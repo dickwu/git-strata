@@ -17,7 +17,7 @@
 | `DepsSetId` | 标识 | 依赖集 id：BLAKE3(安装输入 ∥ 平台 ∥ 工具链) | §3 |
 | `CheckpointId` | 标识 | checkpoint 序号，每会话递增 | §3 |
 | `RepoPath` | 标识 | 仓库内相对路径，`/` 分隔，NFC | §3 |
-| `ProposalId` | 标识 | 依赖变更提议的 id，由 deps 生成 | §3 |
+| `ProposalId` | 标识 | 依赖变更提议的序号（u64） | §3 |
 | `ViewId` | 标识 | 检索视图的 id，由 search 生成 | §3 |
 | `BaseGen` | 结构 | 基线 generation：repo + tree + 依赖集 | §4 |
 | `DepsSet` | 结构 | 封存在 Store 里的依赖集 | §4 |
@@ -37,7 +37,7 @@
 | `Action` | 枚举 | 需要人类确认的三种动作 | §4 |
 | `Config`、`RepoConfig` | 结构 | 全局配置与每仓库配置 | [config.md](config.md) |
 | `StrataError` | 结构 | 被拒绝的调用：`code` + `message` + `detail` | §6 |
-| `Code` | 枚举 | 错误码，共 36 个 | §6 |
+| `Code` | 枚举 | 错误码，共 37 个 | §6 |
 
 ## 2. 约定
 
@@ -50,7 +50,7 @@
 ### 2.2 derive 与 serde
 
 - 所有公开类型 derive `Clone`、`Debug`、`PartialEq`、`Serialize`、`Deserialize`；字段都能比较相等的再加 `Eq`。标识另加 `Hash`、`PartialOrd`、`Ord`，例如 `RepoName` 要作 `BTreeMap` 的键。唯一的例外是 `ConfirmToken`：它只 derive `Debug`，既不能复制，也不能序列化（见 §4）。
-- 有格式的标识（`RepoName`、`SessionId`、`TreeOid`、`CommitOid`、`BlobId`、`DepsSetId`、`RepoPath`）字段私有，只能经 `TryFrom<String>` 构造。serde 也走这条路：`#[serde(try_from = "String", into = "String")]`，所以反序列化同样会校验；格式不对返回 `Code::InvalidInput`。没有格式可校验的 `RepoId` 与 `CheckpointId`，以及格式由产生它的模块决定、对其他模块不透明的 `ProposalId` 与 `ViewId`，都用 `#[serde(transparent)]`。
+- 有格式的标识（`RepoName`、`SessionId`、`TreeOid`、`CommitOid`、`BlobId`、`DepsSetId`、`RepoPath`）字段私有，只能经 `TryFrom<String>` 构造。serde 也走这条路：`#[serde(try_from = "String", into = "String")]`，所以反序列化同样会校验；格式不对返回 `Code::InvalidInput`。没有格式可校验的 `RepoId`、`CheckpointId`、`ProposalId`，以及格式由 search 决定、对其他模块不透明的 `ViewId`，都用 `#[serde(transparent)]`。
 - 字段名就是 JSON 的键，保持 snake_case，不用 `rename_all`。
 - 带数据的枚举用内部标签 `#[serde(tag = "kind")]`。`OverlayEntry` 的 `kind` 字段再加 `#[serde(flatten)]`，这样一条条目在 JSON 里只有一层对象。`PushOutcome` 有元组变体，内部标签装不下其中的字符串，所以改用相邻标签 `#[serde(tag = "kind", content = "message")]`。不带数据的枚举（`Code`）序列化为变体名字符串，如 `"Conflict"`。
 - `Option` 为 `None` 的字段不输出（`skip_serializing_if = "Option::is_none"`），读入时缺省为 `None`（`default`）。
@@ -105,6 +105,7 @@ pub struct BlobId(String);
 pub struct DepsSetId(String);
 
 /// checkpoint 序号：每个会话一个计数器，从 1 递增；(SessionId, CheckpointId) 唯一。
+/// 存进 SQLite 的值不超过 i64::MAX，因为 SQLite 的 INTEGER 是有符号 64 位；ProposalId 和 ReleaseGroup.id 也一样。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CheckpointId(u64);
@@ -115,11 +116,10 @@ pub struct CheckpointId(u64);
 #[serde(try_from = "String", into = "String")]
 pub struct RepoPath(String);
 
-/// 依赖变更提议的 id：由 `deps::propose` 生成，`git-strata deps approve <id>` 用它指名提议。
-/// 格式由 deps.md 规定，对其他模块不透明。
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// 依赖变更提议的序号：`deps::propose` 记录提议时由 Store 分配；`git-strata deps approve <id>` 用它指名提议。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ProposalId(String);
+pub struct ProposalId(u64);
 
 /// 检索视图的 id：search 给一个 (会话, repo) 挂上视图时生成（`search::attach`）。
 /// daemon 和 cli 只把它原样传回 search；格式由 search.md 规定，对其他模块不透明。
@@ -338,7 +338,7 @@ pub struct WorkspaceState {
 人类确认（design §6.9）用的凭据也放在 `strata-types` 里，是纯数据：
 
 ```rust
-use std::time::SystemTime;
+use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 /// 一次人类确认的凭据（design §6.9）。它是纯数据，放在 strata-types 里；只由 strata-confirm 在
@@ -349,10 +349,10 @@ use serde::{Deserialize, Serialize};
 pub struct ConfirmToken {
     /// 被确认的动作。消费方要核对它与本次要执行的操作完全相同。
     pub action: Action,
-    /// 签发时刻，用来判断是否过期；过期时长由 confirm.md 规定。当前时间早于 issued（时钟被回拨）时一律按过期处理。
-    pub issued: SystemTime,
-    /// 16 字节随机数。strata-confirm 签发时登记、校验通过时核销，同一个 nonce 只能用一次。
-    pub nonce: [u8; 16],
+    /// 签发时刻（单调时钟），用来判断是否过期；过期时长由 confirm.md 规定。
+    pub issued: Instant,
+    /// 128 bit 随机数。strata-confirm 签发时登记、校验通过时核销，同一个 nonce 只能用一次。
+    pub nonce: u128,
 }
 
 /// 需要人类确认的动作，即 design §6.9 列出的三种。
@@ -407,6 +407,7 @@ pub enum Code {
     // git-strata 新增
     NoSuchSession, NoSuchRepo, NoSuchCheckpoint, NotConfirmed, NotTty, OpenFiles,
     CrossVolume, Drift, CheckFailed, CheckMutates, PushRefused, Unknown, Unsupported,
+    Corrupt,
 }
 ```
 
@@ -454,6 +455,7 @@ pub enum Code {
 | `PushRefused` | 远端明确拒绝了推送（非快进、权限、服务端钩子），即 gitio 的 `push` 返回了 `PushOutcome` 的 `Refused`。发布链留在本地，没有推上去；`detail` 带远端的原话 | `publish`（由 `PushOutcome` 转换） |
 | `Unknown` | 结果不确定（推送超时或连接中断，即 `PushOutcome` 的 `Unknown`，远端可能已经收到；或写到一半被打断），或者失败归不到任何别的码。一律按不确定处理：保留现场、不重放、不清理，`status` 报出（不变量 6）；daemon 重启后同样报出、不重放 | `publish`（推送结果不确定时）、`gitio`、`daemon`；任何模块按 §6.3 归类后也可能返回 |
 | `Unsupported` | 环境缺少需要的能力：卷不是 APFS 或不支持 `clonefile`（`ENOTSUP`）；仓库使用 SHA-256 对象格式（`TreeOid` 只接受 40 位）；没有 GUI 会话，LocalAuthentication 弹不出来 | `apfs`、`gitio`、`confirm` |
+| `Corrupt` | Store 里的数据坏了：读 blob 时，字节的 BLAKE3 与它的 `BlobId` 不符；写入 blob 时长度对不上；打开 Store 时 SQLite 的 schema 或日志读不出来 | `store` |
 
 ### 6.3 I/O 错误的归类
 
@@ -468,6 +470,7 @@ pub enum Code {
 | `ENOTEMPTY` | `NotEmpty` |
 | `EXDEV` | `CrossVolume` |
 | `ENOTSUP` | `Unsupported` |
+| `ENAMETOOLONG`（APFS 文件名超过 255 字节，或路径超过 macOS 的 `PATH_MAX` 1024 字节） | `InvalidInput` |
 | 写操作中的 `EROFS`、`EPERM`、`EACCES` | `ReadOnly` |
 | 其他（`ENOSPC`、`EIO` 等） | `Unknown` |
 
@@ -533,4 +536,4 @@ confirm 只被 daemon 用
 
 `strata-confirm` 只负责签发和校验凭据（LocalAuthentication + TTY）。"confirm 只被 daemon 用"在 crate 层面成立：session 与 publish 只使用数据类型 `ConfirmToken` 和 `Action`，这两个类型放在 `strata-types` 里（§4）。
 
-基线与依赖一起移动（不变量 8）的原子动作是 `session::move_workspace(session, repo, new_base: BaseGen)`。daemon 处理 `deps approve` 时调它，`publish::rebase_session` 做发布后 rebase 时也调它。`deps` 只计算依赖集、提议和 rollout 计划，不调用 `session` 或 `publish`，依赖方向也不允许它这样做。
+基线与依赖一起移动（不变量 8）的原子动作是 `session::move_workspace(session, repo, new_base: BaseGen)`。daemon 处理 `deps approve` 时调它，`publish::rebase_session` 做发布后 rebase 时也调它。发布后的新基线如果需要另一个依赖集，`rebase_session` 不移动这个会话，而是产生一个依赖变更提议，等 `deps approve`（不变量 4 优先于 design §6.4 的最后一句）。`deps` 只计算依赖集、提议和 rollout 计划，不调用 `session` 或 `publish`，依赖方向也不允许它这样做。
