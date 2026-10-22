@@ -2,15 +2,15 @@
 
 **Crate**：`crates/strata-apfs` · **设计来源**：design.md §3（平台、symlink 陷阱、大小写）、§5（`apfs` 行）、§6.1（克隆）、§6.2（判变与监听）、§7（同卷）、§8（验收数字）、§9 不变量 5、6 · **矩阵**：layerfs-project-telemetry（3b）目标为 `apfs` 的 2 行，layerfs-workspace-layer（3c）3 行，layerfs-replaced（3d）1 行，layerfs-sdk-js（3e）1 行，tgrep-core（3f）18 行，共 25 行，以及理由点名 apfs 的 `—` 行 8 行、理由写"归类同上一行"的 1 行（§7 表后）
 
-apfs 是最底层的 crate，只管 macOS 文件系统的原语，不知道会话、基线、overlay 这些概念：克隆目录和文件，在根之下不跟随符号链接地读与写，用 `getattrlistbulk` 批量读属性（带 gen count），把 FSEvents 的信号翻译成提示，以及 APFS 的名字规则。其余模块的判变、对账和现场处理都建在这些原语的**契约**之上，所以本文把每个原语的失败方式和边界写得很细。本文按 module-rulings.md 的 "T4 apfs" 一节、增补 1 的 gen count 条目、增补 3 的 "Rooted destinations" 条目写成。文中标"实测"的行为，都是 2026-10-22 在本机（macOS 27.0.1，Darwin 27.0.0，arm64）上用临时文件和 `hdiutil` 稀疏镜像（不需要 root）验证过的；计时用到的真实仓库只做了只读遍历，没有写。本模块的类型只在进程内传递（`Attrs` 进缓存，`WatchEvent` 进回调），不经 RPC 或 JSON，所以不 derive `Serialize`/`Deserialize`。
+apfs 是最底层的 crate，只管 macOS 文件系统的原语，不知道会话、基线、overlay 这些概念：克隆目录和文件，在根之下不跟随符号链接地读、写、改名与删除，用 `getattrlistbulk` 批量读属性（带 gen count），把 FSEvents 的信号翻译成提示，以及 APFS 的名字规则。其余模块的判变、对账和现场处理都建在这些原语的**契约**之上，所以本文把每个原语的失败方式和边界写得很细。本文按 module-rulings.md 的 "T4 apfs" 一节、增补 1 的 gen count 条目、增补 3 的 "Rooted destinations" 与 "Durability" 条目、增补 4 与 6 的 gc guards 和"改目录的父级要写权限"两条写成。文中标"实测"的行为，都是 2026-10-22 在本机（macOS 27.0.1，Darwin 27.0.0，arm64）上用临时文件和 `hdiutil` 稀疏镜像（不需要 root）验证过的；计时用到的真实仓库只做了只读遍历，没有写。本模块的类型只在进程内传递（`Attrs` 进缓存，`WatchEvent` 进回调），不经 RPC 或 JSON，所以不 derive `Serialize`/`Deserialize`。
 
 ## 1. 职责与边界
 
 **负责**（design §5 的 `apfs` 行，加上裁定 T4 与增补 3 的两条）：
 
 1. **克隆**（design §6.1、§7）：`clone_tree` 克隆目录树，`clone_file` 克隆文件或符号链接，都是 `clonefile(2)`，同卷检查在先，从不退化成复制（§5.2、§5.3）。
-2. **在根之下不跟随符号链接地读与写**（裁定 T4、增补 3）：`open_rooted`、`open_rooted_file` 逐级 `openat(O_NOFOLLOW)` 打开；写的一侧是目的地变体 `clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`（§5.4）。
-3. **遍历与属性**（design §6.2、§8）：`walk` / `walk_with` 用 `getattrlistbulk` 前序遍历，`attrs_of` 点查，`Attrs` 带纳秒时间、inode 和 gen count，`Attrs::unchanged_since` 把"没被写过"的判法固定下来（§4.2、§5.5、§5.6）。
+2. **在根之下不跟随符号链接地读、写、改名与删除**（裁定 T4、增补 3）：`open_rooted`、`open_rooted_file` 逐级 `openat(O_NOFOLLOW)` 打开；写的一侧是目的地变体 `clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`；改名与删除是 `rename_rooted`（`RENAME_EXCL`、`RENAME_SWAP`）、`unlink_rooted`、`rmdir_rooted`；另有 `full_fsync` 一个 `F_FULLFSYNC` 的包装（§5.4）。
+3. **遍历与属性**（design §6.2、§8）：`walk` / `walk_with` 用 `getattrlistbulk` 前序遍历，`attrs_of` 点查，`Attrs` 带纳秒时间、inode 和 gen count，`Attrs::unchanged_since` 把"没被写过"的判法固定下来，`Attrs::last_changed` 给 gc 判年龄用（增补 4），`list_dir` 是单目录列表（§4.2、§5.5、§5.6）。
 4. **监听**（design §6.2）：`watch` 把 FSEvents 的原始信号翻译成 `WatchEvent`：可能脏的路径、该重扫的子树、事件丢了。它只是提示，从不声称完整（裁定 T4，§5.7）。
 5. **卷与名字规则**（design §3 的大小写行、§7）：`same_volume`、`volume_caps` 回答"clonefile 在这两处之间行不行、这个卷分不分大小写"；`case_fold_eq` 是 APFS 大小写不敏感卷上的名字同一性（§5.1、§5.8）。
 
@@ -21,12 +21,13 @@ apfs 是最底层的 crate，只管 macOS 文件系统的原语，不知道会�
 | 哪些目录和路径不进遍历（`.git`、`deps_dirs`、`seed_caches`、ignore 规则）；遍历结果怎样变成 overlay 条目；改名配对、墓碑 | overlay（`filter` 闭包由调用方给，apfs 只负责剪枝） |
 | 什么时候相信缓存、什么时候读内容算哈希；全量对账的节奏；监听丢失后怎样退化 | overlay（脏集合）与 daemon（调度）；apfs 只给 `Attrs::unchanged_since` 这一条判法和 `WatchEvent` |
 | 调用 `same_volume`、`volume_caps` 做预检的时机（`Store::open`、`new`），以及预检失败怎样上报 | store、session；apfs 只回答问题 |
-| 内容哈希、blob 的 xattr 剥离、`chflags`、`fsync` / `F_FULLFSYNC` | store（blob 规整见 store.md）与各调用方；apfs 不做持久化，克隆之后的落盘归调用方 |
-| 递归删除目录（`unlinkat` 自底向上、清 `UF_IMMUTABLE`） | session、store、deps（清 staging 树）：它们用 `open_rooted` 取目录句柄后自己 `unlinkat` |
+| 内容哈希、blob 的 xattr 剥离、`chflags`、`fsync` / `F_FULLFSYNC` 什么时候调、对哪些句柄调 | store（blob 规整见 store.md）与各调用方；apfs 不做持久化，克隆、改名、删除之后的落盘归调用方。apfs 只提供 `full_fsync` 这个包装，以及取目录句柄的 `open_rooted`（增补 3 "Durability"） |
+| 递归删除目录（自底向上的循环、清 `UF_IMMUTABLE`） | session、store、deps（清 staging 树）：循环在它们那里，每一步用 `list_dir`、`unlink_rooted`、`rmdir_rooted`，或者 `open_rooted` 取目录句柄后自己 `unlinkat`；apfs 只给单个条目的删除 |
+| 操作被权限拒绝时放宽权限（0555 的封存目录要先 `chmod u+w` 才能改名到另一个父目录，带 `uchg` 的要先清标志） | 调用方：apfs 被拒绝就返回 `ReadOnly` 和 `detail.reason`，从不 `chmod`、不 `chflags`（不变量 A10，§4.2 G） |
 | 克隆之后清除 BSD 标志与扩展属性、重设 mtime | store（`put_blob` 的规整，store.md §5.3 第 5 步）与 overlay（投影）；apfs 的克隆原样把它们带过来 |
 | 找出哪些进程打开着哪些文件（`OpenFiles`） | deps（`open_files`）与 session。apfs 只负责一件相关的事：报告 gen count 不可得（§4.2 C） |
 | 路径字符串的语法、NFC 规整、`RepoPath` 的构造 | types（`RepoPath::try_from`） |
-| 清理与回滚 | 谁也不做：apfs 失败时从不删除、从不撤销已经发生的写入，现场原样留给调用方（不变量 6，§4.3） |
+| 清理与回滚 | 谁也不做：apfs 失败时不自己清理、不撤销已经发生的写入，现场原样留给调用方；它删东西只在调用方点名的 `unlink_rooted`、`rmdir_rooted` 里（不变量 6，§4.3） |
 
 ## 2. 依赖
 
@@ -40,7 +41,7 @@ Workspace crate（types.md §8：apfs 在第 1 层，只依赖第 0 层；同层
 
 | 依赖 | 理由 |
 | --- | --- |
-| `libc` | design §11 第 2 条：macOS API 走 libc。用到 `clonefile`、`clonefileat`、`getattrlist`、`getattrlistat`、`fgetattrlist`、`getattrlistbulk`、`openat`、`mkdirat`、`symlinkat`、`readlinkat`、`fstatat`、`fchmodat`、`statfs`，测试里另有 `setrlimit`、`mmap` |
+| `libc` | design §11 第 2 条：macOS API 走 libc。用到 `clonefile`、`clonefileat`、`getattrlist`、`getattrlistat`、`fgetattrlist`、`getattrlistbulk`、`openat`、`mkdirat`、`symlinkat`、`readlinkat`、`fstatat`、`fchmodat`、`renameatx_np`、`unlinkat`、`fcntl`（`F_FULLFSYNC`）、`statfs`，测试里另有 `setrlimit`、`mmap`、`utimensat`。2026-10-22 查本机 cargo registry 里的 libc 0.2.191：以上函数和 `RENAME_SWAP`、`RENAME_EXCL`、`F_FULLFSYNC`、`AT_REMOVEDIR`、`FSOPT_*`、`ATTR_CMN_GEN_COUNT` 都导出了，没有 `CLONE_NOFOLLOW`、`CLONE_NOOWNERCOPY`，这两个常量（0x1、0x2，§4.2 A）由 crate 自己定义 |
 | CoreServices 的 FSEvents 与 libdispatch 的绑定 | 直接绑 `FSEventStreamCreate` 一族加一条私有串行 dispatch queue，不经 `notify`：本模块必须拿到每个事件的原始 flags（`MustScanSubDirs` 与 `UserDropped`、`KernelDropped` 的区别，`RootChanged`），不要第三方抽象替它们归类。用哪个绑定 crate 还是手写 `extern "C"`，交给构建者（§9） |
 | `unicode-normalization` | NFC（目录项名字进 `RepoPath`）与 NFD（`case_fold_eq`） |
 | Unicode 全量大小写折叠表，版本须 ≥ 16.0 | `case_fold_eq`。实测 macOS 27 的 APFS 已经用上 Unicode 16 新增的折叠（§4.2 B）。用 `icu_casemap`、`caseless`，还是用 CaseFolding.txt 生成表，交给构建者（§9）；验收是 §7 的 oracle 测试 |
@@ -50,10 +51,10 @@ Workspace crate（types.md §8：apfs 在第 1 层，只依赖第 0 层；同层
 
 | 调用方 | 用到 |
 | --- | --- |
-| store | `clone_file`（blob 写入与读出，不跟随 `src` 的符号链接）、`same_volume`（`open` 的同卷检查）、`open_rooted`（gc 删目录时逐级取句柄） |
-| deps | `clone_tree`（认领、staging、`clone_into`）、`clone_file`（安装输入进 staging）、`walk`（展开安装输入；认领前后的两次遍历，比较 `Attrs`）、`open_rooted`（读安装输入） |
-| session | `clone_tree`、`clone_file`（工作区、依赖目录、种子缓存、种子文件）、目的地变体（增补 3：往工作区或 staging 树里写的每一处）、`same_volume`、`walk`（`move_workspace` 的携带遍历）、`open_rooted`（删除时逐级取句柄） |
-| overlay | `walk` / `walk_with`、`Attrs`、`attrs_of`、`unchanged_since`、`watch` 与 `WatchEvent`、`case_fold_eq`、`open_rooted_file`、`clone_file` 与目的地变体（restore 的投影） |
+| store | `clone_file`（blob 写入与读出，不跟随 `src` 的符号链接）、`same_volume`（`open` 的同卷检查）、`open_rooted`（gc 删目录时逐级取句柄）；可采用：`Attrs::last_changed`（gc 判年龄，增补 4）、`rename_rooted(Exclusive)` 加 `full_fsync`（`retire_dir` 挪进 trash）、`unlink_rooted`、`rmdir_rooted`、`list_dir`（gc 逐项删除） |
+| deps | `clone_tree`（认领、staging、`clone_into`）、`clone_file`（安装输入进 staging）、`walk`（展开安装输入；认领前后的两次遍历，比较 `Attrs`）、`open_rooted`（读安装输入）；可采用：`rename_rooted(Exclusive)`（封存：先改名、后 `chmod 0555`，§4.2 G）加 `full_fsync`、目的地变体与 `unlink_rooted`、`rmdir_rooted`（往 staging 树里放文件、删文件，增补 3） |
+| session | `clone_tree`、`clone_file`（工作区、依赖目录、种子缓存、种子文件）、目的地变体（增补 3：往工作区或 staging 树里写的每一处）、`same_volume`、`walk`（`move_workspace` 的携带遍历）、`open_rooted`（删除时逐级取句柄）；可采用：`rename_rooted(Swap)`（`move_workspace` 交换工作区与新树）加 `full_fsync`（交换之后对会话根）、`unlink_rooted`、`rmdir_rooted`、`list_dir` |
+| overlay | `walk` / `walk_with`、`list_dir`（按目录列名字，大小写不敏感的卷上找磁盘拼写）、`Attrs`、`attrs_of`、`unchanged_since`、`watch` 与 `WatchEvent`、`case_fold_eq`、`open_rooted_file`、`clone_file_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`、`rename_rooted`（`Exclusive` 与 `Swap`）、`unlink_rooted`、`rmdir_rooted`（restore 的阶段 C 与 `project`） |
 | search | 读工作区文件的内容与属性：`open_rooted_file`、`attrs_of`、`walk`（具体以 search.md 为准） |
 | daemon | 启停每个 tracked 工作区的 `Watcher`（由 overlay 的 `Tracker` 持有）；启动时用 `volume_caps` 预检 |
 
@@ -86,6 +87,8 @@ pub const MIN_BULK_BUFFER_BYTES: usize = 1024;
 pub const MAX_BULK_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 /// FSEvents 的 latency 参数（秒）；配合 NoDefer：第一个事件立即送出，其后的在 50 ms 内合并（§5.7）。
 pub const WATCH_LATENCY_SECS: f64 = 0.05;
+/// Attrs.gen_count 的"不可得"值：卷不支持、内核没返回，或文件正被可写映射着（§4.2 C）。使用者见到它就改读内容哈希。
+pub const GEN_COUNT_UNAVAILABLE: u64 = 0;
 
 // ───────────── 卷 ─────────────
 
@@ -141,6 +144,34 @@ pub fn mkdir_rooted(root: &Path, dst: &RepoPath, mode: u32, parents: bool) -> Re
 /// 建符号链接，目标是 target 的原始字节（不要求 UTF-8，不能为空）。
 pub fn symlink_rooted(root: &Path, dst: &RepoPath, target: &OsStr) -> Result<()>;
 
+// ───────────── 在根之下不跟随符号链接地改名与删除 ─────────────
+// from、to、path 都是 root 之下的相对路径：各自的父级逐级 openat(O_DIRECTORY|O_NOFOLLOW) 钉住，只用最后一个名字做一次 *at 调用。
+// 任何一级是符号链接 → NotDirectory，什么都不动；最后一级是符号链接时，动的是链接本身。没有"覆盖"这一档（不变量 A1）。
+
+/// 改名的模式，对应 renameatx_np 的 flags。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenameMode {
+    /// RENAME_EXCL：to 已存在（文件、目录、含悬空符号链接）→ Exists，什么都不动。
+    Exclusive,
+    /// RENAME_SWAP：from 与 to 都必须存在（类型可以不同），原子对调；各对象的 inode、gen count、mtime 跟着对象走，只有名字换了。
+    Swap,
+}
+
+/// 把 root 之下的 from 改名为 to，单次 renameatx_np，要么完成要么什么都没动。
+/// RepoPath 相同（same_path）或 to 在 from 之下（into_itself）→ InvalidInput，在调内核之前拦下。
+/// 把目录改名到另一个父目录，要求对这个目录本身有写权限（它的 `..` 要改）：0555 的目录得 ReadOnly（reparent_needs_write）。
+/// 所以封存是先改名、后 chmod 0555；要把已经封存的目录挪走（gc、retire），调用方先 chmod u+w 并清 UF_IMMUTABLE（增补 4、6）。
+/// 不 fsync：要扛住断电的调用方，改名之后对 from 与 to 的父目录各调一次 `full_fsync`（增补 3 "Durability"）。
+pub fn rename_rooted(root: &Path, from: &RepoPath, to: &RepoPath, mode: RenameMode) -> Result<()>;
+/// 删除 root 之下的一个非目录条目（文件、符号链接本身、FIFO、socket、设备节点）。目标是目录 → IsDirectory。
+pub fn unlink_rooted(root: &Path, path: &RepoPath) -> Result<()>;
+/// 删除 root 之下的一个空目录。非空 → NotEmpty；文件或符号链接（哪怕指向目录）→ NotDirectory。递归删除由调用方循环。
+pub fn rmdir_rooted(root: &Path, path: &RepoPath) -> Result<()>;
+
+/// fcntl(F_FULLFSYNC)：把数据和元数据一直刷到介质（macOS 的 fsync 不保证，增补 3）。
+/// 普通文件句柄、open_rooted 取得的目录句柄都行（根目录本身用 `File::open(root)`）。
+pub fn full_fsync(file: &File) -> Result<()>;
+
 // ───────────── 属性、遍历 ─────────────
 
 /// 对象类型。符号链接带着目标的原始字节。
@@ -163,9 +194,10 @@ pub struct Attrs {
     pub size: u64,
     /// st_mode 的低 12 位：权限加 setuid / setgid / sticky。类型位在 `kind` 里。
     pub mode: u32,
-    /// ATTR_CMN_GEN_COUNT。0 = 未知（卷不支持、内核没返回、或文件正被可写映射着，§4.2 C）。从不单独比较，用 `unchanged_since`。
+    /// ATTR_CMN_GEN_COUNT。GEN_COUNT_UNAVAILABLE（0）= 不可得（卷不支持、内核没返回，或文件正被可写映射着，§4.2 C），使用者改读内容哈希。
+    /// 从不单独比较，用 `unchanged_since`。
     pub gen_count: u64,
-    /// 纳秒精度。
+    /// 纳秒精度。ctime 是状态变更时间：改名、chmod、chflags、setxattr 更新它而不更新 mtime；clonefile 出来的文件，ctime 是克隆那一刻而 mtime 仍是来源的（§4.2 G）。
     pub mtime: SystemTime,
     pub ctime: SystemTime,
     /// ATTR_CMN_FILEID，只在同一个卷内有意义。
@@ -178,6 +210,11 @@ impl Attrs {
     /// mtime、ctime 不参与：touch 不算改动，被还原的 mtime 也掩盖不了写入。
     /// 对目录，true 的意思只是"没有项被创建、删除、改名"，不代表子孙没变。
     pub fn unchanged_since(&self, earlier: &Attrs) -> bool;
+    /// gen_count 是否可得（不等于 GEN_COUNT_UNAVAILABLE）。
+    pub fn gen_count_known(&self) -> bool;
+    /// gc 判年龄用的时刻：mtime 与 ctime 中较晚的那个（增补 4 "gc guards"）。不能只看 mtime：clonefile 出来的文件带着来源的 mtime，
+    /// 改名只更新 ctime（实测，§4.2 G）。目录同样适用（目录自己的两个时间）。
+    pub fn last_changed(&self) -> SystemTime;
 }
 
 /// 点查 root 之下 path 的属性。父目录逐级 O_NOFOLLOW 解析，最后一级是 lstat 语义。
@@ -193,6 +230,7 @@ pub struct WalkOptions {
     /// getattrlistbulk 的缓冲区字节数，夹在 [MIN_BULK_BUFFER_BYTES, MAX_BULK_BUFFER_BYTES] 之间。测试用小值强制多次续读。
     pub buffer_bytes: usize,
 }
+impl Default for WalkOptions { /* start: None，max_depth: None，buffer_bytes: DEFAULT_BULK_BUFFER_BYTES */ }
 
 /// walk 的迭代器，惰性：第一次 next() 才打开 root；root 打不开 → 第一项是 Err，然后结束。
 pub struct Walk<'f> { /* 私有 */ }
@@ -206,6 +244,10 @@ pub fn walk<'f>(root: &Path, filter: &'f dyn Fn(&Path) -> bool) -> Walk<'f>;
 /// 同上，带选项，并且 filter 同时看到属性：ignore 规则要区分目录和文件，剪枝也可以按类型。
 /// `walk(root, f)` 就是 `walk_with(root, &WalkOptions::default(), &|p, _| f(p))`。
 pub fn walk_with<'f>(root: &Path, opts: &WalkOptions, filter: &'f dyn Fn(&Path, &Attrs) -> bool) -> Walk<'f>;
+/// 列出 root 之下目录 dir 的直接子项（dir = None 是 root 自己）：就是 `walk_with`，start = dir、max_depth = Some(1)、全部放行。
+/// 子目录作为 Dir 条目产出但不读；条目按 RepoPath 的字节序；名字是 NFC 之后、大小写照磁盘上的样子
+/// （overlay 在大小写不敏感的卷上用它找磁盘上的拼写，再用 case_fold_eq 比较）。
+pub fn list_dir(root: &Path, dir: Option<&RepoPath>) -> Walk<'static>;
 
 // ───────────── 监听 ─────────────
 
@@ -247,8 +289,10 @@ pub fn case_fold_eq(a: &str, b: &str) -> bool;
 pub mod seams {
     use std::ffi::OsStr;
 
-    /// 本线程里，在每一次逐级 `openat` 之前调用（open_rooted、open_rooted_file、各个目的地变体与 attrs_of 解析父目录的每一级，
-    /// walk 打开子目录那一次，walk 解析 `start` 的每一级）。step 是 0 起的组件序号（0 = root 之下的第一级），name 是即将打开的名字。
+    /// 本线程里，在每一次对"root 之下某个名字"的 `*at` 系统调用之前调用：逐级 `openat`（打开中间目录；`open_rooted`、`open_rooted_file`
+    /// 打开终点那一次、`attrs_of` 取属性那一次也算）；目的地变体、`rename_rooted`、`unlink_rooted`、`rmdir_rooted` 落地的那一次调用；
+    /// walk 打开子目录那一次，walk 解析 `start` 的每一级。step 是这次公开调用里从 0 起的序号（`rename_rooted` 先走 from 的各级，
+    /// 再走 to 的各级，最后是 renameatx_np 那一次），name 是即将处理的名字。
     /// 回调里可以改文件系统：把目录换成符号链接、把文件换成 FIFO、删掉一个目录。线程局部，不影响别的线程里的测试。None = 清除。
     pub fn set_before_open(hook: Option<Box<dyn Fn(usize, &OsStr)>>);
     /// 本线程里，walk 每读完一次 getattrlistbulk（一个窗口）之后调用，参数是这个窗口里的记录数；用来在两个窗口之间改目录。
@@ -264,8 +308,9 @@ pub mod seams {
 - 裁定 T4 加的 `open_rooted` 返回 `Result<File>`（计划里写的是 `-> File`）。
 - 计划之外新增，各有调用方（§2 的表）：`open_rooted_file`；增补 3 要求的目的地变体 `clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`（名字与参数是我定的 [我的决定]，裁定只说了"create/clone a file or tree at a path resolved component by component"）；`attrs_of`（std 的 `fs::metadata` 读不到 gen count）；`Attrs::unchanged_since`；`volume_caps`；`walk_with` 与 `WalkOptions`；`seams`。
 - 没有 `fence` 或任何"等监听追上"的接口：实测哨兵文件做不成屏障（§4.2 F、§9）。
+- 修订轮（同日，增补 3 的 "Durability"、增补 4 的 gc guards 和 overlay 草稿的需求）又加了：`rename_rooted` 与 `RenameMode`、`unlink_rooted`、`rmdir_rooted`、`full_fsync`、`list_dir`、`Attrs::last_changed`、`Attrs::gen_count_known` 与 `GEN_COUNT_UNAVAILABLE`。overlay 的 restore 要 `RENAME_EXCL`、`RENAME_SWAP`、`unlinkat`、`mkdirat`、`symlinkat` 都经根之下钉住的父目录；gc 要 `max(mtime, ctime)`；扛断电的改名要 `F_FULLFSYNC` [我的决定]。
 
-**`detail` 的形状**：I/O 失败一律带 `errno`（数字）和 `path`（字符串）（types.md §6.3）。apfs 另用这几个键：`reason`（短标识）、`dst_exists`（布尔：失败之后 dst 是否存在）、`src_dev` 与 `dst_dev`（`CrossVolume`）、`fs_type`（`Unsupported`）、`created`（`mkdir_rooted` 部分建好的目录）。`reason` 的取值：`trailing_slash`、`dst_inside_src`、`name_too_long`、`path_too_long`、`empty_target`、`symlink`、`not_a_directory`、`fifo`、`socket`、`device`、`too_deep`、`root_changed`、`unreadable_entry`。
+**`detail` 的形状**：I/O 失败一律带 `errno`（数字）和 `path`（字符串）（types.md §6.3）。apfs 另用这几个键：`reason`（短标识）、`dst_exists`（布尔：失败之后 dst 是否存在）、`src_dev` 与 `dst_dev`（`CrossVolume`）、`fs_type`（`Unsupported`）、`created`（`mkdir_rooted` 部分建好的目录）、`from` 与 `to`（`rename_rooted` 的两个路径，`path` 是出问题的那一个）。`reason` 的取值：`trailing_slash`、`dst_inside_src`、`name_too_long`、`path_too_long`、`empty_target`、`symlink`、`not_a_directory`、`fifo`、`socket`、`device`、`too_deep`、`root_changed`、`unreadable_entry`；改名与删除另有 `same_path`、`into_itself`、`from_missing`、`to_missing`、`reparent_needs_write`、`immutable`、`no_permission`、`read_only_volume`、`busy`。
 
 **各函数的语义与可能返回的 `Code`**（"根"指 `root` 参数：它的祖先可以是符号链接，内核照常解析；它的最后一级用 `O_NOFOLLOW` 打开，所以根本身是符号链接 → `NotDirectory`，`reason = symlink`。调用方应传规范路径）：
 
@@ -276,8 +321,13 @@ pub mod seams {
 - **`open_rooted`**：见 §5.4。`NoSuchPath`、`NotDirectory`（中间一级不是目录；是符号链接时 `reason = symlink`）、`NotFile`（最后一级是符号链接 `reason = symlink`、socket、设备文件）、`Unknown`（读取侧的 `EACCES`：types.md §6.3 的表里只有写操作的权限错误才是 `ReadOnly`，`detail.errno` 带原值）。
 - **`open_rooted_file`**：同上，另加 `IsDirectory`、`NotFile`（FIFO：已经以非阻塞方式打开并关掉了，不会挂住）。
 - **目的地变体**：见 §5.4。共同的：`NoSuchPath`（父目录缺失）、`NotDirectory`（中间一级是文件或符号链接，什么都没写）、`Exists`、`ReadOnly`（写侧的 `EACCES`、`EPERM`、`EROFS`）、`InvalidInput`（`ENAMETOOLONG`；`symlink_rooted` 的目标为空）、`Unknown`。`clone_file_rooted` 与 `clone_tree_rooted` 另有 `clone_file`、`clone_tree` 的源侧与卷的码（`IsDirectory`、`NotFile`、`NotDirectory`、`CrossVolume`、`Unsupported`）。**写入开始之后的失败一律 `Unknown`**（不变量 6）：`clone_file_rooted` 克隆成功而设 mode 失败，克隆出的文件留着（`dst_exists = true`）；`mkdir_rooted(parents = true)` 建了几级之后失败，已建的留着，`detail.created` 列出它们。
+- **`rename_rooted`**：见 §5.4。`InvalidInput`（`same_path`、`into_itself`、`name_too_long`，以及内核的 `EINVAL`）、`NoSuchPath`（`from` 不存在，`reason = from_missing`；`Swap` 时 `to` 不存在，`to_missing`；任一方的父级不存在）、`NotDirectory`（任一方的某一级是文件或符号链接，`reason = symlink`）、`Exists`（`Exclusive` 时 `to` 已存在，含悬空符号链接）、`CrossVolume`（跨卷，含跨嵌套挂载点；`detail.src_dev`、`dst_dev`）、`Unsupported`（`Swap` 在不支持的文件系统上，如 HFS+；`detail.fs_type`）、`ReadOnly`（`EACCES`、`EPERM`、`EROFS`；`detail.reason` 是 `reparent_needs_write`、`immutable`、`no_permission` 或 `read_only_volume`）、`Unknown`（`ENOSPC`、`EIO`、`EBUSY` 等）。单次系统调用：失败时什么都没动。
+- **`unlink_rooted`**：见 §5.4。`NoSuchPath`、`NotDirectory`（某一级父目录是文件或符号链接）、`IsDirectory`（目标是目录；内核对它给的是 `EPERM`，要靠 `fstatat` 区分）、`ReadOnly`（`immutable`、`no_permission`、`read_only_volume`）、`Unknown`。
+- **`rmdir_rooted`**：见 §5.4。`NoSuchPath`、`NotDirectory`（目标是文件或符号链接，符号链接指向的地方不被碰；或某一级父目录不是目录）、`NotEmpty`、`ReadOnly`（同上）、`Unknown`（`EBUSY`：目标是挂载点，`reason = busy`）。
+- **`full_fsync`**：见 §5.4。`Unsupported`（`ENOTSUP`）、`Unknown`（其它 errno；持久性不确定，调用方按"没有落盘"处理）。
 - **`attrs_of`**：见 §5.5。`NoSuchPath`、`NotDirectory`、`Unknown`（读取侧的 `EACCES` 等）。
 - **`walk` / `walk_with`**：见 §5.6。迭代器本身不失败；起点问题是第一项 `Err`（`NoSuchPath`、`NotDirectory`）；单个条目的问题是 `Err` 项，遍历继续：`NotText`（目录项名字不是 UTF-8，APFS 上建不出这样的名字，实测 `EILSEQ`，所以只有记录解析器的单元测试到得了）、`InvalidInput`（`reason = too_deep`，或末尾的 `root_changed`）、`Unknown`（目录不可读，`reason = unreadable_entry`，`detail.errno`）。
+- **`list_dir`**：同 `walk_with` 在 `start = dir`、`max_depth = Some(1)` 时：dir 不存在或某一级不是目录是第一项 `Err`，条目问题是 `Err` 项。
 - **`watch` / `watch_with`**：见 §5.7。`NoSuchPath`、`NotDirectory`（root 不是目录）、`Unknown`（FSEvents 流建不起来或启动失败）。运行中的事件丢失不是错误，是 `WatchEvent::Dropped` 与 `MustRescan`。
 - **`case_fold_eq`**、**`Attrs::unchanged_since`**：纯函数，不失败。
 
@@ -296,7 +346,7 @@ pub mod seams {
 | 项 | 行为 |
 | --- | --- |
 | 原子性 | 目录克隆全有或全无。12 MB 镜像写满时 `ENOSPC`，源树里有不可读条目时 `EACCES`，两种失败都不留 dst |
-| 保留 | 内容、mode、mtime（带过去的是源的 mtime，gc 判"新旧"不能只看 mtime）、扩展属性（含 `user.*` 和 `com.apple.provenance`）、BSD 标志（`uchg`、`hidden`；克隆出来的 `uchg` 文件同样不可变，对它 `chmod` 得 `EPERM`，要先清标志）、稀疏文件的洞、符号链接原样（相对、绝对、悬空、成环）、目录树里的 FIFO 与 socket（克隆出来仍是 FIFO、socket 对象） |
+| 保留 | 内容、mode、mtime（文件和空目录带过去的是源的 mtime，有子项的目录的 mtime 是克隆那一刻——克隆往里填条目会更新它，实测；所以 gc 判"新旧"不能只看 mtime）、扩展属性（含 `user.*` 和 `com.apple.provenance`）、BSD 标志（`uchg`、`hidden`；克隆出来的 `uchg` 文件同样不可变，对它 `chmod` 得 `EPERM`，要先清标志）、稀疏文件的洞、符号链接原样（相对、绝对、悬空、成环）、目录树里的 FIFO 与 socket（克隆出来仍是 FIFO、socket 对象） |
 | 不保留 | 硬链接（每个名字一个独立 inode，`nlink` 为 1，与 git 一致，裁定 T4）；ACL（不传 `CLONE_ACL`）；普通文件的 setuid、setgid 位（`4755` 变 `0755`）；属主（传 `CLONE_NOOWNERCOPY`，克隆归调用者） |
 | 嵌套挂载点 | 克隆成功，得到一个空目录占位，被挂载卷的内容不克隆 |
 | 顶层源 | FIFO、socket、字符设备 → `EINVAL`（所以先 lstat 再分类）。符号链接：flags 为 0 时跟随它（悬空 → `ENOENT`），带 `CLONE_NOFOLLOW` 时克隆链接本身 |
@@ -390,19 +440,37 @@ pub mod seams {
 | 哨兵做不成屏障 | 往另一个被监听的位置写哨兵文件，等它的事件回来就当作之前的事件都到了：慢速写入（1200 对，间隔 15 ms）没有一次乱序，但一口气写 50 或 200 个文件再写哨兵时，40 轮里有 1 到 4 轮哨兵排到了这批最后 5 个事件之前，两个根和同一个根里都出现；20 个以内的爆发没有出现。→ 不提供 `fence` |
 | 事件 id | 洪泛下同一批里的 id 会回退，不依赖 id 的顺序 |
 
+**G. 改名、删除、`F_FULLFSYNC` 与时间戳**（2026-10-22 修订轮实测，同一台机器；除标明的以外在 `/Volumes/GWD`，大小写不敏感的 APFS 上）
+
+| 项 | 行为 |
+| --- | --- |
+| flags（本 SDK，`sys/stdio.h`） | `RENAME_SECLUDE` 0x1、`RENAME_SWAP` 0x2、`RENAME_EXCL` 0x4、`RENAME_NOFOLLOW_ANY` 0x10、`RENAME_RESOLVE_BENEATH` 0x20。本 crate 只用 SWAP 与 EXCL。后两个实测对 from 与 to 都生效：任一边的路径中间有符号链接 → `ELOOP`，任一边用 `..` 越出 dirfd → `ENOTCAPABLE`，对照：不带 flag 时穿过符号链接成功。所以一次系统调用就能约束两边，是可行的优化；不采用的理由在 §9 |
+| `RENAME_EXCL` | to 已存在（文件、目录、悬空符号链接）→ `EEXIST`，什么都不动；from 不存在或 to 的父目录不存在 → `ENOENT`；to 的某一级父级是文件 → `ENOTDIR`；名字 300 个 ASCII 字符 → `ENAMETOOLONG`；跨卷 → `EXDEV`（包括跨嵌套挂载点，两个方向）。from 是符号链接时，改名的是链接本身，指向的目录不受影响 |
+| 同一个条目 | from 与 to 是同一个路径时，EXCL、SWAP 和普通改名都返回成功而什么都不做；大小写不敏感的卷上只差大小写的 EXCL 改名（`Foo` 到 `foo`）也成功，改的是磁盘上的拼写。所以 `rename_rooted` 在调内核之前把 RepoPath 完全相同的情形拦成 `InvalidInput`（`same_path`），只差拼写的交给内核 |
+| `RENAME_SWAP` | 文件与文件、文件与目录、目录与目录（同一个父目录或不同的父目录）、符号链接与文件，都成功；各对象的 inode、mtime、gen count 跟着对象走，换的只是名字（实测：换完之后 `x` 名下是原来 `y` 的 inode、mtime 和 gen count）；任一边不存在 → `ENOENT`；跨卷 → `EXDEV`。HFS+ 镜像上 → `ENOTSUP`，MS-DOS 镜像上成功 |
+| 目录改名进自己里面 | EXCL 与 SWAP 都是 `EINVAL`（to 在 from 之下；SWAP 一个目录与它的后代） |
+| 改目录的父级要写权限 | 把目录改名到另一个父目录，要求对这个目录本身有写权限（它的 `..` 要改）：0555 的目录 → `EACCES`；`RENAME_SWAP` 里有 0555 的目录、且两个目录在不同的父目录下，同样 `EACCES`；同一个父目录之内改名，或对调（`d1` 是 0555、`d2` 是 0755），成功；`chmod u+w` 之后改父级成功。所以 deps 先改名、后 `chmod 0555`；gc 和 `retire_dir` 挪走已封存的目录之前先 `chmod u+w`（增补 4 与 6 的"控制者实测"，这里在本机重做了一遍，结果一致） |
+| 父目录与标志 | 文件挪出 0555 的父目录、或挪进 0555 的父目录 → `EACCES`；带 `UF_IMMUTABLE` 的文件或目录改名，或从带 `UF_IMMUTABLE` 的目录里挪出 → `EPERM` |
+| 挂载点 | `rmdir`、`unlink` 一个挂载点 → `EBUSY`；改名一个挂载点目录成功，挂载跟着走 |
+| `unlinkat(fd, name, 0)` | 文件、符号链接（指向文件、指向目录、悬空）、FIFO → 成功，符号链接只删链接，目标不动；目标是**目录** → `EPERM`（不是 Linux 的 `EISDIR`）；不存在 → `ENOENT`；带 `UF_IMMUTABLE` → `EPERM`；父目录是 0555 → `EACCES`。所以 `EPERM` 要靠 `fstatat` 区分"是目录"还是"带标志" |
+| `unlinkat(fd, name, AT_REMOVEDIR)` | 空目录成功（目录自己是 0555 也行，要的是父目录的写权限）；非空 → `ENOTEMPTY`；文件或指向目录的符号链接 → `ENOTDIR`；不存在 → `ENOENT`；带 `UF_IMMUTABLE` → `EPERM`；父目录是 0555 → `EACCES` |
+| 时间戳 | `clonefile`：克隆出的文件和空目录的 mtime 是来源的（实测 2020 年），有子项的目录的 mtime 是克隆那一刻（目录树里每个有子项的目录都是；`inner` 是空的、`onlysub` 里只有它，则 `inner` 是 2020 年、`onlysub` 是克隆那一刻），所有对象的 ctime 都是克隆那一刻；改名只更新被改名对象的 ctime（它的 mtime 不动），两个父目录的 mtime 与 ctime 都更新；目录改到另一个父目录同样只更新目录自己的 ctime；`RENAME_SWAP` 更新两个对象的 ctime；`chmod`、`chflags`、`setxattr` 只更新 ctime；`utimensat` 把 mtime 设成给定值、ctime 设成现在；写入两者都更新。只看 mtime 会把刚克隆、刚改名的东西当成很老，所以 gc 的年龄是 `max(mtime, ctime)`（增补 4），apfs 用 `Attrs::last_changed` 给出它 |
+| `F_FULLFSYNC` | 对 `O_RDONLY\|O_NOFOLLOW\|O_NONBLOCK` 打开的普通文件句柄和目录句柄（正是 `open_rooted` 给的）都成功；HFS+、MS-DOS 和挂载的 APFS 镜像上也成功。对管道、socket 的句柄 → `EBADF`，`/dev/null` → `ENODEV`。USB SSD 上两次测量：文件 10 ms 与 12 ms，建文件加改名之后对目录 26 ms 与 4 ms，没有脏数据时近乎 0；不是常数，只说明量级 |
+
 ### 4.3 不变量
 
 | # | 不变量 | 落实 |
 | --- | --- | --- |
-| A1 | 不原地改、不覆盖：`clone_*` 只读 src，dst 必须不存在；目的地变体对已存在的东西（含悬空符号链接）一律 `Exists`；crate 里没有"覆盖"或"合并进已有目录"的路径 | design §9 不变量 5 |
+| A1 | 不原地改、不覆盖：`clone_*` 只读 src，dst 必须不存在；目的地变体对已存在的东西（含悬空符号链接）一律 `Exists`；`rename_rooted` 只有 `Exclusive` 与 `Swap` 两档，没有覆盖的一档；crate 里没有"覆盖"或"合并进已有目录"的路径 | design §9 不变量 5 |
 | A2 | 没有复制回退：整个 crate 里没有任何复制字节的代码路径（`std::fs::copy`、`copyfile(3)`、`cp`）；卷不对就在写入之前返回 `CrossVolume` 或 `Unsupported` | design §7；types.md `CrossVolume` |
-| A3 | 写入开始之后只会是 `Unknown`，现场原样留下：单次系统调用的操作（`clone_*`、`create_file_rooted`、`symlink_rooted`）失败时什么都没写，可以给具名的码；多步的（`mkdir_rooted(parents)`、`clone_file_rooted` 的克隆加设 mode）第一步成功之后的失败是 `Unknown`；apfs 从不删除、从不回滚 | design §9 不变量 6 |
-| A4 | 根之下不跟随符号链接：`open_rooted`、`attrs_of`、`walk` 解析 `start`、全部目的地变体，对根之下的每一级 `openat(O_NOFOLLOW)`；写操作永远落不到根之外，也就碰不到工作区里指向基线、依赖集或主 checkout 的符号链接（dev-link 就会建这样的链接） | design §9 不变量 2、5；裁定 T4、增补 3 |
+| A3 | 写入开始之后只会是 `Unknown`，现场原样留下：单次系统调用的操作（`clone_*`、`create_file_rooted`、`symlink_rooted`、`rename_rooted`、`unlink_rooted`、`rmdir_rooted`）失败时什么都没动，可以给具名的码；多步的（`mkdir_rooted(parents)`、`clone_file_rooted` 的克隆加设 mode）第一步成功之后的失败是 `Unknown`；apfs 不在失败后自己清理、不回滚（`unlink_rooted`、`rmdir_rooted` 只删调用方点名的那一个条目） | design §9 不变量 6 |
+| A4 | 根之下不跟随符号链接：`open_rooted`、`attrs_of`、`walk` 解析 `start`、全部目的地变体、`rename_rooted`（from 与 to 两边）、`unlink_rooted`、`rmdir_rooted`，对根之下的每一级 `openat(O_NOFOLLOW)`；写、改名、删除永远落不到根之外，也就碰不到工作区里指向基线、依赖集或主 checkout 的符号链接（dev-link 就会建这样的链接） | design §9 不变量 2、5；裁定 T4、增补 3 |
 | A5 | 监听只是提示：`WatchEvent` 的缺失不证明什么；`walk` 不是快照；crate 里没有"等监听追上"或"已完整"的接口 | 裁定 T4；design §6.2"正确性不依赖监听" |
 | A6 | gen count 为 0 是未知，未知永远不等于未变；`Attrs::unchanged_since` 是比较的唯一入口 | design §6.2；增补 1 |
 | A7 | 资源有界：`walk` 同时持有的描述符不超过深度加一（≤ 129），与目录总数无关；`walk` 在内存里最多存当前路径上各目录的条目；`Watcher` 的回调串行 | 3f 的 `RLIMIT_NOFILE` 256 两行 |
 | A8 | 没有全局可变状态：除线程局部的测试接缝外函数都无状态，可以从任意线程并发调用；`Watcher` 是唯一有生命周期的对象 | — |
 | A9 | 只做被要求的 I/O：读写只限调用方传进来的路径，不创建临时文件，不写日志文件 | — |
+| A10 | 不替调用方放宽权限：被拒绝就返回 `ReadOnly` 加 `detail.reason`，从不 `chmod`、不 `chflags`、不重试（0555 的封存目录要先 `chmod u+w` 才能改名到另一个父目录，这条规则写在 §4.2 G，由调用方做） | 增补 4、6 |
 
 ## 5. 流程与算法
 
@@ -454,7 +522,7 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 
 1. 打开根：`open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`。`ENOENT` → `NoSuchPath`；`ENOTDIR`（不是目录，或根本身是符号链接）→ `NotDirectory`。根的祖先里的符号链接由内核照常解析。
 2. 对除最后一个之外的每个分量：（测试接缝：`before_open(step, name)`）`openat(dirfd, comp, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`，成功就关掉上一级。`ENOENT` → `NoSuchPath`；`ENOTDIR` → `NotDirectory`，并用 `fstatat(dirfd, comp, AT_SYMLINK_NOFOLLOW)` 区分：是符号链接 → `reason = symlink`，否则 `not_a_directory`；`EACCES` → `Unknown`（读取侧）。一级一级走，**任何时候手里只有当前一级的句柄**，所以之后目录被换成符号链接也改不了已经打开的这一级（3f 的 `directory_swap_after_open…`）。
-3. 对最后一个分量，由调用它的函数决定怎么落地（下面）。传给每个 `*at` 调用的永远只是单个分量，不含 `/`。
+3. 对最后一个分量，由调用它的函数决定怎么落地（下面）。传给每个 `*at` 调用的永远只是单个分量，不含 `/`。落地调用之前同样触发一次测试接缝 `before_open(step = 父级分量数, name = 最后一个名字)`（`open_rooted` 的终点 `openat` 就是这一步）。
 
 **`open_rooted(root, path)`**：解析父目录后，最后一个分量 `openat(dirfd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)`：
 
@@ -480,6 +548,20 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 
 所有目的地变体都不 `fsync`。
 
+**改名、删除与 `full_fsync`**（都是单次系统调用，失败时什么都没动）：
+
+- `rename_rooted(root, from, to, mode)`：
+  1. 调内核之前：`from` 与 `to` 的 RepoPath 相同 → `InvalidInput`（`same_path`）；`to` 以 `from` 加 `/` 开头 → `InvalidInput`（`into_itself`）。大小写不敏感的卷上只差拼写的 `into_itself`，由内核的 `EINVAL` 兜住。
+  2. `resolve` 到 `from` 的父目录句柄 PF，再 `resolve` 到 `to` 的父目录句柄 PT（测试接缝的 step 接着数）。单分量的路径用根的句柄。
+  3. 测试接缝 `before_open(step, to 的最后一个名字)`，然后 `renameatx_np(PF, from_name, PT, to_name, flags)`，flags 是 `RENAME_EXCL` 或 `RENAME_SWAP`。成功即结束。
+  4. 失败按 errno 归类：`EEXIST` → `Exists`（`detail.path = to`）；`ENOENT` → `NoSuchPath`，`fstatat(PF, from_name, AT_SYMLINK_NOFOLLOW)` 也是 `ENOENT` 则 `reason = from_missing`，否则 `to_missing`（只会出现在 `Swap`）；`ENOTDIR` → `NotDirectory`；`EXDEV` → `CrossVolume`（`detail.src_dev`、`dst_dev` 取 PF、PT 的真实设备号）；`ENOTSUP` → `Unsupported`（`detail.fs_type`）；`EINVAL` → `InvalidInput`；`ENAMETOOLONG` → `InvalidInput`（`name_too_long`）；`EACCES`、`EPERM`、`EROFS` → `ReadOnly`，`detail.reason` 这样判：`EROFS` 是 `read_only_volume`；否则 `fstatat(PF, from_name, AT_SYMLINK_NOFOLLOW)` 取 `from` 的属性（`Swap` 时再用 `fstatat(PT, to_name, …)` 取 `to` 的），其中有目录、PF 与 PT 不是同一个目录、且这个目录的所有者写位未置 → `reparent_needs_write`；`st_flags` 含 `UF_IMMUTABLE`、`UF_APPEND`、`SF_IMMUTABLE` 或 `SF_APPEND` → `immutable`；其余 `no_permission`。别的 errno（`ENOSPC`、`EIO`、`EBUSY` 等）→ `Unknown`，`EBUSY` 的 `reason = busy`。
+  5. 不 `fsync`，不 `chmod`，不清标志（A10）。
+- `unlink_rooted(root, path)`：`resolve` 到父目录句柄 P；接缝；`unlinkat(P, name, 0)`。`ENOENT` → `NoSuchPath`；`EPERM` → `fstatat(P, name, AT_SYMLINK_NOFOLLOW)`：是目录 → `IsDirectory`，否则 `ReadOnly`（带 `UF_IMMUTABLE` 等标志是 `immutable`，其余 `no_permission`）；`EACCES` → `ReadOnly`（`no_permission`）；`EROFS` → `ReadOnly`（`read_only_volume`）；其余 `Unknown`。符号链接只删链接本身。
+- `rmdir_rooted(root, path)`：同上，`unlinkat(P, name, AT_REMOVEDIR)`。`ENOTDIR` → `NotDirectory`（`fstatat` 看到是符号链接则 `reason = symlink`）；`ENOTEMPTY` → `NotEmpty`；`EBUSY`（挂载点）→ `Unknown`（`reason = busy`）；其余同 `unlink_rooted`。
+- `full_fsync(file)`：`fcntl(fd, F_FULLFSYNC)`；`EINTR` 重试；`ENOTSUP` → `Unsupported`；其余 → `Unknown`（`detail.errno`）。
+
+**扛断电的改名**（增补 3 的 "Durability"）：`rename_rooted` 成功之后，对 from 与 to 的父目录各做一次 `full_fsync`；父目录的句柄用 `open_rooted(root, parent)` 取，根目录本身用 `File::open(root)`。apfs 不替调用方做，因为调用方常常成批改名、最后同步一次。**封存的次序**（增补 4）：目录在 staging 里是 0755，`rename_rooted(Exclusive)` 到封存位置，成功之后再 `chmod 0555`；挪走已封存的目录（gc、`retire_dir`）：先 `chmod u+w` 并清 `UF_IMMUTABLE`、`UF_APPEND`，再 `rename_rooted(Exclusive)`，否则得 `ReadOnly`（`reparent_needs_write` 或 `immutable`）。
+
 ### 5.5 `attrs_of` 与 `Attrs`
 
 `attrs_of(root, path)`：
@@ -491,6 +573,8 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 `Attrs` 的字段来源：`kind` 来自 `OBJTYPE`（`VREG`→`File`，`VDIR`→`Dir`，`VLNK`→`Symlink`，`VFIFO`、`VSOCK`、`VCHR`、`VBLK` 对应其余）；`size` 来自 `DATALENGTH`（目录为 0）；`mode = ACCESSMASK & 0o7777`；`gen_count` 在返回位图含 `GEN_COUNT` 时是它的值，否则为 0；`mtime`、`ctime` 来自 `timespec`（负的秒数用 `UNIX_EPOCH - Duration`）；`inode = FILEID`。
 
 `unchanged_since(&self, earlier)`：`kind` 相同（符号链接比较 `target`）、`inode`、`size`、`mode` 相同，且 `self.gen_count != 0 && self.gen_count == earlier.gen_count`，才返回 `true`。`earlier.gen_count == 0` 同样是 `false`。
+
+`gen_count_known()`：`gen_count != GEN_COUNT_UNAVAILABLE`。`last_changed()`：`max(mtime, ctime)`，纳秒精度；gc 的"年龄不足 1 小时"用它（增补 4），对文件和目录都一样（`attrs_of` 对目录取的是目录自己的两个时间）。
 
 ### 5.6 `walk` 与 `walk_with`
 
@@ -517,7 +601,7 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 4. 符号链接：`readlinkat(fd, name, buf, DATALENGTH + 1)` 取目标原字节；`ENOENT` 跳过这一项。
 5. 全部条目按 `RepoPath` 的字节序排序（NFC 之后的字节），所以产出顺序确定，与目录里的物理顺序无关。
 
-`max_depth = Some(n)`：深度（从起点算，直接子项为 1）等于 `n` 的目录条目照样产出，但不压栈。overlay 的"列一个目录"就是 `start = Some(dir)`、`max_depth = Some(1)`。
+`max_depth = Some(n)`：深度（从起点算，直接子项为 1）等于 `n` 的目录条目照样产出，但不压栈。overlay 的"列一个目录"就是 `start = Some(dir)`、`max_depth = Some(1)`；`list_dir(root, dir)` 是这个组合的具名写法：`walk_with(root, &WalkOptions { start: dir.cloned(), max_depth: Some(1), ..Default::default() }, &allow_all)`，`allow_all` 是 crate 内一个全部放行的函数项（`fn allow_all(_: &Path, _: &Attrs) -> bool { true }`，`'static`），所以返回的 `Walk<'static>` 不借用调用方的东西。
 
 文件描述符：同时持有的只有栈上各 frame 的目录句柄，最多 `MAX_WALK_DEPTH + 1` 个（§4.3 A7）。
 
@@ -556,13 +640,14 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 | --- | --- | --- |
 | `clone_tree` | 内核 O(项数)，单线程 | tool 的 `node_modules`（108,530 个文件、8,789 个目录、63 个符号链接，共 117,382 项）在 `/Volumes/GWD`（U 盘 SSD）上 2.4 s，机器忙（负载 8 到 9）时 3.9 s，约 20 到 30 µs 每项；4 路并行克隆 4 份用了 4.2 s；对照 `cp -Rc` 13.8 s；`rm -rf` 一份克隆 4.8 s。design §8 的"新建会话 < 5 s（tool + 全部兄弟库）"因此只靠调用方**并行**克隆各仓库才有把握，单棵 `node_modules` 就占去一半预算（待 spike 用全部兄弟库复测，§9） |
 | `walk` | O(项数)，每个目录至少一次 `getattrlistbulk` | 温热 11.7 万项约 0.3 s（约 3 µs 每项）；冷（刚读盘）的 tool 源码树 28,889 项（不含 `node_modules`、`.git`、`target` 等）1.42 s，温热 0.20 s；staff-api 13,586 项冷 0.65 s；admin 85 ms（都是只读遍历）。design §8"全量对账 tool 源码树 < 3 s"冷读也满足；"checkpoint 改 50 个文件 < 200 ms"满足不了全量遍历（温热也要 0.2 s），要靠钩子带来的路径、监听事件、`attrs_of` 和 `max_depth = Some(1)` 的单目录列表缩小范围，这是 overlay 的事 |
-| `attrs_of`、`open_rooted` 与目的地变体 | O(深度) 次 `openat` 加一次属性或落地调用 | 每次几十微秒量级（待 spike 实测，§9） |
+| `attrs_of`、`open_rooted`、目的地变体、`rename_rooted`（两个父级）、`unlink_rooted`、`rmdir_rooted` | O(深度) 次 `openat` 加一次属性或落地调用 | 每次几十微秒量级（待 spike 实测，§9） |
+| `full_fsync` | 一次 `fcntl`，等设备 | USB SSD 上两次测量：文件 10 到 12 ms，建文件加改名之后对目录 4 到 26 ms，没有脏数据时近乎 0（§4.2 G）。扛断电的改名每次要对两个父目录各做一次，成批改名应当合并同步 |
 | `watch` | 每个事件 O(1) | 送达延迟 15 ms 到 3.3 s，不是屏障（§4.2 F） |
 | `case_fold_eq` | O(长度) | ASCII 走快路径 |
 
 ## 6. 失败与恢复
 
-错误时序按 design §9 不变量 6 与增补 3 的细化：写入之前的失败是具名的码，什么都没留下；一旦第一次可见的写入发生，之后的失败一律 `Unknown`，现场原样保留。apfs 自己的操作大多是**单次系统调用**（`clonefile`、`clonefileat`、`openat(O_CREAT|O_EXCL)`、`symlinkat`），失败时内核什么都没写，所以可以给具名的码；`ENOSPC` 与 `EIO` 按 types.md §6.3 归 `Unknown`，哪怕实测它们也没留下 dst。多步的只有两个：`mkdir_rooted(parents = true)` 和 `clone_file_rooted` 的"克隆再设 mode"。apfs 从不清理、从不回滚、从不重试（`EINTR` 除外）；恢复的责任在调用方，它们在克隆之前写 intent 行（增补 3、4），崩溃之后不信任 dst 的存在。
+错误时序按 design §9 不变量 6 与增补 3 的细化：写入之前的失败是具名的码，什么都没留下；一旦第一次可见的写入发生，之后的失败一律 `Unknown`，现场原样保留。apfs 自己的操作大多是**单次系统调用**（`clonefile`、`clonefileat`、`openat(O_CREAT|O_EXCL)`、`symlinkat`、`renameatx_np`、`unlinkat`），失败时内核什么都没写，所以可以给具名的码；`ENOSPC` 与 `EIO` 按 types.md §6.3 归 `Unknown`，哪怕实测它们也没留下 dst。多步的只有两个：`mkdir_rooted(parents = true)` 和 `clone_file_rooted` 的"克隆再设 mode"。apfs 从不清理、从不回滚、从不重试（`EINTR` 除外）；恢复的责任在调用方，它们在克隆之前写 intent 行（增补 3、4），崩溃之后不信任 dst 的存在。
 
 | 情形 | 返回 | 现场 | 恢复 |
 | --- | --- | --- | --- |
@@ -578,6 +663,12 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 | 磁盘满（`ENOSPC`）、`EIO`、dataless 文件（`EDEADLK`）、描述符耗尽 | `Unknown`（`detail.errno`、`dst_exists`） | `clone_*`：dst 不存在（实测 `ENOSPC`）。克隆是写时复制，克隆之后的覆盖写才可能耗尽空间，那是调用方写文件时的错误 | 不重放、不清理，状态上报（不变量 6）；空出空间后调用方重试整个操作 |
 | `mkdir_rooted(parents = true)` 建出了几级之后失败 | `Unknown`（`detail.created`） | 已建的目录留着 | 调用方按 `created` 决定留还是删 |
 | `clone_file_rooted` 克隆成功而设 mode 失败 | `Unknown`（`dst_exists = true`） | 克隆出的文件留着，mode 是源的 | 调用方自己 `fchmod` 或删除重来 |
+| `rename_rooted`：`Exclusive` 的 to 已存在（含悬空符号链接）；`Swap` 缺一边；RepoPath 相同；to 在 from 之下 | `Exists`；`NoSuchPath`（`from_missing`、`to_missing`）；`InvalidInput`（`same_path`、`into_itself`） | 什么都没动（单次系统调用） | 调用方先处理已有的东西 |
+| `rename_rooted`：跨卷（含跨嵌套挂载点）；`Swap` 在 HFS+ 上 | `CrossVolume`；`Unsupported` | 什么都没动 | 放在同一个卷上；`Swap` 改用别的步骤 |
+| `rename_rooted`、`unlink_rooted`、`rmdir_rooted`：权限（0555 的目录改父级、父目录不可写、带 `uchg`）、只读卷 | `ReadOnly`，`detail.reason` 是 `reparent_needs_write`、`immutable`、`no_permission`、`read_only_volume` | 什么都没动 | 调用方放宽权限（先 `chmod u+w`、清标志）再重试；apfs 不代劳（A10） |
+| `unlink_rooted` 的目标是目录；`rmdir_rooted` 的目标非空、是文件或符号链接 | `IsDirectory`；`NotEmpty`；`NotDirectory` | 什么都没动；符号链接指向的地方不被碰 | 调用方选对函数 |
+| `rmdir_rooted` 的目标是挂载点 | `Unknown`（`reason = busy`，`errno` 为 `EBUSY`） | 什么都没动 | 调用方的递归删除遇到挂载点就停（session.md §5.5 第 9 步和 store.md §5.11 的 gc 已有"`st_dev` 变了就不进去"） |
+| `full_fsync` 失败 | `Unsupported`（`ENOTSUP`）或 `Unknown`（`detail.errno`） | 改名等操作本身已经发生；持久性不确定 | 调用方按"没有落盘"处理：重试或上报 |
 | 进程在 `clonefile` 中途被杀 | — | 系统调用要么完成要么不可见（进程被杀的情形没有观察到半成品）。**断电**的情形没有测过：不能假定 dst 完整 | 调用方在克隆之前写 intent 行；崩溃后 `recover` 不信任 dst，按 intent 行处理（增补 3、4） |
 | `walk`：目录不可读 | 一条 `Err(Unknown)`（`reason = unreadable_entry`），遍历继续 | 目录条目本身已产出，它的子树缺 | 调用方决定这次扫描是否有效；overlay 把它当作扫描失败（tracker 状态不变） |
 | `walk`：条目在读与打开之间消失，或被换成文件、符号链接 | 不报错，跳过 | 子树不出现。遍历本来就不是快照（A5） | 下一次扫描或监听事件会补上 |
@@ -600,9 +691,9 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 | `clone_refusals_leave_no_residue` | 跨卷、不支持的卷、dst 已存在、dst 的父目录不存在这几种拒绝之后：dst 不存在，两个卷上都没有临时文件或半成品目录，src 树逐字节不变；`clone_file` 与 `clone_tree_rooted` 的拒绝同理。写入之前拒绝、无残留（design §10 的 clonefile 跨卷退化项） | sdk/js/test/verify/direct_refusal_real.mjs |
 | `clone_tree_error_precedence` | 表驱动，一种构造一个错误：src 不存在 → `NoSuchPath`；src 是文件 → `NotDirectory`；src 是指向目录的符号链接 → `NotDirectory`（`reason = symlink`）；dst 已存在（目录、文件、悬空符号链接）→ `Exists`；dst 就是 src → `Exists`；dst 的父目录不存在 → `NoSuchPath`；dst 的父级是文件 → `NotDirectory`；dst 末尾带 `/` → `InvalidInput`（`trailing_slash`）；dst 在 src 里面 → `InvalidInput`（`dst_inside_src`）。优先级：dst 已存在而且在另一个卷 → `Exists`，父目录不存在而且在另一个卷 → `NoSuchPath`，这两者都不是才是 `CrossVolume`。每一种之后原有的东西都没被碰，也没有新的 dst | 新增 |
 | `clone_tree_preserves_content_modes_links_and_holes` | 源树含：mode 0755、0600、0444 的文件，中间有 1 MiB 洞的稀疏文件，相对、绝对、悬空、成环的符号链接，空目录，20 层深的嵌套。克隆后逐项相同：字节、mode、符号链接的目标原样（不被跟随）、空目录还在、洞仍是洞（`st_blocks` 与源同量级，远小于逻辑大小）；源树不变；克隆出来的文件属主是调用者 | 新增 |
-| `clone_tree_keeps_xattrs_and_flags_but_drops_acls_and_setuid` | 带 `user.test` 扩展属性的文件克隆后仍有；`chflags uchg` 的文件克隆后同样不可变（删除它得 `EPERM`；测试结束前先 `chflags nouchg` 再清理）；ACL 不被复制；setuid、setgid 位被清掉（`4755` 变 `0755`）；mtime 与源相同 | 新增 |
+| `clone_tree_keeps_xattrs_and_flags_but_drops_acls_and_setuid` | 带 `user.test` 扩展属性的文件克隆后仍有；`chflags uchg` 的文件克隆后同样不可变（删除它得 `EPERM`；测试结束前先 `chflags nouchg` 再清理）；ACL 不被复制；setuid、setgid 位被清掉（`4755` 变 `0755`）；源里的文件和空目录先设成 2020 年的 mtime，克隆出的同名文件和空目录仍是 2020 年，有子项的目录的 mtime 是克隆那一刻（§4.2 G） | 新增 |
 | `clone_tree_makes_independent_hard_links` | 源里同一个 inode 的两个名字，克隆后是两个 inode（`nlink` 各为 1）；改其中一个不影响另一个；`clone_file` 克隆一个有两个名字的文件，结果也是独立的（裁定 T4：不保留硬链接） | 新增 |
-| `clone_tree_clones_fifos_and_sockets_as_objects` | 目录树里的 FIFO 与 unix socket 文件，克隆后仍是 FIFO、socket（用 `attrs_of` 看 `FileKind`），不是普通文件，也不报错；顶层源是 FIFO 时 `clone_tree` → `NotDirectory`（socket 用 python 或相对路径建，避开 `sockaddr_un` 的 104 字节上限） | 新增 |
+| `clone_tree_clones_fifos_and_sockets_as_objects` | 目录树里的 FIFO 与 unix socket 文件，克隆后仍是 FIFO、socket（用 `std::fs::symlink_metadata` 看文件类型），不是普通文件，也不报错；顶层源是 FIFO 时 `clone_tree` → `NotDirectory`（socket 用 python 或相对路径建，避开 `sockaddr_un` 的 104 字节上限） | 新增 |
 | `clone_tree_leaves_a_nested_mount_as_an_empty_stub` | 源树里有一个挂载点（第二个镜像挂在 `tree/mnt`，镜像里有文件）：克隆成功，`clone/mnt` 是空目录，被挂载卷的文件没被克隆 | 新增 |
 | `clone_tree_fails_atomically_on_unreadable_entry` | 源树里有一个 mode 000 的文件（另一轮是 mode 000 的子目录）：`clone_tree` → `ReadOnly`（`detail.errno` 为 `EACCES`），message 提到两种可能，dst 不存在（`dst_exists = false`）；mode 555 的目录不受影响，克隆成功 | 新增 |
 | `clone_tree_on_a_full_volume_leaves_no_destination` | 12 MB 的 APFS 镜像用文件写到 `ENOSPC`，再 `clone_tree` 一棵有几千个小文件的树 → `Unknown`（`errno = ENOSPC`），dst 不存在，apfs 没有删除任何东西；删掉填充文件后同样的调用成功 | 新增 |
@@ -616,7 +707,7 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 | `same_volume_tells_system_volume_from_data_volume` | `/usr/bin/true`（封存的系统卷）与临时目录（数据卷）：`st_dev` 相同而 `same_volume` 为 `false`；同一个临时目录里的两个文件为 `true`；临时目录与 `hdiutil` 镜像的挂载点为 `false` | 新增 |
 | `same_volume_follows_links_and_reports_missing_paths` | `/tmp/x`（`/tmp` 是符号链接）与 `/private/tmp/x` 为 `true`；`/Users/<当前用户>/x` 与 `/System/Volumes/Data/Users/<当前用户>/x`（firmlink 别名）为 `true`；指向另一个卷的目录的符号链接，比较的是它指向的卷；不存在的路径 → `io::ErrorKind::NotFound` | 新增 |
 | `volume_caps_per_filesystem` | 用镜像：APFS → `fs_type = "apfs"`、`clone = Some(true)`、`case_sensitive = false`、`write_gen_count = true`；大小写敏感的 APFS → `case_sensitive = true`；HFS+ → `clone = None`；MSDOS → `clone = Some(false)`、`write_gen_count = false`；路径不存在 → `NoSuchPath` | 新增 |
-| `errno_mapping_table` | 单元测试，表驱动：`ENOENT`→`NoSuchPath`，`EEXIST`→`Exists`，`ENOTDIR`→`NotDirectory`，`EISDIR`→`IsDirectory`，`ENOTEMPTY`→`NotEmpty`，`EXDEV`→`CrossVolume`，`ENOTSUP`→`Unsupported`，`ENAMETOOLONG`、`EINVAL`（克隆上下文）→`InvalidInput`；写侧的 `EACCES`、`EPERM`、`EROFS`→`ReadOnly`，读侧同样的 errno→`Unknown`；`ENOSPC`、`EIO`、`EDEADLK`、`EMFILE`→`Unknown`；每个错误的 `detail` 都带 `errno` 与 `path` | 新增 |
+| `errno_mapping_table` | 单元测试，表驱动：`ENOENT`→`NoSuchPath`，`EEXIST`→`Exists`，`ENOTDIR`→`NotDirectory`，`EISDIR`→`IsDirectory`，`ENOTEMPTY`→`NotEmpty`，`EXDEV`→`CrossVolume`，`ENOTSUP`→`Unsupported`，`ENAMETOOLONG`、`EINVAL`（克隆上下文）→`InvalidInput`；写侧的 `EACCES`、`EPERM`、`EROFS`→`ReadOnly`，读侧同样的 errno→`Unknown`；`ENOSPC`、`EIO`、`EDEADLK`、`EMFILE`、`EBUSY`→`Unknown`；每个错误的 `detail` 都带 `errno` 与 `path` | 新增 |
 | `rooted_open_opens_files_and_directories` | 在根之下按 `RepoPath` 打开普通文件，读到的内容正确；打开目录得到可当 dirfd 用的句柄（store、session 用它做 `unlinkat`、`fchflags`）；`open_rooted_file` 对目录 → `IsDirectory`；空串、`.`、`./dir/file`、`../file`、`dir/../file`、绝对路径连 `RepoPath` 都构造不出来，apfs 的函数没有别的路径入口；根的祖先里有符号链接（`/tmp/…`）时照常打开 | tgrep-core/src/rooted/tests.rs::regular_opens_and_literal_path_validation |
 | `rooted_open_treats_colon_and_backslash_names_literally` | 名字 `a:b`、`C:relative.txt`、目录 `dir` 里的 `name:stream`、含反斜杠的 `a\b.txt`、含空格与 NFD 字符的名字，都按字面打开、读回，不当作盘符或数据流；`a\b.txt` 与 `a/b.txt` 是两个文件 | tgrep-core/tests/corrupt_index_reader.rs::builder_and_reader_round_trip_unix_colon_filenames |
 | `rooted_open_fifo_is_nonblocking_and_symlinks_are_refused` | 在子进程里跑，20 秒死线（到点杀掉并判失败，防止测试挂死）：树里有一个没有写端的 FIFO：`open_rooted` 立即返回，`metadata().file_type().is_fifo()` 为真，读它得到 `WouldBlock` 或 EOF；`open_rooted_file` → `NotFile`（`fifo`）；同一目录里指向根内、根外文件的符号链接 → `NotFile`（`symlink`），链接目标的内容从未被读到 | tgrep-core/src/rooted/tests.rs::batch_child_fifo_open_is_nonblocking_and_never_follows_symlinks |
@@ -626,31 +717,42 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 | `rooted_open_rejects_a_final_symlink_swap` | 接缝在最后一级之前把目标文件换成指向根外秘密文件的符号链接：`open_rooted` → `NotFile`（`reason = symlink`，`errno` 为 `ELOOP`），秘密文件的内容从未被读到；`open_rooted_file` 同 | tgrep-core/src/rooted/tests.rs::final_symlink_swap_is_rejected |
 | `rooted_open_file_refuses_a_fifo_swapped_in` | 接缝在最后一级之前把目标文件换成 FIFO（子进程加死线）：`open_rooted_file` 立即 → `NotFile`（`fifo`），不阻塞；`open_rooted` 返回非阻塞的 FIFO 句柄，调用方 `fstat` 看得出它不是普通文件 | tgrep-core/src/rooted/tests.rs::fifo_swap_before_final_open_is_nonblocking |
 | `rooted_open_error_codes` | 不存在 → `NoSuchPath`；中间一级是文件 → `NotDirectory`（`not_a_directory`）；终点是 unix socket → `NotFile`（`socket`）；`open_rooted(Path::new("/dev"), "null")`（字符设备）→ `NotFile`（`device`）；mode 000 的文件 → `Unknown`（`errno` 为 `EACCES`）；用 NFC 拼写能打开磁盘上以 NFD 存的名字 | 新增 |
-| `rooted_destination_refuses_a_symlinked_parent` | 根里有指向根外目录的符号链接 `link` 和指向根内另一个目录的符号链接 `inner`：对每个目的地变体（`clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`symlink_rooted`、`parents` 取两个值的 `mkdir_rooted`），dst 为 `link/x`、`inner/x`、`link/a/b` 时 → `NotDirectory`（`reason = symlink`）；根外目录与 `inner` 指向的目录的列表前后不变，根里也没有新东西。这是增补 3 的测试：被跟踪的符号链接在种子文件的父目录上，写入永远出不了会话根 | 新增 |
+| `rooted_destination_refuses_a_symlinked_parent` | 根里有指向根外目录的符号链接 `link` 和指向根内另一个目录的符号链接 `inner`：对每个目的地变体（`clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`symlink_rooted`、`parents` 取两个值的 `mkdir_rooted`）以及 `unlink_rooted`、`rmdir_rooted`（后两个的目标事先放在符号链接指向的目录里），路径为 `link/x`、`inner/x`、`link/a/b` 时 → `NotDirectory`（`reason = symlink`）；根外目录与 `inner` 指向的目录的列表和内容前后不变（被点名的 `x` 还在），根里也没有新东西。这是增补 3 的测试：被跟踪的符号链接在种子文件的父目录上，写入永远出不了会话根 | 新增 |
 | `rooted_destination_never_overwrites` | dst 的位置上已有文件、目录、指向文件的符号链接、悬空符号链接时，每个目的地变体（`mkdir_rooted` 取 `parents = false`）→ `Exists`，原有的东西与符号链接指向的地方都没被碰；`mkdir_rooted(parents = true)` 对已有目录成功，对已有的文件或符号链接叶子 → `Exists` | 新增 |
-| `rooted_destination_swap_after_resolution_stays_inside` | 接缝在最后一个分量落地之前，把父目录的路径换成指向根外的符号链接：写入仍落在原来被钉住的父目录里，根外目录没有新东西；`clone_tree_rooted` 同理 | 新增 |
+| `rooted_destination_swap_after_resolution_stays_inside` | 接缝（落地的 `*at` 调用之前触发的那一次）把父目录的路径换成指向根外的符号链接：写入仍落在原来被钉住的父目录里，根外目录没有新东西；`clone_tree_rooted`、`create_file_rooted`、`symlink_rooted`、`mkdir_rooted` 同理；`unlink_rooted`、`rmdir_rooted` 删掉的是被钉住的目录里的条目，根外目录里的同名条目还在 | 新增 |
 | `mkdir_rooted_parents_semantics` | `parents = true` 一次建出 `a/b/c`；再调一次成功（幂等）；中间一级是文件 → `NotDirectory`，没有新东西；`mode = 0o555` 建 `p/q`，`p` 建出之后 `q` 建不进去 → `Unknown`，`detail.created` 为 `["p"]`，`p` 留着 | 新增 |
 | `clone_file_rooted_sets_the_requested_mode` | src 的 mode 是 0600：`mode = Some(0o644)` 后 dst 是 0644，`Some(0o755)` 得 0755，`None` 保持 0600；src 的 mode 不变；`Some(0o4755)` 的 setuid 位被屏蔽；src 是符号链接时 mode 参数无效；src 带 `uchg` 时 `Some(..)` → `Unknown`（`errno` 为 `EPERM`，`dst_exists` 为 true，克隆留着），`None` 成功，调用方清掉克隆的标志之后自己 `fchmod` 成功 | 新增 |
 | `clone_tree_rooted_is_atomic_and_refuses_cross_volume` | 根在镜像 B 上、src 在镜像 A 上：`clone_tree_rooted` → `CrossVolume`，B 上没有 dst；父目录缺失 → `NoSuchPath`；dst 在 src 里面 → `InvalidInput`；成功时 dst 与 `clone_tree` 的结果逐项相同 | 新增 |
 | `create_file_rooted_and_symlink_rooted_basics` | `create_file_rooted` 返回的句柄可写，文件一开始是空的，mode 受 umask 影响、对句柄 `fchmod` 后精确，第二次调用 → `Exists`；`symlink_rooted` 建出的链接，`readlink` 得到的字节与给定的目标完全相同（含非 UTF-8 字节和相对路径 `../x`）；空目标 → `InvalidInput`（`empty_target`） | 新增 |
+| `rename_rooted_exclusive_never_overwrites` | 根里有 `a/x`（文件）、`b/y`（文件）、`d/`（目录）、`dang`（悬空符号链接）：`Exclusive` 的 `a/x → b/y`、`a/x → d`、`a/x → dang` 都 → `Exists`（`detail.path` 是 to），两边原有的东西和符号链接指向的地方都没被碰；`a/x → b/z` 成功，用 `std::fs` 比较：内容、inode、mtime 不变，ctime 变新，两个父目录的 mtime 变新；`from` 不存在 → `NoSuchPath`（`from_missing`）；`from` 与 `to` 的 RepoPath 相同 → `InvalidInput`（`same_path`），文件没动 | 新增 |
+| `rename_rooted_exclusive_renames_links_and_case_only_spellings` | `from` 是指向目录的符号链接（或悬空的）：改名的是链接本身，目录和里面的东西不动；大小写不敏感的 APFS 镜像上，`Exclusive` 的 `Foo.txt → foo.txt` 成功，`std::fs::read_dir` 看到的名字变成 `foo.txt`，内容和 inode 不变；大小写敏感的镜像上 `a → A` 是两个不同的名字，成功，`A` 已存在时 → `Exists`；`from` 在磁盘上是 NFD 拼写，用 NFC 的 RepoPath 能找到并改名 | 新增 |
+| `rename_rooted_swap_exchanges_two_existing_entries` | `Swap`：文件与文件、文件与目录、目录与目录（同一个父目录和不同的父目录）、符号链接与文件，两个名字下的东西互换，每个对象的 inode 和内容跟着自己走（`std::fs` 比 inode、读内容）；任何一边不存在 → `NoSuchPath`（`from_missing` 或 `to_missing`），另一边没动；overlay 的 restore 用法：暂存目录里的新文件换进工作区旧文件的位置，旧文件换到暂存目录里，两份内容都完整；把目录与它自己的后代对调 → `InvalidInput`；两个镜像之间 → `CrossVolume`；HFS+ 镜像上 → `Unsupported`（`detail.fs_type` 为 `hfs`） | 新增 |
+| `rename_rooted_error_mapping` | 表驱动，一种构造一个错误，每种之后两个路径下原有的东西都没被碰：`to` 的父目录不存在 → `NoSuchPath`；`to` 的父级是文件 → `NotDirectory`；目录改名到自己的后代下（`a → a/b/c`）→ `InvalidInput`（`into_itself`）；名字 256 个码元 → `InvalidInput`（`name_too_long`）；两个 APFS 镜像之间 → `CrossVolume`（`src_dev` 不等于 `dst_dev`）；根下嵌套挂载点的两侧之间（两个方向）→ `CrossVolume`；父目录是 0555 → `ReadOnly`（`no_permission`）；带 `uchg` 的文件 → `ReadOnly`（`immutable`；测试结束前先清标志再清理） | 新增 |
+| `rename_rooted_refuses_symlinked_parents_on_both_sides` | 根里有指向根外目录的符号链接 `out` 和指向根内另一个目录的符号链接 `inn`：`from` 在 `out/x` 或 `inn/x`、`to` 在 `out/y` 或 `inn/y` 的各种组合（`Exclusive` 与 `Swap` 各一遍）都 → `NotDirectory`（`reason = symlink`），根外目录和 `inn` 指向的目录的内容前后不变；接缝在 `to` 的父级解析之前，把已经解析过的 `from` 的父目录的路径换成指向根外的符号链接：这次改名仍作用在被钉住的原目录上，根外目录里没有新东西，之后的新调用 → `NotDirectory` | 新增 |
+| `rename_rooted_directory_reparenting_needs_write_permission` | 增补 4 的"封存先改名、后 chmod"：staging 里 0755 的目录 `Exclusive` 改名到封存位置（另一个父目录）成功，之后 `chmod 0555` 成功；0555 的目录改名到另一个父目录 → `ReadOnly`（`reparent_needs_write`），目录纹丝不动；同一个父目录之内改名成功；`Swap` 里有 0555 的目录、两个目录在不同的父目录下 → `ReadOnly`（`reparent_needs_write`）；对它 `chmod u+w` 之后都成功；0555 的父目录里的文件改名出去 → `ReadOnly`（`no_permission`），不是 `reparent_needs_write` | 新增 |
+| `unlink_rooted_removes_one_entry_without_following` | 文件、指向文件的符号链接、指向目录的符号链接（目录和里面的东西都在）、悬空符号链接、FIFO、socket 都能删，每次只少一个条目，符号链接指向的地方不被碰；目标是目录（空或非空）→ `IsDirectory`（内核给的是 `EPERM`），目录还在；不存在 → `NoSuchPath`；带 `uchg` 的文件 → `ReadOnly`（`immutable`）；0555 的父目录里的文件 → `ReadOnly`（`no_permission`）；父级是符号链接 → `NotDirectory`，链接指向的目录里的同名文件没被删 | 新增 |
+| `rmdir_rooted_removes_only_empty_directories` | 空目录能删（自己是 0555 也行）；非空 → `NotEmpty`，里面的东西都在；目标是文件 → `NotDirectory`；目标是指向目录的符号链接 → `NotDirectory`（`reason = symlink`），链接和目录都还在；不存在 → `NoSuchPath`；带 `uchg` 的空目录 → `ReadOnly`（`immutable`）；挂载点（第二个镜像挂在根下的 `mnt`）→ `Unknown`（`errno` 为 `EBUSY`，`reason = busy`），挂载的内容没动；父级是符号链接 → `NotDirectory`。调用方循环的范例：测试里用 `std::fs::read_dir`、`unlink_rooted`、`rmdir_rooted` 自底向上删光一棵 200 项、含符号链接和只读目录的树（只读目录先 `chmod u+w`），符号链接指向的地方都在 | 新增 |
+| `full_fsync_accepts_file_and_directory_handles` | 对 `open_rooted` 取得的普通文件句柄、目录句柄调用 `full_fsync` → `Ok`；`create_file_rooted` 返回的可写句柄写入之后同样 `Ok`；根目录用 `File::open(root)` 取句柄同样 `Ok`；HFS+、MS-DOS 镜像上同样 `Ok`（实测）；管道的一端 → `Unknown`，`detail.errno` 为 `EBADF`（不 panic）。扛断电的改名配方：`rename_rooted` 之后对两个父目录的句柄各调一次，每次都 `Ok` | 新增 |
 | `gen_count_changes_on_write_not_on_touch` | 以一个文件的 `attrs_of` 为基准。（a）`pwrite` 一个字节（哪怕与原来相同）→ gen_count 变；写入后用 `utimensat` 把 atime、mtime 还原成旧值，gen_count 仍是变了的值，而 `mtime` 与基准相等；`ftruncate` 变大、`O_TRUNC` 也变。（b）`utimensat` 改时间戳、还原时间戳、`chmod`（含加可执行位）、`setxattr`、`chflags`、`rename`、建硬链接、`ftruncate` 到相同大小、`open(O_WRONLY)` 后不写就关闭、`pread`：gen_count 都不变；`chmod` 之后 `mode` 变了，这就是 `Attrs` 带 `mode` 的原因。（c）`unchanged_since` 在（a）的每一步之后为 `false`，在（b）里除 `chmod` 以外的每一步之后为 `true` | 新增 |
-| `gen_count_is_unknown_while_a_writable_mapping_exists` | 与 tgrep 原测试同一个情形：对文件建立可写共享映射，创建映射的描述符已经关闭、映射仍在；另一个独立的读取（`attrs_of`）得到的 gen_count 在映射后、经映射写入后、`msync` 之后三个时点都是 0，`unchanged_since` 为 `false`；映射之前先有一个非零的基准；写入（事后还原时间戳）后 gen_count 改变；解除映射后 gen_count 非零且不同于写入后的值，读到经映射写入的字节 | tgrep-core/tests/managed_storage_macos.rs::native_content_generation_invalidates_writes_and_rejects_retained_writable_mappings |
+| `gen_count_is_unknown_while_a_writable_mapping_exists` | 与 tgrep 原测试同一个情形：对文件建立可写共享映射，创建映射的描述符已经关闭、映射仍在；另一个独立的读取（`attrs_of`）得到的 gen_count 在映射后、经映射写入后、`msync` 之后三个时点都是 `GEN_COUNT_UNAVAILABLE`（`gen_count_known()` 为 `false`），`unchanged_since` 为 `false`；映射之前先有一个非零的基准；写入（事后还原时间戳）后 gen_count 改变；解除映射后 gen_count 非零且不同于写入后的值，读到经映射写入的字节 | tgrep-core/tests/managed_storage_macos.rs::native_content_generation_invalidates_writes_and_rejects_retained_writable_mappings |
 | `gen_count_unknown_with_creator_descriptor_still_open` | 创建可写映射的描述符仍开着：映射存续期间 `attrs_of` 的 gen_count 仍是 0（矩阵的备注：apfs 不得从 tgrep 那一种情形推广，要推广须自己的用例） | 新增 |
 | `gen_count_unknown_for_a_mapping_made_by_another_process` | 子进程建立可写共享映射并保持（管道同步），父进程读到的 gen_count 是 0；子进程退出、映射消失之后读到非零 | 新增 |
 | `read_only_and_private_mappings_keep_gen_count_known` | 只读共享映射、私有可写映射存续期间 gen_count 非零且与映射前相同（私有映射里的写不影响文件） | 新增 |
 | `gen_count_alone_is_not_a_version` | 克隆一个文件，克隆的 gen_count 从 1 起，可能与源相同；用 `rename` 把另一个同样小 gen_count 的文件盖到原路径：gen_count 相同、inode 不同；这两种情况下 `unchanged_since` 都是 `false` | 新增 |
 | `directory_gen_count_tracks_entries_not_content` | 目录：创建、改名、删除子项，建、删子目录，各使它的 gen_count 增加；往子文件里写内容不改变父目录的 gen_count；所以对目录 `unchanged_since` 的含义只是名字集合没变 | 新增 |
+| `attrs_last_changed_is_the_later_of_mtime_and_ctime` | 先把源文件的 mtime 设成 2020 年：`clone_file` 之后克隆的 `mtime` 是 2020 年而 `ctime` 是现在，`last_changed()` 等于 `ctime`（现在）而不是 2020 年；`rename_rooted` 之后 `mtime` 不变、`ctime` 与 `last_changed()` 前进，对象的 inode 与 `gen_count` 不变；`chmod`、`chflags` 只让 `ctime` 前进；`utimensat` 把 mtime 设成 2017 年：`mtime` 回到 2017 年而 `last_changed()` 仍是现在；写入让两者都前进；目录同样：`clone_tree` 一棵源 mtime 都设成 2020 年的树，克隆出的文件和空目录 `mtime` 是 2020 年，有子项的目录 `mtime` 是现在，所有对象的 `last_changed()` 都是现在；目录改名到另一个父目录只让目录自己的 `ctime` 前进、`mtime` 不动；`Swap` 让两个对象的 `ctime` 都前进、`mtime` 不动。所以 gc 的"年龄不足 1 小时"保护刚克隆、刚改名的东西 | 新增 |
 | `attrs_versions_differ_for_same_second_writes` | 同一秒内对同一文件两次不同内容的写入（size 相同、秒级 mtime 相同）：两次 `attrs_of` 的 `Attrs` 不相等，`unchanged_since` 为 `false`；`mtime` 带纳秒（至少一次的纳秒部分非 0） | tgrep-core/src/walker.rs::metadata_walk_reports_precise_same_second_versions |
 | `same_size_write_with_restored_mtime_is_a_new_version` | 同尺寸改写后用 `utimensat` 还原 mtime：`mtime` 与改写前相等而 `gen_count` 不同，`unchanged_since` 为 `false`；纯改时间戳（`touch -r` 一类）不算改动，`unchanged_since` 为 `true` | tgrep-core/src/walker.rs::metadata_walk_detects_same_size_write_with_restored_mtime |
-| `attrs_unchanged_since_rules` | 纯函数，表驱动：任一边 gen_count 为 0 → `false`，两边都是 0 也是 `false`；inode、size、mode、kind 任一不同 → `false`；符号链接的目标不同 → `false`；mtime、ctime 不同而其余全同 → `true`；全同且 gen_count 非零 → `true` | 新增 |
-| `attrs_of_reports_every_field` | 普通文件、目录、符号链接（目标取原字节，含非 UTF-8）、FIFO、socket：`kind`、`size`（符号链接是目标长度，目录与 FIFO 是 0）、`mode`（文件上的 setuid 位 `4755` 保留）、`inode` 与 `std::fs::metadata` 一致，`mtime`、`ctime` 与 `std` 的纳秒一致，`gen_count` 非零；与 `walk_with(max_depth = Some(1))` 对同一条目给出的 `Attrs` 相等 | 新增 |
+| `attrs_unchanged_since_rules` | 纯函数，表驱动：任一边 gen_count 为 `GEN_COUNT_UNAVAILABLE`（0，`gen_count_known()` 为 `false`）→ `false`，两边都是也是 `false`；inode、size、mode、kind 任一不同 → `false`；符号链接的目标不同 → `false`；mtime、ctime 不同而其余全同 → `true`；全同且 gen_count 非零 → `true` | 新增 |
+| `attrs_of_reports_every_field` | 普通文件、目录、符号链接（目标取原字节，含非 UTF-8）、FIFO、socket：`kind`、`size`（符号链接是目标长度，目录与 FIFO 是 0）、`mode`（文件上的 setuid 位 `4755` 保留）、`inode` 与 `std::fs::metadata` 一致，`mtime`、`ctime` 与 `std` 的纳秒一致，`gen_count` 非零（与批量读给出的 `Attrs` 的逐项比较在 `walk_serves_full_and_incremental_scans`） | 新增 |
 | `attrs_of_does_not_follow_links` | 最后一级是符号链接：返回链接本身（`Symlink`），不是目标；父级是符号链接 → `NotDirectory`（`symlink`）；不存在 → `NoSuchPath`；根下单分量的路径可用 | 新增 |
 | `walk_lists_all_entries_relative_to_root` | 无排除时 `walk` 列出树里全部条目（文件、目录、符号链接），路径是相对根的 `RepoPath`，没有根前缀，不含根自己；扩展名为二进制的文件（`.png`、`.zip`）同样列出，apfs 不按扩展名过滤 | tgrep-core/src/walker.rs::walk_dir_no_excludes_returns_all_files |
 | `walk_excludes_configured_dirs` | 树里有 `vendor/` 与 `src/`：filter 对 `vendor` 返回 `false` 后，`vendor` 本身及其下所有文件都不出现，`src` 下的文件不受影响；filter 收到的是相对根的路径，目录也会被问到 | tgrep-core/src/walker.rs::walk_dir_exclude_single_dir |
 | `walk_excludes_several_dirs` | 同时排除 `vendor`、`node_modules`、`target` 三个目录名（filter 按名字匹配任意层级的同名目录）：三者都消失，其余保留 | tgrep-core/src/walker.rs::walk_dir_exclude_multiple_dirs |
 | `walk_exclusion_of_a_missing_dir_is_a_noop` | 排除一个树里不存在的目录名，结果与不排除时逐项相同 | tgrep-core/src/walker.rs::walk_dir_exclude_nonexistent_dir_is_noop |
 | `walk_exclusion_prunes_the_whole_subtree` | 被排除目录下嵌套的子目录与文件一并不出现；filter 对被剪掉的子树里的任何路径一次都没被调用（计数器断言：剪枝不读目录） | tgrep-core/src/walker.rs::walk_dir_exclude_skips_nested_files |
-| `walk_serves_full_and_incremental_scans` | 同一个 `walk_with` 既做全树遍历，也做 `start = Some(dir)`、`max_depth = Some(1)` 的单目录列表（只产出 `dir` 的直接子项，子目录作为 `Dir` 产出但不读它们，路径仍相对根）；两种用法都服从同一个按目录名排除的 filter；git-strata 只有一个 `walk` 实现 | tgrep-core/src/walker.rs::walk_file_metadata_excludes_dirs |
+| `walk_serves_full_and_incremental_scans` | 同一个 `walk_with` 既做全树遍历，也做 `start = Some(dir)`、`max_depth = Some(1)` 的单目录列表（只产出 `dir` 的直接子项，子目录作为 `Dir` 产出但不读它们，路径仍相对根）；两种用法都服从同一个按目录名排除的 filter；git-strata 只有一个 `walk` 实现；对每个条目，`attrs_of` 与 `walk_with` 给出的 `Attrs` 逐项相等（含符号链接的目标、目录、FIFO） | tgrep-core/src/walker.rs::walk_file_metadata_excludes_dirs |
+| `list_dir_lists_one_level_in_byte_order` | `list_dir(root, Some(dir))` 只产出 `dir` 的直接子项（子目录作为 `Dir` 产出但不读它们），按 RepoPath 的字节序，路径相对根；`None` 列根自己；用 NFD 建的名字以 NFC 的 RepoPath 产出，且能被 `open_rooted` 打开；大小写不敏感的卷上，磁盘上是 `Foo.TXT` 时列出的名字就是 `Foo.TXT`（大小写照磁盘，与查询用的拼写比较是调用方的事）；`dir` 不存在 → 第一项 `Err(NoSuchPath)`；`dir` 是符号链接 → 第一项 `Err(NotDirectory)`（`symlink`）；返回值不借用调用方的局部变量（`Walk<'static>`，编译期保证） | 新增 |
 | `walk_wide_directory_is_complete_and_stable_across_buffer_sizes` | 目录 `wide` 里 1300 个文件按降序创建，另有符号链接（相对、悬空）、嵌套目录、两个空目录、两个硬链接名字：每一项恰好出现一次，顺序是 `RepoPath` 的字节序；`buffer_bytes = 1024`（强制很多次续读）与缺省缓冲得到逐项相同的结果；符号链接带目标原字节、不被跟随；空目录各是一条 `Dir`；两个硬链接名字各一条，`inode` 相同；`after_bulk_window` 接缝被调用的次数大于 1 | layerfs-project/tests/backed_acquisition.rs::wide_nested_aliased_root_equals_the_whole_namespace_constructor |
 | `walk_very_wide_directory_through_many_windows` | 一个目录里 17000 个悬空符号链接（目标约 960 字节，以打乱的顺序创建），用最小缓冲区遍历：恰好 17000 条，名字严格按 `s00000` 到 `s16999` 升序，每条都是 `Symlink` 且目标与创建时逐字节相同；窗口数远大于 1 | layerfs-project/tests/backed_acquisition.rs::very_wide_directory_is_ordered_through_many_windows |
 | `walk_after_mass_deletion_lists_only_survivors` | 目录先建 10000 个文件，删掉其中 9870 个（留下大片连续的名字空洞），再用小缓冲区 `walk`：恰好列出剩下的 130 个，每个一次，没有被删的名字，也不因为某个窗口没有任何可用条目而提前结束 | layerfs-workspace/tests/kernel_directory.rs::empty_whiteout_pages_continue_and_only_accepted_names_become_resume_cookies |
@@ -697,7 +799,7 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 
 ## 8. 实现任务（TDD）
 
-前提：workspace 根 `Cargo.toml` 与 `crates/strata-types` 已经存在（types.md §8）。本 crate 的 feature `test-seams` 默认关闭，要用接缝的集成测试（Task 3、4、6）带 `--features test-seams` 运行。所有测试只用 `tempfile` 目录和 `hdiutil` 稀疏镜像，从不碰 `/Volumes/GWD/inter`；`tests/common/mod.rs` 提供 `Image::create(fs, size_mb)`（`hdiutil create -type SPARSE`，`fs` 取 APFS、大小写敏感的 APFS、HFS+、MS-DOS，挂载点在临时目录里，`Drop` 时 `hdiutil detach -force` 并删镜像）、`make_fifo`、`make_socket`（先在短路径上 `bind` 再 `rename` 进目标，避开 `sockaddr_un` 的 104 字节上限）、`fill_until_enospc`。每个任务先写测试、看它因函数还没定义而编译失败，再实现。
+前提：workspace 根 `Cargo.toml` 与 `crates/strata-types` 已经存在（types.md §8）。本 crate 的 feature `test-seams` 默认关闭，要用接缝的集成测试（Task 3、4、6）带 `--features test-seams` 运行。挂载镜像的测试把整个测试根建在内部卷的临时目录（`std::env::temp_dir()`）下：2026-10-22 实测，挂载点放在外置盘 `/Volumes/GWD` 的子目录里（新建的 755 目录也一样；该卷以 `noowners` 挂载，见 `mount` 的输出），`hdiutil attach -mountpoint` 得 `Permission denied`，放在内部卷的临时目录里可以。所有测试只用 `tempfile` 目录和 `hdiutil` 稀疏镜像，从不碰 `/Volumes/GWD/inter`；`tests/common/mod.rs` 提供 `Image::create(fs, size_mb)`（`hdiutil create -type SPARSE`，`fs` 取 APFS、大小写敏感的 APFS、HFS+、MS-DOS，挂载点在临时目录里，`Drop` 时 `hdiutil detach -force` 并删镜像）、`make_fifo`、`make_socket`（先在短路径上 `bind` 再 `rename` 进目标，避开 `sockaddr_un` 的 104 字节上限）、`fill_until_enospc`。每个任务先写测试、看它因函数还没定义而编译失败，再实现。
 
 ### Task 1: crate 骨架、errno 归类、卷标识与能力
 
@@ -774,7 +876,7 @@ git commit -m "feat(apfs): clone_tree and clone_file with volume checks and no c
 Run: `cargo test -p strata-apfs --features test-seams --test rooted`
 Expected: FAIL（`open_rooted` 还没定义，编译不过）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：`resolve` 按 §5.4：根用 `O_DIRECTORY | O_NOFOLLOW` 打开，每一级 `openat(O_DIRECTORY | O_NOFOLLOW)`，每次 `openat` 之前调一次 `before_open`，手里只留当前一级的句柄；`ENOTDIR` 之后用 `fstatat(AT_SYMLINK_NOFOLLOW)` 区分 `reason`；终点用 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`，`fstat` 后拒绝设备；`open_rooted_file` 在此之上要求 `S_ISREG`。不用 `O_NOFOLLOW_ANY`
+- [ ] **Step 3: 写让测试通过的最少实现**：`resolve` 按 §5.4：根用 `O_DIRECTORY | O_NOFOLLOW` 打开，每一级 `openat(O_DIRECTORY | O_NOFOLLOW)`，每次 `openat` 之前调一次 `before_open`（落地的那一次调用之前也调，step 接着数），手里只留当前一级的句柄；`ENOTDIR` 之后用 `fstatat(AT_SYMLINK_NOFOLLOW)` 区分 `reason`；终点用 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`，`fstat` 后拒绝设备；`open_rooted_file` 在此之上要求 `S_ISREG`。不用 `O_NOFOLLOW_ANY`
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-apfs --features test-seams --test rooted`
@@ -787,52 +889,52 @@ git add crates/strata-apfs/src/rooted.rs crates/strata-apfs/src/seams.rs crates/
 git commit -m "feat(apfs): open_rooted with per-component O_NOFOLLOW and test seams"
 ```
 
-### Task 4: 目的地变体
+### Task 4: 目的地变体、改名与删除、`full_fsync`
 
 **Files:**
-- Create: `crates/strata-apfs/src/rooted_write.rs`
-- Test: `crates/strata-apfs/tests/rooted_write.rs`
+- Create: `crates/strata-apfs/src/rooted_write.rs`、`crates/strata-apfs/src/rooted_rename.rs`、`crates/strata-apfs/src/sync.rs`
+- Test: `crates/strata-apfs/tests/rooted_write.rs`、`crates/strata-apfs/tests/rooted_rename.rs`
 
 **Interfaces:**
-- Consumes: Task 2 的检查函数（src 分类、dst 形态、`same_volume`）；Task 3 的 `resolve`
-- Produces: `clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`
+- Consumes: Task 2 的检查函数（src 分类、dst 形态、`same_volume`）；Task 3 的 `resolve` 与 `open_rooted`；Task 1 的 `tests/common` 的 `Image`（HFS+ 镜像、嵌套挂载）
+- Produces: `clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`、`RenameMode`、`rename_rooted`、`unlink_rooted`、`rmdir_rooted`、`full_fsync`
 
-- [ ] **Step 1: 写失败的测试**：§7 的 `rooted_destination_refuses_a_symlinked_parent`、`rooted_destination_never_overwrites`、`rooted_destination_swap_after_resolution_stays_inside`、`mkdir_rooted_parents_semantics`、`clone_file_rooted_sets_the_requested_mode`、`clone_tree_rooted_is_atomic_and_refuses_cross_volume`、`create_file_rooted_and_symlink_rooted_basics`；并把 Task 2 的 `clone_refusals_leave_no_residue` 里 `clone_tree_rooted` 的那一半补上
+- [ ] **Step 1: 写失败的测试**：§7 的 `rooted_destination_refuses_a_symlinked_parent`、`rooted_destination_never_overwrites`、`rooted_destination_swap_after_resolution_stays_inside`、`mkdir_rooted_parents_semantics`、`clone_file_rooted_sets_the_requested_mode`、`clone_tree_rooted_is_atomic_and_refuses_cross_volume`、`create_file_rooted_and_symlink_rooted_basics`（都在 `tests/rooted_write.rs`）；`rename_rooted_exclusive_never_overwrites`、`rename_rooted_exclusive_renames_links_and_case_only_spellings`、`rename_rooted_swap_exchanges_two_existing_entries`、`rename_rooted_error_mapping`、`rename_rooted_refuses_symlinked_parents_on_both_sides`、`rename_rooted_directory_reparenting_needs_write_permission`、`unlink_rooted_removes_one_entry_without_following`、`rmdir_rooted_removes_only_empty_directories`、`full_fsync_accepts_file_and_directory_handles`（都在 `tests/rooted_rename.rs`）；并把 Task 2 的 `clone_refusals_leave_no_residue` 里 `clone_tree_rooted` 的那一半补上
 - [ ] **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p strata-apfs --features test-seams --test rooted_write`
-Expected: FAIL（目的地变体还没定义，编译不过）
+Run: `cargo test -p strata-apfs --features test-seams --test rooted_write --test rooted_rename`
+Expected: FAIL（这些函数还没定义，编译不过）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：共同部分 `resolve` 到父目录句柄 P，只用最后一个名字做一次 `*at` 调用（`clonefileat`、`openat(O_CREAT | O_EXCL | O_NOFOLLOW)`、`mkdirat`、`symlinkat`），不预先 stat，`EEXIST` 就是 `Exists`；flags 只传 `CLONE_NOFOLLOW | CLONE_NOOWNERCOPY`，不传 `CLONE_NOFOLLOW_ANY`、`CLONE_RESOLVE_BENEATH`（它们连 src 一起约束）；`mode` 屏蔽到 `0o777` 后用 `fchmodat(AT_SYMLINK_NOFOLLOW)`；`mkdir_rooted(parents = true)` 逐级建，记录 `created`，建出一级之后的失败升级为 `Unknown`；任何一步都不 `fsync`
+- [ ] **Step 3: 写让测试通过的最少实现**：(a) 目的地变体：共同部分 `resolve` 到父目录句柄 P，只用最后一个名字做一次 `*at` 调用（`clonefileat`、`openat(O_CREAT | O_EXCL | O_NOFOLLOW)`、`mkdirat`、`symlinkat`），落地之前触发 `before_open`，不预先 stat，`EEXIST` 就是 `Exists`；flags 只传 `CLONE_NOFOLLOW | CLONE_NOOWNERCOPY`，不传 `CLONE_NOFOLLOW_ANY`、`CLONE_RESOLVE_BENEATH`（它们连 src 一起约束）；`mode` 屏蔽到 `0o777` 后用 `fchmodat(AT_SYMLINK_NOFOLLOW)`；`mkdir_rooted(parents = true)` 逐级建，记录 `created`，建出一级之后的失败升级为 `Unknown`。(b) 改名与删除，照 §5.4 "改名、删除与 `full_fsync`"：`rename_rooted` 先拦 `same_path`、`into_itself`，解析两个父目录，`renameatx_np` 带 `RENAME_EXCL` 或 `RENAME_SWAP`，失败后用 `fstatat` 区分 `from_missing`、`to_missing` 和 `ReadOnly` 的三种 `reason`；`unlink_rooted` 对 `EPERM` 用 `fstatat` 区分目录与标志；`rmdir_rooted` 的 `EBUSY` 归 `Unknown`；`full_fsync` 是 `fcntl(F_FULLFSYNC)` 加 `EINTR` 重试。任何一步都不 `fsync`、不 `chmod`、不清标志
 - [ ] **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p strata-apfs --features test-seams --test rooted_write --test clone`
+Run: `cargo test -p strata-apfs --features test-seams --test rooted_write --test rooted_rename --test clone`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/strata-apfs/src/rooted_write.rs crates/strata-apfs/src/lib.rs crates/strata-apfs/tests/rooted_write.rs crates/strata-apfs/tests/clone.rs
-git commit -m "feat(apfs): rooted no-follow destination variants"
+git add crates/strata-apfs/src/rooted_write.rs crates/strata-apfs/src/rooted_rename.rs crates/strata-apfs/src/sync.rs crates/strata-apfs/src/lib.rs crates/strata-apfs/tests/rooted_write.rs crates/strata-apfs/tests/rooted_rename.rs crates/strata-apfs/tests/clone.rs
+git commit -m "feat(apfs): rooted no-follow destinations, rename, unlink, rmdir and full_fsync"
 ```
 
 ### Task 5: `Attrs`、记录解析器、`attrs_of` 与 gen count 契约
 
 **Files:**
-- Create: `crates/strata-apfs/src/attrs.rs`（`Attrs`、`FileKind`、`unchanged_since`、`attrs_of`）、`crates/strata-apfs/src/bulk.rs`（属性请求、记录解析器，Task 6 复用）
+- Create: `crates/strata-apfs/src/attrs.rs`（`Attrs`、`FileKind`、`unchanged_since`、`gen_count_known`、`last_changed`、`GEN_COUNT_UNAVAILABLE`、`attrs_of`）、`crates/strata-apfs/src/bulk.rs`（属性请求、记录解析器，Task 6 复用）
 - Test: `crates/strata-apfs/tests/attrs.rs`；`bulk.rs` 内的单元测试
 
 **Interfaces:**
-- Consumes: Task 3 的 `resolve`；Task 1 的 `error.rs`
-- Produces: `Attrs`、`FileKind`、`Attrs::unchanged_since`、`attrs_of`；crate 内部的 `parse_records(buf, n) -> Vec<Result<RawEntry>>`
+- Consumes: Task 3 的 `resolve`；Task 1 的 `error.rs`；Task 2 的 `clone_file` 与 Task 4 的 `rename_rooted`（时间戳的测试用）
+- Produces: `Attrs`、`FileKind`、`Attrs::{unchanged_since, gen_count_known, last_changed}`、`GEN_COUNT_UNAVAILABLE`、`attrs_of`；crate 内部的 `parse_records(buf, n) -> Vec<Result<RawEntry>>`
 
-- [ ] **Step 1: 写失败的测试**：§7 的 `bulk_record_parser_follows_the_returned_bitmap`、`bulk_record_parser_rejects_bad_records`（都在 `bulk.rs` 里，不碰文件系统）、`attrs_unchanged_since_rules`、`attrs_of_reports_every_field`、`attrs_of_does_not_follow_links`、`gen_count_changes_on_write_not_on_touch`、`gen_count_is_unknown_while_a_writable_mapping_exists`、`gen_count_unknown_with_creator_descriptor_still_open`、`gen_count_unknown_for_a_mapping_made_by_another_process`、`read_only_and_private_mappings_keep_gen_count_known`、`gen_count_alone_is_not_a_version`、`directory_gen_count_tracks_entries_not_content`、`attrs_versions_differ_for_same_second_writes`、`same_size_write_with_restored_mtime_is_a_new_version`
+- [ ] **Step 1: 写失败的测试**：§7 的 `bulk_record_parser_follows_the_returned_bitmap`、`bulk_record_parser_rejects_bad_records`（都在 `bulk.rs` 里，不碰文件系统）、`attrs_unchanged_since_rules`、`attrs_of_reports_every_field`、`attrs_of_does_not_follow_links`、`gen_count_changes_on_write_not_on_touch`、`gen_count_is_unknown_while_a_writable_mapping_exists`、`gen_count_unknown_with_creator_descriptor_still_open`、`gen_count_unknown_for_a_mapping_made_by_another_process`、`read_only_and_private_mappings_keep_gen_count_known`、`gen_count_alone_is_not_a_version`、`directory_gen_count_tracks_entries_not_content`、`attrs_versions_differ_for_same_second_writes`、`same_size_write_with_restored_mtime_is_a_new_version`、`attrs_last_changed_is_the_later_of_mtime_and_ctime`
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-apfs --test attrs`
 Expected: FAIL（`Attrs`、`attrs_of` 还没定义，编译不过）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：属性请求与记录布局照 §4.2 D，**按每条记录的返回位图解析**，用未对齐读；`GEN_COUNT` 要 `FSOPT_ATTR_CMN_EXTENDED`；位图里没有 `GEN_COUNT` 或值为 0 → `gen_count = 0`；`attrs_of` 用 `getattrlistat(FSOPT_NOFOLLOW)`；符号链接目标用 `readlinkat` 取原字节；`unchanged_since` 照 §5.5，未知永远是 `false`。多进程、映射的测试用 `fork` 或 `std::process::Command` 启动自身的子测试入口
+- [ ] **Step 3: 写让测试通过的最少实现**：属性请求与记录布局照 §4.2 D，**按每条记录的返回位图解析**，用未对齐读；`GEN_COUNT` 要 `FSOPT_ATTR_CMN_EXTENDED`；位图里没有 `GEN_COUNT` 或值为 0 → `gen_count = 0`；`attrs_of` 用 `getattrlistat(FSOPT_NOFOLLOW)`；符号链接目标用 `readlinkat` 取原字节；`unchanged_since` 照 §5.5，未知永远是 `false`；`gen_count_known` 与 `last_changed`（`max(mtime, ctime)`）照 §5.5。多进程、映射的测试用 `fork` 或 `std::process::Command` 启动自身的子测试入口
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-apfs --lib bulk && cargo test -p strata-apfs --test attrs`
@@ -853,15 +955,15 @@ git commit -m "feat(apfs): Attrs, bulk record parser, attrs_of and the gen count
 
 **Interfaces:**
 - Consumes: Task 5 的 `bulk.rs`；Task 3 的 `resolve`
-- Produces: `walk`、`walk_with`、`WalkOptions`、`Walk`
+- Produces: `walk`、`walk_with`、`list_dir`、`WalkOptions`、`Walk`
 
-- [ ] **Step 1: 写失败的测试**：§7 的 `walk_lists_all_entries_relative_to_root`、`walk_excludes_configured_dirs`、`walk_excludes_several_dirs`、`walk_exclusion_of_a_missing_dir_is_a_noop`、`walk_exclusion_prunes_the_whole_subtree`、`walk_serves_full_and_incremental_scans`、`walk_wide_directory_is_complete_and_stable_across_buffer_sizes`、`walk_very_wide_directory_through_many_windows`、`walk_after_mass_deletion_lists_only_survivors`、`walk_returns_untouched_names_once_while_the_directory_changes`、`walk_never_follows_symlinks`、`walk_does_not_descend_into_mount_points`、`walk_reports_an_unreadable_directory_and_continues`、`walk_skips_entries_that_vanish_mid_walk`、`walk_never_follows_a_directory_swapped_for_a_link`、`walk_reports_a_swapped_root`、`walk_start_is_resolved_without_following_links`、`walk_names_are_nfc_and_openable_either_way`、`walk_depth_limit_is_an_error_item`、`walk_fits_a_low_descriptor_limit`、`low_descriptor_limit_child`（后者 `#[ignore]`，只由前者启动）
+- [ ] **Step 1: 写失败的测试**：§7 的 `walk_lists_all_entries_relative_to_root`、`walk_excludes_configured_dirs`、`walk_excludes_several_dirs`、`walk_exclusion_of_a_missing_dir_is_a_noop`、`walk_exclusion_prunes_the_whole_subtree`、`walk_serves_full_and_incremental_scans`、`list_dir_lists_one_level_in_byte_order`、`walk_wide_directory_is_complete_and_stable_across_buffer_sizes`、`walk_very_wide_directory_through_many_windows`、`walk_after_mass_deletion_lists_only_survivors`、`walk_returns_untouched_names_once_while_the_directory_changes`、`walk_never_follows_symlinks`、`walk_does_not_descend_into_mount_points`、`walk_reports_an_unreadable_directory_and_continues`、`walk_skips_entries_that_vanish_mid_walk`、`walk_never_follows_a_directory_swapped_for_a_link`、`walk_reports_a_swapped_root`、`walk_start_is_resolved_without_following_links`、`walk_names_are_nfc_and_openable_either_way`、`walk_depth_limit_is_an_error_item`、`walk_fits_a_low_descriptor_limit`、`low_descriptor_limit_child`（后者 `#[ignore]`，只由前者启动）
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-apfs --features test-seams --test walk`
 Expected: FAIL（`walk`、`walk_with` 还没定义，编译不过）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：栈式前序遍历，照 §5.6 的七步和 `read_dir` 的五步；一个目录读完、排序之后才产出；filter 在条目到手之后、产出与下探之前调用一次；子目录用 `openat(O_DIRECTORY | O_NOFOLLOW)` 打开，`ENOENT`、`ENOTDIR`、`ELOOP` 当作它已经不在；挂载点、符号链接、特殊文件都是叶子；同时只持有栈上各 frame 的句柄；结束时对根路径 `lstat` 核对身份；`MAX_WALK_DEPTH` 与 `ERANGE` 翻倍重试照 §5.6
+- [ ] **Step 3: 写让测试通过的最少实现**：栈式前序遍历，照 §5.6 的七步和 `read_dir` 的五步；一个目录读完、排序之后才产出；filter 在条目到手之后、产出与下探之前调用一次；子目录用 `openat(O_DIRECTORY | O_NOFOLLOW)` 打开，`ENOENT`、`ENOTDIR`、`ELOOP` 当作它已经不在；挂载点、符号链接、特殊文件都是叶子；同时只持有栈上各 frame 的句柄；结束时对根路径 `lstat` 核对身份；`MAX_WALK_DEPTH` 与 `ERANGE` 翻倍重试照 §5.6；`list_dir` 是 `walk_with` 在 `start = dir`、`max_depth = Some(1)`、全部放行下的具名写法，返回 `Walk<'static>`（放行用一个函数项，不借用调用方的东西）
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-apfs --features test-seams --test walk`
@@ -983,6 +1085,16 @@ git commit -m "test(apfs): design section 8 budgets for walk and clone, with mea
 | 根的解析 | [我的决定] 根的祖先可以是符号链接，根的最后一级 `O_NOFOLLOW`；根之下逐级 `O_DIRECTORY \| O_NOFOLLOW`；不用 `O_NOFOLLOW_ANY` | `O_NOFOLLOW_ANY` 连 `/tmp/x` 也拒绝（§4.2 E） | 2026-10-22 |
 | 目的地变体 | [我的决定] `clone_file_rooted`（`mode: Option<u32>`，屏蔽到 `0o777`）、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`（`parents: bool`）、`symlink_rooted`；父目录缺失不自动建；不 `fsync` | 增补 3 只规定了机制，名字与参数是我定的。`mkdir_rooted(parents)` 单独提供，使每个函数只做一件事、失败边界清楚；`mode` 屏蔽 setuid、setgid 是为了不意外造出特殊位文件 | 2026-10-22 |
 | 克隆带来的 BSD 标志与扩展属性 | [我的决定] apfs 不清，原样带过来；`clone_file_rooted` 只提供 `mode` | 清不清、按什么规则清是 store.md §5.3 第 5 步和 overlay 投影的规整，规则不该在两处各写一份。已知的坑：`mode = Some(..)` 遇到带 `uchg` 的源会 `EPERM`（实测），要先清标志的调用方传 `None` | 2026-10-22 |
+| 改名与删除的接口 | [我的决定] `rename_rooted(root, from, to, RenameMode::{Exclusive, Swap})`、`unlink_rooted`、`rmdir_rooted`；没有覆盖的一档，没有递归删除 | overlay 的 restore 与 `project`（lead 的清单：`RENAME_EXCL`、`RENAME_SWAP`、`unlinkat`、`mkdirat`、`symlinkat`）、store 的 `retire_dir`、deps 的封存、session 的交换都要"根之下不跟随符号链接的改名与删除"（增补 3）。覆盖违反 A1（design §9 不变量 5）；递归删除的循环（清标志、`st_dev` 规则）各模块已经在自己的文档里写了，apfs 只给单个条目的原语 | 2026-10-22 |
+| 同一路径的改名 | [我的决定] RepoPath 完全相同 → `InvalidInput`（`same_path`）；只差拼写的交给内核 | 内核对同一条目的 EXCL、SWAP 都返回成功而什么都不做（实测），调用方的 bug 会被悄悄吞掉；大小写不敏感的卷上只差大小写的 EXCL 改名是有用的（改拼写），所以不一并拦 | 2026-10-22 |
+| `RENAME_NOFOLLOW_ANY`、`RENAME_RESOLVE_BENEATH` | [我的决定] 不用，逐级钉住父目录 | 实测两个 flag 对 from 与 to 都生效（§4.2 G），用 dirfd 加相对路径一次系统调用就能约束两边，是可行的优化。不用是因为：逐级打开才分得出"哪一级是符号链接"（`reason = symlink`，对照内核只给 `ELOOP`），测试接缝能在各级之间触发（`rooted_destination_swap_after_resolution_stays_inside` 一类），这两个 flag 在比 macOS 27 更老的系统上是否可用没测过。以后若 spike 显示逐级 `openat` 太慢，可以换，契约不变 | 2026-10-22 |
+| 改名与删除被拒绝时的 `detail.reason` | [我的决定] `reparent_needs_write`、`immutable`、`no_permission`、`read_only_volume`（都是 `ReadOnly`） | 同一个 `EACCES`、`EPERM` 对调用方的处理不同：前者先 `chmod u+w`，后者先清标志，其余是真的没权限；多一次 `fstatat` 换来可执行的诊断。apfs 自己不放宽权限（A10） | 2026-10-22 |
+| `full_fsync` | [我的决定] 提供这个包装，不做"改名后自动同步" | 增补 3 要求扛断电的目录改名用 `F_FULLFSYNC`：包装一次，各模块不再各写各的常量与 `EINTR` 处理；什么时候同步（成批改名、最后一次）归调用方，实测文件约 10 ms、目录 4 到 26 ms，每次都做会拖慢成批操作 | 2026-10-22 |
+| 年龄的 helper | [我的决定] `Attrs::last_changed()` = `max(mtime, ctime)` | 增补 4 的 gc guards：clonefile 出来的文件和空目录带来源的 mtime，改名只更新 ctime（实测）；放在 `Attrs` 上，gc 对文件和目录都能用 `attrs_of(..).last_changed()` | 2026-10-22 |
+| `gen_count` 的"不可得"值 | [我的决定] 保持 `u64`，0 是 `GEN_COUNT_UNAVAILABLE`，另有 `gen_count_known()` | 计划里 `Attrs` 的 `gen_count` 就是 `u64`；`Option<NonZeroU64>` 更显式，若 overlay 要求，调用方各改一行即可 | 2026-10-22 |
+| 单目录列表 | [我的决定] 加具名的 `list_dir(root, Option<&RepoPath>) -> Walk<'static>` | overlay 在大小写不敏感的卷上找磁盘拼写要列单个目录；`walk_with` 已经能做，具名写法避免每个调用方各拼一遍选项，并保证不借用局部变量 | 2026-10-22 |
+| 测试接缝的 step 编号 | [我的决定] 每次公开调用从 0 起，落地的那一次调用也算一步；`rename_rooted` 先 from 后 to | `rooted_destination_swap_after_resolution_stays_inside` 要在"解析完、落地前"换目录，初稿的定义覆盖不到落地那一步 | 2026-10-22 |
+| 挂载镜像的测试放在哪里 | [我的决定] 测试根建在内部卷的临时目录 | 实测外置盘 `/Volumes/GWD` 的子目录上 `hdiutil attach -mountpoint` 得 `Permission denied`，内部卷的临时目录可以 | 2026-10-22 |
 | `detail.reason` 词表 | [我的决定] §3 末尾列出的那一串 | types.md 只规定了 `errno` 与 `path` | 2026-10-22 |
 | 监听的绑定方式 | [我的决定] 直接绑 CoreServices（`FSEventStreamCreate` 加私有串行 dispatch queue），不经 `notify` | 要拿到原始 flags，自己决定 `Dropped` 与 `MustRescan` 的归类 | 2026-10-22 |
 | 监听的绑定 crate | 待定 | 约束：拿得到原始 flags 与路径，回调在自己的 dispatch queue 上，`drop` 能排空在途回调。候选：`fsevent-sys` 加 `core-foundation-sys`，或手写 `extern "C"` | — |
