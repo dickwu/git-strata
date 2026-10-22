@@ -229,9 +229,12 @@ impl Store {
     /// 码：ReadOnly、InvalidInput（没有这条提议；by 不存在或就是它自己）、Busy、Unknown。
     pub fn decide_proposal(&self, id: ProposalId, to: ProposalDecision, at: SystemTime) -> Result<bool>;
 
-    /// 写入（插入或整行替换）该 repo 主干当前的依赖集，返回同一个事务里读到的旧行。
-    /// set 可以还没有封存（observe_main 只记它算得出的，T8 裁定）。码：ReadOnly、Busy、Unknown。
-    pub fn set_deps_main(&self, row: &DepsMain) -> Result<Option<DepsMain>>;
+    /// 比较并交换该 repo 主干当前的依赖集（增补 7"Main deps record"）。expected 是调用方读到的那一行
+    /// （None 表示预期还没有行）：现有的行与它逐列相等（§5.6）时写入 row，返回 (true, 现有的行)；
+    /// 不相等时什么都不写，返回 (false, 现有的行)，调用方重读之后再决定。row.set 可以还没有封存
+    /// （observe_main 只记它算得出的，T8 裁定）。
+    /// 码：ReadOnly、InvalidInput（row 与 expected 的 repo 不同）、Busy、Unknown。
+    pub fn set_deps_main(&self, row: &DepsMain, expected: Option<&DepsMain>) -> Result<(bool, Option<DepsMain>)>;
 
     /// 没有登记过返回 None。码：Corrupt、Unknown。
     pub fn deps_set(&self, repo: &RepoName, id: &DepsSetId) -> Result<Option<DepsSetRecord>>;
@@ -716,7 +719,7 @@ impl Store {
 | `deps_dir`、`deps_staging_dir` | deps | 依赖集与暂存的路径 |
 | `begin_deps_attempt`、`set_deps_attempt_pid`、`end_deps_attempt`、`record_deps_set` | deps（认领、冷装、封存） | 尝试的意图行与封存登记 |
 | `record_proposal`、`promote_proposal`、`decide_proposal` | deps（`propose`、`observe_main`、`record_rollout`、approve 的替换提议） | 提议的写 |
-| `set_deps_main` | deps（`observe_main`） | 主干当前的依赖集 |
+| `set_deps_main` | deps（`observe_main`：先读，再登记提议，最后比较并交换） | 主干当前的依赖集，比较并交换 |
 | `deps_set`、`deps_attempts`、`proposal`、`proposals`、`deps_main` | deps；session 与 daemon 经 deps | 读 |
 | `create_session`、`set_session_phase`、`set_lifecycle`、`record_seeds` | session（`new`、`remove`、`recover`） | 会话行（`new` 的第一次对外可见的写）、阶段、生命周期、种子 |
 | `begin_move`、`set_move_phase`、`set_move_state`、`finish_move`、`fail_move`、`set_old_tree` | session（`move_workspace`、`recover`） | 移动意图与交换结果 |
@@ -726,7 +729,7 @@ impl Store {
 | `record_publish`、`set_publish_phase`、`publish_record`、`open_publishes`、`record_ref_change`、`ref_changes` | publish；daemon（`open_publishes`） | 发布记录与 ref 审计 |
 | `gc`、`gc_repo`、`last_gc_report` | daemon（`recover` 之后；`gc_repo` 持该 repo 的写锁） | 回收 |
 
-与上一版相比，这一轮改名或新增、供 deps 与 session 的修订轮使用的方法：`record_base_gen` 改为连清单一起登记（删去 `record_manifest`）；`set_workspace_base` 由 `begin_move`、`set_move_phase`、`set_move_state`、`finish_move`、`fail_move`、`set_old_tree` 取代；`set_lifecycle` 多了 `scene`；新增 `set_session_phase`、`move_intents`、`open_move_intents`、`deps_staging_dir`、`is_poisoned`、`gc_repo`；`record_seeds` 改为按路径的行；deps 的写与读用增补 4 定的名字。
+与上一版相比，这一轮改名或新增、供 deps 与 session 的修订轮使用的方法：`record_base_gen` 改为连清单一起登记（删去 `record_manifest`）；`set_workspace_base` 由 `begin_move`、`set_move_phase`、`set_move_state`、`finish_move`、`fail_move`、`set_old_tree` 取代；`set_lifecycle` 多了 `scene`；新增 `set_session_phase`、`move_intents`、`open_move_intents`、`deps_staging_dir`、`is_poisoned`、`gc_repo`；`record_seeds` 改为按路径的行；deps 的写与读用增补 4 定的名字；`set_deps_main` 改为比较并交换，多一个 `expected`，返回是否写成和现有的行（增补 7）。
 
 接口上的三条通则：
 
@@ -777,7 +780,7 @@ impl Store {
 
 | 设置 | 值 | 理由 |
 | --- | --- | --- |
-| `recursive_triggers` | 1（写连接） | `INSERT OR REPLACE` 的隐式删除也会触发 §4.3 的删除守卫，REPLACE 绕不过"只有 gc 删除"（2026-10-22 用 SQLite 3.50.6、3.54.1 实测）；store 自己的覆盖写一律用 `ON CONFLICT … DO UPDATE`，它不删行 |
+| `recursive_triggers` | 1（写连接） | `INSERT OR REPLACE` 的隐式删除也会触发 §4.3 的删除守卫，REPLACE 绕不过"只有 gc 删除"（2026-10-22 用 SQLite 3.50.6、3.54.1 实测）；store 自己从不写 REPLACE：`set_deps_main` 在写事务里先读，再 `INSERT` 或 `UPDATE`（§5.6），blob 登记用 `INSERT … ON CONFLICT (id) DO NOTHING`（§5.8），都不删行 |
 | `trusted_schema` | 0（每个连接） | 不让 schema 里的触发器调用没有声明无害的应用函数；`strata_gc_active` 注册时带 `SQLITE_INNOCUOUS`（不带 `SQLITE_DIRECTONLY`，否则触发器调不到它）。实测：没有这个标志的函数在 `trusted_schema = 0` 下被触发器调用，报 `unsafe use of strata_gc_active()` |
 | `busy_timeout` | 写连接 0，读连接 2000 ms | 外部进程持锁时写立即失败、不重试（3a:620、3a:659）；读只在 WAL 恢复这种极短的独占期里等，普通写事务从不让读等 |
 | `SQLITE_DBCONFIG_DEFENSIVE` | 每个连接都开 | 关掉 `writable_schema` 一类改 schema 的后门（沿用 LayerFS 的做法） |
@@ -1172,7 +1175,7 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
   - 尝试：`running → sealed | failed | refused`；`pid` 只能在 Running 时从空写成值一次；Failed、Refused 必须带错误。
   - 提议：`awaiting_publish → pending | superseded`、`pending → applied | superseded`；`tree` 与 `head` 只在提升时写入；其余列不可改。
   - 发布：`running → done | unknown`、`unknown → done`（暂定，见 §3）。
-  - 其余表写入后整行不可改；`deps_main` 只有 `repo` 不可改，整行由 `set_deps_main` 用 `ON CONFLICT … DO UPDATE` 替换。
+  - 其余表写入后整行不可改；`deps_main` 只有 `repo` 不可改，整行由 `set_deps_main` 比较并交换（一个写事务里先读、逐列比较、再写，§5.6）。
 - **删除守卫**：除 `publishes`、`publish_items`、`refs_audit` 外，每张表的 DELETE 都要 `strata_gc_active()` 为 1；这三张表连 gc 也删不掉（§4.5 S2）。
 
 ### 4.4 列与序号的约定
@@ -1352,7 +1355,7 @@ session 用它拿走会话根、影子仓库、交换之后换下来的旧树、
 - `record_proposal(new, replaces, at)`：先校验（`InvalidInput`）：`from ≠ to`；`tree` 与 `head` 同有同无；没有目标时 `origin` 必须有。位置：有目标 → 该 repo 的 Pending；没有 → 该 repo 该提出会话的 AwaitingPublish。读出位置上现有的那条，与 `replaces` 不符 → `ROLLBACK`，返回 `Ok(None)`。取号 N（同 `begin_deps_attempt`，到顶 → `TooLarge`，`limit = "proposal_id"`）；位置上有旧行就把它改成 Superseded（`superseded_by = N`，`updated_ns = at`）；以显式的 N 插入新行（Pending 或 AwaitingPublish，`created_ns = updated_ns = at`）；`COMMIT` 时检查延迟外键。返回 `Some(N)`。要不要登记、相同的 `to` 已经在了就直接返回它（幂等），这些判断在 deps 读 `proposals` 的时候做（deps.md §5.9）。
 - `promote_proposal(id, tree, head, at)`：没有这条 → `InvalidInput`；不是 AwaitingPublish → false。把该 repo 现有的 Pending，以及该 repo 里 `to` 相同的其它 AwaitingPublish，都改成 Superseded（`superseded_by = id`）；再把 `id` 改成 Pending，写入 `tree`、`head`、`updated_ns`。返回 true。这照搬 deps.md §5.9（ccef28f）的提升规则；deps 的修订轮若要别的取代范围，在它的 §2 列出。
 - `decide_proposal(id, to, at)`：没有这条 → `InvalidInput`；`Superseded { by }` 的 `by` 必须存在且不是 `id`（否则 `InvalidInput`）。`UPDATE … WHERE id = ? AND state = 'pending'`：改了一行 → true，否则 false。approve 发现封存出的 id 与 `P.to` 不同时（T8 的 I5 裁定）不走这里，而是 `record_proposal(替换提议, replaces = Some(P.id))`。
-- `set_deps_main(row)`：读出该 repo 的旧行，再 `INSERT … ON CONFLICT (repo) DO UPDATE` 写入新行，返回旧行。`row.set` 可以还没有封存（`observe_main` 只记它算得出的，T8 裁定）。
+- `set_deps_main(row, expected)`：`row` 与 `expected` 的 repo 必须相同，否则 `InvalidInput`。在这个写事务里读出该 repo 的现有行，与 `expected` 按写入时的列值逐列比较：六列都比，含 `observed_ns` [我的决定：任何一列不同都说明读与写之间有别的观察写过；只比 set，会把 set 相同而 tree 或 head 更新了的一行当成没变，再用过时的观察盖掉它]；一边有行、一边没有也算不等。不等 → 什么都不写，返回 `(false, 现有行)`；相等 → 预期没有行就 `INSERT`，有就 `UPDATE … WHERE repo = ?` 换成 `row`，返回 `(true, 现有行)`。读、比较与写在同一个写事务里，中间插不进别的写。`row.set` 可以还没有封存（`observe_main` 只记它算得出的，T8 裁定）。增补 7"Main deps record"：deps 的 `observe_main` 先读 `deps_main`、登记提议，最后以读到的那一行作 `expected` 写，所以中途被打断或先后颠倒的一次观察由下一次观察重做；没写成之后怎么办由 deps.md 定。
 
 ### 5.7 会话、工作区与移动意图
 
@@ -1409,7 +1412,7 @@ session 怎样串这些方法由 session.md 定。按增补 3、4 的错误时�
 
 三条守卫（增补 4"gc guards"），两个方法都遵守：
 
-- **(a) 有主的路径**：gc 从不删除、也不挪走被这些行点名的路径，以及它们的上级和下级：Preparing、Swapping、Unknown 的意图的 `staging`，Running 与 Failed 的尝试的 `staging` [我的决定：增补 4 写的是"非终态"；Unknown 的意图与 Failed 的尝试的暂存是现场（不变量 6），一并保护]。导出暂存（增补 6"Export staging"）：调用方把 `gitio::export_tree` 的 `dst` 放进自己意图行或尝试行点名的暂存目录里，gitio 在 `dst` 旁边建的 `.export-*` 临时目录就也在这个暂存目录之下，同样受保护。没有意图行的缓存填充（`new` 在 `create_session` 之前建基线，增补 6）由 repo 写锁和 `gc_repo` 第 5 步"名字解析不成键的不进"保护。
+- **(a) 有主的路径**：gc 从不删除、也不挪走被这些行点名的路径，以及它们的上级和下级：Preparing、Swapping、Unknown 的意图的 `staging`，Running 与 Failed 的尝试的 `staging` [我的决定：增补 4 写的是"非终态"；Unknown 的意图与 Failed 的尝试的暂存是现场（不变量 6），一并保护]。导出暂存（增补 6"Export staging"）：`gitio::export_tree` 把临时目录 `.export-<dst 的名字>-<nonce>/` 建在 `dst` 的父目录里，成功时把其中的 `tree/` 改名成 `dst` 再删掉它，失败时原样保留（gitio.md 的 `export_tree`）。调用方把 `dst` 放在自己意图行或尝试行点名的暂存目录之下（不是暂存目录本身），这个临时目录就是暂存目录的下级，同样受本条保护；`dst` 若就是暂存目录本身，临时目录落在暂存目录旁边，本条护不住它。没有意图行的缓存填充（`new` 在 `create_session` 之前建基线，增补 6）由 repo 写锁和 `gc_repo` 第 5 步"名字解析不成键的不进"保护。
 - **(b) 年龄**：没有行的东西（`store/tmp/` 的条目、没有行的 blob 文件、活路径上没有登记的目录）以及要删的 blob 文件，只有年龄超过下限 1 小时才动；年龄按 `lstat` 的 mtime 与 ctime 中较晚的那个算。只看 mtime 是错的：clonefile 复制源文件的 mtime，改名只更新 ctime（2026-10-22 实测：克隆体带着 2020 年的 mtime、ctime 是当下；目录改名之后 mtime 不变、ctime 更新）。trash 的条目按名字里的时刻（改名进来的时间）算。下限与 `keep` 无关 [我的决定]；测试用 `Seam::AgeFloor` 改小它。
 - **(c) 有引用的 generation**：登记过、仍被引用的基线 generation 与依赖集不删（下面的保留集）。
 
@@ -1515,7 +1518,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | put：改名之后、`record_checkpoint` 提交之前 | `blobs/` 里一个没有行的 blob | 之后同内容的 put 复用它；没人复用就由 gc 过了下限收走（3a:293）；不存在 checkpoint 行 |
 | `record_checkpoint`：提交之前 | 什么都没有，SQLite 回滚 | checkpoint 不存在；同一工具调用的重放会重新记 |
 | `record_checkpoint`：提交之后、回复之前 | 完整、持久的 checkpoint | 同一工具调用的重放返回同一个号；`checkpoint_write_is_durable_after_crash` 证明 |
-| session 写下意图行之后（`create_session`、`begin_move`、进入 Removing） | 意图行，以及可能建了一半的暂存或目录 | recover 按 §5.7 收尾：没走到第一次对外可见写的意图关成 Abandoned，暂存经 `retire_dir` 拿走；走到了的进入 Unknown，现场保留（增补 3、4）；`create_session` 本身就是 `new` 的第一次对外可见的写，所以 Creating 的会话一律进入 Unknown（增补 6） |
+| session 写下 `create_session` 或 `begin_move` 的行、或进入 Removing 之后 | 这些行，以及可能建了一半的暂存或目录 | recover 按 §5.7 收尾：Preparing 的意图（没走到第一次对外可见的写）关成 Abandoned，暂存经 `retire_dir` 拿走；Swapping 的意图进入 Unknown；Creating 与 Removing 的会话进入 Unknown，现场保留（增补 3、4）。`create_session` 本身就是 `new` 的第一次对外可见的写，它之后没有"还没对外可见"的窗口，所以 Creating 的会话一律进入 Unknown（增补 6） |
 | deps 的尝试还是 Running 时 daemon 死了 | Running 的行与它的暂存 | 下一个拿到该依赖集建造锁的 deps 把它关成 Failed（`interrupted`，T8 裁定）；gc 从不碰 Running 与 Failed 的暂存 |
 | 目录改名进 `bases/` 或 `deps/` 之后、登记之前 | 活路径上一个没有登记的目录 | 建它的模块下一次发现没登记，就 `retire_dir` 拿走再重建；否则 `gc_repo` 过了年龄下限把它挪进 trash |
 | `retire_dir`：改名之后、同步之前 | 掉电之后目录在原路径或在 trash 里 | 两处都合法：还在原路径就再 `retire_dir` 一次；在 trash 里就由 gc 删 |
@@ -1526,7 +1529,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 
 ### 6.4 `Unknown` 之后
 
-按不变量 6 与错误时机的裁定（增补 3、4）：store 只在写任何东西之前给出类型化的拒绝；写开始之后的失败一律 `Unknown`，现场保留，不清理，不回滚已经持久的东西，由 status 报出。store 自己的意图类行（会话、意图、尝试）只会被关进终态，从不删除（增补 4"Error timing, refinement 2"）。
+按不变量 6 与错误时机的裁定（增补 3、4）：store 只在写任何东西之前给出类型化的拒绝；写开始之后的失败一律 `Unknown`，现场保留，不清理，不回滚已经持久的东西，由 status 报出。移动意图与依赖集尝试只会被关进终态，会话出错时进入 Unknown；它们都不因为失败而被删除，只由 gc 回收（增补 4"Error timing, refinement 2"）。会话行也不是内部的意图行：`create_session` 就是 `new` 的第一次对外可见的写（增补 6）。
 
 - 增补 5（错误时机，第 3 条细化）：操作动手之前对当前、未改动的状态记下的 Before* 安全 checkpoint（BeforeRestore、BeforeRollout、BeforeRemove 等）不算对外可见的写，之后操作仍可给出类型化的拒绝，checkpoint 留着，是一个有效的恢复点。store 不区分这类 checkpoint：它们是普通的 checkpoint 行，只由 gc 按保留期回收，从不因为后面的拒绝而删除。
 - 增补 6（错误时机，第 4 条细化）：建出并登记一个以后任何操作都会复用的、不可变、按内容寻址的 generation（基线 generation、封存的依赖集、blob）是缓存填充，不算对外可见的写，之后操作仍可给出类型化的拒绝。store 这一侧：`record_base_gen`、`record_deps_set` 与 put 写下的东西不因为后面的拒绝而撤销，只由 gc 回收。
@@ -1587,7 +1590,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `proposal_slots_supersede_in_one_transaction` | `record_proposal` 插入 Pending 时取代该 repo 原有的 Pending（`superseded_by` 是新号），插入 AwaitingPublish 时只取代同一 (repo, 提出会话) 的那条；`replaces` 与位置上实际的那条不符时返回 `None`，什么都不写；from = to、tree 与 head 只给一个、没有目标又没有提出会话都返回 `InvalidInput`；任何时刻每个 repo 至多一条 Pending | 新增 |
 | `promote_and_decide_are_compare_and_swap` | `promote_proposal` 把 AwaitingPublish 变成 Pending 并填上 tree 与 head，同一个事务里取代该 repo 原有的 Pending 和 to 相同的其它 AwaitingPublish；对不是 AwaitingPublish 的返回 false；`decide_proposal` 只对 Pending 生效，`Superseded { by }` 的 by 必须存在且不是它自己；Applied 与 Superseded 之后不再变 | 新增 |
 | `proposal_ids_never_reused` | 记三个提议，夹具用 gc 模式的原始连接删掉号最大的那个：新提议拿到的号仍比被删的大（`AUTOINCREMENT`）；依赖集尝试的序号同样不复用 | 新增 |
-| `deps_main_upsert_returns_previous` | 第一次 `set_deps_main` 返回 `None`；之后每次返回同一个事务里读到的旧行；set 可以是还没登记的依赖集；`deps_main` 读回最新的一行 | 新增 |
+| `deps_main_is_compare_and_swap` | 预期没有行时，`set_deps_main(r1, None)` 写入并返回 `(true, None)`；以读到的 r1 作预期写 r2，返回 `(true, Some(r1))`；再以过时的 r1 作预期写 r3：不写，返回 `(false, Some(r2))`，`deps_main` 读回仍是 r2；预期与现有行只差 `observed` 时同样不写；已经有行时预期 `None` 也不写；`row` 与 `expected` 的 repo 不同返回 `InvalidInput`；set 可以是还没登记的依赖集 | 新增 |
 | `generation_rows_register_and_read_back` | `record_base_gen` 写入的 generation 与清单读回相等（`has_base_gen`、`manifest`）；同样内容再登记一次不写；同一 (repo, tree) 的清单不同时返回 `InvalidInput`（`manifest_mismatch`，`detail.path` 是第一处差别），什么都不写 | 新增 |
 | `manifest_absent_and_empty_are_distinct` | 没登记的 (repo, tree) 读回 `None`；登记过的空 tree 读回 entries 为空的清单；同一个 tree 在两个 repo 下各有一份 | 新增 |
 | `base_gen_requires_registered_deps` | 依赖集没登记时 `record_base_gen` 返回 `InvalidInput`（`deps_unregistered`）；`manifest.tree` 与 `gen.tree` 不同返回 `InvalidInput`；两种都什么都不写；没有依赖目录的仓库用 `dirs = []` 的空依赖集（origin Empty）登记成功 | 新增 |
@@ -1729,13 +1732,13 @@ git commit -m "feat(store): content-addressed blob put, get and verify"
 - Consumes: `strata_types::{DepsSet, DepsSetId, ProposalId, SessionId, RepoName, TreeOid, CommitOid, StrataError}`
 - Produces: `Store::deps_dir`、`Store::deps_staging_dir`、`Store::begin_deps_attempt`、`Store::set_deps_attempt_pid`、`Store::end_deps_attempt`、`Store::record_deps_set`、`Store::record_proposal`、`Store::promote_proposal`、`Store::decide_proposal`、`Store::set_deps_main`、`Store::deps_set`、`Store::deps_attempts`、`Store::proposal`、`Store::proposals`、`Store::deps_main`；`AttemptKind`、`AttemptState`、`DepsAttempt`、`DepsOrigin`、`DepsSetRecord`、`NewProposal`、`ProposalRecord`、`ProposalStatus`、`ProposalDecision`、`DepsMain`；写事务助手（L2、`BEGIN IMMEDIATE` 与 `Busy`、从 `sqlite_sequence` 取号与到顶检查）；读连接池与读事务
 
-- [ ] **Step 1: 写失败的测试**：`deps_attempt_is_an_intent_row`、`deps_set_seals_its_attempt`、`proposal_slots_supersede_in_one_transaction`、`promote_and_decide_are_compare_and_swap`、`proposal_ids_never_reused`、`deps_main_upsert_returns_previous`
+- [ ] **Step 1: 写失败的测试**：`deps_attempt_is_an_intent_row`、`deps_set_seals_its_attempt`、`proposal_slots_supersede_in_one_transaction`、`promote_and_decide_are_compare_and_swap`、`proposal_ids_never_reused`、`deps_main_is_compare_and_swap`
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-store --features test-seams --test deps`
 Expected: FAIL（这些函数还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.6 的每个方法一个写事务；尝试与提议的显式取号；`record_proposal` 的位置核对（`replaces`）、先取代再插入与延迟外键；`promote_proposal` 的取代范围；比较并交换返回 false 与 `InvalidInput` 的区分；`set_deps_main` 的 `ON CONFLICT … DO UPDATE` 与旧行；JSON 列（`dirs`、`error`）；§5.10 的读与 `TryFrom` 校验
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.6 的每个方法一个写事务；尝试与提议的显式取号；`record_proposal` 的位置核对（`replaces`）、先取代再插入与延迟外键；`promote_proposal` 的取代范围；比较并交换返回 false 与 `InvalidInput` 的区分；`set_deps_main` 在一个写事务里先读、逐列比较、再写的比较并交换；JSON 列（`dirs`、`error`）；§5.10 的读与 `TryFrom` 校验
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-store --features test-seams --test deps`
@@ -1946,6 +1949,7 @@ design.md 里标 [交给构建者]、落在本模块的事项：
 | 清单怎么登记（§3、§5.5） | `record_base_gen(gen, manifest)` 一个事务登记两者，删去单独的 `record_manifest`，不设 `put_manifest` | 增补 3 让 store 选；清单不会没有 generation 而单独存在，调用方只有 session 一个 | 2026-10-22 |
 | 清单重登记不同（§5.5） | 同一 (repo, tree) 的清单不同时返回 `InvalidInput`（`manifest_mismatch`） | 同一个 tree 导出了不同的字节，多半是检出过滤的配置变了，要人来看 | 2026-10-22 |
 | `record_proposal` 的位置核对（§3、§5.6） | 多一个 `replaces` 参数，位置上的那条与它不符时什么都不写、返回 `Ok(None)` | deps.md 原来在一个写事务里先读后写；换成具名方法之后，靠它守住读与写之间的变化 | 2026-10-22；待 deps.md 修订轮确认 |
+| `set_deps_main` 的"相等"（§5.6） | 现有行与 `expected` 按写入时的列值六列逐列相等，含 `observed_ns` | 任何一列不同都说明读与写之间有别的观察写过；只比 set 会把 set 相同而 tree 或 head 更新了的一行当成没变，再用过时的观察盖掉它 | 2026-10-22；待 deps.md 修订轮确认 |
 | 一个依赖集至多一条 Running 的尝试（§4.3、§5.6） | 部分唯一索引 `deps_attempts_one_running`；第二次 begin 返回 `Exists` | T8 裁定让下一个持锁者先把死掉的尝试关成 Failed；索引让"先开始再关"失败 | 2026-10-22 |
 | 会话行的阶段（§3） | `sessions.phase` 文本列，只在 Creating、Removing 时可写 | 增补 4 只给意图行定了 phase；new 与 rm 也是多步操作，recover 要知道它们停在哪一步 | 2026-10-22；待 session.md 修订轮确认 |
 | 种子何时可写（§3、§5.7） | 只在会话为 Creating 时，每个路径只写一次 | 种子只在 new 时拷进来 | 2026-10-22 |
