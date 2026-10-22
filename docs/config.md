@@ -23,7 +23,7 @@
 
 另外 admin 的 `prebuild` 跑 `scripts/permission-map/generate.mjs`，它读 `../staff-api`、`../tool`、`../front`、`../app`；兄弟缺失时保留已提交的 `generated.json`，不会失败（`admin/scripts/permission-map/generate.mjs:64-70`，`admin/CLAUDE.md`）。
 
-- **派生目录**：`paths.root` 之下固定是 `store/`、`bases/`、`deps/`、`sessions/`（design §7），不单独配置。工作区路径 = `<root>/sessions/<session-id>/<repo>/`：session id 由 `new` 生成（types.md 的 `SessionId`，形如 `s-k3q7xm2a`），ticket 只是会话的标签，不进路径（design §11 第 18 条"会话 id 与 ticket 分离"；design §4 的路径示例仍写作 `<ticket>`，以这里与 types.md 为准）。
+- **派生目录**：`paths.root` 之下固定是 `store/`、`bases/`、`deps/`、`sessions/`（design §7），不单独配置。工作区路径 = `<root>/sessions/<session-id>/<repo>/`：session id 由 `new` 生成（types.md 的 `SessionId`，形如 `s-k3q7xm2a`），ticket 只是会话的标签，不进路径（design §4、§11 第 18 条"会话 id 与 ticket 分离"）。
 
 ---
 
@@ -60,7 +60,7 @@
 - **`seed_files`**：被 gitignore 但运行必需的文件，新建会话时从主 checkout 复制（design §4）；不 checkpoint；`status` 列出来源与时间，不显示内容（`staff-api/.env` 是生产库配置，`secrets.rs` 含密钥）。**条目必须是被 ignore 且未被跟踪的路径**：已被跟踪的文件随基线导出，再从主 checkout 复制会把可能是脏的版本盖到基线上；未被 ignore 的文件复制过去会以 `Untracked` 进 overlay。两种条目两种待遇 [我的决定]：**缺省的四项是候选**——每一项只在该仓库里未被跟踪且被 ignore 时才是种子文件，已被跟踪（admin、maxident-sync、insurance-check、rust-socket、rust-mail、gwd、sockdbg 七个仓库跟踪着 `CLAUDE.md`）或未被 ignore 的缺省项静默不算，不报错也不告警，所以省略 `seed_files` 的最小 `[repo.<name>]` 表在任何仓库上都能 `new`；**显式写出的条目**是硬要求：存在但被跟踪或未被 ignore → `session::new` 拒绝（`InvalidInput`，§4.3）。附录 A 的取法：design §4 的默认四项 ∩ 该仓库里被 ignore 的，再加仓库特有的（maxident-sync、insurance-check 的 `src-tauri/src/secrets.rs`：被 ignore，但没有它 Rust 编译不过）。主 checkout 里不存在的条目静默跳过。
 - **`install_inputs`**：依赖集的键（design §3"锁文件不一定在 git 里"、§4）。每项是仓库内相对路径，指文件，或指目录（目录 = 其下被 git 跟踪的全部文件，递归）。内容经 BLAKE3 哈希，与平台、工具链一起得到 `DepsSetId`（types.md）。经验规则：
   1. 只列**被 git 跟踪**的文件。基线是从 git 对象导出的；被 ignore 的锁文件会被 `bun install` 改写，列进去会让漂移检测抖动。front 因此用被跟踪的 `package-lock.json`，不用被 ignore 的 `bun.lock`；surgical-timeout 的 `bun.lock` 同样被 ignore，所以它只有 `package.json`。
-  2. `@inter/*` 的解析 SHA 不另设输入项：它们已经写在被跟踪的锁文件里（admin、tool 的 `bun.lock`；front 的 `package-lock.json`，附录 B 核对过 5 个 `@inter/*` 都带 SHA）。
+  2. `@inter/*` 的解析 SHA 不另设输入项：它们已经写在被跟踪的锁文件里（admin、tool 的 `bun.lock`）；front 的被跟踪 `package-lock.json` 也带 5 个 `@inter/*` 的 SHA，但 bun 实际解析用的是被 ignore 的 `bun.lock`，其中 3 个 SHA 与它不同（`B`）——所以对 front 这项只是漂移检测的键，不是"解析结果"；front 的 `@inter/*` 真正的解析 SHA 不在任何被跟踪文件里，是本文接受的盲区。
   3. 输入不只是锁文件：tool 的 `postinstall` 跑 `patch-package`，读被跟踪的 `patches/`，所以 `patches` 也是输入。
   4. `package.json` 的 `version` 每次 `build.sh` 发布都会变。哈希是否忽略 `version` 等与依赖无关的字段，由 `deps.md` 的 `inputs_hash` 决定 [交给构建者]；不忽略，每次发布都会产生一次无意义的"依赖变更"。
 - **`install`**：冷装命令，在 staging 克隆的仓库根目录执行，产出 `deps_dirs`（design §6.4 第 2 步）。它本来就是安装，可以有写副作用。安装钩子（`postinstall`）由包管理器自己触发，不单列。
@@ -76,7 +76,7 @@
   6. 检查跑在 staging 树里，所以需要种子文件才能跑的检查（maxident-sync、insurance-check 的 `cargo check` 需要 `secrets.rs`）要么不列，要么由 `publish` 把种子文件带进 staging [交给 `publish.md`]；附录 A 对这两个仓库没有启用 Rust 检查。Tauri 应用的 Rust 侧检查同样没有启用：`src-tauri/target` 冷编译要 30–40 分钟（design §6.1）。
 - **`publish`**：`PublishTarget { branch, push, confirm }`（types.md；design §6.7），三个字段都必须写。`branch` 是发布链 `refs/strata/publish/<branch>` 对应的分支，附录 A 里恒等于 `default_branch`（两者不同时 [我的决定]：发布链以 `origin/<publish.branch>` 为合并基并推到它；新会话仍钉 `origin/<default_branch>`，`pin_unpushed` 只在 `publish.branch == default_branch` 时有意义；细节交给 `publish.md` 与 `session.md`）；`push = true`：发布后立刻把链推到 `origin/<branch>`；`false`：留在本地，之后 `strata push <repo>`；`confirm`：该目标的推送是否需要人类确认。**实际是否需要确认 = `confirm || deploy_on_push`**（`RepoConfig::needs_human_confirm`）。默认 = 直接合主干并推（design §2 目标 7），即 `push = true, confirm = false`；一推上线的仓库 `confirm = true`；staff-api 例外：`push = false`，预期配置是人工 `strata push`（design §6.7，因为推任何分支都会重建生产）。
 - **`deploy_on_push`**：为 `true` 时，推送必须经 design §6.9 的人类确认，没有任何 flag、环境变量或运行期配置能让这次推送绕过（不变量 3、7）；规则 V5 保证 `confirm` 也是 `true`。把 `deploy_on_push` 本身改成 `false` 属于"调松"，daemon 只在人类确认之后接受（§1 的钉住规则，[交给 `daemon.md`]）。`true` 的有：staff-api、front 和全部 `@inter/*` 库（admin-time-off、admin-shared、hr-core、hr-tasks、hr-components、hr-time-management、quick-start）——design §3、§11 第 6 条。
-- **`pin_unpushed`**：新会话钉基线时，发布链领先 `origin/<branch>` 就钉链顶；`false` 则一律钉 `origin/<default_branch>`，新会话看不到已发布未推送的改动，下一次发布必撞（design §6.7）。
+- **`pin_unpushed`**：新会话钉基线时，发布链领先 `origin/<branch>` 就钉链顶；`false` 则一律钉 `origin/<default_branch>`，新会话看不到已发布未推送的改动，下一次发布必撞（design §6.7）。只在 `publish.branch == default_branch` 时有意义：两者不同时新会话一律钉 `origin/<default_branch>`（见上条 `publish`）。
 
 ### 2.4 命令行字符串（`install` 与 `checks`）
 
@@ -134,9 +134,10 @@ pub struct RepoConfig {
     /// 缺省 `["src-tauri/target", ".next/cache", "node_modules/.cache"]`。
     #[serde(default = "RepoConfig::default_seed_caches")]
     pub seed_caches: Vec<RepoPath>,
-    /// 缺省 `["CLAUDE.md", ".env", ".env.local", ".claude/settings.local.json"]`；缺省项是候选，只在该仓库里未被跟踪且被 ignore 时生效，显式条目是硬要求（§2.3）。
-    #[serde(default = "RepoConfig::default_seed_files")]
-    pub seed_files: Vec<RepoPath>,
+    /// `None` = 没写，用缺省四项 `["CLAUDE.md", ".env", ".env.local", ".claude/settings.local.json"]` 当候选（只在该仓库里未被跟踪且被 ignore 时生效）；
+    /// `Some(list)` = 显式条目，硬要求（§2.3）。用 `Option` 是为了区分"没写"与"写了"[我的决定]；读取方用 `seed_files()`。
+    #[serde(default)]
+    pub seed_files: Option<Vec<RepoPath>>,
     /// 文件或目录；目录 = 其下被跟踪的全部文件。
     #[serde(default)]
     pub install_inputs: Vec<RepoPath>,
@@ -170,6 +171,8 @@ impl RepoConfig {
     pub fn default_deps_dirs() -> Vec<RepoPath>;
     pub fn default_seed_caches() -> Vec<RepoPath>;
     pub fn default_seed_files() -> Vec<RepoPath>;
+    /// `(候选列表, 是否显式)`：`None` → `(default_seed_files(), false)`；`Some(v)` → `(v, true)`。
+    pub fn seed_files(&self) -> (Vec<RepoPath>, bool);
     pub fn default_pin_unpushed() -> bool;
     /// design §9 不变量 3、7：`self.publish.confirm || self.deploy_on_push`。
     /// 即使 `validate` 被绕过（代码里直接构造结构体），门也不会被配置打开；配置本身被调松则由 daemon 的钉住规则把守（§1）。
@@ -196,7 +199,7 @@ impl Config {
 { "repo": "tool", "field": "checks", "index": 1, "rule": "V10" }
 ```
 
-`repo` 在 `[paths]`、全局规则或调用方不知道仓库名时（`publish::check`）为 `null`；`index` 在不是数组元素时为 `null`；`rule` 是 §4.1 的规则编号。TOML 本身解析失败（语法错误、类型不符、V11 的未知键）也是 `InvalidInput`：`rule` 为 `"toml"`，并多一个 `message` 键放 `toml` 的原话（含行列）[我的决定]。
+`repo` 在 `[paths]`、全局规则或调用方不知道仓库名时（`publish::check`）为 `null`；`index` 在不是数组元素时为 `null`；`rule` 是 §4.1 的规则编号。TOML 本身解析失败（语法错误、类型不符）也是 `InvalidInput`：`rule` 为 `"toml"`，并多一个 `message` 键放 `toml` 的原话（含行列）；未知键由 `deny_unknown_fields` 在同一步解析里报出，`parse` 把这类错误映射为 `rule = "V11"`（`message` 同样带 toml 的原话）[我的决定]。
 
 `PublishTarget` 定义在 types.md。规则 V11 要求 `publish` 内联表拒绝多出来的键，所以 types.md 里的 `PublishTarget` 也要带 `#[serde(deny_unknown_fields)]`（目前没有；加上不改变它的序列化形状）。
 
@@ -213,7 +216,7 @@ impl Config {
 | V1 | `repo` 表非空；`<name>` 是合法的 `RepoName`（types.md：`[A-Za-z0-9._-]`，非空，不是 `.` 或 `..`），且等于 `path` 的最后一级目录名 | `InvalidInput` | design §3（dev-link 用 `../<目录名>` 找兄弟）、§4（工作区路径 `<root>/sessions/<session-id>/<repo>/`，见 §1） |
 | V2 | `paths.root` 与每个 `path` 是绝对、已规范化的路径：不含 `.`、`..`、`//`、尾部 `/`，不展开 `~` | `InvalidInput` | design §7（daemon 由 launchd 启动，工作目录不确定，相对路径无从解析） |
 | V3 | `paths.root` 不得位于任何 `path` 之内，任何 `path` 不得位于 `paths.root` 之内 | `InvalidInput` | design §9 不变量 2（strata 不写主 checkout 的工作树）[我的决定] |
-| V4 | `default_branch`、`publish.branch` 是合法的分支短名（纯字符串实现 `git check-ref-format --branch` 的规则，不调用 git）：非空；不含 ASCII 控制字符、空格和 `~ ^ : ? * [ \`；不含 `..`、`@{`、`//`；不以 `/` 开头或结尾；每一级不以 `.` 开头、不以 `.lock` 结尾；不等于 `@`、不以 `-` 开头；不以 `refs/` 开头 | `InvalidInput` | design §6.7（分支名拼进 `refs/strata/publish/<分支>`） |
+| V4 | `default_branch`、`publish.branch` 是合法的分支短名（纯字符串实现 `git check-ref-format --branch` 的规则，不调用 git）：非空；不含 ASCII 控制字符、空格和 `~ ^ : ? * [ \`；不含 `..`、`@{`、`//`；不以 `/` 开头或结尾；每一级不以 `.` 开头或结尾、不以 `.lock` 结尾；不等于 `@`、不等于 `HEAD`、不以 `-` 开头；不以 `refs/` 开头 | `InvalidInput` | design §6.7（分支名拼进 `refs/strata/publish/<分支>`） |
 | V5 | `deploy_on_push = true` ⇒ `publish.confirm = true`（加载期的显式检查；运行期仍以 `needs_human_confirm` 兜底，types.md 的 `PublishTarget.confirm` 注释说的是这一层） | `InvalidInput` | design §3、§9 不变量 3 与 7（没有配置能关掉一推上线的人类确认） |
 | V6 | 四个路径列表（`deps_dirs`、`seed_caches`、`seed_files`、`install_inputs`）的每一项都是合法 `RepoPath`（types.md），不是 `.git` 也不在 `.git` 之下；同一列表内无重复、互不嵌套 | `InvalidInput` | design §4 |
 | V7 | 四个列表之间没有相同或嵌套的路径；唯一例外：`seed_caches` 的条目可以位于某个 `deps_dirs` 条目之内（默认的 `node_modules/.cache`） | `InvalidInput` | design §4（依赖目录不进 overlay；种子缓存不封存、不 checkpoint）[我的决定] |
@@ -443,7 +446,7 @@ pin_unpushed = true
 
 **七个 `@inter/*` 库**：`deploy_on_push = true`，由任务清单与 design §3、§11 规定。`I` 的 webhook 表里 hr-core、hr-tasks、hr-time-management、quick-start、hr-components 推送都会重建 front；**admin-shared 与 admin-time-off 没有 webhook**（`I`；`infra-docs/01-overview.md:200` 称它们是"Libraries, developer tooling and build-time dependencies"，front 的 `package.json` 也不依赖它们），这里按 design 设为 `true`，只是多一道确认。
 
-库都是 peer 依赖，多数在主 checkout 里没有 `node_modules`，所以 `deps_dirs = []`；hr-core、hr-tasks、hr-components、hr-time-management、quick-start 都声明了 devDependencies（admin-shared、admin-time-off 没有），但盘上只有 hr-time-management 有 `node_modules`；hr-core 与 hr-time-management 配了 `deps_dirs`（两者的 `bun.lock` 都被 ignore，所以输入只有 `package.json`），因为它们的测试要装依赖才绿；其余库的检查不装依赖就绿，不配依赖目录。检查：hr-components、admin-time-off、hr-time-management 的 `bun test` 不装依赖就能全绿（`B`）；hr-core 声明的 `bun test src` 在没装 peer 依赖时红（`B`：`src/api/client.ts` 引用 `@tanstack/react-query`），所以不启用；admin-shared、hr-tasks、quick-start 没有测试。
+库都是 peer 依赖，多数在主 checkout 里没有 `node_modules`，所以 `deps_dirs = []`；hr-core、hr-tasks、hr-components、hr-time-management、quick-start 都声明了 devDependencies（admin-shared、admin-time-off 没有），但盘上只有 hr-time-management 有 `node_modules`；两个库配了 `deps_dirs = ["node_modules"]`（两者的 `bun.lock` 都被 ignore，所以输入只有 `package.json`）：hr-time-management 因为盘上本来就有 `node_modules`、可以认领；hr-core 因为它的测试要装依赖才绿。其余库的检查不装依赖就绿，不配依赖目录。检查：hr-components、admin-time-off、hr-time-management 的 `bun test` 不装依赖就能全绿（`B`）；hr-core 的 `bun test src` 不装依赖时红（`src/api/client.ts` 引用 peer 依赖 `@tanstack/react-query`），`bun install` 之后绿，所以配依赖目录并启用（`B`）；admin-shared、hr-tasks、quick-start 没有测试。
 
 ```toml
 [repo.release-notes]
@@ -485,7 +488,7 @@ pin_unpushed = true
 [repo.hr-core]
 path = "/Volumes/GWD/inter/hr-core"
 default_branch = "main"                    # G
-deps_dirs = ["node_modules"]               # P devDependencies（3 项，含测试要的 peer）；盘上没有 node_modules，第一个会话按 install 冷装（B：2.7 s）
+deps_dirs = ["node_modules"]               # P devDependencies 3 项（@types/react、@types/react-dom、typescript）+ peerDependencies（bun 默认一并安装，测试要的 @tanstack/react-query 在其中）；盘上没有 node_modules，第一个会话按 install 冷装（B：2.7 s）
 seed_caches = []
 seed_files = [".claude/settings.local.json"]   # G
 install_inputs = ["package.json"]          # G bun.lock 被 ignore（.gitignore:3），没有被跟踪的锁文件（同 hr-time-management）
