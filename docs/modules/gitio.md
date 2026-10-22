@@ -8,7 +8,7 @@ gitio 是 strata 里唯一起 git 子进程的模块。它从 tgrep 借了两段
 
 **负责**（design §5 的 `gitio` 行）：
 
-1. **git 的唯一出口**。strata 的每个 git 子进程都由 gitio 经 crate 私有的 `Git::command` 起，环境先清洗（§5.1）。其他模块只调 §3 的类型化函数：它们不起 git，也不解析、不改写 git 的文件（gitfile、管理目录、影子仓库、index、config、ref）。gitio 交出的目录对它们是不透明的整体，只会被整体移动或退役：session 交换带着新 gitfile 的工作区目录，按 module-rulings Addendum 3 经 `store::retire_dir` 退役旧的管理目录与 `rm` 时的影子仓库。gitio 直接读的 git 文件只有 index、gitfile、`commondir`、`objects/info/alternates`、仓库 config 与 `info/` 下的规则文件（§5.7、§5.8；index、gitfile、`commondir` 与 config 的读法借 tgrep），直接写的只有影子仓库、管理目录与 staging 私有目录里它自己建的那几个文件（§5.6）；其余一律经 git。
+1. **git 的唯一出口**。strata 自己的模块起的每个 git 子进程都经 gitio 的 crate 私有 `Git::command`，环境先清洗（§5.1）。唯一的例外在依赖里：search 若用 tgrep-core 的 `GenerationManager` 建基线索引，tgrep-core 在 `GenerationManager::ensure` 里经它自己的 `generations/git.rs` 起 git，不经 gitio；这由 search.md 交代（module-rulings Addendum 2 的 T11 条让它决定基线索引怎么建）。其他模块只调 §3 的类型化函数：它们不起 git，也不解析、不改写 git 的文件（gitfile、管理目录、影子仓库、index、config、ref）。gitio 交出的目录对它们是不透明的整体，只会被整体移动或退役：session 交换带着新 gitfile 的工作区目录，按 module-rulings Addendum 3 经 `store::retire_dir` 退役旧的管理目录与 `rm` 时的影子仓库。gitio 直接读的 git 文件只有 index、gitfile、`commondir`、`objects/info/alternates`、仓库 config 与 `info/` 下的规则文件（§5.7、§5.8；index、gitfile、`commondir` 与 config 的读法借 tgrep），直接写的只有影子仓库、管理目录与 staging 私有目录里它自己建的那几个文件（§5.6）；其余一律经 git。
 2. **仓库身份**：`open` 由主 checkout 的工作树根得到 git common dir 的 realpath（types.md `RepoId`），拒绝 strata 的工作区、SHA-256 仓库、reftable 仓库与过低的 git 版本。
 3. **远端与 ref**：`fetch` 把远端分支取进 strata 自己的跟踪 ref；`read_ref`、`is_ancestor`、`merge_base`；`refs/strata/*` 下比较并交换的 `update_ref` 与 `delete_ref`（发布链、pin ref）；`push` 产生 types.md 的 `PushOutcome`。
 4. **tree 的两个方向**：`tree_of` 解析并校验基线 tree，`tree_contains` 查一个路径在不在 tree 里（种子文件规则）；`export_tree` 把 tree 导出成目录，逐字节等于 `git checkout` 的结果（检出方向的过滤器）；`stage` 走反方向，按检入方向的过滤器把 staging 树里的文件写成 tree；`commit_tree` 做 commit。
@@ -275,7 +275,7 @@ pub fn is_binary(bytes: &[u8]) -> bool;
 
 | 写入 | 由谁写 | 说明 |
 | --- | --- | --- |
-| `<common>/objects/` 下的对象 | `fetch`（收到的 pack）；publish 经 `stage`（blob、tree）与 `commit_tree`（commit） | 只增不改，按内容寻址。gitio 从不运行 `gc`、`prune`、`repack` 或 maintenance：`fetch` 带 `--no-auto-maintenance`、`--no-write-commit-graph`。不变量 2 的原文只说"写只限 `refs/strata/*`"，没提对象；这是 design 隐含的例外（§6.1 的 fetch、§6.5 的 commit），由 T15 按 module-rulings Addendum 2 写进不变量 2 与计划的 Global Constraints（review M11）。另外，导出与 staging 的 refresh 会跑仓库配置的过滤器，过滤器自己也可能写 common dir，例如 git-lfs 的 smudge 把对象缓存在 `<common>/lfs/` |
+| `<common>/objects/` 下的对象 | `fetch`（收到的 pack）；publish 经 `stage`（blob、tree）与 `commit_tree`（commit） | 只增不改，按内容寻址。gitio 从不运行 `gc`、`prune`、`repack` 或 maintenance：`fetch` 带 `--no-auto-maintenance`、`--no-write-commit-graph`。不变量 2 的原文只说"写只限 `refs/strata/*`"，没提对象；这是 design 隐含的例外（§6.1 的 fetch、§6.5 的 commit），由 T15 按 module-rulings Addendum 2 写进不变量 2 与计划的 Global Constraints：ref 只在 `refs/strata/*` 下，含 session 的 pin ref（本表 `refs/strata/pins/<session-id>` 一行）；对象由 fetch 与 publish 的 commit 写入（review M11）。另外，导出与 staging 的 refresh 会跑仓库配置的过滤器，过滤器自己也可能写 common dir，例如 git-lfs 的 smudge 把对象缓存在 `<common>/lfs/` |
 | `refs/strata/publish/<branch>` | publish，经 `update_ref` | 发布链（design §6.7） |
 | `refs/strata/pins/<session-id>` | session，经 `update_ref`、`delete_ref` | 会话在这个 repo 上的 head。主 checkout 的 `git gc` 看不到影子仓库，有了 pin，钉住的 commit 与 tree 不会被回收（session.md §4.2）。这是工作区给主 checkout 的唯一写入 |
 | `refs/strata/remotes/<remote>/<branch>` | `fetch`；`push` 返回 `Pushed` 之后 | strata 自己看到的远端 tip [我的决定]。不用 `refs/remotes/*`：后台移动人的远端跟踪分支，会让人之后的 `git push --force-with-lease` 以为看过这些提交，从而把它们盖掉 |
