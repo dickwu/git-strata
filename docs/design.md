@@ -1,7 +1,9 @@
-# strata — 设计文档
+# git-strata — 设计文档
 
-> **状态**：brainstorm 产出，2026-10-22，待用户确认。确认前不写任何代码、不建脚手架、不装依赖。
-> 确认后本文是唯一的约束来源；`docs/modules/*.md` 的逐模块开发文档从本文派生，与本文冲突时以本文为准。
+> **状态**：brainstorm 产出，2026-10-22；**用户已确认**（唯一改动：项目名由 strata 改为 git-strata）。
+> 本文是唯一的约束来源；`docs/modules/*.md` 的逐模块开发文档从本文派生，与本文冲突时以本文为准。写代码之前，所有模块文档和测试矩阵必须先完成。
+>
+> 命名：项目与仓库叫 **git-strata**，二进制也叫 `git-strata`，因此可以写作 `git strata new …`；文中的 `strata …` 都指它（可装一个 `strata` 别名）。refs、目录、环境变量沿用短名 `strata`（`refs/strata/*`、`.strata/`、`STRATA_PUBLISH`）。
 >
 > 标注约定：**[用户]** = 用户在对话中明确决定的；**[我的决定]** = 我替用户做的、随时可推翻的选择；**[交给构建者]** = 构建者自行决定。
 
@@ -9,7 +11,7 @@
 
 ## 1. 这是什么
 
-**strata** 让一台 Mac 上的多个 Claude Code 会话各自在**真实目录**里修改**同一组仓库**，共享不可变的基线和依赖，记录每一步，互相可见，最后按选定的批次合成 git 提交。
+**git-strata**（下文简称 strata）让一台 Mac 上的多个 Claude Code 会话各自在**真实目录**里修改**同一组仓库**，共享不可变的基线和依赖，记录每一步，互相可见，最后按选定的批次合成 git 提交。
 
 一句话里的每个词都有来历：
 
@@ -281,7 +283,7 @@ agent 和用户是同一个 uid，且常以 bypass 权限运行，所以 flag �
 
 ## 11. 我替用户做的决定（可推翻）
 
-1. 名字 `strata`，位置 `/Volumes/GWD/opensource/strata`。
+1. 名字 `git-strata` [用户]，位置 `/Volumes/GWD/opensource/git-strata`，仓库 `github.com/dickwu/git-strata`；二进制 `git-strata`（可作 `git strata` 子命令），daemon `git-stratad`。
 2. Rust；macOS API 走 `libc` / `objc2`；索引层以 `tgrep-core` 为库依赖。
 3. 一台机器一个 daemon（launchd agent），unix socket RPC。
 4. 批次按整文件路径，不按 hunk。
