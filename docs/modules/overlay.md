@@ -159,7 +159,8 @@ pub enum OverlayWarning {
     Unstable { path: RepoPath },
     /// FIFO、socket 或设备文件：git 存不了，overlay 从不打开、不记录；它占着的基线路径记为 Deleted。
     SpecialFile { path: RepoPath },
-    /// 嵌套的 git 仓库（根以外的目录里有 `.git`）：overlay 不进入、不记录，strata 不管理子模块。
+    /// 嵌套的 git 仓库（根以外的目录里有 `.git`）：overlay 只看其中的基线路径与已跟踪路径（受限目录，§5.1），
+    /// 别的不记录；strata 不管理子模块。
     EmbeddedRepo { path: RepoPath },
 }
 
@@ -367,7 +368,7 @@ pub fn release_fault(root: &Path);
 
 - 计划写的 `struct BaseManifest`（基线每个文件的 `Attrs` + `BlobId`）拆成两半：内容一半就是 types.md 的 `BaseManifest`（blob、mode、size），本文引用、不重新定义；属性一半（gen count、inode、大小）是 `Tracker` 里的缓存（裁定 T7，types.md §4 `BaseManifest` 的注释）。
 - 计划的 `ws: &Path` 换成 `WorkspaceRef`，`base` 换成 `Base`：算 overlay 要 index、ignore 规则和排除的目录，restore 与 rebase 要读基线文件的内容，而基线文件不在 blob 存储里（Addendum 4）。
-- Addendum 3 写的是 `build_manifest(dir)`，这里多了 `tree` 与 `config`：`BaseManifest` 有 `tree` 字段，排除的依赖目录与种子缓存来自仓库配置。它不碰 Store，登记仍由 session 调 store。
+- Addendum 3 写的是 `build_manifest(dir)`，这里多了 `tree` 与 `config` [我的决定]：`BaseManifest` 有 `tree` 字段，排除的依赖目录与种子缓存来自仓库配置。它不碰 Store，登记仍由 session 调 store。
 - 多一个 `Tracker` 参数：属性缓存与脏集合要在调用之间保留，design §6.2 的"监听维护的可能脏路径集"住在这里。`checkpoint` 与 `restore` 可以不带它，这时冷扫：session 的 `BeforeRollout`、`BeforeRemove` 就这样调用（session.md §5.5 第 5 步、§5.6 第 9 步）。
 - 全部包上 `Result`，因为它们都读文件系统或 Store。
 - `checkpoint` 返回 `Checkpointed`：调用方要知道这次有没有写（UpToDate）、哪些路径变了、有哪些告警 [我的决定]。session 取 `.checkpoint.id`。
@@ -387,7 +388,7 @@ pub fn release_fault(root: &Path);
 - **`lww_matches`**、**`LwwRules::parse`**：纯函数，不失败。
 - **`Overlay::validate`**：`InvalidInput`，`detail.rule` 指明违反了 §4.3 的哪一条。
 
-`OpenFiles` 在 types.md §6.2 的"谁返回"一栏只写了 session；restore 遇到被可写 mmap 着的文件时用它，是按共同规则映射到最接近的已有码，Task 15 在那一栏补上 overlay，码的集合不变。
+`OpenFiles` 在 types.md §6.2 的"谁返回"一栏只写了 session；restore 遇到被可写 mmap 着的文件时用它，是按共同规则映射到最接近的已有码 [我的决定]，Task 15 在那一栏补上 overlay，码的集合不变。
 
 ## 4. 数据与不变量
 
@@ -466,9 +467,9 @@ M 里落在 X 之下的条目不参加比较，既不比较内容，也不成为
 **遍历**（全扫）：从 `ws.root` 起用 `apfs::walk`，filter 按下面的规则决定进不进一个目录。
 
 1. 符号链接从不跟随，是叶子。
-2. 目录 d：d ∈ X → 不进。d 不是根而 d 里有名为 `.git` 的项 → 嵌套仓库，`EmbeddedRepo` 告警，按受限目录进入。`git.is_ignored(ws.root, d)` 为真 → 如果 M 或 I 在 d 之下有路径（`IndexInfo::tracked_under` 与 M 的前缀查找），按受限目录进入，否则剪掉（3f:468）。其余的目录正常进入。受限目录里只看 M 与 I 里的路径，别的名字不记录、不告警。
+2. 目录 d：d ∈ X → 不进。d 不是根而 d 里有名为 `.git` 的项 → 嵌套仓库，`EmbeddedRepo` 告警，按受限目录进入 [我的决定]。`git.is_ignored(ws.root, d)` 为真 → 如果 M 或 I 在 d 之下有路径（`IndexInfo::tracked_under` 与 M 的前缀查找），按受限目录进入，否则剪掉（3f:468）。其余的目录正常进入。受限目录里只看 M 与 I 里的路径，别的名字不记录、不告警。
 3. 文件或符号链接 p（不在受限目录里）：p ∈ M 或 p ∈ I → 候选（ignorecase 下按 `apfs::case_fold_eq` 比较：gitio 的已跟踪判定只像 git 那样折叠 ASCII，Unicode 的大小写差异由 overlay 处理，Addendum 2）；否则 `git.is_ignored(ws.root, p)` 为真 → 跳过；否则是候选。只认 git 的 ignore 规则，ripgrep 的 `.ignore` 不起作用（3f:175）。
-4. FIFO、socket、设备文件：从不打开（FIFO 因此挂不住扫描），`SpecialFile` 告警；它占着的 M 路径按"磁盘上没有"处理。
+4. FIFO、socket、设备文件：从不打开（FIFO 因此挂不住扫描），`SpecialFile` 告警；它占着的 M 路径按"磁盘上没有"处理 [我的决定]。
 5. 目录本身从不成为条目：目录的 mode、mtime，以及空目录，都不记录（git 没有目录条目；裁定 T7：空目录不带）。
 
 **名字**：目录项的原生名先转成 `String`，不是 UTF-8 → `NotText`，不做 U+FFFD 替换。APFS 本来就拒绝建这样的名字，2026-10-22 实测返回 `EILSEQ`。然后 `RepoPath::try_from`，它把 NFD 规整为 NFC（types.md §3；APFS 对 NFC/NFD 不敏感，与 git 的 `core.precomposeunicode` 一致）。字面的 `\` 是普通字符，`a\b.txt` 与 `a/b.txt` 是两个路径（3f:440）。
@@ -496,7 +497,7 @@ M 里落在 X 之下的条目不参加比较，既不比较内容，也不成为
 
 ### 5.3 改名、类型互换与成组
 
-输入是分类之后的两个集合：V（`Absent` 的路径，都在 M 里）与 N（`Present` 的路径）。配对是确定的，只依赖最终状态，与操作顺序、事件顺序无关（3c:99）。
+输入是分类之后的两个集合：V（`Absent` 的路径，都在 M 里）与 N（`Present` 的路径）。配对是确定的，只依赖最终状态，与操作顺序、事件顺序无关（3c:99）。下面的配对顺序 [我的决定]：
 
 1. **只改大小写**（只在 `core.ignorecase` 为真时，Review Focus 4）：V 按路径升序，对每个 v，取 N 里与它 `apfs::case_fold_eq` 相等、不在 M 里、尚未配对的最小路径 n，配成一对，不看内容。改名的同时改了内容，也一样配对。
 2. **精确内容**：剩下的 V 按路径升序，对每个 v，取 N 里 blob = M[v].blob、类型相同（普通文件对普通文件，符号链接对符号链接）、尚未配对的最小路径 n，配成一对。n 可以在 M 里：改名到同一次扫描里空出来的名字，内容等于搬过来的源就是 `Renamed`，否则是 `Deleted` 加 `Modified`（增补裁定 T7，3c:166）。mode 跟着 n 走：改名之后又改了可执行位，仍是改名。
@@ -576,7 +577,7 @@ design §8 的"全量对账"是带着 daemon 的热 `Tracker` 跑 `compute(…, 
 
 ### 5.7 `restore`
 
-调用方占用该会话的队列，不持有该 repo 的写锁（§5.11）。下面的 T 指 `ws.root` 的上级目录（会话根）下的 `.strata-tmp-restore-<repo>/`。
+调用方占用该会话的队列，不持有该 repo 的写锁（§5.11）。下面的 T 指 `ws.root` 的上级目录（会话根）下的 `.strata-tmp-restore-<repo>/`：restore 的私有暂存目录，放在会话根里、与工作区同卷，被替换或删除的文件先挪进它、核对之后才删 [我的决定]。
 
 按 Addendum 3 的错误时机，restore 的第一次对外写入是第 9 步记下的 `BeforeRestore`（Store 行算对外可见）。在它之前的失败都是具名拒绝，什么都没写；在它之后的任何失败都是 `Unknown`，现场保留。
 
@@ -604,7 +605,7 @@ design §8 的"全量对账"是带着 daemon 的热 `Tracker` 跑 `compute(…, 
 
 10. `mkdir T`（0700；已存在且为空就照用），先写 `T/plan.json`（`before`、`target`、要删与要写的路径）并 `F_FULLFSYNC`：从这里到第 14 步 T 一直非空，崩溃之后现场也看得见（§6.3）[我的决定]。每个要写入的路径，在 T 里备一个临时文件，名字是序号：
     - blob → `store.get_blob(id, tmp)`，得到 mode 0644、mtime 为当前时刻的文件；可执行就 `fchmod` 成 0755。
-    - 基线文件 → `apfs::clone_file(base.dir/q, tmp)`，清掉克隆带来的 BSD 标志（封存基线时可能用了 `uchg`，clonefile 会一起复制）与扩展属性（strata 从不恢复 xattr，Addendum 1；按 store.md §5.3 第 5 步 put 规整克隆体的同一规则清），mode 设成 0644 或 0755，mtime 设为当前时刻。理由同 get_blob：增量构建要把内容变了的文件当成变了。
+    - 基线文件 → `apfs::clone_file(base.dir/q, tmp)`，清掉克隆带来的 BSD 标志（封存基线时可能用了 `uchg`，clonefile 会一起复制）与扩展属性（strata 从不恢复 xattr，Addendum 1；按 store.md §5.3 第 5 步 put 规整克隆体的同一规则清），mode 设成 0644 或 0755，mtime 设为当前时刻 [我的决定]。理由同 get_blob：增量构建要把内容变了的文件当成变了。
     - 符号链接 → 目标字节取自 `store.read_blob(id, 1024)`，或基线目录里的 `readlinkat`，再 `symlinkat` 到临时名。
 
     记下每个临时文件的属性，供第 14 步写缓存。
