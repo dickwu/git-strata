@@ -33,7 +33,7 @@ deps 负责依赖集（design §4 的 Deps set）里"算"的那一半：算键�
 | 依赖 | 理由 |
 | --- | --- |
 | `strata-types` | 标识与结构（`DepsSet`、`DepsSetId`、`BaseGen`、`WorkspaceState`、`ProposalId`、`SessionId`、`TreeOid`、`CommitOid`、`RepoName`、`RepoPath`）、`StrataError` 与 `Code`、`RepoConfig` 与 `Paths`（config.md §3），以及 config.md §2.4 的命令行切分：`install` 按同一规则切成 argv [我的决定，§9] |
-| `strata-apfs` | 读：`walk` 与 `Attrs`（展开安装输入目录、认领前后的两次遍历、封存候选的校验与同步）、`attrs_of` 与 `list_dir`（点查、看目录是否为空）、`open_rooted`（每级 `O_NOFOLLOW` 地读安装输入，FIFO 不阻塞；取同步与 `fchmod` 用的句柄）、`same_volume`（预检）。写，全是 rooted、no-follow 的操作（module-rulings Addendum 3"Rooted destinations"、Addendum 8）：`clone_tree_rooted`（staging 的源码树、`clone_into`；跨卷时返回 `CrossVolume`，从不退化成复制）、`clone_from_rooted`（从主 checkout 认领依赖目录、从工作区取安装输入，来源也不跟随符号链接）、`mkdir_rooted`、`symlink_rooted`、`rename_rooted`（挪开、组装候选、封存）、`full_fsync` |
+| `strata-apfs` | 读：`walk` 与 `Attrs`（展开安装输入目录、认领前后的两次遍历、封存候选的校验与同步）、`attrs_of` 与 `list_dir`（点查、看目录是否为空）、`open_rooted`（每级 `O_NOFOLLOW` 地读安装输入，FIFO 不阻塞；取同步与 `fchmod` 用的句柄）、`same_volume`（预检）。写，全是 rooted、no-follow 的操作（module-rulings Addendum 3"Rooted destinations"、Addendum 8）：`clone_tree_rooted`（staging 的源码树、`clone_into`；跨卷时返回 `CrossVolume`，从不退化成复制）、`clone_from_rooted`（从主 checkout 认领依赖目录、从工作区取安装输入，来源也不跟随符号链接）、`mkdir_rooted`、`symlink_rooted`、`create_file_rooted`（`install.log`）、`rename_rooted`（挪开、组装候选、封存）、`full_fsync`。另有 Addendum 8 的根句柄访问函数与 errno 分类函数（§2 对 apfs 第 4、5 条） |
 | `strata-gitio` | `Git::is_ignored(worktree, path)`：在 git 工作树（主 checkout 或会话工作区）里展开安装输入目录时跳过被 ignore 的成员。`Git::tree_of(commit)`：核对提议与主干记录的 head 与 tree 相符。`Git::is_ancestor(ancestor, descendant)`：认出比已记录的更旧的 tip，迟到的观察不覆盖新的（§5.9） |
 | `strata-store` | 依赖集、尝试、提议、主干四类记录的读写，方法名由 module-rulings Addendum 4 定（下面"对 store"）；`Store::deps_dir` 与 `Store::deps_staging_dir` 给出封存目录与暂存目录的路径；`Store::retire_dir`（Addendum 3）把不再需要的暂存原子地挪进 store 的 trash |
 | `blake3` | `inputs_hash`、`set_id` 与文件摘要 |
@@ -79,11 +79,17 @@ deps 负责依赖集（design §4 的 Deps set）里"算"的那一半：算键�
 
 **对 gitio**：用到的三个名字 gitio.md 的第 2 轮（sdd/task-5，1994b5d）都已写明，这里只记 deps 依赖的那几条。`Git::is_ancestor(ancestor, descendant)`：相等也算祖先，码为 `NoSuchCommit`、`Unknown`。`Git::is_ignored(worktree, path)` 收工作区的根，经它的 gitfile 找到会话的影子仓库（module-rulings Addendum 2），对主 checkout 与工作区都能回答，含镜像的 `info/exclude` 与全局排除文件；已跟踪的文件永不被 ignore；没有 `.git` 时返回 `NoSuchPath`，所以 deps 只对有 `.git` 的根调用它（§5.1）。`Git::tree_of(commit)` 对不在库里的 commit 返回 `NoSuchCommit`，另有 `Unsupported`、`NotText`、`InvalidInput`、`Unknown`，deps 都原样透传。
 
-**对 apfs**（apfs.md 在 sdd/task-4 的 599dde6，加上 module-rulings Addendum 8 定下的名字）：
+**对 apfs**（apfs.md 在 sdd/task-4 的 599dde6）：module-rulings Addendum 8 规定 apfs 拥有全部 rooted 文件系统操作，deps 在工作区、暂存、封存区与调用方目录上不做自己的 `*at` 调用。deps 要 apfs 提供：
 
-1. 照 599dde6 用的：`walk`、`list_dir`、`attrs_of`、`Attrs`、`FileKind`（符号链接带着目标的原字节，从不跟随）、`open_rooted`、`same_volume`、`clone_tree_rooted`、`mkdir_rooted`、`symlink_rooted`、`rename_rooted`、`full_fsync`；有可写 mmap 时 gen count 报告为未知（Addendum 1 T4）。
-2. Addendum 8 定名、599dde6 还没有的：`clone_from_rooted(src_root, src, dst)`；`RenameMode` 的变体按 Addendum 8 叫 `Excl`（599dde6 写作 `Exclusive`）。
-3. config.md §4.3 的"最近的已存在上级，再 `same_volume`"由 apfs 的一个帮助函数提供（Addendum 8 的 M17 一条，名字由 apfs 定）。有了之后 §5.4、§5.5 的跨卷预检改调它；在那之前 deps 按 config.md §4.3 自己找上级。
+1. `rename_rooted(root, from, to, RenameMode::Excl)`：封存的 rename，两端都在 `<root>/deps/<repo>/` 这一个根之下（§5.3 第 6 段）；把东西挪进 `discard/`；组装封存候选；把取来的安装输入改名进源码树（§5.4、§5.5）。599dde6 已有，只是变体名写作 `Exclusive`，Addendum 8 定为 `Excl`。
+2. `clone_from_rooted(src_root, src: &RepoPath, dst: &Path)`：认领时 `clone_from_rooted(cfg.path, d, .staging/<a>/seal/d)`，从主 checkout 克隆依赖目录（§5.4 第 7 步）；冷装时从工作区取安装输入（§5.5 第 5 步）。来源逐级不跟随符号链接。Addendum 8 定名，599dde6 还没有。
+3. rooted 目标操作：`clone_tree_rooted`（冷装的源码树、`clone_into` 写调用方的目录，§5.5、§5.7）、`mkdir_rooted`（暂存目录、`seal/` 等的父级、空依赖集的目录）、`symlink_rooted`（安装输入里的符号链接）、`create_file_rooted`（`install.log`）。599dde6 已有。
+4. 根句柄访问函数（Addendum 8，名字由 apfs 定）：取 `<root>/deps/<repo>/` 的句柄做 `full_fsync`（§5.3 第 6 段、§5.6 第 1 步）。
+5. 公开的 errno → `Code` 分类函数（Addendum 8，名字由 apfs 定）：本文写"按 types.md §6.3 归类"的地方，deps 自己剩下的系统调用（锁文件的 `open` 与 `flock`、`F_BARRIERFSYNC`、`fchmod`）都经它归类。
+6. 读：`walk`、`list_dir`、`attrs_of`、`Attrs`、`FileKind`（符号链接带着目标的原字节，从不跟随）、`open_rooted`、`same_volume`、`full_fsync`；有可写 mmap 时 gen count 报告为未知（Addendum 1 T4）。599dde6 已有。
+7. config.md §4.3 的"最近的已存在上级，再 `same_volume`"由 apfs 的一个帮助函数提供（Addendum 8 的 M17 一条，名字由 apfs 定）。有了之后 §5.4、§5.5 的跨卷预检改调它；在那之前 deps 按 config.md §4.3 自己找上级。
+
+deps 用不到 `remove_rooted` 与 `remove_tree_rooted`：它在暂存里不删东西，要去掉的挪进 `discard/`，整个暂存经 `Store::retire_dir` 离开（§4.1）。
 
 **对 daemon**（daemon.md 还没写）：实现 `RepoWriteLock`（有界等待之后 `Busy`）并放进 `Ctx`；给出 `InstallEnv`（显式 PATH 与时限）；按 §5.12 的顺序执行 `deps approve`，`Target::Replaced` 时什么都不移动、把替换提议报给人。
 
@@ -606,13 +612,13 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 一次建造分七段。第 1 段由调用它的函数做（§5.4–§5.6），后六段共用：
 
 1. **预检**（确定性的，什么都不写）：安装输入在 `tree` 里存在、同卷、工具链、依赖配置，算出 (H, id)（module-rulings T8 I4 裁定）。
-2. **【建造锁】** [我的决定：锁的形式]：打开 `.locks/<id>.lock`（`O_CREAT | O_CLOEXEC`），`flock(LOCK_EX)` 阻塞等待。持有者的 install 有时限，所以等待有界。打不开时按 types.md §6.3 归类（例如锁的位置被换成了目录，就是 `EISDIR` → `IsDirectory`），从不在无锁状态下继续。锁 fd 带 `FD_CLOEXEC`，不被 install 继承：daemon 死了锁就释放，残留的 install 只能写进它自己那个不可发现的暂存。
+2. **【建造锁】** [我的决定：锁的形式]：打开 `.locks/<id>.lock`（`O_CREAT | O_CLOEXEC`；`.locks/` 不存在时先 `apfs::mkdir_rooted(<root>/deps, <repo>/.locks, 0o755, true)`），`flock(LOCK_EX)` 阻塞等待。这是一次普通的 `open`，不是 `*at` 调用：`.locks/` 是 deps 私有、只由 strata 建的目录，不在工作区、暂存或封存区里，Addendum 8 管的是那三处；`apfs::create_file_rooted` 带 `O_EXCL`，也不适合反复打开同一把锁。持有者的 install 有时限，所以等待有界。打不开时按 types.md §6.3 归类（例如锁的位置被换成了目录，就是 `EISDIR` → `IsDirectory`），从不在无锁状态下继续。锁 fd 带 `FD_CLOEXEC`，不被 install 继承：daemon 死了锁就释放，残留的 install 只能写进它自己那个不可发现的暂存。
 3. **拿到建造锁之后、写任何东西之前**，依次：
    1. `store.deps_set(repo, id)` 已有：释放锁，返回它（别的建造者刚封存了）。
    2. 关掉死掉的尝试：同一 (repo, id) 的每条 `running` 尝试都属于已经死掉的建造者（D6），用 `end_deps_attempt(该尝试, Failed, 错误, 当前时间)` 把它关掉，错误为 `Unknown`、`detail.reason = "interrupted"`（module-rulings T8 I3 裁定）；返回 false 说明它已经不是 running，跳过。这只是给别人的意图记录补上终态，不是对外可见的写入：关闭的意图记录是历史（Addendum 4 refinement 2）。
    3. 孤儿：`deps_dir(repo, id)` 存在而没有记录时，【repo 写锁】之下再查一次：gc 在持有 repo 写锁时删记录、挪目录，锁外可能正好看到删了一半。复查时记录出现了 → 返回它；目录不见了 → 继续；仍是"有目录、没记录" → 释放锁，返回 `Unknown`，`detail = { "reason": "orphan", "path" }`，不动它 [我的决定]。
    4. 只对冷装，D8 [我的决定：interrupted 重来一次]：取同一 (repo, id) 最近的一条 `build` 尝试 A（不算 refused）。A 是 failed、reason 不是 interrupted、暂存还在 → 返回 `Unknown`，`detail = { "reason": "previous_attempt", "attempt", "staging", "error" }`，不跑 install。A 是 failed、reason interrupted、暂存还在：A 之前紧挨着的那条 build 尝试也是 interrupted（A 已经是重来的那一次）→ 同样 previous_attempt；否则继续，重来一次。A 的暂存已被人删掉 → 继续。
-4. **尝试**：`begin_deps_attempt(repo, id, kind, 当前时间)`（kind 为 `AttemptKind::Adopt` 或 `Build`）插入 `running` 记录，返回尝试序号 a；暂存目录是 `Store::deps_staging_dir(repo, a)`，即 `.staging/<a>/`。冷装起 install 之后用 `set_deps_attempt_pid` 记下 pid。从这里起（Addendum 3 与 Addendum 4 refinement 2）：
+4. **尝试**：`begin_deps_attempt(repo, id, kind, 当前时间)`（kind 为 `AttemptKind::Adopt` 或 `Build`）插入 `running` 记录，返回尝试序号 a；暂存目录是 `Store::deps_staging_dir(repo, a)`，即 `.staging/<a>/`，用 `apfs::mkdir_rooted(<root>/deps/<repo>, .staging/<a>, 0o755, true)` 建出。冷装起 install 之后用 `set_deps_attempt_pid` 记下 pid。从这里起（Addendum 3 与 Addendum 4 refinement 2）：
    - install 开始之前的具名拒绝：先拿走暂存（`retire_dir`，这时尝试还是 running），再 `end_deps_attempt(a, Refused, 错误, 当前时间)`，释放建造锁，返回那个码。两步之间崩溃，留下的是一条没有暂存的 running 记录：下一个拿到这把建造锁的调用把它关成 failed（reason interrupted），它的暂存已经不在，D8 不拦。先关记录、后拿暂存的话，崩溃会留下一个 refused 尝试的暂存，gc 不进 `.staging/`，就再没人收走它。
    - install 开始之后的失败：`end_deps_attempt(a, Failed, 错误, 当前时间)`，暂存原样保留，释放建造锁，返回 `Unknown`（module-rulings 公共条：错误时序）。install 在 strata 之外有副作用（`~/.bun/install/cache`、网络），它的产出和日志是只此一份的证据。
 5. **校验与同步**：对封存候选 `seal/` 做一次 `apfs::walk`（不跟随符号链接）：
@@ -622,7 +628,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 6. **封存**，【repo 写锁】`ctx.locks.with_write(repo, …)` 里依次做（Addendum 4"Locks"：rename、chmod、登记是一个短临界区）：
    1. 【rename】`apfs::rename_rooted(<root>/deps/<repo>, .staging/<a>/seal, <id>, RenameMode::Excl)`：两边都在 `<root>/deps/<repo>/` 之下，逐级不跟随符号链接（Addendum 8）。`seal/` 这时是 0755：把目录改名到另一个父目录要求对它本身有写权限，0555 的目录这样改名会得到 `EACCES`，apfs 报 `ReadOnly`（2026-10-22 本机实测；module-rulings T8 I1 裁定）。`Exists`：第 3 段查过之后才冒出来的目录只能来自外力，尝试记为 failed、候选留在暂存，返回 `Unknown`（reason orphan）。
    2. 用 `apfs::open_rooted(<root>/deps/<repo>, <id>)` 打开封存根目录，对句柄 `fchmod` 成 0555。只改根目录：依赖目录本身与里面的 mode 不动。clonefile 带着 mode，0555 的 `node_modules` 克隆进工作区后不可写（同日实测）。
-   3. 【同步】对 `<root>/deps/<repo>/` 的句柄调 `apfs::full_fsync`：rename 与第 5 段的屏障一起落到介质上（Addendum 3"Durability"）。源一边（`.staging/<a>/`）不另做 [我的决定]：deps 要的只是"有记录就有目录"，记录在这次同步之后才写；目录只有一个名字，断电之后它要么还在暂存里，要么已在 `<id>/`。
+   3. 【同步】对 `<root>/deps/<repo>/` 的句柄（取自 apfs 的根句柄访问函数，§2）调 `apfs::full_fsync`：rename 与第 5 段的屏障一起落到介质上（Addendum 3"Durability"）。源一边（`.staging/<a>/`）不另做 [我的决定]：deps 要的只是"有记录就有目录"，记录在这次同步之后才写；目录只有一个名字，断电之后它要么还在暂存里，要么已在 `<id>/`。
    4. `record_deps_set(set, Adopt 或 Build, Some(a), 当前时间)`：登记依赖集，并在同一事务里把尝试 a 关成 `sealed`。
 
    rename 之后，这几步里任何一步失败都返回 `Unknown`（reason seal_failed）[我的决定]：目录在、记录不在，不可发现（D2），谁都不会认领它，要等 gc 的 1 小时清扫或人来处理，所以得让 status 报出来；尽力把 a 关成 failed，关不上的由下一个建造者当成死掉的关掉。这是 deps 自己的选择，不是错误时序的要求：封存是缓存填充（module-rulings Addendum 6 refinement 4），不算对外可见的写入，封存成功之后的调用方照样可以具名拒绝（§6）。`with_write` 返回 `Busy`（repo 写锁在 daemon 的等待上限内没拿到）时什么都没 rename：认领按 install 之前的具名拒绝处理（拿走暂存、记 refused），返回 `Busy`；冷装已经跑过 install，重试 `with_write` 最多 10 次（缺省等待上限下约 5 分钟）[我的决定]，仍不行就返回 `Unknown`（reason seal_busy），候选留在暂存里。
@@ -665,7 +671,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 7. 运行 install。从这一步起，失败一律 `Unknown`、现场保留（§5.3 第 4 段）：
    - argv 来自第 2 步，cwd 是 S，stdin 是 `/dev/null`。
    - 环境取 daemon 的环境，删掉全部 `GIT_*`，PATH 换成 `env.path` [我的决定]。
-   - 用 `setpgid` 自成一个进程组；stdout 与 stderr 都写进 `.staging/<a>/install.log`；用 `set_deps_attempt_pid` 把 pid 写进尝试记录。
+   - 用 `setpgid` 自成一个进程组；stdout 与 stderr 都写进 `.staging/<a>/install.log`，这个文件由 `apfs::create_file_rooted(.staging/<a>, install.log, 0o644)` 建出，句柄直接交给子进程；用 `set_deps_attempt_pid` 把 pid 写进尝试记录。
    - 到 `env.timeout` 时，先 `killpg(SIGTERM)`，10 秒后再 `killpg(SIGKILL)`。
 8. 非零退出、启动失败或超时：返回 `Unknown`，`detail = { "reason": "install_failed" 或 "timeout", "attempt", "staging", "command", "exit_code", "log_tail" }`，其中 `log_tail` 是日志最后 8 KiB。
 9. 重算 `inputs_hash(cfg, git, S)`，它必须仍等于 H；不等返回 `Unknown`（reason inputs_modified）。这说明 install 改写了安装输入，比如漏了 `--frozen-lockfile`，装出来的东西不属于这个键。
@@ -677,7 +683,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 
 ### 5.6 `ensure(ctx, tree)`
 
-1. `cfg.deps_dirs` 为空时：`id = set_id(空输入常量, platform(), "", 空配置)`。`find_set` 命中就返回。否则在【repo 写锁】`ctx.locks.with_write(repo, …)` 里 [我的决定]：再查一次 `deps_set`，有了就返回它；`apfs::attrs_of(<root>/deps/<repo>, <id>)` 报不存在（`<root>/deps/<repo>` 还没有也算）→ `apfs::mkdir_rooted(<root>/deps, <repo>/<id>, 0o755, true)`。`deps_dir(repo, id)` 已存在而没有记录：是目录、`apfs::list_dir` 一个条目都没有，就是上一次空封存在登记之前失败或崩溃留下的，接着用它（module-rulings T8 第 2 轮裁定：空依赖集的残留不能让每个 `new` 都失败，一直等到 gc 的 1 小时清扫）；不是空目录（或者不是目录）→ `Unknown`（reason orphan），不动它。之后用 `apfs::open_rooted` 打开它、对句柄 `fchmod` 成 0555（残留的可能已是 0555，再设一次无妨）→ 对 `<root>/deps/<repo>/` 的句柄调 `apfs::full_fsync` → `record_deps_set(set, Empty, None, 当前时间)`。没有建造锁、尝试和暂存，也不跑任何命令：并发的调用由 repo 写锁串行化，后到的那个在锁里看到记录。`with_write` 返回 `Busy` 时什么都没写，返回 `Busy`；建出目录之后的失败返回 `Unknown`（reason seal_failed），空目录在、记录不在，同 §5.3 第 6 段，下一次调用会照上面的规则把它登记。
+1. `cfg.deps_dirs` 为空时：`id = set_id(空输入常量, platform(), "", 空配置)`。`find_set` 命中就返回。否则在【repo 写锁】`ctx.locks.with_write(repo, …)` 里 [我的决定]：再查一次 `deps_set`，有了就返回它；`apfs::attrs_of(<root>/deps/<repo>, <id>)` 报不存在（`<root>/deps/<repo>` 还没有也算）→ `apfs::mkdir_rooted(<root>/deps, <repo>/<id>, 0o755, true)`。`deps_dir(repo, id)` 已存在而没有记录：是目录、`apfs::list_dir` 一个条目都没有，就是上一次空封存在登记之前失败或崩溃留下的，接着用它（module-rulings T8 第 2 轮裁定：空依赖集的残留不能让每个 `new` 都失败，一直等到 gc 的 1 小时清扫）；不是空目录（或者不是目录）→ `Unknown`（reason orphan），不动它。之后用 `apfs::open_rooted` 打开它、对句柄 `fchmod` 成 0555（残留的可能已是 0555，再设一次无妨）→ 对 `<root>/deps/<repo>/` 的句柄（apfs 的根句柄访问函数）调 `apfs::full_fsync` → `record_deps_set(set, Empty, None, 当前时间)`。没有建造锁、尝试和暂存，也不跑任何命令：并发的调用由 repo 写锁串行化，后到的那个在锁里看到记录。`with_write` 返回 `Busy` 时什么都没写，返回 `Busy`；建出目录之后的失败返回 `Unknown`（reason seal_failed），空目录在、记录不在，同 §5.3 第 6 段，下一次调用会照上面的规则把它登记。
 2. 预检：每个条目都在 `tree` 里存在，否则 `InvalidInput`；`(H, id) = key_of(ctx, tree)`。
 3. `find_set` 命中就返回。这是热路径，不拿锁。
 4. 调 `adopt(ctx, tree)`。成功就返回。遇到 `Drift { reason: changed_during_clone }` 时再认领，连同第一次最多 3 次 [我的决定]；3 次都是它，就转第 5 步冷装。遇到其它 `Drift`、`NoSuchPath` 或 `NotDirectory` 时转第 5 步。其它错误原样返回。
@@ -1020,7 +1026,7 @@ git commit -m "feat(deps): open-file scan over fds, mappings and cwd"
 - Test: `crates/strata-deps/tests/build.rs`
 
 **Interfaces:**
-- Consumes: Task 1；`apfs::{walk, attrs_of, open_rooted, same_volume, clone_tree_rooted, clone_from_rooted, mkdir_rooted, symlink_rooted, rename_rooted, full_fsync}`；store 的 `begin_deps_attempt`、`set_deps_attempt_pid`、`end_deps_attempt`、`record_deps_set`、`deps_set`、`deps_attempts`、`Store::deps_dir`、`Store::deps_staging_dir`、`Store::retire_dir`
+- Consumes: Task 1；`apfs::{walk, attrs_of, open_rooted, same_volume, clone_tree_rooted, clone_from_rooted, mkdir_rooted, symlink_rooted, create_file_rooted, rename_rooted, full_fsync}` 与 apfs 的根句柄访问函数、errno 分类函数（§2）；store 的 `begin_deps_attempt`、`set_deps_attempt_pid`、`end_deps_attempt`、`record_deps_set`、`deps_set`、`deps_attempts`、`Store::deps_dir`、`Store::deps_staging_dir`、`Store::retire_dir`
 - Produces: `Ctx`、`RepoWriteLock`、`key_of`、`find_set`、`build`、`clone_into`、`attempts`、`BuildAttempt`、`BuildKind`、`BuildState`、`test_seams::{after_attempt_begins, sync_counts, reset}`
 
 - [ ] **Step 1: 写失败的测试**：`build_seals_install_output_without_seed_caches`、`build_failure_is_unknown_and_keeps_scene`、`build_timeout_kills_install_group`、`seal_refuses_when_staging_does_not_match_key`、`killed_builder_leaves_undiscoverable_staging_and_free_lock`、`failed_or_lockless_builds_never_publish`、`orphan_sealed_dir_is_unknown_not_overwritten`、`clone_into_copies_set_dirs_privately`、`seal_runs_under_repo_write_lock`、`build_preflight_and_staging_refusals`
@@ -1228,7 +1234,7 @@ design.md 标为 [交给构建者]、并且落在本模块的决定：
 | install 的时限 | 60 分钟，超时杀进程组 | 冷装要几分钟；挂死的 install 不能让建造锁永远被占着 | 2026-10-22 |
 | install 的环境 | daemon 的环境删掉 `GIT_*`，PATH 取 `InstallEnv.path`，stdin 是 `/dev/null`，自成进程组 | 同 gitio 的净化理由；daemon 没有 TTY | 2026-10-22 |
 | 失败的冷装（D8） | 不自动重来：现场在就返回 previous_attempt，人删掉现场才会重建；唯一的例外是持有者死掉的尝试（reason interrupted），下一个建造者重来一次，连续两次 interrupted 也拒绝 | 不变量 6"不重放"：失败的 install 是只此一份的证据；持有者被杀多半是 daemon 重启，不是 install 本身的问题，重来一次就够，再死一次就该人看（矩阵 3f:554"重启后可重来或清理"） | 2026-10-22 |
-| 建造锁与尝试的顺序 | 预检 → 算 id → 每个 (repo, id) 一个 flock（`FD_CLOEXEC`）→ 写尝试记录；拿锁后先关掉死掉的 running 记录；锁打不开就报错 | 尝试记录写在锁里，同一键别的 running 记录一定属于死掉的建造者（T8 I3 裁定）；锁随 daemon 的死亡释放（3f killed_starter 行）；从不无锁建造（3f interrupted 行） | 2026-10-22 |
+| 建造锁与尝试的顺序 | 预检 → 算 id → 每个 (repo, id) 一个 flock（`FD_CLOEXEC`；锁文件在 deps 私有的 `.locks/` 里，用普通的 `open`）→ 写尝试记录；拿锁后先关掉死掉的 running 记录；锁打不开就报错 | 尝试记录写在锁里，同一键别的 running 记录一定属于死掉的建造者（T8 I3 裁定）；锁随 daemon 的死亡释放（3f killed_starter 行）；从不无锁建造（3f interrupted 行） | 2026-10-22 |
 | 封存的临界区 | daemon 的写锁经 `Ctx` 里的 `RepoWriteLock` 注入；只包住 rename（空依赖集是 mkdir）、chmod、`F_FULLFSYNC`、登记；认领与空依赖集拿不到就以 `Busy` 拒绝，冷装重试 10 次再 `Unknown` | Addendum 4 要求封存持 repo 写锁，Addendum 3 要求冷装在锁外，只有 deps 自己能在两者之间取锁；跑了几分钟的 install 不该因为一次慢的 fetch（gitio 的 fetch 时限 120 s，长于 daemon 的 30 s 等待上限）就作废 | 2026-10-22 |
 | 封存前同步候选（review 的断电撕裂一条） | 选"同步整棵树"：校验遍历里对每个普通文件与目录做 `F_BARRIERFSYNC`，rename 之后对父目录 `F_FULLFSYNC`；属主打不开的普通文件不收 | Addendum 3"Durability"；撕裂的依赖集会被每个新工作区克隆，而登记过的依赖集只有 gc 能拿走。成本：5000 个克隆出来的文件 0.09 s（2026-10-22 本机内置 SSD 实测，约 18 µs 一个；tool 的 `node_modules` 约 10.9 万个文件，约 2 s；工作区所在的 USB SSD 待首个 spike 实测）。打不开的文件做不了屏障（`O_RDONLY` 与 `O_EVTONLY` 都是 `EACCES`，同日实测） | 2026-10-22 |
 | 孤儿 | `deps_dir` 在、记录不在 → `Unknown`（reason orphan），不动；先在 repo 写锁之下复查。空依赖集的残留是空目录时不算孤儿，查过为空就登记（T8 第 2 轮裁定） | gc 在持有 repo 写锁时删记录、挪目录，锁外可能看到删了一半；真的孤儿来自封存中途崩溃或外力，交给人，或交给 gc 的 1 小时清扫 | 2026-10-22 |
