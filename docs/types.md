@@ -17,8 +17,12 @@
 | `DepsSetId` | 标识 | 依赖集 id：BLAKE3(安装输入 ∥ 平台 ∥ 工具链) | §3 |
 | `CheckpointId` | 标识 | checkpoint 序号，每会话递增 | §3 |
 | `RepoPath` | 标识 | 仓库内相对路径，`/` 分隔，NFC | §3 |
+| `ProposalId` | 标识 | 依赖变更提议的 id，由 deps 生成 | §3 |
+| `ViewId` | 标识 | 检索视图的 id，由 search 生成 | §3 |
 | `BaseGen` | 结构 | 基线 generation：repo + tree + 依赖集 | §4 |
 | `DepsSet` | 结构 | 封存在 Store 里的依赖集 | §4 |
+| `BaseManifest` | 结构 | 基线清单：一个 tree 的全部文件，只记内容 | §4 |
+| `ManifestEntry` | 结构 | 基线清单中的一个文件：blob、mode、大小 | §4 |
 | `OverlayEntry` | 结构 | overlay 中的一条整文件差异 | §4 |
 | `EntryKind` | 枚举 | 增、改、删、改名、未跟踪 | §4 |
 | `Checkpoint` | 结构 | 一个工作区在某一时刻的完整 overlay | §4 |
@@ -26,6 +30,7 @@
 | `Batch` | 结构 | 从一个会话的一个 repo 挑出的路径 | §4 |
 | `ReleaseGroup` | 结构 | 一次发布的全部批次 | §4 |
 | `PublishTarget` | 结构 | 目标分支、是否推送、是否要确认 | §4 |
+| `PushOutcome` | 枚举 | 一次推送的结果：推上了、被拒绝、不确定 | §4 |
 | `SessionManifest` | 结构 | 会话清单 | §4 |
 | `WorkspaceState` | 结构 | 会话里一个 repo 的工作区 | §4 |
 | `ConfirmToken` | 结构 | 一次人类确认的凭据，一次一用，只在 daemon 内存里 | §4 |
@@ -45,9 +50,9 @@
 ### 2.2 derive 与 serde
 
 - 所有公开类型 derive `Clone`、`Debug`、`PartialEq`、`Serialize`、`Deserialize`；字段都能比较相等的再加 `Eq`。标识另加 `Hash`、`PartialOrd`、`Ord`，例如 `RepoName` 要作 `BTreeMap` 的键。唯一的例外是 `ConfirmToken`：它只 derive `Debug`，既不能复制，也不能序列化（见 §4）。
-- 有格式的标识（`RepoName`、`SessionId`、`TreeOid`、`CommitOid`、`BlobId`、`DepsSetId`、`RepoPath`）字段私有，只能经 `TryFrom<String>` 构造。serde 也走这条路：`#[serde(try_from = "String", into = "String")]`，所以反序列化同样会校验；格式不对返回 `Code::InvalidInput`。没有格式可校验的 `RepoId` 与 `CheckpointId` 用 `#[serde(transparent)]`。
+- 有格式的标识（`RepoName`、`SessionId`、`TreeOid`、`CommitOid`、`BlobId`、`DepsSetId`、`RepoPath`）字段私有，只能经 `TryFrom<String>` 构造。serde 也走这条路：`#[serde(try_from = "String", into = "String")]`，所以反序列化同样会校验；格式不对返回 `Code::InvalidInput`。没有格式可校验的 `RepoId` 与 `CheckpointId`，以及格式由产生它的模块决定、对其他模块不透明的 `ProposalId` 与 `ViewId`，都用 `#[serde(transparent)]`。
 - 字段名就是 JSON 的键，保持 snake_case，不用 `rename_all`。
-- 带数据的枚举用内部标签 `#[serde(tag = "kind")]`。`OverlayEntry` 的 `kind` 字段再加 `#[serde(flatten)]`，这样一条条目在 JSON 里只有一层对象。不带数据的枚举（`Code`）序列化为变体名字符串，如 `"Conflict"`。
+- 带数据的枚举用内部标签 `#[serde(tag = "kind")]`。`OverlayEntry` 的 `kind` 字段再加 `#[serde(flatten)]`，这样一条条目在 JSON 里只有一层对象。`PushOutcome` 有元组变体，内部标签装不下其中的字符串，所以改用相邻标签 `#[serde(tag = "kind", content = "message")]`。不带数据的枚举（`Code`）序列化为变体名字符串，如 `"Conflict"`。
 - `Option` 为 `None` 的字段不输出（`skip_serializing_if = "Option::is_none"`），读入时缺省为 `None`（`default`）。
 - `SystemTime` 序列化为 RFC 3339 UTC 字符串，用哪个适配器交给构建者；`RepoPath` 与 `PathBuf` 序列化为字符串。
 - `strata-types` 不做 I/O，只依赖 `serde`、`serde_json`（`StrataError.detail` 要用）和做 NFC 规整、十六进制校验的纯计算 crate。
@@ -109,6 +114,18 @@ pub struct CheckpointId(u64);
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct RepoPath(String);
+
+/// 依赖变更提议的 id：由 `deps::propose` 生成，`git-strata deps approve <id>` 用它指名提议。
+/// 格式由 deps.md 规定，对其他模块不透明。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProposalId(String);
+
+/// 检索视图的 id：search 给一个 (会话, repo) 挂上视图时生成（`search::attach`）。
+/// daemon 和 cli 只把它原样传回 search；格式由 search.md 规定，对其他模块不透明。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ViewId(String);
 ```
 
 - `RepoPath` 的 `TryFrom` 会把 NFD 规整为 NFC，与 macOS 上 git 的 `core.precomposeunicode` 一致。从 git tree 或 index 读到的路径字节如果不是 UTF-8，返回 `Code::NotText`。
@@ -148,6 +165,25 @@ pub struct DepsSet {
     pub toolchain: String,
     /// 依赖目录，取自 config.md 的 `deps_dirs`，如 `node_modules`、`vendor`。
     pub dirs: Vec<RepoPath>,
+}
+
+/// 基线清单（design §6.2）：一个基线 tree 里的全部文件，只记内容。每个 tree 一份，钉住同一 tree 的会话共用。
+/// gen count、inode、mtime 这类每个工作区各不相同的属性不在清单里，它们是 overlay 的本地缓存（见 overlay.md）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseManifest {
+    pub tree: TreeOid,
+    pub entries: BTreeMap<RepoPath, ManifestEntry>,
+}
+
+/// 基线清单里的一个文件。工作区里同一路径文件的 blob 和 mode 都与它相同时，该文件不进 overlay。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    /// 文件内容的 BLAKE3，与 OverlayEntry 里的 blob 是同一种地址，相等即内容相同。
+    pub blob: BlobId,
+    /// git 的文件模式，取值同 OverlayEntry 的 mode。
+    pub mode: u32,
+    /// 字节数。
+    pub size: u64,
 }
 
 /// overlay 中的一条：工作区相对它钉住的基线的一个整文件差异（design §4）。
@@ -241,6 +277,18 @@ pub struct PublishTarget {
     pub confirm: bool,
 }
 
+/// 一次 `git push` 的结果：gitio 的 `push` 产生，publish 消费。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "message")]
+pub enum PushOutcome {
+    /// 远端接受了推送，发布链与 `origin/<分支>` 一致。
+    Pushed,
+    /// 远端明确拒绝（非快进、权限、服务端钩子），带远端的原话；publish 把它转成 Code::PushRefused。
+    Refused(String),
+    /// 超时或连接中断，远端可能已经收到；publish 把它转成 Code::Unknown，保留发布链、不重放（不变量 6）。
+    Unknown,
+}
+
 /// 会话清单（design §4、§6.1）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionManifest {
@@ -290,21 +338,21 @@ pub struct WorkspaceState {
 人类确认（design §6.9）用的凭据也放在 `strata-types` 里，是纯数据：
 
 ```rust
-use std::time::Instant;
+use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
-/// 一次人类确认的凭据（design §6.9）。只由 strata-confirm 在 LocalAuthentication 通过之后签发，
-/// 只存在于 daemon 的内存里。
+/// 一次人类确认的凭据（design §6.9）。它是纯数据，放在 strata-types 里；只由 strata-confirm 在
+/// LocalAuthentication 通过之后签发，并由 strata-confirm 校验，只存在于 daemon 的内存里。
 /// 它不实现 Clone、Copy、Serialize、Deserialize：消费它的函数按值接收，用一次就被移走；
 /// 它不会出现在 RPC、JSON 或磁盘上，所以客户端无从伪造或重放。
 #[derive(Debug)]
 pub struct ConfirmToken {
     /// 被确认的动作。消费方要核对它与本次要执行的操作完全相同。
     pub action: Action,
-    /// 签发时刻（单调时钟），用来判断是否过期；过期时长由 confirm.md 规定。
-    pub issued: Instant,
-    /// 128 bit 随机数。strata-confirm 签发时登记、校验通过时核销，同一个 nonce 只能用一次。
-    pub nonce: u128,
+    /// 签发时刻，用来判断是否过期；过期时长由 confirm.md 规定。当前时间早于 issued（时钟被回拨）时一律按过期处理。
+    pub issued: SystemTime,
+    /// 16 字节随机数。strata-confirm 签发时登记、校验通过时核销，同一个 nonce 只能用一次。
+    pub nonce: [u8; 16],
 }
 
 /// 需要人类确认的动作，即 design §6.9 列出的三种。
@@ -313,19 +361,18 @@ pub struct ConfirmToken {
 pub enum Action {
     /// 推送一个需要确认的发布目标：`deploy_on_push = true` 的仓库，或 `PublishTarget.confirm = true`。
     PushDeploy { repo: RepoName, branch: String },
-    /// `deps approve <proposal>`；proposal 是 deps.md 里依赖变更提议的序号。
-    DepsApprove { proposal: u64 },
+    /// `deps approve <proposal>`：批准一个依赖变更提议。
+    DepsApprove { proposal: ProposalId },
     /// `rm --discard`：丢掉会话的未发布改动，再删除会话。
     RemoveDiscard { session: SessionId },
 }
 ```
 
-- **签发与校验**：只有 `strata-confirm` 签发和校验凭据（LocalAuthentication 加 TTY，见 confirm.md），而它只被 `strata-daemon` 依赖（§8）。除了 `strata-confirm` 和测试，任何代码都不构造 `ConfirmToken`。
+- **签发与校验**：只有 `strata-confirm` 签发和校验凭据（见 confirm.md），crate 关系见 §8。除了 `strata-confirm` 和测试，任何代码都不构造 `ConfirmToken`。
 - **动作从哪来**：daemon 根据请求要执行的操作推出 `Action`，从不采用客户端传来的 `Action`。每个需要确认的动作各弹一次认证框。daemon 把凭据交给消费方之前，先经 `strata-confirm` 校验它没用过、没过期，并核销它的 nonce。
 - **谁消费**：
   - `PushDeploy` 的凭据交给 `publish::push`，`RemoveDiscard` 的凭据交给 `session::remove`。这两个函数按值收下凭据并核对 `action`，不符时返回 `Code::NotConfirmed`。
   - `DepsApprove` 由 daemon 处理 `deps approve` 时校验一次，然后对每个目标会话调用 `session::move_workspace`。`move_workspace` 不收凭据，因为发布后 rebase 也会调它。
-- **crate 依赖不变**：session 和 publish 只用 `ConfirmToken`、`Action` 这两个数据类型，不依赖 `strata-confirm` crate。所以"confirm 只被 daemon 用"在 crate 层面仍然成立。
 
 ## 5. 配置结构
 
@@ -385,7 +432,7 @@ pub enum Code {
 | `NotFile` | 要复制或哈希的东西既不是普通文件、符号链接，也不是目录（FIFO、socket、设备文件）：`apfs::clone_file` 的源，或种子文件、安装输入里的条目 | `apfs`、`session`、`deps` |
 | `Binary` | 要按行处理的文件是二进制（按 git 的判定：前 8000 字节里有 NUL）。按条目返回：`diff` 和三方合并预览里该文件的结果是这个码，不给 hunk。发布时两边都改了的二进制文件按整文件冲突报 `Conflict` | `publish` |
 | `NotText` | 应当是 UTF-8 的路径名不是：git tree 或 index 里来自其他平台的非 UTF-8 文件名，既成不了 `RepoPath`，也写不到 APFS 上 | `types`（构造 `RepoPath`）、`gitio` |
-| `NoMatch` | `publish --from <session>:<path>` 的路径在该会话的 overlay 里没有任何条目，即这个路径没有可发布的改动 | `publish` |
+| `NoMatch` | 选择器或句柄一个也没对上：`publish --from <session>:<path>` 的路径在该会话的 overlay 里没有条目（这个路径没有可发布的改动）；`deps approve` 给的 `ProposalId` 不是任何待确认的提议；`ViewId` 不是任何已挂上的检索视图 | `publish`、`deps`、`search` |
 | `AmbiguousMatch` | 会话选择器给的是 ticket，而这个 ticket 有不止一个会话（design §4）。`detail` 列出候选的会话 id | `session` |
 | `Exists` | 要创建的目标已经存在：`clonefile` 的目标已存在（`EEXIST`）；或 `new` 要建的会话目录已存在 | `apfs`、`session` |
 | `NotEmpty` | 第一次在 `[paths] root` 下建 Store 时，该目录已经存在、不是空的，又不是 strata 的布局 | `store` |
@@ -404,8 +451,8 @@ pub enum Code {
 | `Drift` | 安装输入哈希对不上：`deps::adopt` 认领主 checkout 现成的依赖目录时，主 checkout 的安装输入与目标基线不符，调用方改为冷装。`status` 报告的工作区漂移是数据，不是这个错误 | `deps` |
 | `CheckFailed` | 发布时，检查命令在 staging 克隆里以非零状态退出。不提交；`detail` 带命令、退出码和输出末尾 | `publish` |
 | `CheckMutates` | 配置的检查命令会改文件：含 `--write` 或 `cs-fix` 而没有 `--dry-run`，规则见 config.md。这是配置错误，在任何检查运行之前就拒绝（design §6.5 第 4 步） | `publish`（`check`） |
-| `PushRefused` | 远端明确拒绝了推送（非快进、权限、服务端钩子）。发布链留在本地，没有推上去；`detail` 带远端的原话 | `gitio`（`push`），`publish` 透传 |
-| `Unknown` | 结果不确定（推送超时或连接中断时远端可能已经收到；写到一半被打断），或者失败归不到任何别的码。一律按不确定处理：保留现场、不重放、不清理，`status` 报出（不变量 6）；daemon 重启后同样报出、不重放 | `gitio`、`publish`、`daemon`；任何模块按 §6.3 归类后也可能返回 |
+| `PushRefused` | 远端明确拒绝了推送（非快进、权限、服务端钩子），即 gitio 的 `push` 返回了 `PushOutcome` 的 `Refused`。发布链留在本地，没有推上去；`detail` 带远端的原话 | `publish`（由 `PushOutcome` 转换） |
+| `Unknown` | 结果不确定（推送超时或连接中断，即 `PushOutcome` 的 `Unknown`，远端可能已经收到；或写到一半被打断），或者失败归不到任何别的码。一律按不确定处理：保留现场、不重放、不清理，`status` 报出（不变量 6）；daemon 重启后同样报出、不重放 | `publish`（推送结果不确定时）、`gitio`、`daemon`；任何模块按 §6.3 归类后也可能返回 |
 | `Unsupported` | 环境缺少需要的能力：卷不是 APFS 或不支持 `clonefile`（`ENOTSUP`）；仓库使用 SHA-256 对象格式（`TreeOid` 只接受 40 位）；没有 GUI 会话，LocalAuthentication 弹不出来 | `apfs`、`gitio`、`confirm` |
 
 ### 6.3 I/O 错误的归类
@@ -482,6 +529,8 @@ confirm 只被 daemon 用
 | 4 | `strata-publish`、`strata-search` | 第 0–3 层；二者互不依赖。外部的 `tgrep-core` 只给 search 用 |
 | 5 | `strata-daemon` | 第 0–4 层，外加 `strata-confirm` |
 | 6 | `git-strata` | 第 0–5 层，但不含 `strata-confirm` |
-| — | `strata-confirm` | 只依赖第 0 层；只有 `strata-daemon` 依赖它，人类确认在 daemon 里发生（design §6.9）。凭据类型 `ConfirmToken` 和 `Action` 在 `strata-types` 里，session 与 publish 只用这两个类型（§4） |
+| — | `strata-confirm` | 只依赖第 0 层；只有 `strata-daemon` 依赖它，人类确认在 daemon 里发生（design §6.9） |
+
+`strata-confirm` 只负责签发和校验凭据（LocalAuthentication + TTY）。"confirm 只被 daemon 用"在 crate 层面成立：session 与 publish 只使用数据类型 `ConfirmToken` 和 `Action`，这两个类型放在 `strata-types` 里（§4）。
 
 基线与依赖一起移动（不变量 8）的原子动作是 `session::move_workspace(session, repo, new_base: BaseGen)`。daemon 处理 `deps approve` 时调它，`publish::rebase_session` 做发布后 rebase 时也调它。`deps` 只计算依赖集、提议和 rollout 计划，不调用 `session` 或 `publish`，依赖方向也不允许它这样做。
