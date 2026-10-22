@@ -55,13 +55,18 @@ deps 负责依赖集（design §4 的 Deps set）里"算"的那一半：算键�
 
 下面是 deps 依赖、而邻居文档还没写或正在修订的名字与行为。
 
-**对 store**（store.md 的修订轮）：
+**对 store**（store.md 的修订轮已提交：sdd/task-6 223f9d3。名字与签名都取自它的 §3，语义见本文）：
 
-1. module-rulings Addendum 4 定名的方法，签名归 store.md，语义见本文：写 `begin_deps_attempt`、`set_deps_attempt_pid`、`end_deps_attempt`、`record_deps_set`、`record_proposal`、`promote_proposal`、`decide_proposal`、`set_deps_main`；读 `deps_set`、`deps_attempts`、`proposal`、`proposals`（同样定名的 `deps_main` deps 用不着：`set_deps_main` 已经返回旧记录）。每个写方法一个写事务。要求的列、状态、转换与唯一性见 §4.2，比较并交换的语义见 §5.3 与 §5.9。其中四条语义 store.md 的修订轮草稿已经照写，这里列出，免得两边走散：`record_deps_set` 对 origin 为 empty 的依赖集不收尝试；`promote_proposal` 在同一事务里取代该 repo 当前的 Pending 与 to 相同的别的 AwaitingPublish（§4.5）；`set_deps_main` 在同一事务里返回旧记录；`proposals(repo, open_only = true)` 只列 Pending，以及提出会话还有记录、不是 Removed 的 AwaitingPublish（Addendum 4 的"按活着的会话过滤"由 store 在读的时候做）。
-2. `Store::deps_dir(repo, id) -> PathBuf`（store.md §3 已有）；`Store::deps_staging_dir(repo, attempt) -> PathBuf`（store.md 修订轮草稿里的名字）。
-3. `Store::retire_dir` 收下 `deps_staging_dir(repo, a)`：尝试 a 是 running、sealed 或 refused 时都收；failed 的暂存是现场，不收（store.md 修订轮草稿的写法与此一致）。
-4. 回收（§4.6）：引用规则；不进入 `deps/<repo>/` 下以 `.` 开头的条目；有 `running` 尝试指名 (repo, id) 时不碰 `deps_dir(repo, id)`；封存根目录是 0555，`gc_repo` 把它改名进 trash 之前先 `chmod u+w`，否则 `rename` 得到 `EACCES`（store.md 修订轮草稿的 §5.11 第 3、4 步还没有这一步）。
-5. 提议的 `from_set`、`to_set` 与主干记录的 `set_id` 不要求已登记，不能有指向依赖集记录的外键（§4.2）。
+1. deps 调用的方法。写与读的名字由 Addendum 4 定，每个写方法一个写事务；`retire_dir` 的名字由 Addendum 3 定，`deps_staging_dir` 是 store 自己加的：
+   - 写：`begin_deps_attempt(repo, set, kind: AttemptKind, at) -> u64`、`set_deps_attempt_pid(attempt, pid) -> bool`、`end_deps_attempt(attempt, to: AttemptState, error, at) -> bool`、`record_deps_set(set, origin: DepsOrigin, attempt: Option<u64>, at)`、`record_proposal(new: &NewProposal, replaces: Option<ProposalId>, at) -> Option<ProposalId>`、`promote_proposal(id, tree, head, at) -> bool`、`decide_proposal(id, to: ProposalDecision, at) -> bool`、`set_deps_main(row: &DepsMain) -> Option<DepsMain>`（返回同一事务里读到的旧记录）。
+   - 读：`deps_set(repo, id) -> Option<DepsSetRecord>`、`deps_attempts(repo) -> Vec<DepsAttempt>`、`proposal(id) -> Option<ProposalRecord>`、`proposals(repo, open_only) -> Vec<ProposalRecord>`。同样定名的 `deps_main` deps 用不着：`set_deps_main` 已经返回旧记录。
+   - 路径与目录：`deps_dir(repo, id)`、`deps_staging_dir(repo, attempt)`、`retire_dir(path)`（store.md §5.5 表第 3 行：Running、Sealed、Refused 的尝试的暂存都收，Failed 的是现场，不收）。
+   - 行类型到 §3 类型的映射由 deps 做（Addendum 4）：`DepsSetRecord.set` → `DepsSet`；`DepsAttempt` → `BuildAttempt`，其中 `AttemptKind` → `BuildKind`，`AttemptState` 加上建造锁的探测与暂存是否还在 → `BuildState`；`ProposalRecord` → `Proposal`，其中 `origin: Option<SessionId>` → `ProposalOrigin`，`status` 与 `superseded_by` → `ProposalState`。
+2. store 选的两条语义，deps 都确认：
+   - `record_proposal` 返回 `Option<ProposalId>`，`None` 表示 `replaces` 已经不是该位置上的那一条，store 什么都没写：确认。这正是 §5.9 的比较并交换。deps 收到 `None` 就重读、重新决定，最多 3 次，之后返回 `Busy`（reason proposal_race）；`ensure_target` 收到 `None`，说明 P 已被取代，返回 `NoSuchProposal`，不登记替换（§5.10）。Addendum 4 的"返回 ProposalId"由 `Some` 兑现。
+   - `promote_proposal` 同时取代该 repo 当前的 Pending，以及 to 相同的别的 AwaitingPublish：确认，§4.5 与 §5.9 依赖它。它对当前的 Pending 不做比较并交换，deps 也接受：要不要提升不取决于当前是哪一条 Pending，后写者胜，与 `record_proposal` 的取代规则一致。
+3. store 还缺、deps 需要的：`gc_repo` 第 3 步（挪走回收的依赖集目录）与第 4 步（清扫没登记的 `deps/<repo>/<deps>`）在 `renamex_np` 之前，先对要挪的目录本身 `chmod u+w`。封存根目录是 0555（D1），把 0555 的目录改名到另一个父目录得到 `EACCES`（2026-10-22 本机实测）；store.md 223f9d3 只在删 trash 时处理 0555（§5.11 第 5 步），挪进 trash 这一步还没有（§4.6）。
+4. 已经照写、不再是要求：Empty 的依赖集不收尝试；提议与主干记录对依赖集没有外键（`to_set` 可以还没封存，§4.2）；`proposals(open_only = true)` 去掉提出会话已被删除的 AwaitingPublish；gc 不进 `.staging/`、`.locks/`，也不碰 Running 与 Failed 的尝试的暂存（守卫 (a)）。
 
 **对 session**（session.md 的修订轮；module-rulings Addendum 3"Deps API"）：
 
@@ -516,7 +521,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 ```
 
 - 每个 repo 至多一条 Pending；每个 (repo, 提出会话) 至多一条 AwaitingPublish（§4.2）。
-- 只有提出会话自己的改动落地时，它的 AwaitingPublish 才被提升：publish 的 `rebase_session` 以 origin = `Session { s }` 带目标调 `propose`（§5.12）[我的决定]。提升在同一事务里取代该 repo 当前的 Pending，以及该 repo 里 to 相同的别的 AwaitingPublish（沿用 ccef28f 的取代范围，store.md 修订轮草稿照此实现）：那些草稿要的依赖集已经有了一条 Pending，approve 会把它们的会话一起移过去（§5.10 对 to 相同的草稿不判 OwnChange）。origin = Main 的登记不提升、也不取代任何草稿。
+- 只有提出会话自己的改动落地时，它的 AwaitingPublish 才被提升：publish 的 `rebase_session` 以 origin = `Session { s }` 带目标调 `propose`（§5.12）[我的决定]。提升在同一事务里取代该 repo 当前的 Pending，以及该 repo 里 to 相同的别的 AwaitingPublish（沿用 ccef28f 的取代范围，store.md 223f9d3 照此实现，§2 对 store 的第 2 条）：那些草稿要的依赖集已经有了一条 Pending，approve 会把它们的会话一起移过去（§5.10 对 to 相同的草稿不判 OwnChange）。origin = Main 的登记不提升、也不取代任何草稿。
 - 目标的 tree 与 head 设定之后不再改。主干之后又前进了、而依赖集没变时，Pending 的目标仍是登记时的那个 tree；会话下一次发布时，发布后 rebase 会把它接到链顶。
 - 一个会话正在等待一条 Pending 提议 P 的条件是：它 tracked，且 `base.deps ≠ P.to`。status 显示这些会话"在等 deps approve"（module-rulings 公共条 3）。
 - 提出会话被删除后，它的 AwaitingPublish 不再列出，也不再让任何会话 OwnChange（它不在任何计划的会话里）；gc 随会话删除它（Addendum 4）。
@@ -533,7 +538,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 提议与主干记录里的 id 可能还没封存（§4.2），没有对应的目录，这时什么都不用保。不被引用、且超过保留期之后才回收，保留期由 store.md 规定。回收的要求：
 
 - gc 在持有该 repo 写锁时决定并挪走这个 repo 的封存目录（Addendum 4"gc guards"）：先删记录，使它不可发现；再对封存根目录 `chmod u+w`；再 `renamex_np` 进 store 的 trash。封存根目录是 0555，而把目录改名到另一个父目录要求对它本身有写权限（它的 `..` 要改）：没有写权限时 `rename` 返回 `EACCES`（2026-10-22 本机实测）。根目录以下的 mode 本来就可写。
-- gc 不进入 `deps/<repo>/` 下以 `.` 开头的条目；有 `running` 尝试指名 (repo, id) 时，不碰 `deps_dir(repo, id)`（Addendum 4 gc guards (a)）。没有记录、也没有 running 尝试指名的 `deps_dir(repo, id)`（孤儿，§5.3）按 store 的清扫规则在 1 小时之后挪进 trash。
+- gc 不进入 `deps/<repo>/` 下以 `.` 开头的条目，也不碰 Running 与 Failed 的尝试的暂存（Addendum 4 gc guards (a)）。封存的 rename、chmod、登记与 gc 的决定都在同一把 repo 写锁里，gc 看不到"目录在、记录还没写"的中间状态；崩溃留下的孤儿（`deps_dir(repo, id)` 在、记录不在，§5.3）按 store 的清扫规则在 1 小时之后挪进 trash（守卫 (b)）。
 - deps 自己从不删封存目录，也从不删记录。
 
 ### 4.7 不变量
@@ -587,12 +592,12 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 2. **【建造锁】** [我的决定：锁的形式]：打开 `.locks/<id>.lock`（`O_CREAT | O_CLOEXEC`），`flock(LOCK_EX)` 阻塞等待。持有者的 install 有时限，所以等待有界。打不开时按 types.md §6.3 归类（例如锁的位置被换成了目录，就是 `EISDIR` → `IsDirectory`），从不在无锁状态下继续。锁 fd 带 `FD_CLOEXEC`，不被 install 继承：daemon 死了锁就释放，残留的 install 只能写进它自己那个不可发现的暂存。
 3. **拿到建造锁之后、写任何东西之前**，依次：
    1. `store.deps_set(repo, id)` 已有：释放锁，返回它（别的建造者刚封存了）。
-   2. 关掉死掉的尝试：同一 (repo, id) 的每条 `running` 尝试都属于已经死掉的建造者（D6），用 `end_deps_attempt` 把它关成 `failed`，`error` 为 `Unknown`、`detail.reason = "interrupted"`（module-rulings T8 I3 裁定）。这只是给别人的意图记录补上终态，不是对外可见的写入：关闭的意图记录是历史（Addendum 4 refinement 2）。
+   2. 关掉死掉的尝试：同一 (repo, id) 的每条 `running` 尝试都属于已经死掉的建造者（D6），用 `end_deps_attempt(该尝试, Failed, 错误, 当前时间)` 把它关掉，错误为 `Unknown`、`detail.reason = "interrupted"`（module-rulings T8 I3 裁定）；返回 false 说明它已经不是 running，跳过。这只是给别人的意图记录补上终态，不是对外可见的写入：关闭的意图记录是历史（Addendum 4 refinement 2）。
    3. 孤儿：`deps_dir(repo, id)` 存在而没有记录时，【repo 写锁】之下再查一次：gc 在持有 repo 写锁时删记录、挪目录，锁外可能正好看到删了一半。复查时记录出现了 → 返回它；目录不见了 → 继续；仍是"有目录、没记录" → 释放锁，返回 `Unknown`，`detail = { "reason": "orphan", "path" }`，不动它 [我的决定]。
    4. 只对冷装，D8 [我的决定：interrupted 重来一次]：取同一 (repo, id) 最近的一条 `build` 尝试 A（不算 refused）。A 是 failed、reason 不是 interrupted、暂存还在 → 返回 `Unknown`，`detail = { "reason": "previous_attempt", "attempt", "staging", "error" }`，不跑 install。A 是 failed、reason interrupted、暂存还在：A 之前紧挨着的那条 build 尝试也是 interrupted（A 已经是重来的那一次）→ 同样 previous_attempt；否则继续，重来一次。A 的暂存已被人删掉 → 继续。
-4. **尝试**：`begin_deps_attempt(repo, id, kind)` 插入 `running` 记录，返回尝试序号 a；暂存目录是 `Store::deps_staging_dir(repo, a)`，即 `.staging/<a>/`。冷装起 install 之后用 `set_deps_attempt_pid` 记下 pid。从这里起（Addendum 3 与 Addendum 4 refinement 2）：
-   - install 开始之前的具名拒绝：先拿走暂存（`retire_dir`，这时尝试还是 running），再 `end_deps_attempt(a, refused, 错误)`，释放建造锁，返回那个码。两步之间崩溃，留下的是一条没有暂存的 running 记录：下一个拿到这把建造锁的调用把它关成 failed（reason interrupted），它的暂存已经不在，D8 不拦。先关记录、后拿暂存的话，崩溃会留下一个 refused 尝试的暂存，gc 不进 `.staging/`，就再没人收走它。
-   - install 开始之后的失败：`end_deps_attempt(a, failed, 错误)`，暂存原样保留，释放建造锁，返回 `Unknown`（module-rulings 公共条：错误时序）。install 在 strata 之外有副作用（`~/.bun/install/cache`、网络），它的产出和日志是只此一份的证据。
+4. **尝试**：`begin_deps_attempt(repo, id, kind, 当前时间)`（kind 为 `AttemptKind::Adopt` 或 `Build`）插入 `running` 记录，返回尝试序号 a；暂存目录是 `Store::deps_staging_dir(repo, a)`，即 `.staging/<a>/`。冷装起 install 之后用 `set_deps_attempt_pid` 记下 pid。从这里起（Addendum 3 与 Addendum 4 refinement 2）：
+   - install 开始之前的具名拒绝：先拿走暂存（`retire_dir`，这时尝试还是 running），再 `end_deps_attempt(a, Refused, 错误, 当前时间)`，释放建造锁，返回那个码。两步之间崩溃，留下的是一条没有暂存的 running 记录：下一个拿到这把建造锁的调用把它关成 failed（reason interrupted），它的暂存已经不在，D8 不拦。先关记录、后拿暂存的话，崩溃会留下一个 refused 尝试的暂存，gc 不进 `.staging/`，就再没人收走它。
+   - install 开始之后的失败：`end_deps_attempt(a, Failed, 错误, 当前时间)`，暂存原样保留，释放建造锁，返回 `Unknown`（module-rulings 公共条：错误时序）。install 在 strata 之外有副作用（`~/.bun/install/cache`、网络），它的产出和日志是只此一份的证据。
 5. **校验与同步**：对封存候选 `seal/` 做一次 `apfs::walk`（不跟随符号链接）：
    - 只允许目录、属主可读的普通文件，以及按下面规则判定的符号链接 [我的决定：特殊文件与打不开的文件不收]。FIFO、socket、设备文件是 special_file；打不开的普通文件是 unreadable_file。
    - 符号链接（D4，module-rulings T8 I2 裁定）：取链接在仓库布局里的位置 L，从 L 的父目录出发对目标逐段做词法解析：`.` 跳过，`..` 退一级，其它名字进一级。目标是绝对路径，或某一步退到了仓库根之上 → symlink_escapes。没有退出仓库根的一律允许，指向的东西在封存里不存在也允许（悬空）。例如 `node_modules/.bin/tsc → ../typescript/bin/tsc` 解析为 `node_modules/typescript/bin/tsc`，允许；`sidecar/node_modules/cloakbrowser → ../vendor/cloakbrowser` 解析为 `sidecar/vendor/cloakbrowser`，在封存里悬空，在工作区里指向被跟踪的那个目录，允许；`node_modules/x/y → ../../../z` 在第三步退到仓库根之上，拒绝。
@@ -601,7 +606,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
    1. 【rename】`renamex_np(.staging/<a>/seal, deps_dir(repo, id), RENAME_EXCL)`。`seal/` 这时是 0755：把目录改名到另一个父目录要求对它本身有写权限，0555 的目录这样改名会得到 `EACCES`（2026-10-22 本机实测；module-rulings T8 I1 裁定）。`EEXIST`：第 3 段查过之后才冒出来的目录只能来自外力，尝试记为 failed、候选留在暂存，返回 `Unknown`（reason orphan）。
    2. `chmod 0555 deps_dir(repo, id)`。只改根目录：依赖目录本身与里面的 mode 不动。clonefile 带着 mode，0555 的 `node_modules` 克隆进工作区后不可写（同日实测）。
    3. 【同步】对 `<root>/deps/<repo>/` 做 `fcntl(F_FULLFSYNC)`：rename 与第 5 段的屏障一起落到介质上（Addendum 3"Durability"）。
-   4. `store.record_deps_set`：登记依赖集（origin 为 adopt 或 build），并在同一事务里把尝试 a 关成 `sealed`。
+   4. `record_deps_set(set, Adopt 或 Build, Some(a), 当前时间)`：登记依赖集，并在同一事务里把尝试 a 关成 `sealed`。
 
    rename 之后，这几步里任何一步失败都返回 `Unknown`（reason seal_failed）：目录在、记录不在，不可发现（D2）；尽力把 a 关成 failed，关不上的由下一个建造者当成死掉的关掉。rename 之后 deps 不再给具名拒绝。`with_write` 返回 `Busy`（repo 写锁在 daemon 的等待上限内没拿到）时什么都没 rename：认领按 install 之前的具名拒绝处理（拿走暂存、记 refused），返回 `Busy`；冷装已经跑过 install，重试 `with_write` 最多 10 次（缺省等待上限下约 5 分钟）[我的决定]，仍不行就返回 `Unknown`（reason seal_busy），候选留在暂存里。
 7. 尽力拿走 `.staging/<a>/` 剩下的部分（冷装的 `tree/` 与 `install.log`；尝试这时已是 sealed，`retire_dir` 收它），拿不走只记日志，不影响已封存的依赖集；释放建造锁；返回 `DepsSet`。
@@ -616,7 +621,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 4. 列出主 checkout 里存在的依赖目录：对每个 `d ∈ deps_dirs` 做 lstat。不存在的跳过；存在但不是目录的（包括符号链接）返回 `NotDirectory`；一个都不存在时返回 `NoSuchPath`，表示没有可认领的。
 5. §5.3 第 2、3 段：【建造锁】与拿锁后的检查（认领不做 D8：认领不重放 install）。
 6. 第一次遍历 W1（拿着建造锁，还没有尝试记录）：`apfs::walk` 每个存在的依赖目录，跳过 `nested_seed_caches`，记下 (路径, 类型, 大小, gen count, mtime, 链接目标)。出现 FIFO、socket 或设备文件 → `Drift`（reason special_file）；符号链接按 §5.3 第 5 段的规则出了仓库根 → `Drift`（reason symlink_escapes）；两者都带 path，释放锁返回。到这一步为止还什么都没写。
-7. §5.3 第 4 段：`begin_deps_attempt(adopt)`。对每个存在的 d，`apfs::clone_tree(cfg.path/d, .staging/<a>/seal/d)`，父目录按需创建；然后删掉 `seal/` 里的 `nested_seed_caches`。
+7. §5.3 第 4 段：`begin_deps_attempt`，kind 为 `Adopt`。对每个存在的 d，`apfs::clone_tree(cfg.path/d, .staging/<a>/seal/d)`，父目录按需创建；然后删掉 `seal/` 里的 `nested_seed_caches`。
 8. 第二次遍历 W2，规则同第 6 步。W1 与 W2 逐条比较（路径集合、类型、大小、gen count、mtime、链接目标）；某条的 gen count 读不到（有可写的 mmap，见 apfs.md 的 gen count 约定）也算不同。有不同 → install 之前的具名拒绝（拿走暂存、记 refused），返回 `Drift`（reason changed_during_clone，带第一个不同的路径）。W1 与 W2 相同，说明克隆期间主 checkout 的依赖目录没有被写过，克隆是一个一致的快照。
 9. §5.3 第 5 段的校验与同步。打不开的普通文件 → 具名拒绝，返回 `Drift`（reason unreadable_file）。
 10. §5.3 第 6、7 段：封存，origin = adopt，`dirs` 取存在的依赖目录（按字节序）。返回 `DepsSet`。
@@ -632,7 +637,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 1. `cfg.deps_dirs` 为空：转 §5.6 第 1 步。
 2. 预检，什么都不写：`DepsConfigKey::of(cfg)` 切开 `install`（`InvalidInput`）；`toolchain`（`NoSuchPath`）；输入的来源 src 是 `inputs_from`，没给时是 `tree`，这时每个条目都必须在 `tree` 里存在（`InvalidInput`，rule tracked_in_base）；`H = inputs_hash(cfg, git, src)`，`id = set_id(H, platform(), toolchain, config)`；`apfs::same_volume(tree, <Paths::deps() 或它最近的已存在上级>)` 为假 → `CrossVolume`。
 3. §5.3 第 2、3 段：【建造锁】、拿锁后的检查，含 D8。
-4. §5.3 第 4 段：`begin_deps_attempt(build)`，暂存是 `.staging/<a>/`。
+4. §5.3 第 4 段：`begin_deps_attempt`，kind 为 `Build`，暂存是 `.staging/<a>/`。
 5. 准备源码树：`apfs::clone_tree(tree, .staging/<a>/tree)`，记作 S。删掉 S 里的 `deps_dirs` 与 `seed_caches`（它们是自己的克隆，可以删）。给了 `inputs_from` 时，对每个安装输入条目 e：先删掉 S/e，再按 §5.1 对 `inputs_from` 的解析结果，把文件、符号链接（链接本身）和目录成员用 `apfs::clone_file` 放进 S，缺失的保持缺失。往 S 里删和放都走 rooted、no-follow 的目标操作（Addendum 3）：S 是基线树的克隆，被跟踪的符号链接可能出现在中间级，写入不能经它们落到 S 之外。这一步自己出错（例如 `ENOSPC`）：install 之前的具名拒绝（拿走暂存、记 refused），按 types.md §6.3 归类返回。
 6. `H' = inputs_hash(cfg, git, S)`。S 没有 `.git`，所以不过滤。`H' ≠ H` 说明复制期间会话又改了安装输入（或者基线目录被改过）→ install 之前的具名拒绝，返回 `Drift`，`detail = { "reason": "inputs_changed", "expected": H, "found": H' }`。键因此永远是真正装进去的那组输入（D3）。
 7. 运行 install。从这一步起，失败一律 `Unknown`、现场保留（§5.3 第 4 段）：
@@ -650,7 +655,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 
 ### 5.6 `ensure(ctx, tree)`
 
-1. `cfg.deps_dirs` 为空时：`id = set_id(空输入常量, platform(), "", 空配置)`。`find_set` 命中就返回。否则在【repo 写锁】`ctx.locks.with_write(repo, …)` 里 [我的决定]：再查一次 `deps_set`，有了就返回它；`deps_dir(repo, id)` 已存在而没有记录 → `Unknown`（reason orphan），不动它；否则 `mkdir`（0755，父目录按需创建）→ `chmod 0555` → 对 `<root>/deps/<repo>/` 做 `F_FULLFSYNC` → `record_deps_set`（origin = empty，没有尝试）。没有建造锁、尝试和暂存，也不跑任何命令：并发的调用由 repo 写锁串行化，后到的那个在锁里看到记录。`with_write` 返回 `Busy` 时什么都没写，返回 `Busy`；`mkdir` 之后的失败返回 `Unknown`（reason seal_failed），空目录在、记录不在，同 §5.3 第 6 段。
+1. `cfg.deps_dirs` 为空时：`id = set_id(空输入常量, platform(), "", 空配置)`。`find_set` 命中就返回。否则在【repo 写锁】`ctx.locks.with_write(repo, …)` 里 [我的决定]：再查一次 `deps_set`，有了就返回它；`deps_dir(repo, id)` 已存在而没有记录 → `Unknown`（reason orphan），不动它；否则 `mkdir`（0755，父目录按需创建）→ `chmod 0555` → 对 `<root>/deps/<repo>/` 做 `F_FULLFSYNC` → `record_deps_set(set, Empty, None, 当前时间)`。没有建造锁、尝试和暂存，也不跑任何命令：并发的调用由 repo 写锁串行化，后到的那个在锁里看到记录。`with_write` 返回 `Busy` 时什么都没写，返回 `Busy`；`mkdir` 之后的失败返回 `Unknown`（reason seal_failed），空目录在、记录不在，同 §5.3 第 6 段。
 2. 预检：每个条目都在 `tree` 里存在，否则 `InvalidInput`；`(H, id) = key_of(ctx, tree)`。
 3. `find_set` 命中就返回。这是热路径，不拿锁。
 4. 调 `adopt(ctx, tree)`。成功就返回。遇到 `Drift { reason: changed_during_clone }` 时再认领，连同第一次最多 3 次 [我的决定]；3 次都是它，就转第 5 步冷装。遇到其它 `Drift`、`NoSuchPath` 或 `NotDirectory` 时转第 5 步。其它错误原样返回。
@@ -679,13 +684,13 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 `propose`：
 
 1. 校验：`to ≠ from`；`tree` 与 `head` 同为 Some 或同为 None；同为 None 时 origin 必须是 Session；同为 Some 时 `git.tree_of(head)` 必须等于 `tree`。前几项不满足返回 `InvalidInput`；`tree_of` 自己的码（head 不在 object store 里的 `NoSuchCommit` 等）原样透传。
-2. 按参数分三种情况决定写什么。每次写都是 store 的一个写事务，带比较并交换：读到的状态在事务里已经变了（别的调用先写了），store 什么都不写并报冲突；deps 重新读、重新决定，最多 3 次，仍冲突就返回 `Busy`（`detail.reason = "proposal_race"`）[我的决定]。
-   - **会话的草稿**（origin = `Session { s }`，没有目标）：s 在这个 repo 已有 AwaitingPublish D，且 `D.to == to` → 返回 D（幂等）。否则 `record_proposal`（AwaitingPublish，取代 D，如果有）。
-   - **会话的改动已落地**（origin = `Session { s }`，带目标；publish 的 `rebase_session` 调用）：该 repo 当前的 Pending C 的 (to, tree) 与这次相同 → 返回 C。否则 s 有 AwaitingPublish D 且 `D.to == to` → `promote_proposal(D, tree, head)`：D 变成 Pending，填上目标，origin 保持 `Session { s }`，取代 C，以及该 repo 里 to 相同的别的 AwaitingPublish（§4.5）。否则 `record_proposal`（Pending，origin `Session { s }`，取代 C）。
-   - **主干**（origin = `Main`，带目标；`observe_main` 与 `rebase_session` 调用）：C 的 (to, tree) 与这次相同 → 返回 C。否则 `record_proposal`（Pending，origin Main，取代 C）。不提升任何 AwaitingPublish。
+2. 用 `proposals(repo, open_only = true)` 读出该 repo 当前的 Pending C 与各会话的 AwaitingPublish，按参数分三种情况决定写什么。每次写都是 store 的一个写事务，带比较并交换（见下）：读到的状态已经变了（别的调用先写了），store 什么都不写，`record_proposal` 返回 `None`、`promote_proposal` 返回 false；deps 重新读、重新决定，最多 3 次，仍冲突就返回 `Busy`（`detail.reason = "proposal_race"`）[我的决定]。
+   - **会话的草稿**（origin = `Session { s }`，没有目标）：s 在这个 repo 已有 AwaitingPublish D，且 `D.to == to` → 返回 D（幂等）。否则 `record_proposal(新草稿, replaces = D 的 id 或 None, 当前时间)`：插入 AwaitingPublish，取代 D（如果有）。
+   - **会话的改动已落地**（origin = `Session { s }`，带目标；publish 的 `rebase_session` 调用）：s 有 AwaitingPublish D 且 `D.to == to` → `promote_proposal(D, tree, head, 当前时间)`：D 变成 Pending，填上目标，origin 保持 `Session { s }`，取代 C，以及该 repo 里 to 相同的别的 AwaitingPublish（§4.5）。否则 C 的 (to, tree) 与这次相同 → 返回 C（幂等：已经提升过的 D 走到这里）。否则 `record_proposal(新 Pending, replaces = C 的 id 或 None, 当前时间)`，origin `Session { s }`。先看自己的草稿 [我的决定]：C 即使恰好是同一个目标，也让 D 取代它；否则 D 作为一条没人提升的草稿留下来，到 s 下一次发布时才被提升成一条大家都已用上的 Pending。
+   - **主干**（origin = `Main`，带目标；`observe_main` 与 `rebase_session` 调用）：C 的 (to, tree) 与这次相同 → 返回 C。否则 `record_proposal(新 Pending, replaces = C 的 id 或 None, 当前时间)`，origin Main。不提升、也不取代任何 AwaitingPublish。
 3. 返回提议。`ProposalId` 由 store 在 `record_proposal` 插入时分配并返回（types.md:129），deps 从不自己取号。
 
-比较并交换的语义（store 的方法照此实现）：`record_proposal` 指名它要取代的那条 r 时，r 必须仍处于新记录要取代的状态（插 Pending 时 r 是该 repo 的 Pending；插 AwaitingPublish 时 r 是同一 (repo, 会话) 的 AwaitingPublish），这时同一事务里把 r 记为 `Superseded { by: 新 id }` 再插入；不指名 r 而唯一性会被破坏，也算冲突。`promote_proposal` 要求 D 仍是 AwaitingPublish，并在同一事务里取代该 repo 当时的 Pending，以及该 repo 里 to 与 D 相同的别的 AwaitingPublish。`decide_proposal` 要求提议仍是 Pending。
+比较并交换的语义（store.md §5.6 照此实现）：`record_proposal` 的 `replaces` 是 deps 读到的、新记录要占的那个位置上现有的那一条（插 Pending 时是该 repo 的 Pending，插 AwaitingPublish 时是同一 (repo, 会话) 的 AwaitingPublish，位置空着时为 `None`）。位置上已经换了别的，store 什么都不写、返回 `None`；否则在同一事务里把它记为 `Superseded { by: 新 id }` 再插入，返回 `Some(新 id)`。`promote_proposal` 要求 D 仍是 AwaitingPublish（否则返回 false），并在同一事务里取代该 repo 当时的 Pending，以及该 repo 里 to 与 D 相同的别的 AwaitingPublish；它对当时是哪一条 Pending 不做比较，后写者胜（§2 对 store 的第 2 条）。`decide_proposal` 要求提议仍是 Pending（否则返回 false）。
 
 `propose` 不建依赖集：`to` 可以还没封存，这时 `plan_rollout` 把会话标成 NotReady，批准时 `ensure_target` 封存它。
 
@@ -693,7 +698,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 
 1. `git.tree_of(head)` 必须等于 `tree`，否则 `InvalidInput`；`tree_of` 自己的码原样透传。
 2. `(H, id) = key_of(ctx, export)`。
-3. 用 `set_deps_main` 写入 (tree, head, H, id, 当前时间)，取回它在同一事务里读到的旧记录：并发的两次观察各自拿到的都是自己写入之前的那一条，不会两次都拿同一条旧记录去比。
+3. 用 `set_deps_main(&DepsMain { repo, tree, head, inputs_hash: H, set: id, observed: 当前时间 })` 写入，取回它在同一事务里读到的旧记录：并发的两次观察各自拿到的都是自己写入之前的那一条，不会两次都拿同一条旧记录去比。
 4. 没有旧记录（第一次观察），或者旧记录的 set_id 等于 id：返回 `None`。
 5. 否则以 `ProposalOrigin::Main` 调 `propose`：from 取旧记录的 (set_id, inputs_hash)，to 取 (id, H)，目标是 (tree, head)。返回这条提议，它可能是新登记的，也可能是已有的同一条。
 
@@ -704,7 +709,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 1. `P = get_proposal(id)`。不是 Pending → `NoSuchProposal`，`detail = { "proposal", "state" }`；`P.repo ≠ ctx.repo` → `InvalidInput`。
 2. `find_set(P.repo, P.to)` 命中 → `Ready { proposal: P }`。
 3. `set = ensure(ctx, tree_dir)`（可能要冷装几分钟，在 repo 写锁之外）。`set.id == P.to` → `Ready`。
-4. 否则（提议之后工具链、依赖配置或编码版本变了）：`record_proposal`（Pending；origin、from、from_inputs、tree、head 取 P 的 [我的决定]；to = set.id，to_inputs = set.inputs_hash；取代 P）。比较并交换失败（P 在这期间已被取代）→ `NoSuchProposal`，不登记替换。成功 → `Replaced { superseded: P.id, replacement: Q }`。这次 approve 不移动任何会话；人看到替换提议之后再批准它（module-rulings T8 I5 裁定；D10）。
+4. 否则（提议之后工具链、依赖配置或编码版本变了）：`record_proposal(替换提议, replaces = Some(P.id), 当前时间)`。替换提议是 Pending，origin、from、from_inputs、tree、head 取 P 的 [我的决定]，to = set.id，to_inputs = set.inputs_hash。返回 `None`（P 在这期间已被取代）→ `NoSuchProposal`，不登记替换。返回 `Some(Q)` → `Replaced { superseded: P.id, replacement: Q }`。这次 approve 不移动任何会话；人看到替换提议之后再批准它（module-rulings T8 I5 裁定；D10）。
 
 `plan_rollout(ctx, id, sessions, complete)` 只读，什么都不写：
 
@@ -733,7 +738,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 `record_rollout(store, plan, moved)`：
 
 1. `P = get_proposal(plan.proposal)`。`P.state` 不是 Pending（自换时的 AwaitingPublish，或者在计划与记录之间被取代了）：原样返回 P。
-2. 同时满足三个条件时，用 `decide_proposal` 把 P 从 Pending 记为 Applied（比较并交换）：`plan.complete` 为真；每个 Move 的会话都在 `moved` 里；每个 Skip 的原因都只是 Untracked 或 AlreadyThere。否则不改。比较并交换失败（P 刚被取代）时同样不改。
+2. 同时满足三个条件时，用 `decide_proposal(P.id, ProposalDecision::Applied, 当前时间)` 把 P 从 Pending 记为 Applied：`plan.complete` 为真；每个 Move 的会话都在 `moved` 里；每个 Skip 的原因都只是 Untracked 或 AlreadyThere。否则不改。返回 false（P 刚被取代）时同样不改。
 3. 返回 P 的当前状态。
 
 ### 5.11 `open_files(dir)`
@@ -879,7 +884,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 | `observe_main_files_proposal_when_main_set_changes` | 第一次 `observe_main`：返回 None，主干记录为 (tree, head, inputs_hash, id)；新 tip 的依赖集 id 相同：None，只更新 tree 与 head；新 tip 改了 `bun.lock`：一条 Pending，origin 为 Main，from 与 from_inputs 取上一条主干记录，to、to_inputs、tree、head 取新的；to 还没封存（`find_set` 为 None），全程 install 调用次数为 0、没有尝试记录；再来一个不同的依赖集：新的一条 Pending，前一条变成 `Superseded { by: 新 id }`；任何时刻该 repo 只有一条 Pending；只换 PATH 上的假 `bun` 版本（输入不变）：也登记一条 Pending，from_inputs 等于 to_inputs | 新增 |
 | `observe_main_validates_head_and_tree` | `tree_of(head)` 不等于给的 tree：`InvalidInput`；head 是另一个仓库的 commit、不在本 repo 的 object store 里：`NoSuchCommit`；两种都不写主干记录、不登记提议。修订前的"依赖集属于别的 repo"一项已经无从发生：`observe_main` 不再收依赖集，repo 只取自 `Ctx` | 新增 |
 | `propose_validates_and_is_idempotent` | 同样的参数调两次：同一个 `ProposalId`，只有一条记录；from 等于 to：`InvalidInput`；只给 tree 不给 head，或 origin 为 Main 却没有目标：`InvalidInput`；`tree_of(head)` 不等于 tree：`InvalidInput`；head 不在 object store 里：`NoSuchCommit`；同一会话再提一个不同的 to：它之前的 AwaitingPublish 变成 `Superseded { by: 新 id }`；`ProposalId` 是 `record_proposal` 的返回值，从 1 起递增 | 新增 |
-| `publish_promotes_awaiting_proposal` | 会话 S 有一条 AwaitingPublish 提议 P（to 为 D），会话 S3 也有一条 to 为 D 的 AwaitingPublish P3，会话 S5 有一条 to 为 E 的 AwaitingPublish P5，该 repo 另有一条 Pending C。以 origin = `Session { S }` 带目标 (T2, H2)、to 为 D 调 `propose`（模拟 S 发布之后的 `rebase_session`）：返回 P 的 id，状态变为 Pending，origin 仍是 `Session { S }`，tree 与 head 已填上；C 与 P3 都变成 `Superseded { by: P }`；P5 原样仍是 AwaitingPublish。再以 origin = Main、同样的 (to, tree) 调一次：返回 P，不新增记录。之后会话 S4 登记一条 to 为 D 的草稿 P4，再以 origin = Main 带新的 tree T3 调：新的一条 Pending 取代 P，P4 与 P5 仍是 AwaitingPublish（origin = Main 的登记不动任何草稿） | 新增 |
+| `publish_promotes_awaiting_proposal` | 会话 S 有一条 AwaitingPublish 提议 P（to 为 D），会话 S3 也有一条 to 为 D 的 AwaitingPublish P3，会话 S5 有一条 to 为 E 的 AwaitingPublish P5，该 repo 另有一条 Pending C。以 origin = `Session { S }` 带目标 (T2, H2)、to 为 D 调 `propose`（模拟 S 发布之后的 `rebase_session`）：返回 P 的 id，状态变为 Pending，origin 仍是 `Session { S }`，tree 与 head 已填上；C 与 P3 都变成 `Superseded { by: P }`；P5 原样仍是 AwaitingPublish。再以 origin = `Session { S }`、同样的参数调一次，以及以 origin = Main、同样的 (to, tree) 调一次：都返回 P，不新增记录。另一个 repo 里，主干先以 origin = Main 登记了目标 (to D, T2) 的 Pending C2，会话 S6 有 to 为 D 的草稿 P6；以 origin = `Session { S6 }` 带同一目标调 `propose`：P6 被提升，C2 变成 `Superseded { by: P6 }`，S6 没有草稿留下。之后会话 S4 登记一条 to 为 D 的草稿 P4，再以 origin = Main 带新的 tree T3 调：新的一条 Pending 取代 P，P4 与 P5 仍是 AwaitingPublish（origin = Main 的登记不动任何草稿） | 新增 |
 | `open_proposals_lists_open_and_live_only` | 用 store 的会话写方法建出会话 S1（Active）与 S2（Removed）。repo tool 有 Pending P1、S1 的 AwaitingPublish D1、S2 的 AwaitingPublish D2、一条 Applied、一条 Superseded；repo front 有 Pending P2。`open_proposals(Some(tool))` 恰好是 [P1, D1]，按 id 排；`open_proposals(None)` 另含 P2；D2 的提出会话已被删除，两次都不列；`get_proposal(D2)` 照样返回它 | 新增 |
 | `rollout_skips_session_with_open_files` | 准备：Pending 提议 P，目标 `BaseGen { tool, T2, D2 }`，head H2，D2 已封存；会话 S1、S2 都钉 (T1, D1)、tracked，工作区的 `node_modules` 都是 D1 经 `clone_into` 得到的克隆，安装输入未改；起一个子进程打开 S1 的 `node_modules/next/dist/server/next.js` 不关。断言：`plan_rollout(P, [S1, S2], complete = true)` 的 steps 依次为 `Skip { S1, OpenFiles { files: [{ pid: 子进程, path: …/node_modules/next/dist/server/next.js, hold: Fd }] } }` 与 `Move { S2, BaseGen { tool, T2, D2 }, H2 }`；Skip 的 JSON 带 `"kind":"OpenFiles"` 以及 pid 与 path；计划前后，S1 依赖目录的遍历（路径、大小、inode、gen count）逐条相同，store 也前后相同；把计划交给测试里记录调用的 mover（daemon 循环的替身），只有 S2 被调用、且只调用一次；`record_rollout(plan, moved = [S2])` 之后 P 仍是 Pending。子进程退出后，`plan_rollout(P, [S1])` 对 S1 给出 Move。把持有方式换成 mmap（Mapped）和当前目录在 `node_modules` 里（Cwd），各跑一遍，结论相同。交换前的复查由 `session::move_workspace` 负责（session.md 的测试） | 新增 |
 | `rollout_moves_base_and_deps_atomically` | 准备同上，但没有打开的文件。断言：`plan_rollout` 的每个 Move 带的 `new_base` 恰好是 `BaseGen { repo: tool, tree: T2, deps: D2 }`，tree 与 deps 取自同一条提议；head 为 H2，且 `gitio::tree_of(H2)` 等于 T2；计划里只有 Move 与 Skip 两种步骤，不存在只换依赖或只换 tree 的步骤；记录调用的 mover 对每个 Move 恰好收到一次 (session, new_base, head)，对 Skip 从不被调用；mover 对 S2 报失败（模拟 `move_workspace` 返回 `OpenFiles`）时，`record_rollout(moved = [S1])` 让 P 保持 Pending，再 approve 时 S1 为 AlreadyThere、S2 为 Move；全部移过之后 P 为 Applied。交换本身的原子性（先 checkpoint、在旁边准备、rename 交换）由 session.md 的 `move_workspace` 测试断言 | 新增 |
@@ -1185,13 +1190,13 @@ design.md 标为 [交给构建者]、并且落在本模块的决定：
 | 孤儿 | `deps_dir` 在、记录不在 → `Unknown`（reason orphan），不动；先在 repo 写锁之下复查 | gc 在持有 repo 写锁时删记录、挪目录，锁外可能看到删了一半；真的孤儿来自封存中途崩溃或外力，交给人，或交给 gc 的 1 小时清扫 | 2026-10-22 |
 | 认领前后的一致性检查 | W1 在拿到建造锁之后、尝试开始之前，W2 在克隆之后，按 gen count 等逐条比较；不同就拿走自己的暂存、返回 `Drift`；`ensure` 最多认领 3 次，再冷装 | 目录级的 `clonefile` 不是快照；主 checkout 的 dev-link 随时在写 | 2026-10-22 |
 | 依赖集必须自包含 | 符号链接的规则是 T8 I2 裁定（仓库根以内的相对链接照收，可以悬空）；本文另加：特殊文件与属主打不开的普通文件不收 | 克隆进工作区后不会指回主 checkout（不变量 2）或已删除的 staging；insurance-check 的 sidecar 链接必须能封存，否则每个会话的 `new` 都失败 | 2026-10-22 |
-| 提议的写法 | 四种状态（§4.5，Addendum 4）；经 store 的具名方法写，每次带比较并交换，冲突就重读重来，3 次仍冲突返回 `Busy`；只有提出会话自己的改动落地时，才提升它的草稿，提升时一并取代 to 相同的别的草稿；origin = Main 的登记不动任何草稿 | ccef28f 按"最早的同 to 草稿"提升，会把还没发布的会话的草稿当成落地的那一条，提升出的 Pending 挂在错的提出者名下（自换的权利跟着它走）；Addendum 4 的 `promote_proposal` 由调用方指名提升哪一条。取代范围沿用 ccef28f，store.md 修订轮草稿照此实现 | 2026-10-22 |
+| 提议的写法 | 四种状态（§4.5，Addendum 4）；经 store 的具名方法写，每次带比较并交换，冲突就重读重来，3 次仍冲突返回 `Busy`；只有提出会话自己的改动落地时，才提升它的草稿，提升时一并取代 to 相同的别的草稿；带目标的会话调用先看自己的草稿，当前的 Pending 恰好是同一个目标也照样提升；origin = Main 的登记不动任何草稿 | ccef28f 按"最早的同 to 草稿"提升，会把还没发布的会话的草稿当成落地的那一条，提升出的 Pending 挂在错的提出者名下（自换的权利跟着它走）；Addendum 4 的 `promote_proposal` 由调用方指名提升哪一条。取代范围沿用 ccef28f，store.md 223f9d3 照此实现。先看自己的草稿，是为了不留下一条没人提升、等 s 下一次发布才冒出来的草稿 | 2026-10-22 |
 | 提出者自换 | `plan_switch` 不需要确认，要求工作区的哈希等于 `to_inputs`，并检查打开的文件。AwaitingPublish 时 tree 不动；Pending 时（提出者的改动已发布、草稿已被提升）基线与依赖一起移到 (P.tree, P.to) | design §2 目标 3、§6.4 第 3 步 [用户]；不给 agent 新的权力；Pending 那一支与 approve 对别人做的完全一样 | 2026-10-22 |
 | approve 的候选与跳过顺序 | tracked 且 `base.deps ≠ to` 的会话都是候选，不限于钉着 `from` 的；跳过的判定顺序固定（§5.10）；工作区的安装输入哈希等于 `to_inputs` 的不算漂移；自己草稿的 to 与这次相同的不判 OwnChange | 落后不止一代的会话也该能一步追上主干；有自己依赖改动的会话（OwnChange、Drift）换过去会错位；改动正是目标的会话换过去不会错位，提出者的草稿被提升之后正是这样接到它；origin = Main 的 Pending 不取代草稿，草稿的 to 又与它相同时，跳过只会让这个会话白等 | 2026-10-22 |
 | 批准时封存出的 id 与 `to` 不符 | 替换提议本身是裁定（T8 I5）；本文定：`ensure_target` 返回 `Target::Replaced`，替换提议沿用原提议的 origin、from 与目标；原提议在这之前已被取代就返回 `NoSuchProposal`，不登记替换 | 人批准的是他看到的那条（D10）；不在别人刚登记的新提议之上再叠一条 | 2026-10-22 |
 | 主干的跟踪 | 主干记录每个 repo 一条，`observe_main` 只算键、不封存，id 变了就登记 origin = Main 的提议；调用方传入那个 tree 的目录 | design §6.4 第 1 步"主干的锁文件变了"要有人发现；T8 修订轮要求 publish 里不跑冷装；deps 从 git 对象直接读安装输入就得另写一套导出 | 2026-10-22 |
 | 发布后 rebase 的契约 | §5.12：`key_of` 算新基线的 id N；提出者的草稿 `to == N` 就以 `Session { s }` 提升它；`N == base.deps` 直接移动；否则等待，并以 Main 登记 | 不变量 4、8；不变量 4 优先于 design §6.4 的最后一句（公共条 3）；`key_of` 让 publish 不必知道键怎么拼 | 2026-10-22 |
-| 空依赖集 | `deps_dirs` 为空的仓库也有一个依赖集：输入为空、toolchain 为空串、依赖配置为空、目录为空；不建尝试、不拿建造锁，在 repo 写锁里复查、建空目录、chmod、登记 | `BaseGen.deps` 不是 `Option`，所有仓库走同一条路，每个登记的依赖集都有目录；没有东西要装或克隆，repo 写锁足以串行化；store.md 修订轮草稿的 `record_deps_set` 对 empty 也不收尝试 | 2026-10-22 |
+| 空依赖集 | `deps_dirs` 为空的仓库也有一个依赖集：输入为空、toolchain 为空串、依赖配置为空、目录为空；不建尝试、不拿建造锁，在 repo 写锁里复查、建空目录、chmod、登记 | `BaseGen.deps` 不是 `Option`，所有仓库走同一条路，每个登记的依赖集都有目录；没有东西要装或克隆，repo 写锁足以串行化；store.md 223f9d3 的 `record_deps_set` 对 Empty 也不收尝试 | 2026-10-22 |
 | 拿走暂存 | 不再需要的暂存经 `Store::retire_dir` 原子地挪进 store 的 trash，不就地删；具名拒绝时先拿走暂存、再记 refused | 一次 rename，崩溃不会留下删了一半、看着像现场的暂存；冷装的暂存有十万量级的文件，就地删要几秒。先拿走、后关记录，崩溃留下的 running 记录由下一个建造者关掉；反过来会留下没人收的暂存（gc 不进 `.staging/`） | 2026-10-22 |
 | 依赖集的键与布局 | 记录与目录都按 (repo, id) 分开；封存目录与暂存目录的路径由 `Store::deps_dir`、`Store::deps_staging_dir` 给出，`.staging/`、`.locks/` 是 deps 的私有区 | `set_id` 不含 repo（types.md），不同仓库的 id 可能相同；store 拥有 `<root>` 的布局（store.md §4.1） | 2026-10-22 |
 | `clone_into` 归 deps | 封存区怎么用只有 deps 知道，克隆进新目录的事也由它做；只写调用方新建的目录，中间级逐级 `O_NOFOLLOW` | session 不必复制这部分知识；deps 仍然从不写活的工作区 | 2026-10-22 |
