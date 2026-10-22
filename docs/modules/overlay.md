@@ -42,7 +42,7 @@ Workspace crate（types.md §8：overlay 在第 2 层，只依赖第 0–1 层�
 | --- | --- |
 | `strata-types` | `BaseGen`、`BaseManifest`、`ManifestEntry`、`OverlayEntry`、`EntryKind`、`Checkpoint`、`CheckpointReason`、`CheckpointId`、`BlobId`、`RepoPath`、`RepoName`、`SessionId`、`TreeOid`、`RepoConfig`、`StrataError`、`Code` |
 | `strata-apfs` | `walk` 与 `Attrs`（全扫、按目录列名字、读属性）；`Watcher`、`watch`、`WatchEvent`（脏集合的来源）；`case_fold_eq`（APFS 的大小写同一性）；`clone_file`（restore 把基线文件克隆回去）；`open_rooted`（读文件内容、读符号链接目标、读 `.strata/lww`，逐级 `O_NOFOLLOW`，FIFO 不会挂住）；Addendum 3 的 rooted、逐级不跟随的目的地操作（restore 与 `project` 在工作区或 staging 树里的每一次写，名字由 apfs.md 定） |
-| `strata-gitio` | `Git::open`；`Git::read_index` 与 `IndexInfo`（`Added` 还是 `Untracked`、已跟踪的永不被 ignore、`core.ignorecase`）；`Git::is_ignored`（增量点查与全扫用同一个函数，gitio.md §5.8 第 7 步）；`merge3`、`Merge3`（rebase）；`Git::export_tree`（只在测试的 fixture 里） |
+| `strata-gitio` | `Git::read_index(worktree)` 与 `IndexInfo` 的 `is_tracked`、`tracked_under`（`Added` 还是 `Untracked`、已跟踪的永不被 ignore、`core.ignorecase`）；`Git::is_ignored(worktree, path)`（增量点查与全扫用同一个函数，gitio.md §5.8 第 7 步）；`merge3`、`Merge3`（rebase）；测试的 fixture 还用 `Git::open`（对主 checkout）、`export_tree`、`ensure_shadow`、`attach_worktree` |
 | `strata-store` | `Store` 的 `put_blob`、`put_bytes`、`get_blob`、`read_blob`、`verify_blob`、`record_checkpoint`、`checkpoint`、`latest_checkpoint`、`session`；测试的 fixture 还用 `record_deps_set`、`record_base_gen`（连清单一起登记）、`create_session`、`base_dir`、移动意图的 `begin_move` 到 `finish_move`，以及 store 的测试接缝 `Seam`、`arm` |
 
 外部 crate：
@@ -55,7 +55,7 @@ Workspace crate（types.md §8：overlay 在第 2 层，只依赖第 0–1 层�
 | `rayon` | checkpoint 并行 `put_blob`（store.md §5.3：并发的 put 各自克隆、哈希，同一内容只落一份） |
 | 开发依赖 `tempfile`、`proptest` | 临时工作区；§7 的随机改动序列 |
 
-`Git` 句柄的要求：`git.read_index(ws.root)` 必须能读这个工作区的 index。按 Addendum 2，每个会话的每个 repo 有自己的影子仓库（`<paths.root>/sessions/.repos/<session-id>/<repo>.git/`），工作区的 `.git` 是指向其管理目录 `worktrees/<n>/` 的 gitfile。所以每个工作区要用对它的根 `Git::open` 得到的 `Git`：它的 common dir 才是这个影子仓库，gitio.md §5.7 第 2 步的归属核对才会通过；对主 checkout 打开的 `Git` 读工作区 index 得到 `InvalidInput`，index 不存在得到 `Unknown`（`detail.reason = "no-index"`，Addendum 2），从不当作"什么都没跟踪"。`is_ignored` 读的是影子仓库在 `new` 时抄下、会话期间不再改写的 `info/exclude` 镜像，工作区里的 `.gitignore`，以及 git 的全局排除文件（`core.excludesFile`）。
+`Git` 句柄的要求：`ws.git` 是对该 repo **主 checkout** 打开的 `Git`（gitio.md §3：`Git::open` 拒绝 strata 的工作区）。overlay 读工作区的 index 与 ignore 规则时把 `ws.root` 作为 worktree 传进去：`git.read_index(ws.root)`、`git.is_ignored(ws.root, p)`。按 Addendum 2，每个会话的每个 repo 有自己的影子仓库（`<paths.root>/sessions/.repos/<session-id>/<repo>.git/`），工作区的 `.git` 是指向其管理目录 `worktrees/<n>/` 的 gitfile；gitio 经这个 gitfile 读管理目录里的 index，影子仓库算本仓库的（gitio.md §5.7 第 2 步的归属核对）。别的仓库的 `Git` 读它得到 `InvalidInput`；index 不存在得到 `Unknown`（`detail.reason = "no-index"`，Addendum 2），从不当作"什么都没跟踪"。`is_ignored` 读的是影子仓库在 `new` 时抄下、会话期间不再改写的 `info/exclude` 镜像，工作区里的 `.gitignore`，以及全局排除文件（gitio.md §5.8 第 4 步）。daemon 对每个 repo 的主 checkout 打开一个 `Git`，交给该 repo 的所有工作区。
 
 谁调用本模块：
 
@@ -105,7 +105,7 @@ pub struct WorkspaceRef<'a> {
     pub root: &'a Path,
     /// 这个仓库的配置：deps_dirs 与 seed_caches 不进 overlay（§5.1）。
     pub config: &'a RepoConfig,
-    /// 读得了这个工作区 index 的 Git（§2）。
+    /// 对该 repo 主 checkout 打开的 Git；读 index 与 ignore 规则时把 root 作为 worktree 传进去（§2）。
     pub git: &'a Git,
     pub store: &'a Store,
 }
@@ -380,8 +380,8 @@ pub fn release_fault(root: &Path);
 
 - **`build_manifest`**：见 §5.9。码：`NoSuchPath`（dir 不存在）、`NotText`（目录项不是 UTF-8）、`Unsupported`（dir 里有 FIFO、socket、设备文件：导出的树里不应该有）、`Unknown`（读失败）。
 - **`project`**：见 §5.12。`overlay.validate()` 不过 → `InvalidInput`；dst 不在 → `NoSuchPath`；要删或要替换的路径在 dst 里不在、或者类型不对 → `Corrupt`（dst 不是基线的完整克隆；基线文件缺了是 `Corrupt`，从不当作新文件，Addendum 4）；store 的 `get_blob`、`read_blob` 与 apfs 的码原样透传。失败时 dst 停在半途：它是调用方的内部 staging，由调用方按 Addendum 3、4 的错误时机处理。
-- **`compute`**：见 §5.5。`base.gen.repo != *ws.repo` → `InvalidInput`。工作区目录不在 → `NoSuchPath`；没有 `.git`、index 读不了 → gitio 的码原样透传（`NoSuchPath`、`InvalidInput`、`Unsupported`、`Unknown`，index 不存在是 `Unknown` 的 `no-index`）；目录项不是 UTF-8 → `NotText`；名字超出 macOS 的长度限制 → `InvalidInput`；读文件失败 → 按 types.md §6.3 归类（多半是 `Unknown`）。失败时 tracker 的状态不变，脏集合不丢（§6.1）。
-- **`reconcile_full`**：同 `compute`，只是不带 Tracker、从不读缓存。session 用它对一棵不在原位的旧树核对（session.md §5.6 第 19 步），所以 `ws.root` 可以是任何接了 `.git` 的目录。
+- **`compute`**：见 §5.5。`base.gen.repo != *ws.repo` → `InvalidInput`。工作区目录不在 → `NoSuchPath`；没有 `.git`、index 读不了 → gitio 的码原样透传（`NoSuchPath`、`InvalidInput`、`NotText`、`Unsupported`、`Unknown`，index 不存在是 `Unknown` 的 `no-index`）；目录项不是 UTF-8 → `NotText`；名字超出 macOS 的长度限制 → `InvalidInput`；读文件失败 → 按 types.md §6.3 归类（多半是 `Unknown`）。失败时 tracker 的状态不变，脏集合不丢（§6.1）。
+- **`reconcile_full`**：同 `compute`，只是不带 Tracker、从不读缓存。session 用它对一棵不在原位的旧树核对（session.md §5.6 第 19 步），所以 `ws.root` 可以是任何以 gitfile 接到本仓库影子仓库的目录。
 - **`checkpoint`**：见 §5.6。在 `compute` 的码之外：会话不存在或已 `Removed` → `NoSuchSession`；会话里没有这个 repo → `NoSuchRepo`；`base.gen` 不是该工作区在 Store 里记的当前基线 → `InvalidInput`（`detail.reason = "stale_base"`），什么都不写（3f `wrong_root_and_reader_swap_are_rejected` 一行）；`ws.root` 与 Store 里记的工作区路径不是同一个目录 → `InvalidInput`（`detail.reason = "wrong_root"`）；工作区 `tracked = false` → `InvalidInput`（store 也拦）；Store 的 `Busy`、`ReadOnly`、`Corrupt`、`TooLarge`、`Unknown` 原样透传。checkpoint 的对外写入只有最后记下的那一行，记行是一个事务：之前的失败什么都没写，不写工作区，所以它的任何失败都不留下现场。
 - **`restore`**：见 §5.7。第 9 步记下 `BeforeRestore` 是它的第一次对外写入，之前只有具名拒绝，什么都没写：`Unknown`（会话根里留着上一次 restore 的现场目录，`detail.reason = "restore_scene"`；或会话的 `lifecycle`、工作区的 `health` 为 `Unknown`，§6.3）；`NoSuchCheckpoint`（store 透传，不包装、不再读别的东西）；`InvalidInput`（目标是别的 repo 的、`ws.root` 不是这个会话的工作区、目标格式坏了、目标与当前基线不同却没给 `target_base`、`target_base` 与目标的基线不符、目标里有落在排除目录下的条目）；`NoSuchPath`（`paths` 里的路径在目标 checkpoint、两边的基线和当前 overlay 里都没有：types.md §6.2 写的是"目标 checkpoint 和基线"，多认当前 overlay 是为了能用路径限定的 restore 撤销 checkpoint 之后新建的文件 [我的决定]）；`Exists`（要写的位置上有没被记下的内容，§5.7 第 8 步）；`ReadOnly`（要动的文件或目录带不可变标志）；`OpenFiles`（要动的文件有可写的 mmap，gen count 不可得）；`Corrupt`（基线文件不在或大小与清单不符；`verify` 时 blob 或基线文件的内容与地址不符）；`Busy`（`workspace_changed`：扫描之后工作区又被改了，重试即可）；记 `BeforeRestore` 时 `checkpoint` 的全部码。记下 `BeforeRestore` 之后的任何失败：`Unknown`，现场保留（§6.3）。
 - **`rebase`**：见 §5.8。前提：`overlay` 的 blob 都还在 store 里（来自 checkpoint 的已登记；刚 put 的受 store 的 1 小时窗口保护；get、read、verify 按文件工作，Addendum 4）。`overlay.base != old.gen`，或 `old.gen.repo != new.gen.repo` → `InvalidInput`；overlay 不满足 V1–V5 → `InvalidInput`；基线文件不在，或读到的内容与清单不符 → `Corrupt`；会话一侧的 blob 读不出来 → store 透传（`Corrupt`、`TooLarge`、`Unknown`）；合并结果存不进去 → store 透传。单个路径的"太大""二进制""类型不同"不是错误，是冲突（记在 `conflicts` 里）。`merge = false` 时不写任何 blob。
@@ -630,7 +630,7 @@ restore 只在第 10 到 13 步写会话根之下（T 与工作区），次数�
    2. theirs = 合并基 → 取 ours：上游没碰它。
    3. `lww_matches(&opts.lww, p)` → 取 ours，记进 `lww`，不算冲突，也不试合并。design §4 说 `.lww` 命中的文件"最新 checkpoint 的版本胜出"；rebase 投影的 overlay 来自刚记下的 checkpoint（session 的 `BeforeRollout`），比新基线新，所以会话一侧胜出 [我的决定]。不能保证这一点的调用方（restore）传空规则。
    4. `opts.merge`，ours 与 theirs 都是普通文件，合并基不存在或者也是普通文件：
-      - 内容：会话没改内容（ours 的 blob = 合并基的 blob）→ 取 theirs 的 blob；上游没改内容 → 取 ours 的 blob；两边都改了 → 三份都不超过 `MERGE_MAX_BYTES` 才合并，否则冲突。合并基与 theirs 从 `old.dir`、`new.dir` 读，文件不在或读出的 BLAKE3 与清单不符 → `Corrupt`（不在也从不当作新文件，Addendum 4）；合并基不存在时用空串（add/add）。ours 用 `store.read_blob(blob, MERGE_MAX_BYTES)` 读。`gitio::merge3(合并基, ours, theirs)` 得到 `Clean(bytes)` → 它的 BLAKE3 等于 ours 或 theirs 的 blob 就直接用那个，否则 `store.put_bytes(bytes)`；得到 `Conflict` → 冲突。二进制文件由 merge3 给出整份冲突（gitio.md）。
+      - 内容：会话没改内容（ours 的 blob = 合并基的 blob）→ 取 theirs 的 blob；上游没改内容 → 取 ours 的 blob；两边都改了 → 三份都不超过 `MERGE_MAX_BYTES` 才合并，否则冲突。合并基与 theirs 从 `old.dir`、`new.dir` 读，文件不在或读出的 BLAKE3 与清单不符 → `Corrupt`（不在也从不当作新文件，Addendum 4）；合并基不存在时用空串（add/add）。ours 用 `store.read_blob(blob, MERGE_MAX_BYTES)` 读。`gitio::merge3(合并基, ours, theirs)` 得到 `Clean(bytes)` → 它的 BLAKE3 等于 ours 或 theirs 的 blob 就直接用那个，否则 `store.put_bytes(bytes)`：这个 blob 没有登记，只受 store 的 1 小时窗口保护（Addendum 4），调用方要在同一次操作里用 `project` 把它克隆出去，之后的 checkpoint 才登记它；得到 `Conflict` → 冲突。二进制文件由 merge3 给出整份冲突（gitio.md）。
       - mode：会话改了可执行位，就取 ours 的；否则取 theirs 的。合并基不存在时，任一边可执行就可执行。
    5. 其余情况（一边删、一边改；类型不同；符号链接两边改得不同；`merge = false`）→ 冲突。
 
@@ -710,7 +710,7 @@ restore 的阶段 C 是同一个算法，落在活的工作区上（§5.7）。�
 | 失败 | Code | 现场 | 恢复 |
 | --- | --- | --- | --- |
 | 工作区目录不在 | `NoSuchPath` | 无 | session 的 status 报 `Missing` |
-| index 读不了、属于别的仓库、是 sparse index、不存在 | gitio 透传：`NoSuchPath`、`InvalidInput`、`Unsupported`、`Unknown`（不存在是 `no-index`） | 无 | `InvalidInput` 多半是 `Git` 句柄打开错了仓库（§2） |
+| index 读不了、属于别的仓库、是 sparse index、不存在 | gitio 透传：`NoSuchPath`、`InvalidInput`、`NotText`、`Unsupported`、`Unknown`（不存在是 `no-index`） | 无 | `InvalidInput` 多半是 `Git` 句柄打开错了仓库（§2） |
 | 目录项的名字不是 UTF-8 | `NotText`（`detail.path` 是上级目录，`detail.name_hex` 是原字节） | 无 | 改名；APFS 上建不出这种名字 |
 | 名字超出 macOS 的长度限制 | `InvalidInput` | 无 | 改名 |
 | 读文件或属性失败（权限、I/O） | 按 types.md §6.3，多半是 `Unknown`（`detail.path`、errno） | tracker 不变，快照并回 inbox | 下一次扫描重来；一直失败由 status 报出 |
@@ -761,7 +761,7 @@ restore 替换或删除的文件，总是先挪进 T、核对之后才删。所�
 
 ## 7. 测试清单
 
-测试在临时目录里跑。fixture 建一个小的 git 仓库（`core.ignorecase = true`、`core.precomposeunicode = true`，与 inter 的仓库相同），用 `Git::export_tree` 导出基线；在同一个 APFS 卷上开一个临时 Store，用 store 的接口登记一个空依赖集、基线 generation（连同 `build_manifest` 建出的清单）与会话；工作区是基线的克隆，同时是一个普通的 git checkout，`Git::open(工作区)` 读得了它的 index。`Tracker` 默认不启动监听，由测试自己把 `WatchEvent` 交给 inbox，才能精确地模拟丢事件；需要真实 FSEvents 的用例单独启动监听。带 `#[ignore]` 的测试要大文件或 `hdiutil` 建的磁盘映像（不需要 root），用 `cargo test -p strata-overlay -- --ignored` 跑。测试接缝用本模块的 `OverlayFault` 与 store.md §3 的 `Seam`（经 `Store::arm`），都在 `test-seams` feature 后面（Addendum 4）；`Busy` 由 `Seam::PauseBeforeCommit` 造出来：另一个线程的写事务停在 COMMIT 之前，一直占着写锁（Addendum 4：要在两步之间做事，用停住类接缝）。工作量用 `ScanStats` 的计数断言，不计时。
+测试在临时目录里跑。fixture 建一个小的 git 仓库（`core.ignorecase = true`、`core.precomposeunicode = true`，与 inter 的仓库相同），用 `Git::export_tree` 导出基线；在同一个 APFS 卷上开一个临时 Store，用 store 的接口登记一个空依赖集、基线 generation（连同 `build_manifest` 建出的清单）与会话；工作区是基线的克隆，按 session 的做法接上 git：`ensure_shadow` 建影子仓库，`attach_worktree` 写管理目录与 gitfile；`Git` 对 fixture 仓库的主 checkout 打开（`Git::open` 拒绝工作区），读工作区时传工作区的路径。`Tracker` 默认不启动监听，由测试自己把 `WatchEvent` 交给 inbox，才能精确地模拟丢事件；需要真实 FSEvents 的用例单独启动监听。带 `#[ignore]` 的测试要大文件或 `hdiutil` 建的磁盘映像（不需要 root），用 `cargo test -p strata-overlay -- --ignored` 跑。测试接缝用本模块的 `OverlayFault` 与 store.md §3 的 `Seam`（经 `Store::arm`），都在 `test-seams` feature 后面（Addendum 4）；`Busy` 由 `Seam::PauseBeforeCommit` 造出来：另一个线程的写事务停在 COMMIT 之前，一直占着写锁（Addendum 4：要在两步之间做事，用停住类接缝）。工作量用 `ScanStats` 的计数断言，不计时。
 
 | 测试名 | 断言 | 来源（矩阵行 或 新增） |
 | --- | --- | --- |
@@ -841,7 +841,7 @@ restore 替换或删除的文件，总是先挪进 T、核对之后才删。所�
 
 ## 8. 实现任务（TDD）
 
-依赖的三个 crate 先要有 §2 列出的接口：apfs 的 `walk`、`Attrs`（带权限位，见报告）、`watch`、`case_fold_eq`、`clone_file`、`open_rooted` 与 Addendum 3 的 rooted 目的地操作；gitio 的 `Git::open`、`read_index`、`is_ignored`、`merge3`、`export_tree`（只在测试的 fixture 里用）；store 的 blob、checkpoint、会话与登记接口，以及它的测试接缝。任务按顺序做，后面的任务用前面的产出。
+依赖的三个 crate 先要有 §2 列出的接口：apfs 的 `walk`、`Attrs`（带权限位，见报告）、`watch`、`case_fold_eq`、`clone_file`、`open_rooted` 与 Addendum 3 的 rooted 目的地操作；gitio 的 `read_index`、`is_ignored`、`merge3`，以及测试的 fixture 用的 `Git::open`（对主 checkout）、`export_tree`、`ensure_shadow`、`attach_worktree`；store 的 blob、checkpoint、会话与登记接口，以及它的测试接缝。任务按顺序做，后面的任务用前面的产出。
 
 ### Task 1: `Overlay` 的形状规则与成组
 
@@ -913,8 +913,8 @@ git commit -m "feat(overlay): .lww rules in the LayerFS glob dialect"
 - Test: `crates/strata-overlay/tests/manifest.rs`
 
 **Interfaces:**
-- Consumes: `strata_apfs::{walk, Attrs, open_rooted}`；`strata_types::{BaseManifest, ManifestEntry, BlobId, TreeOid, RepoConfig}`；测试的 fixture 用 `strata_gitio::Git::export_tree` 与 store 的登记接口
-- Produces: `WorkspaceRef`、`Base`、`build_manifest`；内部的"读一个候选文件"（§5.2，含写竞态规则与名字转换）；测试共用的 fixture（git 仓库、导出的基线、临时 Store、登记好的基线 generation 与会话）
+- Consumes: `strata_apfs::{walk, Attrs, open_rooted}`；`strata_types::{BaseManifest, ManifestEntry, BlobId, TreeOid, RepoConfig}`；测试的 fixture 用 `strata_gitio::Git` 的 `open`（对主 checkout）、`export_tree`、`ensure_shadow`、`attach_worktree` 与 store 的登记接口
+- Produces: `WorkspaceRef`、`Base`、`build_manifest`；内部的"读一个候选文件"（§5.2，含写竞态规则与名字转换）；测试共用的 fixture（git 仓库、导出的基线、临时 Store、登记好的基线 generation 与会话、接好影子仓库的工作区）
 
 - [ ] **Step 1: 写失败的测试**：`build_manifest_matches_exported_tree`
 - [ ] **Step 2: 跑测试，确认失败**
