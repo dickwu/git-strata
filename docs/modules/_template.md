@@ -53,13 +53,13 @@
 - [ ] **Step 1: 写失败的测试**：<§7 的哪几个测试>
 - [ ] **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p strata-<module> <test_name>`
+Run: `cargo test -p strata-<module> <test_name>`（cli 模块用 `cargo test -p git-strata <test_name>`）
 Expected: FAIL（<失败原因>）
 
 - [ ] **Step 3: 写让测试通过的最少实现**：<要点>
 - [ ] **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p strata-<module> <test_name>`
+Run: `cargo test -p strata-<module> <test_name>`（cli 模块用 `cargo test -p git-strata <test_name>`）
 Expected: PASS
 
 - [ ] **Step 5: Commit**

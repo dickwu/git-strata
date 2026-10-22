@@ -19,7 +19,7 @@ git-strata 让一台 Mac 上的多个 Claude Code 会话，各自在真实的 AP
    - [session.md](modules/session.md)：会话清单与生命周期、兄弟布局、按 cwd 识别会话，以及让基线和依赖一起移动的 `move_workspace`。
    - [publish.md](modules/publish.md)：批次、发布组、staging 树、检查、发布链、推送，以及发布后的 rebase。
    - [search.md](modules/search.md)：基于 tgrep-core 的跨会话 `grep` 和 `files`。
-   - [confirm.md](modules/confirm.md)：人类确认通道，即 LocalAuthentication 加上 TTY 检查。
+   - [confirm.md](modules/confirm.md)：人类确认通道，用 LocalAuthentication（Touch ID 或登录密码）签发和校验确认凭据；TTY 检查在 cli 里。
    - [daemon.md](modules/daemon.md)：launchd agent、unix socket RPC、锁，以及监听和对账的调度。
    - [cli.md](modules/cli.md)：子命令、JSON 输出和 Claude Code 钩子入口。
 
