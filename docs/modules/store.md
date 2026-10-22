@@ -1328,7 +1328,7 @@ store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkp
    - `Symlink { target }` → 把目标的原始字节转到第 10 步存成 blob（符号链接的 blob 就是目标文本，裁定 T7），不克隆。
    - `File` → 下一步。
 3. 取临时名（同第 3 步），`apfs::clone_from_rooted(src_root, src, tmp)`。apfs 在根之下逐级不跟随地打开 `src`，再从这个描述符克隆，所以存下的是这一刻 `src` 上的那个对象，绝不是根之外的文件。`src` 或它的某一级上级在第 2 步之后被换成了符号链接 → apfs 拒绝，原样透传，`tmp` 不存在。
-4. `lstat(tmp)`：普通文件 → 从第 5 步接着做（规整、哈希、看目标、屏障、改名）。是目录（`src` 在第 2 步之后被换成了目录，apfs 克隆了整棵树）→ `apfs::remove_tree_rooted(<root>, store/tmp/<名字>)` 删掉它，返回 `IsDirectory`；删不掉的留给 gc 的 tmp 清扫。
+4. `lstat(tmp)`：普通文件 → 从第 5 步一直做到第 9 步（规整、哈希、看目标并核对长度、0444 与 mtime、屏障、改名），L3、长度与 mtime 的规则都和 `put_blob` 一样。是目录（`src` 在第 2 步之后被换成了目录，apfs 克隆了整棵树）→ `apfs::remove_tree_rooted(<root>, store/tmp/<名字>)` 删掉它，返回 `IsDirectory`；删不掉的留给 gc 的 tmp 清扫。
 
 工作区为什么不能用 `put_blob(ws.root/path)`：按路径克隆时，内核照常跟随上级里的符号链接。overlay 扫描之后、put 之前，工作区里某一级目录被换成指向工作区之外的符号链接，按路径的 put 就会把外面同名的文件存进 store（2026-10-22 实测：`a/b` 换成指向别处的符号链接之后，对 `a/b/f` 的 `clonefile` 克隆出的是别处的 `f`），之后的 restore 或发布再把它带进工作区或 git。
 
