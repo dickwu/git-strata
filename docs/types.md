@@ -28,6 +28,8 @@
 | `PublishTarget` | 结构 | 目标分支、是否推送、是否要确认 | §4 |
 | `SessionManifest` | 结构 | 会话清单 | §4 |
 | `WorkspaceState` | 结构 | 会话里一个 repo 的工作区 | §4 |
+| `ConfirmToken` | 结构 | 一次人类确认的凭据，一次一用，只在 daemon 内存里 | §4 |
+| `Action` | 枚举 | 需要人类确认的三种动作 | §4 |
 | `Config`、`RepoConfig` | 结构 | 全局配置与每仓库配置 | [config.md](config.md) |
 | `StrataError` | 结构 | 被拒绝的调用：`code` + `message` + `detail` | §6 |
 | `Code` | 枚举 | 错误码，共 36 个 | §6 |
@@ -42,7 +44,7 @@
 
 ### 2.2 derive 与 serde
 
-- 所有公开类型 derive `Clone`、`Debug`、`PartialEq`、`Serialize`、`Deserialize`；字段都能比较相等的再加 `Eq`。标识另加 `Hash`、`PartialOrd`、`Ord`，例如 `RepoName` 要作 `BTreeMap` 的键。
+- 所有公开类型 derive `Clone`、`Debug`、`PartialEq`、`Serialize`、`Deserialize`；字段都能比较相等的再加 `Eq`。标识另加 `Hash`、`PartialOrd`、`Ord`，例如 `RepoName` 要作 `BTreeMap` 的键。唯一的例外是 `ConfirmToken`：它只 derive `Debug`，既不能复制，也不能序列化（见 §4）。
 - 有格式的标识（`RepoName`、`SessionId`、`TreeOid`、`CommitOid`、`BlobId`、`DepsSetId`、`RepoPath`）字段私有，只能经 `TryFrom<String>` 构造。serde 也走这条路：`#[serde(try_from = "String", into = "String")]`，所以反序列化同样会校验；格式不对返回 `Code::InvalidInput`。没有格式可校验的 `RepoId` 与 `CheckpointId` 用 `#[serde(transparent)]`。
 - 字段名就是 JSON 的键，保持 snake_case，不用 `rename_all`。
 - 带数据的枚举用内部标签 `#[serde(tag = "kind")]`。`OverlayEntry` 的 `kind` 字段再加 `#[serde(flatten)]`，这样一条条目在 JSON 里只有一层对象。不带数据的枚举（`Code`）序列化为变体名字符串，如 `"Conflict"`。
@@ -285,6 +287,46 @@ pub struct WorkspaceState {
 }
 ```
 
+人类确认（design §6.9）用的凭据也放在 `strata-types` 里，是纯数据：
+
+```rust
+use std::time::Instant;
+use serde::{Deserialize, Serialize};
+
+/// 一次人类确认的凭据（design §6.9）。只由 strata-confirm 在 LocalAuthentication 通过之后签发，
+/// 只存在于 daemon 的内存里。
+/// 它不实现 Clone、Copy、Serialize、Deserialize：消费它的函数按值接收，用一次就被移走；
+/// 它不会出现在 RPC、JSON 或磁盘上，所以客户端无从伪造或重放。
+#[derive(Debug)]
+pub struct ConfirmToken {
+    /// 被确认的动作。消费方要核对它与本次要执行的操作完全相同。
+    pub action: Action,
+    /// 签发时刻（单调时钟），用来判断是否过期；过期时长由 confirm.md 规定。
+    pub issued: Instant,
+    /// 128 bit 随机数。strata-confirm 签发时登记、校验通过时核销，同一个 nonce 只能用一次。
+    pub nonce: u128,
+}
+
+/// 需要人类确认的动作，即 design §6.9 列出的三种。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum Action {
+    /// 推送一个需要确认的发布目标：`deploy_on_push = true` 的仓库，或 `PublishTarget.confirm = true`。
+    PushDeploy { repo: RepoName, branch: String },
+    /// `deps approve <proposal>`；proposal 是 deps.md 里依赖变更提议的序号。
+    DepsApprove { proposal: u64 },
+    /// `rm --discard`：丢掉会话的未发布改动，再删除会话。
+    RemoveDiscard { session: SessionId },
+}
+```
+
+- **签发与校验**：只有 `strata-confirm` 签发和校验凭据（LocalAuthentication 加 TTY，见 confirm.md），而它只被 `strata-daemon` 依赖（§8）。除了 `strata-confirm` 和测试，任何代码都不构造 `ConfirmToken`。
+- **动作从哪来**：daemon 根据请求要执行的操作推出 `Action`，从不采用客户端传来的 `Action`。每个需要确认的动作各弹一次认证框。daemon 把凭据交给消费方之前，先经 `strata-confirm` 校验它没用过、没过期，并核销它的 nonce。
+- **谁消费**：
+  - `PushDeploy` 的凭据交给 `publish::push`，`RemoveDiscard` 的凭据交给 `session::remove`。这两个函数按值收下凭据并核对 `action`，不符时返回 `Code::NotConfirmed`。
+  - `DepsApprove` 由 daemon 处理 `deps approve` 时校验一次，然后对每个目标会话调用 `session::move_workspace`。`move_workspace` 不收凭据，因为发布后 rebase 也会调它。
+- **crate 依赖不变**：session 和 publish 只用 `ConfirmToken`、`Action` 这两个数据类型，不依赖 `strata-confirm` crate。所以"confirm 只被 daemon 用"在 crate 层面仍然成立。
+
 ## 5. 配置结构
 
 `Config`（全局配置）与 `RepoConfig`（每个仓库一张 `[repo.<name>]` 表）定义在 [config.md](config.md)。它们放在 `strata-types` 里，是纯数据、不做 I/O；`RepoConfig` 的 `publish` 字段类型是 `PublishTarget`。本文不重复它们的字段。
@@ -355,7 +397,7 @@ pub enum Code {
 | `NoSuchSession` | 会话选择器（id 或 ticket）对不上任何会话；或命令默认作用于"本会话"，而 cwd 不在任何工作区里 | `session` |
 | `NoSuchRepo` | 名字不在配置的 `[repo.<name>]` 里，比如 `--repos`、批次或 `push <repo>` 里给的名字 | `session`、`publish`、`deps` |
 | `NoSuchCheckpoint` | 该会话里没有这个 `CheckpointId`：从来没有过，或者已被 gc 回收 | `store`，`overlay` 与 `publish` 透传 |
-| `NotConfirmed` | 需要人类确认的动作（一推上线仓库的推送、`deps approve`、`rm --discard`）没通过 LocalAuthentication：认证失败、被取消、超时，或者这次的认证结果已经用过（一次一用，design §6.9） | `confirm`，`daemon` 透传 |
+| `NotConfirmed` | 需要人类确认的动作（一推上线仓库的推送、`deps approve`、`rm --discard`）没有通过确认：LocalAuthentication 认证失败、被取消或超时；或者交来的 `ConfirmToken` 已经用过、已经过期，或它的 `action` 与要执行的操作不符（一次一用，design §6.9） | `confirm`（签发与校验）；`session`、`publish`（核对 `action`）；`daemon` 透传 |
 | `NotTty` | 需要人类确认的命令，stdin 不是 TTY。在弹认证框之前就拒绝（design §6.9） | `cli`、`confirm` |
 | `OpenFiles` | 要替换或删除的目录里有进程打开着文件：`move_workspace` 要换依赖目录时，或 `rm` 时会话目录被占用（dev server 等）。跳过，目录一字不动；`detail` 列出 pid 和路径 | `session` |
 | `CrossVolume` | 会话根目录、Store、基线与依赖集缓存跟主 checkout 不在同一个 APFS 卷上（design §7 要求同卷）。在克隆之前就拒绝，从不退化成复制 | `apfs`（`clone_tree`、`clone_file`）、`store`（`open`）、`session`（`new`） |
@@ -440,6 +482,6 @@ confirm 只被 daemon 用
 | 4 | `strata-publish`、`strata-search` | 第 0–3 层；二者互不依赖。外部的 `tgrep-core` 只给 search 用 |
 | 5 | `strata-daemon` | 第 0–4 层，外加 `strata-confirm` |
 | 6 | `git-strata` | 第 0–5 层，但不含 `strata-confirm` |
-| — | `strata-confirm` | 只依赖第 0 层；只有 `strata-daemon` 依赖它，人类确认在 daemon 里发生（design §6.9） |
+| — | `strata-confirm` | 只依赖第 0 层；只有 `strata-daemon` 依赖它，人类确认在 daemon 里发生（design §6.9）。凭据类型 `ConfirmToken` 和 `Action` 在 `strata-types` 里，session 与 publish 只用这两个类型（§4） |
 
 基线与依赖一起移动（不变量 8）的原子动作是 `session::move_workspace(session, repo, new_base: BaseGen)`。daemon 处理 `deps approve` 时调它，`publish::rebase_session` 做发布后 rebase 时也调它。`deps` 只计算依赖集、提议和 rollout 计划，不调用 `session` 或 `publish`，依赖方向也不允许它这样做。
