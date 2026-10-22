@@ -101,8 +101,8 @@
 | **Seed cache（种子缓存）** | 构建缓存（默认 `src-tauri/target`、`.next/cache`、`node_modules/.cache`）：新建会话时从温热的主 checkout `clonefile` 过来，归会话所有，随便写，**不同步、不 checkpoint、不封存**。它们不是"装"出来的，只是让第一次构建不从零开始。[我的决定] |
 | **Seed files（种子文件）** | 被 gitignore 但运行必需的文件（每仓库配置，默认含 `CLAUDE.md`、`.env`、`.env.local`、`.claude/settings.local.json`）：新建会话时从主 checkout 复制，不 checkpoint，`status` 列出来源与时间。[我的决定] |
 | **Session（会话）** | 一个工作单元，有自己生成的 id；ticket 只是标签，一个 ticket 可以有多个会话。清单记录它包含哪些 repo、各自钉住的基线、各自的依赖集、工作区路径、创建时间、状态。 |
-| **Workspace（工作区）** | 会话中某个 repo 的真实目录。会话根目录下按兄弟布局排列：`<root>/sessions/<ticket>/<repo>/`。 |
-| **Overlay** | 工作区相对其钉住基线的差异集合，按整文件：增/改 = 新内容，删 = 墓碑，改名 = 墓碑 + 新条目，未跟踪且合格 = 仅本工作区，改回与基线相同 = 撤销覆盖。 |
+| **Workspace（工作区）** | 会话中某个 repo 的真实目录。会话根目录下按兄弟布局排列：`<root>/sessions/<session-id>/<repo>/`——路径键是 `new` 生成的会话 id（types.md `SessionId`），ticket 只是会话的标签，不进路径（§11 第 18 条）。 |
+| **Overlay** | 工作区相对其钉住基线的差异集合，按整文件：增/改 = 新内容，删 = 墓碑，改名 = 墓碑 + 新条目，未跟踪且合格 = `Untracked` 条目（可发布、可搜索，与新增文件同等，只记录它不在基线的 git 索引里），改回与基线相同 = 撤销覆盖。 |
 | **Checkpoint** | 某一时刻 overlay 的持久化快照，带时间、触发原因、工具调用 id。恢复的单位。 |
 | **Batch（批次）** | 发布时从一个会话挑出的路径集合。 |
 | **Release group（发布组）** | 若干批次（可来自多个会话）的集合，一次发布的输入。 |
@@ -128,7 +128,7 @@ Claude Code 会话 B ──┤  strata CLI (JSON)   │
                             │          │
               ┌─────────────▼──┐   ┌───▼──────────────────────┐
               │ Store           │   │ 工作区目录                 │
-              │ SQLite 元数据    │   │ <root>/sessions/<ticket>/  │
+              │ SQLite 元数据    │   │ <root>/sessions/<sid>/     │
               │ 内容寻址 blob    │   │   tool/ hr-core/ staff-api/│
               │ 基线与依赖集缓存 │   │ （APFS clonefile 克隆）     │
               └────────────────┘   └───────────────────────────┘
@@ -159,7 +159,7 @@ Claude Code 会话 B ──┤  strata CLI (JSON)   │
 ### 6.1 新建会话 `strata new <ticket> --repos tool,staff-api[,…]`
 
 1. 对清单里**每个兄弟仓库**（不只是 `--repos` 指定的）：`git fetch` 主 checkout 的 `origin`，取发布链或默认分支的 tree OID（§6.7）；若该 OID 的基线不存在，建一个：从 git 对象导出源码树到基线缓存 `bases/<repo>/<oid>/`，再把匹配的依赖集克隆进去。依赖集不存在时先**认领**：主 checkout 现成的 `node_modules`/`vendor` 若其安装输入哈希与基线一致，直接 `clonefile` 封存为第一代（今天 `cp -Rc` 的做法，秒级）；不一致才冷装（tool 的 `bun install` 几分钟；`target` 冷编译 30–40 分钟——所以种子缓存永远只克隆、不冷建）。[我的决定] "不比今天慢"的比较对象是温热的主 checkout。
-2. `clonefile` 基线缓存到 `<root>/sessions/<ticket>/<repo>/`，`.git` 用 `git worktree add --detach` 等价的方式接到主 checkout 的 object store（这样工作区里的 `git status`、`git log` 都正常，且不复制对象）。[交给构建者：worktree 方式 vs 独立 `.git` 文件指向 common dir]
+2. `clonefile` 基线缓存到 `<root>/sessions/<session-id>/<repo>/`，`.git` 用 `git worktree add --detach` 等价的方式接到主 checkout 的 object store（这样工作区里的 `git status`、`git log` 都正常，且不复制对象）。[交给构建者：worktree 方式 vs 独立 `.git` 文件指向 common dir]
 3. 写清单；对 `--repos` 指定的仓库开始监听；其余仓库标记"钉住、无 overlay"。
 4. 种子缓存与种子文件从主 checkout 克隆/复制（§4）。
 5. 打印各工作区路径（JSON）。
@@ -188,7 +188,7 @@ Claude Code 会话 B ──┤  strata CLI (JSON)   │
 5. 人类经 §6.9 确认后 `strata deps approve <id> [--sessions …]`：对每个目标会话，先检查它没有在依赖目录上打开的文件（dev server）；有则跳过并报告；无则按下面"一起移动"的原子动作替换。
 6. 旧依赖集保留到没有会话或基线引用它。
 
-**依赖与源码一起移动** [用户，§13 问题 1 选严格匹配]：`deps approve` 对一个会话 = 把它的基线移到新依赖集所属的 tree——源码 rebase（§6.5 第 7 步）和依赖目录替换是**一个原子动作**：先 checkpoint，在临时目录准备好新基线树与新依赖集的克隆，`rename` 交换，冲突标出；该会话有打开的文件时整个跳过并报告。反过来也成立：发布后 rebase 把基线移到链顶时，若链顶的安装输入变了，就同时换依赖集（没有现成的 generation 就先建）。于是 §4 里"基线 = tree OID + 匹配的依赖集"在任何时刻都成立，`status` 不会出现长期漂移。
+**依赖与源码一起移动** [用户，§13 问题 1 选严格匹配]：`deps approve` 对一个会话 = 把它的基线移到新依赖集所属的 tree——源码 rebase（§6.5 第 7 步）和依赖目录替换是**一个原子动作**：先 checkpoint，在临时目录准备好新基线树与新依赖集的克隆，`rename` 交换，冲突标出；该会话有打开的文件时整个跳过并报告。反过来**不**自动成立：发布后 rebase 把基线移到链顶时，若链顶的安装输入变了，不自动换依赖集——而是记一条"待确认"提议（§6.4 第 4 步），该会话停在旧基线上等待 `deps approve`，`status` 显示它在等（§9 不变量 4 优先于本段：依赖目录只在人类确认后替换）。于是 §4 里"基线 = tree OID + 匹配的依赖集"在任何时刻都成立；代价是依赖变了的发布之后，其它会话落后主干直到有人确认——这正是用户要的。
 
 ### 6.5 发布 `strata publish`
 
@@ -233,7 +233,7 @@ agent 和用户是同一个 uid，且常以 bypass 权限运行，所以 flag �
 
 ## 7. 数据与存储
 
-- 位置：Store、基线缓存、依赖集缓存、工作区**全部在与主 checkout 同一个卷上**，默认 `/Volumes/GWD/inter/.strata/{store,bases,deps,sessions}/`；`~/Library/Application Support/strata/` 只放配置和 daemon 的 socket。原因：`clonefile` 只在同卷内有效，**跨卷退化成复制**，而内置盘只剩约 40 GB。
+- 位置：Store、基线缓存、依赖集缓存、工作区**全部在与主 checkout 同一个卷上**，默认 `/Volumes/GWD/inter/.strata/{store,bases,deps,sessions}/`；`~/Library/Application Support/git-strata/` 只放配置和 daemon 的 socket。原因：`clonefile` 只在同卷内有效，**跨卷退化成复制**，而内置盘只剩约 40 GB。
 - SQLite：WAL；checkpoint 边界 `synchronous=FULL`（与 LayerFS 的 Disposable 不同：我们的数据量小，而"恢复"要求可靠）。
 - Blob：按 BLAKE3 内容寻址，一文件一 blob，存为普通文件；写入 = 从工作区 `clonefile` 到 blob 路径（零拷贝），读出 = 反向克隆。超过阈值（默认 64 MiB，tgrep 的经验）的文件只记录哈希与克隆，不进索引。
 - 基线缓存与依赖集缓存都是普通目录树，键在路径里，封存后只读（`chflags uchg` 或仅靠约定 [交给构建者]）。
