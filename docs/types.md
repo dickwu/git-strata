@@ -37,7 +37,7 @@
 | `Action` | 枚举 | 需要人类确认的三种动作 | §4 |
 | `Config`、`RepoConfig` | 结构 | 全局配置与每仓库配置 | [config.md](config.md) |
 | `StrataError` | 结构 | 被拒绝的调用：`code` + `message` + `detail` | §6 |
-| `Code` | 枚举 | 错误码，共 37 个 | §6 |
+| `Code` | 枚举 | 错误码，共 39 个 | §6 |
 
 ## 2. 约定
 
@@ -344,7 +344,7 @@ use serde::{Deserialize, Serialize};
 /// 一次人类确认的凭据（design §6.9）。它是纯数据，放在 strata-types 里；只由 strata-confirm 在
 /// LocalAuthentication 通过之后签发，并由 strata-confirm 校验，只存在于 daemon 的内存里。
 /// 它不实现 Clone、Copy、Serialize、Deserialize：消费它的函数按值接收，用一次就被移走；
-/// 它不会出现在 RPC、JSON 或磁盘上，所以客户端无从伪造或重放。
+/// 它不会出现在 RPC、JSON 或磁盘上，所以客户端无从伪造或重放。审计记录只存 action 和结果，从不存凭据本身。
 #[derive(Debug)]
 pub struct ConfirmToken {
     /// 被确认的动作。消费方要核对它与本次要执行的操作完全相同。
@@ -405,7 +405,8 @@ pub enum Code {
     NoMatch, AmbiguousMatch, Exists, NotEmpty, NameTaken, ReservedName, ReadOnly,
     TooLarge, InvalidInput,
     // git-strata 新增
-    NoSuchSession, NoSuchRepo, NoSuchCheckpoint, NotConfirmed, NotTty, OpenFiles,
+    NoSuchSession, NoSuchRepo, NoSuchCheckpoint, NoSuchProposal, NoSuchView,
+    NotConfirmed, NotTty, OpenFiles,
     CrossVolume, Drift, CheckFailed, CheckMutates, PushRefused, Unknown, Unsupported,
     Corrupt,
 }
@@ -433,7 +434,7 @@ pub enum Code {
 | `NotFile` | 要复制或哈希的东西既不是普通文件、符号链接，也不是目录（FIFO、socket、设备文件）：`apfs::clone_file` 的源，或种子文件、安装输入里的条目 | `apfs`、`session`、`deps` |
 | `Binary` | 要按行处理的文件是二进制（按 git 的判定：前 8000 字节里有 NUL）。按条目返回：`diff` 和三方合并预览里该文件的结果是这个码，不给 hunk。发布时两边都改了的二进制文件按整文件冲突报 `Conflict` | `publish` |
 | `NotText` | 应当是 UTF-8 的路径名不是：git tree 或 index 里来自其他平台的非 UTF-8 文件名，既成不了 `RepoPath`，也写不到 APFS 上 | `types`（构造 `RepoPath`）、`gitio` |
-| `NoMatch` | 选择器或句柄一个也没对上：`publish --from <session>:<path>` 的路径在该会话的 overlay 里没有条目（这个路径没有可发布的改动）；`deps approve` 给的 `ProposalId` 不是任何待确认的提议；`ViewId` 不是任何已挂上的检索视图 | `publish`、`deps`、`search` |
+| `NoMatch` | `publish --from <session>:<path>` 的路径在该会话的 overlay 里没有任何条目，即这个路径没有可发布的改动 | `publish` |
 | `AmbiguousMatch` | 会话选择器给的是 ticket，而这个 ticket 有不止一个会话（design §4）。`detail` 列出候选的会话 id | `session` |
 | `Exists` | 要创建的目标已经存在：`clonefile` 的目标已存在（`EEXIST`）；或 `new` 要建的会话目录已存在 | `apfs`、`session` |
 | `NotEmpty` | 第一次在 `[paths] root` 下建 Store 时，该目录已经存在、不是空的，又不是 strata 的布局 | `store` |
@@ -445,6 +446,8 @@ pub enum Code {
 | `NoSuchSession` | 会话选择器（id 或 ticket）对不上任何会话；或命令默认作用于"本会话"，而 cwd 不在任何工作区里 | `session` |
 | `NoSuchRepo` | 名字不在配置的 `[repo.<name>]` 里，比如 `--repos`、批次或 `push <repo>` 里给的名字 | `session`、`publish`、`deps` |
 | `NoSuchCheckpoint` | 该会话里没有这个 `CheckpointId`：从来没有过，或者已被 gc 回收 | `store`，`overlay` 与 `publish` 透传 |
+| `NoSuchProposal` | `deps approve` 给的 `ProposalId` 不是待确认的提议：这个提议从来没有过，或者已经不在待确认状态 | `deps`，`daemon` 透传 |
+| `NoSuchView` | 给的 `ViewId` 不是已挂上的检索视图：从来没挂上过，或者已经 detach | `search`，`daemon` 透传 |
 | `NotConfirmed` | 需要人类确认的动作（一推上线仓库的推送、`deps approve`、`rm --discard`）没有通过确认：LocalAuthentication 认证失败、被取消或超时；或者交来的 `ConfirmToken` 已经用过、已经过期，或它的 `action` 与要执行的操作不符（一次一用，design §6.9） | `confirm`（签发与校验）；`session`、`publish`（核对 `action`）；`daemon` 透传 |
 | `NotTty` | 需要人类确认的命令，stdin 不是 TTY。在弹认证框之前就拒绝（design §6.9） | `cli`、`confirm` |
 | `OpenFiles` | 要替换或删除的目录里有进程打开着文件：`move_workspace` 要换依赖目录时，或 `rm` 时会话目录被占用（dev server 等）。跳过，目录一字不动；`detail` 列出 pid 和路径 | `session` |
