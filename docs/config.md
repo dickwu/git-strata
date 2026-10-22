@@ -174,6 +174,10 @@ impl RepoConfig {
     /// design §9 不变量 3、7：`self.publish.confirm || self.deploy_on_push`。
     /// 即使 `validate` 被绕过（代码里直接构造结构体），门也不会被配置打开。
     pub fn needs_human_confirm(&self) -> bool;
+    /// V9 与 V10：`install` 与全部 `checks` 的切分与只读规则（§2.4、§4.2）。
+    /// `Config::validate` 对每个仓库调用它，并在 `detail` 里补上 `repo`；
+    /// `publish::check` 在运行任何检查之前再调用一次（此时 `detail.repo` 为 `null`）。
+    pub fn validate_commands(&self) -> Result<(), StrataError>;
 }
 
 impl Config {
@@ -192,7 +196,9 @@ impl Config {
 { "repo": "tool", "field": "checks", "index": 1, "rule": "V10" }
 ```
 
-`repo` 在 `[paths]` 或全局规则上为 `null`；`index` 在不是数组元素时为 `null`；`rule` 是 §4.1 的规则编号。
+`repo` 在 `[paths]`、全局规则或调用方不知道仓库名时（`publish::check`）为 `null`；`index` 在不是数组元素时为 `null`；`rule` 是 §4.1 的规则编号。
+
+`PublishTarget` 定义在 types.md。规则 V11 要求 `publish` 内联表拒绝多出来的键，所以 types.md 里的 `PublishTarget` 也要带 `#[serde(deny_unknown_fields)]`（目前没有；加上不改变它的序列化形状）。
 
 ---
 
@@ -202,11 +208,11 @@ impl Config {
 
 | 编号 | 规则 | 错误码 | 依据 |
 | --- | --- | --- | --- |
-| V1 | `repo` 表非空；`<name>` 只含 `[A-Za-z0-9_-]`，且等于 `path` 的最后一级目录名 | `InvalidInput` | design §3（dev-link 用 `../<目录名>` 找兄弟）、§4（工作区路径 `<root>/sessions/<ticket>/<repo>/`） |
+| V1 | `repo` 表非空；`<name>` 是合法的 `RepoName`（types.md：`[A-Za-z0-9._-]`，非空，不是 `.` 或 `..`），且等于 `path` 的最后一级目录名 | `InvalidInput` | design §3（dev-link 用 `../<目录名>` 找兄弟）、§4（工作区路径 `<root>/sessions/<ticket>/<repo>/`） |
 | V2 | `paths.root` 与每个 `path` 是绝对、已规范化的路径：不含 `.`、`..`、`//`、尾部 `/`，不展开 `~` | `InvalidInput` | design §7（daemon 由 launchd 启动，工作目录不确定，相对路径无从解析） |
 | V3 | `paths.root` 不得位于任何 `path` 之内，任何 `path` 不得位于 `paths.root` 之内 | `InvalidInput` | design §9 不变量 2（strata 不写主 checkout 的工作树） |
 | V4 | `default_branch`、`publish.branch` 是合法的分支短名：满足 `git check-ref-format` 对分支名的规则（纯字符串实现，不调用 git），且不以 `refs/` 开头 | `InvalidInput` | design §6.7（分支名拼进 `refs/strata/publish/<分支>`） |
-| V5 | `deploy_on_push = true` ⇒ `publish.confirm = true` | `InvalidInput` | design §3、§9 不变量 3 与 7（没有配置能关掉一推上线的人类确认） |
+| V5 | `deploy_on_push = true` ⇒ `publish.confirm = true`（加载期的显式检查；运行期仍以 `needs_human_confirm` 兜底，types.md 的 `PublishTarget.confirm` 注释说的是这一层） | `InvalidInput` | design §3、§9 不变量 3 与 7（没有配置能关掉一推上线的人类确认） |
 | V6 | 四个路径列表（`deps_dirs`、`seed_caches`、`seed_files`、`install_inputs`）的每一项都是合法 `RepoPath`（types.md），不是 `.git` 也不在 `.git` 之下；同一列表内无重复、互不嵌套 | `InvalidInput` | design §4 |
 | V7 | 四个列表之间没有相同或嵌套的路径；唯一例外：`seed_caches` 的条目可以位于某个 `deps_dirs` 条目之内（默认的 `node_modules/.cache`） | `InvalidInput` | design §4（依赖目录不进 overlay；种子缓存不封存、不 checkpoint） |
 | V8 | `deps_dirs` 非空 ⇔ `install` 存在且 `install_inputs` 非空（没有依赖目录就不能有安装命令和输入；有依赖目录就必须能装、能判漂移） | `InvalidInput` | design §4 Deps set、§6.4 |
@@ -223,6 +229,8 @@ impl Config {
 
 按词而不是按子串匹配，是为了不误伤 `php-cs-fixer check`：design §6.5 步骤 4 把它列为合法的检查（等价于 `cs-fix --dry-run --diff`），而 `php-cs-fixer` 里的 `cs-fix` 后面紧跟 `e`，不构成一个词。
 
+谁返回：`Config::validate` 在加载配置时经 `RepoConfig::validate_commands`（§3）返回它，daemon 因此拒绝整份配置。types.md 把 `CheckMutates` 的返回者记作 `publish`（`check`）：它在运行任何检查之前再调用一次同一个函数，所以不经过 `parse`、直接用结构体构造出来的配置，也跑不出一条会改文件的检查（与 `needs_human_confirm` 同一思路）。
+
 | 例子 | 判定 | 原因 |
 | --- | --- | --- |
 | `prettier --write .` | `CheckMutates` | 含词 `--write` |
@@ -236,13 +244,17 @@ impl Config {
 
 ### 4.3 运行期校验（需要 I/O，不在 `strata-types`）
 
-这些规则要看文件系统或 git，由用到配置的模块在用到时执行；失败同样返回 `StrataError`，`detail` 的形状同 §3。
+这些规则要看文件系统或 git，由用到配置的模块在用到时执行；失败同样返回 `StrataError`，`detail` 的形状同 §3。错误码取自 types.md §6.2 的错误码表。
 
 | 规则 | 谁、何时 | 错误码 |
 | --- | --- | --- |
-| `path` 是一个 git 仓库，且 `origin/<default_branch>` 存在 | `gitio`，`session::new` 每次取基线时 | `NoSuchBranch` |
-| `paths.root` 与每个 `path` 在同一卷（`clonefile` 只在同卷有效） | `daemon` 启动时；`session::new` 在克隆之前再查一次 | `CrossVolume` |
-| 每个 `seed_files` 条目（存在时）在该仓库里被 ignore，且在基线 tree 里未被跟踪；不存在则静默跳过 | `session::seed_files` | `InvalidInput` |
+| 每张 `[repo.<name>]` 的 `path` 存在 | `session`，用到该仓库时 | `NoSuchPath` |
+| `paths.root`（存在时）与每个 `path` 是目录；`deps_dirs`、`seed_caches` 里已存在的条目是目录（不存在则静默跳过） | `session`、`deps`；`apfs::clone_tree` 的源不是目录时兜底 | `NotDirectory` |
+| `seed_files` 里已存在的条目是普通文件：是目录 → `IsDirectory`，是 FIFO、socket、设备文件 → `NotFile`；`install_inputs` 里已存在的条目既不是普通文件、符号链接，也不是目录 → `NotFile` | `apfs::clone_file`（`session::new` 复制种子文件时）；`deps::inputs_hash` | `IsDirectory`、`NotFile` |
+| 每个 `path` 是一个 git 仓库（能解析出它的 git common dir）；两张 `[repo.<name>]` 表不得解析到同一个 git common dir，即同一个 `RepoId` | `daemon`，加载配置时，整份配置一起拒绝 | `InvalidInput`（不是仓库）、`NameTaken`（`RepoId` 重复） |
+| fetch 之后 `origin/<default_branch>` 存在；`origin/<publish.branch>` 存在，或者该分支已有发布链 `refs/strata/publish/<branch>` | `gitio`，`session::new` 每次取基线时；`publish` 透传 | `NoSuchBranch` |
+| `paths.root` 与每个 `path` 在同一个 APFS 卷（`clonefile` 只在同卷有效；跨卷是错误，从不退化成复制）；`paths.root` 还不存在时，取它最近的已存在的上级目录所在的卷 | `session::new` 在克隆之前；`store::open`；`apfs::clone_*` 遇到 `EXDEV` 兜底 | `CrossVolume` |
+| 每个 `seed_files` 条目（存在时）在该仓库里被 ignore，且在基线 tree 里未被跟踪；不存在则静默跳过 | `session::new`（复制种子文件时） | `InvalidInput` |
 | 每个 `install_inputs` 条目在基线 tree 里存在且被跟踪 | `deps::inputs_hash` | `InvalidInput` |
 
 ---
