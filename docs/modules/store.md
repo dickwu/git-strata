@@ -7,7 +7,7 @@
 store 负责 git-strata 全部的持久元数据和内容存储，落在 `[paths] root`（config.md，默认 `/Volumes/GWD/inter/.strata`）之下。按增补 4，**只有一份 schema，全部在本文 §4.3**：别的模块不执行 SQL，store 也不提供通用的写事务，每个写都是 §3 里一个具名方法、一个事务。
 
 - **SQLite 元数据**（`<root>/store/store.db`）：基线 generation 与基线清单；依赖集、依赖集的认领与冷装尝试、依赖变更提议、主干当前的依赖集；会话、工作区、种子文件、`move_workspace` 的意图；checkpoint 与 overlay 条目；blob 登记；发布记录与 ref 变动审计；gc 记录（design §5 模块表、§7，增补 3、4）。
-- **按 BLAKE3 寻址的 blob 存储**（`<root>/store/blobs/`）：一文件一 blob，存为普通文件；写入 = 从工作区 `clonefile` 进来（零拷贝），读出 = 反向克隆（design §7）。
+- **按 BLAKE3 寻址的 blob 存储**（`<root>/store/blobs/`）：一文件一 blob，存为普通文件；写入 = 从工作区 `clonefile` 进来（零拷贝；工作区里的文件经 `put_blob_rooted`，每一级都不跟随符号链接，增补 8），读出 = 反向克隆（design §7）。
 - **`<root>` 的布局**：基线、依赖集与依赖集暂存目录的路径由 store 按键算出（§4.1）。目录由 session、deps 建，由 store 登记；目录离开活路径只有一条路：`retire_dir` 把它改名进 store 的 trash（增补 3），之后只由 gc 删除。
 - **回收**：`gc` 与 `gc_repo` 按引用与保留期删除行与目录，是全模块唯一发出 `DELETE` 的路径（裁定 T6）。
 - **状态图的守卫**：每个模块拥有自己状态的词汇、转换图和含义；store 用自己定义的行类型镜像它们（从不依赖 deps、session、publish 的类型，由所有者把行映射到自己 §3 的类型），并用触发器守住转换图（增补 4）。
@@ -28,15 +28,29 @@ store 负责 git-strata 全部的持久元数据和内容存储，落在 `[paths
 Workspace crate：
 
 - `strata-types`：全部标识（`BlobId`、`CheckpointId`、`ProposalId`、`SessionId`、`RepoName`、`RepoPath`、`TreeOid`、`CommitOid`、`DepsSetId`），结构（`BaseGen`、`DepsSet`、`BaseManifest`、`ManifestEntry`、`OverlayEntry`、`EntryKind`、`Checkpoint`、`CheckpointReason`、`SessionManifest`、`WorkspaceState`、`ReleaseGroup`、`Batch`、`Action`），`StrataError` 与 `Code`，以及 `serde_rfc3339` 适配模块。
-- `strata-apfs`：`clone_file`（blob 的写入与读出）、`same_volume`（`open` 的同卷检查）、`open_rooted`（gc 删除 trash 时逐级 `O_NOFOLLOW`）。types.md §8 第 1 层只允许 store 依赖 apfs 这一个同层例外；依赖表以 types.md 为准（裁定 T6）。
+- `strata-apfs`：`clone_file`（`put_blob` 与 `get_blob`）、`same_volume`（`open` 的同卷检查），以及在根之下不跟随符号链接的操作：`attrs_of` 与 `clone_from_rooted`（`put_blob_rooted`）、`open_rooted`（准备 generation 的根目录）、`rename_rooted`（`retire_dir` 与 gc 改名进 trash）、`remove_tree_rooted`（删 trash 的条目与 `store/tmp/` 里的克隆树）、`remove_rooted`（删清扫之后变空的目录）、`list_dir` 与 `Attrs::last_changed`（gc 清扫活路径）、`full_fsync`（改名之后同步 trash）。增补 8：store 在 generation 树与 trash 上不自己发 `*at` 调用，那里的打开、改名与删除全经 apfs。types.md §8 第 1 层只允许 store 依赖 apfs 这一个同层例外；依赖表以 types.md 为准（裁定 T6）。
 
-apfs.md（@d3c392b）里 store 用到的签名：`clone_file(src: &Path, dst: &Path) -> Result<()>`，符号链接克隆成符号链接、从不跟随，`dst` 必须不存在（已存在 → `Exists`，从不覆盖），原子；`same_volume(a: &Path, b: &Path) -> io::Result<bool>`，两个路径都跟随符号链接，路径不存在是 `io::ErrorKind::NotFound`，store 按 types.md §6.3 把 `io::Error` 归类（`NotFound` → `NoSuchPath`）；`open_rooted(root: &Path, path: &RepoPath) -> Result<File>`，逐级 `openat(O_NOFOLLOW)`，目录句柄当 dirfd 给 `openat`、`unlinkat`、`fchflags` 用，gc 删 trash 靠它。apfs 还列了 store 可以采用的 `Attrs::last_changed`、`rename_rooted(Exclusive)` 与 `full_fsync`、`unlink_rooted`、`rmdir_rooted`、`list_dir`：本文的步骤按 libc 写，换成这些函数是等价的，由构建者选。
+apfs.md（@599dde6）里 store 用到的签名：
+
+- `clone_file(src: &Path, dst: &Path) -> Result<()>`：符号链接克隆成符号链接、从不跟随，`dst` 必须不存在（已存在 → `Exists`，从不覆盖），原子。`src` 按路径解析，上级里的符号链接照常跟随，所以 `put_blob` 只给 strata 自己的文件用。
+- `same_volume(a: &Path, b: &Path) -> io::Result<bool>`：两个路径都跟随符号链接，路径不存在是 `io::ErrorKind::NotFound`，store 按 types.md §6.3 把 `io::Error` 归类（`NotFound` → `NoSuchPath`）。
+- `open_rooted(root: &Path, path: &RepoPath) -> Result<File>`：逐级 `openat(O_NOFOLLOW)`；能打开普通文件、目录与 FIFO，最后一级是符号链接、socket 或设备 → `NotFile`，上级里有符号链接 → `NotDirectory`（`reason = symlink`）。store 在它返回的目录句柄上 `fchflags`、`fchmod`。
+- `attrs_of(root: &Path, path: &RepoPath) -> Result<Attrs>`：上级逐级不跟随，最后一级是 lstat 语义；`Attrs.kind` 是 `FileKind`，符号链接带着目标的原始字节；`Attrs::last_changed()` 是 mtime 与 ctime 中较晚的那个。
+- `list_dir(root: &Path, dir: Option<&RepoPath>) -> Walk<'static>`：列一个目录的直接子项，每项带 `Attrs`，不跟随符号链接。
+- `full_fsync(file: &File) -> Result<()>`：`F_FULLFSYNC`。
+
+下面四个由增补 8 定名，要等 apfs 的修订轮写进 apfs.md（`rename_rooted` 只改变体名），是 store 对 apfs 的上游要求：
+
+- `clone_from_rooted(src_root: &Path, src: &RepoPath, dst: &Path)`：以不跟随符号链接的方式打开 `src`（每一级都不跟随，最后一级也不），再从这个描述符克隆（`fclonefileat`），普通文件与目录都行（2026-10-22 实测：对目录的描述符，`fclonefileat` 克隆整棵树）。store 依赖：克隆的就是此刻在 `src` 上的那个对象，绝不是根之外的东西；`dst` 必须不存在（`Exists`，从不覆盖）；错误按 types.md §6.3 归类，同 `clone_file`。
+- `rename_rooted(root, from: &RepoPath, to: &RepoPath, RenameMode::Excl)`：即 599dde6 的 `rename_rooted`，变体按增补 8 改名（599dde6 写作 `RenameMode::Exclusive`）。单次 `renameatx_np(RENAME_EXCL)`，两边的上级都钉住、不跟随；`to` 已存在 → `Exists`；0555 的目录改到别的父目录 → `ReadOnly`（`reparent_needs_write`），带 `uchg` → `ReadOnly`（`immutable`），所以 store 改名之前先准备根目录（§5.5）。
+- `remove_tree_rooted(root, path) -> Result<RemoveReport>`：不跟随符号链接（只删链接本身）、不跨设备，删之前清掉 `UF_IMMUTABLE` 与 `UF_APPEND`、让目录对属主可写，自底向上；删了第一个条目之后的失败都是 `Unknown`，剩下的东西留在原处并写进报告。store 只看成败，不读 `RemoveReport` 的字段。
+- `remove_rooted(root, path, RemoveKind::EmptyDir)`：删一个空目录（599dde6 的 `rmdir_rooted`；不空 → `NotEmpty`）。
 
 外部 crate：
 
 - `rusqlite`，开 `bundled` [我的决定]：SQLite 的版本与编译选项随 crate 固定，§4.2 的回读、STRICT 表与 JSON 函数都依赖它；不链接系统 libsqlite3，免得系统更新改变持久语义。
 - `blake3`，开 `mmap` 与 `rayon`：算 `BlobId`；16 MiB 及以上的文件走 mmap 加多线程 [我的决定]。
-- `libc`：`flock`、`open(O_CLOEXEC)`、`fcntl(F_BARRIERFSYNC)` 与 `fcntl(F_FULLFSYNC)`、`renamex_np(RENAME_EXCL)`、`flistxattr`/`fremovexattr`、`fchflags`、`fchmod`、`futimens`、`utimensat(AT_SYMLINK_NOFOLLOW)`、`unlinkat`、`arc4random_buf`（design §11 第 2 条：macOS API 走 libc）。
+- `libc`：`flock`、`open(O_CLOEXEC)`、`fcntl(F_BARRIERFSYNC)` 与 `fcntl(F_FULLFSYNC)`、`renamex_np(RENAME_EXCL)`（只用在 store 自己的 `tmp/` 到 `blobs/`、临时库到 `store.db`）、`flistxattr`/`fremovexattr`、`fchflags`、`fchmod`（put 的克隆体，以及 `open_rooted` 交来的 generation 根目录句柄）、`futimens`、`utimensat(AT_SYMLINK_NOFOLLOW)`（刷新已存 blob 的时间）、`arc4random_buf`（design §11 第 2 条：macOS API 走 libc）。
 - `serde`、`serde_json`：JSON 列（§4.4）与 `GcReport`。
 - 开发依赖：`tempfile`（测试根目录）。§7 的 VFS 计数与故障注入用 `rusqlite::ffi`，不另加 crate。
 
@@ -48,7 +62,7 @@ apfs.md（@d3c392b）里 store 用到的签名：`clone_file(src: &Path, dst: &P
 | --- | --- |
 | overlay | blob 的全部方法、`record_checkpoint`、`checkpoint`、`latest_checkpoint`、`session`（overlay.md §2） |
 | deps | `deps_dir`、`deps_staging_dir`、增补 4 定名的八个写方法与五个读方法 |
-| session | `base_dir`、`record_base_gen`、`has_base_gen`、`manifest`、`retire_dir`；会话、工作区、种子、意图的写与读（§3 的"会话与工作区"一组）。投影写工作区经 overlay（增补 3"Projection"），session 不直接调 `get_blob` |
+| session | `base_dir`、`record_base_gen`、`has_base_gen`、`manifest`、`retire_dir`、`put_blob_rooted`（carry，增补 8）；会话、工作区、种子、意图的写与读（§3 的"会话与工作区"一组）。投影写工作区经 overlay（增补 3"Projection"），session 不直接调 `get_blob` |
 | publish | `record_publish`、`set_publish_phase`、`record_ref_change`、`ref_changes`、`publish_record`、checkpoint 的读、`read_blob` |
 | daemon | `open`、`close`、`is_poisoned`、`quick_check`、`manifest`（组成 overlay 的 `Base`，overlay.md §2）、`gc`、`gc_repo`、`last_gc_report`、`open_publishes`，以及 status 要的读 |
 | cli | daemon 不在时用 `open_read_only` 加读（design §5） |
@@ -126,6 +140,8 @@ impl Store {
     // ---- blob ----
 
     /// 把 src 此刻的内容存成 blob，返回它的 BlobId（§5.3）。不碰 SQLite：blob 的行由 record_checkpoint 登记。
+    /// 只给 strata 自己的文件用（合并结果的临时文件、核对过的基线字节）：src 按路径解析，上级里的符号链接照常跟随，
+    /// 所以工作区里的文件一律用 put_blob_rooted（增补 8）。
     /// 普通文件经 clonefile 进 tmp/；符号链接存它的目标文本（mode 120000 记在条目里，裁定 T7）。
     /// 克隆之后只看克隆体，所以返回的 id 就是存下的那份字节的 BLAKE3；调用方用这个返回值，不用自己事先算的哈希。
     /// 同一内容已存在时不新增文件、不回读已存副本、不做屏障，只核对长度并刷新它的时间（§5.3 第 7 步）。
@@ -133,6 +149,14 @@ impl Store {
     /// 码：ReadOnly；apfs 透传的 NoSuchPath、IsDirectory、NotFile、CrossVolume、Unsupported、ReadOnly、InvalidInput（名字过长）；
     /// Corrupt（已存同名 blob 不是普通文件或长度不对）、Unknown（I/O，带 detail.outcome）。
     pub fn put_blob(&self, src: &Path) -> Result<BlobId>;
+
+    /// 从工作区捕获：把 src_root 之下 src 此刻的内容存成 blob（§5.3，增补 8）。overlay 的 checkpoint、session 的 carry 用它。
+    /// src 的每一级都不跟随符号链接：扫描之后某一级目录被换成指向工作区之外的符号链接，捕获就失败，从不存下工作区之外的文件。
+    /// 普通文件经 apfs::clone_from_rooted 克隆进 tmp/，再哈希克隆体；符号链接存它的目标文本（apfs::attrs_of 读出）；其余同 put_blob。
+    /// src_root 要是规范路径（apfs 以 O_NOFOLLOW 打开它的最后一级）。
+    /// 码：ReadOnly；apfs 透传的 NoSuchPath、NotDirectory（某一级上级不是目录或是符号链接，detail.reason = "symlink"）、IsDirectory、
+    /// NotFile、CrossVolume、Unsupported、ReadOnly、InvalidInput（名字过长）；Corrupt、Unknown（同 put_blob）。
+    pub fn put_blob_rooted(&self, src_root: &Path, src: &RepoPath) -> Result<BlobId>;
 
     /// 把一段字节存成 blob（三方合并的结果、符号链接的目标）。规则同 put_blob。
     /// 码：ReadOnly、Corrupt、Unknown。
@@ -172,7 +196,8 @@ impl Store {
     /// 把一个已经没有活记录的目录原子地改名进 root/store/trash/，返回它在 trash 里的路径；自己不删任何东西，
     /// 过了 1 小时由 gc 删除（§5.11）。这是目录离开活路径的唯一途径（增补 3）。只接受 §5.5 表里的六种路径，
     /// 每种都按行核对：已登记的 generation、活会话的根与影子仓库、当前代的管理目录、仍在交换中或已成现场的意图
-    /// 与尝试点名的路径都不接受。改名之前先清掉目录的 UF_IMMUTABLE、UF_APPEND，再给属主补上写权限（增补 6）。
+    /// 与尝试点名的路径都不接受。改名之前先清掉目录的 UF_IMMUTABLE、UF_APPEND，再给属主补上写权限（增补 6）；
+    /// 打开与改名都经 apfs（open_rooted，rename_rooted 的 RenameMode::Excl），每一级都不跟随符号链接（增补 8）。
     /// 码：ReadOnly（只读 Store；准备或改名得到 EPERM、EACCES、EROFS）、InvalidInput（路径不是这六种、含符号链接
     /// 或 . 与 ..、对应的行不允许）、NotDirectory（路径不是目录）、NoSuchPath、Unknown。
     pub fn retire_dir(&self, path: &Path) -> Result<PathBuf>;
@@ -665,7 +690,7 @@ pub enum Seam {
     PauseInPut,
     /// 下一次 gc 或 gc_repo 在挪完第 n 个目录之后以 I/O 错误中止。
     GcStopAfterRetire { n: u64 },
-    /// 下一次删 trash 时，对第一个文件的 unlinkat 返回这个 errno。
+    /// 下一次删 trash 条目时不调 apfs::remove_tree_rooted，当它删第一个文件就以这个 errno 失败：条目原样留着。
     GcUnlinkFails { errno: i32 },
     /// 之后 gc 的年龄下限改为这么多秒（缺省 3600）。
     AgeFloor { secs: u64 },
@@ -710,7 +735,8 @@ impl Store {
 | `open`、`open_read_only`、`close` | daemon；cli（只读） | 打开 Store；正常关闭并留下 clean-shutdown 标记 |
 | `is_poisoned` | daemon（status） | 写者是否中毒 |
 | `quick_check` | daemon（校验命令） | 按需的 `PRAGMA quick_check` |
-| `put_blob`、`put_bytes` | overlay（checkpoint、rebase 的合并结果） | 存 blob，不碰 SQLite |
+| `put_blob_rooted` | overlay（checkpoint）、session（carry） | 从工作区捕获 blob，每一级都不跟随符号链接（增补 8）；不碰 SQLite |
+| `put_blob`、`put_bytes` | overlay（rebase 的合并结果、核对过的基线字节） | 存 strata 自己的文件或字节，不碰 SQLite |
 | `get_blob` | overlay（restore 与 `move_workspace` 的投影，增补 3） | 按文件克隆出 blob |
 | `read_blob` | overlay（符号链接目标）、publish（三方合并的输入） | 读出 blob 字节，有上限 |
 | `verify_blob` | overlay（`restore --verify`）、store 自己的 gc 扫描 | 重算哈希 |
@@ -729,7 +755,7 @@ impl Store {
 | `record_publish`、`set_publish_phase`、`publish_record`、`open_publishes`、`record_ref_change`、`ref_changes` | publish；daemon（`open_publishes`） | 发布记录与 ref 审计 |
 | `gc`、`gc_repo`、`last_gc_report` | daemon（`recover` 之后；`gc_repo` 持该 repo 的写锁） | 回收 |
 
-与上一版相比，这一轮改名或新增、供 deps 与 session 的修订轮使用的方法：`record_base_gen` 改为连清单一起登记（删去 `record_manifest`）；`set_workspace_base` 由 `begin_move`、`set_move_phase`、`set_move_state`、`finish_move`、`fail_move`、`set_old_tree` 取代；`set_lifecycle` 多了 `scene`；新增 `set_session_phase`、`move_intents`、`open_move_intents`、`deps_staging_dir`、`is_poisoned`、`gc_repo`；`record_seeds` 改为按路径的行；deps 的写与读用增补 4 定的名字；`set_deps_main` 改为比较并交换，多一个 `expected`，返回是否写成和现有的行（增补 7）。
+与上一版相比，这一轮改名或新增、供 deps 与 session 的修订轮使用的方法：`record_base_gen` 改为连清单一起登记（删去 `record_manifest`）；`set_workspace_base` 由 `begin_move`、`set_move_phase`、`set_move_state`、`finish_move`、`fail_move`、`set_old_tree` 取代；`set_lifecycle` 多了 `scene`；新增 `set_session_phase`、`move_intents`、`open_move_intents`、`deps_staging_dir`、`is_poisoned`、`gc_repo`；`record_seeds` 改为按路径的行；deps 的写与读用增补 4 定的名字；`set_deps_main` 改为比较并交换，多一个 `expected`，返回是否写成和现有的行（增补 7）；新增 `put_blob_rooted`，工作区里的捕获都改用它（增补 8）。
 
 接口上的三条通则：
 
@@ -1199,7 +1225,7 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
 | # | 不变量 | 落实 design §9 |
 | --- | --- | --- |
 | S1 | blob 按内容寻址、只增不改：`blobs/<aa>/<id>` 一旦改名到位，字节永不改写（3a:103）；同一内容只存一份；文件名就是内容的 BLAKE3，不另存哈希。 | 不变量 1（恢复依赖它）、反目标 1 |
-| S2 | 写入过的行只按 §4.4 列出的可变列改动。`DELETE` 只来自 gc（触发器加 `strata_gc_active()`）；`publishes`、`publish_items`、`refs_audit` 连 gc 也不删。文件系统上，store 只在两处删除东西：gc，以及丢弃本次调用自己刚建、从未登记的临时文件（put 的重复克隆、符号链接的克隆、建库的探测文件与空目录）。目录离开活路径只经 `retire_dir` 或 gc 改名进 trash。 | 不变量 5、6 |
+| S2 | 写入过的行只按 §4.4 列出的可变列改动。`DELETE` 只来自 gc（触发器加 `strata_gc_active()`）；`publishes`、`publish_items`、`refs_audit` 连 gc 也不删。文件系统上，store 只在两处删除东西：gc，以及丢弃本次调用自己刚建、从未登记的临时文件（put 的重复克隆、符号链接的克隆、`put_blob_rooted` 克隆时已被换成目录的克隆树、建库的探测文件与空目录）。目录离开活路径只经 `retire_dir` 或 gc 改名进 trash。 | 不变量 5、6 |
 | S3 | checkpoint 行提交之前，它引用的每个 blob 都已改名到位、已用 F_BARRIERFSYNC 排在提交之前、并在同一个事务里登记；不存在悬空引用（3a:475、3a:617、3a:672）。 | 不变量 1 |
 | S4 | 一个 Store 只有一个写者：写连接只有一个，进程之间由 `LOCK` 的 flock 保证。读走独立的只读连接，WAL 之下从不等写者。 | —（design §5"daemon 不在时 CLI 只读"与 §8"并发"的性质，不对应 §9 的某一条） |
 | S5 | 序号在 1 到 `i64::MAX` 之间、只增、提交过的永不复用；意图的代数从不复用（§4.4）。 | —（types.md §3 与增补 4 的性质，不对应 §9 的某一条） |
@@ -1229,7 +1255,7 @@ store 里的锁（daemon 按 repo 的写锁在 store 之外）：
 - **顺序**：repo 写锁在 L3 之前，L3 在 L2 之前（增补 4）。L1 在 Store 的整个生命里持有，不参与这个顺序。持 L2 时从不去取 L3，持 L3 时从不去取 repo 写锁，所以不会死锁。
 - SQLite 自己的锁：写事务一律 `BEGIN IMMEDIATE`。读不取 L2：每个读函数从连接池借一个只读连接，在一个读事务里读完。
 
-store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkpoint"这一步，不变量 1 由调用方落实。原子替换只用在 store 自己的区域（tmp 到 blobs、临时库到 store.db、目录到 trash），一律用 `renamex_np(RENAME_EXCL)`：目标已存在时失败，从不覆盖。
+store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkpoint"这一步，不变量 1 由调用方落实。原子替换只用在 store 自己的区域：tmp 到 blobs、临时库到 store.db 用 `renamex_np(RENAME_EXCL)`，目录到 trash 用 `apfs::rename_rooted(…, RenameMode::Excl)`（增补 8）；都是目标已存在时失败，从不覆盖。
 
 ### 5.1 `open`：第一次建库
 
@@ -1257,6 +1283,7 @@ store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkp
 5. schema 比对：把 §4.3 的 DDL 在 `:memory:` 库里执行一遍，两边各取 `SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name`，必须逐行相同；否则 `Corrupt`（`schema`，`detail` 带第一处差别）。不修补、不迁移（3a:597、3a:610）。
 6. 看 `store/clean-shutdown`（T6 裁定，fix round 1 之后）。在，说明上一次是 `close` 正常关闭的：删掉它并对 `store/` 做 `F_FULLFSYNC`（这一次若异常结束，下次打开就看不到它），不跑 quick_check；删不掉 → `Unknown`。不在（上次被杀、崩溃、写者中毒，或没调 `close` 就退出）：`PRAGMA quick_check` 必须返回 `ok`，否则 `Corrupt`（`sqlite`）。它的成本与库的大小成正比（§5.12），所以只在异常退出之后付；平时由 `quick_check()` 按需跑。标记是 `store/` 下的一个空文件，由 `close` 在关掉全部连接之后写下 [我的决定]。
 7. 注册 SQL 函数 `strata_gc_active()`，带 `SQLITE_INNOCUOUS`（§4.2）。读连接池先空着，用到时再开。
+8. 取 `<root>` 的 realpath，作为 store 在根之下的 apfs 调用（`open_rooted`、`attrs_of`、`list_dir`、`rename_rooted`、`remove_tree_rooted`、`remove_rooted`）的 `root` [我的决定：apfs 以 `O_NOFOLLOW` 打开根的最后一级，`[paths] root` 本身是符号链接时这些调用一律 `NotDirectory`；路径的拼接与 `retire_dir` 的前缀核对仍用配置里的 root]。下文 apfs 调用里写的 `<root>` 都指它。
 
 第 3 到 6 步里 SQLite 报 `SQLITE_CORRUPT` 或 `SQLITE_NOTADB` → `Corrupt`（`sqlite`）。对崩溃后的库，第 3 步会先做 WAL 恢复；这是 SQLite 自己的行为，不改变已提交的内容。
 
@@ -1271,7 +1298,7 @@ store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkp
 
 `quick_check()`：借一个只读连接跑 `PRAGMA quick_check`；结果不是 `ok` → `Corrupt`（`sqlite`，`detail` 带前十条消息）。它只读，写者与只读的 Store 都能跑。
 
-### 5.3 `put_blob` 与 `put_bytes`
+### 5.3 `put_blob`、`put_blob_rooted` 与 `put_bytes`
 
 `put_blob(src)` 不进 SQLite：
 
@@ -1289,9 +1316,21 @@ store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkp
    - 成功 → 对扇出目录做 `fcntl(F_BARRIERFSYNC)`，让新名字也排在之后的写入之前；放开 L3，返回 `id`。
    - `EEXIST`，即另一个线程刚把同一内容存进来 → 同第 7 步的已存在分支（这次的屏障已经做了，无害）。
    - 其它错误 → `Unknown`（`outcome = "not_written"`：`blobs/` 里没有多出东西，tmp 留在原处）。
-10. `put_bytes(bytes)`：先取 L3 共享锁（从第 4 步转来时已经持有，不再取），在 `store/tmp/` 用 `O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC`、权限 0600 建临时文件（重名处理同第 3 步），写入全部字节，从内存里的字节算 BLAKE3，然后同第 7 到 9 步。
+10. `put_bytes(bytes)`：先取 L3 共享锁（从第 4 步或 `put_blob_rooted` 的第 2 步转来时已经持有，不再取），在 `store/tmp/` 用 `O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC`、权限 0600 建临时文件（重名处理同第 3 步），写入全部字节，从内存里的字节算 BLAKE3，然后同第 7 到 9 步。
 
 返回之后，blob 已在 `blobs/` 里，名字与数据都排在之后的任何写入之前；下一次 SQLite 提交的 `F_FULLFSYNC` 排空设备队列，于是"checkpoint 行持久"蕴含"它引用的 blob 持久"（S3）。并发：两个线程 put 同一内容，各自克隆、哈希，`RENAME_EXCL` 只让一个改名成功，另一个走 `EEXIST` 分支；两边返回同一个 id，只落一份（3a:582）。put 不登记 blob：行由 `record_checkpoint` 在同一个事务里写；在那之前只有 1 小时的年龄下限保护它（增补 4"Blob protection"，§4.6）。
+
+`put_blob_rooted(src_root, src)`（增补 8）与 `put_blob` 只差取得克隆体的那一段：
+
+1. 同第 1、2 步：只读 → `ReadOnly`；取 L3 共享锁，一直持到最后。
+2. `apfs::attrs_of(src_root, src)`：上级逐级不跟随，最后一级是 lstat 语义。上级里有符号链接（`NotDirectory`，`reason = "symlink"`）、不存在（`NoSuchPath`）等错误原样透传。再看种类 [我的决定：`clone_from_rooted` 以不跟随的方式打开源再克隆，打不开符号链接本身，遇到目录会克隆整棵树；`attrs_of` 经同样钉住的上级读出链接的目标，也不出根]：
+   - `Dir` → `IsDirectory`；`Fifo`、`Socket`、设备 → `NotFile`。什么都不建。
+   - `Symlink { target }` → 把目标的原始字节转到第 10 步存成 blob（符号链接的 blob 就是目标文本，裁定 T7），不克隆。
+   - `File` → 下一步。
+3. 取临时名（同第 3 步），`apfs::clone_from_rooted(src_root, src, tmp)`。apfs 在根之下逐级不跟随地打开 `src`，再从这个描述符克隆，所以存下的是这一刻 `src` 上的那个对象，绝不是根之外的文件。`src` 或它的某一级上级在第 2 步之后被换成了符号链接 → apfs 拒绝，原样透传，`tmp` 不存在。
+4. `lstat(tmp)`：普通文件 → 从第 5 步接着做（规整、哈希、看目标、屏障、改名）。是目录（`src` 在第 2 步之后被换成了目录，apfs 克隆了整棵树）→ `apfs::remove_tree_rooted(<root>, store/tmp/<名字>)` 删掉它，返回 `IsDirectory`；删不掉的留给 gc 的 tmp 清扫。
+
+工作区为什么不能用 `put_blob(ws.root/path)`：按路径克隆时，内核照常跟随上级里的符号链接。overlay 扫描之后、put 之前，工作区里某一级目录被换成指向工作区之外的符号链接，按路径的 put 就会把外面同名的文件存进 store（2026-10-22 实测：`a/b` 换成指向别处的符号链接之后，对 `a/b/f` 的 `clonefile` 克隆出的是别处的 `f`），之后的 restore 或发布再把它带进工作区或 git。
 
 ### 5.4 `get_blob`、`read_blob`、`verify_blob`
 
@@ -1326,7 +1365,7 @@ store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkp
 
 `retire_dir(path)`：
 
-1. 只读 → `ReadOnly`。`path` 必须是绝对路径、在 `<root>` 之下、没有空组件和 `.`、`..`，否则 `InvalidInput`。从 `<root>` 往下逐级 `lstat`：任何一级是符号链接 → `InvalidInput`（`reason = "symlink"`）；路径不存在 → `NoSuchPath`；最后一级不是目录 → `NotDirectory`。
+1. 只读 → `ReadOnly`。`path` 必须是绝对路径、在 `<root>` 之下、没有空组件和 `.`、`..`，去掉 `<root>/` 之后是一个合法的 `RepoPath`，否则 `InvalidInput`。文件系统上的核对（符号链接、存在、是不是目录）在第 3 步经 apfs 做（增补 8）。
 2. 去掉 `<root>/` 之后，路径必须恰好匹配下表的一行，并在一个读快照里通过这一行的核对；不匹配任何一行、或核对不过 → `InvalidInput`（`reason` 写明是哪一行、哪一项没过）。`<repo>`、`<tree>`、`<deps>`、`<session-id>` 按 types.md 的规则解析，解析不成就不算匹配；`<attempt>`、`<m>` 是不带前导零的十进制正整数；`<name>` 是一个组件 [我的决定：这六行就是 session 与 deps 在增补 2、3 之下会拿走的全部目录]。
 
    | # | 路径（相对 `<root>`） | 接受的条件 | 用它的 |
@@ -1339,8 +1378,8 @@ store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkp
    | 6 | `sessions/.repos/<session-id>/<repo>.git/worktrees/<m>` | 会话是 Active；工作区 (session, repo) 存在；`m` 小于工作区的当前代数（交换之后被换下的旧管理目录），或者 (session, repo, m) 是一条 Preparing、Refused 或 Abandoned 的意图（没有换入的下一代管理目录）。当前代数的管理目录、Swapping 与 Unknown 意图的 `m`、没有任何意图的更大的 `m` 都不接受 | session：`move_workspace` 之后，以及具名拒绝、`recover` |
 
    接受 Preparing 的意图与 Running 的尝试，是为了让操作先拿走自己的暂存、再把行关进终态（增补 4"Error timing, refinement 2"）：两步之间崩溃，行还是 Preparing 或 Running，`recover` 或下一个持锁者会把它关掉。第 5、6 行要求会话是 Active：意图只在 Active 的会话上开始（`begin_move`），会话离开 Active 之后，这些目录随第 4 行的整个会话根与影子仓库一起离开。
-3. 准备（增补 6）：以 `O_RDONLY | O_DIRECTORY | O_NOFOLLOW` 打开它，`fchflags` 清掉 `UF_IMMUTABLE` 与 `UF_APPEND`（其它标志不动），再 `fchmod` 给属主补上写权限（`u+w`，其它位不动）。顺序不能反：带 `uchg` 的目录连 `chmod` 都会 `EPERM`；把目录挪到另一个父目录要改它自己的 `..`，需要对它本身有写权限（2026-10-22 实测：0555 的目录改到别的父目录 `EACCES`，在同一父目录里改名不受影响；带 `uchg` 的 `EPERM`；清掉标志、补上写权限之后都成功）。deps 把封存的根设成 0555（deps.md §4.6），clonefile 会把 `uchg` 带过来，所以这一步对六行一律做。准备失败按 types.md §6.3 返回（`EPERM`、`EACCES` → `ReadOnly`），目录留在原处；`retire_dir` 从不删行，所以失败之后行与目录都和调用之前一样（标志可能已经清掉），调用方可以重试。
-4. `renamex_np(path, store/trash/<unix 毫秒>-<随机>, RENAME_EXCL)`，再对 `store/trash/` 做 `F_FULLFSYNC`（增补 3"Durability"）[我的决定]。只改名，不删除；trash 由 gc 在 1 小时之后删（§5.11）。返回 trash 里的路径。
+3. 打开并准备（增补 6、8）：`apfs::open_rooted(<root>, 相对路径)`，每一级都以 `O_NOFOLLOW` 打开。任何一级是符号链接（apfs 的 `NotDirectory` 或 `NotFile`，`reason = symlink`）→ `InvalidInput`（`reason = "symlink"`）；不存在 → `NoSuchPath`；最后一级不是目录（打开之后 `fstat` 看到的，或 apfs 因为它是 socket、设备而拒绝）→ `NotDirectory`。然后在这个句柄上 `fchflags` 清掉 `UF_IMMUTABLE` 与 `UF_APPEND`（其它标志不动），再 `fchmod` 给属主补上写权限（`u+w`，其它位不动）。顺序不能反：带 `uchg` 的目录连 `chmod` 都会 `EPERM`；把目录挪到另一个父目录要改它自己的 `..`，需要对它本身有写权限（2026-10-22 实测：0555 的目录改到别的父目录 `EACCES`，在同一父目录里改名不受影响；带 `uchg` 的 `EPERM`；清掉标志、补上写权限之后都成功）。deps 把封存的根设成 0555（deps.md §4.6），clonefile 会把 `uchg` 带过来，所以这一步对六行一律做。准备失败按 types.md §6.3 返回（`EPERM`、`EACCES` → `ReadOnly`），目录留在原处；`retire_dir` 从不删行，所以失败之后行与目录都和调用之前一样（标志可能已经清掉），调用方可以重试。
+4. `apfs::rename_rooted(<root>, 相对路径, store/trash/<unix 毫秒>-<随机>, RenameMode::Excl)`，两边的上级都钉住、不跟随符号链接（增补 8）；再用 `apfs::full_fsync` 对 `store/trash/` 做 `F_FULLFSYNC`（增补 3"Durability"）[我的决定]。只改名，不删除；trash 由 gc 在 1 小时之后删（§5.11）。返回 trash 里的路径。
 
 session 用它拿走会话根、影子仓库、交换之后换下来的旧树、被拒绝的暂存和旧代的管理目录（增补 3：目录只经 `retire_dir` 离开，没有 session 私有的 `.trash`）；deps 可以用它拿走自己的暂存（第 3 行），也可以照 deps.md 自己删。
 
@@ -1413,7 +1452,7 @@ session 怎样串这些方法由 session.md 定。按增补 3、4 的错误时�
 三条守卫（增补 4"gc guards"），两个方法都遵守：
 
 - **(a) 有主的路径**：gc 从不删除、也不挪走被这些行点名的路径，以及它们的上级和下级：Preparing、Swapping、Unknown 的意图的 `staging`，Running 与 Failed 的尝试的 `staging` [我的决定：增补 4 写的是"非终态"；Unknown 的意图与 Failed 的尝试的暂存是现场（不变量 6），一并保护]。导出暂存（增补 6"Export staging"）：`gitio::export_tree` 把临时目录 `.export-<dst 的名字>-<nonce>/` 建在 `dst` 的父目录里，成功时把其中的 `tree/` 改名成 `dst` 再删掉它，失败时原样保留（gitio.md 的 `export_tree`）。调用方把 `dst` 放在自己意图行或尝试行点名的暂存目录之下（不是暂存目录本身），这个临时目录就是暂存目录的下级，同样受本条保护；`dst` 若就是暂存目录本身，临时目录落在暂存目录旁边，本条护不住它。没有意图行的缓存填充（`new` 在 `create_session` 之前建基线，增补 6）由 repo 写锁和 `gc_repo` 第 5 步"名字解析不成键的不进"保护。
-- **(b) 年龄**：没有行的东西（`store/tmp/` 的条目、没有行的 blob 文件、活路径上没有登记的目录）以及要删的 blob 文件，只有年龄超过下限 1 小时才动；年龄按 `lstat` 的 mtime 与 ctime 中较晚的那个算。只看 mtime 是错的：clonefile 复制源文件的 mtime，改名只更新 ctime（2026-10-22 实测：克隆体带着 2020 年的 mtime、ctime 是当下；目录改名之后 mtime 不变、ctime 更新）。trash 的条目按名字里的时刻（改名进来的时间）算。下限与 `keep` 无关 [我的决定]；测试用 `Seam::AgeFloor` 改小它。
+- **(b) 年龄**：没有行的东西（`store/tmp/` 的条目、没有行的 blob 文件、活路径上没有登记的目录）以及要删的 blob 文件，只有年龄超过下限 1 小时才动；年龄按 mtime 与 ctime 中较晚的那个算（`Attrs::last_changed`）。只看 mtime 是错的：clonefile 复制源文件的 mtime，改名只更新 ctime（2026-10-22 实测：克隆体带着 2020 年的 mtime、ctime 是当下；目录改名之后 mtime 不变、ctime 更新）。trash 的条目按名字里的时刻（改名进来的时间）算。下限与 `keep` 无关 [我的决定]；测试用 `Seam::AgeFloor` 改小它。
 - **(c) 有引用的 generation**：登记过、仍被引用的基线 generation 与依赖集不删（下面的保留集）。
 
 删行一律分批：每批一个写事务，至多 10 000 行 [我的决定]（测试用 `Seam::GcBatchRows` 改小），先删子行再删父行（schema 没有级联，§4.3）；每批开始时打开 `strata_gc_active`，提交后关掉；批与批之间放开 L2，checkpoint 照常进行。锁的顺序见本节开头：repo 写锁（`gc_repo`，daemon 持有）→ L3（只在 blob 与 tmp 那几段）→ L2（每批）。
@@ -1427,8 +1466,8 @@ session 怎样串这些方法由 session.md 定。按增补 3、4 的错误时�
    - 可删的 gc 记录：`ended_ns < now − keep`、而且不是本 scope 最新的那一行 [我的决定：`last_gc_report` 只要每个 scope 最新的一行]。
 2. **删行**，分批：R 的 `overlay_entries` → `checkpoints` → `seeds` → `move_intents` → `workspaces` → `sessions`；然后 D；然后尝试；然后 gc 记录。D 按引用的顺序删，从不按号：一条提议只在已经没有未删的行经 `superseded_by` 指向它时才删（指向它的行要么已经删了，要么在同一批里），所以每批先挑 D 里没有被剩下的行指向的那些，一条取代链从被取代的一头删起。号的大小说明不了方向：`promote_proposal` 之后，号大的 Pending 可以被号小的行取代，号小的行之后又可以被更新的行取代。同一批里互相引用的行一起删没有问题，外键在 COMMIT 时才检查（延迟外键）。
 3. **blob**，持 L3 独占锁，每批至多 10 000 个：(i) 没有 overlay 条目引用、文件已经不在或年龄超过下限的 `blobs` 行：先删行并提交，再删文件；外键保证被引用的 blob 行删不掉（3a:600）。(ii) 清扫 `blobs/<aa>/`：没有行、年龄超过下限的文件删掉，它们是 put 之后、`record_checkpoint` 之前崩溃留下的孤儿（3a:293）。持独占锁时没有进行中的 put、get 与 `record_checkpoint`，所以一个刚 put、马上要被登记的 blob 不会在这一段里消失；刚 put 完的 blob 又因为年龄（ctime）太小而留着。
-4. **tmp**，持 L3 独占锁：`store/tmp/` 里年龄超过下限的条目删掉（死掉的 put 的克隆体、建库剩下的临时库）。
-5. **删 trash**：名字里的时刻早于 `now` 减去年龄下限（缺省 1 小时，与守卫 (b) 同一个值）的条目逐个删 [我的决定：上一版是过了 `keep` 才删；进 trash 的目录都已经没有活记录，留 1 小时，让还在按路径读它的进程（例如对旧树的扫描）有时间读完，也给人一个找回的窗口]。经 `apfs::open_rooted` 逐级 `O_NOFOLLOW` 打开；每个目录在删它的子项之前确保属主有写与执行权限（deps 封存的根是 0555，deps.md §4.6），每个条目先清掉 `UF_IMMUTABLE` 与 `UF_APPEND`（封存若用了 `chflags uchg`，克隆会把它带过来）再 `unlinkat`，自底向上；符号链接只删链接本身，`st_dev` 变了就不进去。删不掉的条目留在原处，记进报告的 `stuck`，不让整轮失败。
+4. **tmp**，持 L3 独占锁：`store/tmp/` 里年龄超过下限的条目删掉（死掉的 put 的克隆体、建库剩下的临时库）；目录条目（`put_blob_rooted` 克隆出整棵树之后、删掉它之前崩溃留下的）用 `apfs::remove_tree_rooted` 删。
+5. **删 trash**：名字里的时刻早于 `now` 减去年龄下限（缺省 1 小时，与守卫 (b) 同一个值）的条目逐个删 [我的决定：上一版是过了 `keep` 才删；进 trash 的目录都已经没有活记录，留 1 小时，让还在按路径读它的进程（例如对旧树的扫描）有时间读完，也给人一个找回的窗口]。每个条目一次 `apfs::remove_tree_rooted(<root>, store/trash/<名字>)`（增补 8）：不跟随符号链接（只删链接本身）、不跨设备，删之前清掉 `UF_IMMUTABLE` 与 `UF_APPEND`（封存若用了 `chflags uchg`，克隆会把它带过来）、让目录对属主可写（deps 封存的根是 0555，deps.md §4.6），自底向上。失败的条目（剩下的东西留在原处）记进报告的 `stuck`，不让整轮失败，下一轮再删。
 6. **完整性扫描**，持 L3 共享锁：从上一次全局 gc 记录的 `scrub_after` 之后，按 `blobs.id` 的顺序逐个 `verify_blob`，累计读满 2 GiB 就停 [我的决定]，记下最后一个 id；走到末尾则游标回到 NULL，下一轮从头开始。不符、文件不在或长度不对的 blob 进报告的 `corrupt`：从不删除、从不覆盖（3f:557），由 status 报出、人来处理。
 7. 追加一行 `gc_runs`（`scope = NULL`、`outcome = 'complete'`、报告的 JSON 与新游标），返回报告。
 
@@ -1437,10 +1476,10 @@ session 怎样串这些方法由 session.md 定。按增补 3、4 的错误时�
 1. **保留集**，在一个读快照里算：
    - 被钉住的基线 generation：任何工作区行引用的；任何留着的 checkpoint 行引用的，包括 removed 而还没过 keep 的会话的 checkpoint（S10；增补 5：每个留着的 checkpoint 的 `BaseGen` 都算引用，跨基线的 restore 因此总能找到目标基线目录，design §7）；Preparing、Swapping、Unknown 的意图的目标 (to_tree, to_deps)；该 repo 里 `created_ns` 最新的那一个 [我的决定：下一个 `new` 多半要用它，回收掉就得重新导出、重新认领依赖]。`gc` 先跑过，已经回收的会话不再钉住任何东西。
    - 被钉住的依赖集：留下的基线 generation 引用的；Pending 提议的 `to_set`；提出会话还有行的 AwaitingPublish 提议的 `to_set`；`deps_main.set_id`（deps.md §4.6）。`from_set` 不钉：仍钉着它的会话已经由工作区行保住了。
-2. **候选与准备**：没被钉住、且 `created_ns < now − keep` 的基线 generation 是候选。改名进 trash 之前先准备每个候选的根目录（增补 6，同 `retire_dir` 第 3 步）：`lstat` 不跟随；不存在就只删行；是目录就以 `O_RDONLY | O_DIRECTORY | O_NOFOLLOW` 打开，`fchflags` 清掉 `UF_IMMUTABLE` 与 `UF_APPEND`，再 `fchmod` 给属主补上写权限；不是目录（例如被换成了符号链接）就不准备，改名只挪这个条目本身。准备失败的候选这一轮不回收：行与目录都留着，路径记进报告的 `stuck`，下一轮再试；这不算中途失败。基线这一步做完，再定依赖集的候选：没被钉住（留下的基线 generation，含准备失败的，引用的仍被钉住）、且 `sealed_ns < now − keep` 的依赖集，同样先准备根目录（deps 封存的根是 0555，deps.md §4.6）。
+2. **候选与准备**：没被钉住、且 `created_ns < now − keep` 的基线 generation 是候选。改名进 trash 之前先准备每个候选的根目录（增补 6，同 `retire_dir` 第 3 步）：`apfs::open_rooted(<root>, 相对路径)`，不存在（`NoSuchPath`）就只删行；是目录就在这个句柄上 `fchflags` 清掉 `UF_IMMUTABLE` 与 `UF_APPEND`，再 `fchmod` 给属主补上写权限；最后一级不是目录（例如被换成了符号链接，apfs 不打开它）就不准备，改名只挪这个条目本身；上级里有符号链接（`NotDirectory`，`reason = symlink`）算准备失败。准备失败的候选这一轮不回收：行与目录都留着，路径记进报告的 `stuck`，下一轮再试；这不算中途失败。基线这一步做完，再定依赖集的候选：没被钉住（留下的基线 generation，含准备失败的，引用的仍被钉住）、且 `sealed_ns < now − keep` 的依赖集，同样先准备根目录（deps 封存的根是 0555，deps.md §4.6）。
 3. **删行**，分批，只删第 2 步准备好了的：基线 generation 行；然后已没有 generation 引用、且 `created_ns < now − keep` 的基线清单（先删 `manifest_entries` 再删 `base_trees`）；然后依赖集行。
-4. **挪目录**：第 3 步删了行的每个目录用 `renamex_np` 改名进 `store/trash/<now 毫秒>-<随机>`，再对 `store/trash/` 做 `F_FULLFSYNC`；目录已经不在就跳过。先准备、再删行、再改名：准备失败时行没删，不会有目录因为权限留在活路径上而行已经没了。准备之后改名仍然失败（例如 I/O 错误），或在删行与改名之间崩溃，留下的是一个准备好了、没有登记的目录：第 5 步在下一轮过了年龄下限收走它（准备时的 chmod 刷新了它的 ctime）。
-5. **清扫活路径**：形状是 `bases/<repo>/<tree>/<deps>` 或 `deps/<repo>/<deps>`、每一级都能解析成对应的键、却没有登记、年龄超过下限、又不受守卫 (a) 保护的目录 → 照第 2 步准备（失败记进 `stuck`），再改名进 trash；之后变空的 `bases/<repo>/<tree>/` 用 `rmdir` 删掉。名字解析不成键的条目（`.staging`、`.locks`、gitio 导出留下的 `.export-*` 临时目录、别的模块以 `.` 开头的临时目录）一概不进，任何符号链接都不跟随；`<root>/sessions/` 从来不进（裁定 T5：中断的导出保留它的临时目录，由 status 报出）。
+4. **挪目录**：第 3 步删了行的每个目录用 `apfs::rename_rooted(<root>, 相对路径, store/trash/<now 毫秒>-<随机>, RenameMode::Excl)` 改名进 trash，再用 `apfs::full_fsync` 对 `store/trash/` 做 `F_FULLFSYNC`；目录已经不在（`NoSuchPath`）就跳过。先准备、再删行、再改名：准备失败时行没删，不会有目录因为权限留在活路径上而行已经没了。准备之后改名仍然失败（例如 I/O 错误），或在删行与改名之间崩溃，留下的是一个准备好了、没有登记的目录：第 5 步在下一轮过了年龄下限收走它（准备时的 chmod 刷新了它的 ctime）。
+5. **清扫活路径**：用 `apfs::list_dir` 逐级列出 `bases/`、`bases/<repo>/`、`bases/<repo>/<tree>/`、`deps/`、`deps/<repo>/`（每项带 `Attrs`，不跟随符号链接）。形状是 `bases/<repo>/<tree>/<deps>` 或 `deps/<repo>/<deps>`、每一级都能解析成对应的键、却没有登记、年龄超过下限、又不受守卫 (a) 保护的目录 → 照第 2 步准备（失败记进 `stuck`），再照第 4 步改名进 trash；之后变空的 `bases/<repo>/<tree>/` 用 `apfs::remove_rooted(<root>, 相对路径, RemoveKind::EmptyDir)` 删掉，不空就留着。名字解析不成键的条目（`.staging`、`.locks`、gitio 导出留下的 `.export-*` 临时目录、别的模块以 `.` 开头的临时目录）一概不进，符号链接一律不进；`<root>/sessions/` 从来不进（裁定 T5：中断的导出保留它的临时目录，由 status 报出）。
 6. 追加一行 `gc_runs`（`scope = repo`），返回报告。
 
 为什么分 repo、为什么持锁：session 与 deps 都在该 repo 的写锁里把目录改名进 `bases/`、`deps/` 并登记，`gc_repo` 在同一把锁里做决定、挪目录，两者不会交错（增补 4）；年龄守卫是第二道防线。
@@ -1452,6 +1491,7 @@ session 怎样串这些方法由 session.md 定。按增补 3、4 的错误时�
 | 操作 | 复杂度 | 说明 |
 | --- | --- | --- |
 | `put_blob` | O(文件大小) 的哈希加常数次系统调用 | 新内容两次 `F_BARRIERFSYNC`（文件与扇出目录）；重复内容只多一次克隆、一次哈希、一次 `lstat`，没有屏障 |
+| `put_blob_rooted` | 同 `put_blob`，另加两次 O(深度) 的逐级打开（`attrs_of` 与 `clone_from_rooted` 各一次） | 每一级一次 `openat`；符号链接不克隆，直接存目标文本 |
 | `get_blob` | O(1) | 零拷贝克隆，不读内容；一次只读查询 |
 | `record_checkpoint` | O(条目数) 次插入、O(不同 blob 数) 次 `lstat`（L2 之外）加 1 次 `F_FULLFSYNC` | L2 只持几毫秒 |
 | `record_base_gen` | O(清单条目数) | 一个事务；tool 量级（约 1 万个文件）几十毫秒，只在建新基线时 |
@@ -1478,11 +1518,11 @@ design §8 的验收数字里与 store 有关的是"checkpoint 改 50 个文件 
 | `Busy` | open：另一个写者持有 LOCK；任何写：外部进程持有 SQLite 写锁 | 无，`outcome = "not_written"` | 稍后重试 | 否（types.md 只列了 daemon 的按 repo 写锁） |
 | `ReadOnly` | 只读 Store 上的任何写；只读打开时需要 WAL 恢复；get 的 dst 所在目录不可写；retire_dir 的准备或改名得到 `EPERM`、`EACCES` | 无 | 启动 daemon；修正目标 | 否（列的是 cli 与写封存目录的模块） |
 | `Unsupported` | open：卷不支持 clonefile（apfs 透传）；PRAGMA 回读不符 | 无；建库探测失败时删掉自己刚建的空目录 | 换 APFS 卷；换支持这些设置的 SQLite | 否（列的是 apfs、gitio、confirm；回读不符这一项是新增） |
-| `NoSuchPath` | open：checkout 不存在；open_read_only：还没有 Store；put：src 不存在；get：dst 的上级不存在；retire_dir：路径不存在 | 无 | 修正路径 | 否 |
-| `NotDirectory` | get：dst 的某一级上级不是目录（apfs 透传）；retire_dir：路径不是目录 | 无 | 修正路径 | 否（列的是 apfs、session、deps） |
+| `NoSuchPath` | open：checkout 不存在；open_read_only：还没有 Store；put、`put_blob_rooted`：src 不存在；get：dst 的上级不存在；retire_dir：路径不存在 | 无 | 修正路径 | 否 |
+| `NotDirectory` | get：dst 的某一级上级不是目录（apfs 透传）；`put_blob_rooted`：src 的某一级上级不是目录或是符号链接（apfs 透传，`reason = "symlink"`）；retire_dir：路径不是目录 | 无 | 修正路径 | 否（列的是 apfs、session、deps） |
 | `Exists` | get：dst 已存在；create_session：会话 id、root 或工作区路径已有行；begin_deps_attempt：同一依赖集已有 Running 的尝试；record_deps_set：依赖集已登记；begin_move：该工作区已有没结束的意图 | 无 | 换目标；读出已有的那条再决定 | 否（列的是 apfs、session） |
-| `IsDirectory` | put：src 是目录（apfs 透传） | 无 | — | 是 |
-| `NotFile` | put：src 是 FIFO、socket 或设备文件（apfs 透传） | 无 | — | 透传 |
+| `IsDirectory` | put：src 是目录（apfs 透传）；`put_blob_rooted`：src 是目录，或克隆时已被换成目录 | 无 | — | 是 |
+| `NotFile` | put、`put_blob_rooted`：src 是 FIFO、socket 或设备文件（apfs 透传） | 无 | — | 透传 |
 | `NoSuchCheckpoint` | `checkpoint` 读；record_publish 的批次点名了不存在的 checkpoint | 无 | — | 是 |
 | `NoSuchSession` | 写操作点名的会话不存在或已 Removed；set_lifecycle、set_session_phase、record_seeds 的会话不存在 | 无 | — | 否（列的是 session） |
 | `NoSuchRepo` | 会话里没有这个 repo 的工作区 | 无 | — | 否 |
@@ -1515,6 +1555,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | --- | --- | --- |
 | 建库第 9 步之前 | 空目录，`store/tmp/` 里的临时库 | open 从头建（§5.1）；临时库由 gc 过了年龄下限收走 |
 | put：克隆之后、改名之前 | `store/tmp/` 里的克隆体（mtime 可能是源文件的旧值，ctime 是克隆的时刻） | 不影响任何写入，新写入换新名字（3a:228）；gc 过了年龄下限（按 mtime 与 ctime 中较晚的那个）收走 |
+| `put_blob_rooted`：克隆出一棵目录树之后、删掉它之前 | `store/tmp/` 里一棵克隆树 | 不影响任何写入；gc 的 tmp 清扫过了年龄下限用 `remove_tree_rooted` 收走 |
 | put：改名之后、`record_checkpoint` 提交之前 | `blobs/` 里一个没有行的 blob | 之后同内容的 put 复用它；没人复用就由 gc 过了下限收走（3a:293）；不存在 checkpoint 行 |
 | `record_checkpoint`：提交之前 | 什么都没有，SQLite 回滚 | checkpoint 不存在；同一工具调用的重放会重新记 |
 | `record_checkpoint`：提交之后、回复之前 | 完整、持久的 checkpoint | 同一工具调用的重放返回同一个号；`checkpoint_write_is_durable_after_crash` 证明 |
@@ -1540,7 +1581,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 
 ## 7. 测试清单
 
-带 `#[ignore]` 的测试需要 `hdiutil` 建的磁盘映像（不需要 root），用 `cargo test -p strata-store --features test-seams -- --ignored` 跑。子进程测试照 LayerFS 的做法：父测试以 `--exact <子测试名>` 重新执行本测试二进制并设环境变量，子测试函数在环境变量不在时直接返回。测试用到的 `Seam`、`SyncCounts` 只在 `test-seams` 下编译（§3、§8）。
+带 `#[ignore]` 的测试需要 `hdiutil` 建的磁盘映像（不需要 root），用 `cargo test -p strata-store --features test-seams -- --ignored` 跑。子进程测试照 LayerFS 的做法：父测试以 `--exact <子测试名>` 重新执行本测试二进制并设环境变量，子测试函数在环境变量不在时直接返回。测试用到的 `Seam`、`SyncCounts` 只在 `test-seams` 下编译（§3、§8）。store 的 `test-seams` 同时打开 `strata-apfs/test-seams`：要在 apfs 的两次系统调用之间换掉目录的测试用 apfs 的 `seams::set_before_open`。
 
 | 测试名 | 断言 | 来源（矩阵行 或 新增） |
 | --- | --- | --- |
@@ -1572,8 +1613,8 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `large_and_sparse_blobs_roundtrip` | 500 000 000 字节的稠密文件，与带空洞的稀疏文件，经 put、get 字节相同（空洞读成零）；get 是零拷贝克隆，不读内容 | layerfs-daemon/tests/complete_installed_roots.rs::dense_500000000_kernel_bytes_survive_install<br>layerfs-daemon/tests/complete_installed_roots.rs::sparse_chunk_bytes_and_holes_survive_install |
 | `same_bytes_new_path_or_mode_reuse_blob` | 同样字节的文件换路径、换 inode（复制一份）、改 mode 之后 put，得到同一个 blob，`blobs/` 里只有一份；差一个字节就是新 blob | layerfs-daemon/tests/file_digests.rs::a_relinked_file_with_saved_bytes_reuses_the_object<br>layerfs-project/tests/init_counters.rs::init_counts_every_entry_and_each_file_identity_once |
 | `blob_files_are_content_only` | 源文件带 `com.apple.quarantine`、一个用户扩展属性、`uchg` 标志、mode 0755：blob 文件没有这些扩展属性（只剩内核托管的 `com.apple.provenance`），没有 BSD 标志，mode 0444；get 出来的文件 mode 0644、mtime 在当前时刻附近，没有拷来的扩展属性 | layerfs-workspace/tests/captured_namespace_metadata.rs::a_metadata_patch_keeps_every_other_key_and_its_value_root |
-| `symlink_blob_stores_target_text` | put 一个指向 `../a/b` 的符号链接：blob 是内容为 `../a/b` 的普通文件，`read_blob` 读回目标文本；链接本身不被跟随 | 新增 |
-| `put_blob_refuses_directory_and_special_files` | src 是目录 → `IsDirectory`；FIFO → `NotFile`，而且打开 FIFO 不会挂住；不存在 → `NoSuchPath`；三种情况下 `blobs/` 与 `tmp/` 都没有新条目 | 新增 |
+| `symlink_blob_stores_target_text` | put 一个指向 `../a/b` 的符号链接：blob 是内容为 `../a/b` 的普通文件，`read_blob` 读回目标文本；链接本身不被跟随；`put_blob_rooted` 对工作区里的同一个链接得到同一个 id，目标取自 `attrs_of`，不克隆 | 新增 |
+| `put_blob_refuses_directory_and_special_files` | src 是目录 → `IsDirectory`；FIFO → `NotFile`，而且打开 FIFO 不会挂住；不存在 → `NoSuchPath`；三种情况下 `blobs/` 与 `tmp/` 都没有新条目；`put_blob_rooted` 对同样三种 src 返回同样的码，在克隆之前就拒绝 | 新增 |
 | `get_blob_refuses_existing_dst` | dst 已存在：`get_blob` 返回 `Exists`，dst 的字节与 inode 不变 | 新增 |
 | `get_blob_missing_is_corrupt_and_leaves_no_dst` | 删掉一个已 put 的 blob 的文件：`get_blob` 返回 `Corrupt`（`blob_missing`），dst 不存在；`read_blob` 与 `verify_blob` 同样返回 `Corrupt`（`blob_missing`） | layerfs-content/tests/file_read.rs::a_provider_failure_is_returned_once_and_stops_the_read |
 | `missing_or_mismatched_blob_is_corrupt_never_new` | 文件不在、不是普通文件（换成一个目录）、长度与登记行不符（夹具用原始连接插一行 `blobs`）、内容与 id 不符（`verify_blob`）四种情况都返回 `Corrupt` 并带原因；只有文件、没有登记行时 get 与 read 照常成功；没有哪个函数返回会被当成"这是新文件"或"没变"的结果。3c:85 里"基线文件不见了"的那一半不在 store：基线文件不在 blob 存储里，由 overlay.md 与 session.md 报 `Corrupt`（增补 4"Base files"） | layerfs-workspace/tests/captured_file_edits.rs::first_provider_absence_denial_identity_and_length_mismatch_never_prove_newness |
@@ -1585,6 +1626,8 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `concurrent_puts_of_same_content_store_one_blob` | 8 个线程同时 put 同一份新内容（相当于几个会话同时 checkpoint 同一个文件）：都成功，都返回同一个 id，`blobs/` 里只有一个文件，读回完整 | layerfs-persistence/tests/concurrent_first_installs.rs::two_writers_saving_the_same_new_content_both_complete |
 | `put_blob_orders_blob_before_later_writes` | `sync_counts`：每个新 blob 在 put 返回之前有一次文件屏障和一次扇出目录屏障；重复内容的 put 先看到已存的 blob，一次屏障都不做（§5.3 第 7 步） | 新增 |
 | `put_rename_failure_is_not_written` | `BlobRenameFails { errno: EIO }`：put 返回 `Unknown`（`not_written`），`blobs/` 里没有新文件，克隆体留在 `store/tmp/`；之后同内容的 put 成功 | 新增 |
+| `put_blob_rooted_never_follows_a_swapped_parent` | 工作区 W 里 `a/b/f` 是普通文件，W 之外的目录 X 里有内容不同的同名文件 `f`：`put_blob_rooted(W, a/b/f)` 存下 W 里的内容；把 `a/b` 换成指向 X 的符号链接之后再调，返回 `NotDirectory`（`reason = "symlink"`），`blobs/` 与 `tmp/` 都没有新条目，X 里的内容没有进 store；用 apfs 的 `seams::set_before_open` 在 `attrs_of` 之后、`clone_from_rooted` 打开 `a` 之前做同样的替换，结果相同。对照：按路径的 `put_blob(W/a/b/f)` 跟着这个符号链接存下了 X 里的内容（2026-10-22 实测的内核行为），所以工作区的捕获不用它 | 新增 |
+| `put_blob_rooted_drops_a_directory_clone` | 用 apfs 的 `seams::set_before_open` 在 `attrs_of` 之后、`clone_from_rooted` 打开 src 之前，把普通文件 src 换成一个装着文件的目录：返回 `IsDirectory`，`store/tmp/` 里没有留下克隆树，`blobs/` 没有新文件，工作区里的那个目录原样 | 新增 |
 | `deps_attempt_is_an_intent_row` | `begin_deps_attempt` 返回从 1 起的序号，行为 Running，`staging` 等于 `deps_staging_dir`；同一 (repo, set) 再 begin 返回 `Exists`（`detail.attempt`）；`set_deps_attempt_pid` 只写一次，第二次返回 `InvalidInput`，尝试结束之后返回 false；`end_deps_attempt` 把它关成 Failed 或 Refused，读回的 `StrataError` 与写入的相等，再 end 返回 false；关掉之后同一依赖集再 begin 拿到新号；`deps_attempts` 按号列出全部 | 新增 |
 | `deps_set_seals_its_attempt` | `record_deps_set` 登记依赖集，并在同一个事务里把尝试记为 Sealed；origin 与尝试不配（Empty 带尝试、Build 配 Adopt 的尝试、尝试已结束、Empty 的 dirs 非空）返回 `InvalidInput`，什么都不写；已登记的依赖集再登记返回 `Exists`；`deps_set` 读回 origin 与封存时刻 | 新增 |
 | `proposal_slots_supersede_in_one_transaction` | `record_proposal` 插入 Pending 时取代该 repo 原有的 Pending（`superseded_by` 是新号），插入 AwaitingPublish 时只取代同一 (repo, 提出会话) 的那条；`replaces` 与位置上实际的那条不符时返回 `None`，什么都不写；from = to、tree 与 head 只给一个、没有目标又没有提出会话都返回 `InvalidInput`；任何时刻每个 repo 至多一条 Pending | 新增 |
@@ -1646,14 +1689,14 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `gc_deletes_supersede_chains_across_batches` | `promote_proposal` 让一条号小的提议取代号大的 Pending，再由一条更新的 Pending 取代这条号小的，链里两个方向的引用都有；都决定了、过了 keep，`GcBatchRows { rows: 1 }` 让每批只删一行：gc 删完整条链，没有一批在 COMMIT 时撞上外键；被留下的提议经 `superseded_by` 引用的行留着 | 新增 |
 | `symlink_put_never_retakes_the_blob_gate` | put 一个符号链接，`PauseInPut` 停在临时克隆之后；另一个线程开始 gc，在 L3 独占锁上排队；放行之后 put 在 1 秒内返回目标文本的 id，gc 随后完成：符号链接那一支没有第二次取 L3 | 新增 |
 | `gc_keeps_open_publish_scenes` | removed 并过了 keep 的会话，只要有 Running 或 Unknown 的发布引用它的 checkpoint，就整个保留；发布变成 Done 之后，下一轮回收它 | 新增 |
-| `gc_retires_dirs_through_trash_and_resumes` | 回收的 generation 目录先进 trash，过了年龄下限才删（用 `AgeFloor` 缩短）；用 `GcStopAfterRetire` 让 `gc_repo` 在挪目录中途失败：返回 `Unknown`（`partial`），已提交的批次有效，下一轮收走活路径上没登记的目录并把 trash 删完；trash 里带 `uchg` 的文件、0555 的目录照样删掉；用 `GcUnlinkFails` 让一个文件删不掉：它进 `stuck`，整轮不失败 | 新增 |
-| `gc_touches_nothing_outside_its_areas` | `sessions/` 下的一切、`bases/` 下以 `.` 开头的临时目录、解析不成键的名字、指向 root 之外的符号链接，gc 之后都原样存在，链接的目标没有被删 | 新增 |
+| `gc_retires_dirs_through_trash_and_resumes` | 回收的 generation 目录先进 trash，过了年龄下限才删（用 `AgeFloor` 缩短）；用 `GcStopAfterRetire` 让 `gc_repo` 在挪目录中途失败：返回 `Unknown`（`partial`），已提交的批次有效，下一轮收走活路径上没登记的目录并把 trash 删完；trash 里带 `uchg` 的文件、0555 的目录照样删掉（`remove_tree_rooted`）；用 `GcUnlinkFails` 让一个 trash 条目删不掉：它进 `stuck`，整轮不失败，下一轮删掉它 | 新增 |
+| `gc_touches_nothing_outside_its_areas` | `sessions/` 下的一切、`bases/` 下以 `.` 开头的临时目录、解析不成键的名字、指向 root 之外的符号链接，gc 之后都原样存在，链接的目标没有被删；`bases/<repo>` 被换成指向 root 之外目录的符号链接时，`gc_repo` 不进去，那个目录与里面的东西原样 | 新增 |
 | `gc_never_reclaims_live_session_with_missing_dirs` | 活会话的工作区目录被人手删掉：gc 不回收它的任何行，checkpoint 仍可读；这样的现场由 status 报出，不由 gc 清理 | sdk/js/native/tests/unit/reclaim.rs::a_gone_container_is_reclaimed_by_removing_its_records |
 | `gc_scrub_reports_corrupt_and_resumes_from_cursor` | 用 `ScrubBudget` 把预算设为 4 KiB：每轮核对一段，游标前进，走到末尾回到开头；改坏的 blob 在扫到它的那一轮进 `corrupt` | 新增 |
 | `corrupt_blob_is_reported_never_overwritten` | 已存 blob 被改坏（长度不变）：gc 的完整性扫描把它列进 `corrupt` 并原样保留；同内容再 put 不覆盖它；人把正确的字节写回之后，`verify_blob` 通过，下一轮扫描不再报 | tgrep-core/tests/generations.rs::malformed_metadata_is_rejected_without_overwriting_generation |
 | `gc_report_persisted_for_status` | `gc` 与 `gc_repo` 返回的报告与 `last_gc_report(scope)` 读回的相同，重开之后仍能读到；中途停下的一轮（`GcStopAfterRetire`）以 `outcome = 'partial'`、带 `error` 写进 `gc_runs`，`last_gc_report` 读得到它；旧的 gc 记录过了 keep 被删，每个 scope 最新的一行留着 | 新增 |
 
-覆盖：目标模块为 store 的 56 行（3a 45、3c 4、3d 5、3f 2）加裁定改归 store 的 3c L139，共 57 行，全部出现在上表的来源栏里；另引用理由点名 store 的 `—` 行 15 条（3a 2、3b 4、3c 6、3d 2、3e 1），其中 3c:47（`captured_reader_preserves_sealed_bytes_across_install_and_blocks_failed_fold`，理由写"被引用的 blob 由 store 引用计数 gc 保留"）在本轮补引到 `gc_keeps_referenced_generations`。上表共 108 个测试，其中新增 62 个。3b 的 `layerfs-telemetry/tests/platform.rs::retention_expiry_open_reader_and_deletion_failure` 理由写明"不以此为依据"，所以 gc 保留期的测试记为新增。上一版的 `base_gen_requires_registered_tree_and_deps` 改为 `base_gen_requires_registered_deps`：清单不再单独登记，而是随 `record_base_gen` 一起写（M13）。
+覆盖：目标模块为 store 的 56 行（3a 45、3c 4、3d 5、3f 2）加裁定改归 store 的 3c L139，共 57 行，全部出现在上表的来源栏里；另引用理由点名 store 的 `—` 行 15 条（3a 2、3b 4、3c 6、3d 2、3e 1），其中 3c:47（`captured_reader_preserves_sealed_bytes_across_install_and_blocks_failed_fold`，理由写"被引用的 blob 由 store 引用计数 gc 保留"）在本轮补引到 `gc_keeps_referenced_generations`。上表共 110 个测试，其中新增 64 个。3b 的 `layerfs-telemetry/tests/platform.rs::retention_expiry_open_reader_and_deletion_failure` 理由写明"不以此为依据"，所以 gc 保留期的测试记为新增。上一版的 `base_gen_requires_registered_tree_and_deps` 改为 `base_gen_requires_registered_deps`：清单不再单独登记，而是随 `record_base_gen` 一起写（M13）。
 
 ## 8. 实现任务（TDD）
 
@@ -1679,7 +1722,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 Run: `cargo test -p strata-store --features test-seams --test open --test guards`
 Expected: FAIL（`Store::open` 还不存在，编译失败）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.1 的建库顺序（同卷与非空检查在任何写入之前，`O_CLOEXEC` 的 LOCK，clonefile 探测失败时 rmdir 自己的空目录，临时库加 `RENAME_EXCL`）；§5.2 的文件头预检、身份核对、设置回读、`:memory:` schema 比对、函数注册，看 clean-shutdown 标记决定要不要跑 `quick_check`，`close` 写标记，按需的 `quick_check()`；只读打开与 `ReadOnly` 的统一入口；errno 与 SQLite 错误到 `StrataError` 的归类（types.md §6.3 加 §6.2 的 `detail`）；§4.3 的 DDL 原文
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.1 的建库顺序（同卷与非空检查在任何写入之前，`O_CLOEXEC` 的 LOCK，clonefile 探测失败时 rmdir 自己的空目录，临时库加 `RENAME_EXCL`）；§5.2 的文件头预检、身份核对、设置回读、`:memory:` schema 比对、函数注册，看 clean-shutdown 标记决定要不要跑 `quick_check`，取 root 的 realpath 给 apfs 在根之下的调用，`close` 写标记，按需的 `quick_check()`；只读打开与 `ReadOnly` 的统一入口；errno 与 SQLite 错误到 `StrataError` 的归类（types.md §6.3 加 §6.2 的 `detail`）；§4.3 的 DDL 原文
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-store --features test-seams --test open --test guards`（磁盘映像的两个再加 `-- --ignored` 跑一遍）
@@ -1700,16 +1743,16 @@ git commit -m "feat(store): open, layout, pinned schema and guards"
 - Test: `crates/strata-store/tests/blob.rs`
 
 **Interfaces:**
-- Consumes: `apfs::clone_file`、`strata_types::BlobId`
-- Produces: `Store::put_blob`、`Store::put_bytes`、`Store::get_blob`、`Store::read_blob`、`Store::verify_blob`；L3 的共享一侧；`Seam::{BlobRenameFails, TempNameTaken}`；`Store::sync_counts` 的 blob 与目录屏障计数
+- Consumes: `apfs::{clone_file, attrs_of, FileKind}`、增补 8 的 `apfs::{clone_from_rooted, remove_tree_rooted}`（apfs 修订轮之后才有，§2）、测试里 `apfs::seams::set_before_open`；`strata_types::{BlobId, RepoPath}`
+- Produces: `Store::put_blob`、`Store::put_blob_rooted`、`Store::put_bytes`、`Store::get_blob`、`Store::read_blob`、`Store::verify_blob`；L3 的共享一侧；`Seam::{BlobRenameFails, TempNameTaken}`；`Store::sync_counts` 的 blob 与目录屏障计数
 
-- [ ] **Step 1: 写失败的测试**：`blob_put_is_idempotent`、`blob_id_ignores_delivery_shape`、`blob_known_answer_vectors`、`empty_file_is_a_valid_blob`、`stored_blob_is_never_rewritten`、`blob_identity_changes_with_any_byte`、`blob_roundtrip_is_byte_exact`、`large_and_sparse_blobs_roundtrip`、`same_bytes_new_path_or_mode_reuse_blob`、`blob_files_are_content_only`、`symlink_blob_stores_target_text`、`put_blob_refuses_directory_and_special_files`、`get_blob_refuses_existing_dst`、`get_blob_missing_is_corrupt_and_leaves_no_dst`、`missing_or_mismatched_blob_is_corrupt_never_new`、`get_blob_is_trusted_verify_detects_flipped_bit`、`put_reuse_does_not_reread_existing_copy`、`put_reuse_with_length_mismatch_is_corrupt`、`put_restores_missing_blob_file`、`stale_temp_files_do_not_block_put`、`concurrent_puts_of_same_content_store_one_blob`、`put_blob_orders_blob_before_later_writes`、`put_rename_failure_is_not_written`
+- [ ] **Step 1: 写失败的测试**：`blob_put_is_idempotent`、`blob_id_ignores_delivery_shape`、`blob_known_answer_vectors`、`empty_file_is_a_valid_blob`、`stored_blob_is_never_rewritten`、`blob_identity_changes_with_any_byte`、`blob_roundtrip_is_byte_exact`、`large_and_sparse_blobs_roundtrip`、`same_bytes_new_path_or_mode_reuse_blob`、`blob_files_are_content_only`、`symlink_blob_stores_target_text`、`put_blob_refuses_directory_and_special_files`、`get_blob_refuses_existing_dst`、`get_blob_missing_is_corrupt_and_leaves_no_dst`、`missing_or_mismatched_blob_is_corrupt_never_new`、`get_blob_is_trusted_verify_detects_flipped_bit`、`put_reuse_does_not_reread_existing_copy`、`put_reuse_with_length_mismatch_is_corrupt`、`put_restores_missing_blob_file`、`stale_temp_files_do_not_block_put`、`concurrent_puts_of_same_content_store_one_blob`、`put_blob_orders_blob_before_later_writes`、`put_rename_failure_is_not_written`、`put_blob_rooted_never_follows_a_swapped_parent`、`put_blob_rooted_drops_a_directory_clone`
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-store --features test-seams --test blob`
 Expected: FAIL（`put_blob` 等还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.3 的 L3 共享锁、克隆、只看克隆体、规整（标志、mode、扩展属性的跳过表）、BLAKE3（16 MiB 起 mmap 加 rayon）、先看目标再决定（已存在就 `utimensat` 刷新、不做屏障）、`futimens`、两个 `F_BARRIERFSYNC`、`RENAME_EXCL` 与 `EEXIST` 分支；§5.4 的按文件工作（有登记行才比长度）、受信任 get（0644、mtime 为当前时刻）、read 的上限、verify 的重算
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.3 的 L3 共享锁、克隆、只看克隆体、规整（标志、mode、扩展属性的跳过表）、BLAKE3（16 MiB 起 mmap 加 rayon）、先看目标再决定（已存在就 `utimensat` 刷新、不做屏障）、`futimens`、两个 `F_BARRIERFSYNC`、`RENAME_EXCL` 与 `EEXIST` 分支；`put_blob_rooted`（`attrs_of` 先看种类：目录与特殊文件在克隆之前拒绝，符号链接直接存目标；`clone_from_rooted` 克隆进 tmp，克隆体是目录就 `remove_tree_rooted` 删掉并返回 `IsDirectory`；`test-seams` 同时打开 `strata-apfs/test-seams`）；§5.4 的按文件工作（有登记行才比长度）、受信任 get（0644、mtime 为当前时刻）、read 的上限、verify 的重算
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-store --features test-seams --test blob`
@@ -1788,7 +1831,7 @@ git commit -m "feat(store): base generations with their manifests"
 - Test: `crates/strata-store/tests/sessions.rs`
 
 **Interfaces:**
-- Consumes: `strata_types::{SessionManifest, WorkspaceState, SessionId, RepoPath, CommitOid, BaseGen}`；Task 3 的提议读；Task 4 的 `record_base_gen`
+- Consumes: `strata_types::{SessionManifest, WorkspaceState, SessionId, RepoPath, CommitOid, BaseGen}`；`apfs::{open_rooted, full_fsync, rename_rooted, RenameMode}`（变体按增补 8 叫 `Excl`）；Task 3 的提议读；Task 4 的 `record_base_gen`
 - Produces: `Store::create_session`、`Store::set_session_phase`、`Store::set_lifecycle`、`Store::record_seeds`、`Store::begin_move`、`Store::set_move_phase`、`Store::set_move_state`、`Store::finish_move`、`Store::fail_move`、`Store::set_old_tree`、`Store::session`、`Store::sessions`、`Store::move_intents`、`Store::open_move_intents`、`Store::retire_dir`；`Lifecycle`、`Health`、`SessionRecord`、`WorkspaceRecord`、`SeedRow`、`MoveIntent`、`MoveState`；`Seam::PauseBeforeCommit` 与 `Store::wait_paused`、`Store::release`
 
 - [ ] **Step 1: 写失败的测试**：`session_manifest_roundtrip`、`lifecycle_moves_forward_by_compare_and_swap`、`unknown_session_keeps_its_scene`、`seeds_are_per_path_rows_written_once`、`move_intent_generation_never_reused`、`finish_move_swaps_base_head_and_generation_together`、`failed_move_marks_workspace_unknown`、`open_proposals_skip_removed_sessions`、`retire_dir_moves_only_dirs_without_live_rows`、`retire_dir_takes_dirs_of_removed_sessions`、`retire_dir_takes_swapped_out_trees`、`retire_dir_takes_superseded_admin_dirs`
@@ -1797,7 +1840,7 @@ git commit -m "feat(store): base generations with their manifests"
 Run: `cargo test -p strata-store --features test-seams --test sessions`
 Expected: FAIL（这些函数还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.7 的会话事务、比较并交换的生命周期与意图（区分不存在与不是 from）、按路径的种子行、意图代数的分配、`finish_move` 一个事务换掉 base、head、代数与冲突、`fail_move` 记下现场；`proposals(_, true)` 的会话过滤；§5.5 的 `retire_dir`（逐级拒绝符号链接、不是目录给 `NotDirectory`、六种路径按行核对、先清标志补属主写权限再 `RENAME_EXCL` 进 trash 并 `F_FULLFSYNC`）；写事务助手里提交之前的停住点
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.7 的会话事务、比较并交换的生命周期与意图（区分不存在与不是 from）、按路径的种子行、意图代数的分配、`finish_move` 一个事务换掉 base、head、代数与冲突、`fail_move` 记下现场；`proposals(_, true)` 的会话过滤；§5.5 的 `retire_dir`（六种路径按行核对；经 `apfs::open_rooted` 打开，符号链接给 `InvalidInput`、不是目录给 `NotDirectory`；在这个句柄上清标志、补属主写权限；`apfs::rename_rooted(…, RenameMode::Excl)` 进 trash 并 `apfs::full_fsync`）；写事务助手里提交之前的停住点
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-store --features test-seams --test sessions`
@@ -1907,7 +1950,7 @@ git commit -m "feat(store): busy, reader isolation, crash durability and poisoni
 - Test: `crates/strata-store/tests/gc.rs`
 
 **Interfaces:**
-- Consumes: `apfs::open_rooted`；Task 2 的 `verify_blob` 与 L3；Task 3–7 的全部表
+- Consumes: `apfs::{open_rooted, attrs_of, Attrs, list_dir, full_fsync, rename_rooted, RenameMode}` 与增补 8 新增的 `apfs::{remove_tree_rooted, remove_rooted, RemoveKind}`；Task 2 的 `verify_blob` 与 L3；Task 3–7 的全部表
 - Produces: `Store::gc`、`Store::gc_repo`、`Store::last_gc_report`、`GcReport`；L3 的独占一侧；`strata_gc_active` 的开关；`Seam::{PauseInPut, GcStopAfterRetire, GcUnlinkFails, AgeFloor, ScrubBudget, RetirePrepFails, GcBatchRows}`
 
 - [ ] **Step 1: 写失败的测试**：`gc_keeps_referenced_generations`、`gc_keeps_base_of_every_retained_checkpoint`、`gc_reclaims_removed_sessions_after_keep`、`gc_keeps_newest_base_per_repo`、`gc_keeps_pending_proposal_deps`、`gc_reclaims_closed_attempts_keeps_failed_scenes`、`gc_never_deletes_young_blobs`、`gc_spares_in_flight_put_with_old_mtime`、`gc_spares_freshly_renamed_generation_dir`、`gc_skips_paths_of_open_intents_and_attempts`、`retiring_a_0555_root_reparents_it`、`retiring_a_uchg_root_clears_the_flag_first`、`gc_deletes_supersede_chains_across_batches`、`symlink_put_never_retakes_the_blob_gate`、`gc_keeps_open_publish_scenes`、`gc_retires_dirs_through_trash_and_resumes`、`gc_touches_nothing_outside_its_areas`、`gc_never_reclaims_live_session_with_missing_dirs`、`gc_scrub_reports_corrupt_and_resumes_from_cursor`、`corrupt_blob_is_reported_never_overwritten`、`gc_report_persisted_for_status`
@@ -1916,7 +1959,7 @@ git commit -m "feat(store): busy, reader isolation, crash durability and poisoni
 Run: `cargo test -p strata-store --features test-seams --test gc`
 Expected: FAIL（`gc` 还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.11：三条守卫（有主的路径、按 mtime 与 ctime 中较晚者的年龄、有引用的 generation）；`gc` 的保留集（R、提议的闭包、尝试、gc 记录）与先子后父的分批删除，提议按 `superseded_by` 的引用顺序删、从不按号；blob 与 tmp 两段持 L3 独占；trash 的 `open_rooted` 删除、清标志、`stuck`；带游标的完整性扫描；`gc_repo` 的保留集，挪目录之前先准备根目录（清标志、补属主写权限，准备失败不删行、记进 `stuck`），再删行、再挪目录，按键解析的活路径清扫；`gc_runs` 的追加（含 `partial`）；put 里临时克隆之后的停住点，以及符号链接那一支不再取 L3 的验证
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.11：三条守卫（有主的路径、按 mtime 与 ctime 中较晚者的年龄、有引用的 generation）；`gc` 的保留集（R、提议的闭包、尝试、gc 记录）与先子后父的分批删除，提议按 `superseded_by` 的引用顺序删、从不按号；blob 与 tmp 两段持 L3 独占，tmp 里的目录条目经 `apfs::remove_tree_rooted` 删；trash 的条目逐个经 `apfs::remove_tree_rooted` 删，失败进 `stuck`；带游标的完整性扫描；`gc_repo` 的保留集，挪目录之前先准备根目录（清标志、补属主写权限，准备失败不删行、记进 `stuck`），再删行、再经 `apfs::rename_rooted` 挪目录，经 `apfs::list_dir` 按键解析的活路径清扫，变空的目录经 `apfs::remove_rooted` 删；`gc_runs` 的追加（含 `partial`）；put 里临时克隆之后的停住点，以及符号链接那一支不再取 L3 的验证
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-store --features test-seams --test gc`，再跑一遍 `cargo test -p strata-store --features test-seams` 确认全部测试文件都绿
@@ -1937,7 +1980,7 @@ design.md 里标 [交给构建者]、落在本模块的事项：
 | --- | --- | --- | --- |
 | generation 保留期（design §7、§12） | 由 `gc` 与 `gc_repo` 的参数 `keep` 决定，默认值由 daemon.md 定，本文建议 14 天。没有行的东西（tmp、没登记的 blob 与目录）与 trash 另有固定的年龄下限 1 小时，年龄按 mtime 与 ctime 中较晚的那个算 | 保留期是调度策略，daemon 管调度；下限保护 put 与登记之间、改名与登记之间的窗口（增补 4"gc guards"） | 2026-10-22；默认值待定（daemon.md） |
 | `rm` 之前最后一次 checkpoint 保留 N 天（design §6.6） | 不单独设 N：removed 会话的全部行（含 BeforeRemove checkpoint）保留到 `removed_ns + keep`，之后由 gc 一起回收 | 一个参数管所有回收，行为可以预期；增补 3 也把这份保留交给 store 的 gc | 2026-10-22 |
-| 封存目录的只读手段（design §7、§12），gc 这一侧 | gc 删 trash 时先让目录对属主可写可进、清掉 `UF_IMMUTABLE` 与 `UF_APPEND` 再删，`chflags uchg`、0555 与"仅靠约定"都删得掉；手段本身由 session.md、deps.md 定 | clonefile 会把 `uchg` 一起复制（2026-10-22 实测），无论选哪种手段，gc 都必须删得掉 | 2026-10-22；手段本身待定（session.md、deps.md） |
+| 封存目录的只读手段（design §7、§12），gc 这一侧 | gc 删 trash 用 `apfs::remove_tree_rooted`，它先让目录对属主可写、清掉 `UF_IMMUTABLE` 与 `UF_APPEND` 再删（增补 8），`chflags uchg`、0555 与"仅靠约定"都删得掉；手段本身由 session.md、deps.md 定 | clonefile 会把 `uchg` 一起复制（2026-10-22 实测），无论选哪种手段，gc 都必须删得掉 | 2026-10-22；手段本身待定（session.md、deps.md） |
 | 大文件阈值（design §7、§12） | store 没有阈值：put 对任何大小都整份哈希，`read_blob(id, max)` 的 `max` 就是调用方的阈值；64 MiB 的默认值在 config 与 search 一侧 | 阈值是"要不要读内容"的策略，属于读内容的模块；store 只负责存与取（审阅 M8 的裁定） | 2026-10-22 |
 
 本文自己的 [我的决定]，每条在正文里都有标注：
@@ -1973,6 +2016,8 @@ design.md 里标 [交给构建者]、落在本模块的事项：
 | 建库的 clonefile 探测（§5.1） | 失败时 rmdir 自己刚建的空目录，再返回 `Unsupported` | 类型化的拒绝之后没有净写入 | 2026-10-22 |
 | clean-shutdown 标记（§3、§5.2） | `close` 在关掉全部连接之后写下空文件 `store/clean-shutdown` 并 `F_FULLFSYNC`；写者 `open` 时删掉它；中毒的写者不写 | T6 裁定只定了"异常退出之后才跑 quick_check"；标记要在最后一个写之后才出现、在下一个写之前消失，才能可靠地说明"上次正常关闭" | 2026-10-22 |
 | 只读打开需要恢复（§5.2） | `ReadOnly`（`recovery_needed`） | 只读连接做不了 WAL 恢复，先启动 daemon | 2026-10-22 |
+| apfs 调用的根（§5.2） | `open` 取一次 `<root>` 的 realpath，作为 store 在根之下的 apfs 调用的 `root`；路径的拼接与 `retire_dir` 的前缀核对仍用配置里的 root | apfs 以 `O_NOFOLLOW` 打开根的最后一级，`[paths] root` 本身是符号链接时这些调用一律 `NotDirectory` | 2026-10-22 |
+| `put_blob_rooted` 的种类判断（§5.3） | 先 `apfs::attrs_of` 看种类：目录与特殊文件在克隆之前拒绝；符号链接存 `attrs_of` 读出的目标，不克隆；克隆体被换成了目录就当场 `remove_tree_rooted` 删掉、返回 `IsDirectory` | `clone_from_rooted` 以不跟随的方式打开源再克隆，打不开符号链接本身，遇到目录会克隆整棵树；`attrs_of` 经同样钉住的上级读出链接的目标，也不出根 | 2026-10-22 |
 | get 出来的文件（§5.4） | mode 0644，atime 与 mtime 为当前时刻 | 像 git checkout 出来的文件；旧 mtime 会骗过增量构建 | 2026-10-22 |
 | `retire_dir` 接受的路径（§5.5） | §5.5 表里的六行，每行按行核对：会话根与 `sessions/.repos/<session-id>` 在 Removing、Removed 或已没有行时；换下来的旧树、暂存、旧代与没换入的管理目录只在会话 Active 时；被 gc 删掉的尝试的暂存也可拿走 | 这就是 session 与 deps 在增补 2、3 之下会拿走的全部目录；被 gc 回收之后剩下的目录也要能拿走 | 2026-10-22 |
 | `retire_dir` 的持久（§5.5） | 改名之后对 trash 目录 `F_FULLFSYNC` | 增补 3"Durability"：要扛住断电的目录改名用 F_FULLFSYNC | 2026-10-22 |
