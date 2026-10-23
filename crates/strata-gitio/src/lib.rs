@@ -22,12 +22,15 @@ mod err;
 mod fsx;
 mod ignore;
 mod index;
+mod refs;
+mod remote;
 mod repo;
 mod seams;
 
 #[cfg(feature = "test-seams")]
 pub use seams::{GitCall, Pause, SyncEvent};
 pub use index::IndexInfo;
+pub use remote::remote_ref;
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 

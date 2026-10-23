@@ -8,7 +8,8 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 | --- | --- | --- |
 | 1 sanitized command, open | f96b3b9 | |
 | 2 index + config parsing, read_index | b4c257d | |
-| 3 ignore rules, is_ignored | (this commit) | |
+| 3 ignore rules, is_ignored | 3d39e43 | |
+| 4 fetch, ancestry, CAS refs | (this commit) | |
 
 ## Builder decisions (ambiguities)
 
@@ -54,3 +55,20 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
   `case_sensitive_repo_matches_exactly` checks repeated point queries agree.
 - The `fake_shadow` test helper moved to `tests/common` (plus
   `fake_shadow_at` for a chosen workspace path).
+- Task 4: `read_ref`/`update_ref`/`delete_ref` validate names locally
+  (prefix `refs/strata/` plus git's check-ref-format rules) so refusals run
+  no subprocess; `fetch` branch names use `git check-ref-format` as specified.
+- Task 4: a failed update-ref/`-d` is `HeadMoved` when stderr says
+  "but expected"/"reference already exists" *or* the re-read actual value
+  differs from the expected one (covers deleting an already-gone ref);
+  otherwise `Unknown`.
+- Task 4: `is_ancestor`/`merge_base` failures other than exit 0/1 resolve each
+  oid; a missing one is `NoSuchCommit` (detail.commit), else `Unknown`.
+- Task 4: `fetch` of an unconfigured remote ("does not appear to be a git
+  repository") is `InvalidInput` (reason `no-such-remote`).
+- Task 4: the "paths starting with `-` or containing `*`/`:` are literal" half
+  of `option_like_arguments_are_refused_not_executed` concerns path APIs
+  (tree_contains, stage) and is covered with those tasks; "revision
+  `--help`" is refused by `CommitOid` construction (and `read_ref`).
+- `global_excludes_path`'s config query no longer sets `LC_ALL=C` (§5.3 lists
+  only fetch/update-ref/commit-tree/rev-parse/ls-tree).

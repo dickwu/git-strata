@@ -513,7 +513,7 @@ impl Git {
         c.current_dir(common)
             .arg(flag("--git-dir=", common))
             .args(["config", "--path", "--get", "core.excludesFile"]);
-        let out = self.run(c, Opts::c().timeout(QUERY_TIMEOUT))?;
+        let out = self.run(c, Opts::default().timeout(QUERY_TIMEOUT))?;
         let found = match out.status {
             Some(0) => {
                 let mut v = out.stdout.clone();
