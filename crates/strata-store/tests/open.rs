@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use strata_store::{AttemptKind, AttemptState, DepsMain, DepsOrigin, NewProposal, ProposalDecision, Seam, Store};
+use strata_store::{AttemptKind, AttemptState, DepsMain, DepsOrigin, Lifecycle, MoveState, NewProposal, ProposalDecision, Seam, Store};
 use strata_types::Code;
 use support::*;
 
@@ -324,6 +324,20 @@ fn read_only_open_refuses_every_write() {
     let base = strata_types::BaseGen { repo: repo.clone(), tree: tree.clone(), deps: set('c') };
     let manifest = strata_types::BaseManifest { tree: tree.clone(), entries: Default::default() };
     w.record_base_gen(&base, &manifest, at).unwrap();
+    let sid = strata_types::SessionId::try_from("s-aaaaaaaa".to_string()).unwrap();
+    let sroot = env.root.join("sessions/s-aaaaaaaa");
+    let session = strata_types::SessionManifest {
+        id: sid.clone(),
+        ticket: None,
+        root: sroot.clone(),
+        repos: [(repo.clone(), strata_types::WorkspaceState { base: base.clone(), head: head.clone(), path: sroot.join(repo.as_str()), tracked: true })]
+            .into_iter()
+            .collect(),
+    };
+    w.create_session(&session, at).unwrap();
+    assert!(w.set_lifecycle(&sid, Lifecycle::Creating, Lifecycle::Active, None, at).unwrap());
+    let mv = w.begin_move(&sid, &repo, &base, &head, &sroot.join(".m"), at).unwrap();
+    std::fs::create_dir_all(env.root.join("bases/app/.staging/0123456789abcdef0123456789abcdef")).unwrap();
     w.close().unwrap();
     let src = env.dir.path().join("ro-src");
     std::fs::create_dir_all(&src).unwrap();
@@ -343,6 +357,10 @@ fn read_only_open_refuses_every_write() {
     assert!(r.deps_set(&repo, &set('a')).unwrap().is_none());
     assert!(r.has_base_gen(&base).unwrap());
     assert_eq!(r.manifest(&repo, &tree).unwrap(), Some(manifest.clone()));
+    assert_eq!(r.session(&sid).unwrap().unwrap().manifest, session);
+    assert_eq!(r.sessions().unwrap().len(), 1);
+    assert_eq!(r.move_intents(&sid).unwrap().len(), 1);
+    assert_eq!(r.open_move_intents().unwrap().len(), 1);
     // write functions are refused, one block per task
     let f = strata_types::RepoPath::try_from("f".to_string()).unwrap();
     for e in [
@@ -377,6 +395,19 @@ fn read_only_open_refuses_every_write() {
         r.set_deps_main(&main, Some(&main)).err().unwrap(),
         // Task 4
         r.record_base_gen(&base, &manifest, at).err().unwrap(),
+        // Task 5
+        r.create_session(&session, at).err().unwrap(),
+        r.set_session_phase(&sid, "x").err().unwrap(),
+        r.set_lifecycle(&sid, Lifecycle::Active, Lifecycle::Removing, None, at).err().unwrap(),
+        r.record_seeds(&sid, &repo, &[]).err().unwrap(),
+        r.begin_move(&sid, &repo, &base, &head, &sroot.join(".n"), at).err().unwrap(),
+        r.set_move_phase(&sid, &repo, mv, "x").err().unwrap(),
+        r.set_move_state(&sid, &repo, mv, MoveState::Preparing, MoveState::Refused, None, at).err().unwrap(),
+        r.finish_move(&sid, &repo, mv, &[], at).err().unwrap(),
+        r.fail_move(&sid, &repo, mv, &serde_json::json!(1), at).err().unwrap(),
+        r.resolve_move(&sid, &repo, mv, false, at).err().unwrap(),
+        r.set_old_tree(&sid, &repo, mv, &sroot.join(".o")).err().unwrap(),
+        r.retire_dir(&env.root.join("bases/app/.staging/0123456789abcdef0123456789abcdef")).err().unwrap(),
     ] {
         assert_reason(&e, Code::ReadOnly, "read_only_handle");
     }

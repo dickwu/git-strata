@@ -9,7 +9,8 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 | 1 open, layout, pinned schema and guards | done | 87e5b26 |
 | 2 content-addressed blob put, get and verify | done | 1e17403 |
 | 3 deps sets, attempts, proposals and main | done | d7282b5 |
-| 4 base generations with their manifests | done | (see git log) |
+| 4 base generations with their manifests | done | b633b29 |
+| 5 sessions, workspaces, move intents and retire_dir | done | (see git log) |
 
 ## Ambiguity decisions
 
@@ -104,6 +105,42 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
   `base_gens.id` is left to SQLite's rowid assignment.
 - Task 4: `manifest()` cross-checks `base_trees.files` against the entry
   count and re-validates mode/size/path/blob, reporting `Corrupt{reason:"bad_row"}`.
+
+- Task 5 layout checks: `create_session` requires `manifest.root` to be
+  exactly `<root>/sessions/<id>` (text form of the configured root) and each
+  workspace path `<session root>/<repo>`; a base must be registered and
+  `base.repo` must equal the map key. Duplicate id → `Exists{reason:"store_row"}`,
+  root/path taken by another session → `Exists{reason:"root_taken"|"path_taken"}`.
+- Task 5 staging shape (`begin_move` staging, `set_old_tree` path): text
+  `<root>/sessions/<id>/<name>`, one component, not `.`/`..`, and not the
+  name of one of the session's workspaces → otherwise
+  `InvalidInput{reason:"staging_shape"}`. This also excludes `<root>/store`.
+- Task 5 guard order in `begin_move`: NoSuchSession (missing or Removed) →
+  lifecycle → NoSuchRepo → untracked → health_unknown → repo_mismatch /
+  base_unregistered → staging_shape → open intent `Exists{n}`; n =
+  max(generation, max intent n) + 1 (`TooLarge{limit:"move_generation"}` on
+  overflow).
+- Task 5 `set_move_state` only takes the Preparing → Swapping|Refused|Abandoned
+  edges (the others belong to finish/fail/resolve); it is compare-and-swap on
+  state and returns false when the row is not in `from`. Entering Swapping
+  needs an Active session. An unknown n → `InvalidInput{reason:"no_such_intent"}`;
+  a wrong state for phase/finish/fail/old_tree → `InvalidInput{reason:"intent_state"}`.
+- Task 5 `resolve_move` with an n that is not the latest intent or not in
+  state Unknown (including n beyond i64) → `no_failed_move`; Abandon keeps the
+  intent's conflicts and the workspace scene; Accept copies the intent's
+  conflicts and sets `old_tree = staging`.
+- Task 5 `retire_dir` path check: text must start with `<configured root>/`,
+  the rest must be a valid NFC `RepoPath` with no empty/`.`/`..` components
+  and match one of the 7 table rows, else `InvalidInput{reason:"path_shape"}`;
+  a row whose live-row check fails → `InvalidInput{reason:"not_retirable",
+  row, check}`. Leading-zero / zero numbers (`worktrees/02`, `.staging/0`)
+  are shape failures. A symlink anywhere (from apfs NotFile/NotDirectory
+  `reason:"symlink"`) → `InvalidInput{reason:"symlink"}`; sockets/devices/files →
+  `NotDirectory`. Trash name is `store/trash/<unix-ms>-<hex32>`; the trash
+  dir is F_FULLFSYNCed (counted in `dir_barriers`). `RetirePrepFails{errno}`
+  fires after the open/fstat and before `make_removable`.
+- Task 5 row 3 for a missing attempt row: accepted only if the number is ≤
+  the `sqlite_sequence` value of `deps_attempts` (issued, then gc'd).
 
 ## Blockers / notes
 

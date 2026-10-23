@@ -22,8 +22,10 @@ mod deps;
 mod errors;
 mod gens;
 mod open;
+mod retire;
 mod schema;
 mod seams;
+mod sessions;
 mod txn;
 
 #[cfg(feature = "test-seams")]
