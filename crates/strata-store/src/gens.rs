@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::sql::{Connection, OptionalExtension, params};
 use serde_json::json;
 use strata_types::{BaseGen, BaseManifest, Code, ManifestEntry, RepoName, RepoPath, TreeOid};
 
@@ -27,7 +27,7 @@ fn load_manifest(c: &Connection, repo: &str, tree: &str) -> Result<Option<Vec<(S
     let rows = st
         .query_map(params![repo, tree], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
         .map_err(sql_read)?
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<crate::sql::SqlResult<Vec<_>>>()
         .map_err(sql_read)?;
     if rows.len() as i64 != files {
         return Err(bad_row(format!("base_trees {repo}/{tree}: files = {files} but {} entries", rows.len())));

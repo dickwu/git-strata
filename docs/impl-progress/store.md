@@ -13,7 +13,8 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 | 5 sessions, workspaces, move intents and retire_dir | done | d692877 |
 | 6 atomic checkpoint records with store-assigned ids | done | c06f7e2 |
 | 7 publish records and ref audit | done | 832866c |
-| 8 busy, reader isolation, crash durability and poisoning | done | (see git log) |
+| 8 busy, reader isolation, crash durability and poisoning | done | 6671503 |
+| — metadata engine moved to Turso (user decision 2026-10-23) | done | (see git log) |
 
 ## Ambiguity decisions
 
@@ -145,6 +146,78 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 - Task 5 row 3 for a missing attempt row: accepted only if the number is ≤
   the `sqlite_sequence` value of `deps_attempts` (issued, then gc'd).
 
+## Engine: Turso
+
+User decision (2026-10-23): the metadata DB runs on Turso (crate `turso`,
+pinned `=0.8.3`, `default-features = false`) instead of rusqlite, so a
+future embeddings/vector table can live in store.db. Blobs stay BLAKE3
+files. No vector features are added; nothing in the schema check blocks a
+later migration that adds such a table (it would bump `user_version`).
+
+- Sync bridge: `src/sql.rs` is a small blocking facade (Connection,
+  Statement, Row, `params!`, ToSql/FromSql) over the async Turso API. Its
+  `block_on` polls the future on the calling thread; the waker unparks the
+  thread and the loop `park_timeout(1ms)`s between polls. No tokio, no
+  extra threads. All store modules call only the facade.
+- Cross-process: every connection opens with
+  `experimental_multiprocess_wal(true)` (creates `store.db-tshm`); without
+  it a second process cannot share the file. This is an experimental Turso
+  feature, hence the exact version pin. Verified on this Mac: daemon writer
+  + CLI read-only child see each other's commits (`tests/engine.rs`).
+- WAL: Turso's default; header bytes 18/19 = 2/2 checked at open;
+  `journal_mode` reads back `wal`. Clean `close()` runs
+  `wal_checkpoint(TRUNCATE)` (Turso does no last-connection checkpoint).
+- BEGIN IMMEDIATE / transactions: a second process's BEGIN IMMEDIATE is
+  `Busy` at once with `busy_timeout = 0`; readers are not blocked and see
+  only committed data. A deferred-FK failure at COMMIT is `Constraint` and
+  leaves the tx open (txn.rs rolls back), as with SQLite.
+- Durability: `synchronous = FULL` and `fullfsync = 1` are pinned and read
+  back; Turso uses that one sync type for commits and checkpoints. SIGKILL
+  after a returned commit loses nothing (`tests/crash.rs`). The test VFS
+  (`src/vfs.rs`) is now a Turso `IO` wrapper counting WAL syncs.
+- Migration: `user_version = 1`, `application_id` pinned; any other
+  version is refused unchanged (no migrations exist yet).
+- Integrity: `quick_check` / `integrity_check` work; a corrupt page is
+  `Corrupt`, a non-database file is refused.
+
+Gaps (closest safe behaviour chosen; each is a deliberate difference from
+the rusqlite design):
+
+1. No application-defined SQL functions: `strata_gc_active()` is replaced
+   by the one-row table `strata_gc_gate(active)` read by the
+   `*_delete_gc_only` triggers. gc flips it to 1 inside its own write tx
+   and back to 0 before COMMIT. A raw client with write access could flip
+   it too (with rusqlite only our process had the function).
+2. The builder's read-only flag is not honoured within one process (Turso
+   keeps a per-process database registry); readers pin `query_only = 1`
+   instead and writes through them fail.
+3. No `SQLITE_DBCONFIG_DEFENSIVE`; Turso already refuses writes to
+   `sqlite_schema`.
+4. `checkpoint_fullfsync`, `recursive_triggers`, `trusted_schema` are
+   unknown pragmas (silently ignored), so they are no longer pinned.
+   `fullfsync` covers checkpoints too (see Durability).
+5. Without recursive triggers, `INSERT OR REPLACE` deletes the old row
+   without firing BEFORE DELETE/UPDATE guards, so a raw REPLACE bypasses
+   the delete and immutability triggers. The store never uses REPLACE;
+   `tests/guards.rs` records this as "ENGINE GAP" instead of failing.
+6. STRICT tables cannot type `(a IN (..)) = (b IS NULL)` in CHECK; four
+   CHECKs (deps_attempts.error, move_intents.ended_ns and conflicts,
+   checkpoints.reason_text) are spelled in the equivalent AND/OR form.
+7. Turso stores the CREATE text normalized and adds
+   `__turso_internal_seq_*` tables, so a store.db made by the old
+   rusqlite build fails the schema check (`Corrupt{schema}`). No deployed
+   stores exist; `user_version` stays 1.
+8. There is no READONLY_RECOVERY error code to map; that case is not
+   reachable.
+9. `tests/open.rs::lock_is_not_inherited_by_child_processes`: under
+   parallel test load the reopen right after dropping the writer saw
+   `Busy` on `store/LOCK` for ~70–200 ms in about 1 of 4 to 1 of 10 full
+   runs. lsof showed no holder, and the pre-Turso build (6671503) did 0/16.
+   Not root-caused. The test now retries Busy for up to 2 s. An inherited
+   lock would be held by the 60 s sleeper, so the test still proves the
+   lock is not inherited. A CLI racing a daemon restart can see a
+   transient Busy, which callers already treat as retryable.
+
 ## Blockers / notes
 
 - None in strata-apfs so far.
@@ -152,6 +225,8 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
   `"crates/strata-store"` members entry; no `[workspace.dependencies]`
   are added (crate deps are declared in the crate's own Cargo.toml).
 - New crate-level dep: `memmap2 = "0.9"` (Task 2).
+- Crate deps after the engine move: `turso = "=0.8.3"` (default features
+  off), `memmap2`, `libc`; `rusqlite` is gone from deps and tests.
 - One unexplained failure of one `tests/open.rs` test in a single full
   `cargo test -p strata-store` run during Task 3 (output not captured);
   not reproduced in 26 further runs. Watching.

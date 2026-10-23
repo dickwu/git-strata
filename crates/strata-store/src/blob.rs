@@ -378,7 +378,7 @@ impl Store {
         }
         let r = self.reader()?;
         let row: Option<i64> = {
-            use rusqlite::OptionalExtension;
+            use crate::sql::OptionalExtension;
             r.query_row("SELECT size FROM blobs WHERE id = ?1", [id.as_str()], |r| r.get(0)).optional().map_err(sql_read)?
         };
         drop(r);
@@ -434,6 +434,12 @@ impl Store {
     /// Recompute blob `id`'s BLAKE3 (§5.4). Never modifies anything.
     pub fn verify_blob(&self, id: &BlobId) -> Result<()> {
         let _gate = self.gate_shared();
+        self.verify_locked(id)
+    }
+
+    /// [`Store::verify_blob`] for a caller already holding L3 shared (the
+    /// gc integrity scan; the gate is not reentrant).
+    pub(crate) fn verify_locked(&self, id: &BlobId) -> Result<()> {
         let (p, _) = self.locate(id)?;
         let f = open_nofollow(&p, false).map_err(|e| io(&e, IoSide::Read, &p, "verify", NOT_WRITTEN))?;
         let (hex, _) = hash_file(&f).map_err(|e| io(&e, IoSide::Read, &p, "verify", NOT_WRITTEN))?;

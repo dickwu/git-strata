@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::sql::{Connection, OptionalExtension, params};
 use serde_json::json;
 use strata_apfs::IoSide;
 use strata_types::{
@@ -21,7 +21,7 @@ use crate::{CheckpointInfo, Result, Store};
 const OP: &str = "record_checkpoint";
 const MODES: [u32; 3] = [0o100644, 0o100755, 0o120000];
 
-fn w(e: rusqlite::Error) -> StrataError {
+fn w(e: crate::sql::Error) -> StrataError {
     sql(e, OP, NOT_WRITTEN)
 }
 
@@ -113,7 +113,7 @@ struct Head {
 const HEAD_SQL: &str = "SELECT c.id, c.repo, b.tree, b.deps, c.at_ns, c.reason, c.reason_text, c.entries \
      FROM checkpoints c JOIN base_gens b ON b.repo = c.repo AND b.id = c.base_gen";
 
-fn head_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<Head> {
+fn head_of(r: &crate::sql::Row) -> crate::sql::SqlResult<Head> {
     Ok(Head {
         id: r.get(0)?,
         repo: r.get(1)?,

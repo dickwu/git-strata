@@ -8,7 +8,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::params;
 use strata_store::*;
 use strata_types::{
     BaseGen, BaseManifest, BlobId, Checkpoint, CheckpointId, CheckpointReason, Code, CommitOid, DepsSet, DepsSetId,

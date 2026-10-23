@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::SystemTime;
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use crate::sql::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 use strata_types::{BaseGen, Code, CommitOid, RepoName, RepoPath, SessionId, SessionManifest, StrataError, WorkspaceState};
 
@@ -15,7 +15,7 @@ use crate::{Health, Lifecycle, MoveIntent, MoveState, Result, SeedRow, SessionRe
 
 // ---------------------------------------------------------------- helpers
 
-fn w(op: &'static str) -> impl Fn(rusqlite::Error) -> StrataError {
+fn w(op: &'static str) -> impl Fn(crate::sql::Error) -> StrataError {
     move |e| sql(e, op, NOT_WRITTEN)
 }
 
@@ -56,7 +56,7 @@ fn scene_of(s: Option<String>, what: &str) -> Result<Option<Value>> {
     s.map(|s| from_json(&s, what)).transpose()
 }
 
-pub(crate) fn session_lifecycle(c: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
+pub(crate) fn session_lifecycle(c: &Connection, id: &str) -> crate::sql::SqlResult<Option<String>> {
     c.query_row("SELECT lifecycle FROM sessions WHERE id = ?1", [id], |r| r.get(0)).optional()
 }
 
@@ -66,7 +66,7 @@ pub(crate) struct Ws {
     health: String,
 }
 
-pub(crate) fn workspace(c: &Connection, id: &str, repo: &str) -> rusqlite::Result<Option<Ws>> {
+pub(crate) fn workspace(c: &Connection, id: &str, repo: &str) -> crate::sql::SqlResult<Option<Ws>> {
     c.query_row(
         "SELECT tracked, generation, health FROM workspaces WHERE session = ?1 AND repo = ?2",
         [id, repo],
@@ -84,7 +84,7 @@ struct IntentRow {
     old_tree: Option<String>,
 }
 
-fn intent(c: &Connection, id: &str, repo: &str, n: i64) -> rusqlite::Result<Option<IntentRow>> {
+fn intent(c: &Connection, id: &str, repo: &str, n: i64) -> crate::sql::SqlResult<Option<IntentRow>> {
     c.query_row(
         "SELECT state, conflicts, to_tree, to_deps, head, old_tree FROM move_intents \
          WHERE session = ?1 AND repo = ?2 AND n = ?3",
@@ -103,7 +103,7 @@ fn intent(c: &Connection, id: &str, repo: &str, n: i64) -> rusqlite::Result<Opti
     .optional()
 }
 
-pub(crate) fn base_gen_id(c: &Connection, repo: &str, tree: &str, deps: &str) -> rusqlite::Result<Option<i64>> {
+pub(crate) fn base_gen_id(c: &Connection, repo: &str, tree: &str, deps: &str) -> crate::sql::SqlResult<Option<i64>> {
     c.query_row("SELECT id FROM base_gens WHERE repo = ?1 AND tree = ?2 AND deps = ?3", [repo, tree, deps], |r| r.get(0))
         .optional()
 }
@@ -170,7 +170,7 @@ fn allowed_edge(from: Lifecycle, to: Lifecycle) -> bool {
 
 // ---------------------------------------------------------------- row mappers
 
-fn seed_row(r: &Row<'_>) -> rusqlite::Result<Result<(String, SeedRow)>> {
+fn seed_row(r: &Row) -> crate::sql::SqlResult<Result<(String, SeedRow)>> {
     let repo: String = r.get(0)?;
     let path: String = r.get(1)?;
     let source: String = r.get(2)?;
@@ -196,7 +196,7 @@ fn seed_row(r: &Row<'_>) -> rusqlite::Result<Result<(String, SeedRow)>> {
 const INTENT_COLS: &str =
     "session, repo, n, to_tree, to_deps, head, staging, phase, state, conflicts, old_tree, started_ns, ended_ns";
 
-fn intent_row(r: &Row<'_>) -> rusqlite::Result<Result<MoveIntent>> {
+fn intent_row(r: &Row) -> crate::sql::SqlResult<Result<MoveIntent>> {
     let session: String = r.get(0)?;
     let repo: String = r.get(1)?;
     let n: i64 = r.get(2)?;
@@ -233,7 +233,7 @@ fn intent_row(r: &Row<'_>) -> rusqlite::Result<Result<MoveIntent>> {
     })())
 }
 
-fn collect<T>(c: &Connection, q: &str, p: impl rusqlite::Params, f: fn(&Row<'_>) -> rusqlite::Result<Result<T>>) -> Result<Vec<T>> {
+fn collect<T>(c: &Connection, q: &str, p: impl crate::sql::Params, f: fn(&Row) -> crate::sql::SqlResult<Result<T>>) -> Result<Vec<T>> {
     let mut st = c.prepare(q).map_err(sql_read)?;
     let rows = st.query_map(p, f).map_err(sql_read)?;
     let mut out = Vec::new();
@@ -274,7 +274,7 @@ fn session_rows(c: &Connection, id: Option<&str>) -> Result<Vec<SessionRow>> {
         })
     })
     .map_err(sql_read)?
-    .collect::<rusqlite::Result<Vec<_>>>()
+    .collect::<crate::sql::SqlResult<Vec<_>>>()
     .map_err(sql_read)
 }
 
@@ -305,7 +305,7 @@ fn load_session(c: &Connection, s: SessionRow) -> Result<SessionRecord> {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
         })
         .map_err(sql_read)?
-        .collect::<rusqlite::Result<_>>()
+        .collect::<crate::sql::SqlResult<_>>()
         .map_err(sql_read)?;
     let mut repos = BTreeMap::new();
     let mut workspaces = BTreeMap::new();

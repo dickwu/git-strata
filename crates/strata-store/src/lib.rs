@@ -1,4 +1,4 @@
-//! strata-store: SQLite metadata plus a content-addressed BLAKE3 blob store
+//! strata-store: SQLite-format metadata (engine: Turso, see `sql`) plus a content-addressed BLAKE3 blob store
 //! (docs/modules/store.md). One writer process per `<root>` (the daemon);
 //! read-only handles for the CLI and for doctor.
 
@@ -6,10 +6,10 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Mutex, RwLock};
 use std::time::SystemTime;
 
-use rusqlite::Connection;
+use crate::sql::Connection;
 use serde::{Deserialize, Serialize};
 use strata_types::{
     Action, BaseGen, BlobId, CheckpointId, CheckpointReason, CommitOid, DepsSet, DepsSetId, ProposalId,
@@ -28,6 +28,8 @@ mod retire;
 mod schema;
 mod seams;
 mod sessions;
+#[doc(hidden)]
+pub mod sql;
 #[cfg(feature = "test-seams")]
 mod vfs;
 mod txn;
@@ -52,7 +54,6 @@ pub struct Store {
     /// L3: `put` holds it shared from dedup check to row commit; gc's
     /// unlink pass holds it exclusive.
     pub(crate) blob_gate: RwLock<()>,
-    pub(crate) gc_active: Arc<AtomicBool>,
     pub(crate) gc_running: Mutex<()>,
     pub(crate) poisoned: AtomicBool,
     pub(crate) seams: seams::Seams,
@@ -128,10 +129,10 @@ impl Store {
     pub fn debug_pragma(&self, writer: bool, name: &str) -> Result<String> {
         let q = |c: &Connection| -> Result<String> {
             c.query_row(&format!("PRAGMA {name}"), [], |r| {
-                let v: rusqlite::types::Value = r.get(0)?;
+                let v: crate::sql::Value = r.get(0)?;
                 Ok(match v {
-                    rusqlite::types::Value::Integer(i) => i.to_string(),
-                    rusqlite::types::Value::Text(t) => t,
+                    crate::sql::Value::Integer(i) => i.to_string(),
+                    crate::sql::Value::Text(t) => t,
                     other => format!("{other:?}"),
                 })
             })

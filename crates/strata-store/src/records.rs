@@ -2,7 +2,7 @@
 
 use std::time::SystemTime;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::sql::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use strata_types::{Action, Batch, Code, CommitOid, ReleaseGroup, StrataError};
 
@@ -12,7 +12,7 @@ use crate::sessions::session_lifecycle;
 use crate::txn::Tx;
 use crate::{PublishPhase, PublishRecord, RefChange, RefOp, RefOutcome, Result, Store};
 
-fn w(op: &'static str) -> impl Fn(rusqlite::Error) -> StrataError {
+fn w(op: &'static str) -> impl Fn(crate::sql::Error) -> StrataError {
     move |e| sql(e, op, NOT_WRITTEN)
 }
 
@@ -27,7 +27,7 @@ fn allowed(from: PublishPhase, to: PublishPhase) -> bool {
     )
 }
 
-fn publish_exists(c: &Connection, id: i64) -> rusqlite::Result<bool> {
+fn publish_exists(c: &Connection, id: i64) -> crate::sql::SqlResult<bool> {
     Ok(c.query_row("SELECT 1 FROM publishes WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
 }
 
@@ -84,12 +84,12 @@ fn publishes_where(c: &Connection, cond: &str, arg: Option<i64>) -> Result<Vec<P
     let mut st = c
         .prepare(&format!("SELECT id, phase, started_ns, ended_ns, outcome FROM publishes WHERE {cond} ORDER BY id"))
         .map_err(sql_read)?;
-    let map = |r: &rusqlite::Row<'_>| {
+    let map = |r: &crate::sql::Row| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, Option<String>>(4)?))
     };
     let rows: Vec<_> = match arg {
-        Some(a) => st.query_map([a], map).map_err(sql_read)?.collect::<rusqlite::Result<_>>(),
-        None => st.query_map([], map).map_err(sql_read)?.collect::<rusqlite::Result<_>>(),
+        Some(a) => st.query_map([a], map).map_err(sql_read)?.collect::<crate::sql::SqlResult<_>>(),
+        None => st.query_map([], map).map_err(sql_read)?.collect::<crate::sql::SqlResult<_>>(),
     }
     .map_err(sql_read)?;
     rows.into_iter().map(|(id, ph, s, e, o)| load_publish(c, id, ph, s, e, o)).collect()

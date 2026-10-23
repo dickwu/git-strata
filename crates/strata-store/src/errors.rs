@@ -5,7 +5,6 @@
 use std::io;
 use std::path::Path;
 
-use rusqlite::ErrorCode;
 use serde_json::{Map, Value, json};
 use strata_apfs::{IoSide, classify_io_error};
 use strata_types::{Code, StrataError};
@@ -102,41 +101,57 @@ pub(crate) fn errno(n: i32, side: IoSide, path: &Path, op: &str, outcome: &str) 
     io(&io::Error::from_raw_os_error(n), side, path, op, outcome)
 }
 
-/// SQLite error classification (§6.1): busy → `Busy`, corrupt → `Corrupt`,
-/// read-only recovery → `ReadOnly`, everything else `Unknown` with `outcome`.
-pub(crate) fn sql(e: rusqlite::Error, op: &str, outcome: &str) -> StrataError {
+/// Engine (Turso) error classification (§6.1): busy → `Busy`, corrupt or
+/// not-a-database → `Corrupt`, a write refused by the engine → `ReadOnly`,
+/// everything else `Unknown` with `outcome`.
+pub(crate) fn sql(e: turso::Error, op: &str, outcome: &str) -> StrataError {
+    let text = e.to_string();
     match &e {
-        rusqlite::Error::SqliteFailure(f, msg) => {
-            let text = msg.clone().unwrap_or_else(|| f.to_string());
-            match f.code {
-                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked => err(
-                    Code::Busy,
-                    format!("SQLite write lock held by another process: {text}"),
-                    json!({ "lock": "sqlite", "op": op, "outcome": NOT_WRITTEN }),
-                ),
-                ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase => err(
-                    Code::Corrupt,
-                    format!("SQLite reports a damaged database: {text}"),
-                    json!({ "reason": "sqlite", "op": op, "message": text }),
-                ),
-                ErrorCode::ReadOnly if f.extended_code == rusqlite::ffi::SQLITE_READONLY_RECOVERY => err(
-                    Code::ReadOnly,
-                    "the WAL needs recovery, which a read-only connection cannot do; start the daemon first",
-                    json!({ "reason": "recovery_needed" }),
-                ),
-                _ => err(
-                    Code::Unknown,
-                    format!("SQLite error during {op}: {text}"),
-                    json!({ "op": op, "outcome": outcome, "sqlite_code": f.extended_code, "message": text }),
-                ),
-            }
-        }
-        other => err(Code::Unknown, format!("SQLite error during {op}: {other}"), json!({ "op": op, "outcome": outcome })),
+        turso::Error::Busy(_) | turso::Error::BusySnapshot(_) => err(
+            Code::Busy,
+            format!("SQLite write lock held by another process: {text}"),
+            json!({ "lock": "sqlite", "op": op, "outcome": NOT_WRITTEN }),
+        ),
+        turso::Error::Corrupt(_) | turso::Error::NotAdb(_) => err(
+            Code::Corrupt,
+            format!("SQLite reports a damaged database: {text}"),
+            json!({ "reason": "sqlite", "op": op, "message": text }),
+        ),
+        turso::Error::Readonly(_) => err(
+            Code::ReadOnly,
+            format!("the database engine refused a write: {text}"),
+            json!({ "reason": "engine_read_only", "op": op, "outcome": NOT_WRITTEN }),
+        ),
+        _ => err(
+            Code::Unknown,
+            format!("SQLite error during {op}: {text}"),
+            json!({ "op": op, "outcome": outcome, "sqlite_error": engine_kind(&e), "message": text }),
+        ),
+    }
+}
+
+/// A stable name for the engine error kind (goes into `detail`).
+pub(crate) fn engine_kind(e: &turso::Error) -> &'static str {
+    use turso::Error as E;
+    match e {
+        E::ToSqlConversionFailure(_) => "to_sql_conversion",
+        E::QueryReturnedNoRows => "no_rows",
+        E::ConversionFailure(_) => "conversion",
+        E::Busy(_) | E::BusySnapshot(_) => "busy",
+        E::Interrupt(_) => "interrupt",
+        E::Misuse(_) => "misuse",
+        E::Constraint(_) => "constraint",
+        E::Readonly(_) => "readonly",
+        E::DatabaseFull(_) => "full",
+        E::NotAdb(_) => "notadb",
+        E::Corrupt(_) => "corrupt",
+        E::IoError(..) => "io",
+        _ => "error",
     }
 }
 
 /// Read-side SQLite errors (no outcome matters: nothing was written).
-pub(crate) fn sql_read(e: rusqlite::Error) -> StrataError {
+pub(crate) fn sql_read(e: turso::Error) -> StrataError {
     sql(e, "read", NOT_WRITTEN)
 }
 

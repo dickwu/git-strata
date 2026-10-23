@@ -5,7 +5,6 @@ mod support;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OpenFlags};
 use strata_store::*;
 use strata_types::Code;
 use support::world::*;
@@ -22,7 +21,7 @@ fn spawn(test: &str, env: &Env) -> ChildProc {
 }
 
 fn table_counts(env: &Env) -> (i64, i64, i64) {
-    let c = Connection::open_with_flags(env.db(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let c = ro(&env.db());
     let n = |t: &str| c.query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get::<_, i64>(0)).unwrap();
     (n("checkpoints"), n("overlay_entries"), n("blobs"))
 }
@@ -35,7 +34,7 @@ fn lock_child() {
         return;
     }
     let root = env_path("STRATA_ROOT");
-    let c = Connection::open_with_flags(root.join("store/store.db"), OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    let c = connect(&root.join("store/store.db"));
     c.execute_batch("BEGIN IMMEDIATE").unwrap();
     say("LOCKED");
     wait_go();

@@ -144,64 +144,77 @@ fn open_pins_durable_pragmas() {
         ("journal_mode", "wal"),
         ("synchronous", "2"),
         ("fullfsync", "1"),
-        ("checkpoint_fullfsync", "1"),
         ("foreign_keys", "1"),
-        ("recursive_triggers", "1"),
-        ("trusted_schema", "0"),
         ("busy_timeout", "0"),
     ] {
         assert_eq!(s.debug_pragma(true, name).unwrap().to_lowercase(), want, "writer {name}");
     }
-    for (name, want) in [("query_only", "1"), ("trusted_schema", "0")] {
+    for (name, want) in [("query_only", "1"), ("foreign_keys", "1")] {
         assert_eq!(s.debug_pragma(false, name).unwrap(), want, "reader {name}");
     }
     s.close().unwrap();
     let r = Store::open_read_only(&env.root).unwrap();
     assert_eq!(r.debug_pragma(false, "query_only").unwrap(), "1");
-    assert_eq!(r.debug_pragma(false, "trusted_schema").unwrap(), "0");
     r.close().unwrap();
+}
+
+/// Patch bytes of the closed (fully checkpointed) store.db in place.
+fn patch_db(env: &Env, find: &[u8], with: &[u8]) {
+    assert_eq!(find.len(), with.len(), "in-place patch must keep lengths");
+    let wal = env.store_dir().join("store.db-wal");
+    assert!(!wal.exists() || fs::metadata(&wal).unwrap().len() == 0, "WAL not checkpointed");
+    let mut bytes = fs::read(env.db()).unwrap();
+    let at = bytes.windows(find.len()).position(|w| w == find).unwrap_or_else(|| panic!("{:?} not found", String::from_utf8_lossy(find)));
+    bytes[at..at + with.len()].copy_from_slice(with);
+    fs::write(env.db(), &bytes).unwrap();
 }
 
 #[test]
 fn open_refuses_non_wal_store() {
+    // Turso only writes WAL databases, so make a rollback-journal file the
+    // way SQLite marks one: file format bytes 18/19 = 1.
     let env = env();
     env.open().close().unwrap();
-    {
-        let c = bare(&env.db());
-        let m: String = c.query_row("PRAGMA journal_mode = delete", [], |r| r.get(0)).unwrap();
-        assert_eq!(m, "delete");
-    }
-    let before = fs::read(env.db()).unwrap();
+    let mut bytes = fs::read(env.db()).unwrap();
+    assert_eq!((bytes[18], bytes[19]), (2, 2));
+    bytes[18] = 1;
+    bytes[19] = 1;
+    fs::write(env.db(), &bytes).unwrap();
+    let before = snapshot(&env.store_dir());
     let e = env.try_open().err().unwrap();
     assert_reason(&e, Code::Corrupt, "journal_mode");
-    assert_eq!(fs::read(env.db()).unwrap(), before);
-    let c = bare(&env.db());
-    let m: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
-    assert_eq!(m, "delete");
+    assert_eq!(snapshot(&env.store_dir()), before);
+    let b = fs::read(env.db()).unwrap();
+    assert_eq!((b[18], b[19]), (1, 1));
 }
 
 #[test]
 fn open_refuses_schema_drift() {
-    let edits: [(&str, &str); 4] = [
-        ("drop table", "DROP TABLE gc_runs;"),
-        (
-            "drop check",
-            "PRAGMA writable_schema = ON; UPDATE sqlite_schema SET sql = replace(sql, 'CHECK (size >= 0),', ',') WHERE name = 'blobs'; PRAGMA writable_schema = OFF;",
-        ),
-        (
-            "change type",
-            "PRAGMA writable_schema = ON; UPDATE sqlite_schema SET sql = replace(sql, 'ticket     TEXT,', 'ticket     ANY,') WHERE name = 'sessions'; PRAGMA writable_schema = OFF;",
-        ),
-        ("drop trigger", "DROP TRIGGER blobs_no_update;"),
+    // Turso refuses writable_schema edits, so the column-level drifts are
+    // made by same-length byte patches of the stored CREATE text (Turso
+    // stores the text normalised: single spaces).
+    enum Edit {
+        Sql(&'static str),
+        Patch(&'static str, &'static str),
+    }
+    let edits = [
+        ("drop table", Edit::Sql("DROP TABLE gc_runs;")),
+        ("drop trigger", Edit::Sql("DROP TRIGGER blobs_no_update;")),
+        ("extra index", Edit::Sql("CREATE INDEX extra_idx ON blobs (size);")),
+        ("extra table", Edit::Sql("CREATE TABLE embeddings_x (id INTEGER PRIMARY KEY);")),
+        ("drop check", Edit::Patch("CHECK (size >= 0)", "CHECK (size >= 1)")),
+        ("change type", Edit::Patch("ticket TEXT,", "ticket BLOB,")),
     ];
     for (what, edit) in edits {
         let env = env();
         env.open().close().unwrap();
-        {
-            let (c, _) = raw(&env.db(), true);
-            c.execute_batch(edit).unwrap_or_else(|e| panic!("{what}: {e}"));
-            let changed: i64 = c.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0)).unwrap();
-            assert!(changed > 0);
+        match edit {
+            Edit::Sql(q) => {
+                let (c, _) = raw(&env.db(), true);
+                c.execute_batch(q).unwrap_or_else(|e| panic!("{what}: {e}"));
+                c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |_| Ok(())).unwrap();
+            }
+            Edit::Patch(f, w) => patch_db(&env, f.as_bytes(), w.as_bytes()),
         }
         let before = fs::read(env.db()).unwrap();
         let e = env.try_open().err().unwrap_or_else(|| panic!("{what}: open succeeded"));
@@ -220,6 +233,7 @@ fn open_refuses_unknown_user_version() {
         {
             let c = bare(&env.db());
             c.execute_batch(&format!("PRAGMA user_version = {v}")).unwrap();
+            c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |_| Ok(())).unwrap();
         }
         let before = fs::read(env.db()).unwrap();
         let e = env.try_open().err().unwrap();
@@ -234,21 +248,25 @@ fn open_leaves_unrelated_database_untouched() {
     let env = env();
     fs::create_dir_all(env.store_dir()).unwrap();
     {
-        let c = rusqlite::Connection::open(env.db()).unwrap();
+        let c = strata_store::sql::open(&env.db(), strata_store::sql::Mode::Private).unwrap();
         c.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);").unwrap();
+        c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |_| Ok(())).unwrap();
     }
-    let before = fs::read(env.db()).unwrap();
+    for side in ["store.db-wal", "store.db-shm", "store.db-tshm"] {
+        let _ = fs::remove_file(env.store_dir().join(side));
+    }
+    let snap = || {
+        let mut m = snapshot(&env.store_dir());
+        m.remove(std::path::Path::new("LOCK")); // the writer lock file, taken first
+        m
+    };
+    let before = snap();
     let e = env.try_open().err().unwrap();
     assert_reason(&e, Code::Corrupt, "application_id");
-    assert_eq!(fs::read(env.db()).unwrap(), before);
-    assert!(!env.store_dir().join("store.db-wal").exists());
-    assert!(!env.store_dir().join("store.db-shm").exists());
+    assert_eq!(snap(), before);
     let e = Store::open_read_only(&env.root).err().unwrap();
     assert_reason(&e, Code::Corrupt, "application_id");
-    assert!(!env.store_dir().join("store.db-wal").exists());
-    let c = bare(&env.db());
-    let m: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
-    assert_eq!(m, "delete");
+    assert_eq!(snap(), before);
 }
 
 #[test]
@@ -471,7 +489,7 @@ fn quick_check_runs_only_after_unclean_exit() {
         for i in 0..2000 {
             c.execute(
                 "INSERT INTO blobs (id, size, created_ns) VALUES (?1, ?2, 0)",
-                rusqlite::params![format!("{:064x}", i), i],
+                params![format!("{:064x}", i), i],
             )
             .unwrap();
         }
@@ -513,7 +531,19 @@ fn lock_is_not_inherited_by_child_processes() {
     let s = env.open();
     let mut child = Command::new("sleep").arg("60").spawn().unwrap();
     drop(s);
-    let s2 = env.try_open();
+    // Under parallel test load the reopen occasionally sees Busy for
+    // ~70-200 ms after the drop (observed only with the Turso build, never
+    // with `lsof` showing a holder). An inherited lock would be held by the
+    // sleeper for 60 s, so a bounded 2 s wait still proves non-inheritance.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let s2 = loop {
+        match env.try_open() {
+            Err(e) if e.code == Code::Busy && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5))
+            }
+            r => break r,
+        }
+    };
     let alive = child.try_wait().unwrap().is_none();
     let _ = child.kill();
     let _ = child.wait();

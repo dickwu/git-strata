@@ -1,5 +1,9 @@
 //! The pinned schema (store.md §4.3), verbatim. `open` runs it in a
 //! `:memory:` database and compares `sqlite_schema` row by row (§5.2 step 5).
+//! Engine: Turso (see sql.rs); the gc gate table replaces the SQL function
+//! `strata_gc_active()` the design names, and the four `(x IN (..)) = (y IS
+//! NULL)` checks are spelled as AND/OR (Turso cannot type the `=` form in a
+//! STRICT CHECK); the accepted rows are identical.
 
 /// Every table, index and trigger, plus `application_id` and `user_version`.
 pub(crate) const DDL: &str = r#"PRAGMA application_id = 1398035009;
@@ -30,7 +34,7 @@ CREATE TABLE deps_attempts (
     ended_ns   INTEGER,
     error      TEXT    CHECK (error IS NULL OR json_valid(error)),
     CHECK ((state = 'running') = (ended_ns IS NULL)),
-    CHECK ((state IN ('failed', 'refused')) = (error IS NOT NULL))
+    CHECK ((state IN ('failed', 'refused') AND error IS NOT NULL) OR (state NOT IN ('failed', 'refused') AND error IS NULL))
 ) STRICT;
 CREATE UNIQUE INDEX deps_attempts_one_running ON deps_attempts (repo, set_id) WHERE state = 'running';
 CREATE INDEX deps_attempts_by_set ON deps_attempts (repo, set_id, id);
@@ -163,9 +167,9 @@ CREATE TABLE move_intents (
     ended_ns   INTEGER,
     PRIMARY KEY (session, repo, n),
     FOREIGN KEY (session, repo) REFERENCES workspaces (session, repo),
-    CHECK ((state IN ('preparing', 'swapping')) = (ended_ns IS NULL)),
+    CHECK ((state IN ('preparing', 'swapping') AND ended_ns IS NULL) OR (state NOT IN ('preparing', 'swapping') AND ended_ns IS NOT NULL)),
     CHECK (old_tree IS NULL OR state = 'done'),
-    CHECK (state = 'abandoned' OR (state IN ('preparing', 'refused')) = (conflicts IS NULL))
+    CHECK (state = 'abandoned' OR (state IN ('preparing', 'refused') AND conflicts IS NULL) OR (state NOT IN ('preparing', 'refused') AND conflicts IS NOT NULL))
 ) STRICT;
 CREATE UNIQUE INDEX move_intents_one_open ON move_intents (session, repo) WHERE state IN ('preparing', 'swapping');
 
@@ -181,7 +185,7 @@ CREATE TABLE checkpoints (
     PRIMARY KEY (session, id),
     FOREIGN KEY (session, repo) REFERENCES workspaces (session, repo),
     FOREIGN KEY (repo, base_gen) REFERENCES base_gens (repo, id),
-    CHECK ((reason IN ('tool_call', 'manual')) = (reason_text IS NOT NULL))
+    CHECK ((reason IN ('tool_call', 'manual') AND reason_text IS NOT NULL) OR (reason NOT IN ('tool_call', 'manual') AND reason_text IS NULL))
 ) STRICT;
 CREATE UNIQUE INDEX checkpoints_by_tool_call ON checkpoints (session, repo, reason_text) WHERE reason = 'tool_call';
 CREATE INDEX checkpoints_by_repo ON checkpoints (session, repo, id);
@@ -259,6 +263,18 @@ CREATE TABLE gc_runs (
     CHECK (scope IS NULL OR scrub_after IS NULL)
 ) STRICT;
 CREATE INDEX gc_runs_by_scope ON gc_runs (scope, id);
+
+-- The gc delete gate (engine: Turso has no host-registered SQL functions,
+-- so the `*_delete_gc_only` triggers read this one-row table). gc sets
+-- active = 1 as the first statement of its write transaction and back to 0
+-- as the last one, so no committed state ever has active = 1.
+CREATE TABLE strata_gc_gate (
+    id     INTEGER PRIMARY KEY CHECK (id = 1),
+    active INTEGER NOT NULL CHECK (active IN (0, 1))
+) STRICT;
+INSERT INTO strata_gc_gate (id, active) VALUES (1, 0);
+CREATE TRIGGER strata_gc_gate_no_insert BEFORE INSERT ON strata_gc_gate BEGIN SELECT RAISE(ABORT, 'illegal insert: strata_gc_gate'); END;
+CREATE TRIGGER strata_gc_gate_no_delete BEFORE DELETE ON strata_gc_gate BEGIN SELECT RAISE(ABORT, 'append-only: strata_gc_gate'); END;
 
 CREATE TRIGGER deps_sets_no_update        BEFORE UPDATE ON deps_sets        BEGIN SELECT RAISE(ABORT, 'immutable: deps_sets'); END;
 CREATE TRIGGER base_trees_no_update       BEFORE UPDATE ON base_trees       BEGIN SELECT RAISE(ABORT, 'immutable: base_trees'); END;
@@ -359,21 +375,21 @@ WHEN NEW.id IS NOT OLD.id OR NEW.started_ns IS NOT OLD.started_ns
   OR NOT ((OLD.phase = 'running' AND NEW.phase IN ('done', 'unknown')) OR (OLD.phase = 'unknown' AND NEW.phase = 'done'))
 BEGIN SELECT RAISE(ABORT, 'illegal update: publishes'); END;
 
-CREATE TRIGGER deps_sets_delete_gc_only        BEFORE DELETE ON deps_sets        WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: deps_sets'); END;
-CREATE TRIGGER deps_attempts_delete_gc_only    BEFORE DELETE ON deps_attempts    WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: deps_attempts'); END;
-CREATE TRIGGER deps_proposals_delete_gc_only   BEFORE DELETE ON deps_proposals   WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: deps_proposals'); END;
-CREATE TRIGGER deps_main_delete_gc_only        BEFORE DELETE ON deps_main        WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: deps_main'); END;
-CREATE TRIGGER base_trees_delete_gc_only       BEFORE DELETE ON base_trees       WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: base_trees'); END;
-CREATE TRIGGER manifest_entries_delete_gc_only BEFORE DELETE ON manifest_entries WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: manifest_entries'); END;
-CREATE TRIGGER base_gens_delete_gc_only        BEFORE DELETE ON base_gens        WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: base_gens'); END;
-CREATE TRIGGER sessions_delete_gc_only         BEFORE DELETE ON sessions         WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: sessions'); END;
-CREATE TRIGGER workspaces_delete_gc_only       BEFORE DELETE ON workspaces       WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: workspaces'); END;
-CREATE TRIGGER seeds_delete_gc_only            BEFORE DELETE ON seeds            WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: seeds'); END;
-CREATE TRIGGER move_intents_delete_gc_only     BEFORE DELETE ON move_intents     WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: move_intents'); END;
-CREATE TRIGGER checkpoints_delete_gc_only      BEFORE DELETE ON checkpoints      WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: checkpoints'); END;
-CREATE TRIGGER blobs_delete_gc_only            BEFORE DELETE ON blobs            WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: blobs'); END;
-CREATE TRIGGER overlay_entries_delete_gc_only  BEFORE DELETE ON overlay_entries  WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: overlay_entries'); END;
-CREATE TRIGGER gc_runs_delete_gc_only          BEFORE DELETE ON gc_runs          WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: gc_runs'); END;
+CREATE TRIGGER deps_sets_delete_gc_only        BEFORE DELETE ON deps_sets        WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: deps_sets'); END;
+CREATE TRIGGER deps_attempts_delete_gc_only    BEFORE DELETE ON deps_attempts    WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: deps_attempts'); END;
+CREATE TRIGGER deps_proposals_delete_gc_only   BEFORE DELETE ON deps_proposals   WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: deps_proposals'); END;
+CREATE TRIGGER deps_main_delete_gc_only        BEFORE DELETE ON deps_main        WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: deps_main'); END;
+CREATE TRIGGER base_trees_delete_gc_only       BEFORE DELETE ON base_trees       WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: base_trees'); END;
+CREATE TRIGGER manifest_entries_delete_gc_only BEFORE DELETE ON manifest_entries WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: manifest_entries'); END;
+CREATE TRIGGER base_gens_delete_gc_only        BEFORE DELETE ON base_gens        WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: base_gens'); END;
+CREATE TRIGGER sessions_delete_gc_only         BEFORE DELETE ON sessions         WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: sessions'); END;
+CREATE TRIGGER workspaces_delete_gc_only       BEFORE DELETE ON workspaces       WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: workspaces'); END;
+CREATE TRIGGER seeds_delete_gc_only            BEFORE DELETE ON seeds            WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: seeds'); END;
+CREATE TRIGGER move_intents_delete_gc_only     BEFORE DELETE ON move_intents     WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: move_intents'); END;
+CREATE TRIGGER checkpoints_delete_gc_only      BEFORE DELETE ON checkpoints      WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: checkpoints'); END;
+CREATE TRIGGER blobs_delete_gc_only            BEFORE DELETE ON blobs            WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: blobs'); END;
+CREATE TRIGGER overlay_entries_delete_gc_only  BEFORE DELETE ON overlay_entries  WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: overlay_entries'); END;
+CREATE TRIGGER gc_runs_delete_gc_only          BEFORE DELETE ON gc_runs          WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: gc_runs'); END;
 CREATE TRIGGER publishes_no_delete     BEFORE DELETE ON publishes     BEGIN SELECT RAISE(ABORT, 'append-only: publishes'); END;
 CREATE TRIGGER publish_items_no_delete BEFORE DELETE ON publish_items BEGIN SELECT RAISE(ABORT, 'append-only: publish_items'); END;
 CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELECT RAISE(ABORT, 'append-only: refs_audit'); END;

@@ -142,7 +142,7 @@ fn flip_bit(p: &Path, off: u64) {
 
 fn raw_blob_row(env: &Env, id: &str, size: i64) {
     let (c, _) = raw(&env.db(), false);
-    c.execute("INSERT INTO blobs (id, size, created_ns) VALUES (?1, ?2, 0)", rusqlite::params![id, size]).unwrap();
+    c.execute("INSERT INTO blobs (id, size, created_ns) VALUES (?1, ?2, 0)", params![id, size]).unwrap();
 }
 
 fn blob_rows(env: &Env) -> i64 {

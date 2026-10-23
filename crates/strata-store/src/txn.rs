@@ -3,7 +3,7 @@
 
 use std::sync::atomic::Ordering;
 
-use rusqlite::{Connection, ErrorCode, OptionalExtension};
+use crate::sql::{Connection, OptionalExtension};
 use serde_json::json;
 use strata_types::Code;
 
@@ -74,13 +74,10 @@ impl Store {
         match res {
             Ok(()) => Ok(v),
             Err(e) => {
-                let definite = matches!(
-                    &e,
-                    rusqlite::Error::SqliteFailure(f, _)
-                        if matches!(f.code, ErrorCode::ConstraintViolation | ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
-                );
+                let definite =
+                    matches!(&e, turso::Error::Constraint(_) | turso::Error::Busy(_) | turso::Error::BusySnapshot(_));
                 if definite {
-                    // Deferred FK violation or lock: SQLite left the
+                    // Deferred FK violation or lock: the engine left the
                     // transaction open and nothing reached the WAL.
                     rollback(&db);
                     Err(sql(e, op, NOT_WRITTEN))

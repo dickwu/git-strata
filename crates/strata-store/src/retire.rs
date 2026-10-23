@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension};
+use crate::sql::{Connection, OptionalExtension};
 use serde_json::json;
 use strata_apfs::{IoSide, RenameMode};
 use strata_types::{Code, DepsSetId, RepoName, RepoPath, SessionId, StrataError, TreeOid};
@@ -82,7 +82,7 @@ fn classify<'a>(parts: &[&'a str]) -> Option<Row7<'a>> {
     })
 }
 
-fn exists(c: &Connection, q: &str, p: impl rusqlite::Params) -> Result<bool> {
+fn exists(c: &Connection, q: &str, p: impl crate::sql::Params) -> Result<bool> {
     c.query_row(q, p, |r| r.get(0)).map_err(sql_read)
 }
 
@@ -220,7 +220,7 @@ impl Store {
                         c,
                         "SELECT EXISTS (SELECT 1 FROM move_intents WHERE session = ?1 AND repo = ?2 AND n = ?3 \
                          AND state IN ('preparing', 'refused', 'abandoned'))",
-                        rusqlite::params![id, repo.as_str(), m],
+                        crate::sql::params![id, repo.as_str(), m],
                     )?;
                 if !ok {
                     return Err(refused(path, 6, "it is the current, an in-flight or an unknown generation's admin dir"));

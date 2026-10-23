@@ -10,12 +10,10 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
-use rusqlite::config::DbConfig;
-use rusqlite::functions::FunctionFlags;
-use rusqlite::{Connection, OpenFlags};
+use crate::sql::{self, Connection, Mode};
 use serde_json::json;
 use strata_apfs::{IoSide, classify_io_error, full_fsync, nearest_existing_ancestor, same_volume};
 use strata_types::{Code, StrataError};
@@ -150,12 +148,12 @@ fn check_header(db: &Path) -> Result<()> {
     Ok(())
 }
 
-fn pragma_text(c: &Connection, name: &str) -> rusqlite::Result<String> {
+fn pragma_text(c: &Connection, name: &str) -> sql::SqlResult<String> {
     c.query_row(&format!("PRAGMA {name}"), [], |r| {
-        let v: rusqlite::types::Value = r.get(0)?;
+        let v: sql::Value = r.get(0)?;
         Ok(match v {
-            rusqlite::types::Value::Integer(i) => i.to_string(),
-            rusqlite::types::Value::Text(t) => t.to_lowercase(),
+            sql::Value::Integer(i) => i.to_string(),
+            sql::Value::Text(t) => t.to_lowercase(),
             other => format!("{other:?}"),
         })
     })
@@ -193,21 +191,21 @@ fn pin(c: &Connection, name: &str, set: &str, expect: &str, op: &str) -> Result<
     Ok(())
 }
 
-fn defensive(c: &Connection, op: &str) -> Result<()> {
-    c.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true).map_err(|e| sql(e, op, NOT_WRITTEN))?;
-    Ok(())
-}
-
 /// The §4.2 settings for a write connection (journal_mode is in the file).
+/// `SQLITE_DBCONFIG_DEFENSIVE` has no Turso equivalent; Turso refuses
+/// writes to `sqlite_schema` unconditionally, which is the part we need.
 fn pin_writer(c: &Connection, op: &str) -> Result<()> {
-    defensive(c, op)?;
     c.busy_timeout(Duration::ZERO).map_err(|e| sql(e, op, NOT_WRITTEN))?;
     pin(c, "synchronous", "FULL", "2", op)?;
     pin(c, "fullfsync", "1", "1", op)?;
-    pin(c, "checkpoint_fullfsync", "1", "1", op)?;
+    // No `checkpoint_fullfsync` in Turso (unknown pragma, silently ignored):
+    // its pager uses the one `fullfsync` sync type for commits and
+    // checkpoints alike, so pinning `fullfsync` covers both.
     pin(c, "foreign_keys", "1", "1", op)?;
-    pin(c, "recursive_triggers", "1", "1", op)?;
-    pin(c, "trusted_schema", "0", "0", op)?;
+    // `recursive_triggers` and `trusted_schema` are unknown to Turso 0.8.3
+    // (accepted, ignored): there are no app-defined SQL functions or virtual
+    // tables for trusted_schema to guard, and REPLACE's implicit delete is
+    // covered by tests/guards.rs against the engine's actual behaviour.
     let bt = pragma_text(c, "busy_timeout").map_err(|e| sql(e, op, NOT_WRITTEN))?;
     if bt != "0" {
         return Err(err(Code::Unsupported, "busy_timeout did not stick", json!({ "setting": "busy_timeout", "expected": "0", "actual": bt })));
@@ -216,26 +214,15 @@ fn pin_writer(c: &Connection, op: &str) -> Result<()> {
 }
 
 fn pin_reader(c: &Connection, op: &str) -> Result<()> {
-    defensive(c, op)?;
     c.busy_timeout(Duration::from_millis(READER_BUSY_MS)).map_err(|e| sql(e, op, NOT_WRITTEN))?;
-    pin(c, "trusted_schema", "0", "0", op)?;
+    pin(c, "foreign_keys", "1", "1", op)?;
     pin(c, "query_only", "1", "1", op)?;
     Ok(())
 }
 
-pub(crate) fn register_gc_fn(c: &Connection, flag: Arc<AtomicBool>) -> Result<()> {
-    c.create_scalar_function(
-        "strata_gc_active",
-        0,
-        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-        move |_| Ok(flag.load(Ordering::SeqCst) as i64),
-    )
-    .map_err(|e| sql(e, "open", NOT_WRITTEN))
-}
-
 type SchemaRow = (String, String, String, Option<String>);
 
-fn schema_rows(c: &Connection) -> rusqlite::Result<Vec<SchemaRow>> {
+fn schema_rows(c: &Connection) -> sql::SqlResult<Vec<SchemaRow>> {
     let mut st = c.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")?;
     let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
     rows.collect()
@@ -243,8 +230,7 @@ fn schema_rows(c: &Connection) -> rusqlite::Result<Vec<SchemaRow>> {
 
 /// Step 5: the schema must equal the pinned DDL, row for row.
 fn check_schema(c: &Connection, op: &str) -> Result<()> {
-    let mem = Connection::open_in_memory().map_err(|e| sql(e, op, NOT_WRITTEN))?;
-    register_gc_fn(&mem, Arc::new(AtomicBool::new(false)))?;
+    let mem = sql::open_in_memory().map_err(|e| sql(e, op, NOT_WRITTEN))?;
     mem.execute_batch(DDL).map_err(|e| sql(e, op, NOT_WRITTEN))?;
     let want = schema_rows(&mem).map_err(|e| sql(e, op, NOT_WRITTEN))?;
     let got = schema_rows(c).map_err(|e| sql(e, op, NOT_WRITTEN))?;
@@ -276,23 +262,15 @@ fn quick_check_on(c: &Connection) -> Result<()> {
     Err(err(Code::Corrupt, "SQLite quick_check found damage", json!({ "reason": "sqlite", "messages": first })))
 }
 
-/// Open one store connection. Under `test-seams` every connection goes
-/// through the instrumented VFS (vfs.rs) so tests can count and fail syncs.
-pub(crate) fn open_conn(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connection> {
-    #[cfg(feature = "test-seams")]
-    {
-        crate::vfs::ensure_registered();
-        Connection::open_with_flags_and_vfs(path, flags, crate::vfs::NAME)
-    }
-    #[cfg(not(feature = "test-seams"))]
-    {
-        Connection::open_with_flags(path, flags)
-    }
+/// Open one store connection (Turso, multi-process WAL). Under
+/// `test-seams` it goes through the instrumented I/O (vfs.rs) so tests can
+/// count and fail syncs.
+pub(crate) fn open_conn(path: &Path) -> sql::SqlResult<Connection> {
+    sql::open(path, Mode::Shared)
 }
 
 fn open_reader_conn(db: &Path) -> Result<Connection> {
-    let c = open_conn(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-        .map_err(|e| sql(e, "open", NOT_WRITTEN))?;
+    let c = open_conn(db).map_err(|e| sql(e, "open", NOT_WRITTEN))?;
     pin_reader(&c, "open")?;
     Ok(c)
 }
@@ -329,11 +307,7 @@ impl Store {
         let pooled = self.readers.lock().unwrap_or_else(|p| p.into_inner()).pop();
         let conn = match pooled {
             Some(c) => c,
-            None => {
-                let c = open_reader_conn(&self.db_path())?;
-                register_gc_fn(&c, self.gc_active.clone())?;
-                c
-            }
+            None => open_reader_conn(&self.db_path())?,
         };
         Ok(Reader { store: self, conn: Some(c_or(conn)) })
     }
@@ -446,9 +420,7 @@ impl Store {
         let c = open_reader_conn(&rdb)?;
         check_identity(&c, "open")?;
         check_schema(&c, "open")?;
-        let gc_active = Arc::new(AtomicBool::new(false));
-        register_gc_fn(&c, gc_active.clone())?;
-        Ok(new_store(root, real_root, true, c, None, gc_active))
+        Ok(new_store(root, real_root, true, c, None))
     }
 
     pub fn close(self) -> Result<()> {
@@ -458,7 +430,13 @@ impl Store {
             let _ = r.close();
         }
         let conn = db.into_inner().unwrap_or_else(|p| p.into_inner());
-        conn.close().map_err(|(_, e)| sql(e, "close", NOT_WRITTEN))?;
+        if !read_only && !poisoned.load(Ordering::SeqCst) {
+            // Best effort, like SQLite's last-connection checkpoint: fold the
+            // WAL into store.db so a cold open replays nothing. A reader in
+            // another process may keep it from truncating; that is harmless.
+            let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |_| Ok(()));
+        }
+        conn.close().map_err(|e| sql(e, "close", NOT_WRITTEN))?;
         if read_only {
             return Ok(());
         }
@@ -497,7 +475,7 @@ fn c_or(c: Connection) -> Connection {
     c
 }
 
-fn new_store(root: &Path, real_root: PathBuf, read_only: bool, db: Connection, lock: Option<File>, gc_active: Arc<AtomicBool>) -> Store {
+fn new_store(root: &Path, real_root: PathBuf, read_only: bool, db: Connection, lock: Option<File>) -> Store {
     Store {
         root: root.to_path_buf(),
         real_root,
@@ -506,7 +484,6 @@ fn new_store(root: &Path, real_root: PathBuf, read_only: bool, db: Connection, l
         readers: Mutex::new(Vec::new()),
         writer_lock: lock,
         blob_gate: RwLock::new(()),
-        gc_active,
         gc_running: Mutex::new(()),
         poisoned: AtomicBool::new(false),
         seams: Seams::default(),
@@ -594,11 +571,9 @@ fn create(root: &Path, anc: &Path) -> Result<Store> {
     // 8. temp db
     let tdb = tmp.join(format!("init-{}.db", hex32()));
     {
-        let c = open_conn(
-            &tdb,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|e| sql(e, "init", NOT_WRITTEN))?;
+        // A private file: nobody else knows its name, so no multi-process
+        // coordination (and no `-tshm` file) is needed for it.
+        let c = sql::open(&tdb, Mode::Private).map_err(|e| sql(e, "init", NOT_WRITTEN))?;
         let jm: String = c
             .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
             .map_err(|e| sql(e, "init", NOT_WRITTEN))?;
@@ -610,10 +585,28 @@ fn create(root: &Path, anc: &Path) -> Result<Store> {
             ));
         }
         pin_writer(&c, "init")?;
-        register_gc_fn(&c, Arc::new(AtomicBool::new(false)))?;
         c.execute_batch(&format!("BEGIN IMMEDIATE;\n{DDL}\nCOMMIT;")).map_err(|e| sql(e, "init", NOT_WRITTEN))?;
-        c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())).map_err(|e| sql(e, "init", NOT_WRITTEN))?;
-        c.close().map_err(|(_, e)| sql(e, "init", NOT_WRITTEN))?;
+        let ck: Vec<i64> = c
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok(vec![r.get(0)?, r.get(1)?, r.get(2)?]))
+            .map_err(|e| sql(e, "init", NOT_WRITTEN))?;
+        if ck[0] != 0 {
+            return Err(err(
+                Code::Unknown,
+                "the new store's WAL could not be checkpointed",
+                json!({ "op": "init", "outcome": NOT_WRITTEN, "checkpoint": ck }),
+            ));
+        }
+        c.close().map_err(|e| sql(e, "init", NOT_WRITTEN))?;
+    }
+    // Everything is in the main file now; the empty sidecars of the temp
+    // name must not outlive it.
+    for suffix in ["-wal", "-shm", "-tshm"] {
+        let side = PathBuf::from(format!("{}{suffix}", tdb.display()));
+        match fs::remove_file(&side) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(ioe(&e, IoSide::Write, &side, "init")),
+        }
     }
     full_sync_path(&tdb, "init", NOT_WRITTEN)?;
     if seams::take_next_open(&Seam::InitBeforeRename) {
@@ -641,9 +634,7 @@ fn open_existing(root: &Path, lock: Option<File>) -> Result<Store> {
     let real_root = fs::canonicalize(root).map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
     let rstore = real_root.join("store");
     let rdb = rstore.join("store.db");
-    let c = open_conn(&rdb, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-        .map_err(|e| sql(e, "open", NOT_WRITTEN))?;
-    defensive(&c, "open")?;
+    let c = open_conn(&rdb).map_err(|e| sql(e, "open", NOT_WRITTEN))?;
     c.busy_timeout(Duration::ZERO).map_err(|e| sql(e, "open", NOT_WRITTEN))?;
     check_identity(&c, "open")?;
     pin_writer(&c, "open")?;
@@ -658,9 +649,7 @@ fn open_existing(root: &Path, lock: Option<File>) -> Result<Store> {
     } else {
         quick_check_on(&c)?;
     }
-    let gc_active = Arc::new(AtomicBool::new(false));
-    register_gc_fn(&c, gc_active.clone())?;
-    Ok(new_store(root, real_root, false, c, Some(lock), gc_active))
+    Ok(new_store(root, real_root, false, c, Some(lock)))
 }
 
 #[allow(dead_code)]

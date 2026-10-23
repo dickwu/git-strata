@@ -2,7 +2,7 @@
 
 use std::time::SystemTime;
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use crate::sql::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 use strata_types::{Code, CommitOid, DepsSet, DepsSetId, ProposalId, RepoName, RepoPath, StrataError, TreeOid};
 
@@ -35,7 +35,7 @@ const PROPOSAL_COLS: &str = "id, repo, origin_session, from_set, from_inputs, to
                              superseded_by, created_ns, updated_ns";
 const MAIN_COLS: &str = "repo, tree, head, inputs_hash, set_id, observed_ns";
 
-fn attempt_row(r: &Row<'_>) -> rusqlite::Result<Result<DepsAttempt>> {
+fn attempt_row(r: &Row) -> crate::sql::SqlResult<Result<DepsAttempt>> {
     let id: i64 = r.get(0)?;
     let repo: String = r.get(1)?;
     let set: String = r.get(2)?;
@@ -73,7 +73,7 @@ fn attempt_row(r: &Row<'_>) -> rusqlite::Result<Result<DepsAttempt>> {
     })())
 }
 
-fn proposal_row(r: &Row<'_>) -> rusqlite::Result<Result<ProposalRecord>> {
+fn proposal_row(r: &Row) -> crate::sql::SqlResult<Result<ProposalRecord>> {
     let id: i64 = r.get(0)?;
     let repo: String = r.get(1)?;
     let origin: Option<String> = r.get(2)?;
@@ -114,7 +114,7 @@ fn proposal_row(r: &Row<'_>) -> rusqlite::Result<Result<ProposalRecord>> {
     })())
 }
 
-fn main_row(r: &Row<'_>) -> rusqlite::Result<Result<DepsMain>> {
+fn main_row(r: &Row) -> crate::sql::SqlResult<Result<DepsMain>> {
     let repo: String = r.get(0)?;
     let tree: String = r.get(1)?;
     let head: String = r.get(2)?;
@@ -137,8 +137,8 @@ fn main_row(r: &Row<'_>) -> rusqlite::Result<Result<DepsMain>> {
 fn collect<T>(
     c: &Connection,
     q: &str,
-    p: impl rusqlite::Params,
-    f: fn(&Row<'_>) -> rusqlite::Result<Result<T>>,
+    p: impl crate::sql::Params,
+    f: fn(&Row) -> crate::sql::SqlResult<Result<T>>,
 ) -> Result<Vec<T>> {
     let mut st = c.prepare(q).map_err(sql_read)?;
     let rows = st.query_map(p, f).map_err(sql_read)?;
@@ -152,8 +152,8 @@ fn collect<T>(
 fn one<T>(
     c: &Connection,
     q: &str,
-    p: impl rusqlite::Params,
-    f: fn(&Row<'_>) -> rusqlite::Result<Result<T>>,
+    p: impl crate::sql::Params,
+    f: fn(&Row) -> crate::sql::SqlResult<Result<T>>,
 ) -> Result<Option<T>> {
     c.query_row(q, p, f).optional().map_err(sql_read)?.transpose()
 }

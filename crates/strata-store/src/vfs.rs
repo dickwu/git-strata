@@ -1,25 +1,19 @@
-//! The instrumented VFS (store.md §8 Task 8; `feature = "test-seams"` only).
-//!
-//! A shim named `strata-instr` that wraps SQLite's default `unix` VFS. Every
-//! store connection opens through it, so tests can count `xSync` calls on the
-//! WAL by `flags & 0x0F` (`SyncCounts::wal_full` / `wal_normal`) and make the
-//! next WAL `xSync` fail with `SQLITE_IOERR_FSYNC` (`Seam::CommitSyncFails`).
-//! Everything else is forwarded unchanged to the real VFS and file.
-#![allow(non_snake_case)]
+//! Test-seams only: an instrumented Turso I/O backend. It wraps the
+//! platform I/O and, for every WAL file (`<db>-wal`), counts `sync` calls by
+//! kind (F_FULLFSYNC vs plain fsync) and can fail the next one
+//! (`Seam::CommitSyncFails`). Everything else is forwarded untouched.
 
 use std::collections::HashMap;
-use std::ffi::{CStr, c_char, c_int, c_void};
-use std::mem::size_of;
-use std::ptr;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use rusqlite::ffi;
+use turso::core::io::{FileId, FileSyncType, SharedWalLockKind, SharedWalMappedRegion};
+use turso::core::{Buffer, Clock, Completion, File, MemoryIO, MonotonicInstant, OpenFlags, PlatformIO, WallClockInstant, IO};
 
-pub(crate) const NAME: &str = "strata-instr";
-const NAME_C: &CStr = c"strata-instr";
+type TResult<T> = std::result::Result<T, turso::core::LimboError>;
 
-/// Per-database counters, keyed by the main database's full path.
+/// Per-database counters, keyed by the main database's path.
 #[derive(Default)]
 pub(crate) struct Counters {
     pub(crate) wal_full: AtomicU64,
@@ -32,169 +26,150 @@ fn registry() -> &'static Mutex<HashMap<String, Arc<Counters>>> {
     R.get_or_init(Default::default)
 }
 
-/// The counters for the database at `path` (as SQLite names it, i.e.
-/// `Connection::path()`).
+/// The counters for the database at `path` (`Connection::path()`).
 pub(crate) fn counters(path: &str) -> Arc<Counters> {
     registry().lock().unwrap_or_else(|p| p.into_inner()).entry(path.to_string()).or_default().clone()
 }
 
-#[repr(C)]
-struct IFile {
-    base: ffi::sqlite3_file,
-    real: *mut ffi::sqlite3_file,
-    ctr: *const Counters,
+/// The process-wide instrumented I/O.
+pub(crate) fn io() -> Arc<dyn IO> {
+    static IO_: OnceLock<Arc<InstrIo>> = OnceLock::new();
+    IO_.get_or_init(|| Arc::new(InstrIo { base: Arc::new(PlatformIO::new().expect("platform io")) })).clone()
 }
 
-const HDR: usize = (size_of::<IFile>() + 7) & !7;
-
-struct Real(*mut ffi::sqlite3_vfs);
-unsafe impl Send for Real {}
-unsafe impl Sync for Real {}
-static REAL: OnceLock<Real> = OnceLock::new();
-
-/// Register the shim once per process (not as the default VFS).
-pub(crate) fn ensure_registered() {
-    REAL.get_or_init(|| unsafe {
-        let real = ffi::sqlite3_vfs_find(ptr::null());
-        assert!(!real.is_null(), "no default SQLite VFS");
-        let mut v: ffi::sqlite3_vfs = *real;
-        v.zName = NAME_C.as_ptr();
-        v.pNext = ptr::null_mut();
-        v.szOsFile = (HDR as c_int) + (*real).szOsFile;
-        v.xOpen = Some(x_open);
-        let v: &'static mut ffi::sqlite3_vfs = Box::leak(Box::new(v));
-        let rc = ffi::sqlite3_vfs_register(v, 0);
-        assert_eq!(rc, ffi::SQLITE_OK, "register the instrumented VFS");
-        Real(real)
-    });
+struct InstrIo {
+    base: Arc<dyn IO>,
 }
 
-unsafe fn file(f: *mut ffi::sqlite3_file) -> &'static mut IFile {
-    unsafe { &mut *(f as *mut IFile) }
-}
-
-unsafe fn rm(f: *mut ffi::sqlite3_file) -> (*mut ffi::sqlite3_file, &'static ffi::sqlite3_io_methods) {
-    unsafe {
-        let r = file(f).real;
-        (r, &*(*r).pMethods)
+impl InstrIo {
+    fn wrap(&self, path: &str, f: Arc<dyn File>) -> Arc<dyn File> {
+        match path.strip_suffix("-wal") {
+            Some(db) => Arc::new(InstrFile { inner: f, ctr: counters(db) }),
+            None => f,
+        }
     }
 }
 
-unsafe extern "C" fn x_open(
-    _vfs: *mut ffi::sqlite3_vfs,
-    zName: ffi::sqlite3_filename,
-    f: *mut ffi::sqlite3_file,
-    flags: c_int,
-    out: *mut c_int,
-) -> c_int {
-    unsafe {
-        let real_vfs = REAL.get().unwrap().0;
-        let real = (f as *mut u8).add(HDR) as *mut ffi::sqlite3_file;
-        let me = file(f);
-        me.base.pMethods = ptr::null();
-        me.real = real;
-        me.ctr = ptr::null();
-        (*real).pMethods = ptr::null();
-        let rc = ((*real_vfs).xOpen.unwrap())(real_vfs, zName, real, flags, out);
-        if (*real).pMethods.is_null() {
-            return rc;
-        }
-        if flags & ffi::SQLITE_OPEN_WAL != 0 && !zName.is_null() {
-            let db = ffi::sqlite3_filename_database(zName);
-            if !db.is_null() {
-                let key = CStr::from_ptr(db as *const c_char).to_string_lossy().into_owned();
-                me.ctr = Arc::into_raw(counters(&key));
-            }
-        }
-        me.base.pMethods = &METHODS;
-        rc
+impl Clock for InstrIo {
+    fn current_time_monotonic(&self) -> MonotonicInstant {
+        self.base.current_time_monotonic()
+    }
+    fn current_time_wall_clock(&self) -> WallClockInstant {
+        self.base.current_time_wall_clock()
     }
 }
 
-unsafe extern "C" fn x_close(f: *mut ffi::sqlite3_file) -> c_int {
-    unsafe {
-        let (r, m) = rm(f);
-        let rc = (m.xClose.unwrap())(r);
-        let me = file(f);
-        if !me.ctr.is_null() {
-            drop(Arc::from_raw(me.ctr));
-            me.ctr = ptr::null();
-        }
-        rc
+impl IO for InstrIo {
+    fn open_file(&self, path: &str, flags: OpenFlags, direct: bool) -> TResult<Arc<dyn File>> {
+        let f = self.base.open_file(path, flags, direct)?;
+        Ok(self.wrap(path, f))
+    }
+    fn open_shared_wal_file(&self, path: &str) -> TResult<Arc<dyn File>> {
+        self.base.open_shared_wal_file(path)
+    }
+    fn remove_file(&self, path: &str) -> TResult<()> {
+        self.base.remove_file(path)
+    }
+    fn supports_shared_wal_coordination(&self) -> bool {
+        self.base.supports_shared_wal_coordination()
+    }
+    fn step(&self) -> TResult<()> {
+        self.base.step()
+    }
+    fn cancel(&self, c: &[Completion]) -> TResult<()> {
+        self.base.cancel(c)
+    }
+    fn drain_completions(&self, c: &[Completion]) -> TResult<()> {
+        self.base.drain_completions(c)
+    }
+    fn wait_for_completion(&self, c: Completion) -> TResult<()> {
+        self.base.wait_for_completion(c)
+    }
+    fn generate_random_number(&self) -> i64 {
+        self.base.generate_random_number()
+    }
+    fn fill_bytes(&self, dest: &mut [u8]) {
+        self.base.fill_bytes(dest)
+    }
+    fn get_memory_io(&self) -> Arc<MemoryIO> {
+        self.base.get_memory_io()
+    }
+    fn register_fixed_buffer(&self, ptr: NonNull<u8>, len: usize) -> TResult<u32> {
+        self.base.register_fixed_buffer(ptr, len)
+    }
+    fn yield_now(&self) {
+        self.base.yield_now()
+    }
+    fn sleep(&self, d: std::time::Duration) {
+        self.base.sleep(d)
+    }
+    fn file_id(&self, path: &str) -> TResult<FileId> {
+        self.base.file_id(path)
     }
 }
 
-unsafe extern "C" fn x_sync(f: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
-    unsafe {
-        let me = file(f);
-        if !me.ctr.is_null() {
-            let c = &*me.ctr;
-            if c.fail_next.swap(false, Ordering::SeqCst) {
-                return ffi::SQLITE_IOERR_FSYNC;
-            }
-            match flags & 0x0F {
-                ffi::SQLITE_SYNC_FULL => c.wal_full.fetch_add(1, Ordering::SeqCst),
-                ffi::SQLITE_SYNC_NORMAL => c.wal_normal.fetch_add(1, Ordering::SeqCst),
-                _ => 0,
-            };
+struct InstrFile {
+    inner: Arc<dyn File>,
+    ctr: Arc<Counters>,
+}
+
+impl File for InstrFile {
+    fn lock_file(&self, exclusive: bool) -> TResult<()> {
+        self.inner.lock_file(exclusive)
+    }
+    fn unlock_file(&self) -> TResult<()> {
+        self.inner.unlock_file()
+    }
+    fn pread(&self, pos: u64, c: Completion) -> TResult<Completion> {
+        self.inner.pread(pos, c)
+    }
+    fn pwrite(&self, pos: u64, b: Arc<Buffer>, c: Completion) -> TResult<Completion> {
+        self.inner.pwrite(pos, b, c)
+    }
+    fn pwritev(&self, pos: u64, b: Vec<Arc<Buffer>>, c: Completion) -> TResult<Completion> {
+        self.inner.pwritev(pos, b, c)
+    }
+    fn sync(&self, c: Completion, t: FileSyncType) -> TResult<Completion> {
+        if self.ctr.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(turso::core::io_error(std::io::Error::from_raw_os_error(libc::EIO), "sync"));
         }
-        let (r, m) = rm(f);
-        (m.xSync.unwrap())(r, flags)
+        match t {
+            FileSyncType::FullFsync => self.ctr.wal_full.fetch_add(1, Ordering::SeqCst),
+            FileSyncType::Fsync => self.ctr.wal_normal.fetch_add(1, Ordering::SeqCst),
+        };
+        self.inner.sync(c, t)
+    }
+    fn size(&self) -> TResult<u64> {
+        self.inner.size()
+    }
+    fn truncate(&self, len: u64, c: Completion) -> TResult<Completion> {
+        self.inner.truncate(len, c)
+    }
+    fn has_hole(&self, pos: usize, len: usize) -> TResult<bool> {
+        self.inner.has_hole(pos, len)
+    }
+    fn punch_hole(&self, pos: usize, len: usize) -> TResult<()> {
+        self.inner.punch_hole(pos, len)
+    }
+    fn shared_wal_lock_byte(&self, o: u64, x: bool, k: SharedWalLockKind) -> TResult<()> {
+        self.inner.shared_wal_lock_byte(o, x, k)
+    }
+    fn shared_wal_try_lock_byte(&self, o: u64, x: bool, k: SharedWalLockKind) -> TResult<bool> {
+        self.inner.shared_wal_try_lock_byte(o, x, k)
+    }
+    fn shared_wal_probe_exclusive_byte(&self, o: u64, k: SharedWalLockKind) -> TResult<bool> {
+        self.inner.shared_wal_probe_exclusive_byte(o, k)
+    }
+    fn shared_wal_probe_exclusive_while_shared_byte(&self, o: u64, k: SharedWalLockKind) -> TResult<bool> {
+        self.inner.shared_wal_probe_exclusive_while_shared_byte(o, k)
+    }
+    fn shared_wal_unlock_byte(&self, o: u64, k: SharedWalLockKind) -> TResult<()> {
+        self.inner.shared_wal_unlock_byte(o, k)
+    }
+    fn shared_wal_set_len(&self, len: u64) -> TResult<()> {
+        self.inner.shared_wal_set_len(len)
+    }
+    fn shared_wal_map(&self, o: u64, len: usize) -> TResult<Box<dyn SharedWalMappedRegion>> {
+        self.inner.shared_wal_map(o, len)
     }
 }
-
-macro_rules! fwd {
-    ($name:ident, $field:ident, ($($a:ident : $t:ty),*) -> $ret:ty, $missing:expr) => {
-        unsafe extern "C" fn $name(f: *mut ffi::sqlite3_file $(, $a: $t)*) -> $ret {
-            unsafe {
-                let (r, m) = rm(f);
-                match m.$field {
-                    Some(x) => x(r $(, $a)*),
-                    None => $missing,
-                }
-            }
-        }
-    };
-}
-
-fwd!(x_read, xRead, (b: *mut c_void, n: c_int, o: ffi::sqlite3_int64) -> c_int, ffi::SQLITE_IOERR);
-fwd!(x_write, xWrite, (b: *const c_void, n: c_int, o: ffi::sqlite3_int64) -> c_int, ffi::SQLITE_IOERR);
-fwd!(x_truncate, xTruncate, (s: ffi::sqlite3_int64) -> c_int, ffi::SQLITE_IOERR);
-fwd!(x_file_size, xFileSize, (p: *mut ffi::sqlite3_int64) -> c_int, ffi::SQLITE_IOERR);
-fwd!(x_lock, xLock, (l: c_int) -> c_int, ffi::SQLITE_IOERR);
-fwd!(x_unlock, xUnlock, (l: c_int) -> c_int, ffi::SQLITE_IOERR);
-fwd!(x_check_reserved, xCheckReservedLock, (p: *mut c_int) -> c_int, ffi::SQLITE_IOERR);
-fwd!(x_file_control, xFileControl, (op: c_int, p: *mut c_void) -> c_int, ffi::SQLITE_NOTFOUND);
-fwd!(x_sector_size, xSectorSize, () -> c_int, 4096);
-fwd!(x_device_chars, xDeviceCharacteristics, () -> c_int, 0);
-fwd!(x_shm_map, xShmMap, (pg: c_int, sz: c_int, e: c_int, pp: *mut *mut c_void) -> c_int, ffi::SQLITE_IOERR);
-fwd!(x_shm_lock, xShmLock, (o: c_int, n: c_int, fl: c_int) -> c_int, ffi::SQLITE_IOERR);
-fwd!(x_shm_barrier, xShmBarrier, () -> (), ());
-fwd!(x_shm_unmap, xShmUnmap, (d: c_int) -> c_int, ffi::SQLITE_OK);
-fwd!(x_fetch, xFetch, (o: ffi::sqlite3_int64, n: c_int, pp: *mut *mut c_void) -> c_int, {
-    *pp = ptr::null_mut();
-    ffi::SQLITE_OK
-});
-fwd!(x_unfetch, xUnfetch, (o: ffi::sqlite3_int64, p: *mut c_void) -> c_int, ffi::SQLITE_OK);
-
-static METHODS: ffi::sqlite3_io_methods = ffi::sqlite3_io_methods {
-    iVersion: 3,
-    xClose: Some(x_close),
-    xRead: Some(x_read),
-    xWrite: Some(x_write),
-    xTruncate: Some(x_truncate),
-    xSync: Some(x_sync),
-    xFileSize: Some(x_file_size),
-    xLock: Some(x_lock),
-    xUnlock: Some(x_unlock),
-    xCheckReservedLock: Some(x_check_reserved),
-    xFileControl: Some(x_file_control),
-    xSectorSize: Some(x_sector_size),
-    xDeviceCharacteristics: Some(x_device_chars),
-    xShmMap: Some(x_shm_map),
-    xShmLock: Some(x_shm_lock),
-    xShmBarrier: Some(x_shm_barrier),
-    xShmUnmap: Some(x_shm_unmap),
-    xFetch: Some(x_fetch),
-    xUnfetch: Some(x_unfetch),
-};

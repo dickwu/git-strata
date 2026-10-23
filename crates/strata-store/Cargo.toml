@@ -3,7 +3,7 @@ name = "strata-store"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "git-strata store: SQLite metadata and the BLAKE3 content-addressed blob store"
+description = "git-strata store: Turso (SQLite-format) metadata and the BLAKE3 content-addressed blob store"
 
 [features]
 default = []
@@ -14,7 +14,7 @@ test-seams = ["strata-apfs/test-seams"]
 [dependencies]
 strata-types = { path = "../strata-types" }
 strata-apfs = { path = "../strata-apfs" }
-rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+turso = { version = "=0.8.3", default-features = false }
 blake3 = { version = "1", features = ["mmap", "rayon"] }
 memmap2 = "0.9"
 libc = "0.2.191"

@@ -5,7 +5,6 @@ mod support;
 use std::fs;
 use std::io::Write;
 
-use rusqlite::{Connection, OpenFlags};
 use strata_store::*;
 use strata_types::{BlobId, Code, EntryKind};
 use support::world::*;
@@ -22,7 +21,7 @@ fn blob_file(env: &Env, b: &BlobId) -> std::path::PathBuf {
 }
 
 fn blob_row(env: &Env, b: &BlobId) -> bool {
-    let c = Connection::open_with_flags(env.db(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let c = ro(&env.db());
     c.query_row("SELECT count(*) FROM blobs WHERE id = ?1", [b.as_str()], |r| r.get::<_, i64>(0)).unwrap() == 1
 }
 
