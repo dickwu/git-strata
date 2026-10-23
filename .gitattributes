@@ -1,0 +1,2 @@
+# Test fixtures are byte-exact (CRLF, NUL, odd encodings): never convert them.
+crates/strata-gitio/tests/fixtures/** -text

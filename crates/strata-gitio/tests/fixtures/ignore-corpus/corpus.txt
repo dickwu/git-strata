@@ -1,0 +1,135 @@
+# Ignore-rule corpus for is_ignored_agrees_with_git_on_corpus.
+# Sections: "== <file>" holds the lines of a .gitignore (committed),
+# "== @info/exclude" and "== @global" the repository / global excludes,
+# "== tracked" paths committed with `git add -f`, "== paths" the paths
+# to judge (a trailing / makes a directory on disk). "##" lines are comments.
+== .gitignore
+*.log
+!keep.log
+/anchored.txt
+build/
+!build/keep.c
+doc/**/*.pdf
+**/cache
+foo/*/bar
+*.[oa]
+\#hash
+\!bang
+trailing\ 
+spaced   
+temp?
+[
+Mixed.TXT
+[A]up
+\Esc
+*.bak/
+deep/**
+== sub/.gitignore
+*.tmp
+!important.log
+nested/
+/rootonly
+!/anchored.txt
+== sub/deep/.gitignore
+*
+!*.keep
+!*/
+== odd/.gitignore
+*.c
+**/x/**/y
+== @info/exclude
+*.env
+!keep.env
+secret*
+== @global
+*.swp
+.claude/settings.local.json
+local/
+== tracked
+tracked.log
+build2.o
+sub/tracked.tmp
+== paths
+a.log
+keep.log
+sub/keep.log
+sub/important.log
+sub/x.log
+anchored.txt
+sub/anchored.txt
+build/
+build/out.o
+build/keep.c
+sub/build/
+sub/build/x
+doc/a.pdf
+doc/x/
+doc/x/y/
+doc/x/y/a.pdf
+doc/x/a.txt
+cache/
+a/cache/
+a/cache/file
+b/cache
+foo/x/
+foo/x/bar
+foo/x/y/bar
+foo/bar
+lib.o
+lib.a
+lib.c
+#hash
+!bang
+trailing 
+trailing
+spaced
+temp1
+temp12
+Mixed.TXT
+mixed.txt
+MIXED.TXT
+Aup
+aup
+Esc
+esc
+A.LOG
+x.bak
+y.bak/
+deep/
+deep/a
+deep/b/c
+sub/a.TMP
+sub/a.tmp
+sub/nested/
+sub/nested/f
+sub/rootonly
+rootonly
+sub/deep/x.c
+sub/deep/x.keep
+sub/deep/inner/
+sub/deep/inner/y.keep
+odd/x.c
+odd/z/x.c
+x.c
+odd/x/y
+odd/a/x/b/y
+odd/xy
+x.env
+keep.env
+X.ENV
+secret.txt
+sub/secret.txt
+f.swp
+.claude/
+.claude/settings.local.json
+.claude/other.json
+local/
+local/x
+sub/local/
+local
+É.txt
+é.txt
+tracked.log
+build2.o
+sub/tracked.tmp
+SUB/TRACKED.TMP
