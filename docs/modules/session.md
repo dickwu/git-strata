@@ -93,7 +93,7 @@ Workspace crate（types.md §8：session 在第 3 层，只依赖第 0–2 层�
 
 **对 daemon**（daemon.md 还没写；第二轮新增的部分已由 module-rulings 的 "T13 (daemon, from session r2 cec336b)" 与 "Lock order: session queue before repo lock" 记给 daemon）：
 
-1. 每个 repo 对主 checkout 打开一个 `Git`，按 `RepoName` 交给 `Sessions::open`；实现 `deps::RepoWriteLock`（有界等待之后 `Busy`），给出 `deps::InstallEnv`；实现 `BeforeCheckpoint`（§3）：用它为这个工作区持有的 Tracker 记 `BeforeRollout`、`BeforeRemove`，还没有 Tracker 时传 None（module-rulings "Session's Before* checkpoints use the daemon's Tracker"）。
+1. 每个 repo 对主 checkout 打开一个 `Git`，按 `RepoName` 交给 `Sessions::open`。daemon 在它的整个生命周期里只打开一个 `Sessions`：两套进程内的进行中记录都在那里，再开一个就会把正在跑的移动报成 `MoveAwaitingRecover`（§5.5 第 2.9 步，评审 M-8）。cli 只在 daemon 没在跑时自己打开 `Sessions`。实现 `deps::RepoWriteLock`（有界等待之后 `Busy`），给出 `deps::InstallEnv`；实现 `BeforeCheckpoint`（§3）：用它为这个工作区持有的 Tracker 记 `BeforeRollout`、`BeforeRemove`，还没有 Tracker 时传 None（module-rulings "Session's Before* checkpoints use the daemon's Tracker"）。daemon 报出持锁过久的调用（谁持着哪把锁、从什么时候起），因为第一次可见的写之后的等待不再超时（module-rulings "Waits after a call's first visible write are not bounded"）。
 2. 调 `new`、`remove`、`ensure_base`、`ensure_base_for`、`resolve_failed_move` 时不持有任何 repo 写锁（它们自己在短临界区里取，`RepoWriteLock` 不可重入）。调 `move_workspace` 之前，先在锁外用 `ensure_base` 或 `ensure_base_for` 备好目标基线，再持该 repo 的写锁调它（module-rulings "Base generations are built outside the lock"）。要会话队列又要 repo 锁的调用，先占队列、再取锁，持锁时从不等队列（module-rulings "Lock order: session queue before repo lock"）：`deps approve` 之前先按 `SessionId` 升序占齐候选会话的队列，再让 approve 持锁对每个会话 `move_workspace`；publish 先占它那个会话的队列，再取锁。
 3. 同一会话的 checkpoint、restore、`remove`、`move_workspace`、`resolve_failed_move` 串行（module-rulings T7、T13）：`move_workspace`、`remove` 与 `resolve_failed_move` 进行时，这个会话没有别的写在跑。哪些调用走队列由 daemon 定（T13；工具调用的 checkpoint 不该排在一次长的 approve 后面）；`BeforeCheckpoint` 的实现从不进队列（§3）。
 4. `move_workspace` 返回之后（`Ok`，或交换之后的 `Unknown`），以及 `resolve_failed_move` 的 Accept 之后（工作区换了基线），对该工作区 `Tracker::reset` 再 `watch`，下一次扫描是冷扫（增补 3 "Projection"、增补 5）。
@@ -104,7 +104,7 @@ Workspace crate（types.md §8：session 在第 3 层，只依赖第 0–2 层�
 
 **对 publish**（publish.md 还没写）：`rebase_session` 在拿锁之前调 `Sessions::ensure_base_for` 或 `Sessions::ensure_base` 备好新基线（见上文的调用方），再先占这个会话的队列、后取该 repo 的写锁（module-rulings "Lock order: session queue before repo lock"），调 `Sessions::move_workspace`；`MoveReport` 的字段见 §3。
 
-**对 cli**（cli.md 还没写）：处理失败的移动是一个显式命令，人看过 status 之后选 Abandon 或 Accept，没有选择就不运行（module-rulings "Resolving a failed move" 的 T14 部分）；它经 daemon 调 `resolve_failed_move`。
+**对 cli**（cli.md 还没写）：处理失败的移动是一个显式命令，人看过 status 之后选 Abandon 或 Accept，没有选择就不运行（module-rulings "Resolving a failed move" 的 T14 部分）；它经 daemon 调 `resolve_failed_move`。cli 只在 daemon 没在跑时自己打开 `Sessions`（§2 对 daemon 的第 1 条）。
 
 ## 3. 公开接口（Rust）
 
@@ -783,7 +783,7 @@ ticket 不会与 id 混淆：`new` 以 `ReservedName` 拒绝会话 id 形式的 
    6. `conflicts`：工作区行记下的、最近一次移动的冲突路径。
    7. `seeds`：每条种子行。主 checkout 里来源的 mtime 与 `source_mtime` 不同、或来源已不在 → `SeedStale` [我的决定 D18]；`git.is_ignored(ws, p)` 为假 → `SeedNotIgnored`。工作区不在时不查 [我的决定 D19]：`is_ignored` 要经工作区的 `.git` 读规则，`Missing` 已经说明了问题。
    8. `MirrorDrift`：影子仓库在时，`git.shadow_drift(&shadow, ws)` 非空 → 一条告警，每项一个 `MirrorDriftItem`：`Exclude` → `info_exclude`，`Attributes` → `info_attributes`，`Config { key }` → `config` 加 `key`，`PrePushGuardDisabled { hooks_path, hook_replaced }` → `pre_push_guard_disabled` 加这两个字段（gitio @60b1cf5：husky、lefthook 这类安装常把 `core.hooksPath` 改掉）。第二个参数是工作区根：守卫按 git 在工作区里实际用的 hooks 目录判断，工作区的 `.git` 不在时只比镜像（gitio §5.6）。session 只报告，不钉回；要不要钉回由 daemon 定（module-rulings 的 T13 条）。`shadow_drift` 返回 `Unknown`（不论 reason：`hooks-lookup` 是 git 查不出工作区的 hooks 目录，gitfile 坏了或 config 里有 git 拒绝的值；`timeout`；镜像文件读不了……）时不让 status 失败：这个工作区记一条 `PrePushGuardUnknown { detail }`（守卫状态不明，可能已失效；`detail` 是 gitio 的原样错误；gitio.md §5.6、§6 要 status 这样报出），接着做下一步 [我的决定 D48]。gitio 这时不返回任何漂移项，所以这个工作区这次没有 `MirrorDrift`。`shadow_drift` 的另一个码 `InvalidInput`（不是本仓库的影子仓库，或工作区不是绝对路径）照常透传。
-   9. 移动意图（`store.move_intents(id)` 里这个仓库的）：本进程正在跑的移动的意图不报，它们属于进行中的操作（`Sessions` 在进程内记着它们，§3）[我的决定 D47]。其余的：`Preparing` → `MoveLeftover { n, staging }`；`Swapping` → `MoveAwaitingRecover { n, staging }`：交换开始之后的失败没能记下（`fail_move` 本身也失败了，§5.7），交换可能已经发生，工作区健康却还是 `Ok`；daemon 下一次启动时 `recover` 把它记成 `Unknown`（§5.8 第 2 步），之后经 §5.9 处理；在那之前，这个工作区的移动以 `InvalidInput`（`move_awaiting_recover`）拒绝（§5.7 第 9 步；review M-3）；`Abandoned` 而它的 `staging` 目录还在（§5.9 第 6 步没能退役）→ 同样是 `MoveLeftover`；`Unknown` 的意图不另报：工作区健康已是 `Unknown`，带着现场（第 2.1 步），daemon 据此给出 Abandon 与 Accept 两种处理（§5.9）；`Done` 而 `old_tree` 有值，或者它的 `staging` 目录还在（§5.7 第 19 步没走完）→ `OldTreeKept`（`path` 取 `old_tree`，没有时取 `staging`；`retained` 即 `old_tree` 有值），`holders = deps::open_files(path)`，`changed` 在读的时候重算 [我的决定 D22]：找这次移动的 `BeforeRollout` checkpoint，即 `checkpoints(id, Some(repo))` 里原因为 `BeforeRollout`、时刻不晚于意图 `started` 的最新一个；用 `overlay::reconcile_full` 冷扫旧树（`ws.root` 取旧树，它的 gitfile 仍指向旧管理目录；基线取那个 checkpoint 的 `base`），条目与 checkpoint 的条目不同即 `changed = true`。
+   9. 移动意图（`store.move_intents(id)` 里这个仓库的）：`begin_move` 之前已把 `(session, repo)` 标成进行中的（§5.7），只隐藏这个进行中工作区的 `Preparing` 与 `Swapping` 意图 [我的决定 D47，评审 M-8]。其余的：`Preparing` → `MoveLeftover { n, staging }`；`Swapping` → `MoveAwaitingRecover { n, staging }`：交换开始之后的失败没能记下（`fail_move` 本身也失败了，§5.7），交换可能已经发生，工作区健康却还是 `Ok`；daemon 下一次启动时 `recover` 把它记成 `Unknown`（§5.8 第 2 步），之后经 §5.9 处理；在那之前，这个工作区的移动以 `InvalidInput`（`move_awaiting_recover`）拒绝（§5.7 第 9 步；review M-3）。`remove` 与下一次 `move_workspace` 不查这套进行中记录，把每一条 `Swapping` 都当成停住的：一条泄漏的记录不能把停住的意图藏起来。`Abandoned` 而它的 `staging` 目录还在（§5.9 第 6 步没能退役）→ 同样是 `MoveLeftover`；`Unknown` 的意图不另报：工作区健康已是 `Unknown`，带着现场（第 2.1 步），daemon 据此给出 Abandon 与 Accept 两种处理（§5.9）；`Done` 而 `old_tree` 有值，或者它的 `staging` 目录还在（§5.7 第 19 步没走完）→ `OldTreeKept`（`path` 取 `old_tree`，没有时取 `staging`；`retained` 即 `old_tree` 有值），`holders = deps::open_files(path)`，`changed` 在读的时候重算 [我的决定 D22]：找这次移动的 `BeforeRollout` checkpoint，即 `checkpoints(id, Some(repo))` 里原因为 `BeforeRollout`、时刻不晚于意图 `started` 的最新一个；用 `overlay::reconcile_full` 冷扫旧树（`ws.root` 取旧树，它的 gitfile 仍指向旧管理目录；基线取那个 checkpoint 的 `base`），条目与 checkpoint 的条目不同即 `changed = true`。
    10. `RestoreScene`：`<会话根>/.strata-tmp-restore-<repo>/` 存在且非空（增补 7）。里面的 `plan.json` 归 overlay，由 daemon 读出并入回复。
 3. 返回 `SessionStatus`。
 
@@ -849,7 +849,7 @@ ticket 不会与 id 混淆：`new` 以 `ReservedName` 拒绝会话 id 形式的 
 
 **阶段 D：意图行与内部暂存。** 意图行在建任何暂存之前写下（增补 3）。
 
-12. `S = <root>/.strata-tmp-move-<name>-<16 位十六进制>`；`n = store.begin_move(session, &name, &new_base, &head, &S, now)`。失败原样透传，这时什么都没建。`n` 记进进程内正在跑的移动（§3 的 `Sessions`），这次调用返回时去掉，`status` 因此不把它的意图当成残留 [我的决定 D47]。
+12. 先把 `(session, repo)` 标成进行中（panic 时也清掉），再 `S = <root>/.strata-tmp-move-<name>-<16 位十六进制>`；`n = store.begin_move(session, &name, &new_base, &head, &S, now)`。失败原样透传，这时什么都没建，标记清掉。标记在 `begin_move` 之前，所以提交与插入之间的一瞬，并发的 `status` 不会把新的 `Preparing` 意图报成 `MoveLeftover`（评审 M-8）。这次调用返回时去掉标记。
 13. `prepare`：
     1. `apfs::clone_tree_rooted(base_dir(new_base), root, <S 的名字>)`：新基线的源码与新依赖集的目录一次克隆出来。
     2. `rebased = overlay::rebase(&Overlay::from_checkpoint(&cp.checkpoint), &old, &new, store, &RebaseOptions::for_move(&new, ignorecase)?)`，`ignorecase` 取 `git.read_index(ws)` 的 `ignorecase`（增补 5 的 T9 条）。
