@@ -2016,6 +2016,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "strata-session"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "strata-apfs",
+ "strata-deps",
+ "strata-gitio",
+ "strata-overlay",
+ "strata-session",
+ "strata-store",
+ "strata-types",
+ "tempfile",
+]
+
+[[package]]
 name = "strata-store"
 version = "0.1.0"
 dependencies = [
