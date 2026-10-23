@@ -29,11 +29,12 @@ mod imp {
         PauseBeforePut,
         /// Restore: before the precheck of the workspace.
         PauseBeforePrecheck,
-        /// Restore: after the plan, before any write.
+        /// Restore: after plan.json is written, before anything is staged.
         PauseAfterPlan,
         /// Restore: before the staged files get their metadata.
         PauseBeforeTempMeta,
-        /// Restore: after `after` apply steps.
+        /// Restore: after `after` apply steps (0: everything staged, before the
+        /// first rename).
         PauseInApply { after: u32 },
     }
 

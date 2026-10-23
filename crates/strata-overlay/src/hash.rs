@@ -103,10 +103,13 @@ pub(crate) struct Cached {
 pub(crate) struct ReadOut {
     pub blob: BlobId,
     pub mode: u32,
+    #[allow(dead_code)] // kept for debugging output; nothing reads it
     pub size: u64,
     /// The attrs to cache (`None` = do not cache: unstable).
     pub cache: Option<Attrs>,
     pub attrs: Attrs,
+    /// Read only by the test-seams probe (`ReadProbe`).
+    #[cfg_attr(not(feature = "test-seams"), allow(dead_code))]
     pub retried: bool,
     pub unstable: bool,
     pub vouched: bool,

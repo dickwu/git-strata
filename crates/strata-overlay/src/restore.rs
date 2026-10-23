@@ -4,9 +4,9 @@
 //! deleted file only after proving it is a copy of what `BeforeRestore`
 //! records. Every write is rooted at the session root R.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::CStr;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strata_apfs::{Attrs, FileKind, FileMeta, RemoveKind, RenameMode, attrs_of};
+use strata_store::{Health, Lifecycle};
 use strata_types::{
     BaseManifest, BlobId, CheckpointId, CheckpointReason, Code, RepoPath, StrataError,
 };
@@ -26,6 +27,7 @@ use crate::hash::{hash_bytes, hash_file};
 use crate::overlay::{
     MODE_EXEC, MODE_LINK, Overlay, ancestors, entry_blob, entry_from, groups, rp,
 };
+use crate::rebase::{RebaseOptions, rebase};
 use crate::tracker::Tracker;
 use crate::{DEFAULT_DIRTY_CAPACITY, RESTORE_TEMP_PREFIX, Result};
 
@@ -53,6 +55,9 @@ pub struct Restored {
     /// 跨基线恢复时三方投影有冲突、写成了目标 checkpoint 版本的路径。
     pub conflicts: Vec<RepoPath>,
 }
+
+/// T names a plan allows → (the workspace path, the blobs each may hold).
+type SceneNames = BTreeMap<String, (RepoPath, Vec<BlobId>)>;
 
 /// (blob, git mode) at a path; `None` = nothing there.
 type Content = Option<(BlobId, u32)>;
@@ -130,6 +135,39 @@ struct PlanContent<'a> {
     mode: u32,
 }
 
+/// plan.json as read back by a later restore (§5.7 step 1).
+#[derive(Deserialize)]
+struct PlanIn {
+    before: CheckpointId,
+    target: CheckpointId,
+    ops: Vec<PlanOpIn>,
+}
+
+#[derive(Deserialize)]
+struct PlanOpIn {
+    path: RepoPath,
+    temp: String,
+    target: Option<PlanContentIn>,
+    current: Option<PlanContentIn>,
+}
+
+#[derive(Deserialize)]
+struct PlanContentIn {
+    blob: BlobId,
+    mode: u32,
+}
+
+fn content_in(c: &Option<PlanContentIn>) -> Content {
+    c.as_ref().map(|c| (c.blob.clone(), c.mode))
+}
+
+/// Files of an earlier restore's scene, each proven a copy of its plan's
+/// content, with the attrs they were proven at; plan.json last.
+struct Settle {
+    files: Vec<(RepoPath, Attrs)>,
+    plan: Option<(RepoPath, Attrs)>,
+}
+
 fn plan_content(c: &Content) -> Option<PlanContent<'_>> {
     c.as_ref().map(|(b, m)| PlanContent {
         blob: b.as_str(),
@@ -187,8 +225,10 @@ pub fn restore(
     };
     let tname = format!("{RESTORE_TEMP_PREFIX}{}", ws.repo.as_str());
 
-    // 1. T and an earlier scene.
-    check_temp(&r, &tname)?;
+    // 1. T and an earlier scene; then what the store records of an
+    // unfinished operation on this session or workspace.
+    let scene = judge_temp(ws, &r, &tname)?;
+    check_recorded_scene(ws)?;
 
     // 3. The target, exactly as the store returns it.
     let target = ws.store.checkpoint(ws.session, req.target)?;
@@ -222,19 +262,36 @@ pub fn restore(
         }
     }
 
-    // 4. The target state D against the current base.
-    if target.base != base.r#gen {
-        return Err(invalid(
-            "cross_base",
-            format!(
-                "checkpoint {} is on another base generation",
-                target.id.get()
-            ),
-        ));
-    }
-    tov.check_base(&base.manifest)?;
-    let d = tov.clone();
-    let conflicts: Vec<RepoPath> = Vec::new();
+    // 4. The target state D against the current base: the target's own
+    // overlay on the same base generation, else its §5.8 rebase (no merge).
+    let tb: Option<&Base> = if target.base == base.r#gen {
+        None
+    } else {
+        match req.target_base {
+            Some(tb) if tb.r#gen == target.base => Some(tb),
+            _ => {
+                return Err(invalid(
+                    "target_base",
+                    format!(
+                        "checkpoint {} is on another base generation; its base must be given",
+                        target.id.get()
+                    ),
+                ));
+            }
+        }
+    };
+    let (d, conflicts) = match tb {
+        None => {
+            tov.check_base(&base.manifest)?;
+            (tov.clone(), Vec::new())
+        }
+        Some(tb) => {
+            tov.check_base(&tb.manifest)?;
+            let opts = RebaseOptions::for_restore(f0.info.ignorecase, f0.volume_cs);
+            let rb = rebase(&tov, tb, base, ws.store, &opts)?;
+            (rb.overlay, rb.conflicts)
+        }
+    };
 
     // 5. Scan (full, whatever the tracker's events say).
     let mut pass = begin(ws, base, tracker, None)?;
@@ -245,7 +302,15 @@ pub fn restore(
         let fold = Fold {
             case_sensitive: pass.f.volume_cs,
         };
-        let selected = select(&c, &d, &tov, &base.manifest, req.paths, fold)?;
+        let selected = select(
+            &c,
+            &d,
+            &tov,
+            &base.manifest,
+            tb.map(|b| &*b.manifest),
+            req.paths,
+            fold,
+        )?;
         // 7. Plan.
         let cv = View::new(&c, &base.manifest);
         let dv = View::new(&d, &base.manifest);
@@ -280,12 +345,6 @@ pub fn restore(
     let cv = View::new(&c, &base.manifest);
     let dirs = emptied_dirs(&cv, &ops);
 
-    // 8. Precheck.
-    crate::fault::before_precheck(ws.root);
-    if let Err(e) = precheck(ws, base, &ops, &dirs) {
-        give_back(tracker, pass.snap, Some(&c));
-        return Err(e);
-    }
     // The scan's attrs of each path to replace or delete (the proof's basis).
     let scanned: BTreeMap<RepoPath, Attrs> = ops
         .iter()
@@ -295,6 +354,16 @@ pub fn restore(
             (k.blob == *blob).then(|| (o.path.clone(), k.attrs.clone()))
         })
         .collect();
+
+    // 8. Precheck.
+    crate::fault::before_precheck(ws.root);
+    let fold = Fold {
+        case_sensitive: pass.f.volume_cs,
+    };
+    if let Err(e) = precheck(ws, base, &ops, &dirs, fold, &scanned, req.verify) {
+        give_back(tracker, pass.snap, Some(&c));
+        return Err(e);
+    }
 
     // 9. BeforeRestore: entries are C; a planned path that changed since the
     // scan means no row and Busy.
@@ -329,7 +398,6 @@ pub fn restore(
             return Err(e);
         }
     };
-    crate::fault::after_plan(ws.root);
 
     // 10-14. Apply.
     let mut a = Apply {
@@ -340,6 +408,8 @@ pub fn restore(
         before,
         done: Vec::new(),
         steps: 0,
+        settle: scene,
+        wrote: false,
     };
     let res = a.run(ws, base, &target.id, &ops, &dirs, &scanned);
     let touched: Vec<RepoPath> = ops
@@ -373,7 +443,12 @@ pub fn restore(
         }
         Err(e) => {
             tracker.inbox.require_full();
-            Err(a.unknown(e, &ops, &dirs))
+            if a.wrote {
+                Err(a.unknown(e, &ops, &dirs))
+            } else {
+                // Nothing outside the store was written: the refusal as is.
+                Err(e)
+            }
         }
     }
 }
@@ -395,37 +470,191 @@ fn session_root(ws_path: &Path) -> Result<(PathBuf, String)> {
     Ok((r.to_path_buf(), name.to_owned()))
 }
 
-/// §5.7 step 1: T absent or an empty directory; anything else refuses.
-fn check_temp(r: &Path, tname: &str) -> Result<()> {
+/// §5.7 step 1: T absent or an empty directory, or the scene of an earlier
+/// restore whose every file is proven a copy of a content its plan.json
+/// names (settled at step 10). Anything else refuses.
+fn judge_temp(ws: &WorkspaceRef, r: &Path, tname: &str) -> Result<Option<Settle>> {
     let t = rp(tname);
     let shown = r.join(tname);
     match attrs_of(r, &t) {
-        Err(e) if e.code == Code::NoSuchPath => Ok(()),
-        Err(e) => Err(e),
-        Ok(a) if a.kind != FileKind::Dir => Err(StrataError::new(
-            Code::Exists,
-            format!(
-                "{} is in the way of restore's temporary directory",
-                shown.display()
-            ),
-        )
-        .with_detail(json!({ "reason": "restore_temp_taken", "path": shown.to_string_lossy() }))),
-        Ok(_) => {
-            let items = list_names(r, &t)?;
-            if items.is_empty() {
-                return Ok(());
-            }
-            Err(StrataError::new(
-                Code::Unknown,
-                format!("{} holds the scene of an earlier restore", shown.display()),
+        Err(e) if e.code == Code::NoSuchPath => return Ok(None),
+        Err(e) => return Err(e),
+        Ok(a) if a.kind != FileKind::Dir => {
+            return Err(StrataError::new(
+                Code::Exists,
+                format!(
+                    "{} is in the way of restore's temporary directory",
+                    shown.display()
+                ),
             )
-            .with_detail(json!({
-                "reason": "restore_scene",
-                "path": shown.to_string_lossy(),
-                "unproven": items,
-            })))
+            .with_detail(
+                json!({ "reason": "restore_temp_taken", "path": shown.to_string_lossy() }),
+            ));
+        }
+        Ok(_) => {}
+    }
+    let mut items: Vec<(RepoPath, Attrs)> = Vec::new();
+    for item in strata_apfs::list_dir(r, Some(&t)) {
+        items.push(item?);
+    }
+    if items.is_empty() {
+        return Ok(None);
+    }
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    let plan_p = rp(&format!("{tname}/plan.json"));
+    // name in T -> (workspace path, the contents it may hold)
+    let proven_plan = match read_plan(r, &plan_p) {
+        Some(plan) => scene_contents(ws, &plan)?,
+        None => None,
+    };
+    let have_plan = proven_plan.is_some();
+    let allowed = proven_plan.unwrap_or_default();
+    let mut unproven = Vec::new();
+    let mut files = Vec::new();
+    let mut plan = None;
+    for (p, a) in items {
+        let name = p
+            .as_str()
+            .rsplit_once('/')
+            .map_or(p.as_str(), |x| x.1)
+            .to_owned();
+        if name == "plan.json" && have_plan && a.kind == FileKind::File {
+            plan = Some((p, a));
+            continue;
+        }
+        let Some((q, blobs)) = allowed.get(&name) else {
+            unproven.push(json!({ "name": name, "path": null }));
+            continue;
+        };
+        match hash_scene(r, &p, &a)? {
+            Some(id) if blobs.contains(&id) => files.push((p, a)),
+            _ => unproven.push(json!({ "name": name, "path": q.as_str() })),
         }
     }
+    if !unproven.is_empty() {
+        return Err(StrataError::new(
+            Code::Unknown,
+            format!("{} holds the scene of an earlier restore", shown.display()),
+        )
+        .with_detail(json!({
+            "reason": "restore_scene",
+            "path": shown.to_string_lossy(),
+            "unproven": unproven,
+        })));
+    }
+    Ok(Some(Settle { files, plan }))
+}
+
+fn read_plan(r: &Path, p: &RepoPath) -> Option<PlanIn> {
+    let f = strata_apfs::open_rooted_file(r, p).ok()?;
+    let mut body = Vec::new();
+    f.take(64 << 20).read_to_end(&mut body).ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+/// What each name in T may hold under `plan`: an op counts only when its
+/// current content is BeforeRestore's at the path and its target content is
+/// the target checkpoint's entry or BeforeRestore's base at the path. A
+/// write's `<n>` may hold either; a delete's `rm-<n>` only the current one.
+fn scene_contents(ws: &WorkspaceRef, plan: &PlanIn) -> Result<Option<SceneNames>> {
+    let gone = |e: &StrataError| e.code == Code::NoSuchCheckpoint;
+    let before = match ws.store.checkpoint(ws.session, plan.before) {
+        Ok(c) => c,
+        Err(e) if gone(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let target = match ws.store.checkpoint(ws.session, plan.target) {
+        Ok(c) => c,
+        Err(e) if gone(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if before.repo != *ws.repo || target.repo != *ws.repo {
+        return Ok(None);
+    }
+    let Some(bm) = ws.store.manifest(ws.repo, &before.base.tree)? else {
+        return Ok(None);
+    };
+    let bov = Overlay::from_checkpoint(&before);
+    let tov = Overlay::from_checkpoint(&target);
+    let bv = View::new(&bov, &bm);
+    let mut out = BTreeMap::new();
+    for op in &plan.ops {
+        let current = content_in(&op.current);
+        if bv.content(&op.path) != current {
+            continue;
+        }
+        let tc = content_in(&op.target);
+        let mut blobs = Vec::new();
+        let rm = format!("rm-{}", op.temp.trim_start_matches("rm-"));
+        if let Some(t) = &tc {
+            let entry = tov
+                .get(&op.path)
+                .and_then(|e| entry_blob(e).map(|b| (b.clone(), e.mode)));
+            let in_base = bm.entries.get(&op.path).map(|e| (e.blob.clone(), e.mode));
+            if entry.as_ref() != Some(t) && in_base.as_ref() != Some(t) {
+                continue;
+            }
+            if op.temp == rm {
+                continue;
+            }
+            blobs.push(t.0.clone());
+        } else if op.temp != rm {
+            continue;
+        }
+        if let Some((b, _)) = &current {
+            blobs.push(b.clone());
+        }
+        out.insert(op.temp.clone(), (op.path.clone(), blobs));
+    }
+    Ok(Some(out))
+}
+
+/// The content id of a file or symlink in a scene, read between two equal
+/// attrs; `None` when it cannot be proven.
+fn hash_scene(r: &Path, p: &RepoPath, a: &Attrs) -> Result<Option<BlobId>> {
+    match &a.kind {
+        FileKind::Symlink { target } => Ok(Some(hash_bytes(target.as_os_str().as_bytes()))),
+        FileKind::File if a.gen_count_known() => {
+            let f = match strata_apfs::open_rooted_file(r, p) {
+                Ok(f) => f,
+                Err(_) => return Ok(None),
+            };
+            let (id, _) = hash_file(&f, &r.join(p.as_str()))?;
+            match attrs_of(r, p) {
+                Ok(a2) if a2.unchanged_since(a) => Ok(Some(id)),
+                _ => Ok(None),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// §5.7 step 1: the store records an unfinished operation (lifecycle or
+/// workspace health `unknown`): refuse with the scene it keeps.
+fn check_recorded_scene(ws: &WorkspaceRef) -> Result<()> {
+    let Some(rec) = ws.store.session(ws.session)? else {
+        return Ok(());
+    };
+    let w = rec.workspaces.get(ws.repo);
+    let lifecycle = rec.lifecycle == Lifecycle::Unknown;
+    let health = w.is_some_and(|w| w.health == Health::Unknown);
+    if !lifecycle && !health {
+        return Ok(());
+    }
+    let scene = w
+        .and_then(|w| w.scene.clone())
+        .or_else(|| rec.scene.clone());
+    Err(StrataError::new(
+        Code::Unknown,
+        format!(
+            "session {} has an unfinished operation on record; resolve it first",
+            ws.session
+        ),
+    )
+    .with_detail(json!({
+        "reason": if lifecycle { "lifecycle_unknown" } else { "health_unknown" },
+        "scene": scene,
+    })))
 }
 
 fn list_names(r: &Path, dir: &RepoPath) -> Result<Vec<String>> {
@@ -444,6 +673,7 @@ fn select(
     d: &Overlay,
     tov: &Overlay,
     m: &BaseManifest,
+    tm: Option<&BaseManifest>,
     paths: Option<&[RepoPath]>,
     fold: Fold,
 ) -> Result<BTreeSet<RepoPath>> {
@@ -463,6 +693,9 @@ fn select(
     cand.extend(names(d));
     cand.extend(names(tov));
     cand.extend(m.entries.keys().cloned());
+    if let Some(tm) = tm {
+        cand.extend(tm.entries.keys().cloned());
+    }
     let mut picked: BTreeSet<RepoPath> = BTreeSet::new();
     for p in ps {
         let prefix = format!("{}/", p.as_str());
@@ -553,8 +786,137 @@ fn read_only(root: &Path, p: &RepoPath) -> StrataError {
     .with_detail(json!({ "path": shown.to_string_lossy(), "reason": "flags" }))
 }
 
-/// §5.7 step 8 (the checks this module makes before anything is written).
-fn precheck(ws: &WorkspaceRef, base: &Base, ops: &[Op], dirs: &[RepoPath]) -> Result<()> {
+fn exists(root: &Path, p: &str, why: &str) -> StrataError {
+    let shown = root.join(p);
+    StrataError::new(
+        Code::Exists,
+        format!("{} is in the way of the restore ({why})", shown.display()),
+    )
+    .with_detail(json!({ "path": shown.to_string_lossy(), "reason": why }))
+}
+
+/// Directory listings for the precheck's name lookups.
+struct Disk<'a> {
+    root: &'a Path,
+    fold: Fold,
+    lists: HashMap<String, Vec<String>>,
+}
+
+impl Disk<'_> {
+    /// The on-disk path of `parent/name`: the exact bytes first, else the
+    /// one name the volume would take for it. `None`: nothing there.
+    fn find(&mut self, parent: &str, name: &str) -> Option<String> {
+        let root = self.root;
+        let list = self.lists.entry(parent.to_owned()).or_insert_with(|| {
+            std::fs::read_dir(root.join(parent))
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok()?.file_name().to_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        let found = if list.iter().any(|n| n == name) {
+            Some(name.to_owned())
+        } else {
+            let key = self.fold.key(name);
+            list.iter().find(|n| self.fold.key(n) == key).cloned()
+        };
+        found.map(|n| {
+            if parent.is_empty() {
+                n
+            } else {
+                format!("{parent}/{n}")
+            }
+        })
+    }
+}
+
+fn is_dir(root: &Path, p: &str) -> Option<bool> {
+    std::fs::symlink_metadata(root.join(p))
+        .ok()
+        .map(|m| m.file_type().is_dir())
+}
+
+/// §5.7 step 8, in order: Exists, ReadOnly, OpenFiles, Corrupt, Busy.
+fn precheck(
+    ws: &WorkspaceRef,
+    base: &Base,
+    ops: &[Op],
+    dirs: &[RepoPath],
+    fold: Fold,
+    scanned: &BTreeMap<RepoPath, Attrs>,
+    verify: bool,
+) -> Result<()> {
+    let root = ws.root;
+    let deletes: BTreeSet<&str> = ops
+        .iter()
+        .filter(|o| o.target.is_none())
+        .map(|o| o.path.as_str())
+        .collect();
+    let emptied: BTreeSet<&str> = dirs.iter().map(|d| d.as_str()).collect();
+    let mut disk = Disk {
+        root,
+        fold,
+        lists: HashMap::new(),
+    };
+    // Exists: each write's name, and each of its ancestors, is free, is the
+    // file it replaces, or is vacated by this restore first.
+    for o in ops.iter().filter(|o| o.target.is_some()) {
+        let q = o.path.as_str();
+        let comps: Vec<&str> = q.split('/').collect();
+        let mut parent = String::new();
+        for (i, c) in comps.iter().enumerate() {
+            let Some(found) = disk.find(&parent, c) else {
+                break;
+            };
+            let vacated = deletes.contains(found.as_str()) || emptied.contains(found.as_str());
+            if i + 1 == comps.len() {
+                if !vacated && !(found == q && o.current.is_some()) {
+                    return Err(exists(root, &found, "unrecorded_content"));
+                }
+                break;
+            }
+            match is_dir(root, &found) {
+                None => break,
+                Some(true) => parent = found,
+                Some(false) if vacated => break,
+                Some(false) => return Err(exists(root, &found, "not_a_directory")),
+            }
+        }
+    }
+    // ... each delete's ancestors are still directories ...
+    for q in &deletes {
+        for anc in ancestors(q) {
+            if is_dir(root, anc) == Some(false) {
+                return Err(exists(root, anc, "not_a_directory"));
+            }
+        }
+    }
+    // ... and a directory to remove holds nothing this restore does not remove.
+    for d in dirs {
+        match is_dir(root, d.as_str()) {
+            None => continue,
+            Some(false) => return Err(exists(root, d.as_str(), "not_a_directory")),
+            Some(true) => {}
+        }
+        let rd = std::fs::read_dir(root.join(d.as_str())).map_err(|e| {
+            strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &root.join(d.as_str()))
+        })?;
+        for e in rd {
+            let e = e.map_err(|e| {
+                strata_apfs::classify_io_error(
+                    &e,
+                    strata_apfs::IoSide::Read,
+                    &root.join(d.as_str()),
+                )
+            })?;
+            let name = e.file_name();
+            let child = format!("{}/{}", d.as_str(), name.to_string_lossy());
+            if !deletes.contains(child.as_str()) && !emptied.contains(child.as_str()) {
+                return Err(exists(root, &child, "unrecorded_content"));
+            }
+        }
+    }
     // ReadOnly: files to replace or delete, directories to delete.
     for o in ops.iter().filter(|o| o.current.is_some()) {
         if flags_of(ws.root, &o.path).is_some_and(|f| f & LOCK_FLAGS != 0) {
@@ -617,6 +979,41 @@ fn precheck(ws: &WorkspaceRef, base: &Base, ops: &[Op], dirs: &[RepoPath]) -> Re
         if a.size != me.size {
             return Err(corrupt("size differs from the manifest"));
         }
+        if verify {
+            let id = match &a.kind {
+                FileKind::Symlink { target } => hash_bytes(target.as_os_str().as_bytes()),
+                _ => {
+                    let f = strata_apfs::open_rooted_file(&base.dir, &o.path)?;
+                    hash_file(&f, &shown)?.0
+                }
+            };
+            if id != me.blob {
+                return Err(corrupt("content differs from the manifest"));
+            }
+        }
+    }
+    // --verify: every blob to write back from the store hashes to its id.
+    if verify {
+        for o in ops.iter().filter(|o| !o.from_base) {
+            if let Some((blob, _)) = &o.target {
+                ws.store.verify_blob(blob)?;
+            }
+        }
+    }
+    // Busy: a file to replace or delete was written since the scan.
+    for o in ops.iter().filter(|o| o.current.is_some()) {
+        let Some(s) = scanned.get(&o.path) else {
+            continue;
+        };
+        match attrs_of(root, &o.path) {
+            Ok(a) if stable(s, &a) => {}
+            _ => {
+                return Err(busy(format!(
+                    "{} changed after the scan",
+                    root.join(o.path.as_str()).display()
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -630,6 +1027,10 @@ struct Apply<'a> {
     before: CheckpointId,
     done: Vec<RepoPath>,
     steps: u32,
+    /// An earlier restore's proven scene, removed before T is made again.
+    settle: Option<Settle>,
+    /// Something outside the store was written (an error is then Unknown).
+    wrote: bool,
 }
 
 impl Apply<'_> {
@@ -688,7 +1089,11 @@ impl Apply<'_> {
     ) -> Result<()> {
         let r = self.r;
         let t = rp(&self.t);
-        // 10. T, plan.json, then the staged contents.
+        // 10. An earlier proven scene goes first; then T, plan.json and the
+        // staged contents.
+        if let Some(s) = self.settle.take() {
+            self.settle_scene(&s)?;
+        }
         match strata_apfs::mkdir_rooted(r, &t, 0o700, false) {
             Ok(()) => {}
             Err(e) if e.code == Code::Exists => {
@@ -702,10 +1107,13 @@ impl Apply<'_> {
             }
             Err(e) => return Err(e),
         }
+        self.wrote = true;
         self.write_plan(target, ops)?;
+        crate::fault::after_plan(self.ws_root);
         for o in ops.iter().filter(|o| o.target.is_some()) {
             self.stage(ws, base, o)?;
         }
+        crate::fault::in_apply(self.ws_root, 0);
 
         // 11. Deletes, deepest first.
         let mut dels: Vec<&Op> = ops.iter().filter(|o| o.target.is_none()).collect();
@@ -762,6 +1170,42 @@ impl Apply<'_> {
         }
         strata_apfs::remove_rooted(r, &rp(&plan), RemoveKind::File)?;
         strata_apfs::remove_rooted(r, &t, RemoveKind::EmptyDir)?;
+        Ok(())
+    }
+
+    /// Remove a scene `judge_temp` proved: every file still as proven (else
+    /// Busy, nothing removed), each checked again just before it goes; then
+    /// plan.json and T.
+    fn settle_scene(&mut self, s: &Settle) -> Result<()> {
+        let r = self.r;
+        let same = |p: &RepoPath, a: &Attrs| attrs_of(r, p).is_ok_and(|b| stable(a, &b));
+        for (p, a) in s.files.iter().chain(s.plan.iter()) {
+            if !same(p, a) {
+                return Err(busy(format!(
+                    "{} changed since it was judged",
+                    r.join(p.as_str()).display()
+                )));
+            }
+        }
+        for (p, a) in s.files.iter().chain(s.plan.iter()) {
+            if !same(p, a) {
+                let shown = r.join(p.as_str());
+                return Err(StrataError::new(
+                    Code::Unknown,
+                    format!(
+                        "{} changed while the scene was settled; kept",
+                        shown.display()
+                    ),
+                )
+                .with_detail(
+                    json!({ "reason": "restore_scene", "path": shown.to_string_lossy() }),
+                ));
+            }
+            strata_apfs::remove_rooted(r, p, RemoveKind::File)?;
+            self.wrote = true;
+        }
+        strata_apfs::remove_rooted(r, &rp(&self.t), RemoveKind::EmptyDir)?;
+        self.wrote = true;
         Ok(())
     }
 
@@ -829,8 +1273,9 @@ impl Apply<'_> {
         if o.from_base {
             let src = base.dir.join(o.path.as_str());
             strata_apfs::clone_file_rooted(&src, r, &tn, None)?;
+            let made = attrs_of(r, &tn)?.inode;
             crate::fault::before_temp_meta(self.ws_root);
-            let f = strata_apfs::open_rooted_file(r, &tn)?;
+            let f = self.open_staged(&tn, made)?;
             strata_apfs::set_file_meta(
                 &f,
                 &FileMeta {
@@ -850,9 +1295,10 @@ impl Apply<'_> {
             )?;
         } else {
             ws.store.get_blob_rooted(blob, r, &tn)?;
+            let made = attrs_of(r, &tn)?.inode;
             crate::fault::before_temp_meta(self.ws_root);
             if perm == 0o755 {
-                let f = strata_apfs::open_rooted_file(r, &tn)?;
+                let f = self.open_staged(&tn, made)?;
                 strata_apfs::set_file_meta(
                     &f,
                     &FileMeta {
@@ -864,6 +1310,29 @@ impl Apply<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Open the file just staged at `tn` for its metadata, only if it is still
+    /// the one this restore made (same inode, one link): metadata is never set
+    /// through a name someone swapped for a hard link to another file.
+    fn open_staged(&self, tn: &RepoPath, made: u64) -> Result<std::fs::File> {
+        let f = strata_apfs::open_rooted_file(self.r, tn)?;
+        let shown = self.r.join(tn.as_str());
+        let m = f
+            .metadata()
+            .map_err(|e| strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &shown))?;
+        if std::os::unix::fs::MetadataExt::ino(&m) != made
+            || std::os::unix::fs::MetadataExt::nlink(&m) != 1
+        {
+            return Err(StrataError::new(
+                Code::Unknown,
+                format!(
+                    "{} was replaced while it was staged; left alone",
+                    shown.display()
+                ),
+            ));
+        }
+        Ok(f)
     }
 
     /// The file moved to `tn` holds content(C, q): proven → removed, else Unknown.

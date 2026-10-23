@@ -5,15 +5,11 @@
 //! Layer 2: depends on strata-types, strata-apfs, strata-gitio and
 //! strata-store only.
 
-// Interim: helpers the scan and restore (tasks 4-10) use.
 mod checkpoint;
 mod classify;
 mod compute;
-#[allow(dead_code)]
 mod context;
-#[allow(dead_code)]
 mod fault;
-#[allow(dead_code)]
 mod hash;
 mod inbox;
 mod lww;

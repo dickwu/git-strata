@@ -14,8 +14,8 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 | 6 dirty set and incremental scans | done | e373444 |
 | 7 checkpoints that store only what changed | done | f39c80f |
 | 8 three-way rebase with .lww, and projection | done | b2af983 |
-| 9 a restore that checkpoints first | done | (this commit) |
-| 10 restore scenes, verification, cross-base projection | todo | |
+| 9 a restore that checkpoints first | done | 70bf0c5 |
+| 10 restore scenes, verification, cross-base projection | done | (this commit) |
 
 ## Ambiguity decisions
 
@@ -240,3 +240,44 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
   `restore_missing_checkpoint_is_store_error` cannot be built (gc only
   reclaims removed sessions), so only a never-recorded id is tested.
   No test hardcodes /tmp.
+- Task 10: if the lifecycle or health of a restore scene cannot be told,
+  the result is `Unknown`, with reason `lifecycle_unknown` or
+  `health_unknown` and a `scene` detail field. The store-recorded scene
+  check runs after the temp-dir (T) judgement of §5.7 step 1.
+- Task 10: a restore across bases without `target_base` is
+  `InvalidInput` `target_base`, replacing the draft name `cross_base`.
+  A `target_base` whose tree differs from the checkpoint's projection is
+  also `InvalidInput` `target_base`. With it, the restore goes through
+  rebase, and conflicts are reported in `conflicts`.
+- Task 10: the plan proof is read literally. A path may be overwritten
+  only if its current content is the target entry, or is the before-base
+  entry with no modification (M). Anything else, such as ignored files,
+  deps, or new content, is `Exists`, with detail `reason`
+  `unrecorded_content` or `not_a_directory` plus `path`. Name lookups on
+  the case-insensitive volume try the exact name first, then the fold
+  key. A delete's ancestors are checked too.
+- Task 10: `verify` checks each blob with `store.verify_blob`, and hashes
+  base files. A mismatch is `Corrupt`, and nothing is written. Without
+  verify, a base file of the wrong size is still `Corrupt`.
+- Task 10: errors raised before the first write are returned as they are.
+  After the first write (the `wrote` flag), errors are wrapped as
+  `Unknown`, with before/done/pending/temp details.
+- Task 10: fault placement. `after_plan` fires after plan.json is in T.
+  `in_apply(0)` fires after staging, before the first delete.
+- Task 10, a safety fix found by the spec test: a staged file is reopened
+  and checked against the inode it was created with, and must have
+  nlink == 1, before its mode, times or xattrs are set. A hardlink or a
+  swap placed in T while it is staged gives `Unknown` and leaves the
+  file alone.
+- Task 10 tests: the child-kill case hands the store writer lock over
+  (one writer per store). The test swaps to `open_read_only` and closes
+  the writer, runs the `#[ignore]` helper `restore_child_helper` in a
+  child process, kills it at `PauseInApply{after:1}`, and then reopens
+  read-write. The random-edits proptest (64 cases, plus an ignored
+  2048-case `_long` version) reuses one World, resetting it by restoring
+  c0, and compares files without empty dirs.
+- Task 10 cleanup: removed the interim module-wide `#[allow(dead_code)]`
+  on context, fault and hash in lib.rs. Item-level allows remain on
+  `child_path` (unit tests only), `ReadOut.size`, and `ReadOut.retried`
+  (read only by the test-seams probe). Also added a `SceneNames` type
+  alias for clippy.

@@ -96,6 +96,8 @@ pub(crate) fn under(k: &str, x: &str) -> bool {
 
 /// A directory entry name under `parent` as a `RepoPath`; a name that is not
 /// UTF-8 is `NotText` (APFS refuses such names, other volumes may not).
+/// Only the unit tests call it now (the scan builds names in compute).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn child_path(parent: Option<&RepoPath>, name: &OsStr) -> Result<RepoPath> {
     let Some(n) = name.to_str() else {
         let mut e = StrataError::new(
