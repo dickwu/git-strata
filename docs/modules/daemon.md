@@ -2,7 +2,7 @@
 
 **Crate**：`crates/strata-daemon`（lib + bin `git-stratad`）· **设计来源**：design.md §5、§6.2、§8、§9、§12 · **矩阵**：test-matrix 里目标模块为 `daemon` 的行，以及 `—` 行里把替代物写成 daemon / launchd / 本机 unix socket 的行，逐条见 §7 · **邻居版本**：session.md @a324f9c，deps.md @dafdefc，gitio.md @1cd5ac5，confirm.md @229f4e3，overlay.md 与 store.md @08ffa53；publish.md 草案 @0fde091（方法名，正文仍薄）；search.md 草案 @aa0414c（只借方法名）
 
-> 本文按 module-rulings.md 写：「T13 daemon」，以及标了 T13 或 Everyone 且约束本模块的增补。后写的、标了 amended 的那条胜。一台机器一个 daemon。方法表是 cli 子命令的对照，名字与下面这张表一致，不改名。控制器在初稿的 16 个之外加了 `resolve_move` 与 `chain_resolve`。本文不再加别的方法。`Busy` 只用于第一次可见的写之前的等锁（缺省 30 秒）。写之后的等待不受这 30 秒截断。重启报出 `Unknown` 的发布，不重放。不加 `Code`：`Failed` 与 `UnknownMethod` 是 RPC 层的回答。`Code` 停在 39 个。
+> 本文按 module-rulings.md 写：「T13 daemon」，以及标了 T13 或 Everyone 且约束本模块的增补。后写的、标了 amended 的那条胜。一台机器一个 daemon。方法表是 cli 子命令的对照，名字与下面这张表一致，不改名。控制器在初稿的 16 个之外加了 `resolve_move`、`chain_resolve` 与 `config_relax`。本文不再加别的方法。`Busy` 只用于第一次可见的写之前的等锁（缺省 30 秒）。写之后的等待不受这 30 秒截断。重启报出 `Unknown` 的发布，不重放。不加 `Code`：`Failed` 与 `UnknownMethod` 是 RPC 层的回答。`Code` 停在 39 个。
 
 ## 1. 职责与边界
 
@@ -53,7 +53,7 @@ cli 只在连不上 socket 时自己打开 `Sessions`（只读）。daemon 在�
 
 - `deps::RepoWriteLock` 没有 `note_visible_write`。本文用 §5.2 的线程局部规则区分写前与写后的等待 [我的决定 D8]。若将来有调用方在第一次 `with_write` 之前就做了可见的写，deps 应在 trait 上加这个方法，session / publish / overlay 在各自的第一次可见的写处调用。在那之前，本文的规则成立的前提写在 D8。
 - gitio @1cd5ac5 没有重钉 `hooksPath` 的函数，并且写明影子仓库的漂移只报告、不修。本文选择只报告，不要求 gitio 加函数 [我的决定 D2]。
-- `resolve_move` 与 `chain_resolve` 已在方法表里。应用调松仍然没有方法：`Action::ConfigRelax` 还没进 types.md（§5.8）。
+- `config_relax` 是应用调松的命令。`Action::ConfigRelax { repo: RepoId }` 由 Task 15 加进 types.md，本文不定义。变体落地之前，这条路径编译不了；文件变松仍然不生效。confirm 不写 `pins.json`。
 - gitio @1cd5ac5 没有把 a..c 重放到 o 上的函数。`chain_resolve` 的重放调用 `Git::replay_commits(exclusive_base, tip, onto) -> Result<CommitOid>` [我的决定 D18]：只造 commit，不改 ref，不推送，不强推；合不上 → `Conflict`，ref 不动。daemon 不自己起 git。
 
 ## 3. 公开接口（Rust）
@@ -66,7 +66,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 未知方法 → RPC `UnknownMethod`。参数对不上 → RPC `Failed`。
 
-方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 18 个以外不加方法：
+方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 19 个以外不加方法：
 
 | method | 作用 | 是否只读 |
 | --- | --- | --- |
@@ -87,6 +87,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `gc` | `store::gc_repo` | 否 |
 | `resolve_move` | `session::resolve_failed_move`。不查 TTY，不收凭据 | 否 |
 | `chain_resolve` | 人对 Rewound / Diverged 的显式处理。接受 origin 不推送；恢复只在快进时推 | 否 |
+| `config_relax` | 显式接受一次调松。文件变了不弹框。变体进 types.md 之前编译不了 | 否 |
 | `daemon_status` | 锁、队列、Unknown 发布、可选 `quick_check` | 是 |
 
 `params` 的字段（serde，未知字段 → RPC `Failed`）[我的决定 D4]：
@@ -110,6 +111,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `gc` | `{ "repo": RepoName\|null }` | `GcReport` 的数组 |
 | `resolve_move` | `{ "session": SessionId, "repo": RepoName, "abandon": bool, "accept": bool }` | `ResolutionReport`。两个布尔必须恰好一个为真，否则 RPC `Failed`，不调用 session |
 | `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
+| `config_relax` | `{ "repo": RepoName }` | `{}`。没有凭据字段。见 §5.5 |
 | `daemon_status` | `{ "verify": bool }` | 见 §5.4；`verify` 缺省 false |
 
 设计 §6.3 的 `diff --base` 在 publish 草案里没有对应函数。本方法只做 `diff_between`。`--base` 等 publish 补了函数再加参数，不加方法名。
@@ -286,8 +288,8 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 
 `pins.json` 是 UTF-8 JSON：`{ "repos": { "<RepoName>": { "deploy_on_push": bool, "confirm": bool, "push": bool } } }`。第一次启动没有这个文件：把当时加载的配置写成钉，不算调松。之后：
 
-- 调紧立即生效并写回：`deploy_on_push` false→true，`confirm` false→true，`push` true→false。
-- 调松不生效：`deploy_on_push` true→false，`confirm` true→false，`push` false→true。有效值仍是钉住的那份。status 带 `ConfigRelaxPending`。不主动弹框（KeepAlive 重启时弹框，人会顺手点过）。应用调松的步骤在 §5.8，冻结的方法表上没有入口。
+- 调紧立即生效并写回，不要凭据：`deploy_on_push` false→true，`confirm` false→true，`push` true→false。
+- 调松不生效：`deploy_on_push` true→false，`confirm` true→false，`push` false→true。有效值仍是钉住的那份。status 带 `ConfigRelaxPending`。文件变了不弹框，启动、重载、KeepAlive 重启都不弹。要生效必须人发 `config_relax`（§5.5）。
 
 不变量：
 
@@ -417,6 +419,13 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 8. `Restore`：`git.is_ancestor(o, c)` 为假 → `InvalidInput`，`detail.reason = "not_fast_forward"`，`git.push` 不调用，链不动。为真：锁里再对 `PushDeploy`（要确认时），并核对 c 仍是弹框前看到的那个；变了 → `NotConfirmed`，不推。然后 `git.push(staging, "origin", chain_ref, branch, timeout)`。staging 用 `attach_staging` 接到 c，推完 `retire_dir`。timeout 与 publish 的 push 相同，本文不另定。argv 由 gitio 保证没有 `--force`、`--force-with-lease` 或 `+` 开头的 refspec；daemon 不另开一条强推路径。`Refused` → `PushRefused`，链留着。`Unknown` → 报出，不重推。`Pushed` 之后仍在这把锁里把锚点设成推上去的 commit。
 9. 放开锁。`main_tip` 动了就 `observe_main`，失败只是 `ObserveFailed`，不把已经完成的选择改成失败。
 
+**`config_relax`**：显式接受一次调松。params 只有 `repo`。不查 TTY。不占会话队列，不拿 repo 写锁。文件变了不弹框：启动、重载、KeepAlive 重启都不调用 `require`。调紧仍立即写回，不要凭据。
+
+1. 名字不在配置里 → `NoSuchRepo`，不弹框。
+2. 该 repo 的文件并不比钉松 → `InvalidInput`，`detail.reason = "not_relaxed"`，不弹框 [我的决定 D20]。
+3. 顺序固定：`require(Action::ConfigRelax { repo: RepoId })`，然后 `validate` 这个 action（这一步核销 nonce），然后才写 `pins.json`。action 由 daemon 从 `repo` 推出，不采用客户端传来的。不符、用过、过期 → `NotConfirmed`，钉不改。confirm 不写任何文件。
+4. `Action::ConfigRelax` 由 Task 15 加进 types.md。在那之前，点名这个变体的路径编译不了。编译不了期间，重载把钉放松的仍然不应用。不提供绕过。
+
 ### 5.6 publish 的锁
 
 publish 草案把「占队列再拿锁」写在一步里。建造锁的顺序不允许在持有队列或 repo 锁时 `ensure` / `build`。本文把一次 `publish` 拆开，两头都满足：
@@ -442,9 +451,9 @@ publish 草案把「占队列再拿锁」写在一步里。建造锁的顺序不
 
 `new` 内部已经观察过的，daemon 只在看到 `ObserveFailed` 时做第 4 步的再试。两边都做是幂等的：head 已经不是 tip 的观察什么都不写。
 
-### 5.8 还没进方法表的一步
+### 5.8 调松
 
-**应用调松**。人要的是 `Action::ConfigRelax { repo: RepoId }`（Task 15 才进 types.md；confirm.md §5.6 已有框上的文字）。顺序与 §5.3 第 4 步相同：不持锁地 `require` + `validate`，核对 action 就是这个 repo，然后把该 repo 的钉改成文件里的值并写 `pins.json`。在变体进 types.md 之前，这条路径编译不了，daemon 保持拒绝调松。方法表没有入口可挂。不提供绕过。失败的移动不再走这里：它是 `resolve_move`（§5.5）。
+命令是 `config_relax`（§5.5）。方法表里有这一项。confirm 不写 `pins.json`。变体进 types.md 之前该路径编译不了，文件变松仍然不生效。
 
 ### 5.9 小时对账与停机
 
@@ -494,7 +503,7 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | daemon 没在跑 | cli 的只读命令仍可用；`publish` 与 `push` 由 cli 以 `ReadOnly` 拒绝 | 无 | 见 §7 |
 | 处理器 panic，写前 | RPC `Failed`，锁已释放 | 无 | 进程继续 |
 | 处理器 panic，写后 | `Unknown`，锁已释放 | 现场留下 | status 报出 |
-| 配置调松 | 不生效，`ConfigRelaxPending` | 钉住的值不变 | 等 Task 15 的变体与方法表 |
+| 配置调松 | 不生效，直到 `config_relax` 走完 require、validate、写钉。文件变了不弹框。变体进 types.md 之前该路径编译不了 | 钉住的值不变 | 人发 `config_relax` |
 | TOML 或校验失败 | `InvalidInput` | 不听 socket | 改配置 |
 | 两个 repo 同一个 `RepoId` | `NameTaken` | 不听 socket | 改配置 |
 | `path` 不是 realpath | `InvalidInput`，detail 带 realpath | 不听 socket | 改成 realpath |
@@ -559,6 +568,8 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | `observe_failed_does_not_fail_new_or_publish` | `observe_main` 返回错误时 `new` 与 `publish` 仍成功，`data.warnings` 含 `ObserveFailed`；daemon 再观察一次 | 新增 |
 | `toolcall_does_not_wait_out_approve_ensure` | `deps_approve` 的 `ensure_target` 冷装期间，该会话的 ToolCall checkpoint 不等待；移动阶段才排队 | 新增 |
 | `config_relax_not_applied_on_restart` | 停机期间把 `deploy_on_push` 从 true 改成 false，重启后推送仍要确认；status 含 `ConfigRelaxPending`；没有弹框 | 新增 |
+| `config_relax_does_not_prompt_on_file_change` | 只改 `pins` 所对的配置文件、不发 `config_relax`：`require` 调用次数为 0。调紧立即写回，不要凭据 | 新增 |
+| `config_relax_writes_pin_after_validate` | 顺序是 `require`，然后 `validate` 核销，然后才写 `pins.json`。validate 失败则钉的字节不变。confirm 不写这个文件 | 新增 |
 | `hint_and_flush_off_callback_thread` | FSEvents 回调里只有 `Inbox::note`。`hint`、`flush`、丢弃 `Watcher` 都发生在请求线程或停机线程。回调里不 `dispatch_sync` 到 Watcher 的队列 | 新增 |
 | `release_daemon_has_no_test_seams` | `TEST_SEAMS` 为真的二进制拒绝启动，不听 socket | 新增 |
 | `long_hold_named_in_status` | 持锁超过 30 秒时，`status` 写出方法、repo 与开始时间 | 新增 |
@@ -586,7 +597,7 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 **Interfaces:**
 
 - Consumes: 无上游。`Code` 不增加
-- Produces: §3 的信封、`RpcReject`、`MAX_FRAME`、表里的 18 个方法名
+- Produces: §3 的信封、`RpcReject`、`MAX_FRAME`、表里的 19 个方法名
 
 - [ ] **Step 1: 写失败的测试**：`no_auth_facade_observation`、`no_auth_reply_token`、`no_binary_frame`、`no_binary_reply_frame`、`no_binary_tag_extension`、`no_branch_page_frame`、`no_tcp_nodelay_auth`、`no_noise_window`、`no_nonce_record_limit`、`no_encrypted_record`、`no_tamper_replay_frame`、`no_duplex_eof_fence`、`no_duplex_trailing_byte`、`no_duplex_read_timeout`、`no_observed_prefix`、`no_observed_wrapping`、`no_zero_scope`、`no_cleanup_tags`、`no_traced_prefix_tag`、`no_telemetry_beside_reply`、`no_auth_observation_identity`、`no_auth_diagnostic_sink`、`no_auth_traced_diagnostic`、`no_auth_traced_scope`、`confirm_is_not_channel_auth`、`same_machine_unix_socket`、`no_container_daemon_host`、`readiness_is_socket_connect`、`no_container_archive_of_the_binary`。未知方法断言 `error.rpc == "UnknownMethod"` 且没有 `code`。参数坏断言 `Failed`。超帧断言 `TooLarge`。
 - [ ] **Step 2: 跑测试，确认失败**
@@ -689,14 +700,14 @@ git commit -m "feat(daemon): single instance, recover, then listen"
 - Consumes: `Confirmer::require`、`validate`、`probe`；`Action`；`RepoConfig::needs_human_confirm`
 - Produces: `install_agent`、`pins.json`、`PinnedFlags`、`DEFAULT_PATH`
 
-- [ ] **Step 1: 写失败的测试**：`config_relax_not_applied_on_restart`，外加：弹框时不持有队列或 repo 锁；action 不符 → `NotConfirmed`；daemon 不返回 `NotTty`；`InstallEnv.path` 等于 D1；plist 含 `Label`、`KeepAlive`、`LimitLoadToSessionType = Aqua`、D1 的 PATH。
+- [ ] **Step 1: 写失败的测试**：`config_relax_not_applied_on_restart`、`config_relax_does_not_prompt_on_file_change`、`config_relax_writes_pin_after_validate`，外加：弹框时不持有队列或 repo 锁；action 不符 → `NotConfirmed`；daemon 不返回 `NotTty`；`InstallEnv.path` 等于 D1；plist 含 `Label`、`KeepAlive`、`LimitLoadToSessionType = Aqua`、D1 的 PATH。
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-daemon --test confirm_flow`
 
 Expected: FAIL
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.3 第 4 步、§4 的钉、§3 的 plist。不定义 `ConfigRelax`。
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.3 第 4 步、§4 的钉、§5.5 的 `config_relax`、§3 的 plist。不在本文定义 `ConfigRelax`；点名它的臂在 types.md 有这个变体之前编译不了。
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-daemon --test confirm_flow`
@@ -832,3 +843,4 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 | 第二个进程的码 | `Exists`，不是 `Busy` | 矩阵写明码由本文定，且 `Busy` 只用于写锁。`Exists` 是「要建的已经在」里最近的一个 | 2026-10-23 |
 | D18 重放函数 | `Git::replay_commits(exclusive_base, tip, onto) -> Result<CommitOid>` | gitio @1cd5ac5 没有 cherry-pick 或 rev-list。daemon 不能自己起 git。函数不改 ref、不推送；合不上返回已有的 `Conflict` | 2026-10-23 |
 | D19 链处理的 reason | `not_rewound_or_diverged`、`no_replay_range`、`not_fast_forward`，码都是 `InvalidInput` | 控制器不许加码。这三种都是写链或推送之前的具名拒绝 | 2026-10-23 |
+| D20 没有待调松仍叫 `config_relax` | `InvalidInput`，reason `not_relaxed`，不弹框 | 文件变了不弹框。没有待接受的调松时，显式命令也不该弹出一个空框 | 2026-10-23 |
