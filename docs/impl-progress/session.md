@@ -10,8 +10,8 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
 | 2 full sibling layout on per-session shadow repos | done | 03a4bce |
 | 3 resolve by cwd or selector, status | done | 426dd58 |
 | 4 Unknown scenes and restart leftovers | done | bb583d7 |
-| 5 move base and deps with an atomic directory swap | done | (this commit) |
-| 6 remove behind discard confirmation and open-file checks | todo | |
+| 5 move base and deps with an atomic directory swap | done | b2385ec |
+| 6 remove behind discard confirmation and open-file checks | done | (this commit) |
 | 7 resolve a failed move by abandoning or accepting it | todo | |
 
 ## Ambiguity decisions
@@ -183,3 +183,25 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
 - Task 5: the §7 carry row is split into three tests (content, races,
   `uchg`). The parts of §7 T5 rows that need `remove` or
   `resolve_failed_move` are asserted in Tasks 6 and 7.
+- Task 6: the Dirty check (step 4) runs `reconcile_full` only for a
+  tracked workspace that is healthy while the session is Active; an
+  Unknown session is already `session_unknown` and gets no overlay scan.
+  "Missing" is computed as in status (directory, `.git`, shadow), and a
+  manifest repo with no workspace row counts as missing. Old-tree
+  `changed` uses the Task 5 rule; a compare error counts as changed.
+- Task 6: Dirty `detail.repos.<repo>` is `{paths (first 100), count,
+  truncated}`; OpenFiles `detail` also carries `paths` (the two scanned
+  directories). Untracked repos always need discard, even when unchanged.
+- Task 6: step 5.1 takes the bounded per-repo lock per pending intent
+  (Busy passes through, before anything visible). For an Unknown session
+  a Preparing intent is only closed as Abandoned; its staging leaves with
+  the root in step 8. An Abandoned intent whose staging still exists is
+  collected again (Active only).
+- Task 6: BeforeRemove checkpoints are taken only for tracked, healthy
+  workspaces of an Active session; `RemoveReport.checkpoints` lists them.
+- Task 6: a `false` from step 9's Removing→Removed is Corrupt and goes
+  through the Unknown path like any other step 7–9 failure; a StopAt seam
+  returns as is (the row stays Removing for `recover`).
+- Task 6: a Swapping intent (move stopped between swap and record) is
+  `move_awaiting_recover` in Dirty `unresolved`; the test does not remove
+  it with discard (recover owns it).

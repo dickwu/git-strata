@@ -21,6 +21,7 @@ mod dispatch;
 mod move_workspace;
 mod new;
 mod recover;
+mod remove;
 mod resolve;
 mod scene;
 mod seams;
@@ -30,6 +31,7 @@ mod sys;
 mod ticket;
 
 pub use move_workspace::MoveReport;
+pub use remove::RemoveReport;
 #[cfg(feature = "test-seams")]
 pub use seams::SessionSeam;
 pub use status::{
