@@ -317,7 +317,7 @@ fn propose_round(
     )
 }
 
-fn built(id: ProposalId, new: NewProposal, now: SystemTime) -> Proposal {
+pub(crate) fn built(id: ProposalId, new: NewProposal, now: SystemTime) -> Proposal {
     let state = if new.tree.is_some() {
         ProposalState::Pending
     } else {

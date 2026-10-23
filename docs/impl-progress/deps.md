@@ -139,3 +139,14 @@ Spec: docs/modules/deps.md. Branch `impl/deps` (worktree git-strata-wt/deps), ba
   - Returned `Proposal`s are built from the arguments + store ids/timestamps, not re-read, so a concurrent decision cannot change what the caller sees.
   - Validation reasons: `from_equals_to`, `tree_head_mismatch`, `no_target`, `tree_mismatch` (all `InvalidInput`); `tree_of` errors (e.g. `NoSuchCommit`) pass through.
 - Tests: "fetch" is the real gitio fetch from a sandbox bare origin; publish/anchor refs are set with `git update-ref`; chain graphs use `git commit-tree` children. "Not yet fetched" is a fresh bare origin with no fetch. The other-repo case uses a second fixture/store, with main's Pending written via `record_proposal` directly.
+
+### Task 8 — approval targets and rollout plans (§5.10)
+
+- `src/rollout.rs` (`Target`, `RolloutPlan`, `RolloutStep`, `SkipReason`, `ensure_target`, `plan_rollout`, `plan_switch`, `record_rollout`), `tests/rollout.rs` (13 spec tests + `rollout_holder` worker that holds a file open via fd, mmap or cwd in a child process). `proposal::built` became `pub(crate)` so `ensure_target` can return the replacement `Proposal`.
+- Decisions:
+  - `ensure_target`: if the sealed id differs from `P.to`, the replacement is filed inside `with_write` via `record_proposal(replaces = P)`; if that returns `None` (P was decided concurrently), P is re-read and the result is `NoSuchProposal {proposal, state}` with its current state. `Busy` from the lock is returned as-is.
+  - `plan_rollout` checks `P.repo` and every session's `base.repo` against `ctx.repo` (`InvalidInput {reason: wrong_repo}`) and then that P.head is still main's tip (`HeadMoved {reason: main_moved}`).
+  - Skip reasons are evaluated in the spec order: Untracked → AlreadyThere → NotReady → OwnChange → Drift → OpenFiles. OwnChange compares inputs hashes (not set ids) against both the base's and the target's inputs. A missing pinned set is `Skip Error` with `Code::Corrupt`; `inputs_hash`/pinned lookup errors are `Skip Error` rather than failing the whole plan.
+  - The open-file scan is one batch over all remaining candidates (one `lsof`-style pass); per-session file lists are sorted and deduplicated. A scan error skips every candidate with `Skip Error`.
+  - `plan_switch` checks origin first (`not_origin`), then state (`not_open`); for Pending the target is (P.tree, P.to) with head P.head and the main-tip check; for AwaitingPublish the target is (session base tree, P.to). Its plans are always `complete = false`, so `record_rollout` never decides a proposal from a switch.
+  - `record_rollout` marks P Applied only when the plan is complete, every `Move` session is in `moved`, and every Skip is Untracked or AlreadyThere; otherwise (or when `decide_proposal` returns false) it just re-reads and returns P.
