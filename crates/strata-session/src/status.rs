@@ -15,6 +15,7 @@ use strata_types::{CheckpointId, Code, RepoName, RepoPath, SessionId, SessionMan
 
 use crate::seed::{SeedRecord, mtime_of};
 use crate::sys::lstat;
+use crate::scene::{Scene, scene_of};
 use crate::{Result, Sessions};
 
 /// A session's status (design §6.3).
@@ -126,39 +127,8 @@ impl From<MirrorDrift> for MirrorDriftItem {
     }
 }
 
-/// An Unknown scene, stored as JSON on the session or workspace row.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Scene {
-    pub op: SceneOp,
-    pub session: SessionId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repo: Option<RepoName>,
-    pub phase: String,
-    #[serde(with = "strata_types::serde_rfc3339")]
-    pub at: SystemTime,
-    pub kept: Vec<PathBuf>,
-    /// The Unknown error returned to the caller then (§6.3).
-    pub error: StrataError,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SceneOp {
-    New,
-    Move,
-    Remove,
-}
-
 pub(crate) fn no_such_session(id: &str) -> StrataError {
     StrataError::new(Code::NoSuchSession, format!("no session {id}")).with_detail(json!({ "session": id }))
-}
-
-/// A stored scene back as a `Scene`; a row that does not parse is `Corrupt`.
-pub(crate) fn scene_of(v: &serde_json::Value, what: &str) -> Result<Scene> {
-    serde_json::from_value(v.clone()).map_err(|e| {
-        StrataError::new(Code::Corrupt, format!("the stored {what} scene does not parse: {e}"))
-            .with_detail(json!({ "field": "scene", "of": what }))
-    })
 }
 
 impl Sessions<'_> {

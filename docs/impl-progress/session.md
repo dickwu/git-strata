@@ -8,8 +8,8 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
 |---|---|---|
 | 1 refuse invalid new requests before writing | done | d19b845 |
 | 2 full sibling layout on per-session shadow repos | done | 03a4bce |
-| 3 resolve by cwd or selector, status | done | (this commit) |
-| 4 Unknown scenes and restart leftovers | todo | |
+| 3 resolve by cwd or selector, status | done | 426dd58 |
+| 4 Unknown scenes and restart leftovers | done | (this commit) |
 | 5 move base and deps with an atomic directory swap | todo | |
 | 6 remove behind discard confirmation and open-file checks | todo | |
 | 7 resolve a failed move by abandoning or accepting it | todo | |
@@ -111,3 +111,41 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
   checks that status is unaffected and that a second `observe_main` fills
   the missing record. The `new_failure_after_writing_began_is_unknown`
   status/resolve half comes with Task 4 (Unknown scenes).
+- Task 4: `Scene`/`SceneOp` moved from status.rs to scene.rs (re-exported
+  unchanged). `detail.cause` is the lower StrataError as is (code,
+  message, detail); when its detail carries an `errno` (an apfs-classified
+  I/O error, including the seam's injected one), that errno is also lifted
+  to `cause.errno`, so both §6.3 readings ("the StrataError" and "errno
+  plus the original text") hold.
+- Task 4: `new`'s Unknown message omits `/<repo>` (follows the §6.3 `new`
+  example); the repo is in `detail.repo`/`detail.path`. `[/<repo>]` is
+  left for single-repo operations (move, resolve). For phases with no repo
+  (`root`, `finalize`, or `set_session_phase` itself failing) the detail
+  has no `repo`/`path`.
+- Task 4: `kept` = the session root and each `sessions/.repos/<id>/<repo>.git`
+  that exists at the time (lstat); the bare `sessions/.repos/<id>/`
+  container is not listed (row 1136 expects exactly the session root when
+  no shadow exists yet). An empty list prints as `kept nothing`.
+- Task 4: a `set_lifecycle` failure (or `false`) while recording a `new`
+  scene is ignored; `new` still returns the Unknown and `recover` marks
+  the Creating row next start (§5.1 last paragraph).
+- Task 4: `recover` step 1 scene for an interrupted op: `error` is Unknown
+  built from the same §6.3 template, `detail.reason = "interrupted"`,
+  `detail.cause = {reason: "interrupted", message}` (there is no lower
+  error); repo is None. A row with no recorded phase gets the op's first
+  phase (`root` for new, `unpin` for remove). A `set_lifecycle` that
+  returns false (row moved meanwhile) is a Busy `lifecycle_changed` item in
+  `errors`.
+- Task 4: `RecoverReport.retired` lists the staging paths as they were
+  before retirement (not the trash names). `recover` and `leftovers` both
+  skip entries in this process's `live_staging` set (empty at daemon
+  start, so recover still retires everything then). `leftovers` lists
+  export temps only inside directory entries; a missing `.staging` is no
+  leftovers. `IntentRef` and the move fields of `RecoverReport` are defined
+  now and filled by Task 5 (recover step 2).
+- Task 4: `SessionSeam::release` now clears `paused` itself, so a
+  `wait_paused` right after `release` waits for the next pause instead of
+  returning on the old one (needed by the "staging taken twice" case).
+- Task 4: base.rs already had the §5.2 failure handling from Task 2
+  (retire B, then named code or Unknown with kept empty); Task 4 adds the
+  tests for it rather than new code there.

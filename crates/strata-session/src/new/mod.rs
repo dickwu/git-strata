@@ -6,12 +6,14 @@ use serde_json::json;
 use strata_types::{Code, CommitOid, RepoName, SessionManifest, StrataError, TreeOid};
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 use strata_apfs::{FileKind, IoSide, classify_io_error};
 use strata_store::{Lifecycle, SeedRow};
 use strata_types::{BaseGen, RepoPath, SessionId, WorkspaceState};
 
+use crate::scene::{Scene, SceneOp, cause_of, kept_dirs, unknown_error};
 use crate::seed::{SeedSource, ancestors, seed_files, seed_plan};
 use crate::sys::{lstat, rp};
 use crate::{Result, Sessions, dispatch};
@@ -139,29 +141,87 @@ impl Sessions<'_> {
         Ok(Plan { files, caches })
     }
 
-    /// §5.1 steps 12-14. In this version a failure is returned as is.
+    /// §5.1 steps 12-14. Any failure here is after the first visible write:
+    /// the session becomes `Unknown` with its scene, nothing is undone
+    /// (§6.1 rule 3). A `StopAt` seam returns as is (a crash).
     fn build_layout(&self, m: &SessionManifest, plans: &BTreeMap<RepoName, (BaseGen, Plan)>) -> Result<()> {
+        let at = Mutex::new(("root", None::<RepoName>));
+        match self.layout_steps(m, plans, &at) {
+            Ok(()) => Ok(()),
+            Err(e) if crate::seams::is_stop(&e) => Err(e),
+            Err(e) => {
+                let (phase, repo) = at.into_inner().unwrap_or_else(|p| p.into_inner());
+                Err(self.new_unknown(m, phase, repo.as_ref(), &e))
+            }
+        }
+    }
+
+    /// Record the scene and build the error (§6.3). If `set_lifecycle`
+    /// fails too the row stays `Creating`; `recover` marks it next start.
+    fn new_unknown(&self, m: &SessionManifest, phase: &str, repo: Option<&RepoName>, e: &StrataError) -> StrataError {
+        let kept = kept_dirs(&self.config.paths.root, &m.id, m.repos.keys().cloned());
+        let mut extra = serde_json::Map::new();
+        if let Some(r) = repo {
+            extra.insert("repo".into(), json!(r.as_str()));
+            if let Some(ws) = m.repos.get(r) {
+                extra.insert("path".into(), json!(ws.path.display().to_string()));
+            }
+        }
+        let err = unknown_error(SceneOp::New, &m.id, None, phase, cause_of(e), &kept, extra);
+        let now = SystemTime::now();
+        let scene = Scene { op: SceneOp::New, session: m.id.clone(), repo: repo.cloned(), phase: phase.into(), at: now, kept, error: err.clone() };
+        if let Ok(v) = serde_json::to_value(&scene) {
+            let _ = self.store.set_lifecycle(&m.id, Lifecycle::Creating, Lifecycle::Unknown, Some(&v), now);
+        }
+        err
+    }
+
+    fn layout_steps(
+        &self,
+        m: &SessionManifest,
+        plans: &BTreeMap<RepoName, (BaseGen, Plan)>,
+        at: &Mutex<(&'static str, Option<RepoName>)>,
+    ) -> Result<()> {
         let id = &m.id;
         let proot = &self.config.paths.root;
         let repos: Vec<RepoName> = m.repos.keys().cloned().collect();
-        let seam = |phase: &'static str| move |r: &RepoName| self.seams.hit(&format!("new.{phase}"), Some(r));
+        let enter = |phase: &'static str| -> Result<()> {
+            *at.lock().unwrap_or_else(|p| p.into_inner()) = (phase, None);
+            self.store.set_session_phase(id, phase)
+        };
+        // One phase over `repos`; the first failing repo in RepoName order
+        // (the one dispatch returns) is the scene's repo.
+        let each = |phase: &'static str, repos: &[RepoName], f: &(dyn Fn(&RepoName) -> Result<()> + Sync)| -> Result<()> {
+            let failed = Mutex::new(std::collections::BTreeSet::new());
+            let mark = |r: &RepoName| {
+                failed.lock().unwrap_or_else(|p| p.into_inner()).insert(r.clone());
+            };
+            let seam = |r: &RepoName| self.seams.hit(&format!("new.{phase}"), Some(r)).inspect_err(|_| mark(r));
+            let run = |r: &RepoName| f(r).inspect_err(|_| mark(r));
+            let out = dispatch::each_repo(repos, &seam, &run);
+            if out.is_err() {
+                let first = failed.lock().unwrap_or_else(|p| p.into_inner()).iter().next().cloned();
+                at.lock().unwrap_or_else(|p| p.into_inner()).1 = first;
+            }
+            out.map(|_| ())
+        };
 
         // 12. root
-        self.store.set_session_phase(id, "root")?;
+        enter("root")?;
         self.seams.hit("new.root", None)?;
         strata_apfs::mkdir_rooted(proot, &rp("sessions"), 0o755, true)?;
         strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/{id}")), 0o755, false)?;
         strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/.repos/{id}")), 0o755, true)?;
 
         // 13.1 workspace
-        self.store.set_session_phase(id, "workspace")?;
-        dispatch::each_repo(&repos, &seam("workspace"), &|r| {
+        enter("workspace")?;
+        each("workspace", &repos, &|r| {
             strata_apfs::clone_tree_rooted(&self.store.base_dir(&plans[r].0), &m.root, &rp(r.as_str()))
         })?;
 
         // 13.2 git
-        self.store.set_session_phase(id, "git")?;
-        dispatch::each_repo(&repos, &seam("git"), &|r| {
+        enter("git")?;
+        each("git", &repos, &|r| {
             let git = self.git(r)?;
             let ws = &m.repos[r];
             let dir = self.shadow_dir(id, r);
@@ -173,16 +233,16 @@ impl Sessions<'_> {
         })?;
 
         // 13.3 pin
-        self.store.set_session_phase(id, "pin")?;
-        dispatch::each_repo(&repos, &seam("pin"), &|r| {
+        enter("pin")?;
+        each("pin", &repos, &|r| {
             let git = self.git(r)?;
             self.with_lock_unbounded(r, || git.update_ref(&pin_ref(id), &m.repos[r].head, None))
         })?;
 
         // 13.4 seed_caches (tracked repos only)
-        self.store.set_session_phase(id, "seed_caches")?;
+        enter("seed_caches")?;
         let tracked: Vec<RepoName> = repos.iter().filter(|r| m.repos[*r].tracked).cloned().collect();
-        dispatch::each_repo(&tracked, &seam("seed_caches"), &|r| {
+        each("seed_caches", &tracked, &|r| {
             let cfg = self.repo_cfg(r)?;
             let ws = &m.repos[r].path;
             for c in &plans[r].1.caches {
@@ -195,15 +255,15 @@ impl Sessions<'_> {
         })?;
 
         // 13.5 seed_files
-        self.store.set_session_phase(id, "seed_files")?;
-        dispatch::each_repo(&repos, &seam("seed_files"), &|r| {
+        enter("seed_files")?;
+        each("seed_files", &repos, &|r| {
             let records = seed_files(&plans[r].1.files, &m.repos[r].path)?;
             let rows: Vec<SeedRow> = records.iter().map(SeedRow::from).collect();
             self.store.record_seeds(id, r, &rows)
         })?;
 
         // 14. finalize
-        self.store.set_session_phase(id, "finalize")?;
+        enter("finalize")?;
         self.seams.hit("new.finalize", None)?;
         for rel in [format!("sessions/{id}"), format!("sessions/.repos/{id}")] {
             let fd = strata_apfs::open_rooted(proot, &rp(rel))?;

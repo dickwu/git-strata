@@ -18,7 +18,9 @@ use strata_types::{CheckpointReason, Code, Config, RepoConfig, RepoName, Session
 mod base;
 mod dispatch;
 mod new;
+mod recover;
 mod resolve;
+mod scene;
 mod seams;
 mod seed;
 mod status;
@@ -28,8 +30,10 @@ mod ticket;
 #[cfg(feature = "test-seams")]
 pub use seams::SessionSeam;
 pub use status::{
-    MirrorDriftItem, Scene, SceneOp, SessionState, SessionStatus, StatusWarning, WorkspaceHealth, WorkspaceStatus,
+    MirrorDriftItem, SessionState, SessionStatus, StatusWarning, WorkspaceHealth, WorkspaceStatus,
 };
+pub use recover::{IntentRef, Leftover, RecoverReport};
+pub use scene::{Scene, SceneOp};
 pub use new::NewReport;
 pub use new::NewWarning;
 pub use seed::{SeedRecord, SeedSource, seed_files, seed_plan};

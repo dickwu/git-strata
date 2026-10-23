@@ -143,6 +143,9 @@ impl crate::Sessions<'_> {
     pub fn release(&self) {
         let mut st = self.seams.pause.lock().unwrap_or_else(|p| p.into_inner());
         st.released = true;
+        // Not paused any more from the caller's view: a following
+        // `wait_paused` waits for the next pause, not this one.
+        st.paused = false;
         self.seams.cv.notify_all();
     }
 }
