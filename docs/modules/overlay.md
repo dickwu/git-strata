@@ -2,7 +2,7 @@
 
 **Crate**：`crates/strata-overlay` · **设计来源**：design.md §4（Overlay、Checkpoint、`.lww`）、§6.2、§6.3（`diff --between` 的投影）、§6.5 第 7 步、§8、§9 不变量 1、2、4、5、6；tgrep `SHARED_WORKTREE_INDEXES.md` 的 "Base snapshots and worktree overlays" 与 "Implemented worktree synchronization API" 两节；module-rulings.md 的「Common」「T7 overlay」与标了 T7、Everyone 的增补 · **矩阵**：目标模块为 `overlay` 的 131 行（3c 60、3a 15、3d 27、3e 6、3f 23；3b 没有），以及理由点名 overlay 的 `—` 行 49 条，逐条见 §7
 
-> 本文按 module-rulings.md 写，含 Addendum 1–8。与 design.md 旧措辞不同的地方以裁定为准：工作区路径是 `<root>/sessions/<session-id>/<repo>/`；`Checkpoint` 用 Task 15 加进 types.md 的形状，多一个 `base: BaseGen` 字段（增补裁定 T7/T6/T15，store.md 已按它写）；基线清单由 overlay 的 `build_manifest` 建、由 store 持久化（Addendum 3）；把条目落到目录上的投影归 overlay，写入一律经 apfs 的 rooted 操作（Addendum 3、7、8）；工作区的 git 经主 checkout 上打开的 `Git` 读（Addendum 5）；错误时机按 Addendum 3 到 7：第一次对外写入之前只有具名拒绝，之后任何失败都是 `Unknown`，现场保留，`Before*` checkpoint 不算对外写入，restore 的第一次对外写入是 `mkdir T` 与 `plan.json`。apfs 的名字取 apfs.md（d3c392b；`list_dir` 取 599dde6）；`case_fold_key`、`Watcher::flush`（Addendum 7）与 `rename_rooted`、`RenameMode`、`remove_rooted`、`RemoveKind`（Addendum 8），以及 store 的 `put_blob_rooted`（Addendum 8），名字由裁定定下、由上游的修订轮加进去，§2 列为上游要求。标 [我的决定] 的地方是 design 和裁定都没有定、由本文决定的，§9 有汇总。文中标"实测"的 APFS 行为，是 2026-10-22 在本机 APFS 卷上用临时文件验证过的。
+> 本文按 module-rulings.md 写，含 Addendum 1–8 与其后的「Cold scan」「Empty directories, amended」「Proven copies」「Addendum 8: get_blob_rooted」。与 design.md 旧措辞不同的地方以裁定为准：工作区路径是 `<root>/sessions/<session-id>/<repo>/`；`Checkpoint` 用 Task 15 加进 types.md 的形状，多一个 `base: BaseGen` 字段（增补裁定 T7/T6/T15，store.md 已按它写）；基线清单由 overlay 的 `build_manifest` 建、由 store 持久化（Addendum 3）；把条目落到目录上的投影归 overlay，写入一律经 apfs 的 rooted 操作与 store 的 `get_blob_rooted`（Addendum 3、7、8）；工作区的 git 经主 checkout 上打开的 `Git` 读（Addendum 5）；错误时机按 Addendum 3 到 7：第一次对外写入之前只有具名拒绝，之后任何失败都是 `Unknown`，现场保留，`Before*` checkpoint 不算对外写入，restore 的第一次对外写入是 `mkdir T` 与 `plan.json`。apfs 的名字取 apfs.md（1e723f2），store 的取 store.md（e4d273c）。还没进上游文档、§2 列为上游要求的只有两项：apfs 要声明的 `case_fold_key` 前缀性质（module-rulings「case_fold_key prefix property」）与 store 的 `get_blob_rooted`（「Addendum 8: get_blob_rooted」）。标 [我的决定] 的地方是 design 和裁定都没有定、由本文决定的，§9 有汇总。文中标"实测"的 APFS 行为，是 2026-10-22 在本机 APFS 卷上用临时文件验证过的。
 
 ## 1. 职责与边界
 
@@ -41,16 +41,16 @@ Workspace crate（types.md §8：overlay 在第 2 层，只依赖第 0–1 层�
 | 依赖 | 用途 |
 | --- | --- |
 | `strata-types` | `BaseGen`、`BaseManifest`、`ManifestEntry`、`OverlayEntry`、`EntryKind`、`Checkpoint`、`CheckpointReason`、`CheckpointId`、`BlobId`、`RepoPath`、`RepoName`、`SessionId`、`TreeOid`、`RepoConfig`、`StrataError`、`Code` |
-| `strata-apfs` | `walk_with`、`WalkOptions`（全扫）、`list_dir`（列单个目录：增量扫描、拼写解析、restore 看 T）、`Attrs`（`kind`、`size`、`mode`、`gen_count`、`inode`）、`Attrs::unchanged_since`（缓存作保的唯一判法）、`FileKind`、`attrs_of`（点查）；`watch_with`、`WatchOptions`、`Watcher`、`WatchEvent`（脏集合的来源）；`open_rooted_file`（读内容、读 `.strata/lww`，FIFO 不会挂住）、`open_rooted`（取 T 的句柄来 `fsync`）；restore 与 `project` 的写全经 apfs 的 rooted 操作（Addendum 8）：`clone_file_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`。上游要求，名字已由裁定定下，等 apfs 的修订轮加进 apfs.md：`case_fold_key`（折叠键，§5.1，Addendum 7）、`Watcher::flush`（经 `Tracker::flush` 由 daemon 调用，§5.6，Addendum 7、8）、`rename_rooted` 与 `RenameMode { Excl, Swap }`、`remove_rooted` 与 `RemoveKind { File, EmptyDir }`（§5.7、§5.12，Addendum 8） |
+| `strata-apfs` | `walk_with`、`WalkOptions`（全扫）、`list_dir`（列单个目录：增量扫描、拼写解析、restore 看 T）、`Attrs`（`kind`、`size`、`mode`、`gen_count`、`inode`）、`Attrs::unchanged_since`（缓存作保的唯一判法）、`Attrs::gen_count_known`、`FileKind`、`attrs_of`（点查）；`case_fold_key`（折叠键，§5.1，Addendum 7）；`watch_with`、`WatchOptions`（`exclude` 只放 `.git`，§5.4）、`Watcher`、`WatchEvent`（脏集合的来源）、`Watcher::flush`（经 `Tracker::flush` 由 daemon 调用，§5.6，Addendum 7、8）；`open_rooted_file`（读内容、读 `.strata/lww`，FIFO 不会挂住）、`open_rooted`（取 T 的句柄）、`open_root`（取 R 自己的句柄）、`full_fsync`（`F_FULLFSYNC`）、`classify_io_error` 与 `IoSide`（overlay 自己在句柄上做的 libc 调用失败时归类 errno）；restore 与 `project` 的写全经 apfs 的 rooted 操作（Addendum 8）：`clone_file_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`、`rename_rooted` 与 `RenameMode { Excl, Swap }`、`remove_rooted` 与 `RemoveKind { File, EmptyDir }`（`EmptyDir` 遇到非空目录返回 `NotEmpty`，module-rulings「NotEmpty from apfs」）。上游要求（apfs 的下一轮）：声明并测试 `case_fold_key` 的前缀性质 `case_fold_key(a + "/" + b) == case_fold_key(a) + "/" + case_fold_key(b)`（module-rulings「case_fold_key prefix property」：受限目录的键前缀范围查找靠它，§5.1） |
 | `strata-gitio` | `Git::read_index(worktree)` 与 `IndexInfo`（`is_tracked` 判 `Added` 还是 `Untracked`；`tracked` 与 `ignorecase` 进 §5.1 的折叠键；不用 `tracked_under`，它只折叠 ASCII，§5.1）；`Git::is_ignored(worktree, path)`（增量点查与全扫用同一个函数，gitio.md §5.8 第 7 步）；`merge3`、`Merge3`（rebase）；测试的 fixture 还用 `Git::open`（对主 checkout）、`export_tree`、`ensure_shadow`、`attach_worktree` |
-| `strata-store` | `Store` 的 `put_blob`（rebase 按 blob 不变量存基线文件）、`put_bytes`、`get_blob`、`read_blob`、`verify_blob`、`record_checkpoint`、`checkpoint`、`latest_checkpoint`、`session`、`root`；上游要求 `put_blob_rooted`（Addendum 8：checkpoint 从工作区存 blob，不跟随符号链接，§5.6）；测试的 fixture 还用 `record_deps_set`、`record_base_gen`（连清单一起登记）、`create_session`、`base_dir`、移动意图的 `begin_move` 到 `finish_move`，以及 store 的测试接缝 `Seam`、`arm` |
+| `strata-store` | `Store` 的 `put_blob_rooted`（Addendum 8：checkpoint 从工作区存 blob，不跟随符号链接，§5.6）、`put_blob`（rebase 按 blob 不变量存基线文件）、`put_bytes`、`read_blob`、`verify_blob`、`record_checkpoint`、`checkpoint`、`latest_checkpoint`、`session`、`root`；上游要求 `get_blob_rooted(id, root, dst)`（「Addendum 8: get_blob_rooted」，由 store 的下一轮加进 store.md：restore 往 T、`project` 往 dst 取 blob，从 root 起逐级不跟随符号链接，§5.7、§5.12），overlay 不用按路径写的 `get_blob`；测试的 fixture 还用 `record_deps_set`、`record_base_gen`（连清单一起登记）、`create_session`、`base_dir`、移动意图的 `begin_move` 到 `finish_move`，以及 store 的测试接缝 `Seam`、`arm` |
 
 外部 crate：
 
 | 依赖 | 理由 |
 | --- | --- |
 | `blake3` | `compute` 与 `reconcile_full` 只读不存，自己算内容哈希，与 store 的 `BlobId` 是同一种地址 |
-| `libc` | 只用在文件句柄上，apfs 没有包装的：`fchmod`、`fchflags`、`flistxattr`、`fremovexattr`、`futimens`、`fsync`、`fcntl(F_FULLFSYNC)`；句柄来自 apfs 的 `open_rooted`、`open_rooted_file`、`create_file_rooted`。工作区、staging 与基线树上不做任何自己的 `*at` 调用（Addendum 8；design §11 第 2 条：macOS API 走 libc） |
+| `libc` | 只用在文件句柄上，apfs 没有包装的：`fchmod`、`fchflags`、`flistxattr`、`fremovexattr`、`futimens`、`fsync`（`F_FULLFSYNC` 用 apfs 的 `full_fsync`）；句柄来自 apfs 的 `open_root`、`open_rooted`、`open_rooted_file`、`create_file_rooted`。工作区、staging 与基线树上不做任何自己的 `*at` 调用（Addendum 8；design §11 第 2 条：macOS API 走 libc） |
 | `serde` | §3 里出现在 RPC/JSON 上的类型（`Overlay`、`OverlayWarning`、`ScanStats`、`Restored`、`Rebased`） |
 | `serde_json` | `T/plan.json`（§5.7）与错误的 `detail` |
 | `rayon` | checkpoint 并行 `put_blob_rooted`（store.md §5.3：并发的 put 各自克隆、哈希，同一内容只落一份） |
@@ -62,8 +62,8 @@ Workspace crate（types.md §8：overlay 在第 2 层，只依赖第 0–1 层�
 
 | 调用方 | 用到 |
 | --- | --- |
-| daemon | 每个 tracked 工作区一个 `Tracker`（`new`、`watch`、`inbox`、`warnings`、`reset`）；PostToolUse 钩子带来的路径交给 `Inbox::hint` 再调用 `Tracker::flush`，工具没有路径清单（Bash 等）时改调 `Inbox::require_full`，然后做 `ToolCall` checkpoint（§5.6 第 2 步）；`checkpoint -m`；每小时与读 status 时的 `compute`；`restore`；从 store 取清单（`manifest`）组成 `Base`；status 并入 `Tracker::warnings`，并把非空的 restore 暂存目录（读它的 `plan.json`）报成现场（§5.7） |
-| session | `build_manifest`（建基线 generation 时，结果交给 store 登记）；`checkpoint`（`BeforeRollout`、`BeforeRemove`，不带 Tracker，即冷扫）；`reconcile_full`（`remove` 的未发布改动检查、移动后对旧树的核对）；`rebase`、`project` 与 `Overlay`（`move_workspace` 建新一代的树）；`rm` 遇到非空的 restore 暂存目录返回 `Dirty`，除非 `--discard`（Addendum 7） |
+| daemon | 每个 tracked 工作区一个 `Tracker`（`new`、`watch`、`inbox`、`warnings`、`reset`）；PostToolUse 钩子带来的路径交给 `Inbox::hint` 再调用 `Tracker::flush`，工具没有路径清单（Bash 等）时改调 `Inbox::require_full`，然后做 `ToolCall` checkpoint（§5.6 第 2 步）；`checkpoint -m`；每小时与读 status 时的 `compute`；`restore`；从 store 取清单（`manifest`）组成 `Base`；status 并入 `Tracker::warnings`，并把非空的 restore 暂存目录（读它的 `plan.json`）报成现场（§5.7）；session 的 `BeforeRollout`、`BeforeRemove` 用的是 daemon 交过去的这个工作区的 `Tracker`（module-rulings「Session's Before* checkpoints use the daemon's Tracker」） |
+| session | `build_manifest`（建基线 generation 时，结果交给 store 登记）；`checkpoint`（`BeforeRollout`、`BeforeRemove`：带 daemon 交来的这个工作区的 `Tracker`，即不依赖事件的全扫；daemon 还没有它的 Tracker 时才不带，即冷扫，module-rulings「Session's Before* checkpoints use the daemon's Tracker」）；`reconcile_full`（`remove` 的未发布改动检查、移动后对旧树的核对）；`rebase`、`project` 与 `Overlay`（`move_workspace` 建新一代的树）；`rm` 遇到非空的 restore 暂存目录返回 `Dirty`，除非 `--discard`（Addendum 7） |
 | publish | `compute`、`rebase`（发布后 rebase 经 session；`diff --between` 的投影）、`Overlay::paired`、`LwwRules`、`lww_matches`；发布前的 `BeforePublish` checkpoint 由 daemon 经本模块记 |
 | search | `Overlay`（`hides`、`tombstones`、`get`），以及 `Scan`/`Checkpointed` 里的 `changed` 作刷新提示 |
 | cli | 只经 daemon 的 RPC |
@@ -148,7 +148,7 @@ impl Overlay {
     pub fn validate(&self) -> Result<()>;
 }
 
-/// status 要报出的事实。daemon 组装 status 时并入（session.md §5.4）。
+/// status 要报出的事实。daemon 组装 status 时并入（session.md §5.5）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum OverlayWarning {
@@ -177,7 +177,7 @@ pub struct ScanStats {
     pub bytes_hashed: u64,
     /// 属性缓存直接作保、没有读内容的文件数。
     pub vouched: u64,
-    /// 这次是否全扫；是否冷扫（不信缓存）。
+    /// 这次是否全扫；是否冷扫（缓存为空：reconcile_full，或 Tracker 新建、reset 之后的第一次扫描，每个候选都读内容，§5.5）。
     pub full: bool,
     pub cold: bool,
 }
@@ -255,7 +255,7 @@ impl RebaseOptions {
 pub struct Rebased {
     /// 对着新基线的 overlay；冲突路径上是会话的版本。
     pub overlay: Overlay,
-    /// 两边都改了而合不上、保留了会话版本的路径（design §6.5 第 7 步"冲突标出"）。
+    /// 两边都改了而合不上、保留了会话版本的路径（design §6.5 第 7 步"冲突标出"），以及 §5.8 第 4a 步前缀冲突里两边的路径。
     pub conflicts: Vec<RepoPath>,
     /// 离开 overlay 的路径：新基线已经等于会话的内容。
     pub dropped: Vec<RepoPath>,
@@ -286,13 +286,14 @@ impl Tracker {
     pub fn new(root: &Path, capacity: usize) -> Tracker;
     /// 交给监听回调的句柄。
     pub fn inbox(&self) -> Inbox;
-    /// apfs::watch_with(root, &WatchOptions { exclude: 上一次扫描的 X }, …)，事件转进 inbox；Tracker 持有返回的 Watcher，
-    /// 丢弃 Tracker 即停止监听。Code：apfs 透传。
+    /// apfs::watch_with(root, &WatchOptions { exclude: 只有 .git }, …)，事件转进 inbox；排除集合 X 由 Inbox::note 按当前的 X 过滤（§5.4），
+    /// 所以 X 变了不用重新 watch。Tracker 持有返回的 Watcher，丢弃 Tracker 即停止监听。Code：apfs 透传。
     pub fn watch(&mut self) -> Result<()>;
     /// 调用 Watcher::flush()（Addendum 8：FlushSync，再排空流的私有队列）：best-effort，让一部分积压的事件进 inbox，
-    /// 不是屏障。daemon 在 ToolCall checkpoint 之前调用（§5.6 第 2 步）；没有监听时什么都不做。不得在监听回调里调用
-    /// （会死锁）；回调只碰 Inbox 自己的锁，所以 daemon 持着 Tracker 调用它不会死锁。Code：apfs 透传。
-    pub fn flush(&self) -> Result<()>;
+    /// 不是屏障。daemon 在 ToolCall checkpoint 之前调用（§5.6 第 2 步）；没有监听时什么都不做。apfs 的 flush 没有返回值，
+    /// 这里也不会失败。不得在监听回调里调用：apfs 在 debug 构建里 debug_assert，release 构建里直接返回、什么都不做；
+    /// 回调只碰 Inbox 自己的锁，所以 daemon 持着 Tracker 调用它不会死锁。
+    pub fn flush(&self);
     /// 最近一次扫描所对的基线；还没扫过时为 None。
     pub fn base(&self) -> Option<&BaseGen>;
     /// 最近一次扫描得到的 overlay。
@@ -314,6 +315,7 @@ impl Inbox {
     /// 收一个监听事件（§5.4）。
     pub fn note(&self, event: &WatchEvent);
     /// 收已知改过的路径：daemon 在 ToolCall checkpoint 之前交来 PostToolUse 钩子带来的、Edit 与 Write 等写过的文件（§5.6 第 2 步）。
+    /// 路径经过符号链接时，链接指向的路径也记下；解析不了或指到根外 → 要求全扫（§5.4）。它读属性，在 daemon 的线程上调用，不在监听回调里。
     pub fn hint(&self, paths: &[RepoPath]);
     /// 要求下一次扫描全扫。daemon 在没有路径清单的工具调用（Bash 等）之后、ToolCall checkpoint 之前调用它（§5.6 第 2 步）。
     pub fn require_full(&self);
@@ -330,7 +332,7 @@ pub fn compute(ws: &WorkspaceRef, base: &Base, tracker: &mut Tracker, dirty: Opt
 /// 冷扫（§5.5）：不信任何缓存与监听，读遍每个文件的内容，结果就是真相。不写 Store，不写工作区。
 pub fn reconcile_full(ws: &WorkspaceRef, base: &Base) -> Result<Overlay>;
 
-/// 记一个 checkpoint（§5.6）。tracker 为 None，或原因是 Manual、Before* 时冷扫（Addendum 8）。
+/// 记一个 checkpoint（§5.6）。tracker 为 None 时冷扫（reconcile_full）；有 tracker 时 Manual、Before* 全扫，ToolCall 增量。
 pub fn checkpoint(ws: &WorkspaceRef, base: &Base, tracker: Option<&mut Tracker>, reason: CheckpointReason) -> Result<Checkpointed>;
 
 /// 把工作区（或其中一些路径）恢复到一个 checkpoint（§5.7）：先记 BeforeRestore，再投影。
@@ -342,7 +344,7 @@ pub fn rebase(overlay: &Overlay, old: &Base, new: &Base, store: &Store, opts: &R
 
 /// 把 overlay 的条目落到 dst 上（§5.12，Addendum 3、7）。dst 必须是 overlay.base 那棵树的一份未改动的克隆
 /// （session 准备的新一代的树），而且在 <store.root()>/sessions/ 之下。删掉 Deleted 的路径与 Renamed 的 from，写入其余条目；
-/// 所有写都经 apfs 的 rooted 操作（rename_rooted、remove_rooted 等），不跟随任何符号链接，不写 dst 之外的地方，
+/// 所有写都经 apfs 的 rooted 操作（rename_rooted、remove_rooted 等）与 store 的 get_blob_rooted，不跟随任何符号链接，不写 dst 之外的地方，
 /// 不做 F_FULLFSYNC（交换之前由调用方同步）。
 pub fn project(store: &Store, overlay: &Overlay, dst: &Path) -> Result<()>;
 
@@ -360,6 +362,8 @@ pub enum OverlayFault {
     PauseAfterSnapshot,
     /// restore 在第 8 步预检之前停住（§5.7：扫描之后、写之前的并发写入）。
     PauseBeforePrecheck,
+    /// restore 在第 10 步写下 plan.json 并落盘之后、在 T 里备临时文件之前停住（§5.7：T 被换成符号链接）。
+    PauseAfterPlan,
     /// restore 在阶段 C 的第 n 次改名之后停住（§5.7：并发写入与现场）。
     PauseInApply { after: u32 },
 }
@@ -389,22 +393,22 @@ pub fn read_candidate(root: &Path, path: &RepoPath) -> Result<ReadProbe>;
 - 计划写的 `struct BaseManifest`（基线每个文件的 `Attrs` + `BlobId`）拆成两半：内容一半就是 types.md 的 `BaseManifest`（blob、mode、size），本文引用、不重新定义；属性一半（gen count、inode、大小）是 `Tracker` 里的缓存（裁定 T7，types.md §4 `BaseManifest` 的注释）。
 - 计划的 `ws: &Path` 换成 `WorkspaceRef`，`base` 换成 `Base`：算 overlay 要 index、ignore 规则和排除的目录，restore 与 rebase 要读基线文件的内容，而基线文件不在 blob 存储里（Addendum 4）。
 - Addendum 3 写的是 `build_manifest(dir)`，这里多了 `tree` 与 `config` [我的决定]：`BaseManifest` 有 `tree` 字段，排除的依赖目录与种子缓存来自仓库配置。它不碰 Store，登记仍由 session 调 store。
-- 多一个 `Tracker` 参数：属性缓存与脏集合要在调用之间保留，design §6.2 的"监听维护的可能脏路径集"住在这里。`checkpoint` 与 `restore` 可以不带它，这时冷扫：session 的 `BeforeRollout`、`BeforeRemove` 就这样调用（session.md §5.5 第 5 步、§5.6 第 9 步）。
+- 多一个 `Tracker` 参数：属性缓存与脏集合要在调用之间保留，design §6.2 的"监听维护的可能脏路径集"住在这里。`checkpoint` 与 `restore` 可以不带它，这时冷扫：session 的 `BeforeRollout`、`BeforeRemove` 只在 daemon 还没有这个工作区的 `Tracker` 时这样调用，平时带着 daemon 交来的那一个（module-rulings「Session's Before* checkpoints use the daemon's Tracker」）。
 - 全部包上 `Result`，因为它们都读文件系统或 Store。
 - `checkpoint` 返回 `Checkpointed`：调用方要知道这次有没有写（UpToDate）、哪些路径变了、有哪些告警 [我的决定]。session 取 `.checkpoint.id`。
 - `restore` 的目标是 `CheckpointId`（经 `RestoreRequest`）而不是 `&Checkpoint` [我的决定]：overlay 在同一次串行操作里自己读它，store 的 `NoSuchCheckpoint` 原样透传（3c `captured_namespace_custody.rs` 一行），也由 overlay 核对它属于这个工作区。
-- `rebase` 多了 `store`（读会话一侧的 blob、存合并结果）与 `RebaseOptions`（`.lww`、ignorecase、是否做内容合并）。session.md §5.6 第 11 步按三个参数写的调用要补上这两个，用 `RebaseOptions::for_move`，见报告。
+- `rebase` 多了 `store`（读会话一侧的 blob、存合并结果）与 `RebaseOptions`（`.lww`、ignorecase、是否做内容合并）。session.md（853fdf8）§5.7 第 13 步已按它调用，用 `RebaseOptions::for_move`。
 - 测试接缝 `read_candidate` 与 `ReadProbe`（Addendum 4 的测试接缝规则）：§5.2 的写竞态规则在 Task 3 实现，那里就要有一个先失败的测试 [我的决定]。
 - `lww_matches` 的 `patterns` 是解析好的 `LwwRules`；`build_manifest`、`project`（都来自 Addendum 3）、`Overlay` 的辅助方法、`Tracker`、`Inbox`、`LwwRules` 是计划之外新增的，各有调用方（§2 的表）。
 
 各函数的语义与可能返回的 `Code`：
 
 - **`build_manifest`**：见 §5.9。码：`NoSuchPath`（dir 不存在）、`NotText`（目录项不是 UTF-8）、`Unsupported`（dir 里有 FIFO、socket、设备文件：导出的树里不应该有）、`TooLarge`（`too_deep`）与 `Busy`（`root_changed`，Addendum 8 给 apfs 定的映射）、`Unknown`（读失败）。
-- **`project`**：见 §5.12。`overlay.validate()` 不过，或 dst 不在 `<store.root()>/sessions/` 之下 → `InvalidInput`；dst 不在 → `NoSuchPath`；要删或要替换的路径在 dst 里不在、或者类型不对 → `Corrupt`（dst 不是基线的完整克隆；基线文件缺了是 `Corrupt`，从不当作新文件，Addendum 4）；上级某一级是符号链接 → `NotDirectory`（apfs 透传，dst 之外什么都没写）；store 的 `get_blob`、`read_blob` 与 apfs 的其它码原样透传。失败时 dst 停在半途：它是调用方的内部 staging，由调用方按 Addendum 3、4、7 的错误时机处理。
+- **`project`**：见 §5.12。`overlay.validate()` 不过，或 dst 不在 `<store.root()>/sessions/` 之下 → `InvalidInput`；dst 不在 → `NoSuchPath`；要删或要替换的路径在 dst 里不在、或者类型不对 → `Corrupt`（dst 不是基线的完整克隆；基线文件缺了是 `Corrupt`，从不当作新文件，Addendum 4）；上级某一级是符号链接 → `NotDirectory`（apfs 透传，dst 之外什么都没写）；store 的 `get_blob_rooted`、`read_blob` 与 apfs 的其它码原样透传。失败时 dst 停在半途：它是调用方的内部 staging，由调用方按 Addendum 3、4、7 的错误时机处理。
 - **`compute`**：见 §5.5。`base.gen.repo != *ws.repo` → `InvalidInput`。工作区目录不在 → `NoSuchPath`；没有 `.git`、index 读不了 → gitio 的码原样透传（`NoSuchPath`、`InvalidInput`、`NotText`、`Unsupported`、`Unknown`，index 不存在是 `Unknown` 的 `no-index`）；目录项不是 UTF-8 → `NotText`；名字超出 macOS 的长度限制 → `InvalidInput`；遍历太深 → `TooLarge`、工作区根在遍历中被换掉 → `Busy`（apfs 的 `too_deep`、`root_changed`，Addendum 8）；`is_ignored` 读不了规则文件、读文件失败 → 按 types.md §6.3 归类（多半是 `Unknown`）。失败时 tracker 的状态不变，脏集合不丢（§6.1）。
-- **`reconcile_full`**：同 `compute`，只是不带 Tracker、从不读缓存。session 用它对一棵不在原位的旧树核对（session.md §5.6 第 19 步），所以 `ws.root` 可以是任何以 gitfile 接到本仓库影子仓库的目录。
+- **`reconcile_full`**：同 `compute`，只是不带 Tracker、从不读缓存。session 用它对一棵不在原位的旧树核对（session.md §5.7 第 19 步），所以 `ws.root` 可以是任何以 gitfile 接到本仓库影子仓库的目录。
 - **`checkpoint`**：见 §5.6。在 `compute` 的码之外：会话不存在或已 `Removed` → `NoSuchSession`；会话里没有这个 repo → `NoSuchRepo`；`base.gen` 不是该工作区在 Store 里记的当前基线 → `InvalidInput`（`detail.reason = "stale_base"`），什么都不写（3f `wrong_root_and_reader_swap_are_rejected` 一行）；`ws.root` 与 Store 里记的工作区路径不是同一个目录 → `InvalidInput`（`detail.reason = "wrong_root"`）；工作区 `tracked = false` → `InvalidInput`（store 也拦）；Store 的 `Busy`、`ReadOnly`、`Corrupt`、`TooLarge`、`Unknown` 原样透传，`put_blob_rooted` 的 `CrossVolume`、`Unsupported`、`InvalidInput` 也一样（它返回的 `NoSuchPath`、`IsDirectory`、`NotFile`、`NotDirectory` 不是失败：扫描之后路径变了，按写竞态重判，§5.6 第 5 步）。checkpoint 的对外写入只有最后记下的那一行，记行是一个事务：之前的失败什么都没写，不写工作区，所以它的任何失败都不留下现场；`Before*` 的行不算对外写入（Addendum 5）。
-- **`restore`**：见 §5.7。第一次对外写入是第 10 步的 `mkdir T` 与 `plan.json`；`BeforeRestore` 是安全 checkpoint，不算（Addendum 5）。之前只有具名拒绝：`Exists`（T 的位置上是符号链接或文件，`reason = "restore_temp_taken"`）；`Unknown`（T 是证明不了的现场，`detail.reason = "restore_scene"`；或会话的 `lifecycle`、工作区的 `health` 为 `Unknown`，§6.3）；`NoSuchCheckpoint`（store 透传，不包装、不再读别的东西）；`InvalidInput`（目标是别的 repo 的、`ws.root` 不是这个会话的工作区、目标格式坏了、目标与当前基线不同却没给 `target_base`、`target_base` 与目标的基线不符、目标里有落在排除目录下的条目）；`NoSuchPath`（`paths` 里的路径在目标 checkpoint、两边的基线和当前 overlay 里都没有：types.md §6.2 写的是"目标 checkpoint 和基线"，多认当前 overlay 是为了能用路径限定的 restore 撤销 checkpoint 之后新建的文件 [我的决定]；按字节比较，只差大小写时 `detail.on_disk` 给出磁盘上的拼写）；`Exists`（要写的位置上有没被记下的内容，§5.7 第 8 步）；`ReadOnly`（要动的文件或目录带不可变标志）；`OpenFiles`（要动的文件有可写的 mmap，gen count 不可得）；`Corrupt`（基线文件不在或大小与清单不符；`verify` 时 blob 或基线文件的内容与地址不符）；`Busy`（`workspace_changed`：扫描之后工作区又被改了，重试即可）；记 `BeforeRestore` 时 `checkpoint` 的全部码（那时已记下的 `BeforeRestore` 留着）。第一次对外写入之后的任何失败：`Unknown`，现场保留（§6.3）。
+- **`restore`**：见 §5.7。第一次对外写入是第 10 步的 `mkdir T` 与 `plan.json`；`BeforeRestore` 是安全 checkpoint，不算（Addendum 5）。之前只有具名拒绝：`Exists`（T 的位置上是符号链接或文件，`reason = "restore_temp_taken"`）；`Unknown`（T 是证明不了的现场，`detail.reason = "restore_scene"`；或会话的 `lifecycle`、工作区的 `health` 为 `Unknown`，§6.3）；`NoSuchCheckpoint`（store 透传，不包装、不再读别的东西）；`InvalidInput`（目标是别的 repo 的、`ws.root` 不是这个会话的工作区、目标格式坏了、目标与当前基线不同却没给 `target_base`、`target_base` 与目标的基线不符、目标里有落在排除目录下的条目）；`NoSuchPath`（`paths` 里的路径在目标 checkpoint、两边的基线和当前 overlay 里都没有：types.md §6.2 写的是"目标 checkpoint 和基线"，多认当前 overlay 是为了能用路径限定的 restore 撤销 checkpoint 之后新建的文件 [我的决定]；按字节比较，只差大小写时 `detail.on_disk` 给出磁盘上的拼写）；`Exists`（要写的位置或它的某一级上级上有没被记下的东西，§5.7 第 8 步）；`ReadOnly`（要动的文件或目录带不可变标志）；`OpenFiles`（要动的文件有可写的 mmap，gen count 不可得）；`Corrupt`（基线文件不在或大小与清单不符；`verify` 时 blob 或基线文件的内容与地址不符）；`Busy`（`workspace_changed`：扫描之后工作区又被改了，或者第 10 步建 T 时它的位置上已有别的东西，重试即可）；记 `BeforeRestore` 时 `checkpoint` 的全部码（那时已记下的 `BeforeRestore` 留着）。第一次对外写入之后的任何失败：`Unknown`，现场保留（§6.3）。
 - **`rebase`**：见 §5.8。前提：`overlay` 的 blob 都还在 store 里（来自 checkpoint 的已登记；刚 put 的受 store 的 1 小时窗口保护；get、read、verify 按文件工作，Addendum 4）。`overlay.base != old.gen`，或 `old.gen.repo != new.gen.repo` → `InvalidInput`；overlay 不满足 V1–V5 → `InvalidInput`；基线文件不在，或读到的内容与清单不符 → `Corrupt`；会话一侧的 blob 读不出来 → store 透传（`Corrupt`、`TooLarge`、`Unknown`）；合并结果存不进去 → store 透传。单个路径的"太大""二进制""类型不同"，以及目录与文件的前缀冲突（§5.8 第 4a 步），都不是错误，是冲突（记在 `conflicts` 里）。按 blob 不变量存进 store 的基线文件（§5.8 第 5a 步），id 与清单不符 → `Corrupt`。`merge = false` 时不写任何 blob。
 - **`lww_matches`**、**`LwwRules::parse`**：纯函数，不失败。
 - **`Overlay::validate`**：`InvalidInput`，`detail.rule` 指明违反了 §4.3 的哪一条。
@@ -423,9 +427,9 @@ pub fn read_candidate(root: &Path, path: &RepoPath) -> Result<ReadProbe>;
 | `raw` | `RepoPath` → `Absent`，或 `Present {blob, mode, staged}` | 原始差异：与基线不同的每个路径的现状。`Absent` 是基线里有、磁盘上没有；`staged` 是路径在 index 里。条目由它经 §5.1、§5.3 算出，是它的纯函数 |
 | `last`、`base` | 上一次扫描的 `Overlay` 与它所对的 `BaseGen` | `Scan.changed`；换了基线就全扫 |
 | `index` | 上一次 `read_index` 得到的 `tracked` 集合 | index 变了（`git add`、`git rm --cached`），就重判受影响的路径（§5.4） |
-| `inbox` | `Inbox`：路径集合、子树集合、全扫标志、上限 | 脏集合（§5.4） |
-| `fold` | M ∪ `I.tracked` 的折叠键：键 → 确切路径，外加键的有序集合 | §5.1 的候选资格与受限目录；M 的部分每个基线算一次 |
-| `x` | 上一次扫描用的排除集合 X | 仓库配置重新加载、X 变了就全扫（§5.5） |
+| `inbox` | `Inbox`：路径集合、子树集合、全扫标志、上限，以及 `note` 过滤用的当前 X 与 ignorecase、`hint` 解析符号链接用的 `ws.root` | 脏集合（§5.4） |
+| `fold` | M ∪ `I.tracked` 的折叠键：键 → 确切路径，外加键的有序集合，以及算它们用的 ignorecase | §5.1 的候选资格与受限目录；M 的部分每个基线算一次 |
+| `x` | 上一次扫描用的排除集合 X | 仓库配置重新加载、X 变了就全扫，先把新的 X 交给 inbox（§5.5） |
 | `unstable` | 上一次扫描标为 `Unstable` 的路径 | 下一次扫描必重扫 |
 | `warnings` | 当前的 `OverlayWarning` | status |
 | `watcher` | `Option<strata_apfs::Watcher>` | 丢弃即停止监听 |
@@ -443,9 +447,9 @@ overlay 不建库。它写的东西都经别的模块，或者只在 restore 与
 | blob | store 的 `blobs/` | `put_blob_rooted`（checkpoint）、`put_bytes`（rebase 的合并结果）、`put_blob`（rebase 按 blob 不变量存的基线文件） | 按内容寻址，不可变；没有被 checkpoint 引用的，由 store 的 gc 在 1 小时之后收走 |
 | checkpoint 行与条目 | `store.db` | `record_checkpoint` | 只追加；一行对一个 repo；entries 是完整快照，不是增量（types.md §4） |
 | 基线清单 | 不由 overlay 写 | `build_manifest` 只算；session 在 repo 写锁里调 `Store::record_base_gen`，与基线 generation 一起登记（Addendum 3） | 按导出后的字节算（§5.9）；`Base.manifest` 取 store 里登记的那一份 |
-| 工作区文件 | `<会话根>/<repo>/` | 只有 restore 写，经 apfs 的 rooted 操作、以会话根为根 | 写之前先记 `BeforeRestore`（安全 checkpoint） |
-| 投影的目标树 | 调用方给的 dst（session 的 staging，必须在 `<store.root()>/sessions/` 之下） | 只有 `project` 写，经 apfs 的 rooted 操作、以 dst 为根 | 调用方的内部 staging；同步、交换与失败后的收拾都归调用方（§5.12） |
-| restore 暂存目录 T | `<会话根>/.strata-tmp-restore-<repo>/` | 只有 restore 写 | 与工作区同卷、在工作区之外，监听看不到，也不会被当成 `Untracked`。restore 进行中时里面一直有 `plan.json`（§5.7 第 10 步）。overlay 只在 T 为空时删掉它（`remove_rooted`，`RemoveKind::EmptyDir`），T 里的文件只在字节已被证明在 `BeforeRestore`、blob 存储或基线目录里时才 unlink [我的决定]。非空就是现场（Addendum 7）：status 读 `plan.json` 报出，session 的 `rm` 返回 `Dirty`（除非 `--discard`），了结的办法见 §5.7。它属于 session 的布局（Addendum 5），从来不是工作区路径，`Sessions::resolve(cwd)` 在这里照样落空 |
+| 工作区文件 | `<会话根>/<repo>/` | 只有 restore 写，经 apfs 的 rooted 操作与 store 的 `get_blob_rooted`、以会话根为根 | 写之前先记 `BeforeRestore`（安全 checkpoint） |
+| 投影的目标树 | 调用方给的 dst（session 的 staging，必须在 `<store.root()>/sessions/` 之下） | 只有 `project` 写，经 apfs 的 rooted 操作与 store 的 `get_blob_rooted`、以 dst 为根 | 调用方的内部 staging；同步、交换与失败后的收拾都归调用方（§5.12） |
+| restore 暂存目录 T | `<会话根>/.strata-tmp-restore-<repo>/` | 只有 restore 写 | 与工作区同卷、在工作区之外，监听看不到，也不会被当成 `Untracked`。restore 进行中时里面一直有 `plan.json`（§5.7 第 10 步）。T 是平的：restore 只往里放 `plan.json`、临时文件与挪开的文件（普通文件或符号链接），从不放目录。T 里的一个文件只在删除之前刚被证明是一个留着的 checkpoint 所指内容的副本时，才逐个 `remove_rooted(…, RemoveKind::File)`（module-rulings「Proven copies」，§5.7 的"证明"）；`plan.json` 最后删；overlay 只在 T 为空时删掉它（`remove_rooted`，`RemoveKind::EmptyDir`）。非空就是现场（Addendum 7）：status 读 `plan.json` 报出，session 的 `rm` 返回 `Dirty`（除非 `--discard`），了结的办法见 §5.7。它属于 session 的布局（Addendum 5），从来不是工作区路径，`Sessions::resolve(cwd)` 在这里照样落空 |
 
 ### 4.3 `Overlay` 的形状规则
 
@@ -464,12 +468,12 @@ overlay 不建库。它写的东西都经别的模块，或者只在 restore 与
 | 编号 | 不变量 | design §9 |
 | --- | --- | --- |
 | O1 | restore 是 overlay 唯一写工作区的操作（`project` 只写调用方的 staging 树），它在第一次写工作区之前记下 `BeforeRestore`。恢复 `Restored.before`，就回到 restore 之前的状态，包括目标里没有的新文件 | 不变量 1 |
-| O2 | overlay 只写四处：Store（经 store）、`ws.root` 之下、本 repo 的 restore 暂存目录、`project` 的 dst。checkpoint 与 restore 先核对 `ws.root` 与 Store 里记的工作区是同一个目录（dev + inode）；`project` 先核对 dst 在 `<store.root()>/sessions/` 之下；写都经 apfs 的 rooted 操作，所以写不到主 checkout，也穿不过工作区里的符号链接 | 不变量 2 |
+| O2 | overlay 只写四处：Store（经 store）、`ws.root` 之下、本 repo 的 restore 暂存目录、`project` 的 dst。checkpoint 与 restore 先核对 `ws.root` 与 Store 里记的工作区是同一个目录（dev + inode）；`project` 先核对 dst 在 `<store.root()>/sessions/` 之下；写都经 apfs 的 rooted 操作或 store 的 `get_blob_rooted`，所以写不到主 checkout，也穿不过工作区、会话根与 dst 里的符号链接 | 不变量 2 |
 | O3 | 基线目录只读：只以只读方式打开，或作为 `clone_file_rooted`、`put_blob` 的源 | 不变量 5 |
 | O4 | 记下的 checkpoint 永不改变；restore 与 rebase 只产生新的 checkpoint 或新的 overlay | 不变量 5 |
 | O5 | 依赖目录、种子缓存、种子文件、`.git` 不进 overlay，restore 从不写它们 | 不变量 4 |
-| O6 | restore 第一次对外写入（`mkdir T` 与 `plan.json`）之后的任何失败都是 `Unknown`：现场保留，不回滚、不重放、不清理。restore 替换或删除的文件先挪进暂存目录，字节被证明在 `BeforeRestore` 里才删，所以 restore 期间别的进程写下的内容不会丢 | 不变量 6 |
-| O7 | 正确性不依赖监听：全扫与冷扫的结果总等于同一磁盘状态上的 `reconcile_full`；增量 `compute` 只要扫描开始之前完成的写入的事件都已进 inbox 或已 hint，也等于它，事件丢失、溢出都落成全扫。事件还在路上的写入，落进它送达之后的第一次扫描，最迟落进下一次全扫（每小时；`Manual`、`Before*` 与没有路径清单的工具调用之后）。不被监听的全局排除文件改了，增量结果可能与冷扫不同，直到下一次全扫；仓库配置的排除集合变了，下一次扫描就全扫 | design §6.2（"正确性不依赖监听"） |
+| O6 | restore 第一次对外写入（`mkdir T` 与 `plan.json`）之后的任何失败都是 `Unknown`：现场保留，不回滚、不重放、不清理。restore 替换或删除的文件先挪进暂存目录，被证明是 `BeforeRestore` 所指内容的副本才删（module-rulings「Proven copies」），所以 restore 期间别的进程写下的内容不会丢 | 不变量 6 |
+| O7 | 正确性不依赖监听：全扫与冷扫的结果总等于同一磁盘状态上的 `reconcile_full`；增量 `compute` 只要扫描开始之前完成的写入的事件都已进 inbox 或已 hint，也等于它，事件丢失、溢出都落成全扫。事件还在路上的写入，落进它送达之后的第一次扫描，最迟落进下一次全扫（每小时；`Manual`、`Before*` 与没有路径清单的工具调用之后）。不被监听的全局排除文件改了，增量结果可能与冷扫不同，直到下一次全扫；仓库配置的排除集合变了，下一次扫描就全扫，inbox 也从这时起按新的 X 过滤事件（§5.4） | design §6.2（"正确性不依赖监听"） |
 | O8 | 成员资格只看路径与 git 的规则：大小、二进制、扩展名都不影响一个文件进不进 overlay。只有基线里有、磁盘上没有、且不在排除集合之下的路径才是墓碑（3f:463） | 不变量 1 的前提（design §2 反目标：不丢未发布改动） |
 | O9 | 必须一起走的一组路径（改名的两半、类型互换的整组）由 `Overlay::paired` 给出，publish 用它保证批次完整 | 不变量 3 |
 
@@ -492,7 +496,8 @@ M 里落在 X 之下的条目不参加比较，既不比较内容，也不成为
 | 用处 | 比较 | 理由 |
 | --- | --- | --- |
 | 候选资格：磁盘上的 p 是不是 M ∪ `I.tracked` 里的路径 | 折叠：p 的键在 M ∪ `I.tracked` 的键集合里 | APFS 上只差大小写的两个名字是同一个文件；被跟踪的文件不能因为磁盘拼写换了大小写就被 ignore 规则藏起来 |
-| 进不进被 ignore 的目录 d：M ∪ `I.tracked` 里有没有 d 之下的路径 | 折叠：d 的键加 `/` 是不是某个键的前缀（键的有序集合上做范围查找）；从不用 gitio 的 `tracked_under`，它只折叠 ASCII | 否则一个只改了非 ASCII 大小写、又被 ignore 规则命中的已跟踪目录会被剪掉，它的基线文件全成墓碑，发布出假的删除 |
+| 进不进被 ignore 的目录 d：M ∪ `I.tracked` 里有没有 d 之下的路径 | 折叠：d 的键加 `/` 是不是某个键的前缀（键的有序集合上做范围查找；路径的键等于各段的键用 `/` 连起来，即 apfs 要声明的 `case_fold_key` 前缀性质，§2）；从不用 gitio 的 `tracked_under`，它只折叠 ASCII | 否则一个只改了非 ASCII 大小写、又被 ignore 规则命中的已跟踪目录会被剪掉，它的基线文件全成墓碑，发布出假的删除 |
+| 落不落在 X 之下（遍历、`Inbox::note`、拼写解析、V5、restore 第 3 步） | 折叠：路径的键等于某个 X 项的键，或以它加 `/` 开头（同上一行的前缀性质）[我的决定] | 大小写不敏感的卷上 `.ENV` 占的就是种子文件 `.env` 的位置，按字节比较，`.gitignore` 不再 ignore 它之后它会以 `Untracked` 进 overlay；apfs 按 `exclude` 过滤事件也是这样比较的（apfs.md §5.7 第 4 步：大小写不敏感的卷用 `case_fold_eq`），§5.4 把过滤挪进 `Inbox::note` 因此与原来等价 |
 | M[p] 取值、`Absent`、配对里"n 不在 M 里" | 字节（`RepoPath` 相等） | 原始差异以磁盘上的确切拼写为键：只改大小写的改名就是旧拼写 `Absent` 加新拼写 `Present`，由 §5.3 第 1 步配成 `Renamed` |
 | `staged`：`Present` 的新路径是 `Added` 还是 `Untracked` | gitio 的 `IndexInfo::is_tracked`，只折叠 ASCII，就是 git 自己的回答 [我的决定] | `Added` 与 `Untracked` 的分界照搬 git，不另立规则 |
 | 只改大小写的改名（§5.3 第 1 步） | 折叠：两个键相等 | Review Focus 4 |
@@ -531,7 +536,7 @@ M ∪ `I.tracked` 的键集合在 `Tracker` 里：M 的部分每个基线算一�
 3. 否则读内容：普通文件用 `apfs::open_rooted_file(ws.root, p)` 逐级 `O_NOFOLLOW`、只读打开，流式算 BLAKE3，16 MiB 及以上走 mmap 加多线程（同 store）；符号链接的目标原字节就在 `A1.kind`（`FileKind::Symlink { target }`）里。稀疏文件与大文件一样整份读，空洞读成零，代价与逻辑大小成正比（裁定 T7）。3c 的 `new_hole_above_four_gib_uses_bounded_original_run_work` 一行留给模块文档补定的就是这一条。大文件阈值不影响成员资格（3f:463）。
 4. A2 = `attrs_of(ws.root, p)`。`A2.unchanged_since(&A1)` → 写缓存。
 5. 写竞态（裁定 T7）：A1 与 A2 的 kind、inode、size、mode、gen count 有一项不同 → 从第 1 步重来一次；仍然不等 → 用这一次的 blob，路径标 `Unstable`（告警、记进 `unstable`、不写缓存），下一次扫描重扫它。读的时候文件在被写，这一份可能是撕裂的，所以它只出现在 `compute` 的结果里；checkpoint 存下的，总是 `put_blob_rooted` 克隆出的某一刻的完整内容（§5.6 第 5 步）。
-6. gen count 不可得（`gen_count == 0`：有可写的 mmap，apfs 报告为未知，Addendum 1）：照第 3 步读一次，不重来，标 `Unstable`，不写缓存。checkpoint 不强制写回，只保证包含已经写回的内容：`msync` 或 `munmap` 之后的下一次扫描必含（3d:203、3d:268）。
+6. gen count 不可得（`Attrs::gen_count_known()` 为假：有可写的 mmap，apfs 报告为未知，Addendum 1）：照第 3 步读一次，不重来，标 `Unstable`，不写缓存。checkpoint 不强制写回，只保证包含已经写回的内容：`msync` 或 `munmap` 之后的下一次扫描必含（3d:203、3d:268）。
 
 ### 5.3 改名、类型互换与成组
 
@@ -562,16 +567,20 @@ publish 选中一个路径时必须带上整组（裁定 T7；增补裁定：批
 
 `Inbox::note(event)` 只做常数时间的记账，不碰磁盘：
 
-- `WatchEvent::Changed(paths)`：每个绝对路径去掉 `ws.root` 前缀；不在根之下，或落在 X 之下 → 丢弃；转 `String` 或规整成 NFC 失败 → 要求全扫；否则记进路径集合。路径的最后一段是 `.gitignore` → 要求全扫：ignore 规则变了，整棵树的成员资格都可能变 [我的决定]。
-- `WatchEvent::MustRescan(dir)` → 记进子树集合（design §6.2：对该子树重扫）。
+- `WatchEvent::Changed(paths)`：每个绝对路径去掉 `ws.root` 前缀；不在根之下，或落在 inbox 当前的 X 之下 → 丢弃；转 `String` 或规整成 NFC 失败 → 要求全扫；否则记进路径集合。路径的最后一段是 `.gitignore` → 要求全扫：ignore 规则变了，整棵树的成员资格都可能变 [我的决定]。
+- `WatchEvent::MustRescan(dir)`：落在 X 之下 → 丢弃；否则记进子树集合（design §6.2：对该子树重扫）。
 - `WatchEvent::Dropped` → 要求全扫。
 - 两个集合的大小之和超过上限（缺省 `DEFAULT_DIRTY_CAPACITY`）→ 清空两个集合，要求全扫。
 
 集合按规范化之后的 `RepoPath` 去重，同一路径改多少次都只是一项（3c:42、3f:524）。
 
+**X 在 inbox 里过滤** [我的决定]：监听只排除 `.git`（`WatchOptions.exclude`），依赖目录、种子缓存与种子文件由 `note` 按 inbox 当前的 X 丢弃。apfs 本来就在自己的回调里按 `exclude` 过滤（apfs.md §5.7 第 4 步），`note` 用同样的比较（§5.1 的表：折叠），挪过来代价相同，X 却总是最新的：仓库配置重新加载、X 缩小之后，重新纳入的目录里的写入从下一个事件起就进脏集合，不用重新 watch，也没有新旧两个流交接的空档。X 或 ignorecase 变了的那次扫描先把新的 X 连同 ignorecase 交给 inbox，再取快照（§5.5 第 2 步）；在这之前按旧的 X 丢掉的事件，由这次全扫补上。往 X 里的目录洪泛写入（`bun install`、`cargo build`）照样会让流报 `Dropped`（apfs.md §5.7 给消费者的契约 (e)），由此而来的全扫同样不进 X（§5.1 的遍历规则）。
+
+**hint**：`Inbox::hint(paths)` 在 daemon 的线程上调用，可以读属性。每个 p 记进路径集合，然后从根起逐级看 p 的前缀（`apfs::attrs_of(ws.root, 前缀)`）。某一级 s 是符号链接时，Edit、Write 经它写到的是它指向的地方（比如 `CLAUDE.md` → `AGENTS.md`）：目标是相对路径，就把它接在 s 的上级之后、再接上 p 在 s 之后的部分，按字面规整 `.` 与 `..`；结果落在根之内、成得了 `RepoPath`，逐级看下去也不再经过符号链接，就把它也记进路径集合。目标是绝对路径、规整时越过了根、又经过一个符号链接、或者读属性失败 → 要求全扫 [我的决定：只解一跳，其余交给全扫]。某一级已不存在（工具写完又删了）→ 只记 p。
+
 **快照**：每次扫描开始时，在 inbox 的锁里把三样东西整体换出来，留下空的集合继续收事件。扫描期间到达的事件进下一轮（3f:502）。扫描失败时，把快照并回 inbox（3c:43）。
 
-**拼写**（3f:522、3f:523）：FSEvents 报出的拼写可能与磁盘上的不同，例如 `DIR/x` 对 `dir/x`，NFD 对 NFC。扫描时对每个脏路径 p：
+**拼写**（3f:522、3f:523）：FSEvents 报出的拼写可能与磁盘上的不同，例如 `DIR/x` 对 `dir/x`，NFD 对 NFC。扫描时对每个脏路径 p（落在这次扫描的 X 之下的直接丢掉：它进 inbox 之后 X 可能变了）：
 
 1. 从根往下逐级 `list_dir`，找每一级在磁盘上的确切拼写：字节相等，或者在 ignorecase 下 `case_fold_key` 相等（这一级目录的名字按键分组）。同一轮扫描里每个目录只列一次。本文别处说的"拼写解析"就是这三步。某一级找不到 → p 已不存在，按第 3 步处理它在缓存、M、原始差异里的名字。某一级有两个名字都与它折叠相等（ignorecase 的 APFS 上不会发生）→ 要求全扫。
 2. p 在磁盘上是文件或符号链接 → 重列 p 的上级目录。其中与 p 的名字折叠相等的每个名字，以及缓存、M、原始差异里在这个目录下、与它折叠相等的每个名字，都按磁盘上的确切拼写重新判定：在磁盘上就走 §5.2；不在，就在原始差异里改成 `Absent`（在 M 里）或删掉（不在 M 里）。只改大小写的改名因此一次就看到新旧两个名字。
@@ -584,16 +593,18 @@ publish 选中一个路径时必须带上整组（裁定 T7；增补裁定：批
 `compute(ws, base, tracker, dirty)`：
 
 1. `base.gen.repo != *ws.repo` → `InvalidInput`。`tracker.base() != Some(&base.gen)`，或者由 `ws.config` 算出的 X 与 `Tracker` 记下的不同（仓库配置重新加载过）→ 本次全扫。
-2. `info = ws.git.read_index(ws.root)`，码原样透传。
+2. `info = ws.git.read_index(ws.root)`，码原样透传。`info.ignorecase` 与上一次扫描的不同 → 本次全扫，折叠键全部重算（§5.1）。X 或 ignorecase 与 inbox 手里的不同 → 先把新的 X 连同 ignorecase 交给 inbox（§5.4），再取快照。
 3. 取 inbox 快照（§5.4），并上 `dirty` 与 `tracker.unstable`。`dirty` 为 `None`、快照要求全扫、或 `tracker.needs_full()` → 全扫。
 4. 全扫：按 §5.1 遍历整棵树，每个候选走 §5.2（缓存可以作保），重建原始差异。增量：从 `tracker.raw` 出发，只按 §5.4 重判脏路径、脏子树与 index 有变动的路径。
 5. 按 §5.1、§5.3 由原始差异算出 `Overlay { base: base.gen, entries }`。
 6. 提交到 tracker：原始差异、缓存、`last`、`base`、`index`、告警、`unstable`；`needs_full` 清零。`Scan.changed` 是新旧 `last` 的条目差。
 7. 第 2 到 5 步的任何失败（含 §5.1 的错误格子与 `walk` 的 `Err` 项）：tracker 不变，快照并回 inbox，错误原样返回（§6.1）。
 
-`reconcile_full(ws, base)` 就是用一个临时的新 `Tracker`（缓存为空、要求全扫）跑 `compute`：读遍每个候选文件的内容，不信监听、mtime、size，也不信 `git status`，结果就是真相（tgrep 的 `reconcile_full()`："Always read/verify content"）。它不碰 daemon 的 `Tracker`，也不写 Store。session 用它做 `remove` 的未发布改动检查，以及 `move_workspace` 之后对旧树的核对（session.md §5.5、§5.6 第 19 步）；测试用它作参照。
+`reconcile_full(ws, base)` 就是用一个临时的新 `Tracker`（缓存为空、要求全扫）跑 `compute`：读遍每个候选文件的内容，不信监听、mtime、size，也不信 `git status`，结果就是真相（tgrep 的 `reconcile_full()`："Always read/verify content"）。它不碰 daemon 的 `Tracker`，也不写 Store。session 用它做 `remove` 的未发布改动检查，以及 `move_workspace` 之后对旧树的核对（session.md §5.6、§5.7 第 19 步）；测试用它作参照。
 
-design §8 的"全量对账"是带着 daemon 的热 `Tracker` 跑 `compute(…, None)`：一次 `getattrlistbulk` 遍历源码树，缓存作保的文件不读内容，"我们不读内容"说的就是它。它每小时跑一次（间隔见 §9），没有路径清单的工具调用之后也跑（§5.6）；监听整段失效时，daemon 退化为只做这种全扫（design §6.2）。`Manual` 与 `Before*`（含发布前的 `BeforePublish`）按 Addendum 8 用冷的全扫：同样的遍历，但缓存不作保，每个候选都读内容（`stats.cold = true`），结果照常提交到 tracker；tool 的已跟踪源码是 42.3 MB，冷扫仍在 design §8 的 3 s 之内。
+design §8 的"全量对账"是带着 daemon 的热 `Tracker` 跑 `compute(…, None)`：一次 `getattrlistbulk` 遍历源码树，缓存作保的文件不读内容，"我们不读内容"说的就是它。它在每次发布前（`BeforePublish`）、其它 `Before*` 与 `Manual` checkpoint、没有路径清单的工具调用之后跑（§5.6），并且每小时一次（间隔见 §9）。监听整段失效时，daemon 退化为只做这种全扫（design §6.2）。
+
+全扫不依赖事件：它重读每个候选的属性，一个文件只在这次遍历读到的属性对缓存满足 `Attrs::unchanged_since` 时由缓存作保（gen count 不可得从不作保，apfs.md A6），从不因为"没有收到它的事件"而作保。Addendum 8 要 `Manual` 与 `Before*` 做的 full (cold) scan 就是它：module-rulings「Cold scan」定下，cold 指不依赖事件，不是重读每个文件。本文的"冷扫"另指缓存为空的扫描：`reconcile_full`，以及 `Tracker` 新建或 `reset` 之后的第一次扫描，每个候选都读内容（`stats.cold = true`）。
 
 `compute` 与 `reconcile_full` 的结果相等，靠的是 §4.1 的 gen count 性质：缓存只在 `Attrs::unchanged_since` 成立时作保（kind、inode、size、mode 相同，gen count 可得且相等），这几项都没变，就说明内容没被写过。
 
@@ -602,11 +613,11 @@ design §8 的"全量对账"是带着 daemon 的热 `Tracker` 跑 `compute(…, 
 调用方保证同一会话的 checkpoint 串行，后到的排队、不取消（§5.11）。
 
 1. **核对**（只读 Store）：`store.session(ws.session)` 为 `None` 或已 `Removed` → `NoSuchSession`；会话里没有 `ws.repo` → `NoSuchRepo`；记下的工作区 `tracked = false` → `InvalidInput`；它的 `base != base.gen` → `InvalidInput`（`stale_base`，3f:620：基线已被 `move_workspace` 换掉，再对旧基线存 checkpoint，会写出新旧混合的状态）；`ws.root` 与它的 `path` 的 dev + inode 不同 → `InvalidInput`（`wrong_root`）。同一个目录的不同写法（带 `.`、大小写不同）都认作同一个。
-2. **扫描**：没有 tracker → `reconcile_full`（session 的 `BeforeRollout`、`BeforeRemove`）。有 tracker 时按原因选（Addendum 8 的"Event flush, amended"）：
-   - `Manual` 与四种 `Before*` → 冷的全扫（Addendum 8：正确性优先）：遍历整个工作区的 tracked 与 untracked 集合，不依赖监听，也不让属性缓存作保，每个候选都读内容（`stats.cold = true`）；结果照常提交到 tracker，缓存随之刷新。扫描开始之前完成的写入一定在内。
-   - `ToolCall` → 增量 `compute(ws, base, tracker, Some(&[]))`。在这之前 daemon 把钩子带来的路径交给 `Inbox::hint`（Edit、Write 等工具写过的文件，这类工具写的就只有这些），再调用 `Tracker::flush()`：apfs 的 `Watcher::flush()` 让一部分积压的事件进 inbox，Addendum 8 实测它不是屏障，正确性不靠它。工具没有路径清单（Bash 等）时，daemon 改为先调用 `Inbox::require_full()`，这一次就是热缓存的全扫 [我的决定：Addendum 8 让 overlay 在热的全扫与"晚一个工具调用"之间选，理由见 §9]。
+2. **扫描**：没有 tracker → `reconcile_full`（只在 daemon 还没有这个工作区的 `Tracker` 时，session 的 `BeforeRollout`、`BeforeRemove` 才这样调用）。有 tracker 时按原因选（Addendum 8 的"Event flush, amended"）：
+   - `Manual` 与四种 `Before*` → `compute(ws, base, tracker, None)`：全扫整个工作区的 tracked 与 untracked 集合，不依赖监听，扫描开始之前完成的写入一定在内（`BeforePublish` 的这一次就是发布前的全量对账）。这就是 Addendum 8 要的 full (cold) scan（module-rulings「Cold scan」，§5.5）：作保只看这次遍历读到的属性（`unchanged_since`；apfs.md §4.2 C 实测每次写都改 gen count），所以结果与读遍内容的 `reconcile_full` 相同（O7），只是不重读没变过的文件。
+   - `ToolCall` → 增量 `compute(ws, base, tracker, Some(&[]))`。在这之前 daemon 把钩子带来的路径交给 `Inbox::hint`（Edit、Write 等工具点名写的文件；经符号链接写的，hint 把链接指向的路径也记下，解析不了就要求全扫，§5.4），再调用 `Tracker::flush()`：apfs 的 `Watcher::flush()` 让一部分积压的事件进 inbox，Addendum 8 实测它不是屏障，正确性不靠它。工具没有路径清单（Bash 等）时，daemon 改为先调用 `Inbox::require_full()`，这一次就是与 `Manual` 相同的全扫 [我的决定：Addendum 8 让 overlay 在全扫与"晚一个工具调用"之间选，理由见 §9]。
 
-   于是每个 `ToolCall` checkpoint 都含有工具返回之前完成的全部写入：Edit、Write 写的路径由 hint 带来，Bash 等由全扫看到。工具调用之外的写者（后台进程、上一个 Bash 留下的后台任务）的写入要等它们的事件送达（实测 15 ms 到 3.3 s，apfs.md §5.9），落进其后的第一个 checkpoint，最迟落进下一次全扫；restore 与发布不受影响，它们之前的 `BeforeRestore`、`BeforePublish` 是冷的全扫。代价：热的全扫是一次 `getattrlistbulk` 遍历，tool 的源码树温热时 0.20 s（apfs.md §5.9），没有路径清单的 `ToolCall` 因此在 tool 上达不到 design §8 的"改 50 个文件 < 200 ms"（§5.13，见报告）。
+   于是一个 `ToolCall` checkpoint 含有这个工具返回之前完成的写入：Edit、Write 点名的路径（经符号链接时连同它指向的路径）由 hint 带来，Bash 等没有路径清单的由全扫看到。工具调用之外的写者（后台进程、上一个 Bash 留下的后台任务）的写入要等它们的事件送达（实测 15 ms 到 3.3 s，apfs.md §5.9），落进其后的第一个 checkpoint，最迟落进下一次全扫；restore 与发布不受影响，它们之前的 `BeforeRestore`、`BeforePublish` 是全扫。代价：全扫是一次 `getattrlistbulk` 遍历，tool 的源码树温热时 0.20 s（apfs.md §5.9），没有路径清单的 `ToolCall` 因此在 tool 上达不到 design §8 的"改 50 个文件 < 200 ms"（§5.13）；module-rulings 的 T13 一条把它列为阶段末尾交给用户的一项，钩子等不等这次 checkpoint 由 daemon 定。
 3. `latest = store.latest_checkpoint(ws.session, ws.repo)`。
 4. **没有变化**：`reason` 是 `ToolCall` 或 `Manual`，`latest` 存在，且它的 `base` 与 `entries` 都与这次相同 → 返回 `Checkpointed { checkpoint: latest, recorded: false, .. }`，什么都不写：不 put，也不记行（LayerFS 的 UpToDate；3d:277）。`Before*` 四种原因总是记一行 [我的决定]：调用方需要一个能指认的号（`Restored.before`、session 的 `RemoveReport.checkpoints`）。
 5. **存 blob**：已被 `latest` 引用的 blob 都已登记，跳过。其余每个带 blob 的条目（可以并行）：A1 → `id = store.put_blob_rooted(ws.root, path)`（Addendum 8：从工作区存 blob 从不跟随符号链接）→ A2。`id` 等于条目的 blob 且 `A2.unchanged_since(&A1)` → 通过。否则文件在扫描之后又变了：以这次 put 的结果作为它的内容，按 §5.2 第 5 步的规则重来一次；仍然在变，就保留最后一次的 `id` 并标 `Unstable`。`put_blob_rooted` 返回 `NoSuchPath`、`IsDirectory`、`NotFile` 或 `NotDirectory`（扫描之后路径没了、变成了目录或特殊文件，或者上级换成了符号链接）也是写竞态，不让 checkpoint 失败：前三种按 §5.4 拼写解析的第 2、3 步重判这个路径；`NotDirectory` 时从它的上级往上找第一个已不是目录的路径，把它当作脏子树重判（§5.4 第 3 步），那个符号链接或文件本身与它遮住的基线路径于是在同一个 checkpoint 里一起记下。从工作区存 blob 从不跟随符号链接，会话之外的字节进不了 checkpoint（Addendum 8）。然后更新原始差异、重新分类：条目可能消失，配对可能变化。`put_blob_rooted` 克隆之后只看克隆体，所以记下的永远是某一刻完整的内容，即写入序列的某个前缀，不会撕裂（3d:212）。纯改名的 blob 等于一个基线文件，而基线文件不在 blob 存储里，所以第一次也要 put（是克隆，几乎不占空间）；之后的 checkpoint 因为它已被引用而跳过。
@@ -619,29 +630,30 @@ design §8 的"全量对账"是带着 daemon 的热 `Tracker` 跑 `compute(…, 
 
 ### 5.7 `restore`
 
-调用方占用该会话的队列，不持有该 repo 的写锁（§5.11）。R 指会话根（`ws.root` 的上级目录）；T 指 R 下的 `.strata-tmp-restore-<repo>/`，restore 的私有暂存目录，放在会话根里、与工作区同卷 [我的决定]。restore 的写都以 R 为根，经 apfs 的 rooted 操作（Addendum 8）：工作区里的路径 q 写作 `<repo>/q`，T 里的名字写作 `T/<n>`，都是 R 之下的 `RepoPath`，逐级不跟随符号链接。
+调用方占用该会话的队列，不持有该 repo 的写锁（§5.11）。R 指会话根（`ws.root` 的上级目录）；T 指 R 下的 `.strata-tmp-restore-<repo>/`，restore 的私有暂存目录，放在会话根里、与工作区同卷 [我的决定]。restore 的写都以 R 为根，经 apfs 的 rooted 操作与 store 的 `get_blob_rooted`（Addendum 8 与「Addendum 8: get_blob_rooted」）：工作区里的路径 q 写作 `<repo>/q`，T 里的名字写作 `T/<n>`，都是 R 之下的 `RepoPath`，逐级不跟随符号链接。会话根是 agent 写得到的地方（兄弟布局的 `../`），T 在第 1 步之后也可能被换成符号链接，所以 T 同样只经 rooted 操作写。
 
 **错误时机**（Addendum 3、5、7）：`BeforeRestore` 是对当前、未改动状态的安全 checkpoint，不算对外写入（Addendum 5 refinement 3）。restore 的第一次对外写入是第 10 步的 `mkdir T` 与 `plan.json`（Addendum 7：从这一刻起 T 是 status 看得见的现场）；有能自动了结的旧现场时，从第 10 步清掉它的第一次删除算起。在它之前的失败都是具名拒绝，什么都没写到工作区或 T 里；`BeforeRestore` 若已记下就留着，它是合法的恢复点。在它之后的任何失败都是 `Unknown`，现场保留。
 
-**两个记号**：
+**三个记号**：
 
 - 一份对着当前基线 M 的 overlay X，在路径 q 上的内容 content(X, q)：X 在 q 上有条目 → 条目给出的 (blob, mode)（`Deleted` 即不存在）；q 上没有条目而 `X.hides(q)`（q 是某条 `Renamed` 的 from）→ 不存在；否则 M[q]（不在 M 里即不存在）。
 - "在磁盘上找 q"一律用 §5.4 的拼写解析：逐级列上级目录，先按字节、ignorecase 时再按 `case_fold_key` 找出磁盘上的确切名字。从不拿一次 `lstat` 的成败当作"同名"：APFS 上 `Foo.ts` 与 `foo.ts` 是同一个文件。
+- **证明**一个文件是留着的 checkpoint 所指内容的副本（module-rulings「Proven copies」）：紧挨着它的 `remove_rooted(…, RemoveKind::File)` 之前确认，它的字节等于某个留着的 checkpoint 在某个路径上的内容，即那个 checkpoint 的条目给出的 blob（在 blob 存储里，被这个 checkpoint 引用），或者没有条目时它钉住的基线清单里的 blob（基线随 checkpoint 留着，store.md S10）。确认的办法有两种：重算 BLAKE3；或者 `attrs_of` 对一次已经确认过内容的属性满足 `unchanged_since`（§4.1 的 gen count 性质，与缓存作保同一判法）。证明不了就不删，那个文件留在 T 里。
 
 **阶段 A：检查。** 只读。
 
-1. **T 与现场**：`apfs::attrs_of(R, T)`。不存在 → 继续。是符号链接或不是目录 → `Exists`（`detail.path` 是 T，`reason = "restore_temp_taken"`）。是空目录 → 照用：某次 restore 停在建好 T 与写下 `plan.json` 之间，或停在删掉 `plan.json` 与删掉 T 之间。非空（`list_dir(R, Some(T))` 列出它）→ 现场（Addendum 7），按本节末尾的"现场的了结"判它：能自动了结，就记下 T 里每个文件的属性，留到第 10 步动手；不能 → `Unknown`（`restore_scene`，`detail` 列出没被证明的文件和它们原本的工作区路径）。`store.session(ws.session)` 里会话的 `lifecycle` 为 `Unknown`，或这个工作区的 `WorkspaceRecord.health` 为 `Health::Unknown`（某次操作越过了第一次对外写入，Addendum 4）→ 同样 `Unknown`，`detail` 带 store 里记的现场。
+1. **T 与现场**：`apfs::attrs_of(R, T)`。不存在 → 继续。是符号链接或不是目录 → `Exists`（`detail.path` 是 T，`reason = "restore_temp_taken"`）。是空目录 → 照用：某次 restore 停在建好 T 与写下 `plan.json` 之间，或停在删掉 `plan.json` 与删掉 T 之间。非空（`list_dir(R, Some(T))` 列出它）→ 现场（Addendum 7），按本节末尾的"现场的了结"判它：逐个按 §5.2 的读法（以 R 为根）重算 BLAKE3，记下读时的属性；能自动了结，就把这些属性留到第 10 步动手；不能 → `Unknown`（`restore_scene`，`detail` 列出没被证明的文件和它们原本的工作区路径）。`store.session(ws.session)` 里会话的 `lifecycle` 为 `Unknown`，或这个工作区的 `WorkspaceRecord.health` 为 `Health::Unknown`（某次操作越过了第一次对外写入，Addendum 4）→ 同样 `Unknown`，`detail` 带 store 里记的现场。
 2. 同 §5.6 第 1 步的核对。
 3. `target = store.checkpoint(ws.session, req.target)`：`NoSuchCheckpoint` 等 store 的码原样返回，不包装，也不再读别的东西（3c:114）。`target.repo != *ws.repo` → `InvalidInput`。`Overlay::from_checkpoint(&target).validate()` 不过，或者有条目落在 X 之下 → `InvalidInput`（`reason = "excluded_path"`）；从不悄悄丢掉墓碑（3f:621）。
 4. **目标的基线**：`target.base == base.gen` → 目标状态 D 就是目标的 overlay。否则必须有 `req.target_base = Some(tb)` 且 `tb.gen == target.base`，不然 `InvalidInput`。先按 V5 核对目标对 `tb.manifest`，再调用 `rebase(&目标的 overlay, tb, base, ws.store, &RebaseOptions::for_restore(ignorecase))`（ignorecase 取 `ws.git.read_index(ws.root)` 的 `ignorecase`），D 取它的 overlay，冲突路径记下（增补裁定 T7/T6/T15：跨基线走 rebase，从不原样回放）。`for_restore` 不做内容合并，也不用 `.lww`：两边都改了的路径取目标的版本，作为冲突报出 [我的决定]。restore 写回的于是都是目标里真实存在过的内容，不合成新内容，rebase 也不写任何 blob；只有基线一侧改过的路径保持当前基线的内容，不会被悄悄改回旧基线。目标基线总在：每个留着的 checkpoint 都钉住它的 `BaseGen`（Addendum 5，store.md S10）。
-5. **扫描**：按 §5.6 第 2 步、以 `BeforeRestore` 为原因扫描（有 tracker 时是冷的全扫，扫描开始之前完成的写入一定在内），得到当前 overlay C；扫描读到的每个路径的 `Attrs` 留作下面比较的基准。
-6. **选路径**：`paths = None` → C 与 D 的全部条目路径，加上两边 `Renamed` 的 from；其余路径在两边都等于 M，不用动。`paths = Some(ps)` → 每个 p 按字节比较 [我的决定]：p 必须等于、或者是某个候选路径的目录前缀；候选是 C、D 与目标 overlay（rebase 之前）的条目路径和 from，以及两边基线清单里的路径。都不是 → `NoSuchPath`；只有按折叠才对得上时，`detail.on_disk` 给出那个拼写，帮人改参数。选中 p 本身及其下的全部候选，再在 C ∪ D 上取 `paired` 闭包（§5.3）。
-7. **计划**：对每个选中的路径 q，目标 = content(D, q)，当前 = content(C, q)。两者不同才动它：目标不存在 → 删除；目标存在 → 写入（只有 mode 不同，也按写入处理）。写入的路径缺的上级目录要建；删除之后变空、且目标里没有路径在其下的目录要删，只删这次 restore 弄空的目录。不写目录的 mode，不建空目录（裁定 T7）。改名因此恢复得对：当前是 `b.ts` 上的 `Renamed { from: "a.ts" }`，目标是改名之前 → 删 `b.ts`（目标里不存在）、写 `a.ts`（当前 `C.hides("a.ts")`，不存在；目标是 M 的内容）。只改大小写的改名同理：删 `foo.ts`、写 `Foo.ts`。
+5. **扫描**：按 §5.6 第 2 步、以 `BeforeRestore` 为原因扫描（有 tracker 时是全扫，不依赖事件，扫描开始之前完成的写入一定在内），得到当前 overlay C；扫描读到的每个路径的 `Attrs` 留作下面比较的基准。
+6. **选路径**：`paths = None` → C 与 D 的全部条目路径，加上两边 `Renamed` 的 from；其余路径在两边都等于 M，不用动。`paths = Some(ps)` → 每个 p 按字节比较 [我的决定]：p 必须等于、或者是某个候选路径的目录前缀；候选是 C、D 与目标 overlay（rebase 之前）的条目路径和 from，以及两边基线清单里的路径。都不是 → `NoSuchPath`；只有按折叠才对得上时，`detail.on_disk` 给出那个拼写，帮人改参数。选中 p 本身及其下的全部候选，再取 §5.3 的成组闭包，在 C 与 D 的条目路径（含 from）的并集上算：一个路径在 C、另一个在 D，一个是另一个的目录前缀，也算一组（比如当前一条 `Untracked` 的符号链接 `src` 与目标里的 `src/new.ts`）。
+7. **计划**：对每个选中的路径 q，目标 = content(D, q)，当前 = content(C, q)。两者不同才动它：目标不存在 → 删除；目标存在 → 写入（只有 mode 不同，也按写入处理）。写入的路径缺的上级目录要建。这次 restore 弄空的目录（它的每一项都被这次 restore 挪进了 T，或者是同样被这次 restore 弄空的子目录），目标里又没有路径在它之下，就要删（module-rulings「Empty directories, amended」）；restore 没弄空的目录从不删。不写目录的 mode，不建空目录（裁定 T7）。改名因此恢复得对：当前是 `b.ts` 上的 `Renamed { from: "a.ts" }`，目标是改名之前 → 删 `b.ts`（目标里不存在）、写 `a.ts`（当前 `C.hides("a.ts")`，不存在；目标是 M 的内容）。只改大小写的改名同理：删 `foo.ts`、写 `Foo.ts`。
 8. **预检**：
-   - 要写入的路径 q：在磁盘上找 q。找到的名字正是计划要删的路径（只改大小写的改名，旧拼写在删除之列）→ 算作已腾出：第 11 步删掉它之后，第 13 步才建 q。找到的就是 q、计划要替换它 → 继续。找到的东西不在 C 里，而且扫描时就在（被 ignore 的文件、排除集合里的目录、特殊文件）→ `Exists`（`detail.path`）：它们不在任何 checkpoint 里，覆盖就丢了（不变量 1）。扫描之后才出现 → `Busy`（`workspace_changed`）。q 的每一级上级：在磁盘上是目录、不存在，或者是计划要删的路径（类型互换）；否则，扫描时就在而不在 C 里（被 ignore 的文件、特殊文件）→ `Exists`，扫描之后才换成文件或符号链接 → `Busy`。
+   - 要写入的路径 q：在磁盘上找 q。找到的名字正是计划要删的路径（只改大小写的改名，旧拼写在删除之列）→ 算作已腾出：第 11 步删掉它之后，第 13 步才建 q。找到的就是 q、计划要替换它 → 继续。找到的是别的东西（不在 C 里的：被 ignore 的文件、排除集合里的目录、特殊文件，或者扫描之后才出现的）→ `Exists`（`detail.path`）：覆盖它就丢了不在任何 checkpoint 里的字节（不变量 1）。q 的每一级上级在磁盘上必须是目录、不存在，或者是计划要删的路径（类型互换）；否则（文件、符号链接或特殊文件，不论在不在 C 里）→ `Exists`（`detail.path` 是那一级）。挡路的东西一律是 `Exists`，在第 9 步记 `BeforeRestore` 之前返回 [我的决定：不分它是扫描之前就在、还是扫描之后才出现。扫描不进被剪掉的 ignore 目录、不留它们的属性，分不出这两种；两种情况都要人先挪开它]。
    - 要删的目录里有计划之外的东西 → `Exists`。
    - 要替换或删除的文件、要删的目录带 `UF_IMMUTABLE`、`SF_IMMUTABLE`、`UF_APPEND` 或 `SF_APPEND` → `ReadOnly`。
-   - 要替换或删除的文件 gen count 不可得（`gen_count == 0`：有可写的 mmap）→ `OpenFiles`。
+   - 要替换或删除的文件 gen count 不可得（`gen_count_known()` 为假：有可写的 mmap）→ `OpenFiles`。
    - 要克隆的基线文件不在，或大小与清单不符 → `Corrupt`（基线文件缺了是 `Corrupt`，从不当作新文件，Addendum 4）。`req.verify` 时再重算它的 BLAKE3，并对每个要写回的 blob 调 `store.verify_blob`，不符 → `Corrupt`。
    - 要替换或删除的路径，`attrs_of(ws.root, q)` 对第 5 步的 `Attrs` 不满足 `unchanged_since` → `Busy`（`workspace_changed`）：扫描之后有人写了工作区。这时什么都没写，重试即可。
 
@@ -649,28 +661,28 @@ design §8 的"全量对账"是带着 daemon 的热 `Tracker` 跑 `compute(…, 
 
 9. 用第 5 步的扫描结果，按 §5.6 第 3 到 6 步记一个 `BeforeRestore` checkpoint（`Before*` 总是记一行），它的 entries 是 C。存 blob 时发现一个要替换或删除的文件在扫描之后又变了（put 的结果与扫描不同，§5.6 第 5 步）→ 不记行，返回 `Busy`（`workspace_changed`）：put 出来的 blob 没有行引用，是缓存填充（Addendum 6 refinement 4）。计划之外的文件又变了，按 §5.6 第 5 步取最后一次 put 的内容，不拒绝：restore 不动它们，一个一直在写的日志文件不该让 restore 永远 `Busy`。记行本身的失败照 §6.2 原样返回。
 
-**阶段 C：落到工作区。** 从第 10 步的第一次写起（第 10 步开头对旧现场的再核对只读），任何失败都是 `Unknown`，现场保留（§6.3）。这是 §5.12 的投影，落在活的工作区上，外加三条安全网：内容先在 T 里备好；被替换或删除的文件先挪进 T，只有字节已被证明在 `BeforeRestore` 或基线里时才删 [我的决定]；新建用 `RenameMode::Excl`，从不覆盖计划之外的东西。blob 与基线文件先取到 T 的正下方，再用 `apfs::rename_rooted(R, …)` 挪到位置上（Addendum 7、8 的"Rooted projection"）；工作区之下的任何路径都不按路径写。
+**阶段 C：落到工作区。** 从第 10 步的第一次写起（第 10 步开头对旧现场的再核对只读），任何失败都是 `Unknown`，现场保留（§6.3）。这是 §5.12 的投影，落在活的工作区上，外加三条安全网：内容先在 T 里备好；被替换或删除的文件先挪进 T，被证明是 `BeforeRestore` 所指内容的副本才删（上面的"证明"）；新建用 `RenameMode::Excl`，从不覆盖计划之外的东西。blob 用 `store.get_blob_rooted(id, R, T/<n>)`、基线文件用 `apfs::clone_file_rooted` 先取到 T 的正下方，再用 `apfs::rename_rooted(R, …)` 挪到位置上（Addendum 7、8 的"Rooted projection"与「Addendum 8: get_blob_rooted」）；会话根之下的任何路径都不按路径写。
 
-10. 第 1 步判为能自动了结的现场：先再核对一遍 T 里每个文件的属性，有一个对第 1 步记下的不再满足 `unchanged_since` → `Busy`（`workspace_changed`），什么都没删，`BeforeRestore` 留着；都满足 → 按"现场的了结"逐个删掉它们，最后删 `plan.json`，再删掉空的 T（`plan.json` 最后删：中途崩溃时，T 里剩下的文件仍有它作证）。`apfs::mkdir_rooted(R, T, 0o700, false)`（T 已存在且为空就照用）。用 `apfs::create_file_rooted(R, T/plan.json, 0o600)` 写 `plan.json`：`before`、`target`，以及每一项操作的路径、它在 T 里的名字、那个名字下可能出现的两种内容的 (blob, mode)，即要写入的目标内容与 content(C, q)。然后 `plan.json`、T、R 逐个 `fsync`，再一次 `F_FULLFSYNC`（同 gitio.md §5.6 第 6 步）：从这里到第 14 步 T 一直非空，崩溃之后现场也看得见。每个要写入的路径，在 T 的正下方备一个临时文件，名字是操作的序号 n：
-    - blob → `store.get_blob(id, T/<n>)`（按路径取到 T 的正下方，Addendum 7），得到 mode 0644、mtime 为当前时刻的文件；可执行就对 `open_rooted_file(R, T/<n>)` 的句柄 `fchmod` 成 0755。
-    - 基线文件 → `apfs::clone_file_rooted(base.dir/q, R, T/<n>, None)`，再对 `open_rooted_file(R, T/<n>)` 的句柄依次：清掉克隆带来的 BSD 标志（封存基线时可能用了 `uchg`，clonefile 会一起复制，带着它连 chmod 都 `EPERM`）、`fchmod` 成 0644 或 0755、清掉扩展属性（strata 从不恢复 xattr，Addendum 1）、`futimens` 把 mtime 设为当前时刻 [我的决定]。理由同 get_blob：增量构建要把内容变了的文件当成变了。
+10. 第 1 步判为能自动了结的现场：先再核对一遍 T 里每个文件的属性，有一个对第 1 步记下的不再满足 `unchanged_since` → `Busy`（`workspace_changed`），什么都没删，`BeforeRestore` 留着；都满足 → 按"现场的了结"逐个删掉它们：每个文件在自己的 `remove_rooted(R, T/<名字>, RemoveKind::File)` 之前再核对一次属性，这就是它的证明（第 1 步按 §5.2 的办法重算过它的 BLAKE3）；中途有一个又变了 → `Unknown`（`restore_scene`），它留在 T 里。最后删 `plan.json`，再 `remove_rooted(R, T, RemoveKind::EmptyDir)`（`plan.json` 最后删：中途崩溃时，T 里剩下的文件仍有它作证）。`apfs::mkdir_rooted(R, T, 0o700, false)`；返回 `Exists` 时，`attrs_of(R, T)` 是空目录就照用，不是（第 1 步之后才出现的符号链接、文件或非空目录）→ 还没删过旧现场的文件时是 `Busy`（`workspace_changed`），什么都没写，删过之后是 `Unknown`。用 `apfs::create_file_rooted(R, T/plan.json, 0o600)` 写 `plan.json`：`before`、`target`，以及每一项操作的路径、它在 T 里的名字、那个名字下可能出现的两种内容的 (blob, mode)，即要写入的目标内容与 content(C, q)。然后 `plan.json`、T、R 逐个 `fsync`（T 的句柄取自 `open_rooted(R, T)`，R 的取自 `apfs::open_root(R)`），再对 R 的句柄做一次 `apfs::full_fsync`（`F_FULLFSYNC`，同 gitio.md §5.6 `ensure_shadow` 的第 6 步）：从这里到第 14 步 T 一直非空，崩溃之后现场也看得见。每个要写入的路径，在 T 的正下方备一个临时文件，名字是操作的序号 n：
+    - blob → `store.get_blob_rooted(id, R, T/<n>)`（「Addendum 8: get_blob_rooted」：从 R 起逐级不跟随符号链接，T 在这之前被换成符号链接 → `NotDirectory`，R 之外什么都没写），得到 BSD 标志已清、mode 0644、mtime 为当前时刻的文件；可执行就对 `open_rooted_file(R, T/<n>)` 的句柄 `fchmod` 成 0755。
+    - 基线文件 → `apfs::clone_file_rooted(base.dir/q, R, T/<n>, None)`，再对 `open_rooted_file(R, T/<n>)` 的句柄依次：清掉克隆带来的 BSD 标志（封存基线时可能用了 `uchg`，clonefile 会一起复制，带着它连 chmod 都 `EPERM`）、`fchmod` 成 0644 或 0755、清掉扩展属性（strata 从不恢复 xattr，Addendum 1）、`futimens` 把 mtime 设为当前时刻 [我的决定]。理由同 `get_blob_rooted`：增量构建要把内容变了的文件当成变了。
     - 符号链接 → 目标字节取自 `store.read_blob(id, 1024)`，或者基线目录里那个链接的 `attrs_of(base.dir, q)`（`FileKind::Symlink { target }`），再 `apfs::symlink_rooted(R, T/<n>, target)`。
 
     用 `attrs_of(R, T/<n>)` 记下每个临时文件的属性，供第 14 步写缓存。
-11. **删除**，深的先删：`rename_rooted(R, <repo>/q, T/rm-<n>, RenameMode::Excl)` 把它挪进 T；某一级上级是符号链接 → apfs 拒绝（`NotDirectory`），什么都没动，停。再看挪过来的文件：`attrs_of(R, T/rm-<n>)` 对第 5 步的属性满足 `unchanged_since`，说明自扫描起没被写过，它的字节就是 content(C, q)：q 是 C 的条目时它的 blob 在 blob 存储里（`BeforeRestore` 引用它），否则等于基线 → 已被证明，`remove_rooted(R, T/rm-<n>, RemoveKind::File)`。否则 → 停：那是 restore 期间别人写下的新内容，留在 T 里，不丢。
-12. **删目录**：本次弄空的目录，深的先删，`remove_rooted(R, <repo>/d, RemoveKind::EmptyDir)`；目录不空（期间有人在里面建了东西）→ 停 [我的决定：这些目录不是 restore 建的，Addendum 7 只写了"自己建的空目录"；但只删空目录，删掉的不会带走任何字节，目标树需要这个名字（类型互换）时也只能这样腾出来，见报告]。
-13. **写入**，浅的先写：缺的上级目录用 `apfs::mkdir_rooted(R, <repo>/上级, 0o755, true)` 建（某一级是符号链接 → `NotDirectory`，什么都没写，停）。目标位置有文件 → `rename_rooted(R, T/<n>, <repo>/q, RenameMode::Swap)`，旧文件因此换到了 `T/<n>`，按第 11 步的同一规则证明之后才 `remove_rooted`，证明不了 → 停，旧内容留在 T 里。目标位置没有东西 → `RenameMode::Excl`，目标已被占（`Exists`）→ 停，不覆盖任何东西。
+11. **删除**，深的先删：`rename_rooted(R, <repo>/q, T/rm-<n>, RenameMode::Excl)` 把它挪进 T；某一级上级是符号链接 → apfs 拒绝（`NotDirectory`），什么都没动，停。再看挪过来的文件：`attrs_of(R, T/rm-<n>)` 对第 5 步的属性满足 `unchanged_since`，说明自扫描起没被写过，它的字节就是 content(C, q)，即 `BeforeRestore` 在 q 上的内容：q 是 C 的条目时是它引用的 blob，否则是它钉住的基线 → 已被证明，紧接着 `remove_rooted(R, T/rm-<n>, RemoveKind::File)`。否则 → `Unknown`，现场保留：那是 restore 期间别人写下的新内容，留在 T 里，不丢。
+12. **删目录**：第 7 步记下的、这次 restore 弄空的目录，深的先删，只用 `remove_rooted(R, <repo>/d, RemoveKind::EmptyDir)`（module-rulings「Empty directories, amended」）。目录不空（apfs 返回 `NotEmpty`：第 11 步之后有人在里面建了东西）是写竞态，按 module-rulings「NotEmpty from apfs」：第一次对外写入之前是 `Busy`，之后是 `Unknown`。这一步总在它之后，所以返回 `Unknown`，现场保留，那个目录与里面的新东西都不动。
+13. **写入**，浅的先写：缺的上级目录用 `apfs::mkdir_rooted(R, <repo>/上级, 0o755, true)` 建（某一级是符号链接 → `NotDirectory`，什么都没写，停）。目标位置有文件 → `rename_rooted(R, T/<n>, <repo>/q, RenameMode::Swap)`，旧文件因此换到了 `T/<n>`，按第 11 步的同一规则证明之后才 `remove_rooted`，证明不了 → `Unknown`，旧内容留在 T 里。目标位置没有东西 → `RenameMode::Excl`，目标已被占（`Exists`）→ `Unknown`，不覆盖任何东西。
 
 **阶段 D：收尾。**
 
-14. T 里只剩 `plan.json` → `remove_rooted(R, T/plan.json, RemoveKind::File)`，再 `remove_rooted(R, T, RemoveKind::EmptyDir)`（本模块建的空目录，Addendum 7）。还有别的东西 → `Unknown`，现场保留。有 tracker 时，把第 10 步记下的属性与 blob 写进缓存（改名不改 inode 与 gen count），删掉的路径移出缓存，对写过的路径做一次增量重判；这些路径的监听事件随后到达时，缓存直接作保。返回 `Restored`。
+14. T 里只剩 `plan.json` → `remove_rooted(R, T/plan.json, RemoveKind::File)`，再 `remove_rooted(R, T, RemoveKind::EmptyDir)`（本模块建的空目录，Addendum 7）。还有别的东西，或者删 T 时得到 `NotEmpty`（这期间有人往 T 里放了东西）→ `Unknown`，现场保留。有 tracker 时，把第 10 步记下的属性与 blob 写进缓存（改名不改 inode 与 gen count），删掉的路径移出缓存，对写过的路径做一次增量重判；这些路径的监听事件随后到达时，缓存直接作保。返回 `Restored`。
 
 restore 只在第 10 到 14 步写会话根之下（T 与工作区），次数是 O(选中的路径数)。它不对工作区里的文件做 `F_FULLFSYNC`，与 git checkout 一样 [我的决定]：`BeforeRestore` 已经持久地记在 Store 里，`plan.json` 也已落盘，掉电之后 restore 之前的状态总能恢复，工作区由下一次冷扫重新对账。
 
-**现场的了结** [我的决定]：非空的 T 是现场。status 读它的 `plan.json` 报出；session 的 `rm` 在它存在时返回 `Dirty`（`detail` 指出 T），除非 `--discard`，这时会话根连同 T 照常经 `store::retire_dir` 退役（Addendum 7）。了结有两条路：
+**现场的了结**（module-rulings「Proven copies」）：非空的 T 是现场。status 读它的 `plan.json` 报出；session 的 `rm` 在它存在时返回 `Dirty`（`detail` 指出 T），除非 `--discard`，这时会话根连同 T 照常经 `store::retire_dir` 退役（Addendum 7）。了结有两条路：
 
-- **下一次 restore 自动了结**：`plan.json` 读得出来，它记的 `before` 与 `target` 两个 checkpoint 都还在（`store.checkpoint` 读得到，于是它们钉住的 blob 与基线也在），而且 T 里每个文件都列在 `plan.json` 里、重算出的 BLAKE3 与 mode 等于 `plan.json` 为这个名字记下的两种内容之一：目标内容（字节在 blob 存储或目标基线里），或者 content(C, q)（字节在那一次的 `BeforeRestore` 里或等于当时的基线）。它们于是都已被证明。第 10 步把它们和 `plan.json` 逐个 `remove_rooted`、删掉空的 T，再照常做这一次 restore：上一次 restore 就此放弃，工作区停在它做到的地方，这一次的 `BeforeRestore` 把那个状态记下来。
-- **人工了结**：有任何一个文件不在 `plan.json` 里、字节对不上，或者 `plan.json` 不在、读不了，或者那两个 checkpoint 已被回收，restore 返回 `Unknown`（`restore_scene`）。没被证明的文件装着可能不在任何 checkpoint 里的字节，多半是 restore 期间别的进程写下的。人把想留的挪回工作区（下一次 checkpoint 会记下），再删掉 T；或者 `rm --discard`。
+- **下一次 restore 自动了结**：`plan.json` 读得出来，它记的 `before` 与 `target` 两个 checkpoint 都还在（`store.checkpoint` 读得到，于是它们引用的 blob 与钉住的基线也在），T 里除了 `plan.json` 都是文件或符号链接，而且每一个都逐个证明（上面的"证明"），不只信 `plan.json`：`plan.json` 记下这个名字原本的工作区路径 q 与它可能装着的内容：content(C, q)，以及要写入的目标内容（删除操作没有这一种）。先核对这些内容确实是那两个 checkpoint 在 q 上所指的：content(C, q) 等于 `before` 在 q 上的内容（它的条目给出的，或者没有条目时它钉住的基线清单里 q 的 blob）；目标内容等于 `target` 在 q 上的条目给出的，或者（restore 把 q 改回当前基线时）`before` 的基线清单里 q 的 blob。再按 §5.2 的读法（以 R 为根）重算这个文件的 BLAKE3，等于其中一种的 blob，记下读时的属性。第 10 步删每一个之前紧挨着再核对它的属性（`unchanged_since`），然后才 `remove_rooted`：各自核对、各自删，`plan.json` 最后删，再删掉空的 T，然后照常做这一次 restore：上一次 restore 就此放弃，工作区停在它做到的地方，这一次的 `BeforeRestore` 把那个状态记下来。
+- **人工了结**：有任何一个文件不在 `plan.json` 里、字节对不上，T 里有目录，或者 `plan.json` 不在、读不了，或者那两个 checkpoint 已被回收，restore 返回 `Unknown`（`restore_scene`）。没被证明的文件装着可能不在任何 checkpoint 里的字节，多半是 restore 期间别的进程写下的。人把想留的挪回工作区（下一次 checkpoint 会记下），再删掉 T；或者 `rm --discard`。
 
 ### 5.8 `rebase`
 
@@ -691,7 +703,7 @@ restore 只在第 10 到 14 步写会话根之下（T 与工作区），次数�
 4. 最终状态：U 里的路径取上面的结果，U 之外的路径就是新基线。
 4a. **前缀冲突** [我的决定]：最终状态里每个活路径带一个来历：S（取自会话一侧：ours、合并结果或 `.lww`）或 B（等于新基线：不在 U 里，或者结果等于 theirs）。两个活路径 a、b，a 是 b 的目录前缀，而两者来历不同，真实目录里就放不下：会话把目录 `d/` 换成了文件 `d`，上游在 `d/` 下加了 `d/new.ts`；或者会话加了 `lib/x.ts`，上游把 `lib` 换成了文件或符号链接。这时保留 S 一侧，B 一侧的那些路径在最终状态里改为不存在（它们都在新清单里，于是成为墓碑），a 与 b 都记进 `conflicts`。会话的改动因此一个不丢，结果满足 V4，`project` 也不会把它当成损坏。两个 S 路径之间不会有这种冲突（它们来自同一个真实工作区），两个 B 路径之间也不会（它们来自同一棵 tree）。
 5. 按 §5.1 的分类与 §5.3 的配对，对 `new.manifest` 重新分类，得到新的条目。新基线里没有的 `Present` 路径，原来的条目是 `Untracked` 的仍是 `Untracked`，否则是 `Added`；改名重新配对，ignorecase 取 `opts.ignorecase`。结果只按新基线的 tree OID 取键，不复用对旧基线算的任何东西（3c:205）。
-5a. **blob 不变量**（Addendum 7）：新 overlay 里每条带 blob 的条目，blob 必须在 blob 存储里。取自会话一侧的（来自 checkpoint）与合并结果（`put_bytes`）已经在。取自新基线一侧、却因为 mode 不同而留在 overlay 里的不在：会话改了可执行位、上游改了内容，条目是 `Modified { blob: theirs 的 blob, mode: 0o100755 }`。这时用 `store.put_blob(new.dir/p)` 把那个基线文件存进去（基线是 strata 自己的目录，用普通的 `put_blob`，Addendum 8；克隆，几乎不占空间），返回的 id 就是存下的那份字节的 BLAKE3，必须等于清单里的 blob，否则 `Corrupt`：这就是 Addendum 7 要的"先按清单核对，再存"。它与合并结果一样只受 1 小时窗口保护，调用方在同一次操作里用 `project` 把它克隆出去。`merge = false` 时不会有这种条目。
+5a. **blob 不变量**（Addendum 7）：新 overlay 里每条带 blob 的条目，blob 必须在 blob 存储里。取自会话一侧的（来自 checkpoint）与合并结果（`put_bytes`）已经在。条目的 blob 等于 `new.manifest[p].blob`、又不是输入 overlay 里的某个 blob 的，可能不在：内容就是新基线的那一份，只因为 mode 不同才留在 overlay 里，比如会话改了可执行位、上游改了内容（`Modified { blob: theirs 的 blob, mode: 0o100755 }`），或者合并结果恰好等于 theirs、又带着会话加的可执行位。按 blob 判，不按条目来自哪一侧判：凡是这样的条目，都用 `store.put_blob(new.dir/p)` 把那个基线文件存进去（基线是 strata 自己的目录，用普通的 `put_blob`，Addendum 8；克隆，几乎不占空间），返回的 id 就是存下的那份字节的 BLAKE3，必须等于清单里的 blob，否则 `Corrupt`：这就是 Addendum 7 要的"先按清单核对，再存"。它与合并结果一样只受 1 小时窗口保护，调用方在同一次操作里用 `project` 把它克隆出去。`merge = false` 时不会有这种条目：每个路径要么离开 overlay，要么取 ours，条目的 blob 都是输入 overlay 里的。
 6. `dropped` = overlay 里原有、不在 `lww` 里、而新 overlay 里既没有条目也不是任何 from 的路径。返回 `Rebased { overlay: Overlay { base: new.gen, .. }, conflicts, dropped, lww }`，三个列表都按路径排序。
 
 两个例子。会话把 `d/` 改名为 `x/`，上游把 `d/` 改名为 `y/`：`d/*` 两边一致（都不存在），`x/*` 上游没碰，于是会话的 `x/*` 成为 `Added`，不冲突（3d:23 一行的理由）。会话把 `f` 改了名，上游改了 `f` 的内容：`f` 一边删、一边改，冲突，保留会话的改名（3d:20 一行的理由）。
@@ -722,7 +734,7 @@ restore 只在第 10 到 14 步写会话根之下（T 与工作区），次数�
 
 overlay 是库，自己不加锁，靠调用方遵守下面的约定（由 daemon.md 与 session.md 实现）：
 
-- 同一工作区的扫描串行。带 `Tracker` 的调用拿 `&mut Tracker`，类型上就是串行的；不带的调用（session 的 `BeforeRollout`、`BeforeRemove`、`reconcile_full`）在该会话的队列里。
+- 同一工作区的扫描串行。带 `Tracker` 的调用拿 `&mut Tracker`，类型上就是串行的，session 的 `BeforeRollout`、`BeforeRemove` 带着 daemon 交来的那一个也一样；不带的调用（还没有 Tracker 时的这两种、`reconcile_full`）在该会话的队列里。
 - 同一会话有 checkpoint 进行中时，后到的 checkpoint 或 rm 排队，从不取消进行中的那个（裁定 T7）；有 publish 进行中时，后到的 rm 或 checkpoint 排在该 repo 的写锁之后（增补裁定）。
 - restore 占用该会话的队列，与同一会话的其他操作串行；它不持有该 repo 的写锁（Addendum 3：写锁只包短的临界区），因为它只写本会话的工作区与 T，不碰 refs、影子仓库与基线目录。当前基线被工作区行引用，gc 不会收走（Addendum 4 的 gc 守则 (c)）；跨基线时的目标基线同样钉着：每个留着的 checkpoint 都钉住它的 `BaseGen`（Addendum 5；store.md S10）。基线文件仍然读不到（被人改过）是 `Corrupt`：第 8 步时是具名拒绝；第 10 步时是 `Unknown`，这时工作区还没动。
 - 工作区里的进程从不被阻塞：工作区是真实目录，读写不经过 daemon（3d:211、3d:213）。扫描与写入并发时，扫描期间的写入要么被这一次看到，要么进下一次（§5.4 的快照，§5.2 的写竞态规则）。
@@ -731,12 +743,12 @@ overlay 是库，自己不加锁，靠调用方遵守下面的约定（由 daemo
 
 ### 5.12 投影：`project`
 
-`project(store, overlay, dst)` 把 overlay 的条目落到 dst 上（Addendum 3）。dst 是 `overlay.base` 那棵树的一份未改动的克隆：session 的 `move_workspace` 先把新一代的基线克隆成内部 staging，再把 rebase 得到的 overlay 投影上去。dst 是调用方的内部 staging，所以这里没有 restore 的那几条安全网，失败时 dst 停在半途，由调用方按 Addendum 3、4、7 的错误时机处理。写的方式与 restore 相同（Addendum 7、8 的"Rooted projection"）：以 dst 为根，blob 先按路径取到 dst 正下方的私有临时名，再用 `apfs::rename_rooted(dst, …)` 挪到位置上，删除用 `apfs::remove_rooted`；dst 之下的任何路径都不按路径写。
+`project(store, overlay, dst)` 把 overlay 的条目落到 dst 上（Addendum 3）。dst 是 `overlay.base` 那棵树的一份未改动的克隆：session 的 `move_workspace` 先把新一代的基线克隆成内部 staging，再把 rebase 得到的 overlay 投影上去。dst 是调用方的内部 staging，所以这里没有 restore 的那几条安全网，失败时 dst 停在半途，由调用方按 Addendum 3、4、7 的错误时机处理。写的方式与 restore 相同（Addendum 7、8 的"Rooted projection"）：以 dst 为根，blob 先用 `store.get_blob_rooted(id, dst, <临时名>)` 取到 dst 正下方的私有临时名（「Addendum 8: get_blob_rooted」），再用 `apfs::rename_rooted(dst, …)` 挪到位置上，删除用 `apfs::remove_rooted`；dst 之下的任何路径都不按路径写。
 
 1. `overlay.validate()` 不过 → `InvalidInput`；dst 不在 → `NoSuchPath`；dst 的真实路径不在 `<store.root()>/sessions/` 之下 → `InvalidInput`（`reason = "dst_outside_sessions"`）：一道便宜的防线，`project` 写不到主 checkout、基线目录或 blob 存储里（不变量 2、5）[我的决定]。
 2. **删除**，深的先删：每条 `Deleted` 的 path 与每条 `Renamed` 的 from，`remove_rooted(dst, path, RemoveKind::File)`。路径不在（`NoSuchPath`）或是目录（`IsDirectory`）→ `Corrupt`：dst 不是基线的完整克隆（基线文件缺了是 `Corrupt`，从不当作新文件，Addendum 4）。上级某一级是符号链接 → apfs 返回 `NotDirectory`，原样返回，dst 之外什么都没碰。
 3. **删目录**：第 2 步弄空、且 overlay 里没有路径在其下的目录，深的先删，`remove_rooted(dst, d, RemoveKind::EmptyDir)`。dst 是这次操作自己的 staging，这些目录是它克隆出来的（Addendum 7：操作可以删掉自己建的空目录）。
-4. **写入**，浅的先写：缺的上级目录用 `apfs::mkdir_rooted(dst, 上级, 0o755, true)` 建；上级某一级是文件 → 它必须已在第 2 步删掉，否则 `Corrupt`。每个条目先在 dst 正下方备一个临时名 `.strata-project-<序号>`（已存在就换下一个序号）[我的决定]：普通文件 → `store.get_blob(id, dst/<临时名>)`，可执行就对 `open_rooted_file(dst, <临时名>)` 的句柄 `fchmod` 成 0755；符号链接 → `store.read_blob(id, 1024)` 取目标，`apfs::symlink_rooted(dst, <临时名>, 目标)`。再 `rename_rooted(dst, <临时名>, path, RenameMode::Excl)`；目标位置已有东西（`Exists`：`Modified`，或改名、新建到一个基线路径上）→ 改用 `RenameMode::Swap`，换出来的必须是文件或符号链接（基线的那一份，字节就是基线的），随即 `remove_rooted(dst, <临时名>, RemoveKind::File)`；换出来的是目录 → `Corrupt`。
+4. **写入**，浅的先写：缺的上级目录用 `apfs::mkdir_rooted(dst, 上级, 0o755, true)` 建；上级某一级是文件 → 它必须已在第 2 步删掉，否则 `Corrupt`。每个条目先在 dst 正下方备一个临时名 `.strata-project-<序号>`（已存在就换下一个序号）[我的决定]：普通文件 → `store.get_blob_rooted(id, dst, <临时名>)`，可执行就对 `open_rooted_file(dst, <临时名>)` 的句柄 `fchmod` 成 0755；符号链接 → `store.read_blob(id, 1024)` 取目标，`apfs::symlink_rooted(dst, <临时名>, 目标)`。再 `rename_rooted(dst, <临时名>, path, RenameMode::Excl)`；目标位置已有东西（`Exists`：`Modified`，或改名、新建到一个基线路径上）→ 改用 `RenameMode::Swap`，换出来的必须是文件或符号链接（基线的那一份，字节就是基线的），随即 `remove_rooted(dst, <临时名>, RemoveKind::File)`；换出来的是目录 → `Corrupt`。
 5. 不做 `F_FULLFSYNC`：交换之前由调用方按 Addendum 3 的持久性规则同步。结束时 dst 正下方没有残留的临时名。
 
 restore 的阶段 C 是同一个算法，落在活的工作区上（§5.7）。代价是 O(条目数) 次取 blob（克隆）与改名，不读任何文件的内容。
@@ -747,11 +759,10 @@ restore 的阶段 C 是同一个算法，落在活的工作区上（§5.7）。�
 | --- | --- | --- |
 | 增量 `compute` | O(脏路径数 × 上级目录的条目数) + O(被读文件的字节数) + O(overlay 的条目数)（分类与配对） | 热路径只读元数据 |
 | `checkpoint`（`ToolCall`，钩子带来路径，有 tracker） | 一次增量扫描 + 每个新 blob 一次 `put_blob_rooted`（克隆加哈希）+ 一个 SQLite 事务 | 改 50 个文件 < 200 ms |
-| `checkpoint`（没有路径清单的 `ToolCall`，有 tracker） | 一次热缓存的全扫（tool 的源码树温热 0.20 s，apfs.md §5.9）+ put + 一个事务 | 改 50 个文件 < 200 ms：tool 上达不到（§5.6 第 2 步） |
-| `checkpoint`（`Manual`、`Before*`） | 一次冷的全扫：遍历加读遍候选（tool 42.3 MB）+ put + 一个事务 | 全量对账 < 3 s |
+| `checkpoint`（`Manual`、`Before*`、没有路径清单的 `ToolCall`；有 tracker） | 一次全扫：不依赖事件，缓存作保（tool 的源码树温热 0.20 s，apfs.md §5.9）+ put + 一个事务 | 全量对账 < 3 s；没有路径清单的 `ToolCall` 在 tool 上超出 200 ms（§5.6 第 2 步） |
 | 全量对账 `compute(…, None)`（热缓存） | 一次 `getattrlistbulk` 遍历源码树，剪掉的 ignore 目录不进；缓存作保的文件不读 | tool 源码树 < 3 s |
 | `reconcile_full`（冷） | 遍历，加上读遍候选文件：tool 42.3 MB、staff-api 38.5 MB、admin 30.9 MB（2026-10-22） | 同上的目标同样适用 |
-| `restore` | 一次冷的全扫（`BeforeRestore`）+ O(选中的路径数) 次克隆与改名 | — |
+| `restore` | 一次全扫（`BeforeRestore`）+ O(选中的路径数) 次克隆与改名 | — |
 | `rebase` | O(n log n)，n 是 U 的路径数，加上两边都改了的文件的字节数 | — |
 | `build_manifest` | 每个基线 generation 一次，O(树的字节数) | 新建会话 < 5 s |
 | `project` | O(条目数) 次克隆与改名，不读内容 | 新建会话 < 5 s 的一部分（move_workspace） |
@@ -760,7 +771,7 @@ restore 的阶段 C 是同一个算法，落在活的工作区上（§5.7）。�
 
 ## 6. 失败与恢复
 
-共同规则（module-rulings.md「Common」与 Addendum 3 到 7）：具名拒绝只发生在第一次对外写入之前；之后的任何失败都是 `Unknown`，现场保留，不重放、不清理，由 status 报出。errno 按 types.md §6.3 映射；写到一半的失败，无论 errno 是什么，都是 `Unknown`。落到 overlay 上：
+共同规则（module-rulings.md「Common」与 Addendum 3 到 7）：具名拒绝只发生在第一次对外写入之前；之后的任何失败都是 `Unknown`，现场保留，不重放、不清理，由 status 报出。errno 按 types.md §6.3 映射，overlay 自己在句柄上做的 libc 调用失败时经 apfs 的 `classify_io_error` 归类（`IoSide::Read`、`Write`、`AfterWrite`），不另写一张表；写到一半的失败，无论 errno 是什么，都是 `Unknown`。落到 overlay 上：
 
 - checkpoint 的对外写入只有最后那个事务（`ToolCall`、`Manual` 的行），之前的失败什么都没写。
 - `Before*` 是对当前、未改动状态的安全 checkpoint，不算对外写入；记下它之后仍可以具名拒绝，它留着，是合法的恢复点（Addendum 5 refinement 3）。
@@ -807,8 +818,8 @@ checkpoint 从不写工作区，所以它的任何失败都不改变工作区。
 | A | 目标 checkpoint 不存在或已被回收 | `NoSuchCheckpoint`（store 原样） | 无 | — |
 | A | 目标坏了、跨基线却缺 `target_base`、路径谁都不认识 | `InvalidInput`、`NoSuchPath` | 无 | 改参数；`detail.on_disk` 提示只差大小写的拼写 |
 | A | 预检拒绝 | `Exists`、`ReadOnly`、`OpenFiles`、`Corrupt`、`Busy` | 无，工作区一字未动，也没有记 `BeforeRestore` | 挪开挡路的东西再试；`Busy` 直接重试 |
-| B | 记 `BeforeRestore` 失败；存 blob 时发现要动的文件又变了；第 10 步动手之前发现旧现场又变了 | §6.2 的码；`Busy`（`workspace_changed`） | 没有新行，或者只多了一条 `BeforeRestore`（合法的恢复点，Addendum 5）；没被引用的 blob 由 gc 收走 | 重试 |
-| C | 第一次对外写入（第 10 步的 `mkdir T` 与 `plan.json`）之后的任何失败：清掉旧现场时删除失败、在 T 里备内容失败、证明不了被挪开的文件、目标位置已被占（`Exists`）、要删的目录不空、上级换成了符号链接（`NotDirectory`）、I/O | `Unknown`，`detail` 带 `before`（`BeforeRestore` 的号）、`done`（已落位或已删除的路径）、`pending`（还没做的）、`temp`（T 的路径） | 工作区可能部分恢复；T 里是 `plan.json`、没落位的临时文件和被挪开的文件；`BeforeRestore` 记着 restore 之前的全部状态 | 不回滚、不重放、不清理（不变量 6）。T 里的文件都被证明时，下一次 restore 自动了结（§5.7）；否则人工了结 |
+| B | 记 `BeforeRestore` 失败；存 blob 时发现要动的文件又变了；第 10 步动手之前发现旧现场又变了，或者建 T 时它的位置上已有别的东西 | §6.2 的码；`Busy`（`workspace_changed`） | 没有新行，或者只多了一条 `BeforeRestore`（合法的恢复点，Addendum 5）；没被引用的 blob 由 gc 收走 | 重试 |
+| C | 第一次对外写入（第 10 步的 `mkdir T` 与 `plan.json`）之后的任何失败：清掉旧现场时删除失败、在 T 里备内容失败、证明不了被挪开的文件、目标位置已被占（`Exists`）、要删的目录不空（`NotEmpty`，写竞态）、上级或 T 换成了符号链接（`NotDirectory`）、I/O | `Unknown`，`detail` 带 `before`（`BeforeRestore` 的号）、`done`（已落位或已删除的路径）、`pending`（还没做的）、`temp`（T 的路径） | 工作区可能部分恢复；T 里是 `plan.json`、没落位的临时文件和被挪开的文件；`BeforeRestore` 记着 restore 之前的全部状态 | 不回滚、不重放、不清理（不变量 6）。T 里的文件都被证明时，下一次 restore 自动了结（§5.7）；否则人工了结 |
 | D | T 里还有 `plan.json` 之外的东西 | `Unknown` | 工作区已经是目标状态 | 同上 |
 
 restore 替换或删除的文件，总是先挪进 T，只有字节被证明在 `BeforeRestore` 里才删。所以任何时刻，工作区里原有的内容要么在 `BeforeRestore` 里，要么还在 T 里。
@@ -823,7 +834,7 @@ restore 替换或删除的文件，总是先挪进 T，只有字节被证明在 
 | 基线目录里的文件不在，或与清单不符（读来合并时，或按 blob 不变量存进 store 时） | `Corrupt`（`detail.path`，期望与实际） | 无 | 基线 generation 被改过，违反不变量 5；人工处理 |
 | `read_blob`、`put_bytes`、`put_blob` 失败 | store 透传 | 已 put 的 blob 没人引用，gc 收走 | 重试 |
 | `build_manifest` 遍历失败 | `NoSuchPath`、`NotText`、`Unsupported`、`TooLarge`、`Busy`、`Unknown` | 无，它不写任何东西 | 由 session 重新导出这棵树 |
-| `project` 失败 | `InvalidInput`、`NoSuchPath`、`NotDirectory`、`Corrupt`，store 与 apfs 的码 | dst 停在半途 | 由调用方按错误时机处理（session.md）：还没有对外写入时，session 用 `store::retire_dir` 退役 staging（会话根下的一级名字，store.md §5.5 的那一行），把意图行关成 `refused`，原样返回；之后就是 `Unknown` |
+| `project` 失败 | `InvalidInput`、`NoSuchPath`、`NotDirectory`、`Corrupt`，store 与 apfs 的码 | dst 停在半途 | 由调用方按错误时机处理（session.md）：还没有对外写入时，session 用 `store::retire_dir` 退役 staging（会话根下的一级名字，store.md §5.5 的那一行），把意图关成 `MoveState::Refused`，原样返回；之后就是 `Unknown` |
 
 ## 7. 测试清单
 
@@ -852,12 +863,12 @@ restore 替换或删除的文件，总是先挪进 T，只有字节被证明在 
 | `directory_moves_expand_per_file` | 基线目录改名、移到深处、移进一个新建目录再嵌进另一个基线目录、一个周期里移动两次、改名覆盖一个空目录、先移出子目录再删掉父目录：结果都是每个文件在最终路径上一条 `Renamed`（from 是基线路径），中间路径与临时目录不留痕迹，父目录里剩下的文件 `Deleted`；新建的目录树整体改名，只在最终路径上出现 `Untracked`；用例用中性的目录名，不用 `.git`、`node_modules`（它们被排除） | layerfs-workspace/tests/captured_namespace.rs::a_deep_fresh_chain_ends_in_aliases_and_a_moved_base_directory<br>layerfs-workspace/tests/captured_namespace_rebound.rs::a_directory_renamed_over_an_empty_directory_replaces_it<br>layerfs-workspace/tests/captured_namespace_rebound.rs::a_base_directory_moved_twice_in_one_capture_is_bound_once<br>layerfs-workspace/tests/captured_namespace_rebound.rs::a_directory_rescued_from_a_directory_removed_in_the_same_capture_survives<br>layerfs-workspace/tests/captured_namespace_states.rs::a_moved_base_directory_has_no_row_and_no_value<br>layerfs-workspace/tests/captured_namespace_states.rs::a_moved_fresh_directory_keeps_its_serial_and_children<br>layerfs-workspace/tests/captured_namespace_states.rs::a_base_directory_moves_under_a_fresh_directory_inside_a_base_directory<br>layerfs-content/tests/filesystem_bounds.rs::a_directory_larger_than_the_former_walk_ceiling_can_be_rebound<br>layerfs-content/tests/filesystem_topology_backed.rs::one_moved_directory_under_another_ones_stored_child_is_accepted |
 | `exchanged_and_inverted_directories` | 两个基线目录互换名字：内容出现在对方空出来的路径上的文件得到 `Renamed`，同名而内容不同的得到 `Modified`，结果与经哪个临时名交换无关；父子目录颠倒（`p/c` 变成 `c/p`）→ 每个文件一条 `Renamed`，再移回去 → overlay 为空 | layerfs-workspace/tests/captured_namespace_states.rs::two_base_directories_exchange_their_names<br>layerfs-workspace/tests/captured_namespace_states.rs::a_stored_parent_and_child_directory_are_inverted<br>layerfs-content/tests/filesystem_topology_backed.rs::inverting_a_parent_and_its_child_is_a_legal_move_without_a_base_walk |
 | `rename_onto_freed_name_and_replacing_renames` | 删掉 `a`，再把没改过的 `b` 改名为 `a` → `a` 上一条 `Renamed { from: "b" }`；`b` 先改内容再改名为 `a` → `a` 为 `Modified`，`b` 为 `Deleted`；新文件 rename 覆盖基线文件 `victim` → `victim` 为 `Modified`，新文件的旧名没有条目；新符号链接 rename 覆盖基线符号链接 → `Modified`，目标字节是新链接的；把这些操作换个顺序做，结果相同 | layerfs-workspace/tests/captured_namespace.rs::replacing_renames_and_fresh_moves_compose_in_one_capture<br>layerfs-workspace/tests/captured_namespace_holds.rs::a_stored_file_replaced_by_rename_while_open_leaves_only_the_new_inode<br>layerfs-workspace/tests/captured_namespace_holds.rs::fresh_and_looked_up_inodes_replaced_by_rename_leave_only_the_new_inodes<br>layerfs-workspace/tests/captured_namespace_states.rs::a_removed_name_and_a_rebound_name_are_exact_changes |
-| `rename_case_only_recorded_as_rename` | fixture 仓库 `core.ignorecase = true`（APFS 默认大小写不敏感）。`mv src/Foo.ts src/foo.ts` → overlay 恰好是 `src/foo.ts` 上的一条 `Renamed { from: "src/Foo.ts", blob }`，blob 等于基线的 blob，没有 `Deleted` 或 `Untracked`；改名同时改了内容 → 仍是这一条 `Renamed`，blob 是新内容；目录 `Src/` 改成 `src/` → 每个文件一条 `Renamed`；`École.ts` 改成 `école.ts`（非 ASCII 的大小写）→ 同样一条 `Renamed`；只由事件驱动的增量 `compute`（事件用旧拼写送达）与 `reconcile_full` 结果相同；把 `core.ignorecase` 设为 false，改名加改内容 → `Deleted` 加 `Untracked`，纯改名仍按内容配成 `Renamed` | 新增（Review Focus 4；裁定 T7） |
-| `non_ascii_case_renamed_ignored_tracked_dir_is_still_compared` | `core.ignorecase = true`，基线有 `Écoles/x.ts` 与 `Écoles/y.ts`；`.gitignore` 加一行 `écoles/`，再把目录改名为 `écoles` → overlay 是每个文件一条 `Renamed`（from 是 `Écoles/…`），没有 `Deleted`，目录没有因为 ignore 规则被剪掉；只由事件驱动的增量 `compute` 与 `reconcile_full` 结果相同。gitio 的 `tracked_under("écoles")` 在这里答 false（只折叠 ASCII），这个测试证明 overlay 不靠它 | 新增（本模块评审 I5；Addendum 7 的 `case_fold_key`） |
+| `rename_case_only_recorded_as_rename` | fixture 仓库 `core.ignorecase = true`（APFS 默认大小写不敏感）。`mv src/Foo.ts src/foo.ts` → overlay 恰好是 `src/foo.ts` 上的一条 `Renamed { from: "src/Foo.ts", blob }`，blob 等于基线的 blob，没有 `Deleted` 或 `Untracked`；改名同时改了内容 → 仍是这一条 `Renamed`，blob 是新内容；目录 `Src/` 改成 `src/` → 每个文件一条 `Renamed`；`École.ts` 改成 `école.ts`（非 ASCII 的大小写）→ 同样一条 `Renamed`；`compute` 与 `reconcile_full` 结果相同（只由事件驱动的增量那一半在 Task 6 的 `event_spellings_and_subtrees_reverify`）；把 `core.ignorecase` 设为 false，改名加改内容 → `Deleted` 加 `Untracked`，纯改名仍按内容配成 `Renamed` | 新增（Review Focus 4；裁定 T7） |
+| `non_ascii_case_renamed_ignored_tracked_dir_is_still_compared` | `core.ignorecase = true`，基线有 `Écoles/x.ts` 与 `Écoles/y.ts`；`.gitignore` 加一行 `écoles/`，再把目录改名为 `écoles` → overlay 是每个文件一条 `Renamed`（from 是 `Écoles/…`），没有 `Deleted`，目录没有因为 ignore 规则被剪掉；`compute` 与 `reconcile_full` 结果相同（只由事件驱动的增量那一半在 Task 6 的 `event_spellings_and_subtrees_reverify`）。gitio 的 `tracked_under("écoles")` 在这里答 false（只折叠 ASCII），这个测试证明 overlay 不靠它 | 新增（本模块评审 I5；Addendum 7 的 `case_fold_key`） |
 | `hard_links_are_independent_paths` | 给基线文件建一个硬链接 → 新名字是 `Untracked`，blob 与基线相同，原名字没有条目；经一个名字写入 → 两个路径都按新内容记录（原名字 `Modified`）；删掉其中一个名字 → 只有它变化；跨目录移动一个链接名，按改名处理 | 新增<br>layerfs-content/tests/filesystem_hardlinks.rs::two_aliases_reach_one_derived_count<br>layerfs-content/tests/filesystem_topology.rs::a_directory_or_symlink_cannot_have_two_parents<br>layerfs-content/tests/filesystem_topology.rs::a_base_resident_symlink_cannot_gain_a_second_parent<br>layerfs-content/tests/filesystem_topology_backed.rs::a_symlink_bound_twice_is_refused_by_its_derived_count |
 | `ignored_files_skipped_tracked_never_ignored` | 被 ignore 的新文件不进 overlay；被 ignore 的目录 `build/` 里有一个已跟踪文件，改它 → `Modified`，同一目录里的其它新文件不出现；`.gitignore` 新加一条规则盖住一个已跟踪的文件，它仍按内容比较；`.ignore` 文件里的规则不起作用 | tgrep-core/src/walker.rs::a_tracked_file_keeps_its_ignored_directory_walkable<br>tgrep-core/src/gitignore.rs::builds_matcher_from_dot_ignore_without_a_git_repo |
 | `point_query_and_walk_agree` | 一组路径覆盖嵌套的 `.gitignore`、`!` 反向规则、`info/exclude`、全局排除文件、被 ignore 目录里的已跟踪文件、目录规则（`dir/`）与大小写变体；对每一个路径，把它作为唯一脏路径的增量 `compute` 给出的判定，与全扫的判定逐项相同 | tgrep-core/src/walker.rs::the_point_query_matcher_hides_exactly_what_the_walk_hides<br>tgrep-core/src/walker.rs::both_walks_agree_on_what_the_tree_contains |
-| `excluded_dirs_never_enter_overlay` | 在 `node_modules/`、`vendor/`、`src-tauri/target/`、`.next/cache/` 里，以及对未被跟踪的种子文件 `.env`，新建、修改、删除 → 没有条目，也不进脏集合；基线里有被跟踪文件的 `vendor/` 被换成依赖集的克隆（内容不同、少了文件）→ 没有 `Deleted`；改 `.gitignore` 让 `.env` 不再被 ignore → 它仍然不进 overlay；仓库配置的 `deps_dirs` 加了一个目录、重新加载之后，下一次扫描 `stats.full = true`，那个目录下的文件离开 overlay；restore 从不在这些目录下写 | 新增（config.md：依赖目录不进 overlay、不被监听；种子缓存与种子文件不 checkpoint） |
+| `excluded_dirs_never_enter_overlay` | 在 `node_modules/`、`vendor/`、`src-tauri/target/`、`.next/cache/` 里，以及对未被跟踪的种子文件 `.env`，新建、修改、删除 → 没有条目，也不进脏集合；基线里有被跟踪文件的 `vendor/` 被换成依赖集的克隆（内容不同、少了文件）→ 没有 `Deleted`；改 `.gitignore` 让 `.env` 不再被 ignore → 它仍然不进 overlay，把它删掉、改建成 `.ENV` 也一样；以 `NODE_MODULES/x` 的拼写送达的事件不进脏集合；仓库配置的 `deps_dirs` 加了一个目录、重新加载之后，下一次扫描 `stats.full = true`，那个目录下的文件离开 overlay；反过来把它从 `deps_dirs` 去掉、重新加载 → 下一次扫描全扫，它下面的文件进 overlay；之后在里面改一个文件、把它的事件交给 inbox → 下一次增量扫描（`stats.full = false`）含这处改动，事件按 inbox 当前的 X 过滤，不再被丢（`#[ignore]` 的一段用真实监听做同样的事，要等事件送达，apfs.md §4.2 F）；restore 从不在这些目录下写 | 新增（config.md：依赖目录不进 overlay、不被监听；种子缓存与种子文件不 checkpoint；本模块评审 N1） |
 | `size_threshold_never_affects_membership` | 64 MiB 加 1 字节的新文件 → `Untracked`；同样大小的基线文件被改 → `Modified`；没改的大文件没有条目，绝不因为大而被当作墓碑。`#[ignore]`：要约 130 MB 磁盘 | tgrep-core/src/walker.rs::metadata_walk_honours_a_raised_max_file_size |
 | `sparse_file_is_hashed_whole` | 一个 256 MiB 的稀疏文件（开头与末尾各 1 字节，中间是洞）→ blob 等于整份逻辑内容（洞读成零）的 BLAKE3，`ScanStats.bytes_hashed` 等于逻辑大小；restore 之后逐字节相同 | 新增（裁定 T7）<br>layerfs-workspace/tests/captured_file_edits.rs::new_hole_above_four_gib_uses_bounded_original_run_work |
 | `special_files_are_never_opened` | 工作区里建一个 FIFO（新路径）→ 扫描在 1 s 内返回，FIFO 没有条目，`warnings` 有 `SpecialFile`；把一个基线文件换成同名 FIFO → 该路径 `Deleted`，并告警；socket 同样 | 新增 |
@@ -870,10 +881,10 @@ restore 替换或删除的文件，总是先挪进 T，只有字节被证明在 
 | `every_change_kind_reaches_the_next_checkpoint` | 对每一种改动，即改内容、截断、扩展、改可执行位、新建、删除、改名（新旧两个路径都报事件），各自之后的下一次 checkpoint 都 `recorded = true` 并含对应的条目，从不答"无变化"；每一次的增量结果都等于 `reconcile_full`。`touch` 不在其列：它不算改动 | layerfs-overlay/tests/kept_live.rs::every_writer_of_a_kept_serial_counts_it_once |
 | `random_edits_incremental_equals_cold_and_restores_exact` | proptest 生成随机的操作序列：重叠写、截断后再增长、新建、删除、改名、改可执行位、符号链接改指向、整目录移动。每一步之后增量 `compute` 等于 `reconcile_full`，并做一次 checkpoint；序列结束后依次 restore 每个旧 checkpoint，工作区逐字节等于当时读出的快照（增长部分读成零，截掉的字节不复活）。缺省跑 64 个用例，`#[ignore]` 的版本跑 2048 个 | layerfs-api/tests/history_diff_oracle.rs::change_walk_equals_the_full_walk<br>layerfs-overlay/tests/payload.rs::layered_reads_match_a_reference_model_across_writes_resizes_capture_and_install<br>layerfs-workspace/tests/captured_file_edits.rs::overlapping_writes_shrink_regrow_and_cross_cell_spans_match_final_bytes<br>layerfs-workspace/tests/captured_file_edits.rs::many_edits_use_numbered_records_after_install_and_reads_survive_close<br>layerfs-workspace/tests/captured_namespace_fragments.rs::a_truncate_between_pieces_cuts_what_was_written_before_it<br>layerfs-workspace/tests/captured_namespace_fragments.rs::shrinking_and_regrowing_across_cells_never_returns_cut_bytes<br>layerfs-workspace/tests/captured_namespace_states.rs::a_fresh_file_is_constructed_from_its_captured_runs<br>layerfs-workspace/tests/captured_new_file_route.rs::a_new_file_is_identical_on_the_direct_and_the_record_route<br>layerfs-workspace/tests/captured_piece_edits.rs::insert_delete_and_replace_are_one_edit_each<br>layerfs-workspace/tests/payload.rs::truncate_and_regrow_never_resurrect_bytes_across_capture_and_known_install<br>layerfs-workspace/tests/payload.rs::whole_windows_overwrites_and_cuts_inside_them_read_back_exactly |
 | `dirty_set_dedups_by_canonical_path` | 同一路径改 100 次，inbox 里只有一项；`DIR/x` 与 `dir/x`、NFD 与 NFC 的同一个名字、`./dir/x`，归并为同一项；不同路径各一项；overlay 里每个路径至多一条；事件路径转不成 `RepoPath`（不是 UTF-8）→ 要求全扫，不静默丢弃 | layerfs-overlay/tests/kept_live.rs::a_kept_serial_is_counted_once_and_others_as_before<br>tgrep-core/src/worktrees/tests.rs::accepted_hint_spellings_have_one_canonical_queue_entry |
-| `event_spellings_and_subtrees_reverify` | 磁盘上是 `dir/x`，事件只以 `DIR/x` 的拼写送达，期间做了一次同大小、恢复 mtime 的改写 → 增量 `compute` 找到这处改动；NFD 拼写的事件同理；只送一个目录事件（`Changed(["dir"])` 或 `MustRescan("dir")`）→ 整棵子树被重判，其中的同大小改写被找到；在大小写敏感的磁盘映像上让事件拼写与两个磁盘名字都折叠相等 → 全扫（`#[ignore]`，要 `hdiutil`） | tgrep-core/src/worktrees/tests.rs::subtree_hints_and_case_aliases_reverify_unchanged_metadata<br>tgrep-core/src/worktrees/tests.rs::subtree_hint_spellings_reverify_restored_mtime_edits |
+| `event_spellings_and_subtrees_reverify` | 磁盘上是 `dir/x`，事件只以 `DIR/x` 的拼写送达，期间做了一次同大小、恢复 mtime 的改写 → 增量 `compute` 找到这处改动；NFD 拼写的事件同理；只送一个目录事件（`Changed(["dir"])` 或 `MustRescan("dir")`）→ 整棵子树被重判，其中的同大小改写被找到；`core.ignorecase = true` 下 `mv src/Foo.ts src/foo.ts`、把 `École.ts` 改成 `école.ts`，以及 `.gitignore` 里有 `écoles/` 时把 `Écoles/` 改名为 `écoles/`，都只送旧拼写的事件 → 增量 `compute` 与 `reconcile_full` 结果相同（这几种改名怎样分类，由 Task 5 的 `rename_case_only_recorded_as_rename` 与 `non_ascii_case_renamed_ignored_tracked_dir_is_still_compared` 测）；在大小写敏感的磁盘映像上让事件拼写与两个磁盘名字都折叠相等 → 全扫（`#[ignore]`，要 `hdiutil`） | tgrep-core/src/worktrees/tests.rs::subtree_hints_and_case_aliases_reverify_unchanged_metadata<br>tgrep-core/src/worktrees/tests.rs::subtree_hint_spellings_reverify_restored_mtime_edits |
 | `dropped_or_overflowing_events_force_full_scan` | `Dropped` 之后 `needs_full()` 为真，下一次扫描 `stats.full = true`；把上限设为 8、送 9 个不同的路径 → 同样全扫；全扫找到窗口里没有报事件的同 stat 改写（大小与 mtime 都恢复）；全扫之后 `needs_full()` 为假 | tgrep-core/src/worktrees/tests.rs::hints_are_bounded_and_full_refresh_repairs_unreported_same_stat_edits |
 | `periodic_full_scan_repairs_missed_changes` | 不送任何事件，做同 stat 改写、新增、删除、改全局排除文件（`core.excludesFile` 指向的文件）、把文件改回基线：`compute(…, None)` 把每一处都修正（新增出现，删除成为墓碑，改回的条目消失，被新规则 ignore 的 `Untracked` 消失），之后的 checkpoint 记下它们；什么都没变时，`compute(…, None)` 之后的 checkpoint 答 `recorded = false`，缓存作保的文件 `files_hashed = 0` | tgrep-core/src/worktrees/tests.rs::serving_verification_keeps_unchanged_views_ready_and_repairs_missed_changes |
-| `index_changes_reclassify_without_events` | `git add` 一个 `Untracked` 文件，不送任何事件 → 下一次增量 `compute` 把它变成 `Added`；`git add -f` 一个被 ignore 的文件 → 它以 `Added` 出现；`git rm --cached` 一个 `Added` 文件 → 变回 `Untracked` | 新增 |
+| `index_changes_reclassify_without_events` | `git add` 一个 `Untracked` 文件，不送任何事件 → 下一次增量 `compute` 把它变成 `Added`；`git add -f` 一个被 ignore 的文件 → 它以 `Added` 出现；`git rm --cached` 一个 `Added` 文件 → 变回 `Untracked`；把 `core.ignorecase` 改成 false → 下一次扫描 `stats.full = true` | 新增 |
 | `quiet_workspace_stays_clean` | checkpoint 之后没有新的编辑：inbox 为空，`compute` 不读任何文件，overlay 不变，下一次 checkpoint `recorded = false`；只被读过的文件不产生事件，也不改变任何东西 | layerfs-overlay/tests/kept_live.rs::a_kept_row_is_not_counted_dirty |
 | `failed_checkpoint_keeps_dirty_set` | 改 3 个文件，用 store 的 `Seam::AfterCheckpointRow` 让记行失败 → 返回 `Unknown`，没有新行，inbox 里又有这 3 个路径；重试的 checkpoint 含全部 3 处，一处不少；扫描中途读文件失败（把一个文件改成 000 权限）时同样如此 | layerfs-overlay/tests/kept_live.rs::a_failed_job_restores_the_kept_set |
 | `writes_during_scan_reach_the_next_scan` | 用 `OverlayFault::PauseAfterSnapshot` 停住一次 checkpoint，期间写 50 个文件（其中一个目录下 50 个）并送出它们的事件：这次 checkpoint 不含它们或只含一部分，下一次全部含有，最后 overlay 与 `reconcile_full` 相等；一次判为"无变化"的 checkpoint 与并发写入赛跑，写入总是出现在这一次或下一次里，从不丢；定时全扫进行时到达的事件不丢，扫描失败时快照回到 inbox；`compute` 读一个文件的两次之间每次都被写（`OverlayFault::PauseAfterHash` 每次放开之前写一次）→ 这次的 `warnings` 有 `Unstable`，下一次扫描重读它，`Unstable` 消失 | layerfs-daemon/tests/mounted_install.rs::writes_during_a_commit_stay_live_and_reach_the_next_commit<br>layerfs-daemon/tests/mounted_install.rs::writes_during_a_commit_stay_live_and_reach_the_next_commit_fifty_to_a_directory<br>layerfs-daemon/tests/store_commit.rs::a_mutation_racing_an_unchanged_commit_is_never_lost<br>tgrep-core/src/worktrees/tests.rs::epoch_change_after_preparation_prevents_stale_ready_publication<br>tgrep-core/src/worktrees/tests.rs::serving_verification_yields_to_invalidations_and_fails_closed<br>layerfs-workspace/tests/captured_namespace_order.rs::mutations_published_between_producer_passes_do_not_reach_the_captured_root |
@@ -889,21 +900,21 @@ restore 替换或删除的文件，总是先挪进 T，只有字节被证明在 
 | `stale_base_and_wrong_root_are_refused` | 用 store 的移动意图（`begin_move` 直到 `finish_move`）把工作区记下的基线换成另一个已登记的 generation 之后，对旧基线 checkpoint → `InvalidInput`（`stale_base`），没有行；`ws.root` 给成另一个会话的工作区 → `InvalidInput`（`wrong_root`）；同一目录写成 `root/.` 或大小写不同 → 接受；restore 到另一个会话的目录同样被拒绝，两个工作区都不动 | tgrep-core/tests/shared_worktrees.rs::wrong_root_and_reader_swap_are_rejected |
 | `git_modes_roundtrip` | 0o100644、0o100755、0o120000 三种条目 checkpoint 再 restore，磁盘上的可执行位与类型都恢复；目录的 mode 与任何 mtime 都不进 checkpoint，restore 写出的文件 mtime 是当前时刻 | layerfs-content/tests/filesystem_attributes.rs::portable_fields_round_trip_and_are_checked |
 | `mixed_text_and_binary_in_one_checkpoint` | 一次 checkpoint 同时记下文本文件、含 NUL 与非 UTF-8 字节的二进制文件和空文件，各自的 blob 与磁盘字节逐一相同；它们在同一个号里一起出现，不会只记下一部分 | sdk/js/test/binary_write.mjs::forms<br>sdk/js/test/binary_write.mjs::applied |
-| `tool_call_checkpoints_take_hints_and_late_events` | `Tracker` 不启动监听，事件由测试交给 inbox。写 `a.ts`、把它交给 `Inbox::hint`、不送事件 → 紧接着的 `ToolCall` checkpoint 含它；写 `b.ts`、既不 hint 也不送事件，做一次 `ToolCall`，再把它的事件交给 `Inbox::note` → 下一次 `ToolCall` 含它；在上次扫描以来没动过的目录里写 `quiet/c.ts`、`Inbox::require_full` 之后的 `ToolCall` 含它（`stats.full = true`、`stats.cold = false`）；写完立刻做 `Manual` 与以 `BeforeRestore` 为原因的 checkpoint，不 hint、不送事件 → 都含这次写入（`stats.cold = true`）；启动真实监听后，持着 `Tracker` 调 `flush()` 会返回（不死锁） | 新增（本模块评审 I9；Addendum 8 的 Event flush, amended） |
+| `tool_call_checkpoints_take_hints_and_late_events` | `Tracker` 不启动监听，事件由测试交给 inbox。写 `a.ts`、把它交给 `Inbox::hint`、不送事件 → 紧接着的 `ToolCall` checkpoint 含它；`CLAUDE.md` 是指向 `AGENTS.md` 的符号链接，经它改 `AGENTS.md`、只 hint `CLAUDE.md` → 紧接着的 `ToolCall` 含 `AGENTS.md` 的改动，`stats.full = false`；链接指向工作区之外（`../x.md`）时，hint 之后的那次 `ToolCall` 是全扫（`stats.full = true`）；写 `b.ts`、既不 hint 也不送事件，做一次 `ToolCall`，再把它的事件交给 `Inbox::note` → 下一次 `ToolCall` 含它；在上次扫描以来没动过的目录里写 `quiet/c.ts`、`Inbox::require_full` 之后的 `ToolCall` 含它（`stats.full = true`、`stats.cold = false`）；写完立刻做 `Manual` 与以 `BeforeRestore` 为原因的 checkpoint，不 hint、不送事件 → 都含这次写入，其中一处是同大小改写、用 `utimes` 恢复了 mtime 的文件；这两次都是 `stats.full = true`、`stats.cold = false`，没改过的候选都由缓存作保（`vouched` 等于它们的个数），只有改过的被读；最后启动真实监听，持着 `Tracker` 调 `flush()` 会返回（不死锁）；这一段只断言返回，不等任何事件送达，默认跑的各段都不靠 FSEvents 的送达时间（apfs.md §4.2 F） | 新增（本模块评审 I9、N2、N3；Addendum 8 的 Event flush, amended；「Cold scan」） |
 | `checkpoint_never_captures_through_a_swapped_directory` | `d/y.ts` 改过内容。`OverlayFault::PauseAfterHash` 停在 `Manual` checkpoint 的扫描读完最后一个候选之后，测试把已经扫过的 `d/` 换成指向会话之外一个目录的符号链接，那里有同名、同大小、内容不同的 `y.ts`，再放行 → checkpoint 成功（写竞态，不是失败），这一次就记下 `d` 是一条符号链接条目、`d/` 下的基线文件都是墓碑；blob 存储里没有会话之外那个文件的字节；把这次交换的事件交给 inbox 之后，下一次 checkpoint 与 `reconcile_full` 相同 | 新增（Addendum 8：从工作区存 blob 用 `put_blob_rooted`，从不跟随符号链接） |
 | `restore_is_itself_checkpointed` | checkpoint 1 之后改几个文件、新建 `new.txt`、删一个基线文件，然后 `restore(1)`：store 里多了一个 `BeforeRestore` checkpoint，号比 1 大，`Restored.before` 就是它，`written` 与 `removed` 列出动过的路径；再 `restore(before)` → 工作区逐字节回到 restore 之前，`new.txt` 回来了，被删的文件仍被删；对这一次 restore 再 restore 一次也成立；checkpoint 1 仍可读、可再 restore（只追加，不覆盖）；成功之后 T 不存在 | 新增<br>tgrep-core/tests/shared_worktrees.rs::repeated_saves_replace_existing_checkpoint_with_latest_overlay |
 | `restore_before_a_rename_brings_back_the_old_name` | checkpoint 1 之后 `mv a.ts b.ts`，restore(1) → `a.ts` 回来，内容是基线的，`b.ts` 不在了，overlay 为空；改名之后又改了内容 → 同样，`BeforeRestore` 里有改过的内容；`core.ignorecase = true` 的 fixture 里 `mv src/Foo.ts src/foo.ts`，restore(1) → 没有 `Exists`，`readdir` 看到的拼写变回 `Foo.ts`；反过来，checkpoint 2 记下改名之后的状态，从改名之前 restore(2) → 拼写变成 `foo.ts`；`paths = None` 只动两边 overlay 里的路径，其余文件的 inode 不变 | 新增（本模块评审 I4） |
-| `restore_paths_select_whole_groups` | 只给 `restore` 一个 `Renamed` 的 from 或 path → 两半一起恢复；给类型互换组里的任一路径 → 整组恢复；给一个目录前缀 → 其下全部；给 checkpoint 之后才新建的文件 → 它被删除；给一个哪里都不认识的路径 → `NoSuchPath`，工作区一字未动，也没有记 `BeforeRestore`；给一个只差大小写的路径（磁盘上与清单里都是 `Foo.ts`，给 `foo.ts`）→ `NoSuchPath`，`detail.on_disk` 是 `Foo.ts` | 新增（裁定 T7：成对携带；增补裁定：点名改名的任一半即选中整个改名） |
+| `restore_paths_select_whole_groups` | 只给 `restore` 一个 `Renamed` 的 from 或 path → 两半一起恢复；给类型互换组里的任一路径 → 整组恢复；给一个目录前缀 → 其下全部；给 checkpoint 之后才新建的文件 → 它被删除；给一个哪里都不认识的路径 → `NoSuchPath`，工作区一字未动，也没有记 `BeforeRestore`；给一个只差大小写的路径（磁盘上与清单里都是 `Foo.ts`，给 `foo.ts`）→ `NoSuchPath`，`detail.on_disk` 是 `Foo.ts`；只点名 `src/new.ts`，而 `src` 现在是一条 `Untracked` 的符号链接 → `src` 随之选中：链接被删掉（它在 `BeforeRestore` 里），`src/` 建成目录，`src/new.ts` 写进去 | 新增（裁定 T7：成对携带；增补裁定：点名改名的任一半即选中整个改名；本模块评审 N6） |
 | `restore_missing_checkpoint_is_store_error` | restore 一个从未存在的号，以及一个已被 gc 回收的号 → 得到 store 返回的那个 `NoSuchCheckpoint`，code 与 message 都不变、不包装；没有扫描，没有记 `BeforeRestore`，工作区与 store 都不变 | layerfs-workspace/tests/captured_namespace_custody.rs::a_released_reader_is_the_original_stale_refusal_of_the_engine<br>layerfs-overlay/tests/captured_namespace.rs::later_active_rows_install_and_close_leave_reader_answers_until_exact_release |
 | `restore_refuses_malformed_checkpoint` | 手工构造的 `Checkpoint`（路径重复、`Deleted` 带 mode、from 等于 path）交给 `Overlay::from_checkpoint` 再 `validate` → `InvalidInput`；store 里一个 checkpoint 的条目落在后来才加进 `deps_dirs` 的目录下 → restore 返回 `InvalidInput`（`excluded_path`），工作区不变；没有一个墓碑被悄悄丢掉：之后 restore 一个好的 checkpoint 仍然逐字节正确。`..`、绝对路径、空段、`.` 构造不出 `RepoPath`（types.md） | tgrep-core/tests/shared_worktrees.rs::malformed_checkpoints_fail_instead_of_revealing_base_entries |
-| `restore_never_overwrites_unrecorded_content` | 目标要在 `out/report.txt` 写文件，而那里现在是一个被 ignore 的文件 → `Exists`（`detail.path`），工作区不变，被 ignore 的文件字节不变，也没有记 `BeforeRestore`；目标要删的目录里有一个被 ignore 的 `.DS_Store` → `Exists`；正常的 restore 前后，被 ignore 的文件与依赖目录逐字节相同，inode 不变 | 新增（不变量 1、4） |
-| `restore_concurrent_write_is_kept_in_scene` | `OverlayFault::PauseInApply { after: 0 }` 停在第一次落位之前时，store 里已有那条 `BeforeRestore`，T 里已有 `plan.json`，工作区还没动；`OverlayFault::PauseInApply { after: 1 }` 停住 restore，期间改写一个计划要替换的文件 → restore 返回 `Unknown`，`detail` 带 `before`、`done`、`pending`、`temp`，那次改写的内容完整地留在 T 里；此后的 restore 都返回 `Unknown`（`restore_scene`，`detail` 列出那个没被证明的文件和它原本的路径），直到人把它挪走；挪走之后 T 里只剩 `plan.json` 列出、字节对得上的文件 → 下一次 restore 自动了结它们、照常完成，结束时 T 不存在；做 restore 的子进程在第一次删除之后被杀掉 → T 里有 `plan.json`，下一次 restore 自动了结；T 的位置上是一个符号链接 → `Exists`（`restore_temp_taken`），链接指向的地方不被碰；用 `OverlayFault::PauseBeforePrecheck` 停在预检之前改写一个文件 → `Busy`，工作区一字未动，也没有记 `BeforeRestore` | 新增（不变量 6） |
-| `restore_never_writes_through_a_symlinked_directory` | 把 `src/` 换成指向会话之外一个目录的符号链接，再 restore 一个 `src/` 还是目录的 checkpoint → 链接本身被删掉，`src/` 重建为目录，文件写进去，链接指向的目录一字未动；用 `OverlayFault::PauseBeforePrecheck` 在扫描之后才把 `src/` 换成符号链接 → `Busy`，什么都没写；用 `OverlayFault::PauseInApply { after: 1 }` 在落位途中才换 → `Unknown`，链接指向的目录一字未动，没落位的内容留在 T 里 | 新增（本模块评审 M19；Addendum 8） |
+| `restore_never_overwrites_unrecorded_content` | 目标要在 `out/report.txt` 写文件，而那里现在是一个被 ignore 的文件 → `Exists`（`detail.path`），工作区不变，被 ignore 的文件字节不变，也没有记 `BeforeRestore`；目标要删的目录里有一个被 ignore 的 `.DS_Store` → `Exists`；`src/new.ts` 的上级 `src` 现在是一个被 ignore 的文件 → `Exists`（`detail.path` 是 `src`），同样没有记 `BeforeRestore`；正常的 restore 前后，被 ignore 的文件与依赖目录逐字节相同，inode 不变 | 新增（不变量 1、4；本模块评审 N6） |
+| `restore_concurrent_write_is_kept_in_scene` | `OverlayFault::PauseInApply { after: 0 }` 停在第一次落位之前时，store 里已有那条 `BeforeRestore`，T 里已有 `plan.json`，工作区还没动；`OverlayFault::PauseInApply { after: 1 }` 停住 restore，期间改写一个计划要替换的文件 → restore 返回 `Unknown`，`detail` 带 `before`、`done`、`pending`、`temp`，那次改写的内容完整地留在 T 里；此后的 restore 都返回 `Unknown`（`restore_scene`，`detail` 列出那个没被证明的文件和它原本的路径），直到人把它挪走；挪走之后 T 里只剩 `plan.json` 列出、字节对得上的文件 → 下一次 restore 自动了结它们、照常完成，结束时 T 不存在；做 restore 的子进程在第一次删除之后被杀掉 → T 里有 `plan.json`，下一次 restore 自动了结；T 的位置上是一个符号链接 → `Exists`（`restore_temp_taken`），链接指向的地方不被碰；用 `OverlayFault::PauseBeforePrecheck` 停在预检之前改写一个文件 → `Busy`，工作区一字未动，也没有记 `BeforeRestore`；目标在 `d` 是文件、当前 `d/` 是目录时，用 `OverlayFault::PauseInApply` 停在挪走 `d/` 下最后一个文件的那次改名之后，在 `d/` 里建一个新文件再放行 → `Unknown`，`d/` 与新文件都在，`d/` 原来的文件都在 `BeforeRestore` 里；不打断时 `d/` 被删掉，`d` 是目标的文件 | 新增（不变量 6；module-rulings「Proven copies」「Empty directories, amended」） |
+| `restore_never_writes_through_a_symlinked_directory` | 把 `src/` 换成指向会话之外一个目录的符号链接，再 restore 一个 `src/` 还是目录的 checkpoint → 链接本身被删掉，`src/` 重建为目录，文件写进去，链接指向的目录一字未动；用 `OverlayFault::PauseBeforePrecheck` 在扫描之后才把 `src/` 换成符号链接 → `Busy`，什么都没写；用 `OverlayFault::PauseInApply { after: 1 }` 在落位途中才换 → `Unknown`，链接指向的目录一字未动，没落位的内容留在 T 里；用 `OverlayFault::PauseAfterPlan` 停在 `plan.json` 落盘之后、备临时文件之前，把 T 挪开、在原处放一个指向 R 之外一个空目录的符号链接，再放行 → `Unknown`（`detail.temp` 是 T），那个目录仍然是空的，R 之外没有出现任何文件（`get_blob_rooted` 与 `clone_file_rooted` 都从 R 起逐级不跟随符号链接），工作区一字未动 | 新增（本模块评审 M19；Addendum 8 与「Addendum 8: get_blob_rooted」） |
 | `restore_across_bases_goes_through_rebase` | 在基线 T1 上 checkpoint（会话改了 `s` 与 `b`），工作区被换到 T2（上游改了 `u` 与 `b`）。不给 `target_base` 的 restore → `InvalidInput`；给了之后：`s` 是目标的内容，`u` 保持 T2 的内容（没有被改回 T1），`b` 是目标的版本，列在 `Restored.conflicts` 里；T2 的基线目录前后不变；把 T1 的基线目录删掉、在另一个位置重新导出（同一个 `BaseGen`），restore 照样成功；路径相同而内容不同的另一个 tree（不同的 tree OID）不被当作同一个基线 | tgrep-core/tests/shared_worktrees.rs::identical_base_at_another_location_can_restore_checkpoint<br>tgrep-core/tests/shared_worktrees.rs::checkpoint_rejects_changed_postings_even_with_identical_path_table<br>tgrep-core/tests/shared_worktrees.rs::wrong_root_and_reader_swap_are_rejected |
 | `restore_verify_detects_corruption` | 把一个 blob 文件改掉一个字节、长度不变：不带 verify 的 restore 照写（受信任读，裁定 T6），带 verify → `Corrupt`，在写任何东西之前；把基线目录里一个要克隆的文件截短 → 不带 verify 也是 `Corrupt`（大小不符）；只改一个字节不改长度 → 只有 verify 发现 | 新增（store.md：`restore --verify` 用 `verify_blob`；基线目录的完整性由读它的模块核对） |
 | `project_materializes_entries_onto_a_clone` | 把一个含各种条目（`Added`、`Untracked`、`Modified`、可执行文件、符号链接、`Deleted`、`Renamed`、目录换成文件的成组条目）的 overlay 投影到基线的一份新克隆上：结果逐路径等于原工作区里被跟踪与 `Untracked` 的内容（种类、内容或链接目标、git mode）；被删光的目录不留下；`project` 不读任何文件的内容。克隆里一个要删的基线文件缺了 → `Corrupt`，从不当作新文件；把克隆里一个上级目录换成指向 dst 之外的符号链接 → `NotDirectory`，dst 之外什么都没写；dst 不在 `<store.root()>/sessions/` 之下 → `InvalidInput`，什么都没写；结束时 dst 正下方没有 `.strata-project-*` | 新增（Addendum 3：投影归 overlay） |
 | `rebase_one_sided_changes_project` | 会话改了 `a`、上游改了 `b`、两边把 `c` 改成同样的内容、两边都删了 `d`：rebase 之后 `a` 是 `Modified`（会话版本），`b` 不在 overlay 里，`c` 与 `d` 列在 `dropped` 里，`overlay.base` 是新基线；分类只看新清单：上游新增了一个与会话的 `Untracked` 同名同内容的文件 → 进 `dropped`；rebase 前后工作区不变 | layerfs-workspace/tests/kernel_visit.rs::facts_of_another_base_are_ignored_and_read_again_for_the_present_one |
-| `rebase_both_changed_merge_or_conflict` | `merge = true`：两边改了同一个文本文件的不同区域 → 合并结果经 `put_bytes` 存下，条目是 `Modified`，内容等于 `git merge-file` 的结果；改了同一区域 → 冲突，取会话版本，列进 `conflicts`；一边删、一边改（两个方向）→ 冲突，取会话一侧；二进制文件、超过 64 MiB 的文件两边都改 → 冲突；会话把 `f` 改了名、上游改了 `f` → `f` 冲突，改名保留；会话加了可执行位、上游改了内容 → 条目是 `Modified { blob: 上游的 blob, mode: 0o100755 }`，这个 blob 已被存进 blob 存储（`verify_blob` 通过），`project` 到新基线的克隆上得到可执行的上游内容；`merge = false` → 两边都改的路径都是冲突，store 里不新增 blob | 新增<br>layerfs-api/tests/merge_by_serial.rs::an_edit_follows_a_moved_directory |
+| `rebase_both_changed_merge_or_conflict` | `merge = true`：两边改了同一个文本文件的不同区域 → 合并结果经 `put_bytes` 存下，条目是 `Modified`，内容等于 `git merge-file` 的结果；改了同一区域 → 冲突，取会话版本，列进 `conflicts`；一边删、一边改（两个方向）→ 冲突，取会话一侧；二进制文件、超过 64 MiB 的文件两边都改 → 冲突；会话把 `f` 改了名、上游改了 `f` → `f` 冲突，改名保留；会话加了可执行位、上游改了内容 → 条目是 `Modified { blob: 上游的 blob, mode: 0o100755 }`，这个 blob 已被存进 blob 存储（`verify_blob` 通过），`project` 到新基线的克隆上得到可执行的上游内容；`merge = false` → 两边都改的路径都是冲突，store 里不新增 blob，两边把 `g` 改成同样的内容、会话还加了可执行位的那一条也一样（它的 blob 等于新清单里的，但本来就在输入 overlay 里） | 新增<br>layerfs-api/tests/merge_by_serial.rs::an_edit_follows_a_moved_directory |
 | `rebase_moves_on_both_sides_do_not_conflict` | 会话把 `d/` 改名为 `x/`，上游把 `d/` 改名为 `y/` → 没有冲突，`x/*` 变成 `Added`，`d/*` 进 `dropped`；会话把 `a` 改名为 `b`、上游没动 `a` → 仍是 `Renamed`；上游删了 `a` → `b` 变成 `Added` | 新增<br>layerfs-api/tests/merge_by_serial.rs::a_directory_renamed_on_both_sides_conflicts |
 | `rebase_prefix_collisions_keep_the_session_side` | 会话把目录 `d/` 换成文件 `d`，上游在 `d/` 下加了 `d/new.ts` → 结果里 `d` 是会话的文件，`d/new.ts` 是墓碑（对新清单的 `Deleted`），两者都在 `conflicts` 里；会话加了 `lib/x.ts`，上游把 `lib` 换成文件 → `lib/x.ts` 保留，`lib` 成为墓碑，两者都在 `conflicts` 里；上游把 `lib` 换成符号链接，同样；每种情况 `validate()` 通过，`project` 到新基线的克隆上成功、从不跟随那个符号链接，结果逐路径等于预期 | 新增（本模块评审 I7） |
 | `lww_newest_wins_no_conflict` | 新基线的 `.strata/lww` 写着 `*.lock` 与 `generated/**`。两边都改了 `bun.lock` 的不同区域（`merge3` 本可以干净合并）→ 结果逐字节等于会话的版本，没有合并，不在 `conflicts` 里，列在 `lww` 里；两边都改了 `generated/api.ts` 的同一区域 → 同样取会话版本、不冲突；规则之外的 `src/a.ts` 两边改同一区域 → 冲突，保留会话版本；规则之外两边改不同区域 → 干净合并；同样的输入改用 `RebaseOptions::for_restore`（空规则）→ `bun.lock` 成为冲突 | 新增（design §4 `.lww`；发布时的平局规则归 publish，裁定 T10） |
@@ -914,7 +925,7 @@ restore 替换或删除的文件，总是先挪进 T，只有字节被证明在 
 
 ## 8. 实现任务（TDD）
 
-依赖的三个 crate 先要有 §2 列出的接口：apfs 的 `walk_with`、`WalkOptions`、`list_dir`、`Attrs`、`attrs_of`、`watch_with`、`open_rooted`、`open_rooted_file`、`clone_file_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`，以及 apfs 修订轮的 `case_fold_key`、`Watcher::flush`、`rename_rooted`、`remove_rooted`；gitio 的 `read_index`、`is_ignored`、`merge3`，以及测试的 fixture 用的 `Git::open`（对主 checkout）、`export_tree`、`ensure_shadow`、`attach_worktree`；store 的 blob（含 Addendum 8 的 `put_blob_rooted`）、checkpoint、会话与登记接口，以及它的测试接缝。任务按顺序做，后面的任务用前面的产出。
+依赖的三个 crate 先要有 §2 列出的接口：apfs 的 `walk_with`、`WalkOptions`、`list_dir`、`Attrs`、`attrs_of`、`case_fold_key`（连同它要声明的前缀性质）、`watch_with`、`Watcher::flush`、`open_root`、`open_rooted`、`open_rooted_file`、`clone_file_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`、`rename_rooted`、`remove_rooted`、`full_fsync`、`classify_io_error`；gitio 的 `read_index`、`is_ignored`、`merge3`，以及测试的 fixture 用的 `Git::open`（对主 checkout）、`export_tree`、`ensure_shadow`、`attach_worktree`；store 的 blob（含 Addendum 8 的 `put_blob_rooted` 与上游要求的 `get_blob_rooted`）、checkpoint、会话与登记接口，以及它的测试接缝。任务按顺序做，后面的任务用前面的产出。
 
 ### Task 1: `Overlay` 的形状规则与成组
 
@@ -1089,7 +1100,7 @@ git commit -m "feat(overlay): deterministic rename pairing"
 Run: `cargo test -p strata-overlay --test incremental`
 Expected: FAIL（`Inbox` 还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.4 全部：常数时间的 `note`、上限与全扫、快照与失败时并回、拼写解析、文件与子树的重判、index 对称差；§5.5 的增量分支与 `needs_full` 的各个来源
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.4 全部：常数时间的 `note`（按 inbox 当前的 X 过滤）、`hint` 对符号链接的一跳解析、上限与全扫、快照与失败时并回、拼写解析、文件与子树的重判、index 对称差；§5.5 的增量分支与 `needs_full` 的各个来源
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-overlay --test incremental`
@@ -1119,7 +1130,7 @@ git commit -m "feat(overlay): dirty set and incremental scans equal to the cold 
 Run: `cargo test -p strata-overlay --features test-seams --test checkpoint`
 Expected: FAIL（`checkpoint` 还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.6 的七步：核对（`stale_base`、`wrong_root` 用 dev + inode）、按原因选扫描（`Manual`、`Before*` 冷的全扫；`ToolCall` 增量，`require_full` 之后热的全扫）、无变化不写、`put_blob_rooted` 作为存储时的哈希器与写竞态规则（`NoSuchPath`、`IsDirectory`、`NotFile` 重判路径，`NotDirectory` 重判换掉的那一级子树）、记行与 `ToolCall` 去重的识别、失败时并回 inbox
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.6 的七步：核对（`stale_base`、`wrong_root` 用 dev + inode）、按原因选扫描（`Manual`、`Before*` 全扫；`ToolCall` 增量，`require_full` 之后同样全扫）、无变化不写、`put_blob_rooted` 作为存储时的哈希器与写竞态规则（`NoSuchPath`、`IsDirectory`、`NotFile` 重判路径，`NotDirectory` 重判换掉的那一级子树）、记行与 `ToolCall` 去重的识别、失败时并回 inbox
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-overlay --features test-seams --test checkpoint`
@@ -1140,7 +1151,7 @@ git commit -m "feat(overlay): checkpoints that store only what changed"
 - Test: `crates/strata-overlay/tests/rebase.rs`
 
 **Interfaces:**
-- Consumes: `strata_gitio::{merge3, Merge3}`；`strata_store::Store` 的 `read_blob`、`put_bytes`、`put_blob`、`get_blob`、`root`；`strata_apfs::{open_rooted_file, mkdir_rooted, symlink_rooted, rename_rooted, RenameMode, remove_rooted, RemoveKind}`；libc 的 `fchmod`；测试里还有 `verify_blob`；Task 2 的 `lww_matches`；Task 4、5 的分类与配对
+- Consumes: `strata_gitio::{merge3, Merge3}`；`strata_store::Store` 的 `read_blob`、`put_bytes`、`put_blob`、`get_blob_rooted`、`root`；`strata_apfs::{open_rooted_file, mkdir_rooted, symlink_rooted, rename_rooted, RenameMode, remove_rooted, RemoveKind, classify_io_error}`；libc 的 `fchmod`；测试里还有 `verify_blob`；Task 2 的 `lww_matches`；Task 4、5 的分类与配对
 - Produces: `rebase`、`RebaseOptions`（`for_move`、`for_restore`）、`Rebased`、`MERGE_MAX_BYTES`、`project`
 
 - [ ] **Step 1: 写失败的测试**：`rebase_one_sided_changes_project`、`rebase_both_changed_merge_or_conflict`、`rebase_moves_on_both_sides_do_not_conflict`、`lww_newest_wins_no_conflict`、`rebase_prefix_collisions_keep_the_session_side`、`project_materializes_entries_onto_a_clone`
@@ -1169,7 +1180,7 @@ git commit -m "feat(overlay): whole-file three-way rebase with .lww, and project
 - Test: `crates/strata-overlay/tests/restore.rs`
 
 **Interfaces:**
-- Consumes: `strata_store::Store` 的 `checkpoint`、`get_blob`、`read_blob`；`strata_apfs::{clone_file_rooted, create_file_rooted, open_rooted, open_rooted_file, mkdir_rooted, symlink_rooted, rename_rooted, remove_rooted, attrs_of}`；libc 的 `fchmod`、`fchflags`、`flistxattr`、`fremovexattr`、`futimens`、`fsync`、`fcntl(F_FULLFSYNC)`；Task 7 的 `checkpoint`；Task 8 的投影写法
+- Consumes: `strata_store::Store` 的 `checkpoint`、`get_blob_rooted`、`read_blob`；`strata_apfs::{clone_file_rooted, create_file_rooted, open_root, open_rooted, open_rooted_file, mkdir_rooted, symlink_rooted, rename_rooted, remove_rooted, attrs_of, full_fsync, classify_io_error}`；libc 的 `fchmod`、`fchflags`、`flistxattr`、`fremovexattr`、`futimens`、`fsync`；Task 7 的 `checkpoint`；Task 8 的投影写法
 - Produces: `restore`、`RestoreRequest`、`Restored`、`RESTORE_TEMP_PREFIX`
 
 - [ ] **Step 1: 写失败的测试**：`restore_is_itself_checkpointed`、`restore_before_a_rename_brings_back_the_old_name`、`deleted_base_file_is_tombstone`、`symlink_entry_is_exact_target_bytes`、`special_mode_bits_are_normalized_and_warned`、`git_modes_roundtrip`、`sparse_file_is_hashed_whole`、`xattrs_are_never_recorded_or_restored`、`empty_directories_are_not_carried`、`external_writers_are_captured_exactly`、`checkpoint_is_immutable_and_restorable`、`restore_paths_select_whole_groups`、`restore_missing_checkpoint_is_store_error`、`restore_refuses_malformed_checkpoint`、`stale_base_and_wrong_root_are_refused`、`excluded_dirs_never_enter_overlay`
@@ -1198,7 +1209,7 @@ git commit -m "feat(overlay): a restore that checkpoints first"
 - Test: `crates/strata-overlay/tests/restore_safety.rs`
 
 **Interfaces:**
-- Consumes: Task 8 的 `rebase` 与 `RebaseOptions::for_restore`；`strata_store::Store::verify_blob`；`strata_apfs::list_dir`（看 T）；`OverlayFault::{PauseBeforePrecheck, PauseInApply}`
+- Consumes: Task 8 的 `rebase` 与 `RebaseOptions::for_restore`；`strata_store::Store::verify_blob`；`strata_apfs::list_dir`（看 T）；`OverlayFault::{PauseBeforePrecheck, PauseAfterPlan, PauseInApply}`
 - Produces: `restore` 的跨基线路径（`RestoreRequest.target_base`）、`verify`、`restore_scene` 现场与 `Busy`（`workspace_changed`）
 
 - [ ] **Step 1: 写失败的测试**：`restore_never_overwrites_unrecorded_content`、`restore_concurrent_write_is_kept_in_scene`、`restore_verify_detects_corruption`、`restore_across_bases_goes_through_rebase`、`random_edits_incremental_equals_cold_and_restores_exact`、`restore_never_writes_through_a_symlinked_directory`
@@ -1207,7 +1218,7 @@ git commit -m "feat(overlay): a restore that checkpoints first"
 Run: `cargo test -p strata-overlay --features test-seams --test restore_safety`
 Expected: FAIL（跨基线的 restore 还返回 `InvalidInput`，预检还没有 `Exists` 与 `Busy`）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.7 第 1 步（T 被占时的 `Exists`，现场的判定与自动了结，`lifecycle` 或 `health` 为 `Unknown` 时的拒绝）、第 4 步（经 `rebase`）、第 8 步其余的预检（`Exists`、`Busy`、上级目录的类型、`verify`）与第 9 步的 `Busy`、第 10 步的落盘顺序、阶段 C 失败时 `detail` 的 `before`、`done`、`pending`、`temp`；proptest 的操作生成器放在测试文件里
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.7 第 1 步（T 被占时的 `Exists`，现场的判定与自动了结，`lifecycle` 或 `health` 为 `Unknown` 时的拒绝）、第 4 步（经 `rebase`）、第 8 步其余的预检（`Exists`、`Busy`、上级目录的类型、`verify`）与第 9 步的 `Busy`、第 10 步的落盘顺序与建 T 时的 `Busy`、阶段 C 失败时 `detail` 的 `before`、`done`、`pending`、`temp`；proptest 的操作生成器放在测试文件里
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-overlay --features test-seams --test restore_safety`
@@ -1224,14 +1235,14 @@ git commit -m "feat(overlay): restore scenes, verification and cross-base projec
 
 | 事项（design 里标 [交给构建者]、落在本模块） | 选择 | 理由 | 日期 |
 | --- | --- | --- | --- |
-| 对账间隔（design §6.2、§12） | 每小时一次热的 `compute(…, None)`，没有路径清单的工具调用之后也是热的全扫；`Manual` 与 `Before*`（含发布前的 `BeforePublish`）是冷的全扫（Addendum 8，§5.6 第 2 步）；调度由 daemon 做 | design 给的默认是每小时与发布前；热的全扫只遍历元数据，tool 的源码树温热 0.20 s（apfs.md §5.9）；冷扫 tool 读 42.3 MB，仍在 3 s 之内 | 2026-10-22；调度见 daemon.md |
+| 对账间隔（design §6.2、§12） | 每小时一次 `compute(…, None)`；`Manual`、`Before*`（含发布前的 `BeforePublish`）与没有路径清单的工具调用之后也全扫（§5.6 第 2 步）；调度由 daemon 做 | design 给的默认是每小时与发布前；Addendum 8 要 `Manual` 与 `Before*` 做不依赖事件的全扫（module-rulings「Cold scan」）；全扫只遍历元数据，tool 的源码树温热 0.20 s（apfs.md §5.9） | 2026-10-22；调度见 daemon.md |
 | 大文件阈值（design §7、§12），overlay 这一侧 | 阈值不影响成员资格，超阈值的文件照常进 overlay、整份哈希；rebase 的内容合并上限 `MERGE_MAX_BYTES` 取同一个值 64 MiB，超过就算冲突 | 3f:463：超限的文件绝不能被当成删除；三方合并几十 MB 的文件既慢又少有意义 | 2026-10-22；阈值本身若改，两处一起改 |
 | 属性缓存是否持久化 | 不持久化，daemon 重启后第一次扫描冷扫（§4.1） | 持久化就得证明重启期间没漏掉写入；冷扫 tool 是 42.3 MB，远低于 3 s | 2026-10-22 |
 | 脏集合上限 | `DEFAULT_DIRTY_CAPACITY` = 65 536 项，超过即全扫 | 超过这个量，一次热缓存的全扫并不比逐项处理慢 | 2026-10-22；spike 实测后可调 |
 | 哈希的并行度 | 16 MiB 以下的文件单线程流式哈希，文件之间用 rayon 并行；16 MiB 及以上 mmap 加多线程，与 store 相同 | 与 store 的 put 一致，两边算出的 BLAKE3 恒等 | 2026-10-22 |
 | 每小时全扫要不要偶尔冷扫 | 不做：gen count 抓得住每一次内容写入（§4.1 实测，apfs.md §4.2 C） | design §8："我们不读内容"；冷扫只在没有缓存时发生 | 2026-10-22；spike 若发现 gen count 有漏报，改为每天冷扫一次 |
 
-本文其余标 [我的决定] 的地方，按出现的顺序（design 与 Addendum 1–8 都没有定）：
+本文其余标 [我的决定] 的地方，按出现的顺序（design、Addendum 1–8 与其后的裁定都没有定）：
 
 | 位置 | 决定 | 理由 |
 | --- | --- | --- |
@@ -1242,9 +1253,9 @@ git commit -m "feat(overlay): restore scenes, verification and cross-base projec
 | §3 测试接缝 `read_candidate`、`ReadProbe` | 写竞态规则在 Task 3 实现时就有一个先失败的测试 | 它是 §5.2 的规则，不该等到 checkpoint 那一步才测 |
 | §3 restore 的 `NoSuchPath` | 除了目标 checkpoint 与两边的基线，也认当前 overlay 里的路径；按字节比较，只差大小写时 `detail.on_disk` 给出磁盘上的拼写 | 路径限定的 restore 要能撤销 checkpoint 之后新建的文件 |
 | §3 restore 的 `OpenFiles` | 要动的文件有可写的 mmap（gen count 不可得）时用它 | 共同规则下最接近的已有码；Task 15 在 types.md §6.2 的"谁返回"补上 overlay |
-| §4.2、§5.7 T 里的文件 | 只在字节已被证明在 `BeforeRestore`、blob 存储或基线里时才删 | 不变量 6：restore 期间别人写下的字节不能丢 |
 | §5.1 种子文件 | `config.seed_files()` 的候选里不在 M、不在 index 里的，进排除集合 X | `.gitignore` 改了也不会让 `.env` 以 `Untracked` 被发布出去 |
 | §5.1 X 之下的基线条目 | 不比较、不成为墓碑 | 依赖目录里被跟踪的文件，工作区里的那一份是依赖集的克隆，不是会话的改动 |
+| §5.1 落不落在 X 之下 | 按折叠比较（ignorecase 时比 `case_fold_key`）：遍历、`Inbox::note`、拼写解析、V5 与 restore 都用它 | 大小写不敏感的卷上 `.ENV` 占的就是种子文件 `.env` 的位置，不能因为拼写不同被发布；与 apfs 按 `exclude` 过滤事件的比较一致，`note` 接过这个过滤才等价 |
 | §5.1 `staged` | 用 gitio 的 `IndexInfo::is_tracked`（只折叠 ASCII） | `Added` 与 `Untracked` 的分界照搬 git 自己的回答 |
 | §5.1 restore 的 `paths` | 按字节比较；折叠只用来给 `NoSuchPath` 的提示 | 人给的路径就是人要的那个，不猜 |
 | §5.1 嵌套仓库 | `EmbeddedRepo` 告警，按受限目录进入（只看 M 与 index 里的名字） | 不把别人的仓库当成 `Untracked` 发布，也不丢基线文件 |
@@ -1252,15 +1263,16 @@ git commit -m "feat(overlay): restore scenes, verification and cross-base projec
 | §5.3 配对顺序 | ignorecase 时先配只改大小写的，再按精确内容配；V 按路径升序，每次取最小的 n | 配对只依赖最终状态，结果确定（3c:99） |
 | §5.4 `.gitignore` 的事件 | 要求全扫 | ignore 规则变了，整棵树的成员资格都可能变 |
 | §5.4 全局排除文件 | 不监听，改动在下一次全扫时生效 | 发布前与 `Before*` 都全扫，所以不会因此发布错文件（O7 的例外） |
-| §5.6 没有路径清单的工具调用 | daemon 先 `Inbox::require_full`，这次 `ToolCall` 是热缓存的全扫 | Addendum 8 让 overlay 在热的全扫与"晚一个工具调用"之间选。晚一个调用更便宜，但 checkpoint N 会缺第 N 个调用里 Bash 的写入，restore 到 N 会撤掉 N 的一部分（`BeforeRestore` 仍兜底，不丢字节）；全扫让每个 checkpoint 都含工具返回之前的全部写入，代价是 tool 上 0.20 s |
+| §5.4 X 在 inbox 里过滤 | 监听只排除 `.git`；依赖目录、种子缓存与种子文件由 `Inbox::note` 按当前的 X 丢弃；X 或 ignorecase 变了的那次扫描先换 inbox 的 X，再取快照；比较同 §5.1 的 X 一行 | apfs 本来就在回调里按 `exclude` 过滤，代价相同；X 缩小之后，重新纳入的目录里的事件不再被丢，不用重新 watch，也没有两个流交接的空档（本模块评审 N1） |
+| §5.4 hint 与符号链接 | 经符号链接写的路径，hint 把链接指向的路径也记下（相对目标、只解一跳、落在根之内）；其余要求全扫 | Edit、Write 经 `CLAUDE.md` → `AGENTS.md` 这样的链接写，写到的是目标（本模块评审 N2）；多跳或指到根外的少见，全扫兜底 |
+| §5.6 没有路径清单的工具调用 | daemon 先 `Inbox::require_full`，这次 `ToolCall` 是与 `Manual` 相同的全扫 | Addendum 8 让 overlay 在全扫与"晚一个工具调用"之间选。晚一个调用更便宜，但 checkpoint N 会缺第 N 个调用里 Bash 的写入，restore 到 N 会撤掉 N 的一部分（`BeforeRestore` 仍兜底，不丢字节）；全扫让这种调用的 checkpoint 含它返回之前完成的写入，代价是 tool 上 0.20 s，超出 design §8 的 200 ms（module-rulings T13 一条：阶段末尾交给用户） |
 | §5.6 `Before*` | 没有变化也记一行 | 调用方需要一个能指认的号（`Restored.before`、session 的 `RemoveReport.checkpoints`） |
 | §5.7 T 的位置 | 会话根下的 `.strata-tmp-restore-<repo>/`，与工作区同卷 | 改名不跨卷；在工作区之外，监听看不到，也不会被当成 `Untracked` |
 | §5.7 跨基线的 restore | `RebaseOptions::for_restore`：不合并、不用 `.lww`，两边都改的路径取目标的版本并报冲突 | restore 只写回目标里真实存在过的内容 |
-| §5.7 `paths` 的选择 | 按字节；等于或是候选路径的目录前缀；再取 `paired` 闭包 | 改名、类型互换成组恢复（裁定 T7） |
-| §5.7 基线文件的克隆 | 清 BSD 标志、`fchmod`、清 xattr、mtime 设为当前时刻 | 与 `get_blob` 的产物一致；增量构建要把内容变了的文件当成变了 |
-| §5.7 restore 弄空的目录 | 只删空目录，目录不空就停 | `rmdir` 带不走任何字节；类型互换要腾出这个名字。Addendum 7 只写了"自己建的空目录"，见报告 |
+| §5.7 `paths` 的选择 | 按字节；等于或是候选路径的目录前缀；再在 C 与 D 的并集上取成组闭包 | 改名、类型互换成组恢复（裁定 T7） |
+| §5.7 预检里挡路的东西 | 一律 `Exists`，在记 `BeforeRestore` 之前返回 | 扫描不进被剪掉的 ignore 目录、不留它们的属性，分不出扫描之前就在还是之后才出现；两种情况都要人先挪开它（本模块评审 N6） |
+| §5.7 基线文件的克隆 | 清 BSD 标志、`fchmod`、清 xattr、mtime 设为当前时刻 | 与 `get_blob_rooted` 的产物一致；增量构建要把内容变了的文件当成变了 |
 | §5.7 持久性 | 工作区里的文件不做 `F_FULLFSYNC`，`plan.json` 做 | 与 git checkout 一样；`BeforeRestore` 与 `plan.json` 已落盘，掉电之后总能恢复 |
-| §5.7 现场的了结 | `plan.json` 列出、字节对得上、checkpoint 都还在 → 下一次 restore 自动了结；否则 `Unknown`，人工了结或 `rm --discard` | Addendum 7 要 overlay 定了结的办法；自动了结只删已被证明的字节 |
 | §5.8 `.lww` | 命中的路径会话一侧胜出 | rebase 投影的 overlay 来自刚记下的 checkpoint，比新基线新；保证不了这一点的 restore 传空规则 |
 | §5.8 前缀冲突 | 保留会话一侧，基线一侧的路径成为墓碑，两边都报冲突 | 会话的改动一个不丢，结果满足 V4，`project` 不会把它当成损坏 |
 | §5.10 `%include` | 最多读 16 个文件；读不了的当作空文件 | 读不全只会让更多文件按普通文件处理，不会让文件被悄悄覆盖 |
