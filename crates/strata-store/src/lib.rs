@@ -23,6 +23,7 @@ mod deps;
 mod errors;
 mod gens;
 mod open;
+mod records;
 mod retire;
 mod schema;
 mod seams;

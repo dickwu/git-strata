@@ -427,6 +427,31 @@ fn read_only_open_refuses_every_write() {
         r.retire_dir(&env.root.join("bases/app/.staging/0123456789abcdef0123456789abcdef")).err().unwrap(),
         // Task 6
         r.record_checkpoint(cp.clone()).err().unwrap(),
+        // Task 7
+        r.record_publish(
+            &strata_types::ReleaseGroup {
+                id: 0,
+                batches: vec![strata_types::Batch { session: sid.clone(), repo: repo.clone(), checkpoint: cpid, paths: vec![f.clone()] }],
+            },
+            at,
+        )
+        .err()
+        .unwrap(),
+        r.set_publish_phase(1, strata_store::PublishPhase::Running, strata_store::PublishPhase::Done, None, at).err().unwrap(),
+        r.record_ref_change(&strata_store::RefChange {
+            at,
+            repo: repo.clone(),
+            op: strata_store::RefOp::Push,
+            ref_name: "refs/heads/main".into(),
+            old: None,
+            new: head.clone(),
+            outcome: strata_store::RefOutcome::Pushed,
+            publish: None,
+            confirmed: None,
+            detail: None,
+        })
+        .err()
+        .unwrap(),
     ] {
         assert_reason(&e, Code::ReadOnly, "read_only_handle");
     }

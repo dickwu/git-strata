@@ -11,7 +11,8 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 | 3 deps sets, attempts, proposals and main | done | d7282b5 |
 | 4 base generations with their manifests | done | b633b29 |
 | 5 sessions, workspaces, move intents and retire_dir | done | d692877 |
-| 6 atomic checkpoint records with store-assigned ids | done | (see git log) |
+| 6 atomic checkpoint records with store-assigned ids | done | c06f7e2 |
+| 7 publish records and ref audit | done | (see git log) |
 
 ## Ambiguity decisions
 
@@ -181,3 +182,26 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 - Task 6: `late_source_failure_writes_no_checkpoint` checks that the k−1
   blobs stay in `blobs/` (unregistered); the "gc collects them past the age
   floor" half is covered in Task 9 (gc does not exist yet).
+- Task 7: `record_publish` ignores `group.id` and assigns max+1 (overflow is
+  `TooLarge{limit:"release_group_id"}`). Empty `batches` or an empty `paths`
+  list is `InvalidInput`; each batch's session must exist and not be
+  `removed` (`NoSuchSession`), its `(session, checkpoint)` must exist
+  (`NoSuchCheckpoint`), and the checkpoint's repo must equal `batch.repo`
+  (`InvalidInput{reason:"checkpoint_repo"}`). Validation runs before the
+  read-only check, as in Task 6.
+- Task 7: `set_publish_phase` refuses statically illegal transitions (only
+  running→done, running→unknown, unknown→done) with
+  `InvalidInput{reason:"transition"}`. An unknown publish id is
+  `InvalidInput{reason:"no_such_publish"}` (a caller bug), whereas an
+  existing publish in a different phase returns `Ok(false)` (lost CAS).
+  `outcome: None` keeps any earlier outcome (unknown→done after a
+  running→unknown with an outcome keeps it); `ended_ns` is always the
+  latest transition time.
+- Task 7: `record_ref_change` validates the op/outcome pairing and the
+  `refs/strata/` prefix for `update_ref` up front (`InvalidInput`), and a
+  `publish` that does not exist is `InvalidInput{reason:"no_such_publish"}`.
+  `confirmed` is stored as the serde JSON of `Action`. `ref_changes` orders
+  by `(at_ns, id)`; an unknown publish gives an empty list.
+- Task 7: `publish_record` rebuilds batches from `publish_items` ordered by
+  `(batch, item)`; gaps, a batch whose items disagree on
+  session/repo/checkpoint, or a publish with no items are `Corrupt{bad_row}`.
