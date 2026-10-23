@@ -9,9 +9,11 @@ use strata_store::Store;
 use strata_types::{RepoConfig, RepoName, SessionId, StrataError};
 
 pub mod chain;
+pub mod check;
 pub mod stage;
 
 pub use chain::{advance_anchor, anchor_ref, chain_ref, merge_base};
+pub use check::{CHECK_OUTPUT_TAIL, ChecksRan, check};
 pub use stage::{HUNK_TEXT_CAP, Staged, stage};
 
 pub type Result<T> = std::result::Result<T, StrataError>;

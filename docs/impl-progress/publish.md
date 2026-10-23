@@ -7,8 +7,8 @@ Branch `impl/publish` (worktree `git-strata-wt/publish`), from `impl/v1` 95f7660
 | Task | Status | Commit |
 |---|---|---|
 | 1 chain ref and anchor advance | done | fd86995 |
-| 2 path-level stage and merge | done | (this commit) |
-| 3 read-only checks | todo | |
+| 2 path-level stage and merge | done | 8ad75bd |
+| 3 read-only checks | done | (this commit) |
 | 4 commit, push, and unknown | todo | |
 | 5 rebase, assign, and diff | todo | |
 | 6 one merge under the repo lock | todo | |
@@ -92,3 +92,23 @@ These touch shared crates; a parallel worker (search) may conflict there.
   case cannot be recorded through `record_checkpoint`).
 - `stage_goes_through_gitio_stage` allows gitio's own `export_tree`
   `read-tree` (private `GIT_INDEX_FILE`) besides `attach_staging`/`stage`.
+
+### Task 3 (checks)
+
+- `check(cfg, staged)` runs `validate_commands` itself as well (the gate in
+  `publish` runs it earlier, before any directory). Each check line is split
+  by the config splitter (reached through `install_argv` on a clone, since
+  `split_command` is private), run with `cwd = staged`, no shell, stdin
+  `/dev/null`, inherited environment minus every `GIT_*` variable (the
+  staging gitfile decides the repository). No timeout is applied (the spec
+  names none).
+- The first failing check stops the run; later checks do not run.
+  `CheckFailed.detail = {command, index, exit_code, signal, output_tail,
+  checks_ran}`; `output_tail` is the last 8 KiB of stdout followed by stderr
+  (two pipes, not interleaved), lossy UTF-8. A spawn failure counts as a
+  failed check (`exit_code: null`, `spawn_error`).
+- The layout root is `staged.parent()`, removed with `remove_tree_rooted`
+  relative to its parent. Incomplete removal → `Unknown` (reason cleanup)
+  with the check detail under `detail.check`.
+- The "cannot remove" test uses the apfs `before_open` seam to swap a
+  directory for a symlink mid-removal (no chflags/root needed).
