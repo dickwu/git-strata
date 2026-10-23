@@ -25,6 +25,8 @@ mod error;
 mod sys;
 mod volume;
 mod walk;
+mod casefold;
+mod casefold_table;
 
 pub use attrs::{Attrs, FileKind, attrs_of};
 pub use clone::{clone_file, clone_tree};
@@ -45,6 +47,7 @@ pub mod seams {
     pub use crate::hooks::{MetaChange, set_after_bulk_window, set_before_meta, set_before_open};
 }
 pub use error::{IoSide, classify_io_error};
+pub use casefold::{case_fold_eq, case_fold_key};
 pub use walk::{Walk, WalkOptions, list_dir, walk, walk_with};
 pub use volume::{VolumeCaps, nearest_existing_ancestor, same_volume, volume_caps};
 

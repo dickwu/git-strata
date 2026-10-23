@@ -12,7 +12,7 @@ Branch: `impl/v1`. Ledger for the implementation run. design.md wins over module
 | Unit | Status | Tests |
 | --- | --- | --- |
 | `strata-types` (ids, errors, config V1–V11, design §6.7, default inter config) | done | `cargo test -p strata-types` → 35 passed |
-| apfs §8 tasks | Tasks 1–6 done (errno/volume, clone, rooted open + seams, rooted destinations/rename/remove/fsync/meta, remove_tree_rooted/clone_from_rooted, Attrs/bulk parser/attrs_of/gen count); Task 7 done (getattrlistbulk walk/walk_with/list_dir) | |
+| apfs §8 tasks | Tasks 1–6 done (errno/volume, clone, rooted open + seams, rooted destinations/rename/remove/fsync/meta, remove_tree_rooted/clone_from_rooted, Attrs/bulk parser/attrs_of/gen count); Tasks 7–8 done (getattrlistbulk walk/walk_with/list_dir; case_fold_key/case_fold_eq, Unicode 17 table) | |
 | gitio §8 tasks | not started | |
 | store §8 tasks | not started | |
 | overlay §8 tasks | not started | |
