@@ -8,7 +8,8 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 |---|---|---|
 | 1 open, layout, pinned schema and guards | done | 87e5b26 |
 | 2 content-addressed blob put, get and verify | done | 1e17403 |
-| 3 deps sets, attempts, proposals and main | done | (see git log) |
+| 3 deps sets, attempts, proposals and main | done | d7282b5 |
+| 4 base generations with their manifests | done | (see git log) |
 
 ## Ambiguity decisions
 
@@ -88,6 +89,21 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 - Task 3: `proposals(open_only)` tests the session condition with a raw
   `sessions` row (Task 5 adds the session API); a Removed session's
   AwaitingPublish is filtered by `lifecycle <> 'removed'` in the same query.
+- Task 4: `record_base_gen` validates everything it can before the
+  transaction: `manifest.tree != gen.tree` → `InvalidInput{field:"tree"}`;
+  a mode outside {100644, 100755, 120000} → `InvalidInput{field:"mode", path}`.
+  Inside BEGIN IMMEDIATE: `deps_unregistered` (deps set must exist for the
+  same repo) is checked before the manifest comparison.
+- Task 4 `manifest_mismatch` `detail.path`: entries are compared pairwise in
+  path order (byte order, the same as `RepoPath`'s `Ord` and SQLite BINARY);
+  at the first unequal pair the smaller of the two paths is reported (when
+  only blob/mode/size differ, the two paths are the same). If one list is
+  a prefix of the other, the first extra path is reported.
+- Task 4: when the tree's manifest is already registered and the base_gens
+  row already exists, the transaction is rolled back (no write at all);
+  `base_gens.id` is left to SQLite's rowid assignment.
+- Task 4: `manifest()` cross-checks `base_trees.files` against the entry
+  count and re-validates mode/size/path/blob, reporting `Corrupt{reason:"bad_row"}`.
 
 ## Blockers / notes
 

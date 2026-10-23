@@ -312,6 +312,18 @@ fn read_only_open_refuses_every_write() {
     let pid = w.record_proposal(&proposal, None, at).unwrap().unwrap();
     let main = DepsMain { repo: repo.clone(), tree: tree.clone(), head: head.clone(), inputs_hash: "a".repeat(64), set: set('a'), observed: at };
     w.set_deps_main(&main, None).unwrap();
+    let empty = strata_types::DepsSet {
+        id: set('c'),
+        repo: repo.clone(),
+        inputs_hash: "c".repeat(64),
+        platform: "p".into(),
+        toolchain: "t".into(),
+        dirs: vec![],
+    };
+    w.record_deps_set(&empty, DepsOrigin::Empty, None, at).unwrap();
+    let base = strata_types::BaseGen { repo: repo.clone(), tree: tree.clone(), deps: set('c') };
+    let manifest = strata_types::BaseManifest { tree: tree.clone(), entries: Default::default() };
+    w.record_base_gen(&base, &manifest, at).unwrap();
     w.close().unwrap();
     let src = env.dir.path().join("ro-src");
     std::fs::create_dir_all(&src).unwrap();
@@ -329,6 +341,8 @@ fn read_only_open_refuses_every_write() {
     assert!(r.proposal(pid).unwrap().is_some());
     assert_eq!(r.deps_main(&repo).unwrap(), Some(main.clone()));
     assert!(r.deps_set(&repo, &set('a')).unwrap().is_none());
+    assert!(r.has_base_gen(&base).unwrap());
+    assert_eq!(r.manifest(&repo, &tree).unwrap(), Some(manifest.clone()));
     // write functions are refused, one block per task
     let f = strata_types::RepoPath::try_from("f".to_string()).unwrap();
     for e in [
@@ -361,6 +375,8 @@ fn read_only_open_refuses_every_write() {
         r.promote_proposal(pid, &tree, &head, at).err().unwrap(),
         r.decide_proposal(pid, ProposalDecision::Applied, at).err().unwrap(),
         r.set_deps_main(&main, Some(&main)).err().unwrap(),
+        // Task 4
+        r.record_base_gen(&base, &manifest, at).err().unwrap(),
     ] {
         assert_reason(&e, Code::ReadOnly, "read_only_handle");
     }

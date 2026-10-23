@@ -20,6 +20,7 @@ mod blob;
 mod codec;
 mod deps;
 mod errors;
+mod gens;
 mod open;
 mod schema;
 mod seams;
