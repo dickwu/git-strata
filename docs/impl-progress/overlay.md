@@ -9,8 +9,8 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 | 1 overlay shape rules and pairing | done | 195a6da |
 | 2 .lww rules in the LayerFS glob dialect | done | 7b18fe7 |
 | 3 base manifests and race-safe reads | done | d1fd21a |
-| 4 membership, classification and the cold scan | done | (this commit) |
-| 5 deterministic rename pairing | todo | |
+| 4 membership, classification and the cold scan | done | d5ea948 |
+| 5 deterministic rename pairing | done | (this commit) |
 | 6 dirty set and incremental scans | todo | |
 | 7 checkpoints that store only what changed | todo | |
 | 8 three-way rebase with .lww, and projection | todo | |
@@ -84,3 +84,22 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
   "Permission denied", so it is for a human to run).
 - Task 4: no rename pairing yet, so a case-only rename shows as Deleted +
   new path until Task 5 (`rename.rs`).
+- Task 5: case-only pairing groups N once by `case_fold_key` when either
+  fold folds (volume case-insensitive or `core.ignorecase`); both folds that
+  fold use the same key, and a byte fold can never pair a v in M with an n
+  not in M, so one grouping is exactly "equal under either fold". Case-only
+  pairing does not look at type (a file renamed to a symlink of another case
+  still pairs), as §5.3 step 1 says "不看内容".
+- Task 5: exact-content pairing skips a candidate n that is a directory
+  prefix of v or vice versa (`d/f` → file `d`, `f` → `f/x`): §5.3 rules those
+  type swaps as Deleted + Added/Untracked, so they are never Renamed even
+  when the content is equal (extra test
+  `type_swap_with_equal_content_is_not_a_rename`). A base entry whose mode
+  is neither file nor symlink (gitlink) never pairs.
+- Task 5: the hard-link "moved link name" case pairs by path order: with
+  `other.txt` linked as `z/other-link.txt` and moved to `a/other.txt`, the
+  rename lands on `a/other.txt` (smallest path), `z/other-link.txt` stays
+  Untracked.
+- Task 5: the case-sensitive-volume half of
+  `rename_case_only_recorded_as_rename` is a separate #[ignore] test; the
+  disk-image helper moved to `tests/common` (`Image::case_sensitive`).

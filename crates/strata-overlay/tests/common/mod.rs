@@ -362,3 +362,59 @@ fn run_git(home: &Path, xdg: &Path, cwd: &Path, args: &[&str]) -> String {
     );
     String::from_utf8_lossy(&o.stdout).trim().to_owned()
 }
+
+/// A case-sensitive APFS disk image mounted under the temp dir; detached and
+/// deleted on drop (tests that use it are `#[ignore]`: they need `hdiutil`).
+pub struct Image {
+    pub mount: PathBuf,
+    file: PathBuf,
+}
+
+impl Image {
+    pub fn case_sensitive() -> Image {
+        let base = std::env::temp_dir().join(format!(
+            "strata-cs-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("cs.dmg");
+        let mount = base.join("mnt");
+        fs::create_dir_all(&mount).unwrap();
+        let st = Command::new("/usr/bin/hdiutil")
+            .args([
+                "create",
+                "-quiet",
+                "-size",
+                "64m",
+                "-fs",
+                "Case-sensitive APFS",
+            ])
+            .args(["-volname", "strata-cs"])
+            .arg(&file)
+            .status()
+            .unwrap();
+        assert!(st.success(), "hdiutil create");
+        let st = Command::new("/usr/bin/hdiutil")
+            .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+            .arg(&mount)
+            .arg(&file)
+            .status()
+            .unwrap();
+        assert!(st.success(), "hdiutil attach");
+        Image { mount, file }
+    }
+}
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        let _ = Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-force"])
+            .arg(&self.mount)
+            .status();
+        let _ = fs::remove_file(&self.file);
+        if let Some(d) = self.file.parent() {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+}

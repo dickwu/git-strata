@@ -698,56 +698,11 @@ fn excluded_paths_follow_disk_identity() {
     assert_eq!(kinds(&cold(&w)), vec![e(".ENV", "Modified", F)]);
 }
 
-/// Mounts a case-sensitive APFS image under `dir`; detached on drop.
-struct Image {
-    mount: std::path::PathBuf,
-    file: std::path::PathBuf,
-}
-
-impl Drop for Image {
-    fn drop(&mut self) {
-        let _ = Command::new("/usr/bin/hdiutil")
-            .args(["detach", "-force"])
-            .arg(&self.mount)
-            .status();
-        let _ = fs::remove_file(&self.file);
-    }
-}
-
 #[test]
 #[ignore = "needs hdiutil (a case-sensitive disk image)"]
 fn excluded_paths_follow_disk_identity_case_sensitive() {
-    let base = std::env::temp_dir().join(format!("strata-cs-{}", std::process::id()));
-    fs::create_dir_all(&base).unwrap();
-    let file = base.join("cs.dmg");
-    let mount = base.join("mnt");
-    fs::create_dir_all(&mount).unwrap();
-    let st = Command::new("/usr/bin/hdiutil")
-        .args([
-            "create",
-            "-quiet",
-            "-size",
-            "64m",
-            "-fs",
-            "Case-sensitive APFS",
-        ])
-        .args(["-volname", "strata-cs"])
-        .arg(&file)
-        .status()
-        .unwrap();
-    assert!(st.success());
-    let st = Command::new("/usr/bin/hdiutil")
-        .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
-        .arg(&mount)
-        .arg(&file)
-        .status()
-        .unwrap();
-    assert!(st.success());
-    let _img = Image {
-        mount: mount.clone(),
-        file,
-    };
-    let w = World::with_in(Some(&mount), default_tree);
+    let img = Image::case_sensitive();
+    let w = World::with_in(Some(&img.mount), default_tree);
     w.write(".env", b"SECRET=1\n");
     w.write(".ENV", b"OTHER=1\n");
     let o = cold(&w);

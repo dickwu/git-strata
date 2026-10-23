@@ -50,9 +50,7 @@ pub(crate) fn classify(
     raw: &BTreeMap<RepoPath, Raw>,
     folds: Folds,
 ) -> Overlay {
-    // §5.3 pairing arrives with Task 5 (rename.rs).
-    let _ = folds;
-    let renames: BTreeMap<RepoPath, RepoPath> = BTreeMap::new();
+    let renames = crate::rename::pair(m, raw, folds);
     let froms: BTreeSet<&RepoPath> = renames.values().collect();
     let mut entries = Vec::with_capacity(raw.len());
     for (p, r) in raw {

@@ -17,6 +17,7 @@ mod hash;
 mod lww;
 mod manifest;
 mod overlay;
+mod rename;
 mod scan;
 mod tracker;
 
