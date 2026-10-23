@@ -18,6 +18,7 @@ use strata_types::{CheckpointReason, Code, Config, RepoConfig, RepoName, Session
 mod base;
 mod carry;
 mod dispatch;
+mod failed_move;
 mod move_workspace;
 mod new;
 mod recover;
@@ -30,6 +31,7 @@ mod status;
 mod sys;
 mod ticket;
 
+pub use failed_move::{MoveResolution, ResolutionReport};
 pub use move_workspace::MoveReport;
 pub use remove::RemoveReport;
 #[cfg(feature = "test-seams")]

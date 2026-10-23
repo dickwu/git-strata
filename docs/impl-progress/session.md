@@ -11,8 +11,8 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
 | 3 resolve by cwd or selector, status | done | 426dd58 |
 | 4 Unknown scenes and restart leftovers | done | bb583d7 |
 | 5 move base and deps with an atomic directory swap | done | b2385ec |
-| 6 remove behind discard confirmation and open-file checks | done | (this commit) |
-| 7 resolve a failed move by abandoning or accepting it | todo | |
+| 6 remove behind discard confirmation and open-file checks | done | e42d628 |
+| 7 resolve a failed move by abandoning or accepting it | done | (this commit) |
 
 ## Ambiguity decisions
 
@@ -205,3 +205,39 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
 - Task 6: a Swapping intent (move stopped between swap and record) is
   `move_awaiting_recover` in Dirty `unresolved`; the test does not remove
   it with discard (recover owns it).
+- Task 7: the retry check (health not Unknown) runs before `shadow_at`; a
+  retry reads only the store and lstat, so it answers even if the shadow
+  repo has since gone. The not-Unknown path answers `not_failed` unless the
+  latest intent's state matches the choice and the workspace's kept scene
+  is a `move` scene whose `kept` contains that intent's staging.
+- Task 7: `found.*_refusal` holds the gitio code name as Rust prints it
+  (`NotFile`, `InvalidInput`, `IsDirectory`, ...); `IsDirectory` on `S`
+  counts as "not swapped" but is still reported as `staging_refusal` when
+  the scene does not fit. `found.pin` is null when the pin ref is absent.
+- Task 7: `matches` is computed as "which choice the scene and phase fit"
+  (scene shape and phase both required); it is null when neither fits.
+- Task 7: the Unknown after a failed record (pin already moved) is built by
+  a new `scene::unknown_error_named("resolve", ...)` with the same template
+  and fields as other scenes (`op`, `session`, `repo`, `n`, `phase`,
+  `cause`, `kept = [workspace, S]`); no scene is stored on the row (the
+  workspace already holds the move's Unknown scene and stays Unknown). A
+  record failure when the pin was skipped (already at h1) passes the store
+  error through, since nothing was written by this call.
+- Task 7: an injected `resolve.retire` failure skips both retires and lists
+  every still-present path (S, `worktrees/<n>`) in `leftover`; a real
+  retire failure lists only the path that failed. A failed admin collect
+  with `worktrees/<n>` gone lists `worktrees` itself (it was the non-dir
+  that could not be quarantined). StopAt seams return as is.
+- Task 7: `collect_leftover` was split into `retire_present` + a new
+  `collect_admin` so Abandon can record each half's failure separately;
+  behaviour of `move_workspace` and `remove` is unchanged.
+- Task 7: status / move step 9 / remove step 5.1 already recognised an
+  Abandoned intent whose staging is still present (added in Tasks 5–6), so
+  no change was needed there; the Abandon-with-retire-failure test covers it.
+- Task 7: the Busy test holds the test lock from a second thread with a
+  200 ms bounded wait; Accept's `update_ref` runs under the bounded
+  `with_lock` (Busy passes through, nothing written).
+- Task 7: Accept's "the old tree goes with remove" is checked with a plain
+  `remove(discard = false)`: the accepted old tree is unchanged since the
+  move's BeforeRollout checkpoint, so remove's dirty check passes and the
+  tree is retired with the session.

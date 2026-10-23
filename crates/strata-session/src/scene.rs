@@ -86,17 +86,31 @@ pub(crate) fn unknown_error(
     kept: &[PathBuf],
     extra: Map<String, Value>,
 ) -> StrataError {
+    unknown_error_named(op.as_str(), session, msg_repo, phase, cause, kept, extra)
+}
+
+/// `unknown_error` for an operation that keeps no scene of its own (e.g.
+/// `resolve`, §5.9 step 8): the same message template and detail fields.
+pub(crate) fn unknown_error_named(
+    op: &str,
+    session: &SessionId,
+    msg_repo: Option<&RepoName>,
+    phase: &str,
+    cause: Value,
+    kept: &[PathBuf],
+    extra: Map<String, Value>,
+) -> StrataError {
     let who = match msg_repo {
         Some(r) => format!("{session}/{r}"),
         None => session.to_string(),
     };
     let message = format!(
         "{} {who}: {phase} failed after writing began; kept {}; nothing was rolled back, cleaned up or retried; see git-strata status {session}",
-        op.as_str(),
+        op,
         joined(kept),
     );
     let mut d = Map::new();
-    d.insert("op".into(), json!(op.as_str()));
+    d.insert("op".into(), json!(op));
     d.insert("session".into(), json!(session.as_str()));
     d.insert("phase".into(), json!(phase));
     d.extend(extra);

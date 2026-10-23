@@ -562,7 +562,7 @@ impl Sessions<'_> {
     }
 
     /// Retire `p` unless it is already gone.
-    fn retire_present(&self, p: &Path) -> Result<()> {
+    pub(crate) fn retire_present(&self, p: &Path) -> Result<()> {
         if !exists(p) {
             return Ok(());
         }
@@ -578,6 +578,12 @@ impl Sessions<'_> {
     /// is quarantined, never followed. Returns the quarantine path, if any.
     pub(crate) fn collect_leftover(&self, staging: &Path, shadow_dir: &Path, n: u64) -> Result<Option<PathBuf>> {
         self.retire_present(staging)?;
+        self.collect_admin(shadow_dir, n)
+    }
+
+    /// The admin-dir half of `collect_leftover`: retire `worktrees/<n>`,
+    /// quarantining a non-directory there (or at `worktrees`).
+    pub(crate) fn collect_admin(&self, shadow_dir: &Path, n: u64) -> Result<Option<PathBuf>> {
         let wt = shadow_dir.join("worktrees");
         match lstat(&wt).map_err(|e| strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &wt))? {
             None => return Ok(None),

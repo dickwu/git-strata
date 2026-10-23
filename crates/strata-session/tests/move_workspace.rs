@@ -1,8 +1,9 @@
 //! session.md §8 Task 5: `move_workspace` (§5.7, §5.7.1), its leftovers in
 //! `recover` (§5.8 step 2) and in `status` (§5.5 step 2.9).
 //!
-//! The parts of the §7 rows that need `remove` (Task 6) or
-//! `resolve_failed_move` (Task 7) are asserted with those tasks.
+//! The parts of the §7 rows that need `remove` (Task 6) are asserted with
+//! that task; `resolve_failed_move` (Task 7) parts are asserted here and in
+//! tests/resolve_failed_move.rs.
 
 mod support;
 
@@ -15,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use strata_overlay::{Base, WorkspaceRef};
-use strata_session::{MoveReport, NewReport, SessionSeam, Sessions, StatusWarning, WorkspaceHealth};
+use strata_session::{MoveReport, MoveResolution, NewReport, SessionSeam, Sessions, StatusWarning, WorkspaceHealth};
 use strata_store::{MoveIntent, MoveState};
 use strata_types::{BaseGen, CheckpointReason, Code, CommitOid, RepoId, SessionId, StrataError};
 use support::*;
@@ -1113,6 +1114,11 @@ fn status_tells_running_moves_from_interrupted_ones() {
                 .contains(&StatusWarning::MoveAwaitingRecover { n: last.n, staging: last.staging.clone() })
         );
         assert_eq!(health(&s, &id), WorkspaceHealth::Ok);
+        for c in [MoveResolution::Abandon, MoveResolution::Accept] {
+            let e = s.resolve_failed_move(&id, &fx.rn("tool"), c).unwrap_err();
+            assert_eq!(e.code, Code::InvalidInput, "{c:?}: {e:?}");
+            assert_eq!(reason(&e), Some("not_failed"), "{c:?}");
+        }
         let calls = fx.before.calls();
         let n = intents(&fx, &id).len();
         let to4 = target(&fx, &s, "tool", &[("src/up4.ts", b"up\n")]);
@@ -1131,6 +1137,10 @@ fn status_tells_running_moves_from_interrupted_ones() {
     assert_eq!(intents(&fx, &id).last().unwrap().state, MoveState::Unknown);
     assert_eq!(health(&s, &id), WorkspaceHealth::Unknown);
     assert!(!warnings(&s, &id).iter().any(|w| matches!(w, StatusWarning::MoveAwaitingRecover { .. })));
+    let r = s.resolve_failed_move(&id, &fx.rn("tool"), MoveResolution::Accept).unwrap();
+    assert_eq!(r.choice, MoveResolution::Accept);
+    assert_eq!(intents(&fx, &id).last().unwrap().state, MoveState::Done);
+    assert_eq!(health(&s, &id), WorkspaceHealth::Ok);
 }
 
 #[test]
