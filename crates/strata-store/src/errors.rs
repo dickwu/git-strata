@@ -31,10 +31,10 @@ pub(crate) fn with(mut e: StrataError, key: &str, v: impl Into<Value>) -> Strata
 
 /// Set `key` only when absent.
 pub(crate) fn with_default(e: StrataError, key: &str, v: impl Into<Value>) -> StrataError {
-    if let Some(Value::Object(m)) = &e.detail {
-        if m.contains_key(key) {
-            return e;
-        }
+    if let Some(Value::Object(m)) = &e.detail
+        && m.contains_key(key)
+    {
+        return e;
     }
     with(e, key, v)
 }

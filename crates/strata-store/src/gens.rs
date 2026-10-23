@@ -15,6 +15,7 @@ use crate::{Result, Store};
 const MODES: [u32; 3] = [0o100644, 0o100755, 0o120000];
 
 /// Manifest rows of (repo, tree) in path order, or None when no `base_trees` row.
+#[allow(clippy::type_complexity)]
 fn load_manifest(c: &Connection, repo: &str, tree: &str) -> Result<Option<Vec<(String, String, i64, i64)>>> {
     let files: Option<i64> = c
         .query_row("SELECT files FROM base_trees WHERE repo = ?1 AND tree = ?2", params![repo, tree], |r| r.get(0))

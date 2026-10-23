@@ -291,10 +291,9 @@ impl Store {
         match renamed {
             Ok(()) => {
                 let fan = dst.parent().expect("blob path has a fan-out dir");
-                let d = File::open(fan)
+                File::open(fan)
                     .and_then(|d| barrier(&d))
                     .map_err(|e| unknown("put", crate::errors::UNCERTAIN, fan, format!("{}: F_BARRIERFSYNC failed: {e}", fan.display()), Some(&e)))?;
-                let _ = d;
                 self.seams.dir_barriers.fetch_add(1, Ordering::SeqCst);
                 Ok(id)
             }
@@ -382,14 +381,14 @@ impl Store {
             r.query_row("SELECT size FROM blobs WHERE id = ?1", [id.as_str()], |r| r.get(0)).optional().map_err(sql_read)?
         };
         drop(r);
-        if let Some(s) = row {
-            if s < 0 || s as u64 != md.size() {
-                return Err(err(
-                    Code::Corrupt,
-                    format!("blob {id} has {} bytes, its row says {s}", md.size()),
-                    json!({ "reason": "blob_size", "path": p.to_string_lossy(), "id": id.as_str(), "expected": s, "actual": md.size() }),
-                ));
-            }
+        if let Some(s) = row
+            && (s < 0 || s as u64 != md.size())
+        {
+            return Err(err(
+                Code::Corrupt,
+                format!("blob {id} has {} bytes, its row says {s}", md.size()),
+                json!({ "reason": "blob_size", "path": p.to_string_lossy(), "id": id.as_str(), "expected": s, "actual": md.size() }),
+            ));
         }
         Ok((p, md.size()))
     }

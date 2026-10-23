@@ -290,10 +290,10 @@ impl Deref for Reader<'_> {
 
 impl Drop for Reader<'_> {
     fn drop(&mut self) {
-        if let Some(c) = self.conn.take() {
-            if c.is_autocommit() {
-                self.store.readers.lock().unwrap_or_else(|p| p.into_inner()).push(c);
-            }
+        if let Some(c) = self.conn.take()
+            && c.is_autocommit()
+        {
+            self.store.readers.lock().unwrap_or_else(|p| p.into_inner()).push(c);
         }
     }
 }

@@ -104,7 +104,7 @@ fn intents(s: &Store, id: &SessionId) -> Vec<MoveIntent> {
     s.move_intents(id).unwrap()
 }
 fn last(s: &Store, id: &SessionId) -> MoveIntent {
-    intents(s, id).into_iter().filter(|i| i.repo == repo("app")).last().unwrap()
+    intents(s, id).into_iter().rfind(|i| i.repo == repo("app")).unwrap()
 }
 
 /// Make a dir with one file, so we can check the trash copy is intact.

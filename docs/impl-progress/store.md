@@ -15,8 +15,8 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 | 7 publish records and ref audit | done | 832866c |
 | 8 busy, reader isolation, crash durability and poisoning | done | 6671503 |
 | — metadata engine moved to Turso (user decision 2026-10-23) | done | d52d206 |
-| — turso bumped to =0.9.0-pre.1, gaps re-checked | done | (this commit; see git log) |
-| 9 gc with guards, trash and integrity scan | done | (this commit; see git log) |
+| 9 gc with guards, trash and integrity scan | done | 3e116ff |
+| — turso bumped to =0.9.0-pre.1, gaps re-checked | done | caaba3b |
 
 ## Ambiguity decisions
 
@@ -223,7 +223,11 @@ the rusqlite design):
    too, not only the lock test). Fix: the test moved to its own binary
    `tests/lock_inherit.rs`, and it waits for a `sh -c 'echo ready; exec
    sleep 60'` child to print before closing, so its exec is known done.
-   The 2 s Busy retry is gone. Real-world note: a daemon spawning children
+   The 2 s Busy retry is gone. The same race hit `tests/crash.rs`
+   (`commit_io_error_is_unknown_and_poisons_writer` vs. the crash child),
+   so `tests/support` now has a spawn window: `run_child`, `spawn_child`
+   (until the child's first stdout byte), `hdiutil` and `touch` hold it
+   exclusively, `Env::open`/`try_open` hold it shared. Real-world note: a daemon spawning children
    can make a CLI racing a daemon restart see a transient `Busy`, which
    callers already treat as retryable.
 
@@ -243,16 +247,21 @@ against the new engine (not kept).
 | 6 | Original CHECK `(a IN (..)) = (b IS NULL)` in STRICT | rejected | still rejected ("cannot determine type of expression in CHECK constraint; use CAST") | AND/OR form kept |
 | 7 | Schema text kept verbatim | normalized, `__turso_internal_seq_*` added | same | unchanged |
 | 8 | READONLY_RECOVERY error code | none | none | unchanged |
-| 9 | LOCK `Busy` flake | flaky, 2 s retry | root-caused (test spawn + `flock`, not engine) | own binary, ready handshake, retry dropped |
+| 9 | LOCK `Busy` flake | flaky, 2 s retry | root-caused (test spawn + `flock`, not engine) | own binary + ready handshake, test spawn window; retry dropped |
 | – | Multi-process WAL | `engine.rs` / `crash.rs` green | green: 5 full `cargo test -p strata-store` runs (engine, crash, gc 5× each), all pass | `experimental_multiprocess_wal` kept |
 
 Verdict: no regression and no closed gap that changes the design; the pin
 moves to `=0.9.0-pre.1` (a pre-release, so watch for 0.9.0 final).
 Results: `cargo test -p strata-store` 133 passed / 0 failed / 3 ignored
-(×5 runs); `cargo test --workspace` 301 / 0 / 5; `tests/lock_inherit.rs`
-30/30 and `tests/open.rs` 40/40 standalone repeats.
+(×6 runs after the spawn-window fix); `cargo test --workspace` 301 / 0 / 5
+(×2); standalone repeats: `lock_inherit` 30/30, `open` 40/40 + 10/10,
+`crash`, `engine`, `gc`, `concurrency` 10/10 each.
 
 ## Blockers / notes
+
+- Store crate is clippy-clean (`--all-targets`, with and without
+  `test-seams`); the remaining workspace clippy warnings are in
+  strata-apfs, which this worktree does not touch.
 
 - None in strata-apfs so far.
 - Merge watch-items: root `Cargo.toml` gains only the

@@ -219,10 +219,10 @@ impl Store {
         let publish = change.publish.map(|p| int(p, "publish")).transpose()?;
         let confirmed = change.confirmed.as_ref().map(|a| to_json(a, "confirmed")).transpose()?;
         self.write(OP, |c| {
-            if let Some(p) = publish {
-                if !publish_exists(c, p).map_err(w(OP))? {
-                    return Err(no_such_publish(p as u64));
-                }
+            if let Some(p) = publish
+                && !publish_exists(c, p).map_err(w(OP))?
+            {
+                return Err(no_such_publish(p as u64));
             }
             let top: i64 = c.query_row("SELECT COALESCE(MAX(id), 0) FROM refs_audit", [], |r| r.get(0)).map_err(w(OP))?;
             let id = top.max(0).checked_add(1).ok_or_else(|| too_large("refs_audit_id"))?;

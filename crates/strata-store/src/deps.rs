@@ -457,14 +457,14 @@ impl Store {
             if proposal_state(c, pid, OP)?.is_none() {
                 return Err(no_such_proposal(id));
             }
-            if let (Some(b), ProposalDecision::Superseded { by }) = (by, to) {
-                if proposal_state(c, b, OP)?.is_none() {
-                    return Err(err(
-                        Code::InvalidInput,
-                        format!("superseding proposal {by} does not exist"),
-                        json!({ "reason": "no_such_proposal", "field": "by", "proposal": by.get() }),
-                    ));
-                }
+            if let (Some(b), ProposalDecision::Superseded { by }) = (by, to)
+                && proposal_state(c, b, OP)?.is_none()
+            {
+                return Err(err(
+                    Code::InvalidInput,
+                    format!("superseding proposal {by} does not exist"),
+                    json!({ "reason": "no_such_proposal", "field": "by", "proposal": by.get() }),
+                ));
             }
             let n = c
                 .execute(
@@ -511,6 +511,7 @@ impl Store {
 
     // ---- reads (§5.10) ----
 
+    #[allow(clippy::type_complexity)]
     pub fn deps_set(&self, repo: &RepoName, id: &DepsSetId) -> Result<Option<DepsSetRecord>> {
         self.read(|c| {
             let row: Option<(String, String, String, String, String, String, String, i64)> = c

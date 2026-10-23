@@ -17,6 +17,23 @@ pub mod world;
 
 pub const CHILD_ENV: &str = "STRATA_STORE_TEST_CHILD";
 
+/// Spawn window vs. writer opens. On macOS a child being spawned holds a
+/// reference to every parent descriptor, `O_CLOEXEC` ones included, until
+/// its exec completes (100 ms+ under load). `store/LOCK`'s flock lives on
+/// the open file description, so a sibling test that closes its store and
+/// reopens it inside that window gets `Busy` (the old "LOCK Busy flake").
+/// Spawns hold this exclusively until the child has exec'd; `Env` writer
+/// opens hold it shared.
+static SPAWN_WINDOW: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+pub fn spawn_window() -> std::sync::RwLockWriteGuard<'static, ()> {
+    SPAWN_WINDOW.write().unwrap_or_else(|p| p.into_inner())
+}
+
+fn open_window() -> std::sync::RwLockReadGuard<'static, ()> {
+    SPAWN_WINDOW.read().unwrap_or_else(|p| p.into_inner())
+}
+
 /// A temp dir on the system (APFS) volume with a not-yet-existing store
 /// root and an existing checkout directory.
 pub struct Env {
@@ -36,10 +53,11 @@ pub fn env() -> Env {
 
 impl Env {
     pub fn open(&self) -> Store {
-        Store::open(&self.root, &[&self.checkout]).expect("open store")
+        self.try_open().expect("open store")
     }
 
     pub fn try_open(&self) -> Result<Store, StrataError> {
+        let _w = open_window();
         Store::open(&self.root, &[&self.checkout])
     }
 
@@ -195,6 +213,7 @@ pub fn run_child(test: &str, envs: &[(&str, &str)]) -> std::process::Output {
     for (k, v) in envs {
         cmd.env(k, v);
     }
+    let _w = spawn_window(); // held until the child has exited
     cmd.output().expect("run child")
 }
 
@@ -211,6 +230,7 @@ pub struct Image {
 impl Image {
     /// `fs` is e.g. "APFS" or "MS-DOS FAT32".
     pub fn new(fs_name: &str) -> Image {
+        let _w = spawn_window();
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("img.dmg");
         let mount = dir.path().join("mnt");
@@ -235,6 +255,7 @@ impl Image {
 
 impl Drop for Image {
     fn drop(&mut self) {
+        let _w = spawn_window();
         let _ = Command::new("hdiutil").args(["detach", "-force"]).arg(&self.mount).status();
     }
 }

@@ -178,10 +178,10 @@ impl Store {
                 }
             }
             Row7::SessionDir(sid) => {
-                if let Some(lc) = session_lifecycle(c, sid.as_str()).map_err(sql_read)? {
-                    if lc != "removing" && lc != "removed" {
-                        return Err(refused(path, 4, &format!("the session is {lc}")));
-                    }
+                if let Some(lc) = session_lifecycle(c, sid.as_str()).map_err(sql_read)?
+                    && lc != "removing" && lc != "removed"
+                {
+                    return Err(refused(path, 4, &format!("the session is {lc}")));
                 }
             }
             Row7::Child(sid, name) => {

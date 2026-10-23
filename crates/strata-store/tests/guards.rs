@@ -379,7 +379,7 @@ fn state_graphs_are_enforced_by_triggers() {
     // unknown intent → done needs the workspace back to Ok first
     refused(c, &format!("UPDATE move_intents SET state = 'done' WHERE {w}"), "illegal update: move_intents");
     // unknown → ok only while the session is active and the latest intent is unknown
-    ok(c, &format!("UPDATE sessions SET lifecycle = 'removing' WHERE id = 's-conflict'"));
+    ok(c, "UPDATE sessions SET lifecycle = 'removing' WHERE id = 's-conflict'");
     refused(c, &format!("UPDATE workspaces SET health = 'ok' WHERE {ws}"), "illegal update: workspaces");
     // (a fresh session for the positive path)
     session_in(c, "s-resolvea", "active");

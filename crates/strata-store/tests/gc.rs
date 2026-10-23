@@ -76,6 +76,7 @@ fn mode(p: &Path) -> u32 {
 }
 /// mtime 2020 (ctime stays now).
 fn old_mtime(p: &Path) {
+    let _w = support::spawn_window();
     let st = Command::new("touch").args(["-h", "-t", "202001010000"]).arg(p).status().unwrap();
     assert!(st.success());
 }

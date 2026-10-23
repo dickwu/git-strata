@@ -100,8 +100,13 @@ pub fn spawn_child(test: &str, envs: &[(&str, &str)]) -> ChildProc {
     for (k, v) in envs {
         cmd.env(k, v);
     }
+    let w = super::spawn_window();
     let mut child = cmd.spawn().expect("spawn child");
-    let out = BufReader::new(child.stdout.take().unwrap());
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    // The first stdout bytes (libtest's banner) only come after the exec,
+    // so the spawn window is closed; peek without consuming them.
+    let _ = out.fill_buf().expect("child stdout");
+    drop(w);
     ChildProc { child, out }
 }
 

@@ -895,6 +895,7 @@ fn removable_sessions(c: &Connection, cutoff: i64) -> Result<Vec<String>> {
 /// All proposals (id → superseded_by) and D: decided past keep, or
 /// AwaitingPublish whose proposer is gone or reclaimable; minus anything a
 /// kept row reaches through `superseded_by`.
+#[allow(clippy::type_complexity)]
 fn proposal_set(c: &Connection, cutoff: i64) -> Result<(BTreeMap<i64, Option<i64>>, BTreeSet<i64>)> {
     let r: BTreeSet<String> = removable_sessions(c, cutoff)?.into_iter().collect();
     let mut q = c.prepare("SELECT id FROM sessions").map_err(sql_read)?;

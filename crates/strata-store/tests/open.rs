@@ -516,7 +516,7 @@ fn quick_check_runs_only_after_unclean_exit() {
     assert!(env.store_dir().join("clean-shutdown").exists());
     let s = env.open();
     assert!(!env.store_dir().join("clean-shutdown").exists());
-    let e = s.quick_check().err().expect("quick_check finds the damage");
+    let e = s.quick_check().expect_err("quick_check finds the damage");
     assert_reason(&e, Code::Corrupt, "sqlite");
     drop(s); // no close: no marker
     assert!(!env.store_dir().join("clean-shutdown").exists());
