@@ -8,12 +8,12 @@ gitio 是 strata 里唯一起 git 子进程的模块。它从 tgrep 借了两段
 
 **负责**（design §5 的 `gitio` 行）：
 
-1. **git 的唯一出口**。strata 自己的模块起的每个 git 子进程都经 gitio 的 crate 私有 `Git::command`，环境先清洗（§5.1）。唯一的例外在依赖里：search 若用 tgrep-core 的 `GenerationManager` 建基线索引，tgrep-core 在 `GenerationManager::ensure` 里经它自己的 `generations/git.rs` 起 git，不经 gitio；这由 search.md 交代（module-rulings Addendum 2 的 T11 条让它决定基线索引怎么建）。其他模块只调 §3 的类型化函数：它们不起 git，也不解析、不改写 git 的文件（gitfile、管理目录、影子仓库、index、config、ref）。gitio 交出的目录对它们是不透明的整体，只会被整体移动或退役：session 交换带着新 gitfile 的工作区目录，按 module-rulings Addendum 3 经 `store::retire_dir` 退役旧的管理目录与 `rm` 时的影子仓库。gitio 直接读的 git 文件只有 index、gitfile、`commondir`、`objects/info/alternates`、仓库 config 与 `info/` 下的规则文件（§5.7、§5.8；index、gitfile、`commondir` 与 config 的读法借 tgrep），直接写的只有影子仓库、管理目录与 staging 私有目录里它自己建的那几个文件，以及工作区与 staging 树根下的 gitfile（§5.6；gitfile 与 `new` 之后写进影子仓库的管理目录经 apfs 的 rooted 函数写，§2）；其余一律经 git。
+1. **git 的唯一出口**。strata 自己的模块起的每个 git 子进程都经 gitio 的 crate 私有 `Git::command`，环境先清洗（§5.1）。唯一的例外在依赖里：search 若用 tgrep-core 的 `GenerationManager` 建基线索引，tgrep-core 在 `GenerationManager::ensure` 里经它自己的 `generations/git.rs` 起 git，不经 gitio；这由 search.md 交代（module-rulings Addendum 2 的 T11 条让它决定基线索引怎么建）。其他模块只调 §3 的类型化函数：它们不起 git，也不解析、不改写 git 的文件（gitfile、管理目录、影子仓库、index、config、ref）。gitio 交出的目录对它们是不透明的整体，只会被整体移动或退役：session 交换带着新 gitfile 的工作区目录，按 module-rulings Addendum 3 经 `store::retire_dir` 退役旧的管理目录与 `rm` 时的影子仓库。gitio 直接读的 git 文件只有 index、gitfile、`commondir`、`objects/info/alternates`、仓库 config、`info/` 下的规则文件与影子仓库的 `hooks/pre-push`（§5.6、§5.7、§5.8；index、gitfile、`commondir` 与 config 的读法借 tgrep），直接写的只有影子仓库、管理目录与 staging 私有目录里它自己建的那几个文件（管理目录的 index 是 git 在 `tree_dir/.git/` 下建的临时 index 的副本），以及工作区与 staging 树根下的 gitfile 和 attach 时放临时 index 的 `tree_dir/.git/`（§5.6；gitfile 与 `new` 之后写进影子仓库的管理目录经 apfs 的 rooted 函数写，§2）；其余一律经 git。
 2. **仓库身份**：`open` 由主 checkout 的工作树根得到 git common dir 的 realpath（types.md `RepoId`），拒绝 strata 的工作区、SHA-256 仓库、reftable 仓库与过低的 git 版本。
 3. **远端与 ref**：`fetch` 把远端分支取进 strata 自己的跟踪 ref；`read_ref`、`is_ancestor`、`merge_base`；`refs/strata/*` 下比较并交换的 `update_ref` 与 `delete_ref`（发布链、pin ref）；`push` 产生 types.md 的 `PushOutcome`。
 4. **tree 的两个方向**：`tree_of` 解析并校验基线 tree，`tree_contains` 查一个路径在不在 tree 里（种子文件规则）；`export_tree` 把 tree 导出成目录，逐字节等于 `git checkout` 的结果（检出方向的过滤器）；`stage` 走反方向，按检入方向的过滤器把 staging 树里的文件写成 tree；`commit_tree` 做 commit。
-5. **工作区与 staging 的 git**（module-rulings Addendum 2）：`ensure_shadow` 在 `new` 时给一个会话建它在这个 repo 上的影子仓库，是唯一建影子仓库的函数；`shadow_at` 此后只读地认出它（含 daemon 重启后）；`attach_worktree` 给工作区的每一代建一个新的管理目录与 index；`shadow_drift` 报告影子仓库的镜像与主 checkout 现状的差别；`attach_staging` 把 publish 的 staging 树接到主 checkout 的 common dir。
-6. **index 与 ignore**：`read_index` 经工作树的 `.git` 直接解析 index 与 config；`is_ignored` 按 git 的规则判断，已跟踪的文件永不被 ignore（design §3）。
+5. **工作区与 staging 的 git**（module-rulings Addendum 2）：`ensure_shadow` 在 `new` 时给一个会话建它在这个 repo 上的影子仓库，是唯一建影子仓库的函数；`shadow_at` 此后只读地认出它（含 daemon 重启后）；`attach_worktree` 给工作区的每一代建一个新的管理目录与 index；`shadow_drift` 报告影子仓库的镜像与主 checkout 现状的差别，以及 pre-push 守卫在工作区里是否可能失效；`attach_staging` 把 publish 的 staging 树接到主 checkout 的 common dir。
+6. **index 与 ignore**：`read_index` 经工作树的 `.git` 直接解析 index 与 config；`is_ignored` 按 git 的规则判断，已跟踪的文件永不被 ignore（design §3）；`is_ignored_in_export` 在一个 tree 的导出上按同样的规则回答"检出成工作区之后 git 会不会忽略"，供工作区还不存在时用（session 判显式种子）。
 7. **三方合并**：`merge3` 做 hunk 级三方合并，判定与 `git merge-file` 相同；`is_binary` 是 git 的二进制判定。
 
 **不负责**：
@@ -34,7 +34,7 @@ gitio 是 strata 里唯一起 git 子进程的模块。它从 tgrep 借了两段
 | 依赖 | 理由 |
 | --- | --- |
 | `strata-types` | `RepoPath`、`TreeOid`、`CommitOid`、`RepoId`、`PushOutcome`、`StrataError`、`Code`（types.md §8 的第 0 层） |
-| `strata-apfs` | 根之下不跟随符号链接的读、写、改名与删除（§5.5、§5.6）：`create_file_rooted`（工作区与 staging 树根下的 gitfile）；管理目录 `worktrees/<n>/` 与它里面的文件用的 `attrs_of`、`mkdir_rooted`、`create_file_rooted`、`open_rooted`，根是影子仓库目录（`new` 之后影子仓库是 agent 可写的地方，module-rulings 的 Addendum 8 clarification）；`shadow_drift` 读 `hooks/pre-push` 用的 `open_rooted_file`；导出用的 `mkdir_rooted`、`open_rooted`、`rename_rooted`（`RenameMode::Excl`）、`remove_rooted`（`RemoveKind::File`、`RemoveKind::EmptyDir`）、`PATH_MAX_BYTES` 与 `NAME_MAX_UTF16_UNITS`；`full_fsync`，gitio 的每一次 `F_FULLFSYNC` 都经它。apfs 与 gitio 同在第 1 层：module-rulings Addendum 7 的 Layering 条准许 gitio 依赖 apfs（apfs 只依赖 types，没有环），T15 把 types.md §8 第 1 层一行改成"同层只允许 store 与 gitio 依赖 apfs"；Addendum 8 让根之下的文件系统操作都归 apfs，gitio 对工作区、staging 树与导出树不做自己的 `*at` 调用。上游要求，名字由 module-rulings Addendum 8 定下，apfs 599dde6 还没有或写法不同：`rename_rooted(root, from, to, mode)` 与 `RenameMode::Excl`（599dde6 写作 `RenameMode::Exclusive`）；`remove_rooted(root, path, kind)` 与 `RemoveKind::File`、`RemoveKind::EmptyDir`（599dde6 是 `unlink_rooted` 与 `rmdir_rooted`）；根句柄访问函数（名字由 apfs 定），§5.5 第 6 步对 `dst` 的父目录做 `full_fsync` 时用它。不用 `case_fold_eq`：gitio 按 git 的 ASCII 规则折叠（§9）。不依赖 store |
+| `strata-apfs` | 根之下不跟随符号链接的读、写、改名与删除（§5.5、§5.6）：`create_file_rooted`（工作区与 staging 树根下的 gitfile）；管理目录 `worktrees/<n>/` 与它里面的文件（含 index 的副本）用的 `attrs_of`、`mkdir_rooted`、`create_file_rooted`、`open_rooted`，根是影子仓库目录（`new` 之后影子仓库是 agent 可写的地方，module-rulings 的 Addendum 8 clarification）；attach 的临时 index 用的 `mkdir_rooted`、`open_rooted_file`、`remove_rooted`，根是 `tree_dir`；`shadow_drift` 读 `hooks/pre-push` 用的 `open_rooted_file`；导出用的 `mkdir_rooted`、`open_rooted`、`rename_rooted`（`RenameMode::Excl`）、`remove_rooted`（`RemoveKind::File`、`RemoveKind::EmptyDir`）、`open_root`（对根本身做 `full_fsync`）、`PATH_MAX_BYTES` 与 `NAME_MAX_UTF16_UNITS`；`full_fsync`，gitio 的每一次 `F_FULLFSYNC` 都经它；`classify_io_error`，apfs 给的句柄上的读写失败都经它归类：写用 `IoSide::AfterWrite`（gitio 往句柄里写时，这次调用总已建过文件），一律 `Unknown`；读用 `IoSide::Read`，读发生在这次调用的写入开始之后时（如 attach 读回临时 index），结果照 G4 一律当 `Unknown`。apfs 与 gitio 同在第 1 层：module-rulings Addendum 7 的 Layering 条准许 gitio 依赖 apfs（apfs 只依赖 types，没有环），T15 把 types.md §8 第 1 层一行改成"同层只允许 store 与 gitio 依赖 apfs"；Addendum 8 让根之下的文件系统操作都归 apfs，gitio 对工作区、staging 树与导出树不做自己的 `*at` 调用。这些名字与写法都已在 apfs 1e723f2 的 §3 里（module-rulings 的 "apfs names committed at sdd/task-4 1e723f2"），不再是上游要求：根句柄访问函数是 `open_root(root) -> Result<File>`，errno 归类是 `classify_io_error(err, side, path)`。不用 `case_fold_eq`：gitio 按 git 的 ASCII 规则折叠（§9）。不依赖 store |
 | `git` 可执行文件，版本 ≥ 2.44 | 唯一的 git 实现。不用 libgit2 或 gitoxide：git 本身就是语义的标准答案。下限是第一个认 `GIT_NO_LAZY_FETCH` 的发行版（按 2.44 的发行说明，实现时再核实；review M6）：更低的 git 会悄悄从 promisor 远端补缺失的对象，G7 不成立。其余用到的参数都更早：`rev-parse --path-format=absolute`（2.31）、`fetch --no-write-fetch-head` 与 `--no-auto-maintenance`、`init --object-format`（2.29）、`--end-of-options`（2.24）、`user.useConfigOnly`（2.8）。从 daemon 的 `PATH` 解析（daemon.md 规定 PATH）；`HOME` 必须是用户的，全局配置里的身份、`core.excludesFile`、凭据助手才生效 |
 | `memchr` | 抄来的 index 解析器用它找 NUL（tgrep 原样） |
 | `libc` | `fsync`：逐个文件与目录的持久化（§5.5 第 5 步、§5.6）。std 的 `File::sync_all` 在 macOS 上做的是 `F_FULLFSYNC`（Rust 1.92 的 std 源码），逐个用就成了每个文件刷一次盘。`killpg`：超时时杀整个进程组（§5.1 第 5 步）。gitio 没有自己的 `*at` 调用（module-rulings Addendum 8） |
@@ -47,7 +47,7 @@ gitio 是 strata 里唯一起 git 子进程的模块。它从 tgrep 借了两段
 
 | 落点 | 来源 | 改动 |
 | --- | --- | --- |
-| `src/index.rs` | `tgrep-core/src/git_index.rs` | 只留 `metadata_path`、`read_git_dir_using`、`read_common_dir_using`、`config_bool`、`ignores_case`、`load_tracked`、`parse_index_with`、`hex`、`merge_split`、`SplitLink`、`ewah_len`、`read_ewah`、`extension`、`index_header`、`entry_capacity`、`walk_entries`、`read_varint`，只在测试里用的 `parse_index`，以及测试和测试辅助函数（`v2_index`、`ewah`、`with_extension`、`link`）；`metadata_paths_preserve_native_bytes` 不迁移（3f 标不保留）。删掉 `TrackedFiles` 连同 `normalise`、`membership_hash`、`fingerprint_*`，`git_dir`、`index_path`、`common_git_dir`、`read_repository_dirs*`，以及全部 `*_controlled` 与 `MemoryCharge`。`TrackedFiles` 换成 `IndexInfo`，保留大小写，路径是 `RepoPath`。`insert_path` 换成 gitio 自己的：非 UTF-8 路径返回 `NotText`，原来静默跳过。`load_tracked`、`ignores_case` 与各个解析函数返回 `Result`，原来是 `Option` 或 `bool`。不再把 `\` 归一成 `/`。遇到 sparse index 的目录条目（`sdir` 扩展）返回 `Unsupported`。`config_bool` 改成按 git 的 config 语法读（§5.7 第 6 步；review B1）[我的决定，§9]：原来的读法不认引号、转义与行内注释，`shadow = "true"` 与 `ignorecase = "true"` 都读不出来 |
+| `src/index.rs` | `tgrep-core/src/git_index.rs` | 只留 `metadata_path`、`read_git_dir_using`、`read_common_dir_using`、`config_bool`、`ignores_case`、`load_tracked`、`parse_index_with`、`hex`、`merge_split`、`SplitLink`、`ewah_len`、`read_ewah`、`extension`、`index_header`、`entry_capacity`、`walk_entries`、`read_varint`，只在测试里用的 `parse_index`，以及测试和测试辅助函数（`v2_index`、`ewah`、`with_extension`、`link`）；`metadata_paths_preserve_native_bytes` 不迁移（3f 标不保留）。删掉 `TrackedFiles` 连同 `normalise`、`membership_hash`、`fingerprint_*`，`git_dir`、`index_path`、`common_git_dir`、`read_repository_dirs*`，以及全部 `*_controlled` 与 `MemoryCharge`。`TrackedFiles` 换成 `IndexInfo`，保留大小写，路径是 `RepoPath`。`insert_path` 换成 gitio 自己的：非 UTF-8 路径返回 `NotText`，原来静默跳过。`load_tracked`、`ignores_case` 与各个解析函数返回 `Result`，原来是 `Option` 或 `bool`。不再把 `\` 归一成 `/`。遇到 sparse index 的目录条目（`sdir` 扩展）返回 `Unsupported`。`config_bool` 改成按 git 的 config 语法读（§5.7 第 6 步；review B1、M2）[我的决定，§9]：原来的读法不认引号、转义与行内注释，`shadow = "true"` 与 `ignorecase = "true"` 都读不出来 |
 | `src/command.rs` | `tgrep-core/src/generations/git.rs` | 留 `command`、`output`、`path`、`discover_directory`、`repository_command`、`valid_oid`、`object_format_controlled`、`resolve`、`commit_tree`、`commit_tree_controlled`、`parse_entries`。tgrep 的 `discover_directory`、`object_format_controlled`、`resolve`、`commit_tree_controlled`、`parse_entries` 都带 `control: Option<&Control>`（managed v2 的取消与内存记账），照抄时去掉这个参数：`object_format_controlled` 改名 `object_format`；`commit_tree` 与 `commit_tree_controlled` 合成一个，改名 `resolve_commit_and_tree`，免得与本文的 `commit_tree` 同名；`controlled_output` 删掉，调用处改用 `output` 加 gitio 的超时（§5.1）。删掉 `worktree_root`、`worktrees`、`worktrees_controlled`、`entries_controlled`、`entries_for_paths`、`LegacyBlobs`、`Blobs`，以及对 `PipedProcess`、`Control` 的引用。`parse_entries` 的 `TrackedEntry`、`EntryMode` 换成 gitio 自己的条目类型，另改三处：遇到 gitlink 返回 `Unsupported`，原来记成成员；大小一栏为 `BAD` 返回 `NoSuchCommit`，原来算格式错（§5.4）；它调的 `validate_tracked_path` 换成 §5.4 的检查 |
 
 两个文件开头写明出处：仓库、commit、原路径、MIT。crate 根放 `THIRD-PARTY-NOTICES`，收 tgrep 的 LICENSE 原文。
@@ -57,7 +57,7 @@ gitio 是 strata 里唯一起 git 子进程的模块。它从 tgrep 借了两段
 | 调用方 | 用到 |
 | --- | --- |
 | daemon | `open`、`repo_id`。加载配置时检查每个 `path` 是工作树根、两张表不是同一个 `RepoId`（config.md §4.3） |
-| session | `fetch`、`remote_ref`、`read_ref`、`is_ancestor`、`merge_base`、`tree_of`、`tree_contains`（种子文件"在基线 tree 里未被跟踪"，config.md §4.3）、`export_tree`、`ensure_shadow`（只在 `new`）、`shadow_at`（此后与 daemon 重启后）、`attach_worktree`、`update_ref` 与 `delete_ref`（pin ref 的比较并交换）、`is_ignored`；`shadow_drift`（status 的告警） |
+| session | `fetch`、`remote_ref`、`read_ref`、`is_ancestor`、`merge_base`、`tree_of`、`tree_contains`（种子文件"在基线 tree 里未被跟踪"，config.md §4.3）、`export_tree`、`ensure_shadow`（只在 `new`）、`shadow_at`（此后与 daemon 重启后）、`attach_worktree`、`update_ref` 与 `delete_ref`（pin ref 的比较并交换）、`is_ignored`、`is_ignored_in_export`（工作区建好之前判显式种子，session.md @853fdf8 §2 的上游要求）；`shadow_drift`（status 的告警；fix round 4 起多一个参数 `workspace`，pre-push 守卫按 git 在工作区里的有效 hooks 目录判断，review M3） |
 | deps | `is_ignored`、`tree_of` |
 | overlay | `read_index`、`is_ignored`（增量点查与全量对账用同一个函数）、`merge3`（`rebase` 用） |
 | publish | `fetch`、`read_ref`、`is_ancestor`、`merge_base`、`tree_of`、`export_tree`、`attach_staging`、`stage`、`commit_tree`、`update_ref`、`push`、`merge3`、`is_binary` |
@@ -105,11 +105,12 @@ pub enum MirrorDrift {
     Exclude,
     /// `info/attributes`，同上。
     Attributes,
-    /// 复制清单（§4.2）里的一个键，两边的值不同或只有一边有；`key` 的节名与键名小写。
+    /// 复制清单（§4.2）里的一个键，两边的值不同或只有一边有；或影子仓库 config 里的一条 `include.*`、`includeIf.*`
+    /// （建仓时从不写，出现就是后加的；review M3）。`key` 照 `git config --list` 的写法：节名与键名小写，子段原样。
     Config { key: String },
     /// pre-push 守卫可能失效，status 的 reason 是 `pre_push_guard_disabled`（module-rulings 的 T13 条）：
-    /// 影子仓库 config 的 `core.hooksPath` 不是 gitio 钉的 `<dir>/hooks`（`hooks_path` 是现值，None = 键被删了），
-    /// 或 `hooks/pre-push` 不再是 gitio 写的那份（`hook_replaced`）。gitio 不修。
+    /// git 在工作区里实际用的 hooks 目录不是 gitio 钉的 `<dir>/hooks`（`hooks_path` 是那个目录，仍是 `<dir>/hooks` 时为 None；
+    /// 由 git 自己在工作区的上下文里查，跟随 include，review M3），或 `hooks/pre-push` 不再是 gitio 写的那份（`hook_replaced`）。gitio 不修。
     PrePushGuardDisabled { hooks_path: Option<String>, hook_replaced: bool },
 }
 
@@ -197,16 +198,19 @@ impl Git {
     /// Code：NoSuchPath（dir 不存在）；InvalidInput（不是本仓库的影子仓库）；Unknown（读不了，或 config 有 git 也判坏的行）。
     pub fn shadow_at(&self, dir: &Path) -> Result<Shadow>;
     /// 影子仓库的镜像与主 checkout 现状的差别，以及 pre-push 守卫可能失效，供 status 告警；只读，从不修，空表示没有漂移（§5.6）。
-    /// `shadow` 来自 `ensure_shadow` 或 `shadow_at`。
-    /// Code：InvalidInput（不是本仓库的影子仓库）；Unknown。
-    pub fn shadow_drift(&self, shadow: &Shadow) -> Result<Vec<MirrorDrift>>;
+    /// `shadow` 来自 `ensure_shadow` 或 `shadow_at`；`workspace` 是接在它上面的工作区根，守卫按 git 在那里的有效 hooks 目录判断，
+    /// 工作区的 `.git` 不存在时只比镜像。
+    /// Code：InvalidInput（不是本仓库的影子仓库，workspace 不是绝对路径）；Unknown（读不了；git 认不出工作区的 git 目录；查询超时）。
+    pub fn shadow_drift(&self, shadow: &Shadow, workspace: &Path) -> Result<Vec<MirrorDrift>>;
     /// 给工作区的第 `generation` 代建新的管理目录 `<shadow>/worktrees/<generation>/`：HEAD detached 在 `head`，
-    /// index = tree_of(head)，在 `tree_dir` 里 refresh；再在 `tree_dir` 写 `.git` gitfile 指向它（§5.6）。
+    /// index = tree_of(head)，在 `tree_dir` 里 refresh（git 写在 `tree_dir/.git/` 下的临时 index，gitio 再 rooted 地复制进管理目录）；
+    /// 再在 `tree_dir` 写 `.git` gitfile 指向它（§5.6）。
     /// `workspace` 是调用方把 `tree_dir` 换入之后的最终路径（`new` 时二者相同）；`shadow` 来自 `ensure_shadow` 或 `shadow_at`；
     /// `generation` 是 store 分配的代数，与 store 的 `WorkspaceRecord.generation` 同为 `u64`，永不复用。返回管理目录的路径。
     /// Code：tree_of 的那些；InvalidInput（shadow 不属于本仓库、generation 为 0、路径不是绝对路径或在主 checkout 里）；
-    /// NoSuchPath、NotDirectory（tree_dir）；NotDirectory（`<shadow>/worktrees` 是符号链接或文件）；Exists（`tree_dir/.git` 或这一代的管理目录已存在）；
-    /// 写入开始之后的任何失败为 Unknown。
+    /// NoSuchPath、NotDirectory（tree_dir）；NotDirectory（`<shadow>/worktrees` 是符号链接或文件，或建管理目录、复制 index 时路径上被换上了
+    /// 符号链接）；Exists（`tree_dir/.git` 或这一代的管理目录已存在）。写 gitfile 之前，rooted 函数在写之前的拒绝原样返回，
+    /// 已建的管理目录与临时 index 留给调用方（move 时是它的内部暂存，G9）；其余写入开始之后的失败为 Unknown。
     pub fn attach_worktree(
         &self,
         shadow: &Shadow,
@@ -245,8 +249,14 @@ impl Git {
     /// Unknown（index 不存在为 detail.reason = "no-index"；index、gitfile 读不了或格式坏）。
     pub fn read_index(&self, worktree: &Path) -> Result<IndexInfo>;
     /// git 在这个 worktree 里会不会忽略这个路径（§5.8）。已跟踪的永远是 false；目录按规则回答，目录本身从不算已跟踪。
-    /// Code：read_index 的那些；Unknown（规则文件读不了）。
+    /// Code：read_index 的那些；Unknown（规则文件读不了，全局排除文件的查询超时）。
     pub fn is_ignored(&self, worktree: &Path, path: &RepoPath) -> Result<bool>;
+    /// `tree` 检出成本仓库的工作区之后，git 会不会忽略 `path`（§5.8 末段）；`dir` 是 `tree` 的一份导出（没有 `.git`），
+    /// 工作区还不存在时用（session 判显式种子）。规则同 is_ignored，差别三条：已跟踪看 tree 的路径表，`.gitignore` 从 `dir` 读，
+    /// `info/exclude` 与全局排除文件取主 checkout 现在的那份（`ensure_shadow` 将要镜像的）。只读，不需要锁。
+    /// Code：tree_of 的那些；InvalidInput（dir 不是绝对路径，或 dir 里有 `.git`）；NoSuchPath、NotDirectory（dir）；
+    /// Unknown（规则文件读不了，主 checkout 的 config 有 git 也判坏的行，全局排除文件的查询超时）。
+    pub fn is_ignored_in_export(&self, dir: &Path, tree: &TreeOid, path: &RepoPath) -> Result<bool>;
 }
 
 impl Shadow {
@@ -299,9 +309,9 @@ pub enum SyncEvent {
     RenameExcl { from: PathBuf, to: PathBuf },
 }
 
-/// `pause_export_before_rename` 的句柄。
+/// 停住接缝（`pause_export_before_rename`、`pause_attach_before_index`）的句柄。
 #[cfg(feature = "test-seams")]
-pub struct ExportPause { /* 私有 */ }
+pub struct Pause { /* 私有 */ }
 
 #[cfg(feature = "test-seams")]
 impl Git {
@@ -319,14 +329,16 @@ impl Git {
     /// 取出并清空这个 Git 做过的 fsync、F_FULLFSYNC 与改名，按发生的顺序。
     pub fn take_sync_events(&self) -> Vec<SyncEvent>;
     /// 停住：这个 Git 的下一次 export_tree 在 §5.5 第 5 步持久化之后、第 6 步改名之前停住，直到放行。
-    pub fn pause_export_before_rename(&self) -> ExportPause;
+    pub fn pause_export_before_rename(&self) -> Pause;
+    /// 停住：这个 Git 的下一次 attach_worktree 在 §5.6 第 2 步建好管理目录之后、第 3 步建 index 之前停住，直到放行。
+    pub fn pause_attach_before_index(&self) -> Pause;
 }
 
 #[cfg(feature = "test-seams")]
-impl ExportPause {
-    /// 阻塞到那次导出停在改名之前。
+impl Pause {
+    /// 阻塞到那次调用停在停住点。
     pub fn wait_until_paused(&self);
-    /// 放行那次导出。
+    /// 放行那次调用。
     pub fn release(self);
 }
 ```
@@ -339,7 +351,7 @@ impl ExportPause {
   4. `attach_worktree` 换了意思：给本会话影子仓库建一代管理目录，不再接主 checkout；接主 checkout 的是新的 `attach_staging`（review I2）。
   5. types.md §3 的 `RepoId` 注释"主 checkout 和接在它 object store 上的所有工作区是同一个 `RepoId`"早于影子仓库的裁定：工作区的 common dir 是影子仓库，`RepoId` 只从主 checkout 得到（§5.2）。
   6. types.md §8 第 1 层一行改成"同层只允许 store 与 gitio 依赖 apfs"（module-rulings Addendum 7 的 Layering 条；§2）。
-- **计划之外新增的公开项**：Addendum 2 点名的 `ensure_shadow`、`attach_staging`、`tree_contains`、`shadow_drift`，review N2 要的 `shadow_at`，以及它们用到的 `Shadow`、`MirrorDrift`；调用表要的 `open`、`repo_id`、`read_ref`、`is_ancestor`、`merge_base`、`remote_ref`、`delete_ref`；补充条目"clean 过滤器的反方向由 gitio 规定"要的 `stage`。另有三项 [我的决定]：`common_dir`（daemon 报错时给出路径）、`is_binary`（让 types.md 的 `Binary` 与 merge3 用同一个判定）、两个常量。本节代码块末尾 `test-seams` 下的测试接缝 [我的决定] 只在测试里编译，不算公开接口，也不进发布的二进制（module-rulings Addendum 4）。
+- **计划之外新增的公开项**：Addendum 2 点名的 `ensure_shadow`、`attach_staging`、`tree_contains`、`shadow_drift`，review N2 要的 `shadow_at`，以及它们用到的 `Shadow`、`MirrorDrift`；调用表要的 `open`、`repo_id`、`read_ref`、`is_ancestor`、`merge_base`、`remote_ref`、`delete_ref`；补充条目"clean 过滤器的反方向由 gitio 规定"要的 `stage`；session 的上游要求（session.md @853fdf8 §2，module-rulings 的 Requirements rounds 条）要的 `is_ignored_in_export`。另有三项 [我的决定]：`common_dir`（daemon 报错时给出路径）、`is_binary`（让 types.md 的 `Binary` 与 merge3 用同一个判定）、两个常量。本节代码块末尾 `test-seams` 下的测试接缝 [我的决定] 只在测试里编译，不算公开接口，也不进发布的二进制（module-rulings Addendum 4）。
 - gitio 的类型（`Git`、`Shadow`、`MirrorDrift`、`IndexInfo`、`Merge3`、`Hunk`）只在进程内传递，不出现在 RPC 或 JSON 上，所以不 derive `Serialize`。status 要报镜像漂移时，由 session 转成自己的告警；publish 把 `Hunk` 转成 `Conflict.detail` 时，自己决定 JSON 形状与每个 hunk 的长度上限（module-rulings T10）。它们属于 types.md §2.1 所说"模块拥有的跨模块类型"，名字待 T15 补进那张表。
 
 ## 4. 数据与不变量
@@ -356,7 +368,7 @@ impl ExportPause {
 | `refs/strata/remotes/<remote>/<branch>` | `fetch`；`push` 返回 `Pushed` 之后 | strata 自己看到的远端 tip [我的决定]。不用 `refs/remotes/*`：后台移动人的远端跟踪分支，会让人之后的 `git push --force-with-lease` 以为看过这些提交，从而把它们盖掉 |
 | `refs/strata/` 下的其他名字 | 调用方经 `update_ref`、`delete_ref` | gitio 只检查前缀，名字的含义归调用方 |
 
-不写：工作树、`<common>/index`、`HEAD`、`refs/heads/*`、`refs/remotes/*`、`refs/tags/*`、`refs/stash`、`config`、`hooks/`、`info/`、`FETCH_HEAD`、`<common>/worktrees/`。reflog 只在用户把 `core.logAllRefUpdates` 设成 `always` 时才会给 `refs/strata/*` 记，那是用户自己的配置，22 个仓库都没设。
+不写：工作树、`<common>/index`、`HEAD`、`refs/heads/*`、`refs/remotes/*`、`refs/tags/*`、`refs/stash`、`config`、`hooks/`、`info/`、`FETCH_HEAD`、`<common>/worktrees/`，以及 fsmonitor 的 `fsmonitor--daemon.ipc` 与 `fsmonitor--daemon/`（§5.1）。reflog 只在用户把 `core.logAllRefUpdates` 设成 `always` 时才会给 `refs/strata/*` 记，那是用户自己的配置，22 个仓库都没设。
 
 agent 在工作区里的 git 写入（`git add`、`commit`、`stash`、`branch`、`tag`、HEAD 的移动）全都落在本会话的影子仓库里，主 checkout 与别的会话都看不到（实测）。design §6.8 的"允许本地 git add/commit/stash"因此不触及不变量 2。
 
@@ -376,7 +388,7 @@ agent 在工作区里的 git 写入（`git add`、`commit`、`stash`、`branch`�
     gitdir                          <工作区>/.git 的绝对路径
     locked                          git-strata（git worktree prune 因此永不清理它）
     HEAD                            detached：<head> 加换行
-    index                           read-tree 建出，update-index --refresh 填好 stat
+    index                           git 在 <tree_dir>/.git/index 建出（read-tree，update-index --refresh 填好 stat），gitio 复制进来
 <tree_dir>/.git                     一行 gitfile：gitdir: <管理目录>，随目录换入工作区
 ```
 
@@ -393,37 +405,38 @@ agent 在工作区里的 git 写入（`git add`、`commit`、`stash`、`branch`�
 | --- | --- | --- |
 | tree 校验 | `TreeOid` | `tree_of` 的结论（Ok 或 Err），tree 不可变，结论永久有效；校验通过的 tree 另留路径表给 `tree_contains`，最多 64 个 tree，按最近使用淘汰 [我的决定] |
 | index 解析 | index 文件路径加 (size, mtime 纳秒, inode)，再加 §5.7 第 6 步读过的 config 文件的同样三项 | `IndexInfo`；`ignorecase` 来自 config，config 一变就重读 |
-| 规则文件 | 文件路径加 (size, mtime 纳秒, inode) | 解析后的模式；每次 `is_ignored` 对涉及的规则文件各 stat 一次 |
+| 规则文件 | 文件路径加 (size, mtime 纳秒, inode) | 解析后的模式；每次 `is_ignored`、`is_ignored_in_export` 对涉及的规则文件各 stat 一次 |
+| 主 checkout 的 `core.ignorecase` | `<common>/config` 的 (size, mtime 纳秒, inode) | `is_ignored_in_export` 用的值（§5.8 末段） |
 | 影子仓库的归属 | 影子仓库路径 | 标记与 alternates 的核对结论；影子仓库存活期间这两项不变 |
-| 全局排除文件的路径 | common dir（主 checkout 或影子仓库） | 第一次用到时 `git --git-dir=<common> config --path --get core.excludesFile`，没设时取 `$XDG_CONFIG_HOME/git/ignore`，再缺省 `~/.config/git/ignore`。影子仓库复制了主 checkout 仓库级的这个键，所以两边解析出同一个文件，与各自 git 的判定一致（实测）。daemon 重载配置时重新 `open`，缓存随之清空 |
+| 全局排除文件的路径 | common dir（主 checkout 或影子仓库） | 第一次用到时 `git --git-dir=<common> config --path --get core.excludesFile`（10 s 超时，§5.1），没设时取 `$XDG_CONFIG_HOME/git/ignore`，再缺省 `~/.config/git/ignore`。影子仓库复制了主 checkout 仓库级的这个键，所以两边解析出同一个文件，与各自 git 的判定一致（实测）。daemon 重载配置时重新 `open`，缓存随之清空 |
 | git 版本 | 进程 | 第一次 `open` 时读一次 |
 
 ### 4.4 不变量
 
 | # | 不变量 | 落实 design §9 |
 | --- | --- | --- |
-| G1 | 主 checkout 只读，写入只有 §4.1 的两类。每个读写 index 的命令都显式设 `GIT_INDEX_FILE`，指向导出的私有 index、管理目录的 index 或 staging 私有目录的 index，git 从不落到 `<common>/index`。`export_tree` 的 `dst`、`ensure_shadow` 的 `dir`、`attach_worktree` 的 `tree_dir` 与 `workspace`、`attach_staging` 的 `staging` 与 `gitdir` 落在主 checkout 的工作树或 common dir 里时，返回 `InvalidInput`；拿主 checkout 或人自己的 linked worktree 当 `stage`、`push` 的 staging 树同样拒绝。`fetch` 不写 `FETCH_HEAD`、`refs/remotes/*`、tag；`push` 推到地址，不更新 `refs/remotes/*` | 2 |
+| G1 | 主 checkout 只读，写入只有 §4.1 的两类。每个读写 index 的命令都显式设 `GIT_INDEX_FILE`，指向导出的私有 index、attach 时 `tree_dir/.git/` 下的临时 index 或 staging 私有目录的 index，git 从不落到 `<common>/index`；每个 git 子进程都带 `-c core.fsmonitor=false`，用户级的 `core.fsmonitor` 不会让 git 在 common dir 里建 fsmonitor 的 socket、起守护进程（§5.1）。`export_tree` 的 `dst`、`ensure_shadow` 的 `dir`、`attach_worktree` 的 `tree_dir` 与 `workspace`、`attach_staging` 的 `staging` 与 `gitdir` 落在主 checkout 的工作树或 common dir 里时，返回 `InvalidInput`；拿主 checkout 或人自己的 linked worktree 当 `stage`、`push` 的 staging 树同样拒绝。`fetch` 不写 `FETCH_HEAD`、`refs/remotes/*`、tag；`push` 推到地址，不更新 `refs/remotes/*` | 2 |
 | G2 | `update_ref`、`delete_ref`、`read_ref` 只接受 `refs/strata/` 开头的名字。`push` 的源必须在 `refs/strata/` 下，目标恰好一个 `refs/heads/<dst_branch>`，从不强推 | 2、3 |
 | G3 | 导出不改已有的目录：`dst` 存在就拒绝；最后一步用 `apfs::rename_rooted` 的 `RenameMode::Excl`，竞争下也不覆盖。`dst` 只以完整的形态出现：先持久化，再改名 | 5 |
-| G4 | 结果不确定就是 `Unknown`。`push` 没拿到本 ref 的状态行即 `Unknown`；任何写入开始之后的失败即 `Unknown`，已写的原样保留。gitio 从不重试写操作，也从不清理失败的现场 | 6 |
+| G4 | 结果不确定就是 `Unknown`。`push` 没拿到本 ref 的状态行即 `Unknown`；任何写入开始之后的失败即 `Unknown`（`attach_worktree` 写 gitfile 之前的例外见 G9），已写的原样保留。gitio 从不重试写操作，也从不清理失败的现场 | 6 |
 | G5 | 已跟踪的文件永不被 ignore：`is_ignored` 先查 index，ignorecase 时按 ASCII 不区分大小写 [我的决定，与 git 相同；只差 Unicode 大小写的归 overlay，§9] | —（design §3 大小写行） |
 | G6 | 跨出 gitio 的路径一律是 `RepoPath`；git 给出的非 UTF-8 路径返回 `NotText`，从不跳过 | — |
 | G7 | 解析的对象就是确切的那一个：`--no-replace-objects`、`GIT_NO_LAZY_FETCH=1`；拒绝 SHA-256 与 reftable 仓库、gitlink；影子仓库总是 SHA-1、files 引用存储 | 5 |
 | G8 | 参数不会被当成选项：修订、remote、分支先校验，再放在 `--end-of-options` 之后；路径经 `-z --stdin` 传，或放在 `--` 之后并带 `--literal-pathspecs` | 3 |
-| G9 | 先拒绝、后写入：`export_tree`、`ensure_shadow`、`attach_worktree`、`attach_staging`、`stage` 的类型化拒绝全部发生在创建任何文件之前，之后的失败按 G4 处理（module-rulings 的错误时序规则） | 6 |
-| G10 | agent 用的工作区从不接到主 checkout 的 common dir：它的 git 目录是本会话的影子仓库，没有 remote，`pre-push` 没有 `STRATA_PUBLISH=1` 就拒绝（config 钉住 `core.hooksPath`，外面的 hooksPath 关不掉它；它是守卫，不是安全边界，§9），ref 与新对象不出影子仓库；影子仓库的镜像只在建仓时取一次，从不改写；gitio 从不由工作区里的 git 推出 `RepoId`（`open` 拒绝工作区）。接到主 checkout 的 common dir 上的只有 publish 的 staging 树（`attach_staging`），它由 strata 驱动，从不交给 agent。`new` 之后影子仓库是 agent 可写的地方：gitio 之后往里写的（move 时的管理目录）都经 apfs 的 rooted 函数，根是影子仓库目录（module-rulings 的 Addendum 8 clarification） | 2、3、7、8 |
+| G9 | 先拒绝、后写入：`export_tree`、`ensure_shadow`、`attach_worktree`、`attach_staging`、`stage` 的类型化拒绝全部发生在创建任何文件之前，之后的失败按 G4 处理（module-rulings 的错误时序规则）。一个例外：`attach_worktree` 写 gitfile 之前，rooted 函数在写之前的拒绝（`NotDirectory`、`Exists`）原样返回。`move_workspace` 时这时写下的只有调用方的内部暂存（未被引用的下一代管理目录与移动暂存里的临时 index，module-rulings 的 "Error timing, refined"），由调用方退役再以这个码拒绝；`new` 时 `tree_dir` 就是工作区，调用方把 `create_session` 之后的任何失败都当现场（§5.6） | 6 |
+| G10 | agent 用的工作区从不接到主 checkout 的 common dir：它的 git 目录是本会话的影子仓库，没有 remote，`pre-push` 没有 `STRATA_PUBLISH=1` 就拒绝（config 钉住 `core.hooksPath`，外面的 hooksPath 关不掉它；它是守卫，不是安全边界，§9），ref 与新对象不出影子仓库；影子仓库的镜像只在建仓时取一次，从不改写；gitio 从不由工作区里的 git 推出 `RepoId`（`open` 拒绝工作区）。接到主 checkout 的 common dir 上的只有 publish 的 staging 树（`attach_staging`），它由 strata 驱动，从不交给 agent。`new` 之后影子仓库是 agent 可写的地方：gitio 之后往里写的（move 时的管理目录与它的 index 副本）都经 apfs 的 rooted 函数，根是影子仓库目录；git 自己在 `new` 之后不往影子仓库里写任何东西（module-rulings 的 Addendum 8 clarification；§5.6 末尾的清单） | 2、3、7、8 |
 
 ## 5. 流程与算法
 
-gitio 自己不拿 strata 的锁，靠 git 的锁文件（ref 锁、`index.lock`）保证单个命令的原子性。会写主 checkout 或共享目录的操作（`fetch`、`export_tree`、`attach_staging`、`stage`、`commit_tree`、`update_ref`、`delete_ref`）由调用方在 daemon 的 per-repo 写锁内调用；`ensure_shadow`、`attach_worktree` 只写本会话的影子仓库，按 module-rulings Addendum 3 同样在锁内调用（锁只罩 fetch、导出、克隆、attach、pin、交换这些短临界区，`new` 的 fetch 也拿锁）。`push` 的远端那一段不需要 gitio 的锁，它对本地唯一的写（§5.11 第 5 步）自带比较并交换，是否持锁推送由 publish.md 与 daemon.md 定。只读的（`read_index`、`is_ignored`、`tree_of`、`tree_contains`、`shadow_at`、`shadow_drift`、`read_ref`、`is_ancestor`、`merge_base`、`merge3`）不需要锁。gitio 不做 checkpoint：发布前（`BeforePublish`）与移动前（`BeforeRollout`）的 checkpoint 是调用方的事。
+gitio 自己不拿 strata 的锁，靠 git 的锁文件（ref 锁、`index.lock`）保证单个命令的原子性。会写主 checkout 或共享目录的操作（`fetch`、`export_tree`、`attach_staging`、`stage`、`commit_tree`、`update_ref`、`delete_ref`）由调用方在 daemon 的 per-repo 写锁内调用；`ensure_shadow`、`attach_worktree` 只写本会话的影子仓库，按 module-rulings Addendum 3 同样在锁内调用（锁只罩 fetch、导出、克隆、attach、pin、交换这些短临界区，`new` 的 fetch 也拿锁）。`push` 的远端那一段不需要 gitio 的锁，它对本地唯一的写（§5.11 第 5 步）自带比较并交换，是否持锁推送由 publish.md 与 daemon.md 定。只读的（`read_index`、`is_ignored`、`is_ignored_in_export`、`tree_of`、`tree_contains`、`shadow_at`、`shadow_drift`、`read_ref`、`is_ancestor`、`merge_base`、`merge3`）不需要锁。gitio 不做 checkpoint：发布前（`BeforePublish`）与移动前（`BeforeRollout`）的 checkpoint 是调用方的事。
 
 ### 5.1 子进程环境（`command`）
 
 1. `Command::new("git")`；把 `std::env::vars_os()` 里大写后以 `GIT_` 开头的键全部 `env_remove`，与 tgrep 相同。这包括 `GIT_DIR`、`GIT_WORK_TREE`、`GIT_INDEX_FILE`、`GIT_OBJECT_DIRECTORY`、`GIT_CONFIG_*`、`GIT_AUTHOR_*`、`GIT_COMMITTER_*`、`GIT_SSH_COMMAND`、`GIT_ASKPASS`。另外去掉继承来的 `STRATA_PUBLISH`。
-2. 加参数 `--no-replace-objects`；设 `GIT_TERMINAL_PROMPT=0`、`GIT_NO_LAZY_FETCH=1`、`GIT_OPTIONAL_LOCKS=0`。stdin 缺省接 `/dev/null`：凭据助手给不出凭据时立即失败，不会挂住；要喂数据的命令（`commit-tree -F -`、`update-index -z --stdin`）接管道，写完就关。
+2. 加参数 `--no-replace-objects` 与 `-c core.fsmonitor=false` [我的决定，§9]；设 `GIT_TERMINAL_PROMPT=0`、`GIT_NO_LAZY_FETCH=1`、`GIT_OPTIONAL_LOCKS=0`。stdin 缺省接 `/dev/null`：凭据助手给不出凭据时立即失败，不会挂住；要喂数据的命令（`commit-tree -F -`、`update-index -z --stdin`）接管道，写完就关。关掉 fsmonitor，是因为用户级的 `core.fsmonitor = true` 会让 git 在 `checkout-index`、`update-index --refresh` 时起 fsmonitor 守护进程，并在 git 目录里建 `fsmonitor--daemon.ipc` 与 `fsmonitor--daemon/`：实测 `export_tree` 那样的 checkout-index（`--git-dir` 是主 checkout 的 common dir）就在主 checkout 的 `.git` 里建了这两项、留下一个守护进程，违反 G1；move 时的 refresh 在影子仓库里建了 `fsmonitor--daemon.ipc`。gitio 的命令都用不着它。
 3. `LC_ALL=C` 只加在 gitio 要按原话分类 stderr 的命令上：`fetch`、`update-ref`、`commit-tree`，以及 `rev-parse`、`ls-tree` 的失败分类 [我的决定]。会跑用户命令的命令不加：`checkout-index`（smudge）、`update-index`（clean，含 `--refresh`）与 `push`（pre-push 钩子；它的归类只看 porcelain 状态行，git 不翻译这一行）。过滤器与钩子因此继承 daemon 自己的 locale（daemon.md 定；review M15）。加了 `LC_ALL=C` 的命令里也有会跑用户命令的：主 checkout 自己的 `reference-transaction` 钩子（若有；`update-ref` 与 `fetch` 时），以及 `fetch` 起的凭据助手与 ssh 传输（`core.sshCommand`；继承来的 `GIT_SSH_COMMAND` 已在第 1 步清掉）。它们都继承 `LC_ALL=C`，影响的只是它们输出的语言（提示、报错），不影响取凭据与连接；git 没有只给自己设 locale 的办法，而 fetch 的分类要读英文原话，所以留下这一点代价 [我的决定，review N5，§9]。
-4. 仓库级命令（只碰对象与 ref：`rev-parse`、`ls-tree`、`fetch`、`update-ref`、`commit-tree`、`merge-base`、`config`）用 `current_dir(common_dir)` 加 `--git-dir=.`（tgrep 的做法）。git 这时把 common dir 当作工作树顶层，所以 gitio 从不在这种调用里跑碰工作树的命令；主 checkout 自己的钩子（若有）在这里以 common dir 为 cwd 运行。工作树级命令（`read-tree`、`update-index`、`write-tree`、`checkout-index`、`push`）用 `--git-dir=<git 目录> --work-tree=<树>`，`current_dir` 是树的根，不向上发现。读写 index 的命令再设 `GIT_INDEX_FILE`；它在第 1 步清洗之后才设，所以只有 gitio 给的值生效。
-5. 子进程放进自己的进程组（`process_group(0)`）。超时就对整个组发 SIGKILL，`ssh` 这类孙进程一起结束，再等它退出。`fetch` 的超时是常量（§9），`push` 的由调用方给，本地命令不设超时。
+4. 仓库级命令（只碰对象与 ref：`rev-parse`、`ls-tree`、`fetch`、`update-ref`、`commit-tree`、`merge-base`、`config`）用 `current_dir(common_dir)` 加 `--git-dir=.`（tgrep 的做法）。git 这时把 common dir 当作工作树顶层，所以 gitio 从不在这种调用里跑碰工作树的命令；主 checkout 自己的钩子（若有）在这里以 common dir 为 cwd 运行。工作树级命令（`read-tree`、`update-index`、`write-tree`、`checkout-index`、`push`）用 `--git-dir=<git 目录> --work-tree=<树>`，`current_dir` 是树的根，不向上发现；`shadow_drift` 在工作区上下文里的 `rev-parse --git-path hooks` 也按这一条，`--git-dir` 给的是工作区的 gitfile（§5.6）。读写 index 的命令再设 `GIT_INDEX_FILE`；它在第 1 步清洗之后才设，所以只有 gitio 给的值生效。读写 index 的命令（`read-tree`、`update-index`、`checkout-index`、`write-tree`）另加关掉钩子的 `-c core.hooksPath=/dev/null` [我的决定，§9]：git 写完 index 会跑 `post-index-change` 钩子（实测 read-tree 与 refresh 都跑），而这些命令只碰 strata 自己的私有 index；对影子仓库，钩子目录是 agent 可写的，不关的话 move 时 strata 会替 agent 跑它放进去的钩子（实测）。`push` 不加：人自己的 pre-push 钩子照跑（§5.11）。命令行上的 `-c` 压过各级 config，也压过它们 include 进来的文件。
+5. 子进程放进自己的进程组（`process_group(0)`）。超时就对整个组发 SIGKILL，`ssh` 这类孙进程一起结束，再等它退出。`fetch` 的超时是常量（§9），`push` 的由调用方给。本地命令里只有会读活影子仓库 config 的那几个设超时 [我的决定，§9]：git 的每个命令启动时都读仓库 config、跟随其中的 include，影子仓库 config 里一条指向 FIFO 的 include 让它一直挂住（实测 `config --local --list`、`config --get`、`rev-parse` 都挂住）。只读的查询各 10 s：`shadow_drift` 的三次子进程，与全局排除文件的查询（§4.3；`is_ignored` 与 `is_ignored_in_export` 共用这一处，按主 checkout 查时也一样）；`attach_worktree` 的 read-tree 与 refresh 各 600 s。到时杀进程组，返回 `Unknown`（`detail.reason = "timeout"`）。其余本地命令不设超时。
 6. 输出只解析 `-z` 与 porcelain 格式。OID 经 `TreeOid`、`CommitOid` 的 `TryFrom` 校验（40 位）。stderr 只用来分类和填 `detail`，取末尾 4 KiB。
 
 ### 5.2 `open(root)`
@@ -483,7 +496,7 @@ gitio 自己不拿 strata 的锁，靠 git 的锁文件（ref 锁、`index.lock`
    - `T/tree` 里的文件由 git 写进 gitio 在第 2 步建好的空目录，gitio 自己不往里写。工作树目录必须已经存在：不存在时 checkout-index 以 128 退出（`this operation must be run in a work tree`，实测）；建好之后空 tree 也照常退出 0，导出成空的 `dst`。实测 git 不穿过它自己写出的符号链接：同一个名字既是符号链接又是目录（§5.4 现在拒绝），或只差 Unicode 大小写的符号链接与目录，git 都用目录替掉符号链接，链接指向的目录一字没动。
    - 22 个仓库都没有 `.gitattributes`、没配过滤器、没设 `core.autocrlf`，所以今天的导出等于原样写出 blob。上面的规则为将来的仓库与测试而写。
 5. 持久化 [我的决定]：`T/tree` 本身和它下面的每个文件与目录 `fsync`，再对 `T/tree` 做一次 `apfs::full_fsync`。macOS 的 `fsync` 不刷磁盘缓存，一次 `F_FULLFSYNC` 把之前写出的全部刷下去。要打开的是 `<T 的名字>/tree` 本身，以及这个 tree 的路径表（§4.3；已被淘汰就再跑一次 ls-tree）里模式 `100644`、`100755` 的条目与所有条目的各级上级目录在它下面的路径，逐个 `apfs::open_rooted(P, …)` 再 `fsync`；模式 `120000` 的条目（符号链接）不打开，`open_rooted` 对它们报 `NotFile`。不遍历目录，所以没有 `apfs::walk` 的深度上限；代价是每个路径 O(深度) 次 `openat`。
-6. **原子替换点**：`apfs::rename_rooted(P, <T 的名字>/tree, <dst 的名字>, RenameMode::Excl)`，再对 P 做 `apfs::full_fsync`，P 本身的句柄取自 Addendum 8 的根句柄访问函数（§2）。改名之前崩溃，`dst` 不存在、`T` 保留；改名之后，`dst` 是完整的。撞上别人刚建好的 `dst` 时 `rename_rooted` 返回 `Exists`，这时按第 2 步的规则报 `Unknown` 并保留 `T`；在 daemon 的写锁之下不会发生。
+6. **原子替换点**：`apfs::rename_rooted(P, <T 的名字>/tree, <dst 的名字>, RenameMode::Excl)`，再对 P 做 `apfs::full_fsync`，P 本身的句柄取自 `apfs::open_root(P)`（§2）。改名之前崩溃，`dst` 不存在、`T` 保留；改名之后，`dst` 是完整的。撞上别人刚建好的 `dst` 时 `rename_rooted` 返回 `Exists`，这时按第 2 步的规则报 `Unknown` 并保留 `T`；在 daemon 的写锁之下不会发生。
 7. 删掉 `T`，此时里面只剩私有 index：`apfs::remove_rooted(P, <T 的名字>/index, RemoveKind::File)`，再 `remove_rooted(P, <T 的名字>, RemoveKind::EmptyDir)`。module-rulings Addendum 7 准许操作删掉自己建的空目录，非空的只经 `store::retire_dir` 离开，所以先删文件、再删空目录，不用 `remove_tree_rooted`。
 
 复杂度 O(文件数 + 字节数)。design §8 没有导出的验收数字：它的"新建会话 < 5 s"假定基线已在缓存里，只有 origin tip 移动后的第一次 `new` 才导出。首个 spike 实测 tool 与 staff-api 的导出时间，写回 §9。
@@ -511,26 +524,47 @@ module-rulings Addendum 2 定了接法：**每个会话、每个 repo 一个影�
 
 **`shadow_at(dir)`**（只读；`new` 之后与 daemon 重启后，session 都经它拿 `Shadow`，review N2）：`lstat(dir)` 不存在 → `NoSuchPath`；不是目录，或 config 里没有 `strata.shadow = true`，或 `objects/info/alternates` 第一行的 realpath 不是本仓库 `<common>/objects` 的 realpath → `InvalidInput`；读不了 → `Unknown`。存在与否每次都 lstat，归属的结论可以走缓存（§4.3）。从不建、从不改：不刷新镜像，不补缺的文件，不碰 mtime。影子仓库不见了时，session 把工作区报成坏的（status），从不调 `ensure_shadow` 重建：重建会按今天的主 checkout 重新取镜像，违背"只取一次"，还会丢掉 agent 在影子仓库里的 ref 与 stash。不起子进程：标记用照抄并改过的 `config_bool` 直接读 config（§5.7 第 6 步的读法：引号、转义与行内注释都照 git），alternates 直接读文件。标记缺失，或它的值不是 git 认的 true（false，或根本不是布尔值）→ `InvalidInput`；config 有 git 也判坏的行 → `Unknown`（`detail.reason = "bad-config"`）。
 
-**`shadow_drift(shadow)`**（status 用，只读）：核对 `shadow` 属于本仓库（同 `shadow_at` 的核对，否则 `InvalidInput`），再比较它的镜像与主 checkout 的现状：两个 `info/` 文件逐字节比；复制清单里的每个键，两边各一次 `git config --local --null --list`，按值比。再看 pre-push 守卫（review B4）：影子仓库 config 里 `core.hooksPath` 的现值（同一份 `--list` 里的最后一个）不是 gitio 钉的 `<dir>/hooks`，或这个键被删了，或 `hooks/pre-push` 不再是 gitio 写的那份（经 `apfs::open_rooted_file(dir, hooks/pre-push)` 读，字节或可执行位不同，或读不出：不见了、是符号链接、不是普通文件）[我的决定，§9]，就报 `PrePushGuardDisabled`。钩子管理工具（husky、lefthook）在工作区里安装时就会这样改，§9。返回不同的项，按 `Exclude`、`Attributes`、`Config`（键名排序）、`PrePushGuardDisabled` 排列；空表示没有漂移。从不改写影子仓库，也不修守卫，是否重新钉住由 daemon 决定（module-rulings 的 T13 条）：镜像在会话存活期间不变（Addendum 2），漂移只是 status 的告警。读不了 → `Unknown`。复杂度 O(镜像大小)，两次子进程。
+**`shadow_drift(shadow, workspace)`**（status 用，只读）：核对 `shadow` 属于本仓库（同 `shadow_at` 的核对，否则 `InvalidInput`），`workspace` 不是绝对路径 → `InvalidInput`。然后：
+
+1. 镜像：两个 `info/` 文件逐字节比；复制清单里的每个键，两边各一次 `git config --local --null --list`，按值比。影子仓库那份列表里的每一条 `include.*`、`includeIf.*`（`ensure_shadow` 从不写，§4.2）各报一项 `Config { key }`（review M3）：gitio 的读法不跟随 include（§5.7 第 6 步），status 由此看得出读法可能与 git 不同。
+2. pre-push 守卫（review B4、M3）：有效的 hooks 目录由 git 自己在工作区的上下文里查，`git --git-dir=<workspace>/.git --work-tree=<workspace> rev-parse --path-format=absolute --git-path hooks`，`current_dir` 是工作区根；`--git-dir` 给的是 gitfile 时 git 照常经它找到管理目录，不向上发现（实测）。git 照常读系统、用户、影子仓库与 `config.worktree` 各级 config，跟随 include，`includeIf "gitdir:…"` 按管理目录求值，与 agent 在工作区里推送时完全一样。结果不是 `<dir>/hooks` → `PrePushGuardDisabled { hooks_path: Some(结果) }`。实测（git 2.54）有四种情形，影子仓库 config 的本地列表里仍是钉住的值（或没有这个键），有效目录却在别处：在工作区里加的 `include.path` 指向一个设了钩子路径的文件；`extensions.worktreeConfig` 加 `git config --worktree core.hooksPath`；钉住的键被删而用户级设了钩子路径；gitfile 被改指主 checkout。前三种从工作区推到显式地址都成功了。钉住的键还在时，用户级的钩子路径（含只对管理目录生效的 `includeIf "gitdir:"`）压不过它，不报。`hooks/pre-push` 不再是 gitio 写的那份（经 `apfs::open_rooted_file(dir, hooks/pre-push)` 读，字节或可执行位不同，或读不出：不见了、是符号链接、不是普通文件）→ `hook_replaced`，不论有效目录在哪 [我的决定，§9]。钩子管理工具（husky、lefthook）在工作区里安装时就会这样改，§9。`<workspace>/.git` 不存在 → 不查守卫：没有工作区就没有从它的推送，status 已经报 `Missing`。git 认不出工作区的 git 目录（gitfile 坏了，实测退出 128）→ `Unknown`（`detail.reason = "hooks-lookup"`）。
+
+返回不同的项，按 `Exclude`、`Attributes`、`Config`（键名排序）、`PrePushGuardDisabled` 排列；空表示没有漂移。从不改写影子仓库与工作区，也不修守卫，是否重新钉住由 daemon 决定（module-rulings 的 T13 条）：镜像在会话存活期间不变（Addendum 2），漂移只是 status 的告警。读不了 → `Unknown`；三次子进程各有 10 s 超时（§5.1）。复杂度 O(镜像大小)，三次子进程。
 
 **`attach_worktree(shadow, generation, head, tree_dir, workspace)`**（下文把 `generation` 记作 n：`new` 时 n = 1，此后每次 `move_workspace` 用 store 新分配的 n，`u64`，永不复用；`shadow` 来自 `ensure_shadow` 或 `shadow_at`）：
 
 调用方先把基线克隆到 `tree_dir`：`new` 时就是工作区本身（`tree_dir == workspace`），`move_workspace` 时是旁边的临时树，交换之后它出现在 `workspace` 的位置。
 
 1. 拒绝（G9）：`shadow` 不属于本仓库（同 `ensure_shadow` 第 1 步的核对）→ `InvalidInput`；`n = 0` → `InvalidInput`；`tree = tree_of(head)`，它的码原样返回；`tree_dir` 不存在 → `NoSuchPath`，不是目录（lstat，符号链接也算）→ `NotDirectory`；`tree_dir` 或 `workspace` 不是绝对路径，或落在主 checkout 的工作树或 common dir 里 → `InvalidInput`；`<tree_dir>/.git` 已存在（lstat，文件、目录、符号链接都算）→ `Exists`；`<shadow>/worktrees` 存在却不是目录（`apfs::attrs_of(shadow, worktrees)`，lstat 语义，符号链接也算）→ `NotDirectory`；`<shadow>/worktrees/<n>/` 已存在 → `Exists`。管理目录从不复用：每一代一个新的，交换由调用方原子完成（Addendum 2；review M13）。
-2. 建管理目录 `A = <shadow>/worktrees/<n>/`，写 `commondir`（`../..`）、`gitdir`（`<workspace>/.git` 的绝对路径，即交换之后的位置）、`locked`（内容 `git-strata`，`git worktree prune` 因此永远不清理它）、`HEAD`（`<head>` 加换行，即 detached）。都经 apfs 的 rooted 函数，根是影子仓库目录（module-rulings 的 Addendum 8 clarification：`new` 之后影子仓库是 agent 可写的地方，agent 的 git 往里写 ref、对象、index 与管理文件；review B3）：`mkdir_rooted(shadow, worktrees, 0o755, false)`（已存在得 `Exists`，照常往下走），再 `mkdir_rooted(shadow, worktrees/<n>, 0o755, false)`，四个文件各一次 `create_file_rooted(shadow, worktrees/<n>/<名字>, 0o644)`，往返回的句柄里写。被换成符号链接或文件的 `worktrees` 在解析时就得 `NotDirectory`，写不到别处。不这样做的后果，re-review r2 实测过：指向 `<main>/.git/worktrees` 的符号链接让第 2 代的管理目录建进了主 checkout，主 checkout 的 `git worktree list` 列出了它，换入之后工作区里看得见 `origin`。真正建出第一个目录之前的失败（`NotDirectory`、`Exists`）原样返回，什么都没写；从建出第一个目录起，任何失败都是 `Unknown`，已写的原样保留（G4）。`move_workspace` 时，没被引用的新管理目录属于调用方的内部暂存，要不要删由调用方按 module-rulings Addendum 3、4 决定（删掉暂存再以类型化的码拒绝时，调用方的意图记录关闭为 `refused`，从不删除），gitio 不删。
-3. index：`GIT_INDEX_FILE=A/index git --git-dir=A --work-tree=<tree_dir> read-tree <tree>`，再在 `tree_dir` 里跑同样参数的 `update-index -q --refresh`，把 stat 信息填上，工作区里第一次 `git status` 就不用重读所有文件。`-q` 让内容有差异的文件不导致失败（实测退出 0）；`--refresh` 会对 stat 对不上的文件跑 clean 过滤器，与 `git status` 相同。git 往 A 里写 index 是按路径写的：预先放好的符号链接在第 2 步就被拒，第 2 步之后有人卡着时间再把 `worktrees` 换成符号链接，不在防范之内（§9）。
-4. `<tree_dir>/.git`：一行 `gitdir: <A 的绝对路径>`。经 `apfs::create_file_rooted(tree_dir, ".git", 0o644)` 新建，往它返回的句柄里写：`O_CREAT|O_EXCL|O_NOFOLLOW`，不跟随符号链接，从不覆盖（module-rulings Addendum 8）。`new` 时 `tree_dir` 就是工作区，这一步是这次调用里第一次可见的写入（Addendum 3：活的 gitfile 与它指向的管理目录都算可见），此后这次调用里的任何失败都是 `Unknown`；`move_workspace` 时它写在临时树里，随调用方的交换才变得可见（review N4）。
+2. 建管理目录 `A = <shadow>/worktrees/<n>/`，写 `commondir`（`../..`）、`gitdir`（`<workspace>/.git` 的绝对路径，即交换之后的位置）、`locked`（内容 `git-strata`，`git worktree prune` 因此永远不清理它）、`HEAD`（`<head>` 加换行，即 detached）。都经 apfs 的 rooted 函数，根是影子仓库目录（module-rulings 的 Addendum 8 clarification：`new` 之后影子仓库是 agent 可写的地方，agent 的 git 往里写 ref、对象、index 与管理文件；review B3）：`mkdir_rooted(shadow, worktrees, 0o755, false)`（已存在得 `Exists`，照常往下走），再 `mkdir_rooted(shadow, worktrees/<n>, 0o755, false)`，四个文件各一次 `create_file_rooted(shadow, worktrees/<n>/<名字>, 0o644)`，往返回的句柄里写。被换成符号链接或文件的 `worktrees` 在解析时就得 `NotDirectory`，写不到别处。不这样做的后果，re-review r2 实测过：指向 `<main>/.git/worktrees` 的符号链接让第 2 代的管理目录建进了主 checkout，主 checkout 的 `git worktree list` 列出了它，换入之后工作区里看得见 `origin`。错误时序（G9 的例外）：第 2、3 步里 rooted 函数在写之前的拒绝（`NotDirectory`：路径上有符号链接或文件；`Exists`：名字已被占）原样返回，其余失败都是 `Unknown`。`move_workspace` 时，第 4 步写 gitfile 之前这次调用写下的只有未被引用的下一代管理目录与移动暂存里的临时 index，正是 module-rulings "Error timing, refined" 所说的内部暂存：返回类型化的码时它们留在原地，由调用方退役再以这个码拒绝（session 退役 `S` 与 `worktrees/<n>`，意图记录关闭为 `refused`，从不删除；`worktrees/<n>` 被换成了符号链接时，apfs 的 rooted 函数只动链接本身，碰不到它指向的地方）。`new` 时 `tree_dir` 就是工作区，session 把 `create_session` 之后的任何失败都当现场（Creating → Unknown）。gitio 都不删。
+3. index（re-review r3 与 fix round 4 的裁定）：git 不再按路径往 A 里写任何东西。
+   1. 临时目录：`apfs::mkdir_rooted(tree_dir, ".git", 0o700, false)`。名字就是第 4 步 gitfile 的名字：第 1 步已确认它不存在，tree 里也不会有这个名字的条目（§5.4 拒绝 `.git` 分量），所以它碰不上任何导出或投影进来的文件 [我的决定，§9]。`move_workspace` 时 `tree_dir` 是调用方的移动暂存（session 的 `.strata-tmp-move-*`），`new` 时是还没交给 agent 的工作区；agent 的 git 从不往这里写。
+   2. `GIT_INDEX_FILE=<tree_dir>/.git/index git -c core.splitIndex=false --git-dir=<shadow> --work-tree=<tree_dir> read-tree <tree>`，再在 `tree_dir` 里跑同样参数的 `update-index -q --refresh`，把 stat 信息填上，工作区里第一次 `git status` 就不用重读所有文件。`--git-dir` 是 bare 的影子仓库本身，git 只读它：对象经 alternates，过滤器、属性与 `core.autocrlf` 这类键取影子仓库复制来的配置，与工作区里的 git 一样。按 §5.1，这两个命令不跑钩子、不起 fsmonitor，各有 600 s 超时。用户级 `core.splitIndex = true` 不拆这个私有 index（实测），仍显式关掉：副本只有一个文件，这一点不靠 git 的内部规则。`-q` 让内容有差异的文件不导致失败（实测退出 0）；`--refresh` 会对 stat 对不上的文件跑 clean 过滤器，与 `git status` 相同。
+   3. 复制：`apfs::open_rooted_file(tree_dir, ".git/index")` 读出，`apfs::create_file_rooted(shadow, worktrees/<n>/index, 0o644)` 写进返回的句柄，再把副本的 mtime 设成临时 index 的 mtime（`File::set_modified`）[我的决定，§9]：git 按 index 文件的 mtime 判定 racy 条目，副本因此与 git 写出的那份等价。实测：第 2 步之后把 `worktrees/<n>` 换成指向 `<main>/.git` 的符号链接，复制在写之前得到 `NotDirectory`，主 checkout 的 index 逐字节不变；旧的做法（`--git-dir=A`、`GIT_INDEX_FILE=A/index`）在同样的替换下经那个链接重写了主 checkout 的 index，人暂存的文件变成了 Untracked（re-review r3 的复现，本轮在 git 2.54 上又复现了一次）。读临时 index 时 rooted 读被拒（git 跑过之后 `tree_dir/.git` 被换掉了）→ `Unknown`：git 可能已经经那个链接写到了别处。
+   4. 删临时：`apfs::remove_rooted(tree_dir, ".git/index", RemoveKind::File)`，再 `remove_rooted(tree_dir, ".git", RemoveKind::EmptyDir)`（Addendum 7：删自己建的空目录；同 §5.5 第 7 步）。
+4. `<tree_dir>/.git`：一行 `gitdir: <A 的绝对路径>`。经 `apfs::create_file_rooted(tree_dir, ".git", 0o644)` 新建，往它返回的句柄里写：`O_CREAT|O_EXCL|O_NOFOLLOW`，不跟随符号链接，从不覆盖（module-rulings Addendum 8）。从这一步起任何失败都是 `Unknown`：gitfile 一写下，管理目录就被引用了（Addendum 3：活的 gitfile 与它指向的管理目录都算可见）。`new` 时 `tree_dir` 就是工作区，第 3 步的临时目录与这一步的 gitfile 都写在工作区里；`move_workspace` 时它们写在临时树里，随调用方的交换才变得可见（review N4）。
 5. 持久化：A、它里面的文件与 index（经 `apfs::open_rooted(shadow, worktrees/<n>/…)` 打开）、`.git`（第 4 步的句柄）逐个 `fsync`，再一次 `F_FULLFSYNC`。返回 A。
 6. 原子换入是调用方的事：`move_workspace` 把整棵 `tree_dir` 交换到 `workspace`，新的 gitfile 跟着目录过去，git 的 HEAD 与 index 随之一起换（session.md §5.6）。目录改名不改文件的 inode 与 ctime，第 3 步填好的 stat 信息在交换之后仍然有效（实测：在临时树里建好、改名到工作区路径之后，`git status --porcelain` 为空）。旧一代的管理目录由调用方退役（§1）。
 
-结果（实测）：HEAD detached、没有 upstream；`git status --porcelain` 为空，`node_modules/` 与只靠 `info/exclude` 忽略的 `.env` 都不出现；`git log` 经 alternates 读到主 checkout 的历史；`git rev-parse --git-common-dir` 是影子仓库；agent 的 commit 对象、`git stash`、分支与 tag 都只在影子仓库里，主 checkout 的 `for-each-ref` 不变；`git push` 被影子仓库的 `pre-push` 拒绝；主 checkout 的 `git worktree list`、index、`hooks/` 都不变。复杂度 O(文件数)：一次 read-tree 加一次 refresh 的 stat。
+结果（实测）：HEAD detached、没有 upstream；`git status --porcelain` 为空，`node_modules/` 与只靠 `info/exclude` 忽略的 `.env` 都不出现；`git log` 经 alternates 读到主 checkout 的历史；`git rev-parse --git-common-dir` 是影子仓库；agent 的 commit 对象、`git stash`、分支与 tag 都只在影子仓库里，主 checkout 的 `for-each-ref` 不变；`git push` 被影子仓库的 `pre-push` 拒绝；主 checkout 的 `git worktree list`、index、`hooks/` 都不变。fix round 4 的做法同样实测过（git 2.54）：新树的 `git status --porcelain` 为空，`git rev-parse --git-common-dir` 是影子仓库，git 没有往影子仓库里写任何文件。复杂度 O(文件数)：一次 read-tree 加一次 refresh 的 stat，外加一次 index 的复制。
+
+**`new` 之后 strata 对活影子仓库的写**（module-rulings 的 Addendum 8 clarification；re-review r3 与 fix round 4 要的清单）。`new` 之后影子仓库是 agent 的 git 写的地方（ref、对象、index、管理文件、`hooks/`、config）。strata 在那以后起的、碰到影子仓库的操作逐一如下：
+
+| 操作 | 何时 | 往影子仓库里写什么 | 写法；路径被换成符号链接时 |
+| --- | --- | --- | --- |
+| `attach_worktree` 第 2、3 步 | 每次 `move_workspace` | `worktrees/`（不存在时）、`worktrees/<n>/` 与其中的 `commondir`、`gitdir`、`locked`、`HEAD`、`index` | gitio 自己经 apfs 的 rooted 函数写，根是影子仓库目录；`index` 是 `tree_dir/.git/index` 的副本。被换上的符号链接在写之前就得 `NotDirectory`，写不到影子仓库外 |
+| `attach_worktree` 第 3 步的 `read-tree`、`update-index --refresh` | 同上 | 什么都不写：`--git-dir` 是影子仓库，git 只读它，index 在 `tree_dir/.git/` 下。没有 §5.1 关掉的两样时，git 会跑影子仓库 `hooks/` 里的 `post-index-change`，还会在影子仓库里建 `fsmonitor--daemon.ipc`（用户级 `core.fsmonitor = true` 时），两样都实测过 | 影子仓库整个被换成指向别处的链接时，git 读的是链接指向的仓库，仍然只写 `tree_dir/.git/` 下的临时 index |
+| `attach_worktree` 第 5 步 | 同上 | 什么都不写 | `open_rooted` 拿只读句柄再 `fsync` |
+| `shadow_drift`（三次子进程）、`is_ignored` 的全局排除文件查询、`read_index` 与 `is_ignored` 的直接读 | status、overlay | 什么都不写 | 只读；读影子仓库 config 的子进程有 10 s 超时（§5.1） |
+| ref、reflog、对象、config | — | 一个都不写：pin ref 在主 checkout（§4.1），`update_ref`、`delete_ref` 只对主 checkout 的 common dir；`stage`、`commit_tree` 写主对象库；gitio 没有修影子仓库的函数 | "影子仓库的 `refs/` 被换成符号链接，把一次 ref 更新引进主 checkout"这一类因此不会发生。T13 若决定重新钉住 hooksPath（module-rulings 的 T13 条），gitio 另加一个函数，同样经 rooted 函数、走 git 自己的 `config.lock` |
+
+剩下的暴露都要有意的篡改才够得着，按 pre-push 守卫已经裁定的威胁模型（review N1：守卫不是安全边界），最坏情形与之后 status 显示什么记在 §9 的"活影子仓库的写入清单"一行：临时 index 仍由 git 按路径写在 `tree_dir/.git/` 下；refresh 跑影子仓库 config 里的过滤器命令；影子仓库 config 的 include 可以指向 FIFO。
 
 **`attach_staging(staging, gitdir, head)`**（publish 专用）：
 
 1. 拒绝（G9）：`tree = tree_of(head)`，它的码原样返回；`staging` 不存在 → `NoSuchPath`，不是目录（lstat，符号链接也算）→ `NotDirectory`；`staging` 或 `gitdir` 不是绝对路径，或落在主 checkout 的工作树或 common dir 里 → `InvalidInput`；`<staging>/.git` 或 `gitdir` 已存在 → `Exists`。
 2. 建私有 git 目录 `gitdir`：`commondir`（主 checkout common dir 的绝对路径）、`gitdir`（`<staging>/.git` 的绝对路径）、`HEAD`（detached 在 `head`）。从这一步起，任何失败都是 `Unknown`。
-3. index：同 `attach_worktree` 第 3 步，`--git-dir=<gitdir> --work-tree=<staging>`。
+3. index：`GIT_INDEX_FILE=<gitdir>/index git --git-dir=<gitdir> --work-tree=<staging> read-tree <tree>`，再同样参数的 `update-index -q --refresh`（钩子与 fsmonitor 按 §5.1 关掉）。与 `attach_worktree` 不同，git 直接按路径写这个 index：私有 git 目录归 publish，从不交给 agent。
 4. `<staging>/.git`：一行 `gitdir: <gitdir>`，经 `apfs::create_file_rooted(staging, ".git", 0o644)` 新建，同 `attach_worktree` 第 4 步；持久化同第 5 步。
 
 不用 `git worktree add`：它要写主 checkout 的 `<common>/worktrees/`（不变量 2）。代价是主 checkout 的 `git gc` 看不到这个私有目录的 HEAD 与 index：`stage` 写进主对象库的 blob 在 `commit_tree` 与 `update_ref` 之前没有 ref 引用，靠 git 对新松散对象的宽限期（`gc.pruneExpire`，缺省两周）保住，而一次发布只需要几秒到几分钟。结果（实测）：在 staging 里 `update-index`、`write-tree`、`commit-tree` 写出的对象都在主对象库里，`refs/strata/publish/*` 可以指向它们；主 checkout 的 `git worktree list` 不列出它，index 与 `git status` 不变。复杂度 O(文件数)。
@@ -542,12 +576,22 @@ module-rulings Addendum 2 定了接法：**每个会话、每个 repo 一个影�
 3. index 文件与第 6 步读过的 config 文件的 (size, mtime 纳秒, inode) 都与缓存相同 → 返回缓存的快照。
 4. 读 `<git 目录>/index`。文件不存在 → `Unknown`，`detail.reason = "no-index"`（module-rulings Addendum 2 的 T7 条；review M7）：gitio 给工作区与 staging 建的 index 总是在的，它不见了是异常；当成"什么都没跟踪"，ignore 规则就会藏起已跟踪的文件（3f `a_directory_without_git_reports_nothing` 一行）。解析照抄 tgrep 的 `parse_index_with`：版本 2 至 4；v4 的前缀压缩路径；扩展区与结尾校验和；split index 经同目录的 `sharedindex.<hash>` 合并，按 EWAH 位图删除与替换；头部声明的条目数按文件长度夹取，伪造的头部不能让进程按 40 亿条预留内存。读不完整一律返回 `Unknown`（`detail.reason`），不返回少了条目的集合，因为少一条就少一个"已跟踪"豁免。带 sparse 目录条目（`sdir` 扩展）的 index → `Unsupported` [我的决定]；gitio 自己建的 index 总是完整的。
 5. 每条路径：不是 UTF-8 → `NotText`；经 `RepoPath::try_from`（NFC）后进 `tracked`；ignorecase 时它的 ASCII 小写形进 `folded`。
-6. `ignorecase`：读 `<common>/config` 的 `core.ignorecase`；`extensions.worktreeConfig` 为真时，`<git 目录>/config.worktree` 覆盖它，照抄 tgrep 的 `config_bool` 与 `ignores_case`。`config_bool` 改成按 git 的 config 语法读 [我的决定，§9]：agent 的 git 命令与手改都会改写影子仓库的 config，照抄的读法不认引号，`ignorecase = "true"` 会读不出来（review B1）。整个文件逐行解析，git 判为坏行的（段头里有空格、不认识的转义、没闭合的引号）→ `Unknown`（`detail.reason = "bad-config"`）。段名与键名不分大小写，带子段的段头不算这一段，段头后同一行的键照样算。值去掉首尾空白，引号段原样保留（引号可以出现在值的中间），引号外的 `#`、`;` 开始注释；转义有 `\"`、`\\`、`\n`、`\t`、`\b`，行尾的 `\` 接续下一行；同一个键出现多次以最后一个为准。布尔值照 git：没有 `=` 是 true，空值是 false；`true`、`yes`、`on` 与 `false`、`no`、`off` 不分大小写；整数照 git 的写法（可以带 `0x` 或前导 `0`，可以带 `k`、`m`、`g` 后缀），非 0 是 true；其余 → `Unknown`（`bad-config`），git 对这样的 `core.ignorecase` 同样报错退出。没有这个键是 false，与 git 的缺省相同。这些规则都在 git 2.54 上逐条实测过，§7 的 `config_values_read_like_git` 与 git 对拍。影子仓库从不复制 `extensions.*`，所以工作区只看影子仓库 config 里复制来的值。只读仓库级 config，不读全局配置与 `include`：git 在大小写不敏感的卷上 clone 或 init 时，总把 `core.ignorecase = true` 写进仓库 config，22 个仓库都是这样。
+6. `ignorecase`：读 `<common>/config` 的 `core.ignorecase`；`extensions.worktreeConfig` 为真时，`<git 目录>/config.worktree` 覆盖它，照抄 tgrep 的 `config_bool` 与 `ignores_case`。`config_bool` 改成照 git 2.54 的 config 解析器读（`config.c` 的 `parse_file`、`get_value`、`parse_value`，布尔值照 `git_parse_maybe_bool`）[我的决定，§9]：agent 的 git 命令与手改都会改写影子仓库的 config，照抄的读法不认引号，`ignorecase = "true"` 会读不出来（review B1）。按字节读整个文件。下面每条都在 git 2.54 上实测过（`git config --file <f> --type=bool --get`；§7 的 `config_values_read_like_git` 与 git 对拍；review B1、M2）；规则说不准 git 会怎样的形式一律 → `Unknown`（`detail.reason = "bad-config"`），从不猜。
+   - **文件**：开头恰好一个 UTF-8 BOM（`EF BB BF`）跳过，只有它的前一两个字节是坏行。`\r\n` 当作 `\n`；单独的 `\r` 不是行尾，按下面的空白规则处理。文件末尾没有换行等于有。文件里有 NUL 字节 → `Unknown`（`bad-config`），哪怕 git 接受 [我的决定，§9]：git 对 NUL 的处理随位置而变（注释里忽略，值里截断，名字里是坏行），读法不去复刻。
+   - **空白**有两类：解析器用 git 自己的空白（空格、制表符、`\r`、`\n`，不含 `\v`、`\f`）；整数前面的空白用 C 库的（多出 `\v`、`\f`）。
+   - **行**：开头的空白跳过；`#`、`;` 开始注释，到行尾为止（注释里的 `\` 不续行）；`[` 开始段头；ASCII 字母开始一个键；别的字符（含 `\v`、`\f`）都是坏行。
+   - **段头**：`[` 之后是零个或多个 `[A-Za-z0-9.-]`（段名，不分大小写），然后二选一：紧跟 `]`，这时段名不能为空（`[]` 是坏行）；或者一个以上的空白、一个 `"`、子段名（`\` 让下一个字符原样进名字，换行除外）、一个 `"`，紧跟着必须是 `]`，这时段名可以为空（`[ "x"]` git 照样接受，实测）。段名里的别的字符（`[co_re]`、`[core""]`）、空白之后不是 `"`（`[ core]`、`[\tcore]`）、`]` 前的空白（`[core "x" ]`）、到行尾还没闭合，都是坏行。`]` 之后同一行照"行"的规则接着读：又一个段头、一个键或注释都行，`[core]]` 是坏行。只有段名恰好是 `core`、没有子段的段头才开始 `core` 节：`[core "x"]`、`[core ""]`、`[core.x]`、`[core.]`、`[ "x"]` 都不是；第一个段头之前的键不属于任何节。
+   - **键**：ASCII 字母开头，后面是字母、数字或 `-`，不分大小写。名字之后只跳过空格与制表符，然后必须是行尾（没有 `=`，值是"没有值"）或 `=`；别的都是坏行：`ignore_case = 1`、`9key = 1`、`ignorecase # c`、`ignorecase ; c`、名字后的 `\v` 与 `\f`，都让整个文件作废，不论这一行在哪一节、在要读的键之前还是之后。
+   - **值**：`=` 之后，引号外、不是转义出来的空白，在开头跳过、在末尾去掉，中间的保留；`"` 开关引号段，引号本身不进值，可以出现在值的任何位置；引号外的 `#`、`;` 开始注释；转义在引号内外都有效：`\"`、`\\`、`\n`、`\t`、`\b`，`\` 紧跟换行是续行（`\` 在文件末尾也算），转义出来的字符算内容、不被去掉；别的转义、到行尾还没闭合的引号，是坏行。
+   - **取值**：坏行出现在文件里任何位置，git 都拒绝整个文件 → `Unknown`（`bad-config`）。`core` 节的 `ignorecase` 每出现一次都必须是 git 认的布尔值，任何一次不是 → `Unknown`（`bad-config`），git 读到它就报错退出；都是时以最后一次为准；一次都没有是 false，与 git 的缺省相同。布尔值：没有值是 true；空值（含 `""`）是 false；`true`、`yes`、`on` 与 `false`、`no`、`off` 不分大小写；否则当整数：跳过开头的空白，可选的 `+` 或 `-`，按 `strtoimax` 以 0 为基读最长的数字串（`0x`、`0X` 开头是十六进制，`0` 开头是八进制，否则十进制），一个数字也没有、或超出 64 位，都不是布尔值；数字串之后只能什么都没有，或恰好一个 `k`、`m`、`g`（不分大小写，乘 2^10、2^20、2^30）；乘积必须落在 32 位有符号整数里，git 用的是 `int`；非 0 是 true。所以 `1K`、`0x7fffffff`、`-2g`、`"\t1"` 是 true，`0k`、`-0` 是 false，`2g`、`3000000000`、`2097152k`、`0x80000000`、`08`、`0x`、`1kb`、`1e3`、`"1 "` 都不是布尔值。
+   - **include**：`include.path`、`includeIf.<条件>.path` 只当普通的键，不跟随 [我的决定，§9]：跟随就要读 agent 指定的任意文件（可以是 FIFO），`includeIf` 的条件还要照 git 的上下文求值。影子仓库 config 里的 include 由 `shadow_drift` 报成漂移（§5.6），status 因此看得出这个读法可能与 git 不同。22 个仓库的仓库级 config 都没有 include（2026-10-22 只读核对）。
+
+   只读仓库级 config，不读全局配置：git 在大小写不敏感的卷上 clone 或 init 时，总把 `core.ignorecase = true` 写进仓库 config，22 个仓库都是这样。影子仓库从不复制 `extensions.*`，所以工作区只看影子仓库 config 里复制来的值；agent 自己打开 `extensions.worktreeConfig` 时，`config.worktree` 照上面的规则覆盖它。
 7. 返回快照：之后 index 再变，它也不变。
 
 复杂度 O(index 字节数)；tool 约 4K 条，毫秒级。实测主 checkout 的 index 都是 v2，没有 split index。
 
-### 5.8 `is_ignored(worktree, path)`
+### 5.8 `is_ignored(worktree, path)` 与 `is_ignored_in_export(dir, tree, path)`
 
 1. `info = read_index(worktree)`，走缓存；`info.is_tracked(path)` 为真 → `false`（G5）。ignorecase 时这一查不区分 ASCII 大小写，与 `git status` 的判定相同。这里不照 `git check-ignore`：它查 index 时区分大小写，实测 index 里是 `tracked.LOG` 时它仍报 `tracked.log` 被忽略，而在大小写不敏感的磁盘上那是同一个文件。区分大小写的仓库里，被规则逐字命中的已跟踪文件同样不被忽略。这一点与 tgrep 的遍历器不同，design §3 已经定了用"已跟踪永不 ignore"。
 2. `lstat(worktree/path)` 判断是不是目录。不存在的按文件算；符号链接也按文件算，不跟随。
@@ -562,6 +606,15 @@ module-rulings Addendum 2 定了接法：**每个会话、每个 repo 一个影�
 7. 增量点查与全量对账都调这一个函数，两者的判定因此一致（3f 的点查匹配器一行，目标 overlay）。
 
 复杂度：每次调用 O(路径深度) 次 stat 加一次匹配，规则文件只在 stat 变化时重读。tool 源码树约 4K 个文件，在 design §8"全量对账 < 3 s"里占几十毫秒，在"checkpoint 改 50 个文件 < 200 ms"里占几毫秒。
+
+**`is_ignored_in_export(dir, tree, path)`**（session 的上游要求，session.md @853fdf8 §2：工作区还不存在时判显式种子；module-rulings 的 Requirements rounds 条）：回答"把 `tree` 检出成本仓库的工作区之后，git 会不会忽略 `path`"。`dir` 是这个 tree 的一份导出，session 传的是基线 generation 目录（源码导出加依赖集，工作区就是它的克隆）。只读，不需要锁。
+
+1. 拒绝，什么都不写：`dir` 不是绝对路径 → `InvalidInput`；不存在 → `NoSuchPath`；不是目录（lstat，符号链接也算）→ `NotDirectory`；`<dir>/.git` 存在（lstat）→ `InvalidInput`（`detail.reason = "has-git"`），有 `.git` 的是工作树，用 `is_ignored`。`tree` 的路径表按 §5.4 取（`tree_contains` 用的那份，在缓存里就不起子进程）；`tree` 不能当基线 → `tree_of` 的码原样返回。
+2. `ignorecase`：主 checkout `<common>/config` 的 `core.ignorecase`，用 §5.7 第 6 步的读法，按 config 的 stat 缓存（§4.3）。这正是 `ensure_shadow` 复制给影子仓库的值（它按 `--local` 复制，不含 `config.worktree`）。
+3. 已跟踪：`path` 是路径表里的文件或符号链接条目（ignorecase 时按 ASCII 不区分大小写）→ `false`。检出之后 index 里正是这些条目，所以这与 `is_ignored` 第 1 步的 `is_tracked` 是同一个判定；路径表里的目录不算已跟踪，与 `is_ignored` 第 6 步一样按规则回答 [我的决定，§9]。对文件，这就是 fix round 4 的裁定写的 `tree_contains(tree, path)`；`tree_contains` 对目录也答"在"，照搬到这里，两个函数对同一个目录就会给出不同的答案。session 先用 `tree_contains` 拒掉被跟踪的种子，只拿不在 tree 里的路径来问，两种写法对它没有差别。
+4. 其余同 `is_ignored` 的第 2–6 步，只换规则的来源：`lstat(dir/path)` 判断是不是目录；父目录逐级以目录身份判定；`.gitignore` 从 `path` 所在目录逐级向上读到 `dir` 的根为止，`dir` 之上的不读；然后是主 checkout 的 `<common>/info/exclude`；最后是按主 checkout 的 common dir 解析的全局排除文件（§4.3）。`info/exclude` 与全局排除文件正是 `ensure_shadow` 将要镜像、工作区里的 git 将要读到的那两份，所以只要工作区建好之前主 checkout 不改它们，这个答案就等于工作区建好之后 `is_ignored(workspace, path)` 的答案。用户级 config 以 `includeIf "gitdir:…"` 只给主 checkout 引入的 `core.excludesFile` 在这里生效、在工作区里不生效（§9 的 `includeIf` 一行）。
+
+复杂度同 `is_ignored`：O(路径深度) 次 stat 加一次匹配；路径表在缓存里时，已跟踪的判定是 O(log 文件数)。
 
 ### 5.9 `stage(staging, paths)`
 
@@ -647,13 +700,14 @@ module-rulings Addendum 2 定了接法：**每个会话、每个 repo 一个影�
 | `shadow_at` | `dir` 不存在 | `NoSuchPath` | 无，什么都不建 | session 在 status 里把工作区报成坏的，从不经 `ensure_shadow` 重建（review N2） |
 | `shadow_at` | 不是目录、没有 `strata.shadow` 标记、alternates 不指向本仓库的对象库 | `InvalidInput` | 无 | — |
 | `shadow_at` | config 或 alternates 读不了；config 有 git 也判坏的行 | `Unknown`（`detail.reason = "bad-config"`） | 无 | — |
-| `shadow_drift` | 不是本仓库的影子仓库 | `InvalidInput` | 无 | — |
-| `shadow_drift` | 镜像或 config 读不了 | `Unknown` | 无 | — |
+| `shadow_drift` | 不是本仓库的影子仓库；`workspace` 不是绝对路径 | `InvalidInput` | 无 | — |
+| `shadow_drift` | 镜像或 config 读不了；git 认不出工作区的 git 目录（`detail.reason = "hooks-lookup"`）；子进程超过 10 s（`timeout`，例如影子仓库 config 的 include 指向 FIFO） | `Unknown` | 无 | status 报出；工作区的 gitfile 坏了时 `read_index` 同样报错 |
 | `attach_worktree` | `shadow` 不属于本仓库；`n = 0`；路径不是绝对路径或在主 checkout 里 | `InvalidInput` | 无 | 调用方的错 |
 | `attach_worktree` | `tree_dir` 不存在、不是目录；`<shadow>/worktrees` 是符号链接或文件 | `NoSuchPath`、`NotDirectory` | 无 | — |
 | `attach_worktree` | `tree_dir/.git` 或 `worktrees/<n>/` 已存在 | `Exists` | 无 | 调用方用新的代数，或先处理留下的现场 |
+| `attach_worktree` | 第 2、3 步的 rooted 写入在写之前被拒：`worktrees/<n>` 或它的上级在第 1 步之后被换成符号链接或文件（例如指向 `<main>/.git`），或要建的名字已被占 | `NotDirectory`、`Exists`（G9 的例外） | 已建的管理目录（或换上来的链接）与 `tree_dir/.git/` 下的临时 index 留在原地；影子仓库之外什么都没写，主 checkout 的 index 不变 | 调用方退役它的内部暂存再以这个码拒绝（session：`S` 与 `worktrees/<n>`，意图关闭为 `refused`）；`new` 时 session 按现场处理 |
 | `attach_worktree` | `tree_of(head)` 的拒绝 | `tree_of` 的码 | 无 | — |
-| `attach_worktree` | 写入开始之后：read-tree 或 refresh 失败、index 锁被占着、`ENOSPC`、I/O 错误、崩溃 | `Unknown` | 半成的管理目录，`tree_dir/.git` 可能还没写。`move_workspace` 时 `tree_dir` 是临时树，工作区一字没动（交换是调用方的）；`new` 时 `tree_dir` 就是工作区，第 4 步写进它的 `.git` 是第一次可见写入，之后的失败留下的是工作区里的现场（review N4） | `move_workspace`：调用方按 Addendum 3、4 处理它的内部暂存；`new`：按现场处理；都由 status 报出 |
+| `attach_worktree` | 写入开始之后：read-tree 或 refresh 失败或超时、临时 index 的锁被占着、`ENOSPC`、I/O 错误、崩溃；git 跑过之后临时 index 读不回（`tree_dir/.git` 被换掉了，git 可能已经经它写到了别处） | `Unknown` | 半成的管理目录；`tree_dir/.git` 可能还是放临时 index 的目录，或还没写。`move_workspace` 时 `tree_dir` 是临时树，工作区一字没动（交换是调用方的）；`new` 时 `tree_dir` 就是工作区，第 3 步的临时目录与第 4 步的 gitfile 都写在它里面，失败留下的是工作区里的现场（review N4） | `move_workspace`：调用方按 Addendum 3、4 处理它的内部暂存；`new`：按现场处理；都由 status 报出 |
 | `attach_staging` | 路径不是绝对路径或在主 checkout 里 | `InvalidInput` | 无 | 调用方的错 |
 | `attach_staging` | `staging` 不存在、不是目录；`staging/.git` 或 `gitdir` 已存在；`tree_of(head)` 的拒绝 | `NoSuchPath`、`NotDirectory`、`Exists`、`tree_of` 的码 | 无 | — |
 | `attach_staging` | 写入开始之后失败 | `Unknown` | 私有 git 目录半成，staging 根下可能还没有 `.git` | publish 按不变量 6 处理这棵 staging 树 |
@@ -662,7 +716,11 @@ module-rulings Addendum 2 定了接法：**每个会话、每个 repo 一个影�
 | `read_index`、`is_ignored` | git 目录有效而 index 文件不存在 | `Unknown`（`detail.reason = "no-index"`） | 无 | 不猜：调用方停下这次 checkpoint，status 报出 |
 | `read_index`、`is_ignored` | index、gitfile、`commondir` 读不了或格式坏：截断、版本不认识、split index 缺共享半、位图越界；config 有 git 也判坏的行，或 `core.ignorecase` 不是 git 认的布尔值（`bad-config`） | `Unknown`（`detail.reason`） | 无 | 同上 |
 | `read_index` | 非 UTF-8 路径；sparse index | `NotText`；`Unsupported` | 无 | — |
-| `is_ignored` | 规则文件读不了（`ENOENT` 以外的错误） | `Unknown`（`detail`：`errno`、路径） | 无 | — |
+| `is_ignored` | 规则文件读不了（`ENOENT` 以外的错误）；全局排除文件的查询超过 10 s（`timeout`） | `Unknown`（`detail`：`errno`、路径，或 `reason`） | 无 | — |
+| `is_ignored_in_export` | `dir` 不是绝对路径，或 `dir` 里有 `.git`（`detail.reason = "has-git"`） | `InvalidInput` | 无 | 调用方的错：有 `.git` 的是工作树，用 `is_ignored` |
+| `is_ignored_in_export` | `dir` 不存在；不是目录 | `NoSuchPath`、`NotDirectory` | 无 | — |
+| `is_ignored_in_export` | `tree` 不能当基线 | `tree_of` 的码 | 无 | — |
+| `is_ignored_in_export` | 规则文件读不了（`ENOENT` 以外的错误）；主 checkout 的 config 有 git 也判坏的行（`bad-config`）；全局排除文件的查询超过 10 s（`timeout`） | `Unknown`（`detail`） | 无 | — |
 | `stage` | 不是 `attach_staging` 接到本仓库的 staging 树（含主 checkout、人自己的 linked worktree、strata 的工作区） | `InvalidInput` | 无 | 调用方的错 |
 | `stage` | 路径是 FIFO、socket、设备 | `NotFile` | 无，还没写 | — |
 | `stage` | update-index 或 write-tree 失败 | `Unknown` | staging 树的 index 可能已部分更新；它是 publish 的私有目录 | publish 按不变量 6 处理这棵 staging 树 |
@@ -677,16 +735,16 @@ module-rulings Addendum 2 定了接法：**每个会话、每个 repo 一个影�
 | `push` | 超时、断线、没有状态行（含人自己的 pre-push 钩子拒绝） | `Ok(Unknown)` | 远端可能已经收到；本地 ref 不变 | publish 转成 `Unknown`：保留发布链、不重放、status 报出 |
 | `merge3`、`is_binary` | 纯函数，不会失败 | — | — | — |
 
-- **错误时序**（module-rulings 共同规则、Addendum 3 与 Addendum 4 的补充 2，types.md §6.3 末段）：类型化的拒绝只出现在写任何东西之前（G9）；写入一旦开始，失败就是 `Unknown`，现场保留，gitio 不回滚、不清理，status 报出（不变量 6）。对 gitio 而言，"写入开始"指建出导出临时目录、`git init` 影子仓库、建管理目录或 staging 私有目录、运行 update-index 的那一刻。其中导出临时目录、尚未被引用的新管理目录是调用方的内部暂存（Addendum 3）：调用方在自己的意图记录之下可以删掉它们再以类型化的码拒绝，那条意图记录随之关闭为 `refused`，从不删除；gitio 自己从不删，也不写意图记录。
-- **重启**：gitio 没有自己的持久状态，也不写意图记录。残留算内部暂存还是现场，由调用方的意图记录决定（Addendum 3、4）：内部暂存由 `recover` 删掉，意图关闭为 `abandoned`，记录留作历史；现场由 status 报出、不重放，包括结果为 `Unknown` 的推送。gitio 保证残留认得出来：导出临时目录带 `EXPORT_TEMP_PREFIX`，半成的影子仓库没有 `strata.shadow` 标记，管理目录在 `<shadow>/worktrees/<n>/`。
-- **对 types.md 码表的扩展**：gitio 给 `InvalidInput`、`Exists`、`NoSuchPath`、`NotFile`、`NotDirectory` 增加了触发条件；`Unsupported` 在 types.md 列出的 SHA-256 与 gitlink 之外，多了 git 版本过低、reftable、未知 mode、`.git` 分量、路径碰撞、sparse index；`NoSuchCommit` 多了 ls-tree 的 `BAD`；`Unknown` 多了缺 index（`no-index`）。用的都是已有的码，不加新码；T15 可以把 gitio 补进这些码的"谁返回"一列。
+- **错误时序**（module-rulings 共同规则、Addendum 3 与 Addendum 4 的补充 2，types.md §6.3 末段）：类型化的拒绝只出现在写任何东西之前（G9）；写入一旦开始，失败就是 `Unknown`，现场保留，gitio 不回滚、不清理，status 报出（不变量 6）。对 gitio 而言，"写入开始"指建出导出临时目录、`git init` 影子仓库、建管理目录或 staging 私有目录、运行 update-index 的那一刻。其中导出临时目录、尚未被引用的新管理目录是调用方的内部暂存（Addendum 3）：调用方在自己的意图记录之下可以删掉它们再以类型化的码拒绝，那条意图记录随之关闭为 `refused`，从不删除；gitio 自己从不删，也不写意图记录。`attach_worktree` 写 gitfile 之前，rooted 函数在写之前就拒绝的（`NotDirectory`、`Exists`）照样原样返回，已建的管理目录与 `tree_dir/.git/` 下的临时 index 留给调用方：`move_workspace` 时它们是调用方的内部暂存，退役之后以这个码拒绝；`new` 时按现场处理（G9 的例外）。`worktrees/<n>` 被换成符号链接时，拒绝发生在任何东西写到影子仓库之外以前。
+- **重启**：gitio 没有自己的持久状态，也不写意图记录。残留算内部暂存还是现场，由调用方的意图记录决定（Addendum 3、4）：内部暂存由 `recover` 删掉，意图关闭为 `abandoned`，记录留作历史；现场由 status 报出、不重放，包括结果为 `Unknown` 的推送。gitio 保证残留认得出来：导出临时目录带 `EXPORT_TEMP_PREFIX`，半成的影子仓库没有 `strata.shadow` 标记，管理目录在 `<shadow>/worktrees/<n>/`，没走完的 attach 在 `tree_dir/.git/` 下留着临时 index。
+- **对 types.md 码表的扩展**：gitio 给 `InvalidInput`、`Exists`、`NoSuchPath`、`NotFile`、`NotDirectory` 增加了触发条件；`Unsupported` 在 types.md 列出的 SHA-256 与 gitlink 之外，多了 git 版本过低、reftable、未知 mode、`.git` 分量、路径碰撞、sparse index；`NoSuchCommit` 多了 ls-tree 的 `BAD`；`Unknown` 多了缺 index（`no-index`）、config 的坏行（`bad-config`）、认不出工作区的 git 目录（`hooks-lookup`）与本地命令超时（`timeout`）。用的都是已有的码，不加新码；T15 可以把 gitio 补进这些码的"谁返回"一列。
 
 ## 7. 测试清单
 
 | 测试名 | 断言 | 来源（矩阵行 或 新增） |
 | --- | --- | --- |
 | `command_strips_inherited_git_env` | 父进程带着指向另一个仓库的 `GIT_DIR`、`GIT_WORK_TREE`、`GIT_INDEX_FILE`、`GIT_OBJECT_DIRECTORY`、`GIT_CONFIG_PARAMETERS`，以及 `STRATA_PUBLISH`（这个用例改父进程环境，单独一个测试二进制）：`open` 仍打开本仓库，`repo_id` 不变；`take_git_calls` 里每个子进程（含 `open` 自己起的）的环境都没有继承来的 `GIT_*` 与 `STRATA_PUBLISH` | 新增 |
-| `command_sets_safety_flags` | `take_git_calls` 里 `open` 起的每个子进程：argv 带 `--no-replace-objects`，env 有 `GIT_TERMINAL_PROMPT=0`、`GIT_NO_LAZY_FETCH=1`、`GIT_OPTIONAL_LOCKS=0`，stdin 是 `/dev/null`。`open` 的 rev-parse 带 `LC_ALL=C`。其余命令的 `LC_ALL` 规则（§5.1 第 3 步）在实现那个命令的任务里断言：fetch 见 `fetch_writes_only_the_strata_tracking_ref`，update-ref 见 `update_ref_cas_refuses_moved_ref`，tree_of 的 rev-parse 与 ls-tree 见 `tree_validation_is_cached_per_tree`，checkout-index 见 `export_tree_matches_git_checkout_byte_for_byte`，update-index 见 `stage_applies_clean_filters`，commit-tree 见 `commit_tree_creates_single_parent_commit`，push 见 `push_sets_strata_publish_and_never_forces` | 新增 |
+| `command_sets_safety_flags` | `take_git_calls` 里 `open` 起的每个子进程：argv 带 `--no-replace-objects` 与 `-c core.fsmonitor=false`，env 有 `GIT_TERMINAL_PROMPT=0`、`GIT_NO_LAZY_FETCH=1`、`GIT_OPTIONAL_LOCKS=0`，stdin 是 `/dev/null`。`open` 的 rev-parse 带 `LC_ALL=C`。其余命令的 `LC_ALL` 规则（§5.1 第 3 步）在实现那个命令的任务里断言：fetch 见 `fetch_writes_only_the_strata_tracking_ref`，update-ref 见 `update_ref_cas_refuses_moved_ref`，tree_of 的 rev-parse 与 ls-tree 见 `tree_validation_is_cached_per_tree`，checkout-index 见 `export_tree_matches_git_checkout_byte_for_byte`，update-index 见 `stage_applies_clean_filters`，commit-tree 见 `commit_tree_creates_single_parent_commit`，push 见 `push_sets_strata_publish_and_never_forces` | 新增 |
 | `open_resolves_repo_id_from_main_checkout_only` | 主 checkout 与人自己 `git worktree add` 的工作树 `open` 得到同一个 `RepoId`（common dir 的 realpath，`/tmp` 与 `/private/tmp` 归一）；用子目录 `open` → `InvalidInput`；strata 的工作区（gitfile 指向带 `strata.shadow` 标记的影子仓库）→ `InvalidInput`（`detail.reason = "strata-workspace"`），从不得到影子仓库的路径 | tgrep-core/tests/generations.rs::linked_worktrees_and_equal_trees_share_one_arc |
 | `open_refuses_non_repository_bare_and_missing` | 非仓库目录、bare 仓库 → `InvalidInput`；不存在的路径 → `NoSuchPath` | tgrep-core/tests/generations.rs::unsupported_storage_and_discovery_return_errors |
 | `sha256_repository_is_unsupported` | `git init --object-format=sha256` 的仓库（`extensions.objectFormat = sha256`）→ `open` 返回 `Unsupported`；SHA-1 仓库正常打开 | tgrep-core/tests/generations.rs::sha256_repositories_and_unicode_paths_are_supported |
@@ -714,7 +772,7 @@ module-rulings Addendum 2 定了接法：**每个会话、每个 repo 一个影�
 | `non_utf8_index_path_is_not_text` | 经 `git update-index --index-info` 写进字节为 `\xff.txt` 的条目，`read_index` 返回 `NotText`，不跳过 | tgrep-core/tests/generations.rs::non_unicode_repository_roots_are_lossless_but_tracked_paths_are_unsupported |
 | `sparse_index_is_unsupported` | 带 `sdir` 扩展的 index → `Unsupported` | 新增 |
 | `read_index_snapshot_is_immutable_and_cached` | 返回的 `IndexInfo` 在 index 之后改变时保持不变；index 文件的 (size, mtime, inode) 不变时第二次调用不重新解析：把 index 原地改写成等长的垃圾、再把 mtime 改回原值，第二次调用仍返回原快照，mtime 一变就返回 `Unknown` | 新增 |
-| `config_values_read_like_git` | `src/index.rs` 的单测：同一组 config 文本，改过的 `config_bool` 与 `git config --file <f> --type=bool --get <键>` 的结论一一相同（同一个值，或两边都报错，或两边都没有这个键）：`true`、`"true"`、`TRUE`、`"tr"ue`、行内的 `#` 与 `;` 注释、引号里的 `#`、没有 `=`、`=` 后为空、`""`、`yes`、`On`、`off`、`0`、`1`、`2`、`-1`、`0x10`、`010`、`1k`、`0k`、`maybe`、`tr\"ue`、不认识的转义、没闭合的引号、引号里的首尾空格、同一个键写两次、`[Core]`、`[core "x"]`、`[ core ]`、段头同一行的键、行尾 `\` 续行（review B1） | 新增 |
+| `config_values_read_like_git` | `src/index.rs` 的单测：同一组 config 文本，改过的 `config_bool` 与 `git config --file <f> --type=bool --get <键>` 的结论一一相同（同一个值，或两边都报错，或两边都没有这个键）：`true`、`"true"`、`TRUE`、`"tr"ue`、行内的 `#` 与 `;` 注释、引号里的 `#`、没有 `=`、`=` 后为空、`""`、`yes`、`On`、`off`、`0`、`1`、`2`、`-1`、`0x10`、`010`、`1k`、`0k`、`maybe`、`tr\"ue`、不认识的转义、没闭合的引号、引号里的首尾空格、同一个键写两次、`[Core]`、`[core "x"]`、`[ core ]`、段头同一行的键、行尾 `\` 续行（review B1）；review M2 补的：`ignorecase # c`、`ignorecase ; c`、名字后的 `\v` 与 `\f`、行首的 `\v`；文件里任何位置的非法键名（`ignore_case = 1`、`9key = 1`，在要读的键之前、之后、在别的节里）与坏段头（`[core]]`、`[]`、`[co_re]`、`[core""]`、`[core "x" ]`）；`2147483647`、`2147483648`、`-2147483648`、`-2147483649`、`3000000000`、`1g`、`2g`、`-2g`、`-3g`、`2097151k`、`2097152k`、`0x7fffffff`、`0x80000000`、`9223372036854775808`、`1K`、`1M`、`1G`、`+1`、`-0`、`07`、`08`、`0x`、`1kb`、`1e3`、`" 1"`、`"1 "`、`"\t1"`、值开头与末尾的 `\v`；开头的 BOM、只有前两个字节的 BOM、两个 BOM；CRLF 行尾、值里单独的 `\r`、`\` 加 CRLF 的续行、文件末尾的 `\`、跨续行的引号段；前一次是坏值而最后一次是好值；第一个段头之前的键；`[core][user]` 同一行两个段头；`[core "a\zb"]`；空段名带子段的 `[ "x"]`、`[\tcore]`、`[core\t"x"]`、`[.]`、`[core.]`、`[core ""]`；`-2097152k`、`-2097153k`、`0g`。git 接受而读法报 `Unknown` 的只有含 NUL 字节的文件（§5.7 第 6 步的保守规则），用例照这个差别断言；`[include] path = <f>` 而 f 里设了 `ignorecase` 时读法不跟随（§9），用例断言读法给的是本文件里的值 | 新增 |
 | `read_index_refuses_worktree_of_another_repo` | worktree 的 common dir 既不是本仓库的，也不是借本仓库对象库的影子仓库（alternates 指向另一个仓库，或没有 `strata.shadow` 标记）→ `InvalidInput`；本仓库影子仓库的工作区照常读出 | 新增 |
 | `index_parse_tracked_never_ignored` | ignorecase 仓库：规则 `QLogs` 隐藏未跟踪的 `qlogs/` 下文件，`*.txt` 隐藏未跟踪的 `Gone.TXT`，已跟踪的 `Kept.TXT` 不被隐藏，磁盘上换成 `kept.txt` 拼写也不被隐藏（`git status` 的语义）；区分大小写的仓库里，被规则逐字命中的已跟踪文件同样不被隐藏 | tgrep-core/src/walker.rs::ignorecase_hides_what_git_hides_and_keeps_what_git_tracks |
 | `untracking_a_file_lets_rules_apply` | `git rm --cached TRACKED.txt` 之后同一路径 `is_ignored` 变为真；index 被写坏后 `is_ignored` 返回 `Unknown`，不当成"没有已跟踪文件" | tgrep-core/src/worktrees/tests.rs::case_insensitive_ignore_snapshot_tracks_index_membership_coherently |
@@ -734,6 +792,10 @@ module-rulings Addendum 2 定了接法：**每个会话、每个 repo 一个影�
 | `negation_cannot_reinclude_under_excluded_dir` | `build/` 被排除时 `!build/keep.c` 不生效 | 新增 |
 | `unreadable_index_is_an_error_not_empty` | index 不可读（权限、截断）或不存在时，`is_ignored` 返回 `Unknown`，既不全放行也不全隐藏 | tgrep-core/src/walker.rs::an_unreadable_index_excludes_nothing |
 | `is_ignored_agrees_with_git_on_corpus` | 固定语料（嵌套 `.gitignore`、否定、目录模式、`**`、锚定、`info/exclude`、全局排除文件、ignorecase 开关）逐路径对拍：规则部分对 `git check-ignore --no-index`，已跟踪豁免部分对 `git status --porcelain --ignored`；主 checkout 与 strata 的工作区各跑一遍 | 新增 |
+| `is_ignored_in_export_ignores_seeds_like_the_workspace` | 把主 checkout HEAD 的 tree 导出到 `dir`（没有 `.git`）：只靠主 checkout `info/exclude` 忽略的 `.env`、只靠全局排除文件（`set_env` 的 `HOME`）忽略的 `.claude/settings.local.json` → true，`CLAUDE.md` → false，与主 checkout 上 `is_ignored` 的答案相同；主 checkout 改了 `info/exclude` 之后，答案跟着主 checkout 现在的那份走；调用前后 `dir` 一字不动（session.md @853fdf8 §2 的上游要求） | 新增 |
+| `is_ignored_in_export_never_ignores_a_tracked_path` | tree 里跟踪了 `logs/keep.log`，`dir` 的 `.gitignore` 有 `*.log` 与 `logs/`：`logs/keep.log` → false，ignorecase 仓库里 `LOGS/KEEP.LOG` 也 → false；未跟踪的 `logs/other.log` → true；路径表里的目录 `logs` 按规则回答 → true，与主 checkout 上 `is_ignored` 对同一个目录的答案相同（目录从不算已跟踪）；`tree` 含 gitlink → 与 `tree_of` 相同的 `Unsupported` | 新增 |
+| `is_ignored_in_export_honours_negation` | `dir` 的 `.gitignore` 为 `*.local` 与 `!keep.local`：`keep.local` → false，`x.local` → true；主 checkout 的 `info/exclude` 有 `*.env` 而 `dir` 的 `.gitignore` 有 `!keep.env`：`keep.env` → false（目录内 `.gitignore` 压过 `info/exclude`）；`build/` 被排除时 `!build/keep.c` 不生效 → true | 新增 |
+| `is_ignored_in_export_reads_nested_gitignore_from_dir` | `dir/sub/.gitignore` 为 `secret.txt`：`sub/secret.txt` → true，`secret.txt` 与 `other/secret.txt` → false；主 checkout 工作树里没提交的 `.gitignore` 改动（加了一行 `CLAUDE.md`）不起作用，规则只从 `dir` 读；`dir` 的父目录里的 `.gitignore` 不起作用；`dir` 不存在 → `NoSuchPath`，`dir` 里有 `.git` → `InvalidInput`（`detail.reason = "has-git"`），都不写任何东西 | 新增 |
 | `option_like_arguments_are_refused_not_executed` | remote 为 `--upload-pack=touch <f>`、分支为 `-x`、修订为 `--help` 时返回 `InvalidInput`，`<f>` 不出现；以 `-` 开头、含 `*` 或 `:` 的路径按字面处理 | tgrep-core/tests/generations.rs::interrupted_and_failed_publications_are_not_discoverable |
 | `fetch_writes_only_the_strata_tracking_ref` | fetch 之后 `refs/strata/remotes/origin/main` 等于远端 tip，也是返回值；`refs/remotes/origin/main`、`FETCH_HEAD`、`refs/tags` 不变，远端有新 tag 也不带回；`take_git_calls` 里 fetch 的子进程带 `LC_ALL=C`，stdin 是 `/dev/null` | 新增 |
 | `fetch_missing_branch_is_no_such_branch` | 远端没有这个分支，包括远端还没有任何提交 → `NoSuchBranch`，不当成空 tree | tgrep-core/tests/generations.rs::unsupported_storage_and_discovery_return_errors |
@@ -768,12 +830,15 @@ module-rulings Addendum 2 定了接法：**每个会话、每个 repo 一个影�
 | `shadow_at_reopens_without_writing` | `ensure_shadow` 建好之后，换一个新 `open` 的 `Git`（模拟 daemon 重启）调 `shadow_at`：返回与 `ensure_shadow` 相等的 `Shadow`（标记由 gitio 的写法写出、由 gitio 的读法读回，review B1）；影子仓库里每个文件的字节与 mtime 都不变；`shadow_drift` 接受它并返回空表，`attach_worktree` 用它建出下一代；再把标记手改成 `shadow = "true"`，`shadow_at` 照样认出 | 新增 |
 | `shadow_at_missing_dir_is_no_such_path_and_creates_nothing` | `dir` 不存在 → `NoSuchPath`，之后 `dir` 仍不存在，父目录里没有新条目（不会重建）；`dir` 存在但没有 `strata.shadow` 标记、alternates 指向别的仓库、或是普通文件 → `InvalidInput`，一字不动 | 新增 |
 | `shadow_drift_reports_changed_mirrors` | 刚建好时为空；主 checkout 改了 `info/exclude`、新建了 `info/attributes`、改了 `core.autocrlf`、删了一个 `filter.<d>.clean` → 依次报 `Exclude`、`Attributes` 与两条 `Config { key }`；影子仓库的字节不变 | 新增 |
-| `shadow_drift_reports_a_disabled_pre_push_guard` | 在工作区里跑 husky 安装时的那条 `git config core.hooksPath .husky/_` → `shadow_drift` 只报 `PrePushGuardDisabled { hooks_path: Some(".husky/_"), hook_replaced: false }`；删掉这个键 → `hooks_path: None`；钉回 `<dir>/hooks` 之后把 `hooks/pre-push` 换成别的脚本 → `hook_replaced: true`；每次 `shadow_drift` 前后影子仓库的字节都不变，gitio 不修（review B4） | 新增 |
-| `attach_worktree_makes_git_work_in_workspace` | 第 1 代在临时树上 attach、再由测试把它改名到工作区路径之后：HEAD detached 在 head、没有 upstream；`git status --porcelain` 为空，`node_modules/` 与只靠 `info/exclude` 忽略的 `.env` 不出现；`git log -1` 经 alternates 是 head；`git rev-parse --git-common-dir` 是影子仓库；会话里 `git commit` 的对象在影子仓库的 `objects/`，主 checkout 里没有；`git fetch origin` 失败、`origin/main` 解析不到；`git push` 被 `pre-push` 拒绝；主 checkout 的 `git worktree list` 不列出它，index、HEAD、`refs/*`、`hooks/`、`config` 不变 | 新增 |
+| `shadow_drift_reports_a_disabled_pre_push_guard` | 在工作区里跑 husky 安装时的那条 `git config core.hooksPath .husky/_` → `shadow_drift` 只报 `PrePushGuardDisabled { hooks_path: Some("<工作区>/.husky/_"), hook_replaced: false }`（git 在工作区里解析出的绝对路径）；删掉这个键而外面没有 hooksPath → 不报（有效目录仍是 `<dir>/hooks`，守卫照常拒绝）；再在沙箱的用户级 config 里设 hooksPath → `hooks_path: Some(<那个目录>)`；钉回 `<dir>/hooks` 之后把 `hooks/pre-push` 换成别的脚本 → `hooks_path: None, hook_replaced: true`；每次 `shadow_drift` 前后影子仓库的字节都不变，gitio 不修（review B4、M3） | 新增 |
+| `shadow_drift_follows_the_effective_hooks_path` | 工作区里 `git config include.path <f>`，f 设了 `core.hooksPath = <别处>`：`shadow_drift(&shadow, 工作区)` 报 `Config { key: "include.path" }` 与 `PrePushGuardDisabled { hooks_path: Some("<别处>"), hook_replaced: false }`，而影子仓库 config 的本地列表里钉住的值没变；同一个 include 写成 `includeIf "gitdir:<shadow>/worktrees/**"` → 报的键是 `includeif.gitdir:<shadow>/worktrees/**.path`；`extensions.worktreeConfig = true` 加 `git config --worktree core.hooksPath <别处>` → `hooks_path: Some("<别处>")`；钉住的键在、沙箱用户级 config 设了 hooksPath（直接设，或经只对管理目录生效的 `includeIf "gitdir:"`）→ 不报守卫；gitfile 改指 `<main>/.git` → `hooks_path: Some("<main>/.git/hooks")`；工作区的 `.git` 不存在 → 只比镜像、不报守卫；gitfile 是坏的 → `Unknown`（`hooks-lookup`）；影子仓库 config 的 include 指向 FIFO → `Unknown`（`timeout`），约 10 s；每次调用前后影子仓库与工作区的字节都不变（review M3） | 新增 |
+| `attach_worktree_makes_git_work_in_workspace` | 第 1 代在临时树上 attach、再由测试把它改名到工作区路径之后：HEAD detached 在 head、没有 upstream；`git status --porcelain` 为空，`node_modules/` 与只靠 `info/exclude` 忽略的 `.env` 不出现；`git log -1` 经 alternates 是 head；`git rev-parse --git-common-dir` 是影子仓库；会话里 `git commit` 的对象在影子仓库的 `objects/`，主 checkout 里没有；`git fetch origin` 失败、`origin/main` 解析不到；`git push` 被 `pre-push` 拒绝；主 checkout 的 `git worktree list` 不列出它，index、HEAD、`refs/*`、`hooks/`、`config` 不变；对 `.env`、`node_modules/x` 与一个已跟踪的文件，`is_ignored_in_export(导出, head 的 tree, p)` 与 `is_ignored(工作区, p)` 相同 | 新增 |
 | `user_hooks_path_cannot_disable_the_pre_push_guard` | 沙箱 `HOME` 的全局配置设了 `core.hooksPath`（指向一个空目录）：工作区里 `git push <远端地址> HEAD:refs/heads/x` 仍以 1 退出，远端没有这个分支，`git config --show-origin --get core.hooksPath` 给出影子仓库的 config 与 `<dir>/hooks` | 新增 |
-| `attach_worktree_builds_a_fresh_admin_dir_per_generation` | 第 2 代在新的临时树上 attach：建出 `worktrees/2/`（HEAD 为新 head，index 等于新 tree），`worktrees/1/` 的每个字节不变，临时树的 `.git` 指向第 2 代；把它交换到工作区路径之后 `git status --porcelain` 为空；已存在的 `worktrees/<n>/` → `Exists`，什么都不写；`generation = 0` → `InvalidInput` | 新增 |
+| `attach_worktree_builds_a_fresh_admin_dir_per_generation` | 第 2 代在新的临时树上 attach：建出 `worktrees/2/`（HEAD 为新 head，index 等于新 tree），`worktrees/1/` 的每个字节不变，临时树的 `.git` 是指向第 2 代的 gitfile，临时 index 与它的目录都已删掉；把它交换到工作区路径之后 `git status --porcelain` 为空；已存在的 `worktrees/<n>/` → `Exists`，什么都不写；`generation = 0` → `InvalidInput` | 新增 |
 | `attach_refuses_existing_dot_git` | `tree_dir/.git` 已存在（文件、目录或符号链接）→ `Exists`，不建管理目录，什么都不改 | 新增 |
 | `attach_at_move_refuses_a_symlinked_worktrees_dir` | 第 1 代 attach 之后，测试把 `<shadow>/worktrees` 挪开，换成指向 `<main>/.git/worktrees`（人自己的 linked worktree 登记在那里）的符号链接；为第 2 代在新的临时树上 attach → `NotDirectory`，什么都没写：`<main>/.git/worktrees/` 的列表与每个字节不变，主 checkout 的 `git worktree list` 不变，临时树里没有 `.git`；挪回真目录之后同样的 attach 照常建出第 2 代（review B3） | 新增 |
+| `attach_index_copy_refuses_a_swapped_admin_dir` | 主 checkout 里有人暂存的文件。为第 2 代在新的临时树上 attach，`pause_attach_before_index` 让它停在第 2 步之后；测试把 `worktrees/2` 挪开、换成指向 `<main>/.git` 的符号链接，再放行 → `NotDirectory`；主 checkout 的 index 逐字节不变，`git status --porcelain` 仍是那一行 `A`，`<main>/.git` 里没有多出条目；`take_git_calls` 里 read-tree 与 refresh 的 `GIT_INDEX_FILE` 在临时树的 `.git/` 下、`--git-dir` 是影子仓库，没有一次指向管理目录；之后在另一棵临时树上为第 3 代 attach 照常成功（re-review r3、fix round 4 的裁定） | 新增 |
+| `attach_runs_no_planted_hook_and_starts_no_fsmonitor` | 第 1 代 attach 之后，在 `<shadow>/hooks/` 里放一个会写标记文件的 `post-index-change`（钩子管理工具就会往这里写钩子），沙箱用户级 config 设 `core.fsmonitor = true` 与 `core.splitIndex = true`：为第 2 代 attach 之后，标记文件不存在；影子仓库与临时树里没有 `fsmonitor--daemon*`、`sharedindex.*`，也没有为它起的 fsmonitor 守护进程；`take_git_calls` 里 read-tree 与 refresh 的 argv 带 `-c core.hooksPath=/dev/null`、`-c core.fsmonitor=false`、`-c core.splitIndex=false`（不关时 git 会跑这个钩子，还会在影子仓库里建 `fsmonitor--daemon.ipc`，实测，§5.1） | 新增 |
 | `read_index_reads_ignorecase_from_a_strata_built_shadow` | 大小写不敏感的卷上（主 checkout 的 `core.ignorecase = true`）：`ensure_shadow`、`attach_worktree` 之后对工作区 `read_index` → `ignorecase` 为 true，`is_tracked` 按 ASCII 不分大小写命中；把影子仓库 config 里这一行手改成 `ignorecase = "true"`、`ignorecase = true # x` 或只写 `ignorecase`，同一个 `Git` 再读照样为 true，改成 `ignorecase = false` 就为 false（config 一变缓存就失效；review B1） | 新增 |
 | `sessions_never_share_refs` | 同一个 repo 的两个会话各有影子仓库：会话 A 的工作区里 `git stash`、`git branch`、`git tag`、本地 commit 只出现在 A 的影子仓库里；B 的影子仓库与主 checkout 的 `for-each-ref` 都不变 | 新增 |
 | `index_writers_refuse_the_main_checkout` | 把主 checkout 或人自己的 linked worktree 当 `staging` 传给 `stage`、`push`、`attach_staging`，把 `gitdir` 放在 common dir 里，把 `ensure_shadow` 的 `dir`、`attach_worktree` 的 `tree_dir` 或 `workspace` 放在主 checkout 里 → `InvalidInput`；主 checkout 的 index 字节不变 | 新增 |
@@ -799,9 +864,9 @@ module-rulings Addendum 2 定了接法：**每个会话、每个 repo 一个影�
 | `merge3_binary_is_whole_file` | 任一侧是二进制且两边都改了 → `Conflict`，恰好一个整文件 Hunk；只有一边改 → `Clean`，即那一边 | 新增 |
 | `merge3_agrees_with_git_merge_file_on_corpus` | 固定语料（每例的行级 diff 唯一）上，`Clean` 与 `Conflict` 的判定与 `git merge-file -p` 的退出码一致，`Clean` 时字节相同 | 新增 |
 | `is_binary_matches_git_rule` | 前 8000 字节有 NUL → 二进制；NUL 在第 8001 字节 → 不是；空串不是 | 新增 |
-| `main_checkout_untouched_except_strata_refs` | 对一个主 checkout 依次跑 `open`、`fetch`、`tree_of`、`tree_contains`、`export_tree`、`ensure_shadow`、`attach_worktree`、`shadow_drift`、`read_index`、`is_ignored`（工作区与影子仓库在别处），再在一棵 staging 树上跑 `attach_staging`、`stage`、`commit_tree`、`update_ref`、`push` 之后：主 checkout 的工作树文件、`<common>/index` 的字节、`HEAD`、`config`、`hooks/`、`info/`、`refs/heads/*`、`refs/remotes/*`、`refs/tags/*`、`refs/stash`、`FETCH_HEAD`、`<common>/worktrees/` 都与之前逐字节相同，变化只有 `objects/` 与 `refs/strata/*` | layerfs-api/tests/local_install.rs::import_installs_the_store_in_process |
+| `main_checkout_untouched_except_strata_refs` | 沙箱用户级 config 设了 `core.fsmonitor = true` 与 `core.splitIndex = true`；对一个主 checkout 依次跑 `open`、`fetch`、`tree_of`、`tree_contains`、`export_tree`、`is_ignored_in_export`、`ensure_shadow`、`attach_worktree`、`shadow_drift`、`read_index`、`is_ignored`（工作区与影子仓库在别处），再在一棵 staging 树上跑 `attach_staging`、`stage`、`commit_tree`、`update_ref`、`push` 之后：主 checkout 的工作树文件、`<common>/index` 的字节、`HEAD`、`config`、`hooks/`、`info/`、`refs/heads/*`、`refs/remotes/*`、`refs/tags/*`、`refs/stash`、`FETCH_HEAD`、`<common>/worktrees/` 都与之前逐字节相同，没有多出 `fsmonitor--daemon*` 与 `sharedindex.*`，也没有留下 fsmonitor 守护进程，变化只有 `objects/` 与 `refs/strata/*` | layerfs-api/tests/local_install.rs::import_installs_the_store_in_process |
 
-共 115 个用例：55 个引用矩阵行，60 个新增。被引用的不同矩阵行共 57 行：3f 目标为 gitio 的全部 43 行（按 3f@63587e5；`non_unicode_repository_roots_are_lossless_but_tracked_paths_are_unsupported` 的目标已是 gitio），3d 目标为 gitio 的全部 10 行，以及目标不是 gitio、但理由点名 gitio 用例的四行：3f 的 `linked_worktrees_and_equal_trees_share_one_arc`（search）、`interrupted_and_failed_publications_are_not_discoverable`（deps）、`sha256_repositories_and_unicode_paths_are_supported`（`—`），3a 的 `a_component_name_is_accepted_at_255_bytes_and_refused_at_256`（`—`）。其中 3f `linked_worktrees_and_equal_trees_share_one_arc` 与 3d `all_supported_kernel_paths_survive_install_with_full_oracles` 的理由仍写着工作区的 `.git` 接到主 checkout（会话目录与主 checkout 发现同一个仓库；`.git` 是指向主 checkout 的 gitfile），影子仓库的裁定之下不再成立，由 T15 改；本文引用它们时按 module-rulings Addendum 2 断言。3d `interrupted_transfer…` 一行的两条保证，gitio 只承担"中断的导出不建目标、保留临时目录"那一条；"第二个请求者等待、得 `Busy`"那一条归 daemon（§1）。
+共 122 个用例：55 个引用矩阵行，67 个新增。被引用的不同矩阵行共 57 行：3f 目标为 gitio 的全部 43 行（按 3f@63587e5；`non_unicode_repository_roots_are_lossless_but_tracked_paths_are_unsupported` 的目标已是 gitio），3d 目标为 gitio 的全部 10 行，以及目标不是 gitio、但理由点名 gitio 用例的四行：3f 的 `linked_worktrees_and_equal_trees_share_one_arc`（search）、`interrupted_and_failed_publications_are_not_discoverable`（deps）、`sha256_repositories_and_unicode_paths_are_supported`（`—`），3a 的 `a_component_name_is_accepted_at_255_bytes_and_refused_at_256`（`—`）。其中 3f `linked_worktrees_and_equal_trees_share_one_arc` 与 3d `all_supported_kernel_paths_survive_install_with_full_oracles` 的理由仍写着工作区的 `.git` 接到主 checkout（会话目录与主 checkout 发现同一个仓库；`.git` 是指向主 checkout 的 gitfile），影子仓库的裁定之下不再成立，由 T15 改；本文引用它们时按 module-rulings Addendum 2 断言。3d `interrupted_transfer…` 一行的两条保证，gitio 只承担"中断的导出不建目标、保留临时目录"那一条；"第二个请求者等待、得 `Busy`"那一条归 daemon（§1）。
 
 理由点名 gitio、但本文不为它们单列用例的行：
 
@@ -833,7 +898,7 @@ module-rulings Addendum 2 定了接法：**每个会话、每个 repo 一个影�
 Run: `cargo test -p strata-gitio --features test-seams --lib repo:: && cargo test -p strata-gitio --features test-seams --test repo --test command_env`
 Expected: FAIL（`Git` 还没定义，编译不过）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：照抄 tgrep 的 `command()`，补上去掉 `STRATA_PUBLISH` 与按命令加 `LC_ALL=C`（§5.1）；`open` 按 §5.2；版本解析写成私有纯函数，`src/repo.rs` 的单测直接喂字符串；测试接缝 `open_with_env`、`set_env` 与 `take_git_calls`：环境在起子进程的那一处套上，调用也在那一处记下，`open` 自己起的也算进返回的 `Git`。
+- [ ] **Step 3: 写让测试通过的最少实现**：照抄 tgrep 的 `command()`，补上去掉 `STRATA_PUBLISH`、每个子进程加 `-c core.fsmonitor=false` 与按命令加 `LC_ALL=C`（§5.1）；`open` 按 §5.2；版本解析写成私有纯函数，`src/repo.rs` 的单测直接喂字符串；测试接缝 `open_with_env`、`set_env` 与 `take_git_calls`：环境在起子进程的那一处套上，调用也在那一处记下，`open` 自己起的也算进返回的 `Git`。
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-gitio --features test-seams --lib repo:: && cargo test -p strata-gitio --features test-seams --test repo --test command_env`
@@ -933,33 +998,34 @@ git add crates/strata-gitio/src/remote.rs crates/strata-gitio/src/refs.rs crates
 git commit -m "feat(gitio): fetch into refs/strata, ancestry and compare-and-swap refs"
 ```
 
-### Task 5: `tree_of`、`tree_contains` 与 tree 校验
+### Task 5: `tree_of`、`tree_contains`、tree 校验与 `is_ignored_in_export`
 
 **Files:**
 - Create: `crates/strata-gitio/src/tree.rs`（解析部分抄 tgrep `parse_entries`）
-- Test: `crates/strata-gitio/tests/tree.rs`
+- Modify: `crates/strata-gitio/src/ignore.rs`（加 `is_ignored_in_export`，复用 Task 3 的规则栈）
+- Test: `crates/strata-gitio/tests/tree.rs`、`crates/strata-gitio/tests/ignore.rs`（`is_ignored_in_export` 的四个用例）
 
 **Interfaces:**
-- Consumes: Task 1 的 `Git::command`；`RepoPath`
-- Produces: `Git::tree_of`、`Git::tree_contains`
+- Consumes: Task 1 的 `Git::command`；`RepoPath`；Task 2 的 config 读法；Task 3 的规则栈与全局排除文件的解析
+- Produces: `Git::tree_of`、`Git::tree_contains`、`Git::is_ignored_in_export`
 
-- [ ] **Step 1: 写失败的测试**：§7 的 `replace_refs_do_not_change_tree_of`、`gitlink_in_base_tree_is_unsupported`、`missing_blob_refused_before_export`、`non_utf8_tree_path_is_not_text`、`colliding_paths_are_unsupported`、`dot_git_component_is_unsupported`、`overlong_component_refused_before_writing`、`ls_tree_output_parse_is_exact`、`tree_validation_is_cached_per_tree`、`tree_contains_answers_from_the_validated_tree`（gitlink、碰撞、`.git` 分量、超长四条里 `export_tree` 的那一半在 Task 6 补断言）
+- [ ] **Step 1: 写失败的测试**：§7 的 `replace_refs_do_not_change_tree_of`、`gitlink_in_base_tree_is_unsupported`、`missing_blob_refused_before_export`、`non_utf8_tree_path_is_not_text`、`colliding_paths_are_unsupported`、`dot_git_component_is_unsupported`、`overlong_component_refused_before_writing`、`ls_tree_output_parse_is_exact`、`tree_validation_is_cached_per_tree`、`tree_contains_answers_from_the_validated_tree`、`is_ignored_in_export_ignores_seeds_like_the_workspace`、`is_ignored_in_export_never_ignores_a_tracked_path`、`is_ignored_in_export_honours_negation`、`is_ignored_in_export_reads_nested_gitignore_from_dir`（gitlink、碰撞、`.git` 分量、超长四条里 `export_tree` 的那一半在 Task 6 补断言）
 - [ ] **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p strata-gitio --features test-seams --test tree`
-Expected: FAIL（`tree_of`、`tree_contains` 还没有）
+Run: `cargo test -p strata-gitio --features test-seams --test tree --test ignore`
+Expected: FAIL（`tree_of`、`tree_contains`、`is_ignored_in_export` 还没有）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.4；大小一栏为 `BAD` 返回 `NoSuchCommit`；结论按 `TreeOid` 缓存，路径表按最近使用留 64 个。
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.4；大小一栏为 `BAD` 返回 `NoSuchCommit`；结论按 `TreeOid` 缓存，路径表按最近使用留 64 个；`is_ignored_in_export` 按 §5.8 末段：已跟踪查路径表，`.gitignore` 从 `dir` 读，`info/exclude`、全局排除文件与 `core.ignorecase` 取主 checkout 的。
 - [ ] **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p strata-gitio --features test-seams --test tree`
+Run: `cargo test -p strata-gitio --features test-seams --test tree --test ignore`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/strata-gitio/src/tree.rs crates/strata-gitio/src/lib.rs crates/strata-gitio/tests/tree.rs
-git commit -m "feat(gitio): resolve and validate base trees"
+git add crates/strata-gitio/src/tree.rs crates/strata-gitio/src/ignore.rs crates/strata-gitio/src/lib.rs crates/strata-gitio/tests/tree.rs crates/strata-gitio/tests/ignore.rs
+git commit -m "feat(gitio): resolve and validate base trees, judge ignores on an export"
 ```
 
 ### Task 6: `export_tree`
@@ -970,8 +1036,8 @@ git commit -m "feat(gitio): resolve and validate base trees"
 - Test: `crates/strata-gitio/tests/export.rs`
 
 **Interfaces:**
-- Consumes: `Git::tree_of`；`strata_apfs::{mkdir_rooted, open_rooted, rename_rooted, RenameMode, remove_rooted, RemoveKind, full_fsync, PATH_MAX_BYTES}` 与根句柄访问函数（§2）；`libc::fsync`
-- Produces: `Git::export_tree`、`EXPORT_TEMP_PREFIX`；测试接缝 `SyncEvent`、`ExportPause`、`Git::take_sync_events`、`Git::pause_export_before_rename`
+- Consumes: `Git::tree_of`；`strata_apfs::{mkdir_rooted, open_rooted, open_root, rename_rooted, RenameMode, remove_rooted, RemoveKind, full_fsync, classify_io_error, IoSide, PATH_MAX_BYTES, NAME_MAX_UTF16_UNITS}`（§2）；`libc::fsync`
+- Produces: `Git::export_tree`、`EXPORT_TEMP_PREFIX`；测试接缝 `SyncEvent`、`Pause`、`Git::take_sync_events`、`Git::pause_export_before_rename`
 
 - [ ] **Step 1: 写失败的测试**：§7 的 `export_tree_matches_git_checkout_byte_for_byte`、`export_filter_failure_matches_checkout`、`export_tree_refuses_existing_destination_untouched`、`export_typed_refusals_write_nothing`、`interrupted_export_keeps_temp_and_never_creates_destination`、`concurrent_export_never_overwrites_destination`、`export_large_tree_is_complete`、`export_is_durable_before_rename`；补上 Task 5 留下的导出断言
 - [ ] **Step 2: 跑测试，确认失败**
@@ -1000,16 +1066,16 @@ git commit -m "feat(gitio): export trees byte-identical to git checkout"
 - Test: `crates/strata-gitio/tests/shadow.rs`
 
 **Interfaces:**
-- Consumes: `Git::tree_of`、`Git::export_tree`、`Git::read_index`；Task 6 的同步层；`strata_apfs::{create_file_rooted, mkdir_rooted, open_rooted, open_rooted_file, attrs_of}`
-- Produces: `Shadow`、`Shadow::dir`、`MirrorDrift`、`Git::ensure_shadow`、`Git::shadow_at`、`Git::shadow_drift`、`Git::attach_worktree`
+- Consumes: `Git::tree_of`、`Git::export_tree`、`Git::read_index`、`Git::is_ignored_in_export`；Task 6 的同步层与 `Pause`；`strata_apfs::{create_file_rooted, mkdir_rooted, open_rooted, open_rooted_file, attrs_of, remove_rooted, RemoveKind, classify_io_error, IoSide}`
+- Produces: `Shadow`、`Shadow::dir`、`MirrorDrift`、`Git::ensure_shadow`、`Git::shadow_at`、`Git::shadow_drift`、`Git::attach_worktree`；测试接缝 `Git::pause_attach_before_index`
 
-- [ ] **Step 1: 写失败的测试**：§7 从 `exported_workspace_git_status_is_clean` 到 `sessions_never_share_refs` 的 14 个
+- [ ] **Step 1: 写失败的测试**：§7 从 `exported_workspace_git_status_is_clean` 到 `sessions_never_share_refs` 的 17 个
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-gitio --features test-seams --test shadow`
 Expected: FAIL（`ensure_shadow`、`shadow_at`、`attach_worktree` 还没有）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.6 的 `ensure_shadow`、`shadow_at`、`shadow_drift`、`attach_worktree`：`git init` 的三个参数；config 整份写进临时文件再 `rename`，值照 git 的写法（§5.6 第 7 步），钉住 `core.hooksPath`，标记最后；`shadow_at` 只读；`shadow_drift` 另查 pre-push 守卫；管理目录每代新建，经 apfs 的 rooted 函数，根是影子仓库目录；写 index 的命令显式设 `GIT_INDEX_FILE`；gitfile 经 `apfs::create_file_rooted` 新建；持久化经 Task 6 的同步层。
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.6 的 `ensure_shadow`、`shadow_at`、`shadow_drift`、`attach_worktree`：`git init` 的三个参数；config 整份写进临时文件再 `rename`，值照 git 的写法（§5.6 第 7 步），钉住 `core.hooksPath`，标记最后；`shadow_at` 只读；`shadow_drift` 另查 pre-push 守卫：有效 hooks 目录在工作区的上下文里问 git，影子仓库 config 的 include 条目报成漂移；管理目录每代新建，经 apfs 的 rooted 函数，根是影子仓库目录；index 由 git 建在 `tree_dir/.git/` 下（`--git-dir` 是影子仓库，显式设 `GIT_INDEX_FILE`，关钩子、fsmonitor 与 split index，600 s 超时），再 rooted 地复制进管理目录、保留 mtime；`pause_attach_before_index` 停在 §5.6 `attach_worktree` 第 2 步之后；gitfile 经 `apfs::create_file_rooted` 新建；持久化经 Task 6 的同步层。
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-gitio --features test-seams --test shadow && cargo test -p strata-gitio --features test-seams --test repo`
@@ -1145,8 +1211,9 @@ git commit -m "test(gitio): the main checkout changes only in objects and refs/s
 | 影子仓库的建法 | [我的决定] `git -c init.defaultRefFormat=files init --bare --template= --object-format=sha1`；config 由 gitio 整份重写 | 全局的 `init.*` 配置会让影子仓库变成 SHA-256、reftable 或带模板钩子（实测）；手写的管理目录要求 files 引用存储 | 2026-10-22 |
 | 影子仓库的完整标记与归属核对 | [我的决定] config 里最后写的 `strata.shadow = true`；alternates 指向本仓库的 `objects` | `ensure_shadow` 据此认出完整的影子仓库（半成的返回 `Exists`），`shadow_at` 据此只读地认出它；`open` 据此拒绝工作区（`detail.reason = "strata-workspace"`），strata 从不由工作区里的 git 推出 `RepoId`；`read_index`、`is_ignored`、`attach_worktree`、`shadow_drift` 据此核对工作区借的是本仓库的对象库 | 2026-10-22 |
 | 复制的配置键 | session.md §4.2 的清单，[我的决定] 再加 `core.excludesFile`、`core.attributesFile` | 主 checkout 在仓库级设了它们时，工作区里 git 的 ignore 与属性才与主 checkout 一致；session.md 的清单待 T9 补上 | 2026-10-22 |
-| 影子仓库 config 的写法与读法（review B1） | [我的决定] 写：照 git 自己的写法，只在 git 也会加引号时加（首尾空格、`;`、`#`、回车）。读：照抄的 `config_bool` 改按 git 的 config 语法（引号、转义、行内注释、续行、没有 `=` 是 true、空值是 false、git 的布尔词与整数），git 判坏的一律 `Unknown`（`bad-config`）；读 index 的缓存也按 config 的 stat 失效 | 原来的写法给每个值加引号，原来的读法不认引号：`shadow_at` 认不出任何 strata 建的影子仓库，工作区的 `core.ignorecase` 读成 false（re-review r2 把照抄的代码编译出来验证过）。agent 的 git 命令与手改都会改写活的影子仓库的 config，所以读的一侧也照 git。`config_values_read_like_git` 与 git 对拍 | 2026-10-22 |
-| 工作区 `pre-push` 守卫的范围 | 影子仓库的 config 钉住绝对的 `core.hooksPath = <dir>/hooks`（review N1 的裁定）。守卫挡住习惯性与意外的推送，包括推到显式地址；挡不住有意的绕过：push 时跳过钩子的那个选项、命令行上的 `-c core.hooksPath=…`、有意导出的 `STRATA_PUBLISH=1`。在工作区里改影子仓库 config 的 `core.hooksPath` 却常常不是有意的：husky、lefthook 这类钩子管理工具在工作区里安装时就会改钩子路径，或往钩子目录里写自己的钩子，守卫随之失效（review B4）；22 个仓库今天都不用它们（2026-10-22 查过各仓库根目录的 `.husky`、`lefthook*.yml` 与 package.json）。`shadow_drift` 把钩子路径被改、被删报成 `PrePushGuardDisabled`（status 的 reason 是 `pre_push_guard_disabled`）；[我的决定] `hooks/pre-push` 被换掉也报这一项。gitio 不修，是否重新钉住由 daemon 决定（module-rulings 的 T13 条）。钉住的代价：用户级与系统级 hooksPath 里的其他钩子在工作区里都不跑（review B5） | design §6.8 的守卫是守卫，不是安全边界。re-review r2 实测：在工作区里把钩子路径改到 `.husky/_` 改写了影子仓库的 config，之后从工作区推到显式地址成功。实测：用户级或系统级设了 hooksPath 而影子仓库没钉时推送成功，钉了就被拒；跳过钩子的那个选项与 `-c core.hooksPath=/dev/null` 都能绕过 | 2026-10-22 |
+| 影子仓库 config 的写法与读法（review B1、M2） | [我的决定] 写：照 git 自己的写法，只在 git 也会加引号时加（首尾空格、`;`、`#`、回车）。读：照抄的 `config_bool` 改照 git 2.54 的解析器（`parse_file`、`get_value`、`parse_value`、`git_parse_maybe_bool`）：BOM、两类空白、键名与段头的字符集、整个文件的坏行、每一次出现的值、32 位整数与不分大小写的后缀（§5.7 第 6 步）；git 判坏的一律 `Unknown`（`bad-config`）；文件里有 NUL 字节也是 `Unknown`，哪怕 git 接受；读 index 的缓存也按 config 的 stat 失效 | 原来的写法给每个值加引号，原来的读法不认引号：`shadow_at` 认不出任何 strata 建的影子仓库，工作区的 `core.ignorecase` 读成 false（re-review r2 把照抄的代码编译出来验证过）。agent 的 git 命令与手改都会改写活的影子仓库的 config，所以读的一侧也照 git。re-review r3 又找出五种与 git 不同的形式（M2），本轮照 git 的源码逐条补齐，四个探针脚本在 git 2.54 上实测了 124 个形式（有少量重复）。NUL 的处理随位置而变，不值得复刻：说不准就 `Unknown`，从不猜。`config_values_read_like_git` 与 git 对拍 | 2026-10-22 |
+| 读法与 include（review M3） | [我的决定] gitio 进程内的 config 读法（`core.ignorecase`、`strata.shadow`）不跟随 `include.path`、`includeIf.<条件>.path`；影子仓库 config 里出现的 include 条目由 `shadow_drift` 报成 `Config { key }` 漂移 | 跟随就要读 agent 指定的任意文件，包括 FIFO（实测 git 读到指向 FIFO 的 include 就一直挂住），`includeIf` 还要照 git 的上下文求值（gitdir、onbranch、hasconfig）。`ensure_shadow` 从不写 include，出现就是后加的，status 由此看得出读法可能与 git 不同。代价：agent 在影子仓库里经 include 改了 `core.ignorecase` 时，gitio 读到的仍是 config 本身的值，与工作区里的 git 不同，直到 status 的告警被处理。22 个仓库的仓库级 config 都没有 include | 2026-10-22 |
+| 工作区 `pre-push` 守卫的范围 | 影子仓库的 config 钉住绝对的 `core.hooksPath = <dir>/hooks`（review N1 的裁定）。守卫挡住习惯性与意外的推送，包括推到显式地址；挡不住有意的绕过：push 时跳过钩子的那个选项、命令行上的 `-c core.hooksPath=…`、有意导出的 `STRATA_PUBLISH=1`。在工作区里改影子仓库 config 的 `core.hooksPath` 却常常不是有意的：husky、lefthook 这类钩子管理工具在工作区里安装时就会改钩子路径，或往钩子目录里写自己的钩子，守卫随之失效（review B4）；22 个仓库今天都不用它们（2026-10-22 查过各仓库根目录的 `.husky`、`lefthook*.yml` 与 package.json）。`shadow_drift` 在工作区的上下文里问 git 自己用哪个 hooks 目录（跟随 include、读 `config.worktree`、`includeIf` 按管理目录求值；review M3），不是 `<dir>/hooks` 就报 `PrePushGuardDisabled`（status 的 reason 是 `pre_push_guard_disabled`），影子仓库 config 里后加的 include 另报一项 `Config`；[我的决定] `hooks/pre-push` 被换掉也报这一项。gitio 不修，是否重新钉住由 daemon 决定（module-rulings 的 T13 条）。钉住的代价：用户级与系统级 hooksPath 里的其他钩子在工作区里都不跑（review B5） | design §6.8 的守卫是守卫，不是安全边界。re-review r2 实测：在工作区里把钩子路径改到 `.husky/_` 改写了影子仓库的 config，之后从工作区推到显式地址成功。实测：用户级或系统级设了 hooksPath 而影子仓库没钉时推送成功，钉了就被拒；跳过钩子的那个选项与 `-c core.hooksPath=/dev/null` 都能绕过。re-review r3 与本轮实测：影子仓库 config 的本地列表看不见 include 进来的、`config.worktree` 里的与用户级的钩子路径（钉住的键被删之后），也看不见被改指主 checkout 的 gitfile；这四种之下有效目录都在别处，前三种推到显式地址都成功，所以只能问 git 的有效值 | 2026-10-22 |
 | `includeIf` 引入的条件配置 | [我的决定] 不处理，记为限制：用户级 config 以 `includeIf "gitdir:…"` 只给主 checkout 引入的配置，在 staging 树的 push 与 `stage` 里不生效（凭据、http、钩子与 `filter.*` 这些键），在工作区里也不生效；`onbranch:` 条件同样不生效（HEAD 是 detached 的）。`hasconfig:remote.*.url:` 在 staging 里生效（它读主 common dir 的 remote），在没有 remote 的工作区里不生效。gitio 在主 common dir 上跑的命令（`fetch`、`export_tree`、`remote get-url`）照常读到这些配置，所以条件配置里的过滤器会让导出与 `stage` 不对称 | staging 与工作区的 git 目录都不在主 checkout 之下（三种条件都实测过）。要让这些配置生效，写进主 checkout 的仓库级 config：staging 直接读到，工作区只复制 §4.2 清单里的键。T10 publish 重复这条限制（review N3） | 2026-10-22 |
 | 主仓库的引用存储 | [我的决定] `extensions.refStorage` 不是 `files` → `Unsupported` | `attach_staging` 手写 detached `HEAD`，reftable 下 HEAD 不在这个文件里；22 个仓库的 config 都没有 `extensions.*` | 2026-10-22 |
 | ignorecase 下的大小写折叠 | [我的决定] 只按 ASCII 折叠，与 git 相同：`is_tracked`、`tracked_under`、`tree_contains`、ignore 模式匹配、tree 的碰撞检查 | `git status` 就是这样判定的（实测模式 `É.txt` 不命中 `é.txt`）。只差 Unicode 大小写的路径归 overlay，用 `apfs::case_fold_eq`（module-rulings Addendum 2）。types.md:124 与 3f:155 写的是 `apfs::case_fold_eq`，由 T15 统一，本文不改它们 | 2026-10-22 |
@@ -1159,7 +1226,12 @@ git commit -m "test(gitio): the main checkout changes only in objects and refs/s
 | 推送地址 | [我的决定] 推到 `git remote get-url --push` 给出的地址 | 推到 remote 名会更新 `refs/remotes/*`（实测） | 2026-10-22 |
 | pre-push 钩子 | [我的决定] 不带 `--no-verify`；推送在 staging 树根里跑（review M16 的裁定），人自己的 `pre-push` 照跑 | 仓库自己的钩子照跑，cwd 是要发布的内容；钩子拒绝时没有状态行，报 `Unknown` | 2026-10-22 |
 | 导出的持久化与原子性 | [我的决定] 每个文件与目录 `fsync`（`libc::fsync`），一次 `apfs::full_fsync`，再 `apfs::rename_rooted(…, RenameMode::Excl)`；要 `fsync` 的路径取自 tree 的路径表，不遍历目录 | §5.5：基线目录只以完整的形态出现，竞争下也不覆盖。路径表就是 git 写出的全部条目，按它逐个打开没有 `apfs::walk` 的深度上限 | 2026-10-22 |
-| gitio 往工作区、staging 树、导出目标旁与活的影子仓库里的写 | module-rulings Addendum 7 的 Layering 条、Addendum 8 与它的 clarification 的裁定：都经 apfs 的 rooted 函数（gitfile 用 `create_file_rooted`；导出用 `mkdir_rooted`、`rename_rooted`、`remove_rooted`；move 时的管理目录用 `mkdir_rooted`、`create_file_rooted`，根是影子仓库目录），gitio 自己不做 `*at` 调用。`new` 时影子仓库还没有工作区，`ensure_shadow` 的写仍按路径。[我的决定] 导出以 `dst` 的父目录为根，`T` 建成 0700，`T/tree` 由 gitio 建成 0755 | Addendum 3 要求往工作区或 staging 树里的写都不跟随符号链接，Addendum 8 让这类操作只有 apfs 一份实现。gitio 因此依赖同在第 1 层的 apfs（apfs 只依赖 types，没有环），T15 把 types.md §8 第 1 层一行改成"同层只允许 store 与 gitio 依赖 apfs"。`T/tree` 要预先建好：工作树目录不存在时 checkout-index 以 128 退出（实测）。树里的文件由 git 写。影子仓库在 `new` 之后是 agent 可写的地方，re-review r2 用指向 `<main>/.git/worktrees` 的符号链接把第 2 代的管理目录引进了主 checkout（review B3）。git 自己往管理目录里写 index 仍按路径：rooted 函数挡住预先放好的符号链接，attach 进行中卡着时间的替换不防 | 2026-10-22 |
+| gitio 往工作区、staging 树、导出目标旁与活的影子仓库里的写 | module-rulings Addendum 7 的 Layering 条、Addendum 8 与它的 clarification 的裁定：都经 apfs 的 rooted 函数（gitfile 用 `create_file_rooted`；导出用 `mkdir_rooted`、`rename_rooted`、`remove_rooted`；move 时的管理目录用 `mkdir_rooted`、`create_file_rooted`，根是影子仓库目录），gitio 自己不做 `*at` 调用。`new` 时影子仓库还没有工作区，`ensure_shadow` 的写仍按路径。[我的决定] 导出以 `dst` 的父目录为根，`T` 建成 0700，`T/tree` 由 gitio 建成 0755 | Addendum 3 要求往工作区或 staging 树里的写都不跟随符号链接，Addendum 8 让这类操作只有 apfs 一份实现。gitio 因此依赖同在第 1 层的 apfs（apfs 只依赖 types，没有环），T15 把 types.md §8 第 1 层一行改成"同层只允许 store 与 gitio 依赖 apfs"。`T/tree` 要预先建好：工作树目录不存在时 checkout-index 以 128 退出（实测）。树里的文件由 git 写。影子仓库在 `new` 之后是 agent 可写的地方，re-review r2 用指向 `<main>/.git/worktrees` 的符号链接把第 2 代的管理目录引进了主 checkout（review B3）。管理目录的 index 也是 gitio 的 rooted 写：git 把 index 建在 `tree_dir/.git/` 下，gitio 复制进来（re-review r3 实测旧的做法在 `worktrees/<n>` 被换成指向 `<main>/.git` 的符号链接时重写了主 checkout 的 index）。剩下的按路径的 git 写只有那个临时 index，见"活影子仓库的写入清单"一行 | 2026-10-22 |
+| attach 的 index 怎样进管理目录（re-review r3、fix round 4 的裁定） | 裁定：git 把 index 建在 strata 自己的临时路径（移动的暂存里），gitio 再 rooted 地复制进 `worktrees/<n>/index`，git 从不打开管理目录。[我的决定] 临时路径是 `tree_dir/.git/index`（临时目录 0700，与第 4 步的 gitfile 同名，复制之后删掉）；副本的 mtime 设成临时 index 的 mtime；`-c core.splitIndex=false` | `move_workspace` 时 `tree_dir` 就是 session 的移动暂存，裁定说的"移动的暂存里"就是它。`.git` 这个名字第 1 步已确认不存在，tree 里也不可能有（§5.4 拒绝 `.git` 分量），所以不必另起名字，碰不上树里的文件；崩溃时留下的也只在调用方的暂存里，会话根下不多出一类残留。git 按 index 文件的 mtime 判定 racy 条目，保留 mtime 让副本与 git 写的那份等价。用户级 `core.splitIndex = true` 实测不拆私有 index，显式关掉是为了不靠这条内部规则 | 2026-10-22 |
+| 活影子仓库的写入清单与剩下的暴露（module-rulings 的 Addendum 8 clarification；fix round 4） | 清单见 §5.6 末尾：`new` 之后 strata 往影子仓库里写的，只有 move 时 gitio 经 rooted 函数建的管理目录与其中的五个文件；git 命令一个字节都不往里写（ref、reflog、对象、config 都没有：pin ref 在主 checkout，`stage` 与 `commit_tree` 写主对象库）。本轮去掉的暴露：管理目录的 index 改成 rooted 的副本；index 命令不跑钩子，所有 git 命令不起 fsmonitor（§5.1）。剩下三项都要有意的篡改，按 pre-push 守卫已经裁定的威胁模型（review N1）记下最坏情形，以及之后 status 显示什么。(1) 临时 index 仍由 git 按路径写在 `tree_dir/.git/` 下：有人卡着时间把 `tree_dir/.git` 换成指向 `<main>/.git` 的符号链接（或把 `tree_dir` 换成指向主 checkout 工作树根的符号链接），git 就经它重写主 checkout 的 index，人暂存的改动丢失。只换不换回时，gitio 读回临时 index 的 rooted 读被拒，`attach_worktree` 返回 `Unknown`，session 保留移动的现场，status 报出这个工作区的 `Unknown` 与现场。最坏情形是 git 写完之后又换回原来的目录、并在里面放好一份 index：gitio 照常复制，move 成功，status 什么都不显示，工作区拿到的是放进去的那份 index。两种情形下主 checkout 的 index 都不在 strata 的 status 里，人自己的 `git status` 看得到暂存的改动不见了。(2) refresh 跑影子仓库 config 里的过滤器命令：agent 改写 `filter.<driver>.clean` 或 `.process`（或在影子仓库的 `info/attributes` 里给路径配上新的过滤器），strata 就以同一个用户替它跑那条命令，最长 600 s（§5.1）；status 报对应的 `Config` 漂移（`filter.<driver>.clean` 这类键）与 `Attributes` 漂移。(3) 影子仓库 config 的 include 指向 FIFO：每个读它的 git 命令都挂住；strata 的子进程到时被杀，status 的漂移检查报 `Unknown`（`timeout`），move 在 600 s 后得到 `Unknown`，现场保留 | (1) `tree_dir` 是 strata 的暂存（session 的 `.strata-tmp-move-*`，名字随机），agent 的 git 从不往那里写；影子仓库的 `worktrees/` 却是 agent 自己的 git 也写的地方（`git worktree add`、`prune`），旧的做法正暴露在那里。按路径的 git 写去不掉：git 只认路径。(2) refresh 要照工作区里 git 的规则判断内容，过滤器只能取影子仓库的；改取主 checkout 现在的，镜像漂移时会把改过的文件记成干净的。(3) 本地命令原本不设超时，status 与握着写锁的 move 都不能无限挂住 | 2026-10-22 |
+| gitio 自己起的 git 不起 fsmonitor，index 命令不跑钩子 | [我的决定] 每个 git 子进程都带 `-c core.fsmonitor=false`；`read-tree`、`update-index`、`checkout-index`、`write-tree` 再带关掉钩子的 `-c core.hooksPath=/dev/null`；`push` 照跑钩子 | 实测：用户级 `core.fsmonitor = true` 让 `export_tree` 那样的 checkout-index 在主 checkout 的 `.git` 里建了 `fsmonitor--daemon.ipc` 与 `fsmonitor--daemon/`、留下一个守护进程（违反 G1），让 move 时的 refresh 在影子仓库里建了 `fsmonitor--daemon.ipc`；`post-index-change` 钩子在 read-tree 与 refresh 之后都会跑，影子仓库的 hooks 目录 agent 可写。gitio 的命令只碰自己的私有 index，用不着这两样；命令行的 `-c` 压过各级 config 与 include | 2026-10-22 |
+| 本地命令的超时 | [我的决定] 只给会读活影子仓库 config 的子进程：只读的查询（`shadow_drift` 的三次、全局排除文件的查询）各 10 s，`attach_worktree` 的 read-tree 与 refresh 各 600 s；其余本地命令不设 | 实测 git 的每个命令启动时都跟随仓库 config 的 include，一条指向 FIFO 的 include 让 `config --local --list`、`config --get`、`rev-parse` 都一直挂住；status 与 overlay 的对账不能因为一个会话的影子仓库挂住，move 握着 per-repo 写锁。600 s 远大于 refresh 的正常耗时（O(源码字节数)，tool 约 4.2K 个文件），首个 spike 后修正 | 2026-10-22 |
+| `is_ignored_in_export` 的"已跟踪"（session 的上游要求） | [我的决定] tree 路径表里的文件与符号链接条目；路径表里的目录不算，按规则回答 | 检出之后 index 里正是这些条目，这样它与工作区建好之后的 `is_ignored` 对每个路径都给同一个答案（`is_ignored` 里目录从不算已跟踪）。裁定写的是 `tree_contains(tree, path)`：对文件两者相同；`tree_contains` 对目录也答"在"（本表 `tree_contains` 对目录一行），照搬就会让两个函数对目录给出不同答案。session 先用 `tree_contains` 拒掉被跟踪的种子，只拿不在 tree 里的路径来问，对它没有差别 | 2026-10-22 |
 | tree 里的路径碰撞 | [我的决定] NFC 相同，或 ignorecase 下 ASCII 折叠相同，或同一个名字既是文件（符号链接）又是目录，都算碰撞，返回 `Unsupported`；只差 Unicode 大小写的放行 | §5.4；git 在 APFS 上检出只差 Unicode 大小写的一对同样只留一个文件，导出仍等于检出；同名的文件与目录 `git fsck` 判为 `duplicateEntries`，read-tree 却悄悄丢掉一条（实测） | 2026-10-22 |
 | tree 里的 `.git` 分量 | [我的决定] `Unsupported` | tgrep 的 `validate_tracked_path` 同样拒绝；git 检出时拒绝写这样的路径（实测），到导出才发现就已经写了临时目录 | 2026-10-22 |
 | `tree_contains` 对目录 | [我的决定] tree 里的目录也算"在 tree 里" | 与被跟踪目录同名的显式种子条目因此被拒，而不是把文件复制到目录的位置上 | 2026-10-22 |
@@ -1168,5 +1240,5 @@ git commit -m "test(gitio): the main checkout changes only in objects and refs/s
 | index 文件不存在 | `Unknown`，`detail.reason = "no-index"`（review M7、module-rulings Addendum 2 的裁定） | gitio 总给工作区与 staging 建 index，缺了是异常；不当成"什么都没跟踪" | 2026-10-22 |
 | push 与 fetch 的原始输出 | [我的决定] 经 `tracing` 记日志 | `PushOutcome::Unknown` 不带文字 | 2026-10-22 |
 | 计划之外的公开项 | [我的决定] `common_dir`、`is_binary` 与两个常量 | daemon 报错时要给出路径；`Binary` 与 merge3 用同一个判定 | 2026-10-22 |
-| 测试接缝（module-rulings Addendum 4） | [我的决定] cargo feature `test-seams` 下挂在 `Git` 上的六个入口：`open_with_env`、`set_env`、`set_fetch_timeout`、`take_git_calls`、`take_sync_events`、`pause_export_before_rename`（§3 末尾）；版本解析不开接缝，用 `src/repo.rs` 的单测 | 子进程的参数、环境与缓存命中只能在起子进程的那一处看到，而 `command` 是 crate 私有；持久化的顺序只能在同步层看到；120 s 的 fetch 超时在测试里太长；导出的改名竞态要停在两步之间才测得确定（Addendum 4：用停住接缝，不用 errno 故障点）；`set_env` 让每个用例有自己的全局配置与 `EMAIL`，不改测试进程的环境；`open_with_env` 让 `open` 自己的子进程也只读沙箱里的配置（review N8） | 2026-10-22 |
+| 测试接缝（module-rulings Addendum 4） | [我的决定] cargo feature `test-seams` 下挂在 `Git` 上的七个入口：`open_with_env`、`set_env`、`set_fetch_timeout`、`take_git_calls`、`take_sync_events`、`pause_export_before_rename`、`pause_attach_before_index`（§3 末尾）；版本解析不开接缝，用 `src/repo.rs` 的单测 | 子进程的参数、环境与缓存命中只能在起子进程的那一处看到，而 `command` 是 crate 私有；持久化的顺序只能在同步层看到；120 s 的 fetch 超时在测试里太长；导出的改名竞态、attach 时管理目录被换，都要停在两步之间才测得确定（Addendum 4：用停住接缝，不用 errno 故障点）；`set_env` 让每个用例有自己的全局配置与 `EMAIL`，不改测试进程的环境；`open_with_env` 让 `open` 自己的子进程也只读沙箱里的配置（review N8） | 2026-10-22 |
 | 导出耗时 | 待定 | design §8 没有导出的数字；首个 spike 实测 tool（4196 个文件）与 staff-api（4947 个）后写回 | — |
