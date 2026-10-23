@@ -22,6 +22,7 @@ mod overlay;
 mod project;
 mod rebase;
 mod rename;
+mod restore;
 mod scan;
 mod tracker;
 
@@ -43,6 +44,7 @@ pub use manifest::build_manifest;
 pub use overlay::*;
 pub use project::project;
 pub use rebase::{RebaseOptions, Rebased, rebase};
+pub use restore::{RestoreRequest, Restored, restore};
 pub use tracker::Tracker;
 
 /// types.md §8 `Result<T>`.

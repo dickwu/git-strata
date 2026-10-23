@@ -13,8 +13,8 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 | 5 deterministic rename pairing | done | 56c97a8 |
 | 6 dirty set and incremental scans | done | e373444 |
 | 7 checkpoints that store only what changed | done | f39c80f |
-| 8 three-way rebase with .lww, and projection | done | (this commit) |
-| 9 a restore that checkpoints first | todo | |
+| 8 three-way rebase with .lww, and projection | done | b2af983 |
+| 9 a restore that checkpoints first | done | (this commit) |
 | 10 restore scenes, verification, cross-base projection | todo | |
 
 ## Ambiguity decisions
@@ -198,3 +198,45 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
   side without re-proving it: dst is the caller's own staging clone
   (strictly under `<store>/sessions`, else `InvalidInput`
   `dst_outside_sessions`). No fsync in project.
+- Task 9: R (the restore temp's parent) is the parent of the path the Store
+  records for the workspace (after `validate` proves it is the same
+  directory as `ws.root`). The temp `T = R/<RESTORE_TEMP_PREFIX><repo>`.
+  Task 9 does only the minimal step 1: T absent or an empty dir → go on; a
+  non-directory → `Exists` `restore_temp_taken`; a non-empty dir →
+  `Unknown` `restore_scene` (`unproven`). Scene judgement and auto-settle
+  come in Task 10.
+- Task 9: a checkpoint on another base is refused with `InvalidInput`
+  `cross_base` until Task 10 adds the rebase projection.
+- Task 9: root spelling. `root/.` or another case of the same directory
+  is accepted. After `validate`, the scan and every write go through the
+  recorded path (apfs refuses non-canonical roots). The caller's tracker
+  is used only if its root equals the recorded path. Otherwise a fresh
+  tracker scans, and the caller's tracker gets `require_full()`. A tracker
+  for a different directory is still `wrong_tracker`.
+- Task 9: the "checkpoint first" step uses `checkpoint::finish` with a new
+  guard hook, run after the blobs are stored and before
+  `record_checkpoint`. The guard re-checks that the planned targets'
+  current content is still what was scanned, so a write that races the
+  plan gives `Busy` `workspace_changed` with no row recorded.
+  `finish` always records a row for `BeforeRestore`.
+- Task 9: after apply, the touched paths go into `tracker.inbox.hint(..)`
+  rather than writing their new attrs into the cache directly (the spec
+  says update the cache). This is the safer choice: the next scan
+  re-stats them instead of trusting attrs read during our own writes.
+- Task 9: `Restored.written` / `removed` are sorted by path.
+- Task 9: selection. `paths` picks every path of C ∪ X under each request
+  path (exact or prefix `p/`). It is widened to whole rename groups, so
+  both sides of a Renamed entry go together. A request path matching
+  nothing is `InvalidInput` `not_in_checkpoint`, with an `on_disk` detail.
+- Task 9: emptied dirs. A directory is removed only if it is
+  absent from X, it held only removed paths, and it is empty after the
+  deletes (`EmptyDir` removal, so a foreign file keeps it).
+- Task 9: written files get their user xattrs stripped. `com.apple.*`
+  attributes are left alone, because the OS may own them, and ENOATTR is
+  ignored. Symlink content is read with `read_blob(id, 1024)`.
+- Task 9 tests: `external_writers_are_captured_exactly` restores c0, then
+  the external state, in the same workspace rather than a separate fresh
+  clone. The "gc'd checkpoint" case of
+  `restore_missing_checkpoint_is_store_error` cannot be built (gc only
+  reclaims removed sessions), so only a never-recorded id is tested.
+  No test hardcodes /tmp.

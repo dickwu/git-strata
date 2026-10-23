@@ -17,6 +17,7 @@ use crate::classify::{changed, present};
 use crate::compute::{Pass, begin, push_warn, rejudge, settle};
 use crate::context::{Base, WorkspaceRef};
 use crate::hash::{Cached, git_mode, is_shape_error};
+use crate::inbox::Snapshot;
 use crate::overlay::Overlay;
 use crate::tracker::Tracker;
 use crate::{DEFAULT_DIRTY_CAPACITY, OverlayWarning, Result, ScanStats};
@@ -39,7 +40,7 @@ pub struct Checkpointed {
     pub stats: ScanStats,
 }
 
-fn invalid(reason: &str, msg: String) -> StrataError {
+pub(crate) fn invalid(reason: &str, msg: String) -> StrataError {
     StrataError::new(Code::InvalidInput, msg).with_detail(serde_json::json!({ "reason": reason }))
 }
 
@@ -55,8 +56,9 @@ fn io_error(e: &std::io::Error, p: &std::path::Path) -> StrataError {
     }))
 }
 
-/// §5.6 step 1 (reads the Store only).
-fn validate(ws: &WorkspaceRef, base: &Base) -> Result<()> {
+/// §5.6 step 1 (reads the Store only). Returns the workspace path the
+/// Store records (the same directory as `ws.root`).
+pub(crate) fn validate(ws: &WorkspaceRef, base: &Base) -> Result<std::path::PathBuf> {
     let rec = match ws.store.session(ws.session)? {
         Some(r) if r.lifecycle != Lifecycle::Removed => r,
         _ => {
@@ -113,7 +115,7 @@ fn validate(ws: &WorkspaceRef, base: &Base) -> Result<()> {
             ),
         ));
     }
-    Ok(())
+    Ok(w.path.clone())
 }
 
 pub(crate) fn blob_of(e: &OverlayEntry) -> Option<&BlobId> {
@@ -151,7 +153,7 @@ enum Put {
     Race,
 }
 
-fn stable(a1: &Attrs, a2: &Attrs) -> bool {
+pub(crate) fn stable(a1: &Attrs, a2: &Attrs) -> bool {
     match a2.kind {
         // A symlink's content is its target, part of the kind.
         FileKind::Symlink { .. } => a1.kind == a2.kind && a1.inode == a2.inode,
@@ -313,42 +315,50 @@ pub fn checkpoint(
         _ => None,
     };
     let mut pass = begin(ws, base, tracker, dirty)?;
-    match finish(ws, base, &mut pass, reason) {
+    match finish(ws, base, &mut pass, reason, None) {
         Ok(out) => {
             tracker.st = pass.st;
             Ok(out)
         }
         Err(failed) => {
             let (e, scanned) = *failed;
-            // The tracker keeps its old state; what the scan saw goes back
-            // into the inbox with the snapshot (§5.6, 3c:43).
-            let mut snap = pass.snap;
-            if let Some(o) = scanned {
-                let mut seen: BTreeSet<RepoPath> =
-                    changed(tracker.st.last.as_ref(), &o).into_iter().collect();
-                for e in &o.entries {
-                    seen.insert(e.path.clone());
-                    if let EntryKind::Renamed { from, .. } = &e.kind {
-                        seen.insert(from.clone());
-                    }
-                }
-                snap.paths.extend(seen);
-            }
-            tracker.inbox.merge(snap);
+            give_back(tracker, pass.snap, scanned.as_ref());
             Err(e)
         }
     }
 }
 
+/// A pass that is not committed: the tracker keeps its old state; what the
+/// scan saw goes back into the inbox with the snapshot (§5.6, 3c:43).
+pub(crate) fn give_back(tracker: &mut Tracker, mut snap: Snapshot, scanned: Option<&Overlay>) {
+    if let Some(o) = scanned {
+        let mut seen: BTreeSet<RepoPath> =
+            changed(tracker.st.last.as_ref(), o).into_iter().collect();
+        for e in &o.entries {
+            seen.insert(e.path.clone());
+            if let EntryKind::Renamed { from, .. } = &e.kind {
+                seen.insert(from.clone());
+            }
+        }
+        snap.paths.extend(seen);
+    }
+    tracker.inbox.merge(snap);
+}
+
 /// The error plus what the scan saw (boxed: it is large).
-type Failed = Box<(StrataError, Option<Overlay>)>;
+pub(crate) type Failed = Box<(StrataError, Option<Overlay>)>;
+
+/// Runs on the overlay whose blobs are all stored, before the row is
+/// recorded; an error means no row (restore's §5.7 step 9).
+pub(crate) type Guard<'g> = &'g dyn Fn(&Overlay) -> Result<()>;
 
 /// §5.6 steps 3-7 on a scanned pass.
-fn finish(
+pub(crate) fn finish(
     ws: &WorkspaceRef,
     base: &Base,
     pass: &mut Pass,
     reason: CheckpointReason,
+    guard: Option<Guard>,
 ) -> std::result::Result<Checkpointed, Failed> {
     let scanned = settle(base, pass);
     let fail = |e: StrataError, o: &Overlay| Box::new((e, Some(o.clone())));
@@ -383,6 +393,9 @@ fn finish(
         .flat_map(|l| l.entries.iter().filter_map(blob_of).cloned())
         .collect();
     let overlay = put_blobs(ws, base, pass, stored).map_err(|e| fail(e, &scanned))?;
+    if let Some(g) = guard {
+        g(&overlay).map_err(|e| fail(e, &overlay))?;
+    }
     // A raced put may have brought the overlay back to the latest checkpoint.
     if may_skip
         && let Some(l) = &latest
