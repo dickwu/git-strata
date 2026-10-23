@@ -87,6 +87,8 @@ pub(crate) const EXPORT_BEFORE_RENAME: &str = "export_before_rename";
 pub(crate) const ATTACH_BEFORE_INDEX: &str = "attach_before_index";
 pub(crate) const ATTACH_BEFORE_READ_TREE: &str = "attach_before_read_tree";
 pub(crate) const ATTACH_BEFORE_READBACK: &str = "attach_before_readback";
+pub(crate) const PUSH_BEFORE_SEND: &str = "push_before_send";
+pub(crate) const PUSH_BEFORE_RECORD: &str = "push_before_record";
 
 impl Seams {
     #[allow(unused_variables)]
@@ -211,5 +213,16 @@ impl crate::Git {
 
     pub fn pause_attach_before_readback(&self) -> Pause {
         self.inner.seams.arm(ATTACH_BEFORE_READBACK)
+    }
+
+    /// Pause a push right before `git push` is spawned.
+    pub fn pause_push_before_send(&self) -> Pause {
+        self.inner.seams.arm(PUSH_BEFORE_SEND)
+    }
+
+    /// Pause `push_published` after the remote accepted, before the ref
+    /// transaction that records it.
+    pub fn pause_push_before_record(&self) -> Pause {
+        self.inner.seams.arm(PUSH_BEFORE_RECORD)
     }
 }

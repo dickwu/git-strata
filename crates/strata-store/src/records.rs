@@ -187,6 +187,32 @@ impl Store {
         })
     }
 
+    /// Replace a publish row's outcome without changing its phase, only
+    /// while the row is still at `phase` (publish.md §5.7 `assign` writes
+    /// `outcome.assigned` on a closed row). `false` when the row moved on.
+    pub fn set_publish_outcome(&self, id: u64, phase: PublishPhase, outcome: &Value) -> Result<bool> {
+        const OP: &str = "set_publish_outcome";
+        let outcome = to_json(outcome, "outcome")?;
+        let rid = int(id, "publish")?;
+        self.write(OP, |c| {
+            if !publish_exists(c, rid).map_err(w(OP))? {
+                return Err(no_such_publish(id));
+            }
+            let n = c
+                .execute(
+                    "UPDATE publishes SET outcome = ?3 WHERE id = ?1 AND phase = ?2",
+                    params![rid, publish_phase_text(phase), outcome],
+                )
+                .map_err(w(OP))?;
+            Ok(if n == 1 { Tx::Commit(true) } else { Tx::Rollback(false) })
+        })
+    }
+
+    /// Every publish row, oldest first.
+    pub fn publishes(&self) -> Result<Vec<PublishRecord>> {
+        self.read(|c| publishes_where(c, "1 = 1", None))
+    }
+
     pub fn publish_record(&self, id: u64) -> Result<Option<PublishRecord>> {
         let Ok(rid) = i64::try_from(id) else { return Ok(None) };
         self.read(|c| Ok(publishes_where(c, "id = ?1", Some(rid))?.pop()))

@@ -24,6 +24,7 @@ mod fsx;
 mod ignore;
 mod index;
 mod merge;
+mod publish_io;
 mod push;
 mod refs;
 mod remote;
@@ -39,6 +40,7 @@ mod worktree;
 pub use seams::{GitCall, Pause, SyncEvent};
 pub use index::IndexInfo;
 pub use merge::{Hunk, Merge3, is_binary, merge3};
+pub use publish_io::{RefUpdate, TreeBlob, TreeItem};
 pub use remote::remote_ref;
 pub use shadow::{MirrorDrift, Shadow};
 

@@ -6,11 +6,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::json;
-use strata_types::{Code, PushOutcome};
+use strata_types::{Code, CommitOid, PushOutcome};
 
 use crate::command::{Opts, failed};
 use crate::err::errd;
+use crate::publish_io::RefUpdate;
 use crate::refs::check_strata_ref;
+use crate::seams::{PUSH_BEFORE_RECORD, PUSH_BEFORE_SEND};
 use crate::remote::{check_remote, remote_ref};
 use crate::{Git, Result};
 
@@ -36,16 +38,16 @@ pub(crate) fn status_of(stdout: &[u8], spec: &str) -> Option<(char, String)> {
 }
 
 impl Git {
-    /// Push `src_ref` from the staging tree to `refs/heads/<dst_branch>` at
-    /// `remote`'s push URL (§5.11).
-    pub fn push(
+    /// Steps 1–4 of `push`: refusals, the push URL, the push, and this
+    /// ref's status line.
+    fn push_send(
         &self,
         staging: &Path,
         remote: &str,
         src_ref: &str,
         dst_branch: &str,
         timeout: Duration,
-    ) -> Result<PushOutcome> {
+    ) -> Result<Sent> {
         // Step 1: refusals; nothing has been sent.
         let gitfile = staging.join(".git");
         self.staging_gitdir(staging)?;
@@ -82,6 +84,7 @@ impl Git {
         }
 
         // Step 3: the push itself, from the staging root, hooks live.
+        self.inner.seams.hit(PUSH_BEFORE_SEND);
         let spec = format!("{src_ref}:refs/heads/{dst_branch}");
         let mut c = self.tree_command(&gitfile, staging, None);
         c.env("STRATA_PUBLISH", "1");
@@ -90,7 +93,7 @@ impl Git {
             Ok(o) => o,
             Err(e) if e.code == Code::Unknown && e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|r| r.as_str()) == Some("timeout") => {
                 tracing::warn!(remote, src_ref, dst_branch, ?timeout, "push timed out; outcome unknown");
-                return Ok(PushOutcome::Unknown);
+                return Ok(Sent { outcome: PushOutcome::Unknown, tracking, before, pushed });
             }
             Err(e) => return Err(e),
         };
@@ -118,6 +121,21 @@ impl Git {
             _ => PushOutcome::Unknown,
         };
 
+        Ok(Sent { outcome, tracking, before, pushed })
+    }
+
+    /// Push `src_ref` from the staging tree to `refs/heads/<dst_branch>` at
+    /// `remote`'s push URL (§5.11).
+    pub fn push(
+        &self,
+        staging: &Path,
+        remote: &str,
+        src_ref: &str,
+        dst_branch: &str,
+        timeout: Duration,
+    ) -> Result<PushOutcome> {
+        let Sent { outcome, tracking, before, pushed } = self.push_send(staging, remote, src_ref, dst_branch, timeout)?;
+
         // Step 5: strata's tracking ref, compare-and-swap against the value
         // read before the push; failure or skip changes nothing.
         if outcome == PushOutcome::Pushed
@@ -128,4 +146,50 @@ impl Git {
         }
         Ok(outcome)
     }
+
+    /// `push` for publish (publish.md §4.6, §5.6): `Pushed` only after one
+    /// ref transaction has moved both the tracking ref and `anchor_ref`
+    /// (under `refs/strata/`) to the pushed commit, each compare-and-swap
+    /// against its value read before the push. When that transaction does
+    /// not commit, the result is `Unknown` (nothing local moved).
+    pub fn push_published(
+        &self,
+        staging: &Path,
+        remote: &str,
+        src_ref: &str,
+        dst_branch: &str,
+        anchor_ref: &str,
+        timeout: Duration,
+    ) -> Result<PushOutcome> {
+        check_strata_ref(anchor_ref)?;
+        let anchor_before = self.read_ref(anchor_ref)?;
+        let Sent { outcome, tracking, before, pushed } = self.push_send(staging, remote, src_ref, dst_branch, timeout)?;
+        if outcome != PushOutcome::Pushed {
+            return Ok(outcome);
+        }
+        self.inner.seams.hit(PUSH_BEFORE_RECORD);
+        let mut updates = Vec::new();
+        for (name, old) in [(tracking.as_str(), before), (anchor_ref, anchor_before)] {
+            if old.as_ref() == Some(&pushed) {
+                updates.push(RefUpdate::verify(name, old));
+            } else {
+                updates.push(RefUpdate::set(name, pushed.clone(), old));
+            }
+        }
+        match self.ref_transaction(&updates) {
+            Ok(()) => Ok(PushOutcome::Pushed),
+            Err(e) => {
+                tracing::warn!(tracking, anchor_ref, error = %e.message, "push sent but not recorded; outcome unknown");
+                Ok(PushOutcome::Unknown)
+            }
+        }
+    }
+}
+
+/// What steps 1–4 of a push saw.
+struct Sent {
+    outcome: PushOutcome,
+    tracking: String,
+    before: Option<CommitOid>,
+    pushed: CommitOid,
 }
