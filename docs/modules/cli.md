@@ -312,7 +312,7 @@ cli 不重放 `Unknown`，不删除现场，不在失败后改跑 `gc` 或 `rm`�
 | 测试名 | 断言 | 来源（矩阵行 或 新增） |
 | --- | --- | --- |
 | `every_command_emits_ok_envelope` | §3 每个命令的成功输出都是一行紧凑 JSON，独立解析器（不是 `serde_json`）能还原；三个键都在；`data` 不是 null；成功时 `error` 为 null；没有结果的命令 `data` 是 `{}`。不断言两空格缩进 | `layerfs-telemetry/tests/timer_json.rs::json_matches_the_documented_shape` |
-| `envelope_keys_always_present` | 失败时 `data` 仍在且为 `{}`，`error` 是对象；成功时不省略 `error`（值为 null）。这是 T14 对 types.md §7 那句的改定，本行的“另一个键不出现”不沿用 | `layerfs-telemetry/tests/timer_json.rs::outcome_and_incomplete_fields_are_opt_in` |
+| `envelope_keys_always_present` | 三个键都在。成功时 `error` 为 null，不省略。失败时 `error` 是对象，`data` 不是 null。`data` 为 `{}` 只在这次失败没有结果时成立。`commit_tree` 之后的推送超时是 `ok: false`，`error.code` 为 `Unknown`，`data.pushes` 仍在，不得为了让 `data` 变成 `{}` 而丢掉 `pushes`。本行的“另一个键不出现”不沿用 | `layerfs-telemetry/tests/timer_json.rs::outcome_and_incomplete_fields_are_opt_in` |
 | `json_escaping_round_trips` | `data` 里的路径与 `message` 含引号、反斜杠、制表、换行、控制字符、非 ASCII 时，独立解析器还原出原字符串 | `layerfs-telemetry/tests/timer_json.rs::escaping_round_trips_through_an_independent_parser` |
 | `stdout_write_failure_is_nonzero` | stdout 在写信封时被关闭：进程退出码 1，不 panic，不把该次调用报成成功 | `layerfs-telemetry/tests/timer_json.rs::writer_failures_propagate` |
 | `stdout_format_write_failure_is_nonzero` | 同上，覆盖格式化写失败这条同源用例 | `layerfs-telemetry/tests/timer_format.rs::writer_failures_propagate` |
