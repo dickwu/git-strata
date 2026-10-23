@@ -11,8 +11,8 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 | 3 base manifests and race-safe reads | done | d1fd21a |
 | 4 membership, classification and the cold scan | done | d5ea948 |
 | 5 deterministic rename pairing | done | 56c97a8 |
-| 6 dirty set and incremental scans | done | (this commit) |
-| 7 checkpoints that store only what changed | todo | |
+| 6 dirty set and incremental scans | done | e373444 |
+| 7 checkpoints that store only what changed | done | (this commit) |
 | 8 three-way rebase with .lww, and projection | todo | |
 | 9 a restore that checkpoints first | todo | |
 | 10 restore scenes, verification, cross-base projection | todo | |
@@ -139,3 +139,39 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 - Tests' temp dirs follow `TMPDIR` (`std::env::temp_dir()`); nothing in the
   overlay tests hardcodes `/tmp`. Runs here use
   `TMPDIR=/Volumes/GWD/opensource/.strata-tmp` (APFS, same volume as target).
+- Task 7: `checkpoint(.., tracker: None, ..)` scans with a fresh `Tracker`
+  (a full scan, equal to `reconcile_full`). ToolCall uses the inbox only
+  (dirty = `Some(&[])`); Manual and the lifecycle reasons scan fully on the
+  warm cache.
+- Task 7: `PauseAfterSnapshot` sits in the shared scan start, so it pauses
+  `compute` too. `PauseBeforePut` is after the "unchanged against latest"
+  check (§5.6 step 4) and before step 5. The unchanged check runs again
+  after the puts, because a race may have put the tree back to the latest.
+- Task 7: put races (§5.2 steps 5–6). Each put is A1 → put → A2, at most two
+  tries; with no gen count it is accepted once and marked Unstable. A
+  symlink is stable when kind and inode match (the target is the content).
+  A shape error (a component swapped for a file or link) or a path gone
+  re-judges the raced paths with the incremental spelling walk (its
+  "blocked" ancestor is queued, the region under it becomes absent); a
+  NeedFull answer runs a full scan. At most 8 put rounds, then Busy
+  (`workspace_changing`). So a directory swapped for a link to outside the
+  session is recorded as the link, never as the outside bytes.
+- Task 7: a failed checkpoint leaves the tracker state as it was and puts
+  the snapshot plus every path the scan saw (entries, Renamed sources,
+  paths changed against the old state) back into the inbox. Entries are
+  compared sorted by path. `CheckpointId` passed to the store is a
+  placeholder; a returned id ≤ the latest means an earlier ToolCall with the
+  same id, returned with `recorded = false`.
+- Task 7 tests, reduced for runtime: `work_grows_with_the_change_not_the_base`
+  compares bases of 1 000 and 10 000 files (spec: up to 100 000);
+  `writers_are_never_blocked` uses 24 writer threads and 20 appender
+  threads (spec: processes), and the "other session" is a second World
+  (its own store). The Busy lock is held by a child run of the test binary
+  (`lock_child`, a raw `strata_store::sql` connection in `BEGIN
+  IMMEDIATE`): the store's engine is Turso, so `/usr/bin/sqlite3` does not
+  take part in its locking. A failed blob rename leaves the temp file for
+  the store's own sweep (store.md), so the test checks for no new blob,
+  not an empty `store/tmp`.
+- Task 7: the classifier may pair a deleted base file with a modified base
+  path of the same content (seen with an emptied file and a deleted empty
+  file); the test avoids that coincidence rather than change Task 5.

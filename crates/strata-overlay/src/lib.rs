@@ -6,6 +6,7 @@
 //! strata-store only.
 
 // Interim: helpers the scan and restore (tasks 4-10) use.
+mod checkpoint;
 mod classify;
 mod compute;
 #[allow(dead_code)]
@@ -25,6 +26,7 @@ mod tracker;
 use serde::{Deserialize, Serialize};
 use strata_types::{RepoPath, StrataError};
 
+pub use checkpoint::{Checkpointed, checkpoint};
 pub use compute::{Scan, compute, reconcile_full};
 pub use context::{Base, WorkspaceRef};
 #[cfg(feature = "test-seams")]

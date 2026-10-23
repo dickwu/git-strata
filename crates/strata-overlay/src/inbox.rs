@@ -5,10 +5,11 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use strata_apfs::WatchEvent;
+use strata_apfs::{FileKind, WatchEvent, attrs_of};
 use strata_types::RepoPath;
 
 use crate::context::Fold;
+use crate::hash::is_shape_error;
 use crate::scan::XSet;
 
 #[derive(Debug)]
@@ -39,6 +40,19 @@ impl Pending {
         set.entry(k).or_insert(p);
         if self.paths.len() + self.subtrees.len() > self.capacity {
             self.require_full();
+        }
+    }
+
+    /// A path known to be written (hint): dropped under X, `.gitignore` asks
+    /// for a full scan (the same rules as `note`).
+    fn add(&mut self, p: RepoPath) {
+        if self.x.as_ref().is_some_and(|x| x.covers(p.as_str())) {
+            return;
+        }
+        if p.as_str().rsplit('/').next() == Some(".gitignore") {
+            self.require_full();
+        } else {
+            self.insert(false, p);
         }
     }
 
@@ -146,6 +160,32 @@ impl Inbox {
         }
     }
 
+    /// Record paths known to be written (§5.4 hint): each `p`, and where a
+    /// prefix of `p` is a symlink, the path it leads to (one hop only; what
+    /// cannot be resolved that way asks for a full scan). Reads attributes:
+    /// call it on the daemon's thread, never from the watcher callback.
+    pub fn hint(&self, paths: &[RepoPath]) {
+        let root = self.lock().root.clone();
+        for p in paths {
+            let via = resolve_hint(&root, p);
+            let mut g = self.lock();
+            if g.full {
+                return;
+            }
+            g.add(p.clone());
+            match via {
+                Ok(Some(q)) => g.add(q),
+                Ok(None) => {}
+                Err(()) => g.require_full(),
+            }
+        }
+    }
+
+    /// The next scan walks the whole tree (a tool call without a path list).
+    pub fn require_full(&self) {
+        self.lock().require_full();
+    }
+
     pub(crate) fn needs_full(&self) -> bool {
         self.lock().full
     }
@@ -213,4 +253,78 @@ impl Inbox {
             full: g.full,
         }
     }
+}
+
+/// Where a write to `p` lands when a prefix of `p` is a symlink (§5.4 hint):
+/// `Ok(None)` = no symlink on the way (or a component is gone: `p` alone is
+/// enough), `Ok(Some(q))` = the one-hop resolution, `Err(())` = only a full
+/// scan can tell (absolute target, `..` after another component or past the
+/// root, a second symlink, attributes unreadable).
+fn resolve_hint(root: &Path, p: &RepoPath) -> Result<Option<RepoPath>, ()> {
+    let parts: Vec<&str> = p.as_str().split('/').collect();
+    for i in 0..parts.len() {
+        let prefix = RepoPath::try_from(parts[..=i].join("/")).map_err(|_| ())?;
+        let a = match attrs_of(root, &prefix) {
+            Ok(a) => a,
+            Err(e) if is_shape_error(&e) => return Ok(None),
+            Err(_) => return Err(()),
+        };
+        match a.kind {
+            FileKind::Dir => continue,
+            FileKind::Symlink { target } => {
+                let q = join_target(&parts[..i], &target, &parts[i + 1..])?;
+                no_symlink_on(root, &q)?;
+                return Ok(Some(q));
+            }
+            // A file (or special file) above the last component: `p` cannot exist.
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+/// `parent` + `target` + `rest`, `.` and `..` folded literally; `..` only at
+/// the start of the target, cancelling components already seen as directories.
+fn join_target(parent: &[&str], target: &Path, rest: &[&str]) -> Result<RepoPath, ()> {
+    let t = target.to_str().ok_or(())?;
+    if t.starts_with('/') {
+        return Err(());
+    }
+    let mut out: Vec<&str> = parent.to_vec();
+    let mut leading = true;
+    for c in t.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                if !leading || out.pop().is_none() {
+                    return Err(());
+                }
+            }
+            n => {
+                leading = false;
+                out.push(n);
+            }
+        }
+    }
+    out.extend_from_slice(rest);
+    if out.is_empty() {
+        return Err(());
+    }
+    RepoPath::try_from(out.join("/")).map_err(|_| ())
+}
+
+/// Walking `q` from the root passes no symlink (a missing component ends the walk).
+fn no_symlink_on(root: &Path, q: &RepoPath) -> Result<(), ()> {
+    let parts: Vec<&str> = q.as_str().split('/').collect();
+    for i in 0..parts.len() {
+        let prefix = RepoPath::try_from(parts[..=i].join("/")).map_err(|_| ())?;
+        match attrs_of(root, &prefix) {
+            Ok(a) if matches!(a.kind, FileKind::Symlink { .. }) => return Err(()),
+            Ok(a) if a.kind == FileKind::Dir => {}
+            Ok(_) => return Ok(()),
+            Err(e) if is_shape_error(&e) => return Ok(()),
+            Err(_) => return Err(()),
+        }
+    }
+    Ok(())
 }

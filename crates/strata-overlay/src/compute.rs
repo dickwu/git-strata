@@ -27,7 +27,11 @@ pub struct Scan {
     pub stats: ScanStats,
 }
 
-fn push_warn(w: &mut BTreeMap<RepoPath, Vec<OverlayWarning>>, p: &RepoPath, x: OverlayWarning) {
+pub(crate) fn push_warn(
+    w: &mut BTreeMap<RepoPath, Vec<OverlayWarning>>,
+    p: &RepoPath,
+    x: OverlayWarning,
+) {
     let v = w.entry(p.clone()).or_default();
     if !v.contains(&x) {
         v.push(x);
@@ -405,6 +409,19 @@ pub fn compute(
     tracker: &mut Tracker,
     dirty: Option<&[RepoPath]>,
 ) -> Result<Scan> {
+    let mut pass = begin(ws, base, tracker, dirty)?;
+    let overlay = settle(base, &mut pass);
+    let changed = changed(tracker.st.last.as_ref(), &overlay);
+    tracker.st = pass.st;
+    Ok(Scan {
+        overlay,
+        changed,
+        warnings: tracker.st.warnings.clone(),
+        stats: pass.stats,
+    })
+}
+
+fn check_args(ws: &WorkspaceRef, base: &Base, tracker: &Tracker) -> Result<()> {
     if base.r#gen.repo != *ws.repo {
         return Err(StrataError::new(
             Code::InvalidInput,
@@ -427,11 +444,33 @@ pub fn compute(
         )
         .with_detail(serde_json::json!({ "reason": "wrong_tracker" })));
     }
+    Ok(())
+}
+
+/// A scan that has run but is not committed to the tracker yet (checkpoint
+/// stores blobs in between, and may judge raced paths again).
+pub(crate) struct Pass {
+    pub st: State,
+    pub f: Frame,
+    pub stats: ScanStats,
+    pub snap: Snapshot,
+}
+
+/// §5.5 steps 1-4 on a copy of the tracker's state. On failure the snapshot
+/// is merged back and the tracker is unchanged.
+pub(crate) fn begin(
+    ws: &WorkspaceRef,
+    base: &Base,
+    tracker: &mut Tracker,
+    dirty: Option<&[RepoPath]>,
+) -> Result<Pass> {
+    check_args(ws, base, tracker)?;
     let f = frame(ws, base, &tracker.st)?;
     tracker.inbox.set_x(&f.x);
     let snap = tracker.inbox.take();
-    match run(ws, base, tracker, dirty, f, &snap) {
-        Ok(s) => Ok(s),
+    crate::fault::after_snapshot(ws.root);
+    match run(ws, base, &tracker.st, dirty, &f, &snap) {
+        Ok((st, stats)) => Ok(Pass { st, f, stats, snap }),
         Err(e) => {
             tracker.inbox.merge(snap);
             Err(e)
@@ -442,12 +481,11 @@ pub fn compute(
 fn run(
     ws: &WorkspaceRef,
     base: &Base,
-    tracker: &mut Tracker,
+    old: &State,
     dirty: Option<&[RepoPath]>,
-    f: Frame,
+    f: &Frame,
     snap: &Snapshot,
-) -> Result<Scan> {
-    let old = &tracker.st;
+) -> Result<(State, ScanStats)> {
     let full = dirty.is_none()
         || snap.full
         || !old.scanned
@@ -471,7 +509,7 @@ fn run(
         if let Some(t) = &old.tracked {
             set.extend(t.symmetric_difference(&f.info.tracked).cloned());
         }
-        if incremental(ws, base, &mut st, &f, set, &mut stats)?.is_err() {
+        if incremental(ws, base, &mut st, f, set, &mut stats)?.is_err() {
             go_full = true;
             st = old.clone();
             stats = ScanStats {
@@ -482,8 +520,37 @@ fn run(
         }
     }
     if go_full {
-        full_scan(ws, base, &mut st, &f, &mut stats)?;
+        full_scan(ws, base, &mut st, f, &mut stats)?;
     }
+    Ok((st, stats))
+}
+
+/// Judge `paths` again in `pass` (§5.4 spelling steps 1-3: a path, the
+/// shallowest non-directory above it, and what it hides); a full walk when
+/// only that can settle them.
+pub(crate) fn rejudge(
+    ws: &WorkspaceRef,
+    base: &Base,
+    pass: &mut Pass,
+    paths: BTreeSet<RepoPath>,
+) -> Result<()> {
+    let mut st = pass.st.clone();
+    let mut stats = pass.stats;
+    if incremental(ws, base, &mut st, &pass.f, paths, &mut stats)?.is_err() {
+        st = pass.st.clone();
+        stats.full = true;
+        full_scan(ws, base, &mut st, &pass.f, &mut stats)?;
+    }
+    pass.st = st;
+    pass.stats = stats;
+    Ok(())
+}
+
+/// §5.5 steps 5-6: classify the raw difference and record the scan facts in
+/// the pass's state (committed by the caller).
+pub(crate) fn settle(base: &Base, pass: &mut Pass) -> Overlay {
+    let f = &pass.f;
+    let st = &mut pass.st;
     let overlay = classify(
         &base.r#gen,
         &base.manifest,
@@ -493,23 +560,16 @@ fn run(
             ignorecase: f.info.ignorecase,
         },
     );
-    let changed = changed(st.last.as_ref(), &overlay);
     st.last = Some(overlay.clone());
     st.base = Some(base.r#gen.clone());
     st.ignorecase = Some(f.info.ignorecase);
     st.volume_cs = Some(f.volume_cs);
-    st.tracked = Some(f.info.tracked);
-    st.keys = Some(f.keys);
-    st.x = Some(f.x);
+    st.tracked = Some(f.info.tracked.clone());
+    st.keys = Some(f.keys.clone());
+    st.x = Some(f.x.clone());
     st.scanned = true;
     st.flatten_warnings();
-    tracker.st = st;
-    Ok(Scan {
-        overlay,
-        changed,
-        warnings: tracker.st.warnings.clone(),
-        stats,
-    })
+    overlay
 }
 
 /// §5.5 cold scan: a fresh tracker, every candidate's content read.

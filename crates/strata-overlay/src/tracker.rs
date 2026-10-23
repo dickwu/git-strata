@@ -80,6 +80,14 @@ impl Tracker {
         Ok(())
     }
 
+    /// `Watcher::flush()` when watching (best effort, not a barrier; never
+    /// from the watcher callback). Without a watcher it does nothing.
+    pub fn flush(&self) {
+        if let Some(w) = &self.watcher {
+            w.flush();
+        }
+    }
+
     /// The base of the latest scan; `None` before the first one.
     pub fn base(&self) -> Option<&BaseGen> {
         self.st.base.as_ref()

@@ -22,9 +22,10 @@ mod imp {
     pub enum OverlayFault {
         /// After the content of `path` was hashed, before its second attrs.
         PauseAfterHash { path: RepoPath },
-        /// Checkpoint: after the scan, before any blob is stored.
+        /// Scan (compute, checkpoint): after the inbox snapshot was taken,
+        /// before the tree is looked at.
         PauseAfterSnapshot,
-        /// Checkpoint: before the record is written.
+        /// Checkpoint: after the scan, before any blob is stored (§5.6 step 5).
         PauseBeforePut,
         /// Restore: before the precheck of the workspace.
         PauseBeforePrecheck,
