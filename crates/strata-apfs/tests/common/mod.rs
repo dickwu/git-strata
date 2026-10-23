@@ -292,3 +292,54 @@ pub fn simple_hash(b: &[u8]) -> u64 {
     }
     h
 }
+
+/// `lstat` as the raw struct (flags, nanosecond times).
+pub fn st(p: &Path) -> libc::stat {
+    let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+    let mut s: libc::stat = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::lstat(c.as_ptr(), &mut s) }, 0, "lstat {}", p.display());
+    s
+}
+
+pub fn ctime_ns(p: &Path) -> i128 {
+    let s = st(p);
+    s.st_ctime as i128 * 1_000_000_000 + s.st_ctime_nsec as i128
+}
+
+pub fn mtime_ns(p: &Path) -> i128 {
+    let s = st(p);
+    s.st_mtime as i128 * 1_000_000_000 + s.st_mtime_nsec as i128
+}
+
+pub fn atime_ns(p: &Path) -> i128 {
+    let s = st(p);
+    s.st_atime as i128 * 1_000_000_000 + s.st_atime_nsec as i128
+}
+
+/// Set mtime (and leave atime) without following a symlink.
+pub fn set_mtime(p: &Path, secs: i64, nsec: i64) {
+    let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+    let ts = [
+        libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT },
+        libc::timespec { tv_sec: secs, tv_nsec: nsec },
+    ];
+    assert_eq!(unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), ts.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) }, 0);
+}
+
+pub fn mode_of(p: &Path) -> u32 {
+    st(p).st_mode as u32 & 0o7777
+}
+
+pub fn flags_of(p: &Path) -> u32 {
+    st(p).st_flags
+}
+
+pub const UF_IMMUTABLE: u32 = 0x2;
+pub const UF_APPEND: u32 = 0x4;
+pub const UF_COMPRESSED: u32 = 0x20;
+pub const UF_HIDDEN: u32 = 0x8000;
+
+/// Wait so a later ctime would differ from an earlier one.
+pub fn tick() {
+    std::thread::sleep(std::time::Duration::from_millis(20));
+}

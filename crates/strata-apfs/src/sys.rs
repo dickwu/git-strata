@@ -141,3 +141,15 @@ pub(crate) fn rd_u64(b: &[u8], off: usize) -> Option<u64> {
 pub(crate) fn rd_i64(b: &[u8], off: usize) -> Option<i64> {
     b.get(off..off + 8).map(|s| i64::from_ne_bytes(s.try_into().unwrap()))
 }
+
+/// The path the kernel reports for a descriptor (`F_GETPATH`), for messages.
+pub(crate) fn fd_path(fd: i32) -> std::path::PathBuf {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize + 1];
+    let r = unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) };
+    if r == -1 {
+        return std::path::PathBuf::from(format!("<fd {fd}>"));
+    }
+    let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf.truncate(n);
+    std::path::PathBuf::from(std::ffi::OsString::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(buf)))
+}

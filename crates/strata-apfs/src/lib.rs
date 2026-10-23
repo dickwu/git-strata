@@ -10,6 +10,11 @@ use strata_types::StrataError;
 mod clone;
 mod rooted;
 mod hooks;
+mod meta;
+mod rooted_remove;
+mod rooted_rename;
+mod rooted_write;
+mod sync;
 #[allow(dead_code)]
 mod error;
 #[allow(dead_code)]
@@ -17,7 +22,12 @@ mod sys;
 mod volume;
 
 pub use clone::{clone_file, clone_tree};
+pub use meta::{FileMeta, make_removable, set_file_meta};
 pub use rooted::{open_root, open_rooted, open_rooted_file};
+pub use rooted_remove::{RemoveKind, remove_rooted};
+pub use rooted_rename::{RenameMode, rename_rooted};
+pub use rooted_write::{clone_file_rooted, clone_tree_rooted, create_file_rooted, mkdir_rooted, symlink_rooted};
+pub use sync::full_fsync;
 
 pub(crate) type StrataErrorAlias = StrataError;
 

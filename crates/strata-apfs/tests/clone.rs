@@ -122,6 +122,17 @@ fn clone_refusals_leave_no_residue() {
     assert!(clone_file(&tree.join("a.txt"), &b.path().join("x")).is_err());
     assert!(clone_file(&tree.join("a.txt"), &a.path().join("exists")).is_err());
     assert!(clone_file(&tree.join("a.txt"), &a.path().join("missing/x")).is_err());
+    // clone_tree_rooted's half (Task 4).
+    let (ar, br, dr) = (
+        fs::canonicalize(a.path()).unwrap(),
+        fs::canonicalize(b.path()).unwrap(),
+        fs::canonicalize(dos.path()).unwrap(),
+    );
+    let rtree = ar.join("tree");
+    assert_code(clone_tree_rooted(&rtree, &br, &rp("x")), Code::CrossVolume);
+    assert!(clone_tree_rooted(&dr.join("d"), &dr, &rp("x")).is_err());
+    assert_code(clone_tree_rooted(&rtree, &ar, &rp("exists")), Code::Exists);
+    assert_code(clone_tree_rooted(&rtree, &ar, &rp("missing/x")), Code::NoSuchPath);
     assert_eq!(listing(a.path()), la);
     assert_eq!(listing(b.path()), lb);
     assert_eq!(listing(dos.path()), ld);

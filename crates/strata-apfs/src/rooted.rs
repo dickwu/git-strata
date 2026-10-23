@@ -70,7 +70,7 @@ pub(crate) fn check_root(root: &Path) -> Result<()> {
 }
 
 /// Classify a failed `openat` of an intermediate directory (or the root).
-fn dir_open_error(errno: i32, dirfd: Option<RawFd>, name: &OsStr, side: IoSide, shown: &Path) -> crate::StrataErrorAlias {
+pub(crate) fn dir_open_error(errno: i32, dirfd: Option<RawFd>, name: &OsStr, side: IoSide, shown: &Path) -> crate::StrataErrorAlias {
     match errno {
         libc::ENOENT => errno_error(Code::NoSuchPath, errno, shown, None),
         libc::ENOTDIR | libc::ELOOP => {
