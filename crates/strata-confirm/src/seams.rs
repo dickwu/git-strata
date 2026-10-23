@@ -271,3 +271,62 @@ impl Confirmer {
         self.registry.count()
     }
 }
+
+/// A real-LocalAuthentication variant. `quiet()` never shows a prompt: it sets
+/// `interactionNotAllowed = true` before evaluating (LAContext.h: fails with
+/// LAErrorNotInteractive when UI would be needed). `invalidate_first` invalidates the context
+/// before evaluating.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+pub struct LaOptions {
+    pub interaction_not_allowed: bool,
+    pub invalidate_first: bool,
+    pub prompt_timeout: Duration,
+}
+
+#[cfg(target_os = "macos")]
+impl LaOptions {
+    /// interaction_not_allowed = true, invalidate_first = false, prompt_timeout = PROMPT_TIMEOUT.
+    pub fn quiet() -> LaOptions {
+        LaOptions {
+            interaction_not_allowed: true,
+            invalidate_first: false,
+            prompt_timeout: crate::PROMPT_TIMEOUT,
+        }
+    }
+}
+
+/// A fresh LAContext in the production configuration, read back and invalidated
+/// (no evaluation, no prompt).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LaConfigReadback {
+    pub reuse_duration: f64,
+    pub interaction_not_allowed: bool,
+    /// `localizedFallbackTitle` is nil: the system's "Use Password…" fallback stays.
+    pub fallback_title_is_default: bool,
+}
+
+#[cfg(target_os = "macos")]
+pub fn read_back_la_config() -> LaConfigReadback {
+    let (reuse_duration, interaction_not_allowed, fallback_title_is_default) =
+        crate::la::read_back();
+    LaConfigReadback {
+        reuse_duration,
+        interaction_not_allowed,
+        fallback_title_is_default,
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Confirmer {
+    /// Real LocalAuthentication and real clocks, configured by `opts`.
+    pub fn with_la(opts: LaOptions) -> Confirmer {
+        Confirmer::with_local_auth(
+            crate::la::LaTweaks {
+                interaction_not_allowed: opts.interaction_not_allowed,
+                invalidate_first: opts.invalidate_first,
+            },
+            opts.prompt_timeout,
+        )
+    }
+}

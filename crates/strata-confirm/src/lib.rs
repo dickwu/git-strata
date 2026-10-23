@@ -12,6 +12,8 @@ use strata_types::StrataError;
 
 mod clock;
 mod confirmer;
+#[cfg(target_os = "macos")]
+mod la;
 mod outcome;
 mod reason;
 mod registry;
