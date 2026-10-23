@@ -1,0 +1,25 @@
+[package]
+name = "strata-store"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "git-strata store: SQLite metadata and the BLAKE3 content-addressed blob store"
+
+[features]
+default = []
+# Test seams (store.md §3, §8). Also turns on the apfs seams, so tests can
+# swap directories between two apfs syscalls.
+test-seams = ["strata-apfs/test-seams"]
+
+[dependencies]
+strata-types = { path = "../strata-types" }
+strata-apfs = { path = "../strata-apfs" }
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+blake3 = { version = "1", features = ["mmap", "rayon"] }
+libc = "0.2.191"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+strata-store = { path = ".", features = ["test-seams"] }
