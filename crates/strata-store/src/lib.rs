@@ -28,6 +28,8 @@ mod retire;
 mod schema;
 mod seams;
 mod sessions;
+#[cfg(feature = "test-seams")]
+mod vfs;
 mod txn;
 
 #[cfg(feature = "test-seams")]
@@ -104,7 +106,14 @@ impl Store {
     }
 
     pub fn sync_counts(&self) -> SyncCounts {
-        self.seams.counts()
+        let mut c = self.seams.counts();
+        let db = self.db.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(path) = db.path() {
+            let v = vfs::counters(path);
+            c.wal_full = v.wal_full.load(Ordering::SeqCst);
+            c.wal_normal = v.wal_normal.load(Ordering::SeqCst);
+        }
+        c
     }
 
     /// Arm a seam for the next `Store::open` on this thread. Needed for

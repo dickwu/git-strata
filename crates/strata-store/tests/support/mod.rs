@@ -14,6 +14,8 @@ use strata_store::Store;
 use strata_types::{Code, StrataError};
 use tempfile::TempDir;
 
+pub mod world;
+
 pub const CHILD_ENV: &str = "STRATA_STORE_TEST_CHILD";
 
 /// A temp dir on the system (APFS) volume with a not-yet-existing store

@@ -59,10 +59,19 @@ impl Store {
             }
         };
         self.seams.pause_if(&Seam::PauseBeforeCommit);
-        if self.seams.hit(&Seam::CommitSyncFails) {
-            return Err(self.commit_failed(&db, op, "injected: the WAL sync at COMMIT failed".into()));
+        // CommitSyncFails: the instrumented VFS fails the next WAL xSync.
+        #[cfg(feature = "test-seams")]
+        let fail = self.seams.hit(&Seam::CommitSyncFails).then(|| {
+            let c = crate::vfs::counters(db.path().unwrap_or_default());
+            c.fail_next.store(true, Ordering::SeqCst);
+            c
+        });
+        let res = db.execute_batch("COMMIT");
+        #[cfg(feature = "test-seams")]
+        if let Some(c) = fail {
+            c.fail_next.store(false, Ordering::SeqCst);
         }
-        match db.execute_batch("COMMIT") {
+        match res {
             Ok(()) => Ok(v),
             Err(e) => {
                 let definite = matches!(

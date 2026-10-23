@@ -276,8 +276,22 @@ fn quick_check_on(c: &Connection) -> Result<()> {
     Err(err(Code::Corrupt, "SQLite quick_check found damage", json!({ "reason": "sqlite", "messages": first })))
 }
 
+/// Open one store connection. Under `test-seams` every connection goes
+/// through the instrumented VFS (vfs.rs) so tests can count and fail syncs.
+pub(crate) fn open_conn(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connection> {
+    #[cfg(feature = "test-seams")]
+    {
+        crate::vfs::ensure_registered();
+        Connection::open_with_flags_and_vfs(path, flags, crate::vfs::NAME)
+    }
+    #[cfg(not(feature = "test-seams"))]
+    {
+        Connection::open_with_flags(path, flags)
+    }
+}
+
 fn open_reader_conn(db: &Path) -> Result<Connection> {
-    let c = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    let c = open_conn(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
         .map_err(|e| sql(e, "open", NOT_WRITTEN))?;
     pin_reader(&c, "open")?;
     Ok(c)
@@ -580,7 +594,7 @@ fn create(root: &Path, anc: &Path) -> Result<Store> {
     // 8. temp db
     let tdb = tmp.join(format!("init-{}.db", hex32()));
     {
-        let c = Connection::open_with_flags(
+        let c = open_conn(
             &tdb,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
@@ -627,7 +641,7 @@ fn open_existing(root: &Path, lock: Option<File>) -> Result<Store> {
     let real_root = fs::canonicalize(root).map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
     let rstore = real_root.join("store");
     let rdb = rstore.join("store.db");
-    let c = Connection::open_with_flags(&rdb, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    let c = open_conn(&rdb, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
         .map_err(|e| sql(e, "open", NOT_WRITTEN))?;
     defensive(&c, "open")?;
     c.busy_timeout(Duration::ZERO).map_err(|e| sql(e, "open", NOT_WRITTEN))?;

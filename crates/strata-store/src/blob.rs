@@ -16,7 +16,7 @@ use serde_json::json;
 use strata_apfs::{CloneKind, FileKind, FileMeta, IoSide};
 use strata_types::{BlobId, Code, RepoPath, StrataError};
 
-use crate::errors::{NOT_WRITTEN, PARTIAL, annotate, err, io, read_only_handle, sql_read, with};
+use crate::errors::{NOT_WRITTEN, PARTIAL, annotate, err, io, sql_read, with};
 use crate::open::hex32;
 use crate::seams::Seam;
 use crate::{Result, Store};
@@ -189,9 +189,7 @@ impl Store {
 
     /// Store `src`'s current content (§5.3).
     pub fn put_blob(&self, src: &Path) -> Result<BlobId> {
-        if self.read_only {
-            return Err(read_only_handle());
-        }
+        self.writable()?;
         let _gate = self.gate_shared();
         let (tmp, ()) = self.fresh_tmp(|tmp| strata_apfs::clone_file(src, tmp))?;
         self.seams.pause_if(&Seam::PauseInPut);
@@ -207,9 +205,7 @@ impl Store {
     /// Capture `src_root/src` without following a symlink at any level
     /// (§5.3, addendum 8).
     pub fn put_blob_rooted(&self, src_root: &Path, src: &RepoPath) -> Result<BlobId> {
-        if self.read_only {
-            return Err(read_only_handle());
-        }
+        self.writable()?;
         let _gate = self.gate_shared();
         let attrs = strata_apfs::attrs_of(src_root, src)?;
         let shown = src_root.join(src.as_str());
@@ -243,9 +239,7 @@ impl Store {
 
     /// Store `bytes` (§5.3 step 10).
     pub fn put_bytes(&self, bytes: &[u8]) -> Result<BlobId> {
-        if self.read_only {
-            return Err(read_only_handle());
-        }
+        self.writable()?;
         let _gate = self.gate_shared();
         self.put_bytes_locked(bytes)
     }

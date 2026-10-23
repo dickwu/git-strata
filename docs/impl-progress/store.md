@@ -12,7 +12,8 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 | 4 base generations with their manifests | done | b633b29 |
 | 5 sessions, workspaces, move intents and retire_dir | done | d692877 |
 | 6 atomic checkpoint records with store-assigned ids | done | c06f7e2 |
-| 7 publish records and ref audit | done | (see git log) |
+| 7 publish records and ref audit | done | 832866c |
+| 8 busy, reader isolation, crash durability and poisoning | done | (see git log) |
 
 ## Ambiguity decisions
 
@@ -205,3 +206,28 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 - Task 7: `publish_record` rebuilds batches from `publish_items` ordered by
   `(batch, item)`; gaps, a batch whose items disagree on
   session/repo/checkpoint, or a publish with no items are `Corrupt{bad_row}`.
+- Task 8: the instrumented VFS (`src/vfs.rs`, test-seams only) is a shim
+  `strata-instr` over the default `unix` VFS; under test-seams every store
+  connection (writer, readers, init temp db) opens through it. Counters are
+  per database, keyed by the main db's full path as SQLite reports it
+  (`Connection::path()` of the writer), so `sync_counts()` reports only this
+  store's WAL syncs even with several stores in one test process.
+  `Seam::CommitSyncFails` sets a fail flag that makes the next WAL `xSync`
+  return `SQLITE_IOERR_FSYNC`; it is armed just before `COMMIT` and
+  cleared right after, so a real SQLite commit error drives the
+  `uncertain` + poison path (no faked error).
+- Task 8: "every write function" includes the blob puts: `put_blob`,
+  `put_blob_rooted` and `put_bytes` check `writable()` and refuse with
+  `Unknown{reason:"poisoned"}` once the writer is poisoned, like the
+  SQLite writes. Reads (including `get`/`read_blob`/`verify_blob`) work.
+- Task 8: COMMIT errors that are constraint/busy/locked are `not_written`
+  (SQLite keeps the transaction open; we roll back); any other COMMIT error
+  is `uncertain` and poisons. After reopen the uncertain checkpoint may or
+  may not be present; the test accepts either and checks the replay yields
+  exactly one row for the tool call.
+- Task 8: child-process helpers re-exec the test binary with
+  `STRATA_STORE_TEST_CHILD=1`; children write marker lines on raw stdout
+  preceded by a newline and the parent matches the marker anywhere in a
+  line (libtest prints `test name ... ` without a newline first). A
+  `ChildProc` kills its child on drop so a failing parent never leaves a
+  lock holder behind.
