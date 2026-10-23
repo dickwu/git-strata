@@ -96,10 +96,18 @@ impl World {
 
     /// `setup` fills the main checkout before the base commit.
     pub fn with(setup: impl FnOnce(&Path)) -> World {
-        let dir = tempfile::Builder::new()
-            .prefix("strata-overlay-")
-            .tempdir()
-            .expect("tempdir");
+        World::with_in(None, setup)
+    }
+
+    /// [`World::with`] with the temporary directory under `parent` (a disk image).
+    pub fn with_in(parent: Option<&Path>, setup: impl FnOnce(&Path)) -> World {
+        let mut b = tempfile::Builder::new();
+        b.prefix("strata-overlay-");
+        let dir = match parent {
+            Some(p) => b.tempdir_in(p),
+            None => b.tempdir(),
+        }
+        .expect("tempdir");
         let tmp = fs::canonicalize(dir.path()).unwrap();
         let home = tmp.join("home");
         let xdg = home.join(".config");

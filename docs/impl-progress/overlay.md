@@ -8,8 +8,8 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 |---|---|---|
 | 1 overlay shape rules and pairing | done | 195a6da |
 | 2 .lww rules in the LayerFS glob dialect | done | 7b18fe7 |
-| 3 base manifests and race-safe reads | done | (this commit) |
-| 4 membership, classification and the cold scan | todo | |
+| 3 base manifests and race-safe reads | done | d1fd21a |
+| 4 membership, classification and the cold scan | done | (this commit) |
 | 5 deterministic rename pairing | todo | |
 | 6 dirty set and incremental scans | todo | |
 | 7 checkpoints that store only what changed | todo | |
@@ -65,3 +65,22 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 - Task 3: `build_manifest` hashes in parallel (rayon); size is the number of
   bytes hashed. A FIFO/socket/device under an excluded dir is never seen
   (the walk does not enter X), so it is not Unsupported.
+- Task 4: `compute` rejects a tracker whose root is not `ws.root`
+  (InvalidInput, reason `wrong_tracker`), besides the spec's `wrong_repo`.
+- Task 4: a path that goes Gone mid-scan (§5.2) counts as absent this scan,
+  is recorded unstable and is rescanned next time; no warning is emitted.
+- Task 4: a FIFO/socket/device inside an ignored or embedded directory is
+  silent unless its path is a base (M) or tracked key; elsewhere it gets
+  SpecialFile. EmbeddedRepo is warned only when the parent is not already
+  restricted. The embedded check (`d/.git` exists) runs before
+  `is_ignored`, so an ignored embedded repo is still not entered.
+- Task 4: stats: `dirs_listed` = directories walked + the start;
+  `entries_seen` = entries the filter kept.
+- Task 4: the FIFO test bounds the scan at 10 s rather than asserting a 1 s
+  timing, since §7 asserts workload, never timing.
+- Task 4: the case-sensitive-volume half of "excluded paths follow disk
+  identity" is a separate #[ignore] test (needs `hdiutil attach` of a
+  Case-sensitive APFS image; from this agent shell attach fails with
+  "Permission denied", so it is for a human to run).
+- Task 4: no rename pairing yet, so a case-only rename shows as Deleted +
+  new path until Task 5 (`rename.rs`).

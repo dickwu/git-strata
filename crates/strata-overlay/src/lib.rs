@@ -6,6 +6,8 @@
 //! strata-store only.
 
 // Interim: helpers the scan and restore (tasks 4-10) use.
+mod classify;
+mod compute;
 #[allow(dead_code)]
 mod context;
 #[allow(dead_code)]
@@ -15,10 +17,13 @@ mod hash;
 mod lww;
 mod manifest;
 mod overlay;
+mod scan;
+mod tracker;
 
 use serde::{Deserialize, Serialize};
 use strata_types::{RepoPath, StrataError};
 
+pub use compute::{Scan, compute, reconcile_full};
 pub use context::{Base, WorkspaceRef};
 #[cfg(feature = "test-seams")]
 pub use fault::{OverlayFault, inject_fault, release_fault, wait_fault};
@@ -27,6 +32,7 @@ pub use hash::{ReadProbe, read_candidate};
 pub use lww::{LwwRules, lww_matches};
 pub use manifest::build_manifest;
 pub use overlay::*;
+pub use tracker::Tracker;
 
 /// types.md §8 `Result<T>`.
 pub type Result<T> = std::result::Result<T, StrataError>;

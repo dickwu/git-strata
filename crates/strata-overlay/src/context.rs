@@ -61,7 +61,7 @@ impl Fold {
 
 /// X1-X2 of §5.1: `.git` at the root, the deps dirs and the seed caches,
 /// matched with the volume's fold (X3, the seed files, lives in the tracker).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Excluded {
     fold: Fold,
     keys: Vec<String>,
