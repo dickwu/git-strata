@@ -1,6 +1,8 @@
 //! Task 9: FSEvents watcher (§5.7).
 
 mod common;
+#[path = "watch_support/canary.rs"]
+mod canary;
 
 use std::collections::HashSet;
 use std::fs;
@@ -94,9 +96,12 @@ fn changed_has(seen: &[WatchEvent], p: &Path) -> bool {
 /// Run `op`, then wait up to 5 s for a `Changed` naming every path.
 fn step(rec: &mut Rec, paths: &[&Path], op: impl FnOnce()) {
     let m = rec.mark();
+    let since = Instant::now();
     op();
     let ok = rec.wait(ARRIVE, |s| paths.iter().all(|p| changed_has(&s[m..], p)));
-    assert!(ok, "no Changed for {paths:?}; got {:?}", &rec.seen[m..]);
+    if !ok {
+        canary::starved_or_fail(since, format!("no Changed for {paths:?}; got {:?}", &rec.seen[m..]));
+    }
 }
 
 fn send_to(tx: Sender<WatchEvent>) -> impl Fn(WatchEvent) + Send + 'static {
@@ -152,6 +157,10 @@ fn mkroot(t: &Tmp, name: &str) -> PathBuf {
 
 #[test]
 fn watcher_reports_file_and_directory_changes() {
+    canary::run("watcher_reports_file_and_directory_changes", watcher_reports_file_and_directory_changes_body);
+}
+
+fn watcher_reports_file_and_directory_changes_body() {
     let _serial = serial();
     let t = Tmp::new();
     let root = mkroot(&t, "w");
@@ -174,7 +183,12 @@ fn watcher_reports_file_and_directory_changes() {
     step(&mut rec, &[&child], || fs::write(&child, b"c").unwrap());
     let m = rec.mark();
     fs::rename(&d, &e).unwrap();
-    assert!(rec.wait(ARRIVE, |s| changed_has(&s[m..], &d) && changed_has(&s[m..], &e)), "{:?}", &rec.seen[m..]);
+    {
+        let since = Instant::now();
+        if !rec.wait(ARRIVE, |s| changed_has(&s[m..], &d) && changed_has(&s[m..], &e)) {
+            canary::starved_or_fail(since, format!("{:?}", &rec.seen[m..]));
+        }
+    }
     thread::sleep(Duration::from_millis(500));
     rec.drain();
     let kids: Vec<_> = rec.all_paths_since(m).into_iter().filter(|p| strictly_under(p, &d) || strictly_under(p, &e)).collect();
@@ -187,7 +201,12 @@ fn watcher_reports_file_and_directory_changes() {
     let c = root.join("c");
     let m = rec.mark();
     strata_apfs::clone_tree(&src, &c).unwrap();
-    assert!(rec.wait(ARRIVE, |s| changed_has(&s[m..], &c)), "{:?}", &rec.seen[m..]);
+    {
+        let since = Instant::now();
+        if !rec.wait(ARRIVE, |s| changed_has(&s[m..], &c)) {
+            canary::starved_or_fail(since, format!("{:?}", &rec.seen[m..]));
+        }
+    }
     thread::sleep(Duration::from_millis(500));
     rec.drain();
     let kids: Vec<_> = rec.all_paths_since(m).into_iter().filter(|p| strictly_under(p, &c)).collect();
@@ -203,6 +222,10 @@ fn watcher_reports_file_and_directory_changes() {
 
 #[test]
 fn watcher_paths_use_the_callers_root_and_disk_spelling() {
+    canary::run("watcher_paths_use_the_callers_root_and_disk_spelling", watcher_paths_use_the_callers_root_and_disk_spelling_body);
+}
+
+fn watcher_paths_use_the_callers_root_and_disk_spelling_body() {
     let _serial = serial();
     let t = Tmp::new();
     let real = mkroot(&t, "real");
@@ -217,7 +240,12 @@ fn watcher_paths_use_the_callers_root_and_disk_spelling() {
     if insensitive {
         let m = rec.mark();
         fs::write(link.join("foo.txt"), b"2").unwrap();
-        assert!(rec.wait(ARRIVE, |s| changed_has(&s[m..], &upper)), "{:?}", &rec.seen[m..]);
+        {
+        let since = Instant::now();
+        if !rec.wait(ARRIVE, |s| changed_has(&s[m..], &upper)) {
+            canary::starved_or_fail(since, format!("{:?}", &rec.seen[m..]));
+        }
+    }
         rec.drain();
         assert!(!rec.changed_since(m).contains(&link.join("foo.txt")), "event used the caller's spelling, not the disk's");
     }
@@ -227,7 +255,12 @@ fn watcher_paths_use_the_callers_root_and_disk_spelling() {
     step(&mut rec, &[&nfd], || fs::write(&nfd, b"n").unwrap());
     let m = rec.mark();
     fs::write(link.join("caf\u{e9}"), b"m").unwrap();
-    assert!(rec.wait(ARRIVE, |s| changed_has(&s[m..], &nfd)), "{:?}", &rec.seen[m..]);
+    {
+        let since = Instant::now();
+        if !rec.wait(ARRIVE, |s| changed_has(&s[m..], &nfd)) {
+            canary::starved_or_fail(since, format!("{:?}", &rec.seen[m..]));
+        }
+    }
 
     rec.drain();
     for p in rec.all_paths_since(0) {
@@ -238,6 +271,10 @@ fn watcher_paths_use_the_callers_root_and_disk_spelling() {
 
 #[test]
 fn watcher_excludes_configured_dirs() {
+    canary::run("watcher_excludes_configured_dirs", watcher_excludes_configured_dirs_body);
+}
+
+fn watcher_excludes_configured_dirs_body() {
     let _serial = serial();
     let t = Tmp::new();
     let root = mkroot(&t, "w");
@@ -253,7 +290,12 @@ fn watcher_excludes_configured_dirs() {
     fs::create_dir_all(root.join("src")).unwrap();
     let sx = root.join("src/x");
     fs::write(&sx, b"x").unwrap();
-    assert!(rec.wait(ARRIVE, |s| changed_has(s, &y) && changed_has(s, &sx)), "{:?}", rec.seen);
+    {
+        let since = Instant::now();
+        if !rec.wait(ARRIVE, |s| changed_has(s, &y) && changed_has(s, &sx)) {
+            canary::starved_or_fail(since, format!("{:?}", rec.seen));
+        }
+    }
     thread::sleep(Duration::from_secs(1));
     rec.drain();
     let nm = root.join("node_modules");
@@ -270,7 +312,12 @@ fn watcher_excludes_configured_dirs() {
         fs::write(root2.join("Node_Modules/z"), b"z").unwrap();
         let s2 = root2.join("sentinel");
         fs::write(&s2, b"s").unwrap();
-        assert!(rec2.wait(ARRIVE, |s| changed_has(s, &s2)), "{:?}", rec2.seen);
+        {
+        let since = Instant::now();
+        if !rec2.wait(ARRIVE, |s| changed_has(s, &s2)) {
+            canary::starved_or_fail(since, format!("{:?}", rec2.seen));
+        }
+    }
         thread::sleep(Duration::from_secs(1));
         rec2.drain();
         let nm2 = root2.join("Node_Modules");
@@ -281,6 +328,10 @@ fn watcher_excludes_configured_dirs() {
 
 #[test]
 fn dropping_the_watcher_stops_callbacks() {
+    canary::run("dropping_the_watcher_stops_callbacks", dropping_the_watcher_stops_callbacks_body);
+}
+
+fn dropping_the_watcher_stops_callbacks_body() {
     let _serial = serial();
     let t = Tmp::new();
 
@@ -299,7 +350,12 @@ fn dropping_the_watcher_stops_callbacks() {
         })
         .unwrap()
     };
-    assert!(poke_until(&root, ARRIVE, || calls.load(Ordering::SeqCst) > 0));
+    {
+        let since = Instant::now();
+        if !poke_until(&root, ARRIVE, || calls.load(Ordering::SeqCst) > 0) {
+            canary::starved_or_fail(since, "poke_until(&root, ARRIVE, || calls.load(Ordering::SeqCst) > 0) never became true".to_string());
+        }
+    }
     drop(w);
     assert_eq!(drops.load(Ordering::SeqCst), 1, "closure not dropped by drop(Watcher)");
     while rx.try_recv().is_ok() {}
@@ -326,7 +382,12 @@ fn dropping_the_watcher_stops_callbacks() {
         })
         .unwrap()
     };
-    assert!(poke_until(&root, ARRIVE, || started.load(Ordering::SeqCst)));
+    {
+        let since = Instant::now();
+        if !poke_until(&root, ARRIVE, || started.load(Ordering::SeqCst)) {
+            canary::starved_or_fail(since, "poke_until(&root, ARRIVE, || started.load(Ordering::SeqCst)) never became true".to_string());
+        }
+    }
     drop(w);
     assert!(finished.load(Ordering::SeqCst), "drop returned while the callback was still running");
 
@@ -341,7 +402,12 @@ fn dropping_the_watcher_stops_callbacks() {
     })
     .unwrap();
     fs::write(root.join("boom"), b"x").unwrap();
-    assert!(rec.wait(ARRIVE, |s| s.contains(&WatchEvent::Dropped)), "{:?}", rec.seen);
+    {
+        let since = Instant::now();
+        if !rec.wait(ARRIVE, |s| s.contains(&WatchEvent::Dropped)) {
+            canary::starved_or_fail(since, format!("{:?}", rec.seen));
+        }
+    }
     let ok = root.join("ok");
     step(&mut rec, &[&ok], || fs::write(&ok, b"x").unwrap());
     drop(w);
@@ -349,6 +415,10 @@ fn dropping_the_watcher_stops_callbacks() {
 
 #[test]
 fn watcher_reports_a_renamed_root_as_dropped() {
+    canary::run("watcher_reports_a_renamed_root_as_dropped", watcher_reports_a_renamed_root_as_dropped_body);
+}
+
+fn watcher_reports_a_renamed_root_as_dropped_body() {
     let _serial = serial();
     let t = Tmp::new();
     let root = mkroot(&t, "r");
@@ -357,7 +427,12 @@ fn watcher_reports_a_renamed_root_as_dropped() {
     let f = root.join("f");
     step(&mut rec, &[&f], || fs::write(&f, b"x").unwrap());
     fs::rename(&root, t.join("r2")).unwrap();
-    assert!(rec.wait(ARRIVE, |s| s.contains(&WatchEvent::Dropped)), "{:?}", rec.seen);
+    {
+        let since = Instant::now();
+        if !rec.wait(ARRIVE, |s| s.contains(&WatchEvent::Dropped)) {
+            canary::starved_or_fail(since, format!("{:?}", rec.seen));
+        }
+    }
 
     // The old stream does not follow the new directory at the old path.
     fs::create_dir(&root).unwrap();
@@ -385,6 +460,10 @@ struct Cov {
 
 #[test]
 fn watcher_reports_must_rescan() {
+    canary::run("watcher_reports_must_rescan", watcher_reports_must_rescan_body);
+}
+
+fn watcher_reports_must_rescan_body() {
     let _serial = serial();
     let mut triggered = false;
     for round in 0..3 {
@@ -414,7 +493,12 @@ fn watcher_reports_must_rescan() {
             .unwrap()
         };
         // Get the callback stuck first.
-        assert!(poke_until(&root, ARRIVE, || entered.load(Ordering::SeqCst)));
+        {
+        let since = Instant::now();
+        if !poke_until(&root, ARRIVE, || entered.load(Ordering::SeqCst)) {
+            canary::starved_or_fail(since, "poke_until(&root, ARRIVE, || entered.load(Ordering::SeqCst)) never became true".to_string());
+        }
+    }
         let files: Vec<PathBuf> = (0..4)
             .map(|th| {
                 let root = root.clone();
@@ -428,7 +512,7 @@ fn watcher_reports_must_rescan() {
                     v
                 })
             })
-            .flat_map(|h| h.join().unwrap())
+            .flat_map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
             .collect();
         drop(gate_tx);
         let covered = |c: &Cov, p: &Path| {
@@ -437,6 +521,7 @@ fn watcher_reports_must_rescan() {
                 || p.ancestors().skip(1).any(|a| a.starts_with(&root) && c.changed.contains(a))
                 || c.rescans.iter().any(|r| p.starts_with(r))
         };
+        let since = Instant::now();
         let all = wait_until(Duration::from_secs(30), || {
             let c = cov.lock().unwrap();
             files.iter().all(|p| covered(&c, p))
@@ -446,17 +531,21 @@ fn watcher_reports_must_rescan() {
             (c.dropped, c.rescans.len(), c.changed.len())
         };
         eprintln!("round {round}: dropped={dropped} rescans={rescans} changed={nchanged} all_covered={all}");
-        assert!(all, "round {round}: some created files were never covered");
+        if !all {
+            canary::starved_or_fail(since, format!("round {round}: some created files were never covered"));
+        }
         if dropped > 0 || rescans > 0 {
             triggered = true;
             // Still usable after a drop/rescan.
             w.flush();
             let after = root.join("after");
             fs::write(&after, b"x").unwrap();
-            assert!(
-                wait_until(ARRIVE, || cov.lock().unwrap().changed.contains(&after)),
-                "watcher dead after Dropped/MustRescan"
-            );
+            {
+        let since = Instant::now();
+        if !wait_until(ARRIVE, || cov.lock().unwrap().changed.contains(&after)) {
+            canary::starved_or_fail(since, format!("watcher dead after Dropped/MustRescan"));
+        }
+    }
             break;
         }
     }
@@ -465,6 +554,10 @@ fn watcher_reports_must_rescan() {
 
 #[test]
 fn flush_drains_the_callback_queue() {
+    canary::run("flush_drains_the_callback_queue", flush_drains_the_callback_queue_body);
+}
+
+fn flush_drains_the_callback_queue_body() {
     let _serial = serial();
     let t = Tmp::new();
     // (a) flush waits for the callback in flight.
@@ -486,7 +579,12 @@ fn flush_drains_the_callback_queue() {
             .unwrap(),
         )
     };
-    assert!(poke_until(&root, ARRIVE, || started.load(Ordering::SeqCst) > 0));
+    {
+        let since = Instant::now();
+        if !poke_until(&root, ARRIVE, || started.load(Ordering::SeqCst) > 0) {
+            canary::starved_or_fail(since, "poke_until(&root, ARRIVE, || started.load(Ordering::SeqCst) > 0) never became true".to_string());
+        }
+    }
     let n = started.load(Ordering::SeqCst);
     let flushed = Arc::new(AtomicBool::new(false));
     let h = {
@@ -499,7 +597,7 @@ fn flush_drains_the_callback_queue() {
     thread::sleep(Duration::from_millis(200));
     assert!(!flushed.load(Ordering::SeqCst), "flush returned while a callback was still running");
     drop(gate_tx);
-    h.join().unwrap();
+    h.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
     assert!(finished.load(Ordering::SeqCst) >= n);
 
     // (a') quiet: after flush nothing is in flight.
@@ -535,7 +633,7 @@ fn flush_drains_the_callback_queue() {
         })
         .collect();
     for h in hs {
-        h.join().unwrap();
+        h.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
     }
 
     // (d) Send + Sync.
@@ -571,7 +669,12 @@ fn reentry_drop_round() -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
     };
     *slot.lock().unwrap() = Some(Arc::new(Holder(w)));
     drop(slot);
-    assert!(poke_until(&root, Duration::from_secs(5), || done.load(Ordering::SeqCst)), "callback never ran");
+    {
+        let since = Instant::now();
+        if !poke_until(&root, Duration::from_secs(5), || done.load(Ordering::SeqCst)) {
+            canary::starved_or_fail(since, format!("callback never ran"));
+        }
+    }
     assert!(wait_until(Duration::from_secs(5), || drops.load(Ordering::SeqCst) == 1), "state never freed");
     (calls, drops)
 }
@@ -598,7 +701,12 @@ fn reentry_flush_own() {
         )
     };
     *slot.lock().unwrap() = Arc::downgrade(&w);
-    assert!(poke_until(&root, Duration::from_secs(5), || ran.load(Ordering::SeqCst)));
+    {
+        let since = Instant::now();
+        if !poke_until(&root, Duration::from_secs(5), || ran.load(Ordering::SeqCst)) {
+            canary::starved_or_fail(since, "poke_until(&root, Duration::from_secs(5), || ran.load(Ordering::SeqCst)) never became true".to_string());
+        }
+    }
     thread::sleep(Duration::from_millis(500));
     rec.drain();
     let dropped = rec.seen.contains(&WatchEvent::Dropped);
@@ -650,9 +758,19 @@ fn reentry_cross() {
         })
         .unwrap()
     };
-    assert!(poke_until(&rb, Duration::from_secs(5), || b_started.load(Ordering::SeqCst) > 0), "B never called");
+    {
+        let since = Instant::now();
+        if !poke_until(&rb, Duration::from_secs(5), || b_started.load(Ordering::SeqCst) > 0) {
+            canary::starved_or_fail(since, format!("B never called"));
+        }
+    }
     go.store(true, Ordering::SeqCst);
-    assert!(poke_until(&ra, Duration::from_secs(5), || a_done.load(Ordering::SeqCst)), "A never called");
+    {
+        let since = Instant::now();
+        if !poke_until(&ra, Duration::from_secs(5), || a_done.load(Ordering::SeqCst)) {
+            canary::starved_or_fail(since, format!("A never called"));
+        }
+    }
     assert!(ok.load(Ordering::SeqCst), "B's callback was not running when A flushed/dropped it");
     assert!(wait_until(Duration::from_secs(5), || b_drops.load(Ordering::SeqCst) == 1), "B's state never freed");
     drop(a);
@@ -661,6 +779,10 @@ fn reentry_cross() {
 #[test]
 #[ignore = "child process of watcher_reentry_from_the_callback_never_traps"]
 fn watcher_reentry_child() {
+    canary::run("watcher_reentry_child", watcher_reentry_child_body);
+}
+
+fn watcher_reentry_child_body() {
     // (a) 100 rounds of drop-self-in-callback, 50 at a time (each round
     // waits out one delivery latency, which after other test binaries'
     // churn has been ~2 s here).
@@ -668,7 +790,7 @@ fn watcher_reentry_child() {
     let mut results = Vec::new();
     for _ in 0..2 {
         let hs: Vec<_> = (0..50).map(|_| thread::spawn(reentry_drop_round)).collect();
-        results.extend(hs.into_iter().map(|h| h.join().unwrap()));
+        results.extend(hs.into_iter().map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p))));
     }
     thread::sleep(Duration::from_secs(1));
     for (calls, drops) in &results {
@@ -683,7 +805,7 @@ fn watcher_reentry_child() {
     for _ in 0..2 {
         let hs: Vec<_> = (0..10).map(|_| thread::spawn(reentry_cross)).collect();
         for h in hs {
-            h.join().unwrap();
+            h.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
         }
     }
     eprintln!("reentry-child: (c) done at {:?}", t0.elapsed());
@@ -692,6 +814,10 @@ fn watcher_reentry_child() {
 
 #[test]
 fn watcher_reentry_from_the_callback_never_traps() {
+    canary::run("watcher_reentry_from_the_callback_never_traps", watcher_reentry_from_the_callback_never_traps_body);
+}
+
+fn watcher_reentry_from_the_callback_never_traps_body() {
     let _serial = serial();
     let exe = std::env::current_exe().unwrap();
     let mut child = Command::new(exe)
@@ -721,12 +847,20 @@ fn watcher_reentry_from_the_callback_never_traps() {
     assert_ne!(status.code(), Some(133), "dispatch trap\n{stderr}");
     assert!(status.signal().is_none(), "child killed by signal {:?}\n{stderr}", status.signal());
     assert!(status.success(), "child failed: {status:?}\n{stdout}\n{stderr}");
+    if stdout.contains("SKIPPED watcher_reentry_child") {
+        let why = stderr.lines().find(|l| l.starts_with("SKIPPED")).unwrap_or("").to_string();
+        std::panic::panic_any(canary::Starved(format!("in the child process: {why}")));
+    }
     assert!(stdout.contains("reentry-child: 100 rounds"), "{stdout}\n{stderr}");
 }
 
 #[test]
 #[ignore = "measurement only: prints how often flush already covered a just-written file"]
 fn flush_is_not_a_fence() {
+    canary::run("flush_is_not_a_fence", flush_is_not_a_fence_body);
+}
+
+fn flush_is_not_a_fence_body() {
     let _serial = serial();
     let t = Tmp::new();
     let root = mkroot(&t, "w");
