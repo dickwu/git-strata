@@ -13,17 +13,27 @@ pub fn prompt_reason(action: &Action) -> String {
     // No wildcard arm on purpose: a new Action variant must get its own line on the prompt.
     match action {
         Action::PushDeploy { repo, branch } => {
-            format!("push {} to origin/{}", escape(repo.as_str()), escape(branch))
+            format!(
+                "push {} to origin/{}",
+                escape(repo.as_str()),
+                escape(branch)
+            )
         }
         Action::DepsApprove { proposal } => {
-            format!("approve dependency proposal {}", escape(&proposal.to_string()))
+            format!(
+                "approve dependency proposal {}",
+                escape(&proposal.to_string())
+            )
         }
         Action::RemoveDiscard { session } => format!(
             "discard the unpublished changes of session {} and remove it",
             escape(session.as_str())
         ),
         Action::ConfigRelax { repo } => {
-            format!("apply relaxed push settings for {}", escape(&repo.to_string()))
+            format!(
+                "apply relaxed push settings for {}",
+                escape(&repo.to_string())
+            )
         }
     }
 }

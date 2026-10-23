@@ -12,6 +12,7 @@ use strata_types::StrataError;
 
 mod clock;
 mod confirmer;
+mod outcome;
 mod reason;
 mod registry;
 

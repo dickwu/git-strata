@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use strata_confirm::seams::{FakeClock, PromptLog, ScriptedAuth, Verdict};
 use strata_confirm::{Confirmer, RECORD_RETENTION, prompt_reason};
-use strata_types::{Action, Code, ConfirmToken, ProposalId, RepoId, RepoName, SessionId, StrataError};
+use strata_types::{
+    Action, Code, ConfirmToken, ProposalId, RepoId, RepoName, SessionId, StrataError,
+};
 
 const SHORT: Duration = Duration::from_millis(50);
 
@@ -14,7 +16,11 @@ fn seamed(verdicts: Vec<Verdict>) -> (Confirmer, FakeClock, Arc<PromptLog>) {
     let auth = ScriptedAuth::new(true, Ok(()), verdicts);
     let log = auth.log();
     let clock = FakeClock::new();
-    (Confirmer::with_seams(auth, clock.clone(), SHORT, SHORT), clock, log)
+    (
+        Confirmer::with_seams(auth, clock.clone(), SHORT, SHORT),
+        clock,
+        log,
+    )
 }
 
 fn passes(n: usize) -> Vec<Verdict> {
@@ -75,7 +81,8 @@ fn require_pass_mints_a_registered_token() {
     assert_ne!(t1.nonce, t2.nonce);
 
     c.validate(&t1, &action).expect("first redeem");
-    c.validate(&t2, &action).expect("second token redeems on its own");
+    c.validate(&t2, &action)
+        .expect("second token redeems on its own");
     refused(c.validate(&t1, &action), "used");
     refused(c.validate(&t2, &action), "used");
 }
@@ -114,7 +121,9 @@ fn token_expires() {
     let t = c.require(action.clone()).unwrap();
     clock.advance(Duration::from_secs(30));
     let e = refused(c.validate(&t, &action), "expired");
-    let age = e.detail.as_ref().unwrap()["age_ms"].as_u64().expect("age_ms");
+    let age = e.detail.as_ref().unwrap()["age_ms"]
+        .as_u64()
+        .expect("age_ms");
     assert!(age >= 30_000, "age_ms = {age}");
 
     // System sleep: Instant does not move, CLOCK_MONOTONIC does.

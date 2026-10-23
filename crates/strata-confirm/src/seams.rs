@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::Confirmer;
 use crate::clock::{Clock, real_mono_ns};
-use crate::confirmer::{AuthContext, Authenticator, Reply, ReplyError, Thrown};
+use crate::confirmer::{AuthContext, Authenticator, GuiSession, Reply, ReplyError, Thrown};
 
 /// `LAErrorDomain`.
 pub const LA_ERROR_DOMAIN: &str = "com.apple.LocalAuthentication";
@@ -143,6 +143,16 @@ struct ScriptedCtx<'a> {
 }
 
 impl Authenticator for ScriptedAuth {
+    fn gui_session(&self) -> GuiSession {
+        self.log.with(|l| l.probes += 1);
+        if self.gui {
+            GuiSession::Graphic
+        } else {
+            // An ssh-like session: no sessionHasGraphicAccess (0x10) bit.
+            GuiSession::NoGraphic { attrs: 0x0020 }
+        }
+    }
+
     fn context(&self) -> Box<dyn AuthContext + '_> {
         Box::new(ScriptedCtx {
             auth: self,
@@ -153,6 +163,11 @@ impl Authenticator for ScriptedAuth {
 }
 
 impl AuthContext for ScriptedCtx<'_> {
+    fn preflight(&mut self) -> std::result::Result<(), isize> {
+        self.auth.log.with(|l| l.probes += 1);
+        self.auth.can_evaluate
+    }
+
     fn evaluate(
         &mut self,
         reason: &str,
@@ -243,7 +258,12 @@ impl Confirmer {
         prompt_timeout: Duration,
         cancel_grace: Duration,
     ) -> Confirmer {
-        Confirmer::build(Box::new(auth), Box::new(clock), prompt_timeout, cancel_grace)
+        Confirmer::build(
+            Box::new(auth),
+            Box::new(clock),
+            prompt_timeout,
+            cancel_grace,
+        )
     }
 
     /// Current number of records in the registry.

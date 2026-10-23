@@ -22,7 +22,10 @@ fn printable_ascii(s: &str) -> bool {
 
 #[test]
 fn prompt_reason_names_the_action() {
-    assert_eq!(prompt_reason(&push("tool", "main")), "push tool to origin/main");
+    assert_eq!(
+        prompt_reason(&push("tool", "main")),
+        "push tool to origin/main"
+    );
     assert_eq!(
         prompt_reason(&Action::DepsApprove {
             proposal: ProposalId::from(12i64)
