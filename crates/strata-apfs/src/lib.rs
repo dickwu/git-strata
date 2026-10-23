@@ -7,12 +7,14 @@
 
 use strata_types::StrataError;
 
+mod clone;
 #[allow(dead_code)]
 mod error;
 #[allow(dead_code)]
 mod sys;
 mod volume;
 
+pub use clone::{clone_file, clone_tree};
 pub use error::{IoSide, classify_io_error};
 pub use volume::{VolumeCaps, nearest_existing_ancestor, same_volume, volume_caps};
 
