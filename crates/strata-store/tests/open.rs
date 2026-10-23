@@ -291,13 +291,29 @@ fn second_writer_child() {
 #[test]
 fn read_only_open_refuses_every_write() {
     let env = env();
-    env.open().close().unwrap();
+    let w = env.open();
+    let id = w.put_bytes(b"readable").unwrap();
+    w.close().unwrap();
+    let src = env.dir.path().join("ro-src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("f"), b"would be new").unwrap();
     let r = Store::open_read_only(&env.root).unwrap();
     let before = snapshot(&env.root);
     assert!(r.is_read_only());
     // read functions work
     r.quick_check().unwrap();
-    // write functions are added task by task in tests/readonly.rs
+    assert_eq!(r.read_blob(&id, 100).unwrap(), b"readable");
+    r.verify_blob(&id).unwrap();
+    r.get_blob(&id, &src.join("out")).unwrap();
+    // write functions are refused, one block per task
+    let f = strata_types::RepoPath::try_from("f".to_string()).unwrap();
+    for e in [
+        r.put_blob(&src.join("f")).err().unwrap(),
+        r.put_blob_rooted(&src, &f).err().unwrap(),
+        r.put_bytes(b"would be new").err().unwrap(),
+    ] {
+        assert_reason(&e, Code::ReadOnly, "read_only_handle");
+    }
     assert_eq!(snapshot(&env.root), before);
     r.close().unwrap();
     // read-only close leaves the clean-shutdown marker alone

@@ -16,6 +16,7 @@ use strata_types::{
     ReleaseGroup, RepoName, RepoPath, SessionId, SessionManifest, StrataError, TreeOid,
 };
 
+mod blob;
 mod codec;
 mod errors;
 mod open;
