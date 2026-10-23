@@ -2,14 +2,14 @@
 
 **Crate**：`crates/strata-apfs` · **设计来源**：design.md §3（平台、symlink 陷阱、大小写）、§5（`apfs` 行）、§6.1（克隆）、§6.2（判变与监听）、§7（同卷）、§8（验收数字）、§9 不变量 5、6 · **矩阵**：layerfs-project-telemetry（3b）目标为 `apfs` 的 2 行，layerfs-workspace-layer（3c）3 行，layerfs-replaced（3d）1 行，layerfs-sdk-js（3e）1 行，tgrep-core（3f）18 行，共 25 行，以及理由点名 apfs 的 `—` 行 8 行、理由写"归类同上一行"的 1 行（§7 表后）
 
-apfs 是最底层的 crate，只管 macOS 文件系统的原语，不知道会话、基线、overlay 这些概念：克隆目录和文件，在根之下不跟随符号链接地读、写、改名与删除，用 `getattrlistbulk` 批量读属性（带 gen count），把 FSEvents 的信号翻译成提示，以及 APFS 的名字规则。其余模块的判变、对账和现场处理都建在这些原语的**契约**之上，所以本文把每个原语的失败方式和边界写得很细。本文按 module-rulings.md 的 "T4 apfs" 一节、增补 1 的 gen count 条目、增补 3 的 "Rooted destinations" 与 "Durability" 条目、增补 4 与 6 的 gc guards 和"改目录的父级要写权限"两条、增补 7 的折叠键与 Layering 行、增补 8（apfs 拥有根之下的一切文件系统操作）写成，并吸收了第 1 轮评审（task-4-review.md）的 4 条 Important 与 17 条 Minor。文中标"实测"的行为，都是 2026-10-22 在本机（macOS 27.0.1，Darwin 27.0.0，arm64）上用临时文件和 `hdiutil` 稀疏镜像（不需要 root）验证过的；计时用到的真实仓库只做了只读遍历，没有写。本模块的类型只在进程内传递（`Attrs` 进缓存，`WatchEvent` 进回调），不经 RPC 或 JSON，所以不 derive `Serialize`/`Deserialize`：types.md §2.2 的 serde 规则管 types.md 自己的类型，apfs 的进程内类型不适用 [我的决定，§9]。
+apfs 是最底层的 crate，只管 macOS 文件系统的原语，不知道会话、基线、overlay 这些概念：克隆目录和文件，在根之下不跟随符号链接地读、写、改名与删除，用 `getattrlistbulk` 批量读属性（带 gen count），把 FSEvents 的信号翻译成提示，以及 APFS 的名字规则。其余模块的判变、对账和现场处理都建在这些原语的**契约**之上，所以本文把每个原语的失败方式和边界写得很细。本文按 module-rulings.md 的 "T4 apfs" 一节、增补 1 的 gen count 条目、增补 3 的 "Rooted destinations" 与 "Durability" 条目、增补 4 与 6 的 gc guards 和"改目录的父级要写权限"两条、增补 7 的折叠键与 Layering 行、增补 8（apfs 拥有根之下的一切文件系统操作）写成，并吸收了第 1 轮评审（task-4-review.md）的 6 条 Important 与 17 条 Minor，以及第 2 轮的 9 条 Minor 和控制者随后的裁定（`CloneKind`、`make_removable`、`set_file_meta`（含目录的句柄）、`remove_tree_rooted` 返回报告而不是失败、共用的 inode 上不清标志、符号链接重建而不克隆、规范的根、挂载点上的 `rmdir`）。文中标"实测"的行为，都是 2026-10-22 在本机（macOS 27.0.1，Darwin 27.0.0，arm64）上用临时文件和 `hdiutil` 稀疏镜像（不需要 root）验证过的；计时用到的真实仓库只做了只读遍历，没有写。本模块的类型只在进程内传递（`Attrs` 进缓存，`WatchEvent` 进回调），不经 RPC 或 JSON，所以不 derive `Serialize`/`Deserialize`：types.md §2.2 的 serde 规则管 types.md 自己的类型，apfs 的进程内类型不适用 [我的决定，§9]。
 
 ## 1. 职责与边界
 
 **负责**（design §5 的 `apfs` 行，加上裁定 T4 与增补 3 的两条）：
 
 1. **克隆**（design §6.1、§7）：`clone_tree` 克隆目录树，`clone_file` 克隆文件或符号链接，都是 `clonefile(2)`，同卷检查在先，从不退化成复制（§5.2、§5.3）。
-2. **根之下的一切文件系统操作，都不跟随符号链接**（裁定 T4、增补 3、增补 8）：调用方对工作区、staging 与 generation 树的读、写、改名、删除都经这一层，自己不再写 `*at` 调用。读：`open_root`（根自己的句柄）、`open_rooted`、`open_rooted_file`、`clone_from_rooted`（从根之下克隆出去，源这一侧同样钉住）；写：目的地变体 `clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`；改名：`rename_rooted`（`Excl`、`Swap`）；删除：`remove_rooted`（一个条目）、`remove_tree_rooted`（一整棵树）；另有 `full_fsync`（`F_FULLFSYNC` 的包装）和 `classify_io_error`（errno 到 `Code` 的公开归类）（§5.4、§6）。
+2. **根之下的一切文件系统操作，都不跟随符号链接**（裁定 T4、增补 3、增补 8）：调用方对工作区、staging 与 generation 树的读、写、改名、删除都经这一层，自己不再写 `*at` 调用。读：`open_root`（根自己的句柄）、`open_rooted`、`open_rooted_file`、`clone_from_rooted`（从根之下克隆出去，源这一侧同样钉住，调用方要说明源的种类 `CloneKind`）；写：目的地变体 `clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`；改名：`rename_rooted`（`Excl`、`Swap`）；删除：`remove_rooted`（一个条目）、`remove_tree_rooted`（一整棵树，或任何一个条目：返回报告，不是失败）；另有 `make_removable`（调用方在要改名或删除封存的目录之前显式调用：先清标志、再补属主写位）、`set_file_meta`（经句柄改一个文件或目录的标志、mode、mtime；非目录只在不共用的 inode 上）、`full_fsync`（`F_FULLFSYNC` 的包装）和 `classify_io_error`（errno 到 `Code` 的公开归类）（§5.4、§6）。
 3. **遍历与属性**（design §6.2、§8）：`walk` / `walk_with` 用 `getattrlistbulk` 前序遍历，`attrs_of` 点查，`Attrs` 带纳秒时间、inode 和 gen count，`Attrs::unchanged_since` 把"没被写过"的判法固定下来，`Attrs::last_changed` 给 gc 判年龄用（增补 4），`list_dir` 是单目录列表（§4.2、§5.5、§5.6）。
 4. **监听**（design §6.2）：`watch` 把 FSEvents 的原始信号翻译成 `WatchEvent`：可能脏的路径、该重扫的子树、事件丢了。它只是提示，从不声称完整（裁定 T4，§5.7）。`Watcher::flush()` 是 `FSEventStreamFlushSync` 加对回调队列的排空，实测不是屏障，本文写明它保证什么、不保证什么（增补 8 "Event flush, amended"，§4.2 F、§5.7）。
 5. **卷与名字规则**（design §3 的大小写行、§7）：`same_volume`、`volume_caps` 回答"clonefile 在这两处之间行不行、这个卷分不分大小写"；`nearest_existing_ancestor` 是 config.md §4.3 "最近的已存在上级"的那一条规则；`case_fold_eq` 与 `case_fold_key` 是 APFS 大小写不敏感卷上的名字同一性（§5.1、§5.8）。
@@ -21,13 +21,13 @@ apfs 是最底层的 crate，只管 macOS 文件系统的原语，不知道会�
 | 哪些目录和路径不进遍历（`.git`、`deps_dirs`、`seed_caches`、ignore 规则）；遍历结果怎样变成 overlay 条目；改名配对、墓碑 | overlay（`filter` 闭包由调用方给，apfs 只负责剪枝） |
 | 什么时候相信缓存、什么时候读内容算哈希；全量对账的节奏；监听丢失后怎样退化 | overlay（脏集合）与 daemon（调度）；apfs 只给 `Attrs::unchanged_since` 这一条判法和 `WatchEvent` |
 | 调用 `same_volume`、`volume_caps` 做预检的时机（`Store::open`、`new`），以及预检失败怎样上报 | store、session；apfs 只回答问题 |
-| 内容哈希、blob 的 xattr 剥离、`chflags`、`fsync` / `F_FULLFSYNC` 什么时候调、对哪些句柄调 | store（blob 规整见 store.md）与各调用方；apfs 不做持久化，克隆、改名、删除之后的落盘归调用方。apfs 只提供 `full_fsync` 这个包装，以及取目录句柄的 `open_root`、`open_rooted`（增补 3 "Durability"） |
-| 什么时候删、删什么（gc 的 1 小时年龄、意图行点名的路径、`retire_dir` 先挪走再删）；`RemoveReport.stuck` 里剩下的条目怎么办（重试、留着、上报 `Unknown`） | store、session、deps 决定；apfs 只提供删除的原语 `remove_rooted`、`remove_tree_rooted`（增补 8），不知道哪些东西该删。**调用方不自己写递归删除**：非空的树经 `store::retire_dir` 挪走，再由 `remove_tree_rooted` 删；调用方只可以 `remove_rooted(.., RemoveKind::EmptyDir)` 删自己建的空目录（增补 7 "Empty directories"、增补 8） |
-| 放宽权限（0555 的封存目录要先 `chmod u+w` 才能改名到另一个父目录，带 `uchg` 的要先清标志） | 调用方，在 `open_rooted` 取得的目录句柄上 `fchmod`、`fchflags`（句柄钉住对象，不经路径）。`rename_rooted`、`remove_rooted` 被拒绝就返回 `ReadOnly` 和 `detail.reason`，从不 `chmod`、不 `chflags`；唯一的例外是 `remove_tree_rooted`：为了删它点名的那棵树，增补 8 要它清 `UF_IMMUTABLE`、`UF_APPEND` 并补 u+w，并在 `RemoveReport` 里如实报数（不变量 A10，§4.2 H） |
-| 克隆之后清除 BSD 标志与扩展属性、重设 mtime | store（`put_blob` 的规整，store.md §5.3 第 5 步）与 overlay（投影）；apfs 的克隆原样把它们带过来 |
+| 内容哈希、blob 的 xattr 剥离、清哪些标志与设什么 mode、mtime（改的动作是 `set_file_meta`）、`fsync` / `F_FULLFSYNC` 什么时候调、对哪些句柄调 | store（blob 规整见 store.md）与各调用方；apfs 不做持久化，克隆、改名、删除之后的落盘归调用方。apfs 只提供 `full_fsync` 这个包装，以及取目录句柄的 `open_root`、`open_rooted`（增补 3 "Durability"） |
+| 什么时候删、删什么（gc 的 1 小时年龄、意图行点名的路径、`retire_dir` 先挪走再删）；`RemoveReport.stuck` 里剩下的条目怎么办（重试、留着、上报） | store、session、deps 决定；apfs 只提供删除的原语 `remove_rooted`、`remove_tree_rooted`（增补 8），不知道哪些东西该删。**调用方不自己写递归删除**：非空的树经 `store::retire_dir` 挪走，再由 `remove_tree_rooted` 删；调用方只可以 `remove_rooted(.., RemoveKind::EmptyDir)` 删自己建的空目录，或本次 restore 自己清空的目录（增补 7 "Empty directories"，增补 8 amended）；`RemoveKind::File` 只删证明是留存 checkpoint 里 blob 的逐字节副本的文件（增补 8 "Proven copies"） |
+| 放宽权限（0555 的封存目录要先补属主写位才能改名到另一个父目录，带 `uchg` 的要先清标志） | 调用方显式调用 `make_removable(&handle)`（句柄由 `open_rooted` 取得，钉住对象，不经路径；**先清** `UF_IMMUTABLE`、`UF_APPEND`，**再** `fchmod` 补 u+w，顺序不能反：带 `uchg` 的目录 `fchmod` 得 `EPERM`，§4.2 H）。`rename_rooted`、`remove_rooted` 被拒绝就返回 `ReadOnly` 和 `detail.reason`，从不 `chmod`、不 `chflags`。apfs 自己只在三处改标志或权限：`remove_tree_rooted` 删它点名的那棵树的过程中，调用方调用 `make_removable` 的时候，和调用方调用 `set_file_meta` 的时候（不变量 A10，§4.2 H）；`SF_*` 系统标志从不清，共用的 inode（`st_nlink > 1` 的非目录）上也不清 |
+| 克隆之后清除 BSD 标志与扩展属性、重设 mtime | store（`put_blob` 的规整，store.md §5.3 第 5 步）与 overlay（投影、restore）；apfs 的克隆原样把它们带过来，改标志、mode、mtime 的动作经 `set_file_meta`（核对是普通文件或目录，非目录再核对 `st_nlink == 1`），扩展属性的剥离留在调用方，在同一个句柄上 |
 | 找出哪些进程打开着哪些文件（`OpenFiles`） | deps（`open_files`）与 session。apfs 只负责一件相关的事：报告 gen count 不可得（§4.2 C） |
 | 路径字符串的语法、NFC 规整、`RepoPath` 的构造 | types（`RepoPath::try_from`） |
-| 清理与回滚 | 谁也不做：apfs 失败时不自己清理、不撤销已经发生的写入，现场原样留给调用方；它删东西只在调用方点名的 `remove_rooted`、`remove_tree_rooted` 里（不变量 6，§4.3） |
+| 清理与回滚 | 谁也不做：apfs 失败时不自己清理、不撤销已经发生的写入，现场原样留给调用方；它删东西只在调用方点名的 `remove_rooted`、`remove_tree_rooted` 里，后者没删干净时只报告剩下什么，不重放、不清理（不变量 6，§4.3） |
 | 要不要等监听追上，用冷扫还是接受一次工具调用的滞后 | overlay 决定并标注（增补 8 "Event flush, amended"）；apfs 只说明 `flush()` 保证什么、不保证什么（§5.7） |
 
 ## 2. 依赖
@@ -42,28 +42,28 @@ Workspace crate（types.md §8：apfs 在第 1 层，只依赖第 0 层；同层
 
 | 依赖 | 理由 |
 | --- | --- |
-| `libc` | design §11 第 2 条：macOS API 走 libc。用到 `clonefile`、`clonefileat`、`fclonefileat`、`getattrlist`、`getattrlistat`、`fgetattrlist`、`getattrlistbulk`、`openat`、`mkdirat`、`symlinkat`、`readlinkat`、`fstatat`、`fchmodat`、`fchmod`、`fchflags`、`renameatx_np`、`unlinkat`、`fcntl`（`F_FULLFSYNC`）、`fdopendir` 与 `readdir`（`remove_tree_rooted` 读目录，也可以用 `getattrlistbulk`，构建者选）、`statfs`，测试里另有 `setrlimit`、`mmap`、`utimensat`、`chflags`。2026-10-22 查本机 cargo registry 里的 libc 0.2.191：以上函数和 `RENAME_SWAP`、`RENAME_EXCL`、`F_FULLFSYNC`、`AT_REMOVEDIR`、`O_SYMLINK`、`O_EVTONLY`、`UF_IMMUTABLE`、`UF_APPEND`、`FSOPT_*`、`ATTR_CMN_GEN_COUNT` 都导出了，没有 `CLONE_NOFOLLOW`、`CLONE_NOOWNERCOPY`，这两个常量（0x1、0x2，§4.2 A）由 crate 自己定义。**不用 `fchflagsat`**：SDK 标它 macOS 27.0 起才有，而 design 写的是 macOS 26+，libc 也没导出；清标志一律是 `openat` 取句柄再 `fchflags`（§4.2 H） |
+| `libc` | design §11 第 2 条：macOS API 走 libc。用到 `clonefile`、`clonefileat`、`fclonefileat`、`getattrlist`、`getattrlistat`、`fgetattrlist`、`getattrlistbulk`、`openat`、`mkdirat`、`symlinkat`、`readlinkat`、`fstatat`、`fchmodat`、`fchmod`、`fchflags`、`futimens`、`faccessat`、`renameatx_np`、`unlinkat`、`fcntl`（`F_FULLFSYNC`）、`fdopendir` 与 `readdir`（`remove_tree_rooted` 读目录，也可以用 `getattrlistbulk`，构建者选）、`statfs`，测试里另有 `setrlimit`、`mmap`、`utimensat`、`chflags`。2026-10-22 查本机 cargo registry 里的 libc 0.2.191：以上函数和 `RENAME_SWAP`、`RENAME_EXCL`、`F_FULLFSYNC`、`AT_REMOVEDIR`、`O_SYMLINK`、`O_EVTONLY`、`UF_IMMUTABLE`、`UF_APPEND`、`UF_COMPRESSED`、`SF_IMMUTABLE`、`SF_APPEND`、`O_EXEC`、`UTIME_OMIT`、`AT_EACCESS`、`FSOPT_*`、`ATTR_CMN_GEN_COUNT` 都导出了，没有 `CLONE_NOFOLLOW`、`CLONE_NOOWNERCOPY`，这两个常量（0x1、0x2，§4.2 A）由 crate 自己定义。**不用 `fchflagsat`**：SDK 标它 macOS 27.0 起才有，而 design 写的是 macOS 26+，libc 也没导出；清标志一律是 `openat` 取句柄再 `fchflags`（§4.2 H） |
 | CoreServices 的 FSEvents 与 libdispatch 的绑定 | 直接绑 `FSEventStreamCreate` 一族加一条私有串行 dispatch queue，不经 `notify`：本模块必须拿到每个事件的原始 flags（`MustScanSubDirs` 与 `UserDropped`、`KernelDropped` 的区别，`RootChanged`），不要第三方抽象替它们归类。用哪个绑定 crate 还是手写 `extern "C"`，交给构建者（§9） |
-| `serde_json` | `StrataError.detail` 是 `serde_json::Value`（types.md §6.1），apfs 构造每个错误的 `detail`，以及 `RemoveReport::to_detail`、`from_error` |
+| `serde_json` | `StrataError.detail` 是 `serde_json::Value`（types.md §6.1），apfs 构造每个错误的 `detail` |
 | `unicode-normalization` | NFC（目录项名字进 `RepoPath`）与 NFD（`case_fold_eq`、`case_fold_key`） |
 | Unicode 全量大小写折叠表，版本须 ≥ 16.0 | `case_fold_key`、`case_fold_eq`。实测 macOS 27 的 APFS 已经用上 Unicode 16 新增的折叠（§4.2 B）。用 `icu_casemap`、`caseless`，还是用 CaseFolding.txt 生成表，交给构建者（§9）；验收是 §7 的 oracle 测试 |
 | 开发依赖 `tempfile` | 测试的临时目录。跨卷、不支持、满盘、大小写敏感、嵌套挂载的测试另用 `hdiutil create -type SPARSE` 建的镜像（`tests/common` 的 `Image`，§8 Task 1），挂载点放在临时目录里，`Drop` 时 `hdiutil detach` 并删镜像文件 |
 
-谁调用本模块：
+谁调用本模块（这张表按各调用方 2026-10-22 的草稿和 module-rulings 写成；T15 再按最终稿核对）：
 
 | 调用方 | 用到（增补 8：对工作区、staging、generation 树的写、改名、删除一律经 apfs，调用方不自己写 `*at` 调用） |
 | --- | --- |
-| store | `clone_file`（blob 进 `store/tmp`，源是 strata 自己的路径）、`clone_from_rooted`（`put_blob_rooted`：从工作区捕获 blob，源一侧不跟随符号链接）、`same_volume` 与 `nearest_existing_ancestor`（`open` 的同卷检查）、`rename_rooted(Excl)` 加 `full_fsync`（`retire_dir`：挪进 trash，之前先在 `open_rooted` 取得的目录句柄上 `fchmod` 补 u+w、`fchflags` 清 `UF_IMMUTABLE` 与 `UF_APPEND`，增补 6）、`remove_tree_rooted`（gc 删 trash 与 `store/tmp`，`stuck` 进报告）、`Attrs::last_changed`（gc 判 1 小时年龄，增补 4）、`open_root`（对 root 做 `full_fsync`） |
-| deps | `clone_tree`（认领、staging：源与目的都是 strata 自己的目录）、`clone_tree_rooted`（`clone_into`：克隆进工作区）、`clone_file_rooted`、`create_file_rooted`、`mkdir_rooted`（往 staging 放安装输入）、`walk` 与 `Attrs`（展开安装输入；认领前后的两次遍历，比较 `Attrs`）、`open_rooted`（读安装输入）、`rename_rooted(Excl)` 加 `full_fsync`（封存：先改名、后 `chmod 0555`，§4.2 G）、`remove_rooted`、`remove_tree_rooted`（清 staging）、`same_volume` 与 `nearest_existing_ancestor`（预检） |
-| session | `clone_tree_rooted`（`new` 把整个 base 目录克隆进会话根）、`clone_file_rooted`、`mkdir_rooted`、`symlink_rooted`（种子文件、种子缓存、依赖目录）、`clone_from_rooted`（`move_workspace` 的携带，经 `store.put_blob_rooted`）、`walk`（携带遍历）、`rename_rooted(Swap)` 加 `full_fsync`（交换工作区与新树，对会话根用 `open_root`）、`remove_tree_rooted`（`rm` 与回收站）、`same_volume` 与 `nearest_existing_ancestor`（`new` 的同卷预检） |
-| overlay | `walk` / `walk_with`、`list_dir`、`Attrs`、`attrs_of`、`unchanged_since`、`watch` 与 `WatchEvent`、`Watcher::flush`（不是屏障）、`case_fold_eq` 与 `case_fold_key`（大小写不敏感卷上磁盘拼写的同一性，成员判断用键，不做两两比较）、`open_rooted_file`、`clone_from_rooted`（经 `store.put_blob_rooted` 捕获）、投影：`get_blob` 取到 strata 自己的临时目录后 `rename_rooted(Excl)` 或 `rename_rooted(Swap)` 放进工作区，另有 `mkdir_rooted`、`symlink_rooted`、`remove_rooted`（restore 的阶段 C 与 `project`） |
-| gitio | `mkdir_rooted`、`create_file_rooted`、`symlink_rooted`（`export_tree` 往临时树里写，`.git` gitfile）、`rename_rooted(Excl)` 加 `full_fsync`（临时树改名成 `dst`）、`remove_tree_rooted`（失败后清临时树）。gitio 不用 `case_fold_eq`：git 身份只折叠 ASCII（§5.8） |
+| store | `put_blob_rooted`（overlay 的 checkpoint 捕获进 store，不是 session 的携带）：`attrs_of` 先看种类，文件经 `clone_from_rooted(.., CloneKind::File)` 克隆进 `store/tmp` 再哈希克隆体（检查之后被换成目录 → `IsDirectory`，换成 FIFO、socket、设备 → `NotFile`）；`set_file_meta` 规整 put 的临时克隆（`{ clear_flags, mode: 0600 }`，剥离扩展属性之后 `{ mode: 0444, mtime }`；store 私有区里这是选择，不是强制，裁定 "set_file_meta scope, corrected"）；`get_blob_rooted`：`clone_file_rooted(blob, root, dst, None)`，随后在 `open_rooted_file` 的句柄上 `set_file_meta`（清标志、设 mode 与 mtime；blob 写进工作区、staging 与会话根的唯一入口）；`clone_file`（`put_blob(path)` 与 `get_blob` 的按路径版本，源是 strata 自己的路径）；`same_volume` 与 `nearest_existing_ancestor`（`open` 的同卷检查）、`classify_io_error`；`retire_dir`：`open_rooted` 取目录句柄 → `make_removable` → `rename_rooted(Excl)` 进 trash → `full_fsync`；gc：`make_removable` 预备要挪走的封存目录，`list_dir` 与 `Attrs::last_changed`（清扫活路径与基线暂存、判 1 小时年龄，增补 4），`remove_tree_rooted` 删 trash 与 `store/tmp/` 里的**每个条目**（目录、文件、符号链接，一个调用，调用方不再按路径 `chflags`；返回 `RemoveReport`：`is_complete()` 为假就留着、下一轮再删，不当 `Unknown`），`remove_rooted(.., EmptyDir)` 删清扫之后变空的目录（`NotEmpty` 就跳过）。**`remove_tree_rooted` 只有 store 这一行用** |
+| deps | `clone_from_rooted(.., CloneKind::Dir)`（`adopt`：从主 checkout 认领依赖目录，源不是 strata 自己的目录，所以不用 `clone_tree`）与 `CloneKind::File`（从工作区取安装输入）；`clone_tree_rooted`（staging 的源码树、`clone_into`：克隆进调用方的目录，跨卷时 `CrossVolume`）；`mkdir_rooted`、`create_file_rooted`、`symlink_rooted`（staging 里的安装输入与 `install.log`；建造锁：`mkdir_rooted` 建 `.locks/`，`open_rooted_file`，缺了就 `create_file_rooted`）；`rename_rooted(Excl)`（挪开、组装候选、封存：先改名，后对封存根目录的句柄 `set_file_meta(.., { mode: Some(0o555) })`，空依赖集的根目录同样；deps 自己不调 `fchmod`，裁定 "set_file_meta accepts a directory handle"，§4.2 G、H）；`open_root` 加 `full_fsync`；`walk` 与 `Attrs`（展开安装输入；认领前后的两次遍历）、`attrs_of`、`list_dir`、`open_rooted`（逐级不跟随地读安装输入，取同步与 `set_file_meta` 用的句柄）；`same_volume` 与 `nearest_existing_ancestor`（预检）；`classify_io_error`。**deps 不删东西**：`remove_rooted`、`remove_tree_rooted` 它都用不到（弃置的目录走 `store::retire_dir`） |
+| session | `clone_tree_rooted`（`new` 把整个 base 目录克隆进会话根）；`clone_file_rooted`（种子文件、基线文件）；`mkdir_rooted`（种子缓存、依赖目录的父级）；`move_workspace` 的携带：`clone_from_rooted(.., CloneKind::File \| Dir)`，种类取自遍历，克隆到新树根下的私有临时名，再 `rename_rooted(Excl)` 放到位，**不经 store 的 blob 库**（裁定 "Carry is not a capture"）；携带的符号链接条目按重建的配方：`attrs_of` 取目标 → `symlink_rooted`，从不克隆（§5.4）；`rename_rooted(Excl)`（基线改名进 `bases/`、携带的条目放进新树）与 `rename_rooted(Swap)`（交换工作区）；`remove_rooted(.., EmptyDir)`（删自己建的空暂存目录）；`attrs_of`、`list_dir`、`walk_with`（种子与携带的判定、找已有的基线 generation）；`volume_caps`、`same_volume` 与 `nearest_existing_ancestor`（`new` 的预检）；`case_fold_key` 与 `volume_caps` 的 `case_sensitive`（种子落点的磁盘同一性）；`open_root`、`open_rooted` 加 `full_fsync`（交换后同步会话根与父目录）；`classify_io_error`。**session 不删树**：`remove_tree_rooted` 它用不到，退役的树由 store 的 gc 删 |
+| overlay | `walk` / `walk_with`、`WalkOptions`、`list_dir`、`Attrs`、`FileKind`、`attrs_of`、`unchanged_since`、`gen_count_known`；`watch_with`（`exclude` 只放 `.git`）与 `WatchEvent`、`Watcher`、`Watcher::flush`（不是屏障；daemon 经 `Tracker::flush` 调用，从不在回调里）；`volume_caps`（`case_sensitive`：磁盘身份按卷折叠）与 `case_fold_key`（大小写不敏感卷上磁盘拼写的同一性，受限目录的键前缀范围查找用它的路径性质，§5.8）；`open_rooted_file`、`open_rooted`（取临时目录 T 的句柄）、`open_root`、`full_fsync`；`classify_io_error`、`IoSide`。投影与 restore 的写：blob 由 store 的 `get_blob_rooted` 写进临时目录 T（overlay 自己不建 blob 的临时副本），基线文件用 `clone_file_rooted(.., None)` 再在 `open_rooted_file` 的句柄上经 `set_file_meta` 规整（清标志、设 mode 与 mtime；句柄是 FIFO、socket、设备，或 `st_nlink > 1` 的非目录，就什么都不改），overlay 自己再 `rename_rooted(Excl)` 或 `rename_rooted(Swap)` 放进工作区；另有 `mkdir_rooted`、`symlink_rooted`（目标取自 `attrs_of` 读到的符号链接目标）、`create_file_rooted`、`remove_rooted(.., File \| EmptyDir)`（只删自己建的空目录、本次 restore 自己清空的目录，以及证明是留存 checkpoint 里 blob 的逐字节副本的文件；`EmptyDir` 遇到非空目录得 `NotEmpty`，是写竞争，§6） |
+| gitio | 根随场合不同：影子仓库目录（`new` 之后它是 agent 可写的地方，Addendum 8 clarification）里的管理目录 `worktrees/<n>/` 与它里面的四个文件，含 index 的副本：`attrs_of`、`mkdir_rooted`、`create_file_rooted`、`open_rooted`；`tree_dir`：工作区与 staging 树根下的 gitfile（`create_file_rooted`）、attach 的临时 index（`mkdir_rooted`、`open_rooted_file`、`remove_rooted`）；`export_tree` 的 `dst` 的父目录：`mkdir_rooted`、`open_rooted`、`rename_rooted(Excl)`、`remove_rooted(.., File \| EmptyDir)`（只删自己没写成的临时文件和空目录）；`shadow_drift` 读 `hooks/pre-push` 的 `open_rooted_file`；`open_root` 加 `full_fsync`（gitio 的每一次 `F_FULLFSYNC` 都经它）；`classify_io_error` 与 `IoSide`（apfs 给的句柄上的读写失败：写用 `AfterWrite`，读用 `Read`）；`PATH_MAX_BYTES`、`NAME_MAX_UTF16_UNITS`。进程内读文件（工作区或 `dir` 的 `.gitignore`、管理 index、hooks 文件、excludes 文件）走 `open_rooted_file`（FIFO → `NotFile`，不会挂住；裁定 "gitio reads files through apfs"，gitio 下一次修改时落实）。gitio 不用 `remove_tree_rooted`，也不用 `case_fold_eq`：git 身份只折叠 ASCII（§5.8） |
 | search | 读工作区文件的内容与属性：`open_rooted_file`、`attrs_of`、`walk`（具体以 search.md 为准） |
 | daemon | 启停每个 tracked 工作区的 `Watcher`（由 overlay 的 `Tracker` 持有）；启动时用 `volume_caps` 预检 |
 
 ## 3. 公开接口（Rust）
 
-跨模块类型只用 types.md 的（`RepoPath`、`StrataError`、`Code`）。`Attrs`、`FileKind`、`WatchEvent`、`VolumeCaps`、`WalkOptions`、`WatchOptions`、`Walk`、`Watcher`、`RenameMode`、`RemoveKind`、`RemoveReport`、`Stuck`、`StuckReason`、`IoSide` 是本模块自有的公开类型，定义在这里；别的模块按名字使用。这些类型只在进程内传递，不 derive serde（types.md §2.2 管的是 types.md 自己的类型，这里不适用，§9）；唯一进 `StrataError.detail` 的是 `RemoveReport` 的 JSON 形状，由 `RemoveReport::to_detail`、`from_error` 成对生成与读回。
+跨模块类型只用 types.md 的（`RepoPath`、`StrataError`、`Code`）。`Attrs`、`FileKind`、`WatchEvent`、`VolumeCaps`、`WalkOptions`、`WatchOptions`、`Walk`、`Watcher`、`RenameMode`、`RemoveKind`、`CloneKind`、`FileMeta`、`RemoveReport`、`Stuck`、`StuckReason`、`IoSide` 是本模块自有的公开类型，定义在这里；别的模块按名字使用。这些类型只在进程内传递，不 derive serde（types.md §2.2 管的是 types.md 自己的类型，这里不适用，§9）；没有哪个类型进 `StrataError.detail`：`detail` 是 apfs 手写的 JSON 对象，键见下面的"`detail` 的形状"。
 
 ```rust
 // crates/strata-apfs/src/lib.rs —— 签名清单（不是实现）
@@ -110,7 +110,10 @@ pub enum IoSide {
 }
 
 /// errno → StrataError 的归类（表见 §4.2 I）：types.md §6.3 的表，加 apfs 的细化（EINVAL → InvalidInput 等）。
-/// apfs 自己的每个函数都用它；别的模块对 apfs 给的句柄做 I/O（`create_file_rooted` 返回的句柄上的 `write_all`，`open_rooted` 返回的句柄上的 `read`）失败时也用它，不再各写一张表。
+/// apfs 自己的每个函数都用它；别的模块对 apfs 给的句柄做 I/O 失败时也用它，不再各写一张表。两个典型用法：
+/// 在 `open_rooted` 返回的句柄上 `read` 失败 → `IoSide::Read`；在 `create_file_rooted` 返回的句柄上 `write_all` 失败 → `IoSide::AfterWrite`——
+/// 文件已经建出来了，不能再当"什么都没改"，所以不论 errno（哪怕是写侧会给 `ReadOnly` 的 `EROFS`、`EACCES`）都是 `Unknown`，现场留着一个文件。
+/// `nearest_existing_ancestor` 返回的 `io::Error` 同样交给它：`classify_io_error(&e, IoSide::Read, path)`。
 /// `detail` 带 `errno`（数字）与 `path`；EROFS → `reason = read_only_volume`，写侧的 EACCES、EPERM → `reason = no_permission`。
 /// 纯函数，不碰文件系统：要靠 `fstatat` 才分得清的情形（`unlinkat` 一个目录得到 EPERM，带标志的 EPERM）由各个操作自己在调用它之前处理，所以这里 EPERM 只有 `no_permission` 一种说法。
 /// 没有 `raw_os_error` 的 `io::Error` → Unknown。
@@ -126,6 +129,7 @@ pub fn same_volume(a: &Path, b: &Path) -> io::Result<bool>;
 /// 从 path 往上找第一个存在的路径（path 自己存在就是它自己）并返回：config.md §4.3 的"最近的已存在的上级目录"。
 /// `paths.root` 还不存在时，同卷检查拿它的最近已存在上级去比：`same_volume(&nearest_existing_ancestor(root)?, main_checkout)`。
 /// path 必须是绝对路径（否则 `io::ErrorKind::InvalidInput`）。判断存在用跟随符号链接的 `stat`：`ENOENT`（含悬空符号链接）、`ENOTDIR` 都继续往上爬，别的错误（`EACCES` 等）原样返回。
+/// 要把返回的 `io::Error` 变成 `StrataError` 的调用方用 `classify_io_error(&e, IoSide::Read, path)`：读侧的 `EACCES` 是 `Unknown`（`detail.errno` 带原值）；相对路径的 `InvalidInput` 没有 `raw_os_error`，也是 `Unknown`，那是调用方的 bug，不是要处理的情形。
 /// 返回值是 path 的前缀，调用者的拼写，不做 realpath；path 的某一级是文件时返回的就是那个文件，要目录的调用方自己核对。
 pub fn nearest_existing_ancestor(path: &Path) -> io::Result<PathBuf>;
 
@@ -153,35 +157,58 @@ pub fn clone_tree(src: &Path, dst: &Path) -> Result<()>;
 pub fn clone_file(src: &Path, dst: &Path) -> Result<()>;
 
 // ───────────── 在根之下不跟随符号链接地读 ─────────────
+// **root 必须是规范路径**（裁定 "Rooted roots are canonical"）：所有以 `root` 为参数的函数——`open_root`、`open_rooted`、`open_rooted_file`、`clone_from_rooted` 的 `src_root`、
+// 下面的目的地变体、`rename_rooted`、`remove_rooted`、`remove_tree_rooted`，以及 `attrs_of`、`walk`、`walk_with`、`list_dir`——在碰文件系统之前先按原始字节检查它：
+// 空串、以 `/` 结尾、或含 `.`、`..` 分量（以 `/.` 结尾是后者的一种）→ InvalidInput（reason = root_not_canonical），什么都不碰；`walk`、`list_dir` 把它作为第一项 Err。
+// 不用 `Path::components()` 检查，它把结尾的 `/` 与 `.` 吃掉了。理由：结尾的 `/` 或 `/.` 让内核把最后一级当目录解析，`O_NOFOLLOW` 因此跟着符号链接走（§4.2 E，实测），
+// 根的符号链接拒绝和根的钉住都会落空。config.md 在加载时把 `paths.root` 等路径规范化（T15，§9）。`watch` 不在此列：它对 root 做 realpath（§5.7）。
 
 /// 打开 root 本身（O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC）：根的 dirfd 访问器（增补 8）。
 /// 返回的句柄可当 dirfd 用，也是 `full_fsync(&open_root(root)?)` 的入口（根目录的改名要同步根自己）。
-/// 根的祖先里的符号链接照常解析；根本身是符号链接 → NotDirectory（reason = symlink）；不存在 → NoSuchPath；不是目录 → NotDirectory（not_a_directory）。
+/// root 不规范 → InvalidInput（root_not_canonical）；根的祖先里的符号链接照常解析；根本身是符号链接 → NotDirectory（reason = symlink）；不存在 → NoSuchPath；不是目录 → NotDirectory（not_a_directory）。
 pub fn open_root(root: &Path) -> Result<File>;
 /// 在 root 之下，按 path 逐级 openat(O_NOFOLLOW) 打开（只读）。每一级都不跟随符号链接；FIFO 以 O_NONBLOCK 打开，所以不会挂住。
 /// 能打开普通文件、目录和 FIFO；调用方用 `File::metadata()` 核对类型。符号链接、socket、设备文件 → NotFile。
-/// 目录的句柄可以当 dirfd 用（`as_raw_fd()` 传给 `openat`、`fchmod`、`fchflags`、`full_fsync`）：调用方要在已封存的目录上 `fchmod u+w`、`fchflags` 清标志（`retire_dir`，增补 6），就在这个句柄上做，不经路径。
+/// 目录的句柄可以当 dirfd 用（`as_raw_fd()` 传给 `openat`、`full_fsync`），也可以交给 `set_file_meta`（目录的 mode、标志、mtime，例如 deps 把封存根目录设成 0555），或交给 `make_removable`：要改名或删除一个已封存的目录（0555，或带 `uchg`）的调用方（`retire_dir`、gc，增补 6）
+/// 先用它取句柄再调 `make_removable(&句柄)`，不经路径，也不自己写 `fchmod`、`fchflags`。
 /// 递归删除不在这里做，也不由调用方自己写：用 `remove_tree_rooted`。
 pub fn open_rooted(root: &Path, path: &RepoPath) -> Result<File>;
 /// 同上，但只接受普通文件：打开后 fstat 确认，目录 → IsDirectory，FIFO、设备 → NotFile。读内容的路径用这个。
 pub fn open_rooted_file(root: &Path, path: &RepoPath) -> Result<File>;
-/// 把 src_root 之下的 src（普通文件或目录）克隆到 dst：从工作区捕获内容的唯一入口（增补 8，store 的 `put_blob_rooted`、session 的携带都经它）。
-/// 源这一侧同 `open_rooted`：逐级钉住父目录，最后一个分量 `openat(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` 取得句柄，再 `fclonefileat(句柄, …)` 从句柄克隆。
-/// 所以克隆出来的永远是被打开的那个对象：打开之后路径被换成指向根外的符号链接，也跟不过去（§4.2 A、§7 的交换测试）。符号链接、socket、设备文件、FIFO → NotFile。
-/// dst 是调用方给的任意路径，通常是 strata 自己的目录（store/tmp、staging）：它的祖先里的符号链接由内核照常解析，所以不能指向工作区里面；往工作区里写用 `clone_file_rooted`、`clone_tree_rooted`。
-/// 其余同 `clone_file`、`clone_tree`：同卷检查在先（`CrossVolume`，从不复制），dst 已存在（含悬空符号链接）→ Exists，父目录缺失 → NoSuchPath，失败时 dst 不存在。
-pub fn clone_from_rooted(src_root: &Path, src: &RepoPath, dst: &Path) -> Result<()>;
+/// `clone_from_rooted` 的调用方说明它要克隆的是什么（裁定 "clone_from_rooted states its source kind"）。调用方的种类来自之前的 `attrs_of` 或遍历，
+/// 到真正打开之间那个路径可能已经被换成别的东西：文件换成目录，`fclonefileat` 就把一整棵树克隆进 `store/tmp`（store 第 2 轮评审的发现）；
+/// FIFO 的句柄交给 `fclonefileat` 只会得到误导的 `EINVAL`。所以 apfs 对钉住的句柄 `fstat`，种类不符就在克隆之前拒绝，什么都不克隆。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloneKind {
+    /// 期望普通文件：目录 → IsDirectory；FIFO、socket、设备 → NotFile（reason = fifo、socket、device）；符号链接 → NotFile（reason = symlink）。
+    File,
+    /// 期望目录：不是目录 → NotDirectory（reason = not_a_directory）；符号链接 → NotDirectory（reason = symlink）。
+    Dir,
+}
+/// 把 src_root 之下的 src 克隆到 dst，`kind` 说明 src 应当是普通文件还是目录：从工作区捕获内容的唯一入口（增补 8）。
+/// store 的 `put_blob_rooted`（overlay 的 checkpoint 捕获进 store）与 session 的携带传 `File`（携带的目录传 `Dir`），deps 的 `adopt` 从主 checkout 认领依赖目录传 `Dir`。
+/// 源这一侧同 `open_rooted`：逐级钉住父目录，最后一个分量 `openat(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` 取得句柄，`fstat` 核对种类（上面），再 `fclonefileat(句柄, …)` 从句柄克隆。
+/// 所以克隆出来的永远是被打开的那个对象：打开之后路径被换成指向根外的符号链接，也跟不过去（§4.2 A、§7 的交换测试）。
+/// **符号链接不经这里**（两种 `kind` 都拒绝）：它的"内容"是目标，由调用方重建——`attrs_of(src_root, p)` 取目标，`symlink_rooted(dst_root, q, target)`（裁定 "A symlink is recreated, never cloned"）；
+/// 也不能经 `clone_file_rooted` 按路径克隆：它的 src 是路径，中间的符号链接内核照常跟随，`CLONE_NOFOLLOW` 只管最后一级（§4.2 A）。
+/// dst 是调用方给的任意路径，通常是 strata 自己的目录（store/tmp、携带用的私有临时名、`adopt` 的 staging）：它的祖先里的符号链接由内核照常解析，所以不能指向工作区里面；往工作区里写用 `clone_file_rooted`、`clone_tree_rooted`。
+/// 其余同 `clone_file`、`clone_tree`：同卷检查在 `fclonefileat` 之前（`CrossVolume`，从不复制），dst 已存在（含悬空符号链接）→ Exists，父目录缺失 → NoSuchPath，失败时 dst 不存在。
+pub fn clone_from_rooted(src_root: &Path, src: &RepoPath, dst: &Path, kind: CloneKind) -> Result<()>;
 
 // ───────────── 在根之下不跟随符号链接地写（增补 3 的目的地变体） ─────────────
 // dst 是 root 之下的相对路径：先逐级 openat(O_DIRECTORY|O_NOFOLLOW) 取得父目录的句柄，再用只带最后一个分量的 *at 调用落地。
 // 父目录缺失 → NoSuchPath（需要时先 mkdir_rooted）；任何一级是符号链接 → NotDirectory，什么都不写。dst 已存在（含悬空符号链接）→ Exists，从不覆盖。
 
 /// 把文件或符号链接 src 克隆到 root 之下的 dst。mode = Some(m) 时，克隆之后把权限位设成 m & 0o777（setuid、setgid、sticky 被屏蔽；用于 blob 的 0600 投影成 0644 / 0755）；对符号链接无效。
-/// 克隆会带来源的 BSD 标志：源带 `uchg` 时克隆也带，`fchmodat` 会得 `EPERM`（实测）。要先清标志的调用方传 None，清掉之后自己设 mode。
+/// 设 mode 这一步经句柄，不经名字 [我的决定]：克隆之后在钉住的父目录上 `openat(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` 取回 dst，交给 `set_file_meta(.., { mode })`，它核对普通文件与 `st_nlink == 1`，
+/// 所以 dst 在这中间被换成指向根外文件的硬链接，也改不到那个文件（§4.2 H）。这一步的任何失败都是 `Unknown`（克隆已经发生）。
+/// 克隆会带来源的 BSD 标志：源带 `uchg` 时克隆也带，设 mode 会得 `EPERM`（实测）。要先清标志的调用方传 None，再对 `open_rooted_file` 取得的句柄 `set_file_meta(.., { clear_flags: true, mode, mtime })`
+/// （overlay 的基线文件、store 的 `get_blob_rooted` 都这样做）。
+/// src 是调用方给的 strata 自己的路径（blob、基线文件）。**来自工作区的符号链接不用它**：src 按路径解析，中间的符号链接内核照常跟随；重建它——`attrs_of` 取目标，`symlink_rooted`。
 pub fn clone_file_rooted(src: &Path, root: &Path, dst: &RepoPath, mode: Option<u32>) -> Result<()>;
 /// 把目录树 src 克隆到 root 之下的 dst（clonefileat）。同卷检查在先，原子。
 pub fn clone_tree_rooted(src: &Path, root: &Path, dst: &RepoPath) -> Result<()>;
-/// 建一个新的空文件并返回可写句柄（O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW）。mode 受 umask 影响；要精确的位，调用方对返回的句柄 fchmod。
+/// 建一个新的空文件并返回可写句柄（O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW）。mode 受 umask 影响；要精确的位，调用方对返回的句柄 `set_file_meta(.., { mode })`，不自己 `fchmod`（新建的 inode 只有一个名字，核对必过）。
 pub fn create_file_rooted(root: &Path, dst: &RepoPath, mode: u32) -> Result<File>;
 /// 建目录。parents = true 时像 `mkdir -p`：缺的父级逐级建出来，已有的目录跳过，叶子已是目录也算成功。
 /// 两种取值下，叶子（最后一级）已存在而且不是目录（文件，或符号链接，哪怕它指向一个目录）→ Exists；中间一级是文件或符号链接 → NotDirectory。parents = false 时叶子已存在一律 Exists。
@@ -205,36 +232,74 @@ pub enum RenameMode {
 /// 把 root 之下的 from 改名为 to，单次 renameatx_np，要么完成要么什么都没动。
 /// RepoPath 相同（same_path）或 to 在 from 之下（into_itself）→ InvalidInput，在调内核之前拦下。
 /// 把目录改名到另一个父目录，要求对这个目录本身有写权限（它的 `..` 要改）：0555 的目录得 ReadOnly（reparent_needs_write）。
-/// 所以封存是先改名、后 chmod 0555；要把已经封存的目录挪走（gc、retire），调用方先在 `open_rooted` 给的句柄上 fchmod u+w 并清 UF_IMMUTABLE（增补 4、6）。
-/// 不 fsync：要扛住断电的调用方，改名之后对 from 与 to 的父目录各调一次 `full_fsync`（增补 3 "Durability"）。
+/// 所以封存是先改名、后把 mode 设成 0555（对目录的句柄 `set_file_meta`）；要把已经封存的目录挪走（gc、retire），调用方先 `make_removable(&open_rooted(..)?)`（先清标志、再补 u+w，增补 4、6）。`rename_rooted` 自己从不放宽（A10）。
+/// 不 fsync：要扛住断电的调用方，改名之后对 from 与 to 的父目录各调一次 `full_fsync`（增补 3 "Durability"）；崩溃之后 from 与 to 两个位置都合法的调用方（store 的 trash）只需同步 to 的父目录（§5.4）。
 pub fn rename_rooted(root: &Path, from: &RepoPath, to: &RepoPath, mode: RenameMode) -> Result<()>;
 
 /// remove_rooted 要删哪一类东西。选错类型是错误，不会"顺便"删另一类（增补 8）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoveKind {
     /// unlinkat(fd, name, 0)：文件、符号链接本身（不跟随）、FIFO、socket、设备节点。目标是目录 → IsDirectory（内核给的是 EPERM，用 fstatat 区分，§4.2 G）。
+    /// 只删调用方自己建的东西，或证明是留存 checkpoint 里 blob 的逐字节副本的文件（增补 8 "Proven copies"）。
     File,
-    /// unlinkat(fd, name, AT_REMOVEDIR)：空目录。非空 → NotEmpty；不是目录（含指向目录的符号链接）→ NotDirectory；挂载点 → Unknown（reason = busy）。
-    /// 调用方只用它删自己建的空目录（增补 7 "Empty directories"）；非空的东西经 `store::retire_dir` 与 `remove_tree_rooted`，不自己写递归。
+    /// unlinkat(fd, name, AT_REMOVEDIR)：空目录。非空 → NotEmpty；不是目录（含指向目录的符号链接）→ NotDirectory；挂载点 → CrossVolume（reason = mount_point）。
+    /// 调用方只用它删自己建的空目录，或本次 restore 自己清空的目录（增补 7 "Empty directories"，增补 8 amended）；非空的东西经 `store::retire_dir` 与 `remove_tree_rooted`，不自己写递归。
+    /// `NotEmpty` 说明有别的写者，怎样对待归调用方（裁定 "NotEmpty from apfs"）：overlay 的 restore 当写竞争（第一次可见的写之前 `Busy`，之后 `Unknown`），store 的 gc 清扫跳过这个目录。
     EmptyDir,
 }
-/// 删除 root 之下的一个条目，单次 unlinkat，失败时什么都没动。不 chmod、不清标志（A10）。
+/// 删除 root 之下的一个条目，单次改动的系统调用（`unlinkat`），失败时什么都没动。不 chmod、不清标志（A10）。
+/// `EmptyDir` 在调内核之前对目标 `fstatat`：是目录而 `st_dev` 与父目录的不同（挂载点）→ CrossVolume（reason = mount_point，`detail.src_dev` 是父目录的设备号，`dst_dev` 是目标的），什么都没动；
+/// `rmdir` 晚到的 `EBUSY` 同样映射，从不是 Unknown（裁定 "remove_rooted(EmptyDir) on a mount point"）。
 pub fn remove_rooted(root: &Path, path: &RepoPath, kind: RemoveKind) -> Result<()>;
 
-/// 一个没删掉的条目。
+// ───────────── 经句柄改元数据（裁定 "Flags are cleared only on an unshared inode"、"Metadata changes through a handle"） ─────────────
+// fchflags、fchmod、futimens 改的是 inode，不是名字：非目录而 `st_nlink > 1` 时，改它也改了别的名字，别的名字可能在树之外（实测，§4.2 H；
+// store 的 writer 复现过：克隆出的 dst 被换成指向根外 0600 文件的硬链接，`open(O_NOFOLLOW)` 照常打开它，`fchmod 0644` 把根外的文件改成了 0644）。
+// 目录没有这个问题：APFS 拒绝对目录 `link(2)`（`EPERM`，§4.2 H），目录只有一个名字。
+// 所以调用方不自己调这三个系统调用，目录的句柄也一样，一律经下面两个函数；它们先 `fstat` 句柄再动手，拒绝时什么都不改。
+
+/// 让一个已封存的目录（0555，或带 uchg / uappnd）可以改名到另一个父目录或被删掉：**先**清 UF_IMMUTABLE、UF_APPEND，**再** fchmod 补属主的写位 u+w。
+/// 顺序不能反：带 `uchg` 的目录 `fchmod` 得 EPERM（实测，§4.2 H）。`file` 是 `open_rooted` 取得的句柄（钉住对象，不经路径）。
+/// 取代各调用方自己写的"fchmod u+w 加 fchflags"配方（store 的 `retire_dir` 与 gc 的预备）；apfs 不在 `rename_rooted`、`remove_rooted` 里自作主张地做这件事（A10）。
+/// 只在需要时才调 `fchflags`、`fchmod`：无操作的 chmod、chflags 也更新 ctime（实测，§4.2 H），而 gc 的年龄是 `max(mtime, ctime)`；已经可改名、可删除的目录不碰，返回 Ok。其它标志位（`hidden` 等）与 `SF_*` 原样保留。
+/// 拒绝且什么都不改：非目录而 `st_nlink > 1` → ReadOnly（reason = hard_link）；`SF_IMMUTABLE`、`SF_APPEND` 置位（要 root，apfs 从不清）→ ReadOnly（reason = immutable，`detail.flags` 列出置位的标志名）。
+/// 两步的操作：标志清了而补写位失败 → Unknown（`IoSide::AfterWrite`，标志已清）；第一步的失败按写侧归类。
+pub fn make_removable(file: &File) -> Result<()>;
+
+/// `set_file_meta` 要改什么。三项都可以不要：`FileMeta::default()` 什么都不改，只做核对。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FileMeta {
+    /// 清掉写回的文件（或要封存的目录）不该带的用户标志：除 `UF_COMPRESSED` 之外的全部 `UF_*`（克隆会把封存基线的 `uchg`、`hidden` 等带过来）。`SF_*` 从不清。
+    pub clear_flags: bool,
+    /// Some(m)：权限位设成 m & 0o777（setuid、setgid、sticky 被屏蔽）。
+    pub mode: Option<u32>,
+    /// Some(t)：mtime 设成 t，atime 不动。
+    pub mtime: Option<SystemTime>,
+}
+/// 经句柄改一个文件或目录的元数据。先 `fstat` 句柄，要求：普通文件或目录（别的种类 → NotFile）、非目录时 `st_nlink == 1`（否则 ReadOnly，reason = hard_link；目录不核对，它只有一个名字，见上）、
+/// 没有会挡住改动的 `SF_IMMUTABLE`、`SF_APPEND`（否则 ReadOnly，reason = immutable）；任何一项不满足都**什么都不改**。
+/// 然后依次：清标志（`clear_flags`）、设 mode、设 mtime，每一项只在需要时才调（已是目标值的不调）。第一项改动生效之后的失败 → Unknown（`IoSide::AfterWrite`，部分已改）；之前的失败按写侧归类。
+/// 调用方（store 的 `get_blob`、`get_blob_rooted`、`put`，overlay 的 restore 与 `project`，deps 封存根目录）不自己调 `fchflags`、`fchmod`、`futimens`，目录的句柄也一样（裁定 "set_file_meta accepts a directory handle"）；`make_removable` 仍是目录一侧"让它可以改名或删除"的 helper。
+pub fn set_file_meta(file: &File, meta: &FileMeta) -> Result<()>;
+
+/// 一个没删掉的条目。怎样归因见 §5.4 的 "stuck 原因表"（唯一的一张，别处都引用它）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stuck {
     /// 相对 root 的路径（NFC）。
     pub path: RepoPath,
     pub reason: StuckReason,
-    /// 失败的 errno（`StuckReason::OtherDevice`、`Changed`、`TooDeep` 没有系统调用失败时为 0）。
+    /// 失败的 errno（没有系统调用失败时为 0：`OtherDevice`、`TooDeep`，以及 (dev, inode) 不符的 `Changed`）。
     pub errno: i32,
+    /// 补充说明，只有 `Immutable` 带：仍然拦着删除的标志，名字用 `|` 连接——清不掉的 `UF_IMMUTABLE`、`UF_APPEND`，以及置位的每个 `SF_*`（`SF_IMMUTABLE`、`SF_APPEND`，从不清）；
+    /// 或者 `hard_link`（共用的 inode，没去碰它的标志，A10）。其余原因为 `None`。
+    pub detail: Option<String>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StuckReason {
-    /// 清不掉 UF_IMMUTABLE / UF_APPEND（SF_* 系统标志要 root；既带 uchg 又没有读权限的非目录，macOS 26 上没有路径可以清，§4.2 H）。
+    /// 文件标志拦着删除，而 apfs 没有清它或清不掉：`UF_IMMUTABLE`、`UF_APPEND` 清不掉（属主既没有读位也没有搜索位的条目，文件、目录都一样，没有句柄可以清，§4.2 H）；
+    /// `SF_*` 系统标志要 root，从不清；共用的 inode（非目录、`st_nlink > 1`）上不清标志（`detail = hard_link`）。`Stuck.detail` 写出是哪些。
     Immutable,
-    /// EACCES / EPERM 且不是标志：ACL 禁止删除、属主不是调用者等。
+    /// EACCES / EPERM，而且没有上面的标志：ACL 禁止删除、属主不是调用者、mode 拒绝等。
     NoPermission,
     /// 嵌套挂载点（st_dev 与目标不同）：不进入，也删不掉（rmdir 得 EBUSY）。
     OtherDevice,
@@ -246,12 +311,20 @@ pub enum StuckReason {
     Unreadable,
     /// 深度超过 MAX_WALK_DEPTH。
     TooDeep,
-    /// 其余 errno。
+    /// 这个条目自己的 unlink 结果不确定：EIO、ETIMEDOUT、ENXIO、ENODEV、EDEVERR 一类（设备或文件系统出了问题），条目可能已经没了，也可能还在，调用方不能假定它还在。
+    UnknownOutcome,
+    /// 其余 errno：unlink 确定没成功（ENOSPC、EDQUOT 等）。
     Io,
 }
-/// remove_tree_rooted 的报告。`Ok(report)` 只在整棵树（含 path 自己）都没了时返回，此时 `stuck` 为空；
-/// 没删干净时返回 `Err(Unknown)`，`detail` 是同一份报告（`to_detail` 生成，`from_error` 读回），调用方据此决定重试、留着或上报。
+impl StuckReason {
+    /// 蛇形名字：`immutable`、`no_permission`、`other_device`、`busy`、`changed`、`unreadable`、`too_deep`、`unknown_outcome`、`io`。调用方写日志、或把报告写进自己的 `detail` 时用它。
+    pub fn as_str(&self) -> &'static str;
+}
+/// remove_tree_rooted 的报告。遍历开始之后 `remove_tree_rooted` 一律返回 `Ok(report)`：没删干净不是 `Err`，而是 `stuck` 里有条目，`is_complete()` 回答删干净了没有。
+/// 为什么（裁定 "remove_tree_rooted reports, it does not fail"）：部分删除的结局是确定的，store 的 gc 每一轮都重试剩下的；`Unknown`（保留现场、不重放）会禁止这种重试。
+/// `#[must_use]`：忽略报告就是把半删的树当成功。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[must_use = "RemoveReport says what was left behind; check is_complete()"]
 pub struct RemoveReport {
     /// 已删掉的条目数（文件、符号链接、特殊文件、目录各算一个，含目标自己）。
     pub removed: u64,
@@ -265,14 +338,14 @@ pub struct RemoveReport {
     pub stuck_total: u64,
 }
 impl RemoveReport {
-    pub fn to_detail(&self) -> serde_json::Value;
-    /// 从 `remove_tree_rooted` 返回的 Err 里读回报告；不是它产生的错误 → None。
-    pub fn from_error(err: &StrataError) -> Option<RemoveReport>;
+    /// 整棵树（含 path 自己）都没了：`stuck_total == 0`。
+    pub fn is_complete(&self) -> bool;
 }
-/// 删除 root 之下的一整棵目录树（path 必须是目录，不是符号链接）：不跟随符号链接（符号链接只删链接本身），不跨设备，自底向上。
-/// 为了删掉它点名的这棵树，清掉条目的 UF_IMMUTABLE、UF_APPEND，给打不开的目录补 u+rwx（都经句柄，§5.4），如实记在报告里；树之外的东西一概不碰（A10 的唯一例外）。
-/// 遍历开始之前的拒绝是具名的码，什么都没动：NoSuchPath、NotDirectory（目标或某一级父目录是符号链接或文件）、ReadOnly（目标的父目录对调用者不可写）、Unknown（目标本身是挂载点）。
-/// 遍历开始之后（哪怕还一个条目都没改过）没删干净 → Unknown，`detail` 是 `RemoveReport`；增补 8 写的是"第一次 unlink 之后"，这里更严：开始遍历就算开始修改，因为清标志与补权限也是可见的写；apfs 不重试、不回滚。
+/// 删除 root 之下的 path 这一棵树：path 可以是目录、文件或符号链接（任何种类的条目，裁定 "remove_tree_rooted takes any entry kind"），从不跟随符号链接——符号链接只删链接本身；不跨设备，自底向上。
+/// 为了删掉它点名的这棵树，清掉条目的 UF_IMMUTABLE、UF_APPEND（只在不共用的 inode 上，经句柄，§5.4），给打不开的目录补 u+rwx，如实记在报告里；树之外的东西一概不碰（A10）。
+/// **`Err` 只给遍历开始之前、什么都没碰的拒绝**，都是具名的码：NoSuchPath、NotDirectory（某一级父目录是符号链接或文件）、ReadOnly（目标的父目录对调用者不可写或带不可变标志）、
+/// CrossVolume（reason = mount_point：目标是目录而且本身是挂载点，`detail.src_dev` 是父目录的设备号，`dst_dev` 是目标的）。
+/// **遍历一开始（哪怕还一个条目都没改过）就一律返回 `Ok(RemoveReport)`**：没删掉的条目（含 unlink 结果不确定的）在 `stuck` 里带原因。增补 8 写的是"第一次 unlink 之后"，这里更早：清标志与补权限也是可见的写。apfs 不重试、不回滚。
 pub fn remove_tree_rooted(root: &Path, path: &RepoPath) -> Result<RemoveReport>;
 
 /// fcntl(F_FULLFSYNC)：把数据和元数据一直刷到介质（macOS 的 fsync 不保证，增补 3）。
@@ -362,7 +435,7 @@ pub fn list_dir(root: &Path, dir: Option<&RepoPath>) -> Walk<'static>;
 
 // ───────────── 监听 ─────────────
 
-/// 监听事件。回调在 Watcher 私有的串行队列上被调用：不得阻塞，不得 panic，不得在回调里 drop 自己的 Watcher，也不得在回调里调 `flush`。
+/// 监听事件。回调在 Watcher 私有的串行队列上被调用：不得阻塞，不得 panic，不得在回调里调 `flush`（会让进程 `SIGTRAP`，见 `Watcher::flush`）。在回调里 drop 自己的 `Watcher` 是允许的（见 `Watcher`）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WatchEvent {
     /// 这些绝对路径发生了变化（文件或目录；目录表示它的整棵子树都可能变了）。路径以传给 `watch` 的 root 为前缀，
@@ -381,16 +454,20 @@ pub struct WatchOptions {
     pub exclude: Vec<RepoPath>,
 }
 
-/// 监听句柄。drop 时停止流，并等正在进行的回调返回；drop 返回之后不会再有回调。
+/// 监听句柄。drop 时停止流。
+/// 不在回调线程上 drop：先置 `closed`（已排队的回调到了就直接返回，不进 `on_event`），`Stop`、`Invalidate`、`Release`，再对私有队列 `dispatch_sync` 一个空块排空在途的回调，然后释放队列与回调的状态；返回之后不会再有回调。
+/// **在回调里 drop 自己的 `Watcher`**（例如回调持有的最后一个 `Arc<Tracker>` 在回调里被丢掉）[我的决定]：`dispatch_sync` 到自己所在的串行队列会让 libdispatch 以 `SIGTRAP` 杀掉整个进程（实测，§4.2 F），所以这条路径不排空：
+/// 置 `closed`，`Stop`、`Invalidate`（在回调里调用它们没有问题，实测），把最后的 `Release` 与回调状态的释放交给私有队列上的 `dispatch_async`。串行队列保证这个块在当前回调返回之后才跑，所以正在跑的回调仍在用的状态（闭包、`Arc`）此前不会被释放。
+/// 这时 drop 先返回、当前回调继续跑完；之后不会再有第二次回调进入 `on_event`。线程局部的 `IN_CALLBACK` 防护与 `flush` 的是同一个。
 /// `Watcher: Send + Sync` [我的决定]：overlay 的 `Tracker` 持有它，flush 可以从任何线程调。
 pub struct Watcher { /* 私有 */ }
 impl Watcher {
     /// FSEventStreamFlushSync，然后对流的私有队列 dispatch_sync 一个空块（增补 7、8 "Event flush, amended"）。
-    /// **保证的**：返回时回调不在执行中（私有队列已排空）。`FlushSync` 的文档语义是把客户端里还在等 latency 计时器的事件推出来，实测没有观察到它起了可见的作用，不对它作承诺。
+    /// **保证的**：flush 返回时，排空之前已经排进队列的回调都已执行完。排空之后新到的回调不在保证之内（它可能在 flush 返回之前就开始执行）。`FlushSync` 的文档语义是把客户端里还在等 latency 计时器的事件推出来，实测没有观察到它起了可见的作用，不对它作承诺。
     /// **不保证的**：返回前已经完成的写入，其事件已经到齐。实测（§4.2 F）FlushSync 约 0.05 ms 就返回，写 20 到 50 个文件之后立刻调，返回时只送达 11% 到 35%；
     /// 其余的事件还在 fseventsd 那一头，id 甚至比调用前的 `FSEventsGetCurrentEventId()` 还小；写完睡 5 到 100 ms 再调也一样（0/500）。所以这是"尽力缩小窗口"，**不是屏障**，apfs 不提供屏障（§9）。
     /// 调用方要怎样做是 overlay 的决定：Before* 与 Manual 检查点做全量冷扫；ToolCall 检查点用钩子给的路径加 `flush`，没有路径的工具（Bash）选一次温扫或记下"晚到的写入落进下一个检查点"（§5.7）。
-    /// 同时被多个线程调用时互相串行。在 `on_event` 回调里调用会死锁：debug 构建 `debug_assert!` 拦住，release 构建立即返回、什么都不做。
+    /// 同时被多个线程调用时互相串行。在 `on_event` 回调里调用会让 libdispatch 以 `SIGTRAP` 杀掉整个进程（`dispatch_sync` 到自己所在的串行队列，实测；`FlushSync` 本身在回调里调用会正常返回）：debug 构建 `debug_assert!` 拦住，release 构建立即返回、什么都不做。
     pub fn flush(&self);
 }
 
@@ -403,6 +480,8 @@ pub fn watch_with(root: &Path, opts: &WatchOptions, on_event: impl Fn(WatchEvent
 /// 与 `case_fold_eq` 一致，由构造保证：`case_fold_eq(a, b) ⇔ case_fold_key(a) == case_fold_key(b)`（增补 7）。
 /// 键只存在内存里：它不是 NFC，所以不是 RepoPath，不能当路径用，也不能落盘或进 RPC（折叠表升级会改变键）。
 /// 按折叠身份做成员判断（集合、映射）用键，建一次、查多次，不做两两比较。
+/// 路径性质（裁定 "case_fold_key prefix property"）：`case_fold_key(a + "/" + b) == case_fold_key(a) + "/" + case_fold_key(b)`——`/` 是 NFD 不会重排的 starter，折叠把它映射到自己（§5.8）。
+/// overlay 对受限目录按键的前缀做范围查找，靠的就是它。
 pub fn case_fold_key(s: &str) -> String;
 /// APFS 大小写不敏感卷上两个名字是不是同一个：`a == b || case_fold_key(a) == case_fold_key(b)`。
 /// 大小写敏感的卷（`VolumeCaps.case_sensitive`）不该调用它：那里 `a` 和 `A` 是两个文件，RepoPath 的字节相等就是同一个名字。
@@ -416,7 +495,7 @@ pub mod seams {
     use std::ffi::OsStr;
 
     /// 本线程里，在每一次对"root 之下某个名字"的 `*at` 系统调用之前调用：逐级 `openat`（打开中间目录；`open_rooted`、`open_rooted_file`、
-    /// `clone_from_rooted` 打开终点那一次、`attrs_of` 取属性那一次也算）；目的地变体、`rename_rooted`、`remove_rooted`、`clone_from_rooted` 的 `fclonefileat` 落地的那一次调用；
+    /// `clone_from_rooted` 打开终点那一次、`attrs_of` 取属性那一次也算）；目的地变体、`rename_rooted`、`remove_rooted`、`clone_from_rooted` 的 `fclonefileat` 落地的那一次调用（`clone_file_rooted` 带 `Some(mode)` 时，克隆之后取回 dst 的那一次 `openat` 也算，step 接着数）；
     /// `remove_tree_rooted` 打开每个子目录那一次（逐条目的 `unlinkat` 不触发）；walk 打开子目录那一次，walk 解析 `start` 的每一级。
     /// step 是这次公开调用里从 0 起的序号（`rename_rooted` 先走 from 的各级，再走 to 的各级，最后是 renameatx_np 那一次；`clone_from_rooted` 先走 src 的各级和打开终点那一次，最后是 fclonefileat 那一次），name 是即将处理的名字。
     /// 回调里可以改文件系统：把目录换成符号链接、把文件换成 FIFO、删掉一个目录。线程局部，不影响别的线程里的测试。None = 清除。
@@ -435,14 +514,15 @@ pub mod seams {
 - 计划之外新增，各有调用方（§2 的表）：`open_rooted_file`；增补 3 要求的目的地变体 `clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`（名字与参数是我定的 [我的决定]，裁定只说了"create/clone a file or tree at a path resolved component by component"）；`attrs_of`（std 的 `fs::metadata` 读不到 gen count）；`Attrs::unchanged_since`；`volume_caps`；`walk_with` 与 `WalkOptions`；`seams`。
 - 修订轮（同日，增补 3 的 "Durability"、增补 4 的 gc guards 和 overlay 草稿的需求）又加了：`rename_rooted` 与 `RenameMode`、`full_fsync`、`list_dir`、`Attrs::last_changed`、`Attrs::gen_count_known` 与 `GEN_COUNT_UNAVAILABLE`，以及当时的 `unlink_rooted`、`rmdir_rooted`。overlay 的 restore 要 `RENAME_EXCL`、`RENAME_SWAP`、`unlinkat`、`mkdirat`、`symlinkat` 都经根之下钉住的父目录；gc 要 `max(mtime, ctime)`；扛断电的改名要 `F_FULLFSYNC` [我的决定]。
 - 第 1 轮评审（同日，增补 7、8）：名字按增补 8 改为 `RenameMode::Excl`（原 `Exclusive`）、`remove_rooted(root, path, RemoveKind::{File, EmptyDir})`（取代 `unlink_rooted`、`rmdir_rooted`）；新增 `remove_tree_rooted` 与 `RemoveReport`、`clone_from_rooted`、`open_root`、`classify_io_error` 与 `IoSide`（名字由 apfs 定 [我的决定]）、`nearest_existing_ancestor`、`case_fold_key`、`Watcher::flush`。
+- 第 2 轮评审与控制者裁定（同日，增补 8 之后）：`clone_from_rooted` 加 `kind: CloneKind`（在克隆之前核对种类；store 第 2 轮评审发现文件被换成目录时整棵树被克隆进 `store/tmp`）；`remove_tree_rooted` 遍历一开始就一律 `Ok(RemoveReport)`（`#[must_use]`、`is_complete()`、`Stuck.detail`、`StuckReason::UnknownOutcome` 与 `as_str`），目标可以是任何种类的条目，不再有 `Err` 形态的报告，也就没有 `to_detail`、`from_error`；新增 `make_removable`、`set_file_meta` 与 `FileMeta`（经句柄改元数据，共用的 inode 一律不动）；根必须规范（`root_not_canonical`）；`remove_rooted(EmptyDir)` 与 `remove_tree_rooted` 遇挂载点 → `CrossVolume`（`mount_point`）；`Watcher` 的 `Drop` 在回调里也安全；`clone_file_rooted` 的 `mode` 改经句柄设置。
 - 没有 `fence` 或任何"等监听追上"的接口：实测哨兵文件、事件 id 规则、哨兵加 `FlushSync` 加排空、从旧 id 重放历史再等 `HistoryDone`，四种候选屏障都做不成（§4.2 F、§9）。`Watcher::flush` 只是尽力缩小窗口，文档里写明它保证什么、不保证什么。
 
-**`detail` 的形状**：I/O 失败一律带 `errno`（数字）和 `path`（字符串）（types.md §6.3）。apfs 另用这几个键：`reason`（短标识）、`dst_exists`（布尔：失败之后 dst 是否存在）、`src_dev` 与 `dst_dev`（`CrossVolume`）、`fs_type`（`Unsupported`）、`created`（`mkdir_rooted` 部分建好的目录）、`from` 与 `to`（`rename_rooted` 的两个路径，`path` 是出问题的那一个）；`remove_tree_rooted` 没删干净时是 `RemoveReport` 的形状：`reason = "remove_tree_incomplete"`、`removed`、`flags_cleared`、`made_writable`、`stuck`（数组，每项 `{path, reason, errno}`）、`stuck_total`。`reason` 的取值：`trailing_slash`、`dst_inside_src`、`name_too_long`、`path_too_long`、`empty_target`、`symlink`、`not_a_directory`、`fifo`、`socket`、`device`、`too_deep`、`root_changed`、`unreadable_entry`；改名与删除另有 `same_path`、`into_itself`、`from_missing`、`to_missing`、`reparent_needs_write`、`immutable`、`no_permission`、`read_only_volume`、`busy`、`mount_point`；`StuckReason` 的取值是 `immutable`、`no_permission`、`other_device`、`busy`、`changed`、`unreadable`、`too_deep`、`io`。
+**`detail` 的形状**：I/O 失败一律带 `errno`（数字）和 `path`（字符串）（types.md §6.3）。apfs 另用这几个键：`reason`（短标识）、`dst_exists`（布尔：失败之后 dst 是否存在）、`src_dev` 与 `dst_dev`（`CrossVolume`；`mount_point` 的拒绝里是父目录与目标的设备号）、`fs_type`（`Unsupported`）、`created`（`mkdir_rooted` 部分建好的目录）、`from` 与 `to`（`rename_rooted` 的两个路径，`path` 是出问题的那一个）、`flags`（`make_removable`、`set_file_meta` 因 `SF_*` 拒绝时，置位的标志名数组）。`RemoveReport` 不进 `detail`（遍历开始之后没有 `Err`）；`StuckReason::as_str` 的蛇形名字是调用方自己写日志或 `detail` 时的词表。`reason` 的取值：`trailing_slash`、`dst_inside_src`、`name_too_long`、`path_too_long`、`empty_target`、`symlink`、`not_a_directory`、`fifo`、`socket`、`device`、`too_deep`、`root_changed`、`root_not_canonical`、`unreadable_entry`；改名、删除与改元数据另有 `same_path`、`into_itself`、`from_missing`、`to_missing`、`reparent_needs_write`、`immutable`、`hard_link`、`no_permission`、`read_only_volume`、`busy`、`mount_point`。
 
-**各函数的语义与可能返回的 `Code`**（"根"指 `root` 参数：它的祖先可以是符号链接，内核照常解析；它的最后一级用 `O_NOFOLLOW` 打开，所以根本身是符号链接 → `NotDirectory`，`reason = symlink`。调用方应传规范路径）：
+**各函数的语义与可能返回的 `Code`**（"根"指 `root` 参数：它的祖先可以是符号链接，内核照常解析；它的最后一级用 `O_NOFOLLOW` 打开，所以根本身是符号链接 → `NotDirectory`，`reason = symlink`。**root 必须是规范路径**：每个以 `root` 为参数的函数都在碰文件系统之前检查，不规范 → `InvalidInput`（`reason = root_not_canonical`），下面各条不再重复；`walk`、`list_dir` 把它作为第一项 `Err`）：
 
 - **`same_volume`**：见 §5.1。没有 `Code`，返回 `io::Result`；`store::open` 把 `false` 变成 `CrossVolume`。
-- **`nearest_existing_ancestor`**：见 §5.1。没有 `Code`，返回 `io::Result`：相对路径 → `InvalidInput` 种类的 `io::Error`，`stat` 的非 `ENOENT`、`ENOTDIR` 错误原样。
+- **`nearest_existing_ancestor`**：见 §5.1。没有 `Code`，返回 `io::Result`：相对路径 → `InvalidInput` 种类的 `io::Error`，`stat` 的非 `ENOENT`、`ENOTDIR` 错误原样。要变成 `StrataError` 的调用方用 `classify_io_error(&e, IoSide::Read, path)`（读侧的 `EACCES` 是 `Unknown`）。
 - **`volume_caps`**：见 §5.1。`NoSuchPath`、`Unknown`。`fs_type` 不是 `apfs` 本身不是错误，由调用方决定。
 - **`classify_io_error`**：纯函数，不失败；返回的 `Code` 见 §4.2 I 的表。
 - **`clone_tree`**：见 §5.2。`NoSuchPath`（src 不存在，或 dst 的父目录不存在）、`NotDirectory`（src 不是目录，符号链接也算；dst 的父级不是目录）、`Exists`（dst 已存在，含悬空符号链接，含 dst 就是 src）、`CrossVolume`（`detail` 带 `src_dev`、`dst_dev`）、`Unsupported`（卷不支持 clonefile，`detail.fs_type`）、`InvalidInput`（dst 以 `/` 结尾、dst 在 src 里面、分量超 255 个码元、路径达到 1024 字节）、`ReadOnly`（`EACCES`、`EPERM`、`EROFS`：dst 的父目录不可写，**或者源树里有不可读的条目**，message 同时写明两种可能）、`Unknown`（`ENOSPC`、`EIO`、`EDEADLK`、描述符耗尽等；`detail.dst_exists` 如实写）。失败之后 dst 不存在（clonefile 原子，实测）；apfs 不删除任何东西。
@@ -450,17 +530,19 @@ pub mod seams {
 - **`open_root`**：见 §5.4。`NoSuchPath`、`NotDirectory`（不是目录；本身是符号链接时 `reason = symlink`）、`Unknown`（读取侧的 `EACCES` 等，`detail.errno` 带原值）。
 - **`open_rooted`**：见 §5.4。`NoSuchPath`、`NotDirectory`（中间一级不是目录；是符号链接时 `reason = symlink`）、`NotFile`（最后一级是符号链接 `reason = symlink`、socket、设备文件）、`InvalidInput`（`ENAMETOOLONG`：名字或整条路径超限）、`Unknown`（读取侧的 `EACCES`：types.md §6.3 的表里只有写操作的权限错误才是 `ReadOnly`，`detail.errno` 带原值；其余 errno 一律 `Unknown`）。
 - **`open_rooted_file`**：同上，另加 `IsDirectory`、`NotFile`（FIFO：已经以非阻塞方式打开并关掉了，不会挂住）。
-- **`clone_from_rooted`**：见 §5.4。源这一侧的码同 `open_rooted_file`（`NoSuchPath`、`NotDirectory`、`NotFile`，目录与普通文件都接受，所以没有 `IsDirectory`）；目的这一侧与卷的码同 `clone_file`（`Exists`、`NoSuchPath`、`NotDirectory`、`CrossVolume`、`Unsupported`、`InvalidInput`、`ReadOnly`、`Unknown`）。失败之后 dst 不存在。
-- **目的地变体**：见 §5.4。共同的：`NoSuchPath`（父目录缺失）、`NotDirectory`（中间一级是文件或符号链接，什么都没写）、`Exists`、`ReadOnly`（写侧的 `EACCES`、`EPERM`、`EROFS`）、`InvalidInput`（`ENAMETOOLONG`；`symlink_rooted` 的目标为空）、`Unknown`。`clone_file_rooted` 与 `clone_tree_rooted` 另有 `clone_file`、`clone_tree` 的源侧与卷的码（`IsDirectory`、`NotFile`、`NotDirectory`、`CrossVolume`、`Unsupported`）。**写入开始之后的失败一律 `Unknown`**（不变量 6）：`clone_file_rooted` 克隆成功而设 mode 失败，克隆出的文件留着（`dst_exists = true`）；`mkdir_rooted(parents = true)` 建了几级之后失败，已建的留着，`detail.created` 列出它们。
+- **`clone_from_rooted`**：见 §5.4。源这一侧，都在 `fclonefileat` 之前、什么都没克隆：`NoSuchPath`；`NotDirectory`（某一级父目录是文件或符号链接；`Dir` 时源不是目录，或本身是符号链接）；`IsDirectory`（`File` 而源是目录）；`NotFile`（`File` 而源是符号链接、FIFO、socket、设备）。目的这一侧与卷的码同 `clone_file`（`Exists`、`NoSuchPath`、`NotDirectory`、`CrossVolume`、`Unsupported`、`InvalidInput`、`ReadOnly`、`Unknown`）。失败之后 dst 不存在。
+- **目的地变体**：见 §5.4。共同的：`NoSuchPath`（父目录缺失）、`NotDirectory`（中间一级是文件或符号链接，什么都没写）、`Exists`、`ReadOnly`（写侧的 `EACCES`、`EPERM`、`EROFS`）、`InvalidInput`（`ENAMETOOLONG`；`symlink_rooted` 的目标为空）、`Unknown`。`clone_file_rooted` 与 `clone_tree_rooted` 另有 `clone_file`、`clone_tree` 的源侧与卷的码（`IsDirectory`、`NotFile`、`NotDirectory`、`CrossVolume`、`Unsupported`）。**写入开始之后的失败一律 `Unknown`**（不变量 6）：`clone_file_rooted` 克隆成功而经句柄设 mode 失败（含 `set_file_meta` 的 `hard_link`、`immutable` 拒绝：那时已经写过了，不再是具名的 `ReadOnly`），克隆出的文件留着（`dst_exists = true`）；`mkdir_rooted(parents = true)` 建了几级之后失败，已建的留着，`detail.created` 列出它们。
 - **`rename_rooted`**：见 §5.4。`InvalidInput`（`same_path`、`into_itself`、`name_too_long`，以及内核的 `EINVAL`）、`NoSuchPath`（`from` 不存在，`reason = from_missing`；`Swap` 时 `to` 不存在，`to_missing`；任一方的父级不存在）、`NotDirectory`（任一方的某一级是文件或符号链接，`reason = symlink`）、`Exists`（`Excl` 时 `to` 已存在，含悬空符号链接）、`CrossVolume`（跨卷，含跨嵌套挂载点；`detail.src_dev`、`dst_dev`）、`Unsupported`（`Swap` 在不支持的文件系统上，如 HFS+；`detail.fs_type`）、`ReadOnly`（`EACCES`、`EPERM`、`EROFS`；`detail.reason` 是 `reparent_needs_write`、`immutable`、`no_permission` 或 `read_only_volume`）、`Unknown`（`ENOSPC`、`EIO`、`EBUSY` 等）。单次系统调用：失败时什么都没动。
-- **`remove_rooted`**：见 §5.4。`kind = File`：`NoSuchPath`、`NotDirectory`（某一级父目录是文件或符号链接）、`IsDirectory`（目标是目录；内核对它给的是 `EPERM`，要靠 `fstatat` 区分）、`ReadOnly`（`immutable`、`no_permission`、`read_only_volume`）、`Unknown`。`kind = EmptyDir`：`NoSuchPath`、`NotDirectory`（目标是文件或符号链接，符号链接指向的地方不被碰；或某一级父目录不是目录）、`NotEmpty`、`ReadOnly`（同上）、`Unknown`（`EBUSY`：目标是挂载点，`reason = busy`）。
-- **`remove_tree_rooted`**：见 §5.4。遍历开始之前：`NoSuchPath`、`NotDirectory`（目标本身是文件或符号链接，`reason = symlink` 或 `not_a_directory`；某一级父目录是符号链接或文件）、`ReadOnly`（目标的父目录对调用者不可写或带不可变标志，`reason = no_permission` 或 `immutable`；这时树一个字节也没动）、`Unknown`（`reason = mount_point`：目标本身是挂载点）。开始之后：`Ok(RemoveReport)` 只在树整个没了时；否则 `Unknown`，`detail` 是 `RemoveReport` 的形状（`from_error` 读回），哪怕一个条目都没删成。
+- **`remove_rooted`**：见 §5.4。`kind = File`：`NoSuchPath`、`NotDirectory`（某一级父目录是文件或符号链接）、`IsDirectory`（目标是目录；内核对它给的是 `EPERM`，要靠 `fstatat` 区分）、`ReadOnly`（`immutable`、`no_permission`、`read_only_volume`）、`Unknown`。`kind = EmptyDir`：`NoSuchPath`、`NotDirectory`（目标是文件或符号链接，符号链接指向的地方不被碰；或某一级父目录不是目录）、`NotEmpty`（`ENOTEMPTY`：types.md 已有的码，T15 给它的"谁返回"加 `apfs`、含义放宽成"要删的目录非空"，§9）、`CrossVolume`（`reason = mount_point`：目标是挂载点，调内核之前就判出，晚到的 `EBUSY` 同样映射，不是 `Unknown`）、`ReadOnly`（同上）、`Unknown`。
+- **`remove_tree_rooted`**：见 §5.4。遍历之前的拒绝，树一个字节也没动：`NoSuchPath`、`NotDirectory`（某一级父目录是符号链接或文件；目标本身是什么种类都可以）、`ReadOnly`（目标的父目录对调用者不可写或带不可变标志，`reason = no_permission` 或 `immutable`）、`CrossVolume`（`reason = mount_point`：目标是目录而且本身是挂载点）。**遍历一开始就是 `Ok(RemoveReport)`，没有别的返回**：没删掉的条目（ACL、标志、硬链接、嵌套挂载点、被换掉的、太深的、`EBUSY`、unlink 结果不确定的）都在 `stuck` 里带原因（§5.4 的 stuck 原因表），哪怕一个条目都没删成；调用方看 `is_complete()`。
+- **`make_removable`**：见 §5.4。`ReadOnly`（`hard_link`：非目录而 `st_nlink > 1`；`immutable`：`SF_IMMUTABLE`、`SF_APPEND` 置位，`detail.flags` 列出；写侧的 `EACCES`、`EPERM`、`EROFS`，`reason` 的判法同 `rename_rooted`），这些都是第一处改动之前的拒绝，什么都没动；清了标志而补写位失败 → `Unknown`（标志已清）。
+- **`set_file_meta`**：见 §5.4。接受普通文件与目录；拒绝，什么都没改：`NotFile`（FIFO、socket、设备、符号链接）、`ReadOnly`（`hard_link`：非目录而 `st_nlink > 1`；`immutable`：`SF_IMMUTABLE`、`SF_APPEND` 置位，`detail.flags` 列出）；第一项改动之前的 `EACCES`、`EPERM`、`EROFS` 也是 `ReadOnly`（`reason` 的判法同 `rename_rooted`）。第一项改动生效之后的失败 → `Unknown`（部分已改）。
 - **`full_fsync`**：见 §5.4。`Unsupported`（`ENOTSUP`）、`Unknown`（其它 errno；持久性不确定，调用方按"没有落盘"处理）。
 - **`attrs_of`**：见 §5.5。`NoSuchPath`、`NotDirectory`、`Unknown`（读取侧的 `EACCES` 等）。
 - **`walk` / `walk_with`**：见 §5.6。迭代器本身不失败；起点问题是第一项 `Err`（`NoSuchPath`、`NotDirectory`）；单个条目的问题是 `Err` 项，遍历继续：`NotText`（目录项名字不是 UTF-8，APFS 上建不出这样的名字，实测 `EILSEQ`，所以只有记录解析器的单元测试到得了）、`TooLarge`（`reason = too_deep`：深度超过 `MAX_WALK_DEPTH`，增补 8，[我的决定] 码的含义宽于 types.md §6.2，§9）、`Unknown`（目录不可读，`reason = unreadable_entry`，`detail.errno`），以及末尾的 `Busy`（`reason = root_changed`：遍历中根被换掉，增补 8，同样宽于 types.md §6.2 的原意，§9）。
 - **`list_dir`**：同 `walk_with` 在 `start = dir`、`max_depth = Some(1)` 时：dir 不存在或某一级不是目录是第一项 `Err`，条目问题是 `Err` 项。
 - **`watch` / `watch_with`**：见 §5.7。`NoSuchPath`、`NotDirectory`（root 不是目录）、`Unknown`（FSEvents 流建不起来或启动失败）。运行中的事件丢失不是错误，是 `WatchEvent::Dropped` 与 `MustRescan`。
-- **`Watcher::flush`**、**`case_fold_key`**、**`case_fold_eq`**、**`Attrs::unchanged_since`**：不失败。
+- **`Watcher::flush`**、**`case_fold_key`**、**`case_fold_eq`**、**`Attrs::unchanged_since`**、**`StuckReason::as_str`**、**`RemoveReport::is_complete`**：不失败。`drop(Watcher)` 也不失败（在回调里 drop 见 §5.7）。
 
 ## 4. 数据与不变量
 
@@ -489,7 +571,7 @@ pub mod seams {
 | `CLONE_NOFOLLOW` 管不到 dst | 它只管 src 的最后一级。dst 以路径给出时，中间的符号链接照样被跟随：`clonefileat(AT_FDCWD, src, rfd, "evil/pwn", CLONE_NOFOLLOW\|CLONE_NOOWNERCOPY)`（`evil` 是指向根外的符号链接）实测把文件写到了根外。这就是增补 3 要目的地变体的原因 |
 | 两个新 flag 不能用在路径形态上 | `CLONE_NOFOLLOW_ANY`（穿过任何符号链接 → `ELOOP`）与 `CLONE_RESOLVE_BENEATH`（越界 → `ENOTCAPABLE`）**同时作用于 src 与 dst**：src 是绝对路径，或路径上有符号链接祖先（`/tmp/…`），一律失败。所以目的地变体改用"先钉住父目录的句柄，再用单个分量落地"，flags 只传 `CLONE_NOFOLLOW\|CLONE_NOOWNERCOPY` |
 | man page 的告诫 | `man 2 clonefile`（2021-06）写着"强烈不建议用于目录，请改用 `copyfile(3)`"。实测 `copyfile(COPYFILE_CLONE_FORCE)` 不支持目录，`COPYFILE_RECURSIVE\|COPYFILE_CLONE` 是逐文件克隆、可退化成字节复制、不原子，正是本模块要避免的。决定保留 `clonefile(2)` 克隆目录（§9）。已知代价：克隆不是并发写入的源目录的快照（deps.md 用前后两次 `walk` 兜住） |
-| 从句柄克隆（`fclonefileat`，`clone_from_rooted` 的依据） | 句柄用 `openat(O_RDONLY\|O_NOFOLLOW\|O_NONBLOCK\|O_CLOEXEC)` 取得，文件和目录都行（实测）：克隆保留的东西同上（文件的 mtime 是源的，ctime 是现在，`uchg` 与扩展属性带过去）。源是 FIFO、字符设备 → `EINVAL`（所以先 `fstat` 分类）；mode 000 的文件在 `open` 那一步就 `EACCES`；socket 打不开（`EOPNOTSUPP`）。dst 的各种情形与 `clonefile` 一致：已存在 → `EEXIST`（悬空符号链接、已有的目录也是），父目录不存在 → `ENOENT`，末尾带 `/` → `ENOENT` |
+| 从句柄克隆（`fclonefileat`，`clone_from_rooted` 的依据） | 句柄用 `openat(O_RDONLY\|O_NOFOLLOW\|O_NONBLOCK\|O_CLOEXEC)` 取得，文件和目录都行（实测）：克隆保留的东西同上（文件的 mtime 是源的，ctime 是现在，`uchg` 与扩展属性带过去）。源是 FIFO、字符设备 → `EINVAL`（所以先 `fstat` 分类）；源是目录时克隆整棵树（实测），所以分类之后还要与调用方说明的 `CloneKind` 核对：种类不符就拒绝，不调 `fclonefileat`（目录对 `File` → `IsDirectory`，FIFO、设备对 `File` → `NotFile`，非目录对 `Dir` → `NotDirectory`）；mode 000 的文件在 `open` 那一步就 `EACCES`；socket 打不开（`EOPNOTSUPP`）。dst 的各种情形与 `clonefile` 一致：已存在 → `EEXIST`（悬空符号链接、已有的目录也是），父目录不存在 → `ENOENT`，末尾带 `/` → `ENOENT` |
 | 句柄钉住对象（交换测试的依据） | 打开之后把源路径换成指向根外的符号链接（文件、目录各试一次）：克隆出来的仍是被打开的那个原对象，根外的内容一个字节也没进来。对照，按路径的 `clonefile`：flags 为 0 时跟着符号链接克隆了根外的东西，带 `CLONE_NOFOLLOW` 时克隆的是链接本身，两种都不是调用方要的。所以源在工作区里的克隆必须经句柄，不能经路径（评审 I2） |
 | 句柄的跨卷 | 句柄在一个卷、dst 在另一个卷（文件句柄、目录句柄，dst 用路径或 dirfd 加名字）→ `EXDEV`，dst 不存在；dst 已存在而且在另一个卷 → `EEXIST`；dst 的父目录不存在而且在另一个卷 → `ENOENT`，与按路径的 `clonefile` 同一个优先级 |
 | 耗时 | 见 §5.9 |
@@ -559,6 +641,8 @@ pub mod seams {
 | `clonefileat(…, dirfd, "name", …)` | dst 已存在，哪怕是悬空符号链接 | `EEXIST` |
 | `openat(O_RDONLY\|O_SYMLINK\|O_NONBLOCK)` | 最后一级是符号链接 | 打开的是链接本身（没有 `ELOOP`）；同一个调用对文件、目录、FIFO 也成功。`fchflags` 可以作用在这样的句柄上（§4.2 H） |
 | `openat(O_EVTONLY\|…)` | mode 000 的文件或目录 | `EACCES`：并不绕开读权限 |
+| `openat(O_RDONLY\|O_DIRECTORY\|O_NOFOLLOW)`，路径以 `/` 或 `/.` 结尾 | 最后一级是指向目录的符号链接 | **成功，跟随了链接**：`lnk/`、`lnk//`、`lnk/.` 都打开了链接指向的目录，只有不带斜杠的 `lnk` 是 `ENOTDIR`（2026-10-22，macOS 27.0.1）。`O_NOFOLLOW` 只管路径的最后一个分量，结尾的 `/` 让内核把它当目录解析。`./realdir`、`realdir/../realdir` 也能打开。所以根必须是规范路径（`root_not_canonical`，§3、§5.4） |
+| `openat(O_EXEC\|O_NOFOLLOW)`（目录再加 `O_DIRECTORY`） | 属主有执行位（目录的搜索位）而没有读位的目录或文件（0100） | **成功**，而 `O_RDONLY` 是 `EACCES`；对这个句柄 `fchflags`（清 `uchg`）、`fchmod` 都成功，之后 `O_RDONLY` 重开也成功。属主没有执行位的（000、0200）：`O_RDONLY`、`O_EVTONLY`、`O_SYMLINK`、`O_EXEC` 对目录和文件全是 `EACCES`，没有句柄可取（2026-10-22，macOS 27.0.1；下限 macOS 26 没测）。§4.2 H 用它缩小了清不掉标志的角落 |
 | 路径 `/dev/fd/N/name`（N 是目录句柄） | 想把"相对 dirfd 的路径"交给只收路径的 `lchflags` | `ENOENT`，解析不了 |
 | `renameatx_np`、`unlinkat` 的权限类 errno | 不在这张表里，见 §4.2 G | 目录改父级要写权限（0555 → `EACCES`，同一个父目录之内改名成功）；带 `UF_IMMUTABLE` 的改名与删除 → `EPERM`；`unlinkat(目录, 0)` → `EPERM`（不是 `EISDIR`）。根之下的操作把它们归成具名的码（§4.2 I） |
 
@@ -576,7 +660,8 @@ pub mod seams {
 | latency 参数 | 0.0、0.05、0.5 三档对丢事件没有看得出来的影响（30,000 次创建，每档 0 到 7 个 `MustScanSubDirs`） |
 | 送达延迟 | 从操作到回调 15 ms 到 3.3 s 不等：同一台机器、负载相近（8 到 9）时，平均 15 ms 的运行和平均 0.5 到 1.7 s 的运行前后相继出现 |
 | 事件 id | 洪泛下同一批里的 id 会回退，不依赖 id 的顺序；fseventsd 分配 id 的顺序与写入的顺序不一致（见下面的候选 2） |
-| `FlushSync`（`Watcher::flush` 的第一步） | 在 dispatch queue 的流上约 0.05 ms 就返回。写 50 个文件之后立刻调，返回时只送达 57/500（11%，2026-10-22 18:00 复测）；加上对私有队列的排空是 134/500（27%，评审），排空单独 24/500；评审的 20 个事件那一轮是 6 到 7 个。本轮另做了一次同样的复测（写 50 个文件、立刻 `FlushSync` 加排空、10 轮）：返回时 0/500，返回后 1.5 s 内一个也没到；同一次运行里的对照组（只排空）在 1.5 s 内也只到了 95/500——那段时间的送达延迟远大于评审那次，数据不干净，只拿它当"0 到 35%"这个范围的下端。写完睡 5、20、100 ms 再调，返回时送达 0/500：留在 fseventsd 那一头的事件，`FlushSync` 够不着。晚到的事件里，id 小于等于调用前 `FSEventsGetCurrentEventId()` 的占多数（评审 201 个；复测 267 对 176 个）：这个 id 快照低估了在途的事件。能确定的效果只有一个：配上对私有队列的排空，返回时回调不在执行。`FlushSync` 的文档语义是把客户端里还在等 latency 计时器的事件推出来，复测里没有观察到它起了可见的作用（送达 0 到 35%），所以不对它作承诺 |
+| `FlushSync`（`Watcher::flush` 的第一步） | 在 dispatch queue 的流上约 0.05 ms 就返回。写 50 个文件之后立刻调，返回时只送达 57/500（11%，2026-10-22 18:00 复测）；加上对私有队列的排空是 134/500（27%，评审），排空单独 24/500；评审的 20 个事件那一轮是 6 到 7 个。本轮另做了一次同样的复测（写 50 个文件、立刻 `FlushSync` 加排空、10 轮）：返回时 0/500，返回后 1.5 s 内一个也没到；同一次运行里的对照组（只排空）在 1.5 s 内也只到了 95/500——那段时间的送达延迟远大于评审那次，数据不干净，只拿它当"0 到 35%"这个范围的下端。写完睡 5、20、100 ms 再调，返回时送达 0/500：留在 fseventsd 那一头的事件，`FlushSync` 够不着。晚到的事件里，id 小于等于调用前 `FSEventsGetCurrentEventId()` 的占多数（评审 201 个；复测 267 对 176 个）：这个 id 快照低估了在途的事件。能确定的效果只有一个：配上对私有队列的排空，排空之前已排进队列的回调，返回时都跑完了（排空之后新到的回调不在内）。`FlushSync` 的文档语义是把客户端里还在等 latency 计时器的事件推出来，复测里没有观察到它起了可见的作用（送达 0 到 35%），所以不对它作承诺 |
+| 在回调里再进回调所在的队列（`Watcher::flush`、`drop(Watcher)` 的防护依据） | 回调里 `dispatch_sync(自己的流队列, {})`：进程被 libdispatch 以 `SIGTRAP` 杀掉（退出码 133），**不是死锁**；`FSEventStreamStop`、`Invalidate`、`Release` 之后再 `dispatch_sync` 同样 `SIGTRAP`；回调里调 `FSEventStreamFlushSync(自己的流)` 正常返回。回调里 `Stop` + `Invalidate` 之后把 `Release` 放进 `dispatch_async(自己的队列, …)`：回调跑到结尾，它用到的状态一直有效，之后没有第二次回调，进程不崩（`drop(Watcher)` 在回调里的做法）。探针 `dropcb`、`dropcb2`（2026-10-22）共 241 轮：12 轮失败全在一次运行里（可见的 5 条是那条流一个事件都没收到，另 7 条的记录被截断没看；那次运行紧接在几个被 `SIGTRAP` 杀掉的探针之后，原因没有查），之后的 216 轮（含 8 路 CPU 负载下的 25 轮）0 失败 |
 | 候选屏障 1：哨兵文件 | 往被监听的位置写一批文件再写哨兵，等哨兵的事件回来：慢速写入（1200 对，间隔 15 ms）没有一次乱序；一口气写 50 或 200 个文件再写哨兵时，评审在 40 轮里测到哨兵排到这批事件之前**多达 10 轮**，初稿测到 1 到 4 轮，两次测量的差别本身说明它与负载有关。2026-10-22 复测，写入由独立进程做（像一次工具调用）：同一目录 20 个文件 0/40 轮；200 个文件 4/40 轮和 31/40 轮（两次运行，后一次的流上出现了 22 个丢事件标志，不是安静的数据）；分在 8 个目录的 200 个文件 16/40 轮（这一轮的流上同样出现了 13 个丢事件标志）；迟到的事件的 id 无一例外大于哨兵事件的 id（262、1,886、4,484 个，没有一个小于的） |
 | 候选屏障 2：事件 id 规则 | 等到收到 id ≥ 写完之后读到的 `FSEventsGetCurrentEventId()` 的事件：评审测得安静时 17/30 轮有文件没被覆盖（6,000 个里 959 个），洪泛时 30/30 轮；迟到事件的 id 比写完之后读到的 id 大 31% 到 45%。fseventsd 的 id 不按写入顺序分配，这条规则从原理上就站不住 |
 | 候选屏障 3：哨兵 + `FlushSync` + 排空 | 评审：安静的流上两次各 40 轮、0 轮不完整（只看哨兵是 7 到 8/40）。同一台机器上的复测不同：只看哨兵，与哨兵之后再加 `FlushSync` 和排空，不完整的轮数一模一样（200 个文件的爆发，两个探针分别是 7/40 与 37/40；50 个文件是 21/40）——`FlushSync` 与排空没有让任何一轮变得完整。评审：一个兄弟目录里每秒约 2 万个文件的洪泛下 26/30 轮不完整，系统负载高时 39/40 |
@@ -592,7 +677,7 @@ pub mod seams {
 | 同一个条目 | from 与 to 是同一个路径时，EXCL、SWAP 和普通改名都返回成功而什么都不做；大小写不敏感的卷上只差大小写的 EXCL 改名（`Foo` 到 `foo`）也成功，改的是磁盘上的拼写。所以 `rename_rooted` 在调内核之前把 RepoPath 完全相同的情形拦成 `InvalidInput`（`same_path`），只差拼写的交给内核 |
 | `RENAME_SWAP` | 文件与文件、文件与目录、目录与目录（同一个父目录或不同的父目录）、符号链接与文件，都成功；各对象的 inode、mtime、gen count 跟着对象走，换的只是名字（实测：换完之后 `x` 名下是原来 `y` 的 inode、mtime 和 gen count）；任一边不存在 → `ENOENT`；跨卷 → `EXDEV`。HFS+ 镜像上 → `ENOTSUP`，MS-DOS 镜像上成功 |
 | 目录改名进自己里面 | EXCL 与 SWAP 都是 `EINVAL`（to 在 from 之下；SWAP 一个目录与它的后代） |
-| 改目录的父级要写权限 | 把目录改名到另一个父目录，要求对这个目录本身有写权限（它的 `..` 要改）：0555 的目录 → `EACCES`；`RENAME_SWAP` 里有 0555 的目录、且两个目录在不同的父目录下，同样 `EACCES`；同一个父目录之内改名，或对调（`d1` 是 0555、`d2` 是 0755），成功；`chmod u+w` 之后改父级成功。所以 deps 先改名、后 `chmod 0555`；gc 和 `retire_dir` 挪走已封存的目录之前先 `chmod u+w`（增补 4 与 6 的"控制者实测"，这里在本机重做了一遍，结果一致） |
+| 改目录的父级要写权限 | 把目录改名到另一个父目录，要求对这个目录本身有写权限（它的 `..` 要改）：0555 的目录 → `EACCES`；`RENAME_SWAP` 里有 0555 的目录、且两个目录在不同的父目录下，同样 `EACCES`；同一个父目录之内改名，或对调（`d1` 是 0555、`d2` 是 0755），成功；`chmod u+w` 之后改父级成功。所以 deps 先改名、后把 mode 设成 0555（`set_file_meta`）；gc 和 `retire_dir` 挪走已封存的目录之前先 `make_removable`（先清标志、再补 u+w，次序见 §4.2 H；增补 4 与 6 的"控制者实测"，这里在本机重做了一遍，结果一致） |
 | 父目录与标志 | 文件挪出 0555 的父目录、或挪进 0555 的父目录 → `EACCES`；带 `UF_IMMUTABLE` 的文件或目录改名，或从带 `UF_IMMUTABLE` 的目录里挪出 → `EPERM` |
 | 挂载点 | `rmdir`、`unlink` 一个挂载点 → `EBUSY`；改名一个挂载点目录成功，挂载跟着走 |
 | `unlinkat(fd, name, 0)` | 文件、符号链接（指向文件、指向目录、悬空）、FIFO → 成功，符号链接只删链接，目标不动；目标是**目录** → `EPERM`（不是 Linux 的 `EISDIR`）；不存在 → `ENOENT`；带 `UF_IMMUTABLE` → `EPERM`；父目录是 0555 → `EACCES`。所以 `EPERM` 要靠 `fstatat` 区分"是目录"还是"带标志" |
@@ -600,17 +685,23 @@ pub mod seams {
 | 时间戳 | `clonefile`：克隆出的文件和空目录的 mtime 是来源的（实测 2020 年），有子项的目录的 mtime 是克隆那一刻（目录树里每个有子项的目录都是；`inner` 是空的、`onlysub` 里只有它，则 `inner` 是 2020 年、`onlysub` 是克隆那一刻），所有对象的 ctime 都是克隆那一刻；改名只更新被改名对象的 ctime（它的 mtime 不动），两个父目录的 mtime 与 ctime 都更新；目录改到另一个父目录同样只更新目录自己的 ctime；`RENAME_SWAP` 更新两个对象的 ctime；`chmod`、`chflags`、`setxattr` 只更新 ctime；`utimensat` 把 mtime 设成给定值、ctime 设成现在；写入两者都更新。只看 mtime 会把刚克隆、刚改名的东西当成很老，所以 gc 的年龄是 `max(mtime, ctime)`（增补 4），apfs 用 `Attrs::last_changed` 给出它 |
 | `F_FULLFSYNC` | 对 `O_RDONLY\|O_NOFOLLOW\|O_NONBLOCK` 打开的普通文件句柄和目录句柄（正是 `open_rooted` 给的）都成功；HFS+、MS-DOS 和挂载的 APFS 镜像上也成功。对管道、socket 的句柄 → `EBADF`，`/dev/null` → `ENODEV`。USB SSD 上两次测量：文件 10 ms 与 12 ms，建文件加改名之后对目录 26 ms 与 4 ms，没有脏数据时近乎 0；不是常数，只说明量级 |
 
-**H. 删除一整棵树与清标志**（2026-10-22 第 1 轮评审，同一台机器；探针在内部卷的临时目录里，一棵含下列各类条目的树，删完之后核对根外的目录原样；`remove_tree_rooted` 的依据）
+**H. 删除一整棵树、清标志与改元数据**（2026-10-22 第 1 轮评审，同一台机器；探针在内部卷的临时目录里，一棵含下列各类条目的树，删完之后核对根外的目录原样；`remove_tree_rooted`、`make_removable`、`set_file_meta` 的依据。第 2 轮补的几行是同日在同一台机器上用独立探针量的）
 
 | 项 | 行为 |
 | --- | --- |
 | 受保护的条目删不掉 | 带 `UF_IMMUTABLE` 的文件、符号链接（`chflags -h uchg`）、目录，带 `UF_APPEND` 的文件、目录：`unlinkat` 与 `AT_REMOVEDIR` 都是 `EPERM`；`UF_APPEND` 的目录里再 `unlinkat` 一个条目也是 `EPERM`。五类各一个的探针树里，清标志的次数正好是 5 |
-| 清标志只能经句柄 | 对条目取句柄，再 `fchflags(fd, flags & ~(UF_IMMUTABLE\|UF_APPEND))`：文件与目录的句柄用 `openat(O_RDONLY\|O_NOFOLLOW\|O_NONBLOCK)`（目录再加 `O_DIRECTORY`）；**符号链接**用 `openat(O_RDONLY\|O_SYMLINK\|O_NONBLOCK)`（打开的是链接本身），清了之后链接删得掉（带 `uchg` 的符号链接：清之前 `unlinkat` 得 `EPERM`，清之后成功）。取到句柄之后核对 (dev, inode) 与 `fstatat` 看到的一致，防止这中间条目被换掉 |
+| 清标志只能经句柄 | 对条目取句柄，再 `fchflags(fd, flags & ~(UF_IMMUTABLE\|UF_APPEND))`：文件与目录的句柄用 `openat(O_RDONLY\|O_NOFOLLOW\|O_NONBLOCK)`（目录再加 `O_DIRECTORY`）；**符号链接**用 `openat(O_RDONLY\|O_SYMLINK\|O_NONBLOCK)`（打开的是链接本身），清了之后链接删得掉（带 `uchg` 的符号链接：清之前 `unlinkat` 得 `EPERM`，清之后成功）。取到句柄之后核对 (dev, inode) 与 `fstatat` 看到的一致，防止这中间条目被换掉；非目录还要再 `fstat` 看一遍 `st_nlink`，大于 1 就不清（见"共用的 inode"） |
 | 不用 `fchflagsat` | SDK 标它 macOS 27.0 起才有，libc 0.2.191 没有导出，而 design 的下限是 macOS 26：不采用，句柄版本的 `fchflags` 够用（§9）。代价是下一行的那个角落 |
-| 没有读权限的条目 | mode 000 的**目录**：`openat(O_RDONLY\|O_DIRECTORY)` → `EACCES`；对属主，`fchmodat(P, name, mode\|0700, AT_SYMLINK_NOFOLLOW)` 成功，之后能打开、能列、能删。mode 000 的**文件**：删它只要父目录可写，`unlinkat` 直接成功。mode 0555 的目录：能打开，但要删里面的条目得先 `fchmod(fd, mode\|0700)`。**既带 `uchg` 又没有读权限的非目录**：要清标志就得先取句柄，`O_RDONLY` 与 `O_EVTONLY` 都是 `EACCES`，带 `uchg` 的文件又不能 `chmod`（`EPERM`），也没有路径可交给 `lchflags`——这个角落在 macOS 26 上无解，报 `Immutable`（macOS 27 的 `fchflagsat` 能解，不采用） |
-| 修不好的条目 | ACL 里有 `deny delete` 的文件：`unlinkat` → `EACCES`，没有办法修复，进 `stuck`（`NoPermission`），树里其余的东西照常删光（探针：26 项删掉，1 项留下）。`SF_*` 系统标志要 root |
-| 不跟随、不越界 | 符号链接（指向文件、悬空、指向根外目录）、FIFO、unix socket：只删节点本身；硬链接：只删这个名字，其它名字与 inode 不动。探针里根外目录的两个文件原样 |
-| 嵌套挂载点 | 对挂载点的名字 `fstatat(NOFOLLOW)` 得到被挂载卷根目录的属性，`st_dev` 与父目录的不同（探针里 16777258 对 16777233），据此不进入、不删（`OtherDevice`）；对它 `AT_REMOVEDIR` 是 `EBUSY`（§4.2 G）。探针：树里别处全部删光，挂载点和卷里的文件原样 |
+| 没有读权限的条目 | mode 000 的**目录**：`openat(O_RDONLY\|O_DIRECTORY)`、`O_EVTONLY`、`O_SYMLINK`、`O_EXEC` 对属主全是 `EACCES`，没有句柄可取；这时只有按名字的 `fchmodat(P, name, mode\|0700, AT_SYMLINK_NOFOLLOW)` 一条路，对属主成功（探针：0000 → 0700），之后能打开、能列、能删（这是 `remove_tree_rooted` 里唯一一处按名字改 mode，残余风险见下一行）。**属主有执行位而没有读位**的目录（0100）：`O_RDONLY` 是 `EACCES`，但 `openat(O_EXEC\|O_DIRECTORY\|O_NOFOLLOW)` 成功（§4.2 E），在这个句柄上 `fchflags` 清 `uchg`、`fchmod` 补 `0700` 都成功，之后 `O_RDONLY` 重开就能列——所以这类目录不走按名字的那一条。mode 000 的**文件**：删它只要父目录可写，`unlinkat` 直接成功。mode 0555 的目录：能打开，但要删里面的条目得先 `fchmod(fd, mode\|0700)`。**既带 `uchg` 又没有读位也没有执行位的条目——文件、目录都一样**（0000、0200 一类）：要清标志就得先取句柄，上面的打开方式全是 `EACCES`；带 `uchg` 就不能 `chmod`（目录上按名字的 `fchmodat(P, name, 0700, AT_SYMLINK_NOFOLLOW)` 实测 `EPERM`，标志不变），也没有路径可交给 `lchflags`（`/dev/fd/N/name` 解析不了）——这个角落在不用 `fchflagsat` 时无解，报 `Immutable`（macOS 27 的 `fchflagsat` 能解，不采用，§9）。属主有执行位的 `uchg` 文件（0100）反而能删：`O_EXEC` 句柄上清标志，之后 `unlinkat` 成功（探针） |
+| 按名字的 `fchmodat` 的残余风险 | 上一行里 mode 000 的目录（属主没有执行位）是 `remove_tree_rooted` 里**唯一**不经句柄改 mode 的地方：`fchmodat(P, name, mode\|0700, AT_SYMLINK_NOFOLLOW)`，P 是钉住的父目录。`fstatat` 判出它是属主的目录之后、`fchmodat` 之前，树里的并发写者（同一用户的别的进程）可以把这个名字换成别的对象。实测（探针）：换成符号链接——不跟随，根外文件的 mode 不变；换成**指向根外文件的硬链接**——`fchmodat` 改的是那个根外 inode，0644 变成了 0700。限度：（1）只在 `O_RDONLY` 与 `O_EXEC` 都得 `EACCES`、而且 `st_uid` 是调用者的目录上走这一步，别的情形都经句柄；（2）`fchmodat` 要求属主，所以只能改调用者自己拥有的 inode，不跨权限边界；（3）之后立刻 `openat` 重开并核对 (dev, inode) 与类型，不符记 `stuck(Changed)`，但 mode 已改，apfs 不回滚（A3）。所以 `remove_tree_rooted` 的前提是被删的树没有并发写者——store 的 trash 与 tmp 里已退役的东西正是这样（增补 8），活的工作区不该直接交给它 |
+| 共用的 inode（硬链接） | `fchflags`、`fchmod`、`futimens` 改的是 inode：同一个 inode 的两个名字，经一个名字 `fchflags(uchg)`，另一个名字上读到的标志同样是 `uchg`，经另一个名字 `unlinkat` 它得 `EPERM`；经一个名字 `fchmod(0400)`，另一个名字的 mode 同样变成 0400（探针）。store 的 writer 复现过更糟的（2026-10-23，macOS 27.0.1）：get 的克隆 dst 被换成指向根外 0600 文件的硬链接，`open(O_NOFOLLOW)` 照常打开它，`fchmod 0644` 把根外的文件改成了 0644。所以非目录而 `st_nlink > 1` 的 inode 上：`remove_tree_rooted` 不清标志（留下，`stuck(Immutable)`，`detail = hard_link`），`make_removable` 与 `set_file_meta` 拒绝（`ReadOnly`，`hard_link`）。没有标志拦着的硬链接照常 `unlinkat`：只删这个名字，其它名字与 inode 不动。取到句柄之后再 `fstat` 看一遍 `st_nlink`，`unlinkat` 失败和取句柄之间有人 `link()` 也拦得住 |
+| 目录没有别的名字 | 对目录 `link(2)` 得 `EPERM`，没有建出别名（内部卷上的探针；控制者的裁定记录了同一探针在系统卷与 `/Volumes/GWD` 上的结果，2026-10-23，两处都是 APFS）。目录的 `st_nlink` 随子目录数增长（带一个子目录的目录是 3），不能用来判"共用"。目录的句柄上：`fchmod(0555)` 与 `futimens([UTIME_OMIT, t])` 成功（mtime 带纳秒，atime 不动）；带 `uchg` 的目录 `fchmod` 和 `futimens` 都得 `EPERM`，`fchflags` 清掉之后都成功，所以"清标志在先"的次序对目录同样必要。因此 `set_file_meta` 对目录的句柄不核对 `st_nlink`，种类、`SF_*` 的核对与改动的次序同文件（裁定 "set_file_meta accepts a directory handle"） |
+| `make_removable` 的次序 | 0555 加 `uchg` 的目录：先 `fchmod(0755)` → `EPERM`；先 `fchflags` 清 `uchg`（`flags & ~(UF_IMMUTABLE\|UF_APPEND)`）→ 成功，再 `fchmod(0755)` → 成功（mode 0755，flags 0；探针）。所以先清标志、再补 u+w，顺序不能反 |
+| `UF_COMPRESSED` | 透明压缩的文件（`ditto` 复制 `/Library/Documentation/Acknowledgements.rtf` 得到，标志 0x20，1,386,862 字节；这台机器上 `ditto --hfsCompression` 造不出压缩文件）：经句柄加上 `uchg\|hidden`（0x8022）之后 `fchmod` 得 `EPERM`；`fchflags(fd, st_flags & (UF_COMPRESSED\|SF_*))` 成功，标志回到 0x20，大小与内容不变，之后 `fchmod` 成功（探针）。所以 `set_file_meta` 的 `clear_flags` 把 `UF_COMPRESSED` 留下：它描述内容的存储方式，不挡删除也不挡写，不是写回的文件要清的东西 |
+| 无操作的 `chmod`、`chflags` 也更新 ctime | 文件上间隔 2 s 的三次调用：`fchmod` 成同样的 mode、`fchflags` 成同样的标志、`fchmod` 成已含 `u+w` 的 mode，每次 `ctime` 都前进约 2 s，`mtime` 不动（探针）；目录的句柄上同样，无操作的 `fchmod`、`fchflags` 也前进 `ctime`（探针）。gc 的年龄是 `max(mtime, ctime)`（§4.2 G），所以 `make_removable` 与 `set_file_meta` 只在需要时才调 `fchflags`、`fchmod`、`futimens`，无事可做就什么都不调；gc 也要先用 `Attrs::last_changed` 判过年龄、**之后**才对候选调用 `make_removable` |
+| 修不好的条目 | ACL 里有 `deny delete` 的文件：`unlinkat` → `EACCES`，没有办法修复，进 `stuck`（`NoPermission`），树里其余的东西照常删光（探针：26 项删掉，1 项留下）。`SF_*` 系统标志要 root，进 `stuck`（`Immutable`，`detail` 列出标志名），从不清；没有标志的 `EACCES`、`EPERM` 才是 `NoPermission`（§5.4 的 stuck 原因表） |
+| 不跟随、不越界 | 符号链接（指向文件、悬空、指向根外目录）、FIFO、unix socket：只删节点本身；硬链接：没有标志拦着时只删这个名字，其它名字与 inode 不动（有标志拦着的见"共用的 inode"）。探针里根外目录的两个文件原样 |
+| 嵌套挂载点 | 对挂载点的名字 `fstatat(NOFOLLOW)` 得到被挂载卷根目录的属性，`st_dev` 与父目录的不同（探针里 16777258 对 16777233），据此不进入、不删（`OtherDevice`）；对它 `AT_REMOVEDIR` 是 `EBUSY`（§4.2 G）。探针：树里别处全部删光，挂载点和卷里的文件原样。目标本身是挂载点（`remove_tree_rooted` 的目标，或 `remove_rooted(EmptyDir)` 的目标）：`st_dev` 与父目录的不同，开始之前就拒绝（`CrossVolume`，`reason = mount_point`），什么都没动；`AT_REMOVEDIR` 晚到的 `EBUSY` 同样映射 |
 | 父目录的写权限预检 | 对父目录句柄 `faccessat(P, ".", W_OK\|X_OK, AT_EACCESS)`：0755 → 成功；0555 → `EACCES`；`UF_IMMUTABLE` → `EPERM`；**`UF_APPEND` → 也成功**，实际往里 `unlinkat` 却是 `EPERM`，所以还要看 `fstat(P).st_flags`。用途：目标本身最后要靠 `AT_REMOVEDIR` 删，需要 P 可写，开始之前先查，免得树删空了才发现根删不掉 |
 | 速度 | 内部卷上 102,001 项（1000 个目录，各含一个装 100 个文件的子目录）：`readdir` 加 `unlinkat` 的参考实现，三份克隆各 2.98 到 2.99 s（29 µs 每项），原树 3.65 s（36 µs）；`rm -rf` 一份克隆 3.87 s（38 µs 每项）。同一棵树 `clonefile` 一次是 0.67 到 0.70 s（6.6 到 6.8 µs 每项）：删除比克隆慢四倍多 |
 
@@ -639,14 +730,14 @@ pub mod seams {
 | --- | --- | --- |
 | A1 | 不原地改、不覆盖：`clone_*` 只读 src，dst 必须不存在；目的地变体对已存在的东西（含悬空符号链接）一律 `Exists`；`rename_rooted` 只有 `Excl` 与 `Swap` 两档，没有覆盖的一档；crate 里没有"覆盖"或"合并进已有目录"的路径 | design §9 不变量 5 |
 | A2 | 没有复制回退：整个 crate 里没有任何复制字节的代码路径（`std::fs::copy`、`copyfile(3)`、`cp`）；卷不对就在写入之前返回 `CrossVolume` 或 `Unsupported` | design §7；types.md `CrossVolume` |
-| A3 | 写入开始之后只会是 `Unknown`，现场原样留下：单次系统调用的操作（`clone_*`、`clone_from_rooted`、`create_file_rooted`、`symlink_rooted`、`rename_rooted`、`remove_rooted`）失败时什么都没动，可以给具名的码；多步的（`mkdir_rooted(parents)`、`clone_file_rooted` 的克隆加设 mode、`remove_tree_rooted`）第一步成功之后的失败是 `Unknown`。`remove_tree_rooted` 更严一格：遍历一开始就算开始（只有遍历之前的检查是具名的码），没删干净一律 `Unknown`，`detail` 是 `RemoveReport`；apfs 不在失败后自己清理、不回滚（`remove_rooted`、`remove_tree_rooted` 只删调用方点名的条目与树） | design §9 不变量 6；增补 8 |
-| A4 | 根之下不跟随符号链接：`open_root`（根本身最后一级）、`open_rooted`、`clone_from_rooted`（源这一侧）、`attrs_of`、`walk` 解析 `start`、全部目的地变体、`rename_rooted`（from 与 to 两边）、`remove_rooted`、`remove_tree_rooted`（含树内每一级子目录），对根之下的每一级 `openat(O_NOFOLLOW)`；写、改名、删除永远落不到根之外，也就碰不到工作区里指向基线、依赖集或主 checkout 的符号链接（dev-link 就会建这样的链接） | design §9 不变量 2、5；裁定 T4、增补 3 |
+| A3 | 写入开始之后只会是 `Unknown`，现场原样留下：单次改动的操作（`clone_*`、`clone_from_rooted`、`create_file_rooted`、`symlink_rooted`、`rename_rooted`、`remove_rooted`）失败时什么都没动，可以给具名的码；多步的（`mkdir_rooted(parents)`、`clone_file_rooted` 的克隆加设 mode、`make_removable` 的清标志加补写位、`set_file_meta` 的清标志、设 mode、设 mtime）第一步生效之后的失败是 `Unknown`。**`remove_tree_rooted` 是例外**（控制者裁定）：遍历之前的拒绝是具名的码，什么都没碰；遍历一开始就算开始（清标志与补权限也是可见的写），之后永远返回 `Ok(RemoveReport)`，没删干净的条目在 `stuck` 里带原因（含 unlink 结果不确定的 `UnknownOutcome`），没有 `Err` 形态的部分失败——部分删除的结局是确定的，调用方重试剩下的。apfs 不在失败后自己清理、不回滚（`remove_rooted`、`remove_tree_rooted` 只删调用方点名的条目与树） | design §9 不变量 6；增补 8；裁定 "remove_tree_rooted reports, it does not fail" |
+| A4 | 根之下不跟随符号链接：`open_root`（根本身最后一级）、`open_rooted`、`clone_from_rooted`（源这一侧）、`attrs_of`、`walk` 解析 `start`、全部目的地变体、`rename_rooted`（from 与 to 两边）、`remove_rooted`、`remove_tree_rooted`（含树内每一级子目录），对根之下的每一级 `openat(O_NOFOLLOW)`；写、改名、删除永远落不到根之外，也就碰不到工作区里指向基线、依赖集或主 checkout 的符号链接（dev-link 就会建这样的链接）。根本身必须规范（不以 `/` 结尾，没有 `.`、`..` 分量，否则 `InvalidInput`，`root_not_canonical`）：结尾的 `/` 会让最后一级跟着符号链接走（§4.2 E）。`make_removable`、`set_file_meta` 只收句柄，不经路径 | design §9 不变量 2、5；裁定 T4、增补 3；裁定 "Rooted roots are canonical" |
 | A5 | 监听只是提示：`WatchEvent` 的缺失不证明什么；`walk` 不是快照；crate 里没有"等监听追上"或"已完整"的接口——`Watcher::flush` 只是尽力缩小窗口，不是屏障（§4.2 F） | 裁定 T4；design §6.2"正确性不依赖监听" |
 | A6 | gen count 为 0 是未知，未知永远不等于未变；`Attrs::unchanged_since` 是比较的唯一入口 | design §6.2；增补 1 |
 | A7 | 资源有界：`walk` 与 `remove_tree_rooted` 同时持有的描述符不超过深度加一（≤ 129；后者读完一个目录的名字就关掉目录流，每层只留一个句柄），与目录总数无关；`RemoveReport.stuck` 最多 `MAX_REPORTED_STUCK` 条；`walk` 在内存里最多存当前路径上各目录的条目；`Watcher` 的回调串行 | 3f 的 `RLIMIT_NOFILE` 256 两行 |
 | A8 | 没有全局可变状态：除线程局部的测试接缝外函数都无状态，可以从任意线程并发调用；`Watcher` 是唯一有生命周期的对象 | — |
 | A9 | 只做被要求的 I/O：读写只限调用方传进来的路径，不创建临时文件，不写日志文件；删除只发生在 `remove_rooted`、`remove_tree_rooted` 点名的条目与树之下 | 增补 8 |
-| A10 | 不替调用方放宽权限：`rename_rooted`、`remove_rooted` 被拒绝就返回 `ReadOnly` 加 `detail.reason`，从不 `chmod`、不 `chflags`、不重试（0555 的封存目录要先 `chmod u+w` 才能改名到另一个父目录，这条规则写在 §4.2 G，由调用方在 `open_rooted` 取得的句柄上做）。**唯一的例外是 `remove_tree_rooted`**（增补 8）：为了删它被点名的那棵树，它清树内条目的 `UF_IMMUTABLE`、`UF_APPEND`（经句柄），给打不开或写不进的目录补属主的 `rwx`，并如实记进 `RemoveReport`；树之外的东西（含它的父目录）一概不碰 | 增补 4、6、8 |
+| A10 | 不替调用方放宽权限，也不自作主张：`rename_rooted`、`remove_rooted` 被拒绝就返回 `ReadOnly` 加 `detail.reason`，从不 `chmod`、不 `chflags`、不重试。apfs 只在三处改标志或 mode：（1）`make_removable`，调用方显式调用，**先**清 `UF_IMMUTABLE`、`UF_APPEND`、**再**补 u+w（0555 的封存目录要先补 u+w 才能改名到另一个父目录，带 `uchg` 的目录 `fchmod` 得 `EPERM`，§4.2 G、H）；（2）`set_file_meta`，调用方显式调用，改一个文件或目录（例如封存根目录的 0555）的标志、mode、mtime；（3）`remove_tree_rooted` 删它被点名的那棵树的过程中：清树内条目的 `UF_IMMUTABLE`、`UF_APPEND`（经句柄），给打不开或写不进的目录补属主的 `rwx`，如实记进 `RemoveReport`。三处共同的界限：`SF_*` 系统标志从不清（上报）；**非目录而 `st_nlink > 1` 的 inode 上不清标志、不改 mode**（标志与 mode 属于 inode，改了会连带别的名字，包括树之外的）：`make_removable`、`set_file_meta` 拒绝（`ReadOnly`，`hard_link`），`remove_tree_rooted` 留下并记 `stuck(Immutable)`（`detail = hard_link`）；树之外的东西（含它的父目录）一概不碰 | 增补 4、6、8；裁定 "make_removable"、"Flags are cleared only on an unshared inode"、"Metadata changes through a handle" |
 
 ## 5. 流程与算法
 
@@ -704,7 +795,7 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 
 共同的解析 `resolve(root, components, final_flags)`：
 
-1. 打开根：`open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`。`ENOENT` → `NoSuchPath`；`ENOTDIR`（不是目录，或根本身是符号链接）→ `NotDirectory`。根的祖先里的符号链接由内核照常解析。
+1. 先检查 root 是规范路径：按原始字节，空串、以 `/` 结尾、或含 `.`、`..` 分量 → `InvalidInput`（`root_not_canonical`），什么都不碰（不用 `Path::components()`，它把结尾的 `/` 与 `.` 吃掉了；结尾的 `/` 让内核把最后一级当目录解析，`O_NOFOLLOW` 因此跟着符号链接走，§4.2 E）。再打开根：`open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`。`ENOENT` → `NoSuchPath`；`ENOTDIR`（不是目录，或根本身是符号链接）→ `NotDirectory`。根的祖先里的符号链接由内核照常解析。
 2. 对除最后一个之外的每个分量：（测试接缝：`before_open(step, name)`）`openat(dirfd, comp, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`，成功就关掉上一级。`ENOENT` → `NoSuchPath`；`ENOTDIR` → `NotDirectory`，并用 `fstatat(dirfd, comp, AT_SYMLINK_NOFOLLOW)` 区分：是符号链接 → `reason = symlink`，否则 `not_a_directory`；`EACCES` → `Unknown`（读取侧）。一级一级走，**任何时候手里只有当前一级的句柄**，所以之后目录被换成符号链接也改不了已经打开的这一级（3f 的 `directory_swap_after_open…`）。
 3. 对最后一个分量，由调用它的函数决定怎么落地（下面）。传给每个 `*at` 调用的永远只是单个分量，不含 `/`。落地调用之前同样触发一次测试接缝 `before_open(step = 父级分量数, name = 最后一个名字)`（`open_rooted` 的终点 `openat` 就是这一步）。
 
@@ -718,14 +809,15 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 
 **`open_rooted_file`**：同上，打开之后要求 `S_ISREG`：目录 → `IsDirectory`，FIFO → `NotFile`（`fifo`）。TOCTOU 下，调用方以为的普通文件被换成 FIFO 也是这个结果，不挂住（3f 的 `fifo_swap_before_final_open…`）。
 
-**`clone_from_rooted(src_root, src, dst)`**（增补 8；评审 I2）：源在工作区里，捕获时不能跟着符号链接出去；做法是打开一次、从这个句柄克隆。
+**`clone_from_rooted(src_root, src, dst, kind)`**（增补 8；评审 I2；裁定 "clone_from_rooted states its source kind"）：源在工作区里，捕获时不能跟着符号链接出去；做法是打开一次、核对种类、从这个句柄克隆。
 
-1. 先查 dst，不碰源：形态（末尾 `/`、分量超 255 个码元、整条路径 ≥ 1024 字节 → `InvalidInput`，同 §5.2 第 2 步）；`lstat(dst)` 成功（含悬空符号链接）→ `Exists`；dst 的父目录不存在 → `NoSuchPath`，不是目录 → `NotDirectory`。dst 是调用方给的路径，它祖先里的符号链接内核照常解析：它只该指向 strata 自己的目录（store/tmp、staging），不该指向工作区里面。
+1. 先查 dst，不碰源：形态（末尾 `/`、分量超 255 个码元、整条路径 ≥ 1024 字节 → `InvalidInput`，同 §5.2 第 2 步）；`lstat(dst)` 成功（含悬空符号链接）→ `Exists`；dst 的父目录不存在 → `NoSuchPath`，不是目录 → `NotDirectory`。dst 是调用方给的路径，它祖先里的符号链接内核照常解析：它只该指向 strata 自己的目录（store/tmp、携带用的私有临时名、staging），不该指向工作区里面。
 2. `resolve` 到 src 的父目录句柄 P（单分量的 src 用根的句柄），接缝照常触发。
-3. 最后一个分量 `openat(P, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)`，和 `open_rooted` 是同一段代码，errno 的处理也相同。`fstat`：普通文件或目录继续；FIFO、设备 → 关掉，`NotFile`（`fifo`、`device`）。符号链接在这里就是 `NotFile`（`symlink`）：捕获的是内容，符号链接的"内容"是它的目标，由调用方（overlay）另行处理。
-4. 同卷检查：句柄的真实设备号（`fgetattrlist(fd, ATTR_CMN_DEVID, FSOPT_RETURN_REALDEV)`）与 dst 父目录的（`getattrlist`）比较，不同 → `CrossVolume`；`volume_caps(dst 的父目录)` 的 `clone == Some(false)` → `Unsupported`。
-5. 接缝 `before_open(step, dst 的最后一个名字)`（step 接着数：各级父目录、打开终点、这一步），然后 `fclonefileat(fd, AT_FDCWD, dst, CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)`。成功即结束。失败按 §5.2 第 8 步归类（`EXDEV` → `CrossVolume`，`EEXIST` → `Exists`，`ENOENT` → `NoSuchPath`……），再 `lstat(dst)` 填 `detail.dst_exists`。关闭句柄。
-6. 克隆出来的是**句柄背后的那个对象**，不是路径当时指向的东西：打开之后路径被换成符号链接、被换成别的文件，都不影响结果（§4.2 A 的交换测试）。所以 store 的 `put_blob_rooted` 对克隆出来的 dst 做哈希，得到的就是被克隆的那一版内容。不 `fsync`。
+3. 最后一个分量 `openat(P, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)`，和 `open_rooted` 是同一段代码，errno 的处理也相同，只是最后一级是符号链接（`ELOOP`）或 socket（`EOPNOTSUPP`）时按 `kind` 归码：`File` → `NotFile`（`symlink`、`socket`），`Dir` → `NotDirectory`（`symlink`；socket 是 `not_a_directory`）。
+4. **核对种类**（在同卷检查与 `fclonefileat` 之前）：`fstat` 句柄。`kind = File`：目录 → `IsDirectory`；FIFO、设备 → `NotFile`（`fifo`、`device`）；普通文件继续。`kind = Dir`：不是目录 → `NotDirectory`（`not_a_directory`）；目录继续。不符就关掉句柄，什么都不克隆。理由：调用方的种类来自之前的 `attrs_of` 或遍历，到打开之间路径可能被换成别的东西——文件换成目录，`fclonefileat` 就会把一整棵树克隆出去（store 第 2 轮评审发现的：`put_blob_rooted` 把整棵树克隆进 `store/tmp`，事后还得自己删）；FIFO 的句柄交给 `fclonefileat` 只会得到误导的 `EINVAL`。
+5. 同卷检查：句柄的真实设备号（`fgetattrlist(fd, ATTR_CMN_DEVID, FSOPT_RETURN_REALDEV)`）与 dst 父目录的（`getattrlist`）比较，不同 → `CrossVolume`；`volume_caps(dst 的父目录)` 的 `clone == Some(false)` → `Unsupported`。
+6. 接缝 `before_open(step, dst 的最后一个名字)`（step 接着数：各级父目录、打开终点、这一步），然后 `fclonefileat(fd, AT_FDCWD, dst, CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)`。成功即结束。失败按 §5.2 第 8 步归类（`EXDEV` → `CrossVolume`，`EEXIST` → `Exists`，`ENOENT` → `NoSuchPath`……），再 `lstat(dst)` 填 `detail.dst_exists`。关闭句柄。
+7. 克隆出来的是**句柄背后的那个对象**，不是路径当时指向的东西：打开之后路径被换成符号链接、被换成别的文件，都不影响结果（§4.2 A 的交换测试；种类核对之后换掉的东西同样，因为 `fclonefileat` 用的就是核对过的那个句柄）。所以 store 的 `put_blob_rooted` 对克隆出来的 dst 做哈希，得到的就是被克隆的那一版内容。**符号链接不经这里**：捕获的是内容，符号链接的"内容"是它的目标，调用方重建它——`attrs_of(src_root, p)` 取目标，`symlink_rooted(dst_root, q, target)`（裁定 "A symlink is recreated, never cloned"）；也不能经 `clone_file_rooted` 按路径克隆（它的 src 按路径解析，中间的符号链接内核照常跟随，§4.2 A）。不 `fsync`。
 
 **目的地变体**共同的：
 
@@ -735,10 +827,10 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 
 各个函数的落地：
 
-- `clone_file_rooted(src, root, dst, mode)`：src 的检查同 §5.3 第 1 步；`same_volume`（src 与 P）；`clonefileat(AT_FDCWD, src, P, name, CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)`。`mode = Some(m)` 且克隆出来的是普通文件时，再 `fchmodat(P, name, m & 0o777, AT_SYMLINK_NOFOLLOW)`；这一步失败是 `Unknown`（克隆已经发生）；源带 `UF_IMMUTABLE` 时这一步必然 `EPERM`（§4.2 A）。src 是调用方给的 strata 自己的路径（临时目录里的 blob）；源在工作区里的克隆用 `clone_from_rooted`。
+- `clone_file_rooted(src, root, dst, mode)`：src 的检查同 §5.3 第 1 步；`same_volume`（src 与 P）；`clonefileat(AT_FDCWD, src, P, name, CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)`。`mode = Some(m)` 且克隆出来的是普通文件时，再**经句柄**设 mode [我的决定]：在 P 上 `openat(P, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)`（接缝再触发一次，step 接着数），对句柄 `set_file_meta(fd, { mode: Some(m & 0o777) })`（核对普通文件与 `st_nlink == 1`，见下面的"经句柄改元数据"，所以克隆之后 dst 被换成指向根外文件的硬链接，也改不到那个文件，§4.2 H）。这一步的任何失败都是 `Unknown`（克隆已经发生，`set_file_meta` 的具名拒绝也一样）；源带 `UF_IMMUTABLE` 时这一步会得 `EPERM`（实测，§4.2 A）。src 是调用方给的 strata 自己的路径（临时目录里的 blob、基线文件）；源在工作区里的克隆用 `clone_from_rooted`，来自工作区的符号链接用重建的办法（`attrs_of` 取目标，`symlink_rooted`）。
 - `clone_tree_rooted(src, root, dst)`：src 的检查同 §5.2 第 1 步；dst 在 src 里面同样拦（P 的路径用 `fcntl(F_GETPATH)` 取）；`same_volume`（src 与 P）；`clonefileat(AT_FDCWD, src, P, name, CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)`。
 - `create_file_rooted(root, dst, mode)`：`openat(P, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode)`；已存在的符号链接得到 `EEXIST`，链接指向的地方不被碰（§4.2 E）。
-- `symlink_rooted(root, dst, target)`：目标为空 → `InvalidInput`（`empty_target`）；`symlinkat(target, P, name)`。
+- `symlink_rooted(root, dst, target)`：目标为空 → `InvalidInput`（`empty_target`）；`symlinkat(target, P, name)`。重建来自工作区的符号链接就用它：目标取自 `attrs_of(src_root, p)` 的 `FileKind::Symlink`（原始字节）。
 - `mkdir_rooted(root, dst, mode, parents)`：`parents = false`：解析到父目录后 `mkdirat(P, name, mode)`。`parents = true`：从根开始逐级 `openat(…, O_DIRECTORY | O_NOFOLLOW)`；某一级 `ENOENT` 就 `mkdirat` 再打开它（`mkdirat` 返回 `EEXIST` 说明别人刚建了，重新 `openat` 一次，仍然按符号链接和文件的规则判）；已存在的是目录就直接往下走；中间一级是文件或符号链接 → `NotDirectory`（符号链接时 `reason = symlink`）；叶子（最后一级）已存在而且不是目录 → `Exists`（文件，或符号链接，哪怕它指向一个目录）。建出至少一级之后的失败是 `Unknown`，`detail.created` 列出已建的路径。
 
 所有目的地变体都不 `fsync`。
@@ -751,35 +843,81 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
   3. 测试接缝 `before_open(step, to 的最后一个名字)`，然后 `renameatx_np(PF, from_name, PT, to_name, flags)`，flags 是 `RENAME_EXCL`（`Excl`）或 `RENAME_SWAP`（`Swap`）。成功即结束。
   4. 失败按 errno 归类：`EEXIST` → `Exists`（`detail.path = to`）；`ENOENT` → `NoSuchPath`，`fstatat(PF, from_name, AT_SYMLINK_NOFOLLOW)` 也是 `ENOENT` 则 `reason = from_missing`，否则 `to_missing`（只会出现在 `Swap`）；`ENOTDIR` → `NotDirectory`；`EXDEV` → `CrossVolume`（`detail.src_dev`、`dst_dev` 取 PF、PT 的真实设备号）；`ENOTSUP` → `Unsupported`（`detail.fs_type`）；`EINVAL` → `InvalidInput`；`ENAMETOOLONG` → `InvalidInput`（`name_too_long`）；`EACCES`、`EPERM`、`EROFS` → `ReadOnly`，`detail.reason` 这样判：`EROFS` 是 `read_only_volume`；否则 `fstatat(PF, from_name, AT_SYMLINK_NOFOLLOW)` 取 `from` 的属性（`Swap` 时再用 `fstatat(PT, to_name, …)` 取 `to` 的），其中有目录、PF 与 PT 不是同一个目录、且这个目录的所有者写位未置 → `reparent_needs_write`；`st_flags` 含 `UF_IMMUTABLE`、`UF_APPEND`、`SF_IMMUTABLE` 或 `SF_APPEND` → `immutable`；其余 `no_permission`。别的 errno（`ENOSPC`、`EIO`、`EBUSY` 等）→ `Unknown`，`EBUSY` 的 `reason = busy`。
   5. 不 `fsync`，不 `chmod`，不清标志（A10）。
-- `remove_rooted(root, path, kind)`（单次系统调用，失败时什么都没动）：`resolve` 到父目录句柄 P；接缝；`unlinkat(P, name, 0)`（`File`）或 `unlinkat(P, name, AT_REMOVEDIR)`（`EmptyDir`）。归类：
+- `remove_rooted(root, path, kind)`（单次改动的系统调用，失败时什么都没动）：`resolve` 到父目录句柄 P；`kind = EmptyDir` 先 `fstatat(P, name, AT_SYMLINK_NOFOLLOW)`（只读，见下）；接缝 `before_open(step, name)`（落地的那一次调用之前，两种 `kind` 都是紧挨着 `unlinkat`，所以测试能在 `fstatat` 与 `unlinkat` 之间动手脚）；然后 `unlinkat(P, name, 0)`（`File`）或 `unlinkat(P, name, AT_REMOVEDIR)`（`EmptyDir`）。归类：
   - `File`：`ENOENT` → `NoSuchPath`；`EPERM` → `fstatat(P, name, AT_SYMLINK_NOFOLLOW)`：是目录 → `IsDirectory`（内核对目录给 `EPERM`，不是 `EISDIR`），否则 `ReadOnly`（`st_flags` 含 `UF_IMMUTABLE`、`UF_APPEND`、`SF_IMMUTABLE` 或 `SF_APPEND` 是 `immutable`，其余 `no_permission`）；`EACCES` → `ReadOnly`（`no_permission`）；`EROFS` → `ReadOnly`（`read_only_volume`）；`EBUSY` → `Unknown`（`busy`）；其余 `Unknown`。符号链接只删链接本身。
-  - `EmptyDir`：`ENOTDIR` → `NotDirectory`（`fstatat` 看到是符号链接则 `reason = symlink`，指向的目录不被碰）；`ENOTEMPTY` → `NotEmpty`；`ENOENT` → `NoSuchPath`；`EBUSY`（挂载点）→ `Unknown`（`reason = busy`）；`EPERM`、`EACCES`、`EROFS` → `ReadOnly`（`reason` 的判法同 `File`，只是 `EPERM` 不再问"是不是目录"：目标本来就是目录，带 `UF_IMMUTABLE` 等标志是 `immutable`，其余 `no_permission`）；其余 `Unknown`。
-  - 不 chmod、不清标志（A10）：被拒绝就是 `ReadOnly`，放宽权限是调用方的事。
-- `remove_tree_rooted(root, path)`（增补 8；评审 I1；依据 §4.2 H）：
+  - `EmptyDir`：先 `fstatat`：`ENOENT` → `NoSuchPath`；是符号链接 → `NotDirectory`（`symlink`，指向的目录不被碰）；不是目录 → `NotDirectory`（`not_a_directory`）；是目录而 `st_dev` 与 `fstat(P)` 的不同（挂载点）→ `CrossVolume`（`reason = mount_point`，`detail.src_dev` 是 P 的设备号，`dst_dev` 是目标的），什么都没动。然后 `AT_REMOVEDIR`：`ENOTDIR` → `NotDirectory`；`ENOTEMPTY` → `NotEmpty`（types.md 已有的码，T15 放宽含义，§9；调用方怎样对待它见 §3 的 `RemoveKind::EmptyDir`）；`ENOENT` → `NoSuchPath`；`EBUSY`（`fstatat` 之后才变成挂载点，或别的 `EBUSY`；`rmdir` 失败时什么都没变）→ 同样 `CrossVolume`（`mount_point`），从不是 `Unknown`（裁定 "remove_rooted(EmptyDir) on a mount point"）；`EPERM`、`EACCES`、`EROFS` → `ReadOnly`（`reason` 的判法同 `File`，只是 `EPERM` 不再问"是不是目录"：目标本来就是目录，带 `UF_IMMUTABLE` 等标志是 `immutable`，其余 `no_permission`）；其余 `Unknown`。
+  - 不 chmod、不清标志（A10）：被拒绝就是 `ReadOnly`，放宽权限是调用方的事（`make_removable`）。
+- `remove_tree_rooted(root, path)`（增补 8；评审 I1；依据 §4.2 H）。**返回形状（控制者裁定）**：`Err` 只给遍历开始之前、什么都没碰的拒绝；遍历一开始就永远是 `Ok(RemoveReport)`，没删掉的东西在 `stuck` 里，`is_complete()` 回答删干净了没有。**`path` 可以是任何种类的条目**（目录、文件、符号链接，从不跟随符号链接；裁定 "remove_tree_rooted takes any entry kind"）：非目录的目标直接走 `unlink_leaf`（下面第 8 步），报告的形状不变，成功就是 `removed == 1`。
 
   **遍历之前**（任何失败都是具名的码，什么都没动）：
-  1. `resolve` 到 `path` 的父目录句柄 P（单分量的 `path` 用根的句柄），接缝照常触发。
-  2. `fstatat(P, name, AT_SYMLINK_NOFOLLOW)`：`ENOENT` → `NoSuchPath`；不是目录 → `NotDirectory`（符号链接 `reason = symlink`，其它 `not_a_directory`；符号链接本身不在这里删，用 `remove_rooted(.., File)`）。
-  3. 目标的 `st_dev` 与 `fstat(P)` 的 `st_dev` 不同（目标本身是挂载点）→ `Unknown`（`reason = mount_point`）。
-  4. 父目录预检：`fstat(P).st_flags` 含 `UF_IMMUTABLE`、`UF_APPEND`、`SF_IMMUTABLE` 或 `SF_APPEND`（→ `ReadOnly`，`immutable`），或 `faccessat(P, ".", W_OK | X_OK, AT_EACCESS)` 失败（→ `ReadOnly`，`no_permission`）。理由：最后要对目标本身 `AT_REMOVEDIR`，需要 P 可写；先查，免得树删空了才发现根删不掉。`faccessat` 对 `UF_APPEND` 的目录会说"可写"，所以标志要另看（§4.2 H）。
+  1. 检查 root 规范，`resolve` 到 `path` 的父目录句柄 P（单分量的 `path` 用根的句柄），接缝照常触发。
+  2. `fstatat(P, name, AT_SYMLINK_NOFOLLOW)`：`ENOENT` → `NoSuchPath`。目标是什么种类都不拒绝（符号链接只删链接本身，指向的地方不被碰）。
+  3. 目标是目录，而它的 `st_dev` 与 `fstat(P)` 的 `st_dev` 不同（目标本身是挂载点）→ `CrossVolume`（`reason = mount_point`，`detail.src_dev` 是 P 的设备号，`dst_dev` 是目标的）。
+  4. 父目录预检：`fstat(P).st_flags` 含 `UF_IMMUTABLE`、`UF_APPEND`、`SF_IMMUTABLE` 或 `SF_APPEND`（→ `ReadOnly`，`immutable`），或 `faccessat(P, ".", W_OK | X_OK, AT_EACCESS)` 失败（→ `ReadOnly`，`no_permission`）。理由：最后要对目标本身 `AT_REMOVEDIR`（或 `unlink`），需要 P 可写；先查，免得树删空了才发现根删不掉。`faccessat` 对 `UF_APPEND` 的目录会说"可写"，所以标志要另看（§4.2 H）。
   5. 记下 `tdev` = 目标的 `st_dev`；报告清零。
 
   **遍历**（自底向上，递归深度 ≤ `MAX_WALK_DEPTH`；每一层只持有一个目录句柄）：`visit(P, name, depth)`：
-  1. `fstatat(P, name, AT_SYMLINK_NOFOLLOW)`：`ENOENT` → 已经没了，返回；不是目录 → 走 `unlink_leaf`（第 8 步）；是目录但 `st_dev != tdev` → `stuck(OtherDevice)`，不进入；`depth >= MAX_WALK_DEPTH` → `stuck(TooDeep)`。
-  2. 接缝 `before_open(step, name)`；`openat(P, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`。`ENOENT` → 已经没了；`ENOTDIR`、`ELOOP`（刚被换成文件或符号链接）→ `stuck(Changed)`；`EACCES` 且目录属于调用者（第 1 步的 `st_uid`）→ `fchmodat(P, name, mode | 0700, AT_SYMLINK_NOFOLLOW)`（`made_writable += 1`，之后 `mode` 取修过的值）再开一次，不属于调用者 → `stuck(NoPermission)`；`fchmodat` 失败时目录带 `UF_IMMUTABLE` 或 `UF_APPEND` → `stuck(Immutable)`，否则 `stuck(NoPermission)`；`fchmodat` 成功而再开仍失败 → `stuck(Unreadable)`。
+  1. `fstatat(P, name, AT_SYMLINK_NOFOLLOW)`：`ENOENT` → 已经没了，返回；不是目录 → 走 `unlink_leaf`（第 8 步）；是目录但 `st_dev != tdev` → `stuck(OtherDevice)`，不进入；`depth >= MAX_WALK_DEPTH` → `stuck(TooDeep)`；目录带 `SF_IMMUTABLE` 或 `SF_APPEND`（里面的条目也删不掉，`SF_*` 从不清）→ `stuck(Immutable)`，`detail` 列出标志名，不进入。
+  2. 接缝 `before_open(step, name)`；`openat(P, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`。`ENOENT` → 已经没了；`ENOTDIR`、`ELOOP`（刚被换成文件或符号链接）→ `stuck(Changed)`。`EACCES`（目录对属主不可读）：
+     1. 目录不属于调用者（第 1 步的 `st_uid`）→ `stuck(NoPermission)`。
+     2. 属于调用者：先试 `openat(P, name, O_EXEC | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`（属主有搜索位时成功，§4.2 E）。成功 → 核对 (dev, inode) 与第 1 步一致（不一致 → `stuck(Changed)`），目录带 `UF_IMMUTABLE` 或 `UF_APPEND` 就先 `fchflags` 清掉（`flags_cleared += 1`；失败 → `stuck(Immutable)`），再 `fchmod(fd, mode | 0700)`（`made_writable += 1`，之后 `mode` 取修过的值；失败 → `stuck(NoPermission)`），关掉，回到 `O_RDONLY` 重开一次，仍失败 → `stuck(Unreadable)`。**这一条是经句柄的**，不走按名字的路径。
+     3. `O_EXEC` 也是 `EACCES`（属主没有搜索位，没有句柄可取）→ 按名字 `fchmodat(P, name, mode | 0700, AT_SYMLINK_NOFOLLOW)`（`made_writable += 1`；**残余风险见 §4.2 H**：这是整个遍历里唯一不经句柄改 mode 的地方，只用于"属主打不开、也取不到句柄"的目录）。失败：目录带 `UF_IMMUTABLE` 或 `UF_APPEND` → `stuck(Immutable)`，`detail` 列出标志名（既带 `uchg` 又没有读位也没有搜索位的角落，目录也一样），否则 `stuck(NoPermission)`。成功 → 再 `O_RDONLY` 打开一次并核对 (dev, inode)，不符 → `stuck(Changed)`，仍失败 → `stuck(Unreadable)`。
   3. `fstat(fd)` 的 (dev, inode) 与第 1 步看到的不同 → 关掉，`stuck(Changed)`。
   4. 目录自己带 `UF_IMMUTABLE` 或 `UF_APPEND`：`fchflags(fd, flags & ~(UF_IMMUTABLE | UF_APPEND))`（`flags_cleared += 1`），失败 → 关掉，`stuck(Immutable)`。目录的属主位不全（`mode & 0700 != 0700`，`mode` 取第 2 步修过之后的值，免得 000 的目录被计两次）：`fchmod(fd, mode | 0700)`（`made_writable += 1`），失败 → 关掉，`stuck(NoPermission)`。
   5. 用 `fdopendir(dup(fd))` 加 `readdir` 把所有名字和 `d_type` 读进一个 `Vec`，然后立刻 `closedir`：读完再删，删的过程中目录的变动不会搅乱迭代器；`DT_UNKNOWN` 的条目回到第 1 步用 `fstatat` 判。
   6. 对每个子项：`d_type` 是目录 → `visit(fd, child, depth + 1)`；否则 `unlink_leaf(fd, child)`。
-  7. 若这棵子树里没有记下 `stuck`：关闭 fd，`unlinkat(P, name, AT_REMOVEDIR)`：成功 `removed += 1`；`ENOTEMPTY` → `stuck(Changed)`（别的进程在写这棵树）；`EBUSY` → `stuck(Busy)`；`EPERM`、`EACCES` → `stuck(NoPermission)`。有 `stuck` 就不尝试，目录留着。
-  8. `unlink_leaf(D, child)`（第 6 步里的非目录条目；包括符号链接、FIFO、socket、设备节点、硬链接的一个名字）：`unlinkat(D, child, 0)`，成功 `removed += 1`，`ENOENT` 当作已经没了。`EPERM` 或 `EACCES` 时 `fstatat` 看 `st_flags`：含 `UF_IMMUTABLE` 或 `UF_APPEND` → 取条目的句柄（符号链接用 `O_RDONLY | O_SYMLINK | O_NONBLOCK`，其它用 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`），核对 (dev, inode)，`fchflags` 清掉（`flags_cleared += 1`），再 `unlinkat` 一次；取不到句柄（既不可变又没有读权限）、`fchflags` 失败或再次失败 → `stuck(Immutable)`；不含这两个标志 → `stuck(NoPermission)`。`EBUSY` → `stuck(Busy)`；其余 errno → `stuck(Io)`。
+  7. 若这棵子树里没有记下 `stuck`：关闭 fd，`unlinkat(P, name, AT_REMOVEDIR)`：成功 `removed += 1`；`ENOTEMPTY` → `stuck(Changed)`（别的进程在写这棵树）；`EBUSY` → `stuck(Busy)`；`EPERM`、`EACCES` → `stuck(NoPermission)`；`EIO` 一类 → `stuck(UnknownOutcome)`，其余 → `stuck(Io)`。有 `stuck` 就不尝试，目录留着。
+  8. `unlink_leaf(D, child)`（第 6 步里的非目录条目，以及非目录的目标；包括符号链接、FIFO、socket、设备节点、硬链接的一个名字）：`unlinkat(D, child, 0)`，成功 `removed += 1`，`ENOENT` 当作已经没了。`EPERM` 或 `EACCES` 时 `fstatat(D, child, AT_SYMLINK_NOFOLLOW)` 取 `st_flags` 与 `st_nlink`，按顺序：
+     1. 含 `SF_IMMUTABLE` 或 `SF_APPEND` → `stuck(Immutable)`，`detail` 列出置位的 `SF_*`（同时置位的 `UF_*` 也列出）；`SF_*` 从不清。
+     2. 含 `UF_IMMUTABLE` 或 `UF_APPEND`，而 `st_nlink > 1`（共用的 inode，清标志会连带别的名字，A10）→ `stuck(Immutable)`，`detail = hard_link`；不碰标志。
+     3. 含 `UF_IMMUTABLE` 或 `UF_APPEND`，`st_nlink == 1` → 取条目的句柄（符号链接用 `O_RDONLY | O_SYMLINK | O_NONBLOCK`，其它用 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`；非符号链接得 `EACCES` 时再试 `O_EXEC | O_NOFOLLOW | O_NONBLOCK`，§4.2 E），核对 (dev, inode)，**对句柄再 `fstat` 一次确认 `st_nlink` 仍是 1**（中间有人 `link()` 过就按第 2 项处理），`fchflags` 清掉（`flags_cleared += 1`），再 `unlinkat` 一次。取不到句柄（`O_RDONLY` 与 `O_EXEC` 都是 `EACCES`：既带标志又没有读位也没有执行位的条目）或 `fchflags` 失败 → `stuck(Immutable)`，`detail` 列出清不掉的标志名。标志清掉之后 `unlinkat` 仍失败：标志已经不是原因，按那次失败的 errno 重新归类（`EPERM`、`EACCES` 是 `NoPermission`，比如 ACL 禁止删除；`EBUSY`、`EIO` 一类见下）；清掉的标志不还原，`flags_cleared` 如实记着。
+     4. 不含这些标志 → `stuck(NoPermission)`（ACL 禁止删除、属主不是调用者、mode 拒绝）。
+     别的 errno：`EBUSY` → `stuck(Busy)`；`EIO`、`ETIMEDOUT`、`ENXIO`、`ENODEV`、`EDEVERR` → `stuck(UnknownOutcome)`；其余 → `stuck(Io)`。
   9. 记 `stuck` 时 `stuck_total += 1`，`stuck` 向量未满 `MAX_REPORTED_STUCK` 才真正追加。
 
-  **收尾**：`stuck_total == 0` → `Ok(report)`（目标本身也删掉了）；否则 `Err(Unknown)`，`message` 写明删了多少、剩了多少，`detail = report.to_detail()`。`EINTR` 重试，其余从不重试。树之外的东西一概不碰，包括 P。符号链接指着的地方不被碰；挂载点不进入。
+  **收尾**：返回 `Ok(report)`，不论 `stuck_total` 是多少（`is_complete()` 就是 `stuck_total == 0`，此时目标本身也删掉了）。`EINTR` 重试，其余从不重试，也不回滚清掉的标志与补上的权限。树之外的东西一概不碰，包括 P。符号链接指着的地方不被碰；挂载点不进入。
 
 - `full_fsync(file)`：`fcntl(fd, F_FULLFSYNC)`；`EINTR` 重试；`ENOTSUP` → `Unsupported`；其余 → `Unknown`（`detail.errno`）。
 
-**扛断电的改名**（增补 3 的 "Durability"）：`rename_rooted` 成功之后，对 from 与 to 的父目录各做一次 `full_fsync`；父目录的句柄用 `open_rooted(root, parent)` 取，根目录本身用 `open_root(root)`。apfs 不替调用方做，因为调用方常常成批改名、最后同步一次。**封存的次序**（增补 4）：目录在 staging 里是 0755，`rename_rooted(Excl)` 到封存位置，成功之后再 `chmod 0555`；挪走已封存的目录（gc、`retire_dir`）：先在 `open_rooted` 取得的目录句柄上 `fchmod` 补 u+w、`fchflags` 清 `UF_IMMUTABLE`、`UF_APPEND`，再 `rename_rooted(Excl)`，否则得 `ReadOnly`（`reparent_needs_write` 或 `immutable`）。挪走之后的目录经 `remove_tree_rooted` 删掉。
+**`remove_tree_rooted` 的 stuck 原因表**（唯一的一张；`StuckReason` 的文档与 §6 都引用它，裁定 N3）。一个条目因为文件标志拦着而留下，就是 `Immutable`，标志写在 `detail` 里（`UF_*` 是清不掉的，`SF_*` 是置位的、从不清）；`NoPermission` 只给没有标志的 mode 或 ACL 拒绝：
+
+| 情形 | `reason` | `errno` | `detail` |
+| --- | --- | --- | --- |
+| 条目在判类型与打开之间被换成文件或符号链接，或打开之后 (dev, inode) 与 `fstatat` 所见不同 | `Changed` | `ENOTDIR`、`ELOOP`，或 0（(dev, inode) 不符） | — |
+| 删空之后 `AT_REMOVEDIR` 得 `ENOTEMPTY`（别的进程又写进了新条目） | `Changed` | `ENOTEMPTY` | — |
+| 目录的 `st_dev` 与目标的不同（嵌套挂载点；`rmdir` 它得 `EBUSY`） | `OtherDevice` | 0 | — |
+| 深度到 `MAX_WALK_DEPTH` | `TooDeep` | 0 | — |
+| 目录打不开：`EACCES`，目录不属于调用者 | `NoPermission` | `EACCES` | — |
+| 目录打不开，属于调用者：补了 mode（经句柄或按名字）之后仍打不开；或 `EMFILE`、`ENFILE` | `Unreadable` | 原 errno | — |
+| 属于调用者的目录，补 mode 失败（`fchmod`、`fchmodat`），而且目录不带 `UF_IMMUTABLE`、`UF_APPEND` | `NoPermission` | 原 errno | — |
+| 同上，但目录带 `UF_IMMUTABLE` 或 `UF_APPEND`，又没有搜索位取不到句柄（角落，目录也一样，§4.2 H） | `Immutable` | `EPERM` | 置位的标志名 |
+| 条目（目录、文件、符号链接）带 `UF_IMMUTABLE`、`UF_APPEND`，有句柄而 `fchflags` 失败 | `Immutable` | `fchflags` 的 errno | 清不掉的标志名 |
+| 标志已经清掉（`flags_cleared` 记着），之后 `unlinkat` 仍失败 | 按这次失败的 errno 归类（下面几行：`NoPermission`、`Busy`、`UnknownOutcome`、`Io`） | 这次的 errno | 同那几行 |
+| 非目录带这些标志而取不到句柄（`O_RDONLY` 与 `O_EXEC` 都是 `EACCES`：既没有读位也没有执行位，角落） | `Immutable` | `EACCES` | 标志名 |
+| 条目带 `SF_IMMUTABLE`、`SF_APPEND`（要 root，从不清） | `Immutable` | `EPERM` | 置位的 `SF_*`（同时置位的 `UF_*` 也列出） |
+| 非目录、`st_nlink > 1`、带 `UF_IMMUTABLE` 或 `UF_APPEND`：共用的 inode，不动标志 | `Immutable` | `EPERM` | `hard_link` |
+| `EACCES`、`EPERM`，而且没有上面任何一种标志：ACL 的 `deny delete`、属主不是调用者、mode 拒绝 | `NoPermission` | 原 errno | — |
+| `EBUSY` | `Busy` | `EBUSY` | — |
+| `EIO`、`ETIMEDOUT`、`ENXIO`、`ENODEV`、`EDEVERR`：这个条目的 unlink 有没有生效不确定 | `UnknownOutcome` | 原 errno | — |
+| 其余 errno（`ENOSPC`、`EDQUOT` 等）：unlink 确定没成功 | `Io` | 原 errno | — |
+
+**`make_removable(file)` 与 `set_file_meta(file, meta)`**（裁定 "make_removable"、"Flags are cleared only on an unshared inode"、"Metadata changes through a handle"；依据 §4.2 H）：只收句柄，不经路径；先做同一段核对，拒绝时什么都不改：
+
+1. `fstat(file)`。`make_removable`：非目录而 `st_nlink > 1` → `ReadOnly`（`hard_link`）。`set_file_meta`：FIFO、socket、设备、符号链接 → `NotFile`（`fifo`、`socket`、`device`、`symlink`），普通文件与目录继续；**非目录**而 `st_nlink > 1` → `ReadOnly`（`hard_link`）。目录不核对 `st_nlink`：APFS 拒绝对目录 `link(2)`，目录只有一个名字（裁定 "set_file_meta accepts a directory handle"，§4.2 H）。
+2. `st_flags` 含 `SF_IMMUTABLE` 或 `SF_APPEND` → `ReadOnly`（`immutable`，`detail.flags` 列出置位的标志名）：它们要 root 才清得掉，apfs 从不清；有它们在，后面的 `fchmod`、`futimens` 也会 `EPERM`，先拒绝才保证"拒绝时什么都不改"。
+
+`make_removable` 然后：
+3. `st_flags` 含 `UF_IMMUTABLE` 或 `UF_APPEND` → `fchflags(fd, st_flags & ~(UF_IMMUTABLE | UF_APPEND))`，其它标志位原样保留；失败 → 写侧归类（`ReadOnly`，`reason` 的判法同 `rename_rooted`）。
+4. `st_mode & 0200 == 0` → `fchmod(fd, st_mode | 0200)`；第 3 步改过标志的话，这一步失败是 `Unknown`（`IoSide::AfterWrite`，标志已清），否则写侧归类。两步都不需要就什么都不调，返回 `Ok`（无操作的调用也会更新 ctime，§4.2 H）。
+
+`set_file_meta` 然后（每一步只在需要时才调，已是目标值的不调）：
+3. `clear_flags` 且 `st_flags` 含 `UF_COMPRESSED` 以外的 `UF_*` → `fchflags(fd, st_flags & (UF_COMPRESSED | 全部 SF_*))`。
+4. `mode = Some(m)` 且 `st_mode & 0o7777 != m & 0o777` → `fchmod(fd, m & 0o777)`（setuid、setgid、sticky 随之清掉）。
+5. `mtime = Some(t)` → `futimens(fd, [UTIME_OMIT, t])`，atime 不动。
+
+第 3 到 5 步里第一项改动生效之后的失败 → `Unknown`（`AfterWrite`，部分已改），之前的失败写侧归类；`FileMeta::default()` 只做第 1、2 步。纯函数 `blocking_flags(st_flags)`（列出置位的 `UF_IMMUTABLE`、`UF_APPEND`、`SF_IMMUTABLE`、`SF_APPEND` 的名字）被这两个函数和 `remove_tree_rooted` 共用，有单元测试（§7）。
+
+**扛断电的改名**（增补 3 的 "Durability"）：`rename_rooted` 成功之后，对 from 与 to 的父目录各做一次 `full_fsync`；父目录的句柄用 `open_rooted(root, parent)` 取，根目录本身用 `open_root(root)`。apfs 不替调用方做，因为调用方常常成批改名、最后同步一次。崩溃之后 from 与 to 两个位置都合法的调用方（store 的 trash：改名前或改名后崩溃，条目留在原处或已在 trash 里都行，gc 都能处理）可以只对 to 的父目录同步；要求"崩溃之后一定在 to"的才需要两个父目录都同步。**封存的次序**（增补 4）：目录在 staging 里是 0755，`rename_rooted(Excl)` 到封存位置，成功之后再对它的句柄（`open_rooted` 取）`set_file_meta(&dir, &FileMeta { mode: Some(0o555), ..Default::default() })`；挪走已封存的目录（gc、`retire_dir`）：先 `make_removable(&open_rooted(..)?)`（先清标志、再补 u+w），再 `rename_rooted(Excl)`，否则得 `ReadOnly`（`reparent_needs_write` 或 `immutable`）。挪走之后的目录经 `remove_tree_rooted` 删掉。
 
 ### 5.5 `attrs_of` 与 `Attrs`
 
@@ -841,12 +979,14 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 
 4. 一次回调里所有 `Changed` 的路径去重、按到达顺序合成一个 `Changed(Vec<PathBuf>)` 先发；`MustRescan` 与 `Dropped` 按事件顺序随后发。落在 `exclude` 之下的路径（按分量比较，两边先 NFC；大小写不敏感的卷用 `case_fold_eq`，敏感的卷用字节相等）从 `Changed` 与 `MustRescan` 里丢掉；`Dropped` 从不过滤。没有路径可发时不发空的 `Changed`。
 5. `on_event` 在 `catch_unwind` 里调用，panic 不能穿过 FFI：截住、记日志，然后补发一个 `Dropped`（消费者因此全量重扫，不会因为丢了一个事件而错过改动）。
-6. `drop(Watcher)`：`FSEventStreamStop`、`FSEventStreamInvalidate`、`FSEventStreamRelease`，再对队列 `dispatch_sync` 一个空块排空在途的回调，然后释放队列。返回之后不会再有回调。在回调线程里 drop 会死锁，debug 构建里 `debug_assert` 拦住。
+6. `drop(Watcher)`：
+   1. 不在回调线程上（`IN_CALLBACK` 为假）：置 `closed`（已排队的回调到了就直接返回，不进 `on_event`）；`FSEventStreamStop`、`FSEventStreamInvalidate`、`FSEventStreamRelease`；对队列 `dispatch_sync` 一个空块，排空之前入队的回调；释放队列与回调的状态。返回之后不会再有回调。
+   2. 在回调线程上（回调里 drop 自己的 `Watcher`）[我的决定，评审 N2]：`dispatch_sync` 到自己所在的串行队列会让 libdispatch 以 `SIGTRAP` 杀掉整个进程（§4.2 F，实测），所以不排空：置 `closed`，`FSEventStreamStop`、`FSEventStreamInvalidate`（在回调里调用它们没有问题，实测），然后 `dispatch_async(queue, { FSEventStreamRelease；释放回调的状态与队列 })`。串行队列保证这个块在当前回调返回之后才跑，所以正在跑的回调仍在用的状态（闭包、`Arc`）此前不会被释放。drop 返回时当前回调还在继续，之后不会有第二次回调进入 `on_event`（`closed` 挡住已排队的）。
 7. `Watcher::flush(&self)`（增补 7、8 "Event flush, amended"）：
-   1. 在回调线程上调用（回调执行期间线程局部的 `IN_CALLBACK` 为真）→ debug 构建 `debug_assert!` 失败；release 构建直接返回，因为 `dispatch_sync` 到自己所在的串行队列会死锁。
+   1. 在回调线程上调用（回调执行期间线程局部的 `IN_CALLBACK` 为真）→ debug 构建 `debug_assert!` 失败；release 构建直接返回：`dispatch_sync` 到自己所在的串行队列会让 libdispatch 以 `SIGTRAP` 杀掉整个进程（§4.2 F，实测；不是死锁），而一个只在 bug 路径上出现的 `Err` 会给每个调用方多一个分支。
    2. 取 `Watcher` 内部的互斥量：多个线程同时调用时互相串行（`FlushSync` 的线程安全文档没有说，保守起见）。
    3. `FSEventStreamFlushSync(stream)`。
-   4. `dispatch_sync(queue, {})`：空块排在已经入队的回调之后，它返回就说明那些回调都跑完了、没有回调在执行。
+   4. `dispatch_sync(queue, {})`：空块排在已经入队的回调之后，它返回就说明排空之前入队的回调都跑完了（排空之后新到的回调可能已经开始，不在保证之内；所以"返回时没有回调在执行"不是保证，只有在安静的流上才碰巧成立）。
    5. 返回，不带"送达了多少"或"已追上"的信号（§4.2 F 的测量：送达 0 到 35%，不是屏障）。调用方怎样用它是 overlay 的决定，apfs 不承诺：Before* 与 Manual 检查点做全量冷扫；ToolCall 检查点用钩子给的路径加 `flush`；没有路径的工具（Bash）选温扫或"晚到的写入落进下一个检查点"（§4.2 F 的结论）。
 
 给消费者的契约：（a）`Changed` 里的目录路径表示整棵子树可能变了；（b）路径可能已不存在，也可能只是被创建又删掉；（c）事件可能晚到几秒（15 ms 到 3.3 s），也可能被合并或丢掉；`flush` 只能缩小窗口，没有办法等它"追上"，所以消费者必须有不靠监听的对账（design §6.2）；（d）`Dropped` 之后到下一次全量重扫完成之前，消费者不能相信自己的脏集合；（e）往 `exclude` 里的目录洪泛也会触发 `Dropped`。
@@ -864,7 +1004,7 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 
 不查卷、不查 `core.ignorecase`：调用方先决定要不要折叠，规则是 §4.2 B 的"两个问题"。
 
-按整条路径调用与按分量调用结果一致：`/` 在折叠与规范化下不变，也不会被产生（整条路径的键就是各分量的键用 `/` 拼起来）。
+**路径性质**（裁定 "case_fold_key prefix property"，来自 overlay 的上游要求）：`case_fold_key(a + "/" + b) == case_fold_key(a) + "/" + case_fold_key(b)`，对任意 `a`、`b`（含空串、以组合记号开头的 `b`）。理由：`/` 是 ccc = 0 的 starter，NFD 的规范重排不会把组合记号挪过它，NFD 也不会让它与前后的字符组合，所以 `NFD(a + "/" + b) = NFD(a) + "/" + NFD(b)`；`full_case_fold` 逐码位作用（含 F 类的一对多映射），不看上下文，`/` 映射到自己；再做一次 NFD，同样的论证。ASCII 快路径的 `to_ascii_lowercase` 显然满足。整条路径的键因此就是各分量的键用 `/` 拼起来；overlay 对受限目录按键的前缀做范围查找（"某个目录之下的全部键"），靠的就是这条。§7 的 `case_fold_key_of_a_path_is_the_slash_joined_keys` 钉住它。
 
 ### 5.9 复杂度与验收数字
 
@@ -873,7 +1013,7 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 | `clone_tree` | 内核 O(项数)，单线程 | tool 的 `node_modules`（108,530 个文件、8,789 个目录、63 个符号链接，共 117,382 项）在 `/Volumes/GWD`（U 盘 SSD）上 2.4 s，机器忙（负载 8 到 9）时 3.9 s，约 20 到 30 µs 每项；4 路并行克隆 4 份用了 4.2 s（墙钟约 8.9 µs 每项）；对照 `cp -Rc` 13.8 s；`rm -rf` 一份克隆 4.8 s。整个布局的投影见下一行 |
 | 整个布局的 `new`（评审 I3，增补 8 的 T15 与用户一行） | 各仓库逐项相加 | **deps 目录合计约 619,792 项**（评审在真实仓库上数的）：admin 100,269；front 70,999；tool 117,382；slate_viewer 50,125；surgical-timeout 38,647；appointment_patient_viewer 49,861；patient_9_grid 53,362；maxident-sync 49,824；insurance-check 50,111；hr-time-management 20,787；staff-api/vendor 18,425。按上面真实树的单线程成本算是 **12 到 19 s**，按 4 路并行实测的 8.9 µs 每项算约 **5.5 s**，**两者都还没有算源码树和 tool 的 `src-tauri/target`**。所以 design §8 的"新建会话 < 5 s（tool + 全部兄弟库）"对整个布局很可能做不到。下界的对照（本轮，内部卷，合成树）：102,001 项的树单次 `clonefile` 0.67 到 0.70 s，6.6 到 6.8 µs 每项、单线程，照此 62 万项约 4.2 s——每项成本差了三倍以上，原因没有拆开量（卷是 U 盘 SSD 还是内部卷、树的形状都不同），所以这个投影必须在工作区所在的卷上用真实的兄弟库复测，不能用合成树。并行是 session 的事（apfs 的函数是同步的单线程调用，§9）。可选的出路：并行克隆各仓库（session）、按仓库懒克隆 deps、放宽目标——**目标的取舍要交给用户**（经 lead）。§9 的那一行保持"待定"，Task 10 用全部兄弟库复测 |
 | `walk` | O(项数)，每个目录至少一次 `getattrlistbulk` | 温热 11.7 万项约 0.3 s（约 3 µs 每项）；冷（刚读盘）的 tool 源码树 28,889 项（不含 `node_modules`、`.git`、`target` 等）1.42 s，温热 0.20 s；staff-api 13,586 项冷 0.65 s；admin 85 ms（都是只读遍历）。design §8"全量对账 tool 源码树 < 3 s"冷读也满足；"checkpoint 改 50 个文件 < 200 ms"满足不了全量遍历（温热也要 0.2 s），要靠钩子带来的路径、监听事件、`attrs_of` 和 `max_depth = Some(1)` 的单目录列表缩小范围，这是 overlay 的事 |
-| `attrs_of`、`open_root`、`open_rooted`、`clone_from_rooted`（克隆本身另算，成本同 `clone_file`、`clone_tree`）、目的地变体、`rename_rooted`（两个父级）、`remove_rooted` | O(深度) 次 `openat` 加一次属性或落地调用 | 每次几十微秒量级（待 spike 实测，§9） |
+| `attrs_of`、`open_root`、`open_rooted`、`clone_from_rooted`（克隆本身另算，成本同 `clone_file`、`clone_tree`）、目的地变体、`rename_rooted`（两个父级）、`remove_rooted`、`make_removable`、`set_file_meta`（一次 `fstat` 加至多三次系统调用） | O(深度) 次 `openat` 加一次属性或落地调用 | 每次几十微秒量级（待 spike 实测，§9） |
 | `remove_tree_rooted` | O(项数)：每个目录一次打开加一次列表，每个条目一次 `unlinkat` | 内部卷上参考实现 29 µs 每项（102,001 项 2.98 s），`rm -rf` 38 µs 每项；比同一棵树的 `clonefile` 慢四倍多（§4.2 H）。照 62 万项的整个布局算，删一遍约 18 s（单线程）：什么时候删、要不要放后台、一棵树一个线程，是 store、session 的调度（`retire_dir` 的改名是 O(1)，用户感知的 `rm` 不必等删除结束） |
 | `full_fsync` | 一次 `fcntl`，等设备 | USB SSD 上两次测量：文件 10 到 12 ms，建文件加改名之后对目录 4 到 26 ms，没有脏数据时近乎 0（§4.2 G）。扛断电的改名每次要对两个父目录各做一次，成批改名应当合并同步 |
 | `watch` | 每个事件 O(1) | 送达延迟 15 ms 到 3.3 s，不是屏障（§4.2 F） |
@@ -882,33 +1022,35 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 
 ## 6. 失败与恢复
 
-错误时序按 design §9 不变量 6 与增补 3 的细化：写入之前的失败是具名的码，什么都没留下；一旦第一次可见的写入发生，之后的失败一律 `Unknown`，现场原样保留。apfs 自己的操作大多是**单次系统调用**（`clonefile`、`clonefileat`、`openat(O_CREAT|O_EXCL)`、`symlinkat`、`renameatx_np`、`unlinkat`），失败时内核什么都没写，所以可以给具名的码；`ENOSPC` 与 `EIO` 按 types.md §6.3 归 `Unknown`，哪怕实测它们也没留下 dst。多步的只有三个：`mkdir_rooted(parents = true)`、`clone_file_rooted` 的"克隆再设 mode"，以及 `remove_tree_rooted`（遍历一开始就算开始）。apfs 从不清理、从不回滚、从不重试（`EINTR` 除外）；恢复的责任在调用方，它们在克隆之前写 intent 行（增补 3、4），崩溃之后不信任 dst 的存在。
+错误时序按 design §9 不变量 6 与增补 3 的细化：写入之前的失败是具名的码，什么都没留下；一旦第一次可见的写入发生，之后的失败一律 `Unknown`，现场原样保留。apfs 自己的操作大多是**单次系统调用**（`clonefile`、`clonefileat`、`openat(O_CREAT|O_EXCL)`、`symlinkat`、`renameatx_np`、`unlinkat`），失败时内核什么都没写，所以可以给具名的码；`ENOSPC` 与 `EIO` 按 types.md §6.3 归 `Unknown`，哪怕实测它们也没留下 dst。多步的有五个：`mkdir_rooted(parents = true)`、`clone_file_rooted` 的"克隆再经句柄设 mode"、`make_removable`（先清标志、再补写位）、`set_file_meta`（清标志、设 mode、设 mtime），以及 `remove_tree_rooted`。前四个第一步生效之后的失败是 `Unknown`；`remove_tree_rooted` 不同（控制者裁定）：遍历一开始就算开始，之后不再有 `Err`，部分失败进报告，因为部分删除的结局是确定的，调用方重试剩下的。apfs 从不清理、从不回滚、从不重试（`EINTR` 除外）；恢复的责任在调用方，它们在克隆之前写 intent 行（增补 3、4），崩溃之后不信任 dst 的存在。
 
 | 情形 | 返回 | 现场 | 恢复 |
 | --- | --- | --- | --- |
-| dst 以 `/` 结尾；dst 在 src 里面；分量超过 255 个 UTF-16 码元；路径达到 1024 字节；`symlink_rooted` 的目标为空 | `InvalidInput`（`reason`：`trailing_slash`、`dst_inside_src`、`name_too_long`、`path_too_long`、`empty_target`） | 没写任何东西 | 改参数 |
+| dst 以 `/` 结尾；dst 在 src 里面；分量超过 255 个 UTF-16 码元；路径达到 1024 字节；`symlink_rooted` 的目标为空；**root 不规范**（空串、以 `/` 结尾、含 `.`、`..` 分量） | `InvalidInput`（`reason`：`trailing_slash`、`dst_inside_src`、`name_too_long`、`path_too_long`、`empty_target`、`root_not_canonical`） | 没写任何东西 | 改参数；root 由 config 在加载时规范化（T15，§9） |
 | src 不存在；dst 的父目录不存在；`start` 或点查的路径不存在；`watch` 的 root 不存在 | `NoSuchPath` | 没写任何东西 | 目的地变体：先 `mkdir_rooted(parents = true)` 建父级 |
 | `clone_tree` 的 src 不是目录（符号链接也算）；路径中间一级是文件或符号链接；`watch` 的 root 不是目录 | `NotDirectory`（`reason`：`symlink` 或 `not_a_directory`） | 没写任何东西。目的地变体撞上符号链接时，被符号链接指着的地方不被碰 | 调用方决定：工作区里多了一个符号链接，是 overlay 要报告的内容，不是 apfs 的错 |
-| `clone_file` 的 src 是目录；`open_rooted_file` 的终点是目录 | `IsDirectory` | 没写任何东西 | |
-| FIFO、socket、设备文件作 `clone_file` 的源；`open_rooted` 的终点是符号链接、socket、设备文件；`open_rooted_file` 的终点是 FIFO | `NotFile`（`reason`：`fifo`、`socket`、`device`、`symlink`） | 没写任何东西；FIFO 已经以非阻塞方式打开并关掉，没有挂住 | |
+| `clone_file` 的 src 是目录；`open_rooted_file` 的终点是目录；`clone_from_rooted(.., File)` 的源是目录（打开之前被换成目录的也是） | `IsDirectory` | 没写任何东西，没有克隆任何东西（整棵树没有被克隆，store 第 2 轮评审的场景） | 调用方的判断出了偏差，当作写竞争处理 |
+| FIFO、socket、设备文件作 `clone_file` 的源；`open_rooted` 的终点是符号链接、socket、设备文件；`open_rooted_file` 的终点是 FIFO；`clone_from_rooted(.., File)` 的源是符号链接、FIFO、socket、设备；`set_file_meta` 的句柄是 FIFO、socket、设备 | `NotFile`（`reason`：`fifo`、`socket`、`device`、`symlink`） | 没写任何东西；FIFO 已经以非阻塞方式打开并关掉，没有挂住 | 符号链接的"内容"是目标，调用方重建它：`attrs_of` 取目标，`symlink_rooted`（不克隆，§5.4） |
 | dst 已存在（文件、目录、符号链接，含悬空）；dst 就是 src | `Exists` | 原有的东西与符号链接指向的地方都不被碰；apfs 从不覆盖、从不合并 | 调用方先处理已有的东西 |
 | src 与 dst 不在同一个卷 | `CrossVolume`（`detail.src_dev`、`dst_dev`） | 没写任何东西，没有任何字节被复制 | 把会话根、Store 放在与主 checkout 同一个 APFS 卷上（design §7） |
 | 卷不是 APFS，或不支持 `clonefile`（`ENOTSUP`，或 `volume_caps` 明确 `clone = Some(false)`） | `Unsupported`（`detail.fs_type`） | 没写任何东西 | 同上 |
 | 权限：dst 的父目录不可写，**或者**源树里有不可读的条目（mode 000 的文件或目录）；只读卷 | `ReadOnly`（`EACCES`、`EPERM`、`EROFS`；message 同时写出两种可能） | `clone_*`：dst 不存在（`clonefile` 原子，实测）。目的地变体：同 | 修权限；若是源树里的不可读条目，调用方对这棵树要么排除它，要么先修 |
 | 磁盘满（`ENOSPC`）、`EIO`、dataless 文件（`EDEADLK`）、描述符耗尽 | `Unknown`（`detail.errno`、`dst_exists`） | `clone_*`：dst 不存在（实测 `ENOSPC`）。克隆是写时复制，克隆之后的覆盖写才可能耗尽空间，那是调用方写文件时的错误 | 不重放、不清理，状态上报（不变量 6）；空出空间后调用方重试整个操作 |
 | `mkdir_rooted(parents = true)` 建出了几级之后失败 | `Unknown`（`detail.created`） | 已建的目录留着 | 调用方按 `created` 决定留还是删 |
-| `clone_file_rooted` 克隆成功而设 mode 失败 | `Unknown`（`dst_exists = true`） | 克隆出的文件留着，mode 是源的 | 调用方自己 `fchmod` 或删除重来 |
+| `clone_file_rooted` 克隆成功而经句柄设 mode 失败（含 `set_file_meta` 的 `hard_link` 拒绝：dst 在中间被换成了共用的 inode） | `Unknown`（`dst_exists = true`） | 克隆出的文件留着，mode 是源的；被换成硬链接时，根外的文件没有被改 | 调用方自己 `set_file_meta` 或删除重来 |
 | `rename_rooted`：`Excl` 的 to 已存在（含悬空符号链接）；`Swap` 缺一边；RepoPath 相同；to 在 from 之下 | `Exists`；`NoSuchPath`（`from_missing`、`to_missing`）；`InvalidInput`（`same_path`、`into_itself`） | 什么都没动（单次系统调用） | 调用方先处理已有的东西 |
 | `rename_rooted`：跨卷（含跨嵌套挂载点）；`Swap` 在 HFS+ 上 | `CrossVolume`；`Unsupported` | 什么都没动 | 放在同一个卷上；`Swap` 改用别的步骤 |
-| `rename_rooted`、`remove_rooted`：权限（0555 的目录改父级、父目录不可写、带 `uchg`）、只读卷 | `ReadOnly`，`detail.reason` 是 `reparent_needs_write`、`immutable`、`no_permission`、`read_only_volume` | 什么都没动 | 调用方放宽权限（先 `chmod u+w`、清标志）再重试；apfs 不代劳（A10） |
-| `remove_rooted(File)` 的目标是目录；`remove_rooted(EmptyDir)` 的目标非空、是文件或符号链接 | `IsDirectory`；`NotEmpty`；`NotDirectory` | 什么都没动；符号链接指向的地方不被碰 | 调用方选对类型；非空的树经 `remove_tree_rooted`，不自己写递归（增补 7、8） |
-| `remove_rooted(EmptyDir)` 的目标是挂载点 | `Unknown`（`reason = busy`，`errno` 为 `EBUSY`） | 什么都没动 | 不删挂载点；`remove_tree_rooted` 遇到嵌套的挂载点记 `stuck`（`OtherDevice`） |
-| `remove_tree_rooted`：遍历之前的拒绝——目标不存在；目标或某一级父目录是符号链接或文件；目标本身是挂载点；父目录不可写或带不可变标志 | `NoSuchPath`；`NotDirectory`（`symlink` 或 `not_a_directory`）；`Unknown`（`reason = mount_point`）；`ReadOnly`（`no_permission` 或 `immutable`） | 什么都没动，树原样 | 调用方改正参数或先处理父目录（父目录的权限是调用方的，A10） |
-| `remove_tree_rooted`：遍历开始之后没删干净——ACL 禁止删除的条目、清不掉的标志（`SF_*`，或既带 `uchg` 又没有读权限的非目录）、嵌套的挂载点、条目在遍历中被别的进程换掉或又写进新条目、深度超限、`EBUSY`、`EIO` | `Unknown`，`detail` 是 `RemoveReport`（`removed`、`flags_cleared`、`made_writable`、`stuck`、`stuck_total`；`RemoveReport::from_error` 读回） | 能删的都删了，`stuck` 里的条目（连同它们的祖先目录）留着；清掉的标志和补上的权限**不会还原**（如实记在 `flags_cleared`、`made_writable`）；树之外的东西一概没碰 | 调用方按报告决定：重试（别的进程也许已经停写）、留着、或上报；不重放整个删除（不变量 6） |
-| `clone_from_rooted`：源的某一级父目录是符号链接；源本身是符号链接、FIFO、socket、设备 | `NotDirectory`（`symlink`）；`NotFile`（`symlink`、`fifo`、`socket`、`device`） | 没克隆任何东西，dst 不存在 | 符号链接的"内容"由 overlay 另行处理 |
+| `rename_rooted`、`remove_rooted`：权限（0555 的目录改父级、父目录不可写、带 `uchg`）、只读卷 | `ReadOnly`，`detail.reason` 是 `reparent_needs_write`、`immutable`、`no_permission`、`read_only_volume` | 什么都没动 | 调用方先 `make_removable`（句柄由 `open_rooted` 取，先清标志、再补 u+w）再重试；apfs 自己不放宽（A10） |
+| `remove_rooted(File)` 的目标是目录；`remove_rooted(EmptyDir)` 的目标非空、是文件或符号链接 | `IsDirectory`；`NotEmpty`；`NotDirectory` | 什么都没动；符号链接指向的地方不被碰 | 调用方选对类型；非空的树经 `remove_tree_rooted`，不自己写递归（增补 7、8）。`NotEmpty` 说明有别的写者（裁定 "NotEmpty from apfs"）：overlay 的 restore 当写竞争（第一次可见的写之前 `Busy`，之后 `Unknown`），store 的 gc 清扫跳过这个目录；T15 给 types.md 里 `NotEmpty` 的"谁返回"加 `apfs`，含义放宽成"要删的目录非空"（§9） |
+| `remove_rooted(EmptyDir)` 的目标是挂载点 | `CrossVolume`（`reason = mount_point`，`detail.src_dev`、`dst_dev` 是父目录与目标的设备号；`rmdir` 晚到的 `EBUSY` 同样映射） | 什么都没动 | 不删挂载点；`remove_tree_rooted` 遇到嵌套的挂载点记 `stuck`（`OtherDevice`），目标本身是挂载点则在遍历之前拒绝（同一个码） |
+| `remove_tree_rooted`：遍历之前的拒绝——目标不存在；某一级父目录是符号链接或文件；目标是目录而且本身是挂载点；父目录不可写或带不可变标志（目标是什么种类的条目都不拒绝） | `NoSuchPath`；`NotDirectory`（`symlink` 或 `not_a_directory`）；`CrossVolume`（`reason = mount_point`）；`ReadOnly`（`no_permission` 或 `immutable`） | 什么都没动，树原样 | 调用方改正参数或先处理父目录（父目录的权限是调用方的，A10） |
+| `remove_tree_rooted`：遍历开始之后没删干净——ACL 禁止删除的条目、清不掉的标志（`SF_*`；属主既没有读位也没有执行位又带 `uchg` 的条目，文件、目录都一样）、共用的 inode（硬链接）上的标志、嵌套的挂载点、条目在遍历中被别的进程换掉或又写进新条目、深度超限、`EBUSY`、unlink 结果不确定（`EIO` 一类） | **`Ok(RemoveReport)`**，不是 `Err`：`removed`、`flags_cleared`、`made_writable`、`stuck`（每项带 `reason`、`errno`、`detail`，原因见 §5.4 的 stuck 原因表）、`stuck_total`；`is_complete()` 为假 | 能删的都删了，`stuck` 里的条目（连同它们的祖先目录）留着；清掉的标志和补上的权限**不会还原**（如实记在 `flags_cleared`、`made_writable`）；树之外的东西一概没碰，共用的 inode 的标志没动 | 调用方看 `is_complete()` 并按报告决定：重试（别的进程也许已经停写；store 的 gc 下一轮再删）、留着、或上报；不重放整个删除。`UnknownOutcome` 的条目可能已经没了，也可能还在，不要假定 |
+| `clone_from_rooted`：源的某一级父目录是符号链接；`kind = File` 而源本身是符号链接、FIFO、socket、设备；`kind = Dir` 而源不是目录或是符号链接 | `NotDirectory`（`symlink`）；`NotFile`（`symlink`、`fifo`、`socket`、`device`）；`NotDirectory`（`symlink` 或 `not_a_directory`） | 没克隆任何东西，dst 不存在（种类核对在 `fclonefileat` 之前，§5.4 第 4 步） | 符号链接的"内容"是目标，调用方重建它：`attrs_of` 取目标，`symlink_rooted`（不克隆） |
 | `clone_from_rooted`：打开源之后，源路径被换成指向根外的符号链接或别的文件 | 成功，克隆出的是打开时的那个对象 | 根外的内容一个字节也没进 dst | 无需处理（§4.2 A） |
 | `clone_from_rooted`：源与 dst 不在同一个卷；dst 已存在；dst 的父目录不存在 | `CrossVolume`；`Exists`；`NoSuchPath` | dst 不存在（已存在的那个原样），没有字节被复制 | 同 `clone_file` |
 | `full_fsync` 失败 | `Unsupported`（`ENOTSUP`）或 `Unknown`（`detail.errno`） | 改名等操作本身已经发生；持久性不确定 | 调用方按"没有落盘"处理：重试或上报 |
+| `make_removable`、`set_file_meta`：非目录而 `st_nlink > 1`；`SF_IMMUTABLE`、`SF_APPEND` 置位；（`set_file_meta`）写侧的 `EACCES`、`EPERM`、`EROFS` | `ReadOnly`（`hard_link`、`immutable`（带 `detail.flags`）、`no_permission`、`read_only_volume`） | 什么都没改（核对和第一处改动都在任何生效的改动之前） | 共用的 inode 不是 apfs 能处理的：先让别的名字消失；`SF_*` 要 root，调用方上报 |
+| `make_removable`、`set_file_meta` 第一处改动生效之后失败（清了标志而补写位失败；改了 mode 而设 mtime 失败） | `Unknown`（`detail.errno`） | 已做的改动留着（标志已清、mode 已改） | 不重放，状态上报（不变量 6）；`make_removable` 是幂等的，调用方可以重试 |
 | 进程在 `clonefile` 中途被杀 | — | 系统调用要么完成要么不可见（进程被杀的情形没有观察到半成品）。**断电**的情形没有测过：不能假定 dst 完整 | 调用方在克隆之前写 intent 行；崩溃后 `recover` 不信任 dst，按 intent 行处理（增补 3、4） |
 | `walk`：目录不可读 | 一条 `Err(Unknown)`（`reason = unreadable_entry`），遍历继续 | 目录条目本身已产出，它的子树缺 | 调用方决定这次扫描是否有效；overlay 把它当作扫描失败（tracker 状态不变） |
 | `walk`：条目在读与打开之间消失，或被换成文件、符号链接 | 不报错，跳过 | 子树不出现。遍历本来就不是快照（A5） | 下一次扫描或监听事件会补上 |
@@ -916,8 +1058,10 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 | `walk`：根在遍历中被换掉 | 末尾一条 `Err(Busy)`（`reason = root_changed`；码的含义宽于 types.md §6.2，§9） | 已产出的条目来自旧目录 | 丢弃这次遍历的全部结果，重来（`move_workspace` 之后 overlay 本来就要冷扫） |
 | `walk`：名字不是 UTF-8 | 一条 `Err(NotText)` | APFS 上不会发生（`EILSEQ`），解析器仍然防住 | |
 | `watch`：FSEvents 流建不起来、启动失败 | `Unknown` | 没有 Watcher | 调用方退化为只做全量对账（design §6.2） |
-| `Watcher::flush` 之后事件仍未到齐 | 不是错误，没有返回值 | 事件还在 fseventsd 那一头（§4.2 F） | overlay 的做法：冷扫、钩子路径加 `flush`、或一次工具调用的滞后（增补 8） |
-| `nearest_existing_ancestor`：相对路径；`stat` 遇到 `EACCES` | `io::Error`（`InvalidInput`；原 errno） | 只读 | 调用方改正参数或权限 |
+| `Watcher::flush` 之后事件仍未到齐 | 不是错误，没有返回值 | 事件还在 fseventsd 那一头（§4.2 F）；保证的只有排空之前入队的回调都跑完了 | overlay 的做法：冷扫、钩子路径加 `flush`、或一次工具调用的滞后（增补 8） |
+| `Watcher::flush` 在回调里被调用 | debug 构建 `debug_assert!` 失败；release 构建立即返回、什么都不做 | 没有任何东西被改。放行的话，`dispatch_sync` 到自己所在的串行队列会让整个进程 `SIGTRAP`（§4.2 F，不是死锁） | 调用方的 bug：`flush` 不得在 `on_event` 里调用（daemon 在回调线程之外调 `Tracker::flush`） |
+| `drop(Watcher)` 在回调里 | 正常返回 | 流已停；`Release` 与状态的释放留给私有队列上随后的 `dispatch_async` 块；当前回调继续跑完，之后没有第二次回调 | 无需处理（§5.7 第 6 步） |
+| `nearest_existing_ancestor`：相对路径；`stat` 遇到 `EACCES` | `io::Error`（`InvalidInput`；原 errno） | 只读 | 调用方改正参数或权限；要变成 `StrataError` 就 `classify_io_error(.., IoSide::Read, ..)`（两种都是 `Unknown`，调用方的 bug 或读侧的权限错误） |
 | 运行中事件丢失、合并、根被改名 | 不是错误：`Dropped`、`MustRescan` | — | 消费者全量或按子树重扫，排除 `exclude` 里的目录（§5.7） |
 | `on_event` 回调 panic | 截住、记日志，补发一个 `Dropped` | Watcher 继续 | 消费者因此重扫；回调的 bug 由调用方修 |
 
@@ -948,12 +1092,13 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 | `creating_a_non_utf8_name_fails_with_eilseq` | 在 APFS 上用含字节 `0xff` 的名字建文件 → `EILSEQ`：证实磁盘上的名字一定是 UTF-8，`walk` 的 `NotText` 只由解析器的单元测试覆盖 | 新增 |
 | `same_volume_tells_system_volume_from_data_volume` | `/usr/bin/true`（封存的系统卷）与临时目录（数据卷）：`st_dev` 相同而 `same_volume` 为 `false`；同一个临时目录里的两个文件为 `true`；临时目录与 `hdiutil` 镜像的挂载点为 `false` | 新增 |
 | `same_volume_follows_links_and_reports_missing_paths` | `/tmp/x`（`/tmp` 是符号链接）与 `/private/tmp/x` 为 `true`；`/Users/<当前用户>/x` 与 `/System/Volumes/Data/Users/<当前用户>/x`（firmlink 别名）为 `true`；指向另一个卷的目录的符号链接，比较的是它指向的卷；不存在的路径 → `io::ErrorKind::NotFound` | 新增 |
-| `nearest_existing_ancestor_climbs_to_the_first_existing_path` | 评审 M17：已存在的路径 → 它自己；叶子不存在 → 父目录；连缺 5 级 → 第一个存在的祖先；路径的某一级是普通文件（`file/x/y`）→ 那个文件（`ENOTDIR` 也往上爬）；中间有悬空符号链接（`dang/x`）→ 符号链接所在的目录；经 `/tmp` 符号链接给出的路径 → 返回值以 `/tmp` 开头，不是 `/private/tmp`（不做 realpath）；相对路径 → `io::ErrorKind::InvalidInput`；路径上有一个 mode 000 的目录而 `stat` 得 `EACCES` → 原样返回 `PermissionDenied`，不往上爬。接上 `same_volume`：镜像挂载点之下尚不存在的 `mnt/new/deeper`，`same_volume(&nearest_existing_ancestor(..)?, 镜像里的文件)` 为 `true`，对内部卷上的文件为 `false`（config.md §4.3 的规则一份实现） | 新增 |
+| `nearest_existing_ancestor_climbs_to_the_first_existing_path` | 评审 M17：已存在的路径 → 它自己；叶子不存在 → 父目录；连缺 5 级 → 第一个存在的祖先；路径的某一级是普通文件（`file/x/y`）→ 那个文件（`ENOTDIR` 也往上爬）；中间有悬空符号链接（`dang/x`）→ 符号链接所在的目录；经 `/tmp` 符号链接给出的路径 → 返回值以 `/tmp` 开头，不是 `/private/tmp`（不做 realpath）；相对路径 → `io::ErrorKind::InvalidInput`；路径上有一个 mode 000 的目录而 `stat` 得 `EACCES` → 原样返回 `PermissionDenied`，不往上爬。接上 `same_volume`：镜像挂载点之下尚不存在的 `mnt/new/deeper`，`same_volume(&nearest_existing_ancestor(..)?, 镜像里的文件)` 为 `true`，对内部卷上的文件为 `false`（config.md §4.3 的规则一份实现）。评审 N8：两种错误交给 `classify_io_error(&e, IoSide::Read, path)` 都得 `Unknown`——相对路径的 `InvalidInput`（没有 `raw_os_error`）和 mode 000 目录下的 `PermissionDenied`（`detail.errno` 为 `EACCES`）；读侧的权限错误从不是 `ReadOnly` | 新增 |
 | `volume_caps_per_filesystem` | 用镜像：APFS → `fs_type = "apfs"`、`clone = Some(true)`、`case_sensitive = false`、`write_gen_count = true`；大小写敏感的 APFS → `case_sensitive = true`；HFS+ → `clone = None`；MSDOS → `clone = Some(false)`、`write_gen_count = false`；路径不存在 → `NoSuchPath` | 新增 |
-| `errno_mapping_table` | 单元测试，表驱动，直接调公开的 `classify_io_error`，逐行对 §4.2 I：`ENOENT`→`NoSuchPath`，`EEXIST`→`Exists`，`ENOTDIR`→`NotDirectory`，`EISDIR`→`IsDirectory`，`ENOTEMPTY`→`NotEmpty`，`EXDEV`→`CrossVolume`，`ENOTSUP`、`EOPNOTSUPP`→`Unsupported`，`ENAMETOOLONG`、`EINVAL`→`InvalidInput`；`IoSide::Write` 的 `EACCES`、`EPERM`→`ReadOnly`（`reason = no_permission`），`EROFS`→`ReadOnly`（`reason = read_only_volume`），`IoSide::Read` 的同样 errno→`Unknown`；`ENOSPC`、`EIO`、`EDEADLK`、`EMFILE`、`ELOOP`→`Unknown`，`EBUSY`→`Unknown`（`reason = busy`）；`IoSide::AfterWrite` 对上面每一个 errno 都是 `Unknown`；没有 `raw_os_error` 的 `io::Error`→`Unknown`；每个错误的 `detail` 都带 `errno`（数字）与 `path` | 新增 |
+| `errno_mapping_table` | 单元测试，表驱动，直接调公开的 `classify_io_error`，逐行对 §4.2 I：`ENOENT`→`NoSuchPath`，`EEXIST`→`Exists`，`ENOTDIR`→`NotDirectory`，`EISDIR`→`IsDirectory`，`ENOTEMPTY`→`NotEmpty`，`EXDEV`→`CrossVolume`，`ENOTSUP`、`EOPNOTSUPP`→`Unsupported`，`ENAMETOOLONG`、`EINVAL`→`InvalidInput`；`IoSide::Write` 的 `EACCES`、`EPERM`→`ReadOnly`（`reason = no_permission`），`EROFS`→`ReadOnly`（`reason = read_only_volume`），`IoSide::Read` 的同样 errno→`Unknown`；`ENOSPC`、`EIO`、`EDEADLK`、`EMFILE`、`ELOOP`→`Unknown`，`EBUSY`→`Unknown`（`reason = busy`）；`IoSide::AfterWrite` 对上面每一个 errno 都是 `Unknown`；没有 `raw_os_error` 的 `io::Error`→`Unknown`；每个错误的 `detail` 都带 `errno`（数字）与 `path`。评审 N8 的例子：`create_file_rooted` 返回的句柄上 `write_all` 失败，文件已经建出来了，调用方传 `IoSide::AfterWrite`，`EROFS`、`EACCES` 也得 `Unknown`，不是写侧的 `ReadOnly`（现场留着一个文件，不能当"什么都没改"） | 新增 |
 | `classify_io_error_matches_real_syscalls` | 用真实的系统调用造出每个 errno，再把得到的 `io::Error` 交给 `classify_io_error`，核对 §4.2 I 的表（这张表因此是量出来的，不是抄来的）：`File::open` 一个不存在的路径（`ENOENT` → `NoSuchPath`）；`OpenOptions::create_new` 一个已有的文件（`EEXIST` → `Exists`）；把普通文件当目录用（`ENOTDIR` → `NotDirectory`）；对目录 `fs::write`（`EISDIR` → `IsDirectory`）；`remove_dir` 非空目录（`ENOTEMPTY` → `NotEmpty`）；`fs::rename` 跨两个镜像（`EXDEV` → `CrossVolume`）；HFS+ 镜像里的 `clonefile`（`ENOTSUP` → `Unsupported`）；256 个码元的名字（`ENAMETOOLONG` → `InvalidInput`）；mode 000 的文件读（`EACCES` → 读侧 `Unknown`、写侧 `ReadOnly`）；只读挂载的镜像上建文件（`EROFS` → `ReadOnly`，`reason = read_only_volume`）；带 `uchg` 的文件 `remove_file`（`EPERM` → 写侧 `ReadOnly`，`reason = no_permission`：细分成 `immutable` 是各个操作的事，这里不分）；填满的镜像（`ENOSPC` → `Unknown`）。`IoSide::AfterWrite` 对每一个都给 `Unknown` | 新增 |
-| `rooted_open_opens_files_and_directories` | 在根之下按 `RepoPath` 打开普通文件，读到的内容正确；打开目录得到可当 dirfd 用的句柄（store、session 用它做 `unlinkat`、`fchflags`）；`open_rooted_file` 对目录 → `IsDirectory`；空串、`.`、`./dir/file`、`../file`、`dir/../file`、绝对路径连 `RepoPath` 都构造不出来，apfs 的函数没有别的路径入口；根的祖先里有符号链接（`/tmp/…`）时照常打开 | tgrep-core/src/rooted/tests.rs::regular_opens_and_literal_path_validation |
-| `open_root_returns_the_root_handle` | `open_root` 返回的句柄是目录（`metadata().is_dir()`），可以当 dirfd 用：对它 `openat` 一个子项成功；根的祖先里有符号链接（`/tmp/…`）时照常打开；根本身是符号链接 → `NotDirectory`（`reason = symlink`），指向的目录没被碰；根是普通文件 → `NotDirectory`（`not_a_directory`）；不存在 → `NoSuchPath`（对根句柄的 `full_fsync` 在 `full_fsync_accepts_file_and_directory_handles` 里测） | 新增 |
+| `rooted_open_opens_files_and_directories` | 在根之下按 `RepoPath` 打开普通文件，读到的内容正确；打开目录得到可当 dirfd 用的句柄（调用方拿它做 `make_removable`、`full_fsync`，或当 `openat` 的 dirfd）；`open_rooted_file` 对目录 → `IsDirectory`；空串、`.`、`./dir/file`、`../file`、`dir/../file`、绝对路径连 `RepoPath` 都构造不出来，apfs 的函数没有别的路径入口；根的祖先里有符号链接（`/tmp/…`）时照常打开 | tgrep-core/src/rooted/tests.rs::regular_opens_and_literal_path_validation |
+| `open_root_returns_the_root_handle` | `open_root` 返回的句柄是目录（`metadata().is_dir()`），可以当 dirfd 用：对它 `openat` 一个子项成功；根的祖先里有符号链接（`/tmp/…`）时照常打开；根本身是符号链接 → `NotDirectory`（`reason = symlink`），指向的目录没被碰；根是普通文件 → `NotDirectory`（`not_a_directory`）；不存在 → `NoSuchPath`（对根句柄的 `full_fsync` 在 `full_fsync_accepts_file_and_directory_handles` 里测）。评审 N5、裁定 "Rooted roots are canonical"：root 不规范时在碰文件系统之前就 `InvalidInput`（`root_not_canonical`）：`root/`、`root//`、`root/.`、`root/./sub`、`root/../root`；根是符号链接 `lnk` 时，`lnk` → `NotDirectory`（`symlink`），而 `lnk/`、`lnk//`、`lnk/.` 都 → `InvalidInput`（`root_not_canonical`），**不是**打开了链接指向的目录（内核对带结尾斜杠的路径跟随符号链接，`O_NOFOLLOW` 管不到，§4.2 E）；其余函数的同一检查见 `rooted_roots_must_be_canonical` | 新增 |
+| `rooted_roots_must_be_canonical` | 评审 N5、裁定 "Rooted roots are canonical"。表驱动：对 `lnk/`（指向目录的符号链接加斜杠）、`root/`、`root/.`、`root/..`、`root/sub/../sub`、空串这几种不规范的 root，逐个调用每个以 root 为参数的函数：`open_root`、`open_rooted`、`open_rooted_file`、`clone_from_rooted`（`src_root`）、`clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`（`parents` 取两个值）、`symlink_rooted`、`rename_rooted`（`Excl`、`Swap`）、`remove_rooted`（`File`、`EmptyDir`）、`remove_tree_rooted`、`attrs_of`：全部 `InvalidInput`（`root_not_canonical`）；`walk`、`walk_with`、`list_dir` 的第一项是同样的 `Err`。每一种之后，`lnk` 指向的目录与根里的内容、属性逐字节不变，dst 一律不存在。规范的 root（含祖先里有符号链接的 `/tmp/x`）照常工作。`watch` 不在此列（它对 root 做 realpath，§5.7） | 新增 |
 | `rooted_open_treats_colon_and_backslash_names_literally` | 名字 `a:b`、`C:relative.txt`、目录 `dir` 里的 `name:stream`、含反斜杠的 `a\b.txt`、含空格与 NFD 字符的名字，都按字面打开、读回，不当作盘符或数据流；`a\b.txt` 与 `a/b.txt` 是两个文件 | tgrep-core/tests/corrupt_index_reader.rs::builder_and_reader_round_trip_unix_colon_filenames |
 | `rooted_open_fifo_is_nonblocking_and_symlinks_are_refused` | 在子进程里跑，20 秒死线（到点杀掉并判失败，防止测试挂死）：树里有一个没有写端的 FIFO：`open_rooted` 立即返回，`metadata().file_type().is_fifo()` 为真，读它得到 `WouldBlock` 或 EOF；`open_rooted_file` → `NotFile`（`fifo`）；同一目录里指向根内、根外文件的符号链接 → `NotFile`（`symlink`），链接目标的内容从未被读到 | tgrep-core/src/rooted/tests.rs::batch_child_fifo_open_is_nonblocking_and_never_follows_symlinks |
 | `rooted_open_rejects_a_directory_swapped_for_a_link` | 接缝 `before_open` 在打开中间目录 `dir` 之前把它换成符号链接，指向根外（放着 `.env` 之类的文件）和指向根内的另一个目录两种：`open_rooted` 都 → `NotDirectory`（`reason = symlink`），根外文件的内容从未被读到 | tgrep-core/src/rooted/tests.rs::directory_swap_before_open_rejects_outside_and_inside_links |
@@ -968,27 +1113,36 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 | `rooted_destination_swap_after_resolution_stays_inside` | 接缝（落地的 `*at` 调用之前触发的那一次）把父目录的路径换成指向根外的符号链接：写入仍落在原来被钉住的父目录里，根外目录没有新东西；`clone_tree_rooted`、`create_file_rooted`、`symlink_rooted`、`mkdir_rooted` 同理（删除类见 `remove_rooted_refuses_symlinked_parents`） | 新增 |
 | `remove_rooted_refuses_symlinked_parents` | 根里有指向根外目录的符号链接 `link` 和指向根内另一个目录的符号链接 `inner`，被点名的 `x`（文件）与 `d`（空目录）事先放在符号链接指向的目录里：`remove_rooted(link/x, File)`、`inner/x`、`remove_rooted(link/d, EmptyDir)`、`inner/d`、`link/a/b` 都 → `NotDirectory`（`reason = symlink`），根外目录与 `inner` 指向的目录前后不变（`x`、`d` 都还在）；接缝在落地的 `unlinkat` 之前，把已经解析过的父目录的路径换成指向根外的符号链接：删掉的是被钉住的原目录里的条目，根外目录里的同名条目还在，之后的新调用 → `NotDirectory` | 新增 |
 | `mkdir_rooted_parents_semantics` | `parents = true` 一次建出 `a/b/c`；再调一次成功（幂等）；中间一级是文件 → `NotDirectory`，没有新东西；`mode = 0o555` 建 `p/q`，`p` 建出之后 `q` 建不进去 → `Unknown`，`detail.created` 为 `["p"]`，`p` 留着 | 新增 |
-| `clone_file_rooted_sets_the_requested_mode` | src 的 mode 是 0600：`mode = Some(0o644)` 后 dst 是 0644，`Some(0o755)` 得 0755，`None` 保持 0600；src 的 mode 不变；`Some(0o4755)` 的 setuid 位被屏蔽；src 是符号链接时 mode 参数无效；src 带 `uchg` 时 `Some(..)` → `Unknown`（`errno` 为 `EPERM`，`dst_exists` 为 true，克隆留着），`None` 成功，调用方清掉克隆的标志之后自己 `fchmod` 成功 | 新增 |
+| `clone_file_rooted_sets_the_requested_mode` | src 的 mode 是 0600：`mode = Some(0o644)` 后 dst 是 0644，`Some(0o755)` 得 0755，`None` 保持 0600；src 的 mode 不变；`Some(0o4755)` 的 setuid 位被屏蔽；src 是符号链接时 mode 参数无效。设 mode 是经句柄做的（`set_file_meta`，§5.4）：接缝在克隆之后、取回 dst 的那一次 `openat` 之前（同一个名字第二次被问到）把 dst 换成指向根外一个 0600 文件的硬链接 → `Unknown`（`dst_exists` 为 true），根外的文件仍是 0600，`ctime` 也没变——这是 store 的 writer 复现过的场景（经路径改 mode 会把根外的文件改成 0644）；换成指向根外文件的符号链接 → `Unknown`，根外文件不变（`O_NOFOLLOW`）；src 带 `uchg` 时 `Some(..)` → `Unknown`（`errno` 为 `EPERM`，`dst_exists` 为 true，克隆留着），`None` 成功，调用方对 `open_rooted_file` 取得的句柄 `set_file_meta(.., { clear_flags: true, mode: Some(..) })` 之后成功 | 新增 |
 | `clone_tree_rooted_is_atomic_and_refuses_cross_volume` | 根在镜像 B 上、src 在镜像 A 上：`clone_tree_rooted` → `CrossVolume`，B 上没有 dst；父目录缺失 → `NoSuchPath`；dst 在 src 里面 → `InvalidInput`；成功时 dst 与 `clone_tree` 的结果逐项相同 | 新增 |
-| `create_file_rooted_and_symlink_rooted_basics` | `create_file_rooted` 返回的句柄可写，文件一开始是空的，mode 受 umask 影响、对句柄 `fchmod` 后精确，第二次调用 → `Exists`；`symlink_rooted` 建出的链接，`readlink` 得到的字节与给定的目标完全相同（含非 UTF-8 字节和相对路径 `../x`）；空目标 → `InvalidInput`（`empty_target`） | 新增 |
+| `create_file_rooted_and_symlink_rooted_basics` | `create_file_rooted` 返回的句柄可写，文件一开始是空的，mode 受 umask 影响、对句柄 `set_file_meta(.., { mode: Some(..) })` 后精确（新建的 inode 只有一个名字，核对必过），第二次调用 → `Exists`；`symlink_rooted` 建出的链接，`readlink` 得到的字节与给定的目标完全相同（含非 UTF-8 字节和相对路径 `../x`）；空目标 → `InvalidInput`（`empty_target`） | 新增 |
 | `rename_rooted_excl_never_overwrites` | 根里有 `a/x`（文件）、`b/y`（文件）、`d/`（目录）、`dang`（悬空符号链接）：`Excl` 的 `a/x → b/y`、`a/x → d`、`a/x → dang` 都 → `Exists`（`detail.path` 是 to），两边原有的东西和符号链接指向的地方都没被碰；`a/x → b/z` 成功，用 `std::fs` 比较：内容、inode、mtime 不变，ctime 变新，两个父目录的 mtime 变新；`from` 不存在 → `NoSuchPath`（`from_missing`）；`from` 与 `to` 的 RepoPath 相同 → `InvalidInput`（`same_path`），文件没动 | 新增 |
 | `rename_rooted_excl_renames_links_and_case_only_spellings` | `from` 是指向目录的符号链接（或悬空的）：改名的是链接本身，目录和里面的东西不动；大小写不敏感的 APFS 镜像上，`Excl` 的 `Foo.txt → foo.txt` 成功，`std::fs::read_dir` 看到的名字变成 `foo.txt`，内容和 inode 不变；大小写敏感的镜像上 `a → A` 是两个不同的名字，成功，`A` 已存在时 → `Exists`；`from` 在磁盘上是 NFD 拼写，用 NFC 的 RepoPath 能找到并改名 | 新增 |
 | `rename_rooted_swap_exchanges_two_existing_entries` | `Swap`：文件与文件、文件与目录、目录与目录（同一个父目录和不同的父目录）、符号链接与文件，两个名字下的东西互换，每个对象的 inode 和内容跟着自己走（`std::fs` 比 inode、读内容）；任何一边不存在 → `NoSuchPath`（`from_missing` 或 `to_missing`），另一边没动；overlay 的 restore 用法：暂存目录里的新文件换进工作区旧文件的位置，旧文件换到暂存目录里，两份内容都完整；把目录与它自己的后代对调 → `InvalidInput`；两个镜像之间 → `CrossVolume`；HFS+ 镜像上 → `Unsupported`（`detail.fs_type` 为 `hfs`） | 新增 |
 | `rename_rooted_error_mapping` | 表驱动，一种构造一个错误，每种之后两个路径下原有的东西都没被碰：`to` 的父目录不存在 → `NoSuchPath`；`to` 的父级是文件 → `NotDirectory`；目录改名到自己的后代下（`a → a/b/c`）→ `InvalidInput`（`into_itself`）；名字 256 个码元 → `InvalidInput`（`name_too_long`）；两个 APFS 镜像之间 → `CrossVolume`（`src_dev` 不等于 `dst_dev`）；根下嵌套挂载点的两侧之间（两个方向）→ `CrossVolume`；父目录是 0555 → `ReadOnly`（`no_permission`）；带 `uchg` 的文件 → `ReadOnly`（`immutable`；测试结束前先清标志再清理） | 新增 |
 | `rename_rooted_refuses_symlinked_parents_on_both_sides` | 根里有指向根外目录的符号链接 `out` 和指向根内另一个目录的符号链接 `inn`：`from` 在 `out/x` 或 `inn/x`、`to` 在 `out/y` 或 `inn/y` 的各种组合（`Excl` 与 `Swap` 各一遍）都 → `NotDirectory`（`reason = symlink`），根外目录和 `inn` 指向的目录的内容前后不变；接缝在 `to` 的父级解析之前，把已经解析过的 `from` 的父目录的路径换成指向根外的符号链接：这次改名仍作用在被钉住的原目录上，根外目录里没有新东西，之后的新调用 → `NotDirectory` | 新增 |
-| `rename_rooted_directory_reparenting_needs_write_permission` | 增补 4 的"封存先改名、后 chmod"：staging 里 0755 的目录 `Excl` 改名到封存位置（另一个父目录）成功，之后 `chmod 0555` 成功；0555 的目录改名到另一个父目录 → `ReadOnly`（`reparent_needs_write`），内核给的 `detail.errno` 是 `EACCES`（增补 8 点名的"0555 改父级 → EACCES"一条），目录纹丝不动；同一个父目录之内改名成功；`Swap` 里有 0555 的目录、两个目录在不同的父目录下 → `ReadOnly`（`reparent_needs_write`）；对它 `chmod u+w` 之后都成功；0555 的父目录里的文件改名出去 → `ReadOnly`（`no_permission`），不是 `reparent_needs_write` | 新增 |
+| `rename_rooted_directory_reparenting_needs_write_permission` | 增补 4 的"封存先改名、后 chmod"：staging 里 0755 的目录 `Excl` 改名到封存位置（另一个父目录）成功，之后对它的句柄 `set_file_meta({ mode: Some(0o555) })` 成功（目录的句柄，不核对 `st_nlink`）；0555 的目录改名到另一个父目录 → `ReadOnly`（`reparent_needs_write`），内核给的 `detail.errno` 是 `EACCES`（增补 8 点名的"0555 改父级 → EACCES"一条），目录纹丝不动；同一个父目录之内改名成功；`Swap` 里有 0555 的目录、两个目录在不同的父目录下 → `ReadOnly`（`reparent_needs_write`）；对它 `make_removable(&open_rooted(..)?)` 之后都成功；0555 的父目录里的文件改名出去 → `ReadOnly`（`no_permission`），不是 `reparent_needs_write` | 新增 |
 | `remove_rooted_file_on_a_directory_returns_is_directory` | 增补 8 点名的一条：macOS 上 `unlinkat(目录, 0)` 是 `EPERM`（不是 `EISDIR`），types.md §6.3 会把它读成 `ReadOnly`，所以 `remove_rooted(.., File)` 必须用 `fstatat` 区分。空目录、非空目录、0555 的目录、带 `uchg` 的目录：全部 → `IsDirectory`（`detail.errno` 为 `EPERM`），目录与里面的东西都在；对照，带 `uchg` 的**文件**同样是 `EPERM`，却 → `ReadOnly`（`immutable`）；不存在 → `NoSuchPath` | 新增 |
 | `remove_rooted_file_removes_one_entry_without_following` | 文件、指向文件的符号链接、指向目录的符号链接（目录和里面的东西都在）、悬空符号链接、FIFO、socket 都能删，每次只少一个条目，符号链接指向的地方不被碰；目标是目录（空或非空）→ `IsDirectory`（内核给的是 `EPERM`，另有专门的 `remove_rooted_file_on_a_directory_returns_is_directory`），目录还在；不存在 → `NoSuchPath`；带 `uchg` 的文件 → `ReadOnly`（`immutable`）；0555 的父目录里的文件 → `ReadOnly`（`no_permission`）；父级是符号链接 → `NotDirectory`，链接指向的目录里的同名文件没被删（`remove_rooted_refuses_symlinked_parents` 钉住）；`kind = EmptyDir` 对文件 → `NotDirectory`，文件还在 | 新增 |
-| `remove_rooted_empty_dir_removes_only_empty_directories` | 空目录能删（自己是 0555 也行）；非空 → `NotEmpty`，里面的东西都在；目标是文件 → `NotDirectory`；目标是指向目录的符号链接 → `NotDirectory`（`reason = symlink`），链接和目录都还在；不存在 → `NoSuchPath`；带 `uchg` 的空目录 → `ReadOnly`（`immutable`）；挂载点（第二个镜像挂在根下的 `mnt`）→ `Unknown`（`errno` 为 `EBUSY`，`reason = busy`），挂载的内容没动；父级是符号链接 → `NotDirectory`。调用方只用它删自己建的空目录（增补 7 "Empty directories"）；非空的树经 `remove_tree_rooted`，不自己写递归 | 新增 |
-| `remove_tree_rooted_removes_a_protected_tree` | 评审 I1、增补 8 的主测试。树里有：mode 0400 的文件；带 `uchg`、`uappnd`、`hidden` 的文件；指向根外目录、指向树内文件、悬空的符号链接，以及带 `uchg` 的符号链接（`chflags -h`）；FIFO；unix socket；同一个 inode 的两个名字，外加第三个名字放在根外；mode 000 的目录和 0555 的目录（各装一个文件）；带 `uchg`、`uappnd` 的目录（各装一个文件）；`nest/a/b/c/d/leaf` 的深链，其中 `b` 是 0555。根外有 `outside/`，装着文件与子目录。`remove_tree_rooted` → `Ok(report)`：`removed` 等于用 `std` 事先数好的树内条目数（含目标自己），`flags_cleared == 5`（`uchg` 文件、`uappnd` 文件、`uchg` 符号链接、`uchg` 目录、`uappnd` 目录），`made_writable == 3`（000、0555、`b`），`stuck_total == 0`；树整个没了；`outside/` 逐字节原样（符号链接没被跟随），第三个名字还在、内容不变 | 新增 |
-| `remove_tree_rooted_reports_what_it_cannot_remove` | 树里有：一个 ACL 禁止删除（`chmod +a "user:<当前用户> deny delete"`）的文件，一个嵌套的挂载点（第二个镜像挂在 `tree/mnt`，里面有文件和子目录），其余是普通条目：`Err`，`code == Unknown`，`RemoveReport::from_error` 读回的报告里 `stuck` 恰好是这两条（`NoPermission`，`errno` 为 `EACCES`；`OtherDevice`），`stuck_total == 2`，`removed` 等于其余条目数；其余条目都删光了，ACL 文件及其父目录、挂载点及其里面的文件、`tree` 本身还在（不删根）；挂载的卷里的文件逐字节不变。去掉 ACL（`chmod -a`）、卸载镜像之后再调一次：`Ok`，`removed` 为剩下的条目数 | 新增 |
-| `remove_tree_rooted_refuses_before_touching_anything` | 表驱动，一种构造一个拒绝，每种之后整棵树与父目录逐字节、逐属性（mode、标志、mtime）不变：目标不存在 → `NoSuchPath`；目标是普通文件 → `NotDirectory`（`not_a_directory`）；目标是指向目录的符号链接 → `NotDirectory`（`symlink`），链接和目录都还在；某一级父目录是符号链接（指向根外、指向根内各一轮）→ `NotDirectory`（`symlink`），根外的树没被碰；目标本身是挂载点 → `Unknown`（`reason = mount_point`），卷里的文件原样；父目录 0555 → `ReadOnly`（`no_permission`）；父目录带 `uchg` 或 `uappnd` → `ReadOnly`（`immutable`）——`faccessat` 对 `uappnd` 的目录说"可写"，这一行钉住标志检查（§4.2 H）。这些拒绝之后 `RemoveReport::from_error` 都返回 `None` | 新增 |
-| `remove_tree_rooted_never_follows_a_swapped_directory` | 接缝（打开子目录之前触发）把子目录 `d` 换成指向根外目录的符号链接：根外目录的内容一个字节也没少，`d` 处的符号链接本身留着，报告里 `stuck` 含 `d`（`Changed`），其余兄弟照常删光，返回 `Unknown`；另一轮接缝把已经解析过的父目录的路径换成指向根外的符号链接：删掉的是被钉住的原目录里的东西，根外目录里的同名条目还在 | 新增 |
-| `remove_tree_rooted_depth_limit` | 100 层深的链（每层一个字符的目录名）删得干净；130 层深的链：返回 `Unknown`，`stuck` 含深度超限的那一层（`TooDeep`），浅的兄弟分支删光，`MAX_WALK_DEPTH` 层以内的目录与文件也删光，超限的那一层及其上的祖先留着 | 新增 |
+| `remove_rooted_empty_dir_removes_only_empty_directories` | 空目录能删（自己是 0555 也行）；非空 → `NotEmpty`，里面的东西都在；目标是文件 → `NotDirectory`；目标是指向目录的符号链接 → `NotDirectory`（`reason = symlink`），链接和目录都还在；不存在 → `NoSuchPath`；带 `uchg` 的空目录 → `ReadOnly`（`immutable`）；挂载点（第二个镜像挂在根下的 `mnt`）→ `CrossVolume`（`reason = mount_point`，`detail.src_dev` 不等于 `dst_dev`；调内核之前 `fstatat` 就判出了），挂载的内容没动，`mnt` 还在（评审 N7，不再是 `Unknown`）；接缝在 `fstatat` 之后、`unlinkat` 之前把一个空目录变成挂载点（`hdiutil attach -mountpoint`）：晚到的 `EBUSY` 同样 → `CrossVolume`（`mount_point`），不是 `Unknown`，镜像里的内容没动；父级是符号链接 → `NotDirectory`。调用方只用它删自己建的空目录（增补 7 "Empty directories"）；非空的树经 `remove_tree_rooted`，不自己写递归 | 新增 |
+| `remove_tree_rooted_removes_a_protected_tree` | 评审 I1、增补 8 的主测试，也是 N3、N4 的正面一半。树里有：mode 0400 的文件；带 `uchg`、`uappnd`、`hidden` 的文件；指向根外目录、指向树内文件、悬空的符号链接，以及带 `uchg` 的符号链接（`chflags -h`）；FIFO；unix socket；同一个**不带标志**的 inode 的两个名字，外加第三个名字放在根外（没有标志拦着，`unlinkat` 照常只删名字；带标志的共用 inode 见 `remove_tree_rooted_leaves_a_shared_flagged_inode_alone`）；mode 000 的目录和 0555 的目录（各装一个文件）；mode 0100 的目录（属主有搜索位而没有读位，各装一个文件，带 `uchg` 与不带各一个：走 `O_EXEC` 句柄，不用按名字的 `fchmodat`）；带 `uchg`、`uappnd` 的目录（各装一个文件）；mode 0100 又带 `uchg` 的普通文件（`O_EXEC` 句柄上清标志）；`nest/a/b/c/d/leaf` 的深链，其中 `b` 是 0555。根外有 `outside/`，装着文件与子目录。`remove_tree_rooted` → `Ok(report)`：`removed` 等于用 `std` 事先数好的树内条目数（含目标自己），`flags_cleared == 7`（`uchg` 文件、`uappnd` 文件、`uchg` 符号链接、`uchg` 目录、`uappnd` 目录、0100 加 `uchg` 的目录、0100 加 `uchg` 的文件），`made_writable == 5`（000、0555、`b`、0100、0100 加 `uchg`），`stuck_total == 0`，`is_complete()`；树整个没了；`outside/` 逐字节原样（符号链接没被跟随），第三个名字还在、内容与 mode 不变 | 新增 |
+| `remove_tree_rooted_takes_any_entry_kind` | 裁定 "remove_tree_rooted takes any entry kind"（store 的 gc 用这一个调用删 tmp 与 trash 里的每个条目）。目标分别是：mode 0400 的普通文件、带 `uchg` 的文件（独占 inode）、指向根外目录的符号链接、带 `uchg` 的符号链接（`chflags -h`）、悬空符号链接、FIFO、unix socket、空目录：每一个都 → `Ok(report)`，`is_complete()`，`removed == 1`（两个带 `uchg` 的 `flags_cleared == 1`），目标没了，符号链接指向的目录与里面的东西一个字节没动，同一个父目录里的兄弟条目都在。目标是带 `uchg` 而 `st_nlink == 2` 的文件 → `Ok(report)`，`stuck` 恰好是目标（`Immutable`，`detail == "hard_link"`），`removed == 0`，目标和它的另一个名字都在，标志没动 | 新增 |
+| `remove_tree_rooted_reports_what_it_cannot_remove` | 树里有：一个 ACL 禁止删除（`chmod +a "user:<当前用户> deny delete"`）的文件；一个嵌套的挂载点（第二个镜像挂在 `tree/mnt`，里面有文件和子目录）；一个 mode 0000 又带 `uchg` 的目录（里装一个文件），和一个 mode 0200 又带 `uchg` 的普通文件（属主既没有读位也没有搜索位，取不到句柄的角落，评审 N3，§4.2 H）；其余是普通条目。`Ok(report)`，`is_complete()` 为假，`stuck_total == 4`，`stuck` 恰好是这四条，原因按 §5.4 的 stuck 原因表：ACL 文件 `NoPermission`（`errno` 为 `EACCES`，`detail` 为 `None`）；挂载点 `OtherDevice`（`errno` 为 0）；0000 加 `uchg` 的目录 `Immutable`（`errno` 为 `EPERM`，`detail == "UF_IMMUTABLE"`）；0200 加 `uchg` 的文件 `Immutable`（`errno` 为 `EACCES`，`detail == "UF_IMMUTABLE"`）。`removed` 等于事先数好的可删条目数（stuck 条目及其祖先目录不在内）；其余条目都删光了，四个 stuck 条目、它们的祖先目录、挂载点里的文件、`tree` 本身还在（不删根）；挂载的卷里的文件逐字节不变；0000 的目录 apfs 一个字节也没改（mode 还是 0000，标志还在，`made_writable` 不含它）。去掉 ACL（`chmod -a`）、清掉两个 `uchg`、给目录 `chmod 0700`、卸载镜像之后再调一次：`Ok(report)`，`is_complete()`，`removed` 为剩下的条目数。两次调用都是 `Ok`，没有 `Err` | 新增 |
+| `remove_tree_rooted_leaves_a_shared_flagged_inode_alone` | 评审 N4、裁定 "Flags are cleared only on an unshared inode"（`fchflags` 改的是 inode，不是名字）。树里：普通文件 `h` 带 `uchg`，它的第二个名字 `outside/h2` 在根外（`link()` 建的）；`g1`、`g2` 是同一个带 `uappnd` 的 inode 的两个名字，都在树里；另有普通条目若干。前提钉在断言里：`link()` 之后 `outside/h2` 读到的标志已经含 `UF_IMMUTABLE`（标志属于 inode，§4.2 H）。`Ok(report)`，`is_complete()` 为假，`stuck` 恰好是 `h`、`g1`、`g2`，都是 `Immutable`、`errno` 为 `EPERM`、`detail == "hard_link"`（共用的 inode 一律不清，哪怕另一个名字也在树里）；`flags_cleared == 0`；`outside/h2`：内容、mode、标志（仍含 `UF_IMMUTABLE`）、`ctime` 都与调用前相同（apfs 没有对这个 inode 调过 `fchflags`、`fchmod`，`ctime` 没动就是证据）；`removed` 等于其余可删条目数。测试结束前对 `h`、`g1` 先 `chflags nouchg`、`nouappnd` 再清理 | 新增 |
+| `remove_tree_rooted_refuses_before_touching_anything` | 表驱动，一种构造一个拒绝，**返回 `Err`（没有报告）**，每种之后整棵树与父目录逐字节、逐属性（mode、标志、mtime）不变：目标不存在 → `NoSuchPath`；某一级父目录是符号链接（指向根外、指向根内各一轮）→ `NotDirectory`（`symlink`），根外的树没被碰；某一级父目录是文件 → `NotDirectory`（`not_a_directory`）；目标是目录而且本身是挂载点（第二个镜像挂在根下的 `mnt`，里面有文件）→ `CrossVolume`（`reason = mount_point`，`detail.src_dev` 不等于 `dst_dev`），卷里的文件原样；父目录 0555 → `ReadOnly`（`no_permission`）；父目录带 `uchg` 或 `uappnd` → `ReadOnly`（`immutable`）——`faccessat` 对 `uappnd` 的目录说"可写"，这一行钉住标志检查（§4.2 H）。目标是普通文件、符号链接这类**不是**拒绝：它们是合法的目标，见 `remove_tree_rooted_takes_any_entry_kind` | 新增 |
+| `remove_tree_rooted_never_follows_a_swapped_directory` | 接缝（打开子目录之前触发）把子目录 `d` 换成指向根外目录的符号链接：根外目录的内容一个字节也没少，`d` 处的符号链接本身留着，报告里 `stuck` 含 `d`（`Changed`），其余兄弟照常删光，返回 `Ok(report)`（`is_complete()` 为假）；另一轮接缝把已经解析过的父目录的路径换成指向根外的符号链接：删掉的是被钉住的原目录里的东西，根外目录里的同名条目还在 | 新增 |
+| `remove_tree_rooted_depth_limit` | 100 层深的链（每层一个字符的目录名）删得干净；130 层深的链：返回 `Ok(report)`（`is_complete()` 为假），`stuck` 含深度超限的那一层（`TooDeep`），浅的兄弟分支删光，`MAX_WALK_DEPTH` 层以内的目录与文件也删光，超限的那一层及其上的祖先留着 | 新增 |
 | `remove_tree_fits_a_low_descriptor_limit` | 父测试启动子进程（`current_exe`，`--ignored --exact remove_tree_low_descriptor_limit_child`）；子进程先把 `RLIMIT_NOFILE` 软限降到 256，再用 `remove_tree_rooted` 删一棵 512 个目录宽、外加一条 100 层深链的树，不得 `EMFILE`；删除期间每隔若干个条目数一次 `/dev/fd`，最大值不超过深度加一个小常数，与目录总数无关；父测试断言子进程退出码为 0 | 新增 |
 | `remove_tree_low_descriptor_limit_child` | 上一行的子进程入口（`#[ignore]`，只由父测试驱动）：降限不污染同一进程里的其他测试 | 新增 |
-| `remove_report_round_trips_through_the_error_detail` | 单元测试：`RemoveReport` → `to_detail` → 放进 `StrataError`（`Unknown`）→ `from_error` 得到相等的报告（含每个 `StuckReason`、`errno`、`stuck_total`）；`stuck` 超过 `MAX_REPORTED_STUCK` 时向量被截在上限、`stuck_total` 是真实总数；别的 `Unknown` 错误（没有 `reason = remove_tree_incomplete`）与别的码 → `None`；`RemoveReport::default()` 全零 | 新增 |
-| `clone_from_rooted_clones_files_and_directories` | 工作区根下的普通文件（mode 0600、mtime 设成 2020 年、带扩展属性）克隆到 strata 自己的临时目录里：内容、mode、mtime、扩展属性相同，ctime 是现在；目录树（含相对和悬空的符号链接、空目录、FIFO、嵌套 20 层）克隆后与 `clone_tree` 的结果逐项相同，目录里的符号链接仍是符号链接（没被跟随）；源树不变；dst 与源是两个独立的 inode，改克隆不影响源。符号链接作源 → `NotFile`（`symlink`）；FIFO → `NotFile`（`fifo`）；unix socket → `NotFile`（`socket`）；`clone_from_rooted(Path::new("/dev"), "null", dst)` → `NotFile`（`device`）；不存在 → `NoSuchPath` | 新增 |
+| `remove_report_counts_and_completeness` | 单元测试加一个 doc-test：`RemoveReport::default()` 全零，`is_complete()` 为真；`stuck_total > 0` 时为假（哪怕 `stuck` 向量被截断，总数仍说实话）；用内部的记录函数记 `MAX_REPORTED_STUCK + 5` 条：向量被截在上限、前 `MAX_REPORTED_STUCK` 条按记录的顺序、`stuck_total` 是真实总数。`#[must_use]`：`compile_fail` 的 doc-test（`#![deny(unused_must_use)]` 下 `remove_tree_rooted(..);` 丢掉返回值）不能通过编译。没有 `to_detail`、`from_error`：报告不进 `StrataError`（遍历开始之后没有 `Err`） | 新增 |
+| `stuck_reason_classification_and_names` | 单元测试，纯函数（内部，名字构建者定；输入是 errno、`st_flags`、`st_nlink`），表驱动，逐行对 §5.4 的 stuck 原因表：`EACCES`、`EPERM` 且无标志 → `NoPermission`；`EPERM` 且 `UF_IMMUTABLE` 或 `UF_APPEND`、`st_nlink == 1` → `Immutable`（`detail` 是置位的标志名，两个同时置位时都列出）；同上而 `st_nlink > 1` → `Immutable`（`detail == "hard_link"`）；`SF_IMMUTABLE`、`SF_APPEND` 置位（不论 `st_nlink`）→ `Immutable`，`detail` 列出 `SF_*`，同时置位的 `UF_*` 也列出；`EBUSY` → `Busy`；`ENOTEMPTY`、`ENOTDIR`、`ELOOP` → `Changed`；`EIO`、`ETIMEDOUT`、`ENXIO`、`ENODEV`、`EDEVERR` → `UnknownOutcome`；`ENOSPC`、`EDQUOT`、`EINVAL`、其余 → `Io`；`StuckReason::as_str` 的九个名字（`immutable`、`no_permission`、`other_device`、`busy`、`changed`、`unreadable`、`too_deep`、`unknown_outcome`、`io`）互不相同。`UnknownOutcome` 与 `Io` 的区分（unlink 有没有生效不确定）在这里钉住，真实文件系统上造不出 `EIO` | 新增 |
+| `blocking_flags_lists_the_flags_that_block_removal` | 单元测试，纯函数 `blocking_flags(st_flags)`：0 → 空；只有 `UF_IMMUTABLE` → `UF_IMMUTABLE`；`UF_APPEND`；`SF_IMMUTABLE`；`SF_APPEND`；四个都置位 → 固定顺序 `UF_IMMUTABLE\|UF_APPEND\|SF_IMMUTABLE\|SF_APPEND`；`UF_HIDDEN`、`UF_NODUMP`、`UF_COMPRESSED`、`UF_OPAQUE` 单独或与上面混合：不列出（它们不挡删除）。`make_removable`、`set_file_meta`、`remove_tree_rooted` 用同一个函数，所以三处的 `detail` 一致 | 新增 |
+| `make_removable_clears_flags_before_mode` | 裁定 "make_removable"，评审 N3、N4。（a）0555 加 `uchg` 的目录：前提钉在断言里——对它直接 `fchmod(0755)`（用 `std`）得 `EPERM`；`make_removable(&open_rooted(..)?)` → `Ok`，之后标志为 0、mode 为 0755，`rename_rooted(Excl)` 到另一个父目录成功；（b）0555 的目录（没有标志）→ mode 变 0755、标志不变；带 `uappnd` 的 0755 目录 → 清掉 `uappnd`、mode 不变；`hidden` 等别的标志位原样保留；0400 的普通文件 → 0600；（c）无操作：已经是 0755 的目录、已经是 0600 的文件，`make_removable` → `Ok`，`ctime` 前后相等（没有调用 `fchmod`、`fchflags`；无操作的调用也会前进 `ctime`，§4.2 H）；（d）非目录而 `st_nlink == 2`（另一个名字在树外）、带 `uchg` 或只是 0400 → `ReadOnly`（`reason = hard_link`），两个名字的标志、mode、`ctime` 都没变；（e）取得句柄之后另一个进程才 `link()` 出第二个名字：`make_removable` 在句柄上重新 `fstat`，仍然 `ReadOnly`（`hard_link`）；（f）`SF_*` 的拒绝需要 root 才造得出，由 `make_removable_and_set_file_meta_refuse_by_rule` 的纯函数表覆盖 | 新增 |
+| `set_file_meta_changes_metadata_through_a_handle` | 裁定 "Metadata changes through a handle"。（a）克隆自带 `uchg`、`hidden` 的 0444 基线文件，mtime 为 2020 年：句柄（`open_rooted_file`）上 `set_file_meta({ clear_flags: true, mode: Some(0o644), mtime: Some(t) })` → `Ok`，标志只剩 `UF_COMPRESSED`（没有就是 0），mode 0644，`mtime == t`（纳秒精度），`atime` 不变，内容不变；次序：前提钉在断言里——对带 `uchg` 的文件先 `fchmod`（用 `std`）得 `EPERM`，所以必须先清标志；（b）压缩文件（这台机器上 `ditto --hfsCompression` 造不出压缩文件，2026-10-22 实测，所以不用它：用 `ditto` 复制一个系统里本来就压缩的文件，复制会保留压缩——`find /Library -type f -flags +compressed -size +8k` 找一个不带 `restricted` 的，例如 `/Library/Documentation/Acknowledgements.rtf`；找不到就让测试失败并说明）加 `uchg`、`hidden` 之后 `set_file_meta({ clear_flags: true })`：标志只剩 `UF_COMPRESSED`（实测 0x8022 变回 0x20），内容读回与源逐字节相同；（c）无操作：`FileMeta::default()`、已经是目标值的 mode、没有用户标志时的 `clear_flags`、`mtime` 为 `None`：不调系统调用，`ctime` 前后相等；（d）拒绝，什么都不改（标志、mode、mtime、`ctime` 全部不变）：FIFO 句柄（`open_rooted` 非阻塞打开）→ `NotFile`（`fifo`）；socket 句柄（`UnixStream::pair()` 的一端转成 `File`）→ `NotFile`（`socket`）；设备句柄（`File::open("/dev/null")`）→ `NotFile`（`device`）；普通文件而 `st_nlink == 2` → `ReadOnly`（`hard_link`），另一个名字的标志、mode 也没变；（e）store 的 writer 复现过的场景：`get` 的克隆 dst 被换成指向根外 0600 文件的硬链接，`open_rooted_file` 照常打开它（`O_NOFOLLOW` 管不到硬链接），`set_file_meta({ mode: Some(0o644) })` → `ReadOnly`（`hard_link`），根外的文件仍是 0600；（f）打开句柄之后才建第二个名字：句柄上重新 `fstat`，同样 `hard_link`；（g）目录的句柄（裁定 "set_file_meta accepts a directory handle"）：0755 的目录里放一个子目录（`st_nlink == 3`），目录带 `uchg`、`hidden`，mtime 为 2020 年。前提钉在断言里——对它直接 `fchmod(0555)`、`futimens`（用 `std`）都得 `EPERM`；`open_rooted` 取句柄，`set_file_meta({ clear_flags: true, mode: Some(0o555), mtime: Some(t) })` → `Ok`：标志为 0、mode 0555、`mtime == t`（纳秒精度）、`atime` 不变，子目录与里面的东西不变；`st_nlink > 1` 没有拒绝（目录没有硬链接）；`mode: Some(0o4755)` 的 setuid 位被屏蔽；已经是 0555 的目录再调 `{ mode: Some(0o555) }`：不调系统调用，`ctime` 前后相等。deps 封存的写法单独钉一次：staging 里 0755 的目录 `rename_rooted(Excl)` 到封存位置，再对它的句柄 `set_file_meta({ mode: Some(0o555) })`：根目录 0555，里面的条目（含子目录）的 mode 一个都没变 | 新增 |
+| `make_removable_and_set_file_meta_refuse_by_rule` | 单元测试，纯函数（内部，名字构建者定；输入是合成的 `st_mode`、`st_flags`、`st_nlink` 与种类），表驱动，因为 `SF_*` 要 root 才造得出，真实文件系统上测不到：`make_removable`——目录加 `SF_IMMUTABLE` 或 `SF_APPEND` → `ReadOnly`（`immutable`，`detail.flags` 列出）；`UF_IMMUTABLE` 与 `SF_APPEND` 同时置位仍拒绝，`detail.flags` 两个都列出；非目录且 `st_nlink > 1` → `ReadOnly`（`hard_link`）；目录且 `st_nlink > 1`（子目录的 `..` 让它大于 1）→ 不拒绝。`set_file_meta`——FIFO、socket、设备、符号链接 → `NotFile`；目录（含 `st_nlink > 1`）通过种类与 `st_nlink` 两关，只剩 `SF_*` 一关；普通文件而 `st_nlink > 1` → `hard_link`；`SF_*` → `immutable`（目录同样）；检查的先后是种类、`st_nlink`（只对非目录）、`SF_*`。通过的输入返回"要做的步骤"：`make_removable` 对（0555、无标志）= [补 u+w]，对（0755、`UF_IMMUTABLE`）= [清标志]，对（0555、`UF_IMMUTABLE`）= [清标志, 补 u+w]（次序），对（0755、无标志）= []；`set_file_meta` 对各项已是目标值 = []，各项都不同 = [清标志, 设 mode, 设 mtime]（次序），目录（0755、无标志）对 `{ mode: Some(0o555) }` = [设 mode] | 新增 |
+| `clone_from_rooted_clones_files_and_directories` | 工作区根下的普通文件（mode 0600、mtime 设成 2020 年、带扩展属性）以 `CloneKind::File` 克隆到 strata 自己的临时目录里：内容、mode、mtime、扩展属性相同，ctime 是现在；目录树（含相对和悬空的符号链接、空目录、FIFO、嵌套 20 层）以 `CloneKind::Dir` 克隆后与 `clone_tree` 的结果逐项相同，目录里的符号链接仍是符号链接（没被跟随）；源树不变；dst 与源是两个独立的 inode，改克隆不影响源。`File` 时符号链接作源 → `NotFile`（`symlink`）；FIFO → `NotFile`（`fifo`）；unix socket → `NotFile`（`socket`）；`clone_from_rooted(Path::new("/dev"), "null", dst, CloneKind::File)` → `NotFile`（`device`）；不存在 → `NoSuchPath`（种类不符的完整一张表见 `clone_from_rooted_checks_the_source_kind`） | 新增 |
+| `clone_from_rooted_checks_the_source_kind` | 裁定 "clone_from_rooted states its source kind"，store 第 2 轮评审的场景。表驱动，一种构造一个结果，每种之后源原样，失败的 dst 不存在：`File` 对普通文件 → 成功；`File` 对目录（树里有文件）→ `IsDirectory`，**没有克隆任何东西**（`store/tmp` 里没有整棵树，这是原来的 bug）；`File` 对 FIFO → `NotFile`（`fifo`），不是误导的 `EINVAL`；`File` 对 socket → `NotFile`（`socket`）；`File` 对符号链接 → `NotFile`（`symlink`）；`Dir` 对目录 → 成功；`Dir` 对普通文件 → `NotDirectory`（`not_a_directory`）；`Dir` 对 FIFO → `NotDirectory`（`not_a_directory`）；`Dir` 对符号链接（指向目录的、悬空的）→ `NotDirectory`（`symlink`）。交换版本（接缝在打开终点那一次 `openat` 之前触发，模拟 `attrs_of` 与克隆之间路径被换）：调用方说 `File`，路径换成装着文件的目录 → `IsDirectory`，dst 不存在；换成 FIFO（子进程加死线）→ `NotFile`（`fifo`），不阻塞；调用方说 `Dir`，路径换成普通文件 → `NotDirectory`。优先级：`File` 而源是另一个卷上的目录 → `IsDirectory`，不是 `CrossVolume`（先核对种类，后查同卷，§5.4 第 4、5 步）；dst 已存在而且种类也不符 → `Exists`（先查 dst，第 1 步） | 新增 |
+| `symlink_recipe_recreates_a_workspace_symlink` | 评审 N6、裁定 "A symlink is recreated, never cloned"。工作区根下的符号链接：指向树内文件、指向根外目录、悬空、相对目标 `../x`、目标含非 UTF-8 字节：对每个，`attrs_of(src_root, p)` 得 `FileKind::Symlink(target)`，`symlink_rooted(dst_root, q, &target)` 在另一个根下重建；`readlink` 读回的字节与原链接逐字节相同，链接指向的地方从未被读到或被碰（根外目录的内容、属性前后不变）；同一个链接交给 `clone_from_rooted` → `NotFile`（`File`）与 `NotDirectory`（`Dir`），都是 `reason = symlink`，dst 不存在；链接所在的父目录被接缝换成指向根外的符号链接：`attrs_of` → `NotDirectory`（`symlink`），什么都没读到。对照，证明为什么不能按路径克隆：`ws/d` 被换成指向根外目录的符号链接之后，按路径的 `clone_file_rooted(ws/d/link, ..)` 克隆出的是根外目录里的那个同名链接（中间一级被跟随，§4.2 A），而上面的配方得到 `NotDirectory` | 新增 |
 | `clone_from_rooted_refuses_a_symlinked_parent` | 根里有指向根外目录（放着 `.env` 之类的文件）的符号链接 `link` 和指向根内另一个目录的符号链接 `inner`：`clone_from_rooted(root, link/x, dst)`、`inner/x`、`link/a/b` → `NotDirectory`（`reason = symlink`），dst 不存在，根外的内容一个字节也没进临时目录；根本身是符号链接 → `NotDirectory`（`symlink`）。这是评审 I2 的场景：overlay 的捕获不能把 `.env` 带进 blob | 新增 |
 | `clone_from_rooted_clones_the_opened_object_after_a_swap` | 评审 I2 点名的交换测试。根里有 `ws/a/f`（内容 `INSIDE`）和 `ws/d/g`（内容 `INSIDE-G`），根外有 `outside/secret`（内容 `OUTSIDE`）与目录 `outside/dir`（含 `g`，内容 `OUTSIDE-G`）。接缝在 `fclonefileat` 之前（源已经打开之后）把 `ws/a/f` 换成指向 `outside/secret` 的符号链接：克隆出来的 dst 内容是 `INSIDE`，dst 里搜不到 `OUTSIDE`；另一轮把整个 `ws/d` 换成指向 `outside/dir` 的符号链接：dst 目录里是原来的 `g`（`INSIDE-G`），没有 `OUTSIDE-G`。对照，证明这个场景确实有效：同样把 `ws/d` 换成指向 `outside/dir` 的符号链接之后，按路径的 `clone_file(ws/d/g, ..)` 克隆出 `OUTSIDE-G`（`CLONE_NOFOLLOW` 只管最后一级，中间的符号链接照样被跟随，§4.2 A）。再一轮在解析父级的中途把已解析的祖先换成符号链接：仍读到被钉住的原目录里的内容，之后的新调用 → `NotDirectory` | 新增 |
 | `clone_from_rooted_error_codes` | 表驱动，一种构造一个错误：dst 已存在（文件、目录、悬空符号链接）→ `Exists`，原有的东西不被碰；dst 的父目录不存在 → `NoSuchPath`；dst 的父级是文件 → `NotDirectory`；dst 末尾带 `/` → `InvalidInput`（`trailing_slash`）；dst 的名字 256 个码元 → `InvalidInput`（`name_too_long`）；src_root 与 dst 在两个 APFS 镜像上 → `CrossVolume`（`src_dev` 不等于 `dst_dev`），B 上没有 dst，没有字节被复制；HFS+ 镜像上 → `Unsupported`；源带 `uchg` 的文件克隆成功，dst 同样不可变（标志带过去，测试结束前清掉）；失败之后 dst 都不存在（"已存在"那一类里原有的除外） | 新增 |
@@ -1038,16 +1192,19 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 | `bulk_error_record_fallback_has_no_gen_count` | 评审 M10：合成缓冲区里有一条返回位图含 `ERROR`、错误码非零的记录，对应磁盘上一个真实的文件：走 `fstatat` 补取分支，得到的 `Attrs` 里 `kind`、`size`、`mode`、`mtime`、`ctime`、`inode` 与 `std::fs::symlink_metadata` 一致，**`gen_count == 0`**、`gen_count_known()` 为 `false`，`unchanged_since` 对它恒为 `false`；补取时文件已经不存在 → 这一项被跳过，不报错；符号链接的 `size` 是目标长度 | 新增 |
 | `bulk_record_maximum_fits_the_minimum_buffer` | 评审 M12：单元测试，合成一条最长的记录（765 字节加 NUL 的名字，位图含 `ERROR` 与全部请求的属性）：长度在 850 到 880 字节之间，且不超过 `MIN_BULK_BUFFER_BYTES`；用 `const` 断言把这条钉在编译期 | 新增 |
 | `watch_flags_map_to_events` | 单元测试，纯函数 `translate(flags, path)`：`MustScanSubDirs\|UserDropped`、`MustScanSubDirs\|KernelDropped`、`EventIdsWrapped`、`RootChanged` → `Dropped`；单独的 `MustScanSubDirs` → `MustRescan(path)`；`Mount`、`Unmount` → `MustRescan(path)`；`HistoryDone` 被忽略；`ItemCreated`、`ItemRemoved`、`ItemRenamed`、`ItemModified`、`ItemInodeMetaMod`、`ItemXattrMod`、`ItemCloned` 及其组合 → `Changed`；同一批里的 `Changed` 去重并合成一个，先于 `MustRescan`、`Dropped` 发出；路径前缀的 realpath 被换回调用者传入的 root | 新增 |
-| `watcher_reports_must_rescan` | 默认运行（评审 M13）：用**卡住回调**的办法让丢事件必然发生，不靠运气。监听一个临时根，回调在第一次被调用时阻塞在一个门上（`mpsc` 通道）；根下先建 16 个子目录，4 个线程一口气创建 20,000 个文件（约 0.4 s，实测每秒约 5 万个），然后放开门，等到 1 s 内不再有回调（至多 30 s，实测排空要 1 到 4 s）。实测这个配方（卡住回调，5,000 到 6 万个文件，21 轮运行）每一轮都出现 `UserDropped`（每轮至少 1 个，中位数 2 个，最多 61 个）；不卡住回调、4 万个文件也出现了 40 个，所以卡住只是让它必然发生。断言：至少收到一个 `Dropped`；**"不静默丢失"的不变式**：每个被创建的文件，要么被某个 `Changed` 路径覆盖（它本身，或它的某个祖先目录），要么这期间收到过 `Dropped` 或覆盖它的 `MustRescan`；`Dropped` 之后 Watcher 仍然有效：排空后再建一个文件，5 s 内收到覆盖它的 `Changed`。这一轮没有 `Dropped` 就用 4 万个文件再试，至多 3 轮，仍没有则失败并打印原因（不静默通过）。为什么 `Dropped` 满足"必须重扫"：FSEvents 的丢弃信号是 `MustScanSubDirs` 加 `UserDropped`（头文件：对被监听的每个目录做全量扫描），报在流的根路径上；apfs 把这一对译成 `Dropped`（整个监听范围当作未知、全量重扫），单独的 `MustScanSubDirs` 才是 `MustRescan(path)`（`watch_flags_map_to_events` 钉住翻译）。矩阵里的测试名保留 | 新增 |
+| `watcher_reports_must_rescan` | 默认运行（评审 M13）：用**卡住回调**的办法让丢事件很可能发生，再用**重试**让测试可靠——可靠性来自重试，单轮并不保证丢事件。监听一个临时根，回调在第一次被调用时阻塞在一个门上（`mpsc` 通道）；根下先建 16 个子目录，4 个线程一口气创建 20,000 个文件（约 0.4 s，实测每秒约 5 万个），然后放开门。**一轮在这一轮的所有文件都有了着落时结束**——每个被创建的文件，要么被某个 `Changed` 路径覆盖（它本身，或它的某个祖先目录），要么这期间收到过 `Dropped` 或覆盖它的 `MustRescan`——至多 30 s（实测排空要 1 到 4 s）；**不是**"1 s 内不再有回调"，那会让一轮在积压的事件到达之前就结束。数据：第 2 轮评审者复现时，18 个卡住回调的 20,000 文件轮里 16 轮出现丢弃（每轮 1 到 16 个 `UserDropped`），没丢的两轮都是进程里的第一条流，一轮因为 1 s 的静默条件在积压的事件到达之前就结束了（只收到一次回调），另一轮在 3 s 的窗口里收到了全部 20,017 个事件、没有丢弃；我的实测（卡住回调，5,000 到 6 万个文件，21 轮）每轮都出现 `UserDropped`（每轮至少 1 个，中位数 2 个，最多 61 个），不卡住回调、4 万个文件也出现了 40 个。两份数据合起来：卡住大大提高了丢弃的概率，但不保证。断言：至少收到一个 `Dropped`；**"不静默丢失"的不变式在每轮（含没有 `Dropped` 的轮）都成立**；`Dropped` 之后 Watcher 仍然有效：排空后再建一个文件，5 s 内收到覆盖它的 `Changed`。这一轮没有 `Dropped` 就用 4 万个文件再试，至多 3 轮，仍没有则失败并打印原因（不静默通过）。为什么 `Dropped` 满足"必须重扫"：FSEvents 的丢弃信号是 `MustScanSubDirs` 加 `UserDropped`（头文件：对被监听的每个目录做全量扫描），报在流的根路径上；apfs 把这一对译成 `Dropped`（整个监听范围当作未知、全量重扫），单独的 `MustScanSubDirs` 才是 `MustRescan(path)`（`watch_flags_map_to_events` 钉住翻译）。矩阵里的测试名保留 | 新增 |
 | `watcher_reports_file_and_directory_changes` | 创建、改写、改权限、改名、删除一个文件，各得到一个覆盖该路径的 `Changed`；目录改名只有旧、新两个目录路径，没有子项事件；`clone_tree` 克隆进被监听的根只有一个目录事件，没有子项事件（所以目录事件即整棵子树）；先创建后删除的路径仍出现在 `Changed` 里（消费者要 lstat 复核）；事件可能晚到，测试最多等 5 s，不断言延迟上限 | 新增 |
 | `watcher_paths_use_the_callers_root_and_disk_spelling` | 以符号链接根（`/tmp/x`）调用 `watch`：事件路径以 `/tmp/x` 为前缀，不是 `/private/tmp/x`；用 `Foo.txt` 建文件、用 `foo.txt` 去改它：事件里是磁盘上的拼写 `Foo.txt`；NFD 建的名字，事件路径保持 NFD | 新增 |
 | `watcher_excludes_configured_dirs` | `exclude = [node_modules]`：往 `node_modules/pkg/x` 写文件不产生 `Changed`，往 `src/x` 写产生；排除按分量比较（`node_modules2` 不被误排除；大小写不敏感的卷上 `Node_Modules` 被排除）；`Dropped` 不被过滤 | 新增 |
 | `dropping_the_watcher_stops_callbacks` | `drop(watcher)` 返回之后，再怎么改动被监听的树，回调都不再被调用（等 1 s 复核）；回调正在执行时 drop 会等它返回；回调里 panic 被截住，随后收到一个 `Dropped`，Watcher 仍可正常 drop | 新增 |
+| `watcher_reentry_from_the_callback_never_traps` | 评审 N2 [我的决定]（回调里的 `drop(Watcher)` 与 `flush`）：父测试启动子进程（`current_exe`，`--ignored --exact watcher_reentry_child`，20 秒死线），断言子进程退出码为 0，不是 133（`SIGTRAP`）；失败时打印子进程的输出和信号。子进程里：（a）100 轮，回调持有最后一个 `Arc<Holder>`，`Holder` 的 `Drop` 里 drop 自己的 `Watcher`（overlay 的 `Tracker` 的形状）；根下写文件触发第一次回调（每 200 ms 再写一个，直到回调到来，至多 10 s；10 s 仍没有事件则失败并打印"流没有收到事件"，不静默通过），回调在 drop 返回之后继续读它捕获的数据（一个 `Vec`，用 `Arc` 计数确认它没被提前释放），然后设一个"回调结束"标志：drop 没有 `SIGTRAP`、回调跑到了结尾、结束之后再等 1 s 没有第二次回调进入 `on_event`、私有队列上的收尾块已执行（回调的闭包捕获一个带 `Drop` 计数的对象，5 s 内计数变成恰好 1，不是 0 也不是 2）；（b）同样的回调里调 `flush()`：release 构建（`cargo test --release`）立即返回、什么都不做、没有新的 `Dropped`；debug 构建 `debug_assert!` 失败，被回调外层的 `catch_unwind` 截住，随后收到一个 `Dropped`；两种构建都没有 `SIGTRAP` | 新增 |
+| `watcher_reentry_child` | 上一行的子进程入口（`#[ignore]`，只由父测试驱动）：`SIGTRAP` 只杀这个子进程，不连累同一进程里的其他测试 | 新增 |
 | `watcher_reports_a_renamed_root_as_dropped` | 被监听的根被改名（或它的祖先被改名）：收到 `Dropped`（`RootChanged`）；之后在原路径放一个新目录并写文件，旧 Watcher 看不到新目录里的事件，调用方丢弃它、重新 `watch` 才能再收到 | 新增 |
-| `flush_drains_the_callback_queue` | 评审 I5、增补 7：（a）回调在第一次被调用时阻塞在门上，另一个线程调 `flush()`：门没开之前 `flush` 不返回，门一开、回调返回之后它才返回，返回时没有回调在执行（回调里的"执行中"计数为 0）；（b）空闲的流上 `flush()` 在 1 s 内返回，连续 100 次也不挂；（c）4 个线程同时调 `flush()` 互相串行、不死锁；（d）编译期断言 `Watcher: Send + Sync`；（e）`#[cfg(not(debug_assertions))]`（用 `cargo test --release` 跑）：在回调里调 `flush()` 立即返回、不死锁；debug 构建里同样的调用 `debug_assert!` 失败，所以不在默认测试里 | 新增 |
+| `flush_drains_the_callback_queue` | 评审 I5、增补 7；评审 N1 改写了保证的措辞：flush 返回时，**排空之前已经排进队列的回调都已执行完**（不是"此刻没有回调在执行"：排空之后新到的事件可以在 flush 返回之前就开始一次回调）。（a）回调在第一次被调用时阻塞在门上，回调里记 `started` 与 `finished` 两个计数；另一个线程在调用 `flush()` 之前读下 `started`（记为 n），然后调 `flush()`：门没开之前 `flush` 不返回（200 ms 后 `is_finished()` 仍为假）；门一开、回调返回之后它才返回；返回时 `finished >= n`；**不断言**"返回时没有回调在执行"。（a'）安静的流上（写入停了，睡到计数稳定）：`flush()` 返回时"执行中"计数（`started - finished`）为 0——这一条只在流安静时成立，所以只在这里断言。（b）空闲的流上 `flush()` 在 1 s 内返回，连续 100 次也不挂；（c）4 个线程同时调 `flush()` 互相串行、不死锁；（d）编译期断言 `Watcher: Send + Sync`；（e）在回调里调 `flush()` 见 `watcher_reentry_from_the_callback_never_traps`（那会让进程 `SIGTRAP`，所以在子进程里测） | 新增 |
 | `flush_is_not_a_fence` | `#[ignore]`，只打印数字，供 macOS 26 上重测 §4.2 F：写 50 个文件之后立刻 `flush()`，打印返回时已送达的比例（本机 11% 到 35%）；写完睡 5、20、100 ms 再 `flush()` 的比例（本机 0）；"哨兵加 `flush`"规则在安静的流上与有洪泛时各 40 轮里的不完整轮数。不断言任何比例，只断言 `flush()` 没有 panic、没有挂住 | 新增 |
 | `case_fold_eq_known_pairs` | 表驱动，不碰文件系统，期望值全取自 oracle 测试在本机验证过的结果：`ß`≡`SS`、`ﬃ`≡`ffi`、`İ`≡`i̇` 但 `İ`≢`i`、`ς`≡`σ`≡`Σ`、开尔文符号≡`k`、埃符号≡`å`、切罗基、格鲁吉亚、Deseret、Unicode 16 新增（Garay、U+1C89 与 U+1C8A、U+A7CB 与 U+0264、U+A7DC）、NFC≡NFD；零宽连接符、软连字符、VS16 不可忽略；全角 `Ａ` ≢ `a`；ASCII 快路径；空串 | 新增 |
 | `case_fold_key_agrees_with_case_fold_eq` | 评审 I6、增补 7：对 `case_fold_eq_known_pairs` 的每一对和固定种子生成的 1 万对随机串（ASCII、拉丁文带重音、希腊文、西里尔文、格鲁吉亚文、切罗基、Deseret、Unicode 16 新增的字符、组合记号、NFC 与 NFD 混杂；其中一半是同一个串的大小写变体），断言 `case_fold_eq(a, b) == (case_fold_key(a) == case_fold_key(b))`；`case_fold_key` 对纯 ASCII 等于 `to_ascii_lowercase`；`case_fold_key("ß") == case_fold_key("SS")`；键不是 NFC（`"é"` 的键是 NFD）；`HashSet` 以键为元素时，大小写别名只占一个位置——折叠成员判断不需要两两比较。失败时打印那一对的码位 | 新增 |
+| `case_fold_key_of_a_path_is_the_slash_joined_keys` | 裁定 "case_fold_key prefix property"（§5.8；overlay 对受限目录按键前缀做范围查找依赖它）：对固定的 (a, b) 与固定种子生成的 1 万对随机串（同 `case_fold_key_agrees_with_case_fold_eq` 的生成器，另加空串、以 `/` 开头或结尾的片段、组合记号开头的 `b`（`"\u{0301}x"`）、以基字符结尾的 `a`（`"e"`）、`ß`、`İ`、`ﬃ`、Deseret、切罗基）断言 `case_fold_key(a + "/" + b) == case_fold_key(a) + "/" + case_fold_key(b)`——特别是 `a = "e"`、`b = "\u{0301}x"`：路径整体 NFD 之后组合记号仍隔着 `/`，不会与 `e` 合并；纯 ASCII 路径同样成立；失败时打印那一对的码位。范围查找的用法：一组键里 `Dir/x`、`dir/y`、`DIR/z/w`、`dir2/x`、`dirs`，以 `case_fold_key("Dir") + "/"` 为前缀的恰好是前三个，`dir2/x` 与 `dirs` 不在其中 | 新增 |
 | `case_fold_eq_matches_a_case_insensitive_volume` | oracle：在大小写不敏感的 APFS 镜像上，对表里每一对 (a, b) 先用 a 建文件，再问文件系统 b 能不能打开它，断言 `case_fold_eq(a, b)` 与 `case_fold_key(a) == case_fold_key(b)` 都与文件系统的答案一致；表覆盖 §4.2 B 的全部类别，再加按码位区间随机抽样的对子（折叠表的 Unicode 版本落后就会在这里失败） | 新增 |
 | `case_sensitive_volume_distinguishes_case_but_not_normalization` | 大小写敏感的 APFS 镜像：`a` 与 `A` 是两个文件，NFC 与 NFD 的拼写是同一个文件（建一个，用另一个拼写 `open` 成功、`create` 得 `EEXIST`）；`volume_caps(..).case_sensitive` 为 `true`；说明调用方在这种卷上不该用 `case_fold_eq` | 新增 |
 | `walk_tool_sized_tree_within_the_reconcile_budget` | `#[ignore]`（量级测试）：合成 3 万项的源码树（目录、小文件、符号链接的比例取自 tool），`walk` 全量遍历在 3 s 内完成（design §8"全量对账 tool 源码树 < 3 s"；实测冷读 1.42 s），打印耗时与每项微秒数，写回 §5.9 | 新增 |
@@ -1065,11 +1222,11 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 
 3f 里还有几行跟大小写折叠有关，但目标是别的模块：gitio 的 `tracked_lookup_folds_ascii_case_when_ignorecase` **不用** `case_fold_eq`（git 身份只折叠 ASCII，增补 2；3f:155 写的 `apfs::case_fold_eq` 由 T15 统一）；overlay 的大小写别名一行才用（磁盘身份，用 `case_fold_key`）。它们在各自模块里测"怎样使用"，apfs 的契约由 `case_fold_eq_*` 与 `case_fold_key_*` 钉住。折叠有两个问题：磁盘上这两个名字是不是同一个文件（看卷，用 apfs 的折叠），git 把这两个路径当同一个吗（看 `core.ignorecase`，gitio 的 ASCII 折叠）（§4.2 B）。
 
-**统计**：上表共 125 个测试名。矩阵里目标为 `apfs` 的 25 行全部落在上表（3b 2 行、3c 3 行、3d 1 行、3e 1 行、3f 18 行），另有 4 行 `—` 行借用来源（3a 2 行、3b 1 行、3f 1 行），所以有矩阵来源的共 29 行；其余 96 行是新增用例。第 1 轮评审净增 28 行（加了 32 行，改了 4 个名字）：`rename_rooted_exclusive_*` → `rename_rooted_excl_*`，`unlink_rooted_removes_one_entry_without_following` → `remove_rooted_file_removes_one_entry_without_following`，`rmdir_rooted_removes_only_empty_directories` → `remove_rooted_empty_dir_removes_only_empty_directories`；矩阵来源的行一行没动。
+**统计**：上表共 138 个测试名。矩阵里目标为 `apfs` 的 25 行全部落在上表（3b 2 行、3c 3 行、3d 1 行、3e 1 行、3f 18 行），另有 4 行 `—` 行借用来源（3a 2 行、3b 1 行、3f 1 行），所以有矩阵来源的共 29 行；其余 109 行是新增用例。第 1 轮评审净增 28 行（加了 32 行，改了 4 个名字）：`rename_rooted_exclusive_*` → `rename_rooted_excl_*`，`unlink_rooted_removes_one_entry_without_following` → `remove_rooted_file_removes_one_entry_without_following`，`rmdir_rooted_removes_only_empty_directories` → `remove_rooted_empty_dir_removes_only_empty_directories`；矩阵来源的行一行没动。第 2 轮评审与控制者裁定净增 13 行（加了 14 行，删了 1 行）：新增 `rooted_roots_must_be_canonical`、`remove_tree_rooted_takes_any_entry_kind`、`remove_tree_rooted_leaves_a_shared_flagged_inode_alone`、`stuck_reason_classification_and_names`、`blocking_flags_lists_the_flags_that_block_removal`、`make_removable_clears_flags_before_mode`、`set_file_meta_changes_metadata_through_a_handle`、`make_removable_and_set_file_meta_refuse_by_rule`、`clone_from_rooted_checks_the_source_kind`、`symlink_recipe_recreates_a_workspace_symlink`、`watcher_reentry_from_the_callback_never_traps` 与它的子进程入口 `watcher_reentry_child`、`case_fold_key_of_a_path_is_the_slash_joined_keys`；`remove_report_round_trips_through_the_error_detail` 被 `remove_report_counts_and_completeness` 取代（`to_detail`、`from_error` 取消了）；另有几行改写了断言：`remove_tree_rooted_*` 的其余几行、`clone_file_rooted_sets_the_requested_mode`、`remove_rooted_empty_dir_removes_only_empty_directories`、`open_root_returns_the_root_handle`、`nearest_existing_ancestor_climbs_to_the_first_existing_path`、`errno_mapping_table`、`flush_drains_the_callback_queue`、`watcher_reports_must_rescan`；矩阵来源的行的"来源"一栏仍然一行没动（只有 `rooted_open_opens_files_and_directories` 的断言里有一句话随 `make_removable` 改了）。
 
 ## 8. 实现任务（TDD）
 
-前提：workspace 根 `Cargo.toml` 与 `crates/strata-types` 已经存在（types.md §8）。本 crate 的 feature `test-seams` 默认关闭，要用接缝的集成测试（Task 3、4、5、7）带 `--features test-seams` 运行。挂载镜像的测试把整个测试根建在内部卷的临时目录（`std::env::temp_dir()`）下：2026-10-22 实测，挂载点放在外置盘 `/Volumes/GWD` 的子目录里（新建的 755 目录也一样；该卷以 `noowners` 挂载，见 `mount` 的输出），`hdiutil attach -mountpoint` 得 `Permission denied`，放在内部卷的临时目录里可以。所有测试只用 `tempfile` 目录和 `hdiutil` 稀疏镜像，从不碰 `/Volumes/GWD/inter`；`tests/common/mod.rs` 提供 `Image::create(fs, size_mb)`（`hdiutil create -type SPARSE`，`fs` 取 APFS、大小写敏感的 APFS、HFS+、MS-DOS，挂载点缺省在临时目录里，`Drop` 时 `hdiutil detach -force` 并删镜像；`attach_at(dir)` 把它挂到指定的空目录，嵌套挂载的测试用；`reattach_read_only()` 分离后以 `hdiutil attach -readonly` 重新挂载，只读卷的测试用）、`make_fifo`、`make_socket`（先在短路径上 `bind` 再 `rename` 进目标，避开 `sockaddr_un` 的 104 字节上限）、`fill_until_enospc`。每个任务先写测试、看它因函数还没定义而编译失败，再实现。
+前提：workspace 根 `Cargo.toml` 与 `crates/strata-types` 已经存在（types.md §8）。本 crate 的 feature `test-seams` 默认关闭，要用接缝的集成测试（Task 3、4、5、6、7）带 `--features test-seams` 运行。挂载镜像的测试把整个测试根建在内部卷的临时目录（`std::env::temp_dir()`）下：2026-10-22 实测，挂载点放在外置盘 `/Volumes/GWD` 的子目录里（新建的 755 目录也一样；该卷以 `noowners` 挂载，见 `mount` 的输出），`hdiutil attach -mountpoint` 得 `Permission denied`，放在内部卷的临时目录里可以。所有测试只用 `tempfile` 目录和 `hdiutil` 稀疏镜像，从不碰 `/Volumes/GWD/inter`；`tests/common/mod.rs` 提供 `Image::create(fs, size_mb)`（`hdiutil create -type SPARSE`，`fs` 取 APFS、大小写敏感的 APFS、HFS+、MS-DOS，挂载点缺省在临时目录里，`Drop` 时 `hdiutil detach -force` 并删镜像；`attach_at(dir)` 把它挂到指定的空目录，嵌套挂载的测试用；`reattach_read_only()` 分离后以 `hdiutil attach -readonly` 重新挂载，只读卷的测试用）、`make_fifo`、`make_socket`（先在短路径上 `bind` 再 `rename` 进目标，避开 `sockaddr_un` 的 104 字节上限）、`fill_until_enospc`、`remove_protected_tree`（带标志、带 ACL、mode 000 的树留在磁盘上的测试靠它清理：先 `chflags -R nouchg,nouappnd`、`chmod -R u+rwx`、`chmod -R -N`，再删）。每个任务先写测试、看它因函数还没定义而编译失败，再实现。
 
 ### Task 1: crate 骨架、errno 归类、卷标识与能力、最近的已存在上级
 
@@ -1134,115 +1291,115 @@ git commit -m "feat(apfs): clone_tree and clone_file with volume checks and no c
 
 **Files:**
 - Create: `crates/strata-apfs/src/rooted.rs`（`resolve`，§5.4）、`crates/strata-apfs/src/seams.rs`
-- Test: `crates/strata-apfs/tests/rooted.rs`
+- Test: `crates/strata-apfs/tests/rooted.rs`、`crates/strata-apfs/tests/roots.rs`（`rooted_roots_must_be_canonical`：这张表随各任务落地的函数逐步加长，Task 7 之后齐全）
 
 **Interfaces:**
 - Consumes: Task 1 的 `classify_io_error`；`strata_types::RepoPath`
-- Produces: `open_root`、`open_rooted`、`open_rooted_file`、`seams::{set_before_open, set_after_bulk_window}`（`feature = "test-seams"`）；crate 内部的 `resolve`（Task 4、5、6、7 复用）
+- Produces: `open_root`、`open_rooted`、`open_rooted_file`、`seams::{set_before_open, set_after_bulk_window}`（`feature = "test-seams"`）；crate 内部的 `resolve`（Task 4、5、6、7 复用）与规范根检查 `check_root`（每个以 root 为参数的函数的第一行）
 
-- [ ] **Step 1: 写失败的测试**：§7 的 `rooted_open_opens_files_and_directories`、`open_root_returns_the_root_handle`、`rooted_open_treats_colon_and_backslash_names_literally`、`rooted_open_fifo_is_nonblocking_and_symlinks_are_refused`（子进程加 20 秒死线）、`rooted_open_rejects_a_directory_swapped_for_a_link`、`rooted_open_keeps_the_parent_handle_after_a_swap`、`rooted_open_pins_the_root`、`rooted_open_rejects_a_final_symlink_swap`、`rooted_open_file_refuses_a_fifo_swapped_in`、`rooted_open_error_codes`、`rooted_open_name_too_long_is_invalid_input`
+- [ ] **Step 1: 写失败的测试**：§7 的 `rooted_open_opens_files_and_directories`、`open_root_returns_the_root_handle`（含不规范 root 与 `lnk/` 的几行）、`rooted_roots_must_be_canonical`（`tests/roots.rs`，此刻只有 `open_root`、`open_rooted`、`open_rooted_file` 的行）、`rooted_open_treats_colon_and_backslash_names_literally`、`rooted_open_fifo_is_nonblocking_and_symlinks_are_refused`（子进程加 20 秒死线）、`rooted_open_rejects_a_directory_swapped_for_a_link`、`rooted_open_keeps_the_parent_handle_after_a_swap`、`rooted_open_pins_the_root`、`rooted_open_rejects_a_final_symlink_swap`、`rooted_open_file_refuses_a_fifo_swapped_in`、`rooted_open_error_codes`、`rooted_open_name_too_long_is_invalid_input`
 - [ ] **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p strata-apfs --features test-seams --test rooted`
+Run: `cargo test -p strata-apfs --features test-seams --test rooted --test roots`
 Expected: FAIL（`open_rooted`、`open_root` 还没定义，编译不过）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：`resolve` 按 §5.4：根用 `O_DIRECTORY | O_NOFOLLOW` 打开（`open_root` 就是这一步），每一级 `openat(O_DIRECTORY | O_NOFOLLOW)`，每次 `openat` 之前调一次 `before_open`（落地的那一次调用之前也调，step 接着数），手里只留当前一级的句柄；`ENOTDIR` 之后用 `fstatat(AT_SYMLINK_NOFOLLOW)` 区分 `reason`；终点用 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`，`fstat` 后拒绝设备；`ENAMETOOLONG` → `InvalidInput`，其余未列出的 errno → `Unknown`；`open_rooted_file` 在此之上要求 `S_ISREG`。不用 `O_NOFOLLOW_ANY`
+- [ ] **Step 3: 写让测试通过的最少实现**：`resolve` 按 §5.4：根先按原始字节检查是规范路径（空串、结尾的 `/`、`.` 或 `..` 分量 → `InvalidInput`，`root_not_canonical`；不用 `Path::components()`，它把结尾的 `/` 与 `.` 吃掉了；这个检查是 crate 内部的 `check_root`，之后每个任务里以 root 为参数的函数都在第一行调它），再用 `O_DIRECTORY | O_NOFOLLOW` 打开（`open_root` 就是这一步），每一级 `openat(O_DIRECTORY | O_NOFOLLOW)`，每次 `openat` 之前调一次 `before_open`（落地的那一次调用之前也调，step 接着数），手里只留当前一级的句柄；`ENOTDIR` 之后用 `fstatat(AT_SYMLINK_NOFOLLOW)` 区分 `reason`；终点用 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`，`fstat` 后拒绝设备；`ENAMETOOLONG` → `InvalidInput`，其余未列出的 errno → `Unknown`；`open_rooted_file` 在此之上要求 `S_ISREG`。不用 `O_NOFOLLOW_ANY`
 - [ ] **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p strata-apfs --features test-seams --test rooted`
+Run: `cargo test -p strata-apfs --features test-seams --test rooted --test roots`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/strata-apfs/src/rooted.rs crates/strata-apfs/src/seams.rs crates/strata-apfs/src/lib.rs crates/strata-apfs/tests/rooted.rs
+git add crates/strata-apfs/src/rooted.rs crates/strata-apfs/src/seams.rs crates/strata-apfs/src/lib.rs crates/strata-apfs/tests/rooted.rs crates/strata-apfs/tests/roots.rs
 git commit -m "feat(apfs): open_root and open_rooted with per-component O_NOFOLLOW and test seams"
 ```
 
-### Task 4: 目的地变体、改名、`remove_rooted` 与 `full_fsync`
+### Task 4: 目的地变体、改名、`remove_rooted`、`full_fsync` 与经句柄改元数据
 
 **Files:**
-- Create: `crates/strata-apfs/src/rooted_write.rs`、`crates/strata-apfs/src/rooted_rename.rs`、`crates/strata-apfs/src/rooted_remove.rs`、`crates/strata-apfs/src/sync.rs`
-- Test: `crates/strata-apfs/tests/rooted_write.rs`、`crates/strata-apfs/tests/rooted_rename.rs`、`crates/strata-apfs/tests/rooted_remove.rs`
+- Create: `crates/strata-apfs/src/rooted_write.rs`、`crates/strata-apfs/src/rooted_rename.rs`、`crates/strata-apfs/src/rooted_remove.rs`、`crates/strata-apfs/src/sync.rs`、`crates/strata-apfs/src/meta.rs`（`make_removable`、`set_file_meta`、`FileMeta`、crate 内部的 `blocking_flags`，§5.4）
+- Test: `crates/strata-apfs/tests/rooted_write.rs`、`crates/strata-apfs/tests/rooted_rename.rs`、`crates/strata-apfs/tests/rooted_remove.rs`、`crates/strata-apfs/tests/meta.rs`；`meta.rs` 内的单元测试
 
 **Interfaces:**
 - Consumes: Task 2 的检查函数（src 分类、dst 形态、`same_volume`）；Task 3 的 `resolve`、`open_root` 与 `open_rooted`；Task 1 的 `tests/common` 的 `Image`（HFS+ 镜像、嵌套挂载）
-- Produces: `clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`、`RenameMode`、`rename_rooted`、`RemoveKind`、`remove_rooted`、`full_fsync`
+- Produces: `clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`、`RenameMode`、`rename_rooted`、`RemoveKind`、`remove_rooted`、`full_fsync`、`make_removable`、`FileMeta`、`set_file_meta`；crate 内部的 `blocking_flags`（Task 5 复用）
 
-- [ ] **Step 1: 写失败的测试**：§7 的 `rooted_destination_refuses_a_symlinked_parent`、`rooted_destination_never_overwrites`、`rooted_destination_swap_after_resolution_stays_inside`、`mkdir_rooted_parents_semantics`、`clone_file_rooted_sets_the_requested_mode`、`clone_tree_rooted_is_atomic_and_refuses_cross_volume`、`create_file_rooted_and_symlink_rooted_basics`（都在 `tests/rooted_write.rs`）；`rename_rooted_excl_never_overwrites`、`rename_rooted_excl_renames_links_and_case_only_spellings`、`rename_rooted_swap_exchanges_two_existing_entries`、`rename_rooted_error_mapping`、`rename_rooted_refuses_symlinked_parents_on_both_sides`、`rename_rooted_directory_reparenting_needs_write_permission`、`full_fsync_accepts_file_and_directory_handles`（都在 `tests/rooted_rename.rs`）；`remove_rooted_refuses_symlinked_parents`、`remove_rooted_file_on_a_directory_returns_is_directory`、`remove_rooted_file_removes_one_entry_without_following`、`remove_rooted_empty_dir_removes_only_empty_directories`（都在 `tests/rooted_remove.rs`）；并把 Task 2 的 `clone_refusals_leave_no_residue` 里 `clone_tree_rooted` 的那一半补上
+- [ ] **Step 1: 写失败的测试**：§7 的 `make_removable_clears_flags_before_mode`、`set_file_meta_changes_metadata_through_a_handle`（都在 `tests/meta.rs`）、`blocking_flags_lists_the_flags_that_block_removal`、`make_removable_and_set_file_meta_refuse_by_rule`（`meta.rs` 里的单元测试，不碰文件系统）；`rooted_destination_refuses_a_symlinked_parent`、`rooted_destination_never_overwrites`、`rooted_destination_swap_after_resolution_stays_inside`、`mkdir_rooted_parents_semantics`、`clone_file_rooted_sets_the_requested_mode`、`clone_tree_rooted_is_atomic_and_refuses_cross_volume`、`create_file_rooted_and_symlink_rooted_basics`（都在 `tests/rooted_write.rs`）；`rename_rooted_excl_never_overwrites`、`rename_rooted_excl_renames_links_and_case_only_spellings`、`rename_rooted_swap_exchanges_two_existing_entries`、`rename_rooted_error_mapping`、`rename_rooted_refuses_symlinked_parents_on_both_sides`、`rename_rooted_directory_reparenting_needs_write_permission`、`full_fsync_accepts_file_and_directory_handles`（都在 `tests/rooted_rename.rs`）；`remove_rooted_refuses_symlinked_parents`、`remove_rooted_file_on_a_directory_returns_is_directory`、`remove_rooted_file_removes_one_entry_without_following`、`remove_rooted_empty_dir_removes_only_empty_directories`（都在 `tests/rooted_remove.rs`）；并把 Task 2 的 `clone_refusals_leave_no_residue` 里 `clone_tree_rooted` 的那一半补上，把本任务的函数（`clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`、`rename_rooted`、`remove_rooted`）的行加进 Task 3 的 roots 表（`tests/roots.rs`）
 - [ ] **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p strata-apfs --features test-seams --test rooted_write --test rooted_rename --test rooted_remove`
+Run: `cargo test -p strata-apfs --features test-seams --test rooted_write --test rooted_rename --test rooted_remove --test meta`
 Expected: FAIL（这些函数还没定义，编译不过）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：(a) 目的地变体：共同部分 `resolve` 到父目录句柄 P，只用最后一个名字做一次 `*at` 调用（`clonefileat`、`openat(O_CREAT | O_EXCL | O_NOFOLLOW)`、`mkdirat`、`symlinkat`），落地之前触发 `before_open`，不预先 stat，`EEXIST` 就是 `Exists`；flags 只传 `CLONE_NOFOLLOW | CLONE_NOOWNERCOPY`，不传 `CLONE_NOFOLLOW_ANY`、`CLONE_RESOLVE_BENEATH`（它们连 src 一起约束）；`mode` 屏蔽到 `0o777` 后用 `fchmodat(AT_SYMLINK_NOFOLLOW)`；`mkdir_rooted(parents = true)` 逐级建，记录 `created`，建出一级之后的失败升级为 `Unknown`。(b) 改名与删除，照 §5.4 "改名、删除与 `full_fsync`"：`rename_rooted` 先拦 `same_path`、`into_itself`，解析两个父目录，`renameatx_np` 带 `RENAME_EXCL` 或 `RENAME_SWAP`，失败后用 `fstatat` 区分 `from_missing`、`to_missing`，并给 `ReadOnly` 填 `reason`（`reparent_needs_write`、`immutable`、`no_permission`、`read_only_volume`）；`remove_rooted` 一次 `unlinkat`（`File` 带 0，`EmptyDir` 带 `AT_REMOVEDIR`），`File` 对 `EPERM` 用 `fstatat` 区分目录（`IsDirectory`）与标志（`immutable`），`EmptyDir` 的 `EBUSY` 归 `Unknown`；`full_fsync` 是 `fcntl(F_FULLFSYNC)` 加 `EINTR` 重试。任何一步都不 `fsync`、不 `chmod`、不清标志
+- [ ] **Step 3: 写让测试通过的最少实现**：(a) 经句柄改元数据（先做，目的地变体要用它），照 §5.4 "`make_removable(file)` 与 `set_file_meta(file, meta)`"：先 `fstat` 句柄核对种类（`set_file_meta` 收普通文件与目录）、`st_nlink`（只对非目录）、`SF_*`，拒绝时什么都不改；`make_removable` **先**清 `UF_IMMUTABLE`、`UF_APPEND`（`fchflags`，其它位保留）、**再** `fchmod` 补 u+w；`set_file_meta` 按清标志、设 mode、设 mtime 的次序，每一项只在需要时才调（无操作的调用也会更新 `ctime`）；第一项改动生效之后的失败是 `Unknown`；纯函数 `blocking_flags` 列出挡删除的标志名；`SF_*` 要 root 才造得出，它们的拒绝由纯函数表测。(b) 目的地变体：共同部分 `resolve` 到父目录句柄 P，只用最后一个名字做一次 `*at` 调用（`clonefileat`、`openat(O_CREAT | O_EXCL | O_NOFOLLOW)`、`mkdirat`、`symlinkat`），落地之前触发 `before_open`，不预先 stat，`EEXIST` 就是 `Exists`；flags 只传 `CLONE_NOFOLLOW | CLONE_NOOWNERCOPY`，不传 `CLONE_NOFOLLOW_ANY`、`CLONE_RESOLVE_BENEATH`（它们连 src 一起约束）；`clone_file_rooted` 的 `mode = Some(m)`：克隆之后在 P 上 `openat(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` 取回 dst（接缝再触发一次），交给 `set_file_meta`（`mode: Some(m & 0o777)`），这一步的任何失败都是 `Unknown`；不用 `fchmodat`，不经名字改 mode；`mkdir_rooted(parents = true)` 逐级建，记录 `created`，建出一级之后的失败升级为 `Unknown`。(c) 改名与删除，照 §5.4 "改名、删除与 `full_fsync`"：`rename_rooted` 先拦 `same_path`、`into_itself`，解析两个父目录，`renameatx_np` 带 `RENAME_EXCL` 或 `RENAME_SWAP`，失败后用 `fstatat` 区分 `from_missing`、`to_missing`，并给 `ReadOnly` 填 `reason`（`reparent_needs_write`、`immutable`、`no_permission`、`read_only_volume`）；`remove_rooted` 一次 `unlinkat`（`File` 带 0，`EmptyDir` 带 `AT_REMOVEDIR`），`File` 对 `EPERM` 用 `fstatat` 区分目录（`IsDirectory`）与标志（`immutable`），`EmptyDir` 先 `fstatat` 判出挂载点（`st_dev` 与父目录不同）→ `CrossVolume`（`mount_point`），`rmdir` 晚到的 `EBUSY` 同样映射，接缝紧挨着 `unlinkat`（在 `fstatat` 之后）；`full_fsync` 是 `fcntl(F_FULLFSYNC)` 加 `EINTR` 重试。`rename_rooted`、`remove_rooted` 不 `fsync`、不 `chmod`、不清标志
 - [ ] **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p strata-apfs --features test-seams --test rooted_write --test rooted_rename --test rooted_remove --test clone`
+Run: `cargo test -p strata-apfs --lib meta && cargo test -p strata-apfs --features test-seams --test rooted_write --test rooted_rename --test rooted_remove --test meta --test clone --test roots`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/strata-apfs/src/rooted_write.rs crates/strata-apfs/src/rooted_rename.rs crates/strata-apfs/src/rooted_remove.rs crates/strata-apfs/src/sync.rs crates/strata-apfs/src/lib.rs crates/strata-apfs/tests/rooted_write.rs crates/strata-apfs/tests/rooted_rename.rs crates/strata-apfs/tests/rooted_remove.rs crates/strata-apfs/tests/clone.rs
-git commit -m "feat(apfs): rooted no-follow destinations, rename, remove_rooted and full_fsync"
+git add crates/strata-apfs/src/rooted_write.rs crates/strata-apfs/src/rooted_rename.rs crates/strata-apfs/src/rooted_remove.rs crates/strata-apfs/src/sync.rs crates/strata-apfs/src/meta.rs crates/strata-apfs/src/lib.rs crates/strata-apfs/tests/rooted_write.rs crates/strata-apfs/tests/rooted_rename.rs crates/strata-apfs/tests/rooted_remove.rs crates/strata-apfs/tests/meta.rs crates/strata-apfs/tests/roots.rs crates/strata-apfs/tests/clone.rs
+git commit -m "feat(apfs): rooted no-follow destinations, rename, remove_rooted, full_fsync, make_removable and set_file_meta"
 ```
 
 ### Task 5: `remove_tree_rooted` 与 `clone_from_rooted`
 
 **Files:**
-- Create: `crates/strata-apfs/src/remove_tree.rs`（`remove_tree_rooted`、`RemoveReport`、`Stuck`、`StuckReason`，§5.4）、`crates/strata-apfs/src/clone_from.rs`（`clone_from_rooted`）
+- Create: `crates/strata-apfs/src/remove_tree.rs`（`remove_tree_rooted`、`RemoveReport`、`Stuck`、`StuckReason`、`MAX_REPORTED_STUCK`，§5.4）、`crates/strata-apfs/src/clone_from.rs`（`clone_from_rooted`、`CloneKind`）
 - Test: `crates/strata-apfs/tests/remove_tree.rs`、`crates/strata-apfs/tests/clone_from.rs`；`remove_tree.rs` 内的单元测试
 
 **Interfaces:**
-- Consumes: Task 1 的 `classify_io_error`、`same_volume`、`volume_caps`；Task 2 的检查函数（dst 形态、已存在、父目录）与 `clone_tree`、`clone_file`（对照用）；Task 3 的 `resolve`、`open_rooted` 的终点打开逻辑与接缝
-- Produces: `remove_tree_rooted`、`RemoveReport`（含 `to_detail`、`from_error`）、`Stuck`、`StuckReason`、`MAX_REPORTED_STUCK`、`clone_from_rooted`
+- Consumes: Task 1 的 `classify_io_error`、`same_volume`、`volume_caps`；Task 2 的检查函数（dst 形态、已存在、父目录）与 `clone_tree`、`clone_file`（对照用）；Task 3 的 `resolve`、`check_root`、`open_rooted` 的终点打开逻辑与接缝；Task 4 的 `blocking_flags`
+- Produces: `remove_tree_rooted`、`RemoveReport`（`#[must_use]`，`is_complete`）、`Stuck`（含 `detail`）、`StuckReason`（含 `as_str`）、`MAX_REPORTED_STUCK`、`CloneKind`、`clone_from_rooted`
 
-- [ ] **Step 1: 写失败的测试**：§7 的 `remove_tree_rooted_removes_a_protected_tree`、`remove_tree_rooted_reports_what_it_cannot_remove`、`remove_tree_rooted_refuses_before_touching_anything`、`remove_tree_rooted_never_follows_a_swapped_directory`、`remove_tree_rooted_depth_limit`、`remove_tree_fits_a_low_descriptor_limit`、`remove_tree_low_descriptor_limit_child`（后者 `#[ignore]`，只由前者启动）、`remove_report_round_trips_through_the_error_detail`（`remove_tree.rs` 里的单元测试，不碰文件系统）、`clone_from_rooted_clones_files_and_directories`、`clone_from_rooted_refuses_a_symlinked_parent`、`clone_from_rooted_clones_the_opened_object_after_a_swap`、`clone_from_rooted_error_codes`；并把 Task 2 的 `clone_refusals_leave_no_residue` 里 `clone_from_rooted` 的那一半补上
+- [ ] **Step 1: 写失败的测试**：§7 的 `remove_tree_rooted_removes_a_protected_tree`、`remove_tree_rooted_takes_any_entry_kind`、`remove_tree_rooted_reports_what_it_cannot_remove`、`remove_tree_rooted_leaves_a_shared_flagged_inode_alone`、`remove_tree_rooted_refuses_before_touching_anything`、`remove_tree_rooted_never_follows_a_swapped_directory`、`remove_tree_rooted_depth_limit`、`remove_tree_fits_a_low_descriptor_limit`、`remove_tree_low_descriptor_limit_child`（后者 `#[ignore]`，只由前者启动）、`remove_report_counts_and_completeness`（`remove_tree.rs` 里的单元测试加一个 `compile_fail` 的 doc-test，不碰文件系统）、`stuck_reason_classification_and_names`（`remove_tree.rs` 里的单元测试，纯函数）、`clone_from_rooted_clones_files_and_directories`、`clone_from_rooted_checks_the_source_kind`、`clone_from_rooted_refuses_a_symlinked_parent`、`clone_from_rooted_clones_the_opened_object_after_a_swap`、`clone_from_rooted_error_codes`；并把 Task 2 的 `clone_refusals_leave_no_residue` 里 `clone_from_rooted` 的那一半补上，把 `clone_from_rooted`（`src_root`）与 `remove_tree_rooted` 的行加进 Task 3 的 roots 表（`tests/roots.rs`）
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-apfs --features test-seams --test remove_tree --test clone_from`
 Expected: FAIL（`remove_tree_rooted`、`clone_from_rooted` 还没定义，编译不过）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：(a) `remove_tree_rooted` 照 §5.4 的"遍历之前"五步与"遍历"九步："遍历之前"的检查失败给具名的码；遍历自底向上，每层一个句柄，读完名字就关目录流；清标志只用 `fchflags`（经句柄；符号链接用 `O_SYMLINK` 的句柄），**不用 `fchflagsat`**（macOS 27 才有）；打不开的目录用 `fchmodat(AT_SYMLINK_NOFOLLOW)` 补 `0700`，写不进的用 `fchmod`；每次取到句柄都核对 (dev, inode)；不进入 `st_dev` 不同的目录（记 `OtherDevice`）；`stuck` 最多记 `MAX_REPORTED_STUCK` 条，`stuck_total` 照实数；没删干净返回 `Unknown`，`detail = RemoveReport::to_detail()`。(b) `clone_from_rooted` 照 §5.4：先查 dst，再 `resolve`、`openat(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)`、`fstat` 分类，同卷检查用句柄的真实设备号，最后 `fclonefileat(fd, AT_FDCWD, dst, CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)`，落地之前触发 `before_open`
+- [ ] **Step 3: 写让测试通过的最少实现**：(a) `remove_tree_rooted` 照 §5.4 的"遍历之前"五步与"遍历"九步：`Err` 只给遍历之前的拒绝（具名的码，什么都没碰），遍历一开始就一律 `Ok(RemoveReport)`；目标可以是任何种类的条目，非目录直接走 `unlink_leaf`；遍历自底向上，每层一个句柄，读完名字就关目录流；清标志只用 `fchflags`（经句柄；符号链接用 `O_SYMLINK` 的句柄，打不开的非符号链接再试 `O_EXEC`），**不用 `fchflagsat`**（macOS 27 才有），而且只在不共用的 inode 上（`st_nlink == 1`，取到句柄后再 `fstat` 一次）；打不开的目录先试 `O_EXEC` 句柄（清标志、`fchmod`、`O_RDONLY` 重开），属主连搜索位都没有才用按名字的 `fchmodat(AT_SYMLINK_NOFOLLOW)` 补 `0700`（§4.2 H 的残余风险，只用于这一种目录），写不进的用句柄 `fchmod`；每次取到句柄都核对 (dev, inode)；不进入 `st_dev` 不同的目录（记 `OtherDevice`）；`SF_*` 只报告，从不清；原因与 `detail` 一律按 §5.4 的 stuck 原因表（归类是一个纯函数，有单元测试）；`stuck` 最多记 `MAX_REPORTED_STUCK` 条，`stuck_total` 照实数；没有 `to_detail`、`from_error`，报告不进 `StrataError`。(b) `clone_from_rooted` 照 §5.4：先查 dst，再 `resolve`、`openat(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)`，`fstat` 句柄核对 `kind`（在同卷检查与 `fclonefileat` 之前，种类不符就什么都不克隆），同卷检查用句柄的真实设备号，最后 `fclonefileat(fd, AT_FDCWD, dst, CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)`，落地之前触发 `before_open`
 - [ ] **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p strata-apfs --lib remove_tree && cargo test -p strata-apfs --features test-seams --test remove_tree --test clone_from --test clone`
+Run: `cargo test -p strata-apfs --lib remove_tree && cargo test -p strata-apfs --doc && cargo test -p strata-apfs --features test-seams --test remove_tree --test clone_from --test clone --test roots`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/strata-apfs/src/remove_tree.rs crates/strata-apfs/src/clone_from.rs crates/strata-apfs/src/lib.rs crates/strata-apfs/tests/remove_tree.rs crates/strata-apfs/tests/clone_from.rs crates/strata-apfs/tests/clone.rs
-git commit -m "feat(apfs): remove_tree_rooted with a stuck report, and clone_from_rooted from a pinned handle"
+git add crates/strata-apfs/src/remove_tree.rs crates/strata-apfs/src/clone_from.rs crates/strata-apfs/src/lib.rs crates/strata-apfs/tests/remove_tree.rs crates/strata-apfs/tests/clone_from.rs crates/strata-apfs/tests/clone.rs crates/strata-apfs/tests/roots.rs
+git commit -m "feat(apfs): remove_tree_rooted reports what it leaves for any entry kind, and clone_from_rooted checks its source kind"
 ```
 
 ### Task 6: `Attrs`、记录解析器、`attrs_of` 与 gen count 契约
 
 **Files:**
 - Create: `crates/strata-apfs/src/attrs.rs`（`Attrs`、`FileKind`、`unchanged_since`、`gen_count_known`、`last_changed`、`GEN_COUNT_UNAVAILABLE`、`attrs_of`）、`crates/strata-apfs/src/bulk.rs`（属性请求、记录解析器，Task 7 复用）
-- Test: `crates/strata-apfs/tests/attrs.rs`；`bulk.rs` 内的单元测试
+- Test: `crates/strata-apfs/tests/attrs.rs`、`crates/strata-apfs/tests/symlink_recipe.rs`；`bulk.rs` 内的单元测试
 
 **Interfaces:**
-- Consumes: Task 3 的 `resolve`；Task 1 的 `classify_io_error`；Task 2 的 `clone_file` 与 Task 4 的 `rename_rooted`（时间戳的测试用）
+- Consumes: Task 3 的 `resolve`、`check_root`；Task 1 的 `classify_io_error`；Task 2 的 `clone_file` 与 Task 4 的 `rename_rooted`（时间戳的测试用）；Task 4 的 `symlink_rooted` 与 Task 5 的 `clone_from_rooted`（符号链接配方的测试用）
 - Produces: `Attrs`、`FileKind`、`Attrs::{unchanged_since, gen_count_known, last_changed}`、`GEN_COUNT_UNAVAILABLE`、`attrs_of`；crate 内部的 `parse_records(buf, n) -> Vec<Result<RawEntry>>` 与 `ERROR` 记录的 `fstatat` 补取函数
 
-- [ ] **Step 1: 写失败的测试**：§7 的 `bulk_record_parser_follows_the_returned_bitmap`、`bulk_record_parser_rejects_bad_records`、`bulk_error_record_fallback_has_no_gen_count`、`bulk_record_maximum_fits_the_minimum_buffer`（都在 `bulk.rs` 里；前一个以外都不碰文件系统，`bulk_error_record_fallback_has_no_gen_count` 另用一个真实文件做 `fstatat` 补取）、`attrs_unchanged_since_rules`、`attrs_of_reports_every_field`、`attrs_of_does_not_follow_links`、`gen_count_changes_on_write_not_on_touch`、`gen_count_is_unknown_while_a_writable_mapping_exists`、`gen_count_unknown_with_creator_descriptor_still_open`、`gen_count_unknown_for_a_mapping_made_by_another_process`、`gen_count_unknown_for_a_read_only_mapping_of_a_writable_descriptor`、`read_only_and_private_mappings_keep_gen_count_known`、`gen_count_alone_is_not_a_version`、`directory_gen_count_tracks_entries_not_content`、`attrs_versions_differ_for_same_second_writes`、`same_size_write_with_restored_mtime_is_a_new_version`、`attrs_last_changed_is_the_later_of_mtime_and_ctime`
+- [ ] **Step 1: 写失败的测试**：§7 的 `bulk_record_parser_follows_the_returned_bitmap`、`bulk_record_parser_rejects_bad_records`、`bulk_error_record_fallback_has_no_gen_count`、`bulk_record_maximum_fits_the_minimum_buffer`（都在 `bulk.rs` 里；前一个以外都不碰文件系统，`bulk_error_record_fallback_has_no_gen_count` 另用一个真实文件做 `fstatat` 补取）、`attrs_unchanged_since_rules`、`attrs_of_reports_every_field`、`attrs_of_does_not_follow_links`、`gen_count_changes_on_write_not_on_touch`、`gen_count_is_unknown_while_a_writable_mapping_exists`、`gen_count_unknown_with_creator_descriptor_still_open`、`gen_count_unknown_for_a_mapping_made_by_another_process`、`gen_count_unknown_for_a_read_only_mapping_of_a_writable_descriptor`、`read_only_and_private_mappings_keep_gen_count_known`、`gen_count_alone_is_not_a_version`、`directory_gen_count_tracks_entries_not_content`、`attrs_versions_differ_for_same_second_writes`、`same_size_write_with_restored_mtime_is_a_new_version`、`attrs_last_changed_is_the_later_of_mtime_and_ctime`、`symlink_recipe_recreates_a_workspace_symlink`（`tests/symlink_recipe.rs`）；并把 `attrs_of` 的行加进 Task 3 的 roots 表（`tests/roots.rs`）
 - [ ] **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p strata-apfs --test attrs`
+Run: `cargo test -p strata-apfs --features test-seams --test attrs --test symlink_recipe`
 Expected: FAIL（`Attrs`、`attrs_of` 还没定义，编译不过）
 
 - [ ] **Step 3: 写让测试通过的最少实现**：属性请求与记录布局照 §4.2 D，**按每条记录的返回位图解析**，用未对齐读；`GEN_COUNT` 要 `FSOPT_ATTR_CMN_EXTENDED`；位图里没有 `GEN_COUNT` 或值为 0 → `gen_count = 0`；`ERROR` 记录走 `fstatat` 补取，补取的 `Attrs` 里 `gen_count = 0`；`attrs_of` 用 `getattrlistat(FSOPT_NOFOLLOW)`；符号链接目标用 `readlinkat` 取原字节；`unchanged_since` 照 §5.5，未知永远是 `false`；`gen_count_known` 与 `last_changed`（`max(mtime, ctime)`）照 §5.5。多进程、映射的测试用 `fork` 或 `std::process::Command` 启动自身的子测试入口；映射的测试把描述符的打开方式（`O_RDWR` 或 `O_RDONLY`）写进断言，不只看保护位
 - [ ] **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p strata-apfs --lib bulk && cargo test -p strata-apfs --test attrs`
+Run: `cargo test -p strata-apfs --lib bulk && cargo test -p strata-apfs --features test-seams --test attrs --test symlink_recipe --test roots`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/strata-apfs/src/attrs.rs crates/strata-apfs/src/bulk.rs crates/strata-apfs/src/lib.rs crates/strata-apfs/tests/attrs.rs
+git add crates/strata-apfs/src/attrs.rs crates/strata-apfs/src/bulk.rs crates/strata-apfs/src/lib.rs crates/strata-apfs/tests/attrs.rs crates/strata-apfs/tests/symlink_recipe.rs crates/strata-apfs/tests/roots.rs
 git commit -m "feat(apfs): Attrs, bulk record parser, attrs_of and the gen count contract"
 ```
 
@@ -1253,10 +1410,10 @@ git commit -m "feat(apfs): Attrs, bulk record parser, attrs_of and the gen count
 - Test: `crates/strata-apfs/tests/walk.rs`
 
 **Interfaces:**
-- Consumes: Task 6 的 `bulk.rs`；Task 3 的 `resolve`
+- Consumes: Task 6 的 `bulk.rs`；Task 3 的 `resolve`、`check_root`
 - Produces: `walk`、`walk_with`、`list_dir`、`WalkOptions`（手写 `Default`）、`Walk`（`Send`）
 
-- [ ] **Step 1: 写失败的测试**：§7 的 `walk_lists_all_entries_relative_to_root`、`walk_excludes_configured_dirs`、`walk_excludes_several_dirs`、`walk_exclusion_of_a_missing_dir_is_a_noop`、`walk_exclusion_prunes_the_whole_subtree`、`walk_serves_full_and_incremental_scans`、`walk_is_preorder_with_siblings_sorted`、`walk_options_default_uses_the_default_buffer`、`walk_is_send_and_accepts_send_sync_filters`、`list_dir_lists_one_level_in_byte_order`、`walk_wide_directory_is_complete_and_stable_across_buffer_sizes`、`walk_lists_the_longest_name_with_the_minimum_buffer`、`walk_very_wide_directory_through_many_windows`、`walk_after_mass_deletion_lists_only_survivors`、`walk_returns_untouched_names_once_while_the_directory_changes`、`walk_never_follows_symlinks`、`walk_does_not_descend_into_mount_points`、`walk_reports_an_unreadable_directory_and_continues`、`walk_skips_entries_that_vanish_mid_walk`、`walk_never_follows_a_directory_swapped_for_a_link`、`walk_reports_a_swapped_root`、`walk_start_is_resolved_without_following_links`、`walk_names_are_nfc_and_openable_either_way`、`walk_depth_limit_is_an_error_item`、`walk_fits_a_low_descriptor_limit`、`low_descriptor_limit_child`（后者 `#[ignore]`，只由前者启动）
+- [ ] **Step 1: 写失败的测试**：§7 的 `walk_lists_all_entries_relative_to_root`、`walk_excludes_configured_dirs`、`walk_excludes_several_dirs`、`walk_exclusion_of_a_missing_dir_is_a_noop`、`walk_exclusion_prunes_the_whole_subtree`、`walk_serves_full_and_incremental_scans`、`walk_is_preorder_with_siblings_sorted`、`walk_options_default_uses_the_default_buffer`、`walk_is_send_and_accepts_send_sync_filters`、`list_dir_lists_one_level_in_byte_order`、`walk_wide_directory_is_complete_and_stable_across_buffer_sizes`、`walk_lists_the_longest_name_with_the_minimum_buffer`、`walk_very_wide_directory_through_many_windows`、`walk_after_mass_deletion_lists_only_survivors`、`walk_returns_untouched_names_once_while_the_directory_changes`、`walk_never_follows_symlinks`、`walk_does_not_descend_into_mount_points`、`walk_reports_an_unreadable_directory_and_continues`、`walk_skips_entries_that_vanish_mid_walk`、`walk_never_follows_a_directory_swapped_for_a_link`、`walk_reports_a_swapped_root`、`walk_start_is_resolved_without_following_links`、`walk_names_are_nfc_and_openable_either_way`、`walk_depth_limit_is_an_error_item`、`walk_fits_a_low_descriptor_limit`、`low_descriptor_limit_child`（后者 `#[ignore]`，只由前者启动）；并把 `walk`、`walk_with`、`list_dir` 的行（不规范的 root 得第一项 `Err(InvalidInput)`）加进 Task 3 的 roots 表（`tests/roots.rs`），这张表到此齐全
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-apfs --features test-seams --test walk`
@@ -1265,13 +1422,13 @@ Expected: FAIL（`walk`、`walk_with` 还没定义，编译不过）
 - [ ] **Step 3: 写让测试通过的最少实现**：栈式前序遍历，照 §5.6 的七步和 `read_dir` 的五步；一个目录读完、排序之后才产出（排序只在目录之内，整体不是全路径的字节序）；filter 在条目到手之后、产出与下探之前调用一次，类型是 `Fn + Send + Sync`，所以 `Walk` 是 `Send`；子目录用 `openat(O_DIRECTORY | O_NOFOLLOW)` 打开，`ENOENT`、`ENOTDIR`、`ELOOP` 当作它已经不在；挂载点、符号链接、特殊文件都是叶子；同时只持有栈上各 frame 的句柄；结束时对根路径 `lstat` 核对身份，变了产出 `Busy`（`root_changed`）；深度超限产出 `TooLarge`（`too_deep`）；`MAX_WALK_DEPTH` 与 `ERANGE` 翻倍重试照 §5.6；`WalkOptions` 手写 `Default`；`list_dir` 是 `walk_with` 在 `start = dir`、`max_depth = Some(1)`、全部放行下的具名写法，返回 `Walk<'static>`（放行用一个函数项，不借用调用方的东西）
 - [ ] **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p strata-apfs --features test-seams --test walk`
+Run: `cargo test -p strata-apfs --features test-seams --test walk --test roots`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/strata-apfs/src/walk.rs crates/strata-apfs/src/lib.rs crates/strata-apfs/tests/walk.rs
+git add crates/strata-apfs/src/walk.rs crates/strata-apfs/src/lib.rs crates/strata-apfs/tests/walk.rs crates/strata-apfs/tests/roots.rs
 git commit -m "feat(apfs): getattrlistbulk walk with pruning, bounded descriptors and root pinning"
 ```
 
@@ -1285,13 +1442,13 @@ git commit -m "feat(apfs): getattrlistbulk walk with pruning, bounded descriptor
 - Consumes: Task 1 的 `tests/common` 的 `Image`；`unicode-normalization` 与折叠表（§9 待定）
 - Produces: `case_fold_key`、`case_fold_eq`
 
-- [ ] **Step 1: 写失败的测试**：§7 的 `case_fold_eq_known_pairs`（单元测试，表驱动）、`case_fold_key_agrees_with_case_fold_eq`（单元测试，固定种子的随机串）、`case_fold_eq_matches_a_case_insensitive_volume`（oracle，用镜像）、`case_sensitive_volume_distinguishes_case_but_not_normalization`
+- [ ] **Step 1: 写失败的测试**：§7 的 `case_fold_eq_known_pairs`（单元测试，表驱动）、`case_fold_key_agrees_with_case_fold_eq`（单元测试，固定种子的随机串）、`case_fold_key_of_a_path_is_the_slash_joined_keys`（单元测试，路径性质，固定的组合记号用例加固定种子的随机串）、`case_fold_eq_matches_a_case_insensitive_volume`（oracle，用镜像）、`case_sensitive_volume_distinguishes_case_but_not_normalization`
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-apfs --lib casefold && cargo test -p strata-apfs --test case`
 Expected: FAIL（`case_fold_key`、`case_fold_eq` 还没定义，编译不过）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：照 §5.8：`case_fold_key` 对纯 ASCII 走 `to_ascii_lowercase`，否则 `NFD(full_case_fold(NFD(s)))`；`case_fold_eq(a, b)` 就是 `a == b || case_fold_key(a) == case_fold_key(b)`（两边都是 ASCII 时用 `eq_ignore_ascii_case` 省掉分配）；折叠表选定后记入 §9 并核对 Unicode 版本 ≥ 16.0；oracle 测试的表按 §4.2 B 的类别建，再按码位区间随机抽样（固定种子，失败时打印那一对的码位），同时比较 `case_fold_eq` 与键的相等
+- [ ] **Step 3: 写让测试通过的最少实现**：照 §5.8：`case_fold_key` 对纯 ASCII 走 `to_ascii_lowercase`，否则 `NFD(full_case_fold(NFD(s)))`；`case_fold_eq(a, b)` 就是 `a == b || case_fold_key(a) == case_fold_key(b)`（两边都是 ASCII 时用 `eq_ignore_ascii_case` 省掉分配）；折叠表选定后记入 §9 并核对 Unicode 版本 ≥ 16.0；oracle 测试的表按 §4.2 B 的类别建，再按码位区间随机抽样（固定种子，失败时打印那一对的码位），同时比较 `case_fold_eq` 与键的相等；路径性质（`case_fold_key(a + "/" + b)` 等于两边的键用 `/` 拼起来）由构造保证，不需要特别的代码，`case_fold_key_of_a_path_is_the_slash_joined_keys` 钉住它，§5.8 写明了理由
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-apfs --lib casefold && cargo test -p strata-apfs --test case`
@@ -1314,16 +1471,16 @@ git commit -m "feat(apfs): case_fold_key and case_fold_eq as Unicode canonical c
 - Consumes: Task 1 的 `volume_caps`、Task 8 的 `case_fold_eq`（排除过滤在大小写不敏感的卷上用它）；`strata_types::RepoPath`
 - Produces: `watch`、`watch_with`、`WatchOptions`、`WatchEvent`、`Watcher`（`Send + Sync`）、`Watcher::flush`
 
-- [ ] **Step 1: 写失败的测试**：§7 的 `watch_flags_map_to_events`（`translate.rs` 里的单元测试，合成 flags）、`watcher_reports_file_and_directory_changes`、`watcher_paths_use_the_callers_root_and_disk_spelling`、`watcher_excludes_configured_dirs`、`dropping_the_watcher_stops_callbacks`、`watcher_reports_a_renamed_root_as_dropped`、`watcher_reports_must_rescan`（卡住回调的洪泛，默认运行，几秒）、`flush_drains_the_callback_queue`、`flush_is_not_a_fence`（`#[ignore]`，只打印数字）
+- [ ] **Step 1: 写失败的测试**：§7 的 `watch_flags_map_to_events`（`translate.rs` 里的单元测试，合成 flags）、`watcher_reports_file_and_directory_changes`、`watcher_paths_use_the_callers_root_and_disk_spelling`、`watcher_excludes_configured_dirs`、`dropping_the_watcher_stops_callbacks`、`watcher_reports_a_renamed_root_as_dropped`、`watcher_reports_must_rescan`（卡住回调的洪泛，默认运行，几秒；一轮在所有文件都有了着落时结束，至多 30 s，重试至多 3 轮）、`flush_drains_the_callback_queue`、`watcher_reentry_from_the_callback_never_traps`、`watcher_reentry_child`（后者 `#[ignore]`，只由前者在子进程里启动）、`flush_is_not_a_fence`（`#[ignore]`，只打印数字）
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-apfs --lib translate && cargo test -p strata-apfs --test watch`
 Expected: FAIL（`watch` 还没定义，编译不过）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：照 §5.7：`FSEventStreamCreate`（`FileEvents | WatchRoot | NoDefer`，latency 0.05，`SinceNow`）、私有串行队列；回调按翻译表出事件，路径前缀换回调用者的 root；一次回调一个 `Changed`；`on_event` 包在 `catch_unwind` 里，panic 后补发 `Dropped`；`drop` 时 `Stop`、`Invalidate`、`Release`，再 `dispatch_sync` 排空；不设 `IgnoreSelf`，不调 `FSEventStreamSetExclusionPaths`；`exclude` 在回调里按分量过滤。`flush`：回调线程上调用 `debug_assert!`（release 直接返回），取内部互斥量，`FSEventStreamFlushSync`，再对私有队列 `dispatch_sync` 一个空块；不返回"已追上"的信号。事件最多等 5 s，不断言延迟
+- [ ] **Step 3: 写让测试通过的最少实现**：照 §5.7：`FSEventStreamCreate`（`FileEvents | WatchRoot | NoDefer`，latency 0.05，`SinceNow`）、私有串行队列；回调按翻译表出事件，路径前缀换回调用者的 root；一次回调一个 `Changed`；`on_event` 包在 `catch_unwind` 里，panic 后补发 `Dropped`，回调执行期间设线程局部的 `IN_CALLBACK`；`drop`：不在回调线程上时置 `closed`，`Stop`、`Invalidate`、`Release`，再 `dispatch_sync` 排空；**在回调里 drop 自己**（`IN_CALLBACK` 为真）时不排空（`dispatch_sync` 到自己所在的队列会 `SIGTRAP`）：置 `closed`，`Stop`、`Invalidate`，把最后的 `Release` 与回调状态的释放放进 `dispatch_async(queue, …)`；不设 `IgnoreSelf`，不调 `FSEventStreamSetExclusionPaths`；`exclude` 在回调里按分量过滤。`flush`：回调线程上调用 `debug_assert!`（release 直接返回），取内部互斥量，`FSEventStreamFlushSync`，再对私有队列 `dispatch_sync` 一个空块；保证的只有"排空之前入队的回调都已执行完"，不返回"已追上"的信号。事件最多等 5 s，不断言延迟
 - [ ] **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p strata-apfs --lib translate && cargo test -p strata-apfs --test watch && cargo test --release -p strata-apfs --test watch flush_drains_the_callback_queue`
+Run: `cargo test -p strata-apfs --lib translate && cargo test -p strata-apfs --test watch && cargo test --release -p strata-apfs --test watch watcher_reentry_from_the_callback_never_traps`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -1382,12 +1539,17 @@ git commit -m "test(apfs): design section 8 budgets for walk and clone, with mea
 | `attrs_of`、`Attrs::unchanged_since`、`volume_caps` | [我的决定] 新增 | `std::fs` 读不到 gen count；把"未知不等于未变、不能单比 gen count、版本的身份含 inode"固定成一个入口；store、session、daemon 的预检 | 2026-10-22 |
 | `open_rooted` 的返回范围 | [我的决定] 普通文件、目录、FIFO（非阻塞）可以返回；符号链接、socket、设备 → `NotFile`；另有只收普通文件的 `open_rooted_file`；根自己用 `open_root` | store、session 要用 `open_rooted` 取目录句柄（所以与 tgrep 的 `RootedDir` 不同，目录不拒绝）；类型核对交给调用方或 `open_rooted_file` | 2026-10-22 |
 | 根的解析 | [我的决定] 根的祖先可以是符号链接，根的最后一级 `O_NOFOLLOW`；根之下逐级 `O_DIRECTORY \| O_NOFOLLOW`；不用 `O_NOFOLLOW_ANY` | `O_NOFOLLOW_ANY` 连 `/tmp/x` 也拒绝（§4.2 E） | 2026-10-22 |
-| 目的地变体 | [我的决定] `clone_file_rooted`（`mode: Option<u32>`，屏蔽到 `0o777`）、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`（`parents: bool`）、`symlink_rooted`；父目录缺失不自动建；不 `fsync` | 增补 3 只规定了机制，名字与参数是我定的。`mkdir_rooted(parents)` 单独提供，使每个函数只做一件事、失败边界清楚；`mode` 屏蔽 setuid、setgid 是为了不意外造出特殊位文件 | 2026-10-22 |
-| 克隆带来的 BSD 标志与扩展属性 | [我的决定] apfs 不清，原样带过来；`clone_file_rooted` 只提供 `mode` | 清不清、按什么规则清是 store.md §5.3 第 5 步和 overlay 投影的规整，规则不该在两处各写一份。已知的坑：`mode = Some(..)` 遇到带 `uchg` 的源会 `EPERM`（实测），要先清标志的调用方传 `None` | 2026-10-22 |
-| 根之下的改名与删除的接口 | [我的决定]（名字由增补 8 定，签名与细节是我的）`rename_rooted(root, from, to, RenameMode::{Excl, Swap})`、`remove_rooted(root, path, RemoveKind::{File, EmptyDir})`、`remove_tree_rooted(root, path) -> Result<RemoveReport>`；与初稿的名字对应：`Exclusive` → `Excl`，`unlink_rooted` → `remove_rooted(.., File)`，`rmdir_rooted` → `remove_rooted(.., EmptyDir)`；没有覆盖的一档 | overlay 的 restore 与 `project`、store 的 `retire_dir` 与 gc、deps 的封存与 staging、session 的交换与 `rm`、gitio 的 `export_tree` 都要"根之下不跟随符号链接的改名与删除"（增补 3、8）；三份手写的递归删除碰上指向根外的符号链接就是数据丢失的风险（评审 I1）。覆盖违反 A1（design §9 不变量 5）。增补 8 取消了初稿"apfs 不做递归删除"的决定 | 2026-10-22 |
+| 目的地变体 | [我的决定] `clone_file_rooted`（`mode: Option<u32>`，屏蔽到 `0o777`，**经句柄**设置：克隆之后取回 dst，交给 `set_file_meta`）、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`（`parents: bool`）、`symlink_rooted`；父目录缺失不自动建；不 `fsync` | 增补 3 只规定了机制，名字与参数是我定的。`mkdir_rooted(parents)` 单独提供，使每个函数只做一件事、失败边界清楚；`mode` 屏蔽 setuid、setgid 是为了不意外造出特殊位文件。mode 经句柄而不是 `fchmodat(名字)`：克隆之后 dst 的名字可能被换成指向根外文件的硬链接，按名字改 mode 会改到那个文件（§4.2 H） | 2026-10-22 |
+| 克隆带来的 BSD 标志与扩展属性 | [我的决定] apfs 的克隆原样带过来，不清；清标志、设 mode、设 mtime 经 `set_file_meta`（`clear_flags` 清除 `UF_COMPRESSED` 之外的全部 `UF_*`，`SF_*` 从不清）；扩展属性的剥离留在 store，在同一个句柄上、两次 `set_file_meta` 之间 | 清不清、按什么规则清是 store.md §5.3 第 5 步和 overlay 投影的规整，规则不该在两处各写一份；但改标志、mode、mtime 的系统调用要有一份实现，而且要核对 `st_nlink`（第 2 轮裁定 "Metadata changes through a handle"）。已知的坑：`clone_file_rooted(.., Some(m))` 遇到带 `uchg` 的源会 `EPERM`（实测），要先清标志的调用方传 `None`，再对句柄 `set_file_meta` | 2026-10-22 |
+| 根之下的改名与删除的接口 | [我的决定]（名字由增补 8 定，签名与细节是我的）`rename_rooted(root, from, to, RenameMode::{Excl, Swap})`、`remove_rooted(root, path, RemoveKind::{File, EmptyDir})`、`remove_tree_rooted(root, path) -> Result<RemoveReport>`（任何种类的条目都可以是目标）；另有 `make_removable(&File)`、`set_file_meta(&File, &FileMeta)`（下面各有一行）；与初稿的名字对应：`Exclusive` → `Excl`，`unlink_rooted` → `remove_rooted(.., File)`，`rmdir_rooted` → `remove_rooted(.., EmptyDir)`；没有覆盖的一档 | overlay 的 restore 与 `project`、store 的 `retire_dir` 与 gc、deps 的封存与 staging、session 的交换与 `rm`、gitio 的 `export_tree` 都要"根之下不跟随符号链接的改名与删除"（增补 3、8）；三份手写的递归删除碰上指向根外的符号链接就是数据丢失的风险（评审 I1）。覆盖违反 A1（design §9 不变量 5）。增补 8 取消了初稿"apfs 不做递归删除"的决定 | 2026-10-22 |
+| `make_removable` | [控制者裁定；签名与细节是我的] `make_removable(file: &File) -> Result<()>`：句柄由调用方用 `open_rooted` 取得；**先**清 `UF_IMMUTABLE`、`UF_APPEND`、**再** `fchmod` 补 u+w；只在需要时才调系统调用；非目录而 `st_nlink > 1` → `ReadOnly`（`hard_link`）；`SF_IMMUTABLE`、`SF_APPEND` → `ReadOnly`（`immutable`），从不清；标志清了而补写位失败 → `Unknown` | 取代 store 的 `retire_dir` 与 gc 各自写的"`fchmod u+w` 加 `fchflags`"配方。次序不能反：带 `uchg` 的目录 `fchmod` 得 `EPERM`（实测，§4.2 H）。只在需要时才调：无操作的 `chmod`、`chflags` 也更新 `ctime`（实测），而 gc 的年龄是 `max(mtime, ctime)`，所以 gc 先判年龄、后调用。A10 随之改写：apfs 只在 `remove_tree_rooted` 删它点名的树的过程中、和调用方调用 `make_removable`、`set_file_meta` 的时候放宽权限或改元数据 | 2026-10-22 |
+| `set_file_meta` 与 `FileMeta` | [控制者裁定；字段与次序的细节是我的] `set_file_meta(file: &File, meta: &FileMeta) -> Result<()>`，`FileMeta { clear_flags: bool, mode: Option<u32>, mtime: Option<SystemTime> }`：先 `fstat` 句柄，要求普通文件或目录（别的 → `NotFile`）、非目录时 `st_nlink == 1`（否则 `ReadOnly`，`hard_link`）、没有挡路的 `SF_*`（否则 `ReadOnly`，`immutable`），任何一项不满足什么都不改；然后按清标志、设 mode、设 mtime 的次序，每一项只在需要时才调；`UF_COMPRESSED` 保留；第一项改动之后的失败 → `Unknown`；store 的 `get_blob`、`get_blob_rooted`、`put` 的临时克隆、overlay 的 restore、`project` 与 deps 封存根目录（0555）都经它，不自己调 `fchflags`、`fchmod`、`futimens`，目录的句柄也一样 | store 的 writer 复现过：`get` 的克隆 dst 被换成指向根外 0600 文件的硬链接，`open(O_NOFOLLOW)` 照常打开它，`fchmod 0644` 把根外的文件改成了 0644。`fchflags`、`fchmod`、`futimens` 改的是 inode，不是名字，核对 `st_nlink` 才拦得住。范围（裁定 "set_file_meta scope, corrected"）：这条规则管其他进程够得着的文件（会话树、staging、基线 generation、工作区）；store 私有区域（`store/blobs`、`store/tmp`）里增补 8 的 libc 允许仍然成立，`put` 经它是选择，不是强制。目录的句柄（裁定 "set_file_meta accepts a directory handle"，取代原先的"目录 → `IsDirectory`"）：APFS 拒绝对目录 `link(2)`（`EPERM`，§4.2 H），目录只有一个名字，没有硬链接的暴露，所以只对非目录核对 `st_nlink`；封存要把根目录设成 0555，不经它就得让 deps 自己调 `fchmod`，与"没有模块自己调这三个系统调用"冲突 | 2026-10-22 |
+| 共用的 inode 上不动标志与 mode | [控制者裁定] 非目录而 `st_nlink > 1`：`remove_tree_rooted` 留下并记 `stuck(Immutable, detail = "hard_link")`；`make_removable`、`set_file_meta` 拒绝（`ReadOnly`，`hard_link`）；取到句柄之后再 `fstat` 一次 `st_nlink`；目录不适用（APFS 拒绝对目录 `link(2)`，`EPERM`，§4.2 H；`st_nlink` 随子目录数增长，不能用来判共用；目录的句柄经 `set_file_meta` 照常改） | `fchflags`、`fchmod` 改的是 inode：清一个名字上的 `uchg` 也清了别的名字上的，其中可能有树之外的（agent 能给同一用户的任何文件建硬链接，比如主 checkout 里的文件），违反 A10"树之外的东西一概不碰"。代价：一个带标志的硬链接留在 trash 里，由人处理（`stuck` 里写明 `hard_link`）。没有标志拦着的硬链接照常 `unlinkat`，只删这个名字 | 2026-10-22 |
+| `remove_tree_rooted` 的目标种类 | [控制者裁定] 目标可以是目录、文件或符号链接（从不跟随）；非目录的目标直接走叶子的删除（清标志只在不共用的 inode 上），报告的形状不变 | store 的 gc 用这一个调用删 tmp 与 trash 里的每个条目，调用方因此不需要在 apfs 之外按路径 `chflags`、`lchflags`（增补 8 + A10）。代价：目标种类不再是拒绝的理由，调用方传错路径（本想删一棵树却给了一个文件）不会被拦下；`RemoveReport.removed == 1` 看得出 | 2026-10-22 |
 | 同一路径的改名 | [我的决定] RepoPath 完全相同 → `InvalidInput`（`same_path`）；只差拼写的交给内核 | 内核对同一条目的 EXCL、SWAP 都返回成功而什么都不做（实测），调用方的 bug 会被悄悄吞掉；大小写不敏感的卷上只差大小写的 EXCL 改名是有用的（改拼写），所以不一并拦 | 2026-10-22 |
 | `RENAME_NOFOLLOW_ANY`、`RENAME_RESOLVE_BENEATH` | [我的决定] 不用，逐级钉住父目录 | 实测两个 flag 对 from 与 to 都生效（§4.2 G），用 dirfd 加相对路径一次系统调用就能约束两边，是可行的优化。不用是因为：逐级打开才分得出"哪一级是符号链接"（`reason = symlink`，对照内核只给 `ELOOP`），测试接缝能在各级之间触发（`rooted_destination_swap_after_resolution_stays_inside` 一类），这两个 flag 在比 macOS 27 更老的系统上是否可用没测过。以后若 spike 显示逐级 `openat` 太慢，可以换，契约不变 | 2026-10-22 |
-| 改名与删除被拒绝时的 `detail.reason` | [我的决定] `reparent_needs_write`、`immutable`、`no_permission`、`read_only_volume`（都是 `ReadOnly`） | 同一个 `EACCES`、`EPERM` 对调用方的处理不同：前者先 `chmod u+w`，后者先清标志，其余是真的没权限；多一次 `fstatat` 换来可执行的诊断。apfs 自己不放宽权限（A10） | 2026-10-22 |
+| 改名与删除被拒绝时的 `detail.reason` | [我的决定] `reparent_needs_write`、`immutable`、`no_permission`、`read_only_volume`（都是 `ReadOnly`）；`make_removable`、`set_file_meta` 另有 `hard_link` | 同一个 `EACCES`、`EPERM` 对调用方的处理不同：前者（0555 的目录改父级）补写位即可，后者（标志）要先清标志，其余是真的没权限；`make_removable` 两样都做，次序固定（先清标志）。多一次 `fstatat` 换来可执行的诊断。apfs 自己不放宽权限（A10） | 2026-10-22 |
+| `remove_rooted(EmptyDir)` 遇挂载点 | [控制者裁定] `CrossVolume`（`reason = mount_point`），在调内核之前用 `fstatat` 的 `st_dev` 与父目录比较判出，`rmdir` 晚到的 `EBUSY` 同样映射；`remove_tree_rooted` 的目标是挂载点时遍历之前就是同一个码 | `rmdir` 的 `EBUSY` 什么都没改，`Unknown`（保留现场、不重放）是错的归类。`CrossVolume` 的含义因此宽于 types.md §6.2（给 T15 的记录） | 2026-10-22 |
 | `full_fsync` | [我的决定] 提供这个包装，不做"改名后自动同步" | 增补 3 要求扛断电的目录改名用 `F_FULLFSYNC`：包装一次，各模块不再各写各的常量与 `EINTR` 处理；什么时候同步（成批改名、最后一次）归调用方，实测文件约 10 ms、目录 4 到 26 ms，每次都做会拖慢成批操作 | 2026-10-22 |
 | 年龄的 helper | [我的决定] `Attrs::last_changed()` = `max(mtime, ctime)` | 增补 4 的 gc guards：clonefile 出来的文件和空目录带来源的 mtime，改名只更新 ctime（实测）；放在 `Attrs` 上，gc 对文件和目录都能用 `attrs_of(..).last_changed()` | 2026-10-22 |
 | `gen_count` 的"不可得"值 | [我的决定] 保持 `u64`，0 是 `GEN_COUNT_UNAVAILABLE`，另有 `gen_count_known()` | 计划里 `Attrs` 的 `gen_count` 就是 `u64`；`Option<NonZeroU64>` 更显式，若 overlay 要求，调用方各改一行即可 | 2026-10-22 |
@@ -1396,34 +1558,40 @@ git commit -m "test(apfs): design section 8 budgets for walk and clone, with mea
 | 挂载镜像的测试放在哪里 | [我的决定] 测试根建在内部卷的临时目录 | 实测外置盘 `/Volumes/GWD` 的子目录上 `hdiutil attach -mountpoint` 得 `Permission denied`，内部卷的临时目录可以 | 2026-10-22 |
 | `detail.reason` 词表 | [我的决定] §3 的"`detail` 的形状"里列出的那一串 | types.md 只规定了 `errno` 与 `path` | 2026-10-22 |
 | 监听的绑定方式 | [我的决定] 直接绑 CoreServices（`FSEventStreamCreate` 加私有串行 dispatch queue），不经 `notify` | 要拿到原始 flags，自己决定 `Dropped` 与 `MustRescan` 的归类 | 2026-10-22 |
-| `remove_tree_rooted` 的返回形状 | [我的决定] 照字面读增补 8：`Ok(RemoveReport)` 只在整棵树（含目标）都没了时返回，`stuck` 为空；没删干净是 `Err(Unknown)`，`detail` 是同一份报告的 JSON，`RemoveReport::from_error` 读回。遍历之前的检查（目标缺失、不是目录、符号链接父级、目标是挂载点、父目录不可写）是具名的码。边界比增补 8 的"第一次 unlink 之后"更严：遍历一开始就算开始 | 增补 8 写的是"`Result<RemoveReport>`"和"第一次 unlink 之后的失败是 `Unknown`，报告里写剩下什么"。两种读法（`Ok` 带非空 `stuck`，或 `Err` 带报告）都说得通，选了字面的一种：没删干净就是 `Err`，调用方不会因为忘了看 `stuck` 而把半删的树当成功。清标志、补权限也是可见的写，所以不等到第一次 unlink。**请 lead 确认**：若要 `Ok(report)` 带 `stuck`，只改返回形状，其余不变 | 2026-10-22 |
-| 清标志与补权限的办法 | [我的决定] 只用句柄版本：`openat` 取句柄（符号链接用 `O_SYMLINK`）、核对 (dev, inode)、`fchflags`；打不开的目录先 `fchmodat(AT_SYMLINK_NOFOLLOW)` 补 `0700`，打得开而写不进的用 `fchmod`；只清 `UF_IMMUTABLE`、`UF_APPEND`，不动别的标志位；`SF_*` 清不掉，进 `stuck` | `fchflagsat` 要 macOS 27.0，libc 没导出，design 的下限是 macOS 26（§4.2 H）。代价是"既带 `uchg` 又没有读权限的非目录"无解（`Immutable`），极少见 | 2026-10-22 |
+| `remove_tree_rooted` 的返回形状 | [控制者裁定，第 2 轮；原为我的决定] `Err` 只给遍历之前、什么都没碰的拒绝（目标缺失、某一级父目录是符号链接或文件、目标是挂载点 → `CrossVolume`（`mount_point`）、父目录不可写或带不可变标志）；遍历一开始就算开始（清标志、补权限也是可见的写），之后一律 `Ok(RemoveReport)`：没删干净的条目在 `stuck` 里带原因，`is_complete()` 回答删干净了没有；`#[must_use]`；没有 `to_detail`、`from_error` | 初稿照字面读增补 8，没删干净就是 `Err(Unknown)`、`detail` 里带报告，并请 lead 确认；第 2 轮裁定改成现在这样（"remove_tree_rooted reports, it does not fail"）：部分删除的结局是确定的，store 的 trash gc 每一轮重试剩下的，types.md 的 `Unknown`（保留现场、不重放）会禁止这种重试。代价是调用方可能忘了看报告：`#[must_use]` 与 `is_complete()` 把它变成显眼的一步 | 2026-10-22 |
+| 清标志与补权限的办法 | [我的决定] 只用句柄版本：`openat` 取句柄（符号链接用 `O_SYMLINK`；属主有执行位而没有读位的条目 `O_RDONLY` 得 `EACCES`，就用 `O_EXEC`）、核对 (dev, inode)、`fchflags`；打不开的目录先走 `O_EXEC` 句柄清标志、`fchmod` 补 `0700`、`O_RDONLY` 重开；属主连搜索位都没有的目录才用按名字的 `fchmodat(AT_SYMLINK_NOFOLLOW)` 补 `0700`；打得开而写不进的用 `fchmod`；只清 `UF_IMMUTABLE`、`UF_APPEND`，不动别的标志位；`SF_*` 清不掉，进 `stuck`；非目录而 `st_nlink > 1` 的 inode 不清（见"共用的 inode"一行） | `fchflagsat` 要 macOS 27.0，libc 没导出，design 的下限是 macOS 26（§4.2 H）。`O_EXEC` 是第 2 轮的发现：它把按名字改 mode 的范围缩到"属主没有搜索位"的目录，也把无解的角落缩到"既带 `uchg` 又没有读位也没有搜索位"的条目（文件、目录都一样，代价是极少见的 `Immutable`）。`O_EXEC` 只在 macOS 27.0.1 上量过（见"平台范围"一行） | 2026-10-22 |
+| 按名字的 `fchmodat` 的残余风险 | [我的决定] 保留，只用于属主既打不开也取不到 `O_EXEC` 句柄的目录（mode 000 一类）；文档写明交换竞争下的暴露，并说明前提是被删的树没有并发写者 | 这是唯一不经句柄改 mode 的地方：`fstatat` 判出是属主的目录之后、`fchmodat` 之前，别的进程可以把名字换成指向根外文件的硬链接，实测 `fchmodat` 改的是那个 inode（0644 变 0700）。去掉它就删不了 000 的树（`rm -rf` 做得到的事 apfs 做不到）；限度：只改调用者自己拥有的 inode，之后立刻重开并核对 (dev, inode)，store 的 trash 与 tmp 里已退役的东西没有并发写者。（裁定 N4 要求"state the residual exposure"） | 2026-10-22 |
 | `remove_tree_rooted` 的父目录预检 | [我的决定] 开始之前检查父目录：标志含 `UF_IMMUTABLE`、`UF_APPEND`、`SF_IMMUTABLE`、`SF_APPEND`，或 `faccessat(P, ".", W_OK\|X_OK, AT_EACCESS)` 失败 → `ReadOnly` | 最后要 `AT_REMOVEDIR` 目标本身，需要 P 可写；先查，免得树删空了才发现根删不掉。`faccessat` 对 `UF_APPEND` 的目录说"可写"，所以标志要另看（§4.2 H） | 2026-10-22 |
 | `RemoveReport` 的体量 | [我的决定] `stuck` 最多 `MAX_REPORTED_STUCK`（1000）条，总数在 `stuck_total` | 一棵全是受保护条目的大树不该把错误的 `detail` 撑到几十 MB（RPC 帧有上限，types.md §6.2 的 `TooLarge`） | 2026-10-22 |
-| `clone_from_rooted` 的形状 | [我的决定]（名字与参数由增补 8 定）`clone_from_rooted(src_root, src: &RepoPath, dst: &Path)`：源经 `openat(O_NOFOLLOW)` 链取得句柄，`fclonefileat` 从句柄克隆；符号链接源 → `NotFile`；dst 是任意路径，调用方保证它是 strata 自己的目录 | 评审 I2：`clone_file` 的 `CLONE_NOFOLLOW` 只管最后一级，中间的符号链接照样被跟随，被换成符号链接的目录会把根外的文件克隆进 blob（实测，§4.2 A）。符号链接源取 `NotFile`：捕获的是内容，符号链接的"内容"是目标，归 overlay；dst 若指向工作区里面应走 `clone_*_rooted` | 2026-10-22 |
+| `Stuck.detail`、`StuckReason::UnknownOutcome`、`StuckReason::as_str` | [我的决定] `Stuck { path, reason, errno, detail: Option<String> }`；`detail` 只有 `Immutable` 带：`\|` 连接的标志名，或 `hard_link`；`UnknownOutcome` 给 `EIO`、`ETIMEDOUT`、`ENXIO`、`ENODEV`、`EDEVERR` 一类 unlink 结果不确定的 errno，其余 errno 是 `Io`；`as_str` 给蛇形名字 | 一张原因表（§5.4）说清每种情形（评审 N3）：文件标志拦着就是 `Immutable`，标志写在 `detail` 里，不让调用方去猜；`NoPermission` 只给 mode 与 ACL。`UnknownOutcome` 与 `Io` 分开：前者的条目可能已经没了，也可能还在，store 的 gc 不能假定；名字取 `unknown_outcome`，与 store.md 一致 | 2026-10-22 |
+| `clone_from_rooted` 的形状 | [我的决定]（名字与参数由增补 8 定，`kind` 由第 2 轮裁定加）`clone_from_rooted(src_root, src: &RepoPath, dst: &Path, kind: CloneKind)`，`CloneKind::{File, Dir}`：源经 `openat(O_NOFOLLOW)` 链取得句柄，`fstat` 核对种类（不符就在克隆之前拒绝），`fclonefileat` 从句柄克隆；符号链接源 → `NotFile`（`File`）或 `NotDirectory`（`Dir`）；dst 是任意路径，调用方保证它是 strata 自己的目录 | 评审 I2：`clone_file` 的 `CLONE_NOFOLLOW` 只管最后一级，中间的符号链接照样被跟随，被换成符号链接的目录会把根外的文件克隆进 blob（实测，§4.2 A）。`kind`：调用方的种类来自之前的 `attrs_of`，到打开之间路径可能被换成目录，`fclonefileat` 就把整棵树克隆进 `store/tmp`（store 第 2 轮评审发现的），FIFO 会得到误导的 `EINVAL`。符号链接源拒绝：捕获的是内容，符号链接的"内容"是目标，调用方重建它，从不克隆（见"符号链接的重建配方"一行）；dst 若指向工作区里面应走 `clone_*_rooted` | 2026-10-22 |
+| 符号链接的重建配方 | [控制者裁定] 来自工作区的符号链接：`attrs_of(src_root, p)` 取目标（`FileKind::Symlink` 里的原始字节），`symlink_rooted(dst_root, q, target)` 重建；从不克隆 | 经 `clone_file_rooted` 按路径克隆，src 一侧中间的符号链接内核照常跟随（`CLONE_NOFOLLOW` 只管最后一级，实测，§4.2 A）；经 `clone_from_rooted` 则符号链接被拒绝。重建只读目标字节，不读目标指向的任何地方。session 的携带与种子、overlay 的捕获（它本来就从 `attrs_of` 读目标）都用它 | 2026-10-22 |
 | 根的 dirfd 访问器 | [我的决定] `open_root(root) -> Result<File>` | 增补 8 要一个访问器；`open_rooted` 取不到根自己（`RepoPath` 不能为空）。调用方对根句柄 `full_fsync`（根目录改名之后同步根自己），或当 dirfd 用 | 2026-10-22 |
-| 公开的 errno 归类 | [我的决定] `classify_io_error(err, IoSide::{Read, Write, AfterWrite}, path)`，表见 §4.2 I | 增补 8 要求公开一个归类函数（名字由 apfs 定）：别的模块对 apfs 给的句柄做 `write_all`、`read` 失败时用同一张表，不再各写一份。`AfterWrite` 是 types.md §6.3 末段（已改一部分的失败一律 `Unknown`）的显式入口。纯函数：要靠 `fstatat` 才分得清的 `EPERM`（目录还是标志）由各个操作自己先处理 | 2026-10-22 |
-| 最近的已存在上级 | [我的决定] `nearest_existing_ancestor(path) -> io::Result<PathBuf>`，不做"会爬的 `same_volume`" | 评审 M17：store.md、deps.md、session.md 各写了一遍 config.md §4.3 的"爬到最近的已存在上级再比较"。爬与比是两个小函数，比一个会爬的 `same_volume` 好测，`same_volume` 的"路径不存在 → `NotFound`"也不变。三个模块在下一轮或 T15 改成调它 | 2026-10-22 |
+| 规范的根 | [控制者裁定；检查的做法是我的] 每个以 root 为参数的函数在碰文件系统之前按原始字节检查：空串、以 `/` 结尾、或含 `.`、`..` 分量 → `InvalidInput`（`root_not_canonical`）；`watch` 不在此列（它对 root 做 realpath） | `open("link/")` 即使带 `O_DIRECTORY \| O_NOFOLLOW` 也会跟随符号链接（实测，§4.2 E），根的符号链接拒绝和根的钉住都会落空。用原始字节而不是 `Path::components()`：后者把结尾的 `/` 与 `.` 吃掉了。config.md 在加载时规范化路径（给 T15 的记录） | 2026-10-22 |
+| 公开的 errno 归类 | [我的决定] `classify_io_error(err, IoSide::{Read, Write, AfterWrite}, path)`，表见 §4.2 I | 增补 8 要求公开一个归类函数（名字由 apfs 定）：别的模块对 apfs 给的句柄做 `write_all`、`read` 失败时用同一张表，不再各写一份。`AfterWrite` 是 types.md §6.3 末段（已改一部分的失败一律 `Unknown`）的显式入口。纯函数：要靠 `fstatat` 才分得清的 `EPERM`（目录还是标志）由各个操作自己先处理。两个调用方用法（评审 N8）：`nearest_existing_ancestor` 返回的 `io::Error` 用 `IoSide::Read`；`create_file_rooted` 返回的句柄上 `write_all` 失败用 `AfterWrite`（文件已经建出来了，不论 errno 都是 `Unknown`） | 2026-10-22 |
+| 最近的已存在上级 | [我的决定] `nearest_existing_ancestor(path) -> io::Result<PathBuf>`，不做"会爬的 `same_volume`" | 评审 M17：store.md、deps.md、session.md 各写了一遍 config.md §4.3 的"爬到最近的已存在上级再比较"。爬与比是两个小函数，比一个会爬的 `same_volume` 好测，`same_volume` 的"路径不存在 → `NotFound`"也不变。三个模块在下一轮或 T15 改成调它。它返回的 `io::Error` 由调用方交给 `classify_io_error(&e, IoSide::Read, path)`（评审 N8） | 2026-10-22 |
 | `root_changed`、`too_deep` 的码 | [我的决定]（增补 8，评审 I4）`root_changed` → `Busy`（`reason = root_changed`），`too_deep` → `TooLarge`（`reason = too_deep`），不再用 `InvalidInput` | 两者都不是参数格式错。`Busy` 与 overlay 把同一个竞争报成 `Busy`（`workspace_changed`）一致；`TooLarge` 是"超出上限"。两个码的含义都宽于 types.md §6.2 的原意（`Busy` 写的是 repo 写锁，`TooLarge` 写的是文件阈值与 RPC 帧）。**给 T15**：types.md §6.2 为这两个码各加一句"何时返回"，"谁返回"各加 `apfs` | 2026-10-22 |
-| `flush` 在回调里被调用 | [我的决定] debug 构建 `debug_assert!`，release 构建立即返回、什么也不做 | `dispatch_sync` 到自己所在的串行队列会死锁；增补 8 只要求 `debug_assert`，release 里定义成无操作比死锁好 | 2026-10-22 |
+| `flush` 在回调里被调用 | [我的决定] debug 构建 `debug_assert!`，release 构建立即返回、什么也不做 | `dispatch_sync` 到自己所在的串行队列会让 libdispatch 以 `SIGTRAP` 杀掉整个进程（实测，退出码 133，§4.2 F；不是死锁）；增补 8 只要求 `debug_assert`，release 里定义成无操作比杀掉守护进程好。`FlushSync` 本身在回调里调用没有问题，所以问题出在排空那一步 | 2026-10-22 |
+| `drop(Watcher)` 在回调里 | [我的决定] 与 `flush` 同一个 `IN_CALLBACK` 防护：在回调线程上 drop 时不排空，置 `closed`，`Stop`、`Invalidate`，最后的 `Release` 与状态的释放交给 `dispatch_async` 到私有队列 | 评审 N2：overlay 的 `Tracker` 持有 `Watcher`，回调里持有的最后一个 `Arc<Tracker>` 被丢掉就会在回调里 drop（实测 `dispatch_sync` 到自己的队列 `SIGTRAP`，`Stop`、`Invalidate` 在回调里没问题）。探针共 241 轮（2026-10-22）：12 轮失败全在一次运行里，那次紧接在几个被 `SIGTRAP` 杀掉的探针之后，可见的几条是流一个事件都没收到，另有几条的记录被截断没看过，原因没有查；之后的 216 轮（含 8 路 CPU 负载下的 25 轮）0 失败。所以测试（`watcher_reentry_from_the_callback_never_traps`）在流没收到事件时每 200 ms 再写一个文件，10 s 仍没有就失败并说明，不静默通过。方向是评审提出的，具体做法是我定的 | 2026-10-22 |
 | `Watcher` 的线程安全 | [我的决定] `Send + Sync`，`flush` 在内部互斥量下串行 | overlay 的 `Tracker` 持有它，checkpoint 可能在任何线程上调 `flush`；`FlushSync` 的线程安全文档没有说，保守起见自己串行（评审 M8） | 2026-10-22 |
-| 进程内类型不 derive serde | [我的决定] `Attrs`、`WatchEvent`、`FileKind`、`RemoveReport` 等都不 derive `Serialize`/`Deserialize` | types.md §2.2 的 serde 规则管 types.md 自己的类型；这些类型不经 RPC 或 JSON。唯一进 JSON 的是 `RemoveReport` 的形状，由 `to_detail`、`from_error` 成对手写，免得公开类型的字段变动悄悄改了 `detail` 的格式（评审 M5） | 2026-10-22 |
+| 进程内类型不 derive serde | [我的决定] `Attrs`、`WatchEvent`、`FileKind`、`RemoveReport`、`Stuck`、`FileMeta` 等都不 derive `Serialize`/`Deserialize` | types.md §2.2 的 serde 规则管 types.md 自己的类型；这些类型不经 RPC 或 JSON。第 1 轮曾让 `RemoveReport` 经 `to_detail`、`from_error` 成对手写进 `detail`（评审 M5）；第 2 轮 `remove_tree_rooted` 不再有 `Err` 形态的报告，这一对随之取消。调用方要把报告写进自己的日志或 `detail` 时用 `StuckReason::as_str` 的词表 | 2026-10-22 |
 | `case_fold_key` | [我的决定] `case_fold_key(s: &str) -> String` 是 D145 的键；`case_fold_eq(a, b)` = `a == b \|\| key(a) == key(b)`；键只在内存里 | 增补 7：折叠成员判断用键，不做两两比较。键不是 NFC（不是 `RepoPath`），折叠表升级会改变键，所以不落盘、不进 RPC、不当路径用 | 2026-10-22 |
 | 大小写折叠的两个问题 | [我的决定] 磁盘身份（看卷：`case_sensitive = false` 才用 `case_fold_eq` 与 `case_fold_key`）和 git 身份（看 `core.ignorecase`：`is_tracked`、ignore 匹配，gitio 只折叠 ASCII）分开写 | 评审 M4 与增补 2、7：gitio 现在可以依赖 apfs，但对 git 身份仍按 ASCII 折叠，`git status` 就是这样判定的；3f:155 写的 `apfs::case_fold_eq` 对 gitio 不适用，由 T15 统一 | 2026-10-22 |
-| `watcher_reports_must_rescan` 怎样必然触发 | [我的决定] 卡住回调（第一次被调用时阻塞在门上），4 个线程创建 2 万个文件，没触发就再试，至多 3 轮（再用 4 万个） | 评审 M13：初稿"6 万次创建能触发 1 到 21 个"靠运气，所以是 `#[ignore]`。实测卡住回调之后 5,000 到 6 万个文件的 21 轮运行每轮都出现 `UserDropped`；不卡住、4 万个文件也出现了 40 个（每秒约 5 万次创建超过了回调的消化速度），卡住只是让它必然发生。2 万个文件创建约 0.4 s，排空 1 到 4 s，默认运行可以接受 | 2026-10-22 |
-| 给 T15 的记录 | [我的决定] 本文不改别的文档，记在这里 | （1）types.md §6.2：`NotText` 的"谁返回"加 `apfs`（`walk` 以 `Err` 项产出；APFS 上建不出非 UTF-8 的名字，只有解析器的单元测试到得了，评审 M6）；`Busy`、`TooLarge` 各加一句（见上）；`CrossVolume` 的"谁返回"已含 `apfs`，`clone_from_rooted`、`rename_rooted` 同属。（2）types.md §6.3："255 字节"改"255 个 UTF-16 码元"，"超过 1024"改"达到 1024 字节"（§4.2 B）；表里加 `EINVAL` → `InvalidInput`。（3）types.md §8：layer-1 一行改为"同层只允许 store 与 gitio 依赖 apfs"（增补 7）。（4）3f:155 与 types.md:124 写的 `apfs::case_fold_eq` 对 gitio 不适用（git 身份折叠 ASCII，增补 2）。（5）计划写的"`clonefile` 退化成复制"不对：跨卷是 `EXDEV`（§4.2 A）。（6）store.md、deps.md、session.md："最近的已存在上级"循环换成 `nearest_existing_ancestor`；删除、改名、从工作区捕获换成 `remove_tree_rooted`、`rename_rooted`、`clone_from_rooted`（增补 8） | 2026-10-22 |
+| `watcher_reports_must_rescan` 怎样足够可靠 | [我的决定] 卡住回调（第一次被调用时阻塞在门上），4 个线程创建 2 万个文件；**一轮在这一轮的所有文件都有了着落时结束**（至多 30 s），不是"1 s 内不再有回调"；没触发 `Dropped` 就再试，至多 3 轮（再用 4 万个）；"不静默丢失"的不变式在每轮都断言 | 评审 M13：初稿"6 万次创建能触发 1 到 21 个"靠运气，所以是 `#[ignore]`。实测卡住回调之后 5,000 到 6 万个文件的 21 轮运行每轮都出现 `UserDropped`；不卡住、4 万个文件也出现了 40 个（每秒约 5 万次创建超过了回调的消化速度）。第 2 轮评审者复现：18 轮里 16 轮出现丢弃，没丢的两轮都是进程里的第一条流（一轮被"1 s 静默"条件提前结束，另一轮 3 s 的窗口里收到了全部 20,017 个事件）。所以卡住只是大大提高概率，可靠性来自重试和以着落为结束条件，单轮不保证（初稿的措辞已改）。2 万个文件创建约 0.4 s，排空 1 到 4 s，默认运行可以接受 | 2026-10-22 |
+| 给 T15 的记录 | [我的决定] 本文不改别的文档，记在这里 | （1）types.md §6.2：`NotText` 的"谁返回"加 `apfs`（`walk` 以 `Err` 项产出；APFS 上建不出非 UTF-8 的名字，只有解析器的单元测试到得了，评审 M6）；`Busy`、`TooLarge` 各加一句（见上）；`CrossVolume` 的"谁返回"已含 `apfs`，`clone_from_rooted`、`rename_rooted` 同属。（2）types.md §6.3："255 字节"改"255 个 UTF-16 码元"，"超过 1024"改"达到 1024 字节"（§4.2 B）；表里加 `EINVAL` → `InvalidInput`。（3）types.md §8：layer-1 一行改为"同层只允许 store 与 gitio 依赖 apfs"（增补 7）。（4）3f:155 与 types.md:124 写的 `apfs::case_fold_eq` 对 gitio 不适用（git 身份折叠 ASCII，增补 2）。（5）计划写的"`clonefile` 退化成复制"不对：跨卷是 `EXDEV`（§4.2 A）。（6）store.md、deps.md、session.md："最近的已存在上级"循环换成 `nearest_existing_ancestor`；删除、改名、从工作区捕获换成 `remove_tree_rooted`、`rename_rooted`、`clone_from_rooted`（增补 8）。（7）types.md §6.2：`NotEmpty` 的"谁返回"加 `apfs`，含义放宽成"要删的目录非空"（`remove_rooted(.., EmptyDir)` 返回它，裁定 "NotEmpty from apfs"）；overlay 把它当写竞争，store 的 gc 清扫跳过。（8）types.md §6.2：`CrossVolume` 也用于"目标本身是挂载点"的拒绝（`remove_rooted(.., EmptyDir)`、`remove_tree_rooted`，`reason = mount_point`），含义宽于"src 与 dst 不在同一个卷"，加一句。（9）config.md：加载时把 `paths.root` 和所有传给 apfs 的 root 规范化（不以 `/` 或 `/.` 结尾，没有 `.`、`..` 分量）；apfs 对不规范的 root 一律 `InvalidInput`（`root_not_canonical`）。（10）§2 的调用方表按各调用方 2026-10-22 的草稿和 module-rulings 写成，T15 按最终稿核对：只有 store 用 `remove_tree_rooted`；deps 的 `adopt` 用 `clone_from_rooted(.., Dir)`；session 的携带用 `clone_from_rooted` 加符号链接重建，不经 store 的 blob 库；gitio 进程内读文件走 `open_rooted_file`（裁定 "gitio reads files through apfs"，gitio 下一次修改时落实） | 2026-10-22 |
 | 监听的绑定 crate | 待定 | 约束：拿得到原始 flags 与路径，回调在自己的 dispatch queue 上，`drop` 能排空在途回调。候选：`fsevent-sys` 加 `core-foundation-sys`，或手写 `extern "C"` | — |
 | 监听流的参数 | [我的决定] `FileEvents \| WatchRoot \| NoDefer`，latency 0.05 s，`SinceNow`；不设 `IgnoreSelf`；不用 `FSEventStreamSetExclusionPaths` | strata 自己的写入（restore、移动工作区）也要看见；排除 API 挡不住根上的 `Dropped`，还最多 8 个；latency 三档对丢事件没有可见影响（§4.2 F） | 2026-10-22 |
+| `watch_with` 与 `exclude` | [我的决定] `watch(root, on_event)` 的签名保持；另加 `watch_with(root, &WatchOptions { exclude: Vec<RepoPath> }, on_event)`，落在 `exclude` 里的目录之下的事件在回调里丢掉，不产生 `Changed`；`Dropped` 不被过滤；排除按分量比较，大小写不敏感的卷上按 `case_fold_eq` | overlay 不关心 `deps_dirs`、`seed_caches`、`.git` 之下的事件，它们很吵。`FSEventStreamSetExclusionPaths` 最多 8 个路径，而且挡不住根上的 `Dropped`（§4.2 F），所以自己在回调里按分量过滤，没有个数限制。往被排除的目录里洪泛写入照样会让整个流报 `Dropped`，消费者对 `Dropped` 的全量重扫也要排除它们 | 2026-10-22 |
 | 事件到 `WatchEvent` 的映射 | [我的决定] 见 §5.7 的表；路径前缀换回调用者传入的 root；一次回调合成一个 `Changed`；回调 panic → 截住并补发 `Dropped` | 消费者对自己持有的路径做 `strip_prefix`（FSEvents 给的是 realpath）；不因回调的 bug 静默丢事件 | 2026-10-22 |
-| 监听的屏障与 `flush` | [我的决定]（增补 7 经评审修订、增补 8）不提供 `fence`；提供 `Watcher::flush()` = `FSEventStreamFlushSync` 加对私有队列的 `dispatch_sync`，文档写明它只是尽力缩小窗口，并给出测量 | 四种候选屏障都做不成（§4.2 F）：哨兵文件（评审多达 10/40 轮、复测多达 31/40 轮乱序，迟到事件的 id 总是更大）；事件 id 规则（fseventsd 的 id 不按写入顺序分配：安静时 17/30 轮有文件没覆盖）；哨兵加 `FlushSync` 加排空（一轮也没让不完整的轮数减少；洪泛下 26/30 轮不完整）；`sinceWhen` 重放加 `HistoryDone`（`HistoryDone` 比事件早到，27/40 到 34/40 轮不完整）。`FlushSync` 本身约 0.05 ms、只送达 11% 到 35%。正确性本来就不依赖监听（design §6.2、裁定 T4）；overlay 决定怎么用（Before*/Manual 冷扫；ToolCall 钩子路径加 `flush`；Bash 温扫或一次调用的滞后），不得声称比测量支持的更多 | 2026-10-22 |
+| 监听的屏障与 `flush` | [我的决定]（增补 7 经评审修订、增补 8）不提供 `fence`；提供 `Watcher::flush()` = `FSEventStreamFlushSync` 加对私有队列的 `dispatch_sync`，保证的只有"排空之前入队的回调都已执行完"（评审 N1；不是"返回时没有回调在执行"），文档写明它只是尽力缩小窗口，并给出测量 | 四种候选屏障都做不成（§4.2 F）：哨兵文件（评审多达 10/40 轮、复测多达 31/40 轮乱序，迟到事件的 id 总是更大）；事件 id 规则（fseventsd 的 id 不按写入顺序分配：安静时 17/30 轮有文件没覆盖）；哨兵加 `FlushSync` 加排空（一轮也没让不完整的轮数减少；洪泛下 26/30 轮不完整）；`sinceWhen` 重放加 `HistoryDone`（`HistoryDone` 比事件早到，27/40 到 34/40 轮不完整）。`FlushSync` 本身约 0.05 ms、只送达 11% 到 35%。正确性本来就不依赖监听（design §6.2、裁定 T4）；overlay 决定怎么用（Before*/Manual 冷扫；ToolCall 钩子路径加 `flush`；Bash 温扫或一次调用的滞后），不得声称比测量支持的更多 | 2026-10-22 |
 | 只改 xattr 或 FinderInfo 的事件 | 待定 | 现在不过滤（保守）。首个 spike 看真实噪声（`com.apple.provenance` 一类）再定是否丢掉只有 `ItemXattrMod`、`ItemFinderInfoMod` 的事件 | — |
 | `case_fold_eq` 的定义 | [我的决定] D145：`NFD(toCasefold(NFD(x)))`，全量折叠，无土耳其语映射，折叠表 ≥ Unicode 16.0；以 oracle 测试作验收；经 `case_fold_key` 定义（见下一行） | macOS 27 的 APFS 上 51 对样本零不符，含 Unicode 16 新增（§4.2 B） | 2026-10-22 |
 | 折叠表的来源 | 待定 | 约束：Unicode ≥ 16.0，`case_fold_eq_matches_a_case_insensitive_volume` 全绿。候选：`icu_casemap` 的 `CaseMapper::fold_string` 加 `icu_normalizer`；`caseless`（先核对它的 Unicode 版本，旧则不用）；自己从 CaseFolding.txt 生成表 | — |
-| 测试接缝 | [我的决定] 线程局部的 `set_before_open`、`set_after_bulk_window`，在 feature `test-seams` 下；`before_open` 覆盖 `remove_tree_rooted` 的每次子目录打开和 `clone_from_rooted` 的 `fclonefileat` | 裁定 "Test seams"：换目录、换符号链接需要在两步之间执行代码；线程局部使并行的测试互不干扰 | 2026-10-22 |
+| 测试接缝 | [我的决定] 线程局部的 `set_before_open`、`set_after_bulk_window`，在 feature `test-seams` 下；`before_open` 覆盖 `remove_tree_rooted` 的每次子目录打开、`clone_from_rooted` 的 `fclonefileat`、`clone_file_rooted(.., Some(mode))` 克隆之后取回 dst 的那一次 `openat`，以及 `remove_rooted` 紧挨着 `unlinkat` 的那一次（`EmptyDir` 的 `fstatat` 之后，所以测试能在两者之间把空目录变成挂载点） | 裁定 "Test seams"：换目录、换符号链接需要在两步之间执行代码；线程局部使并行的测试互不干扰 | 2026-10-22 |
 | 并行克隆 | [我的决定] apfs 的每个函数是同步的单线程调用，并行度归调用方（session 的 `new` 并行克隆各仓库） | design §8 的 5 s 要靠并行（tool 的 `node_modules` 4 路 4.2 s 完成 4 份）；整个布局的投影见下面的待定行；crate 里不开线程池 | 2026-10-22 |
 | 持久化 | [我的决定] apfs 不 `fsync` | 断电安全归调用方（`F_FULLFSYNC`，裁定 "Durability"） | 2026-10-22 |
 | 断电后 `clonefile` 的原子性 | 待定 | 进程被杀时没有观察到半成品；断电没有测过。调用方的 intent 行是兜底（§6）。首个 spike 能测则测 | — |
 | 新建会话的总耗时（评审 I3；增补 8 的用户一行） | 待定 | 整个布局的 deps 目录约 62 万项（§5.9 逐仓库列出）：真实树上单线程 12 到 19 s、4 路并行约 5.5 s，**还没算源码树和 tool 的 `src-tauri/target`**；内部卷上合成树的下界是单线程 4.2 s。design §8 的"新建会话 < 5 s"对整个布局很可能做不到。并行归 session；出路：并行克隆各仓库、按仓库懒克隆 deps、放宽目标。**设计目标的取舍请用户定**（经 lead）；Task 10 用全部兄弟库、并行度 1 到 4，在工作区所在的卷上复测 | — |
 | `attrs_of` 与单目录列表的单次耗时 | 待定 | 估计几十微秒与亚毫秒；"checkpoint 改 50 个文件 < 200 ms"由 overlay 用这些原语达成，Task 10 量好写回 §5.9 | — |
-| macOS 27 上用 `fchflagsat` 解"既带 `uchg` 又没有读权限"的角落 | 待定 | 要运行期检测（`#[available]` 或 `dlsym`），多一个分支只为一个极少见的角落；首个 spike 若在真实的树里见到这类条目再加 | — |
-| 平台范围 | 待定 | 本文的实测只在 macOS 27.0.1 上做过；design 写的是 macOS 26+，用到的接口（`clonefile`、`fclonefileat`、`getattrlistbulk`、`FSOPT_RETURN_REALDEV`、`O_SYMLINK`、`fchflags`、FSEvents）都早于 26，但 §7 的契约测试要在 26 上复跑一遍确认；**唯一晚于 26 的是 `fchflagsat`（27.0），所以不用**；`flush_is_not_a_fence` 的数字要在 26 上重测 | — |
+| macOS 27 上用 `fchflagsat` 解"既带 `uchg` 又没有读位也没有搜索位"的角落 | 待定 | 第 2 轮的 `O_EXEC` 句柄已经把角落缩小到属主既没有读位也没有执行位（搜索位）又带 `uchg` 的条目（文件、目录都一样，0000、0200 一类）；`fchflagsat` 能解，但要运行期检测（`#[available]` 或 `dlsym`），多一个分支只为一个极少见的角落；首个 spike 若在真实的树里见到这类条目再加 | — |
+| 平台范围 | 待定 | 本文的实测只在 macOS 27.0.1 上做过；design 写的是 macOS 26+，用到的接口（`clonefile`、`fclonefileat`、`getattrlistbulk`、`FSOPT_RETURN_REALDEV`、`O_SYMLINK`、`fchflags`、FSEvents）都早于 26，但 §7 的契约测试要在 26 上复跑一遍确认；**唯一晚于 26 的是 `fchflagsat`（27.0），所以不用**；`flush_is_not_a_fence` 的数字要在 26 上重测；`O_EXEC` 句柄对 mode 0100、0000、0200 的条目的行为，以及无操作的 `chmod`、`chflags` 也前进 `ctime` 的行为，同样只在 27.0.1 上量过，26 上要复测 | — |
