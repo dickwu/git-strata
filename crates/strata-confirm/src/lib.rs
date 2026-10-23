@@ -1,18 +1,24 @@
 //! Human confirmation for git-strata (confirm.md).
 //!
 //! The daemon owns one [`Confirmer`]. [`Confirmer::require`] shows one LocalAuthentication
-//! prompt (Touch ID, or the login password) for an [`Action`] and, when the human passes it,
-//! mints a single-use [`ConfirmToken`] that lives only in this process.
-//! [`Confirmer::validate`] redeems it. confirm reads no environment, no file and no TTY.
+//! prompt (Touch ID, or the login password) for an [`Action`](strata_types::Action) and, when
+//! the human passes it, mints a single-use [`ConfirmToken`](strata_types::ConfirmToken) that
+//! lives only in this process. [`Confirmer::validate`] redeems it. confirm reads no
+//! environment, no file and no TTY (C4).
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use strata_types::{Action, StrataError};
+use strata_types::StrataError;
 
+mod clock;
+mod confirmer;
 mod reason;
+mod registry;
 
+#[cfg(feature = "test-seams")]
+pub mod seams;
+
+pub use confirmer::Confirmer;
 pub use reason::prompt_reason;
 
 /// types.md §8 `Result<T>`.
@@ -34,28 +40,3 @@ pub const RECORD_RETENTION: Duration = Duration::from_secs(600);
 
 /// Whether this crate was built with test seams. git-stratad refuses to start when true (C8).
 pub const TEST_SEAMS: bool = cfg!(feature = "test-seams");
-
-/// Something that can show a prompt (crate-private; production is LocalAuthentication).
-pub(crate) trait Authenticator: Send + Sync {}
-
-/// The two clocks of §5.7.
-pub(crate) trait Clock: Send + Sync {}
-
-#[allow(dead_code)]
-pub(crate) struct Record {
-    pub(crate) action: Action,
-    pub(crate) issued: Instant,
-    pub(crate) issued_mono_ns: u64,
-    pub(crate) spent: bool,
-}
-
-/// The daemon's single issuer of confirm tokens. `Send + Sync`.
-#[allow(dead_code)]
-pub struct Confirmer {
-    auth: Box<dyn Authenticator>,
-    clock: Box<dyn Clock>,
-    registry: Mutex<HashMap<u128, Record>>,
-    gate: Mutex<()>,
-    prompt_timeout: Duration,
-    cancel_grace: Duration,
-}
