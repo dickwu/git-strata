@@ -114,3 +114,11 @@ Spec: docs/modules/deps.md. Branch `impl/deps` (worktree git-strata-wt/deps), ba
   - A deps dir that is not a directory (file, socket, FIFO, symlink) or sits under a symlinked parent is `NotDirectory` before the lock; checks use `attrs_of`, which never opens (FIFO cannot block).
   - Escaping symlinks/special files found by W1 are `Drift` before any attempt is recorded.
   - Nested seed caches are skipped in both walks and discarded from `seal/` after the clone; main's cache is never touched.
+
+### Task 5 — ensure (§5.6)
+
+- `src/ensure.rs`, `tests/ensure.rs` (5 spec tests + worker helper). The empty-set path (`seal_empty`) was already written in Task 3 and is reused unchanged.
+- Decisions:
+  - `ensure` runs the full preflight (`inputs_tracked`, `key_of`) itself before the hot-path `find_set`, so a missing input is `InvalidInput` even when a set happens to be sealed; `adopt`/`build` repeat it (cheap, no writes).
+  - Adoption retries only on `Drift changed_during_clone`, 3 adoptions in total; any other `Drift`, `NoSuchPath` or `NotDirectory` goes straight to one cold install; every other code is returned as-is (e.g. `Busy` from the repo write lock at adoption's seal, `CrossVolume`, `InvalidInput`).
+  - "No command runs" for the empty set is tested with a `bun` that leaves a marker on any invocation (including `--version`).
