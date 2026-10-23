@@ -12,7 +12,8 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 | 4 fetch, ancestry, CAS refs | e18b094 | |
 | 5 tree_of, tree validation, is_ignored_in_export | 4d8bbce | |
 | 6 export_tree | 849c6f1 | |
-| 7 shadow repositories, attach_worktree, worktree_gitdir | (this commit) | |
+| 7 shadow repositories, attach_worktree, worktree_gitdir | 01cb89b | |
+| 8 attach_staging, stage, commit_tree | (this commit) | push part of index_writers_refuse_the_main_checkout lands with Task 9 |
 
 ## Builder decisions (ambiguities)
 
@@ -110,3 +111,30 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 - `worktree_gitdir` returns the gitdir verbatim-joined (no normalisation of `..` or a trailing `/`) and never follows a symlinked `.git`.
 - `fsx::read_human_typed` added (typed codes) with `read_human` as its Unknown-wrapping form; `fsx::read_gitfile` shared by `index::locate` and `worktree_gitdir`.
 - tests/repo.rs `open_resolves_repo_id_from_main_checkout_only` now builds its workspace with ensure_shadow + attach_worktree.
+
+### Task 8 decisions (attach_staging, stage, commit_tree)
+
+- `attach_staging` and `stage` require lexically canonical absolute paths
+  (`InvalidInput`, `reason = "not-canonical"`): rooted apfs opens need it.
+- Refusal order in `attach_staging`: absolute/canonical → `tree_of(head)`
+  → inside the main checkout (`inside-main`) → staging missing/not a dir
+  → `<staging>/.git` exists → `gitdir` exists → gitdir's parent
+  missing/not a dir (`NoSuchPath`/`NotDirectory`).
+- Passing a human's linked worktree as `staging` (its `.git` gitfile
+  points into the common dir) is `InvalidInput` (`reason =
+  "linked-worktree"`) rather than `Exists`, per the test table row of
+  `index_writers_refuse_the_main_checkout`.
+- The private git dir is created rooted at realpath(parent of gitdir);
+  `commondir` holds the realpath of the common dir, `gitdir` holds
+  `<staging>/.git` as given, the gitfile holds `gitdir` as given.
+- The staging index is built with `-c core.splitIndex=false` (as in
+  `attach_worktree`) and git writes it in place (spec §5.6 step 3).
+- Staging judgement failures are `InvalidInput` with `reason =
+  "not-staging"`; `commondir` is read rooted with a PATH_MAX+2 cap.
+- `stage`: deletions run before writes; an empty half is skipped (no
+  update-index call); `write-tree` always runs. No `LC_ALL` on
+  update-index / write-tree.
+- `commit_tree`: on failure, identity (`auto-detection is disabled`) is
+  checked first, then the tree (`cat-file -t` must say `tree`; missing →
+  `NoSuchCommit` with `detail.tree`), then the parent via
+  `missing_commit_or`; anything else `Unknown`.

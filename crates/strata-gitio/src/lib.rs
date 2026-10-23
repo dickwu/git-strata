@@ -17,6 +17,7 @@ use strata_types::{RepoId, StrataError};
 
 mod cache;
 mod command;
+mod commit;
 mod config;
 mod err;
 mod export;
@@ -28,6 +29,8 @@ mod remote;
 mod repo;
 mod seams;
 mod shadow;
+mod stage;
+mod staging;
 mod tree;
 mod worktree;
 
