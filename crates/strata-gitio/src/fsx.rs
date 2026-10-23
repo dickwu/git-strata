@@ -210,7 +210,7 @@ pub(crate) fn parse_gitfile(bytes: &[u8], tree_dir: &Path) -> Result<PathBuf> {
 pub(crate) fn read_gitfile(f: &File, tree_dir: &Path) -> Result<PathBuf> {
     let at = tree_dir.join(".git");
     let mut buf = Vec::new();
-    if let Err(e) = (&*f).take(GITFILE_MAX as u64 + 1).read_to_end(&mut buf) {
+    if let Err(e) = f.take(GITFILE_MAX as u64 + 1).read_to_end(&mut buf) {
         return Err(strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &at));
     }
     parse_gitfile(&buf, tree_dir)

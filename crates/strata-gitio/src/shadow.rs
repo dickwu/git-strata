@@ -139,8 +139,11 @@ pub(crate) fn quote_value(v: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A config key split into (section, subsection, name).
+type KeyParts<'a> = (&'a [u8], Option<&'a [u8]>, &'a [u8]);
+
 /// Split `section.sub.sec.name` into (section, subsection, name).
-fn split_key(key: &[u8]) -> Option<(&[u8], Option<&[u8]>, &[u8])> {
+fn split_key(key: &[u8]) -> Option<KeyParts<'_>> {
     let first = key.iter().position(|&c| c == b'.')?;
     let last = key.iter().rposition(|&c| c == b'.')?;
     let section = &key[..first];

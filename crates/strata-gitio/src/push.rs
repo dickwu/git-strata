@@ -120,10 +120,11 @@ impl Git {
 
         // Step 5: strata's tracking ref, compare-and-swap against the value
         // read before the push; failure or skip changes nothing.
-        if outcome == PushOutcome::Pushed && before.as_ref() != Some(&pushed) {
-            if let Err(e) = self.update_ref(&tracking, &pushed, before.as_ref()) {
-                tracing::info!(tracking, error = %e.message, "tracking ref left alone after push");
-            }
+        if outcome == PushOutcome::Pushed
+            && before.as_ref() != Some(&pushed)
+            && let Err(e) = self.update_ref(&tracking, &pushed, before.as_ref())
+        {
+            tracing::info!(tracking, error = %e.message, "tracking ref left alone after push");
         }
         Ok(outcome)
     }

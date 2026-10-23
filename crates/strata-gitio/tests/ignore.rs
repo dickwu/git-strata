@@ -154,7 +154,7 @@ fn case_sensitive_repo_matches_exactly() {
         assert!(!ig(&git, &main, "Gone.TXT"));
         assert!(ig(&git, &main, "gone.txt"));
     }
-    assert_eq!(git_rules_ignore(&sb, &main, "Gone.TXT"), false);
+    assert!(!git_rules_ignore(&sb, &main, "Gone.TXT"));
 }
 
 #[test]
@@ -166,8 +166,8 @@ fn ascii_only_case_folding_like_git() {
     let git = sb.open(&main);
     assert!(!ig(&git, &main, "é.txt"));
     assert!(ig(&git, &main, "É.txt"));
-    assert_eq!(git_rules_ignore(&sb, &main, "é.txt"), false);
-    assert_eq!(git_rules_ignore(&sb, &main, "É.txt"), true);
+    assert!(!git_rules_ignore(&sb, &main, "é.txt"));
+    assert!(git_rules_ignore(&sb, &main, "É.txt"));
 }
 
 #[test]
@@ -428,13 +428,13 @@ fn rule_and_index_reads_never_hang_on_non_regular_files() {
     write_abs(&rules, "*.log\n");
     for root in [&main, &wt] {
         symlink(&rules, &root.join(".gitignore"));
-        assert_eq!(ig_wd(&git, root, "x.log").unwrap(), false);
+        assert!(!ig_wd(&git, root, "x.log").unwrap());
         assert!(!status_ignored(&sb, root, "x.log") || !root.join("x.log").exists());
-        assert_eq!(git_rules_ignore(&sb, root, "x.log"), false);
+        assert!(!git_rules_ignore(&sb, root, "x.log"));
         fs::remove_file(root.join(".gitignore")).unwrap();
         fs::create_dir(root.join(".gitignore")).unwrap();
-        assert_eq!(ig_wd(&git, root, "x.log").unwrap(), false);
-        assert_eq!(git_rules_ignore(&sb, root, "x.log"), false);
+        assert!(!ig_wd(&git, root, "x.log").unwrap());
+        assert!(!git_rules_ignore(&sb, root, "x.log"));
         // A FIFO .gitignore: Unknown naming it.
         mkfifo(&root.join(".gitignore"));
         let e = ig_wd(&git, root, "x.log").unwrap_err();
@@ -462,7 +462,7 @@ fn rule_and_index_reads_never_hang_on_non_regular_files() {
     symlink(&ie_file, &ie);
     assert!(ig_wd(&git, &main, "a.ie").unwrap());
     assert!(ig_wd(&git, &wt, "a.ie").unwrap());
-    assert_eq!(git_rules_ignore(&sb, &main, "a.ie"), true);
+    assert!(git_rules_ignore(&sb, &main, "a.ie"));
     // config as a symlink to a copy with ignorecase = false: *.LOG no
     // longer ignores x.log.
     assert!(ig_wd(&git, &main, "x.log").unwrap());
@@ -474,12 +474,12 @@ fn rule_and_index_reads_never_hang_on_non_regular_files() {
     fs::rename(&cfg, &orig).unwrap();
     symlink(&copy, &cfg);
     assert!(!ig_wd(&git, &main, "x.log").unwrap());
-    assert_eq!(git_rules_ignore(&sb, &main, "x.log"), false);
+    assert!(!git_rules_ignore(&sb, &main, "x.log"));
     fs::remove_file(&cfg).unwrap();
     fs::rename(&orig, &cfg).unwrap();
     symlink(&sb.path("nowhere"), &ie);
     assert!(!ig_wd(&git, &main, "a.ie").unwrap());
-    assert_eq!(git_rules_ignore(&sb, &main, "a.ie"), false);
+    assert!(!git_rules_ignore(&sb, &main, "a.ie"));
     fs::remove_file(&ie).unwrap();
 
     // ~/.config/git/ignore as a FIFO → Unknown; as a symlink to a file → rules.
@@ -493,7 +493,7 @@ fn rule_and_index_reads_never_hang_on_non_regular_files() {
     write_abs(&gfile, "*.g\n");
     symlink(&gfile, &global);
     assert!(ig_wd(&git, &main, "x.g").unwrap());
-    assert_eq!(git_rules_ignore(&sb, &main, "x.g"), true);
+    assert!(git_rules_ignore(&sb, &main, "x.g"));
     fs::remove_file(&global).unwrap();
 
     // A path component of info/exclude being a regular file: no rules.

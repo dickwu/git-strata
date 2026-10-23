@@ -16,7 +16,7 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 | 8 attach_staging, stage, commit_tree | c3a1dfb | push part of index_writers_refuse_the_main_checkout lands with Task 9 |
 | 9 push | b63b765 | also adds push to index_writers_refuse_the_main_checkout |
 | 10 merge3 | 3593d15 | 22-case corpus in tests/fixtures/merge-corpus; one ignored fuzz test |
-| 11 main-checkout invariant | (this commit) | tests/invariants.rs; also removes dead-code allowances |
+| 11 main-checkout invariant | 4699080 | tests/invariants.rs; also removes dead-code allowances |
 
 ## Builder decisions (ambiguities)
 
@@ -201,3 +201,9 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 
 - The invariant test dirties the main checkout (staged, unstaged, untracked and ignored files), sets global `core.fsmonitor=true` and `core.splitIndex=true` in the sandboxed HOME, then calls every public API. It snapshots everything except `.git/objects` and `.git/refs/strata` and requires an identical snapshot afterwards. It also checks that objects grew, the strata/remote refs exist, no fsmonitor daemon or socket and no `sharedindex.*` file was created, and `diff --cached` is unchanged. A mutation that ran `git status` in the main checkout made the test fail, as intended.
 - The crate-wide `#![allow(dead_code)]` is removed. These unused helpers were deleted: `err::invalid_reason`, `err::unknown`, `fsx::rp_of`, `repo::root_arg`, `repo::root_real`, `command::os`, and the unused `TreeEntry.oid`/`TreeEntry.size` fields (the size column is still validated while parsing). A compile-time check that `Git: Send + Sync` replaces the old dummy function.
+
+### Follow-up: layering, fixture attributes, clippy
+
+- **gitio → apfs is kept.** types.md §8 still says that within layer 1 only store may depend on apfs. But docs/modules/gitio.md lists `strata-apfs` in its §2 dependency table and, in §3, hands this change to T15: "6. types.md §8 第 1 层一行改成\"同层只允许 store 与 gitio 依赖 apfs\"（module-rulings Addendum 7 的 Layering 条；§2）". apfs.md §2 says the same ("同层只有 store 与 gitio 依赖 apfs，增补 7 的 Layering 行，T15 改 types.md §8"). G11 and Addendum 8 also require every rooted read and write to go through apfs ("gitio 自己不做 `*at` 调用"), so reimplementing those pieces inside gitio would break the module doc. types.md §8 is stale until T15 updates it; this branch does not edit types.md.
+- Added a root `.gitattributes` with `crates/strata-gitio/tests/fixtures/** -text`. A `--no-local` clone with `core.autocrlf=true` leaves `merge-corpus/crlf-clean` byte-identical.
+- gitio's own clippy warnings are fixed: let-chains in push/staging, `f.take` in fsx, `KeyParts`/`MainState` type aliases, and `assert!` instead of `assert_eq!(…, bool)` in tests/ignore.rs.

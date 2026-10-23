@@ -77,14 +77,14 @@ impl Git {
         if fsx::lstat(&dotgit)?.is_some() {
             // A human's linked worktree (its gitfile points into the common
             // dir) is the caller's mistake, not an occupied slot.
-            if let Ok(Some(target)) = self.worktree_gitdir(staging) {
-                if self.inside_main(&fsx::lexical_normalize(&target)) {
-                    return Err(errd(
-                        Code::InvalidInput,
-                        format!("{} is a worktree of the main checkout", staging.display()),
-                        json!({ "path": path_str(staging), "reason": "linked-worktree" }),
-                    ));
-                }
+            if let Ok(Some(target)) = self.worktree_gitdir(staging)
+                && self.inside_main(&fsx::lexical_normalize(&target))
+            {
+                return Err(errd(
+                    Code::InvalidInput,
+                    format!("{} is a worktree of the main checkout", staging.display()),
+                    json!({ "path": path_str(staging), "reason": "linked-worktree" }),
+                ));
             }
             return Err(errd(Code::Exists, format!("{} already exists", dotgit.display()), json!({ "path": path_str(&dotgit) })));
         }

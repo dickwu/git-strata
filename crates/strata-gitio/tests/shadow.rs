@@ -123,7 +123,10 @@ fn setup() -> Ctx {
     setup_with(|_, _| {})
 }
 
-fn main_state(sb: &Sandbox, main: &Path) -> (Vec<u8>, Vec<u8>, String, String, String, Vec<(PathBuf, Vec<u8>)>) {
+/// The main checkout's index, config, HEAD, ref and worktree listings, and hook files.
+type MainState = (Vec<u8>, Vec<u8>, String, String, String, Vec<(PathBuf, Vec<u8>)>);
+
+fn main_state(sb: &Sandbox, main: &Path) -> MainState {
     let hooks = main.join(".git/hooks");
     (
         fs::read(main.join(".git/index")).unwrap(),
