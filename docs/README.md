@@ -2,14 +2,14 @@
 
 git-strata 让一台 Mac 上的多个 Claude Code 会话，各自在真实的 APFS 目录里修改同一组仓库。会话之间共享不可变的基线和依赖，每一步都记 checkpoint，彼此能看到对方改了什么，最后按批次合成 git commit。
 
-现阶段只写文档：所有模块文档和测试矩阵都写完之前，不写代码（design.md 开头的约束）。文档用中文写正文，标识符保持英文。
+模块文档和测试矩阵已经写完。下一阶段是按每份模块文档的 §8 实施。文档用中文写正文，标识符保持英文。
 
 ## 阅读顺序
 
 1. [design.md](design.md)：设计本身，包括目标与反目标、环境约束、词汇表、架构、关键流程和不变量。它是唯一的约束来源，其他文档与它冲突时以它为准。
 2. [types.md](types.md)：跨模块共享的名字，包括标识、结构、错误码、JSON 输出约定、crate 布局与依赖方向。后续文档只用这里的名字。
 3. [config.md](config.md)：配置文件的格式与校验规则，以及 inter 工作区每个兄弟仓库的默认配置（Task 2）。
-4. [test-matrix.md](test-matrix.md)：测试矩阵的索引，记录 LayerFS 和 tgrep 的每一条测试映射到哪个模块、怎么处理；各部分的明细在 [test-matrix/](test-matrix/) 下（Task 3a–3f、Task 15）。
+4. [test-matrix.md](test-matrix.md)：测试矩阵的索引。六个部分、每部分的条数、按状态和按目标模块的汇总，以及各模块 §7 里来源为「新增」的行数，都在这一份里；明细在 [test-matrix/](test-matrix/) 下。
 5. [modules/](modules/)：逐模块的开发文档，每份都按 [_template.md](modules/_template.md) 的九节来写，其中包括 TDD 实现任务（Task 4–14）。
    - [apfs.md](modules/apfs.md)：`clonefile` 克隆、`getattrlistbulk` 遍历、用 gen count 判断变化、FSEvents 监听、大小写规则。
    - [gitio.md](modules/gitio.md)：干净的 git 子进程封装、`.git/index` 解析、commit 与 push、三方合并。
