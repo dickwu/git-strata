@@ -2,7 +2,7 @@
 
 **Crate**：`crates/strata-session` · **设计来源**：design.md §3、§4、§5、§6.1、§6.3、§6.4、§6.5 第 7 步、§6.6、§6.7、§6.8、§6.9、§7、§8、§9 · **矩阵**：目标模块为 `session` 的行，加上理由点名 session 的 `—` 行，共 51 行：3b 13 行、3c 4 行、3d 29 行（含裁定改归 session 的 `:176`、`:178`）、3e 5 行；3a、3f 没有。逐条见 §7
 
-> 本文按 module-rulings.md 写："Common"、"T9 session"，以及增补 1–8 里标了 T9、session 或 Everyone 的条目。与 design.md 的旧措辞不同的地方以裁定为准：工作区路径按会话 id 取，即 `<root>/sessions/<session-id>/<repo>/`，ticket 只是标签；不变量 4 优先于 design §6.4 的最后一句；工作区的 git 是每个会话、每个 repo 一个影子仓库（增补 2）；错误时机按增补 3–6 的细化（§6.1）。标 [我的决定 Dn] 的地方是 design 和裁定都没有定、由本文决定的，§9 按编号逐条列出。用到的邻居文档版本：gitio.md @ac4149f、store.md @e4d273c、deps.md @4eb59c6、overlay.md @597d2d9、apfs.md @1e723f2。本文用到、而它们还没有的名字（如 apfs 第 2 轮才加的 `CloneKind`），列在 §2 的"上游要求"里。
+> 本文按 module-rulings.md 写："Common"、"T9 session"，以及增补 1–8 里标了 T9、session 或 Everyone 的条目。与 design.md 的旧措辞不同的地方以裁定为准：工作区路径按会话 id 取，即 `<root>/sessions/<session-id>/<repo>/`，ticket 只是标签；不变量 4 优先于 design §6.4 的最后一句；工作区的 git 是每个会话、每个 repo 一个影子仓库（增补 2）；错误时机按增补 3–6 的细化（§6.1）。标 [我的决定 Dn] 的地方是 design 和裁定都没有定、由本文决定的，§9 按编号逐条列出。用到的邻居文档版本：gitio.md @ac4149f、store.md @0062a3e、deps.md @22e1fac、overlay.md @77e2e0c、apfs.md @1e723f2。本文用到、而它们还没有的名字（如 apfs 第 2 轮才加的 `CloneKind`），列在 §2 的"上游要求"里。
 
 ## 1. 职责与边界
 
@@ -40,11 +40,11 @@ Workspace crate（types.md §8：session 在第 3 层，只依赖第 0–2 层�
 | 依赖 | 用途 |
 | --- | --- |
 | `strata-types` | `RepoName`、`RepoId`、`SessionId`、`TreeOid`、`CommitOid`、`DepsSetId`、`CheckpointId`、`RepoPath`、`BaseGen`、`BaseManifest`、`SessionManifest`、`WorkspaceState`、`CheckpointReason`、`ConfirmToken`、`Action`、`StrataError`、`Code`、`serde_rfc3339`；config.md 的 `Config`、`Paths`、`RepoConfig`（含 `seed_files()`） |
-| `strata-apfs`（apfs.md @1e723f2） | `same_volume`、`nearest_existing_ancestor`、`volume_caps`（`new` 的卷预检，config.md §4.3）；目的地变体 `clone_tree_rooted`、`clone_file_rooted`、`mkdir_rooted`（工作区、种子缓存、种子文件：增补 3 "Rooted destinations"）；`clone_from_rooted` 加 `CloneKind::{File, Dir}`（携带：从旧树里不跟随符号链接地克隆出来；`CloneKind` 见上游要求）；`rename_rooted` 加 `RenameMode::Excl`（基线改名进 `bases/`、携带的条目放进新树）与 `RenameMode::Swap`（交换工作区）；`remove_rooted` 加 `RemoveKind::EmptyDir`（删自己建的空暂存目录，增补 7、8）；`full_fsync`，以及取目录句柄的 `open_root`（会话根这类 rooted 操作的根）与 `open_rooted`（增补 3 "Durability"）；`attrs_of`、`walk_with`、`WalkOptions`、`list_dir`（种子与携带的判定、找已有的基线 generation）；`classify_io_error`（session 自己的 `open` 与 `fcntl(F_GETPATH)`、`nearest_existing_ancestor` 的 errno 归类） |
+| `strata-apfs`（apfs.md @1e723f2） | `same_volume`、`nearest_existing_ancestor`、`volume_caps`（`new` 的卷预检，config.md §4.3）；目的地变体 `clone_tree_rooted`、`clone_file_rooted`、`mkdir_rooted`（工作区、种子缓存、种子文件：增补 3 "Rooted destinations"）；`clone_from_rooted` 加 `CloneKind::{File, Dir}`（携带：从旧树里不跟随符号链接地克隆出来；`CloneKind` 见上游要求）；`rename_rooted` 加 `RenameMode::Excl`（基线改名进 `bases/`、携带的条目放进新树）与 `RenameMode::Swap`（交换工作区）；`remove_rooted` 加 `RemoveKind::EmptyDir`（删自己建的空暂存目录，增补 7、8）；`full_fsync`，以及取目录句柄的 `open_root`（会话根这类 rooted 操作的根）与 `open_rooted`（增补 3 "Durability"）；`attrs_of`（含符号链接的目标 `FileKind::Symlink`）、`walk_with`、`WalkOptions`、`list_dir`（种子与携带的判定、找已有的基线 generation）；`symlink_rooted`（种子与携带里的符号链接按目标重建，module-rulings "A symlink is recreated, never cloned"）；`case_fold_key` 与 `volume_caps` 的 `case_sensitive`（种子落点的磁盘同一性，§5.3）；`classify_io_error`（session 自己的 `open` 与 `fcntl(F_GETPATH)`、`nearest_existing_ancestor` 的 errno 归类） |
 | `strata-gitio`（gitio.md @ac4149f） | `Git` 的 `fetch`、`read_ref`、`is_ancestor`、`merge_base`、`tree_of`、`tree_contains`、`export_tree`、`ensure_shadow`（只在 `new`）、`shadow_at`、`shadow_drift`、`attach_worktree`、`update_ref`、`delete_ref`、`is_ignored`、`read_index`、`repo_id`；上游要求里的 `is_ignored_in_export`、`worktree_gitdir`；类型 `Shadow`、`MirrorDrift`（含 `PrePushGuardDisabled`）、`IndexInfo`；常量 `EXPORT_TEMP_PREFIX` |
-| `strata-store`（store.md @e4d273c） | 路径与基线：`root`、`base_dir`、`has_base_gen`、`manifest`、`record_base_gen`、`retire_dir`；会话的写：`create_session`、`set_session_phase`、`set_lifecycle`、`record_seeds`、`begin_move`、`set_move_phase`、`set_move_state`、`finish_move`、`fail_move`、`set_old_tree`，上游要求里的 `resolve_move`；读：`session`、`sessions`、`move_intents`、`open_move_intents`、`latest_checkpoint`、`checkpoints`、`checkpoint`；行类型 `Lifecycle`、`Health`、`SessionRecord`、`WorkspaceRecord`、`SeedRow`、`MoveIntent`、`MoveState`、`CheckpointInfo` |
-| `strata-overlay`（overlay.md @597d2d9） | `build_manifest`；`reconcile_full`（`remove` 的未发布改动检查、旧树核对）；`rebase` 与 `RebaseOptions::for_move`；`project`；类型 `WorkspaceRef`、`Base`、`Overlay`、`Rebased`、`Checkpointed`（`BeforeCheckpoint` 的签名用到；`BeforeRollout`、`BeforeRemove` 由 daemon 的实现经 `checkpoint` 记下，§3）；常量 `RESTORE_TEMP_PREFIX` |
-| `strata-deps`（deps.md @4eb59c6） | `Ctx`、`RepoWriteLock`、`InstallEnv`；`key_of`、`find_set`、`ensure`、`clone_into`、`nested_seed_caches`、`observe_main`、`open_files`、`drift`、`open_proposals`；类型 `Drift`、`Proposal`、`ProposalState`、`OpenFile` |
+| `strata-store`（store.md @0062a3e） | 路径与基线：`root`、`base_dir`、`has_base_gen`、`manifest`、`record_base_gen`、`retire_dir`；会话的写：`create_session`、`set_session_phase`、`set_lifecycle`、`record_seeds`、`begin_move`、`set_move_phase`、`set_move_state`、`finish_move`、`fail_move`、`set_old_tree`，上游要求里的 `resolve_move`；读：`session`、`sessions`、`move_intents`、`open_move_intents`、`latest_checkpoint`、`checkpoints`、`checkpoint`；行类型 `Lifecycle`、`Health`、`SessionRecord`、`WorkspaceRecord`、`SeedRow`、`MoveIntent`、`MoveState`、`CheckpointInfo` |
+| `strata-overlay`（overlay.md @77e2e0c） | `build_manifest`；`reconcile_full`（`remove` 的未发布改动检查、旧树核对）；`rebase` 与 `RebaseOptions::for_move`；`project`；类型 `WorkspaceRef`、`Base`、`Overlay`、`Rebased`、`Checkpointed`（`BeforeCheckpoint` 的签名用到；`BeforeRollout`、`BeforeRemove` 由 daemon 的实现经 `checkpoint` 记下，§3）；常量 `RESTORE_TEMP_PREFIX` |
+| `strata-deps`（deps.md @22e1fac） | `Ctx`、`RepoWriteLock`、`InstallEnv`；`main_tip`、`key_of`、`find_set`、`ensure`、`clone_into`、`nested_seed_caches`、`observe_main`、`open_files`、`drift`、`open_proposals`；类型 `Drift`、`Proposal`、`ProposalState`、`OpenFile` |
 | `serde`、`serde_json` | §3 里出现在 JSON 上的类型；`Scene` 以 JSON 交给 store 存（形状归 session，store 只核对它是 JSON，增补 4） |
 | `libc` | `fcntl(F_GETPATH)`（`resolve` 与嵌套检查要的真实路径，大小写按卷上的写法）、`arc4random_buf`（会话 id 与暂存目录名的随机数） |
 
@@ -71,11 +71,11 @@ Workspace crate（types.md §8：session 在第 3 层，只依赖第 0–2 层�
 2. `export_tree` 在锁外调用：gitio.md @ac4149f §5 开头把它列在"由调用方在 per-repo 写锁内调用"的操作里。module-rulings "Base generations are built outside the lock" 让 session 在锁外导出基线（§5.2 第 4 步）。目的地是 session 自己的暂存 `B/tree`，每次调用一个随机名，两次导出从不撞名；私有 index 在 `.export-*` 临时目录里，不写主 checkout 的工作树、index 与 refs。22 个仓库都没有过滤器（gitio §5.5 第 4 步），将来的过滤器在 common dir 里的缓存由过滤器自己处理并发。gitio 的下一轮把 `export_tree` 从那张持锁清单里拿出来。
 3. 新增 `Git::worktree_gitdir(&self, tree_dir: &Path) -> Result<Option<PathBuf>>`：不跟随符号链接地读 `<tree_dir>/.git`。它是 gitfile 时返回其中 `gitdir: ` 之后的路径，读法同 gitio 读 gitfile 的规则（§5.7 第 1 步）；`tree_dir` 或 `.git` 不存在、`.git` 不是普通文件时返回 None。只读，不需要锁。`resolve_failed_move` 用它判断哪棵树接在哪一代的管理目录上（§5.9 第 3 步）：gitfile 的格式归 gitio，session 不自己解析。
 
-**对 store**（store.md @e4d273c）：
+**对 store**（store.md @0062a3e）：
 
-1. `retire_dir` 加第 7 行：`bases/<repo>/.staging/<name>`，`<name>` 是 32 位小写十六进制。这是建基线 generation 的暂存（§4.1、§5.2），没有意图行可以核对：它是缓存填充，增补 6 的 "Export staging" 一条要的意图行在这里没有（`new` 在 `create_session` 之前建基线，那时还没有任何行；`move_workspace` 的 `begin_move` 又要求目标基线已经登记）。store.md @e4d273c 的 gc 守卫 (a) 已经写明这类没有意图行的缓存填充由 repo 写锁和 `gc_repo` 不进 `.staging` 保护；缺的只是拿走它的那一行。接受条件由调用方保证：只有建它的那次调用和 daemon 启动时的 `recover`（那时没有任何操作在跑）会拿走它；建它的调用把名字记在进程内的集合里，别的调用从不碰它（§5.2）。
+1. 已照写，不再是要求：`retire_dir` 第 7 行按形状接受基线暂存 `bases/<repo>/.staging/<32 位小写十六进制>`（store.md §5.5），谁拿走它由调用方保证：建它的那次调用，以及 daemon 启动时的 `recover`（那时没有建造在跑）；建它的调用把名字记在进程内的集合里，别的调用从不碰它（§5.2）。`gc_repo` 第 5 步把最近一次直接条目的变化已过年龄下限的暂存挪进 trash（store.md §5.11）。§5.2 照此在清单一建好就登记，并把暂存上的 `NoSuchPath` 当作"已被收走"（module-rulings "Base staging is registered right after its manifest"）。
 2. 已照写、不再是要求：`MoveState` 的词汇与会话行的 `phase` 列（增补 5 的 T9 条）session 照原样采用（§4.3）；`set_old_tree` 接受与意图的 `staging` 相同的路径（形状相同），session 把保留的旧树留在原地（§5.7 第 19 步）。
-3. 说明，不是要求：module-rulings "Carry is not a capture" 改正了增补 8 的说法。session 的携带把旧工作区的条目克隆进新树，不是往 store 里捕获，不进 blob store，也不调 `put_blob_rooted`（§5.7.1 [我的决定 D34]）；store.md @e4d273c 的调用方清单在 store 第 3 轮照此改。同样，session 自己从不往工作区、会话根或暂存树里写 blob 内容：新一代的树由 overlay 的 `project` 投影（增补 8 让它改用 `get_blob_rooted`），种子与携带都是克隆。所以 session 既不调 `get_blob`，也不调增补 8 新增的 `get_blob_rooted`。
+3. 说明，不是要求：module-rulings "Carry is not a capture" 改正了增补 8 的说法。session 的携带把旧工作区的条目克隆进新树，不是往 store 里捕获，不进 blob store，也不调 `put_blob_rooted`（§5.7.1 [我的决定 D34]）；store.md @0062a3e 的调用方清单已照此改。同样，session 自己从不往工作区、会话根或暂存树里写 blob 内容：新一代的树由 overlay 的 `project` 投影（增补 8 让它改用 `get_blob_rooted`），种子与携带都是克隆。所以 session 既不调 `get_blob`，也不调增补 8 新增的 `get_blob_rooted`。
 4. 处理失败的移动（module-rulings "Resolving a failed move"；§5.9）要一个带守卫的方法，暂名 `resolve_move(&self, id: &SessionId, repo: &RepoName, n: u64, accept: bool, at: SystemTime) -> Result<()>`。守卫：会话是 `Active`；工作区健康是 `Unknown`；意图 n 是这个工作区代数最大的意图，状态是 `Unknown`。一个事务里：
    - `accept = false`（Abandon）：意图 `Unknown → Abandoned`；工作区健康 `Unknown → Ok`；base、head、代数与冲突不变。
    - `accept = true`（Accept）：意图 `Unknown → Done`；工作区的 base、head、代数换成意图的 `to`、`head`、`n`，冲突换成第 5 条记在意图行上的那份；意图的 `old_tree` 记成它的 `staging`；健康 `Unknown → Ok`。
@@ -86,9 +86,10 @@ Workspace crate（types.md §8：session 在第 3 层，只依赖第 0–2 层�
 
 1. `clone_from_rooted` 的 `kind: CloneKind` 参数与 `CloneKind { File, Dir }`（module-rulings "clone_from_rooted states its source kind"）：1e723f2 的 `clone_from_rooted` 还是三个参数，apfs 第 2 轮加上。种类对不上时，apfs 在克隆之前给 `IsDirectory`、`NotFile` 或 `NotDirectory`。session 的携带按遍历看到的种类传 `File` 或 `Dir`（§5.7.1）。
 
-**对 deps**（deps.md @4eb59c6）：
+**对 deps**（deps.md @22e1fac）：
 
-1. `observe_main`：module-rulings "deps follows main's current tip" 把它定为 repo 写锁里的一小段临界区，deps 自己取锁，在锁里读主干的 tip。session 调它时不持有任何 repo 写锁（§5.1 第 14 步；锁的顺序见 §5 开头的【锁 R】）。签名（还收不收 `tree`、`head`）以 deps 的下一轮为准。
+1. `observe_main`：module-rulings "deps follows main's current tip" 把它定为 repo 写锁里的一小段临界区，deps 自己取锁，在锁里读主干的 tip。session 调它时不持有任何 repo 写锁（§5.1 第 14 步；锁的顺序见 §5 开头的【锁 R】）。签名不变（deps.md §2 对 session 的要求第 4 条）。
+2. 已照写，不再是要求：deps.md §2 对 session 的要求第 7 条，`new` 第 8 步 fetch 之后用 `deps::main_tip(cfg, git)` 选 head（§5.1 第 8 步）。design §6.7 的钉基线规则只写在 deps 一处，`observe_main` 判定主干当前的 tip 用的是同一个函数。
 
 **对 daemon**（daemon.md 还没写）：
 
@@ -204,13 +205,13 @@ pub fn seed_plan(
 /// 按 seed_plan 的结果，把种子文件克隆进工作区 `to`（根之下、不跟随符号链接），返回复制了的那些。
 pub fn seed_files(plan: &[SeedSource], to: &Path) -> Result<Vec<SeedRecord>>;
 
-/// seed_plan 判定通过的一个种子文件：来源的 lstat 结果。
+/// seed_plan 判定通过的一个种子文件：来源的 lstat 结果（符号链接另有 attrs_of 读出的目标）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeedSource {
     pub path: RepoPath,
     /// 主 checkout 里的绝对路径。
     pub source: PathBuf,
-    /// 来源是符号链接时，链接的目标。
+    /// 来源是符号链接时，链接的目标：经 `apfs::attrs_of(main, path)` 读出，复制时 `symlink_rooted` 按它重建（§5.3）。
     pub link: Option<PathBuf>,
     pub size: u64,
     pub source_mtime: SystemTime,
@@ -406,7 +407,7 @@ pub struct ResolutionReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Leftover {
-    /// 建基线 generation 失败或中断留下的暂存，以及其中 gitio 的导出临时目录（前缀 EXPORT_TEMP_PREFIX）。
+    /// 建基线 generation 时进程中途停下、或失败之后没能退役留下的暂存，以及其中 gitio 的导出临时目录（前缀 EXPORT_TEMP_PREFIX）。
     BaseStaging { repo: RepoName, path: PathBuf, export_temps: Vec<PathBuf> },
 }
 
@@ -478,7 +479,7 @@ types.md §8 写的 `session::move_workspace(session: &SessionId, repo: &RepoId,
 
 - **`open`**：`gits` 的键与 `config.repos` 的键必须完全相同，否则 `InvalidInput`。不做 I/O。
 - **`new`**：建一个会话：配置里的每个仓库都克隆成兄弟布局里的工作区，`repos` 点名的那些标为 tracked；返回 `SessionManifest`。流程见 §5.1。`create_session` 之前的具名拒绝：`InvalidInput`、`ReservedName`、`NoSuchRepo`、`NoSuchPath`、`NotDirectory`、`IsDirectory`、`NotFile`、`CrossVolume`、`Unsupported`、`Exists`；下层在这之前给出的码原样透传（gitio 的 `NoSuchBranch`、`NoSuchCommit`、`Unsupported`、`NotText`，deps 的 `Drift`、`InvalidInput`，写锁的 `Busy`，store 的码）；建基线时写到一半失败为 `Unknown`（§5.2）。`create_session` 之后的任何失败：`Unknown`，会话进入 `Unknown` 并带现场。
-- **`ensure_base`**：返回 `head` 的 tree 配上它安装输入所需依赖集的基线 generation，缺失就建出来（§5.2）。这是缓存填充，不算对外可见的写（增补 6 细化 4）；它可能认领或冷装依赖集（deps 的 `ensure`），可能要几分钟。导出、`ensure` 与清单都在锁外，只有登记那一段自己取该 repo 的写锁，调用方不能持有它（module-rulings "Base generations are built outside the lock"）。码：`tree_of`、`export_tree`、deps 的 `ensure` 与 `clone_into`、overlay 的 `build_manifest`、store 的 `record_base_gen` 给出的码原样透传；`Busy`（写锁，或 §5.2 第 7 步依赖集一再被回收）；写到一半失败为 `Unknown`，暂存留作现场。
+- **`ensure_base`**：返回 `head` 的 tree 配上它安装输入所需依赖集的基线 generation，缺失就建出来（§5.2）。这是缓存填充，不算对外可见的写（增补 6 细化 4）；它可能认领或冷装依赖集（deps 的 `ensure`），可能要几分钟。导出、`ensure` 与清单都在锁外，只有登记那一段自己取该 repo 的写锁，调用方不能持有它（module-rulings "Base generations are built outside the lock"）。码：`tree_of`、`export_tree`、deps 的 `ensure` 与 `clone_into`、overlay 的 `build_manifest`、store 的 `record_base_gen` 给出的码原样透传；`Busy`（写锁；§5.2 依赖集一再被回收，`deps_set_race`；暂存一再被 `gc_repo` 收走，`base_staging_retired`）；写到一半的失败为 `Unknown`，暂存连同写到一半的东西已退役（`kept` 为空，退役也失败时才留下它，§5.2）。
 - **`ensure_base_for`**：同 `ensure_base`，只是 tree 与依赖集都由调用方给出（§5.2）：依赖集必须已经封存，它从不调 `deps::ensure`，所以从不冷装。用于提出者自换的目标"旧 tree 配新依赖集"，那个依赖集不是由 tree 推出来的。码：同 `ensure_base`，另有 `InvalidInput`（`reason: "deps_unsealed"`：依赖集没封存，或在登记之前被 gc 收走）。
 - **`resolve`**：cwd 在某个会话的某个工作区里（含子目录）时返回 `Some((id, repo))`，否则 `Ok(None)`。Store 读不出来时原样透传。命令默认作用于"本会话"而得到 None 时，由调用方返回 `NoSuchSession`。见 §5.4。
 - **`select`**：选择器是会话 id 就按 id 找，否则当作 ticket 找。码：`NoSuchSession`、`AmbiguousMatch`（`detail.candidates`）、`InvalidInput`（既不是 id 也不是合法的 ticket）。
@@ -502,7 +503,8 @@ types.md §8 写的 `session::move_workspace(session: &SessionId, repo: &RepoId,
   bases/<repo>/<tree>/<deps>/              基线 generation = Store::base_dir(&BaseGen)：源码导出加上依赖集的克隆（增补 3）。
                                            session 建好之后改名进来、store 登记；之后只读，由 store 的 gc_repo 回收
   bases/<repo>/.staging/<32 位十六进制>/    建基线 generation 的暂存（§5.2）。tree/ 是导出的目标；gitio 的导出临时目录
-                                           .export-tree-<nonce>/ 也在这里（增补 6 "Export staging"）。gc 从不进 .staging
+                                           .export-tree-<nonce>/ 也在这里（增补 6 "Export staging"）。清单建好就登记；
+                                           gc_repo 收走过了年龄下限的（store.md §5.11）
   deps/<repo>/…                            依赖集，归 deps（deps.md §4.1）
   store/…                                  归 store，含 retire_dir 用的 trash/（store.md §4.1）
   sessions/
@@ -602,6 +604,7 @@ design §6.1 第 2 步把接法交给构建者；增补 2 定为影子仓库，g
 下文的记号：
 
 - 【锁 R】：session 自己经 `locks.with_write(R, …)` 取该 repo 的写锁，只罩住这一小段（`new`、`remove`、`ensure_base`、`ensure_base_for`、`resolve_failed_move` 里）。`move_workspace` 在调用方持有的锁里运行，从不自己取（`RepoWriteLock` 不可重入）。锁只罩 fetch、克隆依赖集、attach、pin、交换、登记基线这些短临界区，从不跨过导出、清单与冷装（增补 3、4 "Locks"；module-rulings "Base generations are built outside the lock"）。持锁的那一段里，session 从不调用会自己取这把锁的函数（deps 的 `ensure` 与 `observe_main`，本模块的 `ensure_base`、`ensure_base_for`）；一个线程一次至多持一把 repo 锁。所以既不会自锁，也没有锁的顺序问题（module-rulings "deps follows main's current tip"：`observe_main` 自己取锁）。`Busy` 来自写锁的有界等待，由 daemon 给出。
+- rooted 调用的根：`paths.root`、主 checkout 的 `path` 由配置在加载时规范化（config.md，T15），`R` 是 `F_GETPATH` 给的真实路径；会话根、工作区、暂存树、基线目录都由 session 用 `Path::join` 从它们接上固定的分量或 `RepoPath` 拼出。所以根从不带结尾的 `/`、`.` 或 `..` 分量，apfs 的 `root_not_canonical` 拒绝（module-rulings "Rooted roots are canonical"）在这里不会出现。session 从不把用户直接给的路径当根：`resolve` 的 `cwd` 只经 `F_GETPATH` 取真实路径，不交给 rooted 调用。
 - 【缓存】：缓存填充，不算对外可见的写（增补 6 细化 4）。
 - 【可见】：该操作第一次对外可见的写（§6.1）。
 - 【rename】：原子改名。【F】：`apfs::full_fsync`，即 `F_FULLFSYNC`（增补 3 "Durability"）。
@@ -620,7 +623,7 @@ design §6.1 第 2 步把接法交给构建者；增补 2 定为影子仓库，g
 
 **阶段 B：钉基线、填缓存、判种子。** 每个仓库各自进行，按 `RepoName` 的顺序派发给最多 4 个并行的工作者 [我的决定 D41]。这里写下的只有缓存（增补 6 细化 4）与 gitio 对 origin 的观察；失败是具名码或原样透传。一个仓库失败，`new` 就在 `create_session` 之前停下，别的仓库已经填好的缓存留着给以后用。
 
-8. 【锁 R】`o = git.fetch("origin", default_branch)`，放锁。选 head：`pin_unpushed = true` 且 `publish.branch == default_branch` 时，读 `c = git.read_ref("refs/strata/publish/<default_branch>")`：`c` 存在、不等于 `o`、且 `git.is_ancestor(o, c)`（链领先 origin）→ 钉链顶 `c`；与 origin 相同、落后或分叉，都钉 `o`（design §6.7，与 publish 选合并基线的规则相同）。`publish.branch != default_branch` 或 `pin_unpushed = false`：一律钉 `o`（config.md §2.3 的 `publish` 与 `pin_unpushed` 两条；增补 1 的 T9/T10 条）。`tree = git.tree_of(head)`。gitio 的码原样透传（`NoSuchBranch`、`NoSuchCommit`、`Unsupported`……，3b `:14`）。fetch 写下的对象与 `refs/strata/remotes/origin/<default_branch>` 是 gitio 自己对 origin 的观察（gitio.md §4.1）：以后的操作都复用它，重做得到同样的结果；增补 6 把 `new` 的第一次对外可见的写定为 `create_session`，而 fetch 必须在它之前，所以本文把 fetch 当作缓存填充看待 [我的决定 D5]。
+8. 【锁 R】`git.fetch("origin", default_branch)`；同一段锁里 `head = deps::main_tip(cfg, git)`，放锁。`main_tip` 就是 design §6.7 的钉基线规则：`pin_unpushed = true` 且 `publish.branch == default_branch` 时，发布链 `refs/strata/publish/<default_branch>` 领先 origin 就钉链顶，与 origin 相同、落后或分叉都钉 origin 的 tip；其余一律钉 origin 的 tip（config.md §2.3 的 `publish` 与 `pin_unpushed` 两条；增补 1 的 T9/T10 条）。规则只写在 deps 一处，`observe_main` 判定主干当前的 tip 用的是同一个函数（deps.md §2 对 session 的要求第 7 条、§5.9）；它只读 ref、不取锁，在 session 持着的锁里调用不会自锁。它返回 None（fetch 之后 origin 仍没有默认分支）→ `NoSuchBranch`（config.md 的运行时检查）。`tree = git.tree_of(head)`。gitio 与 deps 的码原样透传（`NoSuchBranch`、`NoSuchCommit`、`Unsupported`……，3b `:14`）。fetch 写下的对象与 `refs/strata/remotes/origin/<default_branch>` 是 gitio 自己对 origin 的观察（gitio.md §4.1）：以后的操作都复用它，重做得到同样的结果；增补 6 把 `new` 的第一次对外可见的写定为 `create_session`，而 fetch 必须在它之前，所以本文把 fetch 当作缓存填充看待 [我的决定 D5]。
 9. `gen` = §5.2 的 `ensure_base` 流程，沿用第 8 步得到的 head 与 tree：导出、`ensure` 与清单在锁外，只有登记取锁（第 8 步的锁这时已经放开）。
 10. 种子计划：`plan = seed_plan(cfg, git, path, store.base_dir(&gen), &tree)`（§5.3）。显式条目的拒绝在这里发生，对着的是基线 generation（review I3）。tracked 仓库再定种子缓存：条目 `c` 在主 checkout 里存在（第 6 步已确认是真目录），它在基线 generation 目录里不存在，而且各级上级要么不存在、要么是真目录（`apfs::attrs_of(base, 上级)`，逐级 `O_NOFOLLOW`）→ 进计划；否则静默跳过 [我的决定 D12]。种子缓存只是加速，缺省列表的条目不该因为某个仓库的形状让它的每一次 `new` 都失败（与 review M10 同一个教训）；这种情形要是在 `create_session` 之后才发现，就只能报 `Unknown`。
 
@@ -637,7 +640,7 @@ design §6.1 第 2 步把接法交给构建者；增补 2 定为影子仓库，g
     3. `pin`【锁 R】：`git.update_ref("refs/strata/pins/<id>", &head, None)`，期望这个 ref 原本不存在。
     4. `seed_caches`（只对 tracked 仓库）：计划里的每个条目 `c`：`mkdir_rooted(ws, c 的上级, 0o755, parents = true)`；`clone_tree_rooted(path/c, ws, c)`。`node_modules/.cache` 因此落进刚克隆的依赖目录里（deps 封存时排除了它，见 `nested_seed_caches`）。
     5. `seed_files`：`records = seed_files(&plan, ws)`；`store.record_seeds(id, repo, rows)`。
-14. `observe`：对每个仓库（按第 13 步的方式派发）`deps::observe_main(ctx, &tree, &head, &store.base_dir(&gen))`，记下主干当前的依赖集，id 变了就登记提议（deps.md §2 对 session 的要求第 4 条）。session 调它时不持有任何 repo 写锁：按 module-rulings "deps follows main's current tip"，`observe_main` 自己取锁，是写锁里的一小段临界区，在锁里读主干的 tip（签名以 deps 的下一轮为准，§2 对 deps 的要求）。到这一步，第 8 步的 fetch、第 9 步的登记、第 13 步 `git` 与 `pin` 取的锁都已放开，阶段又是一个接一个进行的，所以它取锁不会撞上本线程或本次 `new` 的另一个工作者持有的锁（§5 开头的【锁 R】）。它写的提议与主干记录是对外可见的写，又在 `create_session` 之后，所以它的任何失败（含 deps 的 `Unknown`，`reason = "main_not_recorded"`）都与本阶段别的失败一样：会话 `Creating → Unknown`，现场保留，不当作具名拒绝、也不清理（增补 6：`create_session` 是 `new` 的第一次对外可见的写；deps.md @4eb59c6 §2 对 session 的要求第 4 条、§5.9 与 §6）。放在 `finalize` 之前 [我的决定 D15]，所以会话失败时还在 `Creating`，走的是已有的那条边。
+14. `observe`：对每个仓库（按第 13 步的方式派发）`deps::observe_main(ctx, &tree, &head, &store.base_dir(&gen))`，记下主干当前的依赖集，id 变了就登记提议（deps.md §2 对 session 的要求第 4 条）。session 调它时不持有任何 repo 写锁：按 module-rulings "deps follows main's current tip"，`observe_main` 自己取锁，是写锁里的一小段临界区，在锁里读主干的 tip（签名以 deps 的下一轮为准，§2 对 deps 的要求）。到这一步，第 8 步的 fetch、第 9 步的登记、第 13 步 `git` 与 `pin` 取的锁都已放开，阶段又是一个接一个进行的，所以它取锁不会撞上本线程或本次 `new` 的另一个工作者持有的锁（§5 开头的【锁 R】）。它写的提议与主干记录是对外可见的写，又在 `create_session` 之后，所以它的任何失败（含 deps 的 `Unknown`，`reason = "main_not_recorded"`）都与本阶段别的失败一样：会话 `Creating → Unknown`，现场保留，不当作具名拒绝、也不清理（增补 6：`create_session` 是 `new` 的第一次对外可见的写；deps.md @22e1fac §2 对 session 的要求第 4 条、§5.9 与 §6）。放在 `finalize` 之前 [我的决定 D15]，所以会话失败时还在 `Creating`，走的是已有的那条边。
 15. `finalize`：【F】对会话根与 `sessions/.repos/<id>/` 的目录句柄（`apfs::open_rooted(paths.root, …)`）各做一次 `full_fsync` [我的决定 D14]：会话一旦记成 `Active`，目录就要扛得住断电（增补 3 "Durability"）。然后 `store.set_lifecycle(id, Creating, Active, None, now)`。
 16. 返回清单。daemon 随后为 tracked 仓库建 `Tracker` 并开始监听（design §6.1 第 3 步）。
 
@@ -653,18 +656,22 @@ design §6.1 第 2 步把接法交给构建者；增补 2 定为影子仓库，g
 
 ### 5.2 `ensure_base(repo, head)` 与 `ensure_base_for(repo, tree, deps)`：基线 generation
 
-两个函数走同一个流程，都是缓存填充（增补 6 细化 4）。调用方在拿 repo 写锁之前调用它们，导出、依赖集与清单都在锁外，只有第 7 步的登记取锁（module-rulings "Base generations are built outside the lock"）。`new` 的第 9 步用 `ensure_base`；别的调用方见 §2。`move_workspace` 在锁里只找基线、从不建（§5.7 第 7 步）。两者只在第 1、2、5 步与第 7.1 步不同：`ensure_base` 由 tree 的安装输入定依赖集（`deps::ensure`，可能冷装）；`ensure_base_for` 用调用方给的、已封存的依赖集，从不调 `deps::ensure`。提出者自换的目标"旧 tree 配新依赖集"（design §6.4 第 3 步）只能这样备好，因为那个依赖集不是由 tree 推出来的。
+两个函数走同一个流程，都是缓存填充（增补 6 细化 4）。调用方在拿 repo 写锁之前调用它们，导出、依赖集与清单都在锁外，只有第 7 步的登记取锁（module-rulings "Base generations are built outside the lock"）。`new` 的第 9 步用 `ensure_base`；别的调用方见 §2。`move_workspace` 在锁里只找基线、从不建（§5.7 第 7 步）。两者只在第 1、2、5 步与第 7.1 步不同：`ensure_base` 由 tree 的安装输入定依赖集（`deps::ensure`，可能认领或冷装）；`ensure_base_for` 用调用方给的、已封存的依赖集，从不调 `deps::ensure`。提出者自换的目标"旧 tree 配新依赖集"（design §6.4 第 3 步）只能这样备好，因为那个依赖集不是由 tree 推出来的。
+
+暂存的寿命（module-rulings "Base staging is registered right after its manifest"）：没登记的暂存只有年龄下限护着。`gc_repo` 在 repo 写锁里，把最近一次直接条目的变化已过下限（1 h）的暂存挪进 trash（store.md @0062a3e §5.11 第 5 步）。所以暂存的清单一建好就登记，从不带着它跨过认领、冷装这样的长步去等登记。第 5 步要认领或冷装时，这份暂存只作 `deps::ensure` 的输入，之后退役，另建一份再登记 [我的决定 D7]。
 
 1. `ensure_base`：`tree = git.tree_of(head)`。`ensure_base_for`：`set = deps::find_set(store, repo, deps)` 为 None → `InvalidInput`（`detail = {reason: "deps_unsealed", repo, deps}`），什么都没写。
 2. 热路径：
    - `ensure_base` [我的决定 D6]：在 `apfs::list_dir(paths.root, "bases/<repo>/<tree>")` 里找一个能解析成 `DepsSetId`、且 `has_base_gen` 为真的条目 `d`。找到就算 `(_, id) = deps::key_of(ctx, <那个 generation 目录>)`：同一个 tree 的各个 generation 目录里，源码与安装输入都相同。`has_base_gen(BaseGen { repo, tree, deps: id })` 为真就返回它：不导出、不拿锁。没找到，或 id 对应的 generation 还没有，往下。
    - `ensure_base_for`：`has_base_gen(BaseGen { repo, tree, deps })` 为真就返回它；否则往下。
 3. 暂存 [我的决定 D7]：`B = bases/<repo>/.staging/<32 位十六进制>`；`mkdir_rooted(paths.root, "bases/<repo>/.staging", 0o755, parents = true)`，再 `mkdir_rooted(paths.root, B, 0o755, parents = false)`。把 `B` 记进进程内的"正在用的暂存"集合（`leftovers` 不报它）。
-4. `export`（锁外）【缓存】：`git.export_tree(&tree, B/tree)`。gitio 那一侧的锁规则见 §2 对 gitio 的要求第 2 条。`dst` 总是暂存目录之下的 `B/tree`，从不是 `B` 本身，所以 gitio 建在 `dst` 父目录里的导出临时目录 `.export-tree-<nonce>/` 也在 `B` 里（增补 6 "Export staging"；store.md @e4d273c §5.11 守卫 (a) 对 `dst` 的要求）。`B` 每次调用一个随机名，两次导出从不撞名。`B` 没有意图行：建基线是缓存填充，不属于哪个会话，`new` 又在 `create_session` 之前做它 [我的决定 D7]。保护 `B` 与其中导出临时目录的，是 store 的 gc 从不进 `.staging`（store.md §5.11 第 5 步：名字解析不成键的条目一概不进），以及进程内的"正在用"集合；它怎样收尾见下面的"失败"。
-5. `deps`（锁外）：`ensure_base`：`set = deps::ensure(ctx, B/tree)`。已封存的直接返回；否则认领主 checkout 的依赖目录，认领不了就冷装（deps.md §5.6），可能要几分钟。deps 在封存的临界区里自己取写锁，所以这一步之前 session 不持锁。`ensure_base_for`：用第 1 步的 `set`。
+4. `export`（锁外）【缓存】：`git.export_tree(&tree, B/tree)`。gitio 那一侧的锁规则见 §2 对 gitio 的要求第 2 条。`dst` 总是暂存目录之下的 `B/tree`，从不是 `B` 本身，所以 gitio 建在 `dst` 父目录里的导出临时目录 `.export-tree-<nonce>/` 也在 `B` 里（增补 6 "Export staging"；store.md §5.11 守卫 (a) 对 `dst` 的要求）。`B` 每次调用一个随机名，两次导出从不撞名。`B` 没有意图行：建基线是缓存填充，不属于哪个会话，`new` 又在 `create_session` 之前做它 [我的决定 D7]。护着 `B` 的是进程内的"正在用"集合（只有建它的调用拿走它）与 store 的年龄下限（`retire_dir` 第 7 行按形状接受它，`gc_repo` 只收过了下限的）；它怎样收尾见下面的"失败"。
+5. `deps`（锁外）：
+   - `ensure_base_for`：用第 1 步的 `set`。
+   - `ensure_base`：`(_, id) = deps::key_of(ctx, B/tree)`，`set = deps::find_set(store, repo, id)`。命中 → 第 6 步。落空 → 要认领或冷装（deps.md §5.4、§5.5），这是长步：`set = deps::ensure(ctx, B/tree)`。deps 只在开头读 `B/tree`：认领核对它的安装输入，冷装先把它克隆进自己的暂存。`ensure` 返回之后 `B` 不再登记：`retire_dir(B)`（得到 `NoSuchPath` 说明 `gc_repo` 已经收走了它，照常往下），从"正在用"的集合里去掉，回到第 2 步，另建一份；这一轮第 5 步通常命中（第 5 步与第 7.1 步合起来连续 3 轮落空 → `Busy`，见第 7.1 步）。deps 在封存的临界区里自己取写锁，所以这一步 session 不持锁。
 6. `manifest`（锁外）：`manifest = overlay::build_manifest(B/tree, &tree, cfg)`，O(源码字节数)。在依赖目录克隆进来之前做；它本来也排除依赖目录与种子缓存。
-7. `register`【锁 R】【缓存】，一段临界区（deps.md §5.7：`find_set` 复查与 `clone_into` 在锁里，紧挨着改名与登记）：
-   1. `deps::find_set(store, repo, set.id)` 复查。落空说明 gc 在两步之间收走了一个没人引用的依赖集。`ensure_base`：放锁，回到第 5 步（deps.md §2 对 session 的要求第 3 条）；连续 3 轮落空 → `Busy`（`detail.reason = "deps_set_race"`）[我的决定 D8]，与 deps 的 `proposal_race` 同一做法。`ensure_base_for`：放锁，`retire_dir(B)`，返回 `InvalidInput`（`deps_unsealed`）：它不建依赖集，要调用方重新封存。
+7. `register`【锁 R】【缓存】，清单建好之后紧接着做，一段临界区（deps.md §5.7：`find_set` 复查与 `clone_into` 在锁里，紧挨着改名与登记）：
+   1. `deps::find_set(store, repo, set.id)` 复查。落空说明 gc 在两步之间收走了一个没人引用的依赖集。`ensure_base`：放锁，`retire_dir(B)`，回到第 2 步，第 5 步会再走一次 `ensure`（deps.md §2 对 session 的要求第 3 条）；第 5 步与这里合起来连续 3 轮落空 → `Busy`（`detail.reason = "deps_set_race"`）[我的决定 D8]，与 deps 的 `proposal_race` 同一做法。`ensure_base_for`：放锁，`retire_dir(B)`，返回 `InvalidInput`（`deps_unsealed`）：它不建依赖集，要调用方重新封存。
    2. `gen = BaseGen { repo, tree, deps: set.id }`。`has_base_gen(gen)` 已为真（另一个调用在第 2 步之后先登记了它）→ 放锁，`retire_dir(B)`（store 第 7 行；里面还有导出，不是空目录），从"正在用"的集合里去掉，返回 `gen`。两个调用同时为同一个 (tree, 依赖集) 建基线时，就是这样收场：各自在锁外建好，后登记的那个退役自己的暂存（module-rulings "Base generations are built outside the lock"）。
    3. `deps::clone_into(store, &set, B/tree)`。
    4. `mkdir_rooted(paths.root, "bases/<repo>/<tree>", 0o755, parents = true)`；【rename】`rename_rooted(paths.root, "bases/<repo>/.staging/<x>/tree", "bases/<repo>/<tree>/<set.id>", RenameMode::Excl)`。得到 `Exists` 说明那里有一个没登记的残留（上一次改名之后、登记之前崩溃）：`store.retire_dir(base_dir(gen))`（store 第 1 行），再改名一次。
@@ -672,15 +679,20 @@ design §6.1 第 2 步把接法交给构建者；增补 2 定为影子仓库，g
    6. `store.record_base_gen(&gen, &manifest, now)`。放锁。
 8. 这时 `B` 应当是空的：`remove_rooted(paths.root, B, RemoveKind::EmptyDir)`（增补 7：操作可以删自己建的空目录）。得到 `NotEmpty`（apfs 把 `ENOTEMPTY` 归成它，module-rulings "NotEmpty from apfs"；导出成功时 gitio 已删掉它的临时目录，所以不该发生）就改用 `retire_dir(B)`。从"正在用"的集合里去掉，返回 `gen`。
 
+`B` 已被 `gc_repo` 收走：第 7.3、7.4 步得到 `NoSuchPath`，或某一步失败之后退役 `B` 时得到 `NoSuchPath`（失败正是因为 `B` 不见了）。`gc_repo` 只在 repo 写锁里挪暂存，所以这只会发生在 `B` 建好之后、第 7 步拿到锁之前；这时什么都没登记，也没有任何对外可见的写。放锁（持着时），从"正在用"的集合里去掉，回到第 2 步重建一次；同一次调用里第二次遇到 → `Busy`（`detail = {reason: "base_staging_retired", repo, tree}`）。别处退役 `B` 得到 `NoSuchPath`（第 5 步认领或冷装之后、第 7.1、7.2 步）只说明它已经在 trash 里，照常往下走。
+
 失败：
 
 - 第 1–2 步：原样透传，什么都没写。
-- 第 3–7 步的具名码（gitio 在写之前的拒绝、deps 的具名码、`build_manifest` 的 `NotText` 与 `Unsupported`、`record_base_gen` 的 `InvalidInput`、`Busy`、`ensure_base_for` 的 `deps_unsealed`）：先拿走暂存，`retire_dir(B)`（store 的第 7 行，§2 的上游要求）；第 7.4 步之后失败时，改名进来却没登记的目录用 `retire_dir(base_dir(gen))` 拿走；再返回这个码。调用之前的状态原样恢复，只多了已经封存的依赖集这类缓存。
-- 写到一半的失败（导出中途、`clone_into` 中途、改名或同步得到 `EIO`）：返回 `Unknown`（`detail = {op: "base", repo, tree, phase, path: B, cause, kept: [B]}`）。`B` 原样留作现场，从"正在用"的集合里去掉，`leftovers` 从此报出它。daemon 下一次启动时，`recover` 把它退役（§5.8）：它是缓存填充的内部暂存，从未对外可见，增补 3 允许 `recover` 收走这样的暂存 [我的决定 D7]。
+- 第 3 步起的任何失败，先拿走暂存：`retire_dir(B)`（store 第 7 行）。第 7.4 步的改名可能已经做了时，改名进来、没有登记的 `base_dir(gen)` 也用 `retire_dir` 拿走（第 1 行）。写到一半的导出或克隆是缓存填充的中间产物，随 `B` 一起离开，不是要保留的现场（module-rulings "Base staging is registered right after its manifest"：gitio "中断的导出保留临时目录"只对导出到可见位置的情形）。然后：
+  - 具名码（gitio 在写之前的拒绝、deps 的具名码、`build_manifest` 的 `NotText` 与 `Unsupported`、`record_base_gen` 的 `InvalidInput`、`Busy`、`ensure_base_for` 的 `deps_unsealed`）：原样返回。调用之前的状态原样恢复，只多了已经封存的依赖集这类缓存。
+  - 写到一半的失败（导出中途、`clone_into` 中途、改名或同步得到 `EIO`、`ENOSPC`）：返回 `Unknown`（`detail = {op: "base", repo, tree, phase, path: B, cause, kept: [], retired: [B …]}`）。什么都没留下，修好原因之后重试即可 [我的决定 D7]。
+  - 退役本身失败：`B` 原样留着，从"正在用"的集合里去掉，返回 `Unknown`（`kept: [B]`），`leftovers()` 从此报出它。daemon 下一次启动时 `recover` 把它退役（§5.8）；在那之前，`gc_repo` 过了年龄下限也会收走它。
+  - `record_base_gen` 返回 `Unknown`：登记与否说不准。改名进来的目录不退役（登记了的 generation 只由 `gc_repo` 按保留期回收），`B` 已空，照第 8 步删掉；返回 `Unknown`（`kept: [base_dir(gen)]`）。没登记的话，`gc_repo` 过了年龄下限收走它（store.md §5.11 第 5 步）。
 
 `move_workspace` 不建基线 [我的决定 D31]。它在调用方的锁里运行，目标基线没登记就以 `InvalidInput`（`reason: "base_unbuilt"`）拒绝，在任何写之前（§5.7 第 7 步）。调用方在拿锁之前调本节的函数：deps approve 先 `ensure_base(repo, P.head)` 再 `ensure_base_for(repo, &P.tree, &P.to)`，提出者自换用 `ensure_base_for(repo, <plan_switch 的目标 tree>, &P.to)`，publish 的 rebase 按 publish.md 选其一（§2 的调用方）。进程内不合并同时到来的同一个基线的调用：第 7.2 步让它们各自收场，代价只是一次多余的导出与清单。
 
-复杂度：热路径是一次目录列表加一次 `key_of`（`ensure_base_for` 只是一次 `has_base_gen`）。冷路径是导出 O(文件数 + 字节数)、`ensure`（认领秒级，冷装分钟级）、清单 O(源码字节数)、`clone_into` O(依赖目录条目数)、改名 O(1)。写锁只罩第 7 步：复查、`clone_into`、改名、同步、登记；其中 `clone_into` 按依赖目录的条目数线性（tool 的 `node_modules` 约 2.4–3.9 s，apfs.md 的实测），是这段临界区里最长的一步。导出、`ensure` 与清单从不在锁里（增补 3、4 "Locks"；module-rulings "Base generations are built outside the lock"）。
+复杂度：热路径是一次目录列表加一次 `key_of`（`ensure_base_for` 只是一次 `has_base_gen`）。冷路径是导出 O(文件数 + 字节数)、一次 `key_of`、清单 O(源码字节数)、`clone_into` O(依赖目录条目数)、改名 O(1)；要认领或冷装依赖集时另加一次 `ensure`（认领秒级，冷装分钟级）与第二次导出。写锁只罩第 7 步：复查、`clone_into`、改名、同步、登记；其中 `clone_into` 按依赖目录的条目数线性（tool 的 `node_modules` 约 2.4–3.9 s，apfs.md 的实测），是这段临界区里最长的一步。导出、`ensure` 与清单从不在锁里（增补 3、4 "Locks"；module-rulings "Base generations are built outside the lock"）。
 
 ### 5.3 种子文件：`seed_plan` 与 `seed_files`
 
@@ -688,13 +700,13 @@ design §6.1 第 2 步把接法交给构建者；增补 2 定为影子仓库，g
 
 `seed_plan(cfg, git, main, base, tree)` 对每个条目 `p`（序号 `index`）依次判定 [我的决定 D9]：
 
-1. **来源**：`lstat(main/p)`。不存在 → 静默跳过。普通文件或符号链接 → 继续。目录 → 显式：`IsDirectory`；候选：跳过。FIFO、socket、设备 → 显式：`NotFile`（`detail.file_type`）；候选：跳过。候选在下面任何一条不满足时同样静默跳过，不报错、不告警（review M10：上一版把类型检查排在候选过滤之前，一个是目录的缺省项就能让 `new` 失败）。
+1. **来源**：`lstat(main/p)`。不存在 → 静默跳过。普通文件 → 继续。符号链接 → 经 `apfs::attrs_of(main, p)` 读出 `FileKind::Symlink { target }`，继续；主 checkout 里 `p` 的某一级上级是符号链接（`attrs_of` 逐级不跟随，给 `NotDirectory`）→ 显式：`NotDirectory`（`reason: "symlink"`）；候选：跳过（module-rulings "A symlink is recreated, never cloned"；§5.3 末尾的 `seed_files`）。目录 → 显式：`IsDirectory`；候选：跳过。FIFO、socket、设备 → 显式：`NotFile`（`detail.file_type`）；候选：跳过。候选在下面任何一条不满足时同样静默跳过，不报错、不告警（review M10：上一版把类型检查排在候选过滤之前，一个是目录的缺省项就能让 `new` 失败）。
 2. **被跟踪**：`git.tree_contains(tree, p)` 为真（`p` 是 tree 里的文件或符号链接，或是被跟踪的目录）→ 显式：`InvalidInput`（`detail = {repo, field: "seed_files", index, rule: "seed_files", reason: "tracked"}`）；候选：跳过。
-3. **落点**（增补 3 "Rooted destinations"）：`p` 的每一级上级 `a`，在基线 generation 目录里 `apfs::attrs_of(base, a)`：不存在或是真目录 → 可以；是符号链接或不是目录 → 显式：`InvalidInput`（`reason: "parent_not_directory"`，`detail.parent = a`）；候选：跳过。`p` 本身在基线目录里已存在 → 显式：`InvalidInput`（`reason: "exists_in_base"`）；候选：跳过。这一条保证之后根之下逐级 `O_NOFOLLOW` 的写一定成功，而不是在 `create_session` 之后才撞上一个被跟踪的符号链接、只能报 `Unknown`。
+3. **落点**（增补 3 "Rooted destinations"）：`p` 的每一级上级 `a`，在基线 generation 目录里 `apfs::attrs_of(base, a)`：不存在或是真目录 → 可以；是符号链接或不是目录 → 显式：`InvalidInput`（`reason: "parent_not_directory"`，`detail.parent = a`）；候选：跳过。`p` 本身在基线目录里已存在 → 显式：`InvalidInput`（`reason: "exists_in_base"`）；候选：跳过。这一条保证之后根之下逐级 `O_NOFOLLOW` 的写一定成功，而不是在 `create_session` 之后才撞上一个被跟踪的符号链接、只能报 `Unknown`。"已存在"与"同一个文件"是磁盘同一性的问题，按卷折叠，不按字节，也不按 `core.ignorecase`（module-rulings "Disk identity follows the volume, git identity follows core.ignorecase"）：`volume_caps(base).case_sensitive` 为假的卷上，`attrs_of` 的逐级查找本身就按卷折叠，种子 `.env` 落在被跟踪的 `.ENV` 上，算作已存在，不会覆盖它；同一份条目表里两个条目的 `case_fold_key` 相同时，后一个与前一个是同一个文件：显式 → `InvalidInput`（`reason: "duplicate"`，`detail.other` 是前一个的序号）；候选：跳过 [我的决定 D9]。大小写敏感的卷上按 `RepoPath` 的字节比较。第 2 步的"被跟踪"与第 4 步的"被 ignore"是 git 的看法，照 gitio 的规则。
 4. **被 ignore**：`git.is_ignored_in_export(base, tree, p)`（§2 的上游要求）为假 → 显式：`InvalidInput`（`reason: "not_ignored"`）；候选：跳过。判定与工作区建好之后 git 的判定相同：基线里的 `.gitignore`，主 checkout 现在的 `info/exclude`（即 `ensure_shadow` 将要镜像的那份），以及全局排除文件 `core.excludesFile`（增补 1 的 T5 条）。
-5. 通过 → 一条 `SeedSource`：`source = main/p`；是符号链接时 `link` 记它的目标；`size` 与 `source_mtime` 取自第 1 步的 `lstat`。
+5. 通过 → 一条 `SeedSource`：`source = main/p`；是符号链接时 `link` 记第 1 步经 `attrs_of` 读出的目标；`size` 与 `source_mtime` 取自第 1 步的 `lstat`。
 
-`seed_files(plan, to)`：对每条 `SeedSource`，`mkdir_rooted(to, p 的上级, 0o755, parents = true)`，再 `apfs::clone_file_rooted(source, to, p, None)`。符号链接按链接本身克隆，目标字节不变，从不跟随 [我的决定 D10]。复制出来的文件与主 checkout 的互相独立（CoW），权限位照来源。`copied` 是复制完成的时刻。它只在 `create_session` 之后被调用，任何失败都由 `new` 记成 `Unknown`；来源在计划与复制之间被换了类型（例如换成 FIFO）也一样。
+`seed_files(plan, to)`：对每条 `SeedSource`，`mkdir_rooted(to, p 的上级, 0o755, parents = true)`。普通文件：`apfs::clone_file_rooted(source, to, p, None)`。符号链接按目标重建，从不克隆、从不跟随：`apfs::symlink_rooted(to, p, link)`，目标字节就是计划里记下的那份（module-rulings "A symlink is recreated, never cloned"）[我的决定 D10]。复制出来的文件与主 checkout 的互相独立（CoW），权限位照来源。`copied` 是复制完成的时刻。它只在 `create_session` 之后被调用，任何失败都由 `new` 记成 `Unknown`；来源在计划与复制之间被换了类型（例如换成 FIFO）也一样。
 
 种子文件不进 checkpoint：它们被 ignore，overlay 本来就跳过；即使会话改了 `.gitignore`，让某个种子文件不再被 ignore，overlay 的排除集合也照样把它挡在外面（overlay.md §5.1 的第 3 项）。`status` 每次都对种子文件重查 ignore，不再被 ignore 时给 `SeedNotIgnored`（§5.5）。
 
@@ -843,12 +855,12 @@ ticket 不会与 id 混淆：`new` 以 `ReservedName` 拒绝会话 id 形式的 
 2. 其余的条目是"外来"的，按 `attrs_of(S, p)` 与它在旧树里的种类处理：
    - `S` 里在 `p` 上已经是目录、`p` 也是目录 → 往下走。
    - `S` 里在 `p` 上已经有别的东西（新基线在同一路径上新增了被跟踪的文件，或投影放了东西）；或 `p` 的某一级上级在 `S` 里是符号链接或不是目录；或 `p` 是 FIFO、socket、设备；或 `p` 是对属主不可写的目录（改名到别的父目录要求对它本身有写权限，apfs 会给 `ReadOnly`）；或 `p` 对属主不可读（mode 缺 u+r：apfs 打开源时得 `EACCES`，归为 `Unknown`）→ 不携带，记进 `uncarried`；它留在旧树里，旧树因此被保留（第 19 步）。携带从不覆盖新树里的任何东西：一个被 ignore 的本地文件要是盖掉一个新的被跟踪文件，它就会以 `Modified` 进 overlay，变成可发布的改动。
-   - 否则携带 [我的决定 D34]：缺的上级用 `mkdir_rooted(S, p 的上级, 0o755, parents = true)`。普通文件与目录：`apfs::clone_from_rooted(ws, p, <S>/.strata-carry-<16 位十六进制>, kind)` 克隆到 `S` 根下的一个私有临时名（目录整块克隆，不再往下走），`kind` 按第 1 步遍历看到的种类取 `CloneKind::File` 或 `CloneKind::Dir`，源一侧逐级钉住、不跟随符号链接；再 `rename_rooted(S, <临时名>, p, RenameMode::Excl)` 放到位，目的地一侧同样逐级不跟随（增补 7、8 的做法）。符号链接：`clone_file_rooted(<ws>/p, S, p, None)` 克隆链接本身，从不跟随（`clone_from_rooted` 不接受符号链接；源路径的上级刚被第 1 步的遍历确认是目录，链接的目标从不被读）。
-   - 遍历之后、克隆之前源变了（与 agent 的写并发），不算移动失败：不见了（`NoSuchPath`）就跳过，没有东西要带；种类变了（apfs 在克隆之前给 `IsDirectory`、`NotFile` 或 `NotDirectory`，即 `CloneKind` 对不上）或某一级上级成了符号链接，就记进 `uncarried`，它留在旧树里（module-rulings "clone_from_rooted states its source kind"）。apfs 在克隆之前拒绝，所以这时临时名下什么都没有。测试在遍历之后停住造出这种竞争（接缝位置 `move.carry`，§3）。
+   - 否则携带 [我的决定 D34]：缺的上级用 `mkdir_rooted(S, p 的上级, 0o755, parents = true)`。普通文件与目录：`apfs::clone_from_rooted(ws, p, <S>/.strata-carry-<16 位十六进制>, kind)` 克隆到 `S` 根下的一个私有临时名（目录整块克隆，不再往下走），`kind` 按第 1 步遍历看到的种类取 `CloneKind::File` 或 `CloneKind::Dir`，源一侧逐级钉住、不跟随符号链接；再 `rename_rooted(S, <临时名>, p, RenameMode::Excl)` 放到位，目的地一侧同样逐级不跟随（增补 7、8 的做法）。符号链接按目标重建，从不克隆（module-rulings "A symlink is recreated, never cloned"）：`apfs::attrs_of(ws, p)` 逐级不跟随地读出 `FileKind::Symlink { target }`，再 `apfs::symlink_rooted(S, p, target)`。不用按路径的 `clone_file_rooted(<ws>/p, …)`：它的源一侧跟随中间级的符号链接，旧树里一个被换成符号链接的上级就能把它引到会话之外；`clone_from_rooted` 又不接受符号链接。
+   - 遍历之后、克隆之前源变了（与 agent 的写并发），不算移动失败：不见了（`NoSuchPath`）就跳过，没有东西要带；种类变了（apfs 在克隆之前给 `IsDirectory`、`NotFile` 或 `NotDirectory`，即 `CloneKind` 对不上；符号链接是 `attrs_of` 读到的不再是符号链接）或某一级上级成了符号链接（`attrs_of` 与 `clone_from_rooted` 都给 `NotDirectory`），就记进 `uncarried`，它留在旧树里（module-rulings "clone_from_rooted states its source kind"、"A symlink is recreated, never cloned"）。从不从会话之外复制东西进来。apfs 在克隆之前拒绝，所以这时临时名下什么都没有。测试在遍历之后停住造出这种竞争（接缝位置 `move.carry`，§3）。
    - 克隆把源的 `uchg`、`uappnd` 旗标与扩展属性原样带到临时名上（apfs 不清旗标）。`Attrs` 不带旗标，第 2 步看不出来；带 `uchg` 或 `uappnd` 的条目在放到位的那次改名上得 `EPERM`，apfs 归为 `ReadOnly`，按第 13 步的具名失败处理：移动被拒绝，暂存退役（临时名在暂存里一起退役，store 的 gc 用 `remove_tree_rooted` 清掉旗标再删），`detail.path` 指出这个条目。session 不替人清旗标 [我的决定 D34]。
 3. 嵌套在依赖目录里的种子缓存（`deps::nested_seed_caches(cfg)`，如 `node_modules/.cache`）在第 1 步被剪掉了，单独按第 2 步的规则携带。依赖目录本身来自新依赖集，不携带；dev-link 下一次运行时会重新镜像 `node_modules/@inter/*`。
 
-携带不进 blob store [我的决定 D34]：被 ignore 的内容可能是几百 GB 的构建产物，逐个文件存成 blob 再取回来，要把它们全部读一遍、算一遍哈希，还把构建产物塞进 blob store。module-rulings "Carry is not a capture" 改正了增补 8 把"session 的携带"列在 `put_blob_rooted` 之下的说法：携带是把旧工作区的条目克隆进新树，不是往 store 里捕获；`put_blob_rooted` 的调用方只是往 store 里捕获的（overlay 的 checkpoint）。从工作区读时不跟随符号链接，由 `clone_from_rooted` 本身保证。
+携带不进 blob store [我的决定 D34]：被 ignore 的内容可能是几百 GB 的构建产物，逐个文件存成 blob 再取回来，要把它们全部读一遍、算一遍哈希，还把构建产物塞进 blob store。module-rulings "Carry is not a capture" 改正了增补 8 把"session 的携带"列在 `put_blob_rooted` 之下的说法：携带是把旧工作区的条目克隆进新树，不是往 store 里捕获；`put_blob_rooted` 的调用方只是往 store 里捕获的（overlay 的 checkpoint）。从工作区读时不跟随符号链接，由 `clone_from_rooted` 与 `attrs_of` 本身保证。
 
 复杂度（review M14）：遍历是 O(依赖目录与整块克隆的目录之外的条目数)，tool 约 4.2K 个源码文件；整块克隆在内核里按条目数线性，主要是 `src-tauri/target`：tool 的约 76 万个条目，`cp -Rc` 实测几秒（2026-10-21，本机 USB SSD 上约 200 GB 的 `target`）。design §8 写"依赖 rollout = 克隆 + rename，秒级"；对带着这种目录的工作区，"秒级"取决于这一次克隆，首个 spike 实测之后修正（`move_workspace_seconds_warm`）。不用改名来携带：改名会把目录从旧树里搬走，交换之前的具名拒绝或崩溃就得把它搬回去，而搬回去之前，旧工作区已经少了一块，那是对外可见的改动。
 
@@ -860,13 +872,13 @@ daemon 启动时调用一次，先于 gc 与任何请求；这时没有进行中
 
 1. `store.sessions()` 里 `Creating` 的 → `set_lifecycle(id, Creating, Unknown, Some(scene), now)`，`scene = { op: New, phase: 最后记下的 phase, kept: 存在的会话根与影子仓库目录, error: Unknown 且 detail.reason = "interrupted" }`；`Removing` 的同样记成 `Unknown`，`op: Remove`。
 2. `store.open_move_intents()`：`Preparing` 的 → 会话是 `Active` 时 `retire_dir` 它的暂存与管理目录 `worktrees/<n>`（不存在就跳过）；会话不是 `Active` 时不单独退役，它们随会话根与影子仓库一起离开（store 的第 5、6 行只接受 `Active` 的会话）；再 `set_move_state(…, Preparing, Abandoned)`（增补 3、增补 4 细化 2）。`Swapping` 的 → `fail_move(…, scene)`，`scene` 列出工作区与暂存两个位置，工作区记成 `Unknown`，之后由人经 §5.9 处理。
-3. 对每个仓库，`bases/<repo>/.staging/` 下的每个条目 → `retire_dir`（§2 上游要求的 store 第 7 行）[我的决定 D7]：它们是缓存填充的内部暂存，从未对外可见。
+3. 对每个仓库，`bases/<repo>/.staging/` 下的每个条目 → `retire_dir`（store 第 7 行）[我的决定 D7]：它们是缓存填充的内部暂存，从未对外可见。`NoSuchPath`（`gc_repo` 已经收走）不算失败。daemon 不重启时，漏下的由 `gc_repo` 过了年龄下限收走（store.md §5.11 第 5 步）。
 4. 别的一概不碰：不删除工作区，不重放，不替上次完成交换（不变量 6）。
 5. 单项失败记进 `RecoverReport.errors`，接着处理下一项 [我的决定 D37]：一项坏掉的现场不该让 daemon 起不来；这些错误由 daemon 写进日志并在 status 里报出。返回 `RecoverReport`。
 
 ### 5.9 `resolve_failed_move(session, repo, choice)`：处理一次失败的移动
 
-交换开始之后失败的移动，把工作区留在健康 `Unknown`（§5.7 第 16–18 步、§5.8 第 2 步）。overlay 拒绝在这样的工作区上 restore（overlay.md @597d2d9 §3 的 `restore` 与 §6.3），这一条不变；store 也没有从 `Unknown` 回到 `Ok` 的边。所以在这之前，人只剩 `rm --discard` 一条路（review M-b）。module-rulings "Resolving a failed move"：现场保留并报出（不变量 6），人看过之后可以清掉它。daemon 的 status 给出两种处理（T13）；cli 用一个显式命令收下人的选择，没有选择就不运行（T14）。daemon 在这个会话的队列里调用本函数，不持锁；它只为移 pin 自己取一小段写锁 [我的决定 D45]。
+交换开始之后失败的移动，把工作区留在健康 `Unknown`（§5.7 第 16–18 步、§5.8 第 2 步）。overlay 拒绝在这样的工作区上 restore（overlay.md @77e2e0c §3 的 `restore` 与 §6.3），这一条不变；store 也没有从 `Unknown` 回到 `Ok` 的边。所以在这之前，人只剩 `rm --discard` 一条路（review M-b）。module-rulings "Resolving a failed move"：现场保留并报出（不变量 6），人看过之后可以清掉它。daemon 的 status 给出两种处理（T13）；cli 用一个显式命令收下人的选择，没有选择就不运行（T14）。daemon 在这个会话的队列里调用本函数，不持锁；它只为移 pin 自己取一小段写锁 [我的决定 D45]。
 
 **阶段 A：核对。** 只读，失败都是具名拒绝，什么都不写。
 
@@ -912,20 +924,21 @@ daemon 启动时调用一次，先于 gc 与任何请求；这时没有进行中
   - 收走别的操作留下的内部暂存，并把它的意图关成 `Abandoned`（§5.7 第 9 步、§5.6 第 5.1 步、§5.8），或收走 Abandon 之后没能退役的暂存（§5.9 第 6 步）。
 - **规则**：
   1. 第一次对外可见的写之前：具名拒绝，或原样透传下层的码，调用之前的状态原样恢复。建了内部暂存的，先拿走暂存（`retire_dir`，空目录则 `remove_rooted`），再把意图关成 `Refused`，然后返回（增补 3、增补 4 细化 2）。
-  2. 例外：内部暂存写到一半时下层给出 `Unknown`（`ENOSPC`、`EIO` 这类）。暂存里有什么说不准，所以返回 `Unknown`，暂存原样留着：基线暂存由 `leftovers()` 报出，移动暂存由 `status` 报成 `MoveLeftover`。之后由下一个操作或 `recover` 收走 [我的决定 D7、D33]。工作区与会话的状态都没变。
+  2. 例外：内部暂存写到一半时下层给出 `Unknown`（`ENOSPC`、`EIO` 这类）。移动暂存里有什么说不准，所以返回 `Unknown`，暂存原样留着，由 `status` 报成 `MoveLeftover`，之后由下一个操作或 `recover` 收走 [我的决定 D33]。基线暂存不同：写到一半的导出或克隆是缓存填充的中间产物，随暂存一起退役，返回的 `Unknown` 里 `kept` 为空；只有退役本身失败时它才留下，由 `leftovers()` 报出（§5.2；module-rulings "Base staging is registered right after its manifest"）[我的决定 D7]。工作区与会话的状态都没变。
   3. 第一次对外可见的写之后：任何失败都是 `Unknown`。现场原样保留，`Scene` 记进 store（会话行经 `set_lifecycle`，工作区行经 `fail_move`），`status` 报出，daemon 重启之后照样报出。session 从不自己重放、清理或回滚它。越过它要人：会话的现场经 `rm --discard` 加人类确认（S6）；失败的移动留下的工作区现场，还可以经 `resolve_failed_move` 的 Abandon 或 Accept，它先核对磁盘上的现场与意图的记录（§5.9）。
   4. 意图行从不删除，只被关进终态（`Done`、`Refused`、`Abandoned`、`Unknown`），由 store 的 gc 按保留期回收（增补 4 细化 2）。`Unknown` 的意图只经 §5.9 再被关成 `Abandoned` 或 `Done`。
 
 ### 6.2 失败表
 
-`new`（`ensure_base`、`ensure_base_for` 单独调用时，按其中"建基线"两行；`ensure_base_for` 另有依赖集没封存的 `InvalidInput`）：
+`new`（`ensure_base`、`ensure_base_for` 单独调用时，按其中"建基线"三行；`ensure_base_for` 另有依赖集没封存的 `InvalidInput`）：
 
 | 失败 | 码 | 现场 | 恢复 |
 | --- | --- | --- | --- |
 | 阶段 A：ticket、`repos`、路径与符号链接、别名嵌套、卷、来源类型、id 冲突 | 具名码（§5.1 第 1–7 步） | 无 | 改正后重试；重试得到新 id |
 | fetch、链顶判定、`tree_of` | gitio 的码，原样透传 | 无（fetch 写下的对象与远端跟踪 ref 是 gitio 对 origin 的观察，以后复用） | 重试 |
 | 建基线：具名码（导出之前的拒绝、deps 的 `Drift`、`build_manifest` 的 `NotText`……），写锁的 `Busy` | 原样透传 | 无：暂存已退役；已经封存的依赖集留作缓存 | 修好后重试 |
-| 建基线：写到一半的 I/O 错误 | `Unknown`（`detail.op = "base"`） | 基线暂存 `B`，`leftovers()` 报出 | daemon 下一次启动时 `recover` 收走它；空出空间后重试 |
+| 建基线：写到一半的 I/O 错误 | `Unknown`（`detail.op = "base"`，`kept` 为空） | 无：暂存连同写到一半的导出或克隆已退役；退役也失败时暂存留下，`leftovers()` 报出 | 空出空间后重试；留下的暂存由 `recover` 或 `gc_repo` 收走 |
+| 建基线：暂存在登记之前被 `gc_repo` 收走（`clone_into`、改名或退役得到 `NoSuchPath`） | 重建一次；再被收走 → `Busy`（`reason = "base_staging_retired"`） | 无 | 重试 |
 | 显式种子文件：类型、被跟踪、上级不是目录、未被 ignore | `IsDirectory`、`NotFile`、`InvalidInput` | 无（基线已建好，是缓存） | 改配置或主 checkout 之后重试 |
 | `create_session` | store 的码（`Exists`、`InvalidInput`……） | 无（事务是原子的） | 重试 |
 | `create_session` 之后：`ENOSPC`、`EIO`、克隆中途、attach、pin、种子复制、`observe_main` 的任何失败（含 `main_not_recorded`）、进程崩溃 | `Unknown` | 会话 `Unknown`，带最后的 phase 与现场；会话根、已建的工作区、影子仓库、管理目录、pin，以及 `observe_main` 已登记的提议，都原样保留 | 看 `status`；`rm --discard` 加确认之后重新 `new`；主干记录由下一次观察补上 |
@@ -992,7 +1005,7 @@ daemon 启动时调用一次，先于 gc 与任何请求；这时没有进行中
 
 对应的 `message` 是：`new s-k3q7xm2a: workspace failed after writing began; kept /Volumes/GWD/inter/.strata/sessions/s-k3q7xm2a; nothing was rolled back, cleaned up or retried; see git-strata status s-k3q7xm2a`。
 
-- `detail` 的字段固定：`op`、`phase`、`cause`、`kept`，除 `base` 之外都带 `session`。`new` 另带出错的 `repo` 与 `path`；`base` 带 `repo`、`tree`、`path`（暂存 `B`）；`move` 带 `repo`、`n`、`from`、`to`、`staging`；`remove` 带 `retired`（已经改名进 trash 的路径）；`resolve` 带 `repo`、`n`。
+- `detail` 的字段固定：`op`、`phase`、`cause`、`kept`，除 `base` 之外都带 `session`。`new` 另带出错的 `repo` 与 `path`；`base` 带 `repo`、`tree`、`path`（暂存 `B`）、`retired`（已经退役的暂存）；`move` 带 `repo`、`n`、`from`、`to`、`staging`；`remove` 带 `retired`（已经改名进 trash 的路径）；`resolve` 带 `repo`、`n`。
 - `op` 取 `"new"`、`"base"`、`"move"`、`"remove"`、`"resolve"`。`phase` 的取值固定，也就是测试接缝的阶段名（去掉操作前缀，§3）：
   - `new`：`root`、`workspace`、`git`、`pin`、`seed_caches`、`seed_files`、`observe`、`finalize`；
   - `base`：`export`、`deps`、`manifest`、`register`；
@@ -1000,7 +1013,7 @@ daemon 启动时调用一次，先于 gc 与任何请求；这时没有进行中
   - `remove`：`unpin`、`retire`、`record`；
   - `resolve`：`pin`、`record`、`retire`（只有 Accept 移过 pin 之后才会返回 `Unknown`，这时 phase 是 `record`，§5.9 第 8 步；`retire` 的失败不返回错误）。
 - `cause`：下层给出的是 `StrataError` 时就是那个错误（`code`、`message`、`detail`）；是 I/O 错误时是 `errno` 加原文。
-- `message` 的模板：`<op> <session>[/<repo>]: <phase> failed after writing began; kept <kept 里的路径，逗号分隔>; nothing was rolled back, cleaned up or retried; see git-strata status <session>`。在第一次对外可见的写之前的两种（`base`，`move` 的 `prepare`）改用：`<op> <session/repo 或 repo tree>: <phase> failed before anything visible changed; kept <路径>; <the next move, rm or daemon restart | the next daemon restart> collects it`。
+- `message` 的模板：`<op> <session>[/<repo>]: <phase> failed after writing began; kept <kept 里的路径，逗号分隔>; nothing was rolled back, cleaned up or retried; see git-strata status <session>`。在第一次对外可见的写之前的两种改用：`move` 的 `prepare` 是 `move <session>/<repo>: prepare failed before anything visible changed; kept <路径>; the next move, rm or daemon restart collects it`；`base` 是 `base <repo> <tree>: <phase> failed before anything visible changed; the staging was retired; retry when the cause is fixed`，退役也失败时把后半句换成 `kept <B>; the next daemon restart collects it`。
 - 同一个 `StrataError` 存进 `Scene.error`（`new`、`move` 交换之后、`remove`；`resolve` 不新记现场，工作区原来的现场不变），所以 `status`，以及 daemon 重启之后的 `status`，报出的是与当初完全相同的错误。`Scene.op` 序列化为小写，与 `detail.op` 相同（review M19）。
 
 ### 6.4 重启
@@ -1025,7 +1038,8 @@ daemon 启动时先调 `recover`（§5.8），然后才跑 gc、接受请求。�
 - 交换之前只对依赖目录检查打开的文件（design §6.4 第 5 步）。cwd 在工作区里的进程（在工作区里启动的 Claude Code 或 shell）交换之后留在旧树上：继承这个 cwd 的命令在旧树里读写，`resolve` 对旧树里的路径返回 None。旧树因此被保留并在 `status` 里告警；写进旧树的东西没有 checkpoint，`changed` 读的时候重算，有改动时 `remove` 需要 `--discard`（review I5）。按路径重新进入工作区的进程不受影响。
 - 交换之后，会话的暂存状态和本地 commit 不随工作区走：新管理目录的 index 等于新基线。overlay 里的 `Added` 条目因此变成 `Untracked`，两者发布与检索的待遇相同（types.md `EntryKind`）。本地 commit 的对象还在本会话的影子仓库里，随 `remove` 一起退役。
 - 镜像只在 `new` 时取一次：之后主 checkout 的 `info/exclude`、`info/attributes` 与复制的配置键改了，已有的会话不受影响，只在 `status` 里给 `MirrorDrift`；新会话取新的。
-- 建基线写到一半留下的暂存没有意图行，只在 daemon 下一次启动时被收走；在那之前它占着空间，`leftovers()` 报出它。
+- 建基线失败之后没能退役的暂存没有意图行，由 daemon 下一次启动时的 `recover` 或 `gc_repo` 过了年龄下限收走；在那之前它占着空间，`leftovers()` 报出它。
+- 要认领或冷装依赖集时，基线多导出一次（§5.2 第 5 步）：那份导出跨过了装依赖，按裁定不再登记。相对几秒到几分钟的认领或冷装，这一次导出（tool 几秒）可以忽略。
 - 整套兄弟布局的 `new` 很可能达不到 design §8 的 5 s：增补 8 的估算是全部仓库约 62 万个依赖条目，单线程 12–19 s，按实测的 4 路并行约 5.5 s，还没算源码树，也没算阶段 B 的 22 次网络 fetch（每次一个到 origin 的往返，4 路并行，§5.1 复杂度）。session 的计划是按仓库 4 路并行克隆（D41），按这个速率仍很可能超过 5 s。`new_warm_under_5s` 实测这一点；选项（按仓库并行克隆，即 D41；按仓库懒装依赖；放宽目标）在这一阶段结束时交给用户定。
 - 带着几十万条目的被 ignore 目录（`src-tauri/target`）的工作区，移动的耗时由携带的克隆决定（§5.7.1），可能达不到 design §8 的"秒级"。
 - 保留的旧树越多，`status` 越慢：每棵旧树一次进程扫描加一次冷扫（§5.5）。
@@ -1048,12 +1062,12 @@ daemon 启动时先调 `recover`（§5.8），然后才跑 gc、接受请求。�
 | `new_refuses_fifo_seed_before_writing` | 主 checkout 里的显式种子文件是 FIFO（`mkfifo`）：`NotFile`，在任何写之前返回，FIFO 从未被打开（调用不阻塞），没有残留；换成普通文件后重试成功，得到一个新的会话 id，不返回 `Exists` | `sdk/js/test/init_refusals.mjs::fifo` |
 | `new_clones_entire_sibling_layout` | 配置三个仓库：`tool` 的脚本按 `../quick-start/src` 读兄弟库，另有 `release-notes`。`new(Some("9246"), [tool])` 返回的清单含全部三个仓库，只有 `tool` 的 `tracked = true`。`<paths.root>/sessions/<sid>/` 下恰好是三个仓库目录，`sessions/.repos/<sid>/` 下恰好是三个影子仓库 `<repo>.git`。在 `tool` 工作区里按 `../quick-start/src/index.ts` 读到的字节等于 quick-start 钉住基线里的同一文件。`root = <paths.root>/sessions/<sid>`，`path = root/<repo>`，路径里没有 ticket | 新增（design §3 兄弟布局、§10 新增项） |
 | `new_workspace_equals_base_tree` | 100 与 1000 个文件两档（参数化）。每个工作区去掉 `.git`、依赖目录、种子缓存和种子文件之后，路径集合与 `git ls-tree -r <head>` 完全相同，逐文件字节、可执行位、符号链接目标都相同。`bases/<repo>/<tree>/<deps>/` 已登记（`has_base_gen`），`bases/<repo>/.staging/` 下与会话根旁都没有遗留的临时目录。用真实 Store，不用内存假实现 | `layerfs-project/tests/init_memory.rs::init_100_and_1000_over_memory_ports_pass_the_full_namespace_oracle`；`layerfs-project/tests/init_sqlite.rs::selected_profiles_init_100_and_1000_pass_the_full_namespace_oracle`；`layerfs-workspace/tests/captured_namespace.rs::the_model_of_the_fixture_is_the_base_root` |
-| `new_workspace_keeps_seed_bytes_and_link_targets` | 基线 tree 里有 5 个符号链接：指向依赖目录、断链、自指、指向仓库外、目标是非 UTF-8 字节；还有二进制文件。主 checkout 里有被 ignore 的种子文件（含二进制字节），以及一个不在种子清单里的被 ignore 文件。断言：工作区里的链接目标逐字节等于 tree 里的，从不被跟随；种子文件字节相同；不在清单里的被 ignore 文件不被带入；之后改写、删除主 checkout 的种子文件，工作区里的副本不变；`.git` 是 gitfile，对象没有被复制。用真实 Store | `layerfs-project/tests/complete_root.rs::host_import_keeps_ignored_git_dependencies_outputs_and_exact_link_targets`；`layerfs-project/tests/complete_root.rs::real_host_profiles_acquire_and_reuse_the_exact_complete_root` |
-| `new_refuses_explicit_seed_tracked_or_unignored` | 显式条目对着基线 generation 判定，都在 `create_session` 之前返回：`src-tauri/src/secrets.rs` 在基线 tree 里被跟踪 → `InvalidInput`，`detail = {repo, field: "seed_files", index, rule: "seed_files", reason: "tracked"}`；未被 ignore → 同样的码，`reason: "not_ignored"`；显式写出的 `CLAUDE.md` 在跟踪它的仓库里同样被拒（显式条目不按候选处理）。每种之后 Store 没有会话行、`sessions/` 下没有目录；基线 generation 已经建好并登记（缓存，留给以后用） | 新增（config.md §2.3、§4.3，module-rulings T9，review I3，增补 6） |
+| `new_workspace_keeps_seed_bytes_and_link_targets` | 基线 tree 里有 5 个符号链接：指向依赖目录、断链、自指、指向仓库外、目标是非 UTF-8 字节；还有二进制文件。主 checkout 里有被 ignore 的种子文件（含二进制字节），以及一个不在种子清单里的被 ignore 文件。断言：工作区里的链接目标逐字节等于 tree 里的，从不被跟随；种子文件字节相同；种子文件是符号链接（目标是非 UTF-8 字节）时在工作区里按目标重建，`readlink` 的字节相同；不在清单里的被 ignore 文件不被带入；之后改写、删除主 checkout 的种子文件，工作区里的副本不变；`.git` 是 gitfile，对象没有被复制。用真实 Store | `layerfs-project/tests/complete_root.rs::host_import_keeps_ignored_git_dependencies_outputs_and_exact_link_targets`；`layerfs-project/tests/complete_root.rs::real_host_profiles_acquire_and_reuse_the_exact_complete_root` |
+| `new_refuses_explicit_seed_tracked_or_unignored` | 显式条目对着基线 generation 判定，都在 `create_session` 之前返回：`src-tauri/src/secrets.rs` 在基线 tree 里被跟踪 → `InvalidInput`，`detail = {repo, field: "seed_files", index, rule: "seed_files", reason: "tracked"}`；未被 ignore → 同样的码，`reason: "not_ignored"`；显式写出的 `CLAUDE.md` 在跟踪它的仓库里同样被拒（显式条目不按候选处理）。大小写不敏感的卷上，基线里被跟踪的是 `.ENV`、显式条目是 `.env` → `InvalidInput`（`reason: "exists_in_base"`），`.ENV` 一字不变；同一份表里写了 `.env` 与 `.ENV` 两个显式条目 → `InvalidInput`（`reason: "duplicate"`）。大小写敏感的卷（`hdiutil` 镜像）上前一种的 `.env` 照常复制，与 `.ENV` 并存。显式条目 `.claude/settings.local.json` 是符号链接、而主 checkout 里的 `.claude` 本身是符号链接 → `NotDirectory`（`reason: "symlink"`）。每种之后 Store 没有会话行、`sessions/` 下没有目录；基线 generation 已经建好并登记（缓存，留给以后用） | 新增（config.md §2.3、§4.3，module-rulings T9、"Disk identity follows the volume, git identity follows core.ignorecase"，review I3，增补 6） |
 | `new_seed_writes_never_leave_the_session_root` | 基线 tree 跟踪一个符号链接 `conf -> <测试临时目录里会话根之外的目录 O>`。显式种子 `conf/.env` → `InvalidInput`（`reason = "parent_not_directory"`），在 `create_session` 之前；去掉它之后：候选种子 `.claude/settings.local.json`（`.claude` 是被跟踪的、指向 O 的符号链接）静默跳过，种子缓存 `conf/cache` 静默跳过，`new` 成功；O 里从头到尾没有新条目，O 的 mtime 不变 | 新增（增补 3 "Rooted destinations" 点名的测试；review I6） |
 | `new_pins_chain_top_when_ahead` | `pin_unpushed = true` 且 `publish.branch == default_branch`：`refs/strata/publish/main` 领先 `origin/main` → `head` 是链顶；链与 origin 相同、落后或分叉 → `head` 是 `origin/main` 的 tip；`pin_unpushed = false` → 一律 origin | 新增（design §6.7） |
 | `new_pins_default_branch_when_publish_branch_differs` | `publish.branch = "release"`、`default_branch = "main"`，`refs/strata/publish/release` 领先：新会话仍钉 `origin/main`，`pin_unpushed` 不起作用 | 新增（config.md §2.3 的 `publish` 条，T2 裁定） |
-| `new_seeds_default_names_only_when_untracked_and_ignored` | 配置里没写 `seed_files`，缺省四项都是候选：`CLAUDE.md` 被跟踪 → 不复制，不报错也不告警，工作区里是基线版本；`.env` 未被 ignore → 不复制；`.env.local` 被 ignore 且未被跟踪 → 复制；`.claude/settings.local.json` 只靠 `core.excludesFile` 被 ignore → 复制；主 checkout 里不存在的条目静默跳过。另一组：候选 `.env` 在主 checkout 里是目录、`.env.local` 是 FIFO → 都静默跳过，FIFO 从未被打开，`new` 成功（review M10） | 新增（module-rulings T9 from T2，config.md §2.3） |
+| `new_seeds_default_names_only_when_untracked_and_ignored` | 配置里没写 `seed_files`，缺省四项都是候选：`CLAUDE.md` 被跟踪 → 不复制，不报错也不告警，工作区里是基线版本；`.env` 未被 ignore → 不复制；`.env.local` 被 ignore 且未被跟踪 → 复制；`.claude/settings.local.json` 只靠 `core.excludesFile` 被 ignore → 复制；主 checkout 里不存在的条目静默跳过。另一组：候选 `.env` 在主 checkout 里是目录、`.env.local` 是 FIFO → 都静默跳过，FIFO 从未被打开，`new` 成功（review M10）。大小写不敏感的卷上基线里被跟踪的是 `.ENV`：候选 `.env` 静默跳过，工作区里的 `.ENV` 是基线版本 | 新增（module-rulings T9 from T2，config.md §2.3） |
 | `new_clones_seed_caches_as_real_directories` | tracked 仓库的 `src-tauri/target`、`.next/cache`、`node_modules/.cache` 从主 checkout 克隆为真实目录：`lstat` 不是符号链接；改写工作区里的文件，主 checkout 的同一文件不变。`node_modules/.cache` 落在依赖目录里。`tracked = false` 的仓库不克隆种子缓存。主 checkout 的 `target` 是符号链接时返回 `NotDirectory`，在任何写之前 | 新增（design §3 symlink 陷阱、§4） |
 | `workspace_git_is_detached_and_prepush_refuses` | 每个工作区：`git symbolic-ref -q HEAD` 失败（detached）；`git rev-parse HEAD` 等于清单的 `head`，且 `tree_of(head) == base.tree`；`git rev-parse --git-common-dir` 是 `<paths.root>/sessions/.repos/<sid>/<repo>.git`；`git remote` 输出为空，没有 upstream；新建后 `git status --porcelain` 为空（种子文件与依赖目录被 ignore）。`git push <裸仓库 URL> HEAD:refs/heads/x` 被 `pre-push` 拒绝：非零退出，stderr 含 strata 的提示，远端没有 `x`；用户级配置（`GIT_CONFIG_GLOBAL` 指向的文件）把 `core.hooksPath` 设成一个空目录时照样被拒（影子仓库钉住了 `core.hooksPath`）。带 `STRATA_PUBLISH=1` 时钩子放行（design §6.8 的约定） | 新增（design §6.8；增补 2；gitio 复审 N1） |
 | `manifest_round_trips_through_store` | `new` 返回的清单（id、ticket、root，以及每个 repo 的 base、head、path、tracked）与重开 Store 之后的 `status(id).manifest` 完全相等，JSON 往返不变 | `layerfs-sandbox/tests/container_labels.rs::labels_are_sent_at_create_and_found_in_any_order_beside_the_image_s` |
@@ -1068,17 +1082,17 @@ daemon 启动时先调 `recover`（§5.8），然后才跑 gc、接受请求。�
 | `status_reads_workspace_presence_from_filesystem` | 不经 Store 删掉一个工作区目录（或它的 `.git`）：`status` 报 `Missing`，Store 里的行没有被改写；把目录放回去后，`status` 回到 `Ok`。在会话根下建一个非空的 `.strata-tmp-restore-tool/`（含 `plan.json`）：`tool` 的告警里出现 `RestoreScene { path }`，删掉它之后告警消失 | `layerfs-sandbox/tests/engine_lifecycle.rs::only_the_engines_no_such_container_answer_is_a_gone_container`；`layerfs-sandbox/tests/engine_lifecycle.rs::a_stop_the_engine_answers_with_no_such_container_is_a_gone_container`；`layerfs-sandbox/tests/engine_lifecycle.rs::only_the_exact_intact_container_not_running_is_a_stopped_container`；`layerfs-sandbox/tests/container_labels.rs::a_missing_or_different_label_or_another_mount_is_a_topology_mismatch` |
 | `status_reports_drift_and_pending_proposals` | 在工作区里改 `package.json` 的依赖：`drift` 为工作区算出的安装输入哈希，与所钉依赖集的不同；只改 `version` 字段不产生 drift（依 deps 的 `inputs_hash` 规则）。deps 登记一条 Pending 的提议：`to` 不等于这个工作区的 `base.deps` → `pending` 列出它；`to` 等于它（会话已经在目标上）→ 不列；`tracked = false` 的工作区从不列（deps.md §4.5，增补 6 的 T9 条） | 新增（design §6.3、§6.4；types.md `Drift` 行） |
 | `status_reports_mirror_drift_and_vanished_shadow` | `new` 之后改主 checkout 的 `info/exclude` 与 `core.excludesFile`：`MirrorDrift.items` 恰为 `[{reason: "info_exclude"}, {reason: "config", key: "core.excludesfile"}]`，影子仓库里的镜像文件逐字节不变。再在工作区里跑 husky 安装时的那条 `git config core.hooksPath .husky/_`：多出一项 `{reason: "pre_push_guard_disabled", hooks_path: ".husky/_", hook_replaced: false}`，`status` 之后影子仓库的 config 逐字节不变（session 不钉回）。删掉影子仓库：`status` 报 `Missing` 与 `ShadowMissing`，之后影子仓库仍然不在（从不重建） | 新增（增补 2；gitio 复审；gitio @ac4149f 的 `PrePushGuardDisabled`，module-rulings T13 条） |
-| `new_failure_after_writing_began_is_unknown` | `FailAt { phase: "new.workspace@<第二个仓库>", errno: ENOSPC }`：返回 `Unknown`，`detail.repo` 是第二个仓库。会话根与第一个仓库已克隆的目录原样留下，排在第二个之后的仓库都没有开始，还没有影子仓库；不删除、不重试、不回滚。Store 里该会话为 `Unknown`，`phase = "workspace"`。`status` 报出这个现场（`Scene.op = New`）；`resolve` 对已克隆仓库的路径返回 `Some`（会话存在，由各命令自己的检查拒绝它）。用同一 ticket 再 `new`，得到新 id，旧现场不受影响。另一例：`FailAt { phase: "new.observe", errno: EIO }`：同样返回 `Unknown`，`phase = "observe"`；会话停在 `Unknown`，从未成为 `Active`；工作区、影子仓库、pin 都在 | 新增；理由出处 `layerfs-project/tests/acquisition_custody.rs::a_failed_cleanup_reports_its_cause_and_the_rows_still_held`；`observe` 一例：增补 6，deps.md @4eb59c6 §2 对 session 的要求第 4 条 |
+| `new_failure_after_writing_began_is_unknown` | `FailAt { phase: "new.workspace@<第二个仓库>", errno: ENOSPC }`：返回 `Unknown`，`detail.repo` 是第二个仓库。会话根与第一个仓库已克隆的目录原样留下，排在第二个之后的仓库都没有开始，还没有影子仓库；不删除、不重试、不回滚。Store 里该会话为 `Unknown`，`phase = "workspace"`。`status` 报出这个现场（`Scene.op = New`）；`resolve` 对已克隆仓库的路径返回 `Some`（会话存在，由各命令自己的检查拒绝它）。用同一 ticket 再 `new`，得到新 id，旧现场不受影响。另一例：`FailAt { phase: "new.observe", errno: EIO }`：同样返回 `Unknown`，`phase = "observe"`；会话停在 `Unknown`，从未成为 `Active`；工作区、影子仓库、pin 都在 | 新增；理由出处 `layerfs-project/tests/acquisition_custody.rs::a_failed_cleanup_reports_its_cause_and_the_rows_still_held`；`observe` 一例：增补 6，deps.md @22e1fac §2 对 session 的要求第 4 条 |
 | `new_unknown_detail_names_the_kept_scene` | 同上的失败：`detail` 恰好有 `op = "new"`、`session`、`phase`、`repo`、`path`、`cause`（`errno = 28` 与原文）、`kept`（会话根的绝对路径）；`message` 符合 §6.3 的模板；`Scene` 序列化后 `op` 为 `"new"`，与 `detail.op` 相同；清单从未返回给调用方 | `layerfs-project/tests/acquisition_custody.rs::an_unknown_outcome_leaves_the_operation_untouched` |
 | `unknown_scene_survives_daemon_restart` | 两种情形。（a）上一条的 `Unknown` 之后，丢弃 `Sessions` 与 `Store` 再重新打开；`recover()` 之后，`status` 报出同一个现场（同 id、phase、kept、error）。（b）`StopAt { phase: "new.seed_files" }` 就地返回，不更新状态，模拟崩溃；重开后 `recover()` 把仍为 `Creating` 的行记为 `Unknown`，`status` 报出最后记下的 phase。两种情形下，文件系统在重开前后逐字节相同：不重放，不清理 | 新增（module-rulings T9）；理由出处 `layerfs-project/tests/acquisition_custody.rs::a_failed_cleanup_after_a_failure_keeps_both_causes` |
-| `base_staging_leftover_reported_then_retired_by_recover` | `FailAt { phase: "base.register", errno: EIO }`：`ensure_base` 返回 `Unknown`（`detail.op = "base"`，`kept` 是暂存 `B`），`leftovers()` 报出 `BaseStaging { repo, path: B, .. }`。另一个线程里停在 `PauseAt { phase: "base.deps" }` 的 `ensure_base` 的暂存不在 `leftovers()` 里。重开并 `recover()` 之后，`B` 在 store 的 trash 里（`RecoverReport.retired`），`leftovers()` 为空，已登记的 generation 不受影响。具名失败（`FailAt` 以 `ENOTDIR` 在 `base.export`）→ 原样返回 `NotDirectory`，暂存当场退役，`leftovers()` 为空 | 新增（review M22；增补 6 "Export staging"） |
+| `base_staging_leftover_reported_then_retired_by_recover` | `StopAt { phase: "base.register" }` 模拟进程停在登记之前：重开之后 `leftovers()` 报出 `BaseStaging { repo, path: B, .. }`；`recover()` 之后 `B` 在 store 的 trash 里（`RecoverReport.retired`），`leftovers()` 为空，已登记的 generation 不受影响。另一个线程里停在 `PauseAt { phase: "base.deps" }` 的 `ensure_base` 的暂存不在 `leftovers()` 里。`FailAt { phase: "base.register", errno: EIO }`：返回 `Unknown`（`detail.op = "base"`，`kept` 为空，`retired` 是 `B`），`B` 连同其中的导出已在 trash 里，`leftovers()` 为空。具名失败（`FailAt` 以 `ENOTDIR` 在 `base.export`）→ 原样返回 `NotDirectory`，暂存当场退役。被 `gc_repo` 收走：停在 `PauseAt { phase: "base.register" }` 时，测试用 `store.retire_dir(B)` 把暂存挪进 trash（同 `gc_repo` 第 5 步的做法），放行之后 `ensure_base` 重建一次、登记成功；两次都被挪走（第二次的 `PauseAt` 在重建时装上）→ `Busy`（`reason = "base_staging_retired"`），没有登记，`bases/<repo>/<tree>/` 下没有目录 | 新增（review M22；增补 6 "Export staging"；module-rulings "Base staging is registered right after its manifest"） |
 | `base_generation_never_modified_in_place` | 在工作区里改写、删除、chmod 文件，`bases/<repo>/<tree>/<deps>/` 与依赖集目录的字节和 mode 都不变；`move_workspace` 移到新基线之后，旧的 generation 目录仍然不变 | `layerfs-workspace/tests/operation_scope.rs::scoped_views_share_original_install_serials_and_keep_original_provider` |
-| `ensure_base_builds_outside_the_lock` | 测试用的 `RepoWriteLock` 记下每一段持锁。停在 `PauseAt { phase: "base.export" }`、`"base.deps"`、`"base.manifest"` 时，另一个线程对同一个 repo 的 `with_write` 立即拿到锁。停在 `PauseAt { phase: "base.register" }` 时另一个线程先拿住这把锁 200 ms：这期间 `has_base_gen` 为假，放开之后 `ensure_base` 才登记并返回。两个调用建同一个 tree：A 停在 `base.register`，B 整个做完并登记；放行 A 之后两者返回同一个 `BaseGen`，`bases/<repo>/<tree>/` 下只有一个 generation 目录，A 的暂存在 store 的 trash 里，`leftovers()` 为空。`ensure_base_for(repo, 旧 tree, 已封存的新依赖集)` 建出 (旧 tree, 新依赖集) 的 generation，测试的安装环境不能冷装，它也从不调 `deps::ensure`；依赖集没封存 → `InvalidInput`（`deps_unsealed`），`bases/<repo>/.staging/` 为空 | 新增（module-rulings "Base generations are built outside the lock"；review C-d） |
+| `ensure_base_builds_outside_the_lock` | 测试用的 `RepoWriteLock` 记下每一段持锁。停在 `PauseAt { phase: "base.export" }`、`"base.deps"`、`"base.manifest"` 时，另一个线程对同一个 repo 的 `with_write` 立即拿到锁。停在 `PauseAt { phase: "base.register" }` 时另一个线程先拿住这把锁 200 ms：这期间 `has_base_gen` 为假，放开之后 `ensure_base` 才登记并返回。两个调用建同一个 tree：A 停在 `base.register`，B 整个做完并登记；放行 A 之后两者返回同一个 `BaseGen`，`bases/<repo>/<tree>/` 下只有一个 generation 目录，A 的暂存在 store 的 trash 里，`leftovers()` 为空。`ensure_base_for(repo, 旧 tree, 已封存的新依赖集)` 建出 (旧 tree, 新依赖集) 的 generation，测试的安装环境不能冷装，它也从不调 `deps::ensure`；依赖集没封存 → `InvalidInput`（`deps_unsealed`），`bases/<repo>/.staging/` 为空。要认领的冷路径（测试的安装环境让 `ensure` 认领主 checkout 的依赖目录）：`ensure` 返回之后第一份暂存已在 trash 里，登记的 generation 来自之后新建的第二份暂存（名字不同），这份暂存从建到登记之间没有调用 `deps::ensure` | 新增（module-rulings "Base generations are built outside the lock"、"Base staging is registered right after its manifest"；review C-d） |
 | `move_workspace_validates_before_writing` | 参数化：RepoId 不在配置里 → `NoSuchRepo`；`new_base.repo` 与映射出的名字不同 → `InvalidInput`（`repo_mismatch`）；`tracked = false` → `InvalidInput`（`untracked_repo`）；`tree_of(head) != new_base.tree` → `InvalidInput`（`head_tree`）；依赖集没封存 → `InvalidInput`（`deps_unsealed`）；依赖集封存了而 `new_base` 这个基线 generation 没有登记 → `InvalidInput`（`base_unbuilt`，review C-d）；没有共同祖先 → `NoMergeBase`；工作区不在 → `NoSuchPath`；影子仓库不在 → `NoSuchPath`（`shadow_missing`）；会话在 `Creating` 或 `Removing` → `InvalidInput`（`lifecycle`，review M13）；会话或工作区是 `Unknown` → `Unknown`，带记下的现场；restore 现场非空 → `Unknown`（`restore_scene`）。每种都不写任何东西：没有 checkpoint、没有意图行、没有暂存，refs 不变 | 新增（types.md §8、module-rulings T9） |
 | `move_workspace_swaps_base_and_deps_atomically` | 移动之后：有一个 `BeforeRollout` checkpoint，它经 `Sessions::open` 收到的 `BeforeCheckpoint` 记下（测试的实现计数，并转给不带 Tracker 的 `overlay::checkpoint`），session 自己没有调 `overlay::checkpoint`；工作区的源码等于新基线加上投影后的 overlay，依赖目录是新依赖集的克隆；`WorkspaceState.base`（tree 与依赖集）与 `head` 一起更新，代数变成意图的 n，`.git` 指向 `worktrees/<n>/`，旧管理目录已退役；HEAD detached 在新 head，pin 移到新 head。`StopAt` 分别停在 `move.prepare`、`move.swap`、`move.pin`、`move.record`，各自重开并 `recover()`：停在 `prepare` → 意图 `Abandoned`、暂存退役，工作区与 Store 都是旧状态；其余三处 → 工作区 `Unknown`，新旧两棵树都保留。任何一处都不出现新源码配旧依赖。提出者自换：`ensure_base_for(repo, 旧 tree, 新依赖集)` 在锁外建出 (旧 tree, 新依赖集) 的 generation，再 `move_workspace` 移过去：源码与 head 不变，依赖目录换成新依赖集的克隆 | 新增（design §6.4"依赖与源码一起移动"、第 3 步，不变量 8；module-rulings "Base generations are built outside the lock"） |
 | `move_workspace_rechecks_open_files_before_swap` | `PauseAt { phase: "move.recheck" }`：测试线程等到停住，让持有进程打开新依赖目录里的一个文件，再放行。返回 `OpenFiles`；工作区目录一字不动（inode 与内容都不变）；暂存与新管理目录已在 store 的 trash 里；意图为 `Refused`；Store 里的 base 与 head 不变；`BeforeRollout` checkpoint 留作历史；下一次移动的意图是 n + 1，不复用 n | 新增（module-rulings T8：交换前复查；增补 3；review M17、M18） |
 | `move_workspace_projects_overlay_and_marks_conflicts` | 从旧基线移到新基线（模拟一次发布）：会话已发布的路径离开 overlay，记入 `dropped`；未发布、与新基线不重叠的改动经三方合并后写入；同一 hunk 两边都改的路径保留会话版本，列在 `conflicts` 里，`status` 也列出它；overlay 里 mode 0o100755 的文件在新树里仍可执行，0o120000 的条目成为符号链接，目标字节等于 blob 的内容。交换之后对工作区冷扫（`reconcile_full`）得到的条目等于 `rebase` 的结果 | 新增（design §6.5 第 7 步；增补 3 "Projection"；review I9） |
-| `move_workspace_carries_ignored_content` | 移动之后，种子文件、种子缓存（`target/` 里的内容）、`node_modules/.cache`、其它被 ignore 的文件、被 ignore 的符号链接（链接本身，目标不变）和空目录都原样出现在新工作区里，内容相同，blob store 的条目数不因它们增加。被 ignore 的本地文件与新基线新增的同名被跟踪文件相撞 → 不携带，记进 `uncarried`，新树里是被跟踪的版本，本地文件留在保留的旧树里（`retained = true`，再移动一次它也不被收走）。新基线把 `conf` 换成指向会话根之外目录 O 的被跟踪符号链接，而旧树的 `conf/` 下有被 ignore 的文件 → 记进 `uncarried`，O 里没有新条目。FIFO、mode 000 的文件 → `uncarried`。`PauseAt { phase: "move.carry" }` 停在遍历之后，测试把一个要带的被 ignore 文件换成同名目录、删掉另一个，再放行：移动成功，前者记进 `uncarried`（旧树保留），后者既不在新树里也不在 `uncarried` 里，新树里没有 `.strata-carry-*`。被 ignore 的文件带 `uchg`：返回 `ReadOnly`（`detail.path` 是它），意图 `Refused`，暂存退役，工作区不变 | 新增（design §4 种子文件、种子缓存；增补 3 "Rooted destinations"；review I6、M14；module-rulings "clone_from_rooted states its source kind"） |
+| `move_workspace_carries_ignored_content` | 移动之后，种子文件、种子缓存（`target/` 里的内容）、`node_modules/.cache`、其它被 ignore 的文件、被 ignore 的符号链接（链接本身，目标不变）和空目录都原样出现在新工作区里，内容相同，blob store 的条目数不因它们增加。被 ignore 的本地文件与新基线新增的同名被跟踪文件相撞 → 不携带，记进 `uncarried`，新树里是被跟踪的版本，本地文件留在保留的旧树里（`retained = true`，再移动一次它也不被收走）。新基线把 `conf` 换成指向会话根之外目录 O 的被跟踪符号链接，而旧树的 `conf/` 下有被 ignore 的文件 → 记进 `uncarried`，O 里没有新条目。FIFO、mode 000 的文件 → `uncarried`。`PauseAt { phase: "move.carry" }` 停在遍历之后，测试把一个要带的被 ignore 文件换成同名目录、删掉另一个，再放行：移动成功，前者记进 `uncarried`（旧树保留），后者既不在新树里也不在 `uncarried` 里，新树里没有 `.strata-carry-*`。被 ignore 的文件带 `uchg`：返回 `ReadOnly`（`detail.path` 是它），意图 `Refused`，暂存退役，工作区不变。被 ignore 的符号链接 `src/gen-link`（`src/` 下有被跟踪的文件，遍历走进 `src/`）在新树里按目标重建，`readlink` 的字节与旧树相同（含非 UTF-8 目标），不是克隆。`PauseAt { phase: "move.carry" }` 停在遍历之后，测试把旧树的 `src` 换成指向会话外目录 O 的符号链接（O 里有一个同名、目标不同的 `gen-link`），再放行：`src/gen-link` 记进 `uncarried`（`attrs_of` 在 `src` 上给 `NotDirectory`），新树里没有来自 O 的链接 | 新增（design §4 种子文件、种子缓存；增补 3 "Rooted destinations"；review I6、M14；module-rulings "clone_from_rooted states its source kind"、"A symlink is recreated, never cloned"） |
 | `move_workspace_keeps_old_tree_while_in_use` | 移动时持有进程的 cwd 在旧工作区里：移动成功，`MoveReport.old_tree` 为 `<root>/.strata-tmp-move-<repo>-<十六进制>/`，旧树原样留着，`status` 带 `OldTreeKept`（含该 pid，`changed = false`，`retained = false`）。两种后续（参数化）：（a）往旧树里写一个文件，`status` 重算出 `changed = true`；持有进程退出之后再移动一次，这棵旧树仍然留着。（b）旧树没被改过，持有进程退出之后再移动一次，它连同它的管理目录一起退役 | 新增（design §2 反目标"丢失未发布改动"；module-rulings T9 的交换规则；review I5） |
 | `move_workspace_seconds_warm` | 与 `new_warm_under_5s` 同样的规模，新基线与依赖集都已在缓存里：`move_workspace` 的墙钟时间在秒级（目标小于 5 s），分别记录投影、携带（含几十万条目的 `target/`）与 refresh 的耗时。标 `#[ignore]` | 新增（design §8"依赖 rollout = 克隆 + rename，秒级"） |
 | `recover_abandons_pre_visible_move_intents` | （a）`FailAt { phase: "move.prepare", errno: EIO }`：返回 `Unknown`（`phase = "prepare"`，`kept` 是暂存）；工作区健康仍是 `Ok`，`status` 报 `MoveLeftover { n, staging }`；再对同一工作区 `move_workspace`：意图 n 被关成 `Abandoned`、它的暂存与管理目录退役，新的移动用 n + 1 并成功。（b）`StopAt { phase: "move.prepare" }` 之后重开并 `recover()`：意图 `Abandoned`，`RecoverReport.abandoned` 列出它，暂存在 trash 里，工作区与 Store 的 base、head 不变。（c）`FailAt` 以 `ENOTDIR` 在 `move.prepare`：返回 `NotDirectory`，意图当场关成 `Refused`，暂存退役，没有 `MoveLeftover`。（d）不靠注入：把影子仓库的 `worktrees` 换成指向主 checkout `.git/worktrees` 的符号链接，再 `move_workspace`：返回 `NotDirectory`（来自 `attach_worktree`），意图 `Refused`，暂存退役；主 checkout 的 `.git/worktrees/` 的列表与每个字节不变，工作区不变 | 新增（增补 3 "Error timing, refined"；增补 4 细化 2；review I4；增补 8 对影子仓库的澄清，gitio @ac4149f） |
@@ -1119,7 +1133,7 @@ V2、V3 的字面检查在 daemon 加载配置时由 `Config::validate` 做，�
 - Test: `crates/strata-session/tests/new_refusals.rs`、`crates/strata-session/tests/support/mod.rs`
 
 **Interfaces:**
-- Consumes: types.md 的 `Config`、`RepoConfig`、`RepoName`、`RepoId`、`SessionId`、`StrataError`、`Code`；`apfs::{same_volume, nearest_existing_ancestor, volume_caps, classify_io_error, IoSide}`；`gitio::Git` 的 `repo_id`、`fetch`、`read_ref`、`is_ancestor`、`tree_of`；`deps::{RepoWriteLock, InstallEnv}`；`store::Store` 的 `session`、`sessions`
+- Consumes: types.md 的 `Config`、`RepoConfig`、`RepoName`、`RepoId`、`SessionId`、`StrataError`、`Code`；`apfs::{same_volume, nearest_existing_ancestor, volume_caps, classify_io_error, IoSide}`；`gitio::Git` 的 `repo_id`、`fetch`、`read_ref`、`is_ancestor`、`tree_of`；`deps::{RepoWriteLock, InstallEnv, main_tip}`；`store::Store` 的 `session`、`sessions`
 - Produces: `Sessions::open`、`BeforeCheckpoint`；`Sessions::new` 的阶段 A 与第 8 步（§5.1 第 1–8 步）；`SessionSeam`、`set_next_id`、`arm`、`wait_paused`、`release`
 
 - [ ] **Step 1: 写失败的测试**：`new_typed_refusals_leave_no_trace`、`new_passes_lower_codes_through_unchanged`、`new_validates_ticket`、`new_refuses_cross_volume_root`、`new_refuses_non_apfs_root`、`new_refuses_existing_session_dir_before_any_effect`、`new_refuses_root_aliased_into_checkout`、`new_refuses_symlinked_repo_path`、`new_refuses_fifo_seed_before_writing`
@@ -1128,7 +1142,7 @@ V2、V3 的字面检查在 daemon 加载配置时由 `Config::validate` 做，�
 Run: `cargo test -p strata-session --features test-seams --test new_refusals`
 Expected: FAIL（`Sessions` 还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：ticket 白名单与保留形式；`repos` 校验；每个仓库与 `paths.root` 的 `lstat`（符号链接按 `NotDirectory`）；`F_GETPATH` 取真实路径（errno 经 `classify_io_error`），按路径分量与 `RepoId` 做别名嵌套检查（§5.1 第 4 步）；同卷（`nearest_existing_ancestor`）与 `volume_caps`；显式种子与种子缓存来源的类型；生成会话 id 并检查 `Exists`；【锁 R】fetch，链顶规则，`tree_of`。各码的 `detail` 按 §5.1。阶段 B 余下的部分这时返回一个占位错误，测试只覆盖拒绝的路径。接缝在 `test-seams` feature 下编译。
+- [ ] **Step 3: 写让测试通过的最少实现**：ticket 白名单与保留形式；`repos` 校验；每个仓库与 `paths.root` 的 `lstat`（符号链接按 `NotDirectory`）；`F_GETPATH` 取真实路径（errno 经 `classify_io_error`），按路径分量与 `RepoId` 做别名嵌套检查（§5.1 第 4 步）；同卷（`nearest_existing_ancestor`）与 `volume_caps`；显式种子与种子缓存来源的类型；生成会话 id 并检查 `Exists`；【锁 R】fetch 与同一段锁里的 `main_tip`（`None` → `NoSuchBranch`），`tree_of`。各码的 `detail` 按 §5.1。阶段 B 余下的部分这时返回一个占位错误，测试只覆盖拒绝的路径。接缝在 `test-seams` feature 下编译。
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-session --features test-seams --test new_refusals`
@@ -1148,7 +1162,7 @@ git commit -m "feat(session): refuse invalid new requests before writing"
 - Test: `crates/strata-session/tests/new_layout.rs`
 
 **Interfaces:**
-- Consumes: `gitio::Git` 的 `export_tree`、`tree_contains`、`is_ignored_in_export`（§2 的上游要求）、`ensure_shadow`、`attach_worktree`、`update_ref`；`deps::{Ctx, key_of, ensure, find_set, clone_into, nested_seed_caches, observe_main}`；`overlay::build_manifest`；`apfs::{list_dir, attrs_of, open_rooted, mkdir_rooted, clone_tree_rooted, clone_file_rooted, rename_rooted, RenameMode, remove_rooted, RemoveKind, full_fsync}`；`store::Store` 的 `base_dir`、`has_base_gen`、`record_base_gen`、`retire_dir`、`create_session`、`set_session_phase`、`record_seeds`、`set_lifecycle`
+- Consumes: `gitio::Git` 的 `export_tree`、`tree_contains`、`is_ignored_in_export`（§2 的上游要求）、`ensure_shadow`、`attach_worktree`、`update_ref`；`deps::{Ctx, key_of, ensure, find_set, clone_into, nested_seed_caches, observe_main}`；`overlay::build_manifest`；`apfs::{list_dir, attrs_of, FileKind, open_rooted, mkdir_rooted, clone_tree_rooted, clone_file_rooted, symlink_rooted, rename_rooted, RenameMode, remove_rooted, RemoveKind, full_fsync, volume_caps, case_fold_key}`；`store::Store` 的 `base_dir`、`has_base_gen`、`record_base_gen`、`retire_dir`、`create_session`、`set_session_phase`、`record_seeds`、`set_lifecycle`
 - Produces: `Sessions::ensure_base`、`Sessions::ensure_base_for`；`seed_plan`、`seed_files`、`SeedSource`、`SeedRecord`；`Sessions::new` 的第 9–16 步（§5.1）；`BASE_STAGING_DIR`
 
 - [ ] **Step 1: 写失败的测试**：`ensure_base_builds_outside_the_lock`、`new_clones_entire_sibling_layout`、`new_workspace_equals_base_tree`、`new_workspace_keeps_seed_bytes_and_link_targets`、`new_refuses_explicit_seed_tracked_or_unignored`、`new_seed_writes_never_leave_the_session_root`、`new_pins_chain_top_when_ahead`、`new_pins_default_branch_when_publish_branch_differs`、`new_seeds_default_names_only_when_untracked_and_ignored`、`new_clones_seed_caches_as_real_directories`、`workspace_git_is_detached_and_prepush_refuses`、`manifest_round_trips_through_store`、`new_warm_under_5s`
@@ -1157,7 +1171,7 @@ git commit -m "feat(session): refuse invalid new requests before writing"
 Run: `cargo test -p strata-session --features test-seams --test new_layout`
 Expected: FAIL（阶段 A 之后还没有实现，返回的是占位错误）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.2 的热路径与建基线，`ensure_base` 与 `ensure_base_for` 两种入口（暂存目录；锁外导出、`ensure` 与清单，`ensure_base_for` 只用已封存的依赖集；锁内复查、`clone_into`、改名、同步、登记，后登记的退役自己的暂存；删掉空的暂存；具名失败退役暂存）；§5.3 的四步判定与根之下的复制；§5.1 第 10 步的种子缓存计划；`create_session`；阶段 B 与阶段 D 的 4 路派发（D41），阶段 D 一个阶段做完全部仓库再进下一个，每个阶段之前 `set_session_phase`；`observe`（`observe_main`，在 `finalize` 之前）；finalize 的 `full_fsync` 与 `Creating → Active`。阶段 D 的失败这时先原样返回，`Unknown` 现场在 Task 4 接上。`new_warm_under_5s` 标 `#[ignore]`。
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.2 的热路径与建基线，`ensure_base` 与 `ensure_base_for` 两种入口（暂存目录；锁外导出、`key_of` 与清单，`ensure_base_for` 只用已封存的依赖集；要认领或冷装时第一份暂存只作 `ensure` 的输入，之后退役、另建一份；清单一建好就在锁内复查、`clone_into`、改名、同步、登记，后登记的退役自己的暂存；删掉空的暂存；任何失败先退役暂存；暂存上的 `NoSuchPath` 当作已被收走，重建一次，再遇到 → `Busy` `base_staging_retired`）；§5.3 的四步判定（落点按卷折叠，条目表里折叠之后重名的按 `duplicate` 处理）与根之下的复制（符号链接种子按目标重建）；§5.1 第 10 步的种子缓存计划；`create_session`；阶段 B 与阶段 D 的 4 路派发（D41），阶段 D 一个阶段做完全部仓库再进下一个，每个阶段之前 `set_session_phase`；`observe`（`observe_main`，在 `finalize` 之前）；finalize 的 `full_fsync` 与 `Creating → Active`。阶段 D 的失败这时先原样返回，`Unknown` 现场在 Task 4 接上。`new_warm_under_5s` 标 `#[ignore]`。
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-session --features test-seams --test new_layout`（性能测试另跑：`cargo test -p strata-session --features test-seams --test new_layout new_warm_under_5s -- --ignored`）
@@ -1216,7 +1230,7 @@ git commit -m "feat(session): resolve sessions by cwd or selector and report sta
 Run: `cargo test -p strata-session --features test-seams --test unknown_scenes`
 Expected: FAIL（还没有现场记录、`leftovers` 与 `recover`）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：按 §6.1 给失败分类（`create_session` 之前与之后；内部暂存写到一半）；`Unknown` 的 `detail` 与 `message` 按 §6.3，同一个错误序列化进 `Scene`，经 `set_lifecycle` 存下；基线暂存的"正在用"集合与 `leftovers`；`recover` 的第 1、3、4、5 步（§5.8）；接缝在每个阶段开始处生效。
+- [ ] **Step 3: 写让测试通过的最少实现**：按 §6.1 给失败分类（`create_session` 之前与之后；内部暂存写到一半）；`Unknown` 的 `detail` 与 `message` 按 §6.3，同一个错误序列化进 `Scene`，经 `set_lifecycle` 存下；基线暂存的"正在用"集合与 `leftovers`（只报中途停下或退役失败留下的暂存）；`recover` 的第 1、3、4、5 步（§5.8）；接缝在每个阶段开始处生效。
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-session --features test-seams --test unknown_scenes`
@@ -1237,7 +1251,7 @@ git commit -m "feat(session): keep Unknown scenes and collect leftovers after re
 - Test: `crates/strata-session/tests/move_workspace.rs`
 
 **Interfaces:**
-- Consumes: Task 1 的 `BeforeCheckpoint`（`CheckpointReason::BeforeRollout`）；`overlay::{reconcile_full, rebase, RebaseOptions, project, Overlay, Base, WorkspaceRef, Rebased, Checkpointed}`；`deps::{find_set, open_files, nested_seed_caches, OpenFile}`；`gitio::Git` 的 `tree_of`、`merge_base`、`shadow_at`、`read_index`、`attach_worktree`、`update_ref`；`apfs::{walk_with, WalkOptions, attrs_of, mkdir_rooted, clone_tree_rooted, clone_from_rooted, CloneKind, clone_file_rooted, rename_rooted, RenameMode, open_root, open_rooted, full_fsync}`；`store::Store` 的 `manifest`、`has_base_gen`、`checkpoints`、`begin_move`、`set_move_phase`、`set_move_state`（进入 `Swapping` 时带冲突，§2 的上游要求）、`finish_move`、`fail_move`、`set_old_tree`、`move_intents`、`open_move_intents`、`retire_dir`；Task 2 的 `ensure_base`、`ensure_base_for`（测试在拿锁之前调用它们）
+- Consumes: Task 1 的 `BeforeCheckpoint`（`CheckpointReason::BeforeRollout`）；`overlay::{reconcile_full, rebase, RebaseOptions, project, Overlay, Base, WorkspaceRef, Rebased, Checkpointed}`；`deps::{find_set, open_files, nested_seed_caches, OpenFile}`；`gitio::Git` 的 `tree_of`、`merge_base`、`shadow_at`、`read_index`、`attach_worktree`、`update_ref`；`apfs::{walk_with, WalkOptions, attrs_of, FileKind, mkdir_rooted, clone_tree_rooted, clone_from_rooted, CloneKind, clone_file_rooted, symlink_rooted, rename_rooted, RenameMode, open_root, open_rooted, full_fsync}`；`store::Store` 的 `manifest`、`has_base_gen`、`checkpoints`、`begin_move`、`set_move_phase`、`set_move_state`（进入 `Swapping` 时带冲突，§2 的上游要求）、`finish_move`、`fail_move`、`set_old_tree`、`move_intents`、`open_move_intents`、`retire_dir`；Task 2 的 `ensure_base`、`ensure_base_for`（测试在拿锁之前调用它们）
 - Produces: `Sessions::move_workspace`、`Sessions::repo_name`、`MoveReport`、`IntentRef`、`MOVE_STAGING_PREFIX`；`recover` 的意图部分（§5.8 第 2 步）
 
 - [ ] **Step 1: 写失败的测试**：`base_generation_never_modified_in_place`、`move_workspace_validates_before_writing`、`move_workspace_swaps_base_and_deps_atomically`、`move_workspace_rechecks_open_files_before_swap`、`move_workspace_projects_overlay_and_marks_conflicts`、`move_workspace_carries_ignored_content`、`move_workspace_keeps_old_tree_while_in_use`、`move_workspace_seconds_warm`、`recover_abandons_pre_visible_move_intents`
@@ -1246,7 +1260,7 @@ git commit -m "feat(session): keep Unknown scenes and collect leftovers after re
 Run: `cargo test -p strata-session --features test-seams --test move_workspace`
 Expected: FAIL（`move_workspace` 还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.7 的 21 步与 §5.7.1。要点：RepoId 到 RepoName 的映射与不匹配规则；检查阶段不写任何东西；收走上一次留下的 `Preparing` 意图；目标基线没登记就以 `base_unbuilt` 拒绝，从不建基线、从不调 `ensure`；`BeforeRollout` 经 `BeforeCheckpoint`；`begin_move` 在建任何暂存之前；克隆、`rebase`、`project`、携带（`CloneKind` 按遍历看到的种类，克隆之前源变了的记进 `uncarried`，`move.carry` 接缝）、`attach_worktree`、同步；复查打开的文件；`Preparing → Swapping` 紧挨着交换，同一个事务记下冲突（D46）；`RenameMode::Swap`；CAS 移 pin；`finish_move`；交换之后失败经 `fail_move`；旧树的核对、保留与退役。准备阶段的失败按第 13 步之后的两种处理。`recover` 加上意图，`status` 加上两条意图告警。`move_workspace_seconds_warm` 标 `#[ignore]`。
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.7 的 21 步与 §5.7.1。要点：RepoId 到 RepoName 的映射与不匹配规则；检查阶段不写任何东西；收走上一次留下的 `Preparing` 意图；目标基线没登记就以 `base_unbuilt` 拒绝，从不建基线、从不调 `ensure`；`BeforeRollout` 经 `BeforeCheckpoint`；`begin_move` 在建任何暂存之前；克隆、`rebase`、`project`、携带（`CloneKind` 按遍历看到的种类，符号链接经 `attrs_of` 读目标再 `symlink_rooted` 重建，克隆之前源变了的记进 `uncarried`，`move.carry` 接缝）、`attach_worktree`、同步；复查打开的文件；`Preparing → Swapping` 紧挨着交换，同一个事务记下冲突（D46）；`RenameMode::Swap`；CAS 移 pin；`finish_move`；交换之后失败经 `fail_move`；旧树的核对、保留与退役。准备阶段的失败按第 13 步之后的两种处理。`recover` 加上意图，`status` 加上两条意图告警。`move_workspace_seconds_warm` 标 `#[ignore]`。
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-session --features test-seams --test move_workspace`（性能测试另跑：`cargo test -p strata-session --features test-seams --test move_workspace move_workspace_seconds_warm -- --ignored`）
@@ -1330,10 +1344,10 @@ git commit -m "feat(session): resolve a failed move by abandoning or accepting i
 | D4 会话 id 的生成与冲突 | `arc4random_buf` 取 40 bit，`s-` 加 8 位小写 base32；撞上已有的行或目录 → `Exists`，不换 id 重试 | macOS 自带，不加依赖；碰撞可以忽略，真撞上多半是 bug 或手工建的目录，报出来比绕开好 | 2026-10-22 |
 | D5 `new` 的 fetch 算什么 | 缓存填充：在 `create_session` 之前，失败原样透传 | 它写的是 gitio 对 origin 的观察，以后的操作复用、重做结果相同；增补 6 定 `create_session` 为第一次对外可见的写，而 fetch 必须在它之前 | 2026-10-22 |
 | D6 找已有的基线 generation | 列出 `bases/<repo>/<tree>/`，对一个已登记的 generation 目录算 `deps::key_of`，再 `has_base_gen` | 同一个 tree 的各 generation 源码与安装输入相同，热路径不必导出 | 2026-10-22 |
-| D7 建基线的暂存 | `bases/<repo>/.staging/<32 位十六进制>/`，导出进其中的 `tree/`；具名失败当场退役；写到一半的失败留下它，`leftovers()` 报出，`recover` 退役 | 缓存填充没有意图行（增补 6）；gc 不进 `.staging`；它从未对外可见，`recover` 可以收走（增补 3）。需要 store 的 `retire_dir` 第 7 行（§2） | 2026-10-22 |
+| D7 建基线的暂存 | `bases/<repo>/.staging/<32 位十六进制>/`，导出进其中的 `tree/`；清单一建好就登记；要认领或冷装依赖集时，这份暂存只作 `ensure` 的输入，之后退役，另建一份再登记；任何失败都先退役暂存，写到一半的导出或克隆随它离开，返回的 `Unknown` 里 `kept` 为空；暂存上的 `NoSuchPath` 当作已被 `gc_repo` 收走，重建一次，再遇到 → `Busy`（`base_staging_retired`）；只有退役本身失败时暂存才留下，`leftovers()` 报出，`recover` 或 `gc_repo` 收走 | module-rulings "Base staging is registered right after its manifest" 定了：没登记的暂存只有年龄下限护着，`gc_repo` 在锁里收走过了下限的，所以暂存不能跨过装依赖这样的长步去等登记；`NoSuchPath` 的含义与 `base_staging_retired` 也由它定。本文定的是做法：认领或冷装时 deps 只在开头读这份导出，之后重建一份，比设法延长它的寿命简单，代价只是那一条路上多一次导出；失败时它里面的东西是缓存填充的中间产物，从未对外可见，不是要保留的现场。缓存填充没有意图行（增补 6）；`retire_dir` 第 7 行按形状接受它（store.md @0062a3e） | 2026-10-22 |
 | D8 复查时依赖集一再被回收 | 连续 3 轮 `find_set` 落空 → `Busy`（`reason = "deps_set_race"`） | 与 deps 的 `proposal_race` 同一做法；有界，不无限重试 | 2026-10-22 |
-| D9 种子文件的判定次序 | 来源类型 → 被跟踪 → 落点（上级都是真目录、基线里没有同名）→ 被 ignore；候选任何一步不满足都静默跳过，显式的给具名码 | 对着基线 generation 在 `create_session` 之前判定（review I3、M10）；落点检查保证之后根之下的写一定成功 | 2026-10-22 |
-| D10 种子文件是符号链接 | 克隆链接本身，目标字节不变，从不跟随 | 与工作区里其它符号链接同一待遇；跟随会把链接指向的内容带进工作区 | 2026-10-22 |
+| D9 种子文件的判定次序 | 来源类型 → 被跟踪 → 落点（上级都是真目录、基线里没有同一个文件，按卷折叠；条目表里折叠之后重名的，后一个按 `duplicate` 处理）→ 被 ignore；候选任何一步不满足都静默跳过，显式的给具名码 | 对着基线 generation 在 `create_session` 之前判定（review I3、M10）；落点检查保证之后根之下的写一定成功。"同一个文件"按卷判定由 module-rulings "Disk identity follows the volume, git identity follows core.ignorecase" 定；折叠之后重名的两个条目在大小写不敏感的卷上是同一个文件，第二次复制会在 `create_session` 之后撞上 `Exists`、只能报 `Unknown`，所以在计划里就拒绝或跳过 | 2026-10-22 |
+| D10 种子文件是符号链接 | 按目标重建：计划经 `attrs_of(main, p)` 读出目标，复制时 `symlink_rooted(to, p, 目标)`，目标字节不变；从不克隆、从不跟随；主 checkout 里它的某一级上级是符号链接 → 显式 `NotDirectory`，候选跳过 | module-rulings "A symlink is recreated, never cloned"：按路径的 `clone_file_rooted` 在源一侧跟随中间级的符号链接。与工作区里其它符号链接同一待遇；跟随会把链接指向的内容带进工作区。普通文件的种子仍按路径从主 checkout 克隆：那是人自己的树，经过人自己的链接取文件（如指向共享目录的 `.claude`）正是种子的本意 | 2026-10-22 |
 | D11 种子缓存与种子文件给哪些仓库 | 种子缓存只给 tracked 仓库；种子文件给每个仓库 | 缓存只为加速构建，`tracked = false` 的兄弟库不在会话里构建，而 `target` 动辄几十万条目；种子文件小，运行兄弟库需要它 | 2026-10-22 |
 | D12 种子缓存的落点被挡 | 静默跳过 | 缓存只是加速；缺省列表的条目不该因为某个仓库的形状让 `new` 失败，也不该到 `create_session` 之后才发现 | 2026-10-22 |
 | D13 克隆工作区时拿不拿锁 | 不拿 | 第 11 步写下的工作区行已经引用这个 generation，gc 不回收被引用的 generation | 2026-10-22 |
@@ -1357,7 +1371,7 @@ git commit -m "feat(session): resolve a failed move by abandoning or accepting i
 | D31 `move_workspace` 与基线、依赖集 | 只用已封存的依赖集（`find_set`，没有 → `InvalidInput` `deps_unsealed`）与已登记的基线 generation（`has_base_gen`，没有 → `InvalidInput` `base_unbuilt`），从不调 `ensure`、从不建基线；基线由调用方在拿锁之前经 `ensure_base` 或 `ensure_base_for` 建好（§5.2） | module-rulings "Base generations are built outside the lock" 定下锁里只找、缺了就在写之前类型化拒绝，取代上一版"缺的基线在调用方的锁里建"；冷装不能在写锁里跑（增补 3 "Deps API"、"Locks"）。码是本文选的：缺基线是调用方没按约定先建，不是存储损坏（`Corrupt`）也不是路径问题（`NoSuchPath`），所以用 `InvalidInput` 加 reason，与 `deps_unsealed` 同一做法；码表封闭，不加码 | 2026-10-22 |
 | D32 移动暂存的名字 | `<会话根>/.strata-tmp-move-<repo>-<16 位十六进制>/` | 与 restore 暂存同族；代数在 `begin_move` 之前还不知道，随机后缀避免撞名；形状是 store 的 `begin_move` 要的 `sessions/<id>/<name>` | 2026-10-22 |
 | D33 准备阶段的失败与 `MoveLeftover` | 下层具名码 → 退役暂存、意图 `Refused`、透传；下层 `Unknown` → 返回 `Unknown`，暂存与 `Preparing` 的意图留着，由下一次移动、`remove` 或 `recover` 收走；`MoveLeftover` 不算 `rm` 的未决状态 | 写到一半的暂存说不准是什么，不能当作具名拒绝；但它从未对外可见、工作区原样，所以不需要人确认（增补 3） | 2026-10-22 |
-| D34 携带被 ignore 的内容 | 整块克隆：文件与目录经 `clone_from_rooted`（`CloneKind` 按遍历看到的种类）到 `S` 根下的私有临时名，再 `rename_rooted(Excl)` 到位；符号链接用 `clone_file_rooted` 克隆链接本身；从不覆盖新树，挡住的、对属主不可读的、遍历之后种类变了的（`IsDirectory`、`NotFile`、`NotDirectory`）记进 `uncarried`，不见了的跳过；带 `uchg`、`uappnd` 的条目让移动以 `ReadOnly` 被拒绝，session 不清旗标；不经 blob store；耗时 O(条目数) | 源与目的两侧都不跟随符号链接（增补 3、8）；构建产物不该进 blob store；改名携带要有回退步骤，而交换之前的拒绝会让旧工作区少一块（review M14）；与 agent 并发的写不该让移动失败（module-rulings "clone_from_rooted states its source kind"）；`Attrs` 不带旗标，克隆之前看不出来，而清掉旗标会改掉人有意设下的保护 | 2026-10-22 |
+| D34 携带被 ignore 的内容 | 整块克隆：文件与目录经 `clone_from_rooted`（`CloneKind` 按遍历看到的种类）到 `S` 根下的私有临时名，再 `rename_rooted(Excl)` 到位；符号链接经 `attrs_of` 读出目标、`symlink_rooted` 重建，从不克隆；从不覆盖新树，挡住的、对属主不可读的、遍历之后种类变了的（`IsDirectory`、`NotFile`、`NotDirectory`）记进 `uncarried`，不见了的跳过；带 `uchg`、`uappnd` 的条目让移动以 `ReadOnly` 被拒绝，session 不清旗标；不经 blob store；耗时 O(条目数) | 源与目的两侧都不跟随符号链接（增补 3、8；module-rulings "A symlink is recreated, never cloned"：按路径克隆链接会在源一侧跟随中间级）；构建产物不该进 blob store；改名携带要有回退步骤，而交换之前的拒绝会让旧工作区少一块（review M14）；与 agent 并发的写不该让移动失败（module-rulings "clone_from_rooted states its source kind"）；`Attrs` 不带旗标，克隆之前看不出来，而清掉旗标会改掉人有意设下的保护 | 2026-10-22 |
 | D35 交换之后的旧树 | 没人用、没改过、没有 `uncarried` → 连同旧管理目录退役；否则留在原地。有 `uncarried` 或改动的经 `set_old_tree` 记下（`retained`），只随 `remove` 退役；只因为有进程持有而保留的不记，以后的移动在它没人用、没改过时收走 | 交换之后不再添一步可能半途而废的目录操作；`Done` 意图点名它，`retire_dir` 随时拿得走。agent 的 cwd 多半在工作区里，几乎每次移动都保留一棵旧树，要能自动收走；但有新树没有的东西的旧树不能被悄悄删掉 | 2026-10-22 |
 | D36 `MoveReport` 的字段 | 另带 `lww`、`uncarried`、`old_tree`；`checkpoint` 为 `Option`（目标与当前相同时什么都不做） | 调用方要知道哪些路径整份取了会话一侧、哪些内容还在旧树里 | 2026-10-22 |
 | D37 `recover` 遇到单项失败 | 记进 `RecoverReport.errors`，接着处理下一项 | 一项坏掉的现场不该让 daemon 起不来；错误由 daemon 写日志并在 status 报出 | 2026-10-22 |
