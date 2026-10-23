@@ -6,8 +6,13 @@ use std::time::Duration;
 use strata_types::{RepoPath, StrataError};
 
 mod inputs;
+mod open_files;
+mod seams;
 
 pub use inputs::{inputs_hash, is_input, nested_seed_caches, platform, set_id, toolchain};
+pub use open_files::{Hold, OpenFile, open_files};
+#[cfg(feature = "test-seams")]
+pub use seams::test_seams;
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 
