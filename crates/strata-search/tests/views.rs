@@ -58,6 +58,9 @@ fn unknown_view_is_no_such_view() {
     let w = s.attach(&id(&rep), &fx.rn("front")).unwrap();
     assert_ne!(v, w);
     assert_eq!(s.files(w, "nothing-matches-this").unwrap(), Vec::new());
+    // The shared generation outlives its views.
+    let gens = generation_dirs(&fx.root().join("search/front"));
+    assert!(!gens.is_empty(), "no generation under <root>/search/front");
 }
 
 /// Every `gen-*` directory below `dir` (any depth).
