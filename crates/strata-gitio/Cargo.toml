@@ -1,0 +1,24 @@
+[package]
+name = "strata-gitio"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "git plumbing for git-strata: sanitized git commands, index and ignore reads, exports, shadow repositories, publish staging, merge3"
+
+[features]
+default = []
+test-seams = []
+
+[dependencies]
+strata-types = { path = "../strata-types" }
+strata-apfs = { path = "../strata-apfs" }
+libc = "0.2.191"
+serde_json = "1"
+unicode-normalization = "0.1"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+# The integration tests drive the seams, so the test build of this crate
+# always has them; release builds of dependents never do.
+strata-gitio = { path = ".", features = ["test-seams"] }

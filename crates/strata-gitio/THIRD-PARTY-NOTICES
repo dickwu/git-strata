@@ -1,0 +1,16 @@
+strata-gitio third-party notices
+================================
+
+docs/modules/gitio.md asks that parts of this crate be copied from tgrep
+(`generations/git.rs`, `git_index.rs`, `ignore` handling) with provenance
+headers. The tgrep sources live outside the repository and were not
+available to the builder of this crate, so no tgrep code was copied: the
+command builder, index parser, config parser and ignore matcher here are
+fresh implementations written from the spec and from git's documented
+formats (Documentation/gitformat-index.txt, git-config(1), gitignore(5),
+wildmatch semantics). If tgrep code is later substituted for any of them,
+add its licence text here.
+
+The config value parser and the wildmatch matcher follow the behaviour of
+git (GPL-2.0) as documented and as observed with git 2.54; no git source
+code is included.
