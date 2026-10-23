@@ -2,7 +2,7 @@
 
 **Crate**：`crates/strata-confirm` · **设计来源**：design.md §2 目标 7、§3（一推就上线、库一推就部署）、§6.4 第 5 步、§6.5 第 5 步、§6.6、§6.9、§9 不变量 3 与 7、§11 第 2 条、§13 问题 2；types.md §4（`ConfirmToken`、`Action`，以及其后的"签发与校验""动作从哪来""谁消费"三条）、§6.2（`NotConfirmed`、`NotTty`、`Unsupported`）、§8；module-rulings.md 的「Common」「T12 confirm」与标了 T12、Everyone 的增补 · **矩阵**：没有目标模块为 `confirm` 的行；理由点名 confirm 的只有 3d `:337`（目标 daemon）。3e `sdk/js/test/packaging.mjs::dispatch`（`—`，不保留）的理由点名 design §6.9，不是本模块；3d 里"无需认证通道"的各行，逐条见 §7
 
-> 本文按 module-rulings.md 写：「T12 confirm」；Addendum 1 的 T12 两条（"LocalAuthentication only…"，以及 T12/T13 的钉住规则与 `Action::ConfigRelax`）、T13 的钉住持久化两条（Addendum 1、Addendum 5）；Addendum 3、4 的错误时机与测试接缝；「A confirmation names the exact plan」「approve refuses a Pending whose head is no longer main's tip」「Lock order: session queue before repo lock」。`ConfirmToken` 与 `Action` 是 types.md §4 的纯数据，本文只引用、不重新定义；`Action::ConfigRelax { repo: RepoId }` 由 Task 15 加进 types.md，今天还不在 types.md 里；签发顺序按变体一旦存在即生效来写（§3），不假装今天就能编译，§5.6 的那一行保留。TTY 检查 `require_tty` 是 cli 的，confirm 不看 TTY。confirm 不写任何文件、不改任何 ref、不碰任何工作区，只有进程内的状态，所以它的每一个失败都是具名拒绝，从不返回 `Unknown`（共同规则的错误时机，§6）。文中标"实测"的，是 2026-10-23（UTC）在本机（macOS 27.0.1，SDK 27.0，带 Touch ID）用会话临时目录里的 Swift 探针验证过的；探针从不弹框，每次评估都先设 `interactionNotAllowed = true`。标 [我的决定] 的地方是 design、types.md 和裁定都没有定、由本文决定的，§9 有汇总。
+> 本文按 module-rulings.md 写：「T12 confirm」；Addendum 1 的 T12 两条（"LocalAuthentication only…"，以及 T12/T13 的钉住规则与 `Action::ConfigRelax`）、T13 的钉住持久化两条（Addendum 1、Addendum 5）；Addendum 3、4 的错误时机与测试接缝；「A confirmation names the exact plan」「approve refuses a Pending whose head is no longer main's tip」「Lock order: session queue before repo lock」。`ConfirmToken` 与 `Action` 是 types.md §4 的纯数据，本文只引用、不重新定义；`Action::ConfigRelax { repo: RepoId }` 已在 types.md §4。签发顺序见 §3，是活的；§5.6 的那一行要写。TTY 检查 `require_tty` 是 cli 的，confirm 不看 TTY。confirm 不写任何文件、不改任何 ref、不碰任何工作区，只有进程内的状态，所以它的每一个失败都是具名拒绝，从不返回 `Unknown`（共同规则的错误时机，§6）。文中标"实测"的，是 2026-10-23（UTC）在本机（macOS 27.0.1，SDK 27.0，带 Touch ID）用会话临时目录里的 Swift 探针验证过的；探针从不弹框，每次评估都先设 `interactionNotAllowed = true`。标 [我的决定] 的地方是 design、types.md 和裁定都没有定、由本文决定的，§9 有汇总。
 
 ## 1. 职责与边界
 
@@ -37,7 +37,7 @@ Workspace crate（types.md §8：`strata-confirm` 只依赖第 0 层；只有 `s
 
 | 依赖 | 用途 |
 | --- | --- |
-| `strata-types` | `Action`、`ConfirmToken`、`StrataError`、`Code`；拼框上文字时用 `RepoName`、`SessionId`、`ProposalId` 的 `Display`（Task 15 之后还有 `ConfigRelax` 的 `RepoId`） |
+| `strata-types` | `Action`、`ConfirmToken`、`StrataError`、`Code`；拼框上文字时用 `RepoName`、`SessionId`、`ProposalId`、`RepoId` 的 `Display`（`ConfigRelax` 的 `repo` 是 `RepoId`） |
 
 外部 crate（都只在 macOS 上编译；design §11 第 2 条）：
 
@@ -241,9 +241,9 @@ pub mod seams {
 - **`prompt_reason`**：纯函数，不失败（§5.6）。
 - **`Confirmer::new`**：不失败。真认证器在每次 `require` 时才碰 LocalAuthentication，所以 daemon 在没有图形会话的地方也能启动，只是确认类请求得到 `Unsupported`。
 
-`Action::ConfigRelax { repo: RepoId }` 由 Task 15 加进 types.md（module-rulings Addendum 1 的 T15 一条：「add `Action::ConfigRelax { repo: RepoId }`」）。types.md 今天没有这个变体，本文不假装它已经在，也不重新定义 `Action`。变体一旦存在，下面的签发就是活的。`prompt_reason` 对 `Action` 的 match 不写通配分支 [我的决定]：新变体一加，没写 §5.6 表里那一行，confirm 就编译不过，框上的文字不会退化成一句笼统的"确认一个操作"。那一行保留。`validate` 按 `Action` 的 `PartialEq` 比较，不为这个变体另写比较。
+`Action::ConfigRelax { repo: RepoId }` 在 types.md §4（module-rulings Addendum 1）。本文不重新定义 `Action`。下面的签发是活的。`prompt_reason` 对 `Action` 的 match 不写通配分支 [我的决定]：缺了 §5.6 表里那一行，confirm 就编译不过，框上的文字不会退化成一句笼统的"确认一个操作"。那一行要写。`validate` 按 `Action` 的 `PartialEq` 比较，不为这个变体另写比较。
 
-签发（变体存在之后。发现调松、调松之前继续用钉住的值、由哪条命令触发，仍归 daemon 与 cli；哪边算调松见 config.md §1）：
+签发（发现调松、调松之前继续用钉住的值、由哪条命令触发，仍归 daemon 与 cli；哪边算调松见 config.md §1）：
 
 1. 调紧钉住的 `deploy_on_push`、`publish.confirm` 或 `publish.push` 立即生效。不弹框，不签发凭据。
 2. 调松其中任何一个都不生效，直到人跑一条显式命令。daemon 不得因为配置文件变了就自己弹框（§9）。
@@ -306,7 +306,7 @@ daemon 重启或换一个 `Confirmer` 之后，旧凭据一律是 `unknown`：�
 
 确认的东西必须就是要做的东西（module-rulings「A confirmation names the exact plan」）：
 
-- `DepsApprove { proposal }` 指名一条提议，而提议的目标与依赖集登记之后不再改变。提议在认证或冷装期间被取代时，deps 返回 `NoSuchProposal`，`detail.state` 指向替换它的那一条（deps.md §5.12 第 3、4 步）；daemon 与 cli 把替换提议的计划给人看，批准它是一次新的 `deps approve`、一次新的弹框。批准时主干已经移动（`HeadMoved`，reason `main_moved`，module-rulings「approve refuses a Pending whose head is no longer main's tip」）也一样。types.md §6.2 现在的 `HeadMoved` 一行还没写 `main_moved`；Task 15 补上这一含义；confirm 不另造一个码，跟着 deps 用这一个。confirm 从不把提议 P 的凭据改投 Q：`validate` 对它报 `mismatch`。
+- `DepsApprove { proposal }` 指名一条提议，而提议的目标与依赖集登记之后不再改变。提议在认证或冷装期间被取代时，deps 返回 `NoSuchProposal`，`detail.state` 指向替换它的那一条（deps.md §5.12 第 3、4 步）；daemon 与 cli 把替换提议的计划给人看，批准它是一次新的 `deps approve`、一次新的弹框。批准时主干已经移动（`HeadMoved`，reason `main_moved`，module-rulings「approve refuses a Pending whose head is no longer main's tip」；types.md §6.2 已写上这一含义）也一样。confirm 不另造一个码，跟着 deps 用这一个。confirm 从不把提议 P 的凭据改投 Q：`validate` 对它报 `mismatch`。
 - `PushDeploy { repo, branch }` 不带 commit。推上去的必须就是人确认时看到的那一段：例如在第 2 步把发布链顶读出来给人看，推送前再核对它没动，动了就拒绝、重新确认。这是 publish.md 与 daemon.md 的事，本文只指出这个缺口（§9 末尾列为给 T10、T13 的问题）。
 - `ConfigRelax { repo }` 走上面的第 4、5 步，顺序见 §3。`validate` 核对的就是这次 `require` 的那个动作；不符是 `NotConfirmed`（`mismatch`），nonce 已用掉。daemon 是消费方，核销之后才写钉住值；confirm 不写。调紧不进这两步。
 
@@ -392,7 +392,7 @@ LAError 的码取自 SDK 27.0 的 `LAPublicDefines.h` 与 `LAError.h`：19 个�
 | `PushDeploy { repo, branch }` | `push <repo> to origin/<branch>` |
 | `DepsApprove { proposal }` | `approve dependency proposal <proposal>` |
 | `RemoveDiscard { session }` | `discard the unpublished changes of session <session> and remove it` |
-| `ConfigRelax { repo }`（Task 15 加入之后） | `apply relaxed push settings for <repo>`（`RepoId` 的路径） |
+| `ConfigRelax { repo }` | `apply relaxed push settings for <repo>`（`RepoId` 的路径） |
 
 例：`"git-stratad" is trying to push front to origin/main.`
 
@@ -456,12 +456,12 @@ confirm 不写任何对外可见的东西（§5.9），它的每一个失败都�
 | 测试名 | 断言 | 来源（矩阵行 或 新增） |
 | --- | --- | --- |
 | `token_has_no_clone_copy_or_serde` | 静态断言（`static_assertions::assert_not_impl_any!`、`assert_impl_all!`）：`ConfirmToken` 不实现 `Clone`、`Copy`、`Serialize`、`DeserializeOwned`；`Confirmer` 实现 `Send` 与 `Sync`；objc2 的 `LAContext` 不实现 `Send`（所以 `Confirmer` 存不下上下文，每次只能新建，C1）。一个凭据只能按值移走一次，复制、序列化都编译不过 | 新增（types.md §2.2、§4；C5） |
-| `prompt_reason_names_the_action` | 三个变体的文字逐字等于 §5.6 的表：`push tool to origin/main`、`approve dependency proposal 12`、`discard the unpublished changes of session s-k3q7xm2a and remove it`；对任何输入，结果非空、只含可打印 ASCII；`branch` 里的 U+202E、U+200B、换行、`\` 依次输出为 `\u{202E}`、`\u{200B}`、`\u{A}`、`\\`；两个只差 `branch` 的 `PushDeploy` 文字不同。Task 15 加入 `ConfigRelax` 时这里加一行 | 新增 |
+| `prompt_reason_names_the_action` | 四个变体的文字逐字等于 §5.6 的表：`push tool to origin/main`、`approve dependency proposal 12`、`discard the unpublished changes of session s-k3q7xm2a and remove it`、`apply relaxed push settings for /Volumes/GWD/inter/tool`；对任何输入，结果非空、只含可打印 ASCII；`branch` 里的 U+202E、U+200B、换行、`\` 依次输出为 `\u{202E}`、`\u{200B}`、`\u{A}`、`\\`；两个只差 `branch` 的 `PushDeploy` 文字不同 | 新增 |
 | `require_pass_mints_a_registered_token` | 脚本 `Verdict::pass()`：`require(PushDeploy { tool, main })` 返回的凭据 `action` 与之相同；`PromptLog::shown` 恰好一条，等于 `prompt_reason` 的结果；`validate(&t, &action)` 为 Ok。同一动作再 `require` 一次：又弹一次框（`shown` 两条），两个 nonce 不同，各自只能核销一次（每个动作各弹一次，不缓存） | 新增（design §6.9） |
 | `token_single_use` | 同一凭据第二次 `validate` → `NotConfirmed`，`reason = "used"`；先以错误的 `expected` 核销一次（`mismatch`），再以正确的 `expected` 核销 → `used`：失败的核销也用掉 nonce；`FakeClock::advance(RECORD_RETENTION)` 之后再核销 → `unknown`（记录已清扫）；三种情形都不成功，`record_count` 随清扫回到 0 | 新增（design §6.9 "一次一用"；C2） |
 | `token_expires` | 签发后 `advance(29 s)` → Ok；另一个凭据 `advance(30 s)` → `expired`，`detail.age_ms` 不小于 30000；再一个凭据只 `sleep(31 s)`（`Instant` 不动，模拟合盖）→ `expired`；过期的凭据之后再核销 → `used` | 新增（C3、§5.7） |
 | `wrong_action_is_refused` | 参数化：`RemoveDiscard { s1 }` 的凭据对 `expected = RemoveDiscard { s2 }`；`PushDeploy { tool, main }` 对 `PushDeploy { tool, release }` 与 `PushDeploy { front, main }`；`DepsApprove { P }` 对 `DepsApprove { Q }`（凭据从不覆盖替换它的提议）；`RemoveDiscard { s1 }` 对 `PushDeploy { tool, main }`。都是 `NotConfirmed`，`reason = "mismatch"`，`detail.expected` 与 `detail.confirmed` 是两个 `Action`；之后以正确的 `expected` 再核销 → `used` | 新增（module-rulings「A confirmation names the exact plan」；C3） |
-| `wrong_action_is_refused` 的 `ConfigRelax` 一对（变体加入之后才可执行） | `ConfigRelax { R }` 的凭据对 `expected = ConfigRelax { S }`（R ≠ S）：`NotConfirmed`，`reason = "mismatch"`，`detail.expected` 与 `detail.confirmed` 是两个 `Action`；之后以正确的 `expected` 再核销 → `used`。与上一行同一个测试、同一条核销。types.md 今天没有 `Action::ConfigRelax`，这一行在 Task 15 加入变体之前编译不过，不假装今天可执行 | 新增（变体一旦存在即可执行；module-rulings Addendum 1 的 T15 一条；C3） |
+| `wrong_action_is_refused` 的 `ConfigRelax` 一对 | `ConfigRelax { R }` 的凭据对 `expected = ConfigRelax { S }`（R ≠ S）：`NotConfirmed`，`reason = "mismatch"`，`detail.expected` 与 `detail.confirmed` 是两个 `Action`；之后以正确的 `expected` 再核销 → `used`。与上一行同一个测试、同一条核销。这一对现在可执行 | 新增（module-rulings Addendum 1 的 T15 一条；C3） |
 | `forged_or_tampered_token_is_refused` | 手工构造的 `ConfirmToken { action, issued: Instant::now(), nonce: 随机数 }` → `unknown`；另一个 `Confirmer`（模拟 daemon 重启）签发的凭据交给这一个 → `unknown`；签发之后把 `token.action` 改成别的动作，并以新动作作 `expected` → `tampered`，之后原样再交 → `used`；把 `token.issued` 往后挪（想延寿）→ `tampered` | 新增（types.md §4 字段是 pub；C1 到 C3） |
 | `user_cancel_mints_nothing` | 脚本依次 `Verdict::la(-2)`、`la(-1)`、`la(-4)`、`la(-8)`：`require` 依次返回 `NotConfirmed`，`reason` 是 `cancelled`、`failed`、`interrupted`、`failed`，`detail.la_code` 是原码；`record_count() == 0`；`shown` 每次加一条；`invalidated()` 等于弹框次数，`cancelled_while_pending() == 0` | 新增（design §6.9） |
 | `la_error_mapping_covers_every_code` | 表驱动：对 §5.4 表的每一行（SDK 27.0 的 15 个不同值、未知码 -999、外域错误、success = NO 而没有错误对象、success = YES 却带着错误对象、`Verdict::Throw`）用对应的 `Verdict` 跑 `require`，得到的 (`Code`, `reason`, `la_code`) 逐行等于表；只有 `Verdict::pass()` 签发 | 新增 |
@@ -527,7 +527,7 @@ git commit -m "feat(confirm): token type guarantees and prompt text"
 - Consumes: Task 1；`libc::{clock_gettime, CLOCK_MONOTONIC, arc4random_buf}`
 - Produces: `Confirmer::require`（只有成功路径：闸门、调认证器、按期限等回复、签发）、`Confirmer::validate`；crate 私有的 `Authenticator`；`seams` 里的 `Verdict`、`ScriptedAuth`、`PromptLog`、`FakeClock`、`Confirmer::with_seams`、`Confirmer::record_count`
 
-- [ ] **Step 1: 写失败的测试**：`require_pass_mints_a_registered_token`、`token_single_use`、`token_expires`、`wrong_action_is_refused`、`forged_or_tampered_token_is_refused`。`wrong_action_is_refused` 里 `ConfigRelax` 那一对不在这一步：变体还不在 types.md 里，那一对要等 Task 15 加入之后才写、才跑（§7）
+- [ ] **Step 1: 写失败的测试**：`require_pass_mints_a_registered_token`、`token_single_use`、`token_expires`、`wrong_action_is_refused`、`forged_or_tampered_token_is_refused`。`wrong_action_is_refused` 含 `ConfigRelax` 那一对（§7），这一步就写、就跑。
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-confirm --features test-seams --test mint_validate`
@@ -680,7 +680,7 @@ git commit -m "test(confirm): end-to-end, no TTY, flag, env or RPC path skips th
 | --- | --- | --- |
 | §3 `Confirmer` | 签发与校验是 daemon 持有的一个对象上的方法，不是自由函数 | 一次一用要靠登记表；对象比全局 static 好测，重启前后的凭据互不承认 |
 | §3 `probe` | 不弹框的探测，给 status 用 | 人在发确认类命令之前就该知道通道能不能用 |
-| §3 `prompt_reason` 的 match | 不写通配分支 | Task 15 加 `ConfigRelax` 时编译不过，逼着框上的文字写出来 |
+| §3 `prompt_reason` 的 match | 不写通配分支 | 缺 `ConfigRelax` 那一臂就编译不过，逼着框上的文字写出来 |
 | §4.2 C6 | 框开着时来的第二个请求立即拒绝，不排队 | 刷请求的客户端排不出一串框；人不会在一串框里顺手点过一个不是自己要的 |
 | §4.1 `RECORD_RETENTION` | 10 分钟；核销过的记录留着，只标记已用 | 让用过、过期的凭据报得出 `used`、`expired`；记录很小，签发速度由人限定 |
 | §5.1 调用约定 | 先做不需确认的具名拒绝；`require` 不在任何 repo 写锁或会话队列位置里调；签发之后立刻核销；拿锁之后重新推出 `Action` 再核对 | 弹框可以等 60 s，比写锁的 30 s 有界等待长；注定失败的请求不该打扰人；锁外与锁里解析出的选择器可能不同 |
@@ -700,4 +700,4 @@ git commit -m "test(confirm): end-to-end, no TTY, flag, env or RPC path skips th
 - **daemon.md（T13）**：采用 §5.1 的调用约定（或在它的 §2 写明要改的地方）；plist 把 agent 加载在 Aqua 会话里；`git-stratad` 的 main 见到 `TEST_SEAMS` 为 true 就拒绝启动；测试接缝能起进程内 daemon、给它的 `Confirmer` 装 `ScriptedAuth`、读 `PromptLog` 与收到的请求（§8 Task 6）；RPC 参数类型拒绝未知字段（`no_env_or_flag_bypass` 的 RPC 部分）；status 显示 `probe()` 的结果；`ConfigRelax` 由人发出的一条显式命令触发，不在发现配置调松时自己弹框（否则改一下配置文件就能弹出一串框）；调紧立即生效，不弹框、不签发；那条命令走 §3 的签发，daemon 在写入调松后的钉住值之前消费凭据。
 - **cli.md（T14）**：`require_tty` 在连接 daemon 之前做；RPC 等待上限大于 65 s；弹框之前把框上没有的东西打在终端上（`deps approve` 要移动哪些会话、推送带上哪些 commit、替换提议的计划）；参数定义能被测试遍历；§7 的 `non_tty_refused_before_prompt` 与 cli.md 自己的 `confirm_commands_refuse_non_tty` 可以放在同一个测试文件里，前者多断言"一次弹框都没有、请求没发出"。
 - **publish.md（T10）**：`PushDeploy` 不带 commit，推送要推的必须就是人确认时看到的那一段（§5.1）；弹框不在 repo 写锁里；`push` 按值收下凭据。
-- **types.md（T15）**：加 `Action::ConfigRelax { repo: RepoId }`，并在 §7 的 `prompt_reason_names_the_action` 加一行；§6.2 的 `Unsupported` 一行放宽成"本机做不了主人认证"；考虑 `DepsApprove` 是否要带会话子集、`PushDeploy` 是否要带 commit，好让"确认的就是要做的"（module-rulings「A confirmation names the exact plan」）也覆盖它们；`NotConfirmed` 的 `detail.reason` 词汇与跨模块的 reason 拼写约定（本文用 snake_case）。`HeadMoved` 的含义补上 `main_moved`（deps.md 已向 T15 要这一行；confirm 不另造码）。§7 的 `ConfigRelax` 一对在变体加入之后才可执行。
+- **types.md（T15）**：`Action::ConfigRelax { repo: RepoId }` 与 `HeadMoved` 的 `main_moved` 含义已在 types.md。§7 的 `ConfigRelax` 一对可执行。仍开放的：§6.2 的 `Unsupported` 一行放宽成"本机做不了主人认证"；考虑 `DepsApprove` 是否要带会话子集、`PushDeploy` 是否要带 commit，好让"确认的就是要做的"（module-rulings「A confirmation names the exact plan」）也覆盖它们；`NotConfirmed` 的 `detail.reason` 词汇与跨模块的 reason 拼写约定（本文用 snake_case）。confirm 不另造码。

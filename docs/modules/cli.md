@@ -70,7 +70,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata daemon status` | `daemon_status` | 否 | 否 |
 | `git-strata resolve` | `resolve_move`（上游要求 1） | 是（D18） | 否。没有 `Action` 变体，不弹框 |
 | `git-strata chain` | `chain_resolve`（上游要求 2） | 选择本身要 TTY（D18）。`--restore` 且仓库要确认时，连接前再按 `push` 的钉住值查一次 | `--restore` 且要确认：`PushDeploy`。`--accept-origin replay` / `drop`：不取凭据 |
-| `git-strata config relax` | `config_relax` | 是 | `ConfigRelax`。T15 把该变体加入 types.md 之后才弹框。不因文件变化而跑，也不处理收紧 |
+| `git-strata config relax` | `config_relax` | 是 | `ConfigRelax`。`require_tty` 之后连接并弹框，与其他确认命令相同。不因文件变化而跑，也不处理收紧 |
 
 `git-strata daemon start` 用 `launchctl bootstrap gui/<uid> ~/Library/LaunchAgents/com.gwd.git-stratad.plist` 装上 `com.gwd.git-stratad`，不等待业务，不连接 socket。`stop` 用 `launchctl bootout gui/<uid>/com.gwd.git-stratad`，也不连接 socket。plist 不存在 → `InvalidInput`，`detail.reason = "no_plist"`。已经装上或已经卸下 → 成功，`data.already = true`，不是错误（D15、D16）。
 
@@ -252,7 +252,7 @@ cli 不拿 repo 写锁，不占会话队列，不等待建造锁。锁在 daemon
 1. `deps approve`：读那条 `Proposal`（daemon 在跑就经 `deps_list`，否则 `deps::open_proposals`；两种都不调用 `Sessions::open`）。把 `id`、`repo`、`state`、`from`、`to`、`from_inputs`、`to_inputs`、`tree`、`head` 打到 stderr。凭据只有 `DepsApprove { proposal }`，不含会话：弹框前再逐行列出这次会移动的会话 id（只读的 rollout 计划里判定为移动的那些；同样不调用 `Sessions::open`）。然后才发 `deps_approve`。daemon 弹框。回答是 `NoSuchProposal`：把 `error.detail` 打到 stderr；`detail.state` 若是一个 `ProposalId`，或 `detail.replacement` 是一条 `Proposal`，再把那条替换提议的同样字段打到 stderr。进程到此退出，不发第二次 `approve`。`HeadMoved` 且 `detail.reason = "main_moved"` 同样：打出 `detail.tip`，不重试，不批准另一个 head。
 2. 要确认的 `push`，会推且要确认的 `publish`，以及要确认的 `chain --restore`：先按 §4 判断要不要 TTY（钉住的值；读不出当作要确认）。要确认才展示。凭据只有 `PushDeploy { repo, branch }`，不含提交：stderr 列出这次确认的 a..c 里每个 commit，不只写链顶。`publish` 对批次里每个要推且要确认的仓库各准备一次 `PushDeploy`，在该仓库的 `commit_tree` 之前；没有则该仓库 `NotConfirmed`，这个仓库不提交（front 就是要推且要确认的仓库）。不推的仓库不确认。然后才发请求。daemon 弹框。链在展示之后变了，由 daemon 拒绝；cli 不重发。`publish` 每个仓库的推送结果按 `push` 映射，写进 `data.pushes`：`commit_tree` 之后超时是 `Unknown`，链留下，`ok` 不能为 true；`publish.push` 为假时这次不推，`PushRefused` 留给之后单独的 `git-strata push`。
 3. `rm --discard`：stderr 打一行会话 id 和“未发布的改动会被丢掉”。然后发 `rm`。
-4. `config relax`：`require_tty` 之后才连接。T15 加入 `Action::ConfigRelax` 之前，TTY 通过后返回 `Unsupported`，不连接、不改钉住的值。加入之后才弹框并调用 `config_relax`。收紧不走这条命令。配置文件变了不会自动跑它。
+4. `config relax`：`require_tty` 之后才连接，然后用 `ConfigRelax` 弹框并调用 `config_relax`，与其他确认命令相同。不因配置文件变了而跑。收紧不走这条命令。
 
 `resolve` 在发 RPC 之前把该工作区的 `scene` 和两条 `choices` 打到 stderr，并写明这次 flag 选的是哪一条。`chain` 的 replay / drop 不取凭据；`--restore` 只有在上面第 2 步要确认时才取 `PushDeploy`。两个命令都只发一次 RPC。
 
@@ -456,4 +456,4 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 
 初稿里被后写裁定压过的两句，不沿用：`grep` 不给 session 就是全部（改为 cwd 会话，`--all` 才是全部，design §6.3 与 T11）；`grep` 的 `--repo`（T11 只留 `--session` 与 `--all`）。crate 名从初稿的 `crates/strata-cli` 改为 types.md §8 的 `crates/git-strata`。
 
-待定：上游要求 1 与 2 的方法名，若 daemon 定了别的名字，只改 §3 的方法列，不改命令行。`resolve` 仍没有 `Action` 变体。`chain --restore` 用已有的 `PushDeploy`，不等新变体。`config relax` 等 T15 的 `Action::ConfigRelax`，在那之前是 `Unsupported`，不加码。
+待定：上游要求 1 与 2 的方法名，若 daemon 定了别的名字，只改 §3 的方法列，不改命令行。`resolve` 仍没有 `Action` 变体。`chain --restore` 用已有的 `PushDeploy`，不等新变体。`config relax` 用 types.md 的 `Action::ConfigRelax`，不加码。

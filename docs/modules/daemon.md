@@ -53,7 +53,6 @@ cli 只在连不上 socket 时自己打开 `Sessions`（只读）。daemon 在�
 
 - `deps::RepoWriteLock` 没有 `note_visible_write`。本文用 §5.2 的线程局部规则区分写前与写后的等待 [我的决定 D8]。若将来有调用方在第一次 `with_write` 之前就做了可见的写，deps 应在 trait 上加这个方法，session / publish / overlay 在各自的第一次可见的写处调用。在那之前，本文的规则成立的前提写在 D8。
 - gitio @1cd5ac5 没有重钉 `hooksPath` 的函数，并且写明影子仓库的漂移只报告、不修。本文选择只报告，不要求 gitio 加函数 [我的决定 D2]。
-- `config_relax` 是应用调松的命令。`Action::ConfigRelax { repo: RepoId }` 由 Task 15 加进 types.md，本文不定义。变体落地之前，这条路径编译不了；文件变松仍然不生效。confirm 不写 `pins.json`。
 - gitio @1cd5ac5 没有把 a..c 重放到 o 上的函数，也没有一次写下链和锚点的 ref 事务。重放是 `Git::replay_commits` [我的决定 D18]。链与锚点的写是 publish.md @df9f069 §2 第 3 条要求 gitio 提供的那一次调用（`update-ref --stdin` 或等价物）。daemon 用这一次，不拆成两次 `update_ref`，不起 git。
 
 ## 3. 公开接口（Rust）
@@ -87,7 +86,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `gc` | `store::gc_repo` | 否 |
 | `resolve_move` | `session::resolve_failed_move`。不查 TTY，不收凭据 | 否 |
 | `chain_resolve` | 人对 Rewound / Diverged 的显式处理。接受 origin 不推送；恢复只在快进时推 | 否 |
-| `config_relax` | 显式接受一次调松。文件变了不弹框。变体进 types.md 之前编译不了 | 否 |
+| `config_relax` | 显式接受一次调松。文件变了不弹框。路径能编译。调松仍要这条命令；调紧立即生效 | 否 |
 | `daemon_status` | 锁、队列、Unknown 发布、可选 `quick_check` | 是 |
 
 `params` 的字段（serde，未知字段 → RPC `Failed`）[我的决定 D4]：
@@ -424,8 +423,7 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 
 1. 名字不在配置里 → `NoSuchRepo`，不弹框。
 2. 该 repo 的文件并不比钉松 → `InvalidInput`，`detail.reason = "not_relaxed"`，不弹框 [我的决定 D20]。
-3. 顺序：`require(Action::ConfigRelax { repo: RepoId })`；`validate` 核对 action 就是这个 repo 的 `ConfigRelax`，并核销凭据；然后才写 `pins.json`。action 由 daemon 从 `repo` 推出，不采用客户端传来的。不符、用过、过期 → `NotConfirmed`，钉不改。confirm 不写任何文件。
-4. `Action::ConfigRelax` 由 Task 15 加进 types.md。在那之前，点名这个变体的路径编译不了。编译不了期间，重载把钉放松的仍然不应用。不提供绕过。
+3. 顺序：`require(Action::ConfigRelax { repo: RepoId })`；`validate` 核对 action 就是这个 repo 的 `ConfigRelax`，并核销凭据；然后才写 `pins.json`。action 由 daemon 从 `repo` 推出，不采用客户端传来的。不符、用过、过期 → `NotConfirmed`，钉不改。confirm 不写任何文件。这条路径能编译：变体在 types.md §4，本文不定义。重载把钉放松的仍然不应用，直到这条命令走完；调紧立即写回，不要凭据。不提供绕过。
 
 ### 5.6 publish
 
@@ -449,7 +447,7 @@ daemon 实现 `publish::PublishLocks`（`with_sessions`、`with_repo`），放�
 
 ### 5.8 调松
 
-命令是 `config_relax`（§5.5）。方法表里有这一项。confirm 不写 `pins.json`。变体进 types.md 之前该路径编译不了，文件变松仍然不生效。
+命令是 `config_relax`（§5.5）。方法表里有这一项。confirm 不写 `pins.json`。路径能编译。文件变松仍然不生效，直到 `config_relax`；调紧立即生效。
 
 ### 5.9 小时对账与停机
 
@@ -500,7 +498,7 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | daemon 没在跑 | cli 的只读命令仍可用；`publish` 与 `push` 由 cli 以 `ReadOnly` 拒绝 | 无 | 见 §7 |
 | 处理器 panic，写前 | RPC `Failed`，锁已释放 | 无 | 进程继续 |
 | 处理器 panic，写后 | `Unknown`，锁已释放 | 现场留下 | status 报出 |
-| 配置调松 | 不生效，直到 `config_relax` 走完 require、validate、写钉。文件变了不弹框。变体进 types.md 之前该路径编译不了 | 钉住的值不变 | 人发 `config_relax` |
+| 配置调松 | 不生效，直到 `config_relax` 走完 require、validate、写钉。文件变了不弹框。调紧立即生效 | 钉住的值不变 | 人发 `config_relax` |
 | TOML 或校验失败 | `InvalidInput` | 不听 socket | 改配置 |
 | 两个 repo 同一个 `RepoId` | `NameTaken` | 不听 socket | 改配置 |
 | `path` 不是 realpath | `InvalidInput`，detail 带 realpath | 不听 socket | 改成 realpath |
@@ -705,7 +703,7 @@ Run: `cargo test -p strata-daemon --test confirm_flow`
 
 Expected: FAIL
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.3 第 4 步、§4 的钉、§5.5 的 `config_relax`、§3 的 plist。不在本文定义 `ConfigRelax`；点名它的臂在 types.md 有这个变体之前编译不了。
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.3 第 4 步、§4 的钉、§5.5 的 `config_relax`、§3 的 plist。不在本文定义 `ConfigRelax`；变体已在 types.md，这条路径能编译。重载把钉放松的仍然不应用，直到 `config_relax`；调紧立即生效。
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-daemon --test confirm_flow`
