@@ -40,14 +40,6 @@ pub(crate) fn rp(s: &str) -> Result<RepoPath> {
     RepoPath::try_from(s.to_string()).map_err(|e| invalid(format!("bad path {s:?}: {}", e.message)))
 }
 
-/// Relative path (as RepoPath) from bytes of a relative `Path`.
-pub(crate) fn rp_of(p: &Path) -> Result<RepoPath> {
-    match p.to_str() {
-        Some(s) => rp(s),
-        None => Err(errd(Code::NotText, "path is not UTF-8", json!({ "path": path_str(p) }))),
-    }
-}
-
 fn io_unknown(e: &io::Error, what: &str, p: &Path) -> StrataError {
     errd(
         Code::Unknown,

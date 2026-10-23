@@ -1,14 +1,14 @@
 //! `open` (§5.2) and the git version check.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::json;
 use strata_types::Code;
 
 use crate::command::{Opts, base_command, failed, run};
-use crate::err::{err, errd, path_str};
+use crate::err::{errd, path_str};
 use crate::seams::Seams;
 use crate::{FETCH_TIMEOUT, Git, Inner, MIN_GIT_VERSION, Result};
 
@@ -171,21 +171,6 @@ impl Git {
     pub fn open(root: &Path) -> Result<Git> {
         open_impl(root, Vec::new())
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn root_arg(&self) -> &Path {
-        &self.inner.root_arg
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn root_real(&self) -> &PathBuf {
-        &self.inner.root_real
-    }
-}
-
-#[allow(dead_code)]
-fn _unused() -> strata_types::StrataError {
-    err(Code::Unknown, "")
 }
 
 #[cfg(test)]

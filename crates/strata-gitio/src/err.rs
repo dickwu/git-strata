@@ -17,14 +17,6 @@ pub(crate) fn invalid(message: impl Into<String>) -> StrataError {
     err(Code::InvalidInput, message)
 }
 
-pub(crate) fn invalid_reason(message: impl Into<String>, reason: &str) -> StrataError {
-    errd(Code::InvalidInput, message, json!({ "reason": reason }))
-}
-
-pub(crate) fn unknown(message: impl Into<String>) -> StrataError {
-    err(Code::Unknown, message)
-}
-
 pub(crate) fn unknown_reason(message: impl Into<String>, reason: &str) -> StrataError {
     errd(Code::Unknown, message, json!({ "reason": reason }))
 }

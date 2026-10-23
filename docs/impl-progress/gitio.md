@@ -15,7 +15,8 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 | 7 shadow repositories, attach_worktree, worktree_gitdir | 01cb89b | |
 | 8 attach_staging, stage, commit_tree | c3a1dfb | push part of index_writers_refuse_the_main_checkout lands with Task 9 |
 | 9 push | b63b765 | also adds push to index_writers_refuse_the_main_checkout |
-| 10 merge3 | (this commit) | 22-case corpus in tests/fixtures/merge-corpus; one ignored fuzz test |
+| 10 merge3 | 3593d15 | 22-case corpus in tests/fixtures/merge-corpus; one ignored fuzz test |
+| 11 main-checkout invariant | (this commit) | tests/invariants.rs; also removes dead-code allowances |
 
 ## Builder decisions (ambiguities)
 
@@ -195,3 +196,8 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 - The corpus is committed as plain files (base/ours/theirs per case). The
   test runs `git merge-file -p ours base theirs` in each case dir, through
   the sandbox's git environment. That command writes nothing.
+
+### Task 11 decisions (invariant + cleanup)
+
+- The invariant test dirties the main checkout (staged, unstaged, untracked and ignored files), sets global `core.fsmonitor=true` and `core.splitIndex=true` in the sandboxed HOME, then calls every public API. It snapshots everything except `.git/objects` and `.git/refs/strata` and requires an identical snapshot afterwards. It also checks that objects grew, the strata/remote refs exist, no fsmonitor daemon or socket and no `sharedindex.*` file was created, and `diff --cached` is unchanged. A mutation that ran `git status` in the main checkout made the test fail, as intended.
+- The crate-wide `#![allow(dead_code)]` is removed. These unused helpers were deleted: `err::invalid_reason`, `err::unknown`, `fsx::rp_of`, `repo::root_arg`, `repo::root_real`, `command::os`, and the unused `TreeEntry.oid`/`TreeEntry.size` fields (the size column is still validated while parsing). A compile-time check that `Git: Send + Sync` replaces the old dummy function.

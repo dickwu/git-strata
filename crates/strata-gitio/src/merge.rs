@@ -215,7 +215,7 @@ fn middle_snake(a: &[u32], b: &[u32], vf: &mut [isize], vb: &mut [isize]) -> (us
             }
             vf[at(k)] = x;
             let c = delta - k;
-            if odd && c >= -(d - 1) && c <= d - 1 && x + vb[at(c)] >= n {
+            if odd && c > -d && c < d && x + vb[at(c)] >= n {
                 return (x as usize, y as usize);
             }
             k += 2;

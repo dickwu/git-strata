@@ -6,7 +6,7 @@
 //! tgrep sources were not available to this builder, so the code here is a
 //! fresh implementation of the spec (see THIRD-PARTY-NOTICES).
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -266,7 +266,3 @@ pub(crate) fn flag(prefix: &str, p: &Path) -> OsString {
     s
 }
 
-#[allow(dead_code)]
-pub(crate) fn os(s: &str) -> &OsStr {
-    OsStr::new(s)
-}

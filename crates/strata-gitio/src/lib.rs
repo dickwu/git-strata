@@ -5,7 +5,6 @@
 //! in-process through `strata_apfs` rooted reads (G11). Errors are
 //! `StrataError` with the codes of §6.
 
-#![allow(dead_code)] // removed by the last task once every helper is used
 
 use std::ffi::OsString;
 use std::fmt;
@@ -109,11 +108,8 @@ impl Git {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn _assert_send_sync() {
+// `Git` is shared across threads by its callers.
+const _: fn() = || {
     fn is<T: Send + Sync>() {}
     is::<Git>();
-}
-
-#[allow(unused)]
-pub(crate) fn _unused(_: PathBuf) {}
+};

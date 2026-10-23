@@ -186,7 +186,7 @@ fn merge3_agrees_with_git_merge_file_on_corpus() {
             .output()
             .unwrap();
         let code = out.status.code().expect("git merge-file exited by signal");
-        assert!(code >= 0 && code < 127, "{}: git merge-file failed: {code}", case.display());
+        assert!((0..127).contains(&code), "{}: git merge-file failed: {code}", case.display());
         match merge3(&base, &ours, &theirs) {
             Merge3::Clean(bytes) => {
                 assert_eq!(code, 0, "{}: merge3 is Clean but git found {code} conflicts", case.display());

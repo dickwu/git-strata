@@ -38,8 +38,6 @@ pub(crate) struct RawEntry {
 #[derive(Clone, Debug)]
 pub(crate) struct TreeEntry {
     pub mode: u32,
-    pub oid: String,
-    pub size: u64,
     pub path: RepoPath,
 }
 
@@ -143,8 +141,8 @@ pub(crate) fn build_table(raw: Vec<RawEntry>, icase: bool) -> Result<TreeTable> 
             (0o160000, "commit") => return Err(unsupported(&shown, "gitlink (submodule) entries are not supported")),
             _ => return Err(unsupported(&shown, &format!("mode {:06o} {} is not supported", r.mode, r.kind))),
         }
-        let size = match r.size {
-            Size::Bytes(n) => n,
+        match r.size {
+            Size::Bytes(_) => {}
             Size::Bad => {
                 return Err(errd(
                     Code::NoSuchCommit,
@@ -153,7 +151,7 @@ pub(crate) fn build_table(raw: Vec<RawEntry>, icase: bool) -> Result<TreeTable> 
                 ));
             }
             Size::Dash => return Err(garbled("blob without a size")),
-        };
+        }
         let s = String::from_utf8(r.path).map_err(|_| {
             errd(Code::NotText, format!("tree path {shown} is not UTF-8"), json!({ "path": shown }))
         })?;
@@ -170,7 +168,7 @@ pub(crate) fn build_table(raw: Vec<RawEntry>, icase: bool) -> Result<TreeTable> 
                 return Err(unsupported(&s, "a .git component"));
             }
         }
-        entries.push(TreeEntry { mode: r.mode, oid: r.oid, size, path });
+        entries.push(TreeEntry { mode: r.mode, path });
     }
     // Collisions: NFC-equal names (RepoPath is NFC), ASCII case when
     // icase, and a name that is both an entry and a directory.
