@@ -442,7 +442,7 @@ pub fn list_dir(root: &Path, dir: Option<&RepoPath>) -> Walk<'static>;
 
 // ───────────── 监听 ─────────────
 
-/// 监听事件。回调在 Watcher 私有的串行队列上被调用：不得阻塞，不得 panic，不得在回调里对自己的 `Watcher` 调 `flush`（会让进程 `SIGTRAP`，见 `Watcher::flush`；对别的 `Watcher` 调 `flush` 或 drop 它没有问题）。在回调里 drop 自己的 `Watcher` 是允许的（见 `Watcher`）。
+/// 监听事件。回调在 Watcher 私有的串行队列上被调用：不得阻塞，不得 panic。回调期间不得对任何一个 `Watcher` 调 `flush`，也不得同步 drop 任何一个 `Watcher`（包括别的 `Watcher`）：这个判断按线程判，不按 Watcher 判（见 `Watcher`）。`dispatch_sync` 到回调正在跑的那条队列会让进程 `SIGTRAP`（见 `Watcher::flush`）。在回调里 drop 自己的 `Watcher` 是允许的，走异步路径（见 `Watcher`）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WatchEvent {
     /// 这些绝对路径发生了变化（文件或目录；目录表示它的整棵子树都可能变了）。路径以传给 `watch` 的 root 为前缀，
@@ -465,7 +465,7 @@ pub struct WatchOptions {
 /// **回调的状态只有 `Watcher` 一个所有者**（裁定 "Watcher state has one owner"）：`FSEventStreamContext` 的 `info` 指向堆上的一块状态，`closed` 标志、`on_event` 闭包（连同它捕获的一切）和排除用的数据都放在里面，不放在 `Watcher` 值里；
 /// `retain`、`release`、`copyDescription` 都是 NULL，所以 FSEvents 除了把 `info` 交给回调，从不碰它。这块状态恰好释放一次，闭包与它的捕获物因此恰好 drop 一次，时点固定：`Stop`、`Invalidate`、`Release` 和排空流的队列之后的 `Watcher::drop` 里；在回调里 drop 的，是随后排在当前回调后面的那个块里。
 /// 消费者可以依赖这一点，例如闭包里的 channel `Sender` 在 `Watcher` drop 的时候断开。为什么不把释放交给 FSEvents 的 `context.release`：FSEvents 在最后一次 `FSEventStreamRelease` 之后还让流活着，非 NULL 的 `release` 要到那之后才被调用，也就是在 `Watcher` 已经释放状态之后（实测，§4.2 F：普通 drop 每次如此，回调里 drop 时前后不定）；两个所有者就会释放两次。
-/// 不在这个 `Watcher` 自己的回调里 drop：先置 `closed`（已排队的回调到了就直接返回，不进 `on_event`），`Stop`、`Invalidate`、`Release`，再对私有队列 `dispatch_sync` 一个空块排空在途的回调，然后释放状态与队列；返回之后不会再有回调。
+/// 同步排空只在线程局部标志为假时跑（不在任何一个 `Watcher` 的回调里）：先置 `closed`（已排队的回调到了就直接返回，不进 `on_event`），`Stop`、`Invalidate`、`Release`，再对私有队列 `dispatch_sync` 一个空块排空在途的回调，然后释放状态与队列；返回之后不会再有回调。标志为真时，哪怕回调属于别的 `Watcher`，这次 drop 也走下一段已经写明的异步路径。
 /// **在回调里 drop 自己的 `Watcher`**（例如回调持有的最后一个 `Arc<Tracker>` 在回调里被丢掉）[我的决定]：`dispatch_sync` 到自己所在的串行队列会让 libdispatch 以 `SIGTRAP` 杀掉整个进程（实测，§4.2 F），所以这条路径不排空：
 /// 置 `closed`，`Stop`、`Invalidate`（在回调里调用它们没有问题，实测），把最后的 `Release` 与状态的释放交给私有队列上的 `dispatch_async`。串行队列保证这个块在当前回调返回之后才跑，所以正在跑的回调仍在用的状态（闭包、`Arc`）此前不会被释放。
 /// 这时 drop 先返回、当前回调继续跑完；之后不会再有第二次回调进入 `on_event`。
