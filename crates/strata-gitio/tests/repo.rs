@@ -51,11 +51,15 @@ fn open_resolves_repo_id_from_main_checkout_only() {
     let e = sb.try_open(&repo.join("sub")).unwrap_err();
     assert_eq!(e.code, Code::InvalidInput);
 
-    let shadow = sb.path("shadow.git");
-    sb.git(&sb.root, &["clone", "-q", "--bare", repo.to_str().unwrap(), shadow.to_str().unwrap()]);
-    sb.git(&shadow, &["config", "strata.shadow", "true"]);
+    let shadow = git.ensure_shadow(&sb.path("shadow.git")).unwrap();
     let ws = sb.path("ws");
-    sb.git(&shadow, &["worktree", "add", "-q", "--detach", ws.to_str().unwrap(), "HEAD"]);
+    let tmp = sb.path("ws-tmp");
+    let head = sb.head(&repo);
+    let tree = strata_types::TreeOid::try_from(sb.tree_of(&repo, "HEAD")).unwrap();
+    git.export_tree(&tree, &tmp).unwrap();
+    let commit = strata_types::CommitOid::try_from(head).unwrap();
+    git.attach_worktree(&shadow, 1, &commit, &tmp, &ws).unwrap();
+    std::fs::rename(&tmp, &ws).unwrap();
     let e = sb.try_open(&ws).unwrap_err();
     assert_eq!(e.code, Code::InvalidInput);
     assert_eq!(reason(&e).as_deref(), Some("strata-workspace"));

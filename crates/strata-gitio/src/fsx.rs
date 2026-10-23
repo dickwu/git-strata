@@ -87,6 +87,21 @@ pub(crate) fn read_rooted_limited(
 /// absent, other errors → Unknown), then rooted at its directory.
 /// Returns the resolved path too, for cache keys.
 pub(crate) fn read_human(p: &Path) -> Result<Option<(Vec<u8>, FileKey, PathBuf)>> {
+    match read_human_typed(p) {
+        Ok(v) => Ok(v),
+        Err(e) if e.code == Code::Unknown => Err(e),
+        Err(e) => {
+            let shown = e.detail.as_ref().and_then(|d| d.get("path")).and_then(|v| v.as_str()).map(str::to_string);
+            let shown = shown.unwrap_or_else(|| path_str(p));
+            Err(errd(Code::Unknown, format!("{shown}: {}", e.message), json!({ "path": shown, "code": e.code.as_str() })))
+        }
+    }
+}
+
+/// Like `read_human`, but a resolved path that is not a regular file keeps
+/// apfs's code (`NotFile`, `IsDirectory`, `NotDirectory`); only realpath
+/// failures other than ENOENT / ENOTDIR and read errors are `Unknown`.
+pub(crate) fn read_human_typed(p: &Path) -> Result<Option<(Vec<u8>, FileKey, PathBuf)>> {
     let real = match std::fs::canonicalize(p) {
         Ok(r) => r,
         Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT) | Some(libc::ENOTDIR)) => return Ok(None),
@@ -94,15 +109,20 @@ pub(crate) fn read_human(p: &Path) -> Result<Option<(Vec<u8>, FileKey, PathBuf)>
     };
     let (dir, name) = match (real.parent(), real.file_name()) {
         (Some(d), Some(n)) => (d.to_path_buf(), n.to_os_string()),
-        _ => return Err(errd(Code::NotFile, "not a file", json!({ "path": path_str(p) }))),
+        _ => return Err(errd(Code::IsDirectory, "not a file", json!({ "path": path_str(&real) }))),
     };
     let name = name.to_str().ok_or_else(|| errd(Code::NotText, "path is not UTF-8", json!({ "path": path_str(p) })))?;
-    // Not there any more (a race) → absent; anything else unreadable
-    // (a FIFO, a directory) → Unknown naming the resolved file.
+    // Not there any more (a race) → absent.
     match read_rooted(&dir, name) {
         Ok(None) => Ok(None),
         Ok(Some((b, k))) => Ok(Some((b, k, real))),
-        Err(e) if e.code == Code::Unknown => Err(e),
+        Err(e) if matches!(e.code, Code::NotFile | Code::IsDirectory | Code::NotDirectory | Code::Unknown) => {
+            let mut e = e;
+            if e.code != Code::Unknown {
+                e.detail = Some(json!({ "path": path_str(&real), "detail": e.detail }));
+            }
+            Err(e)
+        }
         Err(e) => Err(errd(
             Code::Unknown,
             format!("{}: {}", real.display(), e.message),
@@ -190,6 +210,18 @@ pub(crate) fn parse_gitfile(bytes: &[u8], tree_dir: &Path) -> Result<PathBuf> {
     }
     let p = Path::new(OsStr::from_bytes(rest));
     Ok(if p.is_absolute() { p.to_path_buf() } else { tree_dir.join(p) })
+}
+
+/// Read an opened `.git` gitfile (at most `GITFILE_MAX + 1` bytes) and parse
+/// it (§5.6 `worktree_gitdir`, §5.7 step 1). The caller opened it with
+/// `open_rooted_file`, so nothing on the way was followed.
+pub(crate) fn read_gitfile(f: &File, tree_dir: &Path) -> Result<PathBuf> {
+    let at = tree_dir.join(".git");
+    let mut buf = Vec::new();
+    if let Err(e) = (&*f).take(GITFILE_MAX as u64 + 1).read_to_end(&mut buf) {
+        return Err(strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &at));
+    }
+    parse_gitfile(&buf, tree_dir)
 }
 
 /// A fresh random hex nonce from /dev/urandom.

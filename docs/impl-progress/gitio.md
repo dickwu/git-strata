@@ -11,7 +11,8 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 | 3 ignore rules, is_ignored | 3d39e43 | |
 | 4 fetch, ancestry, CAS refs | e18b094 | |
 | 5 tree_of, tree validation, is_ignored_in_export | 4d8bbce | |
-| 6 export_tree | (this commit) | |
+| 6 export_tree | 849c6f1 | |
+| 7 shadow repositories, attach_worktree, worktree_gitdir | (this commit) | |
 
 ## Builder decisions (ambiguities)
 
@@ -98,3 +99,14 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 - Every failure after the first mkdir is Unknown with detail `tree` and `temp` (plus `code` of the underlying error); T is kept. This includes failures after the rename (full_fsync of P, removing T/index or T).
 - checkout-index runs without LC_ALL and without a timeout (filters may be slow); a non-required smudge failure is not an error, matching git checkout.
 - The autocrlf variant of the byte-for-byte test also converts `*.rot` (auto-detected text) to CRLF; the comparison with a real clone checkout is authoritative.
+
+### Task 7 decisions (shadow, attach_worktree, worktree_gitdir)
+- `ensure_shadow` refusal order: relative → non-canonical (`InvalidInput` reason `not-canonical`) → inside the main work tree / common dir (`InvalidInput` reason `inside-main`) → parent missing (`NoSuchPath`) / not a directory (`NotDirectory`) → dir exists: returned when it is an owned shadow, else `Exists` (an unreadable existing dir is also `Exists`, never rewritten). Main mirrors are read before anything is created, so a FIFO/directory `info/exclude` refuses with its typed code (`NotFile`, …) and creates nothing.
+- Shadow build: `git -c init.defaultRefFormat=files init --quiet --bare --template= --object-format=sha1` (no LC_ALL, per the §5.3 list), alternates = realpath of `<common>/objects`, mirrors copied only when present in main, `hooks/pre-push` 0755. The config is rendered by gitio (not `git config` calls) into `config.strata-<nonce>`, fsynced and swapped in, `strata.shadow = true` written last. Any build failure is `Unknown`; the half-built dir is left in place (and is `Exists` next time).
+- Copied config: the 10 listed `core.*` keys plus every `filter.*.*`/`diff.*.*`/`merge.*.*` key; values are re-quoted with git's `write_pair` rules; a value-less key is written bare. Subsection case is preserved, section/key names are lower-cased as `git config --list` reports them.
+- Ownership: `strata.shadow` must parse as git-true; a value that is not a boolean is `Unknown` reason `bad-config` (it is a config git itself would reject), `false` is not-owned (`InvalidInput`). Alternates' first line must canonicalize to main's objects dir.
+- `shadow_drift`: a shadow-side mirror that cannot be read as a regular file (FIFO, symlink, dir) counts as drift; a main-side failure is `Unknown`. Config drift compares the copied groups and also reports any `include.*`, `includeIf.*`, `extensions.*` key in the shadow config. The pre-push guard check runs `git rev-parse --git-path hooks` in the workspace (LC_ALL=C, 10 s timeout); a non-zero exit is `Unknown` reason `hooks-lookup`, a timeout `Unknown` reason `timeout`. A missing `.git` skips the guard check.
+- `attach_worktree`: admin-dir creation errors pass `NotDirectory`/`Exists` through, anything else is `Unknown`. The temp index is built at `<tmp>/.git/index` with `read-tree -c core.splitIndex=false --index-output` and `update-index -q --refresh` (both no LC_ALL, 600 s timeout, hooks off, fsmonitor off). Before copying, `<tmp>/.git` is re-verified (dev/ino via a rooted reopen, ctime unchanged); any change → `Unknown` reason `staging-changed` (checked before reporting a read-tree failure); a non-regular index → `Unknown` reason `index-read-back-refused`. The copy keeps the index mtime so the racy-clean check stays valid.
+- `worktree_gitdir` returns the gitdir verbatim-joined (no normalisation of `..` or a trailing `/`) and never follows a symlinked `.git`.
+- `fsx::read_human_typed` added (typed codes) with `read_human` as its Unknown-wrapping form; `fsx::read_gitfile` shared by `index::locate` and `worktree_gitdir`.
+- tests/repo.rs `open_resolves_repo_id_from_main_checkout_only` now builds its workspace with ensure_shadow + attach_worktree.

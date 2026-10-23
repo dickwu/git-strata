@@ -27,12 +27,15 @@ mod refs;
 mod remote;
 mod repo;
 mod seams;
+mod shadow;
 mod tree;
+mod worktree;
 
 #[cfg(feature = "test-seams")]
 pub use seams::{GitCall, Pause, SyncEvent};
 pub use index::IndexInfo;
 pub use remote::remote_ref;
+pub use shadow::{MirrorDrift, Shadow};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 

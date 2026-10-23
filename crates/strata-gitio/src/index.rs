@@ -492,12 +492,11 @@ impl Git {
         let dotgit = root.join(".git");
         let gitdir = match strata_apfs::open_rooted_file(root, &fsx::rp(".git")?) {
             Ok(f) => {
-                use std::io::Read;
-                let mut buf = Vec::new();
-                (&f).take(fsx::GITFILE_MAX as u64 + 1)
-                    .read_to_end(&mut buf)
-                    .map_err(|e| errd(Code::Unknown, format!("read {}: {e}", dotgit.display()), json!({"path": path_str(&dotgit)})))?;
-                fsx::lexical_normalize(&fsx::parse_gitfile(&buf, root)?)
+                let raw = fsx::read_gitfile(&f, root).map_err(|e| match e.code {
+                    Code::InvalidInput | Code::Unknown => e,
+                    _ => unknown_from(e, &dotgit),
+                })?;
+                fsx::lexical_normalize(&raw)
             }
             Err(e) if e.code == Code::IsDirectory => dotgit.clone(),
             Err(e) if e.code == Code::NoSuchPath => return Err(e),
