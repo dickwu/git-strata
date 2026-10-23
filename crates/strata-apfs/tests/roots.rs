@@ -33,6 +33,7 @@ fn calls(src_file: PathBuf, src_dir: PathBuf) -> Vec<(&'static str, Call)> {
         ("remove_rooted(EmptyDir)", Box::new(|r| remove_rooted(r, &rp("sub"), RemoveKind::EmptyDir))),
         ("clone_from_rooted", Box::new(move |r| clone_from_rooted(r, &rp("f"), &cfd, CloneKind::File))),
         ("remove_tree_rooted", Box::new(|r| remove_tree_rooted(r, &rp("sub")).map(drop))),
+        ("attrs_of", Box::new(|r| attrs_of(r, &rp("f")).map(drop))),
     ]
 }
 
@@ -42,6 +43,7 @@ fn ok_calls() -> Vec<(&'static str, Call)> {
         ("open_root", Box::new(|r| open_root(r).map(drop))),
         ("open_rooted_file", Box::new(|r| open_rooted_file(r, &rp("f")).map(drop))),
         ("create_file_rooted", Box::new(|r| create_file_rooted(r, &rp("created"), 0o644).map(drop))),
+        ("attrs_of", Box::new(|r| attrs_of(r, &rp("f")).map(drop))),
     ]
 }
 

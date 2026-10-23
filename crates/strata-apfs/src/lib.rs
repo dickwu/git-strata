@@ -7,6 +7,8 @@
 
 use strata_types::StrataError;
 
+mod attrs;
+mod bulk;
 mod clone;
 mod clone_from;
 mod remove_tree;
@@ -23,6 +25,7 @@ mod error;
 mod sys;
 mod volume;
 
+pub use attrs::{Attrs, FileKind, attrs_of};
 pub use clone::{clone_file, clone_tree};
 pub use clone_from::{CloneKind, clone_from_rooted};
 pub use remove_tree::{RemoveReport, Stuck, StuckReason, remove_tree_rooted};
