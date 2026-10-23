@@ -14,7 +14,8 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 | 6 export_tree | 849c6f1 | |
 | 7 shadow repositories, attach_worktree, worktree_gitdir | 01cb89b | |
 | 8 attach_staging, stage, commit_tree | c3a1dfb | push part of index_writers_refuse_the_main_checkout lands with Task 9 |
-| 9 push | (this commit) | also adds push to index_writers_refuse_the_main_checkout |
+| 9 push | b63b765 | also adds push to index_writers_refuse_the_main_checkout |
+| 10 merge3 | (this commit) | 22-case corpus in tests/fixtures/merge-corpus; one ignored fuzz test |
 
 ## Builder decisions (ambiguities)
 
@@ -161,3 +162,36 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 - The timeout test hangs receive-pack with a sleeping remote
   `pre-receive` hook (not a wrapper script) and checks the hook's pid is
   gone afterwards (process group killed).
+
+### Task 10 decisions (merge3)
+- §9 "行级 diff crate": no crate. merge.rs carries its own linear-space
+  Myers diff (O(N·D) time, O(N) memory), with each change group slid down
+  while the next line equals its first (xdiff's compaction direction). No
+  new dependency, no Cargo.lock change. A unit test checks the script is
+  valid and minimal against an LCS DP on 3000 random inputs.
+- The merge walk is a port of xdiff's `xdl_do_merge` (git
+  xdiff/xmerge.c): the same ours-before/theirs-before/overlap tests,
+  the same signed region arithmetic and the same `xdl_append_merge`
+  folding. Then any conflict region whose ours and theirs text are
+  byte-equal is resolved to one copy. That is the only case where git's
+  default level (zealous refinement) turns a region clean, so Clean versus
+  Conflict matches `git merge-file -p`. Hunks carry the unrefined
+  (diff3-style, EAGER-level) region, because a Hunk has a base section.
+- If the walk ever gave a region outside the files (it never has), merge3
+  logs a warning and returns one whole-file hunk. That is the safe side;
+  it never panics.
+- Parity holds when the line diff is unique. In the corpus, each case's
+  diff is unique. The ignored test `merge3_fuzz_against_git_merge_file`
+  (400 random edits of distinct-line files) matches git on every case.
+  With heavily repeated lines, git's diff heuristics can pick another
+  alignment of an equally minimal diff. A local run with lines drawn from
+  3 values matched git for 528 cases, then differed once: merge3 said
+  Clean where git said Conflict, and both merges are valid. This is
+  accepted, per §5.12's unique-diff corpus rule.
+- Corpus finding: two sides that make the same edit but cover different
+  base extents are a conflict in git, not a clean merge. In the case
+  `overlap-same-content-conflict`, ours deletes line 4, theirs deletes
+  lines 4 and 5, and both write X. merge3 agrees with git.
+- The corpus is committed as plain files (base/ours/theirs per case). The
+  test runs `git merge-file -p ours base theirs` in each case dir, through
+  the sandbox's git environment. That command writes nothing.
