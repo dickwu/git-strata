@@ -10,7 +10,8 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 | 2 content-addressed blob put, get and verify | done | 1e17403 |
 | 3 deps sets, attempts, proposals and main | done | d7282b5 |
 | 4 base generations with their manifests | done | b633b29 |
-| 5 sessions, workspaces, move intents and retire_dir | done | (see git log) |
+| 5 sessions, workspaces, move intents and retire_dir | done | d692877 |
+| 6 atomic checkpoint records with store-assigned ids | done | (see git log) |
 
 ## Ambiguity decisions
 
@@ -152,3 +153,31 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 - One unexplained failure of one `tests/open.rs` test in a single full
   `cargo test -p strata-store` run during Task 3 (output not captured);
   not reproduced in 26 further runs. Watching.
+- Task 6: validation (step 1) runs before the read-only / poison checks, as
+  §5.8 orders it; an incoherent overlay is `InvalidInput{reason:"entries",
+  why}` with `why` in duplicate_path, rename_to_self,
+  rename_source_has_entry, duplicate_rename_source, mode. Two `Renamed`
+  entries with the same `from` are refused too (the DDL has a unique index
+  on `from_path`).
+- Task 6: a session in any lifecycle but `removed` takes checkpoints
+  (`before_remove` checkpoints are written while `removing`); `removed` and
+  missing are both `NoSuchSession`.
+- Task 6: `cp.base.repo != cp.repo` is `InvalidInput{reason:"base_repo"}`;
+  a base not registered is `InvalidInput{reason:"base_unregistered"}`; an
+  untracked workspace is `InvalidInput{reason:"untracked"}`. The base is not
+  required to equal the workspace's current base.
+- Task 6: the `AfterCheckpointRow` seam fails with an injected EIO on
+  store.db: `Unknown{op:"record_checkpoint", outcome:"not_written"}`, and
+  the whole transaction rolls back.
+- Task 6: a repeated `ToolCall{id}` rolls back and returns the existing id
+  without lstat-ing anything new beyond step 3 (blob checks still run first,
+  per the §5.8 step order). `Manual{message}` with the same text is not a
+  tool call.
+- Task 6: blob rows registered by a checkpoint get `created_ns = now()`
+  (not `cp.at`).
+- Task 6: `checkpoint(session, id)` binds `u64::from(id) as i64`, so an id
+  built with `CheckpointId::from(-5i64)` finds a negative row and reports
+  `Corrupt{bad_row}` rather than `NoSuchCheckpoint`.
+- Task 6: `late_source_failure_writes_no_checkpoint` checks that the k−1
+  blobs stay in `blobs/` (unregistered); the "gc collects them past the age
+  floor" half is covered in Task 9 (gc does not exist yet).

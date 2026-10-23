@@ -338,6 +338,20 @@ fn read_only_open_refuses_every_write() {
     assert!(w.set_lifecycle(&sid, Lifecycle::Creating, Lifecycle::Active, None, at).unwrap());
     let mv = w.begin_move(&sid, &repo, &base, &head, &sroot.join(".m"), at).unwrap();
     std::fs::create_dir_all(env.root.join("bases/app/.staging/0123456789abcdef0123456789abcdef")).unwrap();
+    let cp = strata_types::Checkpoint {
+        id: strata_types::CheckpointId::try_from(1u64).unwrap(),
+        session: sid.clone(),
+        repo: repo.clone(),
+        base: base.clone(),
+        at,
+        reason: strata_types::CheckpointReason::BeforePublish,
+        entries: vec![strata_types::OverlayEntry {
+            path: strata_types::RepoPath::try_from("f".to_string()).unwrap(),
+            kind: strata_types::EntryKind::Added { blob: id.clone() },
+            mode: 0o100644,
+        }],
+    };
+    let cpid = w.record_checkpoint(cp.clone()).unwrap();
     w.close().unwrap();
     let src = env.dir.path().join("ro-src");
     std::fs::create_dir_all(&src).unwrap();
@@ -361,6 +375,9 @@ fn read_only_open_refuses_every_write() {
     assert_eq!(r.sessions().unwrap().len(), 1);
     assert_eq!(r.move_intents(&sid).unwrap().len(), 1);
     assert_eq!(r.open_move_intents().unwrap().len(), 1);
+    assert_eq!(r.checkpoint(&sid, cpid).unwrap(), cp);
+    assert_eq!(r.latest_checkpoint(&sid, &repo).unwrap(), Some(cp.clone()));
+    assert_eq!(r.checkpoints(&sid, None).unwrap().len(), 1);
     // write functions are refused, one block per task
     let f = strata_types::RepoPath::try_from("f".to_string()).unwrap();
     for e in [
@@ -408,6 +425,8 @@ fn read_only_open_refuses_every_write() {
         r.resolve_move(&sid, &repo, mv, false, at).err().unwrap(),
         r.set_old_tree(&sid, &repo, mv, &sroot.join(".o")).err().unwrap(),
         r.retire_dir(&env.root.join("bases/app/.staging/0123456789abcdef0123456789abcdef")).err().unwrap(),
+        // Task 6
+        r.record_checkpoint(cp.clone()).err().unwrap(),
     ] {
         assert_reason(&e, Code::ReadOnly, "read_only_handle");
     }

@@ -60,13 +60,13 @@ pub(crate) fn session_lifecycle(c: &Connection, id: &str) -> rusqlite::Result<Op
     c.query_row("SELECT lifecycle FROM sessions WHERE id = ?1", [id], |r| r.get(0)).optional()
 }
 
-struct Ws {
-    tracked: bool,
+pub(crate) struct Ws {
+    pub(crate) tracked: bool,
     generation: i64,
     health: String,
 }
 
-fn workspace(c: &Connection, id: &str, repo: &str) -> rusqlite::Result<Option<Ws>> {
+pub(crate) fn workspace(c: &Connection, id: &str, repo: &str) -> rusqlite::Result<Option<Ws>> {
     c.query_row(
         "SELECT tracked, generation, health FROM workspaces WHERE session = ?1 AND repo = ?2",
         [id, repo],
@@ -103,7 +103,7 @@ fn intent(c: &Connection, id: &str, repo: &str, n: i64) -> rusqlite::Result<Opti
     .optional()
 }
 
-fn base_gen_id(c: &Connection, repo: &str, tree: &str, deps: &str) -> rusqlite::Result<Option<i64>> {
+pub(crate) fn base_gen_id(c: &Connection, repo: &str, tree: &str, deps: &str) -> rusqlite::Result<Option<i64>> {
     c.query_row("SELECT id FROM base_gens WHERE repo = ?1 AND tree = ?2 AND deps = ?3", [repo, tree, deps], |r| r.get(0))
         .optional()
 }

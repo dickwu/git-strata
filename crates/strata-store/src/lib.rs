@@ -17,6 +17,7 @@ use strata_types::{
 };
 
 mod blob;
+mod checkpoints;
 mod codec;
 mod deps;
 mod errors;
