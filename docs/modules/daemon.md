@@ -423,7 +423,7 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 
 1. 名字不在配置里 → `NoSuchRepo`，不弹框。
 2. 该 repo 的文件并不比钉松 → `InvalidInput`，`detail.reason = "not_relaxed"`，不弹框 [我的决定 D20]。
-3. 顺序固定：`require(Action::ConfigRelax { repo: RepoId })`，然后 `validate` 这个 action（这一步核销 nonce），然后才写 `pins.json`。action 由 daemon 从 `repo` 推出，不采用客户端传来的。不符、用过、过期 → `NotConfirmed`，钉不改。confirm 不写任何文件。
+3. 顺序：`require(Action::ConfigRelax { repo: RepoId })`；`validate` 核对 action 就是这个 repo 的 `ConfigRelax`，并核销凭据；然后才写 `pins.json`。action 由 daemon 从 `repo` 推出，不采用客户端传来的。不符、用过、过期 → `NotConfirmed`，钉不改。confirm 不写任何文件。
 4. `Action::ConfigRelax` 由 Task 15 加进 types.md。在那之前，点名这个变体的路径编译不了。编译不了期间，重载把钉放松的仍然不应用。不提供绕过。
 
 ### 5.6 publish 的锁
