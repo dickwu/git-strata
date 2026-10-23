@@ -1,6 +1,7 @@
 //! Test seams (cargo feature `test-seams`; never in a shipped binary, confirm.md §3, C8).
 
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -328,5 +329,72 @@ impl Confirmer {
             },
             opts.prompt_timeout,
         )
+    }
+}
+
+/// The tempting names that §7's "cannot be bypassed" tests always include.
+const FIXED_BYPASS_NAMES: [&str; 12] = [
+    "STRATA_CONFIRM",
+    "STRATA_NO_CONFIRM",
+    "STRATA_SKIP_CONFIRM",
+    "STRATA_ASSUME_YES",
+    "STRATA_YES",
+    "STRATA_FORCE",
+    "STRATA_TEST",
+    "STRATA_CI",
+    "STRATA_NONINTERACTIVE",
+    "STRATA_TTY",
+    "STRATA_DEBUG",
+    "STRATA_PUBLISH",
+];
+
+/// The variable names shared by §7's two "cannot be bypassed" tests: every
+/// `STRATA_[A-Z0-9_]+` name that appears in a `.rs` file under `workspace_root/crates`, plus
+/// a fixed list of tempting names. Sorted, without duplicates.
+pub fn bypass_env_names(workspace_root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = FIXED_BYPASS_NAMES.iter().map(|s| s.to_string()).collect();
+    let mut stack = vec![workspace_root.join("crates")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                if p.file_name().is_some_and(|n| n != "target") {
+                    stack.push(p);
+                }
+            } else if p.extension().is_some_and(|e| e == "rs") {
+                if let Ok(text) = std::fs::read_to_string(&p) {
+                    collect_strata_names(&text, &mut names);
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn collect_strata_names(text: &str, out: &mut Vec<String>) {
+    const PREFIX: &[u8] = b"STRATA_";
+    let b = text.as_bytes();
+    let is_name = |c: u8| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_';
+    let mut i = 0;
+    while i + PREFIX.len() <= b.len() {
+        if &b[i..i + PREFIX.len()] == PREFIX
+            && (i == 0 || !is_name(b[i - 1]) && !b[i - 1].is_ascii_alphanumeric())
+        {
+            let mut j = i + PREFIX.len();
+            while j < b.len() && is_name(b[j]) {
+                j += 1;
+            }
+            if j > i + PREFIX.len() {
+                out.push(text[i..j].to_string());
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
     }
 }
