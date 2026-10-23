@@ -17,3 +17,6 @@ unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+# The integration tests drive the thread-local seams, so the test build of
+# this crate always has them; release builds of dependents never do.
+strata-apfs = { path = ".", features = ["test-seams"] }

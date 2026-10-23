@@ -8,6 +8,8 @@
 use strata_types::StrataError;
 
 mod clone;
+mod rooted;
+mod hooks;
 #[allow(dead_code)]
 mod error;
 #[allow(dead_code)]
@@ -15,6 +17,15 @@ mod sys;
 mod volume;
 
 pub use clone::{clone_file, clone_tree};
+pub use rooted::{open_root, open_rooted, open_rooted_file};
+
+pub(crate) type StrataErrorAlias = StrataError;
+
+/// Thread-local test hooks (§3). Only with `feature = "test-seams"`.
+#[cfg(feature = "test-seams")]
+pub mod seams {
+    pub use crate::hooks::{MetaChange, set_after_bulk_window, set_before_meta, set_before_open};
+}
 pub use error::{IoSide, classify_io_error};
 pub use volume::{VolumeCaps, nearest_existing_ancestor, same_volume, volume_caps};
 
