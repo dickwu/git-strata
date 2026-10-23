@@ -19,6 +19,7 @@ mod cache;
 mod command;
 mod config;
 mod err;
+mod export;
 mod fsx;
 mod ignore;
 mod index;

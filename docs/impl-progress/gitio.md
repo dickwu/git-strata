@@ -10,7 +10,8 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 | 2 index + config parsing, read_index | b4c257d | |
 | 3 ignore rules, is_ignored | 3d39e43 | |
 | 4 fetch, ancestry, CAS refs | e18b094 | |
-| 5 tree_of, tree validation, is_ignored_in_export | (this commit) | |
+| 5 tree_of, tree validation, is_ignored_in_export | 4d8bbce | |
+| 6 export_tree | (this commit) | |
 
 ## Builder decisions (ambiguities)
 
@@ -88,3 +89,12 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
   (not config.worktree).
 - Task 5: the `export_tree` halves of the replace/gitlink/missing-blob/.git/
   overlong/collision tests are added with Task 6.
+
+### Task 6 decisions (export_tree)
+- Refusal order: absolute dst → tree validation (tree_table) → dst name present → parent lstat (missing → NoSuchPath; not a dir / symlink → NotDirectory) → dst exists (lstat, so dangling symlinks count) → Exists → inside main work tree / common dir → InvalidInput → bad name → temp name > 255 UTF-16 units → PATH_MAX. The spec lists Exists earlier; parent checks come first because "exists" is meaningless without a parent. All refusals precede the first mkdir.
+- A relative dst, and a dst whose last component is `..`/not a single valid RepoPath component, are InvalidInput.
+- PATH_MAX (1024) counts the trailing NUL and covers both T/index and every T/tree/<path>.
+- Durability order: fsync every regular file, then every dir deepest-first, then T/tree, then one full_fsync(T/tree); symlinks are never opened. The rename seam event is recorded before the rename attempt (so a failed EEXIST rename is still visible to tests).
+- Every failure after the first mkdir is Unknown with detail `tree` and `temp` (plus `code` of the underlying error); T is kept. This includes failures after the rename (full_fsync of P, removing T/index or T).
+- checkout-index runs without LC_ALL and without a timeout (filters may be slow); a non-required smudge failure is not an error, matching git checkout.
+- The autocrlf variant of the byte-for-byte test also converts `*.rot` (auto-detected text) to CRLF; the comparison with a real clone checkout is authoritative.

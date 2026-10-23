@@ -46,6 +46,17 @@ fn loose_object(repo: &Path, o: &str) -> std::path::PathBuf {
     repo.join(".git/objects").join(&o[..2]).join(&o[2..])
 }
 
+/// `export_tree` of `tree` into a fresh `exports/<tag>` refuses with `code`
+/// and leaves the parent directory empty (nothing written, G9).
+fn export_refused(sb: &Sandbox, git: &Git, tree: &str, tag: &str, code: Code) -> strata_types::StrataError {
+    let parent = sb.path(&format!("exports-{tag}"));
+    fs::create_dir_all(&parent).unwrap();
+    let e = git.export_tree(&toid(tree), &parent.join("dst")).unwrap_err();
+    assert_eq!(e.code, code, "{e:?}");
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "export wrote something for {tag}");
+    e
+}
+
 fn ls_tree_count(git: &Git) -> usize {
     git.take_git_calls().iter().filter(|c| args_of(c).iter().any(|a| a == "ls-tree")).count()
 }
@@ -61,6 +72,10 @@ fn replace_refs_do_not_change_tree_of() {
     assert_ne!(sb.tree_of(&repo, &c1), t1, "git itself honours the replacement");
     let git = sb.open(&repo);
     assert_eq!(git.tree_of(&oid(&c1)).unwrap().as_str(), t1);
+    let dst = sb.path("exp");
+    git.export_tree(&toid(&t1), &dst).unwrap();
+    assert_eq!(fs::read(dst.join("README.md")).unwrap(), b"hello\n");
+    assert!(!dst.join("other.txt").exists());
 }
 
 #[test]
@@ -77,6 +92,8 @@ fn gitlink_in_base_tree_is_unsupported() {
     assert_eq!(detail(&e, "path").as_deref(), Some("sub"));
     let e = git.tree_contains(&toid(&t), &rp("a.txt")).unwrap_err();
     assert_eq!(e.code, Code::Unsupported);
+    let e = export_refused(&sb, &git, &t, "gitlink", Code::Unsupported);
+    assert_eq!(detail(&e, "path").as_deref(), Some("sub"));
 }
 
 #[test]
@@ -95,6 +112,13 @@ fn missing_blob_refused_before_export() {
     let e = git.tree_of(&c).unwrap_err();
     assert_eq!(e.code, Code::NoSuchCommit, "{e:?}");
     assert_eq!(detail(&e, "path").as_deref(), Some("dir/gone.txt"));
+    // Refused before export: an existing base directory is not touched.
+    let base = sb.path("bases/b1");
+    sb.archive_tree_into(&repo, "HEAD", &base);
+    let before = snapshot(&sb.path("bases"));
+    let e = git.export_tree(&toid(&t), &sb.path("bases/b2")).unwrap_err();
+    assert_eq!(e.code, Code::NoSuchCommit, "{e:?}");
+    assert_eq!(snapshot(&sb.path("bases")), before);
 
     // A missing subtree.
     let b2 = blob(&sb, &repo, b"in a subtree\n");
@@ -104,6 +128,8 @@ fn missing_blob_refused_before_export() {
     fs::remove_file(loose_object(&repo, &inner2)).unwrap();
     let e = git.tree_of(&c2).unwrap_err();
     assert_eq!(e.code, Code::NoSuchCommit, "{e:?}");
+    export_refused(&sb, &git, &t2, "subtree", Code::NoSuchCommit);
+    assert_eq!(snapshot(&sb.path("bases")), before);
     // And a commit that is not there at all.
     let e = git.tree_of(&oid("1234567890123456789012345678901234567890")).unwrap_err();
     assert_eq!(e.code, Code::NoSuchCommit);
@@ -119,6 +145,7 @@ fn non_utf8_tree_path_is_not_text() {
     let git = sb.open(&repo);
     let e = git.tree_of(&c).unwrap_err();
     assert_eq!(e.code, Code::NotText, "{e:?}");
+    export_refused(&sb, &git, &t, "nottext", Code::NotText);
 }
 
 #[test]
@@ -138,6 +165,7 @@ fn colliding_paths_are_unsupported() {
     let mut paths: Vec<&str> = paths.iter().map(|v| v.as_str().unwrap()).collect();
     paths.sort();
     assert_eq!(paths, vec!["README", "readme"]);
+    export_refused(&sb, &git, &t, "ascii", Code::Unsupported);
     set_ignorecase(&sb, &repo, false);
     assert_eq!(git.tree_of(&c).unwrap().as_str(), t);
 
@@ -145,17 +173,50 @@ fn colliding_paths_are_unsupported() {
     let t = mktree(&sb, &repo, &[("100644", "blob", &b, "e\u{301}.txt".as_bytes()), ("100644", "blob", &b, "\u{e9}.txt".as_bytes())]);
     let e = git.tree_of(&commit_of(&sb, &repo, &t)).unwrap_err();
     assert_eq!(e.code, Code::Unsupported, "{e:?}");
+    export_refused(&sb, &git, &t, "nfc", Code::Unsupported);
 
     // A name that is both a symlink and a directory.
     let inner = mktree(&sb, &repo, &[("100644", "blob", &b, b"b")]);
     let t = mktree(&sb, &repo, &[("120000", "blob", &b, b"a"), ("040000", "tree", &inner, b"a")]);
     let e = git.tree_of(&commit_of(&sb, &repo, &t)).unwrap_err();
     assert_eq!(e.code, Code::Unsupported, "{e:?}");
+    export_refused(&sb, &git, &t, "symdir", Code::Unsupported);
 
     // Unicode-only case differences are not gitio's to judge.
     set_ignorecase(&sb, &repo, true);
     let t = mktree(&sb, &repo, &[("100644", "blob", &b, "\u{c9}.txt".as_bytes()), ("100644", "blob", &b, "\u{e9}.txt".as_bytes())]);
     assert_eq!(git.tree_of(&commit_of(&sb, &repo, &t)).unwrap().as_str(), t);
+    // The export keeps what `git checkout` keeps: one file when the volume
+    // folds Unicode case, two otherwise.
+    let dst = sb.path("exp-unicode");
+    git.export_tree(&toid(&t), &dst).unwrap();
+    let probe = sb.path("probe");
+    fs::create_dir(&probe).unwrap();
+    fs::write(probe.join("\u{c9}"), b"").unwrap();
+    let folds = probe.join("\u{e9}").exists();
+    let co = sb.path("co-unicode");
+    fs::create_dir(&co).unwrap();
+    let o = sb
+        .cmd(&co)
+        .env("GIT_INDEX_FILE", sb.path("co-unicode.index"))
+        .arg(format!("--git-dir={}", repo.join(".git").display()))
+        .arg(format!("--work-tree={}", co.display()))
+        .args(["read-tree", &t])
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    let o = sb
+        .cmd(&co)
+        .env("GIT_INDEX_FILE", sb.path("co-unicode.index"))
+        .arg(format!("--git-dir={}", repo.join(".git").display()))
+        .arg(format!("--work-tree={}", co.display()))
+        .args(["checkout-index", "--all", "--force"])
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    let n = fs::read_dir(&dst).unwrap().count();
+    assert_eq!(n, fs::read_dir(&co).unwrap().count());
+    assert_eq!(n, if folds { 1 } else { 2 });
 }
 
 #[test]
@@ -169,12 +230,14 @@ fn dot_git_component_is_unsupported() {
     let e = git.tree_of(&commit_of(&sb, &repo, &t)).unwrap_err();
     assert_eq!(e.code, Code::Unsupported, "{e:?}");
     assert_eq!(detail(&e, "path").as_deref(), Some(".GIT/config"));
+    export_refused(&sb, &git, &t, "dotgit-upper", Code::Unsupported);
     let x = mktree(&sb, &repo, &[("100644", "blob", &b, b"x")]);
     let dg = mktree(&sb, &repo, &[("040000", "tree", &x, b".git")]);
     let t = mktree(&sb, &repo, &[("040000", "tree", &dg, b"sub")]);
     let e = git.tree_of(&commit_of(&sb, &repo, &t)).unwrap_err();
     assert_eq!(e.code, Code::Unsupported, "{e:?}");
     assert_eq!(detail(&e, "path").as_deref(), Some("sub/.git/x"));
+    export_refused(&sb, &git, &t, "dotgit-sub", Code::Unsupported);
 }
 
 #[test]
@@ -187,9 +250,24 @@ fn overlong_component_refused_before_writing() {
     let t = mktree(&sb, &repo, &[("100644", "blob", &b, ok.as_bytes())]);
     assert_eq!(git.tree_of(&commit_of(&sb, &repo, &t)).unwrap().as_str(), t);
     let long = "a".repeat(256);
-    let t = mktree(&sb, &repo, &[("100644", "blob", &b, long.as_bytes())]);
-    let e = git.tree_of(&commit_of(&sb, &repo, &t)).unwrap_err();
+    let t2 = mktree(&sb, &repo, &[("100644", "blob", &b, long.as_bytes())]);
+    let e = git.tree_of(&commit_of(&sb, &repo, &t2)).unwrap_err();
     assert_eq!(e.code, Code::InvalidInput, "{e:?}");
+    export_refused(&sb, &git, &t2, "component", Code::InvalidInput);
+
+    // Valid components, but dst + path reaches PATH_MAX (1024 bytes).
+    let mut deep = mktree(&sb, &repo, &[("100644", "blob", &b, ok.as_bytes())]);
+    for i in 0..3 {
+        let d = format!("{i}{}", "d".repeat(250));
+        deep = mktree(&sb, &repo, &[("040000", "tree", &deep, d.as_bytes())]);
+    }
+    assert_eq!(git.tree_of(&commit_of(&sb, &repo, &deep)).unwrap().as_str(), deep);
+    let e = export_refused(&sb, &git, &deep, "pathmax", Code::InvalidInput);
+    assert_eq!(reason(&e).as_deref(), Some("path-too-long"));
+    // The 255-byte name itself exports fine.
+    let dst = sb.path("exp-ok");
+    git.export_tree(&toid(&t), &dst).unwrap();
+    assert!(dst.join(&ok).is_file());
 }
 
 #[test]
