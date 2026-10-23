@@ -28,7 +28,7 @@ store 负责 git-strata 全部的持久元数据和内容存储，落在 `[paths
 Workspace crate：
 
 - `strata-types`：全部标识（`BlobId`、`CheckpointId`、`ProposalId`、`SessionId`、`RepoName`、`RepoPath`、`TreeOid`、`CommitOid`、`DepsSetId`），结构（`BaseGen`、`DepsSet`、`BaseManifest`、`ManifestEntry`、`OverlayEntry`、`EntryKind`、`Checkpoint`、`CheckpointReason`、`SessionManifest`、`WorkspaceState`、`ReleaseGroup`、`Batch`、`Action`），`StrataError` 与 `Code`，以及 `serde_rfc3339` 适配模块。
-- `strata-apfs`：`clone_file`（`put_blob` 与 `get_blob`）、`same_volume` 与 `nearest_existing_ancestor`（`open` 的同卷检查）、`classify_io_error`（`io::Error` 的归类），以及在根之下不跟随符号链接的操作：`attrs_of` 与 `clone_from_rooted`（`put_blob_rooted`）、`clone_file_rooted` 与 `open_rooted_file`（`get_blob_rooted`）、`open_rooted` 与 `make_removable`（准备 generation 的根目录）、`rename_rooted`（`retire_dir` 与 gc 改名进 trash）、`remove_tree_rooted`（删 trash 里的目录，以及 `store/tmp/` 里不是 store 建的目录）、`remove_rooted`（删 trash 里不是目录的条目、清扫之后变空的目录）、`list_dir` 与 `Attrs::last_changed`（gc 清扫活路径与基线暂存，列出 trash 与 tmp 的条目）、`full_fsync`（改名之后同步 trash）。增补 8：store 在会话树、generation 树与 trash 上不自己发 `*at` 调用，那里的打开、克隆、改名与删除全经 apfs；store 自己的 `store/` 之下（`tmp/`、`blobs/`、库文件）照常用 libc。types.md §8 第 1 层只允许 store 依赖 apfs 这一个同层例外；依赖表以 types.md 为准（裁定 T6）。
+- `strata-apfs`：`clone_file`（`put_blob` 与 `get_blob`）、`same_volume` 与 `nearest_existing_ancestor`（`open` 的同卷检查）、`classify_io_error`（`io::Error` 的归类），以及在根之下不跟随符号链接的操作：`attrs_of` 与 `clone_from_rooted`（`put_blob_rooted`）、`clone_file_rooted` 与 `open_rooted_file`（`get_blob_rooted`）、`set_file_meta`（规整 put 的克隆体与 get、`get_blob_rooted` 刚克隆出的文件）、`open_rooted` 与 `make_removable`（准备 generation 的根目录）、`rename_rooted`（`retire_dir` 与 gc 改名进 trash）、`remove_tree_rooted`（gc 删 trash 与 `store/tmp/` 的每个条目，不论种类）、`remove_rooted`（删清扫之后变空的目录）、`list_dir` 与 `Attrs::last_changed`（gc 清扫活路径与基线暂存，列出 trash 与 tmp 的条目）、`full_fsync`（改名之后同步 trash）。增补 8：store 在会话树、generation 树与 trash 上不自己发 `*at` 调用，那里的打开、克隆、改名与删除全经 apfs；store 自己的 `store/` 之下（`tmp/`、`blobs/`、库文件）照常用 libc，只是 gc 删 `tmp/` 的条目也经 `remove_tree_rooted`；store 自己从不调 `fchflags`、`fchmod`、`futimens`：get 出来的文件与 put 的克隆体都经 `set_file_meta` 改元数据，从不按路径改标志（module-rulings 的"remove_tree_rooted takes any entry kind""Metadata changes through a handle go through apfs::set_file_meta"）。这条规则管的是别的进程摸得到的文件（会话树、暂存、基线 generation、工作区）；store 的私有区（`store/blobs`、`store/tmp`）里增补 8 的 libc 许可照旧：put 的克隆体经 `set_file_meta` 是选择，put 第 7 步按路径刷新已存 blob 的时间（`utimensat(AT_SYMLINK_NOFOLLOW)`）也留着，能经根之外的硬链接摸到一个 blob，说明有人动了 strata 的私有区，能变的也只有它的时间（module-rulings 的"set_file_meta scope, corrected"）。types.md §8 第 1 层只允许 store 依赖 apfs 这一个同层例外；依赖表以 types.md 为准（裁定 T6）。
 
 apfs.md（@1e723f2，module-rulings 的"apfs names committed at sdd/task-4 1e723f2"）里 store 用到的签名：
 
@@ -37,27 +37,29 @@ apfs.md（@1e723f2，module-rulings 的"apfs names committed at sdd/task-4 1e723
 - `nearest_existing_ancestor(path: &Path) -> io::Result<PathBuf>`：从 `path` 往上找第一个存在的路径（`path` 自己存在就是它自己），即 config.md §4.3 的"最近的已存在上级"。`open` 的同卷检查就是 `same_volume(&nearest_existing_ancestor(root)?, checkout)`：这条规则只在 apfs 写一份（M17），store 不自己往上找。
 - `classify_io_error(err: &io::Error, side: IoSide, path: &Path) -> StrataError`：types.md §6.3 的 errno 归类表加 apfs 的细化；`IoSide` 分读、写、已经写了一部分之后三种，`detail` 带 `errno` 与 `path`。store 对 apfs 交来的句柄、对自己 `store/` 之下的文件做 I/O 失败时都用它，不另写一张表（§6.2）。
 - `open_rooted(root: &Path, path: &RepoPath) -> Result<File>`：逐级 `openat(O_NOFOLLOW)`；能打开普通文件、目录与 FIFO，最后一级是符号链接、socket 或设备 → `NotFile`，上级里有符号链接 → `NotDirectory`（`reason = symlink`）。store 把它返回的目录句柄交给 `make_removable`（§5.5），或拿来做 `full_fsync`。
-- `open_rooted_file(root: &Path, path: &RepoPath) -> Result<File>`：同 `open_rooted`，另要求是普通文件：目录 → `IsDirectory`，FIFO、设备 → `NotFile`。`get_blob_rooted` 在它返回的句柄上规整刚克隆出的文件。
-- `clone_file_rooted(src: &Path, root: &Path, dst: &RepoPath, mode: Option<u32>) -> Result<()>`：`dst` 的上级逐级以 `O_DIRECTORY | O_NOFOLLOW` 打开并钉住，任何一级是文件或符号链接 → `NotDirectory`（符号链接时 `reason = symlink`），上级不存在 → `NoSuchPath`，都在写任何东西之前；然后在钉住的父目录上只用最后一个名字 `clonefileat`，`dst` 已存在（含悬空符号链接）→ `Exists`，从不覆盖。`src` 按路径解析，store 给的是自己的 blob 文件。克隆带着源的 BSD 标志，所以 store 传 `None`，清掉标志之后自己设 mode（§5.4）。
+- `open_rooted_file(root: &Path, path: &RepoPath) -> Result<File>`：同 `open_rooted`，另要求是普通文件：目录 → `IsDirectory`，FIFO、设备 → `NotFile`。`get_blob_rooted` 把它返回的句柄交给 `set_file_meta`。
+- `clone_file_rooted(src: &Path, root: &Path, dst: &RepoPath, mode: Option<u32>) -> Result<()>`：`dst` 的上级逐级以 `O_DIRECTORY | O_NOFOLLOW` 打开并钉住，任何一级是文件或符号链接 → `NotDirectory`（符号链接时 `reason = symlink`），上级不存在 → `NoSuchPath`，都在写任何东西之前；然后在钉住的父目录上只用最后一个名字 `clonefileat`，`dst` 已存在（含悬空符号链接）→ `Exists`，从不覆盖。`src` 按路径解析，store 给的是自己的 blob 文件。克隆带着源的 BSD 标志，所以 store 传 `None`，清标志与设 mode 都交给之后的 `set_file_meta`（§5.4）。
 - `clone_from_rooted(src_root: &Path, src: &RepoPath, dst: &Path) -> Result<()>`：以不跟随符号链接的方式打开 `src`（每一级都不跟随，最后一级也不：符号链接、socket、设备、FIFO → `NotFile`），再从这个描述符克隆（`fclonefileat`），所以克隆的就是此刻在 `src` 上的那个对象，绝不是根之外的东西；`dst` 必须不存在（`Exists`，从不覆盖）；其余错误同 `clone_file`。在 1e723f2 里，`src` 是目录时它克隆整棵树（2026-10-22 实测：对目录的描述符，`fclonefileat` 克隆整棵树）；store 要的 `kind` 参数见下面的上游要求。
 - `rename_rooted(root: &Path, from: &RepoPath, to: &RepoPath, mode: RenameMode) -> Result<()>`，`RenameMode { Excl, Swap }`：store 只用 `Excl`。单次 `renameatx_np(RENAME_EXCL)`，两边的上级都钉住、不跟随；`to` 已存在 → `Exists`；0555 的目录改到别的父目录 → `ReadOnly`（`reparent_needs_write`），带 `uchg` → `ReadOnly`（`immutable`），所以 store 改名之前先准备根目录（§5.5）。它不同步，要扛住断电的调用方自己对父目录 `full_fsync`。
-- `remove_rooted(root: &Path, path: &RepoPath, kind: RemoveKind) -> Result<()>`，`RemoveKind { File, EmptyDir }`：单次 `unlinkat`，不 chmod、不清标志。`EmptyDir` 删一个空目录（不空 → `NotEmpty`）；`File` 删一个文件或符号链接本身（是目录 → `IsDirectory`）。
-- `remove_tree_rooted(root: &Path, path: &RepoPath) -> Result<RemoveReport>`：删一棵目录树，`path` 必须是目录（是符号链接或文件 → `NotDirectory`）；树里的符号链接只删链接本身、不跟随，不跨设备，为删掉它清掉条目的 `UF_IMMUTABLE` 与 `UF_APPEND`、给打不开的目录补属主权限，自底向上。store 只对目录调用它，不是目录的条目用 `remove_rooted`；没删干净时怎样返回见下面的上游要求。
+- `remove_rooted(root: &Path, path: &RepoPath, kind: RemoveKind) -> Result<()>`，`RemoveKind { File, EmptyDir }`：单次 `unlinkat`，不 chmod、不清标志。`EmptyDir` 删一个空目录（不空 → `NotEmpty`）；`File` 删一个文件或符号链接本身（是目录 → `IsDirectory`）。store 只用 `EmptyDir`。
+- `remove_tree_rooted(root: &Path, path: &RepoPath) -> Result<RemoveReport>`：删一棵目录树，在 1e723f2 里 `path` 必须是目录（是符号链接或文件 → `NotDirectory`）；树里的符号链接只删链接本身、不跟随，不跨设备，为删掉它清掉条目的 `UF_IMMUTABLE` 与 `UF_APPEND`、给打不开的目录补属主权限，自底向上。store 要它也接受不是目录的目标，以及没删干净时怎样返回，见下面的上游要求。
 - `attrs_of(root: &Path, path: &RepoPath) -> Result<Attrs>`：上级逐级不跟随，最后一级是 lstat 语义；`Attrs.kind` 是 `FileKind`，符号链接带着目标的原始字节；`Attrs::last_changed()` 是 mtime 与 ctime 中较晚的那个。
 - `list_dir(root: &Path, dir: Option<&RepoPath>) -> Walk<'static>`：列一个目录的直接子项，每项带 `Attrs`，不跟随符号链接。
 - `full_fsync(file: &File) -> Result<()>`：`F_FULLFSYNC`。
 
-下面三项由 apfs 的第 2 轮加上（module-rulings 的"clone_from_rooted states its source kind""make_removable""remove_tree_rooted reports, it does not fail"），是 store 对 apfs 的上游要求：
+下面五项由 apfs 的第 2 轮加上（module-rulings 的"clone_from_rooted states its source kind""make_removable""remove_tree_rooted reports, it does not fail""remove_tree_rooted takes any entry kind""Metadata changes through a handle go through apfs::set_file_meta"），是 store 对 apfs 的上游要求：
 
 - `clone_from_rooted` 多一个参数 `kind: CloneKind`，`CloneKind { File, Dir }`：apfs `fstat` 钉住的描述符，种类与 `kind` 不符就在克隆之前拒绝。store 只传 `CloneKind::File`，靠的是：是目录 → `IsDirectory`，不再克隆整棵树；是 FIFO、socket 或设备 → `NotFile`（`fclonefileat` 对 FIFO 的描述符返回 `EINVAL`，所以这一条同样要在克隆之前判）。
-- `make_removable(file: &File) -> Result<()>`：在调用方用 `open_rooted` 打开的句柄上，先清掉 `UF_IMMUTABLE` 与 `UF_APPEND`，再 `fchmod u+w`。`retire_dir` 与 `gc_repo` 准备根目录都用它（§5.5、§5.11），store 不再自己发这对 `fchflags`、`fchmod`；apfs 从不自己放宽任何东西（A10）。
+- `make_removable(file: &File) -> Result<()>`：在调用方用 `open_rooted` 打开的句柄上，先清掉 `UF_IMMUTABLE` 与 `UF_APPEND`，再 `fchmod u+w`。`retire_dir` 与 `gc_repo` 准备根目录都用它（§5.5、§5.11），store 不再自己发这对 `fchflags`、`fchmod`；apfs 从不自己放宽任何东西（A10）。不是目录、又有别的名字（`st_nlink > 1`）的条目，它原样拒绝（`ReadOnly`，`reason = "hard_link"`）；store 只对目录调用它。
 - `remove_tree_rooted` 的返回：动手之前的拒绝是 `Err`，什么都没动（`NoSuchPath`、`NotDirectory`、父目录不可写的 `ReadOnly`、目标是挂载点的 `CrossVolume`（`reason = "mount_point"`））；一旦开始遍历就返回 `Ok(RemoveReport)`，没删掉的条目带原因列在 `stuck` 里（不确定的 unlink 是 `unknown_outcome`），`#[must_use]`，`is_complete()` 说明删干净没有。没删干净的结果是确定的，store 把条目留到下一轮再删，不当成 `Unknown`（§5.11）。
+- `remove_tree_rooted` 的目标可以是任何种类的条目（module-rulings 的"remove_tree_rooted takes any entry kind"）：目录照上面删整棵树；文件或符号链接（从不跟随）先清标志、再删它本身，返回同样的 `RemoveReport`。标志只在没有别的名字的 inode 上清（module-rulings 的"Flags are cleared only on an unshared inode"）：带着 `UF_IMMUTABLE` 或 `UF_APPEND`、又有别的名字（`st_nlink > 1`）的非目录原样留下，记进 `stuck`（`Immutable`，`detail = "hard_link"`）；`SF_*` 标志从不清，只报出来。store 的 gc 用这一个调用删 tmp 与 trash 的每个条目（§5.11）。
+- `set_file_meta(file: &File, meta: &FileMeta) -> Result<()>`，`FileMeta { clear_flags: bool, mode: Option<u32>, mtime: Option<SystemTime> }`（module-rulings 的"Metadata changes through a handle go through apfs::set_file_meta"）：先 `fstat` 句柄，要求是普通文件（目录 → `IsDirectory`，别的种类 → `NotFile`）且 `st_nlink` 为 1（否则 `ReadOnly`，`reason = "hard_link"`），核对不过就什么都不改；然后依次清掉写回的文件不该带的用户标志（`UF_COMPRESSED` 保留；`SF_*` 从不清，挡住改动时 `ReadOnly`，`reason = "immutable"`）、设 mode、设 mtime（atime 不动）；第一处改动之后失败 → `Unknown`（`partial`）。句柄上的改动作用在 inode 上，有别的名字时会连带改到那个名字（§5.4 的实测），所以 store 规整刚克隆出的文件（get 出来的文件、put 的克隆体）都经它，自己不调 `fchflags`、`fchmod`、`futimens`。
 
 外部 crate：
 
 - `rusqlite`，开 `bundled` [我的决定]：SQLite 的版本与编译选项随 crate 固定，§4.2 的回读、STRICT 表与 JSON 函数都依赖它；不链接系统 libsqlite3，免得系统更新改变持久语义。
 - `blake3`，开 `mmap` 与 `rayon`：算 `BlobId`；16 MiB 及以上的文件走 mmap 加多线程 [我的决定]。
-- `libc`：`flock`、`open(O_CLOEXEC)`、`fcntl(F_BARRIERFSYNC)` 与 `fcntl(F_FULLFSYNC)`、`renamex_np(RENAME_EXCL)`（只用在 store 自己的 `tmp/` 到 `blobs/`、临时库到 `store.db`）、`flistxattr`/`fremovexattr`、`fchflags`、`fchmod`、`futimens`（put 的克隆体、get 出来的文件）、`lchflags`（gc 清扫 `store/tmp/` 时先清标志）、`utimensat(AT_SYMLINK_NOFOLLOW)`（刷新已存 blob 的时间）、`arc4random_buf`（design §11 第 2 条：macOS API 走 libc）。
+- `libc`：`flock`、`open(O_CLOEXEC)`、`fcntl(F_BARRIERFSYNC)` 与 `fcntl(F_FULLFSYNC)`、`renamex_np(RENAME_EXCL)`（只用在 store 自己的 `tmp/` 到 `blobs/`、临时库到 `store.db`）、`flistxattr`/`fremovexattr`、`utimensat(AT_SYMLINK_NOFOLLOW)`（刷新已存 blob 的时间）、`arc4random_buf`（design §11 第 2 条：macOS API 走 libc）。
 - `serde`、`serde_json`：JSON 列（§4.4）与 `GcReport`。
 - 开发依赖：`tempfile`（测试根目录）。§7 的 VFS 计数与故障注入用 `rusqlite::ffi`，不另加 crate。
 
@@ -174,7 +176,7 @@ impl Store {
     /// 把 blob 克隆成 dst。按文件工作（增补 4"Blob protection"）：blob 文件在就能取，不要求有登记行；
     /// 有登记行时核对长度。dst 不能存在；clonefile 要么建出完整的文件，要么不建。
     /// 受信任读：不重算哈希（裁定 T6）。产物像 git checkout 出来的文件：mode 0644（可执行位由调用方
-    /// 按条目的 mode 设），没有拷来的 BSD 标志与扩展属性，atime 与 mtime 为当前时刻。
+    /// 按条目的 mode 设），没有拷来的 BSD 标志与扩展属性，mtime 为当前时刻。
     /// dst 按路径解析，上级里的符号链接照常跟随，所以只给 strata 自己的、不在会话树（<root>/sessions/）之下的目的地用；
     /// 写进工作区、会话根或 staging 树的一律用 get_blob_rooted（增补 8）。
     /// 符号链接条目不用它（得到的是普通文件），用 read_blob 取目标文本。
@@ -185,11 +187,12 @@ impl Store {
 
     /// 同 get_blob，但 dst 是 root 之下的 RepoPath（§5.4，增补 8）：dst 的上级逐级以 O_NOFOLLOW 打开、钉住，再只用最后一个名字
     /// 克隆（apfs::clone_file_rooted）；上级里有符号链接就在写任何东西之前拒绝，从不写到 root 之外。之后在 apfs::open_rooted_file
-    /// 交来的句柄上做 get_blob 的规整。overlay 的 restore 临时目录与投影临时名用它；往会话树里写 blob 内容的别的调用方也用它。
+    /// 交来的句柄上经 apfs::set_file_meta 做 get_blob 的规整。overlay 的 restore 临时目录与投影临时名用它；往会话树里写 blob 内容的别的调用方也用它。
     /// root 要是规范路径（apfs 以 O_NOFOLLOW 打开它的最后一级）。
     /// 码：Corrupt（同 get_blob）、Exists（dst 已存在，含悬空符号链接）、NoSuchPath（dst 的上级不存在）、NotDirectory（dst 的某一级上级
     /// 不是目录或是符号链接，detail.reason = "symlink"；什么都没写）、ReadOnly、InvalidInput（名字过长）、CrossVolume（apfs 透传）、
-    /// Unknown（克隆之后的步骤失败，含克隆之后 dst 或它的上级被换掉：detail.outcome = "partial"，克隆出的文件留在原处）。
+    /// Unknown（克隆之后的步骤失败，含 dst 或它的上级在克隆之后被换掉、dst 被换成有别的名字的硬链接：detail.outcome = "partial"，
+    /// 克隆出的文件留在原处，根之外什么都不改）。
     pub fn get_blob_rooted(&self, id: &BlobId, root: &Path, dst: &RepoPath) -> Result<()>;
 
     /// 读出 blob 的全部字节；超过 max 字节就不读。按文件工作、受信任读，同 get_blob。
@@ -226,8 +229,10 @@ impl Store {
     // ---- 基线 generation 与清单 ----
 
     /// 登记一个基线 generation 和它 tree 的清单，一个事务（增补 3、§5.5）。清单随 generation 一起登记，不另设 put_manifest
-    /// [我的决定：增补 3 让 store 在两者之间选；一起登记，清单就不会没有 generation 而单独存在]。调用方是 session：它在 new 或
-    /// move_workspace 发现基线目录不在时，在该 repo 的写锁里建好目录、改名到 base_dir(gen)，再调本方法。
+    /// [我的决定：增补 3 让 store 在两者之间选；一起登记，清单就不会没有 generation 而单独存在]。调用方是 session 的 ensure_base 与
+    /// ensure_base_for：导出、依赖集的认领或冷装与清单都在 repo 写锁之外，只有登记那一段（把依赖集克隆进去、改名到
+    /// base_dir(gen)、再调本方法）在该 repo 的写锁里；move_workspace 在锁里只找已建好的基线，从不建
+    /// （module-rulings 的"Base generations are built outside the lock"）。
     /// 同一 (repo, tree) 的清单已登记时逐条比较：相同就不再写，不同就拒绝。generation 已登记时什么都不写。
     /// 码：ReadOnly、InvalidInput（manifest.tree 与 gen.tree 不同；依赖集没有登记；与已登记的清单不同）、Busy、Unknown。
     pub fn record_base_gen(&self, gen: &BaseGen, manifest: &BaseManifest, at: SystemTime) -> Result<()>;
@@ -336,18 +341,35 @@ impl Store {
 
     /// 意图的比较并交换，只用于 Preparing → Swapping（第一次对外可见的写之前，会话须为 Active）、
     /// Preparing → Refused（具名拒绝，暂存已拿走）、Preparing → Abandoned（recover 发现它没走到对外可见的写）。
-    /// 当前不是 from 返回 false。码：ReadOnly、InvalidInput（没有这条意图；不是这三条边；会话不是 Active）、Busy、Unknown。
+    /// 进入 Swapping 时必须带 conflicts（rebase 算出的冲突路径），同一条比较并交换把它原样记在意图行上；别的边不能带
+    /// （module-rulings 的"Move conflicts persist on the intent"，session.md 的 D46）[我的决定：给这条边加参数、不另开方法，同 set_lifecycle 的 scene]。
+    /// 当前不是 from 返回 false。码：ReadOnly、InvalidInput（没有这条意图；不是这三条边；会话不是 Active；conflicts 与 to 不配）、
+    /// Busy、Unknown。
     pub fn set_move_state(&self, id: &SessionId, repo: &RepoName, n: u64, from: MoveState, to: MoveState,
-                          at: SystemTime) -> Result<bool>;
+                          conflicts: Option<&[RepoPath]>, at: SystemTime) -> Result<bool>;
 
     /// 交换已经做完：一个事务里把工作区的 base（tree 与 deps 一起）、head、代数换成意图的 to、head、n，
-    /// 记下冲突路径，意图 Swapping → Done（不变量 8）。
-    /// 码：ReadOnly、InvalidInput（意图不是 Swapping）、Corrupt（意图的目标基线没有登记，base_gen_missing）、Busy、Unknown。
+    /// 记下冲突路径，意图 Swapping → Done（不变量 8）。conflicts 必须与意图进入 Swapping 时记下的那份相同
+    /// （同样的路径、同样的顺序）[我的决定：保留这个参数，session 的调用不变；两份不同说明调用方拿错了 rebase 的结果]。
+    /// 码：ReadOnly、InvalidInput（意图不是 Swapping；conflicts 与意图行上的不同，reason = "conflicts_mismatch"）、
+    /// Corrupt（意图的目标基线没有登记，base_gen_missing）、Busy、Unknown。
     pub fn finish_move(&self, id: &SessionId, repo: &RepoName, n: u64, conflicts: &[RepoPath], at: SystemTime) -> Result<()>;
 
     /// 交换开始之后失败，或 recover 发现意图停在 Swapping：一个事务里意图 Swapping → Unknown，
-    /// 工作区的健康 Ok → Unknown 并记下 scene（增补 4）。码：ReadOnly、InvalidInput（意图不是 Swapping）、Busy、Unknown。
+    /// 工作区的健康 Ok → Unknown 并记下 scene（增补 4）。意图行上的冲突留着，给 resolve_move 的 Accept。
+    /// 码：ReadOnly、InvalidInput（意图不是 Swapping）、Busy、Unknown。
     pub fn fail_move(&self, id: &SessionId, repo: &RepoName, n: u64, scene: &serde_json::Value, at: SystemTime) -> Result<()>;
+
+    /// 人看过一次失败的移动之后，把它记回 Ok（module-rulings 的"Resolving a failed move"与"Move conflicts persist on the intent"；session.md §5.9）。
+    /// 守卫：会话是 Active；工作区健康是 Unknown；n 是这个工作区 n 最大的意图，状态是 Unknown。一个事务里：
+    /// accept = false（Abandon）时意图 Unknown → Abandoned，工作区的 base、head、代数与冲突不变；
+    /// accept = true（Accept）时意图 Unknown → Done、old_tree 记成它的 staging，工作区的 base、head、代数换成意图的
+    /// to、head、n，冲突换成意图进入 Swapping 时记下的那份。两种都把工作区健康 Unknown → Ok，现场留作历史；
+    /// 意图的 ended 记成 at [我的决定]。store 只核对行，磁盘上的现场由 session 在调用之前核对。
+    /// 码：ReadOnly、NoSuchSession（不存在或已 Removed）、NoSuchRepo、
+    /// InvalidInput（守卫不过：reason 是 "lifecycle"、"not_failed" 或 "no_failed_move"，什么都不写）、
+    /// Corrupt（Accept 时意图的目标基线没有登记，base_gen_missing）、Busy、Unknown。
+    pub fn resolve_move(&self, id: &SessionId, repo: &RepoName, n: u64, accept: bool, at: SystemTime) -> Result<()>;
 
     /// 交换之后旧树被保留时记下它的位置（session.md 的 OldTreeKept）。只对 Done 的意图，只写一次。
     /// 码：ReadOnly、InvalidInput（意图不是 Done；已经记过；路径不是会话根下的一级名字，或就是某个工作区的目录）、Busy、Unknown。
@@ -379,11 +401,12 @@ impl Store {
     /// Busy（外部进程持有 SQLite 写锁）、Unknown（I/O；detail.outcome 为 "not_written" 或 "uncertain"；写者已中毒）。
     pub fn record_checkpoint(&self, cp: Checkpoint) -> Result<CheckpointId>;
 
-    /// 读回一个完整的 checkpoint：含 base 与全部条目，条目按 path 排序。
-    /// 码：NoSuchCheckpoint、Corrupt（读回的标识或序号不合法）、Unknown。
+    /// 读回一个完整的 checkpoint：含 base 与全部条目，条目按 path 排序。读到的条目行数必须等于 checkpoints.entries，
+    /// 否则是 Corrupt，从不交出缺了条目的快照（module-rulings 的"A Removed session takes no new pins"）。
+    /// 码：NoSuchCheckpoint、Corrupt（读回的标识或序号不合法；条目行数不符，entries_mismatch）、Unknown。
     pub fn checkpoint(&self, session: &SessionId, id: CheckpointId) -> Result<Checkpoint>;
 
-    /// 该会话、该 repo 序号最大的 checkpoint；一个都没有时返回 None。码：Corrupt、Unknown。
+    /// 该会话、该 repo 序号最大的 checkpoint；一个都没有时返回 None。条目行数的核对同 checkpoint。码：Corrupt、Unknown。
     pub fn latest_checkpoint(&self, session: &SessionId, repo: &RepoName) -> Result<Option<Checkpoint>>;
 
     /// checkpoint 摘要（不含条目），按序号递增；repo 为 None 时列出全部 repo。码：Corrupt、Unknown。
@@ -393,7 +416,8 @@ impl Store {
 
     /// 记一次发布的开始：写 publishes 行（phase = Running），每个批次的每个路径写一行 publish_items，
     /// 返回 store 分配的 ReleaseGroup.id（输入的 group.id 不读）。路径原样照抄，不展开改名。
-    /// 码：ReadOnly、NoSuchCheckpoint（某个批次的 (session, checkpoint) 不存在）、
+    /// 批次点名的会话必须还在、不是 Removed（module-rulings 的"A Removed session takes no new pins"）。
+    /// 码：ReadOnly、NoSuchSession（某个批次的会话不存在或已 Removed）、NoSuchCheckpoint（某个批次的 (session, checkpoint) 不存在）、
     /// InvalidInput（batches 为空或某个批次的 paths 为空）、TooLarge、Busy、Unknown。
     pub fn record_publish(&self, group: &ReleaseGroup, at: SystemTime) -> Result<u64>;
 
@@ -444,7 +468,8 @@ impl Store {
 pub enum Lifecycle { Creating, Active, Removing, Removed, Unknown }
 
 /// 工作区的健康（workspaces.health）：move_workspace 过了第一次对外可见的写却没做完时是 Unknown（增补 4）。
-/// Missing 不存，它看文件系统。只能 Ok → Unknown；Unknown 的工作区随会话一起删除 [我的决定]。
+/// Missing 不存，它看文件系统。Ok → Unknown 经 fail_move；Unknown → Ok 只经 resolve_move，带着这个工作区 n 最大、
+/// 状态为 Unknown 的意图（module-rulings 的"Resolving a failed move"）；没人处理的 Unknown 工作区随会话一起删除。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Health { Ok, Unknown }
 
@@ -466,12 +491,12 @@ pub struct SessionRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceRecord {
-    /// 工作区 git 管理目录的代数：new 时为 1，每次 finish_move 换成意图的 n。
+    /// 工作区 git 管理目录的代数：new 时为 1，每次 finish_move 或 resolve_move 的 Accept 换成意图的 n。
     pub generation: u64,
     pub health: Health,
-    /// health 为 Unknown 时的现场。
+    /// 最近一次进入 Unknown 时记下的现场；resolve_move 记回 Ok 之后也留着，作为历史。
     pub scene: Option<serde_json::Value>,
-    /// 最近一次 finish_move 记下的冲突路径。
+    /// 最近一次 finish_move 或 resolve_move 的 Accept 记下的冲突路径。
     pub conflicts: Vec<RepoPath>,
     /// 种子文件，按 path 排序。
     pub seeds: Vec<SeedRow>,
@@ -500,6 +525,8 @@ pub struct MoveIntent {
     pub staging: PathBuf,
     pub phase: Option<String>,
     pub state: MoveState,
+    /// 进入 Swapping 时记下的冲突路径（session.md 的 D46）；Preparing、Refused，以及从 Preparing 收走的 Abandoned 是 None。
+    pub conflicts: Option<Vec<RepoPath>>,
     pub old_tree: Option<PathBuf>,
     pub started: SystemTime,
     pub ended: Option<SystemTime>,
@@ -507,8 +534,10 @@ pub struct MoveIntent {
 
 /// 意图的状态 [我的决定：增补 4 只定了"意图行在、关闭不删"，状态词汇由本文给出，session.md 采用或在它的 §2 列出要改的]。
 /// Preparing：只建了内部暂存；Swapping：即将或已经做第一次对外可见的写；其余四个是终态：
-/// Done（交换完成）、Refused（具名拒绝，暂存已拿走）、Abandoned（recover 收走的、没走到对外可见写的意图）、
-/// Unknown（交换开始之后失败，现场在工作区行上）。转换图见 §4.3。
+/// Done（交换完成）、Refused（具名拒绝，暂存已拿走）、Abandoned（recover 收走的、没走到对外可见写的意图，
+/// 或人对失败的移动选了 Abandon）、Unknown（交换开始之后失败，现场在工作区行上）。终态里只有 Unknown 还能再走一步：
+/// 人看过现场之后经 resolve_move 变成 Done（Accept）或 Abandoned（Abandon），module-rulings 的"Resolving a failed move"。
+/// 转换图见 §4.3。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MoveState { Preparing, Swapping, Done, Refused, Abandoned, Unknown }
 
@@ -723,6 +752,8 @@ pub enum Seam {
     GcBatchRows { rows: u64 },
     /// 停住：下一次 gc 或 gc_repo 算完保留集（gc_repo 还已准备好根目录）之后、第一批删行之前停住，直到 release。
     GcPauseBeforeRows,
+    /// 停住：下一次 gc 或 gc_repo 提交完第 n 批删行之后、开始下一批之前停住，直到 release。
+    GcPauseAfterBatch { n: u64 },
 }
 
 /// 插桩 VFS 与 store 自己的同步计数（test-seams）。
@@ -764,7 +795,7 @@ impl Store {
 | `get_blob` | strata 自己的、不在会话树（`<root>/sessions/`）之下的目的地（增补 8）。目前各模块文档里没有这样的调用方：overlay 的 restore 与投影改用 `get_blob_rooted`，由 overlay 的修订轮落实；store 自己的测试用它 | 按文件克隆出 blob，dst 按路径解析 |
 | `read_blob` | overlay（符号链接目标）、publish（三方合并的输入） | 读出 blob 字节，有上限 |
 | `verify_blob` | overlay（`restore --verify`）、store 自己的 gc 扫描 | 重算哈希 |
-| `base_dir`、`has_base_gen`、`record_base_gen` | session（`new`、`move_workspace` 建基线时，持 repo 写锁） | 基线目录的路径；登记基线与清单 |
+| `base_dir`、`has_base_gen`、`record_base_gen` | session（`ensure_base`、`ensure_base_for` 在锁外建基线，只有登记持 repo 写锁；`move_workspace` 在锁里只找基线） | 基线目录的路径；登记基线与清单 |
 | `manifest` | daemon（从 store 取清单组成 overlay 的 `Base`，overlay.md §2）、session | 读基线清单 |
 | `deps_dir`、`deps_staging_dir` | deps | 依赖集与暂存的路径 |
 | `begin_deps_attempt`、`set_deps_attempt_pid`、`end_deps_attempt`、`record_deps_set` | deps（认领、冷装、封存） | 尝试的意图行与封存登记 |
@@ -773,13 +804,14 @@ impl Store {
 | `deps_set`、`deps_attempts`、`proposal`、`proposals`、`deps_main` | deps；session 与 daemon 经 deps | 读 |
 | `create_session`、`set_session_phase`、`set_lifecycle`、`record_seeds` | session（`new`、`remove`、`recover`） | 会话行（`new` 的第一次对外可见的写）、阶段、生命周期、种子 |
 | `begin_move`、`set_move_phase`、`set_move_state`、`finish_move`、`fail_move`、`set_old_tree` | session（`move_workspace`、`recover`） | 移动意图与交换结果 |
+| `resolve_move` | session（`resolve_failed_move`，session.md §5.9） | 人选了 Abandon 或 Accept 之后，把失败的移动记回 Ok |
 | `session`、`sessions`、`move_intents`、`open_move_intents` | session（`status`、`resolve`、`select`、`list`、`recover`）；overlay、deps 读会话 | 读 |
 | `retire_dir` | session（会话根、影子仓库、暂存与旧树、旧管理目录、基线暂存）、deps（暂存，可选） | 把目录改名进 trash |
 | `record_checkpoint`、`checkpoint`、`latest_checkpoint`、`checkpoints` | overlay；publish、session、daemon 读 | checkpoint |
 | `record_publish`、`set_publish_phase`、`publish_record`、`open_publishes`、`record_ref_change`、`ref_changes` | publish；daemon（`open_publishes`） | 发布记录与 ref 审计 |
 | `gc`、`gc_repo`、`last_gc_report` | daemon（`recover` 之后；`gc_repo` 持该 repo 的写锁） | 回收 |
 
-与上一版相比，这一轮改名或新增、供 deps 与 session 的修订轮使用的方法：`record_base_gen` 改为连清单一起登记（删去 `record_manifest`）；`set_workspace_base` 由 `begin_move`、`set_move_phase`、`set_move_state`、`finish_move`、`fail_move`、`set_old_tree` 取代；`set_lifecycle` 多了 `scene`；新增 `set_session_phase`、`move_intents`、`open_move_intents`、`deps_staging_dir`、`is_poisoned`、`gc_repo`；`record_seeds` 改为按路径的行；deps 的写与读用增补 4 定的名字；`set_deps_main` 改为比较并交换，多一个 `expected`，返回是否写成和现有的行（增补 7）；新增 `put_blob_rooted`，工作区里的捕获都改用它（增补 8）；新增 `get_blob_rooted`，写进会话树的 blob 都改用它（增补 8"get_blob_rooted"）；`retire_dir` 多了第 7 行（基线暂存，module-rulings 的"Base generations are built outside the lock"）。
+与上一版相比，这一轮改名或新增、供 deps 与 session 的修订轮使用的方法：`record_base_gen` 改为连清单一起登记（删去 `record_manifest`）；`set_workspace_base` 由 `begin_move`、`set_move_phase`、`set_move_state`、`finish_move`、`fail_move`、`set_old_tree` 取代；`set_lifecycle` 多了 `scene`；新增 `set_session_phase`、`move_intents`、`open_move_intents`、`deps_staging_dir`、`is_poisoned`、`gc_repo`；`record_seeds` 改为按路径的行；deps 的写与读用增补 4 定的名字；`set_deps_main` 改为比较并交换，多一个 `expected`，返回是否写成和现有的行（增补 7）；新增 `put_blob_rooted`，工作区里的捕获都改用它（增补 8）；新增 `get_blob_rooted`，写进会话树的 blob 都改用它（增补 8"get_blob_rooted"）；`retire_dir` 多了第 7 行（基线暂存，module-rulings 的"Base generations are built outside the lock"）；新增 `resolve_move`，`set_move_state` 多了 `conflicts`，`MoveIntent` 多了 `conflicts`（module-rulings 的"Move conflicts persist on the intent"）。
 
 接口上的三条通则：
 
@@ -976,7 +1008,7 @@ CREATE TABLE workspaces (
     conflicts  TEXT    NOT NULL CHECK (json_valid(conflicts) AND json_type(conflicts) = 'array'),
     PRIMARY KEY (session, repo),
     FOREIGN KEY (repo, base_gen) REFERENCES base_gens (repo, id),
-    CHECK ((health = 'unknown') = (scene IS NOT NULL))
+    CHECK (health <> 'unknown' OR scene IS NOT NULL)
 ) STRICT;
 CREATE INDEX workspaces_by_base_gen ON workspaces (repo, base_gen);
 
@@ -1003,13 +1035,15 @@ CREATE TABLE move_intents (
     staging    TEXT    NOT NULL,
     phase      TEXT,
     state      TEXT    NOT NULL CHECK (state IN ('preparing', 'swapping', 'done', 'refused', 'abandoned', 'unknown')),
+    conflicts  TEXT    CHECK (conflicts IS NULL OR (json_valid(conflicts) AND json_type(conflicts) = 'array')),
     old_tree   TEXT,
     started_ns INTEGER NOT NULL,
     ended_ns   INTEGER,
     PRIMARY KEY (session, repo, n),
     FOREIGN KEY (session, repo) REFERENCES workspaces (session, repo),
     CHECK ((state IN ('preparing', 'swapping')) = (ended_ns IS NULL)),
-    CHECK (old_tree IS NULL OR state = 'done')
+    CHECK (old_tree IS NULL OR state = 'done'),
+    CHECK (state = 'abandoned' OR (state IN ('preparing', 'refused')) = (conflicts IS NULL))
 ) STRICT;
 CREATE UNIQUE INDEX move_intents_one_open ON move_intents (session, repo) WHERE state IN ('preparing', 'swapping');
 
@@ -1136,9 +1170,14 @@ BEGIN SELECT RAISE(ABORT, 'illegal insert: workspaces'); END;
 CREATE TRIGGER workspaces_update_guard BEFORE UPDATE ON workspaces
 WHEN NEW.session IS NOT OLD.session OR NEW.repo IS NOT OLD.repo OR NEW.path IS NOT OLD.path OR NEW.tracked IS NOT OLD.tracked
   OR ((NEW.base_gen IS NOT OLD.base_gen OR NEW.head IS NOT OLD.head OR NEW.generation IS NOT OLD.generation OR NEW.conflicts IS NOT OLD.conflicts)
-      AND NOT (NEW.generation > OLD.generation AND OLD.tracked = 1 AND OLD.health = 'ok' AND NEW.health = 'ok'))
-  OR (NEW.health IS NOT OLD.health AND NOT (OLD.health = 'ok' AND NEW.health = 'unknown'))
-  OR (NEW.scene IS NOT OLD.scene AND NEW.health IS OLD.health)
+      AND NOT (NEW.generation > OLD.generation AND OLD.tracked = 1 AND NEW.health = 'ok'
+               AND NEW.generation IS (SELECT MAX(n) FROM move_intents WHERE session = NEW.session AND repo = NEW.repo)))
+  OR (NEW.health IS NOT OLD.health
+      AND NOT (OLD.health = 'ok' AND NEW.health = 'unknown')
+      AND NOT (OLD.health = 'unknown' AND NEW.health = 'ok'
+               AND (SELECT lifecycle FROM sessions WHERE id = NEW.session) IS 'active'
+               AND (SELECT state FROM move_intents WHERE session = NEW.session AND repo = NEW.repo ORDER BY n DESC LIMIT 1) IS 'unknown'))
+  OR (NEW.scene IS NOT OLD.scene AND NOT (OLD.health = 'ok' AND NEW.health = 'unknown'))
 BEGIN SELECT RAISE(ABORT, 'illegal update: workspaces'); END;
 
 CREATE TRIGGER move_intents_insert_guard BEFORE INSERT ON move_intents
@@ -1150,11 +1189,18 @@ CREATE TRIGGER move_intents_update_guard BEFORE UPDATE ON move_intents
 WHEN NEW.session IS NOT OLD.session OR NEW.repo IS NOT OLD.repo OR NEW.n IS NOT OLD.n OR NEW.to_tree IS NOT OLD.to_tree
   OR NEW.to_deps IS NOT OLD.to_deps OR NEW.head IS NOT OLD.head OR NEW.staging IS NOT OLD.staging OR NEW.started_ns IS NOT OLD.started_ns
   OR (NEW.phase IS NOT OLD.phase AND OLD.state NOT IN ('preparing', 'swapping'))
-  OR (NEW.old_tree IS NOT OLD.old_tree AND NOT (OLD.old_tree IS NULL AND OLD.state = 'done' AND NEW.state = 'done'))
+  OR (NEW.conflicts IS NOT OLD.conflicts AND NOT (OLD.state = 'preparing' AND NEW.state = 'swapping'))
+  OR (NEW.old_tree IS NOT OLD.old_tree AND NOT (OLD.old_tree IS NULL AND OLD.state IN ('done', 'unknown') AND NEW.state = 'done'))
   OR NOT ((NEW.state = OLD.state AND OLD.state IN ('preparing', 'swapping'))
        OR (NEW.state = OLD.state AND OLD.state = 'done' AND NEW.ended_ns IS OLD.ended_ns)
        OR (OLD.state = 'preparing' AND NEW.state IN ('swapping', 'refused', 'abandoned'))
-       OR (OLD.state = 'swapping'  AND NEW.state IN ('done', 'unknown')))
+       OR (OLD.state = 'swapping'  AND NEW.state IN ('done', 'unknown'))
+       OR (OLD.state = 'unknown'   AND NEW.state IN ('done', 'abandoned')
+           AND NEW.n IS (SELECT MAX(n) FROM move_intents WHERE session = NEW.session AND repo = NEW.repo)
+           AND (SELECT lifecycle FROM sessions WHERE id = NEW.session) IS 'active'
+           AND EXISTS (SELECT 1 FROM workspaces
+                       WHERE session = NEW.session AND repo = NEW.repo AND health = 'ok'
+                         AND (generation = NEW.n) = (NEW.state = 'done'))))
 BEGIN SELECT RAISE(ABORT, 'illegal update: move_intents'); END;
 
 CREATE TRIGGER deps_attempts_insert_guard BEFORE INSERT ON deps_attempts
@@ -1221,8 +1267,8 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
 - **插入守卫**规定每种行的初始状态：会话从 Creating 开始，工作区从代数 1、健康 Ok、没有冲突开始，意图从 Preparing 开始且 `n` 必须大于该工作区的当前代数和它所有意图里最大的 `n`，尝试从 Running 开始，提议从 AwaitingPublish 或 Pending 开始，发布从 Running 开始。
 - **更新守卫**就是各个转换图：
   - 会话：`creating → active | unknown`、`active → removing`、`removing → removed | unknown`、`unknown → removing`（增补 4）；`phase` 只在 Creating、Removing 时可改；`scene` 只在进入 Unknown 时改写；`removed_ns` 由 CHECK 绑在 Removed 上。
-  - 工作区：base、head、代数、冲突列表只能一起变，代数必须变大，而且只对健康为 Ok 的 tracked 工作区（`finish_move`）；健康只能 `ok → unknown`，同时写入现场。
-  - 意图：`preparing → swapping | refused | abandoned`、`swapping → done | unknown`；`phase` 只在没结束时可改；`old_tree` 只能在 Done 上从空写成值一次。
+  - 工作区：base、head、代数、冲突列表只能一起变，代数必须变大、等于这个工作区 n 最大的意图的 n，只对 tracked 工作区，变完健康必须是 Ok（`finish_move`，或者 `resolve_move` 的 Accept 从 Unknown 回来）；`ok → unknown` 时同时写入现场；`unknown → ok` 只在会话是 Active、这个工作区 n 最大的意图还是 Unknown 时放行，所以 `resolve_move` 先改工作区、再改意图；现场只在进入 Unknown 时改写，回到 Ok 之后留作历史。
+  - 意图：`preparing → swapping | refused | abandoned`、`swapping → done | unknown`、`unknown → done | abandoned`（只给 `resolve_move`：它是这个工作区 n 最大的意图，会话是 Active，工作区已经回到 Ok；Done 时工作区的代数已是 n，Abandoned 时不是）；`phase` 只在没结束时可改；`conflicts` 只在 `preparing → swapping` 时写一次（CHECK 另外要求 Swapping、Done、Unknown 有冲突，Preparing、Refused 没有）；`old_tree` 只能在 Done 上、或在 `unknown → done` 时从空写成值一次。
   - 尝试：`running → sealed | failed | refused`；`pid` 只能在 Running 时从空写成值一次；Failed、Refused 必须带错误。
   - 提议：`awaiting_publish → pending | superseded`、`pending → applied | superseded`；`tree` 与 `head` 只在提升时写入；其余列不可改。
   - 发布：`running → done | unknown`、`unknown → done`（暂定，见 §3）。
@@ -1234,7 +1280,7 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
 - **时间**：`*_ns` 列是相对 Unix 纪元的纳秒数（UTC），有符号 INTEGER [我的决定]：早于纪元的时刻（例如种子文件的源文件 mtime）存成负数。读回的 `SystemTime` 与写入时逐纳秒相同；超出 i64 纳秒能表示的范围（约 1677 年到 2262 年）的时间返回 `InvalidInput`。
 - **标识**：十六进制标识存成小写 TEXT，长度与字符由 CHECK 约束。`RepoName`、`RepoPath`、`SessionId` 存它们的字符串形式（types.md §3 的 `Display`）。读回时经 `TryFrom<String>` 重新校验，失败就是 `Corrupt`（`bad_row`）。`PathBuf` 存 UTF-8 文本；不是 UTF-8 的路径在写入时返回 `InvalidInput` [我的决定]。
 - **枚举值**一律存小写 snake_case [我的决定]，包括 `CheckpointReason`（`tool_call`、`manual`、`before_publish`……）和 `EntryKind`（`added`、`modified`……）：库里只有一种写法；读回时按固定的对照表转换，对不上就是 `Corrupt`（`bad_row`）。
-- **JSON 列**有八个，形状由各自的所有者规定，store 只检查是 JSON：`deps_sets.dirs`（`DepsSet.dirs` 的字符串数组）、`deps_attempts.error`（`StrataError`）、`sessions.scene` 与 `workspaces.scene`（session 的现场，增补 4）、`workspaces.conflicts`（`RepoPath` 的字符串数组）、`publishes.outcome`（publish.md 的结果摘要）、`refs_audit.confirmed`（types.md `Action` 的 JSON）、`gc_runs.report`（`GcReport`）。
+- **JSON 列**有九个，形状由各自的所有者规定，store 只检查是 JSON：`deps_sets.dirs`（`DepsSet.dirs` 的字符串数组）、`deps_attempts.error`（`StrataError`）、`sessions.scene` 与 `workspaces.scene`（session 的现场，增补 4）、`workspaces.conflicts` 与 `move_intents.conflicts`（`RepoPath` 的字符串数组）、`publishes.outcome`（publish.md 的结果摘要）、`refs_audit.confirmed`（types.md `Action` 的 JSON）、`gc_runs.report`（`GcReport`）。
 - **序号**：
   - `CheckpointId`：每个会话一个序列，在 `record_checkpoint` 的写事务里取该会话已提交的最大值加 1。回滚的尝试不占号，下一个提交的 checkpoint 拿紧接着的号，所以序列没有空洞 [我的决定]。这与 3a:589 原文的"失败留下空洞"不同：LayerFS 的预留先发给调用方再使用，strata 的号与 checkpoint 行在同一个事务里出现，任何人都看不到一个没提交的号（增补 4 的 T15 一条把 3a:589 改成"没有空洞"）。提交过的号永不复用，重开之后接着递增。会话的行只会被 gc 整个删除，删除之后没有人再引用它的号。
   - `ProposalId` 与依赖集尝试的序号：`AUTOINCREMENT` [我的决定]，由 store 在写事务里分配并返回（types.md：`ProposalId` 由 Store 分配）。gc 会删掉旧的提议与尝试，`AUTOINCREMENT` 保证最大号被删之后也不会再发出去：`git-strata deps approve <id>` 永远点不到另一个提议，`.staging/<attempt>/` 的名字永远不会撞上一个被删的尝试留下的目录。
@@ -1242,7 +1288,7 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
   - `ReleaseGroup.id`：`publishes` 的行永不删除，取最大值加 1。
   - 这些号都只写 1 到 `i64::MAX`（types.md §3）。下一个号会超过 `i64::MAX` 时，写操作在写任何东西之前返回 `TooLarge`（`detail.limit` 指明是哪种号），已存的状态不变，不回绕（3a:590、3a:596）；`AUTOINCREMENT` 的表在分配之前先查 `sqlite_sequence`，因为 SQLite 自己到顶时报的是 `SQLITE_FULL`，不是一个能区分的错误。读回小于 1 的值说明库坏了：store 先检查，返回 `Corrupt`（`bad_row`），不把它交给 `From<i64>`（types.md §3）。
   - `base_gens.id`、`refs_audit.id`、`gc_runs.id` 只在 store 内部用，不出现在公开接口上。
-- **可变的列**只有这些，其余每张表的每一列写入后都不可改（§4.3 的触发器拦）：`sessions` 的 `lifecycle`、`phase`、`scene`、`removed_ns`；`workspaces` 的 `base_gen`、`head`、`generation`、`conflicts`、`health`、`scene`；`move_intents` 的 `state`、`phase`、`old_tree`、`ended_ns`；`deps_attempts` 的 `state`、`pid`、`ended_ns`、`error`；`deps_proposals` 的 `state`、`tree`、`head`、`superseded_by`、`updated_ns`；`deps_main` 除 `repo` 以外的列；`publishes` 的 `phase`、`ended_ns`、`outcome`。状态列只能沿 §4.3 的转换图前进。
+- **可变的列**只有这些，其余每张表的每一列写入后都不可改（§4.3 的触发器拦）：`sessions` 的 `lifecycle`、`phase`、`scene`、`removed_ns`；`workspaces` 的 `base_gen`、`head`、`generation`、`conflicts`、`health`、`scene`；`move_intents` 的 `state`、`phase`、`conflicts`、`old_tree`、`ended_ns`；`deps_attempts` 的 `state`、`pid`、`ended_ns`、`error`；`deps_proposals` 的 `state`、`tree`、`head`、`superseded_by`、`updated_ns`；`deps_main` 除 `repo` 以外的列；`publishes` 的 `phase`、`ended_ns`、`outcome`。状态列只能沿 §4.3 的转换图前进。
 - **schema 版本**：`user_version = 1`。v1 没有旧版 Store，也不做迁移（3a:609 把版本策略交给本文）：版本号不是 1、`application_id` 不对、日志模式不是 WAL、schema 文本有任何差别的库一律拒绝打开（`Corrupt`），不修补、不转换。以后改 schema 就升版本号，迁移另写设计。
 
 ### 4.5 不变量
@@ -1254,10 +1300,10 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
 | S3 | checkpoint 行提交之前，它引用的每个 blob 都已改名到位、已用 F_BARRIERFSYNC 排在提交之前、并在同一个事务里登记；不存在悬空引用（3a:475、3a:617、3a:672）。 | 不变量 1 |
 | S4 | 一个 Store 只有一个写者：写连接只有一个，进程之间由 `LOCK` 的 flock 保证。读走独立的只读连接，WAL 之下从不等写者。 | —（design §5"daemon 不在时 CLI 只读"与 §8"并发"的性质，不对应 §9 的某一条） |
 | S5 | 序号在 1 到 `i64::MAX` 之间、只增、提交过的永不复用；意图的代数从不复用（§4.4）。 | —（types.md §3 与增补 4 的性质，不对应 §9 的某一条） |
-| S6 | 工作区行的 `base_gen` 指向一个 (repo, tree, deps) 组合，`finish_move` 用一个事务同时换掉 tree、deps、head 与代数，不存在只换一半的状态；基线一定属于工作区的 repo（复合外键）。 | 不变量 8 |
+| S6 | 工作区行的 `base_gen` 指向一个 (repo, tree, deps) 组合，`finish_move` 与 `resolve_move` 的 Accept 都用一个事务同时换掉 tree、deps、head 与代数，不存在只换一半的状态；基线一定属于工作区的 repo（复合外键）。 | 不变量 8 |
 | S7 | 基线与依赖集的行、目录永不原地修改；登记过的目录只有 gc_repo 能拿走：先把根目录准备好（清掉不可变标志、给属主补上写权限），准备不成就连行一起留着；准备好了才删行、再改名进 trash，过了 1 小时才删。 | 不变量 5 |
 | S8 | `refs_audit` 里 `update_ref` 的行只能是 `refs/strata/` 下的 ref（CHECK 约束）。store 自己不写任何 git 文件；它的全部路径都在 `<root>` 下，而 config.md 的 V3 保证 `<root>` 不在任何主 checkout 里。 | 不变量 2 |
-| S9 | 不确定的结果保留现场：结果不确定的提交让写者中毒，等重开（§6.4）；阶段为 Running 或 Unknown 的发布钉住它批次里的会话；Unknown 的会话与工作区带着现场，只随会话一起删除；gc 从不碰非终态意图与尝试点名的路径、1 小时以内的东西（按 mtime 与 ctime 中较晚的那个）；损坏的 blob 只报不删。 | 不变量 6 |
+| S9 | 不确定的结果保留现场：结果不确定的提交让写者中毒，等重开（§6.4）；阶段为 Running 或 Unknown 的发布钉住它批次里的会话；Unknown 的会话带着现场，只随会话一起删除；Unknown 的工作区带着现场，直到 `resolve_move` 带着匹配的意图把它记回 Ok（现场留作历史），否则随会话一起删除；gc 从不碰非终态意图与尝试点名的路径、1 小时以内的东西（按 mtime 与 ctime 中较晚的那个）；损坏的 blob 只报不删。 | 不变量 6 |
 | S10 | 每个 checkpoint 记下它对着的 `BaseGen`（`checkpoints.base_gen`，即 `Checkpoint.base`），读回时原样给出；每个留着的 checkpoint 都钉住它的基线（增补 5），跨基线的 restore 因此总能找到目标基线目录。restore 到基线不同的工作区由 overlay 走 `overlay::rebase`，从不按条目原样回放（增补裁定 T7/T6/T15）。 | 不变量 1 |
 | S11 | 每个状态列只沿所有者定义的转换图走（§4.3 的触发器）：会话生命周期、工作区健康、意图、尝试、提议、发布。一个操作自己的意图行只会被关进终态，从不删除（增补 4"Error timing, refinement 2"）。 | 不变量 6 |
 
@@ -1330,13 +1376,13 @@ store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkp
 1. 只读 → `ReadOnly`。
 2. 取 L3 共享锁，一直持到第 9 步结束（增补 4：put 从临时克隆起到最后的改名都持 L3 共享锁，而 gc 清扫 `store/tmp/` 与 `blobs/` 时持独占锁，所以清扫从来看不到进行中的 put）。
 3. 取临时名 `store/tmp/put-<arc4random 生成的 128 bit，十六进制>`，`apfs::clone_file(src, tmp)`（不跟随 src 的符号链接）。临时名已存在（`Exists`）就换一个名字重试，最多 8 次，仍不行 → `Unknown`。新写入从不采用或截断已存在的临时文件（3a:228）。`clone_file` 的其它错误原样透传。测试接缝 `PauseInPut` 停在这一步之后。
-4. 此后只看克隆体，不再碰 src：克隆是 src 那一刻的快照，哈希期间 src 被改写的竞态在这里不存在（overlay 的写竞态规则管的是它自己的判断，见 overlay.md）。`lstat(tmp)`：是符号链接 → `readlink(tmp)` 得到目标的字节，删掉自己的 tmp，转到第 10 步写临时文件的那一段存目标文本（符号链接的 blob 内容就是目标，mode 120000 记在条目里，裁定 T7）。这一转仍在第 2 步取得的 L3 共享锁之下，不再取一次（L3 不可重入，见本节开头）。是普通文件 → 继续。
-5. 规整。克隆会把 src 的 mode、扩展属性、BSD 标志一起带过来，2026-10-22 实测连 `uchg` 也带。依次：`fchflags(st_flags & UF_COMPRESSED)` 清掉其它标志；`fchmod 0600`（只读文件上删扩展属性会 `EACCES`，同日实测）；`flistxattr(XATTR_NOFOLLOW)` 列出的每个名字都 `fremovexattr`，跳过 `com.apple.provenance`、`com.apple.decmpfs`、`com.apple.ResourceFork`（§4.6）。
+4. 此后只看克隆体，不再碰 src：克隆是 src 那一刻的快照，哈希期间 src 被改写的竞态在这里不存在（overlay 的写竞态规则管的是它自己的判断，见 overlay.md）。`lstat(tmp)`：是符号链接 → `readlink(tmp)` 得到目标的字节，删掉自己的 tmp，转到第 10 步写临时文件的那一段存目标文本（符号链接的 blob 内容就是目标，mode 120000 记在条目里，裁定 T7）。这一转仍在第 2 步取得的 L3 共享锁之下，不再取一次（L3 不可重入，见本节开头）。是普通文件 → 以 `O_RDONLY | O_NOFOLLOW | O_CLOEXEC` 打开 tmp，第 5 到 9 步在 tmp 上的改动、读与屏障都用这个句柄。
+5. 规整。克隆会把 src 的 mode、扩展属性、BSD 标志一起带过来，2026-10-22 实测连 `uchg` 也带。依次：`apfs::set_file_meta(&tmp, &FileMeta { clear_flags: true, mode: Some(0o600), mtime: None })` 清掉标志（`UF_COMPRESSED` 保留）并设 0600（只读文件上删扩展属性会 `EACCES`，同日实测）；`flistxattr(XATTR_NOFOLLOW)` 列出的每个名字都 `fremovexattr`，跳过 `com.apple.provenance`、`com.apple.decmpfs`、`com.apple.ResourceFork`（§4.6）。删扩展属性也是句柄上的改动，不另做核对：它夹在两次 `set_file_meta` 之间、用的是同一个句柄，第一次调用已经核对过这个 inode 只有 tmp 一个名字，之后才出现的别名指向的也只是 store 自己的克隆体（module-rulings 的"set_file_meta callers, clarified"）。
 6. 哈希：读 tmp 的全部字节算 BLAKE3，16 MiB 及以上走 mmap 加多线程。代价与文件大小成正比；稀疏文件和大文件一样整份读，空洞读成零，不特殊处理（裁定 T7）。结果是 `id`，读到的字节数是 `size`。
 7. 先看目标：`lstat(blobs/<id 前两位>/<id>)`。已存在，即同一内容已经存过：
    - 不是普通文件 → `Corrupt`（`blob_type`）；大小不等于 `size` → `Corrupt`（`blob_size`）。两种都把 `detail.path` 指向 tmp：tmp 是正确的一份，留给人修复，gc 过了年龄下限收走（3a:506）。
-   - 否则 `utimensat(AT_FDCWD, 已存的 blob, UTIME_NOW, AT_SYMLINK_NOFOLLOW)` 刷新它的时间，删掉自己的 tmp，返回 `id`。按路径设时间只要求是文件的属主，已存副本被改成 000 权限时 `open` 会 `EACCES`，这一步照样成功（2026-10-22 实测）。重复内容的 put 不做任何屏障，也不回读、不重算已存副本（3a:505、3a:507，裁定 T6）。
-8. `fchmod 0444`；`futimens(UTIME_NOW)`：blob 文件的 mtime 就是存入的时刻。gc 按 mtime 与 ctime 中较晚的那个判断年龄（§5.11）。
+   - 否则 `utimensat(AT_FDCWD, 已存的 blob, UTIME_NOW, AT_SYMLINK_NOFOLLOW)` 刷新它的时间（私有区里的 libc 许可，§2），删掉自己的 tmp，返回 `id`。按路径设时间只要求是文件的属主，已存副本被改成 000 权限时 `open` 会 `EACCES`，这一步照样成功（2026-10-22 实测）。重复内容的 put 不做任何屏障，也不回读、不重算已存副本（3a:505、3a:507，裁定 T6）。
+8. `apfs::set_file_meta(&tmp, &FileMeta { clear_flags: false, mode: Some(0o444), mtime: Some(now) })`：blob 文件的 mtime 就是存入的时刻。第 5 步与这一步的 `set_file_meta` 失败时 `blobs/` 里没有多出东西：拒绝原样返回（例如源带着 `SF_*` 标志，`ReadOnly`，`reason = "immutable"`），其余是 `Unknown`（`outcome = "not_written"`）；tmp 留在原处，gc 过了年龄下限收走。gc 按 mtime 与 ctime 中较晚的那个判断年龄（§5.11）。
 9. `fcntl(tmp, F_BARRIERFSYNC)`：tmp 的数据与属性排在之后的任何 I/O 之前落盘（fcntl(2)：屏障之前用 fsync 刷出去的 I/O，保证先于屏障之后的 I/O 持久化）。然后 `renamex_np(tmp, blobs/<id 前两位>/<id>, RENAME_EXCL)`：
    - 成功 → 对扇出目录做 `fcntl(F_BARRIERFSYNC)`，让新名字也排在之后的写入之前；放开 L3，返回 `id`。
    - `EEXIST`，即另一个线程刚把同一内容存进来 → 同第 7 步的已存在分支（这次的屏障已经做了，无害）。
@@ -1367,13 +1413,13 @@ store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkp
 `get_blob(id, dst)` 接着：
 
 3. `apfs::clone_file(blob, dst)`：`dst` 已存在 → `Exists`，dst 不动；上级目录不存在 → `NoSuchPath`；上级不是目录 → `NotDirectory`；不可写 → `ReadOnly`；名字过长 → `InvalidInput`；跨卷 → `CrossVolume`。clonefile 要么建出完整的 dst，要么不建（3a:148）。
-4. 把 dst 弄成 git checkout 出来的样子 [我的决定]：以 `O_RDONLY | O_NOFOLLOW | O_CLOEXEC` 打开 dst，在这个句柄上依次 `fchflags(st_flags & UF_COMPRESSED)` 清掉其它 BSD 标志、`fchmod 0644`、`futimens(UTIME_NOW)` 把 atime 与 mtime 设为当前时刻。先清标志：put 存下的 blob 不带标志（§5.3 第 5 步），但 blob 文件被人加上 `uchg` 时，克隆会把它带过来，带着它 `fchmod` 会 `EPERM`（2026-10-22 实测；清掉之后成功，只读句柄上也行）。blob 文件是 0444，mtime 是当初 put 的时刻；把旧 mtime 带进工作区，增量构建（cargo、tsc、Turbopack）会把内容变了的文件当成没变。可执行位由调用方按条目的 mode 设。这一步失败 → `Unknown`（`outcome = "partial"`，`detail.path` 是 dst：dst 已经建出，留在原处）。
+4. 把 dst 弄成 git checkout 出来的样子 [我的决定]：以 `O_RDONLY | O_NOFOLLOW | O_CLOEXEC` 打开 dst，把句柄交给 `apfs::set_file_meta(&file, &FileMeta { clear_flags: true, mode: Some(0o644), mtime: Some(now) })`（module-rulings 的"Metadata changes through a handle go through apfs::set_file_meta"）：它先核对句柄是普通文件且 `st_nlink` 为 1，核对不过就什么都不改；再清掉克隆带来的 BSD 标志（`UF_COMPRESSED` 保留）、设 0644、把 mtime 设为当前时刻（atime 不动）。句柄上的改动作用在 inode 上，会连带改到这个 inode 在别处的名字；克隆刚建出的 dst 只有这一个名字，`st_nlink` 不是 1 说明 dst 在克隆之后被换掉了。先清标志再设 mode：put 存下的 blob 不带标志（§5.3 第 5 步），但 blob 文件被人加上 `uchg` 时，克隆会把它带过来，带着它改 mode 会 `EPERM`（2026-10-22 实测）。blob 文件是 0444，mtime 是当初 put 的时刻；把旧 mtime 带进工作区，增量构建（cargo、tsc、Turbopack）会把内容变了的文件当成没变。可执行位由调用方按条目的 mode 设。打不开 dst、`set_file_meta` 拒绝或中途失败 → `Unknown`（`outcome = "partial"`，`detail.path` 是 dst：dst 已经建出，留在原处）。
 5. 不写 SQLite，不碰 dst 之外的任何东西。
 
 `get_blob_rooted(id, root, dst)`（增补 8）做完第 1、2 步之后，与 `get_blob` 只差落地的两步：
 
 3. `apfs::clone_file_rooted(blob, root, dst, None)`：dst 的上级逐级以 `O_DIRECTORY | O_NOFOLLOW` 打开并钉住，再在钉住的父目录上只用最后一个名字克隆。任何一级是符号链接或文件 → `NotDirectory`（符号链接时 `reason = "symlink"`），上级不存在 → `NoSuchPath`，都在写任何东西之前；dst 已存在（含悬空符号链接）→ `Exists`，链接指向的地方不被碰；不可写 → `ReadOnly`；名字过长 → `InvalidInput`；跨卷 → `CrossVolume`。传 `None`：克隆会带来 blob 文件的标志，mode 留到下一步、清掉标志之后再设。
-4. `apfs::open_rooted_file(root, dst)`：每一级重新以 `O_NOFOLLOW` 打开，要求是普通文件；在这个句柄上做 `get_blob` 第 4 步的规整（清标志、0644、atime 与 mtime 为当前时刻）。克隆之后 dst 或它的某一级上级被换掉（换成符号链接、目录或特殊文件），`open_rooted_file` 拒绝 → `Unknown`（`outcome = "partial"`，`detail.path` 是 dst：克隆已经落地，留在原处）；根之外的文件不会被改 mode、改时间。规整失败同 `get_blob` 第 4 步。
+4. `apfs::open_rooted_file(root, dst)`：每一级重新以 `O_NOFOLLOW` 打开，要求是普通文件；把句柄交给 `get_blob` 第 4 步的同一个 `apfs::set_file_meta` 调用。克隆之后 dst 或它的某一级上级被换掉：换成符号链接、目录或特殊文件，`open_rooted_file` 拒绝；换成根之外某个文件的硬链接，`set_file_meta` 的 `st_nlink` 核对拒绝（2026-10-22 实测：克隆之后把 dst 换成根之外一个 0600 文件的硬链接，`open(O_NOFOLLOW)` 照样打开它，按句柄的 `fchmod 0644` 把那个文件改成了 0644；带 `uchg` 的文件连硬链接都建不成，`EPERM`）。两种都是 `Unknown`（`outcome = "partial"`，`detail.path` 是 dst：克隆已经落地，或者已被换走），根之外的文件不会被改标志、mode 或时间。`set_file_meta` 中途失败同 `get_blob` 第 4 步。
 5. 同 `get_blob` 第 5 步。
 
 按路径的 `get_blob` 为什么不能写进会话树：内核按路径解析 dst 时照常跟随上级里的符号链接。工作区、会话根与 staging 树是 agent 能写的地方，检查之后、get 之前某一级目录被换成指向外面的符号链接，按路径的 get 就把文件建在了外面（2026-10-22 实测：`a/b` 换成指向别处 X 的符号链接之后，对 `a/b/f` 的 `clonefile` 在 X 里建出了 `f`；同样的替换下，以 `O_DIRECTORY | O_NOFOLLOW` 打开 `b` 得到 `ENOTDIR`，什么都没写）。所以写进会话树的 blob 一律经 `get_blob_rooted`（增补 8"get_blob_rooted"）：overlay 的 restore 把 blob 取进会话根之下的临时目录 T（root 是会话根），投影取进 dst 正下方的临时名（root 是 dst），之后都用 `apfs::rename_rooted` 换到位置上（overlay.md §5.7、§5.12，增补 7、8），store 不参与改名。session 的种子与携带都不经 blob 存储（session.md §5.3、§5.7）。按路径的 `get_blob` 只给 strata 自己的、不在会话树之下的目的地。
@@ -1394,7 +1440,7 @@ store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkp
 4. generation 已登记 → 不写；否则插 `base_gens` 一行（`created_ns = at`）。
 5. `COMMIT`。
 
-调用方是 session：`new` 或 `move_workspace` 发现 `base_dir(gen)` 不在时，它在该 repo 的写锁里建好目录（导出、克隆依赖集）、用 `overlay::build_manifest` 建出清单、改名到 `base_dir(gen)`，再调本方法（增补 3"Base manifest"、增补 4"Locks"）。store 不看目录本身。改名之后、登记之前崩溃，活路径上会留下一个没登记的目录：下一次 `gc_repo` 过了年龄下限把它挪进 trash（§5.11），或者 session 下一次发现它没登记时自己用 `retire_dir` 拿走再重建。
+调用方是 session 的 `ensure_base` 与 `ensure_base_for`（session.md §5.2）：在 repo 写锁之外把源码导出进基线暂存 `bases/<repo>/.staging/<hex>`、备好依赖集、用 `overlay::build_manifest` 建出清单；清单一建好，就在该 repo 的写锁里登记：把依赖集克隆进去、改名到 `base_dir(gen)`、再调本方法（增补 3"Base manifest"、增补 4"Locks"，module-rulings 的"Base generations are built outside the lock"与"Base staging is registered right after its manifest"）。`move_workspace` 在锁里只找已建好的基线，从不建。store 不看目录本身。改名之后、登记之前崩溃，活路径上会留下一个没登记的目录：下一次 `gc_repo` 过了年龄下限把它挪进 trash（§5.11），或者 session 下一次发现它没登记时自己用 `retire_dir` 拿走再重建。
 
 `retire_dir(path)`：
 
@@ -1440,15 +1486,17 @@ session 用它拿走会话根、影子仓库、交换之后换下来的旧树、
 - `record_seeds(id, repo, seeds)`：会话不存在 → `NoSuchSession`；不是 Creating → `InvalidInput`；没有这个工作区 → `NoSuchRepo`；这一批里路径重复、或某个路径已经记过 → `InvalidInput`（`reason = "seed_exists"`），整批不写；路径不是 UTF-8 → `InvalidInput`。每个种子一行。
 - `begin_move(id, repo, to, head, staging, at)`：会话不存在或已 Removed → `NoSuchSession`；不是 Active → `InvalidInput`；没有这个工作区 → `NoSuchRepo`；`tracked = 0` 或健康为 Unknown → `InvalidInput`（tracked = false 的仓库从不移动，T9 增补）；`to` 没有登记或 `to.repo ≠ repo` → `InvalidInput`；`staging` 不是 `<root>/sessions/<id>/<name>`（`<name>` 是一个组件，而且不是该会话任何工作区的目录名）→ `InvalidInput` [我的决定：暂存的名字归 session；store 要求它是会话根下的一级目录，这样它不会落进工作区或 store 的区域，`retire_dir` 的第 5 行也总能把它拿走]；已有一条没结束的意图 → `Exists`（`detail.n`）。n = max(工作区代数, 该工作区全部意图的 n) + 1，超过 `i64::MAX` → `TooLarge`（`limit = "move_generation"`）；插一行 Preparing（`started_ns = at`）。返回 n。
 - `set_move_phase(id, repo, n, phase)`：意图不存在或已结束 → `InvalidInput`。写入 `phase`。
-- `set_move_state(id, repo, n, from, to, at)`：只接受 Preparing → Swapping、Refused、Abandoned（否则 `InvalidInput`）；进入 Swapping 时会话必须仍是 Active（否则 `InvalidInput`）。`UPDATE … WHERE … AND state = from`：改了一行 → true，否则 false（意图不存在 → `InvalidInput`）。进入终态时写 `ended_ns = at`。
-- `finish_move(id, repo, n, conflicts, at)`：意图必须是 Swapping（否则 `InvalidInput`）。取 (repo, to_tree, to_deps) 的 `base_gens.id`：没有 → `Corrupt`（`reason = "base_gen_missing"`；没结束的意图钉住它的目标，正常情况下不会发生）。一个事务里：工作区的 `base_gen`、`head`、`generation = n`、`conflicts` 一起改（S6），意图改成 Done（`ended_ns = at`）。
-- `fail_move(id, repo, n, scene, at)`：意图必须是 Swapping（否则 `InvalidInput`）。一个事务里：意图改成 Unknown（`ended_ns = at`），工作区健康改成 Unknown、写入 `scene`。
+- `set_move_state(id, repo, n, from, to, conflicts, at)`：只接受 Preparing → Swapping、Refused、Abandoned（否则 `InvalidInput`）；进入 Swapping 时会话必须仍是 Active，而且必须带 `conflicts`，别的边不能带（否则 `InvalidInput`）。进入 Swapping 的那条 UPDATE 同时把冲突路径原样写进意图行（session.md 的 D46：交换之后失败、进程又崩溃时，冲突只能从这里找回）。`UPDATE … WHERE … AND state = from`：改了一行 → true，否则 false（意图不存在 → `InvalidInput`）。进入终态时写 `ended_ns = at`。
+- `finish_move(id, repo, n, conflicts, at)`：意图必须是 Swapping（否则 `InvalidInput`）；`conflicts` 必须与意图行上的那份相同（否则 `InvalidInput`，`reason = "conflicts_mismatch"`，什么都不写）。取 (repo, to_tree, to_deps) 的 `base_gens.id`：没有 → `Corrupt`（`reason = "base_gen_missing"`；没结束的意图钉住它的目标，正常情况下不会发生）。一个事务里：工作区的 `base_gen`、`head`、`generation = n`、`conflicts` 一起改（S6），意图改成 Done（`ended_ns = at`）。
+- `fail_move(id, repo, n, scene, at)`：意图必须是 Swapping（否则 `InvalidInput`）。一个事务里：意图改成 Unknown（`ended_ns = at`，冲突留着），工作区健康改成 Unknown、写入 `scene`（换掉上一次留作历史的那份）。
+- `resolve_move(id, repo, n, accept, at)`（module-rulings 的"Resolving a failed move"与"Move conflicts persist on the intent"；session.md §5.9）：在同一个写事务里、改任何行之前依次核对：会话不存在或已 Removed → `NoSuchSession`；不是 Active → `InvalidInput`（`reason = "lifecycle"`）；没有这个工作区 → `NoSuchRepo`；健康不是 Unknown → `InvalidInput`（`reason = "not_failed"`）；n 不是这个工作区 n 最大的意图，或它的状态不是 Unknown → `InvalidInput`（`reason = "no_failed_move"`）。码与 reason 同 session.md §5.9 第 1、2 步的核对。守卫不过就回滚，什么都不写。Accept 时再取 (repo, to_tree, to_deps) 的 `base_gens.id`：没有 → `Corrupt`（`base_gen_missing`；Unknown 的意图钉住它的目标，§5.11，正常情况下不会发生）。然后先改工作区、再改意图（§4.3 的触发器按这个顺序核对）：Abandon 只把健康改成 Ok，意图改成 Abandoned；Accept 把健康改成 Ok，`base_gen`、`head`、`generation = n`、`conflicts`（意图行上的那份）一起改（S6），意图改成 Done、`old_tree` 记成它的 `staging`。两种都写 `ended_ns = at`，都不动工作区的 `scene`：它留作历史，同会话行离开 Unknown 之后的做法。store 只核对行；磁盘上的现场是"没换"还是"已换"、pin 在哪，由 session 在调用之前核对（session.md §5.9 第 3、4 步）。
 - `set_old_tree(id, repo, n, path)`：意图必须是 Done 且 `old_tree` 为空，`path` 的形状同 `begin_move` 的 `staging`（否则 `InvalidInput`）。
 
 session 怎样串这些方法由 session.md 定。按增补 3、4 的错误时机，预期的用法是：
 
 - `new`：（类型化拒绝与缓存填充都在这之前）`create_session` → 每个阶段开始时 `set_session_phase` → `record_seeds` → `set_lifecycle(Creating → Active)`；`create_session` 之后任何失败 → `set_lifecycle(Creating → Unknown, scene)`。
-- `move_workspace`：`begin_move`（在建任何暂存之前）→ 建暂存 → 具名拒绝时先 `retire_dir(暂存)` 再 `set_move_state(Preparing → Refused)` → 否则在第一次对外可见的写之前 `set_move_state(Preparing → Swapping)` → 交换、pin → `finish_move`；交换开始之后失败 → `fail_move(scene)`；旧树 → `retire_dir(staging)`，或保留并 `set_old_tree`。
+- `move_workspace`：`begin_move`（在建任何暂存之前）→ 建暂存 → 具名拒绝时先 `retire_dir(暂存)` 再 `set_move_state(Preparing → Refused)` → 否则在第一次对外可见的写之前 `set_move_state(Preparing → Swapping, 冲突)` → 交换、pin → `finish_move`；交换开始之后失败 → `fail_move(scene)`；旧树 → `retire_dir(staging)`，或保留并 `set_old_tree`。
+- `resolve_failed_move`：人选了 Abandon 或 Accept；session 先核对磁盘上的现场（Accept 还要先移 pin），再 `resolve_move(accept)`；Abandon 之后 `retire_dir(staging)` 与 `retire_dir(<影子仓库>/worktrees/<n>)`，§5.5 的第 5、6 行接受 Abandoned 的意图（session.md §5.9）。
 - `remove`：`set_lifecycle(Active → Removing)`（`--discard` 时也可以是 Unknown → Removing）→ `set_session_phase` → `retire_dir(会话根)`、`retire_dir(影子仓库)` → `set_lifecycle(Removing → Removed)`；中途失败 → `set_lifecycle(Removing → Unknown, scene)`。
 - `recover`：`sessions()` 里 Creating、Removing 的 → `set_lifecycle(… → Unknown, scene)`；`open_move_intents()` 里 Preparing 的 → `retire_dir(暂存)` 再 `set_move_state(Preparing → Abandoned)`，Swapping 的 → `fail_move(scene)`（增补 3、增补 4"Error timing, refinement 2"）。
 
@@ -1471,13 +1519,13 @@ session 怎样串这些方法由 session.md 定。按增补 3、4 的错误时�
 
 每个函数一个写事务，持 L2：
 
-- `record_publish`：`batches` 不能为空，每批的 `paths` 不能为空（否则 `InvalidInput`）；每个 `Batch` 的 (session, checkpoint) 必须存在（否则 `NoSuchCheckpoint`）；取号（最大值加 1，到顶 → `TooLarge`，`limit = "release_group_id"`）；插 `publishes` 一行（`phase = 'running'`），每个（批次下标，路径下标）插 `publish_items` 一行。路径原样照抄，不展开改名：批次怎么解释归 publish.md。返回号。
+- `record_publish`：`batches` 不能为空，每批的 `paths` 不能为空（否则 `InvalidInput`）；每个 `Batch` 的会话必须存在且不是 Removed（否则 `NoSuchSession`），(session, checkpoint) 必须存在（否则 `NoSuchCheckpoint`）；取号（最大值加 1，到顶 → `TooLarge`，`limit = "release_group_id"`）；插 `publishes` 一行（`phase = 'running'`），每个（批次下标，路径下标）插 `publish_items` 一行。路径原样照抄，不展开改名：批次怎么解释归 publish.md。返回号。会话的核对与别的点名会话的写一样（module-rulings 的"A Removed session takes no new pins"）：gc 分批回收 Removed 的会话，批与批之间放开 L2，一个落在两批之间的发布若能钉住这个会话，它的 checkpoint 行就会留下来、条目却已经删了，发布读到的是一个空的快照（§5.11）。
 - `set_publish_phase`：比较并交换，只允许 Running→Done、Running→Unknown、Unknown→Done，其余 → `InvalidInput`（触发器兜底）。每次转换把 `at` 写进 `ended_ns`，`outcome` 可选。daemon 启动时把残留的 Running 改成 Unknown 并报出，从不重放（daemon.md）。
 - `record_ref_change`：追加一行 `refs_audit`。`UpdateRef` 只能配 `Applied` 或 `HeadMoved`，ref 名必须以 `refs/strata/` 开头；`Push` 只能配 `Pushed`、`Refused` 或 `Unknown`；不配 → `InvalidInput`（CHECK 约束也拦）。`confirmed` 存 `Action` 的 JSON，从不存 `ConfirmToken`。
 
 ### 5.10 读
 
-每个读函数从池里借一个只读连接，在一个读事务里读完，再归还连接；例如 `checkpoint` 读到的行与全部条目、`session` 读到的会话行、工作区行与种子都来自同一个快照。读从不取 L2，所以写事务进行时读照常完成（3a:620、3d:165）；WAL 之下，新开的读事务看得见全部已提交的写。读回的标识经 `TryFrom` 重新校验，序号先查是否不小于 1，枚举值按对照表转换；任何一项不对 → `Corrupt`（`bad_row`）。`proposals(_, open_only = true)` 在同一个快照里排除提出会话已不存在或已 Removed 的 AwaitingPublish（增补 4）。
+每个读函数从池里借一个只读连接，在一个读事务里读完，再归还连接；例如 `checkpoint` 读到的行与全部条目、`session` 读到的会话行、工作区行与种子都来自同一个快照。读从不取 L2，所以写事务进行时读照常完成（3a:620、3d:165）；WAL 之下，新开的读事务看得见全部已提交的写。读回的标识经 `TryFrom` 重新校验，序号先查是否不小于 1，枚举值按对照表转换；任何一项不对 → `Corrupt`（`bad_row`）。`proposals(_, open_only = true)` 在同一个快照里排除提出会话已不存在或已 Removed 的 AwaitingPublish（增补 4）。`checkpoint` 与 `latest_checkpoint` 读到的条目行数不等于 `checkpoints.entries` → `Corrupt`（`entries_mismatch`，`detail` 带期望与实际的条数）：缺了条目的 checkpoint 从不当成完整的快照交出去（module-rulings 的"A Removed session takes no new pins"里的兜底）。
 
 ### 5.11 `gc(keep)` 与 `gc_repo(repo, keep)`
 
@@ -1485,11 +1533,11 @@ session 怎样串这些方法由 session.md 定。按增补 3、4 的错误时�
 
 三条守卫（增补 4"gc guards"），两个方法都遵守：
 
-- **(a) 有主的路径**：gc 从不删除、也不挪走被这些行点名的路径，以及它们的上级和下级：Preparing、Swapping、Unknown 的意图的 `staging`，Running 与 Failed 的尝试的 `staging` [我的决定：增补 4 写的是"非终态"；Unknown 的意图与 Failed 的尝试的暂存是现场（不变量 6），一并保护]。导出暂存（增补 6"Export staging"）：`gitio::export_tree` 把临时目录 `.export-<dst 的名字>-<nonce>/` 建在 `dst` 的父目录里，成功时把其中的 `tree/` 改名成 `dst` 再删掉它，失败时原样保留（gitio.md 的 `export_tree`）。调用方把 `dst` 放在自己意图行或尝试行点名的暂存目录之下（不是暂存目录本身），这个临时目录就是暂存目录的下级，同样受本条保护；`dst` 若就是暂存目录本身，临时目录落在暂存目录旁边，本条护不住它。没有意图行的缓存填充：基线 generation 在 repo 写锁之外建（module-rulings 的"Base generations are built outside the lock"），建造中的暂存 `bases/<repo>/.staging/<hex>` 靠守卫 (b) 的年龄下限保护（建造里最慢的一步是冷装，分钟级，session.md §5.2），过了下限的由 `gc_repo` 第 5 步挪进 trash；登记（把其中的 `tree/` 改名进 `base_dir` 再 `record_base_gen`）在 repo 写锁里，`gc_repo` 持着同一把锁，所以登记从不和清扫交错。清扫只改名、不就地删：一个过了下限还在跑的建造者，登记时找不到自己的暂存（`NoSuchPath`），不会登记一棵删了一半的树。
+- **(a) 有主的路径**：gc 从不删除、也不挪走被这些行点名的路径，以及它们的上级和下级：Preparing、Swapping、Unknown 的意图的 `staging`，Running 与 Failed 的尝试的 `staging` [我的决定：增补 4 写的是"非终态"；Unknown 的意图与 Failed 的尝试的暂存是现场（不变量 6），一并保护]。导出暂存（增补 6"Export staging"）：`gitio::export_tree` 把临时目录 `.export-<dst 的名字>-<nonce>/` 建在 `dst` 的父目录里，成功时把其中的 `tree/` 改名成 `dst` 再删掉它，失败时原样保留（gitio.md 的 `export_tree`）。调用方把 `dst` 放在自己意图行或尝试行点名的暂存目录之下（不是暂存目录本身），这个临时目录就是暂存目录的下级，同样受本条保护；`dst` 若就是暂存目录本身，临时目录落在暂存目录旁边，本条护不住它。没有意图行的缓存填充：基线 generation 在 repo 写锁之外建（module-rulings 的"Base generations are built outside the lock"），建造中的暂存 `bases/<repo>/.staging/<hex>` 靠守卫 (b) 的年龄下限保护，年龄按 B 自己的 mtime 与 ctime 算，也就是它的直接条目最后一次变动的时刻。session 在清单建好之后马上登记，从不跨过依赖安装或别的长步骤持着没登记的暂存，所以下限只要盖过导出加清单（module-rulings 的"Base staging is registered right after its manifest"）；过了下限的由 `gc_repo` 第 5 步挪进 trash，暂存里中断的导出留下的临时目录随它一起离开（缓存填充的残留；gitio 的"中断的导出保留临时目录"只管导出到对外可见的目的地）。登记（把其中的 `tree/` 改名进 `base_dir` 再 `record_base_gen`）在 repo 写锁里，`gc_repo` 持着同一把锁，所以登记从不和清扫交错。清扫只改名、不就地删：一个过了下限还在跑的建造者，登记时找不到自己的暂存（`NoSuchPath`），不会登记一棵删了一半的树；session 把登记或 `retire_dir(B)` 得到的 `NoSuchPath` 当作"已被收走"，重建一次，再落空就以 `Busy` 拒绝（module-rulings 的同一条）。
 - **(b) 年龄**：没有行的东西（`store/tmp/` 的条目、没有行的 blob 文件、活路径上没有登记的目录、基线暂存）以及要删的 blob 文件，只有年龄超过下限 1 小时才动；年龄按 mtime 与 ctime 中较晚的那个算（`Attrs::last_changed`）。只看 mtime 是错的：clonefile 复制源文件的 mtime，改名只更新 ctime（2026-10-22 实测：克隆体带着 2020 年的 mtime、ctime 是当下；目录改名之后 mtime 不变、ctime 更新）。trash 的条目按名字里的时刻（改名进来的时间）算。下限与 `keep` 无关 [我的决定]；测试用 `Seam::AgeFloor` 改小它。
 - **(c) 有引用的 generation**：登记过、仍被引用的基线 generation 与依赖集不删（下面的保留集）。
 
-删行一律分批：每批一个写事务，至多 10 000 行 [我的决定]（测试用 `Seam::GcBatchRows` 改小），先删子行再删父行（schema 没有级联，§4.3）；每批开始时打开 `strata_gc_active`，提交后关掉；批与批之间放开 L2，checkpoint 照常进行。每批在自己的写事务里重新核对（裁定 T6）：这一批要删的每一行，第 1 步的保留条件按事务里读到的当前行重算一次，仍然可删才删。第 1 步的快照之后才写下的引用因此在删之前就被看到：`create_session`、`begin_move`、提议的写与 `set_deps_main` 都不持 repo 写锁，`record_publish` 也可能点名一个可回收的会话。重算之后被钉住的行这一轮不删，它的目录也不挪，下一轮从头算；测试用 `Seam::GcPauseBeforeRows` 停在第一批之前，在那里写下这样的引用。批提交之后才写下的引用不会指向已删的行：`create_session`、`begin_move` 与 `record_checkpoint` 都要求基线已登记，否则 `InvalidInput`；提议的 `to_set` 与 `deps_main` 不查登记，指向的依赖集若已回收，由 deps 按 deps.md 处理（`deps_set` 读到 `None`）。锁的顺序见本节开头：repo 写锁（`gc_repo`，daemon 持有）→ L3（只在 blob 与 tmp 那几段）→ L2（每批）。
+删行一律分批：每批一个写事务，至多 10 000 行 [我的决定]（测试用 `Seam::GcBatchRows` 改小），先删子行再删父行（schema 没有级联，§4.3）；每批开始时打开 `strata_gc_active`，提交后关掉；批与批之间放开 L2，checkpoint 照常进行。每批在自己的写事务里重新核对（裁定 T6）：这一批要删的每一行，第 1 步的保留条件按事务里读到的当前行重算一次，仍然可删才删。第 1 步的快照之后才写下的引用因此在删之前就被看到。`gc_repo` 这边，不持 repo 写锁也能写下钉子的只有 `create_session`（session 遇到 `InvalidInput` 会重试）与 deps 在 `observe_main` 和落地之外的提议写（例如会话的草稿提议）；`begin_move`、`set_deps_main` 与 `promote_proposal` 都在 repo 写锁里跑，`gc_repo` 持着同一把锁，它们不会和它交错。`gc` 这边，R 里的会话都已 Removed：往会话里添行的写（`record_checkpoint`、`begin_move`、`record_seeds`）点名 Removed 的会话都被拒绝，唯一能钉住会话的 `record_publish` 也返回 `NoSuchSession`（module-rulings 的"A Removed session takes no new pins"），所以 R 在快照之后既不会多出行，也不会多出钉子：一个会话的行跨几批删（先条目、再 checkpoint 行……），没有哪个发布能落在两批之间、钉住一个条目已经删掉的会话。重新核对留着兜底：重算之后被钉住的行这一轮不删，它的目录也不挪，下一轮从头算；测试用 `Seam::GcPauseBeforeRows` 停在第一批之前、`Seam::GcPauseAfterBatch` 停在两批之间，在那里写下这样的引用。批提交之后才写下的引用不会指向已删的行：`create_session`、`begin_move` 与 `record_checkpoint` 都要求基线已登记，否则 `InvalidInput`；提议的 `to_set` 与 `deps_main` 不查登记，指向的依赖集若已回收，由 deps 按 deps.md 处理（`deps_set` 读到 `None`）。锁的顺序见本节开头：repo 写锁（`gc_repo`，daemon 持有）→ L3（只在 blob 与 tmp 那几段）→ L2（每批）。
 
 `gc(keep)`：
 
@@ -1500,8 +1548,8 @@ session 怎样串这些方法由 session.md 定。按增补 3、4 的错误时�
    - 可删的 gc 记录：`ended_ns < now − keep`、而且不是本 scope 最新的那一行 [我的决定：`last_gc_report` 只要每个 scope 最新的一行]。
 2. **删行**，分批：R 的 `overlay_entries` → `checkpoints` → `seeds` → `move_intents` → `workspaces` → `sessions`；然后 D；然后尝试；然后 gc 记录。D 按引用的顺序删，从不按号：一条提议只在已经没有未删的行经 `superseded_by` 指向它时才删（指向它的行要么已经删了，要么在同一批里），所以每批先挑 D 里没有被剩下的行指向的那些，一条取代链从被取代的一头删起。号的大小说明不了方向：`promote_proposal` 之后，号大的 Pending 可以被号小的行取代，号小的行之后又可以被更新的行取代。同一批里互相引用的行一起删没有问题，外键在 COMMIT 时才检查（延迟外键）。
 3. **blob**，持 L3 独占锁，每批至多 10 000 个：(i) 没有 overlay 条目引用、文件已经不在或年龄超过下限的 `blobs` 行：先删行并提交，再删文件；外键保证被引用的 blob 行删不掉（3a:600）。(ii) 清扫 `blobs/<aa>/`：没有行、年龄超过下限的文件删掉，它们是 put 之后、`record_checkpoint` 之前崩溃留下的孤儿（3a:293）。持独占锁时没有进行中的 put、get 与 `record_checkpoint`，所以一个刚 put、马上要被登记的 blob 不会在这一段里消失；刚 put 完的 blob 又因为年龄（ctime）太小而留着。
-4. **tmp**，持 L3 独占锁：`store/tmp/` 里年龄超过下限的条目删掉（死掉的 put 的克隆体、建库剩下的临时库与探测文件）。store 在这里只建文件（`put_blob_rooted` 按 `CloneKind::File` 克隆，§5.3）：文件与符号链接先 `lchflags` 清掉 `UF_IMMUTABLE` 与 `UF_APPEND`，再 `unlink`（put 死在第 5 步规整之前，克隆体还带着源的 `uchg`，不清就删不掉）；`store/tmp/` 是 store 自己的区域，这里照常用 libc。不是 store 建的目录条目用 `apfs::remove_tree_rooted` 删。没删干净的条目记进报告的 `stuck`，下一轮再删。
-5. **删 trash**：名字里的时刻早于 `now` 减去年龄下限（缺省 1 小时，与守卫 (b) 同一个值）的条目逐个删 [我的决定：上一版是过了 `keep` 才删；进 trash 的目录都已经没有活记录，留 1 小时，让还在按路径读它的进程（例如对旧树的扫描）有时间读完，也给人一个找回的窗口]。条目用 `apfs::list_dir` 列出（每项带种类）。目录一次 `apfs::remove_tree_rooted(<root>, store/trash/<名字>)`（增补 8）：树里的符号链接只删链接本身、不跟随，不跨设备，删之前清掉 `UF_IMMUTABLE` 与 `UF_APPEND`（封存若用了 `chflags uchg`，克隆会把它带过来）、让目录对属主可写（deps 封存的根是 0555，deps.md §4.6），自底向上。不是目录的条目（`gc_repo` 第 2 步只挪走、没有准备的符号链接或文件）用 `apfs::remove_rooted(<root>, store/trash/<名字>, RemoveKind::File)`，只删它本身。返回的报告没删干净（`is_complete()` 为假），或者调用在动手之前就被拒绝，条目都留在 trash 里、路径记进报告的 `stuck`，不让整轮失败，下一轮再删（module-rulings 的"remove_tree_rooted reports, it does not fail"：没删干净的结果是确定的，不是 `Unknown`）。
+4. **tmp**，持 L3 独占锁：`store/tmp/` 里年龄超过下限的条目删掉（死掉的 put 的克隆体、建库剩下的临时库与探测文件）。每个条目一次 `apfs::remove_tree_rooted(<root>, store/tmp/<名字>)`，不论种类（module-rulings 的"remove_tree_rooted takes any entry kind"）：put 死在第 5 步规整之前，克隆体还带着源的 `uchg`，由 apfs 在删之前清掉；store 自己从不按路径改标志（增补 8、A10）。报告没删干净，或者调用在动手之前就被拒绝，条目留在原处、记进报告的 `stuck`，下一轮再删。
+5. **删 trash**：名字里的时刻早于 `now` 减去年龄下限（缺省 1 小时，与守卫 (b) 同一个值）的条目逐个删 [我的决定：上一版是过了 `keep` 才删；进 trash 的目录都已经没有活记录，留 1 小时，让还在按路径读它的进程（例如对旧树的扫描）有时间读完，也给人一个找回的窗口]。条目用 `apfs::list_dir` 列出，每个条目一次 `apfs::remove_tree_rooted(<root>, store/trash/<名字>)`（增补 8；不论种类，module-rulings 的"remove_tree_rooted takes any entry kind"）。目录自底向上删整棵树：树里的符号链接只删链接本身、不跟随，不跨设备，删之前清掉 `UF_IMMUTABLE` 与 `UF_APPEND`（封存若用了 `chflags uchg`，克隆会把它带过来）、让目录对属主可写（deps 封存的根是 0555，deps.md §4.6）。不是目录的条目（`gc_repo` 第 2 步只挪走、没有准备的符号链接或文件）只删它本身，符号链接从不跟随。返回的报告没删干净（`is_complete()` 为假），或者调用在动手之前就被拒绝，条目都留在 trash 里、路径记进报告的 `stuck`，不让整轮失败，下一轮再删（module-rulings 的"remove_tree_rooted reports, it does not fail"：没删干净的结果是确定的，不是 `Unknown`）。
 6. **完整性扫描**，持 L3 共享锁：从上一次全局 gc 记录的 `scrub_after` 之后，按 `blobs.id` 的顺序逐个 `verify_blob`，累计读满 2 GiB 就停 [我的决定]，记下最后一个 id；走到末尾则游标回到 NULL，下一轮从头开始。不符、文件不在或长度不对的 blob 进报告的 `corrupt`：从不删除、从不覆盖（3f:557），由 status 报出、人来处理。
 7. 追加一行 `gc_runs`（`scope = NULL`、`outcome = 'complete'`、报告的 JSON 与新游标），返回报告。
 
@@ -1549,7 +1597,7 @@ design §8 的验收数字里与 store 有关的是"checkpoint 改 50 个文件 
 | --- | --- | --- | --- | --- |
 | `CrossVolume` | open：root 与某个 checkout 不同卷；put、get（含两个 rooted 变体）由 apfs 透传 | 无 | 改 `[paths] root` | 是 |
 | `NotEmpty` | open 建库时 root 里有不属于 strata 的条目 | 无 | 换一个 root，或清空它 | 是 |
-| `Corrupt` | open：文件头、身份、版本、日志模式、schema、quick_check（上次没有正常关闭时）不对，或丢了 store.db；`quick_check()`：结果不是 ok；读：标识、序号或枚举值不合法；blob：文件不在、不是普通文件、长度与登记行不符、重算的哈希不符（只有 `verify_blob` 与 gc 扫描重算）；finish_move 找不到意图的目标基线 | 一字不动；put 的长度不符会留下正确的 tmp | 人工检查（status 报出）；store 从不自动修补 | 是 |
+| `Corrupt` | open：文件头、身份、版本、日志模式、schema、quick_check（上次没有正常关闭时）不对，或丢了 store.db；`quick_check()`：结果不是 ok；读：标识、序号或枚举值不合法，`checkpoint`、`latest_checkpoint` 读到的条目行数与 `checkpoints.entries` 不符；blob：文件不在、不是普通文件、长度与登记行不符、重算的哈希不符（只有 `verify_blob` 与 gc 扫描重算）；finish_move 或 resolve_move 的 Accept 找不到意图的目标基线 | 一字不动；put 的长度不符会留下正确的 tmp | 人工检查（status 报出）；store 从不自动修补 | 是 |
 | `Busy` | open：另一个写者持有 LOCK；任何写：外部进程持有 SQLite 写锁 | 无，`outcome = "not_written"` | 稍后重试 | 否（types.md 只列了 daemon 的按 repo 写锁） |
 | `ReadOnly` | 只读 Store 上的任何写；只读打开时需要 WAL 恢复；get、`get_blob_rooted` 的 dst 所在目录不可写；retire_dir 的准备或改名得到 `EPERM`、`EACCES` | 无 | 启动 daemon；修正目标 | 否（列的是 cli 与写封存目录的模块） |
 | `Unsupported` | open：卷不支持 clonefile（apfs 透传）；PRAGMA 回读不符 | 无；建库探测失败时删掉自己刚建的空目录 | 换 APFS 卷；换支持这些设置的 SQLite | 否（列的是 apfs、gitio、confirm；回读不符这一项是新增） |
@@ -1559,11 +1607,11 @@ design §8 的验收数字里与 store 有关的是"checkpoint 改 50 个文件 
 | `IsDirectory` | put：src 是目录（apfs 透传）；`put_blob_rooted`：src 是目录，或检查之后被换成目录（apfs 按 `CloneKind::File` 在克隆之前拒绝） | 无 | — | 是 |
 | `NotFile` | put、`put_blob_rooted`：src 是 FIFO、socket 或设备文件（apfs 透传）；`put_blob_rooted` 的 src 在检查之后被换成这些或符号链接（apfs 在克隆之前拒绝） | 无 | — | 透传 |
 | `NoSuchCheckpoint` | `checkpoint` 读；record_publish 的批次点名了不存在的 checkpoint | 无 | — | 是 |
-| `NoSuchSession` | 写操作点名的会话不存在或已 Removed；set_lifecycle、set_session_phase、record_seeds 的会话不存在 | 无 | — | 否（列的是 session） |
+| `NoSuchSession` | 写操作点名的会话不存在或已 Removed（含 `record_publish` 的批次，module-rulings 的"A Removed session takes no new pins"）；set_lifecycle、set_session_phase、record_seeds 的会话不存在 | 无 | — | 否（列的是 session） |
 | `NoSuchRepo` | 会话里没有这个 repo 的工作区 | 无 | — | 否 |
-| `InvalidInput` | root 不是绝对路径；条目不一致（含同一路径的 Deleted 加 Added）；工作区 tracked = false 或健康为 Unknown；基线、清单、依赖集没登记或属于别的 repo；与已登记的清单不同；不允许的状态转换；点名的尝试、提议、意图不存在；retire_dir 的路径不合规或对应的行不允许；种子写第二次；路径不是 UTF-8；时间超出范围 | 无 | 调用方的错 | 否（列的是 types、cli、daemon） |
+| `InvalidInput` | root 不是绝对路径；条目不一致（含同一路径的 Deleted 加 Added）；工作区 tracked = false 或健康为 Unknown；基线、清单、依赖集没登记或属于别的 repo；与已登记的清单不同；不允许的状态转换；点名的尝试、提议、意图不存在；`set_move_state` 的 conflicts 与 to 不配；`finish_move` 的冲突与意图行上的不同；`resolve_move` 的守卫不过；retire_dir 的路径不合规或对应的行不允许；种子写第二次；路径不是 UTF-8；时间超出范围 | 无 | 调用方的错 | 否（列的是 types、cli、daemon） |
 | `TooLarge` | 序号或代数到了 `i64::MAX`；read_blob 的大小超过 max | 无 | — | 否（列的是 publish、search、daemon） |
-| `Unknown` | types.md §6.3 归为 `Unknown` 的 I/O 错误（`ENOSPC`、`EIO` 等）；提交结果不确定；写者中毒；gc 中途停下；触发器拦下了 store 自己发出的语句（store 的 bug） | 看 `outcome` | §6.4 | 是（任何模块） |
+| `Unknown` | types.md §6.3 归为 `Unknown` 的 I/O 错误（`ENOSPC`、`EIO` 等）；提交结果不确定；写者中毒；gc 中途停下；get 与 `get_blob_rooted` 克隆之后规整不成（dst 被换掉或有别的名字，`outcome = "partial"`）；触发器拦下了 store 自己发出的语句（store 的 bug） | 看 `outcome` | §6.4 | 是（任何模块） |
 
 ### 6.2 `detail` 的形状
 
@@ -1575,25 +1623,25 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
   - `"uncertain"`：一次 `COMMIT` 的结果不确定（提交时同步或写失败）。那一行在恢复之后可能在、也可能不在。写者中毒（§6.4），status 报出，不重放。
   - `"partial"`：一个多步操作停在中间，已完成的步骤有效（gc 已提交的批次、已挪进 trash 的目录、get 已建出的 dst）。现场保留，status 报出。
   - 同样是 `ENOSPC`：写临时文件时满了是 `not_written`，提交时满了是 `uncertain`。两者都是 `Unknown`，调用方按 `outcome` 区分，永远不把不确定的结果当成确定的容量失败去重放或清理（3c:30）。
-- `Corrupt`：`{"reason": "...", "blob": "...", "expected": "...", "actual": "...", "path": "..."}`。`reason` 取 `application_id`、`user_version`、`journal_mode`、`schema`、`sqlite`、`store_db_missing`、`bad_row`、`blob_missing`、`blob_type`、`blob_size`、`blob_mismatch`、`base_gen_missing` 之一。
+- `Corrupt`：`{"reason": "...", "blob": "...", "expected": "...", "actual": "...", "path": "..."}`。`reason` 取 `application_id`、`user_version`、`journal_mode`、`schema`、`sqlite`、`store_db_missing`、`bad_row`、`entries_mismatch`、`blob_missing`、`blob_type`、`blob_size`、`blob_mismatch`、`base_gen_missing` 之一。
 - `Busy`：`{"lock": "...", "path": "..."}`，`lock` 是 `store-writer`（LOCK）或 `sqlite`（SQLite 写锁）。
 - `Exists`：`{"reason": "...", "path": "...", "attempt": 7, "n": 3}`，按需取用；`reason = "store_row"` 表示撞上的是已有的行。
 - `CrossVolume`：`{"root": "...", "checkout": "..."}`。`NotEmpty`：`{"root": "...", "entries": ["..."]}`。
 - `TooLarge`：`{"limit": "...", "max": 9223372036854775807}`，`limit` 取 `checkpoint_id`、`proposal_id`、`attempt_id`、`release_group_id`、`move_generation` 或 `read_max`。
 - `Unsupported`：`{"setting": "fullfsync", "expected": 1, "actual": 0}`；apfs 透传的保持 apfs 的形状。
 - `ReadOnly`：`{"reason": "read_only_handle"}` 或 `{"reason": "recovery_needed"}`；get 的 dst 不可写时保持 apfs 的形状。
-- `InvalidInput`：`{"reason": "...", "path": "...", "field": "..."}`，按需取用；`reason` 的取值有 `deps_unregistered`、`manifest_mismatch`、`symlink`、`seed_exists`、`illegal_transition`、`not_found` 等。
+- `InvalidInput`：`{"reason": "...", "path": "...", "field": "..."}`，按需取用；`reason` 的取值有 `deps_unregistered`、`manifest_mismatch`、`symlink`、`seed_exists`、`illegal_transition`、`not_found`、`conflicts_mismatch`，以及 `resolve_move` 的 `lifecycle`、`not_failed`、`no_failed_move`（同 session.md §5.9）等。
 
 ### 6.3 崩溃会留下什么
 
 | 崩溃发生在 | 留下 | 下一次 |
 | --- | --- | --- |
 | 建库第 9 步之前 | 空目录，`store/tmp/` 里的临时库 | open 从头建（§5.1）；临时库由 gc 过了年龄下限收走 |
-| put：克隆之后、改名之前 | `store/tmp/` 里的克隆体（mtime 可能是源文件的旧值，ctime 是克隆的时刻；死在第 5 步之前的还带着源的 BSD 标志） | 不影响任何写入，新写入换新名字（3a:228）；gc 过了年龄下限（按 mtime 与 ctime 中较晚的那个）先清标志再删 |
+| put：克隆之后、改名之前 | `store/tmp/` 里的克隆体（mtime 可能是源文件的旧值，ctime 是克隆的时刻；死在第 5 步之前的还带着源的 BSD 标志） | 不影响任何写入，新写入换新名字（3a:228）；gc 过了年龄下限（按 mtime 与 ctime 中较晚的那个）经 `apfs::remove_tree_rooted` 删，带着的标志由 apfs 清掉 |
 | put：改名之后、`record_checkpoint` 提交之前 | `blobs/` 里一个没有行的 blob | 之后同内容的 put 复用它；没人复用就由 gc 过了下限收走（3a:293）；不存在 checkpoint 行 |
 | `record_checkpoint`：提交之前 | 什么都没有，SQLite 回滚 | checkpoint 不存在；同一工具调用的重放会重新记 |
 | `record_checkpoint`：提交之后、回复之前 | 完整、持久的 checkpoint | 同一工具调用的重放返回同一个号；`checkpoint_write_is_durable_after_crash` 证明 |
-| session 写下 `create_session` 或 `begin_move` 的行、或进入 Removing 之后 | 这些行，以及可能建了一半的暂存或目录 | recover 按 §5.7 收尾：Preparing 的意图（没走到第一次对外可见的写）关成 Abandoned，暂存经 `retire_dir` 拿走；Swapping 的意图进入 Unknown；Creating 与 Removing 的会话进入 Unknown，现场保留（增补 3、4）。`create_session` 本身就是 `new` 的第一次对外可见的写，它之后没有"还没对外可见"的窗口，所以 Creating 的会话一律进入 Unknown（增补 6） |
+| session 写下 `create_session` 或 `begin_move` 的行、或进入 Removing 之后 | 这些行，以及可能建了一半的暂存或目录 | recover 按 §5.7 收尾：Preparing 的意图（没走到第一次对外可见的写）关成 Abandoned，暂存经 `retire_dir` 拿走；Swapping 的意图进入 Unknown，进入 Swapping 时记下的冲突留在意图行上，人选 Accept 时由 `resolve_move` 交给工作区（session.md 的 D46）；Creating 与 Removing 的会话进入 Unknown，现场保留（增补 3、4）。`create_session` 本身就是 `new` 的第一次对外可见的写，它之后没有"还没对外可见"的窗口，所以 Creating 的会话一律进入 Unknown（增补 6） |
 | deps 的尝试还是 Running 时 daemon 死了 | Running 的行与它的暂存 | 下一个拿到该依赖集建造锁的 deps 把它关成 Failed（`interrupted`，T8 裁定）；gc 从不碰 Running 与 Failed 的暂存 |
 | 目录改名进 `bases/` 或 `deps/` 之后、登记之前 | 活路径上一个没有登记的目录 | 建它的模块下一次发现没登记，就 `retire_dir` 拿走再重建；否则 `gc_repo` 过了年龄下限把它挪进 trash |
 | session 建基线的中途（暂存还在） | `bases/<repo>/.staging/<hex>`，可能带着 gitio 的导出临时目录 | daemon 启动时的 `recover` 经 `retire_dir` 第 7 行拿走（session.md §5.8）；漏下的由 `gc_repo` 第 5 步过了年龄下限挪进 trash |
@@ -1637,7 +1685,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `lock_is_not_inherited_by_child_processes` | 写者 Store 起一个长时间运行的子进程（`sleep 60`）之后被丢掉：另一个 `open` 立即成功，而子进程还活着，证明 LOCK 以 `O_CLOEXEC` 打开（增补 4） | 新增 |
 | `committed_rows_are_immutable` | 用注册了 `strata_gc_active`（返回 0）的原始连接：每张不可变表上的 UPDATE 都被触发器拦下（`immutable`）；`INSERT OR REPLACE` 撞到已有行时被删除守卫拦下；一批插入里有一行冲突时整批回滚，不留半批；已存的基线与依赖集行不被改写 | layerfs-persistence/tests/inode_branch_delta_custody.rs::a_branch_base_cannot_be_dropped_and_survives_reclamation<br>layerfs-persistence/tests/sqlite_inode_values.rs::a_stored_value_is_never_replaced_and_a_refused_batch_leaves_no_row<br>layerfs-persistence/tests/sqlite_publication.rs::failure_after_body_insert_rolls_back_the_entire_unit_and_published_body_is_immutable<br>layerfs-workspace/tests/operation_scope.rs::scoped_views_share_original_install_serials_and_keep_original_provider |
 | `delete_outside_gc_is_refused` | gc 以外的 DELETE（store 的原始连接、没有注册函数的 `sqlite3` 连接）都失败，行不变；gc 模式下先删子行再删父行成功，父行还有子行时被外键拦下（schema 没有级联）；`publishes`、`publish_items`、`refs_audit` 连 gc 也删不掉 | 新增 |
-| `state_graphs_are_enforced_by_triggers` | 用注册了 `strata_gc_active` 的原始连接逐表试 §4.3 的转换图：会话生命周期、工作区健康、意图、尝试、提议、发布阶段的每条允许的边都成功，其余每条都被触发器拦下（`illegal update`），行不变；意图的 n 不大于工作区代数或已有的 n 时插入被拦下 | 新增 |
+| `state_graphs_are_enforced_by_triggers` | 用注册了 `strata_gc_active` 的原始连接逐表试 §4.3 的转换图：会话生命周期、工作区健康、意图、尝试、提议、发布阶段的每条允许的边都成功，其余每条都被触发器拦下（`illegal update`），行不变；意图的 n 不大于工作区代数或已有的 n 时插入被拦下；工作区的 base、head、代数只能换到它 n 最大的意图的 n 上；健康 Unknown → Ok 只在会话 Active、它 n 最大的意图是 Unknown 时放行，现场只在进入 Unknown 时改写；意图 Unknown → Done、Abandoned 只在会话 Active、它是 n 最大的意图、工作区已经回到 Ok 时放行（Done 要工作区的代数已是 n，Abandoned 要不是）；意图的冲突只在 Preparing → Swapping 时写一次，进入 Swapping 不带冲突被 CHECK 拦下 | 新增 |
 | `blob_put_is_idempotent` | 同一内容 put 两次（同一个文件；两个不同路径的文件；一次 `put_blob` 一次 `put_bytes`）得到同一个 BlobId，`blobs/` 里只有一个文件；把已存副本改成 000 权限之后再 put 照样成功，证明不回读已存副本 | layerfs-content/tests/file_complete.rs::construction_is_deterministic_for_the_same_input<br>layerfs-content/tests/streaming.rs::root_identity_is_stable_across_repeated_streaming_runs<br>layerfs-storage/tests/exact_reuse_trust.rs::an_exact_reuse_reads_no_stored_bytes |
 | `blob_id_ignores_delivery_shape` | 同样的字节，一次写成的文件、分块乱序写成的文件、经 mmap 写成的文件，以及 `put_bytes`，得到同一个 BlobId：身份只取决于内容 | layerfs-content/tests/file_complete.rs::known_length_and_streaming_inputs_agree_exactly<br>layerfs-content/tests/streaming.rs::unknown_length_and_known_length_agree_object_by_object<br>layerfs-workspace/tests/captured_namespace_fragments.rs::fragmented_writes_of_a_base_file_give_one_root |
 | `blob_known_answer_vectors` | 空串的 BlobId 为 `af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262`，`abc` 的为 `6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85`（2026-10-22 用 BLAKE3 参考实现核过）；一百万个 `a` 的值写测试时用 `b3sum` 算出后固定。三者经 `put_blob` 与 `put_bytes` 都得到这些 id。原测试的 SHA-256 向量不保留 | layerfs-storage/tests/object_key.rs::sealed_keys_keep_standard_sha256_bytes_for_empty_short_and_many_blocks |
@@ -1663,8 +1711,8 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `put_rename_failure_is_not_written` | `BlobRenameFails { errno: EIO }`：put 返回 `Unknown`（`not_written`），`blobs/` 里没有新文件，克隆体留在 `store/tmp/`；之后同内容的 put 成功 | 新增 |
 | `put_blob_rooted_never_follows_a_swapped_parent` | 工作区 W 里 `a/b/f` 是普通文件，W 之外的目录 X 里有内容不同的同名文件 `f`：`put_blob_rooted(W, a/b/f)` 存下 W 里的内容；把 `a/b` 换成指向 X 的符号链接之后再调，返回 `NotDirectory`（`reason = "symlink"`），`blobs/` 与 `tmp/` 都没有新条目，X 里的内容没有进 store；用 apfs 的 `seams::set_before_open` 在 `attrs_of` 之后、`clone_from_rooted` 打开 `a` 之前做同样的替换，结果相同。对照：按路径的 `put_blob(W/a/b/f)` 跟着这个符号链接存下了 X 里的内容（2026-10-22 实测的内核行为），所以工作区的捕获不用它 | 新增 |
 | `put_blob_rooted_refuses_a_swapped_kind_before_cloning` | 用 apfs 的 `seams::set_before_open` 在 `attrs_of` 之后、`clone_from_rooted` 打开 src 之前，把普通文件 src 换成一个装着文件的目录：返回 `IsDirectory`，`store/tmp/` 与 `blobs/` 都没有新条目（apfs 按 `CloneKind::File` 在克隆之前拒绝，从来没有克隆树），工作区里的那个目录原样；换成没有写端的 FIFO → `NotFile`，不挂住；换成符号链接 → `NotFile`（`reason = "symlink"`） | 新增 |
-| `get_blob_rooted_roundtrip_matches_get_blob` | 同一个 blob 用 `get_blob(id, P)` 与 `get_blob_rooted(id, W, a/f)` 各取一份：字节与 blob 逐一相同，两份都是 mode 0644、没有 BSD 标志、atime 与 mtime 为当前时刻；blob 文件被人加上 `uchg` 时也一样（先清标志、再设 mode）；`blobs` 里没有行时同样成功。`get_blob_rooted` 的 dst 已存在（含悬空符号链接）→ `Exists`，原样，链接指向的地方没有被碰；blob 文件被删 → `Corrupt`（`blob_missing`），dst 不存在；dst 的上级不存在 → `NoSuchPath` | 新增 |
-| `get_blob_rooted_never_writes_through_a_swapped_parent` | 工作区 W 里 `a/b/` 是目录，W 之外的目录 X 里有文件 `keep`：把 `a/b` 换成指向 X 的符号链接之后，`get_blob_rooted(id, W, a/b/f)` 返回 `NotDirectory`（`reason = "symlink"`），X 里没有新文件；用 apfs 的 `seams::set_before_open` 在 `clone_file_rooted` 打开 `b` 之前做同样的替换，结果相同；在克隆之后、`open_rooted_file` 打开 `b` 之前替换，返回 `Unknown`（`partial`），克隆出的文件随换走的目录留着，X 里的 `keep` 的 mode 与 mtime 都没变。对照：按路径的 `get_blob(id, W/a/b/f)` 跟着这个符号链接在 X 里建出了 `f`（2026-10-22 实测的内核行为），所以会话树里的目的地不用它 | 新增 |
+| `get_blob_rooted_roundtrip_matches_get_blob` | 同一个 blob 用 `get_blob(id, P)` 与 `get_blob_rooted(id, W, a/f)` 各取一份：字节与 blob 逐一相同，两份都是 mode 0644、没有 BSD 标志、mtime 为当前时刻；blob 文件被人加上 `uchg` 时也一样（先清标志、再设 mode）；`blobs` 里没有行时同样成功。`get_blob_rooted` 的 dst 已存在（含悬空符号链接）→ `Exists`，原样，链接指向的地方没有被碰；blob 文件被删 → `Corrupt`（`blob_missing`），dst 不存在；dst 的上级不存在 → `NoSuchPath` | 新增 |
+| `get_blob_rooted_never_writes_through_a_swapped_parent` | 工作区 W 里 `a/b/` 是目录，W 之外的目录 X 里有文件 `keep`：把 `a/b` 换成指向 X 的符号链接之后，`get_blob_rooted(id, W, a/b/f)` 返回 `NotDirectory`（`reason = "symlink"`），X 里没有新文件；用 apfs 的 `seams::set_before_open` 在 `clone_file_rooted` 打开 `b` 之前做同样的替换，结果相同；在克隆之后、`open_rooted_file` 打开 `b` 之前替换，返回 `Unknown`（`partial`），克隆出的文件随换走的目录留着，X 里的 `keep` 的 mode 与 mtime 都没变；用同一个接缝在 `open_rooted_file` 打开 `f` 之前，把 `f` 换成 W 之外一个 0600 文件 `Z` 的硬链接：返回 `Unknown`（`partial`），`Z` 仍是 0600，标志与 mtime 都没变（`set_file_meta` 的 `st_nlink` 核对）。对照：按路径的 `get_blob(id, W/a/b/f)` 跟着这个符号链接在 X 里建出了 `f`（2026-10-22 实测的内核行为），所以会话树里的目的地不用它 | 新增 |
 | `deps_attempt_is_an_intent_row` | `begin_deps_attempt` 返回从 1 起的序号，行为 Running，`staging` 等于 `deps_staging_dir`；同一 (repo, set) 再 begin 返回 `Exists`（`detail.attempt`）；`set_deps_attempt_pid` 只写一次，第二次返回 `InvalidInput`，尝试结束之后返回 false；`end_deps_attempt` 把它关成 Failed 或 Refused，读回的 `StrataError` 与写入的相等，再 end 返回 false；关掉之后同一依赖集再 begin 拿到新号；`deps_attempts` 按号列出全部 | 新增 |
 | `deps_set_seals_its_attempt` | `record_deps_set` 登记依赖集，并在同一个事务里把尝试记为 Sealed；origin 与尝试不配（Empty 带尝试、Build 配 Adopt 的尝试、尝试已结束、Empty 的 dirs 非空）返回 `InvalidInput`，什么都不写；已登记的依赖集再登记返回 `Exists`；`deps_set` 读回 origin 与封存时刻 | 新增 |
 | `proposal_slots_supersede_in_one_transaction` | `record_proposal` 插入 Pending 时取代该 repo 原有的 Pending（`superseded_by` 是新号），插入 AwaitingPublish 时只取代同一 (repo, 提出会话) 的那条；`replaces` 与位置上实际的那条不符时返回 `None`，什么都不写；from = to、tree 与 head 只给一个、没有目标又没有提出会话都返回 `InvalidInput`；任何时刻每个 repo 至多一条 Pending | 新增 |
@@ -1682,6 +1730,10 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `move_intent_generation_never_reused` | `begin_move` 返回工作区代数加 1；已有没结束的意图时再 begin 返回 `Exists`；Preparing→Refused 之后再 begin 拿到更大的 n，不复用；会话不是 Active、工作区 tracked = false 或健康为 Unknown、目标没登记或属于别的 repo、staging 在 `<root>/store` 之下都返回 `InvalidInput` | 新增 |
 | `finish_move_swaps_base_head_and_generation_together` | Swapping 的意图 `finish_move` 之后，读回的 base 的 tree 与 deps、head、代数、冲突列表都是新值，意图为 Done；用 `PauseBeforeCommit` 停在提交之前时，另一个读看到的全部是旧值，放行之后全部是新值（不变量 8）；`set_old_tree` 只对 Done 的意图写一次 | 新增 |
 | `failed_move_marks_workspace_unknown` | `fail_move` 之后意图为 Unknown，工作区健康为 Unknown 并带 scene；之后对这个工作区 `begin_move` 返回 `InvalidInput`；`open_move_intents` 列出 Preparing 与 Swapping 的意图，不列已结束的；Preparing→Abandoned 成功 | 新增 |
+| `move_conflicts_are_recorded_at_swapping` | `set_move_state(Preparing → Swapping, Some(c))` 把 c 原样记在意图行上，`move_intents` 读回 `conflicts = Some(c)`（空列表读回 `Some([])`）；Preparing、Refused 的意图读回 None；进入 Swapping 不带 conflicts、别的边带 conflicts 都返回 `InvalidInput`，什么都不写；`fail_move` 之后意图行上的冲突还在；`finish_move` 带另一组路径（少一条，或顺序不同）返回 `InvalidInput`（`conflicts_mismatch`），工作区与意图都不变；带同样的路径成功，工作区读回这组冲突 | 新增 |
+| `resolve_move_abandon_returns_health_to_ok` | Swapping 之后 `fail_move`：`resolve_move(…, n, false, at)` 之后意图为 Abandoned、`ended` 为 at、冲突还在；工作区健康为 Ok，base、head、代数与冲突都不变，scene 原样留着；之后 `retire_dir(staging)` 与 `retire_dir(sessions/.repos/<id>/<repo>.git/worktrees/<n>)` 都成功（§5.5 第 5、6 行接受 Abandoned 的意图）；对这个工作区再 `begin_move` 拿到 n + 1 | 新增 |
+| `resolve_move_accept_keeps_the_conflicts_recorded_at_swapping` | `set_move_state(Preparing → Swapping, Some([a, b]))` 之后丢掉这个 Store、不调 `close`（进程在交换中崩溃），再 `open`：`open_move_intents` 读回这条 Swapping 的意图，冲突是 [a, b]；`fail_move`（recover 的做法）之后 `resolve_move(…, n, true, at)`：工作区的 base 的 tree 与 deps、head、代数是意图的 to、head、n，冲突是 [a, b]，健康为 Ok，scene 留着；意图为 Done、`old_tree` 等于它的 staging、`ended` 为 at；用 `PauseBeforeCommit` 停在提交之前时，另一个读看到的全部是旧值，放行之后全部是新值（不变量 8） | 新增 |
+| `resolve_move_guards_refuse_and_write_nothing` | 每条守卫各试一次，之后读回的会话、工作区与意图行都与之前相同：会话不存在或已 Removed 返回 `NoSuchSession`；会话是 Removing 返回 `InvalidInput`（`lifecycle`）；没有这个工作区返回 `NoSuchRepo`；健康为 Ok 返回 `InvalidInput`（`not_failed`）；n 不存在、n 是一条更早的 Done 意图都返回 `InvalidInput`（`no_failed_move`）；Abandon 之后再 `resolve_move` 返回 `InvalidInput`（`not_failed`）；夹具用 gc 模式的原始连接删掉意图的目标基线行之后，Accept 返回 `Corrupt`（`base_gen_missing`） | 新增 |
 | `open_proposals_skip_removed_sessions` | 提出会话已 Removed 或已经没有行的 AwaitingPublish 不出现在 `proposals(_, open_only = true)` 里，Pending 照常出现；`open_only = false` 时全部出现 | 新增 |
 | `retire_dir_moves_only_dirs_without_live_rows` | §5.5 表的第 1 到 3 行：没登记的 generation 目录与依赖集目录、Running、Sealed、Refused 尝试的暂存、行已被 gc 删掉的尝试的暂存，都被改名进 `store/trash/`，内容完好；已登记的 generation 与依赖集、Failed 尝试的暂存返回 `InvalidInput`，原样不动。表外的路径、含符号链接或 `..` 的路径也返回 `InvalidInput`；指向文件的路径返回 `NotDirectory`；不存在的路径返回 `NoSuchPath` | 新增 |
 | `retire_dir_takes_dirs_of_removed_sessions` | §5.5 表的第 4 行：会话处在 Removing、Removed，以及行已被 gc 回收时，`sessions/<session-id>` 与 `sessions/.repos/<session-id>`（里面是各 repo 的影子仓库）都被改名进 trash，内容完好；同样的两个路径在 Creating、Active、Unknown 的会话上返回 `InvalidInput`，原样不动 | 新增 |
@@ -1694,6 +1746,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `checkpoint_id_refuses_past_i64_max` | 用原始连接放进一行 id 为 `i64::MAX` 的 checkpoint：下一次 record 返回 `TooLarge`（`checkpoint_id`），所有表的行不变，不回绕 | layerfs-persistence/tests/history_allocation.rs::counts_are_checked_and_the_terminal_endpoint_is_refused<br>layerfs-persistence/tests/history_remediation.rs::last_representable_reservation_is_consumed_and_terminal_refusal_is_atomic |
 | `ids_survive_reopen` | 写入 blob 与 checkpoint，关闭再打开：都能读回；同内容再 put 计为复用；下一个号紧接着上一个 | layerfs-persistence/tests/sqlite_publication.rs::canonical_save_read_reuse_and_persisted_reservations_survive_reopen |
 | `negative_id_read_back_is_corrupt` | 用原始连接（`PRAGMA ignore_check_constraints = 1`）放进一行负 id 的 checkpoint：`checkpoints` 与 `checkpoint` 读到它时返回 `Corrupt`（`bad_row`），不把负数交给 `CheckpointId::from` | 新增 |
+| `checkpoint_read_with_missing_entries_is_corrupt` | 记一个三条条目的 checkpoint，夹具用 gc 模式的原始连接删掉其中一条 `overlay_entries` 行：`checkpoint` 与 `latest_checkpoint` 都返回 `Corrupt`（`entries_mismatch`，`detail` 带期望与实际的条数），不交出少了一条的快照；`checkpoints` 的摘要照常列出它，条目数仍是 3（摘要不读条目行） | 新增 |
 | `tool_call_checkpoint_recorded_once` | 同一会话、同一 repo、同一个 `ToolCall { id }` 记两次：第二次什么都不写，返回第一次的号；换一个 repo 或换一个工具调用 id 各记一个新的 | 新增 |
 | `checkpoint_unit_is_one_transaction` | checkpoint 行、全部条目与新 blob 的登记在一个事务里：用 `PauseBeforeCommit` 停在提交之前，另一个读看不到其中任何一项；放行之后同时看到全部；已登记过的 blob 按先到者为准，不报错 | layerfs-persistence/tests/sqlite_publication.rs::final_body_multirow_locators_and_first_wins_have_one_atomic_ack |
 | `record_checkpoint_failure_rolls_back_whole_unit` | 在插入 checkpoint 行之后注入失败：没有 checkpoint 行，没有条目，没有新的 blob 登记；之前的 checkpoint 与 blob 仍可读；失败只报告一次，store 不自己重试 | layerfs-content/tests/filesystem_failure.rs::a_read_failure_at_each_boundary_publishes_no_root_and_keeps_the_old_one<br>layerfs-content/tests/filesystem_failure.rs::a_refusing_consumer_ends_the_operation_once_without_a_root<br>layerfs-persistence/tests/sqlite_publication.rs::failure_after_body_insert_rolls_back_the_entire_unit_and_published_body_is_immutable |
@@ -1702,7 +1755,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `interleaved_sessions_do_not_see_failed_checkpoints` | 三个会话的 put 与 record 交错进行，其中一个注入失败：成功的两个可读，失败的那个不可见，互不影响 | layerfs-persistence/tests/interleaved_saves.rs::scoped_registry_interleaves_pending_reads_finish_abort_and_slot_reuse |
 | `checkpoint_refused_for_untracked_or_removed` | `tracked = false` 的工作区返回 `InvalidInput`；基线没登记或属于别的 repo 返回 `InvalidInput`；会话已 Removed 返回 `NoSuchSession`；会话里没有这个 repo 返回 `NoSuchRepo`；都不写 | 新增 |
 | `same_path_type_change_is_one_entry` | 同一路径上一条 Deleted 加一条 Added 返回 `InvalidInput`，什么都不写；文件变成符号链接记成一条 Modified、mode 120000，读回相同（增补 4"Same-path type change"） | 新增 |
-| `publish_record_roundtrip_and_phase_machine` | `record_publish` 读回的 `ReleaseGroup` 与写入的相同，批次与路径的顺序不变，id 是分配的号；Running→Unknown→Done 成功，Done→Running 返回 `InvalidInput`；批次点名不存在的 checkpoint 返回 `NoSuchCheckpoint` | 新增 |
+| `publish_record_roundtrip_and_phase_machine` | `record_publish` 读回的 `ReleaseGroup` 与写入的相同，批次与路径的顺序不变，id 是分配的号；Running→Unknown→Done 成功，Done→Running 返回 `InvalidInput`；批次点名不存在的 checkpoint 返回 `NoSuchCheckpoint`；批次点名的会话已 Removed 或已经没有行时返回 `NoSuchSession`，`publishes` 与 `publish_items` 都不多出行 | 新增 |
 | `open_publishes_listed_for_restart` | 阶段为 Running 与 Unknown 的发布出现在 `open_publishes` 里，Done 的不出现；重开 Store 之后结果相同 | 新增 |
 | `ref_audit_only_strata_refs_for_update_ref` | `UpdateRef` 配 `refs/heads/main` 返回 `InvalidInput`，配 `refs/strata/publish/main` 成功；`Push` 配 `HeadMoved` 返回 `InvalidInput`；`confirmed` 读回的 `Action` 与写入的相同 | 新增 |
 | `external_writer_is_busy_without_side_effects` | 子进程 `lock_child` 开原始连接并持着 `BEGIN IMMEDIATE`：本进程的 record 立即返回 `Busy`（`sqlite`），不重试，没有副作用；子进程放手之后，同样的调用成功 | layerfs-persistence/tests/serverless_store.rs::lock_child<br>layerfs-persistence/tests/serverless_store.rs::second_process_busy_has_no_effect_and_readers_keep_progressing<br>layerfs-persistence/tests/sqlite_publication.rs::readonly_refusal_and_external_writer_busy_do_not_retry<br>layerfs-daemon/tests/installed_store.rs::direct_reads_finish_under_another_process_writer_and_busy_stays_typed |
@@ -1724,9 +1777,10 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `gc_skips_paths_of_open_intents_and_attempts` | `AgeFloor` 为 0：Preparing、Swapping、Unknown 意图与 Running、Failed 尝试点名的路径（其中一个放在 `bases/` 下、名字合乎键的形状、没有登记）在 gc 与 `gc_repo` 之后原样留着；那条意图关成 Refused 之后，下一轮 `gc_repo` 把那个目录挪进 trash | 新增 |
 | `retiring_a_0555_root_reparents_it` | 一个依赖集照 deps 的封存方式把根设成 0555，没被引用、过了 keep：`gc_repo` 先给根补上属主写权限，再删行、挪进 trash，过了年龄下限之后 trash 删得干净；一个没登记的 0555 根，`retire_dir` 同样挪得走 | 新增 |
 | `retiring_a_uchg_root_clears_the_flag_first` | 一个基线 generation 的根带 `uchg`（clonefile 会把它带过来）：`gc_repo` 先清标志、再补写权限、再挪进 trash；用 `RetirePrepFails { errno: EPERM }` 让准备失败时，这个 generation 的行与目录都留着、路径进 `stuck`、整轮不失败，下一轮回收它；`retire_dir` 对一个没登记的 `uchg` 根同样先清标志，准备失败返回 `ReadOnly`，目录原样 | 新增 |
-| `gc_rechecks_pins_written_after_its_snapshot` | 两个不是最新的基线 generation G1、G2 与一个依赖集 S 都没被引用、过了 keep；`GcPauseBeforeRows` 让 `gc_repo` 停在准备好根目录之后、第一批删行之前，另一个线程这时用 `create_session` 建一个基于 G1 的工作区，用 `begin_move` 写一条目标是 G2 的意图，用 `set_deps_main` 把主干指向 S；放行之后这一轮照常完成（`outcome = 'complete'`、没有错误），G1、G2、S 的行与目录都在、没有进 trash；G1 的根原先是 0555，之后对属主可写（准备过的根目录不还原）；意图关成 Refused、主干改指别处之后，下一轮回收 G2 与 S。`gc` 同样：停住时另一个线程 `record_publish` 一个点名可回收会话的 Running 发布，放行之后那个会话的行都在 | 新增 |
+| `gc_rechecks_pins_written_after_its_snapshot` | 两个不是最新的基线 generation G1、G2 与一个依赖集 S 都没被引用、过了 keep；`GcPauseBeforeRows` 让 `gc_repo` 停在准备好根目录之后、第一批删行之前，另一个线程这时用 `create_session` 建一个基于 G1 的工作区，用 `begin_move` 写一条目标是 G2 的意图，用 `set_deps_main` 把主干指向 S（后两者在真实调用里持 repo 写锁，不会与 `gc_repo` 交错；这里直接调用，测的是重新核对这道兜底）；放行之后这一轮照常完成（`outcome = 'complete'`、没有错误），G1、G2、S 的行与目录都在、没有进 trash；G1 的根原先是 0555，之后对属主可写（准备过的根目录不还原）；意图关成 Refused、主干改指别处之后，下一轮回收 G2 与 S | 新增 |
+| `gc_refuses_publish_pins_between_batches` | 会话 S 已 Removed、过了 keep，有一个两条条目的 checkpoint；`GcBatchRows { rows: 2 }` 与 `GcPauseAfterBatch { n: 1 }` 让 `gc` 删完 S 的两条条目那一批之后停住：另一个线程这时 `record_publish` 一个点名 (S, 1) 的发布，返回 `NoSuchSession`，`publishes` 与 `publish_items` 都没有多出行；停在同一处时 `checkpoint(S, 1)` 返回 `Corrupt`（`entries_mismatch`），不读成一个空的快照；放行之后这一轮照常完成（`outcome = 'complete'`），S 的 checkpoint、工作区与会话行都不在了 | 新增 |
 | `gc_retires_stale_base_staging` | `bases/<repo>/.staging/` 下放一个过了年龄下限的暂存（里面有 `tree/` 与 gitio 的 `.export-tree-<nonce>/`）和一个刚建的暂存：`gc_repo` 把旧的挪进 trash（`dirs_retired` 加 1），刚建的原样；名字不是 32 位小写十六进制的条目、`deps/<repo>/.staging/` 下的东西都原样；`bases/<repo>/.staging/` 变空之后也不删。暂存被挪走之后，用它的路径做的改名（建造者登记时的那一步）得到 `NoSuchPath`，`bases/<repo>/<tree>/` 下没有出现任何东西 | 新增 |
-| `gc_sweeps_stale_temp_entries` | `store/tmp/` 里放三个过了年龄下限的条目：死掉的 put 留下的克隆体（带着源的 `uchg`：put 停在第 5 步规整之前）、建库剩下的临时库、一个不是 store 建的目录（里面有文件）；`gc` 之后三个都不在，`tmp_removed` 是 3，没有条目进 `stuck`；没过下限的克隆体留着 | 新增 |
+| `gc_sweeps_stale_temp_entries` | `store/tmp/` 里放三个过了年龄下限的条目：死掉的 put 留下的克隆体（带着源的 `uchg`：put 停在第 5 步规整之前）、建库剩下的临时库、一个不是 store 建的目录（里面有文件）；`gc` 之后这三个都不在，`tmp_removed` 是 3；没过下限的克隆体留着。第四个条目是一个在 `store/tmp/` 之外还有一个硬链接、又带着 `uchg` 的文件（先建链接、再加标志）：它留在原处，`stuck` 里只有它，两个名字上的 `uchg` 都还在（apfs 只在没有别的名字的 inode 上清标志） | 新增 |
 | `gc_deletes_supersede_chains_across_batches` | `promote_proposal` 让一条号小的提议取代号大的 Pending，再由一条更新的 Pending 取代这条号小的，链里两个方向的引用都有；都决定了、过了 keep，`GcBatchRows { rows: 1 }` 让每批只删一行：gc 删完整条链，没有一批在 COMMIT 时撞上外键；被留下的提议经 `superseded_by` 引用的行留着 | 新增 |
 | `symlink_put_never_retakes_the_blob_gate` | put 一个符号链接，`PauseInPut` 停在临时克隆之后；另一个线程开始 gc，在 L3 独占锁上排队；放行之后 put 在 1 秒内返回目标文本的 id，gc 随后完成：符号链接那一支没有第二次取 L3 | 新增 |
 | `gc_keeps_open_publish_scenes` | removed 并过了 keep 的会话，只要有 Running 或 Unknown 的发布引用它的 checkpoint，就整个保留；发布变成 Done 之后，下一轮回收它 | 新增 |
@@ -1737,7 +1791,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `corrupt_blob_is_reported_never_overwritten` | 已存 blob 被改坏（长度不变）：gc 的完整性扫描把它列进 `corrupt` 并原样保留；同内容再 put 不覆盖它；人把正确的字节写回之后，`verify_blob` 通过，下一轮扫描不再报 | tgrep-core/tests/generations.rs::malformed_metadata_is_rejected_without_overwriting_generation |
 | `gc_report_persisted_for_status` | `gc` 与 `gc_repo` 返回的报告与 `last_gc_report(scope)` 读回的相同，重开之后仍能读到；中途停下的一轮（`GcStopAfterRetire`）以 `outcome = 'partial'`、带 `error` 写进 `gc_runs`，`last_gc_report` 读得到它；旧的 gc 记录过了 keep 被删，每个 scope 最新的一行留着 | 新增 |
 
-覆盖：目标模块为 store 的 56 行（3a 45、3c 4、3d 5、3f 2）加裁定改归 store 的 3c L139，共 57 行，全部出现在上表的来源栏里；另引用理由点名 store 的 `—` 行 15 条（3a 2、3b 4、3c 6、3d 2、3e 1），其中 3c:47（`captured_reader_preserves_sealed_bytes_across_install_and_blocks_failed_fold`，理由写"被引用的 blob 由 store 引用计数 gc 保留"）在本轮补引到 `gc_keeps_referenced_generations`。上表共 116 个测试，其中新增 70 个。3b 的 `layerfs-telemetry/tests/platform.rs::retention_expiry_open_reader_and_deletion_failure` 理由写明"不以此为依据"，所以 gc 保留期的测试记为新增。上一版的 `base_gen_requires_registered_tree_and_deps` 改为 `base_gen_requires_registered_deps`：清单不再单独登记，而是随 `record_base_gen` 一起写（M13）。
+覆盖：目标模块为 store 的 56 行（3a 45、3c 4、3d 5、3f 2）加裁定改归 store 的 3c L139，共 57 行，全部出现在上表的来源栏里；另引用理由点名 store 的 `—` 行 15 条（3a 2、3b 4、3c 6、3d 2、3e 1），其中 3c:47（`captured_reader_preserves_sealed_bytes_across_install_and_blocks_failed_fold`，理由写"被引用的 blob 由 store 引用计数 gc 保留"）在本轮补引到 `gc_keeps_referenced_generations`。上表共 122 个测试，其中新增 76 个。3b 的 `layerfs-telemetry/tests/platform.rs::retention_expiry_open_reader_and_deletion_failure` 理由写明"不以此为依据"，所以 gc 保留期的测试记为新增。上一版的 `base_gen_requires_registered_tree_and_deps` 改为 `base_gen_requires_registered_deps`：清单不再单独登记，而是随 `record_base_gen` 一起写（M13）。
 
 ## 8. 实现任务（TDD）
 
@@ -1784,7 +1838,7 @@ git commit -m "feat(store): open, layout, pinned schema and guards"
 - Test: `crates/strata-store/tests/blob.rs`
 
 **Interfaces:**
-- Consumes: `apfs::{clone_file, attrs_of, FileKind, clone_file_rooted, open_rooted_file, clone_from_rooted}` 与 apfs 第 2 轮的 `CloneKind`（§2 的上游要求）、测试里 `apfs::seams::set_before_open`；`strata_types::{BlobId, RepoPath}`
+- Consumes: `apfs::{clone_file, attrs_of, FileKind, clone_file_rooted, open_rooted_file, clone_from_rooted}` 与 apfs 第 2 轮的 `CloneKind`、`set_file_meta`、`FileMeta`（§2 的上游要求）、测试里 `apfs::seams::set_before_open`；`strata_types::{BlobId, RepoPath}`
 - Produces: `Store::put_blob`、`Store::put_blob_rooted`、`Store::put_bytes`、`Store::get_blob`、`Store::get_blob_rooted`、`Store::read_blob`、`Store::verify_blob`；L3 的共享一侧；`Seam::{BlobRenameFails, TempNameTaken}`；`Store::sync_counts` 的 blob 与目录屏障计数
 
 - [ ] **Step 1: 写失败的测试**：`blob_put_is_idempotent`、`blob_id_ignores_delivery_shape`、`blob_known_answer_vectors`、`empty_file_is_a_valid_blob`、`stored_blob_is_never_rewritten`、`blob_identity_changes_with_any_byte`、`blob_roundtrip_is_byte_exact`、`large_and_sparse_blobs_roundtrip`、`same_bytes_new_path_or_mode_reuse_blob`、`blob_files_are_content_only`、`symlink_blob_stores_target_text`、`put_blob_refuses_directory_and_special_files`、`get_blob_refuses_existing_dst`、`get_blob_missing_is_corrupt_and_leaves_no_dst`、`missing_or_mismatched_blob_is_corrupt_never_new`、`get_blob_is_trusted_verify_detects_flipped_bit`、`put_reuse_does_not_reread_existing_copy`、`put_reuse_with_length_mismatch_is_corrupt`、`put_restores_missing_blob_file`、`stale_temp_files_do_not_block_put`、`concurrent_puts_of_same_content_store_one_blob`、`put_blob_orders_blob_before_later_writes`、`put_rename_failure_is_not_written`、`put_blob_rooted_never_follows_a_swapped_parent`、`put_blob_rooted_refuses_a_swapped_kind_before_cloning`、`get_blob_rooted_roundtrip_matches_get_blob`、`get_blob_rooted_never_writes_through_a_swapped_parent`
@@ -1793,7 +1847,7 @@ git commit -m "feat(store): open, layout, pinned schema and guards"
 Run: `cargo test -p strata-store --features test-seams --test blob`
 Expected: FAIL（`put_blob` 等还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.3 的 L3 共享锁、克隆、只看克隆体、规整（标志、mode、扩展属性的跳过表）、BLAKE3（16 MiB 起 mmap 加 rayon）、先看目标再决定（已存在就 `utimensat` 刷新、不做屏障）、`futimens`、两个 `F_BARRIERFSYNC`、`RENAME_EXCL` 与 `EEXIST` 分支；`put_blob_rooted`（`attrs_of` 先看种类：目录与特殊文件在克隆之前拒绝，符号链接直接存目标；`clone_from_rooted(…, CloneKind::File)` 克隆进 tmp，检查之后被换掉的由 apfs 在克隆之前拒绝；`test-seams` 同时打开 `strata-apfs/test-seams`）；§5.4 的按文件工作（有登记行才比长度）、受信任 get（在 dst 的句柄上清标志、0644、mtime 为当前时刻）、`get_blob_rooted`（`clone_file_rooted` 传 `None`，再在 `open_rooted_file` 的句柄上做同样的规整，打不开就是 `Unknown`（`partial`））、read 的上限、verify 的重算
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.3 的 L3 共享锁、克隆、只看克隆体、规整（标志、mode、扩展属性的跳过表）、BLAKE3（16 MiB 起 mmap 加 rayon）、先看目标再决定（已存在就 `utimensat` 刷新、不做屏障）、两次 `apfs::set_file_meta`（0600 与 0444）、两个 `F_BARRIERFSYNC`、`RENAME_EXCL` 与 `EEXIST` 分支；`put_blob_rooted`（`attrs_of` 先看种类：目录与特殊文件在克隆之前拒绝，符号链接直接存目标；`clone_from_rooted(…, CloneKind::File)` 克隆进 tmp，检查之后被换掉的由 apfs 在克隆之前拒绝；`test-seams` 同时打开 `strata-apfs/test-seams`）；§5.4 的按文件工作（有登记行才比长度）、受信任 get（把 dst 的句柄交给 `apfs::set_file_meta`：清标志、0644、mtime 为当前时刻，被拒绝或中途失败就是 `Unknown`（`partial`））、`get_blob_rooted`（`clone_file_rooted` 传 `None`，再把 `open_rooted_file` 的句柄交给同一个 `set_file_meta`，打不开或被拒绝就是 `Unknown`（`partial`））、read 的上限、verify 的重算
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-store --features test-seams --test blob`
@@ -1873,15 +1927,15 @@ git commit -m "feat(store): base generations with their manifests"
 
 **Interfaces:**
 - Consumes: `strata_types::{SessionManifest, WorkspaceState, SessionId, RepoPath, CommitOid, BaseGen}`；`apfs::{open_rooted, full_fsync, rename_rooted, RenameMode}` 与 apfs 第 2 轮的 `make_removable`（§2 的上游要求）；Task 3 的提议读；Task 4 的 `record_base_gen`
-- Produces: `Store::create_session`、`Store::set_session_phase`、`Store::set_lifecycle`、`Store::record_seeds`、`Store::begin_move`、`Store::set_move_phase`、`Store::set_move_state`、`Store::finish_move`、`Store::fail_move`、`Store::set_old_tree`、`Store::session`、`Store::sessions`、`Store::move_intents`、`Store::open_move_intents`、`Store::retire_dir`；`Lifecycle`、`Health`、`SessionRecord`、`WorkspaceRecord`、`SeedRow`、`MoveIntent`、`MoveState`；`Seam::PauseBeforeCommit` 与 `Store::wait_paused`、`Store::release`
+- Produces: `Store::create_session`、`Store::set_session_phase`、`Store::set_lifecycle`、`Store::record_seeds`、`Store::begin_move`、`Store::set_move_phase`、`Store::set_move_state`、`Store::finish_move`、`Store::fail_move`、`Store::resolve_move`、`Store::set_old_tree`、`Store::session`、`Store::sessions`、`Store::move_intents`、`Store::open_move_intents`、`Store::retire_dir`；`Lifecycle`、`Health`、`SessionRecord`、`WorkspaceRecord`、`SeedRow`、`MoveIntent`、`MoveState`；`Seam::PauseBeforeCommit` 与 `Store::wait_paused`、`Store::release`
 
-- [ ] **Step 1: 写失败的测试**：`session_manifest_roundtrip`、`lifecycle_moves_forward_by_compare_and_swap`、`unknown_session_keeps_its_scene`、`seeds_are_per_path_rows_written_once`、`move_intent_generation_never_reused`、`finish_move_swaps_base_head_and_generation_together`、`failed_move_marks_workspace_unknown`、`open_proposals_skip_removed_sessions`、`retire_dir_moves_only_dirs_without_live_rows`、`retire_dir_takes_dirs_of_removed_sessions`、`retire_dir_takes_swapped_out_trees`、`retire_dir_takes_superseded_admin_dirs`、`retire_dir_takes_base_staging`
+- [ ] **Step 1: 写失败的测试**：`session_manifest_roundtrip`、`lifecycle_moves_forward_by_compare_and_swap`、`unknown_session_keeps_its_scene`、`seeds_are_per_path_rows_written_once`、`move_intent_generation_never_reused`、`finish_move_swaps_base_head_and_generation_together`、`failed_move_marks_workspace_unknown`、`move_conflicts_are_recorded_at_swapping`、`resolve_move_abandon_returns_health_to_ok`、`resolve_move_accept_keeps_the_conflicts_recorded_at_swapping`、`resolve_move_guards_refuse_and_write_nothing`、`open_proposals_skip_removed_sessions`、`retire_dir_moves_only_dirs_without_live_rows`、`retire_dir_takes_dirs_of_removed_sessions`、`retire_dir_takes_swapped_out_trees`、`retire_dir_takes_superseded_admin_dirs`、`retire_dir_takes_base_staging`
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-store --features test-seams --test sessions`
 Expected: FAIL（这些函数还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.7 的会话事务、比较并交换的生命周期与意图（区分不存在与不是 from）、按路径的种子行、意图代数的分配、`finish_move` 一个事务换掉 base、head、代数与冲突、`fail_move` 记下现场；`proposals(_, true)` 的会话过滤；§5.5 的 `retire_dir`（七种路径：前六种按行核对，第 7 种基线暂存只看形状；经 `apfs::open_rooted` 打开，符号链接给 `InvalidInput`、不是目录给 `NotDirectory`；把这个句柄交给 `apfs::make_removable`；`apfs::rename_rooted(…, RenameMode::Excl)` 进 trash，只对 trash 一侧 `apfs::full_fsync`）；写事务助手里提交之前的停住点
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.7 的会话事务、比较并交换的生命周期与意图（区分不存在与不是 from）、按路径的种子行、意图代数的分配、进入 Swapping 时把冲突原样记在意图行上、`finish_move` 核对冲突并在一个事务里换掉 base、head、代数与冲突、`fail_move` 记下现场、`resolve_move` 的守卫与两条边（先改工作区、再改意图，现场留作历史）；`proposals(_, true)` 的会话过滤；§5.5 的 `retire_dir`（七种路径：前六种按行核对，第 7 种基线暂存只看形状；经 `apfs::open_rooted` 打开，符号链接给 `InvalidInput`、不是目录给 `NotDirectory`；把这个句柄交给 `apfs::make_removable`；`apfs::rename_rooted(…, RenameMode::Excl)` 进 trash，只对 trash 一侧 `apfs::full_fsync`）；写事务助手里提交之前的停住点
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-store --features test-seams --test sessions`
@@ -1905,13 +1959,13 @@ git commit -m "feat(store): sessions, workspaces, move intents and retire_dir"
 - Consumes: `strata_types::{Checkpoint, CheckpointId, CheckpointReason, OverlayEntry, EntryKind, BaseGen}`；Task 2 的 blob 文件布局与 L3；Task 5 的会话与工作区行
 - Produces: `Store::record_checkpoint`、`Store::checkpoint`、`Store::latest_checkpoint`、`Store::checkpoints`、`CheckpointInfo`；`Seam::AfterCheckpointRow`
 
-- [ ] **Step 1: 写失败的测试**：`record_checkpoint_roundtrip_keeps_base`、`checkpoint_ids_monotone_per_session`、`failed_record_consumes_no_id`、`checkpoint_id_refuses_past_i64_max`、`ids_survive_reopen`、`negative_id_read_back_is_corrupt`、`tool_call_checkpoint_recorded_once`、`checkpoint_unit_is_one_transaction`、`record_checkpoint_failure_rolls_back_whole_unit`、`late_source_failure_writes_no_checkpoint`、`checkpoint_refuses_reference_to_missing_blob`、`interleaved_sessions_do_not_see_failed_checkpoints`、`checkpoint_refused_for_untracked_or_removed`、`same_path_type_change_is_one_entry`
+- [ ] **Step 1: 写失败的测试**：`record_checkpoint_roundtrip_keeps_base`、`checkpoint_ids_monotone_per_session`、`failed_record_consumes_no_id`、`checkpoint_id_refuses_past_i64_max`、`ids_survive_reopen`、`negative_id_read_back_is_corrupt`、`checkpoint_read_with_missing_entries_is_corrupt`、`tool_call_checkpoint_recorded_once`、`checkpoint_unit_is_one_transaction`、`record_checkpoint_failure_rolls_back_whole_unit`、`late_source_failure_writes_no_checkpoint`、`checkpoint_refuses_reference_to_missing_blob`、`interleaved_sessions_do_not_see_failed_checkpoints`、`checkpoint_refused_for_untracked_or_removed`、`same_path_type_change_is_one_entry`
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-store --features test-seams --test checkpoints`
 Expected: FAIL（`record_checkpoint` 还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.8 的十步：纯校验（含同一路径只有一条）、L3 共享锁下在 L2 之外 `lstat` 被引用的 blob、`BEGIN IMMEDIATE` 与 `Busy`、事务内核对（含基线属于这个 repo）、工具调用的幂等、先到者为准的 blob 登记、`MAX + 1` 与 `TooLarge`、批量插入；读回时的 `TryFrom` 与负 id 检查
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.8 的十步：纯校验（含同一路径只有一条）、L3 共享锁下在 L2 之外 `lstat` 被引用的 blob、`BEGIN IMMEDIATE` 与 `Busy`、事务内核对（含基线属于这个 repo）、工具调用的幂等、先到者为准的 blob 登记、`MAX + 1` 与 `TooLarge`、批量插入；读回时的 `TryFrom`、负 id 检查与条目行数的核对（`entries_mismatch`）
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-store --features test-seams --test checkpoints`
@@ -1940,7 +1994,7 @@ git commit -m "feat(store): atomic checkpoint records with store-assigned ids"
 Run: `cargo test -p strata-store --features test-seams --test records`
 Expected: FAIL（这些函数还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.9：发布行与批次路径原样照抄、`MAX + 1` 的发布号、阶段的比较并交换、ref 审计的 op 与 outcome 配对、`Action` 的 JSON
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.9：批次点名的会话的核对（不存在或已 Removed → `NoSuchSession`）、发布行与批次路径原样照抄、`MAX + 1` 的发布号、阶段的比较并交换、ref 审计的 op 与 outcome 配对、`Action` 的 JSON
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-store --features test-seams --test records`
@@ -1991,16 +2045,16 @@ git commit -m "feat(store): busy, reader isolation, crash durability and poisoni
 - Test: `crates/strata-store/tests/gc.rs`
 
 **Interfaces:**
-- Consumes: `apfs::{open_rooted, attrs_of, Attrs, list_dir, full_fsync, rename_rooted, RenameMode, remove_tree_rooted, RemoveReport, remove_rooted, RemoveKind}` 与 apfs 第 2 轮的 `make_removable`、`RemoveReport::is_complete`（§2 的上游要求）；Task 2 的 `verify_blob` 与 L3；Task 3–7 的全部表
-- Produces: `Store::gc`、`Store::gc_repo`、`Store::last_gc_report`、`GcReport`；L3 的独占一侧；`strata_gc_active` 的开关；`Seam::{PauseInPut, GcStopAfterRetire, GcUnlinkFails, AgeFloor, ScrubBudget, RetirePrepFails, GcBatchRows, GcPauseBeforeRows}`
+- Consumes: `apfs::{open_rooted, attrs_of, Attrs, list_dir, full_fsync, rename_rooted, RenameMode, remove_tree_rooted, RemoveReport, remove_rooted, RemoveKind}` 与 apfs 第 2 轮的 `make_removable`、`RemoveReport::is_complete` 以及接受任何种类条目的 `remove_tree_rooted`（§2 的上游要求）；Task 2 的 `verify_blob` 与 L3；Task 3–7 的全部表
+- Produces: `Store::gc`、`Store::gc_repo`、`Store::last_gc_report`、`GcReport`；L3 的独占一侧；`strata_gc_active` 的开关；`Seam::{PauseInPut, GcStopAfterRetire, GcUnlinkFails, AgeFloor, ScrubBudget, RetirePrepFails, GcBatchRows, GcPauseBeforeRows, GcPauseAfterBatch}`
 
-- [ ] **Step 1: 写失败的测试**：`gc_keeps_referenced_generations`、`gc_keeps_base_of_every_retained_checkpoint`、`gc_reclaims_removed_sessions_after_keep`、`gc_keeps_newest_base_per_repo`、`gc_keeps_pending_proposal_deps`、`gc_reclaims_closed_attempts_keeps_failed_scenes`、`gc_never_deletes_young_blobs`、`gc_spares_in_flight_put_with_old_mtime`、`gc_spares_freshly_renamed_generation_dir`、`gc_skips_paths_of_open_intents_and_attempts`、`retiring_a_0555_root_reparents_it`、`retiring_a_uchg_root_clears_the_flag_first`、`gc_rechecks_pins_written_after_its_snapshot`、`gc_retires_stale_base_staging`、`gc_sweeps_stale_temp_entries`、`gc_deletes_supersede_chains_across_batches`、`symlink_put_never_retakes_the_blob_gate`、`gc_keeps_open_publish_scenes`、`gc_retires_dirs_through_trash_and_resumes`、`gc_touches_nothing_outside_its_areas`、`gc_never_reclaims_live_session_with_missing_dirs`、`gc_scrub_reports_corrupt_and_resumes_from_cursor`、`corrupt_blob_is_reported_never_overwritten`、`gc_report_persisted_for_status`
+- [ ] **Step 1: 写失败的测试**：`gc_keeps_referenced_generations`、`gc_keeps_base_of_every_retained_checkpoint`、`gc_reclaims_removed_sessions_after_keep`、`gc_keeps_newest_base_per_repo`、`gc_keeps_pending_proposal_deps`、`gc_reclaims_closed_attempts_keeps_failed_scenes`、`gc_never_deletes_young_blobs`、`gc_spares_in_flight_put_with_old_mtime`、`gc_spares_freshly_renamed_generation_dir`、`gc_skips_paths_of_open_intents_and_attempts`、`retiring_a_0555_root_reparents_it`、`retiring_a_uchg_root_clears_the_flag_first`、`gc_rechecks_pins_written_after_its_snapshot`、`gc_refuses_publish_pins_between_batches`、`gc_retires_stale_base_staging`、`gc_sweeps_stale_temp_entries`、`gc_deletes_supersede_chains_across_batches`、`symlink_put_never_retakes_the_blob_gate`、`gc_keeps_open_publish_scenes`、`gc_retires_dirs_through_trash_and_resumes`、`gc_touches_nothing_outside_its_areas`、`gc_never_reclaims_live_session_with_missing_dirs`、`gc_scrub_reports_corrupt_and_resumes_from_cursor`、`corrupt_blob_is_reported_never_overwritten`、`gc_report_persisted_for_status`
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-store --features test-seams --test gc`
 Expected: FAIL（`gc` 还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.11：三条守卫（有主的路径、按 mtime 与 ctime 中较晚者的年龄、有引用的 generation）；`gc` 的保留集（R、提议的闭包、尝试、gc 记录）与先子后父的分批删除，每批在自己的写事务里重新核对钉子（被钉住的行不删、目录不挪），提议按 `superseded_by` 的引用顺序删、从不按号；blob 与 tmp 两段持 L3 独占，tmp 的文件先清标志再删、目录经 `apfs::remove_tree_rooted` 删；trash 的条目按种类逐个删（目录经 `apfs::remove_tree_rooted`，其余经 `apfs::remove_rooted`），没删干净或被拒绝的进 `stuck`、下一轮再删；带游标的完整性扫描；`gc_repo` 的保留集，挪目录之前先准备根目录（`apfs::make_removable`，准备失败不删行、记进 `stuck`），再删行、再经 `apfs::rename_rooted` 挪目录，经 `apfs::list_dir` 按键解析的活路径清扫（含过了年龄下限的基线暂存，`.staging` 本身不删），变空的目录经 `apfs::remove_rooted` 删；`gc_runs` 的追加（含 `partial`）；put 里临时克隆之后的停住点、gc 删行之前的停住点，以及符号链接那一支不再取 L3 的验证
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.11：三条守卫（有主的路径、按 mtime 与 ctime 中较晚者的年龄、有引用的 generation）；`gc` 的保留集（R、提议的闭包、尝试、gc 记录）与先子后父的分批删除，每批在自己的写事务里重新核对钉子（被钉住的行不删、目录不挪），提议按 `superseded_by` 的引用顺序删、从不按号；blob 与 tmp 两段持 L3 独占；tmp 与 trash 的每个条目都经 `apfs::remove_tree_rooted` 删，不论种类，store 不按路径改标志，没删干净或被拒绝的进 `stuck`、下一轮再删；带游标的完整性扫描；`gc_repo` 的保留集，挪目录之前先准备根目录（`apfs::make_removable`，准备失败不删行、记进 `stuck`），再删行、再经 `apfs::rename_rooted` 挪目录，经 `apfs::list_dir` 按键解析的活路径清扫（含过了年龄下限的基线暂存，`.staging` 本身不删），变空的目录经 `apfs::remove_rooted` 删；`gc_runs` 的追加（含 `partial`）；put 里临时克隆之后的停住点、gc 删行之前与两批之间的停住点，以及符号链接那一支不再取 L3 的验证
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-store --features test-seams --test gc`，再跑一遍 `cargo test -p strata-store --features test-seams` 确认全部测试文件都绿
@@ -2038,10 +2092,12 @@ design.md 里标 [交给构建者]、落在本模块的事项：
 | 会话行的阶段（§3） | `sessions.phase` 文本列，只在 Creating、Removing 时可写 | 增补 4 只给意图行定了 phase；new 与 rm 也是多步操作，recover 要知道它们停在哪一步 | 2026-10-22；待 session.md 修订轮确认 |
 | 种子何时可写（§3、§5.7） | 只在会话为 Creating 时，每个路径只写一次 | 种子只在 new 时拷进来 | 2026-10-22 |
 | 会话的现场（§3） | 离开 Unknown 之后 `scene` 作为历史留着 | 现场是 status 与人排查的依据，覆盖掉就没了 | 2026-10-22 |
-| 工作区的健康（§3、§4.3） | 只能 Ok → Unknown；Unknown 的工作区不再移动，随会话一起删除 | 增补 4 只定了 Unknown 加现场；回到 Ok 需要一个 store 无法核实的"现场已修好" | 2026-10-22 |
-| 意图的状态（§3、§4.3） | `MoveState`：Preparing、Swapping、Done、Refused、Abandoned、Unknown；Preparing→Swapping、Refused、Abandoned，Swapping→Done、Unknown | 增补 4 只定了"意图行在、关闭不删"与 refused、abandoned 两个终态；session.md 采用或在它的 §2 列出要改的 | 2026-10-22；待 session.md 修订轮确认 |
+| 意图的状态（§3、§4.3） | `MoveState`：Preparing、Swapping、Done、Refused、Abandoned、Unknown；Preparing→Swapping、Refused、Abandoned，Swapping→Done、Unknown；Unknown→Done、Abandoned 只经 `resolve_move`（module-rulings 的"Resolving a failed move"） | 增补 4 只定了"意图行在、关闭不删"与 refused、abandoned 两个终态；session.md 采用或在它的 §2 列出要改的 | 2026-10-22；待 session.md 修订轮确认 |
 | 意图的暂存放在哪（§3、§5.7） | `staging` 与 `old_tree` 都必须是 `<root>/sessions/<id>/<name>`：`<name>` 是一个组件，不是该会话任何工作区的目录名 | 名字归 session；这样它们不会落进工作区或 store 的区域，`retire_dir` 的第 5 行总能拿走它们 | 2026-10-22；待 session.md 修订轮确认 |
-| 意图不引用基线（§4.3） | `move_intents` 只记 `to_tree`、`to_deps` 两列，不是外键；没结束的意图由 gc 的保留集钉住目标 | 结束了的意图是历史，不该把基线钉到会话被回收为止 | 2026-10-22 |
+| 意图上的冲突怎样写（§3、§5.7） | `set_move_state` 进入 Swapping 时带 `conflicts`（别的边不能带），原样写进意图行；不另开方法 | session.md 的 D46 把"加参数还是另开方法"交给 store；同 `set_lifecycle` 的 scene，一次比较并交换就把状态与冲突一起写下 | 2026-10-22 |
+| `finish_move` 的冲突（§3、§5.7） | 保留 `conflicts` 参数，它必须与意图行上的那份相同（同样的路径、同样的顺序），否则 `InvalidInput`（`conflicts_mismatch`）；写进工作区的是意图行上的那份 | session.md @cec336b 照这个签名调用，两次传的是同一份 `rebase` 结果；Accept 用的是意图行上的那份，不核对的话两条路记下的冲突可能不同 | 2026-10-22 |
+| `resolve_move` 的时刻（§3、§5.7） | 意图离开 Unknown 时 `ended_ns` 改成 `at` | 同 `set_publish_phase` 的 Unknown → Done：每次转换把 `at` 写进 `ended_ns`；失败时的情形留在工作区的现场里 | 2026-10-22 |
+| 意图不引用基线（§4.3） | `move_intents` 只记 `to_tree`、`to_deps` 两列，不是外键；Preparing、Swapping、Unknown 的意图由 gc 的保留集钉住目标 | 结束了的意图是历史，不该把基线钉到会话被回收为止；Unknown 的意图还要留给 `resolve_move` 的 Accept | 2026-10-22 |
 | 基线属于同一个 repo（§4.3） | 复合外键 `(repo, base_gen)` 加写之前的核对，两者都做 | 外键兜底；核对给出能区分的 `InvalidInput` | 2026-10-22 |
 | 发布阶段的转换（§3） | Running→Done、Running→Unknown、Unknown→Done | 与阶段词汇一起暂定（增补 4）；publish.md 采用或在它的 §2 列出要改的 | 2026-10-22；待 publish.md（T10）与 T15 |
 | ref 审计的操作与结果（§3） | `RefOp`：UpdateRef、Push；`RefOutcome`：Applied、HeadMoved（UpdateRef），Pushed、Refused、Unknown（Push，对应 `PushOutcome`） | 审计要区分本地链的比较并交换与远端推送 | 2026-10-22 |
@@ -2059,7 +2115,7 @@ design.md 里标 [交给构建者]、落在本模块的事项：
 | 只读打开需要恢复（§5.2） | `ReadOnly`（`recovery_needed`） | 只读连接做不了 WAL 恢复，先启动 daemon | 2026-10-22 |
 | apfs 调用的根（§5.2） | `open` 取一次 `<root>` 的 realpath，作为 store 在根之下的 apfs 调用的 `root`；路径的拼接与 `retire_dir` 的前缀核对仍用配置里的 root | apfs 以 `O_NOFOLLOW` 打开根的最后一级，`[paths] root` 本身是符号链接时这些调用一律 `NotDirectory` | 2026-10-22 |
 | `put_blob_rooted` 的种类判断（§5.3） | 先 `apfs::attrs_of` 看种类：目录与特殊文件在克隆之前拒绝；符号链接存 `attrs_of` 读出的目标，不克隆；之后才被换掉的，由 `clone_from_rooted` 的 `CloneKind::File` 在克隆之前拒绝 | `clone_from_rooted` 以不跟随的方式打开源，打不开符号链接本身；`attrs_of` 经同样钉住的上级读出链接的目标，也不出根；目录与特殊文件不必再开一次 | 2026-10-22 |
-| get 出来的文件（§5.4） | 在 dst 的句柄上先清 BSD 标志（`UF_COMPRESSED` 除外），再 mode 0644，atime 与 mtime 为当前时刻；`get_blob` 与 `get_blob_rooted` 一样 | 像 git checkout 出来的文件；旧 mtime 会骗过增量构建；克隆带来的 `uchg` 会让 `fchmod` 得到 `EPERM`（2026-10-22 实测） | 2026-10-22 |
+| get 出来的文件（§5.4） | 在 dst 的句柄上调 `apfs::set_file_meta`：先核对是普通文件且 `st_nlink` 为 1（不是就什么都不改，store 返回 `Unknown`），再清 BSD 标志（`UF_COMPRESSED` 除外）、mode 0644、mtime 为当前时刻（atime 不动）；`get_blob` 与 `get_blob_rooted` 一样 | 像 git checkout 出来的文件；旧 mtime 会骗过增量构建；克隆带来的 `uchg` 会让改 mode 得到 `EPERM`（2026-10-22 实测）；句柄上的改动作用在 inode 上，克隆之后 dst 可能已被换成根之外文件的硬链接（2026-10-22 实测，module-rulings 的"Metadata changes through a handle go through apfs::set_file_meta"） | 2026-10-22 |
 | `retire_dir` 接受的路径（§5.5） | §5.5 表里的七行。前六行按行核对，第 7 行（基线暂存，module-rulings 的"Base generations are built outside the lock"）只看形状。前六行：会话根与 `sessions/.repos/<session-id>` 在 Removing、Removed 或已没有行时；换下来的旧树、暂存、旧代与没换入的管理目录只在会话 Active 时；被 gc 删掉的尝试的暂存也可拿走 | 前六行就是 session 与 deps 在增补 2、3 之下会拿走的全部目录，第 7 行是锁外建基线留下的暂存；被 gc 回收之后剩下的目录也要能拿走 | 2026-10-22 |
 | `retire_dir` 的持久（§5.5） | 改名之后只对 trash 目录 `F_FULLFSYNC`，源父目录不同步；`gc_repo` 挪目录同样 | 增补 3"Durability"：要扛住断电的目录改名用 F_FULLFSYNC，调用方之后提交的行不会比改名先落盘。源父目录那一侧保证的是"原路径上已经没有它"，store 用不着：掉电之后目录在原路径或在 trash 都合法（§6.3） | 2026-10-22 |
 | gc 守卫 (a) 的范围（§5.11） | 除非终态的意图与尝试外，Unknown 的意图与 Failed 的尝试点名的路径也不碰 | 它们是现场（不变量 6） | 2026-10-22 |
