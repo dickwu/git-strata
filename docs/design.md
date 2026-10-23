@@ -77,7 +77,7 @@
 
 | 约束 | 事实 | 对设计的影响 |
 | --- | --- | --- |
-| 平台 | macOS 26+（本机 Darwin 27.0.1），Apple Silicon，APFS | 可用 `clonefile(2)`、`getattrlistbulk(2)`、`ATTR_CMN_GEN_COUNT`、FSEvents、系统 libsqlite3 |
+| 平台 | 声明的下限是 macOS 26+；Apple Silicon，APFS。模块文档里的 APFS 行为只在本机 macOS 27.0.1（Darwin 27）上量过，macOS 26 没有测 | 可用 `clonefile(2)`、`getattrlistbulk(2)`、`ATTR_CMN_GEN_COUNT`、FSEvents、系统 libsqlite3。把下限抬到 27 才能用 `fchflagsat` 关掉「不可读又带 uchg」那个角；26 未测，不把 27 的测量写成 26 的保证 |
 | 兄弟布局 | `admin/front/tool` 的 dev-link 用 `../quick-start`、`../release-notes`、`../node_modules` 等相对路径同步兄弟目录的 `@inter/*` 库 | 一个会话必须克隆**整套兄弟布局**，不是只克隆要改的仓库 |
 | symlink 陷阱 | Turbopack 拒绝 symlink 的 `node_modules` | 依赖共享用 `clonefile`（CoW 克隆），**不用 symlink** |
 | 一推就上线 | staff-api 推 `master` = 生产部署；front 推 `main` = 自动部署；任何分支推 staff-api 都会触发重建 | 发布到这些仓库需显式确认；推送目标可配置 |
@@ -193,10 +193,10 @@ Claude Code 会话 B ──┤  strata CLI (JSON)   │
 ### 6.5 发布 `strata publish`
 
 1. 组发布组：`--from <session>:<path>…` 可多次；或交互式从 `status` 选。
-2. 对每个涉及的 repo：取目标分支的最新 tree OID（fetch），作为合并基线 B。
+2. 对每个涉及的 repo：fetch 之后按 §6.7 取合并基线 B。不是「目标分支的最新 tree」。链被回退或分叉时，这一步在任何 commit 之前拒绝。
 3. 构建 staging 树：对每个批次路径，三方合并（基线 = 该会话钉住的基线上该文件的版本，两边 = 会话当前版本与 B 的版本）；多个会话碰同一文件时按会话顺序依次合并。hunk 不重叠自动合；冲突则**整个发布组停下**，列出冲突文件，`strata publish --assign <file> <session>` 指定解决者 [用户]；`.lww` 命中的文件最新 checkpoint 胜出。
 4. 在 staging 克隆里跑该 repo 的检查命令（例如 tool：`tsc --noEmit --incremental false` + `bun run lint-antd-deprecated`；staff-api：`php-cs-fixer check`（即 `cs-fix --dry-run --diff`）+ `composer analyse`）；失败则停，不提交。**检查一律只读**：会改文件的命令（`cs-fix`、`prettier --write`）是配置错误，strata 在跑之前就拒绝；格式化是会话自己的事（它有编辑后自动格式化的钩子）。这样"commit 内容 = 某个 checkpoint 的内容"永远成立，发布后 rebase 不会把格式化过的文件标成冲突。[我的决定] [检查命令的默认值交给构建者从各仓库 CLAUDE.md 抄]
-5. 从 staging 树做 commit（只含批次路径），接到该目标的**发布链**上（§6.7）；按配置推送；一推上线的 repo 没有通过人类确认（§6.9）就在推送前停下。
+5. 从 staging 树做 commit（只含批次路径），接到该目标的**发布链**上，链与锚点同一次 ref 事务（§6.7）。这次要推、且仓库要确认时，§6.9 的凭据在 commit 之前就要有，不是提交之后再问。按配置推送。推送成功与锚点前移是同一次调用，那次调用提交之前推送没有完成。
 6. 记录发布：哪些会话的哪些 checkpoint 的哪些路径进了哪个 commit。
 7. **发布后 rebase**：对每个参与的会话，新基线 = 推送后的 tree OID；重算 overlay（已发布的路径从 overlay 消失；未发布的路径对新基线做三方投影；冲突标出但不改动工作区文件，等会话自己处理）；把工作区目录里已发布的文件替换为新基线版本只在它们与会话当前内容一致时进行（否则保留会话版本并标出）。
 
@@ -204,18 +204,24 @@ Claude Code 会话 B ──┤  strata CLI (JSON)   │
 
 拒绝条件：有未发布改动且没有 `--discard`；有正在跑的进程打开其目录。删除前最后一次 checkpoint 保留 N 天 [交给构建者]。
 
-### 6.7 发布目标的语义 [我的决定]
+### 6.7 发布目标的语义 [我的决定；2026-10-23 按用户要求写入]
 
-- 发布目标 = (repo, 分支名, push, confirm)。strata 在该 repo 的 common dir 里维护一条自己的 ref：`refs/strata/publish/<分支>`，叫**发布链**。它从不碰 `refs/heads/*`（主 checkout 的分支），不变量 2 保持。
-- 合并基线 B：发布链存在且领先 `origin/<分支>` 时取链顶；否则取 `origin/<分支>`。这样 push=false 时连续两次发布不会把上一次的改动当成"对方撤销"而回退。
-- push=true：发布后立刻把链推到 `origin/<分支>`；push=false：留在本地，之后 `strata push <repo>` 再推。推送成功后链与 origin 一致。
-- 新会话钉基线时，链领先 origin 就钉链顶（配置 `pin_unpushed`，默认 true）；否则新会话看不到已发布未推送的改动，下一次发布必撞。
-- 参与会话发布后的新基线 = 链顶的 tree。
-- staff-api 这种"推任何分支都重建生产"的仓库，预期配置是 push=false + 人工 `strata push`。
+- 发布目标 = (repo, 分支名, push, confirm)。strata 在该 repo 的 common dir 里维护两条自己的 ref，从不碰 `refs/heads/*`（不变量 2）：
+  - 发布链 `refs/strata/publish/<分支>`（下面叫 c）；
+  - 锚点 `refs/strata/anchor/<分支>`（下面叫 a）：链上还没推送的那一段所坐的 origin commit。
+- 链与锚点在同一次 ref 事务里改。一次发布以 origin 的 tip 为合并基线时 a := 这个 tip。记录推送成功的那一次调用，同时比较并交换远端跟踪 ref 和锚点，都设成推上去的 commit。那次调用提交之前，推送没有完成，也不把这个窗口读成「链领先」。
+- 领先只有一个判定，归 deps，publish 不另写。o = `origin/<分支>`。链领先只当 c ≠ o、o 是 c 的祖先、并且 a 是 o 的祖先。合并基线 B：只有领先时取链顶，否则取 o。这样 push=false 时连续两次发布不会把上一次的改动当成「对方撤销」而回退，也不会把被人强推拿掉的提交再推上去。
+- 锚点跟着 origin 沿链前移。判定为 Equal、Leads、Behind 或 Diverged 时，下一次在 repo 写锁里的事务把 a 设成 `merge_base(o, c)`，只要那个提交是 a 的后代且不等于 a。Equal 与 Leads 时它是 o，Behind 时是 c，Diverged 时是分叉点。Absent 与 Rewound 不前移。Behind 时不把 a 设成 o。
+- 链被回退（a 不在 origin 上）或分叉：新会话钉 o；publish 在任何 commit 之前拒绝（`chain_rewound` / `chain_diverged`），直到人用显式命令处理。接受 origin 时，重放的是这次前移之后的 a..c，不把 origin 已经有的提交再放一遍，也不把被人拿掉的提交推回去。恢复只在 o 是 c 的祖先时是快进，从不强推。
+- 有依赖目录的仓库必须 `publish.branch` 等于默认分支，并且 `pin_unpushed = true`。否则一条待确认的依赖变更会横跨两条线。配置加载时拒绝这个组合。没有依赖目录的仓库不受这条约束。
+- push=true：发布后立刻把链推到 `origin/<分支>`。push=false：留在本地，之后 `strata push <repo>` 再推。
+- 新会话钉基线：`pin_unpushed` 为真、发布分支等于默认分支、并且链领先时钉链顶；否则钉 o。
+- 参与会话发布后的新基线 = 这次发布产生的 commit 的 tree。依赖集必须跟着变时，不自动换，按 §6.4 等 `deps approve`。
+- staff-api 这种「推任何分支都重建生产」的仓库，预期配置仍是 push=false + 人工 `strata push`。它没有依赖目录，所以不受默认分支那条约束。
 
 ### 6.8 工作区里的 git [我的决定]
 
-- 工作区 `.git` 接到主 checkout 的 object store，HEAD **detached** 在钉住的基线，不设 upstream。
+- 工作区不接在主 checkout 的 common dir 上。每个会话、每个 repo 有自己的影子仓库；工作区的 `.git` 指向影子仓库里的管理目录。HEAD **detached** 在钉住的基线，不设 upstream。这样 agent 的 git 写不到主 checkout 的 ref、钩子和 config。
 - 允许本地 `git add/commit/stash`：overlay 是整文件相对钉住基线的差异，会话内的 commit 不会让差异消失（tgrep 的规则）；暂存与否对 overlay 无意义；"未跟踪且合格" = 没被 gitignore。
 - strata 装一个 `pre-push` 钩子：没有 `STRATA_PUBLISH=1` 就拒绝，agent 习惯性的 `git push` 推不出去；发布只经 strata。
 - tool 的 dev-link 每 30 秒对兄弟库 `git fetch` + `pull --ff-only`：在 detached 的兄弟库上 `pull --ff-only` 直接报"不在分支上"而不做任何事，无害——写进测试矩阵核实；`fetch` 只动主 checkout 的 FETCH_HEAD，与现有的"fetch 循环打断同伴 pull"陷阱同源，strata 不替 dev-link 解决。
@@ -244,10 +250,10 @@ agent 和用户是同一个 uid，且常以 bypass 权限运行，所以 flag �
 ## 8. 性能与稳定性设计
 
 - 热路径只读元数据：checkpoint = O(改动文件数)；全量对账 = 一次 `getattrlistbulk` 遍历源码树（排除依赖目录与 `.git`）。参考：tgrep 在 macOS 上对 linux 内核 96K 文件建全文索引 37 s（读全部内容 + 写 1 GB 索引）；我们不读内容。
-- 新建会话 = 若干次目录 `clonefile`，秒级；依赖 rollout = 克隆 + rename，秒级。
+- 新建会话的源码树克隆是若干次目录 `clonefile`，秒级。含大型依赖目录的克隆不按 5 秒验收：tool 的 `node_modules` 约 62 万条目，单线程约 12–19 秒，四路约 5.5 秒（2026-10-22 估算）。5 秒不是「tool + 全部兄弟库含依赖」的硬门槛。
 - 索引：共享基线索引一次建好，多会话复用；会话 overlay 增量。
 - 并发：daemon 内按 repo 一把写锁；CLI 调用可并行；同一会话的 checkpoint 串行。
-- **验收数字**（写进测试）：新建会话 < 5 s（tool + 全部兄弟库）；checkpoint 改 50 个文件 < 200 ms；全量对账 tool 源码树 < 3 s；`grep` 热查询 < 300 ms。[这些是目标，首个 spike 要实测后修正]
+- **验收数字**（写进测试）：有钩子路径的 checkpoint，改 50 个文件 < 200 ms。没有路径的工具调用（Bash）做一次温扫，或接受晚一个调用才看见；tool 上温扫约 0.20 秒，不按 200 毫秒验收。FSEvents 的 flush 不是屏障，不能靠它保证脏集合完整。全量对账 tool 源码树 < 3 s；`grep` 热查询 < 300 ms。这两个仍是目标，首个实现要实测。
 
 ---
 
@@ -275,7 +281,7 @@ agent 和用户是同一个 uid，且常以 bypass 权限运行，所以 flag �
 | LayerFS `layerfs-api` / `daemon` / `fuse` / `sandbox` / `bridge` | 117 / 166 / 8 / 28 / 25 | Sandbox、exec、daemon 控制通道、FUSE：**不保留**，在矩阵里逐条标明替代物（真实目录 / 直接跑命令 / 无需认证通道）。`fs.*` 查询接口的用例保留，映射到 `cli`。 |
 | LayerFS `sdk/js/test` | 12 文件 | 错误码词汇表（`Conflict`、`HeadMoved`、`Dirty`、`Busy`、`NoSuchPath`…）保留为 CLI 的错误码；init 拒绝规则保留。 |
 | tgrep `worktrees` / `hybrid` / `gitignore` / `git_index` / `generations` | 见 `tgrep-core/src/*/tests.rs` | 映射到 `search`、`gitio`、`overlay`：overlay 遮蔽、墓碑、改回撤销、对账、大小写不敏感、已跟踪文件永不 ignore。 |
-| 新增 | — | 兄弟布局、`clonefile` 跨卷退化、依赖 rollout 的打开文件检查、发布组三方合并、发布后 rebase、一推上线确认。 |
+| 新增 | — | 兄弟布局、`clonefile` 跨卷拒绝（不退化为复制）、依赖 rollout 的打开文件检查、发布组三方合并、发布后 rebase、一推上线确认。 |
 
 交付物：`docs/test-matrix.md`，每条原测试一行：来源、原意、目标模块、状态（保留 / 改写 / 替代 / 不保留 + 理由）。构建前完成。
 
@@ -288,7 +294,7 @@ agent 和用户是同一个 uid，且常以 bypass 权限运行，所以 flag �
 3. 一台机器一个 daemon（launchd agent），unix socket RPC。
 4. 批次按整文件路径，不按 hunk。
 5. v1 无 GUI，只有 CLI + JSON；人看的页面以后再议。
-6. 一推上线的仓库需要 `--confirm-deploy`。
+6. 一推上线的仓库要人类确认。确认是 §6.9 的 LocalAuthentication，不是 flag。要推且要确认时，凭据在 commit 之前。
 7. 保留 `.lww` 规则，默认为空。
 8. Store 走持久（WAL + checkpoint 边界 fsync），不采用 LayerFS 的 Disposable。
 9. 工作区根默认与主 checkout 同卷。
@@ -298,20 +304,22 @@ agent 和用户是同一个 uid，且常以 bypass 权限运行，所以 flag �
 13. 被 ignore 但必需的文件按每仓库"种子文件"清单从主 checkout 复制，不 checkpoint。
 14. 第一代依赖集从主 checkout 现成的目录**认领**，不冷建。
 15. 检查命令一律只读；会改文件的检查是配置错误。
-16. 发布链 `refs/strata/publish/<分支>`；合并基线取链顶；新会话默认钉链顶。
+16. 发布链 `refs/strata/publish/<分支>` 加锚点 `refs/strata/anchor/<分支>`。领先才取链顶；有依赖目录的仓库必须发到默认分支并 `pin_unpushed`。详见 §6.7。
 17. 工作区 detached、无 upstream、`pre-push` 拒绝；允许本地 commit。
 18. Store 与工作区同卷；会话 id 与 ticket 分离。
 
 ## 12. 交给构建者的决定
 
 - diff3 / 三方合并用哪个 crate；FSEvents 走 `notify` 还是直接 FSEvents API。
-- 工作区 `.git` 的接法（worktree vs gitfile 指向 common dir）。
+- 工作区 `.git` 的接法已定：每会话影子仓库，gitfile 指向影子仓库的管理目录，不接主 checkout 的 common dir（§6.8）。剩下的是 gitio 的实现细节。
 - 依赖集键是否含工具链版本；对账间隔；generation 保留期；大文件阈值。
 - 各仓库检查命令与依赖目录的默认配置（从各仓库 CLAUDE.md 抄）。
 - 封存目录的只读手段。
 - RPC 编码（JSON lines 即可）。
 
 ## 13. 待用户回答的问题
+
+2026-10-23 用户要求把当时留在阶段末的设计改动写进本文，已落在 §3、§6.5、§6.7、§6.8、§8、§11。探针目录 `/Volumes/GWD/.strata-apfs-probe-t4` 不是设计问题，不写在这里。
 
 审阅者（独立子代理，以"要照它来建"的视角读）提出 7 个问题；5 个我已在文中决定（§11 第 11–18 条），两个由用户决定（2026-10-22）：
 
