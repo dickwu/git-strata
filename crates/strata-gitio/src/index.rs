@@ -419,19 +419,21 @@ pub(crate) fn parse_full(
 // read_index
 
 /// Where a work tree's git files live.
-struct Located {
+pub(crate) struct Located {
+    /// The work tree root used for rooted reads of work-tree files.
+    pub wt_root: PathBuf,
     /// Root for rooted reads of git-dir files.
-    root: PathBuf,
+    pub root: PathBuf,
     /// The git dir relative to `root` ("" when the root is the git dir).
-    rel: String,
-    common: PathBuf,
-    gitdir: PathBuf,
+    pub rel: String,
+    pub common: PathBuf,
+    pub gitdir: PathBuf,
     /// The main repository's (human) files: read the human way.
-    human: bool,
+    pub human: bool,
 }
 
 impl Located {
-    fn file(&self, name: &str) -> String {
+    pub(crate) fn file(&self, name: &str) -> String {
         if self.rel.is_empty() { name.to_string() } else { format!("{}/{name}", self.rel) }
     }
 }
@@ -448,8 +450,12 @@ impl Git {
     /// The tracked set and `core.ignorecase` of `worktree` (§5.7).
     pub fn read_index(&self, worktree: &Path) -> Result<IndexInfo> {
         let loc = self.locate(worktree)?;
+        self.read_index_at(&loc, worktree)
+    }
+
+    pub(crate) fn read_index_at(&self, loc: &Located, worktree: &Path) -> Result<IndexInfo> {
         let mut keys: Vec<Option<FileKey>> = Vec::new();
-        let ignorecase = self.ignorecase_of(&loc, &mut keys)?;
+        let ignorecase = self.ignorecase_of(loc, &mut keys)?;
         let index_rel = loc.file("index");
         let index_at = loc.root.join(&index_rel);
         let (bytes, key) = match fsx::read_rooted(&loc.root, &index_rel).map_err(|e| unknown_from(e, &index_at))? {
@@ -477,7 +483,7 @@ impl Git {
         Ok(info)
     }
 
-    fn locate(&self, worktree: &Path) -> Result<Located> {
+    pub(crate) fn locate(&self, worktree: &Path) -> Result<Located> {
         let root: &Path = if worktree.as_os_str().as_bytes() == self.inner.root_arg.as_os_str().as_bytes() {
             &self.inner.root_real
         } else {
@@ -522,11 +528,12 @@ impl Git {
                 json!({ "reason": "foreign-worktree", "path": path_str(worktree), "common_dir": path_str(&common) }),
             ));
         }
+        let wt_root = root.to_path_buf();
         let (root, rel) = match gitdir.strip_prefix(&common) {
             Ok(r) => (common.clone(), r.to_str().ok_or_else(|| errd(Code::NotText, "git dir is not UTF-8", json!({"path": path_str(&gitdir)})))?.to_string()),
             Err(_) => (gitdir.clone(), String::new()),
         };
-        Ok(Located { root, rel, common, gitdir, human })
+        Ok(Located { wt_root, root, rel, common, gitdir, human })
     }
 
     /// Whether `common` is one of this repository's shadow repositories:
@@ -596,7 +603,7 @@ impl Git {
     }
 }
 
-fn reason_of(e: &StrataError) -> Option<&str> {
+pub(crate) fn reason_of(e: &StrataError) -> Option<&str> {
     e.detail.as_ref()?.get("reason")?.as_str()
 }
 

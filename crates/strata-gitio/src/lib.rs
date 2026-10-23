@@ -20,6 +20,7 @@ mod command;
 mod config;
 mod err;
 mod fsx;
+mod ignore;
 mod index;
 mod repo;
 mod seams;

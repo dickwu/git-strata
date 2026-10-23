@@ -202,3 +202,33 @@ pub fn detail(e: &strata_types::StrataError, key: &str) -> Option<String> {
 pub fn reason(e: &strata_types::StrataError) -> Option<String> {
     detail(e, "reason")
 }
+
+/// A hand-built shadow repository of `main` with one workspace whose index
+/// holds `tree` (what Task 7 will build for real). Returns (shadow, ws).
+pub fn fake_shadow(sb: &Sandbox, main: &Path, tag: &str, tree: &str, owned: bool) -> (PathBuf, PathBuf) {
+    let ws = sb.path(&format!("ws-{tag}"));
+    fake_shadow_at(sb, main, tag, tree, owned, &ws)
+}
+
+pub fn fake_shadow_at(sb: &Sandbox, main: &Path, tag: &str, tree: &str, owned: bool, ws: &Path) -> (PathBuf, PathBuf) {
+    let shadow = sb.path(&format!("shadow-{tag}"));
+    sb.git(&sb.root, &["init", "-q", "--bare", shadow.to_str().unwrap()]);
+    let objects = if owned { main.join(".git/objects") } else { sb.init_repo(&format!("other-{tag}")).join(".git/objects") };
+    fs::write(shadow.join("objects/info/alternates"), format!("{}\n", objects.display())).unwrap();
+    sb.git(&shadow, &["config", "strata.shadow", "true"]);
+    let admin = shadow.join("worktrees/ws1");
+    fs::create_dir_all(&admin).unwrap();
+    fs::write(admin.join("commondir"), "../..\n").unwrap();
+    fs::write(admin.join("HEAD"), format!("{}\n", sb.head(main))).unwrap();
+    fs::create_dir_all(ws).unwrap();
+    fs::write(ws.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+    fs::write(admin.join("gitdir"), format!("{}\n", ws.join(".git").display())).unwrap();
+    let o = sb
+        .cmd(&shadow)
+        .env("GIT_INDEX_FILE", admin.join("index"))
+        .args(["--git-dir=.", "read-tree", tree])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    (shadow, ws.to_path_buf())
+}

@@ -14,32 +14,6 @@ fn names(info: &strata_gitio::IndexInfo) -> Vec<String> {
     info.tracked.iter().map(|p| p.as_str().to_string()).collect()
 }
 
-/// A hand-built shadow repository of `main` with one workspace whose index
-/// holds `tree` (what Task 7 will build for real).
-fn fake_shadow(sb: &Sandbox, main: &Path, tag: &str, tree: &str, owned: bool) -> (PathBuf, PathBuf) {
-    let shadow = sb.path(&format!("shadow-{tag}"));
-    sb.git(&sb.root, &["init", "-q", "--bare", shadow.to_str().unwrap()]);
-    let objects = if owned { main.join(".git/objects") } else { sb.init_repo(&format!("other-{tag}")).join(".git/objects") };
-    fs::write(shadow.join("objects/info/alternates"), format!("{}\n", objects.display())).unwrap();
-    sb.git(&shadow, &["config", "strata.shadow", "true"]);
-    let admin = shadow.join("worktrees/ws1");
-    fs::create_dir_all(&admin).unwrap();
-    fs::write(admin.join("commondir"), "../..\n").unwrap();
-    fs::write(admin.join("HEAD"), format!("{}\n", sb.head(main))).unwrap();
-    let ws = sb.path(&format!("ws-{tag}"));
-    fs::create_dir_all(&ws).unwrap();
-    fs::write(ws.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
-    fs::write(admin.join("gitdir"), format!("{}\n", ws.join(".git").display())).unwrap();
-    let o = sb
-        .cmd(&shadow)
-        .env("GIT_INDEX_FILE", admin.join("index"))
-        .args(["--git-dir=.", "read-tree", tree])
-        .output()
-        .unwrap();
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    (shadow, ws)
-}
-
 #[test]
 fn follows_a_gitdir_pointer_file() {
     let sb = Sandbox::new();

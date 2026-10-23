@@ -97,9 +97,17 @@ pub(crate) fn read_human(p: &Path) -> Result<Option<(Vec<u8>, FileKey, PathBuf)>
         _ => return Err(errd(Code::NotFile, "not a file", json!({ "path": path_str(p) }))),
     };
     let name = name.to_str().ok_or_else(|| errd(Code::NotText, "path is not UTF-8", json!({ "path": path_str(p) })))?;
-    match read_rooted(&dir, name)? {
-        None => Ok(None),
-        Some((b, k)) => Ok(Some((b, k, real))),
+    // Not there any more (a race) → absent; anything else unreadable
+    // (a FIFO, a directory) → Unknown naming the resolved file.
+    match read_rooted(&dir, name) {
+        Ok(None) => Ok(None),
+        Ok(Some((b, k))) => Ok(Some((b, k, real))),
+        Err(e) if e.code == Code::Unknown => Err(e),
+        Err(e) => Err(errd(
+            Code::Unknown,
+            format!("{}: {}", real.display(), e.message),
+            json!({ "path": path_str(&real), "code": e.code.as_str() }),
+        )),
     }
 }
 

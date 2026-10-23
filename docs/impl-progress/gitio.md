@@ -7,7 +7,8 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 | Task | Commit | Notes |
 | --- | --- | --- |
 | 1 sanitized command, open | f96b3b9 | |
-| 2 index + config parsing, read_index | (this commit) | |
+| 2 index + config parsing, read_index | b4c257d | |
+| 3 ignore rules, is_ignored | (this commit) | |
 
 ## Builder decisions (ambiguities)
 
@@ -36,3 +37,20 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 - Shadow ownership is cached only when positive, keyed by the shadow path.
 - Tests were written alongside the implementation (not strictly run red
   first).
+- Task 3 (§9 gitignore engine): hand-written port of git's `dir.c` pattern
+  rules and `wildmatch.c` (ASCII-only case folding, as git) in
+  `src/ignore.rs`; the `ignore` crate was not used because its folding is
+  Unicode. Like git, inside `[...]` and after `\` pattern characters are
+  not folded (`[A]` does not match `a` even with ignorecase).
+- Rule-file reads: `.gitignore` absent / symlink / directory / behind a
+  non-directory → no rules; other non-regular → `Unknown` (`detail.path`).
+  Shadow `info/exclude` is read rooted and unfollowed: a non-directory
+  `info` → no rules, a symlinked one → `Unknown`. Human files (main
+  `info/exclude`, global excludes) resolve by realpath; dangling or
+  ENOTDIR → no rules. `fsx::read_human` now turns non-absent failures into
+  `Unknown` with the resolved path (used by config reads too).
+- A relative `core.excludesFile` (rare) is resolved against the common dir.
+- "逐条点查与遍历时的逐项调用结果相同": there is no walk API in gitio, so
+  `case_sensitive_repo_matches_exactly` checks repeated point queries agree.
+- The `fake_shadow` test helper moved to `tests/common` (plus
+  `fake_shadow_at` for a chosen workspace path).
