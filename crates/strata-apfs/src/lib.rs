@@ -27,6 +27,7 @@ mod volume;
 mod walk;
 mod casefold;
 mod casefold_table;
+mod watch;
 
 pub use attrs::{Attrs, FileKind, attrs_of};
 pub use clone::{clone_file, clone_tree};
@@ -48,6 +49,7 @@ pub mod seams {
 }
 pub use error::{IoSide, classify_io_error};
 pub use casefold::{case_fold_eq, case_fold_key};
+pub use watch::{WatchEvent, WatchOptions, Watcher, watch, watch_with};
 pub use walk::{Walk, WalkOptions, list_dir, walk, walk_with};
 pub use volume::{VolumeCaps, nearest_existing_ancestor, same_volume, volume_caps};
 

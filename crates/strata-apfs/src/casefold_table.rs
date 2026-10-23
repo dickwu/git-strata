@@ -1,5 +1,5 @@
 //! Generated from Unicode 17.0.0 CaseFolding.txt (status C and F; no S, no T).
-//! Regenerate with the script recorded in docs/impl-notes.md (apfs, Task 8). Do not edit.
+//! Regenerate with crates/strata-apfs/scripts/gen_casefold_table.py. Do not edit.
 
 #[allow(dead_code)] // read by the unit tests and the oracle notes
 pub(crate) const UNICODE_VERSION: (u8, u8, u8) = (17, 0, 0);
