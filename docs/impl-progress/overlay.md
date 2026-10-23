@@ -12,8 +12,8 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 | 4 membership, classification and the cold scan | done | d5ea948 |
 | 5 deterministic rename pairing | done | 56c97a8 |
 | 6 dirty set and incremental scans | done | e373444 |
-| 7 checkpoints that store only what changed | done | (this commit) |
-| 8 three-way rebase with .lww, and projection | todo | |
+| 7 checkpoints that store only what changed | done | f39c80f |
+| 8 three-way rebase with .lww, and projection | done | (this commit) |
 | 9 a restore that checkpoints first | todo | |
 | 10 restore scenes, verification, cross-base projection | todo | |
 
@@ -175,3 +175,26 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 - Task 7: the classifier may pair a deleted base file with a modified base
   path of the same content (seen with an emptied file and a deleted empty
   file); the test avoids that coincidence rather than change Task 5.
+- Task 7 wording fix: pairing a deleted base file with a path that is in M
+  (Renamed onto a modified base path) is sanctioned by §5.3 step 2; it is
+  not a classifier quirk.
+- Task 8: step 5a stores a base-side blob with
+  `put_blob_rooted(new.dir, p)` rather than `put_blob(new.dir/p)`
+  (Addendum 8's plain form): it never follows a symlinked component and
+  stores a link's target bytes. A returned id other than the manifest's,
+  or a missing / wrong-kind file, is `Corrupt`.
+- Task 8: the V5 check (overlay against its base manifest) is
+  `Overlay::check_base`, shared with restore. The base-side bytes for a
+  content merge are read with `open_rooted_file` and BLAKE3-checked
+  against the manifest; any open failure or mismatch is `Corrupt`.
+- Task 8: `MERGE_MAX_BYTES` (64 MiB) is checked on manifest sizes first,
+  then via `read_blob(.., MERGE_MAX_BYTES)` (`TooLarge` → conflict). The
+  big-file test makes only the session side exceed 64 MiB, to avoid
+  writing three large files. "project reads no file content" is not
+  tested directly; project only reads symlink targets from the store.
+- Task 8: in project, `Exists` from `mkdir_rooted` is treated like
+  `NotDirectory` (walk the ancestors; a regular file in the way is
+  `Corrupt`). On an `Excl` rename collision, `Swap` then remove the base
+  side without re-proving it: dst is the caller's own staging clone
+  (strictly under `<store>/sessions`, else `InvalidInput`
+  `dst_outside_sessions`). No fsync in project.

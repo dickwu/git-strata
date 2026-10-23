@@ -19,6 +19,8 @@ mod inbox;
 mod lww;
 mod manifest;
 mod overlay;
+mod project;
+mod rebase;
 mod rename;
 mod scan;
 mod tracker;
@@ -39,6 +41,8 @@ pub use inbox::InboxView;
 pub use lww::{LwwRules, lww_matches};
 pub use manifest::build_manifest;
 pub use overlay::*;
+pub use project::project;
+pub use rebase::{RebaseOptions, Rebased, rebase};
 pub use tracker::Tracker;
 
 /// types.md §8 `Result<T>`.

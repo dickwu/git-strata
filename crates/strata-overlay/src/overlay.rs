@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use strata_types::{BaseGen, Checkpoint, Code, EntryKind, OverlayEntry, RepoPath, StrataError};
+use strata_types::{
+    BaseGen, BaseManifest, BlobId, Checkpoint, Code, EntryKind, OverlayEntry, RepoPath, StrataError,
+};
 
 use crate::Result;
 
@@ -27,6 +29,17 @@ pub(crate) fn ancestors(p: &str) -> impl Iterator<Item = &str> {
 
 pub(crate) fn rp(s: &str) -> RepoPath {
     RepoPath::try_from(s.to_string()).expect("internal path is a valid RepoPath")
+}
+
+/// The content an entry puts at its path (`None` for `Deleted`).
+pub(crate) fn entry_blob(e: &OverlayEntry) -> Option<&BlobId> {
+    match &e.kind {
+        EntryKind::Added { blob }
+        | EntryKind::Modified { blob }
+        | EntryKind::Untracked { blob }
+        | EntryKind::Renamed { blob, .. } => Some(blob),
+        EntryKind::Deleted => None,
+    }
 }
 
 pub(crate) fn entry_from(e: &OverlayEntry) -> Option<&RepoPath> {
@@ -148,6 +161,35 @@ impl Overlay {
                     &rp(p),
                     &format!("{a} is both a file and a directory"),
                 ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Overlay {
+    /// §4.3 V5 against base manifest `m` (rebase and restore check it).
+    pub(crate) fn check_base(&self, m: &BaseManifest) -> Result<()> {
+        for e in &self.entries {
+            let at = m.entries.get(&e.path);
+            let ok = match &e.kind {
+                EntryKind::Modified { .. } | EntryKind::Deleted => at.is_some(),
+                EntryKind::Added { .. } | EntryKind::Untracked { .. } => at.is_none(),
+                EntryKind::Renamed { from, .. } => {
+                    if !m.entries.contains_key(from) {
+                        return Err(shape("V5", &e.path, "rename source not in the base"));
+                    }
+                    true
+                }
+            };
+            if !ok {
+                return Err(shape("V5", &e.path, "kind does not match the base"));
+            }
+            if let (Some(b), Some(blob)) = (at, entry_blob(e))
+                && b.blob == *blob
+                && b.mode == e.mode
+            {
+                return Err(shape("V5", &e.path, "entry equals the base"));
             }
         }
         Ok(())
