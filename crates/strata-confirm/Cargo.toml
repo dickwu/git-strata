@@ -1,0 +1,31 @@
+[package]
+name = "strata-confirm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Human confirmation for git-strata: LocalAuthentication (Touch ID or login password), single-use confirm tokens"
+
+[features]
+default = []
+# Scripted authenticator, fake clock and LocalAuthentication variants for tests.
+# Never enabled in a shipped build: git-stratad refuses to start when TEST_SEAMS is true.
+test-seams = []
+
+[dependencies]
+strata-types = { path = "../strata-types" }
+serde_json = "1"
+libc = "0.2.191"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", features = ["exception"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSError"] }
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "LAContext", "LAError", "block2"] }
+objc2-security = { version = "0.3.2", default-features = false, features = ["std", "AuthSession"] }
+block2 = "0.6"
+
+[dev-dependencies]
+static_assertions = "1"
+regex = "1"
+serde = "1"
+# Integration tests drive the seams; dependents' release builds never turn them on.
+strata-confirm = { path = ".", features = ["test-seams"] }
