@@ -14,7 +14,8 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 | 6 atomic checkpoint records with store-assigned ids | done | c06f7e2 |
 | 7 publish records and ref audit | done | 832866c |
 | 8 busy, reader isolation, crash durability and poisoning | done | 6671503 |
-| — metadata engine moved to Turso (user decision 2026-10-23) | done | (see git log) |
+| — metadata engine moved to Turso (user decision 2026-10-23) | done | d52d206 |
+| 9 gc with guards, trash and integrity scan | done | (this commit; see git log) |
 
 ## Ambiguity decisions
 
@@ -306,3 +307,34 @@ the rusqlite design):
   line (libtest prints `test name ... ` without a newline first). A
   `ChildProc` kills its child on drop so a failing parent never leaves a
   lock holder behind.
+- Task 9: gc's delete triggers are opened by the Turso gate row (gap 1):
+  each gc batch sets `strata_gc_gate.active = 1` first thing in its write
+  tx and back to 0 just before COMMIT; a rollback restores 0 by itself.
+- Task 9 guards: (a) owned paths = staging of open intents
+  (preparing/swapping/unknown) and of running/failed attempts; (b) the age
+  floor (default 3600 s, `Seam::AgeFloor`) uses the later of mtime and
+  ctime; (c) blob and tmp sweeps hold L3 exclusive, so an in-flight put
+  (even with an old source mtime) is never swept, and a symlink put does not
+  retake L3.
+- Task 9 order in `gc`: removable sessions → proposals → closed attempts →
+  old gc_runs (newest per scope kept) → unreferenced blob rows, then orphan
+  blob files → tmp → trash (age from the `<ms>-` name prefix) → scrub
+  (budget 2 GiB, resume cursor in `gc_runs.scrub_after`). `gc_repo`:
+  candidate gens/deps, make_removable on each root (failure → `stuck`, row
+  kept), delete rows with a pin re-check per batch, retire into
+  `store/trash/<ms>-<hex32>`, then sweep unregistered key-shaped dirs
+  (including stale `bases/<repo>/.staging/<hex32>`; `.staging` itself
+  stays). A stop after retire is `Unknown{outcome:"partial"}`, recorded in
+  `gc_runs` as `partial`.
+- Task 9 proposals: a decided proposal past keep is deleted unless a kept
+  proposal reaches it through `superseded_by`; a decided row that points
+  at a kept (pending) row is itself deletable. Deletion follows reference
+  order, never id order (`GcBatchRows{rows:1}` test).
+- Task 9 test adjustments: `begin_move` only accepts staging under the
+  session root, so "an intent whose staging sits under bases/" cannot be
+  built; the owned-path test uses a valid session staging instead. APFS is
+  case-insensitive, so the "uppercase hex .staging name is not swept" case
+  uses a name that does not fold onto any lowercase one. All 25 gc tests run
+  by default (no hdiutil or human needed; uchg via `lchflags`).
+- Task 9 also removed three dead helpers in errors.rs (`detail_str`,
+  `json_err`, `R`) so `cargo build` is warning-free.

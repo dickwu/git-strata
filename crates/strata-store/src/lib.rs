@@ -21,6 +21,7 @@ mod checkpoints;
 mod codec;
 mod deps;
 mod errors;
+mod gc;
 mod gens;
 mod open;
 mod records;

@@ -9,7 +9,6 @@ use serde_json::{Map, Value, json};
 use strata_apfs::{IoSide, classify_io_error};
 use strata_types::{Code, StrataError};
 
-use crate::Result;
 
 pub(crate) const NOT_WRITTEN: &str = "not_written";
 pub(crate) const UNCERTAIN: &str = "uncertain";
@@ -38,10 +37,6 @@ pub(crate) fn with_default(e: StrataError, key: &str, v: impl Into<Value>) -> St
         }
     }
     with(e, key, v)
-}
-
-pub(crate) fn detail_str<'a>(e: &'a StrataError, key: &str) -> Option<&'a str> {
-    e.detail.as_ref()?.get(key)?.as_str()
 }
 
 pub(crate) fn corrupt(reason: &str, msg: impl Into<String>) -> StrataError {
@@ -154,9 +149,3 @@ pub(crate) fn engine_kind(e: &turso::Error) -> &'static str {
 pub(crate) fn sql_read(e: turso::Error) -> StrataError {
     sql(e, "read", NOT_WRITTEN)
 }
-
-pub(crate) fn json_err(e: serde_json::Error, what: &str) -> StrataError {
-    bad_row(format!("bad JSON in {what}: {e}"))
-}
-
-pub(crate) type R<T> = Result<T>;
