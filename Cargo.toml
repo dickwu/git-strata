@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/strata-types", "crates/strata-apfs", "crates/strata-confirm", "crates/strata-gitio", "crates/strata-store"]
+members = ["crates/strata-types", "crates/strata-apfs", "crates/strata-confirm", "crates/strata-gitio", "crates/strata-store", "crates/strata-deps"]
 
 [workspace.package]
 edition = "2024"

@@ -1,0 +1,48 @@
+# strata-deps implementation progress
+
+Spec: docs/modules/deps.md. Branch `impl/deps` (worktree git-strata-wt/deps), based on impl/v1 b70b04e.
+
+## Tasks (§8)
+
+| Task | Commit message | Status |
+|---|---|---|
+| 1 | feat(deps): install-input hash and deps set id | done |
+| 2 | feat(deps): open-file scan over fds, mappings and cwd | |
+| 3 | feat(deps): sealed generations, build lock and cold install | |
+| 4 | feat(deps): adopt the main checkout's deps dirs as the first generation | |
+| 5 | feat(deps): ensure a base's deps set by reuse, adoption or cold install | |
+| 6 | feat(deps): drift as an install-input hash comparison | |
+| 7 | feat(deps): deps change proposals and main tracking | |
+| 8 | feat(deps): approval targets and rollout plans with open-file skips | |
+
+## Changes outside crates/strata-deps
+
+- Workspace `Cargo.toml`: added `crates/strata-deps` to members.
+- `strata-types` `RepoConfig::install_argv()` (additive, public): config.md §2.4's
+  splitter was private to strata-types; `DepsConfigKey::of`, `toolchain` and the
+  cold install need the split argv. It runs the same `check_argv` + `split_command`
+  as validation and maps a split failure to `InvalidInput`.
+
+## Decisions where the spec is open (safest reading)
+
+### Task 1
+- `inputs_hash` on a root that is not a directory returns `NotDirectory`; a missing
+  root returns the classified io error (never "all Absent"), so a vanished workspace
+  cannot look like "no inputs".
+- `NotFile` for special files carries `detail.path` (repo-relative) plus
+  `detail.reason` ∈ {fifo, socket, device}.
+- Ignore filtering applies to members (files, symlinks) only; directories are always
+  descended, because a tracked file under an ignored directory is never ignored
+  (gitio rule) and must count.
+- Whether the root is a git worktree is decided by the presence of `<root>/.git`
+  (file or dir); without it (exports) nothing is filtered.
+- Manifest canonicalization (§4.3) is hand-rolled: recursive sorted keys by UTF-8
+  bytes, compact output, independent of serde_json's `preserve_order`.
+- `toolchain`: the program is resolved along `env.path` only (first executable
+  regular file); cache key is (realpath, inode, size, mtime s+ns), so replacing the
+  program by rename invalidates it. `--version` runs with the install environment
+  (GIT_* removed, PATH = env.path, stdin /dev/null), 10 s limit. Errors are
+  `Unknown` with `detail.reason` = version_failed | version_timeout | version_empty
+  (empty stdout and stderr is treated as a failure rather than producing "bun ").
+- The fixed empty constants are pinned in tests: empty inputs hash
+  `71ce361f…138b`; `set_id(empty, "", "", empty config)` = `ee45535b…21b3`.
