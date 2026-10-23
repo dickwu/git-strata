@@ -134,7 +134,7 @@ fn committed_rows_are_immutable() {
     refused(c, "UPDATE deps_main SET repo = 'q'", "illegal update: deps_main");
     refused(c, "UPDATE publishes SET started_ns = 5", "illegal update: publishes");
     // REPLACE's implicit delete should hit the delete guard. ENGINE GAP
-    // (Turso 0.8.3, docs/impl-progress/store.md "Engine: Turso"): there is no
+    // (Turso 0.8.3 and 0.9.0-pre.1, docs/impl-progress/store.md "Engine: Turso"): there is no
     // recursive_triggers, so REPLACE deletes the old row without firing the
     // DELETE trigger. The store itself never issues REPLACE (only ON
     // CONFLICT DO NOTHING / DO UPDATE on mutable rows); this pins what a raw

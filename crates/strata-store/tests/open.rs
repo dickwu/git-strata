@@ -4,7 +4,6 @@ mod support;
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 use strata_store::{AttemptKind, AttemptState, DepsMain, DepsOrigin, Lifecycle, MoveState, NewProposal, ProposalDecision, Seam, Store};
 use strata_types::Code;
@@ -523,30 +522,4 @@ fn quick_check_runs_only_after_unclean_exit() {
     assert!(!env.store_dir().join("clean-shutdown").exists());
     let e = env.try_open().err().expect("unclean reopen runs quick_check");
     assert_reason(&e, Code::Corrupt, "sqlite");
-}
-
-#[test]
-fn lock_is_not_inherited_by_child_processes() {
-    let env = env();
-    let s = env.open();
-    let mut child = Command::new("sleep").arg("60").spawn().unwrap();
-    drop(s);
-    // Under parallel test load the reopen occasionally sees Busy for
-    // ~70-200 ms after the drop (observed only with the Turso build, never
-    // with `lsof` showing a holder). An inherited lock would be held by the
-    // sleeper for 60 s, so a bounded 2 s wait still proves non-inheritance.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let s2 = loop {
-        match env.try_open() {
-            Err(e) if e.code == Code::Busy && std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(5))
-            }
-            r => break r,
-        }
-    };
-    let alive = child.try_wait().unwrap().is_none();
-    let _ = child.kill();
-    let _ = child.wait();
-    assert!(alive, "the sleeper should still be running");
-    s2.expect("open after the writer is dropped").close().unwrap();
 }

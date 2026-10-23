@@ -14,7 +14,7 @@ test-seams = ["strata-apfs/test-seams"]
 [dependencies]
 strata-types = { path = "../strata-types" }
 strata-apfs = { path = "../strata-apfs" }
-turso = { version = "=0.8.3", default-features = false }
+turso = { version = "=0.9.0-pre.1", default-features = false }
 blake3 = { version = "1", features = ["mmap", "rayon"] }
 memmap2 = "0.9"
 libc = "0.2.191"

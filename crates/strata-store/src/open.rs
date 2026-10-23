@@ -202,8 +202,8 @@ fn pin_writer(c: &Connection, op: &str) -> Result<()> {
     // its pager uses the one `fullfsync` sync type for commits and
     // checkpoints alike, so pinning `fullfsync` covers both.
     pin(c, "foreign_keys", "1", "1", op)?;
-    // `recursive_triggers` and `trusted_schema` are unknown to Turso 0.8.3
-    // (accepted, ignored): there are no app-defined SQL functions or virtual
+    // `recursive_triggers` and `trusted_schema` are unknown to Turso (0.8.3,
+    // 0.9.0-pre.1: accepted, ignored): there are no app-defined SQL functions or virtual
     // tables for trusted_schema to guard, and REPLACE's implicit delete is
     // covered by tests/guards.rs against the engine's actual behaviour.
     let bt = pragma_text(c, "busy_timeout").map_err(|e| sql(e, op, NOT_WRITTEN))?;

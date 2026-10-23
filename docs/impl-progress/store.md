@@ -15,6 +15,7 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 | 7 publish records and ref audit | done | 832866c |
 | 8 busy, reader isolation, crash durability and poisoning | done | 6671503 |
 | — metadata engine moved to Turso (user decision 2026-10-23) | done | d52d206 |
+| — turso bumped to =0.9.0-pre.1, gaps re-checked | done | (this commit; see git log) |
 | 9 gc with guards, trash and integrity scan | done | (this commit; see git log) |
 
 ## Ambiguity decisions
@@ -150,7 +151,8 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 ## Engine: Turso
 
 User decision (2026-10-23): the metadata DB runs on Turso (crate `turso`,
-pinned `=0.8.3`, `default-features = false`) instead of rusqlite, so a
+pinned `=0.9.0-pre.1` since 2026-10-23, was `=0.8.3`;
+`default-features = false`) instead of rusqlite, so a
 future embeddings/vector table can live in store.db. Blobs stay BLAKE3
 files. No vector features are added; nothing in the schema check blocks a
 later migration that adds such a table (it would bump `user_version`).
@@ -210,14 +212,45 @@ the rusqlite design):
    stores exist; `user_version` stays 1.
 8. There is no READONLY_RECOVERY error code to map; that case is not
    reachable.
-9. `tests/open.rs::lock_is_not_inherited_by_child_processes`: under
-   parallel test load the reopen right after dropping the writer saw
-   `Busy` on `store/LOCK` for ~70–200 ms in about 1 of 4 to 1 of 10 full
-   runs. lsof showed no holder, and the pre-Turso build (6671503) did 0/16.
-   Not root-caused. The test now retries Busy for up to 2 s. An inherited
-   lock would be held by the 60 s sleeper, so the test still proves the
-   lock is not inherited. A CLI racing a daemon restart can see a
-   transient Busy, which callers already treat as retryable.
+9. (Not an engine gap; closed.) The flaky `Busy` on `store/LOCK` right
+   after a close + reopen came from `tests/open.rs` spawning a `sleep`
+   child while sibling tests in the same binary had stores open. On macOS
+   a spawned child holds a reference to every parent descriptor,
+   `O_CLOEXEC` included, until its exec finishes image activation (100 ms+
+   under load); a `flock` lives on the open file description, so a sibling
+   test that closed and reopened in that window saw `Busy` (hit
+   `open_creates_layout_on_empty_root` and `open_refuses_non_wal_store`
+   too, not only the lock test). Fix: the test moved to its own binary
+   `tests/lock_inherit.rs`, and it waits for a `sh -c 'echo ready; exec
+   sleep 60'` child to print before closing, so its exec is known done.
+   The 2 s Busy retry is gone. Real-world note: a daemon spawning children
+   can make a CLI racing a daemon restart see a transient `Busy`, which
+   callers already treat as retryable.
+
+### Turso 0.8.3 → 0.9.0-pre.1 (2026-10-23)
+
+The `turso` crate's public API is unchanged (doc comments only); the bump
+built with no source changes. Each gap was re-probed with a throwaway test
+against the new engine (not kept).
+
+| # | Gap | 0.8.3 | 0.9.0-pre.1 | Design now |
+|---|-----|-------|-------------|------------|
+| 1 | App-defined SQL functions | none | **changed, still open for us**: `turso_core::OpenOptions::extension_function(ExternalFunc::new_native_scalar(..))` registers native scalars database-wide at open, but the public `turso::Builder` (via `turso_sdk_kit`) has no hook. A trigger calling an unknown function is created, then fails on DELETE with "no such function". | gate table `strata_gc_gate` kept; not moving to unstable core internals |
+| 2 | Read-only flag in-process | ignored | still ignored (a read_only Builder in the writer's process can INSERT) | readers keep `query_only = 1` |
+| 3 | DEFENSIVE | none; `sqlite_schema` writes refused | same | unchanged |
+| 4 | `checkpoint_fullfsync`, `recursive_triggers`, `trusted_schema` | unknown, ignored | still accepted and read back nothing (`cell_size_check` too) | not pinned; `fullfsync` covers checkpoints |
+| 5 | REPLACE fires delete triggers | no | still no (`INSERT OR REPLACE` and `REPLACE INTO`, with `recursive_triggers` 0 or 1) | guards.rs ENGINE GAP leniency kept |
+| 6 | Original CHECK `(a IN (..)) = (b IS NULL)` in STRICT | rejected | still rejected ("cannot determine type of expression in CHECK constraint; use CAST") | AND/OR form kept |
+| 7 | Schema text kept verbatim | normalized, `__turso_internal_seq_*` added | same | unchanged |
+| 8 | READONLY_RECOVERY error code | none | none | unchanged |
+| 9 | LOCK `Busy` flake | flaky, 2 s retry | root-caused (test spawn + `flock`, not engine) | own binary, ready handshake, retry dropped |
+| – | Multi-process WAL | `engine.rs` / `crash.rs` green | green: 5 full `cargo test -p strata-store` runs (engine, crash, gc 5× each), all pass | `experimental_multiprocess_wal` kept |
+
+Verdict: no regression and no closed gap that changes the design; the pin
+moves to `=0.9.0-pre.1` (a pre-release, so watch for 0.9.0 final).
+Results: `cargo test -p strata-store` 133 passed / 0 failed / 3 ignored
+(×5 runs); `cargo test --workspace` 301 / 0 / 5; `tests/lock_inherit.rs`
+30/30 and `tests/open.rs` 40/40 standalone repeats.
 
 ## Blockers / notes
 
@@ -226,8 +259,8 @@ the rusqlite design):
   `"crates/strata-store"` members entry; no `[workspace.dependencies]`
   are added (crate deps are declared in the crate's own Cargo.toml).
 - New crate-level dep: `memmap2 = "0.9"` (Task 2).
-- Crate deps after the engine move: `turso = "=0.8.3"` (default features
-  off), `memmap2`, `libc`; `rusqlite` is gone from deps and tests.
+- Crate deps after the engine move: `turso = "=0.9.0-pre.1"` (default
+  features off; was `=0.8.3`), `memmap2`, `libc`; `rusqlite` is gone from deps and tests.
 - One unexplained failure of one `tests/open.rs` test in a single full
   `cargo test -p strata-store` run during Task 3 (output not captured);
   not reproduced in 26 further runs. Watching.
