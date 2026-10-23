@@ -72,7 +72,7 @@ Workspace crate（types.md §8：session 在第 3 层，只依赖第 0–2 层�
 3. 已照写：`Git::worktree_gitdir(&self, tree_dir: &Path) -> Result<Option<PathBuf>>`（gitio.md @60b1cf5 §3、§5.6 末段），只读，不需要锁，不跟随符号链接。它与本文 @cec336b 的写法有一处不同，session 照 gitio 改了：只有 `tree_dir` 或 `.git` 不存在才是 None；`.git` 是目录 → `IsDirectory`（attach 停在它的第 3 步时，临时树就是这样：放临时 index 的目录，gitfile 还没写），是符号链接、FIFO、socket 或设备 → `NotFile`，`tree_dir` 是符号链接或不是目录 → `NotDirectory`，gitfile 的格式不对 → `InvalidInput`（`bad-gitfile`）。`resolve_failed_move` 用它判断哪棵树接在哪一代的管理目录上（§5.9 第 3 步）：gitfile 的格式只有 gitio 一处解析。
 4. 说明，不是要求：gitio.md @f0da242 起 `shadow_drift(shadow, workspace)` 多一个参数，pre-push 守卫按 git 在工作区里实际用的 hooks 目录判断；一次调用起三个 git 子进程，各有 10 s 超时（gitio §5.6、§9）。status 第 2.8 步照此传工作区根（§5.5）。查询失败时它返回 `Unknown`（`hooks-lookup`，gitio.md @9985e4c §5.6），status 把它报成告警 `PrePushGuardUnknown`，不失败（D48）。
 
-**对 store**（store.md @9dceed5）：四条都已照写或只是说明，不再是要求；编号留着，正文按编号引用它们。
+**对 store**（store.md @9dceed5）：四条都已照写或只是说明，不再是要求。旧的第 1 条已删，原来的第 2–5 条改成第 1–4 条。
 
 1. 已照写、不再是要求：`MoveState` 的词汇与会话行的 `phase` 列（增补 5 的 T9 条）session 照原样采用（§4.3）；`set_old_tree` 接受与意图的 `staging` 相同的路径（形状相同），session 把保留的旧树留在原地（§5.7 第 19 步）。
 2. 说明，不是要求：module-rulings "Carry is not a capture" 改正了增补 8 的说法。session 的携带把旧工作区的条目克隆进新树，不是往 store 里捕获，不进 blob store，也不调 `put_blob_rooted`（§5.7.1 [我的决定 D34]）；store.md 的调用方清单（@0062a3e 起）已照此改。同样，session 自己从不往工作区、会话根或暂存树里写 blob 内容：新一代的树由 overlay 的 `project` 投影（增补 8 让它改用 `get_blob_rooted`），种子与携带都是克隆。所以 session 既不调 `get_blob`，也不调增补 8 新增的 `get_blob_rooted`。
@@ -660,7 +660,7 @@ design §6.1 第 2 步把接法交给构建者；增补 2 定为影子仓库，g
 
 **阶段 B：钉基线、填缓存、判种子。** 每个仓库各自进行，按 `RepoName` 的顺序派发给最多 4 个并行的工作者 [我的决定 D41]。这里写下的只有缓存（增补 6 细化 4）与 gitio 对 origin 的观察；失败是具名码或原样透传。一个仓库失败，`new` 就在 `create_session` 之前停下，别的仓库已经填好的缓存留着给以后用。
 
-8. 【锁 R】`git.fetch("origin", default_branch)`；同一段锁里 `head = deps::main_tip(cfg, git)`，放锁。design §6.7 的钉基线规则（连同发布链的锚，module-rulings "The publish chain carries an anchor…" 与 "The chain predicate lives in deps"）只由 `main_tip` 实现（发布链的判定在 `deps::publish_chain`，deps.md §5.9），session 不另写一份；`observe_main` 判定主干当前的 tip 用的是同一个函数（deps.md §2 对 session 的要求第 7 条、§5.9）；它只读 ref、不取锁，在 session 持着的锁里调用不会自锁。它返回 None（fetch 之后 origin 仍没有默认分支）→ `NoSuchBranch`（config.md 的运行时检查）。`tree = git.tree_of(head)`。gitio 与 deps 的码原样透传（`NoSuchBranch`、`NoSuchCommit`、`Unsupported`……，3b `:14`）。fetch 写下的对象与 `refs/strata/remotes/origin/<default_branch>` 是 gitio 自己对 origin 的观察（gitio.md §4.1）：以后的操作都复用它，重做得到同样的结果；增补 6 把 `new` 的第一次对外可见的写定为 `create_session`，而 fetch 必须在它之前，所以本文把 fetch 当作缓存填充看待 [我的决定 D5]。
+8. 【锁 R】`git.fetch("origin", default_branch)`；同一段锁里 `head = deps::main_tip(cfg, git)`，放锁。说明，不是另一份规则：`pin_unpushed` 开着、发布分支等于默认分支时，`new` 只在链领先 origin 且锚在 origin 上（`deps::publish_chain` 为 `Leads`）时钉链顶，其余情形钉 origin 的 tip（没有链、与 origin 相同或落后、没有锚、被回退或分叉、`pin_unpushed` 关着）。判定与锚的前移都在 deps（module-rulings "The anchor follows origin along the chain — amended"、"The chain predicate lives in deps"；deps.md §5.9），session 不另写。`observe_main` 用的是同一个 `main_tip`（deps.md §2 对 session 的要求第 7 条）；它只读 ref、不取锁，在 session 持着的锁里调用不会自锁。它返回 None（fetch 之后 origin 仍没有默认分支）→ `NoSuchBranch`（config.md 的运行时检查）。`tree = git.tree_of(head)`。gitio 与 deps 的码原样透传（`NoSuchBranch`、`NoSuchCommit`、`Unsupported`……，3b `:14`）。fetch 写下的对象与 `refs/strata/remotes/origin/<default_branch>` 是 gitio 自己对 origin 的观察（gitio.md §4.1）：以后的操作都复用它，重做得到同样的结果；增补 6 把 `new` 的第一次对外可见的写定为 `create_session`，而 fetch 必须在它之前，所以本文把 fetch 当作缓存填充看待 [我的决定 D5]。
 9. `gen` = §5.2 的 `ensure_base` 流程，沿用第 8 步得到的 head 与 tree：导出、`ensure` 与清单在锁外，只有登记取锁（第 8 步的锁这时已经放开）。
 10. 种子计划：`plan = seed_plan(cfg, git, path, store.base_dir(&gen), &tree)`（§5.3）。显式条目的拒绝在这里发生，对着的是基线 generation（review I3）。tracked 仓库再定种子缓存：条目 `c` 在主 checkout 里存在（第 6 步已确认是真目录），它在基线 generation 目录里不存在，而且各级上级要么不存在、要么是真目录（`apfs::attrs_of(base, 上级)`，逐级 `O_NOFOLLOW`）→ 进计划；否则静默跳过 [我的决定 D12]。种子缓存只是加速，缺省列表的条目不该因为某个仓库的形状让它的每一次 `new` 都失败（与 review M10 同一个教训）；这种情形要是在 `create_session` 之后才发现，就只能报 `Unknown`。
 
@@ -1031,7 +1031,7 @@ daemon 启动时调用一次，先于 gc 与任何请求；这时没有进行中
 | Accept：这一次移了 pin 之后，store 的事务失败 | `Unknown`（`detail.op = "resolve"`） | 工作区仍是 `Unknown`，原来的现场不变；pin 在新 head | 再 Accept 一次：pin 已在新 head，跳过它 |
 | Accept：pin 本来就在新 head，store 的事务失败 | store 的码，原样透传 | 无：这一次什么都没写 | 重试 |
 
-写锁的有界等待（`Busy`，daemon 给出；module-rulings "Lock order: session queue before repo lock" 末句）：取锁在该操作第一次对外可见的写之前时，超时是具名拒绝，原样返回 `Busy`，什么都没写（`new` 第 8、9 步，`ensure_base`、`ensure_base_for` 的登记，`remove` 第 5.1 步，`resolve_failed_move` 第 7 步）；在之后时（`new` 第 13 步的 `git` 与 `pin`，`remove` 第 7 步），同别的失败一样是 `Unknown`；`new` 第 15 步 `observe_main` 等锁到时只是一条 `ObserveFailed` 警告（§5.1 第 15 步）。`move_workspace` 在调用方持有的锁里运行，自己不取锁。
+写锁的有界等待（`Busy`，daemon 给出；module-rulings "Lock order: session queue before repo lock" 末句）：取锁在该操作第一次对外可见的写之前时，超时是具名拒绝，原样返回 `Busy`，什么都没写（`new` 第 8、9 步，`ensure_base`、`ensure_base_for` 的登记，`remove` 第 5.1 步，`resolve_failed_move` 第 7 步）。在第一次可见的写之后（`new` 第 13 步的 `git` 与 `pin`，`remove` 第 7 步），等待不受 `ctx.env.timeout` 截断：外层 `with_write` 返回 `Busy` 就再调，直到拿到锁（module-rulings "Waits after a call's first visible write are not bounded"）[我的决定 D49]。`new` 第 15 步 `observe_main` 的等待是 deps 自己在它第一次写之前的等待，到时仍是 `Busy`，session 只记一条 `ObserveFailed` 警告（§5.1 第 15 步）。`move_workspace` 在调用方持有的锁里运行，自己不取锁。
 
 `recover` 的单项失败记进 `RecoverReport.errors`，那一项原样留着，下一次启动再试；`status`、`resolve`、`select`、`list`、`leftovers` 只读，失败时原样透传下层的码，不留任何东西；只有 `status` 第 2.8 步 `shadow_drift` 的 `Unknown` 不让 status 失败，它成为 `PrePushGuardUnknown` 告警（D48）。
 
