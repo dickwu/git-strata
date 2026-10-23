@@ -71,7 +71,7 @@ publish 把一个 `ReleaseGroup` 变成真实 git 仓库里的一个 commit，�
 2. daemon 在 `attach_staging` 或 `push` 返回 `Unknown` 且 `detail.reason` 为 `staging-changed` 或 `index-read-back-refused` 时，向人告警并点名 `<main>/.git/index`（增补 8 的拼写终稿是连字符）。本文把这个 reason 原样放进自己的 `Unknown.detail`。
 3. gitio 提供一次 ref 事务，在一次调用里比较并交换地写下链和锚点（`update-ref --stdin` 或等价物）。gitio @1cd5ac5 还没有这个调用。publish 不起 git，也不用两次 `update_ref` 代替。本地提交时链的前进和锚点的写走这一次调用。崩溃留下的链与锚点不一致，不靠把过期的锚点读成 `Leads` 来补上；status 报出这个不一致。记录 `Pushed` 的锚点不走这之后的另一次调用（第 6 条）。
 4. `assign` 写在这次发布的 `publishes` 行上（`outcome.assigned`）。store 若不能在 `Done` 之后改这一列，由 store 加这一笔写。不另建文件。
-5. gitio 提供 `blob_bytes(tree, path) -> Result<Option<Vec<u8>>>`：从一个 tree 读一个路径的 blob 字节，不建目录。路径不在 tree 里为 `None`。gitio @f16bb0d 没有这个调用。publish 用它读 B 上的文件字节和 `.strata/lww`（含 `%include`，最多 16 个文件，然后 `LwwRules::parse`）。不用 `export_tree` 来判定冲突，也不用 `LwwRules::load` 去读一份导出。
+5. gitio 提供 `blob_bytes(tree, path) -> Result<Option<TreeBlob>>`，`TreeBlob { bytes, mode }`。从一个 tree 读一个路径，不建目录。路径不在 tree 里为 `None`，不是目录。`mode` 是 git 的 `100644`、`100755` 或 `120000`；符号链接是 `120000`，字节是目标，不是一个内容碰巧是目标的普通文件。路径在 tree 里是目录时不返回文件字节，也不在磁盘上建目录。gitio @f16bb0d 没有这个调用。publish 用它读 B 上的文件字节、可执行位和符号链接，以及 `.strata/lww`（含 `%include`，最多 16 个文件，然后 `LwwRules::parse`）。不用 `export_tree` 来判定冲突或取 mode，也不用 `LwwRules::load` 去读一份导出。
 6. 记录 `Pushed` 的那一次 gitio 调用，同时比较并交换远端跟踪 ref（`refs/strata/remotes/origin/<branch>`）和锚点，都设成推上去的 commit。publish 不起 git。这次调用提交之前，推送没有完成，不返回 `Pushed`。远端已经收下、这次调用还没提交就崩溃：结果是 `Unknown`；之后的 fetch 若显示锚点不在 origin 上，是 `Rewound`，不是 `Leads`。§5.4 的前移不修补这个窗口，不把 a 设成 o。
 
 ## 3. 公开接口（Rust）
@@ -135,8 +135,8 @@ pub fn check(cfg: &RepoConfig, staged: &Path) -> Result<ChecksRan>;
 /// `commit_tree` 之后用 gitio 的一次 ref 事务前进链和锚点。`commit_tree` 已把对象写进主对象库之后，对外不返回 `HeadMoved`：比较并交换失败是 `Unknown`，`HeadMoved` 只在 `detail` 里。不重新合并、不重试。
 pub fn commit(git: &Git, staged: &Staged, parent: &CommitOid, expected_chain: Option<&CommitOid>, message: &str) -> Result<CommitOid>;
 
-/// 核对凭据的 `action`，再调 `gitio::push`。不调用 confirm。
-/// 不需要确认时 `confirm` 为 `None`。需要而没有、或 action 不符 → `NotConfirmed`，不推。
+/// 核对凭据的 `action`，再调 §2 第 6 条记录 `Pushed` 的那一次调用。不调用 confirm。
+/// 不需要确认时 `confirm` 为 `None`。需要而没有、或 action 不符 → `NotConfirmed`，那次调用不启动。
 pub fn push(git: &Git, cfg: &RepoConfig, staging: &Path, confirm: Option<ConfirmToken>) -> Result<PushOutcome>;
 
 /// 把解决者记在这次发布的 `publishes` 行上（`outcome.assigned`）。不写文件，不合并、不推送。
@@ -326,8 +326,8 @@ pub enum PublishFault {
 按 repo 分组。一个调用只处理 `ctx.repo` 那一组批次；别的 repo 由 daemon 各调一次。批次为空，或没有这个 repo 的批次 → `InvalidInput`。
 
 1. **锁外，任何 ref 写之前。** 读已有的 `publish_chain`。`None` → 第 2 步先 fetch。`Rewound` → `InvalidInput`（`chain_rewound`），不前移锚点，这一步还没写行。`Diverged` 不在锁外拒绝：前移要在锁里的事务里做完，再拒绝。不自动重放（D2）。然后 `ensure` 会话正钉着的依赖集（锁外）。新 tree 的集合还不知道，放到第 8 步、放开队列与锁之后。
-2. **占队列，再记行，再拿 repo 写锁。** 队列是本组这个 repo 的会话，按 `SessionId` 升序。占住之后 `rm` 进不了这个会话，然后才 `record_publish`（"A Removed session takes no new pins"）。会话已 Removed → `NoSuchSession`；checkpoint 不存在 → `NoSuchCheckpoint`。这一行是意图行。锁里：`git.fetch("origin", publish.branch)`；按 §5.4 前移锚点；再读 `publish_chain`。`Rewound` → `InvalidInput`（`chain_rewound`），这次没有锚点写，按 D16 把行收成 `Done`。`Diverged` → 同样的码（`chain_diverged`），但若第 5.4 节的前移已经完成，那是做完的副作用，这次拒绝不是「什么都没写」。两种都不 `commit_tree`、不 `push`，链 ref 的字节不变。`merge_base` 得到 B，用的是锁里这一次读到的链，不是锁外的计划（D17）。
-3. **闸门，在任何 staging 写之前。** `validate_commands`。会改文件 → `CheckMutates`，不建目录，检查进程不启动。这次要推（`publish.push`）且 `cfg.needs_human_confirm()` 时，凭据必须在场，且 `action` 等于 `PushDeploy { repo: ctx.repo.clone(), branch: cfg.publish.branch.clone() }`。否则 `NotConfirmed`，不建目录，不 `attach_staging`，不 `gitio::stage`，不 `commit_tree`，不 `push`。凭据按值移走。不核对 nonce、不过期：那是 daemon 核销时 confirm 做的。`publish.push` 为假时这次不看凭据。然后在内存里做 §5.3。B 上每个路径的字节，以及 `.lww`，都经 `blob_bytes` 读取，不调用 `export_tree`。会话所钉基线的字节来自已有的基线目录，checkpoint 的字节来自 blob 存储。冲突 → `Conflict`，hunk 在 `detail` 里，不建目录。合成结果与 B 相同 → `NoCommit`，不建目录。这些具名拒绝按 D16 收成 `Done`。没有 gitfile。
+2. **占队列，再记行，再拿 repo 写锁。** 队列是本组这个 repo 的会话，按 `SessionId` 升序。占住之后 `rm` 进不了这个会话，然后才 `record_publish`（"A Removed session takes no new pins"）。会话已 Removed → `NoSuchSession`；checkpoint 不存在 → `NoSuchCheckpoint`。这一行是意图行。锁里：`git.fetch("origin", publish.branch)`；按 §5.4 前移锚点；再读 `publish_chain`。`Rewound` → `InvalidInput`（`chain_rewound`），这次没有锚点写，按 D16 把行收成 `Done`。`Diverged` → 同样的码（`chain_diverged`），但若第 5.4 节的前移已经完成，那是做完的副作用，这次拒绝不是「什么都没写」。两种都不 `commit_tree`，记录 `Pushed` 的那一次调用不启动，链 ref 的字节不变。`merge_base` 得到 B，用的是锁里这一次读到的链，不是锁外的计划（D17）。
+3. **闸门，在任何 staging 写之前。** `validate_commands`。会改文件 → `CheckMutates`，不建目录，检查进程不启动。这次要推（`publish.push`）且 `cfg.needs_human_confirm()` 时，凭据必须在场，且 `action` 等于 `PushDeploy { repo: ctx.repo.clone(), branch: cfg.publish.branch.clone() }`。否则 `NotConfirmed`，不建目录，不 `attach_staging`，不 `gitio::stage`，不 `commit_tree`，记录 `Pushed` 的那一次调用不启动。凭据按值移走。不核对 nonce、不过期：那是 daemon 核销时 confirm 做的。`publish.push` 为假时这次不看凭据。然后在内存里做 §5.3。B 上每个路径的字节和 `mode`，以及 `.lww`，都经 `blob_bytes` 读取，不调用 `export_tree`。可执行位和 `120000` 来自这个 `mode`。会话所钉基线的字节来自已有的基线目录，checkpoint 的字节来自 blob 存储。冲突 → `Conflict`，hunk 在 `detail` 里，不建目录。合成结果与 B 相同 → `NoCommit`，不建目录。这些具名拒绝按 D16 收成 `Done`。没有 gitfile。
 4. **staging。** 闸门过了才建目录。导出在锁里做，对象是锁里刚读到的 B：`export_tree(tree_of(B), <布局根>/<repo>)`。B 的 tree 很大时这段锁会拉长；这是为了后面的一次合并，不在锁外导出再碰运气 [我的决定 D12]。然后 `attach_staging`。兄弟目录用 `clonefile` 放进布局根，源是各会话所钉的基线 generation，不是活的工作区。写入内存里已经合并好的文件，再 `gitio::stage`。从 `attach_staging` 起，gitfile 的 commondir 是主 checkout；`gitio::stage` 会把对象写进主对象库。这两步都在凭据闸门之后。这一步之后若要具名返回，先按 §4.1 删完目录。
 5. **检查。** §5.5。仍在同一段锁里，仍在 `commit_tree` 之前。非零退出要返回 `CheckFailed` 时，先 `remove_tree_rooted`。删完、gitfile 不再是进主 ref 库的路径，才返回 `CheckFailed`。删不完 → `Unknown`，发布行保持 `Unknown`，status 报出，不返回 `CheckFailed`。
 6. **提交。** `commit_tree` 把对象写进主对象库，这是不可收回的可见写。此后任何失败对外都是 `Unknown`，现场留下，不删链、不删对象、不重放。链与锚点用 gitio 的一次 ref 事务写下（§2 第 3 条），`expected` 是锁里读到的链顶，没有链时为不存在。事务失败 → `Unknown`，`detail` 里保留 `HeadMoved` 的期望值与实际值（3d `:197`）。不返回 `HeadMoved` 作为对外的码。不重新合并、不重试。
@@ -353,7 +353,7 @@ pub enum PublishFault {
 字节规则：
 
 - 两边相对 base 都没改 → 保持。
-- 只有一边改 → 取那边。权限（可执行位）与内容分开比：一边只改可执行位、另一边改内容，结果两者都要。git 只记录 `100644` / `100755`，`700` 这类完整 mode 不进 commit。
+- 只有一边改 → 取那边。权限（可执行位）与内容分开比：一边只改可执行位、另一边改内容，结果两者都要。B 一侧的可执行位和符号链接来自 `blob_bytes` 的 `mode`（`100755` 与 `120000`），在任何导出之前。git 只记录 `100644` / `100755`，`700` 这类完整 mode 不进 commit。符号链接不是普通文件。
 - 两边都改、内容哈希相同 → 不冲突，二进制也一样。
 - 两边都改、哈希不同：任一边是 `is_binary`，或任一边超过 `overlay::MERGE_MAX_BYTES`（64 MiB）→ 整文件 `Conflict`，不读超限文件的内容，不做逐字节 diff3。没超限的文本交给 `gitio::merge3`。干净 → 取合并结果。冲突 → 整组停下。
 - 一边删除、另一边修改同一路径 → `Conflict`。
@@ -363,7 +363,7 @@ pub enum PublishFault {
 - 两边都新增、字节相同 → 留一份。字节不同 → `Conflict`。
 - 空目录不写入 tree。
 
-`.lww`（规则经 `blob_bytes` 从 B 读，不导出）：只有两边都改了的命中路径才决议。组内后应用的批次整文件胜出，不试 `merge3`，不算冲突。同一会话的多个批次，较大的 `CheckpointId` 胜，不管它在 `batches` 里的位置。不按 mtime。没被命中的路径照常三方合并。没有 unit，依赖目录不参与合并。B 上参与合并的文件字节同样经 `blob_bytes`，不经 `export_tree`。
+`.lww`（规则经 `blob_bytes` 从 B 读，不导出）：只有两边都改了的命中路径才决议。组内后应用的批次整文件胜出，不试 `merge3`，不算冲突。同一会话的多个批次，较大的 `CheckpointId` 胜，不管它在 `batches` 里的位置。不按 mtime。没被命中的路径照常三方合并。没有 unit，依赖目录不参与合并。B 上参与合并的文件字节和 `mode` 同样经 `blob_bytes`，不经 `export_tree`。路径不在 tree 里是 `None`，不是目录。
 
 13 个路径级结果（3d 的 `merge_root_oracle`，inode 语义不保留）：
 
@@ -514,10 +514,10 @@ design §8 没有给发布单独的秒数。上表是本文的验收数字，首
 | `zero_checks_reports_zero_ran` | `checks` 为空 → 成功，`checks_ran = 0`，`outcome` 里也是 0 | 新增（D3；config.md §2.3 第 2 条） |
 | `sibling_layout_matches_workspace` | tool 的检查 cwd 的 `../<sibling>` 解析在布局根里，不在活的会话目录里。admin 的 staging 有 `.git`，`bun.lock` 是已跟踪文件 | 新增（config.md §2.3 第 5 条；D4） |
 | `commit_cas_failure_is_not_retried` | 读过链顶之后、ref 事务之前，另一边推进了链 → 不重新合并。`commit_tree` 已把对象写进主对象库之后，对外是 `Unknown`，`HeadMoved` 只在 `detail` 里，带期望值与实际值。不把 `HeadMoved` 当作对外的码 | `layerfs-daemon/tests/lane_merge.rs::a_commit_landing_before_the_lane_is_merged_in_the_lane`；`layerfs-daemon/tests/mount_control.rs::an_unresolved_moved_head_failure_is_answered_and_not_dropped` |
-| `deploy_on_push_without_confirm_stops_before_push` | `deploy_on_push` 或 `publish.confirm` 为真、凭据缺失或 `action` 不是 `PushDeploy` 的这个 repo 与分支 → `NotConfirmed`。`attach_staging`、`gitio::stage`、`commit_tree`、`gitio::push` 都没被调用。没有 gitfile | 新增（计划；不变量 7） |
+| `deploy_on_push_without_confirm_stops_before_push` | `deploy_on_push` 或 `publish.confirm` 为真、凭据缺失或 `action` 不是 `PushDeploy` 的这个 repo 与分支 → `NotConfirmed`。`attach_staging`、`gitio::stage`、`commit_tree` 都没被调用。记录 `Pushed` 的那一次调用不启动。没有 gitfile | 新增（计划；不变量 7） |
 | `push_timeout_keeps_chain_reports_unknown` | 推送超时后链 ref 仍是新 commit，结果 `Unknown`，`publishes` 行是 `Unknown`。重启后 status 报出同一行，不调用 `push` | 新增（Review Focus 5）；`layerfs-daemon/tests/mounted_commit_failures.rs::f3_unknown_history_outcome_keeps_custody_and_the_mount_still_serves`；`layerfs-daemon/tests/store_commit.rs::unknown_history_acknowledgement_retains_original_intent_and_capture` |
 | `push_refused_keeps_local_chain` | 远端拒绝 → 链仍指向新 commit，对外 `Unknown`，`detail.kind = "PushRefused"`，`detail.message` 是远端原话 | 新增（types.md `PushRefused`；写了之后不交具名码） |
-| `push_false_leaves_chain_local` | `publish.push = false` → 不调用 `gitio::push`，链指向新 commit，`Published.push` 为 `None` | 新增（design §6.7） |
+| `push_false_leaves_chain_local` | `publish.push = false` → 记录 `Pushed` 的那一次调用不启动，链指向新 commit，`Published.push` 为 `None` | 新增（design §6.7） |
 | `pushed_sets_anchor_to_pushed_commit` | `Pushed` 只在同一次 gitio 调用提交之后返回：那次调用比较并交换远端跟踪 ref 和锚点，锚点等于推上去的 commit。提交之前推送没有完成。远端已收下而这次调用没提交就崩溃 → `Unknown`；之后 fetch 显示锚点不在 origin 上 → `Rewound`，不是 `Leads`，§5.4 不把 a 设成 o | 新增（"The publish chain carries an anchor"） |
 | `no_flag_or_env_bypass` | 设置任意环境变量或在配置里把 `confirm` 写成假、但 `deploy_on_push` 仍为真 → 仍要凭据。本文不读绕过用的 flag | 新增（不变量 7） |
 | `post_publish_rebase_drops_published_paths` | 发布并 rebase 之后，参与会话的 overlay 不再含已发布且内容一致的路径。B 先发布与 A 不相交的 `from-b`，A 再发布 `from-a` 并 rebase 之后，A 的目录里既有 `from-b`（内容 bravo）也有 `from-a`（内容 alpha） | `layerfs-daemon/tests/negative_entries.rs::a_name_another_workspace_added_shows_after_the_merged_install`；`layerfs-overlay/tests/kept_live.rs::folding_a_failed_capture_into_a_kept_row_counts_it` |
