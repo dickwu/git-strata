@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use strata_apfs::FileKind;
-use strata_types::{Code, RepoPath, StrataError};
+use strata_types::{Code, RepoPath, StrataError, TreeOid};
 
 use crate::command::{Opts, QUERY_TIMEOUT, flag};
 use crate::err::{errd, path_str};
@@ -565,6 +565,47 @@ impl Git {
         tail.extend(self.global_rules(&loc.common)?);
         let stack = Stack { root: loc.wt_root.clone(), tail, icase: info.ignorecase };
         let is_dir = self.is_dir_at(&stack.root, path)?;
+        self.excluded(&stack, path.as_str(), is_dir)
+    }
+
+    /// Whether git would ignore `path` once `tree` (exported in `dir`) is
+    /// checked out as a workspace of this repository (§5.8, last part).
+    pub fn is_ignored_in_export(&self, dir: &Path, tree: &TreeOid, path: &RepoPath) -> Result<bool> {
+        fsx::require_absolute(dir, "export dir")?;
+        match fsx::lstat(dir)? {
+            None => {
+                return Err(errd(
+                    Code::NoSuchPath,
+                    format!("{} does not exist", dir.display()),
+                    json!({ "path": path_str(dir) }),
+                ));
+            }
+            Some(m) if !m.file_type().is_dir() => {
+                return Err(errd(
+                    Code::NotDirectory,
+                    format!("{} is not a directory", dir.display()),
+                    json!({ "path": path_str(dir) }),
+                ));
+            }
+            Some(_) => {}
+        }
+        if fsx::lstat(&dir.join(".git"))?.is_some() {
+            return Err(errd(
+                Code::InvalidInput,
+                format!("{} has a .git; use is_ignored", dir.display()),
+                json!({ "path": path_str(dir), "reason": "has-git" }),
+            ));
+        }
+        let table = self.tree_table(tree)?;
+        if table.has_file(path) {
+            return Ok(false);
+        }
+        let common = self.inner.common_dir.clone();
+        let mut tail = Vec::new();
+        tail.extend(self.human_rules(&common.join("info/exclude"))?);
+        tail.extend(self.global_rules(&common)?);
+        let stack = Stack { root: dir.to_path_buf(), tail, icase: table.icase };
+        let is_dir = self.is_dir_at(dir, path)?;
         self.excluded(&stack, path.as_str(), is_dir)
     }
 

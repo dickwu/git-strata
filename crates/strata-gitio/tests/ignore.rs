@@ -663,3 +663,143 @@ fn is_ignored_agrees_with_git_on_corpus() {
     corpus_round(false);
     corpus_round(true);
 }
+
+// ---------------------------------------------------------------------------
+// is_ignored_in_export
+
+fn head_tree(sb: &Sandbox, repo: &Path) -> strata_types::TreeOid {
+    strata_types::TreeOid::try_from(sb.tree_of(repo, "HEAD")).unwrap()
+}
+
+fn export_head(sb: &Sandbox, repo: &Path, rel: &str) -> PathBuf {
+    let dir = sb.path(rel);
+    sb.archive_tree_into(repo, "HEAD", &dir);
+    dir
+}
+
+fn iie(git: &Git, dir: &Path, tree: &strata_types::TreeOid, p: &str) -> bool {
+    git.is_ignored_in_export(dir, tree, &rp(p)).unwrap_or_else(|e| panic!("is_ignored_in_export {p}: {e:?}"))
+}
+
+#[test]
+fn is_ignored_in_export_ignores_seeds_like_the_workspace() {
+    let sb = Sandbox::new();
+    let main = sb.init_repo("main");
+    set_ignorecase(&sb, &main, false);
+    sb.commit_file(&main, "CLAUDE.md", b"# c\n", "claude");
+    sb.commit_file(&main, ".claude/commands.md", b"x\n", "dot claude");
+    write_abs(&info_exclude(&main), ".env\n");
+    let home2 = sb.path("home2");
+    write_abs(&home2.join(".config/git/ignore"), ".claude/settings.local.json\n");
+    let git = sb.open(&main);
+    git.set_env("HOME", Some(home2.as_os_str()));
+    git.set_env("XDG_CONFIG_HOME", None);
+    let tree = head_tree(&sb, &main);
+    let dir = export_head(&sb, &main, "export");
+    let before = snapshot(&dir);
+    for (p, want) in [(".env", true), (".claude/settings.local.json", true), ("CLAUDE.md", false), (".claude/commands.md", false)] {
+        assert_eq!(iie(&git, &dir, &tree, p), want, "{p}");
+        assert_eq!(ig(&git, &main, p), want, "is_ignored on main {p}");
+    }
+    write_abs(&info_exclude(&main), "# nothing\n");
+    assert!(!iie(&git, &dir, &tree, ".env"));
+    assert!(!ig(&git, &main, ".env"));
+    assert_eq!(snapshot(&dir), before);
+}
+
+#[test]
+fn is_ignored_in_export_never_ignores_a_tracked_path() {
+    let sb = Sandbox::new();
+    let main = sb.init_repo("main");
+    set_ignorecase(&sb, &main, false);
+    sb.write(&main, ".gitignore", b"*.log\nlogs/\n");
+    sb.write(&main, "logs/keep.log", b"k\n");
+    sb.git(&main, &["add", "-f", ".gitignore", "logs/keep.log"]);
+    sb.git(&main, &["commit", "-qm", "logs"]);
+    let git = sb.open(&main);
+    let tree = head_tree(&sb, &main);
+    let dir = export_head(&sb, &main, "export");
+    assert!(!iie(&git, &dir, &tree, "logs/keep.log"));
+    assert!(iie(&git, &dir, &tree, "logs/other.log"));
+    assert!(iie(&git, &dir, &tree, "logs"));
+    assert_eq!(iie(&git, &dir, &tree, "logs"), ig(&git, &main, "logs"));
+    // Case-sensitive repo: neither tracked nor matched by `*.log`/`logs/`.
+    assert!(!iie(&git, &dir, &tree, "LOGS/KEEP.LOG"));
+    assert!(iie(&git, &dir, &tree, "LOGS/KEEP.log") && iie(&git, &dir, &tree, "logs/KEEP.LOG"));
+    set_ignorecase(&sb, &main, true);
+    assert!(!iie(&git, &dir, &tree, "LOGS/KEEP.LOG"));
+    assert!(!iie(&git, &dir, &tree, "logs/keep.log"));
+    assert!(iie(&git, &dir, &tree, "logs/other.log"));
+
+    let head = sb.head(&main);
+    let b = sb.git_stdin(&main, &["hash-object", "-w", "--stdin"], b"x\n");
+    let bad = sb.git_stdin(&main, &["mktree"], format!("160000 commit {head}\tsub\n100644 blob {b}\tf\n").as_bytes());
+    let bad = strata_types::TreeOid::try_from(bad).unwrap();
+    let e = git.is_ignored_in_export(&dir, &bad, &rp("f")).unwrap_err();
+    assert_eq!(e.code, Code::Unsupported, "{e:?}");
+}
+
+#[test]
+fn is_ignored_in_export_honours_negation() {
+    let sb = Sandbox::new();
+    let main = sb.init_repo("main");
+    set_ignorecase(&sb, &main, false);
+    sb.commit_file(&main, ".gitignore", b"*.local\n!keep.local\n!keep.env\nbuild/\n!build/keep.c\n", "rules");
+    write_abs(&info_exclude(&main), "*.env\n");
+    let git = sb.open(&main);
+    let tree = head_tree(&sb, &main);
+    let dir = export_head(&sb, &main, "export");
+    for (p, want) in [
+        ("keep.local", false),
+        ("x.local", true),
+        ("keep.env", false),
+        ("x.env", true),
+        ("build/keep.c", true),
+        ("build/other.c", true),
+    ] {
+        assert_eq!(iie(&git, &dir, &tree, p), want, "{p}");
+        assert_eq!(ig(&git, &main, p), want, "is_ignored on main {p}");
+    }
+}
+
+#[test]
+fn is_ignored_in_export_reads_nested_gitignore_from_dir() {
+    let sb = Sandbox::new();
+    let main = sb.init_repo("main");
+    set_ignorecase(&sb, &main, false);
+    sb.commit_file(&main, "sub/.gitignore", b"secret.txt\n", "nested");
+    sb.commit_file(&main, "CLAUDE.md", b"# c\n", "claude");
+    // An uncommitted change in the main checkout does not reach the export.
+    write_abs(&main.join(".gitignore"), "CLAUDE.md\n");
+    let git = sb.open(&main);
+    assert!(ig(&git, &main, "x/CLAUDE.md"));
+    let tree = head_tree(&sb, &main);
+    write_abs(&sb.path("exp/.gitignore"), "*\n");
+    let dir = export_head(&sb, &main, "exp/d");
+    let before = snapshot(&sb.path("exp"));
+    for (p, want) in [
+        ("sub/secret.txt", true),
+        ("secret.txt", false),
+        ("other/secret.txt", false),
+        ("CLAUDE.md", false),
+        ("x/CLAUDE.md", false),
+        ("anything.txt", false),
+    ] {
+        assert_eq!(iie(&git, &dir, &tree, p), want, "{p}");
+    }
+
+    let e = git.is_ignored_in_export(&sb.path("exp/missing"), &tree, &rp("a")).unwrap_err();
+    assert_eq!(e.code, Code::NoSuchPath, "{e:?}");
+    let e = git.is_ignored_in_export(Path::new("exp/d"), &tree, &rp("a")).unwrap_err();
+    assert_eq!(e.code, Code::InvalidInput, "{e:?}");
+    let e = git.is_ignored_in_export(&dir.join("CLAUDE.md"), &tree, &rp("a")).unwrap_err();
+    assert_eq!(e.code, Code::NotDirectory, "{e:?}");
+    fs::create_dir(dir.join(".git")).unwrap();
+    let with_git = snapshot(&sb.path("exp"));
+    let e = git.is_ignored_in_export(&dir, &tree, &rp("a")).unwrap_err();
+    assert_eq!(e.code, Code::InvalidInput, "{e:?}");
+    assert_eq!(reason(&e).as_deref(), Some("has-git"));
+    assert_eq!(snapshot(&sb.path("exp")), with_git);
+    fs::remove_dir(dir.join(".git")).unwrap();
+    assert_eq!(snapshot(&sb.path("exp")), before);
+}

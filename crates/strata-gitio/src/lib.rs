@@ -26,6 +26,7 @@ mod refs;
 mod remote;
 mod repo;
 mod seams;
+mod tree;
 
 #[cfg(feature = "test-seams")]
 pub use seams::{GitCall, Pause, SyncEvent};

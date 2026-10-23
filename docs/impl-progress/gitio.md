@@ -9,7 +9,8 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 | 1 sanitized command, open | f96b3b9 | |
 | 2 index + config parsing, read_index | b4c257d | |
 | 3 ignore rules, is_ignored | 3d39e43 | |
-| 4 fetch, ancestry, CAS refs | (this commit) | |
+| 4 fetch, ancestry, CAS refs | e18b094 | |
+| 5 tree_of, tree validation, is_ignored_in_export | (this commit) | |
 
 ## Builder decisions (ambiguities)
 
@@ -72,3 +73,18 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
   `--help`" is refused by `CommitOid` construction (and `read_ref`).
 - `global_excludes_path`'s config query no longer sets `LC_ALL=C` (§5.3 lists
   only fetch/update-ref/commit-tree/rev-parse/ls-tree).
+- Task 5: `ls_tree_output_parse_is_exact` is a unit test in `src/tree.rs`
+  (the parser is internal).
+- Task 5: only content-determined tree verdicts (Unsupported / NotText /
+  InvalidInput) are cached per TreeOid; NoSuchCommit / Unknown are retried
+  (missing objects may arrive by fetch). Verdicts and path tables record the
+  core.ignorecase they were judged under and are revalidated if it changes;
+  at most 64 path tables are kept (LRU).
+- Task 5: a well-formed but unknown ls-tree mode is `Unsupported`; a
+  malformed line is `Unknown` (reason `ls-tree-parse`). Collision detail is
+  `{reason:"collision", paths:[a,b], path}`. HFS-ignorable Unicode variants of
+  `.git` are not checked (only ASCII case-folded `.git`).
+- Task 5: the main checkout's ignorecase is read from `<common>/config` only
+  (not config.worktree).
+- Task 5: the `export_tree` halves of the replace/gitlink/missing-blob/.git/
+  overlong/collision tests are added with Task 6.
