@@ -15,9 +15,11 @@ use strata_overlay::{Base, Checkpointed, WorkspaceRef};
 use strata_store::Store;
 use strata_types::{CheckpointReason, Code, Config, RepoConfig, RepoName, SessionId, StrataError};
 
+mod base;
 mod dispatch;
 mod new;
 mod seams;
+mod seed;
 mod sys;
 mod ticket;
 
@@ -25,6 +27,7 @@ mod ticket;
 pub use seams::SessionSeam;
 pub use new::NewReport;
 pub use new::NewWarning;
+pub use seed::{SeedRecord, SeedSource, seed_files, seed_plan};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 
@@ -48,12 +51,10 @@ pub struct Sessions<'a> {
     pub(crate) gits: &'a BTreeMap<RepoName, Git>,
     pub(crate) store: &'a Store,
     pub(crate) locks: &'a dyn RepoWriteLock,
-    #[allow(dead_code)] // read by the build step (T2)
     pub(crate) env: &'a InstallEnv,
     #[allow(dead_code)]
     pub(crate) before: &'a dyn BeforeCheckpoint,
     /// Base staging directories being built by this process (§5.2 step 3).
-    #[allow(dead_code)]
     pub(crate) live_staging: Mutex<BTreeSet<PathBuf>>,
     /// Moves in progress in this process (§5.5 step 2.9).
     #[allow(dead_code)]
@@ -121,7 +122,6 @@ impl<'a> Sessions<'a> {
     /// The same after the call's first visible write: `Busy` from the outer
     /// wait is retried until the lock is had (§6.2; module-rulings "Waits
     /// after a call's first visible write are not bounded").
-    #[allow(dead_code)]
     pub(crate) fn with_lock_unbounded<T>(&self, repo: &RepoName, mut f: impl FnMut() -> Result<T>) -> Result<T> {
         loop {
             let mut out: Option<T> = None;

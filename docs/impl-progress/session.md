@@ -6,8 +6,8 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
 
 | Task | Status | Commit |
 |---|---|---|
-| 1 refuse invalid new requests before writing | done | (this commit) |
-| 2 full sibling layout on per-session shadow repos | todo | |
+| 1 refuse invalid new requests before writing | done | d19b845 |
+| 2 full sibling layout on per-session shadow repos | done | (this commit) |
 | 3 resolve by cwd or selector, status | todo | |
 | 4 Unknown scenes and restart leftovers | todo | |
 | 5 move base and deps with an atomic directory swap | todo | |
@@ -45,3 +45,45 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
   RepoName order; `phase@repo` matches only that repo.
 - Task 1: the test lock panics on same-thread re-entry, so a nested lock
   acquisition is caught as a bug rather than a deadlock.
+- Task 2: the base loop (§5.2) bounds itself: three deps-set misses in a
+  row → Busy `deps_set_race`; staging retired under it twice → Busy
+  `base_staging_retired`; for `ensure_base_for` (a given set) the first
+  miss → InvalidInput `deps_unsealed`, never installing. A hot-path
+  `list_dir` NoSuchPath on the tree directory counts as a miss.
+- Task 2: after staging B is retired, named codes from the build pass
+  through unchanged; only Unknown is wrapped with the base detail. If
+  removing B fails after a successful register, B is left for leftover
+  collection rather than failing the call.
+- Task 2: staging names are 32 hex; in-flight staging is tracked by an RAII
+  guard (`live_staging`) so the leftover sweep (Task 4) can skip it.
+- Task 2: seed duplicates compare each entry against all earlier entries
+  (case-folded on a case-insensitive volume), `detail.other` = the first.
+- Task 2: a seed whose type changes between `lstat` and `attrs_of` is
+  refused (explicit, reason `changed`) or skipped (candidate). A
+  regular-file seed is also checked through `attrs_of` so a symlinked
+  parent in main is caught for every type.
+- Task 2: a seed cache whose ancestor in the base is a symlink or not a
+  directory is skipped silently (D12, same rule as candidates).
+- Task 2: `new` runs Phase B as a second pass over repos after all heads
+  are resolved; observation after the layout uses its own 4-worker pool so
+  one failed observe does not stop the others and becomes
+  `NewWarning::ObserveFailed`. `new` adds `repo` to seed refusal details.
+- Task 2: the §7 row "tracked `.ENV`, explicit `.env` → exists_in_base"
+  only holds with `core.ignorecase = false`: gitio's `tree_contains`
+  follows core.ignorecase (git identity), which git init sets true on this
+  volume, so with the default config step 2 refuses first with `tracked`.
+  The test asserts both: `tracked` under ignorecase=true and
+  `exists_in_base` under ignorecase=false; `.ENV` is untouched either way.
+- Task 2: `new_seed_writes_never_leave_the_session_root` puts the main
+  checkout one commit behind origin (real, ignored `conf/` and `.claude/`
+  directories) while the base tree tracks them as symlinks to O. With the
+  symlinks also in main, §5.3 step 1 (`NotDirectory symlink` for a
+  symlinked parent in main) would fire before the destination check the
+  row names (`parent_not_directory`); this keeps the spec's step order and
+  still exercises the destination rule.
+- Task 2: the parts of the §7 T2 rows that need `status` (Task 3) or the
+  leftover sweep (Task 4) are added with those tasks. Case-sensitive
+  volume variants need an `hdiutil` image and are omitted here.
+- Task 2: tests reopening the Store retry Busy for up to 5 s: children
+  forked by other test threads briefly share the LOCK description between
+  fork and exec.

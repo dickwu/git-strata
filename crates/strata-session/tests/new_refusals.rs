@@ -9,13 +9,9 @@ use strata_session::{NewReport, Result};
 use strata_types::{Code, Config, Paths, StrataError};
 use support::*;
 
-/// `new` got past every phase-A refusal and resolved every head. Until the
-/// layout is built (Task 2) this is the placeholder error.
+/// `new` got past every refusal and built the session.
 fn reached_build(r: &Result<NewReport>) -> bool {
-    match r {
-        Ok(_) => true,
-        Err(e) => e.code == Code::Unsupported && reason(e) == Some("not_implemented"),
-    }
+    r.is_ok()
 }
 
 /// Nothing of a session anywhere: no row, no dirs under sessions/ (and
@@ -135,6 +131,27 @@ fn new_passes_lower_codes_through_unchanged() {
 }
 
 #[test]
+fn new_passes_gitlink_unsupported_through_unchanged() {
+    let fx = Fx::new();
+    let main = fx.main("tool");
+    let head = fx.sb.head(&main);
+    fx.sb.git(&main, &["update-index", "--add", "--cacheinfo", &format!("160000,{head},sub")]);
+    fx.sb.git(&main, &["commit", "-q", "-m", "gitlink"]);
+    fx.sb.git(&main, &["push", "-q", "origin", "HEAD:main"]);
+    let git = &fx.gits[&fx.rn("tool")];
+    let tip = git.fetch("origin", "main").unwrap();
+    // gitio refuses the gitlink when reading the tree.
+    let want = git.tree_of(&tip).unwrap_err();
+    assert_eq!(want.code, Code::Unsupported);
+    let s = fx.sessions();
+    let got = s.new(None, &[fx.rn("tool")]).unwrap_err();
+    assert_eq!(got, want, "gitio's Unsupported reaches the caller verbatim");
+    assert_no_trace(&fx);
+    let staging = fx.root().join("bases/tool/.staging");
+    assert!(!staging.exists() || fs::read_dir(&staging).unwrap().count() == 0, "staging left behind");
+}
+
+#[test]
 fn new_validates_ticket() {
     let fx = Fx::new();
     let s = fx.sessions();
@@ -229,6 +246,30 @@ fn new_refuses_existing_session_dir_before_any_effect() {
         let remotes = fx.sb.git(&fx.main("tool"), &["for-each-ref", "refs/strata/remotes/"]);
         assert!(remotes.is_empty(), "fetched: {remotes}");
     }
+}
+
+#[test]
+fn new_refuses_id_with_existing_store_row() {
+    let fx = Fx::new();
+    let id = sid("s-k3q7xm2a");
+    let s = fx.sessions();
+    s.set_next_id(id.clone());
+    s.new(None, &[fx.rn("tool")]).unwrap();
+    // Both directories gone, the row stays: the id is still taken.
+    for sub in ["", ".repos/"] {
+        fs::remove_dir_all(fx.root().join("sessions").join(format!("{sub}{}", id.as_str()))).unwrap();
+    }
+    let holds = fx.lock.holds().len();
+    let installs = fx.sb.install_count();
+    s.set_next_id(id.clone());
+    let e = s.new(None, &[fx.rn("tool")]).unwrap_err();
+    assert_eq!(e.code, Code::Exists, "{e:?}");
+    assert_eq!(reason(&e), Some("store_row"));
+    assert_eq!(detail_str(&e, "session"), Some(id.as_str()));
+    assert_eq!(fx.lock.holds().len(), holds, "no lock taken");
+    assert_eq!(fx.sb.install_count(), installs);
+    assert_eq!(fx.session_rows(), 1);
+    assert!(fx.session_dirs().is_empty(), "{:?}", fx.session_dirs());
 }
 
 /// Four spellings whose literal paths do not nest but whose real ones do.
@@ -365,6 +406,8 @@ fn new_refuses_fifo_seed_before_writing() {
     assert_no_trace(&fx);
     fs::remove_file(&fifo).unwrap();
     fs::write(&fifo, b"TOKEN=1\n").unwrap();
+    // An explicit seed must be ignored (§5.3 step 4): via the main checkout's info/exclude.
+    fs::write(fx.main("tool").join(".git/info/exclude"), b".env\n").unwrap();
     let s = fx.sessions();
     let r = s.new(None, &[fx.rn("tool")]);
     assert!(reached_build(&r), "after the fix: {r:?}");

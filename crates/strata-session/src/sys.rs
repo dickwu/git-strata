@@ -84,6 +84,20 @@ pub(crate) fn within(inner: &Path, outer: &Path, fold: bool) -> bool {
 }
 
 /// A fresh session id: 40 random bits as `s-` + 8 lowercase base32 chars.
+/// `2 * bytes` lowercase hex digits from arc4random.
+pub(crate) fn random_hex(bytes: usize) -> String {
+    let mut b = vec![0u8; bytes];
+    // SAFETY: arc4random_buf fills exactly b.len() bytes.
+    unsafe { libc::arc4random_buf(b.as_mut_ptr().cast(), b.len()) };
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// A RepoPath from a path this crate composes itself.
+pub(crate) fn rp(s: impl Into<String>) -> strata_types::RepoPath {
+    let s = s.into();
+    strata_types::RepoPath::try_from(s.clone()).unwrap_or_else(|e| panic!("composed path {s:?} is not a RepoPath: {e:?}"))
+}
+
 pub(crate) fn random_session_id() -> SessionId {
     let mut b = [0u8; 5];
     // SAFETY: arc4random_buf fills exactly b.len() bytes.

@@ -9,7 +9,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use strata_deps::InstallEnv;
 use strata_gitio::Git;
@@ -159,7 +159,7 @@ impl Sandbox {
     pub fn commit(&self, repo: &Path, files: &[(&str, &[u8])], msg: &str) -> String {
         for (rel, content) in files {
             self.write(repo, rel, content);
-            self.git(repo, &["add", "--", rel]);
+            self.git(repo, &["add", "-f", "--", rel]);
         }
         self.git(repo, &["commit", "-q", "--allow-empty", "-m", msg]);
         self.head(repo)
@@ -568,7 +568,20 @@ impl Fx {
     pub fn reopen_store(&mut self) {
         assert!(self.store.is_none());
         let checkouts: Vec<&Path> = self.config.repos.values().map(|r| r.path.as_path()).collect();
-        self.store = Some(Arc::new(Store::open(&self.config.paths.root, &checkouts).expect("reopen store")));
+        // Other test threads fork children (git, install scripts) that hold
+        // the old LOCK description between fork and exec, so the flock can
+        // read Busy for a moment after close: retry briefly.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let st = loop {
+            match Store::open(&self.config.paths.root, &checkouts) {
+                Ok(s) => break s,
+                Err(e) if e.code == Code::Busy && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Err(e) => panic!("reopen store: {e:?}"),
+            }
+        };
+        self.store = Some(Arc::new(st));
     }
 
     pub fn root(&self) -> PathBuf {
@@ -630,6 +643,15 @@ impl Fx {
 
     pub fn pins(&self, repo: &str) -> String {
         self.sb.git(&self.main(repo), &["for-each-ref", "--format=%(refname) %(objectname)", "refs/strata/pins/"])
+    }
+
+    /// One critical section under `repo`'s lock from the test, with the
+    /// lock's current bounded wait.
+    pub fn lock_write(&self, repo: &RepoName, mut f: impl FnMut()) -> strata_deps::Result<()> {
+        self.lock.with_write(repo, &mut || {
+            f();
+            Ok(())
+        })?
     }
 
     /// What must not change in a main checkout when `new` refuses.
