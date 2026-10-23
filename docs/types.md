@@ -562,7 +562,7 @@ confirm 只被 daemon 用
 | 层 | crate | 可以依赖 |
 | --- | --- | --- |
 | 0 | `strata-types` | 无 workspace crate |
-| 1 | `strata-apfs`、`strata-gitio`、`strata-store` | 第 0 层。同层只允许 store 依赖 apfs，因为 blob 用 `apfs::clone_file` 写入 |
+| 1 | `strata-apfs`、`strata-gitio`、`strata-store` | 第 0 层。同层只允许 store 与 gitio 依赖 apfs：store 的 blob 用 `apfs::clone_file` 写入；gitio 在根之下的读写（gitfile、管理目录、`export_tree`、经 `open_rooted_file` 读文件）都经 apfs（增补 7 的 Layering 行、增补 8） |
 | 2 | `strata-overlay`、`strata-deps` | 第 0–1 层；二者互不依赖 |
 | 3 | `strata-session` | 第 0–2 层 |
 | 4 | `strata-publish`、`strata-search` | 第 0–3 层；二者互不依赖。外部的 `tgrep-core` 只给 search 用 |
