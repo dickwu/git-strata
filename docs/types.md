@@ -14,7 +14,7 @@
 | `TreeOid` | 标识 | git tree 对象 id，40 位十六进制 | §3 |
 | `CommitOid` | 标识 | git commit 对象 id，40 位十六进制 | §3 |
 | `BlobId` | 标识 | blob 的内容地址（BLAKE3） | §3 |
-| `DepsSetId` | 标识 | 依赖集 id：BLAKE3(安装输入 ∥ 平台 ∥ 工具链) | §3 |
+| `DepsSetId` | 标识 | 依赖集 id：BLAKE3(安装输入 ∥ 平台 ∥ 工具链 ∥ 依赖配置) | §3 |
 | `CheckpointId` | 标识 | checkpoint 序号，每会话递增 | §3 |
 | `RepoPath` | 标识 | 仓库内相对路径，`/` 分隔，NFC | §3 |
 | `ProposalId` | 标识 | 依赖变更提议的序号（u64） | §3 |
@@ -34,7 +34,7 @@
 | `SessionManifest` | 结构 | 会话清单 | §4 |
 | `WorkspaceState` | 结构 | 会话里一个 repo 的工作区 | §4 |
 | `ConfirmToken` | 结构 | 一次人类确认的凭据，一次一用，只在 daemon 内存里 | §4 |
-| `Action` | 枚举 | 需要人类确认的三种动作 | §4 |
+| `Action` | 枚举 | 需要人类确认的四种动作 | §4 |
 | `Config`、`RepoConfig` | 结构 | 全局配置与每仓库配置 | [config.md](config.md) |
 | `StrataError` | 结构 | 被拒绝的调用：`code` + `message` + `detail` | §6 |
 | `Code` | 枚举 | 错误码，共 39 个 | §6 |
@@ -47,13 +47,14 @@
 - 模块按计划里的名字产出的 `pub` 类型，定义在该模块文档的 §3，依赖链上方的模块按名字使用它，本文不重复定义。下表只列出这类类型的名字，形状见所有者的 §3。
 - 名字只用本文和各模块 §3 里的写法，不另起同义词。
 - `Config` 与 `RepoConfig` 是例外：它们放在 `strata-types` 里，但定义写在 [config.md](config.md)。本文只链接，不重复。
+- `PushOutcome` 与 `BaseManifest` 也是例外：它们定义在本文，不在所有者的 §3。模块引用这里的形状，不另写一份。
 
 模块拥有的跨模块类型：
 
 | 名字 | 所有者（定义处） | 使用者 |
 | --- | --- | --- |
 | `MoveReport` | session（session.md §3） | daemon、publish |
-| `Proposal` | deps（deps.md §3） | session、daemon、cli |
+| `Proposal` | deps（deps.md §3） | session、daemon、cli、publish |
 | `RolloutPlan` | deps（deps.md §3） | session、daemon |
 | `Overlay` | overlay（overlay.md §3） | search、publish |
 
@@ -65,7 +66,7 @@
 - 带数据的枚举用内部标签 `#[serde(tag = "kind")]`。`OverlayEntry` 的 `kind` 字段再加 `#[serde(flatten)]`，这样一条条目在 JSON 里只有一层对象。`PushOutcome` 有元组变体，内部标签装不下其中的字符串，所以改用相邻标签 `#[serde(tag = "kind", content = "message")]`。不带数据的枚举（`Code`）序列化为变体名字符串，如 `"Conflict"`。
 - `Option` 为 `None` 的字段不输出（`skip_serializing_if = "Option::is_none"`），读入时缺省为 `None`（`default`）。
 - `SystemTime` 字段加 `#[serde(with = "strata_types::serde_rfc3339")]`，序列化为 RFC 3339 UTC 字符串。这个适配模块放在 `strata-types` 里，怎么实现交给构建者。`RepoPath` 与 `PathBuf` 序列化为字符串。
-- `strata-types` 不做 I/O，只依赖 `serde`、`serde_json`（`StrataError.detail` 要用）和做 NFC 规整、十六进制校验的纯计算 crate。
+- `strata-types` 不做 I/O，只依赖 `serde`、`serde_json`（`StrataError.detail` 要用）、`toml`（`Config::parse` 在 `strata-types`，见 config.md）和做 NFC 规整、十六进制校验的纯计算 crate。
 
 ## 3. 标识
 
@@ -108,8 +109,9 @@ pub struct CommitOid(String);
 #[serde(try_from = "String", into = "String")]
 pub struct BlobId(String);
 
-/// 依赖集 id：BLAKE3(inputs_hash ∥ platform ∥ toolchain)，64 位小写十六进制。
-/// 三段如何拼接编码由 deps.md 规定，要求同样的输入必定得到同样的 id。
+/// 依赖集 id：BLAKE3，64 位小写十六进制。
+/// deps.md 的 `set_id` 取四个参数：`inputs_hash`、`platform`、`toolchain`、`config: &DepsConfigKey`。
+/// 拼接编码由 deps.md 规定，要求同样的输入必定得到同样的 id。
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct DepsSetId(String);
@@ -238,6 +240,8 @@ pub struct Checkpoint {
     pub id: CheckpointId,
     pub session: SessionId,
     pub repo: RepoName,
+    /// 这份 checkpoint 对着的基线。restore 到基线不同的工作区走 `overlay::rebase`，不按条目原样回放。
+    pub base: BaseGen,
     /// JSON 里是 RFC 3339 UTC 字符串（§2.2）。
     #[serde(with = "strata_types::serde_rfc3339")]
     pub at: SystemTime,
@@ -292,8 +296,8 @@ pub struct PublishTarget {
     pub branch: String,
     /// true：发布后立刻推到 `origin/<branch>`；false：留在本地，等 `git-strata push <repo>`。
     pub push: bool,
-    /// 推送前是否要人类确认（design §6.9）。`deploy_on_push = true` 的仓库不论此值都要确认，
-    /// 因为配置不能绕过确认（不变量 7）。
+    /// 推送前是否要人类确认（design §6.9）。`deploy_on_push = true` 的仓库不论此值都要确认。
+    /// 不变量 7 在这里的范围是这些仓库，加上钉住规则：把 `deploy_on_push` / `confirm` / `push` 调松要先过 `ConfigRelax`，调紧立即生效。
     pub confirm: bool,
 }
 
@@ -348,6 +352,7 @@ pub struct WorkspaceState {
   "id": 7,
   "session": "s-k3q7xm2a",
   "repo": "tool",
+  "base": { "repo": "tool", "tree": "abc123…", "deps": "9f2c…" },
   "at": "2026-10-22T18:04:11Z",
   "reason": { "kind": "ToolCall", "id": "toolu_01AbCd" },
   "entries": [
@@ -378,7 +383,8 @@ pub struct ConfirmToken {
     pub nonce: u128,
 }
 
-/// 需要人类确认的动作，即 design §6.9 列出的三种。
+/// 需要人类确认的动作。design §6.9 列出前三种；`ConfigRelax` 是把钉住的
+/// `deploy_on_push` / `confirm` / `push` 调松时的确认（module-rulings Addendum 1）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Action {
@@ -388,6 +394,9 @@ pub enum Action {
     DepsApprove { proposal: ProposalId },
     /// `rm --discard`：丢掉会话的未发布改动，再删除会话。
     RemoveDiscard { session: SessionId },
+    /// 配置重载把某个仓库钉住的 `deploy_on_push` / `confirm` / `push` 调松。
+    /// 调紧立即生效，不走这个动作。`repo` 是该仓库的 `RepoId`。
+    ConfigRelax { repo: RepoId },
 }
 ```
 
@@ -396,6 +405,7 @@ pub enum Action {
 - **谁消费**：
   - `PushDeploy` 的凭据交给 `publish::push`，`RemoveDiscard` 的凭据交给 `session::remove`。这两个函数按值收下凭据并核对 `action`，不符时返回 `Code::NotConfirmed`。
   - `DepsApprove` 由 daemon 处理 `deps approve` 时校验一次，然后对每个目标会话调用 `session::move_workspace`。`move_workspace` 不收凭据，因为发布后 rebase 也会调它。
+  - `ConfigRelax` 的凭据交给 daemon 的 `config_relax`。daemon 核销之后才把调松后的钉住值写回。confirm 不写钉住值。调紧不签发这个动作。
 
 ## 5. 配置结构
 
@@ -444,7 +454,7 @@ pub enum Code {
 | 码 | 何时返回 | 谁返回 |
 | --- | --- | --- |
 | `Conflict` | 合成 staging 树时，同一文件的同一 hunk 被两边都改了（design §6.5 第 3 步）。整个发布组停下，什么都不提交；`detail` 列出冲突文件、hunk 和涉及的会话，用 `publish --assign` 指定由谁解决 | `publish` |
-| `HeadMoved` | 比较并交换失败：要前进的 `refs/strata/publish/<分支>` 已经不是本次读取时的值，说明另一次发布先前进了发布链。不重新合并、不重试；`detail` 带期望值与实际值 | `gitio`（`update_ref`），`publish` 透传 |
+| `HeadMoved` | 两处借用同一个码，不另造码。发布链的比较并交换失败：要前进的 `refs/strata/publish/<分支>` 已经不是本次读取时的值，说明另一次发布先前进了发布链。不重新合并、不重试；`detail` 带期望值与实际值。另外，`deps approve` 与 `plan_rollout` 在 `P.head` 已不再是 `main_tip` 时，写之前拒绝：`detail.reason = "main_moved"`，`detail` 带期望的 head 与当前的 tip | `gitio`（`update_ref`），`publish` 透传；`deps`（`approve`、`plan_rollout`） |
 | `Dirty` | `rm` 的会话还有未发布的改动（某个工作区的 overlay 非空），又没带 `--discard`（design §6.6） | `session` |
 | `Busy` | 同一 repo 的写锁（design §8）被另一个操作持有，在等待上限内没拿到 | `daemon` |
 | `NoSuchPath` | 点名的路径不存在：`restore` 的路径在目标 checkpoint 和基线里都没有；查询命令限定的路径在目标快照里不存在；配置里主 checkout 的 `path` 不存在 | `overlay`、`search`、`session` |
@@ -471,7 +481,7 @@ pub enum Code {
 | `NoSuchCheckpoint` | 该会话里没有这个 `CheckpointId`：从来没有过，或者已被 gc 回收 | `store`，`overlay` 与 `publish` 透传 |
 | `NoSuchProposal` | `deps approve` 给的 `ProposalId` 不是待确认的提议：这个提议从来没有过，或者已经不在待确认状态 | `deps`，`daemon` 透传 |
 | `NoSuchView` | 给的 `ViewId` 不是已挂上的检索视图：从来没挂上过，或者已经 detach | `search`，`daemon` 透传 |
-| `NotConfirmed` | 需要人类确认的动作（一推上线仓库的推送、`deps approve`、`rm --discard`）没有通过确认：LocalAuthentication 认证失败、被取消或超时；或者交来的 `ConfirmToken` 已经用过、已经过期，或它的 `action` 与要执行的操作不符（一次一用，design §6.9） | `confirm`（签发与校验）；`session`、`publish`（核对 `action`）；`daemon` 透传 |
+| `NotConfirmed` | 需要人类确认的动作（一推上线仓库的推送、`deps approve`、`rm --discard`、把钉住的推送设置调松）没有通过确认：LocalAuthentication 认证失败、被取消或超时；或者交来的 `ConfirmToken` 已经用过、已经过期，或它的 `action` 与要执行的操作不符（一次一用，design §6.9） | `confirm`（签发与校验）；`session`、`publish`（核对 `action`）；`daemon` 透传 |
 | `NotTty` | 需要人类确认的命令，stdin 不是 TTY。cli 的 `require_tty` 在发出请求之前就拒绝（design §6.9）；confirm 不检查 TTY | `cli` |
 | `OpenFiles` | 要替换或删除的目录里有进程打开着文件：`move_workspace` 要换依赖目录时，或 `rm` 时会话目录被占用（dev server 等）。跳过，目录一字不动；`detail` 列出 pid 和路径。多会话的 `deps approve` 里它按条目返回：跳过这个会话，其余会话照常移动（design §6.4 第 5 步） | `session` |
 | `CrossVolume` | 会话根目录、Store、基线与依赖集缓存跟主 checkout 不在同一个 APFS 卷上（design §7 要求同卷）。在克隆之前就拒绝，从不退化成复制 | `apfs`（`clone_tree`、`clone_file`）、`store`（`open`）、`session`（`new`） |

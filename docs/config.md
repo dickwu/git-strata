@@ -10,9 +10,9 @@
 
 - **一份全局配置**：`~/Library/Application Support/git-strata/config.toml`（TOML 1.0，UTF-8）。该目录只放配置和 daemon 的 socket（design §7）。design §7 把这个目录写作改名前的 `strata/`；本文按项目名用 `git-strata/`，design 的这一处待同步。
 - **只有两种表**：一张 `[paths]`，和每个仓库一张 `[repo.<name>]`。
-- **没有第二个来源**：strata 不读主 checkout 里的任何 strata 配置文件（不变量 2：对主 checkout 只读，且只读 `.git` 与种子文件）；没有环境变量或命令行 flag 能覆盖配置。对 `deploy_on_push = true` 的仓库，没有任何 flag、环境变量或配置项能让它的推送绕过人类确认（不变量 3、7）。但 `deploy_on_push`、`publish.confirm`、`publish.push` 本身就是同一个 uid 可写的文件里的设置，把它们调松等于绕过确认，所以 daemon 钉住（pin）它加载过的这三个值：之后的重载若调松其中任何一个——`deploy_on_push` 由 `true` 变 `false`，`publish.confirm` 由 `true` 变 `false`，`publish.push` 由 `false` 变 `true`——要先过一次人类确认（`Action::ConfigRelax { repo }`，types.md 还没有这个变体，计划在 Task 15 加入），调紧立即生效 [交给 `daemon.md`]。
+- **没有第二个来源**：strata 不读主 checkout 里的任何 strata 配置文件（不变量 2：对主 checkout 只读，且只读 `.git` 与种子文件）；没有环境变量或命令行 flag 能覆盖配置。对 `deploy_on_push = true` 的仓库，没有任何 flag、环境变量或配置项能让它的推送绕过人类确认（不变量 3、7）。但 `deploy_on_push`、`publish.confirm`、`publish.push` 本身就是同一个 uid 可写的文件里的设置，把它们调松等于绕过确认，所以 daemon 钉住（pin）它加载过的这三个值：之后的重载若调松其中任何一个——`deploy_on_push` 由 `true` 变 `false`，`publish.confirm` 由 `true` 变 `false`，`publish.push` 由 `false` 变 `true`——要先过一次人类确认（`Action::ConfigRelax { repo: RepoId }`，types.md §4），调紧立即生效 [交给 `daemon.md`]。
 - **表是完整的，没有继承**：每张 `[repo.<name>]` 只在字段级有缺省值（§2.2 的"缺省"列），不存在"继承一份内置的 inter 默认表"。附录 A 是一份完整可用的 `config.toml`（把各小节的代码块按顺序拼起来即可）；它怎么随二进制分发（`include_str!`、安装时写出……）[交给构建者]，但只许维护这一份文本，不得在代码里手抄第二份。
-- **解析与校验在 `strata-types`，无 I/O**：输入是文本，不是路径；读文件是 daemon 的事。配置无效时使用方必须拒绝使用，不得带着部分配置运行。`strata-types` 为 `Config::parse` 依赖 `toml`（types.md §2.2 对该 crate 依赖的限制由计划的 Task 15 修订）；§2.4 的 argv 切分是几十行的纯字符串代码，自己写，不另加依赖。
+- **解析与校验在 `strata-types`，无 I/O**：输入是文本，不是路径；读文件是 daemon 的事。配置无效时使用方必须拒绝使用，不得带着部分配置运行。`strata-types` 为 `Config::parse` 依赖 `toml`（types.md §2.2 已列入）；§2.4 的 argv 切分是几十行的纯字符串代码，自己写，不另加依赖。
 - **`[repo.*]` 的全集 = 兄弟布局**。design §6.1 要求 `strata new` 对"每个兄弟仓库（不只是 `--repos` 指定的）"钉基线并克隆，原因是 dev-link 之类的脚本用 `../<目录名>` 找兄弟库（design §3）。一个仓库不在配置里，就不在任何会话里。inter 工作区里这种依赖来自：
 
 | 消费者 | dev-link 镜像进 `node_modules/@inter/*` 的兄弟库 | 出处 |
@@ -55,6 +55,7 @@
 
 ### 2.3 字段语义
 
+- **`path`**：主 checkout 的路径。加载配置时它必须已经存在，并且等于它的 realpath：绝对、没有尾部 `/`、任何分量都不是符号链接。不是 realpath 的，加载时 `InvalidInput`，`detail` 写出 realpath（module-rulings「Repo paths in config are realpaths」）。通过之后 session、deps、apfs 把 `path` 原样往下传，不再解析。词法上的绝对与已规范化仍由 V2 在无 I/O 的 `validate` 里拒绝。
 - **`deps_dirs`**：属于依赖集的目录（design §4）：不进 overlay、不被监听；在会话里是可写的 CoW 克隆（归会话所有）。`strata new` 优先从主 checkout **认领**（安装输入哈希与基线一致就 `clonefile` 封存为第一代），不一致才用 `install` 冷装（design §6.1）。目录里除 `node_modules`、`vendor` 外，还要包含 `install` 产出的其它被 ignore 的目录：tool 的 `postinstall` 把 wasm 等资源从 `node_modules` 复制到 `public/mediapipe/wasm`、`public/pdfium`、`public/file-viewer`；insurance-check 的 `postinstall` 另外装 `sidecar/node_modules`。
 - **`seed_caches`**：构建缓存（design §4）。新建会话时从温热的主 checkout `clonefile` 过来，归会话所有、可写，**不同步、不 checkpoint、不封存**。可以嵌套在某个依赖目录之内（默认的 `node_modules/.cache`），封存依赖集时把它排除。冷建要 30–40 分钟（design §6.1），所以只克隆、绝不冷建。纯 Rust 仓库用 `target`（`src-tauri/target` 的对应物）。主 checkout 里不存在的条目静默跳过。
 - **`seed_files`**：被 gitignore 但运行必需的文件，新建会话时从主 checkout 复制（design §4）；不 checkpoint；`status` 列出来源与时间，不显示内容（`staff-api/.env` 是生产库配置，`secrets.rs` 含密钥）。**条目必须是被 ignore 且未被跟踪的路径**：已被跟踪的文件随基线导出，再从主 checkout 复制会把可能是脏的版本盖到基线上；未被 ignore 的文件复制过去会以 `Untracked` 进 overlay。两种条目两种待遇 [我的决定]：**缺省的四项是候选**——每一项只在该仓库里未被跟踪且被 ignore 时才是种子文件，已被跟踪（admin、maxident-sync、insurance-check、rust-socket、rust-mail、gwd、sockdbg 七个仓库跟踪着 `CLAUDE.md`）或未被 ignore 的缺省项静默不算，不报错也不告警，所以省略 `seed_files` 的最小 `[repo.<name>]` 表在任何仓库上都能 `new`；**显式写出的条目**是硬要求：存在但被跟踪或未被 ignore → `session::new` 拒绝（`InvalidInput`，§4.3）。附录 A 的取法：design §4 的默认四项 ∩ 该仓库里被 ignore 的，再加仓库特有的（maxident-sync、insurance-check 的 `src-tauri/src/secrets.rs`：被 ignore，但没有它 Rust 编译不过）。主 checkout 里不存在的条目静默跳过。
@@ -201,7 +202,7 @@ impl Config {
 
 `repo` 在 `[paths]`、全局规则或调用方不知道仓库名时（`publish::check`）为 `null`；`index` 在不是数组元素时为 `null`；`rule` 是 §4.1 的规则编号。TOML 本身解析失败（语法错误、类型不符）也是 `InvalidInput`：`rule` 为 `"toml"`，并多一个 `message` 键放 `toml` 的原话（含行列）；未知键由 `deny_unknown_fields` 在同一步解析里报出，`parse` 把这类错误映射为 `rule = "V11"`（`message` 同样带 toml 的原话）[我的决定]。
 
-`PublishTarget` 定义在 types.md。规则 V11 要求 `publish` 内联表拒绝多出来的键，所以 types.md 里的 `PublishTarget` 也要带 `#[serde(deny_unknown_fields)]`（目前没有；加上不改变它的序列化形状）。
+`PublishTarget` 定义在 types.md，并且已经带 `#[serde(deny_unknown_fields)]`。规则 V11 要求 `publish` 内联表拒绝多出来的键，解析期就由这个属性挡住，不改变序列化形状。
 
 ---
 
@@ -249,10 +250,11 @@ impl Config {
 
 ### 4.3 运行期校验（需要 I/O，不在 `strata-types`）
 
-这些规则要看文件系统或 git，由用到配置的模块在用到时执行；失败同样返回 `StrataError`，`detail` 的形状同 §3。错误码取自 types.md §6.2 的错误码表。
+这些规则要看文件系统或 git。第一行是加载时的 realpath 核对（module-rulings「Repo paths in config are realpaths」）；其余由用到配置的模块在用到时执行。失败同样返回 `StrataError`，`detail` 的形状同 §3。错误码取自 types.md §6.2 的错误码表。
 
 | 规则 | 谁、何时 | 错误码 |
 | --- | --- | --- |
+| 每个 `path` 必须存在且等于它的 realpath（绝对、无尾部 `/`、任何分量都不是符号链接）。否则拒绝，`detail` 写出 realpath。通过之后调用方把 `path` 原样往下传（module-rulings「Repo paths in config are realpaths」） | daemon，加载配置时 | `InvalidInput` |
 | 每张 `[repo.<name>]` 的 `path` 存在 | `session`，用到该仓库时 | `NoSuchPath` |
 | `paths.root`（存在时）与每个 `path` 是目录；`deps_dirs`、`seed_caches` 里已存在的条目是目录（不存在则静默跳过） | `session`、`deps`；`apfs::clone_tree` 的源不是目录时兜底 | `NotDirectory` |
 | `seed_files` 里已存在的条目是普通文件：是目录 → `IsDirectory`，是 FIFO、socket、设备文件 → `NotFile`；`install_inputs` 里已存在的条目既不是普通文件、符号链接，也不是目录 → `NotFile` | `apfs::clone_file`（`session::new` 复制种子文件时）；`deps::inputs_hash` | `IsDirectory`、`NotFile` |

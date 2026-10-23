@@ -671,7 +671,7 @@ Run: `cargo test -p strata-daemon --test startup`
 
 Expected: FAIL
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.1。gc 在 recover 之后、listen 之前。`Unknown` 只读进内存。
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.1。gc 在 recover 之后、listen 之前。残留的 `PublishPhase::Running` 改成 `Unknown`，然后报出，不重放。
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-daemon --test startup`
