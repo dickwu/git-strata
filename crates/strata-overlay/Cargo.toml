@@ -1,0 +1,30 @@
+[package]
+name = "strata-overlay"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "git-strata overlay: whole-file differences of a workspace against its base, checkpoints, restore and rebase"
+
+[features]
+default = []
+# Test seams (overlay.md §3 OverlayFault, read_candidate). Also turns on the
+# store and apfs seams the overlay tests drive.
+test-seams = ["strata-store/test-seams", "strata-apfs/test-seams"]
+
+[dependencies]
+strata-types = { path = "../strata-types" }
+strata-apfs = { path = "../strata-apfs" }
+strata-gitio = { path = "../strata-gitio" }
+strata-store = { path = "../strata-store" }
+blake3 = { version = "1", features = ["mmap", "rayon"] }
+memmap2 = "0.9"
+rayon = "1"
+libc = "0.2.191"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"
+strata-overlay = { path = ".", features = ["test-seams"] }
+strata-gitio = { path = "../strata-gitio", features = ["test-seams"] }
