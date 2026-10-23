@@ -102,3 +102,15 @@ Spec: docs/modules/deps.md. Branch `impl/deps` (worktree git-strata-wt/deps), ba
   are re-execs of the test binary in their own process group (`worker` test).
   The `CrossVolume` preflight needs a disk image (`hdiutil`) and is a separate
   `#[ignore]` test (`build_preflight_cross_volume`).
+
+### Task 4 — adopt (§5.4)
+
+- `src/adopt.rs`, `tests/adopt.rs` (5 spec tests + worker helper). Test helpers added to `tests/common`: `make_socket` (a re-exec'd worker binds the socket by a relative name, since sockaddr paths are short), `mkfifo`, `apfs_walk`, `Fx::main_deps`.
+- Decisions:
+  - Every adopt failure after `begin` is a refusal (staging retired, attempt `refused`): the staging only holds a CoW clone of main, no unique data.
+  - Step 9 `validate_and_sync` failures with reason `unreadable_file` / `special_file` / `symlink_escapes` are returned as `Drift` with the same reason and path; other validation errors pass through (still refused).
+  - W2 walk errors refuse with that error, except `NoSuchPath` (a deps dir vanished mid-clone), which is `Drift changed_during_clone`.
+  - W1/W2 compare (path, kind, size, gen count, mtime, link target) per entry, including each deps dir root; an unknown gen count is "different". The first differing path in byte order is reported.
+  - A deps dir that is not a directory (file, socket, FIFO, symlink) or sits under a symlinked parent is `NotDirectory` before the lock; checks use `attrs_of`, which never opens (FIFO cannot block).
+  - Escaping symlinks/special files found by W1 are `Drift` before any attempt is recorded.
+  - Nested seed caches are skipped in both walks and discarded from `seal/` after the clone; main's cache is never touched.

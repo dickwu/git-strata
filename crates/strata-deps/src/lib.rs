@@ -9,6 +9,7 @@ use strata_gitio::Git;
 use strata_store::Store;
 use strata_types::{DepsSetId, Paths, RepoConfig, RepoName, RepoPath, StrataError};
 
+mod adopt;
 mod attempts;
 mod build;
 mod inputs;
@@ -17,6 +18,7 @@ mod open_files;
 mod seal;
 mod seams;
 
+pub use adopt::adopt;
 pub use attempts::attempts;
 pub use build::{build, clone_into, find_set, key_of};
 pub use inputs::{inputs_hash, is_input, nested_seed_caches, platform, set_id, toolchain};

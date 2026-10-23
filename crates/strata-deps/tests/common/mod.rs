@@ -635,3 +635,66 @@ pub fn spawn_worker(name: &str, mode: &str, vars: &[(&str, &OsStr)]) -> std::pro
     }
     c.spawn().expect("spawn worker")
 }
+
+/// Worker mode "sock": bind a Unix socket named `$STRATA_SOCK` relative to
+/// the worker's cwd (sockaddr paths are short; the sandbox path is not).
+pub fn sock_worker() -> ! {
+    let name = std::env::var("STRATA_SOCK").unwrap();
+    let l = std::os::unix::net::UnixListener::bind(&name).expect("bind socket");
+    std::mem::forget(l);
+    std::process::exit(0);
+}
+
+/// Create a Unix socket at `dir/name` via a worker of this test binary.
+pub fn make_socket(dir: &Path, name: &str) {
+    let st = Command::new(std::env::current_exe().unwrap())
+        .args(["worker", "--exact", "--nocapture", "--test-threads=1"])
+        .env(WORKER_ENV, "sock")
+        .env("STRATA_SOCK", name)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let m = fs::symlink_metadata(dir.join(name)).unwrap();
+    assert!(std::os::unix::fs::FileTypeExt::is_socket(&m.file_type()));
+}
+
+pub fn mkfifo(p: &Path) {
+    let st = Command::new("mkfifo").arg(p).status().unwrap();
+    assert!(st.success());
+}
+
+/// Attributes of every entry under `root/dir` (gen counts included).
+pub fn apfs_walk(root: &Path, dir: &str) -> Vec<(String, strata_apfs::Attrs)> {
+    let opts = strata_apfs::WalkOptions {
+        start: Some(rp(dir)),
+        ..Default::default()
+    };
+    let all = |_: &Path, _: &strata_apfs::Attrs| true;
+    let mut v: Vec<(String, strata_apfs::Attrs)> = strata_apfs::walk_with(root, &opts, &all)
+        .map(|r| {
+            let (p, a) = r.unwrap();
+            (p.as_str().to_string(), a)
+        })
+        .collect();
+    v.push((
+        dir.to_string(),
+        strata_apfs::attrs_of(root, &rp(dir)).unwrap(),
+    ));
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v
+}
+
+impl Fx {
+    /// The main checkout's `node_modules` like a finished install.
+    pub fn main_deps(&self) {
+        let nm = self.main.join("node_modules");
+        fs::create_dir_all(nm.join("a")).unwrap();
+        fs::create_dir_all(nm.join(".bin")).unwrap();
+        fs::write(nm.join("a/index.js"), b"module.exports = 'a'\n").unwrap();
+        fs::write(nm.join("a/package.json"), b"{\"name\":\"a\"}\n").unwrap();
+        std::os::unix::fs::symlink("../a/index.js", nm.join(".bin/a")).unwrap();
+    }
+}
