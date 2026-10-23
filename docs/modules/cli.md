@@ -33,7 +33,7 @@ crate 依赖到 `strata-daemon` 的 lib 为止，不含 `strata-confirm`（types
 **上游要求**（方法表里还没有、T14 的后写裁定要求有命令。名字若 daemon 已定成别的，改本文，不改行为）：
 
 1. `resolve_move`：包装 `session::resolve_failed_move`。人在 status 里看过现场之后选 Abandon 或 Accept，没有选择就不运行（「Resolving a failed move」）。
-2. `chain_resolve`：包装 publish 对 Rewound / Diverged 的显式处理。选择是接受 origin（重放 a..c，或丢掉 a..c）或恢复（把链按原样推上去）。恢复只在 `is_ancestor(o, c)` 时是快进，gitio 从不强推（publish.md 对 cli 的那条）。推送与链/锚点事务在 repo 写锁里，由 daemon 拿锁，cli 不拿（「Every update of a ref main_tip reads runs under the repo lock」）。
+2. `chain_resolve`：包装 publish 对 Rewound / Diverged 的显式处理。`--accept-origin replay` 与 `--accept-origin drop` 不推送，不取凭据。`--restore` 才推：只在 `is_ancestor(o, c)` 时是快进，否则在任何 push 之前以已有的 `InvalidInput` 拒绝，不加码；仓库要确认时用已有的 `PushDeploy`，不新加 `Action` 变体。gitio 从不强推。推送与链/锚点事务在 repo 写锁里，由 daemon 拿锁，cli 不拿（「Every update of a ref main_tip reads runs under the repo lock」）。
 3. 钉住的 `deploy_on_push` / `publish.confirm` / `publish.push` 写在配置目录里的哪个文件，由 daemon.md 点名。cli 只读它，用来在连接之前决定要不要 `require_tty`。
 
 调用方：人的终端，以及 Claude Code 钩子。没有别的 crate 调用 cli。
@@ -60,7 +60,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata deps propose` | `deps_propose` | 否 | 否 |
 | `git-strata deps approve` | `deps_approve` | 是 | `DepsApprove` |
 | `git-strata deps list` | `deps_list` | 否 | 否 |
-| `git-strata publish` | `publish` | 否 | 否 |
+| `git-strata publish` | `publish` | 是，当批次里有仓库要推且钉住的值要确认 | 每个这样的仓库一次 `PushDeploy`，在该仓库 `commit_tree` 之前。不推的仓库不确认 |
 | `git-strata push` | `push` | 是，当仓库要确认 | `PushDeploy` |
 | `git-strata assign` | `assign` | 否 | 否 |
 | `git-strata rm` | `rm` | `--discard` 时是 | `RemoveDiscard` |
@@ -69,7 +69,8 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata daemon stop` | — | 否 | 否 |
 | `git-strata daemon status` | `daemon_status` | 否 | 否 |
 | `git-strata resolve` | `resolve_move`（上游要求 1） | 是（D18） | 否。没有 `Action` 变体，不弹框 |
-| `git-strata chain` | `chain_resolve`（上游要求 2） | 是（D18） | 否。同上 |
+| `git-strata chain` | `chain_resolve`（上游要求 2） | 选择本身要 TTY（D18）。`--restore` 且仓库要确认时，连接前再按 `push` 的钉住值查一次 | `--restore` 且要确认：`PushDeploy`。`--accept-origin replay` / `drop`：不取凭据 |
+| `git-strata config relax` | `config_relax` | 是 | `ConfigRelax`。T15 把该变体加入 types.md 之后才弹框。不因文件变化而跑，也不处理收紧 |
 
 `git-strata daemon start` 用 `launchctl bootstrap gui/<uid> ~/Library/LaunchAgents/com.gwd.git-stratad.plist` 装上 `com.gwd.git-stratad`，不等待业务，不连接 socket。`stop` 用 `launchctl bootout gui/<uid>/com.gwd.git-stratad`，也不连接 socket。plist 不存在 → `InvalidInput`，`detail.reason = "no_plist"`。已经装上或已经卸下 → 成功，`data.already = true`，不是错误（D15、D16）。
 
@@ -97,9 +98,10 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata rm` | `--session S` `[--discard]`。`--discard` 会丢掉未发布改动，所以要确认 | 不给会话 → `InvalidInput` |
 | `git-strata gc` | 无 | — |
 | `git-strata resolve` | `--session S --repo R`，以及 `--abandon` 与 `--accept` 恰好一个。没有缺省 | 缺选择、或两个都给 → `InvalidInput`，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接 |
-| `git-strata chain` | `--repo R`，以及恰好一个：`--accept-origin replay`、`--accept-origin drop`、`--restore`。没有缺省 | 同上，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接 |
+| `git-strata chain` | `--repo R`，以及恰好一个：`--accept-origin replay`、`--accept-origin drop`、`--restore`。没有缺省。`--restore` 在 `!is_ancestor(o, c)` 时不连接、不推 | 缺选择、或两个都给 → `InvalidInput`，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接。不能快进 → `InvalidInput`，`detail.reason = "not_ancestor"`，在任何 push 之前 |
+| `git-strata config relax` | `<repo>` | 未知 repo 透传 `NoSuchRepo`。文件变了不会自己跑这条命令 |
 
-未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`assign`、`chain`、`checkpoint`、`daemon`、`deps`、`diff`、`files`、`gc`、`grep`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`status`。`git-strata deps` 或 `git-strata daemon` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，或 `start` / `stop` / `status`。
+未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`files`、`gc`、`grep`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`status`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
 
 `-h` / `--help` 与 `--version` 走 clap 的文本，打在 stdout，退出码 0。它们不是子命令，不套信封（D19）。除此之外，stdout 上只有信封。
 
@@ -119,7 +121,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `deps propose` | `Proposal` | — |
 | `deps approve` | `{ "results": [ { "session", "kind": "moved"\|"skipped", "code"?, "detail"? } ] }`。某个会话 `OpenFiles` 则那一条 `kind = "skipped"`，`code = "OpenFiles"`，其余照常。全部跳过仍是 `ok: true`（D17） | `OpenFiles` |
 | `deps list` | `{ "proposals": [Proposal, …] }`，按 `ProposalId` 升序。没有则空数组 | — |
-| `publish` | `{ "commits": { "<repo>": CommitOid }, "checks_ran": <u32>, "waiting": [Proposal, …] }`。没有检查的仓库 `checks_ran` 为 0，不是错误。冲突不是成功：整次 `ok: false`，`error.code = "Conflict"`，`detail` 用 publish 给的清单，cli 不再截断 | — |
+| `publish` | `{ "commits": { "<repo>": CommitOid }, "checks_ran": <u32>, "waiting": [Proposal, …], "pushes": [ { "repo", "outcome": PushOutcome } ] }`。`pushes` 只含这次真的推了的仓库。没有检查的仓库 `checks_ran` 为 0，不是错误。冲突不是成功：整次 `ok: false`，`error.code = "Conflict"`，`detail` 用 publish 给的清单，cli 不再截断。`ok: true` 只在每个 `outcome` 都是 `Pushed`（或 `pushes` 为空）时成立，不能把 `Unknown` 藏进成功。`commit_tree` 之后推送超时：`ok: false`，`error.code = "Unknown"`，链留下，`data.pushes` 仍带那个 `PushOutcome`。远端拒绝不在这次里改写成成功：`publish.push` 为假时不推，`PushRefused` 留给之后单独的 `git-strata push`；这次若已经推了且远端拒绝，`ok: false`，`error.code = "PushRefused"`，链留下 | — |
 | `push` | `PushOutcome`（`kind` + `message`）。`Refused` 不在成功里出现，publish 已把它转成 `PushRefused` | — |
 | `assign` | `{}` | — |
 | `rm` | `RemoveReport` | — |
@@ -127,7 +129,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `daemon start` / `stop` | `{ "already": true }` 或 `{}` | — |
 | `daemon status` | 见 §3.3。daemon 没在跑也有这个对象 | — |
 | `resolve` | `ResolutionReport` | — |
-| `chain` | `{ "repo", "choice", "outcome": PushOutcome }`。`choice` 是 `accept_origin_replay`、`accept_origin_drop` 或 `restore`。不推送的选择没有 `outcome`，改为 `"refs_moved": true` | — |
+| `chain` | `{ "repo", "choice", "outcome": PushOutcome }`。`choice` 是 `accept_origin_replay`、`accept_origin_drop` 或 `restore`。replay 与 drop 不推，没有 `outcome`，改为 `"refs_moved": true`，也不带凭据。`--restore` 的 `outcome` 与 `push` 相同：超时是 `Unknown`，`ok` 不能为 true | — |
 
 `grep` / `files` / `diff` 的路径按 `RepoPath` 的字节序排列（NFC，区分大小写）。不按 inode，不分页，一次把结果放进这一个 JSON（D10）。
 
@@ -193,9 +195,9 @@ socket 是 `~/Library/Application Support/git-strata/daemon.sock`。没有环境
 git-strata checkpoint --tool-call "$TOOL_USE_ID"
 ```
 
-会话从钩子的 cwd 解析，不在命令行上传 `--session`。`--tool-call` 存在且 stdin 不是 TTY 时，读 stdin 的一个 JSON 对象（Claude Code 的钩子输入）：`tool_input.file_path` 是字符串就收成一个 `--path`；`tool_input.file_paths` 或 `tool_input.edits[].file_path` 同样收。`tool_name` 为 `Bash`，或没有路径 → 不传路径，daemon 走 `Inbox::require_full`。stdin 是 TTY 时只认命令行上的 `--path`（D5）。
+会话从钩子的 cwd 解析，不在命令行上传 `--session`。一次钩子可以记下不止一个 repo，不能只记 cwd 所在的那个。`--tool-call` 存在且 stdin 不是 TTY 时，读 stdin 的一个 JSON 对象（Claude Code 的钩子输入）：`tool_input.file_path`、`tool_input.file_paths`、`tool_input.edits[].file_path` 都收成绝对路径。每条绝对路径落到哪个会话仓库，就记哪个仓库：工作区是 `<root>/sessions/<session-id>/<repo>/`，用路径前缀对上，不调用 `Sessions::open`。从 tool 工作区来的 `../hr-core` 一旦变成绝对路径，落在同一会话的 `hr-core` 里，就必须记在 `hr-core` 上，不能丢掉，也不能记成 cwd 那个 repo 的检查点。落在这个会话之外的路径跳过，不让 cwd 的检查点因此失败。没有路径的工具（`Bash`）对这个会话每个 tracked repo 走 `Inbox::require_full`，不是只扫 cwd。stdin 是 TTY 时只认命令行上的 `--path`，映射规则相同（D5）。
 
-同一个 `--tool-call` ID 再来一次是同一条检查点（幂等）。键是（会话，repo，id），与 types.md 的 `CheckpointReason::ToolCall` 一致。cli 先在本地查：这次要记的每个 repo 都已经有这个 id → 返回那些 `Checkpoint`，不再请 daemon 记第二条。缺了的才连接。daemon 没在跑、而 id 已经都在 → 仍返回那些行（这是读）。daemon 没在跑、而 id 是新的 → `Busy`，`detail.reason = "daemon_down"`，什么都不写。
+同一个 `--tool-call` ID 再来一次是同一条检查点（幂等）。键是（会话，repo，id），与 types.md 的 `CheckpointReason::ToolCall` 一致。cli 先查 store 里已有的 `Checkpoint` 行，不调用 `Sessions::open`：这次要记的每个 repo 都已经有这个 id → 返回那些 `Checkpoint`，不再请 daemon 记第二条。缺了的才连接。daemon 没在跑、而 id 已经都在 → 仍返回那些行（这是读）。daemon 没在跑、而 id 是新的 → `Busy`，`detail.reason = "daemon_down"`，什么都不写。
 
 `SessionStart` 的命令行是 `git-strata daemon status`。它打出的那一行信封里有 daemon 是否在跑，以及 cwd 能解析出的会话 id。没有第二行散文。
 
@@ -228,7 +230,7 @@ cli 不拥有表，不拥有目录。它读的配置目录是 `~/Library/Applica
 
 不变量：
 
-1. 不变量 7：`deps approve`、要确认的 `push`、`rm --discard` 在 `require_tty` 失败时不连接、不发 RPC、不弹框。没有 flag、环境变量或配置项能跳过。配置文件把 `deploy_on_push` 写成 false 也不够：钉住的值若仍要确认，照样先查 TTY（读上游要求 3 的文件；文件不存在则用 `needs_human_confirm()`；文件读不出则当作要确认，D21）。
+1. 不变量 7：`deps approve`、要确认的 `push`、会推且要确认的 `publish`、要确认的 `chain --restore`、`config relax`、`rm --discard` 在 `require_tty` 失败时不连接、不发 RPC、不弹框。没有 flag、环境变量或配置项能跳过。配置文件把 `deploy_on_push` 写成 false 也不够：钉住的值若仍要确认，照样先查 TTY（读上游要求 3 的文件；文件不存在则用 `needs_human_confirm()`；文件读不出则当作要确认，D21）。不推的仓库、以及 `chain` 的 replay / drop，不取 `PushDeploy`。
 2. 不变量 6：cli 自己不清理现场。连接在请求写出去之后断开，写命令返回 `Unknown`，`detail.reason = "socket_closed"`，因为不知道 daemon 写到了哪一步。读命令在同样的断开上返回 `Busy`，`detail.reason = "daemon_down"`（读还没写任何东西）。
 3. 不变量 3：cli 不提供绕过推送确认的开关。`assign` 不确认，与 design §6.9 一致。
 4. 一次确认对上的就是那一次计划。被取代的提议、主干已经移开的 head、Rewound / Diverged 的链，都是另一次命令，不是这次命令的重试。
@@ -240,27 +242,28 @@ cli 不拿 repo 写锁，不占会话队列，不等待建造锁。锁在 daemon
 共同的五步：
 
 1. 解析子命令。未知子命令 → `InvalidInput`，`detail.commands` 见 §3.1。不到第 2 步。
-2. 确认类，以及 D18 的 `resolve` / `chain`：`require_tty`。失败即返回 `NotTty`，不到第 3 步。`resolve` / `chain` 在这一步之前就拒绝缺选择或两个都给，同样不连接。
+2. 确认类，以及 D18 的 `resolve` 与 `chain` 的选择：`require_tty`。会推且钉住的值要确认的 `publish`、要确认的 `chain --restore`、`config relax` 也在连接前查 TTY。失败即返回 `NotTty`，不到第 3 步。`resolve` / `chain` 在这一步之前就拒绝缺选择或两个都给，同样不连接。`chain --restore` 且 `!is_ancestor(o, c)` → `InvalidInput`，`detail.reason = "not_ancestor"`，不连接、不取凭据、不推。
 3. daemon 在听：写一行请求，读一行回答，原样映射到信封（上游的码不变）。`UnknownMethod` / `Failed` 按 D7。
 4. daemon 没在听：`status`、`grep`、`files`、`diff`、`deps list`、`daemon status` 走本地只读路径（§5.1）。其余返回 `error.code = "Busy"`，`detail.reason = "daemon_down"`，`message` 告诉人先跑 `git-strata daemon start`。不新加码（D2）。
 5. `checkpoint --tool-call ID`：先按 §3.5 查本地。已经都有则返回那几条，不再请 daemon 记第二条。
 
 确认类在第 3 步之前多做一次展示，仍然不发写请求：
 
-1. `deps approve`：读那条 `Proposal`（daemon 在跑就经 `deps_list` / 读接口，否则本地 `open_proposals`）。把 `id`、`repo`、`state`、`from`、`to`、`from_inputs`、`to_inputs`、`tree`、`head` 打到 stderr。然后才发 `deps_approve`。daemon 弹框。回答是 `NoSuchProposal`：把 `error.detail` 打到 stderr；`detail.state` 若是一个 `ProposalId`，或 `detail.replacement` 是一条 `Proposal`，再把那条替换提议的同样字段打到 stderr。进程到此退出，不发第二次 `approve`。`HeadMoved` 且 `detail.reason = "main_moved"` 同样：打出 `detail.tip`，不重试，不批准另一个 head。
-2. 要确认的 `push`：先按 §4 判断要不要 TTY（配置或钉住的值）。要确认才展示：repo、`publish.branch`、当前链顶（读得到才写）。然后发 `push`。链顶在展示之后变了，由 daemon 拒绝；cli 不重发。
+1. `deps approve`：读那条 `Proposal`（daemon 在跑就经 `deps_list`，否则 `deps::open_proposals`；两种都不调用 `Sessions::open`）。把 `id`、`repo`、`state`、`from`、`to`、`from_inputs`、`to_inputs`、`tree`、`head` 打到 stderr。凭据只有 `DepsApprove { proposal }`，不含会话：弹框前再逐行列出这次会移动的会话 id（只读的 rollout 计划里判定为移动的那些；同样不调用 `Sessions::open`）。然后才发 `deps_approve`。daemon 弹框。回答是 `NoSuchProposal`：把 `error.detail` 打到 stderr；`detail.state` 若是一个 `ProposalId`，或 `detail.replacement` 是一条 `Proposal`，再把那条替换提议的同样字段打到 stderr。进程到此退出，不发第二次 `approve`。`HeadMoved` 且 `detail.reason = "main_moved"` 同样：打出 `detail.tip`，不重试，不批准另一个 head。
+2. 要确认的 `push`，会推且要确认的 `publish`，以及要确认的 `chain --restore`：先按 §4 判断要不要 TTY（钉住的值；读不出当作要确认）。要确认才展示。凭据只有 `PushDeploy { repo, branch }`，不含提交：stderr 列出这次确认的 a..c 里每个 commit，不只写链顶。`publish` 对批次里每个要推且要确认的仓库各准备一次 `PushDeploy`，在该仓库的 `commit_tree` 之前；没有则该仓库 `NotConfirmed`，这个仓库不提交（front 就是要推且要确认的仓库）。不推的仓库不确认。然后才发请求。daemon 弹框。链在展示之后变了，由 daemon 拒绝；cli 不重发。`publish` 每个仓库的推送结果按 `push` 映射，写进 `data.pushes`：`commit_tree` 之后超时是 `Unknown`，链留下，`ok` 不能为 true；`publish.push` 为假时这次不推，`PushRefused` 留给之后单独的 `git-strata push`。
 3. `rm --discard`：stderr 打一行会话 id 和“未发布的改动会被丢掉”。然后发 `rm`。
+4. `config relax`：`require_tty` 之后才连接。T15 加入 `Action::ConfigRelax` 之前，TTY 通过后返回 `Unsupported`，不连接、不改钉住的值。加入之后才弹框并调用 `config_relax`。收紧不走这条命令。配置文件变了不会自动跑它。
 
-`resolve` 在发 RPC 之前把该工作区的 `scene` 和两条 `choices` 打到 stderr，并写明这次 flag 选的是哪一条。`chain` 在发 RPC 之前把 a..c（status 里有才写）和所选的三个动作之一打到 stderr。两个命令都只发一次 RPC。
+`resolve` 在发 RPC 之前把该工作区的 `scene` 和两条 `choices` 打到 stderr，并写明这次 flag 选的是哪一条。`chain` 的 replay / drop 不取凭据；`--restore` 只有在上面第 2 步要确认时才取 `PushDeploy`。两个命令都只发一次 RPC。
 
 设计 §8 的数字不是 cli 自己的预算：checkpoint 改 50 个文件 < 200 ms、热 `grep` < 300 ms，由 daemon / search 达到。cli 加上的只有参数解析、一行 JSON、以及确认类在连接前的 TTY 检查。确认类的等待是人的时间，上限不由 cli 截断。
 
 ### 5.1 本地只读路径
 
-只在第 4 步、且只对那六个命令。不调用 `launchctl`，不创建会话，不调用任何 store 写方法。
+只在第 4 步、且只对那六个命令，并且只在 daemon 没在跑时。不调用 `launchctl`，不创建会话，不调用任何 store 写方法。daemon 在跑时，`open_proposals` 与 `--tool-call` 的查找只读 store 的行或走只读 RPC，不调用 `Sessions::open`。再开一个 `Sessions` 会把进行中的移动报成 `MoveAwaitingRecover`。
 
 1. 读 `config.toml`，`Config::parse` 失败 → 透传 `InvalidInput`（`detail.rule = "toml"` 由 types 填的原样保留）。
-2. 按 session.md 打开 `Sessions`：每个 repo 一个 gitio 的 `Git`（打在主 checkout 上），store 以读者打开（WAL，读者不堵写者）。交给它的 `RepoWriteLock` 立刻返回 `Busy`，从不等待；`BeforeCheckpoint` 若被调用则返回 `InvalidInput`，`detail.reason = "readonly_client"`。只读路径不得走到会调用它们的函数。
+2. 仅在 daemon 没在跑时按 session.md 打开 `Sessions`：每个 repo 一个 gitio 的 `Git`（打在主 checkout 上），store 以读者打开（WAL，读者不堵写者）。交给它的 `RepoWriteLock` 立刻返回 `Busy`，从不等待；`BeforeCheckpoint` 若被调用则返回 `InvalidInput`，`detail.reason = "readonly_client"`。只读路径不得走到会调用它们的函数。daemon 在跑时不执行这一步。
 3. `status` → `Sessions::status` / `list`。`changed` 用 session 已经规定的读时重算。健康 `Unknown` 时 cli 自己加上 `choices`。
 4. `grep` / `files` → 进程内 attach、查询、detach。零命中是空列表。flag 只有 §3.1 那两个。
 5. `diff` → `publish::diff_between` 或相对基线的只读比较，形状按 §3.2。
@@ -271,23 +274,25 @@ cli 不拿 repo 写锁，不占会话队列，不等待建造锁。锁在 daemon
 
 ### 5.2 幂等的检查点
 
-`--tool-call` 的查找只读 store 里该会话已有的 `Checkpoint`。`reason.kind = "ToolCall"` 且 `reason.id` 相等即命中。一次钩子只覆盖 cwd 所在的那个 repo（`resolve` 返回的 `RepoName`）。cwd 在会话根、不在任何一个 repo 里 → 对该会话每个 tracked repo 各查一次。`-m` 不是幂等的：每次都是新的 `Manual` 检查点。
+`--tool-call` 的查找只读 store 里该会话已有的 `Checkpoint` 行，不调用 `Sessions::open`。`reason.kind = "ToolCall"` 且 `reason.id` 相等即命中。要记哪些 repo 按 §3.5 的路径映射，不是只记 cwd。没有路径时，对该会话每个 tracked repo 各查一次。`-m` 不是幂等的：每次都是新的 `Manual` 检查点。
 
 ### 5.3 stderr
 
-JSON 成功之后：若这次解析出了会话，本地再读一次 `open_proposals`（不发第二次 RPC）。每条对该会话仍是 Pending 的提议，stderr 一行 `pending proposal <id> for <repo>`。这次附加读失败不影响已经写出的信封和退出码（D20）。design §6.4 第 4 步的提示只走这条路，不进 `data`；`status` 的 `data` 里照常有 `pending`。
+JSON 成功之后：若这次解析出了会话，再读一次 `deps::open_proposals`（store 的读者，不发写 RPC，不调用 `Sessions::open`）。每条对该会话仍是 Pending 的提议，stderr 一行 `pending proposal <id> for <repo>`。这次附加读失败不影响已经写出的信封和退出码（D20）。design §6.4 第 4 步的提示只走这条路，不进 `data`；`status` 的 `data` 里照常有 `pending`。
 
 回答里的 `alerts`，以及 `status` 里要人看的 warnings（隔离区、attach 的 `index-read-back-refused` / `staging-changed`），各在 stderr 打一行。不改 `ok`。
 
 ### 5.4 交互式发布选择
 
-`git-strata publish` 没有 `--from`、且 stdin 是 TTY：先取 cwd 会话的 `status`，把有改动的路径按编号打到 stderr，读 stdin 的编号或路径，空行结束，收成 `--from` 等价的批次。读到的不是编号也不是路径 → `InvalidInput`，不发 `publish`。这不是确认，不弹框。
+`git-strata publish` 没有 `--from`、且 stdin 是 TTY：先取 cwd 会话的 `status`，把有改动的路径按编号打到 stderr，读 stdin 的编号或路径，空行结束，收成 `--from` 等价的批次。读到的不是编号也不是路径 → `InvalidInput`，不发 `publish`。选路径不是确认，不代替 `PushDeploy`。批次收齐之后，要推且要确认的仓库仍按 §5 在连接前 `require_tty`，并在该仓库 `commit_tree` 之前各取一次 `PushDeploy`。
 
 ## 6. 失败与恢复
 
 | 情形 | 码 | 连了 daemon 吗 | 留下什么 |
 | --- | --- | --- | --- |
-| 非 TTY 上的确认命令，或 D18 的 `resolve` / `chain` | `NotTty` | 否 | 无 |
+| 非 TTY 上的确认命令：`deps approve`、要确认的 `push`、会推且要确认的 `publish`、要确认的 `chain --restore`、`config relax`、`rm --discard`，以及 D18 的 `resolve` 与 `chain` 的选择 | `NotTty` | 否 | 无 |
+| `chain --restore` 且 `!is_ancestor(o, c)` | `InvalidInput`（`not_ancestor`） | 否 | 无 push |
+| 要推且要确认的仓库，在它的 `commit_tree` 之前没有匹配的 `PushDeploy` | `NotConfirmed` | 是 | 这个仓库没有 commit。不回滚别的仓库 |
 | 未知子命令、缺选择、两个选择都给、参数格式错 | `InvalidInput` | 否 | 无 |
 | daemon 没跑，且是写命令（新的 `--tool-call` 也算写） | `Busy`（`daemon_down`） | 否 | 无 |
 | 已有的 `--tool-call` 再来，daemon 没跑 | 成功，返回已有行 | 否 | 无新行 |
@@ -313,8 +318,9 @@ cli 不重放 `Unknown`，不删除现场，不在失败后改跑 `gc` 或 `rm`�
 | `stdout_format_write_failure_is_nonzero` | 同上，覆盖格式化写失败这条同源用例 | `layerfs-telemetry/tests/timer_format.rs::writer_failures_propagate` |
 | `stdout_flush_failure_is_nonzero` | 显式 flush 失败（`BufWriter` 的 `Drop` 会吞掉）也是退出码 1 | `layerfs-telemetry/tests/timer_json.rs::a_flush_failure_is_surfaced` |
 | `error_codes_match_types_md` | 故意触发的每个 `error.code`，以及 `skipped[].code` 与 `BothChange.code` 里的码，都是 types.md `Code` 的变体名。闭集 39 个，测试从枚举读名字，不在 cli 里抄第二份。RPC 的 `UnknownMethod` 不出现在 `error.code` 里 | 新增 |
-| `hook_checkpoint_is_idempotent_per_tool_call` | 同一个 `--tool-call` 对同一会话同一 repo 跑两次：两次 `data.checkpoints[].id` 相同，store 里该键只有一行；第二次没有发写 RPC | 新增 |
-| `confirm_commands_refuse_non_tty` | `deps approve`、`needs_human_confirm` 的 `push`、`rm --discard` 在非 TTY 上退出码 1，`error.code` 为 `NotTty`，socket 上没有字节 | 新增 |
+| `hook_checkpoint_is_idempotent_per_tool_call` | 同一个 `--tool-call` 对同一会话同一 repo 跑两次：两次 `data.checkpoints[].id` 相同，store 里该键只有一行；第二次没有发写 RPC。从 tool 工作区来的 `../hr-core` 记在同一会话的 `hr-core` 上，不丢掉，也不记成 cwd 的 repo。会话外的路径跳过，cwd 的检查点不因此失败。一次钩子可以记下不止一个 repo | 新增 |
+| `daemon_up_read_does_not_open_sessions` | daemon 在跑时，`open_proposals` 与 `--tool-call` 的查找不调用 `Sessions::open`。第二次打开会把进行中的移动报成 `MoveAwaitingRecover`，这个测试断言没有第二次打开 | 新增 |
+| `confirm_commands_refuse_non_tty` | `deps approve`、`needs_human_confirm` 的 `push`、批次里有要推且要确认的仓库的 `publish`（front 即是）、要确认的 `chain --restore`、`config relax`、`rm --discard` 在非 TTY 上退出码 1，`error.code` 为 `NotTty`，socket 上没有字节。`chain` 的 replay / drop 在非 TTY 上也是 `NotTty`，且不取凭据 | 新增 |
 | `readonly_works_without_daemon` | socket 不存在时 `status`、`grep`、`files`、`diff`、`deps list`、`daemon status` 仍是信封；`publish` 与 `push` 是 `Busy`，`detail.reason` 为 `daemon_down` | `sdk/js/test/trace.mjs::store` |
 | `history_is_read_from_the_store_alone` | daemon 没跑时 `status` 的检查点列表来自 store 的只读打开，不要求 socket | `layerfs-api/tests/operator_history.rs::history_is_read_from_the_store_alone` |
 | `binary_file_is_marked_not_rejected` | 内容含 NUL 的文件：`diff` 该条 `code` 为 `Binary`，没有 hunk，整个命令仍 `ok`；`grep` 不把该文件的字节当文本命中，放进 `skipped` | `sdk/js/test/binary_write.mjs::blob` |
@@ -331,7 +337,7 @@ cli 不重放 `Unknown`，不删除现场，不在失败后改跑 `gc` 或 `rm`�
 | `results_live_in_data_not_a_log` | 不保留 trace 行。会话 id、检查点 id、commit oid 只出现在 `data` 里 | `sdk/js/test/trace.mjs::ids` |
 | `listing_is_one_document` | 不保留按字节分页的列表协议。`files` 的 `paths` 一次给完 | `layerfs-content/tests/filesystem_read.rs::listing_is_bounded_by_bytes_as_well_as_count` |
 | `superseded_proposal_is_not_auto_approved` | `deps approve` 得到 `NoSuchProposal` 且 `detail.state` 是另一个 id：stderr 有那条替换提议的 id，进程退出码 1，socket 上只有第一次请求 | 新增 |
-| `resolve_and_chain_require_an_explicit_choice` | `resolve` 不带 `--abandon`/`--accept`、`chain` 不带三个动作之一：`InvalidInput`，不连接。两个都给同样不连接。非 TTY 上即使 flag 齐也是 `NotTty`，不连接 | 新增 |
+| `resolve_and_chain_require_an_explicit_choice` | `resolve` 不带 `--abandon`/`--accept`、`chain` 不带三个动作之一：`InvalidInput`，不连接。两个都给同样不连接。非 TTY 上即使 flag 齐也是 `NotTty`，不连接。`chain --restore` 且 `!is_ancestor(o, c)`：`InvalidInput`，`detail.reason = "not_ancestor"`，不推、不取凭据。replay / drop 不取凭据 | 新增 |
 | `daemon_start_stop_do_not_use_the_socket` | `daemon start` 与 `daemon stop` 的测试替身只记录 `launchctl` 参数，socket 上没有字节 | 新增 |
 | `git_strata_is_the_same_binary` | `argv[0]` 为 `git-strata` 时，`status` 与经 git 的外部子命令约定传入的同样参数走同一个分发，没有第二棵命令树 | 新增 |
 
@@ -402,10 +408,10 @@ git commit -m "feat(cli): require tty before confirm"
 - Test: `crates/git-strata/tests/cli.rs`
 
 **Interfaces:**
-- Consumes: §3 的方法表；session 的 `Sessions::open`；search 的 `grep` / `files`；`deps::open_proposals`
+- Consumes: §3 的方法表；daemon 没在跑时才 `Sessions::open`；search 的 `grep` / `files`；`deps::open_proposals`
 - Produces: 子命令全集、本地只读路径、`--tool-call` 幂等
 
-- [ ] **Step 1: 写失败的测试**：`hook_checkpoint_is_idempotent_per_tool_call`、`readonly_works_without_daemon`、`history_is_read_from_the_store_alone`、`daemon_start_stop_do_not_use_the_socket`、`git_strata_is_the_same_binary`，以及 §7 里 `binary_file_is_marked_not_rejected` 到 `listing_is_one_document` 的各行
+- [ ] **Step 1: 写失败的测试**：`hook_checkpoint_is_idempotent_per_tool_call`、`daemon_up_read_does_not_open_sessions`、`readonly_works_without_daemon`、`history_is_read_from_the_store_alone`、`daemon_start_stop_do_not_use_the_socket`、`git_strata_is_the_same_binary`，以及 §7 里 `binary_file_is_marked_not_rejected` 到 `listing_is_one_document` 的各行
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p git-strata --test cli`
@@ -443,11 +449,11 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D15 plist 路径 | `~/Library/LaunchAgents/com.gwd.git-stratad.plist`，域 `gui/<uid>` | `start` 没有路径就无法 bootstrap。Label 用 daemon 已定的 `com.gwd.git-stratad` | 2026-10-23 |
 | D16 重复 start/stop | 已装上或已卸下是成功，`data.already = true` | `launchctl bootstrap` 对已加载的服务会失败。人再跑一次不该看成故障 | 2026-10-23 |
 | D17 全部跳过 | `deps approve` 每个会话都 `OpenFiles` 时仍 `ok: true`，条目里是 skipped | types.md：按条目返回，其余照常移动。没有“全部跳过”这个码 | 2026-10-23 |
-| D18 `resolve` / `chain` 要 TTY | 非 TTY 返回 `NotTty`，不连接。不弹 LocalAuthentication，因为 `Action` 没有对应变体 | 裁定要求没有人的选择就不运行。只有 flag 的话，钩子也能带上 `--accept`。TTY 挡住非终端的代理。终端里的代理仍能带 flag：要堵住那个，得由 T15 给 `Action` 加变体，cli 不加码、不加变体 | 2026-10-23 |
+| D18 选择要 TTY | `resolve`，以及 `chain` 的 replay / drop：非 TTY 返回 `NotTty`，不连接，不取凭据。`chain --restore` 在仓库要确认时走与 `push` 相同的 `PushDeploy`，会弹框。不再说 chain 从不弹框 | 裁定要求没有人的选择就不运行。replay / drop 不推，所以不取凭据。`--restore` 是推送，用已有的 `PushDeploy`，不新加 `Action` 变体 | 2026-10-23 |
 | D19 `--help` / `--version` | clap 文本，退出码 0，不套信封 | 这两个不是子命令。其余 stdout 只有信封 | 2026-10-23 |
-| D20 待确认提示 | 成功之后本地再读 `open_proposals`，失败不影响退出码 | design §6.4 第 4 步要每次 CLI 都提示。不能为了提示再发一次写 RPC | 2026-10-23 |
+| D20 待确认提示 | 成功之后读 `deps::open_proposals`，不调用 `Sessions::open`，失败不影响退出码 | design §6.4 第 4 步要每次 CLI 都提示。不能为了提示再发一次写 RPC，也不能再开一个 `Sessions` | 2026-10-23 |
 | D21 钉住的值读不出 | 当作要确认，先 `require_tty` | 读不出就放行，等于让一份坏文件跳过 TTY 检查 | 2026-10-23 |
 
 初稿里被后写裁定压过的两句，不沿用：`grep` 不给 session 就是全部（改为 cwd 会话，`--all` 才是全部，design §6.3 与 T11）；`grep` 的 `--repo`（T11 只留 `--session` 与 `--all`）。crate 名从初稿的 `crates/strata-cli` 改为 types.md §8 的 `crates/git-strata`。
 
-待定：上游要求 1 与 2 的方法名，若 daemon 定了别的名字，只改 §3 的方法列，不改命令行。`Action` 若在 T15 加入移动与链的变体，D18 的“不弹框”改为与 `deps approve` 相同的确认顺序。
+待定：上游要求 1 与 2 的方法名，若 daemon 定了别的名字，只改 §3 的方法列，不改命令行。`resolve` 仍没有 `Action` 变体。`chain --restore` 用已有的 `PushDeploy`，不等新变体。`config relax` 等 T15 的 `Action::ConfigRelax`，在那之前是 `Unsupported`，不加码。
