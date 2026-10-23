@@ -66,7 +66,7 @@ pub trait OverlaySource: Send + Sync {
 
 1. **tgrep-core**：把 `HybridIndex::from_reader(Arc<IndexReader>, &Path)` 从 `pub(crate)` 改成 `pub`，或另给一个等价的 `from_shared_reader`。今天 `from_reader` 是 `pub(crate)`（`hybrid.rs`，d25ade6），crate 外造不出一个绑在共享 `Arc<IndexReader>` 上的 `HybridIndex`。`HybridIndex::open` 会再映射一份，对不上 §7 `base_index_shared_across_sessions_same_tree` 的 `Arc::ptr_eq`。在这个构造函数公开之前，`crates/strata-search` 编不过已发布的 tgrep-core。不要复制 `HybridIndex`。若上游不能改可见性，按 design.md §5 的「不可行则 vendor 所需模块」处理，仍不在 search 里重写合并。v1 计划按公开构造函数写。本任务不改 tgrep。
 2. **T13 daemon**：实现 `OverlaySource`；`Which::All` 之前把要查的 Active 会话先 `attach`（search 的 `All` 只查已挂视图，不在查询里附带挂上）；launchd 没有用户 PATH，daemon 在第一次 `attach` 之前把进程 PATH 设成它文档里的显式 PATH，并且这条 PATH 上要找得到 `git`（tgrep 自己 `Command::new("git")`，search 改不了那条子进程的环境，见 §5.2）；长时间停在 `ensure` 上的 attach 由 daemon 的 status 报「正在建索引」，search 不提供 status。
-3. **store / T15**：`<root>/search/` 不在 store.md §4.1 的布局里。gc 不得把它当未知子目录收走。v1 没有引用行，年龄下限保不住一份建完超过 1 小时的索引。
+3. **store**：`<root>/search/` 不在 store.md §4.1 的布局里，gc 的 1 小时下限也不覆盖根下不认识的一级目录，所以 gc 不会收走它。索引按 D8 一直留着，不挪到 `bases/` 下。第一次 `Store::open` 时，`<root>` 里只要有 `store`、`bases`、`deps`、`sessions` 以外的名字就返回 `NotEmpty`（store.md §5.1 第 3 步）。因此 `<root>/search/` 只能在这次 open 成功、`store.db` 已经在之后再建。`store.db` 在了之后再 open，容忍 `search/`，也从不收集它。
 
 ## 3. 公开接口（Rust）
 
@@ -107,7 +107,8 @@ impl<'a> Search<'a> {
 
     /// 按 `changed` 更新该视图的私有索引。未知 id → `NoSuchView`。
     /// 空切片不是「让 tgrep 自己猜变了哪些文件」：本模块不调用 `WorktreeView`。
-    /// 空切片只复核根身份与 overlay 的 base；`needs_full` 为真时才全量复核。见 §5.3。
+    /// 视图就绪且 `needs_full` 为假时，空切片只复核根身份与 overlay 的 base。
+    /// 视图未就绪时，下一次 refresh 一律重做 §5.4，哪怕 `changed` 是空的、`needs_full` 为假。见 §5.3。
     /// 码：`NoSuchView`、`Busy`、`Unknown`、`NotText`。
     pub fn refresh(&self, view: ViewId, changed: &[RepoPath]) -> Result<()>;
 
@@ -151,6 +152,9 @@ pub struct Hit {
 pub enum SearchSeam {
     /// `grep` 在捉住 reader 快照之后、读任何工作区文件之前停住，直到 `release`。
     PauseBeforeVerify,
+    /// 下一次 `ensure` 在 `.stage-*` 出现之后、发布改名之前失败。一次有效。
+    /// §7 `ensure_failure_after_stage_is_unknown` 用它。
+    FailEnsureAfterStage,
 }
 
 #[cfg(feature = "test-seams")]
@@ -161,6 +165,13 @@ impl<'a> Search<'a> {
     pub fn storage_dir(&self, repo: &RepoName) -> Option<PathBuf>;
     pub fn arm(&self, seam: SearchSeam);
     pub fn release(&self);
+    /// 停在 `PauseBeforeVerify` 的那次查询捉住的 reader 指针。没有这样的查询就是 None。
+    /// 相等即与 `generation_ptr` 同一把 `Arc`。§7 `query_keeps_reader_snapshot_across_base_swap` 用它。
+    pub fn paused_reader_ptr(&self) -> Option<usize>;
+    /// 把这个视图当前装着的 reader 换成同一 repo 里已打开的另一份 generation。
+    /// 已经捉住的查询快照不变。未知视图 → `NoSuchView`。那份 tree 还没打开 → `InvalidInput`（`reason = "no_generation"`）。
+    /// §7 `query_keeps_reader_snapshot_across_base_swap` 用它换成另一份 generation。
+    pub fn swap_view_reader(&self, view: ViewId, tree: &TreeOid) -> Result<()>;
 }
 ```
 
@@ -291,7 +302,7 @@ profile [我的决定 D3]：`IndexingProfile::default()`，但 `max_blob_bytes =
 | 6 不确定的失败留现场 | `ensure` 已经建出 `.stage-*` 之后失败：返回 `Unknown`，暂存目录留着，tgrep 本来也不自动删。不发 `ViewId` |
 | 1、4、8 | search 不写工作区、不换依赖、不移动基线。换基线是 `move_workspace`，search 只观察它的结果 |
 
-错误时机按增补 3：工作区、gitfile、Store 行、refs、主 checkout、主对象库才算对外可见。`<root>/search/` 里的索引不在这张表里。所以 `ensure` 建成之后仍可以返回具名拒绝（例如 tree 与 `WorkspaceState.base.tree` 不符）。已经开始的、结果不确定的构建用 `Unknown`，不删暂存。
+错误时机按增补 3：工作区、gitfile、Store 行、refs、主 checkout、主对象库才算对外可见。`<root>/search/` 里的索引不在这张表里。所以 `ensure` 建成之后仍可以返回具名拒绝。建成的 generation 的 tree 与 `base.tree` 不符是已知的不符，返回 `InvalidInput`（`head_tree_mismatch`），不是 `Unknown`：结果是确定的，generation 留着，不发 `ViewId`。已经开始、结果不确定的构建（`.stage-*` 出现之后失败）才用 `Unknown`，不删暂存。
 
 ## 5. 流程与算法
 
@@ -307,7 +318,7 @@ profile [我的决定 D3]：`IndexingProfile::default()`，但 `max_blob_bytes =
 8. 这个 repo 还没有 manager：`Repository::discover(主 checkout)`，`with_storage(repo, <root>/search/<repo>)`。目录没有就建。`with_storage` 拒绝（存储落在某个已注册的 worktree 里，或落在索引快照里）→ `Unsupported`（`index_storage`），不发 id。`git` 找不到 → `Unsupported`（`git_missing`）。
 9. `ensure(head 的 40 位十六进制, profile, 前驱)`。`head` 用 `WorkspaceState.head`，不用 tree OID：`ensure` 会做 `rev^{commit}`，tree 不是 commit。前驱：本进程里同一 repo、同一 profile、已经打开的另一份 generation，没有就 None。增量是否只抽新 blob，由库保证（§7 的 `incremental_reuses_masks_renames_and_copies_extracting_only_new_blobs`）。
 10. 这一步会拿 tgrep 的 `publication.lock`（`generations/mod.rs` 的 `ensure_inner` 调用 `lock`，锁文件就是 §4.1 的那个）。search 不再加一把锁，也不给这个等待加超时 [我的决定 D5]。锁在第一次对外可见的工作区写之前，但 tgrep 的 `lock_exclusive` 本身不返回超时。一个 daemon 里所有线程共用这一把锁，不同 tree 的构建也串行。挂上第二个同 tree 的会话时，锁内只打开已发布的 generation，不重新抽取。
-11. `ensure` 返回的 generation 的 tree 必须等于 `base.tree`。不等 → `Unknown`（`head_tree_mismatch`）。generation 留着（它仍是那个 tree 的合法索引），不发 id。
+11. `ensure` 已经返回，generation 的 tree 不等于 `base.tree` → `InvalidInput`（`head_tree_mismatch`）。这是已知的不符，不是不确定。generation 留着（它仍是那个 tree 的合法索引），不发 id。不用 `Unknown`。
 12. `ensure` 失败：还没有 `.stage-*` → 按 §6 的表返回具名码。已经有本次新建的 `.stage-*` → `Unknown`（`index_build`），目录留着，不发 id。
 13. 用上游要求 1 的构造函数，把 `generation.base().reader()` 的 `Arc` 装进 `HybridIndex`，根设为工作区路径。按 §5.4 把 overlay 填进 `live`。这一步失败 → 不发 id，manager 与 generation 留着。
 14. 填完之后视图才算就绪。发 `ViewId`。中途任何失败都不把 id 放进表。
@@ -346,23 +357,24 @@ gitio 的净化环境到不了这些子进程。tgrep 的 `generations/git.rs` `
 1. 未知 id → `NoSuchView`。
 2. 再读 status 与 `open_root`。根的 `(st_dev, st_ino)` 变了，或 `WorkspaceState.base` 与视图钉住的不同 → 视图标成必须重新挂上，返回 `Busy`（`root_changed` 或 `base_moved`）。不把这一次的对账发布出去。对应「对账发布前根被换走：不发布，视图保持未就绪」。
 3. `overlays.last` 的 `base` 与视图的 `BaseGen` 不同 → 同样 `Busy`（`base_moved`），不发布。
-4. `changed` 非空：对每个路径取 `overlay.paired`，整组都重读。空切片且 `needs_full` 为假：只做了第 2、3 步就返回。空切片且 `needs_full` 为真：对全部成员重做 §5.4。
-5. 读失败、ignore 规则一时算不出、文件在读的过程中变了（`attrs.unchanged_since` 为假且重读一次仍变）：不发布，视图标成未就绪，返回 `Unknown`（`not_ready`）。不得用基线或旧 overlay 作答。下一次 `refresh` 成功之后才重新就绪。
-6. 发布时把新的 `live` 与新的根身份一起换上。换不上（第 2 步的身份在发布前又变了）就不发布。
+4. 视图未就绪：不论 `changed` 是不是空的、`needs_full` 是不是假，都重做 §5.4。这是未就绪之后的下一次 `refresh`，与 §6 的「下一次 refresh 重做 §5.4」是同一句。
+5. 视图就绪，且 `changed` 非空：对每个路径取 `overlay.paired`，整组都重读。视图就绪、空切片、且 `needs_full` 为假：只做了第 2、3 步就返回。视图就绪、空切片、且 `needs_full` 为真：对全部成员重做 §5.4。
+6. 读失败、ignore 规则一时算不出、文件在读的过程中变了（`attrs.unchanged_since` 为假且重读一次仍变）：不发布，视图标成未就绪，返回 `Unknown`（`not_ready`）。不得用基线或旧 overlay 作答。下一次 `refresh` 按第 4 步重做 §5.4，哪怕这次调用的 `changed` 是空的、`needs_full` 为假。成功发布之后才重新就绪。
+7. 发布时把新的 `live` 与新的根身份一起换上。换不上（第 2 步的身份在发布前又变了）就不发布。
 
-初稿写「空切片等于没有提示，tgrep 会核对它认为变了的文件」。那是 `WorktreeView::refresh` 的契约。本模块不调用它，所以上面的第 4 步代替那一句。结果不变的部分：溢出或说不准必须全量复核，不得静默用基线作答。
+初稿写「空切片等于没有提示，tgrep 会核对它认为变了的文件」。那是 `WorktreeView::refresh` 的契约。本模块不调用它。就绪视图的空切片按第 5 步，只复核身份，不让 tgrep 自己猜。未就绪视图的下一次 `refresh` 按第 4 步重做 §5.4，不因为切片是空的就跳过。溢出或说不准（`needs_full`）仍然全量复核，不得静默用基线作答。
 
 ### 5.4 把 overlay 填进 `live`
 
 从共享 reader 出发，按这个顺序。只动 `live`，不动基线文件。
 
 1. 每个墓碑（`Deleted` 的 path，`Renamed` 的 `from`）：`live.delete_file`。
-2. 每个 `Added`、`Modified`、`Untracked`、`Renamed` 的 path：经 `open_rooted_file` 读工作区字节（上限 `MERGE_MAX_BYTES + 1`），`live.upsert_file`。符号链接不读目标，不 upsert 内容，只留在文件名成员里。
+2. 每个 `Added`、`Modified`、`Untracked`、`Renamed` 的 path：mode 是 0o100644 或 0o100755 时才经 `open_rooted_file` 读工作区字节（上限 `MERGE_MAX_BYTES + 1`），再 `live.upsert_file`。mode 0o120000 的符号链接不打开、不读目标，只留在文件名成员里。打开得到 `NoSuchPath` 不是读失败，不让 `attach` 失败。不自己调用 `openat`。
 3. 排除集合与 `.strata/` 之下的路径：即使基线索引里有，也 `delete_file`，`files` 与 `grep` 都看不到。
-4. 基线路径不在 overlay 里：读工作区字节，`TrackedEntry::matches_worktree_bytes` 为真就留着基线倒排；为假就把工作区字节 upsert 进 `live`。这盖住 checkout 过滤（CRLF、smudge）与「git 状态干净但字节不同」。这个 upsert 只在 search 的 `live` 里，不写回 overlay，也不写 checkpoint。
+4. 只读 `hides` 为假的普通文件。`TrackedEntry::matches_worktree_bytes` 为真就留着基线倒排；为假就把读到的字节 upsert 进 `live`。这盖住 checkout 过滤（CRLF、smudge）与「git 状态干净但字节不同」。这个 upsert 只在 search 的 `live` 里，不写回 overlay，也不写 checkpoint。符号链接、gitlink、墓碑（`hides` 为真，包括 `Deleted` 的 path 与 `Renamed` 的 `from`；`from` 不是条目的 path，文件已经不在）只进成员，不读字节。这些路径上文件不在，不是读失败，不让 `attach` 失败。`hides` 为假的普通文件若打开得到 `NoSuchPath`，同样不是读失败，不 upsert，不让 `attach` 失败，基线倒排留着。不自己调用 `openat`。要读的普通文件经 `open_rooted_file`。
 5. 超过 `MERGE_MAX_BYTES` 的普通文件：不读进索引，不 upsert。`files` 仍列出它（它在成员里）。`grep` 不从它出命中，也不因此让整次查询失败。
 
-第 4 步的花费随树的大小增长，只发生在第一次填视图，以及 `needs_full` 的那次 refresh。之后的 refresh 只重读 `changed` 与 `paired`，再用 `attrs_of` 的 `unchanged_since` 决定要不要重读内容。gen count 不可得（0）时 `unchanged_since` 为假，改读内容。与 overlay 的判变同一条规则，不另造。
+第 4 步的花费随要读的普通文件数增长。发生在第一次填视图、`needs_full` 的那次 refresh、以及未就绪之后的下一次 refresh（§5.3 第 4 步）。就绪视图之后的 refresh 只重读 `changed` 与 `paired` 里 `hides` 为假的普通文件，再用 `attrs_of` 的 `unchanged_since` 决定要不要重读内容。gen count 不可得（0）时 `unchanged_since` 为假，改读内容。与 overlay 的判变同一条规则，不另造。符号链接、gitlink、墓碑在这些路径上也不读。
 
 短文件、空文件没有三元组也留在成员里。查询计划若走 MatchAll 或扫描，仍能命中。不因为没有倒排就把它们从 `files` 拿掉。
 
@@ -370,7 +382,7 @@ gitio 的净化环境到不了这些子进程。tgrep 的 `generations/git.rs` `
 
 1. `pattern` 为空，或 `query::build_query_plan(pattern, opts.case_insensitive)` 返回错误 → `InvalidInput`（`pattern`），不查询，也不看视图。只这一次调用。不调用 `build_multi_pattern_plan`、`build_literal_plan`、`build_relaxed_multi_pattern_plan`。模式是库的正则，不是固定字符串。想匹配字面点号的调用方自己转义。没有开关可以改这个行为。
 2. `Which::One` 的 id 未知 → `NoSuchView`。`All` 没有任何已挂视图 → `Ok(vec![])`，不是错误。
-3. 对每个目标视图捉住 §4.5 的快照。视图未就绪 → 先按 §5.3 做一次 `refresh`（空 `changed`，因此 `needs_full` 为真时会全量）。仍然未就绪 → `Unknown`（`not_ready`），不返回基线命中。
+3. 对每个目标视图捉住 §4.5 的快照。视图未就绪 → 先按 §5.3 做一次 `refresh`。这次 `changed` 是空的也重做 §5.4（§5.3 第 4 步），不看 `needs_full`。仍然未就绪 → `Unknown`（`not_ready`），不返回基线命中。
 4. `HybridIndex::execute_query_with_masks` 拿候选文件号，再用这次的 reader `resolve_path`。不用 `file_path` 去问「当前」reader。
 5. 候选再过 §4.4 的成员。排除集合里的路径丢掉。
 6. 对每个候选 `open_rooted_file` 读字节，用同一个模式做全匹配，得到行。一行一条 `Hit`。行不是合法 UTF-8 → 丢掉这一行，查询继续 [我的决定 D13]。二进制、没有倒排、又不是 MatchAll 候选的文件不会进到这里。
@@ -417,16 +429,16 @@ search 不写工作区。下面「写了什么」指 `<root>/search/` 与进程�
 | `with_storage` 拒绝这条存储路径 | `Unsupported`（`index_storage`） | 可能有空的 `<root>/search/<repo>/` | 不把存储改到 `.git` 里。人看为什么主 checkout 的 worktree 列表盖住了这条路径 |
 | `ensure` 在写出 `.stage-*` 之前失败 | 上表里对应的具名码 | 无 generation | 改原因后重试 attach |
 | `ensure` 在 `.stage-*` 出现之后失败 | `Unknown`（`index_build`） | 暂存目录留着 | 不删、不重放。下次 attach 会再 `ensure`；已发布的键仍可打开。废弃的 `.stage-*` tgrep 不自动收 |
-| generation 的 tree 与 `base.tree` 不符 | `Unknown`（`head_tree_mismatch`） | generation 留着 | 不发 id。会话不变量已破，由 session 的 status 报 |
+| `ensure` 已返回，tree 与 `base.tree` 不符 | `InvalidInput`（`head_tree_mismatch`） | generation 留着 | 已知的不符，不是不确定。不发 id。不用 `Unknown` |
 | 未知或已卸下的 `ViewId` | `NoSuchView` | 无 | 重新 attach |
 | 查询或 refresh 时根被换掉 | `Busy`（`root_changed`） | 无命中 | 旧 id 作废。重新 attach。进行中的查询不返回新目录的内容 |
 | overlay 的 base 与视图钉住的不同 | `Busy`（`base_moved`） | 不发布对账 | 重新 attach |
 | 模式或 glob 不合法，或模式为空 | `InvalidInput`（`pattern` 或 `glob`） | 无 | 调用方改参数 |
-| 对账读失败，视图未就绪 | `Unknown`（`not_ready`） | 视图还在，未就绪 | 下一次 refresh 全量。此前 grep 不得用基线单独作答 |
+| 对账读失败，视图未就绪 | `Unknown`（`not_ready`） | 视图还在，未就绪 | 下一次 `refresh` 重做 §5.4，哪怕 `changed` 是空的、`needs_full` 为假（§5.3 第 4 步）。此前 grep 不得用基线单独作答 |
 | 打开已发布索引失败 | `Unknown`（`index_unreadable`） | generation 目录留着，不修复 | 不返回空命中冒充成功。tgrep 对损坏的已发布目录不覆盖 |
 | 零命中 | 成功，空 `Vec` | 无 | 不是 `NoMatch` |
 | 文件超过 `MERGE_MAX_BYTES` | 成功 | 该文件不进索引 | `files` 仍列出。`grep` 不读它，不因此失败。types.md 把 `TooLarge` 标在 search 名下，指「按条目、不读内容」。v1 的公开方法不把整次调用失败成 `TooLarge`，因为 `GrepOpts` 不能再加路径参数，一次查询里夹一个超限文件也不该让其他命中失败 [我的决定 D4] |
-| 点名的路径不在快照里 | 不单设入口 | 无 | v1 的 `grep` / `files` 没有路径参数（简报的签名，D1 也不许把路径塞进 `GrepOpts`）。types.md `NoSuchPath` 那句「查询命令限定的路径」v1 由 cli 在结果上过滤时处理；search 自己的 `NoSuchPath` 只用于工作区目录不存在。请 T15 把那半句的返回方改到 cli，若 cli 确实做了路径过滤。`Busy` 的「谁返回」今天只写 daemon（写锁）；search 为 `root_changed`、`base_moved`、`not_active`、`overlay_not_ready` 返回 `Busy`，请 T15 把 search 加进那一行。`InvalidInput`（模式与 glob）与 `Unsupported`（找不到 git、SHA-256、存储路径被拒）也请 T15 把 search 加进「谁返回」；码是现成的，没有新码 |
+| 点名的路径不在快照里 | 不单设入口 | 无 | v1 的 `grep` / `files` 没有路径参数（简报的签名，D1 也不许把路径塞进 `GrepOpts`）。types.md `NoSuchPath` 那句「查询命令限定的路径」v1 由 cli 在结果上过滤时处理；search 自己的 `NoSuchPath` 只用于工作区目录不存在。请 T15 把那半句的返回方改到 cli，若 cli 确实做了路径过滤。`Busy` 的「谁返回」今天只写 daemon（写锁）；search 为 `root_changed`、`base_moved`、`not_active`、`overlay_not_ready` 返回 `Busy`，请 T15 把 search 加进那一行。`InvalidInput`（模式、glob、`head_tree_mismatch`）与 `Unsupported`（找不到 git、SHA-256、存储路径被拒）也请 T15 把 search 加进「谁返回」；码是现成的，没有新码 |
 
 索引读失败不是 `Corrupt`。`Corrupt` 是 store 的 blob 与 schema。search 不读 blob 存储。
 
@@ -434,7 +446,7 @@ search 不写工作区。下面「写了什么」指 `<root>/search/` 与进程�
 
 ## 7. 测试清单
 
-测试在临时目录里跑。fixture 建一个小的 git 仓库（一个提交、一个 tree），再 `clone --bare` 不够：要一个主 checkout，search 对它 `Repository::discover`。两个会话是两个目录，各自有 gitfile 指向自己的影子 common dir，影子的对象经 alternates 看到主 checkout。工作区里放基线导出的文件，再加上测试自己写的 overlay 文件。`OverlaySource` 用测试里的假实现，直接返回准备好的 `Overlay`，不启动 `Tracker`。tgrep 的索引建在测试自己的 `<root>/search/` 下。断言用 `generation_ptr` 的相等表示 `Arc::ptr_eq`，用数目录表示没有建第二份。不测墙钟，design §8 的 300 ms 是目标，不是这条清单的门。带 `test-seams` 的测试才看得到 `generation_ptr` 与 `PauseBeforeVerify`。
+测试在临时目录里跑。fixture 建一个小的 git 仓库（一个提交、一个 tree），再 `clone --bare` 不够：要一个主 checkout，search 对它 `Repository::discover`。两个会话是两个目录，各自有 gitfile 指向自己的影子 common dir，影子的对象经 alternates 看到主 checkout。工作区里放基线导出的文件，再加上测试自己写的 overlay 文件。`OverlaySource` 用测试里的假实现，直接返回准备好的 `Overlay`，不启动 `Tracker`。tgrep 的索引建在测试自己的 `<root>/search/` 下。断言用 `generation_ptr` 的相等表示 `Arc::ptr_eq`，用数目录表示没有建第二份。不测墙钟，design §8 的 300 ms 是目标，不是这条清单的门。带 `test-seams` 的测试才看得到 `generation_ptr`、`PauseBeforeVerify`、`FailEnsureAfterStage`、`paused_reader_ptr`、`swap_view_reader`。§7 用到的接缝都在 §3 声明。
 
 `来源` 列写矩阵的 `来源` 单元格，原文。一条测试覆盖多行时用 `<br>` 隔开。状态在断言里写明。3f 里索引格式、读取与查询、仍从 `ensure` / `SharedBase` / `IndexReader` / `build_query_plan` 走得到的行保持 `依赖承担`，不在本表重写成 search 的实现。tgrep 的 Windows、`.ignore`、托管 v2、`--type`、`-P` 保持不保留，不改挂到 search。
 
@@ -456,7 +468,7 @@ search 不写工作区。下面「写了什么」指 `<root>/search/` 与进程�
 | `not_ready_does_not_answer_from_base` | 对账读到一半文件被换成不可读。`refresh` 返回 `Unknown`（`not_ready`），视图未就绪。此后 `grep` 在自动重试一次仍失败时返回 `Unknown`，不返回基线命中。修复文件后再 `refresh` 成功，命中变成新内容 | tgrep-core/src/worktrees/tests.rs::read_and_discovery_errors_close_the_gate_and_force_full_retry |
 | `root_replacement_refuses_old_view` | `attach` 之后把工作区目录 `rename` 走，在原路径放一个同名新目录，里面有同名文件但内容不同。对旧 `ViewId` 的 `grep`（包括匹配不到任何东西的模式）与 `files` 都返回 `Busy`（`root_changed`），不是新目录的内容，也不是空列表冒充成功。重新 `attach` 得到新 id，新查询只见新基线 | tgrep-core/src/worktrees/tests.rs::snapshots_reject_root_replacement_before_and_during_empty_queries |
 | `refresh_during_root_swap_does_not_publish` | `refresh` 开始之后、发布之前换掉根。`refresh` 返回 `Busy`（`root_changed`），视图未就绪，随后的 `grep` 不返回换根之后的内容 | tgrep-core/src/worktrees/tests.rs::root_replacement_before_publication_keeps_the_view_not_ready |
-| `query_keeps_reader_snapshot_across_base_swap` | `PauseBeforeVerify`：查询已经捉住 reader。另一个线程换成另一份 generation。放开之后，这一次解析文件号仍用捉住的那份 reader（指针与开始时相等）。若根的 inode 也变了，整次返回 `Err`，码是 `Busy`（`root_changed`），不是带着命中的 `Ok`，也没有新树的行。不出现「用新 reader 解旧文件号」 | tgrep-core/tests/snapshot_consistency.rs::snapshot_survives_reader_swap<br>tgrep-core/tests/snapshot_consistency.rs::concurrent_swap_during_query |
+| `query_keeps_reader_snapshot_across_base_swap` | `arm(PauseBeforeVerify)`。查询停住后 `paused_reader_ptr` 等于开始时的 `generation_ptr`。另一个线程 `swap_view_reader` 换成另一份已打开的 generation。`release` 之后，这一次解析文件号仍用捉住的那份（`paused_reader_ptr` 与开始时相等）。若根的 inode 也变了，整次返回 `Err`，码是 `Busy`（`root_changed`），不是带着命中的 `Ok`，也没有新树的行。不出现「用新 reader 解旧文件号」 | tgrep-core/tests/snapshot_consistency.rs::snapshot_survives_reader_swap<br>tgrep-core/tests/snapshot_consistency.rs::concurrent_swap_during_query |
 | `new_query_after_reattach_sees_new_base` | 换基线并重新 `attach` 之后的新 `grep` 只命中新 tree 的文件，没有旧 tree 的残留。旧 `ViewId` 仍是 `NoSuchView` 或 `Busy`（`root_changed`），不是新结果 | tgrep-core/tests/snapshot_consistency.rs::new_query_after_swap_resolves_correctly |
 | `candidate_count_matches_snapshot` | 同一路径替换不使成员数加一。新增加一。墓碑减一。对基线里不存在的路径 `delete_file` 不改变成员数。同一次查询里的成员数与它捉住的那份（基线 reader，live）一致，不混用换基线前后的两份 | tgrep-core/tests/snapshot_consistency.rs::candidate_totals_account_for_overlay_and_reader_snapshot |
 | `rebuild_preserves_answers_for_empty_short_tombstone` | 卸下再挂、进程内重建 `live` 之后，对 `.`、短文件、空文件、墓碑的 `grep` / `files` 答案与重建前相同。不比较倒排掩码的内部字节。基线里本没有的路径不记墓碑：未跟踪文件删掉之后只是从成员消失 | tgrep-core/tests/shared_worktrees.rs::checkpoint_preserves_masks_tombstones_empty_files_and_unmasked_postings |
@@ -467,10 +479,11 @@ search 不写工作区。下面「写了什么」指 `<root>/search/` 与进程�
 | `verify_does_not_follow_symlink` | 成员路径在打开前被换成指向工作区外的符号链接。`open_rooted_file` 不跟随。`grep` 不返回链接目标里的字节。查询不挂起（FIFO 换上时非阻塞打开，视图未就绪，不读管道） | tgrep-core/src/worktrees/tests.rs::snapshot_candidate_opens_reject_directory_link_swaps |
 | `invalid_pattern_is_invalid_input` | 空模式、不平衡的 `(` → `InvalidInput`，`detail.reason = "pattern"`。不调用 `build_multi_pattern_plan` | 新增 |
 | `files_glob_does_not_cross_slash` | glob `*.rs` 命中 `a.rs`，不命中 `src/a.rs`。`**/*.rs` 命中 `src/a.rs`。空 glob → `InvalidInput`（`glob`）。没有命中 → `Ok(vec![])` | 新增 |
-| `ensure_failure_after_stage_is_unknown` | 测试接缝让 `ensure` 在 `.stage-*` 出现之后失败。返回 `Unknown`（`index_build`），暂存目录还在，没有 `ViewId`。失败发生在任何 `.stage-*` 之前时返回具名码，没有 generation 目录 | 新增 |
+| `ensure_failure_after_stage_is_unknown` | `arm(FailEnsureAfterStage)` 之后 `attach`：`ensure` 在 `.stage-*` 出现之后、发布之前失败。返回 `Unknown`（`index_build`），暂存目录还在，没有 `ViewId`。不装这个接缝、失败发生在任何 `.stage-*` 之前时返回具名码，没有 generation 目录 | 新增 |
 | `attach_refuses_inactive_session` | `Creating` → `Busy`（`not_active`）。`Removed` → `NoSuchSession`。工作区 `Unknown` → `Unknown`，不发 id，不建视图 | 新增 |
 | `which_all_fails_if_one_root_changes` | 两个已挂视图。查询中途只换掉其中一个的根。`Which::All` 返回 `Busy`，不是只含另一个会话的列表 | 新增 |
 | `untracked_searches_like_added` | `Untracked` 与 `Added` 一样出现在 `files` 与 `grep` 里。两者的区别不在检索结果里 | 新增 |
+| `rename_or_symlink_does_not_fail_attach` | overlay 有 `Renamed { from: old.rs, path: new.rs }`，`old.rs` 已不在。基线有一条 mode 0o120000 的 `link.txt`。`attach` 返回 `Ok`，发出 `ViewId`。`files` 有 `new.rs` 与 `link.txt`，没有 `old.rs`。不打开 `old.rs`，不读链接目标，不自己调用 `openat` | 新增 |
 
 下面各行是矩阵归档。断言写的是处置，不是要在 `strata-search` 里重跑 tgrep 的测试。`来源` 仍是矩阵原文，供核对。
 
@@ -562,7 +575,7 @@ git commit -m "feat(search): share base index by main checkout tree and profile"
 - Consumes: `Overlay`、`HybridIndex`（上游要求 1 的构造函数）、`LiveIndex::upsert_file` / `delete_file`
 - Produces: `refresh`、填好的 `grep` / `files`
 
-- [ ] **Step 1: 写失败的测试**：`overlay_entry_shadows_base_path`、`tombstone_hides_base_in_this_session_only`、`grep_all_tags_each_hit_with_session`、`grep_zero_hits_is_empty`、`rename_is_tombstone_plus_new_path`、`commit_inside_session_keeps_overlay_hit`、`untracked_searches_like_added`、`gitfile_and_strata_dir_excluded`、`tracked_ignored_file_still_listed`
+- [ ] **Step 1: 写失败的测试**：`overlay_entry_shadows_base_path`、`tombstone_hides_base_in_this_session_only`、`grep_all_tags_each_hit_with_session`、`grep_zero_hits_is_empty`、`rename_is_tombstone_plus_new_path`、`commit_inside_session_keeps_overlay_hit`、`untracked_searches_like_added`、`rename_or_symlink_does_not_fail_attach`、`gitfile_and_strata_dir_excluded`、`tracked_ignored_file_still_listed`
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-search --test overlay`
@@ -622,7 +635,7 @@ git commit -m "feat(search): pin the query snapshot and refuse a replaced root"
 | D5 `publication.lock` | 不包超时，不再加一把锁 | 锁在 `ensure` 内部，`lock_exclusive` 不返回超时。包一层超时会留下仍在跑的构建，下一次还是堵在同一把锁上。等待发生在工作区写之前 | 2026-10-23 |
 | D6 进行中的查询与换根 | 根 inode 变了就丢全部命中，返回 `Busy`（`root_changed`），不返回旧内容也不返回新内容 | 增补 8 不允许自己 `openat`。`open_rooted_file` 按路径重新解析，保不住旧目录的字节。索引一侧仍用捉住的 reader。下一次查询指重新 attach 之后 | 2026-10-23 |
 | D7 `OverlaySource` | search 不调用 `overlay::compute`，只读 daemon 的 `Tracker::last` | 一个工作区不能有两个扫描者。daemon 已经持有 `Tracker` | 2026-10-23 |
-| D8 不回收索引 | v1 不删 `<root>/search/` 下的 generation | tgrep 是 RetainAll。store 的 gc 不认识这个目录。回收留给以后，并已写成对 store 的上游要求 | 2026-10-23 |
+| D8 不回收索引 | v1 不删 `<root>/search/` 下的 generation。一直留着，不挪到 `bases/` | tgrep 是 RetainAll。store.md 不列这个目录，gc 的 1 小时下限也不覆盖根下不认识的一级名字，所以 gc 不会收走它。不是「过 1 小时就被收」 | 2026-10-23 |
 | D9 `Which::All` | 只查已挂视图。没挂上的会话不出现，不是错误 | 查询不做附带的 `attach`（那会建索引、有副作用）。daemon 在 `--all` 之前挂上要查的会话 | 2026-10-23 |
 | D10 glob | `globset` 0.4.18，`*` 不跨 `/`，`\` 是字面字符。卷不区分大小写时用 globset 的 Unicode 大小写，不自己对齐 `apfs` 折叠键 | 简报的 `files` 要 glob。tgrep 的 `files` 是前缀，不是 glob。不用 `filetypes`（那是 `--type`）。个别字符上与 apfs 折叠不同，v1 接受 | 2026-10-23 |
 | D11 `tracked = false` | 可以挂，没有 overlay 就当空 overlay | 增补 1：这种仓库没有 overlay，但仍有基线树。拒绝挂会让 `--all` 漏掉它的基线文件 | 2026-10-23 |
