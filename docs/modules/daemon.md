@@ -1,6 +1,6 @@
 # daemon
 
-**Crate**：`crates/strata-daemon`（lib + bin `git-stratad`）· **设计来源**：design.md §5、§6.2、§8、§9、§12 · **矩阵**：test-matrix 里目标模块为 `daemon` 的行，以及 `—` 行里把替代物写成 daemon / launchd / 本机 unix socket 的行，逐条见 §7 · **邻居版本**：session.md @a324f9c，deps.md @dafdefc，gitio.md @1cd5ac5，confirm.md @229f4e3，overlay.md 与 store.md @08ffa53；publish.md 草案 @0fde091（方法名，正文仍薄）；search.md 草案 @aa0414c（只借方法名）
+**Crate**：`crates/strata-daemon`（lib + bin `git-stratad`）· **设计来源**：design.md §5、§6.2、§8、§9、§12 · **矩阵**：test-matrix 里目标模块为 `daemon` 的行，以及 `—` 行里把替代物写成 daemon / launchd / 本机 unix socket 的行，逐条见 §7 · **邻居版本**：session.md @a324f9c，deps.md @dafdefc，gitio.md @1cd5ac5，confirm.md @229f4e3，overlay.md 与 store.md @08ffa53；publish.md @df9f069；search.md 草案 @aa0414c（只借方法名）
 
 > 本文按 module-rulings.md 写：「T13 daemon」，以及标了 T13 或 Everyone 且约束本模块的增补。后写的、标了 amended 的那条胜。一台机器一个 daemon。方法表是 cli 子命令的对照，名字与下面这张表一致，不改名。控制器在初稿的 16 个之外加了 `resolve_move`、`chain_resolve` 与 `config_relax`。本文不再加别的方法。`Busy` 只用于第一次可见的写之前的等锁（缺省 30 秒）。写之后的等待不受这 30 秒截断。重启报出 `Unknown` 的发布，不重放。不加 `Code`：`Failed` 与 `UnknownMethod` 是 RPC 层的回答。`Code` 停在 39 个。
 
@@ -24,7 +24,7 @@ cli 只在连不上 socket 时自己打开 `Sessions`（只读）。daemon 在�
 | deps @dafdefc | `ensure`、`build`、`ensure_target`、`observe_main`、`publish_chain`、`main_tip`、`propose`、`plan_rollout`、`record_rollout`、`open_proposals`、`get_proposal`、`open_files`；实现 `RepoWriteLock`，给出 `InstallEnv` | 不在持有队列或 repo 锁时等建造锁 |
 | gitio @1cd5ac5 | 每个 repo 一个 `Git::open`（主 checkout）；`fetch`、`read_ref`、`update_ref`、`merge_base`、`is_ancestor`、`push`、`shadow_drift`、`shadow_at` | 不调用 `Git::command`（crate 私有）。不修影子仓库 |
 | overlay @08ffa53 | `checkpoint`、`restore`、`compute`；`Tracker::new`、`watch`、`reset`、`flush`、`hint` 经 `Inbox`、`require_full`；`DEFAULT_DIRTY_CAPACITY` | 不在回调里 `flush` |
-| publish @0fde091 | `stage`、`check`、`commit`、`push`、`assign`、`rebase_session`、`diff_between`、`chain_ref` | 不调用 `publish::merge_base`（那是发布的合并基 B）。锚点用 `gitio::merge_base` |
+| publish @df9f069 | `publish`（入口）、`push`、`assign`、`diff_between`、`chain_ref`、`anchor_ref`；实现 `PublishLocks` | 不自己拼 `stage` / `check` / `commit`，不自己选合并基 B。`chain_rewound` 与 `chain_diverged` 由 `publish::publish` 在 commit 与 push 之前拒绝 |
 | search @aa0414c | `attach`、`detach`、`refresh`、`grep`、`files` | 不加 tgrep 的 CLI 旗标 |
 | confirm @229f4e3 | 进程里唯一一个 `Confirmer::new`；`require`、`validate`、`probe` | 不序列化 `ConfirmToken`。`TEST_SEAMS == true` 时拒绝启动 |
 | types / config | `Config::parse`、`validate`、`RepoConfig::seed_files`、`needs_human_confirm`；`Action`、`Code`、`StrataError`、`ReleaseGroup`、`CheckpointReason`、`PushOutcome` | 不重定义这些类型 |
@@ -42,7 +42,7 @@ cli 只在连不上 socket 时自己打开 `Sessions`（只读）。daemon 在�
 9. launchd 没有用户的 PATH。`install` 和 `checks` 用本文写明的 PATH：`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` [我的决定 D1]。
 10. 确认：daemon 不查 TTY。它核对凭据的 action 与这次请求一致，并且 confirm 说它还没用过、没过期。不符 → `NotConfirmed`。`require_tty` 是 cli 的（「T12 confirm」、confirm.md §5.1）。
 11. 钉住的 `deploy_on_push` / `publish.confirm` / `publish.push` 写在配置目录的文件里，不写进 store（Addendum 5 的 T13 条）。调松要 `Action::ConfigRelax { repo: RepoId }`，该变体由 Task 15 加进 types.md，本文不定义。
-12. `Store::close(self)` 吃掉 `Store`。daemon 先停掉自己持有的全部 `Arc<Store>` 使用者，再 close。不清洁退出之后的启动才调 `quick_check`；人要的那次走 `daemon_status` 的 `verify`（Addendum 8 的 T13 条，store 第 2 轮）。
+12. `Store::close(self)` 吃掉 `Store`。daemon 先停掉自己持有的全部 `Arc<Store>` 使用者，再 close。`Store::open` 自己看 `store/clean-shutdown`：标记不在就跑 `quick_check`，失败返回 `Corrupt`，daemon 不听 socket。daemon 不另建干净标记，启动时不调用 `quick_check`。人要的那次只走 `daemon_status` 的 `verify: true`。
 13. ToolCall：Edit/Write 的路径经 `Inbox::hint`（裁定的 `Tracker::hint` 就是这个：`Tracker::inbox()` 交出的句柄；overlay @08ffa53 没有 `Tracker::hint`），没有路径清单的工具经 `Inbox::require_full`，然后在请求线程上 `Tracker::flush()`。`hint` 读属性，不在 FSEvents 回调线程上调（「T13 (daemon, from overlay r2)」）。`flush` 返回 `()`。不在回调里 `flush`，也不在回调里丢弃 `Watcher`（「Event flush, amended — corrected by measurement」：回调里对 Watcher 自己的队列 `dispatch_sync` 是 SIGTRAP，exit 133，不是死锁；`FlushSync` 单独在回调里会返回，但 daemon 仍不在回调里调它）。
 14. 交换之后，以及 Accept 之后：`Tracker::reset` 再 `watch`。status 列出旧树上的 `holders`（session 的 `OldTreeKept`）。健康为 `Unknown` 的工作区给出 Abandon 与 Accept 两种处理，本文不自动选（「Resolving a failed move」的 T13 部分）。
 15. 同一会话的 checkpoint、restore、`rm`、`move_workspace` 串行。进行中的 checkpoint 不取消。`resolve_failed_move` 走同一条队列（session §2 第 3 条，比初稿多这一个）。
@@ -54,7 +54,7 @@ cli 只在连不上 socket 时自己打开 `Sessions`（只读）。daemon 在�
 - `deps::RepoWriteLock` 没有 `note_visible_write`。本文用 §5.2 的线程局部规则区分写前与写后的等待 [我的决定 D8]。若将来有调用方在第一次 `with_write` 之前就做了可见的写，deps 应在 trait 上加这个方法，session / publish / overlay 在各自的第一次可见的写处调用。在那之前，本文的规则成立的前提写在 D8。
 - gitio @1cd5ac5 没有重钉 `hooksPath` 的函数，并且写明影子仓库的漂移只报告、不修。本文选择只报告，不要求 gitio 加函数 [我的决定 D2]。
 - `config_relax` 是应用调松的命令。`Action::ConfigRelax { repo: RepoId }` 由 Task 15 加进 types.md，本文不定义。变体落地之前，这条路径编译不了；文件变松仍然不生效。confirm 不写 `pins.json`。
-- gitio @1cd5ac5 没有把 a..c 重放到 o 上的函数。`chain_resolve` 的重放调用 `Git::replay_commits(exclusive_base, tip, onto) -> Result<CommitOid>` [我的决定 D18]：只造 commit，不改 ref，不推送，不强推；合不上 → `Conflict`，ref 不动。daemon 不自己起 git。
+- gitio @1cd5ac5 没有把 a..c 重放到 o 上的函数，也没有一次写下链和锚点的 ref 事务。重放是 `Git::replay_commits` [我的决定 D18]。链与锚点的写是 publish.md @df9f069 §2 第 3 条要求 gitio 提供的那一次调用（`update-ref --stdin` 或等价物）。daemon 用这一次，不拆成两次 `update_ref`，不起 git。
 
 ## 3. 公开接口（Rust）
 
@@ -170,7 +170,7 @@ pub enum DaemonWarning {
     LongHold { repo: RepoName, method: String, since: SystemTime },
     /// publishes 里 phase = Unknown 的一行。不重放、不删除。
     UnknownPublish { id: u64 },
-    /// 崩溃留下的 Running 行，没有在跑的发布。只报告，不改行 [我的决定 D6]。
+    /// 不再产生。启动时 Running 已改成 Unknown，按 UnknownPublish 报出。
     PublishRunning { id: u64 },
     /// 配置文件比钉住的值松，还没经 ConfigRelax 接受。
     ConfigRelaxPending { repo: RepoName },
@@ -282,7 +282,6 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 | --- | --- | --- |
 | `daemon.sock` | unix socket，`0600` | 听之前 bind；停机时 unlink |
 | `daemon.lock` | `flock` 独占，`O_CLOEXEC` | 第二个进程拿不到就退出，不听 socket |
-| `daemon.clean` | 空文件，干净停机的标记 | 停机写上；启动时删掉。没有它 = 不清洁退出 |
 | `pins.json` | 每个 `RepoName` 的 `PinnedFlags` | 见下。不在 store 里 |
 | `daemon.err.log` | stderr | launchd |
 
@@ -300,7 +299,7 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 | I3 | 每会话一条队列，先到先得，不可重入。同一会话的 checkpoint、restore、`rm`、`move_workspace`、`resolve_failed_move` 串行。进行中的不取消，后来的排队，不返回错误码 | §8 |
 | I4 | 建造锁 → 会话队列（`SessionId` 升序）→ repo 写锁（一次只拿一个 repo 的）。持有队列或 repo 锁时不等建造锁 | — |
 | I5 | status、grep、files、diff、deps_list、daemon_status 不排队，不等写锁 | §8 |
-| I6 | publishes 里 `Unknown` 的行，重启后由 `status` 和 `daemon_status` 报出，不重放、不删除、不调用 `git push` | 不变量 6 |
+| I6 | 启动时把残留的 `PublishPhase::Running` 改成 `Unknown`（store 允许这条边），然后由 `status` 和 `daemon_status` 报出。不重放、不删除、不调用 `git push`。留下 Running 不是不变量 6 的不确定状态 | 不变量 6 |
 | I7 | 凭据不出进程。RPC 参数里没有能代表「已确认」的字段。action 由 daemon 从请求推出，不采用客户端传来的 | 不变量 7 |
 | I8 | 不持 `Tracker` 去等队列或锁。回调线程只调 `Inbox::note` | — |
 | I9 | 影子仓库上不跑 `git gc`、`git worktree prune`、`git commit`。`worktrees` 或 `worktrees/<n>` 不是目录时，也不把任何 git 子进程的 git-dir 或 cwd 指到那个影子仓库 | 不变量 2 |
@@ -308,7 +307,7 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 | I11 | 请求处理器返回、返回错误或 panic 之后，写锁与队列都已释放（Drop）。锁中毒不把后来的请求卡成 `Busy`：清掉中毒，继续服务 | §8 |
 | I12 | 小时对账与 gc 与请求共用同一把 repo 锁和同一条会话队列，不另开一套 | §6.2 |
 
-可见的写沿用 Addendum 3 的定义：工作区、活的 gitfile、别人的 store 行、ref、主 checkout、主对象库。`create_session` 是 `new` 的第一次。`commit` 的 `update_ref` 是 publish 的第一次。restore 的第一次是 `mkdir` 那个暂存目录加 `plan.json`（BeforeRestore 不算，Addendum 5 细化 3）。缓存填充（基线 generation、封存的依赖集、blob）不算。
+可见的写沿用 Addendum 3 的定义：工作区、活的 gitfile、别人的 store 行、ref、主 checkout、主对象库。`create_session` 是 `new` 的第一次。publish 的第一次不可收回的写是 `commit_tree` 把对象写进主对象库（publish.md @df9f069 §5.2 第 6 步），不是 daemon 自己的 `update_ref`。restore 的第一次是 `mkdir` 那个暂存目录加 `plan.json`（BeforeRestore 不算，Addendum 5 细化 3）。缓存填充（基线 generation、封存的依赖集、blob）不算。锚点的比较并交换一旦调用，这次命令后面的失败是 `Unknown`，不是 `InvalidInput`，也不是「`Conflict` 且 ref 没变」。
 
 panic：写前 → 该请求 RPC `Failed`，进程继续。写后 → 对该请求答 `Unknown`，现场留下，status 报出。两种都释放锁。
 
@@ -320,21 +319,19 @@ panic：写前 → 该请求 RPC `Failed`，进程继续。写后 → 对该请�
 
 1. `TEST_SEAMS` 为真 → 拒绝启动。
 2. `flock` `daemon.lock`。拿不到 → stdout 一行 `Exists`（I1），退出，不 bind。
-3. 删掉 `daemon.clean`（这次若崩在中途，下次算不清洁）。
-4. 读 `config.toml`，`Config::parse` 再 `validate`。TOML 失败是 `InvalidInput`，`detail.rule = "toml"`，`message` 键是 toml 的原话。`validate` 报文件顺序里的第一条，daemon 不带着部分配置往下走。
-5. 每个 `path` 必须存在且等于它的 realpath（绝对、无尾斜杠、无符号链接分量）。否则 `InvalidInput`，detail 里写出 realpath。通过之后路径原样往下传。
-6. 读 `pins.json`，按 §4 调紧或记下待定的调松。
-7. `Store::open(paths.store(), checkouts)`，`checkouts` 是配置里的主 checkout。同卷检查是 store 的。
-8. 没有过 `daemon.clean`（第 3 步已删；第一次安装也没有）→ `quick_check`。失败 → 记 `VerifyFailed`，仍然继续：人要看得见，而不是静默不听。
-9. 每个 repo `Git::open(主 checkout)`。`repo_id` 撞车 → `NameTaken`，不听 socket。
-10. `Sessions::open` 一次。之后不再开。
-11. `session::recover`。然后才 gc：每个 repo 依次，持该 repo 的写锁调 `gc_repo(repo, GC_KEEP)`，再放开。gc 失败记进告警，不因此不听 socket。
-12. `open_publishes`：`Unknown` 记进内存。`PublishPhase::Running` 且没有本次启动之后的发布在跑 → 记 `PublishRunning`，不改行、不重放 [我的决定 D6]。
-13. 隔离区非空，或 `worktrees` 不是目录 → `Quarantine` 告警，stderr 一行。
-14. 然后才 bind socket、听。
-15. 对已有的、tracked 的工作区 `Tracker::new(root, DEFAULT_DIRTY_CAPACITY)` 再 `watch`。
+3. 读 `config.toml`，`Config::parse` 再 `validate`。TOML 失败是 `InvalidInput`，`detail.rule = "toml"`，`message` 键是 toml 的原话。`validate` 报文件顺序里的第一条，daemon 不带着部分配置往下走。
+4. 每个 `path` 必须存在且等于它的 realpath（绝对、无尾斜杠、无符号链接分量）。否则 `InvalidInput`，detail 里写出 realpath。通过之后路径原样往下传。
+5. 读 `pins.json`，按 §4 调紧或记下待定的调松。
+6. `Store::open(paths.store(), checkouts)`，`checkouts` 是配置里的主 checkout。它自己看 `store/clean-shutdown`：标记不在就跑 `quick_check`，不是 `ok` 则返回 `Corrupt`。daemon 不另跑，返回 `Corrupt` 就不听 socket。不建 `daemon.clean`。
+7. 每个 repo `Git::open(主 checkout)`。`repo_id` 撞车 → `NameTaken`，不听 socket。
+8. `Sessions::open` 一次。之后不再开。
+9. `session::recover`。然后才 gc：每个 repo 依次，持该 repo 的写锁调 `gc_repo(repo, GC_KEEP)`，再放开。gc 失败记进告警，不因此不听 socket。
+10. `open_publishes`：每一行 `PublishPhase::Running` 用 `set_publish_phase(id, Running, Unknown, None, now)` 改成 `Unknown`。然后把 `Unknown`（含刚改的）记进内存，供 status。不调用 `git push`，不重放。
+11. 隔离区非空，或 `worktrees` 不是目录 → `Quarantine` 告警，stderr 一行。
+12. 然后才 bind socket、听。
+13. 对已有的、tracked 的工作区 `Tracker::new(root, DEFAULT_DIRTY_CAPACITY)` 再 `watch`。
 
-第 11 步之前不接受请求。小时计时从开始听算起。
+听 socket 之前不接受请求。小时计时从开始听算起。
 
 ### 5.2 等锁
 
@@ -342,13 +339,13 @@ panic：写前 → 该请求 RPC `Failed`，进程继续。写后 → 对该请�
 
 - 该线程上第一次 `with_write`，以及第一次占队列，在 `visible` 为 false 时最多等 `LOCK_WAIT`。超时 → `Busy`，回调没跑，队列没占上。
 - 同一 RPC 里之后的 `with_write` 和占队列，或者 `visible` 已是 true，一直等到拿到。status 在持有超过 30 秒时写 `LongHold`。
-- daemon 在调用会写的函数之前把 `visible` 设上的时机：`session::new` 返回之后（它内部的第一次 `with_write` 在 `create_session` 之前，之后的由「第二次 with_write」这条盖住）；`publish::commit` 返回成功之后；restore 由 overlay 自己写，daemon 在调用 `restore` 之前已经占上队列，调用期间不再等锁。
+- daemon 在调用会写的函数之前把 `visible` 设上的时机：`session::new` 返回之后（它内部的第一次 `with_write` 在 `create_session` 之前，之后的由「第二次 with_write」这条盖住）。`publish::publish` 自己经 `PublishLocks::with_repo` 拿锁，第一次在 `commit_tree` 之前，放开后再拿的那次已经写过，不等待被 30 秒截断。restore 由 overlay 自己写，daemon 在调用 `restore` 之前已经占上队列，调用期间不再等锁。
 
 前提 [我的决定 D8]：一次 RPC 的第一次 `with_write` 发生在这次 RPC 的第一次可见的写之前。`new` 的 fetch 在 `create_session` 之前取锁，符合。`move_workspace` 由调用方已经持锁再调，它自己不再 `with_write`，符合。若邻居打破这个前提，走 §2 的上游要求，不在这里猜。
 
 队列与锁都是 Drop 释放。panic 也释放（I11）。先到先得：等待队列按到达顺序，不是按线程号。
 
-`publishing` 旗标（按会话）不是锁。`rm` 看见它就等，自己不持有队列、repo 锁或建造锁。checkpoint 在 §5.6 说的缺口里不等它。
+`publishing` 旗标（按会话）不是锁。`rm` 看见它就等，自己不持有队列、repo 锁或建造锁。checkpoint 在 `publish::publish` 放开队列去 `ensure` 的那段不等它（D14，不重开）。
 
 ### 5.3 请求
 
@@ -356,7 +353,7 @@ panic：写前 → 该请求 RPC `Failed`，进程继续。写后 → 对该请�
 2. 只读方法直接跑，不占队列，不等写锁。写锁被占住时，`status` 在 1 秒内返回。
 3. 写方法先做不需要确认就能下的具名拒绝（会话没有、ticket 有歧义、提议不是 Pending）。注定失败的不弹框（confirm.md §5.1 第 2 步）。
 4. 要确认的：cli 应已做 `require_tty`。daemon 不查 TTY，也不相信参数里的任何「已确认」。推出 `Action`，在阻塞线程上 `require` 再立刻 `validate`。此时不持有队列或 repo 锁。框开着时第二个 `require` 由 confirm 以 `NotConfirmed`（`prompt_in_progress`）拒绝。核销之后这次确认就用掉了：后面 `Busy`、`OpenFiles`、被取代，人都要重新发命令、重新认证。
-5. 要建造的，在占队列之前做完（§5.6 的缺口是先放开再建造）。
+5. 要建造的，在占队列之前做完，或先放开队列和 repo 锁再做。`publish` 的这段由 `publish::publish` 自己排（§5.6），daemon 不重写。
 6. 占队列（要几个会话就按 `SessionId` 升序全占上，再往下），再拿 repo 锁。持锁时不等队列。`chain_resolve` 不占会话队列，只拿该 repo 的写锁。`resolve_move` 占队列，不由 daemon 拿 repo 锁。
 7. 拿到锁之后按锁里重新解析出的请求再推一次 `Action`，与 `token.action` 比。不同 → `NotConfirmed`，什么都不做（confirm.md D2）。`remove` 与 `new` 自己取锁，daemon 不持锁去调它们，所以这两条的 D2 在调用前做一次，锁内的 action 核对由 `remove` 自己做（它按值收凭据）。选择器在 `remove` 取锁之后又变的窗口，本文不另开锁去堵：堵了就与 `remove` 的取锁重入 [我的决定 D9]。
 8. 调上游。回答一行 JSON。连接已断：不重放。结果留在 store 里，status 看得到。
@@ -397,7 +394,7 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 
 **`publish`**：见 §5.6。
 
-**`push`**：按钉住的值要确认才弹框，action 是 `PushDeploy { repo, branch }`。弹框前读链顶，记在这次请求里。不占会话队列（不碰工作区）。拿 repo 锁。锁里再对 action，并核对链顶没变；变了 → `NotConfirmed`，不推，人重新确认（confirm.md §5.1 末尾交给本文的缺口）。然后 `publish::push`。`PushOutcome::Pushed` 之后锚点事务里 a := 推上去的 commit（仍在这把锁里）。放开之后 §5.7。
+**`push`**：按钉住的值要确认才弹框，action 是 `PushDeploy { repo, branch }`。弹框前读链顶，记在这次请求里。不占会话队列（不碰工作区）。拿 repo 锁。锁里再对 action，并核对链顶没变；变了 → `NotConfirmed`，不推，人重新确认（confirm.md §5.1 末尾交给本文的缺口）。然后 `publish::push`。`PushOutcome::Pushed` 之后，若 `publish::push` 还没把链和锚点写成那个 commit，daemon 在同一把锁里调用 publish.md @df9f069 §2 第 3 条的那一次 ref 事务，把两者一起设上。不拆成两次 `update_ref`。放开之后 §5.7。
 
 **`assign`**：拿该 repo 的写锁，调 `publish::assign`。不占队列，不确认，不推送。
 
@@ -412,12 +409,16 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 1. `choice` 不是 `ChainChoice` 的三个变体名 → RPC `Failed`。
 2. 还没拿锁时读一次 `publish_chain`。不是 `Rewound` 也不是 `Diverged` → `InvalidInput`，`detail.reason = "not_rewound_or_diverged"`，不 fetch，不改链 [我的决定 D19]。不加码。
 3. `Restore` 且钉住的值要确认（`needs_human_confirm`）：与 `push` 相同。action 用已有的 `Action::PushDeploy { repo, branch }`，不新造变体。不持锁地 `require` 再 `validate`。凭据不出现在 RPC 里。接受 origin 的两个选择不推送，不弹框。
-4. 拿该 repo 的写锁（写前 30 秒）。锁里 `fetch`，再读 `publish_chain`，再做 §5.7 的锚点前移规则里属于 fetch 之后的那一半（`Absent` / `Rewound` 不前移）。fetch 不是这次命令自己的链写入：链与锚点还没改、也还没推时，拒绝仍是具名码，不是 `Unknown`。这与 publish 把第一次可见的写放在 `commit` 而不是 fetch 上相同。
-5. 锁里再读。仍不是 `Rewound` / `Diverged` → `InvalidInput`（reason 同上），不改链，不推。放开之后若 `main_tip` 动了，照 §5.7 观察。
-6. `AcceptOriginDrop`：不调用 `push`，不调用 `replay_commits`。`update_ref(链, o, Some(旧 c))`，然后 `update_ref(锚点, o, Some(旧 a))`。链写成了、锚点没写成 → `Unknown`，不删链，不推（与 publish 的锚点失败相同）。
-7. `AcceptOriginReplay`：不调用 `push`。a 不存在，或 a 不是 c 的祖先 → `InvalidInput`，`detail.reason = "no_replay_range"`，ref 不动 [我的决定 D19]。否则 `git.replay_commits(&a, &c, &o)`（§2 的上游要求）。`Conflict` → ref 不动，不推。成功则把链比较并交换到新 tip，锚点比较并交换到 o。同样：链成、锚败 → `Unknown`，不推。
-8. `Restore`：`git.is_ancestor(o, c)` 为假 → `InvalidInput`，`detail.reason = "not_fast_forward"`，`git.push` 不调用，链不动。为真：锁里再对 `PushDeploy`（要确认时），并核对 c 仍是弹框前看到的那个；变了 → `NotConfirmed`，不推。然后 `git.push(staging, "origin", chain_ref, branch, timeout)`。staging 用 `attach_staging` 接到 c，推完 `retire_dir`。timeout 与 publish 的 push 相同，本文不另定。argv 由 gitio 保证没有 `--force`、`--force-with-lease` 或 `+` 开头的 refspec；daemon 不另开一条强推路径。`Refused` → `PushRefused`，链留着。`Unknown` → 报出，不重推。`Pushed` 之后仍在这把锁里把锚点设成推上去的 commit。
-9. 放开锁。`main_tip` 动了就 `observe_main`，失败只是 `ObserveFailed`，不把已经完成的选择改成失败。
+4. 拿该 repo 的写锁（写前 30 秒）。锁里 `fetch`，再读 `publish_chain`。到这里还没有锚点的比较并交换。分类在任何比较并交换之前：
+   - 不是 `Rewound` 也不是 `Diverged` → `InvalidInput`（`not_rewound_or_diverged`），不写链，不写锚点，不推。
+   - `Restore` 且 `git.is_ancestor(o, c)` 为假 → `InvalidInput`（`not_fast_forward`），不写锚点，不推。
+   - `AcceptOriginReplay` 且下面算不出重放范围 → `InvalidInput`（`no_replay_range`），不写锚点。
+   `Diverged` 的锚点前移会写 ref。先比较并交换再拒绝，具名拒绝就落在一次可见的写之后。所以拒绝在比较并交换之前。比较并交换一旦调用，这次命令后面的失败是 `Unknown`，不是 `InvalidInput`，也不是「`Conflict` 且 ref 没变」。
+5. 分类通过之后才写 ref。链和锚点用 publish.md @df9f069 §2 第 3 条的那一次 ref 事务，一次调用里一起比较并交换。不拆成两次 `update_ref`。两次调用之间崩溃就是过期锚点的窗口。daemon 不起 git。
+6. `AcceptOriginDrop`：不调用 `push`，不调用 `replay_commits`。那一次事务把链和锚点都设成 o，对旧的 c 和旧的 a 比较并交换。事务没完成 → `Unknown`，不推，不声称 ref 没变。
+7. `AcceptOriginReplay`：不调用 `push`。范围是前移之后的 a..c，不是 o..c。前移后的 a 在内存里算，这一步还不写：会前移时 `m = git.merge_base(o, c)`，`is_ancestor(a, m)` 且 `m != a` 则 `exclusive_base` 是 m，否则是当前的 a。`Rewound` 不前移，`exclusive_base` 就是当前的 a。`replay_commits(exclusive_base, c, o)`。`Conflict` 只在还没有 ref 事务时返回，链和锚点的字节不变。成功之后那一次事务把链设成新 tip、锚点设成 o。事务失败 → `Unknown`。
+8. `Restore`：第 4 步已经确认是快进，并且还没有锚点比较并交换。锁里再对 `PushDeploy`（要确认时），并核对 c 仍是弹框前看到的那个；变了 → `NotConfirmed`，不推。然后 `git.push(staging, "origin", chain_ref, branch, timeout)`。staging 用 `attach_staging` 接到 c，推完 `retire_dir`。timeout 与 publish 的 push 相同，本文不另定。argv 由 gitio 保证没有 `--force`、`--force-with-lease` 或 `+` 开头的 refspec；daemon 不另开一条强推路径。`Refused` 且链还没改 → `PushRefused`。`Unknown` → 报出，不重推，不接着做一次把失败说成具名拒绝的比较并交换。`Pushed` 之后才调用那一次 ref 事务，把链和锚点一起设成推上去的 commit。事务失败 → `Unknown`。
+9. 放开锁。`main_tip` 动了就 `observe_main`，失败只是 `ObserveFailed`。第 4 步的具名拒绝不被这次观察改成 `Unknown`。ref 事务已经调用过的，失败只能是 `Unknown`。
 
 **`config_relax`**：显式接受一次调松。params 只有 `repo`。不查 TTY。不占会话队列，不拿 repo 写锁。文件变了不弹框：启动、重载、KeepAlive 重启都不调用 `require`。调紧仍立即写回，不要凭据。
 
@@ -426,30 +427,25 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 3. 顺序：`require(Action::ConfigRelax { repo: RepoId })`；`validate` 核对 action 就是这个 repo 的 `ConfigRelax`，并核销凭据；然后才写 `pins.json`。action 由 daemon 从 `repo` 推出，不采用客户端传来的。不符、用过、过期 → `NotConfirmed`，钉不改。confirm 不写任何文件。
 4. `Action::ConfigRelax` 由 Task 15 加进 types.md。在那之前，点名这个变体的路径编译不了。编译不了期间，重载把钉放松的仍然不应用。不提供绕过。
 
-### 5.6 publish 的锁
+### 5.6 publish
 
-publish 草案把「占队列再拿锁」写在一步里。建造锁的顺序不允许在持有队列或 repo 锁时 `ensure` / `build`。本文把一次 `publish` 拆开，两头都满足：
+RPC `publish` 不自己选合并基 B，也不把 `stage`、`check`、`commit`、`push` 拼成临界区。B 由 `publish::publish` 内部的 `publish::merge_base` 决定（publish.md @df9f069 §5.2 第 2 步、D17）。`Rewound` 在任何 commit 或 push 之前以 `InvalidInput`（reason `chain_rewound`）拒绝，不前移锚点。`Diverged` 以 `InvalidInput`（reason `chain_diverged`）拒绝，不 `commit_tree`、不 `push`，链 ref 的字节不变。daemon 把这两个码原样交出去。自己选链顶会把被人拿掉的提交再推上去；自己选 origin 的 tip 会丢掉 a..c。
 
-1. 要确认的 repo，按钉住的值，每个 `PushDeploy` 各弹一次。不持锁。记下每个链顶。
-2. 若已经知道 rebase 要的依赖集，锁外 `ensure`。通常还不知道。
-3. 按 `SessionId` 升序占本组会话的队列。设 `publishing`。拿涉及的 repo 的写锁，一次一个 repo，做完一个放开再拿下一个 [我的决定 D15]：不同时持两把 repo 锁。写前 30 秒，超时 `Busy`，放开已占的队列。
-4. 锁里再对 action 与链顶。然后 fetch、§5.7 的锚点事务、`stage`、`check`、`commit`、按配置 `push`。检查可以跑几分钟，这把锁就持有这么久：裁定把「publish 在跑检查」当作健康的长持有者，status 在 30 秒后点名。`commit` 成功之后 `visible = true`，之后的等锁一直等。
-5. 放开 repo 锁和队列。`publishing` 仍为真，所以 `rm` 仍等。checkpoint 在下一步的建造期间不等 `publishing` [我的决定 D14]：钩子不能等一次冷装；建造锁的顺序又不许持着队列去等建造锁。commit 已经落地的不会被这次 checkpoint 取消。
-6. rebase 要的 `ensure_base_for` / `ensure` 在锁外做。做完再占该会话队列、拿锁、`move_workspace`，然后放开。`move_workspace` 返回后 `Tracker::reset` 再 `watch`。
-7. 清 `publishing`。`observe_main`（§5.7）。失败只报 `ObserveFailed`，发布照常成功。
+daemon 实现 `publish::PublishLocks`（`with_sessions`、`with_repo`），放进 `publish::Ctx`。对组里每个 repo 各调一次 `publish::publish(ctx, group, confirm)`。`confirm` 是已经 `validate` 过的 `PushDeploy`；这次不推，或不需要确认，则为 `None`。daemon 不在这次调用外面再占队列或 repo 锁：trait 不可重入，锁由 `publish::publish` 自己拿。
 
-同一会话的 checkpoint 或 `rm` 在第 3–4 步到达：排队，不取消进行中的 publish，不返回错误码。在第 5 步的建造缺口里，checkpoint 可以跑完，然后第 6 步的 `move_workspace` 等它；`rm` 仍等 `publishing`，在第 7 步之后才跑。这是「T10 publish / T13 daemon (from 3d)」那条的落实，建造缺口是 D14 写明的收窄。
+`PublishLocks` 守已有的顺序：会话队列按 `SessionId` 升序，再 repo 写锁；持锁时不等队列；持有队列或 repo 锁时不等建造锁。写前等 `LOCK_WAIT`，写后一直等。一次只进入一个 repo 的 `with_repo`（D15）。`ensure` / `build` 仍在占队列之前或放开之后，由 `publish::publish` 自己排（它的 §5.2 第 1 步与第 8 步）。daemon 不把这段再写一遍。这一点不改（「Lock order, extended」）。建造缺口里 checkpoint 可以跑、`rm` 仍等，仍是 D14，不重开。
+
+`publish::publish` 返回之后，工作区换过基线的，daemon 对该工作区 `Tracker::reset` 再 `watch`。`ObserveFailed` 在 `Published.warnings` 里，不把发布改成失败。
 
 ### 5.7 fetch 之后
 
-仍在刚才那把 repo 锁里，或为了这件事再拿一次（写后则一直等）：
+这一节只用于 `publish::publish` 外面的 fetch（`new` 返回之后）。`publish::publish` 自己在锁里前移，daemon 不再做一次。
 
-1. `ch = publish_chain(git, branch)`。`None`（还没 fetch 到）→ 不动锚点。
-2. `ChainState::Absent` 或 `ChainState::Rewound` → 不动锚点。
-3. `ChainState::Equal`、`ChainState::Leads`、`ChainState::Behind` 或 `ChainState::Diverged`：`m = git.merge_base(&ch.origin, &ch.top)`（gitio 的，不是 `publish::merge_base`）。`m` 是旧锚点的后代且不等于旧锚点时，`git.update_ref("refs/strata/anchor/<branch>", m, Some(旧锚点))`。比较并交换失败就再读一次：已经等于 `m` 算成功；否则再试一次；仍失败 → `AnchorNotAdvanced`，不让这次 `new` 或 `publish` 失败。
-4. 放开锁。若 `main_tip` 与 fetch 前不同，调 `observe_main`（它自己取锁）。失败再调一次。仍失败 → 警告 `ObserveFailed`，调用本身按它已经完成的结果返回。
+分类在调用事务之前。`ChainState::Absent` 或 `Rewound`，或还没 fetch 到（`None`）→ 不调用。会前移时（`Equal`、`Leads`、`Behind`、`Diverged`）在内存里算 `m = git.merge_base(o, c)`（gitio 的，不是 `publish::merge_base`）。`is_ancestor(a, m)` 且 `m != a` 才写。
 
-`new` 内部已经观察过的，daemon 只在看到 `ObserveFailed` 时做第 4 步的再试。两边都做是幂等的：head 已经不是 tip 的观察什么都不写。
+写用 publish.md @df9f069 §2 第 3 条的那一次 ref 事务：链保持原值，锚点设成 m，同一次调用。不拆成两次 `update_ref`。只改锚点时链也在同一次事务里（publish.md §5.4）。事务一旦调用，失败是 `Unknown`，不是 `InvalidInput`，也不再试一次然后声称锚点没动。`new` 已经成功的，这次 `Unknown` 记进告警，不把 `new` 改成失败。
+
+放开锁之后，若 `main_tip` 与 fetch 前不同，调 `observe_main`（它自己取锁）。失败再调一次。仍失败 → 警告 `ObserveFailed`。`new` 内部已经观察过的，daemon 只在看到 `ObserveFailed` 时再试。两边都做是幂等的。
 
 ### 5.8 调松
 
@@ -459,7 +455,7 @@ publish 草案把「占队列再拿锁」写在一步里。建造锁的顺序不
 
 每 `RECONCILE_EVERY`：每个工作区试着占该会话的队列（不等；占不上就跳过，记进 `daemon_status`）。占上之后借 `Tracker` 做一次不依赖事件的冷扫（`unchanged_since` 作保，不是把每个文件再哈希一遍），更新缓存，不写 checkpoint 行——`CheckpointReason` 没有「小时」这一项，不发明 [我的决定 D16]。放开 Tracker，放开队列。然后 gc，规则同 `gc` 方法。与请求共用同一把锁和同一条队列。
 
-停机（SIGTERM）：停止 accept。在跑的请求做完。还在排队的以 `ReadOnly` 失败，`detail.reason = "shutting_down"`（types.md 没有 Closed 这个码，映射到已有的「写被拒绝」）[我的决定 D17]。在请求线程上丢掉 Tracker（从而丢掉 Watcher），不在回调里丢。放开全部 `Arc<Store>` 之后 `Store::close`。写 `daemon.clean`。unlink socket。放开 flock。退出。
+停机（SIGTERM）：停止 accept。在跑的请求做完。还在排队的以 `ReadOnly` 失败，`detail.reason = "shutting_down"`（types.md 没有 Closed 这个码，映射到已有的「写被拒绝」）[我的决定 D17]。在请求线程上丢掉 Tracker（从而丢掉 Watcher），不在回调里丢。放开全部 `Arc<Store>` 之后 `Store::close`（它写 `store/clean-shutdown`）。不写 `daemon.clean`。unlink socket。放开 flock。退出。
 
 ### 5.10 告警与影子仓库
 
@@ -490,12 +486,13 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | 要确认的推送，链顶在弹框之后变了 | `NotConfirmed` | 无 | 重新确认 |
 | `resolve_move` 两个布尔都真或都假 | RPC `Failed` | 无 | 只给一个选择 |
 | `chain_resolve` 的 choice 不对 | RPC `Failed` | 无 | — |
-| 链不是 Rewound / Diverged 却来 `chain_resolve` | `InvalidInput`（reason `not_rewound_or_diverged`） | 链不动 | 不必处理 |
-| 接受 origin | 不调用 `push` | 链与锚点按 §5.5 改，或 `Conflict` 时不动 | 人再决定要不要另一次 `push` |
+| 链不是 Rewound / Diverged 却来 `chain_resolve` | `InvalidInput`（reason `not_rewound_or_diverged`） | 链不动，锚点比较并交换还没调用 | 不必处理 |
+| 接受 origin | 不调用 `push`。drop 与 replay 的链和锚点同一次 ref 事务 | replay 在事务之前 `Conflict` 时 ref 不动；事务之后只有 `Unknown` | 人再决定要不要另一次 `push` |
+| 锚点事务已调用之后失败 | `Unknown` | 不声称 ref 没变 | 不重放，不改成 `InvalidInput` 或 `Conflict` |
 | 恢复但 o 不是 c 的祖先 | `InvalidInput`（reason `not_fast_forward`） | 无 push | 改用接受 origin。gitio 不强推 |
 | 恢复要确认而凭据不符 | `NotConfirmed` | 无 push | 重新确认 |
 | 上次推送不确定 | status 报出 `UnknownPublish`，不重放、不删行 | 行还在 | 人决定 |
-| 崩溃留下的 Running 发布 | status 报出，不改行、不重放 | 行还在 | 人决定 [D6] |
+| 崩溃留下的 Running 发布 | 先 `set_publish_phase(Running → Unknown)`，再当 Unknown 报出，不重放 | 行变成 Unknown | 人决定。留下 Running 会让下一次 publish 一直 Busy |
 | `observe_main` 失败 | 警告 `ObserveFailed`，再试一次 | 调用本身已完成的留下 | 下次观察补上 |
 | attach 越界 | `Unknown` 原样透传，加告警 | 现场留下 | 人看主 checkout 的 index，daemon 不改 |
 | 隔离挪失败 | `Unknown`，告警 | 链接可能还在 | 不在该影子仓库上跑 git |
@@ -516,7 +513,7 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | --- | --- | --- |
 | `concurrent_checkpoints_same_session_serialize` | 同一会话两个 checkpoint 同时到，第二个排队，两个都完成，顺序与到达一致，没有一个被取消；types.md 里没有 InFlight 这个码 | `layerfs-daemon/tests/store_commit.rs::a_held_producer_does_not_hold_workspace_metadata_or_read_capacity` |
 | `rm_queued_behind_in_flight_checkpoint` | checkpoint 进行中收到 `rm`，`rm` 在该 checkpoint 完成之后才执行，不取消它，不返回 `Busy` | `layerfs-daemon/tests/store_commit.rs::a_held_producer_does_not_hold_workspace_metadata_or_read_capacity` |
-| `unknown_publish_reported_on_restart_not_replayed` | publishes 里有一行 `Unknown`；重启后 `status` 与 `daemon_status` 都含它；`git push` 没被调用；该行还在 | 新增 |
+| `unknown_publish_reported_on_restart_not_replayed` | 一行 `Unknown` 重启后仍在 status 里；一行 `Running` 被改成 `Unknown` 再报出；两种都不调用 `git push`，也不重放 | 新增 |
 | `cli_readonly_commands_work_without_daemon` | daemon 没听 socket 时，`status`、`grep`、`files` 仍返回 JSON（cli 直接读）；`publish` 与 `push` 失败并说明 daemon 没在跑（`ReadOnly`） | 新增 |
 | `status_does_not_wait_on_write_lock` | 写锁被占住时，`status`、`grep`、`files`、`diff`、`deps_list`、`daemon_status` 都在 1 秒内返回 | `layerfs-api/tests/sdk_reads_during_publish.rs::reads_do_not_wait_for_a_held_publication_lane` |
 | `busy_only_before_first_write` | 调用还没写时，锁超过 30 秒 → `Busy`，什么都没写；已经写过的调用在同样的持锁下等到拿到，不返回 `Busy` | `layerfs-persistence/tests/writer_admission.rs::queued_writers_outlive_the_old_window_and_all_succeed` |
@@ -576,10 +573,11 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | `resolve_move_exclusive_choice` | `abandon` 与 `accept` 都真或都假 → RPC `Failed`，`resolve_failed_move` 没被调用。恰好一个为真才调用，选择与布尔对应 | 新增 |
 | `resolve_move_skips_tty_and_confirm` | 不返回 `NotTty`，不调用 `Confirmer`。参数里多一个凭据字段 → RPC `Failed` | 新增 |
 | `resolve_move_queues_and_does_not_hold_repo_lock` | 占该会话队列之后才调用；调用时 daemon 不持有 repo 写锁。`Accept` 之后 `Tracker::reset` 再 `watch` | 新增 |
-| `chain_resolve_accept_origin_does_not_push` | `AcceptOriginReplay` 与 `AcceptOriginDrop` 的全程 `git.push` 调用次数为 0。drop 把链和锚点改到 o。replay 合不上时链的字节不变 | 新增 |
+| `chain_resolve_accept_origin_does_not_push` | `AcceptOriginReplay` 与 `AcceptOriginDrop` 的全程 `git.push` 调用次数为 0。drop 与 replay 各只调用一次 ref 事务，不是两次 `update_ref`。replay 的范围是前移之后的 a..c，不是 o..c。事务之前 `Conflict` 时链的字节不变 | 新增 |
 | `chain_resolve_restore_pushes_only_fast_forward` | `is_ancestor(o, c)` 为假 → `InvalidInput`（reason `not_fast_forward`），`git.push` 不调用。为真才 `push` 一次，src 是链 ref，dst 是 `publish.branch`。没有第二条强推路径 | 新增 |
 | `chain_resolve_restore_checks_push_deploy` | 钉住的值要确认时，恢复走与 `push` 相同的 `Action::PushDeploy` 核对；不符不推。接受 origin 不弹框 | 新增 |
-| `chain_resolve_refs_under_repo_lock` | fetch、链/锚点的 `update_ref`、以及恢复的 `push` 都发生在该 repo 写锁的闭包里 | 新增 |
+| `chain_resolve_refs_under_repo_lock` | fetch、那一次 ref 事务、以及恢复的 `push` 都在该 repo 写锁的闭包里。分类没通过时 ref 事务的调用次数为 0 | 新增 |
+| `publish_calls_publish_not_stage` | RPC `publish` 调用 `publish::publish`，不调用 `stage`、`check`、`commit`。`Rewound` / `Diverged` 原样交出 `InvalidInput`（`chain_rewound` / `chain_diverged`），daemon 不选链顶，也不选 origin 的 tip 当 B | 新增 |
 
 `second_exporter_waits_then_busy_never_exists` 不在本表。后写的裁定把它交给 session 的登记时去重（「T13 / T10 notes (from gitio 60b1cf5)」），本文不再写。
 
@@ -664,7 +662,7 @@ git commit -m "feat(daemon): repo lock, session queue, busy before write"
 **Interfaces:**
 
 - Consumes: `Store::open`、`quick_check`、`open_publishes`、`gc_repo`、`session::recover`、`Sessions::open`
-- Produces: 单例锁、`daemon.clean`、§5.1 的顺序
+- Produces: 单例锁、§5.1 的顺序。不产生 `daemon.clean`
 
 - [ ] **Step 1: 写失败的测试**：`unknown_publish_reported_on_restart_not_replayed`、`second_instance_refused_then_reacquired`、`quarantine_is_an_alert`、`release_daemon_has_no_test_seams`、`daemon_does_not_idle_exit`、`idle_close_is_not_ours`、`no_linux_install_path`
 - [ ] **Step 2: 跑测试，确认失败**
@@ -730,7 +728,7 @@ git commit -m "feat(daemon): confirm order, pinned flags, launchd plist"
 
 **Interfaces:**
 
-- Consumes: `publish_chain`、`main_tip`、`observe_main`、`gitio::update_ref`、`gitio::merge_base`、`is_ancestor`
+- Consumes: `publish_chain`、`main_tip`、`observe_main`、publish.md @df9f069 §2 第 3 条的一次 ref 事务、`gitio::merge_base`、`is_ancestor`
 - Produces: §5.7、`DaemonWarning::AttachOutside`、`AnchorNotAdvanced`
 
 - [ ] **Step 1: 写失败的测试**：`anchor_advances_after_fetch`、`observe_failed_does_not_fail_new_or_publish`、`hint_and_flush_off_callback_thread`，外加 attach 两个 reason 的告警测试（不改 index），以及 `PrePushGuardDisabled` 只报告、不写影子 config。
@@ -740,7 +738,7 @@ Run: `cargo test -p strata-daemon --test fetch_after`
 
 Expected: FAIL
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.7、§5.10。锚点 ref 名 `refs/strata/anchor/<branch>`。
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.7、§5.10。锚点与链同一次 ref 事务，不拆成两次 `update_ref`。
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-daemon --test fetch_after`
@@ -796,10 +794,10 @@ git commit -m "feat(daemon): rpc, locks, and unknown-publish report"
 
 **Interfaces:**
 
-- Consumes: `session::resolve_failed_move`、`MoveResolution`、`publish_chain`、`gitio::is_ancestor`、`gitio::push`、`gitio::update_ref`、`gitio::fetch`、`Git::replay_commits`（上游要求 D18）、`Action::PushDeploy`
+- Consumes: `session::resolve_failed_move`、`MoveResolution`、`publish_chain`、`gitio::is_ancestor`、`gitio::push`、`gitio::fetch`、publish.md @df9f069 §2 第 3 条的一次 ref 事务、`Git::replay_commits`（D18）、`Action::PushDeploy`、`publish::publish`
 - Produces: `ChainChoice`。不加 `Code`
 
-- [ ] **Step 1: 写失败的测试**：`resolve_move_exclusive_choice`、`resolve_move_skips_tty_and_confirm`、`resolve_move_queues_and_does_not_hold_repo_lock`、`chain_resolve_accept_origin_does_not_push`、`chain_resolve_restore_pushes_only_fast_forward`、`chain_resolve_restore_checks_push_deploy`、`chain_resolve_refs_under_repo_lock`
+- [ ] **Step 1: 写失败的测试**：`resolve_move_exclusive_choice`、`resolve_move_skips_tty_and_confirm`、`resolve_move_queues_and_does_not_hold_repo_lock`、`chain_resolve_accept_origin_does_not_push`、`chain_resolve_restore_pushes_only_fast_forward`、`chain_resolve_restore_checks_push_deploy`、`chain_resolve_refs_under_repo_lock`、`publish_calls_publish_not_stage`
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-daemon --test resolve`
@@ -829,11 +827,11 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 | D3 帧上限 | 16 MiB，超过 → `TooLarge` | types.md 把帧上限指给 daemon，又不许加码。16 MiB 装得下一次大的 diff，又挡得住不换行的灌入 | 2026-10-23 |
 | D4 params 未知字段 | RPC `Failed` | 打错的字段若被忽略，cli 与 daemon 会各跑各的。冻结表的字段就这些 | 2026-10-23 |
 | D5 gc 保留期 | 14 天 | design §7 交给构建者。store 的 `keep` 要一个值；Removed 会话与 BeforeRemove 的内容留两周 | 2026-10-23 |
-| D6 崩溃留下的 Running 行 | 只报告，不改 phase | 裁定只要求报 `Unknown`、不重放、不删除。把 Running 改成 Unknown 是 publish / store 的状态图，草案还没写 recover。改行会冒充已经裁定的转换 | 2026-10-23 |
+| D6 残留的 Running | 启动时 `set_publish_phase(Running → Unknown)`，然后当 Unknown 报出，不重放 | store 允许这条边。留下 Running 不是不变量 6 的不确定状态，下一次 publish 会一直 Busy，没有命令能清。旧的「不改行」撤回 | 2026-10-23 |
 | D7 plist 的 RunAtLoad 与 ProcessType | 都写上 | `KeepAlive` 与 `Aqua` 是裁定。没有 `RunAtLoad`，bootstrap 之后不一定起来。`Interactive` 让认证框画得出。Label、PATH、socket 路径不是这条决定 | 2026-10-23 |
 | D8 写前与写后的等待 | 同一 RPC 里第一次 `with_write` / 占队列在 `visible == false` 时有界，之后无界 | trait 上没有 `note_visible_write`，邻居不能反向依赖 daemon。前提：第一次取锁在第一次可见的写之前。打破前提时走 §2 的上游要求 | 2026-10-23 |
 | D9 `remove` 的锁内再核对 | 调用前核对一次；锁内由 `remove` 核对 action | session 要求调用时不持锁，锁又不可重入。confirm.md D2 的选择器窗口留着，不发明 session 没有的回调 | 2026-10-23 |
-| D10 按需 quick_check | `daemon_status` 的 `verify: true` | 裁定要本文点名校验命令。冻结表没有 `verify`。启动时只在不清洁退出之后跑，与 store 的说法一致 | 2026-10-23 |
+| D10 按需 quick_check | 只有 `daemon_status` 的 `verify: true` 调用 `quick_check` | 启动时的检查是 `Store::open` 看 `store/clean-shutdown`。标记不在它就跑，失败返回 `Corrupt`，daemon 不听。daemon 不再建 `daemon.clean` | 2026-10-23 |
 | D11 钩子等 checkpoint | 做完再回答 | 先应答会把下一次调用的早期写入算进这一次。没有路径清单的冷扫大约 0.20 秒，超出 200 ms，阶段结束时告诉用户 | 2026-10-23 |
 | D14 publish 的建造缺口 | 建造前放开队列与 repo 锁；`rm` 仍等 `publishing`；checkpoint 在缺口里可以跑 | 同时满足「不持队列等建造锁」和「不取消进行中的 publish」。3d 那条在 commit/push/move 阶段仍是排队 | 2026-10-23 |
 | D15 一次一把 repo 锁 | 按批次里的 repo 顺序，做完一个再拿下一个 | 一组跨 repo 时两把锁没有裁定过的顺序。一次一把不会死锁 | 2026-10-23 |
@@ -841,6 +839,16 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 | D17 停机时排队的写 | `ReadOnly`，reason `shutting_down` | types.md 没有 Closed。`ReadOnly` 含「写被拒绝」。映射说在这里 | 2026-10-23 |
 | 对账间隔 | 1 小时 | 初稿已定，落实 design §6.2 交给构建者的间隔 | 2026-10-23 |
 | 第二个进程的码 | `Exists`，不是 `Busy` | 矩阵写明码由本文定，且 `Busy` 只用于写锁。`Exists` 是「要建的已经在」里最近的一个 | 2026-10-23 |
-| D18 重放函数 | `Git::replay_commits(exclusive_base, tip, onto) -> Result<CommitOid>` | gitio @1cd5ac5 没有 cherry-pick 或 rev-list。daemon 不能自己起 git。函数不改 ref、不推送；合不上返回已有的 `Conflict` | 2026-10-23 |
+| D18 重放函数 | `Git::replay_commits(exclusive_base, tip, onto) -> Result<CommitOid>` | 见下。gitio @1cd5ac5 没有这个函数。daemon 不起 git | 2026-10-23 |
 | D19 链处理的 reason | `not_rewound_or_diverged`、`no_replay_range`、`not_fast_forward`，码都是 `InvalidInput` | 控制器不许加码。这三种都是写链或推送之前的具名拒绝 | 2026-10-23 |
 | D20 没有待调松仍叫 `config_relax` | `InvalidInput`，reason `not_relaxed`，不弹框 | 文件变了不弹框。没有待接受的调松时，显式命令也不该弹出一个空框 | 2026-10-23 |
+
+D18 的契约，实现者不要猜：
+
+- 范围是从 `tip` 可达、从 `exclusive_base` 不可达的提交。`chain_resolve` 的 `AcceptOriginReplay` 把 `exclusive_base` 设成前移之后的 a（内存里按锚点规则算出的那个，还没写），`tip` 是 c，`onto` 是 o。不是 o..c：那会把 origin 已经有的提交再放一遍。
+- 顺序是 a..c 上从旧到新。每个新 commit 的第一父是上一个新 commit，第一个的父是 `onto`。
+- 合并提交只走第一父那一条：重放成单父 commit，tree 用那个合并提交的 tree，不重新合并。这一段相对它第一父的 diff 合不上新父 → `Conflict`。
+- 每个 commit 用 `user.useConfigOnly=true`。身份没配 → `InvalidInput`，`detail.reason = "git-identity"`，与 publish 造 commit 的规则相同。
+- 对象进主 checkout 的对象库（`Git::open` 开在主 checkout 上的那一个）。不进影子仓库。
+- 临时工作树若需要，由 gitio 自己建、自己收。daemon 不建，不起 git。
+- 只造 commit。不改 ref，不推送，不强推。`Conflict` 时 ref 的字节不变。ref 事务是 daemon 在这之后另一次调用，不在这个函数里。
