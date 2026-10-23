@@ -47,7 +47,10 @@ impl Default for Sandbox {
 
 impl Sandbox {
     pub fn new() -> Sandbox {
-        let dir = tempfile::Builder::new().prefix("strata-deps-").tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .prefix("strata-deps-")
+            .tempdir()
+            .expect("tempdir");
         let root = fs::canonicalize(dir.path()).unwrap();
         let home = root.join("home");
         let xdg = home.join(".config");
@@ -61,7 +64,14 @@ impl Sandbox {
         let state = root.join("bun-state");
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(&state).unwrap();
-        let sb = Sandbox { _dir: dir, root, home, xdg, bin, state };
+        let sb = Sandbox {
+            _dir: dir,
+            root,
+            home,
+            xdg,
+            bin,
+            state,
+        };
         sb.set_bun_version("1.3.3");
         sb.set_install_script(DEFAULT_INSTALL);
         sb
@@ -81,7 +91,8 @@ impl Sandbox {
     }
 
     pub fn open(&self, root: &Path) -> Git {
-        Git::open_with_env(root, &self.git_env()).unwrap_or_else(|e| panic!("open {}: {e:?}", root.display()))
+        Git::open_with_env(root, &self.git_env())
+            .unwrap_or_else(|e| panic!("open {}: {e:?}", root.display()))
     }
 
     pub fn cmd(&self, cwd: &Path) -> Command {
@@ -164,8 +175,14 @@ impl Sandbox {
         fs::create_dir_all(dir).unwrap();
         let o = self.git_output(repo, &["archive", "--format=tar", treeish]);
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-        let mut tar =
-            Command::new("tar").arg("-xf").arg("-").arg("-C").arg(dir).stdin(Stdio::piped()).spawn().unwrap();
+        let mut tar = Command::new("tar")
+            .arg("-xf")
+            .arg("-")
+            .arg("-C")
+            .arg(dir)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
         tar.stdin.take().unwrap().write_all(&o.stdout).unwrap();
         assert!(tar.wait().unwrap().success());
     }
@@ -185,7 +202,10 @@ impl Sandbox {
     }
 
     pub fn install_env(&self) -> InstallEnv {
-        InstallEnv { path: self.install_path(), timeout: Duration::from_secs(60) }
+        InstallEnv {
+            path: self.install_path(),
+            timeout: Duration::from_secs(60),
+        }
     }
 
     /// Write `bin/<name>` atomically (new inode) with `body` and mode 0755.
@@ -231,7 +251,9 @@ exit $rc
 
     /// How many installs the fake `bun` has run.
     pub fn install_count(&self) -> u32 {
-        fs::read_to_string(self.state.join("count")).map(|s| s.trim().parse().unwrap()).unwrap_or(0)
+        fs::read_to_string(self.state.join("count"))
+            .map(|s| s.trim().parse().unwrap())
+            .unwrap_or(0)
     }
 
     pub fn install_file(&self, what: &str, n: u32) -> String {
@@ -249,7 +271,11 @@ exit $rc
             install_inputs: rps(&["package.json", "bun.lock", "patches"]),
             install: Some("bun install --frozen-lockfile".into()),
             checks: vec![],
-            publish: PublishTarget { branch: "main".into(), push: true, confirm: false },
+            publish: PublishTarget {
+                branch: "main".into(),
+                push: true,
+                confirm: false,
+            },
             deploy_on_push: false,
             pin_unpushed: true,
         }
@@ -272,3 +298,340 @@ echo '{"name":"x","version":"1.0.0"}' > node_modules/x/package.json
 ln -sf ../x/index.js node_modules/.bin/x
 echo "installed"
 "#;
+
+// ---- Task 3+: store, context and the repo write lock double ----
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+
+use strata_deps::{Ctx, RepoWriteLock};
+use strata_store::Store;
+use strata_types::{Code, Paths, StrataError};
+
+type Hook = Box<dyn FnMut() + Send>;
+
+/// The recording `RepoWriteLock` double (§7): a real mutex, `busy`
+/// injected `Busy` returns, enter/exit hooks; released even when a panic
+/// passes through.
+#[derive(Default)]
+pub struct RecLock {
+    m: Mutex<()>,
+    /// Return `Busy` (without running `f`) this many more times.
+    pub busy: AtomicU32,
+    /// Calls that ran `f`.
+    pub enters: AtomicU32,
+    /// Calls that returned `Busy`.
+    pub busies: AtomicU32,
+    pub on_enter: Mutex<Option<Hook>>,
+    pub on_exit: Mutex<Option<Hook>>,
+}
+
+impl RecLock {
+    pub fn enters(&self) -> u32 {
+        self.enters.load(Ordering::SeqCst)
+    }
+
+    pub fn set_busy(&self, n: u32) {
+        self.busy.store(n, Ordering::SeqCst);
+    }
+
+    pub fn on_enter(&self, h: impl FnMut() + Send + 'static) {
+        *self.on_enter.lock().unwrap() = Some(Box::new(h));
+    }
+
+    pub fn on_exit(&self, h: impl FnMut() + Send + 'static) {
+        *self.on_exit.lock().unwrap() = Some(Box::new(h));
+    }
+
+    fn call(slot: &Mutex<Option<Hook>>) {
+        let h = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(mut h) = h {
+            h();
+            let mut s = slot.lock().unwrap_or_else(|p| p.into_inner());
+            if s.is_none() {
+                *s = Some(h);
+            }
+        }
+    }
+}
+
+impl RepoWriteLock for RecLock {
+    fn with_write(
+        &self,
+        repo: &RepoName,
+        f: &mut dyn FnMut() -> strata_deps::Result<()>,
+    ) -> strata_deps::Result<strata_deps::Result<()>> {
+        let left = self.busy.load(Ordering::SeqCst);
+        if left > 0 {
+            self.busy.store(left - 1, Ordering::SeqCst);
+            self.busies.fetch_add(1, Ordering::SeqCst);
+            return Err(StrataError::new(
+                Code::Busy,
+                format!("repo {} write lock is busy", repo.as_str()),
+            ));
+        }
+        let _g = self.m.lock().unwrap_or_else(|p| p.into_inner());
+        self.enters.fetch_add(1, Ordering::SeqCst);
+        Self::call(&self.on_enter);
+        let r = f();
+        Self::call(&self.on_exit);
+        Ok(r)
+    }
+}
+
+/// A sandbox with a main checkout `tool`, a store at `<root>/strata` and
+/// everything a `Ctx` borrows.
+pub struct Fx {
+    pub sb: Sandbox,
+    pub main: PathBuf,
+    pub paths: Paths,
+    pub repo: RepoName,
+    pub cfg: RepoConfig,
+    pub git: Git,
+    pub env: InstallEnv,
+    pub lock: RecLock,
+    store: Option<Arc<Store>>,
+}
+
+impl Default for Fx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Fx {
+    pub fn new() -> Fx {
+        let sb = Sandbox::new();
+        let main = sb.init_project("tool");
+        let root = sb.root.join("strata");
+        let store = Store::open(&root, &[&main]).expect("open store");
+        let git = sb.open(&main);
+        let cfg = sb.config(&main);
+        let env = sb.install_env();
+        Fx {
+            main,
+            paths: Paths { root },
+            repo: repo_name("tool"),
+            cfg,
+            git,
+            env,
+            lock: RecLock::default(),
+            store: Some(Arc::new(store)),
+            sb,
+        }
+    }
+
+    pub fn store(&self) -> &Store {
+        self.store.as_ref().expect("store is open")
+    }
+
+    pub fn store_arc(&self) -> Arc<Store> {
+        self.store.as_ref().expect("store is open").clone()
+    }
+
+    pub fn close_store(&mut self) {
+        let s = self.store.take().expect("store is open");
+        Arc::try_unwrap(s)
+            .ok()
+            .expect("store still shared")
+            .close()
+            .unwrap();
+    }
+
+    pub fn reopen_store(&mut self) {
+        assert!(self.store.is_none());
+        self.store = Some(Arc::new(
+            Store::open(&self.paths.root, &[&self.main]).expect("reopen store"),
+        ));
+    }
+
+    pub fn ctx(&self) -> Ctx<'_> {
+        Ctx {
+            store: self.store(),
+            paths: &self.paths,
+            repo: &self.repo,
+            cfg: &self.cfg,
+            git: &self.git,
+            env: &self.env,
+            locks: &self.lock,
+        }
+    }
+
+    /// The main checkout's HEAD exported to `<root>/trees/<name>`.
+    pub fn tree(&self, name: &str) -> PathBuf {
+        let dir = self.sb.root.join("trees").join(name);
+        self.sb.archive_into(&self.main, "HEAD", &dir);
+        dir
+    }
+
+    /// A tree whose `package.json` differs by `tag` (its own deps set).
+    pub fn tree_tagged(&self, name: &str, tag: &str) -> PathBuf {
+        let dir = self.tree(name);
+        fs::write(
+            dir.join("package.json"),
+            format!("{{\n  \"name\": \"tool\",\n  \"dependencies\": {{ \"x\": \"^1.0.0\", \"{tag}\": \"1.0.0\" }}\n}}\n"),
+        )
+        .unwrap();
+        dir
+    }
+
+    pub fn deps_root(&self) -> PathBuf {
+        self.paths.deps()
+    }
+
+    pub fn repo_dir(&self) -> PathBuf {
+        self.paths.deps().join("tool")
+    }
+
+    pub fn lock_path(&self, id: &strata_types::DepsSetId) -> PathBuf {
+        self.repo_dir()
+            .join(".locks")
+            .join(format!("{}.lock", id.as_str()))
+    }
+
+    pub fn trash(&self) -> PathBuf {
+        self.paths.root.join("store").join("trash")
+    }
+
+    pub fn trash_count(&self) -> usize {
+        fs::read_dir(self.trash()).map(|d| d.count()).unwrap_or(0)
+    }
+
+    pub fn staging_dirs(&self) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = fs::read_dir(self.repo_dir().join(".staging"))
+            .map(|d| d.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+}
+
+/// `(relative path, kind, size, mode, readlink, bytes)` of every entry under
+/// `dir`, sorted; for before/after comparisons.
+pub type Entry = (String, String, u64, u32, String, Vec<u8>);
+
+pub fn snapshot(dir: &Path) -> Vec<Entry> {
+    let mut out = Vec::new();
+    fn go(base: &Path, d: &Path, out: &mut Vec<Entry>) {
+        let Ok(rd) = fs::read_dir(d) else { return };
+        for e in rd {
+            let e = e.unwrap();
+            let p = e.path();
+            let m = fs::symlink_metadata(&p).unwrap();
+            let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+            let ft = m.file_type();
+            let (kind, link, bytes) = if ft.is_symlink() {
+                (
+                    "link",
+                    fs::read_link(&p).unwrap().to_string_lossy().into_owned(),
+                    Vec::new(),
+                )
+            } else if ft.is_dir() {
+                ("dir", String::new(), Vec::new())
+            } else if ft.is_file() {
+                ("file", String::new(), fs::read(&p).unwrap_or_default())
+            } else {
+                ("special", String::new(), Vec::new())
+            };
+            out.push((
+                rel,
+                kind.to_string(),
+                if ft.is_dir() { 0 } else { m.len() },
+                m.permissions().mode(),
+                link,
+                bytes,
+            ));
+            if ft.is_dir() {
+                go(base, &p, out);
+            }
+        }
+    }
+    go(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// Make a sealed (0555) tree writable again and delete it.
+pub fn force_remove(p: &Path) {
+    let _ = Command::new("chmod").arg("-R").arg("u+w").arg(p).status();
+    let _ = fs::remove_dir_all(p);
+}
+
+pub fn wait_for_file(p: &Path, limit: Duration) {
+    let start = std::time::Instant::now();
+    while !p.exists() {
+        assert!(
+            start.elapsed() < limit,
+            "timed out waiting for {}",
+            p.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+pub fn pid_alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks for existence.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+pub fn group_alive(pgid: i32) -> bool {
+    // SAFETY: as above.
+    unsafe { libc::killpg(pgid, 0) == 0 }
+}
+
+pub fn detail_str<'a>(e: &'a StrataError, key: &str) -> Option<&'a str> {
+    e.detail
+        .as_ref()
+        .and_then(|d| d.get(key))
+        .and_then(|v| v.as_str())
+}
+
+pub fn reason(e: &StrataError) -> Option<&str> {
+    detail_str(e, "reason")
+}
+
+pub fn mode_of(p: &Path) -> u32 {
+    fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777
+}
+
+/// The repo config with no Sandbox (for worker processes).
+pub fn bun_config(path: &Path) -> RepoConfig {
+    RepoConfig {
+        path: path.to_path_buf(),
+        default_branch: "main".into(),
+        deps_dirs: rps(&["node_modules"]),
+        seed_caches: rps(&[".cache"]),
+        seed_files: None,
+        install_inputs: rps(&["package.json", "bun.lock", "patches"]),
+        install: Some("bun install --frozen-lockfile".into()),
+        checks: vec![],
+        publish: PublishTarget {
+            branch: "main".into(),
+            push: true,
+            confirm: false,
+        },
+        deploy_on_push: false,
+        pin_unpushed: true,
+    }
+}
+
+pub const WORKER_ENV: &str = "STRATA_DEPS_WORKER";
+
+pub fn worker_mode() -> Option<String> {
+    std::env::var(WORKER_ENV).ok()
+}
+
+/// Re-run this test binary's test `name` as a worker in its own process
+/// group, with `vars`.
+pub fn spawn_worker(name: &str, mode: &str, vars: &[(&str, &OsStr)]) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    let mut c = Command::new(std::env::current_exe().unwrap());
+    c.args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .env(WORKER_ENV, mode)
+        .stdin(Stdio::null())
+        .process_group(0);
+    for (k, v) in vars {
+        c.env(k, v);
+    }
+    c.spawn().expect("spawn worker")
+}

@@ -30,7 +30,10 @@ const TAG_MANIFEST: u8 = 3;
 
 /// `path` is `prefix` or lies under it (the prefix ends at a `/`).
 pub(crate) fn under(path: &str, prefix: &str) -> bool {
-    path == prefix || (path.len() > prefix.len() && path.starts_with(prefix) && path.as_bytes()[prefix.len()] == b'/')
+    path == prefix
+        || (path.len() > prefix.len()
+            && path.starts_with(prefix)
+            && path.as_bytes()[prefix.len()] == b'/')
 }
 
 fn strictly_under(path: &str, prefix: &str) -> bool {
@@ -46,12 +49,20 @@ impl DepsConfigKey {
         deps_dirs.sort_by(|a, b| a.as_str().as_bytes().cmp(b.as_str().as_bytes()));
         deps_dirs.dedup();
         let install = cfg.install_argv()?.unwrap_or_default();
-        Ok(DepsConfigKey { deps_dirs, nested_seed_caches: nested_seed_caches(cfg), install })
+        Ok(DepsConfigKey {
+            deps_dirs,
+            nested_seed_caches: nested_seed_caches(cfg),
+            install,
+        })
     }
 
     /// The empty configuration (the empty deps set, §5.6).
     pub fn empty() -> DepsConfigKey {
-        DepsConfigKey { deps_dirs: Vec::new(), nested_seed_caches: Vec::new(), install: Vec::new() }
+        DepsConfigKey {
+            deps_dirs: Vec::new(),
+            nested_seed_caches: Vec::new(),
+            install: Vec::new(),
+        }
     }
 }
 
@@ -60,7 +71,11 @@ pub fn nested_seed_caches(cfg: &RepoConfig) -> Vec<RepoPath> {
     let mut out: Vec<RepoPath> = cfg
         .seed_caches
         .iter()
-        .filter(|c| cfg.deps_dirs.iter().any(|d| strictly_under(c.as_str(), d.as_str())))
+        .filter(|c| {
+            cfg.deps_dirs
+                .iter()
+                .any(|d| strictly_under(c.as_str(), d.as_str()))
+        })
         .cloned()
         .collect();
     out.sort_by(|a, b| a.as_str().as_bytes().cmp(b.as_str().as_bytes()));
@@ -70,7 +85,9 @@ pub fn nested_seed_caches(cfg: &RepoConfig) -> Vec<RepoPath> {
 
 /// `path` equals an `install_inputs` entry or lies under one.
 pub fn is_input(cfg: &RepoConfig, path: &RepoPath) -> bool {
-    cfg.install_inputs.iter().any(|e| under(path.as_str(), e.as_str()))
+    cfg.install_inputs
+        .iter()
+        .any(|e| under(path.as_str(), e.as_str()))
 }
 
 /// The compile-time target triple (§4.3).
@@ -84,7 +101,12 @@ fn write_bytes(h: &mut blake3::Hasher, b: &[u8]) {
 }
 
 /// §4.3, v2.
-pub fn set_id(inputs_hash: &str, platform: &str, toolchain: &str, config: &DepsConfigKey) -> DepsSetId {
+pub fn set_id(
+    inputs_hash: &str,
+    platform: &str,
+    toolchain: &str,
+    config: &DepsConfigKey,
+) -> DepsSetId {
     let mut h = blake3::Hasher::new_derive_key(SET_ID_CONTEXT);
     write_bytes(&mut h, inputs_hash.as_bytes());
     write_bytes(&mut h, platform.as_bytes());
@@ -106,7 +128,10 @@ pub fn set_id(inputs_hash: &str, platform: &str, toolchain: &str, config: &DepsC
 
 /// The hash of no install inputs at all (the empty deps set).
 pub fn empty_inputs_hash() -> String {
-    blake3::Hasher::new_derive_key(INPUTS_CONTEXT).finalize().to_hex().to_string()
+    blake3::Hasher::new_derive_key(INPUTS_CONTEXT)
+        .finalize()
+        .to_hex()
+        .to_string()
 }
 
 struct Record {
@@ -132,7 +157,9 @@ fn special_name(kind: &FileKind) -> &'static str {
 fn read_rooted(root: &Path, path: &RepoPath) -> Result<Vec<u8>> {
     let mut f = strata_apfs::open_rooted_file(root, path)?;
     let mut buf = Vec::new();
-    f.read_to_end(&mut buf).map_err(|e| strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &root.join(path.as_str())))?;
+    f.read_to_end(&mut buf).map_err(|e| {
+        strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &root.join(path.as_str()))
+    })?;
     Ok(buf)
 }
 
@@ -140,54 +167,115 @@ fn file_record(root: &Path, path: &RepoPath) -> Result<Record> {
     let bytes = read_rooted(root, path)?;
     let name = path.as_str().rsplit('/').next().unwrap_or("");
     if let Some(canon) = canonical_manifest(name, &bytes) {
-        return Ok(Record { path: path.as_str().to_owned(), tag: TAG_MANIFEST, digest: Some(*blake3::hash(&canon).as_bytes()) });
+        return Ok(Record {
+            path: path.as_str().to_owned(),
+            tag: TAG_MANIFEST,
+            digest: Some(*blake3::hash(&canon).as_bytes()),
+        });
     }
-    Ok(Record { path: path.as_str().to_owned(), tag: TAG_FILE, digest: Some(*blake3::hash(&bytes).as_bytes()) })
+    Ok(Record {
+        path: path.as_str().to_owned(),
+        tag: TAG_FILE,
+        digest: Some(*blake3::hash(&bytes).as_bytes()),
+    })
 }
 
 fn link_record(path: &RepoPath, target: &Path) -> Record {
-    Record { path: path.as_str().to_owned(), tag: TAG_SYMLINK, digest: Some(*blake3::hash(target.as_os_str().as_bytes()).as_bytes()) }
+    Record {
+        path: path.as_str().to_owned(),
+        tag: TAG_SYMLINK,
+        digest: Some(*blake3::hash(target.as_os_str().as_bytes()).as_bytes()),
+    }
 }
 
-/// §5.1 and §4.3.
-pub fn inputs_hash(cfg: &RepoConfig, git: &Git, root: &Path) -> Result<String> {
+/// One resolved install-input member (§5.1): a regular file or a symlink
+/// (the link itself, never its target).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Member {
+    File,
+    Link(PathBuf),
+}
+
+/// The resolved members of every `install_inputs` entry under `root`, in
+/// byte order, deduplicated. Absent entries (and empty directories) have no
+/// members. Special files are `NotFile`.
+pub(crate) fn input_members(
+    cfg: &RepoConfig,
+    git: &Git,
+    root: &Path,
+) -> Result<Vec<(RepoPath, Member)>> {
+    Ok(resolve_inputs(cfg, git, root)?
+        .into_iter()
+        .filter_map(|(p, m)| m.map(|m| (p, m)))
+        .collect())
+}
+
+/// Every entry with its members; `(entry, None)` marks an absent entry.
+fn resolve_inputs(
+    cfg: &RepoConfig,
+    git: &Git,
+    root: &Path,
+) -> Result<Vec<(RepoPath, Option<Member>)>> {
     match fs::symlink_metadata(root) {
         Ok(m) if m.is_dir() => {}
         Ok(_) => {
-            return Err(StrataError::new(Code::NotDirectory, format!("{} is not a directory", root.display()))
-                .with_detail(json!({ "path": root })));
+            return Err(StrataError::new(
+                Code::NotDirectory,
+                format!("{} is not a directory", root.display()),
+            )
+            .with_detail(json!({ "path": root })));
         }
-        Err(e) => return Err(strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, root)),
+        Err(e) => {
+            return Err(strata_apfs::classify_io_error(
+                &e,
+                strata_apfs::IoSide::Read,
+                root,
+            ));
+        }
     }
     let worktree = fs::symlink_metadata(root.join(".git")).is_ok();
-    let mut records: Vec<Record> = Vec::new();
+    let mut out: Vec<(RepoPath, Option<Member>)> = Vec::new();
     for e in &cfg.install_inputs {
         let attrs = match strata_apfs::attrs_of(root, e) {
             Ok(a) => a,
             Err(err) if matches!(err.code, Code::NoSuchPath | Code::NotDirectory) => {
-                records.push(Record { path: e.as_str().to_owned(), tag: TAG_ABSENT, digest: None });
+                out.push((e.clone(), None));
                 continue;
             }
             Err(err) => return Err(err),
         };
-        match &attrs.kind {
-            FileKind::File => records.push(file_record(root, e)?),
-            FileKind::Symlink { target } => records.push(link_record(e, target)),
+        match attrs.kind {
+            FileKind::File => out.push((e.clone(), Some(Member::File))),
+            FileKind::Symlink { target } => out.push((e.clone(), Some(Member::Link(target)))),
             FileKind::Dir => {
                 let members = dir_members(git, root, e, worktree)?;
                 if members.is_empty() {
-                    records.push(Record { path: e.as_str().to_owned(), tag: TAG_ABSENT, digest: None });
+                    out.push((e.clone(), None));
                 } else {
-                    records.extend(members);
+                    out.extend(members.into_iter().map(|(p, m)| (p, Some(m))));
                 }
             }
-            other => return Err(not_file(e.as_str(), special_name(other))),
+            other => return Err(not_file(e.as_str(), special_name(&other))),
         }
     }
-    records.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
-    records.dedup_by(|a, b| a.path == b.path);
+    out.sort_by(|a, b| a.0.as_str().as_bytes().cmp(b.0.as_str().as_bytes()));
+    out.dedup_by(|a, b| a.0 == b.0);
+    Ok(out)
+}
+
+/// §5.1 and §4.3.
+pub fn inputs_hash(cfg: &RepoConfig, git: &Git, root: &Path) -> Result<String> {
     let mut h = blake3::Hasher::new_derive_key(INPUTS_CONTEXT);
-    for r in &records {
+    for (path, m) in resolve_inputs(cfg, git, root)? {
+        let r = match m {
+            None => Record {
+                path: path.as_str().to_owned(),
+                tag: TAG_ABSENT,
+                digest: None,
+            },
+            Some(Member::File) => file_record(root, &path)?,
+            Some(Member::Link(target)) => link_record(&path, &target),
+        };
         write_bytes(&mut h, r.path.as_bytes());
         h.update(&[r.tag]);
         if let Some(d) = &r.digest {
@@ -197,7 +285,12 @@ pub fn inputs_hash(cfg: &RepoConfig, git: &Git, root: &Path) -> Result<String> {
     Ok(h.finalize().to_hex().to_string())
 }
 
-fn dir_members(git: &Git, root: &Path, dir: &RepoPath, worktree: bool) -> Result<Vec<Record>> {
+fn dir_members(
+    git: &Git,
+    root: &Path,
+    dir: &RepoPath,
+    worktree: bool,
+) -> Result<Vec<(RepoPath, Member)>> {
     let failure: Mutex<Option<StrataError>> = Mutex::new(None);
     let filter = |p: &Path, a: &strata_apfs::Attrs| -> bool {
         // Directories are always entered: a tracked file is never ignored,
@@ -206,7 +299,9 @@ fn dir_members(git: &Git, root: &Path, dir: &RepoPath, worktree: bool) -> Result
             return true;
         }
         let Some(s) = p.to_str() else { return true };
-        let Ok(rp) = RepoPath::try_from(s.to_owned()) else { return true };
+        let Ok(rp) = RepoPath::try_from(s.to_owned()) else {
+            return true;
+        };
         match git.is_ignored(root, &rp) {
             Ok(ignored) => !ignored,
             Err(e) => {
@@ -218,18 +313,21 @@ fn dir_members(git: &Git, root: &Path, dir: &RepoPath, worktree: bool) -> Result
             }
         }
     };
-    let opts = WalkOptions { start: Some(dir.clone()), ..WalkOptions::default() };
+    let opts = WalkOptions {
+        start: Some(dir.clone()),
+        ..WalkOptions::default()
+    };
     let mut out = Vec::new();
     for item in strata_apfs::walk_with(root, &opts, &filter) {
         let (path, attrs) = item?;
         if let Some(e) = failure.lock().unwrap_or_else(|p| p.into_inner()).take() {
             return Err(e);
         }
-        match &attrs.kind {
+        match attrs.kind {
             FileKind::Dir => {}
-            FileKind::File => out.push(file_record(root, &path)?),
-            FileKind::Symlink { target } => out.push(link_record(&path, target)),
-            other => return Err(not_file(path.as_str(), special_name(other))),
+            FileKind::File => out.push((path, Member::File)),
+            FileKind::Symlink { target } => out.push((path, Member::Link(target))),
+            other => return Err(not_file(path.as_str(), special_name(&other))),
         }
     }
     if let Some(e) = failure.lock().unwrap_or_else(|p| p.into_inner()).take() {
@@ -273,7 +371,11 @@ fn write_canonical(v: &Value, out: &mut Vec<u8>) {
             }
             out.push(b']');
         }
-        other => out.extend_from_slice(serde_json::to_string(other).expect("scalar serializes").as_bytes()),
+        other => out.extend_from_slice(
+            serde_json::to_string(other)
+                .expect("scalar serializes")
+                .as_bytes(),
+        ),
     }
 }
 
@@ -285,7 +387,11 @@ fn write_canonical_object(m: &Map<String, Value>, out: &mut Vec<u8>) {
         if i > 0 {
             out.push(b',');
         }
-        out.extend_from_slice(serde_json::to_string(k).expect("string serializes").as_bytes());
+        out.extend_from_slice(
+            serde_json::to_string(k)
+                .expect("string serializes")
+                .as_bytes(),
+        );
         out.push(b':');
         write_canonical(&m[k], out);
     }
@@ -297,13 +403,16 @@ fn write_canonical_object(m: &Map<String, Value>, out: &mut Vec<u8>) {
 type CacheKey = (PathBuf, u64, u64, i64, i64);
 
 fn cache() -> &'static Mutex<HashMap<CacheKey, String>> {
-    static CACHE: std::sync::OnceLock<Mutex<HashMap<CacheKey, String>>> = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<CacheKey, String>>> =
+        std::sync::OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn is_executable_file(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    fs::metadata(p)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 /// Resolve `program` along `path` (a PATH string); a name with a `/` is used
@@ -313,7 +422,10 @@ pub(crate) fn resolve_program(program: &str, path: &str) -> Option<PathBuf> {
         let p = PathBuf::from(program);
         return is_executable_file(&p).then_some(p);
     }
-    path.split(':').filter(|d| !d.is_empty()).map(|d| Path::new(d).join(program)).find(|p| is_executable_file(p))
+    path.split(':')
+        .filter(|d| !d.is_empty())
+        .map(|d| Path::new(d).join(program))
+        .find(|p| is_executable_file(p))
 }
 
 /// The sanitized environment install and `--version` run with (§5.5 step 7):
@@ -334,34 +446,64 @@ pub fn toolchain(cfg: &RepoConfig, env: &InstallEnv) -> Result<String> {
     };
     let program = &argv[0];
     let Some(resolved) = resolve_program(program, &env.path) else {
-        return Err(StrataError::new(Code::NoSuchPath, format!("install program {program} not found on PATH"))
-            .with_detail(json!({ "program": program, "path": env.path })));
+        return Err(StrataError::new(
+            Code::NoSuchPath,
+            format!("install program {program} not found on PATH"),
+        )
+        .with_detail(json!({ "program": program, "path": env.path })));
     };
     let real = fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
-    let meta = fs::metadata(&real).map_err(|e| strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &real))?;
-    let key: CacheKey = (real.clone(), meta.ino(), meta.size(), meta.mtime(), meta.mtime_nsec());
+    let meta = fs::metadata(&real)
+        .map_err(|e| strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &real))?;
+    let key: CacheKey = (
+        real.clone(),
+        meta.ino(),
+        meta.size(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+    );
     if let Some(hit) = cache().lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
         return Ok(hit.clone());
     }
-    let name = resolved.file_name().unwrap_or(OsStr::new(program)).to_string_lossy().into_owned();
+    let name = resolved
+        .file_name()
+        .unwrap_or(OsStr::new(program))
+        .to_string_lossy()
+        .into_owned();
     let line = run_version(&resolved, env)?;
     let out = format!("{name} {line}");
-    cache().lock().unwrap_or_else(|p| p.into_inner()).insert(key, out.clone());
+    cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key, out.clone());
     Ok(out)
 }
 
 fn first_line(b: &[u8]) -> Option<String> {
-    String::from_utf8_lossy(b).lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_owned)
+    String::from_utf8_lossy(b)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_owned)
 }
 
 fn run_version(program: &Path, env: &InstallEnv) -> Result<String> {
     let unknown = |msg: String, reason: &str| {
-        StrataError::new(Code::Unknown, msg).with_detail(json!({ "reason": reason, "program": program }))
+        StrataError::new(Code::Unknown, msg)
+            .with_detail(json!({ "reason": reason, "program": program }))
     };
     let mut cmd = Command::new(program);
-    cmd.arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     sanitize(&mut cmd, env);
-    let mut child = cmd.spawn().map_err(|e| unknown(format!("cannot run {} --version: {e}", program.display()), "version_failed"))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        unknown(
+            format!("cannot run {} --version: {e}", program.display()),
+            "version_failed",
+        )
+    })?;
     let mut so = child.stdout.take().expect("piped");
     let mut se = child.stderr.take().expect("piped");
     let t_out = std::thread::spawn(move || {
@@ -381,18 +523,34 @@ fn run_version(program: &Path, env: &InstallEnv) -> Result<String> {
             Ok(None) if start.elapsed() >= VERSION_TIMEOUT => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(unknown(format!("{} --version timed out", program.display()), "version_timeout"));
+                return Err(unknown(
+                    format!("{} --version timed out", program.display()),
+                    "version_timeout",
+                ));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(e) => return Err(unknown(format!("waiting for --version: {e}"), "version_failed")),
+            Err(e) => {
+                return Err(unknown(
+                    format!("waiting for --version: {e}"),
+                    "version_failed",
+                ));
+            }
         }
     };
     let out = t_out.join().unwrap_or_default();
     let err = t_err.join().unwrap_or_default();
     if !status.success() {
-        return Err(unknown(format!("{} --version exited with {status}", program.display()), "version_failed"));
+        return Err(unknown(
+            format!("{} --version exited with {status}", program.display()),
+            "version_failed",
+        ));
     }
     first_line(&out)
         .or_else(|| first_line(&err))
-        .ok_or_else(|| unknown(format!("{} --version printed nothing", program.display()), "version_empty"))
+        .ok_or_else(|| {
+            unknown(
+                format!("{} --version printed nothing", program.display()),
+                "version_empty",
+            )
+        })
 }

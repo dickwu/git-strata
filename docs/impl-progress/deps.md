@@ -67,3 +67,38 @@ Spec: docs/modules/deps.md. Branch `impl/deps` (worktree git-strata-wt/deps), ba
 - `fail_open_files_under(prefix)` matches a scanned dir equal to / below `prefix`
   by path components, lexically or after canonicalizing both.
 - Test seams live in `src/seams.rs`; hooks are no-ops without the feature.
+
+### Task 3
+- Layout: all deps-store writes go through `strata_apfs` rooted calls under
+  `paths.deps()`; helpers live in `src/layout.rs`, lock/seal/attempt plumbing in
+  `src/seal.rs`, the install pipeline in `src/build.rs`, recovery listing in
+  `src/attempts.rs`. `inputs.rs` now has one shared resolver
+  (`resolve_inputs`) used by both `inputs_hash` and the members placed into
+  staging, so the hashed set and the placed set cannot diverge.
+- Build lock `Busy` detail: `{reason: "build_lock_busy", lock, waited}` with
+  `waited` in milliseconds. Polling is 50 ms doubling to 1 s, bounded by
+  `env.timeout`.
+- `.locks` (or `<repo>`) existing as a non-directory → `NotDirectory` with
+  `detail.path`; symlink / FIFO lock → `NotFile` (no follow, never blocks).
+- `key_of` / `build` with empty `deps_dirs` use the fixed empty-set key and
+  `seal_empty` (implemented in `seal.rs`, reused by `ensure` in Task 5).
+- `deps_dirs` non-empty but `install` unset/empty → `InvalidInput
+  {field: "install", rule: "required"}` before any write.
+- Failures after install that are not already `Unknown` with a reason are wrapped
+  as `Unknown {reason: "staging_failed", attempt, staging, error}`. Every
+  `Unknown` that ends an attempt as failed carries `attempt` and `staging` (added
+  when missing), so the kept scene is always named. `clone_into` failing after
+  it has created something → `Unknown {reason: "clone_failed"}`.
+- Seal: any non-`Exists` rename error, and any failure after the rename
+  (chmod 0555, full fsync, record) → `Unknown seal_failed`; `Exists` → `orphan`.
+  The seal-time sync count (`test_seams::sync_counts`) counts files and dirs
+  below the seal root (the root itself is excluded) plus one full fsync.
+- Repo write lock `Busy` while sealing: adoption refuses; a cold build retries
+  every 10 ms with no bound (the install already ran; giving up would waste it).
+- A refusal whose staging cannot be retired ends the attempt `failed` (scene
+  kept) instead of `refused`, so it stays visible to recovery.
+- Tests: the FIFO-lock case runs the build on a thread with a 1 s deadline
+  (the store is shared through `Arc`); killed builders and foreign lock holders
+  are re-execs of the test binary in their own process group (`worker` test).
+  The `CrossVolume` preflight needs a disk image (`hdiutil`) and is a separate
+  `#[ignore]` test (`build_preflight_cross_volume`).
