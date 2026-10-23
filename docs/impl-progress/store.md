@@ -7,7 +7,8 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 | Task | Status | Commit |
 |---|---|---|
 | 1 open, layout, pinned schema and guards | done | 87e5b26 |
-| 2 content-addressed blob put, get and verify | done | (see git log) |
+| 2 content-addressed blob put, get and verify | done | 1e17403 |
+| 3 deps sets, attempts, proposals and main | done | (see git log) |
 
 ## Ambiguity decisions
 
@@ -63,6 +64,30 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 - Task 2: the 500 MB dense roundtrip runs by default (about 5 s on APFS);
   "get is a zero-copy clone" is not asserted directly (no portable probe),
   only byte equality and hole reads.
+- Task 3: the write helper (`txn.rs`) checks `read_only` then `poisoned`
+  before taking L2, re-checks `poisoned` under L2, runs `BEGIN IMMEDIATE`,
+  and on COMMIT distinguishes a definite failure (deferred-FK constraint,
+  busy/locked: rolled back, `outcome = not_written`) from anything else
+  (`Unknown{reason:"commit_failed", outcome:"uncertain"}` + poison).
+  `PauseBeforeCommit` and a plain `CommitSyncFails` injection are wired in
+  already; Task 8 may replace the latter with a real VFS fault.
+- Task 3: the next id is `max(sqlite_sequence.seq, max(id)) + 1` (the
+  `max(id)` only matters if someone edits `sqlite_sequence` by hand); at
+  i64::MAX → `TooLarge{limit}`.
+- Task 3: `record_deps_set` checks `Exists` before the attempt match (after
+  the pure Empty/attempt/dirs validation), so re-recording a sealed set
+  reports `Exists` even though its attempt is no longer Running.
+- Task 3: `set_deps_attempt_pid` on an attempt that is no longer Running
+  returns `false` even when a pid was recorded earlier ("not Running" wins
+  over "pid already set", as the §7 test requires).
+- Task 3: InvalidInput reasons used: `no_such_attempt`, `pid_already_set`,
+  `origin_mismatch`, `from_equals_to`, `tree_head_mismatch`, `no_origin`,
+  `no_such_proposal`, `self_supersede`, `repo_mismatch`; field errors for
+  `pid`, `to`, `inputs_hash`/`from_inputs`/`to_inputs` (64 lowercase hex,
+  checked before the transaction rather than surfacing as a CHECK failure).
+- Task 3: `proposals(open_only)` tests the session condition with a raw
+  `sessions` row (Task 5 adds the session API); a Removed session's
+  AwaitingPublish is filtered by `lifecycle <> 'removed'` in the same query.
 
 ## Blockers / notes
 
@@ -71,3 +96,6 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
   `"crates/strata-store"` members entry; no `[workspace.dependencies]`
   are added (crate deps are declared in the crate's own Cargo.toml).
 - New crate-level dep: `memmap2 = "0.9"` (Task 2).
+- One unexplained failure of one `tests/open.rs` test in a single full
+  `cargo test -p strata-store` run during Task 3 (output not captured);
+  not reproduced in 26 further runs. Watching.

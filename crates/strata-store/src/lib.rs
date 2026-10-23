@@ -18,10 +18,12 @@ use strata_types::{
 
 mod blob;
 mod codec;
+mod deps;
 mod errors;
 mod open;
 mod schema;
 mod seams;
+mod txn;
 
 #[cfg(feature = "test-seams")]
 pub use seams::{Seam, SyncCounts};

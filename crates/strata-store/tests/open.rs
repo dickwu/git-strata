@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use strata_store::{Seam, Store};
+use strata_store::{AttemptKind, AttemptState, DepsMain, DepsOrigin, NewProposal, ProposalDecision, Seam, Store};
 use strata_types::Code;
 use support::*;
 
@@ -293,6 +293,25 @@ fn read_only_open_refuses_every_write() {
     let env = env();
     let w = env.open();
     let id = w.put_bytes(b"readable").unwrap();
+    let repo = strata_types::RepoName::try_from("app".to_string()).unwrap();
+    let set = |c: char| strata_types::DepsSetId::try_from(c.to_string().repeat(64)).unwrap();
+    let tree = strata_types::TreeOid::try_from("1".repeat(40)).unwrap();
+    let head = strata_types::CommitOid::try_from("2".repeat(40)).unwrap();
+    let at = std::time::SystemTime::now();
+    let attempt = w.begin_deps_attempt(&repo, &set('a'), AttemptKind::Build, at).unwrap();
+    let proposal = NewProposal {
+        repo: repo.clone(),
+        origin: None,
+        from: set('a'),
+        from_inputs: "a".repeat(64),
+        to: set('b'),
+        to_inputs: "b".repeat(64),
+        tree: Some(tree.clone()),
+        head: Some(head.clone()),
+    };
+    let pid = w.record_proposal(&proposal, None, at).unwrap().unwrap();
+    let main = DepsMain { repo: repo.clone(), tree: tree.clone(), head: head.clone(), inputs_hash: "a".repeat(64), set: set('a'), observed: at };
+    w.set_deps_main(&main, None).unwrap();
     w.close().unwrap();
     let src = env.dir.path().join("ro-src");
     std::fs::create_dir_all(&src).unwrap();
@@ -305,12 +324,43 @@ fn read_only_open_refuses_every_write() {
     assert_eq!(r.read_blob(&id, 100).unwrap(), b"readable");
     r.verify_blob(&id).unwrap();
     r.get_blob(&id, &src.join("out")).unwrap();
+    assert_eq!(r.deps_attempts(None).unwrap().len(), 1);
+    assert_eq!(r.proposals(Some(&repo), true).unwrap().len(), 1);
+    assert!(r.proposal(pid).unwrap().is_some());
+    assert_eq!(r.deps_main(&repo).unwrap(), Some(main.clone()));
+    assert!(r.deps_set(&repo, &set('a')).unwrap().is_none());
     // write functions are refused, one block per task
     let f = strata_types::RepoPath::try_from("f".to_string()).unwrap();
     for e in [
         r.put_blob(&src.join("f")).err().unwrap(),
         r.put_blob_rooted(&src, &f).err().unwrap(),
         r.put_bytes(b"would be new").err().unwrap(),
+        // Task 3
+        r.begin_deps_attempt(&repo, &set('c'), AttemptKind::Adopt, at).err().unwrap(),
+        r.set_deps_attempt_pid(attempt, 42).err().unwrap(),
+        r.set_deps_attempt_pid(attempt, 0).err().unwrap(),
+        r.end_deps_attempt(attempt, AttemptState::Failed, &strata_types::StrataError { code: Code::Unknown, message: "x".into(), detail: None }, at)
+            .err()
+            .unwrap(),
+        r.record_deps_set(
+            &strata_types::DepsSet {
+                id: set('a'),
+                repo: repo.clone(),
+                inputs_hash: "a".repeat(64),
+                platform: "p".into(),
+                toolchain: "t".into(),
+                dirs: vec![],
+            },
+            DepsOrigin::Empty,
+            None,
+            at,
+        )
+        .err()
+        .unwrap(),
+        r.record_proposal(&proposal, Some(pid), at).err().unwrap(),
+        r.promote_proposal(pid, &tree, &head, at).err().unwrap(),
+        r.decide_proposal(pid, ProposalDecision::Applied, at).err().unwrap(),
+        r.set_deps_main(&main, Some(&main)).err().unwrap(),
     ] {
         assert_reason(&e, Code::ReadOnly, "read_only_handle");
     }
