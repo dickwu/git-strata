@@ -23,7 +23,7 @@ deps 负责依赖集（design §4 的 Deps set）里"算"的那一半：算键�
 - **人类确认**：`deps approve` 用的 `ConfirmToken`（`Action::DepsApprove`）由 confirm 签发与校验，由 daemon 核对 action（types.md §4"谁消费"）；TTY 检查在 cli。deps 的任何函数都不收凭据。
 - **种子缓存与种子文件的克隆**：由 session::new 负责（design §4、§6.1 第 4 步）。deps 只保证封存时排除嵌套在依赖目录里的种子缓存，并用 `nested_seed_caches` 告诉调用方是哪几个。
 - **基线导出与基线 generation 目录**：由 session 负责。它经 `gitio::export_tree` 导出源码树，调 `ensure` 取依赖集，用 `clone_into` 把依赖集克隆进它自己新建的目录，再改名到 `Store::base_dir` 并登记（module-rulings Addendum 3"Base generation layout"）。导出、`ensure` 与清单在锁外，只有复查、`clone_into`、改名与登记那一段在 repo 写锁里；`move_workspace` 在锁里只找基线、从不建（module-rulings "Base generations are built outside the lock"）。deps 只读调用方交来的导出目录。
-- **发布链与锚点的写**：由 publish 负责（module-rulings "The publish chain carries an anchor…"）：它在一个 ref 事务里一起写链与锚点，被回退、分叉的链由它拒绝或重放。deps 只读这两个 ref，给出判定（`publish_chain`）。
+- **发布链与锚点的写**：由 publish 负责（module-rulings "The publish chain carries an anchor…"）：它在一个 ref 事务里一起写链与锚点，被回退、分叉的链由它拒绝或重放。deps 只读这两个 ref，给出判定（`publish_chain`）；锚点跟着 origin 沿链前移也由 publish 与 daemon 做（module-rulings "The anchor follows origin along the chain"）。
 - **发布后 rebase**：由 publish::rebase_session 负责。新基线需要另一个依赖集时，它调 `deps::propose` 登记提议，会话停在旧基线上等 `deps approve`（module-rulings 公共条 3：不变量 4 优先于 design §6.4 的最后一句）。deps 对它的要求见 §5.12。
 - **repo 写锁与 `Busy`**：由 daemon 负责（module-rulings T13）。daemon 经 `Ctx.locks`（`RepoWriteLock`，§3）把它交给 deps；deps 只在短的临界区里持有它，从不跨过 install（Addendum 3/4"Locks"）：封存（rename、设 mode、同步、登记），以及提议与主干记录的写。`observe_main` 与 `ensure_target` 的登记自己取锁；`propose` 由调用方持锁调用（module-rulings "deps follows main's current tip"，§5.9）。deps 自己另有"每个依赖集一把建造锁"（§4.1）。
 - **持久化**：表、索引、触发器与全部 SQL 都在 store（Addendum 4"Schema ownership"）。deps 拥有自己四类记录的词汇、转换图与含义（§4.2、§4.5），经 store 的具名方法读写，从不执行 SQL。
@@ -49,8 +49,8 @@ deps 负责依赖集（design §4 的 Deps set）里"算"的那一半：算键�
 | 调用方 | 用到的接口 |
 | --- | --- |
 | session | `new` 与建基线 generation（`ensure_base`）：`main_tip`、`key_of`、`ensure`、`find_set`、`clone_into`、`nested_seed_caches`、`observe_main`；`move_workspace`：`find_set`，交换前复查用 `open_files`；`remove`：`open_files`；`status`：`drift`、`open_proposals` |
-| publish | `rebase_session`：`key_of`、`is_input`、`open_proposals`、`propose`、`main_tip`、`observe_main`（§5.12）；合并基线 B 与 chain_rewound、chain_diverged 的拒绝：`publish_chain`（§5.9） |
-| daemon | `deps propose`：`drift` → `build` → 持 repo 写锁 `propose`，提出者自换用 `plan_switch`；`deps approve`：`get_proposal` → 人类确认 → `ensure_target` → 占住候选会话的队列位置、拿 repo 写锁 → `plan_rollout`（先核对 `main_tip`）→ 逐个 Move 调 `session::move_workspace` → `record_rollout`；checkpoint 碰到安装输入（`is_input`）后重算 `drift`；任何让 `main_tip` 移动的 fetch 之后调 `observe_main`；status 并入 `attempts` 与 `publish_chain` 的判定，status 与 stderr 提示用 `open_proposals`；实现 `RepoWriteLock`，给出 `InstallEnv` |
+| publish | `rebase_session`：`key_of`、`is_input`、`open_proposals`、`propose`、`main_tip`、`observe_main`（§5.12）；合并基线 B、chain_rewound 与 chain_diverged 的拒绝、开始时前移锚点：`publish_chain`（§5.9） |
+| daemon | `deps propose`：`drift` → `build` → 持 repo 写锁 `propose`，提出者自换用 `plan_switch`；`deps approve`：`get_proposal` → 人类确认 → `ensure_target` → 占住候选会话的队列位置、拿 repo 写锁 → `plan_rollout`（先核对 `main_tip`）→ 逐个 Move 调 `session::move_workspace` → `record_rollout`；checkpoint 碰到安装输入（`is_input`）后重算 `drift`；任何让 `main_tip` 移动的 fetch 之后调 `observe_main`，并用 `publish_chain` 判定要不要前移锚点；status 并入 `attempts` 与 `publish_chain` 的判定，status 与 stderr 提示用 `open_proposals`；实现 `RepoWriteLock`，给出 `InstallEnv` |
 | cli | 只用类型：`Proposal`、`RolloutPlan`、`Target` 的 JSON，经 daemon lib 的 RPC 类型 |
 
 ### 上游要求
@@ -95,21 +95,26 @@ deps 负责依赖集（design §4 的 Deps set）里"算"的那一半：算键�
 
 deps 用不到 `remove_rooted`、`remove_tree_rooted` 与 `make_removable`：它在暂存里不删东西，要去掉的挪进 `discard/`，整个暂存经 `Store::retire_dir` 离开（§4.1）；封存目录也从不由 deps 挪走（§4.6）。
 
-**对 daemon**（daemon.md 还没写）：实现 `RepoWriteLock`（有界等待之后 `Busy`）并放进 `Ctx`；给出 `InstallEnv`（显式 PATH 与时限）；按 §5.12 的顺序执行 `deps approve` 与 `deps propose`：`Target::Replaced` 时什么都不移动、把替换提议报给人；`deps propose` 的 `propose` 在 repo 写锁里调用。另外四条：
+**对 daemon**（daemon.md 还没写）：实现 `RepoWriteLock`（有界等待之后 `Busy`）并放进 `Ctx`；给出 `InstallEnv`（显式 PATH 与时限）；按 §5.12 的顺序执行 `deps approve` 与 `deps propose`：`Target::Replaced` 时什么都不移动、把替换提议报给人；`deps propose` 的 `propose` 在 repo 写锁里调用。另外六条：
 
 1. approve 与提出者自换在拿 repo 写锁之前，先按 SessionId 升序占住要移动的会话的队列位置，持着 repo 写锁时从不等队列位置（module-rulings "Lock order: session queue before repo lock"）。
 2. approve 得到 `HeadMoved`（reason main_moved）时什么都没移动：观察主干，把取代它的那一条交给人重新确认，从不自动批准（module-rulings "approve refuses a Pending whose head is no longer main's tip"、"A confirmation names the exact plan"）。
 3. 任何让 `main_tip` 移动的 fetch 之后调 `observe_main`；一次观察失败了，之后再观察一次（module-rulings "observe_main is best-effort for its callers"）。
 4. status 并入 `attempts` 与 `publish_chain` 的判定：链被回退或分叉时，连同 a..c 上还没推送的发布一起报出。
+5. daemon 执行的 fetch、push（push 返回 `Pushed` 之后 gitio 会移动 origin 的跟踪 ref，gitio.md §4.1）与链、锚点的 ref 事务，都持着该 repo 的写锁（module-rulings "Every update of a ref main_tip reads runs under the repo lock"）。`main_tip` 读的 ref 因此只在锁里动，approve 在锁里对它的核对（§5.10 `plan_rollout` 第 1 步）在这段锁里一直成立。
+6. 锚点跟着 origin 沿链前进（module-rulings "The anchor follows origin along the chain"）：fetch 之后 `publish_chain` 报 `Equal`、或 `Leads` 且 a ≠ o 时，daemon 在同一段锁里的链与锚点事务把 a 设成 o（对旧的 a 比较并交换，§5.9）。
 
-**对 config**（config.md 的 T15 修订）：`deps_dirs` 非空的 repo 必须 `publish.branch == default_branch` 且 `pin_unpushed = true`，由 config.md 加一条校验规则（module-rulings "Repos with deps dirs publish to their default branch and pin unpushed chains"）。这是单一 Pending 位置的前提（§4.2、§9）：两个旋钮任一改了，发布链顶与主干 tip 上的 Pending 就在两条线上共用一个位置、互相取代。附录 A 的仓库都已满足。
+**对 config**（config.md 的 T15 修订）：`deps_dirs` 非空的 repo 必须 `publish.branch == default_branch` 且 `pin_unpushed = true`，由 config.md 加一条校验规则（module-rulings "Repos with deps dirs publish to their default branch and pin unpushed chains"）。这是单一 Pending 位置的前提（§4.2、§9）：两个旋钮任一改了，发布链顶与主干 tip 上的 Pending 就在两条线上共用一个位置、互相取代。附录 A 的仓库都已满足。deps 不在运行时再查这个前提 [我的决定]：校验只在 config 加载时做一次，`main_tip` 只按这两个旋钮选 ref（§5.9），不在每次观察或批准时再报一遍错（§9"单一 Pending 位置的前提"）。
 
-**对 publish**（publish.md 还没写）：`rebase_session` 按 §5.12 的契约，用 `key_of` 算新基线的依赖集，决定直接移动还是等待、以哪个 origin 调 `propose`。另外四条要求：
+**对 publish**（publish.md 还没写）：`rebase_session` 按 §5.12 的契约，用 `key_of` 算新基线的依赖集，决定直接移动还是等待、以哪个 origin 调 `propose`。另外五条要求：
 
 1. 带目标的 `propose`（落地的提升、Main 登记）都在 repo 写锁里调用（module-rulings "deps follows main's current tip" 与其后的"T10 publish (from the deps r2 re-review)"一条），锁里后写者胜。
 2. 落地由 publish 判定 [我的决定]：提出会话 s 有开着的草稿，而且它的安装输入改动这次全部发布了（overlay 里 `is_input` 为真的路径都在它已发布的路径里，发布之后也没再改），就以 `Session { s }` 带目标调 `propose`。草稿的 `to` 等于新基线的 id 时 deps 提升它，不等时先把它改登记成落地的键、再提升（§4.5、§5.9）。只发布了一部分时不调：草稿留着，OwnChange 继续保护没发布的那部分。deps 自己分不出落地与没落地，只有 publish 知道发布了哪些路径。
 3. 这次发布让主干的 tip 动了（`main_tip` 等于发布后的链顶）时，放开锁之后调 `observe_main`，它自己取锁。它失败时发布照常成功，只报一个警告（`observe_failed`）：具名拒绝什么都没写，`Unknown`（main_not_recorded）留下了提议、主干记录落后，下一次观察补上（module-rulings "observe_main is best-effort for its callers"）。
-4. 发布链与锚点（module-rulings "The publish chain carries an anchor…"）：publish 在一个 ref 事务里一起写链 `refs/strata/publish/<branch>` 与锚点 `refs/strata/anchor/<branch>`（B 是 origin 的 tip 时 a := B，推送成功之后 a := 推上去的 commit）。B 按 `publish_chain` 的判定取：只有 `Leads` 取链顶，`Absent`、`Equal`、`Behind` 取 origin 的 tip。`Rewound`、`Diverged` 时从不重推被拿掉的提交、也从不悄悄丢掉 a..c：能干净地把 a..c 重放到 o 上就重放（新链，a := o；是否自动由 T10 定），否则在任何写之前拒绝（chain_rewound、chain_diverged），直到人用显式命令处理（T14）。"领先"的判定只有 deps 这一份（module-rulings "The chain predicate lives in deps"），publish 不另写。
+4. 发布链与锚点（module-rulings "The publish chain carries an anchor…"）：publish 在一个 ref 事务里一起写链 `refs/strata/publish/<branch>` 与锚点 `refs/strata/anchor/<branch>`（B 是 origin 的 tip 时 a := B，推送成功之后 a := 推上去的 commit）。B 按 `publish_chain` 的判定取：只有 `Leads` 取链顶，`Absent`、`Equal`、`Behind` 取 origin 的 tip。`Rewound`、`Diverged` 时从不重推被拿掉的提交、也从不悄悄丢掉 a..c：能干净地把 a..c 重放到 o 上就重放（新链，a := o；是否自动由 T10 定），否则在任何写之前拒绝（chain_rewound、chain_diverged），直到人用显式命令处理（T14）。"领先"的判定只有 deps 这一份（module-rulings "The chain predicate lives in deps"），publish 不另写。锚点跟着 origin 沿链前进（module-rulings "The anchor follows origin along the chain"）：publish 开始时的链与锚点事务里，`publish_chain` 报 `Equal`、或 `Leads` 且 a ≠ o 时先把 a 设成 o（对旧的 a 比较并交换，§5.9）。
+5. publish 的 fetch、push（push 返回 `Pushed` 之后 gitio 会移动 origin 的跟踪 ref）与链和锚点的 ref 事务都在 repo 写锁里（module-rulings "Every update of a ref main_tip reads runs under the repo lock"）：`main_tip` 读的 ref 只在锁里动，approve 在锁里的核对才站得住（§5.10）。
+
+**对 cli**（cli.md 还没写，T14）：处理被回退、分叉的链的显式命令（接受 origin：把 a..c 重放到 o 上或丢掉；恢复：把链原样推上去；module-rulings "The publish chain carries an anchor…"）经 daemon 执行，它们的 push 与链、锚点的 ref 事务都持着 repo 写锁（module-rulings "Every update of a ref main_tip reads runs under the repo lock"）。恢复只在 `is_ancestor(o, c)` 时是快进，gitio 从不强推（gitio.md G2），所以 cli 在推之前用 `publish_chain` 返回的 o 与 c 先查这一条；不成立时怎么处理由 T14 定。
 
 ## 3. 公开接口（Rust）
 
@@ -338,7 +343,8 @@ pub struct PublishChain {
 pub enum ChainState {
     /// 没有发布链。
     Absent,
-    /// 链没有锚点，或者锚点不在 origin 上（有人把 origin 强推回锚点之前）。
+    /// 链没有锚点，或者锚点不在 origin 上（有人把 origin 强推回锚点之前）。这时链也可能同时分叉：先看锚点，所以与 `Diverged` 重叠的那一块报 `Rewound`。
+    /// 把链原样推回去（T14 的恢复）只在 o 是 c 的祖先时是快进，调用方先查这一条（§5.9）。
     Rewound,
     /// 链顶就是 origin 的 tip。
     Equal,
@@ -352,6 +358,7 @@ pub enum ChainState {
 
 /// 判定 `branch` 的发布链（§5.9）。只读 ref，什么都不写；origin 的跟踪 ref 还没有（没 fetch 过）时为 None。
 /// `main_tip`、publish 的合并基线 B 与它的 chain_rewound、chain_diverged 拒绝、daemon 的 status 都用这一个函数 [我的决定：名字与形状]。
+/// 报 `Equal`、或 `Leads` 且 a ≠ o 时，下一次在 repo 写锁里的链与锚点事务把 a 设成 o（module-rulings "The anchor follows origin along the chain"）；那一步由 publish 与 daemon 做，deps 只读。
 pub fn publish_chain(git: &Git, branch: &str) -> Result<Option<PublishChain>>;
 
 /// 观察主干（§5.9）：返回这次调用最后一次从 `propose` 拿到的提议。没拿到过时为 None：依赖集没变、Pending 已指向这个 tip，或 head 在 repo 写锁里已不是主干的 tip。
@@ -611,6 +618,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 - 落地之后提出会话不再有开着的草稿，OwnChange 不再因为它成立；之后它像别的会话一样按 Drift 判定（§5.10）。自换过的提出者所钉的依赖集就是工作区的输入，不判 Drift，这一条与以后每一条 Pending 都能移动它（打开的文件照常检查）；没自换过的，工作区的安装输入要等于目标的（例如合并落地之后取了合并后的锁文件）才移动：deps 分不出 overlay 里哪些安装输入的改动已经发布，Drift 只能保守。草稿还留着只剩两种情形：改动只发布了一部分（OwnChange 继续保护没发布的那部分），或者改登记之后、提升之前失败了（§6）。留着的草稿也不让工作区的安装输入等于所钉基线 tree 的、或等于这次 `to_inputs` 的会话 OwnChange（§5.10）[我的决定]。
 - 提议的写都在该 repo 的写锁里，锁里后写者胜（module-rulings "deps follows main's current tip"）：`observe_main` 在锁里读主干的 tip、只记当时的 tip，所以主干回退（reset 到祖先、强推回去）与前进一样被记下、登记；publish 落地的提升与 Main 登记也在锁里（module-rulings "T10 publish (from the deps r2 re-review)"）。deps 从不拿新 tip 与记录里的 head 比祖先关系；`main_tip` 经 `publish_chain` 判定发布链相对 origin 的那几次是钉基线规则本身（§5.9）。
 - 每条提议的目标（tree 与 head）设定之后不再改。带目标登记、而当前的 Pending 的 `to` 与这次相同时，只按一条规则（§5.9 `propose` 第 2 步的"Pending 的同 to 规则"）：(to, tree, head) 都相同就是同一条；目标不同就登记一条只换了目标的副本取代它，origin、from、to 照旧（T8 第 4 轮裁定，即第 3 轮复审的 M1）。主干在登记之后前进或回退、而依赖集没变时，下一次观察就这样让 Pending 跟上（§5.9 `observe_main` 第 3 步第 3 小步）；publish 以 Main 登记同一个依赖集时也一样，所以落地的提出者的 Pending 保留 origin，自换的权利不丢。Pending 的目标因此跟着主干记录走。主干在观察之前就动了（例如 publish 为合并基线 fetch 之后发布失败），approve 在锁里核对 `P.head` 仍是 `main_tip`，不是就以 `HeadMoved`（reason main_moved）拒绝，什么都不写（§5.10、§5.12；module-rulings "approve refuses a Pending whose head is no longer main's tip"）。所以 approve 不会把会话移到一个已经不在主干上的 commit。代价是主干移动之后 Pending 的 id 会变；拿着旧 id 批准的人得到 `NoSuchProposal`，`detail.state` 指向取代它的那一条（§5.12），由 confirm 与 cli 把它重新交给人确认（module-rulings "A confirmation names the exact plan"）。
+- 同一个依赖改动由两个会话各自提出、先后落地时，origin 只由一个会话持有 [我的决定]：S1 先落地，它的草稿被提升成 Pending Q1（origin `Session { S1 }`）；S1 还没自换时，S2 带着自己 to 相同的草稿 D2 落地，`propose` 先看 S2 自己的草稿（§5.9 落地那一支），提升 D2，Q1 被它取代。S1 因此失去这条 Pending 上的自换（`plan_switch` 只认 origin 是自己的提议），只能等 approve，或者重新 `deps propose` 出一条草稿，在所钉的 tree 上只换依赖。不为它另开一条同 to 的路径：这要两个会话各自做出同一个依赖改动，损失只是一次自换、从不丢数据，另开一条又会在刚统一的同 to 规则旁边多出第二条（T8 第 5 轮裁定，即第 4 轮复审 M1 的残留）。
 - 一个会话正在等待一条 Pending 提议 P 的条件是：它 tracked，且 `base.deps ≠ P.to`。status 显示这些会话"在等 deps approve"（module-rulings 公共条 3）。
 - 提出会话被删除后，它的 AwaitingPublish 不再列出，也不再让任何会话 OwnChange（它不在任何计划的会话里）；gc 随会话删除它（Addendum 4）。
 
@@ -791,7 +799,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
      - s 有 AwaitingPublish D 而 `D.to ≠ to`：它的改动落地时换了键，与别人的依赖改动合并了，或者草稿之后工具链、依赖配置变了。先改登记：`record_proposal(新草稿 D′ { from, from_inputs, to, to_inputs 取这次的参数 }, replaces = D 的 id, 当前时间)`，D 变成 `Superseded { by: D′ }`；再 `promote_proposal(D′, tree, head, 当前时间)`，效果同上一种 [我的决定]。草稿不留下来，s 以后不会因为它 OwnChange（§4.5）。这是 `propose` 唯一写两次的地方：第二次写失败（含返回 false）时返回 `Unknown`，`detail = { "reason": "landing_not_promoted", "proposal": D′, "error" }`，因为第一次写已经对外可见。
      - s 没有草稿：C 的 `to` 与这次相同 → 按下面"Pending 的同 to 规则"（已经提升过的草稿重来一次时，就是在这里得到它自己）。否则 `record_proposal(新 Pending, replaces = C 的 id 或 None, 当前时间)`，origin `Session { s }`。
 
-     先看自己的草稿 [我的决定]：C 即使恰好是同一个目标，也让草稿取代它；否则草稿作为一条没人提升的草稿留下来，到 s 下一次发布时才被提升成一条大家都已用上的 Pending。
+     先看自己的草稿 [我的决定]：C 即使恰好是同一个目标，也让草稿取代它；否则草稿作为一条没人提升的草稿留下来，到 s 下一次发布时才被提升成一条大家都已用上的 Pending。C 的 origin 是另一个会话时，那个会话因此失去这条 Pending 上的自换，origin 只由一个会话持有（§4.5）。
    - **主干**（origin = `Main`，带目标；`observe_main` 与 `rebase_session` 调用）：C 的 `to` 与这次相同 → 按下面"Pending 的同 to 规则"。否则 `record_proposal(新 Pending, replaces = C 的 id 或 None, 当前时间)`，origin Main。不提升、也不取代任何 AwaitingPublish。不比较 head 的祖先关系：锁里后写者胜，目标是不是主干当前的 tip 由调用方负责，`observe_main` 在锁里核对过（下面），approve 也再核对一次（§5.10）。
 
    **Pending 的同 to 规则**（带目标、当前的 Pending C 的 `to` 等于这次的 `to` 时，两支共用；T8 第 4 轮裁定，即第 3 轮复审的 M1）：
@@ -815,8 +823,10 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
    5. `git.is_ancestor(c, o)` → `Behind`：origin 已经包含链上的一切（例如人把链推上去之后又往前走了）。
    6. 其余 → `Diverged`：锚点仍在 origin 上，但 o 与 c 各有对方没有的提交（例如 push = false 的链没推，origin 被人往前推了）。
 
-   先看锚点、再比链顶 [我的决定]：被回退同时又分叉的链报 `Rewound`，两者 publish 都拒绝，`Rewound` 说明了 origin 丢了 strata 依托的提交这一更要紧的事。`is_ancestor` 相等也算祖先（gitio.md），所以 a == o 是"锚点在 origin 上"。
+   先看锚点、再比链顶 [我的决定]：被回退同时又分叉的链报 `Rewound`，两者 publish 都拒绝，`Rewound` 说明了 origin 丢了 strata 依托的提交这一更要紧的事。所以 `Rewound` 的链也可能同时分叉，状态里看不出这一点。把链原样推回去（T14 的恢复，module-rulings "The publish chain carries an anchor…"）只在 `is_ancestor(o, c)` 时是快进；gitio 从不强推（gitio.md G2），所以由调用方（T14）在推之前用返回的 o 与 c 先查这一条。`is_ancestor` 相等也算祖先（gitio.md），所以 a == o 是"锚点在 origin 上"。
 4. 返回 `PublishChain { branch, origin: o, top: c, anchor: a, state }`。
+
+锚点跟着 origin 沿链前进（module-rulings "The anchor follows origin along the chain"）：`publish_chain` 报 `Equal`、或 `Leads` 且 a ≠ o 时，origin 已经有了链上 a 之后的一段；下一次在 repo 写锁里的链与锚点事务（daemon 在 fetch 之后，publish 在开始时）把 a 设成 o，对旧的 a 比较并交换。不这样做，链上的提交可能不经锚点就到了 origin（人用 git 推了链；远端收下 strata 的推送之后、锚点事务之前崩溃），之后有人把 origin 强推回锚点或它之上的某个提交，判定就读成 `Leads`，被拿掉的提交又被 `main_tip` 钉住、被 publish 推回去。strata 还没 fetch 到那次推送、它就被拿掉了的情形，三个 ref 看不出来，这是接受的剩余风险。deps 只读这些 ref，前移锚点由 publish 与 daemon 做（§2）。
 
 `main_tip(cfg, git)` [我的决定]：主干的 tip，即新会话此刻会钉住的 commit（design §6.7；config.md §2.3 的 `publish` 与 `pin_unpushed`）。只读 ref，不 fetch，什么都不写：
 
@@ -854,7 +864,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 
 `plan_rollout(ctx, id, sessions, complete)` 只读，什么都不写：
 
-1. `P = get_proposal(id)`。`P.state` 不是 Pending 时返回 `NoSuchProposal`，`detail = { "proposal", "state" }`。`P.repo` 不等于 `ctx.repo`，或某个会话的 `base.repo` 不等于 `P.repo`，返回 `InvalidInput`。然后核对目标仍是主干的 tip：`main_tip(ctx.cfg, ctx.git)` 不等于 `Some(P.head)` → `HeadMoved`，`detail = { "reason": "main_moved", "proposal", "head": P.head, "tip": 当前的 tip }`，什么都不写（module-rulings "approve refuses a Pending whose head is no longer main's tip"；借用 `HeadMoved` [我的决定]，§6）。approve 持着 repo 写锁调它，fetch 也在这把锁里（Addendum 3/4"Locks"），所以核对之后、移动做完之前 `main_tip` 不会变。
+1. `P = get_proposal(id)`。`P.state` 不是 Pending 时返回 `NoSuchProposal`，`detail = { "proposal", "state" }`。`P.repo` 不等于 `ctx.repo`，或某个会话的 `base.repo` 不等于 `P.repo`，返回 `InvalidInput`。然后核对目标仍是主干的 tip：`main_tip(ctx.cfg, ctx.git)` 不等于 `Some(P.head)` → `HeadMoved`，`detail = { "reason": "main_moved", "proposal", "head": P.head, "tip": 当前的 tip }`，什么都不写（module-rulings "approve refuses a Pending whose head is no longer main's tip"；借用 `HeadMoved` [我的决定]，§6）。approve 持着 repo 写锁调它；`main_tip` 读的 ref 的每一次更新（fetch，push 返回 Pushed 之后移动的 origin 跟踪 ref，链与锚点的 ref 事务）都在这把锁里（module-rulings "Every update of a ref main_tip reads runs under the repo lock"），所以核对之后、这段锁结束之前 `main_tip` 不会变。
 2. 目标是 `BaseGen { repo: P.repo, tree: P.tree, deps: P.to }`，head 是 `P.head`。`ready = find_set(P.repo, P.to).is_some()`。用 `proposals(repo, open_only = true)` 读出该 repo 未关闭的 AwaitingPublish 提议（提出会话已被删除的不在其中）。
 3. 对 `sessions` 里的每个 (s, ws)，按顺序判定，第一个成立的条件决定这一步：
    1. `!ws.tracked` → `Skip Untracked`
@@ -988,7 +998,8 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 | head 不在 object store 里 | 同上 | `NoSuchCommit`（gitio） | 无写入 | — |
 | 提议被不持锁的写改了，重读 3 次仍冲突（锁里是兜底） | `propose` 第 2 步 | `Busy`（reason proposal_race） | 每次都没写成 | 稍后重来 |
 | 落地时草稿已改登记成新的键，提升失败 | `propose` 第 2 步（落地那一支） | `Unknown`（reason landing_not_promoted，带改登记的那条与原来的错误） | 新草稿在，还是 AwaitingPublish；旧草稿已被它取代 | 它只让目标输入不同的 Pending 跳过提出会话（§5.10）；s 下一次落地时提升或再改登记 |
-| 主干记录（或要跟上的那条 Pending）被不持锁的写改了，重来 3 次仍没写成（锁里是兜底） | `observe_main` 第 3 步第 3、5 小步 | 还没拿到提议：`Busy`（reason main_race）；拿到过：`Unknown`（reason main_not_recorded，`detail.error` 是那个 `Busy`） | 主干记录没动；提议留着 | 下一次观察重来（§5.9） |
+| 主干记录被不持锁的写改了，重来 3 次仍没写成（锁里是兜底） | `observe_main` 第 3 步第 5 小步 | 还没拿到提议：`Busy`（reason main_race）；拿到过：`Unknown`（reason main_not_recorded，`detail.error` 是那个 `Busy`） | 主干记录没动；提议留着 | 下一次观察重来（§5.9） |
+| `observe_main` 要登记或跟上的那条 Pending 被不持锁的写改了（锁里是兜底） | `observe_main` 第 3 步第 3 小步调的 `propose` 第 2 步 | `propose` 重读 3 次仍冲突，返回 `Busy`（reason proposal_race）：这次调用还没拿到过提议时原样返回；前一轮已拿到过时为 `Unknown`（reason main_not_recorded，`detail.error` 是那个 `Busy`） | 还没拿到过：无写入；拿到过：提议在，主干记录还是旧的 | 下一次观察重来（§5.9） |
 | 拿到提议之后、写主干记录之前失败，或 daemon 在其间崩溃 | `observe_main` 第 3 步第 3、4 小步 | `Unknown`（reason main_not_recorded，`detail.error` 是原来的错误）；崩溃时没有返回 | 提议在，主干记录还是旧的 | 下一次观察照样提议，`propose` 返回同一条，再写主干记录（§5.9） |
 | 观察的 head 在锁里已不是主干的 tip（之后有人 fetch、发布或回退了主干） | `observe_main` 第 3 步第 1 小步 | 这次调用还没拿到过提议：不报错，返回 `None`；重来的一轮里、此前已拿到过提议：`Unknown`（reason main_not_recorded，`detail.error` 是引发重来的 `Busy`） | 没拿到过：无写入；拿到过：提议在，主干记录还是旧的 | 移动主干的那次调用自己观察（§5.12）；落后的记录由下一次观察补上 |
 | 读 origin、发布链或锚点的 ref 失败，或判定祖先关系失败 | `publish_chain`；经它的 `main_tip`、`observe_main` 第 3 步第 1 小步、`plan_rollout` 第 1 步 | `read_ref`、`is_ancestor` 的码（`InvalidInput`、`NoSuchCommit`、`Unknown`）；`observe_main` 里拿到过提议之后为 `Unknown`（main_not_recorded） | 无写入（`observe_main` 拿到过提议时同上一行） | 修好仓库后重来 |
@@ -1068,7 +1079,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 | `approve_files_replacement_when_sealed_id_differs` | origin 为 Main 的 Pending P，to 是用打印 `1.3.3` 的假 `bun` 算出的 D_a，还没封存。把假 `bun` 换成打印 `1.3.4` 的，`ensure_target(P, P.tree 的导出)`：封存出 D_b（≠ D_a，install 调用次数为 1），返回 `Replaced { superseded: P, replacement: Q }`；Q 是 Pending，to 为 D_b，to_inputs 等于 P 的，tree、head、from、origin 都取 P 的；P 变成 `Superseded { by: Q }`；记录调用的 mover 从未被调用；`plan_rollout(P)` 返回 `NoSuchProposal`；`ensure_target(Q)` 直接返回 Ready，不再 install。P.to 已封存时，`ensure_target` 立刻返回 Ready，install 调用次数不变。用 `test_seams::after_attempt_begins` 在第 3 步的冷装开始之后登记一条取代 P 的新 Pending：第 4 步返回 `NoSuchProposal`，不登记替换；封存出的依赖集照样登记（封存是缓存填充，§6）。替换提议的登记在锁替身里：替身被进入两次（第 3 步的封存一次，第 4 步一次），`record_proposal` 落在第二次进入与退出之间，install 在第一次进入之前就结束了。锁替身让封存那次照常进入、对第 4 步那次返回 `Busy`：`ensure_target` 返回 `Busy`，没有登记替换，P 仍是 Pending，D_b 照样登记 | 新增 |
 | `approve_refuses_pending_whose_head_left_main` | 准备同 `rollout_moves_base_and_deps_atomically`：Pending P（origin = Main，目标 (T2, H2)，to D2 已封存），会话 S1、S2 钉 (T1, D1)，origin 在 H2，`plan_rollout(P, [S1, S2])` 给出两个 Move。origin 前进到 H3（只改了 `README`）、fetch，不观察：`plan_rollout(P, [S1, S2])` 返回 `HeadMoved`，`detail` 为 reason main_moved、proposal P、head H2、tip H3；store 前后相同，P 仍是 Pending，记录调用的 mover 从未被调用。观察 (T3, H3) 之后 P 被只换目标的 P′ 取代：`plan_rollout(P)` 为 `NoSuchProposal`，`plan_rollout(P′)` 给出 Move，new_base 为 (T3, D2)，head H3。发布链：`pin_unpushed = true`，origin 在 H1，链 H2、锚点 H1，P 的目标是 (T2, H2)：照常 Move；人把 origin 强推回 H0、fetch，链变成 `Rewound`，`main_tip` 为 H0：`HeadMoved`，tip H0。提出者 S 的 Pending（origin `Session { S }`）在主干移动之后：`plan_switch` 同样返回 `HeadMoved`；S 的 AwaitingPublish 不受影响，`plan_switch` 照常给出 Move | 新增 |
 | `observe_main_retarget_keeps_session_origin` | 会话 S 的草稿落地之后被提升：Pending P 的 origin 为 `Session { S }`，from D1，to D_new，目标 (T2, H2)；主干记录为 (T2, H2, X, D_new)；S 没有自换，仍钉 (T1, D1)。origin 前进到 H3（只改了 `README`，依赖集仍是 D_new）、fetch，观察 (T3, H3)：返回 P′，origin 仍是 `Session { S }`，from、from_inputs、to、to_inputs 与 P 相同，目标 (T3, H3)；P 变成 `Superseded { by: P′ }`；记录为 (T3, H3, X, D_new)。`plan_switch(P′, S)` 恰好是一步 `Move { S, BaseGen { tool, T3, D_new }, H3 }`；另一个会话 S2（也钉 (T1, D1)）调 `plan_switch(P′)`：`NoSuchProposal`（reason not_origin）。origin 强推回 H2、fetch、观察 (T2, H2)：P″ 的 origin 仍是 `Session { S }`，目标 (T2, H2)，`plan_switch(P″, S)` 的 head 为 H2。再观察 (T2, H2) 一次：返回 `None`，不新增记录 | 新增 |
-| `participant_publish_keeps_landed_proposers_pending` | 会话 S1 的草稿 Q1（from D_o，to D_x）没有自换，S1 仍钉 (T1, D_o)；会话 S2 也钉 (T1, D_o)，没有草稿。S1 发布，在锁替身里模拟 `rebase_session`：第 2 步以 `Session { S1 }` 带目标 (T2, H2)、to D_x 调 `propose`，Q1 被提升；第 4 步以 Main、from D_o、同一目标调：返回 Q1，不新增记录。S2 再发布一个只改 `README` 的提交，落地 (T3, H3)，键仍是 D_x；第 4 步以 Main、from D_o、目标 (T3, H3) 调：返回 Q1′，它是 Q1 只换了目标的副本，origin 仍是 `Session { S1 }`，from 与 Q1 相同；Q1 变成 `Superseded { by: Q1′ }`；同样的参数再调一次返回 Q1′，不新增记录。`plan_switch(Q1′, S1)` 恰好是一步 `Move { S1, BaseGen { tool, T3, D_x }, H3 }`。之后观察 (T3, H3)（`main_tip` 为 H3）：返回 Q1′，不新增记录，主干记录为 (T3, H3, X, D_x) | 新增 |
+| `participant_publish_keeps_landed_proposers_pending` | 主干记录为 (T1, H1, O, D_o)。会话 S1 的草稿 Q1（from D_o，to D_x）没有自换，S1 仍钉 (T1, D_o)；会话 S2 也钉 (T1, D_o)，没有草稿。S1 发布，在锁替身里模拟 `rebase_session`（只跑第 2、4 步，不跑第 5 步的观察，所以主干记录到最后那次观察之前一直是 (T1, H1, O, D_o)）：第 2 步以 `Session { S1 }` 带目标 (T2, H2)、to D_x 调 `propose`，Q1 被提升；第 4 步以 Main、from D_o、同一目标调：返回 Q1，不新增记录。S2 再发布一个只改 `README` 的提交，落地 (T3, H3)，键仍是 D_x；第 4 步以 Main、from D_o、目标 (T3, H3) 调：返回 Q1′，它是 Q1 只换了目标的副本，origin 仍是 `Session { S1 }`，from 与 Q1 相同；Q1 变成 `Superseded { by: Q1′ }`；同样的参数再调一次返回 Q1′，不新增记录。`plan_switch(Q1′, S1)` 恰好是一步 `Move { S1, BaseGen { tool, T3, D_x }, H3 }`。之后观察 (T3, H3)（`main_tip` 为 H3）：返回 Q1′，不新增记录，主干记录为 (T3, H3, X, D_x) | 新增 |
 
 矩阵覆盖：目标模块为 deps 的 5 行全部落在上表（3d `merge_units.rs` 的两行，3f `generations` 的三行）；理由点名 deps 的 `—` 行有 1 行（3b `acquisition_custody.rs`），也落在上表。上表共 56 条：6 条引用矩阵行，50 条新增。
 
@@ -1387,9 +1398,10 @@ design.md 标为 [交给构建者]、并且落在本模块的决定：
 | 错误时序之内更严的两处 | 封存里面（rename 之后）的失败与冷装 install 开始之后的失败都返回 `Unknown`，不给具名拒绝；封存本身是缓存填充（Addendum 6 refinement 4），封存成功之后照样可以具名拒绝（T8 第 2 轮裁定要求把前一处标为本文的选择） | 前者留下一个没有记录、谁都不会认领的目录，得让 status 报出来；后者的 install 在 strata 之外有副作用，日志只此一份（不变量 6） | 2026-10-22 |
 | 观察与主干的 tip | `observe_main`：锁外算键；在 repo 写锁里用 `main_tip` 核对调用方的 head，不是当前的 tip 就什么都不写：这次调用还没拿到过提议时返回 `None`，重来时、此前已拿到过提议则返回 `Unknown`（main_not_recorded）；是就先 `propose`，再对读到的那条比较并交换地写主干记录（Addendum 7）。锁里没写成只能是不持锁的写，从读 tip 重来，最多 3 次：没拿到提议返回 `Busy`（main_race），拿到过（已有的同一条也算）返回 `Unknown`（main_not_recorded，`detail.error` 是那个 `Busy`）。deps 不比较 tip 与记录的祖先关系 | 锁、在锁里读 tip、不比较祖先、比较并交换留作兜底，都是 module-rulings "deps follows main's current tip" 的裁定。本文定的是：head 不是当前 tip 时什么都不写（复审给的第二种做法；改记锁里读到的那个 tip 需要它的 tree 目录，只有调用方导得出来，而移动主干的那次调用自己会观察）；键在锁外算（`toolchain` 不命中缓存时要跑 `--version`，最长 10 秒）；重来时连 tip 一起重读；重来时 head 已不是 tip 而提议已经写了，不能当成功返回（第 3 轮复审 N1，T8 第 4 轮裁定） | 2026-10-22 |
 | Pending 的目标跟着主干 | 依赖集没变而主干的 tip 移动了（前进或回退）时，`observe_main` 以 Main 调 `propose`，同 to 规则把 to 就是这个依赖集、目标却是别的 tip 的那条 Pending 换成只换了目标的副本（origin、from、to 照旧，`record_proposal` 取代它）；没被观察到的移动由 approve 对 `main_tip` 的核对兜住 | module-rulings "deps follows main's current tip" 让主干记录跟着当前的 tip，也不许 deps 比较祖先关系；分不出前进与回退，只跟依赖集变化的话，回退到依赖集相同的 commit 之后，Pending 仍指向被丢掉的 commit，批准它就把会话移到不在主干上的 tree。代价是主干移动之后 Pending 的 id 会变，拿旧 id 批准的人得到 `NoSuchProposal`、看到取代它的那一条；保留 origin，是为了不让提出者失去自换的权利（`plan_switch`）。approve 的核对是 module-rulings "approve refuses a Pending whose head is no longer main's tip" 的裁定：主干在观察之前就动了的那一段，只有它挡得住 | 2026-10-22 |
-| approve 核对主干的 tip | `plan_rollout` 第 1 步核对 `P.head == main_tip`，不是就 `HeadMoved`（reason main_moved，detail 带当前的 tip），什么都不写；`plan_switch` 对 Pending 同样核对，对 AwaitingPublish 不核对；借用 `HeadMoved` | 拒绝本身是裁定（见上一行）。本文定：放在 `plan_rollout` 里，approve 在锁里调它，fetch 也要这把锁，核对之后 tip 不会变；提出者自换同样不该落到不在主干上的 commit；AwaitingPublish 的自换不动 tree；`HeadMoved` 在 types.md §6.2 里的含义是 ref 已经不是读取时的值（另一次发布先前进了发布链），main_moved 是同一类事：P 登记时的主干 tip 已经不是现在的 tip，detail 同样带期望值（head）与实际值（tip）；`Code` 又是封闭的 | 2026-10-22 |
+| approve 核对主干的 tip | `plan_rollout` 第 1 步核对 `P.head == main_tip`，不是就 `HeadMoved`（reason main_moved，detail 带当前的 tip），什么都不写；`plan_switch` 对 Pending 同样核对，对 AwaitingPublish 不核对；借用 `HeadMoved` | 拒绝本身是裁定（见上一行）。本文定：放在 `plan_rollout` 里，approve 在锁里调它，`main_tip` 读的 ref 的每一次更新都要这把锁（module-rulings "Every update of a ref main_tip reads runs under the repo lock"），核对之后这段锁里 tip 不会变；提出者自换同样不该落到不在主干上的 commit；AwaitingPublish 的自换不动 tree；`HeadMoved` 在 types.md §6.2 里的含义是 ref 已经不是读取时的值（另一次发布先前进了发布链），main_moved 是同一类事：P 登记时的主干 tip 已经不是现在的 tip，detail 同样带期望值（head）与实际值（tip）；`Code` 又是封闭的 | 2026-10-22 |
 | OwnChange 的判定 | 比草稿与提议的 `to_inputs`，不比 id（T8 第 2 轮裁定，要求标出）；另外要求工作区的安装输入既不等于所钉基线 tree 的（对 `Store::base_dir(&ws.base)` 求 `inputs_hash`），也不等于这次的 `to_inputs` | 工具链或依赖配置一变，同一组输入的 id 就变；落地的草稿已被提升（见下一行），留着的只剩部分落地或提升失败的；工作区等于自己基线的或等于目标的，移过去都不会丢掉什么 | 2026-10-22 |
 | 落地时草稿的去向 | publish 判定提出会话的安装输入改动全部发布之后，以 `Session { s }` 带目标调 `propose`：to 相同就提升；不同就先以同一会话的新草稿把它改登记成落地的键，再提升；只发布了一部分时草稿留着 | T8 第 3 轮裁定：草稿落地之后，不论是否与别人的依赖改动合并，提出会话都不能对以后每一条 Pending 都 OwnChange。deps 分不出落地与没落地，publish 知道发布了哪些路径；改登记再提升只用 store 现有的两个方法，旧草稿被取代、不留下来；只发布了一部分时，没发布的改动仍要 OwnChange 保护 | 2026-10-22 |
+| 同一依赖改动的两个落地者 | origin 只由一个会话持有：后落地的会话自己的同 to 草稿被提升，取代先落地者的 Pending；先落地者失去这条 Pending 上的自换，等 approve，或重新提出一条草稿、在所钉 tree 上只换依赖（§4.5） | 第 4 轮复审 M1 的残留，T8 第 5 轮裁定选 (a)：要两个会话各自做出同一个依赖改动才会发生，损失只是一次自换、从不丢数据；(b) 让草稿留着、改取 C 的同 to 副本，会在刚统一的同 to 规则旁边多出第二条同 to 路径 | 2026-10-22 |
 | 暂存里不删东西 | 要去掉的目录与文件用 `apfs::rename_rooted` 挪进 `discard/`，随暂存经 `retire_dir` 离开；从工作区取的安装输入先克隆进 `inputs/`，再改名进源码树 | Addendum 7：非空的东西只经 `retire_dir` 离开；Addendum 8：暂存上的写全经 apfs 的 rooted 操作；改名是 O(1)，删一个 `node_modules` 要几秒 | 2026-10-22 |
 | 封存后的同步只做目的地一边 | rename 之后只对 `<root>/deps/<repo>/` 调 `apfs::full_fsync`，暂存那一边不做 | deps 只需要"有记录就有目录"，记录在这次同步之后才写；目录只有一个名字，断电之后它要么在暂存里，要么在 `<id>/`；封存的临界区少一次 `F_FULLFSYNC` | 2026-10-22 |
 | `open_files` 的实现 | libproc 扫描 fd、映射段与 cwd；失败返回错误，不返回空列表 | 返回空就是错误地放行，会违反不变量 4；dlopen 的原生模块只能从映射段看到 | 2026-10-22 |
