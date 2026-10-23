@@ -72,6 +72,10 @@ impl XSet {
         }
     }
 
+    pub fn fold(&self) -> Fold {
+        self.fold
+    }
+
     /// `p` lies in X (at or under one of its paths), compared with the volume's fold.
     pub fn covers(&self, p: &str) -> bool {
         if self.ex.covers(p) {
@@ -137,10 +141,15 @@ fn restricts(ctx: &Ctx, d: &str, emb: &Mutex<Vec<RepoPath>>) -> Result<bool> {
 
 /// Whether `d` or one of its ancestors restricts (start of a subtree walk).
 pub(crate) fn restricted_at(ctx: &Ctx, d: &RepoPath) -> Result<bool> {
-    let sink = Mutex::new(Vec::new());
+    restricted_in(ctx, d, &Mutex::new(Vec::new()))
+}
+
+/// `restricted_at`, keeping the nested repository that restricts (the first
+/// restricting directory from the root is one the full walk would warn about).
+fn restricted_in(ctx: &Ctx, d: &RepoPath, emb: &Mutex<Vec<RepoPath>>) -> Result<bool> {
     let s = d.as_str();
     for (i, _) in s.match_indices('/').chain(std::iter::once((s.len(), ""))) {
-        if restricts(ctx, &s[..i], &sink)? {
+        if restricts(ctx, &s[..i], emb)? {
             return Ok(true);
         }
     }
@@ -160,13 +169,23 @@ pub(crate) fn file_candidate(ctx: &Ctx, p: &RepoPath, parent_restricted: bool) -
 
 /// Walk the tree (or the subtree at `start`) by the §5.1 rules.
 pub(crate) fn walk_tree(ctx: &Ctx, start: Option<&RepoPath>) -> Result<Found> {
+    let emb: Mutex<Vec<RepoPath>> = Mutex::new(Vec::new());
     let start_restricted = match start {
         None => false,
-        Some(s) => restricted_at(ctx, s)?,
+        Some(s) => restricted_in(ctx, s, &emb)?,
     };
+    if let Some(s) = start
+        && start_restricted
+        && !ctx.keys.under(s.as_str())
+    {
+        // The full walk would not enter this directory.
+        return Ok(Found {
+            embedded: emb.into_inner().unwrap(),
+            ..Default::default()
+        });
+    }
     let memo: Mutex<HashMap<String, bool>> = Mutex::new(HashMap::new());
     let err: Mutex<Option<StrataError>> = Mutex::new(None);
-    let emb: Mutex<Vec<RepoPath>> = Mutex::new(Vec::new());
     let fail = |e: StrataError| {
         let mut g = err.lock().unwrap();
         if g.is_none() {

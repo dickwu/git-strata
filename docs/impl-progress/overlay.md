@@ -10,8 +10,8 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 | 2 .lww rules in the LayerFS glob dialect | done | 7b18fe7 |
 | 3 base manifests and race-safe reads | done | d1fd21a |
 | 4 membership, classification and the cold scan | done | d5ea948 |
-| 5 deterministic rename pairing | done | (this commit) |
-| 6 dirty set and incremental scans | todo | |
+| 5 deterministic rename pairing | done | 56c97a8 |
+| 6 dirty set and incremental scans | done | (this commit) |
 | 7 checkpoints that store only what changed | todo | |
 | 8 three-way rebase with .lww, and projection | todo | |
 | 9 a restore that checkpoints first | todo | |
@@ -103,3 +103,39 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 - Task 5: the case-sensitive-volume half of
   `rename_case_only_recorded_as_rename` is a separate #[ignore] test; the
   disk-image helper moved to `tests/common` (`Image::case_sensitive`).
+- Task 6: inbox introspection for tests is `Inbox::pending() -> InboxView`
+  behind `test-seams`. The sets are keyed by the volume-fold key (one item
+  per canonical path, case variants and NFC/NFD merged); before the first
+  scan the fold comes from the root's volume (`Fold::of`, case-insensitive
+  when it cannot be read), and `set_x` re-keys when the fold changes.
+- Task 6: an event (or `MustRescan`) for the root itself, a path with `..`
+  or another non-normal component, or a non-UTF-8 path asks for a full scan.
+  The root is a directory and a directory event means "subtree dirty"
+  (§5.4 step 3), so the root means the whole tree. Real FSEvents does report
+  the root when an entry is created directly in it, so such a creation costs
+  a full scan; that is correct, only slower, and left for the daemon
+  scheduling to judge.
+- Task 6: dirty-arg paths ending in `.gitignore` force a full scan, like
+  events. A spelling walk that meets a non-directory ancestor queues that
+  ancestor as its own dirty path (§5.4 steps 2+3 for a dir swapped for a
+  file). Region re-judging under p uses the fold-key prefix.
+- Task 6: `dirs_listed` counts the listings made for spelling resolution
+  too (each directory once per scan): round 3 of
+  `reconcile_after_kernel_dropped_equals_cold_scan` lists 4 = the 2 subtree
+  dirs + root + `src`.
+- Task 6: an incremental scan runs on a clone of the state and is thrown
+  away if it meets something that needs a full scan (then a full scan runs
+  in the same call). `set_x` happens before the snapshot (§5.5 step 2).
+  `Tracker::reset` keeps the same `Inbox` (the watcher closure holds it),
+  emptied and marked full.
+- Task 6: `Inbox::hint`/`require_full` and `Tracker::flush` are left to
+  Task 7, which consumes them.
+- Task 6: the real-FSEvents half of `excluded_dirs_never_enter_overlay` is
+  `excluded_dirs_never_enter_overlay_real_watch` (not ignored; it passes from
+  the agent shell). FSEvents delivers writes made shortly before the stream
+  started, so the test drains the setup's events with one scan first. The
+  case-sensitive half of `event_spellings_and_subtrees_reverify` is #[ignore]
+  (hdiutil).
+- Tests' temp dirs follow `TMPDIR` (`std::env::temp_dir()`); nothing in the
+  overlay tests hardcodes `/tmp`. Runs here use
+  `TMPDIR=/Volumes/GWD/opensource/.strata-tmp` (APFS, same volume as target).

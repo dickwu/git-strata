@@ -14,6 +14,7 @@ mod context;
 mod fault;
 #[allow(dead_code)]
 mod hash;
+mod inbox;
 mod lww;
 mod manifest;
 mod overlay;
@@ -30,6 +31,9 @@ pub use context::{Base, WorkspaceRef};
 pub use fault::{OverlayFault, inject_fault, release_fault, wait_fault};
 #[cfg(feature = "test-seams")]
 pub use hash::{ReadProbe, read_candidate};
+pub use inbox::Inbox;
+#[cfg(feature = "test-seams")]
+pub use inbox::InboxView;
 pub use lww::{LwwRules, lww_matches};
 pub use manifest::build_manifest;
 pub use overlay::*;

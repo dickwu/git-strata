@@ -6,11 +6,15 @@ use std::path::{Path, PathBuf};
 
 use strata_types::{BaseGen, RepoPath};
 
-use crate::OverlayWarning;
+use strata_apfs::{WatchOptions, Watcher, watch_with};
+
 use crate::classify::Raw;
+use crate::context::Fold;
 use crate::hash::Cached;
+use crate::inbox::Inbox;
 use crate::overlay::Overlay;
 use crate::scan::{Keys, XSet};
+use crate::{OverlayWarning, Result};
 
 /// Everything a scan replaces at once (compute works on a copy and commits
 /// it only on success, §5.5 step 7).
@@ -43,9 +47,9 @@ impl State {
 /// The daemon's per-workspace scan state (held under its own mutex).
 pub struct Tracker {
     pub(crate) root: PathBuf,
-    #[allow(dead_code)] // the dirty-set bound (Task 6)
-    pub(crate) capacity: usize,
     pub(crate) st: State,
+    pub(crate) inbox: Inbox,
+    watcher: Option<Watcher>,
 }
 
 impl Tracker {
@@ -53,9 +57,27 @@ impl Tracker {
     pub fn new(root: &Path, capacity: usize) -> Tracker {
         Tracker {
             root: root.to_path_buf(),
-            capacity,
             st: State::default(),
+            inbox: Inbox::new(root, capacity, Fold::of(root)),
+            watcher: None,
         }
+    }
+
+    /// The dirty set the watcher callback (or the daemon) feeds.
+    pub fn inbox(&self) -> Inbox {
+        self.inbox.clone()
+    }
+
+    /// Start (or restart) watching the root; events go to `inbox()`. Only
+    /// `.git` is excluded at the source, X is filtered in `Inbox::note`.
+    pub fn watch(&mut self) -> Result<()> {
+        self.watcher = None;
+        let inbox = self.inbox.clone();
+        let opts = WatchOptions {
+            exclude: vec![RepoPath::try_from(".git".to_owned()).expect("valid path")],
+        };
+        self.watcher = Some(watch_with(&self.root, &opts, move |ev| inbox.note(&ev))?);
+        Ok(())
     }
 
     /// The base of the latest scan; `None` before the first one.
@@ -75,12 +97,14 @@ impl Tracker {
 
     /// The next scan must walk the whole tree.
     pub fn needs_full(&self) -> bool {
-        !self.st.scanned
+        !self.st.scanned || self.inbox.needs_full()
     }
 
-    /// After the workspace became a new tree: drop cache and raw difference;
-    /// the next scan is cold.
+    /// After the workspace became a new tree: drop cache, raw difference and
+    /// the watcher; the next scan is cold.
     pub fn reset(&mut self) {
+        self.watcher = None;
         self.st = State::default();
+        self.inbox.clear_full();
     }
 }
