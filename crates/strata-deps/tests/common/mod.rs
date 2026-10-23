@@ -39,6 +39,26 @@ pub struct Sandbox {
     pub state: PathBuf,
 }
 
+/// Sealed sets and trash entries are 0555: make every directory writable
+/// again so the `TempDir` can remove the sandbox (no leaked temp dirs).
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        fn writable(p: &Path) {
+            let Ok(m) = fs::symlink_metadata(p) else { return };
+            if !m.is_dir() {
+                return;
+            }
+            let _ = fs::set_permissions(p, fs::Permissions::from_mode(0o755));
+            if let Ok(rd) = fs::read_dir(p) {
+                for e in rd.flatten() {
+                    writable(&e.path());
+                }
+            }
+        }
+        writable(&self.root);
+    }
+}
+
 impl Default for Sandbox {
     fn default() -> Self {
         Self::new()

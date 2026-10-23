@@ -122,3 +122,8 @@ Spec: docs/modules/deps.md. Branch `impl/deps` (worktree git-strata-wt/deps), ba
   - `ensure` runs the full preflight (`inputs_tracked`, `key_of`) itself before the hot-path `find_set`, so a missing input is `InvalidInput` even when a set happens to be sealed; `adopt`/`build` repeat it (cheap, no writes).
   - Adoption retries only on `Drift changed_during_clone`, 3 adoptions in total; any other `Drift`, `NoSuchPath` or `NotDirectory` goes straight to one cold install; every other code is returned as-is (e.g. `Busy` from the repo write lock at adoption's seal, `CrossVolume`, `InvalidInput`).
   - "No command runs" for the empty set is tested with a `bun` that leaves a marker on any invocation (including `--version`).
+
+### Task 6 — drift (§5.8)
+
+- `src/drift.rs` (`Drift`, `drift`), `tests/drift.rs` (2 spec tests). `drift` only compares `inputs_hash(ws)` with `pinned.inputs_hash`; toolchain/platform/config never count.
+- Test infra: `Sandbox` now has a `Drop` that makes every directory 0755 before the `TempDir` is removed. Sealed sets/trash entries are 0555, so earlier test runs leaked their sandboxes into `$TMPDIR` (76 leftovers removed). Tests are now run with `TMPDIR=/Volumes/GWD/opensource/.strata-tmp` (internal disk nearly full); no test depends on the internal volume (`/tmp/elsewhere` in adopt tests is only a symlink target string, never created; `build.rs` uses `std::env::temp_dir()`).
