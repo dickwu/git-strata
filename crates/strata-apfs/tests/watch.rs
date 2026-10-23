@@ -538,14 +538,43 @@ fn watcher_reports_must_rescan_body() {
             triggered = true;
             // Still usable after a drop/rescan.
             w.flush();
+            // The backlog of the flood can still be draining, so "after" may
+            // itself be reported by a later Dropped or MustRescan instead of a
+            // Changed; any of the three proves the watcher is still alive.
+            let (d0, r0) = {
+                let c = cov.lock().unwrap();
+                (c.dropped, c.rescans.len())
+            };
             let after = root.join("after");
             fs::write(&after, b"x").unwrap();
+            let since = Instant::now();
+            let alive = wait_until(ARRIVE, || {
+                let c = cov.lock().unwrap();
+                c.changed.contains(&after)
+                    || c.dropped > d0
+                    || c.rescans[r0..].iter().any(|r| after.starts_with(r))
+            });
             {
-        let since = Instant::now();
-        if !wait_until(ARRIVE, || cov.lock().unwrap().changed.contains(&after)) {
-            canary::starved_or_fail(since, format!("watcher dead after Dropped/MustRescan"));
-        }
-    }
+                let c = cov.lock().unwrap();
+                eprintln!(
+                    "after: changed={} dropped {d0}->{} rescans {r0}->{}",
+                    c.changed.contains(&after),
+                    c.dropped,
+                    c.rescans.len()
+                );
+            }
+            if !alive {
+                let c = cov.lock().unwrap();
+                canary::starved_or_fail(
+                    since,
+                    format!(
+                        "watcher dead after Dropped/MustRescan (dropped {d0}->{}, rescans {r0}->{}, changed={})",
+                        c.dropped,
+                        c.rescans.len(),
+                        c.changed.len()
+                    ),
+                );
+            }
             break;
         }
     }
@@ -672,7 +701,7 @@ fn reentry_drop_round() -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
     {
         let since = Instant::now();
         if !poke_until(&root, Duration::from_secs(5), || done.load(Ordering::SeqCst)) {
-            canary::starved_or_fail(since, format!("callback never ran"));
+            canary::starved_or_fail(since, "callback never ran".to_string());
         }
     }
     assert!(wait_until(Duration::from_secs(5), || drops.load(Ordering::SeqCst) == 1), "state never freed");
@@ -761,14 +790,14 @@ fn reentry_cross() {
     {
         let since = Instant::now();
         if !poke_until(&rb, Duration::from_secs(5), || b_started.load(Ordering::SeqCst) > 0) {
-            canary::starved_or_fail(since, format!("B never called"));
+            canary::starved_or_fail(since, "B never called".to_string());
         }
     }
     go.store(true, Ordering::SeqCst);
     {
         let since = Instant::now();
         if !poke_until(&ra, Duration::from_secs(5), || a_done.load(Ordering::SeqCst)) {
-            canary::starved_or_fail(since, format!("A never called"));
+            canary::starved_or_fail(since, "A never called".to_string());
         }
     }
     assert!(ok.load(Ordering::SeqCst), "B's callback was not running when A flushed/dropped it");

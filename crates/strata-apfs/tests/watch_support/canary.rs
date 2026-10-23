@@ -98,7 +98,8 @@ pub fn start() {
         }
         let d = dir.clone();
         thread::spawn(move || {
-            for i in 0u64.. {
+            let mut i = 0u64;
+            loop {
                 let p = d.join(format!("p{i}"));
                 let at = Instant::now();
                 if fs::write(&p, b"").is_ok() {
@@ -108,6 +109,7 @@ pub fn start() {
                     let _ = fs::remove_file(d.join(format!("p{}", i - 2)));
                 }
                 thread::sleep(POKE);
+                i += 1;
             }
         });
         dir
