@@ -18,13 +18,18 @@ use strata_types::{CheckpointReason, Code, Config, RepoConfig, RepoName, Session
 mod base;
 mod dispatch;
 mod new;
+mod resolve;
 mod seams;
 mod seed;
+mod status;
 mod sys;
 mod ticket;
 
 #[cfg(feature = "test-seams")]
 pub use seams::SessionSeam;
+pub use status::{
+    MirrorDriftItem, Scene, SceneOp, SessionState, SessionStatus, StatusWarning, WorkspaceHealth, WorkspaceStatus,
+};
 pub use new::NewReport;
 pub use new::NewWarning;
 pub use seed::{SeedRecord, SeedSource, seed_files, seed_plan};

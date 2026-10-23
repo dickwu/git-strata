@@ -679,9 +679,24 @@ fn new_reports_a_failed_observation_as_a_warning() {
         assert!(fx.store().deps_main(&fx.rn("tool")).unwrap().is_some(), "{mode}: tool was observed");
         assert!(ws(&rep, "front").join("src/index.ts").is_file());
         assert!(!fx.pins("front").is_empty());
-        // Observing again fills the gap.
         let ctx_ok = fx.store().deps_main(&first).unwrap();
         assert!(ctx_ok.is_none(), "{mode}: front was not recorded");
+        // status is unaffected, and observing again fills the gap.
+        let st = fx.sessions().status(&rep.manifest.id).unwrap();
+        assert_eq!(st.state, strata_session::SessionState::Active, "{mode}");
+        assert!(st.workspaces.values().all(|w| w.health == strata_session::WorkspaceHealth::Ok), "{mode}");
+        let fw = &rep.manifest.repos[&first];
+        let ctx = strata_deps::Ctx {
+            store: fx.store(),
+            paths: &fx.config.paths,
+            repo: &first,
+            cfg: &fx.config.repos[&first],
+            git: &fx.gits[&first],
+            env: &fx.env,
+            locks: &fx.lock,
+        };
+        strata_deps::observe_main(&ctx, &fw.base.tree, &fw.head, &fx.store().base_dir(&fw.base)).unwrap();
+        assert!(fx.store().deps_main(&first).unwrap().is_some(), "{mode}: front recorded after observing again");
     }
 }
 

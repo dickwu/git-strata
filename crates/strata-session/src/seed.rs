@@ -225,6 +225,6 @@ pub(crate) fn ancestors(p: &RepoPath) -> Vec<RepoPath> {
     s.match_indices('/').map(|(i, _)| rp(&s[..i])).collect()
 }
 
-fn mtime_of(m: &std::fs::Metadata) -> SystemTime {
+pub(crate) fn mtime_of(m: &std::fs::Metadata) -> SystemTime {
     m.modified().unwrap_or_else(|_| UNIX_EPOCH + Duration::new(m.mtime().max(0) as u64, m.mtime_nsec().max(0) as u32))
 }

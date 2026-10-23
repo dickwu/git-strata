@@ -7,8 +7,8 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
 | Task | Status | Commit |
 |---|---|---|
 | 1 refuse invalid new requests before writing | done | d19b845 |
-| 2 full sibling layout on per-session shadow repos | done | (this commit) |
-| 3 resolve by cwd or selector, status | todo | |
+| 2 full sibling layout on per-session shadow repos | done | 03a4bce |
+| 3 resolve by cwd or selector, status | done | (this commit) |
 | 4 Unknown scenes and restart leftovers | todo | |
 | 5 move base and deps with an atomic directory swap | todo | |
 | 6 remove behind discard confirmation and open-file checks | todo | |
@@ -87,3 +87,27 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
 - Task 2: tests reopening the Store retry Busy for up to 5 s: children
   forked by other test threads briefly share the LOCK description between
   fork and exec.
+- Task 3: status runs the filesystem probes (drift, seed checks, mirror
+  drift) only for a workspace whose health is Ok; "the workspace exists"
+  means its directory, its `.git` and its shadow repo are all there, so a
+  missing `.git` or shadow is `Missing` and status itself never fails on
+  it. An Unknown-health workspace skips these probes but still reports its
+  checkpoint, pending proposals, conflicts, seeds and RestoreScene.
+- Task 3: `shadow_at` errors other than NoSuchPath, and seed-source lstat
+  errors other than ENOENT/ENOTDIR, pass through as status errors rather
+  than being folded into a warning.
+- Task 3: `select` turns every ticket validation failure into
+  InvalidInput, including the id-like reserved form (`S-ABCDEFGH`) that
+  `new` refuses as ReservedName. Ticket matches and `list` sort by
+  creation time, ties broken by session id.
+- Task 3: a stored scene that does not parse, or a workspace row for a
+  repo outside the manifest, is Corrupt.
+- Task 3: `resolve` returns None when `<root>/sessions` cannot be opened
+  (no session can contain cwd); only store errors are Err. The
+  "store unreadable → Err" row is driven by reopening the store (empty
+  reader pool) and chmod 000 on `store.db`; the store has no read-fault
+  seam.
+- Task 3: the T2 row `new_reports_a_failed_observation_as_a_warning` now
+  checks that status is unaffected and that a second `observe_main` fills
+  the missing record. The `new_failure_after_writing_began_is_unknown`
+  status/resolve half comes with Task 4 (Unknown scenes).

@@ -164,7 +164,7 @@ impl Sessions<'_> {
         dispatch::each_repo(&repos, &seam("git"), &|r| {
             let git = self.git(r)?;
             let ws = &m.repos[r];
-            let dir = proot.join("sessions/.repos").join(id.as_str()).join(format!("{r}.git"));
+            let dir = self.shadow_dir(id, r);
             self.with_lock_unbounded(r, || {
                 let shadow = git.ensure_shadow(&dir)?;
                 git.attach_worktree(&shadow, 1, &ws.head, &ws.path, &ws.path)?;
