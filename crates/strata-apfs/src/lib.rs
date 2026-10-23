@@ -8,6 +8,8 @@
 use strata_types::StrataError;
 
 mod clone;
+mod clone_from;
+mod remove_tree;
 mod rooted;
 mod hooks;
 mod meta;
@@ -22,6 +24,8 @@ mod sys;
 mod volume;
 
 pub use clone::{clone_file, clone_tree};
+pub use clone_from::{CloneKind, clone_from_rooted};
+pub use remove_tree::{RemoveReport, Stuck, StuckReason, remove_tree_rooted};
 pub use meta::{FileMeta, make_removable, set_file_meta};
 pub use rooted::{open_root, open_rooted, open_rooted_file};
 pub use rooted_remove::{RemoveKind, remove_rooted};

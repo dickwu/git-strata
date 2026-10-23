@@ -14,6 +14,7 @@ use strata_types::{Code, StrataError};
 type Call = Box<dyn Fn(&Path) -> std::result::Result<(), StrataError>>;
 
 fn calls(src_file: PathBuf, src_dir: PathBuf) -> Vec<(&'static str, Call)> {
+    let cfd = src_file.with_file_name("clone_from_dst");
     let (sf, sf2, sd) = (src_file.clone(), src_file, src_dir);
     vec![
         ("open_root", Box::new(|r| open_root(r).map(drop))),
@@ -30,6 +31,8 @@ fn calls(src_file: PathBuf, src_dir: PathBuf) -> Vec<(&'static str, Call)> {
         ("rename_rooted(Swap)", Box::new(|r| rename_rooted(r, &rp("f"), &rp("sub"), RenameMode::Swap))),
         ("remove_rooted(File)", Box::new(|r| remove_rooted(r, &rp("f"), RemoveKind::File))),
         ("remove_rooted(EmptyDir)", Box::new(|r| remove_rooted(r, &rp("sub"), RemoveKind::EmptyDir))),
+        ("clone_from_rooted", Box::new(move |r| clone_from_rooted(r, &rp("f"), &cfd, CloneKind::File))),
+        ("remove_tree_rooted", Box::new(|r| remove_tree_rooted(r, &rp("sub")).map(drop))),
     ]
 }
 

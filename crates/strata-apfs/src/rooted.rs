@@ -144,7 +144,7 @@ pub(crate) fn open_final(r: &mut Resolved) -> std::result::Result<Fd, i32> {
     openat(r.dir.0, &r.name, FINAL_FLAGS, 0)
 }
 
-fn final_error(errno: i32, shown: &Path) -> crate::StrataErrorAlias {
+pub(crate) fn final_error(errno: i32, shown: &Path) -> crate::StrataErrorAlias {
     match errno {
         libc::ELOOP => errno_error(Code::NotFile, errno, shown, Some("symlink")),
         libc::EOPNOTSUPP => errno_error(Code::NotFile, errno, shown, Some("socket")),

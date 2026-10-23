@@ -133,6 +133,11 @@ fn clone_refusals_leave_no_residue() {
     assert!(clone_tree_rooted(&dr.join("d"), &dr, &rp("x")).is_err());
     assert_code(clone_tree_rooted(&rtree, &ar, &rp("exists")), Code::Exists);
     assert_code(clone_tree_rooted(&rtree, &ar, &rp("missing/x")), Code::NoSuchPath);
+    // clone_from_rooted's half (Task 5).
+    assert_code(clone_from_rooted(&ar, &rp("tree"), &br.join("x"), CloneKind::Dir), Code::CrossVolume);
+    assert_code(clone_from_rooted(&ar, &rp("tree/a.txt"), &br.join("x"), CloneKind::File), Code::CrossVolume);
+    assert_code(clone_from_rooted(&ar, &rp("tree"), &ar.join("exists"), CloneKind::Dir), Code::Exists);
+    assert_code(clone_from_rooted(&ar, &rp("tree/a.txt"), &ar.join("missing/x"), CloneKind::File), Code::NoSuchPath);
     assert_eq!(listing(a.path()), la);
     assert_eq!(listing(b.path()), lb);
     assert_eq!(listing(dos.path()), ld);
