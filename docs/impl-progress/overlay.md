@@ -6,8 +6,8 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 
 | Task | Status | Commit |
 |---|---|---|
-| 1 overlay shape rules and pairing | done | (this commit) |
-| 2 .lww rules in the LayerFS glob dialect | todo | |
+| 1 overlay shape rules and pairing | done | 195a6da |
+| 2 .lww rules in the LayerFS glob dialect | done | (this commit) |
 | 3 base manifests and race-safe reads | todo | |
 | 4 membership, classification and the cold scan | todo | |
 | 5 deterministic rename pairing | todo | |
@@ -29,3 +29,19 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
   `paired` of it is empty.
 - Task 1: `get` uses binary search, with a linear fallback so an overlay that
   `validate` would refuse still answers.
+- Task 2: a leading `/` anchors the pattern to the repo root even when the
+  rest has no `/` (`/top.bin` matches `top.bin`, not `x/top.bin`), as in
+  LayerFS where every pattern starts at `/`.
+- Task 2: a trailing `/**` needs at least one name below (`a/**` matches
+  `a/b`, not `a` itself); `**/` and consecutive `**/**/` may be zero
+  directories; any other `**` matches any run including `/`. `\` escapes the
+  next character; there are no `[...]` classes (not in the LayerFS dialect
+  as quoted in §5.10).
+- Task 2: patterns are NFC-normalised when parsed (paths already are), so a
+  decomposed pattern matches; matching is byte-exact otherwise.
+- Task 2: `parse` ignores `%include` lines (it has no tree to read them
+  from); `load` splices included rules in place. The include path is a repo
+  path (leading `/` dropped) read with `apfs::open_rooted_file`, so a
+  symlinked rules file or a symlinked parent reads as empty (NotFile /
+  NotDirectory), like a missing one, a directory or non-UTF-8 text. Other
+  read errors are returned.

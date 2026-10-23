@@ -5,11 +5,13 @@
 //! Layer 2: depends on strata-types, strata-apfs, strata-gitio and
 //! strata-store only.
 
+mod lww;
 mod overlay;
 
 use serde::{Deserialize, Serialize};
 use strata_types::{RepoPath, StrataError};
 
+pub use lww::{LwwRules, lww_matches};
 pub use overlay::*;
 
 /// types.md §8 `Result<T>`.
