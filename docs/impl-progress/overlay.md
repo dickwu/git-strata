@@ -7,8 +7,8 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
 | Task | Status | Commit |
 |---|---|---|
 | 1 overlay shape rules and pairing | done | 195a6da |
-| 2 .lww rules in the LayerFS glob dialect | done | (this commit) |
-| 3 base manifests and race-safe reads | todo | |
+| 2 .lww rules in the LayerFS glob dialect | done | 7b18fe7 |
+| 3 base manifests and race-safe reads | done | (this commit) |
 | 4 membership, classification and the cold scan | todo | |
 | 5 deterministic rename pairing | todo | |
 | 6 dirty set and incremental scans | todo | |
@@ -45,3 +45,23 @@ Branch `impl/overlay` (worktree `git-strata-wt/overlay`), from `impl/v1` b70b04e
   symlinked rules file or a symlinked parent reads as empty (NotFile /
   NotDirectory), like a missing one, a directory or non-UTF-8 text. Other
   read errors are returned.
+- Task 3: `Base` keeps the spec's field name `gen`, spelled `r#gen` because
+  `gen` is a reserved keyword in edition 2024 (`base.r#gen`).
+- Task 3: X1 is only the root `.git` (§5.1 "根下的 `.git`"); a nested `.git`
+  is the scan's EmbeddedRepo case. X1-X2 match with the volume fold;
+  `Fold::of` falls back to case-insensitive (the more excluding reading)
+  when `volume_caps` fails.
+- Task 3: the §5.2 read returns Gone when the path stops being a
+  file/symlink between A1 and the read (open fails with
+  NoSuchPath/IsDirectory/NotFile/NotDirectory and re-attrs agree), retrying
+  once when re-attrs show a different file; the caller treats Gone as "not
+  on disk this scan" and re-dirties it. Gen count unknown on either A1 or A2
+  → read once, Unstable, never cached.
+- Task 3: test seams are a process-wide registry keyed by the exact root
+  path; faults are one-shot and several may be armed. `release_fault`
+  releases the paused thread, or disarms all armed faults when none is
+  paused. Extra seam `wait_fault(root)` (blocks up to 30 s for a pause) so
+  tests do not poll. Without `test-seams` the hooks compile to nothing.
+- Task 3: `build_manifest` hashes in parallel (rayon); size is the number of
+  bytes hashed. A FIFO/socket/device under an excluded dir is never seen
+  (the walk does not enter X), so it is not Unsupported.

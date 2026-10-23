@@ -5,13 +5,27 @@
 //! Layer 2: depends on strata-types, strata-apfs, strata-gitio and
 //! strata-store only.
 
+// Interim: helpers the scan and restore (tasks 4-10) use.
+#[allow(dead_code)]
+mod context;
+#[allow(dead_code)]
+mod fault;
+#[allow(dead_code)]
+mod hash;
 mod lww;
+mod manifest;
 mod overlay;
 
 use serde::{Deserialize, Serialize};
 use strata_types::{RepoPath, StrataError};
 
+pub use context::{Base, WorkspaceRef};
+#[cfg(feature = "test-seams")]
+pub use fault::{OverlayFault, inject_fault, release_fault, wait_fault};
+#[cfg(feature = "test-seams")]
+pub use hash::{ReadProbe, read_candidate};
 pub use lww::{LwwRules, lww_matches};
+pub use manifest::build_manifest;
 pub use overlay::*;
 
 /// types.md §8 `Result<T>`.
