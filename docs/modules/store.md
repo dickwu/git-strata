@@ -58,6 +58,7 @@ apfs.md（@1e723f2，module-rulings 的"apfs names committed at sdd/task-4 1e723
 外部 crate：
 
 - `rusqlite`，开 `bundled` [我的决定]：SQLite 的版本与编译选项随 crate 固定，§4.2 的回读、STRICT 表与 JSON 函数都依赖它；不链接系统 libsqlite3，免得系统更新改变持久语义。
+- 【引擎变更，2026-10-23 用户决定】元数据引擎已改为 Turso（crate `turso` =0.8.3，SQLite 文件格式兼容，为日后向量化预留）；上一条的 rusqlite 已不再使用，实现差异与缺口见 docs/impl-progress/store.md「Engine: Turso」。
 - `blake3`，开 `mmap` 与 `rayon`：算 `BlobId`；16 MiB 及以上的文件走 mmap 加多线程 [我的决定]。
 - `libc`：`flock`、`open(O_CLOEXEC)`、`fcntl(F_BARRIERFSYNC)` 与 `fcntl(F_FULLFSYNC)`、`renamex_np(RENAME_EXCL)`（只用在 store 自己的 `tmp/` 到 `blobs/`、临时库到 `store.db`）、`flistxattr`/`fremovexattr`、`utimensat(AT_SYMLINK_NOFOLLOW)`（刷新已存 blob 的时间）、`arc4random_buf`（design §11 第 2 条：macOS API 走 libc）。
 - `serde`、`serde_json`：JSON 列（§4.4）与 `GcReport`。
