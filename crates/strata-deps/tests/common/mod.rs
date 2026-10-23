@@ -44,7 +44,9 @@ pub struct Sandbox {
 impl Drop for Sandbox {
     fn drop(&mut self) {
         fn writable(p: &Path) {
-            let Ok(m) = fs::symlink_metadata(p) else { return };
+            let Ok(m) = fs::symlink_metadata(p) else {
+                return;
+            };
             if !m.is_dir() {
                 return;
             }

@@ -127,3 +127,15 @@ Spec: docs/modules/deps.md. Branch `impl/deps` (worktree git-strata-wt/deps), ba
 
 - `src/drift.rs` (`Drift`, `drift`), `tests/drift.rs` (2 spec tests). `drift` only compares `inputs_hash(ws)` with `pinned.inputs_hash`; toolchain/platform/config never count.
 - Test infra: `Sandbox` now has a `Drop` that makes every directory 0755 before the `TempDir` is removed. Sealed sets/trash entries are 0555, so earlier test runs leaked their sandboxes into `$TMPDIR` (76 leftovers removed). Tests are now run with `TMPDIR=/Volumes/GWD/opensource/.strata-tmp` (internal disk nearly full); no test depends on the internal volume (`/tmp/elsewhere` in adopt tests is only a symlink target string, never created; `build.rs` uses `std::env::temp_dir()`).
+
+### Task 7 — proposals and main tracking (§5.9)
+
+- `src/proposal.rs` (`Proposal`, `ProposalOrigin`, `ProposalState`, `ProposeArgs`, `PublishChain`, `ChainState`, `get_proposal`, `open_proposals`, `propose`, `publish_chain`, `main_tip`, `observe_main`), `tests/proposals.rs` (11 spec tests).
+- Decisions:
+  - `propose` looks up slot occupants with `proposals(repo, open_only = false)` filtered to `Pending`/`AwaitingPublish`, not `open_only = true`: a draft of a removed (or missing) session still occupies the store's unique slot, so using the filtered list would make every CAS miss and end in a spurious `proposal_race`. `open_proposals` (and `observe_main`'s current-proposal lookup) keep the spec's open-and-live filter.
+  - `propose` retries its round 3 times, then `Busy {reason: "proposal_race"}`; `observe_main` makes 4 `set_deps_main` CAS attempts (one + 3 retries), then `Busy main_race`.
+  - Landing a draft whose re-key/promote fails → `Unknown {reason: "landing_not_promoted", detail: {proposal: <full Proposal JSON of the recorded draft>, error}}`; a `promote_proposal` returning `false` is reported there as `Busy proposal_race`.
+  - In `observe_main`, any error after a proposal was filed is wrapped once as `Unknown main_not_recorded {proposal, error}` (never double-wrapped); before that, errors pass through.
+  - Returned `Proposal`s are built from the arguments + store ids/timestamps, not re-read, so a concurrent decision cannot change what the caller sees.
+  - Validation reasons: `from_equals_to`, `tree_head_mismatch`, `no_target`, `tree_mismatch` (all `InvalidInput`); `tree_of` errors (e.g. `NoSuchCommit`) pass through.
+- Tests: "fetch" is the real gitio fetch from a sandbox bare origin; publish/anchor refs are set with `git update-ref`; chain graphs use `git commit-tree` children. "Not yet fetched" is a fresh bare origin with no fetch. The other-repo case uses a second fixture/store, with main's Pending written via `record_proposal` directly.

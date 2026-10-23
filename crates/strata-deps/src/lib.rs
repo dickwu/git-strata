@@ -17,6 +17,7 @@ mod ensure;
 mod inputs;
 mod layout;
 mod open_files;
+mod proposal;
 mod seal;
 mod seams;
 
@@ -27,6 +28,10 @@ pub use drift::{Drift, drift};
 pub use ensure::ensure;
 pub use inputs::{inputs_hash, is_input, nested_seed_caches, platform, set_id, toolchain};
 pub use open_files::{Hold, OpenFile, open_files};
+pub use proposal::{
+    ChainState, Proposal, ProposalOrigin, ProposalState, ProposeArgs, PublishChain, get_proposal, main_tip, observe_main,
+    open_proposals, propose, publish_chain,
+};
 #[cfg(feature = "test-seams")]
 pub use seams::test_seams;
 
