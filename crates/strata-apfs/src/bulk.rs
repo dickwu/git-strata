@@ -237,10 +237,10 @@ pub(crate) fn readlink_at(dirfd: RawFd, name: &OsStr) -> Result<PathBuf, i32> {
     Ok(PathBuf::from(std::ffi::OsString::from_vec(buf)))
 }
 
-/// The `ERROR`-record fallback: `Attrs` from `fstatat(AT_SYMLINK_NOFOLLOW)`.
-/// No gen count can be read this way, so `gen_count = 0` (review M10).
-#[allow(dead_code)] // walk (Task 7)
-pub(crate) fn stat_attrs(dirfd: RawFd, name: &OsStr) -> Result<Attrs, i32> {
+/// The `ERROR`-record fallback: `Attrs` from `fstatat(AT_SYMLINK_NOFOLLOW)`,
+/// plus the entry's `st_dev`. No gen count can be read this way, so
+/// `gen_count = 0` (review M10).
+pub(crate) fn stat_attrs(dirfd: RawFd, name: &OsStr) -> Result<(Attrs, libc::dev_t), i32> {
     let st = sys::fstatat_nofollow(dirfd, name)?;
     let kind = match sys::fmt_of(&st) {
         libc::S_IFREG => FileKind::File,
@@ -257,7 +257,7 @@ pub(crate) fn stat_attrs(dirfd: RawFd, name: &OsStr) -> Result<Attrs, i32> {
         FileKind::Symlink { target } => target.as_os_str().len() as u64,
         _ => 0,
     };
-    Ok(Attrs {
+    let attrs = Attrs {
         kind,
         size,
         mode: st.st_mode as u32 & 0o7777,
@@ -265,34 +265,44 @@ pub(crate) fn stat_attrs(dirfd: RawFd, name: &OsStr) -> Result<Attrs, i32> {
         mtime: ts(st.st_mtime, st.st_mtime_nsec),
         ctime: ts(st.st_ctime, st.st_ctime_nsec),
         inode: st.st_ino,
-    })
+    };
+    Ok((attrs, st.st_dev))
 }
 
-/// Turn one bulk record under `dirfd` into `(name, Attrs)` (§5.6 read_dir
-/// steps 2 and 4). `None` = the entry vanished (skip it); `Err(errno)` = the
-/// fallback or `readlinkat` failed otherwise.
-#[allow(dead_code)] // walk (Task 7)
-pub(crate) fn finish_entry(dirfd: RawFd, raw: &RawEntry) -> Option<Result<(String, Attrs), i32>> {
+/// One finished directory entry: on-disk name, attributes, mount point.
+pub(crate) struct Finished {
+    pub(crate) name: String,
+    pub(crate) attrs: Attrs,
+    pub(crate) mount_point: bool,
+}
+
+/// Turn one bulk record under `dirfd` (on device `parent_dev`) into a
+/// [`Finished`] (§5.6 read_dir steps 2 and 4). `None` = the entry vanished
+/// (skip it); `Err(errno)` = the fallback or `readlinkat` failed otherwise.
+pub(crate) fn finish_entry(dirfd: RawFd, parent_dev: libc::dev_t, raw: &RawEntry) -> Option<Result<Finished, i32>> {
     let name = raw.name.clone()?;
     let os = OsStr::new(&name);
-    let attrs = match (raw.error, into_attrs(raw)) {
+    let (attrs, mount_point) = match (raw.error, into_attrs(raw)) {
         (0, Some(mut a)) => {
             if let FileKind::Symlink { target } = &mut a.kind {
                 match readlink_at(dirfd, os) {
                     Ok(t) => *target = t,
-                    Err(libc::ENOENT) => return None,
+                    Err(libc::ENOENT) | Err(libc::EINVAL) => return None,
                     Err(e) => return Some(Err(e)),
                 }
             }
-            a
+            (a, raw.mount_point)
         }
         _ => match stat_attrs(dirfd, os) {
-            Ok(a) => a,
+            Ok((a, dev)) => {
+                let mp = a.kind == FileKind::Dir && dev != parent_dev;
+                (a, mp)
+            }
             Err(libc::ENOENT) => return None,
             Err(e) => return Some(Err(e)),
         },
     };
-    Some(Ok((name, attrs)))
+    Some(Ok(Finished { name, attrs, mount_point }))
 }
 
 /// `getattrlistat(FSOPT_NOFOLLOW | FSOPT_ATTR_CMN_EXTENDED)` for one name;
@@ -514,7 +524,7 @@ pub(crate) mod tests {
         let dir = fs::File::open(td.path()).unwrap();
         use std::os::unix::io::AsRawFd;
         let raw = parse_records(&build(&Rec { error: Some(5), ..file_rec("gone") }), 1).pop().unwrap().unwrap();
-        assert!(finish_entry(dir.as_raw_fd(), &raw).is_none());
+        assert!(finish_entry(dir.as_raw_fd(), 0, &raw).is_none());
     }
 
     #[test]
@@ -531,7 +541,8 @@ pub(crate) mod tests {
             // The record's own fields are deliberately wrong; the fallback must not use them.
             let rec = Rec { error: Some(libc::EACCES as u32), gen_c: Some(99), ..file_rec(name) };
             let raw = parse_records(&build(&rec), 1).pop().unwrap().unwrap();
-            let (n, a) = finish_entry(dir.as_raw_fd(), &raw).unwrap().unwrap();
+            let fin = finish_entry(dir.as_raw_fd(), 0, &raw).unwrap().unwrap();
+            let (n, a) = (fin.name, fin.attrs);
             assert_eq!(n, name);
             let m = fs::symlink_metadata(p.join(name)).unwrap();
             let want_kind = match name {
@@ -557,7 +568,7 @@ pub(crate) mod tests {
         // Gone by the time of the fallback: skipped, no error.
         fs::remove_file(p.join("real")).unwrap();
         let raw = parse_records(&build(&Rec { error: Some(1), ..file_rec("real") }), 1).pop().unwrap().unwrap();
-        assert!(finish_entry(dir.as_raw_fd(), &raw).is_none());
+        assert!(finish_entry(dir.as_raw_fd(), 0, &raw).is_none());
     }
 
     #[test]

@@ -34,6 +34,9 @@ fn calls(src_file: PathBuf, src_dir: PathBuf) -> Vec<(&'static str, Call)> {
         ("clone_from_rooted", Box::new(move |r| clone_from_rooted(r, &rp("f"), &cfd, CloneKind::File))),
         ("remove_tree_rooted", Box::new(|r| remove_tree_rooted(r, &rp("sub")).map(drop))),
         ("attrs_of", Box::new(|r| attrs_of(r, &rp("f")).map(drop))),
+        ("walk", Box::new(|r| walk(r, &|_| true).next().unwrap().map(drop))),
+        ("walk_with", Box::new(|r| walk_with(r, &WalkOptions::default(), &|_, _| true).next().unwrap().map(drop))),
+        ("list_dir", Box::new(|r| list_dir(r, None).next().unwrap().map(drop))),
     ]
 }
 
@@ -44,6 +47,9 @@ fn ok_calls() -> Vec<(&'static str, Call)> {
         ("open_rooted_file", Box::new(|r| open_rooted_file(r, &rp("f")).map(drop))),
         ("create_file_rooted", Box::new(|r| create_file_rooted(r, &rp("created"), 0o644).map(drop))),
         ("attrs_of", Box::new(|r| attrs_of(r, &rp("f")).map(drop))),
+        ("walk", Box::new(|r| walk(r, &|_| true).next().unwrap().map(drop))),
+        ("walk_with", Box::new(|r| walk_with(r, &WalkOptions::default(), &|_, _| true).next().unwrap().map(drop))),
+        ("list_dir", Box::new(|r| list_dir(r, None).next().unwrap().map(drop))),
     ]
 }
 
