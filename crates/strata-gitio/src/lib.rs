@@ -24,6 +24,7 @@ mod export;
 mod fsx;
 mod ignore;
 mod index;
+mod push;
 mod refs;
 mod remote;
 mod repo;

@@ -99,9 +99,12 @@ fn index_writers_refuse_the_main_checkout() {
         let e = r.unwrap_err();
         assert_eq!(e.code, Code::InvalidInput, "{what}: {e:?}");
     };
-    // stage
+    // stage and push
+    git.update_ref("refs/strata/publish/main", &head, None).unwrap();
     for t in [&main, &linked] {
         invalid(git.stage(t, &[rp("README.md")]).map(|_| ()), "stage");
+        let r = git.push(t, "origin", "refs/strata/publish/main", "main", std::time::Duration::from_secs(30));
+        invalid(r.map(|_| ()), "push");
     }
     // attach_staging: main / linked worktree as staging, gitdir in the common dir.
     let gd = sb.path("gd");

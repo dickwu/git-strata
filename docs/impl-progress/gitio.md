@@ -13,7 +13,8 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
 | 5 tree_of, tree validation, is_ignored_in_export | 4d8bbce | |
 | 6 export_tree | 849c6f1 | |
 | 7 shadow repositories, attach_worktree, worktree_gitdir | 01cb89b | |
-| 8 attach_staging, stage, commit_tree | (this commit) | push part of index_writers_refuse_the_main_checkout lands with Task 9 |
+| 8 attach_staging, stage, commit_tree | c3a1dfb | push part of index_writers_refuse_the_main_checkout lands with Task 9 |
+| 9 push | (this commit) | also adds push to index_writers_refuse_the_main_checkout |
 
 ## Builder decisions (ambiguities)
 
@@ -138,3 +139,25 @@ Spec: docs/modules/gitio.md. Crate: crates/strata-gitio.
   checked first, then the tree (`cat-file -t` must say `tree`; missing →
   `NoSuchCommit` with `detail.tree`), then the parent via
   `missing_commit_or`; anything else `Unknown`.
+
+### Task 9 decisions (push)
+
+- Refusal order: staging judgement → `src_ref` under `refs/strata/` →
+  remote name → branch name → `read_ref(src_ref)` (`NoSuchCommit`) →
+  `remote get-url --push` (a missing remote is `InvalidInput`,
+  `reason = "no-such-remote"`; other failures `Unknown`). All before the
+  push is spawned.
+- The push runs with `--git-dir=<staging>/.git` (the gitfile) and
+  `--work-tree=<staging>`, cwd the staging root, `STRATA_PUBLISH=1`, no
+  `LC_ALL`, hooks live. `get-url` carries `LC_ALL=C` (its stderr is
+  classified).
+- A timeout from the command runner becomes `Ok(Unknown)`; other runner
+  errors (spawn) stay `Err(Unknown)`.
+- Any `!` status line is `Refused` — including `[rejected] (fetch first)`
+  when the remote tip is not in the local store. Refused text is the
+  summary plus every `remote:` stderr line.
+- Step 5 is skipped when the tracking ref already equals the pushed
+  commit; CAS failure is logged at info and ignored.
+- The timeout test hangs receive-pack with a sleeping remote
+  `pre-receive` hook (not a wrapper script) and checks the hook's pid is
+  gone afterwards (process group killed).
