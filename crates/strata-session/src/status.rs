@@ -10,12 +10,12 @@ use serde_json::json;
 use strata_apfs::{IoSide, classify_io_error};
 use strata_deps::{Drift, OpenFile, Proposal, ProposalState};
 use strata_gitio::MirrorDrift;
-use strata_store::{Health, Lifecycle, SessionRecord, WorkspaceRecord};
+use strata_store::{Health, Lifecycle, MoveState, SessionRecord, WorkspaceRecord};
 use strata_types::{CheckpointId, Code, RepoName, RepoPath, SessionId, SessionManifest, StrataError};
 
+use crate::scene::{Scene, scene_of};
 use crate::seed::{SeedRecord, mtime_of};
 use crate::sys::lstat;
-use crate::scene::{Scene, scene_of};
 use crate::{Result, Sessions};
 
 /// A session's status (design §6.3).
@@ -113,16 +113,15 @@ pub struct MirrorDriftItem {
 
 impl From<MirrorDrift> for MirrorDriftItem {
     fn from(d: MirrorDrift) -> Self {
-        let item = |reason: &str| MirrorDriftItem { reason: reason.into(), key: None, hooks_path: None, hook_replaced: None };
+        let item =
+            |reason: &str| MirrorDriftItem { reason: reason.into(), key: None, hooks_path: None, hook_replaced: None };
         match d {
             MirrorDrift::Exclude => item("info_exclude"),
             MirrorDrift::Attributes => item("info_attributes"),
             MirrorDrift::Config { key } => MirrorDriftItem { key: Some(key), ..item("config") },
-            MirrorDrift::PrePushGuardDisabled { hooks_path, hook_replaced } => MirrorDriftItem {
-                hooks_path,
-                hook_replaced: Some(hook_replaced),
-                ..item("pre_push_guard_disabled")
-            },
+            MirrorDrift::PrePushGuardDisabled { hooks_path, hook_replaced } => {
+                MirrorDriftItem { hooks_path, hook_replaced: Some(hook_replaced), ..item("pre_push_guard_disabled") }
+            }
         }
     }
 }
@@ -178,7 +177,8 @@ impl Sessions<'_> {
             (WorkspaceHealth::Unknown, scene, None)
         } else {
             let dir_ok = is_dir(&ws.path)?;
-            let git_ok = dir_ok && lstat(&ws.path.join(".git")).map_err(|e| read_err(&e, &ws.path.join(".git")))?.is_some();
+            let git_ok =
+                dir_ok && lstat(&ws.path.join(".git")).map_err(|e| read_err(&e, &ws.path.join(".git")))?.is_some();
             let shadow_dir = self.shadow_dir(id, repo);
             let shadow = match git.shadow_at(&shadow_dir) {
                 Ok(s) => Some(s),
@@ -241,11 +241,44 @@ impl Sessions<'_> {
         if let Some(shadow) = &shadow {
             match git.shadow_drift(shadow, &ws.path) {
                 Ok(items) if items.is_empty() => {}
-                Ok(items) => warnings.push(StatusWarning::MirrorDrift {
-                    items: items.into_iter().map(MirrorDriftItem::from).collect(),
-                }),
+                Ok(items) => warnings
+                    .push(StatusWarning::MirrorDrift { items: items.into_iter().map(MirrorDriftItem::from).collect() }),
                 Err(e) if e.code == Code::Unknown => warnings.push(StatusWarning::PrePushGuardUnknown { detail: e }),
                 Err(e) => return Err(e),
+            }
+        }
+
+        // 2.9 move intents. A move running in this process is not a leftover.
+        let live = self.is_live_move(id, repo);
+        for i in self.store.move_intents(id)?.into_iter().filter(|i| &i.repo == repo) {
+            match i.state {
+                MoveState::Preparing if !live => {
+                    warnings.push(StatusWarning::MoveLeftover { n: i.n, staging: i.staging.clone() })
+                }
+                MoveState::Swapping if !live => {
+                    warnings.push(StatusWarning::MoveAwaitingRecover { n: i.n, staging: i.staging.clone() })
+                }
+                MoveState::Abandoned if lstat(&i.staging).map_err(|e| read_err(&e, &i.staging))?.is_some() => {
+                    warnings.push(StatusWarning::MoveLeftover { n: i.n, staging: i.staging.clone() })
+                }
+                MoveState::Done => {
+                    let path = i.old_tree.clone().unwrap_or_else(|| i.staging.clone());
+                    if lstat(&path).map_err(|e| read_err(&e, &path))?.is_none() {
+                        continue;
+                    }
+                    let holders = strata_deps::open_files(&path)?;
+                    // A tree that cannot be compared reads as changed: it
+                    // is then never collected automatically.
+                    let changed = !self.old_tree_unchanged(&i, cfg).unwrap_or(false);
+                    warnings.push(StatusWarning::OldTreeKept {
+                        path,
+                        n: i.n,
+                        holders,
+                        changed,
+                        retained: i.old_tree.is_some(),
+                    });
+                }
+                _ => {}
             }
         }
 

@@ -40,7 +40,6 @@ pub(crate) struct Seams {
 /// any failure handling (the process "crashed" here).
 const STOP_MARK: &str = "session-seam-stop";
 
-#[allow(dead_code)]
 pub(crate) fn is_stop(e: &StrataError) -> bool {
     e.detail
         .as_ref()

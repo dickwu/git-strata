@@ -9,8 +9,8 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
 | 1 refuse invalid new requests before writing | done | d19b845 |
 | 2 full sibling layout on per-session shadow repos | done | 03a4bce |
 | 3 resolve by cwd or selector, status | done | 426dd58 |
-| 4 Unknown scenes and restart leftovers | done | (this commit) |
-| 5 move base and deps with an atomic directory swap | todo | |
+| 4 Unknown scenes and restart leftovers | done | bb583d7 |
+| 5 move base and deps with an atomic directory swap | done | (this commit) |
 | 6 remove behind discard confirmation and open-file checks | todo | |
 | 7 resolve a failed move by abandoning or accepting it | todo | |
 
@@ -149,3 +149,37 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
 - Task 4: base.rs already had the §5.2 failure handling from Task 2
   (retire B, then named code or Unknown with kept empty); Task 4 adds the
   tests for it rather than new code there.
+- Task 5: `changed` for a kept old tree (status OldTreeKept, step 19/20)
+  compares `reconcile_full` of the old tree against the latest checkpoint
+  taken at or before the intent's `started` (the BeforeRollout one); a
+  reconcile error counts as changed (never collect what can't be proven
+  unchanged). `old_tree = Some(S)` whenever the tree stays, even when not
+  recorded with `set_old_tree`.
+- Task 5: the open-files recheck before the swap covers D in the
+  workspace and in S. A prepare-time Unknown's `kept` always lists S, plus
+  `worktrees/<n>` when it exists. A named prepare failure whose closing
+  (collect + Refused) fails still returns Unknown with `detail.refused`;
+  a successful close returns the original named code with
+  `detail.quarantined` when something was set aside. A failed quarantine
+  rename is Unknown `quarantine_failed`.
+- Task 5: `Exists` from `attach_worktree` still retires `worktrees/<n>`
+  (it is this intent's own number, nothing else can own it). Step 20's
+  admin generation for an earlier Done intent is derived from the intents
+  (the largest earlier Done n, or 1 for the tree `new` attached).
+- Task 5: recover step 2 collects a Preparing intent's staging only for an
+  Active session; other lifecycles get the state change only. status's
+  `open_files` errors on a kept old tree propagate.
+- Task 5: carry compares names case-folded when the workspace index has
+  `core.ignorecase`. A carry rename failure (the `uchg` case) reports
+  `detail.path` as the carried repo path, with the temp name in
+  `detail.temp`.
+- Task 5: the "shadow worktrees replaced" recover case swaps
+  `worktrees/` while the move is paused at `move.carry` (after the
+  workspace's own index was read): replaced before the move, the
+  workspace's gitfile dangles and gitio refuses earlier with InvalidInput
+  `foreign-worktree`, never reaching attach. The test re-creates
+  `.git/worktrees/keep` in main after publishing the target, since the
+  fixture's git commit/push may prune it.
+- Task 5: the §7 carry row is split into three tests (content, races,
+  `uchg`). The parts of §7 T5 rows that need `remove` or
+  `resolve_failed_move` are asserted in Tasks 6 and 7.

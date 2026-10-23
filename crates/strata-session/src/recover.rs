@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use strata_apfs::FileKind;
-use strata_store::Lifecycle;
+use strata_store::{Lifecycle, MoveState};
 use strata_types::{Code, RepoName, RepoPath, SessionId, StrataError};
 
 use crate::scene::{Scene, SceneOp, interrupted, kept_dirs};
@@ -82,7 +82,9 @@ impl Sessions<'_> {
                         let (p, a) = match item {
                             Ok(x) => x,
                             // Retired between the two listings.
-                            Err(e) if e.code == Code::NoSuchPath && export_temps.is_empty() => break,
+                            Err(e) if e.code == Code::NoSuchPath && export_temps.is_empty() => {
+                                break;
+                            }
                             Err(e) => return Err(e),
                         };
                         let named = Path::new(p.as_str())
@@ -130,10 +132,102 @@ impl Sessions<'_> {
             match self.store.set_lifecycle(&id, rec.lifecycle, Lifecycle::Unknown, Some(&v), now) {
                 Ok(true) => rep.unknown.push(id),
                 Ok(false) => rep.errors.push(
-                    StrataError::new(Code::Busy, format!("recover {id}: the session left {:?} meanwhile", rec.lifecycle))
-                        .with_detail(serde_json::json!({ "session": id.as_str(), "reason": "lifecycle_changed" })),
+                    StrataError::new(
+                        Code::Busy,
+                        format!("recover {id}: the session left {:?} meanwhile", rec.lifecycle),
+                    )
+                    .with_detail(serde_json::json!({ "session": id.as_str(), "reason": "lifecycle_changed" })),
                 ),
                 Err(e) => rep.errors.push(e),
+            }
+        }
+
+        // Step 2: open move intents. Preparing ones never reached the swap:
+        // their staging goes, the intent is Abandoned. Swapping ones may
+        // have swapped: the workspace becomes Unknown with the scene.
+        let intents = match self.store.open_move_intents() {
+            Ok(v) => v,
+            Err(e) => {
+                rep.errors.push(e);
+                Vec::new()
+            }
+        };
+        for i in intents {
+            let lifecycle = match self.store.session(&i.session) {
+                Ok(Some(r)) => r.lifecycle,
+                Ok(None) => continue,
+                Err(e) => {
+                    rep.errors.push(e);
+                    continue;
+                }
+            };
+            if lifecycle == Lifecycle::Removed {
+                continue;
+            }
+            let r = IntentRef { session: i.session.clone(), repo: i.repo.clone(), n: i.n };
+            match i.state {
+                MoveState::Preparing => {
+                    if lifecycle == Lifecycle::Active {
+                        let shadow = self.shadow_dir(&i.session, &i.repo);
+                        if let Err(e) = self.collect_leftover(&i.staging, &shadow, i.n) {
+                            rep.errors.push(e);
+                            continue;
+                        }
+                    }
+                    match self.store.set_move_state(
+                        &i.session,
+                        &i.repo,
+                        i.n,
+                        MoveState::Preparing,
+                        MoveState::Abandoned,
+                        None,
+                        SystemTime::now(),
+                    ) {
+                        Ok(true) => rep.abandoned.push(r),
+                        Ok(false) => {}
+                        Err(e) => rep.errors.push(e),
+                    }
+                }
+                MoveState::Swapping => {
+                    let phase = i.phase.clone().unwrap_or_else(|| "swap".to_string());
+                    let ws_path = self
+                        .store
+                        .session(&i.session)
+                        .ok()
+                        .flatten()
+                        .and_then(|rec| rec.manifest.repos.get(&i.repo).map(|w| w.path.clone()));
+                    let mut kept = Vec::new();
+                    kept.extend(ws_path);
+                    kept.push(i.staging.clone());
+                    let mut error = interrupted(SceneOp::Move, &i.session, &phase, &kept);
+                    if let Some(serde_json::Value::Object(m)) = &mut error.detail {
+                        m.insert("repo".into(), serde_json::json!(i.repo.as_str()));
+                        m.insert("n".into(), serde_json::json!(i.n));
+                    }
+                    let now = SystemTime::now();
+                    let scene = Scene {
+                        op: SceneOp::Move,
+                        session: i.session.clone(),
+                        repo: Some(i.repo.clone()),
+                        phase,
+                        at: now,
+                        kept,
+                        error,
+                    };
+                    let v = match serde_json::to_value(&scene) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            rep.errors
+                                .push(StrataError::new(Code::Unknown, format!("recover {}: scene: {e}", i.session)));
+                            continue;
+                        }
+                    };
+                    match self.store.fail_move(&i.session, &i.repo, i.n, &v, now) {
+                        Ok(()) => rep.failed.push(r),
+                        Err(e) => rep.errors.push(e),
+                    }
+                }
+                _ => {}
             }
         }
 

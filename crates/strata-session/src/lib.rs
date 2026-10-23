@@ -16,7 +16,9 @@ use strata_store::Store;
 use strata_types::{CheckpointReason, Code, Config, RepoConfig, RepoName, SessionId, StrataError};
 
 mod base;
+mod carry;
 mod dispatch;
+mod move_workspace;
 mod new;
 mod recover;
 mod resolve;
@@ -27,6 +29,7 @@ mod status;
 mod sys;
 mod ticket;
 
+pub use move_workspace::MoveReport;
 #[cfg(feature = "test-seams")]
 pub use seams::SessionSeam;
 pub use status::{
@@ -61,12 +64,10 @@ pub struct Sessions<'a> {
     pub(crate) store: &'a Store,
     pub(crate) locks: &'a dyn RepoWriteLock,
     pub(crate) env: &'a InstallEnv,
-    #[allow(dead_code)]
     pub(crate) before: &'a dyn BeforeCheckpoint,
     /// Base staging directories being built by this process (§5.2 step 3).
     pub(crate) live_staging: Mutex<BTreeSet<PathBuf>>,
     /// Moves in progress in this process (§5.5 step 2.9).
-    #[allow(dead_code)]
     pub(crate) live_moves: Mutex<BTreeSet<(SessionId, RepoName)>>,
     pub(crate) seams: seams::Seams,
 }
