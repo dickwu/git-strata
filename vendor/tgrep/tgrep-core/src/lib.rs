@@ -1,0 +1,28 @@
+#![deny(unnameable_test_items)]
+
+pub mod builder;
+pub mod encoding;
+pub mod error;
+pub(crate) mod external;
+pub mod filetypes;
+pub mod generations;
+pub mod git_index;
+pub mod gitignore;
+pub mod hybrid;
+pub mod live;
+pub mod managed;
+pub mod meta;
+pub(crate) mod ondisk;
+mod output;
+pub mod path_index;
+pub mod query;
+pub mod reader;
+pub mod rooted;
+pub mod shared;
+pub mod trigram;
+pub mod visibility;
+pub mod walker;
+pub mod worktrees;
+
+pub use error::{Error, Result};
+pub use ondisk::PostingEntry;
