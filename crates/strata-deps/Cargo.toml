@@ -1,0 +1,25 @@
+[package]
+name = "strata-deps"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "git-strata deps: install-input keys, sealed deps-set generations, cold installs, drift, proposals and rollout plans"
+
+[features]
+default = []
+test-seams = []
+
+[dependencies]
+strata-types = { path = "../strata-types" }
+strata-apfs = { path = "../strata-apfs" }
+strata-gitio = { path = "../strata-gitio" }
+strata-store = { path = "../strata-store" }
+blake3 = "1"
+libc = "0.2.191"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+strata-deps = { path = ".", features = ["test-seams"] }
+strata-gitio = { path = "../strata-gitio", features = ["test-seams"] }

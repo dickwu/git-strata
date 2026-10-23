@@ -117,6 +117,19 @@ impl RepoConfig {
         self.publish.confirm || self.deploy_on_push
     }
 
+    /// `install` split by the §2.4 rules (the same splitter `validate_commands`
+    /// uses): `Ok(None)` without `install`, `InvalidInput` (V9) when the line
+    /// does not split into a non-empty argv. Used by deps (deps.md §4.3, §5.2).
+    pub fn install_argv(&self) -> Result<Option<Vec<String>>, StrataError> {
+        let Some(install) = &self.install else {
+            return Ok(None);
+        };
+        check_argv(install, "install", None)?;
+        split_command(install)
+            .map(Some)
+            .map_err(|()| StrataError::new(Code::InvalidInput, "install does not split"))
+    }
+
     pub fn validate_commands(&self) -> Result<(), StrataError> {
         if let Some(install) = &self.install {
             check_argv(install, "install", None)?;

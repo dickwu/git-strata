@@ -1845,6 +1845,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "strata-deps"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "serde",
+ "serde_json",
+ "strata-apfs",
+ "strata-deps",
+ "strata-gitio",
+ "strata-store",
+ "strata-types",
+ "tempfile",
+]
+
+[[package]]
 name = "strata-gitio"
 version = "0.1.0"
 dependencies = [
