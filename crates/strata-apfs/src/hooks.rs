@@ -16,6 +16,7 @@ pub enum MetaChange {
 }
 
 type OpenHook = Rc<dyn Fn(usize, &OsStr)>;
+type BoxedOpenHook = Box<dyn Fn(usize, &OsStr)>;
 type MetaHook = Rc<dyn Fn(usize, MetaChange)>;
 type BulkHook = Rc<dyn Fn(usize)>;
 
@@ -47,7 +48,7 @@ pub(crate) fn after_bulk_window(n: usize) {
 }
 
 #[cfg_attr(not(feature = "test-seams"), allow(dead_code))]
-pub fn set_before_open(hook: Option<Box<dyn Fn(usize, &OsStr)>>) {
+pub fn set_before_open(hook: Option<BoxedOpenHook>) {
     BEFORE_OPEN.with(|c| *c.borrow_mut() = hook.map(Rc::from));
 }
 

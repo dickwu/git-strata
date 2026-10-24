@@ -28,10 +28,10 @@ pub fn clone_tree(src: &Path, dst: &Path) -> Result<()> {
     // 2-4. dst shape, absence, parent.
     let parent = check_dst(dst)?;
     // 5. dst inside src.
-    if let (Ok(rs), Ok(rp)) = (std::fs::canonicalize(src), std::fs::canonicalize(&parent)) {
-        if rp.starts_with(&rs) {
-            return Err(refusal(Code::InvalidInput, dst, "dst_inside_src", "destination is inside the source"));
-        }
+    if let (Ok(rs), Ok(rp)) = (std::fs::canonicalize(src), std::fs::canonicalize(&parent))
+        && rp.starts_with(&rs)
+    {
+        return Err(refusal(Code::InvalidInput, dst, "dst_inside_src", "destination is inside the source"));
     }
     // 6-7.
     check_volume(src, &parent, dst, sys::real_dev_path(src))?;
@@ -113,10 +113,10 @@ pub(crate) fn check_dst_shape(dst: &Path) -> Result<()> {
     if bytes.ends_with(b"/") {
         return Err(refusal(Code::InvalidInput, dst, "trailing_slash", "destination ends with '/'"));
     }
-    if let Some(name) = dst.file_name() {
-        if utf16_units(name.as_bytes()) > NAME_MAX_UTF16_UNITS {
-            return Err(errno_error(Code::InvalidInput, libc::ENAMETOOLONG, dst, Some("name_too_long")));
-        }
+    if let Some(name) = dst.file_name()
+        && utf16_units(name.as_bytes()) > NAME_MAX_UTF16_UNITS
+    {
+        return Err(errno_error(Code::InvalidInput, libc::ENAMETOOLONG, dst, Some("name_too_long")));
     }
     if bytes.len() >= PATH_MAX_BYTES {
         return Err(errno_error(Code::InvalidInput, libc::ENAMETOOLONG, dst, Some("path_too_long")));
@@ -161,10 +161,10 @@ pub(crate) fn check_devs(sd: i32, dd: i32, src: &Path, dst: &Path) -> Result<()>
 pub(crate) fn fill_dst_exists(mut e: StrataError, dst: &Path) -> StrataError {
     let exists = sys::lstat(dst).is_ok();
     set_detail(&mut e, "dst_exists", json!(exists));
-    if e.code == Code::Unsupported {
-        if let Ok(c) = crate::volume_caps(dst.parent().unwrap_or(Path::new("/"))) {
-            set_detail(&mut e, "fs_type", json!(c.fs_type));
-        }
+    if e.code == Code::Unsupported
+        && let Ok(c) = crate::volume_caps(dst.parent().unwrap_or(Path::new("/")))
+    {
+        set_detail(&mut e, "fs_type", json!(c.fs_type));
     }
     e
 }

@@ -47,9 +47,9 @@ pub(crate) enum Kind {
 }
 
 pub(crate) fn classify(flags: u32) -> Kind {
-    if flags & MUST_SCAN_SUB_DIRS != 0 && flags & (USER_DROPPED | KERNEL_DROPPED) != 0 {
-        Kind::Dropped
-    } else if flags & (EVENT_IDS_WRAPPED | ROOT_CHANGED) != 0 {
+    if (flags & MUST_SCAN_SUB_DIRS != 0 && flags & (USER_DROPPED | KERNEL_DROPPED) != 0)
+        || flags & (EVENT_IDS_WRAPPED | ROOT_CHANGED) != 0
+    {
         Kind::Dropped
     } else if flags & MUST_SCAN_SUB_DIRS != 0 || flags & (MOUNT | UNMOUNT) != 0 {
         Kind::Rescan

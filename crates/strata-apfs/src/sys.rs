@@ -151,5 +151,5 @@ pub(crate) fn fd_path(fd: i32) -> std::path::PathBuf {
     }
     let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     buf.truncate(n);
-    std::path::PathBuf::from(std::ffi::OsString::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(buf)))
+    std::path::PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(buf))
 }

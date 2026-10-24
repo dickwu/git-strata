@@ -160,10 +160,10 @@ pub(crate) fn plan_set_file_meta(f: &Facts, meta: &FileMeta) -> std::result::Res
     if meta.clear_flags && f.flags & UF_SETTABLE & !UF_COMPRESSED != 0 {
         steps.push(Step::Flags(f.flags & (UF_COMPRESSED | !UF_SETTABLE)));
     }
-    if let Some(m) = meta.mode {
-        if f.mode != m & 0o777 {
-            steps.push(Step::Mode(m & 0o777));
-        }
+    if let Some(m) = meta.mode
+        && f.mode != m & 0o777
+    {
+        steps.push(Step::Mode(m & 0o777));
     }
     if let Some(t) = meta.mtime {
         let ns = clamp_ns(t);

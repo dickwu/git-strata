@@ -393,13 +393,13 @@ pub(crate) mod tests {
             let start = b.len();
             b.extend(n);
             b.push(0);
-            while b.len() % 4 != 0 {
+            while !b.len().is_multiple_of(4) {
                 b.push(0);
             }
             b[at..at + 4].copy_from_slice(&((start - at) as i32).to_ne_bytes());
             b[at + 4..at + 8].copy_from_slice(&((n.len() + 1) as u32).to_ne_bytes());
         }
-        while b.len() % 8 != 0 {
+        while !b.len().is_multiple_of(8) {
             b.push(0);
         }
         let len = b.len() as u32;
