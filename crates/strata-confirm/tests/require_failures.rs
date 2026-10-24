@@ -230,9 +230,12 @@ fn concurrent_prompt_is_refused_not_queued() {
     assert_eq!(log.shown(), vec![prompt_reason(&push()); 3]);
 }
 
+/// (gui session, policy result, reason, la_error, calls)
+type GuiCase = (bool, Result<(), isize>, &'static str, Option<i64>, u32);
+
 #[test]
 fn no_gui_session_is_unsupported_before_prompt() {
-    let cases: Vec<(bool, Result<(), isize>, &str, Option<i64>, u32)> = vec![
+    let cases: Vec<GuiCase> = vec![
         (false, Ok(()), "no_gui_session", None, 1),
         (true, Err(-5), "passcode_not_set", Some(-5), 2),
         (true, Err(-1004), "not_interactive", Some(-1004), 2),

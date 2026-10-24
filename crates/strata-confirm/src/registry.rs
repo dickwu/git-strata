@@ -131,6 +131,7 @@ impl Registry {
         }
     }
 
+    #[cfg_attr(not(feature = "test-seams"), allow(dead_code))]
     pub(crate) fn count(&self) -> usize {
         match self.map.lock() {
             Ok(m) => m.len(),

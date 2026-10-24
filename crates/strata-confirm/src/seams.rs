@@ -364,10 +364,10 @@ pub fn bypass_env_names(workspace_root: &Path) -> Vec<String> {
                 if p.file_name().is_some_and(|n| n != "target") {
                     stack.push(p);
                 }
-            } else if p.extension().is_some_and(|e| e == "rs") {
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    collect_strata_names(&text, &mut names);
-                }
+            } else if p.extension().is_some_and(|e| e == "rs")
+                && let Ok(text) = std::fs::read_to_string(&p)
+            {
+                collect_strata_names(&text, &mut names);
             }
         }
     }

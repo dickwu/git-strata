@@ -54,6 +54,7 @@ pub(crate) fn production_context() -> Retained<LAContext> {
 }
 
 /// What a production-configured context reports, for `seams::read_back_la_config`.
+#[cfg_attr(not(feature = "test-seams"), allow(dead_code))]
 pub(crate) fn read_back() -> (f64, bool, bool) {
     let ctx = production_context();
     // SAFETY: property getters and invalidate on our own context.
