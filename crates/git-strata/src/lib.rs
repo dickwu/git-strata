@@ -132,7 +132,7 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Grep { pattern, sel } => cmds::grep(&ctx, &pattern, &sel),
         Cmd::Files { glob, sel } => cmds::files(&ctx, glob.as_deref(), &sel),
         Cmd::Diff { base, session, between, repo } => cmds::diff(&ctx, base, session, between, repo),
-        Cmd::Deps(DepsCmd::Propose { session, repo }) => cmds::deps_propose(&ctx, session, repo),
+        Cmd::Deps(DepsCmd::Propose { session, repo, switch }) => cmds::deps_propose(&ctx, session, repo, switch),
         Cmd::Deps(DepsCmd::List { repo }) => cmds::deps_list(&ctx, repo),
         Cmd::Gc => cmds::gc(&ctx),
         Cmd::Daemon(DaemonCmd::Start) => launch::start(&ctx.paths.home),

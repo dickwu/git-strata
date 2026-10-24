@@ -718,3 +718,50 @@ fn publish_conflict_fix_rerun_loop() {
         assert_eq!(support::git(&main, lv.home.path(), &["show", &format!("{t}:new.txt")]), "new");
     });
 }
+
+/// Review M3: `deps propose --switch` moves the proposer onto its new set
+/// without a prompt; another session stays pinned; a proposer holding a
+/// file open in its deps dir is not moved (skipped, `OpenFiles`).
+#[test]
+fn deps_propose_switch_moves_only_the_proposer() {
+    const NEW_DEP: &str = "{\n  \"name\": \"tool\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": { \"x\": \"^1.0.0\", \"y\": \"^2.0.0\" }\n}\n";
+    let lv = Live::with_deps(&["tool"], &base_files(), &["tool"]);
+    lv.serve(|core| {
+        let a = lv.new_session("T-1", "tool");
+        let b = lv.new_session("T-2", "tool");
+        let c = lv.new_session("T-3", "tool");
+        let base = |s: &SessionId| core.store.session(s).unwrap().unwrap().manifest.repos[&rn("tool")].base.clone();
+        let pinned = base(&a);
+        assert_eq!(base(&b), pinned);
+        let (wa, wb) = (lv.ws(&a, "tool"), lv.ws(&b, "tool"));
+        assert!(wa.join("node_modules/x/index.js").is_file(), "deps installed");
+
+        // b: a file open in its node_modules keeps it where it is.
+        write(&wb, "package.json", NEW_DEP.as_bytes());
+        let held = std::fs::File::open(wb.join("node_modules/x/index.js")).unwrap();
+        let d = lv.run_in(&wb, &["deps", "propose", "--switch"]).ok();
+        assert_eq!(d["switched"]["kind"], json!("skipped"), "{d:#}");
+        assert_eq!(d["switched"]["code"], json!("OpenFiles"), "{d:#}");
+        assert_eq!(base(&b), pinned, "b did not move");
+        drop(held);
+
+        // a: moves onto the proposed set, no prompt; c stays pinned.
+        write(&wa, "package.json", NEW_DEP.as_bytes());
+        let d = lv.run_in(&wa, &["deps", "propose", "--switch"]).ok();
+        assert_eq!(d["switched"]["kind"], json!("moved"), "{d:#}");
+        assert_eq!(d["switched"]["session"], json!(a.as_str()), "{d:#}");
+        let moved = base(&a);
+        assert_eq!(moved.tree, pinned.tree);
+        assert_eq!(moved.deps.as_str(), d["proposal"]["to"].as_str().unwrap());
+        assert_ne!(moved.deps, pinned.deps);
+        assert_eq!(base(&c), pinned, "another session stays pinned");
+        assert_eq!(std::fs::read_to_string(wa.join("node_modules/x/package.json")).unwrap(), NEW_DEP);
+
+        // Without --switch the proposer stays where it is (data is the Proposal).
+        let wc = lv.ws(&c, "tool");
+        write(&wc, "package.json", NEW_DEP.as_bytes());
+        let d = lv.run_in(&wc, &["deps", "propose"]).ok();
+        assert!(d["id"].is_number() && d.get("switched").is_none(), "{d:#}");
+        assert_eq!(base(&c), pinned);
+    });
+}

@@ -691,14 +691,25 @@ fn local_between(config: &Config, a: &SessionId, b: &SessionId, r: &RepoName) ->
 
 // ---- deps propose / list ----------------------------------------------------------
 
-pub fn deps_propose(ctx: &Ctx, session: Option<String>, repo: Option<String>) -> Result<Envelope> {
+/// cli.md `deps propose`. With `--switch` (review M3) the daemon also runs
+/// deps §5.10 `plan_switch` for this session only: the origin and open
+/// files are checked there; a skipped move is reported in `switched` with
+/// its code, `ok: true`, like a skipped session of `deps approve` (D17).
+pub fn deps_propose(ctx: &Ctx, session: Option<String>, repo: Option<String>, switch: bool) -> Result<Envelope> {
     let config = ctx.config()?;
     let store = ro::open_store(&config)?;
     let (s, cwd_repo) = ro::session_or_cwd(&store, session.as_deref())?;
     let r = repo_for(&config, &store, &s, repo.as_deref(), cwd_repo)?;
-    let v = ctx.call("deps_propose", json!({ "session": s, "repo": r, "switch": false }), Kind::Write)?;
+    let v = ctx.call("deps_propose", json!({ "session": s, "repo": r, "switch": switch }), Kind::Write)?;
     hint(s);
     match v.get("proposal").filter(|p| !p.is_null()) {
+        Some(p) if switch => {
+            let step = v["switched"].as_array().and_then(|a| a.first()).cloned().unwrap_or(Value::Null);
+            if step["kind"] != json!("moved") {
+                eprintln!("proposal recorded; this session did not move ({})", step["code"].as_str().unwrap_or("skipped"));
+            }
+            Ok(Envelope::ok(json!({ "proposal": p, "switched": step })))
+        }
         Some(p) => Ok(Envelope::ok(p.clone())),
         None => {
             eprintln!("no drift in {r}: nothing to propose");

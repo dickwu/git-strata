@@ -191,6 +191,10 @@ pub enum DepsCmd {
         /// Repo name (default: cwd's repo)
         #[arg(long)]
         repo: Option<String>,
+        /// Also move this session (only the proposer) onto the proposed
+        /// set now, without confirmation; other sessions stay pinned
+        #[arg(long)]
+        switch: bool,
     },
     /// Approve a proposal (needs a TTY and confirmation)
     Approve {

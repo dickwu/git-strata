@@ -89,7 +89,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata grep` | `<pattern>`。`[--session S]` 或 `[--all]`。都不给 = cwd 的会话（design §6.3；压过初稿“不给就是全部”，见 §9）。没有 `--repo`，没有 type / encoding / glob 之类的 tgrep 选项（T11） | 空 pattern → `InvalidInput` |
 | `git-strata files` | 可选的一个位置参数 glob，交给 search 的 `files`；不给 = 该视图全部文件（D11）。选择器同 grep。没有别的 flag | — |
 | `git-strata diff` | 三选一：`--base`（缺省，cwd 或 `--session` 相对它钉住的基线）、`--session S`（该会话相对它的基线）、`--between A B`（两个选择器）。`--repo R` 在 `--between` 时必填，否则用 cwd 的 repo | 两种模式同时给 → `InvalidInput`，`detail.reason = "diff_mode"` |
-| `git-strata deps propose` | `[--session S] [--repo R]`。repo 缺省 = cwd 的 repo | — |
+| `git-strata deps propose` | `[--session S] [--repo R] [--switch]`。repo 缺省 = cwd 的 repo。`--switch`：本会话（只有提议者）立刻换到提议的依赖集，不确认（design §6.4 第 3 步、deps §5.10 `plan_switch`）；别的会话不动 [实现时补的决定，review M3] | — |
 | `git-strata deps approve` | `<id>`（`ProposalId`）。`[--sessions S,S]`，不给 = 该 repo 的全部会话，由 daemon 展开 | 非数字或超过 `i64::MAX` → `InvalidInput` |
 | `git-strata deps list` | `[--repo R]`。不给 = 全部 repo 的未关闭提议 | — |
 | `git-strata publish` | `[--from S:path]` 可重复。path 是 `RepoPath`。点到 `Renamed` 的任一半由 publish 选中整个改名，cli 不拆开。一个都不给且 stdin 是 TTY：交互选择（§5.4）。不给且不是 TTY → `InvalidInput`，`detail.reason = "no_batch"` | `S:path` 缺冒号，或 path 不是 `RepoPath` → `InvalidInput` |
@@ -118,7 +118,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `grep` | `{ "hits": [Hit, …] }`。零命中是 `"hits": []`，`ok` 为 true，不是 `NoMatch`。`hits` 这个键总在 | 前 8000 字节含 NUL 的文件跳过，不进 `hits`。被跳过的放 `skipped: [{ "session", "repo", "path", "code": "Binary" }]`。超过 64 MiB 的同样按条目，`code` 为 `TooLarge`，不读内容。非法 UTF-8 按宽松解码，每个坏序列一个 U+FFFD，不让整条输出失败（D9） |
 | `files` | `{ "paths": [ { "session", "repo", "path" }, … ] }`。没有匹配是空数组 | — |
 | `diff` | `{ "only_a": [FileChange], "only_b": [FileChange], "both": [BothChange] }`。相对基线时只有 `only_a` 有条目（会话相对基线），`only_b` 与 `both` 为空数组。字节相同的文件不列出 | 二进制或超阈值的条目不带 `preview`，改为 `code`：`Binary` 或 `TooLarge`。调用仍然 `ok` |
-| `deps propose` | `Proposal` | — |
+| `deps propose` | `Proposal`；带 `--switch` 时是 `{ "proposal": Proposal, "switched": { "session", "kind": "moved"\|"skipped", "code"?, "detail"? } }`。本会话有打开的依赖文件等原因没换：`kind = "skipped"`、带 `code`（如 `OpenFiles`），提议照样记下，仍是 `ok: true`（同 D17） | `OpenFiles`（在 `switched.code` 里） |
 | `deps approve` | `{ "results": [ { "session", "kind": "moved"\|"skipped", "code"?, "detail"? } ] }`。某个会话 `OpenFiles` 则那一条 `kind = "skipped"`，`code = "OpenFiles"`，其余照常。全部跳过仍是 `ok: true`（D17） | `OpenFiles` |
 | `deps list` | `{ "proposals": [Proposal, …] }`，按 `ProposalId` 升序。没有则空数组 | — |
 | `publish` | `{ "commits": { "<repo>": CommitOid }, "checks_ran": <u32>, "waiting": [Proposal, …], "pushes": [ { "repo", "outcome": PushOutcome } ], "already_published": [ { "repo", "publish", "commit", "push" } ] }`。`pushes` 只含这次真的推了的仓库。`already_published` 是重跑时之前已经落地、这次跳过的仓库（daemon.md D22，review H4）。多仓库时某个仓库失败（如 `Conflict`），前面已经提交的仓库照样写进 `data.commits` / `data.pushes`，`error.detail.repo` 是停下的那个仓库。没有检查的仓库 `checks_ran` 为 0，不是错误。冲突不是成功：整次 `ok: false`，`error.code = "Conflict"`，`detail` 用 publish 给的清单，cli 不再截断。`ok: true` 只在每个 `outcome` 都是 `Pushed`（或 `pushes` 为空）时成立，不能把 `Unknown` 藏进成功。`commit_tree` 之后推送超时：`ok: false`，`error.code = "Unknown"`，链留下，`data.pushes` 仍带那个 `PushOutcome`。远端拒绝不在这次里改写成成功：`publish.push` 为假时不推，`PushRefused` 留给之后单独的 `git-strata push`；这次若已经推了且远端拒绝，`ok: false`，`error.code = "PushRefused"`，链留下 | — |

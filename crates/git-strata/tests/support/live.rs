@@ -29,6 +29,10 @@ pub struct Live {
     pub sb: PathBuf,
     pub root: PathBuf,
     pub repos: BTreeMap<String, PathBuf>,
+    /// Repos configured as bun projects (deps dir `node_modules`).
+    pub deps_repos: Vec<String>,
+    /// The fake `bun` lives here; it is first on the install PATH.
+    pub bin: PathBuf,
     pub alerts: Arc<Mutex<Vec<String>>>,
     /// The method of every request the in-process daemon received.
     pub requests: Arc<Mutex<Vec<String>>>,
@@ -57,6 +61,13 @@ impl Live {
     /// Repos `names`, each with `files` committed on main and pushed to a
     /// local bare origin; config.toml written (push and confirm off).
     pub fn new(names: &[&str], files: &[(&str, &[u8])]) -> Live {
+        Live::with_deps(names, files, &[])
+    }
+
+    /// As `new`; the repos in `deps` are also bun projects: `package.json`
+    /// and `bun.lock` committed, `node_modules/` ignored, installed by a
+    /// fake `bun` that writes `node_modules/x`.
+    pub fn with_deps(names: &[&str], files: &[(&str, &[u8])], deps: &[&str]) -> Live {
         let home = Home::new();
         let sandbox = tempfile::Builder::new().prefix("strata-cli-").tempdir().expect("sandbox");
         let sb = fs::canonicalize(sandbox.path()).unwrap();
@@ -66,9 +77,11 @@ impl Live {
             let p = sb.join(n);
             fs::create_dir_all(&p).unwrap();
             git(&p, home.path(), &["init", "-q"]);
-            write(&p, ".gitignore", b".DS_Store\n");
+            let bun = deps.contains(n);
+            write(&p, ".gitignore", if bun { b".DS_Store\nnode_modules/\n" } else { b".DS_Store\n" });
             git(&p, home.path(), &["add", "-f", "--", ".gitignore"]);
-            for (rel, content) in files {
+            let project: &[(&str, &[u8])] = if bun { &[("package.json", PACKAGE_JSON.as_bytes()), ("bun.lock", b"lock v1\n")] } else { &[] };
+            for (rel, content) in files.iter().chain(project) {
                 write(&p, rel, content);
                 git(&p, home.path(), &["add", "-f", "--", rel]);
             }
@@ -79,7 +92,13 @@ impl Live {
             git(&p, home.path(), &["push", "-q", "origin", "main"]);
             repos.insert(n.to_string(), p);
         }
-        let live = Live { home, sandbox, sb, root, repos, alerts: Arc::new(Mutex::new(Vec::new())), requests: Arc::new(Mutex::new(Vec::new())) };
+        let bin = sb.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let bun = bin.join("bun");
+        fs::write(&bun, FAKE_BUN).unwrap();
+        fs::set_permissions(&bun, fs::Permissions::from_mode(0o755)).unwrap();
+        let deps_repos = deps.iter().map(|s| s.to_string()).collect();
+        let live = Live { home, sandbox, sb, root, repos, deps_repos, bin, alerts: Arc::new(Mutex::new(Vec::new())), requests: Arc::new(Mutex::new(Vec::new())) };
         live.write_config();
         live
     }
@@ -94,8 +113,13 @@ impl Live {
         let mut t = format!("[paths]\nroot = {:?}\n", self.root.to_string_lossy());
         for (n, p) in &self.repos {
             let g = guarded.contains(&n.as_str());
+            let deps = if self.deps_repos.contains(n) {
+                "deps_dirs = [\"node_modules\"]\nseed_caches = []\ninstall_inputs = [\"package.json\", \"bun.lock\"]\ninstall = \"bun install --frozen-lockfile\""
+            } else {
+                "deps_dirs = []"
+            };
             t.push_str(&format!(
-                "\n[repo.{n}]\npath = {p:?}\ndefault_branch = \"main\"\ndeps_dirs = []\ndeploy_on_push = {g}\n\n[repo.{n}.publish]\nbranch = \"main\"\npush = {g}\nconfirm = {g}\n",
+                "\n[repo.{n}]\npath = {p:?}\ndefault_branch = \"main\"\n{deps}\ndeploy_on_push = {g}\n\n[repo.{n}.publish]\nbranch = \"main\"\npush = {g}\nconfirm = {g}\n",
                 p = p.to_string_lossy(),
             ));
         }
@@ -110,7 +134,7 @@ impl Live {
             config_file: config_dir.join("config.toml"),
             config_dir,
             lock_wait: Duration::from_millis(500),
-            install_path: "/usr/bin:/bin:/usr/sbin:/sbin".into(),
+            install_path: format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.bin.display()),
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
             reconcile_every: strata_daemon::RECONCILE_EVERY,
         }
@@ -219,3 +243,14 @@ pub fn write(dir: &Path, rel: &str, content: &[u8]) {
     fs::create_dir_all(p.parent().unwrap()).unwrap();
     fs::write(p, content).unwrap();
 }
+
+pub const PACKAGE_JSON: &str = "{\n  \"name\": \"tool\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": { \"x\": \"^1.0.0\" }\n}\n";
+
+/// A bun stand-in: `--version`, else installs `x` from package.json.
+const FAKE_BUN: &str = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "1.1.0"; exit 0; fi
+mkdir -p node_modules/x || exit 1
+cp package.json node_modules/x/package.json || exit 1
+echo 'module.exports = 1' > node_modules/x/index.js
+echo installed
+"#;

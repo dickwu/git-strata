@@ -94,7 +94,11 @@ Notes:
 - `grep` with no hits is `ok` with `"hits": []` (not an error). Skipped binary
   or oversized files are listed in `data.skipped`.
 - `deps propose [--session S] [--repo R]` proposes a new dependency set after
-  you change install inputs; `deps list` shows open proposals. Approving is
+  you change install inputs; `deps list` shows open proposals. Add `--switch`
+  to move your own session onto the proposed set right away (no prompt; other
+  sessions stay pinned). Check `data.switched.kind`: `skipped` with
+  `code: OpenFiles` means a process holds files in your deps dir; stop it (only
+  if you started it) and run again. Approving for other sessions is
   human-only (below). A `pending proposal <id> for <repo>` line on stderr
   means a proposal waits for the human.
 
