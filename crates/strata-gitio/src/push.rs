@@ -75,7 +75,8 @@ impl Git {
     /// repository's config says now: gitio pins its push URL against
     /// `url.*.insteadOf` / `pushInsteadOf` rewriting (an identity rule for
     /// `url`, the longest match possible), which only loses to a configured
-    /// rule matching `url` exactly or a remote named `url`. Local only.
+    /// rule matching `url` exactly or a remote named `url` (in the config or
+    /// in a legacy `remotes/` / `branches/` file). Local only.
     /// [实现时补的决定] (review-5 N1: the daemon checks it again after the
     /// push before settling scenes.)
     pub fn push_url_exact(&self, url: &str) -> Result<bool> {
@@ -86,7 +87,8 @@ impl Git {
     /// with `c`, a command whose config view is the push's); `None` when it
     /// would. A config rule `url.<base>.(push)insteadOf = url` with another
     /// base ties the pin and wins (git keeps the first longest match);
-    /// `remote.<url>.(push)url` makes `url` a remote name.
+    /// `remote.<url>.(push)url`, or a legacy `remotes/<url>` /
+    /// `branches/<url>` file in the common dir, makes `url` a remote name.
     fn pin_conflict(&self, mut c: std::process::Command, url: &str) -> Result<Option<&'static str>> {
         c.args(["config", "--null", "--get-regexp", r"^(url\..*\.(push)?insteadof|remote\..*\.(push)?url)$"]);
         let out = self.run(c, Opts::c())?;
@@ -109,6 +111,17 @@ impl Git {
                 ("url", "insteadof" | "pushinsteadof") if val == url.as_bytes() && sub != url => return Ok(Some("url-rewritten")),
                 ("remote", "url" | "pushurl") if sub == url => return Ok(Some("url-is-remote-name")),
                 _ => {}
+            }
+        }
+        // review-6 hole 1: git also reads a remote named `url` from the
+        // legacy files `<common>/remotes/<url>` and `<common>/branches/<url>`
+        // when `url` is a valid remote nickname (no `/`, not `.` / `..`).
+        // Any entry there, whatever its content, makes `url` a remote name.
+        if !url.contains('/') && url != "." && url != ".." {
+            for dir in ["remotes", "branches"] {
+                if crate::fsx::lstat(&self.inner.common_dir.join(dir).join(url))?.is_some() {
+                    return Ok(Some("url-is-remote-name"));
+                }
             }
         }
         Ok(None)

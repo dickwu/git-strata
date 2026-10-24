@@ -336,3 +336,42 @@ fn push_to_is_pinned_against_url_rewriting() {
     assert!(!e.git.push_url_exact("a\nb").unwrap());
     let _ = d;
 }
+
+/// Review-6 hole 1: git also reads remotes from the legacy files
+/// `<common>/remotes/<name>` ("URL: <B>") and `<common>/branches/<name>`
+/// ("<B>#<branch>"). A push URL that is a bare name with such a file —
+/// `origin`'s own URL here, as the daemon would resolve it — is a remote
+/// name, not a URL: refused before anything is sent, and not "exact".
+#[test]
+fn push_to_refuses_a_bare_name_with_a_legacy_remote_file() {
+    let e = env();
+    let out = e.sb.git_output(&e.main, &["config", "remote.origin.url"]);
+    let a_url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let b = e.sb.path("other.git");
+    assert!(e.sb.git_output(&e.main, &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()]).status.success());
+    let at_b = || String::from_utf8_lossy(&e.sb.git_output(&b, &["rev-parse", "refs/heads/main"]).stdout).trim().to_string();
+    let anchor = "refs/strata/anchor/main";
+    let common = e.main.join(".git");
+    let c = e.publish(&e.head, "h1.txt");
+
+    for (dir, name, body) in [
+        ("remotes", "legacy", format!("URL: {}\n", b.display())),
+        ("branches", "legacy2", format!("{}#main\n", b.display())),
+    ] {
+        fs::create_dir_all(common.join(dir)).unwrap();
+        fs::write(common.join(dir).join(name), body).unwrap();
+        assert!(e.sb.git_output(&e.main, &["config", "remote.origin.url", name]).status.success());
+        assert_eq!(e.git.push_url("origin").unwrap(), name);
+        assert!(!e.git.push_url_exact(name).unwrap(), "{dir}/{name}");
+        let err = e.git.push_published_to(&e.staging, "origin", name, PUBLISH, "main", anchor, T).unwrap_err();
+        assert_eq!(err.code, Code::InvalidInput, "{dir}: {err:?}");
+        assert_eq!(err.detail.as_ref().unwrap()["reason"], "url-is-remote-name", "{dir}: {err:?}");
+        assert_eq!(at_b(), e.head, "{dir}: nothing sent to B");
+        assert_eq!(e.remote_branch("main").as_deref(), Some(e.head.as_str()), "{dir}: nothing sent to A");
+        assert_eq!(e.git.read_ref(anchor).unwrap(), None, "{dir}: nothing recorded");
+        fs::remove_file(common.join(dir).join(name)).unwrap();
+    }
+    // Without the file the same bare name is just a (missing) path.
+    assert!(e.git.push_url_exact("legacy").unwrap());
+    let _ = c;
+}
