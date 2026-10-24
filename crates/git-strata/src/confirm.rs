@@ -498,21 +498,27 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
     match reply {
         Ok(data) => {
             let published = data.get("published").and_then(Value::as_array).cloned().unwrap_or_default();
-            Ok(publish_envelope(&config, &published, None))
+            let already = data.get("already_published").and_then(Value::as_array).cloned().unwrap_or_default();
+            Ok(publish_envelope(&config, &published, &already, None))
         }
         Err(e) => {
-            let before = e.detail.as_ref().and_then(|d| d.get("published_before")).and_then(Value::as_array).cloned();
-            match before {
-                Some(b) if !b.is_empty() => Ok(publish_envelope(&config, &b, Some(e))),
-                _ => Err(e),
+            // Review H4: what landed before the stop (in this call or an
+            // earlier one) is reported in `data`; the error names the repo.
+            let list = |k: &str| e.detail.as_ref().and_then(|d| d.get(k)).and_then(Value::as_array).cloned().unwrap_or_default();
+            let (before, already) = (list("published_before"), list("already_published"));
+            if before.is_empty() && already.is_empty() {
+                return Err(e);
             }
+            Ok(publish_envelope(&config, &before, &already, Some(e)))
         }
     }
 }
 
-/// `{commits, checks_ran, waiting, pushes}`; `ok` only if every push
-/// outcome is `Pushed`.
-fn publish_envelope(config: &Config, published: &[Value], failed: Option<StrataError>) -> Envelope {
+/// `{commits, checks_ran, waiting, pushes, already_published}`; `ok` only
+/// if every push outcome is `Pushed`. `already_published` (review H4): the
+/// repos of this group that an earlier publish already landed, not
+/// committed again (`[{repo, publish, commit, push}]`).
+fn publish_envelope(config: &Config, published: &[Value], already: &[Value], failed: Option<StrataError>) -> Envelope {
     let mut commits = serde_json::Map::new();
     let mut checks = 0u64;
     let mut pushes = Vec::new();
@@ -546,7 +552,7 @@ fn publish_envelope(config: &Config, published: &[Value], failed: Option<StrataE
         }
     }
     let waiting = waiting_proposals(config, &touched);
-    let data = json!({ "commits": commits, "checks_ran": checks, "waiting": waiting, "pushes": pushes });
+    let data = json!({ "commits": commits, "checks_ran": checks, "waiting": waiting, "pushes": pushes, "already_published": already });
     match failed.or(bad) {
         Some(e) => Envelope::err_with(e, data),
         None => Envelope::ok(data),

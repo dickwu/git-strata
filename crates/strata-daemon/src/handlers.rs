@@ -804,12 +804,43 @@ impl<'d, 'a> Server<'d, 'a> {
     /// pushes) is redeemed before; publish takes its own locks. Review H2:
     /// a confirmed repo's publish is bound to the chain top the cli showed
     /// (`shown`), checked under the repo lock before staging.
+    ///
+    /// Review H4 (kept by design; daemon.md D15, D22): an agent re-runs the
+    /// same publish after fixing a `Conflict`. A batch whose paths this
+    /// session already published (a `Done` row with a commit) and that no
+    /// longer differ from the session's base is dropped before anything is
+    /// called; a repo all of whose batches are dropped, or whose publish is
+    /// `NoCommit` over batches all published before, is reported in
+    /// `already_published` and gets no second commit or push. Every error
+    /// carries `detail.repo` (the repo that stopped) and, when an earlier
+    /// repo of this call landed, `detail.published_before`.
     fn publish(&self, group: &strata_types::ReleaseGroup, shown: &BTreeMap<RepoName, Option<CommitOid>>) -> Result<Value> {
         let core = self.core();
-        let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
-        if repos.is_empty() {
+        if group.batches.is_empty() {
             return Err(StrataError::new(Code::InvalidInput, "the release group has no batch"));
         }
+        let rows = core.store.publishes()?;
+        let mut kept = Vec::new();
+        let mut landed: BTreeMap<RepoName, Value> = BTreeMap::new();
+        for b in &group.batches {
+            let untouched = core.store.checkpoint(&b.session, b.checkpoint).is_ok_and(|cp| {
+                b.paths.iter().all(|p| {
+                    !cp.entries.iter().any(|e| {
+                        e.path == *p || matches!(&e.kind, strata_types::EntryKind::Renamed { from, .. } if from == p)
+                    })
+                })
+            });
+            match landed_before(&rows, b).filter(|_| untouched) {
+                Some(v) => {
+                    landed.insert(b.repo.clone(), v);
+                }
+                None => kept.push(b.clone()),
+            }
+        }
+        let group = strata_types::ReleaseGroup { id: group.id, batches: kept };
+        let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
+        landed.retain(|r, _| !repos.contains(r));
+        let mut already: Vec<Value> = landed.into_values().collect();
         let mut done: Vec<Value> = Vec::new();
         for repo in repos {
             let pinned = core.pinned(&repo)?;
@@ -821,7 +852,7 @@ impl<'d, 'a> Server<'d, 'a> {
             };
             writing();
             let bound = token.as_ref().map(|_| shown.get(&repo).cloned().flatten());
-            let r = self.with_publish_ctx(&repo, |ctx| strata_publish::publish_bound(ctx, group, token, bound.clone()));
+            let r = self.with_publish_ctx(&repo, |ctx| strata_publish::publish_bound(ctx, &group, token, bound.clone()));
             match r {
                 Ok(p) => done.push(json!({
                     "repo": repo.as_str(),
@@ -832,21 +863,39 @@ impl<'d, 'a> Server<'d, 'a> {
                     "warnings": json_of(&p.warnings),
                     "rebases": p.rebases.iter().map(|(s, r)| json!({ "session": s.as_str(), "report": json_of(r) })).collect::<Vec<_>>(),
                 })),
+                Err(e)
+                    if e.code == Code::NoCommit
+                        && let Some(v) = group
+                            .batches
+                            .iter()
+                            .filter(|b| b.repo == repo)
+                            .map(|b| landed_before(&rows, b))
+                            .collect::<Option<Vec<Value>>>()
+                            .and_then(|v| v.into_iter().next_back()) =>
+                {
+                    already.push(v);
+                }
                 Err(mut e) => {
                     if e.code == Code::Unknown {
                         self.report_unknown();
                     }
-                    if !done.is_empty() {
-                        let d = e.detail.get_or_insert_with(|| json!({}));
-                        if d.is_object() {
+                    let d = e.detail.get_or_insert_with(|| json!({}));
+                    if d.is_object() {
+                        if d.get("repo").is_none() {
+                            d["repo"] = json!(repo.as_str());
+                        }
+                        if !done.is_empty() {
                             d["published_before"] = Value::Array(done);
+                        }
+                        if !already.is_empty() {
+                            d["already_published"] = Value::Array(already);
                         }
                     }
                     return Err(e);
                 }
             }
         }
-        Ok(json!({ "published": done }))
+        Ok(json!({ "published": done, "already_published": already }))
     }
 
     /// §5.5 push: the chain tip is checked under the repo lock against the
@@ -894,4 +943,23 @@ impl<'d, 'a> Server<'d, 'a> {
             Ok(json!({ "push": json_of(&r?), "commit": tip.as_str() }))
         })
     }
+}
+
+/// Review H4: the newest `Done` publish row with a commit in which `b`'s
+/// session published every path of `b` in `b`'s repo, as an
+/// `already_published` entry `{repo, publish, commit, push}`.
+fn landed_before(rows: &[strata_store::PublishRecord], b: &strata_types::Batch) -> Option<Value> {
+    rows.iter().rev().find_map(|r| {
+        if r.phase != PublishPhase::Done {
+            return None;
+        }
+        let o = r.outcome.as_ref()?;
+        let commit = o.get("commit").and_then(Value::as_str)?;
+        let covers = r.group.batches.iter().any(|x| {
+            x.session == b.session && x.repo == b.repo && b.paths.iter().all(|p| x.paths.contains(p))
+        });
+        covers.then(|| {
+            json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "push": o.get("push").cloned().unwrap_or(Value::Null) })
+        })
+    })
 }

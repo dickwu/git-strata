@@ -103,7 +103,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `deps_propose` | `{ "session", "repo", "switch": bool }` | 提议；`switch` 为真时附带移动结果 |
 | `deps_approve` | `{ "proposal": ProposalId, "sessions": [SessionId]\|null }` | 每个会话一条；`null` = 该 repo 的全部会话 |
 | `deps_list` | `{ "repo": RepoName\|null }` | `open_proposals` |
-| `publish` | `{ "group": ReleaseGroup, "shown"?: { RepoName: CommitOid \| null } }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数。`shown` 是 cli 给人看过的每个要确认仓库的链顶（D21） |
+| `publish` | `{ "group": ReleaseGroup, "shown"?: { RepoName: CommitOid \| null } }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数。`shown` 是 cli 给人看过的每个要确认仓库的链顶（D21）。回复另带 `already_published: [{repo, publish, commit, push}]`：之前已经落地、这次跳过的仓库（D22）。失败时 `detail.repo` 是停下的仓库，`detail.published_before` 是这次已经提交的仓库 |
 | `push` | `{ "repo": RepoName, "shown"?: CommitOid \| null }` | `PushOutcome`。`shown` 是 cli 给人看过的链顶（D21） |
 | `assign` | `{ "group": ReleaseGroup, "path": RepoPath, "session": SessionId }` | `{}` |
 | `rm` | `{ "session": SessionId, "discard": bool }` | `RemoveReport` |
@@ -843,6 +843,7 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 | D19 链处理的 reason | `not_rewound_or_diverged`、`no_replay_range`、`not_fast_forward`，码都是 `InvalidInput` | 控制器不许加码。这三种都是写链或推送之前的具名拒绝 | 2026-10-23 |
 | D20 没有待调松仍叫 `config_relax` | `InvalidInput`，reason `not_relaxed`，不弹框 | 文件变了不弹框。没有待接受的调松时，显式命令也不该弹出一个空框 | 2026-10-23 |
 | D21 确认绑定展示过的链顶（review H2） | `push`、`publish`、`chain_resolve` 带 cli 展示过的链顶 `shown`（没展示链 = `null`，缺省同 `null`）。要确认时，repo 锁里读到的链顶不是它 → `NotConfirmed`（reason `chain_moved`，detail `confirmed`/`now`），不暂存、不提交、不推。`publish` 在 `strata_publish::publish_bound` 里、fetch 之后核对 [实现时补的决定] | 凭据只有 `PushDeploy { repo, branch }`，不含提交；只比 daemon 自己弹框前读的链顶，盖不住"cli 展示之后、daemon 读之前"那段，人会推出没见过的提交 | 2026-10-23 |
+| D22 冲突后修好重跑（review H4） | 仍按仓库逐个发布，不做跨仓库原子（用户 2026-10-23：主要用户是 agent，冲突 → 修 → 继续）。某个仓库失败，错误 detail 带 `repo`（停下的仓库）和 `published_before`（这次已提交的仓库及 commit / push）。重跑同一个批次：一个 (session, repo) 片段若有一条 `done` 且有 commit 的 publish 行，同一会话、同一仓库、覆盖它全部路径，并且当前 checkpoint 里这些路径都没有条目，就算已经落地，跳过，写进回复的 `already_published`；路径还有条目（落地后又改了）照常发布；拼错的路径照常 `NoMatch`。会话没被 rebase（Waiting）时 publish 返回 `NoCommit`，若该仓库的每个片段都已落地，也算 `already_published`。全部落地 → `ok`，`published` 为空。跳过的仓库不要确认 [实现时补的决定] | 第一次冲突后重跑，已经落地的仓库 checkpoint 已被 rebase 清空，整次 `NoMatch`，agent 卡住；或者重复提交 | 2026-10-23 |
 
 D18 的契约，实现者不要猜：
 

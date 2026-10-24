@@ -85,6 +85,9 @@ Notes:
   edits after the checkpoint stay in the workspace for the next one.
   Without `--from` it is interactive on a TTY and `InvalidInput`
   (`no_batch`) otherwise, so agents always pass `--from SESSION:PATH`.
+- Multi-repo `publish` commits repo by repo. When one repo hits `Conflict`,
+  repos before it have already committed (and pushed, if push is on); the
+  call does not roll them back. See "Publish conflict: fix and re-run" below.
 - `diff` and `diff --between` preview current workspace content, checkpointed
   or not. Identical files are not listed; binary / >64 MiB entries carry
   `code: "Binary"` / `"TooLarge"` instead of a preview and the call stays ok.
@@ -94,6 +97,27 @@ Notes:
   you change install inputs; `deps list` shows open proposals. Approving is
   human-only (below). A `pending proposal <id> for <repo>` line on stderr
   means a proposal waits for the human.
+
+## Publish conflict: fix and re-run
+
+This is the expected loop for agents; the human is not needed unless the
+conflict is `assigned`.
+
+1. `publish` returns `ok: false`, `error.code = "Conflict"`.
+   - `error.detail.repo` is the repo that conflicted; nothing was committed
+     there.
+   - `error.detail.conflicts` lists its paths (with the hunks).
+   - `data.commits` / `data.pushes` hold repos that already landed in this
+     call (also in `error.detail.published_before`). They stay landed.
+2. Fix the listed paths in that repo's workspace (merge in the upstream
+   change; `git-strata diff` helps).
+3. `git-strata checkpoint -m "resolve conflict" <paths>`.
+4. Re-run the exact same `publish --from ...` command. Repos that already
+   landed are not committed again: they appear in
+   `data.already_published` as `{repo, publish, commit, push}`, and only the
+   rest is published (`data.commits`). Edits made to a landed repo's paths
+   after it landed are published again as a new commit, as usual.
+5. Repeat while another repo conflicts.
 
 ## Hook: checkpoint after every tool call (Claude Code)
 
@@ -143,7 +167,7 @@ All three keys are always present; `data` is never null. Branch on
 | `NoSuchSession` | Wrong selector, or cwd is not inside a workspace; `cd` into one or pass `--session`. |
 | `NoSuchRepo` | Repo name not in config; check `--repos` / argument. |
 | `InvalidInput` | Fix arguments per `detail.reason` (`checkpoint_reason`, `diff_mode`, `both_selectors`, `no_batch`, `unknown_command` with `detail.commands`, ...). `chain_rewound` / `chain_diverged` from publish: hand to the human (`chain`). |
-| `Conflict` | Same hunk edited by several sessions; nothing committed. Show `detail` to the human; who resolves is set by `publish --assign`. |
+| `Conflict` | Same hunk changed on both sides (another session or upstream); nothing committed in `detail.repo`, earlier repos of the call may have landed (`data.commits`). Fix, checkpoint, re-run the same publish ("Publish conflict: fix and re-run"); between sessions, who resolves can be set by `publish --assign`. |
 | `Conflict` (`assigned`) | The path is assigned to another session; only that session may publish it. Do not retry from yours. |
 | `NoCommit` | Nothing new to commit or push. Not a failure to fix. |
 | `NoMatch` | A `--from` path is not in the session's checkpoint; checkpoint first. |

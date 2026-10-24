@@ -676,3 +676,45 @@ fn listing_is_one_document() {
     });
 }
 
+
+/// Review H4, the agent loop through the cli (SKILL.md "Publish across
+/// repos"): front lands, tool conflicts with upstream. The envelope names
+/// the landed commit (`data.commits.front`) and the stopped repo with its
+/// paths (`error.detail.repo`, `error.detail.conflicts`). After the fix the
+/// very same command publishes tool and reports front in
+/// `data.already_published`, with no second front commit.
+#[test]
+fn publish_conflict_fix_rerun_loop() {
+    let lv = Live::new(&["front", "tool"], &base_files());
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "front,tool");
+        write(&lv.ws(&s, "front"), "f.txt", b"front\n");
+        write(&lv.ws(&s, "tool"), "t.txt", b"mine\n");
+        write(&lv.ws(&s, "tool"), "new.txt", b"new\n");
+        let main = lv.main("tool");
+        write(&main, "t.txt", b"upstream\n");
+        support::git(&main, lv.home.path(), &["add", "t.txt"]);
+        support::git(&main, lv.home.path(), &["commit", "-q", "-m", "upstream"]);
+        support::git(&main, lv.home.path(), &["push", "-q", "origin", "main"]);
+        let from = [format!("{s}:f.txt"), format!("{s}:t.txt"), format!("{s}:new.txt")];
+        let args = ["publish", "--from", &from[0], "--from", &from[1], "--from", &from[2]];
+        let chain = |r: &str| support::git(&lv.main(r), lv.home.path(), &["rev-parse", "-q", "--verify", "refs/strata/publish/main"]);
+
+        let r = lv.run(&args);
+        assert_eq!(r.err_code(), "Conflict", "{r:?}");
+        let env = r.env();
+        assert_eq!(env["error"]["detail"]["repo"], "tool", "{env}");
+        assert_eq!(env["error"]["detail"]["conflicts"][0]["path"], "t.txt", "{env}");
+        let landed = chain("front");
+        assert_eq!(env["data"]["commits"]["front"], json!(landed), "{env}");
+
+        write(&lv.ws(&s, "tool"), "t.txt", b"upstream\n");
+        let d = lv.run(&args).ok();
+        assert_eq!(chain("front"), landed, "no second front commit");
+        assert_eq!(d["already_published"][0]["repo"], "front", "{d}");
+        assert_eq!(d["already_published"][0]["commit"], json!(landed), "{d}");
+        let t = chain("tool");
+        assert_eq!(d["commits"], json!({ "tool": t }), "{d}");
+        assert_eq!(support::git(&main, lv.home.path(), &["show", &format!("{t}:new.txt")]), "new");
+    });
+}

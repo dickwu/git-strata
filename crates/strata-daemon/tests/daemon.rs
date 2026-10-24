@@ -432,3 +432,71 @@ fn confirmed_publish_is_bound_to_the_shown_chain_top() {
     drop(d);
     core.close().unwrap();
 }
+
+/// Review H4 (kept by design, the agent loop made to work): a two-repo
+/// publish where the second repo conflicts with upstream. The `Conflict`
+/// says which repos already landed in this call (`published_before`) and
+/// which repo stopped, with its paths. The agent fixes its file,
+/// checkpoints, and re-runs the very same publish: the repo that landed is
+/// reported as already published (no second commit, no second push), the
+/// fixed repo publishes.
+#[test]
+fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
+    let fx = Dfx::with(&["front", "tool"]);
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let chain = strata_publish::chain_ref("main");
+    let origin = |r: &str| fx.sb.git(&fx.sb.path(&format!("{r}-origin.git")), &["rev-parse", "refs/heads/main"]);
+    serving(&d, || {
+        let s = ok(call(&sock, "new", json!({ "ticket": null, "repos": ["front", "tool"] })));
+        let id: SessionId = serde_json::from_value(s["session"]["manifest"]["id"].clone()).unwrap();
+        external(&ws(&core, &id, "front"), "printf 'export const f = 1\\n' > src/index.ts");
+        external(&ws(&core, &id, "tool"), "printf 'export const t = 1\\n' > src/index.ts && printf 'export const o = 1\\n' > src/other.ts");
+        // Upstream edits the same line of tool's file.
+        let main = fx.main("tool");
+        fx.sb.commit(&main, &[("src/index.ts", b"export const t = 9\n")], "upstream");
+        fx.sb.git(&main, &["push", "-q", "origin", "main"]);
+        let upstream = origin("tool");
+
+        // What the cli does: a BeforePublish checkpoint per (session, repo), then publish.
+        let run = || {
+            let mut batches = Vec::new();
+            for (repo, paths) in [("front", vec!["src/index.ts"]), ("tool", vec!["src/index.ts", "src/other.ts"])] {
+                let cp = ok(call(&sock, "checkpoint", json!({
+                    "session": id, "repo": repo, "reason": { "kind": "BeforePublish" }, "paths": paths,
+                })));
+                batches.push(json!({ "session": id, "repo": repo, "checkpoint": cp["checkpoint"]["id"], "paths": paths }));
+            }
+            call(&sock, "publish", json!({ "group": { "id": 0, "batches": batches } }))
+        };
+        let r = run();
+        assert_eq!(r["error"]["code"], "Conflict", "{r:#}");
+        let det = &r["error"]["detail"];
+        assert_eq!(det["repo"], "tool", "{r:#}");
+        assert_eq!(det["published_before"][0]["repo"], "front", "{r:#}");
+        let landed = core.gits[&repo_name("front")].read_ref(&chain).unwrap().expect("front committed");
+        assert_eq!(det["published_before"][0]["commit"], json!(landed), "{r:#}");
+        assert_eq!(origin("front"), landed.as_str(), "front pushed");
+        let paths: Vec<&str> = det["conflicts"].as_array().unwrap().iter().filter_map(|c| c["path"].as_str()).collect();
+        assert_eq!(paths, vec!["src/index.ts"], "{r:#}");
+        assert_eq!(origin("tool"), upstream, "tool not pushed");
+
+        // The agent takes upstream's line and re-runs the same publish.
+        external(&ws(&core, &id, "tool"), "printf 'export const t = 9\\n' > src/index.ts");
+        push_calls(&core);
+        let r = ok(run());
+        assert_eq!(core.gits[&repo_name("front")].read_ref(&chain).unwrap(), Some(landed.clone()), "no second front commit");
+        assert_eq!(origin("front"), landed.as_str());
+        assert_eq!(r["already_published"][0]["repo"], "front", "{r:#}");
+        assert_eq!(r["published"].as_array().unwrap().len(), 1, "{r:#}");
+        assert_eq!(r["published"][0]["repo"], "tool", "{r:#}");
+        let t = core.gits[&repo_name("tool")].read_ref(&chain).unwrap().expect("tool committed");
+        assert_eq!(origin("tool"), t.as_str());
+        assert_eq!(fx.sb.git(&main, &["rev-parse", &format!("{t}^")]), upstream, "one commit on upstream");
+        assert_eq!(fx.sb.git(&main, &["show", &format!("{t}:src/other.ts")]), "export const o = 1");
+        assert_eq!(push_calls(&core), 1, "only tool pushed");
+    });
+    drop(d);
+    core.close().unwrap();
+}

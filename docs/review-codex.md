@@ -610,4 +610,5 @@ Short summary: **request changes; build passes; offline tests 807 passed / 102 f
 
 - **H1 — kept as designed.** The user chose to keep daemon.md §5.5 as written: `resolve_move` and `chain_resolve` take no TTY check and no `Confirmer` at the daemon; the CLI's TTY refusal (cli.md D18) remains the human gate. No code change.
 - **H4 — kept as designed.** The user chose to keep daemon.md D15 (a release group publishes repo by repo in name order; a later repo's conflict leaves earlier repos published, reported in `published_before`). No code change.
+  Follow-up (same day): the agent loop "Conflict → fix → re-run" is made to work (error names the stopped repo and what landed; re-run skips landed repos via `already_published`, no duplicate commits). See daemon.md D22 and SKILL.md "Publish conflict: fix and re-run".
 - H2, H3, H5, M1–M8 and L1 are to be fixed, one commit each; findings that turn out not to be real are recorded in docs/impl-notes.md.
