@@ -1,0 +1,37 @@
+[package]
+name = "strata-daemon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "git-stratad: the per-user git-strata daemon (json-lines RPC over a unix socket, locks, confirm order, launchd agent)"
+
+[[bin]]
+name = "git-stratad"
+path = "src/main.rs"
+
+[features]
+default = []
+# Test seams of every lower layer the daemon tests drive. A binary built
+# with these refuses to start (strata_confirm::TEST_SEAMS).
+test-seams = ["strata-confirm/test-seams", "strata-gitio/test-seams", "strata-store/test-seams", "strata-apfs/test-seams", "strata-session/test-seams", "strata-deps/test-seams", "strata-publish/test-seams", "strata-overlay/test-seams", "strata-search/test-seams"]
+
+[dependencies]
+strata-types = { path = "../strata-types" }
+strata-apfs = { path = "../strata-apfs" }
+strata-confirm = { path = "../strata-confirm" }
+strata-gitio = { path = "../strata-gitio" }
+strata-store = { path = "../strata-store" }
+strata-deps = { path = "../strata-deps" }
+strata-overlay = { path = "../strata-overlay" }
+strata-session = { path = "../strata-session" }
+strata-search = { path = "../strata-search" }
+strata-publish = { path = "../strata-publish" }
+libc = "0.2.191"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+toml = "0.8.23"
+strata-daemon = { path = ".", features = ["test-seams"] }

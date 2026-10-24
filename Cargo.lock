@@ -2232,6 +2232,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "strata-daemon"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "strata-apfs",
+ "strata-confirm",
+ "strata-daemon",
+ "strata-deps",
+ "strata-gitio",
+ "strata-overlay",
+ "strata-publish",
+ "strata-search",
+ "strata-session",
+ "strata-store",
+ "strata-types",
+ "tempfile",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "strata-deps"
 version = "0.1.0"
 dependencies = [

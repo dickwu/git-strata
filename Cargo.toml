@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 exclude = ["vendor"]
-members = ["crates/strata-types", "crates/strata-apfs", "crates/strata-confirm", "crates/strata-gitio", "crates/strata-store", "crates/strata-deps", "crates/strata-overlay", "crates/strata-session", "crates/strata-search", "crates/strata-publish"]
+members = ["crates/strata-types", "crates/strata-apfs", "crates/strata-confirm", "crates/strata-gitio", "crates/strata-store", "crates/strata-deps", "crates/strata-overlay", "crates/strata-session", "crates/strata-search", "crates/strata-publish", "crates/strata-daemon"]
 
 [workspace.package]
 edition = "2024"

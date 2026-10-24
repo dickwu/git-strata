@@ -28,6 +28,7 @@ mod publish_io;
 mod push;
 mod refs;
 mod remote;
+mod replay;
 mod repo;
 mod seams;
 mod shadow;
