@@ -427,3 +427,30 @@ fn push_to_rule_added_between_check_and_push_is_refused() {
     assert_eq!(e.remote_branch("main").as_deref(), Some(c.as_str()));
     assert_eq!(at_b(), e.head);
 }
+
+/// Review-7: the guard (D25) hands the human's `pre-push` the environment
+/// it had before: git commands inside that hook do not see the guard's
+/// `core.hooksPath`, so a nested `git hook run pre-commit` finds the human's
+/// own `pre-commit`, and no guard variables leak into the hook.
+#[test]
+fn push_human_pre_push_runs_nested_hooks_without_the_guard_override() {
+    let e = env();
+    let hooks = e.main.join(".git/hooks");
+    let ran = e.sb.path("pre-commit.ran");
+    let log = e.sb.path("pre-push.log");
+    hook(&hooks, "pre-commit", &format!("echo ok > {}\n", ran.display()));
+    hook(
+        &hooks,
+        "pre-push",
+        &format!(
+            "cat >/dev/null\n{{ echo \"hooksPath=[$(git config --get core.hooksPath)]\"; echo \"count=${{GIT_CONFIG_COUNT-unset}} seen=${{STRATA_PUSH_GUARD_SEEN-unset}} user=${{STRATA_USER_PRE_PUSH-unset}}\"; }} > {}\ngit hook run pre-commit || exit 1\n",
+            log.display()
+        ),
+    );
+    let c = e.publish(&e.head, "r7.txt");
+    assert_eq!(e.push("main", T), PushOutcome::Pushed, "{:?}", fs::read_to_string(&log));
+    assert_eq!(e.remote_branch("main").as_deref(), Some(c.as_str()));
+    assert!(ran.exists(), "the nested pre-commit ran");
+    let got = fs::read_to_string(&log).unwrap();
+    assert_eq!(got, "hooksPath=[]\ncount=unset seen=unset user=unset\n");
+}

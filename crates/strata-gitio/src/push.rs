@@ -2,7 +2,7 @@
 //! definite `Pushed` / `Refused` only from this ref's porcelain status
 //! line; everything else is `Unknown`. Never forces, never retries.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -198,9 +198,14 @@ impl Git {
         c.env(PIN_ENV, &url);
         c.env(GUARD_SEEN_ENV, guard.seen());
         c.env(USER_HOOK_ENV, user_hook.as_deref().map(Path::as_os_str).unwrap_or_default());
-        let mut hooks = OsString::from("core.hooksPath=");
-        hooks.push(guard.hooks());
-        c.arg("-c").arg(hooks);
+        // The override rides in GIT_CONFIG_COUNT (command scope, beats every
+        // config file), not `-c`: the guard unsets these before it runs the
+        // human's hook, so git commands inside that hook see the command-line
+        // config they saw before D25 (review-7). base_command already strips
+        // any inherited GIT_CONFIG_*, so there is nothing else to restore.
+        c.env("GIT_CONFIG_COUNT", "1");
+        c.env("GIT_CONFIG_KEY_0", "core.hooksPath");
+        c.env("GIT_CONFIG_VALUE_0", guard.hooks());
         c.arg(format!("--config-env=url.{url}.insteadOf={PIN_ENV}"));
         c.arg(format!("--config-env=url.{url}.pushInsteadOf={PIN_ENV}"));
         c.args(["push", "--porcelain", "--no-follow-tags", "--end-of-options", &url, &spec]);
@@ -434,6 +439,9 @@ if [ "$2" != "$STRATA_PUSH_URL" ]; then
 	exit 1
 fi
 h=$STRATA_USER_PRE_PUSH
+# Hand the human's hook the environment it had before D25: no guard
+# override (GIT_CONFIG_COUNT), no guard variables.
+unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 STRATA_PUSH_GUARD_SEEN STRATA_USER_PRE_PUSH
 if [ -n "$h" ] && [ -f "$h" ] && [ -x "$h" ]; then
 	exec "$h" "$@"
 fi
