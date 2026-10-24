@@ -10,7 +10,8 @@ Not merged.
 | pre: daemon `Busy daemon_down` (cli.md D2) | done | f19e18f |
 | pre: daemon serves `deps_propose` / `deps_approve` | done | 4bee168 |
 | 1 JSON envelope and write failures | done | a6784d9 |
-| 2 TTY before confirmation (confirm-class commands) | done | (this commit) |
+| 2 TTY before confirmation (confirm-class commands) | done | 865b2fc |
+| 3 subcommands, read-only path, hook idempotency (+ `tests/readonly_without_daemon.rs`) | done | (this commit) |
 
 ## Ambiguity decisions
 
@@ -89,3 +90,67 @@ Not merged.
   but it arrives transitively through the strata-daemon library the cli
   uses for paths. The cli never calls it (the rg check in Task 3 covers
   the source).
+
+### Task 3
+
+- **Files.** `src/main.rs` already existed from Task 1 (the plan says
+  "Create"); Task 3 adds `src/cmds.rs` (RPC-or-local dispatch),
+  `src/local.rs` (the §5.1 read-only path) and `src/launch.rs`
+  (`daemon start|stop`). One `[[bin]]`, no `src/bin`.
+- **Which commands fall back when the daemon is down.** `status`, `grep`,
+  `files`, `diff`, `deps list` and `daemon status` (the RPC table's
+  read-only rows plus `daemon status`, which reports `running:false`).
+  Every other command is `Busy`, `detail.reason = "daemon_down"` (D2),
+  with "run `git-strata daemon start`" in the message. `checkpoint` is a
+  write, so the hook is `Busy daemon_down` too.
+- **Base-mode `diff` is always local** (the overlay against base, read
+  from the workspace and store); `diff --between` uses the daemon when it
+  is up and the local read otherwise.
+- **`diff --between` on unrecorded edits.** strata-publish's preview reads
+  both sides' blobs from the store; an edit that has no checkpoint yet has
+  a blob id from reconcile but no blob, and that entry comes back with
+  `code: "Corrupt"` instead of a preview. Not fixed in the cli (it is
+  publish's `diff_between`); the tests checkpoint first. **Open issue,
+  reported upstream.**
+- **add/add between sessions** is `Conflict` (no base), not `Binary`,
+  even for a binary file: upstream publish rule order.
+- **Binary detection.** strata-search skips a file with a NUL anywhere
+  (cli.md says the first 8000 bytes); the cli reports such a file in
+  `skipped` with code `Binary`, so the result is the search crate's.
+- **Lossy UTF-8.** Search D13 drops non-UTF-8 lines; the cli runs its own
+  lossy pass for those so each invalid sequence becomes one U+FFFD
+  (`lossy_utf8_one_fffd_per_bad_sequence`).
+- **`grep` skipped entries** for a workspace that cannot be attached carry
+  no path (only the repo and the code). `files --all` skips a session view
+  that errors with one stderr line.
+- **`new`.** A ticket given both positionally and as `--ticket` →
+  `InvalidInput` "ticket"; `--repos` is required, empty → `InvalidInput`
+  "repos".
+- **`deps propose`** with no proposal answers `{}` plus one stderr line.
+- **Hook path set.** A hook payload whose paths map to no tracked repo
+  checkpoints every tracked repo of the session (full checkpoint).
+- **`daemon status`** holders include the method and session.
+- **`daemon start|stop`** run `launchctl` from `PATH` (tests put a fake
+  first; nothing is loaded into the real domain). `start` needs the plist
+  (`InvalidInput` `no_plist`); `stop` does not. Already loaded / not loaded
+  → `{already:true}`. A launchctl failure is `Unknown`, reason
+  `launchctl`. Neither touches the socket.
+- **`daemon_up_read_does_not_open_sessions`** is tested indirectly: with
+  the daemon up the main checkout is moved away and reads still answer
+  (via the daemon); the control shows the local path needs it.
+- **Stale socket.** A stopped daemon leaves `daemon.sock`; connecting is
+  refused, which is "down". Both the stale and the removed socket are
+  tested.
+- **Test build.** The test binary has strata-daemon with `test-seams` as a
+  dev-dependency feature (the tests run an in-process daemon); the
+  released `git-strata` never starts a daemon and does not enable it.
+- **`tests/readonly_without_daemon.rs`** (daemon.md §8 Task 6's cli half):
+  `cli_readonly_commands_work_without_daemon` (status, grep, files answer;
+  publish and push are `Busy daemon_down`).
+- **`every_command_emits_ok_envelope`** now drives, against an in-process
+  daemon: new, status, status --all, checkpoint -m, grep, files, diff,
+  diff --between, deps propose, deps list, daemon status, restore,
+  publish --from, gc, rm. Not driven there: `assign` (needs a publish
+  conflict), `push`, `resolve`, `chain`, `config relax`, `deps approve`
+  (confirm-class, need a TTY; tests/confirm_gate.rs).
+- **Check.** `rg -o 'git-strata [a-z]+' docs/modules/cli.md | sort -u | wc -l` = 17 (≥ 14).

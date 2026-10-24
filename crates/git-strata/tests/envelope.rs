@@ -13,6 +13,7 @@ use git_strata::envelope::{Envelope, emit};
 use serde_json::{Value, json};
 use strata_types::{Code, StrataError};
 use support::json::{J, parse};
+use support::live::{Live, write};
 use support::{Home, code_names};
 
 /// The three keys, in order, compact (no whitespace outside strings).
@@ -34,8 +35,7 @@ fn every_command_emits_ok_envelope() {
     assert_eq!(j.get("ok"), Some(&J::Bool(true)));
     assert_eq!(j.get("data"), Some(&J::Obj(vec![])));
     assert_eq!(j.get("error"), Some(&J::Null));
-    // The binary (the full command list is driven in tests/cli.rs once
-    // every subcommand exists; this one needs no daemon and no config).
+    // The binary, with no daemon and no config.
     let h = Home::new();
     let r = h.run(&["daemon", "status"]);
     assert_eq!(r.code, 0, "{r:?}");
@@ -43,6 +43,49 @@ fn every_command_emits_ok_envelope() {
     assert_eq!(j.get("ok"), Some(&J::Bool(true)));
     assert_eq!(j.get("error"), Some(&J::Null));
     assert!(matches!(j.get("data"), Some(J::Obj(_))));
+    every_command_against_a_live_daemon();
+}
+
+/// Each subcommand that a non-TTY can complete, against an in-process
+/// daemon. (The confirm commands are NotTty here: tests/confirm_gate.rs;
+/// `assign` needs a publish conflict; `resolve`/`chain` need a TTY.)
+fn every_command_against_a_live_daemon() {
+    let lv = Live::new(&["tool"], &[("a.txt", b"alpha\n")]);
+    let ok = |r: support::Run| -> J {
+        assert_eq!(r.code, 0, "{r:?}");
+        let j = check_shape(&r.stdout);
+        assert_eq!(j.get("ok"), Some(&J::Bool(true)), "{r:?}");
+        assert_eq!(j.get("error"), Some(&J::Null));
+        j.get("data").unwrap().clone()
+    };
+    lv.serve(|_| {
+        let d = ok(lv.run(&["new", "--ticket", "T-1", "--repos", "tool"]));
+        let s = d.get("manifest").and_then(|m| m.get("id")).and_then(J::str).unwrap().to_string();
+        let ws = lv.ws(&strata_types::SessionId::try_from(s.clone()).unwrap(), "tool");
+        write(&ws, "b.txt", b"beta\n");
+        ok(lv.run_in(&ws, &["status"]));
+        ok(lv.run(&["status", "--all"]));
+        let cp = ok(lv.run_in(&ws, &["checkpoint", "-m", "m"]));
+        let id = match cp.get("checkpoints") {
+            Some(J::Arr(v)) => match v[0].get("id") {
+                Some(J::Num(n)) => n.clone(),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        ok(lv.run_in(&ws, &["grep", "beta"]));
+        ok(lv.run_in(&ws, &["files"]));
+        ok(lv.run_in(&ws, &["diff"]));
+        ok(lv.run(&["diff", "--between", &s, &s, "--repo", "tool"]));
+        assert_eq!(ok(lv.run_in(&ws, &["deps", "propose"])), J::Obj(vec![]));
+        ok(lv.run(&["deps", "list"]));
+        ok(lv.run(&["daemon", "status"]));
+        ok(lv.run_in(&ws, &["restore", &id]));
+        let p = ok(lv.run(&["publish", "--from", &format!("{s}:b.txt")]));
+        assert!(p.get("commits").is_some(), "{p:?}");
+        assert_eq!(ok(lv.run(&["gc"])), J::Obj(vec![]));
+        ok(lv.run(&["rm", "--session", &s]));
+    });
 }
 
 #[test]

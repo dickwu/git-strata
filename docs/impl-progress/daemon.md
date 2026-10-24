@@ -164,8 +164,9 @@ Not merged.
   tests below, so those were not added (the lock behaviour is covered by
   tests/locks.rs and the handlers use the same `with_repo` /
   `with_sessions`).
-- **No cli crate.** `crates/git-strata` does not exist on this branch, so
-  `crates/git-strata/tests/readonly_without_daemon.rs` was not created.
+- **No cli crate (on impl/daemon).** `crates/git-strata` did not exist on
+  that branch, so `crates/git-strata/tests/readonly_without_daemon.rs` was
+  not created there; it now exists on impl/cli (cli Task 3).
   The contract half lives in strata-daemon: `client::call` (write methods
   with no daemon → `Busy` `{reason:"daemon_down"}`; first written as
   daemon.md §6's `ReadOnly`, changed after the merge on impl/cli because

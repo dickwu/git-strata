@@ -39,7 +39,7 @@ pub enum Cmd {
         /// Ticket name
         #[arg(value_name = "TICKET")]
         ticket: Option<String>,
-        /// Repos to include, comma separated (default: all configured)
+        /// Repos to include, comma separated (required)
         #[arg(long, value_delimiter = ',', value_name = "A,B")]
         repos: Vec<String>,
     },

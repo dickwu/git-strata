@@ -4,10 +4,13 @@
 //! calls strata-confirm (§1): confirmations happen in the daemon.
 
 pub mod args;
+pub mod cmds;
 pub mod confirm;
 pub mod ctx;
 pub mod env;
 pub mod envelope;
+pub mod launch;
+pub mod local;
 pub mod ro;
 pub mod rpc;
 pub mod show;
@@ -17,7 +20,7 @@ use std::ffi::OsString;
 
 use clap::Parser;
 use clap::error::ErrorKind;
-use serde_json::{Value, json};
+use serde_json::json;
 use strata_types::{Code, StrataError};
 
 use crate::args::{Cli, Cmd, ConfigCmd, DaemonCmd, DepsCmd};
@@ -43,7 +46,26 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
             _ => return emit_stdout(&Envelope::err(parse_error(&argv, &e))),
         },
     };
-    emit_stdout(&dispatch(cli.cmd))
+    let env = dispatch(cli.cmd);
+    let code = emit_stdout(&env);
+    // D20: after a successful JSON, the pending-proposal hint for the
+    // session the command resolved; its failures change nothing.
+    if code == 0
+        && let Some(s) = HINT.lock().ok().and_then(|mut h| h.take())
+        && let Ok(config) = env::Paths::from_env().and_then(|p| p.config())
+    {
+        ro::pending_hint(&config, &s);
+    }
+    code
+}
+
+static HINT: std::sync::Mutex<Option<strata_types::SessionId>> = std::sync::Mutex::new(None);
+
+/// The session a command resolved (for the D20 hint after the envelope).
+pub fn hint(s: strata_types::SessionId) {
+    if let Ok(mut h) = HINT.lock() {
+        *h = Some(s);
+    }
 }
 
 /// A clap rejection as `InvalidInput` (§3.1): an unknown or missing
@@ -73,7 +95,7 @@ fn parse_error(argv: &[OsString], e: &clap::Error) -> StrataError {
 
 fn dispatch(cmd: Cmd) -> Envelope {
     match cmd {
-        Cmd::Daemon(DaemonCmd::Status) => Envelope::from_result(daemon_status_offline()),
+        Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status().unwrap_or_else(Envelope::err),
         cmd => match run_cmd(cmd) {
             Ok(env) => env,
             Err(e) => Envelope::err(e),
@@ -103,17 +125,18 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Resolve { session, repo, abandon, accept } => c::resolve(&ctx, &session, &repo, abandon, accept),
         Cmd::Chain { repo, accept_origin, restore } => c::chain(&ctx, &repo, accept_origin, restore),
         Cmd::Config(ConfigCmd::Relax { repo }) => c::config_relax(&ctx, &repo),
-        other => Err(StrataError::new(Code::Unsupported, format!("{other:?} is not implemented yet"))),
+        Cmd::New { ticket_flag, ticket, repos } => cmds::new(&ctx, ticket_flag, ticket, &repos),
+        Cmd::Status { sel } => cmds::status(&ctx, &sel),
+        Cmd::Checkpoint { tool_call, message, session, paths } => cmds::checkpoint(&ctx, tool_call, message, session, &paths),
+        Cmd::Restore { checkpoint, paths, session } => cmds::restore(&ctx, &checkpoint, &paths, session),
+        Cmd::Grep { pattern, sel } => cmds::grep(&ctx, &pattern, &sel),
+        Cmd::Files { glob, sel } => cmds::files(&ctx, glob.as_deref(), &sel),
+        Cmd::Diff { base, session, between, repo } => cmds::diff(&ctx, base, session, between, repo),
+        Cmd::Deps(DepsCmd::Propose { session, repo }) => cmds::deps_propose(&ctx, session, repo),
+        Cmd::Deps(DepsCmd::List { repo }) => cmds::deps_list(&ctx, repo),
+        Cmd::Gc => cmds::gc(&ctx),
+        Cmd::Daemon(DaemonCmd::Start) => launch::start(&ctx.paths.home),
+        Cmd::Daemon(DaemonCmd::Stop) => launch::stop(),
+        Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status(),
     }
-}
-
-fn daemon_status_offline() -> Result<Value> {
-    let paths = env::Paths::from_env()?;
-    Ok(json!({
-        "running": false,
-        "socket": paths.socket.to_string_lossy(),
-        "holders": [],
-        "unknown_publishes": [],
-        "alerts": [],
-    }))
 }

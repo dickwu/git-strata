@@ -1,0 +1,625 @@
+//! cli.md §8 Task 3 / §7: subcommands, the read-only path and the hook,
+//! end to end against an in-process git-stratad (tests/support/live.rs).
+//! Every repository is a local throwaway with a local bare origin.
+
+mod support;
+
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use serde_json::{Value, json};
+use strata_types::{CheckpointReason, RepoName, SessionId};
+use support::live::{Live, write};
+use support::{BIN, FakeDaemon, Home, code_names};
+
+fn base_files() -> Vec<(&'static str, &'static [u8])> {
+    vec![("a.txt", b"one\ntwo\n"), ("keep.txt", b"same\n"), ("del.txt", b"gone\n"), ("src/lib.txt", b"fn x\n")]
+}
+
+/// The base files plus a committed binary `bin.dat` (both sides then
+/// modify it: an add/add would be a `Conflict`, not `Binary`).
+fn bin_files() -> Vec<(&'static str, &'static [u8])> {
+    let mut v = base_files();
+    v.push(("bin.dat", b"base\0bin\n"));
+    v
+}
+
+fn rn(s: &str) -> RepoName {
+    RepoName::try_from(s.to_string()).unwrap()
+}
+
+fn store_rows(lv: &Live, s: &SessionId, repo: &str, tool_call: &str) -> Vec<u64> {
+    let store = strata_store::Store::open_read_only(&lv.root).unwrap();
+    store
+        .checkpoints(s, Some(&rn(repo)))
+        .unwrap()
+        .into_iter()
+        .filter(|c| matches!(&c.reason, CheckpointReason::ToolCall { id } if id.as_str() == tool_call))
+        .map(|c| u64::from(c.id))
+        .collect()
+}
+
+fn ids(d: &Value) -> Vec<(String, u64)> {
+    d["checkpoints"].as_array().unwrap().iter().map(|c| (c["repo"].as_str().unwrap().to_string(), c["id"].as_u64().unwrap())).collect()
+}
+
+fn paths(v: &Value) -> Vec<String> {
+    v.as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn hook_checkpoint_is_idempotent_per_tool_call() {
+    let lv = Live::new(&["hr-core", "tool"], &base_files());
+    let (s, tws, input) = lv.serve(|_| {
+        let s = lv.new_session("T-1", "hr-core,tool");
+        let tws = lv.ws(&s, "tool");
+        let hws = lv.ws(&s, "hr-core");
+        write(&tws, "a.txt", b"changed\n");
+        write(&hws, "b.txt", b"new in hr-core\n");
+        let input = json!({
+            "session_id": "claude",
+            "cwd": tws,
+            "tool_name": "MultiEdit",
+            "tool_input": {
+                "file_paths": [
+                    tws.join("a.txt"),
+                    format!("{}/../hr-core/b.txt", tws.display()),
+                    "/private/tmp/outside-any-session.txt",
+                ],
+            },
+        })
+        .to_string();
+        let r1 = lv.run_piped(&tws, &["checkpoint", "--tool-call", "tu-1"], input.as_bytes());
+        let d1 = r1.ok();
+        let got = ids(&d1);
+        assert_eq!(got.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(), vec!["hr-core", "tool"], "{d1}");
+        assert!(r1.stderr.contains("outside-any-session"), "the outside path is reported: {}", r1.stderr);
+        for c in d1["checkpoints"].as_array().unwrap() {
+            assert_eq!(c["reason"], json!({ "kind": "ToolCall", "id": "tu-1" }));
+            assert_eq!(c["session"], json!(s.as_str()));
+        }
+        // hr-core's row records b.txt (not cwd's repo).
+        let h = &d1["checkpoints"][0];
+        assert!(paths(&h["entries"]).contains(&"b.txt".to_string()), "{h}");
+        // The same call again: the same rows.
+        let r2 = lv.run_piped(&tws, &["checkpoint", "--tool-call", "tu-1"], input.as_bytes());
+        assert_eq!(ids(&r2.ok()), got);
+        (s, tws, input)
+    });
+    for repo in ["hr-core", "tool"] {
+        assert_eq!(store_rows(&lv, &s, repo, "tu-1").len(), 1, "one row per (session, repo, tool call)");
+    }
+    // A third run with no daemon at all still answers: no write RPC is sent.
+    let r3 = lv.run_piped(&tws, &["checkpoint", "--tool-call", "tu-1"], input.as_bytes());
+    let d3 = r3.ok();
+    assert_eq!(ids(&d3).len(), 2, "{d3}");
+}
+
+#[test]
+fn daemon_up_read_does_not_open_sessions() {
+    // The local path opens Git and `Sessions` for every configured repo.
+    // With the main checkout moved away that open fails, so a success while
+    // it is away shows the read went to the daemon and never opened them.
+    let lv = Live::new(&["tool"], &base_files());
+    let main = lv.main("tool");
+    let away = main.with_file_name("tool.away");
+    let s = lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        write(&ws, "a.txt", b"edit\n");
+        let first = lv.run_in(&ws, &["checkpoint", "--tool-call", "tu-9"]).ok();
+        fs::rename(&main, &away).unwrap();
+        let r = std::panic::catch_unwind(|| {
+            let d = lv.run_in(&ws, &["deps", "list"]).ok();
+            assert_eq!(d, json!({ "proposals": [] }));
+            let again = lv.run_in(&ws, &["checkpoint", "--tool-call", "tu-9"]).ok();
+            assert_eq!(ids(&again), ids(&first));
+        });
+        fs::rename(&away, &main).unwrap();
+        r.unwrap();
+        s
+    });
+    // Control: the same moved checkout breaks the local (daemon-down) read
+    // that does open sessions.
+    fs::rename(&main, &away).unwrap();
+    let down = lv.run(&["status", "--session", s.as_str()]);
+    fs::rename(&away, &main).unwrap();
+    assert_eq!(down.code, 1, "the local path opens the repo: {down:?}");
+}
+
+#[test]
+fn readonly_works_without_daemon() {
+    let lv = Live::new(&["tool"], &base_files());
+    let (s, ws) = lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        write(&ws, "b.txt", b"two\n");
+        lv.run_in(&ws, &["checkpoint", "-m", "x"]).ok();
+        (s, ws)
+    });
+    // A stale socket file (nobody listening) and no socket file at all.
+    readonly_checks(&lv, &s, &ws);
+    let _ = fs::remove_file(lv.home.socket());
+    assert!(!lv.home.socket().exists());
+    readonly_checks(&lv, &s, &ws);
+}
+
+fn readonly_checks(lv: &Live, s: &SessionId, ws: &Path) {
+    let st = lv.run_in(ws, &["status"]).ok();
+    assert_eq!(st["manifest"]["id"], json!(s.as_str()));
+    let g = lv.run_in(ws, &["grep", "two"]).ok();
+    assert_eq!(paths(&g["hits"]), vec!["a.txt", "b.txt"], "{g}");
+    let f = lv.run(&["files", "--all", "*.txt"]).ok();
+    assert_eq!(paths(&f["paths"]), vec!["a.txt", "b.txt", "del.txt", "keep.txt"]);
+    let d = lv.run_in(ws, &["diff"]).ok();
+    assert_eq!(d["only_a"], json!([{ "path": "b.txt", "kind": "Added" }]));
+    let d = lv.run(&["diff", "--between", s.as_str(), s.as_str(), "--repo", "tool"]).ok();
+    // A session against itself: every change is in `both`, clean.
+    assert_eq!(d["both"], json!([{ "path": "b.txt", "kind": "Added", "preview": { "kind": "Clean", "hunks": [] } }]));
+    assert_eq!(lv.run(&["deps", "list"]).ok(), json!({ "proposals": [] }));
+    let ds = lv.run(&["daemon", "status"]).ok();
+    assert_eq!(ds["running"], json!(false));
+    for args in [vec!["publish", "--from", &format!("{s}:b.txt")], vec!["push", "tool"], vec!["gc"]] {
+        let args: Vec<&str> = args.iter().map(|a| a.as_ref()).collect();
+        let r = lv.run_in(ws, &args);
+        assert_eq!(r.code, 1, "{args:?}: {r:?}");
+        assert_eq!(r.err_code(), "Busy", "{args:?}: {r:?}");
+        assert_eq!(r.reason(), "daemon_down", "{args:?}: {r:?}");
+        assert!(r.env()["error"]["message"].as_str().unwrap().contains("git-strata daemon start"), "{r:?}");
+    }
+}
+
+#[test]
+fn history_is_read_from_the_store_alone() {
+    let lv = Live::new(&["tool"], &base_files());
+    let s = lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        write(&ws, "b.txt", b"1\n");
+        lv.run_in(&ws, &["checkpoint", "-m", "one"]).ok();
+        write(&ws, "b.txt", b"2\n");
+        lv.run_in(&ws, &["checkpoint", "-m", "two"]).ok();
+        s
+    });
+    let _ = fs::remove_file(lv.home.socket());
+    assert!(!lv.home.socket().exists(), "no socket");
+    let st = lv.run(&["status", "--session", s.as_str()]).ok();
+    assert_eq!(st["workspaces"]["tool"]["checkpoint"], json!(2), "{st}");
+    let all = lv.run(&["status", "--all"]).ok();
+    assert_eq!(all["sessions"][0]["workspaces"]["tool"]["checkpoint"], json!(2));
+}
+
+fn fake_launchctl(dir: &Path) -> (PathBuf, PathBuf) {
+    let bin = dir.join("fakebin");
+    fs::create_dir_all(&bin).unwrap();
+    let log = dir.join("launchctl.log");
+    let state = dir.join("launchctl.loaded");
+    let script = format!(
+        "#!/bin/sh\necho \"$*\" >> '{log}'\ncase \"$1\" in\n print) [ -f '{state}' ] && exit 0; exit 113;;\n bootstrap) touch '{state}';;\n bootout) rm -f '{state}';;\n *) exit 64;;\nesac\nexit 0\n",
+        log = log.display(),
+        state = state.display()
+    );
+    let p = bin.join("launchctl");
+    fs::write(&p, script).unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    (bin, log)
+}
+
+#[test]
+fn daemon_start_stop_do_not_use_the_socket() {
+    let h = Home::new();
+    let (bin, log) = fake_launchctl(h.path());
+    let plist = strata_daemon::plist::agent_plist_path(h.path());
+    fs::create_dir_all(plist.parent().unwrap()).unwrap();
+    fs::write(&plist, "<plist/>\n").unwrap();
+    let fake = FakeDaemon::start(&h.socket(), |_| json!({ "id": 0, "result": {} }));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let run = |args: &[&str]| support::Run::from(h.cmd(args).env("PATH", &path).output().unwrap());
+    assert_eq!(run(&["daemon", "start"]).ok(), json!({}));
+    assert_eq!(run(&["daemon", "start"]).ok(), json!({ "already": true }));
+    assert_eq!(run(&["daemon", "stop"]).ok(), json!({}));
+    assert_eq!(run(&["daemon", "stop"]).ok(), json!({ "already": true }));
+    assert_eq!(fake.connections(), 0, "no byte on the socket");
+    let uid = unsafe { libc::getuid() };
+    let t = format!("gui/{uid}/com.gwd.git-stratad");
+    let want = vec![
+        format!("print {t}"),
+        format!("bootstrap gui/{uid} {}", plist.display()),
+        format!("print {t}"),
+        format!("print {t}"),
+        format!("bootout {t}"),
+        format!("print {t}"),
+    ];
+    let got: Vec<String> = fs::read_to_string(&log).unwrap().lines().map(String::from).collect();
+    assert_eq!(got, want);
+    // Without the plist, start refuses before launchctl.
+    fs::remove_file(&plist).unwrap();
+    let r = run(&["daemon", "start"]);
+    assert_eq!((r.err_code().as_str(), r.reason().as_str()), ("InvalidInput", "no_plist"));
+    assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), want.len());
+}
+
+#[test]
+fn git_strata_is_the_same_binary() {
+    let lv = Live::new(&["tool"], &base_files());
+    let bin = lv.home.path().join("gitbin");
+    fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(BIN, bin.join("git-strata")).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    for args in [vec!["status", "--all"], vec!["files", "--all"], vec!["no-such"], vec!["deps"]] {
+        let direct = lv.home.cmd(&args).env("PATH", &path).output().unwrap();
+        let mut via = Command::new("git");
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy().starts_with("GIT_") {
+                via.env_remove(&k);
+            }
+        }
+        let via = via
+            .arg("strata")
+            .args(&args)
+            .current_dir(lv.home.path())
+            .env("HOME", lv.home.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("PATH", &path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&via.stdout), String::from_utf8_lossy(&direct.stdout), "{args:?}");
+        assert_eq!(via.status.code(), direct.status.code(), "{args:?}");
+    }
+    // One command tree: one bin target and no src/bin.
+    let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    assert_eq!(manifest.matches("[[bin]]").count(), 1);
+    assert!(!Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin").exists());
+}
+
+/// Two sessions of `tool` (built with `bin_files`) that both change
+/// `a.txt` and `bin.dat`.
+fn two_sessions(lv: &Live, a_txt: (&[u8], &[u8])) -> (SessionId, SessionId) {
+    let a = lv.new_session("T-a", "tool");
+    let b = lv.new_session("T-b", "tool");
+    let (wa, wb) = (lv.ws(&a, "tool"), lv.ws(&b, "tool"));
+    write(&wa, "a.txt", a_txt.0);
+    write(&wb, "a.txt", a_txt.1);
+    write(&wa, "bin.dat", b"xx\0match a\n");
+    write(&wb, "bin.dat", b"xx\0match b\n");
+    // publish's preview reads both sides' blobs from the store, so the
+    // edits are checkpointed first (an unrecorded edit's blob is missing
+    // there and the entry reports `Corrupt`; see impl-progress/cli.md).
+    lv.run_in(&wa, &["checkpoint", "-m", "a"]).ok();
+    lv.run_in(&wb, &["checkpoint", "-m", "b"]).ok();
+    (a, b)
+}
+
+#[test]
+fn binary_file_is_marked_not_rejected() {
+    let lv = Live::new(&["tool"], &bin_files());
+    lv.serve(|_| {
+        let (a, b) = two_sessions(&lv, (b"one\nmatch A\n", b"one\nmatch B\n"));
+        let d = lv.run(&["diff", "--between", a.as_str(), b.as_str(), "--repo", "tool"]).ok();
+        let both = d["both"].as_array().unwrap();
+        let bin = both.iter().find(|e| e["path"] == "bin.dat").expect("bin.dat in both");
+        assert_eq!(bin["code"], "Binary", "{bin}");
+        assert!(bin.get("preview").is_none(), "{bin}");
+        let txt = both.iter().find(|e| e["path"] == "a.txt").expect("a.txt in both");
+        assert!(txt["preview"]["hunks"].as_array().is_some_and(|h| !h.is_empty()), "{txt}");
+        let g = lv.run(&["grep", "match", "--all"]).ok();
+        assert!(g["hits"].as_array().unwrap().iter().all(|h| h["path"] != "bin.dat"), "{g}");
+        assert_eq!(paths(&g["hits"]), vec!["a.txt", "a.txt"]);
+        let sk = g["skipped"].as_array().unwrap();
+        assert_eq!(sk.len(), 2, "{g}");
+        for e in sk {
+            assert_eq!((e["path"].as_str(), e["code"].as_str()), (Some("bin.dat"), Some("Binary")));
+        }
+    });
+}
+
+#[test]
+fn lossy_utf8_one_fffd_per_bad_sequence() {
+    let lv = Live::new(&["tool"], &bin_files());
+    lv.serve(|_| {
+        let (a, b) = two_sessions(&lv, (b"one\nours \xff mark\n", b"one\ntheirs \xe2\x82 mark\n"));
+        let g = lv.run(&["grep", "mark", "--all"]).ok();
+        let mut texts: Vec<String> = g["hits"].as_array().unwrap().iter().map(|h| h["text"].as_str().unwrap().to_string()).collect();
+        texts.sort();
+        assert_eq!(texts, vec!["ours \u{FFFD} mark", "theirs \u{FFFD} mark"], "{g}");
+        let d = lv.run(&["diff", "--between", a.as_str(), b.as_str(), "--repo", "tool"]).ok();
+        let txt = d["both"].as_array().unwrap().iter().find(|e| e["path"] == "a.txt").unwrap().clone();
+        assert_eq!(txt["preview"]["kind"], "Conflict", "{txt}");
+        let h = &txt["preview"]["hunks"][0];
+        assert!(h["ours"].as_str().unwrap().contains("ours \u{FFFD} mark"), "{h}");
+        assert!(h["theirs"].as_str().unwrap().contains("theirs \u{FFFD} mark"), "{h}");
+        assert_eq!(h["theirs"].as_str().unwrap().matches('\u{FFFD}').count(), 1);
+    });
+}
+
+#[test]
+fn diff_lists_content_changes_only() {
+    let lv = Live::new(&["tool"], &base_files());
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        write(&ws, "a.txt", b"one\nTWO\n");
+        write(&ws, "new.txt", b"new\n");
+        fs::remove_file(ws.join("del.txt")).unwrap();
+        // Same bytes, new inode and mtime: not a change.
+        fs::remove_file(ws.join("keep.txt")).unwrap();
+        write(&ws, "keep.txt", b"same\n");
+        let d = lv.run_in(&ws, &["diff"]).ok();
+        assert_eq!(
+            d,
+            json!({
+                "only_a": [
+                    { "path": "a.txt", "kind": "Modified" },
+                    { "path": "del.txt", "kind": "Deleted" },
+                    { "path": "new.txt", "kind": "Added" },
+                ],
+                "only_b": [],
+                "both": [],
+            })
+        );
+        // --session gives the same document from anywhere.
+        assert_eq!(lv.run(&["diff", "--session", s.as_str()]).ok(), d);
+    });
+}
+
+#[test]
+fn diff_omits_hunks_for_binary_and_ignores_inode() {
+    let lv = Live::new(&["tool"], &base_files());
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        write(&ws, "h1.txt", b"linked\n");
+        fs::hard_link(ws.join("h1.txt"), ws.join("h2.txt")).unwrap();
+        // A type change: the regular file becomes a symlink.
+        fs::remove_file(ws.join("keep.txt")).unwrap();
+        std::os::unix::fs::symlink("a.txt", ws.join("keep.txt")).unwrap();
+        let r = lv.run_in(&ws, &["diff"]);
+        let d = r.ok();
+        assert_eq!(
+            d["only_a"],
+            json!([
+                { "path": "h1.txt", "kind": "Added" },
+                { "path": "h2.txt", "kind": "Added" },
+                { "path": "keep.txt", "kind": "Modified" },
+            ])
+        );
+        for key in ["inode", "ino", "nlink", "dev", "hardlink", "link"] {
+            assert!(!r.stdout.contains(&format!("\"{key}\"")), "{key}: {}", r.stdout);
+        }
+        let lv = Live::new(&["tool"], &bin_files());
+        let (a, b) = lv.serve(|_| two_sessions(&lv, (b"x\n", b"y\n")));
+        let d = lv.run(&["diff", "--between", a.as_str(), b.as_str(), "--repo", "tool"]).ok();
+        let bin = d["both"].as_array().unwrap().iter().find(|e| e["path"] == "bin.dat").unwrap().clone();
+        assert_eq!(bin, json!({ "path": "bin.dat", "kind": "Modified", "code": "Binary" }));
+    });
+}
+
+#[test]
+fn grep_skips_nul_and_keeps_valid_hits() {
+    let lv = Live::new(&["tool"], &base_files());
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        let mut nul = vec![b'a'; 20_000];
+        nul.extend_from_slice(b"\0 needle\n");
+        write(&ws, "late-nul.txt", &nul);
+        write(&ws, "nul.txt", b"needle\0\n");
+        write(&ws, "bad.txt", b"needle \xff\nok\n\xc0needle\n");
+        write(&ws, "multi.txt", "日本 needle 語\n".as_bytes());
+        let mut long = "x".repeat(200_000);
+        long.push_str("needle\nneedle 2\n");
+        write(&ws, "long.txt", long.as_bytes());
+        let g = lv.run_in(&ws, &["grep", "needle"]).ok();
+        let hits: Vec<(String, u64, String)> = g["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| (h["path"].as_str().unwrap().into(), h["line"].as_u64().unwrap(), h["text"].as_str().unwrap().chars().rev().take(12).collect::<String>().chars().rev().collect()))
+            .collect();
+        assert_eq!(
+            hits,
+            vec![
+                ("bad.txt".into(), 1, "needle \u{FFFD}".into()),
+                ("bad.txt".into(), 3, "\u{FFFD}needle".into()),
+                ("long.txt".into(), 1, "xxxxxxneedle".into()),
+                ("long.txt".into(), 2, "needle 2".into()),
+                ("multi.txt".into(), 1, "日本 needle 語".into()),
+            ],
+            "{g}"
+        );
+        let sk: Vec<(String, String)> = g["skipped"].as_array().unwrap().iter().map(|e| (e["path"].as_str().unwrap().into(), e["code"].as_str().unwrap().into())).collect();
+        assert_eq!(sk, vec![("late-nul.txt".into(), "Binary".into()), ("nul.txt".into(), "Binary".into())]);
+    });
+}
+
+#[test]
+fn no_multi_fault_order() {
+    // clap refuses first; there is no contract on which of two faults wins
+    // beyond that, and every code is a types.md name.
+    let lv = Live::new(&["tool"], &base_files());
+    let names = code_names();
+    for args in [vec!["grep", "--session", "no-such"], vec!["restore", "--session", "no-such"], vec!["diff", "--between", "x"]] {
+        let r = lv.run(&args);
+        assert_eq!(r.code, 1);
+        assert_eq!(r.err_code(), "InvalidInput", "{args:?}: {r:?}");
+        assert!(names.contains(&r.err_code()));
+    }
+    let r = lv.run(&["status", "--session", "no-such"]);
+    assert!(names.contains(&r.err_code()), "{r:?}");
+}
+
+#[test]
+fn path_order_is_repopath_ord() {
+    let lv = Live::new(&["tool"], &base_files());
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        for i in 0..70 {
+            write(&ws, &format!("d/f{i}.txt"), b"hit\n");
+        }
+        for p in ["B.txt", "a b.txt", "Z/x.txt", "é.txt", "d-x.txt", "d.txt", "d0.txt"] {
+            write(&ws, p, b"hit\n");
+        }
+        let f = lv.run_in(&ws, &["files"]).ok();
+        let got = paths(&f["paths"]);
+        let mut want = got.clone();
+        want.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        assert_eq!(got, want);
+        assert_eq!(got.iter().filter(|p| p.starts_with("d/")).count(), 70);
+        let g = lv.run_in(&ws, &["grep", "^hit$"]).ok();
+        let gp = paths(&g["hits"]);
+        let mut gw = gp.clone();
+        gw.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        assert_eq!(gp, gw);
+        assert_eq!(gp.len(), 77);
+        let d = lv.run_in(&ws, &["diff"]).ok();
+        let dp = paths(&d["only_a"]);
+        let mut dw = dp.clone();
+        dw.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        assert_eq!(dp, dw);
+    });
+}
+
+fn assert_one_document(stdout: &str) {
+    assert_eq!(stdout.matches('\n').count(), 1, "one line");
+    for k in ["cursor", "next", "continue", "page", "truncated_at", "more"] {
+        assert!(!stdout.contains(&format!("\"{k}\"")), "{k}");
+    }
+}
+
+#[test]
+fn no_pagination() {
+    let lv = Live::new(&["tool"], &base_files());
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        for i in 0..300 {
+            write(&ws, &format!("many/{i:03}.txt"), format!("needle {i}\n").as_bytes());
+        }
+        let r = lv.run_in(&ws, &["grep", "needle"]);
+        assert_one_document(&r.stdout);
+        assert_eq!(r.ok()["hits"].as_array().unwrap().len(), 300);
+        let r = lv.run_in(&ws, &["files", "many/**"]);
+        assert_one_document(&r.stdout);
+        assert_eq!(r.ok()["paths"].as_array().unwrap().len(), 300);
+        let r = lv.run_in(&ws, &["diff"]);
+        assert_one_document(&r.stdout);
+        assert_eq!(r.ok()["only_a"].as_array().unwrap().len(), 300);
+    });
+}
+
+#[test]
+fn conflict_json_is_not_windowed() {
+    // The daemon's Conflict detail (publish's whole list) passes through.
+    let lv = Live::new(&["tool"], &base_files());
+    let fake = FakeDaemon::start(&lv.home.socket(), |req| {
+        let conflicts: Vec<Value> = (0..2000).map(|i| json!({ "path": format!("f{i:04}.txt"), "sessions": ["s-a", "s-b"] })).collect();
+        json!({ "id": req["id"], "error": { "code": "Conflict", "message": "conflicts", "detail": { "conflicts": conflicts } } })
+    });
+    let r = lv.run(&["gc"]);
+    assert_eq!(r.err_code(), "Conflict", "{r:?}");
+    let detail = &r.env()["error"]["detail"];
+    assert_eq!(detail["conflicts"].as_array().unwrap().len(), 2000);
+    assert_eq!(detail.as_object().unwrap().keys().collect::<Vec<_>>(), vec!["conflicts"]);
+    assert!(!r.stdout.contains("runcated"), "no window flag");
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[test]
+fn shape_is_this_doc_not_a_golden() {
+    fn keys(v: &Value) -> Vec<&str> {
+        v.as_object().unwrap().keys().map(|k| k.as_str()).collect()
+    }
+    let lv = Live::new(&["tool"], &base_files());
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        write(&ws, "b.txt", b"two\n");
+        let st = lv.run_in(&ws, &["status"]).ok();
+        for k in ["manifest", "state", "workspaces"] {
+            assert!(st.get(k).is_some(), "status.{k}: {st}");
+        }
+        assert_eq!(keys(&lv.run(&["status", "--all"]).ok()), vec!["sessions"]);
+        let cp = lv.run_in(&ws, &["checkpoint", "-m", "m"]).ok();
+        assert_eq!(keys(&cp), vec!["checkpoints"]);
+        let id = cp["checkpoints"][0]["id"].as_u64().unwrap().to_string();
+        let gv = lv.run_in(&ws, &["grep", "two"]).ok();
+        let mut g = keys(&gv);
+        g.sort();
+        assert_eq!(g, vec!["hits", "skipped"]);
+        let empty = lv.run_in(&ws, &["grep", "no such text anywhere"]).ok();
+        assert_eq!(empty["hits"], json!([]));
+        assert_eq!(keys(&lv.run_in(&ws, &["files"]).ok()), vec!["paths"]);
+        let f = lv.run_in(&ws, &["files", "nothing/**"]).ok();
+        assert_eq!(f, json!({ "paths": [] }));
+        let dv = lv.run_in(&ws, &["diff"]).ok();
+        let mut d = keys(&dv);
+        d.sort();
+        assert_eq!(d, vec!["both", "only_a", "only_b"]);
+        assert_eq!(lv.run(&["deps", "list"]).ok(), json!({ "proposals": [] }));
+        assert_eq!(lv.run(&["gc"]).ok(), json!({}));
+        let r = lv.run_in(&ws, &["restore", &id]).ok();
+        assert_eq!(r, json!({ "checkpoint": id.parse::<u64>().unwrap(), "session": s.as_str() }));
+    });
+}
+
+#[test]
+fn one_method_table() {
+    // Every method name the cli sends is one of daemon.md §4's, and its
+    // read/write kind agrees with the daemon's table.
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let re = regex::Regex::new(r#"call\(\s*"([a-z_]+)"\s*,[^;]*?Kind::(Read|Write)"#).unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    for e in fs::read_dir(&src).unwrap() {
+        let p = e.unwrap().path();
+        let text = fs::read_to_string(&p).unwrap();
+        for c in re.captures_iter(&text) {
+            let m = strata_daemon::rpc::Method::from_name(&c[1]).unwrap_or_else(|| panic!("{}: {} is not a daemon method", p.display(), &c[1]));
+            assert_eq!(m.is_read_only(), &c[2] == "Read", "{}", &c[1]);
+            seen.insert(c[1].to_string());
+        }
+    }
+    for m in ["new", "status", "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_list", "gc", "daemon_status", "publish", "push"] {
+        assert!(seen.contains(m), "{m} not found in {seen:?}");
+    }
+}
+
+#[test]
+fn results_live_in_data_not_a_log() {
+    let lv = Live::new(&["tool"], &base_files());
+    lv.serve(|_| {
+        let r = lv.run(&["new", "--ticket", "T-1", "--repos", "tool"]);
+        let s = r.ok()["manifest"]["id"].as_str().unwrap().to_string();
+        assert!(!r.stderr.contains(&s), "{}", r.stderr);
+        let ws = lv.ws(&SessionId::try_from(s.clone()).unwrap(), "tool");
+        write(&ws, "b.txt", b"x\n");
+        let r = lv.run_in(&ws, &["checkpoint", "-m", "m"]);
+        let d = r.ok();
+        assert_eq!(d["checkpoints"][0]["session"], json!(s));
+        assert!(r.stderr.is_empty(), "{}", r.stderr);
+        for args in [vec!["status"], vec!["files"], vec!["grep", "x"], vec!["diff"]] {
+            let r = lv.run_in(&ws, &args);
+            r.ok();
+            assert!(!r.stderr.contains(&s), "{args:?}: {}", r.stderr);
+        }
+    });
+}
+
+#[test]
+fn listing_is_one_document() {
+    let lv = Live::new(&["tool"], &base_files());
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        for i in 0..2500 {
+            write(&ws, &format!("l/{}/{i:05}-{}.txt", i % 7, "p".repeat(40)), b"x\n");
+        }
+        let r = lv.run_in(&ws, &["files", "l/**"]);
+        assert_one_document(&r.stdout);
+        assert_eq!(r.ok()["paths"].as_array().unwrap().len(), 2500);
+    });
+}
+

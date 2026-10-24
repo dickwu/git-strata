@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod json;
+pub mod live;
 
 use std::fs;
 use std::path::{Path, PathBuf};
