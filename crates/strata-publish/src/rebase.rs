@@ -2,6 +2,7 @@
 //! (§5.7) and `diff_between` (§5.9).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,7 +17,7 @@ use strata_types::{
     WorkspaceState,
 };
 
-use crate::stage::{Src, Ver, cap_text, git_mode};
+use crate::stage::{Src, Ver, cap_text, git_mode, read_rooted};
 use crate::{Ctx, Result};
 
 /// What the post-publish rebase did to one session (§3).
@@ -427,6 +428,67 @@ fn entry_ver(e: &OverlayEntry) -> Option<Ver> {
     }
 }
 
+fn workspace_changed(s: &SessionId, p: &RepoPath) -> StrataError {
+    StrataError::new(Code::Busy, format!("{} in session {s} changed while it was read; retry", p.as_str()))
+        .with_detail(json!({ "reason": "workspace_changed", "session": s.as_str(), "path": p.as_str() }))
+}
+
+/// One side's version of `e` read from the workspace itself, not the
+/// store: an edit made after the last checkpoint has a BLAKE3 from the
+/// scan but no blob yet (§5.9 previews the current content, checkpointed
+/// or not). The bytes must still hash to the scanned id; otherwise the
+/// file changed after the scan → `Busy` (`workspace_changed`), retry.
+/// Above `MERGE_MAX_BYTES` nothing is read (the entry is `TooLarge`).
+fn workspace_ver(root: &Path, s: &SessionId, e: &OverlayEntry) -> Result<Option<Ver>> {
+    let Some(mut v) = entry_ver(e) else { return Ok(None) };
+    let full = root.join(e.path.as_str());
+    let md = match std::fs::symlink_metadata(&full) {
+        Ok(md) => md,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Err(workspace_changed(s, &e.path)),
+        Err(err) => return Err(strata_apfs::classify_io_error(&err, strata_apfs::IoSide::Read, &full)),
+    };
+    if !md.file_type().is_symlink() && md.len() > strata_overlay::MERGE_MAX_BYTES {
+        v.size = Some(md.len());
+        return Ok(Some(v));
+    }
+    let bytes = match read_rooted(root, &e.path) {
+        Ok(b) => b,
+        Err(err) if matches!(err.code, Code::NoSuchPath | Code::IsDirectory | Code::NotFile) => {
+            return Err(workspace_changed(s, &e.path));
+        }
+        Err(err) => return Err(err),
+    };
+    if v.blake.as_deref() != Some(blake3::hash(&bytes).to_hex().as_str()) {
+        return Err(workspace_changed(s, &e.path));
+    }
+    v.size = Some(bytes.len() as u64);
+    v.data = Some(Arc::new(bytes));
+    Ok(Some(v))
+}
+
+/// Before projecting a side onto a newer base, its blobs must be in the
+/// store (overlay.md §5.8 precondition). Edits after the last checkpoint
+/// have none yet: store them from the workspace. An unreferenced blob is a
+/// cache fill, not a visible write (overlay.md, Addendum 6 refinement 4);
+/// gc collects it after the window. A put that does not match the scan
+/// means the file changed → `Busy` (`workspace_changed`).
+fn fill_blobs(ctx: &Ctx, s: &SessionId, root: &Path, o: &Overlay) -> Result<()> {
+    for e in &o.entries {
+        let Some(Ver { blake: Some(want), .. }) = entry_ver(e) else { continue };
+        let got = match ctx.store.put_blob_rooted(root, &e.path) {
+            Ok(id) => id,
+            Err(err) if matches!(err.code, Code::NoSuchPath | Code::IsDirectory | Code::NotFile) => {
+                return Err(workspace_changed(s, &e.path));
+            }
+            Err(err) => return Err(err),
+        };
+        if got.as_str() != want {
+            return Err(workspace_changed(s, &e.path));
+        }
+    }
+    Ok(())
+}
+
 fn conflict(kind: &str, p: &RepoPath) -> StrataError {
     StrataError::new(Code::Conflict, format!("{} cannot be merged ({kind})", p.as_str()))
         .with_detail(json!({ "reason": kind, "path": p.as_str() }))
@@ -476,7 +538,8 @@ fn preview(src: &Src, p: &RepoPath, base: Option<&Ver>, a: Option<&Ver>, b: Opti
     })
 }
 
-/// §3 `diff_between`: read-only; no repo lock, no ref, no store write.
+/// §3 `diff_between`: read-only; no repo lock, no ref. The only store
+/// writes are cache fills (unreferenced blobs) when a side is projected.
 pub fn diff_between(ctx: &Ctx, a: SessionId, b: SessionId, repo: &RepoName) -> Result<BetweenDiff> {
     if repo != ctx.repo {
         return Err(invalid(
@@ -492,6 +555,10 @@ pub fn diff_between(ctx: &Ctx, a: SessionId, b: SessionId, repo: &RepoName) -> R
     let mut oa = current_overlay(ctx, &a, &wa, &ba)?;
     let mut ob = current_overlay(ctx, &b, &wb, &bb)?;
     // Different pins: project the older side onto the newer base.
+    // Which side, if any, was projected (its entries then come from the
+    // store; the other side is read from its workspace).
+    let mut projected_a = false;
+    let mut projected_b = false;
     let common = if wa.base == wb.base {
         ba
     } else {
@@ -506,15 +573,19 @@ pub fn diff_between(ctx: &Ctx, a: SessionId, b: SessionId, repo: &RepoName) -> R
                 json!({ "a": wa.head.as_str(), "b": wb.head.as_str() }),
             ));
         };
-        let (old_o, old_b, new_b, old_ws) = if a_older { (&oa, &ba, &bb, &wa) } else { (&ob, &bb, &ba, &wb) };
+        let (old_o, old_b, new_b, old_ws, old_s) =
+            if a_older { (&oa, &ba, &bb, &wa, &a) } else { (&ob, &bb, &ba, &wb, &b) };
+        fill_blobs(ctx, old_s, &old_ws.path, old_o)?;
         let ignorecase = ctx.git.read_index(&old_ws.path)?.ignorecase;
         let opts = RebaseOptions::for_move(new_b, ignorecase)?;
         let projected = strata_overlay::rebase(old_o, old_b, new_b, ctx.store, &opts)?.overlay;
         if a_older {
             oa = projected;
+            projected_a = true;
             bb
         } else {
             ob = projected;
+            projected_b = true;
             ba
         }
     };
@@ -536,7 +607,9 @@ pub fn diff_between(ctx: &Ctx, a: SessionId, b: SessionId, repo: &RepoName) -> R
                     file: Some((common.dir.clone(), p.clone())),
                     data: None,
                 });
-                let r = preview(&src, p, base.as_ref(), entry_ver(ea).as_ref(), entry_ver(eb).as_ref());
+                let va = if projected_a { entry_ver(ea) } else { workspace_ver(&wa.path, &a, ea)? };
+                let vb = if projected_b { entry_ver(eb) } else { workspace_ver(&wb.path, &b, eb)? };
+                let r = preview(&src, p, base.as_ref(), va.as_ref(), vb.as_ref());
                 out.both.push((p.clone(), r));
             }
         }

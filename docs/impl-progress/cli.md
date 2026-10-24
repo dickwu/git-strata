@@ -106,12 +106,13 @@ Not merged.
 - **Base-mode `diff` is always local** (the overlay against base, read
   from the workspace and store); `diff --between` uses the daemon when it
   is up and the local read otherwise.
-- **`diff --between` on unrecorded edits.** strata-publish's preview reads
-  both sides' blobs from the store; an edit that has no checkpoint yet has
-  a blob id from reconcile but no blob, and that entry comes back with
-  `code: "Corrupt"` instead of a preview. Not fixed in the cli (it is
-  publish's `diff_between`); the tests checkpoint first. **Open issue,
-  reported upstream.**
+- **`diff --between` on unrecorded edits.** Was: strata-publish's preview
+  read both sides' blobs from the store, and an edit with no checkpoint yet
+  came back `Corrupt`. **Fixed on impl/v1** in publish's `diff_between`
+  (publish.md §5.9): the unprojected side is read from the workspace and
+  checked against the scanned BLAKE3 (`Busy workspace_changed` on a
+  mismatch); a side projected onto a newer base has its blobs cache-filled
+  first. `two_sessions` in tests/cli.rs no longer checkpoints.
 - **add/add between sessions** is `Conflict` (no base), not `Binary`,
   even for a binary file: upstream publish rule order.
 - **Binary detection.** strata-search skips a file with a NUL anywhere

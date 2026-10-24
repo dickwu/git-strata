@@ -225,6 +225,12 @@ These touch shared crates; a parallel worker (search) may conflict there.
   newer; neither an ancestor → `InvalidInput bases_unordered`. Previews
   follow §5.3 (modify/delete, add/add, link, mode → conflict entries;
   `TooLarge`; binary); merge3 hunks are capped, `start` = our start line.
+  Fix (after cli): uncheckpointed edits used to come back `Corrupt` (no blob
+  in the store). The unprojected side is now read from its workspace and
+  must hash to the scanned id, else `Busy workspace_changed`; the projected
+  side's blobs are cache-filled with `put_blob_rooted` before
+  `overlay::rebase` (a read-only store passes `ReadOnly` through on that
+  path only). Test: `diff_between_previews_uncheckpointed_edits`.
 - `rebase_session` (public) runs `observe_main` itself when main's tip is
   `head`; inside `publish` it is run once before the rebases.
 - The Task 4 `with_repo_unbounded` helper was replaced by `under_locks`.

@@ -285,11 +285,8 @@ fn two_sessions(lv: &Live, a_txt: (&[u8], &[u8])) -> (SessionId, SessionId) {
     write(&wb, "a.txt", a_txt.1);
     write(&wa, "bin.dat", b"xx\0match a\n");
     write(&wb, "bin.dat", b"xx\0match b\n");
-    // publish's preview reads both sides' blobs from the store, so the
-    // edits are checkpointed first (an unrecorded edit's blob is missing
-    // there and the entry reports `Corrupt`; see impl-progress/cli.md).
-    lv.run_in(&wa, &["checkpoint", "-m", "a"]).ok();
-    lv.run_in(&wb, &["checkpoint", "-m", "b"]).ok();
+    // Deliberately not checkpointed: `diff --between` previews the current
+    // workspace content, recorded or not.
     (a, b)
 }
 

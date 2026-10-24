@@ -431,6 +431,8 @@ deps.md §5.12 的顺序，不改：
 
 只读，不占 repo 写锁。两边 `overlay::compute`。只在一边有的路径进 `only_a` / `only_b`。两边都有的用与 §5.3 相同的三边做预览。钉的基线不同时，先把旧的一方用 `overlay::rebase`（`RebaseOptions::for_move`）投影到新基线，再比。超过 64 MiB 的文件该条目返回 `TooLarge`，不读内容。二进制该条目返回 `Binary`，不给 hunk。整次调用不因此失败。
 
+预览的是两边工作区的当前内容，checkpoint 过的与没 checkpoint 的修改一样。没投影的一方从工作区按路径读字节（不跟随符号链接），读出的 BLAKE3 必须等于扫描时的值，不等或文件已不在 → 该次调用返回 `Busy`（`detail.reason = "workspace_changed"`），重试即可；超过 64 MiB 的不读，照上面返回 `TooLarge`。要投影的一方，先用 `put_blob_rooted` 把 overlay 里的 blob 存进 store（overlay §5.8 的前提），这是缓存填充，不算对外写入（overlay.md Addendum 6 refinement 4），存出来的 id 与扫描不符同样是 `Busy`（`workspace_changed`）；store 只读时这一步透传 `ReadOnly`。从不因为修改还没 checkpoint 而返回 `Corrupt`。[实现时补的决定]
+
 ### 5.10 复杂度
 
 | 操作 | 复杂度 | 目标 |

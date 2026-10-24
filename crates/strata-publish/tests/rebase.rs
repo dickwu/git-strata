@@ -487,3 +487,52 @@ fn diff_between_previews_both_sides() {
     let e: StrataError = diff_between(&ctx, a, b, &repo_name("other")).unwrap_err();
     assert_eq!(e.code, Code::InvalidInput);
 }
+
+/// Edits made after the last checkpoint (or with no checkpoint at all)
+/// have a scanned BLAKE3 but no blob yet: the preview reads them from the
+/// workspace instead of returning `Corrupt` (§5.9 previews current
+/// content). Covers the same-base path and the projection path.
+#[test]
+fn diff_between_previews_uncheckpointed_edits() {
+    let fx = fx();
+    // a: checkpointed once, then edited again; b: never checkpointed.
+    let (a, _) = session_with(&fx, &[("src/index.ts", b"export const a = 11\n")], None);
+    fx.edit(&a, "tool", &[("src/index.ts", b"export const a = 21\n"), ("a-new.txt", b"fresh\n")]);
+    let b = fx.new_session(&["tool"]);
+    fx.edit(&b, "tool", &[("src/index.ts", b"export const a = 22\n"), ("same.txt", b"x\n")]);
+    fx.edit(&a, "tool", &[("same.txt", b"x\n")]);
+    let refs = fx.refs("tool");
+    let holds = fx.lock.holds().len();
+    let d = fx.deps_ctx("tool");
+    let ss = fx.sessions();
+    let ctx = fx.ctx(&d, &ss);
+    let diff = diff_between(&ctx, a.clone(), b.clone(), &repo_name("tool")).unwrap();
+    assert_eq!(diff.only_a, rps(&["a-new.txt"]));
+    assert!(diff.only_b.is_empty(), "{diff:?}");
+    let both: Vec<&str> = diff.both.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(both, vec!["same.txt", "src/index.ts"]);
+    let same = diff.both[0].1.as_ref().unwrap_or_else(|e| panic!("same.txt: {e:?}"));
+    assert!(same.merged && same.hunks.is_empty());
+    let idx = diff.both[1].1.as_ref().unwrap_or_else(|e| panic!("src/index.ts: {e:?}"));
+    assert!(!idx.merged);
+    assert!(idx.hunks[0].ours.contains("21") && idx.hunks[0].theirs.contains("22"), "{idx:?}");
+    assert_eq!(fx.lock.holds().len(), holds, "no repo lock");
+    assert_eq!(fx.refs("tool"), refs, "no ref written");
+
+    // Different pins: a (older base, uncheckpointed edit) is projected
+    // onto c's newer base; its blobs are cache-filled first.
+    fx.land_on_origin("tool", "main", &[("upstream.txt", b"up\n")], "upstream");
+    fx.git_of("tool").fetch("origin", "main").unwrap();
+    let c = fx.new_session(&["tool"]);
+    if fx.base_of(&c, "tool") == fx.base_of(&a, "tool") {
+        panic!("the fixture did not give c a newer base");
+    }
+    fx.edit(&c, "tool", &[("src/index.ts", b"export const a = 33\n")]);
+    let ctx = fx.ctx(&d, &ss);
+    let diff = diff_between(&ctx, a.clone(), c.clone(), &repo_name("tool")).unwrap();
+    let idx = diff.both.iter().find(|(p, _)| p.as_str() == "src/index.ts").expect("both sides touch index.ts");
+    let idx = idx.1.as_ref().unwrap_or_else(|e| panic!("projected src/index.ts: {e:?}"));
+    assert!(!idx.merged);
+    assert!(idx.hunks[0].ours.contains("21") && idx.hunks[0].theirs.contains("33"), "{idx:?}");
+    assert!(diff.only_a.iter().any(|p| p.as_str() == "a-new.txt"), "{diff:?}");
+}
