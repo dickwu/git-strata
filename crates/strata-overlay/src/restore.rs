@@ -343,7 +343,7 @@ pub fn restore(
         }
     };
     let cv = View::new(&c, &base.manifest);
-    let dirs = emptied_dirs(&cv, &ops);
+    let dirs = keep_dirs_holding_bare_dirs(ws.root, emptied_dirs(&cv, &ops), &ops);
 
     // The scan's attrs of each path to replace or delete (the proof's basis).
     let scanned: BTreeMap<RepoPath, Attrs> = ops
@@ -766,6 +766,53 @@ fn emptied_dirs(cv: &View, ops: &[Op]) -> Vec<RepoPath> {
         .collect();
     dirs.sort_by(|a, b| depth(b).cmp(&depth(a)).then(a.cmp(b)));
     dirs.into_iter().map(rp).collect()
+}
+
+/// A directory the view says this restore empties may also hold a directory
+/// tree the overlay never sees (only directories, no files: nothing is
+/// recorded for it). That directory is not emptied by this restore, so it and
+/// its ancestors stay (§5.7 step 7: "restore 没弄空的目录从不删"); without this
+/// the precheck would refuse the restore over a tree that holds no content.
+fn keep_dirs_holding_bare_dirs(root: &Path, dirs: Vec<RepoPath>, ops: &[Op]) -> Vec<RepoPath> {
+    let deletes: BTreeSet<&str> = ops
+        .iter()
+        .filter(|o| o.target.is_none())
+        .map(|o| o.path.as_str())
+        .collect();
+    let planned: BTreeSet<String> = dirs.iter().map(|d| d.as_str().to_owned()).collect();
+    let mut keep: BTreeSet<String> = BTreeSet::new();
+    for d in &planned {
+        let Ok(rd) = std::fs::read_dir(root.join(d)) else {
+            continue;
+        };
+        let holds_bare = rd.flatten().any(|e| {
+            let child = format!("{d}/{}", e.file_name().to_string_lossy());
+            !deletes.contains(child.as_str())
+                && !planned.contains(&child)
+                && bare_dir_tree(&root.join(&child))
+        });
+        if holds_bare {
+            keep.insert(d.clone());
+            keep.extend(ancestors(d).map(str::to_owned));
+        }
+    }
+    dirs.into_iter()
+        .filter(|d| !keep.contains(d.as_str()))
+        .collect()
+}
+
+/// A real directory (not a link) whose whole tree is directories only.
+fn bare_dir_tree(p: &Path) -> bool {
+    let Ok(m) = std::fs::symlink_metadata(p) else {
+        return false;
+    };
+    if !m.file_type().is_dir() {
+        return false;
+    }
+    let Ok(rd) = std::fs::read_dir(p) else {
+        return false;
+    };
+    rd.into_iter().all(|e| e.is_ok_and(|e| bare_dir_tree(&e.path())))
 }
 
 const LOCK_FLAGS: u32 = libc::UF_IMMUTABLE | libc::SF_IMMUTABLE | libc::UF_APPEND | libc::SF_APPEND;

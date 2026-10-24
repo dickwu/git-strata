@@ -1108,3 +1108,35 @@ fn random_edits_incremental_equals_cold_and_restores_exact() {
 fn random_edits_incremental_equals_cold_and_restores_exact_long() {
     random_edits(2048);
 }
+
+/// Found by `random_edits`: `d/sub/e.txt` renamed away leaves the bare
+/// directory `d/sub`, which no checkpoint records. A restore that deletes the
+/// last file of `d` must keep `d` (it does not empty it) instead of refusing
+/// over `d/sub`.
+#[test]
+fn restore_keeps_a_directory_holding_bare_directories() {
+    let w = World::new();
+    let c0 = cp(&w, None);
+    try_rs(&w, id(&c0)).expect("reset");
+    let mut t = tracker(&w);
+    checkpoint(&w.ws_ref(), &w.base, Some(&mut t), manual()).unwrap();
+    let ops = [
+        Op::Write { f: 3, off: 32, data: vec![161, 57, 18] },
+        Op::Rename { from: 3, to: 5 },
+        Op::Link { f: 2, to: 1 },
+    ];
+    let mut snaps = Vec::new();
+    for op in &ops {
+        let touched = apply(&w.ws, op);
+        t.inbox().note(&WatchEvent::Changed(touched));
+        let c = checkpoint(&w.ws_ref(), &w.base, Some(&mut t), manual()).unwrap();
+        snaps.push((c.checkpoint.id, files(&w.ws)));
+    }
+    assert!(w.ws.join("d/sub").is_dir());
+    for (cid, snap) in snaps.iter().rev() {
+        try_rs(&w, *cid).expect("restore");
+        assert_eq!(&files(&w.ws), snap, "restore of {cid:?}");
+        assert!(!temp(&w).exists());
+    }
+    assert!(w.ws.join("d/sub").is_dir(), "a bare directory is never deleted");
+}
