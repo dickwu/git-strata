@@ -12,7 +12,8 @@ Not merged.
 | 3 Single instance, recover, then listen | done | f0c112f |
 | 4 Confirm order, pinned flags, launchd plist | done | d236ef6 |
 | 5 Anchor after fetch, observe warning, attach alert | done | b3bd021 |
-| 6 End to end, read-only without the daemon | done | (this commit) |
+| 6 End to end, read-only without the daemon | done | bf56dd0 |
+| 7 `resolve_move` and `chain_resolve` | done | (this commit) |
 
 ## Ambiguity decisions
 
@@ -181,6 +182,51 @@ Not merged.
 - **Panic-safe test server.** The tests' `serving` helper stops the server
   even when the body panics (otherwise the scope waits forever); applied to
   tests/startup.rs too.
+- **`replay_commits` lives in strata-gitio (D18), added on this branch.**
+  `Git::replay_commits(exclusive_base, tip, onto)` (crates/strata-gitio/
+  src/replay.rs): `rev-list --reverse --first-parent tip --not base`, then
+  per commit `merge-tree --write-tree --merge-base=<first parent>` onto the
+  running head and `commit-tree` with the original message (identity as
+  every gitio commit: config only). A conflict is `Conflict`; no ref is ever
+  written (the caller's one transaction does that). Merge commits become
+  single-parent commits. A cross-crate, additive change; tests in
+  crates/strata-gitio/tests/replay.rs (6).
+- **`chain_resolve` Restore = `git.push` + one transaction.** The spec's
+  literal steps: plain `git.push(staging, "origin", chain_ref, branch,
+  PUSH_TIMEOUT)` (publish's push timeout; `seams::push_timeout` is
+  crate-private in strata-publish, so the public `PUSH_TIMEOUT` is used),
+  then one `ref_transaction` that verifies the chain is still c and sets
+  the anchor to c (the chain is already c). Any transaction failure is
+  `Unknown` (`reason: "ref_transaction"`), never `HeadMoved`/`Conflict`.
+- **Replay range.** `no_replay_range` when there is no anchor (a Rewound
+  chain without `refs/strata/anchor/<b>`) or the (advanced) base is not an
+  ancestor of c. The result reports the new chain tip and anchor; no
+  replayed-commit count (gitio has no rev-count API, not added).
+- **Restore chain check** (`c` still the one seen before the prompt) only
+  applies when a prompt happened, like `push`.
+- **Observe after `chain_resolve`.** `main_tip` is read under the lock
+  before the fetch and after the writes; if it moved, `observe_main` runs
+  after the lock (`observe_if_moved`, at most twice) on the new tip's tree
+  exported to `<root>/daemon/observe/<pid>-<ns>` (removed afterwards). A
+  failure is an `ObserveFailed` entry in the reply's `warnings`.
+- **`publishing` flag for `resolve_move`** = an open publish row in phase
+  `Running` whose group has a batch of the session. Waited for holding no
+  queue or lock, polling, at most the lock wait, then `Busy
+  {reason:"publishing"}` (nothing written). The rm handler does not wait
+  for it (unchanged from Task 6).
+- **Tracker after Accept.** `Trackers::restart` takes the session/repo
+  Tracker (if one exists), `reset()`s it, then `watch_or_full`; Abandon
+  leaves it. With no Tracker the next request creates a fresh one anyway.
+- **`resolve_move` seams.** `resolve::resolve_move(core, session, repo,
+  choice, resolve, after_accept)`: the handler passes
+  `Sessions::resolve_failed_move` and `Trackers::restart`; the tests pass
+  doubles to see the queue held, no repo lock, and reset-after-Accept
+  order. A real failed move is session's own test territory.
+- **`chain_resolve` precondition before the lock** reads the tracking ref
+  as it is (no fetch); a chain that was never fetched (`publish_chain` →
+  None) is `not_rewound_or_diverged` too.
+- **`Core::git` / `Core::repo_cfg`** became `pub(crate)` for resolve.rs.
+
 
 ## Task 1
 
@@ -272,3 +318,26 @@ replayed; a pre-receive hook refusing the push → `Unknown` `PushRefused`,
 chain commit, Unknown row and workspace kept, `UnknownPublish` reported
 (also after restart), the same publish `Busy publish_unknown`, no second
 push.
+
+## Task 7
+
+`resolve.rs`: `move_choice`, `wait_not_publishing`, `resolve_move`,
+`chain_resolve` (+ `ChainResolved`), `replay_base`, `observe_tip`,
+`with_staging`; wired into `Server::handle` (deps_propose / deps_approve
+still answer "not served yet", see above). gitio: `Git::replay_commits`
+(D18) with tests/replay.rs (6).
+tests/resolve.rs (8): exclusive choice (both / neither → RPC `Failed`,
+session untouched); no TTY/confirm (empty verdict script, no prompt, no
+probe, `token` param → `Failed`, source scan); queue held and no repo lock
+around `resolve_failed_move`, reset+watch only after Accept, queued behind
+another holder; accept-origin Drop / Replay (advanced range: only C
+replayed, parent o) / Replay conflict (refs byte-identical, no
+transaction) / no anchor → `no_replay_range`, never a push; Restore pushes
+only a fast-forward (Rewound to P pushes c, staging removed, no force
+argv; unrelated rewind and Diverged → `not_fast_forward`, nothing
+written); Restore asks `PushDeploy` (refused → `NotConfirmed` with no
+fetch/push; approved → one push; accept-origin never prompts); refs under
+the repo lock (not a fork → refused with no fetch; healed by the fetch in
+the lock → refused, no transaction; lock held → `Busy lock_wait` with no
+git write; over the socket, a bad choice → `Failed`, Drop works); publish
+calls `publish::publish`, never `stage`. Every remote is a local bare repo.

@@ -17,6 +17,7 @@ pub mod fetch_after;
 pub mod handlers;
 pub mod locks;
 pub mod plist;
+pub mod resolve;
 pub mod rpc;
 pub mod startup;
 pub mod track;

@@ -187,11 +187,11 @@ impl Core {
         out
     }
 
-    fn git(&self, repo: &RepoName) -> Result<&Git> {
+    pub(crate) fn git(&self, repo: &RepoName) -> Result<&Git> {
         self.gits.get(repo).ok_or_else(|| StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}")))
     }
 
-    fn repo_cfg(&self, repo: &RepoName) -> Result<&strata_types::RepoConfig> {
+    pub(crate) fn repo_cfg(&self, repo: &RepoName) -> Result<&strata_types::RepoConfig> {
         self.config
             .repos
             .get(repo)

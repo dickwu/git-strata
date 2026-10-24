@@ -24,6 +24,7 @@ use strata_types::{Action, BaseGen, Code, RepoConfig, RepoName, SessionId, Strat
 use crate::confirm_flow::{apply, needs_confirm, recheck, require_validated};
 use crate::fetch_after::{alert_attach, report_guard_disabled};
 use crate::locks::{self, RequestScope};
+use crate::resolve;
 use crate::rpc::{Params, Reply, Request};
 use crate::startup::{Core, Daemon};
 use crate::track::{self, drop_tracker, prepare_tool_call};
@@ -37,7 +38,7 @@ thread_local! {
     static WRITING: Cell<bool> = const { Cell::new(false) };
 }
 
-fn writing() {
+pub(crate) fn writing() {
     WRITING.with(|w| w.set(true));
 }
 
@@ -133,6 +134,17 @@ impl<'a> Trackers<'a> {
     fn put(&self, s: &SessionId, repo: &RepoName, t: Tracked) {
         if let Some(old) = guard(&self.map).insert((s.clone(), repo.clone()), t) {
             drop_tracker(old.tracker);
+        }
+    }
+
+    /// After an accepted move (the caller holds `s`'s queue): reset the
+    /// Tracker, then watch again (§5.5 `resolve_move`).
+    fn restart(&self, s: &SessionId, repo: &RepoName) {
+        let old = guard(&self.map).remove(&(s.clone(), repo.clone()));
+        if let Some(mut t) = old {
+            t.tracker.reset();
+            t.watching = track::watch_or_full(&mut t.tracker);
+            self.put(s, repo, t);
         }
     }
 
@@ -234,7 +246,7 @@ impl<'d, 'a> Server<'d, 'a> {
     /// One request: scope, handler, panic → `Failed` / `Unknown`.
     pub fn handle(&self, req: Request) -> Reply {
         let name = req.method.name();
-        if matches!(req.params, Params::ResolveMove(_) | Params::ChainResolve(_) | Params::DepsPropose(_) | Params::DepsApprove(_)) {
+        if matches!(req.params, Params::DepsPropose(_) | Params::DepsApprove(_)) {
             return Reply::rejected(&req.id, RpcReject::Failed, format!("{name} is not served yet"));
         }
         let _scope = RequestScope::begin(name, session_of(&req.params));
@@ -383,7 +395,29 @@ impl<'d, 'a> Server<'d, 'a> {
                 Ok(json!({}))
             }
             Params::DaemonStatus(p) => self.d.daemon_status(p.verify),
-            Params::ResolveMove(_) | Params::ChainResolve(_) | Params::DepsPropose(_) | Params::DepsApprove(_) => {
+            Params::ResolveMove(p) => {
+                let Some(choice) = resolve::move_choice(p.abandon, p.accept) else {
+                    return Err(StrataError::new(Code::InvalidInput, "exactly one of abandon and accept")
+                        .with_detail(json!({ "reason": "move_choice" })));
+                };
+                let r = resolve::resolve_move(
+                    core,
+                    &p.session,
+                    &p.repo,
+                    choice,
+                    &|s, repo, c| self.d.sessions.resolve_failed_move(s, repo, c),
+                    &mut || self.trackers.restart(&p.session, &p.repo),
+                )?;
+                Ok(json_of(&r))
+            }
+            Params::ChainResolve(p) => {
+                let r = resolve::chain_resolve(core, &p.repo, p.choice, &mut |tip| resolve::observe_tip(core, &p.repo, tip));
+                if r.as_ref().is_err_and(|e| e.code == Code::Unknown) {
+                    self.report_unknown();
+                }
+                Ok(json_of(&r?))
+            }
+            Params::DepsPropose(_) | Params::DepsApprove(_) => {
                 Err(StrataError::new(Code::InvalidInput, "not served yet"))
             }
         }
