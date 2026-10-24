@@ -6,7 +6,7 @@
 
 store 负责 git-strata 全部的持久元数据和内容存储，落在 `[paths] root`（config.md，默认 `/Volumes/GWD/inter/.strata`）之下。按增补 4，**只有一份 schema，全部在本文 §4.3**：别的模块不执行 SQL，store 也不提供通用的写事务，每个写都是 §3 里一个具名方法、一个事务。
 
-- **SQLite 元数据**（`<root>/store/store.db`）：基线 generation 与基线清单；依赖集、依赖集的认领与冷装尝试、依赖变更提议、主干当前的依赖集；会话、工作区、种子文件、`move_workspace` 的意图；checkpoint 与 overlay 条目；blob 登记；发布记录与 ref 变动审计；gc 记录（design §5 模块表、§7，增补 3、4）。
+- **元数据库**（`<root>/store/store.db`；引擎 Turso，SQLite 文件格式）：基线 generation 与基线清单；依赖集、依赖集的认领与冷装尝试、依赖变更提议、主干当前的依赖集；会话、工作区、种子文件、`move_workspace` 的意图；checkpoint 与 overlay 条目；blob 登记；发布记录与 ref 变动审计；gc 记录（design §5 模块表、§7，增补 3、4）。
 - **按 BLAKE3 寻址的 blob 存储**（`<root>/store/blobs/`）：一文件一 blob，存为普通文件；写入 = 从工作区 `clonefile` 进来（零拷贝；工作区里的文件经 `put_blob_rooted`，每一级都不跟随符号链接，增补 8），读出 = 反向克隆（design §7；写进会话树的经 `get_blob_rooted`，同样每一级都不跟随，增补 8）。
 - **`<root>` 的布局**：基线、依赖集与依赖集暂存目录的路径由 store 按键算出（§4.1）。目录由 session、deps 建，由 store 登记；目录离开活路径只有一条路：`retire_dir` 把它改名进 store 的 trash（增补 3），之后只由 gc 删除。
 - **回收**：`gc` 与 `gc_repo` 按引用与保留期删除行与目录，是全模块唯一发出 `DELETE` 的路径（裁定 T6）。
@@ -58,7 +58,8 @@ apfs.md（@1e723f2，module-rulings 的"apfs names committed at sdd/task-4 1e723
 外部 crate：
 
 - `rusqlite`，开 `bundled` [我的决定]：SQLite 的版本与编译选项随 crate 固定，§4.2 的回读、STRICT 表与 JSON 函数都依赖它；不链接系统 libsqlite3，免得系统更新改变持久语义。
-- 【引擎变更，2026-10-23 用户决定】元数据引擎已改为 Turso（crate `turso` =0.8.3，SQLite 文件格式兼容，为日后向量化预留）；上一条的 rusqlite 已不再使用，实现差异与缺口见 docs/impl-progress/store.md「Engine: Turso」。
+- 【引擎变更，2026-10-23 用户决定】元数据引擎已改为 Turso（crate `turso`，钉 `=0.9.0-pre.1`，原为 `=0.8.3`；SQLite 文件格式兼容，开多进程 WAL）；上一条的 rusqlite 已不再使用，本文其余写 SQLite、PRAGMA、`rusqlite::ffi` 的地方按 Turso 的实际行为读，实现差异与缺口见 docs/impl-progress/store.md「Engine: Turso」。
+- 选这个引擎是为了日后的项目向量化：嵌入可以放进同一个 store.db，用 `vector32` / `vector_distance_cos` 查询（现在不建向量表）。
 - `blake3`，开 `mmap` 与 `rayon`：算 `BlobId`；16 MiB 及以上的文件走 mmap 加多线程 [我的决定]。
 - `libc`：`flock`、`open(O_CLOEXEC)`、`fcntl(F_BARRIERFSYNC)` 与 `fcntl(F_FULLFSYNC)`、`renamex_np(RENAME_EXCL)`（只用在 store 自己的 `tmp/` 到 `blobs/`、临时库到 `store.db`）、`flistxattr`/`fremovexattr`、`utimensat(AT_SYMLINK_NOFOLLOW)`（刷新已存 blob 的时间）、`arc4random_buf`（design §11 第 2 条：macOS API 走 libc）。
 - `serde`、`serde_json`：JSON 列（§4.4）与 `GcReport`。

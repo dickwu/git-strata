@@ -537,7 +537,7 @@ Cargo.toml                       workspace, edition 2024, rust-version 1.88
 crates/strata-types              ids、错误、配置结构（无 I/O）
 crates/strata-apfs               clonefile / getattrlistbulk / gen count / FSEvents
 crates/strata-gitio              git 子进程封装、.git/index 解析、diff3
-crates/strata-store              SQLite 元数据 + blob
+crates/strata-store              Turso 元数据（SQLite 文件格式）+ blob
 crates/strata-overlay            overlay 计算、checkpoint、restore
 crates/strata-deps               依赖集 generation、认领、rollout 计划
 crates/strata-session            清单、兄弟布局、cwd 识别、move_workspace
