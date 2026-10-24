@@ -173,9 +173,15 @@ fn calls(core: &Core) -> Calls {
     out
 }
 
+/// `chain_resolve` as the cli sends it: `shown` is the chain top it read.
 fn resolve(core: &Core, choice: ChainChoice) -> (strata_daemon::Result<ChainResolved>, usize) {
+    let shown = core.gits[&repo_name("tool")].read_ref(CHAIN).unwrap();
+    resolve_shown(core, choice, shown.as_ref())
+}
+
+fn resolve_shown(core: &Core, choice: ChainChoice, shown: Option<&CommitOid>) -> (strata_daemon::Result<ChainResolved>, usize) {
     let mut observed = 0;
-    let r = resolve::chain_resolve(core, &repo_name("tool"), choice, &mut |_| {
+    let r = resolve::chain_resolve(core, &repo_name("tool"), choice, shown, &mut |_| {
         observed += 1;
         Ok(())
     });
@@ -592,7 +598,7 @@ fn chain_resolve_refs_under_repo_lock() {
 #[test]
 fn publish_calls_publish_not_stage() {
     let h = src("handlers.rs");
-    assert!(h.contains("strata_publish::publish("), "the publish handler calls publish::publish");
+    assert!(h.contains("strata_publish::publish_bound("), "the publish handler calls publish::publish (bound to the shown plan)");
     for s in ["strata_publish::stage", "stage(", "Staged"] {
         assert!(!h.contains(s), "handlers.rs mentions {s}");
     }
@@ -600,4 +606,73 @@ fn publish_calls_publish_not_stage() {
         assert!(!src(f).contains("strata_publish::stage"), "{f}");
     }
     let _ = CommitOid::try_from("0".repeat(40)).ok();
+}
+
+/// Review H2: a confirmed restore or push is bound to the chain top the
+/// cli showed. A chain that moved between the display and the request
+/// (C shown, C2 now) is `NotConfirmed` (`chain_moved`) even though it did
+/// not move during the daemon's own prompt; nothing is pushed.
+#[test]
+fn confirmed_push_is_bound_to_the_shown_chain_top() {
+    // chain_resolve Restore.
+    {
+        let mut fx = Dfx::new();
+        set_confirm(&mut fx);
+        let ch = Chain::new(&fx);
+        ch.rewind_origin(&fx, &ch.p);
+        let c2 = advance_chain(&fx, &ch);
+        let (c, log, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass()]);
+        let core = fx.prepare_with(c).unwrap();
+        sync(&core);
+        let before = ch.refs(&fx);
+        let shown = CommitOid::try_from(ch.c.clone()).unwrap();
+        let (r, _) = resolve_shown(&core, ChainChoice::Restore, Some(&shown));
+        assert_eq!(code_reason(&r), (Code::NotConfirmed, "chain_moved".into()), "{r:?}");
+        assert_eq!(ch.refs(&fx), before);
+        assert_eq!(ch.origin_main(&fx), ch.p);
+        assert_eq!(calls(&core).push, 0);
+        // Nothing shown at all is not a plan either.
+        let (r, _) = resolve_shown(&core, ChainChoice::Restore, None);
+        assert_eq!(code_reason(&r), (Code::NotConfirmed, "chain_moved".into()), "{r:?}");
+        assert_eq!(calls(&core).push, 0);
+        assert_eq!(log.shown().len(), 2);
+        let _ = c2;
+    }
+    // push over the socket.
+    {
+        let mut fx = Dfx::new();
+        set_confirm(&mut fx);
+        let ch = Chain::new(&fx);
+        let c2 = advance_chain(&fx, &ch);
+        let (c, _log, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass(), Verdict::pass()]);
+        let core = fx.prepare_with(c).unwrap();
+        sync(&core);
+        let d = Daemon::start(&core).unwrap();
+        let sock = fx.socket();
+        serving(&d, || {
+            for shown in [json!(ch.c), Value::Null] {
+                let r = call(&sock, "push", json!({ "repo": "tool", "shown": shown }));
+                assert_eq!(r["error"]["code"], "NotConfirmed", "{r:#}");
+                assert_eq!(r["error"]["detail"]["reason"], "chain_moved", "{r:#}");
+                assert_eq!(r["error"]["detail"]["now"], json!(c2), "{r:#}");
+                assert_eq!(ch.origin_main(&fx), ch.a, "nothing pushed");
+            }
+            let r = ok(call(&sock, "push", json!({ "repo": "tool", "shown": c2 })));
+            assert_eq!(r["commit"], json!(c2), "{r:#}");
+            assert_eq!(ch.origin_main(&fx), c2);
+        });
+        drop(d);
+        core.close().unwrap();
+    }
+}
+
+/// C2 on C on the chain (a local publish that landed after the display).
+fn advance_chain(fx: &Dfx, ch: &Chain) -> String {
+    let sb = &fx.sb;
+    let a = sb.head(&ch.main);
+    sb.git(&ch.main, &["reset", "-q", "--hard", &ch.c]);
+    let c2 = sb.commit(&ch.main, &[("c2.txt", b"c2\n")], "C2");
+    sb.git(&ch.main, &["reset", "-q", "--hard", &a]);
+    sb.git(&ch.main, &["update-ref", CHAIN, &c2]);
+    c2
 }

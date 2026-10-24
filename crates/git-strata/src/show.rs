@@ -4,20 +4,23 @@
 use serde_json::Value;
 use strata_deps::{Proposal, publish_chain};
 use strata_gitio::Git;
-use strata_types::{RepoConfig, RepoName};
+use strata_types::{CommitOid, RepoConfig, RepoName};
 
 /// How many commits are listed before "… and more".
 pub const SHOW_COMMITS: usize = 500;
 
 /// The commits `origin..top` of `repo`'s publish chain, one per line.
-pub fn push_plan(repo: &RepoName, rc: &RepoConfig, why: &str) {
+/// Returns the chain top shown (`None`: no local chain, or unreadable);
+/// the caller sends it so the daemon binds the confirmation to exactly
+/// this plan (review H2).
+pub fn push_plan(repo: &RepoName, rc: &RepoConfig, why: &str) -> Option<CommitOid> {
     let branch = &rc.publish.branch;
     eprintln!("{why}: push {repo} to origin/{branch}");
     let git = match Git::open(&rc.path) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("  (cannot open {}: {})", rc.path.display(), e.message);
-            return;
+            return None;
         }
     };
     match publish_chain(&git, branch) {
@@ -38,11 +41,21 @@ pub fn push_plan(repo: &RepoName, rc: &RepoConfig, why: &str) {
                     }
                     Err(e) => eprintln!("  (cannot list the commits: {})", e.message),
                 }
+                Some(top.clone())
             }
-            None => eprintln!("  no local publish chain yet (origin {})", ch.origin),
+            None => {
+                eprintln!("  no local publish chain yet (origin {})", ch.origin);
+                None
+            }
         },
-        Ok(None) => eprintln!("  no origin/{branch} tracking ref"),
-        Err(e) => eprintln!("  (cannot read the publish chain: {})", e.message),
+        Ok(None) => {
+            eprintln!("  no origin/{branch} tracking ref");
+            None
+        }
+        Err(e) => {
+            eprintln!("  (cannot read the publish chain: {})", e.message);
+            None
+        }
     }
 }
 

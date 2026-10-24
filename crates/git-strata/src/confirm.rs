@@ -67,13 +67,15 @@ pub fn push(ctx: &Ctx, repo: &str) -> Result<Envelope> {
     let name = repo_name(repo)?;
     let config = ctx.config().ok();
     known_repo(config.as_ref(), &name)?;
+    let mut shown = None;
     if ctx.pins().needs_confirm(config.as_ref(), &name) {
         require_tty_for("push")?;
         if let Some(rc) = config.as_ref().and_then(|c| c.repos.get(&name)) {
-            show::push_plan(&name, rc, "confirm");
+            shown = show::push_plan(&name, rc, "confirm");
         }
     }
-    let data = ctx.call("push", json!({ "repo": name.as_str() }), Kind::Write)?;
+    // Review H2: the daemon pushes only the chain top shown here.
+    let data = ctx.call("push", json!({ "repo": name.as_str(), "shown": shown }), Kind::Write)?;
     let outcome = data.get("push").cloned().unwrap_or(Value::Null);
     Ok(outcome_result(&name, &outcome, outcome.clone()))
 }
@@ -163,6 +165,7 @@ pub fn chain(ctx: &Ctx, repo: &str, accept_origin: Option<AcceptOrigin>, restore
             ch.state
         );
     }
+    let mut shown = None;
     let choice = match accept_origin {
         Some(AcceptOrigin::Replay) => "AcceptOriginReplay",
         Some(AcceptOrigin::Drop) => "AcceptOriginDrop",
@@ -182,10 +185,11 @@ pub fn chain(ctx: &Ctx, repo: &str, accept_origin: Option<AcceptOrigin>, restore
         if ctx.pins().needs_confirm(Some(&config), &name) {
             show::push_plan(&name, rc, "confirm");
         }
+        shown = Some(top.clone());
     } else {
         eprintln!("chosen: {}; nothing is pushed", if accept_origin == Some(AcceptOrigin::Replay) { "replay onto origin" } else { "drop the local chain" });
     }
-    let data = ctx.call("chain_resolve", json!({ "repo": name.as_str(), "choice": choice }), Kind::Write)?;
+    let data = ctx.call("chain_resolve", json!({ "repo": name.as_str(), "choice": choice, "shown": shown }), Kind::Write)?;
     for w in data.get("warnings").and_then(Value::as_array).into_iter().flatten() {
         eprintln!("warning: {w}");
     }
@@ -468,9 +472,11 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
         v
     };
     let front = gate(&mut repos.iter())?;
+    let mut shown = serde_json::Map::new();
     for r in &front {
         if let Some(rc) = config.repos.get(r) {
-            show::push_plan(r, rc, "publish will ask to confirm");
+            let top = show::push_plan(r, rc, "publish will ask to confirm");
+            shown.insert(r.as_str().to_string(), json!(top));
         }
     }
     // Before-publish checkpoints, then the publish.
@@ -488,7 +494,7 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
         let _ = CheckpointId::try_from(cid)?;
         batches.push(json!({ "session": s.as_str(), "repo": r.as_str(), "checkpoint": cid, "paths": ps }));
     }
-    let reply = ctx.call("publish", json!({ "group": { "id": 0, "batches": batches } }), Kind::Write);
+    let reply = ctx.call("publish", json!({ "group": { "id": 0, "batches": batches }, "shown": shown }), Kind::Write);
     match reply {
         Ok(data) => {
             let published = data.get("published").and_then(Value::as_array).cloned().unwrap_or_default();

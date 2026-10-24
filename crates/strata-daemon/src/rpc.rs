@@ -7,6 +7,7 @@
 //! socket (mode 0600) and authority comes from `strata-confirm` per action,
 //! never from the connection.
 
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -15,7 +16,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use strata_types::{
-    CheckpointId, CheckpointReason, Code, ProposalId, ReleaseGroup, RepoName, RepoPath, SessionId, StrataError,
+    CheckpointId, CheckpointReason, Code, CommitOid, ProposalId, ReleaseGroup, RepoName, RepoPath, SessionId, StrataError,
 };
 
 use crate::{ChainChoice, MAX_FRAME, RpcReject};
@@ -164,6 +165,22 @@ pub struct RepoOptParams {
 #[serde(deny_unknown_fields)]
 pub struct PublishParams {
     pub group: ReleaseGroup,
+    /// Review H2: the publish chain top the cli showed for each repo it
+    /// asked to confirm (`null`: it showed no local chain). A repo that
+    /// needs a confirmation is refused (`NotConfirmed`, reason
+    /// `chain_moved`) when its chain top under the lock is not this one;
+    /// a repo missing here counts as "showed no chain top".
+    #[serde(default)]
+    pub shown: BTreeMap<RepoName, Option<CommitOid>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushParams {
+    pub repo: RepoName,
+    /// Review H2: the chain top the cli showed (absent or `null`: none).
+    #[serde(default, deserialize_with = "nullable")]
+    pub shown: Option<CommitOid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -203,6 +220,9 @@ pub struct ResolveMoveParams {
 pub struct ChainResolveParams {
     pub repo: RepoName,
     pub choice: ChainChoice,
+    /// Review H2: for `Restore`, the chain top the cli showed.
+    #[serde(default, deserialize_with = "nullable")]
+    pub shown: Option<CommitOid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -226,7 +246,7 @@ pub enum Params {
     DepsApprove(DepsApproveParams),
     DepsList(RepoOptParams),
     Publish(PublishParams),
-    Push(RepoParams),
+    Push(PushParams),
     Assign(AssignParams),
     Rm(RmParams),
     Gc(RepoOptParams),

@@ -376,3 +376,59 @@ fn failure_keeps_scene_no_replay() {
     drop(d);
     core.close().unwrap();
 }
+
+/// Review H2: a confirmed publish is bound to the chain top the cli showed
+/// (`shown`). A stale plan (it showed no chain, a publish has landed since)
+/// is `NotConfirmed` (`chain_moved`) before any staging: no new commit, no
+/// push. The current plan publishes.
+#[test]
+fn confirmed_publish_is_bound_to_the_shown_chain_top() {
+    use strata_confirm::seams::Verdict;
+    let mut fx = Dfx::new();
+    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.confirm = true;
+    fx.write_config();
+    let (c, log, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass(), Verdict::pass()]);
+    let core = fx.prepare_with(c).unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let chain = strata_publish::chain_ref("main");
+    serving(&d, || {
+        let id = new_session(&sock);
+        let root = ws(&core, &id, "tool");
+        let publish = |text: &str, shown: Value| {
+            external(&root, &format!("printf '{text}\\n' > src/index.ts"));
+            let cp = ok(call(&sock, "checkpoint", json!({
+                "session": id, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+            })));
+            let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+            let g = group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]);
+            call(&sock, "publish", json!({ "group": g, "shown": { "tool": shown } }))
+        };
+        let git = &core.gits[&repo_name("tool")];
+        assert_eq!(git.read_ref(&chain).unwrap(), None);
+        let first = ok(publish("export const a = 1", Value::Null));
+        let x = git.read_ref(&chain).unwrap().expect("chain commit");
+        assert_eq!(first["published"][0]["commit"], json!(x));
+        assert_eq!(origin_main(&fx), x.as_str());
+        push_calls(&core);
+
+        // The same stale plan again: refused under the lock.
+        let r = publish("export const a = 2", Value::Null);
+        assert_eq!(r["error"]["code"], "NotConfirmed", "{r:#}");
+        assert_eq!(r["error"]["detail"]["reason"], "chain_moved", "{r:#}");
+        assert_eq!(r["error"]["detail"]["now"], json!(x), "{r:#}");
+        assert_eq!(git.read_ref(&chain).unwrap(), Some(x.clone()), "no new commit");
+        assert_eq!(push_calls(&core), 0, "nothing pushed");
+
+        // The plan as it is now: published.
+        let r = ok(publish("export const a = 3", json!(x)));
+        let y = git.read_ref(&chain).unwrap().expect("chain commit");
+        assert_ne!(y, x);
+        assert_eq!(r["published"][0]["commit"], json!(y));
+        assert_eq!(origin_main(&fx), y.as_str());
+        assert_eq!(log.shown().len(), 3);
+    });
+    drop(d);
+    core.close().unwrap();
+}

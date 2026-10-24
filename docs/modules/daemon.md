@@ -103,13 +103,13 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `deps_propose` | `{ "session", "repo", "switch": bool }` | 提议；`switch` 为真时附带移动结果 |
 | `deps_approve` | `{ "proposal": ProposalId, "sessions": [SessionId]\|null }` | 每个会话一条；`null` = 该 repo 的全部会话 |
 | `deps_list` | `{ "repo": RepoName\|null }` | `open_proposals` |
-| `publish` | `{ "group": ReleaseGroup }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数 |
-| `push` | `{ "repo": RepoName }` | `PushOutcome` |
+| `publish` | `{ "group": ReleaseGroup, "shown"?: { RepoName: CommitOid \| null } }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数。`shown` 是 cli 给人看过的每个要确认仓库的链顶（D21） |
+| `push` | `{ "repo": RepoName, "shown"?: CommitOid \| null }` | `PushOutcome`。`shown` 是 cli 给人看过的链顶（D21） |
 | `assign` | `{ "group": ReleaseGroup, "path": RepoPath, "session": SessionId }` | `{}` |
 | `rm` | `{ "session": SessionId, "discard": bool }` | `RemoveReport` |
 | `gc` | `{ "repo": RepoName\|null }` | `GcReport` 的数组 |
 | `resolve_move` | `{ "session": SessionId, "repo": RepoName, "abandon": bool, "accept": bool }` | `ResolutionReport`。两个布尔必须恰好一个为真，否则 RPC `Failed`，不调用 session |
-| `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
+| `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice, "shown"?: CommitOid \| null }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
 | `config_relax` | `{ "repo": RepoName }` | `{}`。没有凭据字段。见 §5.5 |
 | `daemon_status` | `{ "verify": bool }` | 见 §5.4；`verify` 缺省 false |
 
@@ -393,7 +393,7 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 
 **`publish`**：见 §5.6。
 
-**`push`**：按钉住的值要确认才弹框，action 是 `PushDeploy { repo, branch }`。弹框前读链顶，记在这次请求里。不占会话队列（不碰工作区）。拿 repo 锁。锁里再对 action，并核对链顶没变；变了 → `NotConfirmed`，不推，人重新确认（confirm.md §5.1 末尾交给本文的缺口）。然后 `publish::push`。`PushOutcome::Pushed` 之后，若 `publish::push` 还没把链和锚点写成那个 commit，daemon 在同一把锁里调用 publish.md @df9f069 §2 第 3 条的那一次 ref 事务，把两者一起设上。不拆成两次 `update_ref`。放开之后 §5.7。
+**`push`**：按钉住的值要确认才弹框，action 是 `PushDeploy { repo, branch }`。核对的链顶是 cli 展示给人、随请求发来的 `shown`，不是 daemon 自己在弹框前读的那个（D21）。不占会话队列（不碰工作区）。拿 repo 锁。锁里再对 action，并核对链顶没变；变了 → `NotConfirmed`，不推，人重新确认（confirm.md §5.1 末尾交给本文的缺口）。然后 `publish::push`。`PushOutcome::Pushed` 之后，若 `publish::push` 还没把链和锚点写成那个 commit，daemon 在同一把锁里调用 publish.md @df9f069 §2 第 3 条的那一次 ref 事务，把两者一起设上。不拆成两次 `update_ref`。放开之后 §5.7。
 
 **`assign`**：拿该 repo 的写锁，调 `publish::assign`。不占队列，不确认，不推送。
 
@@ -416,7 +416,7 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 5. 分类通过之后才写 ref。链和锚点用 publish.md @df9f069 §2 第 3 条的那一次 ref 事务，一次调用里一起比较并交换。不拆成两次 `update_ref`。两次调用之间崩溃就是过期锚点的窗口。daemon 不起 git。
 6. `AcceptOriginDrop`：不调用 `push`，不调用 `replay_commits`。那一次事务把链和锚点都设成 o，对旧的 c 和旧的 a 比较并交换。事务没完成 → `Unknown`，不推，不声称 ref 没变。
 7. `AcceptOriginReplay`：不调用 `push`。范围是前移之后的 a..c，不是 o..c。前移后的 a 在内存里算，这一步还不写：会前移时 `m = git.merge_base(o, c)`，`is_ancestor(a, m)` 且 `m != a` 则 `exclusive_base` 是 m，否则是当前的 a。`Rewound` 不前移，`exclusive_base` 就是当前的 a。`replay_commits(exclusive_base, c, o)`。`Conflict` 只在还没有 ref 事务时返回，链和锚点的字节不变。成功之后那一次事务把链设成新 tip、锚点设成 o。事务失败 → `Unknown`。
-8. `Restore`：第 4 步已经确认是快进，并且还没有锚点比较并交换。锁里再对 `PushDeploy`（要确认时），并核对 c 仍是弹框前看到的那个；变了 → `NotConfirmed`，不推。然后 `git.push(staging, "origin", chain_ref, branch, timeout)`。staging 用 `attach_staging` 接到 c，推完 `retire_dir`。timeout 与 publish 的 push 相同，本文不另定。argv 由 gitio 保证没有 `--force`、`--force-with-lease` 或 `+` 开头的 refspec；daemon 不另开一条强推路径。`Refused` 且链还没改 → `PushRefused`。`Unknown` → 报出，不重推，不接着做一次把失败说成具名拒绝的比较并交换。`Pushed` 之后才调用那一次 ref 事务，把链和锚点一起设成推上去的 commit。事务失败 → `Unknown`。
+8. `Restore`：第 4 步已经确认是快进，并且还没有锚点比较并交换。锁里再对 `PushDeploy`（要确认时），并核对 c 仍是弹框前看到的那个，且就是 cli 发来的 `shown`（D21）；变了 → `NotConfirmed`，不推。然后 `git.push(staging, "origin", chain_ref, branch, timeout)`。staging 用 `attach_staging` 接到 c，推完 `retire_dir`。timeout 与 publish 的 push 相同，本文不另定。argv 由 gitio 保证没有 `--force`、`--force-with-lease` 或 `+` 开头的 refspec；daemon 不另开一条强推路径。`Refused` 且链还没改 → `PushRefused`。`Unknown` → 报出，不重推，不接着做一次把失败说成具名拒绝的比较并交换。`Pushed` 之后才调用那一次 ref 事务，把链和锚点一起设成推上去的 commit。事务失败 → `Unknown`。
 9. 放开锁。`main_tip` 动了就 `observe_main`，失败只是 `ObserveFailed`。第 4 步的具名拒绝不被这次观察改成 `Unknown`。ref 事务已经调用过的，失败只能是 `Unknown`。
 
 **`config_relax`**：显式接受一次调松。params 只有 `repo`。不查 TTY。不占会话队列，不拿 repo 写锁。文件变了不弹框：启动、重载、KeepAlive 重启都不调用 `require`。调紧仍立即写回，不要凭据。
@@ -842,6 +842,7 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 | D18 重放函数 | `Git::replay_commits(exclusive_base, tip, onto) -> Result<CommitOid>` | 见下。gitio @1cd5ac5 没有这个函数。daemon 不起 git | 2026-10-23 |
 | D19 链处理的 reason | `not_rewound_or_diverged`、`no_replay_range`、`not_fast_forward`，码都是 `InvalidInput` | 控制器不许加码。这三种都是写链或推送之前的具名拒绝 | 2026-10-23 |
 | D20 没有待调松仍叫 `config_relax` | `InvalidInput`，reason `not_relaxed`，不弹框 | 文件变了不弹框。没有待接受的调松时，显式命令也不该弹出一个空框 | 2026-10-23 |
+| D21 确认绑定展示过的链顶（review H2） | `push`、`publish`、`chain_resolve` 带 cli 展示过的链顶 `shown`（没展示链 = `null`，缺省同 `null`）。要确认时，repo 锁里读到的链顶不是它 → `NotConfirmed`（reason `chain_moved`，detail `confirmed`/`now`），不暂存、不提交、不推。`publish` 在 `strata_publish::publish_bound` 里、fetch 之后核对 [实现时补的决定] | 凭据只有 `PushDeploy { repo, branch }`，不含提交；只比 daemon 自己弹框前读的链顶，盖不住"cli 展示之后、daemon 读之前"那段，人会推出没见过的提交 | 2026-10-23 |
 
 D18 的契约，实现者不要猜：
 

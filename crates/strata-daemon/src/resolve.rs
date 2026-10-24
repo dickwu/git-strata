@@ -190,6 +190,7 @@ pub fn chain_resolve(
     core: &Core,
     repo: &RepoName,
     choice: ChainChoice,
+    shown: Option<&CommitOid>,
     observe: &mut dyn FnMut(&CommitOid) -> Result<()>,
 ) -> Result<ChainResolved> {
     let cfg = core.repo_cfg(repo)?;
@@ -231,9 +232,15 @@ pub fn chain_resolve(
                 }
                 if let Some(t) = &token {
                     recheck(t, &action)?;
-                    if c != seen {
+                    // Review H2: bound to what the cli showed, and to the
+                    // daemon's own read before the prompt.
+                    if c != seen || shown != Some(&c) {
                         return Err(StrataError::new(Code::NotConfirmed, "the publish chain moved after the confirmation")
-                            .with_detail(json!({ "reason": "chain_moved", "confirmed": seen.as_str(), "now": c.as_str() })));
+                            .with_detail(json!({
+                                "reason": "chain_moved",
+                                "confirmed": shown.map(|s| s.as_str()),
+                                "now": c.as_str(),
+                            })));
                     }
                 }
                 // 8. Push the chain tip; only `Pushed` reaches the transaction.

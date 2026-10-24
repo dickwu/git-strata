@@ -19,7 +19,7 @@ use strata_gitio::Git;
 use strata_overlay::{Base, DEFAULT_DIRTY_CAPACITY, Overlay, RestoreRequest, Tracker, WorkspaceRef};
 use strata_search::{GrepOpts, Hit, OverlaySource, Search, Which};
 use strata_store::PublishPhase;
-use strata_types::{Action, BaseGen, Code, RepoConfig, RepoName, SessionId, StrataError, WorkspaceState};
+use strata_types::{Action, BaseGen, Code, CommitOid, RepoConfig, RepoName, SessionId, StrataError, WorkspaceState};
 
 use crate::confirm_flow::{apply, needs_confirm, recheck, require_validated};
 use crate::fetch_after::{alert_attach, report_guard_disabled};
@@ -347,8 +347,8 @@ impl<'d, 'a> Server<'d, 'a> {
                 Ok(json!({ "only_a": json_of(&d.only_a), "only_b": json_of(&d.only_b), "both": both }))
             }),
             Params::DepsList(p) => Ok(json!({ "proposals": json_of(&strata_deps::open_proposals(&core.store, p.repo.as_ref())?) })),
-            Params::Publish(p) => self.publish(&p.group),
-            Params::Push(p) => self.push(&p.repo),
+            Params::Publish(p) => self.publish(&p.group, &p.shown),
+            Params::Push(p) => self.push(&p.repo, p.shown.as_ref()),
             Params::Assign(p) => {
                 let repo = core.store.publishes()?.into_iter().find(|r| r.group.id == p.group).and_then(|r| {
                     r.group.batches.iter().find(|b| b.session == p.session).or(r.group.batches.first()).map(|b| b.repo.clone())
@@ -418,7 +418,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 Ok(json_of(&r))
             }
             Params::ChainResolve(p) => {
-                let r = resolve::chain_resolve(core, &p.repo, p.choice, &mut |tip| resolve::observe_tip(core, &p.repo, tip));
+                let r = resolve::chain_resolve(core, &p.repo, p.choice, p.shown.as_ref(), &mut |tip| resolve::observe_tip(core, &p.repo, tip));
                 if r.as_ref().is_err_and(|e| e.code == Code::Unknown) {
                     self.report_unknown();
                 }
@@ -801,8 +801,10 @@ impl<'d, 'a> Server<'d, 'a> {
 
     /// `publish::publish` once per repo of the group, in name order. The
     /// confirmation (when the pinned flags ask for one and the publish
-    /// pushes) is redeemed before; publish takes its own locks.
-    fn publish(&self, group: &strata_types::ReleaseGroup) -> Result<Value> {
+    /// pushes) is redeemed before; publish takes its own locks. Review H2:
+    /// a confirmed repo's publish is bound to the chain top the cli showed
+    /// (`shown`), checked under the repo lock before staging.
+    fn publish(&self, group: &strata_types::ReleaseGroup, shown: &BTreeMap<RepoName, Option<CommitOid>>) -> Result<Value> {
         let core = self.core();
         let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
         if repos.is_empty() {
@@ -818,7 +820,8 @@ impl<'d, 'a> Server<'d, 'a> {
                 None
             };
             writing();
-            let r = self.with_publish_ctx(&repo, |ctx| strata_publish::publish(ctx, group, token));
+            let bound = token.as_ref().map(|_| shown.get(&repo).cloned().flatten());
+            let r = self.with_publish_ctx(&repo, |ctx| strata_publish::publish_bound(ctx, group, token, bound.clone()));
             match r {
                 Ok(p) => done.push(json!({
                     "repo": repo.as_str(),
@@ -846,15 +849,16 @@ impl<'d, 'a> Server<'d, 'a> {
         Ok(json!({ "published": done }))
     }
 
-    /// §5.5 push: the chain tip is read before the prompt and checked
-    /// again under the repo lock; a moved tip is `NotConfirmed`.
-    fn push(&self, repo: &RepoName) -> Result<Value> {
+    /// §5.5 push: the chain tip is checked under the repo lock against the
+    /// one the cli showed the human (review H2: `shown`, not a read of the
+    /// daemon's own); a different tip is `NotConfirmed` (`chain_moved`).
+    fn push(&self, repo: &RepoName, shown: Option<&CommitOid>) -> Result<Value> {
         let core = self.core();
         let rc = effective_cfg(core, repo)?;
         let git = git_of(core, repo)?;
         let branch = rc.publish.branch.clone();
         let action = Action::PushDeploy { repo: repo.clone(), branch: branch.clone() };
-        let before = strata_deps::publish_chain(git, &branch)?.and_then(|c| c.top);
+        let before = shown.cloned();
         let token = if needs_confirm(core.pinned(repo)?) { Some(require_validated(&core.confirmer, action.clone())?) } else { None };
         core.locks.with_repo(repo, || {
             if let Some(t) = &token {

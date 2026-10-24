@@ -328,6 +328,7 @@ fn locked(
     group: &ReleaseGroup,
     sessions: &BTreeSet<SessionId>,
     confirm: Option<ConfirmToken>,
+    shown: Option<&Option<CommitOid>>,
     written: &mut Option<CommitOid>,
 ) -> Result<Landed> {
     let branch = &ctx.cfg.publish.branch;
@@ -349,6 +350,17 @@ fn locked(
     ctx.cfg.validate_commands()?;
     let pushing = ctx.cfg.publish.push;
     let confirmed = if pushing { confirm_gate(ctx.cfg, ctx.repo, confirm)? } else { None };
+    if let (Some(_), Some(shown)) = (&confirmed, shown)
+        && *shown != chain.top
+    {
+        return Err(StrataError::new(Code::NotConfirmed, "the publish chain moved after it was shown for the confirmation")
+            .with_detail(json!({
+                "reason": "chain_moved",
+                "repo": ctx.repo.as_str(),
+                "confirmed": shown.as_ref().map(|c| c.as_str()),
+                "now": chain.top.as_ref().map(|c| c.as_str()),
+            })));
+    }
     let plan = stage::plan(ctx, group, &base)?;
     // Steps 4–5.
     let staged = stage::build(ctx, group, &base, &plan)?;
@@ -420,6 +432,21 @@ fn locked(
 /// §3 `publish`: one commit for `ctx.repo`'s batches of `group` (§5.2).
 /// The row id (`record_publish`) is the release id; `group.id` is ignored.
 pub fn publish(ctx: &Ctx, group: &ReleaseGroup, confirm: Option<ConfirmToken>) -> Result<Published> {
+    publish_bound(ctx, group, confirm, None)
+}
+
+/// [`publish`] bound to a shown plan (review H2): with `shown =
+/// Some(top)` and a push that is confirmed, the chain top read under the
+/// repo lock (after the fetch) must be `top` (`None`: no local chain);
+/// otherwise `NotConfirmed` (reason `chain_moved`) before any staging or
+/// commit. [实现时补的决定] the publish then pushes exactly the shown
+/// unpushed commits plus this batch.
+pub fn publish_bound(
+    ctx: &Ctx,
+    group: &ReleaseGroup,
+    confirm: Option<ConfirmToken>,
+    shown: Option<Option<CommitOid>>,
+) -> Result<Published> {
     let mine = ReleaseGroup {
         id: group.id,
         batches: group.batches.iter().filter(|b| b.repo == *ctx.repo).cloned().collect(),
@@ -449,7 +476,7 @@ pub fn publish(ctx: &Ctx, group: &ReleaseGroup, confirm: Option<ConfirmToken>) -
             let mut written: Option<CommitOid> = None;
             let mut inner: Option<Result<Landed>> = None;
             let r = ctx.locks.with_repo(ctx.repo, &mut || {
-                inner = Some(locked(ctx, &group, &sessions, confirm.take(), &mut written));
+                inner = Some(locked(ctx, &group, &sessions, confirm.take(), shown.as_ref(), &mut written));
                 Ok(())
             });
             let r = match r {
