@@ -194,10 +194,15 @@ pub fn replay_base(git: &Git, chain: &PublishChain, c: &CommitOid) -> Result<Opt
 /// every kept scene again (`push_scenes`). Otherwise the directory is
 /// removed. A later definite `Pushed` of a commit that contains the
 /// scene's commit settles it (`settle_push_scenes`).
+///
+/// [实现时补的决定] (review-2 N4) The record also names the remote and the
+/// branch the push went to (`remote`, `branch`); only a definite push to the
+/// same repo, remote and branch settles it.
 pub(crate) fn with_staging<T>(
     core: &Core,
     git: &Git,
     repo: &RepoName,
+    branch: &str,
     tip: &CommitOid,
     uncertain: impl Fn(&Result<T>) -> bool,
     f: impl FnOnce(&Path) -> Result<T>,
@@ -206,7 +211,7 @@ pub(crate) fn with_staging<T>(
     let dir = core.config.paths.root.join(PUSH_SCENES).join(format!("{}-{stamp}", std::process::id()));
     fs::create_dir_all(&dir).map_err(|e| classify_io_error(&e, IoSide::Write, &dir))?;
     let intent = dir.join(SCENE_FILE);
-    let body = json!({ "repo": repo.as_str(), "commit": tip.as_str() }).to_string();
+    let body = json!({ "repo": repo.as_str(), "commit": tip.as_str(), "remote": SCENE_REMOTE, "branch": branch }).to_string();
     if let Err(e) = fs::write(&intent, body) {
         let _ = fs::remove_dir_all(&dir);
         return Err(classify_io_error(&e, IoSide::Write, &intent));
@@ -236,12 +241,28 @@ pub(crate) fn with_staging<T>(
 pub(crate) const PUSH_SCENES: &str = "daemon/push";
 /// The attempt record inside a push directory.
 const SCENE_FILE: &str = "push.json";
+/// The remote every standalone and restore push goes to.
+const SCENE_REMOTE: &str = "origin";
 
 /// Review M6: every kept push scene under `root` (`repo`, `commit`, the
 /// directory), for the startup report. A directory without a readable
 /// record is skipped (nothing was pushed from it: the record is written
 /// before the export).
 pub fn push_scenes(root: &Path) -> Vec<(RepoName, CommitOid, std::path::PathBuf)> {
+    scene_records(root).into_iter().map(|s| (s.repo, s.commit, s.dir)).collect()
+}
+
+/// One kept scene's record; `remote` / `branch` are `None` in a record
+/// written before review-2 N4 (never settled automatically).
+struct SceneRecord {
+    repo: RepoName,
+    commit: CommitOid,
+    remote: Option<String>,
+    branch: Option<String>,
+    dir: std::path::PathBuf,
+}
+
+fn scene_records(root: &Path) -> Vec<SceneRecord> {
     let mut out = Vec::new();
     let Ok(rd) = fs::read_dir(root.join(PUSH_SCENES)) else { return out };
     for e in rd.flatten() {
@@ -250,25 +271,29 @@ pub fn push_scenes(root: &Path) -> Vec<(RepoName, CommitOid, std::path::PathBuf)
         let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
         let repo = v["repo"].as_str().and_then(|r| serde_json::from_value::<RepoName>(json!(r)).ok());
         let commit = v["commit"].as_str().and_then(|c| serde_json::from_value::<CommitOid>(json!(c)).ok());
+        let text_of = |k: &str| v[k].as_str().map(str::to_string);
         if let (Some(repo), Some(commit)) = (repo, commit) {
-            out.push((repo, commit, dir));
+            out.push(SceneRecord { repo, commit, remote: text_of("remote"), branch: text_of("branch"), dir });
         }
     }
-    out.sort_by(|a, b| a.2.cmp(&b.2));
+    out.sort_by(|a, b| a.dir.cmp(&b.dir));
     out
 }
 
-/// Review M6: after a definite `Pushed` of `pushed` on `repo`, the kept
-/// scenes of `repo` whose commit `pushed` contains are settled — the
-/// remote has that commit now — so their directory and warning go.
-/// Scenes of commits not contained stay.
-pub(crate) fn settle_push_scenes(core: &Core, git: &Git, repo: &RepoName, pushed: &CommitOid) {
-    for (r, c, dir) in push_scenes(&core.config.paths.root) {
-        if r != *repo || !git.is_ancestor(&c, pushed).unwrap_or(false) {
+/// Review M6: after a definite `Pushed` of `pushed` to `branch` of
+/// `repo`'s origin, the kept scenes of the same repo, remote and branch
+/// (review-2 N4) whose commit `pushed` contains are settled — that branch
+/// has the commit now — so their directory and warning go. Scenes of other
+/// branches, of commits not contained, and records without a remote and
+/// branch stay [实现时补的决定].
+pub(crate) fn settle_push_scenes(core: &Core, git: &Git, repo: &RepoName, branch: &str, pushed: &CommitOid) {
+    for s in scene_records(&core.config.paths.root) {
+        let same = s.repo == *repo && s.remote.as_deref() == Some(SCENE_REMOTE) && s.branch.as_deref() == Some(branch);
+        if !same || !git.is_ancestor(&s.commit, pushed).unwrap_or(false) {
             continue;
         }
-        if fs::remove_dir_all(&dir).is_ok() {
-            let gone = DaemonWarning::UnknownPush { repo: r, commit: c, scene: dir };
+        if fs::remove_dir_all(&s.dir).is_ok() {
+            let gone = DaemonWarning::UnknownPush { repo: s.repo, commit: s.commit, scene: s.dir };
             core.warnings.remove(|w| *w == gone);
         }
     }
@@ -365,7 +390,7 @@ pub fn chain_resolve(
                 // commit is `Unknown` and nothing local moved.
                 let verify = [RefUpdate::verify(&chain_name, Some(c.clone()))];
                 let uncertain = |r: &Result<PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
-                let outcome = with_staging(core, git, repo, &c, uncertain, |wt| {
+                let outcome = with_staging(core, git, repo, &branch, &c, uncertain, |wt| {
                     crate::handlers::writing();
                     match git.push_recorded(wt, "origin", &chain_name, &branch, &anchor_name, &verify, PUSH_TIMEOUT)? {
                         PushOutcome::Unknown => Err(StrataError::new(Code::Unknown, "the push outcome is unknown; not pushed again")
@@ -386,6 +411,8 @@ pub fn chain_resolve(
                 }
                 done.pushed = true;
                 done.anchor = c.as_str().to_string();
+                // Review-2 N4: a definite restore push settles kept scenes too.
+                settle_push_scenes(core, git, repo, &branch, &c);
             }
             ChainChoice::AcceptOriginDrop => {
                 transaction(git, &[RefUpdate::set(&chain_name, o.clone(), Some(c.clone())), RefUpdate::set(&anchor_name, o.clone(), a)])?;

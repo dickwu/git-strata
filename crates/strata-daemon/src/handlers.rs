@@ -1064,7 +1064,7 @@ impl<'d, 'a> Server<'d, 'a> {
             // Review M6: the scene is kept (and reported) when the outcome
             // is unknown; see `resolve::with_staging`.
             let uncertain = |r: &Result<strata_types::PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
-            let r = resolve::with_staging(core, git, repo, &tip, uncertain, |wt| {
+            let r = resolve::with_staging(core, git, repo, &branch, &tip, uncertain, |wt| {
                 writing();
                 strata_publish::push(git, &rc, repo, wt, token)
             });
@@ -1072,7 +1072,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 self.report_unknown();
             }
             if matches!(r, Ok(strata_types::PushOutcome::Pushed)) {
-                resolve::settle_push_scenes(core, git, repo, &tip);
+                resolve::settle_push_scenes(core, git, repo, &branch, &tip);
             }
             Ok(json!({ "push": json_of(&r?), "commit": tip.as_str() }))
         })
@@ -1080,9 +1080,9 @@ impl<'d, 'a> Server<'d, 'a> {
 }
 
 /// Review M4: the `published` entry of a repo whose publish failed after
-/// its commit: `push` from the error's `kind` (`Unknown` → `Unknown`,
-/// `PushRefused` → `Refused(message)`); any other after-commit error says
-/// nothing about a push, so null [实现时补的决定].
+/// its commit: `push` and `checks_ran` as the error's detail states them
+/// (review-2 N3), else `push` from the error's `kind` (`Unknown` →
+/// `Unknown`, `PushRefused` → `Refused(message)`) or null [实现时补的决定].
 fn landed_after_commit(repo: &RepoName, commit: Value, d: &Value) -> Value {
     // Review-2 N3: publish now states `push` (including `Pushed`) and
     // `checks_ran` on every error after the commit; the `kind` reading is

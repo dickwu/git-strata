@@ -456,6 +456,34 @@ fn chain_resolve_restore_pushes_only_fast_forward() {
     }
 }
 
+/// Review-2 N4: a definite Restore push settles the kept push scenes of
+/// the same repo, remote and branch whose commit it contains; a scene of
+/// another branch and a record without remote and branch (written before
+/// N4) stay.
+#[test]
+fn chain_resolve_restore_settles_only_matching_push_scenes() {
+    let fx = Dfx::new();
+    let ch = Chain::new(&fx);
+    ch.rewind_origin(&fx, &ch.p);
+    let scenes = fx.config.paths.root.join("daemon/push");
+    let scene = |name: &str, body: Value| {
+        let d = scenes.join(name);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("push.json"), body.to_string()).unwrap();
+        d
+    };
+    let same = scene("1-1", json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "main" }));
+    let other = scene("1-2", json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "release" }));
+    let legacy = scene("1-3", json!({ "repo": "tool", "commit": ch.c }));
+    let core = fx.prepare().unwrap();
+    sync(&core);
+    let (r, _) = resolve(&core, ChainChoice::Restore);
+    assert!(r.unwrap().pushed);
+    assert!(!same.exists(), "the matching scene is settled");
+    assert!(other.exists(), "another branch's scene stays");
+    assert!(legacy.exists(), "a record without remote/branch stays");
+}
+
 /// Review M7: Restore records the push in one transaction with the chain
 /// check (tracking ref and anchor together). When the tracking ref moved
 /// between the remote's acceptance and the recording, nothing local moves
