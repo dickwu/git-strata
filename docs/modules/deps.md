@@ -902,6 +902,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 3. 对每个 pid：`ESRCH`（进程已退出）和 `EPERM`（别的 uid 的进程，看不到）跳过；其它错误整个调用返回 `Unknown`，`detail` 带 errno。
    - `proc_pidinfo(PROC_PIDVNODEPATHINFO)` 给出 cwd 与根目录，在 C 下的记 `Cwd`。
    - `proc_pidinfo(PROC_PIDLISTFDS)` 列出 fd；对每个 vnode 类型的 fd，`proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO)` 给出路径，在 C 下的记 `Fd`。
+     [实现时补的决定] 调用进程自己的、`fi_openflags` 带 `O_EVTONLY` 的 fd 不记：那是 FSEvents 为 `kFSEventStreamCreateFlagWatchRoot` 在监视根及其各级父目录上开的只为事件的描述符，不占用文件，是 daemon 自己 Tracker 的，由 daemon 自己丢弃。别的进程的 `O_EVTONLY` fd 照样记（第三方监视器仍算持有者）。
    - 从地址 0 开始，逐段调用 `proc_pidinfo(PROC_PIDREGIONPATHINFO, 地址)`，带 vnode 路径、且路径在 C 下的段记 `Mapped`。dlopen 加载的 `.node` 原生模块不占 fd，只能这样看到。
 4. "在 C 下"的定义：路径等于 C，或者以 `C + "/"` 开头，按字节比较。两边都来自内核，大小写一致。`node_modules2/x` 不算在 `node_modules` 下。
 5. 按 (pid, path, hold) 去重，按 (pid, path) 排序，用 `proc_name` 填 command。

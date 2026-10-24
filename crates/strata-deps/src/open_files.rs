@@ -247,6 +247,14 @@ fn holds_of(pid: i32, keep: &dyn Fn(&[u8]) -> bool) -> Result<Option<Holds>> {
                 e => return Err(scan_error("PROC_PIDFDVNODEPATHINFO", pid, e)),
             }
         }
+        // The calling process's own event-only descriptors (FSEvents opens
+        // the watch root and its ancestors `O_EVTONLY` for
+        // `kFSEventStreamCreateFlagWatchRoot`): they never keep a file busy
+        // and belong to the daemon's own Trackers, which it drops itself
+        // [实现时补的决定].
+        if pid == own_pid() && info.pfi.fi_openflags & libc::O_EVTONLY as u32 != 0 {
+            continue;
+        }
         let p = vip_path(&info.pvip);
         if !p.is_empty() && keep(p) {
             out.push((p.to_vec(), Hold::Fd));
@@ -276,6 +284,10 @@ fn holds_of(pid: i32, keep: &dyn Fn(&[u8]) -> bool) -> Result<Option<Holds>> {
         addr = next;
     }
     Ok(Some(out))
+}
+
+fn own_pid() -> i32 {
+    std::process::id() as i32
 }
 
 fn command_of(pid: i32) -> String {

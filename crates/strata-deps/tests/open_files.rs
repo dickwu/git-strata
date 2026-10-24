@@ -27,6 +27,12 @@ fn worker(spec: &str) {
             assert_ne!(p, libc::MAP_FAILED);
             drop(f); // only the mapping holds it now
         }
+        "evt" => {
+            let c = std::ffi::CString::new(path).unwrap();
+            // SAFETY: a valid C path; the fd is leaked until exit on purpose.
+            let fd = unsafe { libc::open(c.as_ptr(), libc::O_EVTONLY | libc::O_CLOEXEC) };
+            assert!(fd >= 0);
+        }
         "cwd" => {} // the parent sets our cwd
         _ => panic!("unknown worker {kind}"),
     }
@@ -153,4 +159,37 @@ fn open_files_scan_is_fast() {
     let t = std::time::Instant::now();
     open_files(tmp.path()).unwrap();
     eprintln!("open_files scan took {:?}", t.elapsed());
+}
+
+/// The flaky `rm_waits_for_publishing_in_the_lock_free_gap` (OpenFiles held
+/// by the test process itself on `sessions/<id>` and `sessions/<id>/tool`):
+/// those are exactly the `O_EVTONLY` descriptors FSEvents opens on a watch
+/// root and its ancestors (`kFSEventStreamCreateFlagWatchRoot`). The calling
+/// process's own event-only descriptors are not reported; a plain fd of its
+/// own, and another process's event-only fd, still are.
+#[test]
+fn own_event_only_descriptors_are_not_holders() {
+    if std::env::var(WORKER_ENV).is_ok() {
+        return;
+    }
+    let t = tempfile::tempdir().unwrap();
+    let dir = fs::canonicalize(t.path()).unwrap();
+    let sub = dir.join("tool");
+    fs::create_dir(&sub).unwrap();
+    let c = std::ffi::CString::new(sub.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a valid C path; closed below.
+    let evt = unsafe { libc::open(c.as_ptr(), libc::O_EVTONLY | libc::O_CLOEXEC) };
+    assert!(evt >= 0);
+    assert_eq!(open_files(&dir).unwrap(), vec![], "own O_EVTONLY fd is not a holder");
+    let plain = fs::File::open(&sub).unwrap();
+    let got = open_files(&dir).unwrap();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!((got[0].pid, got[0].hold), (std::process::id() as i32, Hold::Fd));
+    drop(plain);
+    // SAFETY: our fd.
+    unsafe { libc::close(evt) };
+    let child = spawn(format!("evt:{}", sub.display()), None);
+    let got = open_files(&dir).unwrap();
+    assert!(got.iter().any(|o| o.pid == child.id() as i32 && o.hold == Hold::Fd), "another process's event-only fd still counts: {got:?}");
+    stop(child);
 }
