@@ -1080,7 +1080,7 @@ impl<'d, 'a> Server<'d, 'a> {
             let dest = resolve::push_dest(git);
             let r = resolve::with_staging(core, git, repo, &branch, &tip, dest.as_ref(), uncertain, |wt| {
                 writing();
-                strata_publish::push(git, &rc, repo, wt, token)
+                strata_publish::push_to(git, &rc, repo, wt, token, dest.as_ref().map(resolve::PushDest::url))
             });
             if r.as_ref().is_err_and(|e| e.code == Code::Unknown) {
                 self.report_unknown();

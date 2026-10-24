@@ -507,6 +507,63 @@ fn chain_resolve_restore_settles_only_matching_push_scenes() {
     assert!(other_id.exists(), "a scene of another repository identity stays");
 }
 
+/// Review-4 F1: the restore pushes to exactly the push URL it recorded in
+/// the scene. Origin's push URL flips A→B after the destination was read
+/// (while staging) and back B→A before the push is recorded: the commit
+/// lands at A (the recorded destination), B is untouched, and the kept
+/// scene for A settles — it is true that A has the commit.
+#[test]
+fn chain_resolve_restore_pushes_to_the_recorded_url_across_a_b_a() {
+    let fx = Dfx::new();
+    let ch = Chain::new(&fx);
+    ch.rewind_origin(&fx, &ch.p);
+    let tool = fx.config.repos[&repo_name("tool")].path.clone();
+    let a_url = fx.sb.git(&tool, &["config", "remote.origin.url"]).trim().to_string();
+    let b = fx.sb.path("tool-b.git");
+    fx.sb.git(&fx.sb.root, &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()]);
+    let b_url = b.to_str().unwrap().to_string();
+    let repo_id = fx.sb.open(&tool).repo_id().get().to_string_lossy().into_owned();
+    let old = fx.config.paths.root.join("daemon/push/1-1");
+    fs::create_dir_all(&old).unwrap();
+    let body = json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "main", "repo_id": repo_id, "push_url": a_url });
+    fs::write(old.join("push.json"), body.to_string()).unwrap();
+    let core = fx.prepare().unwrap();
+    sync(&core);
+    let git = &core.gits[&repo_name("tool")];
+    let staging = git.pause_export_before_rename();
+    let record = git.pause_push_before_record();
+    let wait = |p: &strata_gitio::Pause, what: &str| {
+        let start = std::time::Instant::now();
+        while !p.is_paused() && start.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(p.is_paused(), "restore reached the {what} pause");
+    };
+    std::thread::scope(|sc| {
+        let t = sc.spawn(|| resolve(&core, ChainChoice::Restore).0);
+        let start = std::time::Instant::now();
+        while !staging.is_paused() && !t.is_finished() && start.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if t.is_finished() {
+            panic!("restore ended before staging: {:?}", t.join().unwrap());
+        }
+        wait(&staging, "staging");
+        let scene = fs::read_dir(fx.config.paths.root.join("daemon/push")).unwrap().flatten().map(|d| d.path()).find(|d| *d != old).unwrap();
+        let rec: Value = serde_json::from_str(&fs::read_to_string(scene.join("push.json")).unwrap()).unwrap();
+        assert_eq!(rec["push_url"], a_url, "the scene records A");
+        fx.sb.git(&tool, &["config", "remote.origin.pushurl", &b_url]);
+        staging.release();
+        wait(&record, "record");
+        fx.sb.git(&tool, &["config", "--unset", "remote.origin.pushurl"]);
+        record.release();
+        assert!(t.join().unwrap().unwrap().pushed);
+    });
+    assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", &a_url, "rev-parse", "refs/heads/main"]).trim(), ch.c, "the push went to A, as recorded");
+    assert_eq!(fx.sb.git(&b, &["rev-parse", "refs/heads/main"]).trim(), ch.p, "B untouched");
+    assert!(!old.exists(), "the scene for A settles: A has the commit");
+}
+
 /// Review M7: Restore records the push in one transaction with the chain
 /// check (tracking ref and anchor together). When the tracking ref moved
 /// between the remote's acceptance and the recording, nothing local moves

@@ -246,3 +246,35 @@ fn push_url_names_the_push_destination() {
     assert_eq!(err.detail.as_ref().unwrap()["reason"], "no-such-remote");
     assert_eq!(e.git.push_url("-x").unwrap_err().code, Code::InvalidInput);
 }
+
+/// Review-4 F1: `push_published_to` / `push_recorded_to` send to exactly
+/// the URL given, whatever origin's push URL says now; tracking ref and
+/// anchor still move as for `push_published`. An empty URL is refused
+/// before anything is sent.
+#[test]
+fn push_to_sends_to_the_given_url_not_the_config() {
+    let e = env();
+    let a_url = e.sb.git_output(&e.main, &["config", "remote.origin.url"]);
+    let a_url = String::from_utf8_lossy(&a_url.stdout).trim().to_string();
+    let b = e.sb.path("other.git");
+    assert!(e.sb.git_output(&e.main, &["init", "-q", "--bare", b.to_str().unwrap()]).status.success());
+    assert!(e.sb.git_output(&e.main, &["push", "-q", b.to_str().unwrap(), "main"]).status.success());
+    assert!(e.sb.git_output(&e.main, &["config", "remote.origin.pushurl", b.to_str().unwrap()]).status.success());
+    let anchor = "refs/strata/anchor/main";
+
+    let c = e.publish(&e.head, "f1.txt");
+    let err = e.git.push_published_to(&e.staging, "origin", "", PUBLISH, "main", anchor, T).unwrap_err();
+    assert_eq!(err.code, Code::InvalidInput, "{err:?}");
+    assert_eq!(err.detail.as_ref().unwrap()["reason"], "empty-url");
+    assert_eq!(e.remote_branch("main").as_deref(), Some(e.head.as_str()), "nothing sent");
+    assert_eq!(e.git.push_published_to(&e.staging, "origin", &a_url, PUBLISH, "main", anchor, T).unwrap(), PushOutcome::Pushed);
+    assert_eq!(e.remote_branch("main").as_deref(), Some(c.as_str()), "the push went to the given URL (A)");
+    let at_b = e.sb.git_output(&b, &["rev-parse", "refs/heads/main"]);
+    assert_eq!(String::from_utf8_lossy(&at_b.stdout).trim(), e.head, "not to the configured push URL (B)");
+    assert_eq!(e.git.read_ref(&remote_ref("origin", "main")).unwrap(), Some(coid(&c)));
+    assert_eq!(e.git.read_ref(anchor).unwrap(), Some(coid(&c)));
+
+    let d = e.publish(&c, "f1b.txt");
+    assert_eq!(e.git.push_recorded_to(&e.staging, "origin", &a_url, PUBLISH, "main", anchor, &[], T).unwrap(), PushOutcome::Pushed);
+    assert_eq!(e.remote_branch("main").as_deref(), Some(d.as_str()));
+}

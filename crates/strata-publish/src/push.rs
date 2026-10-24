@@ -215,7 +215,7 @@ pub fn commit(
 
 /// The recording push: chain must lead, then gitio's `push_published`
 /// (tracking ref and anchor in one transaction). Raw outcome.
-fn send(git: &Git, branch: &str, staging: &Path) -> Result<PushOutcome> {
+fn send(git: &Git, branch: &str, staging: &Path, url: Option<&str>) -> Result<PushOutcome> {
     match publish_chain(git, branch)? {
         Some(c) if c.state == ChainState::Leads => {}
         c => {
@@ -223,7 +223,10 @@ fn send(git: &Git, branch: &str, staging: &Path) -> Result<PushOutcome> {
                 .with_detail(json!({ "branch": branch, "state": c.map(|c| format!("{:?}", c.state)) })));
         }
     }
-    git.push_published(staging, REMOTE, &chain_ref(branch), branch, &anchor_ref(branch), seams::push_timeout(git))
+    match url {
+        Some(u) => git.push_published_to(staging, REMOTE, u, &chain_ref(branch), branch, &anchor_ref(branch), seams::push_timeout(git)),
+        None => git.push_published(staging, REMOTE, &chain_ref(branch), branch, &anchor_ref(branch), seams::push_timeout(git)),
+    }
 }
 
 /// §3 `push`: the confirmation first (`NotConfirmed`, nothing started), then
@@ -233,8 +236,16 @@ fn send(git: &Git, branch: &str, staging: &Path) -> Result<PushOutcome> {
 /// in the §3 list (the action names it); recorded in
 /// docs/impl-progress/publish.md. The caller holds the repo write lock.
 pub fn push(git: &Git, cfg: &RepoConfig, repo: &RepoName, staging: &Path, confirm: Option<ConfirmToken>) -> Result<PushOutcome> {
+    push_to(git, cfg, repo, staging, confirm, None)
+}
+
+/// `push` to exactly `url` when given (gitio `push_published_to`): the
+/// daemon passes the push URL it recorded with the staging scene, so the
+/// record names the destination the push went to. [实现时补的决定]
+/// (review-4 F1)
+pub fn push_to(git: &Git, cfg: &RepoConfig, repo: &RepoName, staging: &Path, confirm: Option<ConfirmToken>, url: Option<&str>) -> Result<PushOutcome> {
     confirm_gate(cfg, repo, confirm)?;
-    match send(git, &cfg.publish.branch, staging)? {
+    match send(git, &cfg.publish.branch, staging, url)? {
         PushOutcome::Pushed => Ok(PushOutcome::Pushed),
         PushOutcome::Refused(m) => Err(StrataError::new(Code::PushRefused, "the remote refused the push")
             .with_detail(json!({ "kind": "PushRefused", "message": m }))),
@@ -427,7 +438,7 @@ fn locked(
     // Step 7.
     seams::fail(ctx.git, FailPoint::BeforePush).map_err(|e| with_landed(after_write(&commit, e), Value::Null, ran.ran))?;
     let push = if pushing {
-        let out = send(ctx.git, branch, &staged.worktree);
+        let out = send(ctx.git, branch, &staged.worktree, None);
         let (outcome, detail) = match &out {
             Ok(PushOutcome::Pushed) => (RefOutcome::Pushed, None),
             Ok(PushOutcome::Refused(m)) => (RefOutcome::Refused, Some(m.clone())),

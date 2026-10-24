@@ -264,6 +264,11 @@ impl Git {
     /// `remote` 照 push 检查。Code：InvalidInput（remote 名不合法；没有这个 remote，detail.reason = "no-such-remote"）；Unknown。
     /// [实现时补的决定]（review-3 R4：daemon 把它记进保留的推送现场，只在推到同一地址时结清）
     pub fn push_url(&self, remote: &str) -> Result<String>;
+    /// [实现时补的决定]（review-4 F1）`push_published` / `push_recorded` 推到恰好 `url`（调用方先用
+    /// `push_url` 读好、记下的那个），第 2 步不再读 config；`remote` 仍决定 `refs/strata/remotes/<remote>/<dst>`。
+    /// 空 `url` → InvalidInput（detail.reason = "empty-url"），什么都没发。其余同各自的无 `_to` 版本。
+    pub fn push_published_to(&self, staging: &Path, remote: &str, url: &str, src_ref: &str, dst_branch: &str, anchor_ref: &str, timeout: Duration) -> Result<PushOutcome>;
+    pub fn push_recorded_to(&self, staging: &Path, remote: &str, url: &str, src_ref: &str, dst_branch: &str, anchor_ref: &str, verify: &[RefUpdate], timeout: Duration) -> Result<PushOutcome>;
 
     /// 经 `worktree/.git` 直接解析它的 index 与仓库 config（§5.7）。worktree 是主 checkout、
     /// staging 树，或 strata 的工作区（经 gitfile 到本会话影子仓库的管理目录）。
@@ -903,6 +908,7 @@ module-rulings Addendum 2 定了接法：**每个会话、每个 repo 一个影�
 | `push_pushed_fast_forward_new_and_up_to_date` | 快进、新分支、已是最新（`=`）三种都是 `Pushed`；之后 `refs/strata/remotes/<remote>/<dst>` 等于推送的 commit，主 checkout 的 `refs/remotes/<remote>/<dst>` 不变；推送期间 `refs/strata/remotes/<remote>/<dst>` 被改过时，第 5 步不动它。机制是主 checkout 里的固定装置 `hooks/pre-push`：它用 `git update-ref` 把这个 ref 改到另一个 commit，模拟推送期间落地的 fetch（publish 的推送照跑人自己的 pre-push 钩子，review M16、N9） | 新增 |
 | `push_sets_strata_publish_and_never_forces` | `take_git_calls` 里 push 的子进程环境有 `STRATA_PUBLISH=1`、没有 `LC_ALL`；argv 里没有 `--force`、`--force-with-lease`、`+` 开头的 refspec、`--no-verify`；`src_ref` 不在 `refs/strata/` 下 → `Err(InvalidInput)`，不存在 → `Err(NoSuchCommit)`；`staging` 不是 attach 过的 staging 树 → `Err(InvalidInput)` | 新增 |
 | `push_runs_human_pre_push_in_staging_root` | 主 checkout 自己的 `hooks/pre-push` 在推送时运行，它看到的 cwd 与 `GIT_WORK_TREE` 是 staging 树根；钩子以 1 退出时没有状态行 → `Ok(Unknown)`，远端分支不变 | 新增 |
+| `push_to_sends_to_the_given_url_not_the_config` | （review-4 F1）`remote.origin.pushurl = B` 时 `push_published_to(.., A, ..)` 落在 A、B 不变，tracking ref 与锚点照常前移；`push_recorded_to` 同样；空 url → `InvalidInput`（`empty-url`），远端不变 | 新增 |
 | `push_url_names_the_push_destination` | （review-3 R4）`push_url("origin")` 等于 `remote.origin.url`；设了 `remote.origin.pushurl = B`（另一个本地 bare 仓库）之后等于 B，此时 push 落在 B、不落在 url 指的远端；没有的 remote → `InvalidInput`（`no-such-remote`），名字不合法（`-x`）→ `InvalidInput` | 新增 |
 | `merge3_nonoverlapping_hunks_clean` | 两边的改动之间至少隔一行未改的 base 行 → `Clean`，结果同时含两边的改动；恰好隔一行也干净 | 新增 |
 | `merge3_same_hunk_conflict` | 两边把同一行改成不同内容 → `Conflict`，一个 Hunk，base、ours、theirs 三段文本与起始行号都对 | 新增 |
@@ -1273,7 +1279,8 @@ git commit -m "test(gitio): the main checkout changes only in objects and refs/s
 | fetch 超时 | [我的决定] 120 s 的常量，首个 spike 后修正 | 网络操作必须有界，否则 `new` 握着 per-repo 写锁一直等 | 2026-10-22 |
 | strata 的远端跟踪 ref | [我的决定] `refs/strata/remotes/<remote>/<branch>`，fetch 带 `--refmap=`；`Pushed` 之后比较并交换地更新 | 不写 `refs/remotes/*`（§4.1）；推送期间被 fetch 改过就留给 fetch 的值 | 2026-10-22 |
 | 推送地址 | [我的决定] 推到 `git remote get-url --push` 给出的地址 | 推到 remote 名会更新 `refs/remotes/*`（实测） | 2026-10-22 |
-| 公开推送地址 | [实现时补的决定] 第 2 步的读法提成公开的 `push_url`，push 自己也用它 | review-3 R4：daemon 要记下一次推送的目的地，只在推到同一目的地时结清保留的现场；同一份读法，不会与 push 实际推的地址不一致 | 2026-10-24 |
+| 公开推送地址 | [实现时补的决定] 第 2 步的读法提成公开的 `push_url`，push 自己也用它 | review-3 R4：daemon 要记下一次推送的目的地，只在推到同一目的地时结清保留的现场 | 2026-10-24 |
+| 推到给定地址 | [实现时补的决定] `push_published_to` / `push_recorded_to`：第 2 步用调用方给的地址，不读 config | review-4 F1：同一份读法读两次，两次之间 config 可能被改，记下的地址就不是实际推的地址。daemon 读一次、记下、原样传进来，两者才一致 | 2026-10-24 |
 | pre-push 钩子 | [我的决定] 不带 `--no-verify`；推送在 staging 树根里跑（review M16 的裁定），人自己的 `pre-push` 照跑 | 仓库自己的钩子照跑，cwd 是要发布的内容；钩子拒绝时没有状态行，报 `Unknown` | 2026-10-22 |
 | 导出的持久化与原子性 | [我的决定] 每个文件与目录 `fsync`（`libc::fsync`），一次 `apfs::full_fsync`，再 `apfs::rename_rooted(…, RenameMode::Excl)`；要 `fsync` 的路径取自 tree 的路径表，不遍历目录 | §5.5：基线目录只以完整的形态出现，竞争下也不覆盖。路径表就是 git 写出的全部条目，按它逐个打开没有 `apfs::walk` 的深度上限 | 2026-10-22 |
 | gitio 往工作区、staging 树、导出目标旁与活的影子仓库里的写 | module-rulings Addendum 7 的 Layering 条、Addendum 8 与它的 clarification 的裁定：都经 apfs 的 rooted 函数（gitfile 用 `create_file_rooted`；导出用 `mkdir_rooted`、`rename_rooted`、`remove_rooted`；move 时的管理目录用 `mkdir_rooted`、`create_file_rooted`，根是影子仓库目录），gitio 自己不做 `*at` 调用。`new` 时影子仓库还没有工作区，`ensure_shadow` 的写仍按路径。[我的决定] 导出以 `dst` 的父目录为根，`T` 建成 0700，`T/tree` 由 gitio 建成 0755 | Addendum 3 要求往工作区或 staging 树里的写都不跟随符号链接，Addendum 8 让这类操作只有 apfs 一份实现。gitio 因此依赖同在第 1 层的 apfs（apfs 只依赖 types，没有环），T15 把 types.md §8 第 1 层一行改成"同层只允许 store 与 gitio 依赖 apfs"。`T/tree` 要预先建好：工作树目录不存在时 checkout-index 以 128 退出（实测）。树里的文件由 git 写。影子仓库在 `new` 之后是 agent 可写的地方，re-review r2 用指向 `<main>/.git/worktrees` 的符号链接把第 2 代的管理目录引进了主 checkout（review B3）。管理目录的 index 也是 gitio 的 rooted 写：git 把 index 建在 `tree_dir/.git/` 下，gitio 复制进来（re-review r3 实测旧的做法在 `worktrees/<n>` 被换成指向 `<main>/.git` 的符号链接时重写了主 checkout 的 index）。剩下的按路径的 git 写只有那个临时 index，见"活影子仓库的写入清单"一行 | 2026-10-22 |

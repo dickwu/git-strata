@@ -307,6 +307,13 @@ pub(crate) struct PushDest {
 /// The destination a push to origin from `git` goes to now; `None` when
 /// origin's push URL cannot be read (such a push fails, and its scene, if
 /// any, is never settled automatically).
+impl PushDest {
+    /// The push URL the push is sent to (review-4 F1).
+    pub(crate) fn url(&self) -> &str {
+        &self.push_url
+    }
+}
+
 pub(crate) fn push_dest(git: &Git) -> Option<PushDest> {
     let push_url = git.push_url(SCENE_REMOTE).ok()?;
     Some(PushDest { repo_id: git.repo_id(), push_url })
@@ -359,15 +366,16 @@ fn scene_records(root: &Path) -> Vec<SceneRecord> {
 /// branch stay [实现时补的决定].
 ///
 /// [实现时补的决定] (review-3 R4) `dest` is the destination read before
-/// the push; it must still be the destination now (origin's push URL did
-/// not change around the push), and a scene settles only when its recorded
-/// `repo_id` and `push_url` equal it exactly (byte-for-byte strings: an
-/// alias of the same remote does not settle). A record without them stays.
+/// the push and a scene settles only when its recorded `repo_id` and
+/// `push_url` equal it exactly (byte-for-byte strings: an alias of the same
+/// remote does not settle). A record without them stays.
+///
+/// [实现时补的决定] (review-4 F1) The push was sent to exactly
+/// `dest.push_url` (gitio `push_*_to`), so `dest` is where the commit
+/// landed whatever origin's config says now; the config is not read again.
+/// `dest` `None` (no readable push URL) → nothing settles.
 pub(crate) fn settle_push_scenes(core: &Core, git: &Git, repo: &RepoName, branch: &str, pushed: &CommitOid, dest: Option<&PushDest>) {
     let Some(dest) = dest else { return };
-    if push_dest(git).as_ref() != Some(dest) {
-        return;
-    }
     let repo_id = dest.repo_id.get().to_string_lossy();
     for s in scene_records(&core.config.paths.root) {
         let same = s.repo == *repo
@@ -479,7 +487,12 @@ pub fn chain_resolve(
                 let dest = push_dest(git);
                 let outcome = with_staging(core, git, repo, &branch, &c, dest.as_ref(), uncertain, |wt| {
                     crate::handlers::writing();
-                    match git.push_recorded(wt, "origin", &chain_name, &branch, &anchor_name, &verify, PUSH_TIMEOUT)? {
+                    // Review-4 F1: to exactly the recorded destination.
+                    let sent = match &dest {
+                        Some(d) => git.push_recorded_to(wt, "origin", &d.push_url, &chain_name, &branch, &anchor_name, &verify, PUSH_TIMEOUT)?,
+                        None => git.push_recorded(wt, "origin", &chain_name, &branch, &anchor_name, &verify, PUSH_TIMEOUT)?,
+                    };
+                    match sent {
                         PushOutcome::Unknown => Err(StrataError::new(Code::Unknown, "the push outcome is unknown; not pushed again")
                             .with_detail(json!({ "reason": "push_unknown", "branch": branch }))),
                         o => Ok(o),

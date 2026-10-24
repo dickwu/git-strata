@@ -23,7 +23,7 @@ pub mod stage;
 pub use chain::{advance_anchor, anchor_ref, chain_ref, merge_base};
 pub use check::{CHECK_OUTPUT_TAIL, ChecksRan, check};
 pub use rebase::{BetweenDiff, HunkPreview, Merge3Preview, RebaseReport, assign, diff_between, rebase_session};
-pub use push::{PublishWarning, Published, WarningKind, commit, publish, publish_bound, push};
+pub use push::{PublishWarning, Published, WarningKind, commit, publish, publish_bound, push, push_to};
 pub use seams::PUSH_TIMEOUT;
 #[cfg(feature = "test-seams")]
 pub use seams::PublishFault;

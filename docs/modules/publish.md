@@ -138,6 +138,9 @@ pub fn commit(git: &Git, staged: &Staged, parent: &CommitOid, expected_chain: Op
 /// 核对凭据的 `action`，再调 §2 第 6 条记录 `Pushed` 的那一次调用。不调用 confirm。
 /// 不需要确认时 `confirm` 为 `None`。需要而没有、或 action 不符 → `NotConfirmed`，那次调用不启动。
 pub fn push(git: &Git, cfg: &RepoConfig, staging: &Path, confirm: Option<ConfirmToken>) -> Result<PushOutcome>;
+/// [实现时补的决定]（review-4 F1）同 `push`，`url` 给了就经 gitio `push_published_to` 推到恰好这个地址，
+/// 不再读 origin 的 config。daemon 传它记进推送现场的 `push_url`。`push` 即 `push_to(.., None)`。
+pub fn push_to(git: &Git, cfg: &RepoConfig, repo: &RepoName, staging: &Path, confirm: Option<ConfirmToken>, url: Option<&str>) -> Result<PushOutcome>;
 
 /// 把解决者记在这次发布的 `publishes` 行上（`outcome.assigned`）。不写文件，不合并、不推送。
 pub fn assign(store: &Store, id: u64, path: &RepoPath, session: SessionId) -> Result<()>;
@@ -746,6 +749,7 @@ git commit -m "feat(publish): one merge under the repo lock"
 | D3 零条检查 | 成功，并写出 `checks_ran: 0` | config.md 把这件事交给本文。静默跳过会让人以为检查跑过了 | 2026-10-23 |
 | D4 staging 的位置 | 最小 `SessionId` 的会话根下，`.strata-publish-<repo>-<release-id>/`。仓库在其中的 `<repo>/`，兄弟是所钉基线的克隆，不是活的工作区 | 草稿要求会话根、真实目录、兄弟布局。多会话组没有唯一的根，取最小 id。克隆兄弟是为了检查的 `../` 不写进活的工作区 | 2026-10-23 |
 | D5 hunk 文本上限 | 4096 字节，UTF-8 字符边界。超限的带 `truncated`，同冲突里的小 hunk 保持原文 | 裁定要求本文定上限。3d 的那一行要求小 hunk 精确 | 2026-10-23 |
+| D18 推到给定地址（review-4 F1） | [实现时补的决定] 新增 `push_to`，可带调用方解析好的推送地址；发布流程自己的推送不变（仍由 gitio 读） | daemon 的单独 push 要推到它记进现场的地址，记录与实际目的地才一致 | 2026-10-24 |
 | D12 导出在锁里 | `export_tree` 的对象是锁里刚读到的 B，在同一段锁里导出再合并。导出在凭据闸门和内存冲突判定之后 | 锁外导出再合并，会让并发的不相交发布得到 `HeadMoved`，与 3d 的「全部落地」矛盾。闸门之前不建目录 | 2026-10-23 |
 | D16 具名拒绝的相位 | 目录已删完、或还没建目录时，返回具名码之前把 `Running` 收成 `Done`，`outcome.stopped` 记下那个码。删不完则行保持 `Unknown`，不收成 `Done` | `publishes` 只允许进 `Done` 或 `Unknown`。留着 `Running`，重启会把一次干净的 `Conflict` 报成不确定。删不完的 gitfile 不能靠收成 `Done` 假装没有 | 2026-10-23 |
 | D17 合并基线取锁里的读 | 锁外的计划与锁里的 `publish_chain` 不一致时，用锁里的 B 做这一次合并，不因此 `HeadMoved`。对象已写入之后，对外是 `Unknown`，`HeadMoved` 只在 `detail` 里 | 草稿写「与计划不一致就 `HeadMoved`」。3d 的并发行要求取锁前落地的不相交发布并进这一次合并、全部落地。两处不能同时成立，矩阵行的断言取胜。草稿的「不重新合并、不重试」留在比较并交换失败上 | 2026-10-23 |

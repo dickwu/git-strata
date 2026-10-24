@@ -72,11 +72,14 @@ impl Git {
     }
 
     /// Steps 1–4 of `push`: refusals, the push URL, the push, and this
-    /// ref's status line.
+    /// ref's status line. `url` given → the push goes to exactly that URL
+    /// and the config is not read again (review-4 F1).
+    #[allow(clippy::too_many_arguments)]
     fn push_send(
         &self,
         staging: &Path,
         remote: &str,
+        url: Option<&str>,
         src_ref: &str,
         dst_branch: &str,
         timeout: Duration,
@@ -97,8 +100,14 @@ impl Git {
         let tracking = remote_ref(remote, dst_branch);
         let before = self.read_ref(&tracking)?;
 
-        // Step 2: the push URL.
-        let url = self.push_url_checked(remote)?;
+        // Step 2: the push URL: the caller's, else read now.
+        let url = match url {
+            Some("") => {
+                return Err(errd(Code::InvalidInput, "empty push URL", json!({ "remote": remote, "reason": "empty-url" })));
+            }
+            Some(u) => u.to_string(),
+            None => self.push_url_checked(remote)?,
+        };
 
         // Step 3: the push itself, from the staging root, hooks live.
         self.inner.seams.hit(PUSH_BEFORE_SEND);
@@ -151,7 +160,7 @@ impl Git {
         dst_branch: &str,
         timeout: Duration,
     ) -> Result<PushOutcome> {
-        let Sent { outcome, tracking, before, pushed } = self.push_send(staging, remote, src_ref, dst_branch, timeout)?;
+        let Sent { outcome, tracking, before, pushed } = self.push_send(staging, remote, None, src_ref, dst_branch, timeout)?;
 
         // Step 5: strata's tracking ref, compare-and-swap against the value
         // read before the push; failure or skip changes nothing.
@@ -178,7 +187,43 @@ impl Git {
         anchor_ref: &str,
         timeout: Duration,
     ) -> Result<PushOutcome> {
-        self.push_recorded(staging, remote, src_ref, dst_branch, anchor_ref, &[], timeout)
+        self.push_recorded_via(staging, remote, None, src_ref, dst_branch, anchor_ref, &[], timeout)
+    }
+
+    /// `push_published` to exactly `url` (a `push_url` the caller resolved
+    /// and recorded): the config is not read again, so the destination the
+    /// caller recorded is the one the push went to. `remote` still names the
+    /// tracking ref. Empty `url` → `InvalidInput` (`empty-url`).
+    /// [实现时补的决定] (review-4 F1)
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_published_to(
+        &self,
+        staging: &Path,
+        remote: &str,
+        url: &str,
+        src_ref: &str,
+        dst_branch: &str,
+        anchor_ref: &str,
+        timeout: Duration,
+    ) -> Result<PushOutcome> {
+        self.push_recorded_via(staging, remote, Some(url), src_ref, dst_branch, anchor_ref, &[], timeout)
+    }
+
+    /// `push_recorded` to exactly `url` (see `push_published_to`).
+    /// [实现时补的决定] (review-4 F1)
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_recorded_to(
+        &self,
+        staging: &Path,
+        remote: &str,
+        url: &str,
+        src_ref: &str,
+        dst_branch: &str,
+        anchor_ref: &str,
+        verify: &[RefUpdate],
+        timeout: Duration,
+    ) -> Result<PushOutcome> {
+        self.push_recorded_via(staging, remote, Some(url), src_ref, dst_branch, anchor_ref, verify, timeout)
     }
 
     /// `push_published` whose recording transaction also carries `verify`
@@ -197,9 +242,24 @@ impl Git {
         verify: &[RefUpdate],
         timeout: Duration,
     ) -> Result<PushOutcome> {
+        self.push_recorded_via(staging, remote, None, src_ref, dst_branch, anchor_ref, verify, timeout)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_recorded_via(
+        &self,
+        staging: &Path,
+        remote: &str,
+        url: Option<&str>,
+        src_ref: &str,
+        dst_branch: &str,
+        anchor_ref: &str,
+        verify: &[RefUpdate],
+        timeout: Duration,
+    ) -> Result<PushOutcome> {
         check_strata_ref(anchor_ref)?;
         let anchor_before = self.read_ref(anchor_ref)?;
-        let Sent { outcome, tracking, before, pushed } = self.push_send(staging, remote, src_ref, dst_branch, timeout)?;
+        let Sent { outcome, tracking, before, pushed } = self.push_send(staging, remote, url, src_ref, dst_branch, timeout)?;
         if outcome != PushOutcome::Pushed {
             return Ok(outcome);
         }
