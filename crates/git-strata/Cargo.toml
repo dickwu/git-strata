@@ -1,0 +1,26 @@
+[package]
+name = "git-strata"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "git-strata: the command-line client of git-stratad (one compact JSON envelope per call)"
+
+[lib]
+name = "git_strata"
+path = "src/lib.rs"
+
+[[bin]]
+name = "git-strata"
+path = "src/main.rs"
+
+[dependencies]
+strata-types = { path = "../strata-types" }
+strata-daemon = { path = "../strata-daemon" }
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2.191"
+
+[dev-dependencies]
+tempfile = "3"
+libc = "0.2.191"
