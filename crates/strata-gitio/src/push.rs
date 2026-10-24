@@ -2,7 +2,9 @@
 //! definite `Pushed` / `Refused` only from this ref's porcelain status
 //! line; everything else is `Unknown`. Never forces, never retries.
 
-use std::path::Path;
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::json;
@@ -12,7 +14,7 @@ use crate::command::{Opts, failed};
 use crate::err::errd;
 use crate::publish_io::RefUpdate;
 use crate::refs::check_strata_ref;
-use crate::seams::{PUSH_BEFORE_RECORD, PUSH_BEFORE_SEND};
+use crate::seams::{PUSH_AFTER_CHECK, PUSH_BEFORE_RECORD, PUSH_BEFORE_SEND};
 use crate::remote::{check_remote, remote_ref};
 use crate::{Git, Result};
 
@@ -142,7 +144,7 @@ impl Git {
     ) -> Result<Sent> {
         // Step 1: refusals; nothing has been sent.
         let gitfile = staging.join(".git");
-        self.staging_gitdir(staging)?;
+        let private = self.staging_gitdir(staging)?;
         check_strata_ref(src_ref)?;
         check_remote(remote)?;
         self.check_branch(dst_branch)?;
@@ -180,10 +182,25 @@ impl Git {
                 json!({ "remote": remote, "url": url, "reason": reason }),
             ));
         }
+        // review-6 hole 2: the check above and the push below are two git
+        // processes, each reading the config afresh; a rule added between
+        // them would still win. So the push process checks itself: a guard
+        // `pre-push` hook (git runs it with the URL it is about to send to,
+        // after its own one config read, before any pack is sent) records
+        // that URL and refuses anything but `url`, then runs the human's
+        // `pre-push`. D25 [实现时补的决定]
+        let user_hook = self.user_pre_push(&gitfile, staging)?;
+        let guard = Guard::new(&private)?;
+        self.inner.seams.hit(PUSH_AFTER_CHECK);
         let spec = format!("{src_ref}:refs/heads/{dst_branch}");
         let mut c = self.tree_command(&gitfile, staging, None);
         c.env("STRATA_PUBLISH", "1");
         c.env(PIN_ENV, &url);
+        c.env(GUARD_SEEN_ENV, guard.seen());
+        c.env(USER_HOOK_ENV, user_hook.as_deref().map(Path::as_os_str).unwrap_or_default());
+        let mut hooks = OsString::from("core.hooksPath=");
+        hooks.push(guard.hooks());
+        c.arg("-c").arg(hooks);
         c.arg(format!("--config-env=url.{url}.insteadOf={PIN_ENV}"));
         c.arg(format!("--config-env=url.{url}.pushInsteadOf={PIN_ENV}"));
         c.args(["push", "--porcelain", "--no-follow-tags", "--end-of-options", &url, &spec]);
@@ -219,7 +236,49 @@ impl Git {
             _ => PushOutcome::Unknown,
         };
 
+        // What the guard saw decides whether the status line is about `url`.
+        let seen = guard.read_seen()?;
+        let outcome = if seen.iter().any(|s| s.as_slice() != url.as_bytes()) {
+            if seen.len() == 1 && status_of(&out.stdout, &spec).is_none() {
+                // The one destination git would have sent to is not `url`,
+                // and the guard stopped it before any pack went out.
+                return Err(errd(
+                    Code::InvalidInput,
+                    format!("git would not push to {url} as given (url-rewritten at push time); nothing sent"),
+                    json!({ "remote": remote, "url": url, "reason": "url-rewritten" }),
+                ));
+            }
+            tracing::warn!(remote, url, n = seen.len(), "push went to more than one destination; outcome unknown");
+            PushOutcome::Unknown
+        } else if seen.is_empty() && outcome == PushOutcome::Pushed {
+            // git sent without running the guard: the destination is not
+            // vouched for.
+            tracing::warn!(remote, url, "push guard did not run; outcome unknown");
+            PushOutcome::Unknown
+        } else {
+            outcome
+        };
+
         Ok(Sent { outcome, tracking, before, pushed })
+    }
+
+    /// The human's `pre-push` hook as this push would run it without the
+    /// guard: `git rev-parse --git-path hooks/pre-push` in the staging view
+    /// (their `core.hooksPath`, else the common dir's `hooks/`); a relative
+    /// result is relative to the staging root, where hooks run.
+    fn user_pre_push(&self, gitfile: &Path, staging: &Path) -> Result<Option<PathBuf>> {
+        let mut c = self.tree_command(gitfile, staging, None);
+        c.args(["rev-parse", "--git-path", "hooks/pre-push"]);
+        let out = self.run(c, Opts::c())?;
+        if !out.ok() {
+            return Err(failed("rev-parse --git-path", &out));
+        }
+        let raw = crate::fsx::strip_eol(&out.stdout);
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        let p = Path::new(OsStr::from_bytes(raw));
+        Ok(Some(if p.is_absolute() { p.to_path_buf() } else { staging.join(p) }))
     }
 
     /// Push `src_ref` from the staging tree to `refs/heads/<dst_branch>` at
@@ -358,6 +417,72 @@ impl Git {
 /// The env var carrying the pinned push URL into `--config-env` (git takes
 /// the name after the last `=`, so the URL itself may contain `=`).
 const PIN_ENV: &str = "STRATA_PUSH_URL";
+
+/// The env vars the guard hook reads: where to append the URL it saw, and
+/// the human's `pre-push` to run after it (empty: none).
+const GUARD_SEEN_ENV: &str = "STRATA_PUSH_GUARD_SEEN";
+const USER_HOOK_ENV: &str = "STRATA_USER_PRE_PUSH";
+
+/// The guard `pre-push` (review-6 hole 2, D25). git runs it in the push
+/// process with the URL that process will send to (`$2`, after its own
+/// rewriting), before any pack is sent; a non-zero exit sends nothing.
+const GUARD_HOOK: &str = r#"#!/bin/sh
+# git-strata push guard (gitio §5.11 step 3, D25). Do not edit.
+printf '%s\n' "$2" >> "$STRATA_PUSH_GUARD_SEEN" || exit 1
+if [ "$2" != "$STRATA_PUSH_URL" ]; then
+	echo "git-strata: this push would go to a URL other than the one checked; nothing sent" >&2
+	exit 1
+fi
+h=$STRATA_USER_PRE_PUSH
+if [ -n "$h" ] && [ -f "$h" ] && [ -x "$h" ]; then
+	exec "$h" "$@"
+fi
+cat >/dev/null
+exit 0
+"#;
+
+/// One push's guard directory, `<private git dir>/strata-push-<nonce>/`
+/// (`hooks/pre-push`, and `seen` written by the hook); removed on drop.
+struct Guard {
+    root: PathBuf,
+    name: String,
+}
+
+impl Guard {
+    fn new(private: &Path) -> Result<Self> {
+        let name = format!("strata-push-{}", crate::fsx::nonce());
+        strata_apfs::mkdir_rooted(private, &crate::fsx::rp(&name)?, 0o700, false)?;
+        let g = Guard { root: private.to_path_buf(), name };
+        strata_apfs::mkdir_rooted(private, &crate::fsx::rp(&format!("{}/hooks", g.name))?, 0o700, false)?;
+        crate::fsx::write_new_rooted(private, &format!("{}/hooks/pre-push", g.name), GUARD_HOOK.as_bytes(), 0o700)?;
+        Ok(g)
+    }
+
+    fn hooks(&self) -> PathBuf {
+        self.root.join(&self.name).join("hooks")
+    }
+
+    fn seen(&self) -> PathBuf {
+        self.root.join(&self.name).join("seen")
+    }
+
+    /// The URLs the hook saw, one per run (a URL holds no newline).
+    fn read_seen(&self) -> Result<Vec<Vec<u8>>> {
+        let Some((bytes, _)) = crate::fsx::read_rooted(&self.root, &format!("{}/seen", self.name))? else {
+            return Ok(Vec::new());
+        };
+        Ok(bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty()).map(<[u8]>::to_vec).collect())
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let r = crate::fsx::rp(&self.name).and_then(|rel| Ok(strata_apfs::remove_tree_rooted(&self.root, &rel)?));
+        if let Err(e) = r {
+            tracing::warn!(dir = %self.root.join(&self.name).display(), error = %e.message, "push guard left behind");
+        }
+    }
+}
 
 /// A push URL gitio can pin: not empty, no newline or NUL (a config
 /// subsection cannot hold them). `InvalidInput` otherwise, nothing sent.

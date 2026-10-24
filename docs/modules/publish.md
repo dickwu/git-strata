@@ -143,6 +143,8 @@ pub fn push(git: &Git, cfg: &RepoConfig, staging: &Path, confirm: Option<Confirm
 /// [实现时补的决定]（review-5 N1）gitio 现在把推送地址钉住、不让 git 再按 `insteadOf` 改写；赢不了钉住的
 /// config 在发送前以 `InvalidInput`（`url-rewritten` / `url-is-remote-name`）拒绝，什么都没发。`push_to` 原样
 /// 返回这个错误；发布流程第 7 步的推送照它对任何推送错误的一贯处理，记为 `Unknown`（不重推）。
+/// [实现时补的决定]（review-6，daemon D25）检查之后才加的改写规则、老式 `remotes/` / `branches/` 文件同样拒绝：
+/// 推送进程自己核对它要去的地址（gitio 的守卫 `pre-push`），不等就什么都不发，也是 `InvalidInput`（`url-rewritten`）。
 pub fn push_to(git: &Git, cfg: &RepoConfig, repo: &RepoName, staging: &Path, confirm: Option<ConfirmToken>, url: Option<&str>) -> Result<PushOutcome>;
 
 /// 把解决者记在这次发布的 `publishes` 行上（`outcome.assigned`）。不写文件，不合并、不推送。

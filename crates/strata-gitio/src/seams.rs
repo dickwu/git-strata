@@ -93,6 +93,7 @@ pub(crate) const ATTACH_BEFORE_INDEX: &str = "attach_before_index";
 pub(crate) const ATTACH_BEFORE_READ_TREE: &str = "attach_before_read_tree";
 pub(crate) const ATTACH_BEFORE_READBACK: &str = "attach_before_readback";
 pub(crate) const PUSH_BEFORE_SEND: &str = "push_before_send";
+pub(crate) const PUSH_AFTER_CHECK: &str = "push_after_check";
 pub(crate) const PUSH_BEFORE_RECORD: &str = "push_before_record";
 
 impl Seams {
@@ -223,6 +224,12 @@ impl crate::Git {
     /// Pause a push right before `git push` is spawned.
     pub fn pause_push_before_send(&self) -> Pause {
         self.inner.seams.arm(PUSH_BEFORE_SEND)
+    }
+
+    /// Pause a push after its pre-send checks (the config view, the
+    /// guard hook), right before `git push` is spawned (review-6 hole 2).
+    pub fn pause_push_after_check(&self) -> Pause {
+        self.inner.seams.arm(PUSH_AFTER_CHECK)
     }
 
     /// Pause `push_published` after the remote accepted, before the ref

@@ -27,7 +27,7 @@ have; they land in the Task 1 commit with the crate scaffold:
   the remote-tracking ref and the anchor together; only then `Pushed`. A
   failed transaction after the remote accepted → `Ok(Unknown)`. `push()` is
   unchanged in behaviour (its send path became the shared `push_send`).
-- gitio seams: `PUSH_BEFORE_SEND`, `PUSH_BEFORE_RECORD` (test-seams only).
+- gitio seams: `PUSH_BEFORE_SEND`, `PUSH_AFTER_CHECK` (review-6), `PUSH_BEFORE_RECORD` (test-seams only).
 - store: `set_publish_outcome(id, phase, outcome)` (rewrite the outcome of a
   row in a given phase; used to keep the commit in an `Unknown` row) and
   `publishes()` (every row, for `assigned` and restart reporting).

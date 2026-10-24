@@ -375,3 +375,55 @@ fn push_to_refuses_a_bare_name_with_a_legacy_remote_file() {
     assert!(e.git.push_url_exact("legacy").unwrap());
     let _ = c;
 }
+
+/// Review-6 hole 2: a rule added after the pre-send check and before
+/// `git push` reads the config (here: an exact `pushInsteadOf` sending A to
+/// B, removed again once the push returns, so no later re-check sees it)
+/// cannot redirect the push. The push process itself checks the URL it is
+/// about to send to (the guard `pre-push`, D25): refused, nothing sent to
+/// A or B, nothing recorded, and the guard leaves nothing behind.
+#[test]
+fn push_to_rule_added_between_check_and_push_is_refused() {
+    let e = env();
+    let out = e.sb.git_output(&e.main, &["config", "remote.origin.url"]);
+    let a_url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let b = e.sb.path("other.git");
+    assert!(e.sb.git_output(&e.main, &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()]).status.success());
+    let at_b = || String::from_utf8_lossy(&e.sb.git_output(&b, &["rev-parse", "refs/heads/main"]).stdout).trim().to_string();
+    let anchor = "refs/strata/anchor/main";
+    let rule = format!("url.{}.pushInsteadOf", b.display());
+    let tracking = e.local(&remote_ref("origin", "main"));
+    e.publish(&e.head, "h2.txt");
+
+    let pause = e.git.pause_push_after_check();
+    let r = std::thread::scope(|s| {
+        let h = s.spawn(|| e.git.push_published_to(&e.staging, "origin", &a_url, PUBLISH, "main", anchor, T));
+        pause.wait_until_paused();
+        assert!(e.sb.git_output(&e.main, &["config", &rule, &a_url]).status.success());
+        pause.release();
+        h.join().unwrap()
+    });
+    assert!(e.sb.git_output(&e.main, &["config", "--unset", &rule]).status.success());
+
+    let err = r.unwrap_err();
+    assert_eq!(err.code, Code::InvalidInput, "{err:?}");
+    assert_eq!(err.detail.as_ref().unwrap()["reason"], "url-rewritten", "{err:?}");
+    assert_eq!(at_b(), e.head, "nothing sent to B");
+    assert_eq!(e.remote_branch("main").as_deref(), Some(e.head.as_str()), "nothing sent to A");
+    assert_eq!(e.git.read_ref(anchor).unwrap(), None, "nothing recorded");
+    assert_eq!(e.local(&remote_ref("origin", "main")), tracking);
+    // The rule is gone again: a re-check after the push sees nothing.
+    assert!(e.git.push_url_exact(&a_url).unwrap());
+    let left: Vec<_> = fs::read_dir(e.sb.path("st/git"))
+        .unwrap()
+        .map(|d| d.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("strata-push-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+
+    // The same push without the rule goes to A, guard and all.
+    let c = e.local(PUBLISH).unwrap();
+    assert_eq!(e.git.push_published_to(&e.staging, "origin", &a_url, PUBLISH, "main", anchor, T).unwrap(), PushOutcome::Pushed);
+    assert_eq!(e.remote_branch("main").as_deref(), Some(c.as_str()));
+    assert_eq!(at_b(), e.head);
+}

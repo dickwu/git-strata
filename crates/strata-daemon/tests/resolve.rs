@@ -610,6 +610,57 @@ fn chain_resolve_restore_is_pinned_against_url_rewriting() {
     assert!(old.exists(), "origin's destination changed around the push: nothing settles");
 }
 
+/// Review-6 hole 2: a rule added after gitio's pre-send check and before
+/// `git push` reads the config (an exact `pushInsteadOf` sending A to B),
+/// and removed again right after the push (before the daemon's post-push
+/// check), cannot redirect the restore: the push process checks its own
+/// destination (D25), so nothing reaches B or A, the restore fails, and the
+/// kept scene for A stays.
+#[test]
+fn chain_resolve_restore_rule_added_between_check_and_push_is_refused() {
+    let fx = Dfx::new();
+    let ch = Chain::new(&fx);
+    ch.rewind_origin(&fx, &ch.p);
+    let tool = fx.config.repos[&repo_name("tool")].path.clone();
+    let a_url = fx.sb.git(&tool, &["config", "remote.origin.url"]).trim().to_string();
+    let b = fx.sb.path("other.git");
+    fx.sb.git(&fx.sb.root, &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()]);
+    let repo_id = fx.sb.open(&tool).repo_id().get().to_string_lossy().into_owned();
+    let old = fx.config.paths.root.join("daemon/push/1-1");
+    fs::create_dir_all(&old).unwrap();
+    let body = json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "main", "repo_id": repo_id, "push_url": a_url });
+    fs::write(old.join("push.json"), body.to_string()).unwrap();
+    let core = fx.prepare().unwrap();
+    sync(&core);
+    let git = &core.gits[&repo_name("tool")];
+    let rule = format!("url.{}.pushInsteadOf", b.display());
+    let checked = git.pause_push_after_check();
+    let record = git.pause_push_before_record();
+    let wait = |p: &strata_gitio::Pause, t: &std::thread::ScopedJoinHandle<'_, _>| {
+        let start = std::time::Instant::now();
+        while !p.is_paused() && !t.is_finished() && start.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let r = std::thread::scope(|sc| {
+        let t = sc.spawn(|| resolve(&core, ChainChoice::Restore).0);
+        wait(&checked, &t);
+        assert!(checked.is_paused(), "restore reached the push");
+        fx.sb.git(&tool, &["config", &rule, &a_url]);
+        checked.release();
+        wait(&record, &t);
+        // Gone again before anything after the push looks.
+        fx.sb.git(&tool, &["config", "--unset", &rule]);
+        record.release();
+        t.join().unwrap()
+    });
+    let at = |u: &str| fx.sb.git(&fx.sb.root, &["--git-dir", u, "rev-parse", "refs/heads/main"]).trim().to_string();
+    assert_eq!(at(b.to_str().unwrap()), ch.p, "nothing sent to B: {r:?}");
+    assert_eq!(at(&a_url), ch.p, "nothing sent to A: {r:?}");
+    assert!(r.is_err(), "the restore did not push: {r:?}");
+    assert!(old.exists(), "the kept scene for A stays");
+}
+
 /// Review M7: Restore records the push in one transaction with the chain
 /// check (tracking ref and anchor together). When the tracking ref moved
 /// between the remote's acceptance and the recording, nothing local moves
