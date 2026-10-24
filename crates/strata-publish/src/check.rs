@@ -85,13 +85,17 @@ pub fn check(cfg: &RepoConfig, staged: &Path) -> Result<ChecksRan> {
             Err(e) => Some(json!({ "command": line, "index": index, "exit_code": null, "spawn_error": e.to_string() })),
         };
         if let Some(mut detail) = failed {
+            detail["checks_ran"] = json!(ran);
+            let named = StrataError::new(Code::CheckFailed, format!("check `{line}` failed; nothing was committed"))
+                .with_detail(detail);
+            // §6: a cleanup that fails is `Unknown`; the original code and
+            // detail stay in `detail.cause`.
             remove_staged_layout(staged).map_err(|mut u| {
-                u.detail.get_or_insert_with(|| json!({}))["check"] = detail.clone();
+                let d = u.detail.get_or_insert_with(|| json!({}));
+                d["cause"] = json!({ "code": named.code.as_str(), "message": named.message, "detail": named.detail });
                 u
             })?;
-            detail["checks_ran"] = json!(ran);
-            return Err(StrataError::new(Code::CheckFailed, format!("check `{line}` failed; nothing was committed"))
-                .with_detail(detail));
+            return Err(named);
         }
     }
     Ok(ChecksRan { ran })

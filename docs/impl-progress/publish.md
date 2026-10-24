@@ -8,8 +8,8 @@ Branch `impl/publish` (worktree `git-strata-wt/publish`), from `impl/v1` 95f7660
 |---|---|---|
 | 1 chain ref and anchor advance | done | fd86995 |
 | 2 path-level stage and merge | done | 8ad75bd |
-| 3 read-only checks | done | (this commit) |
-| 4 commit, push, and unknown | todo | |
+| 3 read-only checks | done | 849e297 |
+| 4 commit, push, and unknown | done | (this commit) |
 | 5 rebase, assign, and diff | todo | |
 | 6 one merge under the repo lock | todo | |
 
@@ -109,6 +109,69 @@ These touch shared crates; a parallel worker (search) may conflict there.
   failed check (`exit_code: null`, `spawn_error`).
 - The layout root is `staged.parent()`, removed with `remove_tree_rooted`
   relative to its parent. Incomplete removal → `Unknown` (reason cleanup)
-  with the check detail under `detail.check`.
+  with the original error under `detail.cause = {code: "CheckFailed",
+  message, detail}` (§6; changed in Task 4 from `detail.check`). A failed
+  `stage::build` cleanup likewise keeps its cause under `detail.cause`.
 - The "cannot remove" test uses the apfs `before_open` seam to swap a
   directory for a symlink mid-removal (no chflags/root needed).
+
+### Task 4 (commit, push, unknown)
+
+- Signatures differ from §3 where the listed ones cannot work:
+  `commit(git, branch, staged, parent, expected_chain, message)` (the chain
+  ref needs the branch; the CAS needs the expected value) and
+  `push(git, cfg, repo, staging, confirm)` (the confirm action names the
+  repo). `push` order: confirm gate → chain not `Leads` → `NoCommit` → send.
+  Standalone `push` returns only `Ok(Pushed)`; a refusal is
+  `Err(PushRefused {detail: {kind, message}})`, an uncertain send
+  `Err(Unknown)`. Inside `publish` (after the commit is written) both
+  become `Unknown` (`detail.kind = "PushRefused"` / reason `push_unknown`).
+- Confirm gate (`confirm_gate`): only when `cfg.needs_human_confirm()`; the
+  token's action must equal `PushDeploy {repo, branch: publish.branch}`,
+  else `NotConfirmed` (reason `missing` / `action_mismatch`). Without the
+  need a passed token is ignored. Nothing reads an env var or a flag; the
+  gate runs before `stage::build` (no directory, no git write).
+- Busy rules (§5.2 step 2): an `Unknown` row of the repo blocks every
+  publish of the repo (`Busy publish_unknown`, checked before recording
+  and again under the repo lock). A `Running` row blocks only when it
+  shares a session with this group in this repo (`Busy publish_open`): a
+  repo-wide Running block would serialize Task 6's disjoint concurrent
+  publishes, which the session queues and the repo lock already order.
+- The release id is the publish row id (`group.id` is overwritten with it).
+- Commit message: `strata publish <id> (<repo>)` + blank line +
+  `sessions: …` and `paths: N`. Committer/author come from the repo's git
+  config (gitio `commit_tree`).
+- The chain move is one ref transaction: chain `expected → new`, and the
+  anchor `→ B` only when the tracking ref equals B (B = origin's tip). A
+  CAS failure (`HeadMoved`) is never retried: `Unknown`, reason
+  `head_moved`, `detail.head_moved {ref, expected, actual}`, commit kept in
+  `detail.commit` and in the row.
+- Every error after `commit_tree` returns is wrapped as `Unknown`
+  (`detail.cause` holds the original) and the row goes `Running → Unknown`
+  with `outcome.error`; an error before that closes the row `Done` with
+  `outcome.stopped = <code>`. A store failure while closing → `Unknown`.
+- `PUSH_TIMEOUT` = 120 s: gitio exposes no push default, so this mirrors
+  its fetch timeout. A timeout is `Unknown`; the chain stays.
+- Layout removal failing after a successful push → `Err(Unknown)` with the
+  commit in the detail; the row is `Unknown` (the success is not reported
+  as `Done` while a scene is left).
+- Test seams (`test-seams`): `seams::pause(git, PublishFault::…)`
+  (`PauseBeforeCommit`, `PauseAfterCommit`, `PauseDuringPush`,
+  `PauseBeforePushRecorded`; the last two wrap gitio's push pauses),
+  `seams::fail_once(git, FailPoint::{BeforeRefs, BeforePush, BeforeDone})`
+  (injected failures use `Code::Unknown` reason `injected`; there is no
+  `Io` code) and `seams::set_push_timeout`. Keyed by the git common dir.
+- The post-write section (after the queue is released) waits on the repo
+  lock without a bound (retries `Busy` every 20 ms); in Task 4 it holds an
+  empty body that Task 5 fills with the rebase. `observe_main` errors there
+  become a `ObserveFailed` warning, not a failure.
+- Tests: `tests/push.rs` (15). Remotes are bare repos under the sandbox;
+  push refusal/timeout use a `pre-receive` hook in that bare repo. Two tests
+  beyond §8's list: `running_row_of_another_session_does_not_block` and
+  `publish_refuses_rewound_and_diverged_chain` (the end-to-end half of
+  Task 1's refusal test).
+- `pushed_sets_anchor_to_pushed_commit`'s crash case makes the gitio record
+  transaction fail by moving the tracking ref while `PauseBeforePushRecorded`
+  holds the call (the remote already accepted): `Unknown`, the anchor stays
+  at the previous commit; after the bare origin is rewound and fetched the
+  chain reads `Rewound`, and `advance_anchor` does not move it.

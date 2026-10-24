@@ -98,7 +98,9 @@ fn check_failed_does_not_commit() {
     let e = check(&cfg_with(&fx, &[mk]), &st.worktree).unwrap_err();
     strata_apfs::seams::set_before_open(None);
     assert_eq!(e.code, Code::Unknown, "{e:?}");
-    assert_eq!(e.detail.as_ref().unwrap()["check"]["exit_code"], 1);
+    let cause = &e.detail.as_ref().unwrap()["cause"];
+    assert_eq!(cause["code"], "CheckFailed");
+    assert_eq!(cause["detail"]["exit_code"], 1);
     assert!(st.layout_root().exists());
     fs::remove_dir_all(st.layout_root()).unwrap();
 }

@@ -735,7 +735,8 @@ pub(crate) fn build(ctx: &Ctx, group: &ReleaseGroup, base: &CommitOid, plan: &Pl
         Ok(s) => Ok(s),
         Err(e) => {
             remove_layout(&root, &rel).map_err(|mut u| {
-                u.detail.get_or_insert_with(|| json!({}))["error"] = json!({ "code": e.code, "message": e.message });
+                u.detail.get_or_insert_with(|| json!({}))["cause"] =
+                    json!({ "code": e.code.as_str(), "message": e.message, "detail": e.detail });
                 u
             })?;
             Err(e)
