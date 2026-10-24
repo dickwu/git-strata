@@ -182,7 +182,7 @@ All three keys are always present; `data` is never null. Branch on
 | `Busy` (`workspace_changed`) | A file changed while reading it; retry. |
 | `Busy` (other) | Repo lock held by another operation; wait and retry later. |
 | `NotTty` | Command needs a human at a terminal. Stop; give the exact command to the human. |
-| `NotConfirmed` | Human confirmation failed / was cancelled / expired. Report it; the human reruns. |
+| `NotConfirmed` | Human confirmation failed / was cancelled / expired. Report it; the human reruns. Exception: `detail.reason` `plan_changed` (publish) means no confirmation was attempted and nothing was written: rerun the same command yourself first; if that rerun returns `NotTty`, hand the command to the human. |
 | `AmbiguousMatch` | Ticket matches several sessions; retry with an id from `detail`. |
 | `NoSuchSession` | Wrong selector, or cwd is not inside a workspace; `cd` into one or pass `--session`. |
 | `NoSuchRepo` | Repo name not in config; check `--repos` / argument. |
