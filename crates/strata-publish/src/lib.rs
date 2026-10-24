@@ -13,6 +13,11 @@ pub mod check;
 pub mod push;
 pub mod rebase;
 pub mod seams;
+/// Review-2 N1: stage's selection rules as a read-only query, for the
+/// daemon's re-run filter (the daemon never stages: it calls `publish`).
+pub mod selection {
+    pub use crate::stage::{at_or_under, selects};
+}
 pub mod stage;
 
 pub use chain::{advance_anchor, anchor_ref, chain_ref, merge_base};

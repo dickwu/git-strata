@@ -1099,7 +1099,7 @@ fn landed_after_commit(repo: &RepoName, commit: Value, d: &Value) -> Value {
 
 /// Review-2 N1: which selectors of `b` still go to stage on a re-run, and
 /// the `already_published` entry of the newest proof for those that do not.
-/// Per selector, with stage's own selection rules (`stage::selects`): one
+/// Per selector, with stage's own selection rules (`strata_publish::selection::selects`): one
 /// that picks any checkpoint entry (new or changed content, exact path,
 /// rename source or anything under a directory) is kept. One that picks
 /// nothing (the session's content there equals its base) is dropped only
@@ -1119,7 +1119,7 @@ fn rerun_paths(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_typ
     let mut keep = Vec::new();
     let mut proof: Option<Value> = None;
     for p in &b.paths {
-        if strata_publish::stage::selects(&cp, p) {
+        if strata_publish::selection::selects(&cp, p) {
             keep.push(p.clone());
             continue;
         }
@@ -1140,7 +1140,7 @@ fn rerun_paths(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_typ
 /// file has the same mode and object in that commit as in `base`; `None`
 /// when there is no such row or the content differs.
 fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_types::Batch, base: &strata_types::TreeOid, p: &RepoPath) -> Result<Option<Value>> {
-    use strata_publish::stage::at_or_under;
+    use strata_publish::selection::at_or_under;
     for r in rows.iter().rev() {
         if r.phase != PublishPhase::Done {
             continue;
@@ -1179,7 +1179,7 @@ fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_
 /// `{repo, publish, commit, push}`. Used only after stage said `NoCommit`
 /// (nothing differs from the chain), so no content is lost.
 fn landed_before(rows: &[strata_store::PublishRecord], b: &strata_types::Batch) -> Option<Value> {
-    use strata_publish::stage::at_or_under;
+    use strata_publish::selection::at_or_under;
     rows.iter().rev().find_map(|r| {
         if r.phase != PublishPhase::Done {
             return None;
