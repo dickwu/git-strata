@@ -10,7 +10,8 @@ Not merged.
 | 1 RPC envelope and method table | done | 36b5f0e |
 | 2 Repo lock, session queue, Busy before write | done | 7dfaf8e |
 | 3 Single instance, recover, then listen | done | f0c112f |
-| 4 Confirm order, pinned flags, launchd plist | done | (this commit) |
+| 4 Confirm order, pinned flags, launchd plist | done | d236ef6 |
+| 5 Anchor after fetch, observe warning, attach alert | done | (this commit) |
 
 ## Ambiguity decisions
 
@@ -99,6 +100,37 @@ Not merged.
   unchanged until `validate` and to expire the token (FakeClock) so
   `validate` fails.
 
+- **Where the fetch happens.** The fetch is inside `Sessions::new` (session
+  owns it); the daemon advances the anchor after `new` returns, under its
+  own `with_repo` take (§5.7 "outside publish").
+- **Own anchor step.** `fetch_after::advance_anchor_locked` reimplements the
+  publish-side rule (classify → `None`/`Absent`/`Rewound` = no call; else
+  `m = merge_base(origin, chain)`, write only if `is_ancestor(a, m)` and
+  `m != a`, one `ref_transaction` verifying the chain and CAS-ing the
+  anchor) instead of calling the publish helper, so a failed transaction
+  maps to `Unknown` `{reason:"anchor_transaction", cause}`.
+- **No retry once called.** "不再试一次" wins over the AnchorNotAdvanced
+  wording that mentions two attempts: the transaction runs once;
+  `AnchorNotAdvanced` is recorded on that `Unknown` and cleared by the next
+  successful advance.
+- **Observe retry is injectable.** `Core::after_new(report, observe)` takes
+  the observer; the handler passes `Core::observe_new`. Retry happens once,
+  only for `NewWarning::ObserveFailed`; success drops the warning, failure
+  replaces its detail. The publish-side ObserveFailed (stays in
+  `Published.warnings`) is covered by Task 6's handler tests.
+- **Gitio tracking ref.** The anchor test fetches through gitio
+  (`refs/strata/remotes/origin/main`), from a local bare origin only.
+- **track.rs** is an extra file beyond §8's list: the only place that calls
+  `hint` / `require_full` / `flush` on the overlay tracker (on the request
+  thread, never in the FSEvents callback, which only does `inbox.note`).
+- **shadow_dir** duplicates session's layout (`sessions/.repos/<id>/<repo>.git`)
+  because session's helper is `pub(crate)`.
+- **Attach alert** is tested with synthetic errors in the real gitio/session
+  shapes (`index-read-back-refused`, `staging-changed`, direct or as
+  `cause.detail.reason`).
+- **PrePushGuardDisabled** is only reported: one stderr line per shadow dir
+  per daemon run (`Warnings::alert_first`), no hook or config write.
+
 ## Task 1
 
 `rpc.rs`: the 19-method table (`Method`, with `is_read_only` for I5),
@@ -156,3 +188,19 @@ no queue/repo lock (Hang verdict; both locks taken during the prompt),
 action mismatch → `NotConfirmed`, no `NotTty` in the source, D1 PATH in
 `InstallEnv`, plist keys (Label, KeepAlive, RunAtLoad, Aqua, Interactive,
 D1 PATH, absolute StandardErrorPath) via plutil in a temp HOME.
+
+## Task 5
+
+`fetch_after.rs`: `AnchorStep`, `advance_anchor_locked`,
+`Core::advance_anchor` / `after_new` / `observe_new` / `main_tips`,
+`observe_if_moved` (≤ 2 observes), `attach_outside_reason` /
+`alert_attach`, `report_guard_disabled`. `track.rs`: `prepare_tool_call`
+(hint, or require_full with no paths, then flush) and `drop_tracker`.
+`startup.rs`: `Warnings::alert_first` (once-per-key stderr line).
+tests/fetch_after.rs (5): anchor cases (equal / leads / behind / diverged /
+absent / rewound / kept / never fetched, Busy under a held repo lock, a
+`.lock` file making the transaction fail once → Unknown + warning, then
+advance clears it), observe failure does not fail new (seam
+`new.observe` EIO), hint/flush off the callback thread (plus source scan),
+attach-outside alert leaves the index alone, guard-disabled reported not
+repinned.

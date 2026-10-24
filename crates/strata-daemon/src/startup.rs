@@ -129,11 +129,13 @@ fn make_private_dir(dir: &Path) -> Result<()> {
 pub struct Warnings {
     list: Mutex<Vec<DaemonWarning>>,
     alert: Arc<dyn Fn(&str) + Send + Sync>,
+    /// Keys of the lines `alert_first` already printed.
+    seen: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl Warnings {
     fn new(alert: Arc<dyn Fn(&str) + Send + Sync>) -> Warnings {
-        Warnings { list: Mutex::new(Vec::new()), alert }
+        Warnings { list: Mutex::new(Vec::new()), alert, seen: Mutex::new(Default::default()) }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<DaemonWarning>> {
@@ -167,6 +169,15 @@ impl Warnings {
     /// Print one line for the human without a warning entry.
     pub fn alert_once(&self, line: &str) {
         (self.alert)(line);
+    }
+
+    /// Print `line` the first time `key` is seen; true when printed.
+    pub fn alert_first(&self, key: &str, line: &str) -> bool {
+        let fresh = self.seen.lock().unwrap_or_else(|p| p.into_inner()).insert(key.to_owned());
+        if fresh {
+            (self.alert)(line);
+        }
+        fresh
     }
 
     pub fn remove(&self, f: impl Fn(&DaemonWarning) -> bool) {
