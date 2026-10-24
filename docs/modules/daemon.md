@@ -413,6 +413,8 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 
 （review-2 N5）“整段”是一个绝对截止时刻（开始 + 锁等待），每一轮的旗标等待和每一次占队列共用它（`Locks::with_sessions_until`：这一调用里的每次占用都以截止时刻为界，不只是请求的第一次；已有可见写之后照旧不设界）。之前第二轮占队列不设界，可能无限等。在旗标等待里到期是 `Busy` `publishing`；在占队列时到期是 `Busy` `lock_wait`（带持有者）。都不写任何东西。[实现时补的决定]
 
+（review-3 R5）拿到队列位置之后、`f` 开始之前再看一次截止时刻：旗标恰好在最后一次轮询（已过期）时清掉，或者过期后以零时长拿到空闲队列，都不再让 `f` 晚开始，而是 `Busy` `lock_wait`（`deadline: true`），什么都不写。`f` 一旦开始就不再设界。零时长的 try-lock 语义（`try_session`）不变。[实现时补的决定]
+
 **`gc`**：一个 repo 一把锁，调用方持有，调 `gc_repo(repo, GC_KEEP)`。`repo` 为 null 则按 `RepoName` 升序逐个。写前等锁；超时跳过这个 repo，记进 `daemon_status`，不让整次失败。不占会话队列，不等建造锁。
 
 **`resolve_move`**：不查 TTY，不返回 `NotTty`，不调用 `Confirmer`，参数里没有凭据。cli 已经查过 TTY，并且人给过选择。`abandon` 与 `accept` 必须恰好一个为真；否则 RPC `Failed`，`resolve_failed_move` 不调用。`publishing` 为真时先等旗标，等的时候不持队列或 repo 锁。然后占该会话的队列。不持 repo 锁地调 `session::resolve_failed_move(session, repo, MoveResolution::Abandon 或 Accept)`（它自己取锁）。`Accept` 之后 `Tracker::reset` 再 `watch`。`Abandon` 不换工作区树，不 reset。不自动选。

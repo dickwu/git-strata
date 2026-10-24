@@ -524,3 +524,41 @@ fn with_sessions_until_bounds_a_later_take_by_the_deadline() {
     assert!(took < Duration::from_millis(1000), "bounded by the deadline, took {took:?}");
     holder.join().unwrap().unwrap();
 }
+
+/// Review-3 R5: the guarded step never starts after the deadline. An
+/// already expired deadline on a free queue is `Busy` (the zero-bound take
+/// alone would succeed), and so is a flag that clears only after the
+/// deadline; in both cases `f` does not run.
+#[test]
+fn guarded_step_does_not_start_after_the_deadline() {
+    use strata_daemon::resolve::guarded_until;
+    let l = locks();
+    let s = sid("dddddddd");
+    let ran = AtomicU32::new(0);
+    let step = || {
+        ran.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    };
+    let _scope = RequestScope::begin("rm", Some(s.clone()));
+    // Expired deadline, free queue, clear flag.
+    let past = Instant::now() - Duration::from_millis(1);
+    let e = guarded_until(&l, &s, past, || Ok(false), step).unwrap_err();
+    assert_eq!(e.code, Code::Busy, "{e:?}");
+    assert_eq!(e.detail.as_ref().unwrap()["reason"], "lock_wait");
+    // The flag clears only as the deadline passes: the last poll (taken
+    // after the deadline) sees it clear, so the flag wait returns Ok late.
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let flag_late = || {
+        thread::sleep(deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(5));
+        Ok(false)
+    };
+    let t = Instant::now();
+    let e = guarded_until(&l, &s, deadline, flag_late, step).unwrap_err();
+    assert_eq!(e.code, Code::Busy, "{e:?}");
+    assert_eq!(e.detail.as_ref().unwrap()["reason"], "lock_wait");
+    assert!(t.elapsed() < Duration::from_millis(1000));
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the step never ran");
+    // Before the deadline, with everything free, it runs.
+    guarded_until(&l, &s, Instant::now() + WAIT, || Ok(false), step).unwrap();
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+}

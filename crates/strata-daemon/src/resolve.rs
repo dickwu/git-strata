@@ -23,6 +23,7 @@ use strata_types::{Action, Code, CommitOid, PushOutcome, RepoName, SessionId, St
 
 use crate::confirm_flow::{needs_confirm, recheck, require_validated};
 use crate::fetch_after::observe_if_moved;
+use crate::locks::Locks;
 use crate::startup::Core;
 use crate::{ChainChoice, DaemonWarning, Result};
 
@@ -52,10 +53,18 @@ pub fn wait_not_publishing(core: &Core, session: &SessionId) -> Result<()> {
 }
 
 fn wait_not_publishing_until(core: &Core, session: &SessionId, deadline: Instant) -> Result<()> {
-    while publishing(core, session)? {
+    wait_flag_until(session, deadline, || publishing(core, session))
+}
+
+fn publishing_busy(session: &SessionId) -> StrataError {
+    StrataError::new(Code::Busy, format!("session {session} is publishing"))
+        .with_detail(json!({ "reason": "publishing", "session": session.as_str() }))
+}
+
+fn wait_flag_until(session: &SessionId, deadline: Instant, mut flag: impl FnMut() -> Result<bool>) -> Result<()> {
+    while flag()? {
         if Instant::now() >= deadline {
-            return Err(StrataError::new(Code::Busy, format!("session {session} is publishing"))
-                .with_detail(json!({ "reason": "publishing", "session": session.as_str() })));
+            return Err(publishing_busy(session));
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -79,14 +88,36 @@ fn wait_not_publishing_until(core: &Core, session: &SessionId, deadline: Instant
 /// take is no longer unbounded. Expiry in a flag wait is `Busy`
 /// `publishing`; expiry in a queue take is `Busy` `lock_wait` (naming the
 /// holder). Either way nothing is written.
+///
+/// [实现时补的决定] (review-3 R5) The deadline is checked once more under
+/// the queue place, right before `f`: a flag that cleared during the last
+/// poll, or a free queue taken with a zero bound after expiry, no longer
+/// lets `f` start late. That expiry is `Busy` `lock_wait` with
+/// `deadline: true`; nothing is written. Once `f` runs it is not bounded.
 pub fn with_queue_not_publishing<T>(core: &Core, session: &SessionId, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    let deadline = Instant::now() + core.locks.wait();
+    guarded_until(&core.locks, session, Instant::now() + core.locks.wait(), || publishing(core, session), f)
+}
+
+/// The loop of [`with_queue_not_publishing`] with the flag as a closure
+/// and an explicit deadline (public for the helper-level tests).
+#[doc(hidden)]
+pub fn guarded_until<T>(
+    locks: &Locks,
+    session: &SessionId,
+    deadline: Instant,
+    mut flag: impl FnMut() -> Result<bool>,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let mut f = Some(f);
     loop {
-        wait_not_publishing_until(core, session, deadline)?;
-        let r = core.locks.with_sessions_until(std::slice::from_ref(session), deadline, || {
-            if publishing(core, session)? {
+        wait_flag_until(session, deadline, &mut flag)?;
+        let r = locks.with_sessions_until(std::slice::from_ref(session), deadline, || {
+            if flag()? {
                 return Ok(None);
+            }
+            if Instant::now() >= deadline {
+                return Err(StrataError::new(Code::Busy, format!("the wait for session {session} ran out before the step could start"))
+                    .with_detail(json!({ "reason": "lock_wait", "session": session.as_str(), "deadline": true })));
             }
             match f.take() {
                 Some(f) => f().map(Some),
