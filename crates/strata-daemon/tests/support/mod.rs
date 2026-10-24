@@ -345,6 +345,8 @@ pub struct Dfx {
     pub sock_dir: tempfile::TempDir,
     pub alerts: Arc<Mutex<Vec<String>>>,
     pub lock_wait: Duration,
+    /// `Options::reconcile_every` (production value unless a test shortens it).
+    pub reconcile_every: Duration,
 }
 
 impl Dfx {
@@ -363,7 +365,7 @@ impl Dfx {
         let config = Config { paths: Paths { root: sb.path("strata") }, repos };
         let config_dir = sb.path("cfg");
         let sock_dir = tempfile::Builder::new().prefix("sd-").tempdir_in("/tmp").expect("sock dir");
-        let fx = Dfx { sb, config, config_dir, sock_dir, alerts: Arc::new(Mutex::new(Vec::new())), lock_wait: Duration::from_millis(300) };
+        let fx = Dfx { sb, config, config_dir, sock_dir, alerts: Arc::new(Mutex::new(Vec::new())), lock_wait: Duration::from_millis(300), reconcile_every: strata_daemon::RECONCILE_EVERY };
         fx.write_config();
         fx
     }
@@ -391,6 +393,7 @@ impl Dfx {
             lock_wait: self.lock_wait,
             install_path: self.sb.install_path(),
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
+            reconcile_every: self.reconcile_every,
         }
     }
 

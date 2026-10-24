@@ -111,7 +111,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `resolve_move` | `{ "session": SessionId, "repo": RepoName, "abandon": bool, "accept": bool }` | `ResolutionReport`。两个布尔必须恰好一个为真，否则 RPC `Failed`，不调用 session |
 | `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice, "shown"?: CommitOid \| null }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
 | `config_relax` | `{ "repo": RepoName }` | `{}`。没有凭据字段。见 §5.5 |
-| `daemon_status` | `{ "verify": bool }` | 见 §5.4；`verify` 缺省 false |
+| `daemon_status` | `{ "verify": bool }` | 见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc` |
 
 设计 §6.3 的 `diff --base` 在 publish 草案里没有对应函数。本方法只做 `diff_between`。`--base` 等 publish 补了函数再加参数，不加方法名。
 
@@ -452,6 +452,8 @@ daemon 实现 `publish::PublishLocks`（`with_sessions`、`with_repo`），放�
 ### 5.9 小时对账与停机
 
 每 `RECONCILE_EVERY`：每个工作区试着占该会话的队列（不等；占不上就跳过，记进 `daemon_status`）。占上之后借 `Tracker` 做一次不依赖事件的冷扫（`unchanged_since` 作保，不是把每个文件再哈希一遍），更新缓存，不写 checkpoint 行——`CheckpointReason` 没有「小时」这一项，不发明 [我的决定 D16]。放开 Tracker，放开队列。然后 gc，规则同 `gc` 方法。与请求共用同一把锁和同一条队列。
+
+实现（review M1）：`handlers::serve` 在 accept 循环旁边起一条对账线程，与 accept 循环同生同灭，丢 Tracker 之前先 join。线程先做 §5.1 第 13 步（给每个 Active 会话里 tracked 的工作区建 Tracker 并 watch；队列被占的跳过，由持有它的请求自己建），然后每 `Options::reconcile_every`（生产为 `RECONCILE_EVERY`，测试缩短）跑一轮 `Trackers::reconcile_once`：`Locks::try_session` 不等、不排队；占上就 `compute(.., None)`（不带脏集合 = 走全树，事件整段没来也能发现），只更新缓存。每 20 ms 看一次停机标志，停机不等间隔；正在跑的一轮做完（之后的取锁按 D17 失败）。一轮 panic 记进 `daemon_status`，不拖垮 daemon。上一轮结果写进 `daemon_status.reconcile` [实现时补的决定]。
 
 停机（SIGTERM）：停止 accept。在跑的请求做完。还在排队的以 `ReadOnly` 失败，`detail.reason = "shutting_down"`（types.md 没有 Closed 这个码，映射到已有的「写被拒绝」）[我的决定 D17]。在请求线程上丢掉 Tracker（从而丢掉 Watcher），不在回调里丢。放开全部 `Arc<Store>` 之后 `Store::close`（它写 `store/clean-shutdown`）。不写 `daemon.clean`。unlink socket。放开 flock。退出。
 

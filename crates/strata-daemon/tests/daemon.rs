@@ -500,3 +500,61 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
     drop(d);
     core.close().unwrap();
 }
+
+/// Review M1 (§5.9, I12): the running daemon reconciles on its own. With a
+/// short interval: a pass scans the tracked workspace of a session that
+/// never checkpointed (step 13 watchers, then a full walk), finds a file
+/// no request told it about, writes no checkpoint row; a session whose
+/// queue is held is skipped and listed, not waited for; gc runs under the
+/// repo lock; and stopping does not wait for the next interval.
+#[test]
+fn reconcile_loop_rescans_skips_busy_and_stops() {
+    let mut fx = Dfx::new();
+    fx.reconcile_every = Duration::from_millis(150);
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let tool = RepoName::try_from("tool".to_owned()).unwrap();
+    let mut stop_took = Duration::ZERO;
+    let listener = startup::bind(&d.core.opts.socket).unwrap();
+    let ext = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let h = s.spawn(|| handlers::serve(&d, &listener, &ext));
+        let status = || ok(call(&sock, "daemon_status", json!({})))["reconcile"].clone();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let id = new_session(&sock);
+            let sid = json!(id.as_str());
+            let cps = core.store.checkpoints(&id, Some(&tool)).unwrap().len();
+            fs::write(ws(&core, &id, "tool").join("src/missed.ts"), "missed\n").unwrap();
+            wait_for("a pass that finds src/missed.ts", || {
+                status()["last"]["scanned"].as_array().into_iter().flatten().any(|e| {
+                    e["session"] == sid && e["changed"].as_array().is_some_and(|c| c.contains(&json!("src/missed.ts")))
+                })
+            });
+            assert_eq!(core.store.checkpoints(&id, Some(&tool)).unwrap().len(), cps, "a pass writes no checkpoint");
+            let gc = status()["last"]["gc"].clone();
+            assert!(gc.as_array().unwrap().iter().all(|g| g["ok"] == json!(true)), "{gc:#}");
+
+            core.locks
+                .with_sessions(std::slice::from_ref(&id), || {
+                    let n = status()["runs"].as_u64().unwrap();
+                    wait_for("a pass that skips the busy session", || {
+                        let st = status();
+                        st["runs"].as_u64().unwrap() > n
+                            && st["last"]["skipped"].as_array().unwrap().iter().any(|e| e["session"] == sid)
+                            && !st["last"]["scanned"].as_array().unwrap().iter().any(|e| e["session"] == sid)
+                    });
+                    Ok(())
+                })
+                .unwrap();
+        }));
+        let t0 = Instant::now();
+        d.request_stop();
+        h.join().unwrap().unwrap();
+        stop_took = t0.elapsed();
+        r.unwrap_or_else(|p| std::panic::resume_unwind(p))
+    });
+    assert!(stop_took < Duration::from_secs(5), "stop waited {stop_took:?}");
+    drop(d);
+    core.close().unwrap();
+}

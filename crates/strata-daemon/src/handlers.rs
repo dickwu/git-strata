@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
@@ -168,6 +168,75 @@ impl<'a> Trackers<'a> {
         }
     }
 
+    /// The tracked workspaces of every Active session.
+    fn tracked(&self) -> Vec<(SessionId, RepoName)> {
+        let Ok(all) = self.core.store.sessions() else { return Vec::new() };
+        all.into_iter()
+            .filter(|r| r.lifecycle == strata_store::Lifecycle::Active)
+            .flat_map(|r| {
+                let id = r.manifest.id.clone();
+                r.manifest.repos.into_iter().filter(|(_, w)| w.tracked).map(move |(repo, _)| (id.clone(), repo))
+            })
+            .collect()
+    }
+
+    /// §5.1 step 13: a Tracker that watches for every existing tracked
+    /// workspace. Only for a session whose queue is free right now (a busy
+    /// one gets its Tracker from the request that holds it).
+    pub fn watch_tracked(&self) {
+        for (s, repo) in self.tracked() {
+            if self.core.locks.is_shut_down() {
+                return;
+            }
+            let _ = self.core.locks.try_session(&s, || {
+                let ws = workspace(self.core, &s, &repo)?;
+                let t = self.take(&s, &repo, &ws);
+                self.put(&s, &repo, t);
+                Ok(())
+            });
+        }
+    }
+
+    /// §5.9, one pass: for every tracked workspace whose session queue is
+    /// free, a full scan through its Tracker (`compute` with no dirty list
+    /// walks the whole tree, so an event that never arrived is found) that
+    /// refreshes the cache and writes no checkpoint (D16). Busy sessions
+    /// are skipped and listed. Then gc per repo under its write lock.
+    pub fn reconcile_once(&self) -> Value {
+        let core = self.core;
+        let (mut scanned, mut skipped, mut failed, mut gc) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (s, repo) in self.tracked() {
+            if core.locks.is_shut_down() {
+                break;
+            }
+            let r = core.locks.try_session(&s, || {
+                let ws = workspace(core, &s, &repo)?;
+                let base = base_of(core, &ws.base)?;
+                let wref = WorkspaceRef { session: &s, repo: &repo, root: &ws.path, config: repo_cfg(core, &repo)?, git: git_of(core, &repo)?, store: &core.store };
+                let mut t = self.take(&s, &repo, &ws);
+                let r = strata_overlay::compute(&wref, &base, &mut t.tracker, None);
+                self.put(&s, &repo, t);
+                r
+            });
+            let at = json!({ "session": s.as_str(), "repo": repo.as_str() });
+            match r {
+                None => skipped.push(json!({ "session": s.as_str(), "repo": repo.as_str(), "holder": core.locks.in_flight(&s) })),
+                Some(Ok(scan)) => scanned.push(json!({ "session": s.as_str(), "repo": repo.as_str(), "changed": json_of(&scan.changed) })),
+                Some(Err(e)) => failed.push(json!({ "at": at, "error": json_of(&e) })),
+            }
+        }
+        for repo in core.config.repos.keys() {
+            if core.locks.is_shut_down() {
+                break;
+            }
+            match core.locks.with_repo(repo, || core.store.gc_repo(repo, GC_KEEP).map(|_| ())) {
+                Ok(()) => gc.push(json!({ "repo": repo.as_str(), "ok": true })),
+                Err(e) => gc.push(json!({ "repo": repo.as_str(), "ok": false, "error": json_of(&e) })),
+            }
+        }
+        json!({ "at": json_of(&SystemTime::now()), "scanned": scanned, "skipped": skipped, "failed": failed, "gc": gc })
+    }
+
     fn cold(&self, s: &SessionId, repo: &RepoName) -> Result<Overlay> {
         let ws = workspace(self.core, s, repo)?;
         let base = base_of(self.core, &ws.base)?;
@@ -219,15 +288,48 @@ pub struct Server<'d, 'a> {
 }
 
 /// Serve `d` with every handler until it stops; trackers are dropped on
-/// this thread afterwards.
+/// this thread afterwards. Alongside the accept loop runs the §5.9
+/// reconcile loop (step 13's watchers first, then a pass every
+/// `opts.reconcile_every`); it ends with the accept loop and is joined
+/// before the trackers are dropped (review M1).
 pub fn serve(d: &Daemon<'_>, listener: &std::os::unix::net::UnixListener, external: &AtomicBool) -> Result<()> {
     let trackers = Trackers::new(d.core);
-    let r = {
+    let done = AtomicBool::new(false);
+    let r = std::thread::scope(|s| {
         let server = Server::new(d, &trackers);
-        d.serve(listener, external, &|req| server.handle(req))
-    };
+        s.spawn(|| reconcile_loop(d, &trackers, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
+        let r = d.serve(listener, external, &|req| server.handle(req));
+        done.store(true, Ordering::SeqCst);
+        r
+    });
     trackers.clear();
     r
+}
+
+/// §5.9 on its own thread: watch existing tracked workspaces, then one
+/// [`Trackers::reconcile_once`] every `reconcile_every` until `stop`. The
+/// wait is checked every 20 ms, so shutdown never waits for an interval;
+/// a pass in progress finishes (its queue / lock takes fail `ReadOnly`
+/// once the locks are shut down). A panicking pass is recorded, not fatal.
+fn reconcile_loop(d: &Daemon<'_>, trackers: &Trackers<'_>, stop: &dyn Fn() -> bool) {
+    let every = d.core.opts.reconcile_every;
+    trackers.watch_tracked();
+    loop {
+        let next = std::time::Instant::now() + every;
+        loop {
+            if stop() {
+                return;
+            }
+            let now = std::time::Instant::now();
+            if now >= next {
+                break;
+            }
+            std::thread::sleep((next - now).min(std::time::Duration::from_millis(20)));
+        }
+        let last = catch_unwind(AssertUnwindSafe(|| trackers.reconcile_once()))
+            .unwrap_or_else(|_| json!({ "at": json_of(&SystemTime::now()), "panicked": true }));
+        d.reconciled(last);
+    }
 }
 
 fn session_of(p: &Params) -> Option<SessionId> {

@@ -335,6 +335,22 @@ impl Locks {
         r
     }
 
+    /// §5.9: run `f` holding `id`'s queue place only if it is free right
+    /// now (no waiting, no queueing behind a request). `None` = busy, the
+    /// caller skips. The holder shows as method `reconcile`.
+    pub fn try_session<T>(&self, id: &SessionId, f: impl FnOnce() -> Result<T>) -> Option<Result<T>> {
+        let fifo = self.queue_of(id);
+        let holder = Holder { method: "reconcile".into(), session: Some(id.clone()), since: SystemTime::now(), started: Instant::now() };
+        match fifo.acquire(Some(Duration::ZERO), &self.closed, holder) {
+            Err(TakeError::Timeout(_)) => None,
+            Err(e) => Some(Err(self.take_error(e, json!({ "session": id.as_str() }), Duration::ZERO))),
+            Ok(()) => {
+                let _held = Held { fifo: fifo.as_ref(), on_drop: Box::new(|| {}) };
+                Some(f())
+            }
+        }
+    }
+
     /// The held repo write locks.
     pub fn holds(&self) -> Vec<LockHold> {
         self.repos

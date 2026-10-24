@@ -112,6 +112,7 @@ impl Live {
             lock_wait: Duration::from_millis(500),
             install_path: "/usr/bin:/bin:/usr/sbin:/sbin".into(),
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
+            reconcile_every: strata_daemon::RECONCILE_EVERY,
         }
     }
 

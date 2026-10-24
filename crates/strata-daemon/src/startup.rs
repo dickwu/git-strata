@@ -49,6 +49,9 @@ pub struct Options {
     pub install_path: String,
     /// One line for the human (stderr in production).
     pub alert: Arc<dyn Fn(&str) + Send + Sync>,
+    /// [`RECONCILE_EVERY`](crate::RECONCILE_EVERY) in production (§5.9);
+    /// tests shorten it.
+    pub reconcile_every: Duration,
 }
 
 impl Options {
@@ -62,6 +65,7 @@ impl Options {
             lock_wait: LOCK_WAIT,
             install_path: DEFAULT_PATH.to_string(),
             alert: Arc::new(|line: &str| eprintln!("git-stratad: {line}")),
+            reconcile_every: crate::RECONCILE_EVERY,
         }
     }
 }
@@ -354,6 +358,8 @@ pub struct Daemon<'a> {
     pub recovered: RecoverReport,
     stop: AtomicBool,
     conns: Mutex<Vec<UnixStream>>,
+    /// §5.9: the reconcile loop's counters and its last pass (daemon_status).
+    reconcile: Mutex<Value>,
 }
 
 impl<'a> Daemon<'a> {
@@ -384,7 +390,14 @@ impl<'a> Daemon<'a> {
         if core.store.is_poisoned() {
             core.warnings.add(DaemonWarning::StorePoisoned);
         }
-        Ok(Daemon { core, sessions, recovered, stop: AtomicBool::new(false), conns: Mutex::new(Vec::new()) })
+        Ok(Daemon {
+            core,
+            sessions,
+            recovered,
+            stop: AtomicBool::new(false),
+            conns: Mutex::new(Vec::new()),
+            reconcile: Mutex::new(json!({ "runs": 0, "last": null })),
+        })
     }
 
     /// Ask the accept loop to stop (SIGTERM, or a test).
@@ -394,6 +407,13 @@ impl<'a> Daemon<'a> {
 
     pub fn stopping(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
+    }
+
+    /// Record one finished reconcile pass (§5.9) for `daemon_status`.
+    pub(crate) fn reconciled(&self, last: Value) {
+        let mut r = self.reconcile.lock().unwrap_or_else(|p| p.into_inner());
+        let runs = r["runs"].as_u64().unwrap_or(0) + 1;
+        *r = json!({ "runs": runs, "last": last });
     }
 
     /// Step 12 onwards: serve until [`Daemon::request_stop`] (or `external`
@@ -474,6 +494,7 @@ impl<'a> Daemon<'a> {
                 .collect::<BTreeMap<String, usize>>(),
             "warnings": warnings,
             "verify": verify_result,
+            "reconcile": self.reconcile.lock().unwrap_or_else(|p| p.into_inner()).clone(),
         }))
     }
 }
