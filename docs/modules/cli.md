@@ -92,7 +92,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata deps propose` | `[--session S] [--repo R] [--switch]`。repo 缺省 = cwd 的 repo。`--switch`：本会话（只有提议者）立刻换到提议的依赖集，不确认（design §6.4 第 3 步、deps §5.10 `plan_switch`）；别的会话不动 [实现时补的决定，review M3] | — |
 | `git-strata deps approve` | `<id>`（`ProposalId`）。`[--sessions S,S]`，不给 = 该 repo 的全部会话，由 daemon 展开 | 非数字或超过 `i64::MAX` → `InvalidInput` |
 | `git-strata deps list` | `[--repo R]`。不给 = 全部 repo 的未关闭提议 | — |
-| `git-strata publish` | `[--from S:path]` 可重复。path 是 `RepoPath`。点到 `Renamed` 的任一半由 publish 选中整个改名，cli 不拆开。一个都不给且 stdin 是 TTY：交互选择（§5.4）。不给且不是 TTY → `InvalidInput`，`detail.reason = "no_batch"` | `S:path` 缺冒号，或 path 不是 `RepoPath` → `InvalidInput` |
+| `git-strata publish` | `[--from S:path]` 可重复。path 是 `RepoPath`。发布的是这些路径当下的内容：cli 先对每个批次记一条 `BeforePublish` checkpoint，再把它的号交给 `publish`（review L1）；没有选旧 checkpoint 的参数。点到 `Renamed` 的任一半由 publish 选中整个改名，cli 不拆开。一个都不给且 stdin 是 TTY：交互选择（§5.4）。不给且不是 TTY → `InvalidInput`，`detail.reason = "no_batch"` | `S:path` 缺冒号，或 path 不是 `RepoPath` → `InvalidInput` |
 | `git-strata push` | `<repo>` | 未知 repo 透传 `NoSuchRepo` |
 | `git-strata assign` | `--file PATH --session S`。PATH 是 `RepoPath`。不需要确认（design §6.9） | 缺一 → `InvalidInput` |
 | `git-strata rm` | `--session S` `[--discard]`。`--discard` 会丢掉未发布改动，所以要确认 | 不给会话 → `InvalidInput` |
@@ -276,7 +276,7 @@ cli 不拿 repo 写锁，不占会话队列，不等待建造锁。锁在 daemon
 
 ### 5.2 幂等的检查点
 
-`--tool-call` 的查找只读 store 里该会话已有的 `Checkpoint` 行，不调用 `Sessions::open`。`reason.kind = "ToolCall"` 且 `reason.id` 相等即命中。要记哪些 repo 按 §3.5 的路径映射，不是只记 cwd。没有路径时，对该会话每个 tracked repo 各查一次。`-m` 不是幂等的：每次都是新的 `Manual` 检查点。
+`--tool-call` 的查找只读 store 里该会话已有的 `Checkpoint` 行，不调用 `Sessions::open`。`reason.kind = "ToolCall"` 且 `reason.id` 相等即命中。要记哪些 repo 按 §3.5 的路径映射，不是只记 cwd。没有路径时，对该会话每个 tracked repo 各查一次。`-m` 不按 id 幂等，但也不保证每次一条新行：与最新的 checkpoint 相比没有变化时，overlay 返回那条最新的（它的号与 message，`recorded = false`，overlay.md §5.6 第 4 步）。新的 `--tool-call` id 即使没有变化也记一行（review M8）。（review L1）
 
 ### 5.3 stderr
 

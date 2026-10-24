@@ -6,8 +6,11 @@ description: Use when working in a repo managed by git-strata (macOS), or when t
 # git-strata
 
 git-strata gives every coding session its own workspace: an APFS clone of a
-shared, sealed base snapshot of each repo (plus its dependency set). Sessions
-cannot see each other's edits. Edits are recorded as checkpoints, combined and
+shared, sealed base snapshot of each repo (plus its dependency set). One
+session's edits never change another session's files, but they are readable:
+`status --all`, `grep`/`files` with `--session S` or `--all`, and
+`diff --session S` / `--between` show other sessions' content. Edits are
+recorded as checkpoints, combined and
 committed by `publish`, and sent to the remote only by `git-strata push` or a
 publish that is configured to push. macOS only (APFS, FSEvents, launchd).
 
@@ -79,10 +82,16 @@ Notes:
   mapped to the session repo whose workspace contains it; paths outside the
   session are skipped. With no paths, every tracked repo of the session is
   scanned. `data.checkpoints` has one row per repo recorded.
-- `-m` always makes a new checkpoint. `--tool-call ID` is idempotent per
-  (session, repo, ID): repeating it returns the same rows.
-- `publish` uses the newest checkpoint, not live files. Checkpoint first;
-  edits after the checkpoint stay in the workspace for the next one.
+- `-m` records a new checkpoint only when something changed since the
+  latest one; with no change it returns that latest checkpoint (its id and
+  message, not yours). `--tool-call ID` is idempotent per (session, repo, ID):
+  every new ID records a row (even with no change), and repeating it returns
+  the same rows.
+- `publish` publishes the selected paths' current content: before sending
+  the publish it records a fresh `BeforePublish` checkpoint of each
+  `--from` batch, so edits made to a selected file up to that moment are
+  included. There is no option to publish an older checkpoint; to keep an
+  edit out, revert it (or `restore` the path) before publishing.
   Without `--from` it is interactive on a TTY and `InvalidInput`
   (`no_batch`) otherwise, so agents always pass `--from SESSION:PATH`.
 - Multi-repo `publish` commits repo by repo. When one repo hits `Conflict`,
@@ -118,7 +127,8 @@ conflict is `assigned`.
      in `data.commits` and `data.pushes` too.
 2. Fix the listed paths in that repo's workspace (merge in the upstream
    change; `git-strata diff` helps).
-3. `git-strata checkpoint -m "resolve conflict" <paths>`.
+3. Optionally `git-strata checkpoint -m "resolve conflict" --path P ...`
+   to keep a named point; the re-run snapshots the paths itself.
 4. Re-run the exact same `publish --from ...` command. Repos that already
    landed are not committed again: they appear in
    `data.already_published` as `{repo, publish, commit, push}`, and only the

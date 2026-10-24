@@ -28,6 +28,11 @@ is not running.
 | `chain` | `--repo <R>` + exactly one of `--accept-origin <replay\|drop>` / `--restore` | yes (`--restore` may also confirm) | no | `{repo,choice,outcome?\|refs_moved?}` |
 | `config relax <REPO>` | — | yes + confirm | no | — |
 
+`checkpoint -m` with nothing changed returns the latest checkpoint instead of
+a new one; every new `--tool-call` ID records a row. `publish` records a fresh
+`BeforePublish` checkpoint of each `--from` batch first, so it publishes the
+selected paths' current content (no flag selects an older checkpoint).
+
 Selectors: `--session` accepts a session id (`s-` + 8 base32 chars) or a
 ticket. Without it, the session comes from the cwd.
 
