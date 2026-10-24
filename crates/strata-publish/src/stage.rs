@@ -717,6 +717,27 @@ fn apply(src: &Src, staging: &Path, changed: &BTreeMap<RepoPath, Option<Ver>>) -
     Ok(())
 }
 
+/// Review H3: the publishing repo's own sealed deps set (the one the
+/// layout session pins) cloned into the exported worktree, so checks find
+/// `node_modules` / `vendor` like in the workspace. A private APFS clone
+/// (`deps::clone_into`): a check cannot reach the sealed set. Nothing is
+/// installed here, under the lock: the pinned set is sealed already (a
+/// missing one is `Corrupt`). [实现时补的决定] a deps dir that the export
+/// already has (tracked in git) keeps the tracked content and is not
+/// cloned over. The deps dirs never enter the tree: `gitio::stage` stages
+/// only the plan's paths.
+fn clone_own_deps(ctx: &Ctx, id: &strata_types::DepsSetId, worktree: &Path) -> Result<()> {
+    let Some(mut set) = strata_deps::find_set(ctx.store, ctx.repo, id)? else {
+        return Err(StrataError::new(Code::Corrupt, format!("the sealed deps set {} of {} is not recorded", id.as_str(), ctx.repo))
+            .with_detail(json!({ "repo": ctx.repo.as_str(), "set": id.as_str() })));
+    };
+    set.dirs.retain(|d| std::fs::symlink_metadata(worktree.join(d.as_str())).is_err());
+    if set.dirs.is_empty() {
+        return Ok(());
+    }
+    strata_deps::clone_into(ctx.store, &set, worktree)
+}
+
 /// Build the layout for `plan` (D4, D12): export B, attach the private git
 /// dir, clone the siblings from the session's pinned bases, write the
 /// merged paths and stage them through gitio. Any failure removes the
@@ -734,6 +755,7 @@ pub(crate) fn build(ctx: &Ctx, group: &ReleaseGroup, base: &CommitOid, plan: &Pl
         if let Some(rec) = ctx.store.session(&plan.layout_session)? {
             for (rn, ws) in &rec.manifest.repos {
                 if rn == ctx.repo {
+                    clone_own_deps(ctx, &ws.base.deps, &worktree)?;
                     continue;
                 }
                 let src = ctx.store.base_dir(&ws.base);

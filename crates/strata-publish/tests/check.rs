@@ -143,3 +143,32 @@ fn sibling_layout_matches_workspace() {
     assert!(st.worktree.join(".git").exists());
     assert!(!fx.ws(&s, "front").starts_with(st.layout_root()));
 }
+
+/// Review H3: a check that runs an executable present only in the
+/// publishing repo's sealed deps set (`node_modules/.bin/lint`) finds it in
+/// staging. The staged copy is a private clone (writing it leaves the
+/// sealed set alone) and the deps dir does not enter the staged tree.
+#[test]
+fn staging_has_the_publishing_repos_sealed_deps() {
+    let fx = Fx::with(&["tool"]);
+    fx.sb.set_install_script(&format!(
+        "{DEFAULT_INSTALL}\nprintf '#!/bin/sh\\nexit 0\\n' > node_modules/.bin/lint && chmod +x node_modules/.bin/lint || exit 1\n"
+    ));
+    let (st, s) = staged(&fx, &["tool"]);
+    let lint = st.worktree.join("node_modules/.bin/lint");
+    assert!(lint.is_file(), "the sealed deps are in staging");
+    let ran = check(&cfg_with(&fx, &["node_modules/.bin/lint".to_string()]), &st.worktree).unwrap();
+    assert_eq!(ran.ran, 1);
+
+    // A private clone: the sealed set is untouched by a write in staging.
+    let rec = fx.store().session(&s).unwrap().unwrap();
+    let set = fx.store().deps_dir(&repo_name("tool"), &rec.manifest.repos[&repo_name("tool")].base.deps);
+    let sealed = set.join("node_modules/x/index.js");
+    let before = fs::read(&sealed).unwrap();
+    fs::write(st.worktree.join("node_modules/x/index.js"), b"changed in staging\n").unwrap();
+    assert_eq!(fs::read(&sealed).unwrap(), before);
+
+    // Not part of the commit tree.
+    let names = fx.sb.git(&fx.main("tool"), &["ls-tree", "-r", "--name-only", st.tree.as_str()]);
+    assert!(!names.contains("node_modules"), "{names}");
+}
