@@ -477,7 +477,7 @@ impl Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        let r = crate::fsx::rp(&self.name).and_then(|rel| Ok(strata_apfs::remove_tree_rooted(&self.root, &rel)?));
+        let r = crate::fsx::rp(&self.name).and_then(|rel| strata_apfs::remove_tree_rooted(&self.root, &rel));
         if let Err(e) = r {
             tracing::warn!(dir = %self.root.join(&self.name).display(), error = %e.message, "push guard left behind");
         }
