@@ -244,7 +244,7 @@ cli 不拿 repo 写锁，不占会话队列，不等待建造锁。锁在 daemon
 共同的五步：
 
 1. 解析子命令。未知子命令 → `InvalidInput`，`detail.commands` 见 §3.1。不到第 2 步。
-2. 确认类，以及 D18 的 `resolve` 与 `chain` 的选择：`require_tty`。会推且钉住的值要确认的 `publish`（只算这次还要提交的仓库，见 D23）、要确认的 `chain --restore`、`config relax` 也在连接前查 TTY。失败即返回 `NotTty`，不到第 3 步。`resolve` / `chain` 在这一步之前就拒绝缺选择或两个都给，同样不连接。`chain --restore` 且 `!is_ancestor(o, c)` → `InvalidInput`，`detail.reason = "not_ancestor"`，不连接、不取凭据、不推。
+2. 确认类，以及 D18 的 `resolve` 与 `chain` 的选择：`require_tty`。要确认的 `chain --restore`、`config relax` 也在连接前查 TTY。会推且钉住的值要确认的 `publish` 是例外（D23）：批次里有这类仓库时，先连 daemon 发每个批次的 `BeforePublish` checkpoint 与只读的 `publish_plan`，再只对还要提交的那些仓库查 TTY；不是 TTY 时同样返回 `NotTty`，不发 `publish`、不弹框、不取凭据（review-3 T4）。失败即返回 `NotTty`，不到第 3 步。`resolve` / `chain` 在这一步之前就拒绝缺选择或两个都给，同样不连接。`chain --restore` 且 `!is_ancestor(o, c)` → `InvalidInput`，`detail.reason = "not_ancestor"`，不连接、不取凭据、不推。
 3. daemon 在听：写一行请求，读一行回答，原样映射到信封（上游的码不变）。`UnknownMethod` / `Failed` 按 D7。
 4. daemon 没在听：`status`、`grep`、`files`、`diff`、`deps list`、`daemon status` 走本地只读路径（§5.1）。其余返回 `error.code = "Busy"`，`detail.reason = "daemon_down"`，`message` 告诉人先跑 `git-strata daemon start`。不新加码（D2）。
 5. `checkpoint --tool-call ID`：先按 §3.5 查本地。已经都有则返回那几条，不再请 daemon 记第二条。
@@ -286,7 +286,7 @@ JSON 成功之后：若这次解析出了会话，再读一次 `deps::open_propo
 
 ### 5.4 交互式发布选择
 
-`git-strata publish` 没有 `--from`、且 stdin 是 TTY：先取 cwd 会话的 `status`，把有改动的路径按编号打到 stderr，读 stdin 的编号或路径，空行结束，收成 `--from` 等价的批次。读到的不是编号也不是路径 → `InvalidInput`，不发 `publish`。选路径不是确认，不代替 `PushDeploy`。批次收齐之后，要推且要确认的仓库仍按 §5 在连接前 `require_tty`，并在该仓库 `commit_tree` 之前各取一次 `PushDeploy`。
+`git-strata publish` 没有 `--from`、且 stdin 是 TTY：先取 cwd 会话的 `status`，把有改动的路径按编号打到 stderr，读 stdin 的编号或路径，空行结束，收成 `--from` 等价的批次。读到的不是编号也不是路径 → `InvalidInput`，不发 `publish`。选路径不是确认，不代替 `PushDeploy`。批次收齐之后，按 D23 先发 checkpoint 与 `publish_plan`，再对还要提交的、要推且要确认的仓库 `require_tty`（review-3 T4：不是在连接前），并在该仓库 `commit_tree` 之前各取一次 `PushDeploy`。
 
 ## 6. 失败与恢复
 

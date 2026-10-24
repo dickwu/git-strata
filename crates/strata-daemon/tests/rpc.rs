@@ -489,3 +489,33 @@ fn rpc_reject_variants() {
     assert_eq!(rpc_of(&Reply::rejected(&json!(1), RpcReject::Failed, "m").0), "Failed");
     assert_eq!(rpc_of(&Reply::rejected(&json!(1), RpcReject::UnknownMethod, "m").0), "UnknownMethod");
 }
+
+/// Review-3 T4: daemon.md §3's method inventory — the stated count, the
+/// names and the read-only column — agrees with `Method::ALL`.
+#[test]
+fn daemon_md_method_table_matches_rpc() {
+    let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/modules/daemon.md")).unwrap();
+    let marker = "除表里这 ";
+    let at = doc.find(marker).expect("the method-count sentence");
+    let rest = &doc[at + marker.len()..];
+    let count: usize = rest[..rest.find(' ').unwrap()].parse().expect("a number");
+    assert_eq!(count, Method::ALL.len(), "daemon.md states {count} methods");
+    let table = &rest[rest.find("| method |").expect("the method table")..];
+    let mut names = Vec::new();
+    let mut ro = Vec::new();
+    for line in table.lines().skip(2) {
+        if !line.starts_with('|') {
+            break;
+        }
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        let name = cells[1].trim_matches('`').to_string();
+        if cells[cells.len() - 2] == "是" {
+            ro.push(name.clone());
+        }
+        names.push(name);
+    }
+    let want: Vec<String> = Method::ALL.iter().map(|m| m.name().to_string()).collect();
+    assert_eq!(names, want);
+    let want_ro: Vec<String> = Method::ALL.iter().filter(|m| m.is_read_only()).map(|m| m.name().to_string()).collect();
+    assert_eq!(ro, want_ro);
+}
