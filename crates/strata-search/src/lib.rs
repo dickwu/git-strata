@@ -15,12 +15,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 mod base;
+mod view;
 
 use serde_json::json;
 use tgrep_core::generations::Generation;
 use strata_overlay::Overlay;
 use strata_session::{SessionState, Sessions, WorkspaceHealth};
-use strata_types::{BaseGen, Code, CommitOid, Config, RepoName, RepoPath, SessionId, StrataError, TreeOid, ViewId};
+use strata_types::{BaseGen, Code, CommitOid, Config, RepoName, RepoPath, SessionId, StrataError, ViewId};
+#[cfg(feature = "test-seams")]
+use strata_types::TreeOid;
 
 /// types.md §8 `Result<T>`.
 pub type Result<T> = std::result::Result<T, StrataError>;
@@ -87,7 +90,6 @@ pub(crate) fn root_identity(path: &Path) -> Result<(u64, u64)> {
 }
 
 /// One attached view (§4.2).
-#[allow(dead_code)] // read by the index code of later tasks
 pub(crate) struct View {
     pub(crate) session: SessionId,
     pub(crate) repo: RepoName,
@@ -101,6 +103,43 @@ pub(crate) struct View {
     pub(crate) reattach: Option<&'static str>,
     /// The shared base of `base.tree` (§4.1).
     pub(crate) generation: Arc<Generation>,
+    /// Paths compare folded (the volume is case-insensitive).
+    pub(crate) fold: bool,
+    pub(crate) excl: view::Excl,
+    /// The overlay the private ops were computed from.
+    pub(crate) overlay: Overlay,
+    /// The private `live` content, replayed onto the reader at publish.
+    pub(crate) ops: BTreeMap<String, view::Op>,
+    /// The published state; `None` while the view is not ready.
+    pub(crate) snap: Option<Arc<view::Snap>>,
+}
+
+impl View {
+    fn fill(&self) -> view::Fill<'_> {
+        view::Fill { root: &self.path, overlay: &self.overlay, generation: &self.generation, excl: &self.excl }
+    }
+
+    /// Publish `ops` with the current generation and root identity.
+    fn publish(&mut self) {
+        let members = self.fill().members();
+        let snap = view::Snap::build(&self.generation, &self.ops, members, (&self.session, &self.repo, &self.path, self.root));
+        self.snap = Some(Arc::new(snap));
+    }
+
+    fn refused(&self) -> Result<()> {
+        match self.reattach {
+            Some(r) => Err(err(Code::Busy, format!("view of {}/{} must be re-attached", self.session, self.repo), r)),
+            None => Ok(()),
+        }
+    }
+}
+
+/// `grep` pause (test seam): armed once, holds the reader pointer seen.
+#[cfg(feature = "test-seams")]
+#[derive(Default)]
+struct Pause {
+    state: Mutex<(bool, Option<usize>, bool)>,
+    cv: std::sync::Condvar,
 }
 
 /// The search handle the daemon holds (§3).
@@ -110,6 +149,8 @@ pub struct Search<'a> {
     overlays: &'a dyn OverlaySource,
     views: Mutex<BTreeMap<ViewId, Arc<Mutex<View>>>>,
     bases: base::Bases,
+    #[cfg(feature = "test-seams")]
+    pause: Pause,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -126,10 +167,22 @@ fn new_view_id() -> ViewId {
     ViewId::new(format!("v-{}", rand_hex(8)))
 }
 
+fn root_changed(what: &str) -> StrataError {
+    err(Code::Busy, format!("the workspace root of {what} was replaced"), "root_changed")
+}
+
 impl<'a> Search<'a> {
     /// No I/O, no views.
     pub fn open(config: &'a Config, sessions: &'a Sessions<'_>, overlays: &'a dyn OverlaySource) -> Search<'a> {
-        Search { config, sessions, overlays, views: Mutex::new(BTreeMap::new()), bases: base::Bases::default() }
+        Search {
+            config,
+            sessions,
+            overlays,
+            views: Mutex::new(BTreeMap::new()),
+            bases: base::Bases::default(),
+            #[cfg(feature = "test-seams")]
+            pause: Pause::default(),
+        }
     }
 
     fn view(&self, id: &ViewId) -> Result<Arc<Mutex<View>>> {
@@ -193,7 +246,10 @@ impl<'a> Search<'a> {
         let root = root_identity(&ws.path)?;
         // 8–12: the shared base. No search lock is held across ensure.
         let generation = self.bases.ensure(self.config, repo, &ws.head, &ws.base.tree)?;
-        let v = View {
+        // 13: fill the private live (§5.4). A failure issues no id.
+        let fold = !strata_apfs::volume_caps(&ws.path)?.case_sensitive;
+        let excl = view::Excl::new(&self.config.repos[repo], fold);
+        let mut v = View {
             session: session.clone(),
             repo: repo.clone(),
             path: ws.path.clone(),
@@ -202,7 +258,20 @@ impl<'a> Search<'a> {
             head: ws.head.clone(),
             reattach: None,
             generation,
+            fold,
+            excl,
+            overlay,
+            ops: BTreeMap::new(),
+            snap: None,
         };
+        let mut ops = BTreeMap::new();
+        let f = v.fill();
+        f.update(&mut ops, &f.all_paths())?;
+        if root_identity(&v.path).ok() != Some(v.root) {
+            return Err(root_changed(&format!("{session}/{repo}")));
+        }
+        v.ops = ops;
+        v.publish();
         // 14: issue the id.
         let mut views = lock(&self.views);
         let mut id = new_view_id();
@@ -219,29 +288,160 @@ impl<'a> Search<'a> {
     }
 
     /// §5.3.
-    pub fn refresh(&self, view: ViewId, _changed: &[RepoPath]) -> Result<()> {
+    pub fn refresh(&self, view: ViewId, changed: &[RepoPath]) -> Result<()> {
         let v = self.view(&view)?;
-        let v = lock(&v);
-        if let Some(r) = v.reattach {
-            return Err(err(Code::Busy, format!("view {view} must be re-attached"), r));
+        let mut v = lock(&v);
+        self.refresh_locked(&mut v, changed)
+    }
+
+    /// §5.3 steps 1–7 with the view lock held (never the table lock).
+    fn refresh_locked(&self, v: &mut View, changed: &[RepoPath]) -> Result<()> {
+        v.refused()?;
+        let what = format!("{}/{}", v.session, v.repo);
+        // 2: the workspace and its root still are the attached ones.
+        let st = self.sessions.status(&v.session)?;
+        let Some(ws) = st.manifest.repos.get(&v.repo) else {
+            return Err(StrataError::new(Code::NoSuchRepo, format!("session {} has no repo {}", v.session, v.repo))
+                .with_detail(json!({ "repo": v.repo.as_str() })));
+        };
+        if ws.path != v.path || root_identity(&v.path).ok() != Some(v.root) {
+            v.reattach = Some("root_changed");
+            return Err(root_changed(&what));
         }
+        if ws.base != v.base {
+            v.reattach = Some("base_moved");
+            return Err(err(Code::Busy, format!("{what} moved to another base"), "base_moved"));
+        }
+        // 3: the latest overlay.
+        let overlay = match self.overlays.last(&v.session, &v.repo) {
+            Some(o) => o,
+            None if ws.tracked => {
+                return Err(err(Code::Busy, format!("overlay of {what} not scanned yet"), "overlay_not_ready"));
+            }
+            None => Overlay::empty(ws.base.clone()),
+        };
+        if overlay.base != v.base {
+            v.reattach = Some("base_moved");
+            return Err(err(Code::Busy, format!("overlay of {what} is on another base"), "base_moved"));
+        }
+        // 4–5: what to reread.
+        let full = v.snap.is_none() || self.overlays.needs_full(&v.session, &v.repo);
+        if !full && changed.is_empty() {
+            return Ok(());
+        }
+        let old = std::mem::replace(&mut v.overlay, overlay);
+        let mut ops;
+        let paths = if full {
+            ops = BTreeMap::new();
+            v.fill().all_paths()
+        } else {
+            ops = v.ops.clone();
+            let mut s = std::collections::BTreeSet::new();
+            for p in changed {
+                s.insert(p.as_str().to_string());
+                for q in old.paired(p).into_iter().chain(v.overlay.paired(p)) {
+                    s.insert(q.as_str().to_string());
+                }
+            }
+            s
+        };
+        // 6: read; a failure leaves the view not ready.
+        if let Err(e) = v.fill().update(&mut ops, &paths) {
+            v.snap = None;
+            return Err(e);
+        }
+        // 7: publish only with the root still the attached one.
+        if root_identity(&v.path).ok() != Some(v.root) {
+            v.reattach = Some("root_changed");
+            return Err(root_changed(&what));
+        }
+        v.ops = ops;
+        v.publish();
         Ok(())
     }
 
-    /// §5.5.
-    pub fn grep(&self, which: Which, pattern: &str, _opts: &GrepOpts) -> Result<Vec<Hit>> {
-        check_pattern(pattern)?;
-        if let Which::One(id) = &which {
-            self.view(id)?;
+    /// §5.5 step 3: the snapshot of a view, refreshing a not ready one once.
+    fn snapshot(&self, v: &Mutex<View>) -> Result<Arc<view::Snap>> {
+        let mut g = lock(v);
+        g.refused()?;
+        if g.snap.is_none() {
+            match self.refresh_locked(&mut g, &[]) {
+                Ok(()) => {}
+                Err(e) if e.code == Code::Busy => return Err(e),
+                Err(e) => {
+                    return Err(err(Code::Unknown, format!("view of {}/{} is not ready: {}", g.session, g.repo, e.message), "not_ready"));
+                }
+            }
         }
-        Ok(Vec::new())
+        g.snap.clone().ok_or_else(|| err(Code::Unknown, format!("view of {}/{} is not ready", g.session, g.repo), "not_ready"))
+    }
+
+    /// §5.5 step 7: the root of a finished query is still the snapshot's.
+    fn recheck(&self, v: &Mutex<View>, snap: &view::Snap) -> Result<()> {
+        if root_identity(&snap.path).ok() == Some(snap.root) {
+            return Ok(());
+        }
+        lock(v).reattach = Some("root_changed");
+        Err(root_changed(&format!("{}/{}", snap.session, snap.repo)))
+    }
+
+    #[cfg(feature = "test-seams")]
+    fn pause_hook(&self) -> impl Fn(usize) + '_ {
+        |ptr| {
+            let mut s = lock(&self.pause.state);
+            if !s.0 {
+                return;
+            }
+            s.0 = false;
+            s.1 = Some(ptr);
+            while !s.2 {
+                s = self.pause.cv.wait(s).unwrap_or_else(|p| p.into_inner());
+            }
+        }
+    }
+
+    #[cfg(not(feature = "test-seams"))]
+    fn pause_hook(&self) -> impl Fn(usize) + '_ {
+        |_| {}
+    }
+
+    /// §5.5.
+    pub fn grep(&self, which: Which, pattern: &str, opts: &GrepOpts) -> Result<Vec<Hit>> {
+        check_pattern(pattern)?;
+        let views: Vec<Arc<Mutex<View>>> = match &which {
+            Which::One(id) => vec![self.view(id)?],
+            Which::All => lock(&self.views).values().cloned().collect(),
+        };
+        let mut snaps = Vec::with_capacity(views.len());
+        for v in &views {
+            snaps.push(self.snapshot(v)?);
+        }
+        let pause = self.pause_hook();
+        let mut hits = Vec::new();
+        for s in &snaps {
+            hits.extend(s.grep(pattern, opts.case_insensitive, &pause)?);
+        }
+        for (v, s) in views.iter().zip(&snaps) {
+            self.recheck(v, s)?;
+        }
+        hits.sort_by(|a, b| (&a.session, &a.repo, &a.path, a.line).cmp(&(&b.session, &b.repo, &b.path, b.line)));
+        Ok(hits)
     }
 
     /// §5.6.
     pub fn files(&self, view: ViewId, glob: &str) -> Result<Vec<RepoPath>> {
-        let _v = self.view(&view)?;
-        check_glob(glob, false)?;
-        Ok(Vec::new())
+        let v = self.view(&view)?;
+        let fold = lock(&v).fold;
+        let m = check_glob(glob, fold)?;
+        let snap = self.snapshot(&v)?;
+        let out: Vec<RepoPath> = snap
+            .members
+            .iter()
+            .filter(|p| m.is_match(p.as_str()))
+            .filter_map(|p| RepoPath::try_from(p.clone()).ok())
+            .collect();
+        self.recheck(&v, &snap)?;
+        Ok(out)
     }
 }
 
@@ -269,6 +469,7 @@ pub(crate) fn check_glob(glob: &str, fold: bool) -> Result<globset::GlobMatcher>
     Ok(g.compile_matcher())
 }
 
+
 #[cfg(feature = "test-seams")]
 impl<'a> Search<'a> {
     /// `Arc::as_ptr` of the reader of this (repo, tree)'s generation: one
@@ -288,9 +489,40 @@ impl<'a> Search<'a> {
             SearchSeam::FailEnsureAfterStage => {
                 self.bases.fail_after_stage.store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            SearchSeam::PauseBeforeVerify => {}
+            SearchSeam::PauseBeforeVerify => *lock(&self.pause.state) = (true, None, false),
         }
     }
 
-    pub fn release(&self) {}
+    pub fn release(&self) {
+        lock(&self.pause.state).2 = true;
+        self.pause.cv.notify_all();
+    }
+
+    /// The reader pointer the paused (or last paused) `grep` holds.
+    pub fn paused_reader_ptr(&self) -> Option<usize> {
+        lock(&self.pause.state).1
+    }
+
+    /// Republish the view on another already opened generation of its repo,
+    /// leaving its root and base alone (a stand-in for a base swap).
+    pub fn swap_view_reader(&self, view: ViewId, tree: &TreeOid) -> Result<()> {
+        let v = self.view(&view)?;
+        let mut v = lock(&v);
+        let g = self
+            .bases
+            .opened(&v.repo, tree.as_str())
+            .ok_or_else(|| err(Code::InvalidInput, format!("no generation of {tree} is open"), "no_generation"))?;
+        v.generation = g;
+        v.publish();
+        Ok(())
+    }
+
+    /// Paths whose workspace bytes this view holds privately (an upsert in
+    /// its `live`), ascending. Not a §3 seam: see impl-progress/search.md.
+    #[doc(hidden)]
+    pub fn private_paths(&self, view: ViewId) -> Result<Vec<String>> {
+        let v = self.view(&view)?;
+        let v = lock(&v);
+        Ok(v.ops.iter().filter(|(_, op)| matches!(op, view::Op::Upsert(_))).map(|(p, _)| p.clone()).collect())
+    }
 }

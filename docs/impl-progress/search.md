@@ -7,8 +7,8 @@ Branch `impl/search` (worktree `git-strata-wt/search`), from `impl/v1` 95f7660.
 | Task | Status | Commit |
 |---|---|---|
 | 1 view table and typed refusals | done | e82784a |
-| 2 share base index by main checkout tree and profile | done | (this commit) |
-| 3 session overlay shadows the shared base | todo | |
+| 2 share base index by main checkout tree and profile | done | 75aadbc |
+| 3 session overlay shadows the shared base | done | (this commit) |
 | 4 pin the query snapshot and refuse a replaced root | todo | |
 
 ## Decisions
@@ -74,3 +74,52 @@ Branch `impl/search` (worktree `git-strata-wt/search`), from `impl/v1` 95f7660.
 - Task 2's commit also carries `tests/views.rs` (the generation directory
   assertion of `unknown_view_is_no_such_view`, deferred from Task 1) and
   this file, beyond §8's `git add` list.
+- Task 3: a view's private state is an op map path → `Upsert(bytes)` /
+  `Delete`, not a long-lived `LiveIndex`. Every publish builds a fresh
+  `HybridIndex::from_reader(generation reader)` and replays the map, and
+  publishes it as an immutable `Arc<Snap>` (index + members + root
+  identity). A query clones that `Arc` under the view lock and then reads
+  without locks, which is how §4.5's "one query, one reader" is kept
+  (HybridIndex is not `Clone`, and swapping a reader under a running query
+  is what Task 4 must rule out). Cost: a publish re-trigrams every overlaid
+  file, from memory, without re-reading the workspace.
+- Task 3: `Delete` (mask the base postings) is used for tombstones,
+  `Renamed.from`, excluded paths, and for overlay/dirty paths whose
+  workspace content search does not index: a symlink (never opened),
+  bytes over `MERGE_MAX_BYTES`, bytes with a NUL, or a file that is gone.
+  Those paths stay members for `files` (§4.4). A `Delete` of a path the
+  reader does not contain is not applied (§7 `candidate_count…`).
+- Task 3: §5.4 step 4 reads every non-hidden regular base file on a full
+  fill and keeps the base when `matches_worktree_bytes` holds; a ready
+  view's refresh rereads only `changed` plus their `paired` groups in both
+  the previous and the new overlay (so a `from`-only or `path`-only change
+  updates both ends even if the pair split). `attrs_of` / `unchanged_since`
+  caching is not used (always reread those paths).
+- Task 3: reads are stable reads (fstat before/after, one retry) through
+  `open_rooted_file`. At fill/refresh `NoSuchPath` is not a failure; any
+  other refusal (symlink, FIFO, directory now at a member path) or an
+  unstable read leaves the view not ready (`Unknown` `not_ready`). At grep
+  verify, a candidate that is gone or no longer a regular file is skipped.
+- Task 3: exclusions are `.git`, `.strata`, `deps_dirs`, `seed_caches`,
+  matched as the path itself or a `/`-prefix, folded with `case_fold_key`
+  on a case-insensitive volume (`volume_caps(workspace).case_sensitive`,
+  read at attach). They apply to base entries and overlay entries alike.
+  Gitlinks are not members.
+- Task 3: "clean files do not enter the private live" (§7
+  `base_index_shared_across_sessions_same_tree`) needs to see inside a
+  view; §3 declares no such seam. A `#[doc(hidden)]` `test-seams` method
+  `Search::private_paths(view)` (paths with private bytes) was added and is
+  asserted in `overlay_entry_shadows_base_path` (and after reverting in
+  `commit_inside_session_keeps_overlay_hit`).
+- Task 3: `grep` / `files` / `refresh` beyond §8 Task 3's text are already
+  complete (root re-check after the query, refresh's root/base checks and
+  "no publish when the root changed", not-ready refresh once in grep);
+  Task 4 adds the `PauseBeforeVerify` / `swap_view_reader` seams' tests.
+  `refresh` with `overlays.last() == None` on a tracked workspace answers
+  `Busy` `overlay_not_ready` like `attach`.
+- Task 3's commit also carries `src/lib.rs` (attach step 13, the view
+  fields, grep/files/refresh), a `cfg_attr` dead-code allow in `src/base.rs`
+  (two seam-only helpers), and this file, beyond §8's `git add` list.
+- Task 3 tests were written after the implementation in this session (both
+  in the same commit); with the Task 2 stubs (`grep`/`files` returned empty)
+  they fail.

@@ -85,6 +85,7 @@ impl Bases {
         Ok(r)
     }
 
+    #[cfg_attr(not(feature = "test-seams"), allow(dead_code))]
     pub(crate) fn existing(&self, repo: &RepoName) -> Option<Arc<RepoBase>> {
         lock(&self.repos).get(repo).cloned()
     }
@@ -152,6 +153,7 @@ impl Bases {
     }
 
     /// An already opened generation of (repo, tree).
+    #[cfg_attr(not(feature = "test-seams"), allow(dead_code))]
     pub(crate) fn opened(&self, repo: &RepoName, tree: &str) -> Option<Arc<Generation>> {
         let rb = self.existing(repo)?;
         lock(&rb.generations).get(tree).cloned()
