@@ -69,7 +69,7 @@ impl Ver {
         let blake = blake3::hash(&bytes).to_hex().to_string();
         Ver { mode, blake: Some(blake), oid: None, size: Some(bytes.len() as u64), file: None, data: Some(Arc::new(bytes)) }
     }
-    fn is_link(&self) -> bool {
+    pub(crate) fn is_link(&self) -> bool {
         self.mode == MODE_LINK
     }
 }
@@ -94,7 +94,7 @@ pub(crate) struct Src<'a> {
 impl Src<'_> {
     /// The bytes of `v`, or `None` when it is larger than `MERGE_MAX_BYTES`
     /// (never read).
-    fn load(&self, v: &Ver) -> Result<Option<Arc<Vec<u8>>>> {
+    pub(crate) fn load(&self, v: &Ver) -> Result<Option<Arc<Vec<u8>>>> {
         if let Some(d) = &v.data {
             return Ok(Some(d.clone()));
         }
@@ -120,7 +120,7 @@ impl Src<'_> {
 
     /// Same content? `None` when it cannot be told without reading an
     /// oversize side (treated as different by callers).
-    fn same_content(&self, a: &Ver, b: &Ver) -> Result<Option<bool>> {
+    pub(crate) fn same_content(&self, a: &Ver, b: &Ver) -> Result<Option<bool>> {
         if let (Some(x), Some(y)) = (&a.blake, &b.blake) {
             return Ok(Some(x == y));
         }
@@ -138,7 +138,7 @@ impl Src<'_> {
         }
     }
 
-    fn same(&self, a: Option<&Ver>, b: Option<&Ver>) -> Result<bool> {
+    pub(crate) fn same(&self, a: Option<&Ver>, b: Option<&Ver>) -> Result<bool> {
         Ok(match (a, b) {
             (None, None) => true,
             (Some(a), Some(b)) => a.mode == b.mode && self.same_content(a, b)? == Some(true),
@@ -149,7 +149,7 @@ impl Src<'_> {
 
 /// The bytes of `root/p` (a pinned base), never following a symlink; a
 /// symlink reads as its target.
-fn read_rooted(root: &Path, p: &RepoPath) -> Result<Vec<u8>> {
+pub(crate) fn read_rooted(root: &Path, p: &RepoPath) -> Result<Vec<u8>> {
     let full = root.join(p.as_str());
     let meta = std::fs::symlink_metadata(&full)
         .map_err(|e| strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &full))?;
@@ -477,6 +477,26 @@ pub(crate) fn plan(ctx: &Ctx, group: &ReleaseGroup, base: &CommitOid) -> Result<
             changes.push((e.path.clone(), ver));
         }
         loaded.push((cp, changes));
+    }
+    // §5.7: a path named by `assign` goes only with the named session.
+    let named = crate::rebase::assignments(ctx.store, ctx.repo)?;
+    let mut refused: Vec<Value> = Vec::new();
+    for (cp, changes) in &loaded {
+        for (p, _) in changes {
+            if let Some(who) = named.get(p.as_str())
+                && *who != cp.session
+            {
+                refused.push(json!({
+                    "path": p.as_str(), "kind": "assigned", "session": cp.session.as_str(),
+                    "checkpoint": cp.id.get(), "assigned": who.as_str(), "hunks": [],
+                }));
+            }
+        }
+    }
+    if !refused.is_empty() {
+        let n = refused.len();
+        return Err(StrataError::new(Code::Conflict, format!("{n} path(s) are assigned to another session; nothing was published"))
+            .with_detail(json!({ "reason": "assigned", "conflicts": refused })));
     }
     // Every touched path, read from B (and descendants: `ls-tree` is recursive).
     let all: Vec<RepoPath> = {

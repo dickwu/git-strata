@@ -9,7 +9,7 @@ description = "git-strata publish: path-level merge of release groups into one c
 default = []
 # Test seams (publish.md §3 PublishFault). Also turns on the gitio, store,
 # apfs and session seams the publish tests drive.
-test-seams = ["strata-gitio/test-seams", "strata-store/test-seams", "strata-apfs/test-seams", "strata-session/test-seams"]
+test-seams = ["strata-gitio/test-seams", "strata-store/test-seams", "strata-apfs/test-seams", "strata-session/test-seams", "strata-deps/test-seams"]
 
 [dependencies]
 strata-types = { path = "../strata-types" }

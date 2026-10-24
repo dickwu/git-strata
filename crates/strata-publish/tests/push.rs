@@ -429,12 +429,18 @@ fn injected_failure_after_commit_is_unknown() {
                 assert_eq!(fx.origin_head("tool", "main"), c);
                 assert_eq!(layouts(&fx, &s).len(), 1, "the scene stays");
             }
+            FailPoint::BeforeRebase => unreachable!(),
         }
         let r = last_row(&fx);
         assert_eq!(r.phase, PublishPhase::Unknown, "{at:?}");
         assert_eq!(r.outcome.as_ref().unwrap()["commit"], c.as_str());
         assert_eq!(fs::read(fx.ws(&s, "tool").join("src/index.ts")).unwrap(), ws_before, "overlay untouched");
-        assert_eq!(fx.base_of(&s, "tool"), base_before);
+        if at == FailPoint::BeforeDone {
+            // The rebase (§5.8) ran before the last step.
+            assert_eq!(fx.base_of(&s, "tool").tree, fx.git_of("tool").tree_of(&strata_types::CommitOid::try_from(c.clone()).unwrap()).unwrap());
+        } else {
+            assert_eq!(fx.base_of(&s, "tool"), base_before);
+        }
     }
 }
 

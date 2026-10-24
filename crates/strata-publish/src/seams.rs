@@ -32,6 +32,8 @@ pub enum FailPoint {
     BeforeRefs,
     BeforePush,
     BeforeDone,
+    /// Before each session's post-publish rebase.
+    BeforeRebase,
 }
 
 #[cfg(feature = "test-seams")]

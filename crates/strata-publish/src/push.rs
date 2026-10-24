@@ -18,6 +18,7 @@ use strata_types::{
 
 use crate::chain::{advance_anchor, anchor_ref, chain_ref, refuse_state};
 use crate::check::{check, remove_staged_layout};
+use crate::rebase::RebaseReport;
 use crate::seams::{self, FailPoint, Point};
 use crate::stage::{self, Staged};
 use crate::{Ctx, Result};
@@ -35,6 +36,8 @@ pub struct Published {
     /// `None` when this call did not push.
     pub push: Option<PushOutcome>,
     pub warnings: Vec<PublishWarning>,
+    /// The post-publish rebase of each session of the group, ascending.
+    pub rebases: Vec<(SessionId, RebaseReport)>,
 }
 
 /// Not a `Code`: the publish already succeeded.
@@ -247,6 +250,16 @@ fn refuse_open(ctx: &Ctx, sessions: &BTreeSet<SessionId>, own: Option<u64>, unkn
     Ok(())
 }
 
+/// One `outcome.rebase` element.
+fn report_json(s: &SessionId, r: &RebaseReport) -> Value {
+    let mut v = serde_json::to_value(r).unwrap_or_else(|_| json!({}));
+    v["session"] = json!(s.as_str());
+    if let RebaseReport::Waiting { proposal } = r {
+        v["proposal"] = json!(proposal.id);
+    }
+    v
+}
+
 fn outcome_base(ctx: &Ctx) -> Value {
     json!({ "repo": ctx.repo.as_str(), "commit": null, "checks_ran": null, "push": null, "warnings": [], "rebase": [] })
 }
@@ -255,10 +268,17 @@ fn outcome_base(ctx: &Ctx) -> Value {
 /// `stopped` (D16); `Unknown` or anything after the commit → `Unknown`.
 /// Returns the error the caller reports.
 fn close_failed(ctx: &Ctx, id: u64, written: Option<&CommitOid>, e: StrataError) -> StrataError {
-    let e = match written {
+    let mut e = match written {
         Some(c) => after_write(c, e),
         None => e,
     };
+    // §5.7: the row id is what `assign` names.
+    if e.code == Code::Conflict
+        && let Some(d) = e.detail.as_mut()
+        && d.get("publish").is_none()
+    {
+        d["publish"] = json!(id);
+    }
     let mut o = outcome_base(ctx);
     o["commit"] = json!(written.map(|c| c.as_str()));
     let to = if e.code == Code::Unknown {
@@ -266,6 +286,12 @@ fn close_failed(ctx: &Ctx, id: u64, written: Option<&CommitOid>, e: StrataError)
         PublishPhase::Unknown
     } else {
         o["stopped"] = json!(e.code.as_str());
+        // §5.7: `assign` names a resolver for one of these paths.
+        if e.code == Code::Conflict
+            && let Some(c) = e.detail.as_ref().and_then(|d| d.get("conflicts"))
+        {
+            o["conflicts"] = c.clone();
+        }
         PublishPhase::Done
     };
     match ctx.store.set_publish_phase(id, PublishPhase::Running, to, Some(&o), now()) {
@@ -391,18 +417,6 @@ fn locked(
     Ok(Landed { commit, checks_ran: ran.ran, push, staged })
 }
 
-/// After the first visible write a lock wait is not bounded (§5.1): keep
-/// asking while the lock reports `Busy` before `f` ran.
-fn with_repo_unbounded(ctx: &Ctx, f: &mut dyn FnMut() -> Result<()>) -> Result<()> {
-    loop {
-        match ctx.locks.with_repo(ctx.repo, f) {
-            Err(e) if e.code == Code::Busy => std::thread::sleep(std::time::Duration::from_millis(20)),
-            Err(e) => return Err(e),
-            Ok(r) => return r,
-        }
-    }
-}
-
 /// §3 `publish`: one commit for `ctx.repo`'s batches of `group` (§5.2).
 /// The row id (`record_publish`) is the release id; `group.id` is ignored.
 pub fn publish(ctx: &Ctx, group: &ReleaseGroup, confirm: Option<ConfirmToken>) -> Result<Published> {
@@ -457,24 +471,20 @@ pub fn publish(ctx: &Ctx, group: &ReleaseGroup, confirm: Option<ConfirmToken>) -
     if let Err(e) = strata_deps::observe_main(ctx.deps, &landed.staged.tree, &landed.commit, &landed.staged.worktree) {
         warnings.push(PublishWarning { kind: WarningKind::ObserveFailed, detail: err_json(&e) });
     }
-    let rebase: Vec<Value> = Vec::new();
-    // The rebase section (§5.8) runs under the queue and the lock again;
-    // waits here are after the first visible write and are not bounded.
+    // The rebase (§5.8), one session at a time in ascending order, each
+    // under its queue place and the lock again; waits here are after the
+    // first visible write and are not bounded. The first failure stops the
+    // rest and the row goes `Unknown` (the commit stays the success).
+    let mut rebase: Vec<Value> = Vec::new();
+    let mut rebases: Vec<(SessionId, RebaseReport)> = Vec::new();
     let post = (|| -> Result<()> {
-        loop {
-            let mut ran: Option<Result<()>> = None;
-            match ctx.locks.with_sessions(&queue, &mut || {
-                ran = Some(with_repo_unbounded(ctx, &mut || Ok(())));
-                Ok(())
-            }) {
-                Err(e) if e.code == Code::Busy => std::thread::sleep(std::time::Duration::from_millis(20)),
-                Err(e) => return Err(e),
-                Ok(r) => {
-                    r?;
-                    return ran.unwrap_or(Ok(()));
-                }
-            }
+        for s in &queue {
+            seams::fail(ctx.git, FailPoint::BeforeRebase)?;
+            let r = crate::rebase::after_publish(ctx, s, &landed.staged.tree, &landed.commit)?;
+            rebase.push(report_json(s, &r));
+            rebases.push((s.clone(), r));
         }
+        Ok(())
     })();
 
     // Step 9.
@@ -484,6 +494,7 @@ pub fn publish(ctx: &Ctx, group: &ReleaseGroup, confirm: Option<ConfirmToken>) -
     o["push"] = serde_json::to_value(&landed.push).unwrap_or(Value::Null);
     o["warnings"] = serde_json::to_value(&warnings).unwrap_or(json!([]));
     o["rebase"] = json!(rebase);
+    o["paths"] = json!(landed.staged.paths.iter().map(|p| p.as_str()).collect::<Vec<_>>());
     let fin = post
         .and_then(|()| seams::fail(ctx.git, FailPoint::BeforeDone))
         .and_then(|()| remove_staged_layout(&landed.staged.worktree));
@@ -500,5 +511,5 @@ pub fn publish(ctx: &Ctx, group: &ReleaseGroup, confirm: Option<ConfirmToken>) -
         Ok(false) => return Err(unknown_with("row_moved", "the publish row was not Running at the end", None, json!({ "publish": id, "commit": landed.commit.as_str() }))),
         Err(e) => return Err(after_write(&landed.commit, e)),
     }
-    Ok(Published { id, commit: landed.commit, checks_ran: landed.checks_ran, push: landed.push, warnings })
+    Ok(Published { id, commit: landed.commit, checks_ran: landed.checks_ran, push: landed.push, warnings, rebases })
 }

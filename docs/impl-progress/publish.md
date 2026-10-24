@@ -9,8 +9,8 @@ Branch `impl/publish` (worktree `git-strata-wt/publish`), from `impl/v1` 95f7660
 | 1 chain ref and anchor advance | done | fd86995 |
 | 2 path-level stage and merge | done | 8ad75bd |
 | 3 read-only checks | done | 849e297 |
-| 4 commit, push, and unknown | done | (this commit) |
-| 5 rebase, assign, and diff | todo | |
+| 4 commit, push, and unknown | done | b11dd10 |
+| 5 rebase, assign, and diff | done | (this commit) |
 | 6 one merge under the repo lock | todo | |
 
 ## Lower-layer additions (Task 1 commit)
@@ -175,3 +175,59 @@ These touch shared crates; a parallel worker (search) may conflict there.
   holds the call (the remote already accepted): `Unknown`, the anchor stays
   at the previous commit; after the bare origin is rewound and fetched the
   chain reads `Rewound`, and `advance_anchor` does not move it.
+
+### Task 5 (rebase, assign, diff)
+
+- Store change (Task 5 commit, authorized by publish.md §2 item 4): the
+  `publishes_update_guard` trigger refused every same-phase update, so
+  `set_publish_outcome` (added in Task 1, untested) could never write.
+  It now also allows an `unknown`/`done` row to change only its `outcome`
+  (phase and `ended_ns` unchanged, outcome actually different); `running`
+  rows still cannot. Covered in store `guards.rs` and `records.rs`.
+  store.md §4.3's trigger text is NOT updated (progress is recorded only
+  here); store opens compare `sqlite_schema` row by row, so a store created
+  before this commit reads as `Corrupt` (no deployed stores exist; no
+  `user_version` bump).
+- Post-publish rebase (`rebase::after_publish`) runs per batch session in
+  queue order, after the queue is released and after one `observe_main`.
+  Order per session: outside every lock, old base → `ensure_base_for` →
+  deps key; if the key equals the old deps the workspace is re-targeted
+  with those deps, otherwise `deps::ensure` (seal) runs best effort (a
+  failure is a warning). Then under sessions+repo locks (`under_locks`,
+  unbounded 20 ms retry on `Busy`): base changed meanwhile →
+  `InvalidInput base_changed`; a landed draft is promoted (`propose
+  Session`); same deps → `move_workspace`; otherwise the promoted proposal
+  or `propose(Main)` → `Waiting`. A missing sealed set →
+  `Corrupt deps_unsealed`.
+- `ensure_base_for` can return a lock `Busy` (no `detail.reason`) right
+  after the write; `base_for` retries that only. Other `Busy` passes up.
+- When a draft is promoted, `propose(Main)` is not called again.
+- `move_workspace` `OpenFiles` is a report (`OpenFiles {detail}`), not a
+  failure: the publish stays `Done`.
+- A rebase error (or `FailPoint::BeforeRebase`) stops the remaining
+  rebases; the row goes `Unknown` with the commit and publish returns
+  `Err(Unknown)` with `detail.commit`.
+- `outcome.rebase` is a list of `{session, kind, ...}` (`RebaseReport`
+  serialized, `proposal` replaced by its id); `outcome.paths` is the staged
+  path list (used to clear assignments). `Published.rebases` carries the
+  reports. A `Conflict` row also stores `outcome.conflicts`, and the
+  `Conflict` error carries `detail.publish = <row id>` (what `assign`
+  names).
+- `assign` also checks the session exists (`NoSuchSession`), which the §4
+  codes table does not list. It writes `{path, session, at}` (`at` = ms) to
+  `outcome.assigned` with a phase CAS, 16 retries, then `Busy assign_race`.
+- An assignment is cleared by a later `Done` row with a commit whose
+  `outcome.paths` contains the path and whose `ended` ≥ `at`. The §5.7
+  check in `stage::plan` refuses a batch selecting an assigned path from
+  another session: `Conflict reason=assigned`, conflict kind `assigned`.
+- `diff_between`: reconciles both overlays; with different bases the older
+  side (ancestor by head) is projected with `overlay::rebase` onto the
+  newer; neither an ancestor → `InvalidInput bases_unordered`. Previews
+  follow §5.3 (modify/delete, add/add, link, mode → conflict entries;
+  `TooLarge`; binary); merge3 hunks are capped, `start` = our start line.
+- `rebase_session` (public) runs `observe_main` itself when main's tip is
+  `head`; inside `publish` it is run once before the rebases.
+- The Task 4 `with_repo_unbounded` helper was replaced by `under_locks`.
+- Tests: `tests/rebase.rs` (13), the §8 list. `push.rs`'s
+  `injected_failure_after_commit_is_unknown` now expects the rebase to have
+  moved the base before `BeforeDone`.
