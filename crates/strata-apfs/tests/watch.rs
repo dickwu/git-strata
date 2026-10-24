@@ -239,9 +239,9 @@ fn watcher_paths_use_the_callers_root_and_disk_spelling_body() {
     let insensitive = !volume_caps(&real).unwrap().case_sensitive;
     if insensitive {
         let m = rec.mark();
+        let since = Instant::now();
         fs::write(link.join("foo.txt"), b"2").unwrap();
         {
-        let since = Instant::now();
         if !rec.wait(ARRIVE, |s| changed_has(&s[m..], &upper)) {
             canary::starved_or_fail(since, format!("{:?}", &rec.seen[m..]));
         }
@@ -254,9 +254,9 @@ fn watcher_paths_use_the_callers_root_and_disk_spelling_body() {
     let nfd = link.join("cafe\u{301}");
     step(&mut rec, &[&nfd], || fs::write(&nfd, b"n").unwrap());
     let m = rec.mark();
+    let since = Instant::now();
     fs::write(link.join("caf\u{e9}"), b"m").unwrap();
     {
-        let since = Instant::now();
         if !rec.wait(ARRIVE, |s| changed_has(&s[m..], &nfd)) {
             canary::starved_or_fail(since, format!("{:?}", &rec.seen[m..]));
         }
@@ -282,6 +282,8 @@ fn watcher_excludes_configured_dirs_body() {
     let opts = WatchOptions { exclude: vec![rp("node_modules")] };
     let _w = watch_with(&root, &opts, send_to(tx)).unwrap();
 
+    // The canary window starts before the writes it vouches for.
+    let since = Instant::now();
     fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
     fs::write(root.join("node_modules/pkg/x"), b"x").unwrap();
     fs::create_dir_all(root.join("node_modules2")).unwrap();
@@ -291,7 +293,6 @@ fn watcher_excludes_configured_dirs_body() {
     let sx = root.join("src/x");
     fs::write(&sx, b"x").unwrap();
     {
-        let since = Instant::now();
         if !rec.wait(ARRIVE, |s| changed_has(s, &y) && changed_has(s, &sx)) {
             canary::starved_or_fail(since, format!("{:?}", rec.seen));
         }
@@ -308,12 +309,12 @@ fn watcher_excludes_configured_dirs_body() {
         let root2 = mkroot(&t, "w2");
         let (tx2, mut rec2) = recorder();
         let _w2 = watch_with(&root2, &opts, send_to(tx2)).unwrap();
+        let since = Instant::now();
         fs::create_dir_all(root2.join("Node_Modules")).unwrap();
         fs::write(root2.join("Node_Modules/z"), b"z").unwrap();
         let s2 = root2.join("sentinel");
         fs::write(&s2, b"s").unwrap();
         {
-        let since = Instant::now();
         if !rec2.wait(ARRIVE, |s| changed_has(s, &s2)) {
             canary::starved_or_fail(since, format!("{:?}", rec2.seen));
         }

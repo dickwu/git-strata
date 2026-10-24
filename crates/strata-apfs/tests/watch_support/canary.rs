@@ -123,8 +123,13 @@ pub fn start() {
 pub fn delivering_since(since: Instant) -> Option<bool> {
     let now = Instant::now();
     let half = since + (now - since) / 2;
+    // From one poke period before `since`, so the window also covers the
+    // moment the test's own writes happened (FSEvents can lose events with
+    // no drop flag and then recover; a window that starts after the loss
+    // would vouch for a stream that was losing events when it mattered).
+    let from = since.checked_sub(POKE).unwrap_or(since);
     let written: Vec<PathBuf> =
-        WRITTEN.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(t, _)| *t >= since && *t <= half).map(|(_, p)| p.clone()).collect();
+        WRITTEN.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(t, _)| *t >= from && *t <= half).map(|(_, p)| p.clone()).collect();
     if written.is_empty() {
         return None;
     }
