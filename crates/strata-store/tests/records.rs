@@ -170,6 +170,13 @@ fn publish_record_roundtrip_and_phase_machine() {
         assert_code(&s.set_publish_phase(1, from, to, None, t(83)).unwrap_err(), Code::InvalidInput);
     }
     assert!(s.set_publish_phase(2, PublishPhase::Running, PublishPhase::Done, None, t(84)).unwrap());
+    // the outcome of a closed row can be rewritten in place (publish.md §5.7 `assign`)
+    let assigned = json!({ "app": "pushed", "assigned": [] });
+    assert!(s.set_publish_outcome(1, PublishPhase::Done, &assigned).unwrap());
+    let got = s.publish_record(1).unwrap().unwrap();
+    assert_eq!((got.phase, got.ended, got.outcome), (PublishPhase::Done, Some(t(82)), Some(assigned)));
+    assert!(!s.set_publish_outcome(1, PublishPhase::Unknown, &json!({})).unwrap(), "CAS on a stale phase");
+    assert_reason(&s.set_publish_outcome(99, PublishPhase::Done, &json!({})).unwrap_err(), Code::InvalidInput, "no_such_publish");
     // an unknown publish id is a caller bug, not a lost CAS
     assert_reason(&s.set_publish_phase(99, PublishPhase::Running, PublishPhase::Done, None, t(85)).unwrap_err(), Code::InvalidInput, "no_such_publish");
 

@@ -2282,6 +2282,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "strata-publish"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "serde",
+ "serde_json",
+ "strata-apfs",
+ "strata-deps",
+ "strata-gitio",
+ "strata-overlay",
+ "strata-publish",
+ "strata-session",
+ "strata-store",
+ "strata-types",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "strata-search"
 version = "0.1.0"
 dependencies = [

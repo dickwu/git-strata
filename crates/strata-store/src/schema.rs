@@ -372,7 +372,9 @@ WHEN NEW.phase <> 'running'
 BEGIN SELECT RAISE(ABORT, 'illegal insert: publishes'); END;
 CREATE TRIGGER publishes_update_guard BEFORE UPDATE ON publishes
 WHEN NEW.id IS NOT OLD.id OR NEW.started_ns IS NOT OLD.started_ns
-  OR NOT ((OLD.phase = 'running' AND NEW.phase IN ('done', 'unknown')) OR (OLD.phase = 'unknown' AND NEW.phase = 'done'))
+  OR NOT ((OLD.phase = 'running' AND NEW.phase IN ('done', 'unknown')) OR (OLD.phase = 'unknown' AND NEW.phase = 'done')
+       OR (OLD.phase IN ('unknown', 'done') AND NEW.phase = OLD.phase AND NEW.ended_ns IS OLD.ended_ns
+           AND NEW.outcome IS NOT OLD.outcome))
 BEGIN SELECT RAISE(ABORT, 'illegal update: publishes'); END;
 
 CREATE TRIGGER deps_sets_delete_gc_only        BEFORE DELETE ON deps_sets        WHEN NOT (SELECT active FROM strata_gc_gate) BEGIN SELECT RAISE(ABORT, 'delete outside gc: deps_sets'); END;

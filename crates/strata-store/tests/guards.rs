@@ -485,6 +485,9 @@ fn state_graphs_are_enforced_by_triggers() {
     for to in ["running", "unknown", "done"] {
         refused(c, &format!("UPDATE publishes SET phase = '{to}' WHERE id = 10"), "illegal update: publishes");
     }
+    // publish.md §5.7: `assign` rewrites the outcome of a closed row, nothing else
+    ok(c, "UPDATE publishes SET outcome = '{\"assigned\":[]}' WHERE id = 10");
+    refused(c, "UPDATE publishes SET outcome = '{}', ended_ns = 3 WHERE id = 10", "illegal update: publishes");
     pubrow(c, 11);
     ok(c, "UPDATE publishes SET phase = 'done', ended_ns = 1, outcome = '{}' WHERE id = 11");
     refused(c, "INSERT INTO publishes VALUES (12, 'done', 0, 1, NULL)", "illegal insert: publishes");
