@@ -168,9 +168,10 @@ Not merged.
 - **No cli crate.** `crates/git-strata` does not exist on this branch, so
   `crates/git-strata/tests/readonly_without_daemon.rs` was not created.
   The contract half lives in strata-daemon: `client::call` (write methods
-  with no daemon → `ReadOnly` `{reason:"daemon_down"}`, per this module's
-  §6 table; cli.md's `Busy daemon_down` disagrees — recorded, daemon.md
-  followed since it is the spec being implemented) and
+  with no daemon → `Busy` `{reason:"daemon_down"}`; first written as
+  daemon.md §6's `ReadOnly`, changed after the merge on impl/cli because
+  cli.md D2 (2026-10-23) explicitly rules `Busy` and drops types.md's
+  `ReadOnly` wording) and
   `client::needs_daemon` (= not read-only). `cli_readonly_commands_work_without_daemon`
   does the cli's direct read itself (`Store::open_read_only`, `Sessions`
   status, `Search` over a cold reconcile).
@@ -312,7 +313,7 @@ config_relax, daemon_status. `client.rs`: the client half of the socket.
 tests/daemon.rs (4): an `sh` process edits the workspace → ToolCall
 checkpoint over the socket → grep/files see it → another process trashes
 it → restore equals an independent `git archive` + same-edits oracle; no
-daemon → write methods `ReadOnly daemon_down`, direct read works; a client
+daemon → write methods `Busy daemon_down` (was `ReadOnly`, see above), direct read works; a client
 that disconnects before the reply gets exactly one checkpoint, never
 replayed; a pre-receive hook refusing the push → `Unknown` `PushRefused`,
 chain commit, Unknown row and workspace kept, `UnknownPublish` reported

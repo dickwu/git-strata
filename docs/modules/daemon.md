@@ -503,6 +503,8 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | 两个 repo 同一个 `RepoId` | `NameTaken` | 不听 socket | 改配置 |
 | `path` 不是 realpath | `InvalidInput`，detail 带 realpath | 不听 socket | 改成 realpath |
 
+> daemon 没在跑时写命令的码以 cli.md D2（2026-10-23）为准：`Busy`，`detail.reason = "daemon_down"`；上表与 §7 `cli_readonly_commands_work_without_daemon` 里的 `ReadOnly` 不再沿用。
+
 结果不确定的按不变量 6：保留现场，不重放，不清理，status 报出。daemon 重启后同样报出。
 
 ## 7. 测试清单

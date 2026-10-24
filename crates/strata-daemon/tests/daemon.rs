@@ -200,11 +200,11 @@ fn cli_readonly_commands_work_without_daemon() {
     };
     assert!(!sock.exists(), "the stopped daemon unlinked its socket");
 
-    // Write methods go through the daemon: none listening → ReadOnly.
+    // Write methods go through the daemon: none listening → Busy (cli.md D2).
     assert!(client::needs_daemon(Method::Publish) && client::needs_daemon(Method::Push));
     for (m, p) in [("publish", json!({ "group": { "id": 0, "batches": [] } })), ("push", json!({ "repo": "tool" }))] {
         let e = client::call(&sock, m, p).unwrap_err();
-        assert_eq!(e.code, Code::ReadOnly, "{m}: {e:?}");
+        assert_eq!(e.code, Code::Busy, "{m}: {e:?}");
         assert_eq!(reason(&e), Some("daemon_down"), "{m}");
     }
 
