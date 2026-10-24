@@ -558,3 +558,55 @@ fn reconcile_loop_rescans_skips_busy_and_stops() {
     drop(d);
     core.close().unwrap();
 }
+
+/// Review M2: grep / files see the current workspace, not the overlay the
+/// tracker cached at the last checkpoint. After a checkpoint: a new file,
+/// a deleted file, a rename and an ignore-rule change, none checkpointed.
+#[test]
+fn search_after_checkpoint_sees_uncheckpointed_changes() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let id = new_session(&sock);
+        let root = ws(&core, &id, "tool");
+        let cp = ok(call(&sock, "checkpoint", json!({
+            "session": id, "repo": "tool",
+            "reason": reason_json(CheckpointReason::ToolCall { id: "c1".into() }), "paths": [],
+        })));
+        assert_eq!(cp["recorded"], json!(true), "{cp:#}");
+        let files = |glob: &str| ok(call(&sock, "files", json!({ "session": id, "repo": "tool", "glob": glob })))["paths"].clone();
+        let grep = |pat: &str| {
+            let g = ok(call(&sock, "grep", json!({ "pattern": pat, "session": id, "all": false, "ignore_case": false })));
+            g["hits"].as_array().unwrap().iter().map(|h| h["path"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+        };
+        let before = files("src/*.ts");
+        assert_eq!(before, json!(["src/index.ts"]), "{before}");
+
+        fs::write(root.join("src/fresh.ts"), "uniqueneedle\n").unwrap();
+        assert_eq!(grep("uniqueneedle"), vec!["src/fresh.ts".to_string()], "a new file");
+        assert_eq!(files("src/*.ts"), json!(["src/fresh.ts", "src/index.ts"]));
+
+        fs::rename(root.join("src/fresh.ts"), root.join("src/moved.ts")).unwrap();
+        assert_eq!(grep("uniqueneedle"), vec!["src/moved.ts".to_string()], "a rename");
+
+        fs::remove_file(root.join("src/index.ts")).unwrap();
+        assert_eq!(files("src/*.ts"), json!(["src/moved.ts"]), "a deletion");
+
+        fs::write(root.join(".gitignore"), "src/moved.ts\n").unwrap();
+        assert_eq!(grep("uniqueneedle"), Vec::<String>::new(), "an ignore rule");
+
+        // Search refreshed the Tracker; the next checkpoint still records
+        // what changed since the last checkpoint row.
+        let cp2 = ok(call(&sock, "checkpoint", json!({
+            "session": id, "repo": "tool",
+            "reason": reason_json(CheckpointReason::ToolCall { id: "c2".into() }), "paths": [],
+        })));
+        assert_eq!(cp2["recorded"], json!(true), "{cp2:#}");
+        let paths: Vec<&str> = cp2["checkpoint"]["entries"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap()).collect();
+        assert!(paths.contains(&"src/index.ts") && paths.contains(&".gitignore"), "{paths:?}");
+    });
+    drop(d);
+    core.close().unwrap();
+}

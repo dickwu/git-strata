@@ -383,6 +383,8 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 
 **`grep` / `files`**：不排队。视图没有就 `search::attach`（缓存填充）。零命中是空列表，不是 `NoMatch`。未知视图 → `NoSuchView`。
 
+实现（review M2）：`OverlaySource::last` 不把 Tracker 上次缓存的 overlay 原样交出去，那是上次 checkpoint 时的样子，之后新建、删除、改名的文件和改过的忽略规则都看不到。每次 attach 时：会话队列此刻空闲（`Locks::try_session`，不等、不排队，仍守 I5）就借出 Tracker 跑 `compute(.., None)`，走全树但缓存让没变的文件不重读，不写 Store 也不写工作区，不依赖 FSEvents 已经送到（flush 不是屏障）；队列被别的请求占着就冷算一次 `reconcile_full`（只读）。都失败才是 None，按 search §5 当 `overlay_not_ready`。下一次 checkpoint 仍和 Store 里最新的 checkpoint 行比，所以搜索刷新缓存不会让 checkpoint 漏记 [实现时补的决定]。
+
 **`diff`**：不排队。`publish::diff_between`。
 
 **`deps_list`**：不排队。`open_proposals`。

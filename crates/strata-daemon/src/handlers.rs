@@ -252,15 +252,32 @@ impl<'a> Trackers<'a> {
     }
 }
 
+/// Review M2: search must see the workspace as it is now, not the overlay
+/// the Tracker cached at the last checkpoint (a file created, deleted or
+/// renamed since, or an ignore rule changed, would be missing or stale).
+/// So `last` never returns the cache as is. With the session queue free
+/// right now it takes the Tracker and runs a full-walk `compute(.., None)`:
+/// the cache keeps unchanged files from being read again, it writes
+/// nothing to the Store or the workspace, and it does not depend on
+/// FSEvents having delivered (flush is not a barrier). If a request holds
+/// the queue (the Tracker is checked out), a cold `reconcile_full`, read
+/// only. Never waits for the queue [实现时补的决定].
 impl OverlaySource for Trackers<'_> {
     fn last(&self, session: &SessionId, repo: &RepoName) -> Option<Overlay> {
-        let cached = guard(&self.map).get(&(session.clone(), repo.clone())).and_then(|t| t.tracker.last().cloned());
-        if let Some(o) = cached
-            && workspace(self.core, session, repo).is_ok_and(|ws| ws.base == o.base)
-        {
-            return Some(o);
+        let warm = self.core.locks.try_session(session, || {
+            let core = self.core;
+            let ws = workspace(core, session, repo)?;
+            let base = base_of(core, &ws.base)?;
+            let wref = WorkspaceRef { session, repo, root: &ws.path, config: repo_cfg(core, repo)?, git: git_of(core, repo)?, store: &core.store };
+            let mut t = self.take(session, repo, &ws);
+            let r = strata_overlay::compute(&wref, &base, &mut t.tracker, None);
+            self.put(session, repo, t);
+            r.map(|scan| scan.overlay)
+        });
+        match warm {
+            Some(Ok(o)) => Some(o),
+            _ => self.cold(session, repo).ok(),
         }
-        self.cold(session, repo).ok()
     }
 
     fn needs_full(&self, session: &SessionId, repo: &RepoName) -> bool {
