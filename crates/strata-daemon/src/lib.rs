@@ -11,7 +11,9 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use strata_types::{RepoName, SessionId, StrataError};
 
+pub mod confirm_flow;
 pub mod locks;
+pub mod plist;
 pub mod rpc;
 pub mod startup;
 

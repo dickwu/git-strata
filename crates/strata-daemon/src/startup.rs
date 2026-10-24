@@ -28,9 +28,10 @@ use strata_session::{BeforeCheckpoint, RecoverReport, Sessions};
 use strata_store::{PublishPhase, Store};
 use strata_types::{CheckpointReason, Code, Config, RepoId, RepoName, StrataError};
 
+use crate::confirm_flow::{self, Pins};
 use crate::locks::Locks;
 use crate::rpc::{self, Reply, Request};
-use crate::{DEFAULT_PATH, DaemonWarning, GC_KEEP, LOCK_WAIT, MAX_FRAME, Result};
+use crate::{DEFAULT_PATH, DaemonWarning, PinnedFlags, GC_KEEP, LOCK_WAIT, MAX_FRAME, Result};
 
 /// Where the daemon keeps its files, and the knobs tests turn.
 #[derive(Clone)]
@@ -199,6 +200,8 @@ pub struct Core {
     pub before: DaemonBefore,
     pub confirmer: Confirmer,
     pub warnings: Warnings,
+    /// `pins.json`: the effective safety flags.
+    pub pins: Pins,
     instance: InstanceLock,
 }
 
@@ -209,14 +212,21 @@ pub fn prepare(opts: Options, confirmer: Confirmer, open_git: &dyn Fn(&Path) -> 
     let instance = InstanceLock::take(&crate::lock_path(&opts.config_dir))?;
     // 3. Config: parse (TOML + validate in file order), then validate.
     let text = fs::read_to_string(&opts.config_file).map_err(|e| classify_io_error(&e, IoSide::Read, &opts.config_file))?;
-    let config = Config::parse(&text)?;
+    let mut config = Config::parse(&text)?;
     config.validate()?;
     // 4. Every path exists and is its own realpath.
     for (name, rc) in &config.repos {
         check_realpath(name, &rc.path)?;
     }
     check_realpath_root(&config.paths.root)?;
-    // 5. Pins: Task 4.
+    // 5. Pins: tighten now, record relaxations as pending; never prompt.
+    //    The loaded config carries the effective (pinned) flags.
+    let pins = Pins::load(&crate::pins_path(&opts.config_dir), &config)?;
+    for (name, rc) in config.repos.iter_mut() {
+        if let Some(f) = pins.pinned(name) {
+            confirm_flow::apply(rc, f);
+        }
+    }
     // 6. The store checks its own clean-shutdown marker.
     let checkouts: Vec<&Path> = config.repos.values().map(|r| r.path.as_path()).collect();
     let store = Store::open(&config.paths.root, &checkouts)?;
@@ -238,7 +248,11 @@ pub fn prepare(opts: Options, confirmer: Confirmer, open_git: &dyn Fn(&Path) -> 
     }
     let locks = Locks::new(config.repos.keys().cloned(), opts.lock_wait);
     let warnings = Warnings::new(opts.alert.clone());
+    for repo in pins.pending() {
+        warnings.add(DaemonWarning::ConfigRelaxPending { repo });
+    }
     Ok(Core {
+        pins,
         env: InstallEnv { path: opts.install_path.clone(), timeout: InstallEnv::DEFAULT_TIMEOUT },
         before: DaemonBefore,
         opts,
@@ -283,6 +297,29 @@ fn check_realpath_root(root: &Path) -> Result<()> {
 }
 
 impl Core {
+    /// The effective (pinned) flags of `repo`.
+    pub fn pinned(&self, repo: &RepoName) -> Result<PinnedFlags> {
+        self.pins
+            .pinned(repo)
+            .ok_or_else(|| StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}")))
+    }
+
+    /// `config_relax` (§5.5). `between` runs between `require` and
+    /// `validate` (test seam; the handler passes `&|| {}`).
+    pub fn config_relax_with(&self, repo: &RepoName, between: &dyn Fn()) -> Result<()> {
+        let id = match self.gits.get(repo) {
+            Some(g) => g.repo_id(),
+            None => return Err(StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}"))),
+        };
+        confirm_flow::config_relax_with(&self.confirmer, &self.pins, repo, id, between)?;
+        self.warnings.remove(|w| matches!(w, DaemonWarning::ConfigRelaxPending { repo: r } if r == repo));
+        Ok(())
+    }
+
+    pub fn config_relax(&self, repo: &RepoName) -> Result<()> {
+        self.config_relax_with(repo, &|| {})
+    }
+
     pub fn instance_lock(&self) -> &InstanceLock {
         &self.instance
     }

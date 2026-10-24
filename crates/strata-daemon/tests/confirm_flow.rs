@@ -1,0 +1,292 @@
+//! daemon.md §8 Task 4: confirm order, pinned flags, PATH and the plist.
+
+mod support;
+
+use std::cell::RefCell;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use strata_confirm::seams::Verdict;
+use strata_daemon::confirm_flow::{self, recheck, require_validated};
+use strata_daemon::plist::{self, Launchd};
+use strata_daemon::{DEFAULT_PATH, DaemonWarning, PinnedFlags};
+use strata_types::{Action, Code};
+use support::*;
+
+fn pins_bytes(fx: &Dfx) -> Vec<u8> {
+    fs::read(strata_daemon::pins_path(&fx.config_dir)).unwrap()
+}
+
+fn set_flags(fx: &mut Dfx, deploy: bool, confirm: bool, push: bool) {
+    let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+    rc.deploy_on_push = deploy;
+    rc.publish.confirm = confirm;
+    rc.publish.push = push;
+    fx.write_config();
+}
+
+fn pending(core: &strata_daemon::startup::Core) -> bool {
+    core.warnings.snapshot().contains(&DaemonWarning::ConfigRelaxPending { repo: repo_name("tool") })
+}
+
+#[test]
+fn config_relax_not_applied_on_restart() {
+    let mut fx = Dfx::new();
+    set_flags(&mut fx, true, true, true);
+    let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
+    let core = fx.prepare_with(c).unwrap();
+    // First start: the loaded config becomes the pins, not a relaxation.
+    assert!(!pending(&core));
+    assert_eq!(core.pinned(&repo_name("tool")).unwrap(), PinnedFlags { deploy_on_push: true, confirm: true, push: true });
+    core.close().unwrap();
+    let before = pins_bytes(&fx);
+
+    // While stopped, deploy_on_push true → false (V5 keeps confirm as is).
+    set_flags(&mut fx, false, true, true);
+    for _ in 0..2 {
+        let core = fx.prepare_with(fx.confirmer(vec![Verdict::pass()]).0).unwrap();
+        let f = core.pinned(&repo_name("tool")).unwrap();
+        assert!(f.deploy_on_push, "relaxation not applied");
+        assert!(confirm_flow::needs_confirm(f), "a push still needs confirming");
+        assert!(core.config.repos[&repo_name("tool")].needs_human_confirm());
+        assert!(pending(&core));
+        core.close().unwrap();
+        assert_eq!(pins_bytes(&fx), before);
+    }
+    assert!(log.shown().is_empty());
+    assert_eq!(log.probes(), 0);
+}
+
+#[test]
+fn config_relax_does_not_prompt_on_file_change() {
+    let mut fx = Dfx::new();
+    set_flags(&mut fx, false, false, true);
+    let (c, log, _) = fx.confirmer(vec![]);
+    fx.prepare_with(c).unwrap().close().unwrap();
+
+    // Tightening: written back at once, no credential.
+    set_flags(&mut fx, false, true, true);
+    let (c, log2, _) = fx.confirmer(vec![]);
+    let core = fx.prepare_with(c).unwrap();
+    assert!(core.pinned(&repo_name("tool")).unwrap().confirm);
+    assert!(!pending(&core));
+    core.close().unwrap();
+    let text = String::from_utf8(pins_bytes(&fx)).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["repos"]["tool"]["confirm"], serde_json::json!(true));
+
+    // Push true → false tightens too.
+    set_flags(&mut fx, false, true, false);
+    let (c, log3, _) = fx.confirmer(vec![]);
+    let core = fx.prepare_with(c).unwrap();
+    assert!(!core.pinned(&repo_name("tool")).unwrap().push);
+    core.close().unwrap();
+
+    // Relaxing every field: only pending, never a prompt.
+    set_flags(&mut fx, false, false, true);
+    let (c, log4, _) = fx.confirmer(vec![]);
+    let core = fx.prepare_with(c).unwrap();
+    assert!(pending(&core));
+    assert_eq!(core.pinned(&repo_name("tool")).unwrap(), PinnedFlags { deploy_on_push: false, confirm: true, push: false });
+    core.close().unwrap();
+    for l in [log, log2, log3, log4] {
+        assert!(l.shown().is_empty());
+        assert_eq!(l.probes(), 0);
+    }
+}
+
+#[test]
+fn config_relax_writes_pin_after_validate() {
+    let mut fx = Dfx::new();
+    set_flags(&mut fx, true, true, true);
+    fx.prepare().unwrap().close().unwrap();
+    set_flags(&mut fx, false, true, true);
+    let pinned_before = pins_bytes(&fx);
+
+    // require fails (the human cancelled): no write.
+    let (c, log, _) = fx.confirmer(vec![Verdict::la(-2)]);
+    let core = fx.prepare_with(c).unwrap();
+    let e = core.config_relax(&repo_name("tool")).unwrap_err();
+    assert_eq!(e.code, Code::NotConfirmed, "{e:?}");
+    assert_eq!(log.shown().len(), 1);
+    assert_eq!(pins_bytes(&fx), pinned_before);
+    assert!(pending(&core));
+    core.close().unwrap();
+
+    // validate fails (the token expired between require and validate): no write.
+    let (c, log, clock) = fx.confirmer(vec![Verdict::pass()]);
+    let core = fx.prepare_with(c).unwrap();
+    let e = core
+        .config_relax_with(&repo_name("tool"), &|| clock.advance(strata_confirm::TOKEN_TTL + Duration::from_secs(1)))
+        .unwrap_err();
+    assert_eq!(e.code, Code::NotConfirmed, "{e:?}");
+    assert_eq!(log.shown().len(), 1);
+    assert_eq!(pins_bytes(&fx), pinned_before);
+    assert!(pending(&core));
+    core.close().unwrap();
+
+    // Passed: require, then validate redeems, then pins.json is written.
+    let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
+    let core = fx.prepare_with(c).unwrap();
+    let seen_between = RefCell::new(None);
+    let shown_between = RefCell::new(0);
+    core.config_relax_with(&repo_name("tool"), &|| {
+        *seen_between.borrow_mut() = Some(pins_bytes(&fx));
+        *shown_between.borrow_mut() = log.shown().len();
+    })
+    .unwrap();
+    assert_eq!(*shown_between.borrow(), 1, "require ran first");
+    assert_eq!(seen_between.borrow().as_deref(), Some(pinned_before.as_slice()), "not written before validate");
+    assert_ne!(pins_bytes(&fx), pinned_before);
+    assert!(!core.pinned(&repo_name("tool")).unwrap().deploy_on_push);
+    assert!(!pending(&core));
+    assert!(!log.shown()[0].is_empty());
+    // Nothing left to relax: InvalidInput not_relaxed, no prompt.
+    let e = core.config_relax(&repo_name("tool")).unwrap_err();
+    assert_eq!(e.code, Code::InvalidInput);
+    assert_eq!(reason(&e), Some("not_relaxed"));
+    assert_eq!(log.shown().len(), 1);
+    // Unknown repo: NoSuchRepo, no prompt.
+    assert_eq!(core.config_relax(&repo_name("nope")).unwrap_err().code, Code::NoSuchRepo);
+    assert_eq!(log.shown().len(), 1);
+    core.close().unwrap();
+
+    // The relaxation survives a restart and is no longer pending.
+    let core = fx.prepare().unwrap();
+    assert!(!core.pinned(&repo_name("tool")).unwrap().deploy_on_push);
+    assert!(!pending(&core));
+    core.close().unwrap();
+
+    // confirm itself writes no file into the config dir.
+    let names: Vec<String> = fs::read_dir(&fx.config_dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    let mut names = names;
+    names.sort();
+    assert_eq!(names, vec!["config.toml", "daemon.lock", "pins.json"]);
+}
+
+#[test]
+fn prompt_holds_no_queue_or_repo_lock() {
+    let mut fx = Dfx::new();
+    set_flags(&mut fx, true, true, true);
+    fx.prepare().unwrap().close().unwrap();
+    set_flags(&mut fx, false, true, true);
+    let (c, log, _) = fx.confirmer(vec![Verdict::Hang]);
+    let core = fx.prepare_with(c).unwrap();
+    let d = strata_daemon::startup::Daemon::start(&core).unwrap();
+    let sid = d.sessions.new(None, &[repo_name("tool")]).unwrap().manifest.id;
+    std::thread::scope(|s| {
+        let h = s.spawn(|| core.config_relax(&repo_name("tool")));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while log.shown().is_empty() {
+            assert!(Instant::now() < deadline, "prompt never shown");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The prompt is up: both locks are free (a held one would be Busy
+        // after the 300 ms test bound).
+        let t = Instant::now();
+        core.locks.with_sessions(std::slice::from_ref(&sid), || core.locks.with_repo(&repo_name("tool"), || Ok(()))).unwrap();
+        assert!(t.elapsed() < Duration::from_millis(250));
+        assert!(core.locks.holds().is_empty());
+        let e = h.join().unwrap().unwrap_err();
+        assert_eq!(e.code, Code::NotConfirmed);
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
+#[test]
+fn action_mismatch_is_not_confirmed() {
+    let fx = Dfx::new();
+    let (c, _, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass()]);
+    let a = Action::PushDeploy { repo: repo_name("tool"), branch: "main".into() };
+    let token = require_validated(&c, a.clone()).unwrap();
+    recheck(&token, &a).unwrap();
+    let other = Action::PushDeploy { repo: repo_name("tool"), branch: "release".into() };
+    let e = recheck(&token, &other).unwrap_err();
+    assert_eq!(e.code, Code::NotConfirmed);
+    // Redeemed once: validating the same token again is refused.
+    assert_eq!(c.validate(&token, &a).unwrap_err().code, Code::NotConfirmed);
+}
+
+#[test]
+fn daemon_never_returns_not_tty() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for e in fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        let src = fs::read_to_string(&p).unwrap();
+        for bad in ["NotTty", "require_tty", "isatty"] {
+            assert!(!src.contains(bad), "{bad} in {}", p.display());
+        }
+    }
+}
+
+#[test]
+fn install_env_path_is_d1() {
+    assert_eq!(DEFAULT_PATH, "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    // The production layout (under a temp HOME) installs with D1.
+    let fx = Dfx::new();
+    let home = fx.sb.path("prodhome");
+    let mut opts = strata_daemon::startup::Options::for_home(&home);
+    assert_eq!(opts.install_path, DEFAULT_PATH);
+    assert_eq!(opts.config_dir, home.join("Library/Application Support/git-strata"));
+    fs::create_dir_all(&opts.config_dir).unwrap();
+    fs::copy(fx.config_dir.join("config.toml"), &opts.config_file).unwrap();
+    opts.socket = fx.socket();
+    let env = fx.sb.git_env();
+    let core = strata_daemon::startup::prepare(opts, fx.confirmer(vec![]).0, &move |p: &Path| strata_gitio::Git::open_with_env(p, &env)).unwrap();
+    assert_eq!(core.env.path, DEFAULT_PATH);
+    core.close().unwrap();
+}
+
+#[derive(Default)]
+struct FakeLaunchd {
+    calls: std::sync::Mutex<Vec<(String, PathBuf)>>,
+}
+
+impl Launchd for FakeLaunchd {
+    fn bootstrap(&self, p: &Path) -> strata_daemon::Result<()> {
+        self.calls.lock().unwrap().push(("bootstrap".into(), p.to_path_buf()));
+        Ok(())
+    }
+    fn bootout(&self, p: &Path) -> strata_daemon::Result<()> {
+        self.calls.lock().unwrap().push(("bootout".into(), p.to_path_buf()));
+        Ok(())
+    }
+}
+
+#[test]
+fn plist_has_label_keepalive_aqua_and_d1_path() {
+    let home = tempfile::tempdir().unwrap();
+    let home = fs::canonicalize(home.path()).unwrap();
+    let bin = Path::new("/opt/strata/bin/git-stratad");
+    let fake = FakeLaunchd::default();
+    let p = plist::install_agent_with(bin, &home, &fake).unwrap();
+    assert_eq!(p, home.join("Library/LaunchAgents/com.gwd.git-stratad.plist"));
+    assert_eq!(*fake.calls.lock().unwrap(), vec![("bootstrap".to_string(), p.clone())]);
+
+    // plutil reads it as a property list (lint + convert to JSON on stdout).
+    let out = std::process::Command::new("/usr/bin/plutil").args(["-convert", "json", "-o", "-"]).arg(&p).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["Label"], "com.gwd.git-stratad");
+    assert_eq!(v["KeepAlive"], true);
+    assert_eq!(v["RunAtLoad"], true);
+    assert_eq!(v["LimitLoadToSessionType"], "Aqua");
+    assert_eq!(v["ProcessType"], "Interactive");
+    assert_eq!(v["ProgramArguments"], serde_json::json!([bin]));
+    assert_eq!(v["EnvironmentVariables"]["PATH"], DEFAULT_PATH);
+    let err = v["StandardErrorPath"].as_str().unwrap();
+    assert_eq!(Path::new(err), home.join("Library/Application Support/git-strata/daemon.err.log"));
+    assert!(!err.contains('~'));
+
+    plist::uninstall_agent_with(&home, &fake).unwrap();
+    assert!(!p.exists());
+    assert_eq!(fake.calls.lock().unwrap().len(), 2);
+    // A relative bin is refused before anything is written or loaded.
+    let other = tempfile::tempdir().unwrap();
+    let e = plist::install_agent_with(Path::new("git-stratad"), other.path(), &fake).unwrap_err();
+    assert_eq!(e.code, Code::InvalidInput);
+    assert!(!plist::agent_plist_path(other.path()).exists());
+    assert_eq!(fake.calls.lock().unwrap().len(), 2);
+}

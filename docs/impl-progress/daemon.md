@@ -9,7 +9,8 @@ Not merged.
 |---|---|---|
 | 1 RPC envelope and method table | done | 36b5f0e |
 | 2 Repo lock, session queue, Busy before write | done | 7dfaf8e |
-| 3 Single instance, recover, then listen | done | (this commit) |
+| 3 Single instance, recover, then listen | done | f0c112f |
+| 4 Confirm order, pinned flags, launchd plist | done | (this commit) |
 
 ## Ambiguity decisions
 
@@ -73,6 +74,31 @@ Not merged.
   lowercases to "fnonce"); the scan now strips `FnOnce` first. Fixed in the
   Task 3 commit (no amend).
 
+- **launchd never loaded by tests.** `plist::install_agent_with(bin, home,
+  &dyn Launchd)` takes the launchctl seam; tests pass a temp HOME and a
+  recording fake, and lint the written plist with `plutil -convert json`
+  (read-only). The production `install_agent(bin)` (HOME + real
+  `/bin/launchctl bootstrap gui/<uid>`) is never called by a test.
+- **Plist HOME.** The plist follows the §3 sample exactly (no `HOME` in
+  `EnvironmentVariables`; launchd supplies HOME to a user agent); "HOME
+  written absolute" is read as the absolute `StandardErrorPath`.
+- **Effective flags.** At startup the loaded `Config` gets the pinned
+  flags applied (stricter-or-equal to the file), so everything that borrows
+  the config sees the effective values. After a runtime `config_relax` the
+  borrowed config is stale-strict; handlers (Task 6) read `Core::pinned`.
+  Config is only read at startup ("reload" = restart).
+- **Pins edge cases.** A repo new to `pins.json` is pinned as configured
+  (not a relaxation); pins of repos no longer configured are kept; an
+  unreadable `pins.json` is `InvalidInput` `{reason:"pins"}` and the daemon
+  does not start (safest: never silently reset pins).
+- **V5 interplay.** `deploy_on_push` requires `publish.confirm`, so the
+  "deploy_on_push true → false" relaxation tests keep `confirm = true`.
+- **Confirm order seam.** `require_validated_with(confirmer, action,
+  between)` / `Core::config_relax_with(repo, between)` run `between` after
+  `require` and before `validate`; tests use it to see that pins.json is
+  unchanged until `validate` and to expire the token (FakeClock) so
+  `validate` fails.
+
 ## Task 1
 
 `rpc.rs`: the 19-method table (`Method`, with `is_read_only` for I5),
@@ -113,3 +139,20 @@ shutdown, idle connections closed for read, in-flight requests finish),
 an atomic, one JSON error line on failure. Pins (step 5) come in Task 4.
 tests/startup.rs (10): the seven §8 tests plus the non-directory worktrees
 scan, config/realpath refusals and RepoId collision (a linked worktree).
+
+## Task 4
+
+`confirm_flow.rs`: `flags_of` / `tighten` / `relaxes` / `needs_confirm` /
+`apply`, `Pins` (`pins.json` load at startup step 5: first start pins the
+config, tightening written back at once, relaxations pending →
+`ConfigRelaxPending`; atomic 0600 write), `require_validated(_with)` (§5.3
+step 4, no lock held), `recheck` (step 7, `NotConfirmed`
+`action_changed`), `config_relax_with` (§5.5: `NoSuchRepo`, `not_relaxed`,
+then require → validate → write). `Core::pinned`, `Core::config_relax(_with)`.
+`plist.rs`: `plist_text`, `agent_plist_path`, `install_agent_with` /
+`uninstall_agent_with` over the `Launchd` seam, production `install_agent`.
+tests/confirm_flow.rs (8): the three §8 `config_relax_*` tests, prompt holds
+no queue/repo lock (Hang verdict; both locks taken during the prompt),
+action mismatch → `NotConfirmed`, no `NotTty` in the source, D1 PATH in
+`InstallEnv`, plist keys (Label, KeepAlive, RunAtLoad, Aqua, Interactive,
+D1 PATH, absolute StandardErrorPath) via plutil in a temp HOME.
