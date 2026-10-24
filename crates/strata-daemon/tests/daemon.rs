@@ -501,6 +501,54 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
     core.close().unwrap();
 }
 
+/// Review-2 N6: front lands, then tool's confirmation is cancelled (an
+/// error before tool's publish is even called): the error still reports
+/// front in `published_before`. The re-run with a passed confirmation
+/// reports front as already published and publishes tool.
+#[test]
+fn publish_confirmation_cancelled_after_a_repo_landed_keeps_it_in_the_envelope() {
+    use strata_confirm::seams::Verdict;
+    let mut fx = Dfx::with(&["front", "tool"]);
+    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.confirm = true;
+    fx.write_config();
+    let (c, _log, _) = fx.confirmer(vec![Verdict::la(-2), Verdict::pass()]);
+    let core = fx.prepare_with(c).unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let chain = strata_publish::chain_ref("main");
+    serving(&d, || {
+        let s = ok(call(&sock, "new", json!({ "ticket": null, "repos": ["front", "tool"] })));
+        let id: SessionId = serde_json::from_value(s["session"]["manifest"]["id"].clone()).unwrap();
+        external(&ws(&core, &id, "front"), "printf 'export const f = 1\\n' > src/index.ts");
+        external(&ws(&core, &id, "tool"), "printf 'export const t = 1\\n' > src/index.ts");
+        let run = |shown: Value| {
+            let mut batches = Vec::new();
+            for repo in ["front", "tool"] {
+                let cp = ok(call(&sock, "checkpoint", json!({
+                    "session": id, "repo": repo, "reason": { "kind": "BeforePublish" }, "paths": ["src/index.ts"],
+                })));
+                batches.push(json!({ "session": id, "repo": repo, "checkpoint": cp["checkpoint"]["id"], "paths": ["src/index.ts"] }));
+            }
+            call(&sock, "publish", json!({ "group": { "id": 0, "batches": batches }, "shown": { "tool": shown } }))
+        };
+        let r = run(Value::Null);
+        assert!(r["error"].is_object(), "{r:#}");
+        let det = &r["error"]["detail"];
+        let landed = core.gits[&repo_name("front")].read_ref(&chain).unwrap().expect("front committed");
+        assert_eq!(det["repo"], "tool", "{r:#}");
+        assert_eq!(det["published_before"][0]["repo"], "front", "{r:#}");
+        assert_eq!(det["published_before"][0]["commit"], json!(landed), "{r:#}");
+        assert_eq!(core.gits[&repo_name("tool")].read_ref(&chain).unwrap(), None, "tool not committed");
+
+        let r = ok(run(Value::Null));
+        assert_eq!(r["already_published"][0]["repo"], "front", "{r:#}");
+        assert_eq!(r["already_published"][0]["commit"], json!(landed), "{r:#}");
+        assert_eq!(r["published"][0]["repo"], "tool", "{r:#}");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 /// Review-2 N1: re-run filtering is per selector and by content. Each
 /// call is what the cli does (a BeforePublish checkpoint, then publish).
 fn publish_selectors(sock: &Path, id: &SessionId, repo: &str, paths: &[&str]) -> Value {

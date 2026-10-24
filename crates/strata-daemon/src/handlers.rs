@@ -947,7 +947,16 @@ impl<'d, 'a> Server<'d, 'a> {
         let mut kept = Vec::new();
         let mut landed: BTreeMap<RepoName, Value> = BTreeMap::new();
         for b in &group.batches {
-            let (paths, proof) = rerun_paths(core, &rows, b)?;
+            let (paths, proof) = rerun_paths(core, &rows, b).map_err(|mut e| {
+                // Review-2 N6: nothing is written yet; earlier landings found so far stay visible.
+                if let Some(d) = e.detail.get_or_insert_with(|| json!({})).as_object_mut()
+                    && !landed.is_empty()
+                    && !d.contains_key("already_published")
+                {
+                    d.insert("already_published".into(), Value::Array(landed.values().cloned().collect()));
+                }
+                e
+            })?;
             if paths.is_empty()
                 && let Some(v) = proof
             {
@@ -962,16 +971,21 @@ impl<'d, 'a> Server<'d, 'a> {
         let mut already: Vec<Value> = landed.into_values().collect();
         let mut done: Vec<Value> = Vec::new();
         for repo in repos {
-            let pinned = core.pinned(&repo)?;
-            let branch = repo_cfg(core, &repo)?.publish.branch.clone();
-            let token = if pinned.push && needs_confirm(pinned) {
-                Some(require_validated(&core.confirmer, Action::PushDeploy { repo: repo.clone(), branch })?)
-            } else {
-                None
-            };
-            writing();
-            let bound = token.as_ref().map(|_| shown.get(&repo).cloned().flatten());
-            let r = self.with_publish_ctx(&repo, |ctx| strata_publish::publish_bound(ctx, &group, token, bound.clone()));
+            // Review-2 N6: every error of this repo's body (config, the
+            // confirmation, the publish) goes through the decoration below,
+            // so what landed before it stays in the envelope.
+            let r = (|| {
+                let pinned = core.pinned(&repo)?;
+                let branch = repo_cfg(core, &repo)?.publish.branch.clone();
+                let token = if pinned.push && needs_confirm(pinned) {
+                    Some(require_validated(&core.confirmer, Action::PushDeploy { repo: repo.clone(), branch })?)
+                } else {
+                    None
+                };
+                writing();
+                let bound = token.as_ref().map(|_| shown.get(&repo).cloned().flatten());
+                self.with_publish_ctx(&repo, |ctx| strata_publish::publish_bound(ctx, &group, token, bound.clone()))
+            })();
             match r {
                 Ok(p) => done.push(json!({
                     "repo": repo.as_str(),
