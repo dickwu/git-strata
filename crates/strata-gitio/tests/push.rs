@@ -278,3 +278,61 @@ fn push_to_sends_to_the_given_url_not_the_config() {
     assert_eq!(e.git.push_recorded_to(&e.staging, "origin", &a_url, PUBLISH, "main", anchor, &[], T).unwrap(), PushOutcome::Pushed);
     assert_eq!(e.remote_branch("main").as_deref(), Some(d.as_str()));
 }
+
+/// Review-5 N1: the URL a caller resolved is pushed to as given — git does
+/// not rewrite it again with `url.*.insteadOf` / `pushInsteadOf` (gitio
+/// pins it). The only config that would beat the pin (a rule matching the
+/// URL exactly, a remote named after it) is refused before anything is
+/// sent, as is a URL that cannot be pinned.
+#[test]
+fn push_to_is_pinned_against_url_rewriting() {
+    let e = env();
+    let out = e.sb.git_output(&e.main, &["config", "remote.origin.url"]);
+    let a_url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let a = std::path::Path::new(&a_url);
+    let alt = e.sb.path("alt");
+    fs::create_dir(&alt).unwrap();
+    let alt_repo = alt.join(a.file_name().unwrap());
+    assert!(e.sb.git_output(&e.main, &["clone", "-q", "--bare", &a_url, alt_repo.to_str().unwrap()]).status.success());
+    let at = |p: &std::path::Path| {
+        let o = e.sb.git_output(p, &["rev-parse", "refs/heads/main"]);
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let config = |args: &[&str]| assert!(e.sb.git_output(&e.main, &[&["config"][..], args].concat()).status.success());
+    let anchor = "refs/strata/anchor/main";
+
+    // A prefix rule that would send A to alt/<name>: the pin wins.
+    config(&[&format!("url.{}/.insteadOf", alt.display()), &format!("{}/", a.parent().unwrap().display())]);
+    config(&[&format!("url.{}/.pushInsteadOf", alt.display()), &format!("{}/", a.parent().unwrap().display())]);
+    assert!(e.git.push_url_exact(&a_url).unwrap());
+    let c = e.publish(&e.head, "n1.txt");
+    assert_eq!(e.git.push_published_to(&e.staging, "origin", &a_url, PUBLISH, "main", anchor, T).unwrap(), PushOutcome::Pushed);
+    assert_eq!(e.remote_branch("main").as_deref(), Some(c.as_str()), "the push went to A as given");
+    assert_eq!(at(&alt_repo), e.head, "not to the rewritten URL");
+
+    // A rule matching A exactly ties the pin: refused, nothing sent.
+    let b = e.sb.path("other.git");
+    assert!(e.sb.git_output(&e.main, &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()]).status.success());
+    config(&[&format!("url.{}.pushInsteadOf", b.display()), &a_url]);
+    assert!(!e.git.push_url_exact(&a_url).unwrap());
+    let d = e.publish(&c, "n1b.txt");
+    let err = e.git.push_recorded_to(&e.staging, "origin", &a_url, PUBLISH, "main", anchor, &[], T).unwrap_err();
+    assert_eq!(err.code, Code::InvalidInput, "{err:?}");
+    assert_eq!(err.detail.as_ref().unwrap()["reason"], "url-rewritten");
+    assert_eq!(e.remote_branch("main").as_deref(), Some(c.as_str()), "nothing sent to A");
+    assert_eq!(at(&b), c, "nothing sent to B");
+    assert_eq!(e.git.read_ref(anchor).unwrap(), Some(coid(&c)), "nothing recorded");
+
+    // A remote named after the URL: refused, nothing sent.
+    config(&["remote.host:n1.git.url", &a_url]);
+    assert!(!e.git.push_url_exact("host:n1.git").unwrap());
+    let err = e.git.push_published_to(&e.staging, "origin", "host:n1.git", PUBLISH, "main", anchor, T).unwrap_err();
+    assert_eq!(err.detail.as_ref().unwrap()["reason"], "url-is-remote-name", "{err:?}");
+    assert_eq!(e.remote_branch("main").as_deref(), Some(c.as_str()), "nothing sent");
+
+    // A URL that cannot be pinned.
+    let err = e.git.push_published_to(&e.staging, "origin", "a\nb", PUBLISH, "main", anchor, T).unwrap_err();
+    assert_eq!(err.detail.as_ref().unwrap()["reason"], "bad-url", "{err:?}");
+    assert!(!e.git.push_url_exact("a\nb").unwrap());
+    let _ = d;
+}

@@ -371,11 +371,19 @@ fn scene_records(root: &Path) -> Vec<SceneRecord> {
 /// remote does not settle). A record without them stays.
 ///
 /// [实现时补的决定] (review-4 F1) The push was sent to exactly
-/// `dest.push_url` (gitio `push_*_to`), so `dest` is where the commit
-/// landed whatever origin's config says now; the config is not read again.
+/// `dest.push_url` (gitio `push_*_to`, pinned against URL rewriting).
 /// `dest` `None` (no readable push URL) → nothing settles.
+///
+/// [实现时补的决定] (review-5 N1) Safety net after the push, as before
+/// review-4: origin's push destination read now must still equal `dest`,
+/// and `dest.push_url` must still be a URL git pushes to as given
+/// (`Git::push_url_exact`); otherwise nothing settles (the scenes stay,
+/// reported).
 pub(crate) fn settle_push_scenes(core: &Core, git: &Git, repo: &RepoName, branch: &str, pushed: &CommitOid, dest: Option<&PushDest>) {
     let Some(dest) = dest else { return };
+    if push_dest(git).as_ref() != Some(dest) || !git.push_url_exact(&dest.push_url).unwrap_or(false) {
+        return;
+    }
     let repo_id = dest.repo_id.get().to_string_lossy();
     for s in scene_records(&core.config.paths.root) {
         let same = s.repo == *repo

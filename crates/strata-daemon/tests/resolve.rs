@@ -564,6 +564,52 @@ fn chain_resolve_restore_pushes_to_the_recorded_url_across_a_b_a() {
     assert!(!old.exists(), "the scene for A settles: A has the commit");
 }
 
+/// Review-5 N1: a URL rewrite rule added while the restore stages (here a
+/// prefix `insteadOf` that would send A to alt/<name>) does not move the
+/// push: gitio pins the recorded URL, so the commit lands at A and alt is
+/// untouched. The post-push check sees origin's destination changed and
+/// settles nothing: the kept scene for A stays.
+#[test]
+fn chain_resolve_restore_is_pinned_against_url_rewriting() {
+    let fx = Dfx::new();
+    let ch = Chain::new(&fx);
+    ch.rewind_origin(&fx, &ch.p);
+    let tool = fx.config.repos[&repo_name("tool")].path.clone();
+    let a_url = fx.sb.git(&tool, &["config", "remote.origin.url"]).trim().to_string();
+    let a = Path::new(&a_url);
+    let alt = fx.sb.path("alt");
+    fs::create_dir_all(&alt).unwrap();
+    let alt_repo = alt.join(a.file_name().unwrap());
+    fx.sb.git(&fx.sb.root, &["clone", "-q", "--bare", &a_url, alt_repo.to_str().unwrap()]);
+    let repo_id = fx.sb.open(&tool).repo_id().get().to_string_lossy().into_owned();
+    let old = fx.config.paths.root.join("daemon/push/1-1");
+    fs::create_dir_all(&old).unwrap();
+    let body = json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "main", "repo_id": repo_id, "push_url": a_url });
+    fs::write(old.join("push.json"), body.to_string()).unwrap();
+    let core = fx.prepare().unwrap();
+    sync(&core);
+    let git = &core.gits[&repo_name("tool")];
+    let staging = git.pause_export_before_rename();
+    std::thread::scope(|sc| {
+        let t = sc.spawn(|| resolve(&core, ChainChoice::Restore).0);
+        let start = std::time::Instant::now();
+        while !staging.is_paused() && !t.is_finished() && start.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if t.is_finished() {
+            panic!("restore ended before staging: {:?}", t.join().unwrap());
+        }
+        assert!(staging.is_paused(), "restore reached the staging pause");
+        let rule = format!("url.{}/.insteadOf", alt.display());
+        fx.sb.git(&tool, &["config", &rule, &format!("{}/", a.parent().unwrap().display())]);
+        staging.release();
+        assert!(t.join().unwrap().unwrap().pushed);
+    });
+    assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", &a_url, "rev-parse", "refs/heads/main"]).trim(), ch.c, "the push went to A, as recorded");
+    assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", alt_repo.to_str().unwrap(), "rev-parse", "refs/heads/main"]).trim(), ch.p, "not to the rewritten URL");
+    assert!(old.exists(), "origin's destination changed around the push: nothing settles");
+}
+
 /// Review M7: Restore records the push in one transaction with the chain
 /// check (tracking ref and anchor together). When the tracking ref moved
 /// between the remote's acceptance and the recording, nothing local moves

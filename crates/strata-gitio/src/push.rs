@@ -71,6 +71,49 @@ impl Git {
         Ok(url)
     }
 
+    /// Whether a push to exactly `url` goes to `url` itself, as far as the
+    /// repository's config says now: gitio pins its push URL against
+    /// `url.*.insteadOf` / `pushInsteadOf` rewriting (an identity rule for
+    /// `url`, the longest match possible), which only loses to a configured
+    /// rule matching `url` exactly or a remote named `url`. Local only.
+    /// [实现时补的决定] (review-5 N1: the daemon checks it again after the
+    /// push before settling scenes.)
+    pub fn push_url_exact(&self, url: &str) -> Result<bool> {
+        Ok(check_url(url).is_ok() && self.pin_conflict(self.repo_command(), url)?.is_none())
+    }
+
+    /// Why the pinned push to `url` would not go to `url` verbatim (read
+    /// with `c`, a command whose config view is the push's); `None` when it
+    /// would. A config rule `url.<base>.(push)insteadOf = url` with another
+    /// base ties the pin and wins (git keeps the first longest match);
+    /// `remote.<url>.(push)url` makes `url` a remote name.
+    fn pin_conflict(&self, mut c: std::process::Command, url: &str) -> Result<Option<&'static str>> {
+        c.args(["config", "--null", "--get-regexp", r"^(url\..*\.(push)?insteadof|remote\..*\.(push)?url)$"]);
+        let out = self.run(c, Opts::c())?;
+        match out.status {
+            Some(0) | Some(1) => {}
+            _ => return Err(failed("config", &out)),
+        }
+        for rec in out.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+            let (key, val) = match rec.iter().position(|b| *b == b'\n') {
+                Some(i) => (&rec[..i], &rec[i + 1..]),
+                None => (rec, &b""[..]),
+            };
+            let key = String::from_utf8_lossy(key);
+            let (Some(first), Some(last)) = (key.find('.'), key.rfind('.')) else { continue };
+            if first >= last {
+                continue;
+            }
+            let (section, sub, var) = (key[..first].to_ascii_lowercase(), &key[first + 1..last], key[last + 1..].to_ascii_lowercase());
+            match (section.as_str(), var.as_str()) {
+                ("url", "insteadof" | "pushinsteadof") if val == url.as_bytes() && sub != url => return Ok(Some("url-rewritten")),
+                ("remote", "url" | "pushurl") if sub == url => return Ok(Some("url-is-remote-name")),
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
     /// Steps 1–4 of `push`: refusals, the push URL, the push, and this
     /// ref's status line. `url` given → the push goes to exactly that URL
     /// and the config is not read again (review-4 F1).
@@ -109,11 +152,27 @@ impl Git {
             None => self.push_url_checked(remote)?,
         };
 
-        // Step 3: the push itself, from the staging root, hooks live.
+        check_url(&url)?;
+
+        // Step 3: the push itself, from the staging root, hooks live. The
+        // URL is already rewritten; git must not rewrite it again (review-5
+        // N1): an identity `insteadOf` / `pushInsteadOf` rule for exactly
+        // `url` is the longest match, and the only config that beats it is
+        // refused here, before anything is sent. [实现时补的决定]
         self.inner.seams.hit(PUSH_BEFORE_SEND);
+        if let Some(reason) = self.pin_conflict(self.tree_command(&gitfile, staging, None), &url)? {
+            return Err(errd(
+                Code::InvalidInput,
+                format!("git would not push to {url} as given ({reason}); nothing sent"),
+                json!({ "remote": remote, "url": url, "reason": reason }),
+            ));
+        }
         let spec = format!("{src_ref}:refs/heads/{dst_branch}");
         let mut c = self.tree_command(&gitfile, staging, None);
         c.env("STRATA_PUBLISH", "1");
+        c.env(PIN_ENV, &url);
+        c.arg(format!("--config-env=url.{url}.insteadOf={PIN_ENV}"));
+        c.arg(format!("--config-env=url.{url}.pushInsteadOf={PIN_ENV}"));
         c.args(["push", "--porcelain", "--no-follow-tags", "--end-of-options", &url, &spec]);
         let out = match self.run(c, Opts::default().timeout(timeout)) {
             Ok(o) => o,
@@ -281,6 +340,23 @@ impl Git {
             }
         }
     }
+}
+
+/// The env var carrying the pinned push URL into `--config-env` (git takes
+/// the name after the last `=`, so the URL itself may contain `=`).
+const PIN_ENV: &str = "STRATA_PUSH_URL";
+
+/// A push URL gitio can pin: not empty, no newline or NUL (a config
+/// subsection cannot hold them). `InvalidInput` otherwise, nothing sent.
+fn check_url(url: &str) -> Result<()> {
+    let reason = if url.is_empty() {
+        "empty-url"
+    } else if url.contains(['\n', '\0']) {
+        "bad-url"
+    } else {
+        return Ok(());
+    };
+    Err(errd(Code::InvalidInput, "push URL cannot be pinned", json!({ "url": url, "reason": reason })))
 }
 
 /// What steps 1–4 of a push saw.

@@ -1072,3 +1072,61 @@ fn standalone_push_unknown_keeps_scene_and_reports_across_restart() {
         assert!(!scene.exists(), "a definite push of the chain settles the scene");
     });
 }
+
+/// Review-5 N1: a standalone `push` whose recorded URL A gets an exact
+/// `insteadOf` rule while it stages (git would send A to B) is refused
+/// before anything is sent (`url-rewritten`): A and B are untouched and a
+/// kept scene for A is not settled.
+#[test]
+fn standalone_push_refuses_a_url_rewritten_while_staging() {
+    let mut fx = Dfx::new();
+    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.push = false;
+    fx.write_config();
+    let sock = fx.socket();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let git = core.gits[&repo_name("tool")].clone();
+    let tool = fx.config.repos[&repo_name("tool")].path.clone();
+    let a_url = fx.sb.git(&tool, &["config", "remote.origin.url"]).trim().to_string();
+    let b = fx.sb.path("tool-b.git");
+    fx.sb.git(&fx.sb.root, &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()]);
+    let main_at = |dir: &str| fx.sb.git(&fx.sb.root, &["--git-dir", dir, "rev-parse", "refs/heads/main"]).trim().to_string();
+    let before = main_at(&a_url);
+    serving(&d, || {
+        let id = new_session(&sock);
+        external(&ws(&core, &id, "tool"), "printf 'export const a = 9\\n' > src/index.ts");
+        let cp = ok(call(&sock, "checkpoint", json!({
+            "session": id, "repo": "tool",
+            "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+        })));
+        let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+        ok(call(&sock, "publish", json!({ "group": group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]) })));
+        let tip = git.read_ref(&strata_publish::chain_ref("main")).unwrap().unwrap();
+        let old = fx.config.paths.root.join("daemon/push/1-1");
+        fs::create_dir_all(&old).unwrap();
+        let body = json!({
+            "repo": "tool", "commit": tip, "remote": "origin", "branch": "main",
+            "repo_id": git.repo_id().get().to_string_lossy(), "push_url": a_url,
+        });
+        fs::write(old.join("push.json"), body.to_string()).unwrap();
+        let staging = git.pause_export_before_rename();
+        std::thread::scope(|sc| {
+            let t = sc.spawn(|| call(&sock, "push", json!({ "repo": "tool" })));
+            let start = Instant::now();
+            while !staging.is_paused() && !t.is_finished() && start.elapsed() < Duration::from_secs(20) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(staging.is_paused(), "push reached the staging pause: {:?}", t.is_finished());
+            fx.sb.git(&tool, &["config", &format!("url.{}.insteadOf", b.display()), &a_url]);
+            staging.release();
+            let r = t.join().unwrap();
+            assert_eq!(r["error"]["code"], "InvalidInput", "{r:#}");
+            assert_eq!(r["error"]["detail"]["reason"], "url-rewritten", "{r:#}");
+        });
+        assert_eq!(main_at(&a_url), before, "nothing sent to A");
+        assert_eq!(main_at(b.to_str().unwrap()), before, "nothing sent to B");
+        assert!(old.exists(), "the scene for A is not settled");
+    });
+    drop(d);
+    core.close().unwrap();
+}

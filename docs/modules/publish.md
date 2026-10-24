@@ -140,6 +140,9 @@ pub fn commit(git: &Git, staged: &Staged, parent: &CommitOid, expected_chain: Op
 pub fn push(git: &Git, cfg: &RepoConfig, staging: &Path, confirm: Option<ConfirmToken>) -> Result<PushOutcome>;
 /// [实现时补的决定]（review-4 F1）同 `push`，`url` 给了就经 gitio `push_published_to` 推到恰好这个地址，
 /// 不再读 origin 的 config。daemon 传它记进推送现场的 `push_url`。`push` 即 `push_to(.., None)`。
+/// [实现时补的决定]（review-5 N1）gitio 现在把推送地址钉住、不让 git 再按 `insteadOf` 改写；赢不了钉住的
+/// config 在发送前以 `InvalidInput`（`url-rewritten` / `url-is-remote-name`）拒绝，什么都没发。`push_to` 原样
+/// 返回这个错误；发布流程第 7 步的推送照它对任何推送错误的一贯处理，记为 `Unknown`（不重推）。
 pub fn push_to(git: &Git, cfg: &RepoConfig, repo: &RepoName, staging: &Path, confirm: Option<ConfirmToken>, url: Option<&str>) -> Result<PushOutcome>;
 
 /// 把解决者记在这次发布的 `publishes` 行上（`outcome.assigned`）。不写文件，不合并、不推送。
