@@ -951,7 +951,9 @@ impl<'d, 'a> Server<'d, 'a> {
     /// needs a confirmation but was not planned (the history changed between
     /// `publish_plan` and `publish`) is refused before anything is asked or
     /// written: `NotConfirmed`, reason `plan_changed`. Re-running the command
-    /// plans it again (and gates it on a TTY).
+    /// plans it again (and gates it on a TTY). Review-4 F2: this check (and
+    /// its config read) runs before the loop but its errors get the same
+    /// decoration as the loop's (`repo`, `already_published`).
     fn publish(
         &self,
         group: &strata_types::ReleaseGroup,
@@ -964,9 +966,9 @@ impl<'d, 'a> Server<'d, 'a> {
         let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
         if let Some(plan) = plan {
             for repo in &repos {
-                let pinned = core.pinned(repo)?;
+                let pinned = core.pinned(repo).map_err(|e| self.decorate_publish_error(e, repo, Vec::new(), already.clone()))?;
                 if pinned.push && needs_confirm(pinned) && !plan.contains(repo) {
-                    return Err(StrataError::new(
+                    let e = StrataError::new(
                         Code::NotConfirmed,
                         format!(
                             "{repo} now needs a confirmation that this publish did not plan (the publish history changed since the plan); \
@@ -977,7 +979,8 @@ impl<'d, 'a> Server<'d, 'a> {
                         "reason": "plan_changed",
                         "repo": repo.as_str(),
                         "planned": plan.iter().map(RepoName::as_str).collect::<Vec<_>>(),
-                    })));
+                    }));
+                    return Err(self.decorate_publish_error(e, repo, Vec::new(), already));
                 }
             }
         }
@@ -1020,30 +1023,37 @@ impl<'d, 'a> Server<'d, 'a> {
                 {
                     already.push(v);
                 }
-                Err(mut e) => {
-                    if e.code == Code::Unknown {
-                        self.report_unknown();
-                    }
-                    let d = e.detail.get_or_insert_with(|| json!({}));
-                    if d.is_object() {
-                        if d.get("repo").is_none() {
-                            d["repo"] = json!(repo.as_str());
-                        }
-                        if let Some(c) = d.get("commit").filter(|c| c.is_string()).cloned() {
-                            d["landed"] = landed_after_commit(&repo, c, d);
-                        }
-                        if !done.is_empty() {
-                            d["published_before"] = Value::Array(done);
-                        }
-                        if !already.is_empty() {
-                            d["already_published"] = Value::Array(already);
-                        }
-                    }
-                    return Err(e);
-                }
+                Err(e) => return Err(self.decorate_publish_error(e, &repo, done, already)),
             }
         }
         Ok(json!({ "published": done, "already_published": already }))
+    }
+
+    /// The common decoration of a `publish` error (review-2 N6, M4;
+    /// review-4 F2): `detail.repo` (the repo that stopped, unless set),
+    /// `detail.landed` after a written commit, `published_before` (the
+    /// repos of this call that landed) and `already_published` (the repos
+    /// skipped as already landed). An `Unknown` is reported.
+    fn decorate_publish_error(&self, mut e: StrataError, repo: &RepoName, done: Vec<Value>, already: Vec<Value>) -> StrataError {
+        if e.code == Code::Unknown {
+            self.report_unknown();
+        }
+        let d = e.detail.get_or_insert_with(|| json!({}));
+        if d.is_object() {
+            if d.get("repo").is_none() {
+                d["repo"] = json!(repo.as_str());
+            }
+            if let Some(c) = d.get("commit").filter(|c| c.is_string()).cloned() {
+                d["landed"] = landed_after_commit(repo, c, d);
+            }
+            if !done.is_empty() {
+                d["published_before"] = Value::Array(done);
+            }
+            if !already.is_empty() {
+                d["already_published"] = Value::Array(already);
+            }
+        }
+        e
     }
 
     /// §5.5 push: the chain tip is checked under the repo lock against the

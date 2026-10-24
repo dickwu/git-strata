@@ -551,14 +551,16 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
 /// Review-2 N6: front lands, then tool's confirmation is cancelled (an
 /// error before tool's publish is even called): the error still reports
 /// front in `published_before`. The re-run with a passed confirmation
-/// reports front as already published and publishes tool.
+/// reports front as already published and publishes tool. Review-4 F2: a
+/// re-run whose plan left tool out is refused `plan_changed` before any
+/// prompt, and that error too reports front in `already_published`.
 #[test]
 fn publish_confirmation_cancelled_after_a_repo_landed_keeps_it_in_the_envelope() {
     use strata_confirm::seams::Verdict;
     let mut fx = Dfx::with(&["front", "tool"]);
     fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.confirm = true;
     fx.write_config();
-    let (c, _log, _) = fx.confirmer(vec![Verdict::la(-2), Verdict::pass()]);
+    let (c, log, _) = fx.confirmer(vec![Verdict::la(-2), Verdict::pass()]);
     let core = fx.prepare_with(c).unwrap();
     let d = Daemon::start(&core).unwrap();
     let sock = fx.socket();
@@ -568,7 +570,7 @@ fn publish_confirmation_cancelled_after_a_repo_landed_keeps_it_in_the_envelope()
         let id: SessionId = serde_json::from_value(s["session"]["manifest"]["id"].clone()).unwrap();
         external(&ws(&core, &id, "front"), "printf 'export const f = 1\\n' > src/index.ts");
         external(&ws(&core, &id, "tool"), "printf 'export const t = 1\\n' > src/index.ts");
-        let run = |shown: Value| {
+        let run_plan = |shown: Value, plan: Option<Value>| {
             let mut batches = Vec::new();
             for repo in ["front", "tool"] {
                 let cp = ok(call(&sock, "checkpoint", json!({
@@ -576,8 +578,13 @@ fn publish_confirmation_cancelled_after_a_repo_landed_keeps_it_in_the_envelope()
                 })));
                 batches.push(json!({ "session": id, "repo": repo, "checkpoint": cp["checkpoint"]["id"], "paths": ["src/index.ts"] }));
             }
-            call(&sock, "publish", json!({ "group": { "id": 0, "batches": batches }, "shown": { "tool": shown } }))
+            let mut req = json!({ "group": { "id": 0, "batches": batches }, "shown": { "tool": shown } });
+            if let Some(p) = plan {
+                req["plan"] = p;
+            }
+            call(&sock, "publish", req)
         };
+        let run = |shown: Value| run_plan(shown, None);
         let r = run(Value::Null);
         assert!(r["error"].is_object(), "{r:#}");
         let det = &r["error"]["detail"];
@@ -585,6 +592,19 @@ fn publish_confirmation_cancelled_after_a_repo_landed_keeps_it_in_the_envelope()
         assert_eq!(det["repo"], "tool", "{r:#}");
         assert_eq!(det["published_before"][0]["repo"], "front", "{r:#}");
         assert_eq!(det["published_before"][0]["commit"], json!(landed), "{r:#}");
+        assert_eq!(core.gits[&repo_name("tool")].read_ref(&chain).unwrap(), None, "tool not committed");
+
+        // Review-4 F2: the plan left tool out → plan_changed, front still reported.
+        let shown_before = log.shown().len();
+        let r = run_plan(Value::Null, Some(json!([])));
+        assert_eq!(r["error"]["code"], "NotConfirmed", "{r:#}");
+        let det = &r["error"]["detail"];
+        assert_eq!(det["reason"], "plan_changed", "{r:#}");
+        assert_eq!(det["repo"], "tool", "{r:#}");
+        assert_eq!(det["already_published"][0]["repo"], "front", "{r:#}");
+        assert_eq!(det["already_published"][0]["commit"], json!(landed), "{r:#}");
+        assert!(det.get("published_before").is_none(), "nothing landed in this call: {r:#}");
+        assert_eq!(log.shown().len(), shown_before, "no prompt");
         assert_eq!(core.gits[&repo_name("tool")].read_ref(&chain).unwrap(), None, "tool not committed");
 
         let r = ok(run(Value::Null));
