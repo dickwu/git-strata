@@ -161,6 +161,25 @@ impl Git {
         anchor_ref: &str,
         timeout: Duration,
     ) -> Result<PushOutcome> {
+        self.push_recorded(staging, remote, src_ref, dst_branch, anchor_ref, &[], timeout)
+    }
+
+    /// `push_published` whose recording transaction also carries `verify`
+    /// (extra compare-only updates, e.g. the publish chain still at the
+    /// pushed commit): chain `--restore` records tracking and anchor in
+    /// the same transaction that checks the chain (review M7). Any update
+    /// that does not hold → `Unknown`, nothing local moved.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_recorded(
+        &self,
+        staging: &Path,
+        remote: &str,
+        src_ref: &str,
+        dst_branch: &str,
+        anchor_ref: &str,
+        verify: &[RefUpdate],
+        timeout: Duration,
+    ) -> Result<PushOutcome> {
         check_strata_ref(anchor_ref)?;
         let anchor_before = self.read_ref(anchor_ref)?;
         let Sent { outcome, tracking, before, pushed } = self.push_send(staging, remote, src_ref, dst_branch, timeout)?;
@@ -176,6 +195,7 @@ impl Git {
                 updates.push(RefUpdate::set(name, pushed.clone(), old));
             }
         }
+        updates.extend(verify.iter().cloned());
         match self.ref_transaction(&updates) {
             Ok(()) => Ok(PushOutcome::Pushed),
             Err(e) => {

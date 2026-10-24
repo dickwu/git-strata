@@ -425,6 +425,8 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 6. `AcceptOriginDrop`：不调用 `push`，不调用 `replay_commits`。那一次事务把链和锚点都设成 o，对旧的 c 和旧的 a 比较并交换。事务没完成 → `Unknown`，不推，不声称 ref 没变。
 7. `AcceptOriginReplay`：不调用 `push`。范围是前移之后的 a..c，不是 o..c。前移后的 a 在内存里算，这一步还不写：会前移时 `m = git.merge_base(o, c)`，`is_ancestor(a, m)` 且 `m != a` 则 `exclusive_base` 是 m，否则是当前的 a。`Rewound` 不前移，`exclusive_base` 就是当前的 a。`replay_commits(exclusive_base, c, o)`。`Conflict` 只在还没有 ref 事务时返回，链和锚点的字节不变。成功之后那一次事务把链设成新 tip、锚点设成 o。事务失败 → `Unknown`。
 8. `Restore`：第 4 步已经确认是快进，并且还没有锚点比较并交换。锁里再对 `PushDeploy`（要确认时），并核对 c 仍是弹框前看到的那个，且就是 cli 发来的 `shown`（D21）；变了 → `NotConfirmed`，不推。然后 `git.push(staging, "origin", chain_ref, branch, timeout)`。staging 用 `attach_staging` 接到 c，推完 `retire_dir`。timeout 与 publish 的 push 相同，本文不另定。argv 由 gitio 保证没有 `--force`、`--force-with-lease` 或 `+` 开头的 refspec；daemon 不另开一条强推路径。`Refused` 且链还没改 → `PushRefused`。`Unknown` → 报出，不重推，不接着做一次把失败说成具名拒绝的比较并交换。`Pushed` 之后才调用那一次 ref 事务，把链和锚点一起设成推上去的 commit。事务失败 → `Unknown`。
+
+   实现（review M7）：不用普通的 `git.push` 再另开事务——那样跟踪 ref 由 push 自己单独推进（失败只记日志），锚点在后一个事务里，崩溃或读者会看到一个动了另一个没动。改用 gitio 的 `push_recorded`（`push_published` 加一组只比较的更新）：远端接受之后，同一个 ref 事务里核对链仍是 c、把跟踪 ref 与锚点一起设成 c，各自对推送前读到的值比较并交换；事务不成 → `Unknown`（本地什么都没动，暂存现场照 M6 保留）。[实现时补的决定]
 9. 放开锁。`main_tip` 动了就 `observe_main`，失败只是 `ObserveFailed`。第 4 步的具名拒绝不被这次观察改成 `Unknown`。ref 事务已经调用过的，失败只能是 `Unknown`。
 
 **`config_relax`**：显式接受一次调松。params 只有 `repo`。不查 TTY。不占会话队列，不拿 repo 写锁。文件变了不弹框：启动、重载、KeepAlive 重启都不调用 `require`。调紧仍立即写回，不要凭据。

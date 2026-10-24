@@ -199,6 +199,11 @@ Not merged.
   then one `ref_transaction` that verifies the chain is still c and sets
   the anchor to c (the chain is already c). Any transaction failure is
   `Unknown` (`reason: "ref_transaction"`), never `HeadMoved`/`Conflict`.
+  **Superseded by review M7:** Restore now calls gitio `push_recorded`
+  (`push_published` plus compare-only updates): after the remote accepts,
+  one transaction verifies the chain is c and moves the tracking ref and
+  the anchor together; a transaction that does not commit → `Unknown`
+  (`push_unknown`, scene kept per M6).
 - **Replay range.** `no_replay_range` when there is no anchor (a Rewound
   chain without `refs/strata/anchor/<b>`) or the (advanced) base is not an
   ancestor of c. The result reports the new chain tip and anchor; no

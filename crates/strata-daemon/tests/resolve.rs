@@ -456,6 +456,40 @@ fn chain_resolve_restore_pushes_only_fast_forward() {
     }
 }
 
+/// Review M7: Restore records the push in one transaction with the chain
+/// check (tracking ref and anchor together). When the tracking ref moved
+/// between the remote's acceptance and the recording, nothing local moves
+/// and the outcome is `Unknown` (the scene is kept, M6) — never `Pushed`
+/// with the anchor advanced alone.
+#[test]
+fn chain_resolve_restore_records_tracking_and_anchor_together() {
+    let fx = Dfx::new();
+    let ch = Chain::new(&fx);
+    ch.rewind_origin(&fx, &ch.p);
+    let core = fx.prepare().unwrap();
+    sync(&core);
+    let git = &core.gits[&repo_name("tool")];
+    let tracking = "refs/strata/remotes/origin/main";
+    let gap = git.pause_push_before_record();
+    std::thread::scope(|sc| {
+        let t = sc.spawn(|| resolve(&core, ChainChoice::Restore).0);
+        let start = std::time::Instant::now();
+        while !gap.is_paused() && !t.is_finished() && start.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(gap.is_paused(), "restore records through the recording push: {:?}", if t.is_finished() { Some(t.join().unwrap()) } else { None });
+        assert_eq!(ch.rev(&fx, tracking), ch.p, "fetched the rewound origin");
+        fx.sb.git(&ch.main, &["update-ref", tracking, &ch.a]);
+        gap.release();
+        let r = t.join().unwrap();
+        let e = r.expect_err("unrecorded push is not Pushed");
+        assert_eq!(e.code, Code::Unknown, "{e:?}");
+        assert!(e.detail.as_ref().and_then(|d| d.get("scene")).is_some(), "scene kept: {e:?}");
+    });
+    assert_eq!(ch.refs(&fx), (ch.c.clone(), ch.a.clone()), "anchor not advanced alone");
+    assert_eq!(ch.rev(&fx, tracking), ch.a);
+}
+
 #[test]
 fn chain_resolve_restore_checks_push_deploy() {
     // Refused at the prompt: no fetch, no push, refs unchanged.

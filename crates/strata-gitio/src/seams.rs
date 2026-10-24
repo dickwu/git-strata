@@ -58,6 +58,11 @@ impl Pause {
         }
     }
 
+    /// Whether an operation has reached the pause point (no wait).
+    pub fn is_paused(&self) -> bool {
+        self.state.m.lock().unwrap().0
+    }
+
     /// Let the paused operation continue.
     pub fn release(self) {
         drop(self);

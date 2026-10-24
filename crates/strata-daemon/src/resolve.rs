@@ -351,10 +351,20 @@ pub fn chain_resolve(
                             })));
                     }
                 }
-                // 8. Push the chain tip; only `Pushed` reaches the transaction.
-                let outcome = with_staging(core, git, repo, &c, |r| matches!(r, Ok(PushOutcome::Unknown)), |wt| {
+                // 8. Push the chain tip. Review M7: `Pushed` only once one
+                // transaction has checked the chain and moved the tracking
+                // ref and the anchor together (gitio `push_recorded`, as
+                // publish's `push_published`); a transaction that does not
+                // commit is `Unknown` and nothing local moved.
+                let verify = [RefUpdate::verify(&chain_name, Some(c.clone()))];
+                let uncertain = |r: &Result<PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
+                let outcome = with_staging(core, git, repo, &c, uncertain, |wt| {
                     crate::handlers::writing();
-                    git.push(wt, "origin", &chain_name, &branch, PUSH_TIMEOUT)
+                    match git.push_recorded(wt, "origin", &chain_name, &branch, &anchor_name, &verify, PUSH_TIMEOUT)? {
+                        PushOutcome::Unknown => Err(StrataError::new(Code::Unknown, "the push outcome is unknown; not pushed again")
+                            .with_detail(json!({ "reason": "push_unknown", "branch": branch }))),
+                        o => Ok(o),
+                    }
                 })?;
                 match outcome {
                     PushOutcome::Pushed => {}
@@ -367,7 +377,6 @@ pub fn chain_resolve(
                             .with_detail(json!({ "reason": "push_unknown", "branch": branch })));
                     }
                 }
-                transaction(git, &[RefUpdate::verify(&chain_name, Some(c.clone())), RefUpdate::set(&anchor_name, c.clone(), a)])?;
                 done.pushed = true;
                 done.anchor = c.as_str().to_string();
             }
