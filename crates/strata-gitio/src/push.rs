@@ -38,6 +38,39 @@ pub(crate) fn status_of(stdout: &[u8], spec: &str) -> Option<(char, String)> {
 }
 
 impl Git {
+    /// The URL a push to `remote` goes to (`git remote get-url --push`:
+    /// `pushurl` if set, else `url`, after `insteadOf` / `pushInsteadOf`
+    /// rewriting). Local only: reads the repository's config, contacts no
+    /// remote. `remote` is checked as for `push`; an unknown remote is
+    /// `InvalidInput` `no-such-remote`. [实现时补的决定] (review-3 R4: the
+    /// daemon records it with a kept push scene and settles the scene only
+    /// on a push to the same destination.)
+    pub fn push_url(&self, remote: &str) -> Result<String> {
+        check_remote(remote)?;
+        self.push_url_checked(remote)
+    }
+
+    fn push_url_checked(&self, remote: &str) -> Result<String> {
+        let mut c = self.repo_command();
+        c.args(["remote", "get-url", "--push", remote]);
+        let out = self.run(c, Opts::c())?;
+        if !out.ok() {
+            if out.stderr_str().contains("No such remote") {
+                return Err(errd(
+                    Code::InvalidInput,
+                    format!("no remote {remote}"),
+                    json!({ "remote": remote, "reason": "no-such-remote" }),
+                ));
+            }
+            return Err(failed("remote get-url", &out));
+        }
+        let url = String::from_utf8_lossy(&out.stdout).trim_end_matches(['\n', '\r']).to_string();
+        if url.is_empty() {
+            return Err(failed("remote get-url", &out));
+        }
+        Ok(url)
+    }
+
     /// Steps 1–4 of `push`: refusals, the push URL, the push, and this
     /// ref's status line.
     fn push_send(
@@ -65,23 +98,7 @@ impl Git {
         let before = self.read_ref(&tracking)?;
 
         // Step 2: the push URL.
-        let mut c = self.repo_command();
-        c.args(["remote", "get-url", "--push", remote]);
-        let out = self.run(c, Opts::c())?;
-        if !out.ok() {
-            if out.stderr_str().contains("No such remote") {
-                return Err(errd(
-                    Code::InvalidInput,
-                    format!("no remote {remote}"),
-                    json!({ "remote": remote, "reason": "no-such-remote" }),
-                ));
-            }
-            return Err(failed("remote get-url", &out));
-        }
-        let url = String::from_utf8_lossy(&out.stdout).trim_end_matches(['\n', '\r']).to_string();
-        if url.is_empty() {
-            return Err(failed("remote get-url", &out));
-        }
+        let url = self.push_url_checked(remote)?;
 
         // Step 3: the push itself, from the staging root, hooks live.
         self.inner.seams.hit(PUSH_BEFORE_SEND);

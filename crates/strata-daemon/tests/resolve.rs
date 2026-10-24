@@ -460,11 +460,24 @@ fn chain_resolve_restore_pushes_only_fast_forward() {
 /// the same repo, remote and branch whose commit it contains; a scene of
 /// another branch and a record without remote and branch (written before
 /// N4) stay.
+///
+/// Review-3 R4: origin's push URL points at another bare remote B here, so
+/// the restore pushes to B. Only the scene recorded with this repo's
+/// identity and B's URL settles; one recorded for origin's fetch URL (the
+/// destination before the URL changed), for another repository identity,
+/// or without `repo_id` / `push_url` (written before R4) stays.
 #[test]
 fn chain_resolve_restore_settles_only_matching_push_scenes() {
     let fx = Dfx::new();
     let ch = Chain::new(&fx);
     ch.rewind_origin(&fx, &ch.p);
+    let tool = fx.config.repos[&repo_name("tool")].path.clone();
+    let a_url = fx.sb.git(&tool, &["config", "remote.origin.url"]).trim().to_string();
+    let b = fx.sb.path("tool-b.git");
+    fx.sb.git(&fx.sb.root, &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()]);
+    let b_url = b.to_str().unwrap().to_string();
+    fx.sb.git(&tool, &["config", "remote.origin.pushurl", &b_url]);
+    let repo_id = fx.sb.open(&tool).repo_id().get().to_string_lossy().into_owned();
     let scenes = fx.config.paths.root.join("daemon/push");
     let scene = |name: &str, body: Value| {
         let d = scenes.join(name);
@@ -472,16 +485,26 @@ fn chain_resolve_restore_settles_only_matching_push_scenes() {
         fs::write(d.join("push.json"), body.to_string()).unwrap();
         d
     };
-    let same = scene("1-1", json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "main" }));
-    let other = scene("1-2", json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "release" }));
+    let full = |branch: &str, id: &str, url: &str| {
+        json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": branch, "repo_id": id, "push_url": url })
+    };
+    let same = scene("1-1", full("main", &repo_id, &b_url));
+    let other = scene("1-2", full("release", &repo_id, &b_url));
     let legacy = scene("1-3", json!({ "repo": "tool", "commit": ch.c }));
+    let pre_r4 = scene("1-4", json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "main" }));
+    let to_a = scene("1-5", full("main", &repo_id, &a_url));
+    let other_id = scene("1-6", full("main", "/elsewhere/.git", &b_url));
     let core = fx.prepare().unwrap();
     sync(&core);
     let (r, _) = resolve(&core, ChainChoice::Restore);
     assert!(r.unwrap().pushed);
+    assert_eq!(fx.sb.git(&b, &["rev-parse", "refs/heads/main"]).trim(), ch.c, "the restore pushed to B");
     assert!(!same.exists(), "the matching scene is settled");
     assert!(other.exists(), "another branch's scene stays");
     assert!(legacy.exists(), "a record without remote/branch stays");
+    assert!(pre_r4.exists(), "a record without repo_id/push_url stays");
+    assert!(to_a.exists(), "a scene of another push URL stays");
+    assert!(other_id.exists(), "a scene of another repository identity stays");
 }
 
 /// Review M7: Restore records the push in one transaction with the chain

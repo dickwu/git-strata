@@ -1076,7 +1076,9 @@ impl<'d, 'a> Server<'d, 'a> {
             // Review M6: the scene is kept (and reported) when the outcome
             // is unknown; see `resolve::with_staging`.
             let uncertain = |r: &Result<strata_types::PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
-            let r = resolve::with_staging(core, git, repo, &branch, &tip, uncertain, |wt| {
+            // Review-3 R4: the destination is read before the push.
+            let dest = resolve::push_dest(git);
+            let r = resolve::with_staging(core, git, repo, &branch, &tip, dest.as_ref(), uncertain, |wt| {
                 writing();
                 strata_publish::push(git, &rc, repo, wt, token)
             });
@@ -1084,7 +1086,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 self.report_unknown();
             }
             if matches!(r, Ok(strata_types::PushOutcome::Pushed)) {
-                resolve::settle_push_scenes(core, git, repo, &branch, &tip);
+                resolve::settle_push_scenes(core, git, repo, &branch, &tip, dest.as_ref());
             }
             Ok(json!({ "push": json_of(&r?), "commit": tip.as_str() }))
         })

@@ -217,3 +217,32 @@ fn push_runs_human_pre_push_in_staging_root() {
     assert_eq!(e.remote_branch("main").as_deref(), Some(e.head.as_str()));
     assert_eq!(e.local(&remote_ref("origin", "main")).as_deref(), Some(e.head.as_str()));
 }
+
+/// Review-3 R4: `push_url` is the destination a push goes to, read from
+/// the local config only: the remote's `url`, then a `pushurl` once set (and
+/// a push then lands there), `InvalidInput` for an unknown or malformed
+/// remote name.
+#[test]
+fn push_url_names_the_push_destination() {
+    let e = env();
+    let url = e.sb.git_output(&e.main, &["config", "remote.origin.url"]);
+    let url = String::from_utf8_lossy(&url.stdout).trim().to_string();
+    assert_eq!(e.git.push_url("origin").unwrap(), url);
+
+    let b = e.sb.path("other.git");
+    assert!(e.sb.git_output(&e.main, &["init", "-q", "--bare", b.to_str().unwrap()]).status.success());
+    assert!(e.sb.git_output(&e.main, &["push", "-q", b.to_str().unwrap(), "main"]).status.success());
+    let b_url = b.display().to_string();
+    assert!(e.sb.git_output(&e.main, &["config", "remote.origin.pushurl", &b_url]).status.success());
+    assert_eq!(e.git.push_url("origin").unwrap(), b_url);
+    let c = e.publish(&e.head, "r4.txt");
+    assert_eq!(e.push("main", T), PushOutcome::Pushed);
+    let at_b = e.sb.git_output(&b, &["rev-parse", "refs/heads/main"]);
+    assert_eq!(String::from_utf8_lossy(&at_b.stdout).trim(), c, "the push went to the push URL");
+    assert_eq!(e.remote_branch("main").as_deref(), Some(e.head.as_str()), "not to the fetch URL");
+
+    let err = e.git.push_url("nope").unwrap_err();
+    assert_eq!(err.code, Code::InvalidInput, "{err:?}");
+    assert_eq!(err.detail.as_ref().unwrap()["reason"], "no-such-remote");
+    assert_eq!(e.git.push_url("-x").unwrap_err().code, Code::InvalidInput);
+}

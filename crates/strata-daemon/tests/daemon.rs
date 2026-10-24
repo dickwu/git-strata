@@ -926,6 +926,11 @@ fn rm_waits_for_publishing_in_the_lock_free_gap() {
 /// hook outlasts the push timeout) keeps its staging scene with a
 /// `push.json` record and reports `UnknownPush` — in this daemon and again
 /// after a restart. A later definite push of the chain settles it.
+///
+/// Review-3 R4: the record names the repository identity and origin's push
+/// URL. A definite push after origin's push URL was pointed at another
+/// bare remote B does not settle it; a definite push to the recorded
+/// destination does.
 #[test]
 fn standalone_push_unknown_keeps_scene_and_reports_across_restart() {
     let mut fx = Dfx::new();
@@ -958,6 +963,9 @@ fn standalone_push_unknown_keeps_scene_and_reports_across_restart() {
             assert_eq!(r["error"]["code"], "Unknown", "{r:#}");
             let scene = PathBuf::from(r["error"]["detail"]["scene"].as_str().expect("detail.scene"));
             assert!(scene.join("push.json").is_file(), "the attempt record is kept");
+            let rec: Value = serde_json::from_str(&fs::read_to_string(scene.join("push.json")).unwrap()).unwrap();
+            assert_eq!(rec["repo_id"], json!(git.repo_id().get().to_string_lossy()), "{rec:#}");
+            assert_eq!(rec["push_url"], json!(git.push_url("origin").unwrap()), "{rec:#}");
             let st = ok(call(&sock, "daemon_status", json!({ "verify": false })));
             let tip = git.read_ref(&strata_publish::chain_ref("main")).unwrap().unwrap();
             assert_eq!(scenes(&st), vec![json!({ "repo": "tool", "commit": tip, "scene": scene })], "{st:#}");
@@ -976,6 +984,31 @@ fn standalone_push_unknown_keeps_scene_and_reports_across_restart() {
     serving(&d, || {
         let st = ok(call(&sock, "daemon_status", json!({ "verify": false })));
         assert_eq!(scenes(&st), vec![json!({ "repo": "tool", "commit": tip, "scene": scene })], "{st:#}");
+        // Review-3 R4: the same repo, remote and branch, another destination.
+        let tool = fx.config.repos[&repo_name("tool")].path.clone();
+        let b = fx.sb.path("tool-b.git");
+        fx.sb.git(&fx.sb.root, &["clone", "-q", "--bare", hook.parent().unwrap().parent().unwrap().to_str().unwrap(), b.to_str().unwrap()]);
+        fx.sb.git(&tool, &["config", "remote.origin.pushurl", b.to_str().unwrap()]);
+        let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
+        assert_eq!(r["push"]["kind"], "Pushed", "{r:#}");
+        assert_eq!(fx.sb.git(&b, &["rev-parse", "refs/heads/main"]), tip.as_str(), "pushed to B");
+        let st = ok(call(&sock, "daemon_status", json!({ "verify": false })));
+        assert_eq!(scenes(&st), vec![json!({ "repo": "tool", "commit": tip, "scene": scene })], "{st:#}");
+        assert!(scene.exists(), "a push to another destination does not settle the scene");
+        // Back to the recorded destination (B's main mirrored to origin, so
+        // origin is not rewound): the next chain commit is pushed to origin
+        // and settles the scene.
+        fx.sb.git(&tool, &["config", "--unset", "remote.origin.pushurl"]);
+        let origin = hook.parent().unwrap().parent().unwrap().to_str().unwrap().to_string();
+        fx.sb.git(&b, &["push", "-q", &origin, "main"]);
+        let id = new_session(&sock);
+        external(&ws(&core, &id, "tool"), "printf 'export const a = 8\\n' > src/index.ts");
+        let cp = ok(call(&sock, "checkpoint", json!({
+            "session": id, "repo": "tool",
+            "reason": reason_json(CheckpointReason::Manual { message: "m2".into() }), "paths": [],
+        })));
+        let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+        ok(call(&sock, "publish", json!({ "group": group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]) })));
         let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
         assert_eq!(r["push"]["kind"], "Pushed", "{r:#}");
         let st = ok(call(&sock, "daemon_status", json!({ "verify": false })));

@@ -229,12 +229,19 @@ pub fn replay_base(git: &Git, chain: &PublishChain, c: &CommitOid) -> Result<Opt
 /// [实现时补的决定] (review-2 N4) The record also names the remote and the
 /// branch the push went to (`remote`, `branch`); only a definite push to the
 /// same repo, remote and branch settles it.
+///
+/// [实现时补的决定] (review-3 R4) It also names the repository's identity
+/// (`repo_id`, the realpath of its common git dir) and the push destination
+/// (`push_url`, `dest` read before the push; null when unreadable). Only a
+/// definite push whose `PushDest` equals both exactly settles it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn with_staging<T>(
     core: &Core,
     git: &Git,
     repo: &RepoName,
     branch: &str,
     tip: &CommitOid,
+    dest: Option<&PushDest>,
     uncertain: impl Fn(&Result<T>) -> bool,
     f: impl FnOnce(&Path) -> Result<T>,
 ) -> Result<T> {
@@ -242,7 +249,12 @@ pub(crate) fn with_staging<T>(
     let dir = core.config.paths.root.join(PUSH_SCENES).join(format!("{}-{stamp}", std::process::id()));
     fs::create_dir_all(&dir).map_err(|e| classify_io_error(&e, IoSide::Write, &dir))?;
     let intent = dir.join(SCENE_FILE);
-    let body = json!({ "repo": repo.as_str(), "commit": tip.as_str(), "remote": SCENE_REMOTE, "branch": branch }).to_string();
+    let body = json!({
+        "repo": repo.as_str(), "commit": tip.as_str(), "remote": SCENE_REMOTE, "branch": branch,
+        "repo_id": dest.map(|d| d.repo_id.get().to_string_lossy().into_owned()),
+        "push_url": dest.map(|d| d.push_url.as_str()),
+    })
+    .to_string();
     if let Err(e) = fs::write(&intent, body) {
         let _ = fs::remove_dir_all(&dir);
         return Err(classify_io_error(&e, IoSide::Write, &intent));
@@ -283,13 +295,33 @@ pub fn push_scenes(root: &Path) -> Vec<(RepoName, CommitOid, std::path::PathBuf)
     scene_records(root).into_iter().map(|s| (s.repo, s.commit, s.dir)).collect()
 }
 
+/// Review-3 R4: where a standalone or restore push goes — the repository's
+/// identity (`Git::repo_id`) and origin's effective push URL
+/// (`Git::push_url`, local config only). [实现时补的决定]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PushDest {
+    repo_id: strata_types::RepoId,
+    push_url: String,
+}
+
+/// The destination a push to origin from `git` goes to now; `None` when
+/// origin's push URL cannot be read (such a push fails, and its scene, if
+/// any, is never settled automatically).
+pub(crate) fn push_dest(git: &Git) -> Option<PushDest> {
+    let push_url = git.push_url(SCENE_REMOTE).ok()?;
+    Some(PushDest { repo_id: git.repo_id(), push_url })
+}
+
 /// One kept scene's record; `remote` / `branch` are `None` in a record
-/// written before review-2 N4 (never settled automatically).
+/// written before review-2 N4, `repo_id` / `push_url` in one written before
+/// review-3 R4 (neither is ever settled automatically).
 struct SceneRecord {
     repo: RepoName,
     commit: CommitOid,
     remote: Option<String>,
     branch: Option<String>,
+    repo_id: Option<String>,
+    push_url: Option<String>,
     dir: std::path::PathBuf,
 }
 
@@ -304,7 +336,15 @@ fn scene_records(root: &Path) -> Vec<SceneRecord> {
         let commit = v["commit"].as_str().and_then(|c| serde_json::from_value::<CommitOid>(json!(c)).ok());
         let text_of = |k: &str| v[k].as_str().map(str::to_string);
         if let (Some(repo), Some(commit)) = (repo, commit) {
-            out.push(SceneRecord { repo, commit, remote: text_of("remote"), branch: text_of("branch"), dir });
+            out.push(SceneRecord {
+                repo,
+                commit,
+                remote: text_of("remote"),
+                branch: text_of("branch"),
+                repo_id: text_of("repo_id"),
+                push_url: text_of("push_url"),
+                dir,
+            });
         }
     }
     out.sort_by(|a, b| a.dir.cmp(&b.dir));
@@ -317,9 +357,24 @@ fn scene_records(root: &Path) -> Vec<SceneRecord> {
 /// has the commit now — so their directory and warning go. Scenes of other
 /// branches, of commits not contained, and records without a remote and
 /// branch stay [实现时补的决定].
-pub(crate) fn settle_push_scenes(core: &Core, git: &Git, repo: &RepoName, branch: &str, pushed: &CommitOid) {
+///
+/// [实现时补的决定] (review-3 R4) `dest` is the destination read before
+/// the push; it must still be the destination now (origin's push URL did
+/// not change around the push), and a scene settles only when its recorded
+/// `repo_id` and `push_url` equal it exactly (byte-for-byte strings: an
+/// alias of the same remote does not settle). A record without them stays.
+pub(crate) fn settle_push_scenes(core: &Core, git: &Git, repo: &RepoName, branch: &str, pushed: &CommitOid, dest: Option<&PushDest>) {
+    let Some(dest) = dest else { return };
+    if push_dest(git).as_ref() != Some(dest) {
+        return;
+    }
+    let repo_id = dest.repo_id.get().to_string_lossy();
     for s in scene_records(&core.config.paths.root) {
-        let same = s.repo == *repo && s.remote.as_deref() == Some(SCENE_REMOTE) && s.branch.as_deref() == Some(branch);
+        let same = s.repo == *repo
+            && s.remote.as_deref() == Some(SCENE_REMOTE)
+            && s.branch.as_deref() == Some(branch)
+            && s.repo_id.as_deref() == Some(&*repo_id)
+            && s.push_url.as_deref() == Some(dest.push_url.as_str());
         if !same || !git.is_ancestor(&s.commit, pushed).unwrap_or(false) {
             continue;
         }
@@ -421,7 +476,8 @@ pub fn chain_resolve(
                 // commit is `Unknown` and nothing local moved.
                 let verify = [RefUpdate::verify(&chain_name, Some(c.clone()))];
                 let uncertain = |r: &Result<PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
-                let outcome = with_staging(core, git, repo, &branch, &c, uncertain, |wt| {
+                let dest = push_dest(git);
+                let outcome = with_staging(core, git, repo, &branch, &c, dest.as_ref(), uncertain, |wt| {
                     crate::handlers::writing();
                     match git.push_recorded(wt, "origin", &chain_name, &branch, &anchor_name, &verify, PUSH_TIMEOUT)? {
                         PushOutcome::Unknown => Err(StrataError::new(Code::Unknown, "the push outcome is unknown; not pushed again")
@@ -443,7 +499,7 @@ pub fn chain_resolve(
                 done.pushed = true;
                 done.anchor = c.as_str().to_string();
                 // Review-2 N4: a definite restore push settles kept scenes too.
-                settle_push_scenes(core, git, repo, &branch, &c);
+                settle_push_scenes(core, git, repo, &branch, &c, dest.as_ref());
             }
             ChainChoice::AcceptOriginDrop => {
                 transaction(git, &[RefUpdate::set(&chain_name, o.clone(), Some(c.clone())), RefUpdate::set(&anchor_name, o.clone(), a)])?;
