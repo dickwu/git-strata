@@ -383,6 +383,10 @@ impl<'a> Daemon<'a> {
             }
             core.warnings.add(DaemonWarning::UnknownPublish { id });
         }
+        // Review M6: kept scenes of uncertain standalone/restore pushes.
+        for (repo, commit, scene) in crate::resolve::push_scenes(&core.config.paths.root) {
+            core.warnings.add(DaemonWarning::UnknownPush { repo, commit, scene });
+        }
         // 11. Quarantine and non-directory worktrees.
         for path in quarantine_entries(&core.config.paths.root) {
             core.warnings.add(DaemonWarning::Quarantine { path });

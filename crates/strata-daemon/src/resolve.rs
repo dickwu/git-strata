@@ -24,7 +24,7 @@ use strata_types::{Action, Code, CommitOid, PushOutcome, RepoName, SessionId, St
 use crate::confirm_flow::{needs_confirm, recheck, require_validated};
 use crate::fetch_after::observe_if_moved;
 use crate::startup::Core;
-use crate::{ChainChoice, Result};
+use crate::{ChainChoice, DaemonWarning, Result};
 
 /// Exactly one of `abandon` / `accept`; anything else is no choice (the
 /// RPC layer already answers it `Failed`).
@@ -177,10 +177,33 @@ pub fn replay_base(git: &Git, chain: &PublishChain, c: &CommitOid) -> Result<Opt
 
 /// A staging tree attached at `tip` under `<root>/daemon/push/`, removed
 /// afterwards whatever `f` returned.
-pub(crate) fn with_staging<T>(core: &Core, git: &Git, repo: &RepoName, tip: &CommitOid, f: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+///
+/// Review M6 (design.md §9 invariant 6: an uncertain push keeps its scene,
+/// is not replayed and is reported). [实现时补的决定] Before anything is
+/// exported the directory gets `push.json` (`repo`, `commit`): a durable
+/// record of the attempt. When `uncertain(&result)` holds (a push whose
+/// outcome is unknown) the directory is kept, an `UnknownPush` warning is
+/// raised and an error result carries `detail.scene`; a restart reports
+/// every kept scene again (`push_scenes`). Otherwise the directory is
+/// removed. A later definite `Pushed` of a commit that contains the
+/// scene's commit settles it (`settle_push_scenes`).
+pub(crate) fn with_staging<T>(
+    core: &Core,
+    git: &Git,
+    repo: &RepoName,
+    tip: &CommitOid,
+    uncertain: impl Fn(&Result<T>) -> bool,
+    f: impl FnOnce(&Path) -> Result<T>,
+) -> Result<T> {
     let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let dir = core.config.paths.root.join("daemon/push").join(format!("{}-{stamp}", std::process::id()));
+    let dir = core.config.paths.root.join(PUSH_SCENES).join(format!("{}-{stamp}", std::process::id()));
     fs::create_dir_all(&dir).map_err(|e| classify_io_error(&e, IoSide::Write, &dir))?;
+    let intent = dir.join(SCENE_FILE);
+    let body = json!({ "repo": repo.as_str(), "commit": tip.as_str() }).to_string();
+    if let Err(e) = fs::write(&intent, body) {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(classify_io_error(&e, IoSide::Write, &intent));
+    }
     let r = (|| {
         let wt = dir.join(repo.as_str());
         let gd = dir.join(format!(".git-{repo}"));
@@ -188,8 +211,60 @@ pub(crate) fn with_staging<T>(core: &Core, git: &Git, repo: &RepoName, tip: &Com
         git.attach_staging(&wt, &gd, tip)?;
         f(&wt)
     })();
+    if uncertain(&r) {
+        core.warnings.add(DaemonWarning::UnknownPush { repo: repo.clone(), commit: tip.clone(), scene: dir.clone() });
+        return r.map_err(|mut e| {
+            let mut d = e.detail.take().unwrap_or_else(|| json!({}));
+            if let Some(m) = d.as_object_mut() {
+                m.insert("scene".into(), json!(dir.to_string_lossy()));
+            }
+            e.with_detail(d)
+        });
+    }
     let _ = fs::remove_dir_all(&dir);
     r
+}
+
+/// Where standalone and restore pushes stage (under `paths.root`).
+pub(crate) const PUSH_SCENES: &str = "daemon/push";
+/// The attempt record inside a push directory.
+const SCENE_FILE: &str = "push.json";
+
+/// Review M6: every kept push scene under `root` (`repo`, `commit`, the
+/// directory), for the startup report. A directory without a readable
+/// record is skipped (nothing was pushed from it: the record is written
+/// before the export).
+pub fn push_scenes(root: &Path) -> Vec<(RepoName, CommitOid, std::path::PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(rd) = fs::read_dir(root.join(PUSH_SCENES)) else { return out };
+    for e in rd.flatten() {
+        let dir = e.path();
+        let Ok(text) = fs::read_to_string(dir.join(SCENE_FILE)) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+        let repo = v["repo"].as_str().and_then(|r| serde_json::from_value::<RepoName>(json!(r)).ok());
+        let commit = v["commit"].as_str().and_then(|c| serde_json::from_value::<CommitOid>(json!(c)).ok());
+        if let (Some(repo), Some(commit)) = (repo, commit) {
+            out.push((repo, commit, dir));
+        }
+    }
+    out.sort_by(|a, b| a.2.cmp(&b.2));
+    out
+}
+
+/// Review M6: after a definite `Pushed` of `pushed` on `repo`, the kept
+/// scenes of `repo` whose commit `pushed` contains are settled — the
+/// remote has that commit now — so their directory and warning go.
+/// Scenes of commits not contained stay.
+pub(crate) fn settle_push_scenes(core: &Core, git: &Git, repo: &RepoName, pushed: &CommitOid) {
+    for (r, c, dir) in push_scenes(&core.config.paths.root) {
+        if r != *repo || !git.is_ancestor(&c, pushed).unwrap_or(false) {
+            continue;
+        }
+        if fs::remove_dir_all(&dir).is_ok() {
+            let gone = DaemonWarning::UnknownPush { repo: r, commit: c, scene: dir };
+            core.warnings.remove(|w| *w == gone);
+        }
+    }
 }
 
 /// `deps::observe_main` for `tip` of `repo`: its tree exported to a
@@ -277,7 +352,7 @@ pub fn chain_resolve(
                     }
                 }
                 // 8. Push the chain tip; only `Pushed` reaches the transaction.
-                let outcome = with_staging(core, git, repo, &c, |wt| {
+                let outcome = with_staging(core, git, repo, &c, |r| matches!(r, Ok(PushOutcome::Unknown)), |wt| {
                     crate::handlers::writing();
                     git.push(wt, "origin", &chain_name, &branch, PUSH_TIMEOUT)
                 })?;

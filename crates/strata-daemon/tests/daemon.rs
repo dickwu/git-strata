@@ -658,3 +658,65 @@ fn rm_waits_for_publishing_in_the_lock_free_gap() {
     });
     assert_eq!(log.shown().len(), 1, "the discard prompted once");
 }
+
+/// Review M6: a standalone `push` whose outcome is unknown (the origin's
+/// hook outlasts the push timeout) keeps its staging scene with a
+/// `push.json` record and reports `UnknownPush` — in this daemon and again
+/// after a restart. A later definite push of the chain settles it.
+#[test]
+fn standalone_push_unknown_keeps_scene_and_reports_across_restart() {
+    let mut fx = Dfx::new();
+    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.push = false;
+    fx.write_config();
+    let sock = fx.socket();
+    let hook = fx.sb.path("tool-origin.git/hooks/pre-receive");
+    let scenes = |v: &Value| -> Vec<Value> {
+        v["warnings"].as_array().unwrap().iter().filter_map(|w| w.get("UnknownPush").cloned()).collect()
+    };
+    let t0;
+    let (tip, scene) = {
+        let core = fx.prepare().unwrap();
+        let d = Daemon::start(&core).unwrap();
+        let git = core.gits[&repo_name("tool")].clone();
+        let r = serving(&d, || {
+            let id = new_session(&sock);
+            external(&ws(&core, &id, "tool"), "printf 'export const a = 7\\n' > src/index.ts");
+            let cp = ok(call(&sock, "checkpoint", json!({
+                "session": id, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+            })));
+            let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+            ok(call(&sock, "publish", json!({ "group": group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]) })));
+            fs::write(&hook, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
+            fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            strata_publish::seams::set_push_timeout(&git, Some(Duration::from_millis(300)));
+            let r = call(&sock, "push", json!({ "repo": "tool" }));
+            strata_publish::seams::set_push_timeout(&git, None);
+            assert_eq!(r["error"]["code"], "Unknown", "{r:#}");
+            let scene = PathBuf::from(r["error"]["detail"]["scene"].as_str().expect("detail.scene"));
+            assert!(scene.join("push.json").is_file(), "the attempt record is kept");
+            let st = ok(call(&sock, "daemon_status", json!({ "verify": false })));
+            let tip = git.read_ref(&strata_publish::chain_ref("main")).unwrap().unwrap();
+            assert_eq!(scenes(&st), vec![json!({ "repo": "tool", "commit": tip, "scene": scene })], "{st:#}");
+            (tip, scene)
+        });
+        t0 = Instant::now();
+        drop(d);
+        core.close().unwrap();
+        r
+    };
+    // The hook's push ends; then a restart reports the kept scene again.
+    std::thread::sleep(Duration::from_secs(3).saturating_sub(t0.elapsed()));
+    fs::remove_file(&hook).unwrap();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    serving(&d, || {
+        let st = ok(call(&sock, "daemon_status", json!({ "verify": false })));
+        assert_eq!(scenes(&st), vec![json!({ "repo": "tool", "commit": tip, "scene": scene })], "{st:#}");
+        let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
+        assert_eq!(r["push"]["kind"], "Pushed", "{r:#}");
+        let st = ok(call(&sock, "daemon_status", json!({ "verify": false })));
+        assert!(scenes(&st).is_empty(), "{st:#}");
+        assert!(!scene.exists(), "a definite push of the chain settles the scene");
+    });
+}

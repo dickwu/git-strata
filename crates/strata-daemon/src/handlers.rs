@@ -1052,20 +1052,18 @@ impl<'d, 'a> Server<'d, 'a> {
                 return Err(StrataError::new(Code::NoCommit, format!("the publish chain of {repo} has no commit to push"))
                     .with_detail(json!({ "repo": repo.as_str() })));
             };
-            let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-            let dir = core.config.paths.root.join("daemon/push").join(format!("{}-{stamp}", std::process::id()));
-            fs::create_dir_all(&dir).map_err(|e| classify_io_error(&e, IoSide::Write, &dir))?;
-            let r = (|| {
-                let wt = dir.join(repo.as_str());
-                let gd = dir.join(format!(".git-{repo}"));
-                git.export_tree(&git.tree_of(&tip)?, &wt)?;
-                git.attach_staging(&wt, &gd, &tip)?;
+            // Review M6: the scene is kept (and reported) when the outcome
+            // is unknown; see `resolve::with_staging`.
+            let uncertain = |r: &Result<strata_types::PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
+            let r = resolve::with_staging(core, git, repo, &tip, uncertain, |wt| {
                 writing();
-                strata_publish::push(git, &rc, repo, &wt, token)
-            })();
-            let _ = fs::remove_dir_all(&dir);
+                strata_publish::push(git, &rc, repo, wt, token)
+            });
             if r.as_ref().is_err_and(|e| e.code == Code::Unknown) {
                 self.report_unknown();
+            }
+            if matches!(r, Ok(strata_types::PushOutcome::Pushed)) {
+                resolve::settle_push_scenes(core, git, repo, &tip);
             }
             Ok(json!({ "push": json_of(&r?), "commit": tip.as_str() }))
         })

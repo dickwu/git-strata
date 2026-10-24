@@ -1336,7 +1336,7 @@ store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkp
 
 1. `root` 必须是绝对路径，否则 `InvalidInput`。
 2. 同卷检查，不写任何东西：对每个 checkout 调 `apfs::same_volume(&apfs::nearest_existing_ancestor(root)?, checkout)`（config.md §4.3；M17 之后"最近的已存在上级"由 apfs 的这个助手找，store 不自己往上找）。任一为假 → `CrossVolume`；checkout 不存在 → `NoSuchPath`；其余 `io::Error` 经 `apfs::classify_io_error`（读的一侧）归类。
-3. 看 `<root>`：不存在、是空目录、或只含 `store`、`bases`、`deps`、`sessions` 这几个名字，就继续；有任何别的条目 → `NotEmpty`（`detail.entries` 列出前五个）。
+3. 看 `<root>`：不存在、是空目录、或只含 `store`、`bases`、`deps`、`sessions`、`daemon` 这几个名字，就继续（`daemon` 是 daemon 的暂存与保留的推送现场；不收它的话，单独推送或 approve 之后 daemon 再也起不来。review M6 时发现，[实现时补的决定]）；有任何别的条目 → `NotEmpty`（`detail.entries` 列出前五个）。
 4. `<root>/store/store.db` 已存在 → 走 §5.2。不存在、而 `bases/`、`deps/`、`sessions/` 里有条目 → `Corrupt`（`store_db_missing`）[我的决定]：这是丢了库，不是第一次打开；悄悄建一个空库会让已有的会话失去记录。
 5. 建 `<root>`、`store/`、`store/tmp/`，打开 `LOCK` 并取得 L1（拿不到 → `Busy`，同 §5.2 第 1 步）。取得之后再看一次 `store.db`：另一个进程可能刚建完。
 6. 探测 clonefile：在 `store/tmp/` 建一个探测文件，用 `apfs::clone_file` 克隆一次，随后删掉这两个文件。克隆返回 `Unsupported`（卷不是 APFS，或不支持克隆）时，store 用 `rmdir` 删掉本次调用自己刚建的空目录（只删空目录，从不递归），放开 L1，原样返回 `Unsupported` [我的决定]。这样类型化的拒绝之后没有净写入，符合"类型化拒绝只发生在写任何东西之前"的裁定。

@@ -179,6 +179,8 @@ pub enum DaemonWarning {
     VerifyFailed { message: String },
     /// 锚点事务比较并交换两次仍没写成。下次 fetch 再试。
     AnchorNotAdvanced { repo: RepoName },
+    /// 单独 `push`（或 restore）的推送结果不确定：暂存目录 `scene`（含 `push.json`）保留。review M6 [实现时补的决定]
+    UnknownPush { repo: RepoName, commit: CommitOid, scene: PathBuf },
 }
 
 /// 谁持着哪把锁。status 在持有超过 LOCK_WAIT 时带上；daemon_status 总是带上。
@@ -396,6 +398,8 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 **`publish`**：见 §5.6。
 
 **`push`**：按钉住的值要确认才弹框，action 是 `PushDeploy { repo, branch }`。核对的链顶是 cli 展示给人、随请求发来的 `shown`，不是 daemon 自己在弹框前读的那个（D21）。不占会话队列（不碰工作区）。拿 repo 锁。锁里再对 action，并核对链顶没变；变了 → `NotConfirmed`，不推，人重新确认（confirm.md §5.1 末尾交给本文的缺口）。然后 `publish::push`。`PushOutcome::Pushed` 之后，若 `publish::push` 还没把链和锚点写成那个 commit，daemon 在同一把锁里调用 publish.md @df9f069 §2 第 3 条的那一次 ref 事务，把两者一起设上。不拆成两次 `update_ref`。放开之后 §5.7。
+
+实现（review M6）：单独 `push` 与 restore 的暂存目录 `<root>/daemon/push/<pid>-<ns>/` 在导出之前先写 `push.json`（`repo`、`commit`），作为这次尝试的持久记录。结果确定（`Pushed`、`PushRefused` 等）就删掉目录；结果不确定（`Unknown`）就保留目录，告警 `UnknownPush { repo, commit, scene }`，错误的 `detail.scene` 给出路径；重启时扫描这些目录再报一次。不重推。之后同一 repo 一次确定的 `Pushed`，其 commit 包含现场的 commit 时，现场算结清，删目录、撤告警。store 的 open 因此把 `daemon` 列为 root 里允许的名字（store.md §5.1 第 3 步）。[实现时补的决定]
 
 **`assign`**：拿该 repo 的写锁，调 `publish::assign`。不占队列，不确认，不推送。
 

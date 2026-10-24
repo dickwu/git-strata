@@ -206,6 +206,9 @@ All three keys are always present; `data` is never null. Branch on
    Commits come from `publish`; pushes from `git-strata push` / publish.
 4. Do not push unless the human asked for it.
 5. After `Unknown`, do not replay, `gc` or `rm`; leave the scene for the human.
+   A standalone `push` that ends `Unknown` keeps its staging directory
+   (`error.detail.scene`) and `daemon status` lists it as `UnknownPush`,
+   also after a restart, until a later definite push of the chain settles it.
 6. Only work in your own session; use `--session` / `--all` to read others.
 
 ## Troubleshooting

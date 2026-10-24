@@ -23,7 +23,11 @@ use crate::schema::{APPLICATION_ID, DDL, USER_VERSION};
 use crate::seams::{self, Seam, Seams};
 use crate::{Result, Store};
 
-pub(crate) const LAYOUT_NAMES: [&str; 4] = ["store", "bases", "deps", "sessions"];
+/// The names `open` accepts in `<root>`. `daemon` is the daemon's scratch
+/// and kept push scenes (`<root>/daemon/{push,observe,approve}`): without
+/// it, any daemon start after a standalone push or an approve was refused
+/// `NotEmpty` (found with review M6) [实现时补的决定].
+pub(crate) const LAYOUT_NAMES: [&str; 5] = ["store", "bases", "deps", "sessions", "daemon"];
 const MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const READER_BUSY_MS: u64 = 2000;
 

@@ -101,6 +101,9 @@ pub enum DaemonWarning {
     StorePoisoned,
     VerifyFailed { message: String },
     AnchorNotAdvanced { repo: RepoName },
+    /// Review M6: a standalone (or restore) push whose outcome is unknown;
+    /// its staging directory `scene` (with `push.json`) is kept.
+    UnknownPush { repo: RepoName, commit: strata_types::CommitOid, scene: PathBuf },
 }
 
 /// One held repo write lock (status / daemon_status).
