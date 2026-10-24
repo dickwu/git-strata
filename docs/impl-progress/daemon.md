@@ -156,10 +156,9 @@ Not merged.
 - **Multi-repo publish** runs repos in name order and stops at the first
   error; the error detail carries `published_before`. An `Unknown` result
   adds an `UnknownPublish` warning per Unknown open row (never retried).
-- **Not wired (deviation):** `deps_propose` / `deps_approve` reply RPC
-  `Failed` "not served yet" (the deps install-and-propose flow through the
-  daemon is more than Task 6's minimal implementation; deps' own API is
-  tested in its crate). `resolve_move` / `chain_resolve` come in Task 7.
+- **deps_propose / deps_approve** were first left unwired ("not served
+  yet"); they are wired on impl/cli for the cli (see "cli follow-up"
+  below). `resolve_move` / `chain_resolve` come in Task 7.
 - **Handler-level lock tests.** Task 2 said the RPC-level versions of the
   lock tests would be in tests/daemon.rs; §8 Task 6 lists only the four
   tests below, so those were not added (the lock behaviour is covered by
@@ -325,7 +324,7 @@ push.
 `resolve.rs`: `move_choice`, `wait_not_publishing`, `resolve_move`,
 `chain_resolve` (+ `ChainResolved`), `replay_base`, `observe_tip`,
 `with_staging`; wired into `Server::handle` (deps_propose / deps_approve
-still answer "not served yet", see above). gitio: `Git::replay_commits`
+then still answered "not served yet"; wired later, see "cli follow-up"). gitio: `Git::replay_commits`
 (D18) with tests/replay.rs (6).
 tests/resolve.rs (8): exclusive choice (both / neither → RPC `Failed`,
 session untouched); no TTY/confirm (empty verdict script, no prompt, no
@@ -342,3 +341,34 @@ the repo lock (not a fork → refused with no fetch; healed by the fetch in
 the lock → refused, no transaction; lock held → `Busy lock_wait` with no
 git write; over the socket, a bad choice → `Failed`, Drop works); publish
 calls `publish::publish`, never `stage`. Every remote is a local bare repo.
+
+## cli follow-up (impl/cli)
+
+- `no daemon` from the client is `Busy daemon_down` (cli.md D2), f19e18f.
+- `deps_propose` / `deps_approve` served per deps.md §5.12.
+  - propose: `drift` (none → `{proposal:null, drift:null, switched:null}`),
+    `build` outside the lock, `propose` under the repo lock (origin
+    Session, no target). With `switch`: `ensure_base_for` outside the
+    locks (plain `Busy` retried), session queue + repo lock,
+    `plan_switch`, `move_workspace`; no confirmation. Reply
+    `{proposal, drift, switched: null | [step result]}`.
+  - approve: `get_proposal` not Pending → `NoSuchProposal`
+    `{proposal, state}` before any prompt; `require_validated(DepsApprove)`;
+    a missing target set → export the tree under
+    `<root>/daemon/approve/<pid>-<ns>` (removed after) and `ensure_target`;
+    `Replaced` → `NoSuchProposal` `{proposal, state, replacement}` with
+    nothing moved (never auto-approved); `ensure_base_for`; queues of every
+    live session on the repo (or `sessions`, each must be live on the repo
+    else `NoSuchSession`) ascending, repo lock, `recheck`, re-read the
+    proposal, `plan_rollout(complete = sessions is null)`,
+    `move_workspace` per Move, `record_rollout`. Reply
+    `{results:[{session, kind:"moved", report} | {session, kind:"skipped",
+    code?, detail}], proposal}`; a failed move is a skip with its code
+    (OpenFiles/Drift/Error carry a code; Untracked/AlreadyThere/NotReady/
+    OwnChange do not). Moved sessions' trackers are restarted.
+- `strata_daemon::seams` (feature `test-seams`) re-exports the confirm
+  seams for the cli's end-to-end tests.
+- tests/deps.rs (4): unknown proposal refused with no prompt; no drift →
+  nothing recorded; drift → AwaitingPublish, approve of it refused with
+  its state and no prompt; `switch` moves the proposer (same tree, new
+  deps set) with no prompt.
