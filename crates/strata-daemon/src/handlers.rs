@@ -199,6 +199,16 @@ impl OverlaySource for Trackers<'_> {
     }
 }
 
+/// `NoSuchProposal` for a proposal that is no longer Pending; `detail.state`
+/// is its state, plus the replacement when `ensure_target` filed one.
+fn not_pending(p: &strata_deps::Proposal, replacement: Option<&strata_deps::Proposal>) -> StrataError {
+    let mut d = json!({ "proposal": p.id.get(), "state": json_of(&p.state) });
+    if let Some(r) = replacement {
+        d["replacement"] = json_of(r);
+    }
+    StrataError::new(Code::NoSuchProposal, format!("proposal {} is not pending", p.id.get())).with_detail(d)
+}
+
 // ---- the server ------------------------------------------------------------
 
 /// The handlers over one running [`Daemon`].
@@ -246,9 +256,6 @@ impl<'d, 'a> Server<'d, 'a> {
     /// One request: scope, handler, panic → `Failed` / `Unknown`.
     pub fn handle(&self, req: Request) -> Reply {
         let name = req.method.name();
-        if matches!(req.params, Params::DepsPropose(_) | Params::DepsApprove(_)) {
-            return Reply::rejected(&req.id, RpcReject::Failed, format!("{name} is not served yet"));
-        }
         let _scope = RequestScope::begin(name, session_of(&req.params));
         WRITING.with(|w| w.set(false));
         let r = catch_unwind(AssertUnwindSafe(|| self.dispatch(&req.params)));
@@ -417,9 +424,8 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
                 Ok(json_of(&r?))
             }
-            Params::DepsPropose(_) | Params::DepsApprove(_) => {
-                Err(StrataError::new(Code::InvalidInput, "not served yet"))
-            }
+            Params::DepsPropose(p) => self.deps_propose(&p.session, &p.repo, p.switch),
+            Params::DepsApprove(p) => self.deps_approve(p.proposal, p.sessions.as_deref()),
         }
     }
 
@@ -553,6 +559,216 @@ impl<'d, 'a> Server<'d, 'a> {
             .map(|h| json!({ "session": h.session.as_str(), "repo": h.repo.as_str(), "path": h.path.as_str(), "line": h.line, "text": h.text }))
             .collect();
         Ok(json!({ "hits": hits, "skipped": skipped }))
+    }
+
+    /// deps.md §5.12 propose: drift → build outside the lock → `propose`
+    /// under the repo lock; with `switch`, the proposer's own move
+    /// (`plan_switch`, no confirmation). No drift: `proposal` is null.
+    fn deps_propose(&self, s: &SessionId, repo: &RepoName, switch: bool) -> Result<Value> {
+        let core = self.core();
+        let ws = workspace(core, s, repo)?;
+        let rc = effective_cfg(core, repo)?;
+        let git = git_of(core, repo)?;
+        let ctx = strata_deps::Ctx {
+            store: &core.store,
+            paths: &core.config.paths,
+            repo,
+            cfg: &rc,
+            git,
+            env: &core.env,
+            locks: &core.locks,
+        };
+        let Some(pinned) = strata_deps::find_set(&core.store, repo, &ws.base.deps)? else {
+            return Err(StrataError::new(Code::Corrupt, format!("the pinned deps set {} has no record", ws.base.deps.as_str()))
+                .with_detail(json!({ "repo": repo.as_str(), "set": ws.base.deps.as_str() })));
+        };
+        // 1.
+        let Some(drift) = strata_deps::drift(&rc, git, &ws.path, &pinned)? else {
+            return Ok(json!({ "proposal": null, "drift": null, "switched": null }));
+        };
+        // 2. Outside the lock: the deps set of the workspace's inputs.
+        writing();
+        let set = strata_deps::build(&ctx, &core.store.base_dir(&ws.base), Some(&ws.path))?;
+        // 3.
+        let p = core.locks.with_repo(repo, || {
+            strata_deps::propose(
+                &ctx,
+                strata_deps::ProposeArgs {
+                    origin: strata_deps::ProposalOrigin::Session { session: s.clone() },
+                    from: ws.base.deps.clone(),
+                    from_inputs: pinned.inputs_hash.clone(),
+                    to: set.id.clone(),
+                    to_inputs: set.inputs_hash.clone(),
+                    tree: None,
+                    head: None,
+                },
+            )
+        })?;
+        // 4.
+        let switched = if switch {
+            let target_tree = match &p.state {
+                strata_deps::ProposalState::Pending => p.tree.clone().unwrap_or_else(|| ws.base.tree.clone()),
+                _ => ws.base.tree.clone(),
+            };
+            self.base_for(repo, &target_tree, &p.to)?;
+            let repo_id = git.repo_id();
+            let r = core.locks.with_sessions(std::slice::from_ref(s), || {
+                core.locks.with_repo(repo, || {
+                    let ws = workspace(core, s, repo)?;
+                    let plan = strata_deps::plan_switch(&ctx, p.id, s, &ws)?;
+                    let mut out = Vec::new();
+                    for step in &plan.steps {
+                        out.push(self.apply_step(step, &repo_id, repo, &mut Vec::new()));
+                    }
+                    Ok(out)
+                })
+            })?;
+            Value::Array(r)
+        } else {
+            Value::Null
+        };
+        Ok(json!({ "proposal": json_of(&p), "drift": json_of(&drift), "switched": switched }))
+    }
+
+    /// deps.md §5.12 approve: refusal before the prompt, the prompt, the
+    /// target outside the lock, then queues → repo lock → plan → moves →
+    /// record. A replaced proposal moves nothing and is `NoSuchProposal`
+    /// with the replacement in `detail` (cli.md §5: never auto-approved).
+    fn deps_approve(&self, id: strata_types::ProposalId, only: Option<&[SessionId]>) -> Result<Value> {
+        let core = self.core();
+        // 1.
+        let p = strata_deps::get_proposal(&core.store, id)?;
+        if p.state != strata_deps::ProposalState::Pending {
+            return Err(not_pending(&p, None));
+        }
+        let repo = p.repo.clone();
+        // 2.
+        let action = Action::DepsApprove { proposal: id };
+        let token = require_validated(&core.confirmer, action.clone())?;
+        let rc = effective_cfg(core, &repo)?;
+        let git = git_of(core, &repo)?;
+        let ctx = strata_deps::Ctx {
+            store: &core.store,
+            paths: &core.config.paths,
+            repo: &repo,
+            cfg: &rc,
+            git,
+            env: &core.env,
+            locks: &core.locks,
+        };
+        let Some(tree) = p.tree.clone() else {
+            return Err(StrataError::new(Code::InvalidInput, "a pending proposal without a target")
+                .with_detail(json!({ "reason": "no_target", "proposal": id.get() })));
+        };
+        // 3. Outside the lock.
+        if strata_deps::find_set(&core.store, &repo, &p.to)?.is_none() {
+            let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            let dir = core.config.paths.root.join("daemon/approve").join(format!("{}-{stamp}", std::process::id()));
+            fs::create_dir_all(&dir).map_err(|e| classify_io_error(&e, IoSide::Write, &dir))?;
+            let wt = dir.join(repo.as_str());
+            let r = git.export_tree(&tree, &wt).and_then(|_| {
+                writing();
+                strata_deps::ensure_target(&ctx, id, &wt)
+            });
+            let _ = fs::remove_dir_all(&dir);
+            match r? {
+                strata_deps::Target::Ready { .. } => {}
+                strata_deps::Target::Replaced { superseded, replacement } => {
+                    let now = strata_deps::get_proposal(&core.store, superseded)?;
+                    return Err(not_pending(&now, Some(&replacement)));
+                }
+            }
+        }
+        self.base_for(&repo, &tree, &p.to)?;
+        // 4.
+        let mut ids: Vec<SessionId> = core
+            .store
+            .sessions()?
+            .into_iter()
+            .filter(|r| r.lifecycle != strata_store::Lifecycle::Removed && r.manifest.repos.contains_key(&repo))
+            .map(|r| r.manifest.id)
+            .collect();
+        let complete = only.is_none();
+        if let Some(only) = only {
+            for s in only {
+                if !ids.contains(s) {
+                    return Err(StrataError::new(Code::NoSuchSession, format!("no session {s} on {repo}"))
+                        .with_detail(json!({ "session": s.as_str(), "repo": repo.as_str() })));
+                }
+            }
+            ids = only.to_vec();
+        }
+        ids.sort();
+        ids.dedup();
+        let repo_id = git.repo_id();
+        core.locks.with_sessions(&ids, || {
+            core.locks.with_repo(&repo, || {
+                recheck(&token, &action)?;
+                let cur = strata_deps::get_proposal(&core.store, id)?;
+                if cur.state != strata_deps::ProposalState::Pending {
+                    return Err(not_pending(&cur, None));
+                }
+                // 5.
+                let mut list = Vec::new();
+                for s in &ids {
+                    list.push((s.clone(), workspace(core, s, &repo)?));
+                }
+                let plan = strata_deps::plan_rollout(&ctx, id, &list, complete)?;
+                // 6.
+                writing();
+                let mut moved = Vec::new();
+                let results: Vec<Value> = plan.steps.iter().map(|st| self.apply_step(st, &repo_id, &repo, &mut moved)).collect();
+                // 7.
+                let after = strata_deps::record_rollout(&core.store, &plan, &moved)?;
+                Ok(json!({ "results": results, "proposal": json_of(&after) }))
+            })
+        })
+    }
+
+    /// One rollout step: a move (`moved`) or a per-entry skip; a failed
+    /// move is a skip with its code, never the whole call's failure.
+    fn apply_step(&self, step: &strata_deps::RolloutStep, repo_id: &strata_types::RepoId, repo: &RepoName, moved: &mut Vec<SessionId>) -> Value {
+        match step {
+            strata_deps::RolloutStep::Move { session, new_base, head } => {
+                match self.d.sessions.move_workspace(session, repo_id, new_base.clone(), head.clone()) {
+                    Ok(r) => {
+                        moved.push(session.clone());
+                        self.trackers.restart(session, repo);
+                        json!({ "session": session.as_str(), "kind": "moved", "report": json_of(&r) })
+                    }
+                    Err(e) => json!({
+                        "session": session.as_str(), "kind": "skipped", "code": e.code.as_str(),
+                        "detail": e.detail.clone().unwrap_or_else(|| json!({ "message": e.message })),
+                    }),
+                }
+            }
+            strata_deps::RolloutStep::Skip { session, reason } => {
+                let code = match reason {
+                    strata_deps::SkipReason::OpenFiles { .. } => Some(Code::OpenFiles),
+                    strata_deps::SkipReason::Drift { .. } => Some(Code::Drift),
+                    strata_deps::SkipReason::Error { error } => Some(error.code),
+                    _ => None,
+                };
+                let mut v = json!({ "session": session.as_str(), "kind": "skipped", "detail": json_of(reason) });
+                if let Some(c) = code {
+                    v["code"] = json!(c.as_str());
+                }
+                v
+            }
+        }
+    }
+
+    /// `ensure_base_for` outside the locks; a plain lock `Busy` (no
+    /// reason) is asked again, as publish's `base_for` does.
+    fn base_for(&self, repo: &RepoName, tree: &strata_types::TreeOid, deps: &strata_types::DepsSetId) -> Result<BaseGen> {
+        loop {
+            match self.d.sessions.ensure_base_for(repo, tree, deps) {
+                Err(e) if e.code == Code::Busy && e.detail.as_ref().and_then(|d| d.get("reason")).is_none() => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                r => return r,
+            }
+        }
     }
 
     fn with_publish_ctx<T>(&self, repo: &RepoName, f: impl FnOnce(&strata_publish::Ctx) -> Result<T>) -> Result<T> {

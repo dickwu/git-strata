@@ -1,8 +1,7 @@
-//! The client side of the socket (one request per connection). The cli
-//! crate does not exist yet; this is the piece of it the daemon's
-//! contract needs: a write method with no daemon listening fails
-//! `ReadOnly` (reason `daemon_down`, daemon.md §6) instead of writing
-//! anything itself. Read-only methods are the cli's direct reads.
+//! The client side of the socket (one request per connection): a write
+//! method with no daemon listening fails `Busy` (reason `daemon_down`,
+//! cli.md D2, which overrides daemon.md §6's `ReadOnly`) instead of
+//! writing anything itself. Read-only methods are the cli's direct reads.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -21,14 +20,14 @@ pub fn needs_daemon(method: Method) -> bool {
 }
 
 fn daemon_down(socket: &Path, why: &str) -> StrataError {
-    StrataError::new(Code::ReadOnly, format!("the daemon is not running ({why}); nothing was written"))
+    StrataError::new(Code::Busy, format!("the daemon is not running ({why}); nothing was written; run `git-strata daemon start`"))
         .with_detail(json!({ "reason": "daemon_down", "socket": socket.to_string_lossy() }))
 }
 
 /// Send one request and read its reply. `Ok(data)` on `ok: true`; a
 /// `code` error comes back as that `StrataError`; an RPC-level refusal is
 /// `InvalidInput` with `detail.rpc`. A missing / refusing socket is
-/// `ReadOnly` (`daemon_down`). A connection that ends without a reply is
+/// `Busy` (`daemon_down`, cli.md D2). A connection that ends without a reply is
 /// `Unknown`: the request may have run, and it is not sent again. No read
 /// timeout (rpc I3): it waits as long as the daemon keeps the connection.
 pub fn call(socket: &Path, method: &str, params: Value) -> Result<Value> {

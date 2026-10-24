@@ -22,6 +22,15 @@ pub mod rpc;
 pub mod startup;
 pub mod track;
 
+/// The confirm seams a test daemon is built with (feature `test-seams`
+/// only; a binary built with them refuses to start). Re-exported so the
+/// cli's end-to-end tests need no direct strata-confirm dependency.
+#[cfg(feature = "test-seams")]
+pub mod seams {
+    pub use strata_confirm::Confirmer;
+    pub use strata_confirm::seams::{FakeClock, PromptLog, ScriptedAuth, Verdict, bypass_env_names};
+}
+
 pub type Result<T> = std::result::Result<T, StrataError>;
 
 /// D2: how long the first lock or queue take of a request waits before
