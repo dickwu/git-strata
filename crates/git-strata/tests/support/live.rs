@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use strata_daemon::handlers;
-use strata_daemon::seams::{Confirmer, FakeClock, ScriptedAuth, Verdict};
+use strata_daemon::seams::{Confirmer, FakeClock, PromptLog, ScriptedAuth, Verdict};
 use strata_daemon::startup::{self, Core, Daemon, Options};
 use strata_gitio::Git;
 use strata_types::{RepoName, SessionId};
@@ -30,6 +30,8 @@ pub struct Live {
     pub root: PathBuf,
     pub repos: BTreeMap<String, PathBuf>,
     pub alerts: Arc<Mutex<Vec<String>>>,
+    /// The method of every request the in-process daemon received.
+    pub requests: Arc<Mutex<Vec<String>>>,
 }
 
 impl Drop for Live {
@@ -77,16 +79,23 @@ impl Live {
             git(&p, home.path(), &["push", "-q", "origin", "main"]);
             repos.insert(n.to_string(), p);
         }
-        let live = Live { home, sandbox, sb, root, repos, alerts: Arc::new(Mutex::new(Vec::new())) };
+        let live = Live { home, sandbox, sb, root, repos, alerts: Arc::new(Mutex::new(Vec::new())), requests: Arc::new(Mutex::new(Vec::new())) };
         live.write_config();
         live
     }
 
     pub fn write_config(&self) {
+        self.write_config_guarded(&[]);
+    }
+
+    /// config.toml where the repos in `guarded` push, confirm and deploy
+    /// on push (the confirm-class fixture); the others do none of these.
+    pub fn write_config_guarded(&self, guarded: &[&str]) {
         let mut t = format!("[paths]\nroot = {:?}\n", self.root.to_string_lossy());
         for (n, p) in &self.repos {
+            let g = guarded.contains(&n.as_str());
             t.push_str(&format!(
-                "\n[repo.{n}]\npath = {p:?}\ndefault_branch = \"main\"\ndeps_dirs = []\ndeploy_on_push = false\n\n[repo.{n}.publish]\nbranch = \"main\"\npush = false\nconfirm = false\n",
+                "\n[repo.{n}]\npath = {p:?}\ndefault_branch = \"main\"\ndeps_dirs = []\ndeploy_on_push = {g}\n\n[repo.{n}.publish]\nbranch = \"main\"\npush = {g}\nconfirm = {g}\n",
                 p = p.to_string_lossy(),
             ));
         }
@@ -112,7 +121,14 @@ impl Live {
     }
 
     pub fn serve_with<R>(&self, verdicts: Vec<Verdict>, f: impl FnOnce(&Core) -> R) -> R {
+        self.serve_scripted(verdicts, |c, _| f(c))
+    }
+
+    /// As `serve_with`, also handing `f` the authenticator's prompt log.
+    /// Every request's method is appended to `self.requests`.
+    pub fn serve_scripted<R>(&self, verdicts: Vec<Verdict>, f: impl FnOnce(&Core, &PromptLog) -> R) -> R {
         let auth = ScriptedAuth::new(true, Ok(()), verdicts);
+        let log = auth.log();
         let c = Confirmer::with_seams(auth, FakeClock::new(), Duration::from_secs(2), Duration::from_millis(200));
         let home = self.home.canon();
         let xdg = home.join(".config");
@@ -125,13 +141,38 @@ impl Live {
         let d = Daemon::start(&core).expect("daemon start");
         let listener = startup::bind(&core.opts.socket).expect("bind");
         let ext = AtomicBool::new(false);
+        let requests = self.requests.clone();
         std::thread::scope(|s| {
-            let h = s.spawn(|| handlers::serve(&d, &listener, &ext));
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&core)));
+            let h = s.spawn(|| {
+                let trackers = handlers::Trackers::new(&core);
+                let r = {
+                    let server = handlers::Server::new(&d, &trackers);
+                    d.serve(&listener, &ext, &|req| {
+                        requests.lock().unwrap().push(req.method.name().to_string());
+                        server.handle(req)
+                    })
+                };
+                trackers.clear();
+                r
+            });
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&core, &log)));
             d.request_stop();
             h.join().unwrap().unwrap();
             r.unwrap_or_else(|p| std::panic::resume_unwind(p))
         })
+    }
+
+    /// The cli in `dir` with a pseudo-terminal on stdin and extra `env`.
+    pub fn run_tty_env(&self, dir: &Path, args: &[&str], env: &[(String, String)]) -> Run {
+        let (master, slave) = super::pty();
+        let mut c = self.home.cmd(args);
+        c.current_dir(dir).stdin(std::process::Stdio::from(slave));
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        let out = c.output().expect("spawn git-strata");
+        drop(master);
+        Run::from(out)
     }
 
     /// The cli in `dir` (stdin /dev/null).

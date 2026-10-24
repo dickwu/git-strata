@@ -11,7 +11,7 @@ Spec: `docs/modules/confirm.md`. Branch `impl/confirm` (from impl/v1 779669c).
 | 3. Refuse cancelled, timed-out, concurrent and unsupported prompts | done | e2699b7 |
 | 4. LocalAuthentication bridge through objc2 | done | 0fefe07 |
 | 5. Guards: tokens only built by confirm; no env var reaches it | done | 84086ab |
-| 6. End-to-end tests in the cli crate | blocked: needs the daemon test seams (in-process daemon with `ScriptedAuth`) and the `git-strata` binary from daemon.md / cli.md | — |
+| 6. End-to-end tests in the cli crate | done (on impl/cli, after the cli tasks) | see `git log impl/cli -- crates/git-strata/tests/confirm_gate.rs` |
 
 `manual_prompt_round_trip` (tests/la_manual.rs) is `#[ignore]`; run it with a human at the Mac:
 `cargo test -p strata-confirm --features test-seams --test la_manual -- --ignored --nocapture`.
@@ -58,6 +58,38 @@ both well under 1 s, also from a background thread.
   `Confirmer::build(` appears only in `seams.rs` and `la.rs`, and `seams` is
   `#[cfg(feature = "test-seams")]`.
 - **strata-types**: no changes.
+
+### Task 6 (end-to-end, `crates/git-strata/tests/confirm_gate.rs`)
+
+- Confirm commands covered: `rm --discard`, `deps approve`, `push`, `publish` (to a repo
+  with confirm/push/deploy_on_push guarded), `config relax`. The fixture config guards one
+  repo (`write_config_guarded(["app"])`).
+- The Pending proposal is made directly with `strata_deps::propose` (origin Main) on the
+  in-process daemon's `Core`, with placeholder 64-hex input hashes: the daemon has no
+  main-landing path without a real install.
+- "Not in the daemon's record" is checked by a test-side wrapper around `Server::handle` that
+  records every request method (`Live.requests`), not by a new daemon seam. A refused
+  non-TTY run must add no request and no prompt; the session, the proposal and origin main
+  are checked unchanged after every part.
+- Non-TTY: stdin `/dev/null` and stdin `"y\n"` piped. The positive control runs each command
+  on a pty with a passing `ScriptedAuth`: each prompts exactly once. Limits: `deps approve`
+  after the prompt fails `from_equals_to` (no real install to roll out), so only the single
+  prompt is asserted; `config relax` with nothing relaxed is `not_relaxed` with no prompt, so it
+  has no pty control; `push` gets a chain ahead of origin by one extra commit on
+  `refs/strata/publish/main`; commands run from the sandbox root (a cwd inside the workspace
+  is itself an open file for `rm`).
+- Env: one re-executed child per value (1, true, yes, on, 0) with every `bypass_env_names`
+  name set at once, for both the cli and the in-process daemon; the auth is cancel-forever,
+  so any success is a bypass.
+- Flags: a clap walk collects every boolean/valued flag of every command; each is tried on
+  each confirm command, plus all of a command's own booleans together (help/version and
+  positionals skipped). Asserted: never succeeds without a prompt, and a prompt implies
+  `NotConfirmed`. Codes seen without a prompt: InvalidInput, NoSuchSession.
+- RPC: the five methods sent raw on the socket, plain and with 9 extra fields each set to
+  `true` and `"1"`; none succeeds.
+- Release build: `cargo tree -e features` for strata-daemon and git-strata shows only
+  `strata-confirm feature "default"`, never `test-seams` (the test binary itself gets the seams
+  via the dev-dependency).
 
 ## Merge watch-outs
 
