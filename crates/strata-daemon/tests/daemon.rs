@@ -651,6 +651,42 @@ fn publish_plan_names_the_remaining_repos_and_writes_nothing() {
     core.close().unwrap();
 }
 
+/// Review-3 T3: the documented limit of `publish_plan` (daemon.md §3,
+/// skills reference). A guarded repo whose session stayed on its old base
+/// after its content landed (the publish's rebase is `Waiting` on a deps
+/// change) is still in `repos`: the checkpoint still selects the landed
+/// content, so the cli would still need a TTY and a confirmation for it,
+/// although staging would find nothing new.
+#[test]
+fn publish_plan_keeps_a_waiting_sessions_landed_guarded_repo() {
+    use strata_confirm::seams::Verdict;
+    let mut fx = Dfx::new();
+    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.confirm = true;
+    fx.write_config();
+    let (c, _log, _) = fx.confirmer(vec![Verdict::pass()]);
+    let core = fx.prepare_with(c).unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let id = new_session(&sock);
+        external(&ws(&core, &id, "tool"), "sed -i '' 's/1.0.87/1.0.88/; s/\\^1.0.0/^1.0.1/' package.json");
+        let group = || {
+            let cp = ok(call(&sock, "checkpoint", json!({
+                "session": id, "repo": "tool", "reason": { "kind": "BeforePublish" }, "paths": ["package.json"],
+            })));
+            json!({ "id": 0, "batches": [
+                { "session": id, "repo": "tool", "checkpoint": cp["checkpoint"]["id"], "paths": ["package.json"] },
+            ] })
+        };
+        let r = ok(call(&sock, "publish", json!({ "group": group(), "shown": { "tool": null } })));
+        assert_eq!(r["published"][0]["rebases"][0]["report"]["kind"], "Waiting", "{r:#}");
+        let plan = ok(call(&sock, "publish_plan", json!({ "group": group() })));
+        assert_eq!(plan, json!({ "repos": ["tool"], "already_published": [] }), "{plan:#}");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 /// Review-2 N1: re-run filtering is per selector and by content. Each
 /// call is what the cli does (a BeforePublish checkpoint, then publish).
 fn publish_selectors(sock: &Path, id: &SessionId, repo: &str, paths: &[&str]) -> Value {
