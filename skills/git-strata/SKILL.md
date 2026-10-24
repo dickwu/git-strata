@@ -132,8 +132,11 @@ conflict is `assigned`.
 4. Re-run the exact same `publish --from ...` command. Repos that already
    landed are not committed again: they appear in
    `data.already_published` as `{repo, publish, commit, push}`, and only the
-   rest is published (`data.commits`). Edits made to a landed repo's paths
-   after it landed are published again as a new commit, as usual.
+   rest is published (`data.commits`). The check is per `--from` path and by
+   content: a path (or directory) whose content is exactly what landed is
+   skipped; anything new or changed under it since (including new files in
+   a directory you selected) is published as a new commit, and the unchanged
+   paths of the same `--from` list do not cause `NoMatch`.
 5. Repeat while another repo conflicts.
 
 ## Hook: checkpoint after every tool call (Claude Code)

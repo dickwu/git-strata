@@ -200,32 +200,51 @@ fn related(a: &str, b: &str) -> bool {
     is_under(a, b) || is_under(b, a)
 }
 
-/// The selected entries of one batch (§5.3 selection rules).
-fn select<'c>(cp: &'c Checkpoint, batch: &Batch) -> Result<Vec<&'c OverlayEntry>> {
-    let from_of = |e: &OverlayEntry| match &e.kind {
+fn from_of(e: &OverlayEntry) -> Option<String> {
+    match &e.kind {
         EntryKind::Renamed { from, .. } => Some(from.as_str().to_string()),
         _ => None,
-    };
+    }
+}
+
+/// The entries of `cp` one selector picks (§5.3): an exact path or rename
+/// source, else everything at or under it as a directory.
+fn hits(cp: &Checkpoint, p: &str) -> Vec<usize> {
+    let exact: Vec<usize> = cp
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.path.as_str() == p || from_of(e).as_deref() == Some(p))
+        .map(|(i, _)| i)
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    cp.entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| is_under(e.path.as_str(), p) || from_of(e).is_some_and(|f| is_under(&f, p)))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Whether selector `p` picks any entry of `cp` under the same rules
+/// `stage` uses (review-2 N1: the daemon's re-run filter shares them).
+pub fn selects(cp: &Checkpoint, p: &RepoPath) -> bool {
+    !hits(cp, p.as_str()).is_empty()
+}
+
+/// `a` equals `dir` or lies under it as a directory (bytewise, `/`).
+pub fn at_or_under(a: &str, dir: &str) -> bool {
+    a == dir || is_under(a, dir)
+}
+
+/// The selected entries of one batch (§5.3 selection rules).
+fn select<'c>(cp: &'c Checkpoint, batch: &Batch) -> Result<Vec<&'c OverlayEntry>> {
     let mut chosen: BTreeSet<usize> = BTreeSet::new();
     for p in &batch.paths {
         let p = p.as_str();
-        let exact: Vec<usize> = cp
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.path.as_str() == p || from_of(e).as_deref() == Some(p))
-            .map(|(i, _)| i)
-            .collect();
-        let hits = if exact.is_empty() {
-            cp.entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| is_under(e.path.as_str(), p) || from_of(e).is_some_and(|f| is_under(&f, p)))
-                .map(|(i, _)| i)
-                .collect()
-        } else {
-            exact
-        };
+        let hits = hits(cp, p);
         if hits.is_empty() {
             return Err(StrataError::new(
                 Code::NoMatch,

@@ -19,7 +19,7 @@ use strata_gitio::Git;
 use strata_overlay::{Base, DEFAULT_DIRTY_CAPACITY, Overlay, RestoreRequest, Tracker, WorkspaceRef};
 use strata_search::{GrepOpts, Hit, OverlaySource, Search, Which};
 use strata_store::PublishPhase;
-use strata_types::{Action, BaseGen, Code, CommitOid, RepoConfig, RepoName, SessionId, StrataError, WorkspaceState};
+use strata_types::{Action, BaseGen, Code, CommitOid, RepoConfig, RepoName, RepoPath, SessionId, StrataError, WorkspaceState};
 
 use crate::confirm_flow::{apply, needs_confirm, recheck, require_validated};
 use crate::fetch_after::{alert_attach, report_guard_disabled};
@@ -927,10 +927,10 @@ impl<'d, 'a> Server<'d, 'a> {
     /// (`shown`), checked under the repo lock before staging.
     ///
     /// Review H4 (kept by design; daemon.md D15, D22): an agent re-runs the
-    /// same publish after fixing a `Conflict`. A batch whose paths this
-    /// session already published (a `Done` row with a commit) and that no
-    /// longer differ from the session's base is dropped before anything is
-    /// called; a repo all of whose batches are dropped, or whose publish is
+    /// same publish after fixing a `Conflict`. Selectors whose current
+    /// content is exactly what this session already landed are dropped
+    /// before anything is called (`rerun_paths`, review-2 N1: per selector,
+    /// by content); a repo all of whose batches are dropped, or whose publish is
     /// `NoCommit` over batches all published before, is reported in
     /// `already_published` and gets no second commit or push. Every error
     /// carries `detail.repo` (the repo that stopped) and, when an earlier
@@ -947,18 +947,13 @@ impl<'d, 'a> Server<'d, 'a> {
         let mut kept = Vec::new();
         let mut landed: BTreeMap<RepoName, Value> = BTreeMap::new();
         for b in &group.batches {
-            let untouched = core.store.checkpoint(&b.session, b.checkpoint).is_ok_and(|cp| {
-                b.paths.iter().all(|p| {
-                    !cp.entries.iter().any(|e| {
-                        e.path == *p || matches!(&e.kind, strata_types::EntryKind::Renamed { from, .. } if from == p)
-                    })
-                })
-            });
-            match landed_before(&rows, b).filter(|_| untouched) {
-                Some(v) => {
-                    landed.insert(b.repo.clone(), v);
-                }
-                None => kept.push(b.clone()),
+            let (paths, proof) = rerun_paths(core, &rows, b)?;
+            if paths.is_empty()
+                && let Some(v) = proof
+            {
+                landed.insert(b.repo.clone(), v);
+            } else {
+                kept.push(strata_types::Batch { paths, ..b.clone() });
             }
         }
         let group = strata_types::ReleaseGroup { id: group.id, batches: kept };
@@ -1083,10 +1078,89 @@ fn landed_after_commit(repo: &RepoName, commit: Value, d: &Value) -> Value {
     json!({ "repo": repo.as_str(), "commit": commit, "checks_ran": null, "push": push, "warnings": [], "rebases": [] })
 }
 
+/// Review-2 N1: which selectors of `b` still go to stage on a re-run, and
+/// the `already_published` entry of the newest proof for those that do not.
+/// Per selector, with stage's own selection rules (`stage::selects`): one
+/// that picks any checkpoint entry (new or changed content, exact path,
+/// rename source or anything under a directory) is kept. One that picks
+/// nothing (the session's content there equals its base) is dropped only
+/// when the newest `Done` row of this session and repo that committed
+/// files at or under it (`outcome.paths`, within a selector of that
+/// session's batch) has, for each such file, the same mode and blob in its
+/// commit as in the checkpoint's base, i.e. the current content is what
+/// landed. Anything else is kept, and stage answers `NoMatch` honestly
+/// (e.g. the session's file was later changed upstream by someone else)
+/// [实现时补的决定]. Rename/type pairs are unaffected: a dropped selector
+/// picked no entry. A checkpoint that cannot be read keeps the batch as is
+/// (stage reports it). Read-only; git errors are returned before any write.
+fn rerun_paths(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_types::Batch) -> Result<(Vec<RepoPath>, Option<Value>)> {
+    let Ok(cp) = core.store.checkpoint(&b.session, b.checkpoint) else {
+        return Ok((b.paths.clone(), None));
+    };
+    let mut keep = Vec::new();
+    let mut proof: Option<Value> = None;
+    for p in &b.paths {
+        if strata_publish::stage::selects(&cp, p) {
+            keep.push(p.clone());
+            continue;
+        }
+        match landed_content(core, rows, b, &cp.base.tree, p)? {
+            Some(v) => {
+                if proof.is_none() {
+                    proof = Some(v);
+                }
+            }
+            None => keep.push(p.clone()),
+        }
+    }
+    Ok((keep, proof))
+}
+
+/// The newest `Done` row in which `b`'s session committed files at or under
+/// `p` in `b`'s repo, as `{repo, publish, commit, push}`, when every such
+/// file has the same mode and object in that commit as in `base`; `None`
+/// when there is no such row or the content differs.
+fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_types::Batch, base: &strata_types::TreeOid, p: &RepoPath) -> Result<Option<Value>> {
+    use strata_publish::stage::at_or_under;
+    for r in rows.iter().rev() {
+        if r.phase != PublishPhase::Done {
+            continue;
+        }
+        let Some(o) = r.outcome.as_ref() else { continue };
+        let Some(commit) = o.get("commit").and_then(Value::as_str) else { continue };
+        let mine: Vec<&RepoPath> =
+            r.group.batches.iter().filter(|x| x.session == b.session && x.repo == b.repo).flat_map(|x| x.paths.iter()).collect();
+        let files: Vec<RepoPath> = o
+            .get("paths")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|f| at_or_under(f, p.as_str()) && mine.iter().any(|q| at_or_under(f, q.as_str())))
+            .filter_map(|f| RepoPath::try_from(f.to_string()).ok())
+            .collect();
+        if files.is_empty() {
+            continue;
+        }
+        let Ok(c) = CommitOid::try_from(commit.to_string()) else { return Ok(None) };
+        let git = git_of(core, &b.repo)?;
+        let (now, then) = (git.tree_items(base, &files)?, git.tree_items(&git.tree_of(&c)?, &files)?);
+        let key = |m: &BTreeMap<String, strata_gitio::TreeItem>, f: &RepoPath| m.get(f.as_str()).map(|i| (i.mode, i.oid.clone()));
+        if files.iter().all(|f| key(&now, f) == key(&then, f)) {
+            return Ok(Some(json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "push": o.get("push").cloned().unwrap_or(Value::Null) })));
+        }
+        return Ok(None);
+    }
+    Ok(None)
+}
+
 /// Review H4: the newest `Done` publish row with a commit in which `b`'s
-/// session published every path of `b` in `b`'s repo, as an
-/// `already_published` entry `{repo, publish, commit, push}`.
+/// session published every selector of `b` in `b`'s repo (equal, or one
+/// at or under the other: review-2 N1), as an `already_published` entry
+/// `{repo, publish, commit, push}`. Used only after stage said `NoCommit`
+/// (nothing differs from the chain), so no content is lost.
 fn landed_before(rows: &[strata_store::PublishRecord], b: &strata_types::Batch) -> Option<Value> {
+    use strata_publish::stage::at_or_under;
     rows.iter().rev().find_map(|r| {
         if r.phase != PublishPhase::Done {
             return None;
@@ -1094,7 +1168,9 @@ fn landed_before(rows: &[strata_store::PublishRecord], b: &strata_types::Batch) 
         let o = r.outcome.as_ref()?;
         let commit = o.get("commit").and_then(Value::as_str)?;
         let covers = r.group.batches.iter().any(|x| {
-            x.session == b.session && x.repo == b.repo && b.paths.iter().all(|p| x.paths.contains(p))
+            x.session == b.session
+                && x.repo == b.repo
+                && b.paths.iter().all(|p| x.paths.iter().any(|q| at_or_under(p.as_str(), q.as_str()) || at_or_under(q.as_str(), p.as_str())))
         });
         covers.then(|| {
             json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "push": o.get("push").cloned().unwrap_or(Value::Null) })

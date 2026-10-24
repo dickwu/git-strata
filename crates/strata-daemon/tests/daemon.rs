@@ -25,7 +25,7 @@ use strata_overlay::{Base, Overlay, WorkspaceRef};
 use strata_search::{GrepOpts, OverlaySource, Search, Which};
 use strata_session::{SessionState, Sessions};
 use strata_store::{PublishPhase, Store};
-use strata_types::{CheckpointReason, Code, RepoName, SessionId};
+use strata_types::{CheckpointReason, Code, RepoName, RepoPath, SessionId};
 use support::*;
 
 /// Serve `d` with every handler in a scoped thread, run `f`, stop.
@@ -496,6 +496,91 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
         assert_eq!(fx.sb.git(&main, &["rev-parse", &format!("{t}^")]), upstream, "one commit on upstream");
         assert_eq!(fx.sb.git(&main, &["show", &format!("{t}:src/other.ts")]), "export const o = 1");
         assert_eq!(push_calls(&core), 1, "only tool pushed");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
+/// Review-2 N1: re-run filtering is per selector and by content. Each
+/// call is what the cli does (a BeforePublish checkpoint, then publish).
+fn publish_selectors(sock: &Path, id: &SessionId, repo: &str, paths: &[&str]) -> Value {
+    let cp = ok(call(sock, "checkpoint", json!({
+        "session": id, "repo": repo, "reason": { "kind": "BeforePublish" }, "paths": paths,
+    })));
+    call(sock, "publish", json!({ "group": { "id": 0, "batches": [
+        { "session": id, "repo": repo, "checkpoint": cp["checkpoint"]["id"], "paths": paths },
+    ] } }))
+}
+
+/// Review-2 N1: a directory selector that landed, then new edits under it,
+/// then the very same publish again: the edits are committed (the old
+/// filter saw no entry literally named `src` and skipped the repo). A third
+/// identical run with nothing new is `already_published`, no commit.
+#[test]
+fn publish_rerun_of_a_directory_selector_commits_new_edits() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let chain = strata_publish::chain_ref("main");
+    let git = &core.gits[&repo_name("tool")];
+    serving(&d, || {
+        let id = new_session(&sock);
+        let root = ws(&core, &id, "tool");
+        external(&root, "printf 'export const a = 1\\n' > src/index.ts");
+        let r = ok(publish_selectors(&sock, &id, "tool", &["src"]));
+        assert_eq!(r["published"].as_array().unwrap().len(), 1, "{r:#}");
+        let first = git.read_ref(&chain).unwrap().expect("first commit");
+
+        external(&root, "printf 'export const a = 2\\n' > src/index.ts && printf 'export const n = 1\\n' > src/new.ts");
+        let r = ok(publish_selectors(&sock, &id, "tool", &["src"]));
+        assert_eq!(r["published"].as_array().unwrap().len(), 1, "the new edits publish: {r:#}");
+        assert_eq!(r["already_published"], json!([]), "{r:#}");
+        let second = git.read_ref(&chain).unwrap().expect("second commit");
+        assert_ne!(second, first, "a second commit");
+        let tree = git.tree_of(&second).unwrap();
+        let show = |p: &str| git.blob_bytes(&tree, &RepoPath::try_from(p.to_string()).unwrap()).unwrap().map(|b| b.bytes);
+        assert_eq!(show("src/index.ts").as_deref(), Some(&b"export const a = 2\n"[..]));
+        assert_eq!(show("src/new.ts").as_deref(), Some(&b"export const n = 1\n"[..]));
+
+        let r = ok(publish_selectors(&sock, &id, "tool", &["src"]));
+        assert_eq!(r["published"], json!([]), "{r:#}");
+        assert_eq!(r["already_published"][0]["commit"], json!(second), "{r:#}");
+        assert_eq!(git.read_ref(&chain).unwrap(), Some(second), "no third commit");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
+/// Review-2 N1: a landed batch {index, other}; only index is edited; the
+/// same publish again commits index and does not stop at `NoMatch` for the
+/// unchanged other (its content equals what landed).
+#[test]
+fn publish_rerun_of_a_partly_changed_batch_commits_the_changed_path() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let chain = strata_publish::chain_ref("main");
+    let git = &core.gits[&repo_name("tool")];
+    serving(&d, || {
+        let id = new_session(&sock);
+        let root = ws(&core, &id, "tool");
+        external(&root, "printf 'export const a = 1\\n' > src/index.ts && printf 'export const o = 1\\n' > src/other.ts");
+        let sel = ["src/index.ts", "src/other.ts"];
+        ok(publish_selectors(&sock, &id, "tool", &sel));
+        let first = git.read_ref(&chain).unwrap().expect("first commit");
+
+        external(&root, "printf 'export const a = 2\\n' > src/index.ts");
+        let r = publish_selectors(&sock, &id, "tool", &sel);
+        let r = ok(r);
+        assert_eq!(r["published"].as_array().unwrap().len(), 1, "{r:#}");
+        let second = git.read_ref(&chain).unwrap().expect("second commit");
+        assert_ne!(second, first);
+        let (t1, t2) = (git.tree_of(&first).unwrap(), git.tree_of(&second).unwrap());
+        let at = |t: &strata_types::TreeOid, p: &str| git.blob_bytes(t, &RepoPath::try_from(p.to_string()).unwrap()).unwrap().map(|b| b.bytes);
+        assert_eq!(at(&t2, "src/index.ts").as_deref(), Some(&b"export const a = 2\n"[..]));
+        assert_eq!(at(&t2, "src/other.ts"), at(&t1, "src/other.ts"), "other unchanged");
     });
     drop(d);
     core.close().unwrap();
