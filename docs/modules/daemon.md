@@ -103,7 +103,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `deps_propose` | `{ "session", "repo", "switch": bool }` | 提议；`switch` 为真时附带移动结果 |
 | `deps_approve` | `{ "proposal": ProposalId, "sessions": [SessionId]\|null }` | 每个会话一条；`null` = 该 repo 的全部会话 |
 | `deps_list` | `{ "repo": RepoName\|null }` | `open_proposals` |
-| `publish` | `{ "group": ReleaseGroup, "shown"?: { RepoName: CommitOid \| null } }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数。`shown` 是 cli 给人看过的每个要确认仓库的链顶（D21）。回复另带 `already_published: [{repo, publish, commit, push}]`：之前已经落地、这次跳过的仓库（D22）。失败时 `detail.repo` 是停下的仓库，`detail.published_before` 是这次已经提交的仓库 |
+| `publish` | `{ "group": ReleaseGroup, "shown"?: { RepoName: CommitOid \| null } }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数。`shown` 是 cli 给人看过的每个要确认仓库的链顶（D21）。回复另带 `already_published: [{repo, publish, commit, push}]`：之前已经落地、这次跳过的仓库（D22）。失败时 `detail.repo` 是停下的仓库，`detail.published_before` 是这次已经提交的仓库。停下的仓库若已写了提交（`detail.commit`，如推送超时或被拒），`detail.landed` 是它的那条 `{repo, commit, push}`，`push` 取已知的结果（`Unknown` / `Refused`，没推为 null）（review M4）[实现时补的决定] |
 | `push` | `{ "repo": RepoName, "shown"?: CommitOid \| null }` | `PushOutcome`。`shown` 是 cli 给人看过的链顶（D21） |
 | `assign` | `{ "group": ReleaseGroup, "path": RepoPath, "session": SessionId }` | `{}` |
 | `rm` | `{ "session": SessionId, "discard": bool }` | `RemoveReport` |

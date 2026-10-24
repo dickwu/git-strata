@@ -932,7 +932,10 @@ impl<'d, 'a> Server<'d, 'a> {
     /// `NoCommit` over batches all published before, is reported in
     /// `already_published` and gets no second commit or push. Every error
     /// carries `detail.repo` (the repo that stopped) and, when an earlier
-    /// repo of this call landed, `detail.published_before`.
+    /// repo of this call landed, `detail.published_before`. Review M4: an
+    /// error after this repo's commit was written (`detail.commit`) also
+    /// carries `detail.landed`, a `published` entry for it whose `push` is
+    /// what is known of the push (`Unknown`, `Refused`, or null: not sent).
     fn publish(&self, group: &strata_types::ReleaseGroup, shown: &BTreeMap<RepoName, Option<CommitOid>>) -> Result<Value> {
         let core = self.core();
         if group.batches.is_empty() {
@@ -1003,6 +1006,9 @@ impl<'d, 'a> Server<'d, 'a> {
                         if d.get("repo").is_none() {
                             d["repo"] = json!(repo.as_str());
                         }
+                        if let Some(c) = d.get("commit").filter(|c| c.is_string()).cloned() {
+                            d["landed"] = landed_after_commit(&repo, c, d);
+                        }
                         if !done.is_empty() {
                             d["published_before"] = Value::Array(done);
                         }
@@ -1062,6 +1068,19 @@ impl<'d, 'a> Server<'d, 'a> {
             Ok(json!({ "push": json_of(&r?), "commit": tip.as_str() }))
         })
     }
+}
+
+/// Review M4: the `published` entry of a repo whose publish failed after
+/// its commit: `push` from the error's `kind` (`Unknown` → `Unknown`,
+/// `PushRefused` → `Refused(message)`); any other after-commit error says
+/// nothing about a push, so null [实现时补的决定].
+fn landed_after_commit(repo: &RepoName, commit: Value, d: &Value) -> Value {
+    let push = match d.get("kind").and_then(Value::as_str) {
+        Some("Unknown") => json!({ "kind": "Unknown" }),
+        Some("PushRefused") => json!({ "kind": "Refused", "message": d.get("message").cloned().unwrap_or(json!("")) }),
+        _ => Value::Null,
+    };
+    json!({ "repo": repo.as_str(), "commit": commit, "checks_ran": null, "push": push, "warnings": [], "rebases": [] })
 }
 
 /// Review H4: the newest `Done` publish row with a commit in which `b`'s

@@ -113,6 +113,9 @@ conflict is `assigned`.
    - `error.detail.conflicts` lists its paths (with the hunks).
    - `data.commits` / `data.pushes` hold repos that already landed in this
      call (also in `error.detail.published_before`). They stay landed.
+     The same holds for any publish error: a repo whose commit was written
+     before its push timed out (`Unknown`) or was refused (`PushRefused`) is
+     in `data.commits` and `data.pushes` too.
 2. Fix the listed paths in that repo's workspace (merge in the upstream
    change; `git-strata diff` helps).
 3. `git-strata checkpoint -m "resolve conflict" <paths>`.

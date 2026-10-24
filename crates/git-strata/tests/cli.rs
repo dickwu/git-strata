@@ -765,3 +765,58 @@ fn deps_propose_switch_moves_only_the_proposer() {
         assert_eq!(base(&c), pinned);
     });
 }
+
+/// Review M4: a push that times out after `commit_tree` (local bare
+/// origin whose hook outlasts the timeout) is `ok: false`, `Unknown`, and
+/// `data` keeps the commit and the push outcome of that repo.
+#[test]
+fn publish_push_timeout_keeps_commit_and_push_in_data() {
+    let lv = Live::new(&["tool"], &base_files());
+    let cfg = lv.home.config_dir().join("config.toml");
+    let t = std::fs::read_to_string(&cfg).unwrap().replace("\npush = false", "\npush = true");
+    std::fs::write(&cfg, t).unwrap();
+    let origin = lv.sb.join("tool-origin.git");
+    let hook = origin.join("hooks/pre-receive");
+    std::fs::write(&hook, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let git = strata_gitio::Git::open(&lv.main("tool")).unwrap();
+    strata_publish::seams::set_push_timeout(&git, Some(std::time::Duration::from_millis(300)));
+    let t0 = std::time::Instant::now();
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        write(&lv.ws(&s, "tool"), "n.txt", b"n\n");
+        let r = lv.run(&["publish", "--from", &format!("{s}:n.txt")]);
+        assert_eq!(r.err_code(), "Unknown", "{r:?}");
+        let env = r.env();
+        let chain = support::git(&lv.main("tool"), lv.home.path(), &["rev-parse", "-q", "--verify", "refs/strata/publish/main"]);
+        assert_eq!(env["data"]["commits"]["tool"], json!(chain), "{env}");
+        assert_eq!(env["data"]["pushes"], json!([{ "repo": "tool", "outcome": { "kind": "Unknown" } }]), "{env}");
+    });
+    strata_publish::seams::set_push_timeout(&git, None);
+    std::thread::sleep(std::time::Duration::from_secs(3).saturating_sub(t0.elapsed()));
+}
+
+/// Review M4: a remote refusal after the commit is `PushRefused` with the
+/// commit and the `Refused` outcome in `data`; the chain stays.
+#[test]
+fn publish_push_refused_keeps_commit_and_push_in_data() {
+    let lv = Live::new(&["tool"], &base_files());
+    let cfg = lv.home.config_dir().join("config.toml");
+    let t = std::fs::read_to_string(&cfg).unwrap().replace("\npush = false", "\npush = true");
+    std::fs::write(&cfg, t).unwrap();
+    let hook = lv.sb.join("tool-origin.git/hooks/pre-receive");
+    std::fs::write(&hook, "#!/bin/sh\necho 'denied by policy' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        write(&lv.ws(&s, "tool"), "n.txt", b"n\n");
+        let r = lv.run(&["publish", "--from", &format!("{s}:n.txt")]);
+        assert_eq!(r.err_code(), "PushRefused", "{r:?}");
+        let env = r.env();
+        let chain = support::git(&lv.main("tool"), lv.home.path(), &["rev-parse", "-q", "--verify", "refs/strata/publish/main"]);
+        assert_eq!(env["data"]["commits"]["tool"], json!(chain), "{env}");
+        assert_eq!(env["data"]["pushes"][0]["repo"], "tool", "{env}");
+        assert_eq!(env["data"]["pushes"][0]["outcome"]["kind"], "Refused", "{env}");
+        assert!(env["data"]["pushes"][0]["outcome"]["message"].as_str().unwrap().contains("denied by policy"), "{env}");
+    });
+}

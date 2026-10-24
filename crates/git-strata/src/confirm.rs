@@ -505,11 +505,19 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
             // Review H4: what landed before the stop (in this call or an
             // earlier one) is reported in `data`; the error names the repo.
             let list = |k: &str| e.detail.as_ref().and_then(|d| d.get(k)).and_then(Value::as_array).cloned().unwrap_or_default();
-            let (before, already) = (list("published_before"), list("already_published"));
+            // Review M4: the failing repo's commit (and what is known of
+            // its push) when the error came after its commit was written.
+            let (mut before, already) = (list("published_before"), list("already_published"));
+            if let Some(l) = e.detail.as_ref().and_then(|d| d.get("landed")).filter(|l| l.is_object()) {
+                before.push(l.clone());
+            }
             if before.is_empty() && already.is_empty() {
                 return Err(e);
             }
-            Ok(publish_envelope(&config, &before, &already, Some(e)))
+            // A definite remote refusal after the commit is `PushRefused`
+            // (cli.md §5), not the publish layer's `Unknown`.
+            let refused = e.code == Code::Unknown && e.detail.as_ref().and_then(|d| d.get("kind")).and_then(Value::as_str) == Some("PushRefused");
+            Ok(publish_envelope(&config, &before, &already, (!refused).then_some(e)))
         }
     }
 }
