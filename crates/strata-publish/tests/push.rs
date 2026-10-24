@@ -662,3 +662,38 @@ fn chain_ref_failure_reports_checks_ran_and_no_push() {
     assert!(d.get("push").is_some_and(serde_json::Value::is_null), "explicit push: null: {d}");
     assert_eq!(fx.read_ref("tool", CHAIN), None);
 }
+
+/// Review-3 T2: a remote refusal whose row cannot be closed reports the
+/// recording failure (`row_moved`), not a plain refusal; the refusal stays
+/// in `detail.cause` and the result fields (commit, push, checks) travel on.
+#[test]
+fn refusal_with_a_moved_row_keeps_the_recording_error_and_the_result() {
+    let mut fx = fx();
+    fx.cfg_mut("tool").checks = vec!["/usr/bin/true".into()];
+    hook(&fx, "echo 'denied by policy' >&2\nexit 1");
+    let (_s, g) = edit(&fx, "src/index.ts", b"export const a = 32\n");
+    let p = seams::pause(fx.git_of("tool"), PublishFault::PauseAfterCommit);
+    let r = std::thread::scope(|sc| {
+        let h = sc.spawn(|| run(&fx, &g, None));
+        p.wait_until_paused();
+        // Someone else moves the Running row while the publish is paused.
+        let id = last_row(&fx).group.id;
+        let mark = serde_json::json!({ "repo": "tool", "note": "moved" });
+        assert!(fx
+            .store()
+            .set_publish_phase(id, PublishPhase::Running, PublishPhase::Unknown, Some(&mark), std::time::SystemTime::now())
+            .unwrap());
+        p.release();
+        h.join().unwrap()
+    });
+    let e = r.unwrap_err();
+    assert_eq!(e.code, Code::Unknown, "{e:?}");
+    let d = e.detail.as_ref().unwrap();
+    assert_eq!(d["reason"], "row_moved", "{d}");
+    assert!(d.get("kind").is_none(), "the outer error is not the refusal: {d}");
+    assert_eq!(d["cause"]["detail"]["kind"], "PushRefused", "{d}");
+    assert_eq!(d["push"]["kind"], "Refused", "{d}");
+    assert_eq!(d["checks_ran"], 1, "{d}");
+    assert_eq!(d["commit"].as_str().unwrap(), fx.read_ref("tool", CHAIN).unwrap());
+    assert_eq!(last_row(&fx).outcome.unwrap()["note"], "moved", "the other writer's outcome stays");
+}

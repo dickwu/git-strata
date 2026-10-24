@@ -554,10 +554,21 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
             }
             // A definite remote refusal after the commit is `PushRefused`
             // (cli.md §5), not the publish layer's `Unknown`.
-            let refused = e.code == Code::Unknown && e.detail.as_ref().and_then(|d| d.get("kind")).and_then(Value::as_str) == Some("PushRefused");
+            let refused = bare_refusal(&e);
             Ok(publish_envelope(&config, &before, &already, (!refused).then_some(e)))
         }
     }
+}
+
+/// The publish layer's `Unknown` for a definite remote refusal after the
+/// commit, which the envelope reports as `PushRefused`. Review-3 T2: a
+/// recording failure (`reason` = `row_moved` / `row_not_closed`) that wraps
+/// a refusal is not one; it stays the error.
+fn bare_refusal(e: &StrataError) -> bool {
+    e.code == Code::Unknown
+        && e.detail
+            .as_ref()
+            .is_some_and(|d| d.get("kind").and_then(Value::as_str) == Some("PushRefused") && d.get("reason").is_none())
 }
 
 /// `{commits, checks_ran, waiting, pushes, already_published}`; `ok` only
@@ -615,4 +626,30 @@ fn waiting_proposals(config: &Config, repos: &[String]) -> Vec<Value> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unknown(d: Value) -> StrataError {
+        StrataError::new(Code::Unknown, "x").with_detail(d)
+    }
+
+    /// Review-3 T2: the CLI turns only the bare refusal into `PushRefused`;
+    /// a recording failure around one keeps its own error.
+    #[test]
+    fn only_a_bare_refusal_becomes_push_refused() {
+        let push = serde_json::json!({ "kind": "Refused", "message": "denied" });
+        assert!(bare_refusal(&unknown(serde_json::json!({ "kind": "PushRefused", "message": "denied", "push": push }))));
+        for reason in ["row_moved", "row_not_closed"] {
+            let wrapped = serde_json::json!({
+                "reason": reason, "kind": "PushRefused", "push": push,
+                "cause": { "code": "Unknown", "detail": { "kind": "PushRefused" } },
+            });
+            assert!(!bare_refusal(&unknown(wrapped)), "{reason}");
+        }
+        assert!(!bare_refusal(&unknown(serde_json::json!({ "reason": "push_unknown", "kind": "Unknown" }))));
+        assert!(!bare_refusal(&StrataError::new(Code::PushRefused, "x")));
+    }
 }

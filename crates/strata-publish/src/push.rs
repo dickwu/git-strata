@@ -109,10 +109,13 @@ fn with_landed(e: StrataError, push: Value, checks_ran: u32) -> StrataError {
 }
 
 /// Review-2 N3: the landed keys of `inner`'s detail copied into `extra`, for
-/// an error that replaces `inner` (the row could not be closed).
+/// an error that replaces `inner` (the row could not be closed). Only the
+/// result fields travel (review-3 T2): `kind`/`message` describe `inner`
+/// and stay in `detail.cause`, so the recording failure is not mistaken for
+/// the refusal it wraps.
 fn carry(inner: &StrataError, mut extra: Value) -> Value {
     if let (Some(d), Value::Object(m)) = (inner.detail.as_ref(), &mut extra) {
-        for k in ["commit", "push", "checks_ran", "kind", "message"] {
+        for k in ["commit", "push", "checks_ran"] {
             if let Some(v) = d.get(k)
                 && !m.contains_key(k)
             {
