@@ -532,7 +532,10 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
             shown.insert(r.as_str().to_string(), json!(top));
         }
     }
-    let reply = ctx.call("publish", json!({ "group": { "id": 0, "batches": batches }, "shown": shown }), Kind::Write);
+    // Review-3 T1: the guarded repos this gate covered; the daemon refuses
+    // (before any prompt) a guarded repo outside it.
+    let plan: Vec<&str> = front.iter().map(|r| r.as_str()).collect();
+    let reply = ctx.call("publish", json!({ "group": { "id": 0, "batches": batches }, "shown": shown, "plan": plan }), Kind::Write);
     match reply {
         Ok(data) => {
             let published = data.get("published").and_then(Value::as_array).cloned().unwrap_or_default();

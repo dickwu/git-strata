@@ -36,7 +36,12 @@ pub struct Live {
     pub alerts: Arc<Mutex<Vec<String>>>,
     /// The method of every request the in-process daemon received.
     pub requests: Arc<Mutex<Vec<String>>>,
+    /// One-shot hooks run (with the daemon's core) just before the next
+    /// request of the named method is handled.
+    pub on_request: Arc<Mutex<Vec<(String, OnRequest)>>>,
 }
+
+pub type OnRequest = Box<dyn FnOnce(&Core) + Send>;
 
 impl Drop for Live {
     /// Sealed sets are 0555: make directories writable so the sandbox goes.
@@ -98,7 +103,7 @@ impl Live {
         fs::write(&bun, FAKE_BUN).unwrap();
         fs::set_permissions(&bun, fs::Permissions::from_mode(0o755)).unwrap();
         let deps_repos = deps.iter().map(|s| s.to_string()).collect();
-        let live = Live { home, sandbox, sb, root, repos, deps_repos, bin, alerts: Arc::new(Mutex::new(Vec::new())), requests: Arc::new(Mutex::new(Vec::new())) };
+        let live = Live { home, sandbox, sb, root, repos, deps_repos, bin, alerts: Arc::new(Mutex::new(Vec::new())), requests: Arc::new(Mutex::new(Vec::new())), on_request: Arc::new(Mutex::new(Vec::new())) };
         live.write_config();
         live
     }
@@ -167,13 +172,22 @@ impl Live {
         let listener = startup::bind(&core.opts.socket).expect("bind");
         let ext = AtomicBool::new(false);
         let requests = self.requests.clone();
+        let hooks = self.on_request.clone();
         std::thread::scope(|s| {
             let h = s.spawn(|| {
                 let trackers = handlers::Trackers::new(&core);
                 let r = {
                     let server = handlers::Server::new(&d, &trackers);
                     d.serve(&listener, &ext, &|req| {
-                        requests.lock().unwrap().push(req.method.name().to_string());
+                        let name = req.method.name().to_string();
+                        let hook = {
+                            let mut h = hooks.lock().unwrap();
+                            h.iter().position(|(m, _)| *m == name).map(|i| h.remove(i).1)
+                        };
+                        if let Some(hook) = hook {
+                            hook(&core);
+                        }
+                        requests.lock().unwrap().push(name);
                         server.handle(req)
                     })
                 };

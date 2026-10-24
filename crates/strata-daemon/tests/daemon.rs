@@ -433,6 +433,53 @@ fn confirmed_publish_is_bound_to_the_shown_chain_top() {
     core.close().unwrap();
 }
 
+/// Review-3 T1: `plan` (the guarded repos the cli's TTY gate covered).
+/// A guarded repo the publish would commit but that is not in it is
+/// `NotConfirmed` `plan_changed` before any prompt: no row, no commit, no
+/// push. With the repo planned, the same publish prompts and lands.
+#[test]
+fn publish_refuses_a_guarded_repo_outside_the_plan_before_prompting() {
+    use strata_confirm::seams::Verdict;
+    let mut fx = Dfx::new();
+    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.confirm = true;
+    fx.write_config();
+    let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
+    let core = fx.prepare_with(c).unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let chain = strata_publish::chain_ref("main");
+    serving(&d, || {
+        let id = new_session(&sock);
+        let root = ws(&core, &id, "tool");
+        external(&root, "printf 'export const a = 7\\n' > src/index.ts");
+        let cp = ok(call(&sock, "checkpoint", json!({
+            "session": id, "repo": "tool",
+            "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+        })));
+        let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+        let g = group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]);
+        let git = &core.gits[&repo_name("tool")];
+        let origin = origin_main(&fx);
+
+        let r = call(&sock, "publish", json!({ "group": g, "shown": {}, "plan": [] }));
+        assert_eq!(r["error"]["code"], "NotConfirmed", "{r:#}");
+        assert_eq!(r["error"]["detail"]["reason"], "plan_changed", "{r:#}");
+        assert_eq!(r["error"]["detail"]["repo"], "tool", "{r:#}");
+        assert_eq!(log.shown().len(), 0, "prompted outside the plan");
+        assert!(core.store.publishes().unwrap().is_empty(), "a publish row was written");
+        assert_eq!(git.read_ref(&chain).unwrap(), None, "a commit was written");
+        assert_eq!(origin_main(&fx), origin);
+        assert_eq!(push_calls(&core), 0);
+
+        let r = ok(call(&sock, "publish", json!({ "group": g, "shown": { "tool": null }, "plan": ["tool"] })));
+        let x = git.read_ref(&chain).unwrap().expect("chain commit");
+        assert_eq!(r["published"][0]["commit"], json!(x));
+        assert_eq!(log.shown().len(), 1);
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 /// Review H4 (kept by design, the agent loop made to work): a two-repo
 /// publish where the second repo conflicts with upstream. The `Conflict`
 /// says which repos already landed in this call (`published_before`) and

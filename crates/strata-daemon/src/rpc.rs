@@ -7,7 +7,7 @@
 //! socket (mode 0600) and authority comes from `strata-confirm` per action,
 //! never from the connection.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -182,6 +182,13 @@ pub struct PublishParams {
     /// a repo missing here counts as "showed no chain top".
     #[serde(default)]
     pub shown: BTreeMap<RepoName, Option<CommitOid>>,
+    /// Review-3 T1: the pushing, guarded repos the cli planned to commit
+    /// (the ones its TTY gate covered). When present, a repo that needs a
+    /// confirmation but is not in it is refused (`NotConfirmed`, reason
+    /// `plan_changed`) before any confirmation is asked for. Absent: no
+    /// such check (callers other than the cli).
+    #[serde(default)]
+    pub plan: Option<BTreeSet<RepoName>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]

@@ -466,7 +466,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 Ok(json!({ "only_a": json_of(&d.only_a), "only_b": json_of(&d.only_b), "both": both }))
             }),
             Params::DepsList(p) => Ok(json!({ "proposals": json_of(&strata_deps::open_proposals(&core.store, p.repo.as_ref())?) })),
-            Params::Publish(p) => self.publish(&p.group, &p.shown),
+            Params::Publish(p) => self.publish(&p.group, &p.shown, p.plan.as_ref()),
             Params::PublishPlan(p) => {
                 // Review-2 N2: what `publish` would do with this group, without
                 // writing; the cli gates TTY / confirmation on `repos` only.
@@ -945,11 +945,42 @@ impl<'d, 'a> Server<'d, 'a> {
     /// error after this repo's commit was written (`detail.commit`) also
     /// carries `detail.landed`, a `published` entry for it whose `push` is
     /// what is known of the push (`Unknown`, `Refused`, or null: not sent).
-    fn publish(&self, group: &strata_types::ReleaseGroup, shown: &BTreeMap<RepoName, Option<CommitOid>>) -> Result<Value> {
+    ///
+    /// Review-3 T1: `plan` (sent by the cli) is the guarded repos its TTY
+    /// gate covered. The publish plan is recomputed here; a repo that now
+    /// needs a confirmation but was not planned (the history changed between
+    /// `publish_plan` and `publish`) is refused before anything is asked or
+    /// written: `NotConfirmed`, reason `plan_changed`. Re-running the command
+    /// plans it again (and gates it on a TTY).
+    fn publish(
+        &self,
+        group: &strata_types::ReleaseGroup,
+        shown: &BTreeMap<RepoName, Option<CommitOid>>,
+        plan: Option<&BTreeSet<RepoName>>,
+    ) -> Result<Value> {
         let core = self.core();
         let rows = core.store.publishes()?;
         let (group, mut already) = rerun_plan(core, &rows, group)?;
         let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
+        if let Some(plan) = plan {
+            for repo in &repos {
+                let pinned = core.pinned(repo)?;
+                if pinned.push && needs_confirm(pinned) && !plan.contains(repo) {
+                    return Err(StrataError::new(
+                        Code::NotConfirmed,
+                        format!(
+                            "{repo} now needs a confirmation that this publish did not plan (the publish history changed since the plan); \
+                             nothing was written, run the command again"
+                        ),
+                    )
+                    .with_detail(json!({
+                        "reason": "plan_changed",
+                        "repo": repo.as_str(),
+                        "planned": plan.iter().map(RepoName::as_str).collect::<Vec<_>>(),
+                    })));
+                }
+            }
+        }
         let mut done: Vec<Value> = Vec::new();
         for repo in repos {
             // Review-2 N6: every error of this repo's body (config, the

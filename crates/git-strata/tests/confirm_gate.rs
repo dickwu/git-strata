@@ -527,3 +527,52 @@ fn release_daemon_has_no_test_seams() {
         assert!(!text.contains("feature \"test-seams\""), "{pkg} release build has test seams:\n{text}");
     }
 }
+
+/// Review-3 T1: the history can change between `publish_plan` and
+/// `publish`. A non-TTY re-run whose guarded repo the plan dropped (its
+/// content landed) is not gated; if, before its `publish` arrives, another
+/// publish of that session's path lands different content, the daemon's own
+/// re-plan keeps the guarded repo. It is refused (`NotConfirmed`
+/// `plan_changed`) before any prompt or credential, and nothing is written.
+#[test]
+fn non_tty_publish_refuses_a_guarded_repo_the_plan_left_out() {
+    let lv = guarded_live();
+    lv.serve_scripted(passes(4), |_core, log| {
+        let s = lv.new_session("T-3", "app");
+        let ws = lv.ws(&s, "app");
+        write(&ws, "a.txt", b"two\n");
+        let from = format!("{s}:a.txt");
+        let before = origin_main(&lv);
+        lv.run_tty_env(&lv.sb, &["publish", "--from", &from], &[]).ok();
+        assert_eq!(log.shown().len(), 1, "the first publish prompts once");
+        let landed = origin_main(&lv);
+        assert_ne!(landed, before, "publish did not push");
+
+        // Just before the re-run's `publish`: a later Done row of this
+        // session's a.txt whose commit (the old origin) has other content.
+        let other = before.clone();
+        lv.on_request.lock().unwrap().push((
+            "publish".into(),
+            Box::new(move |core: &Core| {
+                let g = core.store.publishes().unwrap().pop().expect("the landed row").group;
+                let id = core.store.record_publish(&g, std::time::SystemTime::now()).unwrap();
+                let outcome = json!({ "commit": other, "paths": ["a.txt"] });
+                assert!(core
+                    .store
+                    .set_publish_phase(id, strata_store::PublishPhase::Running, strata_store::PublishPhase::Done, Some(&outcome), std::time::SystemTime::now())
+                    .unwrap());
+            }),
+        ));
+        let seen = lv.requests.lock().unwrap().len();
+        let r = lv.run_in(&ws, &["publish", "--from", &from]);
+        assert_eq!(lv.requests.lock().unwrap()[seen..], ["checkpoint", "publish_plan", "publish"]);
+        assert_eq!(r.err_code(), "NotConfirmed", "{r:?}");
+        let e = r.env();
+        assert_eq!(e["error"]["detail"]["reason"], "plan_changed", "{e:#}");
+        assert_eq!(e["error"]["detail"]["repo"], "app", "{e:#}");
+        assert_eq!(log.shown().len(), 1, "the non-TTY publish prompted");
+        assert_eq!(origin_main(&lv), landed, "nothing pushed");
+        let main = lv.main("app");
+        assert_eq!(git(&main, lv.home.path(), &["rev-parse", "refs/strata/publish/main"]), landed, "no new commit");
+    });
+}
