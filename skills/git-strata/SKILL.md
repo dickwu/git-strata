@@ -101,7 +101,7 @@ Notes:
 it to Claude Code's settings; git-strata does not write the file:
 
 ```json
-{"hooks":{"PostToolUse":[{"matcher":"Edit|Write|Bash|MultiEdit","hooks":[{"type":"command","command":"git-strata checkpoint --tool-call \"$TOOL_USE_ID\""}]}],"SessionStart":[{"hooks":[{"type":"command","command":"git-strata daemon status"}]}]}}
+{"hooks":{"PostToolUse":[{"matcher":"Edit|Write|Bash|MultiEdit","hooks":[{"type":"command","command":"git-strata checkpoint --tool-call"}]}],"SessionStart":[{"hooks":[{"type":"command","command":"git-strata daemon status"}]}]}}
 ```
 
 - The session is resolved from the hook's cwd; do not add `--session`.
@@ -110,10 +110,13 @@ it to Claude Code's settings; git-strata does not write the file:
   `tool_input.file_paths[]` and `tool_input.edits[].file_path`; relative paths
   are joined to the object's `cwd`. A tool with no paths (e.g. `Bash`) scans
   every tracked repo of the session. Example input:
-  `{"cwd":"/…/sessions/s-k3q7xm2a/tool","tool_input":{"file_path":"src/a.ts"}}`
-- The ID must be non-empty; an empty `--tool-call ""` is `InvalidInput`
-  (`checkpoint_reason`). No other agent's hook format is documented; for other
-  agents run `git-strata checkpoint -m "..."` yourself after edits.
+  `{"tool_use_id":"toolu_01","cwd":"/…/sessions/s-k3q7xm2a/tool","tool_name":"Edit","tool_input":{"file_path":"src/a.ts"}}`
+- `--tool-call` without a value (or with an empty one) takes the id from the
+  JSON's `tool_use_id`. If that is missing or empty too, or stdin is a TTY,
+  the result is `InvalidInput` (`checkpoint_reason`). `--tool-call ID` with a
+  value uses that ID.
+- No other agent's hook format is documented; for other agents run
+  `git-strata checkpoint -m "..."` yourself after edits.
 
 ## The JSON envelope
 

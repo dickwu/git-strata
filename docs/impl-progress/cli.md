@@ -155,3 +155,15 @@ Not merged.
   conflict), `push`, `resolve`, `chain`, `config relax`, `deps approve`
   (confirm-class, need a TTY; tests/confirm_gate.rs).
 - **Check.** `rg -o 'git-strata [a-z]+' docs/modules/cli.md | sort -u | wc -l` = 17 (≥ 14).
+
+### Hook id from stdin (D22, 2026-10-23)
+
+- Claude Code sets no `TOOL_USE_ID` env var; the hook JSON on stdin carries
+  `tool_use_id`. `--tool-call` now takes an optional value
+  (`num_args = 0..=1`). No value or an empty one → the id is the stdin
+  JSON's `tool_use_id` (non-TTY stdin only, read once and also used for the
+  paths). Missing / empty / not a string / not JSON / TTY stdin →
+  `InvalidInput` `checkpoint_reason`, as before. A non-empty `--tool-call
+  ID` wins over `tool_use_id`. cli.md §3.5 hook command is now
+  `git-strata checkpoint --tool-call`. Test:
+  `hook_tool_call_id_comes_from_stdin_tool_use_id`.

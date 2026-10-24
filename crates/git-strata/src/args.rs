@@ -50,8 +50,9 @@ pub enum Cmd {
     },
     /// Record a checkpoint (exactly one of --tool-call / -m)
     Checkpoint {
-        /// Tool call id (hook mode; reads the hook JSON on a non-TTY stdin)
-        #[arg(long, value_name = "ID")]
+        /// Tool call id (hook mode; reads the hook JSON on a non-TTY stdin).
+        /// Without a value, the id is the hook JSON's `tool_use_id`
+        #[arg(long, value_name = "ID", num_args = 0..=1, default_missing_value = "")]
         tool_call: Option<String>,
         /// Manual checkpoint message
         #[arg(short = 'm', long = "message", value_name = "MSG")]

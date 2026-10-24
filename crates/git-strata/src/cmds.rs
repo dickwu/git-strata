@@ -163,6 +163,14 @@ fn local_status(ctx: &Ctx, sel: &Select) -> Result<Vec<Value>> {
 
 // ---- checkpoint -------------------------------------------------------------
 
+/// The hook input's `tool_use_id` (cli.md §3.5, D22): used when
+/// `--tool-call` has no value or an empty one. Missing, empty, not a
+/// string, or not JSON → `None`.
+pub fn hook_tool_use_id(input: &str) -> Option<String> {
+    let v = serde_json::from_str::<Value>(input).ok()?;
+    v["tool_use_id"].as_str().filter(|s| !s.is_empty()).map(str::to_string)
+}
+
 /// D5: the Claude Code hook input on stdin (one JSON object). Unreadable
 /// or not JSON → no paths (a Bash call has none either).
 pub fn hook_paths(input: &str) -> Vec<PathBuf> {
@@ -199,8 +207,24 @@ fn checkpoint_json(store: &Store, s: &SessionId, id: CheckpointId) -> Result<Val
 }
 
 pub fn checkpoint(ctx: &Ctx, tool_call: Option<String>, message: Option<String>, session: Option<String>, paths: &[String]) -> Result<Envelope> {
+    // Hook mode reads stdin once (non-TTY only); the id falls back to the
+    // hook JSON's `tool_use_id` when `--tool-call` has no value (D22).
+    let hook_input = if tool_call.is_some() && message.is_none() && !crate::tty::stdin_is_tty() {
+        Some(read_stdin())
+    } else {
+        None
+    };
     let reason = match (tool_call, message) {
         (Some(id), None) if !id.is_empty() => CheckpointReason::ToolCall { id },
+        (Some(_), None) => match hook_input.as_deref().and_then(hook_tool_use_id) {
+            Some(id) => CheckpointReason::ToolCall { id },
+            None => {
+                return Err(invalid(
+                    "checkpoint_reason",
+                    "--tool-call has no id and the hook JSON on stdin has no tool_use_id",
+                ));
+            }
+        },
         (None, Some(message)) => CheckpointReason::Manual { message },
         _ => return Err(invalid("checkpoint_reason", "give exactly one of --tool-call ID and -m MSG")),
     };
@@ -209,8 +233,8 @@ pub fn checkpoint(ctx: &Ctx, tool_call: Option<String>, message: Option<String>,
     let (s, _) = ro::session_or_cwd(&store, session.as_deref())?;
     let rec = ro::record(&store, &s)?;
     let mut abs: Vec<PathBuf> = paths.iter().map(|p| absolute(p)).collect();
-    if matches!(reason, CheckpointReason::ToolCall { .. }) && !crate::tty::stdin_is_tty() {
-        abs.extend(hook_paths(&read_stdin()));
+    if let Some(input) = &hook_input {
+        abs.extend(hook_paths(input));
     }
     // Every path lands on the repo of this session it falls in; paths
     // outside the session are skipped (§3.5).

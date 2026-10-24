@@ -98,6 +98,62 @@ fn hook_checkpoint_is_idempotent_per_tool_call() {
 }
 
 #[test]
+fn hook_tool_call_id_comes_from_stdin_tool_use_id() {
+    // cli.md §3.5 / D22: Claude Code sets no TOOL_USE_ID env var; the id is
+    // the hook JSON's `tool_use_id` when `--tool-call` has no value.
+    let lv = Live::new(&["tool"], &base_files());
+    let s = lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        write(&ws, "a.txt", b"hooked\n");
+        let hook = |id: Option<&str>| {
+            let mut v = json!({
+                "session_id": "claude",
+                "cwd": ws,
+                "tool_name": "Edit",
+                "tool_input": { "file_path": ws.join("a.txt") },
+            });
+            if let Some(id) = id {
+                v["tool_use_id"] = json!(id);
+            }
+            v.to_string()
+        };
+        // No value: the id is tool_use_id.
+        let r1 = lv.run_piped(&ws, &["checkpoint", "--tool-call"], hook(Some("toolu_A")).as_bytes());
+        let d1 = r1.ok();
+        assert_eq!(d1["checkpoints"][0]["reason"], json!({ "kind": "ToolCall", "id": "toolu_A" }), "{d1}");
+        assert!(paths(&d1["checkpoints"][0]["entries"]).contains(&"a.txt".to_string()), "{d1}");
+        // Empty value: same fallback, and idempotent on the same id.
+        let r2 = lv.run_piped(&ws, &["checkpoint", "--tool-call="], hook(Some("toolu_A")).as_bytes());
+        assert_eq!(ids(&r2.ok()), ids(&d1));
+        // A non-empty value wins over tool_use_id.
+        write(&ws, "a.txt", b"hooked again\n");
+        let r3 = lv.run_piped(&ws, &["checkpoint", "--tool-call", "cli-id"], hook(Some("toolu_B")).as_bytes());
+        assert_eq!(r3.ok()["checkpoints"][0]["reason"], json!({ "kind": "ToolCall", "id": "cli-id" }));
+        // Missing, empty, or not JSON: InvalidInput checkpoint_reason, nothing recorded.
+        for input in [hook(None), hook(Some("")), "not json".to_string()] {
+            for args in [&["checkpoint", "--tool-call"][..], &["checkpoint", "--tool-call="][..]] {
+                let r = lv.run_piped(&ws, args, input.as_bytes());
+                assert_eq!(r.err_code(), "InvalidInput", "{r:?}");
+                assert_eq!(r.reason(), "checkpoint_reason", "{r:?}");
+            }
+        }
+        // A TTY stdin has no hook JSON to read.
+        let t = lv.run_tty_env(&ws, &["checkpoint", "--tool-call"], &[]);
+        assert_eq!(t.err_code(), "InvalidInput", "{t:?}");
+        assert_eq!(t.reason(), "checkpoint_reason", "{t:?}");
+        // --tool-call with no value and -m together is still both reasons.
+        let both = lv.run_piped(&ws, &["checkpoint", "--tool-call", "-m", "x"], hook(Some("toolu_C")).as_bytes());
+        assert_eq!(both.reason(), "checkpoint_reason", "{both:?}");
+        s
+    });
+    assert_eq!(store_rows(&lv, &s, "tool", "toolu_A").len(), 1);
+    assert_eq!(store_rows(&lv, &s, "tool", "cli-id").len(), 1);
+    assert!(store_rows(&lv, &s, "tool", "toolu_B").is_empty());
+    assert!(store_rows(&lv, &s, "tool", "").is_empty());
+}
+
+#[test]
 fn daemon_up_read_does_not_open_sessions() {
     // The local path opens Git and `Sessions` for every configured repo.
     // With the main checkout moved away that open fails, so a success while

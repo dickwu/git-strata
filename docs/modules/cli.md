@@ -84,7 +84,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | --- | --- | --- |
 | `git-strata new` | `--repos a,b`（至少一个 `RepoName`）。ticket 用 `--ticket T` 或第一个位置参数，二者给了同一个字段；都不给则没有标签。ticket 只是标签，不进路径 | 空 `--repos`；ticket 形如 `SessionId` 由 session 返回 `ReservedName`，cli 透传 |
 | `git-strata status` | `[--all]` 或 `[--session S]`。都不给 = cwd 的会话 | — |
-| `git-strata checkpoint` | `--tool-call ID` 与 `-m MSG` 二选一。`[--session S]`。`--path P` 可重复，P 是工作区里的路径，cli 收成相对该 repo 根的 `RepoPath` | 两个都给，或两个都不给 → `InvalidInput`，`detail.reason = "checkpoint_reason"` |
+| `git-strata checkpoint` | `--tool-call [ID]` 与 `-m MSG` 二选一；`ID` 省略或为空时取钩子 stdin JSON 的 `tool_use_id`（§3.5，D22）。`[--session S]`。`--path P` 可重复，P 是工作区里的路径，cli 收成相对该 repo 根的 `RepoPath` | 两个都给，或两个都不给 → `InvalidInput`，`detail.reason = "checkpoint_reason"` |
 | `git-strata restore` | `<checkpoint>`（十进制 `CheckpointId`，超过 `i64::MAX` → `InvalidInput`）`[paths…]` `[--session S]` | 非数字 id → `InvalidInput` |
 | `git-strata grep` | `<pattern>`。`[--session S]` 或 `[--all]`。都不给 = cwd 的会话（design §6.3；压过初稿“不给就是全部”，见 §9）。没有 `--repo`，没有 type / encoding / glob 之类的 tgrep 选项（T11） | 空 pattern → `InvalidInput` |
 | `git-strata files` | 可选的一个位置参数 glob，交给 search 的 `files`；不给 = 该视图全部文件（D11）。选择器同 grep。没有别的 flag | — |
@@ -192,8 +192,10 @@ socket 是 `~/Library/Application Support/git-strata/daemon.sock`。没有环境
 `PostToolUse` 的命令行就是：
 
 ```text
-git-strata checkpoint --tool-call "$TOOL_USE_ID"
+git-strata checkpoint --tool-call
 ```
+
+Claude Code 不设 `TOOL_USE_ID` 这类环境变量；工具调用的 id 在钩子 stdin 的 JSON 里（`tool_use_id`，与 `session_id`、`cwd`、`tool_name`、`tool_input` 并列）。`--tool-call` 不带值或带空值时，id 取 stdin JSON 的 `tool_use_id`。stdin 是 TTY、不是 JSON、或其中 `tool_use_id` 缺失或为空 → `InvalidInput`，`detail.reason = "checkpoint_reason"`，与现在相同。`--tool-call ID` 带非空值时用命令行的值，stdin 只用来取路径。[实现时补的决定]（D22）
 
 会话从钩子的 cwd 解析，不在命令行上传 `--session`。一次钩子可以记下不止一个 repo，不能只记 cwd 所在的那个。`--tool-call` 存在且 stdin 不是 TTY 时，读 stdin 的一个 JSON 对象（Claude Code 的钩子输入）：`tool_input.file_path`、`tool_input.file_paths`、`tool_input.edits[].file_path` 都收成绝对路径。每条绝对路径落到哪个会话仓库，就记哪个仓库：工作区是 `<root>/sessions/<session-id>/<repo>/`，用路径前缀对上，不调用 `Sessions::open`。从 tool 工作区来的 `../hr-core` 一旦变成绝对路径，落在同一会话的 `hr-core` 里，就必须记在 `hr-core` 上，不能丢掉，也不能记成 cwd 那个 repo 的检查点。落在这个会话之外的路径跳过，不让 cwd 的检查点因此失败。没有路径的工具（`Bash`）对这个会话每个 tracked repo 走 `Inbox::require_full`，不是只扫 cwd。stdin 是 TTY 时只认命令行上的 `--path`，映射规则相同（D5）。
 
@@ -206,7 +208,7 @@ git-strata checkpoint --tool-call "$TOOL_USE_ID"
 钩子由人写进 Claude Code 的设置，本文不生成文件：
 
 ```json
-{"hooks":{"PostToolUse":[{"matcher":"Edit|Write|Bash|MultiEdit","hooks":[{"type":"command","command":"git-strata checkpoint --tool-call \"$TOOL_USE_ID\""}]}],"SessionStart":[{"hooks":[{"type":"command","command":"git-strata daemon status"}]}]}}
+{"hooks":{"PostToolUse":[{"matcher":"Edit|Write|Bash|MultiEdit","hooks":[{"type":"command","command":"git-strata checkpoint --tool-call"}]}],"SessionStart":[{"hooks":[{"type":"command","command":"git-strata daemon status"}]}]}}
 ```
 
 ## 4. 数据与不变量
@@ -453,6 +455,7 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D19 `--help` / `--version` | clap 文本，退出码 0，不套信封 | 这两个不是子命令。其余 stdout 只有信封 | 2026-10-23 |
 | D20 待确认提示 | 成功之后读 `deps::open_proposals`，不调用 `Sessions::open`，失败不影响退出码 | design §6.4 第 4 步要每次 CLI 都提示。不能为了提示再发一次写 RPC，也不能再开一个 `Sessions` | 2026-10-23 |
 | D21 钉住的值读不出 | 当作要确认，先 `require_tty` | 读不出就放行，等于让一份坏文件跳过 TTY 检查 | 2026-10-23 |
+| D22 钩子的工具调用 id | `--tool-call` 不带值或为空 → 取 stdin JSON 的 `tool_use_id`；仍缺或为空 → `InvalidInput`（`checkpoint_reason`）。§3.5 的命令行改为 `git-strata checkpoint --tool-call`。[实现时补的决定] | Claude Code 不设 `TOOL_USE_ID` 环境变量，原命令行会传空串，每次钩子都失败 | 2026-10-23 |
 
 初稿里被后写裁定压过的两句，不沿用：`grep` 不给 session 就是全部（改为 cwd 会话，`--all` 才是全部，design §6.3 与 T11）；`grep` 的 `--repo`（T11 只留 `--session` 与 `--all`）。crate 名从初稿的 `crates/strata-cli` 改为 types.md §8 的 `crates/git-strata`。
 
