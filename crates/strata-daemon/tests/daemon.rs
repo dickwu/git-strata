@@ -549,6 +549,61 @@ fn publish_confirmation_cancelled_after_a_repo_landed_keeps_it_in_the_envelope()
     core.close().unwrap();
 }
 
+/// Review-2 N2: `publish_plan` names the repos a publish of the group would
+/// still commit and those that already landed, and writes nothing, so the
+/// cli gates TTY / confirmation on the remaining repos only.
+#[test]
+fn publish_plan_names_the_remaining_repos_and_writes_nothing() {
+    use strata_confirm::seams::Verdict;
+    let mut fx = Dfx::with(&["front", "tool"]);
+    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.confirm = true;
+    fx.write_config();
+    let (c, log, _) = fx.confirmer(vec![Verdict::la(-2)]);
+    let core = fx.prepare_with(c).unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let chain = strata_publish::chain_ref("main");
+    serving(&d, || {
+        let s = ok(call(&sock, "new", json!({ "ticket": null, "repos": ["front", "tool"] })));
+        let id: SessionId = serde_json::from_value(s["session"]["manifest"]["id"].clone()).unwrap();
+        external(&ws(&core, &id, "front"), "printf 'export const f = 1\\n' > src/index.ts");
+        external(&ws(&core, &id, "tool"), "printf 'export const t = 1\\n' > src/index.ts");
+        let group = || {
+            let mut batches = Vec::new();
+            for repo in ["front", "tool"] {
+                let cp = ok(call(&sock, "checkpoint", json!({
+                    "session": id, "repo": repo, "reason": { "kind": "BeforePublish" }, "paths": ["src/index.ts"],
+                })));
+                batches.push(json!({ "session": id, "repo": repo, "checkpoint": cp["checkpoint"]["id"], "paths": ["src/index.ts"] }));
+            }
+            json!({ "id": 0, "batches": batches })
+        };
+        let plan = ok(call(&sock, "publish_plan", json!({ "group": group() })));
+        assert_eq!(plan, json!({ "repos": ["front", "tool"], "already_published": [] }));
+        assert!(core.store.publishes().unwrap().is_empty(), "the plan wrote a publish row");
+
+        // front lands, tool's confirmation is cancelled.
+        let r = call(&sock, "publish", json!({ "group": group(), "shown": { "tool": null } }));
+        assert_eq!(r["error"]["detail"]["repo"], "tool", "{r:#}");
+        let landed = core.gits[&repo_name("front")].read_ref(&chain).unwrap().expect("front committed");
+        let rows = core.store.publishes().unwrap().len();
+        let prompts = log.shown().len();
+
+        let plan = ok(call(&sock, "publish_plan", json!({ "group": group() })));
+        assert_eq!(plan["repos"], json!(["tool"]), "{plan:#}");
+        assert_eq!(plan["already_published"][0]["repo"], "front", "{plan:#}");
+        assert_eq!(plan["already_published"][0]["commit"], json!(landed), "{plan:#}");
+        assert_eq!(core.store.publishes().unwrap().len(), rows, "the plan wrote a publish row");
+        assert_eq!(log.shown().len(), prompts, "the plan prompted");
+        assert_eq!(core.gits[&repo_name("tool")].read_ref(&chain).unwrap(), None, "tool committed");
+        assert_eq!(core.gits[&repo_name("front")].read_ref(&chain).unwrap(), Some(landed));
+        let e = call(&sock, "publish_plan", json!({ "group": { "id": 0, "batches": [] } }));
+        assert_eq!(e["error"]["code"], "InvalidInput", "{e:#}");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 /// Review-2 N1: re-run filtering is per selector and by content. Each
 /// call is what the cli does (a BeforePublish checkpoint, then publish).
 fn publish_selectors(sock: &Path, id: &SessionId, repo: &str, paths: &[&str]) -> Value {

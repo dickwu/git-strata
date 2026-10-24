@@ -471,28 +471,66 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
         v.dedup();
         v
     };
-    let front = gate(&mut repos.iter())?;
+    // Review-2 N2: the TTY gate and the confirmations cover only the repos
+    // this publish will still commit. When a pushing, guarded repo is in the
+    // batch, the before-publish checkpoints and the read-only `publish_plan`
+    // come first, so a re-run whose guarded repos already landed is not
+    // refused on a non-TTY. Before the gate nothing but those is sent: no
+    // `publish`, no prompt, no credential. A failure of either step on a
+    // non-TTY is the gate's `NotTty` (as before), with the failure attached.
+    let guarded: Vec<RepoName> =
+        repos.iter().filter(|r| pins.pushes(Some(&config), r) && pins.needs_confirm(Some(&config), r)).cloned().collect();
+    let tty_refused = |e: StrataError| -> StrataError {
+        match require_tty_for("publish") {
+            Err(mut t) => {
+                if let Some(d) = t.detail.as_mut().and_then(Value::as_object_mut) {
+                    d.insert("plan_error".into(), json!({ "code": e.code, "message": e.message, "detail": e.detail }));
+                }
+                t
+            }
+            Ok(()) => e,
+        }
+    };
+    // Before-publish checkpoints, then the plan, the gate, the publish.
+    let mut batches = Vec::new();
+    for ((s, r), paths) in &batch {
+        let ps: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+        let cid = (|| {
+            let c = ctx.call(
+                "checkpoint",
+                json!({ "session": s.as_str(), "repo": r.as_str(), "reason": { "kind": "BeforePublish" }, "paths": ps }),
+                Kind::Write,
+            )?;
+            let cid = c.get("checkpoint").and_then(|c| c.get("id")).and_then(Value::as_u64).ok_or_else(|| {
+                invalid("rpc_failed", "the daemon's checkpoint reply has no checkpoint id")
+            })?;
+            let _ = CheckpointId::try_from(cid)?;
+            Ok::<u64, StrataError>(cid)
+        })()
+        .map_err(|e| if guarded.is_empty() { e } else { tty_refused(e) })?;
+        batches.push(json!({ "session": s.as_str(), "repo": r.as_str(), "checkpoint": cid, "paths": ps }));
+    }
+    let remaining: Vec<RepoName> = if guarded.is_empty() {
+        Vec::new()
+    } else {
+        let plan = ctx
+            .call("publish_plan", json!({ "group": { "id": 0, "batches": batches } }), Kind::Read)
+            .map_err(tty_refused)?;
+        plan.get("repos")
+            .and_then(Value::as_array)
+            .ok_or_else(|| tty_refused(invalid("rpc_failed", "the daemon's publish_plan reply has no repos")))?
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(|r| RepoName::try_from(r.to_string()).ok())
+            .collect()
+    };
+    let front = gate(&mut guarded.iter().filter(|r| remaining.contains(r)))?;
     let mut shown = serde_json::Map::new();
     for r in &front {
         if let Some(rc) = config.repos.get(r) {
             let top = show::push_plan(r, rc, "publish will ask to confirm");
             shown.insert(r.as_str().to_string(), json!(top));
         }
-    }
-    // Before-publish checkpoints, then the publish.
-    let mut batches = Vec::new();
-    for ((s, r), paths) in &batch {
-        let ps: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
-        let c = ctx.call(
-            "checkpoint",
-            json!({ "session": s.as_str(), "repo": r.as_str(), "reason": { "kind": "BeforePublish" }, "paths": ps }),
-            Kind::Write,
-        )?;
-        let cid = c.get("checkpoint").and_then(|c| c.get("id")).and_then(Value::as_u64).ok_or_else(|| {
-            invalid("rpc_failed", "the daemon's checkpoint reply has no checkpoint id")
-        })?;
-        let _ = CheckpointId::try_from(cid)?;
-        batches.push(json!({ "session": s.as_str(), "repo": r.as_str(), "checkpoint": cid, "paths": ps }));
     }
     let reply = ctx.call("publish", json!({ "group": { "id": 0, "batches": batches }, "shown": shown }), Kind::Write);
     match reply {

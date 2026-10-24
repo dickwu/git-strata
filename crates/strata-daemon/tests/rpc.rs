@@ -91,18 +91,18 @@ fn roundtrip(sock: &Path, lines: &[&[u8]]) -> Vec<Value> {
 }
 
 #[test]
-fn method_table_has_the_nineteen_names() {
+fn method_table_has_the_twenty_names() {
     let names: Vec<&str> = Method::ALL.iter().map(|m| m.name()).collect();
     assert_eq!(
         names,
         [
             "new", "status", "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_approve",
-            "deps_list", "publish", "push", "assign", "rm", "gc", "resolve_move", "chain_resolve", "config_relax",
+            "deps_list", "publish", "publish_plan", "push", "assign", "rm", "gc", "resolve_move", "chain_resolve", "config_relax",
             "daemon_status"
         ]
     );
     let ro: Vec<&str> = Method::ALL.iter().filter(|m| m.is_read_only()).map(|m| m.name()).collect();
-    assert_eq!(ro, ["status", "grep", "files", "diff", "deps_list", "daemon_status"]);
+    assert_eq!(ro, ["status", "grep", "files", "diff", "deps_list", "publish_plan", "daemon_status"]);
     for m in Method::ALL {
         assert_eq!(Method::from_name(m.name()), Some(*m));
     }
@@ -179,6 +179,7 @@ fn every_method_parses_its_documented_params() {
         ("deps_approve", json!({ "proposal": 1, "sessions": null })),
         ("deps_list", json!({ "repo": null })),
         ("publish", json!({ "group": { "id": 0, "batches": [] } })),
+        ("publish_plan", json!({ "group": { "id": 0, "batches": [] } })),
         ("push", json!({ "repo": "tool" })),
         ("assign", json!({ "group": 1, "path": "a.txt", "session": sid })),
         ("rm", json!({ "session": sid, "discard": false })),

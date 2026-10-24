@@ -59,6 +59,7 @@ methods! {
     DepsApprove = "deps_approve", ro = false;
     DepsList = "deps_list", ro = true;
     Publish = "publish", ro = false;
+    PublishPlan = "publish_plan", ro = true;
     Push = "push", ro = false;
     Assign = "assign", ro = false;
     Rm = "rm", ro = false;
@@ -161,6 +162,15 @@ pub struct RepoOptParams {
     pub repo: Option<RepoName>,
 }
 
+/// Review-2 N2: the read-only plan of a `publish` of this group: which
+/// repos it would still commit (`repos`) and which already landed
+/// (`already_published`). Nothing is written.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishPlanParams {
+    pub group: ReleaseGroup,
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishParams {
@@ -246,6 +256,7 @@ pub enum Params {
     DepsApprove(DepsApproveParams),
     DepsList(RepoOptParams),
     Publish(PublishParams),
+    PublishPlan(PublishPlanParams),
     Push(PushParams),
     Assign(AssignParams),
     Rm(RmParams),
@@ -279,6 +290,7 @@ impl Params {
             Method::DepsApprove => typed(v, Params::DepsApprove),
             Method::DepsList => typed(v, Params::DepsList),
             Method::Publish => typed(v, Params::Publish),
+            Method::PublishPlan => typed(v, Params::PublishPlan),
             Method::Push => typed(v, Params::Push),
             Method::Assign => typed(v, Params::Assign),
             Method::Rm => typed(v, Params::Rm),

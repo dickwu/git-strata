@@ -80,6 +80,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `deps_approve` | 确认后铺开 | 否 |
 | `deps_list` | `open_proposals` | 是 |
 | `publish` | `stage` 到 `commit`，按配置 `push` | 否 |
+| `publish_plan` | 同一个 group 的发布会做什么：还要提交的仓库与已经落地的仓库。不写任何东西（review-2 N2）[实现时补的决定] | 是 |
 | `push` | `publish::push` | 否 |
 | `assign` | 点名冲突解决者 | 否 |
 | `rm` | `session::remove` | 否 |
@@ -104,6 +105,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `deps_approve` | `{ "proposal": ProposalId, "sessions": [SessionId]\|null }` | 每个会话一条；`null` = 该 repo 的全部会话 |
 | `deps_list` | `{ "repo": RepoName\|null }` | `open_proposals` |
 | `publish` | `{ "group": ReleaseGroup, "shown"?: { RepoName: CommitOid \| null } }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数。`shown` 是 cli 给人看过的每个要确认仓库的链顶（D21）。回复另带 `already_published: [{repo, publish, commit, push}]`：之前已经落地、这次跳过的仓库（D22）。失败时 `detail.repo` 是停下的仓库，`detail.published_before` 是这次已经提交的仓库。停下的仓库若已写了提交（`detail.commit`，如推送超时或被拒），`detail.landed` 是它的那条 `{repo, commit, push}`，`push` 取已知的结果（`Unknown` / `Refused`，没推为 null）（review M4）[实现时补的决定]；`push` 与 `checks_ran` 取 publish 错误 detail 里写明的值，推送成功后才失败（rebase、关行）的是 `Pushed`（review-2 N3）[实现时补的决定]。`repo` / `published_before` / `already_published` 加在该仓库的任何错误上，不只是 publish 本身的：读配置、确认失败或被取消（`require_validated`）同样带上（review-2 N6）[实现时补的决定] |
+| `publish_plan` | `{ "group": ReleaseGroup }` | `{ "repos": [RepoName], "already_published": [{repo, publish, commit, push}] }`。与 `publish` 用同一份重跑过滤（D22）：`repos` 是这次 `publish` 还会提交、会确认的仓库，按名字排序；`already_published` 与 `publish` 会报的一致。不排队，不拿锁，不写 Store、ref、工作区，不弹框。只覆盖按内容判定的落地；会话没被 rebase 时 publish 的 `NoCommit` 回退（D22）只有真正 stage 才知道，这类仓库仍在 `repos` 里。group 为空 → `InvalidInput`。cli 用它把 TTY 检查和确认限制在还要做事的仓库上（cli.md §5，review-2 N2）[实现时补的决定] |
 | `push` | `{ "repo": RepoName, "shown"?: CommitOid \| null }` | `PushOutcome`。`shown` 是 cli 给人看过的链顶（D21） |
 | `assign` | `{ "group": ReleaseGroup, "path": RepoPath, "session": SessionId }` | `{}` |
 | `rm` | `{ "session": SessionId, "discard": bool }` | `RemoveReport` |
@@ -299,7 +301,7 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 | I2 | 每 repo 一把写锁，不可重入。先到先得。写前等 `LOCK_WAIT`，超时 `Busy`，什么都没写。写后的等待一直等到拿到，不返回 `Busy`（「Waits after a call's first visible write are not bounded」） | §8、不变量 6 |
 | I3 | 每会话一条队列，先到先得，不可重入。同一会话的 checkpoint、restore、`rm`、`move_workspace`、`resolve_failed_move` 串行。进行中的不取消，后来的排队，不返回错误码 | §8 |
 | I4 | 建造锁 → 会话队列（`SessionId` 升序）→ repo 写锁（一次只拿一个 repo 的）。持有队列或 repo 锁时不等建造锁 | — |
-| I5 | status、grep、files、diff、deps_list、daemon_status 不排队，不等写锁 | §8 |
+| I5 | status、grep、files、diff、deps_list、publish_plan、daemon_status 不排队，不等写锁 | §8 |
 | I6 | 启动时把残留的 `PublishPhase::Running` 改成 `Unknown`（store 允许这条边），然后由 `status` 和 `daemon_status` 报出。不重放、不删除、不调用 `git push`。留下 Running 不是不变量 6 的不确定状态 | 不变量 6 |
 | I7 | 凭据不出进程。RPC 参数里没有能代表「已确认」的字段。action 由 daemon 从请求推出，不采用客户端传来的 | 不变量 7 |
 | I8 | 不持 `Tracker` 去等队列或锁。回调线程只调 `Inbox::note` | — |
@@ -390,6 +392,8 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 **`diff`**：不排队。`publish::diff_between`。
 
 **`deps_list`**：不排队。`open_proposals`。
+
+**`publish_plan`**：不排队。`publish` 开头那一步重跑过滤（`rerun_plan`，即 D22 的按选择子、按内容判定）原样跑一遍，返回还要提交的仓库与 `already_published`，不写（review-2 N2）[实现时补的决定]。
 
 **`deps_propose`**：锁外 `drift`，没有漂移不必提议。有则锁外 `build`。然后占 repo 锁（写前 30 秒）调 `propose`。`switch` 为真：先锁外 `ensure_base_for`，再占该会话队列、拿锁、`plan_switch` 与 `move_workspace`。建造都在占队列之前。
 

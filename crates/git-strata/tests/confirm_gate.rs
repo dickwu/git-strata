@@ -237,7 +237,14 @@ fn non_tty_refused_before_prompt() {
             }
         }
         std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(lv.requests.lock().unwrap()[seen..], [] as [String; 0], "a refused command reached the daemon");
+        // Review-2 N2: a refused publish sends only its before-publish
+        // checkpoint and the read-only plan (to learn which repos remain);
+        // no `publish`, no prompt. Every other command sends nothing.
+        assert_eq!(
+            lv.requests.lock().unwrap()[seen..],
+            ["checkpoint", "publish_plan", "checkpoint", "publish_plan"],
+            "a refused command reached the daemon"
+        );
         untouched(&lv, core, &fx, "non-tty");
 
         // Control: on a pseudo-terminal each prompts exactly once.
@@ -269,6 +276,42 @@ fn non_tty_refused_before_prompt() {
         once(&["rm", "--session", fx.s.as_str(), "--discard"]).ok();
         let rec = core.store.session(&fx.s).unwrap();
         assert!(rec.is_none_or(|r| r.lifecycle == strata_store::Lifecycle::Removed), "rm --discard did not remove");
+    });
+}
+
+/// Review-2 N2: the TTY gate covers only the repos the publish will still
+/// commit. A non-TTY re-run whose guarded repo already landed (same
+/// content) succeeds with `already_published` and no prompt; once that repo
+/// has new content the gate refuses again, before any `publish` request.
+#[test]
+fn non_tty_rerun_of_a_landed_guarded_repo_is_not_gated() {
+    let lv = guarded_live();
+    lv.serve_scripted(passes(4), |_core, log| {
+        let s = lv.new_session("T-2", "app");
+        let ws = lv.ws(&s, "app");
+        write(&ws, "a.txt", b"two\n");
+        let from = format!("{s}:a.txt");
+        let before = origin_main(&lv);
+        lv.run_tty_env(&lv.sb, &["publish", "--from", &from], &[]).ok();
+        assert_eq!(log.shown().len(), 1, "the first publish prompts once");
+        let landed = origin_main(&lv);
+        assert_ne!(landed, before, "publish did not push");
+
+        let seen = lv.requests.lock().unwrap().len();
+        let r = lv.run_in(&ws, &["publish", "--from", &from]).ok();
+        assert_eq!(r["already_published"][0]["repo"], "app", "{r:#}");
+        assert_eq!(r["commits"], json!({}), "{r:#}");
+        assert_eq!(log.shown().len(), 1, "the re-run prompted");
+        assert_eq!(origin_main(&lv), landed);
+        assert_eq!(lv.requests.lock().unwrap()[seen..], ["checkpoint", "publish_plan", "publish"]);
+
+        write(&ws, "a.txt", b"three\n");
+        let seen = lv.requests.lock().unwrap().len();
+        let r = lv.run_in(&ws, &["publish", "--from", &from]);
+        assert_eq!(r.err_code(), "NotTty", "{r:?}");
+        assert_eq!(log.shown().len(), 1, "a refused publish prompted");
+        assert_eq!(lv.requests.lock().unwrap()[seen..], ["checkpoint", "publish_plan"]);
+        assert_eq!(origin_main(&lv), landed, "a refused publish pushed");
     });
 }
 

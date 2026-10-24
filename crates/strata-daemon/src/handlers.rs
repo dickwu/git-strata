@@ -467,6 +467,13 @@ impl<'d, 'a> Server<'d, 'a> {
             }),
             Params::DepsList(p) => Ok(json!({ "proposals": json_of(&strata_deps::open_proposals(&core.store, p.repo.as_ref())?) })),
             Params::Publish(p) => self.publish(&p.group, &p.shown),
+            Params::PublishPlan(p) => {
+                // Review-2 N2: what `publish` would do with this group, without
+                // writing; the cli gates TTY / confirmation on `repos` only.
+                let (g, already) = rerun_plan(core, &core.store.publishes()?, &p.group)?;
+                let repos: BTreeSet<&str> = g.batches.iter().map(|b| b.repo.as_str()).collect();
+                Ok(json!({ "repos": repos.into_iter().collect::<Vec<_>>(), "already_published": already }))
+            }
             Params::Push(p) => self.push(&p.repo, p.shown.as_ref()),
             Params::Assign(p) => {
                 let repo = core.store.publishes()?.into_iter().find(|r| r.group.id == p.group).and_then(|r| {
@@ -940,35 +947,9 @@ impl<'d, 'a> Server<'d, 'a> {
     /// what is known of the push (`Unknown`, `Refused`, or null: not sent).
     fn publish(&self, group: &strata_types::ReleaseGroup, shown: &BTreeMap<RepoName, Option<CommitOid>>) -> Result<Value> {
         let core = self.core();
-        if group.batches.is_empty() {
-            return Err(StrataError::new(Code::InvalidInput, "the release group has no batch"));
-        }
         let rows = core.store.publishes()?;
-        let mut kept = Vec::new();
-        let mut landed: BTreeMap<RepoName, Value> = BTreeMap::new();
-        for b in &group.batches {
-            let (paths, proof) = rerun_paths(core, &rows, b).map_err(|mut e| {
-                // Review-2 N6: nothing is written yet; earlier landings found so far stay visible.
-                if let Some(d) = e.detail.get_or_insert_with(|| json!({})).as_object_mut()
-                    && !landed.is_empty()
-                    && !d.contains_key("already_published")
-                {
-                    d.insert("already_published".into(), Value::Array(landed.values().cloned().collect()));
-                }
-                e
-            })?;
-            if paths.is_empty()
-                && let Some(v) = proof
-            {
-                landed.insert(b.repo.clone(), v);
-            } else {
-                kept.push(strata_types::Batch { paths, ..b.clone() });
-            }
-        }
-        let group = strata_types::ReleaseGroup { id: group.id, batches: kept };
+        let (group, mut already) = rerun_plan(core, &rows, group)?;
         let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
-        landed.retain(|r, _| !repos.contains(r));
-        let mut already: Vec<Value> = landed.into_values().collect();
         let mut done: Vec<Value> = Vec::new();
         for repo in repos {
             // Review-2 N6: every error of this repo's body (config, the
@@ -1095,6 +1076,43 @@ fn landed_after_commit(repo: &RepoName, commit: Value, d: &Value) -> Value {
     };
     let checks = d.get("checks_ran").cloned().unwrap_or(Value::Null);
     json!({ "repo": repo.as_str(), "commit": commit, "checks_ran": checks, "push": push, "warnings": [], "rebases": [] })
+}
+
+/// Review-2 N1/N2: the group as `publish` will run it: each batch with the
+/// selectors whose content already landed dropped (`rerun_paths`), batches
+/// left with nothing removed, and the `already_published` entries of the
+/// repos none of whose batches remain. Read-only; `publish` and
+/// `publish_plan` share it, so the cli's TTY gate sees the same repos the
+/// publish will confirm.
+fn rerun_plan(core: &Core, rows: &[strata_store::PublishRecord], group: &strata_types::ReleaseGroup) -> Result<(strata_types::ReleaseGroup, Vec<Value>)> {
+    if group.batches.is_empty() {
+        return Err(StrataError::new(Code::InvalidInput, "the release group has no batch"));
+    }
+    let mut kept = Vec::new();
+    let mut landed: BTreeMap<RepoName, Value> = BTreeMap::new();
+    for b in &group.batches {
+        let (paths, proof) = rerun_paths(core, rows, b).map_err(|mut e| {
+            // Review-2 N6: nothing is written yet; earlier landings found so far stay visible.
+            if let Some(d) = e.detail.get_or_insert_with(|| json!({})).as_object_mut()
+                && !landed.is_empty()
+                && !d.contains_key("already_published")
+            {
+                d.insert("already_published".into(), Value::Array(landed.values().cloned().collect()));
+            }
+            e
+        })?;
+        if paths.is_empty()
+            && let Some(v) = proof
+        {
+            landed.insert(b.repo.clone(), v);
+        } else {
+            kept.push(strata_types::Batch { paths, ..b.clone() });
+        }
+    }
+    let group = strata_types::ReleaseGroup { id: group.id, batches: kept };
+    let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
+    landed.retain(|r, _| !repos.contains(r));
+    Ok((group, landed.into_values().collect()))
 }
 
 /// Review-2 N1: which selectors of `b` still go to stage on a re-run, and
