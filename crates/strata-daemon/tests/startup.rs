@@ -144,7 +144,7 @@ fn second_instance_refused_then_reacquired() {
 
     // A second instance (its own open file description) gets Exists, not Busy,
     // before it reads config or opens the store.
-    let e = fx.prepare().err().expect("second instance refused");
+    let e = fx.prepare_once(fx.confirmer(vec![]).0).err().expect("second instance refused");
     assert_eq!(e.code, Code::Exists);
     assert_eq!(reason(&e), Some("daemon_running"));
     let e = startup::InstanceLock::take(&strata_daemon::lock_path(&fx.config_dir)).err().unwrap();

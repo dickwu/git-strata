@@ -414,7 +414,24 @@ impl Dfx {
         self.prepare_with(c)
     }
 
+    /// A restart right after `close()` can briefly see `daemon_running`: the
+    /// lock is `O_CLOEXEC`, but std falls back to fork+exec when a command sets
+    /// `PATH` (deps installs do), and a sibling test's child holds a copy of
+    /// every descriptor between fork and exec. A real restart is a new process,
+    /// so only the in-process tests retry; `prepare_once` is the single attempt.
     pub fn prepare_with(&self, c: Confirmer) -> strata_daemon::Result<Core> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let lock = strata_daemon::lock_path(&self.config_dir);
+        while std::time::Instant::now() < deadline {
+            match startup::InstanceLock::take(&lock) {
+                Err(e) if is_daemon_running(&e) => std::thread::sleep(Duration::from_millis(20)),
+                _ => break,
+            }
+        }
+        self.prepare_once(c)
+    }
+
+    pub fn prepare_once(&self, c: Confirmer) -> strata_daemon::Result<Core> {
         let env = self.sb.git_env();
         startup::prepare(self.options(), c, &move |p: &Path| Git::open_with_env(p, &env))
     }
@@ -461,4 +478,8 @@ pub fn group(batches: Vec<Batch>) -> ReleaseGroup {
 
 pub fn reason(e: &strata_types::StrataError) -> Option<&str> {
     e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|v| v.as_str())
+}
+
+fn is_daemon_running(e: &strata_types::StrataError) -> bool {
+    e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|r| r.as_str()) == Some("daemon_running")
 }
