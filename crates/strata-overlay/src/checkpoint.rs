@@ -366,10 +366,14 @@ pub(crate) fn finish(
         .store
         .latest_checkpoint(ws.session, ws.repo)
         .map_err(|e| fail(e, &scanned))?;
-    let may_skip = matches!(
-        reason,
-        CheckpointReason::ToolCall { .. } | CheckpointReason::Manual { .. }
-    );
+    // Review M8 [实现时补的决定]: UpToDate (no row) only for `Manual`. A
+    // ToolCall always ends in a row carrying its id — a no-op one records
+    // the unchanged state — so the (session, repo, id) lookup the cli does
+    // (also with the daemon down) returns the same checkpoint forever; a
+    // repeated id is the store's dedup (the row already there). Without
+    // the row, a later change would make a replay of the no-op id return
+    // a different checkpoint.
+    let may_skip = matches!(reason, CheckpointReason::Manual { .. });
     let out =
         |cp: Checkpoint, recorded: bool, o: &Overlay, pass: &Pass, prev: Option<&Checkpoint>| {
             let prev = prev.map(Overlay::from_checkpoint);

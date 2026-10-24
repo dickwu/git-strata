@@ -98,6 +98,44 @@ fn hook_checkpoint_is_idempotent_per_tool_call() {
 }
 
 #[test]
+fn hook_replay_of_a_no_op_tool_call_returns_its_own_row() {
+    // Review M8: C1 (change) -> T1 (no change) -> T2 (change) -> replay T1
+    // with the daemon down must answer T1's row, not C2's.
+    let lv = Live::new(&["tool"], &base_files());
+    let (s, tws, t1) = lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let tws = lv.ws(&s, "tool");
+        let input = json!({
+            "session_id": "claude",
+            "cwd": tws,
+            "tool_name": "Edit",
+            "tool_input": { "file_path": tws.join("a.txt") },
+        })
+        .to_string();
+        let run = |id: &str| ids(&lv.run_piped(&tws, &["checkpoint", "--tool-call", id], input.as_bytes()).ok());
+        write(&tws, "a.txt", b"c1\n");
+        let c1 = run("tu-c1");
+        let t1 = run("tu-t1");
+        assert_eq!(t1.len(), 1);
+        assert_ne!(t1, c1, "the no-op tool call records its own row");
+        write(&tws, "a.txt", b"t2\n");
+        let t2 = run("tu-t2");
+        assert_ne!(t2, t1);
+        (s, tws, t1)
+    });
+    assert_eq!(store_rows(&lv, &s, "tool", "tu-t1").len(), 1);
+    let input = json!({
+        "session_id": "claude",
+        "cwd": tws,
+        "tool_name": "Edit",
+        "tool_input": { "file_path": tws.join("a.txt") },
+    })
+    .to_string();
+    let d = lv.run_piped(&tws, &["checkpoint", "--tool-call", "tu-t1"], input.as_bytes()).ok();
+    assert_eq!(ids(&d), t1, "{d}");
+}
+
+#[test]
 fn hook_tool_call_id_comes_from_stdin_tool_use_id() {
     // cli.md §3.5 / D22: Claude Code sets no TOOL_USE_ID env var; the id is
     // the hook JSON's `tool_use_id` when `--tool-call` has no value.

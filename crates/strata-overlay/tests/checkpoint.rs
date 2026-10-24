@@ -257,12 +257,13 @@ fn new_then_deleted_path_leaves_no_entry() {
     fs::remove_file(abs(&w, "held.txt")).unwrap();
     f.write_all(b"more\n").unwrap();
     changed(&w, &t, &["new.txt", "newlink", "tmpd", "held.txt", "never"]);
-    let c = cp(&w, Some(&mut t), tool("c1"));
+    let c = cp(&w, Some(&mut t), manual());
     assert!(c.checkpoint.entries.is_empty());
     assert!(!c.recorded, "nothing changed against the latest");
     assert_eq!(latest_id(&w), top);
-    let c = cp(&w, Some(&mut t), manual());
+    let c = cp(&w, Some(&mut t), tool("c1"));
     assert!(c.checkpoint.entries.is_empty());
+    assert!(c.recorded && c.changed.is_empty(), "a new tool call id records the unchanged state (review M8)");
     assert_eq!(blob_files(&w), blobs, "nothing was stored");
     drop(f);
 
@@ -302,7 +303,7 @@ fn mtime_only_change_is_no_change() {
     for when in [SystemTime::now(), common::t(0), common::t(10_000_000), m] {
         set_times(&p, when, a);
         changed(&w, &t, &["README.md"]);
-        let c = cp(&w, Some(&mut t), tool("m"));
+        let c = cp(&w, Some(&mut t), manual());
         assert!(!c.recorded);
         assert!(c.checkpoint.entries.is_empty());
         let s = compute(&w.ws_ref(), &w.base, &mut t, None).unwrap();
@@ -511,7 +512,7 @@ fn quiet_workspace_stays_clean() {
     thread::sleep(Duration::from_secs(2));
     t.flush();
     let _ = compute(&w.ws_ref(), &w.base, &mut t, Some(&[])).unwrap();
-    for _ in 0..3 {
+    for i in 0..3 {
         let _ = fs::read(abs(&w, "README.md")).unwrap();
         let _ = fs::read(abs(&w, "src/lib.rs")).unwrap();
         thread::sleep(Duration::from_millis(700));
@@ -523,7 +524,9 @@ fn quiet_workspace_stays_clean() {
             v.paths
         );
         let c = cp(&w, Some(&mut t), tool("q"));
-        assert!(!c.recorded);
+        // Review M8: the first `q` records the unchanged state; repeats are
+        // the store's dedup.
+        assert_eq!(c.recorded, i == 0);
         assert_eq!(c.stats.files_hashed, 0);
         assert!(!c.stats.full);
     }
@@ -806,15 +809,21 @@ fn unchanged_checkpoint_is_up_to_date() {
     assert!(first.recorded, "no latest yet");
     let rows0 = rows(&w);
     let files = w.store_files().len();
-    for r in [tool("t1"), manual()] {
-        let c = cp(&w, Some(&mut t), r);
-        assert!(!c.recorded);
-        assert_eq!(c.checkpoint.id, first.checkpoint.id);
-        assert_eq!(c.stats.files_hashed, 0);
-        assert!(c.changed.is_empty());
-    }
+    let c = cp(&w, Some(&mut t), manual());
+    assert!(!c.recorded);
+    assert_eq!(c.checkpoint.id, first.checkpoint.id);
+    assert_eq!(c.stats.files_hashed, 0);
+    assert!(c.changed.is_empty());
     assert_eq!(rows(&w), rows0);
     assert_eq!(w.store_files().len(), files);
+    // Review M8: a new ToolCall id records a row even when nothing changed
+    // (no new blob); a repeated id returns that row.
+    let t1 = cp(&w, Some(&mut t), tool("t1"));
+    assert!(t1.recorded && t1.changed.is_empty());
+    assert_eq!(t1.checkpoint.entries, first.checkpoint.entries);
+    assert_eq!(rows(&w), rows0 + 1);
+    assert_eq!(w.store_files().len(), files);
+    let rows0 = rows0 + 1;
 
     w.write("a.txt", b"a\n");
     changed(&w, &t, &["a.txt"]);
@@ -823,8 +832,14 @@ fn unchanged_checkpoint_is_up_to_date() {
     assert_eq!(rows(&w), rows0 + 1);
     assert_eq!(c2.changed, vec![rp("a.txt")]);
     let c = cp(&w, Some(&mut t), tool("t3"));
-    assert!(!c.recorded);
-    assert_eq!(rows(&w), rows0 + 1);
+    assert!(c.recorded && c.changed.is_empty());
+    assert_eq!(rows(&w), rows0 + 2);
+    // The M8 sequence: replaying the no-op t1 after t2's change still
+    // returns t1's own row.
+    let again = try_cp(&w, Some(&mut t), tool("t1")).expect("checkpoint");
+    assert!(!again.recorded);
+    assert_eq!(again.checkpoint.id, t1.checkpoint.id);
+    assert_eq!(rows(&w), rows0 + 2);
 
     // Lifecycle reasons always record.
     for r in [
