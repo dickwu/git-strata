@@ -10,8 +10,8 @@ Branch `impl/publish` (worktree `git-strata-wt/publish`), from `impl/v1` 95f7660
 | 2 path-level stage and merge | done | 8ad75bd |
 | 3 read-only checks | done | 849e297 |
 | 4 commit, push, and unknown | done | b11dd10 |
-| 5 rebase, assign, and diff | done | (this commit) |
-| 6 one merge under the repo lock | todo | |
+| 5 rebase, assign, and diff | done | 8b73e41 |
+| 6 one merge under the repo lock | done | (this commit) |
 
 ## Lower-layer additions (Task 1 commit)
 
@@ -231,3 +231,27 @@ These touch shared crates; a parallel worker (search) may conflict there.
 - Tests: `tests/rebase.rs` (13), the §8 list. `push.rs`'s
   `injected_failure_after_commit_is_unknown` now expects the rebase to have
   moved the base before `BeforeDone`.
+
+### Task 6 (concurrency)
+
+- No `src/` change was needed: since Task 4 the plan, merge, export,
+  commit and chain CAS already run inside one `with_repo` hold (§5.1,
+  D12, D17), so Step 2's expected failure did not reproduce; the commit
+  holds only the tests (the §8 `git add` names `src/lib.rs`, unchanged).
+- Tests: `tests/concurrent.rs` (3). Every test also asserts the repo lock
+  holds never overlap (`TestLock` hold intervals).
+  - `disjoint_concurrent_publishes_all_land`: 4 sessions behind a barrier;
+    4 commits on the chain's first-parent line since the seed, every file
+    in the tip, one `Done` row with a commit per session.
+  - `conflict_already_landed_stops_the_group`: A pauses at
+    `PauseBeforeCommit` (inside its hold) while B (two batches: a disjoint
+    file + the same line of `shared.txt`) records its row and waits for the
+    lock; after A lands, B's in-lock merge → `Conflict`, the chain stays at
+    A's commit, B's disjoint file is not on the chain, B's row `Done`
+    `stopped = Conflict`.
+  - `concurrent_publish_matches_serial_oracle`: two sessions, two
+    concurrent rounds (disjoint files → both land, one via a merge; the
+    same line → one lands, one `Conflict`). Successes = new chain commits;
+    each chain commit's tree equals the start tree plus the successful
+    publishes' selected files replayed in chain order. A status reader
+    thread runs throughout and never appears among the repo lock holders.
