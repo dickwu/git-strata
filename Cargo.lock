@@ -2250,6 +2250,7 @@ dependencies = [
  "strata-store",
  "strata-types",
  "tempfile",
+ "toml",
  "tracing",
 ]
 

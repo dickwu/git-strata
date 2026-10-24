@@ -13,6 +13,7 @@ use strata_types::{RepoName, SessionId, StrataError};
 
 pub mod locks;
 pub mod rpc;
+pub mod startup;
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 

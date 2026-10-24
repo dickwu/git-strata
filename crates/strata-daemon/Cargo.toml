@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 description = "git-stratad: the per-user git-strata daemon (json-lines RPC over a unix socket, locks, confirm order, launchd agent)"
 
+[[bin]]
+name = "git-stratad"
+path = "src/main.rs"
+
 [features]
 default = []
 # Test seams of every lower layer the daemon tests drive. A binary built
@@ -29,4 +33,5 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+toml = "0.8.23"
 strata-daemon = { path = ".", features = ["test-seams"] }

@@ -294,7 +294,8 @@ fn no_noise_window() {
 
 #[test]
 fn no_nonce_record_limit() {
-    assert!(!sources().to_lowercase().contains("nonce"));
+    // `FnOnce` is a closure bound, not a nonce.
+    assert!(!sources().replace("FnOnce", "").to_lowercase().contains("nonce"));
     assert!(!format!("{:?}", Code::TooLarge).contains("Record"));
     let reply = Reply::too_large(MAX_FRAME).0;
     assert_eq!(reply["error"]["code"], "TooLarge");
