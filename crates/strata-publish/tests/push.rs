@@ -644,3 +644,21 @@ fn publish_refuses_rewound_and_diverged_chain() {
     assert_eq!(reason(&e), Some("chain_rewound"));
     assert_eq!(fx.store().publishes().unwrap().len(), rows);
 }
+
+/// Review-3 R3: a failure in the chain-ref transaction (after the object
+/// exists, before any push) still reports `push: null` and the checks that
+/// ran.
+#[test]
+fn chain_ref_failure_reports_checks_ran_and_no_push() {
+    let mut fx = fx();
+    fx.cfg_mut("tool").checks = vec!["/usr/bin/true".into(), "/usr/bin/true".into()];
+    let (_s, g) = edit(&fx, "src/index.ts", b"export const a = 31\n");
+    seams::fail_once(fx.git_of("tool"), FailPoint::BeforeRefs);
+    let e = run(&fx, &g, None).unwrap_err();
+    assert_eq!(e.code, Code::Unknown, "{e:?}");
+    let d = e.detail.as_ref().unwrap();
+    assert!(object_exists(&fx, &commit_of(&e)));
+    assert_eq!(d["checks_ran"], 2, "{d}");
+    assert!(d.get("push").is_some_and(serde_json::Value::is_null), "explicit push: null: {d}");
+    assert_eq!(fx.read_ref("tool", CHAIN), None);
+}

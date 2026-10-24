@@ -418,7 +418,9 @@ fn locked(
             });
         }
     }
-    let commit = r?;
+    // Review-3 R3: a failure once the object exists (the chain-ref
+    // transaction) still says no push was sent and how many checks ran.
+    let commit = r.map_err(|e| if written.is_some() { with_landed(e, Value::Null, ran.ran) } else { e })?;
     // Step 7.
     seams::fail(ctx.git, FailPoint::BeforePush).map_err(|e| with_landed(after_write(&commit, e), Value::Null, ran.ran))?;
     let push = if pushing {
