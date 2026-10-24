@@ -409,9 +409,20 @@ impl Dfx {
         (c, log, clock)
     }
 
+    /// A start with a fresh confirmer. The lock probe in `prepare_with` has a
+    /// window of its own (the kernel copies the descriptor table into a child
+    /// spawned meanwhile before exec closes it), so this retries the whole
+    /// start, which takes the lock first and has done nothing else on refusal.
     pub fn prepare(&self) -> strata_daemon::Result<Core> {
-        let (c, _, _) = self.confirmer(vec![]);
-        self.prepare_with(c)
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            match self.prepare_once(self.confirmer(vec![]).0) {
+                Err(e) if is_daemon_running(&e) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                r => return r,
+            }
+        }
     }
 
     /// A restart right after `close()` can briefly see `daemon_running`: the
@@ -422,7 +433,9 @@ impl Dfx {
     pub fn prepare_with(&self, c: Confirmer) -> strata_daemon::Result<Core> {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         let lock = strata_daemon::lock_path(&self.config_dir);
-        while std::time::Instant::now() < deadline {
+        // A first start has nothing to wait for (and a probe would only add a
+        // window of its own); only a restart probes.
+        while lock.exists() && std::time::Instant::now() < deadline {
             match startup::InstanceLock::take(&lock) {
                 Err(e) if is_daemon_running(&e) => std::thread::sleep(Duration::from_millis(20)),
                 _ => break,
