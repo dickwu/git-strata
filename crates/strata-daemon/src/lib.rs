@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use strata_types::{RepoName, SessionId, StrataError};
 
+pub mod locks;
 pub mod rpc;
 
 pub type Result<T> = std::result::Result<T, StrataError>;
