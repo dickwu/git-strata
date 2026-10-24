@@ -18,6 +18,16 @@ pub fn prepare_tool_call(tracker: &Tracker, paths: &[RepoPath]) {
     tracker.flush();
 }
 
+/// Start watching (request thread). If the watch cannot start, the next
+/// reconcile must be a full scan. Returns whether it is watching.
+pub fn watch_or_full(tracker: &mut Tracker) -> bool {
+    if tracker.watch().is_ok() {
+        return true;
+    }
+    tracker.inbox().require_full();
+    false
+}
+
 /// Drop a Tracker (and with it its Watcher) on the calling thread: the
 /// request or shutdown thread, never the watcher callback.
 pub fn drop_tracker(tracker: Tracker) {

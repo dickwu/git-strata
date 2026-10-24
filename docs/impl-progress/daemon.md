@@ -11,7 +11,8 @@ Not merged.
 | 2 Repo lock, session queue, Busy before write | done | 7dfaf8e |
 | 3 Single instance, recover, then listen | done | f0c112f |
 | 4 Confirm order, pinned flags, launchd plist | done | d236ef6 |
-| 5 Anchor after fetch, observe warning, attach alert | done | (this commit) |
+| 5 Anchor after fetch, observe warning, attach alert | done | b3bd021 |
+| 6 End to end, read-only without the daemon | done | (this commit) |
 
 ## Ambiguity decisions
 
@@ -131,6 +132,56 @@ Not merged.
 - **PrePushGuardDisabled** is only reported: one stderr line per shadow dir
   per daemon run (`Warnings::alert_first`), no hook or config write.
 
+- **Handlers live in `handlers.rs`** (extra file). `handlers::serve(d,
+  listener, external)` wraps `Daemon::serve` with a `Server` that owns the
+  per-(session, repo) `Trackers` and the `Search`; `Daemon::handle` stays
+  the status-only handler the Task 3 tests use. `git-stratad` serves
+  `handlers::serve`.
+- **Unknown on panic.** A handler panic is `Unknown` when the request may
+  have written (a thread-local `WRITING` flag set before any lower-layer
+  call that can write, or after `mark_visible`), else RPC `Failed`.
+  `WRITING` is separate from `mark_visible` so lower layers' own lock takes
+  stay bounded (`Busy`) as Task 2 decided.
+- **ToolCall with no paths** prepares a full scan whatever the reason
+  (correctness over speed); a tracker whose watch cannot start is
+  require_full on every take (`track::watch_or_full`, keeping every inbox
+  call in track.rs).
+- **Search views** are attached and detached per request (no long-lived
+  views). `grep --all` puts attach failures in `skipped`.
+- **Push staging** is `<paths.root>/daemon/push/<pid>-<nanos>/` (export +
+  attach), removed after `publish::push`. The chain top is read before the
+  prompt and rechecked under the repo lock (moved → `NotConfirmed`
+  `chain_moved`).
+- **Multi-repo publish** runs repos in name order and stops at the first
+  error; the error detail carries `published_before`. An `Unknown` result
+  adds an `UnknownPublish` warning per Unknown open row (never retried).
+- **Not wired (deviation):** `deps_propose` / `deps_approve` reply RPC
+  `Failed` "not served yet" (the deps install-and-propose flow through the
+  daemon is more than Task 6's minimal implementation; deps' own API is
+  tested in its crate). `resolve_move` / `chain_resolve` come in Task 7.
+- **Handler-level lock tests.** Task 2 said the RPC-level versions of the
+  lock tests would be in tests/daemon.rs; §8 Task 6 lists only the four
+  tests below, so those were not added (the lock behaviour is covered by
+  tests/locks.rs and the handlers use the same `with_repo` /
+  `with_sessions`).
+- **No cli crate.** `crates/git-strata` does not exist on this branch, so
+  `crates/git-strata/tests/readonly_without_daemon.rs` was not created.
+  The contract half lives in strata-daemon: `client::call` (write methods
+  with no daemon → `ReadOnly` `{reason:"daemon_down"}`, per this module's
+  §6 table; cli.md's `Busy daemon_down` disagrees — recorded, daemon.md
+  followed since it is the spec being implemented) and
+  `client::needs_daemon` (= not read-only). `cli_readonly_commands_work_without_daemon`
+  does the cli's direct read itself (`Store::open_read_only`, `Sessions`
+  status, `Search` over a cold reconcile).
+- **Client has no read timeout** (rpc I3 / `no_duplex_read_timeout` scans
+  the whole crate); a connection that ends without a reply is `Unknown`
+  `reply_lost`, never resent.
+- **Oracle compare** ignores empty directories (as git does): restoring a
+  deletion may prune its emptied parent.
+- **Panic-safe test server.** The tests' `serving` helper stops the server
+  even when the body panics (otherwise the scope waits forever); applied to
+  tests/startup.rs too.
+
 ## Task 1
 
 `rpc.rs`: the 19-method table (`Method`, with `is_read_only` for I5),
@@ -204,3 +255,20 @@ advance clears it), observe failure does not fail new (seam
 `new.observe` EIO), hint/flush off the callback thread (plus source scan),
 attach-outside alert leaves the index alone, guard-disabled reported not
 repinned.
+
+## Task 6
+
+`handlers.rs`: every §4 method except deps_propose / deps_approve (and
+Task 7's two) over `Core` / `Daemon`: new (+ anchor advance, observe
+retry, attach alert), status, checkpoint, restore, grep, files, diff,
+deps_list, publish, push, assign, rm (discard needs confirm), gc,
+config_relax, daemon_status. `client.rs`: the client half of the socket.
+tests/daemon.rs (4): an `sh` process edits the workspace → ToolCall
+checkpoint over the socket → grep/files see it → another process trashes
+it → restore equals an independent `git archive` + same-edits oracle; no
+daemon → write methods `ReadOnly daemon_down`, direct read works; a client
+that disconnects before the reply gets exactly one checkpoint, never
+replayed; a pre-receive hook refusing the push → `Unknown` `PushRefused`,
+chain commit, Unknown row and workspace kept, `UnknownPublish` reported
+(also after restart), the same publish `Busy publish_unknown`, no second
+push.

@@ -67,10 +67,11 @@ fn serving<R>(d: &Daemon<'_>, f: impl FnOnce() -> R) -> R {
     let ext = AtomicBool::new(false);
     std::thread::scope(|s| {
         let h = s.spawn(|| d.serve(&listener, &ext, &|req| d.handle(req)));
-        let r = f();
+        // Stop even when `f` panics, or the scope would wait forever.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         d.request_stop();
         h.join().unwrap().unwrap();
-        r
+        r.unwrap_or_else(|p| std::panic::resume_unwind(p))
     })
 }
 

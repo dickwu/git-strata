@@ -36,7 +36,7 @@ fn run() -> Result<(), StrataError> {
             libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
             libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
         }
-        daemon.serve(&listener, &TERM, &|req| daemon.handle(req))
+        strata_daemon::handlers::serve(&daemon, &listener, &TERM)
     })();
     let closed = core.close();
     result.and(closed)
