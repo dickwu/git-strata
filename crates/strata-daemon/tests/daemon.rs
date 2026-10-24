@@ -512,6 +512,34 @@ fn publish_selectors(sock: &Path, id: &SessionId, repo: &str, paths: &[&str]) ->
     ] } }))
 }
 
+/// Review-2 N3: a failure after a definite push (the post-publish rebase,
+/// or closing the row) still reports the landed repo with its push outcome
+/// `Pushed` and the checks it ran: the envelope never loses a landed result.
+#[test]
+fn publish_failure_after_a_definite_push_reports_the_pushed_commit() {
+    use strata_publish::seams::{FailPoint, fail_once};
+    // A fresh daemon per point: an `Unknown` row blocks the next publish.
+    for (n, at) in [(1, FailPoint::BeforeRebase), (2, FailPoint::BeforeDone)] {
+        let fx = Dfx::new();
+        let core = fx.prepare().unwrap();
+        let d = Daemon::start(&core).unwrap();
+        let sock = fx.socket();
+        let git = core.gits[&repo_name("tool")].clone();
+        serving(&d, || {
+            let id = new_session(&sock);
+            external(&ws(&core, &id, "tool"), &format!("printf 'export const a = {n}\\n' > src/index.ts"));
+            fail_once(&git, at);
+            let r = publish_selectors(&sock, &id, "tool", &["src/index.ts"]);
+            assert_eq!(r["error"]["code"], "Unknown", "{at:?}: {r:#}");
+            let l = &r["error"]["detail"]["landed"];
+            let tip = git.read_ref(&strata_publish::chain_ref("main")).unwrap().unwrap();
+            assert_eq!(l["commit"], json!(tip), "{at:?}: {r:#}");
+            assert_eq!(l["push"]["kind"], "Pushed", "{at:?}: {r:#}");
+            assert!(l["checks_ran"].is_u64(), "{at:?}: {r:#}");
+        });
+    }
+}
+
 /// Review-2 N1: a directory selector that landed, then new edits under it,
 /// then the very same publish again: the edits are committed (the old
 /// filter saw no entry literally named `src` and skipped the repo). A third

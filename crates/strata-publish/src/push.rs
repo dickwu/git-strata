@@ -90,6 +90,39 @@ fn after_write(commit: &CommitOid, e: StrataError) -> StrataError {
     )
 }
 
+/// Review-2 N3: an error after the commit carries what is known of it, the
+/// push outcome (`push`: a `PushOutcome` as JSON, null when nothing was
+/// sent) and `checks_ran`, so the daemon's envelope never loses a landed
+/// result. Keys already set are kept.
+fn with_landed(e: StrataError, push: Value, checks_ran: u32) -> StrataError {
+    let mut e = e;
+    let d = e.detail.get_or_insert_with(|| json!({}));
+    if d.is_object() {
+        if d.get("push").is_none() {
+            d["push"] = push;
+        }
+        if d.get("checks_ran").is_none() {
+            d["checks_ran"] = json!(checks_ran);
+        }
+    }
+    e
+}
+
+/// Review-2 N3: the landed keys of `inner`'s detail copied into `extra`, for
+/// an error that replaces `inner` (the row could not be closed).
+fn carry(inner: &StrataError, mut extra: Value) -> Value {
+    if let (Some(d), Value::Object(m)) = (inner.detail.as_ref(), &mut extra) {
+        for k in ["commit", "push", "checks_ran", "kind", "message"] {
+            if let Some(v) = d.get(k)
+                && !m.contains_key(k)
+            {
+                m.insert(k.to_string(), v.clone());
+            }
+        }
+    }
+    extra
+}
+
 // ---- confirmation (§5.6) -------------------------------------------------
 
 /// The confirmation gate: when the push needs a human, the token's action
@@ -296,10 +329,10 @@ fn close_failed(ctx: &Ctx, id: u64, written: Option<&CommitOid>, e: StrataError)
     };
     match ctx.store.set_publish_phase(id, PublishPhase::Running, to, Some(&o), now()) {
         Ok(true) => e,
-        Ok(false) => unknown_with("row_moved", "the publish row was not Running when it was closed", Some(&e), json!({ "publish": id })),
+        Ok(false) => unknown_with("row_moved", "the publish row was not Running when it was closed", Some(&e), carry(&e, json!({ "publish": id }))),
         Err(se) => {
             tracing::warn!(publish = id, error = %se.message, "publish row could not be closed");
-            unknown_with("row_not_closed", "the publish row could not be closed", Some(&e), json!({ "publish": id, "store": err_json(&se) }))
+            unknown_with("row_not_closed", "the publish row could not be closed", Some(&e), carry(&e, json!({ "publish": id, "store": err_json(&se) })))
         }
     }
 }
@@ -387,7 +420,7 @@ fn locked(
     }
     let commit = r?;
     // Step 7.
-    seams::fail(ctx.git, FailPoint::BeforePush)?;
+    seams::fail(ctx.git, FailPoint::BeforePush).map_err(|e| with_landed(after_write(&commit, e), Value::Null, ran.ran))?;
     let push = if pushing {
         let out = send(ctx.git, branch, &staged.worktree);
         let (outcome, detail) = match &out {
@@ -408,18 +441,21 @@ fn locked(
             confirmed: confirmed.clone(),
             detail,
         });
-        match out? {
+        let unknown = || serde_json::to_value(PushOutcome::Unknown).unwrap_or(Value::Null);
+        match out.map_err(|e| with_landed(after_write(&commit, e), unknown(), ran.ran))? {
             PushOutcome::Pushed => Some(PushOutcome::Pushed),
             PushOutcome::Refused(m) => {
-                return Err(StrataError::new(Code::Unknown, "the remote refused the push; the commit stays on the local chain")
-                    .with_detail(json!({ "kind": "PushRefused", "message": m, "commit": commit.as_str() })));
+                let push = serde_json::to_value(PushOutcome::Refused(m.clone())).unwrap_or(Value::Null);
+                return Err(StrataError::new(Code::Unknown, "the remote refused the push; the commit stays on the local chain").with_detail(
+                    json!({ "kind": "PushRefused", "message": m, "commit": commit.as_str(), "push": push, "checks_ran": ran.ran }),
+                ));
             }
             PushOutcome::Unknown => {
                 return Err(unknown_with(
                     "push_unknown",
                     "the push did not finish; the chain stays and nothing is replayed",
                     None,
-                    json!({ "kind": "Unknown", "commit": commit.as_str() }),
+                    json!({ "kind": "Unknown", "commit": commit.as_str(), "push": unknown(), "checks_ran": ran.ran }),
                 ));
             }
         }
@@ -527,7 +563,7 @@ pub fn publish_bound(
         .and_then(|()| seams::fail(ctx.git, FailPoint::BeforeDone))
         .and_then(|()| remove_staged_layout(&landed.staged.worktree));
     if let Err(e) = fin {
-        let e = after_write(&landed.commit, e);
+        let e = with_landed(after_write(&landed.commit, e), o["push"].clone(), landed.checks_ran);
         o["error"] = err_json(&e);
         if let Err(se) = ctx.store.set_publish_phase(id, PublishPhase::Running, PublishPhase::Unknown, Some(&o), now()) {
             tracing::warn!(publish = id, error = %se.message, "publish row could not be marked unknown");
@@ -536,8 +572,15 @@ pub fn publish_bound(
     }
     match ctx.store.set_publish_phase(id, PublishPhase::Running, PublishPhase::Done, Some(&o), now()) {
         Ok(true) => {}
-        Ok(false) => return Err(unknown_with("row_moved", "the publish row was not Running at the end", None, json!({ "publish": id, "commit": landed.commit.as_str() }))),
-        Err(e) => return Err(after_write(&landed.commit, e)),
+        Ok(false) => {
+            return Err(unknown_with(
+                "row_moved",
+                "the publish row was not Running at the end",
+                None,
+                json!({ "publish": id, "commit": landed.commit.as_str(), "push": o["push"].clone(), "checks_ran": landed.checks_ran }),
+            ));
+        }
+        Err(e) => return Err(with_landed(after_write(&landed.commit, e), o["push"].clone(), landed.checks_ran)),
     }
     Ok(Published { id, commit: landed.commit, checks_ran: landed.checks_ran, push: landed.push, warnings, rebases })
 }

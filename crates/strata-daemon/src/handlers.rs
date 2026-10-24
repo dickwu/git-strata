@@ -1070,12 +1070,17 @@ impl<'d, 'a> Server<'d, 'a> {
 /// `PushRefused` → `Refused(message)`); any other after-commit error says
 /// nothing about a push, so null [实现时补的决定].
 fn landed_after_commit(repo: &RepoName, commit: Value, d: &Value) -> Value {
-    let push = match d.get("kind").and_then(Value::as_str) {
-        Some("Unknown") => json!({ "kind": "Unknown" }),
-        Some("PushRefused") => json!({ "kind": "Refused", "message": d.get("message").cloned().unwrap_or(json!("")) }),
+    // Review-2 N3: publish now states `push` (including `Pushed`) and
+    // `checks_ran` on every error after the commit; the `kind` reading is
+    // the fallback for errors that do not.
+    let push = match (d.get("push"), d.get("kind").and_then(Value::as_str)) {
+        (Some(p), _) => p.clone(),
+        (None, Some("Unknown")) => json!({ "kind": "Unknown" }),
+        (None, Some("PushRefused")) => json!({ "kind": "Refused", "message": d.get("message").cloned().unwrap_or(json!("")) }),
         _ => Value::Null,
     };
-    json!({ "repo": repo.as_str(), "commit": commit, "checks_ran": null, "push": push, "warnings": [], "rebases": [] })
+    let checks = d.get("checks_ran").cloned().unwrap_or(Value::Null);
+    json!({ "repo": repo.as_str(), "commit": commit, "checks_ran": checks, "push": push, "warnings": [], "rebases": [] })
 }
 
 /// Review-2 N1: which selectors of `b` still go to stage on a re-run, and

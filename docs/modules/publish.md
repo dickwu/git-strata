@@ -457,6 +457,7 @@ design §8 没有给发布单独的秒数。上表是本文的验收数字，首
 | --- | --- | --- | --- |
 | 链与锚点的那一次事务失败 | `Unknown`，`detail` 保留 `HeadMoved` | commit 对象在。事务是一次调用，不留下「链已前进、锚点没写」的半截 | 不重试、不重合并。status 报出。已有的不一致不读成 `Leads` 来补 |
 | 同一次调用里，commit 已写入之后推送被拒 | `Unknown`，`detail.kind = "PushRefused"` | 链在本地 | 人处理后再 `push`。不自动重推。单独的 `push` 调用还没写过，仍返回草稿表里的 `PushRefused` |
+| commit 已写入之后的任何错误（review-2 N3） | `Unknown`，`detail.commit`；另带 `detail.push`（已知的推送结果，`PushOutcome` 的 JSON，含推送成功后 rebase / 关行失败时的 `Pushed`；没推为 null）和 `detail.checks_ran`；行关不上（`row_moved` / `row_not_closed`）时这些键从原错误拷过来 [实现时补的决定] | 不变 | daemon 把它们放进 `detail.landed`，信封里不丢已落地的结果 |
 | 推送超时或连接中断 | `Unknown` | 链在本地，行是 `Unknown` | 重启只报出，不重放 |
 | 推送之后的 I/O、rebase 写到一半 | `Unknown` | 现场留下 | 不重放。已进链的 commit 由 status 报出，不当成没发生 |
 | `observe_main` 失败 | 无（警告 `ObserveFailed`） | 发布已成功 | daemon 再观察 |
