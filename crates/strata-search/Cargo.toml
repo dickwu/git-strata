@@ -1,0 +1,31 @@
+[package]
+name = "strata-search"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "git-strata search: per-session grep/files views over a shared tgrep base index plus the session overlay"
+
+[features]
+default = []
+# Test seams (search.md §3 SearchSeam and the inspection hooks).
+test-seams = []
+
+[dependencies]
+strata-types = { path = "../strata-types" }
+strata-apfs = { path = "../strata-apfs" }
+strata-overlay = { path = "../strata-overlay" }
+strata-session = { path = "../strata-session" }
+# Vendored tgrep-core 1.2.4 (see vendor/tgrep/PATCHES.md).
+tgrep-core = { path = "../../vendor/tgrep/tgrep-core" }
+globset = "0.4.18"
+regex = "1"
+getrandom = "0.4"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+serde = { version = "1", features = ["derive"] }
+strata-search = { path = ".", features = ["test-seams"] }
+strata-store = { path = "../strata-store" }
+strata-gitio = { path = "../strata-gitio", features = ["test-seams"] }
+strata-deps = { path = "../strata-deps" }

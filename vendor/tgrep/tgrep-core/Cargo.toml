@@ -1,0 +1,48 @@
+# Vendored from microsoft/tgrep at d25ade642cd0a34537cc0791a0abbac57ccbf6f9
+# (tgrep-core/Cargo.toml). The workspace-inherited fields are inlined; the
+# benches and the criterion dev-dependency are dropped (benches/ and tests/
+# are not vendored). See ../PATCHES.md.
+[package]
+name = "tgrep-core"
+version = "1.2.4"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/microsoft/tgrep"
+authors = ["Shengyu Fu"]
+description = "Trigram index library for fast full-text search on large codebases"
+keywords = ["trigram", "search", "index", "grep", "full-text"]
+categories = ["text-processing", "algorithms"]
+autobenches = false
+autotests = false
+autoexamples = false
+
+[features]
+managed-test-hooks = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+blake3 = "1"
+memmap2 = "0.9"
+memchr = "2"
+regex = "1"
+regex-syntax = "0.8"
+rayon = "1"
+ignore = { path = "../vendor/ignore" }
+globset = "0.4.18"
+encoding_rs = "0.8"
+fs2 = "0.4.3"
+tempfile = "3"
+same-file = "1"
+rusqlite = { git = "https://github.com/rusqlite/rusqlite.git", rev = "a1a23ea2a6a8a27bc07c8b10cbd363760287e1cc", features = ["bundled"] }
+getrandom = "0.4.2"
+
+[target.'cfg(unix)'.dependencies]
+cap-std = "4"
+cap-tempfile = "4"
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_Threading"] }
