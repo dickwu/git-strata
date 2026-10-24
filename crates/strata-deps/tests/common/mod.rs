@@ -344,6 +344,12 @@ pub struct RecLock {
     pub enters: AtomicU32,
     /// Calls that returned `Busy`.
     pub busies: AtomicU32,
+    /// Return this (non-`Busy`) error without running `f`; after 100 such
+    /// returns the double gives up and lets `f` run, so a caller that
+    /// wrongly retries it ends instead of hanging the test.
+    pub fail: Mutex<Option<StrataError>>,
+    /// Calls that returned `fail`.
+    pub fails: AtomicU32,
     pub on_enter: Mutex<Option<Hook>>,
     pub on_exit: Mutex<Option<Hook>>,
 }
@@ -383,6 +389,15 @@ impl RepoWriteLock for RecLock {
         repo: &RepoName,
         f: &mut dyn FnMut() -> strata_deps::Result<()>,
     ) -> strata_deps::Result<strata_deps::Result<()>> {
+        {
+            let mut fail = self.fail.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(e) = fail.clone() {
+                if self.fails.fetch_add(1, Ordering::SeqCst) + 1 >= 100 {
+                    *fail = None;
+                }
+                return Err(e);
+            }
+        }
         let left = self.busy.load(Ordering::SeqCst);
         if left > 0 {
             self.busy.store(left - 1, Ordering::SeqCst);

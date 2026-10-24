@@ -92,6 +92,16 @@ fn interrupted(a: u64) -> StrataError {
     )
 }
 
+/// The attempt error recorded when the repo write lock refuses for good
+/// after an install: reason interrupted, the refusal in `detail.error`.
+fn interrupted_by(st: &Staging, e: &StrataError) -> StrataError {
+    unknown(
+        "interrupted",
+        format!("deps attempt {} was interrupted before its seal: {}", st.a, e.message),
+        json!({ "attempt": st.a, "staging": st.dir, "error": e }),
+    )
+}
+
 /// §5.3 step 3, under the build lock. `Some(set)`: already sealed.
 pub(crate) fn after_lock(
     ctx: &Ctx,
@@ -396,10 +406,21 @@ pub(crate) fn seal(
     let result = loop {
         match ctx.locks.with_write(ctx.repo, &mut f) {
             Ok(r) => break r,
-            Err(busy) => match kind {
-                AttemptKind::Adopt => return Err(refuse(ctx, st, busy)),
-                AttemptKind::Build => std::thread::sleep(Duration::from_millis(10)),
-            },
+            Err(busy) if kind == AttemptKind::Adopt => return Err(refuse(ctx, st, busy)),
+            Err(busy) if busy.code == Code::Busy => std::thread::sleep(Duration::from_millis(10)),
+            // Review H5 [实现时补的决定]: only `Busy` is retried. A permanent
+            // refusal (`ReadOnly` `shutting_down`, …) renamed nothing: close
+            // the attempt as interrupted, keep the staging (D8 lets the next
+            // builder redo it once) and return the lock's error.
+            Err(e) => {
+                let _ = ctx.store.end_deps_attempt(
+                    st.a,
+                    AttemptState::Failed,
+                    &interrupted_by(st, &e),
+                    SystemTime::now(),
+                );
+                return Err(e);
+            }
         }
     };
     if let Err(e) = result {

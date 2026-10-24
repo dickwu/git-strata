@@ -976,3 +976,36 @@ fn build_preflight_cross_volume() {
     assert_eq!(sb.install_count(), 0);
     store.close().unwrap();
 }
+
+/// Review H5: only `Busy` from the repo write lock is retried after an
+/// install. A permanent refusal (`ReadOnly` `shutting_down` once the daemon
+/// closes its locks) ends the build at once: nothing renamed, the attempt
+/// closed as failed with reason interrupted (so D8 lets the next builder
+/// redo it once), the staging kept, the lock's error returned.
+#[test]
+fn seal_does_not_retry_a_shutdown_refusal() {
+    let fx = Fx::new();
+    let tree = fx.tree("a");
+    let (_, id) = key_of(&fx.ctx(), &tree).unwrap();
+    let refusal = strata_types::StrataError::new(Code::ReadOnly, "the daemon is shutting down")
+        .with_detail(serde_json::json!({ "reason": "shutting_down" }));
+    *fx.lock.fail.lock().unwrap() = Some(refusal);
+    let e = build(&fx.ctx(), &tree, None).unwrap_err();
+    assert_eq!(fx.lock.fails.load(Ordering::SeqCst), 1, "the refusal was retried");
+    assert_eq!(e.code, Code::ReadOnly, "{e:?}");
+    assert_eq!(e.detail.as_ref().unwrap()["reason"], "shutting_down");
+    assert_eq!(fx.lock.enters(), 0);
+    assert!(!fx.store().deps_dir(&fx.repo, &id).exists());
+    assert!(fx.store().deps_set(&fx.repo, &id).unwrap().is_none());
+    let atts = store_attempts(&fx);
+    let last = atts.last().unwrap();
+    assert_eq!(last.state, AttemptState::Failed);
+    assert_eq!(last.error.as_ref().unwrap().detail.as_ref().unwrap()["reason"], "interrupted");
+    let staging = fx.repo_dir().join(".staging").join(last.id.to_string());
+    assert!(staging.join("seal").is_dir(), "the installed candidate is kept");
+
+    // The next builder (after a restart) redoes it once and seals.
+    *fx.lock.fail.lock().unwrap() = None;
+    let set = build(&fx.ctx(), &tree, None).unwrap();
+    assert_eq!(set.id, id);
+}
