@@ -1235,7 +1235,9 @@ WHEN NEW.phase <> 'running'
 BEGIN SELECT RAISE(ABORT, 'illegal insert: publishes'); END;
 CREATE TRIGGER publishes_update_guard BEFORE UPDATE ON publishes
 WHEN NEW.id IS NOT OLD.id OR NEW.started_ns IS NOT OLD.started_ns
-  OR NOT ((OLD.phase = 'running' AND NEW.phase IN ('done', 'unknown')) OR (OLD.phase = 'unknown' AND NEW.phase = 'done'))
+  OR NOT ((OLD.phase = 'running' AND NEW.phase IN ('done', 'unknown')) OR (OLD.phase = 'unknown' AND NEW.phase = 'done')
+       OR (OLD.phase IN ('unknown', 'done') AND NEW.phase = OLD.phase AND NEW.ended_ns IS OLD.ended_ns
+           AND NEW.outcome IS NOT OLD.outcome))
 BEGIN SELECT RAISE(ABORT, 'illegal update: publishes'); END;
 
 CREATE TRIGGER deps_sets_delete_gc_only        BEFORE DELETE ON deps_sets        WHEN NOT strata_gc_active() BEGIN SELECT RAISE(ABORT, 'delete outside gc: deps_sets'); END;
@@ -1289,7 +1291,7 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
   - `ReleaseGroup.id`：`publishes` 的行永不删除，取最大值加 1。
   - 这些号都只写 1 到 `i64::MAX`（types.md §3）。下一个号会超过 `i64::MAX` 时，写操作在写任何东西之前返回 `TooLarge`（`detail.limit` 指明是哪种号），已存的状态不变，不回绕（3a:590、3a:596）；`AUTOINCREMENT` 的表在分配之前先查 `sqlite_sequence`，因为 SQLite 自己到顶时报的是 `SQLITE_FULL`，不是一个能区分的错误。读回小于 1 的值说明库坏了：store 先检查，返回 `Corrupt`（`bad_row`），不把它交给 `From<i64>`（types.md §3）。
   - `base_gens.id`、`refs_audit.id`、`gc_runs.id` 只在 store 内部用，不出现在公开接口上。
-- **可变的列**只有这些，其余每张表的每一列写入后都不可改（§4.3 的触发器拦）：`sessions` 的 `lifecycle`、`phase`、`scene`、`removed_ns`；`workspaces` 的 `base_gen`、`head`、`generation`、`conflicts`、`health`、`scene`；`move_intents` 的 `state`、`phase`、`conflicts`、`old_tree`、`ended_ns`；`deps_attempts` 的 `state`、`pid`、`ended_ns`、`error`；`deps_proposals` 的 `state`、`tree`、`head`、`superseded_by`、`updated_ns`；`deps_main` 除 `repo` 以外的列；`publishes` 的 `phase`、`ended_ns`、`outcome`。状态列只能沿 §4.3 的转换图前进。
+- **可变的列**只有这些，其余每张表的每一列写入后都不可改（§4.3 的触发器拦）：`sessions` 的 `lifecycle`、`phase`、`scene`、`removed_ns`；`workspaces` 的 `base_gen`、`head`、`generation`、`conflicts`、`health`、`scene`；`move_intents` 的 `state`、`phase`、`conflicts`、`old_tree`、`ended_ns`；`deps_attempts` 的 `state`、`pid`、`ended_ns`、`error`；`deps_proposals` 的 `state`、`tree`、`head`、`superseded_by`、`updated_ns`；`deps_main` 除 `repo` 以外的列；`publishes` 的 `phase`、`ended_ns`、`outcome`（`unknown` / `done` 的行可以只改 `outcome`，阶段与 `ended_ns` 不变，供 `set_publish_outcome` 与 publish.md §5.7 的 `assign`；`running` 的行不能只改 `outcome`）。状态列只能沿 §4.3 的转换图前进。
 - **schema 版本**：`user_version = 1`。v1 没有旧版 Store，也不做迁移（3a:609 把版本策略交给本文）：版本号不是 1、`application_id` 不对、日志模式不是 WAL、schema 文本有任何差别的库一律拒绝打开（`Corrupt`），不修补、不转换。以后改 schema 就升版本号，迁移另写设计。
 
 ### 4.5 不变量
