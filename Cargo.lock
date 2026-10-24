@@ -931,6 +931,9 @@ dependencies = [
  "serde",
  "serde_json",
  "strata-daemon",
+ "strata-deps",
+ "strata-gitio",
+ "strata-store",
  "strata-types",
  "tempfile",
 ]

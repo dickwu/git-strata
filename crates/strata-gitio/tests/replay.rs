@@ -122,3 +122,22 @@ fn never_pushes_or_writes_refs() {
         }
     }
 }
+
+#[test]
+fn commits_between_lists_the_range_newest_first() {
+    let sb = Sandbox::new();
+    let (repo, a, c, o) = diverged(&sb);
+    let g = sb.open(&repo);
+    let before = refs(&sb, &repo);
+    let (v, more) = g.commits_between(&oid(&a), &oid(&c), 10).unwrap();
+    assert!(!more);
+    assert_eq!(v.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(), vec!["c2 adds y", "c1 adds x"]);
+    assert_eq!(v[0].0, oid(&c));
+    let (v, more) = g.commits_between(&oid(&a), &oid(&c), 1).unwrap();
+    assert!(more);
+    assert_eq!(v.len(), 1);
+    assert!(g.commits_between(&oid(&c), &oid(&c), 10).unwrap().0.is_empty());
+    // o is not in a..c: only what c adds over o.
+    assert_eq!(g.commits_between(&oid(&o), &oid(&c), 10).unwrap().0.len(), 2);
+    assert_eq!(refs(&sb, &repo), before, "read-only");
+}

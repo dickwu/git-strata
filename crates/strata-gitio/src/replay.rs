@@ -11,6 +11,34 @@ use crate::refs::parse_oid;
 use crate::{Git, Result};
 
 impl Git {
+    /// Read-only: the commits reachable from `tip` and not from
+    /// `exclusive_base`, first-parent only, newest first, each with its
+    /// subject line (what a push of `exclusive_base..tip` publishes; the cli
+    /// lists them before a `PushDeploy` prompt, cli.md §5 step 2). At most
+    /// `limit` entries; the bool is whether more were left out.
+    pub fn commits_between(
+        &self,
+        exclusive_base: &CommitOid,
+        tip: &CommitOid,
+        limit: usize,
+    ) -> Result<(Vec<(CommitOid, String)>, bool)> {
+        let mut c = self.repo_command();
+        let max = format!("--max-count={}", limit.saturating_add(1));
+        c.args(["log", "--first-parent", "--no-show-signature", "--format=%H%x00%s", &max, tip.as_str(), "--not", exclusive_base.as_str(), "--"]);
+        let out = self.run(c, Opts::c())?;
+        if !out.ok() {
+            return Err(self.missing_commit_or(&[exclusive_base, tip], "log", &out));
+        }
+        let mut v = Vec::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let (oid, subject) = line.split_once('\0').unwrap_or((line, ""));
+            v.push((parse_oid(oid.as_bytes(), "log")?, subject.to_string()));
+        }
+        let more = v.len() > limit;
+        v.truncate(limit);
+        Ok((v, more))
+    }
+
     /// The commits reachable from `tip` and not from `exclusive_base`,
     /// first-parent only, oldest first, each re-applied (3-way against its
     /// first parent) on the previous new commit; the first goes on `onto`.

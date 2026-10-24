@@ -4,8 +4,14 @@
 //! calls strata-confirm (§1): confirmations happen in the daemon.
 
 pub mod args;
-pub mod envelope;
+pub mod confirm;
+pub mod ctx;
 pub mod env;
+pub mod envelope;
+pub mod ro;
+pub mod rpc;
+pub mod show;
+pub mod tty;
 
 use std::ffi::OsString;
 
@@ -14,7 +20,8 @@ use clap::error::ErrorKind;
 use serde_json::{Value, json};
 use strata_types::{Code, StrataError};
 
-use crate::args::{Cli, Cmd, DaemonCmd};
+use crate::args::{Cli, Cmd, ConfigCmd, DaemonCmd, DepsCmd};
+use crate::ctx::Ctx;
 use crate::envelope::{Envelope, emit_stdout};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
@@ -67,7 +74,36 @@ fn parse_error(argv: &[OsString], e: &clap::Error) -> StrataError {
 fn dispatch(cmd: Cmd) -> Envelope {
     match cmd {
         Cmd::Daemon(DaemonCmd::Status) => Envelope::from_result(daemon_status_offline()),
-        other => Envelope::err(StrataError::new(Code::Unsupported, format!("{other:?} is not implemented yet"))),
+        cmd => match run_cmd(cmd) {
+            Ok(env) => env,
+            Err(e) => Envelope::err(e),
+        },
+    }
+}
+
+fn run_cmd(cmd: Cmd) -> Result<Envelope> {
+    use crate::confirm as c;
+    // Argument checks that need no environment come first.
+    match &cmd {
+        Cmd::Resolve { abandon, accept, .. } if *abandon == *accept => {
+            return c::resolve_choice_error(*abandon as usize + *accept as usize);
+        }
+        Cmd::Chain { accept_origin, restore, .. } if accept_origin.is_some() == *restore => {
+            return c::resolve_choice_error(accept_origin.is_some() as usize + *restore as usize);
+        }
+        _ => {}
+    }
+    let ctx = Ctx::from_env()?;
+    match cmd {
+        Cmd::Deps(DepsCmd::Approve { id, sessions }) => c::deps_approve(&ctx, &id, &sessions),
+        Cmd::Push { repo } => c::push(&ctx, &repo),
+        Cmd::Publish { from, assign } => c::publish(&ctx, &from, assign.as_deref()),
+        Cmd::Assign { file, session } => c::assign(&ctx, &file, &session),
+        Cmd::Rm { session, discard } => c::rm(&ctx, &session, discard),
+        Cmd::Resolve { session, repo, abandon, accept } => c::resolve(&ctx, &session, &repo, abandon, accept),
+        Cmd::Chain { repo, accept_origin, restore } => c::chain(&ctx, &repo, accept_origin, restore),
+        Cmd::Config(ConfigCmd::Relax { repo }) => c::config_relax(&ctx, &repo),
+        other => Err(StrataError::new(Code::Unsupported, format!("{other:?} is not implemented yet"))),
     }
 }
 

@@ -16,6 +16,9 @@ path = "src/main.rs"
 [dependencies]
 strata-types = { path = "../strata-types" }
 strata-daemon = { path = "../strata-daemon" }
+strata-store = { path = "../strata-store" }
+strata-gitio = { path = "../strata-gitio" }
+strata-deps = { path = "../strata-deps" }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
