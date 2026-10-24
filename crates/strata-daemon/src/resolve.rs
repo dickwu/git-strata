@@ -48,12 +48,12 @@ fn publishing(core: &Core, session: &SessionId) -> Result<bool> {
 /// Wait for `session`'s publishing flag to clear, holding no queue and no
 /// lock, at most the lock wait (then `Busy`, nothing written).
 pub fn wait_not_publishing(core: &Core, session: &SessionId) -> Result<()> {
-    wait_not_publishing_since(core, session, Instant::now())
+    wait_not_publishing_until(core, session, Instant::now() + core.locks.wait())
 }
 
-fn wait_not_publishing_since(core: &Core, session: &SessionId, start: Instant) -> Result<()> {
+fn wait_not_publishing_until(core: &Core, session: &SessionId, deadline: Instant) -> Result<()> {
     while publishing(core, session)? {
-        if start.elapsed() >= core.locks.wait() {
+        if Instant::now() >= deadline {
             return Err(StrataError::new(Code::Busy, format!("session {session} is publishing"))
                 .with_detail(json!({ "reason": "publishing", "session": session.as_str() })));
         }
@@ -72,12 +72,19 @@ fn wait_not_publishing_since(core: &Core, session: &SessionId, start: Instant) -
 /// again, the queue place is given back and the wait starts over; the whole
 /// wait is bounded by one lock wait, then `Busy` (`reason: "publishing"`),
 /// nothing written.
+///
+/// [实现时补的决定] (review-2 N5) "The whole wait" is one absolute
+/// deadline (start + lock wait) shared by every flag wait and every queue
+/// take of the loop (`Locks::with_sessions_until`); a later round's queue
+/// take is no longer unbounded. Expiry in a flag wait is `Busy`
+/// `publishing`; expiry in a queue take is `Busy` `lock_wait` (naming the
+/// holder). Either way nothing is written.
 pub fn with_queue_not_publishing<T>(core: &Core, session: &SessionId, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    let start = Instant::now();
+    let deadline = Instant::now() + core.locks.wait();
     let mut f = Some(f);
     loop {
-        wait_not_publishing_since(core, session, start)?;
-        let r = core.locks.with_sessions(std::slice::from_ref(session), || {
+        wait_not_publishing_until(core, session, deadline)?;
+        let r = core.locks.with_sessions_until(std::slice::from_ref(session), deadline, || {
             if publishing(core, session)? {
                 return Ok(None);
             }

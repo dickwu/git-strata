@@ -293,6 +293,18 @@ impl Locks {
     /// Run `f` holding the queue place of every session in `ids` (taken in
     /// ascending order, I4). Places this request already holds are kept.
     pub fn with_sessions<T>(&self, ids: &[SessionId], f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.sessions_bounded(ids, None, f)
+    }
+
+    /// [`Locks::with_sessions`] where every take of this call, not only the
+    /// request's first, waits at most until `deadline` (review-2 N5: one
+    /// overall bound across a wait that may take the queue more than once).
+    /// After a visible write the takes wait without bound, as everywhere.
+    pub fn with_sessions_until<T>(&self, ids: &[SessionId], deadline: Instant, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.sessions_bounded(ids, Some(deadline), f)
+    }
+
+    fn sessions_bounded<T>(&self, ids: &[SessionId], deadline: Option<Instant>, f: impl FnOnce() -> Result<T>) -> Result<T> {
         let want: BTreeSet<SessionId> = ids.iter().cloned().collect();
         let fifos: Vec<(SessionId, Arc<Fifo>)> = want
             .into_iter()
@@ -304,7 +316,11 @@ impl Locks {
             .collect();
         let mut guards: Vec<Held<'_>> = Vec::new();
         for (id, fifo) in &fifos {
-            let bound = take_bound(self.wait);
+            let first = take_bound(self.wait);
+            let bound = match deadline {
+                Some(d) if !is_visible() => Some(d.saturating_duration_since(Instant::now())),
+                _ => first,
+            };
             let t0 = Instant::now();
             fifo.acquire(bound, &self.closed, Self::holder_now())
                 .map_err(|e| self.take_error(e, json!({ "session": id.as_str() }), t0.elapsed()))?;

@@ -493,3 +493,34 @@ fn reentrant_repo_take_is_refused_not_deadlocked() {
     let e = l.with_repo(&rn("nope"), || Ok(())).unwrap_err();
     assert_eq!(e.code, Code::NoSuchRepo);
 }
+
+/// Review-2 N5: `with_sessions_until` bounds every take by the one
+/// deadline, also a request's second take (which `with_sessions` leaves
+/// unbounded): a queue held past the deadline is `Busy` at the deadline,
+/// and `f` never runs.
+#[test]
+fn with_sessions_until_bounds_a_later_take_by_the_deadline() {
+    let l = locks();
+    let (a, b) = (sid("aaaaaaaa"), sid("bbbbbbbb"));
+    let (l1, b1) = (l.clone(), b.clone());
+    let holder = request("checkpoint", Some(b.clone()), move || {
+        l1.with_sessions(&[b1], || {
+            thread::sleep(Duration::from_millis(1500));
+            Ok(())
+        })
+    });
+    wait_until("b held", || l.in_flight(&b).is_some());
+    let (l2, a2, b2) = (l.clone(), a.clone(), b.clone());
+    let waiter = request("rm", Some(a.clone()), move || {
+        // The request's first take (bounded as always).
+        l2.with_sessions(&[a2], || Ok(())).unwrap();
+        let t = Instant::now();
+        let r = l2.with_sessions_until(&[b2], t + Duration::from_millis(200), || Ok(()));
+        (r, t.elapsed())
+    });
+    let (r, took) = waiter.join().unwrap();
+    let e: StrataError = r.expect_err("the take times out");
+    assert_eq!(e.code, Code::Busy, "{e:?}");
+    assert!(took < Duration::from_millis(1000), "bounded by the deadline, took {took:?}");
+    holder.join().unwrap().unwrap();
+}
