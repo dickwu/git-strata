@@ -8,8 +8,8 @@ Branch `impl/search` (worktree `git-strata-wt/search`), from `impl/v1` 95f7660.
 |---|---|---|
 | 1 view table and typed refusals | done | e82784a |
 | 2 share base index by main checkout tree and profile | done | 75aadbc |
-| 3 session overlay shadows the shared base | done | (this commit) |
-| 4 pin the query snapshot and refuse a replaced root | todo | |
+| 3 session overlay shadows the shared base | done | c065675 |
+| 4 pin the query snapshot and refuse a replaced root | done | (this commit) |
 
 ## Decisions
 
@@ -123,3 +123,37 @@ Branch `impl/search` (worktree `git-strata-wt/search`), from `impl/v1` 95f7660.
 - Task 3 tests were written after the implementation in this session (both
   in the same commit); with the Task 2 stubs (`grep`/`files` returned empty)
   they fail.
+
+### Task 4
+
+- No implementation change was needed: the Task 1–3 code already pins
+  `(reader, members)` in one `Arc<Snap>` per query and rechecks every root
+  after verify. Task 4 adds `tests/snapshot.rs` (13 tests).
+- **Base change in `new_query_after_reattach_sees_new_base`.** Sessions has
+  no rebase, so the test publishes a new upstream commit (drops `old.ts`,
+  adds `new.ts`), builds its base with `Sessions::ensure_base`, and calls
+  `Sessions::move_workspace`. Like strata-session's own move tests, it does
+  not wrap the call in `fx.lock_write`. The old view gets `Busy`, with
+  either `root_changed` or `base_moved` accepted: move replaces the workspace
+  dir, so in practice it's `root_changed`. A re-attach gets a new id and sees
+  only new-tree hits.
+- **"Replace the root".** Tests do this by renaming the workspace dir aside
+  and `cp -Rp`'ing it back to the same path, so it has a new inode and the
+  same gitfile. That way the session status stays healthy, and a re-attach
+  works on the replacement.
+- **Reader swap.** Tests swap readers with `swap_view_reader` onto a second
+  session's tree (T2 = T1 + `extra.ts`). The paused query's
+  `paused_reader_ptr` stays at T1's `generation_ptr` and its ids never
+  resolve to `extra.ts`.
+- **Candidate count.** "Candidate count" is observed as the member count
+  (`files("**").len()`) plus one paused `grep(".")`, whose hit set equals the
+  pre-swap answer. tgrep's `num_files_using` isn't exposed through the API
+  and the spec only needs membership consistency.
+- **Oversized files.** `oversized_file_listed_not_indexed` adds `Untracked`
+  entries for the two 64 MiB files to a captured overlay by hand, instead of
+  capturing them, so it doesn't copy 128 MiB into the store. Search never
+  reads the overlay blob, only the workspace bytes.
+- **FIFO handling.** `verify_does_not_follow_symlink` runs under a 60 s
+  bound. A FIFO in place of a clean base file is skipped by verify (no hang).
+  An explicit refresh of it gives `Unknown not_ready`, and so does the next
+  query. A symlink in place of a base file yields no target bytes.
