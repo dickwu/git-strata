@@ -251,6 +251,8 @@ pub enum PublishFault {
     PauseDuringPush,
     /// 记录 `Pushed` 的那一次调用提交之前停住，用来造「远端已收下、锚点还没一起写上」。结果不是 `Pushed`，也不是 `Leads`。
     PauseBeforePushRecorded,
+    /// 每个会话的发布后 rebase 之前停住：队列和 repo 锁都已放下，行仍是 `Running`（`publishing` 间隙）。review M5 的测试用。[实现时补的决定]
+    PauseBeforeRebase,
 }
 ```
 

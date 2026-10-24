@@ -48,7 +48,10 @@ fn publishing(core: &Core, session: &SessionId) -> Result<bool> {
 /// Wait for `session`'s publishing flag to clear, holding no queue and no
 /// lock, at most the lock wait (then `Busy`, nothing written).
 pub fn wait_not_publishing(core: &Core, session: &SessionId) -> Result<()> {
-    let start = Instant::now();
+    wait_not_publishing_since(core, session, Instant::now())
+}
+
+fn wait_not_publishing_since(core: &Core, session: &SessionId, start: Instant) -> Result<()> {
     while publishing(core, session)? {
         if start.elapsed() >= core.locks.wait() {
             return Err(StrataError::new(Code::Busy, format!("session {session} is publishing"))
@@ -57,6 +60,37 @@ pub fn wait_not_publishing(core: &Core, session: &SessionId) -> Result<()> {
         thread::sleep(Duration::from_millis(20));
     }
     Ok(())
+}
+
+/// Run `f` under `session`'s queue place once its `publishing` flag is
+/// clear (daemon.md §3: rm and resolve_move wait for the flag, holding no
+/// queue, repo lock or build lock while they wait).
+///
+/// [实现时补的决定] (review M5) The flag is checked again under the queue
+/// place: a publish that began (or reached its lock-free rebase gap) between
+/// the wait and the queue would otherwise still be raced. If it is set
+/// again, the queue place is given back and the wait starts over; the whole
+/// wait is bounded by one lock wait, then `Busy` (`reason: "publishing"`),
+/// nothing written.
+pub fn with_queue_not_publishing<T>(core: &Core, session: &SessionId, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let start = Instant::now();
+    let mut f = Some(f);
+    loop {
+        wait_not_publishing_since(core, session, start)?;
+        let r = core.locks.with_sessions(std::slice::from_ref(session), || {
+            if publishing(core, session)? {
+                return Ok(None);
+            }
+            match f.take() {
+                Some(f) => f().map(Some),
+                None => Err(StrataError::new(Code::Unknown, "the guarded step already ran")),
+            }
+        })?;
+        if let Some(v) = r {
+            return Ok(v);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// §5.5 `resolve_move`. No TTY check, no `Confirmer`. `resolve` is
@@ -71,8 +105,7 @@ pub fn resolve_move(
     resolve: &dyn Fn(&SessionId, &RepoName, MoveResolution) -> Result<ResolutionReport>,
     after_accept: &mut dyn FnMut(),
 ) -> Result<ResolutionReport> {
-    wait_not_publishing(core, session)?;
-    core.locks.with_sessions(std::slice::from_ref(session), || {
+    with_queue_not_publishing(core, session, || {
         crate::handlers::writing();
         let r = resolve(session, repo, choice)?;
         if choice == MoveResolution::Accept {

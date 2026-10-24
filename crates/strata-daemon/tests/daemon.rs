@@ -610,3 +610,51 @@ fn search_after_checkpoint_sees_uncheckpointed_changes() {
     drop(d);
     core.close().unwrap();
 }
+
+/// Review M5: `publishing` is not a lock (daemon.md §3, D14): publish
+/// releases the session queue and the repo lock after its commit/push and
+/// takes them again per rebase step. An `rm` — plain or `--discard` — that
+/// arrives in that gap waits for the flag, holding nothing, instead of
+/// removing the session under the publish; it then runs, and the publish's
+/// rebase of that session is intact.
+#[test]
+fn rm_waits_for_publishing_in_the_lock_free_gap() {
+    use strata_confirm::seams::Verdict;
+    use strata_publish::seams::{PublishFault, pause};
+    let mut fx = Dfx::new();
+    fx.lock_wait = Duration::from_secs(20);
+    let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
+    let core = fx.prepare_with(c).unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let git = &core.gits[&repo_name("tool")];
+    serving(&d, || {
+        for (k, discard) in [(2, false), (3, true)] {
+            let id = new_session(&sock);
+            let root = ws(&core, &id, "tool");
+            external(&root, &format!("printf 'export const a = {k}\\n' > src/index.ts"));
+            let cp = ok(call(&sock, "checkpoint", json!({
+                "session": id, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+            })));
+            let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+            let g = group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]);
+            let gap = pause(git, PublishFault::PauseBeforeRebase);
+            std::thread::scope(|sc| {
+                let publish = sc.spawn(|| call(&sock, "publish", json!({ "group": g })));
+                gap.wait_until_paused();
+                assert_eq!(core.locks.in_flight(&id), None, "the gap holds no queue place");
+                let rm = sc.spawn(|| call(&sock, "rm", json!({ "session": id, "discard": discard })));
+                std::thread::sleep(Duration::from_millis(400));
+                assert!(!rm.is_finished(), "rm waits for publishing: {:#}", if rm.is_finished() { rm.join().unwrap() } else { Value::Null });
+                gap.release();
+                let p = ok(publish.join().unwrap());
+                let mine = p["published"][0]["rebases"].as_array().unwrap().iter().find(|r| r["session"] == json!(id)).cloned();
+                assert_eq!(mine.as_ref().map(|r| &r["report"]["kind"]), Some(&json!("Moved")), "rebase intact: {p:#}");
+                ok(rm.join().unwrap());
+            });
+            assert!(core.store.session(&id).unwrap().is_none_or(|r| r.removed.is_some()), "rm ran after the publish");
+        }
+    });
+    assert_eq!(log.shown().len(), 1, "the discard prompted once");
+}

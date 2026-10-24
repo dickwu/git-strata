@@ -507,6 +507,7 @@ pub fn publish_bound(
     let post = (|| -> Result<()> {
         for s in &queue {
             seams::fail(ctx.git, FailPoint::BeforeRebase)?;
+            seams::hit(ctx.git, Point::BeforeRebase);
             let r = crate::rebase::after_publish(ctx, s, &landed.staged.tree, &landed.commit)?;
             rebase.push(report_json(s, &r));
             rebases.push((s.clone(), r));

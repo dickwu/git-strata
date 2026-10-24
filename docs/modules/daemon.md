@@ -401,6 +401,8 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 
 **`rm`**：`discard` 为真则先弹框，action `RemoveDiscard { session }`，不持队列和锁。然后占该会话的队列。不持 repo 锁地调 `session::remove`（它自己取锁）。`publishing` 为真时先等旗标，不等的时候不持别的锁。进行中的 checkpoint 不取消：队列让 `rm` 排在它后面。
 
+实现（review M5）：`rm` 和 `resolve_move` 都走 `resolve::with_queue_not_publishing`：先不持任何队列和锁地等旗标，再占队列，在队列里再查一次旗标；又为真（publish 正在提交后的无锁间隙，如逐会话 rebase 之间）就交还队列重新等。整段等待合起来以一个锁等待为上限，超时 `Busy`（`reason: "publishing"`），什么都不写。[实现时补的决定]
+
 **`gc`**：一个 repo 一把锁，调用方持有，调 `gc_repo(repo, GC_KEEP)`。`repo` 为 null 则按 `RepoName` 升序逐个。写前等锁；超时跳过这个 repo，记进 `daemon_status`，不让整次失败。不占会话队列，不等建造锁。
 
 **`resolve_move`**：不查 TTY，不返回 `NotTty`，不调用 `Confirmer`，参数里没有凭据。cli 已经查过 TTY，并且人给过选择。`abandon` 与 `accept` 必须恰好一个为真；否则 RPC `Failed`，`resolve_failed_move` 不调用。`publishing` 为真时先等旗标，等的时候不持队列或 repo 锁。然后占该会话的队列。不持 repo 锁地调 `session::resolve_failed_move(session, repo, MoveResolution::Abandon 或 Accept)`（它自己取锁）。`Accept` 之后 `Tracker::reset` 再 `watch`。`Abandon` 不换工作区树，不 reset。不自动选。

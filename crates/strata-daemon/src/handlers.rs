@@ -486,7 +486,9 @@ impl<'d, 'a> Server<'d, 'a> {
             Params::Rm(p) => {
                 let action = Action::RemoveDiscard { session: p.session.clone() };
                 let token = if p.discard { Some(require_validated(&core.confirmer, action.clone())?) } else { None };
-                core.locks.with_sessions(std::slice::from_ref(&p.session), || {
+                // Review M5: wait out `publishing` (holding nothing), then the
+                // queue place, the flag checked again under it.
+                crate::resolve::with_queue_not_publishing(core, &p.session, || {
                     if let Some(t) = &token {
                         recheck(t, &action)?;
                     }

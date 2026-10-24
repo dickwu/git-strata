@@ -21,6 +21,9 @@ pub const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) enum Point {
     BeforeCommit,
     AfterCommit,
+    /// Before each session's post-publish rebase: the queue and the repo
+    /// lock are released, the row is still `Running` (the `publishing` gap).
+    BeforeRebase,
 }
 
 /// Steps after `commit_tree` where a test can inject one failure
@@ -63,6 +66,9 @@ mod imp {
         /// Stop after the remote accepted, before the tracking ref and the
         /// anchor are recorded (gitio `pause_push_before_record`).
         PauseBeforePushRecorded,
+        /// Stop before a session's post-publish rebase, with the session
+        /// queue and the repo lock released and the row still `Running`.
+        PauseBeforeRebase,
     }
 
     #[derive(Default)]
@@ -130,6 +136,7 @@ mod imp {
         let point = match fault {
             PublishFault::PauseBeforeCommit => Point::BeforeCommit,
             PublishFault::PauseAfterCommit => Point::AfterCommit,
+            PublishFault::PauseBeforeRebase => Point::BeforeRebase,
             PublishFault::PauseDuringPush => return Pause(Some(Inner::Git(git.pause_push_before_send()))),
             PublishFault::PauseBeforePushRecorded => return Pause(Some(Inner::Git(git.pause_push_before_record()))),
         };
