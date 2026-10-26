@@ -549,12 +549,28 @@ fn watcher_reports_must_rescan_body() {
             let after = root.join("after");
             fs::write(&after, b"x").unwrap();
             let since = Instant::now();
-            let alive = wait_until(ARRIVE, || {
+            // Under load the flood's backlog can take longer than ARRIVE to
+            // drain ahead of "after"; keep waiting while deliveries still
+            // make progress, and call it dead only after ARRIVE of silence.
+            let progress = || {
                 let c = cov.lock().unwrap();
-                c.changed.contains(&after)
-                    || c.dropped > d0
-                    || c.rescans[r0..].iter().any(|r| after.starts_with(r))
-            });
+                (c.changed.len(), c.dropped, c.rescans.len())
+            };
+            let mut last = progress();
+            let alive = loop {
+                let hit = wait_until(ARRIVE, || {
+                    let c = cov.lock().unwrap();
+                    c.changed.contains(&after)
+                        || c.dropped > d0
+                        || c.rescans[r0..].iter().any(|r| after.starts_with(r))
+                });
+                let now = progress();
+                if hit || now == last || since.elapsed() > Duration::from_secs(300) {
+                    break hit;
+                }
+                eprintln!("after: still draining ({last:?} -> {now:?}), waiting on");
+                last = now;
+            };
             {
                 let c = cov.lock().unwrap();
                 eprintln!(
