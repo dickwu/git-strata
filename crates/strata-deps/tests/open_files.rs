@@ -193,3 +193,47 @@ fn own_event_only_descriptors_are_not_holders() {
     assert!(got.iter().any(|o| o.pid == child.id() as i32 && o.hold == Hold::Fd), "another process's event-only fd still counts: {got:?}");
     stop(child);
 }
+
+/// A child being spawned briefly holds copies of all our fds, `O_CLOEXEC`
+/// ones included, until its exec closes them; our own `O_EVTONLY` fd must
+/// not show up under the child's pid then (it did in 11 of 150 scans while
+/// 4 threads kept spawning, before the fix).
+#[test]
+fn own_event_only_fd_copied_into_a_spawning_child_is_not_a_holder() {
+    if std::env::var(WORKER_ENV).is_ok() {
+        return;
+    }
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let t = tempfile::tempdir().unwrap();
+    let dir = fs::canonicalize(t.path()).unwrap();
+    let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a valid C path; closed below.
+    let evt = unsafe { libc::open(c.as_ptr(), libc::O_EVTONLY | libc::O_CLOEXEC) };
+    assert!(evt >= 0);
+    let done = Arc::new(AtomicBool::new(false));
+    let spawners: Vec<_> = (0..4)
+        .map(|_| {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                while !done.load(Ordering::SeqCst) {
+                    let _ = Command::new("/usr/bin/true").status();
+                }
+            })
+        })
+        .collect();
+    let start = std::time::Instant::now();
+    let mut seen = Vec::new();
+    let mut scans = 0;
+    while scans < 40 && start.elapsed() < std::time::Duration::from_secs(30) {
+        seen.extend(open_files(&dir).unwrap());
+        scans += 1;
+    }
+    done.store(true, Ordering::SeqCst);
+    for s in spawners {
+        s.join().unwrap();
+    }
+    // SAFETY: our fd.
+    unsafe { libc::close(evt) };
+    assert_eq!(seen, vec![], "after {scans} scans (own pid {})", std::process::id());
+}

@@ -172,11 +172,11 @@ fn all_pids() -> Result<Vec<i32>> {
     }
 }
 
-/// Every (path, hold) of process `pid`; `None` when the process is gone or
-/// not ours to see.
-type Holds = Vec<(Vec<u8>, Hold)>;
+/// Every (path, hold, event-only) of process `pid`; `None` when the process
+/// is gone or not ours to see. The flag is set on `O_EVTONLY` descriptors.
+type Holds = Vec<(Vec<u8>, Hold, bool)>;
 
-fn holds_of(pid: i32, keep: &dyn Fn(&[u8]) -> bool) -> Result<Option<Holds>> {
+fn holds_of(pid: i32, keep: &dyn Fn(&[u8]) -> bool, with_own_evt: bool) -> Result<Option<Holds>> {
     let mut out = Vec::new();
     let skip = |e: i32| e == libc::ESRCH || e == libc::EPERM;
 
@@ -196,7 +196,7 @@ fn holds_of(pid: i32, keep: &dyn Fn(&[u8]) -> bool) -> Result<Option<Holds>> {
     }
     for p in [vip_path(&vpi.pvi_cdir), vip_path(&vpi.pvi_rdir)] {
         if !p.is_empty() && keep(p) {
-            out.push((p.to_vec(), Hold::Cwd));
+            out.push((p.to_vec(), Hold::Cwd, false));
         }
     }
 
@@ -252,12 +252,13 @@ fn holds_of(pid: i32, keep: &dyn Fn(&[u8]) -> bool) -> Result<Option<Holds>> {
         // `kFSEventStreamCreateFlagWatchRoot`): they never keep a file busy
         // and belong to the daemon's own Trackers, which it drops itself
         // [实现时补的决定].
-        if pid == own_pid() && info.pfi.fi_openflags & libc::O_EVTONLY as u32 != 0 {
+        let evt = info.pfi.fi_openflags & libc::O_EVTONLY as u32 != 0;
+        if pid == own_pid() && evt && !with_own_evt {
             continue;
         }
         let p = vip_path(&info.pvip);
         if !p.is_empty() && keep(p) {
-            out.push((p.to_vec(), Hold::Fd));
+            out.push((p.to_vec(), Hold::Fd, evt));
         }
     }
 
@@ -275,7 +276,7 @@ fn holds_of(pid: i32, keep: &dyn Fn(&[u8]) -> bool) -> Result<Option<Holds>> {
         }
         let p = vip_path(&r.prp_vip);
         if !p.is_empty() && keep(p) {
-            out.push((p.to_vec(), Hold::Mapped));
+            out.push((p.to_vec(), Hold::Mapped, false));
         }
         let next = r.prp_prinfo.pri_address.saturating_add(r.prp_prinfo.pri_size);
         if next <= addr {
@@ -284,6 +285,15 @@ fn holds_of(pid: i32, keep: &dyn Fn(&[u8]) -> bool) -> Result<Option<Holds>> {
         addr = next;
     }
     Ok(Some(out))
+}
+
+/// `pid`'s parent, or `None` when it cannot be read.
+fn ppid_of(pid: i32) -> Option<i32> {
+    let mut bi: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: buffer is a proc_bsdinfo.
+    let n = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut bi as *mut _ as *mut libc::c_void, size) };
+    (n == size).then_some(bi.pbi_ppid as i32)
 }
 
 fn own_pid() -> i32 {
@@ -346,13 +356,31 @@ pub(crate) fn scan(dirs: &[&Path]) -> Result<Vec<Result<Vec<OpenFile>>>> {
         return Ok(results);
     }
     let keep = |p: &[u8]| active.iter().any(|(_, c)| is_under(p, c));
+    // Our own event-only paths, read once when a child turns up holding an
+    // event-only fd (see below).
+    let mut own_evt: Option<Vec<Vec<u8>>> = None;
     for pid in all_pids()? {
-        let Some(holds) = holds_of(pid, &keep)? else { continue };
+        let Some(mut holds) = holds_of(pid, &keep, false)? else { continue };
+        // A child we are spawning right now briefly holds copies of all our
+        // descriptors, `O_CLOEXEC` ones included, until its exec closes
+        // them: our own FSEvents `O_EVTONLY` fds then show up under the
+        // child's pid (measured: 11 of 150 scans while 4 threads spawn).
+        // A direct child's event-only fd on a path we hold event-only
+        // ourselves is that copy, and event-only fds never keep a file busy
+        // anyway [实现时补的决定].
+        if pid != own_pid() && holds.iter().any(|h| h.2) && ppid_of(pid) == Some(own_pid()) {
+            if own_evt.is_none() {
+                let mine = holds_of(own_pid(), &keep, true)?.unwrap_or_default();
+                own_evt = Some(mine.into_iter().filter(|h| h.2).map(|h| h.0).collect());
+            }
+            let mine = own_evt.as_deref().unwrap_or_default();
+            holds.retain(|h| !(h.2 && mine.contains(&h.0)));
+        }
         if holds.is_empty() {
             continue;
         }
         let command = command_of(pid);
-        for (path, hold) in holds {
+        for (path, hold, _) in holds {
             for (i, c) in &active {
                 if is_under(&path, c)
                     && let Ok(v) = &mut results[*i]

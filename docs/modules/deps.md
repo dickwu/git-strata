@@ -903,6 +903,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
    - `proc_pidinfo(PROC_PIDVNODEPATHINFO)` 给出 cwd 与根目录，在 C 下的记 `Cwd`。
    - `proc_pidinfo(PROC_PIDLISTFDS)` 列出 fd；对每个 vnode 类型的 fd，`proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO)` 给出路径，在 C 下的记 `Fd`。
      [实现时补的决定] 调用进程自己的、`fi_openflags` 带 `O_EVTONLY` 的 fd 不记：那是 FSEvents 为 `kFSEventStreamCreateFlagWatchRoot` 在监视根及其各级父目录上开的只为事件的描述符，不占用文件，是 daemon 自己 Tracker 的，由 daemon 自己丢弃。别的进程的 `O_EVTONLY` fd 照样记（第三方监视器仍算持有者）。
+     [实现时补的决定]（2026-10-26）调用进程正在派生的子进程，在 exec 关掉 `O_CLOEXEC` 描述符之前，会短暂地带着调用进程全部 fd 的副本，于是调用进程自己的 `O_EVTONLY` fd 会以子进程的 pid 出现（实测：4 个线程不停派生时 150 次扫描里 11 次）。所以：直接子进程（`pbi_ppid` 是调用进程）手里的 `O_EVTONLY` fd，如果调用进程自己也在同一路径上持有 `O_EVTONLY` fd，就当作这份副本不记。调用进程自己没有在该路径上开只为事件的 fd 时，子进程的 `O_EVTONLY` fd 照样记。测试：`own_event_only_fd_copied_into_a_spawning_child_is_not_a_holder`（修之前 40 次扫描必现）。
    - 从地址 0 开始，逐段调用 `proc_pidinfo(PROC_PIDREGIONPATHINFO, 地址)`，带 vnode 路径、且路径在 C 下的段记 `Mapped`。dlopen 加载的 `.node` 原生模块不占 fd，只能这样看到。
 4. "在 C 下"的定义：路径等于 C，或者以 `C + "/"` 开头，按字节比较。两边都来自内核，大小写一致。`node_modules2/x` 不算在 `node_modules` 下。
 5. 按 (pid, path, hold) 去重，按 (pid, path) 排序，用 `proc_name` 填 command。
