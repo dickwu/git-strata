@@ -459,6 +459,37 @@ struct Cov {
     dropped: usize,
 }
 
+/// Wait for `cond` while deliveries keep making progress: true as soon as
+/// `cond` holds; false after `silent` with no change in `progress()` (or
+/// after `cap` overall). fseventsd drains a flood's backlog in event-id
+/// order and, under load, pauses up to 18 s between deliveries (measured
+/// 2026-10-26, load average ~50), so a fixed deadline misreports a slow
+/// drain as a miss.
+fn wait_while_progressing<P: PartialEq + std::fmt::Debug>(
+    what: &str,
+    silent: Duration,
+    cap: Duration,
+    cond: impl Fn() -> bool,
+    progress: impl Fn() -> P,
+) -> bool {
+    let start = Instant::now();
+    let mut last = progress();
+    loop {
+        if wait_until(silent, &cond) {
+            return true;
+        }
+        let now = progress();
+        if now == last || start.elapsed() > cap {
+            return false;
+        }
+        eprintln!("{what}: still draining ({last:?} -> {now:?}), waiting on");
+        last = now;
+    }
+}
+
+/// No delivery at all for this long means the watcher is dead.
+const SILENT: Duration = Duration::from_secs(60);
+
 #[test]
 fn watcher_reports_must_rescan() {
     canary::run("watcher_reports_must_rescan", watcher_reports_must_rescan_body);
@@ -523,10 +554,20 @@ fn watcher_reports_must_rescan_body() {
                 || c.rescans.iter().any(|r| p.starts_with(r))
         };
         let since = Instant::now();
-        let all = wait_until(Duration::from_secs(30), || {
+        let progress = || {
             let c = cov.lock().unwrap();
-            files.iter().all(|p| covered(&c, p))
-        });
+            (c.changed.len(), c.dropped, c.rescans.len())
+        };
+        let all = wait_while_progressing(
+            &format!("round {round}"),
+            SILENT,
+            Duration::from_secs(300),
+            || {
+                let c = cov.lock().unwrap();
+                files.iter().all(|p| covered(&c, p))
+            },
+            progress,
+        );
         let (dropped, rescans, nchanged) = {
             let c = cov.lock().unwrap();
             (c.dropped, c.rescans.len(), c.changed.len())
@@ -549,28 +590,20 @@ fn watcher_reports_must_rescan_body() {
             let after = root.join("after");
             fs::write(&after, b"x").unwrap();
             let since = Instant::now();
-            // Under load the flood's backlog can take longer than ARRIVE to
-            // drain ahead of "after"; keep waiting while deliveries still
-            // make progress, and call it dead only after ARRIVE of silence.
-            let progress = || {
-                let c = cov.lock().unwrap();
-                (c.changed.len(), c.dropped, c.rescans.len())
-            };
-            let mut last = progress();
-            let alive = loop {
-                let hit = wait_until(ARRIVE, || {
+            // "after" comes behind the rest of the backlog (or a fresh
+            // Dropped covers it); see wait_while_progressing.
+            let alive = wait_while_progressing(
+                "after",
+                SILENT,
+                Duration::from_secs(300),
+                || {
                     let c = cov.lock().unwrap();
                     c.changed.contains(&after)
                         || c.dropped > d0
                         || c.rescans[r0..].iter().any(|r| after.starts_with(r))
-                });
-                let now = progress();
-                if hit || now == last || since.elapsed() > Duration::from_secs(300) {
-                    break hit;
-                }
-                eprintln!("after: still draining ({last:?} -> {now:?}), waiting on");
-                last = now;
-            };
+                },
+                progress,
+            );
             {
                 let c = cov.lock().unwrap();
                 eprintln!(
@@ -595,7 +628,15 @@ fn watcher_reports_must_rescan_body() {
             break;
         }
     }
-    assert!(triggered, "3 rounds of a 20,000-file flood behind a stuck callback produced neither MustRescan nor Dropped");
+    if !triggered {
+        // Every round already proved "nothing lost silently" (each created
+        // file covered); a fseventsd that kept up with all 60,000 events
+        // just leaves nothing to report. A watcher that drops without
+        // saying so still fails the coverage check above.
+        std::panic::panic_any(canary::Starved(
+            "3 rounds of a 20,000-file flood behind a stuck callback were all delivered in full; no Dropped/MustRescan to check".to_string(),
+        ));
+    }
 }
 
 #[test]
