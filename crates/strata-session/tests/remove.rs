@@ -343,15 +343,31 @@ fn remove_refuses_unpublished_without_discard() {
 }
 
 #[test]
-fn remove_untracked_repo_requires_discard() {
+fn remove_untouched_untracked_repo_needs_no_discard() {
     let fx = Fx::new();
     let s = fx.sessions();
     let rep = s.new(Some("T-6"), &[fx.rn("tool")]).unwrap();
     let id = id(&rep);
+    // `front` came along untracked (every sibling joins; design.md:302) and nobody touched it.
+    let r = s.remove(&id, false, None).unwrap();
+    assert!(r.checkpoints.contains_key(&fx.rn("tool")) && !r.checkpoints.contains_key(&fx.rn("front")), "{r:?}");
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Removed);
+    assert!(!session_root(&fx, &id).exists() && !repos_dir(&fx, &id).exists());
+}
+
+#[test]
+fn remove_edited_untracked_repo_requires_discard() {
+    let fx = Fx::new();
+    let s = fx.sessions();
+    let rep = s.new(Some("T-6"), &[fx.rn("tool")]).unwrap();
+    let id = id(&rep);
+    fx.sb.write(&ws(&rep, "front"), "src/stray.ts", b"stray\n");
     let a = untouched(&fx, &id);
     let e = s.remove(&id, false, None).unwrap_err();
     assert_eq!(e.code, Code::Dirty, "{e:?}");
     assert_eq!(detail(&e)["untracked_repos"], serde_json::json!(["front"]));
+    assert_eq!(detail(&e)["repos"]["front"]["paths"], serde_json::json!(["src/stray.ts"]), "{e:?}");
+    assert!(detail(&e)["repos"].get("tool").is_none(), "{e:?}");
     assert_eq!(untouched(&fx, &id), a);
     let r = s.remove(&id, true, tok(&id)).unwrap();
     assert!(r.checkpoints.contains_key(&fx.rn("tool")) && !r.checkpoints.contains_key(&fx.rn("front")), "{r:?}");

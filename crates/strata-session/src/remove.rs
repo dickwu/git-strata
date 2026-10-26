@@ -236,15 +236,20 @@ impl Sessions<'_> {
                     json!({ "kind": "move_awaiting_recover", "repo": repo.as_str(), "n": i.n, "staging": i.staging }),
                 );
             }
-            if !ws.tracked {
-                untracked.push(json!(repo.as_str()));
-            } else if bad.is_none() && rec.lifecycle == Lifecycle::Active {
+            // Tracked or not, a healthy workspace of an Active session is
+            // reconciled against its base. An untracked one only blocks when
+            // that finds something: its edits have no checkpoint, but an
+            // untouched sibling loses nothing (D50).
+            if bad.is_none() && rec.lifecycle == Lifecycle::Active {
                 let cfg = self.repo_cfg(repo)?;
                 let git = self.git(repo)?;
                 let base = self.base_of(&ws.base)?;
                 let wsref = WorkspaceRef { session: id, repo, root: &ws.path, config: cfg, git, store: self.store };
                 let o = strata_overlay::reconcile_full(&wsref, &base)?;
                 if !o.entries.is_empty() {
+                    if !ws.tracked {
+                        untracked.push(json!(repo.as_str()));
+                    }
                     let truncated = o.entries.len() > DIRTY_PATHS_CAP;
                     let paths: Vec<&str> = o.entries.iter().take(DIRTY_PATHS_CAP).map(|e| e.path.as_str()).collect();
                     repos.insert(
