@@ -13,7 +13,7 @@ use serde_json::json;
 use strata_apfs::{IoSide, classify_io_error};
 use strata_types::{Code, StrataError};
 
-use crate::{AGENT_LABEL, DEFAULT_PATH, Result};
+use crate::{AGENT_LABEL, Result};
 
 /// `launchctl bootstrap` / `bootout` for one plist.
 pub trait Launchd {
@@ -90,7 +90,7 @@ pub fn plist_text(bin: &Path, home: &Path) -> String {
 "#,
         label = AGENT_LABEL,
         bin = xml(&bin.to_string_lossy()),
-        path = DEFAULT_PATH,
+        path = xml(&crate::install_path_for_home(home)),
         err = xml(&err.to_string_lossy()),
     )
 }

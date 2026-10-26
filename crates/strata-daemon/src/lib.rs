@@ -42,8 +42,16 @@ pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub const RECONCILE_EVERY: Duration = Duration::from_secs(3600);
 /// D12: `gc_repo` keep window.
 pub const GC_KEEP: Duration = Duration::from_secs(14 * 24 * 3600);
-/// D1: the PATH installs and checks run with (launchd gives a bare PATH).
+/// D1: the system part of the PATH installs and checks run with (launchd
+/// gives a bare PATH). [`install_path_for_home`] puts `~/.bun/bin` in front.
 pub const DEFAULT_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+
+/// D1: the PATH installs and checks run with, and the agent's PATH:
+/// `<home>/.bun/bin` (bun's own installer puts it there, not in Homebrew),
+/// then [`DEFAULT_PATH`].
+pub fn install_path_for_home(home: &Path) -> String {
+    format!("{}:{DEFAULT_PATH}", home.join(".bun/bin").display())
+}
 
 /// The launchd label of the agent.
 pub const AGENT_LABEL: &str = "com.gwd.git-stratad";

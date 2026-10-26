@@ -228,14 +228,15 @@ fn install_env_path_is_d1() {
     let fx = Dfx::new();
     let home = fx.sb.path("prodhome");
     let mut opts = strata_daemon::startup::Options::for_home(&home);
-    assert_eq!(opts.install_path, DEFAULT_PATH);
+    let d1 = format!("{}/.bun/bin:{DEFAULT_PATH}", home.display());
+    assert_eq!(opts.install_path, d1);
     assert_eq!(opts.config_dir, home.join("Library/Application Support/git-strata"));
     fs::create_dir_all(&opts.config_dir).unwrap();
     fs::copy(fx.config_dir.join("config.toml"), &opts.config_file).unwrap();
     opts.socket = fx.socket();
     let env = fx.sb.git_env();
     let core = strata_daemon::startup::prepare(opts, fx.confirmer(vec![]).0, &move |p: &Path| strata_gitio::Git::open_with_env(p, &env)).unwrap();
-    assert_eq!(core.env.path, DEFAULT_PATH);
+    assert_eq!(core.env.path, d1);
     core.close().unwrap();
 }
 
@@ -275,7 +276,7 @@ fn plist_has_label_keepalive_aqua_and_d1_path() {
     assert_eq!(v["LimitLoadToSessionType"], "Aqua");
     assert_eq!(v["ProcessType"], "Interactive");
     assert_eq!(v["ProgramArguments"], serde_json::json!([bin]));
-    assert_eq!(v["EnvironmentVariables"]["PATH"], DEFAULT_PATH);
+    assert_eq!(v["EnvironmentVariables"]["PATH"], format!("{}/.bun/bin:{DEFAULT_PATH}", home.display()));
     let err = v["StandardErrorPath"].as_str().unwrap();
     assert_eq!(Path::new(err), home.join("Library/Application Support/git-strata/daemon.err.log"));
     assert!(!err.contains('~'));

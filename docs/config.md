@@ -86,7 +86,7 @@
 1. 按 shell-words 规则切成 argv：以空白分隔，单引号、双引号把含空白的部分合成一个词，`\` 转义。
 2. 不展开变量、`~`、通配符。引号之外出现 `|`、`&`、`;`、`<`、`>` 一律是 `InvalidInput`（规则 V9）——否则 `a && b` 会被当成"把 `&&` 和 `b` 当参数传给 `a`"，悄悄跑出另一种东西。
 3. 工作目录：`checks` 是 staging 树里该仓库的根目录；`install` 是 staging 基线克隆里该仓库的根目录。
-4. 程序名按 daemon 的 `PATH` 解析。launchd agent 的默认 `PATH` 不含 `~/.bun/bin`、`~/.cargo/bin`、`/opt/homebrew/bin`，所以 daemon 的 plist 必须带上用户的 `PATH` [交给 `daemon.md`]；staff-api 的 php 命令像它自己的 `composer.json` 脚本那样写绝对路径 `/opt/homebrew/bin/php`。
+4. 程序名按 daemon 的 `PATH` 解析。launchd agent 的默认 `PATH` 不含 `~/.bun/bin`、`~/.cargo/bin`、`/opt/homebrew/bin`，所以 daemon 的 plist 必须带上用户的 `PATH` [交给 `daemon.md`]（daemon.md D1：`~/.bun/bin` 加 Homebrew 与系统目录；`~/.cargo/bin`、`~/.pub-cache/bin` 不在里面，cargo 用 Homebrew 的）[实现时补的决定]；staff-api 的 php 命令像它自己的 `composer.json` 脚本那样写绝对路径 `/opt/homebrew/bin/php`。
 
 ---
 

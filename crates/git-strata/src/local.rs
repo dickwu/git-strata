@@ -91,7 +91,12 @@ impl Local {
         for (name, rc) in &config.repos {
             gits.insert(name.clone(), Git::open(&rc.path)?);
         }
-        let env = InstallEnv { path: strata_daemon::DEFAULT_PATH.to_string(), timeout: Duration::from_secs(60) };
+        // The daemon's PATH (D1), so toolchain lines match what it computes.
+        let path = match std::env::var_os("HOME") {
+            Some(h) => strata_daemon::install_path_for_home(std::path::Path::new(&h)),
+            None => strata_daemon::DEFAULT_PATH.to_string(),
+        };
+        let env = InstallEnv { path, timeout: Duration::from_secs(60) };
         Ok(Local { config, gits, store, env })
     }
 

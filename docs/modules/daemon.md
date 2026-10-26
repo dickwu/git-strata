@@ -39,7 +39,7 @@ cli 只在连不上 socket 时自己打开 `Sessions`（只读）。daemon 在�
 6. `index-read-back-refused` 或 `staging-changed`（连字符，以 gitio 9985e4c 的拼写为准，「Attach alert reasons, spelling — final」）时告警，请人看主 checkout 的 `git status` 与 `git diff --cached`。不自动改主 checkout（「An attach that may have written outside its staging is raised to the human」）。
 7. `<shadow>/worktrees` 或 `worktrees/<n>` 不是目录时，session 把它挪进 `<shadow>/strata-quarantine/`。daemon 告警。挪失败则结果是 `Unknown`，仍然告警。不在这种影子仓库上跑 `git gc`、`git worktree prune` 或会触发 auto-maintenance 的 `git commit`（「A symlinked worktrees/<n> is quarantined, never kept」及其 amended 条）。
 8. 持锁超过 30 秒就在 `status` 里写出谁持着哪把锁、从什么时候起（「Waits after a call's first visible write are not bounded」）。
-9. launchd 没有用户的 PATH。`install` 和 `checks` 用本文写明的 PATH：`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` [我的决定 D1]。
+9. launchd 没有用户的 PATH。`install` 和 `checks` 用本文写明的 PATH：`HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` [我的决定 D1]。`HOME/.bun/bin` 是真机安装时补的：这台机器的 bun 由 bun 自己的安装脚本装在 `~/.bun/bin`，不在 Homebrew，缺了它第一次 `new` 就在 admin 的 `bun install` 上报 `NoSuchPath`（每个会话都要给全部兄弟仓库备依赖）[实现时补的决定]。
 10. 确认：daemon 不查 TTY。它核对凭据的 action 与这次请求一致，并且 confirm 说它还没用过、没过期。不符 → `NotConfirmed`。`require_tty` 是 cli 的（「T12 confirm」、confirm.md §5.1）。
 11. 钉住的 `deploy_on_push` / `publish.confirm` / `publish.push` 写在配置目录的文件里，不写进 store（Addendum 5 的 T13 条）。调松要 `Action::ConfigRelax { repo: RepoId }`，该变体由 Task 15 加进 types.md，本文不定义。
 12. `Store::close(self)` 吃掉 `Store`。daemon 先停掉自己持有的全部 `Arc<Store>` 使用者，再 close。`Store::open` 自己看 `store/clean-shutdown`：标记不在就跑 `quick_check`，失败返回 `Corrupt`，daemon 不听 socket。daemon 不另建干净标记，启动时不调用 `quick_check`。人要的那次只走 `daemon_status` 的 `verify: true`。
@@ -142,8 +142,12 @@ pub const RECONCILE_EVERY: Duration = Duration::from_secs(3600);
 /// gc 的保留期（design §7 交给构建者）[我的决定 D5]。
 pub const GC_KEEP: Duration = Duration::from_secs(14 * 24 * 3600);
 
-/// D1。install 与 checks 的 PATH。配置以后可以覆盖，缺省用这一条。
+/// D1 的系统部分。配置以后可以覆盖。
 pub const DEFAULT_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+
+/// D1。install 与 checks 的 PATH，也是 plist 里的 PATH：`<home>/.bun/bin:` 加 DEFAULT_PATH。
+/// cli 的只读计算（toolchain 行）用同一条，按 `$HOME` 算 [实现时补的决定]。
+pub fn install_path_for_home(home: &Path) -> String;
 
 /// RPC 层的拒绝。不是 Code。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,7 +269,7 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>StandardErrorPath</key>
   <string>HOME/Library/Application Support/git-strata/daemon.err.log</string>
@@ -846,7 +850,7 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 
 | 决定 | 选择 | 理由 | 日期 |
 | --- | --- | --- | --- |
-| D1 显式 PATH | `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` | launchd 没有用户 PATH。这台机器的 bun 与 git 在 Homebrew。`~/.bun/bin` 与 `~/.cargo/bin` 不在缺省里；staff-api 的 php 在配置里写绝对路径。配置以后可以覆盖 | 2026-10-23 |
+| D1 显式 PATH | `HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` | launchd 没有用户 PATH。git 与 cargo（含 clippy、rustfmt，与 rustup 同版本）在 Homebrew；bun 不在 Homebrew，在 `~/.bun/bin`（2026-10-26 真机安装时改正：原先写「bun 在 Homebrew」不对，第一次 `new` 因此失败）[实现时补的决定]。`~/.cargo/bin` 仍不在里面；fvm 的 Flutter、staff-api 的 php 在配置里写绝对路径。配置以后可以覆盖 | 2026-10-23；2026-10-26 改 |
 | D2 影子仓库漂移只报告 | 不重钉 `hooksPath`，不要求 gitio 加函数 | gitio @1cd5ac5 写明不修。重钉会与 husky / lefthook 对打，并且要往活的影子仓库写。status 已有 `MirrorDrift` | 2026-10-23 |
 | D3 帧上限 | 16 MiB，超过 → `TooLarge` | types.md 把帧上限指给 daemon，又不许加码。16 MiB 装得下一次大的 diff，又挡得住不换行的灌入 | 2026-10-23 |
 | D4 params 未知字段 | RPC `Failed` | 打错的字段若被忽略，cli 与 daemon 会各跑各的。冻结表的字段就这些 | 2026-10-23 |

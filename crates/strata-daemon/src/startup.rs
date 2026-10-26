@@ -31,7 +31,7 @@ use strata_types::{CheckpointReason, Code, Config, RepoId, RepoName, StrataError
 use crate::confirm_flow::{self, Pins};
 use crate::locks::Locks;
 use crate::rpc::{self, Reply, Request};
-use crate::{DEFAULT_PATH, DaemonWarning, PinnedFlags, GC_KEEP, LOCK_WAIT, MAX_FRAME, Result};
+use crate::{DaemonWarning, PinnedFlags, GC_KEEP, LOCK_WAIT, MAX_FRAME, Result};
 
 /// Where the daemon keeps its files, and the knobs tests turn.
 #[derive(Clone)]
@@ -45,7 +45,8 @@ pub struct Options {
     pub socket: PathBuf,
     /// [`LOCK_WAIT`] in production.
     pub lock_wait: Duration,
-    /// The explicit PATH installs and checks run with ([`DEFAULT_PATH`]).
+    /// The explicit PATH installs and checks run with
+    /// ([`install_path_for_home`](crate::install_path_for_home)).
     pub install_path: String,
     /// One line for the human (stderr in production).
     pub alert: Arc<dyn Fn(&str) + Send + Sync>,
@@ -63,7 +64,7 @@ impl Options {
             socket: crate::socket_path(&dir),
             config_dir: dir,
             lock_wait: LOCK_WAIT,
-            install_path: DEFAULT_PATH.to_string(),
+            install_path: crate::install_path_for_home(home),
             alert: Arc::new(|line: &str| eprintln!("git-stratad: {line}")),
             reconcile_every: crate::RECONCILE_EVERY,
         }
