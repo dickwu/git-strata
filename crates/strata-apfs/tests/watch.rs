@@ -706,6 +706,7 @@ fn reentry_drop_round() -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
         }
     }
     assert!(wait_until(Duration::from_secs(5), || drops.load(Ordering::SeqCst) == 1), "state never freed");
+    eprintln!("{TICK}");
     (calls, drops)
 }
 
@@ -804,7 +805,11 @@ fn reentry_cross() {
     assert!(ok.load(Ordering::SeqCst), "B's callback was not running when A flushed/dropped it");
     assert!(wait_until(Duration::from_secs(5), || b_drops.load(Ordering::SeqCst) == 1), "B's state never freed");
     drop(a);
+    eprintln!("{TICK}");
 }
+
+/// Printed on stderr by the child after every finished round.
+const TICK: &str = "reentry-child: tick";
 
 #[test]
 #[ignore = "child process of watcher_reentry_from_the_callback_never_traps"]
@@ -831,6 +836,7 @@ fn watcher_reentry_child_body() {
     // (b) flush of one's own watcher from its callback.
     reentry_flush_own();
     eprintln!("reentry-child: (b) done at {:?}", t0.elapsed());
+    eprintln!("{TICK}");
     // (c) cross-watcher flush + drop from a callback, 20 rounds, 10 at a time.
     for _ in 0..2 {
         let hs: Vec<_> = (0..10).map(|_| thread::spawn(reentry_cross)).collect();
@@ -856,23 +862,53 @@ fn watcher_reentry_from_the_callback_never_traps_body() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    // Deadlock detector, not a performance bound: right after the other test
-    // binaries fseventsd delivery lags for seconds (phase (a) took 14.6 s).
-    let end = Instant::now() + Duration::from_secs(60);
+    // Deadlock detector, not a performance bound. The child prints a tick
+    // after every round; it is killed only when no round finishes for
+    // STALL. A wall-clock cap misfired: under heavy machine load (load
+    // average ~76 from parallel builds) each FSEvents stream's
+    // create/first-delivery/teardown takes long enough that the healthy
+    // child needs 94–122 s, daemon running or not; a trap or hang in a
+    // callback still stops the ticks.
+    const STALL: Duration = Duration::from_secs(60);
+    const CAP: Duration = Duration::from_secs(900);
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let collect = |r: Box<dyn std::io::Read + Send>, ticks: Option<Arc<AtomicUsize>>| {
+        thread::spawn(move || {
+            use std::io::BufRead;
+            let mut all = String::new();
+            for line in std::io::BufReader::new(r).lines().map_while(Result::ok) {
+                if line == TICK
+                    && let Some(t) = &ticks
+                {
+                    t.fetch_add(1, Ordering::SeqCst);
+                }
+                all.push_str(&line);
+                all.push('\n');
+            }
+            all
+        })
+    };
+    let out_h = collect(Box::new(child.stdout.take().unwrap()), None);
+    let err_h = collect(Box::new(child.stderr.take().unwrap()), Some(ticks.clone()));
+    let start = Instant::now();
+    let (mut seen, mut last) = (0, Instant::now());
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {
             break s;
         }
-        if Instant::now() > end {
+        let n = ticks.load(Ordering::SeqCst);
+        if n != seen {
+            (seen, last) = (n, Instant::now());
+        }
+        if last.elapsed() > STALL || start.elapsed() > CAP {
             let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            panic!("child timed out (deadlock?)\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            let _ = child.wait();
+            let (o, e) = (out_h.join().unwrap(), err_h.join().unwrap());
+            panic!("child made no progress for {:?} after {seen} rounds, {:?} in (deadlock?)\n{o}\n{e}", last.elapsed(), start.elapsed());
         }
         thread::sleep(Duration::from_millis(50));
     };
-    let out = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let (stdout, stderr) = (out_h.join().unwrap(), err_h.join().unwrap());
     use std::os::unix::process::ExitStatusExt;
     assert_ne!(status.code(), Some(133), "dispatch trap\n{stderr}");
     assert!(status.signal().is_none(), "child killed by signal {:?}\n{stderr}", status.signal());

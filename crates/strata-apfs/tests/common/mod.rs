@@ -193,12 +193,7 @@ pub fn fill_until_enospc(dir: &Path) -> PathBuf {
         }
     }
     let small = vec![1u8; 4096];
-    loop {
-        match f.write_all(&small) {
-            Ok(()) => {}
-            Err(_) => break,
-        }
-    }
+    while f.write_all(&small).is_ok() {}
     let _ = f.sync_all();
     p
 }

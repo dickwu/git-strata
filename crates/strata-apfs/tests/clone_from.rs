@@ -143,7 +143,8 @@ fn clone_from_rooted_checks_the_source_kind() {
     symlink("dir", root.join("ldir")).unwrap();
     symlink("nope", root.join("ldangle")).unwrap();
     use CloneKind::*;
-    let rows: &[(&str, CloneKind, Option<(Code, Option<&str>)>)] = &[
+    type Row<'a> = (&'a str, CloneKind, Option<(Code, Option<&'a str>)>);
+    let rows: &[Row] = &[
         ("file", File, None),
         ("dir", File, Some((Code::IsDirectory, None))),
         ("fifo", File, Some((Code::NotFile, Some("fifo")))),

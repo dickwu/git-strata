@@ -141,8 +141,8 @@ fn remove_tree_rooted_takes_any_entry_kind() {
             chflags(p, "uchg");
         }), 1),
         ("dangling", Box::new(|p| symlink("nope", p).unwrap()), 0),
-        ("fifo", Box::new(|p| make_fifo(p)), 0),
-        ("sock", Box::new(|p| make_socket(p)), 0),
+        ("fifo", Box::new(make_fifo), 0),
+        ("sock", Box::new(make_socket), 0),
         ("emptydir", Box::new(|p| fs::create_dir(p).unwrap()), 0),
     ];
     let out_before = snapshot(&outside.path);
@@ -297,13 +297,13 @@ fn attrs(p: &Path) -> Vec<(PathBuf, u32, u32, i128)> {
     fn go(base: &Path, p: &Path, out: &mut Vec<(PathBuf, u32, u32, i128)>) {
         out.push((p.strip_prefix(base).unwrap().to_path_buf(), mode_of(p), flags_of(p), mtime_ns(p)));
         let m = fs::symlink_metadata(p).unwrap();
-        if m.is_dir() {
-            if let Ok(rd) = fs::read_dir(p) {
-                let mut v: Vec<_> = rd.map(|e| e.unwrap().path()).collect();
-                v.sort();
-                for c in v {
-                    go(base, &c, out);
-                }
+        if m.is_dir()
+            && let Ok(rd) = fs::read_dir(p)
+        {
+            let mut v: Vec<_> = rd.map(|e| e.unwrap().path()).collect();
+            v.sort();
+            for c in v {
+                go(base, &c, out);
             }
         }
     }
