@@ -7,7 +7,7 @@ is not running.
 
 | Command | Arguments and flags | Human | No daemon | `data` on success |
 | --- | --- | --- | --- | --- |
-| `new [TICKET]` | `--ticket <T>` (same as positional), `--repos <A,B>` (required) | no | no | `{manifest:{id,ticket?,root,repos:{<repo>:{base,head,path,tracked}}},warnings:[]}` |
+| `new [TICKET]` | `--ticket <T>` (same as positional), `--repos <A,B>` (required; the tracked repos; every configured repo still gets a workspace) | no | no | `{manifest:{id,ticket?,root,repos:{<repo>:{base,head,path,tracked}}},warnings:[]}` |
 | `status` | `--session <S>` or `--all` (default: cwd's session) | no | yes | `SessionStatus`; `--all`: `{sessions:[...]}` |
 | `checkpoint` | exactly one of `--tool-call [ID]` (no ID: hook JSON `tool_use_id`) / `-m, --message <MSG>`; `--session <S>`; `--path <P>` (repeatable) | no | repeat of an existing `--tool-call` only | `{checkpoints:[Checkpoint,...]}` |
 | `restore <CHECKPOINT> [PATHS]...` | `--session <S>` | no | no | `{checkpoint,session}` |
@@ -39,9 +39,13 @@ ticket. Without it, the session comes from the cwd.
 Fixed `detail.reason` values produced by the CLI: `daemon_down`,
 `socket_closed`, `both_selectors`, `checkpoint_reason`, `diff_mode`,
 `no_batch`, `no_choice`, `both_choices`, `not_ancestor`, `no_plist`,
-`unknown_command` (with `detail.commands`), `rpc_id`, `unknown_method`,
+`unknown_command` (with `detail.commands`), `args`, `repos`, `ticket`,
+`assign_with_from`, `pick`, `stdin`, `not_tty` (code `NotTty`, with
+`detail.command`), `push_unknown`, `launchctl`, `rpc_id`, `unknown_method`,
 `rpc_failed`, `readonly_client`. From publish: `assigned`, `chain_rewound`,
-`chain_diverged`, `workspace_changed`; from deps: `main_moved`.
+`chain_diverged`, `workspace_changed`, `plan_changed`; from deps:
+`main_moved`; from `config relax`: `not_relaxed`; from the push guard:
+`url-rewritten`, `url-is-remote-name`, `empty-url`, `no-such-remote`.
 
 The closed set of `error.code` values (types.md): Conflict, HeadMoved, Dirty,
 Busy, NoSuchPath, NoSuchBranch, NoSuchCommit, NoCommit, NoMergeBase,
