@@ -23,8 +23,13 @@ same binary. Full command and flag table: [reference.md](reference.md).
 
 - `git-strata` is on `PATH`. The config lives in
   `~/Library/Application Support/git-strata/config.toml`; the daemon socket is
-  `~/Library/Application Support/git-strata/daemon.sock` (no env var or flag
-  changes either).
+  `~/Library/Application Support/git-strata/daemon.sock`, the pinned safety
+  flags `~/Library/Application Support/git-strata/pins.json` (no env var or
+  flag changes them; only `$HOME` does). Workspaces live under the data root
+  (`[paths] root`, default `/Volumes/GWD/inter/.strata`) as
+  `<root>/sessions/<session-id>/<repo>/`.
+- The daemon reads `config.toml` only at start; a config change needs
+  `git-strata daemon stop` then `git-strata daemon start`.
 - Write commands need the daemon. Check with `git-strata daemon status`
   (`data.running`). Start it with `git-strata daemon start` (loads the per-user
   LaunchAgent `com.gwd.git-stratad`; `data.already = true` if it was up). If
@@ -38,7 +43,9 @@ same binary. Full command and flag table: [reference.md](reference.md).
 ## Workflow
 
 ```sh
-# 1. New session over one or more configured repos (ticket is just a label)
+# 1. New session (ticket is just a label). Every configured repo gets a
+#    workspace; --repos (required) picks the TRACKED ones: only those are
+#    checkpointed and published. Do not edit untracked siblings.
 git-strata new PROJ-123 --repos tool,hr-core
 #    data.manifest.id                  -> session id, e.g. "s-k3q7xm2a"
 #    data.manifest.repos.<repo>.path   -> that repo's workspace directory
@@ -191,7 +198,8 @@ All three keys are always present; `data` is never null. Branch on
 | `Conflict` (`assigned`) | The path is assigned to another session; only that session may publish it. Do not retry from yours. |
 | `NoCommit` | Nothing new to commit or push. Not a failure to fix. |
 | `NoMatch` | A `--from` path is not in the session's checkpoint; checkpoint first. |
-| `Dirty` | `rm` without `--discard` on unpublished work. Publish it, or ask the human about `rm --discard`. |
+| `Dirty` | `rm` without `--discard` on unpublished work (`detail.repos`; edited untracked siblings in `detail.untracked_repos`). Publish it, or ask the human about `rm --discard`. |
+| `InvalidInput` (`url-rewritten`, `url-is-remote-name`, `empty-url`, `no-such-remote`) | git-strata's push refused before sending: origin's push URL is rewritten or ambiguous in the main checkout's git config. Tell the human; do not edit git config. |
 | `OpenFiles` | A process holds files in the directory (`detail` has pids). Stop it (only if you started it) and retry. |
 | `CheckFailed` | The repo's check failed in staging; fix the code, checkpoint, publish again. |
 | `CheckMutates` | Configured check writes files; config problem, tell the human. |
@@ -212,19 +220,33 @@ All three keys are always present; `data` is never null. Branch on
      `publish.confirm` is true; `deploy_on_push` alone does not gate, so e.g.
      staff-api with `confirm = false` publishes and pushes headless)
    - `git-strata publish` when it pushes to a repo that needs confirmation
+   A repo needs confirmation when `publish.confirm` is true (the pinned
+   flag in `pins.json` ORed with `config.toml`); `deploy_on_push` is
+   information only. A publish into
+   a repo with `publish.push = false` is never gated; only its later `push`
+   is. Loosening the config needs a daemon restart plus the human's
+   `config relax` (until then `daemon status` alerts `ConfigRelaxPending`).
+   Full rule: README.md "Confirmation gate (Touch ID / TTY)".
    - `git-strata config relax <REPO>`
    - `git-strata resolve --session S --repo R --abandon|--accept`
    - `git-strata chain --repo R --accept-origin replay|drop` or `--restore`
 2. Never edit `.strata/`, base snapshots, dependency-set caches, or anything
    under the git-strata root other than your own session workspace.
 3. Never run `git push` (or `git commit` / ref updates on the main checkout).
-   Commits come from `publish`; pushes from `git-strata push` / publish.
+   Commits come from `publish`; pushes from `git-strata push` / publish. A
+   workspace's pre-push hook refuses `git push` anyway ("push refused in a
+   strata workspace; publish with git-strata publish").
 4. Do not push unless the human asked for it.
 5. After `Unknown`, do not replay, `gc` or `rm`; leave the scene for the human.
    A standalone `push` that ends `Unknown` keeps its staging directory
    (`error.detail.scene`) and `daemon status` lists it as `UnknownPush`,
    also after a restart, until a later definite push of the chain settles it.
 6. Only work in your own session; use `--session` / `--all` to read others.
+7. Seed files (`.env`, `.env.local`, ...) are cloned from the main checkout
+   and kept current by the daemon while you leave them untouched. Never
+   print, `cat`, log, `git add` or commit them; they are gitignored and never
+   checkpointed or published. An edited copy is not refreshed (`status`
+   warns `SeedStale`). README.md "Seed files (.env)".
 
 ## Troubleshooting
 

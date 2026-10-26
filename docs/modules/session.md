@@ -610,6 +610,7 @@ design §6.1 第 2 步把接法交给构建者；增补 2 定为影子仓库，g
 - **阶段**：`new`、`remove` 经 `set_session_phase` 记在会话行上，移动经 `set_move_phase` 记在意图行上；词汇见 §6.3。
 - **现场**：`Scene`（§3）序列化成 JSON，进入 `Unknown` 时交给 `set_lifecycle` 或 `fail_move`；store 只核对它是 JSON。
 - **种子**：`record_seeds` 在会话为 `Creating` 时每个工作区写一次，每个路径一行（`SeedRow` ↔ `SeedRecord`）。
+- **种子刷新** [实现时补的决定]（2026-10-26，peilin："需要支持在各个 worktree 内保持 .env 文件"）：`Sessions::refresh_seeds(id)`（只读的 `seeds_due(id)` 先判定）让未被改过的种子副本跟随主 checkout。只对 Active 会话、健康 `Ok` 的工作区、普通文件种子（链接种子不刷新）。判定：副本 lstat 是普通文件，且其（mtime, size）等于 strata 上次写下的（有 xattr `dev.git-strata.seed` = `v1 <mtime_ns> <size>` 就用它，否则用种子行的 source_mtime/size）；来源的（mtime, size）与之不同；工作区里仍被 ignore。做法：`clone_file_rooted` 克隆到布局根下的 `.strata-tmp-seed-*`，写 xattr，`rename_rooted(.., Swap)` 换进去；换出来的旧副本若（mtime, size）或 inode 已变（换之前被改了），再换回去、删暂存，不覆盖。种子行不可变（`seeds_no_update`）且 schema 无迁移，所以"上次写下的"记在 xattr 里，不改 store；`status` 的 `SeedStale` 也对着它比。内容从不读出、不记日志；种子仍在 overlay 排除集合里，不 checkpoint、不发布。daemon 的对账线程每 `SEED_REFRESH_EVERY`（2 s）对每个会话先 `seeds_due`，有事才 `Locks::try_session`（不等，占不上下一轮再来）。
 - **清单**：`SessionManifest` 由会话行与工作区行拼成。按 types.md §4 末段，创建时间与状态不在清单里，由 `status` 报出。
 - **引用**：没删除的会话，其工作区行引用各自的 `BaseGen`；store 的 gc 从不回收被引用的 generation（store.md §5.11 守卫 (c)），所以 `create_session` 之后基线目录不会在克隆途中消失（§5.1 第 13 步）。
 

@@ -9,6 +9,7 @@ pub mod confirm;
 pub mod ctx;
 pub mod env;
 pub mod envelope;
+mod help;
 pub mod launch;
 pub mod local;
 pub mod ro;
