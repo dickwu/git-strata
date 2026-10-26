@@ -234,6 +234,30 @@ pub const PUBLISH_AFTER: &str = concat!(
 
 Agents always pass --from SESSION:PATH (repo path, or a directory). Without
 --from it is interactive on a TTY and InvalidInput no_batch otherwise.
+In zsh write \"${S}:path\", not \"$S:path\" ($S:t, $S:h, ... are modifiers).
+
+--FROM PATHS
+  PATH is relative to the repo root, with no repo prefix:
+  staff-api/app/x.php in session S is --from S:app/x.php. The repo is the
+  workspace that has PATH (on disk or in its base). Path errors come before
+  any TTY check and send nothing:
+  InvalidInput from_syntax       no ':', empty session, not a repo path
+  InvalidInput from_repo_prefix  PATH starts with a repo name; rerun with
+                                 error.detail.expected
+  InvalidInput from_path         no workspace has PATH (detail.repos)
+  AmbiguousMatch from_repo       several do (detail.candidates)
+
+DURATION
+  The reply comes after checks, commit, push and the rebase of every session.
+  git push waits for the remote to close (its hooks included; bounded at
+  120 s, then Unknown push_unknown); the rebase is not bounded. Silence for a
+  minute or two after the remote branch moved is normal: wait for the JSON
+  line, do not interrupt or rerun.
+
+RELEASE BUILDS
+  Not from a workspace (no remotes, detached HEAD, push guard). Publish and
+  push, then in the main checkout: git pull --ff-only, check HEAD equals
+  data.commits.<repo>, run the build there. See README.md.
 
 DATA
   {commits:{<repo>:oid}, checks_ran, waiting:[], pushes:[{repo, outcome}],
