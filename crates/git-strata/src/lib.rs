@@ -136,6 +136,7 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Deps(DepsCmd::Propose { session, repo, switch }) => cmds::deps_propose(&ctx, session, repo, switch),
         Cmd::Deps(DepsCmd::List { repo }) => cmds::deps_list(&ctx, repo),
         Cmd::Gc => cmds::gc(&ctx),
+        Cmd::Du { refresh } => cmds::du(&ctx, refresh),
         Cmd::Daemon(DaemonCmd::Start) => launch::start(&ctx.paths.home),
         Cmd::Daemon(DaemonCmd::Stop) => launch::stop(),
         Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status(),

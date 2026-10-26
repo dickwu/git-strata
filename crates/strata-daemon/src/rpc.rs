@@ -23,7 +23,7 @@ use crate::{ChainChoice, MAX_FRAME, RpcReject};
 
 macro_rules! methods {
     ($($variant:ident = $name:literal, ro = $ro:literal;)*) => {
-        /// The 19 methods (daemon.md §4).
+        /// The 21 methods (daemon.md §4).
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub enum Method { $($variant),* }
 
@@ -68,6 +68,7 @@ methods! {
     ChainResolve = "chain_resolve", ro = false;
     ConfigRelax = "config_relax", ro = false;
     DaemonStatus = "daemon_status", ro = true;
+    Du = "du", ro = true;
 }
 
 /// A field that must be present but may be `null` (a missing one is
@@ -249,6 +250,14 @@ pub struct DaemonStatusParams {
     pub verify: bool,
 }
 
+/// `du` (§5.12): `refresh` re-sizes every unit in the background.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DuParams {
+    #[serde(default)]
+    pub refresh: bool,
+}
+
 /// The typed params of one request.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Params {
@@ -272,6 +281,7 @@ pub enum Params {
     ChainResolve(ChainResolveParams),
     ConfigRelax(RepoParams),
     DaemonStatus(DaemonStatusParams),
+    Du(DuParams),
 }
 
 fn typed<T: DeserializeOwned>(v: Value, wrap: fn(T) -> Params) -> Result<Params, String> {
@@ -312,6 +322,7 @@ impl Params {
             Method::ChainResolve => typed(v, Params::ChainResolve),
             Method::ConfigRelax => typed(v, Params::ConfigRelax),
             Method::DaemonStatus => typed(v, Params::DaemonStatus),
+            Method::Du => typed(v, Params::Du),
         }
     }
 }

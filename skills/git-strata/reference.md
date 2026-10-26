@@ -21,7 +21,8 @@ is not running.
 | `push <REPO>` | — | when the repo needs confirmation | no | `PushOutcome` `{kind,message}`; for a repo without confirmation also `commit`, `replayed` (`{from,to,onto,commits,checks_ran}` or null), `rebases`, `warnings`: it fetches and replays a diverged chain onto origin first (`Conflict` `replay_conflict` / `CheckFailed` / `replay_deps_unsealed`: nothing written or pushed) |
 | `assign` | `--file <PATH> --session <S>` (both required) | no | no | `{}` |
 | `rm` | `--session <S>` (required), `--discard` | `--discard`: yes + confirm | no | `RemoveReport` |
-| `gc` | — | no | no | `{}` |
+| `gc` | — (also empties `store/trash` entries older than 1 h that nothing names; refused/stuck on stderr) | no | no | `{}` |
+| `du` | `--refresh` (re-size everything in the background; returns at once) | no | no | `{root,now,total,store{all,db,blobs,tmp,other,trash{...,entries,eligible{entries,reclaim_min,reclaim_max},young,floor_secs,gc}},bases{all,repos},deps{all,repos},sessions{all,list[{session,savings,...}]},savings{live,cumulative},scan{running,started,done,queued,full,failed,last_full},took_ms}`; every figure `{logical,allocated,private,shared,files,exact,errors,units,stale,pending,complete,as_of}` |
 | `daemon start` / `daemon stop` | — | no | yes (uses launchd, not the socket) | `{}` or `{already:true}` |
 | `daemon status` | — | no | yes | `{running,socket,session?,holders:[],unknown_publishes:[],alerts:[]}` |
 | `resolve` | `--session <S> --repo <R>` + exactly one of `--abandon` / `--accept` | yes | no | `ResolutionReport` |
@@ -55,3 +56,17 @@ Exists, NotEmpty, NameTaken, ReservedName, ReadOnly, TooLarge, InvalidInput,
 NoSuchSession, NoSuchRepo, NoSuchCheckpoint, NoSuchProposal, NoSuchView,
 NotConfirmed, NotTty, OpenFiles, CrossVolume, Drift, CheckFailed,
 CheckMutates, PushRefused, Unknown, Unsupported, Corrupt.
+
+## `du` figures
+
+Read-only, from the daemon's cache (about 1 s). `as_of` is when a figure was
+measured; `stale` / `pending` count units being re-sized in the background.
+`logical` = file lengths; `allocated` = blocks per file (a shared clone extent
+counts once per file); `private` = blocks only that file owns (APFS private
+size); `shared` = allocated - private. A unit's real cost lies between
+`private` and `allocated`; freeing it may free less if a base or another
+session shares its blocks, and Time Machine snapshots can hold freed blocks.
+`savings.live` = logical - private of live sessions; `savings.cumulative`
+counts only sessions recorded since `since` (earlier: unknown).
+`store.trash.eligible` is what `git-strata gc` would try to delete; agents do
+not run `gc` unless asked.

@@ -1130,3 +1130,54 @@ fn standalone_push_refuses_a_url_rewritten_while_staging() {
     drop(d);
     core.close().unwrap();
 }
+
+/// §5.12: `du` answers from the cache, sizes a new session in the
+/// background, records it at new/rm; the global `gc` empties old,
+/// unreferenced store/trash entries and keeps young ones.
+#[test]
+fn du_sizes_sessions_records_new_and_rm_and_gc_empties_trash() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let root = fx.config.paths.root.clone();
+    let trash = root.join("store/trash");
+    fs::create_dir_all(&trash).unwrap();
+    let old = trash.join(format!("1000-{}", "0".repeat(32)));
+    fs::create_dir_all(old.join("x")).unwrap();
+    fs::write(old.join("x/f"), vec![7u8; 100_000]).unwrap();
+    serving(&d, || {
+        let id = new_session(&sock);
+        let wait_idle = || {
+            wait_for("du pass", || {
+                let r = ok(call(&sock, "du", json!({})));
+                !r["scan"]["running"].as_bool().unwrap() && r["scan"]["queued"] == json!(0) && r["store"]["all"]["pending"] == json!(0)
+            })
+        };
+        ok(call(&sock, "du", json!({ "refresh": true })));
+        wait_idle();
+        let r = ok(call(&sock, "du", json!({})));
+        let list = r["sessions"]["list"].as_array().unwrap();
+        let s = list.iter().find(|s| s["session"] == json!(id.as_str())).unwrap_or_else(|| panic!("{r:#}"));
+        assert!(s["logical"].as_u64().unwrap() > 0, "{s}");
+        assert!(s["as_of"].is_string());
+        let t = &r["store"]["trash"];
+        assert!(t["eligible"]["entries"].as_u64().unwrap() >= 1, "{t}");
+        assert!(t["eligible"]["reclaim_max"].as_u64().unwrap() >= 100_000, "{t}");
+        assert_eq!(t["gc"], json!("git-strata gc"));
+        assert_eq!(r["savings"]["cumulative"]["sessions"], json!(1), "{r:#}");
+
+        ok(call(&sock, "rm", json!({ "session": id, "discard": false })));
+        let r = ok(call(&sock, "du", json!({})));
+        assert!(r["sessions"]["list"].as_array().unwrap().iter().all(|s| s["session"] != json!(id.as_str())), "{r:#}");
+        assert_eq!(r["savings"]["cumulative"]["removed"], json!(1), "{r:#}");
+
+        let g = ok(call(&sock, "gc", json!({ "repo": null })));
+        assert!(g["trash"]["removed"].as_u64().unwrap() >= 1, "{g:#}");
+        assert!(!old.exists());
+        let g = ok(call(&sock, "gc", json!({ "repo": "tool" })));
+        assert_eq!(g["trash"], Value::Null, "a repo gc leaves trash alone");
+    });
+    drop(d);
+    core.close().unwrap();
+}

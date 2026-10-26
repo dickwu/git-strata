@@ -741,7 +741,24 @@ pub fn gc(ctx: &Ctx) -> Result<Envelope> {
     for s in v["skipped"].as_array().into_iter().flatten() {
         eprintln!("gc skipped: {s}");
     }
+    let t = &v["trash"];
+    if t.is_object() {
+        eprintln!("gc trash: removed {} young {}", t["removed"], t["young"]);
+        for p in t["refused"].as_array().into_iter().flatten() {
+            eprintln!("gc trash refused (still referenced): {p}");
+        }
+        for p in t["stuck"].as_array().into_iter().flatten() {
+            eprintln!("gc trash stuck: {p}");
+        }
+    }
     Ok(Envelope::ok(json!({})))
+}
+
+// ---- du -------------------------------------------------------------------------------
+
+/// §5.12: the daemon's cached sizes; `refresh` starts a full background pass.
+pub fn du(ctx: &Ctx, refresh: bool) -> Result<Envelope> {
+    Ok(Envelope::ok(ctx.call("du", json!({ "refresh": refresh }), Kind::Read)?))
 }
 
 // ---- daemon status ----------------------------------------------------------------------

@@ -98,11 +98,11 @@ fn method_table_has_the_twenty_names() {
         [
             "new", "status", "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_approve",
             "deps_list", "publish", "publish_plan", "push", "assign", "rm", "gc", "resolve_move", "chain_resolve", "config_relax",
-            "daemon_status"
+            "daemon_status", "du"
         ]
     );
     let ro: Vec<&str> = Method::ALL.iter().filter(|m| m.is_read_only()).map(|m| m.name()).collect();
-    assert_eq!(ro, ["status", "grep", "files", "diff", "deps_list", "publish_plan", "daemon_status"]);
+    assert_eq!(ro, ["status", "grep", "files", "diff", "deps_list", "publish_plan", "daemon_status", "du"]);
     for m in Method::ALL {
         assert_eq!(Method::from_name(m.name()), Some(*m));
     }
@@ -188,6 +188,7 @@ fn every_method_parses_its_documented_params() {
         ("chain_resolve", json!({ "repo": "tool", "choice": "AcceptOriginDrop" })),
         ("config_relax", json!({ "repo": "tool" })),
         ("daemon_status", json!({})),
+        ("du", json!({ "refresh": true })),
     ];
     assert_eq!(cases.len(), Method::ALL.len());
     for (m, p) in cases {

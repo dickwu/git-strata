@@ -277,3 +277,6 @@ All three keys are always present; `data` is never null. Branch on
 - `status` shows health `Unknown` with `choices: ["abandon","accept"]`: a move
   failed midway; this is the human's `git-strata resolve`.
 - Unexpected command error: `git-strata <cmd> --help` shows the real flags.
+- Disk space questions: `git-strata du` (read-only, cached, each figure has
+  `as_of`); `du --refresh` re-sizes in the background. `store.trash.eligible`
+  is what `git-strata gc` could reclaim; run `gc` only when the human asks.

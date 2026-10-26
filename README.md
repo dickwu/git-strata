@@ -27,6 +27,7 @@ Design documents (Chinese) are in [docs/](docs/README.md); the agent skill is
 - [Confirmation gate (Touch ID / TTY)](#confirmation-gate-touch-id--tty)
 - [Push guards](#push-guards)
 - [Error codes and what to do](#error-codes-and-what-to-do)
+- [Disk usage (`du`)](#disk-usage-du)
 - [Commands](#commands)
 
 ## Install and daemon
@@ -427,6 +428,40 @@ NoSuchRepo, NoSuchCheckpoint, NoSuchProposal, NoSuchView, NotConfirmed,
 NotTty, OpenFiles, CrossVolume, Drift, CheckFailed, CheckMutates,
 PushRefused, Unknown, Unsupported, Corrupt.
 
+## Disk usage (`du`)
+
+`git-strata du` reports the data root's size from the daemon's cache in about
+a second; `git-strata du --refresh` re-sizes everything in the background
+(poll `du` until `data.scan.running` is false). Every figure carries `as_of`
+(when it was measured) plus `stale` / `pending` unit counts. Read-only; needs
+the daemon.
+
+Groups: `store` (`db` = store.db + -wal/-shm, sized every call; `blobs`, `tmp`,
+`trash`, `other`), `bases.repos.<repo>`, `deps.repos.<repo>`,
+`sessions.list[]` (workspaces + shadow repos). Each has `logical` (file
+lengths), `allocated` (blocks per file; a shared clone extent counts once per
+file that has it), `private` (APFS private size: blocks only that file owns)
+and `shared` = allocated - private.
+
+Accuracy: a unit's real cost is between `private` and `allocated`. Two clones
+of the same data both show the shared extent in `allocated` and neither in
+`private`, so summing `private` undercounts data shared only between units
+(e.g. a session and its base) and summing `allocated` overcounts it. APFS has
+no public API for "bytes freed if I delete this tree". Snapshots (Time
+Machine) can keep freed blocks; `du` does not see them. `exact: false` means
+the volume gave no private size (`private` = `allocated`).
+
+Savings: `savings.live` is logical - private of live sessions (what plain
+copies would have cost on top). `savings.cumulative` sums sessions recorded at
+`new`/`rm` since `since` (`<root>/daemon/du/sessions.jsonl`); sessions from
+before are `unknown`.
+
+Trash: `store.trash.eligible` = entries older than 1 h, with
+`reclaim_min`..`reclaim_max` (private..allocated). `git-strata gc` deletes
+them, except entries a session, workspace, deps staging, move intent,
+alternates file or worktree link still names (reported as refused on
+stderr). Before 2026-10-26 nothing emptied `store/trash`.
+
 ## Commands
 
 Flags, defaults and `data` shapes:
@@ -449,6 +484,7 @@ Flags, defaults and `data` shapes:
 | `assign --file PATH --session S` | no |
 | `rm --session S [--discard]` | `--discard` only |
 | `gc` | no |
+| `du [--refresh]` | no |
 | `daemon start \| stop \| status` | no |
 | `resolve --session S --repo R (--abandon \| --accept)` | yes |
 | `chain --repo R (--accept-origin replay\|drop \| --restore)` | yes |

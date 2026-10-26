@@ -65,6 +65,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata assign` | `assign` | 否 | 否 |
 | `git-strata rm` | `rm` | `--discard` 时是 | `RemoveDiscard` |
 | `git-strata gc` | `gc` | 否 | 否 |
+| `git-strata du [--refresh]` | `du` | 否 | 否 |
 | `git-strata daemon start` | — | 否 | 否 |
 | `git-strata daemon stop` | — | 否 | 否 |
 | `git-strata daemon status` | `daemon_status` | 否 | 否 |
@@ -97,11 +98,12 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata assign` | `--file PATH --session S`。PATH 是 `RepoPath`。不需要确认（design §6.9） | 缺一 → `InvalidInput` |
 | `git-strata rm` | `--session S` `[--discard]`。`--discard` 会丢掉未发布改动，所以要确认 | 不给会话 → `InvalidInput` |
 | `git-strata gc` | 无 | — |
+| `git-strata du` | `--refresh` | 缺省 false：只返回缓存，过期的单元在后台重算；true：后台把全部单元重算一遍，立即返回 |
 | `git-strata resolve` | `--session S --repo R`，以及 `--abandon` 与 `--accept` 恰好一个。没有缺省 | 缺选择、或两个都给 → `InvalidInput`，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接 |
 | `git-strata chain` | `--repo R`，以及恰好一个：`--accept-origin replay`、`--accept-origin drop`、`--restore`。没有缺省。`--restore` 在 `!is_ancestor(o, c)` 时不连接、不推 | 缺选择、或两个都给 → `InvalidInput`，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接。不能快进 → `InvalidInput`，`detail.reason = "not_ancestor"`，在任何 push 之前 |
 | `git-strata config relax` | `<repo>` | 未知 repo 透传 `NoSuchRepo`。文件变了不会自己跑这条命令 |
 
-未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`files`、`gc`、`grep`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`status`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
+未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`status`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
 
 `-h` / `--help` 与 `--version` 走 clap 的文本，打在 stdout，退出码 0。它们不是子命令，不套信封（D19）。除此之外，stdout 上只有信封。
 
@@ -125,7 +127,8 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `push` | `PushOutcome`（`kind` + `message`）。`Refused` 不在成功里出现，publish 已把它转成 `PushRefused` | — |
 | `assign` | `{}` | — |
 | `rm` | `RemoveReport` | — |
-| `gc` | `{}` | — |
+| `gc` | `{}` | daemon 回复里的 `skipped` 与 `trash`（`removed`、`young`、`refused`、`stuck`）打到 stderr |
+| `du` | daemon `du` 的回复原样（daemon.md §5.12） | — |
 | `daemon start` / `stop` | `{ "already": true }` 或 `{}` | — |
 | `daemon status` | 见 §3.3。daemon 没在跑也有这个对象 | — |
 | `resolve` | `ResolutionReport` | — |

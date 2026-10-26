@@ -361,6 +361,8 @@ pub struct Daemon<'a> {
     conns: Mutex<Vec<UnixStream>>,
     /// §5.9: the reconcile loop's counters and its last pass (daemon_status).
     reconcile: Mutex<Value>,
+    /// §5.12: the du cache and its background pass (stopped on drop).
+    pub du: crate::du::DuHandle,
 }
 
 impl<'a> Daemon<'a> {
@@ -402,6 +404,7 @@ impl<'a> Daemon<'a> {
             stop: AtomicBool::new(false),
             conns: Mutex::new(Vec::new()),
             reconcile: Mutex::new(json!({ "runs": 0, "last": null })),
+            du: crate::du::Du::open(&core.config.paths.root),
         })
     }
 

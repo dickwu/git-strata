@@ -150,9 +150,16 @@ pub enum Cmd {
         #[arg(long)]
         discard: bool,
     },
-    /// Collect garbage (old bases, removed sessions)
+    /// Collect garbage (old bases, removed sessions, old store/trash)
     #[command(after_long_help = crate::help::GC_AFTER)]
     Gc,
+    /// Disk usage of the data root (cached; CoW-aware)
+    #[command(after_long_help = crate::help::DU_AFTER)]
+    Du {
+        /// Re-size every unit in the background (returns at once)
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Daemon control
     #[command(subcommand, subcommand_required = true, after_long_help = crate::help::DAEMON_AFTER)]
     Daemon(DaemonCmd),

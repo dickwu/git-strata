@@ -1045,6 +1045,12 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 | `Watcher::flush` | 一次 `FlushAsync` 加一次 `dispatch_sync` 排空 | 空闲时亚微秒；不用 `FlushSync`：空闲时测到约 1.0 s 的停顿（impl-notes Task 9）；回调正忙时要等它返回 |
 | `case_fold_key`、`case_fold_eq` | O(长度) | ASCII 走快路径，不分配；非 ASCII 要分配一个键 |
 
+### 5.10 `usage_of` 与 `usage_with`：CoW 感知的用量
+
+`usage_of(path)` 量一棵树（或一个文件）：`getattrlistbulk` 带 `FSOPT_ATTR_CMN_EXTENDED`，每项取 `ATTR_FILE_DATALENGTH`（logical）、`ATTR_FILE_DATAALLOCSIZE`（allocated）与 `ATTR_CMNEXT_PRIVATESIZE`（private）。硬链接（链接数 > 1）按 fileid 只算一次；符号链接不跟随；挂载点不进入；深度上限 512。`usage_with(path, stop)` 在目录之间看 `stop`，为真返回 `Busy`（`cancelled`）。路径不在 → `NoSuchPath`。读不了的条目计入 `errors`，不让整次失败。卷不给 private 时 `private = allocated`，`exact = false`。
+
+语义：private 是只属于这个文件的块，共享的 clone extent 一次也不算；allocated 对每个文件各算一次。所以 private ≤ 真实占用 ≤ allocated，`shared = allocated − private`。没有公开的 extent 引用计数 API；`F_LOG2PHYS_EXT` 逐 extent 调用、只给偏移，不用。测试：`tests/usage.rs`（单文件 private = allocated；克隆后 allocated 翻倍、克隆体 private 近零，写 1 MiB 后 private 增长；硬链接一次；符号链接不跟随；取消与不存在的路径）。在 TMPDIR（APFS 内部卷）上跑。
+
 ## 6. 失败与恢复
 
 错误时序按 design §9 不变量 6 与增补 3 的细化：写入之前的失败是具名的码，什么都没留下；一旦第一次可见的写入发生，之后的失败一律 `Unknown`，现场原样保留。apfs 自己的操作大多是**单次系统调用**（`clonefile`、`clonefileat`、`openat(O_CREAT|O_EXCL)`、`symlinkat`、`renameatx_np`、`unlinkat`），失败时内核什么都没写，所以可以给具名的码；`ENOSPC` 与 `EIO` 按 types.md §6.3 归 `Unknown`，哪怕实测它们也没留下 dst。多步的有五个：`mkdir_rooted(parents = true)`、`clone_file_rooted` 的"克隆再经句柄设 mode"、`make_removable`（先清标志、再补写位）、`set_file_meta`（清标志、设 mode、设 mtime），以及 `remove_tree_rooted`。前四个第一步生效之后的失败是 `Unknown`；`remove_tree_rooted` 不同（控制者裁定）：遍历一开始就算开始，之后不再有 `Err`，部分失败进报告，因为部分删除的结局是确定的，调用方重试剩下的。apfs 从不清理、从不回滚、从不重试（`EINTR` 除外）；恢复的责任在调用方，它们在克隆之前写 intent 行（增补 3、4），崩溃之后不信任 dst 的存在。

@@ -13,6 +13,7 @@ use strata_types::{RepoName, SessionId, StrataError};
 
 pub mod client;
 pub mod confirm_flow;
+pub mod du;
 pub mod fetch_after;
 pub mod handlers;
 pub mod locks;

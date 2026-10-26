@@ -65,7 +65,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 未知方法 → RPC `UnknownMethod`。参数对不上 → RPC `Failed`。
 
-方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 20 个以外不加方法（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
+方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 21 个以外不加方法（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
 
 | method | 作用 | 是否只读 |
 | --- | --- | --- |
@@ -84,11 +84,12 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `push` | `publish::push` | 否 |
 | `assign` | 点名冲突解决者 | 否 |
 | `rm` | `session::remove` | 否 |
-| `gc` | `store::gc_repo` | 否 |
+| `gc` | `store::gc_repo`；`repo` 为 null 时再 `store::gc_trash` | 否 |
 | `resolve_move` | `session::resolve_failed_move`。不查 TTY，不收凭据 | 否 |
 | `chain_resolve` | 人对 Rewound / Diverged 的显式处理。接受 origin 不推送；恢复只在快进时推 | 否 |
 | `config_relax` | 显式接受一次调松。文件变了不弹框。路径能编译。调松仍要这条命令；调紧立即生效 | 否 |
 | `daemon_status` | 锁、队列、Unknown 发布、可选 `quick_check` | 是 |
+| `du` | 数据根的磁盘用量，读缓存（§5.12） | 是 |
 
 `params` 的字段（serde，未知字段 → RPC `Failed`）[我的决定 D4]：
 
@@ -109,11 +110,12 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `push` | `{ "repo": RepoName, "shown"?: CommitOid \| null }` | `{push: PushOutcome, commit}`。`shown` 是 cli 给人看过的链顶（D21）。不要确认的仓库先 fetch，链 `Diverged` 时无头重放再推一次快进，另带 `replayed`（`{from,to,onto,commits,checks_ran}` 或 null）、`rebases`、`warnings`；冲突 `Conflict` `replay_conflict`，不写不推（publish.md D2a）[实现时补的决定] |
 | `assign` | `{ "group": ReleaseGroup, "path": RepoPath, "session": SessionId }` | `{}` |
 | `rm` | `{ "session": SessionId, "discard": bool }` | `RemoveReport` |
-| `gc` | `{ "repo": RepoName\|null }` | `GcReport` 的数组 |
+| `gc` | `{ "repo": RepoName\|null }` | `{ done, skipped, trash }`；`trash` 是 `TrashReport`（`repo` 为 null 时）或 null |
 | `resolve_move` | `{ "session": SessionId, "repo": RepoName, "abandon": bool, "accept": bool }` | `ResolutionReport`。两个布尔必须恰好一个为真，否则 RPC `Failed`，不调用 session |
 | `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice, "shown"?: CommitOid \| null }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
 | `config_relax` | `{ "repo": RepoName }` | `{}`。没有凭据字段。见 §5.5 |
 | `daemon_status` | `{ "verify": bool }` | 见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc` |
+| `du` | `{ "refresh": bool }`（缺省 false） | 见 §5.12 |
 
 设计 §6.3 的 `diff --base` 在 publish 草案里没有对应函数。本方法只做 `diff_between`。`--base` 等 publish 补了函数再加参数，不加方法名。
 
@@ -419,7 +421,7 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 
 （review-3 R5）拿到队列位置之后、`f` 开始之前再看一次截止时刻：旗标恰好在最后一次轮询（已过期）时清掉，或者过期后以零时长拿到空闲队列，都不再让 `f` 晚开始，而是 `Busy` `lock_wait`（`deadline: true`），什么都不写。`f` 一旦开始就不再设界。零时长的 try-lock 语义（`try_session`）不变。[实现时补的决定]
 
-**`gc`**：一个 repo 一把锁，调用方持有，调 `gc_repo(repo, GC_KEEP)`。`repo` 为 null 则按 `RepoName` 升序逐个。写前等锁；超时跳过这个 repo，记进 `daemon_status`，不让整次失败。不占会话队列，不等建造锁。
+**`gc`**：一个 repo 一把锁，调用方持有，调 `gc_repo(repo, GC_KEEP)`。`repo` 为 null 则按 `RepoName` 升序逐个。写前等锁；超时跳过这个 repo，记进 `daemon_status`，不让整次失败。不占会话队列，不等建造锁。`repo` 为 null 时，逐个 repo 做完之后再调 `Store::gc_trash(extra)`（store.md §5.11a），回复的 `trash` 是它的 `TrashReport`。`extra` 是 store 没有行的、git 链接点名的路径：每个影子仓库（`sessions/.repos/<sid>/<repo>.git`）与每个配置仓库的 `.git` 的 `objects/info/alternates` 各行、`commondir`、`worktrees/*/gitdir` 与 `worktrees/*/commondir`。对账循环与启动不调 `gc_trash`：清空 trash 只在人（或被要求的 agent）跑 `git-strata gc` 时发生 [实现时补的决定]（2026-10-26）。此前没有任何路径清空 `store/trash`：daemon 只调 `gc_repo`，`Store::gc`（第 5 步删 trash）从未被调用。
 
 **`resolve_move`**：不查 TTY，不返回 `NotTty`，不调用 `Confirmer`，参数里没有凭据。cli 已经查过 TTY，并且人给过选择。`abandon` 与 `accept` 必须恰好一个为真；否则 RPC `Failed`，`resolve_failed_move` 不调用。`publishing` 为真时先等旗标，等的时候不持队列或 repo 锁。然后占该会话的队列。不持 repo 锁地调 `session::resolve_failed_move(session, repo, MoveResolution::Abandon 或 Accept)`（它自己取锁）。`Accept` 之后 `Tracker::reset` 再 `watch`。`Abandon` 不换工作区树，不 reset。不自动选。
 
@@ -488,6 +490,22 @@ daemon 实现 `publish::PublishLocks`（`with_sessions`、`with_repo`），放�
 `shadow_drift` 的 `PrePushGuardDisabled`（reason 字符串 `pre_push_guard_disabled`）只报告：session 的 `MirrorDrift` 已经带上，daemon 再在第一次看见时打一行 stderr。不重钉，不重建影子仓库 [我的决定 D2]。重钉要往活的影子仓库写 config，gitio 没有这个函数，而且 husky / lefthook 会把它再改回去。include、`config.worktree`、`extensions.*`、gitfile、被换掉的 hooks 目录同样只报告。
 
 旧树上的进程只列在 status 里，不杀（session 的已知限制）。
+
+### 5.12 `du`：磁盘用量
+
+只读（`ro = true`），不排队，不拿锁。实现在 `du.rs`，`Daemon.du` 持有 `Du`，daemon 停时停掉后台线程。
+
+**单元**。把数据根切成可分别缓存的单元：`store/blobs/<分片>`、`store/trash/<条目>`、`store/tmp`、`store/store.db*` 与 `LOCK`、`store/` 下其余条目、`bases/<repo>/<名字>`、`deps/<repo>/<名字>`、`sessions/<sid>` 与 `sessions/.repos/<sid>`。每个单元用 `apfs::usage_with` 量（apfs.md §5.10），得到 `logical`、`allocated`、`private`、`files`、`errors`、`exact`。
+
+**缓存**。`<root>/daemon/du/cache.json`（原子写：临时文件加改名），每个单元记 inode、mtime（ns）、`as_of_ms`（开始量的时刻）、`took_ms`。schema 钉死（`user_version = 1`），所以不进 store.db，放旁车文件 [实现时补的决定]。新鲜的判定：store.db* 每次调用当场量（Live，便宜）；其余单元 inode 或 mtime 变了、或超过 TTL 就过期。TTL：不可变的（`bases`、`deps` 下不以 `.` 开头的快照、blob 分片、trash 条目）24 h，可变的（`store/tmp`、会话、点目录）10 min。目录的 mtime 只反映直接条目，深处的改动要靠 TTL 兜底，所以会话的数字最多旧 10 分钟。
+
+**回复**。`du` 只读缓存、立即返回（目标约 1 s）：每个分组的数字带 `as_of`（参与的单元里最旧的那个）、`units`、`stale`、`pending`、`complete`。过期与缺失的单元排进队列，由后台线程（`strata-du`，4 个工作线程，`setiopolicy_np` 设 utility 级 I/O）量完写回缓存；`refresh: true` 把全部单元排进去。`scan` 报 `running`、`started`、`done`、`queued`、`full`、`failed`、`last_full`。
+
+**trash**。`store.trash` 另带 `entries`、`eligible{entries, reclaim_min, reclaim_max}`（名字里的时刻早于 1 h 的条目；min 是 private 之和，max 是 allocated 之和）、`young`、`floor_secs`、`gc: "git-strata gc"`。`gc_trash` 还会拒绝被点名的条目，`du` 不算这一项，所以 eligible 是上界。
+
+**节省**。会话的 `savings` = logical − private：若是普通拷贝要多花的字节。`savings.live` 是活会话之和。`savings.cumulative` 来自 `<root>/daemon/du/sessions.jsonl`：`new` 处理器成功后把会话两个单元排到队首，量完记一条 `new`（已有会话第一次量到记 `seen`）；`rm` 成功后记一条 `rm`，带上缓存里最后的数字。每个会话取最后一条相加；`since` 之前的会话是 `unknown`。
+
+**准确度**。private 是 APFS 的 `ATTR_CMNEXT_PRIVATESIZE`：只属于这个文件的块；被克隆共享的 extent 一次也不算。allocated（`ATTR_FILE_DATAALLOCSIZE`）对每个持有它的文件各算一次。一个单元的真实占用在 private 与 allocated 之间；删掉它能释放的也在这个区间，且 Time Machine 快照可能留住释放的块。没有公开的 API 能问"删掉这棵树能释放多少"：`F_LOG2PHYS_EXT` 要逐文件逐 extent 调用，太慢，也只给物理偏移、不给引用计数，所以不用 [实现时补的决定]（2026-10-26）。测试：`du::tests`（单元划分、新鲜判定、缓存回答与排队、改动/新建/删除的失效、重开读缓存）与 `tests/daemon.rs::du_sizes_sessions_records_new_and_rm_and_gc_empties_trash`。
 
 ### 5.11 复杂度
 

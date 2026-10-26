@@ -295,6 +295,45 @@ fn not_pending(p: &strata_deps::Proposal, replacement: Option<&strata_deps::Prop
     StrataError::new(Code::NoSuchProposal, format!("proposal {} is not pending", p.id.get())).with_detail(d)
 }
 
+/// Paths git links name that the store has no row for: alternates and
+/// gitdir / commondir links of every shadow repo and every configured
+/// repo. `gc_trash` refuses a trash entry any of them points into.
+fn trash_refs(core: &Core) -> Vec<PathBuf> {
+    fn links(git_dir: &Path, out: &mut Vec<PathBuf>) {
+        let mut read = |f: PathBuf, base: &Path| {
+            if let Ok(t) = fs::read_to_string(&f) {
+                for l in t.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+                    out.push(base.join(l));
+                }
+            }
+        };
+        read(git_dir.join("objects/info/alternates"), &git_dir.join("objects"));
+        read(git_dir.join("commondir"), git_dir);
+        if let Ok(d) = fs::read_dir(git_dir.join("worktrees")) {
+            for w in d.flatten() {
+                let w = w.path();
+                read(w.join("gitdir"), &w);
+                read(w.join("commondir"), &w);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let repos = core.config.paths.root.join("sessions/.repos");
+    if let Ok(d) = fs::read_dir(&repos) {
+        for s in d.flatten() {
+            if let Ok(g) = fs::read_dir(s.path()) {
+                for r in g.flatten() {
+                    links(&r.path(), &mut out);
+                }
+            }
+        }
+    }
+    for rc in core.config.repos.values() {
+        links(&rc.path.join(".git"), &mut out);
+    }
+    out
+}
+
 // ---- the server ------------------------------------------------------------
 
 /// The handlers over one running [`Daemon`].
@@ -522,7 +561,9 @@ impl<'d, 'a> Server<'d, 'a> {
                     }
                     self.trackers.drop_session(&p.session);
                     writing();
-                    Ok(json_of(&self.d.sessions.remove(&p.session, p.discard, token)?))
+                    let r = self.d.sessions.remove(&p.session, p.discard, token)?;
+                    self.d.du.on_remove(p.session.as_str());
+                    Ok(json_of(&r))
                 })
             }
             Params::Gc(p) => {
@@ -543,7 +584,15 @@ impl<'d, 'a> Server<'d, 'a> {
                         Err(e) => return Err(e),
                     }
                 }
-                Ok(json!({ "done": done, "skipped": skipped }))
+                // §5.12: the global gc also empties store/trash (old entries
+                // nothing names; store.md §5.11a). A repo-scoped gc does not.
+                let trash = if p.repo.is_none() {
+                    writing();
+                    Some(json_of(&core.store.gc_trash(&trash_refs(core))?))
+                } else {
+                    None
+                };
+                Ok(json!({ "done": done, "skipped": skipped, "trash": trash }))
             }
             Params::ConfigRelax(p) => {
                 writing();
@@ -551,6 +600,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 Ok(json!({}))
             }
             Params::DaemonStatus(p) => self.d.daemon_status(p.verify),
+            Params::Du(p) => Ok(self.d.du.report(p.refresh)),
             Params::ResolveMove(p) => {
                 let Some(choice) = resolve::move_choice(p.abandon, p.accept) else {
                     return Err(StrataError::new(Code::InvalidInput, "exactly one of abandon and accept")
@@ -596,6 +646,7 @@ impl<'d, 'a> Server<'d, 'a> {
             }
         };
         locks::mark_visible();
+        self.d.du.on_new(rep.manifest.id.as_str());
         let after = core.after_new(&mut rep, &|r, repo| core.observe_new(r, repo));
         for (repo, _) in &after.anchor_unknown {
             core.warnings.add(DaemonWarning::AnchorNotAdvanced { repo: repo.clone() });

@@ -355,8 +355,43 @@ detail.unresolved lists interrupted scenes. Publish the work, or hand
     gate_text!()
 );
 
-pub const GC_AFTER: &str = "Removes old bases and leftovers of removed sessions. Skipped items are
-printed on stderr; data is {}. Do not run it after an Unknown outcome.
+pub const GC_AFTER: &str = "Removes old bases and leftovers of removed sessions, and empties
+<root>/store/trash of entries older than 1 h that no session, workspace,
+deps staging, move intent, alternates file or worktree link names (refused
+entries stay). Skipped / refused / stuck items are printed on stderr; data is
+{}. Do not run it after an Unknown outcome.
+";
+
+pub const DU_AFTER: &str = "Read-only. Answers from the daemon's size cache in about a second; every
+figure has as_of (when it was measured) and stale/pending counts. Units not
+fresh (missing, inode/mtime changed, or older than 10 min for tmp, sessions
+and dot-dirs, 24 h for bases/deps snapshots, blob shards and trash entries)
+are re-sized in the background (4 threads, utility I/O). store.db* is sized
+every call. --refresh re-sizes everything in the background; poll `du` until
+scan.running is false. Needs the daemon (Busy daemon_down otherwise).
+
+FIGURES (bytes)
+  logical    sum of file lengths (what `ls -l` adds up)
+  allocated  blocks each file has, shared clone extents counted once per file
+  private    blocks only that file owns (APFS private size, clone-aware);
+             the physical cost of a unit is between private and allocated
+  shared     allocated - private
+  exact      false when the volume gives no private size (private = allocated)
+
+DATA
+  {root, now, total, store{all, db, blobs, tmp, other, trash{..., entries,
+   eligible{entries, reclaim_min, reclaim_max}, young, floor_secs, gc}},
+   bases{all, repos}, deps{all, repos}, sessions{all, list[{session, savings}]},
+   savings{live, cumulative}, scan{running, started, done, queued, full,
+   failed, last_full}, took_ms}
+  savings.live: logical - private of live sessions. savings.cumulative: from
+  sessions created/removed since `since`; earlier sessions are unknown.
+  trash.eligible is what `git-strata gc` would try to delete (it may still
+  refuse referenced entries).
+
+EXAMPLES
+  git-strata du             # cached figures, queue what is stale
+  git-strata du --refresh   # full background recompute
 ";
 
 pub const DAEMON_AFTER: &str = "INSTALL

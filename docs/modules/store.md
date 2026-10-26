@@ -1557,6 +1557,12 @@ session 怎样串这些方法由 session.md 定。按增补 3、4 的错误时�
 6. **完整性扫描**，持 L3 共享锁：从上一次全局 gc 记录的 `scrub_after` 之后，按 `blobs.id` 的顺序逐个 `verify_blob`，累计读满 2 GiB 就停 [我的决定]，记下最后一个 id；走到末尾则游标回到 NULL，下一轮从头开始。不符、文件不在或长度不对的 blob 进报告的 `corrupt`：从不删除、从不覆盖（3f:557），由 status 报出、人来处理。
 7. 追加一行 `gc_runs`（`scope = NULL`、`outcome = 'complete'`、报告的 JSON 与新游标），返回报告。
 
+注（2026-10-26）：实现上 daemon 从来只调 `gc_repo`（启动、对账循环、`gc` 方法），`gc(keep)` 没有调用方，所以第 5 步从未运行，`store/trash` 只进不出。补上的是下面的 `gc_trash`，只由 daemon 的全局 `gc` 方法调用。
+
+### 5.11a `gc_trash(extra)`
+
+只有写者能跑；与 `gc`、`gc_repo` 共用 `gc_running` 互斥。只删 `store/trash/` 的条目，不删行、不写 `gc_runs`。年龄按名字里的时刻（`<ms>-<hex32>`；解析不了就按 mtime 与 ctime 中较晚的）算，下限与守卫 (b) 相同（1 小时，`Seam::AgeFloor` 可改小）；不到下限的计入 `young`。引用集：`sessions.root`、`workspaces.path`、`deps_attempts.staging`、`move_intents.staging`（全部行，不论状态），加上调用方传入的 `extra`（daemon 传 git 的 alternates 与 worktree 链接），以及它们规范化（解析符号链接）之后的形式。任何引用落在条目之内（等于条目或是它的下级），条目都不删，记进 `refused`。其余条目一次 `apfs::remove_tree_rooted`，没删干净进 `stuck`。返回 `TrashReport { removed, young, refused, stuck }`。测试：`gc_trash_removes_only_old_unreferenced_trash`。
+
 `gc_repo(repo, keep)`，调用方持有该 repo 的写锁：
 
 1. **保留集**，在一个读快照里算：
