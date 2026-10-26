@@ -81,7 +81,7 @@ impl Pins {
         match (self.pinned(repo), file) {
             (None, _) => true,
             (_, None) => true,
-            (Some(Some(p)), Some(f)) => p.confirm || p.deploy_on_push || f,
+            (Some(Some(p)), Some(f)) => p.confirm || f,
             (Some(None), Some(f)) => f,
         }
     }

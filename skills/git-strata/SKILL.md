@@ -208,7 +208,9 @@ All three keys are always present; `data` is never null. Branch on
    human; print the exact command and stop:
    - `git-strata rm --session S --discard`
    - `git-strata deps approve <ID> [--sessions S,S]`
-   - `git-strata push <REPO>` when the repo needs confirmation
+   - `git-strata push <REPO>` when the repo needs confirmation (its pinned
+     `publish.confirm` is true; `deploy_on_push` alone does not gate, so e.g.
+     staff-api with `confirm = false` publishes and pushes headless)
    - `git-strata publish` when it pushes to a repo that needs confirmation
    - `git-strata config relax <REPO>`
    - `git-strata resolve --session S --repo R --abandon|--accept`

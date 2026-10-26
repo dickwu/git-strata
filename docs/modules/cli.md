@@ -26,7 +26,7 @@ daemon 没在跑时，只读命令直接读 store 与工作区。写命令失败
 | deps | `open_proposals`、`Proposal`。批准时展示的就是这条 `Proposal`，不另造一种计划 |
 | search | `grep`、`files`、`Hit`。零命中是空 `Vec` |
 | publish | `diff_between`、`PushOutcome`。链的判定不在 cli 重写 |
-| config | `RepoConfig::needs_human_confirm`（`publish.confirm \|\| deploy_on_push`）。读 `~/Library/Application Support/git-strata/config.toml` |
+| config | `RepoConfig::needs_human_confirm`（`publish.confirm \|\| deploy_on_push`；[实现时补的决定]（2026-10-26，peilin："将api 也改为不用确认"）改为只看 `publish.confirm`，`Pins::needs_confirm` 取钉住的 `confirm` 与文件的较严者）。读 `~/Library/Application Support/git-strata/config.toml` |
 
 crate 依赖到 `strata-daemon` 的 lib 为止，不含 `strata-confirm`（types.md §8）。外部 crate：`clap`、`serde_json`、`libc`（`isatty`）。
 

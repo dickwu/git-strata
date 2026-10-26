@@ -180,7 +180,7 @@ fn commit_cas_failure_is_not_retried() {
 }
 
 #[test]
-fn deploy_on_push_without_confirm_stops_before_push() {
+fn confirm_without_a_matching_token_stops_before_push() {
     let mut fx = fx();
     let origin = fx.origin_head("tool", "main");
     let (s, g) = edit(&fx, "src/index.ts", b"export const a = 2\n");
@@ -190,7 +190,7 @@ fn deploy_on_push_without_confirm_stops_before_push() {
         Some(token(Action::PushDeploy { repo: repo_name("front"), branch: "main".into() })),
         Some(token(Action::RemoveDiscard { session: s.clone() })),
     ];
-    for (deploy_on_push, confirm) in [(true, false), (false, true)] {
+    for (deploy_on_push, confirm) in [(true, true), (false, true)] {
         fx.cfg_mut("tool").deploy_on_push = deploy_on_push;
         fx.cfg_mut("tool").publish.confirm = confirm;
         for t in bad.iter() {
@@ -217,6 +217,21 @@ fn deploy_on_push_without_confirm_stops_before_push() {
     let changes = fx.store().ref_changes(p.id).unwrap();
     let pushed = changes.iter().find(|c| c.op == strata_store::RefOp::Push).expect("push recorded");
     assert_eq!(pushed.confirmed, Some(deploy("main")));
+}
+
+#[test]
+fn deploy_on_push_without_confirm_pushes_headless() {
+    // 2026-10-26: deploy_on_push is information; publish.confirm alone gates.
+    let mut fx = fx();
+    fx.cfg_mut("tool").deploy_on_push = true;
+    fx.cfg_mut("tool").publish.confirm = false;
+    let (_s, g) = edit(&fx, "src/index.ts", b"export const a = 8\n");
+    let p = run(&fx, &g, None).unwrap();
+    assert_eq!(p.push, Some(PushOutcome::Pushed));
+    assert_eq!(fx.origin_head("tool", "main"), p.commit.as_str());
+    let changes = fx.store().ref_changes(p.id).unwrap();
+    let pushed = changes.iter().find(|c| c.op == strata_store::RefOp::Push).expect("push recorded");
+    assert_eq!(pushed.confirmed, None);
 }
 
 #[test]
@@ -312,6 +327,7 @@ fn push_false_leaves_chain_local() {
     let st = staging_for(&fx, p.commit.as_str());
     let mut cfg = fx.config.repos[&repo_name("tool")].clone();
     cfg.deploy_on_push = true;
+    cfg.publish.confirm = true;
     calls(&fx);
     let e = push(fx.git_of("tool"), &cfg, &repo_name("tool"), &st, None).unwrap_err();
     assert_eq!(e.code, Code::NotConfirmed);
@@ -370,7 +386,7 @@ fn pushed_sets_anchor_to_pushed_commit() {
 fn no_flag_or_env_bypass() {
     let mut fx = fx();
     fx.cfg_mut("tool").deploy_on_push = true;
-    fx.cfg_mut("tool").publish.confirm = false;
+    fx.cfg_mut("tool").publish.confirm = true;
     let g = fx.git_of("tool");
     for k in ["STRATA_PUBLISH", "STRATA_CONFIRM", "STRATA_NO_CONFIRM", "STRATA_YES", "CI"] {
         g.set_env(k, Some(std::ffi::OsStr::new("1")));

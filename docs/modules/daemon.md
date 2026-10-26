@@ -295,7 +295,7 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 `pins.json` 是 UTF-8 JSON：`{ "repos": { "<RepoName>": { "deploy_on_push": bool, "confirm": bool, "push": bool } } }`。第一次启动没有这个文件：把当时加载的配置写成钉，不算调松。之后：
 
 - 调紧立即生效并写回，不要凭据：`deploy_on_push` false→true，`confirm` false→true，`push` true→false。
-- 调松不生效：`deploy_on_push` true→false，`confirm` true→false，`push` false→true。有效值仍是钉住的那份。status 带 `ConfigRelaxPending`。文件变了不弹框，启动、重载、KeepAlive 重启都不弹。要生效必须人发 `config_relax`（§5.5）。
+- 调松不生效：`deploy_on_push` true→false，`confirm` true→false，`push` false→true。[实现时补的决定]（2026-10-26，peilin："将api 也改为不用确认"）：`confirm_flow::needs_confirm` 只看钉住的 `confirm`；`deploy_on_push` 仍按调紧/调松规则钉住，但只是信息，不单独要求确认。有效值仍是钉住的那份。status 带 `ConfigRelaxPending`。文件变了不弹框，启动、重载、KeepAlive 重启都不弹。要生效必须人发 `config_relax`（§5.5）。
 
 不变量：
 

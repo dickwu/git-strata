@@ -113,8 +113,10 @@ impl RepoConfig {
         true
     }
 
+    /// `publish.confirm` is the only gate; `deploy_on_push` is information
+    /// (it names the action `PushDeploy` and shows in status), not a gate.
     pub fn needs_human_confirm(&self) -> bool {
-        self.publish.confirm || self.deploy_on_push
+        self.publish.confirm
     }
 
     /// `install` split by the §2.4 rules (the same splitter `validate_commands`
@@ -286,16 +288,8 @@ fn validate_repo(name: &RepoName, cfg: &RepoConfig, root: &Path) -> Result<(), S
             "publish.branch is not a branch short name",
         ));
     }
-    if cfg.deploy_on_push && !cfg.publish.confirm {
-        return Err(violation(
-            Code::InvalidInput,
-            Some(repo),
-            "deploy_on_push",
-            None,
-            "V5",
-            "deploy_on_push requires publish.confirm",
-        ));
-    }
+    // V5 (deploy_on_push requires publish.confirm) was dropped on 2026-10-26:
+    // `publish.confirm` is the single, explicit gate (config.md V5).
     let (seeds, _) = cfg.seed_files();
     let lists = [
         ("deps_dirs", cfg.deps_dirs.as_slice()),

@@ -76,7 +76,7 @@
      - front 的 `dev-link.sh` 会对干净的兄弟库 `git reset --hard origin/main`（`front/dev-link.sh:23`），**不得**列入。
   6. 检查跑在 staging 树里，所以需要种子文件才能跑的检查（maxident-sync、insurance-check 的 `cargo check` 需要 `secrets.rs`）要么不列，要么由 `publish` 把种子文件带进 staging [交给 `publish.md`]；附录 A 对这两个仓库没有启用 Rust 检查。Tauri 应用的 Rust 侧检查同样没有启用：`src-tauri/target` 冷编译要 30–40 分钟（design §6.1）。
 - **`publish`**：`PublishTarget { branch, push, confirm }`（types.md；design §6.7），三个字段都必须写。`branch` 是发布链 `refs/strata/publish/<branch>` 对应的分支，附录 A 里恒等于 `default_branch`（两者不同时 [我的决定]：发布链以 `origin/<publish.branch>` 为合并基并推到它；新会话仍钉 `origin/<default_branch>`，`pin_unpushed` 只在 `publish.branch == default_branch` 时有意义；细节交给 `publish.md` 与 `session.md`）；`push = true`：发布后立刻把链推到 `origin/<branch>`；`false`：留在本地，之后 `strata push <repo>`；`confirm`：该目标的推送是否需要人类确认。**实际是否需要确认 = `confirm || deploy_on_push`**（`RepoConfig::needs_human_confirm`）。默认 = 直接合主干并推（design §2 目标 7），即 `push = true, confirm = false`；一推上线的仓库 `confirm = true`；staff-api 例外：`push = false`，预期配置是人工 `strata push`（design §6.7，因为推任何分支都会重建生产）。
-- **`deploy_on_push`**：为 `true` 时，推送必须经 design §6.9 的人类确认，没有任何 flag、环境变量或运行期配置能让这次推送绕过（不变量 3、7）；规则 V5 保证 `confirm` 也是 `true`。把 `deploy_on_push` 本身改成 `false` 属于"调松"，daemon 只在人类确认之后接受（§1 的钉住规则，[交给 `daemon.md`]）。`true` 的有：staff-api、front 和全部 `@inter/*` 库（admin-time-off、admin-shared、hr-core、hr-tasks、hr-components、hr-time-management、quick-start）——design §3、§11 第 6 条。
+- **`deploy_on_push`**：为 `true` 时，推送必须经 design §6.9 的人类确认，没有任何 flag、环境变量或运行期配置能让这次推送绕过（不变量 3、7）；规则 V5 保证 `confirm` 也是 `true`。[实现时补的决定]（2026-10-26，peilin："将api 也改为不用确认"）：上面这句作废。`deploy_on_push` 只是信息（推送算作 `Action::PushDeploy`、status 里显示），不再是门；要不要人类确认只看 `publish.confirm`（`needs_human_confirm() = publish.confirm`），V5 一并撤销。现有配置里 `deploy_on_push = true` 的仓库都显式写了 `confirm = true`，门不变；唯一改的是 staff-api（`confirm = false`，`push = false`、`deploy_on_push = true` 不变）。把 `confirm` 从 true 改成 false 仍是"调松"，要人跑 `git-strata config relax <REPO>`（TTY + Touch ID）才生效。把 `deploy_on_push` 本身改成 `false` 属于"调松"，daemon 只在人类确认之后接受（§1 的钉住规则，[交给 `daemon.md`]）。`true` 的有：staff-api、front 和全部 `@inter/*` 库（admin-time-off、admin-shared、hr-core、hr-tasks、hr-components、hr-time-management、quick-start）——design §3、§11 第 6 条。
 - **`pin_unpushed`**：新会话钉基线时，发布链领先 `origin/<branch>` 就钉链顶；`false` 则一律钉 `origin/<default_branch>`，新会话看不到已发布未推送的改动，下一次发布必撞（design §6.7）。只在 `publish.branch == default_branch` 时有意义：两者不同时新会话一律钉 `origin/<default_branch>`（见上条 `publish`）。
 
 ### 2.4 命令行字符串（`install` 与 `checks`）
@@ -176,6 +176,7 @@ impl RepoConfig {
     pub fn seed_files(&self) -> (Vec<RepoPath>, bool);
     pub fn default_pin_unpushed() -> bool;
     /// design §9 不变量 3、7：`self.publish.confirm || self.deploy_on_push`。
+    /// [实现时补的决定]（2026-10-26）改为只看 `self.publish.confirm`，见 §2 `deploy_on_push` 条。
     /// 即使 `validate` 被绕过（代码里直接构造结构体），门也不会被配置打开；配置本身被调松则由 daemon 的钉住规则把守（§1）。
     pub fn needs_human_confirm(&self) -> bool;
     /// V9 与 V10：`install` 与全部 `checks` 的切分与只读规则（§2.4、§4.2）。
@@ -218,7 +219,7 @@ impl Config {
 | V2 | `paths.root` 与每个 `path` 是绝对、已规范化的路径：不含 `.`、`..`、`//`、尾部 `/`，不展开 `~` | `InvalidInput` | design §7（daemon 由 launchd 启动，工作目录不确定，相对路径无从解析） |
 | V3 | `paths.root` 不得位于任何 `path` 之内，任何 `path` 不得位于 `paths.root` 之内 | `InvalidInput` | design §9 不变量 2（strata 不写主 checkout 的工作树）[我的决定] |
 | V4 | `default_branch`、`publish.branch` 是合法的分支短名（纯字符串实现 `git check-ref-format --branch` 的规则，不调用 git）：非空；不含 ASCII 控制字符、空格和 `~ ^ : ? * [ \`；不含 `..`、`@{`、`//`；不以 `/` 开头或结尾；每一级不以 `.` 开头或结尾、不以 `.lock` 结尾；不等于 `@`、不等于 `HEAD`、不以 `-` 开头；不以 `refs/` 开头 | `InvalidInput` | design §6.7（分支名拼进 `refs/strata/publish/<分支>`） |
-| V5 | `deploy_on_push = true` ⇒ `publish.confirm = true`（加载期的显式检查；运行期仍以 `needs_human_confirm` 兜底，types.md 的 `PublishTarget.confirm` 注释说的是这一层） | `InvalidInput` | design §3、§9 不变量 3 与 7（没有配置能关掉一推上线的人类确认） |
+| V5 | **已撤销**（[实现时补的决定]（2026-10-26，peilin："将api 也改为不用确认"）；`publish.confirm` 是唯一的门，见 §2 `deploy_on_push` 条）。原规则：`deploy_on_push = true` ⇒ `publish.confirm = true`（加载期的显式检查；运行期仍以 `needs_human_confirm` 兜底，types.md 的 `PublishTarget.confirm` 注释说的是这一层） | `InvalidInput` | design §3、§9 不变量 3 与 7（没有配置能关掉一推上线的人类确认） |
 | V6 | 四个路径列表（`deps_dirs`、`seed_caches`、`seed_files`、`install_inputs`）的每一项都是合法 `RepoPath`（types.md），不是 `.git` 也不在 `.git` 之下；同一列表内无重复、互不嵌套 | `InvalidInput` | design §4 |
 | V7 | 四个列表之间没有相同或嵌套的路径；唯一例外：`seed_caches` 的条目可以位于某个 `deps_dirs` 条目之内（默认的 `node_modules/.cache`） | `InvalidInput` | design §4（依赖目录不进 overlay；种子缓存不封存、不 checkpoint）[我的决定] |
 | V8 | `deps_dirs` 非空 ⇔ `install` 存在且 `install_inputs` 非空（没有依赖目录就不能有安装命令和输入；有依赖目录就必须能装、能判漂移） | `InvalidInput` | design §4 Deps set、§6.4 [我的决定] |
@@ -567,7 +568,7 @@ install_inputs = ["composer.json", "composer.lock"]   # G composer.lock 已跟�
 install = "composer install --no-interaction"   # R/C `composer install`；--no-interaction 因为 daemon 没有 TTY [未核]
 checks = ["/opt/homebrew/bin/php -d memory_limit=2G vendor/bin/phpstan analyse -c phpstan.neon.dist --no-progress"]   # C 的作用域形式去掉文件参数；B [已核] 51 s，No errors
                                            # php-cs-fixer check 整仓 [红]（B：135/4537 个文件待修），未启用
-publish = { branch = "master", push = false, confirm = true }   # D§6.7 "预期配置是 push=false + 人工 strata push"
+publish = { branch = "master", push = false, confirm = false }  # D§6.7 "预期配置是 push=false + 人工 strata push"；confirm=false：2026-10-26 peilin 要求 staff-api 的 publish/push 无需确认（无 TTY、无 Touch ID）
 deploy_on_push = true                      # D§3；I "Staff API Source" webhook；C "a push to master IS a production deploy"
 pin_unpushed = true
 

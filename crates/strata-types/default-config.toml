@@ -241,7 +241,7 @@ install_inputs = ["composer.json", "composer.lock"]   # G composer.lock 已跟�
 install = "composer install --no-interaction"   # R/C `composer install`；--no-interaction 因为 daemon 没有 TTY [未核]
 checks = ["/opt/homebrew/bin/php -d memory_limit=2G vendor/bin/phpstan analyse -c phpstan.neon.dist --no-progress"]   # C 的作用域形式去掉文件参数；B [已核] 51 s，No errors
                                            # php-cs-fixer check 整仓 [红]（B：135/4537 个文件待修），未启用
-publish = { branch = "master", push = false, confirm = true }   # D§6.7 "预期配置是 push=false + 人工 strata push"
+publish = { branch = "master", push = false, confirm = false }  # D§6.7 "预期配置是 push=false + 人工 strata push"；confirm=false：2026-10-26 peilin 要求 staff-api 的 publish/push 无需确认（无 TTY、无 Touch ID）
 deploy_on_push = true                      # D§3；I "Staff API Source" webhook；C "a push to master IS a production deploy"
 pin_unpushed = true
 

@@ -296,7 +296,7 @@ pub struct PublishTarget {
     pub branch: String,
     /// true：发布后立刻推到 `origin/<branch>`；false：留在本地，等 `git-strata push <repo>`。
     pub push: bool,
-    /// 推送前是否要人类确认（design §6.9）。`deploy_on_push = true` 的仓库不论此值都要确认。
+    /// 推送前是否要人类确认（design §6.9）。`deploy_on_push = true` 的仓库不论此值都要确认。[实现时补的决定]（2026-10-26）作废：只看此值，`deploy_on_push` 只是信息（config.md V5 撤销）。
     /// 不变量 7 在这里的范围是这些仓库，加上钉住规则：把 `deploy_on_push` / `confirm` / `push` 调松要先过 `ConfigRelax`，调紧立即生效。
     pub confirm: bool,
 }

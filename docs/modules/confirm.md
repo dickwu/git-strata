@@ -286,7 +286,7 @@ daemon 重启或换一个 `Confirmer` 之后，旧凭据一律是 `unknown`：�
 
 - **D1**（types.md §4）：凭据交给消费方之前，先 `validate`；交出去的每一个凭据都经过它。session 与 publish 只核对 `action`，它们不能、也不该调用 confirm。
 - **D2**（types.md §4、module-rulings「T12 confirm」）：拿到锁之后、真正动手之前，daemon 按锁里重新解析出的请求再推出一次 `Action`，与 `token.action` 比较；不同就 `NotConfirmed`，什么都不做。选择器（ticket → 会话 id）在锁外与锁里可能解析出不同的东西，这一步就是为它。
-- **D3**（config.md §1）：一个推送要不要确认，看 daemon 钉住的三个值，不看请求，也不看刚被改过的配置文件。调紧钉住的 `deploy_on_push`、`publish.confirm` 或 `publish.push` 立即生效，不弹框、不签发；调松任何一个都不生效，直到人跑显式命令走 §3 的 `ConfigRelax` 签发。daemon 不因文件变化自己弹框。
+- **D3**（config.md §1）：[实现时补的决定]（2026-10-26，peilin："将api 也改为不用确认"）：要不要确认只看钉住的 `publish.confirm`（`deploy_on_push` 只是信息，config.md V5 撤销）；下文的钉住与调松规则不变。原文：一个推送要不要确认，看 daemon 钉住的三个值，不看请求，也不看刚被改过的配置文件。调紧钉住的 `deploy_on_push`、`publish.confirm` 或 `publish.push` 立即生效，不弹框、不签发；调松任何一个都不生效，直到人跑显式命令走 §3 的 `ConfigRelax` 签发。daemon 不因文件变化自己弹框。
 
 ## 5. 流程与算法
 

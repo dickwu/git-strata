@@ -60,6 +60,23 @@ fn confirm_commands_refuse_non_tty() {
     assert_eq!(d.connections(), 0, "a refused command connected: {:?}", d.requests());
 }
 
+#[test]
+fn deploy_on_push_without_confirm_is_headless() {
+    // 2026-10-26: publish.confirm alone gates; deploy_on_push is information.
+    // A staff-api-like repo (deploy_on_push, confirm = false, push = false)
+    // pushes and publishes without a terminal: the CLI connects.
+    let h = Home::new();
+    h.write_config(&[RepoSpec { name: "api", push: false, confirm: false, deploy_on_push: true }]);
+    let d = FakeDaemon::start(&h.socket(), refuse_all);
+    for args in [&["push", "api"][..], &["publish", "--from", "s-aaaaaaaa:a.txt"][..]] {
+        let r = h.run(args);
+        assert_ne!(r.err_code(), "NotTty", "{args:?}: {r:?}");
+    }
+    // push reaches the daemon (publish --from stops on the unknown session
+    // before connecting, but not on NotTty).
+    assert!(d.requests().iter().any(|q| q["method"] == "push"), "push did not connect: {:?}", d.requests());
+}
+
 fn superseded(req: &Value) -> Value {
     assert_eq!(req["method"], "deps_approve");
     json!({

@@ -219,7 +219,7 @@ publish = {{ branch = "main", push = true, confirm = false }}
 }
 
 #[test]
-fn v5_deploy_on_push_requires_confirm_but_the_runtime_gate_does_not_trust_validate() {
+fn deploy_on_push_is_information_and_confirm_is_the_only_gate() {
     let text = r#"
 [repo.staff-api]
 path = "/Volumes/GWD/inter/staff-api"
@@ -228,10 +228,13 @@ deps_dirs = []
 deploy_on_push = true
 publish = { branch = "master", push = false, confirm = false }
 "#;
-    let err = parse(text).unwrap_err();
-    assert_eq!(err.code, Code::InvalidInput);
-    assert_eq!(rule(&err), "V5");
-    let built = RepoConfig {
+    // V5 is gone: deploy_on_push = true with confirm = false parses and
+    // does not ask a human.
+    let cfg = parse(text).unwrap_or_else(|err| panic!("{err} {:?}", err.detail));
+    let staff = cfg.repo(&repo("staff-api")).unwrap();
+    assert!(staff.deploy_on_push);
+    assert!(!staff.needs_human_confirm());
+    let mut built = RepoConfig {
         path: "/Volumes/GWD/inter/staff-api".into(),
         default_branch: "master".into(),
         deps_dirs: vec![],
@@ -248,6 +251,10 @@ publish = { branch = "master", push = false, confirm = false }
         deploy_on_push: true,
         pin_unpushed: true,
     };
+    assert!(!built.needs_human_confirm());
+    built.publish.confirm = true;
+    assert!(built.needs_human_confirm());
+    built.deploy_on_push = false;
     assert!(built.needs_human_confirm());
 }
 
@@ -530,6 +537,10 @@ fn default_inter_config_parses() {
         cfg.repo(&repo("tool")).unwrap().needs_human_confirm()
             || !cfg.repo(&repo("tool")).unwrap().deploy_on_push
     );
-    assert!(cfg.repo(&repo("staff-api")).unwrap().needs_human_confirm());
+    // staff-api: deploys on push but publishes headless (2026-10-26).
+    assert!(!cfg.repo(&repo("staff-api")).unwrap().needs_human_confirm());
+    assert!(cfg.repo(&repo("staff-api")).unwrap().deploy_on_push);
+    assert!(!cfg.repo(&repo("staff-api")).unwrap().publish.push);
     assert!(cfg.repo(&repo("front")).unwrap().deploy_on_push);
+    assert!(cfg.repo(&repo("front")).unwrap().needs_human_confirm());
 }

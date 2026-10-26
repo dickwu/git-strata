@@ -41,9 +41,9 @@ pub fn relaxes(pin: PinnedFlags, file: PinnedFlags) -> bool {
     (pin.deploy_on_push && !file.deploy_on_push) || (pin.confirm && !file.confirm) || (!pin.push && file.push)
 }
 
-/// `needs_human_confirm` over pinned flags.
+/// `needs_human_confirm` over pinned flags: `confirm` alone gates.
 pub fn needs_confirm(f: PinnedFlags) -> bool {
-    f.confirm || f.deploy_on_push
+    f.confirm
 }
 
 /// Apply pinned (effective) flags onto a repo config.
