@@ -25,6 +25,7 @@ mod error;
 mod sys;
 mod volume;
 mod walk;
+mod usage;
 mod casefold;
 mod casefold_table;
 mod watch;
@@ -50,6 +51,7 @@ pub mod seams {
 pub use error::{IoSide, classify_io_error};
 pub use casefold::{case_fold_eq, case_fold_key};
 pub use watch::{WatchEvent, WatchOptions, Watcher, watch, watch_with};
+pub use usage::{Usage, usage_of, usage_with};
 pub use walk::{Walk, WalkOptions, list_dir, walk, walk_with};
 pub use volume::{VolumeCaps, nearest_existing_ancestor, same_volume, volume_caps};
 
