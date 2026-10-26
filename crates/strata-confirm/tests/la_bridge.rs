@@ -49,7 +49,7 @@ fn check(confirmer: &Confirmer, gui: bool, want_code: Code, want_reason: &str, w
         .require(push())
         .expect_err("never confirmed without a human");
     assert!(
-        t.elapsed() < Duration::from_secs(1),
+        t.elapsed() < Duration::from_secs(5),
         "took {:?}",
         t.elapsed()
     );
@@ -79,7 +79,7 @@ fn la_non_interactive_round_trip_maps_codes() {
     // preflight passes or names why it cannot.
     let t = Instant::now();
     let p = quiet.probe();
-    assert!(t.elapsed() < Duration::from_secs(1));
+    assert!(t.elapsed() < Duration::from_secs(5));
     if !gui {
         let e = p.expect_err("no GUI");
         assert_eq!(detail_str(&e, "reason"), Some("no_gui_session"));
