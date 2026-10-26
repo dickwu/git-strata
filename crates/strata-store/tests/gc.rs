@@ -930,3 +930,47 @@ fn gc_report_persisted_for_status() {
     assert_eq!(outcomes(&env, None), vec!["complete", "complete"]);
 }
 
+
+#[test]
+fn gc_trash_removes_only_old_unreferenced_trash() {
+    let (env, s) = setup();
+    let t_dir = env.store_dir().join("trash");
+    fs::create_dir_all(&t_dir).unwrap();
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let old = now_ms - 2 * 3600 * 1000;
+    let free = t_dir.join(format!("{old}-{}", "1".repeat(32)));
+    let young = t_dir.join(format!("{now_ms}-{}", "2".repeat(32)));
+    let by_row = t_dir.join(format!("{old}-{}", "3".repeat(32)));
+    let by_extra = t_dir.join(format!("{old}-{}", "4".repeat(32)));
+    for d in [&free, &young, &by_row, &by_extra] {
+        mk(d);
+    }
+    fs::write(free.join("locked"), b"l").unwrap();
+    chflags(&free.join("locked"), UF_IMMUTABLE);
+    // a live workspace whose path resolves into a trash entry
+    let id = session(&env, &s, "livelive", &g('1', 'a'));
+    let ws = env.root.join("sessions").join(id.as_str());
+    fs::create_dir_all(&ws).unwrap();
+    symlink(&by_row, ws.join("app")).unwrap();
+    // a caller path (an alternates target) inside another one
+    let extra = vec![by_extra.join("objects")];
+    let before = count(&env, "SELECT count(*) FROM gc_runs");
+    let r = s.gc_trash(&extra).unwrap();
+    assert_eq!(r.removed, 1, "{r:?}");
+    assert_eq!(r.young, 1);
+    assert!(r.stuck.is_empty(), "{r:?}");
+    assert_eq!(r.refused.len(), 2, "{r:?}");
+    assert!(!exists(&free));
+    assert!(young.exists() && by_row.exists() && by_extra.exists());
+    assert_eq!(count(&env, "SELECT count(*) FROM gc_runs"), before, "no gc_runs row");
+    // nothing outside trash was touched
+    assert!(s.base_dir(&g('1', 'a')).join("f").exists());
+    // once nothing names them, they go (the floor still applies to `young`)
+    fs::remove_file(ws.join("app")).unwrap();
+    let r = s.gc_trash(&[]).unwrap();
+    assert_eq!((r.removed, r.young, r.refused.len()), (2, 1, 0), "{r:?}");
+    floor0(&s);
+    let r = s.gc_trash(&[]).unwrap();
+    assert_eq!(r.removed, 1);
+    assert!(trash(&env).is_empty());
+}

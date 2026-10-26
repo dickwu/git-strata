@@ -371,6 +371,17 @@ pub enum RefOutcome {
     Unknown,
 }
 
+/// What [`Store::gc_trash`] did: entries removed, entries younger than the
+/// age floor, entries a row or caller path still names, entries it could
+/// not remove completely.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrashReport {
+    pub removed: u64,
+    pub young: u64,
+    pub refused: Vec<PathBuf>,
+    pub stuck: Vec<PathBuf>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]

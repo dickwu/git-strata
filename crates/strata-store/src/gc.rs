@@ -21,7 +21,7 @@ use crate::errors::{NOT_WRITTEN, PARTIAL, annotate, err, errno, sql, sql_read};
 use crate::open::hex32;
 use crate::seams::Seam;
 use crate::txn::Tx;
-use crate::{GcReport, Result, Store};
+use crate::{GcReport, Result, Store, TrashReport};
 
 const OP_GC: &str = "gc";
 const OP_REPO: &str = "gc_repo";
@@ -985,6 +985,72 @@ impl Store {
         let mut run = Run::new(self, OP_REPO, Some(repo.clone()), keep)?;
         let res = run.repo_body(repo);
         run.finish(res, None)
+    }
+
+    /// Empty `store/trash/` and nothing else (store.md §5.11a): every entry
+    /// older than the age floor that no row and no `extra` path names. A
+    /// path names an entry when it, or its canonical form, lies inside the
+    /// entry; the rows read are every `sessions.root`, `workspaces.path`,
+    /// `deps_attempts.staging` and `move_intents.staging`, whatever their
+    /// state. `extra` carries what the caller knows and the store does not
+    /// (alternates and gitdir links of live shadow repos). No gc_runs row:
+    /// the global `gc`'s scrub cursor stays where it was.
+    pub fn gc_trash(&self, extra: &[PathBuf]) -> Result<TrashReport> {
+        self.writable()?;
+        let _one = self.gc_running.lock().unwrap_or_else(|p| p.into_inner());
+        let run = Run::new(self, "gc_trash", None, Duration::ZERO)?;
+        let mut refs: Vec<PathBuf> = self.read(|c| {
+            let mut q = c
+                .prepare(
+                    "SELECT root FROM sessions UNION SELECT path FROM workspaces \
+                     UNION SELECT staging FROM deps_attempts UNION SELECT staging FROM move_intents",
+                )
+                .map_err(sql_read)?;
+            q.query_map((), |r| r.get::<_, String>(0))
+                .map_err(sql_read)?
+                .collect::<crate::sql::SqlResult<Vec<_>>>()
+                .map_err(sql_read)
+        })?
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+        refs.extend(extra.iter().cloned());
+        let canon: Vec<PathBuf> = refs.iter().filter_map(|p| std::fs::canonicalize(p).ok()).collect();
+        refs.extend(canon);
+        let mut report = TrashReport::default();
+        let trash = rp("store/trash");
+        if !run.real_dir(&trash)? {
+            return Ok(report);
+        }
+        for (p, a) in run.list(&trash)? {
+            let named = last_name(&p).split_once('-').and_then(|(ms, _)| ms.parse::<u128>().ok());
+            let old = match named {
+                Some(ms) => now_ms().saturating_sub(ms) >= run.floor.as_millis(),
+                None => run.old(&a),
+            };
+            if !old {
+                report.young += 1;
+                continue;
+            }
+            let shown = self.root.join(p.as_str());
+            let real = self.real_root.join(p.as_str());
+            if refs.iter().any(|r| r.starts_with(&shown) || r.starts_with(&real)) {
+                report.refused.push(shown);
+                continue;
+            }
+            let fails = self.seams.take(|s| match s {
+                Seam::GcUnlinkFails { errno } => Some(*errno),
+                _ => None,
+            });
+            let complete =
+                fails.is_none() && matches!(strata_apfs::remove_tree_rooted(&self.real_root, &p), Ok(r) if r.is_complete());
+            if complete {
+                report.removed += 1;
+            } else {
+                report.stuck.push(shown);
+            }
+        }
+        Ok(report)
     }
 
     /// The newest gc report of `scope` (`None` = the global `gc`).
