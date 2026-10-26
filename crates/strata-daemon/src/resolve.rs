@@ -410,6 +410,9 @@ pub fn observe_tip(core: &Core, repo: &RepoName, tip: &CommitOid) -> Result<()> 
     let dir = core.config.paths.root.join("daemon/observe").join(format!("{}-{stamp}", std::process::id()));
     let r = (|| {
         let tree = git.tree_of(tip)?;
+        // The export needs its parent; nothing else creates `daemon/observe`.
+        let parent = dir.parent().expect("observe dir has a parent");
+        fs::create_dir_all(parent).map_err(|e| classify_io_error(&e, IoSide::Write, parent))?;
         git.export_tree(&tree, &dir)?;
         let ctx = strata_deps::Ctx {
             store: &core.store,

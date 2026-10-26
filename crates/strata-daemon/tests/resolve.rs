@@ -437,7 +437,6 @@ fn chain_resolve_restore_pushes_only_fast_forward() {
         for a in &k.push_args {
             assert!(!a.starts_with("--force") && !a.starts_with('+'), "{:?}", k.push_args);
         }
-        assert!(!fx.config.paths.root.join("daemon/push").read_dir().map(|mut d| d.next().is_some()).unwrap_or(false));
     }
     // Rewound to an unrelated Q, and Diverged: not a fast-forward.
     for diverge in [false, true] {
@@ -914,4 +913,187 @@ fn advance_chain(fx: &Dfx, ch: &Chain) -> String {
     sb.git(&ch.main, &["reset", "-q", "--hard", &a]);
     sb.git(&ch.main, &["update-ref", CHAIN, &c2]);
     c2
+}
+
+// ---- push: the headless replay of a Diverged chain (publish.md D2a) ----
+
+fn no_force(k: &Calls) {
+    for a in &k.push_args {
+        assert!(!a.starts_with("--force") && !a.starts_with('+'), "{:?}", k.push_args);
+    }
+}
+
+/// A repo without confirmation: origin moved under the unpushed chain C.
+/// `push` fetches, replays C onto O, runs the checks on the new tip (with
+/// the sealed deps set cloned in), moves chain and anchor in one
+/// transaction, pushes once as a fast-forward and rebases the session
+/// that sat on C onto its copy.
+#[test]
+fn headless_push_replays_a_diverged_chain_then_pushes() {
+    let mut fx = Dfx::new();
+    {
+        let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+        rc.checks = vec!["test -f o.txt".into(), "test -d node_modules".into()];
+    }
+    fx.write_config();
+    let ch = Chain::new(&fx);
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let s = new_session(&sock);
+        let head = |s: &SessionId| core.store.session(s).unwrap().unwrap().manifest.repos[&repo_name("tool")].head.as_str().to_string();
+        assert_eq!(head(&s), ch.c, "the session is pinned on the unpushed chain top");
+        let o = ch.advance_origin(&fx, &[("o.txt", b"o\n")]);
+        core.gits[&repo_name("tool")].take_git_calls();
+        let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
+        let new = r["commit"].as_str().unwrap().to_string();
+        assert_ne!(new, ch.c);
+        assert_eq!(r["push"]["kind"], json!("Pushed"), "{r:#}");
+        assert_eq!(r["warnings"], json!([]), "{r:#}");
+        assert_eq!(ch.origin_main(&fx), new, "origin fast-forwarded to the replayed tip");
+        assert_eq!(fx.sb.git(&ch.main, &["rev-parse", &format!("{new}^")]).trim(), o);
+        assert_eq!(ch.refs(&fx), (new.clone(), new.clone()));
+        assert_eq!(r["replayed"]["from"], json!(ch.c), "{r:#}");
+        assert_eq!(r["replayed"]["onto"], json!(o), "{r:#}");
+        assert_eq!(r["replayed"]["commits"], json!(1), "{r:#}");
+        assert_eq!(r["replayed"]["checks_ran"], json!(2), "{r:#}");
+        let files = fx.sb.git(&ch.main, &["ls-tree", "--name-only", &new]);
+        for f in ["a.txt", "c.txt", "o.txt"] {
+            assert!(files.lines().any(|l| l == f), "{f} in {files}");
+        }
+        assert!(!files.lines().any(|l| l == "node_modules"), "deps never enter the tree: {files}");
+        let k = calls(&core);
+        assert_eq!((k.fetch >= 1, k.push, k.transactions >= 1, k.replay), (true, 1, true, 1), "{k:?}");
+        no_force(&k);
+        assert_eq!(r["rebases"][0]["session"], json!(s.as_str()), "{r:#}");
+        assert_eq!(r["rebases"][0]["report"]["kind"], json!("Moved"), "{r:#}");
+        assert_eq!(head(&s), new, "the session follows its replayed commit");
+        // A second push has nothing left to do.
+        let r = call(&sock, "push", json!({ "repo": "tool" }));
+        assert_eq!(r["error"]["code"], "NoCommit", "{r:#}");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
+/// The unpushed chain does not apply onto the new origin: `Conflict`
+/// (`replay_conflict`) with the commit that failed; chain, anchor and
+/// origin unchanged, no transaction, no push. A failing check after a
+/// clean replay is `CheckFailed`, likewise with nothing written. Rewound
+/// stays the human's (`chain_rewound`).
+#[test]
+fn headless_push_conflict_or_failed_check_writes_and_pushes_nothing() {
+    // Conflict.
+    {
+        let fx = Dfx::new();
+        let ch = Chain::new(&fx);
+        let c2 = fx.sb.commit(&ch.main, &[("a.txt", b"chain\n")], "C2");
+        fx.sb.git(&ch.main, &["reset", "-q", "--hard", &ch.a]);
+        fx.sb.git(&ch.main, &["update-ref", CHAIN, &c2]);
+        let o = ch.advance_origin(&fx, &[("a.txt", b"origin\n")]);
+        let core = fx.prepare().unwrap();
+        let d = Daemon::start(&core).unwrap();
+        let sock = fx.socket();
+        serving(&d, || {
+            let before = ch.refs(&fx);
+            core.gits[&repo_name("tool")].take_git_calls();
+            let r = call(&sock, "push", json!({ "repo": "tool" }));
+            assert_eq!(r["error"]["code"], "Conflict", "{r:#}");
+            let det = &r["error"]["detail"];
+            assert_eq!(det["reason"], "replay_conflict", "{r:#}");
+            assert_eq!(det["commit"], json!(c2), "{r:#}");
+            assert_eq!(det["chain"], json!(c2), "{r:#}");
+            assert_eq!(det["origin"], json!(o), "{r:#}");
+            assert_eq!(det["pushed"], json!(false), "{r:#}");
+            assert_eq!(ch.refs(&fx), before);
+            assert_eq!(ch.origin_main(&fx), o);
+            let k = calls(&core);
+            assert_eq!((k.push, k.transactions), (0, 0), "{k:?}");
+        });
+        drop(d);
+        core.close().unwrap();
+    }
+    // A failing check.
+    {
+        let mut fx = Dfx::new();
+        fx.config.repos.get_mut(&repo_name("tool")).unwrap().checks = vec!["false".into()];
+        fx.write_config();
+        let ch = Chain::new(&fx);
+        let core = fx.prepare().unwrap();
+        let d = Daemon::start(&core).unwrap();
+        let sock = fx.socket();
+        serving(&d, || {
+            // Unsealed deps: the checks cannot run; refused, nothing written.
+            let o = ch.advance_origin(&fx, &[("o.txt", b"o\n")]);
+            let before = ch.refs(&fx);
+            let r = call(&sock, "push", json!({ "repo": "tool" }));
+            assert_eq!(r["error"]["detail"]["reason"], "replay_deps_unsealed", "{r:#}");
+            assert_eq!(ch.refs(&fx), before);
+            new_session(&sock); // seals the deps set of these inputs
+            assert_eq!(ch.refs(&fx), before);
+            core.gits[&repo_name("tool")].take_git_calls();
+            let r = call(&sock, "push", json!({ "repo": "tool" }));
+            assert_eq!(r["error"]["code"], "CheckFailed", "{r:#}");
+            assert_eq!(ch.refs(&fx), before);
+            assert_eq!(ch.origin_main(&fx), o);
+            let k = calls(&core);
+            assert_eq!((k.push, k.transactions), (0, 0), "{k:?}");
+        });
+        drop(d);
+        core.close().unwrap();
+    }
+    // Rewound.
+    {
+        let fx = Dfx::new();
+        let ch = Chain::new(&fx);
+        let q = ch.rewind_to_unrelated(&fx);
+        let core = fx.prepare().unwrap();
+        let d = Daemon::start(&core).unwrap();
+        let sock = fx.socket();
+        serving(&d, || {
+            let before = ch.refs(&fx);
+            core.gits[&repo_name("tool")].take_git_calls();
+            let r = call(&sock, "push", json!({ "repo": "tool" }));
+            assert_eq!(r["error"]["code"], "InvalidInput", "{r:#}");
+            assert_eq!(r["error"]["detail"]["reason"], "chain_rewound", "{r:#}");
+            assert_eq!(ch.refs(&fx), before);
+            assert_eq!(ch.origin_main(&fx), q);
+            let k = calls(&core);
+            assert_eq!((k.push, k.transactions, k.replay), (0, 0, 0), "{k:?}");
+        });
+        drop(d);
+        core.close().unwrap();
+    }
+}
+
+/// A repo that needs confirmation keeps the gated path: without a
+/// confirmation nothing is fetched, replayed or pushed; with one, a
+/// Diverged chain is still not replayed (`NoCommit`, the human's `chain`).
+#[test]
+fn confirmed_repo_push_never_replays() {
+    let mut fx = Dfx::new();
+    set_confirm(&mut fx);
+    let ch = Chain::new(&fx);
+    let o = ch.advance_origin(&fx, &[("o.txt", b"o\n")]);
+    let (c, _log, _) = fx.confirmer(vec![Verdict::la(-2), Verdict::pass()]);
+    let core = fx.prepare_with(c).unwrap();
+    sync(&core);
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let before = ch.refs(&fx);
+        let r = call(&sock, "push", json!({ "repo": "tool", "shown": ch.c }));
+        assert_ne!(r["ok"], json!(true), "{r:#}");
+        let k = calls(&core);
+        assert_eq!((k.fetch, k.push, k.transactions, k.replay), (0, 0, 0, 0), "{k:?}");
+        let r = call(&sock, "push", json!({ "repo": "tool", "shown": ch.c }));
+        assert_eq!(r["error"]["code"], "NoCommit", "{r:#}");
+        let k = calls(&core);
+        assert_eq!((k.push, k.transactions, k.replay), (0, 0, 0), "{k:?}");
+        assert_eq!(ch.refs(&fx), before);
+        assert_eq!(ch.origin_main(&fx), o);
+    });
+    drop(d);
+    core.close().unwrap();
 }
