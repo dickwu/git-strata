@@ -22,6 +22,7 @@ Design documents (Chinese) are in [docs/](docs/README.md); the agent skill is
 - [Session lifecycle](#session-lifecycle)
 - [Seed files (.env)](#seed-files-env)
 - [Headless command sequences](#headless-command-sequences)
+- [Release builds from a session](#release-builds-from-a-session)
 - [Publish conflicts: fix and rerun](#publish-conflicts-fix-and-rerun)
 - [Confirmation gate (Touch ID / TTY)](#confirmation-gate-touch-id--tty)
 - [Push guards](#push-guards)
@@ -154,13 +155,77 @@ git-strata new PROJ-123 --repos tool,staff-api
 cd "$W"                                      # edit files here
 git-strata checkpoint -m "parse config before connect"
 git-strata diff                              # vs the base
-git-strata publish --from "$S:src/a.ts" --from "$S:src/lib"
+git-strata publish --from "${S}:src/a.ts" --from "${S}:src/lib"
 #  -> data.commits.<repo> = commit oid; data.pushes = pushes done by publish
 git-strata rm --session "$S"
 ```
 
+Write `"${S}:path"`, not `"$S:path"`: in zsh `$S:t`, `$S:h`, `$S:r`, ... are
+history modifiers applied to `$S`, so `"$S:tool.ts"` silently becomes a
+different string.
+
+**`--from SESSION:PATH`.** PATH is relative to the repo root of the workspace
+that holds it, with no repo prefix: for `staff-api/app/x.php` in session `S`
+write `--from "${S}:app/x.php"`, never `"${S}:staff-api/app/x.php"`. A
+directory publishes every checkpointed path under it. The repo is found by
+looking the path up in each workspace (on disk or in its base). Path errors
+come back before any TTY check and send nothing to the daemon:
+
+| error | when | `detail` |
+| --- | --- | --- |
+| `InvalidInput` `from_syntax` | no `:`, empty session, or not a repo path | |
+| `InvalidInput` `from_repo_prefix` | PATH starts with a repo name of the session and the rest exists in that repo | `{path, session, repo, expected}`; rerun with `expected` |
+| `InvalidInput` `from_path` | no workspace of a multi-repo session has PATH | `{path, session, repos, expected}` |
+| `AmbiguousMatch` `from_repo` | several workspaces have PATH | `{path, session, candidates}` |
+
+In a single-repo session any other path is taken as that repo's (the daemon
+then reports a path that is not checkpointed as `NoMatch`).
+
+**How long publish takes.** `publish` answers only when everything is done:
+checks, the commit, the push (for pushing repos), then the rebase of every
+session onto the new base. The push runs `git push` and waits until the
+remote closes the connection, which includes the remote's own hooks (a
+deploy-on-push remote may keep it open after the branch has already moved);
+it is bounded at 120 s, after which the outcome is `Unknown`
+(`push_unknown`). The rebase that follows is not bounded. So a publish that
+prints nothing for a minute or two after the branch moved on the remote is
+still working: wait for its JSON line and do not interrupt or rerun it.
+
 Hook mode (Claude Code `PostToolUse`): `git-strata checkpoint --tool-call`
 reads the hook JSON on stdin; see [SKILL.md](skills/git-strata/SKILL.md#hook-checkpoint-after-every-tool-call-claude-code).
+
+## Release builds from a session
+
+A session workspace cannot run a release build, by design:
+
+- its git dir is a strata shadow repo with **no remotes** (origin's URL is
+  not copied), so `git pull` / `git fetch` fail;
+- `HEAD` is a detached commit (the session's base or last publish), not a
+  branch;
+- the `pre-push` guard refuses every `git push`;
+- the other repos of the session are workspaces too; a build script that
+  commits or pushes in its sibling repos would make commits strata never
+  sees.
+
+There is no `git-strata exec` or build command. A release build runs in the
+**main checkout**, after the change has been published and pushed:
+
+```sh
+git-strata checkpoint -m "release: <what>"               # in the workspace
+git-strata publish --from "${S}:path/a" --from "${S}:path/b"
+#  -> data.commits.<repo> = C; data.pushes[].outcome.kind must be "Pushed"
+#     (repo with publish.push = false: git-strata push <repo>, human on a TTY if gated)
+cd <main checkout of the repo>                          # e.g. /Volumes/GWD/inter/tool
+git status --porcelain                                  # must be empty
+git pull --ff-only                                      # fast-forwards to C
+git rev-parse HEAD                                      # must equal C
+./build.sh                                              # the repo's own release script
+```
+
+The build script runs outside strata: whatever it commits or pushes (its own
+repo, sibling repos, deploys) is not covered by strata's checks or
+confirmation gate, so it is the human's step unless they explicitly asked the
+agent to run it.
 
 ## Publish conflicts: fix and rerun
 
@@ -241,7 +306,10 @@ a plain `git push`:
 git-strata: push refused in a strata workspace; publish with git-strata publish
 ```
 
-Never run `git push` (or commit on the main checkout). Commits come from
+Never run `git push` (or commit on the main checkout), and never set
+`STRATA_PUBLISH` or pass `--no-verify`: the hook only stops accidental pushes
+(git-strata's own push sets `STRATA_PUBLISH=1` for it), it is not a security
+boundary. Commits come from
 `publish`; pushes from `git-strata push` or a pushing publish. `daemon status`
 reports a disabled or replaced hook as `PrePushGuardDisabled`.
 
@@ -283,11 +351,11 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Busy` (other) | repo lock held; wait, retry later |
 | `NotTty` | hand the exact command to the human |
 | `NotConfirmed` | report; the human reruns (`plan_changed`: rerun once yourself) |
-| `AmbiguousMatch` | ticket matches several sessions; use an id from `detail` |
+| `AmbiguousMatch` | ticket matches several sessions; use an id from `detail` (`from_repo`: a `--from` path is in several repos, see `detail.candidates`) |
 | `NoSuchSession` | cd into a workspace or pass `--session` |
 | `NoSuchRepo` | name not in config |
 | `NoSuchBranch` | (`new`) a repo has no `origin/<default_branch>`; tell the human |
-| `InvalidInput` | fix arguments per `detail.reason`; `chain_rewound` / `chain_diverged`: human runs `chain`; push-guard reasons above: tell the human |
+| `InvalidInput` | fix arguments per `detail.reason` (`from_repo_prefix` / `from_path`: rewrite `--from` as `detail.expected` says); `chain_rewound` / `chain_diverged`: human runs `chain`; push-guard reasons above: tell the human |
 | `Conflict` | fix and rerun the same publish (above) |
 | `Conflict` (`assigned`) | another session owns the path; do not retry |
 | `NoMatch` | a `--from` path is not checkpointed; checkpoint, rerun |

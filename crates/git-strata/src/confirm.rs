@@ -322,28 +322,59 @@ pub fn assign(ctx: &Ctx, file: &str, session: &str) -> Result<Envelope> {
 /// One (session, repo) piece of the batch with its paths.
 type Batch = BTreeMap<(SessionId, RepoName), Vec<RepoPath>>;
 
+/// The repo of `path` in session `id` (cli.md D30): the workspace that has
+/// it on disk or in its base. Every path error is the caller's input, so it
+/// is reported before any gate: `InvalidInput` `from_repo_prefix` when PATH
+/// starts with a repo name (`S:staff-api/x` for `S:x`), `InvalidInput`
+/// `from_path` when no workspace has it, `AmbiguousMatch` `from_repo` when
+/// several do. A single-repo session takes any other path as its own (a new
+/// file the daemon then reads).
 fn which_repo(store: &Store, id: &SessionId, path: &RepoPath) -> Result<RepoName> {
     let rec = ro::record(store, id)?;
-    let repos: Vec<&RepoName> = rec.manifest.repos.keys().collect();
-    if repos.len() == 1 {
-        return Ok(repos[0].clone());
-    }
-    let mut hits = Vec::new();
-    for (repo, ws) in &rec.manifest.repos {
-        let on_disk = std::fs::symlink_metadata(ws.path.join(path.as_str())).is_ok();
-        let in_base = store.manifest(repo, &ws.base.tree).ok().flatten().is_some_and(|m| m.entries.contains_key(path));
-        if on_disk || in_base {
-            hits.push(repo.clone());
+    let has = |repo: &RepoName, ws: &strata_types::WorkspaceState, p: &RepoPath| -> bool {
+        std::fs::symlink_metadata(ws.path.join(p.as_str())).is_ok()
+            || store.manifest(repo, &ws.base.tree).ok().flatten().is_some_and(|m| m.entries.contains_key(p))
+    };
+    let mut hits: Vec<RepoName> = rec.manifest.repos.iter().filter(|(r, ws)| has(r, ws, path)).map(|(r, _)| r.clone()).collect();
+    match hits.len() {
+        1 => return Ok(hits.remove(0)),
+        0 => {}
+        _ => {
+            return Err(StrataError::new(Code::AmbiguousMatch, format!("{path} is in several repos of {id}")).with_detail(
+                json!({ "reason": "from_repo", "session": id.as_str(), "path": path.as_str(), "candidates": hits.iter().map(|r| r.as_str()).collect::<Vec<_>>() }),
+            ));
         }
     }
-    match hits.len() {
-        1 => Ok(hits.remove(0)),
-        0 => Err(StrataError::new(Code::NoSuchPath, format!("{path} is in no workspace of {id}"))
-            .with_detail(json!({ "session": id.as_str(), "path": path.as_str() }))),
-        _ => Err(StrataError::new(Code::AmbiguousMatch, format!("{path} is in several repos of {id}")).with_detail(
-            json!({ "reason": "from_repo", "session": id.as_str(), "path": path.as_str(), "candidates": hits.iter().map(|r| r.as_str()).collect::<Vec<_>>() }),
-        )),
+    if let Some((first, rest)) = path.as_str().split_once('/')
+        && let Ok(inner) = RepoPath::try_from(rest.to_string())
+        && let Some((repo, _)) = rec.manifest.repos.iter().find(|(r, ws)| r.as_str() == first && has(r, ws, &inner))
+    {
+        let expected = format!("{id}:{rest}");
+        return Err(StrataError::new(
+            Code::InvalidInput,
+            format!("--from {id}:{path}: PATH starts with the repo name {repo}; PATH is relative to the repo root, so write --from {expected}"),
+        )
+        .with_detail(json!({ "reason": "from_repo_prefix", "session": id.as_str(), "path": path.as_str(), "repo": repo.as_str(), "expected": expected })));
     }
+    let repos: Vec<&str> = rec.manifest.repos.keys().map(|r| r.as_str()).collect();
+    if repos.len() == 1 {
+        return Ok(rec.manifest.repos.keys().next().cloned().expect("one repo"));
+    }
+    Err(StrataError::new(
+        Code::InvalidInput,
+        format!(
+            "--from {id}:{path}: {path} is in no workspace of {id} (repos: {}); --from takes SESSION:PATH, PATH relative to the repo root with no repo prefix, e.g. {id}:src/a.ts",
+            repos.join(", ")
+        ),
+    )
+    .with_detail(json!({ "reason": "from_path", "session": id.as_str(), "path": path.as_str(), "repos": repos, "expected": "SESSION:PATH (PATH relative to the repo root, no repo prefix)" })))
+}
+
+/// The `--from` errors that are about a path (not the session selector):
+/// reported as they are, before the TTY gate.
+fn is_path_error(e: &StrataError) -> bool {
+    let reason = e.detail.as_ref().and_then(|d| d.get("reason")).and_then(Value::as_str);
+    matches!(reason, Some("from_path" | "from_repo_prefix" | "from_repo"))
 }
 
 fn parse_from(entries: &[String]) -> Result<Vec<(String, RepoPath)>> {
@@ -458,9 +489,12 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
         let parsed = parse_from(from)?;
         match build_batch(&config, &parsed) {
             Ok(b) => b,
+            // D30: a bad PATH is the caller's input and is reported as it
+            // is; a NotTty here would hide it (no connection either way).
+            Err(e) if is_path_error(&e) => return Err(e),
             Err(e) => {
-                // The batch's repos are unknown: gate on every configured
-                // repo before reporting (no connection either way).
+                // The session is unreadable, so the batch's repos are
+                // unknown: gate on every configured repo before reporting.
                 gate(&mut config.repos.keys())?;
                 return Err(e);
             }

@@ -101,6 +101,22 @@ Notes:
   edit out, revert it (or `restore` the path) before publishing.
   Without `--from` it is interactive on a TTY and `InvalidInput`
   (`no_batch`) otherwise, so agents always pass `--from SESSION:PATH`.
+  PATH is relative to the repo root with no repo prefix (`staff-api/app/x.php`
+  is `--from "${S}:app/x.php"`). Write `"${S}:path"`, never `"$S:path"`: zsh
+  reads `$S:t`, `$S:h`, ... as modifiers. Path mistakes come back before any
+  TTY check: `InvalidInput` `from_repo_prefix` (rerun with
+  `error.detail.expected`), `InvalidInput` `from_path` (no workspace has it),
+  `AmbiguousMatch` `from_repo` (several do; `detail.candidates`).
+- `publish` replies only after checks, commit, push and the rebase of every
+  session. `git push` waits for the remote's own hooks (bounded at 120 s,
+  then `Unknown` `push_unknown`), the rebase is unbounded: a minute or two of
+  silence after the remote branch moved is normal. Wait; do not interrupt or
+  rerun.
+- Release builds never run in a workspace (no remotes, detached `HEAD`, push
+  guard). Publish (and push), then in the main checkout `git pull --ff-only`,
+  check `HEAD` equals `data.commits.<repo>`, and run the build there; the
+  build script is the human's step unless they asked you to run it. See
+  README "Release builds from a session".
 - Multi-repo `publish` commits repo by repo. When one repo hits `Conflict`,
   repos before it have already committed (and pushed, if push is on); the
   call does not roll them back. See "Publish conflict: fix and re-run" below.
