@@ -69,7 +69,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata daemon stop` | — | 否 | 否 |
 | `git-strata daemon status` | `daemon_status` | 否 | 否 |
 | `git-strata resolve` | `resolve_move`（上游要求 1） | 是（D18） | 否。没有 `Action` 变体，不弹框 |
-| `git-strata chain` | `chain_resolve`（上游要求 2） | 选择本身要 TTY（D18）。`--restore` 且仓库要确认时，连接前再按 `push` 的钉住值查一次 | `--restore` 且要确认：`PushDeploy`。`--accept-origin replay` / `drop`：不取凭据 |
+| `git-strata chain` | `chain_resolve`（上游要求 2） | 选择本身要 TTY（D18）。不要确认的仓库分叉时，`push` 自己无头重放（publish.md D2a），`chain` 本身不变。`--restore` 且仓库要确认时，连接前再按 `push` 的钉住值查一次 | `--restore` 且要确认：`PushDeploy`。`--accept-origin replay` / `drop`：不取凭据 |
 | `git-strata config relax` | `config_relax` | 是 | `ConfigRelax`。`require_tty` 之后连接并弹框，与其他确认命令相同。不因文件变化而跑，也不处理收紧 |
 
 `git-strata daemon start` 用 `launchctl bootstrap gui/<uid> ~/Library/LaunchAgents/com.gwd.git-stratad.plist` 装上 `com.gwd.git-stratad`，不等待业务，不连接 socket。`stop` 用 `launchctl bootout gui/<uid>/com.gwd.git-stratad`，也不连接 socket。plist 不存在 → `InvalidInput`，`detail.reason = "no_plist"`。已经装上或已经卸下 → 成功，`data.already = true`，不是错误（D15、D16）。[实现时补的决定][我的决定 D24] `stop` 在 `bootout` 成功之后再用 `launchctl print` 轮询，直到 launchd 不再列出这个服务才返回（每 100 ms 一次，最多 10 s；超时 → `Unknown`，`detail = {reason: "launchctl", step: "bootout_wait"}`）。真实安装里 `bootout` 返回时服务还在列表里，紧接着的 `start` 回答 `already` 却什么都没起来。

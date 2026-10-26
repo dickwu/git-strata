@@ -25,6 +25,8 @@ macro_rules! gate_text {
     deps approve           always (TTY + prompt)
     config relax           always (TTY + prompt)
     resolve, chain         always need a TTY (chain --restore may also prompt)
+  push REPO of a repo that needs no confirmation runs headless and, when origin
+  moved under the unpushed chain (diverged), replays it itself (see push --help).
   publish into a repo with publish.push = false never asks, even when the repo
   needs confirmation; only the later `push REPO` does.
 
@@ -277,7 +279,10 @@ OTHER ERRORS
   CheckFailed        the repo's check failed in staging: fix, rerun
   PushRefused        the commit landed (data.commits) but the remote refused
   Unknown push_unknown  push outcome unknown: do not retry; tell the human
-  InvalidInput chain_rewound / chain_diverged  human runs `git-strata chain`
+  InvalidInput chain_rewound / chain_diverged  origin moved under an unpushed
+                     chain. diverged on a repo without confirmation: run
+                     `git-strata push REPO` (it replays), then rerun publish.
+                     Otherwise the human runs `git-strata chain`
   NotConfirmed plan_changed  nothing written: rerun once yourself
 
 ",
@@ -297,12 +302,30 @@ pub const PUSH_AFTER: &str = concat!(
   git-strata push tool
 
 RESULT
-  Pushed  -> ok, data {kind:\"Pushed\", message}
+  Pushed  -> ok, data {kind:\"Pushed\", commit, replayed, rebases, warnings}
   Refused -> PushRefused (message has the remote's words); report to the human
   unknown -> Unknown (push_unknown; a kept staging dir is in detail.scene when
              given); do not retry, gc or rm; `daemon status` lists it as UnknownPush
   nothing new -> NoCommit (not a failure)
   unknown repo -> NoSuchRepo
+
+ORIGIN MOVED (repos that need no confirmation)
+  push fetches origin first. When origin gained commits the chain does not
+  have (chain_diverged), it replays the unpushed commits onto origin's tip
+  (like `chain --accept-origin replay`), reruns the repo's checks on the new
+  tip, moves chain and anchor, rebases sessions that sat on a replayed commit,
+  and pushes once as a fast-forward. data.replayed = {from, to, onto, commits,
+  checks_ran} (null when nothing was replayed). Never forced, never retried.
+  Conflict replay_conflict -> nothing written, nothing pushed; detail.commit
+             is the commit that did not apply onto detail.origin. Fix it in a
+             session (or hand `git-strata chain` to the human)
+  CheckFailed -> checks failed on the replayed tip; nothing written or pushed
+  InvalidInput replay_deps_unsealed -> the deps set for the replayed tree is
+             not built; open a session (`new`) on the repo, then push again
+  InvalidInput chain_rewound -> origin dropped pushed commits: human only
+             (`git-strata chain`); push never replays a rewound chain
+  A repo that needs confirmation is never replayed by push: its push sends
+  only a chain that leads origin; diverged is NoCommit, the human runs chain.
 
 ",
     gate_text!(),
@@ -363,7 +386,9 @@ to the human.
 
 pub const CHAIN_AFTER: &str = "HUMAN ONLY. Exactly one of --accept-origin replay|drop / --restore.
 Needs a TTY; --restore pushes and may also prompt. publish errors
-InvalidInput chain_rewound / chain_diverged mean the human must run this.
+InvalidInput chain_rewound / chain_diverged mean the human must run this,
+except chain_diverged on a repo that needs no confirmation: `git-strata push
+REPO` replays it headless (push --help, ORIGIN MOVED).
 ";
 
 pub const CONFIG_AFTER: &str = concat!(

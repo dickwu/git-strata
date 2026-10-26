@@ -415,7 +415,7 @@ o = `publish_chain.origin`，c = 链顶，a = 锚点。前移只在 repo 写锁�
 
 `needs_human_confirm` 为真时，凭据的 `action` 必须是 `PushDeploy { repo, branch }`，`branch` 等于 `cfg.publish.branch`。不符 → `NotConfirmed`，记录 `Pushed` 的那一次调用不启动。人的 `pre-push` 钩子由 gitio 在那次调用里跑，cwd 是 staging 根，环境里有 `STRATA_PUBLISH=1`。钩子拒绝按 gitio 的 porcelain 归类，本文不另解析。那次调用提交之前不是 `Pushed`。
 
-链不领先 origin（`publish_chain` 不是 `Leads`）→ `NoCommit`，不推。
+链不领先 origin（`publish_chain` 不是 `Leads`）→ `NoCommit`，不推。不要确认的仓库，daemon 的 `push` 先 fetch，`Diverged` 时先无头重放再推（D2a）。
 
 ### 5.7 `assign`
 
@@ -751,6 +751,7 @@ git commit -m "feat(publish): one merge under the repo lock"
 | --- | --- | --- | --- |
 | D1 `merge_base` 的形状 | 薄包装。只在 `Leads` 时返回链顶，其余返回 origin 的 tip。没 fetch → `NoSuchBranch` | 计划要这个名字。判定只有 deps 一份，两份会在锚上分叉 | 2026-10-23 |
 | D2 不自动重放回退或分叉的链 | `InvalidInput`，`chain_rewound` / `chain_diverged`。显式命令归 T14 | 自动重放会把被人拿掉的提交推回去。裁定把「是否自动」交给 T10 | 2026-10-23 |
+| D2a 不要确认的仓库，`push` 无头重放分叉的链 [实现时补的决定] | daemon `push`（resolve.rs `push_replaying`）：仓库钉住的 `confirm` 为假时先 fetch；`Leads` 照常推；`Diverged`（锚点仍在 origin 上）把未推的 `a..c` 逐个 `replay_commits` 接到 o 上，任何一个接不上 → `Conflict`（`replay_conflict`，`detail.commit` / `origin` / `chain`），不写 ref、不推；接上了先用本仓库按新 tree 的输入找到的 sealed 依赖集重跑检查（没 sealed → `InvalidInput` `replay_deps_unsealed`，锁里不安装；检查失败 → `CheckFailed`），再一次事务挪链与锚点，再经原来记录的、钉住 URL 的 `push_to` 推一次快进，不强推、不重试；最后把头在被重放提交上的会话按 §5.8 rebase 到对应副本。`Rewound` 仍 `chain_rewound`；要确认的仓库走原路径，分叉是 `NoCommit`，`chain` 仍归人 | D2 怕的是把人拿掉的提交推回去，那是 `Rewound`；`Diverged` 时人没拿掉任何东西，只是别人在 origin 上加了提交，重放只接未推的部分，冲突就停。要确认的仓库每次推送本来就有人在场，交给 `chain`。放在 `push` 而不是给 `chain` 开无头入口：代理本来就跑 `push`，`chain` 仍守 cli D18，重放还会重跑检查。（2026-10-26，peilin：staff-api `config relax` 之后无头推送被 non-ff 拒） | 2026-10-26 |
 | D3 零条检查 | 成功，并写出 `checks_ran: 0` | config.md 把这件事交给本文。静默跳过会让人以为检查跑过了 | 2026-10-23 |
 | D4 staging 的位置 | 最小 `SessionId` 的会话根下，`.strata-publish-<repo>-<release-id>/`。仓库在其中的 `<repo>/`，兄弟是所钉基线的克隆，不是活的工作区 | 草稿要求会话根、真实目录、兄弟布局。多会话组没有唯一的根，取最小 id。克隆兄弟是为了检查的 `../` 不写进活的工作区 | 2026-10-23 |
 | D5 hunk 文本上限 | 4096 字节，UTF-8 字符边界。超限的带 `truncated`，同冲突里的小 hunk 保持原文 | 裁定要求本文定上限。3d 的那一行要求小 hunk 精确 | 2026-10-23 |

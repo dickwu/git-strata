@@ -244,6 +244,55 @@ No human is needed unless `detail.reason` is `assigned`.
 `Conflict` with reason `assigned`: the path belongs to another session
 (`git-strata assign` / `publish --assign`); do not retry from yours.
 
+## Origin moved under the unpushed chain: push replays
+
+A repo with `publish.push = false` keeps its published commits on
+`refs/strata/publish/<branch>` until `git-strata push`. When someone else
+pushes to origin in between, the chain and origin have **diverged**: the
+anchor (origin's tip at the last publish) is still on origin, origin has
+commits the chain lacks, and a plain push would be refused as
+non-fast-forward.
+
+For a repo that needs **no** confirmation (`publish.confirm = false` in the
+pin), `git-strata push REPO` handles this headless:
+
+1. it fetches origin;
+2. chain leads origin: pushes as before;
+3. diverged: replays the unpushed commits (anchor..chain) onto origin's tip,
+   as `chain --accept-origin replay` does. If any commit does not apply, it
+   stops with `Conflict` `replay_conflict` (`detail.commit` did not apply onto
+   `detail.origin`): no ref is written and nothing is pushed;
+4. reruns the repo's checks on the replayed tip, with the repo's sealed deps
+   set cloned in (`InvalidInput` `replay_deps_unsealed` when that set was
+   never built: open a session on the repo, then push again; `CheckFailed`
+   when a check fails). Checks that need sibling repos' layouts may fail
+   here; then nothing is written either;
+5. moves chain and anchor in one ref transaction, pushes once as a
+   fast-forward through the same recording, URL-pinned push as always (never
+   forced, never retried; a refusal is `PushRefused` and the next push
+   replays again);
+6. rebases every live session whose workspace head was one of the replayed
+   commits onto its copy, as publish rebases its sessions.
+
+`data` = `{kind: "Pushed", commit, replayed: {from, to, onto, commits,
+checks_ran} | null, rebases: [{session, from, to, report}], warnings}`.
+
+```sh
+git-strata push staff-api
+#  -> ok: data.replayed shows the replay (null when origin had not moved)
+#  -> Conflict replay_conflict: fix in a session and publish, or hand
+#     `git-strata chain --repo staff-api ...` to the human
+```
+
+What stays human: a **rewound** chain (origin dropped commits that were
+pushed; `chain_rewound`) is never replayed automatically, since that would
+push back commits a human removed; and a repo that needs confirmation never
+replays on push (diverged is `NoCommit`), so `chain --repo R --accept-origin
+replay|drop` / `--restore` remains the human's command (TTY). `publish` still
+refuses `chain_diverged` when origin moved before it; for a repo without
+confirmation run `git-strata push REPO` first, then rerun the publish.
+Pushing right after each publish keeps the window small.
+
 ## Confirmation gate (Touch ID / TTY)
 
 > Keep this section in step with `gate_text!` in
@@ -355,7 +404,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `NoSuchSession` | cd into a workspace or pass `--session` |
 | `NoSuchRepo` | name not in config |
 | `NoSuchBranch` | (`new`) a repo has no `origin/<default_branch>`; tell the human |
-| `InvalidInput` | fix arguments per `detail.reason` (`from_repo_prefix` / `from_path`: rewrite `--from` as `detail.expected` says); `chain_rewound` / `chain_diverged`: human runs `chain`; push-guard reasons above: tell the human |
+| `InvalidInput` | fix arguments per `detail.reason` (`from_repo_prefix` / `from_path`: rewrite `--from` as `detail.expected` says); `chain_diverged` on a repo without confirmation: `git-strata push REPO` replays it (see [Origin moved](#origin-moved-under-the-unpushed-chain-push-replays)), then rerun; `chain_rewound`, or diverged on a gated repo: human runs `chain`; push-guard reasons above: tell the human |
 | `Conflict` | fix and rerun the same publish (above) |
 | `Conflict` (`assigned`) | another session owns the path; do not retry |
 | `NoMatch` | a `--from` path is not checkpointed; checkpoint, rerun |

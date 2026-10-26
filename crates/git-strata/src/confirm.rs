@@ -77,7 +77,16 @@ pub fn push(ctx: &Ctx, repo: &str) -> Result<Envelope> {
     // Review H2: the daemon pushes only the chain top shown here.
     let data = ctx.call("push", json!({ "repo": name.as_str(), "shown": shown }), Kind::Write)?;
     let outcome = data.get("push").cloned().unwrap_or(Value::Null);
-    Ok(outcome_result(&name, &outcome, outcome.clone()))
+    // Publish.md D2a: a headless push may have replayed the chain first.
+    let mut shown_data = outcome.clone();
+    if let Some(m) = shown_data.as_object_mut() {
+        for k in ["commit", "replayed", "rebases", "warnings"] {
+            if let Some(v) = data.get(k) {
+                m.insert(k.into(), v.clone());
+            }
+        }
+    }
+    Ok(outcome_result(&name, &outcome, shown_data))
 }
 
 // ---- config relax --------------------------------------------------------

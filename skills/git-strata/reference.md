@@ -18,7 +18,7 @@ is not running.
 | `deps approve <ID>` | `--sessions <S,S>` (default: all sessions of the repo) | yes + confirm | no | `{results:[{session,kind:"moved"\|"skipped",code?,detail?}]}` |
 | `deps list` | `--repo <R>` | no | yes | `{proposals:[...]}` |
 | `publish` | `--from <S:PATH>` (repeatable; none = interactive on a TTY, else `InvalidInput` `no_batch`); `--assign <FILE> <SESSION>` | when a repo it will still commit pushes and needs confirmation. A guarded repo is exempt only when the content check proves its selected paths already landed; a session still on its old base (its rebase is `Waiting` on a deps proposal) still counts, so it can need a TTY and confirmation even though nothing new would be committed. If the daemon's own replan needs a guarded repo outside the set the CLI's TTY check covered (history changed between the plan and the publish), publish returns `NotConfirmed` with `detail.reason` `plan_changed` before prompting or writing anything (`data.already_published` still lists repos that landed earlier): rerun the same command | no | `{commits:{<repo>:oid},checks_ran,waiting:[],pushes:[{repo,outcome}],already_published:[{repo,publish,commit,push}]}`; on `Conflict`, `error.detail.repo` is the stopped repo and `data` keeps the repos that landed |
-| `push <REPO>` | — | when the repo needs confirmation | no | `PushOutcome` `{kind,message}` |
+| `push <REPO>` | — | when the repo needs confirmation | no | `PushOutcome` `{kind,message}`; for a repo without confirmation also `commit`, `replayed` (`{from,to,onto,commits,checks_ran}` or null), `rebases`, `warnings`: it fetches and replays a diverged chain onto origin first (`Conflict` `replay_conflict` / `CheckFailed` / `replay_deps_unsealed`: nothing written or pushed) |
 | `assign` | `--file <PATH> --session <S>` (both required) | no | no | `{}` |
 | `rm` | `--session <S>` (required), `--discard` | `--discard`: yes + confirm | no | `RemoveReport` |
 | `gc` | — | no | no | `{}` |
@@ -43,7 +43,8 @@ Fixed `detail.reason` values produced by the CLI: `daemon_down`,
 `assign_with_from`, `pick`, `stdin`, `not_tty` (code `NotTty`, with
 `detail.command`), `push_unknown`, `launchctl`, `rpc_id`, `unknown_method`,
 `rpc_failed`, `readonly_client`. From publish: `assigned`, `chain_rewound`,
-`chain_diverged`, `workspace_changed`, `plan_changed`; from deps:
+`chain_diverged`, `workspace_changed`, `plan_changed`; from push: `replay_conflict`,
+`replay_deps_unsealed`, `replay_too_long`, `chain_rewound`; from deps:
 `main_moved`; from `config relax`: `not_relaxed`; from the push guard:
 `url-rewritten`, `url-is-remote-name`, `empty-url`, `no-such-remote`.
 
