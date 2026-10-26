@@ -14,7 +14,7 @@ use strata_store::{Health, Lifecycle, MoveState, SessionRecord, WorkspaceRecord}
 use strata_types::{CheckpointId, Code, RepoName, RepoPath, SessionId, SessionManifest, StrataError};
 
 use crate::scene::{Scene, scene_of};
-use crate::seed::{SeedRecord, mtime_of};
+use crate::seed::{SeedRecord, mtime_of, written_stamp};
 use crate::sys::lstat;
 use crate::{Result, Sessions};
 
@@ -226,7 +226,9 @@ impl Sessions<'_> {
             for s in &seeds {
                 let stale = match lstat(&s.source).map_err(|e| read_err(&e, &s.source))? {
                     None => true,
-                    Some(m) => mtime_of(&m) != s.source_mtime,
+                    // Against what strata last wrote at the copy: the
+                    // refresh mark, else the row (seed refresh).
+                    Some(m) => mtime_of(&m) != written_stamp(&ws.path.join(s.path.as_str()), s).0,
                 };
                 if stale {
                     warnings.push(StatusWarning::SeedStale { path: s.path.clone() });

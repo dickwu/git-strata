@@ -391,6 +391,87 @@ fn seed_files_listed_in_status_and_never_checkpointed() {
 }
 
 #[test]
+fn seed_refresh_follows_main_and_never_overwrites_an_edit() {
+    let fx = Fx::with(&["tool"]);
+    ignore(&fx, "tool", ".env\n");
+    let main = fx.main("tool");
+    fs::write(main.join(".env"), b"A=1\n").unwrap();
+    let s = fx.sessions();
+    let rep = s.new(None, &[fx.rn("tool")]).unwrap();
+    let w = ws(&rep, "tool");
+    let sid = id(&rep);
+    let stale = |s: &Sessions<'_>| {
+        let st = s.status(&sid).unwrap();
+        has_warning(wstat(&st, "tool"), |x| matches!(x, StatusWarning::SeedStale { path } if path.as_str() == ".env"))
+    };
+    let staging = || {
+        fs::read_dir(w.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(strata_session::SEED_STAGING_PREFIX))
+            .count()
+    };
+
+    // main unchanged: nothing to do
+    assert!(s.refresh_seeds(&sid).unwrap().is_empty());
+
+    // main changes: the untouched copy follows; status is clean again
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(main.join(".env"), b"A=22\n").unwrap();
+    assert!(stale(&s));
+    assert_eq!(s.seeds_due(&sid).unwrap().len(), 1);
+    assert_eq!(fs::read(w.join(".env")).unwrap(), b"A=1\n", "seeds_due is read only");
+    let r = s.refresh_seeds(&sid).unwrap();
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!((r[0].repo.as_str(), r[0].path.as_str()), ("tool", ".env"));
+    assert_eq!(fs::read(w.join(".env")).unwrap(), b"A=22\n");
+    assert!(!stale(&s));
+    assert!(s.refresh_seeds(&sid).unwrap().is_empty());
+
+    // and again (the copy is now described by its refresh mark)
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(main.join(".env"), b"A=333\n").unwrap();
+    assert_eq!(s.refresh_seeds(&sid).unwrap().len(), 1);
+    assert_eq!(fs::read(w.join(".env")).unwrap(), b"A=333\n");
+    assert!(!stale(&s));
+    assert_eq!(staging(), 0);
+
+    // the workspace edits its copy: never overwritten, stale is reported
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(w.join(".env"), b"A=mine\n").unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(main.join(".env"), b"A=4444\n").unwrap();
+    assert!(s.seeds_due(&sid).unwrap().is_empty());
+    assert!(s.refresh_seeds(&sid).unwrap().is_empty());
+    assert_eq!(fs::read(w.join(".env")).unwrap(), b"A=mine\n");
+    assert!(stale(&s));
+    assert_eq!(staging(), 0);
+
+    // a copy replaced by rename (editors' atomic save) is not strata's either
+    let fx2 = Fx::with(&["tool"]);
+    ignore(&fx2, "tool", ".env\n");
+    fs::write(fx2.main("tool").join(".env"), b"B=1\n").unwrap();
+    let s2 = fx2.sessions();
+    let rep2 = s2.new(None, &[fx2.rn("tool")]).unwrap();
+    let w2 = ws(&rep2, "tool");
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(fx2.main("tool").join(".env"), b"B=22\n").unwrap();
+    assert_eq!(s2.refresh_seeds(&id(&rep2)).unwrap().len(), 1);
+    fs::write(w2.join(".env.tmp"), b"B=xx\n").unwrap();
+    fs::rename(w2.join(".env.tmp"), w2.join(".env")).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(fx2.main("tool").join(".env"), b"B=333\n").unwrap();
+    assert!(s2.refresh_seeds(&id(&rep2)).unwrap().is_empty());
+    assert_eq!(fs::read(w2.join(".env")).unwrap(), b"B=xx\n");
+
+    // never checkpointed, never in git status as tracked
+    let paths = entry_paths(&checkpoint(&fx, &rep, "tool"));
+    assert!(!paths.contains(".env"), "{paths:?}");
+    let porcelain = fx.sb.git(&w, &["status", "--porcelain"]);
+    assert!(!porcelain.lines().any(|l| l.ends_with(".env")), "{porcelain}");
+}
+
+#[test]
 fn status_warns_untracked_repo_edits_not_checkpointed() {
     let fx = Fx::new();
     let s = fx.sessions();

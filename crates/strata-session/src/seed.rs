@@ -228,3 +228,173 @@ pub(crate) fn ancestors(p: &RepoPath) -> Vec<RepoPath> {
 pub(crate) fn mtime_of(m: &std::fs::Metadata) -> SystemTime {
     m.modified().unwrap_or_else(|_| UNIX_EPOCH + Duration::new(m.mtime().max(0) as u64, m.mtime_nsec().max(0) as u32))
 }
+
+/// The xattr a refreshed seed copy carries: `v1 <mtime_ns> <size>` of the
+/// copy as strata wrote it. Present only after a refresh; a copy from `new`
+/// is described by its store row (size, source mtime: clonefile keeps the
+/// source's mtime). Any write to the copy changes its mtime; an editor that
+/// replaces the file drops the xattr. Either way the copy no longer matches
+/// what strata wrote and is never overwritten.
+pub const SEED_MARK: &str = "dev.git-strata.seed";
+
+/// Staging name prefix (layout root) of a seed being refreshed.
+pub const SEED_STAGING_PREFIX: &str = ".strata-tmp-seed-";
+
+/// One seed copy `refresh_seeds` replaced with the main checkout's current file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeedRefresh {
+    pub repo: strata_types::RepoName,
+    pub path: RepoPath,
+}
+
+/// What strata last wrote at a seed copy: (mtime, size).
+pub(crate) type SeedStamp = (SystemTime, u64);
+
+/// What strata last wrote at `copy` (seed row `s`): the refresh mark when
+/// the copy carries one, else the row's source mtime and size.
+pub(crate) fn written_stamp(copy: &Path, s: &SeedRecord) -> SeedStamp {
+    read_mark(copy).unwrap_or((s.source_mtime, s.size))
+}
+
+fn ns_of(t: SystemTime) -> i128 {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_nanos() as i128,
+        Err(e) => -(e.duration().as_nanos() as i128),
+    }
+}
+
+fn time_of(ns: i128) -> Option<SystemTime> {
+    let d = Duration::from_nanos(u64::try_from(ns.unsigned_abs()).ok()?);
+    if ns >= 0 { UNIX_EPOCH.checked_add(d) } else { UNIX_EPOCH.checked_sub(d) }
+}
+
+fn cpath(p: &Path) -> Option<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(p.as_os_str().as_bytes()).ok()
+}
+
+fn read_mark(p: &Path) -> Option<SeedStamp> {
+    let (c, n) = (cpath(p)?, std::ffi::CString::new(SEED_MARK).ok()?);
+    let mut buf = [0u8; 96];
+    // SAFETY: valid NUL-terminated strings; buf outlives the call and its
+    // length is passed.
+    let r = unsafe { libc::getxattr(c.as_ptr(), n.as_ptr(), buf.as_mut_ptr().cast(), buf.len(), 0, libc::XATTR_NOFOLLOW) };
+    if r < 0 {
+        return None;
+    }
+    let s = std::str::from_utf8(&buf[..r as usize]).ok()?;
+    let mut it = s.split(' ');
+    if it.next()? != "v1" {
+        return None;
+    }
+    let m = time_of(it.next()?.parse::<i128>().ok()?)?;
+    let size = it.next()?.parse::<u64>().ok()?;
+    if it.next().is_some() {
+        return None;
+    }
+    Some((m, size))
+}
+
+fn write_mark(p: &Path, st: SeedStamp) -> std::io::Result<()> {
+    let c = cpath(p).ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let n = std::ffi::CString::new(SEED_MARK).expect("no NUL");
+    let v = format!("v1 {} {}", ns_of(st.0), st.1);
+    // SAFETY: valid NUL-terminated strings; v outlives the call.
+    let r = unsafe { libc::setxattr(c.as_ptr(), n.as_ptr(), v.as_ptr().cast(), v.len(), 0, libc::XATTR_NOFOLLOW) };
+    if r < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+}
+
+fn stamp_of(a: &strata_apfs::Attrs) -> SeedStamp {
+    (a.mtime, a.size)
+}
+
+impl crate::Sessions<'_> {
+    /// Keep seed copies current (seed refresh): every regular-file seed of
+    /// an active session whose main-checkout source changed since strata
+    /// last wrote the copy, and whose copy nobody touched since, is replaced
+    /// by a fresh clone of the source (staged at the layout root, then
+    /// swapped in with one rename). A copy that was edited, replaced or
+    /// removed in the workspace, a seed that is no longer ignored, a symlink
+    /// seed and a missing source are left alone (`status` keeps reporting
+    /// `SeedStale`). Never reads or logs file contents.
+    pub fn refresh_seeds(&self, id: &strata_types::SessionId) -> Result<Vec<SeedRefresh>> {
+        self.seeds_pass(id, false)
+    }
+
+    /// Read only: the seeds `refresh_seeds` would replace now (before the
+    /// ignore check). Lets a caller take the session's queue only when
+    /// there is something to do.
+    pub fn seeds_due(&self, id: &strata_types::SessionId) -> Result<Vec<SeedRefresh>> {
+        self.seeds_pass(id, true)
+    }
+
+    fn seeds_pass(&self, id: &strata_types::SessionId, dry: bool) -> Result<Vec<SeedRefresh>> {
+        let rec = self.live_session(id)?;
+        if rec.lifecycle != strata_store::Lifecycle::Active {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for (repo, row) in &rec.workspaces {
+            if row.health != strata_store::Health::Ok || row.seeds.is_empty() {
+                continue;
+            }
+            let Some(ws) = rec.manifest.repos.get(repo) else { continue };
+            let git = self.git(repo)?;
+            for s in row.seeds.iter().map(SeedRecord::from) {
+                if s.link.is_none() && refresh_one(git, &ws.path, repo, &s, dry)? {
+                    out.push(SeedRefresh { repo: repo.clone(), path: s.path.clone() });
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn refresh_one(git: &Git, ws: &Path, repo: &strata_types::RepoName, s: &SeedRecord, dry: bool) -> Result<bool> {
+    // The source: a regular file whose stamp differs from what was written.
+    let src = match lstat(&s.source).map_err(|e| classify_io_error(&e, IoSide::Read, &s.source))? {
+        Some(m) if m.file_type().is_file() => m,
+        _ => return Ok(false),
+    };
+    let src_stamp = (mtime_of(&src), src.len());
+    // The copy: a regular file, reached without following symlinks.
+    let copy = match strata_apfs::attrs_of(ws, &s.path) {
+        Ok(a) if matches!(a.kind, FileKind::File) => a,
+        Ok(_) => return Ok(false),
+        Err(e) if matches!(e.code, Code::NoSuchPath | Code::NotDirectory) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let copy_path = ws.join(s.path.as_str());
+    let written = written_stamp(&copy_path, s);
+    if stamp_of(&copy) != written || src_stamp == written {
+        return Ok(false);
+    }
+    if dry {
+        return Ok(true);
+    }
+    if !git.is_ignored(ws, &s.path)? {
+        return Ok(false);
+    }
+    let Some(layout) = ws.parent() else { return Ok(false) };
+    let tmp = rp(format!("{SEED_STAGING_PREFIX}{}", crate::sys::random_hex(8)));
+    let dst = rp(format!("{repo}/{}", s.path));
+    strata_apfs::clone_file_rooted(&s.source, layout, &tmp, None)?;
+    let tmp_path = layout.join(tmp.as_str());
+    let undo = |e: StrataError| -> StrataError {
+        let _ = strata_apfs::remove_rooted(layout, &tmp, strata_apfs::RemoveKind::File);
+        e
+    };
+    let fresh = strata_apfs::attrs_of(layout, &tmp).map_err(undo)?;
+    write_mark(&tmp_path, stamp_of(&fresh)).map_err(|e| undo(classify_io_error(&e, IoSide::Write, &tmp_path)))?;
+    strata_apfs::rename_rooted(layout, &tmp, &dst, strata_apfs::RenameMode::Swap).map_err(undo)?;
+    // `tmp` now holds the old copy. Written to between the check and the
+    // swap: put it back and keep the edit.
+    let old = strata_apfs::attrs_of(layout, &tmp)?;
+    if stamp_of(&old) != written || old.inode != copy.inode {
+        strata_apfs::rename_rooted(layout, &tmp, &dst, strata_apfs::RenameMode::Swap)?;
+        strata_apfs::remove_rooted(layout, &tmp, strata_apfs::RemoveKind::File)?;
+        return Ok(false);
+    }
+    strata_apfs::remove_rooted(layout, &tmp, strata_apfs::RemoveKind::File)?;
+    Ok(true)
+}

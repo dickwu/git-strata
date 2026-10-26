@@ -43,7 +43,7 @@ pub use recover::{IntentRef, Leftover, RecoverReport};
 pub use scene::{Scene, SceneOp};
 pub use new::NewReport;
 pub use new::NewWarning;
-pub use seed::{SeedRecord, SeedSource, seed_files, seed_plan};
+pub use seed::{SEED_MARK, SEED_STAGING_PREFIX, SeedRecord, SeedRefresh, SeedSource, seed_files, seed_plan};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 

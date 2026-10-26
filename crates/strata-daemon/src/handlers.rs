@@ -331,6 +331,7 @@ pub fn serve(d: &Daemon<'_>, listener: &std::os::unix::net::UnixListener, extern
 fn reconcile_loop(d: &Daemon<'_>, trackers: &Trackers<'_>, stop: &dyn Fn() -> bool) {
     let every = d.core.opts.reconcile_every;
     trackers.watch_tracked();
+    let mut seeds_at = std::time::Instant::now();
     loop {
         let next = std::time::Instant::now() + every;
         loop {
@@ -338,6 +339,10 @@ fn reconcile_loop(d: &Daemon<'_>, trackers: &Trackers<'_>, stop: &dyn Fn() -> bo
                 return;
             }
             let now = std::time::Instant::now();
+            if now >= seeds_at {
+                let _ = catch_unwind(AssertUnwindSafe(|| refresh_seeds_pass(d)));
+                seeds_at = std::time::Instant::now() + crate::SEED_REFRESH_EVERY;
+            }
             if now >= next {
                 break;
             }
@@ -346,6 +351,22 @@ fn reconcile_loop(d: &Daemon<'_>, trackers: &Trackers<'_>, stop: &dyn Fn() -> bo
         let last = catch_unwind(AssertUnwindSafe(|| trackers.reconcile_once()))
             .unwrap_or_else(|_| json!({ "at": json_of(&SystemTime::now()), "panicked": true }));
         d.reconciled(last);
+    }
+}
+
+/// Seed refresh: keep every active session's untouched seed copies equal
+/// to the main checkout's files (`Sessions::refresh_seeds`). A session busy
+/// with a request is skipped until the next pass; errors are skipped too
+/// (`status` keeps reporting `SeedStale`). Never reads file contents.
+fn refresh_seeds_pass(d: &Daemon<'_>) {
+    let Ok(ids) = d.sessions.list() else { return };
+    for id in ids {
+        if d.stopping() {
+            return;
+        }
+        if d.sessions.seeds_due(&id).is_ok_and(|v| !v.is_empty()) {
+            let _ = d.core.locks.try_session(&id, || d.sessions.refresh_seeds(&id));
+        }
     }
 }
 

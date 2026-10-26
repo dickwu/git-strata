@@ -40,6 +40,9 @@ pub const LOCK_WAIT: Duration = Duration::from_secs(30);
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// D11: how often the reconcile loop runs.
 pub const RECONCILE_EVERY: Duration = Duration::from_secs(3600);
+/// How often the reconcile thread refreshes seed copies whose main-checkout
+/// source changed (`Sessions::refresh_seeds`; a few lstats per seed).
+pub const SEED_REFRESH_EVERY: Duration = Duration::from_secs(2);
 /// D12: `gc_repo` keep window.
 pub const GC_KEEP: Duration = Duration::from_secs(14 * 24 * 3600);
 /// D1: the system part of the PATH installs and checks run with (launchd
