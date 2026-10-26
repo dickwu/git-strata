@@ -341,6 +341,7 @@ cli 不重放 `Unknown`，不删除现场，不在失败后改跑 `gc` 或 `rm`�
 | `superseded_proposal_is_not_auto_approved` | `deps approve` 得到 `NoSuchProposal` 且 `detail.state` 是另一个 id：stderr 有那条替换提议的 id，进程退出码 1，socket 上只有第一次请求 | 新增 |
 | `resolve_and_chain_require_an_explicit_choice` | `resolve` 不带 `--abandon`/`--accept`、`chain` 不带三个动作之一：`InvalidInput`，不连接。两个都给同样不连接。非 TTY 上即使 flag 齐也是 `NotTty`，不连接。`chain --restore` 且 `!is_ancestor(o, c)`：`InvalidInput`，`detail.reason = "not_ancestor"`，不推、不取凭据。replay / drop 不取凭据 | 新增 |
 | `daemon_stop_waits_until_launchd_drops_the_agent` | 替身 launchctl 在 bootout 之后还列出服务三次：`stop` 一直轮询到不再列出才成功（D24） | 新增 |
+| `publish_from_bad_paths_are_input_errors_not_not_tty`、`publish_from_prefix_is_caught_in_a_single_repo_session` | 配置里有要确认的仓库、非 TTY：`S:app/a.txt` → `InvalidInput` `from_repo_prefix`（`expected = S:a.txt`），`S:nope/b.txt` → `InvalidInput` `from_path`，两个仓库都有的路径 → `AmbiguousMatch` `from_repo`；都不是 `NotTty`，daemon 收不到请求（D30） | 新增 |
 | `daemon_start_stop_do_not_use_the_socket` | `daemon start` 与 `daemon stop` 的测试替身只记录 `launchctl` 参数，socket 上没有字节 | 新增 |
 | `git_strata_is_the_same_binary` | `argv[0]` 为 `git-strata` 时，`status` 与经 git 的外部子命令约定传入的同样参数走同一个分发，没有第二棵命令树 | 新增 |
 
@@ -452,6 +453,7 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D15 plist 路径 | `~/Library/LaunchAgents/com.gwd.git-stratad.plist`，域 `gui/<uid>` | `start` 没有路径就无法 bootstrap。Label 用 daemon 已定的 `com.gwd.git-stratad` | 2026-10-23 |
 | D16 重复 start/stop | 已装上或已卸下是成功，`data.already = true` | `launchctl bootstrap` 对已加载的服务会失败。人再跑一次不该看成故障 | 2026-10-23 |
 | D24 `stop` 等服务真正卸下 | `bootout` 之后轮询 `print`，不再列出才返回，最多 10 s | 真实安装里 `stop` 后立刻 `start` 得到 `already` 而 daemon 没在跑。[实现时补的决定] | 2026-10-26 |
+| D30 `publish --from` 的路径错误先报 | `--from S:PATH` 的 PATH 在会话里找不到仓库时，不再先对全部配置仓库做 TTY 检查（那会把路径错误变成 `NotTty`），直接返回：PATH 以会话里某个仓库名开头且去掉它之后在该仓库存在 → `InvalidInput` `from_repo_prefix`，`detail {path, session, repo, expected}`（单仓库会话也查）；多仓库会话里没有仓库有它 → `InvalidInput` `from_path`，`detail {path, session, repos, expected}`，message 写明 SESSION:PATH 格式；几个仓库都有 → `AmbiguousMatch` `from_repo`（不变）。这些都只读 store 与工作区，socket 上没有字节。会话本身读不到时仍先做 TTY 检查（`confirm_commands_refuse_non_tty`）。[实现时补的决定] | 真实使用里 `publish --from S:staff-api/x` 在非 TTY 上得到 `NotTty`，agent 以为要人类，实际是路径写错；路径错误不是要确认的动作，不变量 7 不涉及 | 2026-10-26 |
 | D17 全部跳过 | `deps approve` 每个会话都 `OpenFiles` 时仍 `ok: true`，条目里是 skipped | types.md：按条目返回，其余照常移动。没有“全部跳过”这个码 | 2026-10-23 |
 | D18 选择要 TTY | `resolve`，以及 `chain` 的 replay / drop：非 TTY 返回 `NotTty`，不连接，不取凭据。`chain --restore` 在仓库要确认时走与 `push` 相同的 `PushDeploy`，会弹框。不再说 chain 从不弹框 | 裁定要求没有人的选择就不运行。replay / drop 不推，所以不取凭据。`--restore` 是推送，用已有的 `PushDeploy`，不新加 `Action` 变体 | 2026-10-23 |
 | D19 `--help` / `--version` | clap 文本，退出码 0，不套信封 | 这两个不是子命令。其余 stdout 只有信封 | 2026-10-23 |
