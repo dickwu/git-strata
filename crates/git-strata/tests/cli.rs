@@ -302,6 +302,35 @@ fn fake_launchctl(dir: &Path) -> (PathBuf, PathBuf) {
 }
 
 #[test]
+fn daemon_stop_waits_until_launchd_drops_the_agent() {
+    // launchd can keep listing the service for a moment after bootout.
+    let h = Home::new();
+    let bin = h.path().join("fakebin");
+    fs::create_dir_all(&bin).unwrap();
+    let log = h.path().join("launchctl.log");
+    let lag = h.path().join("launchctl.lag");
+    fs::write(&lag, "").unwrap();
+    let script = format!(
+        "#!/bin/sh\necho \"$*\" >> '{log}'\ncase \"$1\" in\n print) n=$(wc -c < '{lag}'); [ \"$n\" -lt 4 ] && {{ printf x >> '{lag}'; exit 0; }}; exit 113;;\n bootout) exit 0;;\n *) exit 64;;\nesac\n",
+        log = log.display(),
+        lag = lag.display(),
+    );
+    let p = bin.join("launchctl");
+    fs::write(&p, script).unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let r = support::Run::from(h.cmd(&["daemon", "stop"]).env("PATH", &path).output().unwrap());
+    assert_eq!(r.ok(), json!({}));
+    let got: Vec<String> = fs::read_to_string(&log).unwrap().lines().map(String::from).collect();
+    let uid = unsafe { libc::getuid() };
+    let t = format!("gui/{uid}/com.gwd.git-stratad");
+    // loaded before bootout, still listed three times after, then gone.
+    let mut want = vec![format!("print {t}"), format!("bootout {t}")];
+    want.extend(std::iter::repeat_n(format!("print {t}"), 4));
+    assert_eq!(got, want);
+}
+
+#[test]
 fn daemon_start_stop_do_not_use_the_socket() {
     let h = Home::new();
     let (bin, log) = fake_launchctl(h.path());
@@ -324,6 +353,7 @@ fn daemon_start_stop_do_not_use_the_socket() {
         format!("print {t}"),
         format!("print {t}"),
         format!("bootout {t}"),
+        format!("print {t}"),
         format!("print {t}"),
     ];
     let got: Vec<String> = fs::read_to_string(&log).unwrap().lines().map(String::from).collect();

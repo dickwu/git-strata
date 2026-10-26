@@ -5,12 +5,16 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use strata_types::{Code, StrataError};
 
 use crate::Result;
 use crate::envelope::Envelope;
+
+/// How long `stop` waits for launchd to drop the service after bootout.
+const STOP_WAIT: Duration = Duration::from_secs(10);
 
 fn uid() -> u32 {
     unsafe { libc::getuid() }
@@ -68,6 +72,17 @@ pub fn stop() -> Result<Envelope> {
     let (ok, text) = launchctl(&["bootout", &target()])?;
     if !ok {
         return Err(failed("bootout", &text));
+    }
+    // bootout can return while launchd still lists the service; a `start`
+    // right after would then answer `already` and leave nothing running.
+    // Return only once it is gone (D24).
+    let deadline = Instant::now() + STOP_WAIT;
+    while loaded()? {
+        if Instant::now() >= deadline {
+            return Err(StrataError::new(Code::Unknown, "launchctl bootout returned but the agent is still loaded")
+                .with_detail(json!({ "reason": "launchctl", "step": "bootout_wait" })));
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
     Ok(Envelope::ok(json!({})))
 }
