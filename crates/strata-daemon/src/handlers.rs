@@ -1088,6 +1088,11 @@ impl<'d, 'a> Server<'d, 'a> {
         let action = Action::PushDeploy { repo: repo.clone(), branch: branch.clone() };
         let before = shown.cloned();
         let token = if needs_confirm(core.pinned(repo)?) { Some(require_validated(&core.confirmer, action.clone())?) } else { None };
+        // Publish.md D2a: a repo that needs no confirmation fetches first
+        // and replays a Diverged chain onto origin before its one push.
+        if token.is_none() && !rc.needs_human_confirm() {
+            return self.push_headless(repo, &rc, git);
+        }
         core.locks.with_repo(repo, || {
             if let Some(t) = &token {
                 recheck(t, &action)?;
@@ -1121,6 +1126,86 @@ impl<'d, 'a> Server<'d, 'a> {
             }
             Ok(json!({ "push": json_of(&r?), "commit": tip.as_str() }))
         })
+    }
+}
+
+impl Server<'_, '_> {
+    /// `push` of a repo that needs no confirmation (publish.md D2a): see
+    /// `resolve::push_replaying`. After the lock, when the chain was
+    /// replayed, every live session whose workspace head is one of the
+    /// replayed commits is rebased onto that commit's copy (as publish
+    /// rebases its sessions, §5.8), then `main` is observed if it moved.
+    /// A rebase or observe failure is a warning; the push result stands.
+    fn push_headless(&self, repo: &RepoName, rc: &RepoConfig, git: &Git) -> Result<Value> {
+        let core = self.core();
+        let mut tips = (None, None);
+        let mut replayed: Option<resolve::Replayed> = None;
+        let r = core.locks.with_repo(repo, || {
+            tips.0 = strata_deps::main_tip(rc, git).ok().flatten();
+            let r = resolve::push_replaying(core, git, rc, repo, &mut replayed);
+            tips.1 = strata_deps::main_tip(rc, git).ok().flatten();
+            r
+        });
+        if r.as_ref().is_err_and(|e| e.code == Code::Unknown) {
+            self.report_unknown();
+        }
+        let mut rebases = Vec::new();
+        let mut warnings = Vec::new();
+        if let Some(rp) = &replayed {
+            self.rebase_replayed(repo, git, rp, &mut rebases, &mut warnings);
+        }
+        if let Some(after) = tips.1.clone()
+            && let Some(e) = crate::fetch_after::observe_if_moved(tips.0.as_ref(), Some(&after), &mut || resolve::observe_tip(core, repo, &after))
+        {
+            warnings.push(json!({ "kind": "ObserveFailed", "repo": repo.as_str(), "code": e.code.as_str(), "message": e.message }));
+        }
+        let replay = replayed.as_ref().map(resolve::Replayed::json);
+        match r {
+            Ok(tip) => Ok(json!({
+                "push": json_of(&strata_types::PushOutcome::Pushed),
+                "commit": tip.as_str(),
+                "replayed": replay,
+                "rebases": rebases,
+                "warnings": warnings,
+            })),
+            Err(mut e) => {
+                if let Some(rp) = replay {
+                    let d = e.detail.get_or_insert_with(|| json!({}));
+                    if let Some(m) = d.as_object_mut() {
+                        m.insert("replayed".into(), rp);
+                        m.insert("rebases".into(), Value::Array(rebases));
+                        m.insert("warnings".into(), Value::Array(warnings));
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn rebase_replayed(&self, repo: &RepoName, git: &Git, rp: &resolve::Replayed, rebases: &mut Vec<Value>, warnings: &mut Vec<Value>) {
+        let core = self.core();
+        let records = match core.store.sessions() {
+            Ok(r) => r,
+            Err(e) => {
+                warnings.push(json!({ "kind": "RebaseFailed", "repo": repo.as_str(), "code": e.code.as_str(), "message": e.message }));
+                return;
+            }
+        };
+        for rec in records.into_iter().filter(|r| r.lifecycle != strata_store::Lifecycle::Removed) {
+            let Some(ws) = rec.manifest.repos.get(repo) else { continue };
+            let Some((_, copy)) = rp.map.iter().find(|(old, _)| *old == ws.head) else { continue };
+            let s = rec.manifest.id.clone();
+            let r = git.tree_of(copy).and_then(|tree| {
+                let base = BaseGen { repo: repo.clone(), tree, deps: ws.base.deps.clone() };
+                self.with_publish_ctx(repo, |ctx| strata_publish::rebase_session(ctx, s.clone(), repo, base, copy.clone()))
+            });
+            match r {
+                Ok(report) => rebases.push(json!({ "session": s.as_str(), "from": ws.head.as_str(), "to": copy.as_str(), "report": json_of(&report) })),
+                Err(e) => warnings.push(json!({
+                    "kind": "RebaseFailed", "repo": repo.as_str(), "session": s.as_str(), "code": e.code.as_str(), "message": e.message,
+                })),
+            }
+        }
     }
 }
 

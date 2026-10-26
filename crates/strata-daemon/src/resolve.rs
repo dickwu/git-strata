@@ -550,3 +550,183 @@ pub fn chain_resolve(
     }
     Ok(done)
 }
+
+// ---- push: the headless replay of a Diverged chain ----------------------
+
+/// The upper bound on the replayed range a headless `push` takes (and on
+/// the commits it maps for the session rebase). A longer range is left to
+/// the human (`chain`).
+const REPLAY_LIMIT: usize = 512;
+
+/// What a headless `push` replayed (publish.md D2a): the old chain `from`
+/// re-applied as `to` on origin's `onto`; `map` pairs every replayed old
+/// commit with its copy, oldest first. Set only once the chain-and-anchor
+/// transaction committed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Replayed {
+    pub from: CommitOid,
+    pub to: CommitOid,
+    pub onto: CommitOid,
+    pub map: Vec<(CommitOid, CommitOid)>,
+    pub checks_ran: u32,
+}
+
+impl Replayed {
+    pub fn json(&self) -> Value {
+        json!({
+            "from": self.from.as_str(),
+            "to": self.to.as_str(),
+            "onto": self.onto.as_str(),
+            "commits": self.map.len(),
+            "checks_ran": self.checks_ran,
+        })
+    }
+}
+
+/// `exclusive..tip` along first parents, oldest first, at most
+/// [`REPLAY_LIMIT`].
+fn range_oldest_first(git: &Git, exclusive: &CommitOid, tip: &CommitOid) -> Result<Vec<CommitOid>> {
+    let (mut v, more) = git.commits_between(exclusive, tip, REPLAY_LIMIT)?;
+    if more {
+        return Err(StrataError::new(Code::InvalidInput, "the unpushed chain is too long to replay headless; a human runs `git-strata chain`")
+            .with_detail(json!({ "reason": "replay_too_long", "limit": REPLAY_LIMIT })));
+    }
+    v.reverse();
+    Ok(v.into_iter().map(|(c, _)| c).collect())
+}
+
+/// The repo's own sealed deps set for `wt` (by its inputs) cloned into
+/// it, as publish's staging does (review H3), so the checks find `vendor`
+/// / `node_modules`. A dir the tree already tracks is kept. No install
+/// runs here: a set that is not sealed is `InvalidInput`
+/// (`replay_deps_unsealed`), nothing written.
+fn clone_deps_for_checks(core: &Core, git: &Git, rc: &strata_types::RepoConfig, repo: &RepoName, wt: &Path) -> Result<()> {
+    if rc.deps_dirs.is_empty() || rc.checks.is_empty() {
+        return Ok(());
+    }
+    let ctx = strata_deps::Ctx { store: &core.store, paths: &core.config.paths, repo, cfg: rc, git, env: &core.env, locks: &core.locks };
+    let (_, id) = strata_deps::key_of(&ctx, wt)?;
+    let Some(mut set) = strata_deps::find_set(&core.store, repo, &id)? else {
+        return Err(StrataError::new(
+            Code::InvalidInput,
+            "the replayed tree needs a deps set that is not built yet; nothing was pushed (a human runs `git-strata chain`, or a session on the new origin builds it first)",
+        )
+        .with_detail(json!({ "reason": "replay_deps_unsealed", "repo": repo.as_str(), "set": id.as_str() })));
+    };
+    set.dirs.retain(|d| fs::symlink_metadata(wt.join(d.as_str())).is_err());
+    if set.dirs.is_empty() {
+        return Ok(());
+    }
+    strata_deps::clone_into(&core.store, &set, wt)
+}
+
+fn replay_conflict(mut e: StrataError, repo: &RepoName, branch: &str, chain: &PublishChain, c: &CommitOid) -> StrataError {
+    if e.code != Code::Conflict {
+        return e;
+    }
+    let d = e.detail.get_or_insert_with(|| json!({}));
+    if let Some(m) = d.as_object_mut() {
+        m.insert("reason".into(), json!("replay_conflict"));
+        m.insert("repo".into(), json!(repo.as_str()));
+        m.insert("branch".into(), json!(branch));
+        m.insert("chain".into(), json!(c.as_str()));
+        m.insert("origin".into(), json!(chain.origin.as_str()));
+        m.insert("anchor".into(), json!(chain.anchor.as_ref().map(|a| a.as_str())));
+        m.insert("pushed".into(), json!(false));
+    }
+    e.message = format!(
+        "{}; the unpushed chain does not replay cleanly onto origin/{branch}: nothing was written or pushed (a human resolves it with `git-strata chain`)",
+        e.message
+    );
+    e
+}
+
+/// §5.5 `push` of a repo that needs no confirmation (publish.md D2a
+/// [实现时补的决定], 2026-10-26). The caller holds the repo lock.
+///
+/// Fetch first. `Leads`: push as before. `Diverged` (origin gained
+/// commits the chain lacks; the anchor is still on origin, so nothing a
+/// human removed comes back): replay the unpushed range (`replay_base`, as
+/// `chain --accept-origin replay`) onto origin's tip, objects only; a
+/// piece that does not apply is `Conflict` (`replay_conflict`) with every
+/// ref unchanged. Then, in the staging layout of the new tip, the repo's
+/// checks run (its sealed deps set cloned in); a failing check is
+/// `CheckFailed`, refs unchanged. Then one transaction moves the chain
+/// (expecting the old top) and the anchor (to origin), and the recording
+/// push sends the new tip once: a fast-forward of origin to the recorded
+/// URL, never forced, never retried. `Rewound` is refused as publish
+/// refuses it (`chain_rewound`): that stays the human's. `*replayed` is set
+/// once the transaction committed, whatever the push did.
+pub(crate) fn push_replaying(
+    core: &Core,
+    git: &Git,
+    rc: &strata_types::RepoConfig,
+    repo: &RepoName,
+    replayed: &mut Option<Replayed>,
+) -> Result<CommitOid> {
+    let branch = rc.publish.branch.as_str();
+    git.fetch("origin", branch)?;
+    let chain = strata_deps::publish_chain(git, branch)?;
+    let mut plan = None;
+    let tip = match &chain {
+        Some(ch) if ch.state == ChainState::Leads && ch.top.is_some() => ch.top.clone().expect("leads has a top"),
+        Some(ch) if ch.state == ChainState::Diverged && ch.top.is_some() => {
+            let c = ch.top.clone().expect("diverged has a top");
+            let Some(base) = replay_base(git, ch, &c)? else {
+                strata_publish::chain::refuse_unpublishable(git, branch)?;
+                return Err(invalid("no_replay_range", "no replay range: the chain has no anchor on it"));
+            };
+            let old = range_oldest_first(git, &base, &c)?;
+            // A Conflict here comes before any ref write: the refs are unchanged.
+            let new = git.replay_commits(&base, &c, &ch.origin).map_err(|e| replay_conflict(e, repo, branch, ch, &c))?;
+            plan = Some((c, ch.origin.clone(), ch.anchor.clone(), old, new.clone()));
+            new
+        }
+        Some(ch) if ch.state == ChainState::Rewound => {
+            strata_publish::chain::refuse_unpublishable(git, branch)?;
+            return Err(invalid("chain_rewound", format!("the publish chain of {branch} is rewound")));
+        }
+        c => {
+            return Err(StrataError::new(Code::NoCommit, format!("the publish chain of {repo} has no commit to push")).with_detail(json!({
+                "repo": repo.as_str(),
+                "branch": branch,
+                "state": c.as_ref().map(|c| format!("{:?}", c.state)),
+            })));
+        }
+    };
+    let (chain_name, anchor_name) = (chain_ref(branch), anchor_ref(branch));
+    // Review M6: an unknown push keeps its scene; a transaction that did not
+    // commit sent nothing, so it does not.
+    let uncertain = |r: &Result<PushOutcome>| {
+        r.as_ref().is_err_and(|e| e.code == Code::Unknown && reason_of(e) != Some("ref_transaction"))
+    };
+    let dest = push_dest(git);
+    let r = with_staging(core, git, repo, branch, &tip, dest.as_ref(), uncertain, |wt| {
+        if let Some((c, o, a, old, new)) = &plan {
+            clone_deps_for_checks(core, git, rc, repo, wt)?;
+            let ran = strata_publish::check(rc, wt)?;
+            let copies = range_oldest_first(git, o, new)?;
+            if copies.len() != old.len() {
+                return Err(invalid("replay_mismatch", "the replayed range does not match the chain; nothing was written"));
+            }
+            transaction(git, &[RefUpdate::set(&chain_name, new.clone(), Some(c.clone())), RefUpdate::set(&anchor_name, o.clone(), a.clone())])?;
+            *replayed = Some(Replayed {
+                from: c.clone(),
+                to: new.clone(),
+                onto: o.clone(),
+                map: old.iter().cloned().zip(copies).collect(),
+                checks_ran: ran.ran,
+            });
+        }
+        crate::handlers::writing();
+        strata_publish::push_to(git, rc, repo, wt, None, dest.as_ref().map(PushDest::url))
+    });
+    if matches!(r, Ok(PushOutcome::Pushed)) {
+        settle_push_scenes(core, git, repo, branch, &tip, dest.as_ref());
+    }
+    r.map(|_| tip)
+}
+
+fn reason_of(e: &StrataError) -> Option<&str> {
+    e.detail.as_ref().and_then(|d| d.get("reason")).and_then(Value::as_str)
+}
