@@ -792,6 +792,39 @@ fn publish_rerun_of_a_directory_selector_commits_new_edits() {
     core.close().unwrap();
 }
 
+/// Review P1-8: the newest `Done` row of a selector names a commit that is
+/// no longer in the repository (replayed off the chain, then pruned by git
+/// gc). Re-publishing that unchanged selector must not fail with
+/// `NoSuchCommit`; the selector stays and stage answers as usual.
+#[test]
+fn publish_rerun_tolerates_a_pruned_landed_commit() {
+    use strata_store::PublishPhase;
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let id = new_session(&sock);
+        let root = ws(&core, &id, "tool");
+        external(&root, "printf 'export const a = 7\\n' > src/index.ts");
+        let r = ok(publish_selectors(&sock, &id, "tool", &["src/index.ts"]));
+        assert_eq!(r["published"].as_array().unwrap().len(), 1, "{r:#}");
+        let done = core.store.publishes().unwrap().into_iter().rev().find(|p| p.phase == PublishPhase::Done).expect("a done row");
+        let mut group = done.group.clone();
+        group.id = 0;
+        let fake = core.store.record_publish(&group, std::time::SystemTime::now()).unwrap();
+        let gone = json!({ "commit": "0123456789abcdef0123456789abcdef01234567", "paths": ["src/index.ts"], "push": null });
+        assert!(core.store.set_publish_phase(fake, PublishPhase::Running, PublishPhase::Done, Some(&gone), std::time::SystemTime::now()).unwrap());
+
+        let r = publish_selectors(&sock, &id, "tool", &["src/index.ts"]);
+        assert_ne!(r["error"]["code"], "NoSuchCommit", "{r:#}");
+        let plan = call(&sock, "publish_plan", json!({ "group": { "id": 0, "batches": group.batches } }));
+        assert_ne!(plan["error"]["code"], "NoSuchCommit", "{plan:#}");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 /// Review-2 N1: a landed batch {index, other}; only index is edited; the
 /// same publish again commits index and does not stop at `NoMatch` for the
 /// unchanged other (its content equals what landed).

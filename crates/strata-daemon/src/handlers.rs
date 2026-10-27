@@ -1379,7 +1379,8 @@ fn rerun_paths(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_typ
 /// The newest `Done` row in which `b`'s session committed files at or under
 /// `p` in `b`'s repo, as `{repo, publish, commit, push}`, when every such
 /// file has the same mode and object in that commit as in `base`; `None`
-/// when there is no such row or the content differs.
+/// when there is no such row, the content differs, or that row's commit is
+/// no longer in the repository (pruned after a replay or drop).
 fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_types::Batch, base: &strata_types::TreeOid, p: &RepoPath) -> Result<Option<Value>> {
     use strata_publish::selection::at_or_under;
     for r in rows.iter().rev() {
@@ -1404,7 +1405,15 @@ fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_
         }
         let Ok(c) = CommitOid::try_from(commit.to_string()) else { return Ok(None) };
         let git = git_of(core, &b.repo)?;
-        let (now, then) = (git.tree_items(base, &files)?, git.tree_items(&git.tree_of(&c)?, &files)?);
+        // Review P1-8: the row's commit may be gone (replayed or dropped
+        // off the chain, then pruned by git gc). That cannot prove the
+        // content landed: keep the selector, stage answers honestly.
+        let then = match git.tree_of(&c).and_then(|t| git.tree_items(&t, &files)) {
+            Ok(m) => m,
+            Err(e) if matches!(e.code, Code::NoSuchCommit | Code::NoSuchPath) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let now = git.tree_items(base, &files)?;
         let key = |m: &BTreeMap<String, strata_gitio::TreeItem>, f: &RepoPath| m.get(f.as_str()).map(|i| (i.mode, i.oid.clone()));
         if files.iter().all(|f| key(&now, f) == key(&then, f)) {
             return Ok(Some(json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "push": o.get("push").cloned().unwrap_or(Value::Null) })));
