@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>git-strata — Workspace fork</title>
+  <desc>A bold white fork connects three separate isometric workspace plates on a teal macOS icon body.</desc>
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5B9BB5"/>
+      <stop offset="0.55" stop-color="#2E6F8E"/>
+      <stop offset="1" stop-color="#245B76"/>
+    </linearGradient>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E8F3F7"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#body)"/>
+  <!-- The branch is behind the plates, which act as its three nodes. -->
+  <path d="M512 660 V548 C512 474 350 506 350 410 M512 548 C512 474 674 506 674 410" fill="none" stroke="#FFFFFF" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M222 344 V384 Q222 393 234 399 L334 449 Q350 457 366 449 L466 399 Q478 393 478 384 V344 Z" fill="#B9D6E2"/>
+  <path d="M334 280 Q350 272 366 280 L474 334 Q494 344 474 354 L366 408 Q350 416 334 408 L226 354 Q206 344 226 334 Z" fill="url(#plate)"/>
+  <path d="M546 344 V384 Q546 393 558 399 L658 449 Q674 457 690 449 L790 399 Q802 393 802 384 V344 Z" fill="#B9D6E2"/>
+  <path d="M658 280 Q674 272 690 280 L798 334 Q818 344 798 354 L690 408 Q674 416 658 408 L550 354 Q530 344 550 334 Z" fill="url(#plate)"/>
+  <path d="M384 660 V700 Q384 709 396 715 L496 765 Q512 773 528 765 L628 715 Q640 709 640 700 V660 Z" fill="#B9D6E2"/>
+  <path d="M496 596 Q512 588 528 596 L636 650 Q656 660 636 670 L528 724 Q512 732 496 724 L388 670 Q368 660 388 650 Z" fill="url(#plate)"/>
+</svg>

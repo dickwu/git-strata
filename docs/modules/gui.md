@@ -435,7 +435,7 @@ README 第一节改成「下载 app → 首次打开 → 引导」，cli 用法�
 
 - **单实例**：`tauri-plugin-single-instance`；第二次启动只把已有实例的窗口带到前台。
 - 关窗（⌘W、红点）→ 隐藏窗口并切 `ActivationPolicy::Accessory`；点 Dock / Finder 里的 app（`RunEvent::Reopen`）或托盘 `Open Git Strata` → 显示窗口并切回 `Regular`。⌘Q / 托盘 `Quit Git Strata` 才退出 GUI；退出 GUI 不影响 daemon。
-- 托盘图标：模板图（三道地层横线），状态靠形状：正常 / 有待处理（小圆点）/ daemon 不可达或数据过期（斜杠）。
+- 图标（peilin 14:1x 选定 concept b「workspace fork」）：app 图标是青色渐变圆角方块上，一个白色 Y 形分叉连起三块等距视角的工作区平板。托盘图标是同一图形的模板图（黑色、透明底，18 pt；按 2 单位网格简化成三块扁平菱形 + Y 叉，叉与板之间留 1 px 空隙），状态靠形状：正常 / 有待处理（小圆点）/ daemon 不可达或数据过期（斜杠）。源文件在 `apps/desktop/src-tauri/icons/src/`（`app-icon.svg`、`tray-template*.svg`），`render.sh` 用 rsvg-convert 与 `tauri icon` 生成全部尺寸与 icns。
 - **判活**：watch 有 heartbeat（§5.3）；45 s 没有任何行即重连；数据超过 60 s 未更新时托盘状态行写 "Updated 2 min ago"，不显示过期的「healthy」。
 - 托盘菜单：状态行（"Daemon running · 5 sessions"）；"Waiting for you" 下最多 5 项，只含种类、编号、仓库名（G7）；"Open Git Strata"；"Pause notifications for 1 hour"；"Quit Git Strata"。点待处理项 → 先强制取新数据，再打开主窗口到对应对话框。
 - 窗口隐藏时保持 watch；回退轮询按 §5.3 的统一表（隐藏行）。

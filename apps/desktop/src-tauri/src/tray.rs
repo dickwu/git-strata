@@ -15,12 +15,20 @@ const TRAY_ID: &str = "main";
 /// and opens it (gui.md §5.8: fresh data before any dialog).
 pub const OPEN_EVENT: &str = "strata://open";
 
+/// Template images (black on transparent, `icon_as_template`), drawn from
+/// `icons/src/tray-template*.svg` by `icons/src/render.sh`. The menu bar
+/// shows them 18 pt tall, so the 36 px `@2x` renders are the ones loaded;
+/// the 18 px files are kept for previews and 1x checks.
+fn icon_bytes(i: Icon) -> &'static [u8] {
+    match i {
+        Icon::Normal => include_bytes!("../icons/tray/trayTemplate@2x.png"),
+        Icon::Pending => include_bytes!("../icons/tray/trayTemplate-pending@2x.png"),
+        Icon::Down => include_bytes!("../icons/tray/trayTemplate-down@2x.png"),
+    }
+}
+
 fn icon(i: Icon) -> tauri::Result<Image<'static>> {
-    Image::from_bytes(match i {
-        Icon::Normal => include_bytes!("../icons/tray/normal.png"),
-        Icon::Pending => include_bytes!("../icons/tray/pending.png"),
-        Icon::Down => include_bytes!("../icons/tray/down.png"),
-    })
+    Image::from_bytes(icon_bytes(i))
 }
 
 fn menu<R: Runtime>(app: &AppHandle<R>, m: &TrayModel) -> tauri::Result<Menu<R>> {
@@ -113,4 +121,24 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result
     tray.set_icon_as_template(true)?;
     tray.set_menu(Some(menu(app, &m)?))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_icons_decode_as_36px_templates() {
+        for i in [Icon::Normal, Icon::Pending, Icon::Down] {
+            let img = icon(i).expect("tray png decodes");
+            assert_eq!((img.width(), img.height()), (36, 36));
+            // Template image: every pixel is black; only alpha varies.
+            let rgba = img.rgba();
+            assert!(
+                rgba.chunks(4)
+                    .all(|p| p[3] == 0 || (p[0], p[1], p[2]) == (0, 0, 0))
+            );
+            assert!(rgba.chunks(4).any(|p| p[3] == 255));
+        }
+    }
 }
