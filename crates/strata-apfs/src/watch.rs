@@ -3,7 +3,7 @@
 mod translate;
 
 use std::cell::Cell;
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -82,7 +82,6 @@ unsafe extern "C" {
 const UTF8: u32 = 0x0800_0100;
 const SINCE_NOW: u64 = u64::MAX;
 const CREATE_NO_DEFER: u32 = 0x2;
-const CREATE_WATCH_ROOT: u32 = 0x4;
 const CREATE_FILE_EVENTS: u32 = 0x10;
 
 // ───────── state ─────────
@@ -115,11 +114,28 @@ struct State {
     /// otherwise report a new directory created at the old path (measured),
     /// which is not the directory this Watcher was opened on.
     root_gone: AtomicBool,
+    /// The root as opened: path, device and inode. Incident 2026-10-27:
+    /// `kFSEventStreamCreateFlagWatchRoot` cost a kqueue plus an event-only
+    /// descriptor on the root and every ancestor (about 8 per workspace on
+    /// /Volumes/GWD/inter, 15 under /var/folders), enough to run the daemon
+    /// out of descriptors. Instead each delivered batch checks that the
+    /// path still names the same directory.
+    root: (CString, u64, u64),
     on_event: Box<dyn Fn(WatchEvent) + Send>,
     tr: Translator,
 }
 
 impl State {
+    /// The root path still names the directory the stream was opened on.
+    fn root_is_same(&self) -> bool {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: a NUL-terminated path and a local stat buffer.
+        if unsafe { libc::lstat(self.root.0.as_ptr(), &mut st) } != 0 {
+            return std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR);
+        }
+        st.st_dev as u64 == self.root.1 && st.st_ino as u64 == self.root.2
+    }
+
     fn deliver(&self, ev: WatchEvent) {
         if self.closed.load(Ordering::Acquire) {
             return;
@@ -145,8 +161,9 @@ extern "C" fn callback(_s: StreamRef, info: *mut c_void, n: usize, paths: *mut c
         // SAFETY: FSEvents passes `n` C strings and `n` flags (no UseCFTypes).
         let paths = unsafe { std::slice::from_raw_parts(paths as *const *const c_char, n) };
         let flags = unsafe { std::slice::from_raw_parts(flags, n) };
-        if flags.iter().any(|f| f & translate::ROOT_CHANGED != 0) {
+        if flags.iter().any(|f| f & translate::ROOT_CHANGED != 0) || !st.root_is_same() {
             st.root_gone.store(true, Ordering::Release);
+            return vec![WatchEvent::Dropped];
         }
         st.tr.translate(flags.iter().zip(paths).map(|(&f, &p)| (f, unsafe { CStr::from_ptr(p) }.to_bytes())))
     }))
@@ -249,6 +266,12 @@ pub fn watch_with(root: &Path, opts: &WatchOptions, on_event: impl Fn(WatchEvent
     let state = Box::into_raw(Box::new(State {
         closed: AtomicBool::new(false),
         root_gone: AtomicBool::new(false),
+        root: {
+            use std::os::unix::fs::MetadataExt;
+            let cm = std::fs::symlink_metadata(&canonical).map_err(|e| crate::classify_io_error(&e, crate::IoSide::Read, root))?;
+            let c = CString::new(canonical.as_os_str().as_bytes()).map_err(|_| refusal(Code::InvalidInput, root, "nul_in_path", "watch root has a NUL byte"))?;
+            (c, cm.dev(), cm.ino())
+        },
         on_event: Box::new(on_event),
         tr: Translator::new(&canonical, root, &opts.exclude, case_sensitive),
     }));
@@ -269,7 +292,7 @@ pub fn watch_with(root: &Path, opts: &WatchOptions, on_event: impl Fn(WatchEvent
             release: std::ptr::null(),
             copy_description: std::ptr::null(),
         };
-        let flags = CREATE_FILE_EVENTS | CREATE_WATCH_ROOT | CREATE_NO_DEFER;
+        let flags = CREATE_FILE_EVENTS | CREATE_NO_DEFER;
         let stream = FSEventStreamCreate(std::ptr::null(), callback, &ctx, arr, SINCE_NOW, WATCH_LATENCY_SECS, flags);
         CFRelease(arr);
         if stream.is_null() {

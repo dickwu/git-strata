@@ -1006,3 +1006,33 @@ fn flush_is_not_a_fence_body() {
         println!("flush_is_not_a_fence: sleep={pre_sleep_ms}ms covered={hit}/{rounds}");
     }
 }
+
+/// Descriptors open in this process (entries of /dev/fd, less the listing's).
+fn open_fds() -> usize {
+    fs::read_dir("/dev/fd").unwrap().count() - 1
+}
+
+/// Incident 2026-10-27: with kFSEventStreamCreateFlagWatchRoot a watcher
+/// cost a kqueue plus one event-only descriptor per path component of its
+/// root (15 under /var/folders, measured), so 25 live workspaces ran the
+/// daemon out of descriptors at launchd's soft limit of 256. Without it a
+/// watcher holds at most 2 whatever the depth, and dropping watchers gives
+/// every descriptor back (no leak across create/drop).
+#[test]
+fn watcher_descriptors_are_bounded_and_released_on_drop() {
+    let _serial = serial();
+    let t = Tmp::new();
+    let root = mkroot(&t, "a/b/c/d");
+    let depth = root.components().count();
+    let before = open_fds();
+    for round in 0..3 {
+        let ws: Vec<Watcher> = (0..5).map(|_| watch(&root, |_| {}).unwrap()).collect();
+        let during = open_fds();
+        let per = (during.saturating_sub(before)) as f64 / ws.len() as f64;
+        eprintln!("round {round}: {per} descriptors per watcher of a root {depth} components deep");
+        assert!(per <= 2.0, "round {round}: {per} descriptors per watcher of a root {depth} components deep");
+        drop(ws);
+        // FSEvents closes the root's descriptors as the stream is released.
+        assert!(wait_until(Duration::from_secs(5), || open_fds() <= before), "round {round}: {} descriptors left after drop (before {before})", open_fds());
+    }
+}

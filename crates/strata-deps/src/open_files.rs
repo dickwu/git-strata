@@ -249,7 +249,8 @@ fn holds_of(pid: i32, keep: &dyn Fn(&[u8]) -> bool, with_own_evt: bool) -> Resul
         }
         // The calling process's own event-only descriptors (FSEvents opens
         // the watch root and its ancestors `O_EVTONLY` for
-        // `kFSEventStreamCreateFlagWatchRoot`): they never keep a file busy
+        // `kFSEventStreamCreateFlagWatchRoot`, which strata-apfs no longer
+        // sets since 2026-10-27; kept for any other): they never keep a file busy
         // and belong to the daemon's own Trackers, which it drops itself
         // [实现时补的决定].
         let evt = info.pfi.fi_openflags & libc::O_EVTONLY as u32 != 0;
