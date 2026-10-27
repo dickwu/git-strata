@@ -85,6 +85,11 @@ pub fn plist_text(bin: &Path, home: &Path) -> String {
   <integer>{exit_timeout}</integer>
   <key>ProcessType</key>
   <string>Interactive</string>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>{nofile}</integer>
+  </dict>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -97,6 +102,7 @@ pub fn plist_text(bin: &Path, home: &Path) -> String {
 "#,
         label = AGENT_LABEL,
         exit_timeout = EXIT_TIMEOUT_SECS,
+        nofile = crate::startup::FD_LIMIT,
         bin = xml(&bin.to_string_lossy()),
         path = xml(&crate::install_path_for_home(home)),
         err = xml(&err.to_string_lossy()),

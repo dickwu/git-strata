@@ -277,6 +277,9 @@ fn plist_has_label_keepalive_aqua_and_d1_path() {
     assert_eq!(v["ProcessType"], "Interactive");
     // Review P1-5: launchd waits for in-flight writes before SIGKILL.
     assert_eq!(v["ExitTimeOut"], plist::EXIT_TIMEOUT_SECS);
+    // Incident 2026-10-27: launchd's default soft limit of 256 descriptors ran out.
+    assert_eq!(v["SoftResourceLimits"]["NumberOfFiles"], strata_daemon::startup::FD_LIMIT);
+    assert!(v.get("HardResourceLimits").is_none(), "the hard limit is left alone");
     assert_eq!(v["ProgramArguments"], serde_json::json!([bin]));
     assert_eq!(v["EnvironmentVariables"]["PATH"], format!("{}/.bun/bin:{DEFAULT_PATH}", home.display()));
     let err = v["StandardErrorPath"].as_str().unwrap();
