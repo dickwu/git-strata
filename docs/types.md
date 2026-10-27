@@ -535,6 +535,7 @@ pub enum Code {
 ```text
 Cargo.toml                       workspace, edition 2024, rust-version 1.88
 crates/strata-types              ids、错误、配置结构（无 I/O）
+crates/strata-client             与 daemon 通信的纯传输层（json-lines、错误映射；无文件系统、无 store、无 git；gui.md §3.1）
 crates/strata-apfs               clonefile / getattrlistbulk / gen count / FSEvents
 crates/strata-gitio              git 子进程封装、.git/index 解析、diff3
 crates/strata-store              Turso 元数据（SQLite 文件格式）+ blob
@@ -554,6 +555,7 @@ crates/git-strata                bin git-strata：CLI
 
 ```text
 types ← apfs, gitio, store ← overlay, deps ← session ← publish, search ← daemon ← cli
+types ← client ← cli（以及 GUI 的 git-strata-desktop；P2 起 daemon 也可以依赖它）
 confirm 只被 daemon 用
 ```
 
@@ -562,12 +564,13 @@ confirm 只被 daemon 用
 | 层 | crate | 可以依赖 |
 | --- | --- | --- |
 | 0 | `strata-types` | 无 workspace crate |
+| 0′ | `strata-client` | 只依赖第 0 层（外部只有 serde、serde_json）。夹在第 0 层与第 1 层之间：第 1 层及以上的 crate 可以依赖它，它不能依赖任何第 1 层及以上的 crate。今天只有 `git-strata` 依赖它（cli 的 `rpc` 模块是它的 re-export，gui.md §3.1 P0）；核心 workspace 之外的 `git-strata-desktop` 也依赖它 |
 | 1 | `strata-apfs`、`strata-gitio`、`strata-store` | 第 0 层。同层只允许 store 与 gitio 依赖 apfs：store 的 blob 用 `apfs::clone_file` 写入；gitio 在根之下的读写（gitfile、管理目录、`export_tree`、经 `open_rooted_file` 读文件）都经 apfs（增补 7 的 Layering 行、增补 8） |
 | 2 | `strata-overlay`、`strata-deps` | 第 0–1 层；二者互不依赖 |
 | 3 | `strata-session` | 第 0–2 层 |
 | 4 | `strata-publish`、`strata-search` | 第 0–3 层；二者互不依赖。外部的 `tgrep-core` 只给 search 用 |
 | 5 | `strata-daemon` | 第 0–4 层，外加 `strata-confirm` |
-| 6 | `git-strata` | 第 0–5 层（对 `strata-daemon` 只依赖它的 lib），但不含 `strata-confirm` |
+| 6 | `git-strata` | 第 0–5 层（含第 0′ 层的 `strata-client`；对 `strata-daemon` 只依赖它的 lib），但不含 `strata-confirm` |
 | — | `strata-confirm` | 只依赖第 0 层；只有 `strata-daemon` 依赖它，人类确认在 daemon 里发生（design §6.9） |
 
 `strata-confirm` 只负责签发和校验凭据（LocalAuthentication：Touch ID 或登录密码），不检查 TTY；TTY 检查（`require_tty`）在 cli 里。"confirm 只被 daemon 用"在 crate 层面成立：session 与 publish 只使用数据类型 `ConfirmToken` 和 `Action`，这两个类型放在 `strata-types` 里（§4）。
