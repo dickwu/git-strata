@@ -11,6 +11,9 @@ pub mod state;
 pub mod tray_model;
 
 mod commands;
+// Dev-only window focus for the connector; never in a release build.
+#[cfg(all(feature = "dev-connector", debug_assertions))]
+mod dev_focus;
 mod tray;
 
 use std::time::Duration;
@@ -98,6 +101,8 @@ pub fn run() {
                     let _ = tray::refresh(&h, &snap);
                 }
             });
+            #[cfg(all(feature = "dev-connector", debug_assertions))]
+            dev_focus::bring_main_to_front(app);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -206,6 +211,34 @@ mod tests {
         for p in ["allow-daemon-start", "allow-legacy-agent"] {
             assert!(!include_str!("../capabilities-dev/dev-connector.json").contains(p));
         }
+    }
+
+    /// The dev-only focus code (dev_focus.rs) is compiled only with the
+    /// dev-connector feature in a debug build: the module and every call
+    /// sit directly under that cfg, and nothing else names it.
+    #[test]
+    fn dev_focus_is_gated() {
+        const GATE: &str = "#[cfg(all(feature = \"dev-connector\", debug_assertions))]";
+        let src = include_str!("lib.rs");
+        let body = &src[..src.find("#[cfg(test)]").unwrap()];
+        let lines: Vec<&str> = body.lines().map(str::trim).collect();
+        let uses: Vec<usize> = (0..lines.len())
+            .filter(|&i| lines[i].contains("dev_focus"))
+            .collect();
+        assert_eq!(uses.len(), 2, "expected `mod dev_focus;` and one call");
+        for i in uses {
+            assert_eq!(lines[i - 1], GATE, "ungated dev_focus use: {}", lines[i]);
+        }
+        let cargo = include_str!("../Cargo.toml");
+        for dep in ["objc2 ", "objc2-app-kit "] {
+            let line = cargo.lines().find(|l| l.starts_with(dep)).unwrap();
+            assert!(line.contains("optional = true"), "{dep} must be optional");
+        }
+        let feat = cargo
+            .lines()
+            .find(|l| l.starts_with("dev-connector ="))
+            .unwrap();
+        assert!(feat.contains("dep:objc2") && feat.contains("dep:objc2-app-kit"));
     }
 
     #[test]

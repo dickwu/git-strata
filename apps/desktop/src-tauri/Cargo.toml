@@ -35,9 +35,15 @@ libc = "0.2"
 # build). Off unless `bun run tauri:dev` passes --features dev-connector.
 tauri-plugin-connector = { version = "0.17", optional = true }
 
+# Dev-only too: dev_focus.rs activates the app so the connector's webview
+# is not throttled behind another app. Enabled only by dev-connector.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "NSApplication", "NSResponder"] }
+
 [features]
 default = []
-dev-connector = ["dep:tauri-plugin-connector"]
+dev-connector = ["dep:tauri-plugin-connector", "dep:objc2", "dep:objc2-app-kit"]
 
 [dev-dependencies]
 tempfile = "3"
