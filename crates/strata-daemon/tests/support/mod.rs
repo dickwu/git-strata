@@ -389,10 +389,10 @@ impl Dfx {
         if p.exists() {
             return;
         }
-        if let Ok(text) = fs::read_to_string(self.config_dir.join("config.toml")) {
-            if let Ok(c) = Config::parse(&text) {
-                fs::write(p, pins_json(&c)).unwrap();
-            }
+        if let Ok(text) = fs::read_to_string(self.config_dir.join("config.toml"))
+            && let Ok(c) = Config::parse(&text)
+        {
+            fs::write(p, pins_json(&c)).unwrap();
         }
     }
 
