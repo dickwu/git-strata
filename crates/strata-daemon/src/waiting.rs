@@ -212,6 +212,15 @@ impl WaitState {
     }
 }
 
+/// Review P1-6: bind the socket and answer from `state` (`Busy starting`
+/// at first) before the first store attempt, so a stall inside that attempt
+/// (macOS TCC holding a syscall) never leaves the socket silent.
+pub fn answer_early(socket: &Path, state: &WaitState) -> std::result::Result<Waiting, String> {
+    crate::startup::bind(socket)
+        .map_err(|e| e.message)
+        .and_then(|l| Waiting::start(l, state.clone()).map_err(|e| e.to_string()))
+}
+
 /// The socket while waiting: every request gets [`WaitState::error`].
 /// [`Waiting::finish`] stops accepting and hands the listener back, so the
 /// real accept loop takes over the same socket (queued connections included).
@@ -411,6 +420,30 @@ mod tests {
         );
         assert_eq!(r.unwrap(), None);
         assert_eq!(calls.get(), 1);
+    }
+
+    /// Review P1-6: the socket answers while the first attempt is still
+    /// blocked (nothing has failed yet).
+    #[test]
+    fn the_socket_answers_during_a_blocked_first_attempt() {
+        let dir = tempfile::Builder::new().prefix("sw").tempdir_in("/tmp").unwrap();
+        let sock = dir.path().join("d.sock");
+        let state = WaitState::default();
+        let w = answer_early(&sock, &state).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let blocked = std::thread::spawn(move || {
+            // A first prepare attempt stuck in a syscall.
+            let _ = rx.recv_timeout(Duration::from_secs(30));
+        });
+        let e = crate::client::call(&sock, "daemon_status", json!({ "verify": false })).unwrap_err();
+        assert_eq!(e.code, Code::Busy, "{e:?}");
+        assert_eq!(e.detail.unwrap()["reason"], "starting");
+        tx.send(()).unwrap();
+        blocked.join().unwrap();
+        state.failed(&io_err(libc::EINTR), 1, Duration::from_secs(1));
+        let e = crate::client::call(&sock, "daemon_status", json!({ "verify": false })).unwrap_err();
+        assert_eq!(e.detail.unwrap()["reason"], "store_unavailable");
+        assert!(w.finish().is_some());
     }
 
     #[test]

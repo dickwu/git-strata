@@ -901,6 +901,7 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 
   **收尾**：返回 `Ok(report)`，不论 `stuck_total` 是多少（`is_complete()` 就是 `stuck_total == 0`，此时目标本身也删掉了）。`EINTR` 重试，其余从不重试，也不回滚清掉的标志与补上的权限。树之外的东西一概不碰，包括 P。符号链接指着的地方不被碰；挂载点不进入。
 
+- 内部系统调用的 `EINTR` 重试有上限：一次调用最多 `SYS_EINTR_ATTEMPTS = 64` 次，之后把 `EINTR` 交给调用方（`retry_eintr` 与 daemon 的启动等待会报告、可取消）。review P1-6；原来无上限，TCC 反复打断时连外层有界重试也回不来。
 - `full_fsync(file)`：`fcntl(fd, F_FULLFSYNC)`；`EINTR` 重试；`ENOTSUP` → `Unsupported`；其余 → `Unknown`（`detail.errno`）。
 
 **`remove_tree_rooted` 的 stuck 原因表**（唯一的一张；`StuckReason` 的文档与 §6 都引用它，裁定 N3）。一个条目因为文件标志拦着而留下，就是 `Immutable`，标志写在 `detail` 里（`UF_*` 是清不掉的，`SF_*` 是置位的、从不清）；`NoPermission` 只给没有标志的 mode 或 ACL 拒绝：
