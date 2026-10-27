@@ -650,9 +650,9 @@ dependencies = [
 
 [[package]]
 name = "connector-client"
-version = "0.17.3"
+version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "491aa525b390ac3837f574e62c5e60dd802f68013b000a246ed695c6f23d0854"
+checksum = "06c202dc966581ca52439e057c51a2e4f8444bbdff854007bf4bd0ee5385282e"
 dependencies = [
  "futures-util",
  "serde",
@@ -4375,9 +4375,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-connector"
-version = "0.17.3"
+version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaac8aacdd4ebde3e391668d428f04104cdf6290f54a1b4921d9d110a03d30bb"
+checksum = "52984d842266160f9fc1f79b3b05d60b1d7813c98178ac2a8ce0b04b72489a7f"
 dependencies = [
  "axum",
  "base64 0.23.1",
