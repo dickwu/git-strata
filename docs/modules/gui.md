@@ -2,7 +2,7 @@
 
 **Crate**：`crates/strata-client`（新，从 cli 抽出的纯传输层）＋ `apps/desktop/src-tauri`（新，crate `git-strata-desktop`，lib `strata_desktop_lib`，不在核心 workspace 里）· **前端**：`apps/desktop/`（Next.js 静态导出）· **设计来源**：daemon.md §3–§6、confirm.md §1 §3 §5、cli.md §1 §3、config.md、types.md §8、README「Install and daemon」「Confirmation gate」 · **参照工程**：R2（github.com/dickwu/r2，已确认的技术栈）· **UI 方法**：frontend-design skill
 
-> 状态：提案，未实现。第三版（2026-10-27，r3.3）。第二版（ed7a85a）按 peilin 的回答（t49u）定下 D1–D10；Codex 与 Claude 复核了第二版（review-notes/gui-merged.md），peilin 10:28 回答了四个问题（D11–D14）。本版逐条处理复核结论：每条结论在哪一节落地，见文末「复核对照」表。第三版的确认复核（review-notes/gui-r3-*.md）又提出 4 条阻断与若干小项，已在 r3.1 就地修正；r3.1 的再复核（gui-r3.1-*.md）指出停机栅栏仍有检查与停机之间的空档，r3.2 改为 daemon 内原子封口；r3.2 的再复核（gui-r3.2-*.md）指出封口后的 60 s 自退会被 KeepAlive 拉起一个未封口的新进程、旧 daemon 迁移挡不住已建立的连接，r3.3 改为「封口即退出 + 退出码决定是否拉起」与「旧 daemon 无客户端连接才迁移」，见「复核对照」的 r3 部分。本文只写设计，不含代码；daemon 侧要加的东西全部列在 §3.4，分期写进 §8.1。
+> 状态：提案，未实现。第三版（2026-10-27，r3.4）。第二版（ed7a85a）按 peilin 的回答（t49u）定下 D1–D10；Codex 与 Claude 复核了第二版（review-notes/gui-merged.md），peilin 10:28 回答了四个问题（D11–D14）。本版逐条处理复核结论：每条结论在哪一节落地，见文末「复核对照」表。第三版的确认复核（review-notes/gui-r3-*.md）又提出 4 条阻断与若干小项，已在 r3.1 就地修正；r3.1 的再复核（gui-r3.1-*.md）指出停机栅栏仍有检查与停机之间的空档，r3.2 改为 daemon 内原子封口；r3.2 的再复核（gui-r3.2-*.md）指出封口后的 60 s 自退会被 KeepAlive 拉起一个未封口的新进程、旧 daemon 迁移挡不住已建立的连接，r3.3 改为「封口即退出 + 退出码决定是否拉起」与「旧 daemon 无客户端连接才迁移」，r3.3 的再复核指出「客户端已断开、处理线程还在跑」的请求核验不到，peilin 选 (a)（11:31），r3.4 改为按副本数核验连接线程，并按 peilin 11:32（t51u）把迁移收窄到他本机这一套旧安装，见「复核对照」的 r3 部分。本文只写设计，不含代码；daemon 侧要加的东西全部列在 §3.4，分期写进 §8.1。
 
 ### 决定表
 
@@ -187,6 +187,7 @@ daemon.md §5 的方法表与「共 21 个方法」那句、`tests/rpc.rs::daemo
 | P3 | push / publish 的 URL 绑定 | 否 | **由 impl/v1 实现**（D12），GUI 只处理 `remote_changed` | impl/v1 自带增补 |
 | P4 | `watch`（新） | 是 | §5.3：连接专用模式、单一事件序列、重放与快照协议 | 方法表 +1；daemon.md 新增 §5.x「watch 线协议」；rpc I1 增加 `Busy too_many_watchers` |
 | P5 | `drain {on: bool, ttl_s}` / `drain {seal: true, lease_id, then: restart / stop}`（新） | 控制 | §5.9：可续租的拒收新写请求；准入与 inflight 同一临界区；原子封口后 daemon 立即自己退出，退出码由 `then` 决定（restart 75 → launchd 拉起；stop 0 → 留在停止状态）；写 `last_shutdown.json` | 方法表 +1；daemon.md §5.9 停机步骤 |
+| P5 | cli `daemon start` | — | 服务已加载但没在跑（stop 封口以 0 退出后的状态）时 `kickstart`（不带 `-k`），不再回 `already: true`（v1:crates/git-strata/src/launch.rs:57 今天只看「已加载」）；已在跑才回 `already: true` | cli.md `daemon start` 行 |
 | P5 | plist、退出码与日志 | — | plist 加 `ExitTimeOut 900`，`KeepAlive` 改为 `{SuccessfulExit = false}`；main.rs 退出码按封口模式（restart 75 / stop 与 SIGTERM 0，close 出错不改退出码，记进 `last_shutdown.json`）；daemon 自己把 stderr 重定向到 `~/Library/Logs/git-strata/daemon.log`（10 MiB 轮转一份）；PATH 从旁路文件读（§5.7） | daemon.md §5.9、config.md 新增 daemon-env.toml |
 | P6 | label 改名 | — | cli 的 `launch.rs` 一个版本周期内两个 label 都认；新安装不再有默认数据根 | cli.md、config.md |
 
@@ -389,19 +390,29 @@ README 第一节改成「下载 app → 首次打开 → 引导」，cli 用法�
 **升级**（Tauri updater）：
 1. `update.download()` 下载并校验签名（§6），**不安装**。
 2. §5.9 的 drain：等进行中的操作结束（显示列表，人可以取消升级）。
-3. 停 daemon（A：`unregister()`；B：`bootout`），等 socket 消失、daemon.lock 释放（最多 ExitTimeOut）。
+3. 停 daemon：按 §5.9 第 4 条「升级 / 迁移」的顺序——封口 `then: stop` → 等进程以 0 退出并**停稳**（无 pid、last exit 0、socket 消失、daemon.lock 可拿）→ `launchctl disable` → 复查停稳 → A：`unregister()`；B：`bootout`。
 4. `update.install()`，重启 app。
 5. 新 app 首次启动：注册 / 启动新 daemon，核对 `daemon_status.version` 等于自己的版本；不等或 60 s 内起不来 → 显示 "The new daemon didn't start" 与日志位置，提供 `Roll back`（重新安装上一版需要用户手动下载，README 写明；数据不受影响）。
 
 **从旧安装迁移**（`~/.cargo/bin/git-strata{,d}` + `~/Library/LaunchAgents/com.gwd.git-stratad.plist`）：
-1. **检测**（每次启动都做，不只首次）：旧 plist 存在、`launchctl print gui/<uid>/com.gwd.git-stratad` 有记录、`~/.cargo/bin` 下有旧二进制、PATH 里排前面的 `git-strata` 不是 bundle 的。两个 label 同时加载时显示警告（两个 daemon 会争 daemon.lock）。
+
+**范围（peilin 11:32，t51u）**：只覆盖 peilin 这台 Mac 上现有的这一套——用本仓库 impl/v1 编出、`cargo install` 到 `~/.cargo/bin`、由 `com.gwd.git-stratad` LaunchAgent 起的 daemon。**不做通用的旧版兼容**：不支持别的安装位置、别的 label、别的版本区间。开源用户一律是全新安装，走 §5.6 的引导，看不到迁移入口。
+1. **检测**（每次启动都做，不只首次）：旧 plist 存在、`launchctl print gui/<uid>/com.gwd.git-stratad` 有记录、`~/.cargo/bin` 下有旧二进制、PATH 里排前面的 `git-strata` 不是 bundle 的。两个 label 同时加载时显示警告（两个 daemon 会争 daemon.lock）。检测到的只要不是下面「身份核对」认得的那一套，迁移入口不出现，只显示 "An older git-strata install was found that this app can't migrate automatically" 与 README 的手动步骤。
 2. **显式化配置**：旧 config.toml 没有 `[paths]` 时，旧 daemon 用的是默认根 `/Volumes/GWD/inter/.strata`（`Paths::default_root()`）。新版不再有默认根，所以迁移先把**旧 daemon 实际使用的根**写成显式的 `[paths] root = "…"`（备份为 `config.toml.bak-<时间>`，改写前后给人看 diff）。这一步对旧版也合法，回滚无害。
-3. **旧 daemon 的准入栅栏与「无客户端」核验（不需要改旧二进制）**：旧 daemon 没有 `drain` 与 `inflight`（api 0），holds / waiters 也看不到确认框等待中（确认在拿锁之前，handlers.rs:1141）或尚未排上的请求（startup.rs:515）；已建立的连接还能随时再发请求（rpc.rs:497 按帧循环分派），所以只摘 socket 不够，必须核验**没有任何客户端连着旧 daemon**。做法：
-   ① **摘掉 socket 路径**：把 `daemon.sock` 改名为 `daemon.sock.migrating-<随机后缀>`（同目录 rename；目录 0700、socket 0600，startup.rs:123、539，只有同 uid 与 root 能连）。新连接一律连不上（cli 得到 `Busy daemon_down`，不会自动拉起 daemon，rpc.rs:57），这是准入栅栏；改名后的路径只有 GUI 知道。旧 daemon 只在 bind（startup.rs:533）与退出（startup.rs:366）时碰 socket 路径，服务中不再检查，所以已有连接与 GUI 经新路径的连接照常工作。
-   ② **核验没有客户端连接**（socket 层，旧 daemon 无需配合）：从 `launchctl print gui/<uid>/com.gwd.git-stratad` 取旧 daemon 的 pid；`/usr/sbin/lsof -nP -U -F pfn` 列出本 uid 所有进程的 unix socket，取旧 daemon 自己的 socket 端点地址，再找**对端指向这些地址的其他进程**（lsof 的 `->0x…`）——每一个就是一条仍开着的客户端连接，按 pid 与进程名列给人看。注意不能数旧 daemon 的 fd：`conns` 为每个接受过的连接留了一个 clone，直到停机才释放（startup.rs:458-460、479），fd 数永远不降；对端为空的端点是已断开的连接，不算。GUI 自己的 `daemon_status` 连接每次用完即关，核验时排除 GUI 自己的 pid。同时经改名后的 socket 读 `daemon_status`：holds / waiters 为空；旧 daemon 没有子进程（`git push`、依赖安装等，按 ppid 查）。以上**连续两次、间隔 ≥ 2 s 都为空**才算通过；确认框（客户端已断但处理线程还在等 Touch ID）屏幕上看得见，对话框仍要求勾选 "No Touch ID prompt from git-strata is open"。通过之后，再没有谁能向旧 daemon 发请求（新连接进不来、旧连接都已关闭），所以接下来的 bootout 不会打断写操作。
-   ③ **核验不了就拒绝**：pid 取不到、lsof 不存在 / 退出非 0 / 输出解析不了、以 root 运行的进程可能连着（同 uid 的 lsof 看不到 root 的 fd：发现 root 进程打开了该目录下的文件，或 lsof 报权限不足）→ 不迁移，把 socket 改回原名，提示 "Close agents using git-strata and retry"，并给出 README 的手动迁移步骤。有客户端连着 → 列出它们，同一条提示，人可以 `Retry`；不超时强迁，没有「强制」按钮。
-   ④ **旧 daemon 在迁移中被拉起**：旧 plist 是无条件 KeepAlive，旧 daemon 若崩溃，launchd 会重启它，新进程在**原路径**重新 bind `daemon.sock`（startup.rs:533）。GUI 在每次核验前、以及 bootout 前一刻检查：pid 变了或 `daemon.sock` 重新出现 → 不继续；删掉已死进程留下的 `daemon.sock.migrating-*`（先确认那个 pid 已不存在），把新的 `daemon.sock` 重新改名，从 ② 重新开始等。`daemon.sock.migrating-*` 连不上也按这一条处理，不当作「旧 daemon 已退出、可以继续」。
-   ⑤ 文案写明旧 plist 没有 `ExitTimeOut`，SIGTERM 后 launchd **20 s** 强杀；因为 ② 已核验无客户端、无持锁、无子进程，正常情况下不会触发。
+3. **旧 daemon 的身份核对、准入栅栏与静止核验（不需要改旧二进制）**：旧 daemon 没有 `drain` 与 `inflight`（api 0）。已建立的连接还能随时再发请求（v1:rpc.rs:520-535 按帧循环分派）；更麻烦的是客户端已经断开、处理线程还在跑的请求——旧 daemon 先跑完处理函数，写回答失败才发现客户端没了（v1:rpc.rs:535），这样的 push 可能刚过确认、正要拿 repo 锁（v1:handlers.rs:1184 之后），此刻既没有客户端、没有持锁、没有子进程，也没有确认框。所以核验的对象是**旧 daemon 里还活着的连接线程**，不是客户端。下面行号带 `v1:` 的指 impl/v1 分支（peilin 装的就是它；impl/gui 落后它 18 个提交，连接处理已经不同）。
+   ⓪ **身份核对（单一检查，不认得就拒绝）**：label 是 `com.gwd.git-stratad`；`launchctl print` 的 `program` 是 `~/.cargo/bin/git-stratad`（解析符号链接后）；经 socket 读到的 `daemon_status` 没有 `api` 字段，且同时有 `holds`、`repo_waiting`、`warnings`、`verify`、`reconcile` 这几个键（v1:startup.rs:570-578；`reconcile` 由 d9e0a8a、`repo_waiting` 由本仓库的单实例提交引入，都是本仓库 daemon 这一条线上才有的形状）。`version` 在这条线上一直是 `0.1.0`（crates/strata-daemon/Cargo.toml），区分不了构建，所以不按版本号区间匹配，只要求它等于 `0.1.0`。任何一项不符 → 不迁移（见 ③）。
+   ① **摘掉 socket 路径**：把 `daemon.sock` 改名为 `daemon.sock.migrating-<随机后缀>`（同目录 rename；目录 0700、socket 0600，v1:startup.rs:584-594，只有同 uid 与 root 能连）。新连接一律连不上（cli 得到 `Busy daemon_down`，不会自动拉起 daemon，rpc.rs:57），这是准入栅栏；改名后的路径只有 GUI 知道。旧 daemon 只在 bind 与退出时碰 socket 路径，服务中不再检查，所以已有连接与 GUI 经新路径的连接照常工作。
+   ② **静止核验**（全部满足，**连续两次、间隔 ≥ 2 s**；任一次不满足就从头等）：
+      - **连接线程按副本数核验**：`/usr/sbin/lsof -nP -a -p <旧 pid> -U -F pfdn`，把旧 daemon 的 unix socket fd **按 DEVICE（内核 socket 地址，`d` 字段）分组**。同一个连接的几个 fd 是 `try_clone`（dup）出来的，地址相同。旧 daemon 每接受一个连接：一份 clone 放进 `conns`，线程里再有读端与写端两份（v1:startup.rs:498-513；impl/v1 1060b72 之前的构建见 startup.rs:458-468，同样三份）；线程跑完，读写两份随线程释放——1060b72 之后 `conns` 那份也一起删（v1:startup.rs:511-512），之前的构建留着它直到停机（startup.rs:479）。**GUI 自己的连接也算**：先经 socket 读完 `daemon_status` / `status` 并关掉连接，再跑 lsof，所以每次采样时 GUI 没有连接开着。所以规则是：**除监听 socket（`n` 字段是 socket 路径的那一个）以外，每个地址至多 1 份**。有地址 ≥ 2 份 = 还有连接线程活着（无论客户端在不在、请求在哪个阶段，包括已过确认、未拿锁的 push）→ 不通过。
+      - **没有客户端连接**：同一次 `lsof -nP -U -F pfdn`（本 uid 所有进程）里，没有别的进程的 socket 对端（`->0x…`）指向旧 daemon 的任何地址；GUI 自己的 `daemon_status` 连接每次用完即关，核验时排除 GUI 自己的 pid。它与上一条互相印证；impl/v1 最多同时服务 128 个连接，满了才让新连接留在 listen backlog（v1:startup.rs:37、491-497），连接数不满时接受循环每 20 ms 轮询一次（v1:startup.rs:515），所以改名前已进 backlog 的连接在 2 s 内一定会被接受、出现在副本计数里。
+      - `daemon_status.holds` 为空、`repo_waiting` 全为 0；`status{all:true}` 每个会话的 `in_flight` 为空、`queued` 为 0（v1:handlers.rs:744-745；holds 只列 repo 锁，只拿会话队列的写，例如 `checkpoint`，要看这两项）。
+      - 旧 daemon 没有子进程（`git push`、依赖安装等，按 ppid 查）。
+      - **reconcile 余量**：reconcile 每 `RECONCILE_EVERY` = 3600 s 一轮（v1:lib.rs:61），下一轮的时刻从上一轮结束时算起（v1:handlers.rs:373-391），`daemon_status.reconcile.last.at` 就是上一轮结束的时间（`runs` 为 0 时用旧 pid 的启动时间，`ps -o lstart`）。要求最后一次采样时离下一轮 ≥ 300 s；不够就等这一轮做完（`runs` 加 1）再从头采样。这样 bootout 落在两轮之间，reconcile 的 `gc_repo` 不会在迁移窗口里开始。
+      - 屏幕上没有 git-strata 的 Touch ID 框：对话框仍要求勾选 "No Touch ID prompt from git-strata is open"（副本计数已经覆盖等确认的线程，这一项只是多一道人眼）。
+      通过之后，旧 daemon 里没有活着的连接线程、新连接进不来，接下来的 bootout 不会打断 RPC 写操作。
+   ③ **核验不了就拒绝**：⓪ 不符、pid 取不到、lsof 不存在 / 退出非 0 / 输出里缺 `d` 或 `n` 字段、找不到监听 socket、有 root 进程可能连着（同 uid 的 lsof 看不到 root 的 fd：lsof 报权限不足即算）→ 不迁移，把 socket 改回原名，提示 "Close agents using git-strata and retry"，并给出 README 的手动迁移步骤。核验不通过（有线程、有客户端、有持锁或排队、有子进程）→ 列出看得到的（客户端 pid 与进程名、holds、in_flight），同一条提示，人可以 `Retry`；不超时强迁，没有「强制」按钮。
+   ④ **旧 daemon 在迁移中被拉起**：旧 plist 是无条件 KeepAlive，旧 daemon 若崩溃，launchd 会重启它，新进程在**原路径**重新 bind `daemon.sock`。GUI 在每次采样前、以及 bootout 前一刻检查：pid 变了或 `daemon.sock` 重新出现 → 不继续；删掉已死进程留下的 `daemon.sock.migrating-*`（先确认那个 pid 已不存在），把新的 `daemon.sock` 重新改名，从 ⓪ 重新开始。`daemon.sock.migrating-*` 连不上也按这一条处理，不当作「旧 daemon 已退出、可以继续」。
+   ⑤ **残余风险（非 RPC 的后台写）**：静止核验只管 RPC。旧 daemon 还有两种后台写，bootout 时可能正在跑：reconcile 的 `gc_repo`（② 的余量已让它不在窗口里开始）与每 2 s 一次的种子刷新（v1:lib.rs:64、v1:handlers.rs:399-409，`try_session` 拿得到会话队列才做）。两者被中断都不丢已提交的数据：种子刷新先在布局根克隆到 `.strata-tmp-seed-<hex>`，再一次 rename 换进去（v1:seed.rs:379-388），中断只会留下一个暂存文件或一份没刷新的种子（`status` 照旧报 `SeedStale`）；`gc_repo` 只把目录改名进 `store/trash/`（v1:gc.rs 的 `retire`，`RenameMode::Excl`），store.md §6.3 的崩溃表写明改名前后中断目录在原路径或 trash 里都合法（v1:docs/modules/store.md:1466、1662），SQLite 的改动按事务提交，没有正常关闭时下次 `open` 做 WAL 恢复并跑 `quick_check`（store.md:1359-1363）。旧 plist 若是 impl/v1 6381f45 之后生成的，带 `ExitTimeOut 900`；更早生成的没有，SIGTERM 后 launchd **20 s** 强杀——文案按 `launchctl print` 读到的值写；SIGTERM 时后台 pass 会在锁关闭后尽快结束（v1:handlers.rs:365-368）。
    ⑥ 放弃迁移 → `daemon.sock` 不存在时把 socket 改回原名（存在说明旧 daemon 已重启并自己 bind 了，删掉改名的那个即可），一切照旧。
 4. **停旧的**：`launchctl bootout gui/<uid>/com.gwd.git-stratad`（等退出，最多 ExitTimeOut）→ `launchctl disable gui/<uid>/com.gwd.git-stratad`（防止下次登录被拉起）→ 旧 plist 移到 `~/Library/Application Support/git-strata/legacy/`（不删）。
 5. **起新的**（§5.6 第 5–7 步）。新 daemon 用同一个 `~/Library/Application Support/git-strata/`（config.toml、pins.json、socket 路径不变）、同一个数据根；会话、store、基线原样继续，不做数据迁移。TCC 授权要重新给一次。
@@ -500,7 +511,11 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 | `seal_exit_code_by_mode` | `then: restart` → 75、`then: stop` → 0、未封口 SIGTERM → 0；用测试缝让 `close()` 出错，退出码不变，`last_shutdown.json` 记下 `close_error` | 新增 |
 | `gui_stop_settled_before_launchctl` | 假 launchctl：升级流程只在「无 pid + last exit 0 + socket 消失」后 disable，复查后才 unregister / bootout；GUI 暂停后假 launchd 拉起了新 pid → 不调 bootout，回到第 1 步；restart / stop 不调 launchctl | 新增 |
 | `legacy_migration_socket_fence` | 假旧 daemon：socket 改名后新连接失败、已有连接完成；放弃迁移改回原名后恢复 | 新增 |
-| `legacy_migration_refuses_with_open_client` | 假旧 daemon（用当前 daemon 二进制、关掉 drain 模拟 api 0）+ 一个开着不发请求的客户端：核验列出该客户端 pid，不 bootout；客户端关闭后两次采样为空才继续；客户端断开后旧 daemon 残留的 fd 不算；lsof 不可用 / 输出无法解析 → 拒绝并改回 socket 名 | 新增 |
+| `legacy_lsof_copy_count` | 解析器单测，用录下的 `lsof -F pfdn` 样本：监听 socket 被排除；同地址 3 份（线程活着）→ 不通过；1 份（1060b72 之前的残留 clone）与 0 份 → 通过；缺 `d` 或 `n` 字段 → 拒绝 | 新增 |
+| `legacy_migration_refuses_with_open_client` | 用 impl/v1 的 daemon 当旧 daemon：① 一个开着不发请求的客户端 → 列出其 pid，不 bootout；② 客户端发一个用测试缝卡在处理函数里的请求后自己退出（模拟「已断开、线程还在」）→ 副本计数不通过，不 bootout；③ 都结束后两次采样为空才继续；lsof 不可用 → 拒绝并改回 socket 名 | 新增 |
+| `legacy_identity_gate` | 假 `daemon_status` / 假 `launchctl print`：program 不在 `~/.cargo/bin`、有 `api` 字段、缺 `repo_waiting` 或 `reconcile`、version 不是 `0.1.0`、label 不同 → 都不出现迁移入口、提示手动步骤；本仓库形状 → 出现 | 新增 |
+| `legacy_reconcile_headroom` | 假时钟：离下一轮 < 300 s 时等 `runs` 加 1 再采样；≥ 300 s 时继续 | 新增 |
+| `cli_daemon_start_kickstarts_stopped` | 假 launchctl：已加载未运行 → `kickstart`（无 `-k`）；在跑 → `already: true`；未加载 → `bootstrap` | 新增 |
 | `legacy_migration_revived_daemon_rerename` | 迁移中杀掉假旧 daemon，假 launchd 拉起后在原路径 bind：GUI 发现 pid 变化 / `daemon.sock` 重现，重新改名并从头等待，不 bootout | 新增 |
 | `deps_build_started_emitted_during_build` | 脚本化的慢依赖构建：`deps_build.started` 在处理函数返回前到达订阅者 | 新增 |
 | `gui_publish_never_calls_assign_when_batching` | GUI 分批只组装 `batches`，不发 `assign`；`assign` 只出现在 Conflict 流程 | 新增 |
@@ -543,8 +558,8 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 | P2 | daemon 只读增补（§3.4 P2 行：status summary、changes、diff_text、allocations、push_plan、publish_plan detail、daemon_status 字段、`Confirmer::pending`、config_effective）＋ strata-client 回答类型与契约测试；GUI 接上 Allocations、Diff、Home | 6 天 | P0；push_plan / publish_plan 的 URL 字段依赖 impl/v1 的 URL 绑定已合并 | 是 |
 | P3 | 确认类对话框：push、publish（checkpoint + 本地 batches + plan；assign 只用于 Conflict）、deps approve（planned）、rm --discard、config relax（revision）、chain resolve / restore、gc（普通确认）；部分成功与 reason 分支；prompt_in_progress 横幅 | 6 天 | P1、P2；impl/v1 的 `remote_changed` | 是（deps_approve、config_relax 两个参数） |
 | P4 | `watch`：hub、连接专用模式、分配差分、FSEvents、失效表、GUI watch.rs 与轮询表 | 5 天 | P2；impl/v1 合并到本分支之后（改动面与 v1 的 handlers / startup 重叠最大） | 是 |
-| P5 | drain 与 inflight、封口与退出码、SuccessfulExit plist、ExitTimeOut、自重定向日志、daemon-env.toml；GUI 的 lifecycle（重启 / 停止 / 收紧配置 / 停稳核验）；旧 daemon 迁移的 lsof 核验 | 3 天 | P2 | 是 |
-| P6 | bundle、注册（按 P-pack 结论选 A / B）、cli 链接、引导、迁移与回滚、通知 | 3 天 | P5、P-pack 结论 | label |
+| P5 | drain 与 inflight、封口与退出码、SuccessfulExit plist、ExitTimeOut、自重定向日志、daemon-env.toml；GUI 的 lifecycle（重启 / 停止 / 收紧配置 / 停稳核验）；cli `daemon start` 对已加载未运行的服务 kickstart | 3 天 | P2 | 是 |
+| P6 | bundle、注册（按 P-pack 结论选 A / B）、cli 链接、引导、迁移（只针对 peilin 本机的旧安装，含身份核对与 lsof 副本计数）与回滚、通知 | 3 天 | P5、P-pack 结论 | label |
 | P7 | release CI、自签名、updater（download → drain → install）、DMG 说明、README 改写 | 2 天 | P6、P-pack | 否 |
 
 主线合计 30 天。
@@ -621,7 +636,7 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 5. **Q-cli-plan**：daemon 有了 push_plan / publish_plan detail 之后，cli 是否也改用（去掉本地计划读取，两边文案同源）？不影响 GUI。
 6. **Q-daemon-client**：`strata_daemon::client` 语义与 cli 不同，P2 时是否统一到 strata-client？
 7. **Q-drain-agent**：drain 期间 agent 的写请求收到 `Busy draining`。cli 是否要等待重试（像 daemon_down 时那样提示），还是直接报错？
-8. **Q-legacy**：从旧安装迁移时，GUI 摘掉 socket 路径并用 lsof 核验没有任何客户端连着旧 daemon（§5.7 迁移第 3 条），核验不了就拒绝并提示关掉 agent；确认框是否开着仍由人勾选。可以接受吗？还是你更愿意在一个安静的时刻按 README 手动迁移？
+8. **Q-legacy**：迁移只针对你本机这一套（§5.7「范围」），身份核对认不出就不迁移、给手动步骤；认得出时按 lsof 副本计数 + 静止核验自动迁移，核验不了就拒绝并提示关掉 agent。迁移前是否要先把 `~/.cargo/bin` 的旧 daemon 更新到 impl/v1 最新再迁（不是必须：副本规则对 1060b72 前后都成立）？
 
 ### 复核对照（gui-merged.md → 本版）
 
@@ -672,6 +687,9 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 | 阻断（Codex B1，r3.1 再复核仍未解决：检查与停机之间有空档；旧 daemon 无准入栅栏） | §5.9：租约 + 准入与 inflight 同一临界区 + daemon 内原子封口（sealed 不过期、失败方向是退出）；r3.3：封口即退出、退出码由 `then` 决定、`SuccessfulExit = false`；§5.7 迁移第 3 条：socket 改名 + lsof 核验无客户端连接 + 等空 + 人确认无 Touch ID 框；§9 Q-legacy；`drain_seal_atomic`、`seal_exit_code_by_mode`、`legacy_migration_socket_fence`、`legacy_migration_refuses_with_open_client` |
 | r3.2 再复核（Codex 阻断 1）：旧 daemon 已建立的连接在「查空」之后还能发请求 | §5.7 迁移第 3 条 ②③：socket 层核验无对端（不数 fd，conns 留着 clone），连续两次为空；核验不了就拒绝 "Close agents using git-strata and retry" |
 | r3.2 再复核（Codex 阻断 2 / Claude 非阻断 1）：60 s 自退后无条件 KeepAlive 拉起未封口的进程，迟到的 bootout 误停它 | §5.9 第 1a、1b、4 条：删掉 60 s 兜底，封口即退出；`SuccessfulExit = false` + 退出码按模式（restart 75 / stop 0）；升级 / 迁移只在「停稳」后 disable → 复查 → unregister / bootout；`gui_stop_settled_before_launchctl` |
+| r3.3 再复核（Codex 阻断）：客户端已断开、处理线程还在跑的请求（rpc.rs:502-506，push 过了确认未拿锁）核验不到 | §5.7 迁移第 3 条 ②：lsof `-F pfdn` 按地址数副本，每个已接受的连接至多 1 份才算没有活着的连接线程；⓪ 身份核对只认本仓库这条线；③ 认不出 / 核验不了就拒绝；⑤ reconcile 余量与后台写的崩溃容忍依据；`legacy_lsof_copy_count`、`legacy_identity_gate`、`legacy_reconcile_headroom` |
+| r3.3 再复核（Codex / Claude 非阻断）：stop 后 cli `daemon start` 回 already 不起；lsof 缺 `d` 字段；holds 不含只拿会话队列的写；§5.7 升级第 3 条旧顺序 | §3.4 P5 cli `daemon start` 行与 `cli_daemon_start_kickstarts_stopped`；`-F pfdn`；`status{all:true}` 的 in_flight / queued；§5.7 升级第 3 条改按 §5.9 第 4 条 |
+| peilin 11:32（t51u）：只迁本机 | §5.7「范围」：只认 `~/.cargo/bin` + `com.gwd.git-stratad` + 本仓库形状；开源用户全新安装 |
 | r3.2 再复核（Claude 非阻断 2）：迁移中旧 daemon 崩溃被拉起 | §5.7 迁移第 3 条 ④：pid 变化 / `daemon.sock` 重现 → 重新改名、从头等；`legacy_migration_revived_daemon_rerename` |
 | r3.2 再复核（Claude 非阻断 3）：close 出错时退出码非 0 | §5.9 第 1b 条：退出码按 `then`，close 错误记进 `last_shutdown.json`，GUI 启动后显示 |
 | r3.1 再复核（Claude 非阻断 1–5）：KeepAlive 须无条件；§3.2 / §8.1 残留「assign」；deps 事件由谁发；准入原子性；inflight 不含 reconcile | §5.9 第 1b 条与 `plist_keepalive_successful_exit_false`（r3.3 由无条件改为 SuccessfulExit = false）；§3.2 publish 行、§8.1 P3 行；§5.3.2 由 daemon 处理函数在调用前后发；§5.9 第 1 条；§5.9 第 4 条说明 |
