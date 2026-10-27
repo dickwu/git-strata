@@ -33,6 +33,9 @@ use crate::locks::Locks;
 use crate::rpc::{self, Reply, Request};
 use crate::{DaemonWarning, PinnedFlags, GC_KEEP, LOCK_WAIT, MAX_FRAME, Result};
 
+/// Review P1-3: connections served at once; more wait in the backlog.
+pub const MAX_CONNS: usize = 128;
+
 /// Where the daemon keeps its files, and the knobs tests turn.
 #[derive(Clone)]
 pub struct Options {
@@ -375,7 +378,10 @@ pub struct Daemon<'a> {
     pub sessions: Sessions<'a>,
     pub recovered: RecoverReport,
     stop: AtomicBool,
-    conns: Mutex<Vec<UnixStream>>,
+    /// Review P1-3: the open connections only (a clone each, for the
+    /// stop), removed when the connection ends.
+    conns: Mutex<BTreeMap<u64, UnixStream>>,
+    next_conn: std::sync::atomic::AtomicU64,
     /// §5.9: the reconcile loop's counters and its last pass (daemon_status).
     reconcile: Mutex<Value>,
     /// §5.12: the du cache and its background pass (stopped on drop).
@@ -419,10 +425,17 @@ impl<'a> Daemon<'a> {
             sessions,
             recovered,
             stop: AtomicBool::new(false),
-            conns: Mutex::new(Vec::new()),
+            conns: Mutex::new(BTreeMap::new()),
+            next_conn: std::sync::atomic::AtomicU64::new(0),
             reconcile: Mutex::new(json!({ "runs": 0, "last": null })),
             du: crate::du::Du::open(&core.config.paths.root),
         })
+    }
+
+    /// Connections being served now (review P1-3: a finished connection
+    /// leaves no descriptor behind).
+    pub fn open_connections(&self) -> usize {
+        self.conns.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Ask the accept loop to stop (SIGTERM, or a test).
@@ -453,18 +466,28 @@ impl<'a> Daemon<'a> {
                 if self.stopping() || external.load(Ordering::SeqCst) {
                     break;
                 }
+                // Review P1-3: at most MAX_CONNS connections are served at
+                // once; past that the loop stops accepting (clients wait in
+                // the listen backlog) until one ends.
+                if self.open_connections() >= MAX_CONNS {
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let _ = stream.set_nonblocking(false);
-                        if let Ok(c) = stream.try_clone() {
-                            self.conns.lock().unwrap_or_else(|p| p.into_inner()).push(c);
-                        }
+                        let id = self.next_conn.fetch_add(1, Ordering::SeqCst);
+                        let Ok(c) = stream.try_clone() else { continue };
+                        self.conns.lock().unwrap_or_else(|p| p.into_inner()).insert(id, c);
                         s.spawn(move || {
-                            let Ok(w) = stream.try_clone() else { return };
-                            let mut r = BufReader::new(stream);
-                            let mut w = w;
-                            let mut h = |req: Request| handle(req);
-                            let _ = rpc::serve_connection(&mut r, &mut w, MAX_FRAME, &mut h);
+                            if let Ok(w) = stream.try_clone() {
+                                let mut r = BufReader::new(stream);
+                                let mut w = w;
+                                let mut h = |req: Request| handle(req);
+                                let _ = rpc::serve_connection(&mut r, &mut w, MAX_FRAME, &mut h);
+                            }
+                            // The clone kept for the stop goes with the connection.
+                            self.conns.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
                         });
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(20)),
@@ -476,7 +499,7 @@ impl<'a> Daemon<'a> {
             // finishes. Idle connections see end of input; a connection in
             // the middle of a request still writes its reply.
             self.core.locks.shutdown();
-            for c in self.conns.lock().unwrap_or_else(|p| p.into_inner()).drain(..) {
+            for c in self.conns.lock().unwrap_or_else(|p| p.into_inner()).values() {
                 let _ = c.shutdown(std::net::Shutdown::Read);
             }
         });

@@ -1221,3 +1221,47 @@ fn slim_new_then_add_over_the_socket() {
     drop(d);
     core.close().unwrap();
 }
+
+/// Review P1-3: a finished connection leaves nothing behind (the clone the
+/// daemon keeps for the stop goes with it), and connections past
+/// `MAX_CONNS` wait instead of each taking a thread.
+#[test]
+fn finished_connections_release_their_descriptors() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        for _ in 0..40 {
+            ok(call(&sock, "daemon_status", json!({})));
+        }
+        let t0 = std::time::Instant::now();
+        while d.open_connections() > 0 && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(d.open_connections(), 0, "closed connections are dropped");
+        // Idle connections count while open and are capped.
+        // Connect in steps so the listen backlog never overflows.
+        let mut idle: Vec<UnixStream> = Vec::new();
+        for i in 0..startup::MAX_CONNS + 5 {
+            idle.push(UnixStream::connect(&sock).unwrap());
+            let want = (i + 1).min(startup::MAX_CONNS);
+            let t0 = std::time::Instant::now();
+            while d.open_connections() < want && t0.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(d.open_connections(), startup::MAX_CONNS, "no more than MAX_CONNS served at once");
+        drop(idle);
+        let t0 = std::time::Instant::now();
+        while d.open_connections() > 0 && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(d.open_connections(), 0);
+        // The daemon still answers.
+        ok(call(&sock, "daemon_status", json!({})));
+    });
+    drop(d);
+    core.close().unwrap();
+}

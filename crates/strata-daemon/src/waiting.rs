@@ -227,18 +227,31 @@ impl Waiting {
         let stop = Arc::new(AtomicBool::new(false));
         let (st, s2) = (stop.clone(), state.clone());
         let thread = std::thread::Builder::new().name("strata-waiting".into()).spawn(move || {
+            // Review P1-3: at most MAX_CONNS connection threads at once.
+            let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             while !st.load(Ordering::SeqCst) {
+                if live.load(Ordering::SeqCst) >= crate::startup::MAX_CONNS {
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let _ = stream.set_nonblocking(false);
                         let s3 = s2.clone();
-                        let _ = std::thread::Builder::new().name("strata-waiting-conn".into()).spawn(move || {
-                            let Ok(mut w) = stream.try_clone() else { return };
-                            // Like the real server: no read timeout; the peer owns the connection.
-                            let mut r = BufReader::new(stream);
-                            let mut h = |req: Request| s3.reply(&req);
-                            let _ = rpc::serve_connection(&mut r, &mut w, MAX_FRAME, &mut h);
+                        let l2 = live.clone();
+                        l2.fetch_add(1, Ordering::SeqCst);
+                        let spawned = std::thread::Builder::new().name("strata-waiting-conn".into()).spawn(move || {
+                            if let Ok(mut w) = stream.try_clone() {
+                                // Like the real server: no read timeout; the peer owns the connection.
+                                let mut r = BufReader::new(stream);
+                                let mut h = |req: Request| s3.reply(&req);
+                                let _ = rpc::serve_connection(&mut r, &mut w, MAX_FRAME, &mut h);
+                            }
+                            l2.fetch_sub(1, Ordering::SeqCst);
                         });
+                        if spawned.is_err() {
+                            live.fetch_sub(1, Ordering::SeqCst);
+                        }
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(20)),
                     Err(_) => std::thread::sleep(Duration::from_millis(20)),
