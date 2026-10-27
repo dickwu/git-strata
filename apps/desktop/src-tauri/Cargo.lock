@@ -1612,6 +1612,7 @@ dependencies = [
 name = "git-strata-desktop"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "strata-client",

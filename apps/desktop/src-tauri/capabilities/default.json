@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: core IPC, events, window dragging (overlay titlebar), opener, platform query. No fs, http or shell (G6).",
+  "description": "Main window: core IPC, events, window dragging (overlay titlebar), opener, platform query. No fs, http, dialog or shell (G6). The app commands are listed one by one (build.rs APP_COMMANDS); daemon_start and legacy_agent run /bin/launchctl and are granted here only.",
   "windows": [
     "main"
   ],
@@ -10,6 +10,14 @@
     "core:event:default",
     "opener:default",
     "os:allow-platform",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "allow-daemon-status",
+    "allow-daemon-socket",
+    "allow-sessions-list",
+    "allow-session-status",
+    "allow-du",
+    "allow-deps-list",
+    "allow-legacy-agent",
+    "allow-daemon-start"
   ]
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-deps-list"
+description = "Enables the deps_list command without any pre-configured scope."
+commands.allow = ["deps_list"]
+
+[[permission]]
+identifier = "deny-deps-list"
+description = "Denies the deps_list command without any pre-configured scope."
+commands.deny = ["deps_list"]

@@ -1,8 +1,18 @@
-import type { GuiError } from './types';
+import type { GuiError, StartProgress, Started } from './types';
 
-/** The six read commands the back end registers in P1 (src-tauri/src/lib.rs). */
+/**
+ * The commands the back end registers (src-tauri/src/lib.rs): the six P1 reads, plus
+ * legacy_agent and daemon_start (S0, main window only).
+ */
 export type Command =
-  'daemon_status' | 'daemon_socket' | 'sessions_list' | 'session_status' | 'du' | 'deps_list';
+  | 'daemon_status'
+  | 'daemon_socket'
+  | 'sessions_list'
+  | 'session_status'
+  | 'du'
+  | 'deps_list'
+  | 'legacy_agent'
+  | 'daemon_start';
 
 export const OPEN_EVENT = 'strata://open';
 
@@ -45,4 +55,16 @@ export async function call<T>(cmd: Command, args?: Record<string, unknown>): Pro
   } catch (e) {
     throw asGuiError(e);
   }
+}
+
+/**
+ * daemon_start: kickstart or bootstrap the launchd agent, then wait for its socket.
+ * Progress arrives on a Channel while the call runs (src-tauri/src/commands/service.rs).
+ */
+export async function startDaemon(onProgress: (p: StartProgress) => void): Promise<Started> {
+  if (!inTauri()) return call<Started>('daemon_start');
+  const { Channel } = await import('@tauri-apps/api/core');
+  const ch = new Channel<StartProgress>();
+  ch.onmessage = onProgress;
+  return call<Started>('daemon_start', { onProgress: ch });
 }

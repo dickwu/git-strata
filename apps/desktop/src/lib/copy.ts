@@ -20,7 +20,6 @@ export const copy = {
     title: 'Daemon',
     running: 'Running',
     down: "Daemon isn't running. Start it to see live sessions.",
-    downHint: 'Run `git-strata daemon start` in a terminal. Starting it from here comes later.',
     stuck: (secs: number) =>
       `The daemon did not answer within ${secs} seconds — it may have run out of file descriptors or be stuck.`,
     busy: 'The daemon is busy. Retrying.',
@@ -35,6 +34,47 @@ export const copy = {
     noWarnings: 'No warnings.',
     storage: 'Storage',
     socket: 'Socket',
+  },
+  /** The Start daemon control in the down notice (S0, design §6.1: start only, never stop). */
+  start: {
+    button: 'Start daemon',
+    retry: 'Try again',
+    done: 'Daemon started',
+    fallback: 'Or run `git-strata daemon start` in a terminal.',
+    phase: {
+      kickstart: 'Asking launchd to start the daemon',
+      bootstrap: 'Loading the launch agent into launchd',
+      waiting: 'Waiting for the daemon to answer',
+      store: 'Waiting for the daemon to open its store',
+      tcc: 'Waiting for macOS. Approve the removable-volume prompt if one is showing.',
+      recovering: 'The daemon is recovering its sessions',
+      ready: 'Daemon started',
+    },
+    setup: {
+      title: 'No launch agent is installed, so the daemon cannot be started from here yet.',
+      hint: (plist: string) =>
+        `Install \`${plist}\` as the README section "Install and daemon" describes, then start it. Setting it up from here comes later.`,
+    },
+    errors: {
+      plistMissing: (plist: string) => `No launch agent at \`${plist}\`.`,
+      launchctl: (step: string, status: number | null) =>
+        status === null
+          ? `launchctl ${step} did not finish.`
+          : `launchctl ${step} failed with exit code ${status}.`,
+      launchctlHint:
+        'Its output is below. Running `git-strata daemon start` in a terminal shows the same.',
+      tcc: 'macOS is still asking whether the daemon may use its removable volume.',
+      tccHint:
+        'Approve the removable-volume prompt, or allow it in System Settings, Privacy & Security, then try again.',
+      store: 'The daemon started but cannot open its store.',
+      storeHint: 'Check that the volume is mounted, then try again.',
+      timeout: (secs: number) =>
+        `launchd took the start, but the daemon did not answer within ${secs} seconds.`,
+      timeoutHint:
+        'Its log is `~/Library/Application Support/git-strata/daemon.err.log`. Try again once it settles.',
+      inFlight: 'A start is already in progress.',
+      notMain: 'Start the daemon from the main window.',
+    },
   },
   sessions: {
     title: 'Sessions',

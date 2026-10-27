@@ -162,3 +162,25 @@ export interface DuReply {
   };
   scan?: { running: boolean; queued: number; last_full: { started: string; ended: string } | null };
 }
+
+/** legacy_agent (src-tauri/src/service/mod.rs LegacyAgent). */
+export type AgentState = 'loaded' | 'installed' | 'not_installed';
+export interface LegacyAgent {
+  state: AgentState;
+  label: string;
+  plist: string;
+  command: string;
+}
+
+/** daemon_start progress, one per change (service::Progress, tagged by `phase`). */
+export type StartProgress =
+  | { phase: 'launching'; action: 'kickstart' | 'bootstrap' }
+  | { phase: 'waiting' }
+  | { phase: 'waiting_store'; tcc: boolean }
+  | { phase: 'recovering' }
+  | { phase: 'ready' };
+
+export interface Started {
+  action: 'kickstart' | 'bootstrap';
+  waited_ms: number;
+}

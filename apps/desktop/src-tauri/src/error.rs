@@ -15,7 +15,7 @@ pub struct GuiError {
 }
 
 impl GuiError {
-    fn new(code: Code, message: impl Into<String>, detail: Value) -> GuiError {
+    pub(crate) fn new(code: Code, message: impl Into<String>, detail: Value) -> GuiError {
         GuiError {
             code: code.as_str().to_string(),
             message: message.into(),

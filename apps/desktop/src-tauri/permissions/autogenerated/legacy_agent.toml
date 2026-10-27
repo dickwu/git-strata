@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-legacy-agent"
+description = "Enables the legacy_agent command without any pre-configured scope."
+commands.allow = ["legacy_agent"]
+
+[[permission]]
+identifier = "deny-legacy-agent"
+description = "Denies the legacy_agent command without any pre-configured scope."
+commands.deny = ["legacy_agent"]

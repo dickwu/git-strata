@@ -5,6 +5,7 @@
 pub mod daemon;
 pub mod error;
 pub mod lifecycle;
+pub mod service;
 pub mod socket;
 pub mod state;
 pub mod tray_model;
@@ -79,6 +80,7 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_connector::init());
     let app = builder
         .manage(AppState::new(socket::default_socket().map(Daemon::new)))
+        .manage(service::Starter::from_env())
         .setup(|app| {
             let handle = app.handle().clone();
             tray::install(&handle)?;
@@ -111,6 +113,8 @@ pub fn run() {
             commands::sessions::session_status,
             commands::storage::du,
             commands::deps::deps_list,
+            commands::service::legacy_agent,
+            commands::service::daemon_start,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| panic!("error while building {APP_NAME}: {e}"));
@@ -163,6 +167,47 @@ mod tests {
     /// The plugin's lock (macOS: /tmp/<identifier>_si.sock) is keyed by the
     /// bundle identifier, so the dev statusbar build
     /// (io.github.dickwu.git-strata.statusbar) is a separate instance.
+    /// The app ACL (build.rs `APP_COMMANDS`) lists every registered command,
+    /// and capabilities/default.json grants each to the main window only;
+    /// with an app manifest Tauri refuses any command not granted.
+    #[test]
+    fn every_command_is_in_the_app_acl_for_main_only() {
+        let lib = include_str!("lib.rs");
+        let h = &lib[lib.find("generate_handler![").unwrap()..];
+        let h = &h[..h.find("])").unwrap()];
+        let registered: Vec<&str> = h
+            .lines()
+            .filter_map(|l| l.trim().strip_suffix(','))
+            .filter_map(|l| l.rsplit("::").next())
+            .collect();
+        assert_eq!(registered.len(), 8);
+        let build = include_str!("../build.rs");
+        let cap: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert_eq!(cap["windows"], serde_json::json!(["main"]));
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        for c in &registered {
+            assert!(
+                build.contains(&format!("\"{c}\"")),
+                "{c} missing from build.rs APP_COMMANDS"
+            );
+            let allow = format!("allow-{}", c.replace('_', "-"));
+            assert!(
+                perms.contains(&allow.as_str()),
+                "{allow} missing from default.json"
+            );
+        }
+        // No other capability file may grant the launchctl commands.
+        for p in ["allow-daemon-start", "allow-legacy-agent"] {
+            assert!(!include_str!("../capabilities-dev/dev-connector.json").contains(p));
+        }
+    }
+
     #[test]
     fn single_instance_key_is_the_identifier() {
         let conf: serde_json::Value =

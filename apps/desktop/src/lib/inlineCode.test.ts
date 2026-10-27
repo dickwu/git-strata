@@ -13,8 +13,8 @@ describe('splitInlineCode', () => {
   test('plain text stays one part', () => {
     expect(splitInlineCode('plain')).toEqual([{ text: 'plain', code: false }]);
   });
-  test('daemon-down hint has one command and no literal backticks after split', () => {
-    const parts = splitInlineCode(copy.daemon.downHint);
+  test('Start daemon fallback has one command and no literal backticks after split', () => {
+    const parts = splitInlineCode(copy.start.fallback);
     expect(parts.filter((p) => p.code).map((p) => p.text)).toEqual(['git-strata daemon start']);
     expect(parts.some((p) => p.text.includes('`'))).toBe(false);
   });
