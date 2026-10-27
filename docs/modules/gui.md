@@ -2,11 +2,26 @@
 
 **Crate**：`crates/strata-client`（新，从 cli 抽出）＋ `apps/desktop/src-tauri`（新，crate `git-strata-desktop`，lib `strata_desktop_lib`）· **前端**：`apps/desktop/`（Next.js 静态导出）· **设计来源**：daemon.md §3–§5、confirm.md §1 §5、cli.md §1 §3、README「Install and daemon」「Confirmation gate」 · **参照工程**：R2（github.com/dickwu/r2，已确认的技术栈）· **UI 方法**：frontend-design skill
 
-> 状态：提案，未实现。技术栈按 R2 已定，不再讨论；§9 列出待 peilin 决定的问题。本文只写设计，不含代码。
+> 状态：提案，未实现。技术栈按 R2 已定。第二版（2026-10-27）按 peilin 的回答（t49u）改写：GUI 是项目主入口、实时看到后端分配、没有 Apple ID、daemon 打进 app、界面只用英文、关窗后留在菜单栏。决定见下表，§9 记录剩余问题。本文只写设计，不含代码。
+
+### 决定表（第二版）
+
+| # | 决定 | 来源 | 落在 |
+|---|---|---|---|
+| D1 | GUI 是项目主入口：放在本仓库 `apps/desktop`，README 与引导先讲 app；cli 保留，主要给 agent 用 | t49u | §1、§5.6 |
+| D2 | 实时看到后端分配（会话、工作区、基线 / 依赖集、克隆、存储）：daemon 新增只读 `watch` 事件流；轮询保留为回退 | t49u | §5.3 |
+| D3 | 没有 Apple Developer ID：只做 ad-hoc 或自签名；不公证；用稳定的自签名身份让 TCC 授权跨更新保留；引导里写 Gatekeeper 首次打开步骤 | t49u | §6 |
+| D4 | daemon 打进 `.app`（不走 Homebrew）；LaunchAgent 用 **SMAppService.agent + `Contents/Library/LaunchAgents` + `BundleProgram`**；cli 也打进 bundle，引导里建 PATH 符号链接；规划从 `~/.cargo/bin` + `com.gwd.git-stratad` 迁移 | t49u | §5.6、§5.7、§6 |
+| D5 | 界面只用英文 | t49u | §5.2 |
+| D6 | 关窗不退出，常驻菜单栏：状态 + 待处理事项速览 | t49u | §5.8 |
+| D7 | 强调色深青石蓝 `#2E6F8E`，字体沿用 R2 三款 | 按建议 | §8.2 |
+| D8 | 同意新增只读 daemon 方法：`diff_text`、`watch`、daemon_status 带 Touch ID 可用性与「正在等待的确认框」 | 按建议 | §3.1、§5.3 |
+| D9 | `com.gwd.*` 改为 `io.github.dickwu.git-strata`（app），LaunchAgent label `io.github.dickwu.git-strata.daemon`；默认数据根与 plist PATH 去个人化（本版只写计划与迁移） | 按建议 | §5.7 |
+| D10 | GUI 里的 gc 需要 Touch ID：daemon 新增 `Action::Gc` | 按建议 | §5.5（见 §9 Q-gc：daemon 分不出调用方，门只能对所有客户端生效） |
 
 ## 1. 职责与边界
 
-gui 是给**人**用的桌面前端：看 daemon 健康与告警、看各会话在各仓库的状态和改动、在需要时批准（发布 / 推送 / 依赖提议 / 丢弃会话 / 放宽配置），以及首次使用的引导。目标用户是一个开发者，同时看着几个 agent 在 git-strata 会话里干活；他打开窗口要回答的问题只有三个：**谁改了什么、什么在等我、磁盘还够不够**。
+gui 是 git-strata 的**主入口**（D1），给人用的桌面 app：看 daemon 健康与告警、看各会话在各仓库的状态和改动、在需要时批准（发布 / 推送 / 依赖提议 / 丢弃会话 / 放宽配置），以及首次使用的引导。目标用户是一个开发者，同时看着几个 agent 在 git-strata 会话里干活；他打开窗口要回答的问题只有三个：**谁改了什么、什么在等我、磁盘还够不够**。
 
 - **做**：
   - Tauri v2 外壳；全部业务在 Rust 侧，经 `strata-client` 调 daemon 的 RPC（daemon.md §5），JS 只做展示与交互状态。
@@ -19,7 +34,7 @@ gui 是给**人**用的桌面前端：看 daemon 健康与告警、看各会话�
   - 不直接读写 store、`<root>/sessions/` 或任何仓库工作树；**所有数据都经 daemon socket**（理由见 §6 TCC）。daemon 没在跑时不走 cli 那条本地只读路径，只显示"daemon 未运行"和启动按钮。
   - 不提供 cli 没有的写操作，不提供"跳过确认""全部批准""自动批准被取代的提议"。
   - 不在 JS 里拼 RPC、不在 JS 里判断能否推送；这些判断由 daemon 返回，Rust 侧转成类型化结构。
-- **与 cli 的关系**：同一组 RPC 的第二个客户端。cli 的 `require_tty` 只是 cli 自己的前置过滤，不是安全边界（confirm.md §1 威胁模型：agent 同 uid，可以直接连 socket）。GUI 不是 TTY，也不需要是：真正的门在 daemon。
+- **与 cli 的关系**：cli 随 app 一起分发（bundle 内 `Contents/MacOS/git-strata`，引导里链接进 PATH，§5.6），主要给 agent 和钩子用。GUI 与 cli 是同一组 RPC 的两个客户端。cli 的 `require_tty` 只是 cli 自己的前置过滤，不是安全边界（confirm.md §1 威胁模型：agent 同 uid，可以直接连 socket）。GUI 不是 TTY，也不需要是：真正的门在 daemon。
 
 ## 2. 依赖
 
@@ -48,8 +63,22 @@ git-strata/
       ├─ tauri.conf.json
       ├─ capabilities/default.json
       ├─ Info.plist           # 合并进 bundle（R2 同款做法）
-      └─ src/{main.rs, lib.rs, commands/, poller.rs, events.rs, onboarding/}
+      ├─ src/{main.rs, lib.rs, commands/, watch.rs, poller.rs, events.rs, tray.rs, onboarding/}
+      └─ LaunchAgents/io.github.dickwu.git-strata.daemon.plist   # 打包时放进 Contents/Library/LaunchAgents
 ```
+
+打出来的 bundle（D4）：
+
+```
+Git Strata.app/Contents/
+├─ MacOS/git-strata-desktop        # GUI（Tauri 主程序）
+├─ MacOS/git-stratad               # daemon（Tauri externalBin / 打包脚本拷入）
+├─ MacOS/git-strata                # cli（同上；引导把它链接到 ~/.local/bin/git-strata）
+├─ Library/LaunchAgents/io.github.dickwu.git-strata.daemon.plist   # BundleProgram = Contents/MacOS/git-stratad
+└─ Info.plist                      # 不设 LSUIElement（窗口模式要有 Dock 图标，关窗后切 Accessory，§5.8）
+```
+
+三个可执行文件用同一个签名身份签（§6），各自 identifier：`io.github.dickwu.git-strata`、`…git-strata.daemon`、`…git-strata.cli`。
 
 放进同一 workspace 的理由：GUI 直接复用 `strata-types` 的 `Code`、`RepoName`、`SessionId` 与 config 校验（config.md V1–V3），改一处两边编译期同步；`default-members` 排除 desktop，核心的 `cargo test`、CI 时间不受 tauri 影响。另一种是放在 workspace 之外（`exclude`），用 path 依赖；见 §9 Q1。
 
@@ -67,7 +96,7 @@ git-strata/
 | 代码 / diff | Monaco（DiffEditor，只读） | R2 同款依赖 |
 | 动效 | framer-motion | 只用在 §8 那一处 |
 | Rust↔前端 | 普通 `#[tauri::command]` + `generate_handler!`，命令在 `src-tauri/src/commands/`；流式与进度用事件 | R2 同款；**不用 tauri-specta**，类型两边手写 |
-| 插件 | opener、os、notification、updater、process、dialog | R2 的子集加 notification；**不要 fs、http 插件**（GUI 不读文件、不发网络请求，见 §6） |
+| 插件 | opener、os、notification、updater、process、dialog；tauri `tray-icon` feature | R2 的子集加 notification；**不要 fs、http 插件**（GUI 不读数据卷，见 §6）；SMAppService 用 `objc2-service-management` 在 Rust 里调 |
 
 与 R2 的唯一约定差异：R2 命令返回 `Result<T, String>`；这里返回 `Result<T, GuiError>`，`GuiError = { code, message, detail }` 与 cli 信封的 `error` 同形。因为界面要按 `error.code` 分支（types.md 的闭集 `Code`，cli.md：不看 message），字符串错误做不到。
 
@@ -107,9 +136,14 @@ impl Client {
 }
 /// 计划读取：cli 的 show::push_plan、confirm.rs 的 planned_moves 挪到这里，
 /// cli 打到 stderr、GUI 画成对话框，用的是同一个函数的同一个结果。
+/// 放在 feature `local-plan` 后面：它要打开主 checkout 的 git 和 store（在数据卷上）。
+/// GUI 不开这个 feature（G5），改走 daemon 新增的只读 `push_plan`（§9 Q-plan）与已有的 publish_plan。
+#[cfg(feature = "local-plan")]
 pub mod plan {
     pub fn push_plan(config: &Config, repo: &RepoName) -> Option<PushPlan>;   // 含要推的 chain 顶 = shown
 }
+/// 订阅（D2）：一条长连接，按行读事件；daemon 回 UnknownMethod 时返回 Unsupported，调用方退回轮询。
+pub fn watch(&self, since: Option<Cursor>) -> Result<EventStream, CallError>;
 pub enum Kind { Read, Write }
 pub enum CallError { Down, Failed(StrataError) }
 ```
@@ -125,12 +159,13 @@ pub enum CallError { Down, Failed(StrataError) }
 | health.rs | `daemon_status`、`daemon_start`、`daemon_stop` | daemon_status / launchctl | 只读 / 本机 |
 | sessions.rs | `sessions`、`session_files`、`checkpoints` | status --all、files | 只读 |
 | diff.rs | `diff_paths`、`diff_text`* | diff、（新）diff_text | 只读 |
-| storage.rs | `du`、`gc` | du、gc | 只读 / 写（模态确认，见 §5.5） |
+| storage.rs | `du`、`gc` | du、gc（新 `Action::Gc`） | 只读 / 写，Touch ID（D10） |
 | deps.rs | `deps_list`、`deps_propose`、`deps_approve` | 同名 | 写，Touch ID |
 | publish.rs | `publish_plan`、`publish`、`push`、`chain_resolve`、`resolve_move` | 同名 | 写，按 pins 需 Touch ID |
 | sessions.rs | `rm` | rm（`discard` 时 Touch ID） | 写 |
 | config.rs | `config_get`、`config_relax`、`config_check` | 读文件 + config_relax | 写，Touch ID |
-| onboarding/ | `onboarding_state`、`write_config`、`install_agent`、`open_privacy_pane` | 本机 | 见 §5.6 |
+| onboarding/ | `onboarding_state`、`write_config`、`register_agent`、`unregister_agent`、`link_cli`、`migrate_legacy`、`open_privacy_pane` | 本机 | 见 §5.6、§5.7 |
+| tray.rs | 无命令；托盘菜单只打开主窗口到对应项 | — | — |
 
 \* `diff_text` 需要 daemon 新增一个只读方法，见 §9 Q4。
 
@@ -140,7 +175,7 @@ pub enum CallError { Down, Failed(StrataError) }
 
 | 事件 | 负载 | 来源 |
 |---|---|---|
-| `strata://health` | `DaemonStatus` + `reachable` | poller，变化才发 |
+| `strata://health` | `DaemonStatus` + `reachable` + `source`（watch / poll） | watch 或 poller，变化才发 |
 | `strata://sessions` | `Vec<SessionStatus>` | poller，变化才发 |
 | `strata://du` | `DuReport` | poller / 手动刷新 |
 | `strata://op` | `{op_id, method, phase, result?}` | 写命令 |
@@ -158,6 +193,8 @@ GUI 不拥有持久业务数据。它只写三样东西，都在引导里、由�
 - **G3 人手触发**：确认类命令只能由主窗口里的一次点击发起；不绑全局快捷键、不能从命令面板直接执行（面板只能打开对话框）、不能被 URL scheme / 深链 / 命令行参数 / AppleScript 触发。
 - **G4 无自动化面**：发布构建里没有 `tauri-plugin-connector`（R2 在 dev 用来让 AI 驱动界面），没有 MCP、没有 WebSocket 端口。
 - **G5 不读数据卷**：GUI 进程不打开 `paths.root` 之下和任何仓库 `path` 之下的文件（§6 TCC）。
+- **G7 托盘不批准**：菜单栏菜单只显示状态与待处理数，点击只打开主窗口到对应对话框；托盘里没有任何写操作（Quit 只退 GUI，不停 daemon）。
+- **G8 bundle 内 cli 与外部 cli 同权**：bundle 里的 `git-strata` 没有额外能力（不借 GUI 的签名特权、不读 GUI 状态），确认仍由 daemon 弹框。
 - **G6 不信任仓库内容**：diff、路径、提交信息、ticket 都是 agent 写的，按纯文本渲染（Monaco 只读、AntD 文本），不渲染 HTML / Markdown，开严格 CSP。
 
 ## 5. 流程与算法
@@ -192,25 +229,41 @@ GUI 不拥有持久业务数据。它只写三样东西，都在引导里、由�
 | **Diff** | 左文件树（改动类型），右 Monaco DiffEditor 只读；支持 session vs base 与两个 session 之间 | diff、diff_text |
 | **Publish / push** | 见 §5.4 | publish_plan、push、publish |
 | **Dependencies** | 提议列表、影响的会话、planned moves，Approve 走 §5.4 | deps_list、deps_approve |
-| **Storage** | 每组 logical / allocated / private、可回收的 trash（`reclaim_min`–`reclaim_max`）、savings、扫描状态与 `as_of`；"Empty trash older than 1 hour" | du、gc |
+| **Allocations / Storage** | 实时（D2）：基线与依赖集的克隆、哪些会话引用哪个基线、进行中的克隆 / 发布；每组 logical / allocated / private、可回收的 trash（`reclaim_min`–`reclaim_max`）、savings、扫描状态与 `as_of`；"Empty trash older than 1 hour" | du、gc |
 | **Settings / onboarding** | §5.6 | 本机 |
 
 ### 5.2 写作规则（skill「Writing」）
+
+- 界面只用英文（D5），不做 i18n 框架；文案集中在 `src/lib/copy.ts`。
 
 - 动作名一致：按钮 `Publish` → 结果 `Published`；`Approve` → `Approved`；`Push` → `Pushed`；`Discard session` → `Discarded`。
 - 错误说发生了什么、怎么修，不道歉：`Daemon isn't running. Start it to see live sessions.`；`git-stratad can't read /Volumes/…: allow Removable Volumes for git-stratad in Privacy & Security.`
 - 句首大写（sentence case），不用全大写标签（与 R2 `.tag` 的 uppercase 不同，见 §8.3）。
 - Touch ID 框是 git-stratad 弹的，对话框里先告诉人："macOS will ask git-stratad for Touch ID. The prompt says: *push staff-api main to origin*." 文字取自 daemon 将用的 `reason`，让人核对两边一致。
 
-### 5.3 实时更新
+### 5.3 实时更新：`watch` 事件流（D2）与轮询回退
 
-daemon 没有订阅流，一个连接一个请求（daemon.md）。MVP 在 Rust 侧轮询：
+现在 daemon 一个连接一个请求，没有推送。新增只读方法 `watch`：
 
-1. `poller.rs` 启动一个 tokio 任务；窗口可见时 `daemon_status` 每 2 s、`status --all` 每 3 s、`du` 每 60 s（`du` 走缓存，约 1 s 返回，带 `as_of/stale`）；窗口隐藏或最小化时退到 15 s / 30 s / 不轮询；菜单栏模式（§9）下只轮 daemon_status。
-2. 对回答做哈希，变化才 `emit`；同类事件用 R2 `ThrottleGate` 的做法限频。
-3. 只读方法不排队不加锁（daemon.md），所以轮询不会拖慢 agent；仍给 `Kind::Read` 设 5 s 超时，超时显示为 "Daemon is slow to answer"。
-4. 前端：`useStrataEvents` 把事件写进 TanStack Query 缓存；Query 自身 `refetchInterval` 关掉，`refetchOnWindowFocus` 关（R2 同款），手动刷新调对应命令。
-5. 后续（需 daemon 改动，§9 Q4b）：一个只读的 `watch` 方法，长连接按行推送变化，GUI 优先用它，没有就退回轮询。
+1. **连接与握手**：客户端发 `{"id","method":"watch","params":{"v":1,"since":{"epoch":E,"seq":N}|null,"topics":[...]|null}}`。daemon 先回一行普通回答 `{"id","ok":true,"data":{"v":1,"epoch":E,"seq":S,"resync":bool}}`，然后**保持连接**，之后每行一个事件。旧 daemon 回 `error.rpc = UnknownMethod` → 客户端退回轮询。
+2. **事件信封**：`{"v":1,"epoch":E,"seq":n,"kind":"…","key":"…","at":"rfc3339","data":{…}}`。`epoch` 每次 daemon 启动换新（启动时间 + pid），`seq` 在 epoch 内单调递增。
+3. **事件种类**（v1，均为「某物变了」的提示加小摘要，不是完整数据；客户端按需用已有只读方法取全量，数据只有一个来源）：
+   - `health`：DaemonWarning 集合、`store_unavailable`、启动 / 停止中
+   - `session.created` / `session.changed` / `session.removed`（key = session id；摘要：仓库数、改动数、最后检查点）
+   - `workspace.changed`（key = session/repo；摘要：改动计数、检查点 id）
+   - `base.created` / `base.evicted`、`deps.set.created` / `deps.set.evicted`（基线与依赖集缓存，「后端分配」的核心）
+   - `clone.started` / `clone.finished`（APFS clonefile 进行中，含目标与耗时）
+   - `proposal.created` / `proposal.changed`
+   - `publish.started` / `publish.finished`、`push.started` / `push.finished`（含结果 kind）
+   - `confirm.prompting` / `confirm.resolved`（Action 种类、方法名、仓库 / 提议；**不含**任何可复用的东西）——GUI 用它提示「有一个不是你点的确认框」
+   - `du.updated`（`as_of`）、`gc.finished`
+   - `resync`（见 5）
+4. **合并**：daemon 内每个订阅者一个按 `(kind,key)` 去重的待发表；同一 key 在 100 ms 窗口内只发最后一次。`*.started`/`*.finished`、`confirm.*` 不合并。
+5. **背压**：每个订阅者一个有界队列（256 条）和一个专用写线程，写超时 2 s；daemon 的业务线程只往队列里放，从不阻塞在慢客户端上。队列满或写超时 → 清空队列、发一条 `resync`、继续；客户端收到 `resync` 就重新取全量（daemon_status、status --all、du）。订阅者上限 8 个，超出回 `Busy`（reason `too_many_watchers`）。
+6. **断线续传**：daemon 保留最近 1024 条事件的环形缓冲；`since` 的 epoch 相同且 seq 仍在缓冲内 → 补发，否则回答里 `resync: true`。
+7. **版本**：`v` 只做加法（新 kind、新字段）；客户端忽略未知 kind 与字段；不兼容的改动才升 `v:2`，daemon 同时支持旧版至少一个发布周期。
+8. **安全**：只读，和 status 暴露的信息相同；不进会话队列，不拿锁；socket 仍是 0600。事件在状态落盘之后发出（先写后报）。
+9. **GUI 侧**：`watch.rs` 一个线程读流，断线指数退避重连（0.5 s → 10 s）；连不上或旧 daemon → 启动 `poller.rs`（窗口可见时 daemon_status 2 s、status --all 3 s、du 60 s；隐藏时 15 s / 30 s / 不轮）。两者都只在内容变化时 `emit`，同类事件按 R2 `ThrottleGate` 限频；前端 `useStrataEvents` 写 TanStack Query 缓存，Query 自身不定时刷新。cli 不订阅。
 
 ### 5.4 确认类流程（以 push 为例；publish、deps approve、rm --discard、config relax、chain restore 同构）
 
@@ -223,18 +276,56 @@ daemon 没有订阅流，一个连接一个请求（daemon.md）。MVP 在 Rust 
 
 ### 5.5 gc
 
-gc 在 daemon 侧不要求 Touch ID。GUI 用 AntD 模态确认，展示 du 给出的 `trash.eligible`（条目数、可回收 `reclaim_min`–`reclaim_max`）后才调。是否加 Touch ID 见 §9 Q9。（运维规则：在真实数据上跑 gc 需 peilin 同意；GUI 的这一按钮就是那次同意。）
+D10：新增 `Action::Gc { reclaim_max }`，daemon 的 gc 先 `Confirmer::require`，Touch ID 框文字写可回收上限。GUI 先展示 du 的 `trash.eligible`（条目数、`reclaim_min`–`reclaim_max`）再调。注意：daemon 分不出是 GUI 还是 cli 调的（同 uid、无握手），所以这个门对 cli 的 `gc` 同样生效——agent 将不能再无人值守地 gc（§9 Q-gc）。
 
-### 5.6 首次使用引导（开源后的易用性重点）
+### 5.6 首次使用引导（开源后的易用性重点，D1）
 
-步骤，每步可检测、可重做，状态由 `onboarding_state` 计算：
+README 第一节改成「下载 app → 首次打开 → 引导」，cli 用法挪到 "For agents" 一节。引导每步可检测、可重做，状态由 `onboarding_state` 计算：
 
-1. **找到二进制**：`git-strata`、`git-stratad` 在不在、版本是否与 GUI 匹配（§6 打包决定它们从哪来）。
-2. **配置**：没有 `~/Library/Application Support/git-strata/config.toml` 时，选数据根（`dialog` 插件选目录）、添加仓库；Rust 侧用 `strata-types` 的 Config 校验 V1–V3（绝对规范路径、根与仓库同卷、互不包含），报错按 §5.2 写法。默认值不再是 `/Volumes/GWD/inter/.strata`，改为"与第一个仓库同卷的 `<volume>/.strata`"（§9 Q6）。
-3. **LaunchAgent**：展示将写入的 plist（复用 `strata_daemon::plist` 的渲染，`LimitLoadToSessionType=Aqua`），人点 `Install` 后写入并 `launchctl bootstrap gui/<uid>`；现在 README 说 cli 从不写 plist，GUI 成为第一个写它的客户端，需要确认（§9 Q5）。macOS 13+ 也可改用 `SMAppService.agent`（出现在"登录项"，用户可在系统设置里关）。
-4. **权限（TCC）**：数据根在外置卷时，git-stratad 需要"可移除宗卷"授权。GUI 不能替它授权，只能检测（daemon_status 的 `store_unavailable` / EINTR 类错误）并 `open_privacy_pane` 打开对应系统设置页，写明给谁授权（git-stratad，不是 GUI）。之前 tccd 卡住造成 EINTR 的事故写进帮助。
-5. **确认能力**：显示 daemon 的 `Confirmer` 是否可用（需要 daemon_status 带出 probe 结果，§9 Q4c）；不可用时说明要设登录密码 / Touch ID。
-6. **Claude Code 钩子**：给出 `SessionStart` / `PostToolUse` 的配置片段，`Copy` 按钮，不替用户改 `~/.claude`。
+0. **Gatekeeper 首次打开**（D3，app 外的步骤，写在 README、DMG 背景图和发布说明里）：macOS 15 起右键「打开」不再能绕过未公证 app。步骤：双击 → 被拦 → 系统设置 › 隐私与安全性 › 找到 "Git Strata was blocked" → **Open Anyway** → 输管理员密码。DMG 本身也可能被拦一次，同样处理。终端替代：`xattr -dr com.apple.quarantine "/Applications/Git Strata.app"`。之后用 app 内 updater 更新，下载的包不带 quarantine 属性，不再触发（P5 在干净虚拟机上验证）。
+1. **迁移检测**：发现旧安装（§5.7）就先走迁移。
+2. **配置**：没有 config.toml 时选数据根（`dialog` 选目录）、添加仓库；Rust 侧用 `strata-types` 的 Config 校验 V1–V3。没有默认根：建议「与第一个仓库同卷的 `<volume>/.strata`」，人确认。
+3. **注册 daemon**：`SMAppService.agent(plistName: "io.github.dickwu.git-strata.daemon.plist").register()`（§5.7 选型）。状态 `requiresApproval` 时说明并 `openSystemSettingsLoginItems()`。
+4. **权限（TCC）**：数据根在外置卷时，git-stratad 需要「可移除宗卷」授权（授给 daemon，不是 GUI）。检测 `store_unavailable` / EINTR 类错误，`open_privacy_pane`，写明授权对象。帮助里记下 tccd 卡住导致 EINTR 的旧事故。
+5. **确认能力**：daemon_status 的 Confirmer probe（D8）；不可用时说明要设登录密码 / Touch ID。
+6. **命令行工具**：`Install command-line tool` → 建 `~/.local/bin/git-strata` → bundle 内 cli 的符号链接（不需要 sudo）；`~/.local/bin` 不在 PATH 时给出要加到 shell 配置的一行（不替用户改）。每次启动校验链接目标仍在（app 被移动则提示重建）。`git strata` 形式因 git 在 PATH 里找 `git-strata` 自动可用。
+7. **Claude Code 钩子**：给出 `SessionStart` / `PostToolUse` 片段与 `Copy`，不改 `~/.claude`。
+8. **daemon 的 PATH**：不再写死 `~/.bun/bin`；引导时运行一次用户登录 shell 取 PATH（`$SHELL -lc 'printf %s "$PATH"'`），展示给人确认后写入 config.toml 的新字段，daemon 启动时读取（bundle 内的 plist 只读，§9 Q-path）。
+
+### 5.7 LaunchAgent 选型与迁移（D4、D9）
+
+**选 SMAppService.agent**，不选 app 写 `~/Library/LaunchAgents` 的传统 plist。
+
+| | SMAppService.agent（选） | 传统 plist（app 写入） |
+|---|---|---|
+| ad-hoc / 自签名能用吗 | 能（Apple 只要求「已签名」，ad-hoc 算；LaunchDaemon 才要求公证）。第三方在 macOS 26.6 上实测 ad-hoc 的 SMAppService 注册可用、重建后仍有效、移动 app 后仍有效（测的是 mainApp，agent 需 P4 实测） | 能 |
+| app 被移动 | `BundleProgram` 是相对 bundle 的路径，跟着走 | 绝对路径失效，launchd 报 78 EX_CONFIG，系统仍显示「已启用」，需要每次启动自检重写 |
+| 用户可见性 | 系统设置 › 登录项里以 app 名出现，可开关；app 能读到真实状态（`enabled`/`requiresApproval`/`notFound`） | 显示为「来自身份不明开发者的项目」，状态读不准 |
+| 更新 | 可执行文件变了要 `unregister` + `register`（Apple 文档），新版首次启动时做；做之前确认没有写操作在跑 | 路径不变就继续用 |
+| 卸载 | 设置里 `Unregister`；删 app 后 BTM 清理 | 留下 plist，要提供卸载按钮 |
+| 代码量 | Rust 里经 `objc2-service-management` 调几行；cli 的 `daemon start/stop` 改为 `launchctl kickstart -k` / `bootout gui/<uid>/<label>`（不再 bootstrap 一个文件） | 复用现有 `plist.rs` / `launch.rs` |
+| 最低系统 | macOS 13 | 任意 |
+
+理由：开源用户会把 app 放在不同位置，传统 plist 会静默失效；SMAppService 能读到真实状态，引导能据此给出准确提示。代价是最低支持 macOS 13（`minimumSystemVersion: 13.0`），以及每次更新要重新注册。
+
+**迁移**（从现在的 `~/.cargo/bin/git-strata{,d}` + `~/Library/LaunchAgents/com.gwd.git-stratad.plist`）：
+
+1. 检测：旧 plist 存在、`launchctl print gui/<uid>/com.gwd.git-stratad` 有记录、`~/.cargo/bin` 下有旧二进制、PATH 里排在前面的 `git-strata` 不是 bundle 的。
+2. 前置：经旧 daemon 的 daemon_status 确认没有进行中的写操作（publish / push / 克隆）；有就等，不强停。
+3. 人点 `Migrate`：`launchctl bootout gui/<uid>/com.gwd.git-stratad`（等它退出，同 launch.rs 的 10 s 等待），把旧 plist 改名为 `.plist.disabled`（不删，可回滚）。
+4. SMAppService 注册新 agent，新 daemon 用同一个 `~/Library/Application Support/git-strata/`（config.toml、pins.json、socket 路径不变）、同一个数据根——会话、store、基线原样继续，不需要数据迁移。
+5. TCC：新 daemon 是另一个二进制、另一个签名，「可移除宗卷」要重新授权一次（之后自签名身份稳定，跨更新保留，§6）。
+6. PATH：`~/.cargo/bin` 通常排在 `~/.local/bin` 前面；引导提示把旧 `git-strata` 改名或调整 PATH 顺序（删文件由用户自己做或明确同意）。新增 cli 与 daemon 的版本对比（daemon_status 带 `version`），不一致时 cli 在 stderr 提醒。
+7. 回滚：设置里 `Restore previous daemon` = unregister 新 agent、把 `.disabled` 改回、`launchctl bootstrap`。
+8. label：`com.gwd.git-stratad` → `io.github.dickwu.git-strata.daemon`；cli 的 `launch.rs` 在一个版本周期内两个 label 都认。默认数据根 `/Volumes/GWD/inter/.strata` 改为「无默认，必须配置」；已有 config.toml 写明了 root，不受影响。
+
+### 5.8 菜单栏常驻（D6）
+
+- 关窗（⌘W、红点）→ `CloseRequested` 里 `prevent_close` 并隐藏窗口，切换 `ActivationPolicy::Accessory`（Dock 图标消失）；打开窗口时切回 `Regular`。⌘Q / 托盘 `Quit Git Strata` 才退出 GUI；**退出 GUI 不影响 daemon**（daemon 由 launchd 管）。
+- 托盘图标：模板图（单色三道地层横线），状态靠形状而不只靠颜色：正常 / 有待处理（小圆点）/ daemon 不可达（带斜杠）。
+- 托盘菜单：状态行（"Daemon running · 5 sessions"）；"Waiting for you" 下最多 5 项（如 "Approve deps proposal #12 for tool"），点击打开主窗口并定位到那一项的对话框（G7：托盘本身不执行）；"Open Git Strata"；"Pause notifications for 1 hour"；"Quit Git Strata"。
+- 数据来自同一条 watch 流；窗口隐藏时仍保持 watch（开销很小），轮询回退时只轮 daemon_status。
+- 开机启动：设置里 "Open at login"（`SMAppService.mainApp`），默认关；daemon 的开机启动由它自己的 agent 负责，与 GUI 无关。
 
 ## 6. 失败与恢复
 
@@ -248,13 +339,17 @@ gc 在 daemon 侧不要求 Touch ID。GUI 用 AntD 模态确认，展示 du 给�
 | 计划过期（G2） | 对话框作废并刷新 | 重新确认 |
 | GUI 崩溃 | daemon 不受影响（GUI 无状态） | 重开 |
 
-**打包与签名**（与 TCC 强相关）：
+**打包与签名**（D3：没有 Apple Developer ID）：
 
-- **ad-hoc 签名**（`signingIdentity: "-"`）：免费，本机自用可行。缺点：下载的构建被 Gatekeeper 拦（要右键打开或去掉 quarantine）；TCC 授权按 cdhash 记，**每次更新都换二进制，可移除宗卷等授权失效、要重新给**；对 daemon 尤其痛（会再次 `store_unavailable`）。
-- **Developer ID + notarization**（$99/年）：签名身份稳定，TCC 授权跨更新保留；Gatekeeper 直接放行；Tauri 在 CI 里用 `APPLE_CERTIFICATE`、`APPLE_SIGNING_IDENTITY`、`APPLE_API_KEY`/`APPLE_API_ISSUER` 自动签名并公证。R2 的 release.yml 只有 updater 的 `TAURI_SIGNING_PRIVATE_KEY`（minisign），没看到 Apple 证书变量，即 R2 目前没有公证；git-strata 想开源分发，建议补上。
-- **GUI 自身不需要 TCC 授权**：它只连 `~/Library/Application Support` 下的 socket（G5）。这是坚持"所有数据经 daemon"的主要理由——否则每个新 GUI 版本都要单独申请外置卷权限，且可能复现 tccd 卡死。
-- **分发**：GitHub Releases（`.dmg` + updater `latest.json`，照 R2 publish.sh / release.yml / homebrew.yml / ci.yml）；Homebrew 分两件：formula 装 `git-strata` + `git-stratad`（agent 和无 GUI 用户只要这个），cask 装 GUI。另一种是把 daemon 作为 Tauri `externalBin` 打进 `.app`，plist 指向 bundle 内路径（移动 app 会断，需要 SMAppService）；见 §9 Q7。
-- **更新**：updater 换 GUI 无风险；换 daemon 前要求没有正在执行的写操作，GUI 显示 "Restart daemon to finish updating"，由人点。
+- **ad-hoc**（`codesign -s -`）：designated requirement（DR）就是 cdhash，**每次更新二进制都变**，TCC 认为是新程序：daemon 的「可移除宗卷」授权每次更新都丢，会再次 `store_unavailable`。只适合从源码自己构建的开发者。
+- **稳定的自签名身份（选）**：项目生成一个长期有效的自签名代码签名证书，私钥只放在 GitHub Actions secret，release.yml 用它签 GUI、daemon、cli。codesign 为非 Apple 证书生成的 DR 形如 `identifier "io.github.dickwu.git-strata.daemon" and certificate leaf = H"…"`，只要 identifier 与证书不变，TCC 授权跨更新保留（P5 在干净虚拟机上验证：授权 → 更新 → 授权仍在）。
+  - 代价：Gatekeeper 依然当它是「身份不明开发者」（未公证），首次打开见 §5.6 第 0 步；证书泄露 = 别人能签出 TCC 认作同一程序的二进制并继承授权，所以私钥只在 CI；轮换会让所有用户重新授权一次；`spctl` 评估仍是 rejected，不影响运行。
+  - 从源码构建的用户：`scripts/make-signing-identity.sh` 在本机登录钥匙串里生成自己的自签名身份，本机重建也保留授权（DR 与官方发布不同，换用官方包要重新授权一次）。
+  - 第三方测试显示自签名对登录项没有可见区别；它的价值只在 TCC（DR 稳定）。
+- **updater**：沿用 R2 的 tauri-plugin-updater（minisign 签 `latest.json` 与包，和 codesign 无关）。app 内下载的更新不带 quarantine 属性，不再触发 Gatekeeper（P5 验证）。更新 daemon：新版首次启动时确认没有写操作在跑 → `unregister` + `register` agent → daemon 重启；有写操作就显示 "Restart daemon to finish updating"，由人点。
+- **分发**：只走 GitHub Releases（`.dmg` + `latest.json`），照 R2 的 publish.sh / release.yml / ci.yml；不做 Homebrew（D4）。R2 的 release.yml 也没有 Apple 证书变量。
+- **GUI 自身不需要 TCC 授权**：它只连 `~/Library/Application Support` 下的 socket（G5）。
+- **以后有了 Developer ID**：换证书 = DR 变 = 所有用户重新授权一次；公证后 Gatekeeper 步骤可删。
 
 ## 7. 测试清单
 
@@ -263,7 +358,9 @@ gc 在 daemon 侧不要求 Touch ID。GUI 用 AntD 模态确认，展示 du 给�
 - **Tauri 命令**：`tauri::test::mock_builder` 验证命令注册与参数形状；poller 用假 Client，验证"不变不发"、隐藏窗口降频。
 - **确认流程**：假 Confirmer（daemon test-seams 的脚本化确认）下验证 GUI 发出的 `shown` 等于展示的计划；计划变化时对话框作废；用户取消时不重试。
 - **安全检查（CI）**：发布构建 `cargo tree -e features` 里不得有 `tauri-plugin-connector`；capabilities 只允许主窗口、只列用到的命令；`tauri.conf.json` 的 CSP 不为 null（R2 是 null，这里不跟）；不注册 URL scheme。
-- **引导**：launchctl、写 plist、打开系统设置都在 trait 后面，测试用假实现，绝不在测试里碰真实 LaunchAgent 或 `/Volumes/GWD/inter`。
+- **watch**：进程内 daemon 上订阅，验证事件在状态落盘之后发出、合并窗口、慢订阅者触发 `resync` 而不阻塞写路径、epoch 变化后 `resync: true`、旧 daemon（UnknownMethod）时客户端退回轮询。
+- **托盘**：关窗只隐藏、托盘菜单项只发「打开窗口到 X」、Quit 不发任何 RPC。
+- **引导**：SMAppService、launchctl、写 plist、打开系统设置都在 trait 后面，测试用假实现，绝不在测试里碰真实 LaunchAgent 或 `/Volumes/GWD/inter`。
 - **前端**：`bun test` 测 store、事件归并、格式化（字节、相对时间、oid 短码）；`bun run check`（tsc + prettier + eslint，照 R2）。
 - **界面**：dev 构建开 `connector` feature（仅 dev），用 R2 的 tauri-connector 截图做 skill 要求的视觉自查：键盘焦点、`prefers-reduced-motion`、对比度、浅深两套主题。
 
@@ -273,14 +370,14 @@ gc 在 daemon 侧不要求 Touch ID。GUI 用 AntD 模态确认，展示 du 给�
 
 | 期 | 内容 | 估计 | 需改 daemon |
 |---|---|---|---|
-| P0 | 抽 `strata-client`，cli 与 daemon 改用；契约测试 | 1 天 | 否 |
-| P1 | 照 R2 搭 `apps/desktop`（壳、token、主题、命令面板）；健康、会话列表/详情、Storage（只读）；poller 与事件 | 3 天 | 否 |
-| P2 | Diff 屏（路径 + Monaco）；检查点与 restore | 2–3 天 | 是：`diff_text` 只读方法 |
-| P3 | Waiting for you；publish/push/deps approve/rm --discard/config relax/chain 对话框；gc | 3 天 | 否 |
-| P4 | 引导（config、LaunchAgent、TCC、钩子片段）；通知；菜单栏图标（可选） | 2–3 天 | 可选：probe 进 daemon_status |
-| P5 | 签名、公证、updater、Homebrew formula + cask、CI；去掉 `com.gwd.*` 与 `/Volumes/GWD` 默认值 | 2 天 | 改 label 与默认根 |
+| P0 | 抽 `strata-client`（含 `local-plan` feature），cli 与 daemon 改用；契约测试 | 1 天 | 否 |
+| P1 | 照 R2 搭 `apps/desktop`（壳、token、主题、命令面板）；健康、会话列表/详情、Allocations/Storage（只读，轮询）；菜单栏常驻 | 3–4 天 | 否 |
+| P2 | daemon 增补：`watch`、`diff_text`、`push_plan`、daemon_status 的 probe / 等待中的确认 / version、`Action::Gc`；GUI 接 watch | 4–5 天 | 是 |
+| P3 | Diff 屏；Waiting for you；publish / push / deps approve / rm --discard / config relax / chain / gc 对话框 | 4 天 | 否 |
+| P4 | bundle（daemon + cli 进 app）、SMAppService 注册、cli 符号链接、迁移与回滚、引导、通知 | 4 天 | label 与默认根 |
+| P5 | 自签名身份、release CI、updater、DMG 首次打开说明；虚拟机上验证 TCC 跨更新与 Gatekeeper 步骤 | 2–3 天 | 否 |
 
-合计约 2.5–3 周（一人）。每期先写测试再实现，按 module-rulings 的节奏，每期一个可审的提交序列。
+合计约 3.5–4 周（一人）。P2 的 watch 要在 daemon 主循环与各写路径加发出点，和 impl/v1 上并行的改动冲突面最大，建议在 v1 合并后再做。每期先写测试再实现，按 module-rulings 的节奏，每期一个可审的提交序列。
 
 ### 8.2 视觉方向（frontend-design skill，在 R2 的 AntD 体系内）
 
@@ -315,23 +412,22 @@ gc 在 daemon 侧不要求 Touch ID。GUI 用 AntD 模态确认，展示 du 给�
 
 ## 9. 构建者决定记录
 
-已定（来自 peilin / R2）：技术栈全照 R2（§2.2）；后端全在 Rust；UI 用 frontend-design skill 并与 R2 的 AntD 风格一致；考虑开源后的易用性。
+已定：技术栈全照 R2（§2.2）；后端全在 Rust；UI 用 frontend-design skill 并与 R2 的 AntD 风格一致；考虑开源后的易用性；第二版决定表 D1–D10。
 
 我的决定（可推翻）：
-- 抽 `strata-client` 而不是让 GUI 依赖 cli 的 lib：`git_strata` 的命令函数里混着 TTY 检查和 stderr 输出，不能给 GUI 用。
-- GUI 不做本地只读回退，不读数据卷（G5），换来 GUI 不需要 TCC 授权。
-- GUI 不自己弹 LocalAuthentication：daemon 已是权威门，GUI 再弹一次只会教人"见框就按"，不增加安全性。
-- 错误类型偏离 R2 的 `String`，用 `{code,message,detail}`。
-- CSP 不跟 R2 的 null。
+- 抽 `strata-client` 而不是让 GUI 依赖 cli 的 lib：`git_strata` 的命令函数里混着 TTY 检查和 stderr 输出。
+- GUI 不做本地只读回退，不读数据卷（G5），换来 GUI 不需要 TCC 授权；因此计划读取放在 `local-plan` feature 后，GUI 走 daemon。
+- GUI 不自己弹 LocalAuthentication：daemon 已是权威门。
+- 错误类型偏离 R2 的 `String`，用 `{code,message,detail}`；CSP 不跟 R2 的 null。
+- LaunchAgent 用 SMAppService.agent（§5.7），最低 macOS 13。
+- 签名用项目级稳定自签名身份（§6）。
+- 事件是「变了」的提示 + 摘要，全量仍用只读方法取（§5.3）。
 
-待 peilin 决定：
-1. **Q1 位置**：`apps/desktop` 放本仓库 workspace（default-members 排除）还是 workspace 外 / 独立仓库？
-2. **Q2 签名**：有没有 Apple Developer ID？决定 TCC 授权能否跨更新保留和开源分发体验。
-3. **Q3 强调色**：用新的深青石蓝 `#2E6F8E` 还是保留 R2 的橙 `#F38020`？是否沿用 R2 的三款字体？
-4. **Q4 daemon 增补**（都是只读）：(a) `diff_text` 返回文件两侧内容，GUI 才能不读数据卷；(b) `watch` 长连接推送，替代轮询；(c) daemon_status 带出 Confirmer probe 结果与"有确认框正在等待（由哪个方法发起）"——后者让 GUI 能提示"有一个不是你点的确认请求"，防止人对 agent 发起的 Touch ID 框随手按下。
-5. **Q5 LaunchAgent**：同意 GUI 写 plist 并 bootstrap 吗？用传统 plist 还是 SMAppService？
-6. **Q6 开源前去个人化**：label `com.gwd.git-stratad`、默认根 `/Volumes/GWD/inter/.strata`、plist 里的 `~/.bun/bin` PATH 改成什么？bundle id 建议 `io.github.dickwu.git-strata`（R2 是 `com.lifefarmer.r2`）。
-7. **Q7 daemon 的来源**：Homebrew formula 装 CLI + daemon、cask 装 GUI（推荐），还是 daemon 打进 `.app`？
-8. **Q8 语言**：界面先英文（与 cli 输出一致）还是同时中文？
-9. **Q9 gc**：GUI 里的 gc 只用模态确认，还是也要 Touch ID（需 daemon 新增一个 Action）？
-10. **Q10 菜单栏模式**：要不要只显示托盘图标 + 待批数（R2 已有 tray-icon 先例）？
+剩余问题：
+1. **Q-gc**：daemon 分不出 GUI 与 cli，`Action::Gc` 会让 cli 的 gc 也要 Touch ID，agent 不能再无人值守 gc。接受吗？（另一种：gc 不加门，GUI 只用模态确认，但那不是安全边界。）
+2. **Q-plan**：为了 G5，新增只读 `push_plan`（daemon 读 chain 顶与提交列表）。同意吗？
+3. **Q-path**：daemon 的 PATH 改由 config.toml 新字段 `[daemon] path` 提供（bundle 内 plist 只读）。同意吗？
+4. **Q-watch-timing**：watch 改动面大，是否等 impl/v1 合并后再做（P1 先用轮询）？
+5. **Q-cert**：谁持有自签名证书私钥（只在 GitHub secret？本机备份？），有效期多长？
+6. **Q-macos**：最低 macOS 13 可以吗？
+7. **Q-cli-link**：cli 链接到 `~/.local/bin`（免 sudo）还是 `/usr/local/bin`（要管理员）？
