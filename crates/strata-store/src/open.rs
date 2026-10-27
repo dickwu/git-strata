@@ -27,7 +27,9 @@ use crate::{Result, Store};
 /// and kept push scenes (`<root>/daemon/{push,observe,approve}`): without
 /// it, any daemon start after a standalone push or an approve was refused
 /// `NotEmpty` (found with review M6) [实现时补的决定].
-pub(crate) const LAYOUT_NAMES: [&str; 5] = ["store", "bases", "deps", "sessions", "daemon"];
+/// Entries a strata root may hold. `search` is the daemon's search index
+/// (strata-search); incident 2026-10-27: a root holding it was refused.
+pub(crate) const LAYOUT_NAMES: [&str; 6] = ["store", "bases", "deps", "sessions", "daemon", "search"];
 const MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const READER_BUSY_MS: u64 = 2000;
 
@@ -351,6 +353,13 @@ impl Store {
                     json!({ "root": root.to_string_lossy(), "checkout": c.to_string_lossy() }),
                 ));
             }
+        }
+        // Incident 2026-10-27: an existing store opens whatever else its
+        // root holds; the foreign-entry check below guards only creating
+        // a store in a directory that is not one. (An error here is left
+        // to steps 3 and 4 to classify.)
+        if let Ok(true) = exists(&root.join("store").join("store.db")) {
+            return open_existing(root, None);
         }
         // 3. look at <root>
         match retry_eintr(|| fs::metadata(root)) {
