@@ -14,8 +14,10 @@ use crate::Result;
 use crate::fault;
 use crate::overlay::{MODE_EXEC, MODE_FILE, MODE_LINK};
 
-/// Files at least this large are hashed through mmap with rayon (store's rule).
-const MMAP_MIN: u64 = 16 << 20;
+/// Files at least this large are hashed with rayon, one big read at a time.
+const PARALLEL_MIN: u64 = 16 << 20;
+/// The read size for files hashed with rayon.
+const PARALLEL_CHUNK: usize = 8 << 20;
 
 fn blob_id(h: blake3::Hash) -> BlobId {
     BlobId::try_from(h.to_hex().to_string()).expect("blake3 hex is a blob id")
@@ -28,15 +30,11 @@ pub(crate) fn hash_file(f: &File, shown: &Path) -> Result<(BlobId, u64)> {
         .map_err(|e| classify_io_error(&e, IoSide::Read, shown))?
         .len();
     let mut h = blake3::Hasher::new();
-    if len >= MMAP_MIN {
-        // SAFETY: read-only map of a regular file; a concurrent writer is the
-        // race §5.2 detects with A2, as store does for put.
-        let m = unsafe { memmap2::Mmap::map(f) }
-            .map_err(|e| classify_io_error(&e, IoSide::Read, shown))?;
-        h.update_rayon(&m);
-        return Ok((blob_id(h.finalize()), m.len() as u64));
-    }
-    let mut buf = vec![0u8; 256 * 1024];
+    // Review P1-10: never mmap a live workspace file. A writer truncating
+    // it under the map turns the next page touch into SIGBUS and kills the
+    // daemon; a short read is the race §5.2 detects with A2.
+    let big = len >= PARALLEL_MIN;
+    let mut buf = vec![0u8; if big { PARALLEL_CHUNK } else { 256 * 1024 }];
     let mut off = 0u64;
     loop {
         let n = match f.read_at(&mut buf, off) {
@@ -45,7 +43,11 @@ pub(crate) fn hash_file(f: &File, shown: &Path) -> Result<(BlobId, u64)> {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(classify_io_error(&e, IoSide::Read, shown)),
         };
-        h.update(&buf[..n]);
+        if big {
+            h.update_rayon(&buf[..n]);
+        } else {
+            h.update(&buf[..n]);
+        }
         off += n as u64;
     }
     Ok((blob_id(h.finalize()), off))
@@ -53,7 +55,7 @@ pub(crate) fn hash_file(f: &File, shown: &Path) -> Result<(BlobId, u64)> {
 
 pub(crate) fn hash_bytes(b: &[u8]) -> BlobId {
     let mut h = blake3::Hasher::new();
-    if b.len() as u64 >= MMAP_MIN {
+    if b.len() as u64 >= PARALLEL_MIN {
         h.update_rayon(b);
     } else {
         h.update(b);
@@ -259,5 +261,53 @@ pub fn read_candidate(root: &Path, path: &RepoPath) -> Result<ReadProbe> {
             format!("{} is a special file", path.as_str()),
         )
         .with_detail(serde_json::json!({ "path": path.as_str() }))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn big(dir: &Path, len: usize) -> (std::path::PathBuf, Vec<u8>) {
+        let bytes: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8).collect();
+        let p = dir.join("big.bin");
+        File::create(&p).unwrap().write_all(&bytes).unwrap();
+        (p, bytes)
+    }
+
+    #[test]
+    fn large_files_hash_like_their_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        let (p, bytes) = big(d.path(), (17 << 20) + 12345);
+        let (id, n) = hash_file(&File::open(&p).unwrap(), &p).unwrap();
+        assert_eq!(n, bytes.len() as u64);
+        assert_eq!(id, hash_bytes(&bytes));
+        assert_eq!(id.as_str(), blake3::hash(&bytes).to_hex().as_str());
+    }
+
+    /// Review P1-10: a file truncated while it is hashed gives a short or
+    /// stale hash (A2 catches it), never SIGBUS. With the old mmap path this
+    /// test process died.
+    #[test]
+    fn truncating_a_large_file_while_hashing_it_does_not_crash() {
+        let d = tempfile::tempdir().unwrap();
+        let (p, bytes) = big(d.path(), 64 << 20);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let w = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    w.set_len(0).unwrap();
+                    w.set_len(bytes.len() as u64).unwrap();
+                }
+            });
+            let t = std::time::Instant::now();
+            while t.elapsed() < std::time::Duration::from_secs(3) {
+                let f = File::open(&p).unwrap();
+                let _ = hash_file(&f, &p);
+            }
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
     }
 }

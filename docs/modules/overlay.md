@@ -543,7 +543,7 @@ M ∪ `I.tracked` 按卷折叠的键集合在 `Tracker` 里（`fold`）：M 的�
 
 1. A1 = 当前的 `Attrs`。全扫时来自 `walk_with` 的批量读，增量时来自上级目录的单目录列表 `list_dir(ws.root, Some(上级))`。
 2. 缓存作保：`cache[p]` 存在，且 `A1.unchanged_since(&cache[p].attrs)` → blob 取缓存，不读内容（计入 `ScanStats.vouched`）。
-3. 否则读内容：普通文件用 `apfs::open_rooted_file(ws.root, p)` 逐级 `O_NOFOLLOW`、只读打开，流式算 BLAKE3，16 MiB 及以上走 mmap 加多线程（同 store）；符号链接的目标原字节就在 `A1.kind`（`FileKind::Symlink { target }`）里。稀疏文件与大文件一样整份读，空洞读成零，代价与逻辑大小成正比（裁定 T7）。3c 的 `new_hole_above_four_gib_uses_bounded_original_run_work` 一行留给模块文档补定的就是这一条。大文件阈值不影响成员资格（3f:463）。
+3. 否则读内容：普通文件用 `apfs::open_rooted_file(ws.root, p)` 逐级 `O_NOFOLLOW`、只读打开，流式算 BLAKE3，16 MiB 及以上每次读 8 MiB、多线程算（不 mmap 工作区里的活文件：别人同时截短它，碰到映射页就是 SIGBUS，整个 daemon 崩掉；读短了由 A2 发现，review P1-10）；符号链接的目标原字节就在 `A1.kind`（`FileKind::Symlink { target }`）里。稀疏文件与大文件一样整份读，空洞读成零，代价与逻辑大小成正比（裁定 T7）。3c 的 `new_hole_above_four_gib_uses_bounded_original_run_work` 一行留给模块文档补定的就是这一条。大文件阈值不影响成员资格（3f:463）。
 4. A2 = `attrs_of(ws.root, p)`。`A2.unchanged_since(&A1)` → 写缓存。
 5. 写竞态（裁定 T7）：A1 与 A2 的 kind、inode、size、mode、gen count 有一项不同 → 从第 1 步重来一次；仍然不等 → 用这一次的 blob，路径标 `Unstable`（告警、记进 `unstable`、不写缓存），下一次扫描重扫它。读的时候文件在被写，这一份可能是撕裂的，所以它只出现在 `compute` 的结果里；checkpoint 存下的，总是 `put_blob_rooted` 克隆出的某一刻的完整内容（§5.6 第 5 步）。
 6. gen count 不可得（`Attrs::gen_count_known()` 为假：有可写的 mmap，apfs 报告为未知，Addendum 1）：照第 3 步读一次，不重来，标 `Unstable`，不写缓存。checkpoint 不强制写回，只保证包含已经写回的内容：`msync` 或 `munmap` 之后的下一次扫描必含（3d:203、3d:268）。
@@ -1021,7 +1021,7 @@ git commit -m "feat(overlay): .lww rules in the LayerFS glob dialect"
 Run: `cargo test -p strata-overlay --features test-seams --test manifest --test read`
 Expected: FAIL（`build_manifest`、`read_candidate` 还不存在）
 
-- [ ] **Step 3: 写让测试通过的最少实现**：§5.9（排除依赖目录、种子缓存与 `.git`）；§5.2 的第 1 到 6 步写成内部函数（读模式），`OverlayFault::PauseAfterHash` 停在第 3 步之后，`read_candidate` 包住它，Cargo.toml 的 `test-seams` feature 从这里起有内容；名字经 `String` 与 `RepoPath::try_from`（§5.1），非 UTF-8 → `NotText`；BLAKE3 在 16 MiB 及以上走 mmap 加多线程
+- [ ] **Step 3: 写让测试通过的最少实现**：§5.9（排除依赖目录、种子缓存与 `.git`）；§5.2 的第 1 到 6 步写成内部函数（读模式），`OverlayFault::PauseAfterHash` 停在第 3 步之后，`read_candidate` 包住它，Cargo.toml 的 `test-seams` feature 从这里起有内容；名字经 `String` 与 `RepoPath::try_from`（§5.1），非 UTF-8 → `NotText`；BLAKE3 在 16 MiB 及以上分块读、多线程（不 mmap，见 §5.2 第 3 步）
 - [ ] **Step 4: 跑测试，确认通过**
 
 Run: `cargo test -p strata-overlay --features test-seams --test manifest --test read`
