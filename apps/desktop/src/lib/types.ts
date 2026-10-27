@@ -19,6 +19,11 @@ export interface DaemonStatus {
   /** Added in P2 (gui.md §3.4). Absent on every daemon P1 can talk to. */
   api?: number;
   version?: string;
+  /** Descriptor use (daemons from ffe316b on). Optional: older daemons omit it. */
+  fds?: { open: number; limit: number; accept_errors: number };
+  /** Not sent by any daemon yet; typed so the status modal picks them up when they are. */
+  pid?: number;
+  started?: string;
 }
 
 export interface BaseRef {
@@ -110,10 +115,50 @@ export interface Usage {
   units: number;
 }
 
+/** One live session in `du` (daemon.md §5.12). */
+export interface DuSession extends Usage {
+  session: string;
+  files?: number;
+  /** logical − private: what a plain copy would have added. */
+  savings: number;
+  /** Wall time of the `new` that made it (ms). Absent on older daemons, null when not measured. */
+  create_ms?: number | null;
+}
+
+/** `savings.cumulative`: every session recorded since `since`. */
+export interface DuCumulative {
+  since: string | null;
+  sessions: number;
+  sized: number;
+  unsized: number;
+  removed: number;
+  logical: number;
+  private: number;
+  savings: number;
+  /** Newer daemons: sessions with a measured `new`, their total time and size. */
+  timed?: number;
+  create_ms?: number;
+  timed_logical?: number;
+  timed_files?: number;
+}
+
 export interface DuReply {
   now: string;
   root: string;
   total: Usage;
   bases: { all: Usage; repos: Record<string, Usage> };
   deps: { all: Usage; repos: Record<string, Usage> };
+  /** Optional: daemons before the du savings report (2026-10-27) send neither. */
+  sessions?: { all: Usage & { files?: number }; list: DuSession[] };
+  savings?: {
+    live: {
+      logical: number;
+      private: number;
+      savings: number;
+      as_of: string | null;
+      complete: boolean;
+    };
+    cumulative: DuCumulative;
+  };
+  scan?: { running: boolean; queued: number; last_full: { started: string; ended: string } | null };
 }

@@ -1,0 +1,112 @@
+/* The status-bar daemon modal. One loud element: the saved-bytes figure. */
+.title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-title);
+}
+.updated {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.body {
+  display: grid;
+  gap: 24px;
+  max-height: min(70vh, 720px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.h {
+  margin: 0 0 6px;
+  font-family: var(--font-title);
+  font-size: 15px;
+  font-weight: 600;
+}
+.h3 {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.intro,
+.note,
+.formula {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.formula {
+  font-size: 12px;
+}
+.savings {
+  padding: 18px 20px 14px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent) 9%, var(--bg-panel)),
+    var(--bg-panel) 55%
+  );
+}
+.hero {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 10px 0 6px;
+}
+.heroNum {
+  font-family: var(--font-title);
+  font-size: 44px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.heroCap {
+  font-size: 14px;
+}
+.facts {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.7;
+}
+.race {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+  margin-bottom: 8px;
+}
+.race > div:not(.speedup) {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-sunken);
+}
+.raceLabel {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.raceValue {
+  font-weight: 500;
+}
+.speedup {
+  grid-column: 1 / -1;
+  font-weight: 600;
+}
+.table {
+  margin: 10px 0 8px;
+}
+.desc :global(.ant-descriptions-item-label) {
+  width: 140px;
+}
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.warnings {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--danger);
+}

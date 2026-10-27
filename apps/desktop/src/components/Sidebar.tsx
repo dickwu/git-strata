@@ -1,23 +1,14 @@
 'use client';
 
-import {
-  CloudServerOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
-  UnorderedListOutlined,
-} from '@ant-design/icons';
+import { MenuFoldOutlined, MenuUnfoldOutlined, UnorderedListOutlined } from '@ant-design/icons';
 import { copy } from '@/lib/copy';
 import { sessionRows } from '@/lib/view';
 import type { StatusReply } from '@/lib/types';
 import { useNav } from '@/stores/nav';
 
-export function Sidebar({
-  sessions,
-  daemonUp,
-}: {
-  sessions: StatusReply | undefined;
-  daemonUp: boolean;
-}) {
+// The daemon moved to the status bar (StatusBar → DaemonStatusModal); `daemonUp` stays in
+// the props so Shell does not change.
+export function Sidebar({ sessions }: { sessions: StatusReply | undefined; daemonUp: boolean }) {
   const { screen, session, sidebarCollapsed, go, openSession, toggleSidebar } = useNav();
   const rows = sessionRows(sessions);
   const label = (s: string) => (sidebarCollapsed ? null : <span>{s}</span>);
@@ -51,23 +42,6 @@ export function Sidebar({
             )}
           </button>
         ))}
-      <button
-        type="button"
-        className="nav-item"
-        aria-current={screen === 'daemon' ? 'page' : undefined}
-        onClick={() => go('daemon')}
-        title={copy.nav.daemon}
-      >
-        <CloudServerOutlined />
-        {label(copy.nav.daemon)}
-        {!sidebarCollapsed && (
-          <span
-            className="dot"
-            data-state={daemonUp ? 'up' : 'down'}
-            style={{ marginLeft: 'auto' }}
-          />
-        )}
-      </button>
       <button
         type="button"
         className="nav-item"
