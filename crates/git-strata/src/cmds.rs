@@ -832,7 +832,7 @@ pub fn deps_list(ctx: &Ctx, repo: Option<String>) -> Result<Envelope> {
 
 pub fn gc(ctx: &Ctx, store: bool, dry_run: bool) -> Result<Envelope> {
     if dry_run {
-        let v = ctx.call("gc", json!({ "repo": null, "store": true, "dry_run": true }), Kind::Read)?;
+        let v = ctx.call("gc", json!({ "repo": null, "store": true, "dry_run": true }), Kind::Write)?;
         return Ok(Envelope::ok(json!({ "dry_run": true, "preview": v["preview"] })));
     }
     let v = ctx.call("gc", json!({ "repo": null, "store": store }), Kind::Write)?;
