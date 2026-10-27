@@ -871,11 +871,13 @@ impl Store {
 | `SQLITE_DBCONFIG_DEFENSIVE` | 每个连接都开 | 关掉 `writable_schema` 一类改 schema 的后门（沿用 LayerFS 的做法） |
 | `query_only` | 1（读连接） | 读连接写不了 |
 | `application_id` | 1398035009，即 0x53545241（"STRA"） | 建库时写入；在文件头偏移 68，open 靠它认出这是 Store |
-| `user_version` | 1 | 建库时写入；在文件头偏移 60；schema 版本规则见 §4.4 |
+| `user_version` | 2（`schema::LATEST`） | 建库时写入；在文件头偏移 60；v1 的库由写者 open 迁移到 2，规则见 §4.4a |
 
 `wal_autocheckpoint` 保持 SQLite 的缺省值（1000 页），写者提交时自动做；读事务都很短，不会让 WAL 无限增长。
 
 ### 4.3 完整 DDL
+
+下面是 v1 的 DDL（`schema::BASE_DDL`，冻结不改）。当前版本的 schema 是它加上 §4.4a 的迁移（`schema::ddl(v)`）；新库直接按 `ddl(LATEST)` 建，与迁移出来的库逐行相同（`new_and_migrated_stores_have_the_same_schema`）。
 
 这是 git-strata 唯一的一份 schema（增补 4）：deps.md §4.2 原来的四张表在这里，按 T8 的裁定调整过（尝试行在拿锁、算出 set 之后才写，所以 `set_id` 必填；`ProposalId` 由 store 分配；AwaitingPublish → Pending 的提升允许；`deps_main` 多了 `inputs_hash`，它的 `set_id` 可以还没有封存）；session 要的会话、工作区、种子与移动意图也在这里。各表的词汇、转换图归所有者（会话生命周期归 session，提议与尝试的状态归 deps，发布阶段暂定，见 §3），触发器只是守住它们。
 
@@ -1293,7 +1295,31 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
   - 这些号都只写 1 到 `i64::MAX`（types.md §3）。下一个号会超过 `i64::MAX` 时，写操作在写任何东西之前返回 `TooLarge`（`detail.limit` 指明是哪种号），已存的状态不变，不回绕（3a:590、3a:596）；`AUTOINCREMENT` 的表在分配之前先查 `sqlite_sequence`，因为 SQLite 自己到顶时报的是 `SQLITE_FULL`，不是一个能区分的错误。读回小于 1 的值说明库坏了：store 先检查，返回 `Corrupt`（`bad_row`），不把它交给 `From<i64>`（types.md §3）。
   - `base_gens.id`、`refs_audit.id`、`gc_runs.id` 只在 store 内部用，不出现在公开接口上。
 - **可变的列**只有这些，其余每张表的每一列写入后都不可改（§4.3 的触发器拦）：`sessions` 的 `lifecycle`、`phase`、`scene`、`removed_ns`；`workspaces` 的 `base_gen`、`head`、`generation`、`conflicts`、`health`、`scene`；`move_intents` 的 `state`、`phase`、`conflicts`、`old_tree`、`ended_ns`；`deps_attempts` 的 `state`、`pid`、`ended_ns`、`error`；`deps_proposals` 的 `state`、`tree`、`head`、`superseded_by`、`updated_ns`；`deps_main` 除 `repo` 以外的列；`publishes` 的 `phase`、`ended_ns`、`outcome`（`unknown` / `done` 的行可以只改 `outcome`，阶段与 `ended_ns` 不变，供 `set_publish_outcome` 与 publish.md §5.7 的 `assign`；`running` 的行不能只改 `outcome`）。状态列只能沿 §4.3 的转换图前进。
-- **schema 版本**：`user_version = 1`。v1 没有旧版 Store，也不做迁移（3a:609 把版本策略交给本文）：版本号不是 1、`application_id` 不对、日志模式不是 WAL、schema 文本有任何差别的库一律拒绝打开（`Corrupt`），不修补、不转换。以后改 schema 就升版本号，迁移另写设计。
+- **schema 版本**：`user_version` 取 `BASE_VERSION`（1）到 `LATEST`（2）。比 `LATEST` 新的（新版 git-strata 写的）、比 1 小的、`application_id` 不对、日志模式不是 WAL、schema 文本与该版本的 `ddl(v)` 有任何差别的库一律拒绝打开（`Corrupt`），不修补、不转换；版本号大于 `LATEST` 时消息提示安装写它的那个版本。旧版本由写者 open 按 §4.4a 前进迁移；只读 open 不迁移，按库自己的版本核对 schema 并照常读（v1 的会话 `agent` 读成 `None`）。
+- **`sessions.agent`**（v2）：创建会话的 AI agent 名，types.md `AgentName`（1 到 64 个 `[A-Za-z0-9._-]`，首字符是字母或数字），`NULL` 表示不知道。CHECK 与 `AgentName` 逐字符一致：Turso 的 `GLOB` 与 `length()` 在内嵌的 NUL 处停下，所以另加 `length(CAST(agent AS BLOB)) = length(agent)`，它同时挡住非 ASCII；两边的一致性由 `agent_column_matches_agent_name_and_is_immutable` 用一张表逐条核对。写入后不可改（触发器 `sessions_agent_guard`，包括 `NULL` → 值）。
+
+### 4.4a schema 迁移
+
+迁移只前进、只在写者 open 里跑，整段在一个事务里：
+
+- **登记**：`schema::MIGRATIONS` 是 `Migration { to, name, sql }` 的有序表，第 i 条把库从 `to - 1` 带到 `to`，`sql` 的最后一句设 `PRAGMA user_version = to`。`LATEST` 是最后一条的 `to`。已发布的迁移不改；改 schema 就加一条。
+- **v1 → v2（`sessions.agent`）**：
+
+  ```sql
+  ALTER TABLE sessions ADD COLUMN agent TEXT CHECK (agent IS NULL OR (length(agent) BETWEEN 1 AND 64 AND length(CAST(agent AS BLOB)) = length(agent) AND agent GLOB '[A-Za-z0-9]*' AND agent NOT GLOB '*[^A-Za-z0-9._-]*'));
+  CREATE TRIGGER sessions_agent_guard BEFORE UPDATE ON sessions WHEN NEW.agent IS NOT OLD.agent BEGIN SELECT RAISE(ABORT, 'immutable: sessions.agent'); END;
+  PRAGMA user_version = 2;
+  ```
+
+  已有的会话 `agent` 为 `NULL`，其余行一字不变（`writer_open_migrates_v1_and_keeps_every_row` 用 v1 夹具逐行比对）。
+- **步骤**（§5.2 写者第 9 步）：
+  1. 库不是干净关闭的就先跑 `quick_check`（干净关闭的也补跑一次：迁移之前要知道库是好的）。
+  2. 备份：`PRAGMA wal_checkpoint(TRUNCATE)` 必须返回 busy = 0 且 `-wal` 长度为 0，最多等 5 秒（每 100 ms 再试）；做不到（有读者持着旧快照）→ `Busy`（`migration_backup`，`not_written`），什么都没改，读者结束后重启 daemon 即可。然后建 `store/backups/`（新建时同步 `store/`），`clonefile` 出 `store/backups/store-v<from>-<ns>.db`，对它与目录做 `F_FULLFSYNC`，再不经 SQLite 核对它：魔数、`application_id`、`user_version = from`、页大小 × 页数等于文件长度。任一步失败就删掉这个克隆，`not_written`。
+  3. `BEGIN IMMEDIATE`，依次执行待做的迁移，在事务里回读 `user_version` 必须是 `LATEST`，并按 `ddl(LATEST)` 比对 schema；任一不对 → `ROLLBACK`，`not_written`，库仍是旧版本，下次 open 再试。
+  4. `COMMIT`。确定的失败（约束、`Busy`）→ `not_written`。其它失败 → `Unknown`（`reason = "migration_commit"`，`outcome = "uncertain"`，`detail` 带 `from`、`to`、`backup`）：新 schema 是否落盘不知道，而 Turso 只在新进程里重跑 WAL 恢复，所以调用方必须退出；daemon 不在进程内重试这个错误（waiting.rs `retryable` 排除它），launchd 重启后的 open 读到的要么是完整的旧版本（再迁移一次），要么是完整的新版本（`uncertain_commit_is_resolved_by_a_fresh_process`）。
+  5. 提交之后尽力做一次 TRUNCATE 检查点，并在 stderr 写一行迁移与备份路径。这一步只整理文件，不是版本的依据：所有 open 都以 PRAGMA 读到的 `user_version`（事务里写下的）为准；检查点没做成时文件头还是旧版本号，那也是 §5.2 第 2 步接受的值。提交之后进程立刻死掉，下次 open 看到的是 v2，不再迁移（`crash_right_after_commit_keeps_v2`）。
+- **读者与迁移**：已经打开的只读 `Store`（同一进程或另一个进程，例如正在跑的 cli）跨过迁移照常工作。另一个进程迁移之后，Turso 的旧连接在每个显式读事务的第一句碰表的语句上报 `Database schema changed`，直到这个连接执行一句自动提交的语句重新载入 schema；所以 `read_txn` 遇到它时先执行一句自动提交的 `SELECT count(*) FROM sqlite_schema`，再把整个读事务重做一次（只一次）。读函数因此是可重放的（`Fn`）。
+- **恢复到旧版本**：迁移不可逆，旧版 git-strata 拒绝 v2 的库（`Corrupt`，`user_version`）。要回到旧版：停 daemon（`launchctl bootout`），把 `store/store.db` 与它的 `-wal`、`-shm`、`-tshm` 挪开，把 `store/backups/store-v1-<ns>.db` 复制成 `store/store.db`，装回旧版本再启动。迁移之后新建的会话不在备份里（它们的目录还在 `sessions/` 下，旧版会把库里没有的目录当成陌生东西）；所以只在迁移后马上发现问题时这样做。
 
 ### 4.5 不变量
 
@@ -1352,13 +1378,14 @@ store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkp
 写者（`open`）：
 
 1. 取 L1：`flock` 返回 `EWOULDBLOCK` → `Busy`（`lock = "store-writer"`），什么都不写。
-2. 不经 SQLite，直接读 `store.db` 的文件头：魔数 `SQLite format 3\0`；偏移 18 与 19 的值为 2（WAL）；偏移 60 的 `user_version` 为 1；偏移 68 的 `application_id` 为 1398035009。任一不对 → `Corrupt`（`reason` 为 `application_id`、`user_version` 或 `journal_mode`）。这一步保证对不是 Store 的文件不建连接、不产生 -wal 与 -shm（3a:661）。建库时做过 TRUNCATE 检查点，之后这两个 PRAGMA 再也不改，所以主文件的文件头一直是准的。
-3. 建写连接（`SQLITE_OPEN_READ_WRITE | SQLITE_OPEN_NO_MUTEX`，不带 CREATE），开 DEFENSIVE，`busy_timeout = 0`；用 PRAGMA 再核一次 `application_id`、`user_version`、`journal_mode`（不对同样是 `Corrupt`）。
+2. 不经 SQLite，直接读 `store.db` 的文件头：魔数 `SQLite format 3\0`；偏移 18 与 19 的值为 2（WAL）；偏移 60 的 `user_version` 在 1 到 `LATEST` 之间；偏移 68 的 `application_id` 为 1398035009。任一不对 → `Corrupt`（`reason` 为 `application_id`、`user_version` 或 `journal_mode`）。这一步保证对不是 Store 的文件不建连接、不产生 -wal 与 -shm（3a:661）。建库时做过 TRUNCATE 检查点；`application_id` 之后再也不改。`user_version` 只由迁移改（§4.4a），迁移之后文件头可能暂时还是旧值，所以这一步只做范围检查，版本以第 3 步 PRAGMA 读到的为准。
+3. 建写连接（`SQLITE_OPEN_READ_WRITE | SQLITE_OPEN_NO_MUTEX`，不带 CREATE），开 DEFENSIVE，`busy_timeout = 0`；用 PRAGMA 再核一次 `application_id`、`user_version`（1 到 `LATEST`，记下它作为库的版本 v）、`journal_mode`（不对同样是 `Corrupt`）。
 4. 设 §4.2 的连接级设置（含 `trusted_schema = 0`）并逐项回读；不符 → `Unsupported`，`detail` 带设置名、期望值与实际值。
-5. schema 比对：把 §4.3 的 DDL 在 `:memory:` 库里执行一遍，两边各取 `SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name`，必须逐行相同；否则 `Corrupt`（`schema`，`detail` 带第一处差别）。不修补、不迁移（3a:597、3a:610）。
+5. schema 比对：把版本 v 的 DDL（`ddl(v)`，§4.3 加上 §4.4a 里 v 之前的迁移）在 `:memory:` 库里执行一遍，两边各取 `SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name`，必须逐行相同；否则 `Corrupt`（`schema`，`detail` 带第一处差别）。不修补、不迁移（3a:597、3a:610）。
 6. 看 `store/clean-shutdown`（T6 裁定，fix round 1 之后）。在，说明上一次是 `close` 正常关闭的：删掉它并对 `store/` 做 `F_FULLFSYNC`（这一次若异常结束，下次打开就看不到它），不跑 quick_check；删不掉 → `Unknown`。不在（上次被杀、崩溃、写者中毒，或没调 `close` 就退出）：`PRAGMA quick_check` 必须返回 `ok`，否则 `Corrupt`（`sqlite`）。它的成本与库的大小成正比（§5.12），所以只在异常退出之后付；平时由 `quick_check()` 按需跑。标记是 `store/` 下的一个空文件，由 `close` 在关掉全部连接之后写下 [我的决定]。
 7. 注册 SQL 函数 `strata_gc_active()`，带 `SQLITE_INNOCUOUS`（§4.2）。读连接池先空着，用到时再开。
 8. 取 `<root>` 的 realpath，作为 store 在根之下的 apfs 调用（`open_rooted`、`attrs_of`、`list_dir`、`rename_rooted`、`remove_tree_rooted`、`remove_rooted`）的 `root` [我的决定：apfs 以 `O_NOFOLLOW` 打开根的最后一级，`[paths] root` 本身是符号链接时这些调用一律 `NotDirectory`；路径的拼接与 `retire_dir` 的前缀核对仍用配置里的 root]。下文 apfs 调用里写的 `<root>` 都指它。
+9. v < `LATEST`：按 §4.4a 迁移（之前没跑过 quick_check 就先跑）。迁移失败时 open 返回那个错误，不交出 Store。
 
 第 3 到 6 步里 SQLite 报 `SQLITE_CORRUPT` 或 `SQLITE_NOTADB` → `Corrupt`（`sqlite`）。对崩溃后的库，第 3 步会先做 WAL 恢复；这是 SQLite 自己的行为，不改变已提交的内容。
 
@@ -1366,7 +1393,7 @@ store 不覆盖工作区里已有的文件，所以本模块没有"先做 checkp
 
 1. 不取 L1。`store.db` 不存在 → `NoSuchPath`。
 2. 同写者第 2 步。
-3. 建只读连接（`SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX`），开 DEFENSIVE，`trusted_schema = 0`，`query_only = 1`，`busy_timeout = 2000`；核身份、比 schema（同写者第 3、5 步）。只读连接做不了 WAL 恢复时 SQLite 报 `SQLITE_READONLY_RECOVERY` → `ReadOnly`（`recovery_needed`：先启动 daemon）[我的决定]。
+3. 建只读连接（`SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX`），开 DEFENSIVE，`trusted_schema = 0`，`query_only = 1`，`busy_timeout = 2000`；在一个读事务里核身份、按库自己的版本比 schema（同写者第 3、5 步）。不迁移：v1 的库照常读。只读连接做不了 WAL 恢复时 SQLite 报 `SQLITE_READONLY_RECOVERY` → `ReadOnly`（`recovery_needed`：先启动 daemon）[我的决定]。
 4. 不改 store.db 的内容。WAL 协议下，`-shm`（以及 `-wal`）不在而目录可写时，只读连接会建出它们（2026-10-22 用 SQLite 3.54.1 实测）；那是 SQLite 的共享内存索引与空日志，不改变库的内容，§7 的只读测试在打开之后才取文件快照。此后每个写函数第一步就返回 `ReadOnly`，不碰 SQLite 和文件系统（3a:659）。只读打开不看、也不动 clean-shutdown 标记。
 
 `close`：取 L2，等进行中的写事务结束；关闭读连接池与写连接（最后一个连接关闭时 SQLite 做检查点，并删掉 -wal 与 -shm）。写者没有中毒时，以 `O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC`、权限 0600 建 `store/clean-shutdown`，对它和 `store/` 做 `F_FULLFSYNC`；标记已经在（不该发生）就留着。最后关掉 LOCK，放开 L1。写标记失败返回 `Unknown`，下一次 `open` 照常跑 quick_check。只读的 Store 只关连接。
@@ -1529,7 +1556,7 @@ session 怎样串这些方法由 session.md 定。按增补 3、4 的错误时�
 
 ### 5.10 读
 
-每个读函数从池里借一个只读连接，在一个读事务里读完，再归还连接；例如 `checkpoint` 读到的行与全部条目、`session` 读到的会话行、工作区行与种子都来自同一个快照。读从不取 L2，所以写事务进行时读照常完成（3a:620、3d:165）；WAL 之下，新开的读事务看得见全部已提交的写。读回的标识经 `TryFrom` 重新校验，序号先查是否不小于 1，枚举值按对照表转换；任何一项不对 → `Corrupt`（`bad_row`）。`proposals(_, open_only = true)` 在同一个快照里排除提出会话已不存在或已 Removed 的 AwaitingPublish（增补 4）。`checkpoint` 与 `latest_checkpoint` 读到的条目行数不等于 `checkpoints.entries` → `Corrupt`（`entries_mismatch`，`detail` 带期望与实际的条数）：缺了条目的 checkpoint 从不当成完整的快照交出去（module-rulings 的"A Removed session takes no new pins"里的兜底）。
+每个读函数从池里借一个只读连接，在一个读事务里读完，再归还连接（另一个进程刚迁移过 schema 时重做一次，§4.4a）；例如 `checkpoint` 读到的行与全部条目、`session` 读到的会话行、工作区行与种子都来自同一个快照。读从不取 L2，所以写事务进行时读照常完成（3a:620、3d:165）；WAL 之下，新开的读事务看得见全部已提交的写。读回的标识经 `TryFrom` 重新校验，序号先查是否不小于 1，枚举值按对照表转换；任何一项不对 → `Corrupt`（`bad_row`）。`proposals(_, open_only = true)` 在同一个快照里排除提出会话已不存在或已 Removed 的 AwaitingPublish（增补 4）。`checkpoint` 与 `latest_checkpoint` 读到的条目行数不等于 `checkpoints.entries` → `Corrupt`（`entries_mismatch`，`detail` 带期望与实际的条数）：缺了条目的 checkpoint 从不当成完整的快照交出去（module-rulings 的"A Removed session takes no new pins"里的兜底）。
 
 ### 5.11 `gc(keep)` 与 `gc_repo(repo, keep)`
 
@@ -1637,8 +1664,9 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
   - `"uncertain"`：一次 `COMMIT` 的结果不确定（提交时同步或写失败）。那一行在恢复之后可能在、也可能不在。写者中毒（§6.4），status 报出，不重放。
   - `"partial"`：一个多步操作停在中间，已完成的步骤有效（gc 已提交的批次、已挪进 trash 的目录、get 已建出的 dst）。现场保留，status 报出。
   - 同样是 `ENOSPC`：写临时文件时满了是 `not_written`，提交时满了是 `uncertain`。两者都是 `Unknown`，调用方按 `outcome` 区分，永远不把不确定的结果当成确定的容量失败去重放或清理（3c:30）。
-- `Corrupt`：`{"reason": "...", "blob": "...", "expected": "...", "actual": "...", "path": "..."}`。`reason` 取 `application_id`、`user_version`、`journal_mode`、`schema`、`sqlite`、`store_db_missing`、`bad_row`、`entries_mismatch`、`blob_missing`、`blob_type`、`blob_size`、`blob_mismatch`、`base_gen_missing` 之一。
-- `Busy`：`{"lock": "...", "path": "..."}`，`lock` 是 `store-writer`（LOCK）或 `sqlite`（SQLite 写锁）。
+- `Corrupt`：`{"reason": "...", "blob": "...", "expected": "...", "actual": "...", "path": "..."}`。`reason` 取 `application_id`、`user_version`（含比 `LATEST` 新的库）、`journal_mode`、`schema`、`sqlite`、`store_db_missing`、`bad_row`、`entries_mismatch`、`blob_missing`、`blob_type`、`blob_size`、`blob_mismatch`、`base_gen_missing` 之一。
+- `Busy`：`{"lock": "...", "path": "..."}`，`lock` 是 `store-writer`（LOCK）或 `sqlite`（SQLite 写锁）。迁移前折叠不了 WAL 时是 `{"reason": "migration_backup", "op": "migrate_backup", "outcome": "not_written", "checkpoint": "...", "wal_bytes": n}`（§4.4a）。
+- 迁移（§4.4a）：`op` 是 `migrate` 或 `migrate_backup`；备份核对失败是 `Unknown`（`migration_backup`，`not_written`，带 `path`）；提交结果不确定是 `Unknown`（`migration_commit`，`uncertain`，带 `from`、`to`、`backup`），调用方要退出进程。
 - `Exists`：`{"reason": "...", "path": "...", "attempt": 7, "n": 3}`，按需取用；`reason = "store_row"` 表示撞上的是已有的行。
 - `CrossVolume`：`{"root": "...", "checkout": "..."}`。`NotEmpty`：`{"root": "...", "entries": ["..."]}`。
 - `TooLarge`：`{"limit": "...", "max": 9223372036854775807}`，`limit` 取 `checkpoint_id`、`proposal_id`、`attempt_id`、`release_group_id`、`move_generation` 或 `read_max`。
@@ -1691,7 +1719,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `open_pins_durable_pragmas` | 写连接回读 `journal_mode = wal`、`synchronous = 2`、`fullfsync = 1`、`checkpoint_fullfsync = 1`、`foreign_keys = 1`、`recursive_triggers = 1`、`trusted_schema = 0`、`busy_timeout = 0`；读连接 `query_only = 1`、`trusted_schema = 0`。strata 只有这一种持久配置，没有 Disposable 档。这是 `checkpoint_write_is_durable_after_crash` 的前置 | layerfs-persistence/tests/sqlite_publication.rs::wal_full_settings_and_unavailable_engine_are_explicit<br>layerfs-persistence/tests/serverless_store.rs::disposable_create_publish_seal_and_reopen_all_layouts<br>layerfs-daemon/tests/r5_10_producer_profile.rs::r5_10_each_mounted_commit_has_one_producer_on_the_one_open_disposable_writer_session |
 | `open_refuses_non_wal_store` | 用原始连接把库改成 `journal_mode = delete`：`open` 返回 `Corrupt`（`journal_mode`），文件字节不变，日志模式仍是 delete | layerfs-persistence/tests/serverless_store.rs::non_wal_store_is_refused_without_conversion |
 | `open_refuses_schema_drift` | 分别删一张表、去掉一个 CHECK 约束、改一列的类型、删一个触发器：`open` 都返回 `Corrupt`（`schema`），文件字节不变，不修补 | layerfs-persistence/tests/history_remediation.rs::reopen_refuses_each_independent_schema_or_binding_corruption<br>layerfs-persistence/tests/old_format_open.rs::a_store_with_any_other_schema_difference_is_still_refused<br>layerfs-project/tests/init_sqlite.rs::a_store_without_acquisition_tables_refuses_init |
-| `open_refuses_unknown_user_version` | `user_version` 改成 0 和 2：`open` 都返回 `Corrupt`（`user_version`），不迁移；版本策略见 §4.4 | layerfs-persistence/tests/sqlite_inode_values.rs::a_store_of_the_value_group_format_is_refused_at_open<br>layerfs-persistence/tests/old_format_open.rs::an_old_format_store_opens_and_records_hints_from_then_on |
+| `open_refuses_unknown_user_version` | `user_version` 改成 0 和 3：`open` 都返回 `Corrupt`（`user_version`），不迁移；版本策略见 §4.4 | layerfs-persistence/tests/sqlite_inode_values.rs::a_store_of_the_value_group_format_is_refused_at_open<br>layerfs-persistence/tests/old_format_open.rs::an_old_format_store_opens_and_records_hints_from_then_on |
 | `open_leaves_unrelated_database_untouched` | `store.db` 的位置上放一个 delete 日志模式的无关 SQLite 库：`open` 返回 `Corrupt`（`application_id`），文件字节与日志模式不变，没有产生 -wal 或 -shm | layerfs-persistence/tests/sqlite_publication.rs::writable_open_does_not_migrate_an_unrelated_database_journal |
 | `second_writer_open_is_busy` | 已有一个写者 `Store`（同一进程里，以及子进程里）时，第二个 `open` 返回 `Busy`（`store-writer`），什么都不写；`open_read_only` 照常成功：Store 只有 daemon 一个写者，cli 只读，没有直连写路径 | layerfs-store-service/tests/kernel_guard.rs::direct_access_is_unsupported_off_linux<br>layerfs-store-service/tests/kernel_guard.rs::direct_access_is_unsupported_on_a_filesystem_outside_the_allowlist |
 | `read_only_open_refuses_every_write` | `open_read_only` 之后取 store 目录的文件列表与字节快照（打开时 SQLite 可能建出 -wal 与 -shm，所以快照在打开之后取，§5.2）；之后每个写函数（put、`record_checkpoint`、`create_session`、`begin_deps_attempt`、`retire_dir`、gc 等）都返回 `ReadOnly`，快照不变；读函数照常 | layerfs-persistence/tests/sqlite_publication.rs::readonly_refusal_and_external_writer_busy_do_not_retry |

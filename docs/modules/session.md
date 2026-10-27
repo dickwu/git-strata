@@ -162,6 +162,9 @@ impl<'a> Sessions<'a> {
     ) -> Result<Sessions<'a>>;
 
     pub fn new(&self, ticket: Option<&str>, repos: &[RepoName]) -> Result<NewReport>;
+    /// `new` 加上布局（`new_with`）与创建它的 agent（types.md `AgentName`）。agent 只写进会话行与清单的
+    /// `agent`，不影响任何别的步骤；`new` 与 `new_with` 都是 `agent = None`（daemon 的 `new` 调这个）。
+    pub fn new_as(&self, ticket: Option<&str>, repos: &[RepoName], layout: Layout, agent: Option<&AgentName>) -> Result<NewReport>;
     /// `head` 的 tree 配上它的安装输入所需的依赖集（经 `deps::ensure`，可能冷装）。锁外调用（§5.2）。
     pub fn ensure_base(&self, repo: &RepoName, head: &CommitOid) -> Result<BaseGen>;
     /// 指定的 tree 配上指定的、已封存的依赖集，从不调 `deps::ensure`。提出者自换的目标"旧 tree 配新依赖集"

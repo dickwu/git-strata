@@ -96,7 +96,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 | method | params | data |
 | --- | --- | --- |
-| `new` | `{ "ticket": string\|null, "repos": [RepoName], "only"?: bool }` | `NewReport`。`only` 为真时会话只有 `repos` 这些工作区（session.md D51）；缺省为假，cli 只在 `--repo` 时才发这个字段，好让新 cli 也能用旧 daemon |
+| `new` | `{ "ticket": string\|null, "repos": [RepoName], "only"?: bool, "agent"?: string\|null }` | `NewReport`。`only` 为真时会话只有 `repos` 这些工作区（session.md D51）；缺省为假，cli 只在 `--repo` 时才发这个字段，好让新 cli 也能用旧 daemon。`agent`（D38）是创建会话的 AI agent 名；缺省或 null 表示不知道；在调 session 之前按 types.md `AgentName` 校验，不合法 → `InvalidInput`（`detail.reason = "agent"`），什么都不写；不是字符串 → RPC `Failed`。它进会话清单的 `agent`，`new` 的回复与 `status` 里都在 `manifest.agent`（没有就省略这个键）。cli 只在 `daemon_status.features` 含 `"new.agent"` 时才发这个字段 |
 | `add` | `{ "session": SessionId, "repos": [RepoName] }` | `{ report: AddReport, anchor_unknown }`（session.md D52） |
 | `status` | `{ "cwd": string\|null, "session": string\|null, "all": bool }` | 见 §5.4 |
 | `checkpoint` | `{ "session", "repo", "reason": CheckpointReason, "paths": [RepoPath] }` | `Checkpointed`；`paths` 可空 |
@@ -396,13 +396,13 @@ panic：写前 → 该请求 RPC `Failed`，进程继续。写后 → 对该请�
 
 `ObserveFailed` 不在 `DaemonWarning` 里重定义。它是 `NewWarning` 或这次 RPC 的 `data.warnings`。
 
-`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
+`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent"]`（D38）；没有这个键的 daemon 一个也不支持。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
 
 stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看见某个影子仓库的 `PrePushGuardDisabled`。同一条不重复打。JSON 里都有，不靠人去翻日志。
 
 ### 5.5 各方法
 
-**`new`**：不持锁地调 `Sessions::new`。它自己 fetch、取锁、`ensure`、`observe_main`。返回的 `warnings` 里有 `ObserveFailed` 时，daemon 对该 repo 再 `observe_main` 一次。再失败仍是警告，`new` 已经成功的不改成失败。然后 §5.7。
+**`new`**：先校验 `agent`（D38），再不持锁地调 `Sessions::new_as`。它自己 fetch、取锁、`ensure`、`observe_main`。返回的 `warnings` 里有 `ObserveFailed` 时，daemon 对该 repo 再 `observe_main` 一次。再失败仍是警告，`new` 已经成功的不改成失败。然后 §5.7。
 
 **`checkpoint`**：先等队列，等到了再借 `Tracker`。等的时候不持有 `Tracker`。同一会话已有 checkpoint 在跑：排队，不取消，两个都做完，顺序与到达一致。同一 `ToolCall.id` 已经记过：返回那一条，不再写。路径非空 → `Inbox::hint` 再 `flush` 再 `checkpoint(Some(tracker))`。路径空且 reason 是 `ToolCall` → `require_full` 再 `flush` 再 checkpoint。`Manual` 与 `Before*` 用 Tracker 的冷扫（有 Tracker 时），不依赖事件。不拿 repo 写锁。钩子等这次 checkpoint 做完再回答，不先应答 [我的决定 D11]：先应答的话，下一次调用的早期写入会混进这一次。代价是没有路径清单的 ToolCall 在 tool 的树上大约 0.20 秒，超出 design §8 的 200 ms；这是给阶段结束时告诉用户的，不是 daemon 能靠少扫修掉的。
 
@@ -923,13 +923,4 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 | D35 确认绑定推送 URL（review P1-15） | `push`、`publish`、要确认的 `chain_resolve Restore`：弹框前读 origin 推送 URL 放进 `PushDeploy.url`（弹框文字显示它，用户信息写成 `***`）。`push` 与 `Restore` 在 repo 锁里、暂存之前用 `check_approved_url` 比此刻的推送目标，`publish` 由 publish 的闸门比（publish.md D20）；不同 → `NotConfirmed`（`remote_changed`，detail 的两个 URL 去掉令牌），不暂存、不推。测试 seam `seams::set_after_confirm` 在确认通过之后跑一个钩子 | 原来凭据不含远端：弹框之后改 `remote.origin.pushurl`，批准的推送会去别处 | 2026-10-27 |
 | D36 描述符用完时不卡死（事故 2026-10-27） | 启动时把软 `RLIMIT_NOFILE` 抬到 `min(10240, 硬上限)`（`raise_fd_limit`，launchd 默认 256）。accept 循环遇到 EMFILE/ENFILE：每 10 s 至多记一行（次数、当前描述符数、连接数），退避 20 ms 翻倍到 1 s，放掉一个预留的 `/dev/null` 描述符让下一次 accept 有位置；预留重开不了时，进来的客户端得到 `Busy`（`reason = too_many_open_files`）并被关掉；`try_clone` 失败也答 `Busy`，不再静默关闭。`daemon_status` 多一个 `fds: { open, limit, accept_errors }` | 原来 EMFILE 时每 20 ms 静默重试；macOS 上 accept 失败会直接关掉那个客户端，CLI 看到 `socket_closed`，daemon 自己不留任何记录。测试 `tests/fds.rs`：60 轮 status/files/grep/daemon_status 描述符数不涨；压到上限时客户端得到 `Busy` 或关闭而不挂住，放开后恢复服务 |
 | D37 plist 设 `SoftResourceLimits.NumberOfFiles = 10240`（事故 2026-10-27） | LaunchAgent 的 plist 写入软描述符上限 10240（与 `FD_LIMIT` 同值），硬上限不动；`raise_fd_limit` 仍在启动时兜底 | 已装的 plist 要重新 `install` 并重启 daemon 才生效；在那之前由 `raise_fd_limit` 生效 |
-
-D18 的契约，实现者不要猜：
-
-- 范围是从 `tip` 可达、从 `exclusive_base` 不可达的提交。`chain_resolve` 的 `AcceptOriginReplay` 把 `exclusive_base` 设成前移之后的 a（内存里按锚点规则算出的那个，还没写），`tip` 是 c，`onto` 是 o。不是 o..c：那会把 origin 已经有的提交再放一遍。
-- 顺序是 a..c 上从旧到新。每个新 commit 的第一父是上一个新 commit，第一个的父是 `onto`。
-- 合并提交只走第一父那一条：重放成单父 commit，tree 用那个合并提交的 tree，不重新合并。这一段相对它第一父的 diff 合不上新父 → `Conflict`。
-- 每个 commit 用 `user.useConfigOnly=true`。身份没配 → `InvalidInput`，`detail.reason = "git-identity"`，与 publish 造 commit 的规则相同。
-- 对象进主 checkout 的对象库（`Git::open` 开在主 checkout 上的那一个）。不进影子仓库。
-- 临时工作树若需要，由 gitio 自己建、自己收。daemon 不建，不起 git。
-- 只造 commit。不改 ref，不推送，不强推。`Conflict` 时 ref 的字节不变。ref 事务是 daemon 在这之后另一次调用，不在这个函数里。
+| D38 记录创建会话的 agent（2026-10-27） | `new` 多一个可选的 `agent`（`NewParams.agent`，`#[serde(default)]`），校验成 `AgentName` 之后交给 `Sessions::new_as`，存进 `sessions.agent`（store schema v2，store.md §4.4a）。`daemon_status` 多一个 `features: ["new.agent"]`，cli 据此决定发不发这个字段。启动时 `Store::open` 迁移 v1 的库；迁移的 COMMIT 结果不确定（`reason = "migration_commit"`）时不在进程内等待重试（`waiting::retryable` 排除它），daemon 退出由 launchd 重启，新进程重跑 WAL 恢复再看版本 | 旧 daemon 的 `NewParams` 是 `deny_unknown_fields`，收到 `agent` 会拒绝整个 `new`；所以新 cli 先看 `features`，旧 cli 不发也照常工作。测试：`tests/rpc.rs::new_agent_is_an_optional_string`、`tests/daemon.rs::new_records_the_agent_and_daemon_status_lists_the_feature`、`waiting.rs` 的 `retryable` 单测 |

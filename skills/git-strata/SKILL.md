@@ -53,6 +53,13 @@ git-strata new PROJ-123 --repo tool --repo hr-core
 #    data.manifest.id                  -> session id, e.g. "s-k3q7xm2a"
 #    data.manifest.repos.<repo>.path   -> that repo's workspace directory
 #    data.warnings                     -> [] when fine
+#    data.manifest.agent               -> the agent recorded for this session
+#    The session records which AI agent created it. Claude Code, Codex and
+#    Cursor are detected from their environment. Any other agent: run
+#    `export STRATA_AGENT=<name>` (e.g. aider; 1-64 of [A-Za-z0-9._-],
+#    starting with a letter or digit) before `new`, or pass --agent <name>.
+#    A warning of kind AgentNotRecorded means the running daemon is older
+#    than this CLI; the session is fine, only the agent is not recorded.
 
 # 1b. Need another repo later? Add it to the same session (tracked):
 git-strata add --repo front            # or: --session S --repo front

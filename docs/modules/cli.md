@@ -86,6 +86,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | --- | --- | --- |
 | `git-strata new` | `--repos a,b`（至少一个 `RepoName`）。ticket 用 `--ticket T` 或第一个位置参数，二者给了同一个字段；都不给则没有标签。ticket 只是标签，不进路径。`--repos` 只选 tracked，每个配置的 repo 都建工作区；cli 在 stderr 提示一行 `note: --repos tracks …`（D35） | 空 `--repos`；ticket 形如 `SessionId` 由 session 返回 `ReservedName`，cli 透传 |
 | `git-strata new`（精简） | `--repo R`，可重复或逗号分隔：只有这些 repo 建工作区，全部 tracked（session.md D51；daemon `new` 的 `only = true`）。ticket 同上 | 与 `--repos` 同给 → `InvalidInput`，`detail.reason = "repo_flags"`；两个都不给 → `InvalidInput` |
+| `git-strata new` 的 agent | `--agent NAME`（可选，`new` 与精简形式都有）。创建会话的 AI agent，按 D36 检测：`--agent`，否则 `STRATA_AGENT`（空 = 没设），否则 Claude Code（`CLAUDECODE`、`CLAUDE_CODE_SESSION_ID`、`CLAUDE_CODE_ENTRYPOINT` 任一非空 → `claude-code`）、Codex（`CODEX_THREAD_ID`、`CODEX_SANDBOX` → `codex`）、Cursor（`CURSOR_AGENT` → `cursor-agent`），按这个顺序取第一个；都没有就不记 | `--agent` 或 `STRATA_AGENT` 不是合法的 `AgentName`（types.md）或不是 UTF-8 → `InvalidInput`，`detail = {reason: "agent", source: "--agent" \| "STRATA_AGENT"}`，在连 daemon 之前，什么都不发 |
 | `git-strata add` | `--repo R`（至少一个，可重复或逗号分隔）`[--session S]`，不给 = cwd 的会话（session.md D52） | 没有 `--repo` → `InvalidInput`（`repos`）；未知 repo 透传 `NoSuchRepo`；会话不是 `Active` 透传 session 的码 |
 | `git-strata status` | `[--all]` 或 `[--session S]`。都不给 = cwd 的会话 | — |
 | `git-strata checkpoint` | `--tool-call [ID]` 与 `-m MSG` 二选一；`ID` 省略或为空时取钩子 stdin JSON 的 `tool_use_id`（§3.5，D22）。`[--session S]`。`--path P` 可重复，P 是工作区里的路径，cli 收成相对该 repo 根的 `RepoPath` | 两个都给，或两个都不给 → `InvalidInput`，`detail.reason = "checkpoint_reason"` |
@@ -116,7 +117,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 
 | 命令 | 成功时的 `data` | 按条目返回、不让整个调用失败 |
 | --- | --- | --- |
-| `new` | `NewReport` | — |
+| `new` | `NewReport`；`manifest.agent` 是记下的 agent（没有就省略）。agent 没能记下时（daemon 太旧，D36），`warnings` 多一条 `{kind: "AgentNotRecorded", agent, reason: "daemon_too_old"}`，stderr 一行同样的意思 | — |
 | `add` | `AddReport`：`{ session, added: {<repo>: WorkspaceState}, already: {<repo>: WorkspaceState}, warnings }`；锚点未知的 repo 打在 stderr | — |
 | `status` | 一个会话：`SessionStatus`。`--all`：`{ "sessions": [SessionStatus, …] }`，按 `SessionId` 升序。健康为 `Unknown` 的工作区带 `choices: ["abandon", "accept"]`。`OldTreeKept` 的 `holders` 原样透传 | — |
 | `checkpoint` | `{ "checkpoints": [Checkpoint, …] }`，该次工具调用或 `-m` 在每个被记的 repo 上的那一行。幂等命中时就是已有的那几行，不是新 id | — |
@@ -184,6 +185,7 @@ pub enum DiffPreview {
 - `running`：daemon 是否在听 socket。没在跑时 cli 本地造这份对象，`running` 为 false，`holders` 与 `unknown_publishes` 为空数组，不假装知道锁。
 - `session`：cwd 能解析出会话才有，否则省略。daemon 回答了时，这个查找（读 config、开 store）放在另一个线程里，最多等 2 秒（`STATUS_LOOKUP_WAIT`）；超时就省略 `session`，加 `"session_lookup": "timed_out"`，信封照常 `ok`。SessionStart 钩子不会因为 store 一时读不动而卡住。daemon 没在跑时直接查。
 - `holders`：谁持着哪把 repo 写锁、从什么时候起。daemon 在跑时由 `daemon_status` 填。
+- `features`：daemon 接受的请求扩展（daemon.md D38，现在是 `["new.agent"]`），daemon 在跑时原样透传；旧 daemon 没有这个键。
 - `fds`：daemon 的文件描述符计数（`open`、`limit` 等），daemon 在跑时原样透传 `daemon_status` 的 `fds`（D35）。
 - `alerts`：隔离区、`index-read-back-refused`、`staging-changed` 这类要人看的项，原样透传 daemon 的 warnings。每条同时在 stderr 打一行。
 
@@ -476,7 +478,4 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D33 `gc --store [--dry-run]`（review P1-12） | 全局 store gc 是显式的选项，不是 `gc` 的缺省：`--store` 调 daemon 的 `gc { store: true }`（30 天保留期，daemon.md D33）；`--dry-run` 要求 `--store`（clap `requires`），走只读的 `gc { store: true, dry_run: true }`，回 `{ dry_run: true, preview }`，什么都不改。帮助里写明先跑 `--dry-run` |
 | D34 推送计划写出目标 URL（review P1-15） | 要确认的 `push`/`publish`/`chain --restore` 在 stderr 的计划里多一行 `  to <origin 推送 URL>`（用户信息写成 `***`），读不出就写一句说明；弹框文字也带这个 URL（confirm.md §5.6），daemon 在锁里核对它没变（daemon.md D35） | 人批准的是推到哪里，不只是哪个分支 | 2026-10-27 |
 | D35 `--repos` 的提示与 `daemon status` 的 `fds` | `new --repos` 时 cli 在 stderr 写一行 `note: --repos tracks A,B; every configured repo still gets a workspace (pass --repo R for only these)`；`--repo` 时不写。`daemon status` 把 daemon 的 `fds` 原样放进 data。`new` 失败已回滚时错误带 `detail.rolled_back = true`（session.md D56），cli 原样透传 | 事故 2026-10-27：agent 把 `--repos tool` 当成只建 tool，得到 23 个工作区；`fds` 在 daemon 里有、cli 丢了。提示走 stderr，不改 data | 2026-10-27 |
-
-初稿里被后写裁定压过的两句，不沿用：`grep` 不给 session 就是全部（改为 cwd 会话，`--all` 才是全部，design §6.3 与 T11）；`grep` 的 `--repo`（T11 只留 `--session` 与 `--all`）。crate 名从初稿的 `crates/strata-cli` 改为 types.md §8 的 `crates/git-strata`。
-
-待定：上游要求 1 与 2 的方法名，若 daemon 定了别的名字，只改 §3 的方法列，不改命令行。`resolve` 仍没有 `Action` 变体。`chain --restore` 用已有的 `PushDeploy`，不等新变体。`config relax` 用 types.md 的 `Action::ConfigRelax`，不加码。
+| D36 `new` 记录 agent | 检测见 §3.1。只有检测到 agent 时，cli 先用 `daemon_status`（读超时与写超时 `PROBE_DEADLINE` = 5 秒，`rpc::call_within`）看 `features` 有没有 `new.agent`：有才在 `new` 的参数里带 `agent`；没有、超时或出错就不带，会话照常建，加 `AgentNotRecorded` 警告。探测之后 daemon 换成了旧版、拒绝了 `agent`（RPC `Failed` 且消息含 ``unknown field `agent` ``，那时什么都没执行）：去掉 `agent` 重发一次 `new`，同样加警告；别的错误一律不重发。没检测到 agent 不探测、不发字段，与以前的请求逐字节相同。测试的 `Home::cmd` 去掉 `GIT_*`、`STRATA*`、`CLAUDE*`、`CODEX*`、`CURSOR*` 环境变量，跑测试的 agent 不会漏进被测命令 | 旧 daemon 的参数拒绝未知字段，直接发会让新 cli 配旧 daemon 时 `new` 整个失败；探测一次比失败后猜原因可靠。`tests/agent.rs`：新 daemon 拿到 agent；旧 daemon 从没见过这个字段且会话带警告；探测后换成旧 daemon 只重发一次；别的拒绝不重发；没有 agent 不探测；不合法的显式值什么都不发；探测有上限；在进程内 daemon 上端到端（`STRATA_AGENT`、`--agent` 压过环境、`CLAUDE_CODE_ENTRYPOINT`、都没有） | 2026-10-27 |

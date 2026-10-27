@@ -11,6 +11,7 @@
 | `RepoName` | 标识 | 配置里的仓库名，如 `tool`；同时是工作区的目录名 | §3 |
 | `RepoId` | 标识 | 仓库身份：git common dir 的规范路径 | §3 |
 | `SessionId` | 标识 | 会话 id，生成，`s-` + 8 位 base32 | §3 |
+| `AgentName` | 标识 | 创建会话的 AI agent 名，如 `claude-code`、`codex`、`cursor-agent` | §3 |
 | `TreeOid` | 标识 | git tree 对象 id，40 位十六进制 | §3 |
 | `CommitOid` | 标识 | git commit 对象 id，40 位十六进制 | §3 |
 | `BlobId` | 标识 | blob 的内容地址（BLAKE3） | §3 |
@@ -61,7 +62,7 @@
 ### 2.2 derive 与 serde
 
 - 所有公开类型 derive `Clone`、`Debug`、`PartialEq`、`Serialize`、`Deserialize`；字段都能比较相等的再加 `Eq`。标识另加 `Hash`、`PartialOrd`、`Ord`，例如 `RepoName` 要作 `BTreeMap` 的键。唯一的例外是 `ConfirmToken`：它只 derive `Debug`，既不能复制，也不能序列化（见 §4）。
-- 有格式的标识（`RepoName`、`SessionId`、`TreeOid`、`CommitOid`、`BlobId`、`DepsSetId`、`RepoPath`）字段私有，只能经 `TryFrom<String>` 构造。serde 也走这条路：`#[serde(try_from = "String", into = "String")]`，所以反序列化同样会校验；格式不对返回 `Code::InvalidInput`。数字标识 `CheckpointId` 与 `ProposalId` 用 `#[serde(try_from = "u64", into = "u64")]`：JSON 里是一个裸数字，超过 `i64::MAX` 的值返回 `InvalidInput`。`RepoId` 和对其他模块不透明的 `ViewId` 用 `#[serde(transparent)]`。这几个标识的构造与取值方法见 §3。
+- 有格式的标识（`RepoName`、`AgentName`、`SessionId`、`TreeOid`、`CommitOid`、`BlobId`、`DepsSetId`、`RepoPath`）字段私有，只能经 `TryFrom<String>` 构造。serde 也走这条路：`#[serde(try_from = "String", into = "String")]`，所以反序列化同样会校验；格式不对返回 `Code::InvalidInput`。数字标识 `CheckpointId` 与 `ProposalId` 用 `#[serde(try_from = "u64", into = "u64")]`：JSON 里是一个裸数字，超过 `i64::MAX` 的值返回 `InvalidInput`。`RepoId` 和对其他模块不透明的 `ViewId` 用 `#[serde(transparent)]`。这几个标识的构造与取值方法见 §3。
 - 字段名就是 JSON 的键，保持 snake_case，不用 `rename_all`。
 - 带数据的枚举用内部标签 `#[serde(tag = "kind")]`。`OverlayEntry` 的 `kind` 字段再加 `#[serde(flatten)]`，这样一条条目在 JSON 里只有一层对象。`PushOutcome` 有元组变体，内部标签装不下其中的字符串，所以改用相邻标签 `#[serde(tag = "kind", content = "message")]`。不带数据的枚举（`Code`）序列化为变体名字符串，如 `"Conflict"`。
 - `Option` 为 `None` 的字段不输出（`skip_serializing_if = "Option::is_none"`），读入时缺省为 `None`（`default`）。
@@ -81,6 +82,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct RepoName(String);
+
+/// 创建会话的 AI agent 名（schema v2，store.md §4.4）：1 到 64 个 `[A-Za-z0-9._-]`，首字符是字母或数字。
+/// 由 cli 检测或从 `--agent`、`STRATA_AGENT` 取得（cli.md）；只是标签，strata 不按它改变行为。
+/// 不合法 → `InvalidInput`，`detail.reason = "agent"`。`as_str()` 取值，`Display` 原样输出。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct AgentName(String);
 
 /// 仓库身份：git common dir 的规范路径（`git rev-parse --git-common-dir` 之后取 realpath，沿用 tgrep 的做法）。
 /// 主 checkout 和接在它 object store 上的所有工作区是同一个 `RepoId`。
@@ -320,6 +328,9 @@ pub struct SessionManifest {
     /// ticket 只是标签，一个 ticket 可以有多个会话。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// 创建会话的 AI agent；没检测到的、以及 schema v2 之前建的会话没有这个键。写入后不可改。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentName>,
     /// 会话根目录 `<root>/sessions/<session-id>/`，各工作区按兄弟布局排在它下面。
     pub root: PathBuf,
     /// 配置里的每个兄弟仓库都在这里，不只是 `--repos` 点名的那些（design §6.1）。
