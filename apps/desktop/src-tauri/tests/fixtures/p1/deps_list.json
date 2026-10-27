@@ -1,0 +1,20 @@
+{
+  "proposals": [
+    {
+      "created": "2026-10-27T17:31:16.005383Z",
+      "from": "a286a8822dfc1ea09e45f5bf16792c3d51dce0732dc75574c6f36f5cad41cb41",
+      "from_inputs": "281d5e0f700d1eb8fd8e8717359d4c193fd12d582b9fb6f2c8b85724676e1313",
+      "id": 1,
+      "origin": {
+        "kind": "Session",
+        "session": "S2"
+      },
+      "repo": "tool",
+      "state": {
+        "kind": "AwaitingPublish"
+      },
+      "to": "b7c7f7b87fc2e1bed844ca8f3ae1a927fe94bbd9bc614c41e18c5532a47522be",
+      "to_inputs": "eaacff60728d8dc498510bd41a9a54dad021c238ed40d74c673ad9b9d05b7253"
+    }
+  ]
+}

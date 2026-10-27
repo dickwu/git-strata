@@ -1,0 +1,7 @@
+[
+  { "fixture": "daemon_status", "method": "daemon_status", "params": { "verify": false } },
+  { "fixture": "status_all", "method": "status", "params": { "cwd": null, "session": null, "all": true } },
+  { "fixture": "status_session", "method": "status", "params": { "cwd": null, "session": "$S1", "all": false } },
+  { "fixture": "du", "method": "du", "params": { "refresh": false } },
+  { "fixture": "deps_list", "method": "deps_list", "params": { "repo": null } }
+]
