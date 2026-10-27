@@ -1,0 +1,35 @@
+[package]
+name = "git-strata-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Git Strata: the macOS desktop app over git-stratad (docs/modules/gui.md)"
+publish = false
+
+# Its own workspace and Cargo.lock: the core workspace excludes this
+# directory (gui.md §2.1), so tauri never enters the daemon's build.
+[workspace]
+
+[lib]
+name = "strata_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+# gui.md §2.3: the desktop depends only on strata-client, strata-types,
+# tauri and its plugins, and tokio.
+strata-client = { path = "../../../crates/strata-client" }
+strata-types = { path = "../../../crates/strata-types" }
+tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2.7"
+tauri-plugin-os = "2.4"
+tauri-plugin-single-instance = "2.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "time", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
