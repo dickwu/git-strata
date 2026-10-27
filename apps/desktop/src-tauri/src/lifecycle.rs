@@ -1,6 +1,6 @@
 //! gui.md §5.8 window behaviour, behind a trait so it is tested with a
 //! fake: a second launch (single-instance), the Dock icon and the tray's
-//! "Open Git Strata" bring the one window back and restore the Dock icon;
+//! "Open GIT STRATA" bring the one window back and restore the Dock icon;
 //! closing the window hides it and drops to an accessory (menu-bar) app.
 //! Quitting the GUI never touches the daemon.
 
@@ -13,7 +13,7 @@ pub trait Shell {
     fn set_regular(&self, regular: bool);
 }
 
-/// Second launch, Dock reopen, tray "Open Git Strata": never a new window.
+/// Second launch, Dock reopen, tray "Open GIT STRATA": never a new window.
 pub fn bring_to_front(s: &impl Shell) {
     s.set_regular(true);
     s.show_window();

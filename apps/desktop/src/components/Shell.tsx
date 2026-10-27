@@ -4,9 +4,10 @@ import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useNav } from '@/stores/nav';
 import { useTheme } from '@/stores/theme';
+import { isSidebarShortcut, useLayout } from '@/stores/layout';
 import { usePlan, useSessions, useDeps } from '@/lib/queries';
 import { OPEN_EVENT, inTauri } from '@/lib/tauri';
-import { openTarget } from '@/lib/view';
+import { openTarget, waitingCount } from '@/lib/view';
 import type { DepsList, StatusReply } from '@/lib/types';
 import { Titlebar } from './Titlebar';
 import { Sidebar } from './Sidebar';
@@ -17,20 +18,24 @@ import { SessionsScreen } from './SessionsScreen';
 import { SessionDetail } from './SessionDetail';
 
 export function Shell() {
-  const { screen, session, sidebarCollapsed, setPalette, openSession } = useNav();
+  const { screen, session, setPalette, openSession } = useNav();
+  const sidebarCollapsed = useLayout((s) => s.sidebarCollapsed);
   const toggleTheme = useTheme((s) => s.toggle);
   const { plan, status } = usePlan();
   const sessions = useSessions(plan.sessions);
   // Kept warm so a tray "deps" item can find its session.
-  useDeps(plan.deps);
+  const deps = useDeps(plan.deps);
   const qc = useQueryClient();
 
-  // ⌘K / Ctrl+K opens the palette.
+  // ⌘K / Ctrl+K opens the palette; ⌘\ / Ctrl+\ toggles the sidebar.
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setPalette(true);
+      } else if (isSidebarShortcut(e)) {
+        e.preventDefault();
+        useLayout.getState().toggleSidebar();
       }
     };
     window.addEventListener('keydown', on);
@@ -64,7 +69,11 @@ export function Shell() {
   return (
     <div className="shell" data-collapsed={sidebarCollapsed}>
       <Titlebar />
-      <Sidebar sessions={sessions.data} daemonUp={status.isSuccess} />
+      <Sidebar
+        sessions={sessions.data}
+        daemonUp={status.isSuccess}
+        waiting={waitingCount(sessions.data, deps.data)}
+      />
       <main className="main">
         {screen === 'daemon' ? (
           <DaemonScreen status={status} plan={plan} />

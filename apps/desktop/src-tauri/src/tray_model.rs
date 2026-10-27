@@ -40,9 +40,9 @@ pub struct WaitingItem {
 impl WaitingItem {
     pub fn label(&self) -> String {
         match self.kind {
-            WaitingKind::DepsProposal => format!("Deps proposal {} · {}", self.number, self.repo),
-            WaitingKind::Conflict if self.number == 1 => format!("1 conflict · {}", self.repo),
-            WaitingKind::Conflict => format!("{} conflicts · {}", self.number, self.repo),
+            WaitingKind::DepsProposal => format!("Deps proposal {} in {}", self.number, self.repo),
+            WaitingKind::Conflict if self.number == 1 => format!("1 conflict in {}", self.repo),
+            WaitingKind::Conflict => format!("{} conflicts in {}", self.number, self.repo),
         }
     }
 
@@ -152,8 +152,8 @@ pub fn model(s: &Snapshot, now: SystemTime) -> TrayModel {
         (Some(true), Some(age)) if age > STALE_AFTER => (Icon::Down, ago(age)),
         (Some(true), _) => {
             let line = match s.sessions.as_ref().map(active_sessions) {
-                Some(1) => "Daemon running · 1 session".to_string(),
-                Some(n) => format!("Daemon running · {n} sessions"),
+                Some(1) => "Daemon running, 1 session".to_string(),
+                Some(n) => format!("Daemon running, {n} sessions"),
                 None => "Daemon running".to_string(),
             };
             (

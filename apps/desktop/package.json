@@ -6,7 +6,7 @@
     "dev": "next dev --turbopack -p 3000",
     "build": "next build",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
+    "tauri:dev": "tauri dev --features dev-connector",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write src",
     "format:check": "prettier --check src",

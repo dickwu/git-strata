@@ -69,7 +69,7 @@ git-strata/
 打出来的 bundle：
 
 ```
-Git Strata.app/Contents/
+GIT STRATA.app/Contents/
 ├─ MacOS/git-strata-desktop        # GUI
 ├─ MacOS/git-stratad               # daemon
 ├─ MacOS/git-strata                # cli（引导把它链接到 ~/.local/bin/git-strata）
@@ -208,7 +208,7 @@ GUI 不拥有持久业务数据。它写的东西都由人按按钮触发：首�
 - **G4 无自动化面**：发布构建里没有 `tauri-plugin-connector`、MCP、WebSocket 端口。
 - **G5 不读数据卷**：GUI 进程不打开 `paths.root` 之下和任何仓库 `path` 之下的文件，计划、diff、分配都经 daemon。唯一例外是引导时用系统对话框选目录（只拿路径，不读内容）。
 - **G6 不信任仓库内容**：diff、路径、提交信息、ticket、提议理由都是 agent 写的，按纯文本渲染（Monaco 只读、AntD 文本），不渲染 HTML / Markdown，严格 CSP。
-- **G7 托盘不批准、不显示 agent 文本**：托盘只显示种类、编号与仓库名（如 "Deps proposal 12 · tool"），不显示 ticket、提交标题、提议理由；点击只打开主窗口到对应对话框；Quit 只退 GUI。
+- **G7 托盘不批准、不显示 agent 文本**：托盘只显示种类、编号与仓库名（如 "Deps proposal 12 in tool"），不显示 ticket、提交标题、提议理由；点击只打开主窗口到对应对话框；Quit 只退 GUI。
 - **G8 bundle 内 cli 与外部 cli 同权**：bundle 里的 `git-strata` 没有额外能力，确认仍由 daemon 弹框。
 - **G9 不在有写操作时重启 daemon**：GUI 发起的任何 daemon 停止 / 重启 / 升级 / 迁移都先走 §5.9 的 drain；不用 `launchctl kickstart -k`，不发 SIGKILL。
 
@@ -357,14 +357,14 @@ daemon 不拥有领域逻辑（基线、依赖集、克隆写在 session / deps 
 
 README 第一节改成「下载 app → 首次打开 → 引导」，cli 用法挪到 "For agents"。每步可检测、可重做，状态由 `onboarding_state` 计算：
 
-0. **Gatekeeper 首次打开**（app 外，写在 README、DMG 背景与发布说明里）：macOS 15 起右键「打开」不能绕过未公证 app：双击 → 被拦 → 系统设置 › 隐私与安全性 › **Open Anyway** → 管理员密码。非管理员账户做不了这一步，README 写明。终端替代：`xattr -dr com.apple.quarantine "/Applications/Git Strata.app"`。
-1. **位置检查**：app 若在 DMG 卷里（`/Volumes/…` 且卷是只读映像）或被 App Translocation 运行（路径含 `/AppTranslocation/`），**不允许**注册 daemon、链接 cli，只显示 "Move Git Strata to Applications, then open it again."。记录已注册的 bundle 路径；以后启动发现路径变了，提示重新注册与重建链接。
+0. **Gatekeeper 首次打开**（app 外，写在 README、DMG 背景与发布说明里）：macOS 15 起右键「打开」不能绕过未公证 app：双击 → 被拦 → 系统设置 › 隐私与安全性 › **Open Anyway** → 管理员密码。非管理员账户做不了这一步，README 写明。终端替代：`xattr -dr com.apple.quarantine "/Applications/GIT STRATA.app"`。
+1. **位置检查**：app 若在 DMG 卷里（`/Volumes/…` 且卷是只读映像）或被 App Translocation 运行（路径含 `/AppTranslocation/`），**不允许**注册 daemon、链接 cli，只显示 "Move GIT STRATA to Applications, then open it again."。记录已注册的 bundle 路径；以后启动发现路径变了，提示重新注册与重建链接。
 2. **内部二进制的 quarantine**：Open Anyway 只放行主程序；daemon 与 cli 若仍带 `com.apple.quarantine`，在注册前由 app 从**自己的 bundle** 去掉这个属性（P-pack 验证是否必要、bundle 不可写时怎么办）。
 3. **迁移检测**：发现旧安装（§5.7）先走迁移。
 4. **配置**：没有 config.toml 时用系统对话框选数据根、添加仓库，按 config.md V1–V3 校验；建议「与第一个仓库同卷的 `<volume>/.strata`」，人确认。根与仓库是否同一 APFS 卷由 daemon 启动时校验，失败的 InvalidInput 原样显示。
 5. **daemon 的 PATH**：`capture_login_path` 运行一次 `$SHELL -ilc 'printf "\n__GS_PATH__%s\n" "$PATH"'`：stdin 为 /dev/null、5 s 超时（到时杀掉整个进程组）、输出上限 64 KiB、只取标记后那一行；rc 文件打印的杂讯被忽略。结果给人看、可编辑，写入 `daemon-env.toml`（§5.7）。失败或人选择不设时**不写** daemon-env.toml，由 daemon 用自己编进去的默认值（`install_path_for_home`，lib.rs:52-59，`~/.bun/bin` 在最前，依赖安装靠它，startup.rs:289）；GUI 不另造一份默认 PATH。
 6. **注册 daemon**：按 P-pack 选定的方案（§5.7）。SMAppService 返回 `requiresApproval` 时说明并打开系统设置的登录项页。注册后等 socket 出现并 `daemon_status` 成功，才算完成。
-7. **权限（TCC）**：数据根在外置卷时，需要「可移除宗卷」授权。授权对象（git-stratad 还是 Git Strata）以 P-pack 实测为准，文案照实写。检测 `store_unavailable`，`open_privacy_pane`。
+7. **权限（TCC）**：数据根在外置卷时，需要「可移除宗卷」授权。授权对象（git-stratad 还是 GIT STRATA）以 P-pack 实测为准，文案照实写。检测 `store_unavailable`，`open_privacy_pane`。
 8. **确认能力**：先发 `daemon_status{}` 取 `api`；`api ≥ 1` 才发 `daemon_status{probe: true}`（`DaemonStatusParams` 是 `deny_unknown_fields`，rpc.rs:246-251，旧 daemon 收到 `probe` 会回 `rpc_failed`）；不可用时说明要设登录密码 / Touch ID。
 9. **命令行工具**：`~/.local/bin/git-strata` → bundle 内 cli 的符号链接（免 sudo）。目标已存在且不是我们的链接 → 不覆盖，提示。之后用第 5 步拿到的 PATH 检查 `git-strata` 解析到哪里；若 `~/.cargo/bin` 的旧版排在前面，提示改名或调整顺序（删文件由用户自己做）。
 10. **Claude Code 钩子**：给出 `SessionStart` / `PostToolUse` 片段，命令写**绝对路径**（复制时展开为 `/Users/<you>/.local/bin/git-strata`），因为钩子不一定继承交互 shell 的 PATH；只提供 `Copy`，不改 `~/.claude`。
@@ -434,10 +434,10 @@ README 第一节改成「下载 app → 首次打开 → 引导」，cli 用法�
 ### 5.8 菜单栏常驻（D6）
 
 - **单实例**：`tauri-plugin-single-instance`；第二次启动只把已有实例的窗口带到前台。
-- 关窗（⌘W、红点）→ 隐藏窗口并切 `ActivationPolicy::Accessory`；点 Dock / Finder 里的 app（`RunEvent::Reopen`）或托盘 `Open Git Strata` → 显示窗口并切回 `Regular`。⌘Q / 托盘 `Quit Git Strata` 才退出 GUI；退出 GUI 不影响 daemon。
+- 关窗（⌘W、红点）→ 隐藏窗口并切 `ActivationPolicy::Accessory`；点 Dock / Finder 里的 app（`RunEvent::Reopen`）或托盘 `Open GIT STRATA` → 显示窗口并切回 `Regular`。⌘Q / 托盘 `Quit GIT STRATA` 才退出 GUI；退出 GUI 不影响 daemon。
 - 图标（peilin 14:1x 选定 concept b「workspace fork」）：app 图标是青色渐变圆角方块上，一个白色 Y 形分叉连起三块等距视角的工作区平板。托盘图标是同一图形的模板图（黑色、透明底，18 pt；按 2 单位网格简化成三块扁平菱形 + Y 叉，叉与板之间留 1 px 空隙），状态靠形状：正常 / 有待处理（小圆点）/ daemon 不可达或数据过期（斜杠）。源文件在 `apps/desktop/src-tauri/icons/src/`（`app-icon.svg`、`tray-template*.svg`），`render.sh` 用 rsvg-convert 与 `tauri icon` 生成全部尺寸与 icns。
 - **判活**：watch 有 heartbeat（§5.3）；45 s 没有任何行即重连；数据超过 60 s 未更新时托盘状态行写 "Updated 2 min ago"，不显示过期的「healthy」。
-- 托盘菜单：状态行（"Daemon running · 5 sessions"）；"Waiting for you" 下最多 5 项，只含种类、编号、仓库名（G7）；"Open Git Strata"；"Pause notifications for 1 hour"；"Quit Git Strata"。点待处理项 → 先强制取新数据，再打开主窗口到对应对话框。
+- 托盘菜单：状态行（"Daemon running · 5 sessions"）；"Waiting for you" 下最多 5 项，只含种类、编号、仓库名（G7）；"Open GIT STRATA"；"Pause notifications for 1 hour"；"Quit GIT STRATA"。点待处理项 → 先强制取新数据，再打开主窗口到对应对话框。
 - 窗口隐藏时保持 watch；回退轮询按 §5.3 的统一表（隐藏行）。
 - "Open at login"（`SMAppService.mainApp`，默认关）。登录启动时不弹窗口（识别方式由 P-pack 验证；识别不了就提供 "Start hidden" 偏好）。
 
@@ -602,12 +602,12 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 - **antd 主色固定**：antd 的暗色算法会把种子色 #6FB3D2 改成 #619bb6；providers 在算法之后再把 `colorPrimary` 与 `colorTextLightSolid` 钉回 §8.2 的 accent / on-accent，让 `ui_accent_contrast` 测的就是画出来的颜色。另有测试核对 `globals.css` 与 `src/lib/tokens.ts` 的取值一致。
 - **字体**：Inter、Inter Tight、JetBrains Mono 的 woff2 与 OFL 文本从 R2 原样复制到 `public/fonts/`，不用 `next/font/google`（构建时要联网，CSP 也只放行 `'self'`）。
 - **格式化**：`.prettierrc` 去掉了 `prettier-plugin-tailwindcss`（没装，本期不许安装）；需要时再加回并装依赖。
-- **检查**：`bun run typecheck`、`bun test src`（31 个：对比度与 token 一致、P1 fixture 上的视图映射、轮询表、⌘K 过滤）、`bun run build`（静态导出到 `dist/`）、`src-tauri` 的 `cargo test` 全过。headless Chrome 打开静态导出（非 Tauri 环境）能渲染壳并显示「Open this inside the Git Strata app.」；真窗口里连 daemon 的界面还没人看过，要在 peilin 本机 `bun run tauri dev` 时确认。
+- **检查**：`bun run typecheck`、`bun test src`（31 个：对比度与 token 一致、P1 fixture 上的视图映射、轮询表、⌘K 过滤）、`bun run build`（静态导出到 `dist/`）、`src-tauri` 的 `cargo test` 全过。headless Chrome 打开静态导出（非 Tauri 环境）能渲染壳并显示「Open this inside the GIT STRATA app.」；真窗口里连 daemon 的界面还没人看过，要在 peilin 本机 `bun run tauri dev` 时确认。
 
 **并行轨道 P-pack**（4–5 天，从 P0 完成起与 P1–P3 交替进行；D15：在 GitHub Actions 托管 macOS runner 上跑，每次都是没装过本 app 的干净机器）。产出一页实测记录，P6 之前必须有结论。要回答的问题：
 
 1. 自签名（以及 ad-hoc）的 app 能否用 `SMAppService.agent` 注册并启动内嵌的 `git-stratad`；移动 app、重签后是否仍有效。
-2. TCC「可移除宗卷」授权记在哪个名字下（git-stratad 还是 Git Strata），授权后更新（同一证书重签）是否保留。
+2. TCC「可移除宗卷」授权记在哪个名字下（git-stratad 还是 GIT STRATA），授权后更新（同一证书重签）是否保留。
 3. LocalAuthentication 框显示的发起者名字（影响 §5.2 文案）。
 4. Open Anyway 之后内部二进制是否仍被 quarantine / Gatekeeper 拦；app 自己去掉属性是否可行；app 内 updater 下载的包是否带 quarantine。
 5. 登录项启动能否识别（§5.8）。

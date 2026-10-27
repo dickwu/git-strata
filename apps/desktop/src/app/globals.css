@@ -10,9 +10,11 @@
   --bg-panel: #ffffff;
   --bg-sunken: #efece6;
   --border: #e3dfd7;
+  --border-strong: #b9b2a6;
   --text: #181613;
   --text-muted: #6b665e;
   --accent: #2e6f8e;
+  --accent-text: #245a74;
   --on-accent: #ffffff;
   --danger: #d4493a;
   --mount-live: #1f9d55;
@@ -31,9 +33,11 @@
   --bg-panel: #17171a;
   --bg-sunken: #0a0a0a;
   --border: #2a2927;
+  --border-strong: #4a4743;
   --text: #ecebe7;
   --text-muted: #9b958b;
   --accent: #6fb3d2;
+  --accent-text: #8cc4de;
   --on-accent: #0e0d0c;
   color-scheme: dark;
 }
@@ -61,6 +65,8 @@ body {
     'side main'
     'status status';
   height: 100vh;
+  /* Collapse/expand glides; the global reduced-motion rule turns this off. */
+  transition: grid-template-columns 200ms cubic-bezier(0.2, 0, 0, 1);
 }
 .shell[data-collapsed='true'] {
   grid-template-columns: 56px 1fr;
@@ -79,12 +85,89 @@ body {
   -webkit-user-select: none;
 }
 
+/* The all-caps name gets caps spacing (letterspaced capitals read evenly). */
+.wordmark {
+  font-family: var(--font-title);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+}
+
 .sidebar {
   grid-area: side;
   border-right: 1px solid var(--border);
   background: var(--bg-sunken);
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sidebar-toggle {
+  width: 40px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.nav-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nav-sub .nav-item {
+  padding-left: 36px;
+}
+.nav-item {
+  white-space: nowrap;
+}
+.nav-icon {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+}
+.nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity 120ms ease;
+}
+.sidebar[data-collapsed='true'] .nav-label,
+.sidebar[data-collapsed='true'] .nav-badge {
+  opacity: 0;
+}
+/* Counts at the row end when expanded; a dot on the icon when collapsed. */
+.nav-badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.nav-badge-dot,
+.nav-icon-dot {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  width: 7px;
+  height: 7px;
+  box-shadow: 0 0 0 2px var(--bg-sunken);
+}
+.nav-badge-dot {
+  border-radius: 50%;
+  background: var(--danger);
+  opacity: 0;
+}
+.sidebar[data-collapsed='true'] .nav-badge-dot {
+  opacity: 1;
 }
 
 .main {
@@ -109,6 +192,9 @@ body {
   flex: 1;
   overflow: auto;
   padding: 20px;
+  /* One column that may shrink below its content, so a wide table scrolls inside itself. */
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
 }
 
 .statusbar {
@@ -165,9 +251,16 @@ body {
 .nav-item:hover {
   background: color-mix(in srgb, var(--text) 6%, transparent);
 }
-.nav-item[aria-current='page'] {
-  background: var(--accent);
-  color: var(--on-accent);
+/*
+ * Current place / active palette row: a teal tint with a teal edge, not a solid fill, so
+ * the teal repo tags stay the one saturated element on screen.
+ */
+.nav-item[aria-current='page'],
+.nav-item[data-active='true'] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--text);
+  font-weight: 600;
 }
 
 .dot {
@@ -199,4 +292,156 @@ body {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* Repo tags in the Sessions list. Tracked repos (checkpoint, publish) carry the teal; reference
+ * workspaces stay muted with a dashed edge. All tags show; they wrap and the row grows. */
+.repo-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 4px;
+  min-width: 0;
+}
+.repo-tag {
+  height: 18px;
+  max-width: 100%;
+  padding: 0 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.repo-tag[data-used='true'] {
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+.repo-tag[data-used='true']:hover {
+  border-color: var(--accent);
+}
+.repo-tag[aria-pressed='true'],
+.filter-tag[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+/* Unused: in the session, not tracked, no changes. Muted, dashed, inert. */
+.repo-tag[data-used='false'] {
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: default;
+}
+/* Rows grow with their tags; every cell starts at the top line. */
+.sessions-table .ant-table-tbody > tr > td {
+  vertical-align: top;
+}
+
+.filter-bar {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+}
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.filter-count {
+  font-variant-numeric: tabular-nums;
+}
+.filter-group {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  align-items: start;
+  gap: 8px;
+}
+.filter-group-label {
+  padding-top: 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.filter-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+}
+.filter-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 4px 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.filter-tag:hover {
+  border-color: var(--accent);
+}
+.filter-tag-count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.filter-tag[aria-pressed='true'] .filter-tag-count {
+  background: color-mix(in srgb, var(--on-accent) 20%, transparent);
+  color: inherit;
+}
+.ticket-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.agent-badge {
+  padding: 0 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+/* Time column: created (muted) then age (text), tabular so the column does not jitter as it ticks. */
+.session-time {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  border-radius: 3px;
+}
+.session-time time {
+  color: var(--text-muted);
+}
+.session-age {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.inline-code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 8%, transparent);
 }

@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App, ConfigProvider, theme as antdTheme } from 'antd';
 import type { MappingAlgorithm } from 'antd';
 import { initTheme, useTheme } from '@/stores/theme';
+import { initLayout } from '@/stores/layout';
 import { TOKENS } from '@/lib/tokens';
 
 export function Providers({ children }: { children: ReactNode }) {
@@ -12,6 +13,7 @@ export function Providers({ children }: { children: ReactNode }) {
   const theme = useTheme((s) => s.theme);
 
   useEffect(() => initTheme(), []);
+  useEffect(() => initLayout(), []);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
@@ -23,6 +25,10 @@ export function Providers({ children }: { children: ReactNode }) {
     ...map!,
     colorPrimary: t.accent,
     colorTextLightSolid: t.onAccent,
+    // Link buttons (Clear, back) read in the accent text colour, not antd's blue.
+    colorLink: t.accentText,
+    colorLinkHover: t.accent,
+    colorLinkActive: t.accent,
   });
   return (
     <QueryClientProvider client={client}>

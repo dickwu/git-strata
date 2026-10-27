@@ -75,6 +75,9 @@ jobs:
       - name: Signing-identity script test (fake security, no keychain)
         run: bash apps/desktop/scripts/tests/test-make-signing-identity.sh
 
+      - name: Release-connector check test
+        run: bash apps/desktop/scripts/tests/test-check-release-no-connector.sh
+
       - name: Desktop crate tests
         run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
 
@@ -84,10 +87,10 @@ jobs:
         env:
           CI: true
 
-      - name: Release build keeps a CSP (gui_release_has_no_connector)
+      - name: Release build has no connector and keeps a CSP (gui_release_has_no_connector)
         run: |
-          csp=$(jq -c '.app.security.csp' apps/desktop/src-tauri/tauri.conf.json)
-          test "$csp" != "null" || { echo "::error::tauri.conf.json app.security.csp is null"; exit 1; }
+          bash apps/desktop/scripts/check-release-no-connector.sh \
+            apps/desktop/src-tauri/target/aarch64-apple-darwin/release/git-strata-desktop
 
       - name: Import the self-signed identity
         if: env.SIGNING == 'self-signed'
@@ -102,7 +105,7 @@ jobs:
           id="${STRATA_SIGN_ID:--}"
           [[ "$SIGNING" == adhoc ]] && id=-
           apps/desktop/pack/assemble.sh \
-            "apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Git Strata.app" \
+            "apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/GIT STRATA.app" \
             target/aarch64-apple-darwin/release "$id" pack-out
           cat pack-out/pack-record.md >> "$GITHUB_STEP_SUMMARY"
 

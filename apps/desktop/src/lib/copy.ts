@@ -1,9 +1,17 @@
 /** Every user-visible string (gui.md §5.2: English only, sentence case, say what to do). */
 export const copy = {
-  app: 'Git Strata',
+  app: 'GIT STRATA',
   nav: {
+    main: 'Main',
     sessions: 'Sessions',
     daemon: 'Daemon',
+    collapse: 'Collapse sidebar',
+    expand: 'Expand sidebar',
+    shortcut: '⌘\\',
+    waiting: (n: number) => (n === 1 ? '1 waiting for you' : `${n} waiting for you`),
+    up: 'running',
+    down: 'not reachable',
+    conflicts: 'Has conflicts',
   },
   palette: {
     placeholder: 'Search sessions and screens',
@@ -12,6 +20,9 @@ export const copy = {
     goTo: (name: string) => `Go to ${name}`,
     toggleTheme: 'Switch light / dark theme',
     refresh: 'Refresh now',
+    toggleSidebar: 'Toggle sidebar',
+    withRepo: (repo: string) => `Sessions with ${repo}`,
+    byAgent: (agent: string) => `Sessions by ${agent}`,
   },
   daemon: {
     title: 'Daemon',
@@ -43,9 +54,32 @@ export const copy = {
       repos: 'Repos',
       changes: 'Pending',
       conflicts: 'Conflicts',
-      created: 'Created',
+      time: 'Time',
+    },
+    time: {
+      created: (t: string) => `Created ${t}`,
+      running: (d: string) => `Running for ${d}`,
+      ended: 'Removed. The daemon does not report when, so no final duration.',
     },
     slow: 'Session status is checked every 30 seconds while the window is open.',
+    filter: {
+      placeholder: 'Filter by ticket, session, repo or agent',
+      label: 'Filter sessions',
+      repos: 'Repos',
+      reposHint: 'Show sessions that use all selected repos',
+      agents: 'Agents',
+      agentsHint: 'Show sessions from any selected agent',
+      toggle: (name: string, n: number, on: boolean) =>
+        `${name}, used by ${n} ${n === 1 ? 'session' : 'sessions'}${on ? ', selected' : ''}`,
+      rowTag: (repo: string, on: boolean) =>
+        on ? `${repo}: remove from filter` : `${repo}: show only sessions that use it`,
+      unused: (repo: string) => `${repo} is in this session but unused (not tracked, no changes)`,
+      clear: 'Clear',
+      none: 'No session matches this filter.',
+      count: (shown: number, total: number) => `${shown} of ${total}`,
+    },
+    tracked: 'Tracked',
+    reference: 'Reference',
   },
   detail: {
     back: 'All sessions',
@@ -69,7 +103,7 @@ export const copy = {
     sessions: (n: number) => (n === 1 ? '1 session' : `${n} sessions`),
   },
   errors: {
-    notInTauri: 'Open this inside the Git Strata app.',
+    notInTauri: 'Open this inside the GIT STRATA app.',
     unknown: 'Something went wrong talking to the daemon.',
   },
 } as const;
@@ -93,4 +127,36 @@ export function bytes(n: number): string {
     i++;
   }
   return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+/**
+ * How long something has existed: "<1m", "14m", "2h 14m", "3d 4h". Two units at most, so
+ * the list column stays narrow; the tooltip carries the exact times.
+ */
+export function duration(ms: number): string {
+  const m = Math.floor(Math.max(0, ms) / 60_000);
+  if (m < 1) return '<1m';
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return h % 24 ? `${d}d ${h % 24}h` : `${d}d`;
+}
+
+/** Local time, as short as it can be: "2:05 PM" today, "Oct 27, 2:05 PM" this year, else "Oct 27, 2025". */
+export function compactTime(t: Date, now: Date): string {
+  const sameDay = t.toDateString() === now.toDateString();
+  if (sameDay) return hm(t);
+  // Date and time joined by hand: ICU versions differ on ", " vs " at ".
+  if (t.getFullYear() === now.getFullYear())
+    return `${t.toLocaleDateString('en', { month: 'short', day: 'numeric' })}, ${hm(t)}`;
+  return t.toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+const hm = (t: Date) => t.toLocaleTimeString('en', { hour: 'numeric', minute: '2-digit' });
+
+/** Full local timestamp with its zone, for tooltips: "Oct 27, 2026, 2:05:09 PM CDT". */
+export function fullTime(t: Date): string {
+  const date = t.toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' });
+  return `${date}, ${t.toLocaleTimeString('en', { timeStyle: 'long' })}`;
 }

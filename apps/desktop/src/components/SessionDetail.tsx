@@ -8,27 +8,40 @@ import { sessionDetail, short, type RepoView } from '@/lib/view';
 import { useNav } from '@/stores/nav';
 import { ErrorNote } from './ErrorNote';
 import { healthTag } from './SessionsScreen';
+import { SessionTime } from './SessionTime';
+import { AgentBadge } from './AgentBadge';
+import { useNow } from '@/hooks/useNow';
 
 export function SessionDetail({ id, interval }: { id: string; interval: number | false }) {
   const openSession = useNav((s) => s.openSession);
   const q = useSession(id, interval);
   const d = sessionDetail(q.data, id);
   const t = copy.detail;
+  const now = useNow();
   return (
     <>
       <div className="toolbar">
         <Button
           type="text"
-          icon={<ArrowLeftOutlined />}
+          icon={<ArrowLeftOutlined aria-hidden />}
           onClick={() => openSession(null)}
           aria-label={t.back}
         />
         <h1 className="screen-title">{d?.row.ticket ?? id}</h1>
+        {d && <AgentBadge agent={d.row.agent} />}
         {d && <span className="mono muted">{d.row.id}</span>}
         {d && (
-          <Tag>
-            {d.row.state} · {d.row.phase}
-          </Tag>
+          <span>
+            {d.row.state}
+            <span className="muted" style={{ marginLeft: 6 }}>
+              {d.row.phase}
+            </span>
+          </span>
+        )}
+        {d && (
+          <span style={{ marginLeft: 'auto' }}>
+            <SessionTime created={d.row.created} state={d.row.state} now={now} />
+          </span>
         )}
       </div>
       <div className="content" style={{ display: 'grid', gap: 16, alignContent: 'start' }}>

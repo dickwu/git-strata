@@ -9,7 +9,7 @@ export function Titlebar() {
   const setPalette = useNav((s) => s.setPalette);
   return (
     <header className="titlebar" data-tauri-drag-region>
-      <span data-tauri-drag-region style={{ fontFamily: 'var(--font-title)', fontWeight: 600 }}>
+      <span data-tauri-drag-region className="wordmark">
         {copy.app}
       </span>
       <span data-tauri-drag-region style={{ flex: 1, alignSelf: 'stretch' }} />

@@ -3,47 +3,10 @@
 import { useMemo, useState } from 'react';
 import { Input, Modal } from 'antd';
 import { copy } from '@/lib/copy';
-import { filterEntries, type Entry } from '@/lib/palette';
+import { useLayout } from '@/stores/layout';
+import { buildEntries, filterEntries, type Entry } from '@/lib/palette';
 import type { StatusReply } from '@/lib/types';
-import { sessionRows } from '@/lib/view';
 import { useNav } from '@/stores/nav';
-
-export function buildEntries(sessions: StatusReply | undefined): Entry[] {
-  const screens: Entry[] = [
-    {
-      key: 'screen:sessions',
-      label: copy.palette.goTo(copy.nav.sessions),
-      keywords: ['list'],
-      action: { kind: 'screen', screen: 'sessions' },
-    },
-    {
-      key: 'screen:daemon',
-      label: copy.palette.goTo(copy.nav.daemon),
-      keywords: ['status', 'socket', 'warnings'],
-      action: { kind: 'screen', screen: 'daemon' },
-    },
-    {
-      key: 'theme',
-      label: copy.palette.toggleTheme,
-      keywords: ['dark', 'light', 'appearance'],
-      action: { kind: 'theme' },
-    },
-    {
-      key: 'refresh',
-      label: copy.palette.refresh,
-      keywords: ['reload'],
-      action: { kind: 'refresh' },
-    },
-  ];
-  const rows: Entry[] = sessionRows(sessions).map((r) => ({
-    key: `session:${r.id}`,
-    label: r.ticket ?? r.id,
-    hint: r.id,
-    keywords: [r.state, r.phase],
-    action: { kind: 'session', id: r.id },
-  }));
-  return [...rows, ...screens];
-}
 
 export function CommandPalette({
   sessions,
@@ -54,7 +17,15 @@ export function CommandPalette({
   onRefresh: () => void;
   onToggleTheme: () => void;
 }) {
-  const { paletteOpen, setPalette, go, openSession } = useNav();
+  const {
+    paletteOpen,
+    setPalette,
+    go,
+    openSession,
+    addRepoFilter,
+    agentFilter,
+    toggleAgentFilter,
+  } = useNav();
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const entries = useMemo(() => filterEntries(buildEntries(sessions), query), [sessions, query]);
@@ -69,7 +40,14 @@ export function CommandPalette({
     const a = e.action;
     if (a.kind === 'screen') go(a.screen);
     else if (a.kind === 'session') openSession(a.id);
-    else if (a.kind === 'theme') onToggleTheme();
+    else if (a.kind === 'repo') {
+      go('sessions');
+      addRepoFilter(a.repo);
+    } else if (a.kind === 'agent') {
+      go('sessions');
+      if (!agentFilter.includes(a.agent)) toggleAgentFilter(a.agent);
+    } else if (a.kind === 'theme') onToggleTheme();
+    else if (a.kind === 'sidebar') useLayout.getState().toggleSidebar();
     else onRefresh();
     close();
   };
@@ -123,7 +101,7 @@ export function CommandPalette({
             role="option"
             aria-selected={i === active}
             className="nav-item"
-            aria-current={i === active ? 'page' : undefined}
+            data-active={i === active}
             onMouseEnter={() => setActive(i)}
             onClick={() => run(e)}
           >

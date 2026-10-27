@@ -62,7 +62,7 @@ fn menu<R: Runtime>(app: &AppHandle<R>, m: &TrayModel) -> tauri::Result<Menu<R>>
             items.push(Box::new(MenuItem::with_id(
                 app,
                 "waiting:more",
-                format!("{} more in Git Strata", m.more),
+                format!("{} more in {}", m.more, crate::APP_NAME),
                 true,
                 None::<&str>,
             )?));
@@ -72,7 +72,7 @@ fn menu<R: Runtime>(app: &AppHandle<R>, m: &TrayModel) -> tauri::Result<Menu<R>>
     items.push(Box::new(MenuItem::with_id(
         app,
         "open",
-        "Open Git Strata",
+        format!("Open {}", crate::APP_NAME),
         true,
         None::<&str>,
     )?));
@@ -80,7 +80,7 @@ fn menu<R: Runtime>(app: &AppHandle<R>, m: &TrayModel) -> tauri::Result<Menu<R>>
     items.push(Box::new(MenuItem::with_id(
         app,
         "quit",
-        "Quit Git Strata",
+        format!("Quit {}", crate::APP_NAME),
         true,
         Some("CmdOrCtrl+Q"),
     )?));
@@ -93,7 +93,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(m.icon)?)
         .icon_as_template(true)
-        .tooltip("Git Strata")
+        .tooltip(crate::APP_NAME)
         .menu(&menu(app, &m)?)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, ev| {

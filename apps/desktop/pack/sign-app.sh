@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Sign Git Strata.app inside-out with one identity (gui.md §2.1, §6):
+# Sign GIT STRATA.app inside-out with one identity (gui.md §2.1, §6):
 #   Contents/MacOS/git-stratad        io.github.dickwu.git-strata.daemon
 #   Contents/MacOS/git-strata         io.github.dickwu.git-strata.cli
 #   Contents/MacOS/strata-pack-probe  io.github.dickwu.git-strata.pack-probe (P-pack only)
 #   the app itself                    io.github.dickwu.git-strata (from Info.plist)
-# usage: sign-app.sh <path/Git Strata.app> <identity SHA-1 | ->
+# usage: sign-app.sh <path/GIT STRATA.app> <identity SHA-1 | ->
 # "-" is ad-hoc: the DR is the cdhash and changes with every build.
 # STRATA_SIGN_KEYCHAIN (optional) names the keychain holding the identity, so
 # the user's keychain search list is never touched.

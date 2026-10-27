@@ -1,12 +1,30 @@
 /** Daemon replies → what the screens show. Pure; tested against the P1 fixtures. */
 import type { Checkpoint, DaemonStatus, DepsList, StatusReply, SessionEntry } from './types';
 
+/** One repo in a session. Tracked repos checkpoint and publish; the rest are reference workspaces. */
+export interface RepoChip {
+  name: string;
+  tracked: boolean;
+  /**
+   * The session uses this repo: it is tracked, or its workspace has pending changes,
+   * conflicts or a checkpoint. Only used repos are filterable (peilin t73u).
+   */
+  used: boolean;
+}
+
 export interface SessionRow {
   id: string;
   ticket: string | null;
   state: string;
   phase: string;
   repos: number;
+  /** Used first, then the rest; alphabetical within each. */
+  repoList: RepoChip[];
+  /**
+   * The AI agent that created the session (Claude, Codex, …). The daemon does not record
+   * one yet (see the t72u proposal); read defensively so the GUI lights up once it does.
+   */
+  agent: string | null;
   pending: number;
   conflicts: number;
   /** Worst workspace health: anything other than "Ok" wins. */
@@ -48,6 +66,106 @@ export interface DaemonView {
 export const short = (oid: string | null | undefined, n = 7): string =>
   oid ? oid.slice(0, n) : '—';
 
+function repoList(s: SessionEntry): RepoChip[] {
+  const checkpointed = new Set((s.checkpoints ?? []).map((c) => c.repo));
+  return Object.entries(s.status.manifest.repos ?? {})
+    .map(([name, m]) => {
+      const tracked = m.tracked !== false;
+      const w = s.status.workspaces?.[name];
+      const used =
+        tracked ||
+        (w?.pending?.length ?? 0) > 0 ||
+        (w?.conflicts?.length ?? 0) > 0 ||
+        w?.checkpoint != null ||
+        checkpointed.has(name);
+      return { name, tracked, used };
+    })
+    .sort((a, b) => Number(b.used) - Number(a.used) || a.name.localeCompare(b.name));
+}
+
+function agentOf(s: SessionEntry): string | null {
+  const raw =
+    (s.status as { agent?: unknown }).agent ?? (s.status.manifest as { agent?: unknown }).agent;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
+/** Repos some current session uses, with how many sessions use each; busiest first. */
+export function usedRepos(rows: SessionRow[]): Array<{ name: string; sessions: number }> {
+  const n = new Map<string, number>();
+  for (const r of rows)
+    for (const x of r.repoList) if (x.used) n.set(x.name, (n.get(x.name) ?? 0) + 1);
+  return [...n]
+    .map(([name, sessions]) => ({ name, sessions }))
+    .sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name));
+}
+
+/** Agents seen on current sessions, with counts. Empty until the daemon records agents. */
+export function knownAgents(rows: SessionRow[]): Array<{ name: string; sessions: number }> {
+  const n = new Map<string, number>();
+  for (const r of rows) if (r.agent) n.set(r.agent, (n.get(r.agent) ?? 0) + 1);
+  return [...n]
+    .map(([name, sessions]) => ({ name, sessions }))
+    .sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name));
+}
+
+export interface RowFilter {
+  /** Selected repos: a session must use all of them. */
+  repos: string[];
+  /** Selected agents: a session must come from one of them (a session has one agent). */
+  agents?: string[];
+  text?: string;
+}
+
+/**
+ * The Sessions list filter. A row passes when it uses every selected repo, comes from one
+ * of the selected agents (if any), and every word of `text` appears in its ticket, id,
+ * agent or one of its repo names.
+ */
+export function filterRows(rows: SessionRow[], f: RowFilter): SessionRow[] {
+  const words = (f.text ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const agents = f.agents ?? [];
+  return rows.filter((r) => {
+    const used = new Set(r.repoList.filter((x) => x.used).map((x) => x.name));
+    if (!f.repos.every((x) => used.has(x))) return false;
+    if (agents.length > 0 && !(r.agent && agents.includes(r.agent))) return false;
+    if (words.length === 0) return true;
+    const hay = [r.ticket ?? '', r.id, r.agent ?? '', ...r.repoList.map((x) => x.name)]
+      .join(' ')
+      .toLowerCase();
+    return words.every((w) => hay.includes(w));
+  });
+}
+
+/**
+ * How many things wait for a human: pending deps proposals plus workspaces with
+ * conflicted paths. Same rule as the tray's "Waiting for you" (src-tauri/src/tray_model.rs
+ * `waiting`), so the sidebar badge and the tray agree.
+ */
+export function waitingCount(
+  sessions: StatusReply | undefined,
+  deps: DepsList | undefined
+): number {
+  const proposals = (deps?.proposals ?? []).filter((p) => p.state?.kind === 'Pending').length;
+  const conflicts = (sessions?.sessions ?? []).reduce(
+    (n, s) =>
+      n +
+      Object.values(s.status.workspaces ?? {}).filter((w) => (w.conflicts?.length ?? 0) > 0).length,
+    0
+  );
+  return proposals + conflicts;
+}
+
+/**
+ * A session's age for the Time column. Running sessions count from `created` to `now`.
+ * The status reply carries no end time, so a Removed session has no final duration (null)
+ * rather than a clock that keeps running.
+ */
+export function sessionAge(created: string, state: string, now: number): number | null {
+  if (state === 'Removed') return null;
+  const t = Date.parse(created);
+  return Number.isNaN(t) ? null : Math.max(0, now - t);
+}
+
 function row(s: SessionEntry): SessionRow {
   const ws = Object.values(s.status.workspaces ?? {});
   const bad = ws.map((w) => w.health).find((h) => h !== 'Ok');
@@ -57,6 +175,8 @@ function row(s: SessionEntry): SessionRow {
     state: s.status.state,
     phase: s.status.phase,
     repos: Object.keys(s.status.manifest.repos ?? {}).length,
+    repoList: repoList(s),
+    agent: agentOf(s),
     pending: ws.reduce((n, w) => n + (w.pending?.length ?? 0), 0),
     conflicts: ws.reduce((n, w) => n + (w.conflicts?.length ?? 0), 0),
     health: bad ?? 'Ok',

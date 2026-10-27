@@ -329,7 +329,7 @@ fn gui_tray_status_lines() {
     let m = tray_model::model(&fresh, now);
     assert_eq!(
         (m.icon, m.status_line.as_str()),
-        (Icon::Normal, "Daemon running · 2 sessions")
+        (Icon::Normal, "Daemon running, 2 sessions")
     );
     assert!(m.waiting.is_empty());
 
@@ -339,7 +339,7 @@ fn gui_tray_status_lines() {
         &snap(one, json!({ "proposals": [] }), Duration::ZERO, now),
         now,
     );
-    assert_eq!(m.status_line, "Daemon running · 1 session");
+    assert_eq!(m.status_line, "Daemon running, 1 session");
 
     let stale = snap(
         fixture("status_all"),
@@ -403,8 +403,8 @@ fn gui_tray_no_agent_text() {
     assert_eq!(m.waiting.len(), MAX_WAITING);
     assert_eq!(m.more, 3);
     let labels: Vec<_> = m.waiting.iter().map(|w| w.label()).collect();
-    assert_eq!(labels[0], "Deps proposal 10 · tool");
-    assert_eq!(labels[4], "2 conflicts · tool");
+    assert_eq!(labels[0], "Deps proposal 10 in tool");
+    assert_eq!(labels[4], "2 conflicts in tool");
     let mut text = vec![m.status_line.clone()];
     text.extend(labels);
     text.extend(m.waiting.iter().map(|w| w.id()));

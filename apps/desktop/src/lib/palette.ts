@@ -1,8 +1,15 @@
 /** ⌘K entries and filtering. */
+import { copy } from './copy';
+import type { StatusReply } from './types';
+import { sessionRows, usedRepos } from './view';
+
 export type Action =
   | { kind: 'screen'; screen: 'sessions' | 'daemon' }
   | { kind: 'session'; id: string }
+  | { kind: 'repo'; repo: string }
+  | { kind: 'agent'; agent: string }
   | { kind: 'theme' }
+  | { kind: 'sidebar' }
   | { kind: 'refresh' };
 
 export interface Entry {
@@ -39,4 +46,70 @@ export function filterEntries(entries: Entry[], query: string): Entry[] {
     scored.push({ e, score, i });
   });
   return scored.sort((a, b) => a.score - b.score || a.i - b.i).map((s) => s.e);
+}
+
+/**
+ * Sessions first (searchable by ticket, id, state, phase and repo names), then one
+ * "Sessions with <repo>" entry per repo, which filters the list, then screens and commands.
+ */
+export function buildEntries(sessions: StatusReply | undefined): Entry[] {
+  const screens: Entry[] = [
+    {
+      key: 'screen:sessions',
+      label: copy.palette.goTo(copy.nav.sessions),
+      keywords: ['list'],
+      action: { kind: 'screen', screen: 'sessions' },
+    },
+    {
+      key: 'screen:daemon',
+      label: copy.palette.goTo(copy.nav.daemon),
+      keywords: ['status', 'socket', 'warnings'],
+      action: { kind: 'screen', screen: 'daemon' },
+    },
+    {
+      key: 'theme',
+      label: copy.palette.toggleTheme,
+      keywords: ['dark', 'light', 'appearance'],
+      action: { kind: 'theme' },
+    },
+    {
+      key: 'sidebar',
+      label: copy.palette.toggleSidebar,
+      hint: copy.nav.shortcut,
+      keywords: ['collapse', 'expand', 'navigation'],
+      action: { kind: 'sidebar' },
+    },
+    {
+      key: 'refresh',
+      label: copy.palette.refresh,
+      keywords: ['reload'],
+      action: { kind: 'refresh' },
+    },
+  ];
+  const rows = sessionRows(sessions);
+  const sessionEntries: Entry[] = rows.map((r) => ({
+    key: `session:${r.id}`,
+    label: r.ticket ?? r.id,
+    hint: r.id,
+    keywords: [r.state, r.phase, ...(r.agent ? [r.agent] : []), ...r.repoList.map((x) => x.name)],
+    action: { kind: 'session', id: r.id },
+  }));
+  // Only repos some session uses (t73u), alphabetical.
+  const repos = usedRepos(rows)
+    .map((x) => x.name)
+    .sort();
+  const repoEntries: Entry[] = repos.map((repo) => ({
+    key: `repo:${repo}`,
+    label: copy.palette.withRepo(repo),
+    keywords: ['repo', 'filter'],
+    action: { kind: 'repo', repo },
+  }));
+  const agents = [...new Set(rows.flatMap((r) => (r.agent ? [r.agent] : [])))].sort();
+  const agentEntries: Entry[] = agents.map((agent) => ({
+    key: `agent:${agent}`,
+    label: copy.palette.byAgent(agent),
+    keywords: ['agent', 'ai', 'filter'],
+    action: { kind: 'agent', agent },
+  }));
+  return [...sessionEntries, ...repoEntries, ...agentEntries, ...screens];
 }

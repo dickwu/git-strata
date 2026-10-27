@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { contrast } from './contrast';
+import { contrast, mix } from './contrast';
 import { CSS_VAR, TOKENS, type ThemeName } from './tokens';
 
 // gui.md §8.2: ui_accent_contrast.
@@ -16,6 +16,15 @@ describe('ui_accent_contrast', () => {
     });
     test(`${name}: on-accent on accent >= 4.5:1`, () => {
       expect(contrast(t.onAccent, t.accent)).toBeGreaterThanOrEqual(4.5);
+    });
+    // Repo tags and filter chips: accent-text on a 12% accent tint; selected nav row: text
+    // on a 16% tint. Checked over both surfaces the list can sit on.
+    test(`${name}: teal tag text and tinted selection >= 4.5:1`, () => {
+      for (const bg of [t.bgApp, t.bgPanel]) {
+        expect(contrast(t.accentText, mix(t.accent, 12, bg))).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(t.text, mix(t.accent, 16, bg))).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(t.textMuted, bg)).toBeGreaterThanOrEqual(4.5);
+      }
     });
     test(`${name}: text and muted text on app background >= 4.5:1`, () => {
       expect(contrast(t.text, t.bgApp)).toBeGreaterThanOrEqual(4.5);

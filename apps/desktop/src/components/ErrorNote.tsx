@@ -2,6 +2,7 @@
 
 import { Alert } from 'antd';
 import { copy } from '@/lib/copy';
+import { splitInlineCode } from '@/lib/inlineCode';
 import { asGuiError, reason } from '@/lib/tauri';
 
 /** One place that turns a GuiError into §5.2 copy. */
@@ -25,5 +26,16 @@ export function errorText(e: unknown): { title: string; hint?: string } {
 
 export function ErrorNote({ error }: { error: unknown }) {
   const t = errorText(error);
-  return <Alert type="warning" showIcon title={t.title} description={t.hint} />;
+  const hint = t.hint
+    ? splitInlineCode(t.hint).map((p, i) =>
+        p.code ? (
+          <code key={i} className="inline-code">
+            {p.text}
+          </code>
+        ) : (
+          <span key={i}>{p.text}</span>
+        )
+      )
+    : undefined;
+  return <Alert type="warning" showIcon title={t.title} description={hint} />;
 }

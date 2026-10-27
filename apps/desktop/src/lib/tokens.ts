@@ -11,6 +11,8 @@ export interface ThemeTokens {
   text: string;
   textMuted: string;
   accent: string;
+  /** Teal text on a teal tint (repo tags, filter chips). */
+  accentText: string;
   onAccent: string;
 }
 
@@ -21,6 +23,7 @@ export const TOKENS: Record<ThemeName, ThemeTokens> = {
     text: '#181613',
     textMuted: '#6b665e',
     accent: '#2E6F8E',
+    accentText: '#245a74',
     onAccent: '#FFFFFF',
   },
   dark: {
@@ -29,6 +32,7 @@ export const TOKENS: Record<ThemeName, ThemeTokens> = {
     text: '#ecebe7',
     textMuted: '#9b958b',
     accent: '#6FB3D2',
+    accentText: '#8cc4de',
     onAccent: '#0E0D0C',
   },
 };
@@ -47,5 +51,6 @@ export const CSS_VAR: Record<keyof ThemeTokens, string> = {
   text: '--text',
   textMuted: '--text-muted',
   accent: '--accent',
+  accentText: '--accent-text',
   onAccent: '--on-accent',
 };

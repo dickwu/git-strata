@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Git Strata",
+  "productName": "GIT STRATA",
   "mainBinaryName": "git-strata-desktop",
   "version": "0.1.0",
   "identifier": "io.github.dickwu.git-strata",
@@ -15,7 +15,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Git Strata",
+        "title": "GIT STRATA",
         "width": 1200,
         "height": 800,
         "minWidth": 880,

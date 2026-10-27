@@ -44,7 +44,7 @@ export function DaemonScreen({
               <Descriptions.Item label="Holds">{copy.daemon.holds(v.holds)}</Descriptions.Item>
               {du.data && (
                 <Descriptions.Item label={copy.daemon.storage}>
-                  {bytes(du.data.total.allocated)} on disk · {bytes(du.data.total.logical)} logical
+                  {bytes(du.data.total.allocated)} on disk ({bytes(du.data.total.logical)} logical)
                 </Descriptions.Item>
               )}
             </Descriptions>

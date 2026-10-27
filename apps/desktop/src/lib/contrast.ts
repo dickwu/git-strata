@@ -21,3 +21,16 @@ export function contrast(a: string, b: string): number {
   const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
   return (hi + 0.05) / (lo + 0.05);
 }
+
+/** CSS `color-mix(in srgb, fg pct%, bg)` for opaque colours, as #rrggbb. */
+export function mix(fg: string, pct: number, bg: string): string {
+  const a = parseHex(fg);
+  const b = parseHex(bg);
+  return (
+    '#' +
+    a
+      .map((v, i) => Math.round(v * (pct / 100) + b[i] * (1 - pct / 100)))
+      .map((v) => v.toString(16).padStart(2, '0'))
+      .join('')
+  );
+}

@@ -17,6 +17,13 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, RunEvent, Runtime, WindowEvent};
 
 use crate::daemon::Daemon;
+
+/// The display name (tray, menus, window title). tauri.conf.json carries the
+/// same string as productName and the window title, which names the .app
+/// bundle and Info.plist CFBundleName / CFBundleDisplayName; the test
+/// `app_name_matches_tauri_conf` keeps them together. The bundle identifier,
+/// LaunchAgent label and binary names stay `git-strata`.
+pub const APP_NAME: &str = "GIT STRATA";
 use crate::state::AppState;
 
 /// `lifecycle::Shell` over the real window and activation policy.
@@ -59,13 +66,18 @@ impl<R: Runtime> lifecycle::Shell for TauriShell<R> {
 }
 
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // First, so a second launch exits before it builds anything else.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             lifecycle::bring_to_front(&TauriShell(app.clone()))
         }))
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_os::init());
+    // UI automation for development only (gui.md G4): needs both the
+    // dev-connector feature (`bun run tauri:dev`) and a debug build.
+    #[cfg(all(feature = "dev-connector", debug_assertions))]
+    let builder = builder.plugin(tauri_plugin_connector::init());
+    let app = builder
         .manage(AppState::new(socket::default_socket().map(Daemon::new)))
         .setup(|app| {
             let handle = app.handle().clone();
@@ -101,7 +113,7 @@ pub fn run() {
             commands::deps::deps_list,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building Git Strata");
+        .unwrap_or_else(|e| panic!("error while building {APP_NAME}: {e}"));
     app.run(|app, event| {
         #[cfg(target_os = "macos")]
         if let RunEvent::Reopen { .. } = event {
@@ -110,4 +122,20 @@ pub fn run() {
         #[cfg(not(target_os = "macos"))]
         let _ = (app, event);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::APP_NAME;
+
+    #[test]
+    fn app_name_matches_tauri_conf() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(APP_NAME, "GIT STRATA");
+        assert_eq!(conf["productName"], APP_NAME);
+        assert_eq!(conf["app"]["windows"][0]["title"], APP_NAME);
+        // The rename is display-only.
+        assert_eq!(conf["identifier"], "io.github.dickwu.git-strata");
+    }
 }

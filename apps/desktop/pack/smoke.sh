@@ -9,7 +9,7 @@ dmg="$1"; out="$2"
 mkdir -p "$out"
 rec="$out/smoke-record.md"
 label="io.github.dickwu.git-strata.daemon"
-app="/Applications/Git Strata.app"
+app="/Applications/GIT STRATA.app"
 cfgdir="$HOME/Library/Application Support/git-strata"
 sock="$cfgdir/daemon.sock"
 uid="$(id -u)"
@@ -42,16 +42,16 @@ xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;$(uuidgen)
 fact "dmg quarantine: $(xattr -p com.apple.quarantine "$dmg" 2>&1)"
 mnt="$(mktemp -d)"
 must hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg" > /dev/null
-fact "mounted app quarantine: $(xattr -p com.apple.quarantine "$mnt/Git Strata.app" 2>&1 || true)"
+fact "mounted app quarantine: $(xattr -p com.apple.quarantine "$mnt/GIT STRATA.app" 2>&1 || true)"
 log "spctl (expected: rejected, self-signed / ad-hoc is not notarized):"
-code spctl --assess --type execute -vv "$mnt/Git Strata.app" || true
+code spctl --assess --type execute -vv "$mnt/GIT STRATA.app" || true
 if command -v syspolicy_check > /dev/null; then
-  code syspolicy_check distribution "$mnt/Git Strata.app" || true
+  code syspolicy_check distribution "$mnt/GIT STRATA.app" || true
 fi
-must ditto "$mnt/Git Strata.app" "$app"
+must ditto "$mnt/GIT STRATA.app" "$app"
 hdiutil detach "$mnt" > /dev/null || true
 for f in "" /Contents/MacOS/git-stratad /Contents/MacOS/git-strata; do
-  fact "quarantine after ditto on \`${f:-Git Strata.app}\`: $(xattr -p com.apple.quarantine "$app$f" 2>&1 || true)"
+  fact "quarantine after ditto on \`${f:-GIT STRATA.app}\`: $(xattr -p com.apple.quarantine "$app$f" 2>&1 || true)"
 done
 log "Stand-in for Open Anyway (the runner cannot click it): remove quarantine from the whole bundle."
 xattr -dr com.apple.quarantine "$app"

@@ -2,13 +2,13 @@
 # P-pack: turn the bundle `tauri build --bundles app` produced into the layout
 # of gui.md §2.1, sign it, check the designated requirements, and make the DMG.
 # usage: assemble.sh <tauri .app> <dir with git-stratad and git-strata> <identity SHA-1 | -> <out dir>
-# Writes <out>/Git Strata.app, <out>/Git-Strata_<version>_<arch>.dmg, <out>/pack-record.md
+# Writes <out>/GIT STRATA.app, <out>/Git-Strata_<version>_<arch>.dmg, <out>/pack-record.md
 set -euo pipefail
 src_app="$1"; bins="$2"; id="$3"; out="$4"
 here="$(cd "$(dirname "$0")" && pwd)"
 prefix="io.github.dickwu.git-strata"
 mkdir -p "$out"
-app="$out/Git Strata.app"
+app="$out/GIT STRATA.app"
 rm -rf "$app"
 ditto "$src_app" "$app"
 macos="$app/Contents/MacOS"
@@ -59,9 +59,9 @@ done
 
 dmg="$out/Git-Strata_${version}_${arch}.dmg"
 stage="$(mktemp -d)"
-ditto "$app" "$stage/Git Strata.app"
+ditto "$app" "$stage/GIT STRATA.app"
 ln -s /Applications "$stage/Applications"
-hdiutil create -volname "Git Strata" -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$dmg" > /dev/null
+hdiutil create -volname "GIT STRATA" -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$dmg" > /dev/null
 rm -rf "$stage"
 kc=()
 [[ -n "${STRATA_SIGN_KEYCHAIN:-}" && "$id" != "-" ]] && kc=(--keychain "$STRATA_SIGN_KEYCHAIN")
