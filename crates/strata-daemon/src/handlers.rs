@@ -20,7 +20,7 @@ use strata_overlay::{Base, DEFAULT_DIRTY_CAPACITY, Overlay, RestoreRequest, Trac
 use strata_search::{GrepOpts, Hit, OverlaySource, Search, Which};
 use strata_session::Layout;
 use strata_store::PublishPhase;
-use strata_types::{Action, BaseGen, Code, CommitOid, RepoConfig, RepoName, RepoPath, SessionId, StrataError, WorkspaceState};
+use strata_types::{Action, AgentName, BaseGen, Code, CommitOid, RepoConfig, RepoName, RepoPath, SessionId, StrataError, WorkspaceState};
 
 use crate::confirm_flow::{apply, needs_confirm, recheck, require_validated};
 use crate::fetch_after::{alert_attach, report_guard_disabled};
@@ -454,7 +454,7 @@ impl<'d, 'a> Server<'d, 'a> {
     fn dispatch(&self, p: &Params) -> Result<Value> {
         let core = self.core();
         match p {
-            Params::New(p) => self.new_session(p.ticket.as_deref(), &p.repos, p.only),
+            Params::New(p) => self.new_session(p.ticket.as_deref(), &p.repos, p.only, p.agent.clone()),
             Params::Add(p) => self.add_repos(&p.session, &p.repos),
             Params::Status(p) => self.status(p.cwd.as_deref(), p.session.as_deref(), p.all),
             Params::Checkpoint(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
@@ -650,11 +650,13 @@ impl<'d, 'a> Server<'d, 'a> {
     }
 
     /// §5.7: `new`, then the anchor and the observe retry.
-    fn new_session(&self, ticket: Option<&str>, repos: &[RepoName], only: bool) -> Result<Value> {
+    fn new_session(&self, ticket: Option<&str>, repos: &[RepoName], only: bool, agent: Option<String>) -> Result<Value> {
+        // Validate before anything is written: a bad name creates nothing.
+        let agent = agent.map(AgentName::try_from).transpose()?;
         let core = self.core();
         writing();
         let layout = if only { Layout::Only } else { Layout::Siblings };
-        let mut rep = match self.d.sessions.new_with(ticket, repos, layout) {
+        let mut rep = match self.d.sessions.new_as(ticket, repos, layout, agent.as_ref()) {
             Ok(r) => r,
             Err(e) => {
                 for r in repos {

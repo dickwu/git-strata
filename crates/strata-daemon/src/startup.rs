@@ -628,6 +628,7 @@ impl<'a> Daemon<'a> {
             "warnings": warnings,
             "verify": verify_result,
             "reconcile": self.reconcile.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+            "features": crate::FEATURES,
             "fds": {
                 "open": open_fd_count(),
                 "limit": fd_limit().map(|(soft, _)| soft),

@@ -87,6 +87,13 @@ pub struct NewParams {
     /// Only `repos` get a workspace (session.md D51); absent means false.
     #[serde(default)]
     pub only: bool,
+    /// Which agent created the session; absent or null means not known.
+    /// A plain string on the wire: the handler validates it as an
+    /// `AgentName` so a bad name answers `InvalidInput` reason `agent`.
+    /// Old daemons reject the field (deny_unknown_fields), so the CLI sends
+    /// it only when `daemon_status.features` has `new.agent`.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// `add` (session.md D52): more repos for an existing session.

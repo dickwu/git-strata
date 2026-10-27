@@ -1333,6 +1333,47 @@ fn slim_new_then_add_over_the_socket() {
     core.close().unwrap();
 }
 
+/// agent-id: `daemon_status.features` lists `new.agent`; `new` stores the
+/// agent and `status` shows it as `manifest.agent`; absent or null stores
+/// none; a bad name is InvalidInput reason `agent` and creates nothing; a
+/// non-string is an rpc `Failed`.
+#[test]
+fn new_records_the_agent_and_daemon_status_lists_the_feature() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let dst = ok(call(&sock, "daemon_status", json!({ "verify": false })));
+        assert!(dst["features"].as_array().unwrap().contains(&json!("new.agent")), "{dst:#}");
+
+        let s = ok(call(&sock, "new", json!({ "ticket": null, "repos": ["tool"], "agent": "claude-code" })));
+        assert_eq!(s["session"]["manifest"]["agent"], "claude-code", "{s:#}");
+        let id = s["session"]["manifest"]["id"].as_str().unwrap().to_string();
+        let st = ok(call(&sock, "status", json!({ "cwd": null, "session": id, "all": false })));
+        assert_eq!(st["sessions"][0]["status"]["manifest"]["agent"], "claude-code", "{st:#}");
+
+        for p in [json!({ "ticket": null, "repos": ["tool"] }), json!({ "ticket": null, "repos": ["tool"], "agent": null })] {
+            let s = ok(call(&sock, "new", p));
+            assert!(s["session"]["manifest"].get("agent").is_none(), "absent, not null: {s:#}");
+        }
+        let count = || ok(call(&sock, "status", json!({ "cwd": null, "session": null, "all": true })))["sessions"].as_array().unwrap().len();
+        assert_eq!(count(), 3);
+
+        for bad in ["", "bad name", "-x", "é"] {
+            let r = call(&sock, "new", json!({ "ticket": null, "repos": ["tool"], "agent": bad }));
+            assert_eq!(r["error"]["code"], "InvalidInput", "{bad:?}: {r:#}");
+            assert_eq!(r["error"]["detail"]["reason"], "agent", "{bad:?}: {r:#}");
+        }
+        let r = call(&sock, "new", json!({ "ticket": null, "repos": ["tool"], "agent": 5 }));
+        assert_eq!(r["ok"], json!(false), "{r:#}");
+        assert_eq!(r["error"]["rpc"], "Failed", "{r:#}");
+        assert_eq!(count(), 3, "refused requests create nothing");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 /// Review P1-3: a finished connection leaves nothing behind (the clone the
 /// daemon keeps for the stop goes with it), and connections past
 /// `MAX_CONNS` wait instead of each taking a thread.

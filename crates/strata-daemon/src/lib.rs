@@ -108,6 +108,11 @@ pub fn install_path_for_home(home: &Path) -> String {
     format!("{}:{DEFAULT_PATH}", home.join(".bun/bin").display())
 }
 
+/// Optional request features this daemon serves, listed in
+/// `daemon_status.features` so a newer CLI can tell what an older daemon
+/// would reject. Additive only. `new.agent`: `new` takes `agent`.
+pub const FEATURES: &[&str] = &["new.agent"];
+
 /// The launchd label of the agent.
 pub const AGENT_LABEL: &str = "com.gwd.git-stratad";
 

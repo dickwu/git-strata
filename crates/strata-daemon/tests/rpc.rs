@@ -204,6 +204,24 @@ fn every_method_parses_its_documented_params() {
     assert_eq!(q.params, Params::DaemonStatus(rpc::DaemonStatusParams { verify: true }));
 }
 
+/// `new.agent`: `agent` is optional, nullable, and a plain string on the
+/// wire (the handler validates the name); a non-string is a shape error.
+#[test]
+fn new_agent_is_an_optional_string() {
+    let new = |p: Value| req(json!({ "id": 1, "method": "new", "params": p }));
+    let agent_of = |q: rpc::Request| match q.params {
+        Params::New(p) => p.agent,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(agent_of(new(json!({ "ticket": null, "repos": ["tool"] })).unwrap()), None);
+    assert_eq!(agent_of(new(json!({ "ticket": null, "repos": ["tool"], "agent": null })).unwrap()), None);
+    assert_eq!(agent_of(new(json!({ "ticket": null, "repos": ["tool"], "agent": "codex" })).unwrap()), Some("codex".into()));
+    // Not validated here: the handler answers InvalidInput reason agent.
+    assert_eq!(agent_of(new(json!({ "ticket": null, "repos": ["tool"], "agent": "bad name" })).unwrap()), Some("bad name".into()));
+    let r = new(json!({ "ticket": null, "repos": ["tool"], "agent": 5 })).expect_err("a number is a shape error").0;
+    assert_eq!(rpc_of(&r), "Failed", "{r:#}");
+}
+
 #[test]
 fn too_large_line_is_code_too_large() {
     // The real limit: one byte over MAX_FRAME, then a normal request.

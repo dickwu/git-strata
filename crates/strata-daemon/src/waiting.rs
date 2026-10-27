@@ -92,10 +92,15 @@ impl ErrorLog {
 
 /// Whether a startup error is worth waiting out: it came from the file
 /// system (`errno`, `io_kind` or `io` in its detail) and is not "another
-/// daemon is running" or a test-seam refusal.
+/// daemon is running", a test-seam refusal, or an uncertain schema
+/// migration COMMIT (store.md §4.4: only a fresh process re-runs WAL
+/// recovery, so the daemon must exit and let launchd start a new one).
 pub fn retryable(e: &StrataError) -> bool {
     let Some(d) = e.detail.as_ref() else { return false };
-    if matches!(d.get("reason").and_then(Value::as_str), Some("daemon_running" | "test_seams" | "no_instance_lock")) {
+    if matches!(
+        d.get("reason").and_then(Value::as_str),
+        Some("daemon_running" | "test_seams" | "no_instance_lock" | "migration_commit")
+    ) {
         return false;
     }
     d.get("errno").is_some() || d.get("io_kind").is_some() || d.get("io").is_some()
@@ -334,6 +339,9 @@ mod tests {
             .with_detail(json!({ "reason": "daemon_running", "errno": 35 }));
         assert!(!retryable(&running));
         assert!(!retryable(&StrataError::new(Code::InvalidInput, "bad config")));
+        let uncertain = StrataError::new(Code::Unknown, "COMMIT of the schema migration failed")
+            .with_detail(serde_json::json!({ "reason": "migration_commit", "outcome": "uncertain", "errno": libc::EIO }));
+        assert!(!retryable(&uncertain), "an uncertain migration COMMIT exits for a fresh process");
         let missing = StrataError::new(Code::InvalidInput, "repo x: /a does not exist")
             .with_detail(json!({ "reason": "missing", "io": "Interrupted system call (os error 4)" }));
         assert!(retryable(&missing));
