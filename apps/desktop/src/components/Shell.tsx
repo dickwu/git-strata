@@ -2,24 +2,21 @@
 
 import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { useNav } from '@/stores/nav';
+import { sessionFromUrl, sessionHash, useNav } from '@/stores/nav';
 import { useTheme } from '@/stores/theme';
-import { isSidebarShortcut, useLayout } from '@/stores/layout';
 import { usePlan, useSessions, useDeps } from '@/lib/queries';
 import { OPEN_EVENT, inTauri } from '@/lib/tauri';
 import { openTarget, waitingCount } from '@/lib/view';
 import type { DepsList, StatusReply } from '@/lib/types';
 import { Titlebar } from './Titlebar';
-import { Sidebar } from './Sidebar';
 import { StatusBar } from './StatusBar';
 import { CommandPalette } from './CommandPalette';
 import { DaemonScreen } from './DaemonScreen';
 import { SessionsScreen } from './SessionsScreen';
-import { SessionDetail } from './SessionDetail';
+import { SessionDetailModal } from './SessionDetail';
 
 export function Shell() {
   const { screen, session, setPalette, openSession, go } = useNav();
-  const sidebarCollapsed = useLayout((s) => s.sidebarCollapsed);
   const toggleTheme = useTheme((s) => s.toggle);
   const { plan, status } = usePlan();
   const sessions = useSessions(plan.sessions);
@@ -27,20 +24,38 @@ export function Shell() {
   const deps = useDeps(plan.deps);
   const qc = useQueryClient();
 
-  // ⌘K / Ctrl+K opens the palette; ⌘\ / Ctrl+\ toggles the sidebar.
+  // ⌘K / Ctrl+K opens the palette.
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setPalette(true);
-      } else if (isSidebarShortcut(e)) {
-        e.preventDefault();
-        useLayout.getState().toggleSidebar();
       }
     };
     window.addEventListener('keydown', on);
     return () => window.removeEventListener('keydown', on);
   }, [setPalette]);
+
+  // Deep links: /session/<id>, ?session=<id> or #/session/<id> open the list with that
+  // session's modal; the hash then follows the modal so a reload reopens it.
+  useEffect(() => {
+    const read = () => {
+      const id = sessionFromUrl(window.location);
+      if (id && id !== useNav.getState().session) openSession(id);
+    };
+    read();
+    window.addEventListener('hashchange', read);
+    return () => window.removeEventListener('hashchange', read);
+  }, [openSession]);
+  useEffect(() => {
+    const { pathname, search, hash } = window.location;
+    const path = pathname.startsWith('/session/') ? '/' : pathname;
+    const params = new URLSearchParams(search);
+    params.delete('session');
+    const q = params.toString();
+    const next = `${path}${q ? `?${q}` : ''}${session ? sessionHash(session) : ''}`;
+    if (next !== `${pathname}${search}${hash}`) window.history.replaceState(null, '', next);
+  }, [session]);
 
   // Tray "Waiting for you" items (src-tauri/src/tray.rs) land on the session they belong to.
   useEffect(() => {
@@ -67,14 +82,11 @@ export function Shell() {
   }, [qc, openSession]);
 
   return (
-    <div className="shell" data-collapsed={sidebarCollapsed}>
+    <div className="shell">
       <Titlebar />
-      <Sidebar sessions={sessions.data} />
       <main className="main">
         {screen === 'daemon' ? (
           <DaemonScreen status={status} plan={plan} onBack={() => go('sessions')} />
-        ) : session ? (
-          <SessionDetail id={session} interval={plan.session} />
         ) : (
           <SessionsScreen
             sessions={sessions}
@@ -84,6 +96,7 @@ export function Shell() {
           />
         )}
       </main>
+      <SessionDetailModal id={session} interval={plan.session} />
       <StatusBar status={status} sessions={sessions.data} />
       <CommandPalette
         sessions={sessions.data}

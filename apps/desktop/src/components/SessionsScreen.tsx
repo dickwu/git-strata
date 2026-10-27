@@ -27,7 +27,7 @@ export function SessionsScreen({
   sessions: UseQueryResult<StatusReply>;
   daemon: UseQueryResult<DaemonStatus>;
   legacy: boolean;
-  /** Things waiting for a human (tray rule). Shown here since the sidebar has no Sessions item (t76u). */
+  /** Things waiting for a human (tray rule), shown in the header. */
   waiting?: number;
 }) {
   const { openSession, repoFilter, agentFilter, textFilter, toggleRepoFilter, clearFilters } =
@@ -76,8 +76,8 @@ export function SessionsScreen({
             loading={sessions.isPending && !daemon.isError}
             pagination={false}
             tableLayout="fixed"
-            // Fixed columns take 650px and Repos gets the rest. 860 fits a 1200px window with
-            // the sidebar open (content is ~895px); narrower than that, the table scrolls
+            // Fixed columns take 650px and Repos gets the rest. The table has the full window
+            // width (no sidebar), so this only bites below ~900px: there the table scrolls
             // sideways so Repos keeps ~210px for its wrapping tags instead of a sliver.
             scroll={{ x: 860 }}
             locale={{
@@ -90,7 +90,20 @@ export function SessionsScreen({
                   <Empty description={copy.sessions.empty} />
                 ),
             }}
-            onRow={(r) => ({ onClick: () => openSession(r.id), style: { cursor: 'default' } })}
+            // A row opens its detail modal: click, or Enter / Space when the row has focus.
+            onRow={(r) => ({
+              onClick: () => openSession(r.id),
+              onKeyDown: (e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  openSession(r.id);
+                }
+              },
+              tabIndex: 0,
+              'aria-label': copy.sessions.openRow(r.ticket ?? r.id),
+              style: { cursor: 'default' },
+            })}
             columns={[
               {
                 title: c.ticket,

@@ -62,9 +62,16 @@ describe('buildEntries (⌘K)', () => {
     expect(repos.map((x) => x.label)).toEqual(['Sessions with tool', 'Sessions with web']);
     expect(repos[1].action).toEqual({ kind: 'repo', repo: 'web' });
   });
-  test('"Toggle sidebar" is a command, found by collapse too', () => {
-    expect(filterEntries(list, 'collapse').map((x) => x.key)).toEqual(['sidebar']);
-    expect(list.find((x) => x.key === 'sidebar')!.action).toEqual({ kind: 'sidebar' });
+  test('no sidebar any more (t87u): no "Toggle sidebar" command', () => {
+    expect(list.some((x) => x.key === 'sidebar')).toBe(false);
+    expect(filterEntries(list, 'sidebar')).toEqual([]);
+    expect(filterEntries(list, 'collapse')).toEqual([]);
+  });
+  test('session entries open that session (its detail modal)', () => {
+    expect(list.find((x) => x.key === 'session:S1')!.action).toEqual({ kind: 'session', id: 'S1' });
+  });
+  test('the Daemon screen stays reachable', () => {
+    expect(filterEntries(list, 'daemon').map((x) => x.key)).toContain('screen:daemon');
   });
   test('no daemon reply → only screens and commands', () => {
     expect(buildEntries(undefined).every((x) => !x.key.startsWith('session:'))).toBe(true);

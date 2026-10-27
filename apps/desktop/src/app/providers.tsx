@@ -5,7 +5,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App, ConfigProvider, theme as antdTheme } from 'antd';
 import type { MappingAlgorithm } from 'antd';
 import { initTheme, useTheme } from '@/stores/theme';
-import { initLayout } from '@/stores/layout';
 import { TOKENS } from '@/lib/tokens';
 
 export function Providers({ children }: { children: ReactNode }) {
@@ -13,7 +12,6 @@ export function Providers({ children }: { children: ReactNode }) {
   const theme = useTheme((s) => s.theme);
 
   useEffect(() => initTheme(), []);
-  useEffect(() => initLayout(), []);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);

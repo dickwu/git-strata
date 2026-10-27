@@ -17,7 +17,7 @@ export function DaemonScreen({
 }: {
   status: UseQueryResult<DaemonStatus>;
   plan: PollPlan;
-  /** Back to the session list: the sidebar has no Sessions item any more (t76u). */
+  /** Back to the session list (the Daemon screen is full-page, reached via ⌘K). */
   onBack: () => void;
 }) {
   const socket = useSocket();

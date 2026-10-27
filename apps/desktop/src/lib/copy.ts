@@ -2,14 +2,9 @@
 export const copy = {
   app: 'GIT STRATA',
   nav: {
-    main: 'Main',
     sessions: 'Sessions',
     daemon: 'Daemon',
-    collapse: 'Collapse sidebar',
-    expand: 'Expand sidebar',
-    shortcut: '⌘\\',
     waiting: (n: number) => (n === 1 ? '1 waiting for you' : `${n} waiting for you`),
-    conflicts: 'Has conflicts',
   },
   palette: {
     placeholder: 'Search sessions and screens',
@@ -18,7 +13,6 @@ export const copy = {
     goTo: (name: string) => `Go to ${name}`,
     toggleTheme: 'Switch light / dark theme',
     refresh: 'Refresh now',
-    toggleSidebar: 'Toggle sidebar',
     withRepo: (repo: string) => `Sessions with ${repo}`,
     byAgent: (agent: string) => `Sessions by ${agent}`,
   },
@@ -76,11 +70,13 @@ export const copy = {
       none: 'No session matches this filter.',
       count: (shown: number, total: number) => `${shown} of ${total}`,
     },
+    openRow: (name: string) => `Open ${name}`,
     tracked: 'Tracked',
     reference: 'Reference',
   },
   detail: {
     back: 'All sessions',
+    close: 'Close session details',
     repos: 'Repos',
     checkpoints: 'Checkpoints',
     noCheckpoints: 'No checkpoints yet.',

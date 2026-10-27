@@ -3,7 +3,6 @@
 import { useMemo, useState } from 'react';
 import { Input, Modal } from 'antd';
 import { copy } from '@/lib/copy';
-import { useLayout } from '@/stores/layout';
 import { buildEntries, filterEntries, type Entry } from '@/lib/palette';
 import type { StatusReply } from '@/lib/types';
 import { useNav } from '@/stores/nav';
@@ -47,7 +46,6 @@ export function CommandPalette({
       go('sessions');
       if (!agentFilter.includes(a.agent)) toggleAgentFilter(a.agent);
     } else if (a.kind === 'theme') onToggleTheme();
-    else if (a.kind === 'sidebar') useLayout.getState().toggleSidebar();
     else onRefresh();
     close();
   };

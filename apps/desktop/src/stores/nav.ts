@@ -21,6 +21,30 @@ interface NavState {
   setPalette: (open: boolean) => void;
 }
 
+/**
+ * The session a deep link points at, or null. Accepts `#/session/<id>` (what the app writes
+ * while a session is open; works in the static export), `/session/<id>` and `?session=<id>`.
+ * Any of them opens the list with that session's detail modal on top.
+ */
+export function sessionFromUrl(url: {
+  pathname: string;
+  hash: string;
+  search: string;
+}): string | null {
+  const m =
+    /^#?\/?session\/([^/?#]+)\/?$/.exec(url.hash) ?? /^\/session\/([^/?#]+)\/?$/.exec(url.pathname);
+  const raw = m?.[1] ?? new URLSearchParams(url.search).get('session');
+  if (!raw) return null;
+  try {
+    return decodeURIComponent(raw) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** The hash for an open session, so a reload or a copied link reopens it. */
+export const sessionHash = (id: string) => `#/session/${encodeURIComponent(id)}`;
+
 export const useNav = create<NavState>((set) => ({
   screen: 'sessions',
   session: null,

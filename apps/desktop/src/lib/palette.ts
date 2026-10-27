@@ -9,7 +9,6 @@ export type Action =
   | { kind: 'repo'; repo: string }
   | { kind: 'agent'; agent: string }
   | { kind: 'theme' }
-  | { kind: 'sidebar' }
   | { kind: 'refresh' };
 
 export interface Entry {
@@ -71,13 +70,6 @@ export function buildEntries(sessions: StatusReply | undefined): Entry[] {
       label: copy.palette.toggleTheme,
       keywords: ['dark', 'light', 'appearance'],
       action: { kind: 'theme' },
-    },
-    {
-      key: 'sidebar',
-      label: copy.palette.toggleSidebar,
-      hint: copy.nav.shortcut,
-      keywords: ['collapse', 'expand', 'navigation'],
-      action: { kind: 'sidebar' },
     },
     {
       key: 'refresh',
