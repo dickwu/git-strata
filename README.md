@@ -60,6 +60,37 @@ Without a running daemon only these work, read-only, straight from the store:
 repeating a `checkpoint --tool-call ID` whose checkpoint already exists.
 Everything else returns `Busy` with `detail.reason = "daemon_down"`.
 
+### Dev install
+
+`scripts/dev-install.sh` builds both binaries in release mode, stops the
+daemon, keeps the previous binaries in a temp directory, copies both into
+`~/.cargo/bin` together and starts the daemon again (`--no-start` only builds
+and copies).
+
+Signing is opt-in through `STRATA_CODESIGN_IDENTITY`. With it set, both
+binaries are signed with that identity and fixed identifiers
+(`com.gwd.git-stratad`, `com.gwd.git-strata`), so macOS privacy grants (the
+"removable volume" prompt) survive rebuilds; unsigned builds re-prompt after
+every install. For local development a self-signed identity is enough:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+  -keyout key.pem -out cert.pem -subj "/CN=git-strata dev" \
+  -addext "basicConstraints=critical,CA:false" \
+  -addext "keyUsage=critical,digitalSignature" \
+  -addext "extendedKeyUsage=critical,codeSigning"
+/usr/bin/openssl pkcs12 -export -inkey key.pem -in cert.pem -name "git-strata dev" -out dev.p12
+security import dev.p12 -k ~/Library/Keychains/login.keychain-db -T /usr/bin/codesign
+security add-trusted-cert -r trustRoot -p codeSign -k ~/Library/Keychains/login.keychain-db cert.pem
+security find-identity -v -p codesigning     # lists "git-strata dev"
+# then delete key.pem, cert.pem, dev.p12
+STRATA_CODESIGN_IDENTITY="git-strata dev" scripts/dev-install.sh
+```
+
+`add-trusted-cert` asks for the login password; the first signing may ask to
+"Always Allow" codesign to use the key; the first start of a newly signed
+daemon asks once for the removable-volume permission.
+
 ## Paths
 
 | What | Path |
