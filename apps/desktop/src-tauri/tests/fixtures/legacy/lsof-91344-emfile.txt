@@ -1,0 +1,301 @@
+lsof: WARNING: can't stat() smbfs file system /Volumes/.timemachine/NAS._smb._tcp.local./REDACTED/backup
+      Output information may be incomplete.
+      assuming "dev=3600003c" from mount table
+COMMAND     PID         USER   FD     TYPE             DEVICE SIZE/OFF                NODE NAME
+git-strat 91344 user  cwd      DIR               1,16      736                   2 /
+git-strat 91344 user  txt      REG               1,16 29661536           322062975 /Users/user/.cargo/bin/git-stratad
+git-strat 91344 user  txt      REG               1,27    86016           156513459 /Volumes/DATA/work/.strata/store/store.db-tshm
+git-strat 91344 user  txt      REG               1,27   201408           181104046 /Volumes/DATA/work/.strata/search/repo-02/d94db88d803424f5876683fe70c5d1e9c4020d684efb5cac4617f2ad36388a42/gen-c1bd7cbfbb109c8a0893e36fabab0eb586a83a3e1877e193c104f26764ebff16/lookup.bin
+git-strat 91344 user  txt      REG               1,27    54400           181104980 /Volumes/DATA/work/.strata/search/repo-15/575107451da622320a1f6e53c938e4081eddab2b72482bb23dbddf8259767e00/gen-91001e43026214864126f29cdadf43191d385e9288706fad071b8698fae1fce0/lookup.bin
+git-strat 91344 user  txt      REG               1,27    27780           181104979 /Volumes/DATA/work/.strata/search/repo-15/575107451da622320a1f6e53c938e4081eddab2b72482bb23dbddf8259767e00/gen-91001e43026214864126f29cdadf43191d385e9288706fad071b8698fae1fce0/index.bin
+git-strat 91344 user  txt      REG               1,16  4129088 1152921500312613838 /usr/lib/dyld
+git-strat 91344 user  txt      REG               1,27  2897616           181103736 /Volumes/DATA/work/.strata/search/repo-01/2c9f85561a264b2e6baf83d15747fee1ac19bfe7f90d6dcaa61faa5dacd80baa/gen-311952f4192e54c3734cb99cfb9af1bb3cc1866601210bae8bd838654bd5686e/lookup.bin
+git-strat 91344 user  txt      REG               1,27 20862378           181103735 /Volumes/DATA/work/.strata/search/repo-01/2c9f85561a264b2e6baf83d15747fee1ac19bfe7f90d6dcaa61faa5dacd80baa/gen-311952f4192e54c3734cb99cfb9af1bb3cc1866601210bae8bd838654bd5686e/index.bin
+git-strat 91344 user  txt      REG               1,27   274458           181104045 /Volumes/DATA/work/.strata/search/repo-02/d94db88d803424f5876683fe70c5d1e9c4020d684efb5cac4617f2ad36388a42/gen-c1bd7cbfbb109c8a0893e36fabab0eb586a83a3e1877e193c104f26764ebff16/index.bin
+git-strat 91344 user  txt      REG               1,27   213824           181104355 /Volumes/DATA/work/.strata/search/repo-03/4bd958aa3b3b447fb84c0182115ae63cbb2fab0213d0dcbcbdd3fef17db9ade2/gen-8fff84f2f308b8f6cbf4d7bf6600856d729abf39f97e31a37e56135d258db02c/lookup.bin
+git-strat 91344 user  txt      REG               1,27   366780           181104354 /Volumes/DATA/work/.strata/search/repo-03/4bd958aa3b3b447fb84c0182115ae63cbb2fab0213d0dcbcbdd3fef17db9ade2/gen-8fff84f2f308b8f6cbf4d7bf6600856d729abf39f97e31a37e56135d258db02c/index.bin
+git-strat 91344 user  txt      REG               1,27  1191008           181104775 /Volumes/DATA/work/.strata/search/repo-04/fdba6c4fb344a34ef5d47c4a3382bd1163e5bcfbf257fc87cdffcb6020180bab/gen-9b64bda8de37a13181852acadebcd1b8432df7235c06fad0455414778d5a092a/lookup.bin
+git-strat 91344 user  txt      REG               1,27 13232910           181104774 /Volumes/DATA/work/.strata/search/repo-04/fdba6c4fb344a34ef5d47c4a3382bd1163e5bcfbf257fc87cdffcb6020180bab/gen-9b64bda8de37a13181852acadebcd1b8432df7235c06fad0455414778d5a092a/index.bin
+git-strat 91344 user  txt      REG               1,27  1371232           181104790 /Volumes/DATA/work/.strata/search/repo-05/6d0a00526f6008f491c6d7879650f85c8f9f83254133e0530d21a94e6f7f05bf/gen-576381205cacf28625f4a93079ce8e8c331b030f400f0910220806d14d23396e/lookup.bin
+git-strat 91344 user  txt      REG               1,27   855660           181104789 /Volumes/DATA/work/.strata/search/repo-05/6d0a00526f6008f491c6d7879650f85c8f9f83254133e0530d21a94e6f7f05bf/gen-576381205cacf28625f4a93079ce8e8c331b030f400f0910220806d14d23396e/index.bin
+git-strat 91344 user  txt      REG               1,27  1153008           181104803 /Volumes/DATA/work/.strata/search/repo-06/84767e5d5e1d9ad558c479e88b48e0e83f42b91b99037964b80d08d63f56e895/gen-78ef841dd6c5a6d48b1b28701f4b8dd796c778c4769d25cb23e7c26794101ade/lookup.bin
+git-strat 91344 user  txt      REG               1,27  1674348           181104802 /Volumes/DATA/work/.strata/search/repo-06/84767e5d5e1d9ad558c479e88b48e0e83f42b91b99037964b80d08d63f56e895/gen-78ef841dd6c5a6d48b1b28701f4b8dd796c778c4769d25cb23e7c26794101ade/index.bin
+git-strat 91344 user  txt      REG               1,27   376576           181104831 /Volumes/DATA/work/.strata/search/repo-07/5ddb1de6164f6dcf851e497e959bcb3f2888a1922ebf9c634482d23949c81249/gen-3a78c55235f0cda0ef34d5bc91e0627d6f146fe8c91d37aeea4757901ffd3b59/lookup.bin
+git-strat 91344 user  txt      REG               1,27   506862           181104830 /Volumes/DATA/work/.strata/search/repo-07/5ddb1de6164f6dcf851e497e959bcb3f2888a1922ebf9c634482d23949c81249/gen-3a78c55235f0cda0ef34d5bc91e0627d6f146fe8c91d37aeea4757901ffd3b59/index.bin
+git-strat 91344 user  txt      REG               1,27   344640           181104854 /Volumes/DATA/work/.strata/search/repo-08/691380b31e1ddc21306eed8156d20a033cde3b07164af63f26a1b2328dfdd394/gen-b54159d5d8c70b45f49cc54fb6f4c17e590bf173b1dcedc85acd1b0d302113ab/lookup.bin
+git-strat 91344 user  txt      REG               1,27   745548           181104853 /Volumes/DATA/work/.strata/search/repo-08/691380b31e1ddc21306eed8156d20a033cde3b07164af63f26a1b2328dfdd394/gen-b54159d5d8c70b45f49cc54fb6f4c17e590bf173b1dcedc85acd1b0d302113ab/index.bin
+git-strat 91344 user  txt      REG               1,27   167408           181104863 /Volumes/DATA/work/.strata/search/repo-09/42bbc6905a8cc20d235e109345878310045fd527beb1f6169f955636c929db3c/gen-46d515f1ca0bb8afab50b05e0a6f43f0c5857e4a21839101cc21a615ce68de78/lookup.bin
+git-strat 91344 user  txt      REG               1,27   211482           181104862 /Volumes/DATA/work/.strata/search/repo-09/42bbc6905a8cc20d235e109345878310045fd527beb1f6169f955636c929db3c/gen-46d515f1ca0bb8afab50b05e0a6f43f0c5857e4a21839101cc21a615ce68de78/index.bin
+git-strat 91344 user  txt      REG               1,27   394960           181104873 /Volumes/DATA/work/.strata/search/repo-10/21e35954fbbc5fd8886d4ceea008600ac495a629bbcceb228fdbb622e84308c9/gen-ea236a2b4400bfb05a38175b9988b8a2c102e3c65ca438720b5ebfd0385f3791/lookup.bin
+git-strat 91344 user  txt      REG               1,27  1396584           181104872 /Volumes/DATA/work/.strata/search/repo-10/21e35954fbbc5fd8886d4ceea008600ac495a629bbcceb228fdbb622e84308c9/gen-ea236a2b4400bfb05a38175b9988b8a2c102e3c65ca438720b5ebfd0385f3791/index.bin
+git-strat 91344 user  txt      REG               1,27   220128           181104884 /Volumes/DATA/work/.strata/search/repo-11/4a741751789a6e8653fdf8df00d1c1992b12bf807b1e5f52ee2c85503f1eea83/gen-5ed492c9c9d488f8857ecf9216abd5875fe2290e5879ed80071e1f52a74aa7d4/lookup.bin
+git-strat 91344 user  txt      REG               1,27   324828           181104883 /Volumes/DATA/work/.strata/search/repo-11/4a741751789a6e8653fdf8df00d1c1992b12bf807b1e5f52ee2c85503f1eea83/gen-5ed492c9c9d488f8857ecf9216abd5875fe2290e5879ed80071e1f52a74aa7d4/index.bin
+git-strat 91344 user  txt      REG               1,27  1739296           181104894 /Volumes/DATA/work/.strata/search/repo-12/1c3d2934d9a0e7980eef64e89c417465c01168660f283b790be92b960a903e02/gen-8bb81c669962d468bfc54a030c8e037032f3ba4d40d9da6d733eda22a83488dd/lookup.bin
+git-strat 91344 user  txt      REG               1,27  2698122           181104893 /Volumes/DATA/work/.strata/search/repo-12/1c3d2934d9a0e7980eef64e89c417465c01168660f283b790be92b960a903e02/gen-8bb81c669962d468bfc54a030c8e037032f3ba4d40d9da6d733eda22a83488dd/index.bin
+git-strat 91344 user  txt      REG               1,27  1541696           181104913 /Volumes/DATA/work/.strata/search/repo-13/782096521fde98c6273cb5fdc38463288ac7eade3d03727d06dc160b2b69401b/gen-e9b21a81ebdc0194e94d5ff60c8f31e10060921d5c175092ab2ae8e0d900e5bb/lookup.bin
+git-strat 91344 user  txt      REG               1,27  1270872           181104912 /Volumes/DATA/work/.strata/search/repo-13/782096521fde98c6273cb5fdc38463288ac7eade3d03727d06dc160b2b69401b/gen-e9b21a81ebdc0194e94d5ff60c8f31e10060921d5c175092ab2ae8e0d900e5bb/index.bin
+git-strat 91344 user  txt      REG               1,27  1362032           181104971 /Volumes/DATA/work/.strata/search/repo-14/5f68067d8043458c98317a1226cfc24440dde34f3c95334304474b75e9d1a371/gen-fdb582751a36df036617079516b73b9c02053afb05b088161d128cd3fd302be8/lookup.bin
+git-strat 91344 user  txt      REG               1,27   745470           181104970 /Volumes/DATA/work/.strata/search/repo-14/5f68067d8043458c98317a1226cfc24440dde34f3c95334304474b75e9d1a371/gen-fdb582751a36df036617079516b73b9c02053afb05b088161d128cd3fd302be8/index.bin
+git-strat 91344 user  txt      REG               1,27   281744           181104993 /Volumes/DATA/work/.strata/search/repo-16/25f6334679990bd3298b92fed3867a5b12405b41fac65830a59ad0aeb2dcc3bd/gen-4dacaf6e4b9aef3405c3dc3b30fb2639006570a48df410d08e9241a2426314b0/lookup.bin
+git-strat 91344 user  txt      REG               1,27   408096           181104992 /Volumes/DATA/work/.strata/search/repo-16/25f6334679990bd3298b92fed3867a5b12405b41fac65830a59ad0aeb2dcc3bd/gen-4dacaf6e4b9aef3405c3dc3b30fb2639006570a48df410d08e9241a2426314b0/index.bin
+git-strat 91344 user  txt      REG               1,27   428400           181105003 /Volumes/DATA/work/.strata/search/repo-17/4db372c73134c31fa22a14a0d9da76fe7aec1326d9bb84b7a45412861847d7cb/gen-47ce213b4c0387dcde6a0bdc58682dc4ed3bae2f5d6f905a4011862bec0ea1e1/lookup.bin
+git-strat 91344 user  txt      REG               1,27   399084           181105002 /Volumes/DATA/work/.strata/search/repo-17/4db372c73134c31fa22a14a0d9da76fe7aec1326d9bb84b7a45412861847d7cb/gen-47ce213b4c0387dcde6a0bdc58682dc4ed3bae2f5d6f905a4011862bec0ea1e1/index.bin
+git-strat 91344 user  txt      REG               1,27   246992           181105013 /Volumes/DATA/work/.strata/search/repo-18/3c35a6d63f14c16c0fdb6b7670cc2eb83f9e6315ee55f167b8397398401f8dab/gen-4e00ee3404b84fba2196c38dbe2105773d6747a11418a0649f09248fcc09be0a/lookup.bin
+git-strat 91344 user  txt      REG               1,27   217458           181105012 /Volumes/DATA/work/.strata/search/repo-18/3c35a6d63f14c16c0fdb6b7670cc2eb83f9e6315ee55f167b8397398401f8dab/gen-4e00ee3404b84fba2196c38dbe2105773d6747a11418a0649f09248fcc09be0a/index.bin
+git-strat 91344 user  txt      REG               1,27  2897184           181105067 /Volumes/DATA/work/.strata/search/repo-01/2c9f85561a264b2e6baf83d15747fee1ac19bfe7f90d6dcaa61faa5dacd80baa/gen-e1dad98f6f34a5fa7a50a1c4c1d9fbaac3c80c62834c429088e0748041cc160a/lookup.bin
+git-strat 91344 user  txt      REG               1,27 20855184           181105066 /Volumes/DATA/work/.strata/search/repo-01/2c9f85561a264b2e6baf83d15747fee1ac19bfe7f90d6dcaa61faa5dacd80baa/gen-e1dad98f6f34a5fa7a50a1c4c1d9fbaac3c80c62834c429088e0748041cc160a/index.bin
+git-strat 91344 user    0r     CHR                3,2      0t0                 336 /dev/null
+git-strat 91344 user    1u     CHR                3,2      0t0                 336 /dev/null
+git-strat 91344 user    2u     REG               1,16   403026           311908716 /Users/user/Library/Application Support/git-strata/daemon.err.log
+git-strat 91344 user    3u     REG               1,16        0           311908722 /Users/user/Library/Application Support/git-strata/daemon.lock
+git-strat 91344 user    4u     REG               1,27        0           156513193 /Volumes/DATA/work/.strata/store/LOCK
+git-strat 91344 user    5u     REG               1,27 32186368           156513457 /Volumes/DATA/work/.strata/store/store.db
+git-strat 91344 user    6u     REG               1,27    86016           156513459 /Volumes/DATA/work/.strata/store/store.db-tshm
+git-strat 91344 user    7u     REG               1,27   238992           156513460 /Volumes/DATA/work/.strata/store/store.db-wal
+git-strat 91344 user    8u     REG               1,27 32186368           156513457 /Volumes/DATA/work/.strata/store/store.db
+git-strat 91344 user    9u    unix  0x88a0e25040c4049      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   10u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user   11r     DIR               1,27      704           171299842 /Volumes/DATA/work/.strata/sessions/s-ocu5sflz/repo-13
+git-strat 91344 user   12r     DIR               1,27      800           170982974 /Volumes/DATA/work/.strata/sessions/s-ocu5sflz
+git-strat 91344 user   13r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user   14r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user   15r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user   16r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user   17r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user   18u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user   19r     DIR               1,27     1536           171453602 /Volumes/DATA/work/.strata/sessions/s-ocu5sflz/repo-21
+git-strat 91344 user   20r     DIR               1,27      800           170982974 /Volumes/DATA/work/.strata/sessions/s-ocu5sflz
+git-strat 91344 user   21r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user   22r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user   23r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user   24r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user   25r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user   26u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user   27r     DIR               1,27     1760           171516100 /Volumes/DATA/work/.strata/sessions/s-ocu5sflz/repo-23
+git-strat 91344 user   28r     DIR               1,27      800           170982974 /Volumes/DATA/work/.strata/sessions/s-ocu5sflz
+git-strat 91344 user   29r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user   30r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user   31r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user   32r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user   33r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user   34u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user   35u    unix  0x45d5c5f73d4ea24      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   36u    unix 0xec70472906e1953a      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   37u    unix 0x1abf4c2e3400a84d      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   38u    unix 0x114424dfbb02989e      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   39u    unix 0x98dbd72ea0e4e673      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   40u    unix 0xa203f29024b42bf8      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   41u    unix 0xe6cb5e1ba54a71a8      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   42u    unix 0x430410d0d7de68c8      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   43u    unix  0xbfe126671010759      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   44u     REG               1,27 32186368           156513457 /Volumes/DATA/work/.strata/store/store.db
+git-strat 91344 user   45u     REG               1,27 32186368           156513457 /Volumes/DATA/work/.strata/store/store.db
+git-strat 91344 user   46u     REG               1,27 32186368           156513457 /Volumes/DATA/work/.strata/store/store.db
+git-strat 91344 user   47u    unix 0x257588125716fbff      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   48u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user   49r     DIR               1,27     1632           179037172 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-01
+git-strat 91344 user   50r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user   51r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user   52r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user   53r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user   54r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user   55r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user   56u    unix 0x96a1128cc020625c      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   57r     DIR               1,27     1504           180455312 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-21
+git-strat 91344 user   58r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user   59r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user   60r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user   61r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user   62r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user   63r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user   64u    unix 0x65e565164fb383c7      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   65u    unix 0xdc3a0ca2bca46c7a      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   66u    unix 0xc995579308715ee0      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   67u    unix 0x719d439e5d997041      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   68u    unix 0x73008d5003331b62      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   70u    unix 0x96e5f932de1e2475      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   71u    unix 0x6b8e1ae9dc2328ad      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user   72u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user   73r     DIR               1,27      224           181103733 /Volumes/DATA/work/.strata/search/repo-01/2c9f85561a264b2e6baf83d15747fee1ac19bfe7f90d6dcaa61faa5dacd80baa/gen-311952f4192e54c3734cb99cfb9af1bb3cc1866601210bae8bd838654bd5686e
+git-strat 91344 user   74r     DIR               1,27      224           179035049 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-02
+git-strat 91344 user   75r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user   76r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user   77r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user   78r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user   79r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user   80r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user   81u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user   82r     DIR               1,27      224           181104044 /Volumes/DATA/work/.strata/search/repo-02/d94db88d803424f5876683fe70c5d1e9c4020d684efb5cac4617f2ad36388a42/gen-c1bd7cbfbb109c8a0893e36fabab0eb586a83a3e1877e193c104f26764ebff16
+git-strat 91344 user   83r     DIR               1,27      320           178984911 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-03
+git-strat 91344 user   84r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user   85r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user   86r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user   87r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user   88r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user   89r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user   90u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user   91r     DIR               1,27      224           181104353 /Volumes/DATA/work/.strata/search/repo-03/4bd958aa3b3b447fb84c0182115ae63cbb2fab0213d0dcbcbdd3fef17db9ade2/gen-8fff84f2f308b8f6cbf4d7bf6600856d729abf39f97e31a37e56135d258db02c
+git-strat 91344 user   92r     DIR               1,27     1088           179035099 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-04
+git-strat 91344 user   93r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user   94r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user   95r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user   96r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user   97r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user   98r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user   99u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  100r     DIR               1,27      224           181104769 /Volumes/DATA/work/.strata/search/repo-04/fdba6c4fb344a34ef5d47c4a3382bd1163e5bcfbf257fc87cdffcb6020180bab/gen-9b64bda8de37a13181852acadebcd1b8432df7235c06fad0455414778d5a092a
+git-strat 91344 user  101r     DIR               1,27      544           178984978 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-05
+git-strat 91344 user  102r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  103r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  104r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  105r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  106r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  107r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  108u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  109r     DIR               1,27      224           181104788 /Volumes/DATA/work/.strata/search/repo-05/6d0a00526f6008f491c6d7879650f85c8f9f83254133e0530d21a94e6f7f05bf/gen-576381205cacf28625f4a93079ce8e8c331b030f400f0910220806d14d23396e
+git-strat 91344 user  110r     DIR               1,27     1184           179260365 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-06
+git-strat 91344 user  111r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  112r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  113r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  114r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  115r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  116r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  117u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  118r     DIR               1,27      224           181104801 /Volumes/DATA/work/.strata/search/repo-06/84767e5d5e1d9ad558c479e88b48e0e83f42b91b99037964b80d08d63f56e895/gen-78ef841dd6c5a6d48b1b28701f4b8dd796c778c4769d25cb23e7c26794101ade
+git-strat 91344 user  119r     DIR               1,27      448           179037112 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-07
+git-strat 91344 user  120r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  121r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  122r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  123r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  124r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  125r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  126u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  127r     DIR               1,27      224           181104829 /Volumes/DATA/work/.strata/search/repo-07/5ddb1de6164f6dcf851e497e959bcb3f2888a1922ebf9c634482d23949c81249/gen-3a78c55235f0cda0ef34d5bc91e0627d6f146fe8c91d37aeea4757901ffd3b59
+git-strat 91344 user  128r     DIR               1,27      320           179138953 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-08
+git-strat 91344 user  129r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  130r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  131r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  132r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  133r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  134r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  135u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  136r     DIR               1,27      224           181104851 /Volumes/DATA/work/.strata/search/repo-08/691380b31e1ddc21306eed8156d20a033cde3b07164af63f26a1b2328dfdd394/gen-b54159d5d8c70b45f49cc54fb6f4c17e590bf173b1dcedc85acd1b0d302113ab
+git-strat 91344 user  137r     DIR               1,27      288           179620331 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-09
+git-strat 91344 user  138r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  139r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  140r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  141r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  142r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  143r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  144u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  145r     DIR               1,27      224           181104861 /Volumes/DATA/work/.strata/search/repo-09/42bbc6905a8cc20d235e109345878310045fd527beb1f6169f955636c929db3c/gen-46d515f1ca0bb8afab50b05e0a6f43f0c5857e4a21839101cc21a615ce68de78
+git-strat 91344 user  146r     DIR               1,27      320           179159941 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-10
+git-strat 91344 user  147r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  148r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  149r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  150r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  151r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  152r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  153u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  154r     DIR               1,27      224           181104871 /Volumes/DATA/work/.strata/search/repo-10/21e35954fbbc5fd8886d4ceea008600ac495a629bbcceb228fdbb622e84308c9/gen-ea236a2b4400bfb05a38175b9988b8a2c102e3c65ca438720b5ebfd0385f3791
+git-strat 91344 user  155r     DIR               1,27      352           179139038 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-11
+git-strat 91344 user  156r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  157r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  158r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  159r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  160r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  161r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  162u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  163r     DIR               1,27      224           181104882 /Volumes/DATA/work/.strata/search/repo-11/4a741751789a6e8653fdf8df00d1c1992b12bf807b1e5f52ee2c85503f1eea83/gen-5ed492c9c9d488f8857ecf9216abd5875fe2290e5879ed80071e1f52a74aa7d4
+git-strat 91344 user  164r     DIR               1,27      768           179160084 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-12
+git-strat 91344 user  165r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  166r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  167r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  168r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  169r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  170r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  171u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  172r     DIR               1,27      224           181104891 /Volumes/DATA/work/.strata/search/repo-12/1c3d2934d9a0e7980eef64e89c417465c01168660f283b790be92b960a903e02/gen-8bb81c669962d468bfc54a030c8e037032f3ba4d40d9da6d733eda22a83488dd
+git-strat 91344 user  173r     DIR               1,27      672           179210448 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-13
+git-strat 91344 user  174r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  175r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  176r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  177r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  178r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  179r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  180u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  181r     DIR               1,27      224           181104911 /Volumes/DATA/work/.strata/search/repo-13/782096521fde98c6273cb5fdc38463288ac7eade3d03727d06dc160b2b69401b/gen-e9b21a81ebdc0194e94d5ff60c8f31e10060921d5c175092ab2ae8e0d900e5bb
+git-strat 91344 user  182r     DIR               1,27      672           179331554 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-14
+git-strat 91344 user  183r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  184r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  185r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  186r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  187r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  188r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  189u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  190r     DIR               1,27      224           181104969 /Volumes/DATA/work/.strata/search/repo-14/5f68067d8043458c98317a1226cfc24440dde34f3c95334304474b75e9d1a371/gen-fdb582751a36df036617079516b73b9c02053afb05b088161d128cd3fd302be8
+git-strat 91344 user  191r     DIR               1,27      224           179385049 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-15
+git-strat 91344 user  192r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  193r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  194r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  195r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  196r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  197r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  198u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  199r     DIR               1,27      224           181104978 /Volumes/DATA/work/.strata/search/repo-15/575107451da622320a1f6e53c938e4081eddab2b72482bb23dbddf8259767e00/gen-91001e43026214864126f29cdadf43191d385e9288706fad071b8698fae1fce0
+git-strat 91344 user  200r     DIR               1,27      800           179385001 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-16
+git-strat 91344 user  201r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  202r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  203r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  204r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  205r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  206r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  207u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  208r     DIR               1,27      224           181104991 /Volumes/DATA/work/.strata/search/repo-16/25f6334679990bd3298b92fed3867a5b12405b41fac65830a59ad0aeb2dcc3bd/gen-4dacaf6e4b9aef3405c3dc3b30fb2639006570a48df410d08e9241a2426314b0
+git-strat 91344 user  209r     DIR               1,27      416           179385058 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-17
+git-strat 91344 user  210r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  211r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  212r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  213r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  214r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  215r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  216u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  217r     DIR               1,27      224           181105001 /Volumes/DATA/work/.strata/search/repo-17/4db372c73134c31fa22a14a0d9da76fe7aec1326d9bb84b7a45412861847d7cb/gen-47ce213b4c0387dcde6a0bdc58682dc4ed3bae2f5d6f905a4011862bec0ea1e1
+git-strat 91344 user  218r     DIR               1,27      416           179385091 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-18
+git-strat 91344 user  219r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  220r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  221r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  222r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  223r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  224r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  225u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  226r     DIR               1,27      224           181105011 /Volumes/DATA/work/.strata/search/repo-18/3c35a6d63f14c16c0fdb6b7670cc2eb83f9e6315ee55f167b8397398401f8dab/gen-4e00ee3404b84fba2196c38dbe2105773d6747a11418a0649f09248fcc09be0a
+git-strat 91344 user  227r     DIR               1,27      672           179385115 /Volumes/DATA/work/.strata/sessions/s-ivupymmu/repo-19
+git-strat 91344 user  228r     DIR               1,27      800           178984909 /Volumes/DATA/work/.strata/sessions/s-ivupymmu
+git-strat 91344 user  229r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  230r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  231r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  232r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  233r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  234u    unix 0x29dba8d468e87bbe      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user  235u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  236r     DIR               1,27     1568           170982976 /Volumes/DATA/work/.strata/sessions/s-ocu5sflz/repo-01
+git-strat 91344 user  237r     DIR               1,27      800           170982974 /Volumes/DATA/work/.strata/sessions/s-ocu5sflz
+git-strat 91344 user  238r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  239r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  240r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  241r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  242r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  243u  KQUEUE                                                 count=0, state=0x8
+git-strat 91344 user  244r     DIR               1,27      224           181105065 /Volumes/DATA/work/.strata/search/repo-01/2c9f85561a264b2e6baf83d15747fee1ac19bfe7f90d6dcaa61faa5dacd80baa/gen-e1dad98f6f34a5fa7a50a1c4c1d9fbaac3c80c62834c429088e0748041cc160a
+git-strat 91344 user  245r     DIR               1,27      224           171084817 /Volumes/DATA/work/.strata/sessions/s-ocu5sflz/repo-02
+git-strat 91344 user  246r     DIR               1,27      800           170982974 /Volumes/DATA/work/.strata/sessions/s-ocu5sflz
+git-strat 91344 user  247r     DIR               1,27      160           156513456 /Volumes/DATA/work/.strata/sessions
+git-strat 91344 user  248r     DIR               1,27      256           156513190 /Volumes/DATA/work/.strata
+git-strat 91344 user  249r     DIR               1,27     1824              569473 /Volumes/DATA/work
+git-strat 91344 user  250r     DIR               1,27      416                   2 /Volumes/DATA
+git-strat 91344 user  251r     DIR               1,16      256               17215 /Volumes
+git-strat 91344 user  252u    unix 0xc1980dff475da305      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user  253u    unix 0xfbe4591a1b869661      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user  254u    unix 0x224a52658d6c857b      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock
+git-strat 91344 user  255u    unix 0xabe9595264c79a65      0t0                     /Users/user/Library/Application Support/git-strata/daemon.sock

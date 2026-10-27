@@ -1,0 +1,3 @@
+lsof: WARNING: can't stat() smbfs file system /Volumes/.timemachine/NAS._smb._tcp.local./REDACTED/backup
+      Output information may be incomplete.
+      assuming "dev=3600003c" from mount table
