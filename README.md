@@ -41,7 +41,7 @@ plist; installing it is a human step. Its content (from
 `strata_daemon::plist::plist_text`):
 
 - `Label` `com.gwd.git-stratad`; `ProgramArguments` the absolute path of `git-stratad`
-- `RunAtLoad` true, `KeepAlive` true, `LimitLoadToSessionType` `Aqua`, `ProcessType` `Interactive`
+- `RunAtLoad` true, `KeepAlive` true, `LimitLoadToSessionType` `Aqua`, `ProcessType` `Interactive`, `ExitTimeOut` 900 (a stop waits for in-flight writes instead of killing them)
 - `EnvironmentVariables.PATH` `~/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`
 - `StandardErrorPath` `~/Library/Application Support/git-strata/daemon.err.log`
 

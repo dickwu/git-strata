@@ -57,6 +57,11 @@ fn xml(s: &str) -> String {
 }
 
 /// The plist text for `bin` (absolute) and `home` (absolute).
+/// Review P1-5: launchd's SIGTERM → SIGKILL grace. Above the longest
+/// bounded git call (attach, 600 s) so a stop drains in-flight writes
+/// instead of killing a ref transaction (launchd's default is about 20 s).
+pub const EXIT_TIMEOUT_SECS: u64 = 900;
+
 pub fn plist_text(bin: &Path, home: &Path) -> String {
     let err = crate::err_log_path(&crate::config_dir_for_home(home));
     format!(
@@ -76,6 +81,8 @@ pub fn plist_text(bin: &Path, home: &Path) -> String {
   <true/>
   <key>LimitLoadToSessionType</key>
   <string>Aqua</string>
+  <key>ExitTimeOut</key>
+  <integer>{exit_timeout}</integer>
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>EnvironmentVariables</key>
@@ -89,6 +96,7 @@ pub fn plist_text(bin: &Path, home: &Path) -> String {
 </plist>
 "#,
         label = AGENT_LABEL,
+        exit_timeout = EXIT_TIMEOUT_SECS,
         bin = xml(&bin.to_string_lossy()),
         path = xml(&crate::install_path_for_home(home)),
         err = xml(&err.to_string_lossy()),

@@ -191,6 +191,8 @@ pub enum DaemonWarning {
     AnchorNotAdvanced { repo: RepoName },
     /// 单独 `push`（或 restore）的推送结果不确定：暂存目录 `scene`（含 `push.json`）保留。review M6 [实现时补的决定]
     UnknownPush { repo: RepoName, commit: CommitOid, scene: PathBuf },
+    /// 启动时删掉的 `refs/strata/**/*.lock`（被杀的 ref 事务留下的）。review P1-5（D29）
+    StaleRefLock { repo: RepoName, path: PathBuf },
 }
 
 /// 谁持着哪把锁。status 在持有超过 LOCK_WAIT 时带上；daemon_status 总是带上。
@@ -268,6 +270,8 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
   <true/>
   <key>LimitLoadToSessionType</key>
   <string>Aqua</string>
+  <key>ExitTimeOut</key>
+  <integer>900</integer>
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>EnvironmentVariables</key>
@@ -281,7 +285,7 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 </plist>
 ```
 
-`LimitLoadToSessionType = Aqua` 是 confirm.md §5.2 第 3 步要的：不在图形会话里，LocalAuthentication 弹不出框。`KeepAlive` 为真，空闲不退出（design §5）。`RunAtLoad` 与 `ProcessType = Interactive` 是 [我的决定 D7]：前者让 bootstrap 之后就起来，后者让认证框画得出。装上之后 `launchctl bootstrap gui/$UID <plist>`；卸下是 `bootout` 再删 plist。这是库函数，不是 RPC：daemon 没在跑时 cli 在本进程调它。
+`LimitLoadToSessionType = Aqua` 是 confirm.md §5.2 第 3 步要的：不在图形会话里，LocalAuthentication 弹不出框。`KeepAlive` 为真，空闲不退出（design §5）。`RunAtLoad` 与 `ProcessType = Interactive` 是 [我的决定 D7]：前者让 bootstrap 之后就起来，后者让认证框画得出。`ExitTimeOut = 900`（`EXIT_TIMEOUT_SECS`）高于最长的有界 git 调用（attach 600 s），停机时 launchd 等在途的写做完再 SIGKILL（D29）。装上之后 `launchctl bootstrap gui/$UID <plist>`；卸下是 `bootout` 再删 plist。这是库函数，不是 RPC：daemon 没在跑时 cli 在本进程调它。
 
 `strata_confirm::TEST_SEAMS == true` 时 main 拒绝启动，不听 socket，不弹框（confirm.md C8）。
 
@@ -909,6 +913,7 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 | D26 缺钉要确认（review P0-1） | 没有 `pins.json`、或文件里没有某个 repo 名时，该 repo 钉成配置值但 `confirm = true`，配置更松就记 `ConfigRelaxPending`，只有 `config_relax`（Touch ID）能采用；cli 的 `needs_confirm` 对缺文件、缺名一律要确认。改名的 repo 按新名算缺钉 | 原来第一次启动（或删掉文件后的启动）直接采用配置，删文件/改名再调松配置就绕过了 Touch ID，与 help/README "缺钉算要确认" 矛盾。代价：全新安装时 `confirm = false` 的 repo 要各做一次 `git-strata config relax R`。否决：按"store 是否新建"判断首装（删 store 也能绕过）；按路径把旧名的钉迁给新名（路径也能改） | 2026-10-27 |
 | D27 连接有上限、结束即释放（review P1-3） | 服务循环（和等待期的应答器）同时最多服务 `MAX_CONNS = 128` 个连接，满了就不 accept，客户端在 listen backlog 里等；为停机保留的连接克隆在连接结束时删掉 | 原来每个连接的克隆一直留到停机（fd 泄漏），线程数没有上限。否决：给连接加读超时（peer 拥有连接，长等待是合法的） | 2026-10-27 |
 | D28 du 的锁只有一个顺序（review P1-4） | `Du` 的三把锁固定按 `recorded` → `scan` → `cache` 取；`report` 先读扫描队列再拿 cache 锁，不在 cache 锁里拿 scan 锁 | 原来 `report` 持 cache 再拿 scan，而 `scan_json`/扫描收尾持 scan 再拿 cache，`du` 和 `status` 并发时会 ABBA 死锁（单测可复现）。否决：合并成一把锁（扫描收尾要长时间持 scan） | 2026-10-27 |
+| D29 启动清理残留 ref 锁、停机宽限 900 s（review P1-5） | `Daemon::start` 在第 8 步前、持实例 flock，对每个 repo 在其写锁下删掉 mtime 早于本次启动的 `refs/strata/**/*.lock`，各记一条 `StaleRefLock` 告警并打印一行；比启动新的锁留着（可能是活着的 `git pack-refs`）。plist 写 `ExitTimeOut = 900` | 原来 SIGKILL（launchd 默认约 20 s 的宽限、断电、自己的 killpg）落在 prepare 与 commit 之间就留下锁，git 和 daemon 都不清，之后那条 ref 的事务全失败、`rm` 卡在 pin CAS。只有 daemon 写 `refs/strata/`，所以启动时清是安全的。否决：拒绝 `daemon stop`（launchd/重启不经过它） | 2026-10-27 |
 
 D18 的契约，实现者不要猜：
 

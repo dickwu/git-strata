@@ -117,6 +117,9 @@ pub enum DaemonWarning {
     /// Review M6: a standalone (or restore) push whose outcome is unknown;
     /// its staging directory `scene` (with `push.json`) is kept.
     UnknownPush { repo: RepoName, commit: strata_types::CommitOid, scene: PathBuf },
+    /// Review P1-5: a `refs/strata/**/*.lock` left by a killed ref
+    /// transaction, removed at startup.
+    StaleRefLock { repo: RepoName, path: PathBuf },
 }
 
 /// One held repo write lock (status / daemon_status).

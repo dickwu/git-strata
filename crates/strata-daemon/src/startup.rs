@@ -391,6 +391,20 @@ pub struct Daemon<'a> {
 impl<'a> Daemon<'a> {
     /// Steps 8–11.
     pub fn start(core: &'a Core) -> Result<Daemon<'a>> {
+        // Review P1-5: a ref transaction killed between prepare and commit
+        // (SIGKILL, power loss, our own killpg) leaves `refs/strata/*.lock`;
+        // every later transaction on that ref would fail. Only locks older
+        // than this start go (the instance flock is held).
+        let started = SystemTime::now();
+        for (repo, git) in core.gits.iter() {
+            let _ = core.locks.with_repo(repo, || {
+                for path in git.clear_stale_strata_locks(started) {
+                    core.warnings.alert_once(&format!("removed stale ref lock {}", path.display()));
+                    core.warnings.add(DaemonWarning::StaleRefLock { repo: repo.clone(), path });
+                }
+                Ok(())
+            });
+        }
         // 8. Sessions once.
         let sessions = Sessions::open(&core.config, &core.gits, &core.store, &core.locks, &core.env, &core.before)?;
         // 9. recover, then gc per repo under its write lock.

@@ -357,3 +357,37 @@ fn two_names_for_one_repository_is_name_taken() {
     assert_eq!(e.code, Code::NameTaken, "{e:?}");
     assert_eq!(reason(&e), Some("repo_id"));
 }
+
+/// Review P1-5: a ref transaction killed between prepare and commit leaves
+/// `refs/strata/**/*.lock`; startup removes the old ones and says so, and
+/// keeps a lock newer than its own start (a live git may hold it).
+#[test]
+fn stale_strata_ref_locks_are_removed_at_startup() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let common = core.gits[&repo_name("tool")].common_dir().to_path_buf();
+    let dir = common.join("refs/strata/publish");
+    fs::create_dir_all(&dir).unwrap();
+    let stale = dir.join("main.lock");
+    fs::write(&stale, "0000\n").unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    fs::File::options().write(true).open(&stale).unwrap().set_modified(old).unwrap();
+    let fresh = dir.join("live.lock");
+    fs::write(&fresh, "").unwrap();
+    let later = SystemTime::now() + Duration::from_secs(3600);
+    fs::File::options().write(true).open(&fresh).unwrap().set_modified(later).unwrap();
+    // Not a lock: kept.
+    let keep = dir.join("main");
+    fs::write(&keep, "0000\n").unwrap();
+
+    let d = Daemon::start(&core).unwrap();
+    assert!(!stale.exists(), "stale lock removed");
+    assert!(fresh.exists(), "a lock newer than the start is kept");
+    assert!(keep.exists());
+    let w = status(&d)["warnings"].clone();
+    let want = serde_json::to_value(DaemonWarning::StaleRefLock { repo: repo_name("tool"), path: stale.clone() }).unwrap();
+    assert!(w.as_array().unwrap().contains(&want), "{w}");
+    assert!(fx.alerts().iter().any(|l| l.contains("stale ref lock")), "{:?}", fx.alerts());
+    drop(d);
+    core.close().unwrap();
+}

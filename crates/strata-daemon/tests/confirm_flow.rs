@@ -275,6 +275,8 @@ fn plist_has_label_keepalive_aqua_and_d1_path() {
     assert_eq!(v["RunAtLoad"], true);
     assert_eq!(v["LimitLoadToSessionType"], "Aqua");
     assert_eq!(v["ProcessType"], "Interactive");
+    // Review P1-5: launchd waits for in-flight writes before SIGKILL.
+    assert_eq!(v["ExitTimeOut"], plist::EXIT_TIMEOUT_SECS);
     assert_eq!(v["ProgramArguments"], serde_json::json!([bin]));
     assert_eq!(v["EnvironmentVariables"]["PATH"], format!("{}/.bun/bin:{DEFAULT_PATH}", home.display()));
     let err = v["StandardErrorPath"].as_str().unwrap();
