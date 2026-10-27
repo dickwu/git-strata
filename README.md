@@ -90,7 +90,9 @@ Every call prints exactly one compact JSON line on stdout:
 - Exit status is 0 iff `ok` is true, else 1.
 - Branch on `error.code`, then `error.detail.reason` where present. Never parse `message`.
 - stderr carries only human notices: prompts, alerts, `skipped (not in session ...)`,
-  `pending proposal <id> for <repo>`.
+  and (only when stderr is a terminal) `pending proposal <id> for <repo>`.
+- Proposals still pending for the resolved session ride in
+  `data.pending_proposals: [{id, repo}]` (key absent when there are none).
 - `--help` / `--version` print plain clap text on stdout and exit 0, with no envelope.
 - Bad arguments give `InvalidInput` with `detail.reason` `unknown_command`
   (plus `detail.commands`, and `detail.group` inside `deps` / `daemon` / `config`)
@@ -160,6 +162,10 @@ git-strata publish --from "${S}:src/a.ts" --from "${S}:src/lib"
 #  -> data.commits.<repo> = commit oid; data.pushes = pushes done by publish
 git-strata rm --session "$S"
 ```
+
+`diff --session S` outside a workspace and without `--repo` compares the one
+repo of S that has changes or checkpoints (`data.repo`); if several do, it is
+`InvalidInput` with `detail.reason = "repo"` and `detail.candidates`.
 
 Write `"${S}:path"`, not `"$S:path"`: in zsh `$S:t`, `$S:h`, `$S:r`, ... are
 history modifiers applied to `$S`, so `"$S:tool.ts"` silently becomes a

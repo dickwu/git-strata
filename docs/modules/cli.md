@@ -89,7 +89,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata restore` | `<checkpoint>`（十进制 `CheckpointId`，超过 `i64::MAX` → `InvalidInput`）`[paths…]` `[--session S]` | 非数字 id → `InvalidInput` |
 | `git-strata grep` | `<pattern>`。`[--session S]` 或 `[--all]`。都不给 = cwd 的会话（design §6.3；压过初稿“不给就是全部”，见 §9）。没有 `--repo`，没有 type / encoding / glob 之类的 tgrep 选项（T11） | 空 pattern → `InvalidInput` |
 | `git-strata files` | 可选的一个位置参数 glob，交给 search 的 `files`；不给 = 该视图全部文件（D11）。选择器同 grep。没有别的 flag | — |
-| `git-strata diff` | 三选一：`--base`（缺省，cwd 或 `--session` 相对它钉住的基线）、`--session S`（该会话相对它的基线）、`--between A B`（两个选择器）。`--repo R` 在 `--between` 时必填，否则用 cwd 的 repo | 两种模式同时给 → `InvalidInput`，`detail.reason = "diff_mode"` |
+| `git-strata diff` | 三选一：`--base`（缺省，cwd 或 `--session` 相对它钉住的基线）、`--session S`（该会话相对它的基线）、`--between A B`（两个选择器）。`--repo R` 在 `--between` 时必填；否则用 cwd 的 repo。`--session S` 既没有 `--repo` 也不在某个 repo 的工作区里时，cli 扫该会话的全部 repo（8 个线程），取有内容改动或有 checkpoint 的那一个；没有一个合格 → `repo: null`、三个空数组；多于一个 → `InvalidInput`，`detail.reason = "repo"`，`detail.candidates` 列出候选 [实现时补的决定，2026-10-27] | 两种模式同时给 → `InvalidInput`，`detail.reason = "diff_mode"` |
 | `git-strata deps propose` | `[--session S] [--repo R] [--switch]`。repo 缺省 = cwd 的 repo。`--switch`：本会话（只有提议者）立刻换到提议的依赖集，不确认（design §6.4 第 3 步、deps §5.10 `plan_switch`）；别的会话不动 [实现时补的决定，review M3] | — |
 | `git-strata deps approve` | `<id>`（`ProposalId`）。`[--sessions S,S]`，不给 = 该 repo 的全部会话，由 daemon 展开 | 非数字或超过 `i64::MAX` → `InvalidInput` |
 | `git-strata deps list` | `[--repo R]`。不给 = 全部 repo 的未关闭提议 | — |
@@ -119,7 +119,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `restore` | `{ "checkpoint": CheckpointId, "session": SessionId }` | — |
 | `grep` | `{ "hits": [Hit, …] }`。零命中是 `"hits": []`，`ok` 为 true，不是 `NoMatch`。`hits` 这个键总在 | 前 8000 字节含 NUL 的文件跳过，不进 `hits`。被跳过的放 `skipped: [{ "session", "repo", "path", "code": "Binary" }]`。超过 64 MiB 的同样按条目，`code` 为 `TooLarge`，不读内容。非法 UTF-8 按宽松解码，每个坏序列一个 U+FFFD，不让整条输出失败（D9） |
 | `files` | `{ "paths": [ { "session", "repo", "path" }, … ] }`。没有匹配是空数组 | — |
-| `diff` | `{ "only_a": [FileChange], "only_b": [FileChange], "both": [BothChange] }`。相对基线时只有 `only_a` 有条目（会话相对基线），`only_b` 与 `both` 为空数组。字节相同的文件不列出 | 二进制或超阈值的条目不带 `preview`，改为 `code`：`Binary` 或 `TooLarge`。调用仍然 `ok` |
+| `diff` | `{ "repo": RepoName \| null, "only_a": [FileChange], "only_b": [FileChange], "both": [BothChange] }`。`repo` 是这次比的那个 repo（缺省规则见 §2），`null` 只在 `--session` 缺省扫描没有命中时出现。相对基线时只有 `only_a` 有条目（会话相对基线），`only_b` 与 `both` 为空数组。字节相同的文件不列出 | 二进制或超阈值的条目不带 `preview`，改为 `code`：`Binary` 或 `TooLarge`。调用仍然 `ok` |
 | `deps propose` | `Proposal`；带 `--switch` 时是 `{ "proposal": Proposal, "switched": { "session", "kind": "moved"\|"skipped", "code"?, "detail"? } }`。本会话有打开的依赖文件等原因没换：`kind = "skipped"`、带 `code`（如 `OpenFiles`），提议照样记下，仍是 `ok: true`（同 D17） | `OpenFiles`（在 `switched.code` 里） |
 | `deps approve` | `{ "results": [ { "session", "kind": "moved"\|"skipped", "code"?, "detail"? } ] }`。某个会话 `OpenFiles` 则那一条 `kind = "skipped"`，`code = "OpenFiles"`，其余照常。全部跳过仍是 `ok: true`（D17） | `OpenFiles` |
 | `deps list` | `{ "proposals": [Proposal, …] }`，按 `ProposalId` 升序。没有则空数组 | — |
@@ -178,7 +178,7 @@ pub enum DiffPreview {
 ```
 
 - `running`：daemon 是否在听 socket。没在跑时 cli 本地造这份对象，`running` 为 false，`holders` 与 `unknown_publishes` 为空数组，不假装知道锁。
-- `session`：cwd 能解析出会话才有，否则省略。
+- `session`：cwd 能解析出会话才有，否则省略。daemon 回答了时，这个查找（读 config、开 store）放在另一个线程里，最多等 2 秒（`STATUS_LOOKUP_WAIT`）；超时就省略 `session`，加 `"session_lookup": "timed_out"`，信封照常 `ok`。SessionStart 钩子不会因为 store 一时读不动而卡住。daemon 没在跑时直接查。
 - `holders`：谁持着哪把 repo 写锁、从什么时候起。daemon 在跑时由 `daemon_status` 填。
 - `alerts`：隔离区、`index-read-back-refused`、`staging-changed` 这类要人看的项，原样透传 daemon 的 warnings。每条同时在 stderr 打一行。
 
@@ -283,7 +283,7 @@ cli 不拿 repo 写锁，不占会话队列，不等待建造锁。锁在 daemon
 
 ### 5.3 stderr
 
-JSON 成功之后：若这次解析出了会话，再读一次 `deps::open_proposals`（store 的读者，不发写 RPC，不调用 `Sessions::open`）。每条对该会话仍是 Pending 的提议，stderr 一行 `pending proposal <id> for <repo>`。这次附加读失败不影响已经写出的信封和退出码（D20）。design §6.4 第 4 步的提示只走这条路，不进 `data`；`status` 的 `data` 里照常有 `pending`。
+JSON 成功之后：若这次解析出了会话，再读一次 `deps::open_proposals`（store 的读者，不发写 RPC，不调用 `Sessions::open`）。这次读在写信封之前。对该会话仍是 Pending 的提议非空、且 `data` 是对象时，加一个键 `data.pending_proposals: [{ "id": ProposalId, "repo": RepoName }]`；没有就不加这个键。stderr 是终端时每条再打一行 `pending proposal <id> for <repo>`，不是终端（代理、管道）时不打，代理只看信封。这次附加读失败当作没有，不影响信封的 `ok` 和退出码（D20）。`status` 的 `data` 里照常有 `pending`。
 
 回答里的 `alerts`，以及 `status` 里要人看的 warnings（隔离区、attach 的 `index-read-back-refused` / `staging-changed`），各在 stderr 打一行。不改 `ok`。
 
@@ -460,7 +460,7 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D17 全部跳过 | `deps approve` 每个会话都 `OpenFiles` 时仍 `ok: true`，条目里是 skipped | types.md：按条目返回，其余照常移动。没有“全部跳过”这个码 | 2026-10-23 |
 | D18 选择要 TTY | `resolve`，以及 `chain` 的 replay / drop：非 TTY 返回 `NotTty`，不连接，不取凭据。`chain --restore` 在仓库要确认时走与 `push` 相同的 `PushDeploy`，会弹框。不再说 chain 从不弹框 | 裁定要求没有人的选择就不运行。replay / drop 不推，所以不取凭据。`--restore` 是推送，用已有的 `PushDeploy`，不新加 `Action` 变体 | 2026-10-23 |
 | D19 `--help` / `--version` | clap 文本，退出码 0，不套信封 | 这两个不是子命令。其余 stdout 只有信封 | 2026-10-23 |
-| D20 待确认提示 | 成功之后读 `deps::open_proposals`，不调用 `Sessions::open`，失败不影响退出码 | design §6.4 第 4 步要每次 CLI 都提示。不能为了提示再发一次写 RPC，也不能再开一个 `Sessions` | 2026-10-23 |
+| D20 待确认提示 | 成功之后读 `deps::open_proposals`，不调用 `Sessions::open`，失败不影响退出码。2026-10-27 起放进 `data.pending_proposals`，stderr 那行只在终端上打 | design §6.4 第 4 步要每次 CLI 都提示。不能为了提示再发一次写 RPC，也不能再开一个 `Sessions` | 2026-10-23 |
 | D21 钉住的值读不出 | 当作要确认，先 `require_tty` | 读不出就放行，等于让一份坏文件跳过 TTY 检查 | 2026-10-23 |
 | D23 publish 的 TTY 检查只看还要做事的仓库（review-2 N2） | 批次里有要推且要确认的仓库时，cli 先发每个批次的 `BeforePublish` checkpoint，再发只读的 `publish_plan`（daemon.md §4），然后只对 `repos` 里那些要推且要确认的仓库 `require_tty`、展示链顶、发 `shown`。全部已经落地 → 不查 TTY，`publish` 回 `already_published`。还有要确认的仓库且不是 TTY → `NotTty`；在此之前送到 daemon 的只有这些 checkpoint 和 `publish_plan`：不发 `publish`，不弹框，不取凭据。checkpoint 或 `publish_plan` 失败且不是 TTY → 仍是 `NotTty`，原错误放在 `detail.plan_error`。批次里没有要确认的仓库时不发 `publish_plan`。`publish` 请求带 `plan`：TTY 检查覆盖了的那些仓库（可以为空）。`publish_plan` 与 `publish` 之间历史可能变（别的发布落地了不同内容），daemon 重算后多出来的要确认仓库不在 `plan` 里 → 在弹框、取凭据之前 `NotConfirmed`（`plan_changed`），什么都不写；agent 重跑，cli 重新计划并查 TTY（review-3 T1）。[实现时补的决定] | agent 重跑是主流程（D22）：之前要确认的仓库已经落地、只剩不用确认的仓库时，非 TTY 的重跑不该因已经落地的仓库被拒。checkpoint 只是记录当下内容，不是要确认的动作；不变量 7 守的是发布、弹框和凭据 | 2026-10-24 |
 | D22 钩子的工具调用 id | `--tool-call` 不带值或为空 → 取 stdin JSON 的 `tool_use_id`；仍缺或为空 → `InvalidInput`（`checkpoint_reason`）。§3.5 的命令行改为 `git-strata checkpoint --tool-call`。[实现时补的决定] | Claude Code 不设 `TOOL_USE_ID` 环境变量，原命令行会传空串，每次钩子都失败 | 2026-10-23 |

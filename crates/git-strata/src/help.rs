@@ -211,6 +211,9 @@ pub const DIFF_AFTER: &str = "EXAMPLES
 
 Shows current workspace content, checkpointed or not. Binary / >64 MiB entries
 carry code Binary / TooLarge instead of a preview; the call stays ok.
+With --session S and no --repo outside a workspace, the one repo of S with
+changes or checkpoints is picked (data.repo; null when none). Several such
+repos is InvalidInput reason repo with detail.candidates; pass --repo.
 Works without the daemon. Two modes together is InvalidInput diff_mode.
 ";
 

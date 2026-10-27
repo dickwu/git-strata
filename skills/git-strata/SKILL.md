@@ -131,8 +131,8 @@ Notes:
   sessions stay pinned). Check `data.switched.kind`: `skipped` with
   `code: OpenFiles` means a process holds files in your deps dir; stop it (only
   if you started it) and run again. Approving for other sessions is
-  human-only (below). A `pending proposal <id> for <repo>` line on stderr
-  means a proposal waits for the human.
+  human-only (below). `data.pending_proposals: [{id, repo}]` in any
+  envelope means a proposal waits for the human.
 
 ## Publish conflict: fix and re-run
 

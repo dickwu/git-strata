@@ -241,6 +241,24 @@ fn passes(n: usize) -> Vec<Verdict> {
 }
 
 #[test]
+fn pending_proposals_ride_in_the_envelope() {
+    let lv = guarded_live();
+    lv.serve_scripted(passes(4), |core, _| {
+        let fx = fixture(&lv, core);
+        for args in [vec!["diff"], vec!["status"]] {
+            let r = lv.run_in(&fx.ws, &args);
+            let d = r.ok();
+            assert_eq!(d["pending_proposals"], json!([{ "id": fx.pid, "repo": "app" }]), "{args:?}: {d}");
+            // stderr is not a terminal here: no duplicate notice line.
+            assert!(!r.stderr.contains("pending proposal"), "{args:?}: {r:?}");
+        }
+        // No session resolved: nothing added.
+        let d = lv.run(&["deps", "list"]).ok();
+        assert!(d.get("pending_proposals").is_none(), "{d}");
+    });
+}
+
+#[test]
 fn non_tty_refused_before_prompt() {
     let lv = guarded_live();
     lv.serve_scripted(passes(32), |core, log| {

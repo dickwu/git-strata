@@ -598,11 +598,20 @@ pub fn diff(ctx: &Ctx, base: bool, session: Option<String>, between: Option<Vec<
     match between {
         None => {
             let (s, cwd_repo) = ro::session_or_cwd(&store, session.as_deref())?;
-            let r = repo_for(&config, &store, &s, repo.as_deref(), cwd_repo)?;
-            let git = strata_gitio::Git::open(&config.repo(&r)?.path)?;
-            let o = overlay_of(&config, &store, &git, &s, &r)?;
+            let picked = match (repo.as_deref(), cwd_repo) {
+                (None, None) => diff_default_repo(&config, &store, &s)?,
+                (flag, cwd) => {
+                    let r = repo_for(&config, &store, &s, flag, cwd)?;
+                    let git = strata_gitio::Git::open(&config.repo(&r)?.path)?;
+                    let o = overlay_of(&config, &store, &git, &s, &r)?;
+                    Some((r, change_kinds(&o)))
+                }
+            };
             hint(s);
-            Ok(Envelope::ok(json!({ "only_a": sorted_changes(&change_kinds(&o)), "only_b": [], "both": [] })))
+            Ok(Envelope::ok(match picked {
+                Some((r, kinds)) => json!({ "repo": r, "only_a": sorted_changes(&kinds), "only_b": [], "both": [] }),
+                None => json!({ "repo": null, "only_a": [], "only_b": [], "both": [] }),
+            }))
         }
         Some(ab) => {
             let Some(r) = repo.as_deref() else {
@@ -623,6 +632,59 @@ pub fn diff(ctx: &Ctx, base: bool, session: Option<String>, between: Option<Vec<
         }
     }
 }
+
+/// `diff --session S` with no `--repo` and no cwd repo (§3.2): the one
+/// repo of the session with changes or checkpoints, with its changes.
+/// None qualifies → `None` (an empty diff); several → `InvalidInput`,
+/// `reason = "repo"`, with `detail.candidates`. Every workspace is scanned
+/// (reads only), a few at a time.
+fn diff_default_repo(config: &Config, store: &Store, s: &SessionId) -> Result<Option<(RepoName, BTreeMap<RepoPath, &'static str>)>> {
+    let repos: Vec<RepoName> = ro::record(store, s)?.manifest.repos.keys().cloned().collect();
+    type Found = Result<Option<BTreeMap<RepoPath, &'static str>>>;
+    let scan = |r: &RepoName| -> Found {
+        let kinds = {
+            let git = strata_gitio::Git::open(&config.repo(r)?.path)?;
+            change_kinds(&overlay_of(config, store, &git, s, r)?)
+        };
+        if !kinds.is_empty() || !store.checkpoints(s, Some(r))?.is_empty() {
+            return Ok(Some(kinds));
+        }
+        Ok(None)
+    };
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out: Vec<std::sync::Mutex<Option<Found>>> = repos.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|sc| {
+        for _ in 0..DIFF_SCAN_WORKERS.min(repos.len()).max(1) {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let Some(r) = repos.get(i) else { return };
+                let res = scan(r);
+                *out[i].lock().unwrap_or_else(|p| p.into_inner()) = Some(res);
+            });
+        }
+    });
+    let mut hits = Vec::new();
+    for (r, cell) in repos.into_iter().zip(out) {
+        match cell.into_inner().unwrap_or_else(|p| p.into_inner()) {
+            Some(Ok(Some(k))) => hits.push((r, k)),
+            Some(Ok(None)) => {}
+            Some(Err(e)) => return Err(e),
+            None => return Err(StrataError::new(Code::Unknown, format!("diff scan of {r} did not run"))),
+        }
+    }
+    match hits.len() {
+        0 => Ok(None),
+        1 => Ok(hits.pop()),
+        _ => {
+            let names: Vec<&str> = hits.iter().map(|(r, _)| r.as_str()).collect();
+            Err(StrataError::new(Code::InvalidInput, format!("session {s} has changes in several repos ({}); pass --repo", names.join(", ")))
+                .with_detail(json!({ "reason": "repo", "candidates": names })))
+        }
+    }
+}
+
+/// Workspaces `diff_default_repo` scans at once.
+const DIFF_SCAN_WORKERS: usize = 8;
 
 fn path_list(v: &Value, kinds: &BTreeMap<RepoPath, &'static str>) -> Vec<Value> {
     let mut m = BTreeMap::new();
@@ -763,6 +825,10 @@ pub fn du(ctx: &Ctx, refresh: bool) -> Result<Envelope> {
 
 // ---- daemon status ----------------------------------------------------------------------
 
+/// How long `daemon status` waits for its cwd-session lookup when the
+/// daemon has already answered.
+pub const STATUS_LOOKUP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// §3.3. Never fails for a missing config or a down daemon (SessionStart).
 pub fn daemon_status() -> Result<Envelope> {
     let paths = crate::env::Paths::from_env()?;
@@ -774,8 +840,10 @@ pub fn daemon_status() -> Result<Envelope> {
         "unknown_publishes": [],
         "alerts": [],
     });
+    let mut up = false;
     match ctx.try_call("daemon_status", json!({ "verify": false }), Kind::Read) {
         Ok(v) => {
+            up = true;
             data["running"] = json!(true);
             data["holders"] = json!(v["holds"].as_array().cloned().unwrap_or_default());
             let warnings = v["warnings"].as_array().cloned().unwrap_or_default();
@@ -787,7 +855,25 @@ pub fn daemon_status() -> Result<Envelope> {
         Err(CallError::Down(_)) => {}
         Err(CallError::Failed(e)) => return Err(e),
     }
-    let found = ctx.config().ok().and_then(|c| ro::open_store(&c).ok()).and_then(|s| ro::cwd_session(&s).ok().flatten());
+    let lookup = move || ctx.config().ok().and_then(|c| ro::open_store(&c).ok()).and_then(|s| ro::cwd_session(&s).ok().flatten());
+    // With the daemon up the answer is already in hand; the cwd lookup reads
+    // the store on the volume, which can block (a wedged volume), so it gets
+    // STATUS_LOOKUP_WAIT on its own thread and is dropped after that.
+    let found = if up {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(lookup());
+        });
+        match rx.recv_timeout(STATUS_LOOKUP_WAIT) {
+            Ok(f) => f,
+            Err(_) => {
+                data["session_lookup"] = json!("timed_out");
+                None
+            }
+        }
+    } else {
+        lookup()
+    };
     if let Some((s, _)) = found {
         data["session"] = json!(s);
     }

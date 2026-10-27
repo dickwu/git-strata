@@ -120,15 +120,17 @@ pub fn repo_name(name: &str) -> Result<RepoName> {
     })
 }
 
-/// §5.3: one stderr line per proposal still Pending for the session's repos.
-/// Failures here are ignored (D20).
-pub fn pending_hint(config: &Config, session: &SessionId) {
-    let Ok(store) = open_store(config) else { return };
-    let Ok(Some(rec)) = store.session(session) else { return };
+/// §5.3 / D20: `{id, repo}` for each proposal still Pending for the
+/// session's repos, by repo then id. Failures here read as none.
+pub fn pending_proposals(config: &Config, session: &SessionId) -> Vec<serde_json::Value> {
+    let Ok(store) = open_store(config) else { return Vec::new() };
+    let Ok(Some(rec)) = store.session(session) else { return Vec::new() };
+    let mut out = Vec::new();
     for repo in rec.manifest.repos.keys() {
         let Ok(ps) = strata_deps::open_proposals(&store, Some(repo)) else { continue };
         for p in ps.iter().filter(|p| p.state == strata_deps::ProposalState::Pending) {
-            eprintln!("pending proposal {} for {}", p.id.get(), p.repo);
+            out.push(json!({ "id": p.id.get(), "repo": p.repo.as_str() }));
         }
     }
+    out
 }

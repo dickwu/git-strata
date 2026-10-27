@@ -472,6 +472,7 @@ fn diff_lists_content_changes_only() {
         assert_eq!(
             d,
             json!({
+                "repo": "tool",
                 "only_a": [
                     { "path": "a.txt", "kind": "Modified" },
                     { "path": "del.txt", "kind": "Deleted" },
@@ -483,6 +484,56 @@ fn diff_lists_content_changes_only() {
         );
         // --session gives the same document from anywhere.
         assert_eq!(lv.run(&["diff", "--session", s.as_str()]).ok(), d);
+    });
+}
+
+#[test]
+fn diff_session_defaults_to_the_one_changed_repo() {
+    let lv = Live::new(&["app", "tool"], &base_files());
+    lv.serve(|_| {
+        // Every configured repo gets a workspace; only `tool` is tracked.
+        let s = lv.new_session("T-1", "tool");
+        let none = lv.run(&["diff", "--session", s.as_str()]).ok();
+        assert_eq!(none, json!({ "repo": null, "only_a": [], "only_b": [], "both": [] }));
+
+        let tool = lv.ws(&s, "tool");
+        write(&tool, "new.txt", b"new\n");
+        let d = lv.run(&["diff", "--session", s.as_str()]).ok();
+        assert_eq!(d["repo"], json!("tool"), "{d}");
+        assert_eq!(d["only_a"], json!([{ "path": "new.txt", "kind": "Added" }]));
+
+        // A checkpoint whose change was undone still makes `tool` a candidate.
+        lv.run_in(&tool, &["checkpoint", "-m", "x"]).ok();
+        fs::remove_file(tool.join("new.txt")).unwrap();
+        let d = lv.run(&["diff", "--session", s.as_str()]).ok();
+        assert_eq!(d, json!({ "repo": "tool", "only_a": [], "only_b": [], "both": [] }));
+
+        let app = lv.ws(&s, "app");
+        write(&app, "b.txt", b"b\n");
+        let r = lv.run(&["diff", "--session", s.as_str()]);
+        assert_eq!(r.err_code(), "InvalidInput", "{r:?}");
+        assert_eq!(r.reason(), "repo", "{r:?}");
+        assert_eq!(r.env()["error"]["detail"]["candidates"], json!(["app", "tool"]), "{r:?}");
+        // --repo and the cwd still pick one.
+        let d = lv.run(&["diff", "--session", s.as_str(), "--repo", "app"]).ok();
+        assert_eq!(d["repo"], json!("app"));
+        let d = lv.run_in(&app, &["diff"]).ok();
+        assert_eq!(d["only_a"], json!([{ "path": "b.txt", "kind": "Added" }]));
+    });
+}
+
+#[test]
+fn daemon_status_up_reports_the_cwd_session() {
+    let lv = Live::new(&["tool"], &base_files());
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        let t = std::time::Instant::now();
+        let ds = lv.run_in(&ws, &["daemon", "status"]).ok();
+        assert_eq!(ds["running"], json!(true));
+        assert_eq!(ds["session"], json!(s.as_str()), "{ds}");
+        assert!(ds.get("session_lookup").is_none(), "{ds}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(10));
     });
 }
 
@@ -679,7 +730,7 @@ fn shape_is_this_doc_not_a_golden() {
         let dv = lv.run_in(&ws, &["diff"]).ok();
         let mut d = keys(&dv);
         d.sort();
-        assert_eq!(d, vec!["both", "only_a", "only_b"]);
+        assert_eq!(d, vec!["both", "only_a", "only_b", "repo"]);
         assert_eq!(lv.run(&["deps", "list"]).ok(), json!({ "proposals": [] }));
         assert_eq!(lv.run(&["gc"]).ok(), json!({}));
         let r = lv.run_in(&ws, &["restore", &id]).ok();

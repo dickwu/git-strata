@@ -47,22 +47,33 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
             _ => return emit_stdout(&Envelope::err(parse_error(&argv, &e))),
         },
     };
-    let env = dispatch(cli.cmd);
-    let code = emit_stdout(&env);
-    // D20: after a successful JSON, the pending-proposal hint for the
-    // session the command resolved; its failures change nothing.
-    if code == 0
-        && let Some(s) = HINT.lock().ok().and_then(|mut h| h.take())
+    let mut env = dispatch(cli.cmd);
+    // D20: on success, the proposals still Pending for the session the
+    // command resolved go into `data.pending_proposals` (before the
+    // envelope is written); a failed read changes nothing.
+    let hinted = HINT.lock().ok().and_then(|mut h| h.take());
+    if env.ok
+        && let Some(s) = hinted
         && let Ok(config) = env::Paths::from_env().and_then(|p| p.config())
     {
-        ro::pending_hint(&config, &s);
+        let pending = ro::pending_proposals(&config, &s);
+        if !pending.is_empty()
+            && let Some(m) = env.data.as_object_mut()
+        {
+            if tty::stderr_is_tty() {
+                for p in &pending {
+                    eprintln!("pending proposal {} for {}", p["id"], p["repo"].as_str().unwrap_or(""));
+                }
+            }
+            m.insert("pending_proposals".into(), serde_json::Value::Array(pending));
+        }
     }
-    code
+    emit_stdout(&env)
 }
 
 static HINT: std::sync::Mutex<Option<strata_types::SessionId>> = std::sync::Mutex::new(None);
 
-/// The session a command resolved (for the D20 hint after the envelope).
+/// The session a command resolved (for D20's `data.pending_proposals`).
 pub fn hint(s: strata_types::SessionId) {
     if let Ok(mut h) = HINT.lock() {
         *h = Some(s);

@@ -18,6 +18,13 @@ pub fn stdin_is_tty() -> bool {
     unsafe { libc::isatty(0) == 1 }
 }
 
+/// Whether stderr (fd 2) is a terminal: human notices that duplicate
+/// envelope data are printed only then.
+pub fn stderr_is_tty() -> bool {
+    // SAFETY: isatty only inspects the descriptor.
+    unsafe { libc::isatty(2) == 1 }
+}
+
 /// Ok only when stdin is a terminal; otherwise `NotTty`. Runs before any
 /// connection to the daemon.
 pub fn require_tty() -> Result<()> {
