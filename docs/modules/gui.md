@@ -2,7 +2,7 @@
 
 **Crate**：`crates/strata-client`（新，从 cli 抽出的纯传输层）＋ `apps/desktop/src-tauri`（新，crate `git-strata-desktop`，lib `strata_desktop_lib`，不在核心 workspace 里）· **前端**：`apps/desktop/`（Next.js 静态导出）· **设计来源**：daemon.md §3–§6、confirm.md §1 §3 §5、cli.md §1 §3、config.md、types.md §8、README「Install and daemon」「Confirmation gate」 · **参照工程**：R2（github.com/dickwu/r2，已确认的技术栈）· **UI 方法**：frontend-design skill
 
-> 状态：提案，未实现。第三版（2026-10-27，r3.6）。第二版（ed7a85a）按 peilin 的回答（t49u）定下 D1–D10；Codex 与 Claude 复核了第二版（review-notes/gui-merged.md），peilin 10:28 回答了四个问题（D11–D14）。本版逐条处理复核结论：每条结论在哪一节落地，见文末「复核对照」表。第三版的确认复核（review-notes/gui-r3-*.md）又提出 4 条阻断与若干小项，已在 r3.1 就地修正；r3.1 的再复核（gui-r3.1-*.md）指出停机栅栏仍有检查与停机之间的空档，r3.2 改为 daemon 内原子封口；r3.2 的再复核（gui-r3.2-*.md）指出封口后的 60 s 自退会被 KeepAlive 拉起一个未封口的新进程、旧 daemon 迁移挡不住已建立的连接，r3.3 改为「封口即退出 + 退出码决定是否拉起」与「旧 daemon 无客户端连接才迁移」，r3.3 的再复核指出「客户端已断开、处理线程还在跑」的请求核验不到，peilin 选 (a)（11:31），r3.4 改为按副本数核验连接线程，并按 peilin 11:32（t51u）把迁移收窄到他本机这一套旧安装，见「复核对照」的 r3 部分。r3.4 的再复核（gui-r3.4-*.md）指出 ⓪ 要求的 `version` 字段旧 daemon 根本没有，另有监听 socket 认法、停机顺序等小项；r3.5 按 peilin 的要求把身份核对改为四项检查，用实录的 `daemon_status` 回答与 lsof 样本（review-notes/r3.5-samples/）改写 ⓪ ②，并吸收 10-27 inter 的 daemon 事故（/tmp/stratad-incident/）：旧 daemon fd 用尽时迁移一律按「核验不了」拒绝，bundle 的 daemon 必须接受数据根下的 `search/`。r3.5 的再复核（gui-r3.5-*.md）两家都无阻断；r3.6 吸收 Claude 的三条非阻断：`status{all:true}` 单独 60 s 超时、超时与 EOF 分开措辞，bootout 前按时钟重算 reconcile 余量，实录样本脱敏后作为测试 fixture 提交（`apps/desktop/src-tauri/tests/fixtures/legacy/`，见其中 README）、改正样本计数，迁移一节的 `v1:` 行号全部改按 c98794f 重新核对。本文只写设计，不含代码；daemon 侧要加的东西全部列在 §3.4，分期写进 §8.1。
+> 状态：提案，未实现。第三版（2026-10-27，r3.7）。第二版（ed7a85a）按 peilin 的回答（t49u）定下 D1–D10；Codex 与 Claude 复核了第二版（review-notes/gui-merged.md），peilin 10:28 回答了四个问题（D11–D14）。本版逐条处理复核结论：每条结论在哪一节落地，见文末「复核对照」表。第三版的确认复核（review-notes/gui-r3-*.md）又提出 4 条阻断与若干小项，已在 r3.1 就地修正；r3.1 的再复核（gui-r3.1-*.md）指出停机栅栏仍有检查与停机之间的空档，r3.2 改为 daemon 内原子封口；r3.2 的再复核（gui-r3.2-*.md）指出封口后的 60 s 自退会被 KeepAlive 拉起一个未封口的新进程、旧 daemon 迁移挡不住已建立的连接，r3.3 改为「封口即退出 + 退出码决定是否拉起」与「旧 daemon 无客户端连接才迁移」，r3.3 的再复核指出「客户端已断开、处理线程还在跑」的请求核验不到，peilin 选 (a)（11:31），r3.4 改为按副本数核验连接线程，并按 peilin 11:32（t51u）把迁移收窄到他本机这一套旧安装，见「复核对照」的 r3 部分。r3.4 的再复核（gui-r3.4-*.md）指出 ⓪ 要求的 `version` 字段旧 daemon 根本没有，另有监听 socket 认法、停机顺序等小项；r3.5 按 peilin 的要求把身份核对改为四项检查，用实录的 `daemon_status` 回答与 lsof 样本（review-notes/r3.5-samples/）改写 ⓪ ②，并吸收 10-27 inter 的 daemon 事故（/tmp/stratad-incident/）：旧 daemon fd 用尽时迁移一律按「核验不了」拒绝，bundle 的 daemon 必须接受数据根下的 `search/`。r3.5 的再复核（gui-r3.5-*.md）两家都无阻断；r3.6 吸收 Claude 的三条非阻断：`status{all:true}` 单独 60 s 超时、超时与 EOF 分开措辞，bootout 前按时钟重算 reconcile 余量，实录样本脱敏后作为测试 fixture 提交（`apps/desktop/src-tauri/tests/fixtures/legacy/`，见其中 README）、改正样本计数，迁移一节的 `v1:` 行号全部改按 c98794f 重新核对。r3.7 按 peilin 13:2x 的决定（t55u「打包可以参考 R2 用 github」，D15）把 P-pack 从「干净的 macOS 虚拟机」改到 GitHub Actions 托管 runner，§6「打包与签名」与 §8.1 P-pack 段改写，工作流与脚本已提交（未推送）。本文只写设计，不含代码；daemon 侧要加的东西全部列在 §3.4，分期写进 §8.1。
 
 ### 决定表
 
@@ -20,8 +20,9 @@
 | ~~D10~~ | ~~gc 需要 Touch ID（`Action::Gc`）~~ —— **撤销**，见 D11 | — | — |
 | D11 | **gc 不走 Touch ID**。删掉 `Action::Gc` 和 gc 门；GUI 用普通确认对话框，文案如实说 gc 做什么（每仓库 `gc_repo`，全局 gc 另加 `gc_trash`），并说明 daemon 启动时与每小时 reconcile 时本来就会自动 gc | peilin 10:28 | §5.5 |
 | D12 | **推送批准绑定目标 URL**：由 impl/v1 的另一位 worker 在核心 daemon 里实现——门之前解析出实际 push URL，写进计划与 Touch ID 文案，锁内复核，不一致返回 `remote_changed`。GUI 依赖这一点，不自己读 remote | peilin 10:28 | §4 G2、§5.4 |
-| D13 | **打包验证作为并行轨道 P-pack**，和 UI 工作同时进行：SMAppService.agent + 自签名、TCC 与 Touch ID 框显示的名字、内部二进制的 Gatekeeper / quarantine、plist.rs 回退 | peilin 10:28 | §8.1 |
+| D13 | **打包验证作为并行轨道 P-pack**（在哪里跑见 D15），和 UI 工作同时进行：SMAppService.agent + 自签名、TCC 与 Touch ID 框显示的名字、内部二进制的 Gatekeeper / quarantine、plist.rs 回退 | peilin 10:28 | §8.1 |
 | D14 | 工期 6–7 周（一人），接受 | peilin 10:28 | §8.1 |
+| D15 | **P-pack 用 GitHub Actions 托管 macOS runner，照 R2**，不再需要干净虚拟机；签名用 secret 导入的稳定自签名身份，ad-hoc 只作对照。工作流只手动或 `desktop-pack-v*` tag 触发，不随推送 main 运行；何时上线 CI 由 peilin 定 | peilin 13:2x（t55u） | §6、§8.1 |
 
 ## 1. 职责与边界
 
@@ -484,10 +485,19 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 **打包与签名**（D3）：
 
 - **ad-hoc**（`codesign -s -`）：designated requirement 就是 cdhash，每次更新都变，TCC 授权每次更新都丢。只给从源码自己构建的开发者用。
-- **稳定的自签名身份（选）**：项目生成一个长期自签名代码签名证书，私钥只放在 GitHub Actions secret，release.yml 用它签三个可执行文件。非 Apple 证书的 DR 形如 `identifier "…" and certificate leaf = H"…"`，identifier 与证书不变时 TCC 授权预期跨更新保留——**这一条与「授权记在哪个名字下」都由 P-pack 实测**，不当作已知事实。代价：Gatekeeper 仍当它是身份不明开发者（§5.6 第 0 步）；证书泄露 = 别人能签出 TCC 认作同一程序的二进制，所以私钥只在 CI；轮换会让所有用户重新授权一次。从源码构建的用户用 `scripts/make-signing-identity.sh` 生成自己的身份。
+- **稳定的自签名身份（选）**：项目生成一个长期自签名代码签名证书，私钥只放在 GitHub Actions secret，release.yml 用它签三个可执行文件。自签名证书就是它自己的根，codesign 写出的 DR 形如 `identifier "…" and certificate root = H"<证书 SHA-1>"`（本机用一次性钥匙串实测，r3.7；r3.6 写的 `certificate leaf` 不对），identifier 与证书不变时 TCC 授权预期跨更新保留——**这一条与「授权记在哪个名字下」都由 P-pack 实测**，不当作已知事实。代价：Gatekeeper 仍当它是身份不明开发者（§5.6 第 0 步）；证书泄露 = 别人能签出 TCC 认作同一程序的二进制，所以私钥只在 CI；轮换会让所有用户重新授权一次。从源码构建的用户用 `apps/desktop/scripts/make-signing-identity.sh` 生成自己的身份。
+- **为什么这是现在就要的**：10-27 下午每次重编 git-stratad（未签名 = 链接器的 ad-hoc 签名，DR 是 cdhash）都会重新弹出「可移除宗卷」的 TCC 框——TCC 看到的是一个新程序。稳定身份就是为了让 DR 只含 identifier 与证书，与构建内容无关。
+- **签名标识**：app `io.github.dickwu.git-strata`；git-stratad `io.github.dickwu.git-strata.daemon`；git-strata `io.github.dickwu.git-strata.cli`；P-pack 用的探针 `strata-pack-probe` 是 `io.github.dickwu.git-strata.pack-probe`（只在 P-pack 构建里，P6 的正式 bundle 不带）。都用 `--options runtime --timestamp=none`，由内向外签，最后签 app，`codesign --verify --deep --strict` 收尾。不交给 tauri 签 sidecar：它对 externalBin 的 identifier 控制不可靠；P-pack 先构建无签名的 `--bundles app`，再由 `pack/assemble.sh` 放入二进制与 LaunchAgent plist、签名、核对 DR、做 DMG（hdiutil UDZO，内含 /Applications 链接，DMG 也签）。P7 再评估改用 tauri-action。
+- **CI 里的身份**：`pack/import-identity.sh` 把 p12 导入 `$RUNNER_TEMP` 下的临时钥匙串，**不改钥匙串搜索列表**（签名时 `codesign --keychain` 指定），核对证书 SHA-1 等于仓库变量后才签；任务结束删钥匙串。DR 核对：自签名时每个二进制的 DR 必须含 `certificate root = H"<SHA-1>"`（或 leaf）且不含 cdhash，否则构建失败。
 - **updater**：tauri-plugin-updater 用 minisign 签**下载的更新包**（`.app.tar.gz`），app 内嵌公钥，下载后先验签再安装。`latest.json` 清单本身**不签名**，靠 HTTPS（GitHub Releases）取得；清单里的版本号、说明、下载地址可被能篡改清单的人改，但包的签名对不上就不会安装；updater 只接受比当前更高的版本，不会被引导降级。minisign 私钥只在 CI；丢失私钥 = 已安装的用户只能手动下载新版。minisign 与 codesign 互不相干。
 - app 内下载的更新是否还带 quarantine、是否触发 Gatekeeper，由 P-pack 验证。
-- **分发**：只走 GitHub Releases（`.dmg` + `latest.json`），照 R2 的 publish.sh / release.yml / ci.yml。
+- **分发**：只走 GitHub Releases（`.dmg` + `latest.json`），照 R2 的 publish.sh / release.yml / ci.yml。R2 的做法（r3.7 读过其仓库）：
+  - release.yml：`v*` tag 或手动触发；先建（或复用）草稿 release，再按矩阵（macOS aarch64 / x86_64、Windows、Ubuntu，max-parallel 1）用 setup-bun、rust-toolchain、rust-cache、`bun install --frozen-lockfile`，由 `tauri-apps/tauri-action@v0` 构建并上传到草稿，`includeUpdaterJson` 生成 `latest.json`。
+  - ci.yml：推送 / PR 到 main 时跑 `bun run check`、`cargo fmt --check`、clippy `-D warnings`、`cargo test`、`bun tauri build`，上传 dmg 与 .app 作为 artifact。
+  - homebrew.yml：release 发布后下载 DMG、算 sha256，写 dickwu/homebrew-tap 的 cask。
+  - publish.sh：改四处版本号（package.json、tauri.conf.json、Cargo.toml、Cargo.lock），要求先有发布说明，提交、打 tag、推送；CI 完成后用脚本发布草稿。
+  - **R2 在 macOS 上不做代码签名也不公证**（没有 APPLE_* 变量，只有链接器 ad-hoc 签名）；它只用 minisign 给 updater 包签名。git-strata 的 daemon 要 TCC 授权，所以这一点**不照搬**，改用上面的稳定自签名身份。
+  - **secret 名**（只记名字）：R2 用 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`、`HOMEBREW_TAP_TOKEN`、`GITHUB_TOKEN`。git-strata 用 `STRATA_CODESIGN_P12`（p12 的 base64）、`STRATA_CODESIGN_P12_PASSWORD`、仓库变量（非 secret）`STRATA_CODESIGN_CERT_SHA1`；P7 再加与 R2 同名的 `TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)`，Homebrew 若要做再加 `HOMEBREW_TAP_TOKEN`。值由 `make-signing-identity.sh` 在 peilin 本机生成，脚本只打印 `gh secret set` / `gh variable set` 命令，不上传。
 - **GUI 自身不需要 TCC 授权**（G5）。
 - **以后有了 Developer ID**：换证书 = DR 变 = 所有用户重新授权一次；公证后第 0 步可删。
 
@@ -580,7 +590,7 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 
 主线合计 30 天。
 
-**并行轨道 P-pack**（4–5 天，从 P0 完成起与 P1–P3 交替进行，需要一台干净的 macOS 虚拟机）。产出一页实测记录，P6 之前必须有结论：
+**并行轨道 P-pack**（4–5 天，从 P0 完成起与 P1–P3 交替进行；D15：在 GitHub Actions 托管 macOS runner 上跑，每次都是没装过本 app 的干净机器）。产出一页实测记录，P6 之前必须有结论。要回答的问题：
 
 1. 自签名（以及 ad-hoc）的 app 能否用 `SMAppService.agent` 注册并启动内嵌的 `git-stratad`；移动 app、重签后是否仍有效。
 2. TCC「可移除宗卷」授权记在哪个名字下（git-stratad 还是 Git Strata），授权后更新（同一证书重签）是否保留。
@@ -588,6 +598,37 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 4. Open Anyway 之后内部二进制是否仍被 quarantine / Gatekeeper 拦；app 自己去掉属性是否可行；app 内 updater 下载的包是否带 quarantine。
 5. 登录项启动能否识别（§5.8）。
 6. 若 1 失败：方案 B（plist.rs 生成的传统 plist，绝对路径指向 bundle 内 daemon）在同样条件下的 1–4。
+
+**工作流** `.github/workflows/desktop-pack.yml`（照 R2 的 release.yml / ci.yml 结构）：
+
+- 触发：`workflow_dispatch`（输入 `signing`：`self-signed` 默认，或 `adhoc` 作对照）或推送 `desktop-pack-v*` tag；**不随推送 main 运行**；`permissions: contents: read`，不建 release。
+- `build`（macos-15，`MACOSX_DEPLOYMENT_TARGET=13.0`）：checkout → setup-bun → rust stable（aarch64-apple-darwin）+ rust-cache → 核心 workspace `cargo build --release --locked -p strata-daemon -p git-strata` → `bun install --frozen-lockfile`、`bun run typecheck`、`bun test src` → desktop crate `cargo test` → `bun run tauri build --bundles app` → 检查 CSP 不是 null → 导入身份（self-signed）→ `pack/assemble.sh`（放二进制、编译探针、放 plist、签名、核对 identifier 与 DR、做 DMG、记 sha256，`pack-record.md` 写进 job summary）→ 删临时钥匙串 → 上传 DMG 与 pack-record。
+- `smoke`（矩阵 macos-15、macos-latest，fail-fast 关）：下载 DMG，跑 `pack/smoke.sh`（只在 `CI=true` 且 `GITHUB_ACTIONS=true` 时肯跑，本机拒绝），上传 `smoke-record.md`。步骤：
+  0. 记环境：macOS 版本、架构、gui/<uid> 域是否存在、控制台用户。
+  1. 安装：给 DMG 打 quarantine 后挂载，记 `spctl` / `syspolicy_check` 的拒绝结果，ditto 到 /Applications，记 app 与内部二进制的 quarantine；去掉属性（代替 Open Anyway），codesign 校验，记 DR。
+  2. 写 config.toml（数据根在 runner 的 $HOME 下，绝不是 /Volumes/GWD/inter）。
+  3. 首次启动：`open` app，10 s 后仍在运行、无崩溃报告。
+  4. 注册：探针 `status` → `register`；状态为 enabled 且 30 s 内出现 socket 即方案 A 通过；否则 unregister 后走方案 B（plist 改成 Program 绝对路径放进 ~/Library/LaunchAgents，`launchctl bootstrap`），记录 A 失败的错误域与错误码。
+  5. daemon 回答：记 pid、可执行路径与其签名；`git-strata daemon status` 必须含 `"ok":true` 与 `"running":true`（`ok:true` 单独不够，daemon 不在时也是 ok:true）；附 daemon.log 尾部。
+  6. `sudo sfltool dumpbtm` 里与本 app 相关的登录项条目。
+  7. 卸载：unregister（A）或 bootout（B），20 s 内 daemon 退出；退出 app（AppleEvent，失败再 pkill）；删 app；记残留的 label、socket、btm 条目。
+  8. 列出本 runner 测不了的项（下段）。
+  硬失败：安装、codesign、app 启动、daemon 起来、daemon status running、注销后 daemon 退出。其余只记录。
+- 脚本：`apps/desktop/pack/`（`import-identity.sh`、`sign-app.sh`、`assemble.sh`、`smoke.sh`、LaunchAgent plist、探针 `probe/main.swift`）与 `apps/desktop/scripts/make-signing-identity.sh`。探针是一个 Swift 小程序，调用 `SMAppService.agent(plistName:)` 的 status / register / unregister，输出一行 JSON，只在 P-pack 构建里，P6 时这几个调用进 Rust（objc2）或保留为 helper 再定。
+- 本机已做：`assemble.sh` 用假二进制分别以 ad-hoc 和一次性自签名身份（临时钥匙串，搜索列表前后一致，用完删除）跑通，四个 identifier 正确，自签名 DR 为 `certificate root = H"…"`、无 cdhash；没在本机注册、没跑 launchctl、没碰运行中的 daemon。
+
+**runner 能回答的**：问题 1 的「注册与启动」部分（前提是托管 runner 有 Aqua 的 gui/<uid> 会话——未知，smoke 第 0 步会记录；没有的话 A 和 B 都会失败，结论只能在本机得出）；问题 4 的 quarantine 传播部分（DMG → app → 内部二进制）；问题 6 的方案 B 注册与启动；卸载是否干净；DR 是否稳定（两次构建对比 pack-record）。
+
+**runner 回答不了的**（没有人点、没有可移除宗卷、没有 Touch ID）：问题 2（TCC 框与授权名字、重签后是否保留）、问题 3（LocalAuthentication 框名字）、问题 4 的 Gatekeeper 首次打开与 Open Anyway 交互（runner 上只能记 spctl 的判定）、updater 下载包的 quarantine（P7 才有 updater）、问题 5（登录项启动）。
+
+**本机手动清单**（peilin 的 Mac；用 CI 产出的自签名 DMG；需要 peilin 自己动手，因为会安装、注册并让 daemon 访问外置盘；先把旧安装按 §5.7 处理或用另一个数据根）：
+
+1. 下载 artifact 里的 DMG，打开，拖进 /Applications；首次打开记录 Gatekeeper 提示与「系统设置 → 隐私与安全性 → 仍要打开」的步骤（截图进记录）。
+2. 让 daemon 访问 /Volumes 上的数据根：记录 TCC 框里显示的名字，以及「系统设置 → 隐私与安全性 → 文件与文件夹」里授权记在谁名下。
+3. 触发一次 Touch ID 确认（如 push 计划）：记录框里的发起者名字。
+4. 用同一证书重新跑一次工作流，装新 DMG 覆盖：TCC 框**不应**再出现；再装一次 ad-hoc 构建作对照：应当再出现。
+5. 系统设置「登录项」里看本 app 的显示；注销重登，确认 daemon 自动起来、app 能识别是登录项启动。
+6. 卸载：在 app 里注销（或探针 `unregister`），确认 daemon 退出、登录项消失。
 
 合计 30 + 4–5 = **34–35 天，约 7 周**；若 P-pack 一次通过、P4 与 v1 冲突小，约 6 周。每期先写测试再实现，每期一个可审的提交序列；涉及 daemon 的期，daemon.md / types.md / confirm.md 增补与实现同一提交。
 
@@ -646,7 +687,7 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 
 剩余问题（给 peilin）：
 1. **Q-reload**：收紧确认（`confirm = true`）目前要重启 daemon 才生效。要不要让 daemon 定时重读 config.toml，**只对收紧**立即生效？（放松仍走 config_relax。）
-2. **Q-cert**：自签名证书私钥由谁持有（只在 GitHub secret，还是本机也备份一份）？有效期多长（建议 10 年）？minisign 私钥同问。
+2. **Q-cert**：secret 名字已定（§6：`STRATA_CODESIGN_P12`、`STRATA_CODESIGN_P12_PASSWORD`、变量 `STRATA_CODESIGN_CERT_SHA1`）。仍待定：私钥由谁持有（只在 GitHub secret，还是本机也备份一份——丢了就要所有用户重新授权）？有效期（脚本默认 10 年）？由你在本机跑 `make-signing-identity.sh` 并执行它打印的 `gh` 命令；minisign 私钥（P7）同问。
 3. **Q-macos**：最低 macOS 13 可以吗？
 4. **Q-cli-link**：cli 链接到 `~/.local/bin`（免 sudo，选）还是 `/usr/local/bin`？
 5. **Q-cli-plan**：daemon 有了 push_plan / publish_plan detail 之后，cli 是否也改用（去掉本地计划读取，两边文案同源）？不影响 GUI。

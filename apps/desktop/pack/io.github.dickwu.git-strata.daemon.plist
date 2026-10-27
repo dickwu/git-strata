@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Plan A (gui.md §5.7): the LaunchAgent that SMAppService.agent registers from
+  Contents/Library/LaunchAgents/. BundleProgram is relative to the bundle, so
+  moving the app keeps it valid. KeepAlive follows §3.4 P5: launchd restarts the
+  daemon only after a non-zero exit; a sealed stop exits 0 and stays down.
+  No StandardErrorPath: launchd does not expand ~, and P5 has the daemon
+  redirect its own log to ~/Library/Logs/git-strata/.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.dickwu.git-strata.daemon</string>
+  <key>BundleProgram</key>
+  <string>Contents/MacOS/git-stratad</string>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>io.github.dickwu.git-strata</string>
+  </array>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
