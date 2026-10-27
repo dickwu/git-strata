@@ -53,7 +53,7 @@ export const daemonCopy = {
     timingNone: 'No session has been created since the daemon started timing them.',
     columns: {
       session: 'Session',
-      logical: 'Files',
+      logical: 'Full size',
       onDisk: 'On disk',
       saved: 'Saved',
       created: 'Created in',
