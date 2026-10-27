@@ -2,7 +2,7 @@
 
 **Crate**：`crates/strata-client`（新，从 cli 抽出的纯传输层）＋ `apps/desktop/src-tauri`（新，crate `git-strata-desktop`，lib `strata_desktop_lib`，不在核心 workspace 里）· **前端**：`apps/desktop/`（Next.js 静态导出）· **设计来源**：daemon.md §3–§6、confirm.md §1 §3 §5、cli.md §1 §3、config.md、types.md §8、README「Install and daemon」「Confirmation gate」 · **参照工程**：R2（github.com/dickwu/r2，已确认的技术栈）· **UI 方法**：frontend-design skill
 
-> 状态：提案，未实现。第三版（2026-10-27，r3.1）。第二版（ed7a85a）按 peilin 的回答（t49u）定下 D1–D10；Codex 与 Claude 复核了第二版（review-notes/gui-merged.md），peilin 10:28 回答了四个问题（D11–D14）。本版逐条处理复核结论：每条结论在哪一节落地，见文末「复核对照」表。第三版的确认复核（review-notes/gui-r3-*.md）又提出 4 条阻断与若干小项，已在本版（r3.1）就地修正，见「复核对照」的 r3 部分。本文只写设计，不含代码；daemon 侧要加的东西全部列在 §3.4，分期写进 §8.1。
+> 状态：提案，未实现。第三版（2026-10-27，r3.2）。第二版（ed7a85a）按 peilin 的回答（t49u）定下 D1–D10；Codex 与 Claude 复核了第二版（review-notes/gui-merged.md），peilin 10:28 回答了四个问题（D11–D14）。本版逐条处理复核结论：每条结论在哪一节落地，见文末「复核对照」表。第三版的确认复核（review-notes/gui-r3-*.md）又提出 4 条阻断与若干小项，已在 r3.1 就地修正；r3.1 的再复核（gui-r3.1-*.md）指出停机栅栏仍有检查与停机之间的空档，r3.2 改为 daemon 内原子封口，见「复核对照」的 r3 部分。本文只写设计，不含代码；daemon 侧要加的东西全部列在 §3.4，分期写进 §8.1。
 
 ### 决定表
 
@@ -147,7 +147,7 @@ pub fn call(socket: &Path, method: &str, params: Value, kind: Kind) -> Result<Va
 | diff.rs | `diff_text` | `diff_text`（session vs base、session vs session） | 只读 |
 | storage.rs | `allocations`、`du`、`gc` | `allocations`、du、gc | 只读 / 普通确认的写（D11） |
 | deps.rs | `deps_list`、`deps_approve` | 同名（`planned` 绑定，§5.4） | 写，Touch ID |
-| publish.rs | `push_plan`、`push`、`publish_prepare`、`publish`、`chain_resolve`、`resolve_move`、`restore` | 同名；`publish_prepare` = checkpoint + assign + publish_plan（§5.4） | 写，按 pins 需 Touch ID |
+| publish.rs | `push_plan`、`push`、`publish_prepare`、`publish`、`chain_resolve`、`resolve_move`、`restore` | 同名；`publish_prepare` = checkpoint + 本地组装 batches + publish_plan detail（§5.4；`assign` 只在 Conflict 对话框） | 写，按 pins 需 Touch ID |
 | sessions.rs | `rm` | rm（`discard` 时 Touch ID） | 写 |
 | config.rs | `config_effective`、`config_relax`、`config_tighten` | `config_effective`、config_relax；tighten 写 config.toml 后走 §5.9 重启 | 写 |
 | onboarding/ | `onboarding_state`、`write_initial_config`、`register_agent`、`unregister_agent`、`link_cli`、`migrate_legacy`、`rollback_legacy`、`capture_login_path`、`open_privacy_pane` | 本机，参数全是固定值或经 dialog 选的路径（§4 G3） | 见 §5.6、§5.7 |
@@ -186,7 +186,7 @@ daemon.md §5 的方法表与「共 21 个方法」那句、`tests/rpc.rs::daemo
 | P3 | `config_relax` 加参数 `revision: Option<String>` | 否 | 绑定人看过的**已读入**内容（不是磁盘上的字节），不等 → `NotConfirmed config_changed` | daemon.md §5 config_relax 行 |
 | P3 | push / publish 的 URL 绑定 | 否 | **由 impl/v1 实现**（D12），GUI 只处理 `remote_changed` | impl/v1 自带增补 |
 | P4 | `watch`（新） | 是 | §5.3：连接专用模式、单一事件序列、重放与快照协议 | 方法表 +1；daemon.md 新增 §5.x「watch 线协议」；rpc I1 增加 `Busy too_many_watchers` |
-| P5 | `drain {on: bool, ttl_s}`（新） | 控制 | §5.9：拒收新写请求，报告进行中的操作 | 方法表 +1；daemon.md §5.9 停机步骤 |
+| P5 | `drain {on: bool, ttl_s}` / `drain {seal: true, lease_id, exit}`（新） | 控制 | §5.9：可续租的拒收新写请求；准入与 inflight 同一临界区；原子封口（sealed 不过期，失败方向是退出） | 方法表 +1；daemon.md §5.9 停机步骤 |
 | P5 | plist 与日志 | — | plist 加 `ExitTimeOut 900`；daemon 自己把 stderr 重定向到 `~/Library/Logs/git-strata/daemon.log`（10 MiB 轮转一份）；PATH 从旁路文件读（§5.7） | daemon.md §5.9、config.md 新增 daemon-env.toml |
 | P6 | label 改名 | — | cli 的 `launch.rs` 一个版本周期内两个 label 都认；新安装不再有默认数据根 | cli.md、config.md |
 
@@ -274,7 +274,7 @@ daemon 不拥有领域逻辑（基线、依赖集、克隆写在 session / deps 
 |---|---|---|---|
 | `session.created` / `session.removed` | state | `new` / `rm` 处理函数返回 Ok 之后 | store 事务已提交 |
 | `workspace.changed`（key session/repo） | state | daemon 跑 `compute` 处理完跟踪器 inbox 之后（checkpoint、reconcile handlers.rs:212-219、search handlers.rs:265-281），以及 restore / resolve_move 返回之后。**没有** FSEvents 驱动的即时处理（inbox 属于 strata-overlay 的 Tracker，tracker.rs:48-67），所以这是「检查点 / reconcile 驱动」，不是逐次编辑实时；界面的改动数照 §3.4 标时间 | overlay 已更新 |
-| `base.created` / `base.removed`、`deps_set.created` / `deps_set.removed`、`deps_build.started` / `deps_build.finished` | state | `deps_build.started` 与 `base.created` 由**构建路径自己发**：插入 `deps_attempts` 行、登记新基线代的事务提交后立即 `hub.publish`（handlers.rs:864 一带的构建过程中，不等处理函数返回）。其余（`*.removed`、`deps_build.finished`、`deps_set.created`）用**分配差分**：每个写处理函数前后、reconcile 与自动 gc 前后，各读一次 store 的 `base_gens`、`deps_sets`、`deps_attempts` 的 id 与状态，做差——差分只当作「终态清单失效」，不承诺看见中间态 | 行已提交 |
+| `base.created` / `base.removed`、`deps_set.created` / `deps_set.removed`、`deps_build.started` / `deps_build.finished` | state | `deps_build.started` 由 **daemon 处理函数**在调用 strata-deps 构建（handlers.rs:863-871 调 `ensure_target`）**之前**发，含义是「已请求构建」；领域 crate 不知道 hub，不加回调。`deps_build.finished` / `base.created` 在该调用返回后发。其余（`*.removed`、`deps_build.finished`、`deps_set.created`）用**分配差分**：每个写处理函数前后、reconcile 与自动 gc 前后，各读一次 store 的 `base_gens`、`deps_sets`、`deps_attempts` 的 id 与状态，做差——差分只当作「终态清单失效」，不承诺看见中间态 | 行已提交 |
 | `clone.started` / `clone.finished` | progress | FSEvents 监视 `<root>/bases` 与 `<root>/deps`（复用 strata-apfs 的 watch 包装，track.rs 同款），看到暂存目录出现 / 改名；不依赖 store | 文件系统事件，仅作进度 |
 | `proposal.created` / `proposal.changed` | state | 写处理函数与 reconcile 前后对 open proposals（id、状态）做差 | 行已提交 |
 | `op.started` / `op.finished`（method、repo、session、结果 kind） | progress | 每个写处理函数入口 / 出口 | — |
@@ -320,7 +320,7 @@ daemon 不拥有领域逻辑（基线、依赖集、克隆写在 session / deps 
 共同规则：计划全部由 daemon 给（G5）；对话框里展示的东西和传回 daemon 的绑定值来自同一份回答；主按钮不设默认回车；等待态显示「Look for the Touch ID prompt」；daemon 返回 `prompt_in_progress` 时显著提示（见 6）。
 
 1. **push**：`push_plan{repo}` → 展示仓库、分支、**目标 URL**（D12）、要推的提交（oid 短码 + 标题，等宽）、`deploy_on_push`、pins 是否要确认、Touch ID 文字 → 人点 `Push` → `push{repo, shown}`。pins 不要求确认时明说 "This repo pushes without confirmation"，并给 "Require confirmation…"（见 7）。
-2. **publish**（照 cli confirm.rs 的顺序）：`publish_prepare` = ① 对组内每个 (session, repo) 做 `checkpoint{session, repo, reason: BeforePublish, paths}`，参数取法与 cli confirm.rs 完全相同；② 人在对话框里按路径分批时，GUI 在本地组装草稿 `ReleaseGroup.batches`（检查点 id + 选中的路径，与 cli confirm.rs:403-473 的组装同款，数据来自 `changes` 与 ① 的检查点 id），不调任何写方法；**`assign` 不是分批调用**——它给一个**已存在的**发布的冲突路径指定解决会话（rebase.rs:339 起，路径不是该发布的冲突 → `NoSuchPath`），只在 Conflict 对话框里用（cli `publish --assign` 同款，confirm.rs:309-327）；③ `publish_plan{group, detail: true}`。展示每仓库的提交、目标 URL、跳过项、`waiting_proposals` → 人点 `Publish` → `publish{group, shown: {repo → chain 顶}, plan: <计划里的仓库集合>}`。`plan` 必须发，daemon 用它判 `plan_changed`。
+2. **publish**（照 cli confirm.rs 的顺序）：`publish_prepare` = ① 对组内每个 (session, repo) 做 `checkpoint{session, repo, reason: BeforePublish, paths}`，参数取法与 cli confirm.rs 完全相同；② 人在对话框里按路径分批时，GUI 在本地组装草稿 `ReleaseGroup.batches`（检查点 id + 选中的路径，与 cli confirm.rs:537-555 的检查点 → batches 组装同款，数据来自 `changes` 与 ① 的检查点 id），不调任何写方法；**`assign` 不是分批调用**——它给一个**已存在的**发布的冲突路径指定解决会话（rebase.rs:339 起，路径不是该发布的冲突 → `NoSuchPath`），只在 Conflict 对话框里用（cli `publish --assign` 同款，confirm.rs:309-327）；③ `publish_plan{group, detail: true}`。展示每仓库的提交、目标 URL、跳过项、`waiting_proposals` → 人点 `Publish` → `publish{group, shown: {repo → chain 顶}, plan: <计划里的仓库集合>}`。`plan` 必须发，daemon 用它判 `plan_changed`。
 3. **deps approve**：`deps_list` 的提议里带 daemon 算的 `planned_moves`（§3.4 P3 行）→ 展示 → `deps_approve{proposal, sessions, planned}`（线上字段名是 `proposal`，rpc.rs:154）。`sessions` 的语义：`null` = 所有受影响的会话，列表 = 只这些；GUI **从不发 `[]`**（`[]` 表示一个也不移，界面上没有这个选项）；全选时发 `null`，部分选择时发列表，一个都没选时按钮置灰。
 4. **rm --discard**：展示会话、各仓库**当前**未发布的改动（对每个仓库现调 `changes`；`fresh: false` 时写 "Couldn't read current changes"，仍允许人决定，但不显示数字）→ `rm{session, discard: true}`。
 5. **config relax**：`config_effective` 展示**正在执行的**值（放宽作用于它）；磁盘文件与之不同时另起一行 "Edited since the daemon started" 并列出差异 → `config_relax{repo, revision}`（revision 是已读入文本的哈希）。
@@ -396,7 +396,7 @@ README 第一节改成「下载 app → 首次打开 → 引导」，cli 用法�
 **从旧安装迁移**（`~/.cargo/bin/git-strata{,d}` + `~/Library/LaunchAgents/com.gwd.git-stratad.plist`）：
 1. **检测**（每次启动都做，不只首次）：旧 plist 存在、`launchctl print gui/<uid>/com.gwd.git-stratad` 有记录、`~/.cargo/bin` 下有旧二进制、PATH 里排前面的 `git-strata` 不是 bundle 的。两个 label 同时加载时显示警告（两个 daemon 会争 daemon.lock）。
 2. **显式化配置**：旧 config.toml 没有 `[paths]` 时，旧 daemon 用的是默认根 `/Volumes/GWD/inter/.strata`（`Paths::default_root()`）。新版不再有默认根，所以迁移先把**旧 daemon 实际使用的根**写成显式的 `[paths] root = "…"`（备份为 `config.toml.bak-<时间>`，改写前后给人看 diff）。这一步对旧版也合法，回滚无害。
-3. **旧 daemon 无法证明空闲**：旧 daemon 没有 `drain` 与 `inflight`（api 0）。holds / waiters 看不到确认框等待中的请求（确认在拿锁之前，handlers.rs:1141），也看不到还没排上的请求（startup.rs:515），所以**不能**从它们推断空闲，GUI 也不这么说。做法：① 显示 holds / waiters 与旧 daemon 的子进程（`git push`、依赖安装等，按 pid 查子进程），有就等；② 要求人勾选 "No agent is publishing, pushing or installing dependencies right now"，文案写明旧 plist 没有 `ExitTimeOut`，launchd 会在 SIGTERM 后 **20 s** 强杀，进行中的推送可能变成「结果未知」；③ 紧接着停之前**再读一次** holds / waiters / 子进程，有变化就回到 ①。不强停、无「强制」按钮。
+3. **旧 daemon 的准入栅栏（不需要旧 daemon 配合）**：旧 daemon 没有 `drain` 与 `inflight`（api 0），holds / waiters 也看不到确认框等待中（确认在拿锁之前，handlers.rs:1141）或尚未排上的请求（startup.rs:515），所以**不从它们推断空闲**。做法：① **摘掉 socket 路径**：把 `daemon.sock` 改名为 `daemon.sock.migrating`（同目录 rename）。已建立的连接不受影响，旧 daemon 继续服务它们；新的连接一律连不上（cli 得到 `Busy daemon_down`），这就是准入栅栏。旧 daemon 退出时按原路径删 socket（startup.rs:366），删不到改名后的文件，由 GUI 在新 daemon 起来前删掉；新 daemon 的 `bind` 本来就清理残留（startup.rs:533）。② 等已接受的请求做完：经改名后的 socket 读 `daemon_status` 的 holds / waiters，并看旧 daemon 的子进程（`git push`、依赖安装等，按 pid 查），都空了才继续；确认框等待中的请求，人自己看得见屏幕上的 Touch ID 框——对话框要求勾选 "No Touch ID prompt from git-strata is open"。③ 文案写明旧 plist 没有 `ExitTimeOut`，SIGTERM 后 launchd **20 s** 强杀；因为 ② 已等空，正常情况下不会触发。④ 放弃迁移 → 把 socket 改回原名，一切照旧。不强停、无「强制」按钮。
 4. **停旧的**：`launchctl bootout gui/<uid>/com.gwd.git-stratad`（等退出，最多 ExitTimeOut）→ `launchctl disable gui/<uid>/com.gwd.git-stratad`（防止下次登录被拉起）→ 旧 plist 移到 `~/Library/Application Support/git-strata/legacy/`（不删）。
 5. **起新的**（§5.6 第 5–7 步）。新 daemon 用同一个 `~/Library/Application Support/git-strata/`（config.toml、pins.json、socket 路径不变）、同一个数据根；会话、store、基线原样继续，不做数据迁移。TCC 授权要重新给一次。
 6. **回滚**（Settings › `Restore previous daemon`）：drain 并停新 daemon（A：unregister；B：bootout）→ 旧 plist 移回 → `launchctl enable` + `bootstrap` 旧 label。config.toml 只多了显式的 `[paths]`，daemon-env.toml 旧版不读，pins.json 未改，所以旧版能直接起来。
@@ -416,7 +416,8 @@ README 第一节改成「下载 app → 首次打开 → 引导」，cli 用法�
 
 daemon 侧（P5）：
 
-1. `drain{on: true, ttl_s}`：daemon 进入 draining：**新的写请求**一律回 `Busy`，`detail.reason = draining`（只读请求与 watch 照常）；已在排队或执行的写请求照常完成。drain 是**租约**：`ttl_s` 默认 120 s、上限 600 s；再发一次 `drain{on: true, ttl_s}` 就从现在起续期，总时长不设上限（依赖安装可达 60 分钟，strata-deps lib.rs:76）。租约到期自动解除，daemon 重启也解除——GUI 崩溃或睡眠后 daemon 不会永远拒写。`drain{on: false}` 立即解除。回答带 `lease_id`，`daemon_status.draining` 给出 `{lease_id, expires_at}`。（同 uid 的 agent 也能调 drain，但它本来就能 `launchctl bootout`，不增加攻击面。）
+1. `drain{on: true, ttl_s}`：daemon 进入 draining：**新的写请求**一律回 `Busy`，`detail.reason = draining`（只读请求与 watch 照常）；已在排队或执行的写请求照常完成。drain 是**租约**：`ttl_s` 默认 120 s、上限 600 s；再发一次 `drain{on: true, ttl_s}` 就从现在起续期，总时长不设上限（依赖安装可达 60 分钟，strata-deps lib.rs:76）。租约到期自动解除，daemon 重启也解除——GUI 崩溃或睡眠后 daemon 不会永远拒写。`drain{on: false}` 立即解除。回答带 `lease_id`，`daemon_status.draining` 给出 `{lease_id, expires_at, sealed}`。**准入原子性**：写请求的「查 draining」与「登记进 inflight」在同一个临界区里做（同一把 inflight 锁）；drain 的开启也在这把锁里，所以不存在「已解析、未登记」而同时躲过 `Busy draining` 与 inflight 列表的请求。
+1a. `drain{seal: true, lease_id, exit: bool}`（**封口**）：在同一临界区里原子地核对 `lease_id` 是当前的、未过期、`inflight` 为空；不满足 → `Busy`，`detail.reason = not_idle / lease_lost`，什么都不改。满足 → drain 变为 sealed：**不再过期、不能解除**（`drain{on:false}` 回 `InvalidInput sealed`），直到进程退出。`exit: true` 时 daemon 随即走自己的 §5.9 停机路径（等同收到 SIGTERM）。`exit: false` 时给停机方 60 s：60 s 内进程没退出，daemon **自己**走停机路径——失败的方向永远是「退出」，不是「重新放行写请求」。（同 uid 的 agent 也能调 drain，但它本来就能 `launchctl bootout`，不增加攻击面。）
 2. `daemon_status.inflight[]`：每个已接受但未完成的写请求一项：`{method, session?, repo?, phase: queued / confirming / locked / running, started_at}`，覆盖今天 holds / waiters 看不到的阶段（确认框等待中、依赖构建中）。
 3. 收到 SIGTERM：照 daemon.md §5.9 停止 accept、在跑的请求做完、**还在排队的以 `ReadOnly shutting_down` 失败**、订阅者收到 `bye`；plist 的 `ExitTimeOut 900` 给足时间。所以 GUI 必须等 inflight（含 queued）为空才发停机。
 
@@ -424,12 +425,12 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 
 1. `drain{on: true}`；旧 daemon（api 不够）→ 走 §5.7 迁移第 3 条的做法（不推断空闲，人确认）。
 2. 显示 inflight 列表，等它变空；等待期间**每 30 s 续租**，一直保持到 daemon 进程退出；人可以 `Cancel`（`drain{on: false}`），也可以等。确认框等待中的项写明 "Waiting for someone to answer a Touch ID prompt"。**没有「强制」按钮。**
-3. **停之前复核栅栏**：同一个流程里紧接着读 `daemon_status`，要求 `draining.lease_id` 仍是自己的、未过期、`inflight` 为空；任何一项不满足（例如电脑睡眠导致租约过期、期间有新写请求进来）→ 回到第 1 步重新开始，不停机。
+3. **封口**：`drain{seal: true, lease_id, exit: <restart 时 true>}`。检查与封口由 daemon 在一个临界区里完成，GUI 侧没有「查完再停」的空档；回 `not_idle` / `lease_lost`（例如电脑睡眠导致租约过期、期间有新写请求进来）→ 回到第 1 步，不停机。
 4. 停：
-   - restart：`launchctl kill SIGTERM gui/<uid>/<label>`，由 plist 的 `KeepAlive` 拉起新进程（不 bootout，服务留在域里）；
+   - restart：封口时已带 `exit: true`，daemon 自己优雅退出，由 plist 的 `KeepAlive`（必须是无条件的 `<true/>`，plist.rs:73-74；daemon 收到停机后以 0 退出，main.rs:95-99，若改成 `SuccessfulExit = false` 就不会被拉起——main.rs:2 的注释与此不符，P5 一并改正）拉起新进程，服务留在域里，不调 launchctl；
    - stop：`launchctl bootout gui/<uid>/<label>`（A、B 都是；A 仍注册着，下次登录会再起，见下）；
    - 升级 / 迁移：A 方案 `unregister()`，B 方案 `bootout`。
-   两种都是 launchd 发 SIGTERM、最多等 ExitTimeOut；SIGTERM 时 drain 仍在生效，所以停机窗口里没有新写请求能进来。等 socket 消失与 daemon.lock 释放。
+   stop / 升级 / 迁移在封口（`exit: false`）后 60 s 内发出；launchd 发 SIGTERM、最多等 ExitTimeOut。封口后 drain 不会过期，所以停机窗口里没有新的 **RPC 写请求**能进来。注意 inflight 只覆盖 RPC：reconcile（handlers.rs:205-238，compute + 锁内 `gc_repo`）不在其中，可能在封口后开始；SIGTERM 时它作为持锁者照常做完（ExitTimeOut 900 足够），不丢数据。等 socket 消失与 daemon.lock 释放。
 5. 起：restart 只需等新进程出现；stop 之后的启动走 §5.7 的幂等启动。两者都核对 `daemon_status.epoch` 变了、`version` 符合预期。
 6. 任一步失败 → 显示原因与日志位置，不自动重试。
 
@@ -487,6 +488,9 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 | `watch_shutdown_joins_fast` | 有订阅者时 SIGTERM，daemon 在 1 s + 写超时内退出 | 新增 |
 | `watch_stops_on_external_term` | 有订阅者时只置 `external`（模拟 SIGTERM，不调 request_stop），订阅者收到 `bye`，`serve` 在 1 s + 写超时内返回 | 新增 |
 | `drain_lease_renew_and_expire` | 续租延长到期；不续则到期解除；`lease_id` 不符时 GUI 流程回到第 1 步 | 新增 |
+| `drain_seal_atomic` | 并发：写请求与 `seal` 竞争，要么写被 `Busy draining` 拒、要么 seal 回 `not_idle`，不存在两者都通过；sealed 后 `drain{on:false}` 被拒、不过期；`exit:false` 60 s 无人停机时 daemon 自己停 | 新增 |
+| `plist_keepalive_unconditional` | 生成与打包的 plist 的 `KeepAlive` 是 `<true/>`，不是 `SuccessfulExit` 字典 | 新增 |
+| `legacy_migration_socket_fence` | 假旧 daemon：socket 改名后新连接失败、已有连接完成；放弃迁移改回原名后恢复 | 新增 |
 | `deps_build_started_emitted_during_build` | 脚本化的慢依赖构建：`deps_build.started` 在处理函数返回前到达订阅者 | 新增 |
 | `gui_publish_never_calls_assign_when_batching` | GUI 分批只组装 `batches`，不发 `assign`；`assign` 只出现在 Conflict 流程 | 新增 |
 | `changes_reports_uncheckpointed_edits` | 检查点之后改一个文件，`changes` 看得到，`changes_at_checkpoint` 不变 | 新增 |
@@ -526,7 +530,7 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 | P0 | 抽 `strata-client` 传输层（§3.1 P0）；types.md §8 加层；cli rpc.rs 变 re-export | 1 天 | — | 否 |
 | P1 | 照 R2 搭 `apps/desktop`（壳、token、主题、⌘K、单实例、托盘）；Daemon 屏、会话列表 / 详情（**只用现有方法**：daemon_status、status 单会话、du、deps_list；会话列表先用低频 `status` 并标注「待 P2 换 summary」） | 4 天 | P0 | 否 |
 | P2 | daemon 只读增补（§3.4 P2 行：status summary、changes、diff_text、allocations、push_plan、publish_plan detail、daemon_status 字段、`Confirmer::pending`、config_effective）＋ strata-client 回答类型与契约测试；GUI 接上 Allocations、Diff、Home | 6 天 | P0；push_plan / publish_plan 的 URL 字段依赖 impl/v1 的 URL 绑定已合并 | 是 |
-| P3 | 确认类对话框：push、publish（checkpoint + assign + plan）、deps approve（planned）、rm --discard、config relax（revision）、chain resolve / restore、gc（普通确认）；部分成功与 reason 分支；prompt_in_progress 横幅 | 6 天 | P1、P2；impl/v1 的 `remote_changed` | 是（deps_approve、config_relax 两个参数） |
+| P3 | 确认类对话框：push、publish（checkpoint + 本地 batches + plan；assign 只用于 Conflict）、deps approve（planned）、rm --discard、config relax（revision）、chain resolve / restore、gc（普通确认）；部分成功与 reason 分支；prompt_in_progress 横幅 | 6 天 | P1、P2；impl/v1 的 `remote_changed` | 是（deps_approve、config_relax 两个参数） |
 | P4 | `watch`：hub、连接专用模式、分配差分、FSEvents、失效表、GUI watch.rs 与轮询表 | 5 天 | P2；impl/v1 合并到本分支之后（改动面与 v1 的 handlers / startup 重叠最大） | 是 |
 | P5 | drain 与 inflight、ExitTimeOut、自重定向日志、daemon-env.toml；GUI 的 lifecycle（重启 / 停止 / 收紧配置） | 3 天 | P2 | 是 |
 | P6 | bundle、注册（按 P-pack 结论选 A / B）、cli 链接、引导、迁移与回滚、通知 | 3 天 | P5、P-pack 结论 | label |
@@ -606,7 +610,7 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 5. **Q-cli-plan**：daemon 有了 push_plan / publish_plan detail 之后，cli 是否也改用（去掉本地计划读取，两边文案同源）？不影响 GUI。
 6. **Q-daemon-client**：`strata_daemon::client` 语义与 cli 不同，P2 时是否统一到 strata-client？
 7. **Q-drain-agent**：drain 期间 agent 的写请求收到 `Busy draining`。cli 是否要等待重试（像 daemon_down 时那样提示），还是直接报错？
-8. **Q-legacy**：从旧安装迁移时旧 daemon 无法证明空闲（§5.7 迁移第 3 条），靠人确认 + 20 s 强杀风险提示。可以接受吗？还是你更愿意在一个安静的时刻手动迁移（README 给步骤）？
+8. **Q-legacy**：从旧安装迁移时，旧 daemon 的准入栅栏靠把 socket 改名（§5.7 迁移第 3 条），确认框是否开着由人确认。可以接受吗？还是你更愿意在一个安静的时刻手动迁移（README 给步骤）？
 
 ### 复核对照（gui-merged.md → 本版）
 
@@ -654,7 +658,8 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 
 | 复核结论 | r3.1 处理 |
 |---|---|
-| 阻断（Codex B1）：停机没有可靠栅栏；旧 daemon 不能从 holds / waiters 推断空闲；drain 可能在等待中过期 | §5.9：drain 改为可续租的租约，续到进程退出；停之前复核 lease_id 与 inflight；§5.7 迁移第 3 条：不推断空闲，人确认 + 20 s 风险提示 + 停前复读；§9 Q-legacy |
+| 阻断（Codex B1，r3.1 再复核仍未解决：检查与停机之间有空档；旧 daemon 无准入栅栏） | §5.9：租约 + 准入与 inflight 同一临界区 + daemon 内原子封口（sealed 不过期、失败方向是退出）；restart 由封口 `exit:true` 自退 + 无条件 KeepAlive；§5.7 迁移第 3 条：socket 改名作准入栅栏 + 等空 + 人确认无 Touch ID 框；§9 Q-legacy；`drain_seal_atomic`、`legacy_migration_socket_fence` |
+| r3.1 再复核（Claude 非阻断 1–5）：KeepAlive 须无条件；§3.2 / §8.1 残留「assign」；deps 事件由谁发；准入原子性；inflight 不含 reconcile | §5.9 第 4 条与 `plist_keepalive_unconditional`；§3.2 publish 行、§8.1 P3 行；§5.3.2 由 daemon 处理函数在调用前后发；§5.9 第 1 条；§5.9 第 4 条说明 |
 | 阻断（Codex B2 / Claude 1）：watch 停机谓词漏了生产 SIGTERM | §5.3.1 第 2 条：`serve` 因 external 退出时先 request_stop；waiting.rs 同样覆盖；`watch_stops_on_external_term` |
 | 阻断（Codex B3 / Claude 2）：`assign` 不是分批调用 | §5.4 第 2 条：本地组装 batches，assign 只在 Conflict 对话框；`gui_publish_never_calls_assign_when_batching` |
 | 阻断（Codex B4）：摘要计数是历史值 | §3.4：`changes_at_checkpoint` 标明历史；`changes` 读当前工作区并带 fresh；§5.4 第 4 条 rm 用 `changes` |
