@@ -148,21 +148,31 @@ it later with `git-strata add --repo other`.
 sibling repos link to each other by relative path; A,B are the tracked ones.
 Only tracked repos are watched, checkpointed and published. Untracked siblings
 are pinned at their base; do not edit them (an edit there is never checkpointed,
-and makes `rm` return Dirty with detail.untracked_repos).";
+and makes `rm` return Dirty with detail.untracked_repos).
+
+The session records which AI agent created it (data.manifest.agent; status and
+the GUI show it): --agent NAME, else STRATA_AGENT, else detected from the shell
+(Claude Code -> claude-code, Codex -> codex, Cursor -> cursor-agent). An agent
+that is none of these should `export STRATA_AGENT=<name>` (1-64 of
+[A-Za-z0-9._-], starting with a letter or digit) before running `new`.";
 
 pub const NEW_AFTER: &str = "EXAMPLES
   git-strata new PROJ-123 --repo staff-api            # one workspace
   git-strata new PROJ-123 --repo tool --repo staff-api
   git-strata new --ticket PROJ-123 --repos tool       # every repo, tool tracked
+  STRATA_AGENT=aider git-strata new PROJ-123 --repo tool
 
 DATA
-  {manifest:{id, ticket?, root, repos:{<repo>:{base, head, path, tracked}}}, warnings:[]}
+  {manifest:{id, ticket?, agent?, root, repos:{<repo>:{base, head, path, tracked}}}, warnings:[]}
+  warnings may hold {kind:AgentNotRecorded, agent, reason:daemon_too_old}: the
+  running daemon predates agent recording; the session was created without it.
   Use data.manifest.id as SESSION and data.manifest.repos.<repo>.path as the cwd.
 
 ERRORS
   InvalidInput repos       neither --repo nor --repos given, or an empty name
   InvalidInput repo_flags  --repo and --repos both given
   InvalidInput ticket      ticket given both positionally and with --ticket
+  InvalidInput agent       --agent or STRATA_AGENT is not a valid agent name (nothing created)
   NoSuchRepo               a repo name is not in config.toml
   NoSuchBranch             a repo has no origin/<default_branch> tip (the session's repos are fetched)
   Busy daemon_down         run `git-strata daemon start`, retry once

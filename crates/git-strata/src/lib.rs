@@ -3,6 +3,7 @@
 //! goes to stderr only. The binary never runs `git` itself and never
 //! calls strata-confirm (§1): confirmations happen in the daemon.
 
+pub mod agent;
 pub mod args;
 pub mod cmds;
 pub mod confirm;
@@ -137,7 +138,7 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Resolve { session, repo, abandon, accept } => c::resolve(&ctx, &session, &repo, abandon, accept),
         Cmd::Chain { repo, accept_origin, restore } => c::chain(&ctx, &repo, accept_origin, restore),
         Cmd::Config(ConfigCmd::Relax { repo }) => c::config_relax(&ctx, &repo),
-        Cmd::New { ticket_flag, ticket, repo, repos } => cmds::new(&ctx, ticket_flag, ticket, &repo, &repos),
+        Cmd::New { ticket_flag, ticket, repo, repos, agent } => cmds::new(&ctx, ticket_flag, ticket, &repo, &repos, agent.as_deref()),
         Cmd::Add { session, repo } => cmds::add(&ctx, session, &repo),
         Cmd::Status { sel } => cmds::status(&ctx, &sel),
         Cmd::Checkpoint { tool_call, message, session, paths } => cmds::checkpoint(&ctx, tool_call, message, session, &paths),

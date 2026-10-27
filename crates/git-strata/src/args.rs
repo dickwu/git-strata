@@ -47,6 +47,9 @@ pub enum Cmd {
         /// Repos to track, comma separated; every configured repo still gets a workspace (the full sibling layout)
         #[arg(long, value_delimiter = ',', value_name = "A,B")]
         repos: Vec<String>,
+        /// The AI agent creating the session (default: STRATA_AGENT, else detected: claude-code, codex, cursor-agent)
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
     },
     /// Add workspaces of more repos to an existing session
     #[command(after_long_help = crate::help::ADD_AFTER)]
