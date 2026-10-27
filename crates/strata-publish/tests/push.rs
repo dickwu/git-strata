@@ -43,8 +43,13 @@ fn token(action: Action) -> ConfirmToken {
     ConfirmToken { action, issued: Instant::now(), nonce: 7 }
 }
 
-fn deploy(branch: &str) -> Action {
-    Action::PushDeploy { repo: repo_name("tool"), branch: branch.into() }
+/// Review P1-15: the approval names origin's push URL as read now.
+fn deploy(fx: &Fx, branch: &str) -> Action {
+    deploy_at(branch, &fx.git_of("tool").push_url("origin").unwrap())
+}
+
+fn deploy_at(branch: &str, url: &str) -> Action {
+    Action::PushDeploy { repo: repo_name("tool"), branch: branch.into(), url: url.into() }
 }
 
 /// Every git call since the last take: `"<subcommand> <argv…> cwd=… <GIT_* env>"`.
@@ -186,8 +191,8 @@ fn confirm_without_a_matching_token_stops_before_push() {
     let (s, g) = edit(&fx, "src/index.ts", b"export const a = 2\n");
     let bad = [
         None,
-        Some(token(deploy("other"))),
-        Some(token(Action::PushDeploy { repo: repo_name("front"), branch: "main".into() })),
+        Some(token(deploy(&fx, "other"))),
+        Some(token(Action::PushDeploy { repo: repo_name("front"), branch: "main".into(), url: fx.git_of("tool").push_url("origin").unwrap() })),
         Some(token(Action::RemoveDiscard { session: s.clone() })),
     ];
     for (deploy_on_push, confirm) in [(true, true), (false, true)] {
@@ -211,12 +216,49 @@ fn confirm_without_a_matching_token_stops_before_push() {
         }
     }
     // The matching action pushes.
-    let p = run(&fx, &g, Some(token(deploy("main")))).unwrap();
+    let p = run(&fx, &g, Some(token(deploy(&fx, "main")))).unwrap();
     assert_eq!(p.push, Some(PushOutcome::Pushed));
     assert_eq!(fx.origin_head("tool", "main"), p.commit.as_str());
     let changes = fx.store().ref_changes(p.id).unwrap();
     let pushed = changes.iter().find(|c| c.op == strata_store::RefOp::Push).expect("push recorded");
-    assert_eq!(pushed.confirmed, Some(deploy("main")));
+    assert_eq!(pushed.confirmed, Some(deploy(&fx, "main")));
+}
+
+/// Review P1-15: the approval names origin's push URL. When origin's push
+/// URL under the lock is not the approved one (it was changed after the
+/// prompt), publish and push are `NotConfirmed` (`remote_changed`, both
+/// URLs in the detail) before any staging, and nothing reaches either
+/// remote. With the approved URL restored, the same kind of token pushes.
+#[test]
+fn a_confirmed_push_is_bound_to_the_approved_url() {
+    let mut fx = fx();
+    fx.cfg_mut("tool").publish.confirm = true;
+    let origin = fx.origin_head("tool", "main");
+    let approved = fx.git_of("tool").push_url("origin").unwrap();
+    let other = fx.sb.root.join("elsewhere.git");
+    fx.sb.git(&fx.sb.root, &["init", "-q", "--bare", other.to_str().unwrap()]);
+    let main = fx.main("tool");
+    fx.sb.git(&main, &["config", "remote.origin.pushurl", other.to_str().unwrap()]);
+    let (s, g) = edit(&fx, "src/index.ts", b"export const a = 9\n");
+    calls(&fx);
+    let e = run(&fx, &g, Some(token(deploy_at("main", &approved)))).unwrap_err();
+    assert_eq!(e.code, Code::NotConfirmed, "{e:?}");
+    let d = e.detail.clone().unwrap();
+    assert_eq!(d["reason"], "remote_changed", "{e:?}");
+    assert_eq!(d["confirmed"], approved.as_str());
+    assert_eq!(d["now"], other.to_str().unwrap());
+    let cs = calls(&fx);
+    assert!(!touched_layout(&cs), "no staging: {cs:#?}");
+    assert_eq!(ran(&cs, "push"), 0);
+    assert!(layouts(&fx, &s).is_empty());
+    assert_eq!(fx.read_ref("tool", CHAIN), None);
+    assert_eq!(fx.origin_head("tool", "main"), origin);
+    assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", other.to_str().unwrap(), "for-each-ref"]), "", "nothing reached the other remote");
+    // A token for the URL as it is now pushes there (the human approved it).
+    fx.sb.git(&main, &["config", "--unset", "remote.origin.pushurl"]);
+    let p = run(&fx, &g, Some(token(deploy_at("main", &approved)))).unwrap();
+    assert_eq!(p.push, Some(PushOutcome::Pushed));
+    assert_eq!(fx.origin_head("tool", "main"), p.commit.as_str());
 }
 
 #[test]
@@ -340,13 +382,13 @@ fn push_false_leaves_chain_local() {
     assert_eq!(e.code, Code::NotConfirmed);
     assert_eq!(ran(&calls(&fx), "push"), 0);
     assert_eq!(fx.read_ref("tool", ANCHOR).unwrap(), origin);
-    let out = push(fx.git_of("tool"), &cfg, &repo_name("tool"), &st, Some(token(deploy("main")))).unwrap();
+    let out = push(fx.git_of("tool"), &cfg, &repo_name("tool"), &st, Some(token(deploy(&fx, "main")))).unwrap();
     assert_eq!(out, PushOutcome::Pushed);
     assert_eq!(fx.origin_head("tool", "main"), p.commit.as_str());
     assert_eq!(fx.read_ref("tool", ANCHOR).unwrap(), p.commit.as_str());
     assert_eq!(fx.read_ref("tool", TRACK).unwrap(), p.commit.as_str());
     // Nothing leads any more: NoCommit.
-    let e = push(fx.git_of("tool"), &cfg, &repo_name("tool"), &st, Some(token(deploy("main")))).unwrap_err();
+    let e = push(fx.git_of("tool"), &cfg, &repo_name("tool"), &st, Some(token(deploy(&fx, "main")))).unwrap_err();
     assert_eq!(e.code, Code::NoCommit);
 }
 

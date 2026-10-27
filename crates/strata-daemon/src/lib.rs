@@ -48,6 +48,34 @@ pub mod seams {
     pub(crate) fn scene_sync_fails(p: &std::path::Path) -> bool {
         SCENE_SYNC_FAILS.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|r| p.starts_with(r))
     }
+
+    type Hook = std::sync::Arc<dyn Fn() + Send + Sync>;
+    static AFTER_CONFIRM: std::sync::Mutex<Vec<(std::path::PathBuf, Hook)>> = std::sync::Mutex::new(Vec::new());
+
+    /// Review P1-15: run `hook` after every passed push confirmation of the
+    /// daemon whose root is `root`, before its repo lock is taken (`None`
+    /// removes it). Keyed by root so parallel tests are unaffected.
+    pub fn set_after_confirm(root: &std::path::Path, hook: Option<Hook>) {
+        let mut v = AFTER_CONFIRM.lock().unwrap_or_else(|p| p.into_inner());
+        v.retain(|(r, _)| r != root);
+        if let Some(h) = hook {
+            v.push((root.to_path_buf(), h));
+        }
+    }
+
+    pub(crate) fn after_confirm(root: &std::path::Path) {
+        let h = AFTER_CONFIRM.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(r, _)| r == root).map(|(_, h)| h.clone());
+        if let Some(h) = h {
+            h();
+        }
+    }
+}
+
+/// Test seam point after a passed push confirmation (no-op in a normal
+/// build); see `seams::set_after_confirm`.
+pub(crate) fn after_confirm(_root: &Path) {
+    #[cfg(feature = "test-seams")]
+    seams::after_confirm(_root);
 }
 
 pub type Result<T> = std::result::Result<T, StrataError>;

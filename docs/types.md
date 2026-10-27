@@ -389,7 +389,10 @@ pub struct ConfirmToken {
 #[serde(tag = "kind")]
 pub enum Action {
     /// 推送一个需要确认的发布目标：`deploy_on_push = true` 的仓库，或 `PublishTarget.confirm = true`。
-    PushDeploy { repo: RepoName, branch: String },
+    /// `url` 是弹框前读到的 origin 推送 URL（`git remote get-url --push origin`），
+    /// 弹框文字带上它；推送前在锁里再读一次，不同 → `NotConfirmed`（`remote_changed`）。
+    /// 序列化时 URL 里的用户信息（令牌）写成 `***`（review P1-15）。
+    PushDeploy { repo: RepoName, branch: String, url: String },
     /// `deps approve <proposal>`：批准一个依赖变更提议。
     DepsApprove { proposal: ProposalId },
     /// `rm --discard`：丢掉会话的未发布改动，再删除会话。

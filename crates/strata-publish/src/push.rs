@@ -129,20 +129,61 @@ fn carry(inner: &StrataError, mut extra: Value) -> Value {
 // ---- confirmation (§5.6) -------------------------------------------------
 
 /// The confirmation gate: when the push needs a human, the token's action
-/// must be exactly `PushDeploy { repo, branch: cfg.publish.branch }`. Only
+/// must be `PushDeploy { repo, branch: cfg.publish.branch, url }`. Only
 /// the action is checked (nonce and age are confirm's job). Returns the
 /// confirmed action. Reads nothing else: no flag, env var or config bypass.
-fn confirm_gate(cfg: &RepoConfig, repo: &RepoName, confirm: Option<ConfirmToken>) -> Result<Option<Action>> {
+///
+/// [实现时补的决定] (review P1-15) `url` is the push URL the human approved;
+/// origin's push URL read now (the caller holds the repo lock) must be
+/// exactly it, otherwise `NotConfirmed` (`remote_changed`, detail
+/// `confirmed` / `now` redacted) and nothing is pushed. The push then goes to
+/// exactly `url` ([`confirmed_url`]).
+fn confirm_gate(git: &Git, cfg: &RepoConfig, repo: &RepoName, confirm: Option<ConfirmToken>) -> Result<Option<Action>> {
     if !cfg.needs_human_confirm() {
         return Ok(None);
     }
-    let want = Action::PushDeploy { repo: repo.clone(), branch: cfg.publish.branch.clone() };
+    let branch = &cfg.publish.branch;
+    let want = json!({ "kind": "PushDeploy", "repo": repo.as_str(), "branch": branch });
     match confirm {
-        Some(t) if t.action == want => Ok(Some(t.action)),
-        Some(t) => Err(StrataError::new(Code::NotConfirmed, "the confirmation is for a different action")
-            .with_detail(json!({ "reason": "action_mismatch", "want": want, "got": t.action }))),
-        None => Err(StrataError::new(Code::NotConfirmed, format!("pushing {repo} to {} needs a confirmation", cfg.publish.branch))
+        Some(t) => match &t.action {
+            Action::PushDeploy { repo: r, branch: b, url } if r == repo && b == branch => {
+                let now = git.push_url(REMOTE)?;
+                if *url != now {
+                    return Err(remote_changed(url, &now));
+                }
+                Ok(Some(t.action))
+            }
+            _ => Err(StrataError::new(Code::NotConfirmed, "the confirmation is for a different action")
+                .with_detail(json!({ "reason": "action_mismatch", "want": want, "got": t.action }))),
+        },
+        None => Err(StrataError::new(Code::NotConfirmed, format!("pushing {repo} to {branch} needs a confirmation"))
             .with_detail(json!({ "reason": "missing", "want": want }))),
+    }
+}
+
+/// `NotConfirmed`, reason `remote_changed`: origin's push URL is not the one
+/// the human approved (review P1-15). Both URLs redacted.
+pub fn remote_changed(confirmed: &str, now: &str) -> StrataError {
+    StrataError::new(
+        Code::NotConfirmed,
+        format!(
+            "origin's push URL changed after the confirmation ({} → {}); nothing was pushed, confirm again",
+            strata_types::display_url(confirmed),
+            strata_types::display_url(now)
+        ),
+    )
+    .with_detail(json!({
+        "reason": "remote_changed",
+        "confirmed": strata_types::display_url(confirmed),
+        "now": strata_types::display_url(now),
+    }))
+}
+
+/// The URL a confirmed push goes to: the approved one.
+fn confirmed_url(confirmed: Option<&Action>) -> Option<&str> {
+    match confirmed {
+        Some(Action::PushDeploy { url, .. }) => Some(url.as_str()),
+        _ => None,
     }
 }
 
@@ -244,7 +285,14 @@ pub fn push(git: &Git, cfg: &RepoConfig, repo: &RepoName, staging: &Path, confir
 /// record names the destination the push went to. [实现时补的决定]
 /// (review-4 F1)
 pub fn push_to(git: &Git, cfg: &RepoConfig, repo: &RepoName, staging: &Path, confirm: Option<ConfirmToken>, url: Option<&str>) -> Result<PushOutcome> {
-    confirm_gate(cfg, repo, confirm)?;
+    let confirmed = confirm_gate(git, cfg, repo, confirm)?;
+    // Review P1-15: a confirmed push goes to the approved URL; a caller's
+    // URL (the scene's) must be that one.
+    let url = match (confirmed_url(confirmed.as_ref()), url) {
+        (Some(c), Some(u)) if c != u => return Err(remote_changed(c, u)),
+        (Some(c), _) => Some(c),
+        (None, u) => u,
+    };
     match send(git, &cfg.publish.branch, staging, url)? {
         PushOutcome::Pushed => Ok(PushOutcome::Pushed),
         PushOutcome::Refused(m) => Err(StrataError::new(Code::PushRefused, "the remote refused the push")
@@ -471,7 +519,7 @@ fn locked(
     // Step 3: the gate, before any staging write.
     ctx.cfg.validate_commands()?;
     let pushing = ctx.cfg.publish.push;
-    let confirmed = if pushing { confirm_gate(ctx.cfg, ctx.repo, confirm)? } else { None };
+    let confirmed = if pushing { confirm_gate(ctx.git, ctx.cfg, ctx.repo, confirm)? } else { None };
     if let (Some(_), Some(shown)) = (&confirmed, shown)
         && *shown != chain.top
     {
@@ -513,7 +561,7 @@ fn locked(
     // Step 7.
     seams::fail(ctx.git, FailPoint::BeforePush).map_err(|e| with_landed(after_write(&commit, e), Value::Null, ran.ran))?;
     let push = if pushing {
-        let out = send(ctx.git, branch, &staged.worktree, None);
+        let out = send(ctx.git, branch, &staged.worktree, confirmed_url(confirmed.as_ref()));
         let (outcome, detail) = match &out {
             Ok(PushOutcome::Pushed) => (RefOutcome::Pushed, None),
             Ok(PushOutcome::Refused(m)) => (RefOutcome::Refused, Some(m.clone())),

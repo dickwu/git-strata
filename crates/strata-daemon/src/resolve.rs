@@ -321,7 +321,7 @@ pub(crate) const PUSH_SCENES: &str = "daemon/push";
 /// The attempt record inside a push directory.
 const SCENE_FILE: &str = "push.json";
 /// The remote every standalone and restore push goes to.
-const SCENE_REMOTE: &str = "origin";
+pub(crate) const SCENE_REMOTE: &str = "origin";
 
 /// Review M6: every kept push scene under `root` (`repo`, `commit`, the
 /// directory), for the startup report. A directory without a readable
@@ -347,6 +347,17 @@ impl PushDest {
     /// The push URL the push is sent to (review-4 F1).
     pub(crate) fn url(&self) -> &str {
         &self.push_url
+    }
+}
+
+/// Review P1-15: under the repo lock, before any staging, origin's push
+/// destination read now (`dest`) must have the push URL the human approved
+/// (`approved`); otherwise `NotConfirmed` (`remote_changed`) and nothing is
+/// staged or pushed. An unreadable URL is the same refusal (now `""`).
+pub(crate) fn check_approved_url(approved: &str, dest: Option<&PushDest>) -> Result<()> {
+    match dest {
+        Some(d) if d.push_url == approved => Ok(()),
+        d => Err(strata_publish::remote_changed(approved, d.map(PushDest::url).unwrap_or(""))),
     }
 }
 
@@ -483,12 +494,18 @@ pub fn chain_resolve(
     let (_, seen) = rewound_or_diverged(strata_deps::publish_chain(git, &branch)?)?;
 
     // 3. Restore asks the human like push, holding nothing.
-    let action = Action::PushDeploy { repo: repo.clone(), branch: branch.clone() };
-    let token = if choice == ChainChoice::Restore && needs_confirm(core.pinned(repo)?) {
+    // Review P1-15: the approval names origin's push URL read now.
+    let confirm = choice == ChainChoice::Restore && needs_confirm(core.pinned(repo)?);
+    let url = if confirm { git.push_url(SCENE_REMOTE)? } else { String::new() };
+    let action = Action::PushDeploy { repo: repo.clone(), branch: branch.clone(), url: url.clone() };
+    let token = if confirm {
         Some(require_validated(&core.confirmer, action.clone())?)
     } else {
         None
     };
+    if token.is_some() {
+        crate::after_confirm(&core.config.paths.root);
+    }
 
     let mut tips = (None, None);
     let out = core.locks.with_repo(repo, || {
@@ -532,6 +549,9 @@ pub fn chain_resolve(
                 let verify = [RefUpdate::verify(&chain_name, Some(c.clone()))];
                 let uncertain = |r: &Result<PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
                 let dest = push_dest(git);
+                if token.is_some() {
+                    check_approved_url(&url, dest.as_ref())?;
+                }
                 let outcome = with_staging(core, git, repo, &branch, &c, dest.as_ref(), uncertain, |wt| {
                     crate::handlers::writing();
                     // Review-4 F1: to exactly the recorded destination.

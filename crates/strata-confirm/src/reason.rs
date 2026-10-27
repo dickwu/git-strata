@@ -12,11 +12,12 @@ use strata_types::Action;
 pub fn prompt_reason(action: &Action) -> String {
     // No wildcard arm on purpose: a new Action variant must get its own line on the prompt.
     match action {
-        Action::PushDeploy { repo, branch } => {
+        Action::PushDeploy { repo, branch, url } => {
             format!(
-                "push {} to origin/{}",
+                "push {} to origin/{} at {}",
                 escape(repo.as_str()),
-                escape(branch)
+                escape(branch),
+                escape(&strata_types::display_url(url))
             )
         }
         Action::DepsApprove { proposal } => {

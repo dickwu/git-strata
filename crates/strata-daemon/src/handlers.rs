@@ -1108,10 +1108,16 @@ impl<'d, 'a> Server<'d, 'a> {
                 let pinned = core.pinned(&repo)?;
                 let branch = repo_cfg(core, &repo)?.publish.branch.clone();
                 let token = if pinned.push && needs_confirm(pinned) {
-                    Some(require_validated(&core.confirmer, Action::PushDeploy { repo: repo.clone(), branch })?)
+                    // Review P1-15: the approval names origin's push URL read
+                    // now; publish checks it again under the repo lock.
+                    let url = git_of(core, &repo)?.push_url(resolve::SCENE_REMOTE)?;
+                    Some(require_validated(&core.confirmer, Action::PushDeploy { repo: repo.clone(), branch, url })?)
                 } else {
                     None
                 };
+                if token.is_some() {
+                    crate::after_confirm(&core.config.paths.root);
+                }
                 writing();
                 let bound = token.as_ref().map(|_| shown.get(&repo).cloned().flatten());
                 self.with_publish_ctx(&repo, |ctx| strata_publish::publish_bound(ctx, &group, token, bound.clone()))
@@ -1179,9 +1185,17 @@ impl<'d, 'a> Server<'d, 'a> {
         let rc = effective_cfg(core, repo)?;
         let git = git_of(core, repo)?;
         let branch = rc.publish.branch.clone();
-        let action = Action::PushDeploy { repo: repo.clone(), branch: branch.clone() };
         let before = shown.cloned();
-        let token = if needs_confirm(core.pinned(repo)?) { Some(require_validated(&core.confirmer, action.clone())?) } else { None };
+        let confirm = needs_confirm(core.pinned(repo)?);
+        // Review P1-15: the approval names origin's push URL read before the
+        // prompt; under the lock it must still be that URL (`remote_changed`)
+        // and the push goes to exactly it.
+        let url = if confirm { git.push_url(resolve::SCENE_REMOTE)? } else { String::new() };
+        let action = Action::PushDeploy { repo: repo.clone(), branch: branch.clone(), url: url.clone() };
+        let token = if confirm { Some(require_validated(&core.confirmer, action.clone())?) } else { None };
+        if token.is_some() {
+            crate::after_confirm(&core.config.paths.root);
+        }
         // Publish.md D2a: a repo that needs no confirmation fetches first
         // and replays a Diverged chain onto origin before its one push.
         if token.is_none() && !rc.needs_human_confirm() {
@@ -1208,6 +1222,9 @@ impl<'d, 'a> Server<'d, 'a> {
             let uncertain = |r: &Result<strata_types::PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
             // Review-3 R4: the destination is read before the push.
             let dest = resolve::push_dest(git);
+            if token.is_some() {
+                resolve::check_approved_url(&url, dest.as_ref())?;
+            }
             let r = resolve::with_staging(core, git, repo, &branch, &tip, dest.as_ref(), uncertain, |wt| {
                 writing();
                 strata_publish::push_to(git, &rc, repo, wt, token, dest.as_ref().map(resolve::PushDest::url))

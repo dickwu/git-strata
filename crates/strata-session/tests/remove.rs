@@ -384,7 +384,7 @@ fn remove_discard_checks_the_token() {
     let before = (untouched(&fx, &a_id), untouched(&fx, &b_id));
     let expected = serde_json::to_value(Action::RemoveDiscard { session: a_id.clone() }).unwrap();
     let push = ConfirmToken {
-        action: Action::PushDeploy { repo: fx.rn("tool"), branch: "main".into() },
+        action: Action::PushDeploy { repo: fx.rn("tool"), branch: "main".into(), url: String::new() },
         issued: Instant::now(),
         nonce: 2,
     };

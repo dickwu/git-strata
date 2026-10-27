@@ -904,6 +904,95 @@ fn confirmed_push_is_bound_to_the_shown_chain_top() {
     }
 }
 
+/// Sets origin's push URL of `main` to `other` once a confirmation passed
+/// (between the prompt and the push), through the daemon's test seam.
+fn redirect_after_confirm(root: &Path, main: &Path, other: &Path) {
+    let (main, other) = (main.to_path_buf(), other.to_path_buf());
+    strata_daemon::seams::set_after_confirm(
+        root,
+        Some(std::sync::Arc::new(move || {
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args(["config", "remote.origin.pushurl"])
+                .arg(&other)
+                .status()
+                .unwrap();
+            assert!(st.success());
+        })),
+    );
+}
+
+fn unredirect(root: &Path, fx: &Dfx, main: &Path) {
+    strata_daemon::seams::set_after_confirm(root, None);
+    fx.sb.git(main, &["config", "--unset", "remote.origin.pushurl"]);
+}
+
+/// Review P1-15: a confirmed restore or push is bound to origin's push URL
+/// read before the prompt (the prompt names it). A push URL changed after
+/// the confirmation is `NotConfirmed` (`remote_changed`): no ref moves and
+/// nothing reaches either remote. With the URL unchanged it goes through.
+#[test]
+fn confirmed_push_is_bound_to_the_approved_url() {
+    // chain_resolve Restore.
+    {
+        let mut fx = Dfx::new();
+        set_confirm(&mut fx);
+        let ch = Chain::new(&fx);
+        ch.rewind_origin(&fx, &ch.p);
+        let elsewhere = fx.sb.root.join("elsewhere.git");
+        fx.sb.git(&fx.sb.root, &["init", "-q", "--bare", elsewhere.to_str().unwrap()]);
+        let (c, log, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass()]);
+        let core = fx.prepare_with(c).unwrap();
+        sync(&core);
+        let root = core.config.paths.root.clone();
+        redirect_after_confirm(&root, &ch.main, &elsewhere);
+        let before = ch.refs(&fx);
+        let shown = CommitOid::try_from(ch.c.clone()).unwrap();
+        let (r, _) = resolve_shown(&core, ChainChoice::Restore, Some(&shown));
+        assert_eq!(code_reason(&r), (Code::NotConfirmed, "remote_changed".into()), "{r:?}");
+        assert!(log.shown()[0].contains("tool-origin.git"), "the prompt names the URL: {:?}", log.shown());
+        assert_eq!(ch.refs(&fx), before);
+        assert_eq!(ch.origin_main(&fx), ch.p);
+        assert_eq!(calls(&core).push, 0);
+        assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", elsewhere.to_str().unwrap(), "for-each-ref"]), "");
+        unredirect(&root, &fx, &ch.main);
+        let (r, _) = resolve_shown(&core, ChainChoice::Restore, Some(&shown));
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(ch.origin_main(&fx), ch.c);
+        core.close().unwrap();
+    }
+    // push over the socket.
+    {
+        let mut fx = Dfx::new();
+        set_confirm(&mut fx);
+        let ch = Chain::new(&fx);
+        let elsewhere = fx.sb.root.join("elsewhere.git");
+        fx.sb.git(&fx.sb.root, &["init", "-q", "--bare", elsewhere.to_str().unwrap()]);
+        let (c, _log, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass()]);
+        let core = fx.prepare_with(c).unwrap();
+        sync(&core);
+        let root = core.config.paths.root.clone();
+        redirect_after_confirm(&root, &ch.main, &elsewhere);
+        let d = Daemon::start(&core).unwrap();
+        let sock = fx.socket();
+        serving(&d, || {
+            let r = call(&sock, "push", json!({ "repo": "tool", "shown": ch.c }));
+            assert_eq!(r["error"]["code"], "NotConfirmed", "{r:#}");
+            assert_eq!(r["error"]["detail"]["reason"], "remote_changed", "{r:#}");
+            assert_eq!(r["error"]["detail"]["now"], json!(elsewhere.to_str().unwrap()), "{r:#}");
+            assert_eq!(ch.origin_main(&fx), ch.a, "nothing pushed");
+            assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", elsewhere.to_str().unwrap(), "for-each-ref"]), "");
+            unredirect(&root, &fx, &ch.main);
+            let r = ok(call(&sock, "push", json!({ "repo": "tool", "shown": ch.c })));
+            assert_eq!(r["commit"], json!(ch.c), "{r:#}");
+            assert_eq!(ch.origin_main(&fx), ch.c);
+        });
+        drop(d);
+        core.close().unwrap();
+    }
+}
+
 /// C2 on C on the chain (a local publish that landed after the display).
 fn advance_chain(fx: &Dfx, ch: &Chain) -> String {
     let sb = &fx.sb;

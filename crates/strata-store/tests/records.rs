@@ -240,7 +240,7 @@ fn ref_audit_only_strata_refs_for_update_ref() {
     c2.old = None;
     let mut c3 = change(RefOp::Push, "refs/heads/main", RefOutcome::Pushed, Some(p));
     c3.at = t(61);
-    c3.confirmed = Some(Action::PushDeploy { repo: repo("app"), branch: "main".into() });
+    c3.confirmed = Some(Action::PushDeploy { repo: repo("app"), branch: "main".into(), url: String::new() });
     c3.detail = Some("remote: ok".into());
     let mut c4 = change(RefOp::Push, "refs/heads/main", RefOutcome::Refused, None);
     c4.at = t(62);

@@ -137,8 +137,37 @@ pub struct ConfirmToken {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Action {
-    PushDeploy { repo: RepoName, branch: String },
+    /// `url`: origin's effective push URL, read before the prompt and shown
+    /// on it (userinfo redacted, [`display_url`]); the push goes to exactly
+    /// it, and a different URL under the repo lock is `NotConfirmed`
+    /// (`remote_changed`). Serialized redacted too (store records, error
+    /// details never hold a token); empty only in a record written before
+    /// review P1-15 (`serde(default)`). [实现时补的决定]
+    PushDeploy {
+        repo: RepoName,
+        branch: String,
+        #[serde(default, serialize_with = "ser_display_url")]
+        url: String,
+    },
     DepsApprove { proposal: ProposalId },
     RemoveDiscard { session: SessionId },
     ConfigRelax { repo: RepoId },
+}
+
+/// A push URL as shown to a person (prompt, plan, error detail): the
+/// userinfo of a `scheme://userinfo@host/...` URL (which may hold a token)
+/// becomes `***`; anything else is kept as is. The binding itself always
+/// compares the full URL. [实现时补的决定] (review P1-15)
+pub fn display_url(url: &str) -> String {
+    let Some(i) = url.find("://") else { return url.to_string() };
+    let rest = &url[i + 3..];
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => format!("{}***{}", &url[..i + 3], &rest[at..]),
+        None => url.to_string(),
+    }
+}
+
+fn ser_display_url<S: serde::Serializer>(url: &str, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&display_url(url))
 }

@@ -31,6 +31,7 @@ fn push(repo: &str, branch: &str) -> Action {
     Action::PushDeploy {
         repo: RepoName::try_from(repo.to_string()).unwrap(),
         branch: branch.to_string(),
+        url: "git@github.com:inter/tool.git".to_string(),
     }
 }
 
