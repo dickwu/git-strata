@@ -130,8 +130,8 @@ pub enum Cmd {
     /// Publish session changes to the publish branch
     #[command(long_about = crate::help::PUBLISH, after_long_help = crate::help::PUBLISH_AFTER)]
     Publish {
-        /// SESSION:PATH to include (repeatable; without it, interactive on a TTY)
-        #[arg(long = "from", value_name = "S:PATH")]
+        /// SESSION:PATH or SESSION:REPO:PATH to include (repeatable; without it, interactive on a TTY)
+        #[arg(long = "from", value_name = "S:[REPO:]PATH")]
         from: Vec<String>,
         /// Same as `git-strata assign --file FILE --session SESSION`
         #[arg(long, num_args = 2, value_names = ["FILE", "SESSION"])]

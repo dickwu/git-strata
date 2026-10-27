@@ -189,15 +189,21 @@ different string.
 that holds it, with no repo prefix: for `staff-api/app/x.php` in session `S`
 write `--from "${S}:app/x.php"`, never `"${S}:staff-api/app/x.php"`. A
 directory publishes every checkpointed path under it. The repo is found by
-looking the path up in each workspace (on disk or in its base). Path errors
+looking the path up in each workspace (on disk or in its base); when several
+workspaces have it, the one repo whose checkpoints in the session changed it
+is taken. To name the repo outright, write **`--from "${S}:REPO:PATH"`**
+(e.g. `--from "${S}:admin:src/utils/a.ts"`). The text between the first and
+second `:` counts as REPO only when it is one of the session's repos;
+otherwise everything after the first `:` is PATH, so a PATH that itself
+starts with `<repo>:` is written `${S}:<repo>:<repo>:...`. Path errors
 come back before any TTY check and send nothing to the daemon:
 
 | error | when | `detail` |
 | --- | --- | --- |
 | `InvalidInput` `from_syntax` | no `:`, empty session, or not a repo path | |
 | `InvalidInput` `from_repo_prefix` | PATH starts with a repo name of the session and the rest exists in that repo | `{path, session, repo, expected}`; rerun with `expected` |
-| `InvalidInput` `from_path` | no workspace of a multi-repo session has PATH | `{path, session, repos, expected}` |
-| `AmbiguousMatch` `from_repo` | several workspaces have PATH | `{path, session, candidates}` |
+| `InvalidInput` `from_path` | no workspace of a multi-repo session has PATH, or `S:REPO:PATH` and REPO's workspace lacks it (or REPO is not in the session) | `{path, session, repos, expected}` |
+| `AmbiguousMatch` `from_repo` | several workspaces have PATH and not exactly one of their checkpoints changed it | `{path, session, candidates, changed_in, expected}`; rerun with one of `expected` (`S:REPO:PATH`) |
 
 In a single-repo session any other path is taken as that repo's (the daemon
 then reports a path that is not checkpointed as `NoMatch`).
@@ -421,7 +427,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Busy` (other) | repo lock held; wait, retry later |
 | `NotTty` | hand the exact command to the human |
 | `NotConfirmed` | report; the human reruns (`plan_changed`: rerun once yourself) |
-| `AmbiguousMatch` | ticket matches several sessions; use an id from `detail` (`from_repo`: a `--from` path is in several repos, see `detail.candidates`) |
+| `AmbiguousMatch` | ticket matches several sessions; use an id from `detail` (`from_repo`: a `--from` path is in several repos; rerun with one of `detail.expected`, the `S:REPO:PATH` form) |
 | `NoSuchSession` | cd into a workspace or pass `--session` |
 | `NoSuchRepo` | name not in config; `not_in_session`: run `detail.fix` (`git-strata add --session S --repo R`) |
 | `NoSuchBranch` | (`new`) a repo has no `origin/<default_branch>`; tell the human |

@@ -113,7 +113,10 @@ Notes:
   reads `$S:t`, `$S:h`, ... as modifiers. Path mistakes come back before any
   TTY check: `InvalidInput` `from_repo_prefix` (rerun with
   `error.detail.expected`), `InvalidInput` `from_path` (no workspace has it),
-  `AmbiguousMatch` `from_repo` (several do; `detail.candidates`).
+  `AmbiguousMatch` `from_repo` (several have it and not exactly one of their
+  checkpoints changed it; rerun with one of `detail.expected`). To pick the
+  repo yourself use `--from "${S}:REPO:PATH"` (e.g. `"${S}:admin:src/a.ts"`);
+  the middle part is REPO only when it is one of the session's repos.
 - `publish` replies only after checks, commit, push and the rebase of every
   session. `git push` waits for the remote's own hooks (bounded at 120 s,
   then `Unknown` `push_unknown`), the rebase is unbounded: a minute or two of
