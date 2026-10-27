@@ -59,28 +59,53 @@ fn real(p: &Path) -> Option<PathBuf> {
 
 /// Where an absolute path falls: the live session workspace containing it
 /// (by real path prefix) and the repo-relative path. `None` when outside
-/// every workspace.
+/// every workspace. A symlink as the last component names the link entry
+/// itself, not its target (review P1-9: `restore link` restored the file it
+/// pointed at); only when the link's own location is outside every
+/// workspace is it followed (a link from elsewhere into a workspace).
 pub fn locate(store: &Store, path: &Path) -> Result<Option<(SessionId, RepoName, Option<RepoPath>)>> {
-    // The path may not exist (a deleted file): resolve its nearest existing
-    // ancestor and re-append the rest.
+    let leaf_is_link = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    if leaf_is_link
+        && let (Some(name), Some(parent)) = (path.file_name(), path.parent())
+        && let Some(mut at) = resolved(parent)
+    {
+        at.push(name);
+        if let Some(hit) = in_workspace(store, &at)?
+            && hit.2.is_some()
+        {
+            return Ok(Some(hit));
+        }
+    }
+    match resolved(path) {
+        Some(real_path) => in_workspace(store, &real_path),
+        None => Ok(None),
+    }
+}
+
+/// `path` with every existing component resolved: the path may not exist
+/// (a deleted file), so resolve its nearest existing ancestor and re-append
+/// the rest.
+fn resolved(path: &Path) -> Option<PathBuf> {
     let mut probe = path.to_path_buf();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    let real_path = loop {
-        if let Some(r) = real(&probe) {
-            let mut r = r;
+    loop {
+        if let Some(mut r) = real(&probe) {
             for t in tail.iter().rev() {
                 r.push(t);
             }
-            break r;
+            return Some(r);
         }
         match (probe.file_name().map(|s| s.to_os_string()), probe.parent()) {
             (Some(name), Some(parent)) => {
                 tail.push(name);
                 probe = parent.to_path_buf();
             }
-            _ => return Ok(None),
+            _ => return None,
         }
-    };
+    }
+}
+
+fn in_workspace(store: &Store, real_path: &Path) -> Result<Option<(SessionId, RepoName, Option<RepoPath>)>> {
     for rec in live(store)? {
         for (repo, ws) in &rec.manifest.repos {
             let Some(root) = real(&ws.path) else { continue };

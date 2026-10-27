@@ -738,6 +738,33 @@ fn shape_is_this_doc_not_a_golden() {
     });
 }
 
+/// Review P1-9: `restore CP link` restores the symlink entry itself, not
+/// the file it points at. Before, the cli canonicalized the whole path, so
+/// it rolled back `a.txt` (the target) and left the changed link alone.
+#[test]
+fn restore_of_a_symlink_restores_the_link_not_its_target() {
+    let lv = Live::new(&["tool"], &base_files());
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool");
+        let ws = lv.ws(&s, "tool");
+        std::os::unix::fs::symlink("keep.txt", ws.join("link")).unwrap();
+        let cp = lv.run_in(&ws, &["checkpoint", "-m", "m"]).ok();
+        let id = cp["checkpoints"][0]["id"].as_u64().unwrap().to_string();
+        fs::remove_file(ws.join("link")).unwrap();
+        std::os::unix::fs::symlink("a.txt", ws.join("link")).unwrap();
+        write(&ws, "a.txt", b"edited\n");
+        lv.run_in(&ws, &["restore", &id, "link"]).ok();
+        assert_eq!(fs::read_link(ws.join("link")).unwrap(), Path::new("keep.txt"), "the link is restored");
+        assert_eq!(fs::read(ws.join("a.txt")).unwrap(), b"edited\n", "the old target is untouched");
+        let abs = ws.join("link");
+        fs::remove_file(&abs).unwrap();
+        std::os::unix::fs::symlink("a.txt", &abs).unwrap();
+        lv.run(&["restore", &id, abs.to_str().unwrap(), "--session", s.as_str()]).ok();
+        assert_eq!(fs::read_link(&abs).unwrap(), Path::new("keep.txt"), "by absolute path too");
+        assert_eq!(fs::read(ws.join("a.txt")).unwrap(), b"edited\n");
+    });
+}
+
 #[test]
 fn one_method_table() {
     // Every method name the cli sends is one of daemon.md §4's, and its
