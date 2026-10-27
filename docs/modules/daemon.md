@@ -544,7 +544,7 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | 锚点事务已调用之后失败 | `Unknown` | 不声称 ref 没变 | 不重放，不改成 `InvalidInput` 或 `Conflict` |
 | 恢复但 o 不是 c 的祖先 | `InvalidInput`（reason `not_fast_forward`） | 无 push | 改用接受 origin。gitio 不强推 |
 | 恢复要确认而凭据不符 | `NotConfirmed` | 无 push | 重新确认 |
-| 上次推送不确定 | status 报出 `UnknownPublish`，不重放、不删行 | 行还在 | 人决定 |
+| 上次推送不确定 | status 报出 `UnknownPublish`，不重放、不删行；同 repo 下一次发布前对远端对账，commit 已在远端就收行（publish.md D19） | 行还在 | 人决定：`git-strata push REPO` 之后下一次发布对上账 |
 | 崩溃留下的 Running 发布 | 先 `set_publish_phase(Running → Unknown)`，再当 Unknown 报出，不重放 | 行变成 Unknown | 人决定。留下 Running 会让下一次 publish 一直 Busy |
 | `observe_main` 失败 | 警告 `ObserveFailed`，再试一次 | 调用本身已完成的留下 | 下次观察补上 |
 | attach 越界 | `Unknown` 原样透传，加告警 | 现场留下 | 人看主 checkout 的 index，daemon 不改 |

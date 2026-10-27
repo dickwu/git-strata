@@ -311,7 +311,10 @@ fn origin_main(fx: &Dfx) -> String {
 fn failure_keeps_scene_no_replay() {
     let fx = Dfx::new();
     let hook = origin_dir(&fx).join("hooks/pre-receive");
-    fs::write(&hook, "#!/bin/sh\necho 'denied by policy' >&2\nexit 1\n").unwrap();
+    // Review P0-2: a definite refusal now closes its row; an unknown
+    // outcome comes from a push that outlasts its timeout.
+    fs::write(&hook, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
+    let t0 = std::time::Instant::now();
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
@@ -321,6 +324,7 @@ fn failure_keeps_scene_no_replay() {
     let chain = strata_publish::chain_ref("main");
     let (id, commit, unknown) = {
         let core = fx.prepare().unwrap();
+        strata_publish::seams::set_push_timeout(&core.gits[&repo_name("tool")], Some(Duration::from_millis(300)));
         let d = Daemon::start(&core).unwrap();
         let r = serving(&d, || {
             let id = new_session(&sock);
@@ -337,7 +341,7 @@ fn failure_keeps_scene_no_replay() {
             let r = call(&sock, "publish", json!({ "group": g }));
             assert_eq!(r["ok"], json!(false), "{r:#}");
             assert_eq!(r["error"]["code"], "Unknown", "{r:#}");
-            assert_eq!(r["error"]["detail"]["kind"], "PushRefused", "{r:#}");
+            assert_eq!(r["error"]["detail"]["kind"], "Unknown", "{r:#}");
             assert_eq!(push_calls(&core), 1, "pushed once");
 
             // The scene stays: the chain commit, the row, the workspace.
@@ -375,6 +379,8 @@ fn failure_keeps_scene_no_replay() {
     assert_eq!(core.store.session(&id).unwrap().unwrap().manifest.id, id);
     drop(d);
     core.close().unwrap();
+    strata_publish::seams::set_push_timeout(&strata_gitio::Git::open(&fx.main("tool")).unwrap(), None);
+    std::thread::sleep(Duration::from_secs(3).saturating_sub(t0.elapsed()));
 }
 
 /// Review H2: a confirmed publish is bound to the chain top the cli showed

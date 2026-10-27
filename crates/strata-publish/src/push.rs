@@ -328,7 +328,19 @@ fn close_failed(ctx: &Ctx, id: u64, written: Option<&CommitOid>, e: StrataError)
     }
     let mut o = outcome_base(ctx);
     o["commit"] = json!(written.map(|c| c.as_str()));
-    let to = if e.code == Code::Unknown {
+    let to = if is_bare_refusal(&e) {
+        // Review P0-2 (publish.md D-refused): the remote said no. The
+        // commit stays on the local chain and nothing is in flight, so
+        // the outcome is definite: the row closes `Done` with the refusal
+        // and does not block the repo's next publish.
+        o["stopped"] = json!(Code::PushRefused.as_str());
+        if let Some(d) = e.detail.as_ref() {
+            o["push"] = d.get("push").cloned().unwrap_or(Value::Null);
+            o["checks_ran"] = d.get("checks_ran").cloned().unwrap_or(Value::Null);
+            o["message"] = d.get("message").cloned().unwrap_or(Value::Null);
+        }
+        PublishPhase::Done
+    } else if e.code == Code::Unknown {
         o["error"] = err_json(&e);
         PublishPhase::Unknown
     } else {
@@ -348,6 +360,69 @@ fn close_failed(ctx: &Ctx, id: u64, written: Option<&CommitOid>, e: StrataError)
             tracing::warn!(publish = id, error = %se.message, "publish row could not be closed");
             unknown_with("row_not_closed", "the publish row could not be closed", Some(&e), carry(&e, json!({ "publish": id, "store": err_json(&se) })))
         }
+    }
+}
+
+/// The definite refusal `locked` returns after the commit: `Unknown` with
+/// `detail.kind = "PushRefused"` and no `reason` (anything wrapped after
+/// it carries a `reason` and stays unknown).
+fn is_bare_refusal(e: &StrataError) -> bool {
+    e.code == Code::Unknown
+        && e.detail
+            .as_ref()
+            .is_some_and(|d| d.get("kind").and_then(Value::as_str) == Some("PushRefused") && d.get("reason").is_none())
+}
+
+/// The commit an `Unknown` row wrote: `outcome.commit`, else the applied
+/// chain-ref update recorded for the row (a row closed by startup has no
+/// outcome).
+fn row_commit(ctx: &Ctx, r: &strata_store::PublishRecord) -> Option<CommitOid> {
+    if let Some(c) = r.outcome.as_ref().and_then(|o| o.get("commit")).and_then(Value::as_str) {
+        return CommitOid::try_from(c.to_owned()).ok();
+    }
+    let changes = ctx.store.ref_changes(r.group.id).ok()?;
+    changes.into_iter().rev().find(|c| c.op == RefOp::UpdateRef && c.outcome == RefOutcome::Applied).map(|c| c.new)
+}
+
+/// Review P0-2: the way out of an `Unknown` row. Before the §6 check, the
+/// repo's `Unknown` rows are reconciled against the remote under the repo
+/// lock: a row whose commit is now contained in `origin/<branch>` (fetched
+/// here) did land, so it closes `Done` with `push = Pushed` and
+/// `reconciled` naming the remote tip. A row whose commit is not on the
+/// remote stays `Unknown` (status keeps reporting it); the human pushes
+/// the chain with `git-strata push REPO` (which pushes that commit when
+/// it is still on the chain) and the next publish reconciles. Nothing is
+/// replayed. Fetch or git failures leave the rows as they are.
+fn reconcile_unknown(ctx: &Ctx) {
+    let Ok(open) = ctx.store.open_publishes() else { return };
+    let rows: Vec<_> = open
+        .into_iter()
+        .filter(|r| r.phase == PublishPhase::Unknown && r.group.batches.iter().any(|b| b.repo == *ctx.repo))
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    let branch = &ctx.cfg.publish.branch;
+    let r = ctx.locks.with_repo(ctx.repo, &mut || {
+        let tip = ctx.git.fetch(REMOTE, branch)?;
+        for row in &rows {
+            let Some(c) = row_commit(ctx, row) else { continue };
+            if !ctx.git.is_ancestor(&c, &tip).unwrap_or(false) {
+                continue;
+            }
+            let mut o = row.outcome.clone().filter(Value::is_object).unwrap_or_else(|| outcome_base(ctx));
+            o["commit"] = json!(c.as_str());
+            o["push"] = serde_json::to_value(PushOutcome::Pushed).unwrap_or(Value::Null);
+            o["reconciled"] = json!({ "remote": tip.as_str(), "branch": branch });
+            match ctx.store.set_publish_phase(row.group.id, PublishPhase::Unknown, PublishPhase::Done, Some(&o), now()) {
+                Ok(_) => tracing::info!(publish = row.group.id, commit = c.as_str(), "unknown publish reconciled: the remote has the commit"),
+                Err(e) => tracing::warn!(publish = row.group.id, error = %e.message, "unknown publish not reconciled"),
+            }
+        }
+        Ok(())
+    });
+    if let Err(e) | Ok(Err(e)) = r {
+        tracing::warn!(repo = %ctx.repo, error = %e.message, "unknown publishes not reconciled");
     }
 }
 
@@ -517,6 +592,7 @@ pub fn publish_bound(
     let sessions: BTreeSet<SessionId> = mine.batches.iter().map(|b| b.session.clone()).collect();
     let queue: Vec<SessionId> = sessions.iter().cloned().collect();
 
+    reconcile_unknown(ctx);
     // Step 2: queue, row, lock.
     let mut confirm = confirm;
     let mut slot: Option<Result<(u64, Landed)>> = None;

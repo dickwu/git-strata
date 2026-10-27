@@ -464,7 +464,7 @@ design §8 没有给发布单独的秒数。上表是本文的验收数字，首
 | 情形 | 对外的码 | 留下什么 | 之后 |
 | --- | --- | --- | --- |
 | 链与锚点的那一次事务失败 | `Unknown`，`detail` 保留 `HeadMoved` | commit 对象在。事务是一次调用，不留下「链已前进、锚点没写」的半截 | 不重试、不重合并。status 报出。已有的不一致不读成 `Leads` 来补 |
-| 同一次调用里，commit 已写入之后推送被拒 | `Unknown`，`detail.kind = "PushRefused"` | 链在本地 | 人处理后再 `push`。不自动重推。单独的 `push` 调用还没写过，仍返回草稿表里的 `PushRefused` |
+| 同一次调用里，commit 已写入之后推送被拒 | `Unknown`，`detail.kind = "PushRefused"`（cli 报 `PushRefused`）。远端明确拒绝是确定的结果：行收成 `Done`，`outcome.stopped = "PushRefused"`，带 `commit`、`push`（D19） | 链在本地 | 人处理后再 `push`，或下一次发布连同这个 commit 一起推。不自动重推。单独的 `push` 调用还没写过，仍返回草稿表里的 `PushRefused` |
 | commit 已写入之后的任何错误（review-2 N3） | `Unknown`，`detail.commit`；另带 `detail.push`（已知的推送结果，`PushOutcome` 的 JSON，含推送成功后 rebase / 关行失败时的 `Pushed`；没推为 null）和 `detail.checks_ran`；链 ref 事务失败（commit 已写、还没推）也带 `push: null` 和 `checks_ran`（review-3 R3）；行关不上（`row_moved` / `row_not_closed`）时只把 `commit` / `push` / `checks_ran` 这三个结果键从原错误拷过来，原错误的 `kind` / `message` 只留在 `detail.cause` 里，外层错误仍是记录失败而不是被包住的拒绝（review-3 T2） [实现时补的决定] | 不变 | daemon 把它们放进 `detail.landed`，信封里不丢已落地的结果 |
 | 推送超时或连接中断 | `Unknown` | 链在本地，行是 `Unknown` | 重启只报出，不重放 |
 | 推送之后的 I/O、rebase 写到一半 | `Unknown` | 现场留下 | 不重放。已进链的 commit 由 status 报出，不当成没发生 |
@@ -485,7 +485,7 @@ design §8 没有给发布单独的秒数。上表是本文的验收数字，首
 | 这个 repo 已有 `Running` 或 `Unknown` 的发布行 | `Busy`（`publish_open` 或 `publish_unknown`） | 无。不覆盖那一行，不重放 |
 | 会话已 Removed | `NoSuchSession` | 无 |
 
-`Unknown` 的行挡住这个 repo 的下一次发布，直到人看过 status。不挡住别的 repo。会话删除是否被挡由 session 定，本文不代它拒绝 `rm`。
+`Unknown` 的行挡住这个 repo 的下一次发布，直到它对上账（D19）：每次发布在第 2 步之前，拿 repo 写锁 fetch 一次，行的 commit（`outcome.commit`，没有就取这行记下的链 ref 更新）已在 `origin/<branch>` 里 → 行收成 `Done`，`push = Pushed`，`reconciled = { remote, branch }`。不在远端 → 行仍 `Unknown`，照旧 `Busy publish_unknown`；人用 `git-strata push REPO` 把链推上去之后，下一次发布对上账。什么都不重放。fetch 或 git 失败时行不动。不挡住别的 repo。会话删除是否被挡由 session 定，本文不代它拒绝 `rm`。
 
 善后自己又失败（清理 staging 时出错）时，外层仍是 `Unknown`，原始 `detail` 留在 `detail.cause` 里。不因为内层是 `Busy` 之类的具名码就把外层改回去。
 
@@ -530,7 +530,7 @@ design §8 没有给发布单独的秒数。上表是本文的验收数字，首
 | `commit_cas_failure_is_not_retried` | 读过链顶之后、ref 事务之前，另一边推进了链 → 不重新合并。`commit_tree` 已把对象写进主对象库之后，对外是 `Unknown`，`HeadMoved` 只在 `detail` 里，带期望值与实际值。不把 `HeadMoved` 当作对外的码 | `layerfs-daemon/tests/lane_merge.rs::a_commit_landing_before_the_lane_is_merged_in_the_lane`；`layerfs-daemon/tests/mount_control.rs::an_unresolved_moved_head_failure_is_answered_and_not_dropped` |
 | `deploy_on_push_without_confirm_stops_before_push` | [实现时补的决定]（2026-10-26，peilin："将api 也改为不用确认"）：改名 `confirm_without_a_matching_token_stops_before_push`，组合改为 (deploy_on_push, confirm) ∈ {(true,true),(false,true)}；另加 `deploy_on_push_without_confirm_pushes_headless`：`deploy_on_push = true`、`confirm = false` 不带凭据就推，记录的 `confirmed` 为空。原文：`deploy_on_push` 或 `publish.confirm` 为真、凭据缺失或 `action` 不是 `PushDeploy` 的这个 repo 与分支 → `NotConfirmed`。`attach_staging`、`gitio::stage`、`commit_tree` 都没被调用。记录 `Pushed` 的那一次调用不启动。没有 gitfile | 新增（计划；不变量 7） |
 | `push_timeout_keeps_chain_reports_unknown` | 推送超时后链 ref 仍是新 commit，结果 `Unknown`，`publishes` 行是 `Unknown`。重启后 status 报出同一行，不调用 `push` | 新增（Review Focus 5）；`layerfs-daemon/tests/mounted_commit_failures.rs::f3_unknown_history_outcome_keeps_custody_and_the_mount_still_serves`；`layerfs-daemon/tests/store_commit.rs::unknown_history_acknowledgement_retains_original_intent_and_capture` |
-| `push_refused_keeps_local_chain` | 远端拒绝 → 链仍指向新 commit，对外 `Unknown`，`detail.kind = "PushRefused"`，`detail.message` 是远端原话 | 新增（types.md `PushRefused`；写了之后不交具名码） |
+| `push_refused_keeps_local_chain` | 远端拒绝 → 链仍指向新 commit，对外 `Unknown`，`detail.kind = "PushRefused"`，`detail.message` 是远端原话；行 `Done`，`stopped = "PushRefused"`（D19）。`refused_publish_does_not_block_the_next`、`unknown_row_is_reconciled_when_the_remote_has_the_commit` 覆盖 D19 | 新增（types.md `PushRefused`；写了之后不交具名码） |
 | `push_false_leaves_chain_local` | `publish.push = false` → 记录 `Pushed` 的那一次调用不启动，链指向新 commit，`Published.push` 为 `None` | 新增（design §6.7） |
 | `pushed_sets_anchor_to_pushed_commit` | `Pushed` 只在同一次 gitio 调用提交之后返回：那次调用比较并交换远端跟踪 ref 和锚点，锚点等于推上去的 commit。提交之前推送没有完成。远端已收下而这次调用没提交就崩溃 → `Unknown`；之后 fetch 显示锚点不在 origin 上 → `Rewound`，不是 `Leads`，§5.4 不把 a 设成 o | 新增（"The publish chain carries an anchor"） |
 | `no_flag_or_env_bypass` | 设置任意环境变量或在配置里把 `confirm` 写成假、但 `deploy_on_push` 仍为真 → 仍要凭据。[实现时补的决定]（2026-10-26，peilin："将api 也改为不用确认"）：测试改为 `confirm = true` 时设任意环境变量仍要凭据（`confirm = false` 本身就是不要确认）。本文不读绕过用的 flag | 新增（不变量 7） |
@@ -759,5 +759,6 @@ git commit -m "feat(publish): one merge under the repo lock"
 | D12 导出在锁里 | `export_tree` 的对象是锁里刚读到的 B，在同一段锁里导出再合并。导出在凭据闸门和内存冲突判定之后 | 锁外导出再合并，会让并发的不相交发布得到 `HeadMoved`，与 3d 的「全部落地」矛盾。闸门之前不建目录 | 2026-10-23 |
 | D16 具名拒绝的相位 | 目录已删完、或还没建目录时，返回具名码之前把 `Running` 收成 `Done`，`outcome.stopped` 记下那个码。删不完则行保持 `Unknown`，不收成 `Done` | `publishes` 只允许进 `Done` 或 `Unknown`。留着 `Running`，重启会把一次干净的 `Conflict` 报成不确定。删不完的 gitfile 不能靠收成 `Done` 假装没有 | 2026-10-23 |
 | D17 合并基线取锁里的读 | 锁外的计划与锁里的 `publish_chain` 不一致时，用锁里的 B 做这一次合并，不因此 `HeadMoved`。对象已写入之后，对外是 `Unknown`，`HeadMoved` 只在 `detail` 里 | 草稿写「与计划不一致就 `HeadMoved`」。3d 的并发行要求取锁前落地的不相交发布并进这一次合并、全部落地。两处不能同时成立，矩阵行的断言取胜。草稿的「不重新合并、不重试」留在比较并交换失败上 | 2026-10-23 |
+| D19 拒绝收行、Unknown 对账（review P0-2） | 推送被远端明确拒绝时行收成 `Done`（`stopped = "PushRefused"`）；`Unknown` 行在同 repo 下一次发布前对远端对账，commit 已在远端就收成 `Done`（`reconciled`） | 原来拒绝也记成 `Unknown`，而 `Unknown` 没有出口，repo 永远 `Busy publish_unknown`。拒绝时远端没收、本地链留着，结果是确定的。对账只认"远端已含这个 commit"这一种确定情况；不在远端的仍留 `Unknown`，由人 `push` 之后自然对上。否决：自动重推（重放）；提供"手工清行"命令（会把未知当成已知） | 2026-10-27 |
 
 草稿里的 D1、D2、D3 保持原选择。D11（两次 `update_ref`，失败的那次靠下一次前移补上）撤回：它覆盖了「链与锚点同一次 ref 事务」的裁定。上游要求在 §2 第 3 条。

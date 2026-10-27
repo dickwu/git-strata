@@ -428,6 +428,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | --- | --- |
 | `Busy` (`daemon_down`) | `git-strata daemon start`, retry once |
 | `Busy` (`workspace_changed`) | a file changed while read; retry |
+| `Busy` (`publish_unknown`) | an earlier publish of this repo has an unknown outcome; it clears once origin has that commit (checked at each publish), e.g. after the human runs `git-strata push REPO`; a definite remote refusal never blocks |
 | `Busy` (other) | repo lock held; wait, retry later |
 | `NotTty` | hand the exact command to the human |
 | `NotConfirmed` | report; the human reruns (`plan_changed`: rerun once yourself) |

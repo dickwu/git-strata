@@ -327,6 +327,9 @@ OTHER ERRORS
   CheckFailed        the repo's check failed in staging: fix, rerun
   PushRefused        the commit landed (data.commits) but the remote refused
   Unknown push_unknown  push outcome unknown: do not retry; tell the human
+  Busy publish_unknown  an earlier publish of the repo is Unknown. It clears
+                     by itself once origin has that commit (checked on each
+                     publish); the human can `git-strata push REPO` first
   InvalidInput chain_rewound / chain_diverged  origin moved under an unpushed
                      chain. diverged on a repo without confirmation: run
                      `git-strata push REPO` (it replays), then rerun publish.

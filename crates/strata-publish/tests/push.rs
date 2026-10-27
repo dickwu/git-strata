@@ -282,7 +282,14 @@ fn push_refused_keeps_local_chain() {
     assert_eq!(fx.read_ref("tool", CHAIN).unwrap(), c);
     assert_eq!(fx.read_ref("tool", TRACK).unwrap(), origin);
     assert_eq!(fx.origin_head("tool", "main"), origin);
-    assert_eq!(last_row(&fx).phase, PublishPhase::Unknown);
+    // Review P0-2: a definite refusal closes the row (`Done`, stopped
+    // `PushRefused`), so it does not block the repo's next publish.
+    let r = last_row(&fx);
+    assert_eq!(r.phase, PublishPhase::Done);
+    let o = r.outcome.unwrap();
+    assert_eq!(o["stopped"], "PushRefused", "{o}");
+    assert_eq!(o["commit"], c.as_str(), "{o}");
+    assert_eq!(o["push"]["kind"], "Refused", "{o}");
     assert_eq!(state(&fx), ChainState::Leads);
 
     // The standalone push has written nothing yet: PushRefused.
@@ -712,4 +719,60 @@ fn refusal_with_a_moved_row_keeps_the_recording_error_and_the_result() {
     assert_eq!(d["checks_ran"], 1, "{d}");
     assert_eq!(d["commit"].as_str().unwrap(), fx.read_ref("tool", CHAIN).unwrap());
     assert_eq!(last_row(&fx).outcome.unwrap()["note"], "moved", "the other writer's outcome stays");
+}
+
+/// Review P0-2: a refused publish does not block the next one; the next
+/// publish pushes the whole chain (the refused commit and its own).
+#[test]
+fn refused_publish_does_not_block_the_next() {
+    let fx = fx();
+    hook(&fx, "echo 'denied by policy' >&2\nexit 1");
+    let (_s, g) = edit(&fx, "src/index.ts", b"export const a = 41\n");
+    let e = run(&fx, &g, None).unwrap_err();
+    let first = commit_of(&e);
+    fs::remove_file(origin_dir(&fx).join("hooks/pre-receive")).unwrap();
+    let (_s2, g2) = edit(&fx, "src/other.ts", b"export const b = 41\n");
+    let p = run(&fx, &g2, None).unwrap();
+    assert_eq!(p.push, Some(PushOutcome::Pushed));
+    assert_eq!(fx.origin_head("tool", "main"), p.commit.as_str());
+    assert!(fx.git_of("tool").is_ancestor(&strata_types::CommitOid::try_from(first).unwrap(), &p.commit).unwrap());
+}
+
+/// Review P0-2: an `Unknown` row whose commit is now on the remote is
+/// reconciled (`Done`, `reconciled`) by the next publish of the repo; one
+/// whose commit is not on the remote keeps refusing. Nothing is replayed.
+#[test]
+fn unknown_row_is_reconciled_when_the_remote_has_the_commit() {
+    let fx = fx();
+    let t0 = Instant::now();
+    hook(&fx, "sleep 2\nexit 1");
+    seams::set_push_timeout(fx.git_of("tool"), Some(Duration::from_millis(300)));
+    let (_s, g) = edit(&fx, "src/index.ts", b"export const a = 42\n");
+    let e = run(&fx, &g, None).unwrap_err();
+    assert_eq!(e.code, Code::Unknown, "{e:?}");
+    let c = commit_of(&e);
+    let id = last_row(&fx).group.id;
+    assert_eq!(row(&fx, id).phase, PublishPhase::Unknown);
+    seams::set_push_timeout(fx.git_of("tool"), None);
+    std::thread::sleep(Duration::from_secs(3).saturating_sub(t0.elapsed()));
+    fs::remove_file(origin_dir(&fx).join("hooks/pre-receive")).unwrap();
+
+    // Not on the remote yet: still refused, still Unknown.
+    let (_s2, g2) = edit(&fx, "src/other.ts", b"export const b = 42\n");
+    let e = run(&fx, &g2, None).unwrap_err();
+    assert_eq!(reason(&e), Some("publish_unknown"), "{e:?}");
+    assert_eq!(row(&fx, id).phase, PublishPhase::Unknown);
+
+    // The human pushes the chain; the next publish reconciles and runs.
+    let st = staging_for(&fx, &c);
+    let cfg = fx.config.repos[&repo_name("tool")].clone();
+    assert_eq!(push(fx.git_of("tool"), &cfg, &repo_name("tool"), &st, None).unwrap(), PushOutcome::Pushed);
+    let p = run(&fx, &g2, None).unwrap();
+    assert_eq!(p.push, Some(PushOutcome::Pushed));
+    let r = row(&fx, id);
+    assert_eq!(r.phase, PublishPhase::Done);
+    let o = r.outcome.unwrap();
+    assert_eq!(o["commit"], c.as_str(), "{o}");
+    assert_eq!(o["push"]["kind"], "Pushed", "{o}");
+    assert!(o["reconciled"]["remote"].is_string(), "{o}");
 }
