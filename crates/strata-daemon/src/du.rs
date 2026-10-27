@@ -22,7 +22,9 @@
 //! the first time it is sized (`new` for sessions created by this daemon,
 //! `seen` for older ones) and one at `rm` (the last cached figures), so the
 //! cumulative figure covers every session since the first line; sessions
-//! removed before that are unknown.
+//! removed before that are unknown. A `new` record also carries
+//! `create_ms`, the wall time of the `new` handler that made the session
+//! (absent on records written before this field, and on `seen`).
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
@@ -310,8 +312,9 @@ struct ScanState {
     done: u64,
     failed: VecDeque<(String, String)>,
     full_started: Option<u64>,
-    /// Sessions created by this daemon whose `new` record is still due.
-    new_due: HashSet<String>,
+    /// Sessions created by this daemon whose `new` record is still due,
+    /// with the wall time of their `new` when it was measured.
+    new_due: HashMap<String, Option<u64>>,
     last_save: Option<Instant>,
 }
 
@@ -352,6 +355,9 @@ pub struct Record {
     pub fig: Option<Figures>,
     #[serde(default)]
     pub as_of_ms: Option<u64>,
+    /// `new` records only: how long the `new` handler took (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_ms: Option<u64>,
 }
 
 impl Du {
@@ -441,6 +447,8 @@ impl Du {
         let mut bases = serde_json::Map::new();
         let mut deps = serde_json::Map::new();
         let mut sessions = Vec::new();
+        let recs = self.records();
+        let created = Self::create_times(&recs);
         let mut live = Agg::default();
         let mut bases_all = Agg::default();
         let mut deps_all = Agg::default();
@@ -458,6 +466,7 @@ impl Du {
                     let mut j = a.json();
                     j["session"] = json!(s);
                     j["savings"] = json!(a.fig.logical.saturating_sub(a.fig.private));
+                    j["create_ms"] = created.get(s.as_str()).map_or(Value::Null, |&ms| json!(ms));
                     sessions.push(j);
                     live.merge(a);
                 }
@@ -524,9 +533,15 @@ impl Du {
         })
     }
 
+    /// `create_ms` per session, from its `new` record.
+    fn create_times(recs: &[Record]) -> HashMap<&str, u64> {
+        recs.iter().filter_map(|r| Some((r.session.as_str(), r.create_ms?))).collect()
+    }
+
     /// Records, latest per session, summed.
     fn cumulative(&self) -> Value {
         let recs = self.records();
+        let created = Self::create_times(&recs);
         let since = recs.iter().map(|r| r.at_ms).min();
         let mut latest: HashMap<&str, &Record> = HashMap::new();
         for r in &recs {
@@ -538,6 +553,8 @@ impl Du {
         }
         let (mut logical, mut private, mut known, mut unknown, mut removed) = (0u64, 0u64, 0u64, 0u64, 0u64);
         let rm: HashSet<&str> = recs.iter().filter(|r| r.event == "rm").map(|r| r.session.as_str()).collect();
+        // Sessions with both a measured `new` and figures: the time and size of the same set.
+        let (mut timed, mut create_ms, mut timed_logical, mut timed_files) = (0u64, 0u64, 0u64, 0u64);
         for (s, r) in &latest {
             if rm.contains(s) {
                 removed += 1;
@@ -547,6 +564,12 @@ impl Du {
                     known += 1;
                     logical += f.logical;
                     private += f.private;
+                    if let Some(&ms) = created.get(s) {
+                        timed += 1;
+                        create_ms += ms;
+                        timed_logical += f.logical;
+                        timed_files += f.files;
+                    }
                 }
                 None => unknown += 1,
             }
@@ -561,6 +584,10 @@ impl Du {
             "private": private,
             "savings": logical.saturating_sub(private),
             "before_since": "unknown",
+            "timed": timed,
+            "create_ms": create_ms,
+            "timed_logical": timed_logical,
+            "timed_files": timed_files,
         })
     }
 
@@ -597,7 +624,13 @@ impl Du {
 
     /// After `new`: size the session first; its `new` record follows.
     pub fn on_new(self: &Arc<Self>, sid: &str) {
-        lock(&self.scan).new_due.insert(sid.to_owned());
+        self.on_new_timed(sid, None);
+    }
+
+    /// [`Du::on_new`] with the wall time `new` took; the `new` record carries it as `create_ms`.
+    pub fn on_new_timed(self: &Arc<Self>, sid: &str, took: Option<Duration>) {
+        let ms = took.map(|d| d.as_millis().min(u64::MAX as u128) as u64);
+        lock(&self.scan).new_due.insert(sid.to_owned(), ms);
         let keys = Self::session_keys(sid);
         {
             let mut st = lock(&self.scan);
@@ -630,7 +663,7 @@ impl Du {
         lock(&self.scan).new_due.remove(sid);
         let mut rec = self.recorded();
         let set = rec.get_or_insert_with(HashSet::new);
-        self.append(set, &Record { event: "rm".into(), session: sid.to_owned(), at_ms: now_ms(), fig, as_of_ms: as_of });
+        self.append(set, &Record { event: "rm".into(), session: sid.to_owned(), at_ms: now_ms(), fig, as_of_ms: as_of, create_ms: None });
         drop(rec);
         self.save();
     }
@@ -786,8 +819,9 @@ impl Du {
             (f, as_of)
         };
         let new = lock(&self.scan).new_due.remove(sid);
-        let event = if new { "new" } else { "seen" };
-        self.append(set, &Record { event: event.into(), session: sid.to_owned(), at_ms: now_ms(), fig: Some(fig), as_of_ms: Some(as_of) });
+        let event = if new.is_some() { "new" } else { "seen" };
+        let create_ms = new.flatten();
+        self.append(set, &Record { event: event.into(), session: sid.to_owned(), at_ms: now_ms(), fig: Some(fig), as_of_ms: Some(as_of), create_ms });
     }
 
     /// Write the cache atomically (tmp + rename).
@@ -982,12 +1016,20 @@ mod tests {
         assert!(!lock(&du.cache).units.keys().any(|k| root.join(k) == gone));
         // new: sized at once, `new` record
         file(&root.join("sessions/s-bbbbbbbb/app/f"), 7000);
-        du.on_new("s-bbbbbbbb");
+        du.on_new_timed("s-bbbbbbbb", Some(Duration::from_millis(1234)));
         assert!(du.wait_idle(Duration::from_secs(30)));
         let recs = du.records();
         let n = recs.iter().find(|r| r.session == "s-bbbbbbbb").unwrap();
         assert_eq!(n.event, "new");
         assert_eq!(n.fig.unwrap().logical, 7000);
+        assert_eq!(n.create_ms, Some(1234));
+        let r = du.report(false);
+        let s = r["sessions"]["list"].as_array().unwrap().iter().find(|s| s["session"] == "s-bbbbbbbb").unwrap().clone();
+        assert_eq!(s["create_ms"], 1234);
+        let cum = &r["savings"]["cumulative"];
+        assert_eq!((cum["timed"].clone(), cum["create_ms"].clone(), cum["timed_logical"].clone()), (json!(1), json!(1234), json!(7000)));
+        // a `seen` session has no time
+        assert!(recs.iter().filter(|r| r.event == "seen").all(|r| r.create_ms.is_none()));
         // rm: `rm` record with the cached figures; entries dropped
         fs::remove_dir_all(root.join("sessions/s-bbbbbbbb")).unwrap();
         du.on_remove("s-bbbbbbbb");

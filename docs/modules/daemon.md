@@ -522,6 +522,8 @@ daemon 实现 `publish::PublishLocks`（`with_sessions`、`with_repo`），放�
 
 **节省**。会话的 `savings` = logical − private：若是普通拷贝要多花的字节。`savings.live` 是活会话之和。`savings.cumulative` 来自 `<root>/daemon/du/sessions.jsonl`：`new` 处理器成功后把会话两个单元排到队首，量完记一条 `new`（已有会话第一次量到记 `seen`）；`rm` 成功后记一条 `rm`，带上缓存里最后的数字。每个会话取最后一条相加；`since` 之前的会话是 `unknown`。
 
+**创建耗时**。`new` 处理器量自己调 `sessions.new` 的墙钟时间，记在那条 `new` 记录的 `create_ms` 上（`seen`、`rm` 和旧记录没有这个字段）。`sessions.list[]` 每项带 `create_ms`（没有则 null）；`savings.cumulative` 加 `timed`（既有 `create_ms` 又量过的会话数）、`create_ms`（它们的耗时之和）、`timed_logical` 与 `timed_files`（同一批会话的 logical 字节和文件数），让界面拿同一批会话的耗时和体量对比。
+
 **准确度**。private 是 APFS 的 `ATTR_CMNEXT_PRIVATESIZE`：只属于这个文件的块；被克隆共享的 extent 一次也不算。allocated（`ATTR_FILE_DATAALLOCSIZE`）对每个持有它的文件各算一次。一个单元的真实占用在 private 与 allocated 之间；删掉它能释放的也在这个区间，且 Time Machine 快照可能留住释放的块。没有公开的 API 能问"删掉这棵树能释放多少"：`F_LOG2PHYS_EXT` 要逐文件逐 extent 调用，太慢，也只给物理偏移、不给引用计数，所以不用 [实现时补的决定]（2026-10-26）。测试：`du::tests`（单元划分、新鲜判定、缓存回答与排队、改动/新建/删除的失效、重开读缓存）与 `tests/daemon.rs::du_sizes_sessions_records_new_and_rm_and_gc_empties_trash`。
 
 ### 5.11 复杂度
