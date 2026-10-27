@@ -9,8 +9,6 @@ export const copy = {
     expand: 'Expand sidebar',
     shortcut: '⌘\\',
     waiting: (n: number) => (n === 1 ? '1 waiting for you' : `${n} waiting for you`),
-    up: 'running',
-    down: 'not reachable',
     conflicts: 'Has conflicts',
   },
   palette: {

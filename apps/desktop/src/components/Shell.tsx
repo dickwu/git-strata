@@ -69,7 +69,7 @@ export function Shell() {
   return (
     <div className="shell" data-collapsed={sidebarCollapsed}>
       <Titlebar />
-      <Sidebar sessions={sessions.data} daemonUp={status.isSuccess} />
+      <Sidebar sessions={sessions.data} />
       <main className="main">
         {screen === 'daemon' ? (
           <DaemonScreen status={status} plan={plan} onBack={() => go('sessions')} />

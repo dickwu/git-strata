@@ -117,46 +117,14 @@ body {
 .nav-item {
   white-space: nowrap;
 }
-.nav-icon {
-  position: relative;
-  display: inline-grid;
-  place-items: center;
-  flex: none;
-  width: 20px;
-}
 .nav-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   transition: opacity 120ms ease;
 }
-.sidebar[data-collapsed='true'] .nav-label,
-.sidebar[data-collapsed='true'] .nav-badge {
+.sidebar[data-collapsed='true'] .nav-label {
   opacity: 0;
-}
-/* Counts at the row end when expanded; a dot on the icon when collapsed. */
-.nav-badge {
-  margin-left: auto;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: var(--danger);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 18px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-.nav-badge-dot,
-.nav-icon-dot {
-  position: absolute;
-  top: -3px;
-  right: -4px;
-  width: 7px;
-  height: 7px;
-  box-shadow: 0 0 0 2px var(--bg-sunken);
 }
 .nav-badge-dot {
   border-radius: 50%;
@@ -443,10 +411,6 @@ body {
   background: color-mix(in srgb, currentColor 8%, transparent);
 }
 
-/* t76u: session shortcuts sit at the top level, Daemon is pinned to the bottom. */
-.nav-daemon {
-  margin-top: auto;
-}
 .waiting-note {
   display: inline-flex;
   align-items: center;

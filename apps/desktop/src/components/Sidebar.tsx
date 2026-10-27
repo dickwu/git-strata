@@ -2,7 +2,7 @@
 
 import type { ReactNode } from 'react';
 import { Tooltip } from 'antd';
-import { CloudServerOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
+import { MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
 import { copy } from '@/lib/copy';
 import { sessionRows } from '@/lib/view';
 import type { StatusReply } from '@/lib/types';
@@ -18,19 +18,13 @@ function Tip({ show, title, children }: { show: boolean; title: string; children
   );
 }
 
-export function Sidebar({
-  sessions,
-  daemonUp,
-}: {
-  sessions: StatusReply | undefined;
-  daemonUp: boolean;
-}) {
-  const { screen, session, go, openSession } = useNav();
+// The daemon lives in the status bar (StatusBar → DaemonStatusModal); its full screen is in ⌘K.
+export function Sidebar({ sessions }: { sessions: StatusReply | undefined }) {
+  const { session, openSession } = useNav();
   const { sidebarCollapsed: collapsed, toggleSidebar } = useLayout();
   const rows = sessionRows(sessions);
   const n = copy.nav;
   const toggle = collapsed ? n.expand : n.collapse;
-  const daemonName = `${n.daemon}, ${daemonUp ? n.up : n.down}`;
   return (
     <nav className="sidebar" aria-label={n.main} data-collapsed={collapsed}>
       <Tip show title={`${toggle} (${n.shortcut})`}>
@@ -62,21 +56,6 @@ export function Sidebar({
           </button>
         ))}
       </div>
-      <Tip show={collapsed} title={daemonName}>
-        <button
-          type="button"
-          className="nav-item nav-daemon"
-          aria-current={screen === 'daemon' ? 'page' : undefined}
-          aria-label={daemonName}
-          onClick={() => go('daemon')}
-        >
-          <span className="nav-icon">
-            <CloudServerOutlined aria-hidden />
-            <span className="dot nav-icon-dot" data-state={daemonUp ? 'up' : 'down'} aria-hidden />
-          </span>
-          <span className="nav-label">{n.daemon}</span>
-        </button>
-      </Tip>
     </nav>
   );
 }
