@@ -382,6 +382,8 @@ pub struct Daemon<'a> {
     /// stop), removed when the connection ends.
     conns: Mutex<BTreeMap<u64, UnixStream>>,
     next_conn: std::sync::atomic::AtomicU64,
+    /// `accept` failures for want of descriptors (EMFILE/ENFILE).
+    fd_errors: std::sync::atomic::AtomicU64,
     /// §5.9: the reconcile loop's counters and its last pass (daemon_status).
     reconcile: Mutex<Value>,
     /// §5.12: the du cache and its background pass (stopped on drop).
@@ -441,6 +443,7 @@ impl<'a> Daemon<'a> {
             stop: AtomicBool::new(false),
             conns: Mutex::new(BTreeMap::new()),
             next_conn: std::sync::atomic::AtomicU64::new(0),
+            fd_errors: std::sync::atomic::AtomicU64::new(0),
             reconcile: Mutex::new(json!({ "runs": 0, "last": null })),
             du: crate::du::Du::open(&core.config.paths.root),
         })
@@ -476,6 +479,16 @@ impl<'a> Daemon<'a> {
             .set_nonblocking(true)
             .map_err(|e| classify_io_error(&e, IoSide::Read, &self.core.opts.socket))?;
         let mut poisoned = false;
+        // Incident 2026-10-27: out of descriptors (EMFILE/ENFILE) the loop
+        // used to retry every 20 ms in silence (and macOS closes the client
+        // whose accept failed, which the CLI saw as `socket_closed`). Now
+        // it logs, backs off (20 ms doubling to 1 s), and frees a reserve
+        // descriptor so the next accept has a slot. While the reserve
+        // cannot be reopened the daemon is still out of descriptors: each
+        // client is answered `Busy` (`too_many_open_files`) and closed.
+        let mut reserve = File::open("/dev/null").ok();
+        let mut backoff = ACCEPT_BACKOFF_MIN;
+        let mut last_log: Option<std::time::Instant> = None;
         std::thread::scope(|s| {
             loop {
                 if self.stopping() || external.load(Ordering::SeqCst) {
@@ -497,16 +510,34 @@ impl<'a> Daemon<'a> {
                 }
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        if reserve.is_none() {
+                            reserve = File::open("/dev/null").ok();
+                            if reserve.is_none() {
+                                shed(stream);
+                                std::thread::sleep(backoff);
+                                backoff = (backoff * 2).min(ACCEPT_BACKOFF_MAX);
+                                continue;
+                            }
+                        }
+                        backoff = ACCEPT_BACKOFF_MIN;
                         let _ = stream.set_nonblocking(false);
                         let id = self.next_conn.fetch_add(1, Ordering::SeqCst);
-                        let Ok(c) = stream.try_clone() else { continue };
+                        // Out of descriptors for the clone: answer Busy, not
+                        // a silent close.
+                        let Ok(c) = stream.try_clone() else {
+                            shed(stream);
+                            continue;
+                        };
                         self.conns.lock().unwrap_or_else(|p| p.into_inner()).insert(id, c);
                         s.spawn(move || {
-                            if let Ok(w) = stream.try_clone() {
-                                let mut r = BufReader::new(stream);
-                                let mut w = w;
-                                let mut h = |req: Request| handle(req);
-                                let _ = rpc::serve_connection(&mut r, &mut w, MAX_FRAME, &mut h);
+                            match stream.try_clone() {
+                                Ok(w) => {
+                                    let mut r = BufReader::new(stream);
+                                    let mut w = w;
+                                    let mut h = |req: Request| handle(req);
+                                    let _ = rpc::serve_connection(&mut r, &mut w, MAX_FRAME, &mut h);
+                                }
+                                Err(_) => shed(stream),
                             }
                             // The clone kept for the stop goes with the connection.
                             self.conns.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
@@ -514,12 +545,34 @@ impl<'a> Daemon<'a> {
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(20)),
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
+                    Err(e) if matches!(e.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE)) => {
+                        let fd_errors = self.fd_errors.fetch_add(1, Ordering::SeqCst) + 1;
+                        if last_log.is_none_or(|t| t.elapsed() >= FD_LOG_EVERY) {
+                            last_log = Some(std::time::Instant::now());
+                            self.core.warnings.alert_once(&format!(
+                                "accept: {e} ({fd_errors} times; {} descriptors open, {} connections); shedding new connections with Busy",
+                                open_fd_count().map_or("?".to_string(), |n| n.to_string()),
+                                self.open_connections()
+                            ));
+                        }
+                        reserve = None;
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(ACCEPT_BACKOFF_MAX);
+                    }
+                    Err(e) => {
+                        if last_log.is_none_or(|t| t.elapsed() >= FD_LOG_EVERY) {
+                            last_log = Some(std::time::Instant::now());
+                            self.core.warnings.alert_once(&format!("accept: {e}"));
+                        }
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(ACCEPT_BACKOFF_MAX);
+                    }
                 }
             }
             // Stop: queued takes fail ReadOnly(shutting_down); the holder
             // finishes. Idle connections see end of input; a connection in
             // the middle of a request still writes its reply.
+            drop(reserve.take());
             self.core.locks.shutdown();
             for c in self.conns.lock().unwrap_or_else(|p| p.into_inner()).values() {
                 let _ = c.shutdown(std::net::Shutdown::Read);
@@ -575,8 +628,68 @@ impl<'a> Daemon<'a> {
             "warnings": warnings,
             "verify": verify_result,
             "reconcile": self.reconcile.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+            "fds": {
+                "open": open_fd_count(),
+                "limit": fd_limit().map(|(soft, _)| soft),
+                "accept_errors": self.fd_errors.load(Ordering::SeqCst),
+            },
         }))
     }
+}
+
+const ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(20);
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
+const FD_LOG_EVERY: Duration = Duration::from_secs(10);
+
+/// The soft descriptor limit `raise_fd_limit` asks for (macOS caps
+/// `setrlimit` at `OPEN_MAX`, 10240). launchd starts agents with 256; on
+/// 2026-10-27 25 live workspaces (then about 8 watcher descriptors each),
+/// search-index maps and connections used them up.
+pub const FD_LIMIT: u64 = 10240;
+
+/// Raise the soft `RLIMIT_NOFILE` to `min(FD_LIMIT, hard)`. Returns the
+/// soft limit before and after. Never lowers it.
+pub fn raise_fd_limit() -> io::Result<(u64, u64)> {
+    let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: plain syscalls on a local struct.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let before = r.rlim_cur;
+    let want = FD_LIMIT.min(r.rlim_max);
+    if before >= want {
+        return Ok((before, before));
+    }
+    r.rlim_cur = want;
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &r) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((before, want))
+}
+
+/// (soft, hard) `RLIMIT_NOFILE`.
+pub fn fd_limit() -> Option<(u64, u64)> {
+    let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    (unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } == 0).then_some((r.rlim_cur, r.rlim_max))
+}
+
+/// Descriptors open in this process now (entries of /dev/fd, less the
+/// one the listing itself uses).
+pub fn open_fd_count() -> Option<usize> {
+    let n = fs::read_dir("/dev/fd").ok()?.count();
+    Some(n.saturating_sub(1))
+}
+
+/// Answer a client the daemon cannot serve now (out of descriptors) with
+/// `Busy` and close it, so it does not hang in the backlog.
+fn shed(stream: UnixStream) {
+    use std::io::Write;
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+    let e = StrataError::new(Code::Busy, "git-stratad is out of file descriptors; try again shortly")
+        .with_detail(json!({ "reason": "too_many_open_files" }));
+    let mut w = &stream;
+    let _ = writeln!(w, "{}", rpc::Reply::error(&Value::Null, &e).0);
 }
 
 /// Step 12: bind the socket (directory 0700, socket 0600). The caller

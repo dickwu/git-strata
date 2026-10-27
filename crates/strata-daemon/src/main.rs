@@ -34,6 +34,14 @@ fn run() -> Result<(), StrataError> {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
     }
+    // Incident 2026-10-27: launchd's default soft descriptor limit (256)
+    // ran out with 25 live workspaces (each watcher holds ~8). Raise it
+    // before anything is opened.
+    match startup::raise_fd_limit() {
+        Ok((before, after)) if after > before => (opts.alert)(&format!("raised the open-file limit from {before} to {after}")),
+        Ok(_) => {}
+        Err(e) => (opts.alert)(&format!("cannot raise the open-file limit: {e}")),
+    }
     // 2. Single instance, held across the store wait below.
     let mut instance = Some(InstanceLock::take(&strata_daemon::lock_path(&opts.config_dir))?);
     let open_git = |p: &std::path::Path| strata_gitio::Git::open(p);
