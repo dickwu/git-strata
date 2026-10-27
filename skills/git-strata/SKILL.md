@@ -232,7 +232,7 @@ All three keys are always present; `data` is never null. Branch on
 | `CheckMutates` | Configured check writes files; config problem, tell the human. |
 | `HeadMoved` | Another publish or main moved first. Re-read state; do not loop. |
 | `PushRefused` | Remote refused (detail has its words). Report to the human. |
-| `Unknown` | Outcome uncertain (e.g. push timeout, `socket_closed`). Do not retry or clean up; run `status` and tell the human. |
+| `Unknown` | Outcome uncertain (e.g. push timeout, `socket_closed`). Do not retry or clean up; run `status` and tell the human. Exception: `detail.reason` `poisoned` means nothing was written; the daemon restarts itself to reopen the store, so retry once after `git-strata daemon status` answers again. |
 | `Binary` / `TooLarge` | Per-entry markers in `diff` / `grep` results; not a call failure. |
 | `Corrupt` | Store damage. Stop and tell the human. |
 
