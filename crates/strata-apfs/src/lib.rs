@@ -21,6 +21,7 @@ mod rooted_write;
 mod sync;
 #[allow(dead_code)]
 mod error;
+mod eintr;
 #[allow(dead_code)]
 mod sys;
 mod volume;
@@ -49,6 +50,7 @@ pub mod seams {
     pub use crate::hooks::{MetaChange, set_after_bulk_window, set_before_meta, set_before_open};
 }
 pub use error::{IoSide, classify_io_error};
+pub use eintr::{EINTR_ATTEMPTS, retry_eintr, retry_eintr_n};
 pub use casefold::{case_fold_eq, case_fold_key};
 pub use watch::{WatchEvent, WatchOptions, Watcher, watch, watch_with};
 pub use usage::{Usage, usage_of, usage_with};

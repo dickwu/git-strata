@@ -22,6 +22,7 @@ pub mod resolve;
 pub mod rpc;
 pub mod startup;
 pub mod track;
+pub mod waiting;
 
 /// The confirm seams a test daemon is built with (feature `test-seams`
 /// only; a binary built with them refuses to start). Re-exported so the

@@ -342,6 +342,17 @@ panic：写前 → 该请求 RPC `Failed`，进程继续。写后 → 对该请�
 
 听 socket 之前不接受请求。小时计时从开始听算起。
 
+#### 5.1a 等 store
+
+第 3–8 步遇到 I/O 错误（`detail` 带 `errno`/`io_kind`/`io`，例如 macOS TCC 还没放行可移动卷时的 `EINTR`、`EPERM`/`EACCES`），daemon 不退出，在进程内重试：间隔 1 s 起翻倍，封顶 60 s。不退出是为了不让 launchd 的 `KeepAlive` 变成每几秒一次的重启循环（每次重启又去撞 TCC）。
+
+- `daemon.lock` 在整个等待期间一直持有。
+- 日志：第一次出错写一行（带错误原文、第几次、多久后重试）；之后只在错误变了，或每 10 分钟提醒一次时再写。成功时写一行 `store available after N attempts`。
+- 第一次出错就 bind socket。等待期间每个请求都回 `Busy`，`detail.reason = "store_unavailable"`（或成功后、开始听之前的 `"starting"`），带 `attempts`、`last_error`、`last_error_at`、`next_retry_in_ms`、`since`。同一个 listener 之后交给正式的 accept 循环。
+- `SIGTERM`/`SIGINT` 立即结束等待，删 socket，退出 0。
+- 配置错误、`Corrupt`、`NameTaken` 等非 I/O 错误照旧：stdout 一行，退出。
+- 单个文件系统调用遇到 `EINTR` 先就地重试几次（`strata_apfs::retry_eintr`，5 次），仍失败才进上面的等待。
+
 ### 5.2 等锁
 
 每个 RPC 一个线程局部 `visible: bool`，初值 false。

@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use crate::sql::{self, Connection, Mode};
 use serde_json::json;
-use strata_apfs::{IoSide, classify_io_error, full_fsync, nearest_existing_ancestor, same_volume};
+use strata_apfs::{IoSide, classify_io_error, full_fsync, nearest_existing_ancestor, retry_eintr, same_volume};
 use strata_types::{Code, StrataError};
 
 use crate::errors::{self, NOT_WRITTEN, corrupt, err, sql};
@@ -56,7 +56,7 @@ pub(crate) fn rename_excl(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 fn exists(p: &Path) -> io::Result<bool> {
-    match fs::symlink_metadata(p) {
+    match retry_eintr(|| fs::symlink_metadata(p)) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
@@ -64,8 +64,8 @@ fn exists(p: &Path) -> io::Result<bool> {
 }
 
 fn dir_has_entries(p: &Path) -> io::Result<bool> {
-    match fs::read_dir(p) {
-        Ok(mut it) => Ok(it.next().is_some()),
+    match retry_eintr(|| fs::read_dir(p).map(|mut it| it.next().is_some())) {
+        Ok(any) => Ok(any),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => Ok(true),
         Err(e) => Err(e),
@@ -75,15 +75,9 @@ fn dir_has_entries(p: &Path) -> io::Result<bool> {
 /// L1: `store/LOCK`, `O_CREAT | O_RDWR | O_CLOEXEC`, `flock(LOCK_EX | LOCK_NB)`.
 fn take_lock(store_dir: &Path) -> Result<File> {
     let path = store_dir.join("LOCK");
-    let f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC)
-        .open(&path)
-        .map_err(|e| ioe(&e, IoSide::Write, &path, "open"))?;
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create(true).truncate(false).mode(0o600).custom_flags(libc::O_CLOEXEC);
+    let f = retry_eintr(|| opts.open(&path)).map_err(|e| ioe(&e, IoSide::Write, &path, "open"))?;
     loop {
         let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc == 0 {
@@ -106,7 +100,7 @@ fn take_lock(store_dir: &Path) -> Result<File> {
 
 /// Step 2 of §5.2: the file header, without SQLite.
 fn check_header(db: &Path) -> Result<()> {
-    let mut f = File::open(db).map_err(|e| ioe(&e, IoSide::Read, db, "open"))?;
+    let mut f = retry_eintr(|| File::open(db)).map_err(|e| ioe(&e, IoSide::Read, db, "open"))?;
     let mut buf = [0u8; 100];
     let mut got = 0;
     while got < buf.len() {
@@ -336,9 +330,9 @@ impl Store {
             ));
         }
         // 2. same volume, nothing written
-        let anc = nearest_existing_ancestor(root).map_err(|e| classify_io_error(&e, IoSide::Read, root))?;
+        let anc = retry_eintr(|| nearest_existing_ancestor(root)).map_err(|e| classify_io_error(&e, IoSide::Read, root))?;
         for c in checkouts {
-            match fs::metadata(c) {
+            match retry_eintr(|| fs::metadata(c)) {
                 Ok(_) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     return Err(err(
@@ -349,7 +343,7 @@ impl Store {
                 }
                 Err(e) => return Err(classify_io_error(&e, IoSide::Read, c)),
             }
-            let same = same_volume(&anc, c).map_err(|e| classify_io_error(&e, IoSide::Read, c))?;
+            let same = retry_eintr(|| same_volume(&anc, c)).map_err(|e| classify_io_error(&e, IoSide::Read, c))?;
             if !same {
                 return Err(err(
                     Code::CrossVolume,
@@ -359,12 +353,13 @@ impl Store {
             }
         }
         // 3. look at <root>
-        match fs::metadata(root) {
+        match retry_eintr(|| fs::metadata(root)) {
             Ok(m) if m.is_dir() => {
                 let mut foreign = Vec::new();
-                for ent in fs::read_dir(root).map_err(|e| ioe(&e, IoSide::Read, root, "open"))? {
-                    let ent = ent.map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
-                    let name = ent.file_name().to_string_lossy().into_owned();
+                let names = retry_eintr(|| fs::read_dir(root)?.map(|e| e.map(|e| e.file_name())).collect::<io::Result<Vec<_>>>())
+                    .map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
+                for name in names {
+                    let name = name.to_string_lossy().into_owned();
                     if !LAYOUT_NAMES.contains(&name.as_str()) {
                         foreign.push(name);
                     }
@@ -419,7 +414,7 @@ impl Store {
             ));
         }
         check_header(&db)?;
-        let real_root = fs::canonicalize(root).map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
+        let real_root = retry_eintr(|| fs::canonicalize(root)).map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
         let rdb = real_root.join("store").join("store.db");
         let c = open_reader_conn(&rdb)?;
         check_identity(&c, "open")?;
@@ -635,7 +630,7 @@ fn open_existing(root: &Path, lock: Option<File>) -> Result<Store> {
     };
     let db = store_dir.join("store.db");
     check_header(&db)?;
-    let real_root = fs::canonicalize(root).map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
+    let real_root = retry_eintr(|| fs::canonicalize(root)).map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
     let rstore = real_root.join("store");
     let rdb = rstore.join("store.db");
     let c = open_conn(&rdb).map_err(|e| sql(e, "open", NOT_WRITTEN))?;

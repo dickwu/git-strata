@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
-use strata_apfs::{IoSide, classify_io_error};
+use strata_apfs::{IoSide, classify_io_error, retry_eintr};
 use strata_confirm::Confirmer;
 use strata_deps::InstallEnv;
 use strata_gitio::Git;
@@ -95,19 +95,15 @@ impl InstanceLock {
         if let Some(dir) = path.parent() {
             make_private_dir(dir)?;
         }
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_CLOEXEC)
-            .open(path)
-            .map_err(|e| classify_io_error(&e, IoSide::Write, path))?;
-        // SAFETY: flock on a descriptor this function owns.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc != 0 {
-            let e = io::Error::last_os_error();
+        let mut oo = OpenOptions::new();
+        oo.read(true).write(true).create(true).truncate(false).mode(0o600).custom_flags(libc::O_CLOEXEC);
+        let file = retry_eintr(|| oo.open(path)).map_err(|e| classify_io_error(&e, IoSide::Write, path))?;
+        let locked = retry_eintr(|| {
+            // SAFETY: flock on a descriptor this function owns.
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+        });
+        if let Err(e) = locked {
             if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
                 return Err(StrataError::new(Code::Exists, "another git-stratad is running")
                     .with_detail(json!({ "reason": "daemon_running", "lock": path })));
@@ -124,7 +120,7 @@ impl InstanceLock {
 }
 
 fn make_private_dir(dir: &Path) -> Result<()> {
-    match fs::DirBuilder::new().recursive(true).mode(0o700).create(dir) {
+    match retry_eintr(|| fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)) {
         Ok(()) => Ok(()),
         Err(e) => Err(classify_io_error(&e, IoSide::Write, dir)),
     }
@@ -226,8 +222,25 @@ pub struct Core {
 pub fn prepare(opts: Options, confirmer: Confirmer, open_git: &dyn Fn(&Path) -> Result<Git>) -> Result<Core> {
     // 2. Single instance before anything else is read.
     let instance = InstanceLock::take(&crate::lock_path(&opts.config_dir))?;
+    prepare_locked(opts, confirmer, open_git, &mut Some(instance))
+}
+
+/// Steps 3–7 under an instance lock the caller already holds. The lock
+/// moves into the [`Core`] only on success; on an error it stays in
+/// `instance`, so `main` can retry without letting another daemon in
+/// (§5.1a, waiting for the store).
+pub fn prepare_locked(
+    opts: Options,
+    confirmer: Confirmer,
+    open_git: &dyn Fn(&Path) -> Result<Git>,
+    instance: &mut Option<InstanceLock>,
+) -> Result<Core> {
+    if instance.is_none() {
+        return Err(StrataError::new(Code::InvalidInput, "prepare_locked without the instance lock")
+            .with_detail(json!({ "reason": "no_instance_lock" })));
+    }
     // 3. Config: parse (TOML + validate in file order), then validate.
-    let text = fs::read_to_string(&opts.config_file).map_err(|e| classify_io_error(&e, IoSide::Read, &opts.config_file))?;
+    let text = retry_eintr(|| fs::read_to_string(&opts.config_file)).map_err(|e| classify_io_error(&e, IoSide::Read, &opts.config_file))?;
     let mut config = Config::parse(&text)?;
     config.validate()?;
     // 4. Every path exists and is its own realpath.
@@ -267,6 +280,10 @@ pub fn prepare(opts: Options, confirmer: Confirmer, open_git: &dyn Fn(&Path) -> 
     for repo in pins.pending() {
         warnings.add(DaemonWarning::ConfigRelaxPending { repo });
     }
+    let Some(instance) = instance.take() else {
+        return Err(StrataError::new(Code::InvalidInput, "prepare_locked without the instance lock")
+            .with_detail(json!({ "reason": "no_instance_lock" })));
+    };
     Ok(Core {
         pins,
         env: InstallEnv { path: opts.install_path.clone(), timeout: InstallEnv::DEFAULT_TIMEOUT },
@@ -283,7 +300,7 @@ pub fn prepare(opts: Options, confirmer: Confirmer, open_git: &dyn Fn(&Path) -> 
 }
 
 fn check_realpath(name: &RepoName, path: &Path) -> Result<()> {
-    let real = fs::canonicalize(path).map_err(|e| {
+    let real = retry_eintr(|| fs::canonicalize(path)).map_err(|e| {
         StrataError::new(Code::InvalidInput, format!("repo {name}: {} does not exist", path.display()))
             .with_detail(json!({ "reason": "missing", "repo": name.as_str(), "path": path, "io": e.to_string() }))
     })?;
@@ -300,7 +317,7 @@ fn check_realpath(name: &RepoName, path: &Path) -> Result<()> {
 fn check_realpath_root(root: &Path) -> Result<()> {
     // The root may not exist yet (Store::open creates it); when it does it
     // must be its realpath too.
-    if let Ok(real) = fs::canonicalize(root)
+    if let Ok(real) = retry_eintr(|| fs::canonicalize(root))
         && real != root
     {
         return Err(StrataError::new(
