@@ -316,6 +316,8 @@ struct ScanState {
 }
 
 /// The du state of one daemon; shared with its scan thread.
+/// Lock order (review P1-4): `recorded` → `scan` → `cache`. A path that
+/// needs two of them takes them in that order or one at a time.
 pub struct Du {
     root: PathBuf,
     dir: PathBuf,
@@ -393,10 +395,12 @@ impl Du {
         let mut groups: BTreeMap<Group, Agg> = BTreeMap::new();
         let (mut eligible, mut young) = (Agg::default(), Agg::default());
         let (mut eligible_n, mut young_n) = (0u64, 0u64);
+        // Review P1-4: lock order is `recorded` → `scan` → `cache`; the
+        // queue is read before the cache lock, never inside it.
+        let queued = lock(&self.scan).queued.clone();
         {
             let mut cache = lock(&self.cache);
             let present: HashSet<&str> = units.iter().map(|u| u.key.as_str()).collect();
-            let queued = lock(&self.scan).queued.clone();
             cache.units.retain(|k, _| present.contains(k.as_str()) || queued.contains(k));
             for u in &units {
                 let path = self.root.join(&u.key);
@@ -921,6 +925,35 @@ mod tests {
         let recs = du.records();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].event, "seen");
+    }
+
+    /// Review P1-4: `report` (cache, then scan) against `scan_json` and
+    /// the pass end (scan, then cache) deadlocked. Hammer both.
+    #[test]
+    fn report_and_scan_status_do_not_deadlock() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let d2 = du.0.clone();
+        std::thread::spawn(move || {
+            std::thread::scope(|s| {
+                let a = &d2;
+                s.spawn(move || {
+                    for _ in 0..300 {
+                        a.report(true);
+                    }
+                });
+                s.spawn(move || {
+                    for _ in 0..20_000 {
+                        let _ = a.scan_json();
+                    }
+                });
+            });
+            let _ = tx.send(());
+        });
+        assert!(rx.recv_timeout(Duration::from_secs(60)).is_ok(), "report and scan_json deadlocked");
+        assert!(du.wait_idle(Duration::from_secs(30)));
     }
 
     #[test]
