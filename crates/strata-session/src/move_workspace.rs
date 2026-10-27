@@ -16,7 +16,7 @@ use strata_types::{
     SessionId, StrataError,
 };
 
-use crate::carry::Carry;
+use crate::carry::{Carried, Carry};
 use crate::new::pin_ref;
 use crate::scene::{Scene, SceneOp, cause_of, unknown_error};
 use crate::seams::is_stop;
@@ -323,11 +323,13 @@ impl Sessions<'_> {
         let _live = LiveMove { set: &self.live_moves, key: (session.clone(), name.clone()) };
         let sname = format!("{MOVE_STAGING_PREFIX}{name}-{}", random_hex(8));
         let staging = root.join(&sname);
-        let n = self.store.begin_move(session, &name, &new_base, &head, &staging, SystemTime::now())?;
+        let started = SystemTime::now();
+        let n = self.store.begin_move(session, &name, &new_base, &head, &staging, started)?;
         let mv = Mv { session, name: &name, n, staging: staging.clone(), shadow_dir: shadow_dir.clone() };
 
         // 13. prepare.
-        let prepared = (|| -> Result<(Rebased, Vec<RepoPath>)> {
+        let old_admin = shadow_dir.join("worktrees").join(row.generation.to_string());
+        let prepared = (|| -> Result<(Rebased, Vec<RepoPath>, Carried, bool)> {
             self.store.set_move_phase(session, &name, n, "prepare")?;
             self.seams.hit("move.prepare", Some(&name))?;
             strata_apfs::clone_tree_rooted(&self.store.base_dir(&new_base), &root, &rp(sname.clone()))?;
@@ -335,13 +337,16 @@ impl Sessions<'_> {
             let opts = RebaseOptions::for_move(&new, ignorecase)?;
             let rebased = strata_overlay::rebase(&Overlay::from_checkpoint(&cp), &old, &new, self.store, &opts)?;
             strata_overlay::project(self.store, &rebased.overlay, &staging)?;
-            let uncarried = self.carry(&ws.path, &staging, &old, &cp.entries, &d, cfg, ignorecase, &name)?;
+            let out = self.carry(&ws.path, &staging, &old, &cp.entries, &d, cfg, ignorecase, &name)?;
+            // Review P1-14: what the carry took and when, next to the old
+            // tree's admin dir, for later judgements of the kept old tree.
+            write_carried(&old_admin, n, &out.carried);
             git.attach_worktree(&shadow, n, &head, &staging, &ws.path)?;
             strata_apfs::full_fsync(&strata_apfs::open_rooted(&root, &rp(sname.clone()))?)?;
             strata_apfs::full_fsync(&strata_apfs::open_root(&root)?)?;
-            Ok((rebased, uncarried))
+            Ok((rebased, out.uncarried, out.carried, ignorecase))
         })();
-        let (rebased, uncarried) = match prepared {
+        let (rebased, uncarried, carried, ignorecase) = match prepared {
             Ok(x) => x,
             Err(e) => return Err(self.prepare_failed(&mv, "prepare", e)),
         };
@@ -423,13 +428,15 @@ impl Sessions<'_> {
 
         // ---- Phase F: the old tree (now at S). Failures here only show in
         // `old_tree` and status.
-        let old_admin = shadow_dir.join("worktrees").join(row.generation.to_string());
         let old_tree = match self.seams.hit("move.old_tree", Some(&name)) {
             Err(e) if is_stop(&e) => return Err(e),
             Err(_) => Some(staging.clone()),
             Ok(()) => {
                 let held = strata_deps::open_files(&staging).map(|h| !h.is_empty()).unwrap_or(true);
-                let unchanged = self.tree_matches(session, &name, cfg, &staging, &old, &cp.entries);
+                // Review P1-14: the overlay entries, and every carried
+                // ignored entry as the carry took it.
+                let unchanged = self.tree_matches(session, &name, cfg, &staging, &old, &cp.entries)
+                    && untouched(&staging, &old, &cp.entries, &d, cfg, ignorecase, Some(&carried), started);
                 if !held && unchanged && uncarried.is_empty() {
                     let gone = self.store.retire_dir(&staging).is_ok() && {
                         let _ = self.retire_present(&old_admin);
@@ -500,7 +507,7 @@ impl Sessions<'_> {
         cfg: &RepoConfig,
         fold: bool,
         name: &RepoName,
-    ) -> Result<Vec<RepoPath>> {
+    ) -> Result<crate::carry::CarryOut> {
         let mut owned: Vec<&str> = old.manifest.entries.keys().map(|p| p.as_str()).collect();
         for e in entries {
             owned.push(e.path.as_str());
@@ -550,14 +557,32 @@ impl Sessions<'_> {
     }
 
     /// Whether a done move's old tree still matches its BeforeRollout
-    /// checkpoint.
+    /// checkpoint, and (review P1-14) still holds every carried ignored
+    /// entry as the carry took it: judged against the record the move left
+    /// in the old tree's admin dir, or, without one, against the move's
+    /// start.
     pub(crate) fn old_tree_unchanged(&self, i: &MoveIntent, cfg: &RepoConfig) -> Result<bool> {
         let path = i.old_tree.clone().unwrap_or_else(|| i.staging.clone());
         let Some(cp) = self.rollout_checkpoint(i)? else {
             return Ok(false);
         };
         let base = self.base_of(&cp.base)?;
-        Ok(self.tree_matches(&i.session, &i.repo, cfg, &path, &base, &cp.entries))
+        if !self.tree_matches(&i.session, &i.repo, cfg, &path, &base, &cp.entries) {
+            return Ok(false);
+        }
+        let mut dset: BTreeSet<RepoPath> = cfg.deps_dirs.iter().cloned().collect();
+        for deps in [&cp.base.deps, &i.to.deps] {
+            if let Some(set) = strata_deps::find_set(self.store, &i.repo, deps)? {
+                dset.extend(set.dirs.iter().cloned());
+            }
+        }
+        let d: Vec<RepoPath> = dset.into_iter().collect();
+        let fold = self.git(&i.repo)?.read_index(&path).map(|x| x.ignorecase).unwrap_or(false);
+        let all = self.store.move_intents(&i.session)?;
+        let admin =
+            self.shadow_dir(&i.session, &i.repo).join("worktrees").join(prior_generation(&all, i).to_string());
+        let carried = read_carried(&admin, i.n);
+        Ok(untouched(&path, &base, &cp.entries, &d, cfg, fold, carried.as_ref(), i.started))
     }
 
     /// Retire `p` unless it is already gone.
@@ -692,6 +717,60 @@ fn quarantine(shadow_dir: &Path, from: &str, stem: &str) -> Result<PathBuf> {
             Err(u)
         }
     }
+}
+
+/// The carry record's file in an old tree's admin dir (review P1-14).
+const CARRIED_FILE: &str = "strata-carried.json";
+
+#[derive(Serialize, Deserialize)]
+struct CarriedRecord {
+    n: u64,
+    carried: Carried,
+}
+
+/// Best effort: without the record, later judgements hold every ignored
+/// entry to the move's start (stricter, never looser).
+fn write_carried(admin: &Path, n: u64, carried: &Carried) {
+    if let Ok(body) = serde_json::to_vec(&CarriedRecord { n, carried: carried.clone() }) {
+        let _ = std::fs::write(admin.join(CARRIED_FILE), body);
+    }
+}
+
+fn read_carried(admin: &Path, n: u64) -> Option<Carried> {
+    let body = std::fs::read(admin.join(CARRIED_FILE)).ok()?;
+    let r: CarriedRecord = serde_json::from_slice(&body).ok()?;
+    (r.n == n).then_some(r.carried)
+}
+
+/// Review P1-14: no ignored entry of the old tree at `tree` holds content
+/// the carry did not take (`Carry::touched`). An error reads as touched.
+#[allow(clippy::too_many_arguments)]
+fn untouched(
+    tree: &Path,
+    old: &Base,
+    entries: &[OverlayEntry],
+    d: &[RepoPath],
+    cfg: &RepoConfig,
+    fold: bool,
+    carried: Option<&Carried>,
+    since: SystemTime,
+) -> bool {
+    let mut owned: Vec<&str> = old.manifest.entries.keys().map(|p| p.as_str()).collect();
+    for e in entries {
+        owned.push(e.path.as_str());
+        if let strata_types::EntryKind::Renamed { from, .. } = &e.kind {
+            owned.push(from.as_str());
+        }
+    }
+    let c = Carry {
+        ws: tree,
+        dst: tree,
+        owned,
+        deps_dirs: d.iter().map(|p| p.as_str()).collect(),
+        nested: strata_deps::nested_seed_caches(cfg),
+        fold,
+    };
+    matches!(c.touched(carried, since), Ok(None))
 }
 
 fn sorted(mut v: Vec<OverlayEntry>) -> Vec<OverlayEntry> {

@@ -4,9 +4,10 @@
 //! their target; nothing is ever captured into the blob store, nothing in
 //! the new tree is ever overwritten.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use strata_apfs::{Attrs, CloneKind, FileKind, RenameMode, WalkOptions};
 use strata_types::{Code, RepoPath};
@@ -48,6 +49,28 @@ impl Keys {
     }
 }
 
+/// Review P1-14: when each carried entry was taken. Path (a carried
+/// directory covers everything below it) → nanoseconds since the epoch, read
+/// just before its clone (or, for a symlink, before its target was read).
+/// An entry of the old tree whose ctime is earlier was carried as it is now.
+/// `entered`: foreign directories present in both trees, carried entry by
+/// entry (judged by their children only).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Carried {
+    pub taken: BTreeMap<String, u128>,
+    pub entered: BTreeSet<String>,
+}
+
+/// What one carry run produced.
+pub(crate) struct CarryOut {
+    pub uncarried: Vec<RepoPath>,
+    pub carried: Carried,
+}
+
+pub(crate) fn ns_of(t: SystemTime) -> u128 {
+    t.duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+}
+
 enum Outcome {
     Carried,
     Uncarried,
@@ -56,9 +79,7 @@ enum Outcome {
 }
 
 impl Carry<'_> {
-    /// Carry everything foreign; `after_walk` runs once after the first walk
-    /// (the `move.carry` seam). Returns the `uncarried` paths, sorted.
-    pub(crate) fn run(&self, after_walk: &dyn Fn() -> Result<()>) -> Result<Vec<RepoPath>> {
+    fn keys(&self) -> Keys {
         let mut keys = Keys { owned: BTreeSet::new(), above: BTreeSet::new(), prune: BTreeSet::new(), fold: self.fold };
         for p in &self.owned {
             let k = keys.key(p);
@@ -77,8 +98,16 @@ impl Carry<'_> {
             let k = keys.key(d);
             keys.prune.insert(k);
         }
+        keys
+    }
 
+    /// Carry everything foreign; `after_walk` runs once after the first walk
+    /// (the `move.carry` seam). Returns the `uncarried` paths, sorted, and
+    /// when each carried entry was taken.
+    pub(crate) fn run(&self, after_walk: &dyn Fn() -> Result<()>) -> Result<CarryOut> {
+        let keys = self.keys();
         let mut uncarried = BTreeSet::new();
+        let mut carried = Carried::default();
         let found = self.collect(&keys, None)?;
         // Seed caches nested in dependency directories: found after the walk
         // too, so the same race rules hold.
@@ -91,9 +120,89 @@ impl Carry<'_> {
             }
         }
         after_walk()?;
-        self.process(&keys, found, &mut uncarried)?;
-        self.process(&keys, nested, &mut uncarried)?;
-        Ok(uncarried.into_iter().collect())
+        self.process(&keys, found, &mut uncarried, &mut carried)?;
+        self.process(&keys, nested, &mut uncarried, &mut carried)?;
+        Ok(CarryOut { uncarried: uncarried.into_iter().collect(), carried })
+    }
+
+    /// Review P1-14: the first foreign entry of the tree at `self.ws` (the
+    /// old tree after a move) that may hold content the carry did not take:
+    /// one not covered by `carried`, or changed (ctime or mtime) at or after
+    /// the moment its carry began. With no record (`carried = None`) every
+    /// foreign entry is held to `since` (the move's start). Owned paths are
+    /// not looked at (the overlay comparison covers them), nor are the
+    /// dependency directories (never carried); the nested seed caches are.
+    pub(crate) fn touched(&self, carried: Option<&Carried>, since: SystemTime) -> Result<Option<RepoPath>> {
+        let keys = self.keys();
+        let since = ns_of(since);
+        let threshold = |p: &str| -> Option<u128> {
+            let Some(c) = carried else {
+                return Some(since);
+            };
+            let mut at = p;
+            loop {
+                if let Some(t) = c.taken.get(at) {
+                    return Some(*t);
+                }
+                at = at.rsplit_once('/')?.0;
+            }
+        };
+        let changed = |p: &str, a: &Attrs| -> bool {
+            match threshold(p) {
+                None => true,
+                Some(t) => ns_of(a.ctime) >= t || ns_of(a.mtime) >= t,
+            }
+        };
+        // Owned entries and the dependency directories are dropped; the
+        // proper ancestors of owned paths are entered but not judged.
+        let filter = |p: &Path, _: &Attrs| -> bool {
+            let Some(s) = p.to_str() else {
+                return true;
+            };
+            if s == ".git" {
+                return false;
+            }
+            let k = keys.key(s);
+            if keys.prune.contains(&k) || keys.owned.contains(&k) {
+                return false;
+            }
+            true
+        };
+        for item in strata_apfs::walk_with(self.ws, &WalkOptions::default(), &filter) {
+            let (p, a) = item?;
+            if keys.above.contains(&keys.key(p.as_str())) {
+                continue;
+            }
+            if carried.is_some_and(|c| c.entered.contains(p.as_str())) {
+                continue;
+            }
+            if changed(p.as_str(), &a) {
+                return Ok(Some(p));
+            }
+        }
+        for c in &self.nested {
+            match strata_apfs::attrs_of(self.ws, c) {
+                Ok(a) => {
+                    if changed(c.as_str(), &a) {
+                        return Ok(Some(c.clone()));
+                    }
+                }
+                Err(e) if matches!(e.code, Code::NoSuchPath | Code::NotDirectory) => continue,
+                Err(e) => return Err(e),
+            }
+            let opts = WalkOptions { start: Some(c.clone()), ..Default::default() };
+            for item in strata_apfs::walk_with(self.ws, &opts, &|_: &Path, _: &Attrs| true) {
+                let (p, a) = match item {
+                    Ok(x) => x,
+                    Err(e) if matches!(e.code, Code::NoSuchPath | Code::NotDirectory) => break,
+                    Err(e) => return Err(e),
+                };
+                if changed(p.as_str(), &a) {
+                    return Ok(Some(p));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// The foreign entries under `start` (`None` = the workspace root).
@@ -128,14 +237,25 @@ impl Carry<'_> {
         Ok(v.into_iter().map(|(s, a)| (rp(s), a)).collect())
     }
 
-    fn process(&self, keys: &Keys, items: Vec<(RepoPath, Attrs)>, uncarried: &mut BTreeSet<RepoPath>) -> Result<()> {
+    fn process(
+        &self,
+        keys: &Keys,
+        items: Vec<(RepoPath, Attrs)>,
+        uncarried: &mut BTreeSet<RepoPath>,
+        carried: &mut Carried,
+    ) -> Result<()> {
         for (p, a) in items {
+            let at = ns_of(SystemTime::now());
             match self.one(&p, &a)? {
-                Outcome::Carried | Outcome::Skipped => {}
+                Outcome::Carried => {
+                    carried.taken.insert(p.as_str().to_string(), at);
+                }
+                Outcome::Skipped => {}
                 Outcome::Uncarried => {
                     uncarried.insert(p);
                 }
                 Outcome::Descend => {
+                    carried.entered.insert(p.as_str().to_string());
                     let below = match self.collect(keys, Some(&p)) {
                         Ok(v) => v,
                         // Changed since the walk: gone, or no longer a directory.
@@ -146,7 +266,7 @@ impl Carry<'_> {
                         }
                         Err(e) => return Err(e),
                     };
-                    self.process(keys, below, uncarried)?;
+                    self.process(keys, below, uncarried, carried)?;
                 }
             }
         }

@@ -822,6 +822,56 @@ fn move_workspace_keeps_old_tree_while_in_use() {
     }
 }
 
+/// Review P1-14 (GS-01): an ignored file edited in the old tree after the
+/// carry took it (before the swap) is not in the new tree; the old tree
+/// must be kept, not retired. Both a carried file and a file inside a
+/// directory carried whole; and, as the control, no edit → retired.
+#[test]
+fn move_workspace_keeps_old_tree_with_a_late_ignored_edit() {
+    for late in [None, Some("late.env"), Some("build/out.txt")] {
+        let fx = Fx::with(&["tool"]);
+        let s = fx.sessions();
+        ignore(&fx, "tool", "late.env\nbuild/\n");
+        let rep = new_tool(&fx, &s);
+        let id = id(&rep);
+        let w = ws(&rep, "tool");
+        fs::write(w.join("late.env"), b"v1\n").unwrap();
+        fs::create_dir_all(w.join("build")).unwrap();
+        fs::write(w.join("build/out.txt"), b"v1\n").unwrap();
+        let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
+        s.arm(SessionSeam::PauseAt { phase: "move.recheck".into() });
+        let r = std::thread::scope(|sc| {
+            let h = sc.spawn(|| mv(&fx, &s, &id, &to));
+            s.wait_paused();
+            if let Some(p) = late {
+                fs::write(w.join(p), b"v2\n").unwrap();
+            }
+            s.release();
+            h.join().unwrap().unwrap()
+        });
+        assert!(r.uncarried.is_empty(), "{r:?}");
+        let Some(p) = late else {
+            assert!(r.old_tree.is_none(), "nothing late: the old tree goes ({r:?})");
+            assert_eq!(fs::read(w.join("late.env")).unwrap(), b"v1\n");
+            continue;
+        };
+        let old = r.old_tree.clone().unwrap_or_else(|| panic!("{p}: the old tree is kept ({r:?})"));
+        assert_eq!(fs::read(old.join(p)).unwrap(), b"v2\n", "{p}: the late edit survives in the old tree");
+        assert_eq!(fs::read(w.join(p)).unwrap(), b"v1\n", "{p}: the new tree has what the carry took");
+        let n = intents(&fx, &id).last().unwrap().n;
+        assert_eq!(intent(&fx, &id, n).old_tree.as_deref(), Some(old.as_path()), "{p}: retained");
+        let kept = warnings(&s, &id).into_iter().find_map(|x| match x {
+            StatusWarning::OldTreeKept { changed, retained, .. } => Some((changed, retained)),
+            _ => None,
+        });
+        assert_eq!(kept, Some((true, true)), "{p}");
+        // A later move does not collect it either.
+        let to2 = target(&fx, &s, "tool", &[("src/up2.ts", b"up\n")]);
+        mv(&fx, &s, &id, &to2).unwrap();
+        assert!(old.join(p).is_file(), "{p}: still kept after the next move");
+    }
+}
+
 #[test]
 #[ignore = "timing on a full-size tree (§7 move_workspace_seconds_warm)"]
 fn move_workspace_seconds_warm() {
