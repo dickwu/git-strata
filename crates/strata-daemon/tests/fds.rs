@@ -130,7 +130,7 @@ fn out_of_descriptors_the_daemon_sheds_with_busy_and_recovers() {
         ok(call(&sock, "daemon_status", json!({})));
         set_soft((fds() + 64) as u64);
         let mut fill: Vec<File> = Vec::new();
-        let mut fill_up = |fill: &mut Vec<File>| {
+        let fill_up = |fill: &mut Vec<File>| {
             while let Ok(f) = File::open("/dev/null") {
                 fill.push(f);
             }
