@@ -106,7 +106,7 @@ fn attach_refuses_inactive_session() {
     for (r, w) in repos.iter_mut() {
         w.path = root.join(r.as_str());
     }
-    st.create_session(&SessionManifest { id: other.clone(), ticket: None, root, repos }, SystemTime::now())
+    st.create_session(&SessionManifest { id: other.clone(), ticket: None, agent: None, root, repos }, SystemTime::now())
         .unwrap();
     let first = ov.map.lock().unwrap()[&(id(&rep), fx.rn("front"))].clone();
     ov.set(&other, "front", first);

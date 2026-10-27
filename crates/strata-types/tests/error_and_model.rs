@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime};
 
 use strata_types::{
-    Action, BaseGen, Batch, BlobId, Checkpoint, CheckpointId, CheckpointReason, Code, CommitOid,
+    Action, AgentName, BaseGen, Batch, BlobId, Checkpoint, CheckpointId, CheckpointReason, Code, CommitOid,
     ConfirmToken, DepsSet, DepsSetId, EntryKind, ManifestEntry, OverlayEntry, ProposalId,
     PublishTarget, PushOutcome, ReleaseGroup, RepoId, RepoName, RepoPath, SessionId,
     SessionManifest, StrataError, TreeOid, WorkspaceState,
@@ -145,6 +145,7 @@ fn session_manifest_skips_absent_ticket() {
     let manifest = SessionManifest {
         id: SessionId::try_from("s-k3q7xm2a".to_owned()).unwrap(),
         ticket: None,
+        agent: None,
         root: "/Volumes/GWD/inter/.strata/sessions/s-k3q7xm2a".into(),
         repos: std::collections::BTreeMap::from([(
             rn("tool"),
@@ -163,6 +164,7 @@ fn session_manifest_skips_absent_ticket() {
     };
     let json = serde_json::to_value(&manifest).unwrap();
     assert!(json.get("ticket").is_none());
+    assert!(json.get("agent").is_none());
     let back: SessionManifest = serde_json::from_value(json).unwrap();
     assert_eq!(back, manifest);
 }
@@ -206,4 +208,21 @@ fn confirm_token_is_plain_data_with_a_debug_impl() {
         push: true,
         confirm: false,
     };
+}
+
+#[test]
+fn session_manifest_carries_agent_and_reads_old_json_without_it() {
+    let mut old = serde_json::json!({
+        "id": "s-k3q7xm2a",
+        "root": "/tmp/s",
+        "repos": {},
+    });
+    let m: SessionManifest = serde_json::from_value(old.clone()).unwrap();
+    assert_eq!(m.agent, None);
+    old["agent"] = "claude-code".into();
+    let m: SessionManifest = serde_json::from_value(old.clone()).unwrap();
+    assert_eq!(m.agent, Some(AgentName::try_from("claude-code".to_owned()).unwrap()));
+    assert_eq!(serde_json::to_value(&m).unwrap()["agent"], "claude-code");
+    old["agent"] = "".into();
+    assert!(serde_json::from_value::<SessionManifest>(old).is_err());
 }

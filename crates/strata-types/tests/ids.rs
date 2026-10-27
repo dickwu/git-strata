@@ -1,5 +1,5 @@
 use strata_types::{
-    BlobId, CheckpointId, CommitOid, DepsSetId, ProposalId, RepoId, RepoName, RepoPath, SessionId,
+    AgentName, BlobId, CheckpointId, CommitOid, DepsSetId, ProposalId, RepoId, RepoName, RepoPath, SessionId,
     TreeOid, ViewId,
 };
 
@@ -144,4 +144,29 @@ fn ids_round_trip_through_json() {
     let id = CheckpointId::try_from(3_u64).unwrap();
     assert_eq!(serde_json::to_string(&id).unwrap(), "3");
     assert!(serde_json::from_str::<CheckpointId>(&format!("{}", (i64::MAX as u64) + 1)).is_err());
+}
+
+#[test]
+fn agent_name_accepts_short_slugs() {
+    for raw in ["claude-code", "codex", "cursor-agent", "A", "my_agent.v2", &"a".repeat(64)] {
+        let a = AgentName::try_from(raw.to_owned()).unwrap();
+        assert_eq!(a.as_str(), raw);
+        assert_eq!(a.to_string(), raw);
+    }
+}
+
+#[test]
+fn agent_name_rejects_empty_long_and_odd_chars() {
+    for raw in ["", "-codex", ".x", "_x", "a b", "a/b", "ü", "a\n", &"a".repeat(65)] {
+        let e = AgentName::try_from(raw.to_owned()).unwrap_err();
+        assert_eq!(e.code, strata_types::Code::InvalidInput, "{raw:?}");
+        assert_eq!(e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|f| f.as_str()), Some("agent"), "{raw:?}");
+    }
+}
+
+#[test]
+fn agent_name_serde_is_a_plain_string_and_validates() {
+    let a: AgentName = serde_json::from_str("\"codex\"").unwrap();
+    assert_eq!(serde_json::to_string(&a).unwrap(), "\"codex\"");
+    assert!(serde_json::from_str::<AgentName>("\"bad name\"").is_err());
 }

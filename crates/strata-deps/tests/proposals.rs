@@ -968,6 +968,7 @@ fn make_session(fx: &Fx, id: &SessionId, removed: bool) {
         &SessionManifest {
             id: id.clone(),
             ticket: None,
+            agent: None,
             root,
             repos,
         },

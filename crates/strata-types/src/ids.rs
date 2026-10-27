@@ -55,6 +55,51 @@ impl std::fmt::Display for RepoName {
     }
 }
 
+/// Which AI agent created a session (`claude-code`, `codex`, `cursor-agent`,
+/// or any `STRATA_AGENT` / `--agent` value): 1-64 of `[A-Za-z0-9._-]`,
+/// starting with a letter or digit.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct AgentName(String);
+
+impl AgentName {
+    pub const MAX_LEN: usize = 64;
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for AgentName {
+    type Error = StrataError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let ok = !value.is_empty()
+            && value.len() <= Self::MAX_LEN
+            && value.as_bytes()[0].is_ascii_alphanumeric()
+            && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-');
+        if !ok {
+            return Err(invalid(format!(
+                "agent name {value:?} must be 1-64 of [A-Za-z0-9._-] starting with a letter or digit (set STRATA_AGENT or --agent to e.g. claude-code)"
+            ))
+            .with_detail(serde_json::json!({ "reason": "agent" })));
+        }
+        Ok(Self(value))
+    }
+}
+
+impl From<AgentName> for String {
+    fn from(value: AgentName) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for AgentName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RepoId(PathBuf);

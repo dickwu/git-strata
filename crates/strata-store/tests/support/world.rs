@@ -58,7 +58,7 @@ pub fn world(env: &Env, s: &Store) {
         repo(),
         WorkspaceState { base: gen1(), head: CommitOid::try_from("1".repeat(40)).unwrap(), path: root.join("app"), tracked: true },
     );
-    s.create_session(&SessionManifest { id: sid(), ticket: None, root, repos }, t(10)).unwrap();
+    s.create_session(&SessionManifest { id: sid(), ticket: None, agent: None, root, repos }, t(10)).unwrap();
     assert!(s.set_lifecycle(&sid(), Lifecycle::Creating, Lifecycle::Active, None, t(11)).unwrap());
 }
 

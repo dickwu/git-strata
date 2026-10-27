@@ -5,7 +5,7 @@ use std::time::{Instant, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BlobId, CheckpointId, CommitOid, DepsSetId, ProposalId, RepoId, RepoName, RepoPath, SessionId,
+    AgentName, BlobId, CheckpointId, CommitOid, DepsSetId, ProposalId, RepoId, RepoName, RepoPath, SessionId,
     TreeOid,
 };
 
@@ -115,6 +115,10 @@ pub struct SessionManifest {
     pub id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// The AI agent that created the session (CLI detection or `--agent`);
+    /// absent for sessions from before schema v2 or with no agent detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentName>,
     pub root: PathBuf,
     pub repos: BTreeMap<RepoName, WorkspaceState>,
 }
