@@ -84,16 +84,29 @@ fn repo_for(config: &Config, store: &Store, s: &SessionId, flag: Option<&str>, c
 
 // ---- new --------------------------------------------------------------------
 
-pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, repos: &[String]) -> Result<Envelope> {
-    if repos.is_empty() || repos.iter().any(|r| r.is_empty()) {
-        return Err(invalid("repos", "--repos needs at least one repo name"));
+pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only: &[String], repos: &[String]) -> Result<Envelope> {
+    if !only.is_empty() && !repos.is_empty() {
+        return Err(invalid(
+            "repo_flags",
+            "pass either --repo (the session gets only those repos) or --repos (every repo gets a workspace), not both",
+        ));
+    }
+    let list = if only.is_empty() { repos } else { only };
+    if list.is_empty() || list.iter().any(|r| r.is_empty()) {
+        return Err(invalid("repos", "pass --repo R (repeatable) or --repos A,B with at least one repo name"));
     }
     let ticket = match (ticket_flag, ticket) {
         (Some(a), Some(b)) => return Err(invalid("ticket", format!("the ticket is given twice ({a:?} and {b:?})"))),
         (a, b) => a.or(b),
     };
-    let names: Vec<RepoName> = repos.iter().map(|r| repo_name(r)).collect::<Result<_>>()?;
-    let v = ctx.call("new", json!({ "ticket": ticket, "repos": names }), Kind::Write)?;
+    let names: Vec<RepoName> = list.iter().map(|r| repo_name(r)).collect::<Result<_>>()?;
+    // `only` is sent only when set, so this CLI still talks to a daemon
+    // that predates it (its params refuse unknown fields).
+    let mut params = json!({ "ticket": ticket, "repos": names });
+    if !only.is_empty() {
+        params["only"] = json!(true);
+    }
+    let v = ctx.call("new", params, Kind::Write)?;
     for w in v["anchor_unknown"].as_array().into_iter().flatten() {
         eprintln!("warning: anchor unknown: {w}");
     }
@@ -102,6 +115,25 @@ pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, repos
         hint(s);
     }
     Ok(Envelope::ok(report))
+}
+
+// ---- add --------------------------------------------------------------------
+
+/// cli.md `add`: more repos for an existing session (session.md D52).
+pub fn add(ctx: &Ctx, session: Option<String>, repos: &[String]) -> Result<Envelope> {
+    if repos.is_empty() || repos.iter().any(|r| r.is_empty()) {
+        return Err(invalid("repos", "pass --repo R (repeatable) with at least one repo name"));
+    }
+    let config = ctx.config()?;
+    let names: Vec<RepoName> = repos.iter().map(|r| known_repo(&config, r)).collect::<Result<_>>()?;
+    let store = ro::open_store(&config)?;
+    let (s, _) = ro::session_or_cwd(&store, session.as_deref())?;
+    let v = ctx.call("add", json!({ "session": s, "repos": names }), Kind::Write)?;
+    for w in v["anchor_unknown"].as_array().into_iter().flatten() {
+        eprintln!("warning: anchor unknown: {w}");
+    }
+    hint(s);
+    Ok(Envelope::ok(v.get("report").cloned().unwrap_or(Value::Null)))
 }
 
 // ---- status -------------------------------------------------------------------

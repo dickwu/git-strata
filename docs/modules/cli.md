@@ -51,6 +51,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | 命令 | daemon 方法 | TTY | 确认 |
 | --- | --- | --- | --- |
 | `git-strata new` | `new` | 否 | 否 |
+| `git-strata add` | `add` | 否 | 否 |
 | `git-strata status` | `status` | 否 | 否 |
 | `git-strata checkpoint` | `checkpoint` | 否 | 否 |
 | `git-strata restore` | `restore` | 否 | 否 |
@@ -84,6 +85,8 @@ pub fn require_tty() -> Result<(), StrataError>;
 | 命令 | 参数 | 不合法 |
 | --- | --- | --- |
 | `git-strata new` | `--repos a,b`（至少一个 `RepoName`）。ticket 用 `--ticket T` 或第一个位置参数，二者给了同一个字段；都不给则没有标签。ticket 只是标签，不进路径 | 空 `--repos`；ticket 形如 `SessionId` 由 session 返回 `ReservedName`，cli 透传 |
+| `git-strata new`（精简） | `--repo R`，可重复或逗号分隔：只有这些 repo 建工作区，全部 tracked（session.md D51；daemon `new` 的 `only = true`）。ticket 同上 | 与 `--repos` 同给 → `InvalidInput`，`detail.reason = "repo_flags"`；两个都不给 → `InvalidInput` |
+| `git-strata add` | `--repo R`（至少一个，可重复或逗号分隔）`[--session S]`，不给 = cwd 的会话（session.md D52） | 没有 `--repo` → `InvalidInput`（`repos`）；未知 repo 透传 `NoSuchRepo`；会话不是 `Active` 透传 session 的码 |
 | `git-strata status` | `[--all]` 或 `[--session S]`。都不给 = cwd 的会话 | — |
 | `git-strata checkpoint` | `--tool-call [ID]` 与 `-m MSG` 二选一；`ID` 省略或为空时取钩子 stdin JSON 的 `tool_use_id`（§3.5，D22）。`[--session S]`。`--path P` 可重复，P 是工作区里的路径，cli 收成相对该 repo 根的 `RepoPath` | 两个都给，或两个都不给 → `InvalidInput`，`detail.reason = "checkpoint_reason"` |
 | `git-strata restore` | `<checkpoint>`（十进制 `CheckpointId`，超过 `i64::MAX` → `InvalidInput`）`[paths…]` `[--session S]` | 非数字 id → `InvalidInput` |
@@ -103,7 +106,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata chain` | `--repo R`，以及恰好一个：`--accept-origin replay`、`--accept-origin drop`、`--restore`。没有缺省。`--restore` 在 `!is_ancestor(o, c)` 时不连接、不推 | 缺选择、或两个都给 → `InvalidInput`，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接。不能快进 → `InvalidInput`，`detail.reason = "not_ancestor"`，在任何 push 之前 |
 | `git-strata config relax` | `<repo>` | 未知 repo 透传 `NoSuchRepo`。文件变了不会自己跑这条命令 |
 
-未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`status`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
+未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`status`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
 
 `-h` / `--help` 与 `--version` 走 clap 的文本，打在 stdout，退出码 0。它们不是子命令，不套信封（D19）。除此之外，stdout 上只有信封。
 
@@ -114,6 +117,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | 命令 | 成功时的 `data` | 按条目返回、不让整个调用失败 |
 | --- | --- | --- |
 | `new` | `NewReport` | — |
+| `add` | `AddReport`：`{ session, added: {<repo>: WorkspaceState}, already: {<repo>: WorkspaceState}, warnings }`；锚点未知的 repo 打在 stderr | — |
 | `status` | 一个会话：`SessionStatus`。`--all`：`{ "sessions": [SessionStatus, …] }`，按 `SessionId` 升序。健康为 `Unknown` 的工作区带 `choices: ["abandon", "accept"]`。`OldTreeKept` 的 `holders` 原样透传 | — |
 | `checkpoint` | `{ "checkpoints": [Checkpoint, …] }`，该次工具调用或 `-m` 在每个被记的 repo 上的那一行。幂等命中时就是已有的那几行，不是新 id | — |
 | `restore` | `{ "checkpoint": CheckpointId, "session": SessionId }` | — |
@@ -464,6 +468,7 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D21 钉住的值读不出 | 当作要确认，先 `require_tty` | 读不出就放行，等于让一份坏文件跳过 TTY 检查 | 2026-10-23 |
 | D23 publish 的 TTY 检查只看还要做事的仓库（review-2 N2） | 批次里有要推且要确认的仓库时，cli 先发每个批次的 `BeforePublish` checkpoint，再发只读的 `publish_plan`（daemon.md §4），然后只对 `repos` 里那些要推且要确认的仓库 `require_tty`、展示链顶、发 `shown`。全部已经落地 → 不查 TTY，`publish` 回 `already_published`。还有要确认的仓库且不是 TTY → `NotTty`；在此之前送到 daemon 的只有这些 checkpoint 和 `publish_plan`：不发 `publish`，不弹框，不取凭据。checkpoint 或 `publish_plan` 失败且不是 TTY → 仍是 `NotTty`，原错误放在 `detail.plan_error`。批次里没有要确认的仓库时不发 `publish_plan`。`publish` 请求带 `plan`：TTY 检查覆盖了的那些仓库（可以为空）。`publish_plan` 与 `publish` 之间历史可能变（别的发布落地了不同内容），daemon 重算后多出来的要确认仓库不在 `plan` 里 → 在弹框、取凭据之前 `NotConfirmed`（`plan_changed`），什么都不写；agent 重跑，cli 重新计划并查 TTY（review-3 T1）。[实现时补的决定] | agent 重跑是主流程（D22）：之前要确认的仓库已经落地、只剩不用确认的仓库时，非 TTY 的重跑不该因已经落地的仓库被拒。checkpoint 只是记录当下内容，不是要确认的动作；不变量 7 守的是发布、弹框和凭据 | 2026-10-24 |
 | D22 钩子的工具调用 id | `--tool-call` 不带值或为空 → 取 stdin JSON 的 `tool_use_id`；仍缺或为空 → `InvalidInput`（`checkpoint_reason`）。§3.5 的命令行改为 `git-strata checkpoint --tool-call`。[实现时补的决定] | Claude Code 不设 `TOOL_USE_ID` 环境变量，原命令行会传空串，每次钩子都失败 | 2026-10-23 |
+| D31 `--repo` 与 `add` | `new --repo R`（可重复）给精简会话；不带时保留 `--repos` 的整套布局；新命令 `add [--session S] --repo R…`。`NoSuchRepo` 的 `not_in_session` 带 `detail.fix` 原样给出这条 `add` 命令。cli 只在 `--repo` 时给 daemon 发 `only` | 见 session.md D51/D52。新 flag 不改 `--repos` 的含义，旧用法与旧 daemon 都不受影响。否决：给 `--repos` 加 `--only` 修饰 | 2026-10-27 |
 
 初稿里被后写裁定压过的两句，不沿用：`grep` 不给 session 就是全部（改为 cwd 会话，`--all` 才是全部，design §6.3 与 T11）；`grep` 的 `--repo`（T11 只留 `--session` 与 `--all`）。crate 名从初稿的 `crates/strata-cli` 改为 types.md §8 的 `crates/git-strata`。
 

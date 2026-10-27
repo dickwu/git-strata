@@ -59,6 +59,16 @@ impl StrataError {
         self.detail = Some(detail);
         self
     }
+
+    /// `NoSuchRepo` for a configured repo that `session` has no workspace
+    /// of (a session made with `new --repo` holds only the repos it asked
+    /// for). `detail.fix` is the one command that adds it.
+    pub fn not_in_session(session: &str, repo: &str) -> Self {
+        let fix = format!("git-strata add --session {session} --repo {repo}");
+        Self::new(Code::NoSuchRepo, format!("session {session} has no workspace of {repo}; add it with `{fix}`")).with_detail(
+            serde_json::json!({ "reason": "not_in_session", "session": session, "repo": repo, "fix": fix }),
+        )
+    }
 }
 
 impl fmt::Display for StrataError {

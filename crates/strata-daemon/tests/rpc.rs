@@ -96,7 +96,7 @@ fn method_table_has_the_twenty_names() {
     assert_eq!(
         names,
         [
-            "new", "status", "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_approve",
+            "new", "add", "status", "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_approve",
             "deps_list", "publish", "publish_plan", "push", "assign", "rm", "gc", "resolve_move", "chain_resolve", "config_relax",
             "daemon_status", "du"
         ]
@@ -169,6 +169,7 @@ fn every_method_parses_its_documented_params() {
     let sid = "s-abcdefgh";
     let cases = [
         ("new", json!({ "ticket": null, "repos": ["tool"] })),
+        ("add", json!({ "session": sid, "repos": ["front"] })),
         ("status", json!({ "cwd": "/x", "session": null, "all": false })),
         ("checkpoint", json!({ "session": sid, "repo": "tool", "reason": { "kind": "Manual", "message": "m" }, "paths": [] })),
         ("restore", json!({ "session": sid, "repo": "tool", "checkpoint": 3, "paths": null })),
@@ -195,6 +196,10 @@ fn every_method_parses_its_documented_params() {
         let q = req(json!({ "id": 1, "method": m, "params": p })).unwrap_or_else(|r| panic!("{m}: {:?}", r.0));
         assert_eq!(q.method.name(), m);
     }
+    let q = req(json!({ "id": 1, "method": "new", "params": { "ticket": null, "repos": ["tool"], "only": true } })).unwrap();
+    assert!(matches!(q.params, Params::New(ref p) if p.only));
+    let q = req(json!({ "id": 1, "method": "new", "params": { "ticket": null, "repos": ["tool"] } })).unwrap();
+    assert!(matches!(q.params, Params::New(ref p) if !p.only));
     let q = req(json!({ "id": 1, "method": "daemon_status", "params": { "verify": true } })).unwrap();
     assert_eq!(q.params, Params::DaemonStatus(rpc::DaemonStatusParams { verify: true }));
 }

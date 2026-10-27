@@ -65,11 +65,12 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 未知方法 → RPC `UnknownMethod`。参数对不上 → RPC `Failed`。
 
-方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 21 个以外不加方法（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
+方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 22 个以外不加方法（`add` 是 session.md D52 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
 
 | method | 作用 | 是否只读 |
 | --- | --- | --- |
 | `new` | `session::new` | 否 |
+| `add` | `session::add`：给已有会话加仓库的工作区（session.md D52）；排这个会话的队，之后对每个加上的仓库推进锚点（同 `new` 之后） | 否 |
 | `status` | 读，不排队，不等写锁 | 是 |
 | `checkpoint` | 记检查点 | 否 |
 | `restore` | 恢复到一个检查点 | 否 |
@@ -95,7 +96,8 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 | method | params | data |
 | --- | --- | --- |
-| `new` | `{ "ticket": string\|null, "repos": [RepoName] }` | `NewReport` |
+| `new` | `{ "ticket": string\|null, "repos": [RepoName], "only"?: bool }` | `NewReport`。`only` 为真时会话只有 `repos` 这些工作区（session.md D51）；缺省为假，cli 只在 `--repo` 时才发这个字段，好让新 cli 也能用旧 daemon |
+| `add` | `{ "session": SessionId, "repos": [RepoName] }` | `{ report: AddReport, anchor_unknown }`（session.md D52） |
 | `status` | `{ "cwd": string\|null, "session": string\|null, "all": bool }` | 见 §5.4 |
 | `checkpoint` | `{ "session", "repo", "reason": CheckpointReason, "paths": [RepoPath] }` | `Checkpointed`；`paths` 可空 |
 | `restore` | `{ "session", "repo", "checkpoint": CheckpointId, "paths": [RepoPath]\|null }` | `Restored` |

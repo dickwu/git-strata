@@ -85,6 +85,18 @@ fn every_command_against_a_live_daemon() {
         assert!(p.get("commits").is_some(), "{p:?}");
         assert_eq!(ok(lv.run(&["gc"])), J::Obj(vec![]));
         ok(lv.run(&["rm", "--session", &s]));
+
+        // session.md D51/D52: the slim form and `add`.
+        let d = ok(lv.run(&["new", "--repo", "tool"]));
+        let s2 = d.get("manifest").and_then(|m| m.get("id")).and_then(J::str).unwrap().to_string();
+        let ws2 = lv.ws(&strata_types::SessionId::try_from(s2.clone()).unwrap(), "tool");
+        let a = ok(lv.run_in(&ws2, &["add", "--repo", "tool"]));
+        assert!(matches!(a.get("already").and_then(|x| x.get("tool")), Some(J::Obj(_))), "{a:?}");
+        ok(lv.run(&["add", "--session", &s2, "--repo", "tool"]));
+        ok(lv.run(&["rm", "--session", &s2]));
+        let r = lv.run(&["new", "--repo", "tool", "--repos", "tool"]);
+        assert_ne!(r.code, 0, "{r:?}");
+        assert!(r.stdout.contains("repo_flags"), "{r:?}");
     });
 }
 

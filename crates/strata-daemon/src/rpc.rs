@@ -23,7 +23,7 @@ use crate::{ChainChoice, MAX_FRAME, RpcReject};
 
 macro_rules! methods {
     ($($variant:ident = $name:literal, ro = $ro:literal;)*) => {
-        /// The 21 methods (daemon.md §4).
+        /// The 22 methods (daemon.md §4).
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub enum Method { $($variant),* }
 
@@ -49,6 +49,7 @@ macro_rules! methods {
 
 methods! {
     New = "new", ro = false;
+    Add = "add", ro = false;
     Status = "status", ro = true;
     Checkpoint = "checkpoint", ro = false;
     Restore = "restore", ro = false;
@@ -82,6 +83,17 @@ fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Resu
 pub struct NewParams {
     #[serde(deserialize_with = "nullable")]
     pub ticket: Option<String>,
+    pub repos: Vec<RepoName>,
+    /// Only `repos` get a workspace (session.md D51); absent means false.
+    #[serde(default)]
+    pub only: bool,
+}
+
+/// `add` (session.md D52): more repos for an existing session.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddParams {
+    pub session: SessionId,
     pub repos: Vec<RepoName>,
 }
 
@@ -262,6 +274,7 @@ pub struct DuParams {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Params {
     New(NewParams),
+    Add(AddParams),
     Status(StatusParams),
     Checkpoint(CheckpointParams),
     Restore(RestoreParams),
@@ -297,6 +310,7 @@ impl Params {
         }
         match method {
             Method::New => typed(v, Params::New),
+            Method::Add => typed(v, Params::Add),
             Method::Status => typed(v, Params::Status),
             Method::Checkpoint => typed(v, Params::Checkpoint),
             Method::Restore => typed(v, Params::Restore),

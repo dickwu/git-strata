@@ -80,6 +80,9 @@ fn run() -> Result<(), StrataError> {
     state.starting();
     let result = (|| {
         let daemon = Daemon::start(&core)?;
+        // session.md D53: back-to-back `new`/`add` reuse a fetch younger
+        // than this (publish fetches for itself). Tests keep the default 0.
+        daemon.sessions.set_fetch_window(strata_session::NEW_FETCH_WINDOW);
         // The waiting socket, when there was one, becomes the real one.
         let listener = match waiting.take().and_then(Waiting::finish) {
             Some(l) => l,

@@ -70,18 +70,7 @@ pub(crate) fn validate(ws: &WorkspaceRef, base: &Base) -> Result<std::path::Path
         }
     };
     let Some(w) = rec.manifest.repos.get(ws.repo) else {
-        return Err(StrataError::new(
-            Code::NoSuchRepo,
-            format!(
-                "session {} has no repo {}",
-                ws.session.as_str(),
-                ws.repo.as_str()
-            ),
-        )
-        .with_detail(serde_json::json!({
-            "session": ws.session.as_str(),
-            "repo": ws.repo.as_str(),
-        })));
+        return Err(StrataError::not_in_session(ws.session.as_str(), ws.repo.as_str()));
     };
     if !w.tracked {
         return Err(invalid(

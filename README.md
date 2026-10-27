@@ -100,15 +100,28 @@ Every call prints exactly one compact JSON line on stdout:
 
 ## Session lifecycle
 
-1. **`new`** creates a session. Every repo in `config.toml` is fetched
-   (`git fetch origin <default_branch>`) and gets a workspace, because sibling
-   repos link to each other by relative path. `--repos A,B` is required and
-   chooses which repos are **tracked**: only tracked repos are watched,
-   checkpointed and published. Untracked siblings stay pinned at their base;
-   do not edit them. An edit there is never checkpointed and makes `rm`
-   return `Dirty` (`detail.untracked_repos`).
+1. **`new`** creates a session. Two forms:
+   - `--repo R` (repeatable or `R1,R2`): only these repos are fetched
+     (`git fetch origin <default_branch>`, up to 8 at a time) and get a
+     workspace, all **tracked**. Fast; agents should use it. A repo that links
+     a sibling by relative path (`../other`) needs that sibling in the session
+     too: name it, or `git-strata add` it later.
+   - `--repos A,B` (no `--repo`; the original form): every repo in
+     `config.toml` is fetched and gets a workspace, because sibling repos link
+     to each other by relative path; `A,B` are the **tracked** ones. Only
+     tracked repos are watched, checkpointed and published. Untracked siblings
+     stay pinned at their base; do not edit them. An edit there is never
+     checkpointed and makes `rm` return `Dirty` (`detail.untracked_repos`).
+   Giving both is `InvalidInput` (`repo_flags`). The daemon reuses a fetch of
+   the same repo younger than 30 s (back-to-back `new`/`add`); publish always
+   fetches for itself.
    Result: `data.manifest.id` (the session id, `s-` + 8 base32 chars) and
    `data.manifest.repos.<repo>.{path, tracked, base, head}`.
+   **`add --repo R [--session S]`** gives an existing active session
+   workspaces for more repos (tracked), built like `new` builds them. Repos it
+   already has are listed in `data.already` and left alone. A command naming a
+   repo the session lacks fails `NoSuchRepo` with `detail.reason`
+   `not_in_session` and `detail.fix` = that `add` command.
 2. **Work** in `data.manifest.repos.<repo>.path`. Commands without `--session`
    take the session from the cwd. `--session` accepts an id or a ticket.
 3. **`checkpoint`** records edits (`-m MSG`, or `--tool-call [ID]` from a hook).
@@ -153,8 +166,9 @@ Everything below needs no human, as long as no repo in the publish is gated
 git-strata daemon status                     # data.running must be true
 git-strata daemon start                      # only if not running; then retry once
 
-git-strata new PROJ-123 --repos tool,staff-api
+git-strata new PROJ-123 --repo tool --repo staff-api
 #  -> S = data.manifest.id, W = data.manifest.repos.tool.path
+git-strata add --session "$S" --repo front   # only if front is needed later
 cd "$W"                                      # edit files here
 git-strata checkpoint -m "parse config before connect"
 git-strata diff                              # vs the base
@@ -409,7 +423,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `NotConfirmed` | report; the human reruns (`plan_changed`: rerun once yourself) |
 | `AmbiguousMatch` | ticket matches several sessions; use an id from `detail` (`from_repo`: a `--from` path is in several repos, see `detail.candidates`) |
 | `NoSuchSession` | cd into a workspace or pass `--session` |
-| `NoSuchRepo` | name not in config |
+| `NoSuchRepo` | name not in config; `not_in_session`: run `detail.fix` (`git-strata add --session S --repo R`) |
 | `NoSuchBranch` | (`new`) a repo has no `origin/<default_branch>`; tell the human |
 | `InvalidInput` | fix arguments per `detail.reason` (`from_repo_prefix` / `from_path`: rewrite `--from` as `detail.expected` says); `chain_diverged` on a repo without confirmation: `git-strata push REPO` replays it (see [Origin moved](#origin-moved-under-the-unpushed-chain-push-replays)), then rerun; `chain_rewound`, or diverged on a gated repo: human runs `chain`; push-guard reasons above: tell the human |
 | `Conflict` | fix and rerun the same publish (above) |
@@ -476,7 +490,8 @@ Flags, defaults and `data` shapes:
 
 | Command | Human needed |
 | --- | --- |
-| `new [TICKET] [--ticket T] --repos A,B` | no |
+| `new [TICKET] [--ticket T] (--repo R... \| --repos A,B)` | no |
+| `add --repo R... [--session S]` | no |
 | `status [--session S \| --all]` | no |
 | `checkpoint (--tool-call [ID] \| -m MSG) [--session S] [--path P]...` | no |
 | `restore CHECKPOINT [PATHS]... [--session S]` | no |

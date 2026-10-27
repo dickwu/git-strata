@@ -7,7 +7,8 @@ is not running.
 
 | Command | Arguments and flags | Human | No daemon | `data` on success |
 | --- | --- | --- | --- | --- |
-| `new [TICKET]` | `--ticket <T>` (same as positional), `--repos <A,B>` (required; the tracked repos; every configured repo still gets a workspace) | no | no | `{manifest:{id,ticket?,root,repos:{<repo>:{base,head,path,tracked}}},warnings:[]}` |
+| `new [TICKET]` | `--ticket <T>` (same as positional), `--repo <R>` (repeatable or comma separated; only these repos get a workspace, all tracked; preferred) or `--repos <A,B>` (the tracked repos; every configured repo still gets a workspace); one of the two, not both (`repo_flags`) | no | no | `{manifest:{id,ticket?,root,repos:{<repo>:{base,head,path,tracked}}},warnings:[]}` |
+| `add` | `--repo <R>` (at least one; repeatable or comma separated), `--session <S>` (default: cwd's session) | no | no | `{session,added:{<repo>:WorkspaceState},already:{<repo>:WorkspaceState},warnings:[]}` |
 | `status` | `--session <S>` or `--all` (default: cwd's session) | no | yes | `SessionStatus`; `--all`: `{sessions:[...]}` |
 | `checkpoint` | exactly one of `--tool-call [ID]` (no ID: hook JSON `tool_use_id`) / `-m, --message <MSG>`; `--session <S>`; `--path <P>` (repeatable) | no | repeat of an existing `--tool-call` only | `{checkpoints:[Checkpoint,...]}` |
 | `restore <CHECKPOINT> [PATHS]...` | `--session <S>` | no | no | `{checkpoint,session}` |

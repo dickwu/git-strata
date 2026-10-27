@@ -32,7 +32,7 @@ pub struct Select {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
-    /// Create a session with one workspace per repo
+    /// Create a session of workspaces (--repo: only those repos)
     #[command(long_about = crate::help::NEW, after_long_help = crate::help::NEW_AFTER)]
     New {
         /// Ticket name (also accepted positionally)
@@ -41,9 +41,22 @@ pub enum Cmd {
         /// Ticket name
         #[arg(value_name = "TICKET")]
         ticket: Option<String>,
-        /// Repos to track, comma separated (required; every configured repo still gets a workspace)
+        /// A repo the session gets, tracked (repeatable or comma separated); only these get a workspace
+        #[arg(long = "repo", value_delimiter = ',', value_name = "R")]
+        repo: Vec<String>,
+        /// Repos to track, comma separated; every configured repo still gets a workspace (the full sibling layout)
         #[arg(long, value_delimiter = ',', value_name = "A,B")]
         repos: Vec<String>,
+    },
+    /// Add workspaces of more repos to an existing session
+    #[command(after_long_help = crate::help::ADD_AFTER)]
+    Add {
+        /// Session id or ticket (default: the session of the current directory)
+        #[arg(long)]
+        session: Option<String>,
+        /// A repo to add, tracked (repeatable or comma separated)
+        #[arg(long = "repo", value_delimiter = ',', value_name = "R")]
+        repo: Vec<String>,
     },
     /// Session status (cwd's session, --session, or --all)
     #[command(after_long_help = crate::help::STATUS_AFTER)]

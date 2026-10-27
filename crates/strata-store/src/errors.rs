@@ -76,7 +76,7 @@ pub(crate) fn no_such_session(id: &str) -> StrataError {
 }
 
 pub(crate) fn no_such_repo(session: &str, repo: &str) -> StrataError {
-    err(Code::NoSuchRepo, format!("session {session} has no workspace for {repo}"), json!({ "session": session, "repo": repo }))
+    StrataError::not_in_session(session, repo)
 }
 
 /// `io::Error` → `StrataError` via apfs, plus `op`; `outcome` on `Unknown`.

@@ -98,8 +98,9 @@ DAEMON
 
 HEADLESS FLOW (no human needed)
   git-strata daemon status                       # data.running
-  git-strata new PROJ-1 --repos tool,staff-api   # data.manifest.id, .repos.<repo>.path
+  git-strata new PROJ-1 --repo tool --repo staff-api  # data.manifest.id, .repos.<repo>.path
   cd <data.manifest.repos.tool.path>             # edit files there
+  git-strata add --repo front                    # only if another repo is needed later
   git-strata checkpoint -m \"what changed\"
   git-strata diff
   git-strata publish --from <id>:src/a.ts --from <id>:src/b.ts
@@ -113,6 +114,7 @@ ERRORS (code -> what an agent does)
   Conflict assigned  another session owns the path; do not retry
   NoMatch / no_batch checkpoint the paths, then publish
   NoSuchSession      cd into a workspace or pass --session
+  NoSuchRepo not_in_session  run detail.fix (git-strata add --session S --repo R)
   AmbiguousMatch     use a session id from detail
   Dirty              rm on unpublished work: publish it, or ask the human (rm --discard)
   CheckFailed        fix the code, checkpoint, publish again
@@ -133,28 +135,60 @@ Per-command detail: git-strata <command> --help. Full reference: README.md.
 "
 );
 
-pub const NEW: &str = "Create a session: one workspace per configured repo.
+pub const NEW: &str = "Create a session of workspaces (APFS clones of base snapshots).
 
-Every repo in config.toml gets a workspace (an APFS clone of its base snapshot),
-because sibling repos link to each other by relative path. --repos chooses which
-repos are tracked: only tracked repos are watched, checkpointed and published.
-Untracked siblings are pinned at their base; do not edit them (an edit there is
-never checkpointed, and makes `rm` return Dirty with detail.untracked_repos).";
+--repo R (repeatable, or R1,R2): the session gets workspaces for these repos
+only, all tracked. This is the fast form; agents should use it. Repos that link
+to a sibling by relative path (../other) need that sibling too: pass it, or add
+it later with `git-strata add --repo other`.
+
+--repos A,B (no --repo): every repo in config.toml gets a workspace, because
+sibling repos link to each other by relative path; A,B are the tracked ones.
+Only tracked repos are watched, checkpointed and published. Untracked siblings
+are pinned at their base; do not edit them (an edit there is never checkpointed,
+and makes `rm` return Dirty with detail.untracked_repos).";
 
 pub const NEW_AFTER: &str = "EXAMPLES
-  git-strata new PROJ-123 --repos tool,staff-api
-  git-strata new --ticket PROJ-123 --repos tool
+  git-strata new PROJ-123 --repo staff-api            # one workspace
+  git-strata new PROJ-123 --repo tool --repo staff-api
+  git-strata new --ticket PROJ-123 --repos tool       # every repo, tool tracked
 
 DATA
   {manifest:{id, ticket?, root, repos:{<repo>:{base, head, path, tracked}}}, warnings:[]}
   Use data.manifest.id as SESSION and data.manifest.repos.<repo>.path as the cwd.
 
 ERRORS
-  InvalidInput repos   --repos missing or empty (it is required)
-  InvalidInput ticket  ticket given both positionally and with --ticket
-  NoSuchRepo           a --repos name is not in config.toml
-  NoSuchBranch         a repo has no origin/<default_branch> tip (every repo is fetched)
-  Busy daemon_down     run `git-strata daemon start`, retry once
+  InvalidInput repos       neither --repo nor --repos given, or an empty name
+  InvalidInput repo_flags  --repo and --repos both given
+  InvalidInput ticket      ticket given both positionally and with --ticket
+  NoSuchRepo               a repo name is not in config.toml
+  NoSuchBranch             a repo has no origin/<default_branch> tip (the session's repos are fetched)
+  Busy daemon_down         run `git-strata daemon start`, retry once
+";
+
+pub const ADD_AFTER: &str = "Gives an existing (active) session workspaces for more repos, tracked, built
+as `new` builds them (base snapshot, worktree, pin, caches, seed files).
+
+EXAMPLES
+  git-strata add --repo front                     # the session of the cwd
+  git-strata add --session PROJ-123 --repo front --repo admin
+
+A command that names a repo the session lacks fails NoSuchRepo with
+detail.reason not_in_session and detail.fix: this command.
+
+DATA {session, added:{<repo>:{base, head, path, tracked}}, already:{...}, warnings:[]}
+  A repo already in the session is listed in already and left as it is.
+
+ERRORS
+  InvalidInput repos       no --repo given
+  InvalidInput lifecycle   the session is not active
+  NoSuchRepo               a repo is not in config.toml
+  NoSuchSession            no such session (or the cwd is not in one: pass --session)
+  Exists add_leftover      a leftover from an earlier failed add is in the way;
+                           detail.path names it (`git-strata rm` of the session clears it)
+  Any other error while building: nothing was recorded and the session is as it
+  was; detail.op is \"add\" and detail.kept lists the partial directories left
+  under the session root (`git-strata rm` of the session retires them).
 ";
 
 pub const STATUS_AFTER: &str = "EXAMPLES

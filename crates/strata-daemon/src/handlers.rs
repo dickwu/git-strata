@@ -18,6 +18,7 @@ use strata_apfs::{IoSide, classify_io_error};
 use strata_gitio::Git;
 use strata_overlay::{Base, DEFAULT_DIRTY_CAPACITY, Overlay, RestoreRequest, Tracker, WorkspaceRef};
 use strata_search::{GrepOpts, Hit, OverlaySource, Search, Which};
+use strata_session::Layout;
 use strata_store::PublishPhase;
 use strata_types::{Action, BaseGen, Code, CommitOid, RepoConfig, RepoName, RepoPath, SessionId, StrataError, WorkspaceState};
 
@@ -74,9 +75,7 @@ fn workspace(core: &Core, s: &SessionId, repo: &RepoName) -> Result<WorkspaceSta
     let Some(rec) = core.store.session(s)? else {
         return Err(StrataError::new(Code::NoSuchSession, format!("no session {s}")).with_detail(json!({ "session": s.as_str() })));
     };
-    rec.manifest.repos.get(repo).cloned().ok_or_else(|| {
-        StrataError::new(Code::NoSuchRepo, format!("session {s} has no repo {repo}")).with_detail(json!({ "repo": repo.as_str() }))
-    })
+    rec.manifest.repos.get(repo).cloned().ok_or_else(|| StrataError::not_in_session(s.as_str(), repo.as_str()))
 }
 
 /// A base generation with its manifest and exported directory.
@@ -417,6 +416,7 @@ fn session_of(p: &Params) -> Option<SessionId> {
         Params::DepsPropose(p) => Some(p.session.clone()),
         Params::Assign(p) => Some(p.session.clone()),
         Params::Rm(p) => Some(p.session.clone()),
+        Params::Add(p) => Some(p.session.clone()),
         Params::ResolveMove(p) => Some(p.session.clone()),
         _ => None,
     }
@@ -454,7 +454,8 @@ impl<'d, 'a> Server<'d, 'a> {
     fn dispatch(&self, p: &Params) -> Result<Value> {
         let core = self.core();
         match p {
-            Params::New(p) => self.new_session(p.ticket.as_deref(), &p.repos),
+            Params::New(p) => self.new_session(p.ticket.as_deref(), &p.repos, p.only),
+            Params::Add(p) => self.add_repos(&p.session, &p.repos),
             Params::Status(p) => self.status(p.cwd.as_deref(), p.session.as_deref(), p.all),
             Params::Checkpoint(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
                 let ws = workspace(core, &p.session, &p.repo)?;
@@ -629,10 +630,11 @@ impl<'d, 'a> Server<'d, 'a> {
     }
 
     /// §5.7: `new`, then the anchor and the observe retry.
-    fn new_session(&self, ticket: Option<&str>, repos: &[RepoName]) -> Result<Value> {
+    fn new_session(&self, ticket: Option<&str>, repos: &[RepoName], only: bool) -> Result<Value> {
         let core = self.core();
         writing();
-        let mut rep = match self.d.sessions.new(ticket, repos) {
+        let layout = if only { Layout::Only } else { Layout::Siblings };
+        let mut rep = match self.d.sessions.new_with(ticket, repos, layout) {
             Ok(r) => r,
             Err(e) => {
                 for r in repos {
@@ -655,6 +657,27 @@ impl<'d, 'a> Server<'d, 'a> {
             "session": json_of(&rep),
             "anchor_unknown": after.anchor_unknown.iter().map(|(r, e)| json!({ "repo": r.as_str(), "error": json_of(e) })).collect::<Vec<_>>(),
         }))
+    }
+
+    /// session.md D52: `Sessions::add` under the session's queue, then the
+    /// anchor of each added repo, as after `new`.
+    fn add_repos(&self, session: &SessionId, repos: &[RepoName]) -> Result<Value> {
+        let core = self.core();
+        let rep = core.locks.with_sessions(std::slice::from_ref(session), || {
+            writing();
+            self.d.sessions.add(session, repos)
+        })?;
+        let mut anchor_unknown = Vec::new();
+        if !rep.added.is_empty() {
+            locks::mark_visible();
+            self.d.du.on_new(session.as_str());
+            for repo in rep.added.keys() {
+                if let Err(e) = core.advance_anchor(repo) {
+                    anchor_unknown.push(json!({ "repo": repo.as_str(), "error": json_of(&e) }));
+                }
+            }
+        }
+        Ok(json!({ "report": json_of(&rep), "anchor_unknown": anchor_unknown }))
     }
 
     /// Read only; no queue, no lock.

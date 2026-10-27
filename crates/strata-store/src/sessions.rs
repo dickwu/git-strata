@@ -431,6 +431,109 @@ impl Store {
         })
     }
 
+    /// Add workspaces to an `Active` session (session.md D52, `add`): one
+    /// transaction inserts the workspace rows (generation 1, health ok,
+    /// same path and base rules as `create_session`) and their seed rows.
+    /// A repo already in the session is `Exists` (`reason: "workspace_exists"`).
+    pub fn add_workspaces(
+        &self,
+        id: &SessionId,
+        repos: &BTreeMap<RepoName, WorkspaceState>,
+        seeds: &BTreeMap<RepoName, Vec<SeedRow>>,
+    ) -> Result<()> {
+        const OP: &str = "add_workspaces";
+        self.writable()?;
+        let id = id.as_str();
+        if repos.is_empty() {
+            return Err(invalid_field("repos", format!("no workspaces to add to session {id}")));
+        }
+        let root = self.session_root_text(id)?;
+        let mut ws = Vec::new();
+        for (repo, st) in repos {
+            let want = format!("{root}/{}", repo.as_str());
+            if st.path.to_str() != Some(want.as_str()) {
+                return Err(err(
+                    Code::InvalidInput,
+                    format!("workspace path of {repo} must be {want}, not {}", st.path.display()),
+                    json!({ "field": "path", "repo": repo.as_str(), "expected": want }),
+                ));
+            }
+            if st.base.repo != *repo {
+                return Err(err(
+                    Code::InvalidInput,
+                    format!("workspace {repo} names a base of {}", st.base.repo),
+                    json!({ "reason": "repo_mismatch", "repo": repo.as_str(), "base_repo": st.base.repo.as_str() }),
+                ));
+            }
+            let mut rows = Vec::new();
+            for s in seeds.get(repo).map(Vec::as_slice).unwrap_or(&[]) {
+                rows.push((
+                    s.path.as_str().to_string(),
+                    path_text(&s.source, "source")?,
+                    s.link.as_deref().map(|l| path_text(l, "link")).transpose()?,
+                    int(s.size, "size")?,
+                    ns(s.source_mtime, "source_mtime")?,
+                    ns(s.copied, "copied")?,
+                ));
+            }
+            ws.push((repo.as_str(), st, want, rows));
+        }
+        if let Some(r) = seeds.keys().find(|r| !repos.contains_key(*r)) {
+            return Err(invalid_field("seeds", format!("seeds given for {r}, which is not being added")));
+        }
+        self.write(OP, |c| {
+            let lc = session_lifecycle(c, id).map_err(w(OP))?.ok_or_else(|| no_such_session(id))?;
+            if lc != "active" {
+                return Err(lifecycle_err(id, &lc, "active"));
+            }
+            for (repo, st, path, rows) in &ws {
+                if workspace(c, id, repo).map_err(w(OP))?.is_some() {
+                    return Err(err(
+                        Code::Exists,
+                        format!("session {id} already has a workspace of {repo}"),
+                        json!({ "reason": "workspace_exists", "session": id, "repo": repo }),
+                    ));
+                }
+                let g = base_gen_id(c, repo, st.base.tree.as_str(), st.base.deps.as_str()).map_err(w(OP))?;
+                let Some(g) = g else {
+                    return Err(err(
+                        Code::InvalidInput,
+                        format!("base {}/{}/{} is not registered", repo, st.base.tree, st.base.deps),
+                        json!({ "reason": "base_unregistered", "repo": repo, "tree": st.base.tree.as_str(), "deps": st.base.deps.as_str() }),
+                    ));
+                };
+                let other: Option<String> =
+                    c.query_row("SELECT session FROM workspaces WHERE path = ?1", [path], |r| r.get(0)).optional().map_err(w(OP))?;
+                if let Some(other) = other {
+                    return Err(err(Code::Exists, format!("{path} belongs to session {other}"), json!({ "reason": "path_taken", "path": path, "session": other })));
+                }
+                c.execute(
+                    "INSERT INTO workspaces (session, repo, base_gen, head, path, tracked, generation, health, conflicts) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'ok', '[]')",
+                    params![id, repo, g, st.head.as_str(), path, st.tracked as i64],
+                )
+                .map_err(w(OP))?;
+                let mut seen = BTreeSet::new();
+                for r in rows {
+                    if !seen.insert(r.0.as_str()) {
+                        return Err(err(
+                            Code::InvalidInput,
+                            format!("seed {} of {id}/{repo} is given twice", r.0),
+                            json!({ "reason": "seed_exists", "path": r.0 }),
+                        ));
+                    }
+                    c.execute(
+                        "INSERT INTO seeds (session, repo, path, source, link, size, source_mtime_ns, copied_ns) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![id, repo, r.0, r.1, r.2, r.3, r.4, r.5],
+                    )
+                    .map_err(w(OP))?;
+                }
+            }
+            Ok(Tx::Commit(()))
+        })
+    }
+
     pub fn set_session_phase(&self, id: &SessionId, phase: &str) -> Result<()> {
         const OP: &str = "set_session_phase";
         self.writable()?;

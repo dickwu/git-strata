@@ -210,8 +210,7 @@ impl<'a> Search<'a> {
         }
         // 3: the repo must be in this session.
         let Some(ws) = st.manifest.repos.get(repo) else {
-            return Err(StrataError::new(Code::NoSuchRepo, format!("session {session} has no repo {repo}"))
-                .with_detail(json!({ "repo": repo.as_str() })));
+            return Err(StrataError::not_in_session(session.as_str(), repo.as_str()));
         };
         // 4: workspace health.
         if let Some(w) = st.workspaces.get(repo) {
@@ -301,8 +300,7 @@ impl<'a> Search<'a> {
         // 2: the workspace and its root still are the attached ones.
         let st = self.sessions.status(&v.session)?;
         let Some(ws) = st.manifest.repos.get(&v.repo) else {
-            return Err(StrataError::new(Code::NoSuchRepo, format!("session {} has no repo {}", v.session, v.repo))
-                .with_detail(json!({ "repo": v.repo.as_str() })));
+            return Err(StrataError::not_in_session(v.session.as_str(), v.repo.as_str()));
         };
         if ws.path != v.path || root_identity(&v.path).ok() != Some(v.root) {
             v.reattach = Some("root_changed");

@@ -1181,3 +1181,37 @@ fn du_sizes_sessions_records_new_and_rm_and_gc_empties_trash() {
     drop(d);
     core.close().unwrap();
 }
+
+/// session.md D51/D52: `new` with `only` lays out the named repo alone; a
+/// call on a repo the session lacks names `git-strata add`; `add` gives the
+/// session that repo, and the same call then works.
+#[test]
+fn slim_new_then_add_over_the_socket() {
+    let fx = Dfx::with(&["front", "tool"]);
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let s = ok(call(&sock, "new", json!({ "ticket": null, "repos": ["tool"], "only": true })));
+        let repos = s["session"]["manifest"]["repos"].as_object().unwrap();
+        assert_eq!(repos.keys().collect::<Vec<_>>(), ["tool"], "{s:#}");
+        let id: SessionId = serde_json::from_value(s["session"]["manifest"]["id"].clone()).unwrap();
+
+        let r = call(&sock, "files", json!({ "session": id, "repo": "front", "glob": "*" }));
+        assert_eq!(r["ok"], json!(false), "{r:#}");
+        assert_eq!(r["error"]["code"], "NoSuchRepo", "{r:#}");
+        assert_eq!(r["error"]["detail"]["reason"], "not_in_session", "{r:#}");
+        assert_eq!(r["error"]["detail"]["fix"], json!(format!("git-strata add --session {id} --repo front")), "{r:#}");
+
+        let a = ok(call(&sock, "add", json!({ "session": id, "repos": ["front"] })));
+        assert!(a["report"]["added"]["front"]["tracked"].as_bool().unwrap(), "{a:#}");
+        assert_eq!(a["anchor_unknown"], json!([]), "{a:#}");
+        let f = ok(call(&sock, "files", json!({ "session": id, "repo": "front", "glob": "src/*.ts" })));
+        assert_eq!(f["paths"], json!(["src/index.ts"]), "{f:#}");
+        let again = ok(call(&sock, "add", json!({ "session": id, "repos": ["front"] })));
+        assert_eq!(again["report"]["added"], json!({}), "{again:#}");
+        assert!(again["report"]["already"]["front"].is_object(), "{again:#}");
+    });
+    drop(d);
+    core.close().unwrap();
+}

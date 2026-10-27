@@ -43,13 +43,20 @@ same binary. Full command and flag table: [reference.md](reference.md).
 ## Workflow
 
 ```sh
-# 1. New session (ticket is just a label). Every configured repo gets a
-#    workspace; --repos (required) picks the TRACKED ones: only those are
-#    checkpointed and published. Do not edit untracked siblings.
-git-strata new PROJ-123 --repos tool,hr-core
+# 1. New session (ticket is just a label). Name the repos you will touch with
+#    --repo (repeatable): only those get a workspace, all tracked. This is the
+#    fast form; use it. A repo that links a sibling by relative path (../x)
+#    needs that sibling too: pass it, or add it later (step 1b).
+#    (Without --repo, `--repos A,B` gives EVERY configured repo a workspace
+#    and tracks only A,B; do not edit the untracked siblings.)
+git-strata new PROJ-123 --repo tool --repo hr-core
 #    data.manifest.id                  -> session id, e.g. "s-k3q7xm2a"
 #    data.manifest.repos.<repo>.path   -> that repo's workspace directory
 #    data.warnings                     -> [] when fine
+
+# 1b. Need another repo later? Add it to the same session (tracked):
+git-strata add --repo front            # or: --session S --repo front
+#    data.added.<repo>.path; data.already lists repos it had already.
 
 # 2. Work inside the workspace. Commands without --session use the cwd.
 cd "<data.manifest.repos.tool.path>"
@@ -208,7 +215,7 @@ All three keys are always present; `data` is never null. Branch on
 | `NotConfirmed` | Human confirmation failed / was cancelled / expired. Report it; the human reruns. Exception: `detail.reason` `plan_changed` (publish) means no confirmation was attempted and nothing was written: rerun the same command yourself first; if that rerun returns `NotTty`, hand the command to the human. |
 | `AmbiguousMatch` | Ticket matches several sessions; retry with an id from `detail`. |
 | `NoSuchSession` | Wrong selector, or cwd is not inside a workspace; `cd` into one or pass `--session`. |
-| `NoSuchRepo` | Repo name not in config; check `--repos` / argument. |
+| `NoSuchRepo` | Repo name not in config; check `--repo` / argument. With `detail.reason` `not_in_session`: the session has no workspace of that repo; run `detail.fix` (`git-strata add --session S --repo R`), then retry. |
 | `InvalidInput` | Fix arguments per `detail.reason` (`checkpoint_reason`, `diff_mode`, `both_selectors`, `no_batch`, `unknown_command` with `detail.commands`, ...). `chain_diverged` from publish on a repo that needs no confirmation: run `git-strata push <REPO>` (it fetches, replays the unpushed chain onto origin, reruns checks, pushes a fast-forward), then rerun the publish; `replay_deps_unsealed` from push: open a session on the repo, push again. `chain_rewound`, or diverged on a gated repo: hand to the human (`chain`). |
 | `Conflict` | Same hunk changed on both sides (another session or upstream); nothing committed in `detail.repo`, earlier repos of the call may have landed (`data.commits`). Fix, checkpoint, re-run the same publish ("Publish conflict: fix and re-run"); between sessions, who resolves can be set by `publish --assign`. |
 | `Conflict` (`assigned`) | The path is assigned to another session; only that session may publish it. Do not retry from yours. |

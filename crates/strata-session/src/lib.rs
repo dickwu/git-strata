@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use strata_deps::{InstallEnv, RepoWriteLock};
 use strata_gitio::Git;
@@ -43,6 +44,11 @@ pub use recover::{IntentRef, Leftover, RecoverReport};
 pub use scene::{Scene, SceneOp};
 pub use new::NewReport;
 pub use new::NewWarning;
+pub use new::Layout;
+pub use new::add::{ADD_STAGING_PREFIX, AddReport};
+
+/// The fetch window the daemon gives `new` and `add` (D53).
+pub const NEW_FETCH_WINDOW: Duration = Duration::from_secs(30);
 pub use seed::{SEED_MARK, SEED_STAGING_PREFIX, SeedRecord, SeedRefresh, SeedSource, seed_files, seed_plan};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
@@ -74,6 +80,11 @@ pub struct Sessions<'a> {
     /// Moves in progress in this process (§5.5 step 2.9).
     pub(crate) live_moves: Mutex<BTreeSet<(SessionId, RepoName)>>,
     pub(crate) seams: seams::Seams,
+    /// When `new`/`add` last fetched each repo successfully (D53).
+    pub(crate) fetched: Mutex<BTreeMap<RepoName, Instant>>,
+    /// How long such a fetch counts as fresh; zero (the default) always
+    /// fetches. The daemon sets `NEW_FETCH_WINDOW`.
+    pub(crate) fetch_window: Mutex<Duration>,
 }
 
 impl<'a> Sessions<'a> {
@@ -109,7 +120,24 @@ impl<'a> Sessions<'a> {
             live_staging: Mutex::new(BTreeSet::new()),
             live_moves: Mutex::new(BTreeSet::new()),
             seams: seams::Seams::default(),
+            fetched: Mutex::new(BTreeMap::new()),
+            fetch_window: Mutex::new(Duration::ZERO),
         })
+    }
+
+    /// D53: a repo that `new` or `add` fetched successfully less than `w`
+    /// ago is not fetched again by them (the chain top is still read under
+    /// the repo lock). Zero turns the skip off.
+    pub fn set_fetch_window(&self, w: Duration) {
+        *self.fetch_window.lock().unwrap_or_else(|p| p.into_inner()) = w;
+    }
+
+    pub(crate) fn fetch_is_fresh(&self, repo: &RepoName) -> bool {
+        let w = *self.fetch_window.lock().unwrap_or_else(|p| p.into_inner());
+        if w.is_zero() {
+            return false;
+        }
+        self.fetched.lock().unwrap_or_else(|p| p.into_inner()).get(repo).is_some_and(|t| t.elapsed() < w)
     }
 
     pub(crate) fn repo_cfg(&self, repo: &RepoName) -> Result<&'a RepoConfig> {

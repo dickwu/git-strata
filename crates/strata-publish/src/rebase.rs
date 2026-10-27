@@ -76,10 +76,7 @@ fn workspace(ctx: &Ctx, s: &SessionId) -> Result<WorkspaceState> {
         Some(r) if r.lifecycle != Lifecycle::Removed => r,
         _ => return Err(no_such_session(s)),
     };
-    rec.manifest.repos.get(ctx.repo).cloned().ok_or_else(|| {
-        StrataError::new(Code::NoSuchRepo, format!("session {s} has no repo {}", ctx.repo))
-            .with_detail(json!({ "session": s.as_str(), "repo": ctx.repo.as_str() }))
-    })
+    rec.manifest.repos.get(ctx.repo).cloned().ok_or_else(|| StrataError::not_in_session(s.as_str(), ctx.repo.as_str()))
 }
 
 fn base_struct(store: &Store, g: &BaseGen) -> Result<Base> {

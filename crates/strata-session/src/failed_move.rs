@@ -139,8 +139,7 @@ impl Sessions<'_> {
             ));
         }
         let (Some(ws), Some(row)) = (rec.manifest.repos.get(repo), rec.workspaces.get(repo)) else {
-            return Err(StrataError::new(Code::NoSuchRepo, format!("session {session} has no repo {repo}"))
-                .with_detail(json!({ "session": session.as_str(), "repo": repo.as_str() })));
+            return Err(StrataError::not_in_session(session.as_str(), repo.as_str()));
         };
         let git = self.git(repo)?;
         let intents: Vec<MoveIntent> =

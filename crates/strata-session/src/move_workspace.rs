@@ -159,8 +159,7 @@ impl Sessions<'_> {
         }
         // 3.
         let Some(ws) = rec.manifest.repos.get(&name) else {
-            return Err(StrataError::new(Code::NoSuchRepo, format!("session {session} has no repo {name}"))
-                .with_detail(json!({ "session": session.as_str(), "repo": name.as_str() })));
+            return Err(StrataError::not_in_session(session.as_str(), name.as_str()));
         };
         if !ws.tracked {
             return Err(invalid(

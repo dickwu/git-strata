@@ -9,10 +9,23 @@ use strata_types::RepoName;
 use crate::Result;
 
 pub(crate) const WORKERS: usize = 4;
+/// Workers for `new`'s fetch phase (D53): fetches wait on the network,
+/// not the disk, so more of them overlap well.
+pub(crate) const FETCH_WORKERS: usize = 8;
 
 /// Run `f` for each repo; `seam` is checked as each repo is claimed (in
 /// order), so a seam without `@<repo>` fires on the first one dispatched.
 pub(crate) fn each_repo<T: Send>(
+    repos: &[RepoName],
+    seam: &(dyn Fn(&RepoName) -> Result<()> + Sync),
+    f: &(dyn Fn(&RepoName) -> Result<T> + Sync),
+) -> Result<Vec<(RepoName, T)>> {
+    each_repo_n(WORKERS, repos, seam, f)
+}
+
+/// `each_repo` with `n` workers.
+pub(crate) fn each_repo_n<T: Send>(
+    n: usize,
     repos: &[RepoName],
     seam: &(dyn Fn(&RepoName) -> Result<()> + Sync),
     f: &(dyn Fn(&RepoName) -> Result<T> + Sync),
@@ -23,7 +36,7 @@ pub(crate) fn each_repo<T: Send>(
         results: Vec<Option<Result<T>>>,
     }
     let shared = Mutex::new(Shared { next: 0, failed: false, results: (0..repos.len()).map(|_| None).collect() });
-    let workers = WORKERS.min(repos.len()).max(1);
+    let workers = n.min(repos.len()).max(1);
     std::thread::scope(|s| {
         for _ in 0..workers {
             s.spawn(|| {
