@@ -116,6 +116,17 @@ impl Sessions<'_> {
         }
 
         // ---- Phase C: the visible steps.
+        self.teardown(&rec, cur)?;
+        Ok(RemoveReport { session: id.clone(), discarded: discard, checkpoints })
+    }
+
+    /// §5.6 steps 6–9 from `cur` (Active or Unknown): Removing, unpin,
+    /// retire the session root and its shadow repositories, Removed. A
+    /// failure after Removing is an Unknown scene. Also `new`'s rollback.
+    pub(crate) fn teardown(&self, rec: &SessionRecord, cur: Lifecycle) -> Result<()> {
+        let id = &rec.manifest.id;
+        let root = rec.manifest.root.clone();
+        let repos_dir = self.config.paths.root.join("sessions/.repos").join(id.as_str());
         // 6.
         if !self.store.set_lifecycle(id, cur, Lifecycle::Removing, None, SystemTime::now())? {
             return Err(StrataError::new(
@@ -164,9 +175,9 @@ impl Sessions<'_> {
             Ok(())
         })();
         match r {
-            Ok(()) => Ok(RemoveReport { session: id.clone(), discarded: discard, checkpoints }),
+            Ok(()) => Ok(()),
             Err(e) if is_stop(&e) => Err(e),
-            Err(e) => Err(self.remove_unknown(&rec, phase, &e)),
+            Err(e) => Err(self.remove_unknown(rec, phase, &e)),
         }
     }
 
@@ -204,7 +215,9 @@ impl Sessions<'_> {
         }
         match self.git(repo)?.shadow_at(&self.shadow_dir(&rec.manifest.id, repo)) {
             Ok(_) => Ok(None),
-            Err(e) if e.code == Code::NoSuchPath => Ok(Some("missing")),
+            // A half-built shadow (no marker, e.g. a `new` that stopped in
+            // `git init`) is as good as none.
+            Err(e) if matches!(e.code, Code::NoSuchPath | Code::InvalidInput) => Ok(Some("missing")),
             Err(e) => Err(e),
         }
     }

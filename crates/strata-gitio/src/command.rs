@@ -26,6 +26,12 @@ use crate::{Git, Result};
 const STDERR_TAIL: usize = 4096;
 /// Timeout of the read-only queries that read live shadow config (§5.1 step 5).
 pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout of `git init` of a shadow repository. It only writes a few
+/// small files, but a volume busy with a large `clonefile` (a seed cache of
+/// hundreds of GB) or a pending macOS permission prompt stalls those
+/// metadata writes for tens of seconds; 10 s failed `new` (incident
+/// 2026-10-27, s-kooeepw3).
+pub(crate) const INIT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Timeout of attach's read-tree and refresh.
 pub(crate) const ATTACH_TIMEOUT: Duration = Duration::from_secs(600);
 /// How long after git exits its pipes may stay open when the run has no

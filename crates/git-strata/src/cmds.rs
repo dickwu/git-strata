@@ -105,6 +105,13 @@ pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only:
     let mut params = json!({ "ticket": ticket, "repos": names });
     if !only.is_empty() {
         params["only"] = json!(true);
+    } else {
+        // `--repos` only picks the tracked repos (D51); say so, since it is
+        // easy to take for `--repo`.
+        eprintln!(
+            "note: --repos tracks {}; every configured repo still gets a workspace (pass --repo R for only these)",
+            list.join(",")
+        );
     }
     let v = ctx.call("new", params, Kind::Write)?;
     for w in v["anchor_unknown"].as_array().into_iter().flatten() {
@@ -900,6 +907,10 @@ pub fn daemon_status() -> Result<Envelope> {
             data["unknown_publishes"] = json!(unknown);
             warnings.iter().for_each(alert);
             data["alerts"] = json!(warnings);
+            // The daemon's descriptor count (open, soft limit, ...), as is.
+            if let Some(f) = v.get("fds") {
+                data["fds"] = f.clone();
+            }
         }
         Err(CallError::Down(_)) => {}
         Err(CallError::Failed(e)) => return Err(e),

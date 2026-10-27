@@ -541,7 +541,7 @@ fn remove_unresolved_scene_requires_discard_confirmation() {
         let fx = Fx::with(&["tool"]);
         let s = fx.sessions();
         let id = if how == "new_unknown" {
-            s.arm(SessionSeam::FailAt { phase: "new.workspace@tool".into(), errno: libc::ENOSPC });
+            s.arm(SessionSeam::FailKeepAt { phase: "new.workspace@tool".into(), errno: libc::ENOSPC });
             s.new(None, &fx.all()).unwrap_err();
             let rows = fx.store().sessions().unwrap();
             assert_eq!(rows.len(), 1);

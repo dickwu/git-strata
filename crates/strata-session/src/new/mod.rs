@@ -167,8 +167,11 @@ impl Sessions<'_> {
     }
 
     /// §5.1 steps 12-14. Any failure here is after the first visible write:
-    /// the session becomes `Unknown` with its scene, nothing is undone
-    /// (§6.1 rule 3). A `StopAt` seam returns as is (a crash).
+    /// the session becomes `Unknown` with its scene, then `new` rolls the
+    /// session back as `remove --discard` would (D56): Removing, unpin,
+    /// retire both directories, Removed. Only when the rollback fails too
+    /// does the Unknown scene (or the rollback's own scene) stay for a human.
+    /// A `StopAt` seam returns as is (a crash).
     fn build_layout(&self, m: &SessionManifest, plans: &BTreeMap<RepoName, (BaseGen, Plan)>) -> Result<()> {
         let at = Mutex::new(("root", None::<RepoName>));
         match self.layout_steps(m, plans, &at) {
@@ -176,8 +179,39 @@ impl Sessions<'_> {
             Err(e) if crate::seams::is_stop(&e) => Err(e),
             Err(e) => {
                 let (phase, repo) = at.into_inner().unwrap_or_else(|p| p.into_inner());
-                Err(self.new_unknown(m, phase, repo.as_ref(), &e))
+                let unknown = self.new_unknown(m, phase, repo.as_ref(), &e);
+                match self.roll_back_new(m) {
+                    Ok(()) => Err(rolled_back_error(m, phase, repo.as_ref(), &e)),
+                    Err(re) if crate::seams::is_stop(&re) => Err(re),
+                    Err(_) => Err(self.scene_error_or(&m.id, unknown)),
+                }
             }
+        }
+    }
+
+    /// D56: undo a failed `new` from its Unknown row through `teardown`.
+    fn roll_back_new(&self, m: &SessionManifest) -> Result<()> {
+        self.seams.hit("new.rollback", None)?;
+        let rec = match self.store.session(&m.id)? {
+            Some(r) if r.lifecycle == Lifecycle::Unknown => r,
+            _ => {
+                return Err(StrataError::new(Code::Unknown, format!("new {}: the row is not Unknown; not rolled back", m.id))
+                    .with_detail(json!({ "reason": "lifecycle", "session": m.id.as_str() })));
+            }
+        };
+        self.teardown(&rec, Lifecycle::Unknown)
+    }
+
+    /// The error of the scene now on the row (the rollback's own when it
+    /// got past Removing), else `fallback`; status shows the same error.
+    fn scene_error_or(&self, id: &SessionId, fallback: StrataError) -> StrataError {
+        match self.store.session(id) {
+            Ok(Some(r)) if r.lifecycle == Lifecycle::Unknown => r
+                .scene
+                .and_then(|v| serde_json::from_value::<Scene>(v).ok())
+                .map(|s| s.error)
+                .unwrap_or(fallback),
+            _ => fallback,
         }
     }
 
@@ -238,10 +272,9 @@ impl Sessions<'_> {
         strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/{id}")), 0o755, false)?;
         strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/.repos/{id}")), 0o755, true)?;
 
-        // 13.1-13.4. Each tracked repo's seed caches are cloned by a
+        // 13.1 and 13.4. Each tracked repo's seed caches are cloned by a
         // background worker as soon as that repo's workspace is cloned
-        // (D54), overlapping the other repos' clones and the git and pin
-        // phases; the phase is entered (and its result taken) after pin.
+        // (D54), overlapping the other repos' clones only (D56).
         let wants_cache = |r: &RepoName| m.repos[r].tracked;
         let (tx, rx) = std::sync::mpsc::channel::<RepoName>();
         let tx = Mutex::new(Some(tx));
@@ -259,14 +292,24 @@ impl Sessions<'_> {
             }
             Ok(())
         };
-        let steps = std::thread::scope(|sc| {
+        // 13.1 workspace. The seed caches are cloned behind the workspace
+        // clones and joined before step 13.2: a clonefile of a large cache
+        // stalls the volume's metadata writes, and the git steps run under
+        // timeouts (incident 2026-10-27: a 216 GB src-tauri/target clone
+        // made four shadow `git init`s time out).
+        enter("workspace")?;
+        let abort = std::sync::atomic::AtomicBool::new(false);
+        let ws_res = std::thread::scope(|sc| {
             for _ in 0..CACHE_WORKERS {
                 sc.spawn(|| {
                     loop {
                         let next = rx.lock().unwrap_or_else(|p| p.into_inner()).recv();
                         let Ok(r) = next else { return };
-                        // Once one repo's caches failed no further repo starts (as dispatch).
-                        if !cache_errs.lock().unwrap_or_else(|p| p.into_inner()).is_empty() {
+                        // Once a workspace or one repo's caches failed no
+                        // further repo starts (as dispatch).
+                        if abort.load(std::sync::atomic::Ordering::SeqCst)
+                            || !cache_errs.lock().unwrap_or_else(|p| p.into_inner()).is_empty()
+                        {
                             continue;
                         }
                         if let Err(e) = cache_one(&r) {
@@ -275,52 +318,51 @@ impl Sessions<'_> {
                     }
                 });
             }
-            let steps = (|| -> Result<()> {
-                // 13.1 workspace
-                enter("workspace")?;
-                each("workspace", &repos, &|r| {
-                    strata_apfs::clone_tree_rooted(&self.store.base_dir(&plans[r].0), &m.root, &rp(r.as_str()))?;
-                    if wants_cache(r)
-                        && let Some(tx) = tx.lock().unwrap_or_else(|p| p.into_inner()).as_ref()
-                    {
-                        let _ = tx.send(r.clone());
-                    }
-                    Ok(())
-                })?;
-
-                // 13.2 git
-                enter("git")?;
-                each("git", &repos, &|r| {
-                    let git = self.git(r)?;
-                    let ws = &m.repos[r];
-                    let dir = self.shadow_dir(id, r);
-                    self.with_lock_unbounded(r, || {
-                        let shadow = git.ensure_shadow(&dir)?;
-                        git.attach_worktree(&shadow, 1, &ws.head, &ws.path, &ws.path)?;
-                        Ok(())
-                    })
-                })?;
-
-                // 13.3 pin
-                enter("pin")?;
-                each("pin", &repos, &|r| {
-                    let git = self.git(r)?;
-                    self.with_lock_unbounded(r, || git.update_ref(&pin_ref(id), &m.repos[r].head, None))
-                })?;
-
-                // 13.4 seed_caches (tracked repos only): wait for the worker.
-                enter("seed_caches")
-            })();
+            let r = each("workspace", &repos, &|r| {
+                strata_apfs::clone_tree_rooted(&self.store.base_dir(&plans[r].0), &m.root, &rp(r.as_str()))?;
+                if wants_cache(r)
+                    && let Some(tx) = tx.lock().unwrap_or_else(|p| p.into_inner()).as_ref()
+                {
+                    let _ = tx.send(r.clone());
+                }
+                Ok(())
+            });
+            if r.is_err() {
+                abort.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             // Closing the channel lets the workers finish what was sent; the
             // scope joins them.
             tx.lock().unwrap_or_else(|p| p.into_inner()).take();
-            steps
+            r
         });
-        steps?;
+        ws_res?;
+
+        // 13.4 seed_caches (tracked repos only): the workers are joined.
+        enter("seed_caches")?;
         if let Some((r, e)) = cache_errs.into_inner().unwrap_or_else(|p| p.into_inner()).into_iter().next() {
             at.lock().unwrap_or_else(|p| p.into_inner()).1 = Some(r);
             return Err(e);
         }
+
+        // 13.2 git
+        enter("git")?;
+        each("git", &repos, &|r| {
+            let git = self.git(r)?;
+            let ws = &m.repos[r];
+            let dir = self.shadow_dir(id, r);
+            self.with_lock_unbounded(r, || {
+                let shadow = git.ensure_shadow(&dir)?;
+                git.attach_worktree(&shadow, 1, &ws.head, &ws.path, &ws.path)?;
+                Ok(())
+            })
+        })?;
+
+        // 13.3 pin
+        enter("pin")?;
+        each("pin", &repos, &|r| {
+            let git = self.git(r)?;
+            self.with_lock_unbounded(r, || git.update_ref(&pin_ref(id), &m.repos[r].head, None))
+        })?;
 
         // 13.5 seed_files
         enter("seed_files")?;
@@ -410,5 +452,106 @@ impl Sessions<'_> {
         };
         let tree = git.tree_of(&head)?;
         Ok((head, tree))
+    }
+}
+
+/// D56: the error of a `new` that failed and was rolled back. Nothing of
+/// the session is left, so the code is the cause's, not `Unknown`, except:
+/// a git timeout is `Busy` (`git_timeout`: the volume stalled, or a macOS
+/// permission prompt is waiting) and a refused access is `ReadOnly`
+/// (`tcc_denied`).
+fn rolled_back_error(m: &SessionManifest, phase: &str, repo: Option<&RepoName>, e: &StrataError) -> StrataError {
+    let cause = crate::scene::cause_of(e);
+    let (code, reason, hint) = if has_reason(&cause, "timeout") {
+        (
+            Code::Busy,
+            "git_timeout".to_string(),
+            Some(
+                "git timed out: the data volume stalled (a large clone, Time Machine, Spotlight) or a macOS \
+                 permission prompt for git-stratad is waiting (System Settings > Privacy & Security); retry",
+            ),
+        )
+    } else if denied(&cause) {
+        (
+            Code::ReadOnly,
+            "tcc_denied".to_string(),
+            Some(
+                "macOS refused access (TCC): allow git-stratad under Privacy & Security \
+                 (Files and Folders > Removable Volumes, or Full Disk Access); retry",
+            ),
+        )
+    } else {
+        let r = e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|v| v.as_str()).unwrap_or("rolled_back");
+        (e.code, r.to_string(), None)
+    };
+    let mut d = serde_json::Map::new();
+    d.insert("reason".into(), json!(reason));
+    d.insert("op".into(), json!("new"));
+    d.insert("session".into(), json!(m.id.as_str()));
+    d.insert("phase".into(), json!(phase));
+    if let Some(r) = repo {
+        d.insert("repo".into(), json!(r.as_str()));
+    }
+    d.insert("rolled_back".into(), json!(true));
+    if let Some(h) = hint {
+        d.insert("hint".into(), json!(h));
+    }
+    d.insert("cause".into(), cause);
+    let at = match repo {
+        Some(r) => format!("{phase} of {r}"),
+        None => phase.to_string(),
+    };
+    StrataError::new(code, format!("new {}: {at} failed: {}; rolled back, nothing kept", m.id, e.message))
+        .with_detail(serde_json::Value::Object(d))
+}
+
+/// Whether `v` or any error nested in it carries `"reason": want`.
+fn has_reason(v: &serde_json::Value, want: &str) -> bool {
+    match v {
+        serde_json::Value::Object(m) => {
+            m.get("reason").and_then(|r| r.as_str()) == Some(want) || m.values().any(|x| has_reason(x, want))
+        }
+        serde_json::Value::Array(a) => a.iter().any(|x| has_reason(x, want)),
+        _ => false,
+    }
+}
+
+/// EPERM anywhere in the cause, or git's "Operation not permitted": what a
+/// TCC refusal looks like from here.
+fn denied(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Object(m) => {
+            m.get("errno").and_then(|e| e.as_i64()) == Some(i64::from(libc::EPERM))
+                || m.get("stderr").and_then(|s| s.as_str()).is_some_and(|s| s.contains("Operation not permitted"))
+                || m.values().any(denied)
+        }
+        serde_json::Value::Array(a) => a.iter().any(denied),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shapes gitio gives: a timeout (`reason: timeout`), possibly
+    /// wrapped by `as_unknown`, and git's EPERM stderr.
+    #[test]
+    fn rolled_back_cause_classification() {
+        let timeout = StrataError::new(Code::Unknown, "git init timed out")
+            .with_detail(json!({ "reason": "timeout", "args": ["init", "--bare"], "stderr": "" }));
+        let wrapped = StrataError::new(Code::Unknown, "shadow")
+            .with_detail(json!({ "code": "Unknown", "message": "git init timed out", "detail": { "reason": "timeout" } }));
+        let tcc = StrataError::new(Code::Unknown, "git init failed")
+            .with_detail(json!({ "stderr": "fatal: cannot mkdir x: Operation not permitted" }));
+        let eperm = StrataError::new(Code::ReadOnly, "clone").with_detail(json!({ "errno": libc::EPERM }));
+        let other = StrataError::new(Code::Unknown, "full").with_detail(json!({ "errno": libc::ENOSPC }));
+        assert!(has_reason(&cause_of(&timeout), "timeout"));
+        assert!(has_reason(&cause_of(&wrapped), "timeout"));
+        assert!(!has_reason(&cause_of(&tcc), "timeout"));
+        assert!(denied(&cause_of(&tcc)));
+        assert!(denied(&cause_of(&eperm)));
+        assert!(!denied(&cause_of(&other)));
+        assert!(!denied(&cause_of(&timeout)));
     }
 }

@@ -533,7 +533,35 @@ fn daemon_status_up_reports_the_cwd_session() {
         assert_eq!(ds["running"], json!(true));
         assert_eq!(ds["session"], json!(s.as_str()), "{ds}");
         assert!(ds.get("session_lookup").is_none(), "{ds}");
+        // The daemon's descriptor count is passed through (incident
+        // 2026-10-27: the cli dropped it).
+        assert!(ds["fds"]["open"].as_u64().unwrap() > 0, "{ds}");
+        assert!(ds["fds"]["limit"].as_u64().unwrap() > 0, "{ds}");
         assert!(t.elapsed() < std::time::Duration::from_secs(10));
+    });
+}
+
+/// Incident 2026-10-27 (`new connector-0172 --repos tool`): `--repos` picks
+/// the tracked repos and every configured repo gets a workspace (D51), and
+/// the cli says so; `--repo` builds only the named repos.
+#[test]
+fn new_repos_tracks_and_repo_builds_only() {
+    let lv = Live::new(&["tool", "app"], &base_files());
+    lv.serve(|_| {
+        let r = lv.run(&["new", "--ticket", "T-1", "--repos", "tool"]);
+        let d = r.ok();
+        let repos = d["manifest"]["repos"].as_object().unwrap();
+        assert_eq!(repos.keys().collect::<Vec<_>>(), ["app", "tool"], "{d}");
+        assert_eq!(repos["tool"]["tracked"], json!(true), "{d}");
+        assert_eq!(repos["app"]["tracked"], json!(false), "{d}");
+        assert!(r.stderr.contains("note: --repos tracks tool;"), "{}", r.stderr);
+
+        let r = lv.run(&["new", "--ticket", "T-2", "--repo", "tool"]);
+        let d = r.ok();
+        let repos = d["manifest"]["repos"].as_object().unwrap();
+        assert_eq!(repos.keys().collect::<Vec<_>>(), ["tool"], "{d}");
+        assert_eq!(repos["tool"]["tracked"], json!(true), "{d}");
+        assert!(!r.stderr.contains("note:"), "{}", r.stderr);
     });
 }
 

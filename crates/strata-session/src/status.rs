@@ -93,6 +93,9 @@ pub enum StatusWarning {
     MirrorDrift { items: Vec<MirrorDriftItem> },
     PrePushGuardUnknown { detail: StrataError },
     ShadowMissing { path: PathBuf },
+    /// The shadow directory exists but is not this repo's shadow
+    /// repository (`reason` from gitio, e.g. `no-marker`).
+    ShadowInvalid { path: PathBuf, reason: String },
     MoveLeftover { n: u64, staging: PathBuf },
     MoveAwaitingRecover { n: u64, staging: PathBuf },
     OldTreeKept { path: PathBuf, n: u64, holders: Vec<OpenFile>, changed: bool, retained: bool },
@@ -184,6 +187,13 @@ impl Sessions<'_> {
                 Ok(s) => Some(s),
                 Err(e) if e.code == Code::NoSuchPath => {
                     warnings.push(StatusWarning::ShadowMissing { path: shadow_dir });
+                    None
+                }
+                // Not a shadow of this repo (e.g. half-built, no marker):
+                // the workspace is Missing; status still answers.
+                Err(e) if e.code == Code::InvalidInput => {
+                    let reason = e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|r| r.as_str()).unwrap_or("");
+                    warnings.push(StatusWarning::ShadowInvalid { path: shadow_dir, reason: reason.to_string() });
                     None
                 }
                 Err(e) => return Err(e),
