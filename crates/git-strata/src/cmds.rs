@@ -830,8 +830,12 @@ pub fn deps_list(ctx: &Ctx, repo: Option<String>) -> Result<Envelope> {
 
 // ---- gc -------------------------------------------------------------------------------
 
-pub fn gc(ctx: &Ctx) -> Result<Envelope> {
-    let v = ctx.call("gc", json!({ "repo": null }), Kind::Write)?;
+pub fn gc(ctx: &Ctx, store: bool, dry_run: bool) -> Result<Envelope> {
+    if dry_run {
+        let v = ctx.call("gc", json!({ "repo": null, "store": true, "dry_run": true }), Kind::Read)?;
+        return Ok(Envelope::ok(json!({ "dry_run": true, "preview": v["preview"] })));
+    }
+    let v = ctx.call("gc", json!({ "repo": null, "store": store }), Kind::Write)?;
     for s in v["skipped"].as_array().into_iter().flatten() {
         eprintln!("gc skipped: {s}");
     }
@@ -844,6 +848,19 @@ pub fn gc(ctx: &Ctx) -> Result<Envelope> {
         for p in t["stuck"].as_array().into_iter().flatten() {
             eprintln!("gc trash stuck: {p}");
         }
+    }
+    let s = &v["store"];
+    if s.is_object() {
+        for p in s["trash_refused"].as_array().into_iter().flatten() {
+            eprintln!("gc trash refused (still referenced): {p}");
+        }
+        for p in s["stuck"].as_array().into_iter().flatten() {
+            eprintln!("gc stuck: {p}");
+        }
+        for b in s["corrupt"].as_array().into_iter().flatten() {
+            eprintln!("gc scrub: corrupt blob {b} (kept; tell the human)");
+        }
+        return Ok(Envelope::ok(json!({ "store": s })));
     }
     Ok(Envelope::ok(json!({})))
 }

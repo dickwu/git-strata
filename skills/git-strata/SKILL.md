@@ -290,3 +290,5 @@ All three keys are always present; `data` is never null. Branch on
 - Disk space questions: `git-strata du` (read-only, cached, each figure has
   `as_of`); `du --refresh` re-sizes in the background. `store.trash.eligible`
   is what `git-strata gc` could reclaim; run `gc` only when the human asks.
+  `gc --store` also deletes checkpoints of sessions removed over 30 days
+  ago: run `gc --store --dry-run` first and only run `--store` when asked.

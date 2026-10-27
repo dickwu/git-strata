@@ -168,6 +168,21 @@ pub struct DepsApproveParams {
     pub sessions: Option<Vec<SessionId>>,
 }
 
+/// D33: `store` adds the store-wide gc (`Store::gc_with`: removed
+/// sessions, proposals, attempts, blobs, tmp, trash, scrub) after the repo
+/// gcs; `dry_run` (only with `store`) answers `Store::gc_preview` and
+/// writes nothing. Both default to false (the old `{ "repo": .. }` call).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GcParams {
+    #[serde(deserialize_with = "nullable")]
+    pub repo: Option<RepoName>,
+    #[serde(default)]
+    pub store: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepoOptParams {
@@ -289,7 +304,7 @@ pub enum Params {
     Push(PushParams),
     Assign(AssignParams),
     Rm(RmParams),
-    Gc(RepoOptParams),
+    Gc(GcParams),
     ResolveMove(ResolveMoveParams),
     ChainResolve(ChainResolveParams),
     ConfigRelax(RepoParams),

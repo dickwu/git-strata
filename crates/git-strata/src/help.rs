@@ -411,6 +411,18 @@ pub const GC_AFTER: &str = "Removes old bases and leftovers of removed sessions,
 deps staging, move intent, alternates file or worktree link names (refused
 entries stay). Skipped / refused / stuck items are printed on stderr; data is
 {}. Do not run it after an Unknown outcome.
+
+--store also runs the store-wide gc (opt-in; never automatic): rows of
+sessions removed more than 30 days ago (their checkpoints can no longer be
+restored), decided deps proposals, closed deps attempts, old gc records,
+blobs nothing kept references, store/tmp leftovers older than 1 h, the same
+trash rule as above, and a budgeted (2 GiB) blob integrity scan. Sessions a
+running or Unknown publish names are kept. data is {store: report}; corrupt
+blobs are listed, never deleted.
+--store --dry-run changes nothing: data is {dry_run: true, preview:
+{keep_secs, floor_secs, sessions[], proposals, attempts, gc_runs, blobs,
+blob_bytes, trash_eligible, trash_young, trash_refused[]}}, an upper bound
+of what --store would reclaim now. Run it first.
 ";
 
 pub const DU_AFTER: &str = "Read-only. Answers from the daemon's size cache in about a second; every

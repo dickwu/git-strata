@@ -733,6 +733,11 @@ fn shape_is_this_doc_not_a_golden() {
         assert_eq!(d, vec!["both", "only_a", "only_b", "repo"]);
         assert_eq!(lv.run(&["deps", "list"]).ok(), json!({ "proposals": [] }));
         assert_eq!(lv.run(&["gc"]).ok(), json!({}));
+        // D33: the store-wide gc is opt-in and previews first
+        let pv = lv.run(&["gc", "--store", "--dry-run"]).ok();
+        assert_eq!(pv["dry_run"], json!(true), "{pv}");
+        assert!(pv["preview"]["sessions"].is_array(), "{pv}");
+        assert!(lv.run(&["gc", "--dry-run"]).code != 0, "--dry-run needs --store");
         let r = lv.run_in(&ws, &["restore", &id]).ok();
         assert_eq!(r, json!({ "checkpoint": id.parse::<u64>().unwrap(), "session": s.as_str() }));
     });

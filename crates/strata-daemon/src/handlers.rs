@@ -29,7 +29,7 @@ use crate::resolve;
 use crate::rpc::{Params, Reply, Request};
 use crate::startup::{Core, Daemon};
 use crate::track::{self, drop_tracker, prepare_tool_call};
-use crate::{DaemonWarning, GC_KEEP, Result, RpcReject};
+use crate::{DaemonWarning, GC_KEEP, Result, RpcReject, STORE_GC_KEEP};
 
 thread_local! {
     /// The handler is about to call (or is inside) a lower-layer function
@@ -568,6 +568,19 @@ impl<'d, 'a> Server<'d, 'a> {
                 })
             }
             Params::Gc(p) => {
+                if p.store && p.repo.is_some() {
+                    return Err(StrataError::new(Code::InvalidInput, "--store is the whole store; it takes no repo")
+                        .with_detail(json!({ "reason": "store_with_repo" })));
+                }
+                if p.dry_run && !p.store {
+                    return Err(StrataError::new(Code::InvalidInput, "--dry-run previews the store-wide gc; add --store")
+                        .with_detail(json!({ "reason": "dry_run_without_store" })));
+                }
+                if p.dry_run {
+                    // D33: read-only; nothing is locked, deleted or recorded.
+                    let pv = core.store.gc_preview(STORE_GC_KEEP, &trash_refs(core))?;
+                    return Ok(json!({ "dry_run": true, "preview": json_of(&pv) }));
+                }
                 let repos: Vec<RepoName> = match &p.repo {
                     Some(r) => vec![r.clone()],
                     None => core.config.repos.keys().cloned().collect(),
@@ -587,6 +600,13 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
                 // §5.12: the global gc also empties store/trash (old entries
                 // nothing names; store.md §5.11a). A repo-scoped gc does not.
+                // D33: `store` runs the store-wide gc instead, whose trash
+                // step has the same protection (store.md §5.11 step 5).
+                if p.store {
+                    writing();
+                    let rep = core.store.gc_with(STORE_GC_KEEP, &trash_refs(core))?;
+                    return Ok(json!({ "done": done, "skipped": skipped, "trash": null, "store": json_of(&rep) }));
+                }
                 let trash = if p.repo.is_none() {
                     writing();
                     Some(json_of(&core.store.gc_trash(&trash_refs(core))?))

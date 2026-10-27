@@ -493,6 +493,13 @@ them, except entries a session, workspace, deps staging, move intent,
 alternates file or worktree link still names (reported as refused on
 stderr). Before 2026-10-26 nothing emptied `store/trash`.
 
+Store-wide gc is opt-in: `git-strata gc --store --dry-run` reports what it
+would reclaim (rows and checkpoints of sessions removed more than 30 days
+ago, blobs only they reference, decided deps proposals, closed attempts,
+store/tmp leftovers, old trash) and changes nothing; `git-strata gc --store`
+does it and runs a budgeted blob integrity scan. Nothing runs it
+automatically.
+
 ## Commands
 
 Flags, defaults and `data` shapes:

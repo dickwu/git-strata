@@ -165,7 +165,15 @@ pub enum Cmd {
     },
     /// Collect garbage (old bases, removed sessions, old store/trash)
     #[command(after_long_help = crate::help::GC_AFTER)]
-    Gc,
+    Gc {
+        /// Also run the store-wide gc: removed sessions past 30 days, their
+        /// checkpoints and blobs, decided proposals, store/tmp, blob scrub
+        #[arg(long)]
+        store: bool,
+        /// With --store: report what it would reclaim, change nothing
+        #[arg(long, requires = "store")]
+        dry_run: bool,
+    },
     /// Disk usage of the data root (cached; CoW-aware)
     #[command(after_long_help = crate::help::DU_AFTER)]
     Du {

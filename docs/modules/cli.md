@@ -131,7 +131,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `push` | `PushOutcome`（`kind` + `message`）。`Refused` 不在成功里出现，publish 已把它转成 `PushRefused` | — |
 | `assign` | `{}` | — |
 | `rm` | `RemoveReport` | — |
-| `gc` | `{}` | daemon 回复里的 `skipped` 与 `trash`（`removed`、`young`、`refused`、`stuck`）打到 stderr |
+| `gc` | `{}`；`--store` 时 `{ store: GcReport }`；`--store --dry-run` 时 `{ dry_run: true, preview: GcPreview }` | daemon 回复里的 `skipped` 与 `trash`（`removed`、`young`、`refused`、`stuck`）打到 stderr；`--store` 时再打 `trash_refused`、`stuck` 与 `corrupt`（D33） |
 | `du` | daemon `du` 的回复原样（daemon.md §5.12） | — |
 | `daemon start` / `stop` | `{ "already": true }` 或 `{}` | — |
 | `daemon status` | 见 §3.3。daemon 没在跑也有这个对象 | — |
@@ -472,6 +472,7 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D22 钩子的工具调用 id | `--tool-call` 不带值或为空 → 取 stdin JSON 的 `tool_use_id`；仍缺或为空 → `InvalidInput`（`checkpoint_reason`）。§3.5 的命令行改为 `git-strata checkpoint --tool-call`。[实现时补的决定] | Claude Code 不设 `TOOL_USE_ID` 环境变量，原命令行会传空串，每次钩子都失败 | 2026-10-23 |
 | D31 `--repo` 与 `add` | `new --repo R`（可重复）给精简会话；不带时保留 `--repos` 的整套布局；新命令 `add [--session S] --repo R…`。`NoSuchRepo` 的 `not_in_session` 带 `detail.fix` 原样给出这条 `add` 命令。cli 只在 `--repo` 时给 daemon 发 `only` | 见 session.md D51/D52。新 flag 不改 `--repos` 的含义，旧用法与旧 daemon 都不受影响。否决：给 `--repos` 加 `--only` 修饰 | 2026-10-27 |
 | D32 路径落在哪个工作区：末尾的符号链接不跟随（review P1-9） | `checkpoint`/`restore` 等把路径映射到会话与 repo 时，最后一个分量是符号链接就只解析它的父目录、保留链接名；这样落在某个工作区里就用它（链接条目本身）；链接本身不在任何工作区里（外面指进来的链接）才跟随到目标 | 原来整条路径 canonicalize：`restore CP link` 恢复的是链接指向的文件，改过的链接原样不动 | 2026-10-27 |
+| D33 `gc --store [--dry-run]`（review P1-12） | 全局 store gc 是显式的选项，不是 `gc` 的缺省：`--store` 调 daemon 的 `gc { store: true }`（30 天保留期，daemon.md D33）；`--dry-run` 要求 `--store`（clap `requires`），走只读的 `gc { store: true, dry_run: true }`，回 `{ dry_run: true, preview }`，什么都不改。帮助里写明先跑 `--dry-run` |
 
 初稿里被后写裁定压过的两句，不沿用：`grep` 不给 session 就是全部（改为 cwd 会话，`--all` 才是全部，design §6.3 与 T11）；`grep` 的 `--repo`（T11 只留 `--session` 与 `--all`）。crate 名从初稿的 `crates/strata-cli` 改为 types.md §8 的 `crates/git-strata`。
 

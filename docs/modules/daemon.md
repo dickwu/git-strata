@@ -85,7 +85,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `push` | `publish::push` | 否 |
 | `assign` | 点名冲突解决者 | 否 |
 | `rm` | `session::remove` | 否 |
-| `gc` | `store::gc_repo`；`repo` 为 null 时再 `store::gc_trash` | 否 |
+| `gc` | `store::gc_repo`；`repo` 为 null 时再 `store::gc_trash`；`store` 时改调 `store::gc_with`，`dry_run` 时只调 `store::gc_preview`（D33） | 否 |
 | `resolve_move` | `session::resolve_failed_move`。不查 TTY，不收凭据 | 否 |
 | `chain_resolve` | 人对 Rewound / Diverged 的显式处理。接受 origin 不推送；恢复只在快进时推 | 否 |
 | `config_relax` | 显式接受一次调松。文件变了不弹框。路径能编译。调松仍要这条命令；调紧立即生效 | 否 |
@@ -438,7 +438,7 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 
 （review-3 R5）拿到队列位置之后、`f` 开始之前再看一次截止时刻：旗标恰好在最后一次轮询（已过期）时清掉，或者过期后以零时长拿到空闲队列，都不再让 `f` 晚开始，而是 `Busy` `lock_wait`（`deadline: true`），什么都不写。`f` 一旦开始就不再设界。零时长的 try-lock 语义（`try_session`）不变。[实现时补的决定]
 
-**`gc`**：一个 repo 一把锁，调用方持有，调 `gc_repo(repo, GC_KEEP)`。`repo` 为 null 则按 `RepoName` 升序逐个。写前等锁；超时跳过这个 repo，记进 `daemon_status`，不让整次失败。不占会话队列，不等建造锁。`repo` 为 null 时，逐个 repo 做完之后再调 `Store::gc_trash(extra)`（store.md §5.11a），回复的 `trash` 是它的 `TrashReport`。`extra` 是 store 没有行的、git 链接点名的路径：每个影子仓库（`sessions/.repos/<sid>/<repo>.git`）与每个配置仓库的 `.git` 的 `objects/info/alternates` 各行、`commondir`、`worktrees/*/gitdir` 与 `worktrees/*/commondir`。对账循环与启动不调 `gc_trash`：清空 trash 只在人（或被要求的 agent）跑 `git-strata gc` 时发生 [实现时补的决定]（2026-10-26）。此前没有任何路径清空 `store/trash`：daemon 只调 `gc_repo`，`Store::gc`（第 5 步删 trash）从未被调用。
+**`gc`**：一个 repo 一把锁，调用方持有，调 `gc_repo(repo, GC_KEEP)`。`repo` 为 null 则按 `RepoName` 升序逐个。写前等锁；超时跳过这个 repo，记进 `daemon_status`，不让整次失败。不占会话队列，不等建造锁。`repo` 为 null 时，逐个 repo 做完之后再调 `Store::gc_trash(extra)`（store.md §5.11a），回复的 `trash` 是它的 `TrashReport`。`extra` 是 store 没有行的、git 链接点名的路径：每个影子仓库（`sessions/.repos/<sid>/<repo>.git`）与每个配置仓库的 `.git` 的 `objects/info/alternates` 各行、`commondir`、`worktrees/*/gitdir` 与 `worktrees/*/commondir`。对账循环与启动不调 `gc_trash`：清空 trash 只在人（或被要求的 agent）跑 `git-strata gc` 时发生 [实现时补的决定]（2026-10-26）。参数另有 `store` 与 `dry_run`（都缺省 false，D33）：`store` 时 repo 必须为 null（否则 `InvalidInput`，`reason = "store_with_repo"`），逐个 repo 做完之后调 `Store::gc_with(STORE_GC_KEEP, extra)`（30 天；它的 trash 步与 `gc_trash` 同样保护），不再单独调 `gc_trash`，回复多一个 `store`（`GcReport`，`trash` 为 null）；`dry_run` 只能和 `store` 一起（否则 `InvalidInput`，`reason = "dry_run_without_store"`），只调 `Store::gc_preview` 回 `{ dry_run: true, preview }`，不拿锁、不写任何东西。此前没有任何路径清空 `store/trash`：daemon 只调 `gc_repo`，`Store::gc`（第 5 步删 trash）从未被调用。
 
 **`resolve_move`**：不查 TTY，不返回 `NotTty`，不调用 `Confirmer`，参数里没有凭据。cli 已经查过 TTY，并且人给过选择。`abandon` 与 `accept` 必须恰好一个为真；否则 RPC `Failed`，`resolve_failed_move` 不调用。`publishing` 为真时先等旗标，等的时候不持队列或 repo 锁。然后占该会话的队列。不持 repo 锁地调 `session::resolve_failed_move(session, repo, MoveResolution::Abandon 或 Accept)`（它自己取锁）。`Accept` 之后 `Tracker::reset` 再 `watch`。`Abandon` 不换工作区树，不 reset。不自动选。
 
@@ -917,6 +917,7 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 | D30 等待期应答器先起（review P1-6） | `main` 拿到实例锁后、第一次 `prepare_locked` 之前就 `waiting::answer_early`（bind + 应答 `Busy starting`），失败才在第一次出错时再试；apfs 内部 `EINTR` 重试最多 64 次 | 原来第一次出错才 bind：第一次尝试卡在 TCC 里时 socket 一声不响，`daemon status` 只能超时；apfs 的 `retry` 无限重试 EINTR，外层有界的 `retry_eintr`/启动等待回不来、也看不到 SIGTERM | 2026-10-27 |
 | D31 写者中毒就退出重启（review P1-7） | `serve` 的接受循环每轮看 `store.is_poisoned()`；中毒就停止接受、排空在途连接、告警一次，以 `Unknown{reason:"store_poisoned_restart"}` 返回，`main` 以失败退出，launchd `KeepAlive` 拉起新进程重开 store（没有干净关停标记，所以跑 quick_check） | 原来中毒之后 daemon 一直活着，每个写都 `Unknown poisoned`，直到有人手动重启；进程内重开不行：Turso 每进程每文件一个 `Database`，不会重跑 WAL 恢复 | 2026-10-27 |
 | D32 重跑过滤容忍已被清掉的提交（review P1-8） | `landed_content` 读最新 `Done` 行的提交时，`tree_of`/`tree_items` 报 `NoSuchCommit`/`NoSuchPath` 就当作“证明不了已落地”，返回 `None`：选择器留着，由 stage 如实回答（`NoMatch`/`NoCommit` 后的 H4 兜底） | 那个提交被 replay 或 `chain --accept-origin drop` 挪出链、再被 git gc 清掉后，同一会话任何“内容没变”的选择器都让整个 publish 以 `NoSuchCommit` 失败，agent 只能改文件或开新会话 | 2026-10-27 |
+| D33 全局 gc 只在人要求时跑（review GS-09，P1-12） | `Store::gc`（删已移除会话过了保留期的行与 checkpoint、已决提议、已结束的尝试、旧 gc 记录、无引用的 blob、`store/tmp`、trash，再做 2 GiB 的 blob 校验）此前没有调用方。现在只由 `gc` 方法在 `store = true` 时调用（`git-strata gc --store`），保留期 `STORE_GC_KEEP` 30 天，比 `GC_KEEP` 长：删掉的 checkpoint 无法重建。启动、对账循环都不调它。`dry_run` 先给 `gc_preview`（只读、不记 `gc_runs`）。trash 步改用与 `gc_trash` 相同的引用集（行与 git 链接），被点名的条目记进 `trash_refused`。在跑的发布、Unknown 的发布点名的会话照 store.md §5.11 留着。自动定期跑留待人决定。测试：`store_gc_is_opt_in_and_previews_first`（daemon）、`gc_preview_counts_and_writes_nothing`、`gc_trash_step_spares_referenced_trash`（store）、cli 的 `shape_is_this_doc_not_a_golden` |
 
 D18 的契约，实现者不要猜：
 

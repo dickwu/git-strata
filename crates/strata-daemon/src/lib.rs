@@ -47,6 +47,11 @@ pub const RECONCILE_EVERY: Duration = Duration::from_secs(3600);
 pub const SEED_REFRESH_EVERY: Duration = Duration::from_secs(2);
 /// D12: `gc_repo` keep window.
 pub const GC_KEEP: Duration = Duration::from_secs(14 * 24 * 3600);
+/// D33: the store-wide gc's keep (removed sessions, decided proposals,
+/// closed attempts). Longer than [`GC_KEEP`]: what it deletes (checkpoints
+/// of removed sessions) cannot be rebuilt. Only `git-strata gc --store`
+/// runs it.
+pub const STORE_GC_KEEP: Duration = Duration::from_secs(30 * 24 * 3600);
 /// D1: the system part of the PATH installs and checks run with (launchd
 /// gives a bare PATH). [`install_path_for_home`] puts `~/.bun/bin` in front.
 pub const DEFAULT_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";

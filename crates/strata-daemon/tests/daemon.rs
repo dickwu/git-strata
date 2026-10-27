@@ -1221,6 +1221,44 @@ fn du_sizes_sessions_records_new_and_rm_and_gc_empties_trash() {
     core.close().unwrap();
 }
 
+/// D33 (review GS-09): `gc --store --dry-run` previews and writes nothing;
+/// `gc --store` runs the store-wide gc with the trash protection; `store`
+/// takes no repo and `dry_run` needs `store`.
+#[test]
+fn store_gc_is_opt_in_and_previews_first() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let root = fx.config.paths.root.clone();
+    let trash = root.join("store/trash");
+    fs::create_dir_all(&trash).unwrap();
+    let old = trash.join(format!("1000-{}", "0".repeat(32)));
+    fs::create_dir_all(old.join("x")).unwrap();
+    serving(&d, || {
+        let r = call(&sock, "gc", json!({ "repo": "tool", "store": true }));
+        assert_eq!(r["error"]["detail"]["reason"], json!("store_with_repo"), "{r:#}");
+        let r = call(&sock, "gc", json!({ "repo": null, "dry_run": true }));
+        assert_eq!(r["error"]["detail"]["reason"], json!("dry_run_without_store"), "{r:#}");
+
+        let runs = core.store.last_gc_report(None).unwrap();
+        let p = ok(call(&sock, "gc", json!({ "repo": null, "store": true, "dry_run": true })));
+        assert_eq!(p["dry_run"], json!(true), "{p:#}");
+        assert!(p["preview"]["trash_eligible"].as_u64().unwrap() >= 1, "{p:#}");
+        assert_eq!(p["preview"]["keep_secs"], json!(30 * 24 * 3600), "{p:#}");
+        assert!(old.exists(), "a dry run deletes nothing");
+        assert_eq!(core.store.last_gc_report(None).unwrap(), runs, "a dry run records no gc run");
+
+        let g = ok(call(&sock, "gc", json!({ "repo": null, "store": true })));
+        assert!(g["store"]["trash_removed"].as_u64().unwrap() >= 1, "{g:#}");
+        assert!(g["store"]["error"].is_null(), "{g:#}");
+        assert!(!old.exists());
+        assert!(core.store.last_gc_report(None).unwrap().is_some(), "the store-wide run is recorded");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 /// session.md D51/D52: `new` with `only` lays out the named repo alone; a
 /// call on a repo the session lacks names `git-strata add`; `add` gives the
 /// session that repo, and the same call then works.
