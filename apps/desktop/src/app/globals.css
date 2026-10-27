@@ -1,0 +1,202 @@
+@import 'tailwindcss';
+@import './fonts.css';
+
+/*
+ * gui.md §8.2 tokens. Contrast-bearing values are mirrored in src/lib/tokens.ts and
+ * checked by src/lib/contrast.test.ts (ui_accent_contrast) — change both together.
+ */
+:root {
+  --bg-app: #f6f5f2;
+  --bg-panel: #ffffff;
+  --bg-sunken: #efece6;
+  --border: #e3dfd7;
+  --text: #181613;
+  --text-muted: #6b665e;
+  --accent: #2e6f8e;
+  --on-accent: #ffffff;
+  --danger: #d4493a;
+  --mount-live: #1f9d55;
+  --layer-base: #b8ae9c;
+  --layer-deps: #8c9a7a;
+  --layer-session: var(--accent);
+  --layer-chain: #c98a3d;
+  --font-ui: 'Inter', -apple-system, system-ui, sans-serif;
+  --font-title: 'Inter Tight', 'Inter', -apple-system, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --bg-app: #0e0d0c;
+  --bg-panel: #17171a;
+  --bg-sunken: #0a0a0a;
+  --border: #2a2927;
+  --text: #ecebe7;
+  --text-muted: #9b958b;
+  --accent: #6fb3d2;
+  --on-accent: #0e0d0c;
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg-app);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 20px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* Shell grid (§5.1): titlebar 36, sidebar 264 / 56, status bar 30. */
+.shell {
+  display: grid;
+  grid-template-rows: 36px 1fr 30px;
+  grid-template-columns: 264px 1fr;
+  grid-template-areas:
+    'title title'
+    'side main'
+    'status status';
+  height: 100vh;
+}
+.shell[data-collapsed='true'] {
+  grid-template-columns: 56px 1fr;
+}
+
+.titlebar {
+  grid-area: title;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Room for the macOS traffic lights (titleBarStyle Overlay). */
+  padding: 0 12px 0 80px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-app);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.sidebar {
+  grid-area: side;
+  border-right: 1px solid var(--border);
+  background: var(--bg-sunken);
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.toolbar {
+  height: 52px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.content {
+  flex: 1;
+  overflow: auto;
+  padding: 20px;
+}
+
+.statusbar {
+  grid-area: status;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-app);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.screen-title {
+  font-family: var(--font-title);
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+.nav-item:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+.nav-item[aria-current='page'] {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.dot[data-state='up'] {
+  background: var(--mount-live);
+}
+.dot[data-state='down'] {
+  background: var(--danger);
+}
+
+/* Focus is always visible (§8.2). */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
