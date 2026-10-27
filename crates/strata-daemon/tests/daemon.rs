@@ -1112,6 +1112,46 @@ fn standalone_push_unknown_keeps_scene_and_reports_across_restart() {
     });
 }
 
+/// Review P1-13 (D34): the push scene record is fsynced before anything is
+/// pushed. When that fsync fails the push is refused, origin is untouched
+/// and no scene is left behind.
+#[test]
+fn standalone_push_needs_a_durable_scene_record() {
+    let mut fx = Dfx::new();
+    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.push = false;
+    fx.write_config();
+    let sock = fx.socket();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let tool = fx.config.repos[&repo_name("tool")].path.clone();
+    let a_url = fx.sb.git(&tool, &["config", "remote.origin.url"]).trim().to_string();
+    let main_at = || fx.sb.git(&fx.sb.root, &["--git-dir", &a_url, "rev-parse", "refs/heads/main"]).trim().to_string();
+    let before = main_at();
+    let root = fx.config.paths.root.clone();
+    serving(&d, || {
+        let id = new_session(&sock);
+        external(&ws(&core, &id, "tool"), "printf 'export const a = 11\\n' > src/index.ts");
+        let cp = ok(call(&sock, "checkpoint", json!({
+            "session": id, "repo": "tool",
+            "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+        })));
+        let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+        ok(call(&sock, "publish", json!({ "group": group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]) })));
+        strata_daemon::seams::set_scene_sync_fails(&root, true);
+        let r = call(&sock, "push", json!({ "repo": "tool" }));
+        strata_daemon::seams::set_scene_sync_fails(&root, false);
+        assert!(r.get("error").is_some(), "{r:#}");
+        assert_eq!(main_at(), before, "nothing was pushed");
+        let left: Vec<_> = fs::read_dir(root.join("daemon/push")).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        assert!(left.is_empty(), "no scene is left: {left:?}");
+        let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
+        assert_eq!(r["push"]["kind"], "Pushed", "{r:#}");
+        assert_ne!(main_at(), before);
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 /// Review-5 N1: a standalone `push` whose recorded URL A gets an exact
 /// `insteadOf` rule while it stages (git would send A to B) is refused
 /// before anything is sent (`url-rewritten`): A and B are untouched and a

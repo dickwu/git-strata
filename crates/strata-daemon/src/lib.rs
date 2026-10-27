@@ -31,6 +31,23 @@ pub mod waiting;
 pub mod seams {
     pub use strata_confirm::Confirmer;
     pub use strata_confirm::seams::{FakeClock, PromptLog, ScriptedAuth, Verdict, bypass_env_names};
+
+    static SCENE_SYNC_FAILS: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+    /// Review P1-13: make every fsync of a push scene record under `root`
+    /// fail with EIO (`on`), or stop doing so. Keyed by root so parallel
+    /// tests are unaffected.
+    pub fn set_scene_sync_fails(root: &std::path::Path, on: bool) {
+        let mut v = SCENE_SYNC_FAILS.lock().unwrap_or_else(|p| p.into_inner());
+        v.retain(|r| r != root);
+        if on {
+            v.push(root.to_path_buf());
+        }
+    }
+
+    pub(crate) fn scene_sync_fails(p: &std::path::Path) -> bool {
+        SCENE_SYNC_FAILS.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|r| p.starts_with(r))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, StrataError>;

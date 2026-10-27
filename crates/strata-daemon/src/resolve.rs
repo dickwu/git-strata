@@ -255,9 +255,9 @@ pub(crate) fn with_staging<T>(
         "push_url": dest.map(|d| d.push_url.as_str()),
     })
     .to_string();
-    if let Err(e) = fs::write(&intent, body) {
+    if let Err(e) = write_scene_record(&dir, &intent, body.as_bytes()) {
         let _ = fs::remove_dir_all(&dir);
-        return Err(classify_io_error(&e, IoSide::Write, &intent));
+        return Err(e);
     }
     let r = (|| {
         let wt = dir.join(repo.as_str());
@@ -278,6 +278,42 @@ pub(crate) fn with_staging<T>(
     }
     let _ = fs::remove_dir_all(&dir);
     r
+}
+
+/// Review P1-13 (D34): the attempt record must be on the medium before
+/// anything is pushed, or a power loss after the push leaves no scene and
+/// the unknown push is never reported. Temp file → write → F_FULLFSYNC →
+/// rename → F_FULLFSYNC the scene directory and its parent (the scene
+/// directory itself was just created). Any failure is returned and the
+/// caller pushes nothing.
+fn write_scene_record(dir: &Path, intent: &Path, body: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let io = |e: std::io::Error, p: &Path| classify_io_error(&e, IoSide::Write, p);
+    let tmp = dir.join(format!(".{SCENE_FILE}.tmp"));
+    {
+        let mut f = fs::File::create(&tmp).map_err(|e| io(e, &tmp))?;
+        f.write_all(body).map_err(|e| io(e, &tmp))?;
+        sync_path_file(&f, &tmp)?;
+    }
+    fs::rename(&tmp, intent).map_err(|e| io(e, intent))?;
+    for d in [Some(dir), dir.parent()].into_iter().flatten() {
+        let f = fs::File::open(d).map_err(|e| io(e, d))?;
+        sync_path_file(&f, d)?;
+    }
+    Ok(())
+}
+
+/// F_FULLFSYNC, falling back to fsync where the volume does not support it.
+fn sync_path_file(f: &fs::File, shown: &Path) -> Result<()> {
+    #[cfg(feature = "test-seams")]
+    if crate::seams::scene_sync_fails(shown) {
+        return Err(classify_io_error(&std::io::Error::from_raw_os_error(libc::EIO), IoSide::Write, shown));
+    }
+    match strata_apfs::full_fsync(f) {
+        Ok(()) => Ok(()),
+        Err(e) if e.code == Code::Unsupported => f.sync_all().map_err(|e| classify_io_error(&e, IoSide::Write, shown)),
+        Err(e) => Err(e),
+    }
 }
 
 /// Where standalone and restore pushes stage (under `paths.root`).
