@@ -2,7 +2,7 @@
 
 **Crate**：`crates/strata-client`（新，从 cli 抽出的纯传输层）＋ `apps/desktop/src-tauri`（新，crate `git-strata-desktop`，lib `strata_desktop_lib`，不在核心 workspace 里）· **前端**：`apps/desktop/`（Next.js 静态导出）· **设计来源**：daemon.md §3–§6、confirm.md §1 §3 §5、cli.md §1 §3、config.md、types.md §8、README「Install and daemon」「Confirmation gate」 · **参照工程**：R2（github.com/dickwu/r2，已确认的技术栈）· **UI 方法**：frontend-design skill
 
-> 状态：提案，未实现。第三版（2026-10-27，r3.7）。第二版（ed7a85a）按 peilin 的回答（t49u）定下 D1–D10；Codex 与 Claude 复核了第二版（review-notes/gui-merged.md），peilin 10:28 回答了四个问题（D11–D14）。本版逐条处理复核结论：每条结论在哪一节落地，见文末「复核对照」表。第三版的确认复核（review-notes/gui-r3-*.md）又提出 4 条阻断与若干小项，已在 r3.1 就地修正；r3.1 的再复核（gui-r3.1-*.md）指出停机栅栏仍有检查与停机之间的空档，r3.2 改为 daemon 内原子封口；r3.2 的再复核（gui-r3.2-*.md）指出封口后的 60 s 自退会被 KeepAlive 拉起一个未封口的新进程、旧 daemon 迁移挡不住已建立的连接，r3.3 改为「封口即退出 + 退出码决定是否拉起」与「旧 daemon 无客户端连接才迁移」，r3.3 的再复核指出「客户端已断开、处理线程还在跑」的请求核验不到，peilin 选 (a)（11:31），r3.4 改为按副本数核验连接线程，并按 peilin 11:32（t51u）把迁移收窄到他本机这一套旧安装，见「复核对照」的 r3 部分。r3.4 的再复核（gui-r3.4-*.md）指出 ⓪ 要求的 `version` 字段旧 daemon 根本没有，另有监听 socket 认法、停机顺序等小项；r3.5 按 peilin 的要求把身份核对改为四项检查，用实录的 `daemon_status` 回答与 lsof 样本（review-notes/r3.5-samples/）改写 ⓪ ②，并吸收 10-27 inter 的 daemon 事故（/tmp/stratad-incident/）：旧 daemon fd 用尽时迁移一律按「核验不了」拒绝，bundle 的 daemon 必须接受数据根下的 `search/`。r3.5 的再复核（gui-r3.5-*.md）两家都无阻断；r3.6 吸收 Claude 的三条非阻断：`status{all:true}` 单独 60 s 超时、超时与 EOF 分开措辞，bootout 前按时钟重算 reconcile 余量，实录样本脱敏后作为测试 fixture 提交（`apps/desktop/src-tauri/tests/fixtures/legacy/`，见其中 README）、改正样本计数，迁移一节的 `v1:` 行号全部改按 c98794f 重新核对。r3.7 按 peilin 13:2x 的决定（t55u「打包可以参考 R2 用 github」，D15）把 P-pack 从「干净的 macOS 虚拟机」改到 GitHub Actions 托管 runner，§6「打包与签名」与 §8.1 P-pack 段改写，工作流与脚本已提交（未推送）。本文只写设计，不含代码；daemon 侧要加的东西全部列在 §3.4，分期写进 §8.1。
+> 状态：提案，未实现。第三版（2026-10-27，r3.8）。第二版（ed7a85a）按 peilin 的回答（t49u）定下 D1–D10；Codex 与 Claude 复核了第二版（review-notes/gui-merged.md），peilin 10:28 回答了四个问题（D11–D14）。本版逐条处理复核结论：每条结论在哪一节落地，见文末「复核对照」表。第三版的确认复核（review-notes/gui-r3-*.md）又提出 4 条阻断与若干小项，已在 r3.1 就地修正；r3.1 的再复核（gui-r3.1-*.md）指出停机栅栏仍有检查与停机之间的空档，r3.2 改为 daemon 内原子封口；r3.2 的再复核（gui-r3.2-*.md）指出封口后的 60 s 自退会被 KeepAlive 拉起一个未封口的新进程、旧 daemon 迁移挡不住已建立的连接，r3.3 改为「封口即退出 + 退出码决定是否拉起」与「旧 daemon 无客户端连接才迁移」，r3.3 的再复核指出「客户端已断开、处理线程还在跑」的请求核验不到，peilin 选 (a)（11:31），r3.4 改为按副本数核验连接线程，并按 peilin 11:32（t51u）把迁移收窄到他本机这一套旧安装，见「复核对照」的 r3 部分。r3.4 的再复核（gui-r3.4-*.md）指出 ⓪ 要求的 `version` 字段旧 daemon 根本没有，另有监听 socket 认法、停机顺序等小项；r3.5 按 peilin 的要求把身份核对改为四项检查，用实录的 `daemon_status` 回答与 lsof 样本（review-notes/r3.5-samples/）改写 ⓪ ②，并吸收 10-27 inter 的 daemon 事故（/tmp/stratad-incident/）：旧 daemon fd 用尽时迁移一律按「核验不了」拒绝，bundle 的 daemon 必须接受数据根下的 `search/`。r3.5 的再复核（gui-r3.5-*.md）两家都无阻断；r3.6 吸收 Claude 的三条非阻断：`status{all:true}` 单独 60 s 超时、超时与 EOF 分开措辞，bootout 前按时钟重算 reconcile 余量，实录样本脱敏后作为测试 fixture 提交（`apps/desktop/src-tauri/tests/fixtures/legacy/`，见其中 README）、改正样本计数，迁移一节的 `v1:` 行号全部改按 c98794f 重新核对。r3.7 按 peilin 13:2x 的决定（t55u「打包可以参考 R2 用 github」，D15）把 P-pack 从「干净的 macOS 虚拟机」改到 GitHub Actions 托管 runner，§6「打包与签名」与 §8.1 P-pack 段改写，工作流与脚本已提交（未推送）。r3.8 记下 P1 前端实现时的取舍（§8.1「P1 实现记录」），设计本身不变。本文只写设计，不含代码；daemon 侧要加的东西全部列在 §3.4，分期写进 §8.1。
 
 ### 决定表
 
@@ -590,6 +590,18 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 
 主线合计 30 天。
 
+**P1 实现记录**（r3.8；后端 f81f714，前端 357fc19，均未推送）。照上表做，偏离与补充如下：
+
+- **旧 daemon 护栏（我的决定）**：`daemon_status` 回答里没有 `api` 键就当旧 daemon（P2 之前的所有 daemon，包括 10-27 fd 泄漏的 c98794f 构建）。对它把 `status{all:true}`（每次都对每个会话做 drift 与打开文件检查）降到可见 30 s、隐藏 120 s，单会话 `status` 可见 30 s、隐藏不轮询，`daemon_status` 可见 5 s；有 `api` 的 daemon 用 §5.3.3 的轮询兜底数字（2 / 5 / 10 / 10 / 60 s，隐藏 10 / 30 / 停 / 30 / 停）。daemon 不在（`detail.reason == "daemon_down"`）时只轮询 `daemon_status`（可见 5 s、隐藏 30 s）。`Busy` 的 request_in_flight、超时都不算「不在」。前端不重试，单飞与超时由后端负责（§3.2）。实现在 `src/lib/poll.ts`，测试在 `poll.test.ts`。
+- **托盘**：P1 托盘已读「等你处理」（deps 提案 Pending、有冲突的 workspace），点项发 `strata://open`，前端落到对应会话：`deps:<id>` → 提出该提案的会话，`conflict:<repo>` → 该仓库里第一个有冲突的会话，找不到就停在会话列表。「暂停通知」项本期不做（P1 没有通知）。
+- **strata 柱推迟到 P2**：会话详情先用表格列出每个仓库的 head / base tree / deps 集短哈希、健康、pending、冲突与已发布链状态，checkpoint 按新到旧排；分层柱与 Home、Allocations、Diff 一起在 P2 做。
+- **CSP 的例外**：antd 6 的 CSS-in-JS 在运行时插 `<style>`，所以 `style-src` 保留 `'unsafe-inline'`，并用 `dangerousDisableAssetCspModification: ["style-src"]` 阻止 Tauri 往 style-src 加 hash（加了 hash 后 `'unsafe-inline'` 会被浏览器忽略）。`script-src` 仍只有 `'self'`，Next 静态导出的内联脚本由 Tauri 构建时自动加 hash。
+- **窗口拖动**：标题栏用 `data-tauri-drag-region`，需要 capability `core:window:allow-start-dragging`（已加进 `capabilities/default.json`）。
+- **antd 主色固定**：antd 的暗色算法会把种子色 #6FB3D2 改成 #619bb6；providers 在算法之后再把 `colorPrimary` 与 `colorTextLightSolid` 钉回 §8.2 的 accent / on-accent，让 `ui_accent_contrast` 测的就是画出来的颜色。另有测试核对 `globals.css` 与 `src/lib/tokens.ts` 的取值一致。
+- **字体**：Inter、Inter Tight、JetBrains Mono 的 woff2 与 OFL 文本从 R2 原样复制到 `public/fonts/`，不用 `next/font/google`（构建时要联网，CSP 也只放行 `'self'`）。
+- **格式化**：`.prettierrc` 去掉了 `prettier-plugin-tailwindcss`（没装，本期不许安装）；需要时再加回并装依赖。
+- **检查**：`bun run typecheck`、`bun test src`（31 个：对比度与 token 一致、P1 fixture 上的视图映射、轮询表、⌘K 过滤）、`bun run build`（静态导出到 `dist/`）、`src-tauri` 的 `cargo test` 全过。headless Chrome 打开静态导出（非 Tauri 环境）能渲染壳并显示「Open this inside the Git Strata app.」；真窗口里连 daemon 的界面还没人看过，要在 peilin 本机 `bun run tauri dev` 时确认。
+
 **并行轨道 P-pack**（4–5 天，从 P0 完成起与 P1–P3 交替进行；D15：在 GitHub Actions 托管 macOS runner 上跑，每次都是没装过本 app 的干净机器）。产出一页实测记录，P6 之前必须有结论。要回答的问题：
 
 1. 自签名（以及 ad-hoc）的 app 能否用 `SMAppService.agent` 注册并启动内嵌的 `git-stratad`；移动 app、重签后是否仍有效。
@@ -684,6 +696,7 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 - daemon 自己写日志到 `~/Library/Logs/git-strata/`。
 - drain 带 ttl，同 uid 可调用。
 - 错误类型用 `{code,message,detail}`；CSP 不跟 R2 的 null。
+- P1 对没有 `api` 键的旧 daemon 降低 `status` 轮询频率（§8.1「P1 实现记录」）。
 
 剩余问题（给 peilin）：
 1. **Q-reload**：收紧确认（`confirm = true`）目前要重启 daemon 才生效。要不要让 daemon 定时重读 config.toml，**只对收紧**立即生效？（放松仍走 config_relax。）
