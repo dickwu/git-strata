@@ -13,8 +13,10 @@ macro_rules! gate_text {
         "CONFIRMATION GATE (Touch ID / TTY)
   A repo needs confirmation when publish.confirm = true; that is the only gate.
   deploy_on_push is information (a push deploys) and gates nothing by itself.
-  The flag used is the pinned confirm (pins.json) ORed with config.toml; an
-  unreadable pins.json, or a repo missing from it, counts as needs confirmation.
+  The flag used is the pinned confirm (pins.json) ORed with config.toml; a
+  missing or unreadable pins.json, or a repo missing from it (new or renamed),
+  counts as needs confirmation. The daemon pins such a repo with confirm on;
+  a looser config.toml applies only after `git-strata config relax REPO`.
 
   Gated commands need a terminal on stdin; most then show a LocalAuthentication
   prompt (Touch ID, or the login password) from the daemon:

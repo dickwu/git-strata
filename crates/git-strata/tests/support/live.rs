@@ -128,7 +128,7 @@ impl Live {
                 p = p.to_string_lossy(),
             ));
         }
-        fs::write(self.home.config_dir().join("config.toml"), t).unwrap();
+        fs::write(self.home.config_dir().join("config.toml"), &t).unwrap();
     }
 
     fn options(&self) -> Options {
@@ -167,6 +167,23 @@ impl Live {
             ("XDG_CONFIG_HOME", Some(xdg.as_os_str())),
             ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
         ];
+        // A repo with no pin needs confirmation: pin the first config as if
+        // a human had accepted it; later writes go through tighten/pending.
+        let pins = self.home.config_dir().join("pins.json");
+        if !pins.exists() {
+            let c = strata_types::Config::parse(&fs::read_to_string(self.home.config_dir().join("config.toml")).unwrap()).expect("fixture config");
+            let repos: serde_json::Map<String, serde_json::Value> = c
+                .repos
+                .iter()
+                .map(|(n, rc)| {
+                    (
+                        n.as_str().to_string(),
+                        serde_json::json!({ "deploy_on_push": rc.deploy_on_push, "confirm": rc.publish.confirm, "push": rc.publish.push }),
+                    )
+                })
+                .collect();
+            fs::write(pins, serde_json::to_string_pretty(&serde_json::json!({ "repos": repos })).unwrap()).unwrap();
+        }
         let core = startup::prepare(self.options(), c, &move |p: &Path| Git::open_with_env(p, &env)).expect("prepare");
         let d = Daemon::start(&core).expect("daemon start");
         let listener = startup::bind(&core.opts.socket).expect("bind");

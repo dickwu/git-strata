@@ -41,6 +41,11 @@ pub fn relaxes(pin: PinnedFlags, file: PinnedFlags) -> bool {
     (pin.deploy_on_push && !file.deploy_on_push) || (pin.confirm && !file.confirm) || (!pin.push && file.push)
 }
 
+/// The pin of a repo that has none yet: the configured flags, but gated.
+pub fn unpinned(file: PinnedFlags) -> PinnedFlags {
+    PinnedFlags { confirm: true, ..file }
+}
+
 /// `needs_human_confirm` over pinned flags: `confirm` alone gates.
 pub fn needs_confirm(f: PinnedFlags) -> bool {
     f.confirm
@@ -71,11 +76,14 @@ struct PinsState {
 }
 
 impl Pins {
-    /// Startup step 5. No file: the loaded configuration becomes the pins
-    /// (not a relaxation). Otherwise tighten at once and write back; record
-    /// relaxations as pending. A repo new to the file is pinned as
-    /// configured. Pins of repos no longer configured are kept. Never
-    /// prompts.
+    /// Startup step 5. Tighten at once and write back; record relaxations
+    /// as pending. A repo with no pin (no file, or a name the file does not
+    /// have, e.g. a new or renamed repo) is pinned as configured but with
+    /// `confirm = true` (`unpinned`): a missing pin needs confirmation, so
+    /// deleting `pins.json` or renaming a repo never loosens the gate; a
+    /// configured `confirm = false` shows as pending until `config relax`
+    /// (daemon.md §4, D26). Pins of repos no longer configured are kept.
+    /// Never prompts.
     pub fn load(path: &Path, config: &Config) -> Result<Pins> {
         let file: BTreeMap<RepoName, PinnedFlags> =
             config.repos.iter().map(|(n, rc)| (n.clone(), flags_of(rc))).collect();
@@ -91,7 +99,7 @@ impl Pins {
         for (n, f) in &file {
             let next = match pinned.get(n) {
                 Some(pin) => tighten(*pin, *f),
-                None => *f,
+                None => unpinned(*f),
             };
             pinned.insert(n.clone(), next);
         }

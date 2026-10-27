@@ -52,7 +52,7 @@ struct PinsFile {
 
 /// What pins.json says.
 pub enum Pins {
-    /// No file: the configuration's own values apply.
+    /// No file: every repo counts as unpinned (needs confirmation).
     Missing,
     Read(BTreeMap<RepoName, PinnedFlags>),
     /// Unreadable or unparsable: treated as "confirm and push" (D21).
@@ -81,15 +81,15 @@ impl Pins {
 
     /// Whether a push of `repo` asks a human. Either the pin or the file
     /// asking is enough (the stricter of the two; the daemon tightens at
-    /// once and relaxes only through `config relax`). An unreadable pins
-    /// file, or an unknown repo / unreadable config, asks.
+    /// once and relaxes only through `config relax`). An unreadable or
+    /// missing pins file, a repo missing from it (new or renamed), or an
+    /// unknown repo / unreadable config, asks: the daemon pins such a repo
+    /// with `confirm = true` until `config relax`.
     pub fn needs_confirm(&self, config: Option<&Config>, repo: &RepoName) -> bool {
         let file = config.and_then(|c| c.repos.get(repo)).map(|rc| rc.needs_human_confirm());
         match (self.pinned(repo), file) {
-            (None, _) => true,
-            (_, None) => true,
             (Some(Some(p)), Some(f)) => p.confirm || f,
-            (Some(None), Some(f)) => f,
+            _ => true,
         }
     }
 
@@ -102,5 +102,31 @@ impl Pins {
             (Some(Some(p)), Some(f)) => p.push || f,
             (Some(None), Some(f)) => f,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(confirm: bool) -> Config {
+        Config::parse(&format!(
+            "[paths]\nroot = \"/tmp/r\"\n\n[repo.app]\npath = \"/tmp/app\"\ndefault_branch = \"main\"\ndeps_dirs = []\ndeploy_on_push = false\n\n[repo.app.publish]\nbranch = \"main\"\npush = true\nconfirm = {confirm}\n"
+        ))
+        .unwrap()
+    }
+
+    /// review P0-1: no pins file, or a repo missing from it, asks.
+    #[test]
+    fn missing_pin_needs_confirmation() {
+        let app = RepoName::try_from("app".to_string()).unwrap();
+        let c = config(false);
+        assert!(Pins::Missing.needs_confirm(Some(&c), &app));
+        assert!(Pins::Read(BTreeMap::new()).needs_confirm(Some(&c), &app));
+        assert!(Pins::Unreadable.needs_confirm(Some(&c), &app));
+        let open = PinnedFlags { deploy_on_push: false, confirm: false, push: true };
+        let pinned = Pins::Read([(app.clone(), open)].into_iter().collect());
+        assert!(!pinned.needs_confirm(Some(&c), &app));
+        assert!(pinned.needs_confirm(Some(&config(true)), &app));
     }
 }

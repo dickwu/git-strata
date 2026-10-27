@@ -291,3 +291,63 @@ fn plist_has_label_keepalive_aqua_and_d1_path() {
     assert!(!plist::agent_plist_path(other.path()).exists());
     assert_eq!(fake.calls.lock().unwrap().len(), 2);
 }
+
+/// review P0-1: no pins.json is not "adopt the config". Every repo is
+/// pinned gated (`confirm = true`) and a configured `confirm = false` waits
+/// for `config relax` (Touch ID).
+#[test]
+fn missing_pins_file_means_needs_confirmation() {
+    let mut fx = Dfx::new();
+    set_flags(&mut fx, false, false, true);
+    let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
+    let core = fx.prepare_unseeded(c).unwrap();
+    let f = core.pinned(&repo_name("tool")).unwrap();
+    assert_eq!(f, PinnedFlags { deploy_on_push: false, confirm: true, push: true });
+    assert!(pending(&core), "the looser config waits for config relax");
+    assert!(log.shown().is_empty(), "startup never prompts");
+    // Only a confirmed relax adopts it.
+    core.config_relax(&repo_name("tool")).unwrap();
+    assert!(!core.pinned(&repo_name("tool")).unwrap().confirm);
+    assert_eq!(log.shown().len(), 1);
+    core.close().unwrap();
+}
+
+/// review P0-1: deleting pins.json after a gated pin, loosening the config
+/// and restarting keeps the gate.
+#[test]
+fn deleted_pins_file_does_not_loosen() {
+    let mut fx = Dfx::new();
+    set_flags(&mut fx, true, true, true);
+    fx.prepare().unwrap().close().unwrap();
+    assert!(fx.prepare().unwrap().pinned(&repo_name("tool")).unwrap().confirm);
+    fs::remove_file(strata_daemon::pins_path(&fx.config_dir)).unwrap();
+    set_flags(&mut fx, false, false, true);
+    let core = fx.prepare_unseeded(fx.confirmer(vec![]).0).unwrap();
+    assert!(confirm_flow::needs_confirm(core.pinned(&repo_name("tool")).unwrap()));
+    assert!(core.config.repos[&repo_name("tool")].needs_human_confirm());
+    assert!(pending(&core));
+    core.close().unwrap();
+}
+
+/// review P0-1: a repo renamed in config.toml has no pin under its new name;
+/// it starts gated, not as the (looser) config says.
+#[test]
+fn renamed_repo_does_not_reset_the_pin() {
+    let mut fx = Dfx::new();
+    set_flags(&mut fx, true, true, true);
+    fx.prepare().unwrap().close().unwrap();
+    let mut rc = fx.config.repos.remove(&repo_name("tool")).unwrap();
+    let moved = rc.path.with_file_name("tool2");
+    fs::rename(&rc.path, &moved).unwrap();
+    rc.path = moved;
+    rc.publish.confirm = false;
+    rc.deploy_on_push = false;
+    fx.config.repos.insert(repo_name("tool2"), rc);
+    fx.write_config();
+    let core = fx.prepare().unwrap();
+    let f = core.pinned(&repo_name("tool2")).unwrap();
+    assert!(f.confirm, "renamed repo is gated");
+    assert!(core.config.repos[&repo_name("tool2")].needs_human_confirm());
+    assert!(core.warnings.snapshot().contains(&DaemonWarning::ConfigRelaxPending { repo: repo_name("tool2") }));
+    core.close().unwrap();
+}

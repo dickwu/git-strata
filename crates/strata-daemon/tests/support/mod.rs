@@ -380,6 +380,28 @@ impl Dfx {
         fs::write(self.config_dir.join("config.toml"), text).unwrap();
     }
 
+    /// Before a start with no pins.json: pin the config on disk as if a
+    /// human had accepted it (a repo with no pin needs confirmation, so the
+    /// daemon itself never adopts it). Never overwrites pins.json: later
+    /// config changes go through the daemon's tighten / pending.
+    pub fn seed_pins(&self) {
+        let p = strata_daemon::pins_path(&self.config_dir);
+        if p.exists() {
+            return;
+        }
+        if let Ok(text) = fs::read_to_string(self.config_dir.join("config.toml")) {
+            if let Ok(c) = Config::parse(&text) {
+                fs::write(p, pins_json(&c)).unwrap();
+            }
+        }
+    }
+
+    /// One start without seeding pins.json (the "no pin" cases).
+    pub fn prepare_unseeded(&self, c: Confirmer) -> strata_daemon::Result<Core> {
+        let env = self.sb.git_env();
+        startup::prepare(self.options(), c, &move |p: &Path| Git::open_with_env(p, &env))
+    }
+
     pub fn socket(&self) -> PathBuf {
         self.sock_dir.path().join("d.sock")
     }
@@ -445,6 +467,7 @@ impl Dfx {
     }
 
     pub fn prepare_once(&self, c: Confirmer) -> strata_daemon::Result<Core> {
+        self.seed_pins();
         let env = self.sb.git_env();
         startup::prepare(self.options(), c, &move |p: &Path| Git::open_with_env(p, &env))
     }
@@ -495,4 +518,19 @@ pub fn reason(e: &strata_types::StrataError) -> Option<&str> {
 
 fn is_daemon_running(e: &strata_types::StrataError) -> bool {
     e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|r| r.as_str()) == Some("daemon_running")
+}
+
+/// pins.json for `config` exactly as configured.
+pub fn pins_json(config: &Config) -> String {
+    let repos: serde_json::Map<String, serde_json::Value> = config
+        .repos
+        .iter()
+        .map(|(n, rc)| {
+            (
+                n.as_str().to_string(),
+                serde_json::json!({ "deploy_on_push": rc.deploy_on_push, "confirm": rc.publish.confirm, "push": rc.publish.push }),
+            )
+        })
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({ "repos": repos })).unwrap()
 }

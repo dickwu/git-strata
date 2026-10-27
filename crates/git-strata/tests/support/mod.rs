@@ -161,7 +161,24 @@ impl Home {
                 c = r.confirm,
             ));
         }
-        fs::write(self.config_dir().join("config.toml"), t).unwrap();
+        fs::write(self.config_dir().join("config.toml"), &t).unwrap();
+        // A repo with no pin needs confirmation: pin the first config as if
+        // a human had accepted it; later writes go through tighten/pending.
+        let pins = self.config_dir().join("pins.json");
+        if !pins.exists() {
+            let c = strata_types::Config::parse(&t).expect("fixture config");
+            let repos: serde_json::Map<String, serde_json::Value> = c
+                .repos
+                .iter()
+                .map(|(n, rc)| {
+                    (
+                        n.as_str().to_string(),
+                        serde_json::json!({ "deploy_on_push": rc.deploy_on_push, "confirm": rc.publish.confirm, "push": rc.publish.push }),
+                    )
+                })
+                .collect();
+            fs::write(pins, serde_json::to_string_pretty(&serde_json::json!({ "repos": repos })).unwrap()).unwrap();
+        }
     }
 
     /// Run with stdin on a fresh pseudo-terminal (the master end is kept

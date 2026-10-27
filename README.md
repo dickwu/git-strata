@@ -332,8 +332,12 @@ Pushing right after each publish keeps the window small.
 to that repo deploys) and gates nothing by itself, so a repo may set
 `deploy_on_push = true` with `publish.confirm = false` (e.g. staff-api, whose
 publish and push run headless). The CLI uses the pinned `confirm` in
-`pins.json` ORed with `config.toml`; an unreadable `pins.json`, or a repo
-missing from it, counts as needs confirmation.
+`pins.json` ORed with `config.toml`; a missing or unreadable `pins.json`, or
+a repo missing from it (new or renamed), counts as needs confirmation. The
+daemon pins such a repo with `confirm` on, so deleting `pins.json` or renaming
+a repo never loosens the gate; a looser `config.toml` (including a fresh
+install's `confirm = false` repos) applies only after `git-strata config relax
+REPO` (Touch ID).
 
 **Which commands are gated.** They need a terminal on stdin; most then show a
 LocalAuthentication prompt (Touch ID, or the login password) from the daemon:
