@@ -95,6 +95,12 @@ impl Store {
 
 #[cfg(feature = "test-seams")]
 impl Store {
+    /// Mark the writer poisoned, as an uncertain COMMIT would (callers'
+    /// tests of what follows poisoning).
+    pub fn poison_for_test(&self) {
+        self.poisoned.store(true, Ordering::SeqCst);
+    }
+
     pub fn arm(&self, seam: Seam) {
         self.seams.arm(seam)
     }

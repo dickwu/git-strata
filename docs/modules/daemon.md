@@ -915,6 +915,7 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 | D28 du 的锁只有一个顺序（review P1-4） | `Du` 的三把锁固定按 `recorded` → `scan` → `cache` 取；`report` 先读扫描队列再拿 cache 锁，不在 cache 锁里拿 scan 锁 | 原来 `report` 持 cache 再拿 scan，而 `scan_json`/扫描收尾持 scan 再拿 cache，`du` 和 `status` 并发时会 ABBA 死锁（单测可复现）。否决：合并成一把锁（扫描收尾要长时间持 scan） | 2026-10-27 |
 | D29 启动清理残留 ref 锁、停机宽限 900 s（review P1-5） | `Daemon::start` 在第 8 步前、持实例 flock，对每个 repo 在其写锁下删掉 mtime 早于本次启动的 `refs/strata/**/*.lock`，各记一条 `StaleRefLock` 告警并打印一行；比启动新的锁留着（可能是活着的 `git pack-refs`）。plist 写 `ExitTimeOut = 900` | 原来 SIGKILL（launchd 默认约 20 s 的宽限、断电、自己的 killpg）落在 prepare 与 commit 之间就留下锁，git 和 daemon 都不清，之后那条 ref 的事务全失败、`rm` 卡在 pin CAS。只有 daemon 写 `refs/strata/`，所以启动时清是安全的。否决：拒绝 `daemon stop`（launchd/重启不经过它） | 2026-10-27 |
 | D30 等待期应答器先起（review P1-6） | `main` 拿到实例锁后、第一次 `prepare_locked` 之前就 `waiting::answer_early`（bind + 应答 `Busy starting`），失败才在第一次出错时再试；apfs 内部 `EINTR` 重试最多 64 次 | 原来第一次出错才 bind：第一次尝试卡在 TCC 里时 socket 一声不响，`daemon status` 只能超时；apfs 的 `retry` 无限重试 EINTR，外层有界的 `retry_eintr`/启动等待回不来、也看不到 SIGTERM | 2026-10-27 |
+| D31 写者中毒就退出重启（review P1-7） | `serve` 的接受循环每轮看 `store.is_poisoned()`；中毒就停止接受、排空在途连接、告警一次，以 `Unknown{reason:"store_poisoned_restart"}` 返回，`main` 以失败退出，launchd `KeepAlive` 拉起新进程重开 store（没有干净关停标记，所以跑 quick_check） | 原来中毒之后 daemon 一直活着，每个写都 `Unknown poisoned`，直到有人手动重启；进程内重开不行：Turso 每进程每文件一个 `Database`，不会重跑 WAL 恢复 | 2026-10-27 |
 
 D18 的契约，实现者不要猜：
 

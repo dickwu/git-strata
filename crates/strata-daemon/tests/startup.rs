@@ -391,3 +391,39 @@ fn stale_strata_ref_locks_are_removed_at_startup() {
     drop(d);
     core.close().unwrap();
 }
+
+/// Review P1-7: a poisoned store writer never recovered while the daemon
+/// lived. The serve loop now drains and returns an error (the binary exits
+/// non-zero, launchd restarts it, the reopen runs WAL recovery).
+#[test]
+fn poisoned_store_ends_serve_for_a_restart() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let listener = startup::bind(&d.core.opts.socket).unwrap();
+    let ext = AtomicBool::new(false);
+    let r = std::thread::scope(|s| {
+        let h = s.spawn(|| d.serve(&listener, &ext, &|req| d.handle(req)));
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert!(strata_daemon::rpc::ready(&fx.socket(), Duration::from_secs(5)));
+            core.store.poison_for_test();
+            let t = Instant::now();
+            while !h.is_finished() && t.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            h.is_finished()
+        }));
+        if ok.as_ref().map_or(true, |f| !f) {
+            d.request_stop();
+        }
+        let r = h.join().unwrap();
+        assert!(ok.unwrap(), "serve did not end on its own");
+        r
+    });
+    let e = r.expect_err("serve ends with an error when the store is poisoned");
+    assert_eq!(e.code, Code::Unknown);
+    assert_eq!(reason(&e), Some("store_poisoned_restart"));
+    assert!(fx.alerts().iter().any(|l| l.contains("poisoned")), "{:?}", fx.alerts());
+    drop(d);
+    let _ = core.close();
+}

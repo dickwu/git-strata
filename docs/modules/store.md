@@ -1668,7 +1668,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 - 增补 5（错误时机，第 3 条细化）：操作动手之前对当前、未改动的状态记下的 Before* 安全 checkpoint（BeforeRestore、BeforeRollout、BeforeRemove 等）不算对外可见的写，之后操作仍可给出类型化的拒绝，checkpoint 留着，是一个有效的恢复点。store 不区分这类 checkpoint：它们是普通的 checkpoint 行，只由 gc 按保留期回收，从不因为后面的拒绝而删除。
 - 增补 6（错误时机，第 4 条细化）：建出并登记一个以后任何操作都会复用的、不可变、按内容寻址的 generation（基线 generation、封存的依赖集、blob）是缓存填充，不算对外可见的写，之后操作仍可给出类型化的拒绝。store 这一侧：`record_base_gen`、`record_deps_set` 与 put 写下的东西不因为后面的拒绝而撤销，只由 gc 回收。
 
-- `outcome = "uncertain"` 的提交之后，写者中毒：此后每个写函数返回 `Unknown`（`reason = "poisoned"`），`is_poisoned()` 返回 true，直到 daemon 丢掉这个 `Store` 重新 `open` [我的决定]。daemon 把 `is_poisoned()` 并进 status（增补 4 的 T13 一条）。重开时 SQLite 的 WAL 恢复给出真实结果：checkpoint 行在，就是提交了；不在，就是没提交，钩子的重放会重新记。中毒期间读照常工作。理由：同步失败之后继续写，可能把其实没落盘的状态当成已提交（PostgreSQL 在 fsync 失败后也不再继续）。
+- `outcome = "uncertain"` 的提交之后，写者中毒：此后每个写函数返回 `Unknown`（`reason = "poisoned"`），`is_poisoned()` 返回 true，直到 daemon 丢掉这个 `Store` 重新 `open` [我的决定]。daemon 的做法是退出进程让 launchd 重启（daemon D31）：Turso 每个进程每个文件只留一个 `Database`，进程内重开不会重跑 WAL 恢复。daemon 把 `is_poisoned()` 并进 status（增补 4 的 T13 一条）。重开时 SQLite 的 WAL 恢复给出真实结果：checkpoint 行在，就是提交了；不在，就是没提交，钩子的重放会重新记。中毒期间读照常工作。理由：同步失败之后继续写，可能把其实没落盘的状态当成已提交（PostgreSQL 在 fsync 失败后也不再继续）。
 - gc 的 `partial`：`gc` 或 `gc_repo` 返回 `Unknown`（`outcome = "partial"`），store 尽力把这一轮写进 `gc_runs`（`outcome = 'partial'`，报告里带 `error`）。daemon 把返回的错误留在内存里并在 status 里报出；重开之后 `last_gc_report` 读得到写进库的那一轮。不需要人处理，下一轮会接着做；`stuck` 里的条目要人看。
 - `Corrupt` 从不自动处理：status 报出它（gc 报告里的 `corrupt` 也由 status 报出），由人决定。
 

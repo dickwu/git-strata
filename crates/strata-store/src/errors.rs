@@ -62,7 +62,7 @@ pub(crate) fn read_only_handle() -> StrataError {
 pub(crate) fn poisoned() -> StrataError {
     err(
         Code::Unknown,
-        "the store writer is poisoned after an uncertain commit; reopen the store",
+        "the store writer is poisoned after an uncertain commit; git-stratad restarts itself to reopen the store: retry once `git-strata daemon status` answers",
         json!({ "reason": "poisoned", "outcome": NOT_WRITTEN }),
     )
 }

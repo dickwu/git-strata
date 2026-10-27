@@ -475,9 +475,17 @@ impl<'a> Daemon<'a> {
         listener
             .set_nonblocking(true)
             .map_err(|e| classify_io_error(&e, IoSide::Read, &self.core.opts.socket))?;
+        let mut poisoned = false;
         std::thread::scope(|s| {
             loop {
                 if self.stopping() || external.load(Ordering::SeqCst) {
+                    break;
+                }
+                // Review P1-7: a poisoned writer only recovers by reopening
+                // the store (WAL recovery + quick_check). Drain like a stop
+                // and exit non-zero; launchd's KeepAlive starts us again.
+                if self.core.store.is_poisoned() {
+                    poisoned = true;
                     break;
                 }
                 // Review P1-3: at most MAX_CONNS connections are served at
@@ -517,6 +525,16 @@ impl<'a> Daemon<'a> {
                 let _ = c.shutdown(std::net::Shutdown::Read);
             }
         });
+        if poisoned {
+            self.core.warnings.alert_once(
+                "the store writer is poisoned after an uncertain commit; git-stratad exits so launchd restarts it and reopens the store",
+            );
+            return Err(StrataError::new(
+                Code::Unknown,
+                "the store writer is poisoned; git-stratad exits to reopen the store (launchd restarts it)",
+            )
+            .with_detail(json!({ "reason": "store_poisoned_restart" })));
+        }
         Ok(())
     }
 
