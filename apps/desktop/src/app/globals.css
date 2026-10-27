@@ -371,6 +371,13 @@ body {
   background: color-mix(in srgb, var(--on-accent) 20%, transparent);
   color: inherit;
 }
+/* State over phase, like ticket over agent: two short lines instead of one wide one. */
+.stacked-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
 .ticket-cell {
   display: flex;
   flex-direction: column;
@@ -397,6 +404,13 @@ body {
 }
 .session-time time {
   color: var(--text-muted);
+}
+/* In the Sessions list the two parts stack (created over age) so the column stays narrow. */
+.sessions-table .session-time {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
 }
 .session-age {
   color: var(--text);

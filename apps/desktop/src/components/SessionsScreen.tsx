@@ -76,9 +76,10 @@ export function SessionsScreen({
             loading={sessions.isPending && !daemon.isError}
             pagination={false}
             tableLayout="fixed"
-            // Fixed columns take ~730px; below this width the table scrolls sideways so
-            // the Repos column keeps room for its tags instead of shrinking to a sliver.
-            scroll={{ x: 980 }}
+            // Fixed columns take 650px and Repos gets the rest. 860 fits a 1200px window with
+            // the sidebar open (content is ~895px); narrower than that, the table scrolls
+            // sideways so Repos keeps ~210px for its wrapping tags instead of a sliver.
+            scroll={{ x: 860 }}
             locale={{
               emptyText:
                 filtered && all.length > 0 ? (
@@ -108,20 +109,18 @@ export function SessionsScreen({
               {
                 title: c.id,
                 dataIndex: 'id',
-                width: 110,
+                width: 100,
                 render: (v: string) => <span className="mono">{v}</span>,
               },
               {
                 title: c.state,
                 key: 'state',
-                width: 120,
+                width: 88,
                 render: (_, r) => (
-                  <>
-                    {r.state}
-                    <span className="muted" style={{ marginLeft: 6 }}>
-                      {r.phase}
-                    </span>
-                  </>
+                  <div className="stacked-cell">
+                    <span>{r.state}</span>
+                    <span className="muted">{r.phase}</span>
+                  </div>
                 ),
               },
               {
@@ -131,19 +130,19 @@ export function SessionsScreen({
                   <RepoTags repos={r.repoList} selected={repoSel} onToggle={toggleRepoFilter} />
                 ),
               },
-              { title: c.changes, dataIndex: 'pending', align: 'right', width: 72 },
+              { title: c.changes, dataIndex: 'pending', align: 'right', width: 68 },
               {
                 title: c.conflicts,
                 dataIndex: 'conflicts',
                 align: 'right',
-                width: 80,
+                width: 78,
                 render: (n: number) => (n > 0 ? <Tag color="error">{n}</Tag> : n),
               },
               { title: 'Health', dataIndex: 'health', width: 64, render: healthTag },
               {
                 title: c.time,
                 key: 'time',
-                width: 150,
+                width: 112,
                 render: (_, r) => <SessionTime created={r.created} state={r.state} now={now} />,
               },
             ]}
