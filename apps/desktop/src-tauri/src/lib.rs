@@ -138,4 +138,38 @@ mod tests {
         // The rename is display-only.
         assert_eq!(conf["identifier"], "io.github.dickwu.git-strata");
     }
+
+    /// t79u: the single-instance plugin must be the first plugin registered
+    /// (its docs require it), so a second launch exits before anything else
+    /// starts, and it must not depend on the dev-connector feature.
+    #[test]
+    fn single_instance_registered_first() {
+        let src = include_str!("lib.rs");
+        let run = &src[src.find("pub fn run()").unwrap()..];
+        let first = run.find(".plugin(").unwrap();
+        assert!(
+            run[first..].starts_with(".plugin(tauri_plugin_single_instance::init("),
+            "first plugin in run() must be single-instance"
+        );
+        let connector = run.find("tauri_plugin_connector::init()").unwrap();
+        assert!(first < connector);
+        let cfg = &run[..first];
+        assert!(
+            !cfg.contains("dev-connector"),
+            "single-instance must not be feature-gated"
+        );
+    }
+
+    /// The plugin's lock (macOS: /tmp/<identifier>_si.sock) is keyed by the
+    /// bundle identifier, so the dev statusbar build
+    /// (io.github.dickwu.git-strata.statusbar) is a separate instance.
+    #[test]
+    fn single_instance_key_is_the_identifier() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let key = |id: &str| format!("/tmp/{}_si.sock", id.replace(['.', '-'], "_"));
+        let main = key(conf["identifier"].as_str().unwrap());
+        assert_eq!(main, "/tmp/io_github_dickwu_git_strata_si.sock");
+        assert_ne!(main, key("io.github.dickwu.git-strata.statusbar"));
+    }
 }

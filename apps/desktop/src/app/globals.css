@@ -114,9 +114,6 @@ body {
   flex-direction: column;
   gap: 2px;
 }
-.nav-sub .nav-item {
-  padding-left: 36px;
-}
 .nav-item {
   white-space: nowrap;
 }
@@ -444,4 +441,16 @@ body {
   padding: 1px 5px;
   border-radius: 4px;
   background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+/* t76u: session shortcuts sit at the top level, Daemon is pinned to the bottom. */
+.nav-daemon {
+  margin-top: auto;
+}
+.waiting-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 13px;
 }

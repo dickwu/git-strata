@@ -255,7 +255,7 @@ describe('filterRows (repo AND, agent OR, text)', () => {
   });
 });
 
-describe('waitingCount (sidebar badge, same rule as the tray)', () => {
+describe('waitingCount (Sessions header note, same rule as the tray)', () => {
   test('fixtures: nothing pending, no conflicts', () => {
     expect(waitingCount(all, deps)).toBe(0);
     expect(waitingCount(undefined, undefined)).toBe(0);

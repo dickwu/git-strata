@@ -22,10 +22,13 @@ export function SessionsScreen({
   sessions,
   daemon,
   legacy,
+  waiting = 0,
 }: {
   sessions: UseQueryResult<StatusReply>;
   daemon: UseQueryResult<DaemonStatus>;
   legacy: boolean;
+  /** Things waiting for a human (tray rule). Shown here since the sidebar has no Sessions item (t76u). */
+  waiting?: number;
 }) {
   const { openSession, repoFilter, agentFilter, textFilter, toggleRepoFilter, clearFilters } =
     useNav();
@@ -44,6 +47,12 @@ export function SessionsScreen({
     <>
       <div className="toolbar">
         <h1 className="screen-title">{copy.sessions.title}</h1>
+        {waiting > 0 && (
+          <span className="waiting-note" role="status">
+            <span className="dot" data-state="down" aria-hidden />
+            {copy.nav.waiting(waiting)}
+          </span>
+        )}
         {legacy && sessions.data && <span className="muted">{copy.sessions.slow}</span>}
       </div>
       <div className="content" style={{ display: 'grid', gap: 12, alignContent: 'start' }}>

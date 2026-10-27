@@ -139,7 +139,7 @@ export function filterRows(rows: SessionRow[], f: RowFilter): SessionRow[] {
 /**
  * How many things wait for a human: pending deps proposals plus workspaces with
  * conflicted paths. Same rule as the tray's "Waiting for you" (src-tauri/src/tray_model.rs
- * `waiting`), so the sidebar badge and the tray agree.
+ * `waiting`), so the Sessions header note and the tray agree.
  */
 export function waitingCount(
   sessions: StatusReply | undefined,

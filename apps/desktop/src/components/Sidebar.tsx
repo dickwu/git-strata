@@ -2,12 +2,7 @@
 
 import type { ReactNode } from 'react';
 import { Tooltip } from 'antd';
-import {
-  CloudServerOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
-  UnorderedListOutlined,
-} from '@ant-design/icons';
+import { CloudServerOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
 import { copy } from '@/lib/copy';
 import { sessionRows } from '@/lib/view';
 import type { StatusReply } from '@/lib/types';
@@ -26,19 +21,15 @@ function Tip({ show, title, children }: { show: boolean; title: string; children
 export function Sidebar({
   sessions,
   daemonUp,
-  waiting,
 }: {
   sessions: StatusReply | undefined;
   daemonUp: boolean;
-  /** Things waiting for a human (tray rule); badged on Sessions in both widths. */
-  waiting: number;
 }) {
   const { screen, session, go, openSession } = useNav();
   const { sidebarCollapsed: collapsed, toggleSidebar } = useLayout();
   const rows = sessionRows(sessions);
   const n = copy.nav;
   const toggle = collapsed ? n.expand : n.collapse;
-  const sessionsName = waiting > 0 ? `${n.sessions}, ${n.waiting(waiting)}` : n.sessions;
   const daemonName = `${n.daemon}, ${daemonUp ? n.up : n.down}`;
   return (
     <nav className="sidebar" aria-label={n.main} data-collapsed={collapsed}>
@@ -54,27 +45,8 @@ export function Sidebar({
           {collapsed ? <MenuUnfoldOutlined aria-hidden /> : <MenuFoldOutlined aria-hidden />}
         </button>
       </Tip>
-      <Tip show={collapsed} title={sessionsName}>
-        <button
-          type="button"
-          className="nav-item"
-          aria-current={screen === 'sessions' && !session ? 'page' : undefined}
-          aria-label={sessionsName}
-          onClick={() => go('sessions')}
-        >
-          <span className="nav-icon">
-            <UnorderedListOutlined aria-hidden />
-            {waiting > 0 && <span className="nav-badge-dot" aria-hidden />}
-          </span>
-          <span className="nav-label">{n.sessions}</span>
-          {waiting > 0 && (
-            <span className="nav-badge" aria-hidden>
-              {waiting}
-            </span>
-          )}
-        </button>
-      </Tip>
-      <div className="nav-sub" hidden={collapsed}>
+      {/* t76u: no "Sessions" item; the list is the default view, these are shortcuts into it. */}
+      <div className="nav-sub" role="group" aria-label={n.sessions} hidden={collapsed}>
         {rows.map((r) => (
           <button
             key={r.id}
@@ -93,7 +65,7 @@ export function Sidebar({
       <Tip show={collapsed} title={daemonName}>
         <button
           type="button"
-          className="nav-item"
+          className="nav-item nav-daemon"
           aria-current={screen === 'daemon' ? 'page' : undefined}
           aria-label={daemonName}
           onClick={() => go('daemon')}

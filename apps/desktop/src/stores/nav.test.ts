@@ -36,3 +36,20 @@ describe('Sessions list filter state', () => {
     expect(s().repoFilter).toEqual(['web']);
   });
 });
+
+describe('the session list is the top-level view (t76u: no Sessions nav item)', () => {
+  test('the app opens on the list, not a session or the Daemon screen', () => {
+    const init = useNav.getInitialState();
+    expect(init.screen).toBe('sessions');
+    expect(init.session).toBeNull();
+  });
+  test('back from Daemon and back from a session both land on the list', () => {
+    const s = () => useNav.getState();
+    s().go('daemon');
+    s().go('sessions');
+    expect([s().screen, s().session]).toEqual(['sessions', null]);
+    s().openSession('s-1');
+    s().openSession(null);
+    expect([s().screen, s().session]).toEqual(['sessions', null]);
+  });
+});

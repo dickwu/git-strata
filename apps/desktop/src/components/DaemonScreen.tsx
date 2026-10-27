@@ -1,6 +1,7 @@
 'use client';
 
-import { Descriptions, Empty, List, Tag } from 'antd';
+import { Button, Descriptions, Empty, List, Tag } from 'antd';
+import { ArrowLeftOutlined } from '@ant-design/icons';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { bytes, copy } from '@/lib/copy';
 import { useDu, useSocket } from '@/lib/queries';
@@ -12,9 +13,12 @@ import { ErrorNote } from './ErrorNote';
 export function DaemonScreen({
   status,
   plan,
+  onBack,
 }: {
   status: UseQueryResult<DaemonStatus>;
   plan: PollPlan;
+  /** Back to the session list: the sidebar has no Sessions item any more (t76u). */
+  onBack: () => void;
 }) {
   const socket = useSocket();
   const du = useDu(plan.du);
@@ -22,6 +26,12 @@ export function DaemonScreen({
   return (
     <>
       <div className="toolbar">
+        <Button
+          type="text"
+          icon={<ArrowLeftOutlined aria-hidden />}
+          onClick={onBack}
+          aria-label={copy.detail.back}
+        />
         <h1 className="screen-title">{copy.daemon.title}</h1>
         {v && !status.isError && <Tag color="success">{copy.daemon.running}</Tag>}
         {v?.version && <span className="mono muted">{v.version}</span>}

@@ -18,7 +18,7 @@ import { SessionsScreen } from './SessionsScreen';
 import { SessionDetail } from './SessionDetail';
 
 export function Shell() {
-  const { screen, session, setPalette, openSession } = useNav();
+  const { screen, session, setPalette, openSession, go } = useNav();
   const sidebarCollapsed = useLayout((s) => s.sidebarCollapsed);
   const toggleTheme = useTheme((s) => s.toggle);
   const { plan, status } = usePlan();
@@ -69,14 +69,10 @@ export function Shell() {
   return (
     <div className="shell" data-collapsed={sidebarCollapsed}>
       <Titlebar />
-      <Sidebar
-        sessions={sessions.data}
-        daemonUp={status.isSuccess}
-        waiting={waitingCount(sessions.data, deps.data)}
-      />
+      <Sidebar sessions={sessions.data} daemonUp={status.isSuccess} />
       <main className="main">
         {screen === 'daemon' ? (
-          <DaemonScreen status={status} plan={plan} />
+          <DaemonScreen status={status} plan={plan} onBack={() => go('sessions')} />
         ) : session ? (
           <SessionDetail id={session} interval={plan.session} />
         ) : (
@@ -84,6 +80,7 @@ export function Shell() {
             sessions={sessions}
             daemon={status}
             legacy={!status.data || !('api' in status.data)}
+            waiting={waitingCount(sessions.data, deps.data)}
           />
         )}
       </main>
