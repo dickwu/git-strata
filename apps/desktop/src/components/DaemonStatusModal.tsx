@@ -170,6 +170,7 @@ export function DaemonStatusModal({
       onCancel={onClose}
       footer={null}
       width={760}
+      destroyOnHidden
       title={
         <span className={css.title}>
           {t.modal.title}
