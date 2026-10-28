@@ -118,8 +118,15 @@ fn absorb(
                 }
                 on_disk.insert(p);
             }
-            // Gone between the walk and the read: absent now, looked at again next time.
+            // Gone between the walk and the read: absent now, looked at again
+            // next time. Unstable, since a path that became a directory hides
+            // whatever the walk never saw beneath it (session.md §5.6 step 5.3).
             Got::Gone => {
+                push_warn(
+                    &mut st.warn,
+                    &p,
+                    OverlayWarning::Unstable { path: p.clone() },
+                );
                 st.unstable.insert(p);
             }
             Got::Special => {

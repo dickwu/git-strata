@@ -339,3 +339,25 @@ fn tree_contains_answers_from_the_validated_tree() {
     assert_eq!(e.code, Code::Unsupported);
     assert_eq!(e, git.tree_of(&commit_of(&sb, &repo, &bad)).unwrap_err());
 }
+
+#[test]
+fn tree_has_file_uses_the_validated_identity() {
+    let sb = Sandbox::new();
+    let repo = sb.init_repo("main");
+    set_ignorecase(&sb, &repo, false);
+    let b = blob(&sb, &repo, b"x\n");
+    let inner = mktree(&sb, &repo, &[("100644", "blob", &b, b"y")]);
+    let t = toid(&mktree(
+        &sb,
+        &repo,
+        &[("100644", "blob", &b, "e\u{301}.txt".as_bytes()), ("100644", "blob", &b, b"Up.txt"), ("040000", "tree", &inner, b"d")],
+    ));
+    let git = sb.open(&repo);
+    // RepoPath is NFC; the tree spells the name decomposed.
+    for (p, want) in [("\u{e9}.txt", true), ("Up.txt", true), ("up.txt", false), ("d", false), ("d/y", true), ("nope", false)] {
+        assert_eq!(git.tree_has_file(&t, &rp(p)).unwrap(), want, "{p}");
+    }
+    set_ignorecase(&sb, &repo, true);
+    assert!(git.tree_has_file(&t, &rp("up.txt")).unwrap());
+    assert!(!git.tree_has_file(&t, &rp("D")).unwrap());
+}

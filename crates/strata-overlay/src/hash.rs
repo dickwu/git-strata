@@ -174,6 +174,7 @@ pub(crate) fn read_path(
             files_hashed: 0,
         })));
     }
+    fault::before_read(root, path);
     let mut a1 = a1;
     let mut retried = false;
     let (mut hashed, mut files) = (0u64, 0u64);

@@ -361,6 +361,8 @@ pub fn lww_matches(patterns: &LwwRules, path: &RepoPath) -> bool;
 #[cfg(feature = "test-seams")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OverlayFault {
+    /// 遍历找到 path、取过 A1 之后，打开内容之前停住（§5.2 第 7 步：读之前路径换了形状）。
+    PauseBeforeRead { path: RepoPath },
     /// 读完 path 的内容之后、再读属性之前停住，直到 release_fault 放行（§5.2 第 4 步的写竞态）。
     PauseAfterHash { path: RepoPath },
     /// 扫描取完 inbox 快照之后停住（§5.4：扫描期间到达的事件进下一轮）。
@@ -547,6 +549,7 @@ M ∪ `I.tracked` 按卷折叠的键集合在 `Tracker` 里（`fold`）：M 的�
 4. A2 = `attrs_of(ws.root, p)`。`A2.unchanged_since(&A1)` → 写缓存。
 5. 写竞态（裁定 T7）：A1 与 A2 的 kind、inode、size、mode、gen count 有一项不同 → 从第 1 步重来一次；仍然不等 → 用这一次的 blob，路径标 `Unstable`（告警、记进 `unstable`、不写缓存），下一次扫描重扫它。读的时候文件在被写，这一份可能是撕裂的，所以它只出现在 `compute` 的结果里；checkpoint 存下的，总是 `put_blob_rooted` 克隆出的某一刻的完整内容（§5.6 第 5 步）。
 6. gen count 不可得（`Attrs::gen_count_known()` 为假：有可写的 mmap，apfs 报告为未知，Addendum 1）：照第 3 步读一次，不重来，标 `Unstable`，不写缓存。checkpoint 不强制写回，只保证包含已经写回的内容：`msync` 或 `munmap` 之后的下一次扫描必含（3d:203、3d:268）。
+7. 读之前路径没了或成了目录（`hash.rs` 的 `Got::Gone`：遍历之后、读之前，重取一次属性之后仍读不成；换成 FIFO、设备等特殊文件的走 `Got::Special`，照旧报 `SpecialFile`，不在这一条）：这次当它不在，路径标 `Unstable`（告警、记进 `unstable`），下一次扫描重扫它 [D57，session.md]。成了目录的路径之下的东西这次遍历没有看到，告警是唯一的痕迹：session.md §5.6 第 5.3 步凭它拒绝 `rm`。
 
 ### 5.3 改名、类型互换与成组
 
@@ -902,6 +905,7 @@ restore 替换或删除的文件，总是先挪进 T，只有字节被证明在 
 | `failed_checkpoint_keeps_dirty_set` | 改 3 个文件，用 store 的 `Seam::AfterCheckpointRow` 让记行失败 → 返回 `Unknown`，没有新行，inbox 里又有这 3 个路径；重试的 checkpoint 含全部 3 处，一处不少；扫描中途读文件失败（把一个文件改成 000 权限）时同样如此 | layerfs-overlay/tests/kept_live.rs::a_failed_job_restores_the_kept_set |
 | `writes_during_scan_reach_the_next_scan` | 用 `OverlayFault::PauseAfterSnapshot` 停住一次 checkpoint，期间写 50 个文件（其中一个目录下 50 个）并送出它们的事件：这次 checkpoint 不含它们或只含一部分，下一次全部含有，最后 overlay 与 `reconcile_full` 相等；一次判为"无变化"的 checkpoint 与并发写入赛跑，写入总是出现在这一次或下一次里，从不丢；定时全扫进行时到达的事件不丢，扫描失败时快照回到 inbox；`compute` 读一个文件的两次之间每次都被写（`OverlayFault::PauseAfterHash` 每次放开之前写一次）→ 这次的 `warnings` 有 `Unstable`，下一次扫描重读它，`Unstable` 消失 | layerfs-daemon/tests/mounted_install.rs::writes_during_a_commit_stay_live_and_reach_the_next_commit<br>layerfs-daemon/tests/mounted_install.rs::writes_during_a_commit_stay_live_and_reach_the_next_commit_fifty_to_a_directory<br>layerfs-daemon/tests/store_commit.rs::a_mutation_racing_an_unchanged_commit_is_never_lost<br>tgrep-core/src/worktrees/tests.rs::epoch_change_after_preparation_prevents_stale_ready_publication<br>tgrep-core/src/worktrees/tests.rs::serving_verification_yields_to_invalidations_and_fails_closed<br>layerfs-workspace/tests/captured_namespace_order.rs::mutations_published_between_producer_passes_do_not_reach_the_captured_root |
 | `work_grows_with_the_change_not_the_base` | 有 tracker 的工作区里分别改 40、160、640、1600 个文件，每次 checkpoint 的 `files_hashed` 等于改动数，`entries_seen` 与 `dirs_listed` 至多按改动数线性增长；同样的 40 处改动放在 1000 个文件和 100 000 个文件的基线上，增量计数相同；全扫的 `dirs_listed` 等于源码树的目录数，被剪掉的 ignore 目录不算；只有判为改了的文件被读 | layerfs-workspace/tests/captured_namespace_cursor.rs::work_grows_linearly_with_the_change_and_pages_stay_bounded<br>layerfs-workspace/tests/captured_namespace_cursor.rs::work_follows_the_change_and_not_the_installed_base<br>layerfs-daemon/tests/file_digests.rs::a_commit_records_digests_of_followed_fresh_files_only<br>layerfs-content/tests/edit_noop.rs::a_long_equal_prefix_then_a_mismatch_stops_the_comparison_early<br>layerfs-api/tests/sdk_diff_entries.rs::the_same_changes_cost_the_same_in_a_small_and_a_large_tree |
+| `a_file_turned_directory_during_the_scan_is_unstable` | `OverlayFault::PauseBeforeRead` 停在遍历之后、读 `src/lib.rs` 之前，期间把它换成装着 `new.txt` 的目录：这次 `compute` 不含 `src/lib.rs/new.txt`，`warnings` 有 `Unstable { src/lib.rs }`；下一次扫描含 `new.txt`（`Untracked`），告警消失 | — |
 | `write_race_retries_then_marks_unstable` | 对 `read_candidate`：`OverlayFault::PauseAfterHash` 停在读完内容之后，期间写一次 → `retried = true`、`unstable = false`，blob 是写入之后的内容；每次重读之前都写 → `retried = true`、`unstable = true`，blob 是最后一次读到的；文件有可写的 mmap（gen count 不可得）→ 只读一次，`retried = false`、`unstable = true`；没有写入 → 两个都是 false | tgrep-core/src/worktrees/tests.rs::managed_verified_read_rejects_restored_mtime_mutation_and_replacement<br>layerfs-workspace/tests/captured_namespace_order.rs::mutations_published_between_producer_passes_do_not_reach_the_captured_root |
 | `mmap_writes_count_once_written_back` | 有可写 mmap 期间 gen count 不可得：扫描照读内容并标 `Unstable`，不写缓存；`msync` 之后的下一次 checkpoint 必含映射里写的字节；`munmap` 之后缓存恢复作保；checkpoint 从不调用 `msync` | layerfs-daemon/tests/mounted_commit.rs::r5_9_stores_through_shared_mappings_are_committed_once_written_back<br>layerfs-daemon/tests/r5_9_dirty_mapping.rs::r5_9_a_still_dirty_mapped_page_is_outside_the_commit_and_in_the_next_after_msync |
 | `checkpoint_is_immutable_and_restorable` | checkpoint 之后继续编辑、再 checkpoint、对它的 overlay 做 rebase：读回的旧 checkpoint 的 base 与 entries 一字不变，restore 它得到当时的树；同一会话连续 5 个增量 checkpoint（包括在一个写入者每两步之间各做一次）都能完整 restore 出各自那一刻；号严格递增，后一个紧接前一个；已被 gc 回收的 checkpoint 读取得 `NoSuchCheckpoint` | layerfs-overlay/tests/captured_namespace.rs::later_active_rows_install_and_close_leave_reader_answers_until_exact_release<br>layerfs-workspace/tests/captured_file_edits.rs::prepare_after_actual_binding_install_rebinds_only_the_retained_original_root<br>layerfs-daemon/tests/mounted_commit.rs::r5_3_commit_captures_what_every_launch_published_whatever_became_of_the_process<br>layerfs-daemon/tests/mounted_commit.rs::r5_8_five_incremental_commits_on_one_mount_each_read_back_completely<br>layerfs-daemon/tests/r5_5_install_survival.rs::r5_5_a_commit_at_each_parked_step_of_a_writer_is_exact_on_the_same_and_a_fresh_mount |
@@ -1292,6 +1296,7 @@ git commit -m "feat(overlay): restore scenes, verification and cross-base projec
 | §5.8 `.lww` | 命中的路径会话一侧胜出 | rebase 投影的 overlay 来自刚记下的 checkpoint，比新基线新；保证不了这一点的 restore 传空规则 |
 | §5.8 前缀冲突 | 保留会话一侧，基线一侧的路径成为墓碑，两边都报冲突 | 会话的改动一个不丢，结果满足 V4，`project` 不会把它当成损坏 |
 | §5.8 配对用的卷 | 卷是否区分大小写放进 `RebaseOptions.volume_case_sensitive`：`for_move` 从 `apfs::volume_caps(&new.dir)` 读，`for_restore` 由 restore 传入 | rebase 不自己探卷，结果只由参数决定；测试不用磁盘映像就能覆盖两种卷 |
+| §5.2 第 7 步 读之前换了形状 | 标 `Unstable` 并告警，不再只记进 `unstable` | 成了目录的路径遮住了遍历没看到的子路径；`rm` 的复查（session.md D57）要从告警里看到它 |
 | §5.10 `%include` | 最多读 16 个文件；读不了的当作空文件 | 读不全只会让更多文件按普通文件处理，不会让文件被悄悄覆盖 |
 | §5.10 `.lww` 的大小写 | 区分大小写，按 NFC 之后的字节比较 | 同一份规则在每个会话、每台机器上给出同样的判定 |
 | §5.12 dst 的位置 | 必须在 `<store.root()>/sessions/` 之下，否则 `InvalidInput` | 一道便宜的防线：`project` 写不到主 checkout、基线目录或 blob 存储里 |
