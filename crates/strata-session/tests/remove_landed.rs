@@ -611,3 +611,96 @@ fn remove_landed_tries_32_distinct_commits() {
         }
     }
 }
+
+/// Step 4.2: an entry whose path read unsteadily in step 4's scan never
+/// lands, though its bytes match the publish. Step 4 refuses; step 5 is
+/// never reached.
+#[test]
+fn remove_landed_step4_unstable_path_stays_dirty() {
+    use strata_overlay::{OverlayFault, inject_fault, release_fault, wait_fault};
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = s.new(None, &fx.all()).unwrap();
+    let w = ws(&rep);
+    fs::write(w.join("src/index.ts"), b"changed\n").unwrap();
+    publish(&fx, &rep, &[("src/index.ts", b"changed\n")], &[]);
+    // Same bytes, new attrs: nothing cached vouches for the path.
+    fs::write(w.join("src/index.ts"), b"changed\n").unwrap();
+    let pause = OverlayFault::PauseAfterHash { path: rp("src/index.ts") };
+    // Both the read and its one retry see the attrs move.
+    inject_fault(&w, pause.clone());
+    inject_fault(&w, pause.clone());
+    let root = w.clone();
+    let t = std::thread::spawn(move || {
+        for _ in 0..2 {
+            assert_eq!(wait_fault(&root), Some(pause.clone()));
+            fs::write(root.join("src/index.ts"), b"changed\n").unwrap();
+            release_fault(&root);
+        }
+    });
+    let e = dirty(&s, &rep);
+    t.join().unwrap();
+    release_fault(&w);
+    assert!(detail(&e).get("reason").is_none(), "step 4 refuses: {:?}", detail(&e));
+    assert_eq!(paths(&e), ["src/index.ts"]);
+    assert_eq!(detail(&e)["landed"], json!({}));
+    assert_eq!(lifecycle(&fx, &id(&rep)), Lifecycle::Active);
+}
+
+/// Step 4.2: a rename whose source read unsteadily in step 4's scan never
+/// lands. `patches/a.patch` reappears after the publish and vanishes
+/// between the walk and the read (Got::Gone, Unstable), so the scan pairs
+/// `patches/b.patch` with it as a rename.
+#[test]
+fn remove_landed_step4_unstable_rename_source_stays_dirty() {
+    use strata_overlay::{OverlayFault, inject_fault, release_fault, wait_fault};
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = s.new(None, &fx.all()).unwrap();
+    let w = ws(&rep);
+    fs::rename(w.join("patches/a.patch"), w.join("patches/b.patch")).unwrap();
+    publish(&fx, &rep, &[("patches/b.patch", b"patch a\n")], &["patches/a.patch"]);
+    fs::write(w.join("patches/a.patch"), b"back\n").unwrap();
+    let pause = OverlayFault::PauseBeforeRead { path: rp("patches/a.patch") };
+    inject_fault(&w, pause.clone());
+    let root = w.clone();
+    let t = std::thread::spawn(move || {
+        assert_eq!(wait_fault(&root), Some(pause));
+        fs::remove_file(root.join("patches/a.patch")).unwrap();
+        release_fault(&root);
+    });
+    let e = dirty(&s, &rep);
+    t.join().unwrap();
+    release_fault(&w);
+    assert!(detail(&e).get("reason").is_none(), "step 4 refuses: {:?}", detail(&e));
+    assert_eq!(paths(&e), ["patches/b.patch"]);
+    assert_eq!(detail(&e)["landed"], json!({}));
+    assert_eq!(lifecycle(&fx, &id(&rep)), Lifecycle::Active);
+}
+
+/// Known limit (session.md §5.6 step 4.2): where the repository ignores
+/// case, a published case-only rename `a.patch → A.patch` stays Dirty: the
+/// folded lookup sees the destination as a file at the source.
+#[test]
+fn remove_landed_case_only_rename_stays_dirty() {
+    let fx = Fx::with(&["tool"]);
+    let main = fx.main("tool");
+    let icase = fx.sb.git_output(&main, &["config", "--bool", "core.ignorecase"]);
+    if String::from_utf8_lossy(&icase.stdout).trim() != "true" {
+        eprintln!("skipped: core.ignorecase is not true on this volume");
+        return;
+    }
+    let s = fx.sessions();
+    let rep = s.new(None, &fx.all()).unwrap();
+    let w = ws(&rep);
+    fs::rename(w.join("patches/a.patch"), w.join("patches/A.patch")).unwrap();
+    let cp = checkpoint(&fx, &rep);
+    fx.sb.git(&main, &["mv", "patches/a.patch", "patches/A.patch"]);
+    let c = land(&fx, &[], &[], true);
+    let held = fx.sb.git(&main, &["ls-tree", "-r", "--name-only", &c, "patches"]);
+    assert!(held.lines().any(|l| l == "patches/A.patch") && !held.lines().any(|l| l == "patches/a.patch"), "{held:?}");
+    row(&fx, &[(&id(&rep), cp)], PublishPhase::Done, outcome(&c, &id(&rep)));
+    let e = dirty(&s, &rep);
+    assert_eq!(paths(&e), ["patches/A.patch"]);
+    assert_eq!(detail(&e)["landed"], json!({}));
+}
