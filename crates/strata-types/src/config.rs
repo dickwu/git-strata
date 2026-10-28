@@ -38,9 +38,12 @@ impl Default for DevPorts {
 }
 
 /// Ranges a dev-port range must not overlap: common dev-server defaults
-/// (3000–3999 for Next, 5173 for Vite, 8080) and tauri-plugin-connector's
-/// default ranges (bridge 9300–9400, WS/MCP 9555–9656).
-const DEV_PORTS_FORBIDDEN: &[(u16, u16)] = &[(3000, 3999), (5173, 5173), (8080, 8080), (9300, 9400), (9555, 9656)];
+/// (3000–3999 for Next, the Hub on 3000; 4001 for git-strata's own desktop
+/// GUI; 5173 for Vite; 8080) and tauri-plugin-connector's default ranges
+/// (bridge 9300–9400, git-strata 9300; WS/MCP 9555–9656, which holds the
+/// GIT STRATA app's 9555/9556 and the Hub's pinned WS 9640–9649 / MCP
+/// 9650–9654).
+const DEV_PORTS_FORBIDDEN: &[(u16, u16)] = &[(3000, 3999), (4001, 4001), (5173, 5173), (8080, 8080), (9300, 9400), (9555, 9656)];
 
 impl DevPorts {
     /// Ports per lease: web, connector, connector_mcp, aux.

@@ -104,7 +104,7 @@
 
 规则（`DevPorts::validate`，`Config::validate` 的最后一步，`InvalidInput`，`detail.rule`）：
 - P1：`range` 是 `LO-HI` 且 `LO <= HI`；`exclude` 没有 0。
-- P2：范围在 1024–49151 之内（低于 macOS 的临时端口），且不与常见默认端口重叠：3000–3999（Next）、5173（Vite）、8080、9300–9400（tauri-connector bridge）、9555–9656（tauri-connector WS/MCP）。所以主 checkout 用默认端口，与任意多个会话共存。
+- P2：范围在 1024–49151 之内（低于 macOS 的临时端口），且不与常见默认端口重叠：3000–3999（Next；Hub 固定 3000）、4001（git-strata 自己的桌面 GUI 的 dev server）、5173（Vite）、8080、9300–9400（tauri-connector bridge；git-strata 固定 9300）、9555–9656（tauri-connector WS/MCP；含 GIT STRATA app 固定的 9555/9556 与 Hub 固定的 WS 9640–9649 / MCP 9650–9654）。所以主 checkout 用默认端口，与任意多个会话共存。
 - P3：去掉 `exclude` 后至少剩一块。
 
 整个表可以不写（全用缺省）。daemon 启动时按它设置分配策略；只有装上带租约的 daemon 后才该写这个表（旧 daemon 会以 V11 拒绝未知键）。分配时对每块的 4 个端口做绑定探测（`0.0.0.0`、`[::]`、`127.0.0.1`，`SO_REUSEADDR`），不通过的块跳过；全部用尽时 `new` / `add` 照常成功，只是没有租约（`session ports` 再要时 `Busy ports_exhausted`）。

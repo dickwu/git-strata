@@ -636,6 +636,7 @@ fn dev_ports_default_to_2500_blocks_and_validate_their_range() {
         ("range = \"30000-20000\"", "P1", "dev_ports.range"),
         ("range = \"50000-50100\"", "P2", "dev_ports.range"),
         ("range = \"9000-9600\"", "P2", "dev_ports.range"),
+        ("range = \"4000-4003\"", "P2", "dev_ports.range"),
         ("range = \"20001-20003\"", "P3", "dev_ports.range"),
         ("range = \"20000-20003\"\nexclude = [20002]", "P3", "dev_ports.range"),
         ("exclude = [0]", "P1", "dev_ports.exclude"),
