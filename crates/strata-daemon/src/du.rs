@@ -877,12 +877,7 @@ impl Du {
 
     /// [`Du::scan_unit_with`] with the sizing function given (tests reach
     /// the walk's `NoSuchPath` branch without racing a rename).
-    fn scan_unit_using(
-        &self,
-        key: &str,
-        cancel: &AtomicBool,
-        size: &dyn Fn(&Path, &dyn Fn() -> bool) -> crate::Result<Usage>,
-    ) {
+    fn scan_unit_using(&self, key: &str, cancel: &AtomicBool, size: &SizeFn) {
         let path = self.root.join(key);
         let Some((ino, mtime)) = stat(&path) else {
             self.forget_unless_cancelled(key, cancel);
@@ -1007,6 +1002,9 @@ fn utility_io() {
         setiopolicy_np(0, 1, 4);
     }
 }
+
+/// How a unit is sized: [`usage_with`] outside tests.
+type SizeFn = dyn Fn(&Path, &dyn Fn() -> bool) -> crate::Result<Usage>;
 
 #[cfg(test)]
 mod tests {
