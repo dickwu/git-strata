@@ -150,6 +150,19 @@ Notes:
   if you started it) and run again. Approving for other sessions is
   human-only (below). `data.pending_proposals: [{id, repo}]` in any
   envelope means a proposal waits for the human.
+- If you change install inputs (package.json deps, bun.lock, patches,
+  pubspec.yaml / pubspec.lock, ...) and publish without switching, publish
+  still runs the checks with deps that match the staged inputs: it uses a
+  sealed set (warning `DepsSubstituted`) or installs one first (slower;
+  warning `DepsReinstalled`, and the history shows an extra row stopped with
+  `Drift`). Plain drift does not refuse the publish; it can still stop with
+  `Drift` when the inputs move again during that install (`deps_drift`) or
+  when the deps dirs overlap files you publish (`deps_select_failed`,
+  `tracked_overlap`: follow its `fix`/`hint`). Still run the warning's `fix`
+  (`deps propose --switch`) so your workspace matches. `status` shows the same
+  `drift.fix`. If that install fails (`detail.stage: "deps_install"`), hand it
+  to the human with `detail.log_tail`; do not retry in a loop (a retry
+  returns `previous_attempt`).
 
 ## Publish conflict: fix and re-run
 

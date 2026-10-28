@@ -588,6 +588,12 @@ fn status_reports_drift_and_pending_proposals() {
     assert_eq!(d.pinned, d1);
     assert_eq!(d.pinned_inputs, deps_inputs(&fx, "tool", &d1));
     assert_ne!(d.found_inputs, d.pinned_inputs);
+    // deps-drift §2.7: a hint with the switch command and the publish note.
+    assert_eq!(d.fix, format!("git-strata deps propose --session {} --repo tool --switch", id(&a).as_str()));
+    assert_eq!(d.note, strata_session::DRIFT_NOTE);
+    let j = serde_json::to_value(wstat(&s.status(&id(&a)).unwrap(), "tool")).unwrap();
+    assert_eq!(j["drift"]["pinned"], serde_json::json!(d1.as_str()));
+    assert!(j["drift"]["fix"].is_string() && j["drift"]["note"].is_string());
     fx.sb.write(&w, "package.json", PACKAGE_JSON.replace("1.0.87", "1.0.88").as_bytes());
     assert_eq!(drift(&s), None, "a version bump alone is no drift");
     fx.sb.write(&w, "package.json", PACKAGE_JSON.as_bytes());

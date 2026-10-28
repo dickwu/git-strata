@@ -1553,7 +1553,9 @@ fn landed_after_commit(repo: &RepoName, commit: Value, d: &Value) -> Value {
         _ => Value::Null,
     };
     let checks = d.get("checks_ran").cloned().unwrap_or(Value::Null);
-    json!({ "repo": repo.as_str(), "commit": commit, "checks_ran": checks, "push": push, "warnings": [], "rebases": [] })
+    // deps-drift §2.5: what the checks used travels with the landed result.
+    let warnings: Vec<Value> = d.get("deps_warning").filter(|w| !w.is_null()).cloned().into_iter().collect();
+    json!({ "repo": repo.as_str(), "commit": commit, "checks_ran": checks, "push": push, "warnings": warnings, "rebases": [] })
 }
 
 /// Review-2 N1/N2: the group as `publish` will run it: each batch with the

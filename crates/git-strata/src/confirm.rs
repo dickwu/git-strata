@@ -731,7 +731,10 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
         }
         checks += p.get("checks_ran").and_then(Value::as_u64).unwrap_or(0);
         for w in p.get("warnings").and_then(Value::as_array).into_iter().flatten() {
-            eprintln!("warning ({repo}): {w}");
+            match deps_warning_line(w) {
+                Some(m) => eprintln!("warning: {m}"),
+                None => eprintln!("warning ({repo}): {w}"),
+            }
         }
         touched.push(repo.clone());
         if let Some(o) = p.get("push").filter(|o| !o.is_null()) {
@@ -751,11 +754,24 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
             }
         }
     }
+    // deps-drift §2.5: a failure after staging still says what the checks used.
+    if let Some(m) = failed.as_ref().and_then(|e| e.detail.as_ref()).and_then(|d| d.get("deps_warning")).and_then(deps_warning_line) {
+        eprintln!("warning: {m}");
+    }
     let waiting = waiting_proposals(config, &touched);
     let data = json!({ "commits": commits, "checks_ran": checks, "waiting": waiting, "pushes": pushes, "already_published": already });
     match failed.or(bad) {
         Some(e) => Envelope::err_with(e, data),
         None => Envelope::ok(data),
+    }
+}
+
+/// deps-drift §2.5: the one-line text of a deps warning (its
+/// `detail.message`), `None` for other kinds.
+fn deps_warning_line(w: &Value) -> Option<&str> {
+    match w.get("kind").and_then(Value::as_str)? {
+        "DepsSubstituted" | "DepsReinstalled" | "DepsInputsLeft" => w.get("detail")?.get("message")?.as_str(),
+        _ => None,
     }
 }
 

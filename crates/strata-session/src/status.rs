@@ -74,6 +74,26 @@ pub enum WorkspaceHealth {
     Unknown,
 }
 
+/// deps-drift §2.7: the workspace's drift plus what to do about it (a
+/// hint only).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriftStatus {
+    #[serde(flatten)]
+    pub drift: Drift,
+    pub fix: String,
+    pub note: String,
+}
+
+/// The note `status` adds to a drift (deps-drift §2.7).
+pub const DRIFT_NOTE: &str = "publish checks use the deps set matching the published install inputs; it installs that set itself when none is sealed, which makes the publish slower";
+
+impl std::ops::Deref for DriftStatus {
+    type Target = Drift;
+    fn deref(&self) -> &Drift {
+        &self.drift
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceStatus {
     pub health: WorkspaceHealth,
@@ -86,7 +106,7 @@ pub struct WorkspaceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<CheckpointId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drift: Option<Drift>,
+    pub drift: Option<DriftStatus>,
     pub pending: Vec<Proposal>,
     pub conflicts: Vec<RepoPath>,
     pub seeds: Vec<SeedRecord>,
@@ -305,6 +325,11 @@ impl Sessions<'_> {
                 Some(set) if !set.dirs.is_empty() => strata_deps::drift(cfg, git, &ws.path, &set)?,
                 _ => None,
             }
+            .map(|drift| DriftStatus {
+                drift,
+                fix: format!("git-strata deps propose --session {} --repo {repo} --switch", id.as_str()),
+                note: DRIFT_NOTE.to_owned(),
+            })
         } else {
             None
         };
