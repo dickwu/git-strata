@@ -32,14 +32,23 @@ struct Fake {
     release: mpsc::Sender<()>,
 }
 
+/// A core-shaped lowercase hex id (TreeOid/CommitOid 40, DepsSetId 64).
+fn hex(digit: u8, len: usize) -> String {
+    char::from_digit(u32::from(digit), 16).unwrap().to_string().repeat(len)
+}
+
 fn moved_reply(id: &Value, proposal: &Value) -> Value {
     json!({ "id": id, "ok": true, "data": {
-        "results": [{ "session": "S1", "kind": "moved", "report": {
-            "session": "S1", "repo": "web",
-            "from": { "repo": "web", "tree": "t1", "deps": "d1" }, "from_head": "a1",
-            "to": { "repo": "web", "tree": "t1", "deps": "d2" }, "head": "b2",
+        "results": [{ "session": "s-aaaaaaaa", "kind": "moved", "report": {
+            "session": "s-aaaaaaaa", "repo": "web",
+            "from": { "repo": "web", "tree": hex(1, 40), "deps": hex(2, 64) },
+            "from_head": hex(3, 40),
+            "to": { "repo": "web", "tree": hex(1, 40), "deps": hex(4, 64) },
+            "head": hex(5, 40),
             "dropped": [], "conflicts": [], "lww": [], "uncarried": [] } }],
-        "proposal": { "id": proposal, "state": { "kind": "Applied" } } } })
+        "proposal": { "id": proposal, "repo": "web", "origin": { "kind": "Main" },
+            "from": hex(2, 64), "from_inputs": "i1", "to": hex(4, 64), "to_inputs": "i2",
+            "state": { "kind": "Applied" }, "created": "2026-10-28T15:46:00Z" } } })
 }
 
 impl Fake {
@@ -135,11 +144,11 @@ fn approve_sends_the_proposal_and_null_sessions_only() {
 fn approve_sends_a_named_list_as_is() {
     let fake = Fake::start(Mode::Moved);
     let d = Daemon::new(fake.socket.clone());
-    rt().block_on(d.deps_approve(5, Some(vec!["S1".into(), "S2".into()])))
+    rt().block_on(d.deps_approve(5, Some(vec!["s-aaaaaaaa".into(), "s-bbbbbbbb".into()])))
         .unwrap();
     assert_eq!(
         fake.requests()[0]["params"],
-        json!({ "proposal": 5, "sessions": ["S1", "S2"] })
+        json!({ "proposal": 5, "sessions": ["s-aaaaaaaa", "s-bbbbbbbb"] })
     );
 }
 
@@ -196,7 +205,7 @@ fn approve_has_no_deadline_and_one_flight() {
     assert_eq!(r, json!({ "proposals": [] }));
     fake.release.send(()).unwrap();
     let got = rt.block_on(first).unwrap().unwrap();
-    assert_eq!(got["results"][0]["session"], "S1");
+    assert_eq!(got["results"][0]["session"], "s-aaaaaaaa");
     // The slot is free again.
     fake.release.send(()).unwrap();
     let again = rt.block_on(d.deps_approve(8, None)).unwrap();

@@ -22,25 +22,25 @@ describe('approve verdict: headline priority Unknown > errors > skipped > moved'
     expect(v.title).toBe('Approved. Moved 2 sessions.');
     expect(v.again).toBe(false);
     expect(v.rows.map((x) => [x.session, x.state, x.conflicts])).toEqual([
-      ['s-aaa', 'moved', 2],
-      ['s-bbb', 'moved', 0],
+      ['s-aaaaaaaa', 'moved', 2],
+      ['s-bbbbbbbb', 'moved', 0],
     ]);
   });
 
   test('skipped: warning, proposal stays waiting, a reason per row', () => {
     const v = verdict(22, reply(skipped));
     expect(v.tone).toBe('warning');
-    // s-kkk is AlreadyThere: unchanged, not counted as a blocking skip.
+    // s-kkkkkkkk is AlreadyThere: unchanged, not counted as a blocking skip.
     expect(v.title).toBe('Approved, but 4 sessions were skipped, so proposal 22 stays waiting.');
     expect(v.again).toBe(true);
     const by = Object.fromEntries(v.rows.map((x) => [x.session, x]));
-    expect(by['s-ccc'].detail).toBe(
-      'Files in the old tree are open: /v/s-ccc/admin/node_modules/.bin/vite (node, pid 4242)'
+    expect(by['s-cccccccc'].detail).toBe(
+      'Files in the old tree are open: /v/s-cccccccc/admin/node_modules/.bin/vite (node, pid 4242)'
     );
-    expect(by['s-ddd'].detail).toBe('Has its own dependency edits (proposal 21)');
-    expect(by['s-eee'].detail).toBe('Has its own dependency edits');
-    expect(by['s-fff'].detail).toBe('Not ready yet');
-    expect(by['s-kkk']).toMatchObject({ state: 'unchanged', label: '· No move needed' });
+    expect(by['s-dddddddd'].detail).toBe('Has its own dependency edits (proposal 21)');
+    expect(by['s-eeeeeeee'].detail).toBe('Has its own dependency edits');
+    expect(by['s-ffffffff'].detail).toBe('Not ready yet');
+    expect(by['s-kkkkkkkk']).toMatchObject({ state: 'unchanged', label: '· No move needed' });
     // Skips sort before moves; unchanged rows last.
     expect(v.rows.map((x) => x.state).slice(-2)).toEqual(['moved', 'unchanged']);
   });
@@ -50,15 +50,15 @@ describe('approve verdict: headline priority Unknown > errors > skipped > moved'
     expect(v.tone).toBe('error');
     expect(v.title).toBe('4 sessions failed to move, so proposal 22 stays waiting.');
     const by = Object.fromEntries(v.rows.map((x) => [x.session, x]));
-    expect(by['s-ggg'].state).toBe('failed');
-    expect(by['s-ggg'].label).toBe('✕ Failed');
-    expect(by['s-ggg'].detail).toBe('OpenFiles: /v/s-ggg/admin (node (pid 9))');
-    expect(by['s-hhh'].detail).toBe(
-      'Busy: Another change (publish, s-hhh) was holding session s-hhh. Nothing moved. Try again; it asks for confirmation again.'
+    expect(by['s-gggggggg'].state).toBe('failed');
+    expect(by['s-gggggggg'].label).toBe('✕ Failed');
+    expect(by['s-gggggggg'].detail).toBe('OpenFiles: /v/s-gggggggg/admin (node (pid 9))');
+    expect(by['s-hhhhhhhh'].detail).toBe(
+      'Busy: Another change (publish, s-hhhhhhhh) was holding session s-hhhhhhhh. Nothing moved. Try again; it asks for confirmation again.'
     );
-    expect(by['s-iii'].detail).toBe('Corrupt: workspace manifest unreadable');
+    expect(by['s-iiiiiiii'].detail).toBe('Corrupt: workspace manifest unreadable');
     // A SkipReason::Error is a failure with its own code.
-    expect(by['s-lll']).toMatchObject({
+    expect(by['s-llllllll']).toMatchObject({
       state: 'failed',
       detail: 'Corrupt: deps set 12 is missing its manifest',
     });
@@ -71,17 +71,21 @@ describe('approve verdict: headline priority Unknown > errors > skipped > moved'
     expect(v.notes).toEqual(['2 sessions needed no move.']);
     expect(v.again).toBe(false);
     expect(v.rows.filter((x) => x.state === 'unchanged').map((x) => x.session)).toEqual([
-      's-mmm',
-      's-nnn',
+      's-mmmmmmmm',
+      's-nnnnnnnn',
     ]);
   });
 
   test('an Unknown row outranks everything and hides Approve again', () => {
     const v = verdict(22, reply(unknownRow));
     expect(v.tone).toBe('unknown');
-    expect(v.title).toBe('Result unknown for s-jjj: the move may have happened.');
+    expect(v.title).toBe('Result unknown for s-jjjjjjjj: the move may have happened.');
     expect(v.again).toBe(false);
-    expect(v.rows[0]).toMatchObject({ session: 's-jjj', state: 'unknown', label: '? Unknown' });
+    expect(v.rows[0]).toMatchObject({
+      session: 's-jjjjjjjj',
+      state: 'unknown',
+      label: '? Unknown',
+    });
     expect(v.rows[0].detail).toContain('move interrupted');
   });
 

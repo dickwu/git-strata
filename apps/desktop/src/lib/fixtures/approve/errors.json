@@ -31,7 +31,18 @@
       },
       "replacement": {
         "id": 28,
-        "repo": "admin"
+        "repo": "admin",
+        "origin": {
+          "kind": "Main"
+        },
+        "from": "4683432000000000000000000000000000000000000000000000000000000000",
+        "from_inputs": "i2",
+        "to": "f00dcafe00000000000000000000000000000000000000000000000000000000",
+        "to_inputs": "i3",
+        "state": {
+          "kind": "Pending"
+        },
+        "created": "2026-10-28T16:02:00Z"
       }
     }
   },
@@ -62,7 +73,7 @@
     "detail": {
       "reason": "main_moved",
       "proposal": 22,
-      "head": "aaa",
+      "head": "aaa0000000000000000000000000000000000000",
       "tip": "bbb"
     }
   },

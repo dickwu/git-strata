@@ -1,23 +1,23 @@
 {
   "results": [
     {
-      "session": "s-aaa",
+      "session": "s-aaaaaaaa",
       "kind": "moved",
       "report": {
-        "session": "s-aaa",
+        "session": "s-aaaaaaaa",
         "repo": "admin",
         "from": {
           "repo": "admin",
-          "tree": "4b825dc6",
-          "deps": "468343aa"
+          "tree": "4b825dc600000000000000000000000000000000",
+          "deps": "468343aa00000000000000000000000000000000000000000000000000000000"
         },
-        "from_head": "3b416ebaa",
+        "from_head": "3b416ebaa0000000000000000000000000000000",
         "to": {
           "repo": "admin",
-          "tree": "4b825dc6",
-          "deps": "ed8aac11"
+          "tree": "4b825dc600000000000000000000000000000000",
+          "deps": "ed8aac1100000000000000000000000000000000000000000000000000000000"
         },
-        "head": "ed8aac01",
+        "head": "ed8aac0100000000000000000000000000000000",
         "dropped": [],
         "conflicts": ["src/a.ts", "src/b.ts"],
         "lww": [],
@@ -26,23 +26,23 @@
       }
     },
     {
-      "session": "s-bbb",
+      "session": "s-bbbbbbbb",
       "kind": "moved",
       "report": {
-        "session": "s-bbb",
+        "session": "s-bbbbbbbb",
         "repo": "admin",
         "from": {
           "repo": "admin",
-          "tree": "4b825dc6",
-          "deps": "468343aa"
+          "tree": "4b825dc600000000000000000000000000000000",
+          "deps": "468343aa00000000000000000000000000000000000000000000000000000000"
         },
-        "from_head": "3b416ebaa",
+        "from_head": "3b416ebaa0000000000000000000000000000000",
         "to": {
           "repo": "admin",
-          "tree": "4b825dc6",
-          "deps": "ed8aac11"
+          "tree": "4b825dc600000000000000000000000000000000",
+          "deps": "ed8aac1100000000000000000000000000000000000000000000000000000000"
         },
-        "head": "ed8aac01",
+        "head": "ed8aac0100000000000000000000000000000000",
         "dropped": [],
         "conflicts": [],
         "lww": [],
@@ -61,8 +61,8 @@
     "state": {
       "kind": "Applied"
     },
-    "from": "468343aa",
-    "to": "ed8aac11",
+    "from": "468343aa00000000000000000000000000000000000000000000000000000000",
+    "to": "ed8aac1100000000000000000000000000000000000000000000000000000000",
     "from_inputs": "i1",
     "to_inputs": "i2"
   }
