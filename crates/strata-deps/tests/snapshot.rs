@@ -118,3 +118,20 @@ fn inputs_hash_of_fixed_inputs_is_unchanged() {
     assert_eq!(hash_records(&input_records(&fx.cfg, &fx.git, &dir).unwrap()), h);
     assert_eq!(h, "d7f9be33ae1fa05d066bf07f2f039afa0051bcb49c8adb2ff68416606db9a858");
 }
+
+/// Codex impl-r1 B1: a symlinked `deps/<repo>` is never followed, by the
+/// startup sweep or by `remove_snapshot`.
+#[test]
+fn snapshot_removal_never_follows_a_repo_link() {
+    test_seams::reset();
+    let fx = Fx::new();
+    let outside = fx.sb.path("outside");
+    fs::create_dir_all(outside.join(".inputs/9")).unwrap();
+    fs::write(outside.join(".inputs/9/sentinel"), "keep\n").unwrap();
+    fs::create_dir_all(fx.paths.deps()).unwrap();
+    symlink(&outside, fx.paths.deps().join("alias")).unwrap();
+    assert!(clean_snapshots(&fx.paths).is_empty());
+    let alias = strata_types::RepoName::try_from("alias".to_owned()).unwrap();
+    assert!(!remove_snapshot(&fx.paths, &alias, 9), "a link is refused, not removed through");
+    assert!(outside.join(".inputs/9/sentinel").exists(), "nothing outside the store is removed");
+}

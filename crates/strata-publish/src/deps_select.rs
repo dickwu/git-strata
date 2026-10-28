@@ -168,7 +168,8 @@ pub(crate) fn diagnose(
             fix: Some(fix),
         };
     }
-    if main_changed == Some(false) && l.single {
+    // A workspace whose inputs could not be read is `mixed` (§2.6).
+    if w.is_some() && main_changed == Some(false) && l.single {
         return Diagnosis {
             cause: "selection",
             paths,
@@ -301,6 +302,7 @@ fn select_inner(
             "repo": ctx.repo.as_str(),
             "session": l.session.as_str(),
             "fix": fix,
+            "hint": format!("the workspace's install inputs may first need to match what you want to publish; then run `{fix}`, check that data.switched.kind is \"moved\", and publish again"),
         })));
     }
     let tc = strata_deps::toolchain(ctx.cfg, ctx.deps.env)?;
@@ -416,6 +418,7 @@ pub(crate) fn cold_install(ctx: &Ctx, e: &StrataError, first_row: u64) -> Result
         let tree = ctx.store.base_dir(&ws.base);
         seams::hit(ctx.git, Point::BeforeColdInstall);
         seams::fail(ctx.git, FailPoint::ColdInstall)?;
+        seams::fail(ctx.git, FailPoint::ColdInstallPanic)?;
         let t0 = Instant::now();
         let set =
             strata_deps::build(ctx.deps, &tree, Some(&strata_deps::snapshot_tree(ctx.deps.paths, ctx.repo, first_row)))?;

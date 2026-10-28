@@ -656,6 +656,23 @@ pub fn publish(ctx: &Ctx, group: &ReleaseGroup, confirm: Option<ConfirmToken>) -
     publish_bound(ctx, group, confirm, None)
 }
 
+/// deps-drift §2.4: removes the snapshots of the rows publish recorded
+/// (an absent one is a no-op) on every exit, unwinding included.
+struct SnapshotGuard<'a> {
+    ctx: &'a Ctx<'a>,
+    rows: std::cell::RefCell<Vec<u64>>,
+}
+
+impl Drop for SnapshotGuard<'_> {
+    fn drop(&mut self) {
+        for r in self.rows.get_mut().drain(..) {
+            if !strata_deps::remove_snapshot(self.ctx.deps.paths, self.ctx.repo, r) {
+                tracing::warn!(publish = r, "the install-input snapshot could not be removed");
+            }
+        }
+    }
+}
+
 /// [`publish`] bound to a shown plan (review H2): with `shown =
 /// Some(top)` and a push that is confirmed, the chain top read under the
 /// repo lock (after the fetch) must be `top` (`None`: no local chain);
@@ -697,6 +714,9 @@ pub fn publish_bound(
     // Step 2: queue, row, lock; deps-drift §2.1: at most two rounds, the
     // second after a cold install with no publish lock held.
     let mut installed: Option<Installed> = None;
+    // Unwind safety: whatever R1 snapshot exists is removed when this
+    // returns or unwinds (the explicit removals below report what stays).
+    let snaps = SnapshotGuard { ctx, rows: std::cell::RefCell::new(Vec::new()) };
     let (id, landed) = loop {
         reconcile_unknown(ctx);
         let select = Select::Publish { allow_install: installed.is_none(), installed: installed.as_ref() };
@@ -707,6 +727,7 @@ pub fn publish_bound(
                 refuse_open(ctx, &sessions, None, false)?;
                 let id = ctx.store.record_publish(&mine, now())?;
                 row = Some(id);
+                snaps.rows.borrow_mut().push(id);
                 let group = ReleaseGroup { id, batches: mine.batches.clone() };
                 let mut written: Option<CommitOid> = None;
                 let mut inner: Option<Result<Landed>> = None;
@@ -734,10 +755,16 @@ pub fn publish_bound(
             Err(e) if installed.is_none() && crate::deps_select::is_install_needed(&e) && row.is_some() => {
                 installed = Some(crate::deps_select::cold_install(ctx, &e, row.expect("row"))?);
             }
-            Err(e) => {
-                // §2.2: a snapshot that no cold install uses.
-                if let Some(r) = row {
-                    let _ = strata_deps::remove_snapshot(ctx.deps.paths, ctx.repo, r);
+            Err(mut e) => {
+                // §2.2: a snapshot that no cold install uses; what stays
+                // (this one, or R1's after a cold install) is reported.
+                let left = row
+                    .and_then(|r| crate::deps_select::remove_snapshot_warning(ctx, r))
+                    .or_else(|| installed.as_ref().and_then(|i| i.left.clone()));
+                if let Some(w) = left
+                    && let Some(d) = e.detail.get_or_insert_with(|| json!({})).as_object_mut()
+                {
+                    d.insert("deps_inputs_left".into(), w.detail);
                 }
                 return Err(e);
             }

@@ -49,6 +49,9 @@ pub enum FailPoint {
     /// deps-drift §2.4: in place of the cold install (R1 closed, no publish
     /// lock held), as if the daemon stopped there.
     ColdInstall,
+    /// deps-drift §2.4: a panic in place of the cold install (the daemon
+    /// catches handler panics and keeps serving).
+    ColdInstallPanic,
 }
 
 #[cfg(feature = "test-seams")]
@@ -196,6 +199,10 @@ mod imp {
         let Some(a) = t.get_mut(&key(git)) else { return Ok(()) };
         let Some(i) = a.fails.iter().position(|f| *f == at) else { return Ok(()) };
         a.fails.remove(i);
+        drop(t);
+        if at == FailPoint::ColdInstallPanic {
+            panic!("injected panic at {at:?}");
+        }
         Err(StrataError::new(Code::Unknown, format!("injected failure at {at:?}"))
             .with_detail(json!({ "reason": "injected", "at": format!("{at:?}") })))
     }

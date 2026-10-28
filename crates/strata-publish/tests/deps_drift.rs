@@ -250,6 +250,36 @@ fn interrupted_cold_install_leaves_no_open_row() {
     run(&fx, &g).expect("retry");
 }
 
+/// Codex impl-r1 B2: a panic in the cold install (the daemon catches
+/// handler panics) still removes R1's snapshot.
+#[test]
+fn panicking_cold_install_removes_the_snapshot() {
+    let fx = fx();
+    let s = fx.new_session(&["tool"]);
+    let g = select(&fx, &s, &[("package.json", PKG2.as_bytes())]);
+    seams::fail_once(fx.git_of("tool"), FailPoint::ColdInstallPanic);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&fx, &g)));
+    assert!(r.is_err(), "the injected panic unwinds");
+    let r1 = rows(&fx).remove(0);
+    assert_eq!(r1.phase, PublishPhase::Done);
+    snapshot_gone(&fx, r1.group.id);
+    run(&fx, &g).expect("retry");
+}
+
+/// Codex impl-r1 B2: a panic while the snapshot is built (under the locks)
+/// leaves no snapshot behind.
+#[test]
+fn panicking_snapshot_build_removes_the_snapshot() {
+    let fx = fx();
+    let s = fx.new_session(&["tool"]);
+    let g = select(&fx, &s, &[("package.json", PKG2.as_bytes())]);
+    strata_deps::test_seams::after_snapshot_clone(Box::new(|_, _| panic!("injected snapshot panic")));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&fx, &g)));
+    strata_deps::test_seams::reset();
+    assert!(r.is_err(), "the injected panic unwinds");
+    snapshot_gone(&fx, rows(&fx)[0].group.id);
+}
+
 /// Test 11: no checks → no selection, no install, one row, no warning.
 #[test]
 fn no_checks_skip_selection() {

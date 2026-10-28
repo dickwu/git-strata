@@ -79,12 +79,10 @@ pub fn snapshot_inputs(ctx: &Ctx, from: &Path, row: u64, expect: &str) -> Result
 
 /// Remove publish row `row`'s snapshot. `true` when nothing is left (an
 /// absent snapshot included).
+/// Removal is rooted at `<root>/deps`, so a symlink at `deps/<repo>` or
+/// `.inputs` is refused, never followed.
 pub fn remove_snapshot(paths: &Paths, repo: &RepoName, row: u64) -> bool {
-    let root = paths.deps().join(repo.as_str()).join(".inputs");
-    if std::fs::symlink_metadata(&root).is_err() {
-        return true;
-    }
-    remove_rooted_tree(&root, &rp(row.to_string()))
+    remove_rooted_tree(&paths.deps(), &rp(format!("{}/.inputs/{row}", repo.as_str())))
 }
 
 fn remove_rooted_tree(root: &Path, rel: &RepoPath) -> bool {
@@ -101,7 +99,14 @@ pub fn clean_snapshots(paths: &Paths) -> Vec<PathBuf> {
     let Ok(repos) = std::fs::read_dir(paths.deps()) else {
         return left;
     };
+    let deps = paths.deps();
     for r in repos.flatten() {
+        // Never through a link: `deps/<repo>` and `.inputs` must be real
+        // directories, and the removal below is rooted at `deps` anyway.
+        if !r.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Some(repo) = r.file_name().to_str().map(str::to_owned) else { continue };
         let root = r.path().join(".inputs");
         match std::fs::symlink_metadata(&root) {
             Ok(m) if m.is_dir() => {}
@@ -109,10 +114,10 @@ pub fn clean_snapshots(paths: &Paths) -> Vec<PathBuf> {
         }
         let Ok(rows) = std::fs::read_dir(&root) else { continue };
         for row in rows.flatten() {
-            let name = row.file_name().to_string_lossy().into_owned();
-            let Ok(rel) = RepoPath::try_from(name) else { continue };
-            if !remove_rooted_tree(&root, &rel) {
-                left.push(root.join(rel.as_str()));
+            let Some(name) = row.file_name().to_str().map(str::to_owned) else { continue };
+            let Ok(rel) = RepoPath::try_from(format!("{repo}/.inputs/{name}")) else { continue };
+            if !remove_rooted_tree(&deps, &rel) {
+                left.push(deps.join(rel.as_str()));
             }
         }
     }
