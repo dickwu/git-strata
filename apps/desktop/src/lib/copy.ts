@@ -11,7 +11,7 @@ export const copy = {
     open: 'Open command palette',
     empty: 'No match.',
     goTo: (name: string) => `Go to ${name}`,
-    toggleTheme: 'Switch light / dark theme',
+    theme: (name: string) => `Theme: ${name}`,
     refresh: 'Refresh now',
     withRepo: (repo: string) => `Sessions with ${repo}`,
     byAgent: (agent: string) => `Sessions by ${agent}`,
@@ -135,6 +135,18 @@ export const copy = {
     offline: 'Daemon unreachable',
     loading: 'Connecting…',
     sessions: (n: number) => (n === 1 ? '1 session' : `${n} sessions`),
+  },
+  theme: {
+    label: 'Theme',
+    names: { system: 'System', light: 'Light', dark: 'Dark' },
+    /** Tooltip on each status bar segment. */
+    tip: {
+      system: 'Match macOS appearance',
+      light: 'Light theme',
+      dark: 'Dark theme',
+    },
+    /** Appended to the System tooltip: what System resolves to right now. */
+    now: (name: string) => `now ${name.toLowerCase()}`,
   },
   errors: {
     notInTauri: 'Open this inside the GIT STRATA app.',

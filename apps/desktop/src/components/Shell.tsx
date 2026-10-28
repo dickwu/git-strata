@@ -17,7 +17,7 @@ import { SessionDetailModal } from './SessionDetail';
 
 export function Shell() {
   const { screen, session, setPalette, openSession, go } = useNav();
-  const toggleTheme = useTheme((s) => s.toggle);
+  const setTheme = useTheme((s) => s.setChoice);
   const { plan, status } = usePlan();
   const sessions = useSessions(plan.sessions);
   // Kept warm so a tray "deps" item can find its session.
@@ -101,7 +101,7 @@ export function Shell() {
       <CommandPalette
         sessions={sessions.data}
         onRefresh={() => qc.invalidateQueries()}
-        onToggleTheme={toggleTheme}
+        onTheme={setTheme}
       />
     </div>
   );

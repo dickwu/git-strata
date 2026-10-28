@@ -8,6 +8,7 @@ import { useDu } from '@/lib/queries';
 import { isDaemonDown } from '@/lib/tauri';
 import { errorText } from './ErrorNote';
 import { DaemonStatusModal } from './DaemonStatusModal';
+import { ThemeSwitch } from './ThemeSwitch';
 import type { DaemonStatus, StatusReply } from '@/lib/types';
 import css from './StatusBar.module.css';
 
@@ -70,6 +71,7 @@ export function StatusBar({
         </button>
       )}
       {sessions && <span>{copy.status.sessions(sessions.sessions.length)}</span>}
+      <ThemeSwitch />
       <DaemonStatusModal
         open={open}
         onClose={() => setOpen(false)}

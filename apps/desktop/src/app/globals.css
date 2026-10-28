@@ -1,6 +1,9 @@
 @import 'tailwindcss';
 @import './fonts.css';
 
+/* Tailwind dark: follows the theme store (data-theme on <html>), not only the OS. */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
 /*
  * gui.md §8.2 tokens. Contrast-bearing values are mirrored in src/lib/tokens.ts and
  * checked by src/lib/contrast.test.ts (ui_accent_contrast) — change both together.

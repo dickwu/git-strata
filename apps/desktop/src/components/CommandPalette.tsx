@@ -6,15 +6,16 @@ import { copy } from '@/lib/copy';
 import { buildEntries, filterEntries, type Entry } from '@/lib/palette';
 import type { StatusReply } from '@/lib/types';
 import { useNav } from '@/stores/nav';
+import type { ThemeChoice } from '@/stores/theme';
 
 export function CommandPalette({
   sessions,
   onRefresh,
-  onToggleTheme,
+  onTheme,
 }: {
   sessions: StatusReply | undefined;
   onRefresh: () => void;
-  onToggleTheme: () => void;
+  onTheme: (choice: ThemeChoice) => void;
 }) {
   const {
     paletteOpen,
@@ -45,7 +46,7 @@ export function CommandPalette({
     } else if (a.kind === 'agent') {
       go('sessions');
       if (!agentFilter.includes(a.agent)) toggleAgentFilter(a.agent);
-    } else if (a.kind === 'theme') onToggleTheme();
+    } else if (a.kind === 'theme') onTheme(a.choice);
     else onRefresh();
     close();
   };

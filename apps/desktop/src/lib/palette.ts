@@ -1,5 +1,6 @@
 /** ⌘K entries and filtering. */
 import { copy } from './copy';
+import { THEME_CHOICES, type ThemeChoice } from '@/stores/theme';
 import type { StatusReply } from './types';
 import { sessionRows, usedRepos } from './view';
 
@@ -8,7 +9,7 @@ export type Action =
   | { kind: 'session'; id: string }
   | { kind: 'repo'; repo: string }
   | { kind: 'agent'; agent: string }
-  | { kind: 'theme' }
+  | { kind: 'theme'; choice: ThemeChoice }
   | { kind: 'refresh' };
 
 export interface Entry {
@@ -65,12 +66,13 @@ export function buildEntries(sessions: StatusReply | undefined): Entry[] {
       keywords: ['status', 'socket', 'warnings'],
       action: { kind: 'screen', screen: 'daemon' },
     },
-    {
-      key: 'theme',
-      label: copy.palette.toggleTheme,
-      keywords: ['dark', 'light', 'appearance'],
-      action: { kind: 'theme' },
-    },
+    // One entry per choice, the same three the status bar switch offers (t93u).
+    ...THEME_CHOICES.map((choice): Entry => ({
+      key: `theme:${choice}`,
+      label: copy.palette.theme(copy.theme.names[choice]),
+      keywords: ['theme', 'appearance', 'mode', ...(choice === 'system' ? ['auto', 'os'] : [])],
+      action: { kind: 'theme', choice },
+    })),
     {
       key: 'refresh',
       label: copy.palette.refresh,

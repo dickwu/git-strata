@@ -16,7 +16,7 @@ const entries = [
   e('a', 'Go to Sessions', ['list']),
   e('b', 'Go to Daemon', ['status', 'socket']),
   e('c', 'T-101', ['Active'], 'S1'),
-  e('d', 'Switch light / dark theme', ['dark']),
+  e('d', 'Theme: Dark', ['theme']),
   e('e', 'Session tools', []),
 ];
 
@@ -75,5 +75,26 @@ describe('buildEntries (⌘K)', () => {
   });
   test('no daemon reply → only screens and commands', () => {
     expect(buildEntries(undefined).every((x) => !x.key.startsWith('session:'))).toBe(true);
+  });
+});
+
+describe('⌘K theme entries', () => {
+  test('one entry per choice, in status bar order, each carrying its choice', () => {
+    const themes = buildEntries(undefined).filter((x) => x.action.kind === 'theme');
+    expect(themes.map((x) => x.label)).toEqual(['Theme: System', 'Theme: Light', 'Theme: Dark']);
+    expect(themes.map((x) => x.action)).toEqual([
+      { kind: 'theme', choice: 'system' },
+      { kind: 'theme', choice: 'light' },
+      { kind: 'theme', choice: 'dark' },
+    ]);
+  });
+  test('"dark" finds the dark entry; "appearance" finds all three', () => {
+    const list = buildEntries(undefined);
+    expect(filterEntries(list, 'dark').map((x) => x.key)).toEqual(['theme:dark']);
+    expect(filterEntries(list, 'appearance').map((x) => x.key)).toEqual([
+      'theme:system',
+      'theme:light',
+      'theme:dark',
+    ]);
   });
 });
