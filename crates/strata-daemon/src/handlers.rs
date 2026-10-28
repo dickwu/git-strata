@@ -405,6 +405,8 @@ const OLD_TREE_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 /// `stop` reaches into the walks: a judgement in progress gives up and
 /// writes no verdict.
 fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
+    // Background work: this thread's disk I/O at utility priority, like du.
+    crate::du::utility_io();
     let flag = Arc::new(AtomicBool::new(false));
     let finished = AtomicBool::new(false);
     std::thread::scope(|s| {
@@ -886,14 +888,22 @@ impl<'d, 'a> Server<'d, 'a> {
         }
         // Chains only on request (status-perf D2): absent, not `{}`, when
         // not computed.
+        // Each repo's chain holds one of the shared `[status] parallel`
+        // slots, like a workspace read (A4).
         let chains = if with_chains {
-            let mut chains = serde_json::Map::new();
+            let mut todo = Vec::with_capacity(core.gits.len());
             for (repo, git) in &core.gits {
-                let branch = &repo_cfg(core, repo)?.publish.branch;
-                let v = match strata_deps::publish_chain(git, branch) {
+                todo.push((repo, git, &repo_cfg(core, repo)?.publish.branch));
+            }
+            let got =
+                sessions.on_status_slots(&todo, |&(_, git, branch)| match strata_deps::publish_chain(git, branch) {
                     Ok(c) => json_of(&c),
                     Err(e) => json!({ "error": json_of(&e) }),
-                };
+                });
+            let mut chains = serde_json::Map::new();
+            for ((repo, _, _), v) in todo.iter().zip(got) {
+                let v =
+                    v.unwrap_or_else(|| json!({ "error": { "code": "Unknown", "message": "the chain was not read" } }));
                 chains.insert(repo.as_str().to_string(), v);
             }
             Some(chains)

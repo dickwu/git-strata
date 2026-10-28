@@ -330,7 +330,7 @@ pub enum StatusWarning {
     /// 交换开始之后失败、却没能记成 Unknown 的移动（fail_move 本身也失败了）：意图停在 Swapping，交换可能已经发生，
     /// 健康仍是 Ok。daemon 下一次启动时 recover 把它记成 Unknown，之后经 resolve_failed_move 处理（§5.5 第 2.9 步）[我的决定 D47]。
     MoveAwaitingRecover { n: u64, staging: PathBuf },
-    /// move_workspace 交换之后保留在原地的旧树（§5.7 第 19 步），以及 Accept 留下的旧树（§5.9 第 9 步）。holders 与 changed 都在读的时候重算：
+    /// move_workspace 交换之后保留在原地的旧树（§5.7 第 19 步），以及 Accept 留下的旧树（§5.9 第 9 步）。holders 与 changed 在 Inline 模式下每次读的时候重算（Deferred 模式下 changed 取判定缓存，见下）：
     /// changed = 旧树与那次移动的 BeforeRollout checkpoint 不一致，即交换之后有人往旧树里写过。
     /// retained = 交换时旧树里有新树没有的东西（没带过来的内容或改动），以后的移动不自动收走它。
     /// status-perf A1：changed 为 None 表示还没判定（Deferred 模式下没有判定缓存，unchecked = true）；

@@ -997,7 +997,7 @@ unsafe extern "C" {
 
 /// This thread's disk I/O at utility priority (sys/resource.h:
 /// IOPOL_TYPE_DISK 0, IOPOL_SCOPE_THREAD 1, IOPOL_UTILITY 4).
-fn utility_io() {
+pub(crate) fn utility_io() {
     unsafe {
         setiopolicy_np(0, 1, 4);
     }

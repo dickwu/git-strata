@@ -191,33 +191,12 @@ impl Sessions<'_> {
             .filter_map(|(i, h)| h.as_ref().ok().map(|h| (i, h)))
             .flat_map(|(i, h)| h.rec.workspaces.iter().map(move |(repo, row)| (i, repo, row)))
             .collect();
-        let done: Vec<Mutex<Option<Result<WorkspaceStatus>>>> = tasks.iter().map(|_| Mutex::new(None)).collect();
-        let next = AtomicUsize::new(0);
-        let run = || {
-            loop {
-                let t = next.fetch_add(1, Ordering::Relaxed);
-                let Some(&(i, repo, row)) = tasks.get(t) else { break };
-                let Ok(h) = &heads[i] else { continue };
-                let r = {
-                    let _slot = self.status_slots.take();
-                    self.workspace_status(&h.rec, repo, row)
-                };
-                *done[t].lock().unwrap_or_else(|p| p.into_inner()) = Some(r);
-            }
-        };
-        let workers = self.status_slots.cap().min(tasks.len());
-        if workers <= 1 {
-            run();
-        } else {
-            std::thread::scope(|s| {
-                for _ in 0..workers {
-                    s.spawn(run);
-                }
-            });
-        }
+        let done = on_slots(&self.status_slots, &tasks, |&(i, repo, row)| {
+            heads[i].as_ref().ok().map(|h| self.workspace_status(&h.rec, repo, row))
+        });
         let n = tasks.len();
         drop(tasks);
-        let mut done = done.into_iter().map(|m| m.into_inner().unwrap_or_else(|p| p.into_inner()));
+        let mut done = done.into_iter().map(Option::flatten);
         let mut out = Vec::with_capacity(ids.len());
         let mut t = 0;
         for h in heads {
@@ -488,6 +467,45 @@ impl From<&strata_store::SeedRow> for SeedRecord {
     }
 }
 
+impl Sessions<'_> {
+    /// status-perf A4: `f` of each item on the same shared slots as the
+    /// workspace reads of [`Sessions::status_many`] (the daemon's chains
+    /// go through here), one result per item in the order given.
+    pub fn on_status_slots<T: Sync, R: Send>(&self, items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<Option<R>> {
+        on_slots(&self.status_slots, items, f)
+    }
+}
+
+/// `f` of each item, at most `slots.cap()` workers here and at most the
+/// slots' free count across every caller at once; each call holds one
+/// slot. Results in item order; `None` only for an item never run.
+pub(crate) fn on_slots<T: Sync, R: Send>(slots: &Slots, items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<Option<R>> {
+    let done: Vec<Mutex<Option<R>>> = items.iter().map(|_| Mutex::new(None)).collect();
+    let next = AtomicUsize::new(0);
+    let run = || {
+        loop {
+            let t = next.fetch_add(1, Ordering::Relaxed);
+            let Some(item) = items.get(t) else { break };
+            let r = {
+                let _slot = slots.take();
+                f(item)
+            };
+            *done[t].lock().unwrap_or_else(|p| p.into_inner()) = Some(r);
+        }
+    };
+    let workers = slots.cap().min(items.len());
+    if workers <= 1 {
+        run();
+    } else {
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(run);
+            }
+        });
+    }
+    done.into_iter().map(|m| m.into_inner().unwrap_or_else(|p| p.into_inner())).collect()
+}
+
 /// status-perf A4: a counting semaphore. `take` blocks until a slot is
 /// free; the guard gives it back. Nothing holds a slot while waiting for
 /// another, so the slots cannot deadlock.
@@ -548,5 +566,39 @@ mod opt_rfc3339 {
             Some(text) => strata_types::serde_rfc3339::parse(&text).map(Some).map_err(serde::de::Error::custom),
             None => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::{Slots, on_slots};
+
+    /// Two callers at once share the one cap: never more than `cap`
+    /// items run together, and each caller gets its results in order.
+    #[test]
+    fn slots_are_shared_across_concurrent_callers() {
+        let slots = Slots::new(2);
+        let (now, max) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let items: Vec<usize> = (0..8).collect();
+        let work = |&i: &usize| {
+            let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+            max.fetch_max(n, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(20));
+            now.fetch_sub(1, Ordering::SeqCst);
+            i * 10
+        };
+        let (a, b) = std::thread::scope(|s| {
+            let a = s.spawn(|| on_slots(&slots, &items, work));
+            let b = s.spawn(|| on_slots(&slots, &items, work));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        let want: Vec<Option<usize>> = items.iter().map(|i| Some(i * 10)).collect();
+        assert_eq!(a, want);
+        assert_eq!(b, want);
+        assert!(max.load(Ordering::SeqCst) <= 2, "max {} at once", max.load(Ordering::SeqCst));
+        assert!(max.load(Ordering::SeqCst) >= 2, "the two callers did overlap");
     }
 }
