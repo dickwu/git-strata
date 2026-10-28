@@ -162,6 +162,7 @@ impl Sessions<'_> {
                 strata_apfs::mkdir_rooted(&staging, parent, 0o755, true).map_err(fail)?;
             }
             strata_apfs::clone_tree_rooted(&cfg.path.join(c.as_str()), &staging, c).map_err(fail)?;
+            crate::seed::drop_connector_files(&staging, c).map_err(fail)?;
         }
         let git = self.git(r)?;
         let dir = self.shadow_dir(id, r);

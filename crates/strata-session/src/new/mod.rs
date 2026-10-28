@@ -14,7 +14,7 @@ use strata_store::{Lifecycle, SeedRow};
 use strata_types::{BaseGen, RepoPath, SessionId, WorkspaceState};
 
 use crate::scene::{Scene, SceneOp, cause_of, kept_dirs, unknown_error};
-use crate::seed::{SeedSource, ancestors, seed_files, seed_plan};
+use crate::seed::{SeedSource, ancestors, drop_connector_files, seed_files, seed_plan};
 use crate::sys::{lstat, rp};
 use crate::{Result, Sessions, dispatch};
 
@@ -296,6 +296,7 @@ impl Sessions<'_> {
                     strata_apfs::mkdir_rooted(ws, parent, 0o755, true)?;
                 }
                 strata_apfs::clone_tree_rooted(&cfg.path.join(c.as_str()), ws, c)?;
+                drop_connector_files(ws, c)?;
             }
             Ok(())
         };
