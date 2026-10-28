@@ -508,6 +508,8 @@ daemon 实现 `publish::PublishLocks`（`with_sessions`、`with_repo`），放�
 
 旧树上的进程只列在 status 里，不杀（session 的已知限制）。
 
+旧树线程（status-perf A1，peilin 的 D1）：`serve` 起一条线程。启动时先对每个会话（`try_session` → `with_repo`）跑 `sweep_half_retired`（旧树已退役、管理目录还在且不是当前 gitdir 的，退役那个管理目录），再把所有 `Done` 意图的旧树排进队列。之后循环：`next_old_tree(100 ms)` 取一项，`try_session` → `with_repo` 下调 `check_old_tree`；会话忙（Busy）的项 5 s 后重排。`stop()`（done、stopping、外部停止）为真时置位停止标志，正在进行的遍历在下一个目录处停下。panic 被 `catch_unwind` 接住、记日志，线程继续。已知限制：检查期间线程占着该会话的队列，同一会话的 `rm`、`move` 会排在它后面，可能返回 Busy。`rm`（不论成败）与 `restore` 之后清掉该会话的判定。
+
 ### 5.12 `du`：磁盘用量
 
 只读（`ro = true`），不排队，不拿锁。实现在 `du.rs`，`Daemon.du` 持有 `Du`，daemon 停时停掉后台线程。
