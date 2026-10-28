@@ -1,8 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Modal, Spin, Tag } from 'antd';
-import { useQueryClient, type QueryClient } from '@tanstack/react-query';
+import { useQueryClient, type QueryClient, type QueryKey } from '@tanstack/react-query';
 import {
   REFRESH_AFTER_APPROVE,
   STILL_WORKING_MS,
@@ -13,7 +13,7 @@ import {
 } from '@/lib/approve';
 import { compactTime, copy, fullTime } from '@/lib/copy';
 import { useDeps, useSession, useSessions } from '@/lib/queries';
-import { approveProposal, asGuiError } from '@/lib/tauri';
+import { approveProposal, asGuiError, reason } from '@/lib/tauri';
 import { short } from '@/lib/view';
 import type { Proposal } from '@/lib/types';
 import { useNav } from '@/stores/nav';
@@ -24,6 +24,7 @@ import css from './ReviewModal.module.css';
 const t = copy.review;
 /** The modal re-reads while open (design §4.5: deps polls every 10 s while visible). */
 const POLL_MS = 10_000;
+const DEPS_KEYS: QueryKey[] = [['deps'], ['sessions']];
 
 /** Refresh after every outcome, lost replies and Stop waiting included (§4.4). */
 function refreshAfterApprove(qc: QueryClient) {
@@ -31,17 +32,22 @@ function refreshAfterApprove(qc: QueryClient) {
     void qc.invalidateQueries({ queryKey: [...queryKey] });
 }
 
-/** Re-read before showing anything (gui.md:320); returns when the re-read was asked. */
-function useFreshSince(keys: string[][]): [number, () => void] {
+/**
+ * Re-read before showing anything (gui.md:320). Joins a read already in flight instead of
+ * cancelling it: the back end allows one read per kind, so a cancelled-and-restarted read
+ * would come back request_in_flight. Returns when the re-read was asked.
+ */
+function useFreshSince(keys: QueryKey[]): [number, () => void] {
   const qc = useQueryClient();
   const [since, setSince] = useState(() => Date.now());
+  const run = useCallback(() => {
+    for (const queryKey of keys) void qc.refetchQueries({ queryKey }, { cancelRefetch: false });
+  }, [qc, keys]);
   const reread = useCallback(() => {
     setSince(Date.now());
-    for (const queryKey of keys) void qc.refetchQueries({ queryKey });
-  }, [qc]);
-  useEffect(() => {
-    for (const queryKey of keys) void qc.refetchQueries({ queryKey });
-  }, [qc]);
+    run();
+  }, [run]);
+  useEffect(run, [run]);
   return [since, reread];
 }
 
@@ -173,6 +179,16 @@ function Rows({ v, onOpen }: { v: Verdict; onOpen: (s: string) => void }) {
 type Phase =
   { kind: 'idle' } | { kind: 'confirming'; slow: boolean } | { kind: 'result'; v: Verdict };
 
+/** An approve outcome: the headline banner and one line per session. */
+export function ResultView({ v, onOpen }: { v: Verdict; onOpen: (s: string) => void }) {
+  return (
+    <>
+      <Banner tone={v.tone} title={v.title} notes={v.notes} />
+      <Rows v={v} onOpen={onOpen} />
+    </>
+  );
+}
+
 function DepsReview({
   target,
   onBusy,
@@ -182,7 +198,7 @@ function DepsReview({
 }) {
   const qc = useQueryClient();
   const deps = useDeps(POLL_MS);
-  const [since, reread] = useFreshSince([['deps'], ['sessions']]);
+  const [since, reread] = useFreshSince(DEPS_KEYS);
   const { open, close, approving, setApproving } = useReview();
   const openSession = useNav((s) => s.openSession);
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
@@ -197,6 +213,9 @@ function DepsReview({
     };
   }, [onBusy]);
 
+  // A read refused as request_in_flight is another read finishing; the poll picks it up.
+  const readError =
+    deps.isError && reason(asGuiError(deps.error)) !== 'request_in_flight' ? deps.error : null;
   const fresh = deps.dataUpdatedAt >= since && !deps.isError;
   const p = deps.data?.proposals.find((x) => x.id === target.id) ?? null;
   const pending = p?.state?.kind === 'Pending';
@@ -275,12 +294,7 @@ function DepsReview({
     footer = phase.slow ? <Button onClick={onStopWaiting}>{t.stopWaiting}</Button> : null;
   } else if (phase.kind === 'result') {
     const v = phase.v;
-    body = (
-      <>
-        <Banner tone={v.tone} title={v.title} notes={v.notes} />
-        <Rows v={v} onOpen={toSession} />
-      </>
-    );
+    body = <ResultView v={v} onOpen={toSession} />;
     footer = (
       <>
         {v.replacement !== null && (
@@ -292,10 +306,10 @@ function DepsReview({
         <Button onClick={close}>{t.close}</Button>
       </>
     );
-  } else if (deps.isError) {
+  } else if (readError) {
     body = (
       <>
-        <ReadError error={deps.error} />
+        <ReadError error={readError} />
         <p className={css.note}>{t.readFailed}</p>
         <p className={css.terminal}>
           {t.terminal} <code className="mono">{t.command(target.id)}</code>
@@ -335,6 +349,9 @@ function DepsReview({
   } else {
     body = (
       <>
+        <div className={css.stateLine}>
+          <Tag className={css.tag}>Pending</Tag>
+        </div>
         <Origin p={p} />
         <Facts p={p} />
         <section className={css.section} aria-labelledby="review-scope">
@@ -369,11 +386,6 @@ function DepsReview({
 
   return (
     <div className={css.body}>
-      {p && pending && phase.kind !== 'result' && (
-        <div className={css.stateLine}>
-          <Tag className={css.tag}>Pending</Tag>
-        </div>
-      )}
       {body}
       {footer && <div className={css.footer}>{footer}</div>}
     </div>
@@ -383,7 +395,11 @@ function DepsReview({
 function ConflictReview({ target }: { target: Extract<ReviewTarget, { kind: 'conflict' }> }) {
   const one = useSession(target.session, POLL_MS);
   const list = useSessions(POLL_MS);
-  const [since] = useFreshSince([['sessions'], ['session', target.session] as unknown as string[]]);
+  const keys = useMemo<QueryKey[]>(
+    () => [['sessions'], ['session', target.session]],
+    [target.session]
+  );
+  const [since] = useFreshSince(keys);
   const { close } = useReview();
   const openSession = useNav((s) => s.openSession);
   const [done, copyText] = useCopy();
