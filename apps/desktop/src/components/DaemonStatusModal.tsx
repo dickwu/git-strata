@@ -1,6 +1,6 @@
 'use client';
 
-import { Descriptions, Modal, Table, Tag } from 'antd';
+import { Descriptions, Modal, Table, Tag, Tooltip } from 'antd';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { ago, bytes } from '@/lib/copy';
 import { daemonCopy as t } from '@/lib/daemonCopy';
@@ -36,6 +36,7 @@ function Missing({ live }: { live: boolean }) {
 function Savings({ v, tickets }: { v: SavingsView; tickets: Map<string, string> }) {
   const s = t.savings;
   const note = s.cumulativeNote(v.cumulative.removed, v.cumulative.unsized);
+  const untimedTip = v.timingMissing === 'old-daemon' ? s.notTimedTipOld : s.notTimedTip;
   return (
     <section className={css.savings} aria-labelledby="savings-h">
       <h2 id="savings-h" className={css.h}>
@@ -111,7 +112,15 @@ function Savings({ v, tickets }: { v: SavingsView; tickets: Map<string, string> 
               dataIndex: 'createMs',
               align: 'right',
               render: (ms: number | null) =>
-                ms === null ? <span className="muted">{s.notTimed}</span> : duration(ms),
+                ms === null ? (
+                  <Tooltip title={untimedTip} placement="topRight">
+                    <span className={`muted ${css.untimed}`} aria-label={untimedTip}>
+                      {s.notTimed}
+                    </span>
+                  </Tooltip>
+                ) : (
+                  duration(ms)
+                ),
             },
             {
               title: s.columns.estimate,
@@ -121,6 +130,9 @@ function Savings({ v, tickets }: { v: SavingsView; tickets: Map<string, string> 
             },
           ]}
         />
+      )}
+      {v.untimed > 0 && v.timingMissing !== 'old-daemon' && (
+        <p className={css.formula}>{s.notTimedNote(v.untimed)}</p>
       )}
       <p className={css.formula}>{s.accuracy}</p>
     </section>

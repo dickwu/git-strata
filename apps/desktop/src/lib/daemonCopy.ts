@@ -49,7 +49,7 @@ export const daemonCopy = {
     formula:
       'Estimate = logical size ÷ 2 GB/s (2 × 10⁹ bytes a second, a fast SSD). It leaves out per-file overhead and installing dependencies, so a real git worktree takes longer.',
     timingOld:
-      "This daemon doesn't time new sessions. Once it runs a build that records create_ms, measured times appear here.",
+      "This daemon doesn't record how long creating a session takes. A newer git-strata daemon times every session it creates.",
     timingNone: 'No session has been created since the daemon started timing them.',
     columns: {
       session: 'Session',
@@ -59,7 +59,13 @@ export const daemonCopy = {
       created: 'Created in',
       estimate: 'Worktree (est.)',
     },
-    notTimed: 'not timed',
+    /** "Created in" cell for a session with no recorded time. */
+    notTimed: '—',
+    notTimedTip:
+      'Created before the daemon recorded creation time. Only sessions created by a newer daemon are timed.',
+    notTimedTipOld: "This daemon doesn't record creation time.",
+    notTimedNote: (n: number) =>
+      `— marks ${n} ${plural(n, 'session', 'sessions')} created before the daemon recorded creation time. Only sessions created by a newer daemon are timed.`,
   },
   status: {
     heading: 'Status',

@@ -110,3 +110,11 @@
   padding-left: 18px;
   color: var(--danger);
 }
+
+/* "Created in" for a session made before the daemon timed sessions: a dash with a tooltip. */
+.untimed {
+  display: inline-block;
+  min-width: 2ch;
+  text-align: center;
+  cursor: help;
+}

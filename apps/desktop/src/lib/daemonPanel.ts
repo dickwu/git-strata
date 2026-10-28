@@ -58,6 +58,8 @@ export interface SavingsView {
   /** Why `timing` is null. */
   timingMissing: 'old-daemon' | 'none-timed' | null;
   rows: SavingsRow[];
+  /** Rows with no recorded create time (made before the daemon timed sessions). */
+  untimed: number;
 }
 
 const ratio = (est: number, measured: number | null) =>
@@ -121,6 +123,7 @@ export function savingsView(du: DuReply | undefined): SavingsView | null {
     timing,
     timingMissing,
     rows,
+    untimed: rows.filter((r) => r.createMs === null).length,
   };
 }
 

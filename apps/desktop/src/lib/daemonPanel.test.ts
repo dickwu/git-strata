@@ -108,6 +108,11 @@ describe('savingsView', () => {
     expect(v.rows[1].speedup).toBeNull();
   });
 
+  test('untimed counts the rows made before the daemon recorded creation time', () => {
+    expect(savingsView(timedDu())!.untimed).toBe(1);
+    expect(savingsView(fx<DuReply>('du'))!.untimed).toBe(2);
+  });
+
   test('a daemon that times new but has no timed session yet says so', () => {
     const du = timedDu();
     du.savings!.cumulative = {
