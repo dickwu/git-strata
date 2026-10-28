@@ -6,7 +6,7 @@
   "identifier": "io.github.dickwu.git-strata",
   "build": {
     "beforeDevCommand": "bun run dev",
-    "devUrl": "http://localhost:3000",
+    "devUrl": "http://localhost:4001",
     "beforeBuildCommand": "bun run build",
     "frontendDist": "../dist"
   },

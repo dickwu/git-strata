@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "dev": "next dev --turbopack -p 3000",
+    "dev": "next dev --turbopack -p 4001",
     "build": "next build",
     "tauri": "tauri",
     "tauri:dev": "tauri dev --features dev-connector",
