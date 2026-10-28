@@ -27,6 +27,9 @@ pub(crate) enum Point {
     /// After the check siblings were re-checked (`siblings::place`), before
     /// the layout directory exists and they are cloned (publish.md D21).
     AfterSiblingPlace,
+    /// deps-drift §2.4: R1 is closed and no publish lock is held, before
+    /// the cold install of the staged install inputs starts.
+    BeforeColdInstall,
 }
 
 /// Steps after `commit_tree` where a test can inject one failure
@@ -43,6 +46,9 @@ pub enum FailPoint {
     /// Inside a check sibling's fetch section, before its anchor step
     /// (keyed by the sibling's git; publish.md D21).
     SiblingAnchor,
+    /// deps-drift §2.4: in place of the cold install (R1 closed, no publish
+    /// lock held), as if the daemon stopped there.
+    ColdInstall,
 }
 
 #[cfg(feature = "test-seams")]
@@ -78,6 +84,9 @@ mod imp {
         /// Stop after the check siblings were re-checked, before the layout
         /// exists and they are cloned (publish.md D21).
         PauseAfterSiblingPlace,
+        /// Stop after R1 closed, before the cold install (deps-drift §2.4),
+        /// with no publish lock held.
+        PauseBeforeColdInstall,
     }
 
     #[derive(Default)]
@@ -147,6 +156,7 @@ mod imp {
             PublishFault::PauseAfterCommit => Point::AfterCommit,
             PublishFault::PauseBeforeRebase => Point::BeforeRebase,
             PublishFault::PauseAfterSiblingPlace => Point::AfterSiblingPlace,
+            PublishFault::PauseBeforeColdInstall => Point::BeforeColdInstall,
             PublishFault::PauseDuringPush => return Pause(Some(Inner::Git(git.pause_push_before_send()))),
             PublishFault::PauseBeforePushRecorded => return Pause(Some(Inner::Git(git.pause_push_before_record()))),
         };
