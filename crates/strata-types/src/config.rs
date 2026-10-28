@@ -14,12 +14,12 @@ pub struct Config {
     #[serde(rename = "repo")]
     pub repos: std::collections::BTreeMap<RepoName, RepoConfig>,
     /// `[dev_ports]`: the port blocks leased to session workspaces for dev
-    /// servers (config.md §2.6). Optional; absent → defaults.
+    /// servers (config.md §2.5). Optional; absent → defaults.
     #[serde(default)]
     pub dev_ports: DevPorts,
 }
 
-/// `[dev_ports]` (config.md §2.6): `range = "LO-HI"` (inclusive) is split
+/// `[dev_ports]` (config.md §2.5): `range = "LO-HI"` (inclusive) is split
 /// into 4-aligned blocks of [`DevPorts::BLOCK`] ports; a block holding any
 /// port of `exclude` is never leased.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

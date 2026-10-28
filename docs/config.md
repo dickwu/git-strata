@@ -93,6 +93,22 @@
 3. 工作目录：`checks` 是 staging 树里该仓库的根目录；`install` 是 staging 基线克隆里该仓库的根目录。
 4. 程序名按 daemon 的 `PATH` 解析。launchd agent 的默认 `PATH` 不含 `~/.bun/bin`、`~/.cargo/bin`、`/opt/homebrew/bin`，所以 daemon 的 plist 必须带上用户的 `PATH` [交给 `daemon.md`]（daemon.md D1：`~/.bun/bin` 加 Homebrew 与系统目录；`~/.cargo/bin`、`~/.pub-cache/bin` 不在里面，cargo 用 Homebrew 的）[实现时补的决定]；staff-api 的 php 命令像它自己的 `composer.json` 脚本那样写绝对路径 `/opt/homebrew/bin/php`。
 
+### 2.5 `[dev_ports]`（可选）[实现时补的决定]（2026-10-28，dev-ports 设计）
+
+每个会话工作区（不含主 checkout）在 `new` / `add` 时租一组 4 个连续的 TCP 端口：`web`（dev server，`PORT`）、`connector`、`connector_mcp`、`aux`。租约记在 Store 的 `dev_ports` 表（store.md §4.4a），由 `git-strata session ports` / `session exec` 交给进程（cli.md §3.2）。
+
+| 字段 | 类型 | 缺省 | 语义 |
+| --- | --- | --- | --- |
+| `range` | string `"LO-HI"`（含两端） | `"20000-29999"` | 切成按 4 对齐的块；每块是一个租约 |
+| `exclude` | 端口数组 | `[]` | 含其中任一端口的块永不出租 |
+
+规则（`DevPorts::validate`，`Config::validate` 的最后一步，`InvalidInput`，`detail.rule`）：
+- P1：`range` 是 `LO-HI` 且 `LO <= HI`；`exclude` 没有 0。
+- P2：范围在 1024–49151 之内（低于 macOS 的临时端口），且不与常见默认端口重叠：3000–3999（Next）、5173（Vite）、8080、9300–9400（tauri-connector bridge）、9555–9656（tauri-connector WS/MCP）。所以主 checkout 用默认端口，与任意多个会话共存。
+- P3：去掉 `exclude` 后至少剩一块。
+
+整个表可以不写（全用缺省）。daemon 启动时按它设置分配策略；只有装上带租约的 daemon 后才该写这个表（旧 daemon 会以 V11 拒绝未知键）。分配时对每块的 4 个端口做绑定探测（`0.0.0.0`、`[::]`、`127.0.0.1`，`SO_REUSEADDR`），不通过的块跳过；全部用尽时 `new` / `add` 照常成功，只是没有租约（`session ports` 再要时 `Busy ports_exhausted`）。
+
 ---
 
 ## 3. Rust 定义（`strata-types`）
@@ -117,6 +133,19 @@ pub struct Config {
     /// TOML 里的 `[repo.<name>]`。BTreeMap：遍历顺序 = 名字的字典序，稳定。
     #[serde(rename = "repo")]
     pub repos: BTreeMap<RepoName, RepoConfig>,
+    /// `[dev_ports]`（§2.5），可省略。
+    #[serde(default)]
+    pub dev_ports: DevPorts,
+}
+
+/// `[dev_ports]`（§2.5）。`blocks()` 给出每个可用块的起始端口（升序）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevPorts {
+    #[serde(default = "DevPorts::default_range")]
+    pub range: String,
+    #[serde(default)]
+    pub exclude: Vec<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

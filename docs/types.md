@@ -38,7 +38,7 @@
 | `Action` | 枚举 | 需要人类确认的四种动作 | §4 |
 | `Config`、`RepoConfig` | 结构 | 全局配置与每仓库配置 | [config.md](config.md) |
 | `StrataError` | 结构 | 被拒绝的调用：`code` + `message` + `detail` | §6 |
-| `Code` | 枚举 | 错误码，共 39 个 | §6 |
+| `Code` | 枚举 | 错误码，共 40 个 | §6 |
 
 ## 2. 约定
 
@@ -455,7 +455,7 @@ pub enum Code {
     NoSuchSession, NoSuchRepo, NoSuchCheckpoint, NoSuchProposal, NoSuchView,
     NotConfirmed, NotTty, OpenFiles,
     CrossVolume, Drift, CheckFailed, CheckMutates, PushRefused, Unknown, Unsupported,
-    Corrupt,
+    Corrupt, PortInUse,
 }
 ```
 
@@ -498,6 +498,7 @@ pub enum Code {
 | `NotConfirmed` | 需要人类确认的动作（一推上线仓库的推送、`deps approve`、`rm --discard`、把钉住的推送设置调松）没有通过确认：LocalAuthentication 认证失败、被取消或超时；或者交来的 `ConfirmToken` 已经用过、已经过期，或它的 `action` 与要执行的操作不符（一次一用，design §6.9） | `confirm`（签发与校验）；`session`、`publish`（核对 `action`）；`daemon` 透传 |
 | `NotTty` | 需要人类确认的命令，stdin 不是 TTY。cli 的 `require_tty` 在发出请求之前就拒绝（design §6.9）；confirm 不检查 TTY | `cli` |
 | `OpenFiles` | 要替换或删除的目录里有进程打开着文件：`move_workspace` 要换依赖目录时，或 `rm` 时会话目录被占用（dev server 等）。跳过，目录一字不动；`detail` 列出 pid 和路径。多会话的 `deps approve` 里它按条目返回：跳过这个会话，其余会话照常移动（design §6.4 第 5 步） | `session` |
+| `PortInUse` | `session exec` 启动前检查本工作区租到的 dev 端口时，端口上已有监听进程：`detail.reason = "already_running"`（监听者的 cwd 在本工作区里，复用或先停掉它；`session ports --reassign` 此时也拒绝），或 `"foreign"`（别处的进程占着，`detail.fix` 是 `git-strata session ports --reassign --session S --repo R`）。`detail.check` 列出每个端口的状态和监听者。不可重试；只检查，从不杀进程（dev-ports 设计 §3.4）[实现时补的决定] | `cli` |
 | `CrossVolume` | 会话根目录、Store、基线与依赖集缓存跟主 checkout 不在同一个 APFS 卷上（design §7 要求同卷）。在克隆之前就拒绝，从不退化成复制 | `apfs`（`clone_tree`、`clone_file`）、`store`（`open`）、`session`（`new`） |
 | `Drift` | 安装输入哈希对不上：`deps::adopt` 认领主 checkout 现成的依赖目录时，主 checkout 的安装输入与目标基线不符，调用方改为冷装。`status` 报告的工作区漂移是数据，不是这个错误 | `deps` |
 | `CheckFailed` | 发布时，检查命令在 staging 克隆里以非零状态退出。不提交；`detail` 带命令、退出码和输出末尾 | `publish` |

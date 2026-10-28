@@ -82,7 +82,7 @@ pub const TOP: &str = concat!(
   error.detail.reason; never parse message. stderr has human notices only.
   --help / --version print plain text on stdout, exit 0, no JSON.
   Bad arguments: InvalidInput, detail.reason \"unknown_command\" (with
-  detail.commands, and detail.group inside deps/daemon/config) or \"args\".
+  detail.commands, and detail.group inside deps/daemon/config/session) or \"args\".
 
 PATHS
   config     ~/Library/Application Support/git-strata/config.toml
@@ -96,7 +96,8 @@ DAEMON
   Write commands go to the daemon (LaunchAgent com.gwd.git-stratad).
   Busy with detail.reason daemon_down: run `git-strata daemon start`, retry once.
   Without the daemon only these work: status, grep, files, diff, deps list,
-  daemon status (and repeating a --tool-call checkpoint that already exists).
+  daemon status, session ports/exec of a workspace that already has its
+  ports (and repeating a --tool-call checkpoint that already exists).
 
 HEADLESS FLOW (no human needed)
   git-strata daemon status                       # data.running
@@ -127,6 +128,8 @@ ERRORS (code -> what an agent does)
   PushRefused        report the remote's words to the human
   Unknown            outcome uncertain: do not retry, gc or rm; tell the human
   Corrupt            stop; tell the human
+  PortInUse foreign  run detail.fix (session ports --reassign), then rerun
+  PortInUse already_running  this workspace's server is up: reuse it
 
 ",
     gate_text!(),
@@ -525,3 +528,78 @@ pin (nothing to do). NoSuchRepo: unknown repo.
 ",
     gate_text!()
 );
+
+pub const SESSION_AFTER: &str = "Every session workspace (not the main checkout) leases a block of 4 TCP ports
+(web, connector, connector_mcp, aux) when it is created, so concurrent dev
+servers and tauri-connector instances of different sessions never collide.
+Committed config stays untouched: the ports reach the processes as env vars.
+
+EXAMPLES
+  git-strata session ports                      # this workspace's ports and env
+  git-strata session exec -- bun run dev        # dev server on $PORT
+  git-strata session exec --tauri -- bun run tauri:dev
+  git-strata session ports --reassign --session S --repo R   # after PortInUse foreign
+";
+
+pub const SESSION_PORTS: &str = "A workspace's leased dev ports and the env that hands them out.
+
+Read-only for a workspace that already has a lease (no daemon needed). A
+workspace without one (created before leases) gets one from the daemon
+(ports_ensure). --all lists every live workspace and never writes; unleased
+ones show \"ports\":null,\"reason\":\"unleased\".";
+
+pub const SESSION_PORTS_AFTER: &str = "OUTPUT
+  data.leases[]: {session, repo, path, ports{web,connector,connector_mcp,aux},
+  env{PORT, STRATA_DEV_PORT, STRATA_CONNECTOR_PORT, STRATA_CONNECTOR_MCP_PORT,
+  STRATA_AUX_PORT, STRATA_SESSION, STRATA_REPO, TAURI_CONNECTOR_PROJECT,
+  STRATA_TAURI_DEV_CONFIG}, tauri_app_root, check?}
+  check (with --check): per role {state: free|ours|foreign|unidentified|
+  probe_error, listeners[{pid, command, in_workspace}]}. Advisory only.
+
+--reassign
+  Needs exactly one session and repo. Refused with PortInUse already_running
+  while a process of this workspace listens on its ports; otherwise the lease
+  moves to the next free block (the old ports are not reused right away).
+
+ERRORS
+  Busy ports_exhausted   no free block in [dev_ports] range: tell the human
+  Unsupported daemon_too_old  the daemon predates leases: tell the human
+  Unsupported no_policy  the daemon runs without [dev_ports]: tell the human
+
+EXAMPLES
+  git-strata session ports --check
+  git-strata session ports --all
+";
+
+pub const SESSION_EXEC: &str = "Run a command in a workspace with its dev-port env (exec: the command
+replaces git-strata; its exit status is the command's).
+
+The env (see `session ports --help`) overrides inherited values. Run from
+inside the workspace the command keeps the cwd; from outside every workspace
+it runs at the workspace root; from another workspace: InvalidInput
+cwd_mismatch. Before running, the 4 ports are checked (--no-check skips).";
+
+pub const SESSION_EXEC_AFTER: &str = "--tauri
+  Adds --config '{\"build\":{\"devUrl\":\"http://localhost:<web>\"}}' to tauri dev,
+  so the webview loads this workspace's dev server. Accepted launchers:
+    tauri dev | cargo tauri dev | npx/bunx/pnpx tauri dev | pnpm exec tauri dev
+      (inserted before the first bare --)
+    bun [run] S | pnpm [run] S | yarn [run] S | npm run S
+      where package.json script S is one plain `[NAME=v ...] [bunx|npx] tauri dev
+      [opts]` (no quotes, $, &&, or bare --); no bare -- in the caller args
+      (npm: at most one)
+  Anything else: InvalidInput tauri_launcher; run without --tauri and pass
+  --config \"$STRATA_TAURI_DEV_CONFIG\" to tauri dev yourself.
+
+ERRORS (from the port check)
+  PortInUse already_running  this workspace already serves on its ports
+  PortInUse foreign          run detail.fix (session ports --reassign ...)
+  Busy port_unidentified     retry shortly
+  Busy port_probe_error      retry
+  NoSuchPath                 the command was not found
+
+EXAMPLES
+  git-strata session exec -- bun run dev
+  git-strata session exec --tauri -- bun run tauri:dev
+  git-strata session exec --session PROJ-1 --repo front -- npm run dev
+";

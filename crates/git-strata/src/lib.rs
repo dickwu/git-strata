@@ -8,6 +8,7 @@ pub mod args;
 pub mod cmds;
 pub mod confirm;
 pub mod ctx;
+pub mod devports;
 pub mod env;
 pub mod envelope;
 mod help;
@@ -25,7 +26,7 @@ use clap::error::ErrorKind;
 use serde_json::json;
 use strata_types::{Code, StrataError};
 
-use crate::args::{Cli, Cmd, ConfigCmd, DaemonCmd, DepsCmd};
+use crate::args::{Cli, Cmd, ConfigCmd, DaemonCmd, DepsCmd, SessionCmd};
 use crate::ctx::Ctx;
 use crate::envelope::{Envelope, emit_stdout};
 
@@ -153,5 +154,13 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Daemon(DaemonCmd::Start) => launch::start(&ctx.paths.home),
         Cmd::Daemon(DaemonCmd::Stop) => launch::stop(),
         Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status(),
+        Cmd::Session(SessionCmd::Ports { session, repo, all, check, reassign }) => devports::ports(
+            &ctx,
+            &devports::PortsArgs { session: session.as_deref(), repo: repo.as_deref(), all, check, reassign },
+        ),
+        Cmd::Session(SessionCmd::Exec { session, repo, tauri, no_check, cmd }) => devports::exec(
+            &ctx,
+            &devports::ExecArgs { session: session.as_deref(), repo: repo.as_deref(), tauri, no_check, cmd: &cmd },
+        ),
     }
 }
