@@ -73,6 +73,16 @@ fn with_warning(mut e: StrataError, w: Option<&PublishWarning>) -> StrataError {
     e
 }
 
+/// deps-drift §2.4: R1's snapshot that stayed (`DepsInputsLeft`) also
+/// rides on an error returned after the commit.
+fn with_left(mut e: StrataError, w: Option<&PublishWarning>) -> StrataError {
+    let Some(w) = w else { return e };
+    if let Some(m) = e.detail.get_or_insert_with(|| json!({})).as_object_mut() {
+        m.entry("deps_inputs_left").or_insert_with(|| w.detail.clone());
+    }
+    e
+}
+
 pub(crate) fn err_json(e: &StrataError) -> Value {
     json!({ "code": e.code.as_str(), "message": e.message, "detail": e.detail })
 }
@@ -776,6 +786,7 @@ pub fn publish_bound(
     warnings.extend(landed.staged.deps_warning.clone());
     warnings.extend(installed.as_ref().and_then(|i| i.left.clone()));
     let dw = landed.staged.deps_warning.clone();
+    let left = installed.as_ref().and_then(|i| i.left.clone());
     if let Err(e) = strata_deps::observe_main(ctx.deps, &landed.staged.tree, &landed.commit, &landed.staged.worktree) {
         warnings.push(PublishWarning { kind: WarningKind::ObserveFailed, detail: err_json(&e) });
     }
@@ -808,7 +819,10 @@ pub fn publish_bound(
         .and_then(|()| seams::fail(ctx.git, FailPoint::BeforeDone))
         .and_then(|()| remove_staged_layout(&landed.staged.worktree));
     if let Err(e) = fin {
-        let e = with_warning(with_landed(after_write(&landed.commit, e), o["push"].clone(), landed.checks_ran), dw.as_ref());
+        let e = with_left(
+            with_warning(with_landed(after_write(&landed.commit, e), o["push"].clone(), landed.checks_ran), dw.as_ref()),
+            left.as_ref(),
+        );
         o["error"] = err_json(&e);
         if let Err(se) = ctx.store.set_publish_phase(id, PublishPhase::Running, PublishPhase::Unknown, Some(&o), now()) {
             tracing::warn!(publish = id, error = %se.message, "publish row could not be marked unknown");
@@ -818,18 +832,24 @@ pub fn publish_bound(
     match ctx.store.set_publish_phase(id, PublishPhase::Running, PublishPhase::Done, Some(&o), now()) {
         Ok(true) => {}
         Ok(false) => {
-            return Err(with_warning(
-                unknown_with(
-                    "row_moved",
-                    "the publish row was not Running at the end",
-                    None,
-                    json!({ "publish": id, "commit": landed.commit.as_str(), "push": o["push"].clone(), "checks_ran": landed.checks_ran }),
+            return Err(with_left(
+                with_warning(
+                    unknown_with(
+                        "row_moved",
+                        "the publish row was not Running at the end",
+                        None,
+                        json!({ "publish": id, "commit": landed.commit.as_str(), "push": o["push"].clone(), "checks_ran": landed.checks_ran }),
+                    ),
+                    dw.as_ref(),
                 ),
-                dw.as_ref(),
+                left.as_ref(),
             ));
         }
         Err(e) => {
-            return Err(with_warning(with_landed(after_write(&landed.commit, e), o["push"].clone(), landed.checks_ran), dw.as_ref()));
+            return Err(with_left(
+                with_warning(with_landed(after_write(&landed.commit, e), o["push"].clone(), landed.checks_ran), dw.as_ref()),
+                left.as_ref(),
+            ));
         }
     }
     Ok(Published { id, commit: landed.commit, checks_ran: landed.checks_ran, push: landed.push, warnings, rebases })
