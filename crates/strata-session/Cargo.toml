@@ -18,6 +18,7 @@ strata-gitio = { path = "../strata-gitio" }
 strata-store = { path = "../strata-store" }
 strata-deps = { path = "../strata-deps" }
 strata-overlay = { path = "../strata-overlay" }
+blake3 = "1"
 libc = "0.2.191"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -26,3 +27,4 @@ serde_json = "1"
 tempfile = "3"
 strata-session = { path = ".", features = ["test-seams"] }
 strata-gitio = { path = "../strata-gitio", features = ["test-seams"] }
+strata-overlay = { path = "../strata-overlay", features = ["test-seams"] }

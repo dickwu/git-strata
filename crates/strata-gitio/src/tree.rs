@@ -234,6 +234,13 @@ impl Git {
         Ok(self.tree_table(tree)?.contains(path))
     }
 
+    /// Whether a file or symlink entry of `tree` is at `path`, under the
+    /// validated table's identity: NFC names, and ASCII case when the
+    /// repository ignores case. A directory there is not a file.
+    pub fn tree_has_file(&self, tree: &TreeOid, path: &RepoPath) -> Result<bool> {
+        Ok(self.tree_table(tree)?.has_file(path))
+    }
+
     /// The verdict for `tree`, from the cache or by validating it.
     pub(crate) fn validated(&self, tree: &TreeOid) -> Result<()> {
         let icase = self.main_ignorecase()?;

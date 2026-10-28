@@ -119,7 +119,7 @@ ERRORS (code -> what an agent does)
   NoSuchRepo not_in_session  run detail.fix (git-strata add --session S --repo R)
   InvalidInput siblings_missing  publish checks need sibling repos: run detail.fix
   AmbiguousMatch     use a session id from detail
-  Dirty              rm on unpublished work: publish it, or ask the human (rm --discard)
+  Dirty              rm on work that is not published: publish it, or ask the human (rm --discard)
   CheckFailed        fix the code, checkpoint, publish again
   OpenFiles          stop the process you started (detail has pids), retry
   NoCommit           nothing to do; not a failure
@@ -408,10 +408,14 @@ pub const RM_AFTER: &str = concat!(
   git-strata rm --session s-k3q7xm2a              # after its work is published
   git-strata rm --session s-k3q7xm2a --discard    # HUMAN ONLY (TTY + prompt)
 
-Dirty: the session still has changes against its base. detail.repos lists
-paths per repo, detail.untracked_repos names edited untracked siblings,
-detail.unresolved lists interrupted scenes. Publish the work, or hand
-`rm --discard` to the human. Never rm after an Unknown outcome.
+Dirty: the session has changes that are not published. A file whose exact
+bytes and mode are in a publish of this session that origin already has does
+not count, even while the session waits on a deps proposal. detail.repos lists
+the rest per repo, detail.landed counts what was skipped, detail.untracked_repos
+names edited untracked siblings, detail.unresolved lists interrupted scenes.
+detail.reason = changed_during_remove: files changed while rm ran; retry.
+Publish the work, or hand `rm --discard` to the human. Never rm after an
+Unknown outcome.
 
 ",
     gate_text!()

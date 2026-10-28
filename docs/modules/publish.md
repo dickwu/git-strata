@@ -430,7 +430,7 @@ deps.md §5.12 的顺序，不改：
 1. 锁外 `(N_inputs, N) = key_of(ctx.deps, 新基线目录)`。目录还没有就先 `ensure_base_for`（锁外，缓存填充）。
 2. repo 写锁里：s 有开着的草稿，且 overlay 里 `is_input` 为真的路径这次都发布了、发布之后也没再改 → `propose(Session { s }, 带目标 (tree, head))`。只发布了一部分 → 不调，草稿留着。`D.from == N` → 也不调。
 3. `N == s.base.deps` → 占队列（若还没占）、拿锁、`move_workspace`。交换前 session 自己复查打开的文件。
-4. 否则会话留在旧基线上，锁里 `propose(Main, 带目标)`。返回 `Waiting`。
+4. 否则会话留在旧基线上，锁里 `propose(Main, 带目标)`。返回 `Waiting`。commit 推到 origin 之后，内容与 mode 恰在其中的路径不再让 `rm` 得 `Dirty`（session.md §5.6 第 4.2 步，D57）。
 5. `main_tip` 等于新的 head 时，放开锁之后 `observe_main`。失败只报 `ObserveFailed`。
 
 `move_workspace` 的 `head` 是这次的 commit。已发布且与会话当前内容一致的路径离开 overlay（`rebase` 的 `dropped`）。选中之后才有的修改留着，进入下一次 checkpoint。新基线上别人发布的、本会话没有的路径，出现在换过的工作区里。
