@@ -11,6 +11,7 @@ use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -131,10 +132,17 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
     })?;
     let pid = child.id() as libc::pid_t;
 
+    // Every pipe thread reports its end on `done` (also when it panics), so
+    // draining blocks on a channel instead of polling the threads.
+    let (done_tx, done_rx) = mpsc::channel::<()>();
     let stdin_thread = match (opts.stdin, child.stdin.take()) {
-        (Some(bytes), Some(mut sink)) => Some(thread::spawn(move || {
-            let _ = sink.write_all(&bytes);
-            drop(sink);
+        (Some(bytes), Some(mut sink)) => Some(thread::spawn({
+            let done = Done(done_tx.clone());
+            move || {
+                let _done = done;
+                let _ = sink.write_all(&bytes);
+                drop(sink);
+            }
         })),
         _ => None,
     };
@@ -144,7 +152,9 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
     let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::default();
     let out_thread = {
         let buf = stdout_buf.clone();
+        let done = Done(done_tx.clone());
         thread::spawn(move || {
+            let _done = done;
             let mut chunk = [0u8; 64 * 1024];
             loop {
                 match so.read(&mut chunk) {
@@ -158,7 +168,9 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
     };
     let err_thread = {
         let buf = stderr_buf.clone();
+        let done = Done(done_tx);
         thread::spawn(move || {
+            let _done = done;
             let mut chunk = [0u8; 8192];
             loop {
                 match se.read(&mut chunk) {
@@ -182,25 +194,24 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
     let deadline = opts.timeout.map(|t| Instant::now() + t);
     let status = match deadline {
         None => child.wait(),
+        // A thread blocks in wait(2) and hands the status over, so git's
+        // exit is seen at once instead of on the next poll.
         Some(deadline) => {
-            let mut nap = Duration::from_millis(1);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(s)) => break Ok(s),
-                    Ok(None) => {}
-                    Err(e) => break Err(e),
-                }
-                let now = Instant::now();
-                if now >= deadline {
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                let _ = tx.send(child.wait());
+            });
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(s) => s,
+                Err(RecvTimeoutError::Timeout) => {
                     timed_out = true;
                     // SAFETY: plain syscall on the child's own process group.
                     unsafe {
                         libc::killpg(pid, libc::SIGKILL);
                     }
-                    break child.wait();
+                    rx.recv().unwrap_or_else(|_| Err(std::io::Error::other("wait thread ended")))
                 }
-                thread::sleep(nap.min(deadline - now));
-                nap = (nap * 2).min(Duration::from_millis(50));
+                Err(RecvTimeoutError::Disconnected) => Err(std::io::Error::other("wait thread ended")),
             }
         }
     };
@@ -219,12 +230,13 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
     };
     let mut threads: Vec<thread::JoinHandle<()>> = vec![out_thread, err_thread];
     threads.extend(stdin_thread);
-    if !join_by(&mut threads, drain_by) {
+    let mut pending = threads.len();
+    if !join_by(&mut threads, &done_rx, &mut pending, drain_by) {
         // SAFETY: plain syscall on the child's own process group.
         unsafe {
             libc::killpg(pid, libc::SIGKILL);
         }
-        join_by(&mut threads, Instant::now() + DRAIN_AFTER_KILL);
+        join_by(&mut threads, &done_rx, &mut pending, Instant::now() + DRAIN_AFTER_KILL);
     }
     let stdout = std::mem::take(&mut *stdout_buf.lock().unwrap_or_else(|p| p.into_inner()));
     let mut stderr = std::mem::take(&mut *stderr_buf.lock().unwrap_or_else(|p| p.into_inner()));
@@ -245,27 +257,32 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
     Ok(Out { status: status.code(), stdout, stderr })
 }
 
-/// Join every thread in `ts` that finishes by `by`; `true` when all did.
-/// Unfinished handles stay in `ts` (dropping one detaches the thread).
-fn join_by(ts: &mut Vec<thread::JoinHandle<()>>, by: Instant) -> bool {
-    loop {
-        let mut i = 0;
-        while i < ts.len() {
-            if ts[i].is_finished() {
-                let _ = ts.swap_remove(i).join();
-            } else {
-                i += 1;
-            }
-        }
-        if ts.is_empty() {
-            return true;
-        }
-        let now = Instant::now();
-        if now >= by {
-            return false;
-        }
-        thread::sleep((by - now).min(Duration::from_millis(5)));
+/// Sends on drop: a pipe thread's end, however it ends.
+struct Done(Sender<()>);
+
+impl Drop for Done {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
     }
+}
+
+/// Wait until every thread in `ts` has reported on `done` by `by`, then
+/// join them; `true` when all did. `pending` counts the reports still due
+/// and carries over to a later call. Unjoined handles stay in `ts`
+/// (dropping one detaches the thread).
+fn join_by(ts: &mut Vec<thread::JoinHandle<()>>, done: &mpsc::Receiver<()>, pending: &mut usize, by: Instant) -> bool {
+    while *pending > 0 {
+        match done.recv_timeout(by.saturating_duration_since(Instant::now())) {
+            Ok(()) => *pending -= 1,
+            Err(RecvTimeoutError::Timeout) => return false,
+            // Every sender is gone: every thread has ended.
+            Err(RecvTimeoutError::Disconnected) => *pending = 0,
+        }
+    }
+    for t in ts.drain(..) {
+        let _ = t.join();
+    }
+    true
 }
 
 /// `Unknown` for a git that exited non-zero where no specific class applies.
