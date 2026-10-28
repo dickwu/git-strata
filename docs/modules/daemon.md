@@ -98,7 +98,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | --- | --- | --- |
 | `new` | `{ "ticket": string\|null, "repos": [RepoName], "only"?: bool }` | `NewReport`。`only` 为真时会话只有 `repos` 这些工作区（session.md D51）；缺省为假，cli 只在 `--repo` 时才发这个字段，好让新 cli 也能用旧 daemon |
 | `add` | `{ "session": SessionId, "repos": [RepoName] }` | `{ report: AddReport, anchor_unknown }`（session.md D52） |
-| `status` | `{ "cwd": string\|null, "session": string\|null, "all": bool, "chains"?: bool }` | 见 §5.4；`chains` 缺省 false |
+| `status` | `{ "cwd": string\|null, "session": string\|null, "all": bool, "chains"?: bool, "summary"?: bool, "workspaces"?: bool }` | 见 §5.4；`chains` 缺省 false。`summary: true`（status-perf C）：只读 store，回 `{ sessions: [SessionSummary] }`（cli.md §3.2 `status --brief`），按 id 升序，选择优先级同普通 status（`all` > `session` > `cwd` > 全部）；不 stat 工作区、不跑 git、不走旧树，不进池。`workspaces: true` 给每个会话带上 `workspaces`，只在 `summary` 时合法，否则 `InvalidInput`（`workspaces_without_summary`）；`summary` 与 `chains: true` 同给 → `InvalidInput`（`summary_with_chains`）。旧 daemon 不认识这两个字段，以 RPC `Failed`「unknown field」拒绝，cli 读 store 回退 |
 | `checkpoint` | `{ "session", "repo", "reason": CheckpointReason, "paths": [RepoPath] }` | `Checkpointed`；`paths` 可空 |
 | `restore` | `{ "session", "repo", "checkpoint": CheckpointId, "paths": [RepoPath]\|null }` | `Restored` |
 | `grep` | `{ "pattern", "session": string\|null, "all": bool, "ignore_case": bool }` | `Hit` 的数组；零命中是 `[]` |

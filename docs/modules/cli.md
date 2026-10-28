@@ -87,7 +87,8 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata new` | `--repos a,b`（至少一个 `RepoName`）。ticket 用 `--ticket T` 或第一个位置参数，二者给了同一个字段；都不给则没有标签。ticket 只是标签，不进路径。`--repos` 只选 tracked，每个配置的 repo 都建工作区；cli 在 stderr 提示一行 `note: --repos tracks …`（D35） | 空 `--repos`；ticket 形如 `SessionId` 由 session 返回 `ReservedName`，cli 透传 |
 | `git-strata new`（精简） | `--repo R`，可重复或逗号分隔：只有这些 repo 建工作区，全部 tracked（session.md D51；daemon `new` 的 `only = true`）。ticket 同上 | 与 `--repos` 同给 → `InvalidInput`，`detail.reason = "repo_flags"`；两个都不给 → `InvalidInput` |
 | `git-strata add` | `--repo R`（至少一个，可重复或逗号分隔）`[--session S]`，不给 = cwd 的会话（session.md D52） | 没有 `--repo` → `InvalidInput`（`repos`）；未知 repo 透传 `NoSuchRepo`；会话不是 `Active` 透传 session 的码 |
-| `git-strata status` | `[--all]` 或 `[--session S]`。都不给 = cwd 的会话 | — |
+| `git-strata status` | `[--all]` 或 `[--session S]`。都不给 = cwd 的会话。`[--brief]`：只读 store 的摘要（§3.2，D36） | — |
+| `git-strata ls` | `[--table]`：成功时 stdout 只有表格（D36，对 D19 的修订） | — |
 | `git-strata checkpoint` | `--tool-call [ID]` 与 `-m MSG` 二选一；`ID` 省略或为空时取钩子 stdin JSON 的 `tool_use_id`（§3.5，D22）。`[--session S]`。`--path P` 可重复，P 是工作区里的路径，cli 收成相对该 repo 根的 `RepoPath` | 两个都给，或两个都不给 → `InvalidInput`，`detail.reason = "checkpoint_reason"` |
 | `git-strata restore` | `<checkpoint>`（十进制 `CheckpointId`，超过 `i64::MAX` → `InvalidInput`）`[paths…]` `[--session S]` | 非数字 id → `InvalidInput` |
 | `git-strata grep` | `<pattern>`。`[--session S]` 或 `[--all]`。都不给 = cwd 的会话（design §6.3；压过初稿“不给就是全部”，见 §9）。没有 `--repo`，没有 type / encoding / glob 之类的 tgrep 选项（T11） | 空 pattern → `InvalidInput` |
@@ -106,9 +107,9 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata chain` | `--repo R`，以及恰好一个：`--accept-origin replay`、`--accept-origin drop`、`--restore`。没有缺省。`--restore` 在 `!is_ancestor(o, c)` 时不连接、不推 | 缺选择、或两个都给 → `InvalidInput`，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接。不能快进 → `InvalidInput`，`detail.reason = "not_ancestor"`，在任何 push 之前 |
 | `git-strata config relax` | `<repo>` | 未知 repo 透传 `NoSuchRepo`。文件变了不会自己跑这条命令 |
 
-未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`status`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
+未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`ls`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`status`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
 
-`-h` / `--help` 与 `--version` 走 clap 的文本，打在 stdout，退出码 0。它们不是子命令，不套信封（D19）。除此之外，stdout 上只有信封。
+`-h` / `--help` 与 `--version` 走 clap 的文本，打在 stdout，退出码 0。它们不是子命令，不套信封（D19）。另一个例外：`ls --table` 成功时 stdout 只有表格（D36）；出错时照常是完整错误信封、退出码非 0。除此之外，stdout 上只有信封。
 
 ### 3.2 每个子命令的 `data`
 
@@ -119,6 +120,8 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `new` | `NewReport` | — |
 | `add` | `AddReport`：`{ session, added: {<repo>: WorkspaceState}, already: {<repo>: WorkspaceState}, warnings }`；锚点未知的 repo 打在 stderr | — |
 | `status` | 一个会话：`SessionStatus`（顶层带 `id`、`ticket`（无则 null）；`manifest.id`、`manifest.ticket` 与之重复，**已弃用**，下一个大版本去掉，新代码读顶层）。warning `OldTreeKept`（status-perf A1）：`changed` 可为 `null`（daemon 还没在后台检查这棵旧树，同时带 `unchecked: true`，此时 `holders` 为空；daemon 不在、走本地回退时总是这样）；检查过的带 `checked_at`（RFC 3339）。旧 GUI 读到 `null` 应当当作「未知」。`--all`：`{ "sessions": [SessionStatus, …] }`，按 `SessionId` 升序。健康为 `Unknown` 的工作区带 `choices: ["abandon", "accept"]`。`OldTreeKept` 的 `holders` 原样透传 | — |
+| `status --brief` | 只来自 store（status-perf C）：`SessionSummary` = `{ id, ticket（无则 null）, state, created（RFC 3339）, repos: [RepoName], phase?, workspaces: [{ repo, health_stored, path, checkpoint }] }`。`state` 是 store 的 lifecycle（`Creating`/`Active`/`Removing`/`Unknown`），没有只能从文件系统得出的 `Missing`；`health_stored` 是 store 记录的健康（`Ok`/`Unknown`），工作区目录缺失在这里看不出；`checkpoint` 是最新检查点，untracked 或没有则 null。不算 drift、seeds、mirrors、旧树，不 stat 工作区，不跑 git。一个会话：该对象；`--all`：`{ "sessions": [SessionSummary, …] }`，按 id 升序。daemon 不在或 daemon 不认识 `summary`/`workspaces` 时读 store，并带 `source: "local"` | — |
+| `ls` | `{ "sessions": [{ id, ticket, state, created, repos, phase? }, …], "source"? }`：全部未 Removed 的会话，按 id 升序，字段同上（没有 `workspaces`）。`source: "local"` 同上。`--table`：`ID  TICKET  STATE  REPOS  CREATED`（ticket 为空写 `-`，repos 用逗号连），不套信封 | — |
 | `checkpoint` | `{ "checkpoints": [Checkpoint, …] }`，该次工具调用或 `-m` 在每个被记的 repo 上的那一行。幂等命中时就是已有的那几行，不是新 id | — |
 | `restore` | `{ "checkpoint": CheckpointId, "session": SessionId }` | — |
 | `grep` | `{ "hits": [Hit, …] }`。零命中是 `"hits": []`，`ok` 为 true，不是 `NoMatch`。`hits` 这个键总在 | 前 8000 字节含 NUL 的文件跳过，不进 `hits`。被跳过的放 `skipped: [{ "session", "repo", "path", "code": "Binary" }]`。超过 64 MiB 的同样按条目，`code` 为 `TooLarge`，不读内容。非法 UTF-8 按宽松解码，每个坏序列一个 U+FFFD，不让整条输出失败（D9） |
@@ -279,6 +282,8 @@ cli 不拿 repo 写锁，不占会话队列，不等待建造锁。锁在 daemon
 5. `diff` → `publish::diff_between` 或相对基线的只读比较，形状按 §3.2。
 6. `deps list` → `deps::open_proposals`。
 7. `daemon status` → §3.3 里 `running: false` 的那份。cwd 能解析出会话才填 `session`。
+
+`ls` 与 `status --brief`（D36）不走上面这几步：daemon 以 `status{summary:true}` 回答；只在 `CallError::Down`（socket 连不上），或 daemon 以 RPC `Failed` 且 message 含 ``unknown field `summary` `` / ``unknown field `workspaces` ``（早于它的 daemon，参数 `deny_unknown_fields`）时，以 `Store::open_read_only` 读 store（不开 `Sessions`、不建 `Git`），`data.source = "local"`。其它 daemon 错误照常返回，不回退。选择器只读 store：`--session` 查 id / ticket，`--all` 列 store，cwd 只把 cwd 与 `<root>/sessions` 各 realpath 一次再按路径分量对 store 的会话与 repo 名比，不 stat、不 canonicalize 任何工作区路径。
 
 本地打开失败（store 打不开、配置缺路径）透传那个码，不改写成 `daemon_down`。`daemon_down` 只表示 socket 连不上。
 
@@ -475,6 +480,7 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D32 路径落在哪个工作区：末尾的符号链接不跟随（review P1-9） | `checkpoint`/`restore` 等把路径映射到会话与 repo 时，最后一个分量是符号链接就只解析它的父目录、保留链接名；这样落在某个工作区里就用它（链接条目本身）；链接本身不在任何工作区里（外面指进来的链接）才跟随到目标 | 原来整条路径 canonicalize：`restore CP link` 恢复的是链接指向的文件，改过的链接原样不动 | 2026-10-27 |
 | D33 `gc --store [--dry-run]`（review P1-12） | 全局 store gc 是显式的选项，不是 `gc` 的缺省：`--store` 调 daemon 的 `gc { store: true }`（30 天保留期，daemon.md D33）；`--dry-run` 要求 `--store`（clap `requires`），走只读的 `gc { store: true, dry_run: true }`，回 `{ dry_run: true, preview }`，什么都不改。帮助里写明先跑 `--dry-run` |
 | D34 推送计划写出目标 URL（review P1-15） | 要确认的 `push`/`publish`/`chain --restore` 在 stderr 的计划里多一行 `  to <origin 推送 URL>`（用户信息写成 `***`），读不出就写一句说明；弹框文字也带这个 URL（confirm.md §5.6），daemon 在锁里核对它没变（daemon.md D35） | 人批准的是推到哪里，不只是哪个分支 | 2026-10-27 |
+| D36 `ls`、`status --brief`、`ls --table`（status-perf C，D4/D6） | 新增 `ls [--table]` 与 `status --brief`，只读 store（§3.2、§5.1）。daemon 方法不新增：`status` 多两个可选参数 `summary`、`workspaces`（daemon.md §4）。**修订 D19**：`ls --table` 成功时 stdout 是表格不是信封；出错仍是信封、退出码非 0。推迟到 daemon-independence r5：`--wait N`、`Busy starting` 不回退的语义、共享等待机制 | `status --all` 在 8 会话 42 工作区上要 30–60 s，大半是工作区与旧树的文件系统工作；列会话不需要这些。人看的列表要能直接读 | 2026-10-28 |
 | D35 `--repos` 的提示与 `daemon status` 的 `fds` | `new --repos` 时 cli 在 stderr 写一行 `note: --repos tracks A,B; every configured repo still gets a workspace (pass --repo R for only these)`；`--repo` 时不写。`daemon status` 把 daemon 的 `fds` 原样放进 data。`new` 失败已回滚时错误带 `detail.rolled_back = true`（session.md D56），cli 原样透传 | 事故 2026-10-27：agent 把 `--repos tool` 当成只建 tool，得到 23 个工作区；`fds` 在 daemon 里有、cli 丢了。提示走 stderr，不改 data | 2026-10-27 |
 
 初稿里被后写裁定压过的两句，不沿用：`grep` 不给 session 就是全部（改为 cwd 会话，`--all` 才是全部，design §6.3 与 T11）；`grep` 的 `--repo`（T11 只留 `--session` 与 `--all`）。crate 名从初稿的 `crates/strata-cli` 改为 types.md §8 的 `crates/git-strata`。
