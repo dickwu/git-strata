@@ -216,7 +216,7 @@ pub const STATUS_AFTER: &str = "EXAMPLES
 
 A workspace with health Unknown carries choices [\"abandon\",\"accept\"]: a move
 stopped midway; that is the human's `git-strata resolve`. Works without the daemon.
---session with --all is InvalidInput both_selectors.
+--session or --repo with --all is InvalidInput both_selectors.
 ";
 
 pub const CHECKPOINT_AFTER: &str = "EXAMPLES

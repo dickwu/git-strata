@@ -368,6 +368,9 @@ pub fn ports(ctx: &Ctx, a: &PortsArgs) -> Result<Envelope> {
     if a.all && a.session.is_some() {
         return Err(invalid("both_selectors", "--all and --session are exclusive", json!({})));
     }
+    if a.all && a.repo.is_some() {
+        return Err(invalid("both_selectors", "--all lists every repo; drop --repo, or pass --session with --repo", json!({})));
+    }
     if a.reassign && a.all {
         return Err(invalid("reassign_one", "--reassign moves exactly one workspace's lease; pass --session and --repo", json!({})));
     }

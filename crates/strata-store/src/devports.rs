@@ -112,6 +112,9 @@ fn probe_one(port: u16, addr: Addr) -> std::result::Result<(), i32> {
         if fd < 0 {
             return Err(errno());
         }
+        // A child spawned meanwhile (install, checks) must not inherit the
+        // probe and keep the port bound after we close it.
+        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
         let r = (|| {
             let one: libc::c_int = 1;
             let sz = std::mem::size_of::<libc::c_int>() as libc::socklen_t;

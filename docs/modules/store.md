@@ -1667,7 +1667,7 @@ design §8 的验收数字里与 store 有关的是"checkpoint 改 50 个文件 
 
 ### 6.1 store 返回的码
 
-"types.md 已列"一栏说的是 types.md §6.2"谁返回"里有没有 store。写"否"的几项，是本文把 store 的行为映射到最接近的已有码；增补 4 的 T15 一条让 Task 15 在 types.md 的"谁返回"里给它们补上 store，码的集合不变（仍是 39 个）。
+"types.md 已列"一栏说的是 types.md §6.2"谁返回"里有没有 store。写"否"的几项，是本文把 store 的行为映射到最接近的已有码；增补 4 的 T15 一条让 Task 15 在 types.md 的"谁返回"里给它们补上 store，码的集合不变（当时 39 个；后来 dev-ports 为 cli 的端口检查加了 `PortInUse`，现为 40 个，store 不返回它）。
 
 | 码 | 何时（函数） | 留下的现场 | 恢复 | types.md 已列 |
 | --- | --- | --- | --- | --- |

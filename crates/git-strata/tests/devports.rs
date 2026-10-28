@@ -128,6 +128,8 @@ fn selection_errors() {
     assert_eq!(r.env()["error"]["detail"]["commands"], json!(["exec", "ports"]));
     let r = lv.run(&["session", "ports", "--all", "--session", a.as_str()]);
     assert_eq!(r.reason(), "both_selectors", "{r:?}");
+    let r = lv.run(&["session", "ports", "--all", "--repo", "tool"]);
+    assert_eq!(r.reason(), "both_selectors", "{r:?}");
     let r = lv.run_in(&wb, &["session", "exec", "--tauri", "--", "sh", "-c", "tauri dev"]);
     assert_eq!(r.reason(), "tauri_launcher", "{r:?}");
     assert!(r.env()["error"]["detail"]["fix"].as_str().unwrap().contains("STRATA_TAURI_DEV_CONFIG"));

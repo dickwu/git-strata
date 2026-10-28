@@ -2,7 +2,7 @@
 
 **Crate**：`crates/strata-daemon`（lib + bin `git-stratad`）· **设计来源**：design.md §5、§6.2、§8、§9、§12 · **矩阵**：test-matrix 里目标模块为 `daemon` 的行，以及 `—` 行里把替代物写成 daemon / launchd / 本机 unix socket 的行，逐条见 §7 · **邻居版本**：session.md @a324f9c，deps.md @dafdefc，gitio.md @1cd5ac5，confirm.md @229f4e3，overlay.md 与 store.md @08ffa53；publish.md @df9f069；search.md 草案 @aa0414c（只借方法名）
 
-> 本文按 module-rulings.md 写：「T13 daemon」，以及标了 T13 或 Everyone 且约束本模块的增补。后写的、标了 amended 的那条胜。一台机器一个 daemon。方法表是 cli 子命令的对照，名字与下面这张表一致，不改名。控制器在初稿的 16 个之外加了 `resolve_move`、`chain_resolve` 与 `config_relax`。本文不再加别的方法。`Busy` 只用于第一次可见的写之前的等锁（缺省 30 秒）。写之后的等待不受这 30 秒截断。重启报出 `Unknown` 的发布，不重放。不加 `Code`：`Failed` 与 `UnknownMethod` 是 RPC 层的回答。`Code` 停在 39 个。
+> 本文按 module-rulings.md 写：「T13 daemon」，以及标了 T13 或 Everyone 且约束本模块的增补。后写的、标了 amended 的那条胜。一台机器一个 daemon。方法表是 cli 子命令的对照，名字与下面这张表一致，不改名。控制器在初稿的 16 个之外加了 `resolve_move`、`chain_resolve` 与 `config_relax`。本文不再加别的方法。`Busy` 只用于第一次可见的写之前的等锁（缺省 30 秒）。写之后的等待不受这 30 秒截断。重启报出 `Unknown` 的发布，不重放。不加 `Code`：`Failed` 与 `UnknownMethod` 是 RPC 层的回答。`Code` 停在 40 个（dev-ports 加了 `PortInUse`，cli.md D37；daemon 的 `ports_*` 不返回它，它只由 cli 的端口检查发出）。
 
 ## 1. 职责与边界
 

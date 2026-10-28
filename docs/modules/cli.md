@@ -108,7 +108,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata resolve` | `--session S --repo R`，以及 `--abandon` 与 `--accept` 恰好一个。没有缺省 | 缺选择、或两个都给 → `InvalidInput`，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接 |
 | `git-strata chain` | `--repo R`，以及恰好一个：`--accept-origin replay`、`--accept-origin drop`、`--restore`。没有缺省。`--restore` 在 `!is_ancestor(o, c)` 时不连接、不推 | 缺选择、或两个都给 → `InvalidInput`，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接。不能快进 → `InvalidInput`，`detail.reason = "not_ancestor"`，在任何 push 之前 |
 | `git-strata config relax` | `<repo>` | 未知 repo 透传 `NoSuchRepo`。文件变了不会自己跑这条命令 |
-| `git-strata session ports` | `[--session S] [--repo R]`，或 `--all`（只读，列出全部活会话的工作区，没有租约的 `ports: null`、`reason: "unleased"`，不分配）。`--check`：每个端口的监听者与状态。`--reassign`：把恰好一个工作区的租约挪到别的块，把查过的 base 作为 `checked` 发给 daemon，租约在此期间被别人挪过 → `Busy lease_changed`（D37）。没有空闲块的工作区是一条 `ports: null`、`reason: "ports_exhausted"` 的记录，其他工作区照常列出（`exec` 仍报错） | `--all` 与 `--session` 同给 → `both_selectors`；`--reassign --all` → `reassign_one`；`--reassign` 选中多个工作区 → `ambiguous_repo`（`detail.repos`）；都是 `InvalidInput` |
+| `git-strata session ports` | `[--session S] [--repo R]`，或 `--all`（只读，列出全部活会话的工作区，没有租约的 `ports: null`、`reason: "unleased"`，不分配）。`--check`：每个端口的监听者与状态。`--reassign`：把恰好一个工作区的租约挪到别的块，把查过的 base 作为 `checked` 发给 daemon，租约在此期间被别人挪过 → `Busy lease_changed`（D37）。没有空闲块的工作区是一条 `ports: null`、`reason: "ports_exhausted"` 的记录，其他工作区照常列出（`exec` 仍报错） | `--all` 与 `--session` 或 `--repo` 同给 → `both_selectors`；`--reassign --all` → `reassign_one`；`--reassign` 选中多个工作区 → `ambiguous_repo`（`detail.repos`）；都是 `InvalidInput` |
 | `git-strata session exec` | `[--session S] [--repo R] [--tauri] [--no-check] -- <cmd…>`：在恰好一个工作区里、带着它的端口环境变量（§3.2）用 `execvp` 替换本进程跑命令（D37） | 选中多个 → `ambiguous_repo`；cwd 在另一个会话工作区里 → `cwd_mismatch`；`--tauri` 认不出启动方式 → `tauri_launcher`（`detail.fix`）；都是 `InvalidInput`。`--` 之后没有命令 → `args` |
 
 未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`session`、`status`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
@@ -241,7 +241,7 @@ cli 不拥有表，不拥有目录。它读的配置目录是 `~/Library/Applica
 - 一行，紧凑（`serde_json` 的紧凑格式，不是 pretty），末尾一个 `\n`，stdout 上没有别的字节（D12）。
 - `ok`、`data`、`error` 三个键都在。`data` 不是 null；没有结果时是 `{}`。成功时 `error` 是 null，不是省略。这压过 types.md §7“失败时没有 `data`、成功时没有 `error`”和 3b 那一行的同句：T14 的裁定是 `data` 总在（§9）。
 - `error` 是一个 `StrataError`：`code` 是变体名，`message` 总在，`detail` 按 types.md 省略 `None`。`Busy` 且 daemon 没跑时 `detail` 总有，`reason` 为 `"daemon_down"`。
-- `error.code` 必须是 types.md `Code` 的变体名。闭集 39 个，cli 自己不发明码。对不上的 RPC 层名字按 D7 收成 `InvalidInput`。
+- `error.code` 必须是 types.md `Code` 的变体名。闭集 40 个（dev-ports 加了 `PortInUse`，D37），cli 自己不发明码。对不上的 RPC 层名字按 D7 收成 `InvalidInput`。
 - 程序只按 `error.code` 分支。`message` 的措辞可以改。
 - 退出码：信封 `ok` 为 true 且 stdout 的 write 与 flush 都成功 → 0。其余 → 1。不使用别的退出码。
 - stdout 写失败（管道关掉、flush 失败）按 3b：退出码 1，能写 stderr 就写一行 `stdout_write_failed`，不写半行 JSON，不 panic，不在 `Drop` 里吞掉 flush 错误。显式 `flush` 并检查。
@@ -337,7 +337,7 @@ cli 不重放 `Unknown`，不删除现场，不在失败后改跑 `gc` 或 `rm`�
 | `stdout_write_failure_is_nonzero` | stdout 在写信封时被关闭：进程退出码 1，不 panic，不把该次调用报成成功 | `layerfs-telemetry/tests/timer_json.rs::writer_failures_propagate` |
 | `stdout_format_write_failure_is_nonzero` | 同上，覆盖格式化写失败这条同源用例 | `layerfs-telemetry/tests/timer_format.rs::writer_failures_propagate` |
 | `stdout_flush_failure_is_nonzero` | 显式 flush 失败（`BufWriter` 的 `Drop` 会吞掉）也是退出码 1 | `layerfs-telemetry/tests/timer_json.rs::a_flush_failure_is_surfaced` |
-| `error_codes_match_types_md` | 故意触发的每个 `error.code`，以及 `skipped[].code` 与 `BothChange.code` 里的码，都是 types.md `Code` 的变体名。闭集 39 个，测试从枚举读名字，不在 cli 里抄第二份。RPC 的 `UnknownMethod` 不出现在 `error.code` 里 | 新增 |
+| `error_codes_match_types_md` | 故意触发的每个 `error.code`，以及 `skipped[].code` 与 `BothChange.code` 里的码，都是 types.md `Code` 的变体名。闭集 40 个，测试从枚举读名字，不在 cli 里抄第二份。RPC 的 `UnknownMethod` 不出现在 `error.code` 里 | 新增 |
 | `hook_checkpoint_is_idempotent_per_tool_call` | 同一个 `--tool-call` 对同一会话同一 repo 跑两次：两次 `data.checkpoints[].id` 相同，store 里该键只有一行；第二次没有发写 RPC。从 tool 工作区来的 `../hr-core` 记在同一会话的 `hr-core` 上，不丢掉，也不记成 cwd 的 repo。会话外的路径跳过，cwd 的检查点不因此失败。一次钩子可以记下不止一个 repo | 新增 |
 | `daemon_up_read_does_not_open_sessions` | daemon 在跑时，`open_proposals` 与 `--tool-call` 的查找不调用 `Sessions::open`。第二次打开会把进行中的移动报成 `MoveAwaitingRecover`，这个测试断言没有第二次打开 | 新增 |
 | `confirm_commands_refuse_non_tty` | `deps approve`、`needs_human_confirm` 的 `push`、批次里有要推且要确认的仓库的 `publish`（front 即是）、要确认的 `chain --restore`、`config relax`、`rm --discard` 在非 TTY 上退出码 1，`error.code` 为 `NotTty`，socket 上没有字节（`publish` 在会话读不到时同样没有；`non_tty_refused_before_prompt` 断言真实会话上只发了 checkpoint 与 `publish_plan`，D23）。`non_tty_rerun_of_a_landed_guarded_repo_is_not_gated`：要确认的仓库已经落地，非 TTY 重跑成功、`already_published` 带它、不弹框；内容再变则 `NotTty`，不发 `publish`。`non_tty_publish_refuses_a_guarded_repo_the_plan_left_out`（review-3 T1）：计划里没有那个仓库（已落地），`publish` 到达前另一条 Done 行落地了不同内容，daemon 回 `NotConfirmed` `plan_changed`，没有弹框，链和 origin 不变。`chain` 的 replay / drop 在非 TTY 上也是 `NotTty`，且不取凭据 | 新增 |
