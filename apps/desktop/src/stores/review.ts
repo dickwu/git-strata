@@ -8,12 +8,11 @@ import type { WaitingItem } from '@/lib/view';
 export type ReviewTarget =
   { kind: 'deps'; id: number; repo: string } | { kind: 'conflict'; session: string; repo: string };
 
-/** The outcome of the last deps_approve call, kept until a review of that proposal shows it. */
-export interface Finished {
-  id: number;
-  outcome: Outcome;
-  seen: boolean;
-}
+/**
+ * Outcomes no review has shown yet, by proposal id. Each stays until a review of its own
+ * proposal shows it, so approving another proposal never drops one.
+ */
+export type Unseen = Readonly<Record<number, Outcome>>;
 
 interface ReviewState {
   target: ReviewTarget | null;
@@ -23,8 +22,8 @@ interface ReviewState {
    * Approve off instead of sending a second call into the back end's single-flight refusal.
    */
   approving: number | null;
-  /** The last call's outcome. A review of that proposal shows it, even one opened later. */
-  finished: Finished | null;
+  /** Outcomes not shown yet. A review of that proposal shows its own, even one opened later. */
+  unseen: Unseen;
   /**
    * Approve stays off until a read with `dataUpdatedAt >= readyAt` has landed: a read that
    * began after the last call ended. Infinity while that refresh is being asked for.
@@ -37,7 +36,8 @@ interface ReviewState {
    * lists refreshed whether or not any modal is still open. False when one is already out.
    */
   start: (id: number, call: () => Promise<Outcome>, qc: QueryClient) => boolean;
-  markSeen: () => void;
+  /** Drop proposal `id`'s unseen outcome once a review has shown it. */
+  markSeen: (id: number) => void;
 }
 
 export function targetOf(it: WaitingItem): ReviewTarget | null {
@@ -52,13 +52,13 @@ export function targetKey(t: ReviewTarget): string {
 export const useReview = create<ReviewState>((set, get) => ({
   target: null,
   approving: null,
-  finished: null,
+  unseen: {},
   readyAt: 0,
   open: (target) => set({ target }),
   close: () => set({ target: null }),
   start: (id, call, qc) => {
     if (get().approving !== null) return false;
-    set({ approving: id, finished: null });
+    set({ approving: id });
     const unknown = (e: unknown): Outcome => ({
       kind: 'error',
       error: { code: 'Unknown', message: String(e), detail: null },
@@ -66,13 +66,18 @@ export const useReview = create<ReviewState>((set, get) => ({
     void call()
       .catch(unknown)
       .then((outcome) => {
-        set({ approving: null, finished: { id, outcome, seen: false }, readyAt: Infinity });
+        set((st) => ({
+          approving: null,
+          unseen: { ...st.unseen, [id]: outcome },
+          readyAt: Infinity,
+        }));
         return refreshAfter(qc, REFRESH_AFTER_APPROVE).then((readyAt) => set({ readyAt }));
       });
     return true;
   },
-  markSeen: () => {
-    const f = get().finished;
-    if (f && !f.seen) set({ finished: { ...f, seen: true } });
+  markSeen: (id) => {
+    if (!(id in get().unseen)) return;
+    const { [id]: _shown, ...rest } = get().unseen;
+    set({ unseen: rest });
   },
 }));

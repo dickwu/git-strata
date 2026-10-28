@@ -16,7 +16,7 @@ function deferred() {
 }
 
 beforeEach(() => {
-  useReview.setState({ target: null, approving: null, finished: null, readyAt: 0 });
+  useReview.setState({ target: null, approving: null, unseen: {}, readyAt: 0 });
 });
 
 describe('review store: an approval outlives the modal that sent it (§4.4)', () => {
@@ -35,9 +35,9 @@ describe('review store: an approval outlives the modal that sent it (§4.4)', ()
     await tick();
     const st = useReview.getState();
     expect(st.approving).toBeNull();
-    expect(st.finished).toMatchObject({ id: 22, seen: false, outcome: reply });
-    st.markSeen();
-    expect(useReview.getState().finished?.seen).toBe(true);
+    expect(st.unseen[22]).toEqual(reply);
+    st.markSeen(22);
+    expect(useReview.getState().unseen[22]).toBeUndefined();
   });
 
   test('Approve stays off until the refresh after the outcome has been asked for', async () => {
@@ -58,7 +58,31 @@ describe('review store: an approval outlives the modal that sent it (§4.4)', ()
     const qc = new QueryClient();
     useReview.getState().start(22, () => Promise.reject(new Error('boom')), qc);
     await tick();
-    const f = useReview.getState().finished;
-    expect(f?.outcome).toMatchObject({ kind: 'error', error: { code: 'Unknown' } });
+    expect(useReview.getState().unseen[22]).toMatchObject({
+      kind: 'error',
+      error: { code: 'Unknown' },
+    });
+  });
+
+  test('approving another proposal keeps an unseen outcome (Stop waiting on A, then B)', async () => {
+    const qc = new QueryClient();
+    const a = deferred();
+    const b = deferred();
+    const s = useReview.getState();
+    s.start(22, () => a.promise, qc);
+    s.close();
+    s.open({ kind: 'deps', id: 23, repo: 'tool' });
+    // A's outcome lands while B is open: B's review must not consume it.
+    a.resolve(reply);
+    await tick();
+    expect(useReview.getState().start(23, () => b.promise, qc)).toBe(true);
+    useReview.getState().markSeen(23);
+    b.resolve(reply);
+    await tick();
+    const st = useReview.getState();
+    expect(st.unseen[22]).toEqual(reply);
+    expect(st.unseen[23]).toEqual(reply);
+    st.markSeen(23);
+    expect(Object.keys(useReview.getState().unseen)).toEqual(['22']);
   });
 });

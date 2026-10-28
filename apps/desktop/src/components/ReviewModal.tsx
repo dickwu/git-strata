@@ -202,7 +202,7 @@ function DepsReview({
   const qc = useQueryClient();
   const deps = useDeps(POLL_MS);
   const [since, reread] = useFreshSince(DEPS_KEYS);
-  const { open, close, approving, finished, readyAt, start, markSeen } = useReview();
+  const { open, close, approving, unseen: unseenAll, readyAt, start, markSeen } = useReview();
   const openSession = useNav((s) => s.openSession);
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
   const [done, copyText] = useCopy();
@@ -226,18 +226,19 @@ function DepsReview({
     deps.data?.proposals.find(
       (x) => x.repo === target.repo && x.id !== target.id && x.state?.kind === 'Pending'
     ) ?? null;
-  const unseen = finished !== null && !finished.seen && finished.id === target.id;
+  const outcome = unseenAll[target.id] ?? null;
+  const unseen = outcome !== null;
   const canApprove = phase.kind === 'idle' && fresh && pending && approving === null && !unseen;
 
   // The outcome of this proposal's call, whichever modal started it: this one (confirming),
   // this one after Stop waiting, or an earlier one closed while the call was out (§4.4).
   useEffect(() => {
-    if (!unseen || !finished) return;
+    if (outcome === null) return;
     if (slow.current) clearTimeout(slow.current);
-    markSeen();
-    setPhase({ kind: 'result', v: verdict(target.id, finished.outcome) });
+    markSeen(target.id);
+    setPhase({ kind: 'result', v: verdict(target.id, outcome) });
     onBusy(false);
-  }, [unseen, finished, target.id, markSeen, onBusy]);
+  }, [outcome, target.id, markSeen, onBusy]);
 
   // Pointer or keyboard activation of the Approve button only; nothing binds Enter (§4.7).
   const onApprove = () => {
