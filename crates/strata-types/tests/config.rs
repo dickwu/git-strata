@@ -115,6 +115,7 @@ fn v1_name_must_match_path_basename_and_table_must_be_nonempty() {
     let empty = Config {
         paths: Paths::default(),
         repos: Default::default(),
+        status: Default::default(),
     };
     assert_eq!(rule(&empty.validate().unwrap_err()), "V1");
 }
@@ -616,5 +617,29 @@ publish = { branch = "main", push = true, confirm = false }
 #[test]
 fn a_misspelt_check_siblings_key_is_v11() {
     let err = parse(&(sib_repo("tool", r#"check_sibling = ["admin"]"#) + &sib_repo("admin", ""))).unwrap_err();
+    assert_eq!(rule(&err), "V11");
+}
+
+/// status-perf D7: `[status] parallel` defaults to 4, accepts 1..=16, and
+/// rejects anything else with V13; unknown keys in it are still V11.
+#[test]
+fn status_parallel_defaults_and_bounds() {
+    let repo = bare_repo("tool", "/Volumes/GWD/inter/tool");
+    let cfg = parse(&minimal(&repo)).unwrap();
+    assert_eq!(cfg.status.parallel, 4);
+    assert!(!toml::to_string(&cfg).unwrap().contains("[status]"), "the default table is not written back");
+    for ok in [1, 16] {
+        let cfg = parse(&format!("{}\n[status]\nparallel = {ok}\n", minimal(&repo))).unwrap();
+        assert_eq!(cfg.status.parallel, ok);
+    }
+    let cfg = parse(&format!("{}\n[status]\n", minimal(&repo))).unwrap();
+    assert_eq!(cfg.status.parallel, 4, "an empty table keeps the default");
+    for bad in [0, 17] {
+        let err = parse(&format!("{}\n[status]\nparallel = {bad}\n", minimal(&repo))).unwrap_err();
+        assert_eq!(err.code, Code::InvalidInput);
+        assert_eq!(rule(&err), "V13");
+        assert_eq!(err.detail.as_ref().unwrap()["field"], "parallel");
+    }
+    let err = parse(&format!("{}\n[status]\nparallel = 2\nfast = true\n", minimal(&repo))).unwrap_err();
     assert_eq!(rule(&err), "V11");
 }

@@ -95,6 +95,21 @@
 
 ---
 
+### 2.5 `[status]`
+
+[实现时补的决定]（2026-10-28，status-perf D7）可省略的表，目前只有一个键：
+
+| 键 | 类型 | 缺省 | 含义 | 规则 |
+|---|---|---|---|---|
+| `parallel` | 整数 | `4` | `status` 同时评估多少个工作区；是**一个进程**内所有请求共享的上限（daemon 一个池，本地回退每次进程内一个池），不是每个请求各自的数目。每个工作区串行跑它的 git 子进程，所以同时最多这么多个工作区在跑 git | 1..=16，超出 → `InvalidInput`（V13） |
+
+```toml
+[status]
+parallel = 4
+```
+
+整个表或这个键省略 → 缺省 4；缺省值不写回（序列化时省略整个表）。表里的未知键照样是 V11。daemon 只在启动时读配置，所以改了要重启才生效。**旧二进制不认识 `[status]`**（`Config` 是 `deny_unknown_fields`，V11，整份配置加载失败），所以上线顺序与 `check_siblings` 相同：先把新的 `git-strata` 与 `git-stratad` 一起装好，再改线上配置，最后重启 daemon；若在重启之后才改配置，要再重启一次才生效。
+
 ## 3. Rust 定义（`strata-types`）
 
 `Config`、`RepoConfig`、`Paths` 的定义在这里，`RepoName`、`PublishTarget`、`RepoPath`、`StrataError` 来自 `types.md`。下面的 `impl` 块只列签名，实现按 §4 的规则写。
@@ -117,6 +132,17 @@ pub struct Config {
     /// TOML 里的 `[repo.<name>]`。BTreeMap：遍历顺序 = 名字的字典序，稳定。
     #[serde(rename = "repo")]
     pub repos: BTreeMap<RepoName, RepoConfig>,
+    /// `[status]`（§2.5）；缺省时不序列化。
+    #[serde(default, skip_serializing_if = "StatusConfig::is_default")]
+    pub status: StatusConfig,
+}
+
+/// `[status]`（§2.5，status-perf D7）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusConfig {
+    #[serde(default = "StatusConfig::default_parallel")] // 4
+    pub parallel: u32, // V13：1..=16
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,7 +245,7 @@ impl Config {
 
 ### 4.1 静态规则（`Config::validate`，无 I/O）
 
-按 `[paths]`、再按各 `[repo.<name>]` 表在文件里的出现顺序检查，表内按 V1→V12 的顺序；只报第一条违规 [我的决定]。
+按 `[paths]`、再按各 `[repo.<name>]` 表在文件里的出现顺序检查，表内按 V1→V12 的顺序，最后是 `[status]` 的 V13；只报第一条违规 [我的决定]。
 
 | 编号 | 规则 | 错误码 | 依据 |
 | --- | --- | --- | --- |
@@ -235,6 +261,7 @@ impl Config {
 | V10 | `checks` 的只读规则（§4.2） | `CheckMutates` | design §6.5 步骤 4、§11 第 15 条 |
 | V11 | 任何表里的未知键都拒绝；`publish` 内联表恰好三个字段 | `InvalidInput` | — |
 | V12 | `check_siblings` 的每项是另一个已配置的 repo：不是本 repo，不重复。`detail` 带 `repo`、`field = "check_siblings"`、`index`、`rule = "V12"`。未知键 V11 由 serde 在解析时报，先于其它规则 | `InvalidInput` | publish.md D21 [实现时补的决定] |
+| V13 | `[status] parallel` 在 1..=16 之间。`detail` 带 `repo = null`、`field = "parallel"`、`index = null`、`rule = "V13"`。在全部 repo 表之后检查（不改变已有规则的先后） | `InvalidInput` | status-perf D7 [实现时补的决定] |
 
 ### 4.2 `checks` 只读规则（`CheckMutates`）
 

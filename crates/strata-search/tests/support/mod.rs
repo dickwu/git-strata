@@ -521,7 +521,7 @@ impl Fx {
             repos.insert(repo_name(n), sb.config(&main));
         }
         let root = sb.root.join("strata");
-        let config = Config { paths: Paths { root }, repos };
+        let config = Config { paths: Paths { root }, repos, status: Default::default() };
         Fx::from_parts(sb, config)
     }
 

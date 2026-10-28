@@ -13,6 +13,38 @@ pub struct Config {
     pub paths: Paths,
     #[serde(rename = "repo")]
     pub repos: std::collections::BTreeMap<RepoName, RepoConfig>,
+    /// `[status]` (config.md §2.5, status-perf D7). Omitted when default,
+    /// so a config without the table writes back without it.
+    #[serde(default, skip_serializing_if = "StatusConfig::is_default")]
+    pub status: StatusConfig,
+}
+
+/// `[status]`: how `status` runs (status-perf D7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusConfig {
+    /// How many workspaces `status` evaluates at once, across all requests
+    /// of one process (1..=16, V13).
+    #[serde(default = "StatusConfig::default_parallel")]
+    pub parallel: u32,
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        Self { parallel: Self::default_parallel() }
+    }
+}
+
+impl StatusConfig {
+    pub const MAX_PARALLEL: u32 = 16;
+
+    pub fn default_parallel() -> u32 {
+        4
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +246,16 @@ impl Config {
             };
             validate_repo(name, cfg, &self.paths.root)?;
             validate_check_siblings(name, cfg, &self.repos)?;
+        }
+        if !(1..=StatusConfig::MAX_PARALLEL).contains(&self.status.parallel) {
+            return Err(violation(
+                Code::InvalidInput,
+                None,
+                "parallel",
+                None,
+                "V13",
+                "status.parallel is not between 1 and 16",
+            ));
         }
         Ok(())
     }
