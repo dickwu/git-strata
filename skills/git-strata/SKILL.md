@@ -215,16 +215,23 @@ git-strata session exec --tauri -- bun run tauri dev
   refused. Anything else is `InvalidInput` `tauri_launcher`; use the form in
   `detail.fix`:
   `git-strata session exec -- sh -c 'tauri dev --config "$STRATA_TAURI_DEV_CONFIG"'`.
-- tauri-connector does not read `STRATA_CONNECTOR_PORT` yet and picks its
-  own port; find it in the `.connector.json` it writes under your
-  workspace's `target/` (copies from the main checkout are removed when the
-  session is created).
+- `exec` does not set tauri-connector's variables. tauri-connector 0.17.7+
+  binds exactly `TAURI_CONNECTOR_PORT`, `TAURI_CONNECTOR_MCP_PORT` and
+  `TAURI_CONNECTOR_BRIDGE_PORT`; map the lease onto them:
+  `git-strata session exec -- sh -c 'TAURI_CONNECTOR_PORT=$STRATA_CONNECTOR_PORT TAURI_CONNECTOR_MCP_PORT=$STRATA_CONNECTOR_MCP_PORT TAURI_CONNECTOR_BRIDGE_PORT=$STRATA_AUX_PORT exec tauri dev --config "$STRATA_TAURI_DEV_CONFIG"'`.
+  Precedence: a port in the app's builder code > the exact env variable >
+  `TAURI_CONNECTOR_*_PORT_RANGE` > a builder range > the default. A busy
+  exact port is not replaced: the connector does not start (the app keeps
+  running); free the port or `--reassign`, then restart. The bound ports
+  are in the `.connector.json` under your workspace's `target/` (copies
+  from the main checkout are removed when the session is created).
 - `exec`'s variables reach only the command it starts and its children, not
   a later connector command or an MCP server that is already running. When
   you talk to the app from such a client, select it explicitly: `tauri-connector
   ... --project <tauri_app_root>` (`tauri_app_root`, else `path`, from
   `git-strata session ports`), or wrap the client:
-  `git-strata session exec --no-check -- tauri-connector ...`. Never connect
+  `git-strata session exec --no-check -- sh -c 'TAURI_CONNECTOR_PORT=$STRATA_CONNECTOR_PORT tauri-connector ...'`
+  (without `--port` the CLI uses `TAURI_CONNECTOR_PORT`). Never connect
   to the connector's default ports (9555/9556): they may be another
   session's app.
 - Before starting, `exec` checks the lease's ports (`--no-check` skips it;

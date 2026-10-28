@@ -234,11 +234,31 @@ that select another package (`--prefix`, `--filter`, `-w`, `--workspace`,
 (`InvalidInput` `tauri_launcher`), since the script that runs would not be
 the one checked.
 
+`exec` does not set tauri-connector's own variables. tauri-connector
+(0.17.7 and later) binds exactly the ports in `TAURI_CONNECTOR_PORT`,
+`TAURI_CONNECTOR_MCP_PORT` and `TAURI_CONNECTOR_BRIDGE_PORT`, so map the
+lease onto them in an `sh -c` form:
+
+```bash
+git-strata session exec -- sh -c 'TAURI_CONNECTOR_PORT=$STRATA_CONNECTOR_PORT \
+  TAURI_CONNECTOR_MCP_PORT=$STRATA_CONNECTOR_MCP_PORT \
+  TAURI_CONNECTOR_BRIDGE_PORT=$STRATA_AUX_PORT \
+  exec bunx tauri dev --config "$STRATA_TAURI_DEV_CONFIG"'
+```
+
+The connector's precedence is: a port set in the app's builder code, then
+the exact env variable, then `TAURI_CONNECTOR_*_PORT_RANGE`, then a range
+set in the builder, then its default ports. An exact port that is busy is
+not replaced: the connector does not start and the app keeps running (a
+`.connector.json` left by an earlier run then names a dead pid). The ports
+it bound are recorded in `.connector.json` under the app's `target/`.
+
 The variables reach only `exec`'s command and its children. A connector
 client started separately (or an MCP server already running) selects the
 app with `tauri-connector ... --project <tauri_app_root>` from `session
 ports`, or runs as `git-strata session exec --no-check -- tauri-connector
-...`; never the connector's default ports.
+...` (with no `--port`, the CLI uses `TAURI_CONNECTOR_PORT`, so map it the
+same way in that `sh -c`); never the connector's default ports.
 
 `session ports` lists a workspace with no free block as `"ports": null,
 "reason": "ports_exhausted"` next to the others; `exec` there is `Busy`
