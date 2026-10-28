@@ -1,4 +1,4 @@
-//! status-perf: wall-clock timing of `status --all`
+//! status-perf: wall-clock timing of `status --all`,
 //! `ls` and `status --brief` against the in-process daemon on a
 //! throw-away store. Not a pass/fail test: `cargo test --test status_timing
 //! -- --ignored --nocapture` prints the numbers.
