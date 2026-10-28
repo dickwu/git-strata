@@ -599,6 +599,7 @@ mod tests {
         assert_eq!(a, want);
         assert_eq!(b, want);
         assert!(max.load(Ordering::SeqCst) <= 2, "max {} at once", max.load(Ordering::SeqCst));
-        assert!(max.load(Ordering::SeqCst) >= 2, "the two callers did overlap");
+        // Two callers of 2 workers each would reach 4 at once on private pools; the shared cap keeps it at 2.
+        assert!(max.load(Ordering::SeqCst) >= 2, "the cap was used in full");
     }
 }
