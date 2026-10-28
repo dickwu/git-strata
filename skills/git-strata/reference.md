@@ -29,6 +29,8 @@ is not running.
 | `resolve` | `--session <S> --repo <R>` + exactly one of `--abandon` / `--accept` | yes | no | `ResolutionReport` |
 | `chain` | `--repo <R>` + exactly one of `--accept-origin <replay\|drop>` / `--restore` | yes (`--restore` may also confirm) | no | `{repo,choice,outcome?\|refs_moved?}` |
 | `config relax <REPO>` | — | yes + confirm | no | — |
+| `session ports` | `--session <S>`, `--repo <R>` (defaults: cwd's session; cwd's repo, else every repo), or `--all` (read-only, every live workspace; unleased ones show `ports: null`, `reason: "unleased"`); `--check` (who listens on each port); `--reassign` (move exactly one workspace's lease to another block) | no | yes when the lease exists | `{leases:[{session,repo,path,tauri_app_root,ports:{web,connector,connector_mcp,aux},env:{...},check?}]}` |
+| `session exec -- <CMD>...` | `--session <S>`, `--repo <R>` (exactly one workspace), `--tauri` (add `--config $STRATA_TAURI_DEV_CONFIG` to `tauri dev`), `--no-check` | no | yes when the lease exists | none: the process becomes `<CMD>` (its output and exit code) with the lease env set |
 
 `checkpoint -m` with nothing changed returns the latest checkpoint instead of
 a new one; every new `--tool-call` ID records a row. `publish` records a fresh
@@ -44,7 +46,7 @@ Fixed `detail.reason` values produced by the CLI: `daemon_down`,
 `unknown_command` (with `detail.commands`), `args`, `repos`, `ticket`,
 `assign_with_from`, `pick`, `stdin`, `not_tty` (code `NotTty`, with
 `detail.command`), `push_unknown`, `launchctl`, `rpc_id`, `unknown_method`,
-`rpc_failed`, `readonly_client`. From publish: `assigned`, `chain_rewound`,
+`rpc_failed`, `readonly_client`. From `session ports` / `session exec`: `reassign_one`, `ambiguous_repo` (with `detail.repos`), `cwd_mismatch`, `tauri_launcher` (with `detail.fix`), `exec`, `unleased` (a `--all` entry, not an error), `already_running` / `foreign` (code `PortInUse`), `port_unidentified` / `port_probe_error` (code `Busy`), `ports_exhausted` (`Busy`), `not_active` (`NoSuchSession`), `daemon_too_old` (`Unsupported`). From publish: `assigned`, `chain_rewound`,
 `chain_diverged`, `workspace_changed`, `plan_changed`; from push: `replay_conflict`,
 `replay_deps_unsealed`, `replay_too_long`, `chain_rewound`; from deps:
 `main_moved`; from `config relax`: `not_relaxed`; from the push guard:
@@ -56,7 +58,7 @@ IsDirectory, NotDirectory, NotFile, Binary, NotText, NoMatch, AmbiguousMatch,
 Exists, NotEmpty, NameTaken, ReservedName, ReadOnly, TooLarge, InvalidInput,
 NoSuchSession, NoSuchRepo, NoSuchCheckpoint, NoSuchProposal, NoSuchView,
 NotConfirmed, NotTty, OpenFiles, CrossVolume, Drift, CheckFailed,
-CheckMutates, PushRefused, Unknown, Unsupported, Corrupt.
+CheckMutates, PushRefused, Unknown, Unsupported, Corrupt, PortInUse.
 
 ## `du` figures
 

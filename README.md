@@ -21,6 +21,7 @@ Design documents (Chinese) are in [docs/](docs/README.md); the agent skill is
 - [Output: the JSON envelope](#output-the-json-envelope)
 - [Session lifecycle](#session-lifecycle)
 - [Seed files (.env)](#seed-files-env)
+- [Dev servers: per-session ports](#dev-servers-per-session-ports)
 - [Headless command sequences](#headless-command-sequences)
 - [Release builds from a session](#release-builds-from-a-session)
 - [Publish conflicts: fix and rerun](#publish-conflicts-fix-and-rerun)
@@ -187,6 +188,37 @@ staff-api `.env` and front `.env.local`.
   `status` shows only path, source and time, never contents. Do not `cat`,
   print or log seed contents (`.env` holds production credentials).
 - Symlink seeds are recreated at `new` and not refreshed.
+
+## Dev servers: per-session ports
+
+Each session workspace leases a block of 4 TCP ports from the daemon when
+the session is created (`new`, `add`), so concurrent `tauri dev` / `next dev`
+runs in different sessions do not collide. Roles: `web` (base), `connector`
+(+1), `connector_mcp` (+2), `aux` (+3). The main checkout has no lease and
+keeps the project's own ports. A lease is released when the session is
+removed. Range and exclusions: `[dev_ports]` in `config.toml`
+([docs/config.md](docs/config.md) §2.5; default `20000-29999`).
+
+```bash
+git-strata session ports [--session S] [--repo R] [--check]   # read the lease
+git-strata session ports --all                                # every live workspace, read-only
+git-strata session exec -- bun run dev                        # PORT=<web> and the rest set
+git-strata session exec --tauri -- bun run tauri dev          # also tauri dev --config <devUrl patch>
+git-strata session ports --reassign --session S --repo R      # move one lease to another block
+```
+
+`exec` replaces itself with the command, run in the workspace with `PORT`,
+`STRATA_DEV_PORT`, `STRATA_CONNECTOR_PORT`, `STRATA_CONNECTOR_MCP_PORT`,
+`STRATA_AUX_PORT`, `STRATA_SESSION`, `STRATA_REPO`,
+`TAURI_CONNECTOR_PROJECT` and `STRATA_TAURI_DEV_CONFIG`
+(`{"build":{"devUrl":"http://localhost:<web>"}}`). Committed files are never
+edited. Before starting it checks the ports (`--no-check` skips): a listener
+from this workspace is `PortInUse` `already_running`; any other listener is
+`PortInUse` `foreign` with `detail.fix` = the `--reassign` command. Nothing
+is killed and nothing is reassigned automatically. Copies of tauri-connector's
+`.connector.json` in cloned `target/` seed caches are deleted when the
+session is created. Once a lease exists, `ports` and `exec` read it from the
+store and work without the daemon.
 
 ## Headless command sequences
 
@@ -460,6 +492,8 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Busy` (`daemon_down`) | `git-strata daemon start`, retry once |
 | `Busy` (`workspace_changed`) | a file changed while read; retry |
 | `Busy` (`publish_unknown`) | an earlier publish of this repo has an unknown outcome; it clears once origin has that commit (checked at each publish), e.g. after the human runs `git-strata push REPO`; a definite remote refusal never blocks |
+| `Busy` (`port_unidentified` / `port_probe_error`) | `session exec` could not identify a port's holder; retry shortly |
+| `Busy` (`ports_exhausted`) | no free port block in `[dev_ports]`; tell the human |
 | `Busy` (other) | repo lock held; wait, retry later |
 | `NotTty` | hand the exact command to the human |
 | `NotConfirmed` | report; the human reruns (`plan_changed`: rerun once yourself) |
@@ -481,6 +515,8 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Unknown` | outcome uncertain (`push_unknown`, `socket_closed`, `launchctl`): do not retry, `gc` or `rm`; tell the human |
 | `Binary` / `TooLarge` | per-entry markers in `diff` / `grep`; not a call failure |
 | `Corrupt` | store damage; stop, tell the human |
+| `PortInUse` | `already_running`: reuse the server this workspace already runs; `foreign`: run `detail.fix` (`session ports --reassign`) for your own session, then `exec` again |
+| `Unsupported` (`daemon_too_old`) | the daemon predates dev-port leases; tell the human |
 
 The full closed set of codes: Conflict, HeadMoved, Dirty, Busy, NoSuchPath,
 NoSuchBranch, NoSuchCommit, NoCommit, NoMergeBase, IsDirectory, NotDirectory,
@@ -488,7 +524,7 @@ NotFile, Binary, NotText, NoMatch, AmbiguousMatch, Exists, NotEmpty,
 NameTaken, ReservedName, ReadOnly, TooLarge, InvalidInput, NoSuchSession,
 NoSuchRepo, NoSuchCheckpoint, NoSuchProposal, NoSuchView, NotConfirmed,
 NotTty, OpenFiles, CrossVolume, Drift, CheckFailed, CheckMutates,
-PushRefused, Unknown, Unsupported, Corrupt.
+PushRefused, Unknown, Unsupported, Corrupt, PortInUse.
 
 ## Disk usage (`du`)
 
@@ -559,3 +595,5 @@ Flags, defaults and `data` shapes:
 | `resolve --session S --repo R (--abandon \| --accept)` | yes |
 | `chain --repo R (--accept-origin replay\|drop \| --restore)` | yes |
 | `config relax REPO` | yes |
+| `session ports [--session S] [--repo R] [--all] [--check] [--reassign]` | no |
+| `session exec [--session S] [--repo R] [--tauri] [--no-check] -- CMD...` | no |

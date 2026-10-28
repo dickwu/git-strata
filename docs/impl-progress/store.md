@@ -396,3 +396,9 @@ Results: `cargo test -p strata-store` 133 passed / 0 failed / 3 ignored
   by default (no hdiutil or human needed; uchg via `lchflags`).
 - Task 9 also removed three dead helpers in errors.rs (`detail_str`,
   `json_err`, `R`) so `cargo build` is warning-free.
+
+## dev-ports (impl/dev-ports, 2026-10-28)
+
+- `dev_ports(session, repo, base)` in v2 (`sessions.agent+dev_ports`); `DevPortLease`, `set_dev_ports_policy`, `dev_port_leases` (None on v1), `ensure_dev_ports`, `reassign_dev_ports`; lease at `create_session` / `add_workspaces`; release at `set_lifecycle(Removed)`; gc deletes `dev_ports` rows before workspaces.
+- Allocation: start at fnv1a64("session/repo") mod blocks (reassign: after the old block), at most 64 blocks probed, a block is taken by a lease or by any bind failure on 0.0.0.0 / [::] / 127.0.0.1.
+- Tests: `fnv_is_the_reference_function`, `bind_probe_sees_a_listener_and_its_absence`, `without_a_policy_nothing_is_leased_and_ensure_is_unsupported`, `new_and_add_lease_distinct_blocks_that_pass_the_probe`, `exhaustion_never_blocks_new_and_ensure_reports_it`, `reassign_moves_to_a_later_block_and_frees_the_old_one`, `ensure_needs_an_active_session_and_removal_releases_for_good`, `read_only_handles_cannot_lease`; the v2 migration tests cover the table.

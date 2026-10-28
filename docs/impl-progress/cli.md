@@ -167,3 +167,9 @@ Not merged.
   ID` wins over `tool_use_id`. cli.md §3.5 hook command is now
   `git-strata checkpoint --tool-call`. Test:
   `hook_tool_call_id_comes_from_stdin_tool_use_id`.
+
+### dev-ports (D37, 2026-10-28)
+
+- `session ports [--session S] [--repo R] [--all] [--check] [--reassign]` and `session exec [--session S] [--repo R] [--tauri] [--no-check] -- CMD...` (crates/git-strata/src/devports.rs); `PortInUse` error code (40 codes).
+- Unit tests: `env_and_app_root`, `direct_launchers_get_the_patch_before_the_app_separator`, `package_scripts_must_be_literal_tauri_dev`, `states_follow_listeners_then_the_probe`, `judge_follows_the_action_table`, `lsof_fields_parse_per_process`.
+- Integration (tests/devports.rs): `ports_are_leased_at_new_read_without_the_daemon_and_exec_runs_with_them`, `selection_errors`, `tauri_gets_the_dev_url_patch_and_scripts_are_checked`, `the_check_reassign_and_an_own_server`, `an_old_daemon_cannot_reassign`.

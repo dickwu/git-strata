@@ -328,6 +328,22 @@ impl Store {
     /// 码：ReadOnly、NoSuchSession、NoSuchRepo、InvalidInput（会话不是 Creating；路径重复或已经记过；路径不是 UTF-8）、Busy、Unknown。
     pub fn record_seeds(&self, id: &SessionId, repo: &RepoName, seeds: &[SeedRow]) -> Result<()>;
 
+    // ---- dev 端口租约（§4.4 `dev_ports`，dev-ports 设计）[实现时补的决定]（2026-10-28） ----
+    // DevPortLease { session, repo, base }：web = base、connector = base+1、connector_mcp = base+2、aux = base+3。
+    // DEV_PORT_BLOCK = 4。DevPortsPolicy::probing(blocks) 由 daemon 按 config [dev_ports] 设进来；
+    // 没设策略的句柄（cli 的只读 open）不分配：create_session / add_workspaces 不建租约，ensure / reassign → Unsupported(no_policy)。
+
+    /// daemon 启动时设一次。
+    pub fn set_dev_ports_policy(&self, policy: Option<DevPortsPolicy>);
+    /// 全部租约（给了 session 就只要它的），按会话、repo 排序。库还是 v1（只读句柄，未迁移）时返回 None：每个工作区都算没租约。
+    pub fn dev_port_leases(&self, session: Option<&SessionId>) -> Result<Option<Vec<DevPortLease>>>;
+    /// Active 会话的工作区的租约；没有就分配一个（表之前建的会话）。幂等。
+    /// 码：ReadOnly、Unsupported(no_policy)、NoSuchSession(not_active：creating / removing / removed)、
+    /// InvalidInput(session_unknown：Unknown 的会话保留已有租约，但不发新的)、NoSuchRepo、Busy(ports_exhausted)、Unknown。
+    pub fn ensure_dev_ports(&self, id: &SessionId, repo: &RepoName) -> Result<DevPortLease>;
+    /// 把租约挪到另一个可用块（从旧块之后找起）；没有租约时等于 ensure。找不到时旧租约不动，Busy(ports_exhausted)。码同 ensure。
+    pub fn reassign_dev_ports(&self, id: &SessionId, repo: &RepoName) -> Result<DevPortLease>;
+
     /// move_workspace 的意图行：写在建任何暂存之前，状态 Preparing，返回 store 分配的代数 n
     /// （该工作区当前代数与它所有意图里最大的 n 再加 1，永不复用）。staging 是 session 选的暂存路径，必须是
     /// root/sessions/<id>/<name> 这样会话根下的一级名字，而且不是任何工作区的目录名（§5.5 第 5 行的形状）。
@@ -805,6 +821,7 @@ impl Store {
 | `set_deps_main` | deps（`observe_main`：先读，再登记提议，最后比较并交换） | 主干当前的依赖集，比较并交换 |
 | `deps_set`、`deps_attempts`、`proposal`、`proposals`、`deps_main` | deps；session 与 daemon 经 deps | 读 |
 | `create_session`、`set_session_phase`、`set_lifecycle`、`record_seeds` | session（`new`、`remove`、`recover`） | 会话行（`new` 的第一次对外可见的写）、阶段、生命周期、种子 |
+| `set_dev_ports_policy`、`ensure_dev_ports`、`reassign_dev_ports`；`dev_port_leases` | daemon（启动、`ports_ensure`、`ports_reassign`）；cli 读 | dev 端口租约（§4.4 `dev_ports`） |
 | `begin_move`、`set_move_phase`、`set_move_state`、`finish_move`、`fail_move`、`set_old_tree` | session（`move_workspace`、`recover`） | 移动意图与交换结果 |
 | `resolve_move` | session（`resolve_failed_move`，session.md §5.9） | 人选了 Abandon 或 Accept 之后，把失败的移动记回 Ok |
 | `session`、`sessions`、`move_intents`、`open_move_intents` | session（`status`、`resolve`、`select`、`list`、`recover`）；overlay、deps 读会话 | 读 |
@@ -1298,6 +1315,8 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
 - **schema 版本**：`user_version` 取 `BASE_VERSION`（1）到 `LATEST`（2）。比 `LATEST` 新的（新版 git-strata 写的）、比 1 小的、`application_id` 不对、日志模式不是 WAL、schema 文本与该版本的 `ddl(v)` 有任何差别的库一律拒绝打开（`Corrupt`），不修补、不转换；版本号大于 `LATEST` 时消息提示安装写它的那个版本。旧版本由写者 open 按 §4.4a 前进迁移；只读 open 不迁移，按库自己的版本核对 schema 并照常读（v1 的会话 `agent` 读成 `None`）。
 - **`sessions.agent`**（v2）：创建会话的 AI agent 名，types.md `AgentName`（1 到 64 个 `[A-Za-z0-9._-]`，首字符是字母或数字），`NULL` 表示不知道。CHECK 与 `AgentName` 逐字符一致：Turso 的 `GLOB` 与 `length()` 在内嵌的 NUL 处停下，所以另加 `length(CAST(agent AS BLOB)) = length(agent)`，它同时挡住非 ASCII；两边的一致性由 `agent_column_matches_agent_name_and_is_immutable` 用一张表逐条核对。写入后不可改（触发器 `sessions_agent_guard`，包括 `NULL` → 值）。
 
+- **`dev_ports`**（v2）[实现时补的决定]（2026-10-28，dev-ports 设计）：每个会话工作区一行租约，`base..base+3` 四个端口（web、connector、connector_mcp、aux）。`UNIQUE(base)` 加上 4 对齐，两条租约不可能重叠。分配：在 daemon 设的策略（config.md §2.5 的块）里，从 `fnv1a64("<session>/<repo>")` 对块数取模的位置起环形找（reassign 从旧块之后起），跳过已租的块与旧块，每块的 4 个端口都通过绑定探测（`0.0.0.0`、`[::]`、`127.0.0.1`，`SO_REUSEADDR`；`EAFNOSUPPORT`、`EADDRNOTAVAIL`、`EPROTONOSUPPORT` 当作通过）才用；一次最多探 64 块。写入时机：`create_session` 与 `add_workspaces` 在同一个写事务里给每个新工作区分一块（找不到就不建，从不让 `new` / `add` 失败）；`ensure_dev_ports`、`reassign_dev_ports`。删除时机：`reassign` 删旧行再插新行；`set_lifecycle` 到 `Removed` 时在同一事务里删掉该会话的全部租约。这是 S2"`DELETE` 只来自 gc"的例外：租约是可回收的分配，不是历史；表上没有 gc 守卫触发器，gc 的删除顺序里它排在 `workspaces` 之前（子行先删）。
+
 ### 4.4a schema 迁移
 
 迁移只前进、只在写者 open 里跑，整段在一个事务里：
@@ -1312,6 +1331,20 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
   ```
 
   已有的会话 `agent` 为 `NULL`，其余行一字不变（`writer_open_migrates_v1_and_keeps_every_row` 用 v1 夹具逐行比对）。
+
+  同一条迁移（名字 `sessions.agent+dev_ports`，dev-ports 设计与 agent-id 合成一个 v2，peilin 2026-10-28）还建 `dev_ports` 表，写在 `PRAGMA user_version = 2;` 之前：
+
+  ```sql
+  CREATE TABLE dev_ports (
+      session TEXT    NOT NULL REFERENCES sessions (id),
+      repo    TEXT    NOT NULL,
+      base    INTEGER NOT NULL UNIQUE CHECK (base BETWEEN 1024 AND 65532 AND base % 4 = 0),
+      PRIMARY KEY (session, repo),
+      FOREIGN KEY (session, repo) REFERENCES workspaces (session, repo)
+  ) STRICT;
+  ```
+
+  迁移不给已有的工作区租约：它们在第一次 `session ports` / `session exec`（daemon 的 `ports_ensure`）时拿到。
 - **步骤**（§5.2 写者第 9 步）：
   1. 库不是干净关闭的就先跑 `quick_check`（干净关闭的也补跑一次：迁移之前要知道库是好的）。
   2. 备份：`PRAGMA wal_checkpoint(TRUNCATE)` 必须返回 busy = 0 且 `-wal` 长度为 0，最多等 5 秒（每 100 ms 再试）；做不到（有读者持着旧快照）→ `Busy`（`migration_backup`，`not_written`），什么都没改，读者结束后重启 daemon 即可。然后建 `store/backups/`（新建时同步 `store/`），`clonefile` 出 `store/backups/store-v<from>-<ns>.db`，对它与目录做 `F_FULLFSYNC`，再不经 SQLite 核对它：魔数、`application_id`、`user_version = from`、页大小 × 页数等于文件长度。任一步失败就删掉这个克隆，`not_written`。
@@ -2171,5 +2204,6 @@ design.md 里标 [交给构建者]、落在本模块的事项：
 | 每个 repo 最新的基线（§5.11） | `gc_repo` 不回收 `created_ns` 最新的那个 generation | 下一个 `new` 多半要用它 | 2026-10-22 |
 | store.db 的增长（§5.12） | spike 项：首个 spike 量出每周增长；超过 1 GB 每周就回到用户，决定要不要把条目按内容去重（升 `user_version`）。`quick_check` 已按 T6 裁定改为只在异常退出之后与按需时跑 | checkpoint 是完整快照，估算在 0.5 到 2 GB 之间；去重要在第一次发布之前定 | 2026-10-22；待 spike |
 | 准备过的根目录不还原（§5.11、§6.3） | `gc_repo` 准备好根目录、却没有删它的行时（删行之前崩溃；第 3 步中途停下；删行那一批重新核对时它已被快照之后的引用钉住），根目录的写权限与清掉的标志不还原 | 这几个窗口都小，下一轮重算之后照样回收或者留下；还原要再记一份原来的标志与权限，换不来什么；根目录可写不改变里面任何文件的 mode 与标志 | 2026-10-22 |
+| dev 端口租约（§4.4 `dev_ports`、§4.4a） | 租约放在 store 的 `dev_ports` 表，随 agent-id 的 v1 → v2 一起迁移；分配在 store 的写事务里，探测策略由 daemon 注入；会话 Removed 时释放 | 租约要跨进程唯一、随会话生命周期走；放在同一个库里，`UNIQUE(base)` 与写事务就是锁，不需要另一份文件 | 2026-10-28 |
 | 写者中毒（§6.4） | 提交结果不确定之后，写一律 `Unknown` 直到重开；`is_poisoned()` 报给 daemon | 同步失败之后继续写，可能把没落盘的状态当成已提交 | 2026-10-22 |
 | 根目录里的 `search` 与已有 store 旁的其它条目（§3，事故 2026-10-27） | `Store::open` 先看 `store/store.db`：在就直接打开已有 store，不管根目录里还有什么；只有新建时才查陌生条目，`search`（daemon 的搜索索引）也算布局里的名字 | 原来陌生条目检查在 store.db 之前，daemon 建了 `search/` 之后重启就拒绝打开自己的 store | 2026-10-27 |
