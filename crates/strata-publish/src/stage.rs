@@ -19,6 +19,7 @@ use strata_types::{
     StrataError, TreeOid,
 };
 
+use crate::deps_select::{Layout, OwnDeps, Select};
 use crate::{Ctx, Result};
 
 /// Git modes publish writes (§5.3): nothing else reaches a commit.
@@ -41,6 +42,9 @@ pub struct Staged {
     pub gitdir: PathBuf,
     pub tree: TreeOid,
     pub paths: Vec<RepoPath>,
+    /// deps-drift §2.5: what the checks used when it was not the session's
+    /// pinned set (`DepsSubstituted` / `DepsReinstalled`).
+    pub deps_warning: Option<crate::PublishWarning>,
 }
 
 impl Staged {
@@ -747,16 +751,17 @@ fn apply(src: &Src, staging: &Path, changed: &BTreeMap<RepoPath, Option<Ver>>) -
 /// already has (tracked in git) keeps the tracked content and is not
 /// cloned over. The deps dirs never enter the tree: `gitio::stage` stages
 /// only the plan's paths.
-fn clone_own_deps(ctx: &Ctx, id: &strata_types::DepsSetId, worktree: &Path) -> Result<()> {
+fn clone_own_deps(ctx: &Ctx, id: &strata_types::DepsSetId, worktree: &Path) -> Result<OwnDeps> {
     let Some(mut set) = strata_deps::find_set(ctx.store, ctx.repo, id)? else {
         return Err(StrataError::new(Code::Corrupt, format!("the sealed deps set {} of {} is not recorded", id.as_str(), ctx.repo))
             .with_detail(json!({ "repo": ctx.repo.as_str(), "set": id.as_str() })));
     };
+    let pinned = set.clone();
     set.dirs.retain(|d| std::fs::symlink_metadata(worktree.join(d.as_str())).is_err());
-    if set.dirs.is_empty() {
-        return Ok(());
+    if !set.dirs.is_empty() {
+        strata_deps::clone_into(ctx.store, &set, worktree)?;
     }
-    strata_deps::clone_into(ctx.store, &set, worktree)
+    Ok(OwnDeps { pinned, cloned: set.dirs })
 }
 
 /// Build the layout for `plan` (D4, D12): export B, attach the private git
@@ -770,6 +775,7 @@ pub(crate) fn build(
     base: &CommitOid,
     plan: &Plan,
     prep: &crate::siblings::Prepared,
+    select: Select,
 ) -> Result<Staged> {
     let root = ctx.deps.paths.root.clone();
     let (layout, rel) = layout_rel(ctx, &plan.layout_session, group.id)?;
@@ -782,10 +788,12 @@ pub(crate) fn build(
         ctx.git.export_tree(&plan.b_tree, &worktree)?;
         ctx.git.attach_staging(&worktree, &gitdir, base)?;
         let mut cloned = BTreeSet::new();
-        if let Some(rec) = ctx.store.session(&plan.layout_session)? {
+        let rec = ctx.store.session(&plan.layout_session)?;
+        let mut own = None;
+        if let Some(rec) = &rec {
             for (rn, ws) in &rec.manifest.repos {
                 if rn == ctx.repo {
-                    clone_own_deps(ctx, &ws.base.deps, &worktree)?;
+                    own = Some(clone_own_deps(ctx, &ws.base.deps, &worktree)?);
                     continue;
                 }
                 let src = ctx.store.base_dir(&ws.base);
@@ -800,6 +808,9 @@ pub(crate) fn build(
         crate::siblings::clone_supplies(&rest, &layout).map_err(|m| {
             crate::siblings::missing_error(ctx.repo, Some(&plan.layout_session), std::slice::from_ref(&m))
         })?;
+        // deps-drift §2.6 B: the export before the merged paths land.
+        let selecting = select.applies(ctx, own.as_ref());
+        let b = if selecting { crate::deps_select::records(ctx, &worktree) } else { None };
         let src = Src { store: ctx.store, git: ctx.git };
         apply(&src, &worktree, &plan.changed)?;
         let paths: Vec<RepoPath> = plan.changed.keys().cloned().collect();
@@ -807,17 +818,29 @@ pub(crate) fn build(
         if tree == plan.b_tree {
             return Err(no_commit(base));
         }
-        Ok(Staged { worktree, gitdir, tree, paths })
+        let mut deps_warning = None;
+        if let (true, Some(own), Some(rec)) = (selecting, own.as_ref(), rec.as_ref())
+            && let Some(ws) = rec.manifest.repos.get(ctx.repo)
+        {
+            let sessions: BTreeSet<&SessionId> = group.batches.iter().map(|b| &b.session).collect();
+            let l = Layout { session: &plan.layout_session, ws, single: sessions.len() == 1, row: group.id };
+            deps_warning = crate::deps_select::select_own_deps(ctx, select, plan, &worktree, own, b.as_deref(), &l)?;
+        }
+        Ok(Staged { worktree, gitdir, tree, paths, deps_warning })
     })();
     match r {
         Ok(s) => Ok(s),
         Err(e) => {
-            remove_layout(&root, &rel).map_err(|mut u| {
+            if let Err(mut u) = remove_layout(&root, &rel) {
                 u.detail.get_or_insert_with(|| json!({}))["cause"] =
                     json!({ "code": e.code.as_str(), "message": e.message, "detail": e.detail });
-                u
-            })?;
-            Err(e)
+                // §2.2: no cold install from a layout that stays.
+                if crate::deps_select::is_install_needed(&e) {
+                    let _ = strata_deps::remove_snapshot(ctx.deps.paths, ctx.repo, group.id);
+                }
+                return Err(u);
+            }
+            Err(crate::deps_select::rewrite_select_failure(ctx, e))
         }
     }
 }
@@ -831,5 +854,5 @@ pub fn stage(ctx: &Ctx, group: &ReleaseGroup, base: &CommitOid) -> Result<Staged
     if !prep.missing.is_empty() {
         return Err(crate::siblings::missing_error(ctx.repo, Some(&plan.layout_session), &prep.missing));
     }
-    build(ctx, group, base, &plan, &prep)
+    build(ctx, group, base, &plan, &prep, Select::PinnedOnly)
 }

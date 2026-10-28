@@ -500,7 +500,7 @@ pub enum Code {
 | `OpenFiles` | 要替换或删除的目录里有进程打开着文件：`move_workspace` 要换依赖目录时，或 `rm` 时会话目录被占用（dev server 等）。跳过，目录一字不动；`detail` 列出 pid 和路径。多会话的 `deps approve` 里它按条目返回：跳过这个会话，其余会话照常移动（design §6.4 第 5 步） | `session` |
 | `PortInUse` | `session exec` 启动前检查本工作区租到的 dev 端口时，端口上已有监听进程：`detail.reason = "already_running"`（监听者的 cwd 在本工作区里，复用或先停掉它；`session ports --reassign` 此时也拒绝），或 `"foreign"`（别处的进程占着，`detail.fix` 是 `git-strata session ports --reassign --session S --repo R`）。`detail.check` 列出每个端口的状态和监听者。不可重试；只检查，从不杀进程（dev-ports 设计 §3.4）[实现时补的决定] | `cli` |
 | `CrossVolume` | 会话根目录、Store、基线与依赖集缓存跟主 checkout 不在同一个 APFS 卷上（design §7 要求同卷）。在克隆之前就拒绝，从不退化成复制 | `apfs`（`clone_tree`、`clone_file`）、`store`（`open`）、`session`（`new`） |
-| `Drift` | 安装输入哈希对不上：`deps::adopt` 认领主 checkout 现成的依赖目录时，主 checkout 的安装输入与目标基线不符，调用方改为冷装。`status` 报告的工作区漂移是数据，不是这个错误 | `deps` |
+| `Drift` | 安装输入哈希对不上：`deps::adopt` 认领主 checkout 现成的依赖目录时，主 checkout 的安装输入与目标基线不符，调用方改为冷装。publish（deps-drift）：`deps_install_needed` 只出现在第一轮 R1 行的 `outcome.deps` 里，不对外返回；`deps_drift` 是冷装后第二轮输入仍不符；`deps_select_failed` 是集合选择失败（`cause`）或写到所钉集合的依赖目录（`sub = "tracked_overlap"`）。`status` 报告的工作区漂移是数据，不是这个错误 | `deps`、`publish` |
 | `CheckFailed` | 发布时，检查命令在 staging 克隆里以非零状态退出。不提交；`detail` 带命令、退出码和输出末尾 | `publish` |
 | `CheckMutates` | 配置的检查命令会改文件：含 `--write` 或 `cs-fix` 而没有 `--dry-run`，规则见 config.md。这是配置错误，在任何检查运行之前就拒绝（design §6.5 第 4 步） | `types`（加载配置时 `Config::validate` 调 `RepoConfig::validate_commands`，见 config.md）、`publish`（`check` 运行前） |
 | `PushRefused` | 远端明确拒绝了推送（非快进、权限、服务端钩子），即 gitio 的 `push` 返回了 `PushOutcome` 的 `Refused`。发布链留在本地，没有推上去；`detail` 带远端的原话 | `publish`（由 `PushOutcome` 转换） |

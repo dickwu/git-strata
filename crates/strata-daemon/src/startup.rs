@@ -262,6 +262,10 @@ pub fn prepare_locked(
     // 6. The store checks its own clean-shutdown marker.
     let checkouts: Vec<&Path> = config.repos.values().map(|r| r.path.as_path()).collect();
     let store = Store::open(&config.paths.root, &checkouts)?;
+    // deps-drift §2.4: publish's install-input snapshots of a stopped daemon.
+    for p in strata_deps::clean_snapshots(&config.paths) {
+        tracing::warn!(path = %p.display(), "an install-input snapshot could not be removed");
+    }
     // Dev-port leases (config [dev_ports]); validated with the config.
     store.set_dev_ports_policy(Some(strata_store::DevPortsPolicy::probing(config.dev_ports.blocks()?)));
     // 7. One Git per repo; two names for one repository → NameTaken.
