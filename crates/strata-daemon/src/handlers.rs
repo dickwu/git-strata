@@ -724,9 +724,11 @@ impl<'d, 'a> Server<'d, 'a> {
         } else {
             sessions.list()?
         };
+        // A4: the workspaces are read in parallel; the results come back
+        // in the serial order, so the first error below is today's.
         let mut out = Vec::new();
-        for id in &ids {
-            let st = sessions.status(id)?;
+        for (id, st) in ids.iter().zip(sessions.status_many(&ids)) {
+            let st = st?;
             report_guard_disabled(&core.warnings, &st, &core.config.paths.root);
             let cps: Vec<Value> = core
                 .store

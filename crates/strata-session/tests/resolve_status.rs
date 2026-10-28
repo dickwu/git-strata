@@ -680,3 +680,50 @@ fn status_reports_mirror_drift_and_vanished_shadow() {
     assert_eq!(wstat(&st, "front").health, WorkspaceHealth::Ok);
     assert!(!sh.exists());
 }
+
+// ------------------------------------------------- status-perf A4: parallel
+
+/// The same answers, in the same order, at `[status] parallel` 1 and 4.
+#[test]
+fn parallel_status_equals_serial() {
+    let mut fx = Fx::new();
+    let repos = [fx.rn("front"), fx.rn("tool")];
+    let ids: Vec<SessionId> =
+        (0..3).map(|i| id(&fx.sessions().new(Some(&format!("par-{i}")), &repos).unwrap())).collect();
+    fx.config.status.parallel = 1;
+    let serial: Vec<_> = fx.sessions().status_many(&ids).into_iter().map(Result::unwrap).collect();
+    let one_by_one: Vec<_> = ids.iter().map(|i| fx.sessions().status(i).unwrap()).collect();
+    assert_eq!(serial, one_by_one);
+    fx.config.status.parallel = 4;
+    let parallel: Vec<_> = fx.sessions().status_many(&ids).into_iter().map(Result::unwrap).collect();
+    assert_eq!(parallel, serial);
+    let got: Vec<&SessionId> = parallel.iter().map(|s| &s.id).collect();
+    assert_eq!(got, ids.iter().collect::<Vec<_>>(), "results in the order asked");
+}
+
+/// Each session's error is the one the serial walk hits first (its own
+/// row, then its workspaces by repo), and one session's error does not
+/// touch the others.
+#[test]
+fn parallel_status_reports_the_lowest_ordinal_error() {
+    let mut fx = Fx::new();
+    fx.config.status.parallel = 4;
+    let repos = [fx.rn("front"), fx.rn("tool")];
+    let ids: Vec<SessionId> =
+        (0..3).map(|i| id(&fx.sessions().new(Some(&format!("ord-{i}")), &repos).unwrap())).collect();
+    let gone = SessionId::try_from("s-aaaaaaaa".to_string()).unwrap();
+    let broken = session_root(&fx, &ids[1]);
+    let mode = fs::metadata(&broken).unwrap().permissions().mode();
+    fs::set_permissions(&broken, fs::Permissions::from_mode(0o000)).unwrap();
+    let mut ask = ids.clone();
+    ask.push(gone.clone());
+    let r = fx.sessions().status_many(&ask);
+    fs::set_permissions(&broken, fs::Permissions::from_mode(mode)).unwrap();
+    assert_eq!(r.len(), 4);
+    assert!(r[0].is_ok() && r[2].is_ok(), "{:?} {:?}", r[0], r[2]);
+    let e = r[1].as_ref().unwrap_err();
+    let text = format!("{e:?}");
+    assert!(text.contains(&broken.join("front").to_string_lossy().to_string()), "front before tool: {text}");
+    assert_eq!(r[3].as_ref().unwrap_err().code, Code::NoSuchSession);
+    assert_eq!(fx.sessions().status(&ids[1]).unwrap().id, ids[1]);
+}

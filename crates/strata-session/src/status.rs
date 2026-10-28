@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -142,26 +144,112 @@ pub(crate) fn no_such_session(id: &str) -> StrataError {
 impl Sessions<'_> {
     /// §5.5 steps 1, 2 and 3.
     pub fn status(&self, id: &SessionId) -> Result<SessionStatus> {
-        let rec = self.live_session(id)?;
-        let state = SessionState::from(rec.lifecycle);
-        let scene = match (&rec.scene, rec.lifecycle) {
-            (Some(v), Lifecycle::Unknown) => Some(scene_of(v, "session")?),
-            _ => None,
-        };
-        let mut workspaces = BTreeMap::new();
-        for (repo, row) in &rec.workspaces {
-            workspaces.insert(repo.clone(), self.workspace_status(&rec, repo, row)?);
+        self.status_many(std::slice::from_ref(id)).pop().unwrap_or_else(|| Err(no_such_session(id.as_str())))
+    }
+
+    /// status-perf A4: `status` of each id, one result per id in the order
+    /// given. The workspaces of all of them are read on the shared slots,
+    /// at most `[status] parallel` at once in this process; the results are
+    /// put together in the serial order, never the order they finish in,
+    /// and a session's error is the one the serial walk would have hit
+    /// first (its own row before its workspaces, workspaces by repo).
+    pub fn status_many(&self, ids: &[SessionId]) -> Vec<Result<SessionStatus>> {
+        struct Head {
+            rec: SessionRecord,
+            scene: Option<Scene>,
         }
-        Ok(SessionStatus {
-            id: rec.manifest.id.clone(),
-            ticket: rec.manifest.ticket.clone(),
-            manifest: rec.manifest.clone(),
-            state,
-            created: rec.created,
-            phase: rec.phase.clone(),
-            scene,
-            workspaces,
-        })
+        // Ordinal (i, 0): the session's own row, read serially.
+        let heads: Vec<Result<Head>> = ids
+            .iter()
+            .map(|id| {
+                let rec = self.live_session(id)?;
+                let scene = match (&rec.scene, rec.lifecycle) {
+                    (Some(v), Lifecycle::Unknown) => Some(scene_of(v, "session")?),
+                    _ => None,
+                };
+                Ok(Head { rec, scene })
+            })
+            .collect();
+        // Ordinals (i, 1 + k): workspace k of session i, by RepoName.
+        let tasks: Vec<(usize, &RepoName, &WorkspaceRecord)> = heads
+            .iter()
+            .enumerate()
+            .filter_map(|(i, h)| h.as_ref().ok().map(|h| (i, h)))
+            .flat_map(|(i, h)| h.rec.workspaces.iter().map(move |(repo, row)| (i, repo, row)))
+            .collect();
+        let done: Vec<Mutex<Option<Result<WorkspaceStatus>>>> = tasks.iter().map(|_| Mutex::new(None)).collect();
+        let next = AtomicUsize::new(0);
+        let run = || {
+            loop {
+                let t = next.fetch_add(1, Ordering::Relaxed);
+                let Some(&(i, repo, row)) = tasks.get(t) else { break };
+                let Ok(h) = &heads[i] else { continue };
+                let r = {
+                    let _slot = self.status_slots.take();
+                    self.workspace_status(&h.rec, repo, row)
+                };
+                *done[t].lock().unwrap_or_else(|p| p.into_inner()) = Some(r);
+            }
+        };
+        let workers = self.status_slots.cap().min(tasks.len());
+        if workers <= 1 {
+            run();
+        } else {
+            std::thread::scope(|s| {
+                for _ in 0..workers {
+                    s.spawn(run);
+                }
+            });
+        }
+        let n = tasks.len();
+        drop(tasks);
+        let mut done = done.into_iter().map(|m| m.into_inner().unwrap_or_else(|p| p.into_inner()));
+        let mut out = Vec::with_capacity(ids.len());
+        let mut t = 0;
+        for h in heads {
+            let h = match h {
+                Ok(h) => h,
+                Err(e) => {
+                    out.push(Err(e));
+                    continue;
+                }
+            };
+            let mut workspaces = BTreeMap::new();
+            let mut first_err = None;
+            for repo in h.rec.workspaces.keys() {
+                let r = done.next().flatten();
+                t += 1;
+                match r {
+                    Some(Ok(w)) => {
+                        workspaces.insert(repo.clone(), w);
+                    }
+                    Some(Err(e)) => {
+                        first_err.get_or_insert(e);
+                    }
+                    None => {
+                        first_err.get_or_insert_with(|| {
+                            StrataError::new(Code::Unknown, format!("status of {repo} was not read"))
+                        });
+                    }
+                }
+            }
+            let rec = h.rec;
+            out.push(match first_err {
+                Some(e) => Err(e),
+                None => Ok(SessionStatus {
+                    id: rec.manifest.id.clone(),
+                    ticket: rec.manifest.ticket.clone(),
+                    manifest: rec.manifest.clone(),
+                    state: SessionState::from(rec.lifecycle),
+                    created: rec.created,
+                    phase: rec.phase.clone(),
+                    scene: h.scene,
+                    workspaces,
+                }),
+            });
+        }
+        debug_assert_eq!(t, n);
+        out
     }
 
     /// The session's row unless it is missing or Removed.
@@ -354,5 +442,47 @@ impl From<&strata_store::SeedRow> for SeedRecord {
             source_mtime: r.source_mtime,
             copied: r.copied,
         }
+    }
+}
+
+/// status-perf A4: a counting semaphore. `take` blocks until a slot is
+/// free; the guard gives it back. Nothing holds a slot while waiting for
+/// another, so the slots cannot deadlock.
+pub(crate) struct Slots {
+    cap: usize,
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+pub(crate) struct Slot<'a>(&'a Slots);
+
+impl Slots {
+    pub(crate) fn new(cap: usize) -> Slots {
+        let cap = cap.max(1);
+        Slots { cap, free: Mutex::new(cap), freed: Condvar::new() }
+    }
+
+    pub(crate) fn cap(&self) -> usize {
+        self.cap
+    }
+
+    fn lock(&self) -> MutexGuard<'_, usize> {
+        self.free.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub(crate) fn take(&self) -> Slot<'_> {
+        let mut free = self.lock();
+        while *free == 0 {
+            free = self.freed.wait(free).unwrap_or_else(|p| p.into_inner());
+        }
+        *free -= 1;
+        Slot(self)
+    }
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        *self.0.lock() += 1;
+        self.0.freed.notify_one();
     }
 }

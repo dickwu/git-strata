@@ -85,6 +85,9 @@ pub struct Sessions<'a> {
     /// How long such a fetch counts as fresh; zero (the default) always
     /// fetches. The daemon sets `NEW_FETCH_WINDOW`.
     pub(crate) fetch_window: Mutex<Duration>,
+    /// status-perf A4: the slots shared by every status read of this
+    /// process, `[status] parallel` of them (read when opened).
+    pub(crate) status_slots: status::Slots,
 }
 
 impl<'a> Sessions<'a> {
@@ -122,6 +125,7 @@ impl<'a> Sessions<'a> {
             seams: seams::Seams::default(),
             fetched: Mutex::new(BTreeMap::new()),
             fetch_window: Mutex::new(Duration::ZERO),
+            status_slots: status::Slots::new(config.status.parallel as usize),
         })
     }
 

@@ -193,8 +193,8 @@ fn local_status(ctx: &Ctx, sel: &Select) -> Result<Vec<Value>> {
         vec![ro::session_or_cwd(&local.store, sel.session.as_deref())?.0]
     };
     let mut out = Vec::new();
-    for id in ids {
-        let st = sessions.status(&id)?;
+    for st in sessions.status_many(&ids) {
+        let st = st?;
         out.push(serde_json::to_value(st).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?);
     }
     Ok(out)
