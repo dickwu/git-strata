@@ -6,14 +6,23 @@
       "report": {
         "session": "s-aaa",
         "repo": "admin",
-        "from": 3,
+        "from": {
+          "repo": "admin",
+          "tree": "4b825dc6",
+          "deps": "468343aa"
+        },
         "from_head": "3b416ebaa",
-        "to": 4,
+        "to": {
+          "repo": "admin",
+          "tree": "4b825dc6",
+          "deps": "ed8aac11"
+        },
         "head": "ed8aac01",
         "dropped": [],
         "conflicts": [],
         "lww": [],
-        "uncarried": []
+        "uncarried": [],
+        "checkpoint": 7
       }
     },
     {
@@ -21,8 +30,15 @@
       "kind": "skipped",
       "code": "OpenFiles",
       "detail": {
-        "path": "/v/s-ggg/admin/node_modules",
-        "holders": ["node (pid 9)"]
+        "path": "/v/s-ggg/admin",
+        "holders": [
+          {
+            "pid": 9,
+            "command": "node",
+            "path": "/v/s-ggg/admin/node_modules/esbuild/bin/esbuild",
+            "hold": "Mapped"
+          }
+        ]
       }
     },
     {
@@ -41,9 +57,21 @@
     {
       "session": "s-iii",
       "kind": "skipped",
-      "code": "IoError",
+      "code": "Corrupt",
       "detail": {
-        "message": "disk full"
+        "message": "workspace manifest unreadable"
+      }
+    },
+    {
+      "session": "s-lll",
+      "kind": "skipped",
+      "code": "Corrupt",
+      "detail": {
+        "kind": "Error",
+        "error": {
+          "code": "Corrupt",
+          "message": "deps set 12 is missing its manifest"
+        }
       }
     }
   ],

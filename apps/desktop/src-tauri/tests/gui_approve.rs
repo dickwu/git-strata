@@ -35,7 +35,9 @@ struct Fake {
 fn moved_reply(id: &Value, proposal: &Value) -> Value {
     json!({ "id": id, "ok": true, "data": {
         "results": [{ "session": "S1", "kind": "moved", "report": {
-            "session": "S1", "repo": "web", "from": 3, "from_head": "a1", "to": 4, "head": "b2",
+            "session": "S1", "repo": "web",
+            "from": { "repo": "web", "tree": "t1", "deps": "d1" }, "from_head": "a1",
+            "to": { "repo": "web", "tree": "t1", "deps": "d2" }, "head": "b2",
             "dropped": [], "conflicts": [], "lww": [], "uncarried": [] } }],
         "proposal": { "id": proposal, "state": { "kind": "Applied" } } } })
 }

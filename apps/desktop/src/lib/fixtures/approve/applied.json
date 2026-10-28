@@ -6,14 +6,23 @@
       "report": {
         "session": "s-aaa",
         "repo": "admin",
-        "from": 3,
+        "from": {
+          "repo": "admin",
+          "tree": "4b825dc6",
+          "deps": "468343aa"
+        },
         "from_head": "3b416ebaa",
-        "to": 4,
+        "to": {
+          "repo": "admin",
+          "tree": "4b825dc6",
+          "deps": "ed8aac11"
+        },
         "head": "ed8aac01",
         "dropped": [],
         "conflicts": ["src/a.ts", "src/b.ts"],
         "lww": [],
-        "uncarried": []
+        "uncarried": [],
+        "checkpoint": 7
       }
     },
     {
@@ -22,14 +31,23 @@
       "report": {
         "session": "s-bbb",
         "repo": "admin",
-        "from": 3,
+        "from": {
+          "repo": "admin",
+          "tree": "4b825dc6",
+          "deps": "468343aa"
+        },
         "from_head": "3b416ebaa",
-        "to": 4,
+        "to": {
+          "repo": "admin",
+          "tree": "4b825dc6",
+          "deps": "ed8aac11"
+        },
         "head": "ed8aac01",
         "dropped": [],
         "conflicts": [],
         "lww": [],
-        "uncarried": []
+        "uncarried": [],
+        "checkpoint": 7
       }
     }
   ],

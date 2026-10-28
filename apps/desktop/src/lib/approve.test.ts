@@ -9,6 +9,7 @@ import skipped from './fixtures/approve/skipped.json';
 import failed from './fixtures/approve/failed.json';
 import unknownRow from './fixtures/approve/unknown_row.json';
 import errors from './fixtures/approve/errors.json';
+import appliedWithSkips from './fixtures/approve/applied_with_skips.json';
 
 const reply = (r: unknown): Outcome => ({ kind: 'reply', reply: r as ApproveReply });
 const err = (k: keyof typeof errors): Outcome => ({ kind: 'error', error: errors[k] as GuiError });
@@ -29,31 +30,50 @@ describe('approve verdict: headline priority Unknown > errors > skipped > moved'
   test('skipped: warning, proposal stays waiting, a reason per row', () => {
     const v = verdict(22, reply(skipped));
     expect(v.tone).toBe('warning');
+    // s-kkk is AlreadyThere: unchanged, not counted as a blocking skip.
     expect(v.title).toBe('Approved, but 4 sessions were skipped, so proposal 22 stays waiting.');
     expect(v.again).toBe(true);
     const by = Object.fromEntries(v.rows.map((x) => [x.session, x]));
     expect(by['s-ccc'].detail).toBe(
-      'Files in the old tree are open: node_modules/.bin/vite (node, pid 4242)'
+      'Files in the old tree are open: /v/s-ccc/admin/node_modules/.bin/vite (node, pid 4242)'
     );
     expect(by['s-ddd'].detail).toBe('Has its own dependency edits (proposal 21)');
     expect(by['s-eee'].detail).toBe('Has its own dependency edits');
     expect(by['s-fff'].detail).toBe('Not ready yet');
-    // Skips sort before moves.
-    expect(v.rows[v.rows.length - 1]?.state).toBe('moved');
+    expect(by['s-kkk']).toMatchObject({ state: 'unchanged', label: '· No move needed' });
+    // Skips sort before moves; unchanged rows last.
+    expect(v.rows.map((x) => x.state).slice(-2)).toEqual(['moved', 'unchanged']);
   });
 
   test('failed moves outrank skips and show code + detail; lock_wait names its holder', () => {
     const v = verdict(22, reply(failed));
     expect(v.tone).toBe('error');
-    expect(v.title).toBe('3 sessions failed to move, so proposal 22 stays waiting.');
+    expect(v.title).toBe('4 sessions failed to move, so proposal 22 stays waiting.');
     const by = Object.fromEntries(v.rows.map((x) => [x.session, x]));
     expect(by['s-ggg'].state).toBe('failed');
     expect(by['s-ggg'].label).toBe('✕ Failed');
-    expect(by['s-ggg'].detail).toBe('OpenFiles: /v/s-ggg/admin/node_modules (node (pid 9))');
+    expect(by['s-ggg'].detail).toBe('OpenFiles: /v/s-ggg/admin (node (pid 9))');
     expect(by['s-hhh'].detail).toBe(
       'Busy: Another change (publish, s-hhh) was holding session s-hhh. Nothing moved. Try again; it asks for confirmation again.'
     );
-    expect(by['s-iii'].detail).toBe('IoError: disk full');
+    expect(by['s-iii'].detail).toBe('Corrupt: workspace manifest unreadable');
+    // A SkipReason::Error is a failure with its own code.
+    expect(by['s-lll']).toMatchObject({
+      state: 'failed',
+      detail: 'Corrupt: deps set 12 is missing its manifest',
+    });
+  });
+
+  test('Applied with AlreadyThere / Untracked skips is a success, not "stays waiting"', () => {
+    const v = verdict(22, reply(appliedWithSkips));
+    expect(v.tone).toBe('success');
+    expect(v.title).toBe('Approved. Moved 2 sessions.');
+    expect(v.notes).toEqual(['2 sessions needed no move.']);
+    expect(v.again).toBe(false);
+    expect(v.rows.filter((x) => x.state === 'unchanged').map((x) => x.session)).toEqual([
+      's-mmm',
+      's-nnn',
+    ]);
   });
 
   test('an Unknown row outranks everything and hides Approve again', () => {
@@ -121,7 +141,7 @@ describe('approve verdict: whole-call errors (nothing moved)', () => {
       'unsupported',
       { title: "This Mac can't show the confirmation prompt (no_gui_session).", again: false },
     ],
-    ['other', { tone: 'error', title: 'something odd (Internal, weird)' }],
+    ['other', { tone: 'error', title: 'something odd (Corrupt, weird)' }],
   ];
   for (const [k, want] of cases)
     test(k, () => {

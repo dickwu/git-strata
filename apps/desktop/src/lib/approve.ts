@@ -3,6 +3,8 @@
  * headline rules are tested against fixture replies (approve.test.ts):
  *
  * - headline priority Unknown > errors > skipped > moved;
+ * - Untracked and AlreadyThere skips are "unchanged", not skips: the daemon still records
+ *   Applied with them (rollout.rs record_rollout), so they never say "stays waiting";
  * - any Unknown (a row, the whole call, a lost reply, Stop waiting) hides every way back to
  *   Approve in this modal: a fresh modal re-reads state first;
  * - a failed move (a skipped row with `code` but no `detail.kind`) shows its code and detail;
@@ -15,7 +17,8 @@ export type Tone = 'success' | 'neutral' | 'warning' | 'error' | 'unknown';
 
 export interface RowView {
   session: string;
-  state: 'moved' | 'skipped' | 'failed' | 'unknown';
+  /** `unchanged`: a skip that needs nothing (Untracked, AlreadyThere) and blocks nothing. */
+  state: 'moved' | 'unchanged' | 'skipped' | 'failed' | 'unknown';
   /** Glyph plus word, never colour alone. */
   label: string;
   /** Plain text; agent-originated strings are never rendered as markup. */
@@ -68,6 +71,13 @@ export function holderText(detail: unknown): string {
   return parts.length > 0 ? parts.join(', ') : r.unknownHolder;
 }
 
+/** An OpenFile (strata-deps open_files.rs) as "command (pid N)". */
+function holderOf(h: unknown): string {
+  const o = obj(h);
+  if (!o) return typeof h === 'string' ? h : JSON.stringify(h);
+  return `${String(o.command ?? '?')} (pid ${String(o.pid ?? '?')})`;
+}
+
 /** A failed move's or an error's detail as one line of plain text. */
 export function detailText(code: string | null, detail: unknown): string | null {
   const d = obj(detail);
@@ -75,9 +85,7 @@ export function detailText(code: string | null, detail: unknown): string | null 
   if (str(d.message)) return d.message as string;
   if (d.reason === 'lock_wait') return r.lockWait(holderText(d), lockText(d.lock));
   if (str(d.path)) {
-    const holders = Array.isArray(d.holders)
-      ? d.holders.map((h) => (typeof h === 'string' ? h : JSON.stringify(h)))
-      : [];
+    const holders = Array.isArray(d.holders) ? d.holders.map(holderOf) : [];
     return holders.length > 0 ? `${d.path} (${holders.join(', ')})` : (d.path as string);
   }
   const text = JSON.stringify(d);
@@ -111,6 +119,9 @@ function skipText(detail: Record<string, unknown>): string {
   }
 }
 
+/** Skips record_rollout counts as done: the proposal still becomes Applied with them. */
+export const BENIGN_SKIPS: ReadonlySet<string> = new Set(['Untracked', 'AlreadyThere']);
+
 export function rowView(row: ApproveRow): RowView {
   if (row.kind === 'moved') {
     return {
@@ -136,10 +147,11 @@ export function rowView(row: ApproveRow): RowView {
   if (d && typeof d.kind === 'string') {
     // A SkipReason. `Error` carries a code and is a failure, not a planned skip.
     const failed = d.kind === 'Error';
+    const benign = BENIGN_SKIPS.has(d.kind);
     return {
       session: row.session,
-      state: failed ? 'failed' : 'skipped',
-      label: failed ? r.rowFailed : r.rowSkipped,
+      state: failed ? 'failed' : benign ? 'unchanged' : 'skipped',
+      label: failed ? r.rowFailed : benign ? r.rowUnchanged : r.rowSkipped,
       detail: skipText(d),
       conflicts: 0,
     };
@@ -155,7 +167,13 @@ export function rowView(row: ApproveRow): RowView {
   };
 }
 
-const ORDER: Record<RowView['state'], number> = { unknown: 0, failed: 1, skipped: 2, moved: 3 };
+const ORDER: Record<RowView['state'], number> = {
+  unknown: 0,
+  failed: 1,
+  skipped: 2,
+  moved: 3,
+  unchanged: 4,
+};
 
 function fromReply(id: number, reply: ApproveReply, subset: boolean): Verdict {
   const rows = (reply.results ?? []).map(rowView).sort((a, b) => ORDER[a.state] - ORDER[b.state]);
@@ -181,8 +199,10 @@ function fromReply(id: number, reply: ApproveReply, subset: boolean): Verdict {
   if (skipped > 0) {
     return { ...base, tone: 'warning', title: r.skipped(skipped, id), notes: [], again: true };
   }
+  const unchanged = n('unchanged');
+  const quiet = unchanged > 0 ? [r.unchanged(unchanged)] : [];
   if (state === 'Applied' || state === 'AwaitingPublish') {
-    return { ...base, tone: 'success', title: r.applied(n('moved')), notes: [], again: false };
+    return { ...base, tone: 'success', title: r.applied(n('moved')), notes: quiet, again: false };
   }
   if (state === 'Pending' && subset) {
     return { ...base, tone: 'success', title: r.subset(id), notes: [], again: true };
@@ -192,7 +212,7 @@ function fromReply(id: number, reply: ApproveReply, subset: boolean): Verdict {
     ...base,
     tone: 'neutral',
     title: r.applied(n('moved')),
-    notes: [r.state(id, state)],
+    notes: [r.state(id, state), ...quiet],
     again: state === 'Pending',
   };
 }

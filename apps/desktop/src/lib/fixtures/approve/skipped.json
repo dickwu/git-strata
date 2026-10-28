@@ -6,14 +6,23 @@
       "report": {
         "session": "s-aaa",
         "repo": "admin",
-        "from": 3,
+        "from": {
+          "repo": "admin",
+          "tree": "4b825dc6",
+          "deps": "468343aa"
+        },
         "from_head": "3b416ebaa",
-        "to": 4,
+        "to": {
+          "repo": "admin",
+          "tree": "4b825dc6",
+          "deps": "ed8aac11"
+        },
         "head": "ed8aac01",
         "dropped": [],
         "conflicts": [],
         "lww": [],
-        "uncarried": []
+        "uncarried": [],
+        "checkpoint": 7
       }
     },
     {
@@ -26,8 +35,8 @@
           {
             "pid": 4242,
             "command": "node",
-            "path": "node_modules/.bin/vite",
-            "hold": "open"
+            "path": "/v/s-ccc/admin/node_modules/.bin/vite",
+            "hold": "Fd"
           }
         ]
       }
@@ -58,6 +67,13 @@
       "kind": "skipped",
       "detail": {
         "kind": "NotReady"
+      }
+    },
+    {
+      "session": "s-kkk",
+      "kind": "skipped",
+      "detail": {
+        "kind": "AlreadyThere"
       }
     }
   ],

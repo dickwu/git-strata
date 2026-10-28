@@ -80,7 +80,7 @@ export const copy = {
       unknownNote:
         'Check the sessions before doing anything else. Close this and open the item again to read the current state.',
       detachedNote:
-        'The modal stopped waiting; the daemon may still finish. The lists refresh when it answers.',
+        'The modal stopped waiting; the daemon may still finish. When it answers, its result replaces this, even if you close and reopen the review.',
       applied: (n: number) =>
         n === 0
           ? 'Approved. No session needed to move.'
@@ -127,6 +127,9 @@ export const copy = {
       other: (message: string, code: string) => `${message} (${code})`,
       rowMoved: '✓ Moved',
       rowSkipped: '– Skipped',
+      rowUnchanged: '· No move needed',
+      unchanged: (k: number) =>
+        k === 1 ? '1 session needed no move.' : `${k} sessions needed no move.`,
       rowFailed: '✕ Failed',
       rowUnknown: '? Unknown',
       conflicts: (n: number) => (n === 1 ? '1 conflict' : `${n} conflicts`),

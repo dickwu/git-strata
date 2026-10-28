@@ -149,8 +149,12 @@
 .rows li[data-state='unknown'] .rowState {
   color: var(--danger);
 }
-.rows li[data-state='skipped'] .rowState {
+.rows li[data-state='skipped'] .rowState,
+.rows li[data-state='unchanged'] .rowState {
   color: var(--text-muted);
+}
+.rows li[data-state='unchanged'] .rowState {
+  font-weight: 400;
 }
 .rowSession {
   padding: 0;

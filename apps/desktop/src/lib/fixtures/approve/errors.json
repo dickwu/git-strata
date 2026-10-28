@@ -133,7 +133,7 @@
     }
   },
   "other": {
-    "code": "Internal",
+    "code": "Corrupt",
     "message": "something odd",
     "detail": {
       "reason": "weird"
