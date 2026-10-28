@@ -65,7 +65,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 未知方法 → RPC `UnknownMethod`。参数对不上 → RPC `Failed`。
 
-方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 22 个以外不加方法（`add` 是 session.md D52 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
+方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 24 个以外不加方法（`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
 
 | method | 作用 | 是否只读 |
 | --- | --- | --- |
