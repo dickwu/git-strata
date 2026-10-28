@@ -560,11 +560,15 @@ impl<'d, 'a> Server<'d, 'a> {
                     if let Some(t) = &token {
                         recheck(t, &action)?;
                     }
-                    self.trackers.drop_session(&p.session);
-                    writing();
-                    let r = self.d.sessions.remove(&p.session, p.discard, token)?;
-                    self.d.du.on_remove(p.session.as_str());
-                    Ok(json_of(&r))
+                    // status-perf D8: du lets go of the session first, and
+                    // stays off it until its figures are dropped.
+                    self.with_du_hold(std::slice::from_ref(&p.session), || {
+                        self.trackers.drop_session(&p.session);
+                        writing();
+                        let r = self.d.sessions.remove(&p.session, p.discard, token)?;
+                        self.d.du.on_remove(p.session.as_str());
+                        Ok(json_of(&r))
+                    })
                 })
             }
             Params::Gc(p) => {
@@ -867,14 +871,16 @@ impl<'d, 'a> Server<'d, 'a> {
             self.base_for(repo, &target_tree, &p.to)?;
             let repo_id = git.repo_id();
             let r = core.locks.with_sessions(std::slice::from_ref(s), || {
-                core.locks.with_repo(repo, || {
-                    let ws = workspace(core, s, repo)?;
-                    let plan = strata_deps::plan_switch(&ctx, p.id, s, &ws)?;
-                    let mut out = Vec::new();
-                    for step in &plan.steps {
-                        out.push(self.apply_step(step, &repo_id, repo, &mut Vec::new()));
-                    }
-                    Ok(out)
+                self.with_du_hold(std::slice::from_ref(s), || {
+                    core.locks.with_repo(repo, || {
+                        let ws = workspace(core, s, repo)?;
+                        let plan = strata_deps::plan_switch(&ctx, p.id, s, &ws)?;
+                        let mut out = Vec::new();
+                        for step in &plan.steps {
+                            out.push(self.apply_step(step, &repo_id, repo, &mut Vec::new()));
+                        }
+                        Ok(out)
+                    })
                 })
             })?;
             Value::Array(r)
@@ -956,27 +962,39 @@ impl<'d, 'a> Server<'d, 'a> {
         ids.dedup();
         let repo_id = git.repo_id();
         core.locks.with_sessions(&ids, || {
-            core.locks.with_repo(&repo, || {
-                recheck(&token, &action)?;
-                let cur = strata_deps::get_proposal(&core.store, id)?;
-                if cur.state != strata_deps::ProposalState::Pending {
-                    return Err(not_pending(&cur, None));
-                }
-                // 5.
-                let mut list = Vec::new();
-                for s in &ids {
-                    list.push((s.clone(), workspace(core, s, &repo)?));
-                }
-                let plan = strata_deps::plan_rollout(&ctx, id, &list, complete)?;
-                // 6.
-                writing();
-                let mut moved = Vec::new();
-                let results: Vec<Value> = plan.steps.iter().map(|st| self.apply_step(st, &repo_id, &repo, &mut moved)).collect();
-                // 7.
-                let after = strata_deps::record_rollout(&core.store, &plan, &moved)?;
-                Ok(json!({ "results": results, "proposal": json_of(&after) }))
+            self.with_du_hold(&ids, || {
+                core.locks.with_repo(&repo, || {
+                    recheck(&token, &action)?;
+                    let cur = strata_deps::get_proposal(&core.store, id)?;
+                    if cur.state != strata_deps::ProposalState::Pending {
+                        return Err(not_pending(&cur, None));
+                    }
+                    // 5.
+                    let mut list = Vec::new();
+                    for s in &ids {
+                        list.push((s.clone(), workspace(core, s, &repo)?));
+                    }
+                    let plan = strata_deps::plan_rollout(&ctx, id, &list, complete)?;
+                    // 6.
+                    writing();
+                    let mut moved = Vec::new();
+                    let results: Vec<Value> =
+                        plan.steps.iter().map(|st| self.apply_step(st, &repo_id, &repo, &mut moved)).collect();
+                    // 7.
+                    let after = strata_deps::record_rollout(&core.store, &plan, &moved)?;
+                    Ok(json!({ "results": results, "proposal": json_of(&after) }))
+                })
             })
         })
+    }
+
+    /// status-perf D8: run `f` with du held off `sessions` (their running
+    /// scans cancelled, waited for up to [`crate::du::HOLD_WAIT`]). Taken
+    /// inside the session queue and before the repo lock.
+    fn with_du_hold<T>(&self, sessions: &[SessionId], f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let ids: Vec<&str> = sessions.iter().map(SessionId::as_str).collect();
+        let _hold = self.d.du.hold_sessions(&ids, crate::du::HOLD_WAIT)?;
+        f()
     }
 
     /// One rollout step: a move (`moved`) or a per-entry skip; a failed
@@ -1038,7 +1056,8 @@ impl<'d, 'a> Server<'d, 'a> {
             env: &core.env,
             locks: &core.locks,
         };
-        let ctx = strata_publish::Ctx { store: &core.store, git, cfg: &rc, repo, deps: &deps, locks: &core.locks, sessions: &self.d.sessions };
+        let locks = PublishLocksDu { locks: &core.locks, du: &self.d.du };
+        let ctx = strata_publish::Ctx { store: &core.store, git, cfg: &rc, repo, deps: &deps, locks: &locks, sessions: &self.d.sessions };
         f(&ctx)
     }
 
@@ -1512,4 +1531,53 @@ fn landed_before(rows: &[strata_store::PublishRecord], b: &strata_types::Batch) 
             json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "push": o.get("push").cloned().unwrap_or(Value::Null) })
         })
     })
+}
+
+/// publish's locks, with the du hold (status-perf D8) on the rebase's take
+/// of its session: queue → du hold → repo lock. A hold that times out is
+/// the take's `Busy`, which the rebase waits out like the queue's.
+struct PublishLocksDu<'a> {
+    locks: &'a crate::locks::Locks,
+    du: &'a Arc<crate::du::Du>,
+}
+
+impl strata_publish::PublishLocks for PublishLocksDu<'_> {
+    fn with_sessions(
+        &self,
+        sessions: &[SessionId],
+        f: &mut dyn FnMut() -> strata_publish::Result<()>,
+    ) -> strata_publish::Result<strata_publish::Result<()>> {
+        strata_publish::PublishLocks::with_sessions(self.locks, sessions, f)
+    }
+
+    fn with_repo(
+        &self,
+        repo: &RepoName,
+        f: &mut dyn FnMut() -> strata_publish::Result<()>,
+    ) -> strata_publish::Result<strata_publish::Result<()>> {
+        strata_publish::PublishLocks::with_repo(self.locks, repo, f)
+    }
+
+    fn with_rebase_sessions(
+        &self,
+        sessions: &[SessionId],
+        f: &mut dyn FnMut() -> strata_publish::Result<()>,
+    ) -> strata_publish::Result<strata_publish::Result<()>> {
+        let ids: Vec<&str> = sessions.iter().map(SessionId::as_str).collect();
+        let mut refused = None;
+        let r = strata_publish::PublishLocks::with_sessions(self.locks, sessions, &mut || {
+            let held = self.du.hold_sessions(&ids, crate::du::HOLD_WAIT);
+            match held {
+                Ok(_hold) => f(),
+                Err(e) => {
+                    refused = Some(e);
+                    Ok(())
+                }
+            }
+        });
+        match refused {
+            Some(e) => Err(e),
+            None => r,
+        }
+    }
 }

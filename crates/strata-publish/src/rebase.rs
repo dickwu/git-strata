@@ -103,7 +103,7 @@ fn sleep_busy() {
 fn under_locks<T>(ctx: &Ctx, sessions: &[SessionId], f: &mut dyn FnMut() -> Result<T>) -> Result<T> {
     loop {
         let mut slot: Option<Result<T>> = None;
-        let r = ctx.locks.with_sessions(sessions, &mut || {
+        let r = ctx.locks.with_rebase_sessions(sessions, &mut || {
             loop {
                 match ctx.locks.with_repo(ctx.repo, &mut || {
                     slot = Some(f());

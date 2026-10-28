@@ -524,6 +524,8 @@ daemon 实现 `publish::PublishLocks`（`with_sessions`、`with_repo`），放�
 
 **创建耗时**。`new` 处理器量自己调 `sessions.new` 的墙钟时间，记在那条 `new` 记录的 `create_ms` 上（`seen`、`rm` 和旧记录没有这个字段）。`sessions.list[]` 每项带 `create_ms`（没有则 null）；`savings.cumulative` 加 `timed`（既有 `create_ms` 又量过的会话数）、`create_ms`（它们的耗时之和）、`timed_logical` 与 `timed_files`（同一批会话的 logical 字节和文件数），让界面拿同一批会话的耗时和体量对比。
 
+**写操作期间让开（status-perf D8）**。`rm`、`deps switch`/`deps approve` 的移动、publish 之后的 rebase 会检查工作区有没有被打开的文件；du 的扫描线程持有会话里的目录 fd，会让这项检查误判为 `OpenFiles`。所以这些写操作先对涉及的会话拿 du hold（`Du::hold_sessions`，顺序固定为「会话队列 → du hold → repo 锁」）：在 `scan` 锁里登记 hold、把这些会话的单元移出队列、对正在扫的单元置位它那一次扫描自己的取消 token，然后在条件变量上等它们结束，最多 5 s（`HOLD_WAIT`）。超时：`Busy`，`detail.reason = "du_cancel_timeout"`，什么都不做、不再查打开的文件。hold 期间这些会话的单元不进队列（`report`/`refresh`/`new` 的排队都跳过），被取消的扫描不写缓存（最后一次取消检查与写缓存在 `scan` 锁里，与登记 hold 串行），缓存保留上次的数字和 `as_of`。hold 在写操作结束时释放（`rm` 在 `on_remove` 之后），释放不排队，也不碰之后新扫描的 token；下一次 `du` 会把过期单元排回去。publish 的 rebase 发生在落地之后，hold 超时只是这次取锁的 `Busy`，rebase 照旧无上限地重试，不会变成 publish 的错误；落地前的取锁不拿 hold。`restore` 不需要：它的 OpenFiles 检查只看可写映射。测试：`du::tests::a_hold_*`、`a_cancelled_scan_keeps_the_last_figures`、`session_of_decodes_unit_keys`。
+
 **准确度**。private 是 APFS 的 `ATTR_CMNEXT_PRIVATESIZE`：只属于这个文件的块；被克隆共享的 extent 一次也不算。allocated（`ATTR_FILE_DATAALLOCSIZE`）对每个持有它的文件各算一次。一个单元的真实占用在 private 与 allocated 之间；删掉它能释放的也在这个区间，且 Time Machine 快照可能留住释放的块。没有公开的 API 能问"删掉这棵树能释放多少"：`F_LOG2PHYS_EXT` 要逐文件逐 extent 调用，太慢，也只给物理偏移、不给引用计数，所以不用 [实现时补的决定]（2026-10-26）。测试：`du::tests`（单元划分、新鲜判定、缓存回答与排队、改动/新建/删除的失效、重开读缓存）与 `tests/daemon.rs::du_sizes_sessions_records_new_and_rm_and_gc_empties_trash`。
 
 ### 5.11 复杂度

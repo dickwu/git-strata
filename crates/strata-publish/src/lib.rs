@@ -55,4 +55,11 @@ pub trait PublishLocks: Sync {
     fn with_sessions(&self, sessions: &[SessionId], f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>>;
     /// Hold `repo`'s write lock while `f` runs.
     fn with_repo(&self, repo: &RepoName, f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>>;
+    /// The rebase's take of its sessions' queue places (§5.8): what
+    /// `with_sessions` holds plus anything else a workspace move needs
+    /// quiet (the daemon's du hold, status-perf D8). A `Busy` is waited
+    /// out like the queue's.
+    fn with_rebase_sessions(&self, sessions: &[SessionId], f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>> {
+        self.with_sessions(sessions, f)
+    }
 }
