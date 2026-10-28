@@ -1,0 +1,67 @@
+{
+  "results": [
+    {
+      "session": "s-aaa",
+      "kind": "moved",
+      "report": {
+        "session": "s-aaa",
+        "repo": "admin",
+        "from": 3,
+        "from_head": "3b416ebaa",
+        "to": 4,
+        "head": "ed8aac01",
+        "dropped": [],
+        "conflicts": [],
+        "lww": [],
+        "uncarried": []
+      }
+    },
+    {
+      "session": "s-ggg",
+      "kind": "skipped",
+      "code": "OpenFiles",
+      "detail": {
+        "path": "/v/s-ggg/admin/node_modules",
+        "holders": [
+          "node (pid 9)"
+        ]
+      }
+    },
+    {
+      "session": "s-hhh",
+      "kind": "skipped",
+      "code": "Busy",
+      "detail": {
+        "reason": "lock_wait",
+        "lock": {
+          "session": "s-hhh"
+        },
+        "holder": "publish",
+        "holder_session": "s-hhh"
+      }
+    },
+    {
+      "session": "s-iii",
+      "kind": "skipped",
+      "code": "IoError",
+      "detail": {
+        "message": "disk full"
+      }
+    }
+  ],
+  "proposal": {
+    "id": 22,
+    "repo": "admin",
+    "created": "2026-10-28T15:46:00Z",
+    "origin": {
+      "kind": "Main"
+    },
+    "state": {
+      "kind": "Pending"
+    },
+    "from": "468343aa",
+    "to": "ed8aac11",
+    "from_inputs": "i1",
+    "to_inputs": "i2"
+  }
+}

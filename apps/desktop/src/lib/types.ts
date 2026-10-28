@@ -113,9 +113,43 @@ export interface Proposal {
   repo: string;
   created: string;
   origin: { kind: string; session?: string };
-  state: { kind: string };
+  /** Pending, Applied, AwaitingPublish or `{kind: 'Superseded', by}`. */
+  state: { kind: string; by?: number };
   from: string;
   to: string;
+  /** Hashes of the install inputs; differing means the lockfile or manifests changed (deps.md). */
+  from_inputs?: string;
+  to_inputs?: string;
+  /** Main's tree and commit the proposal was made from. */
+  tree?: string | null;
+  head?: string | null;
+}
+
+/** A session's move report (strata-session MoveReport); only what the modal reads is typed. */
+export interface MoveReport {
+  conflicts: string[];
+  dropped: string[];
+  lww: string[];
+  uncarried: string[];
+  old_tree?: string;
+  [k: string]: unknown;
+}
+
+/** One `deps_approve` result row (handlers.rs apply_step). */
+export type ApproveRow =
+  | { session: string; kind: 'moved'; report: MoveReport }
+  | {
+      session: string;
+      kind: 'skipped';
+      /** Present on failed moves and on OpenFiles / Drift / Error skips. */
+      code?: string;
+      /** A SkipReason (`{kind, ...}`), or a failed move's error detail (no `kind`). */
+      detail: unknown;
+    };
+
+export interface ApproveReply {
+  results: ApproveRow[];
+  proposal: Proposal;
 }
 
 export interface DepsList {

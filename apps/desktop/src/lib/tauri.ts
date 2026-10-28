@@ -1,8 +1,8 @@
-import type { GuiError, StartProgress, Started } from './types';
+import type { ApproveReply, GuiError, StartProgress, Started } from './types';
 
 /**
  * The commands the back end registers (src-tauri/src/lib.rs): the six P1 reads, plus
- * legacy_agent and daemon_start (S0, main window only).
+ * legacy_agent and daemon_start (S0) and deps_approve (gui-approve), main window only.
  */
 export type Command =
   | 'daemon_status'
@@ -12,7 +12,8 @@ export type Command =
   | 'du'
   | 'deps_list'
   | 'legacy_agent'
-  | 'daemon_start';
+  | 'daemon_start'
+  | 'deps_approve';
 
 export const OPEN_EVENT = 'strata://open';
 
@@ -67,4 +68,13 @@ export async function startDaemon(onProgress: (p: StartProgress) => void): Promi
   const ch = new Channel<StartProgress>();
   ch.onmessage = onProgress;
   return call<Started>('daemon_start', { onProgress: ch });
+}
+
+/**
+ * deps_approve (gui-approve D1/D2=b): the daemon shows the Touch ID / password prompt and
+ * approves the whole proposal as it sees it then. `sessions` is always null in this slice
+ * (D4: subsets come with S2); `[]` is refused here and in the back end.
+ */
+export function approveProposal(proposal: number): Promise<ApproveReply> {
+  return call<ApproveReply>('deps_approve', { proposal, sessions: null });
 }

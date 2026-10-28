@@ -1,4 +1,10 @@
 /** Every user-visible string (gui.md §5.2: English only, sentence case, say what to do). */
+/**
+ * The text the daemon's prompt names for an approval (strata-confirm reason.rs:
+ * "approve dependency proposal {}"); copy.test.ts checks the core still says this.
+ */
+export const promptText = (id: number) => `approve dependency proposal ${id}`;
+
 export const copy = {
   app: 'GIT STRATA',
   nav: {
@@ -18,6 +24,124 @@ export const copy = {
     resolve: 'Resolve it in the session workspace.',
     open: (session: string) => `Open ${session}`,
     stale: 'Could not refresh. These may be out of date.',
+    review: 'Review',
+    reviewLabel: (what: string) => `Review ${what}`,
+  },
+  /** The review modal (gui-approve design §4, decisions D1–D6). Sentence case, no "we". */
+  review: {
+    depsTitle: (id: number, repo: string) => `Deps proposal ${id} in ${repo}`,
+    conflictTitle: (repo: string) => `Conflicts in ${repo}`,
+    fromMain: 'From the main branch',
+    fromSession: (s: string) => `From session ${s}`,
+    proposed: 'proposed',
+    mainAt: 'Main at',
+    deps: 'Dependencies',
+    inputsChanged: 'install inputs changed',
+    inputsSame: 'install inputs unchanged (toolchain or deps config changed)',
+    loading: 'Reading the latest state from the daemon…',
+    readFailed: 'Could not read the latest state, so Approve is off.',
+    scopeHeading: 'What Approve covers',
+    scope: (id: number, repo: string) =>
+      `Approve applies proposal ${id} to every session on ${repo} that can move at the moment you confirm, as the daemon sees it then. This view does not list those sessions yet; the result lists each one that moved or was skipped.`,
+    promptHeading: 'What happens when you approve',
+    prompt: (id: number) =>
+      `macOS asks for Touch ID or your password. The prompt names “${promptText(id)}”.`,
+    promptCheck: "If the number is different, or you didn't click Approve, cancel it.",
+    terminal: 'Or approve it in a terminal:',
+    command: (id: number) => `git-strata deps approve ${id}`,
+    copyCommand: 'Copy terminal command',
+    copyPath: 'Copy path',
+    copied: 'Copied',
+    copyFailed: 'Could not copy',
+    close: 'Close',
+    approve: 'Approve',
+    reviewAgain: 'Review again',
+    reviewOther: (id: number) => `Review proposal ${id}`,
+    openSession: (s: string) => `Open ${s}`,
+    confirming: (id: number) => `Look for the macOS prompt for proposal ${id}.`,
+    confirmingNote: 'Nothing moves until you pass it. Cancel the prompt to stop.',
+    stillWorking: 'Still working: installing dependencies can take minutes.',
+    stopWaiting: 'Stop waiting',
+    gone: (id: number) => `Proposal ${id} is no longer pending.`,
+    goneNote:
+      'It was approved or replaced. The daemon only lists open proposals, so this view cannot tell which.',
+    otherPending: (id: number, repo: string) => `Proposal ${id} is now waiting in ${repo}.`,
+    conflictSession: 'Session',
+    conflictRepo: 'Repo',
+    conflictNote:
+      "These files kept the session's version when it moved to the new base. Fix them in the session's workspace.",
+    noConflicts: (repo: string) => `No conflicts left in ${repo}.`,
+    conflictPaths: (n: number) => (n === 1 ? '1 conflicted path' : `${n} conflicted paths`),
+    result: {
+      heading: 'Result',
+      unknown: 'Result unknown.',
+      unknownRows: (s: string[]) =>
+        `Result unknown for ${s.join(', ')}: the move may have happened.`,
+      unknownNote:
+        'Check the sessions before doing anything else. Close this and open the item again to read the current state.',
+      detachedNote:
+        'The modal stopped waiting; the daemon may still finish. The lists refresh when it answers.',
+      applied: (n: number) =>
+        n === 0
+          ? 'Approved. No session needed to move.'
+          : n === 1
+            ? 'Approved. Moved 1 session.'
+            : `Approved. Moved ${n} sessions.`,
+      subset: (id: number) =>
+        `Selected sessions updated. Proposal ${id} stays waiting for the others.`,
+      skipped: (k: number, id: number) =>
+        k === 1
+          ? `Approved, but 1 session was skipped, so proposal ${id} stays waiting.`
+          : `Approved, but ${k} sessions were skipped, so proposal ${id} stays waiting.`,
+      failed: (k: number, id: number) =>
+        k === 1
+          ? `1 session failed to move, so proposal ${id} stays waiting.`
+          : `${k} sessions failed to move, so proposal ${id} stays waiting.`,
+      state: (id: number, state: string) => `Proposal ${id} is now ${state}.`,
+      notApproved: 'Not approved.',
+      notConfirmed: {
+        cancelled: 'The prompt was cancelled. Nothing moved.',
+        failed: 'Authentication failed. Nothing moved.',
+        timeout: 'The prompt timed out. Nothing moved.',
+        interrupted: 'The prompt was interrupted. Nothing moved.',
+      } as Record<string, string>,
+      promptOpen:
+        "Another git-strata confirmation prompt is already open. If you didn't start it, cancel it.",
+      planChanged: 'The sessions to move changed since you looked. Nothing moved.',
+      replaced: (id: number, by: number) =>
+        `Proposal ${id} was replaced by proposal ${by}. Nothing moved.`,
+      alreadyApproved: 'Already approved.',
+      notPending: (id: number, state: string) =>
+        `Proposal ${id} is no longer pending (${state}). Nothing moved.`,
+      headMoved:
+        'Main moved after this proposal was made. Nothing moved. An updated proposal will be registered; review that one.',
+      lockWait: (holder: string, lock: string) =>
+        `Another change (${holder}) was holding ${lock}. Nothing moved. Try again; it asks for confirmation again.`,
+      unknownHolder: 'holder unknown',
+      shuttingDown: 'The daemon is shutting down. Nothing moved.',
+      buildLock: 'Dependencies are being installed by another task. Nothing moved. Try again later.',
+      daemonDown: "The daemon isn't running, so nothing was sent.",
+      inFlight: 'An approval is already being sent. Wait for its result.',
+      unsupported: (r: string) => `This Mac can't show the confirmation prompt (${r}).`,
+      other: (message: string, code: string) => `${message} (${code})`,
+      rowMoved: '✓ Moved',
+      rowSkipped: '– Skipped',
+      rowFailed: '✕ Failed',
+      rowUnknown: '? Unknown',
+      conflicts: (n: number) => (n === 1 ? '1 conflict' : `${n} conflicts`),
+      checkStatus: 'Check its status before trying again.',
+      skip: {
+        Untracked: 'Does not track this repo',
+        AlreadyThere: 'Already on these dependencies',
+        NotReady: 'Not ready yet',
+        OwnChange: 'Has its own dependency edits',
+        Drift: 'Has its own dependency edits',
+        OpenFiles: 'Files in the old tree are open',
+      } as Record<string, string>,
+      ownProposal: (id: number) => `proposal ${id}`,
+      openFile: (path: string, command: string, pid: number | string) =>
+        `${path} (${command}, pid ${pid})`,
+    },
   },
   palette: {
     placeholder: 'Search sessions and screens',
