@@ -74,7 +74,7 @@
       "reason": "main_moved",
       "proposal": 22,
       "head": "aaa0000000000000000000000000000000000000",
-      "tip": "bbb"
+      "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     }
   },
   "lock_wait": {

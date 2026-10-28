@@ -56,7 +56,7 @@
       "detail": {
         "kind": "Drift",
         "drift": {
-          "pinned": "a",
+          "pinned": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "pinned_inputs": "b",
           "found_inputs": "c"
         }
