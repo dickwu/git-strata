@@ -198,10 +198,21 @@ pub const STATUS_AFTER: &str = "EXAMPLES
   git-strata status                  # the session of the cwd
   git-strata status --session PROJ-123
   git-strata status --all            # {sessions:[...]}
+  git-strata status --brief          # store only: no drift/seeds/mirrors/old trees
 
 A workspace with health Unknown carries choices [\"abandon\",\"accept\"]: a move
 stopped midway; that is the human's `git-strata resolve`. Works without the daemon.
 --session with --all is InvalidInput both_selectors.
+";
+
+pub const LS_AFTER: &str = "EXAMPLES
+  git-strata ls                      # {sessions:[{id,ticket,state,created,repos,phase?}]}
+  git-strata ls --table              # ID TICKET STATE REPOS CREATED
+
+From the store alone, sorted by id; never stats a workspace or runs git.
+Without the daemon (or with one that predates it) the store is read
+directly and data.source is \"local\". With --table a success prints only
+the table; an error is still the JSON envelope.
 ";
 
 pub const CHECKPOINT_AFTER: &str = "EXAMPLES

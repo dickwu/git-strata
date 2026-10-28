@@ -47,7 +47,13 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
             _ => return emit_stdout(&Envelope::err(parse_error(&argv, &e))),
         },
     };
+    // status-perf C: `ls --table` prints a table instead of a successful
+    // envelope (a stated exception to D19); errors stay envelopes.
+    let table = matches!(cli.cmd, Cmd::Ls { table: true });
     let mut env = dispatch(cli.cmd);
+    if table && env.ok {
+        return cmds::emit_table(&env);
+    }
     // D20: on success, the proposals still Pending for the session the
     // command resolved go into `data.pending_proposals` (before the
     // envelope is written); a failed read changes nothing.
@@ -139,7 +145,9 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Config(ConfigCmd::Relax { repo }) => c::config_relax(&ctx, &repo),
         Cmd::New { ticket_flag, ticket, repo, repos } => cmds::new(&ctx, ticket_flag, ticket, &repo, &repos),
         Cmd::Add { session, repo } => cmds::add(&ctx, session, &repo),
-        Cmd::Status { sel } => cmds::status(&ctx, &sel),
+        Cmd::Status { sel, brief: true } => cmds::status_brief(&ctx, &sel),
+        Cmd::Status { sel, brief: false } => cmds::status(&ctx, &sel),
+        Cmd::Ls { .. } => cmds::ls(&ctx),
         Cmd::Checkpoint { tool_call, message, session, paths } => cmds::checkpoint(&ctx, tool_call, message, session, &paths),
         Cmd::Restore { checkpoint, paths, session } => cmds::restore(&ctx, &checkpoint, &paths, session),
         Cmd::Grep { pattern, sel } => cmds::grep(&ctx, &pattern, &sel),

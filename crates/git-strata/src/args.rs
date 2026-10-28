@@ -63,6 +63,18 @@ pub enum Cmd {
     Status {
         #[command(flatten)]
         sel: Select,
+        /// From the store alone: the session fields and each workspace's
+        /// recorded health, path and checkpoint (no drift, seeds, mirrors,
+        /// old trees)
+        #[arg(long)]
+        brief: bool,
+    },
+    /// List live sessions from the store (id, ticket, state, repos, created)
+    #[command(after_long_help = crate::help::LS_AFTER)]
+    Ls {
+        /// A table for people instead of the envelope (errors stay envelopes)
+        #[arg(long)]
+        table: bool,
     },
     /// Record a checkpoint (exactly one of --tool-call / -m)
     #[command(after_long_help = crate::help::CHECKPOINT_AFTER)]

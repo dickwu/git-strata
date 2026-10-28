@@ -183,6 +183,130 @@ pub fn status(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
     Ok(Envelope::ok(one))
 }
 
+// ---- ls, status --brief (status-perf C) ---------------------------------------
+
+/// A daemon that predates `summary`/`workspaces` refuses them before
+/// dispatch (`deny_unknown_fields`): an RPC `Failed` naming the field.
+fn predates_summary(e: &StrataError) -> bool {
+    let rpc_failed = e.code == Code::InvalidInput
+        && e.detail.as_ref().and_then(|d| d.get("rpc")).and_then(Value::as_str) == Some("Failed");
+    rpc_failed && (e.message.contains("unknown field `summary`") || e.message.contains("unknown field `workspaces`"))
+}
+
+/// `status{summary:true}` from the daemon; the store read only when no
+/// daemon listens (D5) or the daemon predates `summary`. Returns the
+/// sessions and whether they came from the store directly.
+fn summaries(ctx: &Ctx, sel: &Select, workspaces: bool) -> Result<(Vec<Value>, bool)> {
+    let here = cwd();
+    let mut params = json!({ "cwd": here, "session": sel.session, "all": sel.all, "summary": true });
+    if workspaces {
+        params["workspaces"] = json!(true);
+    }
+    match ctx.try_call("status", params, Kind::Read) {
+        Ok(v) => Ok((v["sessions"].as_array().cloned().unwrap_or_default(), false)),
+        Err(CallError::Failed(e)) if !predates_summary(&e) => Err(e),
+        Err(_) => {
+            let config = ctx.config()?;
+            let store = ro::open_store(&config)?;
+            let which = if sel.all {
+                strata_session::SummarySelect::All
+            } else if let Some(s) = sel.session.as_deref() {
+                strata_session::SummarySelect::Session(s)
+            } else {
+                strata_session::SummarySelect::Cwd(&here)
+            };
+            let v = strata_session::summary(&store, &config.paths.root, which, workspaces)?;
+            let v = serde_json::to_value(v).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
+            Ok((v.as_array().cloned().unwrap_or_default(), true))
+        }
+    }
+}
+
+/// `ls`: every live session, by id.
+pub fn ls(ctx: &Ctx) -> Result<Envelope> {
+    let (list, local) = summaries(ctx, &Select { session: None, all: true }, false)?;
+    let mut data = json!({ "sessions": list });
+    if local {
+        data["source"] = json!("local");
+    }
+    Ok(Envelope::ok(data))
+}
+
+/// `status --brief`: as `status` (one session, or `{sessions}` with
+/// `--all`), from the store alone.
+pub fn status_brief(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
+    both_selectors(sel)?;
+    let (list, local) = summaries(ctx, sel, true)?;
+    let mut data = if sel.all {
+        json!({ "sessions": list })
+    } else {
+        let one = list.into_iter().next().ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
+        if let Some(s) = sid(&one["id"]) {
+            hint(s);
+        }
+        one
+    };
+    if local && let Some(m) = data.as_object_mut() {
+        m.insert("source".into(), json!("local"));
+    }
+    Ok(Envelope::ok(data))
+}
+
+/// `ls --table` on success: `ID TICKET STATE REPOS CREATED`, one row per
+/// session. Returns the exit code.
+pub fn emit_table(env: &Envelope) -> i32 {
+    use std::io::Write;
+    let text = table_of(&env.data);
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    let r = lock.write_all(text.as_bytes()).and_then(|()| lock.flush());
+    if let Err(e) = &r {
+        let _ = writeln!(std::io::stderr(), "git-strata: stdout_write_failed: {e}");
+    }
+    if env.data["source"] == "local" {
+        eprintln!("note: read from the store directly (no daemon answering summary)");
+    }
+    env.exit_code(&r)
+}
+
+/// The `ls --table` text for `ls`'s `data`.
+pub fn table_of(data: &Value) -> String {
+    let head = ["ID", "TICKET", "STATE", "REPOS", "CREATED"];
+    let mut rows: Vec<[String; 5]> = vec![head.map(str::to_string)];
+    for s in data["sessions"].as_array().into_iter().flatten() {
+        let text = |v: &Value| v.as_str().map(str::to_string).unwrap_or_else(|| "-".into());
+        let repos: Vec<&str> = s["repos"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        rows.push([
+            text(&s["id"]),
+            text(&s["ticket"]),
+            text(&s["state"]),
+            if repos.is_empty() { "-".into() } else { repos.join(",") },
+            text(&s["created"]),
+        ]);
+    }
+    let mut width = [0usize; 5];
+    for r in &rows {
+        for (w, c) in width.iter_mut().zip(r) {
+            *w = (*w).max(c.chars().count());
+        }
+    }
+    let mut out = String::new();
+    for r in &rows {
+        let mut line = String::new();
+        for (i, c) in r.iter().enumerate() {
+            if i + 1 == r.len() {
+                line.push_str(c);
+            } else {
+                line.push_str(c);
+                line.push_str(&" ".repeat(width[i] - c.chars().count() + 2));
+            }
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
 /// §5.1: the daemon is down; `Sessions::open` over the reader store.
 fn local_status(ctx: &Ctx, sel: &Select) -> Result<Vec<Value>> {
     let local = Local::open(ctx.config()?)?;
