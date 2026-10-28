@@ -47,6 +47,16 @@ fn json_of<T: serde::Serialize>(v: &T) -> Value {
     serde_json::to_value(v).unwrap_or(Value::Null)
 }
 
+/// The wire shape of one lease (`ports_ensure` / `ports_reassign`).
+fn lease_json(l: &strata_store::DevPortLease) -> Value {
+    json!({
+        "session": l.session.as_str(),
+        "repo": l.repo.as_str(),
+        "base": l.base,
+        "ports": { "web": l.web(), "connector": l.connector(), "connector_mcp": l.connector_mcp(), "aux": l.aux() },
+    })
+}
+
 fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -418,6 +428,7 @@ fn session_of(p: &Params) -> Option<SessionId> {
         Params::Rm(p) => Some(p.session.clone()),
         Params::Add(p) => Some(p.session.clone()),
         Params::ResolveMove(p) => Some(p.session.clone()),
+        Params::PortsEnsure(p) | Params::PortsReassign(p) => Some(p.session.clone()),
         _ => None,
     }
 }
@@ -622,6 +633,17 @@ impl<'d, 'a> Server<'d, 'a> {
             }
             Params::DaemonStatus(p) => self.d.daemon_status(p.verify),
             Params::Du(p) => Ok(self.d.du.report(p.refresh)),
+            // design dev-ports §3.1: under the session queue, so serialized
+            // with rm's Active→Removing→Removed; the store re-reads the
+            // lifecycle inside its write txn.
+            Params::PortsEnsure(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
+                writing();
+                Ok(lease_json(&core.store.ensure_dev_ports(&p.session, &p.repo)?))
+            }),
+            Params::PortsReassign(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
+                writing();
+                Ok(lease_json(&core.store.reassign_dev_ports(&p.session, &p.repo)?))
+            }),
             Params::ResolveMove(p) => {
                 let Some(choice) = resolve::move_choice(p.abandon, p.accept) else {
                     return Err(StrataError::new(Code::InvalidInput, "exactly one of abandon and accept")

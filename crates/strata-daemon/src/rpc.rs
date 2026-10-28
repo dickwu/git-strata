@@ -70,6 +70,8 @@ methods! {
     ConfigRelax = "config_relax", ro = false;
     DaemonStatus = "daemon_status", ro = true;
     Du = "du", ro = true;
+    PortsEnsure = "ports_ensure", ro = false;
+    PortsReassign = "ports_reassign", ro = false;
 }
 
 /// A field that must be present but may be `null` (a missing one is
@@ -241,6 +243,14 @@ pub struct RepoParams {
     pub repo: RepoName,
 }
 
+/// `ports_ensure` / `ports_reassign`: one workspace's dev-port lease.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortsParams {
+    pub session: SessionId,
+    pub repo: RepoName,
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssignParams {
@@ -317,6 +327,8 @@ pub enum Params {
     ConfigRelax(RepoParams),
     DaemonStatus(DaemonStatusParams),
     Du(DuParams),
+    PortsEnsure(PortsParams),
+    PortsReassign(PortsParams),
 }
 
 fn typed<T: DeserializeOwned>(v: Value, wrap: fn(T) -> Params) -> Result<Params, String> {
@@ -359,6 +371,8 @@ impl Params {
             Method::ConfigRelax => typed(v, Params::ConfigRelax),
             Method::DaemonStatus => typed(v, Params::DaemonStatus),
             Method::Du => typed(v, Params::Du),
+            Method::PortsEnsure => typed(v, Params::PortsEnsure),
+            Method::PortsReassign => typed(v, Params::PortsReassign),
         }
     }
 }

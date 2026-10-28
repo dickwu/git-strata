@@ -1376,6 +1376,49 @@ fn new_records_the_agent_and_daemon_status_lists_the_feature() {
     core.close().unwrap();
 }
 
+/// dev-ports: `daemon_status.features` lists `session.ports`; `new` leases
+/// a block; `ports_ensure` returns it unchanged; `ports_reassign` moves it;
+/// after `rm` the lease is gone and neither RPC brings it back.
+#[test]
+fn new_leases_dev_ports_and_ensure_reassign_rm_follow_the_lifecycle() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let dst = ok(call(&sock, "daemon_status", json!({ "verify": false })));
+        assert!(dst["features"].as_array().unwrap().contains(&json!("session.ports")), "{dst:#}");
+        let id = new_session(&sock);
+        let leased = core.store.dev_port_leases(Some(&id)).unwrap().unwrap();
+        assert_eq!(leased.len(), 1, "{leased:?}");
+        let base = leased[0].base;
+        assert!((20000..=29996).contains(&base) && base % 4 == 0, "{base}");
+
+        let p = json!({ "session": id.as_str(), "repo": "tool" });
+        let e = ok(call(&sock, "ports_ensure", p.clone()));
+        assert_eq!(e["base"], json!(base), "{e:#}");
+        assert_eq!(e["ports"], json!({ "web": base, "connector": base + 1, "connector_mcp": base + 2, "aux": base + 3 }));
+        let r = ok(call(&sock, "ports_reassign", p.clone()));
+        assert_ne!(r["base"], json!(base), "{r:#}");
+        assert_eq!(ok(call(&sock, "ports_ensure", p.clone()))["base"], r["base"]);
+
+        let r = call(&sock, "ports_ensure", json!({ "session": id.as_str(), "repo": "nope" }));
+        assert_eq!(r["error"]["code"], "NoSuchRepo", "{r:#}");
+        let r = call(&sock, "ports_ensure", json!({ "session": id.as_str(), "repo": "tool", "extra": 1 }));
+        assert_eq!(r["error"]["rpc"], "Failed", "{r:#}");
+
+        ok(call(&sock, "rm", json!({ "session": id.as_str(), "discard": false })));
+        assert_eq!(core.store.dev_port_leases(Some(&id)).unwrap().unwrap(), vec![]);
+        for m in ["ports_ensure", "ports_reassign"] {
+            let r = call(&sock, m, p.clone());
+            assert_eq!(r["error"]["code"], "NoSuchSession", "{m}: {r:#}");
+        }
+        assert_eq!(core.store.dev_port_leases(Some(&id)).unwrap().unwrap(), vec![]);
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 /// Review P1-3: a finished connection leaves nothing behind (the clone the
 /// daemon keeps for the stop goes with it), and connections past
 /// `MAX_CONNS` wait instead of each taking a thread.
