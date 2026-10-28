@@ -874,7 +874,7 @@ impl Du {
     fn scan_unit_with(&self, key: &str, cancel: &AtomicBool) {
         let path = self.root.join(key);
         let Some((ino, mtime)) = stat(&path) else {
-            lock(&self.cache).units.remove(key);
+            self.forget_unless_cancelled(key, cancel);
             return;
         };
         let started = now_ms();
@@ -892,7 +892,9 @@ impl Du {
                 lock(&self.cache).units.insert(key.to_owned(), e);
             }
             Err(e) if e.code == strata_types::Code::NoSuchPath => {
-                lock(&self.cache).units.remove(key);
+                if !self.forget_unless_cancelled(key, cancel) {
+                    return;
+                }
             }
             Err(e) => {
                 if !stopped() {
@@ -908,6 +910,18 @@ impl Du {
         if let Some(sid) = session_of(key) {
             self.maybe_record(sid);
         }
+    }
+
+    /// Drop `key`'s cached figures because its root is gone, unless a hold
+    /// cancelled the scan: the check and the removal are one `scan`
+    /// critical section, like the insert. False when cancelled.
+    fn forget_unless_cancelled(&self, key: &str, cancel: &AtomicBool) -> bool {
+        let _st = lock(&self.scan);
+        if cancel.load(Ordering::SeqCst) {
+            return false;
+        }
+        lock(&self.cache).units.remove(key);
+        true
     }
 
     /// First sizing of a session: `new` (created by this daemon) or `seen`.
@@ -1175,6 +1189,21 @@ mod tests {
         assert!(lock(&du.scan).failed.is_empty(), "a cancel is no failure");
         du.scan_unit(key);
         assert!(lock(&du.cache).units.get(key).copied().unwrap().fig.logical > before.fig.logical);
+    }
+
+    #[test]
+    fn a_cancelled_scan_of_a_gone_root_keeps_the_last_figures() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let key = "sessions/s-aaaaaaaa";
+        du.scan_unit(key);
+        assert!(lock(&du.cache).units.contains_key(key));
+        std::fs::rename(root.join(key), root.join("sessions/gone")).unwrap();
+        du.scan_unit_with(key, &AtomicBool::new(true));
+        assert!(lock(&du.cache).units.contains_key(key), "a cancelled scan removes nothing");
+        du.scan_unit(key);
+        assert!(!lock(&du.cache).units.contains_key(key));
     }
 
     #[test]
