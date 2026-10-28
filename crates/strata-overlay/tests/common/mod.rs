@@ -212,6 +212,7 @@ impl World {
         let m = SessionManifest {
             id: w.sid.clone(),
             ticket: None,
+            agent: None,
             root: w.root.join("sessions/s-ovrlayaa"),
             repos,
         };

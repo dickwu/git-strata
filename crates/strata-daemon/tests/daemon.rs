@@ -1477,6 +1477,96 @@ fn slim_new_then_add_over_the_socket() {
     core.close().unwrap();
 }
 
+/// agent-id: `daemon_status.features` lists `new.agent`; `new` stores the
+/// agent and `status` shows it as `manifest.agent`; absent or null stores
+/// none; a bad name is InvalidInput reason `agent` and creates nothing; a
+/// non-string is an rpc `Failed`.
+#[test]
+fn new_records_the_agent_and_daemon_status_lists_the_feature() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let dst = ok(call(&sock, "daemon_status", json!({ "verify": false })));
+        assert!(dst["features"].as_array().unwrap().contains(&json!("new.agent")), "{dst:#}");
+
+        let s = ok(call(&sock, "new", json!({ "ticket": null, "repos": ["tool"], "agent": "claude-code" })));
+        assert_eq!(s["session"]["manifest"]["agent"], "claude-code", "{s:#}");
+        let id = s["session"]["manifest"]["id"].as_str().unwrap().to_string();
+        let st = ok(call(&sock, "status", json!({ "cwd": null, "session": id, "all": false })));
+        assert_eq!(st["sessions"][0]["status"]["manifest"]["agent"], "claude-code", "{st:#}");
+
+        for p in [json!({ "ticket": null, "repos": ["tool"] }), json!({ "ticket": null, "repos": ["tool"], "agent": null })] {
+            let s = ok(call(&sock, "new", p));
+            assert!(s["session"]["manifest"].get("agent").is_none(), "absent, not null: {s:#}");
+        }
+        let count = || ok(call(&sock, "status", json!({ "cwd": null, "session": null, "all": true })))["sessions"].as_array().unwrap().len();
+        assert_eq!(count(), 3);
+
+        for bad in ["", "bad name", "-x", "é"] {
+            let r = call(&sock, "new", json!({ "ticket": null, "repos": ["tool"], "agent": bad }));
+            assert_eq!(r["error"]["code"], "InvalidInput", "{bad:?}: {r:#}");
+            assert_eq!(r["error"]["detail"]["reason"], "agent", "{bad:?}: {r:#}");
+        }
+        let r = call(&sock, "new", json!({ "ticket": null, "repos": ["tool"], "agent": 5 }));
+        assert_eq!(r["ok"], json!(false), "{r:#}");
+        assert_eq!(r["error"]["rpc"], "Failed", "{r:#}");
+        assert_eq!(count(), 3, "refused requests create nothing");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
+/// dev-ports: `daemon_status.features` lists `session.ports`; `new` leases
+/// a block; `ports_ensure` returns it unchanged; `ports_reassign` moves it;
+/// after `rm` the lease is gone and neither RPC brings it back.
+#[test]
+fn new_leases_dev_ports_and_ensure_reassign_rm_follow_the_lifecycle() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let dst = ok(call(&sock, "daemon_status", json!({ "verify": false })));
+        assert!(dst["features"].as_array().unwrap().contains(&json!("session.ports")), "{dst:#}");
+        let id = new_session(&sock);
+        let leased = core.store.dev_port_leases(Some(&id)).unwrap().unwrap();
+        assert_eq!(leased.len(), 1, "{leased:?}");
+        let base = leased[0].base;
+        assert!((20000..=29996).contains(&base) && base.is_multiple_of(4), "{base}");
+
+        let p = json!({ "session": id.as_str(), "repo": "tool" });
+        let e = ok(call(&sock, "ports_ensure", p.clone()));
+        assert_eq!(e["base"], json!(base), "{e:#}");
+        assert_eq!(e["ports"], json!({ "web": base, "connector": base + 1, "connector_mcp": base + 2, "aux": base + 3 }));
+        let checked = json!({ "session": id.as_str(), "repo": "tool", "checked": base });
+        let r = ok(call(&sock, "ports_reassign", checked.clone()));
+        assert_ne!(r["base"], json!(base), "{r:#}");
+        assert_eq!(ok(call(&sock, "ports_ensure", p.clone()))["base"], r["base"]);
+        // the same check again is stale: the lease stays where it went
+        let stale = call(&sock, "ports_reassign", checked);
+        assert_eq!(stale["error"]["code"], "Busy", "{stale:#}");
+        assert_eq!(stale["error"]["detail"]["reason"], "lease_changed", "{stale:#}");
+        assert_eq!(ok(call(&sock, "ports_ensure", p.clone()))["base"], r["base"]);
+
+        let r = call(&sock, "ports_ensure", json!({ "session": id.as_str(), "repo": "nope" }));
+        assert_eq!(r["error"]["code"], "NoSuchRepo", "{r:#}");
+        let r = call(&sock, "ports_ensure", json!({ "session": id.as_str(), "repo": "tool", "extra": 1 }));
+        assert_eq!(r["error"]["rpc"], "Failed", "{r:#}");
+
+        ok(call(&sock, "rm", json!({ "session": id.as_str(), "discard": false })));
+        assert_eq!(core.store.dev_port_leases(Some(&id)).unwrap().unwrap(), vec![]);
+        for m in ["ports_ensure", "ports_reassign"] {
+            let r = call(&sock, m, p.clone());
+            assert_eq!(r["error"]["code"], "NoSuchSession", "{m}: {r:#}");
+        }
+        assert_eq!(core.store.dev_port_leases(Some(&id)).unwrap().unwrap(), vec![]);
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 /// Review P1-3: a finished connection leaves nothing behind (the clone the
 /// daemon keeps for the stop goes with it), and connections past
 /// `MAX_CONNS` wait instead of each taking a thread.

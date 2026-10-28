@@ -4,6 +4,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
@@ -54,7 +55,20 @@ pub fn listening(socket: &Path) -> bool {
 
 /// Send `method` with `params`; the reply's `data`, or its error as is.
 pub fn call(socket: &Path, method: &str, params: Value, kind: Kind) -> Result<Value, CallError> {
+    call_inner(socket, method, params, kind, None)
+}
+
+/// `call`, giving up (as a broken connection) when sending or the reply
+/// takes longer than `deadline` each. For probes that must not hang.
+pub fn call_within(socket: &Path, method: &str, params: Value, kind: Kind, deadline: Duration) -> Result<Value, CallError> {
+    call_inner(socket, method, params, kind, Some(deadline))
+}
+
+fn call_inner(socket: &Path, method: &str, params: Value, kind: Kind, deadline: Option<Duration>) -> Result<Value, CallError> {
     let mut stream = UnixStream::connect(socket).map_err(|_| CallError::Down(daemon_down(socket)))?;
+    if deadline.is_some() && (stream.set_read_timeout(deadline).is_err() || stream.set_write_timeout(deadline).is_err()) {
+        return Err(CallError::Down(daemon_down(socket)));
+    }
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed).to_string();
     let line = format!("{}\n", json!({ "id": id, "method": method, "params": params }));
     let broken = || match kind {

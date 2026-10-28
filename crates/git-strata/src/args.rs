@@ -47,6 +47,9 @@ pub enum Cmd {
         /// Repos to track, comma separated; every configured repo still gets a workspace (the full sibling layout)
         #[arg(long, value_delimiter = ',', value_name = "A,B")]
         repos: Vec<String>,
+        /// The AI agent creating the session (default: STRATA_AGENT, else detected: claude-code, codex, cursor-agent)
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
     },
     /// Add workspaces of more repos to an existing session
     #[command(after_long_help = crate::help::ADD_AFTER)]
@@ -228,6 +231,9 @@ pub enum Cmd {
     /// Configuration
     #[command(subcommand, subcommand_required = true, after_long_help = crate::help::CONFIG_AFTER)]
     Config(ConfigCmd),
+    /// Per-workspace dev ports (dev server, tauri-connector) and running with them
+    #[command(subcommand, subcommand_required = true, after_long_help = crate::help::SESSION_AFTER)]
+    Session(SessionCmd),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -267,6 +273,48 @@ pub enum DepsCmd {
         /// Only this repo
         #[arg(long)]
         repo: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionCmd {
+    /// A workspace's leased dev ports and the env that hands them out
+    #[command(long_about = crate::help::SESSION_PORTS, after_long_help = crate::help::SESSION_PORTS_AFTER)]
+    Ports {
+        /// Session id or ticket (default: cwd's session)
+        #[arg(long)]
+        session: Option<String>,
+        /// Repo name (default: cwd's repo, else every repo of the session)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Every live session's workspaces; read-only (unleased ones show ports null)
+        #[arg(long)]
+        all: bool,
+        /// Also report who listens on each port
+        #[arg(long)]
+        check: bool,
+        /// Move this workspace's lease to a free block (exactly one session and repo)
+        #[arg(long)]
+        reassign: bool,
+    },
+    /// Run a command in a workspace with its dev-port env
+    #[command(long_about = crate::help::SESSION_EXEC, after_long_help = crate::help::SESSION_EXEC_AFTER)]
+    Exec {
+        /// Session id or ticket (default: cwd's session)
+        #[arg(long)]
+        session: Option<String>,
+        /// Repo name (default: cwd's repo, or the session's only repo)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Point tauri dev's devUrl at the web port (adds --config to the command)
+        #[arg(long)]
+        tauri: bool,
+        /// Skip the port availability check
+        #[arg(long)]
+        no_check: bool,
+        /// The command and its arguments, after --
+        #[arg(last = true, required = true, value_name = "CMD")]
+        cmd: Vec<String>,
     },
 }
 

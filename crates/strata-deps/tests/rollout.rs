@@ -327,6 +327,7 @@ fn ws_new(
             &SessionManifest {
                 id: s.clone(),
                 ticket: None,
+                agent: None,
                 root,
                 repos,
             },

@@ -5,8 +5,10 @@
 //! NULL)` checks are spelled as AND/OR (Turso cannot type the `=` form in a
 //! STRICT CHECK); the accepted rows are identical.
 
-/// Every table, index and trigger, plus `application_id` and `user_version`.
-pub(crate) const DDL: &str = r#"PRAGMA application_id = 1398035009;
+/// Every table, index and trigger of schema version 1, plus `application_id`
+/// and `user_version`. Frozen: never edit this text (stores in the field
+/// were made from it); change the schema by appending to [`MIGRATIONS`].
+pub(crate) const BASE_DDL: &str = r#"PRAGMA application_id = 1398035009;
 PRAGMA user_version = 1;
 
 CREATE TABLE deps_sets (
@@ -398,4 +400,70 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
 "#;
 
 pub(crate) const APPLICATION_ID: i64 = 1398035009;
-pub(crate) const USER_VERSION: i64 = 1;
+
+/// One forward-only schema step (store.md §4.4): `sql` takes a store at
+/// `to - 1` to `to` and ends with `PRAGMA user_version = {to};`. It runs in
+/// one transaction with every other pending step; append-only, never edited.
+pub(crate) struct Migration {
+    pub(crate) to: u32,
+    pub(crate) name: &'static str,
+    pub(crate) sql: &'static str,
+}
+
+/// v2: `sessions.agent`, the agent that created the session (immutable; the
+/// CHECK is the `AgentName` alphabet); and `dev_ports`, the per-workspace
+/// dev-port leases (store.md §4.4a: one 4-aligned block `base..base+3`;
+/// `UNIQUE(base)` means no two leases overlap).
+pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
+    to: 2,
+    name: "sessions.agent+dev_ports",
+    sql: r#"
+ALTER TABLE sessions ADD COLUMN agent TEXT CHECK (agent IS NULL OR (length(agent) BETWEEN 1 AND 64 AND length(CAST(agent AS BLOB)) = length(agent) AND agent GLOB '[A-Za-z0-9]*' AND agent NOT GLOB '*[^A-Za-z0-9._-]*'));
+CREATE TRIGGER sessions_agent_guard BEFORE UPDATE ON sessions WHEN NEW.agent IS NOT OLD.agent BEGIN SELECT RAISE(ABORT, 'immutable: sessions.agent'); END;
+CREATE TABLE dev_ports (
+    session TEXT    NOT NULL REFERENCES sessions (id),
+    repo    TEXT    NOT NULL,
+    base    INTEGER NOT NULL UNIQUE CHECK (base BETWEEN 1024 AND 65532 AND base % 4 = 0),
+    PRIMARY KEY (session, repo),
+    FOREIGN KEY (session, repo) REFERENCES workspaces (session, repo)
+) STRICT;
+PRAGMA user_version = 2;
+"#,
+}];
+
+/// The oldest schema version this build opens (and migrates from).
+pub(crate) const BASE_VERSION: u32 = 1;
+/// The schema version this build writes.
+pub(crate) const LATEST: u32 = BASE_VERSION + MIGRATIONS.len() as u32;
+
+/// The full DDL of schema version `v` (`BASE_VERSION..=LATEST`).
+pub(crate) fn ddl(v: u32) -> String {
+    let mut s = String::from(BASE_DDL);
+    for m in MIGRATIONS.iter().filter(|m| m.to <= v) {
+        s.push_str(m.sql);
+    }
+    s
+}
+
+/// The steps that take `from` to `LATEST`, as one batch.
+pub(crate) fn pending(from: u32) -> impl Iterator<Item = &'static Migration> {
+    MIGRATIONS.iter().filter(move |m| m.to > from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrations_are_contiguous_and_set_their_version() {
+        assert!(BASE_DDL.contains("PRAGMA user_version = 1;"));
+        for (i, m) in MIGRATIONS.iter().enumerate() {
+            assert_eq!(m.to, BASE_VERSION + 1 + i as u32, "{}", m.name);
+            assert!(m.sql.trim_end().ends_with(&format!("PRAGMA user_version = {};", m.to)), "{}", m.name);
+        }
+        assert_eq!(LATEST, 2);
+        assert_eq!(pending(1).count(), 1);
+        assert_eq!(pending(LATEST).count(), 0);
+        assert!(ddl(1) == BASE_DDL && ddl(2).len() > BASE_DDL.len());
+    }
+}

@@ -81,8 +81,10 @@ pub const TOP: &str = concat!(
   Exit status: 0 iff ok is true, else 1. Branch on error.code, then
   error.detail.reason; never parse message. stderr has human notices only.
   --help / --version print plain text on stdout, exit 0, no JSON.
+  session exec, once its command starts, prints no envelope: stdout, stderr
+  and the exit status are the command's (failures before that: an envelope).
   Bad arguments: InvalidInput, detail.reason \"unknown_command\" (with
-  detail.commands, and detail.group inside deps/daemon/config) or \"args\".
+  detail.commands, and detail.group inside deps/daemon/config/session) or \"args\".
 
 PATHS
   config     ~/Library/Application Support/git-strata/config.toml
@@ -96,7 +98,8 @@ DAEMON
   Write commands go to the daemon (LaunchAgent com.gwd.git-stratad).
   Busy with detail.reason daemon_down: run `git-strata daemon start`, retry once.
   Without the daemon only these work: status, grep, files, diff, deps list,
-  daemon status (and repeating a --tool-call checkpoint that already exists).
+  daemon status, session ports/exec of a workspace that already has its
+  ports (and repeating a --tool-call checkpoint that already exists).
 
 HEADLESS FLOW (no human needed)
   git-strata daemon status                       # data.running
@@ -127,6 +130,8 @@ ERRORS (code -> what an agent does)
   PushRefused        report the remote's words to the human
   Unknown            outcome uncertain: do not retry, gc or rm; tell the human
   Corrupt            stop; tell the human
+  PortInUse foreign  run detail.fix (session ports --reassign), then rerun
+  PortInUse already_running  this workspace's server is up: reuse it
 
 ",
     gate_text!(),
@@ -149,21 +154,31 @@ it later with `git-strata add --repo other`.
 sibling repos link to each other by relative path; A,B are the tracked ones.
 Only tracked repos are watched, checkpointed and published. Untracked siblings
 are pinned at their base; do not edit them (an edit there is never checkpointed,
-and makes `rm` return Dirty with detail.untracked_repos).";
+and makes `rm` return Dirty with detail.untracked_repos).
+
+The session records which AI agent created it (data.manifest.agent; status and
+the GUI show it): --agent NAME, else STRATA_AGENT, else detected from the shell
+(Claude Code -> claude-code, Codex -> codex, Cursor -> cursor-agent). An agent
+that is none of these should `export STRATA_AGENT=<name>` (1-64 of
+[A-Za-z0-9._-], starting with a letter or digit) before running `new`.";
 
 pub const NEW_AFTER: &str = "EXAMPLES
   git-strata new PROJ-123 --repo staff-api            # one workspace
   git-strata new PROJ-123 --repo tool --repo staff-api
   git-strata new --ticket PROJ-123 --repos tool       # every repo, tool tracked
+  STRATA_AGENT=aider git-strata new PROJ-123 --repo tool
 
 DATA
-  {manifest:{id, ticket?, root, repos:{<repo>:{base, head, path, tracked}}}, warnings:[]}
+  {manifest:{id, ticket?, agent?, root, repos:{<repo>:{base, head, path, tracked}}}, warnings:[]}
+  warnings may hold {kind:AgentNotRecorded, agent, reason:daemon_too_old}: the
+  running daemon predates agent recording; the session was created without it.
   Use data.manifest.id as SESSION and data.manifest.repos.<repo>.path as the cwd.
 
 ERRORS
   InvalidInput repos       neither --repo nor --repos given, or an empty name
   InvalidInput repo_flags  --repo and --repos both given
   InvalidInput ticket      ticket given both positionally and with --ticket
+  InvalidInput agent       --agent or STRATA_AGENT is not a valid agent name (nothing created)
   NoSuchRepo               a repo name is not in config.toml
   NoSuchBranch             a repo has no origin/<default_branch> tip (the session's repos are fetched)
   Busy daemon_down         run `git-strata daemon start`, retry once
@@ -202,7 +217,7 @@ pub const STATUS_AFTER: &str = "EXAMPLES
 
 A workspace with health Unknown carries choices [\"abandon\",\"accept\"]: a move
 stopped midway; that is the human's `git-strata resolve`. Works without the daemon.
---session with --all is InvalidInput both_selectors.
+--session or --repo with --all is InvalidInput both_selectors.
 ";
 
 pub const LS_AFTER: &str = "EXAMPLES
@@ -526,3 +541,90 @@ pin (nothing to do). NoSuchRepo: unknown repo.
 ",
     gate_text!()
 );
+
+pub const SESSION_AFTER: &str = "Every session workspace (not the main checkout) leases a block of 4 TCP ports
+(web, connector, connector_mcp, aux) when it is created, so concurrent dev
+servers and tauri-connector instances of different sessions never collide.
+Committed config stays untouched: the ports reach the processes as env vars.
+
+EXAMPLES
+  git-strata session ports                      # this workspace's ports and env
+  git-strata session exec -- bun run dev        # dev server on $PORT
+  git-strata session exec --tauri -- bun run tauri:dev
+  git-strata session ports --reassign --session S --repo R   # after PortInUse foreign
+";
+
+pub const SESSION_PORTS: &str = "A workspace's leased dev ports and the env that hands them out.
+
+Read-only for a workspace that already has a lease (no daemon needed). A
+workspace without one (created before leases) gets one from the daemon
+(ports_ensure). --all lists every live workspace and never writes; unleased
+ones show \"ports\":null,\"reason\":\"unleased\".";
+
+pub const SESSION_PORTS_AFTER: &str = "OUTPUT
+  data.leases[]: {session, repo, path, ports{web,connector,connector_mcp,aux},
+  env{PORT, STRATA_DEV_PORT, STRATA_CONNECTOR_PORT, STRATA_CONNECTOR_MCP_PORT,
+  STRATA_AUX_PORT, STRATA_SESSION, STRATA_REPO, TAURI_CONNECTOR_PROJECT,
+  STRATA_TAURI_DEV_CONFIG}, tauri_app_root, check?}
+  check (with --check): per role {state: free|ours|foreign|unidentified|
+  probe_error, listeners[{pid, command, in_workspace}]}. Advisory only.
+
+--reassign
+  Needs exactly one session and repo. Refused with PortInUse already_running
+  while a process of this workspace listens on its ports; otherwise the lease
+  moves to the next free block (the old ports are not reused right away).
+  The daemon moves it only if it is still the lease checked here.
+
+ERRORS
+  Busy ports_exhausted   no free block in [dev_ports] range: tell the human
+                         (without --reassign: an entry \"ports\":null,
+                         \"reason\":\"ports_exhausted\", not an error)
+  Busy lease_changed     --reassign: another caller moved the lease since the
+                         check; check again and decide afresh
+  Unsupported daemon_too_old  the daemon predates leases: tell the human
+  Unsupported no_policy  the daemon has no port-allocation policy installed
+                         (not about [dev_ports], which is optional): tell
+                         the human
+
+EXAMPLES
+  git-strata session ports --check
+  git-strata session ports --all
+";
+
+pub const SESSION_EXEC: &str = "Run a command in a workspace with its dev-port env (exec: the command
+replaces git-strata; its exit status is the command's).
+
+The env (see `session ports --help`) overrides inherited values. Run from
+inside the workspace the command keeps the cwd; from outside every workspace
+it runs at the workspace root; from another workspace: InvalidInput
+cwd_mismatch. Before running, the 4 ports are checked (--no-check skips).";
+
+pub const SESSION_EXEC_AFTER: &str = "--tauri
+  Adds --config '{\"build\":{\"devUrl\":\"http://localhost:<web>\"}}' to tauri dev,
+  so the webview loads this workspace's dev server. Accepted launchers:
+    tauri dev | cargo tauri dev | npx/bunx/pnpx tauri dev | pnpm exec tauri dev
+      (inserted before the first bare --)
+    bun run S | pnpm run S | yarn run S | npm run S
+      where package.json script S is one plain `[NAME=v ...] [bunx|npx] tauri dev
+      [opts]` (no quotes, $, &&, or bare --), or the bare `[bunx|npx] tauri`
+      with `dev` right after S (bun run tauri dev, npm run tauri -- dev); no
+      bare -- in the caller args (npm: at most one). `run` is required (without
+      it the manager may run its own command S); S must not start with -.
+      Refused: options
+      that select another package (--prefix, --filter, -w, --workspace, --cwd,
+      ...) and, for npm, any option before its --.
+  Anything else: InvalidInput tauri_launcher; run without --tauri and pass
+  --config \"$STRATA_TAURI_DEV_CONFIG\" to tauri dev yourself.
+
+ERRORS (from the port check)
+  PortInUse already_running  this workspace already serves on its ports
+  PortInUse foreign          run detail.fix (session ports --reassign ...)
+  Busy port_unidentified     retry shortly
+  Busy port_probe_error      retry
+  NoSuchPath                 the command was not found
+
+EXAMPLES
+  git-strata session exec -- bun run dev
+  git-strata session exec --tauri -- bun run tauri:dev
+  git-strata session exec --session PROJ-1 --repo front -- npm run dev
+";

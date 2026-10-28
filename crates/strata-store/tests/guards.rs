@@ -54,7 +54,7 @@ fn fx() -> Fx {
 /// A session (Creating) with one tracked workspace (generation 1, Ok).
 fn session(c: &Connection, id: &str) {
     c.execute_batch(&format!(
-        "INSERT INTO sessions VALUES ('{id}', NULL, '/w/{id}', 'creating', NULL, NULL, 0, NULL);
+        "INSERT INTO sessions VALUES ('{id}', NULL, '/w/{id}', 'creating', NULL, NULL, 0, NULL, NULL);
          INSERT INTO workspaces VALUES ('{id}', 'r', 1, '{H}', '/w/{id}/r', 1, 1, 'ok', NULL, '[]');"
     ))
     .unwrap();
@@ -299,7 +299,7 @@ fn state_graphs_are_enforced_by_triggers() {
     ok(c, "UPDATE sessions SET lifecycle = 'active' WHERE id = 's-phaseaaa'");
     refused(c, "UPDATE sessions SET phase = 'p2' WHERE id = 's-phaseaaa'", "illegal update: sessions");
     refused(c, "UPDATE sessions SET scene = '{}' WHERE id = 's-phaseaaa'", "illegal update: sessions");
-    refused(c, "INSERT INTO sessions VALUES ('s-bbbbbbbb', NULL, '/q', 'active', NULL, NULL, 0, NULL)", "illegal insert: sessions");
+    refused(c, "INSERT INTO sessions VALUES ('s-bbbbbbbb', NULL, '/q', 'active', NULL, NULL, 0, NULL, NULL)", "illegal insert: sessions");
 
     // ---- intents: insert guard
     session_in(c, "s-intentaa", "active");
@@ -404,7 +404,7 @@ fn state_graphs_are_enforced_by_triggers() {
     ok(c, &format!("UPDATE move_intents SET state = 'abandoned' WHERE {w}"));
     // untracked workspaces never move
     c.execute_batch(&format!(
-        "INSERT INTO sessions VALUES ('s-untracka', NULL, '/w/u', 'creating', NULL, NULL, 0, NULL);
+        "INSERT INTO sessions VALUES ('s-untracka', NULL, '/w/u', 'creating', NULL, NULL, 0, NULL, NULL);
          INSERT INTO workspaces VALUES ('s-untracka', 'r', 1, '{H}', '/w/u/r', 0, 1, 'ok', NULL, '[]');"
     ))
     .unwrap();
@@ -538,4 +538,37 @@ fn intent_in(c: &Connection, id: &str, state: &str) {
         }
         _ => unreachable!(),
     }
+}
+
+/// v2: `sessions.agent` accepts exactly what `AgentName` accepts, and
+/// never changes once written.
+#[test]
+fn agent_column_matches_agent_name_and_is_immutable() {
+    let f = fx();
+    let c = &f.c;
+    let long = "a".repeat(64);
+    let longer = "a".repeat(65);
+    let cases: Vec<&str> = vec![
+        "claude-code", "codex", "cursor-agent", "A", "9", "a.b_c-D", &long, &longer, "", "-x", ".x", "_x", "a b", "a/b",
+        "a\u{0}b", "\u{0}", "é", "aé", "a\n", "a*", "a[b]", "a?", "ａ",
+    ];
+    for (k, name) in cases.iter().enumerate() {
+        let id = format!("s-{}", sid(1000 + k));
+        let rust = strata_types::AgentName::try_from(name.to_string()).is_ok();
+        let sql = c
+            .execute(
+                "INSERT INTO sessions (id, ticket, root, lifecycle, created_ns, agent) VALUES (?1, NULL, ?2, 'creating', 0, ?3)",
+                params![id, format!("/w/{id}"), name.to_string()],
+            )
+            .is_ok();
+        assert_eq!(sql, rust, "AgentName and the CHECK disagree on {name:?}");
+    }
+    let (named, none) = (format!("s-{}", sid(1000)), "s-zzzzzzzz");
+    ok(c, &format!("INSERT INTO sessions (id, ticket, root, lifecycle, created_ns, agent) VALUES ('{none}', NULL, '/w/n', 'creating', 0, NULL)"));
+    refused(c, &format!("UPDATE sessions SET agent = 'codex' WHERE id = '{named}'"), "immutable: sessions.agent");
+    refused(c, &format!("UPDATE sessions SET agent = NULL WHERE id = '{named}'"), "immutable: sessions.agent");
+    refused(c, &format!("UPDATE sessions SET agent = 'codex' WHERE id = '{none}'"), "immutable: sessions.agent");
+    ok(c, &format!("UPDATE sessions SET agent = 'claude-code' WHERE id = '{named}'"));
+    ok(c, &format!("UPDATE sessions SET lifecycle = 'active' WHERE id = '{named}'"));
+    assert_eq!(one(c, &format!("SELECT agent FROM sessions WHERE id = '{named}'")), r#"Text("claude-code")"#);
 }

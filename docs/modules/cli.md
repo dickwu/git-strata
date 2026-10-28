@@ -73,6 +73,8 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata resolve` | `resolve_move`（上游要求 1） | 是（D18） | 否。没有 `Action` 变体，不弹框 |
 | `git-strata chain` | `chain_resolve`（上游要求 2） | 选择本身要 TTY（D18）。不要确认的仓库分叉时，`push` 自己无头重放（publish.md D2a），`chain` 本身不变。`--restore` 且仓库要确认时，连接前再按 `push` 的钉住值查一次 | `--restore` 且要确认：`PushDeploy`。`--accept-origin replay` / `drop`：不取凭据 |
 | `git-strata config relax` | `config_relax` | 是 | `ConfigRelax`。`require_tty` 之后连接并弹框，与其他确认命令相同。不因文件变化而跑，也不处理收紧 |
+| `git-strata session ports` | 先只读 open store；没有租约时 `ports_ensure`，`--reassign` 时 `ports_reassign`，`--all` 不调 | 否 | 否 |
+| `git-strata session exec` | 同上，没有租约时 `ports_ensure` | 否 | 否 |
 
 `git-strata daemon start` 用 `launchctl bootstrap gui/<uid> ~/Library/LaunchAgents/com.gwd.git-stratad.plist` 装上 `com.gwd.git-stratad`，不等待业务，不连接 socket。`stop` 用 `launchctl bootout gui/<uid>/com.gwd.git-stratad`，也不连接 socket。plist 不存在 → `InvalidInput`，`detail.reason = "no_plist"`。已经装上或已经卸下 → 成功，`data.already = true`，不是错误（D15、D16）。[实现时补的决定][我的决定 D24] `stop` 在 `bootout` 成功之后再用 `launchctl print` 轮询，直到 launchd 不再列出这个服务才返回（每 100 ms 一次，最多 10 s；超时 → `Unknown`，`detail = {reason: "launchctl", step: "bootout_wait"}`）。真实安装里 `bootout` 返回时服务还在列表里，紧接着的 `start` 回答 `already` 却什么都没起来。
 
@@ -86,6 +88,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | --- | --- | --- |
 | `git-strata new` | `--repos a,b`（至少一个 `RepoName`）。ticket 用 `--ticket T` 或第一个位置参数，二者给了同一个字段；都不给则没有标签。ticket 只是标签，不进路径。`--repos` 只选 tracked，每个配置的 repo 都建工作区；cli 在 stderr 提示一行 `note: --repos tracks …`（D35） | 空 `--repos`；ticket 形如 `SessionId` 由 session 返回 `ReservedName`，cli 透传 |
 | `git-strata new`（精简） | `--repo R`，可重复或逗号分隔：只有这些 repo 建工作区，全部 tracked（session.md D51；daemon `new` 的 `only = true`）。ticket 同上 | 与 `--repos` 同给 → `InvalidInput`，`detail.reason = "repo_flags"`；两个都不给 → `InvalidInput` |
+| `git-strata new` 的 agent | `--agent NAME`（可选，`new` 与精简形式都有）。创建会话的 AI agent，按 D36 检测：`--agent`，否则 `STRATA_AGENT`（空 = 没设），否则 Claude Code（`CLAUDECODE`、`CLAUDE_CODE_SESSION_ID`、`CLAUDE_CODE_ENTRYPOINT` 任一非空 → `claude-code`）、Codex（`CODEX_THREAD_ID`、`CODEX_SANDBOX` → `codex`）、Cursor（`CURSOR_AGENT` → `cursor-agent`），按这个顺序取第一个；都没有就不记 | `--agent` 或 `STRATA_AGENT` 不是合法的 `AgentName`（types.md）或不是 UTF-8 → `InvalidInput`，`detail = {reason: "agent", source: "--agent" \| "STRATA_AGENT"}`，在连 daemon 之前，什么都不发 |
 | `git-strata add` | `--repo R`（至少一个，可重复或逗号分隔）`[--session S]`，不给 = cwd 的会话（session.md D52） | 没有 `--repo` → `InvalidInput`（`repos`）；未知 repo 透传 `NoSuchRepo`；会话不是 `Active` 透传 session 的码 |
 | `git-strata status` | `[--all]` 或 `[--session S]`。都不给 = cwd 的会话。`[--brief]`：只读 store 的摘要（§3.2，D36） | — |
 | `git-strata ls` | `[--table]`：成功时 stdout 只有表格（D36，对 D19 的修订） | — |
@@ -106,8 +109,10 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata resolve` | `--session S --repo R`，以及 `--abandon` 与 `--accept` 恰好一个。没有缺省 | 缺选择、或两个都给 → `InvalidInput`，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接 |
 | `git-strata chain` | `--repo R`，以及恰好一个：`--accept-origin replay`、`--accept-origin drop`、`--restore`。没有缺省。`--restore` 在 `!is_ancestor(o, c)` 时不连接、不推 | 缺选择、或两个都给 → `InvalidInput`，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接。不能快进 → `InvalidInput`，`detail.reason = "not_ancestor"`，在任何 push 之前 |
 | `git-strata config relax` | `<repo>` | 未知 repo 透传 `NoSuchRepo`。文件变了不会自己跑这条命令 |
+| `git-strata session ports` | `[--session S] [--repo R]`，或 `--all`（只读，列出全部活会话的工作区，没有租约的 `ports: null`、`reason: "unleased"`，不分配）。`--check`：每个端口的监听者与状态。`--reassign`：把恰好一个工作区的租约挪到别的块，把查过的 base 作为 `checked` 发给 daemon，租约在此期间被别人挪过 → `Busy lease_changed`（D37）。没有空闲块的工作区是一条 `ports: null`、`reason: "ports_exhausted"` 的记录，其他工作区照常列出（`exec` 仍报错） | `--all` 与 `--session` 或 `--repo` 同给 → `both_selectors`；`--reassign --all` → `reassign_one`；`--reassign` 选中多个工作区 → `ambiguous_repo`（`detail.repos`）；都是 `InvalidInput` |
+| `git-strata session exec` | `[--session S] [--repo R] [--tauri] [--no-check] -- <cmd…>`：在恰好一个工作区里、带着它的端口环境变量（§3.2）用 `execvp` 替换本进程跑命令（D37） | 选中多个 → `ambiguous_repo`；cwd 在另一个会话工作区里 → `cwd_mismatch`；`--tauri` 认不出启动方式 → `tauri_launcher`（`detail.fix`）；都是 `InvalidInput`。`--` 之后没有命令 → `args` |
 
-未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`ls`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`status`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
+未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`ls`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`session`、`status`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
 
 `-h` / `--help` 与 `--version` 走 clap 的文本，打在 stdout，退出码 0。它们不是子命令，不套信封（D19）。另一个例外：`ls --table` 成功时 stdout 只有表格（D36）；出错时照常是完整错误信封、退出码非 0。除此之外，stdout 上只有信封。
 
@@ -117,7 +122,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 
 | 命令 | 成功时的 `data` | 按条目返回、不让整个调用失败 |
 | --- | --- | --- |
-| `new` | `NewReport` | — |
+| `new` | `NewReport`；`manifest.agent` 是记下的 agent（没有就省略）。agent 没能记下时（daemon 太旧，D36），`warnings` 多一条 `{kind: "AgentNotRecorded", agent, reason: "daemon_too_old"}`，stderr 一行同样的意思 | — |
 | `add` | `AddReport`：`{ session, added: {<repo>: WorkspaceState}, already: {<repo>: WorkspaceState}, warnings }`；锚点未知的 repo 打在 stderr | — |
 | `status` | 一个会话：`SessionStatus`（顶层带 `id`、`ticket`（无则 null）；`manifest.id`、`manifest.ticket` 与之重复，**已弃用**，下一个大版本去掉，新代码读顶层）。warning `OldTreeKept`（status-perf A1）：`changed` 可为 `null`（daemon 还没在后台检查这棵旧树，同时带 `unchecked: true`，此时 `holders` 为空；daemon 不在、走本地回退时总是这样）；检查过的带 `checked_at`（RFC 3339）。旧 GUI 读到 `null` 应当当作「未知」。`--all`：`{ "sessions": [SessionStatus, …] }`，按 `SessionId` 升序。健康为 `Unknown` 的工作区带 `choices: ["abandon", "accept"]`。`OldTreeKept` 的 `holders` 原样透传 | — |
 | `status --brief` | 只来自 store（status-perf C）：`SessionSummary` = `{ id, ticket（无则 null）, state, created（RFC 3339）, repos: [RepoName], phase?, workspaces: [{ repo, health_stored, path, checkpoint }] }`。`state` 是 store 的 lifecycle（`Creating`/`Active`/`Removing`/`Unknown`），没有只能从文件系统得出的 `Missing`；`health_stored` 是 store 记录的健康（`Ok`/`Unknown`），工作区目录缺失在这里看不出；`checkpoint` 是最新检查点，untracked 或没有则 null。不算 drift、seeds、mirrors、旧树，不 stat 工作区，不跑 git。一个会话：该对象；`--all`：`{ "sessions": [SessionSummary, …] }`，按 id 升序。daemon 不在或 daemon 不认识 `summary`/`workspaces` 时读 store，并带 `source: "local"` | — |
@@ -140,6 +145,8 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `daemon status` | 见 §3.3。daemon 没在跑也有这个对象 | — |
 | `resolve` | `ResolutionReport` | — |
 | `chain` | `{ "repo", "choice", "outcome": PushOutcome }`。`choice` 是 `accept_origin_replay`、`accept_origin_drop` 或 `restore`。replay 与 drop 不推，没有 `outcome`，改为 `"refs_moved": true`，也不带凭据。`--restore` 的 `outcome` 与 `push` 相同：超时是 `Unknown`，`ok` 不能为 true | — |
+| `session ports` | `{ "leases": [ { "session", "repo", "path", "tauri_app_root", "ports": { "web", "connector", "connector_mcp", "aux" }, "env": { … }, "check"? } ] }`。`path` 是工作区根（realpath）；`tauri_app_root` 是 cwd（不在工作区里时是工作区根）往上、工作区之内最近的含 `src-tauri/tauri.conf.json` 的目录，没有为 `null`。`env` 是 `exec` 会设的九个变量：`PORT` 与 `STRATA_DEV_PORT`（web）、`STRATA_CONNECTOR_PORT`、`STRATA_CONNECTOR_MCP_PORT`、`STRATA_AUX_PORT`、`STRATA_SESSION`、`STRATA_REPO`、`TAURI_CONNECTOR_PROJECT`（`tauri_app_root`，没有就是工作区根）、`STRATA_TAURI_DEV_CONFIG`（`{"build":{"devUrl":"http://localhost:<web>"}}`）。`check` 只在 `--check` 时有：每个角色 `{ state, listeners: [{pid, command, in_workspace}] }`，`state` 是 `free`、`ours`、`foreign`、`unidentified`、`probe_error` | — |
+| `session exec` | 成功时没有信封：本进程已被命令替换，stdout、stderr 与退出码都是命令的。只有在 `execvp` 之前或在它上面失败才打信封：命令找不到 → `NoSuchPath`，其它 → `InvalidInput`，`detail.reason = "exec"` | — |
 
 `grep` / `files` / `diff` 的路径按 `RepoPath` 的字节序排列（NFC，区分大小写）。不按 inode，不分页，一次把结果放进这一个 JSON（D10）。
 
@@ -187,6 +194,7 @@ pub enum DiffPreview {
 - `running`：daemon 是否在听 socket。没在跑时 cli 本地造这份对象，`running` 为 false，`holders` 与 `unknown_publishes` 为空数组，不假装知道锁。
 - `session`：cwd 能解析出会话才有，否则省略。daemon 回答了时，这个查找（读 config、开 store）放在另一个线程里，最多等 2 秒（`STATUS_LOOKUP_WAIT`）；超时就省略 `session`，加 `"session_lookup": "timed_out"`，信封照常 `ok`。SessionStart 钩子不会因为 store 一时读不动而卡住。daemon 没在跑时直接查。
 - `holders`：谁持着哪把 repo 写锁、从什么时候起。daemon 在跑时由 `daemon_status` 填。
+- `features`：daemon 接受的请求扩展（daemon.md D38，现在是 `["new.agent"]`），daemon 在跑时原样透传；旧 daemon 没有这个键。
 - `fds`：daemon 的文件描述符计数（`open`、`limit` 等），daemon 在跑时原样透传 `daemon_status` 的 `fds`（D35）。
 - `alerts`：隔离区、`index-read-back-refused`、`staging-changed` 这类要人看的项，原样透传 daemon 的 warnings。每条同时在 stderr 打一行。
 
@@ -236,7 +244,7 @@ cli 不拥有表，不拥有目录。它读的配置目录是 `~/Library/Applica
 - 一行，紧凑（`serde_json` 的紧凑格式，不是 pretty），末尾一个 `\n`，stdout 上没有别的字节（D12）。
 - `ok`、`data`、`error` 三个键都在。`data` 不是 null；没有结果时是 `{}`。成功时 `error` 是 null，不是省略。这压过 types.md §7“失败时没有 `data`、成功时没有 `error`”和 3b 那一行的同句：T14 的裁定是 `data` 总在（§9）。
 - `error` 是一个 `StrataError`：`code` 是变体名，`message` 总在，`detail` 按 types.md 省略 `None`。`Busy` 且 daemon 没跑时 `detail` 总有，`reason` 为 `"daemon_down"`。
-- `error.code` 必须是 types.md `Code` 的变体名。闭集 39 个，cli 自己不发明码。对不上的 RPC 层名字按 D7 收成 `InvalidInput`。
+- `error.code` 必须是 types.md `Code` 的变体名。闭集 40 个（dev-ports 加了 `PortInUse`，D37），cli 自己不发明码。对不上的 RPC 层名字按 D7 收成 `InvalidInput`。
 - 程序只按 `error.code` 分支。`message` 的措辞可以改。
 - 退出码：信封 `ok` 为 true 且 stdout 的 write 与 flush 都成功 → 0。其余 → 1。不使用别的退出码。
 - stdout 写失败（管道关掉、flush 失败）按 3b：退出码 1，能写 stderr 就写一行 `stdout_write_failed`，不写半行 JSON，不 panic，不在 `Drop` 里吞掉 flush 错误。显式 `flush` 并检查。
@@ -287,6 +295,8 @@ cli 不拿 repo 写锁，不占会话队列，不等待建造锁。锁在 daemon
 
 本地打开失败（store 打不开、配置缺路径）透传那个码，不改写成 `daemon_down`。`daemon_down` 只表示 socket 连不上。
 
+`session ports` 与 `session exec` 不在这六个命令里，但不论 daemon 在不在跑，都先以读者打开 store 读租约（`Store::dev_port_leases`，不打开 `Sessions`，不写）；租约在就不连 daemon，所以 daemon 停着时已有租约的工作区照样能 `exec`。没有租约（或 `--reassign`）才连 daemon，连不上返回 `daemon_down`（D37）。v1 的 store 当作没有租约。
+
 ### 5.2 幂等的检查点
 
 `--tool-call` 的查找只读 store 里该会话已有的 `Checkpoint` 行，不调用 `Sessions::open`。`reason.kind = "ToolCall"` 且 `reason.id` 相等即命中。要记哪些 repo 按 §3.5 的路径映射，不是只记 cwd。没有路径时，对该会话每个 tracked repo 各查一次。`-m` 不按 id 幂等，但也不保证每次一条新行：与最新的 checkpoint 相比没有变化时，overlay 返回那条最新的（它的号与 message，`recorded = false`，overlay.md §5.6 第 4 步）。新的 `--tool-call` id 即使没有变化也记一行（review M8）。（review L1）
@@ -332,7 +342,7 @@ cli 不重放 `Unknown`，不删除现场，不在失败后改跑 `gc` 或 `rm`�
 | `stdout_write_failure_is_nonzero` | stdout 在写信封时被关闭：进程退出码 1，不 panic，不把该次调用报成成功 | `layerfs-telemetry/tests/timer_json.rs::writer_failures_propagate` |
 | `stdout_format_write_failure_is_nonzero` | 同上，覆盖格式化写失败这条同源用例 | `layerfs-telemetry/tests/timer_format.rs::writer_failures_propagate` |
 | `stdout_flush_failure_is_nonzero` | 显式 flush 失败（`BufWriter` 的 `Drop` 会吞掉）也是退出码 1 | `layerfs-telemetry/tests/timer_json.rs::a_flush_failure_is_surfaced` |
-| `error_codes_match_types_md` | 故意触发的每个 `error.code`，以及 `skipped[].code` 与 `BothChange.code` 里的码，都是 types.md `Code` 的变体名。闭集 39 个，测试从枚举读名字，不在 cli 里抄第二份。RPC 的 `UnknownMethod` 不出现在 `error.code` 里 | 新增 |
+| `error_codes_match_types_md` | 故意触发的每个 `error.code`，以及 `skipped[].code` 与 `BothChange.code` 里的码，都是 types.md `Code` 的变体名。闭集 40 个，测试从枚举读名字，不在 cli 里抄第二份。RPC 的 `UnknownMethod` 不出现在 `error.code` 里 | 新增 |
 | `hook_checkpoint_is_idempotent_per_tool_call` | 同一个 `--tool-call` 对同一会话同一 repo 跑两次：两次 `data.checkpoints[].id` 相同，store 里该键只有一行；第二次没有发写 RPC。从 tool 工作区来的 `../hr-core` 记在同一会话的 `hr-core` 上，不丢掉，也不记成 cwd 的 repo。会话外的路径跳过，cwd 的检查点不因此失败。一次钩子可以记下不止一个 repo | 新增 |
 | `daemon_up_read_does_not_open_sessions` | daemon 在跑时，`open_proposals` 与 `--tool-call` 的查找不调用 `Sessions::open`。第二次打开会把进行中的移动报成 `MoveAwaitingRecover`，这个测试断言没有第二次打开 | 新增 |
 | `confirm_commands_refuse_non_tty` | `deps approve`、`needs_human_confirm` 的 `push`、批次里有要推且要确认的仓库的 `publish`（front 即是）、要确认的 `chain --restore`、`config relax`、`rm --discard` 在非 TTY 上退出码 1，`error.code` 为 `NotTty`，socket 上没有字节（`publish` 在会话读不到时同样没有；`non_tty_refused_before_prompt` 断言真实会话上只发了 checkpoint 与 `publish_plan`，D23）。`non_tty_rerun_of_a_landed_guarded_repo_is_not_gated`：要确认的仓库已经落地，非 TTY 重跑成功、`already_published` 带它、不弹框；内容再变则 `NotTty`，不发 `publish`。`non_tty_publish_refuses_a_guarded_repo_the_plan_left_out`（review-3 T1）：计划里没有那个仓库（已落地），`publish` 到达前另一条 Done 行落地了不同内容，daemon 回 `NotConfirmed` `plan_changed`，没有弹框，链和 origin 不变。`chain` 的 replay / drop 在非 TTY 上也是 `NotTty`，且不取凭据 | 新增 |
@@ -482,7 +492,5 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D34 推送计划写出目标 URL（review P1-15） | 要确认的 `push`/`publish`/`chain --restore` 在 stderr 的计划里多一行 `  to <origin 推送 URL>`（用户信息写成 `***`），读不出就写一句说明；弹框文字也带这个 URL（confirm.md §5.6），daemon 在锁里核对它没变（daemon.md D35） | 人批准的是推到哪里，不只是哪个分支 | 2026-10-27 |
 | D36 `ls`、`status --brief`、`ls --table`（status-perf C，D4/D6） | 新增 `ls [--table]` 与 `status --brief`，只读 store（§3.2、§5.1）。daemon 方法不新增：`status` 多两个可选参数 `summary`、`workspaces`（daemon.md §4）。**修订 D19**：`ls --table` 成功时 stdout 是表格不是信封；出错仍是信封、退出码非 0。推迟到 daemon-independence r5：`--wait N`、`Busy starting` 不回退的语义、共享等待机制 | `status --all` 在 8 会话 42 工作区上要 30–60 s，大半是工作区与旧树的文件系统工作；列会话不需要这些。人看的列表要能直接读 | 2026-10-28 |
 | D35 `--repos` 的提示与 `daemon status` 的 `fds` | `new --repos` 时 cli 在 stderr 写一行 `note: --repos tracks A,B; every configured repo still gets a workspace (pass --repo R for only these)`；`--repo` 时不写。`daemon status` 把 daemon 的 `fds` 原样放进 data。`new` 失败已回滚时错误带 `detail.rolled_back = true`（session.md D56），cli 原样透传 | 事故 2026-10-27：agent 把 `--repos tool` 当成只建 tool，得到 23 个工作区；`fds` 在 daemon 里有、cli 丢了。提示走 stderr，不改 data | 2026-10-27 |
-
-初稿里被后写裁定压过的两句，不沿用：`grep` 不给 session 就是全部（改为 cwd 会话，`--all` 才是全部，design §6.3 与 T11）；`grep` 的 `--repo`（T11 只留 `--session` 与 `--all`）。crate 名从初稿的 `crates/strata-cli` 改为 types.md §8 的 `crates/git-strata`。
-
-待定：上游要求 1 与 2 的方法名，若 daemon 定了别的名字，只改 §3 的方法列，不改命令行。`resolve` 仍没有 `Action` 变体。`chain --restore` 用已有的 `PushDeploy`，不等新变体。`config relax` 用 types.md 的 `Action::ConfigRelax`，不加码。
+| D36 `new` 记录 agent | 检测见 §3.1。只有检测到 agent 时，cli 先用 `daemon_status`（读超时与写超时 `PROBE_DEADLINE` = 5 秒，`rpc::call_within`）看 `features` 有没有 `new.agent`：有才在 `new` 的参数里带 `agent`；没有、超时或出错就不带，会话照常建，加 `AgentNotRecorded` 警告。探测之后 daemon 换成了旧版、拒绝了 `agent`（RPC `Failed` 且消息含 ``unknown field `agent` ``，那时什么都没执行）：去掉 `agent` 重发一次 `new`，同样加警告；别的错误一律不重发。没检测到 agent 不探测、不发字段，与以前的请求逐字节相同。测试的 `Home::cmd` 去掉 `GIT_*`、`STRATA*`、`CLAUDE*`、`CODEX*`、`CURSOR*` 环境变量，跑测试的 agent 不会漏进被测命令 | 旧 daemon 的参数拒绝未知字段，直接发会让新 cli 配旧 daemon 时 `new` 整个失败；探测一次比失败后猜原因可靠。`tests/agent.rs`：新 daemon 拿到 agent；旧 daemon 从没见过这个字段且会话带警告；探测后换成旧 daemon 只重发一次；别的拒绝不重发；没有 agent 不探测；不合法的显式值什么都不发；探测有上限；在进程内 daemon 上端到端（`STRATA_AGENT`、`--agent` 压过环境、`CLAUDE_CODE_ENTRYPOINT`、都没有） | 2026-10-27 |
+| D37 `session ports` / `session exec`（dev-ports，peilin 定） | 并行的 `tauri dev`（不同会话）各用自己的端口，已提交的配置一字不改。daemon 在 `new` / `add` 时给每个会话工作区租一块 4 个端口（store.md §4.4 `dev_ports`，config.md §2.6）；主 checkout 没有租约，用项目的默认端口。cli：(1) 选择：`--session` / cwd 的会话，再 `--repo` / cwd 的 repo / 全部 repo。(2) 租约：先读 store（只读 open，daemon 不在跑也行）；没有才调 `ports_ensure`，daemon 不在跑时透传 `daemon_down`（D3：agent 不启动 daemon）。旧 daemon 回 `UnknownMethod`（`InvalidInput unknown_method`）→ `Unsupported`，`detail.reason = "daemon_too_old"`；不先探 `features`，因为未知方法在执行任何东西之前就被拒绝。(3) 检查（`exec` 默认做，`--no-check` 跳过；`ports --check` 只报告）：对每个端口，`/usr/sbin/lsof -nP -iTCP:<p> -sTCP:LISTEN` 找监听者，再按监听者的 cwd 是否在工作区里分 `ours` / `foreign`；没有监听者时做绑定探测（`0.0.0.0`、`[::]`、`127.0.0.1`），被占是 `unidentified`，探测出错是 `probe_error`。动作表，第一条命中的为准：有本工作区的监听者 → `PortInUse already_running`（`exec` 与 `--reassign` 都拒绝）；`--reassign` 其余情况都继续；有 `foreign` → `PortInUse foreign`，`detail.fix` 是 `git-strata session ports --reassign --session S --repo R`；有 `unidentified` → `Busy port_unidentified`；有 `probe_error` → `Busy port_probe_error`。cli 从不杀进程，也不自动换端口：换由用户（或 agent 按 `fix`）显式跑 `--reassign`。(4) `exec`：cwd 在所选工作区里就留在原地；cwd 不在任何会话工作区里就 chdir 到工作区根；在另一个工作区里 → `cwd_mismatch`。设上九个变量（覆盖继承的值），`execvp`。(5) `--tauri`：把 `--config <STRATA_TAURI_DEV_CONFIG>` 加进 tauri dev 的参数，让 `build.devUrl` 指向 web 端口。直接启动（`tauri dev`、`cargo\|npx\|bunx\|pnpx tauri dev`、`pnpm exec tauri dev`）插在第一个 `--` 之前；包脚本（`bun\|pnpm\|yarn\|npm run X`，必须写 `run`）只在 `package.json` 的脚本恰好是一条字面的 `[NAME=v…] (tauri\|bunx tauri\|npx tauri) dev [opts]`（或裸的 `[bunx\|npx] tauri`，此时转给脚本的第一个参数是 `dev`：`bun run tauri dev`，npm 去掉自己的 `--` 后算，`npm run tauri -- dev` 也行）、不赋 `exec` 要设的变量、不含裸 `--` 时追加在末尾（`npm run` 先补一个 `--`）；命令里再有裸 `--` 会落到 app 而不是 tauri，拒绝。不带 `run` 一律拒绝（包管理器可能跑同名的自带命令，如 `bun test`、`pnpm help`、`yarn workspace`；impl-r2）；脚本名以 `-` 开头拒绝（`npm run --prefix=../x dev` 会被 npm 当成选项，impl-r2 B1）；会换包的选项（`--prefix`、`--filter`、`-w`、`--workspace`、`--cwd` 等）以及 npm 在它的 `--` 之前的任何选项都拒绝，因为跑的就不是校验过的那个脚本（impl-r1 B1）。认不出 → `InvalidInput tauri_launcher`，`detail.fix` 教用 `sh -c 'tauri dev --config "$STRATA_TAURI_DEV_CONFIG"'`。启动方式在拿租约之前就校验，失败不写任何东西 | 端口冲突是并行会话的常态；把端口交给进程（而不是改 `tauri.conf.json`、`.env`）就不碰已提交的文件。只检查不杀进程，是因为监听者可能是另一个会话或人自己的 dev server | 2026-10-28 |

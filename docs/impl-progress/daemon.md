@@ -378,3 +378,8 @@ calls `publish::publish`, never `stage`. Every remote is a local bare repo.
   nothing recorded; drift → AwaitingPublish, approve of it refused with
   its state and no prompt; `switch` moves the proposer (same tree, new
   deps set) with no prompt.
+
+## dev-ports (impl/dev-ports, 2026-10-28)
+
+- Methods `ports_ensure` / `ports_reassign` (`{session, repo}` → `{base}`), on the session queue; `features` = `["new.agent", "session.ports"]`; policy from `[dev_ports]` at startup (daemon.md D39).
+- Test: `new_leases_dev_ports_and_ensure_reassign_rm_follow_the_lifecycle`.

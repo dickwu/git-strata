@@ -93,8 +93,6 @@
 3. 工作目录：`checks` 是 staging 树里该仓库的根目录；`install` 是 staging 基线克隆里该仓库的根目录。
 4. 程序名按 daemon 的 `PATH` 解析。launchd agent 的默认 `PATH` 不含 `~/.bun/bin`、`~/.cargo/bin`、`/opt/homebrew/bin`，所以 daemon 的 plist 必须带上用户的 `PATH` [交给 `daemon.md`]（daemon.md D1：`~/.bun/bin` 加 Homebrew 与系统目录；`~/.cargo/bin`、`~/.pub-cache/bin` 不在里面，cargo 用 Homebrew 的）[实现时补的决定]；staff-api 的 php 命令像它自己的 `composer.json` 脚本那样写绝对路径 `/opt/homebrew/bin/php`。
 
----
-
 ### 2.5 `[status]`
 
 [实现时补的决定]（2026-10-28，status-perf D7）可省略的表，目前只有一个键：
@@ -109,6 +107,22 @@ parallel = 4
 ```
 
 整个表或这个键省略 → 缺省 4；缺省值不写回（序列化时省略整个表）。表里的未知键照样是 V11。daemon 只在启动时读配置，所以改了要重启才生效。**旧二进制不认识 `[status]`**（`Config` 是 `deny_unknown_fields`，V11，整份配置加载失败），所以上线顺序与 `check_siblings` 相同：先把新的 `git-strata` 与 `git-stratad` 一起装好，再改线上配置，最后重启 daemon；若在重启之后才改配置，要再重启一次才生效。
+
+### 2.6 `[dev_ports]`（可选）[实现时补的决定]（2026-10-28，dev-ports 设计）
+
+每个会话工作区（不含主 checkout）在 `new` / `add` 时租一组 4 个连续的 TCP 端口：`web`（dev server，`PORT`）、`connector`、`connector_mcp`、`aux`。租约记在 Store 的 `dev_ports` 表（store.md §4.4a），由 `git-strata session ports` / `session exec` 交给进程（cli.md §3.2）。
+
+| 字段 | 类型 | 缺省 | 语义 |
+| --- | --- | --- | --- |
+| `range` | string `"LO-HI"`（含两端） | `"20000-29999"` | 切成按 4 对齐的块；每块是一个租约 |
+| `exclude` | 端口数组 | `[]` | 含其中任一端口的块永不出租 |
+
+规则（`DevPorts::validate`，`Config::validate` 的最后一步，`InvalidInput`，`detail.rule`）：
+- P1：`range` 是 `LO-HI` 且 `LO <= HI`；`exclude` 没有 0。
+- P2：范围在 1024–49151 之内（低于 macOS 的临时端口），且不与常见默认端口重叠：3000–3999（Next；Hub 固定 3000）、4001（git-strata 自己的桌面 GUI 的 dev server）、5173（Vite）、8080、9300–9400（tauri-connector bridge；git-strata 固定 9300）、9555–9656（tauri-connector WS/MCP；含 GIT STRATA app 固定的 9555/9556 与 Hub 固定的 WS 9640–9649 / MCP 9650–9654）。所以主 checkout 用默认端口，与任意多个会话共存。
+- P3：去掉 `exclude` 后至少剩一块。
+
+整个表可以不写（全用缺省）。daemon 启动时按它设置分配策略；只有装上带租约的 daemon 后才该写这个表（旧 daemon 会以 V11 拒绝未知键）。分配时对每块的 4 个端口做绑定探测（`0.0.0.0`、`[::]`、`127.0.0.1`，`SO_REUSEADDR`），不通过的块跳过；全部用尽时 `new` / `add` 照常成功，只是没有租约：`session ports` 把这个工作区列成一项 `{"ports": null, "reason": "ports_exhausted"}`（调用本身成功），`session exec` 与 `--reassign` 才回 `Busy ports_exhausted`。
 
 ## 3. Rust 定义（`strata-types`）
 
@@ -135,6 +149,9 @@ pub struct Config {
     /// `[status]`（§2.5）；缺省时不序列化。
     #[serde(default, skip_serializing_if = "StatusConfig::is_default")]
     pub status: StatusConfig,
+    /// `[dev_ports]`（§2.6），可省略。
+    #[serde(default)]
+    pub dev_ports: DevPorts,
 }
 
 /// `[status]`（§2.5，status-perf D7）。
@@ -143,6 +160,16 @@ pub struct Config {
 pub struct StatusConfig {
     #[serde(default = "StatusConfig::default_parallel")] // 4
     pub parallel: u32, // V13：1..=16
+}
+
+/// `[dev_ports]`（§2.6）。`blocks()` 给出每个可用块的起始端口（升序）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevPorts {
+    #[serde(default = "DevPorts::default_range")]
+    pub range: String,
+    #[serde(default)]
+    pub exclude: Vec<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

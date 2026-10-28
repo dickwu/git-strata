@@ -223,7 +223,7 @@ fn stdout_flush_failure_is_nonzero() {
 #[test]
 fn error_codes_match_types_md() {
     let names = code_names();
-    assert_eq!(names.len(), 39);
+    assert_eq!(names.len(), 40);
     assert!(!names.iter().any(|n| n == "UnknownMethod" || n == "Failed"));
     for c in Code::ALL {
         let e = Envelope::err(StrataError::new(*c, "m"));

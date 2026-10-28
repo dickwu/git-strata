@@ -132,7 +132,7 @@ fn session(env: &Env, s: &Store, name: &str, b: &BaseGen) -> SessionId {
     let root = env.root.join("sessions").join(id.as_str());
     let mut repos = BTreeMap::new();
     repos.insert(repo("app"), WorkspaceState { base: b.clone(), head: head('1'), path: root.join("app"), tracked: true });
-    s.create_session(&SessionManifest { id: id.clone(), ticket: None, root, repos }, t(10)).unwrap();
+    s.create_session(&SessionManifest { id: id.clone(), ticket: None, agent: None, root, repos }, t(10)).unwrap();
     assert!(s.set_lifecycle(&id, Lifecycle::Creating, Lifecycle::Active, None, t(11)).unwrap());
     id
 }

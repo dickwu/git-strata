@@ -241,3 +241,8 @@ Branch `impl/session` (worktree `git-strata-wt/session`), from `impl/v1` d40218a
   `remove(discard = false)`: the accepted old tree is unchanged since the
   move's BeforeRollout checkpoint, so remove's dirty check passes and the
   tree is retired with the session.
+
+## dev-ports (D58, 2026-10-28)
+
+- `seed::drop_connector_files` after cloning each seed cache in `new` (stage `seed_caches`) and in `add`'s staging; only caches named `target`; `NoSuchPath` ignored.
+- Test: `connector_files_are_dropped_only_from_target_caches`.

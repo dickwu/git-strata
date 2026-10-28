@@ -11,7 +11,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::sql::{self, Connection, Mode};
 use serde_json::json;
@@ -19,7 +19,7 @@ use strata_apfs::{IoSide, classify_io_error, full_fsync, nearest_existing_ancest
 use strata_types::{Code, StrataError};
 
 use crate::errors::{self, NOT_WRITTEN, corrupt, err, sql};
-use crate::schema::{APPLICATION_ID, DDL, USER_VERSION};
+use crate::schema::{APPLICATION_ID, BASE_VERSION, LATEST, ddl, pending};
 use crate::seams::{self, Seam, Seams};
 use crate::{Result, Store};
 
@@ -130,13 +130,11 @@ fn check_header(db: &Path) -> Result<()> {
             json!({ "reason": "application_id", "path": shown, "expected": APPLICATION_ID, "actual": app }),
         ));
     }
+    // The header may lag the WAL by one migration; PRAGMA user_version
+    // (step 3) decides, the header only gates the range.
     let uv = be(60);
-    if uv != USER_VERSION as u32 {
-        return Err(err(
-            Code::Corrupt,
-            format!("{shown} has schema version {uv}; this strata understands {USER_VERSION}"),
-            json!({ "reason": "user_version", "path": shown, "expected": USER_VERSION, "actual": uv }),
-        ));
+    if !(BASE_VERSION..=LATEST).contains(&uv) {
+        return Err(bad_version(&shown, uv));
     }
     if buf[18] != 2 || buf[19] != 2 {
         return Err(err(
@@ -159,22 +157,67 @@ fn pragma_text(c: &Connection, name: &str) -> sql::SqlResult<String> {
     })
 }
 
-/// Step 3: re-check identity through SQLite.
-fn check_identity(c: &Connection, op: &str) -> Result<()> {
+fn bad_version(shown: &str, uv: u32) -> StrataError {
+    let why = if uv > LATEST { "; a newer git-strata wrote it, install that version" } else { "" };
+    err(
+        Code::Corrupt,
+        format!("{shown} has schema version {uv}; this strata understands {BASE_VERSION}..={LATEST}{why}"),
+        json!({ "reason": "user_version", "path": shown, "expected": LATEST, "actual": uv }),
+    )
+}
+
+/// `Database schema changed`: what a connection that lived through
+/// another process's migration reports on the first statement of a
+/// transaction that touches a table (`PRAGMA user_version` does not), and
+/// keeps reporting in every explicit transaction until an autocommit
+/// statement has reloaded its schema.
+fn schema_changed(e: &StrataError) -> bool {
+    const MSG: &str = "Database schema changed";
+    e.message.contains(MSG) || e.detail.as_ref().and_then(|d| d.get("message")).and_then(|m| m.as_str()).is_some_and(|m| m.contains(MSG))
+}
+
+/// Run `f` in one read transaction on `c`; if the store's schema changed
+/// under this connection (a migration by another process), run it again,
+/// once, in a fresh transaction. Reads have no side effects to repeat.
+pub(crate) fn read_txn<T>(c: &Connection, op: &str, f: impl Fn(&Connection) -> Result<T>) -> Result<T> {
+    let mut retried = false;
+    loop {
+        c.execute_batch("BEGIN DEFERRED").map_err(|e| sql(e, op, NOT_WRITTEN))?;
+        let out = f(c);
+        let end = c.execute_batch(if out.is_ok() { "COMMIT" } else { "ROLLBACK" });
+        match out {
+            Err(e) if !retried && schema_changed(&e) => {
+                // Inside BEGIN the connection keeps its stale schema; one
+                // autocommit statement makes it reload (Turso 0.9.0-pre.1).
+                c.query_row("SELECT count(*) FROM sqlite_schema", (), |r| r.get::<_, i64>(0)).map_err(|e| sql(e, op, NOT_WRITTEN))?;
+                retried = true;
+            }
+            Err(e) => return Err(e),
+            Ok(v) => {
+                end.map_err(|e| sql(e, op, NOT_WRITTEN))?;
+                return Ok(v);
+            }
+        }
+    }
+}
+
+/// Step 3: re-check identity through SQLite; the schema version.
+fn check_identity(c: &Connection, op: &str) -> Result<u32> {
     let s = |e| sql(e, op, NOT_WRITTEN);
     let app = pragma_text(c, "application_id").map_err(s)?;
     if app != APPLICATION_ID.to_string() {
         return Err(err(Code::Corrupt, "application_id mismatch", json!({ "reason": "application_id", "actual": app })));
     }
     let uv = pragma_text(c, "user_version").map_err(s)?;
-    if uv != USER_VERSION.to_string() {
-        return Err(err(Code::Corrupt, "user_version mismatch", json!({ "reason": "user_version", "actual": uv })));
-    }
+    let v: u32 = match uv.parse() {
+        Ok(v) if (BASE_VERSION..=LATEST).contains(&v) => v,
+        _ => return Err(err(Code::Corrupt, "user_version mismatch", json!({ "reason": "user_version", "actual": uv }))),
+    };
     let jm = pragma_text(c, "journal_mode").map_err(s)?;
     if jm != "wal" {
         return Err(err(Code::Corrupt, "journal_mode is not WAL", json!({ "reason": "journal_mode", "actual": jm })));
     }
-    Ok(())
+    Ok(v)
 }
 
 /// Set and read back one pragma; mismatch → `Unsupported`.
@@ -228,10 +271,10 @@ fn schema_rows(c: &Connection) -> sql::SqlResult<Vec<SchemaRow>> {
     rows.collect()
 }
 
-/// Step 5: the schema must equal the pinned DDL, row for row.
-fn check_schema(c: &Connection, op: &str) -> Result<()> {
+/// Step 5: the schema must equal the pinned DDL of version `v`, row for row.
+fn check_schema(c: &Connection, op: &str, v: u32) -> Result<()> {
     let mem = sql::open_in_memory().map_err(|e| sql(e, op, NOT_WRITTEN))?;
-    mem.execute_batch(DDL).map_err(|e| sql(e, op, NOT_WRITTEN))?;
+    mem.execute_batch(&ddl(v)).map_err(|e| sql(e, op, NOT_WRITTEN))?;
     let want = schema_rows(&mem).map_err(|e| sql(e, op, NOT_WRITTEN))?;
     let got = schema_rows(c).map_err(|e| sql(e, op, NOT_WRITTEN))?;
     let show = |r: Option<&SchemaRow>| r.map(|(t, n, tb, s)| json!({ "type": t, "name": n, "tbl_name": tb, "sql": s }));
@@ -241,7 +284,7 @@ fn check_schema(c: &Connection, op: &str) -> Result<()> {
         if w != g {
             return Err(err(
                 Code::Corrupt,
-                "the store's schema differs from this strata's schema; refusing to open (no repair, no migration)",
+                "the store's schema differs from this strata's schema for its version; refusing to open (no repair)",
                 json!({ "reason": "schema", "index": i, "expected": show(w), "actual": show(g) }),
             ));
         }
@@ -313,14 +356,9 @@ impl Store {
     }
 
     /// Run `f` inside one read transaction on a pooled reader.
-    pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    pub(crate) fn read<T>(&self, f: impl Fn(&Connection) -> Result<T>) -> Result<T> {
         let r = self.reader()?;
-        r.execute_batch("BEGIN DEFERRED").map_err(errors::sql_read)?;
-        let out = f(&r);
-        let end = r.execute_batch(if out.is_ok() { "COMMIT" } else { "ROLLBACK" });
-        let v = out?;
-        end.map_err(errors::sql_read)?;
-        Ok(v)
+        read_txn(&r, "read", f)
     }
 
     pub fn open(root: &Path, checkouts: &[&Path]) -> Result<Store> {
@@ -426,8 +464,9 @@ impl Store {
         let real_root = retry_eintr(|| fs::canonicalize(root)).map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
         let rdb = real_root.join("store").join("store.db");
         let c = open_reader_conn(&rdb)?;
-        check_identity(&c, "open")?;
-        check_schema(&c, "open")?;
+        // Version and schema from one snapshot: a migration in the daemon
+        // may land between any two statements otherwise.
+        read_txn(&c, "open", |c| check_identity(c, "open").and_then(|v| check_schema(c, "open", v)))?;
         Ok(new_store(root, real_root, true, c, None))
     }
 
@@ -495,6 +534,7 @@ fn new_store(root: &Path, real_root: PathBuf, read_only: bool, db: Connection, l
         gc_running: Mutex::new(()),
         poisoned: AtomicBool::new(false),
         seams: Seams::default(),
+        dev_ports: Mutex::new(None),
     }
 }
 
@@ -593,7 +633,7 @@ fn create(root: &Path, anc: &Path) -> Result<Store> {
             ));
         }
         pin_writer(&c, "init")?;
-        c.execute_batch(&format!("BEGIN IMMEDIATE;\n{DDL}\nCOMMIT;")).map_err(|e| sql(e, "init", NOT_WRITTEN))?;
+        c.execute_batch(&format!("BEGIN IMMEDIATE;\n{}\nCOMMIT;", ddl(LATEST))).map_err(|e| sql(e, "init", NOT_WRITTEN))?;
         let ck: Vec<i64> = c
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok(vec![r.get(0)?, r.get(1)?, r.get(2)?]))
             .map_err(|e| sql(e, "init", NOT_WRITTEN))?;
@@ -644,10 +684,13 @@ fn open_existing(root: &Path, lock: Option<File>) -> Result<Store> {
     let rdb = rstore.join("store.db");
     let c = open_conn(&rdb).map_err(|e| sql(e, "open", NOT_WRITTEN))?;
     c.busy_timeout(Duration::ZERO).map_err(|e| sql(e, "open", NOT_WRITTEN))?;
-    check_identity(&c, "open")?;
+    let v = check_identity(&c, "open")?;
     pin_writer(&c, "open")?;
-    check_schema(&c, "open")?;
+    check_schema(&c, "open", v)?;
+    // The marker goes first: a migration that fails or dies below must
+    // never leave a stale clean-shutdown claim behind.
     let marker = rstore.join("clean-shutdown");
+    let mut checked = false;
     if exists(&marker).map_err(|e| ioe(&e, IoSide::Read, &marker, "open"))? {
         fs::remove_file(&marker).map_err(|e| {
             let e = errors::io(&e, IoSide::Write, &marker, "open", NOT_WRITTEN);
@@ -656,8 +699,174 @@ fn open_existing(root: &Path, lock: Option<File>) -> Result<Store> {
         full_sync_path(&rstore, "open", errors::UNCERTAIN)?;
     } else {
         quick_check_on(&c)?;
+        checked = true;
+    }
+    if v < LATEST {
+        if !checked {
+            quick_check_on(&c)?;
+        }
+        migrate(&c, &rstore, &rdb, v)?;
     }
     Ok(new_store(root, real_root, false, c, Some(lock)))
+}
+
+const MIGRATE: &str = "migrate";
+const CHECKPOINT_WAIT: Duration = Duration::from_secs(5);
+
+/// store.md §4.4: take a store at `from` to `LATEST` in one transaction,
+/// after a durable, verified backup of the `from` file. L1 is held, so no
+/// other writer (or checkpointer) exists; read-only connections may.
+fn migrate(c: &Connection, rstore: &Path, rdb: &Path, from: u32) -> Result<()> {
+    let backup = backup(c, rstore, rdb, from)?;
+    c.execute_batch("BEGIN IMMEDIATE").map_err(|e| sql(e, MIGRATE, NOT_WRITTEN))?;
+    let applied = (|| -> Result<()> {
+        for m in pending(from) {
+            c.execute_batch(m.sql).map_err(|e| errors::with(sql(e, MIGRATE, NOT_WRITTEN), "migration", m.name))?;
+        }
+        // Validate inside the transaction (it sees its own schema), so
+        // nothing that can fail as NOT_WRITTEN runs after COMMIT.
+        let uv = pragma_text(c, "user_version").map_err(|e| sql(e, MIGRATE, NOT_WRITTEN))?;
+        if uv != LATEST.to_string() {
+            return Err(err(
+                Code::Corrupt,
+                format!("migration left user_version {uv}, not {LATEST}"),
+                json!({ "reason": "user_version", "op": MIGRATE, "outcome": NOT_WRITTEN, "expected": LATEST, "actual": uv }),
+            ));
+        }
+        check_schema(c, MIGRATE, LATEST)?;
+        if seams::take_next_open(&Seam::MigrateFailsBeforeCommit) {
+            return Err(err(
+                Code::Unknown,
+                "migration interrupted before COMMIT (test seam)",
+                json!({ "op": MIGRATE, "outcome": NOT_WRITTEN, "seam": "migrate_fails_before_commit" }),
+            ));
+        }
+        Ok(())
+    })();
+    if let Err(e) = applied {
+        let _ = c.execute_batch("ROLLBACK");
+        return Err(errors::with_default(e, "outcome", NOT_WRITTEN));
+    }
+    #[cfg(feature = "test-seams")]
+    let fail = seams::take_next_open(&Seam::MigrateCommitSyncFails).then(|| {
+        let v = crate::vfs::counters(c.path().unwrap_or_default());
+        v.fail_next.store(true, Ordering::SeqCst);
+        v
+    });
+    let res = c.execute_batch("COMMIT");
+    #[cfg(feature = "test-seams")]
+    if let Some(v) = fail {
+        v.fail_next.store(false, Ordering::SeqCst);
+    }
+    if let Err(e) = res {
+        let definite = matches!(&e, turso::Error::Constraint(_) | turso::Error::Busy(_) | turso::Error::BusySnapshot(_));
+        let _ = c.execute_batch("ROLLBACK");
+        if definite {
+            return Err(sql(e, MIGRATE, NOT_WRITTEN));
+        }
+        // Like txn.rs commit_failed: whether the new schema reached the
+        // disk is unknown. Only a fresh process re-runs WAL recovery
+        // (store.md §5.2), so the caller must exit; its next open reads
+        // user_version and migrates again or proceeds — both whole.
+        let msg = e.to_string();
+        return Err(err(
+            Code::Unknown,
+            format!("COMMIT of the schema migration {from} -> {LATEST} failed; whether it reached the disk is unknown (restart the process to recover): {msg}"),
+            json!({ "op": MIGRATE, "outcome": errors::UNCERTAIN, "reason": "migration_commit", "from": from, "to": LATEST, "backup": backup.to_string_lossy(), "message": msg }),
+        ));
+    }
+    if seams::take_next_open(&Seam::MigrateAbortAfterCommit) {
+        std::process::abort();
+    }
+    // Committed: from here on the store is LATEST whatever happens; the
+    // user_version written inside the transaction is what every open
+    // trusts (check_identity reads the PRAGMA). Folding the WAL is best
+    // effort and only tidies the file: if it fails, the header still says
+    // `from` (an accepted value) until a later checkpoint.
+    let _ = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |_| Ok(()));
+    eprintln!("git-strata: store schema migrated {from} -> {LATEST}; a copy of the v{from} store is at {}", backup.display());
+    Ok(())
+}
+
+/// Fold the WAL into store.db and clone it to `store/backups/`, durably,
+/// then check the copy stands alone. Any failure: nothing migrated.
+fn backup(c: &Connection, rstore: &Path, rdb: &Path, from: u32) -> Result<PathBuf> {
+    const OP: &str = "migrate_backup";
+    let wal = PathBuf::from(format!("{}-wal", rdb.display()));
+    let deadline = Instant::now() + CHECKPOINT_WAIT;
+    loop {
+        let ck: Vec<sql::Value> = c
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok(vec![r.get(0)?, r.get(1)?, r.get(2)?]))
+            .map_err(|e| sql(e, OP, NOT_WRITTEN))?;
+        let wal_len = match fs::metadata(&wal) {
+            Ok(m) => m.len(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(ioe(&e, IoSide::Read, &wal, OP)),
+        };
+        if ck.first() == Some(&sql::Value::Integer(0)) && wal_len == 0 {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(err(
+                Code::Busy,
+                "cannot fold the WAL before migrating (a reader holds it); nothing migrated, the store is unchanged — retry when git-strata readers finish",
+                json!({ "reason": "migration_backup", "op": OP, "outcome": NOT_WRITTEN, "checkpoint": format!("{ck:?}"), "wal_bytes": wal_len }),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let dir = rstore.join("backups");
+    let made = match fs::create_dir(&dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
+        Err(e) => return Err(ioe(&e, IoSide::Write, &dir, OP)),
+    };
+    let ns = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let dst = dir.join(format!("store-v{from}-{ns}.db"));
+    let done = (|| -> Result<()> {
+        strata_apfs::clone_file(rdb, &dst).map_err(|e| errors::annotate(e, OP, NOT_WRITTEN))?;
+        full_sync_path(&dst, OP, NOT_WRITTEN)?;
+        full_sync_path(&dir, OP, NOT_WRITTEN)?;
+        if made {
+            full_sync_path(rstore, OP, NOT_WRITTEN)?;
+        }
+        verify_backup(&dst, from)
+    })();
+    if let Err(e) = done {
+        let _ = fs::remove_file(&dst);
+        return Err(e);
+    }
+    Ok(dst)
+}
+
+/// The copy, read without SQLite (so no sidecar is created next to it):
+/// a strata header at `from`, and exactly `page_count` pages long.
+fn verify_backup(p: &Path, from: u32) -> Result<()> {
+    let bytes = fs::read(p).map_err(|e| ioe(&e, IoSide::Read, p, "migrate_backup"))?;
+    let shown = p.to_string_lossy();
+    let bad = |what: String| {
+        err(
+            Code::Unknown,
+            format!("the pre-migration backup {shown} is not a whole v{from} store ({what}); nothing migrated"),
+            json!({ "reason": "migration_backup", "op": "migrate_backup", "outcome": NOT_WRITTEN, "path": shown }),
+        )
+    };
+    if bytes.len() < 100 || &bytes[..16] != MAGIC {
+        return Err(bad("no SQLite header".into()));
+    }
+    let be = |o: usize| u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+    if be(68) != APPLICATION_ID as u32 || be(60) != from {
+        return Err(bad(format!("application_id {} user_version {}", be(68), be(60))));
+    }
+    let ps = match u16::from_be_bytes([bytes[16], bytes[17]]) {
+        1 => 65536u64,
+        n => n as u64,
+    };
+    let pages = be(28) as u64;
+    if pages == 0 || ps * pages != bytes.len() as u64 {
+        return Err(bad(format!("{pages} pages of {ps} bytes but {} bytes long", bytes.len())));
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]

@@ -278,11 +278,12 @@ impl<'a> Run<'a> {
     }
 
     fn delete_sessions(&mut self, r: &[String]) -> Result<()> {
-        const TABLES: [(&str, &str); 6] = [
+        const TABLES: [(&str, &str); 7] = [
             ("overlay_entries", "session"),
             ("checkpoints", "session"),
             ("seeds", "session"),
             ("move_intents", "session"),
+            ("dev_ports", "session"),
             ("workspaces", "session"),
             ("sessions", "id"),
         ];
@@ -1156,7 +1157,7 @@ impl Store {
     pub fn last_gc_report(&self, scope: Option<&RepoName>) -> Result<Option<GcReport>> {
         let s = scope.map(|r| r.as_str().to_owned());
         let text: Option<String> = self.read(|c| {
-            c.query_row("SELECT report FROM gc_runs WHERE scope IS ?1 ORDER BY id DESC LIMIT 1", [s], |r| r.get(0))
+            c.query_row("SELECT report FROM gc_runs WHERE scope IS ?1 ORDER BY id DESC LIMIT 1", [s.clone()], |r| r.get(0))
                 .optional()
                 .map_err(sql_read)
         })?;

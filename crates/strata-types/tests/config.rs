@@ -116,6 +116,7 @@ fn v1_name_must_match_path_basename_and_table_must_be_nonempty() {
         paths: Paths::default(),
         repos: Default::default(),
         status: Default::default(),
+        dev_ports: Default::default(),
     };
     assert_eq!(rule(&empty.validate().unwrap_err()), "V1");
 }
@@ -642,4 +643,33 @@ fn status_parallel_defaults_and_bounds() {
     }
     let err = parse(&format!("{}\n[status]\nparallel = 2\nfast = true\n", minimal(&repo))).unwrap_err();
     assert_eq!(rule(&err), "V11");
+}
+
+#[test]
+fn dev_ports_default_to_2500_blocks_and_validate_their_range() {
+    let base = minimal(&bare_repo("tool", "/Volumes/GWD/inter/tool"));
+    let c = parse(&base).unwrap();
+    assert_eq!(c.dev_ports, strata_types::DevPorts::default());
+    let blocks = c.dev_ports.blocks().unwrap();
+    assert_eq!((blocks.len(), blocks[0], *blocks.last().unwrap()), (2500, 20000, 29996));
+
+    let with = |t: &str| format!("{base}\n[dev_ports]\n{t}\n");
+    let c = parse(&with("range = \"20001-20011\"\nexclude = [20005]")).unwrap();
+    assert_eq!(c.dev_ports.blocks().unwrap(), vec![20008]);
+    for (t, r, field) in [
+        ("range = \"x\"", "P1", "dev_ports.range"),
+        ("range = \"30000-20000\"", "P1", "dev_ports.range"),
+        ("range = \"50000-50100\"", "P2", "dev_ports.range"),
+        ("range = \"9000-9600\"", "P2", "dev_ports.range"),
+        ("range = \"4000-4003\"", "P2", "dev_ports.range"),
+        ("range = \"20001-20003\"", "P3", "dev_ports.range"),
+        ("range = \"20000-20003\"\nexclude = [20002]", "P3", "dev_ports.range"),
+        ("exclude = [0]", "P1", "dev_ports.exclude"),
+    ] {
+        let e = parse(&with(t)).unwrap_err();
+        assert_eq!(e.code, Code::InvalidInput, "{t}");
+        assert_eq!(rule(&e), r, "{t}");
+        assert_eq!(e.detail.as_ref().unwrap()["field"], field, "{t}");
+    }
+    assert_eq!(rule(&parse(&with("ranges = \"1-2\"")).unwrap_err()), "V11");
 }

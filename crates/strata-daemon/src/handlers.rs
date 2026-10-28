@@ -20,7 +20,7 @@ use strata_overlay::{Base, DEFAULT_DIRTY_CAPACITY, Overlay, RestoreRequest, Trac
 use strata_search::{GrepOpts, Hit, OverlaySource, Search, Which};
 use strata_session::Layout;
 use strata_store::PublishPhase;
-use strata_types::{Action, BaseGen, Code, CommitOid, RepoConfig, RepoName, RepoPath, SessionId, StrataError, WorkspaceState};
+use strata_types::{Action, AgentName, BaseGen, Code, CommitOid, RepoConfig, RepoName, RepoPath, SessionId, StrataError, WorkspaceState};
 
 use crate::confirm_flow::{apply, needs_confirm, recheck, require_validated};
 use crate::fetch_after::{alert_attach, report_guard_disabled};
@@ -45,6 +45,16 @@ pub(crate) fn writing() {
 
 fn json_of<T: serde::Serialize>(v: &T) -> Value {
     serde_json::to_value(v).unwrap_or(Value::Null)
+}
+
+/// The wire shape of one lease (`ports_ensure` / `ports_reassign`).
+fn lease_json(l: &strata_store::DevPortLease) -> Value {
+    json!({
+        "session": l.session.as_str(),
+        "repo": l.repo.as_str(),
+        "base": l.base,
+        "ports": { "web": l.web(), "connector": l.connector(), "connector_mcp": l.connector_mcp(), "aux": l.aux() },
+    })
 }
 
 fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -513,6 +523,8 @@ fn session_of(p: &Params) -> Option<SessionId> {
         Params::Rm(p) => Some(p.session.clone()),
         Params::Add(p) => Some(p.session.clone()),
         Params::ResolveMove(p) => Some(p.session.clone()),
+        Params::PortsEnsure(p) => Some(p.session.clone()),
+        Params::PortsReassign(p) => Some(p.session.clone()),
         _ => None,
     }
 }
@@ -549,7 +561,7 @@ impl<'d, 'a> Server<'d, 'a> {
     fn dispatch(&self, p: &Params) -> Result<Value> {
         let core = self.core();
         match p {
-            Params::New(p) => self.new_session(p.ticket.as_deref(), &p.repos, p.only),
+            Params::New(p) => self.new_session(p.ticket.as_deref(), &p.repos, p.only, p.agent.clone()),
             Params::Add(p) => self.add_repos(&p.session, &p.repos),
             Params::Status(p) if p.summary || p.workspaces => {
                 self.status_summary(p.cwd.as_deref(), p.session.as_deref(), p.all, p.chains, p.summary, p.workspaces)
@@ -727,6 +739,17 @@ impl<'d, 'a> Server<'d, 'a> {
             }
             Params::DaemonStatus(p) => self.d.daemon_status(p.verify),
             Params::Du(p) => Ok(self.d.du.report(p.refresh)),
+            // design dev-ports §3.1: under the session queue, so serialized
+            // with rm's Active→Removing→Removed; the store re-reads the
+            // lifecycle inside its write txn.
+            Params::PortsEnsure(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
+                writing();
+                Ok(lease_json(&core.store.ensure_dev_ports(&p.session, &p.repo)?))
+            }),
+            Params::PortsReassign(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
+                writing();
+                Ok(lease_json(&core.store.reassign_dev_ports(&p.session, &p.repo, p.checked)?))
+            }),
             Params::ResolveMove(p) => {
                 let Some(choice) = resolve::move_choice(p.abandon, p.accept) else {
                     return Err(StrataError::new(Code::InvalidInput, "exactly one of abandon and accept")
@@ -755,12 +778,14 @@ impl<'d, 'a> Server<'d, 'a> {
     }
 
     /// §5.7: `new`, then the anchor and the observe retry.
-    fn new_session(&self, ticket: Option<&str>, repos: &[RepoName], only: bool) -> Result<Value> {
+    fn new_session(&self, ticket: Option<&str>, repos: &[RepoName], only: bool, agent: Option<String>) -> Result<Value> {
+        // Validate before anything is written: a bad name creates nothing.
+        let agent = agent.map(AgentName::try_from).transpose()?;
         let core = self.core();
         writing();
         let t0 = std::time::Instant::now();
         let layout = if only { Layout::Only } else { Layout::Siblings };
-        let mut rep = match self.d.sessions.new_with(ticket, repos, layout) {
+        let mut rep = match self.d.sessions.new_as(ticket, repos, layout, agent.as_ref()) {
             Ok(r) => r,
             Err(e) => {
                 for r in repos {

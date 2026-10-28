@@ -70,6 +70,8 @@ methods! {
     ConfigRelax = "config_relax", ro = false;
     DaemonStatus = "daemon_status", ro = true;
     Du = "du", ro = true;
+    PortsEnsure = "ports_ensure", ro = false;
+    PortsReassign = "ports_reassign", ro = false;
 }
 
 /// A field that must be present but may be `null` (a missing one is
@@ -87,6 +89,13 @@ pub struct NewParams {
     /// Only `repos` get a workspace (session.md D51); absent means false.
     #[serde(default)]
     pub only: bool,
+    /// Which agent created the session; absent or null means not known.
+    /// A plain string on the wire: the handler validates it as an
+    /// `AgentName` so a bad name answers `InvalidInput` reason `agent`.
+    /// Old daemons reject the field (deny_unknown_fields), so the CLI sends
+    /// it only when `daemon_status.features` has `new.agent`.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// `add` (session.md D52): more repos for an existing session.
@@ -245,6 +254,26 @@ pub struct RepoParams {
     pub repo: RepoName,
 }
 
+/// `ports_ensure`: one workspace's dev-port lease.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortsParams {
+    pub session: SessionId,
+    pub repo: RepoName,
+}
+
+/// `ports_reassign`: `checked` is the base the caller checked for
+/// listeners (`null` or absent: it saw no lease); the store refuses a lease
+/// that has changed since (`Busy lease_changed`).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReassignParams {
+    pub session: SessionId,
+    pub repo: RepoName,
+    #[serde(default)]
+    pub checked: Option<u16>,
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssignParams {
@@ -321,6 +350,8 @@ pub enum Params {
     ConfigRelax(RepoParams),
     DaemonStatus(DaemonStatusParams),
     Du(DuParams),
+    PortsEnsure(PortsParams),
+    PortsReassign(ReassignParams),
 }
 
 fn typed<T: DeserializeOwned>(v: Value, wrap: fn(T) -> Params) -> Result<Params, String> {
@@ -363,6 +394,8 @@ impl Params {
             Method::ConfigRelax => typed(v, Params::ConfigRelax),
             Method::DaemonStatus => typed(v, Params::DaemonStatus),
             Method::Du => typed(v, Params::Du),
+            Method::PortsEnsure => typed(v, Params::PortsEnsure),
+            Method::PortsReassign => typed(v, Params::PortsReassign),
         }
     }
 }

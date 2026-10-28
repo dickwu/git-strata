@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use strata_types::{Code, CommitOid, RepoName, SessionManifest, StrataError, TreeOid};
+use strata_types::{AgentName, Code, CommitOid, RepoName, SessionManifest, StrataError, TreeOid};
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -14,7 +14,7 @@ use strata_store::{Lifecycle, SeedRow};
 use strata_types::{BaseGen, RepoPath, SessionId, WorkspaceState};
 
 use crate::scene::{Scene, SceneOp, cause_of, kept_dirs, unknown_error};
-use crate::seed::{SeedSource, ancestors, seed_files, seed_plan};
+use crate::seed::{SeedSource, ancestors, drop_connector_files, seed_files, seed_plan};
 use crate::sys::{lstat, rp};
 use crate::{Result, Sessions, dispatch};
 
@@ -89,6 +89,12 @@ impl Sessions<'_> {
     /// `new` with an explicit layout (D51): `Layout::Only` builds workspaces
     /// of the requested repos only and fetches only those.
     pub fn new_with(&self, ticket: Option<&str>, repos: &[RepoName], layout: Layout) -> Result<NewReport> {
+        self.new_as(ticket, repos, layout, None)
+    }
+
+    /// `new_with`, recording which agent created the session (stored with
+    /// the session row, immutable; `None` = not known).
+    pub fn new_as(&self, ticket: Option<&str>, repos: &[RepoName], layout: Layout, agent: Option<&AgentName>) -> Result<NewReport> {
         let v = self.validate_new(ticket, repos, layout)?;
         let heads: BTreeMap<RepoName, (CommitOid, TreeOid)> = self.resolve_heads(&v.members)?.into_iter().collect();
         let all: Vec<RepoName> = heads.keys().cloned().collect();
@@ -108,6 +114,7 @@ impl Sessions<'_> {
         let manifest = SessionManifest {
             id: v.id.clone(),
             ticket: ticket.map(str::to_string),
+            agent: agent.cloned(),
             root: root.clone(),
             repos: all
                 .iter()
@@ -289,6 +296,7 @@ impl Sessions<'_> {
                     strata_apfs::mkdir_rooted(ws, parent, 0o755, true)?;
                 }
                 strata_apfs::clone_tree_rooted(&cfg.path.join(c.as_str()), ws, c)?;
+                drop_connector_files(ws, c)?;
             }
             Ok(())
         };

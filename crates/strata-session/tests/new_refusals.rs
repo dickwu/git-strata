@@ -192,7 +192,7 @@ fn new_refuses_cross_volume_root() {
     sb.bare_origin(&main);
     let mut repos = std::collections::BTreeMap::new();
     repos.insert(repo_name("tool"), sb.config(&main));
-    let config = Config { paths: Paths { root: img.mount.join("strata") }, repos, status: Default::default() };
+    let config = Config { paths: Paths { root: img.mount.join("strata") }, repos, status: Default::default(), dev_ports: Default::default() };
     let fx = Fx::from_parts_unchecked(sb, config);
     let e = fx.sessions().new(None, &[fx.rn("tool")]).unwrap_err();
     assert_eq!(e.code, Code::CrossVolume, "{e:?}");
@@ -215,7 +215,7 @@ fn new_refuses_non_apfs_root() {
     sb.bare_origin(&main);
     let mut repos = std::collections::BTreeMap::new();
     repos.insert(repo_name("tool"), sb.config(&main));
-    let config = Config { paths: Paths { root: img.mount.join("strata") }, repos, status: Default::default() };
+    let config = Config { paths: Paths { root: img.mount.join("strata") }, repos, status: Default::default(), dev_ports: Default::default() };
     let fx = Fx::from_parts_unchecked(sb, config);
     let e = fx.sessions().new(None, &[fx.rn("tool")]).unwrap_err();
     assert_eq!(e.code, Code::Unsupported, "{e:?}");
@@ -330,7 +330,7 @@ fn Store_open_close(root: &Path) {
 fn aliased(sb: Sandbox, path: &Path, root: impl Fn(&Sandbox) -> std::path::PathBuf) -> Fx {
     let mut repos = std::collections::BTreeMap::new();
     repos.insert(repo_name("tool"), sb.config(path));
-    let config = Config { paths: Paths { root: root(&sb) }, repos, status: Default::default() };
+    let config = Config { paths: Paths { root: root(&sb) }, repos, status: Default::default(), dev_ports: Default::default() };
     Fx::from_parts_unchecked(sb, config)
 }
 

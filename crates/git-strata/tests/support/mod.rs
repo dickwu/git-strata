@@ -50,7 +50,8 @@ impl Home {
         let mut c = Command::new(BIN);
         for (k, _) in std::env::vars_os() {
             let up = k.to_string_lossy().to_ascii_uppercase();
-            if up.starts_with("GIT_") || up.starts_with("STRATA") {
+            // Agent markers too: `new` would record the agent running the tests.
+            if ["GIT_", "STRATA", "CLAUDE", "CODEX", "CURSOR"].iter().any(|p| up.starts_with(p)) {
                 c.env_remove(&k);
             }
         }
@@ -224,7 +225,8 @@ pub fn git(dir: &Path, home: &Path, args: &[&str]) -> String {
 }
 
 /// A fake daemon on the HOME socket: records every request line and
-/// answers each with `reply(request)`.
+/// answers each with `reply(request)` (`null`: closes the connection
+/// without answering).
 pub struct FakeDaemon {
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     pub connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -255,7 +257,11 @@ impl FakeDaemon {
                         while r.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
                             let v: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap_or(serde_json::Value::Null);
                             rq.lock().unwrap().push(v.clone());
-                            let mut out = reply(&v).to_string();
+                            let answer = reply(&v);
+                            if answer.is_null() {
+                                break; // `null`: close without a reply
+                            }
+                            let mut out = answer.to_string();
                             out.push('\n');
                             let _ = w.write_all(out.as_bytes());
                             line.clear();

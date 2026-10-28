@@ -53,6 +53,13 @@ git-strata new PROJ-123 --repo tool --repo hr-core
 #    data.manifest.id                  -> session id, e.g. "s-k3q7xm2a"
 #    data.manifest.repos.<repo>.path   -> that repo's workspace directory
 #    data.warnings                     -> [] when fine
+#    data.manifest.agent               -> the agent recorded for this session
+#    The session records which AI agent created it. Claude Code, Codex and
+#    Cursor are detected from their environment. Any other agent: run
+#    `export STRATA_AGENT=<name>` (e.g. aider; 1-64 of [A-Za-z0-9._-],
+#    starting with a letter or digit) before `new`, or pass --agent <name>.
+#    A warning of kind AgentNotRecorded means the running daemon is older
+#    than this CLI; the session is fine, only the agent is not recorded.
 
 # 1b. Need another repo later? Add it to the same session (tracked):
 git-strata add --repo front            # or: --session S --repo front
@@ -172,6 +179,73 @@ conflict is `assigned`.
    paths of the same `--from` list do not cause `NoMatch`.
 5. Repeat while another repo conflicts.
 
+## Dev servers and `tauri dev`: per-session ports
+
+Every session workspace gets its own block of 4 ports (a lease), so two
+sessions can run `tauri dev` (or any dev server) at the same time. The main
+checkout has no lease and keeps the project's default ports. Never change
+ports by editing committed files (`tauri.conf.json`, `package.json`,
+`next.config.*`, `.env`); start the server through git-strata instead:
+
+```bash
+cd <your workspace>                     # data.manifest.repos.<repo>.path
+git-strata session ports                # read the lease: data.leases[0].ports / .env
+git-strata session exec -- bun run dev  # any server that reads $PORT (Next.js does)
+git-strata session exec -- sh -c 'vite --port "$PORT" --strictPort'
+git-strata session exec --tauri -- bun run tauri dev
+```
+
+- `exec` runs the command in place of itself (its output, its exit code)
+  in exactly one workspace (`--repo R` when the session has several) with:
+  `PORT` = `STRATA_DEV_PORT` (web), `STRATA_CONNECTOR_PORT`,
+  `STRATA_CONNECTOR_MCP_PORT`, `STRATA_AUX_PORT`, `STRATA_SESSION`,
+  `STRATA_REPO`, `TAURI_CONNECTOR_PROJECT` (the Tauri app dir) and
+  `STRATA_TAURI_DEV_CONFIG`. Child processes (e.g. Tauri's
+  `beforeDevCommand`) inherit them.
+- `--tauri` adds `--config $STRATA_TAURI_DEV_CONFIG` to `tauri dev`, which
+  points `build.devUrl` at `http://localhost:$PORT`. The frontend dev server
+  must then listen on `$PORT`. It understands `tauri dev`, `cargo tauri dev`,
+  `npx|bunx|pnpx tauri dev`, `pnpm exec tauri dev`, and `bun|pnpm|yarn|npm
+  run <script>` when that script is literally `tauri dev ...` (or the bare
+  `tauri` CLI, with `dev` right after the script name: `bun run tauri dev`,
+  `npm run tauri -- dev`). Always write `run`: `bun <script>` without it is
+  refused, since the package manager may run its own command of that name.
+  Options that pick another package (`--prefix`, `--filter`, `-w`,
+  `--workspace`, `--cwd`, ...) and, for npm, any option before its `--` are
+  refused. Anything else is `InvalidInput` `tauri_launcher`; use the form in
+  `detail.fix`:
+  `git-strata session exec -- sh -c 'tauri dev --config "$STRATA_TAURI_DEV_CONFIG"'`.
+- tauri-connector does not read `STRATA_CONNECTOR_PORT` yet and picks its
+  own port; find it in the `.connector.json` it writes under your
+  workspace's `target/` (copies from the main checkout are removed when the
+  session is created).
+- `exec`'s variables reach only the command it starts and its children, not
+  a later connector command or an MCP server that is already running. When
+  you talk to the app from such a client, select it explicitly: `tauri-connector
+  ... --project <tauri_app_root>` (`tauri_app_root`, else `path`, from
+  `git-strata session ports`), or wrap the client:
+  `git-strata session exec --no-check -- tauri-connector ...`. Never connect
+  to the connector's default ports (9555/9556): they may be another
+  session's app.
+- Before starting, `exec` checks the lease's ports (`--no-check` skips it;
+  `session ports --check` only reports):
+  - `PortInUse` `already_running`: a process of this workspace already
+    listens. Reuse it; stop it only if you started it.
+  - `PortInUse` `foreign`: something else holds a port. Nothing moves on its
+    own: run `detail.fix` (`git-strata session ports --reassign --session S
+    --repo R`) for your own session, then `exec` again. Never kill a process
+    you did not start.
+  - `Busy` `port_unidentified` / `port_probe_error`: retry shortly.
+- A workspace without a lease yet (e.g. one created before this feature)
+  gets one from the daemon on first `ports` / `exec`; an existing lease works
+  without the daemon. `Busy` `daemon_down` from `ports` / `exec`: report it
+  to the human; do not start the daemon yourself. `Busy` `ports_exhausted`
+  (`ports` shows the workspace with `"ports": null`): no free block; tell the
+  human. `Busy` `lease_changed` (`--reassign`): another caller moved the
+  lease since your check; run `session ports --check` again and decide
+  afresh. `Unsupported` `daemon_too_old`: the running daemon predates leases;
+  tell the human (install the matching git-strata and restart the daemon).
+
 ## Hook: checkpoint after every tool call (Claude Code)
 
 `docs/modules/cli.md` §3.5 documents this for Claude Code only. The human adds
@@ -198,7 +272,10 @@ it to Claude Code's settings; git-strata does not write the file:
 ## The JSON envelope
 
 stdout carries exactly one compact JSON line; exit code 0 iff `ok` is true,
-else 1. Human prompts and notices go to stderr only.
+else 1. Human prompts and notices go to stderr only. One exception: a
+`session exec` that starts its command prints no envelope; stdout, stderr
+and the exit status are the command's (a failure before the start is an
+envelope as usual).
 
 ```json
 {"ok":true,"data":{...},"error":null}

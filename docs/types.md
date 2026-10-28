@@ -11,6 +11,7 @@
 | `RepoName` | 标识 | 配置里的仓库名，如 `tool`；同时是工作区的目录名 | §3 |
 | `RepoId` | 标识 | 仓库身份：git common dir 的规范路径 | §3 |
 | `SessionId` | 标识 | 会话 id，生成，`s-` + 8 位 base32 | §3 |
+| `AgentName` | 标识 | 创建会话的 AI agent 名，如 `claude-code`、`codex`、`cursor-agent` | §3 |
 | `TreeOid` | 标识 | git tree 对象 id，40 位十六进制 | §3 |
 | `CommitOid` | 标识 | git commit 对象 id，40 位十六进制 | §3 |
 | `BlobId` | 标识 | blob 的内容地址（BLAKE3） | §3 |
@@ -37,7 +38,7 @@
 | `Action` | 枚举 | 需要人类确认的四种动作 | §4 |
 | `Config`、`RepoConfig` | 结构 | 全局配置与每仓库配置 | [config.md](config.md) |
 | `StrataError` | 结构 | 被拒绝的调用：`code` + `message` + `detail` | §6 |
-| `Code` | 枚举 | 错误码，共 39 个 | §6 |
+| `Code` | 枚举 | 错误码，共 40 个 | §6 |
 
 ## 2. 约定
 
@@ -61,7 +62,7 @@
 ### 2.2 derive 与 serde
 
 - 所有公开类型 derive `Clone`、`Debug`、`PartialEq`、`Serialize`、`Deserialize`；字段都能比较相等的再加 `Eq`。标识另加 `Hash`、`PartialOrd`、`Ord`，例如 `RepoName` 要作 `BTreeMap` 的键。唯一的例外是 `ConfirmToken`：它只 derive `Debug`，既不能复制，也不能序列化（见 §4）。
-- 有格式的标识（`RepoName`、`SessionId`、`TreeOid`、`CommitOid`、`BlobId`、`DepsSetId`、`RepoPath`）字段私有，只能经 `TryFrom<String>` 构造。serde 也走这条路：`#[serde(try_from = "String", into = "String")]`，所以反序列化同样会校验；格式不对返回 `Code::InvalidInput`。数字标识 `CheckpointId` 与 `ProposalId` 用 `#[serde(try_from = "u64", into = "u64")]`：JSON 里是一个裸数字，超过 `i64::MAX` 的值返回 `InvalidInput`。`RepoId` 和对其他模块不透明的 `ViewId` 用 `#[serde(transparent)]`。这几个标识的构造与取值方法见 §3。
+- 有格式的标识（`RepoName`、`AgentName`、`SessionId`、`TreeOid`、`CommitOid`、`BlobId`、`DepsSetId`、`RepoPath`）字段私有，只能经 `TryFrom<String>` 构造。serde 也走这条路：`#[serde(try_from = "String", into = "String")]`，所以反序列化同样会校验；格式不对返回 `Code::InvalidInput`。数字标识 `CheckpointId` 与 `ProposalId` 用 `#[serde(try_from = "u64", into = "u64")]`：JSON 里是一个裸数字，超过 `i64::MAX` 的值返回 `InvalidInput`。`RepoId` 和对其他模块不透明的 `ViewId` 用 `#[serde(transparent)]`。这几个标识的构造与取值方法见 §3。
 - 字段名就是 JSON 的键，保持 snake_case，不用 `rename_all`。
 - 带数据的枚举用内部标签 `#[serde(tag = "kind")]`。`OverlayEntry` 的 `kind` 字段再加 `#[serde(flatten)]`，这样一条条目在 JSON 里只有一层对象。`PushOutcome` 有元组变体，内部标签装不下其中的字符串，所以改用相邻标签 `#[serde(tag = "kind", content = "message")]`。不带数据的枚举（`Code`）序列化为变体名字符串，如 `"Conflict"`。
 - `Option` 为 `None` 的字段不输出（`skip_serializing_if = "Option::is_none"`），读入时缺省为 `None`（`default`）。
@@ -81,6 +82,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct RepoName(String);
+
+/// 创建会话的 AI agent 名（schema v2，store.md §4.4）：1 到 64 个 `[A-Za-z0-9._-]`，首字符是字母或数字。
+/// 由 cli 检测或从 `--agent`、`STRATA_AGENT` 取得（cli.md）；只是标签，strata 不按它改变行为。
+/// 不合法 → `InvalidInput`，`detail.reason = "agent"`。`as_str()` 取值，`Display` 原样输出。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct AgentName(String);
 
 /// 仓库身份：git common dir 的规范路径（`git rev-parse --git-common-dir` 之后取 realpath，沿用 tgrep 的做法）。
 /// 主 checkout 和接在它 object store 上的所有工作区是同一个 `RepoId`。
@@ -320,6 +328,9 @@ pub struct SessionManifest {
     /// ticket 只是标签，一个 ticket 可以有多个会话。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// 创建会话的 AI agent；没检测到的、以及 schema v2 之前建的会话没有这个键。写入后不可改。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentName>,
     /// 会话根目录 `<root>/sessions/<session-id>/`，各工作区按兄弟布局排在它下面。
     pub root: PathBuf,
     /// 配置里的每个兄弟仓库都在这里，不只是 `--repos` 点名的那些（design §6.1）。
@@ -444,7 +455,7 @@ pub enum Code {
     NoSuchSession, NoSuchRepo, NoSuchCheckpoint, NoSuchProposal, NoSuchView,
     NotConfirmed, NotTty, OpenFiles,
     CrossVolume, Drift, CheckFailed, CheckMutates, PushRefused, Unknown, Unsupported,
-    Corrupt,
+    Corrupt, PortInUse,
 }
 ```
 
@@ -487,6 +498,7 @@ pub enum Code {
 | `NotConfirmed` | 需要人类确认的动作（一推上线仓库的推送、`deps approve`、`rm --discard`、把钉住的推送设置调松）没有通过确认：LocalAuthentication 认证失败、被取消或超时；或者交来的 `ConfirmToken` 已经用过、已经过期，或它的 `action` 与要执行的操作不符（一次一用，design §6.9） | `confirm`（签发与校验）；`session`、`publish`（核对 `action`）；`daemon` 透传 |
 | `NotTty` | 需要人类确认的命令，stdin 不是 TTY。cli 的 `require_tty` 在发出请求之前就拒绝（design §6.9）；confirm 不检查 TTY | `cli` |
 | `OpenFiles` | 要替换或删除的目录里有进程打开着文件：`move_workspace` 要换依赖目录时，或 `rm` 时会话目录被占用（dev server 等）。跳过，目录一字不动；`detail` 列出 pid 和路径。多会话的 `deps approve` 里它按条目返回：跳过这个会话，其余会话照常移动（design §6.4 第 5 步） | `session` |
+| `PortInUse` | `session exec` 启动前检查本工作区租到的 dev 端口时，端口上已有监听进程：`detail.reason = "already_running"`（监听者的 cwd 在本工作区里，复用或先停掉它；`session ports --reassign` 此时也拒绝），或 `"foreign"`（别处的进程占着，`detail.fix` 是 `git-strata session ports --reassign --session S --repo R`）。`detail.check` 列出每个端口的状态和监听者。不可重试；只检查，从不杀进程（dev-ports 设计 §3.4）[实现时补的决定] | `cli` |
 | `CrossVolume` | 会话根目录、Store、基线与依赖集缓存跟主 checkout 不在同一个 APFS 卷上（design §7 要求同卷）。在克隆之前就拒绝，从不退化成复制 | `apfs`（`clone_tree`、`clone_file`）、`store`（`open`）、`session`（`new`） |
 | `Drift` | 安装输入哈希对不上：`deps::adopt` 认领主 checkout 现成的依赖目录时，主 checkout 的安装输入与目标基线不符，调用方改为冷装。`status` 报告的工作区漂移是数据，不是这个错误 | `deps` |
 | `CheckFailed` | 发布时，检查命令在 staging 克隆里以非零状态退出。不提交；`detail` 带命令、退出码和输出末尾 | `publish` |

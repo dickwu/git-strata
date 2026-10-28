@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use crate::sql::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
-use strata_types::{BaseGen, Code, CommitOid, RepoName, RepoPath, SessionId, SessionManifest, StrataError, WorkspaceState};
+use strata_types::{AgentName, BaseGen, Code, CommitOid, RepoName, RepoPath, SessionId, SessionManifest, StrataError, WorkspaceState};
 
 use crate::codec::*;
 use crate::errors::{NOT_WRITTEN, bad_row, err, invalid, invalid_field, no_such_repo, no_such_session, sql, sql_read, too_large};
@@ -246,6 +246,7 @@ fn collect<T>(c: &Connection, q: &str, p: impl crate::sql::Params, f: fn(&Row) -
 struct SessionRow {
     id: String,
     ticket: Option<String>,
+    agent: Option<String>,
     root: String,
     lifecycle: String,
     phase: Option<String>,
@@ -255,22 +256,27 @@ struct SessionRow {
 }
 
 fn session_rows(c: &Connection, id: Option<&str>) -> Result<Vec<SessionRow>> {
+    // A read-only handle may meet a v1 store (daemon not yet upgraded) or
+    // see it migrate under it: ask this transaction's snapshot.
+    let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(sql_read)?;
+    let agent = if v >= 2 { "agent" } else { "NULL" };
     let mut st = c
-        .prepare(
-            "SELECT id, ticket, root, lifecycle, phase, scene, created_ns, removed_ns FROM sessions \
-             WHERE ?1 IS NULL OR id = ?1 ORDER BY created_ns, id",
-        )
+        .prepare(&format!(
+            "SELECT id, ticket, {agent}, root, lifecycle, phase, scene, created_ns, removed_ns FROM sessions \
+             WHERE ?1 IS NULL OR id = ?1 ORDER BY created_ns, id"
+        ))
         .map_err(sql_read)?;
     st.query_map([id], |r| {
         Ok(SessionRow {
             id: r.get(0)?,
             ticket: r.get(1)?,
-            root: r.get(2)?,
-            lifecycle: r.get(3)?,
-            phase: r.get(4)?,
-            scene: r.get(5)?,
-            created: r.get(6)?,
-            removed: r.get(7)?,
+            agent: r.get(2)?,
+            root: r.get(3)?,
+            lifecycle: r.get(4)?,
+            phase: r.get(5)?,
+            scene: r.get(6)?,
+            created: r.get(7)?,
+            removed: r.get(8)?,
         })
     })
     .map_err(sql_read)?
@@ -340,7 +346,7 @@ fn load_session(c: &Connection, s: SessionRow) -> Result<SessionRecord> {
         );
     }
     Ok(SessionRecord {
-        manifest: SessionManifest { id: parse(s.id, "session id")?, ticket: s.ticket, root: pathbuf(s.root), repos },
+        manifest: SessionManifest { id: parse(s.id, "session id")?, ticket: s.ticket, agent: s.agent.map(AgentName::try_from).transpose().map_err(|e| bad_row(format!("sessions.agent: {}", e.message)))?, root: pathbuf(s.root), repos },
         lifecycle,
         created: time(s.created),
         removed: opt_time(s.removed),
@@ -388,6 +394,7 @@ impl Store {
             ws.push((repo.as_str(), st, want));
         }
         let at = ns(at, "at")?;
+        let policy = self.dev_ports_policy();
         self.write(OP, |c| {
             if session_lifecycle(c, id).map_err(w(OP))?.is_some() {
                 return Err(err(Code::Exists, format!("session {id} already has a row"), json!({ "reason": "store_row", "session": id })));
@@ -415,8 +422,8 @@ impl Store {
                 gens.push(g);
             }
             c.execute(
-                "INSERT INTO sessions (id, ticket, root, lifecycle, created_ns) VALUES (?1, ?2, ?3, 'creating', ?4)",
-                params![id, manifest.ticket, root, at],
+                "INSERT INTO sessions (id, ticket, agent, root, lifecycle, created_ns) VALUES (?1, ?2, ?3, ?4, 'creating', ?5)",
+                params![id, manifest.ticket, manifest.agent.as_ref().map(|a| a.as_str()), root, at],
             )
             .map_err(w(OP))?;
             for ((repo, st, path), g) in ws.iter().zip(gens) {
@@ -426,6 +433,7 @@ impl Store {
                     params![id, repo, g, st.head.as_str(), path, st.tracked as i64],
                 )
                 .map_err(w(OP))?;
+                crate::devports::lease_new(c, policy.as_deref(), id, repo).map_err(w(OP))?;
             }
             Ok(Tx::Commit(()))
         })
@@ -481,6 +489,7 @@ impl Store {
         if let Some(r) = seeds.keys().find(|r| !repos.contains_key(*r)) {
             return Err(invalid_field("seeds", format!("seeds given for {r}, which is not being added")));
         }
+        let policy = self.dev_ports_policy();
         self.write(OP, |c| {
             let lc = session_lifecycle(c, id).map_err(w(OP))?.ok_or_else(|| no_such_session(id))?;
             if lc != "active" {
@@ -529,6 +538,7 @@ impl Store {
                     )
                     .map_err(w(OP))?;
                 }
+                crate::devports::lease_new(c, policy.as_deref(), id, repo).map_err(w(OP))?;
             }
             Ok(Tx::Commit(()))
         })
@@ -579,6 +589,10 @@ impl Store {
                 )
                 .map_err(w(OP))?;
             if n == 1 {
+                if to == Lifecycle::Removed {
+                    // store.md §4.4a: a removed session's dev ports are free again.
+                    c.execute("DELETE FROM dev_ports WHERE session = ?1", [id]).map_err(w(OP))?;
+                }
                 return Ok(Tx::Commit(true));
             }
             session_lifecycle(c, id).map_err(w(OP))?.ok_or_else(|| no_such_session(id))?;

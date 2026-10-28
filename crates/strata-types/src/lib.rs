@@ -9,10 +9,10 @@ mod error;
 mod ids;
 mod model;
 
-pub use config::{Config, Paths, RepoConfig, StatusConfig};
+pub use config::{Config, DevPorts, Paths, RepoConfig, StatusConfig};
 pub use error::{Code, StrataError};
 pub use ids::{
-    BlobId, CheckpointId, CommitOid, DepsSetId, ProposalId, RepoId, RepoName, RepoPath, SessionId,
+    AgentName, BlobId, CheckpointId, CommitOid, DepsSetId, ProposalId, RepoId, RepoName, RepoPath, SessionId,
     TreeOid, ViewId,
 };
 pub use model::{

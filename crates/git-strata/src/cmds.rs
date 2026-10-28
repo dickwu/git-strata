@@ -84,7 +84,7 @@ fn repo_for(config: &Config, store: &Store, s: &SessionId, flag: Option<&str>, c
 
 // ---- new --------------------------------------------------------------------
 
-pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only: &[String], repos: &[String]) -> Result<Envelope> {
+pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only: &[String], repos: &[String], agent_flag: Option<&str>) -> Result<Envelope> {
     if !only.is_empty() && !repos.is_empty() {
         return Err(invalid(
             "repo_flags",
@@ -100,6 +100,7 @@ pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only:
         (a, b) => a.or(b),
     };
     let names: Vec<RepoName> = list.iter().map(|r| repo_name(r)).collect::<Result<_>>()?;
+    let agent = crate::agent::detect(agent_flag, |k| std::env::var_os(k))?;
     // `only` is sent only when set, so this CLI still talks to a daemon
     // that predates it (its params refuse unknown fields).
     let mut params = json!({ "ticket": ticket, "repos": names });
@@ -113,11 +114,40 @@ pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only:
             list.join(",")
         );
     }
-    let v = ctx.call("new", params, Kind::Write)?;
+    // `agent` goes only to a daemon that lists `new.agent`; an older one
+    // would refuse the unknown field.
+    let mut dropped = None;
+    if let Some(a) = &agent {
+        if crate::agent::daemon_takes_agent(&ctx.paths.socket) {
+            params["agent"] = json!(a.as_str());
+        } else {
+            dropped = agent.as_ref();
+        }
+    }
+    let v = match ctx.try_call("new", params.clone(), Kind::Write) {
+        Ok(v) => v,
+        // The daemon was swapped for an older one since the probe: it
+        // refused the field before running anything, so send it again
+        // without (only this refusal; nothing else is replayed).
+        Err(CallError::Failed(e)) if params.get("agent").is_some() && crate::agent::refused_unknown_agent(&e) => {
+            params.as_object_mut().expect("an object").remove("agent");
+            dropped = agent.as_ref();
+            ctx.call("new", params, Kind::Write)?
+        }
+        Err(e) => return Err(e.into_error()),
+    };
     for w in v["anchor_unknown"].as_array().into_iter().flatten() {
         eprintln!("warning: anchor unknown: {w}");
     }
-    let report = v.get("session").cloned().unwrap_or(Value::Null);
+    let mut report = v.get("session").cloned().unwrap_or(Value::Null);
+    if let Some(a) = dropped {
+        eprintln!("warning: the daemon predates agent recording; the session does not record agent {a} (install the matching git-strata and restart the daemon)");
+        if let Some(ws) = report.get_mut("warnings").and_then(Value::as_array_mut) {
+            ws.push(crate::agent::not_recorded(a));
+        } else if let Some(o) = report.as_object_mut() {
+            o.insert("warnings".into(), json!([crate::agent::not_recorded(a)]));
+        }
+    }
     if let Some(s) = sid(&report["manifest"]["id"]) {
         hint(s);
     }
@@ -1037,6 +1067,10 @@ pub fn daemon_status() -> Result<Envelope> {
             // The daemon's descriptor count (open, soft limit, ...), as is.
             if let Some(f) = v.get("fds") {
                 data["fds"] = f.clone();
+            }
+            // Optional request features (absent from older daemons).
+            if let Some(f) = v.get("features") {
+                data["features"] = f.clone();
             }
         }
         Err(CallError::Down(_)) => {}

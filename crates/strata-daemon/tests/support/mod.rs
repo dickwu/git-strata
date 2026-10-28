@@ -363,7 +363,7 @@ impl Dfx {
             sb.bare_origin(&p);
             repos.insert(repo_name(n), sb.config(&p));
         }
-        let config = Config { paths: Paths { root: sb.path("strata") }, repos, status: Default::default() };
+        let config = Config { paths: Paths { root: sb.path("strata") }, repos, status: Default::default(), dev_ports: Default::default() };
         let config_dir = sb.path("cfg");
         let sock_dir = tempfile::Builder::new().prefix("sd-").tempdir_in("/tmp").expect("sock dir");
         let fx = Dfx { sb, config, config_dir, sock_dir, alerts: Arc::new(Mutex::new(Vec::new())), lock_wait: Duration::from_millis(300), reconcile_every: strata_daemon::RECONCILE_EVERY };
