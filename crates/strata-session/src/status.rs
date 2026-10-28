@@ -21,6 +21,12 @@ use crate::{Result, Sessions};
 /// A session's status (design §6.3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionStatus {
+    /// `manifest.id`, at the top level (status-perf D3).
+    pub id: SessionId,
+    /// `manifest.ticket`, at the top level; null when there is none.
+    pub ticket: Option<String>,
+    /// `manifest.id` and `manifest.ticket` duplicate the two fields above
+    /// and are deprecated; they go in the next major version.
     pub manifest: SessionManifest,
     pub state: SessionState,
     #[serde(with = "strata_types::serde_rfc3339")]
@@ -147,6 +153,8 @@ impl Sessions<'_> {
             workspaces.insert(repo.clone(), self.workspace_status(&rec, repo, row)?);
         }
         Ok(SessionStatus {
+            id: rec.manifest.id.clone(),
+            ticket: rec.manifest.ticket.clone(),
             manifest: rec.manifest.clone(),
             state,
             created: rec.created,

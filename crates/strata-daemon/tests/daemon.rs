@@ -291,6 +291,36 @@ fn lost_rpc_reply_is_not_replayed() {
     core.close().unwrap();
 }
 
+#[test]
+fn status_has_chains_only_on_request_and_top_level_id() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let id = new_session(&sock);
+        // Omitted or false: no `chains` key at all.
+        let st = ok(call(&sock, "status", json!({ "cwd": null, "session": null, "all": true })));
+        assert!(st.get("chains").is_none(), "{st:#}");
+        let st =
+            ok(call(&sock, "status", json!({ "cwd": null, "session": id.as_str(), "all": false, "chains": false })));
+        assert!(st.get("chains").is_none(), "{st:#}");
+        // Top-level id and ticket mirror the (deprecated) manifest fields.
+        let s0 = &st["sessions"][0]["status"];
+        assert_eq!(s0["id"], s0["manifest"]["id"], "{s0:#}");
+        assert_eq!(s0["id"], json!(id.as_str()));
+        assert!(s0.get("ticket").is_some_and(|t| *t == s0["manifest"].get("ticket").cloned().unwrap_or(Value::Null)));
+        // Requested: one entry per configured repo, as before.
+        let st =
+            ok(call(&sock, "status", json!({ "cwd": null, "session": id.as_str(), "all": false, "chains": true })));
+        let chains = st["chains"].as_object().unwrap_or_else(|| panic!("{st:#}"));
+        assert_eq!(chains.len(), core.gits.len());
+        assert!(chains.contains_key("tool"));
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 fn push_calls(core: &Core) -> usize {
     core.gits.values().flat_map(|g| g.take_git_calls()).filter(|c| c.args.iter().any(|a| a == "push" || a == "send-pack")).count()
 }

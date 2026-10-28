@@ -98,7 +98,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | --- | --- | --- |
 | `new` | `{ "ticket": string\|null, "repos": [RepoName], "only"?: bool }` | `NewReport`。`only` 为真时会话只有 `repos` 这些工作区（session.md D51）；缺省为假，cli 只在 `--repo` 时才发这个字段，好让新 cli 也能用旧 daemon |
 | `add` | `{ "session": SessionId, "repos": [RepoName] }` | `{ report: AddReport, anchor_unknown }`（session.md D52） |
-| `status` | `{ "cwd": string\|null, "session": string\|null, "all": bool }` | 见 §5.4 |
+| `status` | `{ "cwd": string\|null, "session": string\|null, "all": bool, "chains"?: bool }` | 见 §5.4；`chains` 缺省 false |
 | `checkpoint` | `{ "session", "repo", "reason": CheckpointReason, "paths": [RepoPath] }` | `Checkpointed`；`paths` 可空 |
 | `restore` | `{ "session", "repo", "checkpoint": CheckpointId, "paths": [RepoPath]\|null }` | `Restored` |
 | `grep` | `{ "pattern", "session": string\|null, "all": bool, "ignore_case": bool }` | `Hit` 的数组；零命中是 `[]` |
@@ -390,7 +390,7 @@ panic：写前 → 该请求 RPC `Failed`，进程继续。写后 → 对该请�
 
 `status` 不排队，不等写锁。读到的可以与持锁者交错，这是裁定要的，不是漏了锁。
 
-组装：`session::status`（或 `all`）的 `SessionStatus`，加上 `overlay::compute` 在读时算出的 `changed`（session §2 第 5 条，daemon 照做）、`Tracker::warnings`、`leftovers`、`deps::attempts`、`open_proposals`、每个 repo 的 `publish_chain`（Rewound / Diverged 时带上 a..c）。健康 `Unknown` 的工作区带上两个选择：`Abandon` 与 `Accept`，不执行。`OldTreeKept.holders` 原样带上。restore 暂存目录非空时，session 的 `RestoreScene` 已经含 `plan.json` 的路径，不另造。
+组装：`session::status`（或 `all`）的 `SessionStatus`，加上 `overlay::compute` 在读时算出的 `changed`（session §2 第 5 条，daemon 照做）、`Tracker::warnings`、`leftovers`、`deps::attempts`、`open_proposals`、每个 repo 的 `publish_chain`（Rewound / Diverged 时带上 a..c；只在 `chains: true` 时算，否则回复里**没有** `chains` 键，不是 `{}`——缺键是「没算」，`{}` 是「算了但没有」。status-perf D2：CLI 从不发 `chains`；GUI 只在会话详情里发。旧 daemon 不认识 `chains`，以 RPC `Failed`「unknown field `chains`」拒绝，GUI 见到这一种拒绝就去掉它重发一次）。健康 `Unknown` 的工作区带上两个选择：`Abandon` 与 `Accept`，不执行。`OldTreeKept.holders` 原样带上。restore 暂存目录非空时，session 的 `RestoreScene` 已经含 `plan.json` 的路径，不另造。
 
 再加上 §3 的 `DaemonWarning`：隔离、attach、超过 30 秒的 `LongHold`、`UnknownPublish`、`PublishRunning`、`ConfigRelaxPending`、`StorePoisoned`。持锁不到 30 秒的不进 `status`（进 `daemon_status`）。
 

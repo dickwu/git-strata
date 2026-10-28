@@ -257,6 +257,11 @@ pub enum NewWarning {
 /// 一个会话的状态（design §6.3）。JSON 形状由 cli.md 引用。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionStatus {
+    /// = manifest.id（status-perf D3：顶层也给一份）。
+    pub id: SessionId,
+    /// = manifest.ticket；没有时是 null（顶层总是有这个键）。
+    pub ticket: Option<String>,
+    /// 其中的 `id`/`ticket` 与上面两个重复，已弃用，下一个大版本去掉。
     pub manifest: SessionManifest,
     pub state: SessionState,
     #[serde(with = "strata_types::serde_rfc3339")]

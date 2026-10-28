@@ -105,6 +105,10 @@ pub struct StatusParams {
     #[serde(deserialize_with = "nullable")]
     pub session: Option<String>,
     pub all: bool,
+    /// Compute each repo's publish chain (status-perf D2). Off by default:
+    /// the reply then has no `chains` key at all.
+    #[serde(default)]
+    pub chains: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]

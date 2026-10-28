@@ -456,7 +456,7 @@ impl<'d, 'a> Server<'d, 'a> {
         match p {
             Params::New(p) => self.new_session(p.ticket.as_deref(), &p.repos, p.only),
             Params::Add(p) => self.add_repos(&p.session, &p.repos),
-            Params::Status(p) => self.status(p.cwd.as_deref(), p.session.as_deref(), p.all),
+            Params::Status(p) => self.status(p.cwd.as_deref(), p.session.as_deref(), p.all, p.chains),
             Params::Checkpoint(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
                 let ws = workspace(core, &p.session, &p.repo)?;
                 let base = base_of(core, &ws.base)?;
@@ -702,7 +702,7 @@ impl<'d, 'a> Server<'d, 'a> {
     }
 
     /// Read only; no queue, no lock.
-    fn status(&self, cwd: Option<&Path>, selector: Option<&str>, all: bool) -> Result<Value> {
+    fn status(&self, cwd: Option<&Path>, selector: Option<&str>, all: bool, with_chains: bool) -> Result<Value> {
         let core = self.core();
         let sessions = &self.d.sessions;
         let ids: Vec<SessionId> = if all {
@@ -746,23 +746,33 @@ impl<'d, 'a> Server<'d, 'a> {
                 "queued": core.locks.queued(id),
             }));
         }
-        let mut chains = serde_json::Map::new();
-        for (repo, git) in &core.gits {
-            let branch = &repo_cfg(core, repo)?.publish.branch;
-            let v = match strata_deps::publish_chain(git, branch) {
-                Ok(c) => json_of(&c),
-                Err(e) => json!({ "error": json_of(&e) }),
-            };
-            chains.insert(repo.as_str().to_string(), v);
-        }
+        // Chains only on request (status-perf D2): absent, not `{}`, when
+        // not computed.
+        let chains = if with_chains {
+            let mut chains = serde_json::Map::new();
+            for (repo, git) in &core.gits {
+                let branch = &repo_cfg(core, repo)?.publish.branch;
+                let v = match strata_deps::publish_chain(git, branch) {
+                    Ok(c) => json_of(&c),
+                    Err(e) => json!({ "error": json_of(&e) }),
+                };
+                chains.insert(repo.as_str().to_string(), v);
+            }
+            Some(chains)
+        } else {
+            None
+        };
         let daemon = self.d.daemon_status(false)?;
-        Ok(json!({
+        let mut reply = json!({
             "sessions": out,
             "leftovers": json_of(&sessions.leftovers()?),
-            "chains": chains,
             "warnings": daemon["warnings"].clone(),
             "holds": daemon["holds"].clone(),
-        }))
+        });
+        if let Some(chains) = chains {
+            reply["chains"] = Value::Object(chains);
+        }
+        Ok(reply)
     }
 
     fn grep(&self, pattern: &str, session: Option<&SessionId>, all: bool, ignore_case: bool) -> Result<Value> {
