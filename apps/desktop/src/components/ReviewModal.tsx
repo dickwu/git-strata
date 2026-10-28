@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Modal, Spin, Tag } from 'antd';
-import { useQueryClient, type QueryClient, type QueryKey } from '@tanstack/react-query';
+import { useQueryClient, type QueryKey } from '@tanstack/react-query';
 import {
   REFRESH_AFTER_APPROVE,
   STILL_WORKING_MS,
@@ -11,6 +11,7 @@ import {
   type Outcome,
   type Verdict,
 } from '@/lib/approve';
+import { refreshAfter } from '@/lib/refresh';
 import { compactTime, copy, fullTime } from '@/lib/copy';
 import { useDeps, useSession, useSessions } from '@/lib/queries';
 import { approveProposal, asGuiError, reason } from '@/lib/tauri';
@@ -26,28 +27,30 @@ const t = copy.review;
 const POLL_MS = 10_000;
 const DEPS_KEYS: QueryKey[] = [['deps'], ['sessions']];
 
-/** Refresh after every outcome, lost replies and Stop waiting included (§4.4). */
-function refreshAfterApprove(qc: QueryClient) {
-  for (const queryKey of REFRESH_AFTER_APPROVE)
-    void qc.invalidateQueries({ queryKey: [...queryKey] });
-}
-
 /**
  * Re-read before showing anything (gui.md:320). Joins a read already in flight instead of
- * cancelling it: the back end allows one read per kind, so a cancelled-and-restarted read
- * would come back request_in_flight. Returns when the re-read was asked.
+ * cancelling it (refreshAfter). `since` is Infinity until the reads that began before the
+ * modal opened have ended; a read landing at or after `since` began after the open.
  */
 function useFreshSince(keys: QueryKey[]): [number, () => void] {
   const qc = useQueryClient();
-  const [since, setSince] = useState(() => Date.now());
-  const run = useCallback(() => {
-    for (const queryKey of keys) void qc.refetchQueries({ queryKey }, { cancelRefetch: false });
-  }, [qc, keys]);
+  const [since, setSince] = useState(Infinity);
+  const live = useRef(true);
+  const asked = useRef(0);
   const reread = useCallback(() => {
-    setSince(Date.now());
-    run();
-  }, [run]);
-  useEffect(run, [run]);
+    const n = ++asked.current;
+    setSince(Infinity);
+    void refreshAfter(qc, keys).then((t) => {
+      if (live.current && n === asked.current) setSince(t);
+    });
+  }, [qc, keys]);
+  useEffect(() => {
+    live.current = true;
+    reread();
+    return () => {
+      live.current = false;
+    };
+  }, [reread]);
   return [since, reread];
 }
 
@@ -199,65 +202,65 @@ function DepsReview({
   const qc = useQueryClient();
   const deps = useDeps(POLL_MS);
   const [since, reread] = useFreshSince(DEPS_KEYS);
-  const { open, close, approving, setApproving } = useReview();
+  const { open, close, approving, finished, readyAt, start, markSeen } = useReview();
   const openSession = useNav((s) => s.openSession);
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
   const [done, copyText] = useCopy();
-  const live = useRef(true);
-  const detached = useRef(false);
-  useEffect(() => {
-    live.current = true;
-    return () => {
-      live.current = false;
+  const slow = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (slow.current) clearTimeout(slow.current);
       onBusy(false);
-    };
-  }, [onBusy]);
+    },
+    [onBusy]
+  );
 
   // A read refused as request_in_flight is another read finishing; the poll picks it up.
   const readError =
     deps.isError && reason(asGuiError(deps.error)) !== 'request_in_flight' ? deps.error : null;
-  const fresh = deps.dataUpdatedAt >= since && !deps.isError;
+  // Fresh: read after the modal opened and after the last approval ended (readyAt).
+  const fresh = deps.dataUpdatedAt >= Math.max(since, readyAt) && !deps.isError;
   const p = deps.data?.proposals.find((x) => x.id === target.id) ?? null;
   const pending = p?.state?.kind === 'Pending';
   const other =
     deps.data?.proposals.find(
       (x) => x.repo === target.repo && x.id !== target.id && x.state?.kind === 'Pending'
     ) ?? null;
-  const canApprove = phase.kind === 'idle' && fresh && pending && approving === null;
+  const unseen = finished !== null && !finished.seen && finished.id === target.id;
+  const canApprove = phase.kind === 'idle' && fresh && pending && approving === null && !unseen;
 
-  const settle = (outcome: Outcome) => {
-    refreshAfterApprove(qc);
-    if (!live.current || detached.current) return;
-    setPhase({ kind: 'result', v: verdict(target.id, outcome) });
+  // The outcome of this proposal's call, whichever modal started it: this one (confirming),
+  // this one after Stop waiting, or an earlier one closed while the call was out (§4.4).
+  useEffect(() => {
+    if (!unseen || !finished) return;
+    if (slow.current) clearTimeout(slow.current);
+    markSeen();
+    setPhase({ kind: 'result', v: verdict(target.id, finished.outcome) });
     onBusy(false);
-  };
+  }, [unseen, finished, target.id, markSeen, onBusy]);
 
   // Pointer or keyboard activation of the Approve button only; nothing binds Enter (§4.7).
   const onApprove = () => {
     if (!canApprove) return;
     const id = target.id;
-    detached.current = false;
+    const sent = start(
+      id,
+      () =>
+        approveProposal(id).then(
+          (reply): Outcome => ({ kind: 'reply', reply }),
+          (e): Outcome => ({ kind: 'error', error: asGuiError(e) })
+        ),
+      qc
+    );
+    if (!sent) return;
     setPhase({ kind: 'confirming', slow: false });
     onBusy(true);
-    setApproving(id);
-    const slow = setTimeout(() => {
-      if (live.current && !detached.current) setPhase({ kind: 'confirming', slow: true });
-    }, STILL_WORKING_MS);
-    approveProposal(id)
-      .then(
-        (reply): Outcome => ({ kind: 'reply', reply }),
-        (e): Outcome => ({ kind: 'error', error: asGuiError(e) })
-      )
-      .then((o) => {
-        clearTimeout(slow);
-        if (useReview.getState().approving === id) setApproving(null);
-        settle(o);
-      });
+    slow.current = setTimeout(() => setPhase({ kind: 'confirming', slow: true }), STILL_WORKING_MS);
   };
 
+  // Ends the wait, not the call: its outcome replaces this view when it comes (effect above).
   const onStopWaiting = () => {
-    detached.current = true;
-    refreshAfterApprove(qc);
+    void refreshAfter(qc, REFRESH_AFTER_APPROVE);
     setPhase({ kind: 'result', v: verdict(target.id, { kind: 'detached' }) });
     onBusy(false);
   };
@@ -403,16 +406,21 @@ function ConflictReview({ target }: { target: Extract<ReviewTarget, { kind: 'con
   const { close } = useReview();
   const openSession = useNav((s) => s.openSession);
   const [done, copyText] = useCopy();
-  const entry =
-    one.data?.sessions.find((s) => s.status.manifest.id === target.session) ??
-    list.data?.sessions.find((s) => s.status.manifest.id === target.session) ??
-    null;
-  const fresh = one.dataUpdatedAt >= since || list.dataUpdatedAt >= since;
+  // The newest successful read wins: a failed detail refresh must not hide a fresher list.
+  const source = [one, list]
+    .filter((q) => q.data !== undefined && q.dataUpdatedAt > 0)
+    .sort((a, b) => b.dataUpdatedAt - a.dataUpdatedAt)[0];
+  const fresh = source !== undefined && source.dataUpdatedAt >= since;
+  const entry = fresh
+    ? (source.data?.sessions.find((s) => s.status.manifest.id === target.session) ?? null)
+    : null;
   const ws = entry?.status.workspaces?.[target.repo];
   const paths = (ws?.conflicts ?? []).map((c) => (typeof c === 'string' ? c : JSON.stringify(c)));
   const root = entry?.status.manifest.repos?.[target.repo]?.path ?? null;
   const full = (rel: string) => (root ? `${root.replace(/\/$/, '')}/${rel}` : rel);
-  const error = one.isError && list.isError ? one.error : null;
+  const readError = (q: typeof one) =>
+    q.isError && reason(asGuiError(q.error)) !== 'request_in_flight';
+  const error = !fresh && readError(one) && readError(list) ? one.error : null;
   return (
     <div className={css.body}>
       <dl className={css.facts}>
@@ -423,7 +431,7 @@ function ConflictReview({ target }: { target: Extract<ReviewTarget, { kind: 'con
       </dl>
       {error ? (
         <ReadError error={error} />
-      ) : !entry && !fresh ? (
+      ) : !fresh ? (
         <div className={css.loading}>
           <Spin size="small" /> <span className="muted">{t.loading}</span>
         </div>

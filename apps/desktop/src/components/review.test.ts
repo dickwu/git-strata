@@ -65,12 +65,29 @@ describe('review modal: Approve can only come from a deliberate click (§4.7)', 
     expect(modal).toMatch(/if \(!busy\) close\(\)/);
   });
 
-  test('every outcome refreshes deps and sessions, including Stop waiting', () => {
+  test('every outcome refreshes, in the store (not the modal), and so does Stop waiting', () => {
+    const store = code(read('stores/review.ts'));
+    const start = store.slice(
+      store.indexOf('start: (id, call, qc)'),
+      store.lastIndexOf('markSeen:')
+    );
+    expect(start).toContain('refreshAfter(qc, REFRESH_AFTER_APPROVE)');
     const c = code(modal);
-    const settle = c.slice(c.indexOf('const settle'), c.indexOf('const onApprove'));
-    expect(settle.indexOf('refreshAfterApprove(qc)')).toBeLessThan(settle.indexOf('return'));
     const stop = c.slice(c.indexOf('const onStopWaiting'), c.indexOf('const onAgain'));
-    expect(stop).toContain('refreshAfterApprove(qc)');
+    expect(stop).toContain('refreshAfter(qc, REFRESH_AFTER_APPROVE)');
+  });
+
+  test('review refreshes never cancel an in-flight read (all go through refreshAfter)', () => {
+    for (const f of ['components/ReviewModal.tsx', 'stores/review.ts']) {
+      const c = code(read(f));
+      expect([f, /\.(invalidateQueries|refetchQueries)\(/.test(c)]).toEqual([f, false]);
+    }
+  });
+
+  test('Approve waits for a read after the last approval ended, and for any unseen outcome', () => {
+    const c = code(modal);
+    expect(c).toContain('deps.dataUpdatedAt >= Math.max(since, readyAt)');
+    expect(c).toMatch(/approving === null && !unseen/);
   });
 
   test('the modal is mounted once, in Shell', () => {
