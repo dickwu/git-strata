@@ -14,6 +14,7 @@ import { CommandPalette } from './CommandPalette';
 import { DaemonScreen } from './DaemonScreen';
 import { SessionsScreen } from './SessionsScreen';
 import { SessionDetailModal } from './SessionDetail';
+import { ReviewModal } from './ReviewModal';
 
 export function Shell() {
   const { screen, session, setPalette, openSession, go } = useNav();
@@ -98,6 +99,7 @@ export function Shell() {
         )}
       </main>
       <SessionDetailModal id={session} interval={plan.session} />
+      <ReviewModal />
       <StatusBar status={status} sessions={sessions.data} />
       <CommandPalette
         sessions={sessions.data}

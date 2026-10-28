@@ -439,7 +439,14 @@ body {
   font-size: 12px;
 }
 .waiting-origin {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 12px;
+}
+.waiting-origin .waiting-review {
+  margin-left: auto;
 }
 .waiting-origin .ant-btn-link {
   padding: 0;

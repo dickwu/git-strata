@@ -1,9 +1,11 @@
 'use client';
 
+import { useState } from 'react';
 import { Button, Popover } from 'antd';
 import { compactTime, copy, fullTime } from '@/lib/copy';
 import type { WaitingItem } from '@/lib/view';
 import { useNav } from '@/stores/nav';
+import { targetOf, useReview } from '@/stores/review';
 import { Inline } from './Inline';
 
 /**
@@ -12,6 +14,8 @@ import { Inline } from './Inline';
  */
 export function WaitingNote({ items, stale = false }: { items: WaitingItem[]; stale?: boolean }) {
   const openSession = useNav((s) => s.openSession);
+  const openReview = useReview((s) => s.open);
+  const [open, setOpen] = useState(false);
   if (items.length === 0) return null;
   const w = copy.waiting;
   const now = new Date();
@@ -36,11 +40,34 @@ export function WaitingNote({ items, stale = false }: { items: WaitingItem[]; st
             </div>
             <div className="waiting-origin">
               {it.session ? (
-                <Button type="link" size="small" onClick={() => openSession(it.session)}>
+                <Button
+                  type="link"
+                  size="small"
+                  onClick={() => {
+                    setOpen(false);
+                    openSession(it.session);
+                  }}
+                >
                   {w.open(it.session)}
                 </Button>
               ) : (
                 <span className="muted">{w.fromMain}</span>
+              )}
+              {targetOf(it) && (
+                <Button
+                  size="small"
+                  className="waiting-review"
+                  aria-label={w.reviewLabel(
+                    it.kind === 'deps' ? w.deps(it.number, it.repo) : w.conflict(it.number, it.repo)
+                  )}
+                  onClick={() => {
+                    const t = targetOf(it);
+                    setOpen(false);
+                    if (t) openReview(t);
+                  }}
+                >
+                  {w.review}
+                </Button>
               )}
             </div>
           </li>
@@ -49,7 +76,14 @@ export function WaitingNote({ items, stale = false }: { items: WaitingItem[]; st
     </div>
   );
   return (
-    <Popover content={list} title={w.title} trigger="click" placement="bottomLeft">
+    <Popover
+      content={list}
+      title={w.title}
+      trigger="click"
+      placement="bottomLeft"
+      open={open}
+      onOpenChange={setOpen}
+    >
       <button type="button" className="waiting-note" aria-label={w.show(items.length)}>
         <span className="dot" data-state="down" aria-hidden />
         {copy.nav.waiting(items.length)}
