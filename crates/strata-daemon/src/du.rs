@@ -872,6 +872,17 @@ impl Du {
     /// [`Du::scan_unit`], given up when `cancel` is set (a hold). A
     /// cancelled scan writes nothing: the cache keeps its last figures.
     fn scan_unit_with(&self, key: &str, cancel: &AtomicBool) {
+        self.scan_unit_using(key, cancel, &|p, stop| usage_with(p, stop));
+    }
+
+    /// [`Du::scan_unit_with`] with the sizing function given (tests reach
+    /// the walk's `NoSuchPath` branch without racing a rename).
+    fn scan_unit_using(
+        &self,
+        key: &str,
+        cancel: &AtomicBool,
+        size: &dyn Fn(&Path, &dyn Fn() -> bool) -> crate::Result<Usage>,
+    ) {
         let path = self.root.join(key);
         let Some((ino, mtime)) = stat(&path) else {
             self.forget_unless_cancelled(key, cancel);
@@ -880,7 +891,7 @@ impl Du {
         let started = now_ms();
         let t = Instant::now();
         let stopped = || self.stop.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst);
-        match usage_with(&path, &stopped) {
+        match size(&path, &stopped) {
             Ok(u) => {
                 let e = Entry { fig: u.into(), ino, mtime_ns: mtime, as_of_ms: started, took_ms: t.elapsed().as_millis() as u64 };
                 // The last cancel check and the write are one `scan`
@@ -1204,6 +1215,26 @@ mod tests {
         assert!(lock(&du.cache).units.contains_key(key), "a cancelled scan removes nothing");
         du.scan_unit(key);
         assert!(!lock(&du.cache).units.contains_key(key));
+    }
+
+    #[test]
+    fn a_root_gone_mid_walk_is_forgotten_unless_cancelled() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let key = "sessions/s-aaaaaaaa";
+        du.scan_unit(key);
+        assert!(lock(&du.cache).units.contains_key(key));
+        // The root stats, then the walk finds it gone (`NoSuchPath`).
+        let gone = |_: &Path, _: &dyn Fn() -> bool| -> crate::Result<Usage> {
+            Err(strata_types::StrataError::new(strata_types::Code::NoSuchPath, "gone mid walk"))
+        };
+        du.scan_unit_using(key, &AtomicBool::new(true), &gone);
+        assert!(lock(&du.cache).units.contains_key(key), "a cancelled scan removes nothing");
+        assert!(lock(&du.scan).failed.is_empty(), "NoSuchPath is no failure");
+        du.scan_unit_using(key, &AtomicBool::new(false), &gone);
+        assert!(!lock(&du.cache).units.contains_key(key), "not cancelled: forgotten");
+        assert!(lock(&du.scan).failed.is_empty());
     }
 
     #[test]
