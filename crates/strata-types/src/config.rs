@@ -44,6 +44,13 @@ pub struct RepoConfig {
     pub deploy_on_push: bool,
     #[serde(default = "RepoConfig::default_pin_unpushed")]
     pub pin_unpushed: bool,
+    /// Repos that must sit at `../<name>` of the staged repo for its
+    /// `checks` to be trustworthy (dev-link; config.md §2.3 item 5).
+    /// Publish supplies each one: the layout session's pinned base when the
+    /// session has the repo, else the repo's current main-tip base
+    /// (publish.md D21). Empty by default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_siblings: Vec<RepoName>,
 }
 
 impl Default for Paths {
@@ -206,6 +213,7 @@ impl Config {
                 continue;
             };
             validate_repo(name, cfg, &self.paths.root)?;
+            validate_check_siblings(name, cfg, &self.repos)?;
         }
         Ok(())
     }
@@ -428,6 +436,28 @@ fn stamp_repo(mut err: StrataError, repo: &str) -> StrataError {
     }
     err.detail = Some(detail);
     err
+}
+
+/// V12: every `check_siblings` entry is another configured repo, listed once.
+fn validate_check_siblings(
+    name: &RepoName,
+    cfg: &RepoConfig,
+    repos: &std::collections::BTreeMap<RepoName, RepoConfig>,
+) -> Result<(), StrataError> {
+    let repo = name.as_str();
+    for (i, s) in cfg.check_siblings.iter().enumerate() {
+        let message = if s == name {
+            "check_siblings names the repo itself"
+        } else if !repos.contains_key(s) {
+            "check_siblings names a repo that is not configured"
+        } else if cfg.check_siblings[..i].contains(s) {
+            "check_siblings lists a repo twice"
+        } else {
+            continue;
+        };
+        return Err(violation(Code::InvalidInput, Some(repo), "check_siblings", Some(i), "V12", message));
+    }
+    Ok(())
 }
 
 fn violation(

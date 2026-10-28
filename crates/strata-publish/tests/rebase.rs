@@ -223,6 +223,32 @@ fn rebase_waits_when_deps_must_change() {
     assert_eq!(row_outcome(&fx, p.id)["rebase"][0]["kind"], "Waiting");
 }
 
+/// session.md §5.6 step 4.2 (D57): a publish that leaves the session
+/// waiting on deps no longer makes `rm` Dirty for what it published.
+#[test]
+fn waiting_session_is_removable_without_discard() {
+    let fx = fx();
+    let pj = new_package_json();
+    let (s, g) = session_with(&fx, &[("package.json", &pj)], None);
+    let p = run(&fx, &g).unwrap();
+    let id = match report(&p, &s) {
+        RebaseReport::Waiting { proposal } => u64::from(proposal.id),
+        r => panic!("{r:?}"),
+    };
+    let ss = fx.sessions();
+    fx.edit(&s, "tool", &[("later.txt", b"later\n")]);
+    let e = ss.remove(&s, false, None).unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    let d = e.detail.as_ref().unwrap();
+    assert_eq!(d["repos"]["tool"]["paths"], serde_json::json!(["later.txt"]), "{d}");
+    assert_eq!(d["landed"]["tool"]["publishes"], serde_json::json!([p.id]), "{d}");
+    assert_eq!(d["landed"]["tool"]["proposals"], serde_json::json!([id]), "{d}");
+    assert!(e.message.contains(&format!("waiting on deps proposal #{id}")), "{}", e.message);
+    fs::remove_file(fx.ws(&s, "tool").join("later.txt")).unwrap();
+    let r = ss.remove(&s, false, None);
+    assert!(r.is_ok(), "{r:?}");
+}
+
 #[test]
 fn landed_draft_promoted_under_repo_lock() {
     let fx = fx();

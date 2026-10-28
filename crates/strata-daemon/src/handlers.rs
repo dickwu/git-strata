@@ -655,6 +655,7 @@ impl<'d, 'a> Server<'d, 'a> {
         let agent = agent.map(AgentName::try_from).transpose()?;
         let core = self.core();
         writing();
+        let t0 = std::time::Instant::now();
         let layout = if only { Layout::Only } else { Layout::Siblings };
         let mut rep = match self.d.sessions.new_as(ticket, repos, layout, agent.as_ref()) {
             Ok(r) => r,
@@ -670,7 +671,7 @@ impl<'d, 'a> Server<'d, 'a> {
             }
         };
         locks::mark_visible();
-        self.d.du.on_new(rep.manifest.id.as_str());
+        self.d.du.on_new_timed(rep.manifest.id.as_str(), Some(t0.elapsed()));
         let after = core.after_new(&mut rep, &|r, repo| core.observe_new(r, repo));
         for (repo, _) in &after.anchor_unknown {
             core.warnings.add(DaemonWarning::AnchorNotAdvanced { repo: repo.clone() });
@@ -1251,11 +1252,19 @@ impl Server<'_, '_> {
     /// A rebase or observe failure is a warning; the push result stands.
     fn push_headless(&self, repo: &RepoName, rc: &RepoConfig, git: &Git) -> Result<Value> {
         let core = self.core();
+        // publish.md D21: the check siblings a replay's checks need, prepared
+        // before this repo's lock (each under its own); `Busy` / `Unknown`
+        // stop the push, a named miss is refused only if a replay needs it.
+        let prep = if strata_publish::siblings::needed(rc) {
+            self.with_publish_ctx(repo, |ctx| strata_publish::siblings::prepare(ctx, None))?
+        } else {
+            strata_publish::siblings::Prepared::default()
+        };
         let mut tips = (None, None);
         let mut replayed: Option<resolve::Replayed> = None;
         let r = core.locks.with_repo(repo, || {
             tips.0 = strata_deps::main_tip(rc, git).ok().flatten();
-            let r = resolve::push_replaying(core, git, rc, repo, &mut replayed);
+            let r = resolve::push_replaying(core, git, rc, repo, &prep, &mut replayed);
             tips.1 = strata_deps::main_tip(rc, git).ok().flatten();
             r
         });
@@ -1263,7 +1272,18 @@ impl Server<'_, '_> {
             self.report_unknown();
         }
         let mut rebases = Vec::new();
-        let mut warnings = Vec::new();
+        let mut warnings: Vec<Value> = prep
+            .warnings
+            .iter()
+            .map(|w| {
+                json!({
+                    "kind": "ObserveFailed",
+                    "repo": w.detail.get("repo").cloned().unwrap_or(Value::Null),
+                    "code": w.detail.get("code").cloned().unwrap_or(Value::Null),
+                    "message": w.detail.get("message").cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect();
         if let Some(rp) = &replayed {
             self.rebase_replayed(repo, git, rp, &mut rebases, &mut warnings);
         }

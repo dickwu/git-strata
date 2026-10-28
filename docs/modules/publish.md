@@ -335,10 +335,10 @@ pub enum PublishFault {
 
 按 repo 分组。一个调用只处理 `ctx.repo` 那一组批次；别的 repo 由 daemon 各调一次。批次为空，或没有这个 repo 的批次 → `InvalidInput`。
 
-1. **锁外，任何 ref 写之前。** 读已有的 `publish_chain`。`None` → 第 2 步先 fetch。`Rewound` → `InvalidInput`（`chain_rewound`），不前移锚点，这一步还没写行。`Diverged` 不在锁外拒绝：前移要在锁里的事务里做完，再拒绝。不自动重放（D2）。然后 `ensure` 会话正钉着的依赖集（锁外）。新 tree 的集合还不知道，放到第 8 步、放开队列与锁之后。
+1. **锁外，任何 ref 写之前。** 读已有的 `publish_chain`。`None` → 第 2 步先 fetch。`Rewound` → `InvalidInput`（`chain_rewound`），不前移锚点，这一步还没写行。`Diverged` 不在锁外拒绝：前移要在锁里的事务里做完，再拒绝。不自动重放（D2）。然后 `ensure` 会话正钉着的依赖集（锁外）。新 tree 的集合还不知道，放到第 8 步、放开队列与锁之后。然后备好检查要的兄弟（D21）：本 repo 有 `checks` 且 `check_siblings` 非空时，读布局会话 L（最小 `SessionId`）的 manifest；在 L 里的兄弟用 L 所钉的基线，不在 L 里的兄弟由 `siblings::prepare` 取它此刻的 main tip：在那个兄弟自己的 repo 写锁里 `fetch` + 按 §5.4 前移它的锚点 + `main_tip`（一次只拿一把锁，不嵌套在别的 repo 锁里）；放锁后 `ensure_base`（可能冷装依赖）与 `observe_main`（失败 → 警告 `ObserveFailed`，发布不失败）。锚点事务出错 → `Unknown`（`anchor_transaction`，`detail.cause` 是原错误）；`Busy` / `Unknown` 原样返回并加上 `detail.sibling`；具名的取不到（没有 origin 分支、带类型的 fetch 失败、`ensure_base` 的具名拒绝）记为缺失，有缺失 → `InvalidInput`（`siblings_missing`），此时还没写行、没占队列、没碰本 repo 的锁、没建目录。
 2. **占队列，再记行，再拿 repo 写锁。** 队列是本组这个 repo 的会话，按 `SessionId` 升序。占住之后 `rm` 进不了这个会话，然后才 `record_publish`（"A Removed session takes no new pins"）。会话已 Removed → `NoSuchSession`；checkpoint 不存在 → `NoSuchCheckpoint`。这一行是意图行。锁里：`git.fetch("origin", publish.branch)`；按 §5.4 前移锚点；再读 `publish_chain`。`Rewound` → `InvalidInput`（`chain_rewound`），这次没有锚点写，按 D16 把行收成 `Done`。`Diverged` → 同样的码（`chain_diverged`），但若第 5.4 节的前移已经完成，那是做完的副作用，这次拒绝不是「什么都没写」。两种都不 `commit_tree`，记录 `Pushed` 的那一次调用不启动，链 ref 的字节不变。`merge_base` 得到 B，用的是锁里这一次读到的链，不是锁外的计划（D17）。
 3. **闸门，在任何 staging 写之前。** `validate_commands`。会改文件 → `CheckMutates`，不建目录，检查进程不启动。这次要推（`publish.push`）且 `cfg.needs_human_confirm()` 时，凭据必须在场，且 `action` 等于 `PushDeploy { repo: ctx.repo.clone(), branch: cfg.publish.branch.clone(), url }`，`url` 是此刻 `git remote get-url --push origin` 的值；只有 `url` 不同 → `NotConfirmed`（`reason = "remote_changed"`，`detail.confirmed`/`detail.now` 是去掉令牌的两个 URL，D20）。否则 `NotConfirmed`，不建目录，不 `attach_staging`，不 `gitio::stage`，不 `commit_tree`，记录 `Pushed` 的那一次调用不启动。凭据按值移走。不核对 nonce、不过期：那是 daemon 核销时 confirm 做的。`publish.push` 为假时这次不看凭据。然后在内存里做 §5.3。B 上每个路径的字节和 `mode`，以及 `.lww`，都经 `blob_bytes` 读取，不调用 `export_tree`。可执行位和 `120000` 来自这个 `mode`。会话所钉基线的字节来自已有的基线目录，checkpoint 的字节来自 blob 存储。冲突 → `Conflict`，hunk 在 `detail` 里，不建目录。合成结果与 B 相同 → `NoCommit`，不建目录。这些具名拒绝按 D16 收成 `Done`。没有 gitfile。
-4. **staging。** 闸门过了才建目录。导出在锁里做，对象是锁里刚读到的 B：`export_tree(tree_of(B), <布局根>/<repo>)`。B 的 tree 很大时这段锁会拉长；这是为了后面的一次合并，不在锁外导出再碰运气 [我的决定 D12]。然后 `attach_staging`。兄弟目录用 `clonefile` 放进布局根，源是各会话所钉的基线 generation，不是活的工作区。本 repo 自己的依赖集（布局会话所钉的那份 sealed 集）用 `deps::clone_into` 克隆进 `<布局根>/<repo>/`，检查才找得到 `node_modules`/`vendor` 里的可执行文件；这是私有克隆，检查写不到 sealed 集；锁里不安装，所钉的集已 sealed，不在则 `Corrupt`；导出里已有（被 git 跟踪）的依赖目录保留跟踪内容、不覆盖；依赖目录不进 tree，`gitio::stage` 只暂存计划里的路径（review H3）[实现时补的决定]。写入内存里已经合并好的文件，再 `gitio::stage`。从 `attach_staging` 起，gitfile 的 commondir 是主 checkout；`gitio::stage` 会把对象写进主对象库。这两步都在凭据闸门之后。这一步之后若要具名返回，先按 §4.1 删完目录。
+4. **staging。** 闸门过了才建目录。导出在锁里做，对象是锁里刚读到的 B：`export_tree(tree_of(B), <布局根>/<repo>)`。B 的 tree 很大时这段锁会拉长；这是为了后面的一次合并，不在锁外导出再碰运气 [我的决定 D12]。然后 `attach_staging`。兄弟目录用 `clonefile` 放进布局根，源是各会话所钉的基线 generation，不是活的工作区。建目录之前先 `siblings::place`：再读一次 L 的 manifest（期间 `add` 进来的兄弟改用它的钉，只克隆一次）；L 所钉兄弟的基线目录不在 → `Corrupt`（store 损坏，不拿 main tip 顶替）；第 1 步备好的 generation 再查一次 `has_base_gen` 与目录在场，被 gc 收走 → `siblings_missing`（`base_collected`），不建目录。L 之外的兄弟克隆进 `<布局根>/<兄弟>/`；克隆失败 → 删布局根，删完 → `siblings_missing`（`clone_failed`，原因留在 `cause`），删不完 → `Unknown`（D21）[实现时补的决定]。本 repo 自己的依赖集（布局会话所钉的那份 sealed 集）用 `deps::clone_into` 克隆进 `<布局根>/<repo>/`，检查才找得到 `node_modules`/`vendor` 里的可执行文件；这是私有克隆，检查写不到 sealed 集；锁里不安装，所钉的集已 sealed，不在则 `Corrupt`；导出里已有（被 git 跟踪）的依赖目录保留跟踪内容、不覆盖；依赖目录不进 tree，`gitio::stage` 只暂存计划里的路径（review H3）[实现时补的决定]。写入内存里已经合并好的文件，再 `gitio::stage`。从 `attach_staging` 起，gitfile 的 commondir 是主 checkout；`gitio::stage` 会把对象写进主对象库。这两步都在凭据闸门之后。这一步之后若要具名返回，先按 §4.1 删完目录。
 5. **检查。** §5.5。仍在同一段锁里，仍在 `commit_tree` 之前。非零退出要返回 `CheckFailed` 时，先 `remove_tree_rooted`。删完、gitfile 不再是进主 ref 库的路径，才返回 `CheckFailed`。删不完 → `Unknown`，发布行保持 `Unknown`，status 报出，不返回 `CheckFailed`。
 6. **提交。** `commit_tree` 把对象写进主对象库，这是不可收回的可见写。此后任何失败对外都是 `Unknown`，现场留下，不删链、不删对象、不重放。链与锚点用 gitio 的一次 ref 事务写下（§2 第 3 条），`expected` 是锁里读到的链顶，没有链时为不存在。事务失败 → `Unknown`，`detail` 里保留 `HeadMoved` 的期望值与实际值（3d `:197`）。不返回 `HeadMoved` 作为对外的码。不重新合并、不重试。
 7. **推送。** `publish.push` 为假 → 停在本地，`push` 为 `None`。要推：同一段锁里调用记录 `Pushed` 的那一次 gitio 调用（§2 第 6 条）。它提交时，远端跟踪 ref 和锚点一起变成推上去的 commit。提交之前推送没有完成，不返回 `Pushed`，§5.4 不把这个窗口前移成 `Leads`。`Refused` → 链留在本地；这发生在可见的写之后，所以对外是 `Unknown`，`detail.kind = "PushRefused"`，远端原话留在 `detail.message`。单独的 `push` 调用还没写过，仍返回 `PushRefused`。超时、连接中断，或远端已收下而这次调用还没提交 → `Unknown`，链留下，行记 `Unknown`，不重放。之后的 fetch 若显示锚点不在 origin 上，是 `Rewound`，不是 `Leads`。
@@ -409,7 +409,7 @@ o = `publish_chain.origin`，c = 链顶，a = 锚点。前移只在 repo 写锁�
 
 配置了 0 条 → 不失败，`checks_ran = 0`（D3）。结果与 `outcome` 里都写这个数。
 
-兄弟布局是给 tool 的 `bun dev-link.mjs --sync-only` 与 admin 的 `./dev-link.sh` 用的（config.md §2.3 第 5 条）。front 的 `dev-link.sh` 不在 `checks` 里，本文也不跑它。staging 带 `.git`，`bun.lock` 在导出里是被跟踪的，所以 admin 的 self-heal 不会删它。
+兄弟布局是给 tool 的 `bun dev-link.mjs --sync-only` 与 admin 的 `./dev-link.sh` 用的（config.md §2.3 第 5 条）。front 的 `dev-link.sh` 不在 `checks` 里，本文也不跑它。这些 `../<兄弟>` 由 repo 的 `check_siblings` 列出（config.md §2.2），布局会话没有某个兄弟时由发布从它的 main tip 基线补上（§5.2 第 1、4 步，D21），补不上就 `siblings_missing`，检查不跑，不会因为兄弟缺失得到误导的 `CheckFailed`。staging 带 `.git`，`bun.lock` 在导出里是被跟踪的，所以 admin 的 self-heal 不会删它。
 
 ### 5.6 `push` 与确认
 
@@ -430,7 +430,7 @@ deps.md §5.12 的顺序，不改：
 1. 锁外 `(N_inputs, N) = key_of(ctx.deps, 新基线目录)`。目录还没有就先 `ensure_base_for`（锁外，缓存填充）。
 2. repo 写锁里：s 有开着的草稿，且 overlay 里 `is_input` 为真的路径这次都发布了、发布之后也没再改 → `propose(Session { s }, 带目标 (tree, head))`。只发布了一部分 → 不调，草稿留着。`D.from == N` → 也不调。
 3. `N == s.base.deps` → 占队列（若还没占）、拿锁、`move_workspace`。交换前 session 自己复查打开的文件。
-4. 否则会话留在旧基线上，锁里 `propose(Main, 带目标)`。返回 `Waiting`。
+4. 否则会话留在旧基线上，锁里 `propose(Main, 带目标)`。返回 `Waiting`。commit 推到 origin 之后，内容与 mode 恰在其中的路径不再让 `rm` 得 `Dirty`（session.md §5.6 第 4.2 步，D57）。
 5. `main_tip` 等于新的 head 时，放开锁之后 `observe_main`。失败只报 `ObserveFailed`。
 
 `move_workspace` 的 `head` 是这次的 commit。已发布且与会话当前内容一致的路径离开 overlay（`rebase` 的 `dropped`）。选中之后才有的修改留着，进入下一次 checkpoint。新基线上别人发布的、本会话没有的路径，出现在换过的工作区里。
@@ -469,6 +469,8 @@ design §8 没有给发布单独的秒数。上表是本文的验收数字，首
 | 推送超时或连接中断 | `Unknown` | 链在本地，行是 `Unknown` | 重启只报出，不重放 |
 | 推送之后的 I/O、rebase 写到一半 | `Unknown` | 现场留下 | 不重放。已进链的 commit 由 status 报出，不当成没发生 |
 | `observe_main` 失败 | 无（警告 `ObserveFailed`） | 发布已成功 | daemon 再观察 |
+| 兄弟的锚点事务、冷装或基线登记不确定（D21） | `Unknown`，`detail.sibling`；锚点事务另带 `reason = "anchor_transaction"` 与 `detail.cause` | 无发布行、无目录；兄弟那边的现场按 session / deps 的规则留下 | 人看 `detail` 处理后重跑 |
+| L 所钉兄弟的基线目录不在 | `Corrupt`，`detail.sibling` | 无目录 | store 损坏，不用 `add` 修，也不拿 main tip 顶替 |
 
 具名拒绝（目录已删完，或还没建）：
 
@@ -484,6 +486,8 @@ design §8 没有给发布单独的秒数。上表是本文的验收数字，首
 | 合成结果与 B 相同 | `NoCommit` | 无 commit |
 | 这个 repo 已有 `Running` 或 `Unknown` 的发布行 | `Busy`（`publish_open` 或 `publish_unknown`） | 无。不覆盖那一行，不重放 |
 | 会话已 Removed | `NoSuchSession` | 无 |
+| 检查要的兄弟补不上（D21） | `InvalidInput`（`siblings_missing`）。`detail`：`repo`、`session`（L）、`missing[]`（`repo`、`why` 为 `main_tip_unavailable` / `base_unavailable` / `base_collected` / `clone_failed`、`next`、`cause`）、`fix` = `git-strata add --session <L> --repo …` | 第 1 步拒绝时无行、无目录；第 4 步拒绝时目录已删完，行按 D16 收成 `Done`。兄弟的锚点前移若已完成，那是做完的副作用 |
+| 等兄弟的 repo 锁超时 | `Busy`，`detail.sibling` | 无行、无目录 |
 
 `Unknown` 的行挡住这个 repo 的下一次发布，直到它对上账（D19）：每次发布在第 2 步之前，拿 repo 写锁 fetch 一次，行的 commit（`outcome.commit`，没有就取这行记下的链 ref 更新）已在 `origin/<branch>` 里 → 行收成 `Done`，`push = Pushed`，`reconciled = { remote, branch }`。不在远端 → 行仍 `Unknown`，照旧 `Busy publish_unknown`；人用 `git-strata push REPO` 把链推上去之后，下一次发布对上账。什么都不重放。fetch 或 git 失败时行不动。不挡住别的 repo。会话删除是否被挡由 session 定，本文不代它拒绝 `rm`。
 
@@ -558,6 +562,16 @@ design §8 没有给发布单独的秒数。上表是本文的验收数字，首
 | `diff_between_previews_both_sides` | 只在 A 的路径进 `only_a`，只在 B 的进 `only_b`，两边都有的带 hunk 预览。不占 repo 写锁，不写 ref | 新增（design §6.3） |
 | `non_utf8_link_target_refused_before_commit` | 符号链接目标含非 UTF-8 字节 → `InvalidInput`，`detail.reason = "link_target"`，无 commit 对象 | 新增（"Recorded paths and link targets are UTF-8"） |
 | `removed_session_is_nosuchsession` | 批次里的会话已 `Removed` → `NoSuchSession`，无 `publishes` 新行 | 新增（"A Removed session takes no new pins"） |
+| `sibling_outside_the_session_comes_from_its_main_tip`、`stage_supplies_the_siblings_too` | 瘦会话（D51）发布 tool：`../admin` 在、内容是 admin 的 main tip，探测检查看得到它，发布成功；admin 的 fetch 在它自己的锁里 | 新增（D21） |
+| `sibling_in_the_layout_session_uses_its_pin`、`an_add_between_prepare_and_place_uses_the_new_pin` | L 里有 admin → 用 L 的钉，不取更新的 main tip、不 fetch admin；prepare 之后 `add` 进来 → `place` 不再补，只克隆一次 | 新增（D21） |
+| `unfetchable_sibling_refuses_before_the_row_with_an_add_hint` | origin 没有兄弟的分支 → `siblings_missing`，`fix` 是 add 命令；无发布行、无目录、检查没跑、本 repo 的 ref 不变；推上分支并 `add` 之后发布成功 | 新增（D21） |
+| `busy_sibling_lock_is_busy_with_the_sibling_named`、`sibling_anchor_failure_is_unknown_before_the_row` | 兄弟锁等超时 → `Busy`；锚点事务失败 → `Unknown`（`anchor_transaction`）；都带 `detail.sibling`，无行 | 新增（D21） |
+| `a_sibling_cold_install_failure_refuses_before_the_row`、`an_uncertain_sibling_base_registration_is_unknown_keeping_its_detail` | 兄弟冷装失败、基线登记不确定 → `Unknown`，`ensure_base` 的 `detail`（`op`、`phase`、`kept`、`retired`、`cause`）原样保留，另加 `detail.sibling`；无行、无目录；冷装失败后 deps 留着那次 attempt（`previous_attempt`），处理之前重试仍是 `Unknown`，不会不带兄弟就发布 | 新增（D21） |
+| `the_sibling_anchor_is_advanced_so_a_later_rewind_reads_rewound` | 兄弟的链 Leads、origin 已含链顶但本地 origin ref 还旧：准备兄弟时 fetch 并把锚点前移到链顶；之后 origin 被回退 → 兄弟的链读成 `Rewound`，不会误判成 `Leads` 再推一次 | 新增（D21） |
+| `a_collected_prepared_base_is_base_collected`、`a_base_removed_after_place_refuses_with_the_layout_gone`、`a_clone_of_a_vanished_base_is_clone_failed` | place 之前或之后基线被收走 → `siblings_missing`（`base_collected` / `clone_failed`），布局根已删；基线回来后重试成功 | 新增（D21 的 gc 竞争） |
+| `a_pinned_sibling_with_no_base_dir_is_corrupt` | L 所钉兄弟的基线目录不在 → `Corrupt`，`detail.sibling` | 新增（D21） |
+| `no_checks_means_no_siblings_prepared`、`a_sibling_is_fetched_under_its_own_lock_before_the_publishing_repo` | 没有 `checks` 或没有 `check_siblings` → 不碰兄弟的锁；有时兄弟的锁先拿、先放，不嵌套在本 repo 的锁里 | 新增（D21） |
+| `headless_replay_supplies_the_check_siblings`、`headless_replay_with_a_missing_sibling_is_siblings_missing`、`a_leads_push_is_not_refused_for_a_missing_sibling`、`a_busy_or_unknown_sibling_prep_stops_even_a_leads_push`、`push_scene_cleanup_is_rooted_and_checked`、`resolve::tests::*scene*`（strata-daemon） | D2a 重放的现场里有 `../admin`；补不上 → `siblings_missing`（`session` 为 null，`fix` 是重试 push），ref 不变、不推、无现场；`Leads` 不需要兄弟，照推；但兄弟准备 `Busy` / `Unknown` 时连 `Leads` 也挡住，什么都不推不写，原因消失后同一 push 成功；现场清理走 rooted、检查结果，没删干净 → `Unknown`（`cleanup`），推成功的带 `detail.push`，失败的带 `detail.cause` | 新增（D21 × D2a） |
 
 不保留与替代、理由点名本模块的 `—` 行。断言列写结果，不把 inode 语义写成要实现的行为。
 
@@ -753,6 +767,7 @@ git commit -m "feat(publish): one merge under the repo lock"
 | D1 `merge_base` 的形状 | 薄包装。只在 `Leads` 时返回链顶，其余返回 origin 的 tip。没 fetch → `NoSuchBranch` | 计划要这个名字。判定只有 deps 一份，两份会在锚上分叉 | 2026-10-23 |
 | D2 不自动重放回退或分叉的链 | `InvalidInput`，`chain_rewound` / `chain_diverged`。显式命令归 T14 | 自动重放会把被人拿掉的提交推回去。裁定把「是否自动」交给 T10 | 2026-10-23 |
 | D2a 不要确认的仓库，`push` 无头重放分叉的链 [实现时补的决定] | daemon `push`（resolve.rs `push_replaying`）：仓库钉住的 `confirm` 为假时先 fetch；`Leads` 照常推；`Diverged`（锚点仍在 origin 上）把未推的 `a..c` 逐个 `replay_commits` 接到 o 上，任何一个接不上 → `Conflict`（`replay_conflict`，`detail.commit` / `origin` / `chain`），不写 ref、不推；接上了先用本仓库按新 tree 的输入找到的 sealed 依赖集重跑检查（没 sealed → `InvalidInput` `replay_deps_unsealed`，锁里不安装；检查失败 → `CheckFailed`），再一次事务挪链与锚点，再经原来记录的、钉住 URL 的 `push_to` 推一次快进，不强推、不重试；最后把头在被重放提交上的会话按 §5.8 rebase 到对应副本。`Rewound` 仍 `chain_rewound`；要确认的仓库走原路径，分叉是 `NoCommit`，`chain` 仍归人 | D2 怕的是把人拿掉的提交推回去，那是 `Rewound`；`Diverged` 时人没拿掉任何东西，只是别人在 origin 上加了提交，重放只接未推的部分，冲突就停。要确认的仓库每次推送本来就有人在场，交给 `chain`。放在 `push` 而不是给 `chain` 开无头入口：代理本来就跑 `push`，`chain` 仍守 cli D18，重放还会重跑检查。（2026-10-26，peilin：staff-api `config relax` 之后无头推送被 non-ff 拒） | 2026-10-26 |
+| D21 发布自己补检查要的兄弟 [实现时补的决定] | `RepoConfig.check_siblings` 列出检查要在 `../<名字>` 找到的 repo（admin：admin-shared、admin-time-off；tool：另加 hr-*、quick-start；front 无）。布局会话 L 里有的用 L 的钉；没有的，发布在锁外取它此刻的 main tip（兄弟自己的锁里 fetch + 前移锚点 + main_tip，放锁后 `ensure_base` / `observe_main`），建目录前 `place` 再核对，克隆进布局根。补不上 → `InvalidInput siblings_missing`，`fix` = `git-strata add --session <L> --repo …`，每项 `next` 写具体出路；`Busy` / `Unknown` 原样返回带 `detail.sibling`；L 所钉的基线不在 → `Corrupt`。D2a 的无头重放同样补（`session` 为 null，`fix` 是重试 push）：`push` 有 `checks` 与 `check_siblings` 时总是先 prepare（`Busy` / `Unknown` 挡住这次 push），具名缺失只在真的要重放时才拒绝；重放现场的清理改成 rooted 且检查结果：没删干净 → `Unknown`（`reason = "cleanup"`、`detail.scene`；推成功的保留 `detail.push`，失败的保留 `detail.cause`），与发布第 9 步删布局根的规则一致 | D51 的瘦会话（如 `new --repo admin --repo staff-api`）发布 admin 时 `../admin-shared` 不在，`dev-link.sh` 什么都没链上，`tsc` 报误导的错（Inter 的 `CheckFailed`）。依赖写在 shell 脚本里，解析脚本太脆，所以显式配置。main tip 等于 `add --repo S` 此刻会钉的那份。gc 竞争靠「失败干净、重试」而不是再加一把锁的嵌套。（2026-10-28，peilin 批准 (a)+(b)） | 2026-10-28 |
 | D3 零条检查 | 成功，并写出 `checks_ran: 0` | config.md 把这件事交给本文。静默跳过会让人以为检查跑过了 | 2026-10-23 |
 | D4 staging 的位置 | 最小 `SessionId` 的会话根下，`.strata-publish-<repo>-<release-id>/`。仓库在其中的 `<repo>/`，兄弟是所钉基线的克隆，不是活的工作区 | 草稿要求会话根、真实目录、兄弟布局。多会话组没有唯一的根，取最小 id。克隆兄弟是为了检查的 `../` 不写进活的工作区 | 2026-10-23 |
 | D5 hunk 文本上限 | 4096 字节，UTF-8 字符边界。超限的带 `truncated`，同冲突里的小 hunk 保持原文 | 裁定要求本文定上限。3d 的那一行要求小 hunk 精确 | 2026-10-23 |

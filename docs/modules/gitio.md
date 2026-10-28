@@ -57,7 +57,7 @@ gitio 是 strata 里唯一起 git 子进程的模块。它从 tgrep 借了两段
 | 调用方 | 用到 |
 | --- | --- |
 | daemon | `open`、`repo_id`。加载配置时检查每个 `path` 是工作树根、两张表不是同一个 `RepoId`（config.md §4.3） |
-| session | `fetch`、`read_ref`、`is_ancestor`、`merge_base`、`tree_of`、`tree_contains`（种子文件"在基线 tree 里未被跟踪"，config.md §4.3）、`export_tree`（在锁外导出到自己的基线暂存）、`ensure_shadow`（只在 `new`）、`shadow_at`（此后与 daemon 重启后）、`attach_worktree`、`update_ref` 与 `delete_ref`（pin ref 的比较并交换）、`is_ignored`、`is_ignored_in_export`（工作区建好之前判显式种子，session.md @853fdf8 §2 的上游要求）、`worktree_gitdir`（`resolve_failed_move` 核对失败的移动留下的现场，session.md @cec336b §2 的上游要求）；`shadow_drift`（status 的告警；fix round 4 起多一个参数 `workspace`，pre-push 守卫按 git 在工作区里的有效 hooks 目录判断，review M3）；`read_index`（`move_workspace` 第 13.2 步取工作区的 `ignorecase`，session.md @5797ee8 §5.7）与 `repo_id`（`RepoId` 就是 `git.repo_id()`，session.md @5797ee8 §4.4），这两项是 re-review r5 对照 session 补上的 |
+| session | `fetch`、`read_ref`、`is_ancestor`、`merge_base`、`tree_of`、`tree_contains`（种子文件"在基线 tree 里未被跟踪"，config.md §4.3）、`tree_has_file`（`rm` 判已发布的删除，session.md §5.6 第 4.2 步，D57）、`export_tree`（在锁外导出到自己的基线暂存）、`ensure_shadow`（只在 `new`）、`shadow_at`（此后与 daemon 重启后）、`attach_worktree`、`update_ref` 与 `delete_ref`（pin ref 的比较并交换）、`is_ignored`、`is_ignored_in_export`（工作区建好之前判显式种子，session.md @853fdf8 §2 的上游要求）、`worktree_gitdir`（`resolve_failed_move` 核对失败的移动留下的现场，session.md @cec336b §2 的上游要求）；`shadow_drift`（status 的告警；fix round 4 起多一个参数 `workspace`，pre-push 守卫按 git 在工作区里的有效 hooks 目录判断，review M3）；`read_index`（`move_workspace` 第 13.2 步取工作区的 `ignorecase`，session.md @5797ee8 §5.7）与 `repo_id`（`RepoId` 就是 `git.repo_id()`，session.md @5797ee8 §4.4），这两项是 re-review r5 对照 session 补上的 |
 | deps | `is_ignored`、`tree_of`；`read_ref` 与 `remote_ref`（`main_tip` 读 origin 默认分支的跟踪 ref 与发布链）、`is_ancestor`（只在 `main_tip` 里判断发布链是否领先 origin，design §6.7 的钉基线规则）。按 deps.md @22e1fac §2 的 gitio 行与 §3 的 `main_tip` 行 |
 | overlay | `read_index`、`is_ignored`（增量点查与全量对账用同一个函数）、`merge3`（`rebase` 用） |
 | publish | `fetch`、`read_ref`、`is_ancestor`、`merge_base`、`tree_of`、`export_tree`、`attach_staging`、`stage`、`commit_tree`、`update_ref`、`push`、`merge3`、`is_binary` |
@@ -185,6 +185,8 @@ impl Git {
     /// `path` 是否在 `tree` 里：是其中的文件或符号链接，或是它的一个目录；ignorecase 时按 ASCII 不区分大小写（§5.4）。
     /// 先做与 tree_of 相同的校验。Code：同 tree_of。
     pub fn tree_contains(&self, tree: &TreeOid, path: &RepoPath) -> Result<bool>;
+    /// session.md §5.6 第 4.2 步（D57）：路径表里这个路径是文件或符号链接条目（NFC，忽略大小写时按 ASCII 折叠），目录不算。
+    pub fn tree_has_file(&self, tree: &TreeOid, path: &RepoPath) -> Result<bool>;
     /// 把 tree 导出到还不存在的 `dst`，结果逐字节等于 git checkout（§5.5）；dst 只以完整的形态出现。
     /// 不需要锁：只读主 checkout，只写 dst 与它旁边的临时目录，dst 由调用方保证独有（§5）。中断的导出把临时目录
     /// 留在 dst 的父目录里（§4.2）：dst 在调用方的暂存里时（session 的基线暂存），它随暂存一起退役。
@@ -440,7 +442,7 @@ agent 在工作区里的 git 写入（`git add`、`commit`、`stash`、`branch`�
 
 | 缓存 | 键 | 内容 |
 | --- | --- | --- |
-| tree 校验 | `TreeOid` | `tree_of` 的结论（Ok 或 Err），tree 不可变，结论永久有效；校验通过的 tree 另留路径表给 `tree_contains`，最多 64 个 tree，按最近使用淘汰 [我的决定] |
+| tree 校验 | `TreeOid` | `tree_of` 的结论（Ok 或 Err），tree 不可变，结论永久有效；校验通过的 tree 另留路径表给 `tree_contains` 与 `tree_has_file`，最多 64 个 tree，按最近使用淘汰 [我的决定] |
 | index 解析 | index 文件路径加 (size, mtime 纳秒, inode)，再加 §5.7 第 6 步读过的 config 文件的同样三项 | `IndexInfo`；`ignorecase` 来自 config，config 一变就重读 |
 | 规则文件 | 文件路径加 (size, mtime 纳秒, inode) | 解析后的模式；每次 `is_ignored`、`is_ignored_in_export` 对涉及的规则文件各 stat 一次 |
 | 主 checkout 的 `core.ignorecase` | `<common>/config` 的 (size, mtime 纳秒, inode) | `is_ignored_in_export` 用的值（§5.8 末段） |

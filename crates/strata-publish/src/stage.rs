@@ -652,8 +652,10 @@ fn refuse_symlinks(root: &Path, rel: &RepoPath) -> Result<()> {
     Ok(())
 }
 
-/// Remove the layout root; `Unknown` when anything is left behind.
-pub(crate) fn remove_layout(root: &Path, rel: &RepoPath) -> Result<()> {
+/// Remove the layout root `<root>/<rel>` without following symlinks: an
+/// absent root is fine, anything left behind is `Unknown` (reason
+/// `cleanup`). The daemon removes its replay scenes the same way (D21).
+pub fn remove_layout(root: &Path, rel: &RepoPath) -> Result<()> {
     match strata_apfs::remove_tree_rooted(root, rel) {
         Ok(r) if r.stuck_total == 0 => Ok(()),
         Ok(r) => Err(StrataError::new(Code::Unknown, "the staging layout could not be removed").with_detail(json!({
@@ -758,12 +760,20 @@ fn clone_own_deps(ctx: &Ctx, id: &strata_types::DepsSetId, worktree: &Path) -> R
 }
 
 /// Build the layout for `plan` (D4, D12): export B, attach the private git
-/// dir, clone the siblings from the session's pinned bases, write the
-/// merged paths and stage them through gitio. Any failure removes the
-/// layout first; a removal that fails is `Unknown`.
-pub(crate) fn build(ctx: &Ctx, group: &ReleaseGroup, base: &CommitOid, plan: &Plan) -> Result<Staged> {
+/// dir, clone the siblings from the session's pinned bases and the check
+/// siblings the session lacks from their prepared main-tip bases (D21),
+/// write the merged paths and stage them through gitio. Any failure
+/// removes the layout first; a removal that fails is `Unknown`.
+pub(crate) fn build(
+    ctx: &Ctx,
+    group: &ReleaseGroup,
+    base: &CommitOid,
+    plan: &Plan,
+    prep: &crate::siblings::Prepared,
+) -> Result<Staged> {
     let root = ctx.deps.paths.root.clone();
     let (layout, rel) = layout_rel(ctx, &plan.layout_session, group.id)?;
+    let supplies = crate::siblings::place(ctx.store, ctx.git, ctx.cfg, ctx.repo, Some(&plan.layout_session), prep)?;
     refuse_symlinks(&root, &rel)?;
     strata_apfs::mkdir_rooted(&root, &rel, 0o755, false)?;
     let r = (|| -> Result<Staged> {
@@ -771,6 +781,7 @@ pub(crate) fn build(ctx: &Ctx, group: &ReleaseGroup, base: &CommitOid, plan: &Pl
         let gitdir = layout.join(format!(".git-{}", ctx.repo.as_str()));
         ctx.git.export_tree(&plan.b_tree, &worktree)?;
         ctx.git.attach_staging(&worktree, &gitdir, base)?;
+        let mut cloned = BTreeSet::new();
         if let Some(rec) = ctx.store.session(&plan.layout_session)? {
             for (rn, ws) in &rec.manifest.repos {
                 if rn == ctx.repo {
@@ -780,9 +791,15 @@ pub(crate) fn build(ctx: &Ctx, group: &ReleaseGroup, base: &CommitOid, plan: &Pl
                 let src = ctx.store.base_dir(&ws.base);
                 if src.is_dir() {
                     strata_apfs::clone_tree_rooted(&src, &layout, &RepoPath::try_from(rn.as_str().to_string())?)?;
+                    cloned.insert(rn.clone());
                 }
             }
         }
+        // An `add` that landed after `place` already put its pin here.
+        let rest: Vec<_> = supplies.iter().filter(|s| !cloned.contains(&s.repo)).cloned().collect();
+        crate::siblings::clone_supplies(&rest, &layout).map_err(|m| {
+            crate::siblings::missing_error(ctx.repo, Some(&plan.layout_session), std::slice::from_ref(&m))
+        })?;
         let src = Src { store: ctx.store, git: ctx.git };
         apply(&src, &worktree, &plan.changed)?;
         let paths: Vec<RepoPath> = plan.changed.keys().cloned().collect();
@@ -807,7 +824,12 @@ pub(crate) fn build(ctx: &Ctx, group: &ReleaseGroup, base: &CommitOid, plan: &Pl
 
 /// §3 `stage`: merge `group` onto `base` (= B) by path and build the
 /// staging layout. Conflicts are decided before any directory exists.
+/// The check siblings are prepared first (D21), with no lock held.
 pub fn stage(ctx: &Ctx, group: &ReleaseGroup, base: &CommitOid) -> Result<Staged> {
     let plan = plan(ctx, group, base)?;
-    build(ctx, group, base, &plan)
+    let prep = crate::siblings::prepare(ctx, Some(&plan.layout_session))?;
+    if !prep.missing.is_empty() {
+        return Err(crate::siblings::missing_error(ctx.repo, Some(&plan.layout_session), &prep.missing));
+    }
+    build(ctx, group, base, &plan, &prep)
 }

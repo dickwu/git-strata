@@ -23,6 +23,8 @@
 
 另外 admin 的 `prebuild` 跑 `scripts/permission-map/generate.mjs`，它读 `../staff-api`、`../tool`、`../front`、`../app`；兄弟缺失时保留已提交的 `generated.json`，不会失败（`admin/scripts/permission-map/generate.mjs:64-70`，`admin/CLAUDE.md`）。
 
+[实现时补的决定]（2026-10-28，publish.md D21）：D51 之后会话可以只含部分 repo（session.md D51），所以「全集 = 兄弟布局」只对不带 `--repo` 的会话成立。检查要的兄弟由 `check_siblings`（§2.2）显式列出，发布时布局会话里没有的由发布从它的 main tip 基线补进 staging。上表 admin、tool 两行就是附录 A 里这两个 repo 的 `check_siblings`；front 的 dev-link 不是检查，不列。
+
 - **派生目录**：`paths.root` 之下固定是 `store/`、`bases/`、`deps/`、`sessions/`（design §7），不单独配置。工作区路径 = `<root>/sessions/<session-id>/<repo>/`：session id 由 `new` 生成（types.md 的 `SessionId`，形如 `s-k3q7xm2a`），ticket 只是会话的标签，不进路径（design §4、§11 第 18 条"会话 id 与 ticket 分离"）。
 
 ---
@@ -52,6 +54,7 @@
 | `publish` | 内联表 `PublishTarget` | 必填 | 发布目标 | design §6.7 |
 | `deploy_on_push` | bool | `false` | 推送到 `origin/<publish.branch>` 本身就会触发生产部署 | design §3、不变量 3、7 |
 | `pin_unpushed` | bool | `true` | 新会话钉基线时，发布链领先 origin 就钉链顶 | design §6.7 |
+| `check_siblings` | string 数组（`RepoName`） | `[]` | `checks` 要在 `../<名字>` 找到的兄弟 repo；会话里没有时发布从它的 main tip 基线补上 | publish.md D21 [实现时补的决定] |
 
 ### 2.3 字段语义
 
@@ -74,10 +77,12 @@
      - admin 的 `./dev-link.sh`（单次、无 `--watch`）只写 `node_modules/@inter/*`，兄弟目录缺失时静默跳过；**但它的 self-heal 会在不是 git 工作树的目录里 `rm bun.lock`**（`git ls-files --error-unmatch bun.lock` 失败即删，`admin/dev-link.sh:15-18`；附录 B 复现过），所以 staging 树必须带 `.git`、且 `bun.lock` 在其中是被跟踪的。已列入。
      - tool 的 `bun dev-link.mjs --sync-only` 在兄弟目录缺失时会 `git clone`，并在布局根写 `../node_modules/tailwindcss`（`tool/dev-link.mjs:204-233`），所以要求完整的兄弟布局（design §3）。已列入。
      - front 的 `dev-link.sh` 会对干净的兄弟库 `git reset --hard origin/main`（`front/dev-link.sh:23`），**不得**列入。
+     - [实现时补的决定]（2026-10-28）兄弟布局不再靠会话含全部 repo：admin、tool 的 `check_siblings` 列出 dev-link 要的兄弟，发布保证它们在 staging 里（publish.md D21）。
   6. 检查跑在 staging 树里，所以需要种子文件才能跑的检查（maxident-sync、insurance-check 的 `cargo check` 需要 `secrets.rs`）要么不列，要么由 `publish` 把种子文件带进 staging [交给 `publish.md`]；附录 A 对这两个仓库没有启用 Rust 检查。Tauri 应用的 Rust 侧检查同样没有启用：`src-tauri/target` 冷编译要 30–40 分钟（design §6.1）。
 - **`publish`**：`PublishTarget { branch, push, confirm }`（types.md；design §6.7），三个字段都必须写。`branch` 是发布链 `refs/strata/publish/<branch>` 对应的分支，附录 A 里恒等于 `default_branch`（两者不同时 [我的决定]：发布链以 `origin/<publish.branch>` 为合并基并推到它；新会话仍钉 `origin/<default_branch>`，`pin_unpushed` 只在 `publish.branch == default_branch` 时有意义；细节交给 `publish.md` 与 `session.md`）；`push = true`：发布后立刻把链推到 `origin/<branch>`；`false`：留在本地，之后 `strata push <repo>`；`confirm`：该目标的推送是否需要人类确认。**实际是否需要确认 = `confirm || deploy_on_push`**（`RepoConfig::needs_human_confirm`）。默认 = 直接合主干并推（design §2 目标 7），即 `push = true, confirm = false`；一推上线的仓库 `confirm = true`；staff-api 例外：`push = false`，预期配置是人工 `strata push`（design §6.7，因为推任何分支都会重建生产）。
 - **`deploy_on_push`**：为 `true` 时，推送必须经 design §6.9 的人类确认，没有任何 flag、环境变量或运行期配置能让这次推送绕过（不变量 3、7）；规则 V5 保证 `confirm` 也是 `true`。[实现时补的决定]（2026-10-26，peilin："将api 也改为不用确认"）：上面这句作废。`deploy_on_push` 只是信息（推送算作 `Action::PushDeploy`、status 里显示），不再是门；要不要人类确认只看 `publish.confirm`（`needs_human_confirm() = publish.confirm`），V5 一并撤销。现有配置里 `deploy_on_push = true` 的仓库都显式写了 `confirm = true`，门不变；唯一改的是 staff-api（`confirm = false`，`push = false`、`deploy_on_push = true` 不变）。把 `confirm` 从 true 改成 false 仍是"调松"，要人跑 `git-strata config relax <REPO>`（TTY + Touch ID）才生效。把 `deploy_on_push` 本身改成 `false` 属于"调松"，daemon 只在人类确认之后接受（§1 的钉住规则，[交给 `daemon.md`]）。`true` 的有：staff-api、front 和全部 `@inter/*` 库（admin-time-off、admin-shared、hr-core、hr-tasks、hr-components、hr-time-management、quick-start）——design §3、§11 第 6 条。
 - **`pin_unpushed`**：新会话钉基线时，发布链领先 `origin/<branch>` 就钉链顶；`false` 则一律钉 `origin/<default_branch>`，新会话看不到已发布未推送的改动，下一次发布必撞（design §6.7）。只在 `publish.branch == default_branch` 时有意义：两者不同时新会话一律钉 `origin/<default_branch>`（见上条 `publish`）。
+- **`check_siblings`**：[实现时补的决定]（2026-10-28，publish.md D21）每项是另一个已配置的 repo（V12）。只在 `checks` 非空时起作用。发布（以及 D2a 的无头重放）staging 时：布局会话钉了它 → 用那个钉；没钉 → 发布在锁外 fetch 它的 `origin/<default_branch>`、前移它的锚点、取 main tip 的基线（可能冷装依赖），克隆进 `<布局根>/<名字>/`。补不上 → `InvalidInput`（`siblings_missing`），`detail.fix` 是 `git-strata add --session <id> --repo …`，检查不跑。缺省空列表 = 旧行为，不碰任何兄弟。旧二进制不认这个键（V11），所以上线顺序是：先把新的 `git-strata` 与 `git-stratad` 一起装好，再改线上配置，最后重启 daemon；若在重启之后才改配置，要再重启一次才生效。
 
 ### 2.4 命令行字符串（`install` 与 `checks`）
 
@@ -155,6 +160,9 @@ pub struct RepoConfig {
     /// 缺省 `true`。
     #[serde(default = "RepoConfig::default_pin_unpushed")]
     pub pin_unpushed: bool,
+    /// 检查要在 `../<名字>` 找到的兄弟 repo（publish.md D21）；缺省空。[实现时补的决定]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_siblings: Vec<RepoName>,
 }
 
 // ---- 签名清单（不是实现）----
@@ -211,7 +219,7 @@ impl Config {
 
 ### 4.1 静态规则（`Config::validate`，无 I/O）
 
-按 `[paths]`、再按各 `[repo.<name>]` 表在文件里的出现顺序检查，表内按 V1→V11 的顺序；只报第一条违规 [我的决定]。
+按 `[paths]`、再按各 `[repo.<name>]` 表在文件里的出现顺序检查，表内按 V1→V12 的顺序；只报第一条违规 [我的决定]。
 
 | 编号 | 规则 | 错误码 | 依据 |
 | --- | --- | --- | --- |
@@ -226,6 +234,7 @@ impl Config {
 | V9 | `install` 与每条 `checks`：非空；能按 §2.4 切分（引号配对）；引号之外没有 `\|`、`&`、`;`、`<`、`>` | `InvalidInput` | §2.4 |
 | V10 | `checks` 的只读规则（§4.2） | `CheckMutates` | design §6.5 步骤 4、§11 第 15 条 |
 | V11 | 任何表里的未知键都拒绝；`publish` 内联表恰好三个字段 | `InvalidInput` | — |
+| V12 | `check_siblings` 的每项是另一个已配置的 repo：不是本 repo，不重复。`detail` 带 `repo`、`field = "check_siblings"`、`index`、`rule = "V12"`。未知键 V11 由 serde 在解析时报，先于其它规则 | `InvalidInput` | publish.md D21 [实现时补的决定] |
 
 ### 4.2 `checks` 只读规则（`CheckMutates`）
 
@@ -316,6 +325,7 @@ checks = [
 publish = { branch = "master", push = true, confirm = false }   # D§6.7 默认
 deploy_on_push = false                     # I 无 webhook（admin 靠手动 build.sh 发布）
 pin_unpushed = true                        # D§6.7 默认
+check_siblings = ["admin-shared", "admin-time-off"]   # D21：admin 的 checks 读 ../admin-shared、../admin-time-off（dev-link）；不在 session 里时 publish 用它们 main 的最新 base [实现时补的决定]
 
 [repo.front]
 path = "/Volumes/GWD/inter/front"
@@ -349,6 +359,7 @@ checks = [
 publish = { branch = "main", push = true, confirm = false }   # D§6.7 默认
 deploy_on_push = false                     # I 无 webhook；但 tool 的 build.sh 会推 6 个兄弟库，其中 5 个的推送会部署 front（C tool、front）
 pin_unpushed = true
+check_siblings = ["admin-shared", "admin-time-off", "hr-components", "hr-core", "hr-tasks", "hr-time-management", "quick-start"]   # D21：tool 的 checks 读这 7 个兄弟库（dev-link）[实现时补的决定]
 ```
 
 ### A.3 kiosk 与诊所桥接：slate_viewer、surgical-timeout、appointment_patient_viewer、patient_9_grid、maxident-sync、insurance-check

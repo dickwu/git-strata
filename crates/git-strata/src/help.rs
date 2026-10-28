@@ -117,8 +117,9 @@ ERRORS (code -> what an agent does)
   NoMatch / no_batch checkpoint the paths, then publish
   NoSuchSession      cd into a workspace or pass --session
   NoSuchRepo not_in_session  run detail.fix (git-strata add --session S --repo R)
+  InvalidInput siblings_missing  publish checks need sibling repos: run detail.fix
   AmbiguousMatch     use a session id from detail
-  Dirty              rm on unpublished work: publish it, or ask the human (rm --discard)
+  Dirty              rm on work that is not published: publish it, or ask the human (rm --discard)
   CheckFailed        fix the code, checkpoint, publish again
   OpenFiles          stop the process you started (detail has pids), retry
   NoCommit           nothing to do; not a failure
@@ -345,6 +346,13 @@ OTHER ERRORS
                      `git-strata push REPO` (it replays), then rerun publish.
                      Otherwise the human runs `git-strata chain`
   NotConfirmed plan_changed  nothing written: rerun once yourself
+  InvalidInput siblings_missing  the repo's checks need sibling repos
+                     (check_siblings) that could not be supplied; nothing
+                     written. Run detail.fix (git-strata add --session S
+                     --repo R ...) or follow detail.missing[].next, then rerun
+  Busy / Unknown with detail.sibling  preparing that sibling (fetch, anchor)
+                     was busy or unknown; Busy: retry later; Unknown: tell
+                     the human
 
 ",
     gate_text!(),
@@ -385,6 +393,9 @@ ORIGIN MOVED (repos that need no confirmation)
              not built; open a session (`new`) on the repo, then push again
   InvalidInput chain_rewound -> origin dropped pushed commits: human only
              (`git-strata chain`); push never replays a rewound chain
+  InvalidInput siblings_missing -> the replay's checks need sibling repos
+             (check_siblings) that could not be supplied; nothing written or
+             pushed. Follow detail.missing[].next, then push again
   A repo that needs confirmation is never replayed by push: its push sends
   only a chain that leads origin; diverged is NoCommit, the human runs chain.
 
@@ -407,10 +418,14 @@ pub const RM_AFTER: &str = concat!(
   git-strata rm --session s-k3q7xm2a              # after its work is published
   git-strata rm --session s-k3q7xm2a --discard    # HUMAN ONLY (TTY + prompt)
 
-Dirty: the session still has changes against its base. detail.repos lists
-paths per repo, detail.untracked_repos names edited untracked siblings,
-detail.unresolved lists interrupted scenes. Publish the work, or hand
-`rm --discard` to the human. Never rm after an Unknown outcome.
+Dirty: the session has changes that are not published. A file whose exact
+bytes and mode are in a publish of this session that origin already has does
+not count, even while the session waits on a deps proposal. detail.repos lists
+the rest per repo, detail.landed counts what was skipped, detail.untracked_repos
+names edited untracked siblings, detail.unresolved lists interrupted scenes.
+detail.reason = changed_during_remove: files changed while rm ran; retry.
+Publish the work, or hand `rm --discard` to the human. Never rm after an
+Unknown outcome.
 
 ",
     gate_text!()

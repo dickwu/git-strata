@@ -13,6 +13,7 @@ pub mod check;
 pub mod push;
 pub mod rebase;
 pub mod seams;
+pub mod siblings;
 /// Review-2 N1: stage's selection rules as a read-only query, for the
 /// daemon's re-run filter (the daemon never stages: it calls `publish`).
 pub mod selection {
@@ -27,7 +28,7 @@ pub use push::{PublishWarning, Published, WarningKind, commit, publish, publish_
 pub use seams::PUSH_TIMEOUT;
 #[cfg(feature = "test-seams")]
 pub use seams::PublishFault;
-pub use stage::{HUNK_TEXT_CAP, Staged, stage};
+pub use stage::{HUNK_TEXT_CAP, Staged, remove_layout, stage};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 
