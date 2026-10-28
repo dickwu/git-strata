@@ -88,8 +88,22 @@ fn gui_p1_replies_match_fixtures() {
             if params.get("session").and_then(Value::as_str) == Some("$S1") {
                 params["session"] = json!(s1.as_str());
             }
-            let reply = strata_client::call(&socket, r["method"].as_str().unwrap(), params, Kind::Read)
-                .unwrap_or_else(|e| panic!("{name}: {:?}", e.into_error()));
+            let method = r["method"].as_str().unwrap();
+            // The desktop asks `status{session}` for `chains` (status-perf
+            // D2). A daemon older than status-perf refuses the field; the
+            // desktop then asks again without it (daemon.rs `read`), and so
+            // does this test, so it runs on both sides of that change.
+            let reply = match strata_client::call(&socket, method, params.clone(), Kind::Read) {
+                Err(strata_client::CallError::Failed(e))
+                    if params.get("chains").is_some() && e.message.contains("unknown field `chains`") =>
+                {
+                    let mut params = params;
+                    params.as_object_mut().unwrap().remove("chains");
+                    strata_client::call(&socket, method, params, Kind::Read)
+                }
+                other => other,
+            }
+            .unwrap_or_else(|e| panic!("{name}: {:?}", e.into_error()));
             out.push((name, reply));
         }
         let subs = vec![

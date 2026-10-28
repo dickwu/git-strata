@@ -68,6 +68,9 @@ describe('sessionDetail', () => {
     const d = sessionDetail(all, 'S1')!;
     expect(d.checkpoints.map((c) => c.id)).toEqual([2, 1]);
     expect(d.repos.find((r) => r.repo === 'web')!.checkpoint).toBe(2);
+    // status{all} has no `chains` key (a status-perf daemon computes them only on request)
+    expect(all.chains).toBeUndefined();
+    for (const r of d.repos) expect(r.chain).toBeNull();
   });
   test('unknown id → null', () => {
     expect(sessionDetail(all, 'S99')).toBeNull();

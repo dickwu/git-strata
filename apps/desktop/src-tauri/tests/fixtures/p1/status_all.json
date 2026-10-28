@@ -1,16 +1,4 @@
 {
-  "chains": {
-    "tool": {
-      "branch": "main",
-      "origin": "03f2ef69ecdb11ec0345ab181555013a4c55d51c",
-      "state": "Absent"
-    },
-    "web": {
-      "branch": "main",
-      "origin": "69ef075315971387f8398290dbf2b4e33c03f2ad",
-      "state": "Absent"
-    }
-  },
   "holds": [],
   "leftovers": [],
   "sessions": [

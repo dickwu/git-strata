@@ -27,7 +27,10 @@ pub enum Read {
     /// it is slow on a busy store. P1 lists sessions with it at low
     /// frequency until P2 adds `sessions_summary` (gui.md §8.1).
     Sessions,
-    /// `status{session}`: one session, the same per-workspace checks.
+    /// `status{session, chains:true}`: one session, the same
+    /// per-workspace checks, plus each repo's publish chain (a daemon
+    /// with status-perf computes chains only when asked; an older one
+    /// rejects the field and is asked again without it, see `read`).
     Session(String),
     /// `du{refresh:false}`: the cached usage report.
     Du,
@@ -52,7 +55,7 @@ impl Read {
         match self {
             Read::DaemonStatus => json!({ "verify": false }),
             Read::Sessions => json!({ "cwd": null, "session": null, "all": true }),
-            Read::Session(id) => json!({ "cwd": null, "session": id, "all": false }),
+            Read::Session(id) => json!({ "cwd": null, "session": id, "all": false, "chains": true }),
             Read::Du => json!({ "refresh": false }),
             Read::DepsList => json!({ "repo": null }),
         }
@@ -139,7 +142,20 @@ impl Daemon {
         let (socket, method, params) = (self.socket.clone(), r.method(), r.params());
         let task = tokio::task::spawn_blocking(move || {
             let _flight = flight;
-            strata_client::call(&socket, method, params, Kind::Read)
+            match strata_client::call(&socket, method, params.clone(), Kind::Read) {
+                // A daemon older than status-perf has no `chains` param
+                // (`deny_unknown_fields`) and computes chains anyway: ask
+                // once more without it. Same thread, flight and deadline;
+                // at most two requests; any other error is returned as is.
+                Err(strata_client::CallError::Failed(e)) if predates_chains(&params, &e) => {
+                    let mut params = params;
+                    if let Some(o) = params.as_object_mut() {
+                        o.remove("chains");
+                    }
+                    strata_client::call(&socket, method, params, Kind::Read)
+                }
+                other => other,
+            }
         });
         match tokio::time::timeout(deadline, task).await {
             Err(_) => Err(GuiError::timeout(method, r.deadline().as_secs())),
@@ -149,4 +165,17 @@ impl Daemon {
             Ok(Ok(reply)) => reply.map_err(GuiError::from),
         }
     }
+}
+
+/// The request carried `chains` and the daemon refused it as an unknown
+/// param: RPC `Failed` (cli D7 maps it to `InvalidInput` with
+/// `detail.rpc == "Failed"`) whose message names the field.
+fn predates_chains(params: &Value, e: &strata_types::StrataError) -> bool {
+    params.get("chains").is_some()
+        && e.detail
+            .as_ref()
+            .and_then(|d| d.get("rpc"))
+            .and_then(Value::as_str)
+            == Some("Failed")
+        && e.message.contains("unknown field `chains`")
 }

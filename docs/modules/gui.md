@@ -594,6 +594,8 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 
 **P1 实现记录**（r3.8；后端 f81f714，前端 357fc19，均未推送）。照上表做，偏离与补充如下：
 
+- **`chains` 按需（status-perf D2）**：daemon 只在 `status` 带 `chains: true` 时回 `chains` 键，否则回复里没有这个键（不是 `{}`）。P1 只在单会话读（`Read::Session`）上发 `chains: true`，会话列表（`status{all}`）不发、详情的链一栏从单会话回复取。比 status-perf 旧的 daemon（`deny_unknown_fields`）以 RPC `Failed`「unknown field `chains`」拒绝：后端在同一个阻塞任务、单飞与超时之内去掉 `chains` 重发一次（最多两次请求，别的错误不重试），旧 daemon 照旧算链。`status_all.json` 不再带 `chains`，`requests.json` 的单会话请求带 `chains: true`。核心侧的 `crates/git-strata/tests/gui_fixtures.rs` 同样在旧 daemon 拒绝时去掉 `chains` 重发，所以 impl/gui 合入 main 之前也能跑。
+- **`OldTreeKept.changed` 可为 null（status-perf A1）**：`null`（同时 `unchecked: true`）表示后台还没判定，读作「未知」，不能当 `false`。P1 只数 warning 个数、不读这个字段；类型见 `types.ts` 的 `OldTreeKeptWarning`。
 - **旧 daemon 护栏（我的决定）**：`daemon_status` 回答里没有 `api` 键就当旧 daemon（P2 之前的所有 daemon，包括 10-27 fd 泄漏的 c98794f 构建）。对它把 `status{all:true}`（每次都对每个会话做 drift 与打开文件检查）降到可见 30 s、隐藏 120 s，单会话 `status` 可见 30 s、隐藏不轮询，`daemon_status` 可见 5 s；有 `api` 的 daemon 用 §5.3.3 的轮询兜底数字（2 / 5 / 10 / 10 / 60 s，隐藏 10 / 30 / 停 / 30 / 停）。daemon 不在（`detail.reason == "daemon_down"`）时只轮询 `daemon_status`（可见 5 s、隐藏 30 s）。`Busy` 的 request_in_flight、超时都不算「不在」。前端不重试，单飞与超时由后端负责（§3.2）。实现在 `src/lib/poll.ts`，测试在 `poll.test.ts`。
 - **托盘**：P1 托盘已读「等你处理」（deps 提案 Pending、有冲突的 workspace），点项发 `strata://open`，前端落到对应会话：`deps:<id>` → 提出该提案的会话，`conflict:<repo>` → 该仓库里第一个有冲突的会话，找不到就停在会话列表。「暂停通知」项本期不做（P1 没有通知）。
 - **strata 柱推迟到 P2**：会话详情先用表格列出每个仓库的 head / base tree / deps 集短哈希、健康、pending、冲突与已发布链状态，checkpoint 按新到旧排；分层柱与 Home、Allocations、Diff 一起在 P2 做。

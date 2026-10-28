@@ -33,6 +33,9 @@ enum Mode {
     Silent,
     /// Answer every request with an `ok:false` error.
     Refuse,
+    /// A daemon older than status-perf: refuses a `chains` param the way
+    /// `deny_unknown_fields` does (RPC `Failed`), otherwise the fixtures.
+    PreChains,
 }
 
 /// A json-lines daemon on a socket under /tmp (short enough for
@@ -71,7 +74,9 @@ impl Fake {
                     }
                     Mode::Refuse => json!({ "id": req["id"], "ok": false, "error": {
                         "code": "NoMatch", "message": "no such session", "detail": { "reason": "session_unknown" } } }),
-                    Mode::Fixtures => {
+                    Mode::PreChains if req["params"].get("chains").is_some() => json!({ "id": req["id"], "ok": false, "error": {
+                        "rpc": "Failed", "message": "invalid params: unknown field `chains`, expected one of `cwd`, `session`, `all`" } }),
+                    Mode::Fixtures | Mode::PreChains => {
                         json!({ "id": req["id"], "ok": true, "data": fixture(fixture_for(&req)) })
                     }
                 };
@@ -184,6 +189,24 @@ fn gui_daemon_error_passes_through() {
         .unwrap_err();
     assert_eq!(e.code, "NoMatch");
     assert_eq!(e.reason(), Some("session_unknown"));
+    // Not the old-daemon shape: no second request.
+    assert_eq!(fake.requests().len(), 1);
+}
+
+/// A daemon older than status-perf refuses `chains`: the session read is
+/// sent once more without it and returns that reply; other reads go once.
+#[test]
+fn gui_session_read_retries_without_chains_on_an_older_daemon() {
+    let fake = Fake::start(Mode::PreChains);
+    let d = Daemon::new(fake.socket.clone());
+    let got = rt().block_on(d.read(Read::Session("S1".into()))).unwrap();
+    assert_eq!(got, fixture("status_session"));
+    let reqs = fake.requests();
+    assert_eq!(reqs.len(), 2, "{reqs:?}");
+    assert_eq!(reqs[0]["params"]["chains"], json!(true));
+    assert_eq!(reqs[1]["params"], json!({ "cwd": null, "session": "S1", "all": false }));
+    rt().block_on(d.read(Read::Sessions)).unwrap();
+    assert_eq!(fake.requests().len(), 3, "status{{all}} carries no chains: one request");
 }
 
 /// A daemon that accepts but never answers: the read gives up at its

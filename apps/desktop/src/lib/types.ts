@@ -46,7 +46,24 @@ export interface Workspace {
   health: string;
   pending: unknown[];
   seeds: unknown[];
+  /** Counted only in P1; see `OldTreeKeptWarning` for the one with a tri-state field. */
   warnings: unknown[];
+}
+
+/**
+ * `status` workspace warning `{kind: "OldTreeKept"}`. Since status-perf A1 `changed` is
+ * nullable: `null` (with `unchecked: true`) means not judged yet, the old-tree check runs
+ * in the background. Read `null` as unknown, never as `false`. P1 does not read it yet.
+ */
+export interface OldTreeKeptWarning {
+  kind: 'OldTreeKept';
+  path: string;
+  n: number;
+  holders: unknown[];
+  changed: boolean | null;
+  retained: boolean;
+  unchecked?: boolean;
+  checked_at?: string;
 }
 
 export interface Checkpoint {
@@ -83,7 +100,8 @@ export interface Chain {
 }
 
 export interface StatusReply {
-  chains: Record<string, Chain>;
+  /** Only when asked (`chains: true`; the GUI asks on `status{session}`). */
+  chains?: Record<string, Chain>;
   holds: unknown[];
   leftovers: unknown[];
   sessions: SessionEntry[];
