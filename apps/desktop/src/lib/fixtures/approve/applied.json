@@ -11,10 +11,7 @@
         "to": 4,
         "head": "ed8aac01",
         "dropped": [],
-        "conflicts": [
-          "src/a.ts",
-          "src/b.ts"
-        ],
+        "conflicts": ["src/a.ts", "src/b.ts"],
         "lww": [],
         "uncarried": []
       }

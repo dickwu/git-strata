@@ -53,7 +53,9 @@ const reasonOf = (detail: unknown): string | null => str(obj(detail)?.reason);
 export function lockText(lock: unknown): string {
   const o = obj(lock);
   if (o) {
-    const parts = Object.entries(o).map(([k, v]) => `${k} ${typeof v === 'string' ? v : JSON.stringify(v)}`);
+    const parts = Object.entries(o).map(
+      ([k, v]) => `${k} ${typeof v === 'string' ? v : JSON.stringify(v)}`
+    );
     if (parts.length > 0) return parts.join(', ');
   }
   return str(lock) ?? 'a lock';
@@ -73,7 +75,9 @@ export function detailText(code: string | null, detail: unknown): string | null 
   if (str(d.message)) return d.message as string;
   if (d.reason === 'lock_wait') return r.lockWait(holderText(d), lockText(d.lock));
   if (str(d.path)) {
-    const holders = Array.isArray(d.holders) ? d.holders.map((h) => (typeof h === 'string' ? h : JSON.stringify(h))) : [];
+    const holders = Array.isArray(d.holders)
+      ? d.holders.map((h) => (typeof h === 'string' ? h : JSON.stringify(h)))
+      : [];
     return holders.length > 0 ? `${d.path} (${holders.join(', ')})` : (d.path as string);
   }
   const text = JSON.stringify(d);
@@ -85,13 +89,17 @@ function skipText(detail: Record<string, unknown>): string {
   const base = r.skip[kind] ?? kind;
   switch (kind) {
     case 'OwnChange':
-      return typeof detail.proposal === 'number' ? `${base} (${r.ownProposal(detail.proposal)})` : base;
+      return typeof detail.proposal === 'number'
+        ? `${base} (${r.ownProposal(detail.proposal)})`
+        : base;
     case 'OpenFiles': {
       const files = Array.isArray(detail.files) ? detail.files : [];
       const list = files
         .map(obj)
         .filter((f): f is Record<string, unknown> => f !== null)
-        .map((f) => r.openFile(String(f.path ?? '?'), String(f.command ?? '?'), (f.pid as number) ?? '?'));
+        .map((f) =>
+          r.openFile(String(f.path ?? '?'), String(f.command ?? '?'), (f.pid as number) ?? '?')
+        );
       return list.length > 0 ? `${base}: ${list.join('; ')}` : base;
     }
     case 'Error': {
@@ -156,7 +164,13 @@ function fromReply(id: number, reply: ApproveReply, subset: boolean): Verdict {
   const unknown = rows.filter((x) => x.state === 'unknown').map((x) => x.session);
   const base = { rows, replacement: null };
   if (unknown.length > 0) {
-    return { ...base, tone: 'unknown', title: r.unknownRows(unknown), notes: [r.unknownNote], again: false };
+    return {
+      ...base,
+      tone: 'unknown',
+      title: r.unknownRows(unknown),
+      notes: [r.unknownNote],
+      again: false,
+    };
   }
   const failed = n('failed');
   const skipped = n('skipped');
@@ -198,7 +212,13 @@ function fromError(id: number, e: GuiError): Verdict {
   switch (e.code) {
     case 'NotConfirmed':
       if (why === 'prompt_in_progress')
-        return { ...base, tone: 'warning', title: r.notApproved, notes: [r.promptOpen], again: true };
+        return {
+          ...base,
+          tone: 'warning',
+          title: r.notApproved,
+          notes: [r.promptOpen],
+          again: true,
+        };
       if (why === 'plan_changed')
         return { ...base, tone: 'neutral', title: r.planChanged, again: true };
       return {
@@ -215,7 +235,13 @@ function fromError(id: number, e: GuiError): Verdict {
         (typeof obj(d.replacement)?.id === 'number' ? (obj(d.replacement)!.id as number) : null) ??
         (typeof st?.by === 'number' ? (st.by as number) : null);
       if (kind === 'Superseded' && by !== null)
-        return { ...base, tone: 'neutral', title: r.replaced(id, by), again: false, replacement: by };
+        return {
+          ...base,
+          tone: 'neutral',
+          title: r.replaced(id, by),
+          again: false,
+          replacement: by,
+        };
       if (kind === 'Applied' || kind === 'AwaitingPublish')
         return { ...base, tone: 'neutral', title: r.alreadyApproved, again: false };
       return { ...base, tone: 'neutral', title: r.notPending(id, kind), again: false };
@@ -223,19 +249,37 @@ function fromError(id: number, e: GuiError): Verdict {
     case 'HeadMoved':
       return { ...base, tone: 'warning', title: r.headMoved, again: false };
     case 'ReadOnly':
-      return { ...base, tone: 'error', title: why === 'shutting_down' ? r.shuttingDown : r.other(e.message, why ?? e.code), again: true };
+      return {
+        ...base,
+        tone: 'error',
+        title: why === 'shutting_down' ? r.shuttingDown : r.other(e.message, why ?? e.code),
+        again: true,
+      };
     case 'Busy':
       if (why === 'lock_wait')
-        return { ...base, tone: 'warning', title: r.lockWait(holderText(d), lockText(d.lock)), again: true };
-      if (why === 'build_lock_busy') return { ...base, tone: 'warning', title: r.buildLock, again: true };
-      if (why === 'daemon_down') return { ...base, tone: 'error', title: r.daemonDown, again: true };
-      if (why === 'request_in_flight') return { ...base, tone: 'warning', title: r.inFlight, again: false };
+        return {
+          ...base,
+          tone: 'warning',
+          title: r.lockWait(holderText(d), lockText(d.lock)),
+          again: true,
+        };
+      if (why === 'build_lock_busy')
+        return { ...base, tone: 'warning', title: r.buildLock, again: true };
+      if (why === 'daemon_down')
+        return { ...base, tone: 'error', title: r.daemonDown, again: true };
+      if (why === 'request_in_flight')
+        return { ...base, tone: 'warning', title: r.inFlight, again: false };
       break;
     case 'Unsupported':
       return { ...base, tone: 'error', title: r.unsupported(why ?? e.message), again: false };
   }
   // Anything else: the daemon's own words, code and reason verbatim (gui.md:342, no guessing).
-  return { ...base, tone: 'error', title: r.other(e.message, why ? `${e.code}, ${why}` : e.code), again: true };
+  return {
+    ...base,
+    tone: 'error',
+    title: r.other(e.message, why ? `${e.code}, ${why}` : e.code),
+    again: true,
+  };
 }
 
 /** `subset`: a session list was sent (S2). Always false in this slice (D2=b). */
@@ -264,7 +308,11 @@ export function inputsChanged(p: { from_inputs?: string; to_inputs?: string }): 
 }
 
 /** The query keys refreshed after every outcome, lost replies and Stop waiting included. */
-export const REFRESH_AFTER_APPROVE: ReadonlyArray<readonly string[]> = [['deps'], ['sessions'], ['session']];
+export const REFRESH_AFTER_APPROVE: ReadonlyArray<readonly string[]> = [
+  ['deps'],
+  ['sessions'],
+  ['session'],
+];
 
 /** When the modal adds "Still working" and Stop waiting: prompt 60 s + cancel grace 5 s + margin. */
 export const STILL_WORKING_MS = 70_000;

@@ -22,9 +22,7 @@
       "code": "OpenFiles",
       "detail": {
         "path": "/v/s-ggg/admin/node_modules",
-        "holders": [
-          "node (pid 9)"
-        ]
+        "holders": ["node (pid 9)"]
       }
     },
     {

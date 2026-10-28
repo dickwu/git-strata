@@ -119,7 +119,8 @@ export const copy = {
         `Another change (${holder}) was holding ${lock}. Nothing moved. Try again; it asks for confirmation again.`,
       unknownHolder: 'holder unknown',
       shuttingDown: 'The daemon is shutting down. Nothing moved.',
-      buildLock: 'Dependencies are being installed by another task. Nothing moved. Try again later.',
+      buildLock:
+        'Dependencies are being installed by another task. Nothing moved. Try again later.',
       daemonDown: "The daemon isn't running, so nothing was sent.",
       inFlight: 'An approval is already being sent. Wait for its result.',
       unsupported: (r: string) => `This Mac can't show the confirmation prompt (${r}).`,
