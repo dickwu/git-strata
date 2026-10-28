@@ -534,6 +534,7 @@ fn new_store(root: &Path, real_root: PathBuf, read_only: bool, db: Connection, l
         gc_running: Mutex::new(()),
         poisoned: AtomicBool::new(false),
         seams: Seams::default(),
+        dev_ports: Mutex::new(None),
     }
 }
 

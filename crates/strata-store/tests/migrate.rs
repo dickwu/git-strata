@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use strata_store::{Seam, Store};
+use strata_store::{DevPortsPolicy, Seam, Store};
 use strata_types::{AgentName, Code, CommitOid, SessionId, SessionManifest, WorkspaceState};
 use support::world::*;
 use support::*;
@@ -131,6 +131,8 @@ fn fixture_is_a_v1_store() {
     assert!(rows["sessions"].iter().all(|r| r.split('|').count() == 8), "v1 sessions have 8 columns");
 }
 
+static DEV_PORTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| "dev_ports".to_string());
+
 #[test]
 fn writer_open_migrates_v1_and_keeps_every_row() {
     let env = v1_env();
@@ -147,7 +149,12 @@ fn writer_open_migrates_v1_and_keeps_every_row() {
     assert_eq!(header_u32(&env.db(), 60), 2);
     let (uv, ic, after) = dump_copy(&env.db());
     assert_eq!((uv, ic.as_str()), (2, "ok"));
-    assert_eq!(before.keys().collect::<Vec<_>>(), after.keys().collect::<Vec<_>>());
+    // v2 adds one table, `dev_ports`, empty: v1 sessions get leases lazily
+    let mut keys: Vec<&String> = before.keys().collect();
+    keys.push(&DEV_PORTS);
+    keys.sort();
+    assert_eq!(keys, after.keys().collect::<Vec<_>>());
+    assert!(after["dev_ports"].is_empty());
     for (t, rows) in &before {
         if t == "sessions" {
             let widened: Vec<String> = rows.iter().map(|r| format!("{r}|Null")).collect();
@@ -280,13 +287,18 @@ fn read_only_handle_survives_an_in_process_migration() {
     let env = v1_env();
     let ro = Store::open_read_only(&env.root).unwrap();
     assert!(ro.sessions().unwrap().iter().all(|r| r.manifest.agent.is_none()));
+    // v1 has no dev_ports table: every workspace reads as unleased, not Corrupt
+    assert_eq!(ro.dev_port_leases(None).unwrap(), None);
     let s = env.open(); // migrates under the reader
+    s.set_dev_ports_policy(Some(DevPortsPolicy { blocks: vec![20000], port_ok: std::sync::Arc::new(|_| true) }));
     let m = manifest(&env.root, "claude-code");
     let id = m.id.clone();
     s.create_session(&m, t(30)).unwrap();
     let got = ro.session(&id).unwrap().unwrap();
     assert_eq!(got.manifest.agent.map(String::from).as_deref(), Some("claude-code"));
     assert_eq!(ro.sessions().unwrap().len(), 3);
+    let leases = ro.dev_port_leases(None).unwrap().unwrap();
+    assert_eq!(leases.iter().map(|l| (l.session.as_str(), l.base)).collect::<Vec<_>>(), vec![(id.as_str(), 20000)]);
     s.close().unwrap();
 }
 

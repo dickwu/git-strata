@@ -394,6 +394,7 @@ impl Store {
             ws.push((repo.as_str(), st, want));
         }
         let at = ns(at, "at")?;
+        let policy = self.dev_ports_policy();
         self.write(OP, |c| {
             if session_lifecycle(c, id).map_err(w(OP))?.is_some() {
                 return Err(err(Code::Exists, format!("session {id} already has a row"), json!({ "reason": "store_row", "session": id })));
@@ -432,6 +433,7 @@ impl Store {
                     params![id, repo, g, st.head.as_str(), path, st.tracked as i64],
                 )
                 .map_err(w(OP))?;
+                crate::devports::lease_new(c, policy.as_deref(), id, repo).map_err(w(OP))?;
             }
             Ok(Tx::Commit(()))
         })
@@ -487,6 +489,7 @@ impl Store {
         if let Some(r) = seeds.keys().find(|r| !repos.contains_key(*r)) {
             return Err(invalid_field("seeds", format!("seeds given for {r}, which is not being added")));
         }
+        let policy = self.dev_ports_policy();
         self.write(OP, |c| {
             let lc = session_lifecycle(c, id).map_err(w(OP))?.ok_or_else(|| no_such_session(id))?;
             if lc != "active" {
@@ -535,6 +538,7 @@ impl Store {
                     )
                     .map_err(w(OP))?;
                 }
+                crate::devports::lease_new(c, policy.as_deref(), id, repo).map_err(w(OP))?;
             }
             Ok(Tx::Commit(()))
         })
@@ -585,6 +589,10 @@ impl Store {
                 )
                 .map_err(w(OP))?;
             if n == 1 {
+                if to == Lifecycle::Removed {
+                    // store.md §4.4a: a removed session's dev ports are free again.
+                    c.execute("DELETE FROM dev_ports WHERE session = ?1", [id]).map_err(w(OP))?;
+                }
                 return Ok(Tx::Commit(true));
             }
             session_lifecycle(c, id).map_err(w(OP))?.ok_or_else(|| no_such_session(id))?;

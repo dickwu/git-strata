@@ -20,6 +20,7 @@ mod blob;
 mod checkpoints;
 mod codec;
 mod deps;
+mod devports;
 mod errors;
 mod gc;
 mod gens;
@@ -37,6 +38,7 @@ mod txn;
 
 #[cfg(feature = "test-seams")]
 pub use seams::{Seam, SyncCounts};
+pub use devports::{DEV_PORT_BLOCK, DevPortLease, DevPortsPolicy, Probe, bind_probe};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 
@@ -58,6 +60,8 @@ pub struct Store {
     pub(crate) gc_running: Mutex<()>,
     pub(crate) poisoned: AtomicBool,
     pub(crate) seams: seams::Seams,
+    /// How new dev-port leases are chosen (the daemon sets it from config).
+    pub(crate) dev_ports: Mutex<Option<std::sync::Arc<devports::DevPortsPolicy>>>,
 }
 
 impl Store {

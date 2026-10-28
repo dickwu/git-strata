@@ -278,11 +278,12 @@ impl<'a> Run<'a> {
     }
 
     fn delete_sessions(&mut self, r: &[String]) -> Result<()> {
-        const TABLES: [(&str, &str); 6] = [
+        const TABLES: [(&str, &str); 7] = [
             ("overlay_entries", "session"),
             ("checkpoints", "session"),
             ("seeds", "session"),
             ("move_intents", "session"),
+            ("dev_ports", "session"),
             ("workspaces", "session"),
             ("sessions", "id"),
         ];

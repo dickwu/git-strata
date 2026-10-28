@@ -411,13 +411,22 @@ pub(crate) struct Migration {
 }
 
 /// v2: `sessions.agent`, the agent that created the session (immutable; the
-/// CHECK is the `AgentName` alphabet).
+/// CHECK is the `AgentName` alphabet); and `dev_ports`, the per-workspace
+/// dev-port leases (store.md §4.4a: one 4-aligned block `base..base+3`;
+/// `UNIQUE(base)` means no two leases overlap).
 pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
     to: 2,
-    name: "sessions.agent",
+    name: "sessions.agent+dev_ports",
     sql: r#"
 ALTER TABLE sessions ADD COLUMN agent TEXT CHECK (agent IS NULL OR (length(agent) BETWEEN 1 AND 64 AND length(CAST(agent AS BLOB)) = length(agent) AND agent GLOB '[A-Za-z0-9]*' AND agent NOT GLOB '*[^A-Za-z0-9._-]*'));
 CREATE TRIGGER sessions_agent_guard BEFORE UPDATE ON sessions WHEN NEW.agent IS NOT OLD.agent BEGIN SELECT RAISE(ABORT, 'immutable: sessions.agent'); END;
+CREATE TABLE dev_ports (
+    session TEXT    NOT NULL REFERENCES sessions (id),
+    repo    TEXT    NOT NULL,
+    base    INTEGER NOT NULL UNIQUE CHECK (base BETWEEN 1024 AND 65532 AND base % 4 = 0),
+    PRIMARY KEY (session, repo),
+    FOREIGN KEY (session, repo) REFERENCES workspaces (session, repo)
+) STRICT;
 PRAGMA user_version = 2;
 "#,
 }];
