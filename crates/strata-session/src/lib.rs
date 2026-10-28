@@ -43,7 +43,7 @@ pub use summary::{SessionSummary, SummarySelect, WorkspaceSummary, summary};
 #[cfg(feature = "test-seams")]
 pub use seams::SessionSeam;
 pub use status::{
-    MirrorDriftItem, SessionState, SessionStatus, StatusWarning, WorkspaceHealth, WorkspaceStatus,
+    DRIFT_NOTE, DriftStatus, MirrorDriftItem, SessionState, SessionStatus, StatusWarning, WorkspaceHealth, WorkspaceStatus,
 };
 pub use recover::{IntentRef, Leftover, RecoverReport};
 pub use scene::{Scene, SceneOp};
