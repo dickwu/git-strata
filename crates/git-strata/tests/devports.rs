@@ -79,7 +79,7 @@ fn ports_are_leased_at_new_read_without_the_daemon_and_exec_runs_with_them() {
     assert_eq!(l["path"], ws.to_str().unwrap());
     assert_eq!(l["tauri_app_root"], Value::Null);
     let w = web(&l);
-    assert!((20000..=29996).contains(&w) && w % 4 == 0, "{l}");
+    assert!((20000..=29996).contains(&w) && w.is_multiple_of(4), "{l}");
     assert_eq!(l["ports"], json!({ "web": w, "connector": w + 1, "connector_mcp": w + 2, "aux": w + 3 }));
     let env = l["env"].as_object().unwrap();
     assert_eq!(env.len(), 9, "{l}");

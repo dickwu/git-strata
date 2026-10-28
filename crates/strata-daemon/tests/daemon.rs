@@ -1392,7 +1392,7 @@ fn new_leases_dev_ports_and_ensure_reassign_rm_follow_the_lifecycle() {
         let leased = core.store.dev_port_leases(Some(&id)).unwrap().unwrap();
         assert_eq!(leased.len(), 1, "{leased:?}");
         let base = leased[0].base;
-        assert!((20000..=29996).contains(&base) && base % 4 == 0, "{base}");
+        assert!((20000..=29996).contains(&base) && base.is_multiple_of(4), "{base}");
 
         let p = json!({ "session": id.as_str(), "repo": "tool" });
         let e = ok(call(&sock, "ports_ensure", p.clone()));
