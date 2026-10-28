@@ -353,6 +353,7 @@ pub fn serve(d: &Daemon<'_>, listener: &std::os::unix::net::UnixListener, extern
     let r = std::thread::scope(|s| {
         let server = Server::new(d, &trackers);
         s.spawn(|| reconcile_loop(d, &trackers, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
+        s.spawn(|| old_tree_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
         let r = d.serve(listener, external, &|req| server.handle(req));
         done.store(true, Ordering::SeqCst);
         r
@@ -389,6 +390,98 @@ fn reconcile_loop(d: &Daemon<'_>, trackers: &Trackers<'_>, stop: &dyn Fn() -> bo
         let last = catch_unwind(AssertUnwindSafe(|| trackers.reconcile_once()))
             .unwrap_or_else(|_| json!({ "at": json_of(&SystemTime::now()), "panicked": true }));
         d.reconciled(last);
+    }
+}
+
+/// How long a queued old tree whose session was busy waits before it is
+/// tried again.
+const OLD_TREE_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// status-perf A1 on its own thread (started by `serve`, after startup's
+/// recover): first the half-retired sweep and a queue of every existing
+/// old tree, then one queued old tree at a time, each under the session's
+/// queue place (taken only when free; a busy session is retried after
+/// [`OLD_TREE_RETRY`]) and the repo's write lock, released between items.
+/// `stop` reaches into the walks: a judgement in progress gives up and
+/// writes no verdict.
+fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
+    let flag = Arc::new(AtomicBool::new(false));
+    let finished = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            while !finished.load(Ordering::SeqCst) {
+                if stop() {
+                    flag.store(true, Ordering::SeqCst);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+        let _ = catch_unwind(AssertUnwindSafe(|| old_tree_startup(d, &flag)));
+        let mut later: Vec<(std::time::Instant, strata_session::OldTreeKey, PathBuf, u64)> = Vec::new();
+        while !flag.load(Ordering::SeqCst) {
+            let now = std::time::Instant::now();
+            later.retain(|(at, k, p, ino)| {
+                if *at <= now {
+                    d.sessions.requeue_old_tree(k.clone(), p.clone(), *ino);
+                    false
+                } else {
+                    true
+                }
+            });
+            let Some((key, path, ino)) = d.sessions.next_old_tree(std::time::Duration::from_millis(100)) else {
+                continue;
+            };
+            let r = catch_unwind(AssertUnwindSafe(|| {
+                d.core.locks.try_session(&key.session, || {
+                    d.core.locks.with_repo(&key.repo, || d.sessions.check_old_tree(&key, &path, ino, &flag))
+                })
+            }));
+            match r {
+                Ok(None) => later.push((std::time::Instant::now() + OLD_TREE_RETRY, key, path, ino)),
+                Ok(Some(Ok(out))) => {
+                    tracing::debug!(session = %key.session, repo = %key.repo, n = key.n, outcome = ?out, "old tree checked");
+                }
+                Ok(Some(Err(e))) => {
+                    tracing::warn!(session = %key.session, repo = %key.repo, n = key.n, error = %e.message, "old tree check failed");
+                }
+                Err(_) => {
+                    tracing::warn!(session = %key.session, repo = %key.repo, n = key.n, "old tree check panicked");
+                }
+            }
+        }
+        finished.store(true, Ordering::SeqCst);
+    });
+}
+
+/// The start of [`old_tree_loop`]: the half-retired sweep of every active
+/// session (busy ones are skipped this time), then every old tree queued.
+fn old_tree_startup(d: &Daemon<'_>, flag: &AtomicBool) {
+    let Ok(ids) = d.sessions.list() else { return };
+    for id in ids {
+        if flag.load(Ordering::SeqCst) {
+            return;
+        }
+        let repos: Vec<RepoName> = match d.core.store.session(&id) {
+            Ok(Some(rec)) => rec.manifest.repos.keys().cloned().collect(),
+            _ => continue,
+        };
+        let _ = d.core.locks.try_session(&id, || {
+            for repo in &repos {
+                match d.core.locks.with_repo(repo, || d.sessions.sweep_half_retired(&id, repo)) {
+                    Ok(done) => {
+                        for p in done {
+                            tracing::info!(session = %id, repo = %repo, path = %p.display(), "retired a half-retired admin dir");
+                        }
+                    }
+                    Err(e) => tracing::warn!(session = %id, repo = %repo, error = %e.message, "half-retired sweep failed"),
+                }
+            }
+            Ok(())
+        });
+    }
+    if let Err(e) = d.sessions.queue_all_old_trees() {
+        tracing::warn!(error = %e.message, "could not queue the old trees");
     }
 }
 
@@ -498,6 +591,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 let req = RestoreRequest { target: p.checkpoint, target_base: target_base.as_ref(), paths: p.paths.as_deref(), verify: false };
                 writing();
                 let r = strata_overlay::restore(&wref, &base, Some(&mut t.tracker), &req);
+                self.d.sessions.forget_old_trees(&p.session);
                 self.trackers.put(&p.session, &p.repo, t);
                 Ok(json_of(&r?))
             }),
@@ -565,7 +659,9 @@ impl<'d, 'a> Server<'d, 'a> {
                     self.with_du_hold(std::slice::from_ref(&p.session), || {
                         self.trackers.drop_session(&p.session);
                         writing();
-                        let r = self.d.sessions.remove(&p.session, p.discard, token)?;
+                        let r = self.d.sessions.remove(&p.session, p.discard, token);
+                        self.d.sessions.forget_old_trees(&p.session);
+                        let r = r?;
                         self.d.du.on_remove(p.session.as_str());
                         Ok(json_of(&r))
                     })

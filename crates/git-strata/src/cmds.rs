@@ -187,6 +187,9 @@ pub fn status(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
 fn local_status(ctx: &Ctx, sel: &Select) -> Result<Vec<Value>> {
     let local = Local::open(ctx.config()?)?;
     let sessions = local.sessions()?;
+    // status-perf A1, D10: no old-tree walks without the daemon; old trees
+    // report `unchecked`.
+    sessions.set_old_tree_mode(strata_session::OldTreeMode::Deferred);
     let ids: Vec<SessionId> = if sel.all {
         ro::live(&local.store)?.into_iter().map(|r| r.manifest.id).collect()
     } else {

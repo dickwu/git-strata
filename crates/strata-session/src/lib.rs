@@ -22,6 +22,7 @@ mod dispatch;
 mod failed_move;
 mod move_workspace;
 mod new;
+mod old_tree;
 mod recover;
 mod remove;
 mod resolve;
@@ -34,6 +35,7 @@ mod ticket;
 
 pub use failed_move::{MoveResolution, ResolutionReport};
 pub use move_workspace::MoveReport;
+pub use old_tree::{OLD_TREE_TTL, OldTreeKey, OldTreeMode, OldTreeVerdict, Outcome as OldTreeOutcome};
 pub use remove::RemoveReport;
 #[cfg(feature = "test-seams")]
 pub use seams::SessionSeam;
@@ -88,6 +90,8 @@ pub struct Sessions<'a> {
     /// status-perf A4: the slots shared by every status read of this
     /// process, `[status] parallel` of them (read when opened).
     pub(crate) status_slots: status::Slots,
+    /// status-perf A1: the old-tree mode, verdict table and queue.
+    pub(crate) old_trees: old_tree::OldTrees,
 }
 
 impl<'a> Sessions<'a> {
@@ -126,6 +130,7 @@ impl<'a> Sessions<'a> {
             fetched: Mutex::new(BTreeMap::new()),
             fetch_window: Mutex::new(Duration::ZERO),
             status_slots: status::Slots::new(config.status.parallel as usize),
+            old_trees: old_tree::OldTrees::default(),
         })
     }
 

@@ -15,6 +15,7 @@ use strata_gitio::MirrorDrift;
 use strata_store::{Health, Lifecycle, MoveState, SessionRecord, WorkspaceRecord};
 use strata_types::{CheckpointId, Code, RepoName, RepoPath, SessionId, SessionManifest, StrataError};
 
+use crate::old_tree::OldTreeMode;
 use crate::scene::{Scene, scene_of};
 use crate::seed::{SeedRecord, mtime_of, written_stamp};
 use crate::sys::lstat;
@@ -106,7 +107,20 @@ pub enum StatusWarning {
     ShadowInvalid { path: PathBuf, reason: String },
     MoveLeftover { n: u64, staging: PathBuf },
     MoveAwaitingRecover { n: u64, staging: PathBuf },
-    OldTreeKept { path: PathBuf, n: u64, holders: Vec<OpenFile>, changed: bool, retained: bool },
+    /// `changed: null` + `unchecked: true`: not judged yet (status-perf
+    /// A1, D10); `checked_at`: when the background judgement was made
+    /// (absent when judged in the request).
+    OldTreeKept {
+        path: PathBuf,
+        n: u64,
+        holders: Vec<OpenFile>,
+        changed: Option<bool>,
+        retained: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unchecked: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_rfc3339")]
+        checked_at: Option<SystemTime>,
+    },
     RestoreScene { path: PathBuf },
 }
 
@@ -374,6 +388,33 @@ impl Sessions<'_> {
                     if lstat(&path).map_err(|e| read_err(&e, &path))?.is_none() {
                         continue;
                     }
+                    let retained = i.old_tree.is_some();
+                    if self.old_tree_mode() == OldTreeMode::Deferred {
+                        // status-perf A1: only the verdict table; what it
+                        // lacks is queued for the background thread.
+                        let hint = crate::old_tree::ino_of(&path).and_then(|ino| self.old_tree_hint(&i, &path, ino));
+                        warnings.push(match hint {
+                            Some(v) => StatusWarning::OldTreeKept {
+                                path,
+                                n: i.n,
+                                holders: v.holders,
+                                changed: Some(v.changed),
+                                retained,
+                                unchecked: false,
+                                checked_at: Some(v.checked_at),
+                            },
+                            None => StatusWarning::OldTreeKept {
+                                path,
+                                n: i.n,
+                                holders: Vec::new(),
+                                changed: None,
+                                retained,
+                                unchecked: true,
+                                checked_at: None,
+                            },
+                        });
+                        continue;
+                    }
                     let holders = strata_deps::open_files(&path)?;
                     // A tree that cannot be compared reads as changed: it
                     // is then never collected automatically.
@@ -382,8 +423,10 @@ impl Sessions<'_> {
                         path,
                         n: i.n,
                         holders,
-                        changed,
-                        retained: i.old_tree.is_some(),
+                        changed: Some(changed),
+                        retained,
+                        unchecked: false,
+                        checked_at: None,
                     });
                 }
                 _ => {}
@@ -484,5 +527,26 @@ impl Drop for Slot<'_> {
     fn drop(&mut self) {
         *self.0.lock() += 1;
         self.0.freed.notify_one();
+    }
+}
+
+/// `Option<SystemTime>` as an RFC 3339 string (status-perf A1 `checked_at`).
+mod opt_rfc3339 {
+    use std::time::SystemTime;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(t: &Option<SystemTime>, s: S) -> Result<S::Ok, S::Error> {
+        match t {
+            Some(t) => strata_types::serde_rfc3339::serialize(t, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SystemTime>, D::Error> {
+        match Option::<String>::deserialize(d)? {
+            Some(text) => strata_types::serde_rfc3339::parse(&text).map(Some).map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
     }
 }

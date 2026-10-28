@@ -411,6 +411,9 @@ impl<'a> Daemon<'a> {
         let sessions = Sessions::open(&core.config, &core.gits, &core.store, &core.locks, &core.env, &core.before)?;
         // 9. recover, then gc per repo under its write lock.
         let recovered = sessions.recover()?;
+        // status-perf A1: status reads old-tree verdicts the `old-tree`
+        // thread makes (started by `serve`, so after this recover).
+        sessions.set_old_tree_mode(strata_session::OldTreeMode::Deferred);
         for repo in core.config.repos.keys() {
             if let Err(e) = core.locks.with_repo(repo, || core.store.gc_repo(repo, GC_KEEP).map(|_| ())) {
                 core.warnings.add(DaemonWarning::VerifyFailed { message: format!("gc {repo}: {}", e.message) });

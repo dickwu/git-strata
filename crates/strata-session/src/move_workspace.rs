@@ -451,25 +451,17 @@ impl Sessions<'_> {
                 }
             }
         };
-        // 20. earlier trees kept only because they were held.
+        // 20. earlier trees kept only because they were held (status-perf
+        // A1: the same judgement as the background thread).
         if let Ok(all) = self.store.move_intents(session) {
-            let mine: Vec<&MoveIntent> = all.iter().filter(|i| i.repo == name).collect();
-            for i in &mine {
-                if i.n == n || i.state != MoveState::Done || i.old_tree.is_some() || !exists(&i.staging) {
+            for i in all.iter().filter(|i| i.repo == name) {
+                if i.n == n || i.state != MoveState::Done || i.old_tree.is_some() {
                     continue;
                 }
-                if !matches!(strata_deps::open_files(&i.staging), Ok(h) if h.is_empty()) {
-                    continue;
-                }
-                if !self.old_tree_unchanged(i, cfg).unwrap_or(false) {
-                    continue;
-                }
-                let admin = shadow_dir.join("worktrees").join(prior_generation(&all, i).to_string());
-                if self.store.retire_dir(&i.staging).is_ok() {
-                    let _ = self.retire_present(&admin);
-                }
+                let _ = self.collect_old_tree(&all, i, cfg, false);
             }
         }
+        self.forget_old_trees(session);
 
         Ok(MoveReport {
             session: session.clone(),

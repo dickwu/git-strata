@@ -687,3 +687,41 @@ fn low_descriptor_limit_child() {
     }
     assert_eq!(open_fds(), base, "attrs_of leaked a descriptor");
 }
+
+/// status-perf A1: `with_walk_stop` ends a walk on this thread at the next
+/// directory with one `Busy`/`stopped` error; unset or on another thread,
+/// walks run to the end; the flag goes away when the closure returns.
+#[test]
+fn with_walk_stop_ends_walks_at_the_next_directory() {
+    let t = Tmp::new();
+    let r = t.path.clone();
+    for f in ["a/1", "a/b/2", "c/3", "d/4"] {
+        touch(&r.join(f));
+    }
+    let full = names(walk(&r, &yes)).len();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (n, last) = strata_apfs::with_walk_stop(stop.clone(), || {
+        let mut n = 0;
+        let mut last = None;
+        for item in strata_apfs::walk(&r, &yes) {
+            match item {
+                Ok(_) => {
+                    n += 1;
+                    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        (n, last)
+    });
+    let e = last.expect("stopped");
+    assert_eq!(e.code, strata_types::Code::Busy, "{e:?}");
+    assert_eq!(e.detail.as_ref().unwrap()["reason"], "stopped");
+    assert!(n < full, "{n} of {full}");
+    // Another thread is not affected while the flag is set here.
+    strata_apfs::with_walk_stop(stop.clone(), || {
+        let other = std::thread::scope(|s| s.spawn(|| names(walk(&r, &yes)).len()).join().unwrap());
+        assert_eq!(other, full);
+    });
+    assert_eq!(names(walk(&r, &yes)).len(), full, "gone after the closure");
+}
