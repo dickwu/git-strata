@@ -1240,6 +1240,8 @@ fn du_sizes_sessions_records_new_and_rm_and_gc_empties_trash() {
         let s = list.iter().find(|s| s["session"] == json!(id.as_str())).unwrap_or_else(|| panic!("{r:#}"));
         assert!(s["logical"].as_u64().unwrap() > 0, "{s}");
         assert!(s["as_of"].is_string());
+        assert!(s["create_ms"].is_u64(), "the daemon times its own `new`: {s}");
+        assert_eq!(r["savings"]["cumulative"]["timed"], json!(1), "{r:#}");
         let t = &r["store"]["trash"];
         assert!(t["eligible"]["entries"].as_u64().unwrap() >= 1, "{t}");
         assert!(t["eligible"]["reclaim_max"].as_u64().unwrap() >= 100_000, "{t}");

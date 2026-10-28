@@ -653,6 +653,7 @@ impl<'d, 'a> Server<'d, 'a> {
     fn new_session(&self, ticket: Option<&str>, repos: &[RepoName], only: bool) -> Result<Value> {
         let core = self.core();
         writing();
+        let t0 = std::time::Instant::now();
         let layout = if only { Layout::Only } else { Layout::Siblings };
         let mut rep = match self.d.sessions.new_with(ticket, repos, layout) {
             Ok(r) => r,
@@ -668,7 +669,7 @@ impl<'d, 'a> Server<'d, 'a> {
             }
         };
         locks::mark_visible();
-        self.d.du.on_new(rep.manifest.id.as_str());
+        self.d.du.on_new_timed(rep.manifest.id.as_str(), Some(t0.elapsed()));
         let after = core.after_new(&mut rep, &|r, repo| core.observe_new(r, repo));
         for (repo, _) in &after.anchor_unknown {
             core.warnings.add(DaemonWarning::AnchorNotAdvanced { repo: repo.clone() });
