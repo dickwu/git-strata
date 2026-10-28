@@ -113,6 +113,7 @@ pub fn run() {
             commands::sessions::session_status,
             commands::storage::du,
             commands::deps::deps_list,
+            commands::deps::deps_approve,
             commands::service::legacy_agent,
             commands::service::daemon_start,
         ])
@@ -180,7 +181,7 @@ mod tests {
             .filter_map(|l| l.trim().strip_suffix(','))
             .filter_map(|l| l.rsplit("::").next())
             .collect();
-        assert_eq!(registered.len(), 8);
+        assert_eq!(registered.len(), 9);
         let build = include_str!("../build.rs");
         let cap: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
@@ -203,9 +204,76 @@ mod tests {
             );
         }
         // No other capability file may grant the launchctl commands.
-        for p in ["allow-daemon-start", "allow-legacy-agent"] {
+        for p in [
+            "allow-daemon-start",
+            "allow-legacy-agent",
+            "allow-deps-approve",
+        ] {
             assert!(!include_str!("../capabilities-dev/dev-connector.json").contains(p));
         }
+    }
+
+    /// gui-approve §4.7: the commands carry identifiers only. No field or
+    /// argument could stand for "the human already confirmed"; the gate is
+    /// the daemon's own prompt (G1).
+    #[test]
+    fn commands_have_no_confirmation_bypass_field() {
+        let sources = [
+            ("deps.rs", include_str!("commands/deps.rs")),
+            ("health.rs", include_str!("commands/health.rs")),
+            ("sessions.rs", include_str!("commands/sessions.rs")),
+            ("storage.rs", include_str!("commands/storage.rs")),
+            ("service.rs", include_str!("commands/service.rs")),
+            ("mod.rs", include_str!("commands/mod.rs")),
+        ];
+        let words = |src: &str| {
+            src.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+        };
+        for (f, src) in sources {
+            for w in words(src) {
+                for bad in ["confirmed", "token", "approved", "force"] {
+                    assert!(
+                        !w.split('_').any(|p| p == bad),
+                        "{f}: identifier `{w}` contains `{bad}`"
+                    );
+                }
+            }
+        }
+        // The approve command takes exactly the window, the state, the id
+        // and the session list.
+        let deps = include_str!("commands/deps.rs");
+        let f = &deps[deps.find("pub async fn deps_approve(").unwrap()..];
+        let args = &f[..f.find(") ->").unwrap()];
+        let names: Vec<&str> = args
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.trim().split(':').next())
+            .filter(|n| !n.is_empty())
+            .collect();
+        assert_eq!(names, ["window", "state", "proposal", "sessions"]);
+    }
+
+    /// The one daemon write is `deps_approve`, sent from daemon.rs only;
+    /// the tray (G7) and every other module only read.
+    #[test]
+    fn deps_approve_is_the_only_write() {
+        let write = ["Kind::", "Write"].concat();
+        let daemon = include_str!("daemon.rs");
+        assert_eq!(daemon.matches(&write).count(), 1);
+        for (f, src) in [
+            ("tray.rs", include_str!("tray.rs")),
+            ("tray_model.rs", include_str!("tray_model.rs")),
+            ("state.rs", include_str!("state.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+            ("service/mod.rs", include_str!("service/mod.rs")),
+        ] {
+            assert!(!src.contains(&write), "{f}");
+        }
+        let tray = include_str!("tray.rs");
+        assert!(!tray.contains("deps_approve"));
+        assert!(!include_str!("tray_model.rs").contains("deps_approve"));
     }
 
     #[test]

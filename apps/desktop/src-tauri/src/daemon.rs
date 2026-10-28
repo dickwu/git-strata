@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use strata_client::Kind;
+use strata_types::Code;
 
 use crate::error::GuiError;
 
@@ -55,7 +56,9 @@ impl Read {
         match self {
             Read::DaemonStatus => json!({ "verify": false }),
             Read::Sessions => json!({ "cwd": null, "session": null, "all": true }),
-            Read::Session(id) => json!({ "cwd": null, "session": id, "all": false, "chains": true }),
+            Read::Session(id) => {
+                json!({ "cwd": null, "session": id, "all": false, "chains": true })
+            }
             Read::Du => json!({ "refresh": false }),
             Read::DepsList => json!({ "repo": null }),
         }
@@ -124,20 +127,25 @@ impl Daemon {
         &self.socket
     }
 
-    pub async fn read(&self, r: Read) -> Result<Value, GuiError> {
-        let key = r.flight_key();
+    /// Take the in-flight slot `key`, or `request_in_flight` when it is
+    /// already taken.
+    fn take_flight(&self, key: String, method: &str) -> Result<Flight, GuiError> {
         if !self
             .flights
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(key.clone())
         {
-            return Err(GuiError::in_flight(r.method()));
+            return Err(GuiError::in_flight(method));
         }
-        let flight = Flight {
+        Ok(Flight {
             flights: self.flights.clone(),
             key,
-        };
+        })
+    }
+
+    pub async fn read(&self, r: Read) -> Result<Value, GuiError> {
+        let flight = self.take_flight(r.flight_key(), r.method())?;
         let deadline = self.deadline_override.unwrap_or_else(|| r.deadline());
         let (socket, method, params) = (self.socket.clone(), r.method(), r.params());
         let task = tokio::task::spawn_blocking(move || {
@@ -166,6 +174,74 @@ impl Daemon {
         }
     }
 }
+
+/// `deps_approve` params (gui-approve design, D2=b): `{proposal,
+/// sessions}` only. `sessions` is `null` (every session the daemon finds
+/// on the repo) or a non-empty list; `[]` is refused here, before any
+/// socket I/O (gui.md §5.4 item 3). Nothing else is sent: the daemon's
+/// `DepsApproveParams` has `deny_unknown_fields`, and the human gate is
+/// the daemon's own system prompt, so the GUI has no field that could
+/// stand for it.
+pub fn approve_params(proposal: u64, sessions: Option<Vec<String>>) -> Result<Value, GuiError> {
+    if proposal == 0 {
+        return Err(GuiError::new(
+            Code::InvalidInput,
+            "proposal ids start at 1",
+            json!({ "reason": "bad_proposal", "proposal": proposal }),
+        ));
+    }
+    if let Some(list) = &sessions {
+        if list.is_empty() {
+            return Err(GuiError::new(
+                Code::InvalidInput,
+                "an empty session list would approve nothing; send null for every session",
+                json!({ "reason": "empty_sessions" }),
+            ));
+        }
+        if list.iter().any(|s| s.trim().is_empty()) {
+            return Err(GuiError::new(
+                Code::InvalidInput,
+                "a session id is empty",
+                json!({ "reason": "bad_session" }),
+            ));
+        }
+    }
+    Ok(json!({ "proposal": proposal, "sessions": sessions }))
+}
+
+impl Daemon {
+    /// The GUI's one daemon write: `deps_approve`. The daemon shows the
+    /// Touch ID / password prompt itself and moves nothing unless the
+    /// human passes it.
+    ///
+    /// No deadline: the prompt alone may wait 60 s, and a cold target
+    /// installs dependencies first (minutes). Giving up early would
+    /// only turn a reply into "unknown". The front end offers "Stop
+    /// waiting", which detaches the modal; the flight slot stays taken
+    /// until the daemon answers, so a second approve cannot be sent
+    /// meanwhile (`request_in_flight`). Reads keep their own keys.
+    pub async fn deps_approve(
+        &self,
+        proposal: u64,
+        sessions: Option<Vec<String>>,
+    ) -> Result<Value, GuiError> {
+        let params = approve_params(proposal, sessions)?;
+        let flight = self.take_flight(APPROVE.to_string(), APPROVE)?;
+        let socket = self.socket.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let _flight = flight;
+            strata_client::call(&socket, APPROVE, params, Kind::Write)
+        });
+        match task.await {
+            Err(join) => Err(GuiError::internal(format!(
+                "the `{APPROVE}` request thread failed: {join}"
+            ))),
+            Ok(reply) => reply.map_err(GuiError::from),
+        }
+    }
+}
+
+const APPROVE: &str = "deps_approve";
 
 /// The request carried `chains` and the daemon refused it as an unknown
 /// param: RPC `Failed` (cli D7 maps it to `InvalidInput` with

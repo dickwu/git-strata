@@ -53,6 +53,18 @@ impl AppState {
         res
     }
 
+    /// `deps_approve` (daemon.rs). Not recorded in the snapshot: the front
+    /// end refetches deps and sessions after every outcome, and those
+    /// reads update the menu bar.
+    pub async fn deps_approve(
+        &self,
+        proposal: u64,
+        sessions: Option<Vec<String>>,
+    ) -> Result<Value, GuiError> {
+        let d = self.daemon.as_ref().ok_or_else(GuiError::no_home)?;
+        d.deps_approve(proposal, sessions).await
+    }
+
     /// A reply says the daemon is up; `daemon_down` and `daemon_timeout`
     /// say it is not. Other errors (a refused request, one already in
     /// flight) say nothing about liveness and leave the snapshot alone.

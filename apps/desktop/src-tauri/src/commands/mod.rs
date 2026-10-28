@@ -2,7 +2,8 @@
 //! over existing daemon methods (§8.1); every one returns the daemon's
 //! `data` as is (typed replies arrive with P2's summary methods). S0 adds
 //! `legacy_agent` and `daemon_start` (service.rs), the only commands that
-//! run a process.
+//! run a process. gui-approve adds `deps_approve` (deps.rs), the one
+//! daemon write; the daemon itself asks the human (Touch ID / password).
 
 pub mod deps;
 pub mod health;

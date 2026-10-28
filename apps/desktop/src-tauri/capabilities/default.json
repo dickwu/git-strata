@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: core IPC, events, window dragging (overlay titlebar), opener, platform query. No fs, http, dialog or shell (G6). The app commands are listed one by one (build.rs APP_COMMANDS); daemon_start and legacy_agent run /bin/launchctl and are granted here only.",
+  "description": "Main window: core IPC, events, window dragging (overlay titlebar), opener, platform query. No fs, http, dialog or shell (G6). The app commands are listed one by one (build.rs APP_COMMANDS); daemon_start and legacy_agent run /bin/launchctl, and deps_approve is the one daemon write (the daemon prompts for Touch ID); all three are granted here only.",
   "windows": [
     "main"
   ],
@@ -17,6 +17,7 @@
     "allow-session-status",
     "allow-du",
     "allow-deps-list",
+    "allow-deps-approve",
     "allow-legacy-agent",
     "allow-daemon-start"
   ]

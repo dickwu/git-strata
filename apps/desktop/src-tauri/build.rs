@@ -10,6 +10,7 @@ const APP_COMMANDS: &[&str] = &[
     "session_status",
     "du",
     "deps_list",
+    "deps_approve",
     "legacy_agent",
     "daemon_start",
 ];
