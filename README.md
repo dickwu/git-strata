@@ -224,10 +224,11 @@ session is created. Once a lease exists, `ports` and `exec` read it from the
 store and work without the daemon.
 
 `--tauri` accepts `tauri dev`, `cargo|npx|bunx|pnpx tauri dev`, `pnpm exec
-tauri dev`, and `bun|pnpm|yarn|npm run <script>` (or `bun|pnpm|yarn <script>`
-for a name that is not one of the package manager's own commands) when the
+tauri dev`, and `bun|pnpm|yarn|npm run <script>` (always with `run`: without
+it the package manager may run its own command of that name) when the
 script is literally `tauri dev ...` or the bare `tauri` CLI followed by
-`dev` in the command (`"tauri": "tauri"` → `bun run tauri dev`). Options
+`dev` in the command (`"tauri": "tauri"` → `bun run tauri dev`, or
+`npm run tauri -- dev`). A script name that starts with `-` is refused. Options
 that select another package (`--prefix`, `--filter`, `-w`, `--workspace`,
 `--cwd`, ...) and, for npm, any option before its `--` are refused
 (`InvalidInput` `tauri_launcher`), since the script that runs would not be

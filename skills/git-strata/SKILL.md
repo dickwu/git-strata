@@ -207,9 +207,9 @@ git-strata session exec --tauri -- bun run tauri dev
   must then listen on `$PORT`. It understands `tauri dev`, `cargo tauri dev`,
   `npx|bunx|pnpx tauri dev`, `pnpm exec tauri dev`, and `bun|pnpm|yarn|npm
   run <script>` when that script is literally `tauri dev ...` (or the bare
-  `tauri` CLI, with `dev` right after the script name: `bun run tauri dev`).
-  `bun|pnpm|yarn <script>` without `run` works too, except for names the
-  package manager uses itself (`test`, `start`, `workspace`, ...: add `run`).
+  `tauri` CLI, with `dev` right after the script name: `bun run tauri dev`,
+  `npm run tauri -- dev`). Always write `run`: `bun <script>` without it is
+  refused, since the package manager may run its own command of that name.
   Options that pick another package (`--prefix`, `--filter`, `-w`,
   `--workspace`, `--cwd`, ...) and, for npm, any option before its `--` are
   refused. Anything else is `InvalidInput` `tauri_launcher`; use the form in

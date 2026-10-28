@@ -571,7 +571,9 @@ ERRORS
   Busy lease_changed     --reassign: another caller moved the lease since the
                          check; check again and decide afresh
   Unsupported daemon_too_old  the daemon predates leases: tell the human
-  Unsupported no_policy  the daemon runs without [dev_ports]: tell the human
+  Unsupported no_policy  the daemon has no port-allocation policy installed
+                         (not about [dev_ports], which is optional): tell
+                         the human
 
 EXAMPLES
   git-strata session ports --check
@@ -591,12 +593,13 @@ pub const SESSION_EXEC_AFTER: &str = "--tauri
   so the webview loads this workspace's dev server. Accepted launchers:
     tauri dev | cargo tauri dev | npx/bunx/pnpx tauri dev | pnpm exec tauri dev
       (inserted before the first bare --)
-    bun [run] S | pnpm [run] S | yarn [run] S | npm run S
+    bun run S | pnpm run S | yarn run S | npm run S
       where package.json script S is one plain `[NAME=v ...] [bunx|npx] tauri dev
       [opts]` (no quotes, $, &&, or bare --), or the bare `[bunx|npx] tauri`
-      with `dev` right after S (bun run tauri dev); no bare -- in the caller
-      args (npm: at most one). Without `run`, S must not be one of the package
-      manager's own commands (test, start, workspace, ...). Refused: options
+      with `dev` right after S (bun run tauri dev, npm run tauri -- dev); no
+      bare -- in the caller args (npm: at most one). `run` is required (without
+      it the manager may run its own command S); S must not start with -.
+      Refused: options
       that select another package (--prefix, --filter, -w, --workspace, --cwd,
       ...) and, for npm, any option before its --.
   Anything else: InvalidInput tauri_launcher; run without --tauri and pass

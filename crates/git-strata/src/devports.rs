@@ -526,17 +526,6 @@ pub fn script_is_tauri_dev(script: &str) -> std::result::Result<ScriptKind, Stri
     Ok(ScriptKind::Dev)
 }
 
-/// Names a package manager dispatches to its own command before any
-/// package script (`bun test` is Bun's test runner, `yarn workspace` picks
-/// another package, ...): `--tauri` needs an explicit `run` for these.
-const BUILTINS: &[&str] = &[
-    "a", "add", "audit", "bin", "build", "c", "cache", "config", "create", "dedupe", "deploy", "dlx", "doctor", "env",
-    "exec", "explain", "fetch", "i", "import", "info", "init", "install", "it", "link", "list", "ln", "ls", "node",
-    "npm", "outdated", "pack", "patch", "patch-commit", "plugin", "pm", "prune", "publish", "rb", "rebuild", "remove",
-    "repl", "restart", "rm", "root", "run", "run-script", "server", "set", "setup", "start", "stop", "store", "t",
-    "test", "un", "uninstall", "unlink", "up", "update", "upgrade", "version", "why", "workspace", "workspaces", "x",
-];
-
 /// Options that make a package manager run a different package's script
 /// (or none) even after the script name. npm takes any option before its
 /// `--`; these are refused for every manager.
@@ -565,16 +554,18 @@ pub fn tauri_plan(argv: &[String], scripts: impl Fn(&str) -> Option<String>) -> 
     }
     // Package scripts: (manager, index of the script name).
     let (pm, si) = match w.as_slice() {
+        // Always `run`: without it the manager may dispatch to its own
+        // command of that name (`bun test`, `pnpm help`, `yarn workspace`).
         ["bun" | "pnpm" | "yarn" | "npm", "run", _, ..] => (w[0], 2),
         ["bun" | "pnpm" | "yarn", s, ..] if !s.starts_with('-') => {
-            if BUILTINS.contains(s) {
-                return Err(launcher_error(format!("`{} {s}` is the package manager's own command; use `{} run {s}`", w[0], w[0]), argv));
-            }
-            (w[0], 1)
+            return Err(launcher_error(format!("--tauri needs `{0} run {s}`: without `run`, {0} may run its own command {s:?}", w[0]), argv));
         }
         _ => return Err(launcher_error("unsupported launcher for --tauri", argv)),
     };
     let name = w[si];
+    if name.starts_with('-') {
+        return Err(launcher_error(format!("{name:?} is an option, not a script name"), argv));
+    }
     let Some(script) = scripts(name) else {
         return Err(launcher_error(format!("package.json has no script {name:?} here"), argv));
     };
@@ -586,7 +577,9 @@ pub fn tauri_plan(argv: &[String], scripts: impl Fn(&str) -> Option<String>) -> 
     if let Some(o) = tail.iter().find(|x| is_selector(x)).or_else(|| tail[..npm_own].iter().find(|x| x.starts_with('-'))) {
         return Err(launcher_error(format!("{o:?} would let {pm} run another package's script than the one checked"), argv));
     }
-    if kind == ScriptKind::Cli && tail.first() != Some(&"dev") {
+    // What reaches the script: npm drops its own `--` and forwards the rest.
+    let fwd = tail.iter().enumerate().filter(|&(i, x)| !(pm == "npm" && *x == "--" && i == npm_own)).map(|(_, x)| *x);
+    if kind == ScriptKind::Cli && fwd.clone().next() != Some("dev") {
         return Err(launcher_error(format!("script {name:?} is the bare tauri CLI; pass `dev` right after it"), argv));
     }
     let seps = tail.iter().filter(|x| **x == "--").count();
@@ -671,6 +664,9 @@ mod tests {
         ("tauri", "tauri"),
         ("test", "tauri dev"),
         ("workspace", "tauri dev"),
+        ("help", "tauri dev"),
+        ("--prefix=../other", "tauri dev"),
+        ("-C", "tauri dev"),
     ];
 
     fn plan(w: &[&str]) -> Result<Vec<String>> {
@@ -689,16 +685,16 @@ mod tests {
     #[test]
     fn package_scripts_must_be_literal_tauri_dev() {
         assert_eq!(plan(&["bun", "run", "tauri:dev"]).unwrap(), sv(&["bun", "run", "tauri:dev", "--config", "P"]));
-        assert_eq!(plan(&["bun", "tauri:dev"]).unwrap(), sv(&["bun", "tauri:dev", "--config", "P"]));
-        assert_eq!(plan(&["yarn", "bx"]).unwrap(), sv(&["yarn", "bx", "--config", "P"]));
+        assert_eq!(plan(&["yarn", "run", "bx"]).unwrap(), sv(&["yarn", "run", "bx", "--config", "P"]));
         assert_eq!(plan(&["npm", "run", "tauri:dev"]).unwrap(), sv(&["npm", "run", "tauri:dev", "--", "--config", "P"]));
         assert_eq!(plan(&["npm", "run", "tauri:dev", "--", "-v"]).unwrap(), sv(&["npm", "run", "tauri:dev", "--", "-v", "--config", "P"]));
         // explicit `run` for a name the manager also uses
         assert_eq!(plan(&["bun", "run", "test"]).unwrap(), sv(&["bun", "run", "test", "--config", "P"]));
         // `"tauri": "tauri"` with `dev` from the command
         assert_eq!(plan(&["bun", "run", "tauri", "dev"]).unwrap(), sv(&["bun", "run", "tauri", "dev", "--config", "P"]));
-        assert_eq!(plan(&["pnpm", "tauri", "dev", "--release"]).unwrap(), sv(&["pnpm", "tauri", "dev", "--release", "--config", "P"]));
+        assert_eq!(plan(&["pnpm", "run", "tauri", "dev", "--release"]).unwrap(), sv(&["pnpm", "run", "tauri", "dev", "--release", "--config", "P"]));
         assert_eq!(plan(&["npm", "run", "tauri", "dev"]).unwrap(), sv(&["npm", "run", "tauri", "dev", "--", "--config", "P"]));
+        assert_eq!(plan(&["npm", "run", "tauri", "--", "dev"]).unwrap(), sv(&["npm", "run", "tauri", "--", "dev", "--config", "P"]));
         for bad in [
             &["bun", "run", "dollar"][..],
             &["bun", "run", "chain"],
@@ -720,14 +716,20 @@ mod tests {
             &["pnpm", "run", "tauri:dev", "--filter", "app"],
             &["yarn", "tauri:dev", "--cwd", "../other"],
             &["bun", "run", "tauri:dev", "--cwd=../other"],
-            // the manager's own commands, not the scripts of that name
+            // without `run` the manager may run its own command of that name
             &["bun", "test"],
             &["pnpm", "test"],
+            &["pnpm", "help"],
+            &["bun", "tauri:dev"],
             &["yarn", "workspace", "app", "tauri:dev"],
+            // an option where the script name goes
+            &["npm", "run", "--prefix=../other", "dev"],
+            &["bun", "run", "-C", "dev"],
+            &["npm", "run", "--prefix=../other"],
             // the bare CLI needs `dev`
             &["bun", "run", "tauri"],
             &["bun", "run", "tauri", "build"],
-            &["npm", "run", "tauri", "--", "dev"],
+            &["npm", "run", "tauri", "--", "build"],
         ] {
             let e = plan(bad).unwrap_err();
             assert_eq!(e.detail.as_ref().unwrap()["reason"], "tauri_launcher", "{bad:?}");
