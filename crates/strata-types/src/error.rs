@@ -29,7 +29,7 @@ codes! {
     NoSuchSession, NoSuchRepo, NoSuchCheckpoint, NoSuchProposal, NoSuchView,
     NotConfirmed, NotTty, OpenFiles,
     CrossVolume, Drift, CheckFailed, CheckMutates, PushRefused, Unknown, Unsupported,
-    Corrupt,
+    Corrupt, PortInUse,
 }
 
 impl fmt::Display for Code {

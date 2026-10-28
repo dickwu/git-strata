@@ -13,6 +13,90 @@ pub struct Config {
     pub paths: Paths,
     #[serde(rename = "repo")]
     pub repos: std::collections::BTreeMap<RepoName, RepoConfig>,
+    /// `[dev_ports]`: the port blocks leased to session workspaces for dev
+    /// servers (config.md §2.6). Optional; absent → defaults.
+    #[serde(default)]
+    pub dev_ports: DevPorts,
+}
+
+/// `[dev_ports]` (config.md §2.6): `range = "LO-HI"` (inclusive) is split
+/// into 4-aligned blocks of [`DevPorts::BLOCK`] ports; a block holding any
+/// port of `exclude` is never leased.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevPorts {
+    #[serde(default = "DevPorts::default_range")]
+    pub range: String,
+    #[serde(default)]
+    pub exclude: Vec<u16>,
+}
+
+impl Default for DevPorts {
+    fn default() -> Self {
+        Self { range: Self::default_range(), exclude: Vec::new() }
+    }
+}
+
+/// Ranges a dev-port range must not overlap: common dev-server defaults
+/// (3000–3999 for Next, 5173 for Vite, 8080) and tauri-plugin-connector's
+/// default ranges (bridge 9300–9400, WS/MCP 9555–9656).
+const DEV_PORTS_FORBIDDEN: &[(u16, u16)] = &[(3000, 3999), (5173, 5173), (8080, 8080), (9300, 9400), (9555, 9656)];
+
+impl DevPorts {
+    /// Ports per lease: web, connector, connector_mcp, aux.
+    pub const BLOCK: u16 = 4;
+
+    pub fn default_range() -> String {
+        "20000-29999".to_string()
+    }
+
+    fn bad(field: &str, rule: &str, message: String) -> StrataError {
+        violation(Code::InvalidInput, None, field, None, rule, &message)
+    }
+
+    /// `(lo, hi)` of `range`, inclusive; the P1/P2 rules.
+    pub fn bounds(&self) -> Result<(u16, u16), StrataError> {
+        let field = "dev_ports.range";
+        let parsed = self.range.split_once('-').and_then(|(a, b)| Some((a.trim().parse::<u16>().ok()?, b.trim().parse::<u16>().ok()?)));
+        let Some((lo, hi)) = parsed.filter(|(lo, hi)| lo <= hi) else {
+            return Err(Self::bad(field, "P1", format!("dev_ports.range {:?} is not \"LO-HI\" with LO <= HI", self.range)));
+        };
+        if lo < 1024 || hi > 49151 {
+            return Err(Self::bad(field, "P2", format!("dev_ports.range {lo}-{hi} must lie within 1024-49151 (below macOS's ephemeral ports)")));
+        }
+        if let Some((a, b)) = DEV_PORTS_FORBIDDEN.iter().find(|(a, b)| lo <= *b && *a <= hi) {
+            return Err(Self::bad(field, "P2", format!("dev_ports.range {lo}-{hi} overlaps {a}-{b}, a default dev-server or connector port range")));
+        }
+        Ok((lo, hi))
+    }
+
+    /// The bases of every usable block, ascending.
+    pub fn blocks(&self) -> Result<Vec<u16>, StrataError> {
+        let (lo, hi) = self.bounds()?;
+        let first = lo.div_ceil(Self::BLOCK) * Self::BLOCK;
+        let mut v = Vec::new();
+        let mut b = u32::from(first);
+        while b + u32::from(Self::BLOCK) - 1 <= u32::from(hi) {
+            let base = b as u16;
+            if !self.exclude.iter().any(|p| (base..base + Self::BLOCK).contains(p)) {
+                v.push(base);
+            }
+            b += u32::from(Self::BLOCK);
+        }
+        Ok(v)
+    }
+
+    /// P1–P3: a well-formed range outside the forbidden ranges that leaves
+    /// at least one block; exclusions must be ports (not 0).
+    pub fn validate(&self) -> Result<(), StrataError> {
+        if let Some(i) = self.exclude.iter().position(|p| *p == 0) {
+            return Err(violation(Code::InvalidInput, None, "dev_ports.exclude", Some(i), "P1", "dev_ports.exclude has port 0"));
+        }
+        if self.blocks()?.is_empty() {
+            return Err(Self::bad("dev_ports.range", "P3", format!("dev_ports.range {:?} with its exclusions leaves no block of 4 ports", self.range)));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,7 +299,7 @@ impl Config {
             validate_repo(name, cfg, &self.paths.root)?;
             validate_check_siblings(name, cfg, &self.repos)?;
         }
-        Ok(())
+        self.dev_ports.validate()
     }
 }
 

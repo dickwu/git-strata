@@ -24,10 +24,10 @@ fn deps() -> DepsSetId {
 }
 
 #[test]
-fn code_set_is_closed_at_thirty_nine_and_serializes_as_the_variant_name() {
-    assert_eq!(Code::ALL.len(), 39);
+fn code_set_is_closed_at_forty_and_serializes_as_the_variant_name() {
+    assert_eq!(Code::ALL.len(), 40);
     let unique: std::collections::HashSet<_> = Code::ALL.iter().copied().collect();
-    assert_eq!(unique.len(), 39);
+    assert_eq!(unique.len(), 40);
     assert_eq!(
         serde_json::to_string(&Code::Conflict).unwrap(),
         "\"Conflict\""
