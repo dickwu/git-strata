@@ -140,6 +140,12 @@ impl<'a> Sessions<'a> {
         self.fetched.lock().unwrap_or_else(|p| p.into_inner()).get(repo).is_some_and(|t| t.elapsed() < w)
     }
 
+    /// `repo`'s configuration and git handle, for callers that work on a
+    /// repo outside any session (publish's check siblings, publish.md D21).
+    pub fn repo_handles(&self, repo: &RepoName) -> Result<(&'a RepoConfig, &'a Git)> {
+        Ok((self.repo_cfg(repo)?, self.git(repo)?))
+    }
+
     pub(crate) fn repo_cfg(&self, repo: &RepoName) -> Result<&'a RepoConfig> {
         self.config.repos.get(repo).ok_or_else(|| no_such_repo(repo))
     }

@@ -17,6 +17,7 @@ checks = [
 publish = { branch = "master", push = true, confirm = false }   # D§6.7 默认
 deploy_on_push = false                     # I 无 webhook（admin 靠手动 build.sh 发布）
 pin_unpushed = true                        # D§6.7 默认
+check_siblings = ["admin-shared", "admin-time-off"]   # D21：admin 的 checks 读 ../admin-shared、../admin-time-off（dev-link）；不在 session 里时 publish 用它们 main 的最新 base [实现时补的决定]
 
 [repo.front]
 path = "/Volumes/GWD/inter/front"
@@ -50,6 +51,7 @@ checks = [
 publish = { branch = "main", push = true, confirm = false }   # D§6.7 默认
 deploy_on_push = false                     # I 无 webhook；但 tool 的 build.sh 会推 6 个兄弟库，其中 5 个的推送会部署 front（C tool、front）
 pin_unpushed = true
+check_siblings = ["admin-shared", "admin-time-off", "hr-components", "hr-core", "hr-tasks", "hr-time-management", "quick-start"]   # D21：tool 的 checks 读这 7 个兄弟库（dev-link）[实现时补的决定]
 
 [repo.slate_viewer]
 path = "/Volumes/GWD/inter/slate_viewer"

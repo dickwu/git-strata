@@ -52,7 +52,7 @@ pub enum WarningKind {
     ObserveFailed,
 }
 
-fn err_json(e: &StrataError) -> Value {
+pub(crate) fn err_json(e: &StrataError) -> Value {
     json!({ "code": e.code.as_str(), "message": e.message, "detail": e.detail })
 }
 
@@ -500,6 +500,7 @@ fn locked(
     confirm: Option<ConfirmToken>,
     shown: Option<&Option<CommitOid>>,
     written: &mut Option<CommitOid>,
+    prep: &crate::siblings::Prepared,
 ) -> Result<Landed> {
     let branch = &ctx.cfg.publish.branch;
     let id = group.id;
@@ -533,7 +534,7 @@ fn locked(
     }
     let plan = stage::plan(ctx, group, &base)?;
     // Steps 4–5.
-    let staged = stage::build(ctx, group, &base, &plan)?;
+    let staged = stage::build(ctx, group, &base, &plan, prep)?;
     let ran = check(ctx.cfg, &staged.worktree)?;
     // Step 6: the first visible write.
     let expected = chain.top.clone();
@@ -639,6 +640,14 @@ pub fn publish_bound(
     }
     let sessions: BTreeSet<SessionId> = mine.batches.iter().map(|b| b.session.clone()).collect();
     let queue: Vec<SessionId> = sessions.iter().cloned().collect();
+    // D21: the check siblings the layout session (the smallest id) lacks,
+    // prepared with no queue place and no lock but each sibling's own; a
+    // sibling that cannot be supplied refuses before the row exists.
+    let layout = queue.first().expect("non-empty");
+    let prep = crate::siblings::prepare(ctx, Some(layout))?;
+    if !prep.missing.is_empty() {
+        return Err(crate::siblings::missing_error(ctx.repo, Some(layout), &prep.missing));
+    }
 
     reconcile_unknown(ctx);
     // Step 2: queue, row, lock.
@@ -652,7 +661,7 @@ pub fn publish_bound(
             let mut written: Option<CommitOid> = None;
             let mut inner: Option<Result<Landed>> = None;
             let r = ctx.locks.with_repo(ctx.repo, &mut || {
-                inner = Some(locked(ctx, &group, &sessions, confirm.take(), shown.as_ref(), &mut written));
+                inner = Some(locked(ctx, &group, &sessions, confirm.take(), shown.as_ref(), &mut written, &prep));
                 Ok(())
             });
             let r = match r {
@@ -670,7 +679,7 @@ pub fn publish_bound(
     let (id, landed) = slot.unwrap_or_else(|| Err(unknown_with("queue", "the session queue never ran", None, json!({}))))?;
 
     // Step 8: lock and queue released; observe main, then the rebase.
-    let mut warnings = Vec::new();
+    let mut warnings = prep.warnings.clone();
     if let Err(e) = strata_deps::observe_main(ctx.deps, &landed.staged.tree, &landed.commit, &landed.staged.worktree) {
         warnings.push(PublishWarning { kind: WarningKind::ObserveFailed, detail: err_json(&e) });
     }

@@ -250,6 +250,7 @@ publish = { branch = "master", push = false, confirm = false }
         },
         deploy_on_push: true,
         pin_unpushed: true,
+        check_siblings: Vec::new(),
     };
     assert!(!built.needs_human_confirm());
     built.publish.confirm = true;
@@ -445,6 +446,7 @@ fn validate_commands_reports_repo_null_until_config_validate_fills_it() {
         },
         deploy_on_push: false,
         pin_unpushed: true,
+        check_siblings: Vec::new(),
     };
     let err = cfg.validate_commands().unwrap_err();
     assert_eq!(err.code, Code::CheckMutates);
@@ -543,4 +545,76 @@ fn default_inter_config_parses() {
     assert!(!cfg.repo(&repo("staff-api")).unwrap().publish.push);
     assert!(cfg.repo(&repo("front")).unwrap().deploy_on_push);
     assert!(cfg.repo(&repo("front")).unwrap().needs_human_confirm());
+    // D21: the dev-link checks' siblings.
+    assert_eq!(cfg.repo(&repo("admin")).unwrap().check_siblings, vec![repo("admin-shared"), repo("admin-time-off")]);
+    assert_eq!(cfg.repo(&repo("tool")).unwrap().check_siblings.len(), 7);
+    assert!(cfg.repo(&repo("front")).unwrap().check_siblings.is_empty());
+}
+
+fn sib_repo(name: &str, extra: &str) -> String {
+    format!(
+        r#"
+[repo.{name}]
+path = "/Volumes/GWD/inter/{name}"
+default_branch = "main"
+deps_dirs = []
+publish = {{ branch = "main", push = true, confirm = false }}
+{extra}
+"#
+    )
+}
+
+#[test]
+fn check_siblings_defaults_to_empty_and_names_other_configured_repos() {
+    let cfg = parse(&(sib_repo("tool", "") + &sib_repo("admin", ""))).unwrap();
+    assert!(cfg.repo(&repo("tool")).unwrap().check_siblings.is_empty());
+    let cfg = parse(&(sib_repo("tool", r#"check_siblings = ["admin"]"#) + &sib_repo("admin", ""))).unwrap();
+    assert_eq!(cfg.repo(&repo("tool")).unwrap().check_siblings, vec![repo("admin")]);
+}
+
+#[test]
+fn v12_rejects_self_unconfigured_and_duplicate_siblings() {
+    for (list, index, needle) in [
+        (r#"["tool"]"#, 0, "itself"),
+        (r#"["admin", "nope"]"#, 1, "not configured"),
+        (r#"["admin", "admin"]"#, 1, "twice"),
+    ] {
+        let text = sib_repo("tool", &format!("check_siblings = {list}")) + &sib_repo("admin", "");
+        let err = parse(&text).unwrap_err();
+        assert_eq!(err.code, Code::InvalidInput, "{list}");
+        assert!(err.message.contains(needle), "{list}: {}", err.message);
+        let d = err.detail.unwrap();
+        assert_eq!(d["rule"], "V12", "{list}");
+        assert_eq!(d["repo"], "tool");
+        assert_eq!(d["field"], "check_siblings");
+        assert_eq!(d["index"], index, "{list}");
+    }
+    let err = parse(&sib_repo("tool", r#"check_siblings = ["Bad/Name"]"#)).unwrap_err();
+    assert_eq!(err.code, Code::InvalidInput);
+}
+
+#[test]
+fn v12_keeps_the_file_order_of_violations() {
+    // An earlier repo's V12 wins over a later repo's V1 (file order, not
+    // name order: zzz comes first).
+    let text = sib_repo("zzz", r#"check_siblings = ["nope"]"#)
+        + r#"
+[repo.aaa]
+path = "/not-the-basename"
+default_branch = "main"
+deps_dirs = []
+publish = { branch = "main", push = true, confirm = false }
+"#;
+    let err = parse(&text).unwrap_err();
+    assert_eq!(rule(&err), "V12");
+    assert_eq!(err.detail.unwrap()["repo"], "zzz");
+    // Within one repo the per-repo rules (V10 here) come first.
+    let text = sib_repo("aaa", "checks = [\"prettier --write .\"]\ncheck_siblings = [\"nope\"]");
+    assert_eq!(rule(&parse(&text).unwrap_err()), "V10");
+}
+
+#[test]
+fn a_misspelt_check_siblings_key_is_v11() {
+    let err = parse(&(sib_repo("tool", r#"check_sibling = ["admin"]"#) + &sib_repo("admin", ""))).unwrap_err();
+    assert_eq!(rule(&err), "V11");
 }

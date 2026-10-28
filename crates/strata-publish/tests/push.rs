@@ -494,7 +494,7 @@ fn injected_failure_after_commit_is_unknown() {
                 assert_eq!(fx.origin_head("tool", "main"), c);
                 assert_eq!(layouts(&fx, &s).len(), 1, "the scene stays");
             }
-            FailPoint::BeforeRebase => unreachable!(),
+            FailPoint::BeforeRebase | FailPoint::SiblingAnchor => unreachable!(),
         }
         let r = last_row(&fx);
         assert_eq!(r.phase, PublishPhase::Unknown, "{at:?}");

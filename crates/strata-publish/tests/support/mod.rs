@@ -302,6 +302,7 @@ exit $rc
             },
             deploy_on_push: false,
             pin_unpushed: true,
+            check_siblings: Vec::new(),
         }
     }
 }
