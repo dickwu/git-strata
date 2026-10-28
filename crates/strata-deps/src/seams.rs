@@ -176,6 +176,7 @@ pub mod test_seams {
     /// Called once, by this thread's next publish input snapshot, after the
     /// first file is cloned into its slot and before it is renamed to
     /// `tree/<member>` (`snap` is the snapshot directory).
+    #[allow(clippy::type_complexity)]
     pub fn after_snapshot_clone(hook: Box<dyn FnMut(&Path, &strata_types::RepoPath)>) {
         imp::SNAPSHOT_CLONE.with(|s| *s.borrow_mut() = Some(hook));
     }

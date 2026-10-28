@@ -518,6 +518,7 @@ fn record_ref(ctx: &Ctx, change: RefChange) {
 
 /// Steps 2 (inside the lock) to 7. `written` is set once `commit_tree`
 /// returned.
+#[allow(clippy::too_many_arguments)]
 fn locked(
     ctx: &Ctx,
     group: &ReleaseGroup,
@@ -695,7 +696,6 @@ pub fn publish_bound(
 
     // Step 2: queue, row, lock; deps-drift §2.1: at most two rounds, the
     // second after a cold install with no publish lock held.
-    let confirm = confirm;
     let mut installed: Option<Installed> = None;
     let (id, landed) = loop {
         reconcile_unknown(ctx);

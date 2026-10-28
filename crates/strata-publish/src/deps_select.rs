@@ -208,6 +208,7 @@ fn approvable(ctx: &Ctx, h: &str) -> Option<String> {
         .map(|q| q.id.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn warning(
     ctx: &Ctx,
     kind: WarningKind,
