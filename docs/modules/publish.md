@@ -172,6 +172,9 @@ pub struct Staged {
     pub tree: TreeOid,
     /// 进了 index 的路径，按 `RepoPath` 升序。
     pub paths: Vec<RepoPath>,
+    /// deps-drift §2.5：检查用的不是布局会话所钉的集合时的警告
+    /// （`DepsSubstituted` / `DepsReinstalled`）。standalone `stage` 恒为 `None`。
+    pub deps_warning: Option<PublishWarning>,
 }
 
 /// 跑完的检查条数。没配置时为 0（D3）。
@@ -192,13 +195,19 @@ pub struct Published {
 
 /// 不是 `Code`。发布已经成功。
 pub struct PublishWarning {
-    /// 固定为 `ObserveFailed`。
+    /// `ObserveFailed`，或 deps-drift 的三种（§6）。
     pub kind: WarningKind,
     pub detail: serde_json::Value,
 }
 
 pub enum WarningKind {
     ObserveFailed,
+    /// 检查用了已 sealed 的、对应 staged 安装输入的集合（deps-drift §2.2）。
+    DepsSubstituted,
+    /// 这次发布为 staged 安装输入冷装了集合，检查用它（deps-drift §2.4）。
+    DepsReinstalled,
+    /// 冷装后输入快照删不完（`detail.path`）；daemon 启动时再清。
+    DepsInputsLeft,
 }
 
 pub enum RebaseReport {
@@ -331,6 +340,8 @@ pub enum PublishFault {
 
 占锁前的等待到时是 `Busy`，什么都没写。`commit_tree` 之后的等锁一直等到拿到。
 
+deps-drift 的冷装（§5.2 第 4 步）在第一轮放开 repo 写锁与会话队列之后、第二轮占队列之前做，只持建造锁（deps.md §5.3）。冷装期间同 repo 的别的发布可以拿到队列与锁并完成；为同一集合的第二个发布在建造锁上等，之后拿到已 sealed 的集合。
+
 ### 5.2 `publish(ctx, group, confirm)`
 
 按 repo 分组。一个调用只处理 `ctx.repo` 那一组批次；别的 repo 由 daemon 各调一次。批次为空，或没有这个 repo 的批次 → `InvalidInput`。
@@ -338,7 +349,13 @@ pub enum PublishFault {
 1. **锁外，任何 ref 写之前。** 读已有的 `publish_chain`。`None` → 第 2 步先 fetch。`Rewound` → `InvalidInput`（`chain_rewound`），不前移锚点，这一步还没写行。`Diverged` 不在锁外拒绝：前移要在锁里的事务里做完，再拒绝。不自动重放（D2）。然后 `ensure` 会话正钉着的依赖集（锁外）。新 tree 的集合还不知道，放到第 8 步、放开队列与锁之后。然后备好检查要的兄弟（D21）：本 repo 有 `checks` 且 `check_siblings` 非空时，读布局会话 L（最小 `SessionId`）的 manifest；在 L 里的兄弟用 L 所钉的基线，不在 L 里的兄弟由 `siblings::prepare` 取它此刻的 main tip：在那个兄弟自己的 repo 写锁里 `fetch` + 按 §5.4 前移它的锚点 + `main_tip`（一次只拿一把锁，不嵌套在别的 repo 锁里）；放锁后 `ensure_base`（可能冷装依赖）与 `observe_main`（失败 → 警告 `ObserveFailed`，发布不失败）。锚点事务出错 → `Unknown`（`anchor_transaction`，`detail.cause` 是原错误）；`Busy` / `Unknown` 原样返回并加上 `detail.sibling`；具名的取不到（没有 origin 分支、带类型的 fetch 失败、`ensure_base` 的具名拒绝）记为缺失，有缺失 → `InvalidInput`（`siblings_missing`），此时还没写行、没占队列、没碰本 repo 的锁、没建目录。
 2. **占队列，再记行，再拿 repo 写锁。** 队列是本组这个 repo 的会话，按 `SessionId` 升序。占住之后 `rm` 进不了这个会话，然后才 `record_publish`（"A Removed session takes no new pins"）。会话已 Removed → `NoSuchSession`；checkpoint 不存在 → `NoSuchCheckpoint`。这一行是意图行。锁里：`git.fetch("origin", publish.branch)`；按 §5.4 前移锚点；再读 `publish_chain`。`Rewound` → `InvalidInput`（`chain_rewound`），这次没有锚点写，按 D16 把行收成 `Done`。`Diverged` → 同样的码（`chain_diverged`），但若第 5.4 节的前移已经完成，那是做完的副作用，这次拒绝不是「什么都没写」。两种都不 `commit_tree`，记录 `Pushed` 的那一次调用不启动，链 ref 的字节不变。`merge_base` 得到 B，用的是锁里这一次读到的链，不是锁外的计划（D17）。
 3. **闸门，在任何 staging 写之前。** `validate_commands`。会改文件 → `CheckMutates`，不建目录，检查进程不启动。这次要推（`publish.push`）且 `cfg.needs_human_confirm()` 时，凭据必须在场，且 `action` 等于 `PushDeploy { repo: ctx.repo.clone(), branch: cfg.publish.branch.clone(), url }`，`url` 是此刻 `git remote get-url --push origin` 的值；只有 `url` 不同 → `NotConfirmed`（`reason = "remote_changed"`，`detail.confirmed`/`detail.now` 是去掉令牌的两个 URL，D20）。否则 `NotConfirmed`，不建目录，不 `attach_staging`，不 `gitio::stage`，不 `commit_tree`，记录 `Pushed` 的那一次调用不启动。凭据按值移走。不核对 nonce、不过期：那是 daemon 核销时 confirm 做的。`publish.push` 为假时这次不看凭据。然后在内存里做 §5.3。B 上每个路径的字节和 `mode`，以及 `.lww`，都经 `blob_bytes` 读取，不调用 `export_tree`。可执行位和 `120000` 来自这个 `mode`。会话所钉基线的字节来自已有的基线目录，checkpoint 的字节来自 blob 存储。冲突 → `Conflict`，hunk 在 `detail` 里，不建目录。合成结果与 B 相同 → `NoCommit`，不建目录。这些具名拒绝按 D16 收成 `Done`。没有 gitfile。
-4. **staging。** 闸门过了才建目录。导出在锁里做，对象是锁里刚读到的 B：`export_tree(tree_of(B), <布局根>/<repo>)`。B 的 tree 很大时这段锁会拉长；这是为了后面的一次合并，不在锁外导出再碰运气 [我的决定 D12]。然后 `attach_staging`。兄弟目录用 `clonefile` 放进布局根，源是各会话所钉的基线 generation，不是活的工作区。建目录之前先 `siblings::place`：再读一次 L 的 manifest（期间 `add` 进来的兄弟改用它的钉，只克隆一次）；L 所钉兄弟的基线目录不在 → `Corrupt`（store 损坏，不拿 main tip 顶替）；第 1 步备好的 generation 再查一次 `has_base_gen` 与目录在场，被 gc 收走 → `siblings_missing`（`base_collected`），不建目录。L 之外的兄弟克隆进 `<布局根>/<兄弟>/`；克隆失败 → 删布局根，删完 → `siblings_missing`（`clone_failed`，原因留在 `cause`），删不完 → `Unknown`（D21）[实现时补的决定]。本 repo 自己的依赖集（布局会话所钉的那份 sealed 集）用 `deps::clone_into` 克隆进 `<布局根>/<repo>/`，检查才找得到 `node_modules`/`vendor` 里的可执行文件；这是私有克隆，检查写不到 sealed 集；锁里不安装，所钉的集已 sealed，不在则 `Corrupt`；导出里已有（被 git 跟踪）的依赖目录保留跟踪内容、不覆盖；依赖目录不进 tree，`gitio::stage` 只暂存计划里的路径（review H3）[实现时补的决定]。写入内存里已经合并好的文件，再 `gitio::stage`。从 `attach_staging` 起，gitfile 的 commondir 是主 checkout；`gitio::stage` 会把对象写进主对象库。这两步都在凭据闸门之后。这一步之后若要具名返回，先按 §4.1 删完目录。
+4. **staging。** 闸门过了才建目录。导出在锁里做，对象是锁里刚读到的 B：`export_tree(tree_of(B), <布局根>/<repo>)`。B 的 tree 很大时这段锁会拉长；这是为了后面的一次合并，不在锁外导出再碰运气 [我的决定 D12]。然后 `attach_staging`。兄弟目录用 `clonefile` 放进布局根，源是各会话所钉的基线 generation，不是活的工作区。建目录之前先 `siblings::place`：再读一次 L 的 manifest（期间 `add` 进来的兄弟改用它的钉，只克隆一次）；L 所钉兄弟的基线目录不在 → `Corrupt`（store 损坏，不拿 main tip 顶替）；第 1 步备好的 generation 再查一次 `has_base_gen` 与目录在场，被 gc 收走 → `siblings_missing`（`base_collected`），不建目录。L 之外的兄弟克隆进 `<布局根>/<兄弟>/`；克隆失败 → 删布局根，删完 → `siblings_missing`（`clone_failed`，原因留在 `cause`），删不完 → `Unknown`（D21）[实现时补的决定]。本 repo 自己的依赖集（布局会话所钉的那份 sealed 集）用 `deps::clone_into` 克隆进 `<布局根>/<repo>/`，检查才找得到 `node_modules`/`vendor` 里的可执行文件；这是私有克隆，检查写不到 sealed 集；锁里不安装，所钉的集已 sealed，不在则 `Corrupt`；导出里已有（被 git 跟踪）的依赖目录保留跟踪内容、不覆盖；依赖目录不进 tree，`gitio::stage` 只暂存计划里的路径（review H3）[实现时补的决定]。写入内存里已经合并好的文件，再 `gitio::stage`。
+
+   **集合选择（deps-drift §2.2，只在 `build` 的 `select` 为 `Publish` 时）。** 本 repo 有 `checks` 且克隆进了依赖目录时，`gitio::stage` 之后算 staged 工作树的安装输入 hash h（`deps::input_records` + `hash_records`）。h 等于所钉集合 P 的 `inputs_hash` → 照旧用 P。计划写到 P 的依赖目录之下（配置改过、P 用旧的 `deps_dirs` 建成）→ `Drift`（`deps_select_failed`，`sub = "tracked_overlap"`，`dirs`，`fix`）。否则按 h、平台、toolchain、配置键算集合 id：store 里有 → 删掉克隆进来的 P、克隆那个集合，警告 `DepsSubstituted`（第二轮里正是刚装的那个 → `DepsReinstalled`；第二轮命中别的集合 → `DepsSubstituted` 带 `after_install`）。没有 → 第一轮把安装输入快照到 `deps/<repo>/.inputs/<行 id>`（`deps::snapshot_inputs`，不在会话根），返回 `Drift`（`deps_install_needed`）；第二轮仍没有 → `Drift`（`deps_drift`，`detail.install` 是第一轮装的集合）。这一段的错误带 `detail.stage = "deps_select"`；`Unknown` 在布局删完之后改写成 `Drift`（`deps_select_failed`，原错误在 `cause`），不让行停在 `Unknown`；布局删不完则照旧 `Unknown`，快照已删，不冷装。检查只警告，从不因为输入不一致拒绝发布（peilin 的决定 D1）。
+
+   **两轮（deps-drift §2.1）。** `publish_bound` 至多两轮。第一轮 R1 返回 `deps_install_needed` 时：R1 按 D16 收成 `Done`，`outcome.stopped = "Drift"`，`outcome.deps` 是这份 detail（这一信号只出现在 R1 的 outcome 里，不对外返回）；然后锁外 `cold_install`：用布局会话所钉基线目录加上快照的输入 `deps::build`，删快照（删不完 → 警告 `DepsInputsLeft`）；再跑第二轮 R2（新的一行，`allow_install = false`）。所以一次成功的发布在历史里可能是两行（D11）。冷装失败 → 原码返回（D10-A），`detail.stage = "deps_install"`、`publish = R1`、`deps_drift`（诊断），没有 `Unknown` 行；同样的输入再发布时 deps 的失败记录给出 `Unknown`/`previous_attempt`，不再装。standalone `stage` 用 `Select::PinnedOnly`：永远用 P，不替换、不冷装。
+
+   从 `attach_staging` 起，gitfile 的 commondir 是主 checkout；`gitio::stage` 会把对象写进主对象库。这两步都在凭据闸门之后。这一步之后若要具名返回，先按 §4.1 删完目录。
 5. **检查。** §5.5。仍在同一段锁里，仍在 `commit_tree` 之前。非零退出要返回 `CheckFailed` 时，先 `remove_tree_rooted`。删完、gitfile 不再是进主 ref 库的路径，才返回 `CheckFailed`。删不完 → `Unknown`，发布行保持 `Unknown`，status 报出，不返回 `CheckFailed`。
 6. **提交。** `commit_tree` 把对象写进主对象库，这是不可收回的可见写。此后任何失败对外都是 `Unknown`，现场留下，不删链、不删对象、不重放。链与锚点用 gitio 的一次 ref 事务写下（§2 第 3 条），`expected` 是锁里读到的链顶，没有链时为不存在。事务失败 → `Unknown`，`detail` 里保留 `HeadMoved` 的期望值与实际值（3d `:197`）。不返回 `HeadMoved` 作为对外的码。不重新合并、不重试。
 7. **推送。** `publish.push` 为假 → 停在本地，`push` 为 `None`。要推：同一段锁里调用记录 `Pushed` 的那一次 gitio 调用（§2 第 6 条）。它提交时，远端跟踪 ref 和锚点一起变成推上去的 commit。提交之前推送没有完成，不返回 `Pushed`，§5.4 不把这个窗口前移成 `Leads`。`Refused` → 链留在本地；这发生在可见的写之后，所以对外是 `Unknown`，`detail.kind = "PushRefused"`，远端原话留在 `detail.message`。单独的 `push` 调用还没写过，仍返回 `PushRefused`。超时、连接中断，或远端已收下而这次调用还没提交 → `Unknown`，链留下，行记 `Unknown`，不重放。之后的 fetch 若显示锚点不在 origin 上，是 `Rewound`，不是 `Leads`。
@@ -408,6 +425,8 @@ o = `publish_chain.origin`，c = 链顶，a = 锚点。前移只在 repo 写锁�
 `RepoConfig::validate_commands` 在建目录、`attach_staging`、`gitio::stage` 之前就跑。argv 里有 `--write`，或 `cs-fix` 没有 `--dry-run` → `CheckMutates`，检查进程不启动，不建目录。闸门过了之后，在 `<布局根>/<repo>` 里按序跑 `checks`，cwd 是该目录，不经 shell（config.md §2.4）。非零退出 → 先删掉布局根（§5.2 第 5 步），删完才返回 `CheckFailed`，`detail` 带命令、退出码、输出末尾 8 KiB。不提交。删不完则不是 `CheckFailed`。
 
 配置了 0 条 → 不失败，`checks_ran = 0`（D3）。结果与 `outcome` 里都写这个数。
+
+检查目录里的依赖是 staged 安装输入对应的集合（§5.2 第 4 步的集合选择）：输入没变时是布局会话所钉的 P，变了时是替换或冷装来的集合，并带警告。没配检查时不选、不算 hash、不冷装。
 
 兄弟布局是给 tool 的 `bun dev-link.mjs --sync-only` 与 admin 的 `./dev-link.sh` 用的（config.md §2.3 第 5 条）。front 的 `dev-link.sh` 不在 `checks` 里，本文也不跑它。这些 `../<兄弟>` 由 repo 的 `check_siblings` 列出（config.md §2.2），布局会话没有某个兄弟时由发布从它的 main tip 基线补上（§5.2 第 1、4 步，D21），补不上就 `siblings_missing`，检查不跑，不会因为兄弟缺失得到误导的 `CheckFailed`。staging 带 `.git`，`bun.lock` 在导出里是被跟踪的，所以 admin 的 self-heal 不会删它。
 
@@ -490,6 +509,20 @@ design §8 没有给发布单独的秒数。上表是本文的验收数字，首
 | 等兄弟的 repo 锁超时 | `Busy`，`detail.sibling` | 无行、无目录 |
 
 `Unknown` 的行挡住这个 repo 的下一次发布，直到它对上账（D19）：每次发布在第 2 步之前，拿 repo 写锁 fetch 一次，行的 commit（`outcome.commit`，没有就取这行记下的链 ref 更新）已在 `origin/<branch>` 里 → 行收成 `Done`，`push = Pushed`，`reconciled = { remote, branch }`。不在远端 → 行仍 `Unknown`，照旧 `Busy publish_unknown`；人用 `git-strata push REPO` 把链推上去之后，下一次发布对上账。什么都不重放。fetch 或 git 失败时行不动。不挡住别的 repo。会话删除是否被挡由 session 定，本文不代它拒绝 `rm`。
+
+deps-drift（§5.2 第 4 步）：
+
+| 情形 | 对外 | 行 |
+| --- | --- | --- |
+| 有已 sealed 的对应集合 | 成功，警告 `DepsSubstituted`（`detail`：`repo`、`session`、`pinned`、`used`、`inputs`、`cause` = `unswitched` / `selection` / `base_moved` / `mixed`、`paths`、`hint`、`message`，能直接 switch 时有 `fix`） | 一行 |
+| 没有，冷装成功 | 成功，警告 `DepsReinstalled`（同上，另有 `first_row`、`install_ms`） | R1 `Done`/`stopped = "Drift"`（`outcome.deps.reason = "deps_install_needed"`），R2 正常 |
+| 冷装成功、第二轮输入又变了（main 又落了改输入的提交） | `Drift`（`deps_drift`，`detail.install`） | R1、R2 都 `Done`/`stopped = "Drift"` |
+| 冷装失败 | 原码（如 `Unknown`/`install_failed`），`detail.stage = "deps_install"`、`publish = R1`、`deps_drift` | R1 `Done`；无 `Unknown` 行 |
+| 选择本身失败（toolchain `--version` 失败、快照 hash 不等） | `Drift`（`deps_select_failed`，`cause`） | `Done`/`stopped = "Drift"`，不挡下一次发布 |
+| 选择的具名错误（如 toolchain 不在 PATH → `NoSuchPath`，快照被换成 symlink → `NotDirectory`） | 原码，`detail.stage = "deps_select"` | `Done`/`stopped` 为那个码 |
+| 写到所钉集合的依赖目录 | `Drift`（`deps_select_failed`，`sub = "tracked_overlap"`） | `Done` |
+
+替换或冷装之后的失败（`CheckFailed`、提交后的 `Unknown` 等）在 `detail.deps_warning` 里带那条警告；daemon 的提交后失败条目也带它。
 
 善后自己又失败（清理 staging 时出错）时，外层仍是 `Unknown`，原始 `detail` 留在 `detail.cause` 里。不因为内层是 `Busy` 之类的具名码就把外层改回去。
 
