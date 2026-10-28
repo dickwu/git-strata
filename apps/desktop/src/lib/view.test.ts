@@ -9,6 +9,7 @@ import {
   knownAgents,
   usedRepos,
   waitingCount,
+  waitingItems,
   sessionDetail,
   sessionRows,
   short,
@@ -266,5 +267,45 @@ describe('waitingCount (Sessions header note, same rule as the tray)', () => {
     const s: StatusReply = structuredClone(all);
     s.sessions[0].status.workspaces.web.conflicts = [{ path: 'a' }, { path: 'b' }];
     expect(waitingCount(s, d)).toBe(2);
+  });
+  test('items: pending proposals by id, then conflicted workspaces, with where they belong', () => {
+    const d: DepsList = structuredClone(deps);
+    const p = d.proposals[0];
+    d.proposals = [
+      { ...p, id: 27, repo: 'app', state: { kind: 'Pending' }, origin: { kind: 'Main' } },
+      {
+        ...p,
+        id: 25,
+        repo: 'app',
+        state: { kind: 'AwaitingPublish' },
+        origin: { kind: 'Session', session: 's-a' },
+      },
+      {
+        ...p,
+        id: 22,
+        repo: 'admin',
+        state: { kind: 'Pending' },
+        origin: { kind: 'Session', session: 's-b' },
+      },
+    ];
+    const s: StatusReply = structuredClone(all);
+    s.sessions[0].status.workspaces.web.conflicts = [{ path: 'a' }, { path: 'b' }];
+    const items = waitingItems(s, d);
+    expect(items.map((i) => i.key)).toEqual([
+      'deps:22',
+      'deps:27',
+      `conflict:${s.sessions[0].status.manifest.id}:web`,
+    ]);
+    expect(items[0].session).toBe('s-b');
+    expect(items[1].session).toBeNull();
+    expect(items[1].since).toBe(p.created);
+    expect(items[2]).toMatchObject({ kind: 'conflict', number: 2, repo: 'web', since: null });
+  });
+  test('the list follows each refresh: an approved proposal drops out', () => {
+    const d: DepsList = structuredClone(deps);
+    d.proposals[0].state = { kind: 'Pending' };
+    expect(waitingItems(undefined, d)).toHaveLength(1);
+    d.proposals[0].state = { kind: 'Applied' };
+    expect(waitingItems(undefined, d)).toHaveLength(0);
   });
 });

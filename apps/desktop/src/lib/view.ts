@@ -136,23 +136,60 @@ export function filterRows(rows: SessionRow[], f: RowFilter): SessionRow[] {
   });
 }
 
+/** One thing that waits for a human, as the tray lists it (src-tauri/src/tray_model.rs). */
+export interface WaitingItem {
+  key: string;
+  kind: 'deps' | 'conflict';
+  /** The proposal id, or the number of conflicted paths. */
+  number: number;
+  repo: string;
+  /** The session it belongs to; null for a proposal that came from the main branch. */
+  session: string | null;
+  /** When the proposal was made (ISO); conflicts carry no time. */
+  since: string | null;
+}
+
 /**
- * How many things wait for a human: pending deps proposals plus workspaces with
- * conflicted paths. Same rule as the tray's "Waiting for you" (src-tauri/src/tray_model.rs
- * `waiting`), so the Sessions header note and the tray agree.
+ * What waits for a human: pending deps proposals, then workspaces with conflicted paths.
+ * Same rule as the tray's "Waiting for you" (src-tauri/src/tray_model.rs `waiting`), so
+ * the Sessions header note and the tray agree.
  */
+export function waitingItems(
+  sessions: StatusReply | undefined,
+  deps: DepsList | undefined
+): WaitingItem[] {
+  const proposals: WaitingItem[] = (deps?.proposals ?? [])
+    .filter((p) => p.state?.kind === 'Pending')
+    .sort((a, b) => a.id - b.id)
+    .map((p) => ({
+      key: `deps:${p.id}`,
+      kind: 'deps',
+      number: p.id,
+      repo: p.repo,
+      session: p.origin?.kind === 'Session' ? (p.origin.session ?? null) : null,
+      since: p.created ?? null,
+    }));
+  const conflicts: WaitingItem[] = (sessions?.sessions ?? []).flatMap((s) =>
+    Object.entries(s.status.workspaces ?? {})
+      .filter(([, w]) => (w.conflicts?.length ?? 0) > 0)
+      .map(([repo, w]) => ({
+        key: `conflict:${s.status.manifest.id}:${repo}`,
+        kind: 'conflict' as const,
+        number: w.conflicts?.length ?? 0,
+        repo,
+        session: s.status.manifest.id,
+        since: null,
+      }))
+  );
+  return [...proposals, ...conflicts];
+}
+
+/** How many things wait for a human (see `waitingItems`). */
 export function waitingCount(
   sessions: StatusReply | undefined,
   deps: DepsList | undefined
 ): number {
-  const proposals = (deps?.proposals ?? []).filter((p) => p.state?.kind === 'Pending').length;
-  const conflicts = (sessions?.sessions ?? []).reduce(
-    (n, s) =>
-      n +
-      Object.values(s.status.workspaces ?? {}).filter((w) => (w.conflicts?.length ?? 0) > 0).length,
-    0
-  );
-  return proposals + conflicts;
+  return waitingItems(sessions, deps).length;
 }
 
 /**

@@ -390,7 +390,66 @@ body {
   align-items: center;
   gap: 6px;
   color: var(--text-muted);
+  font: inherit;
   font-size: 13px;
+  padding: 2px 8px;
+  margin-left: -8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+.waiting-note:hover,
+.waiting-note[aria-expanded='true'] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.waiting-note:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.waiting-list {
+  width: 340px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.waiting-list ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.waiting-list li {
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.waiting-list li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.waiting-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.waiting-label {
+  font-weight: 500;
+}
+.waiting-how {
+  margin-top: 2px;
+  font-size: 12px;
+}
+.waiting-origin {
+  font-size: 12px;
+}
+.waiting-origin .ant-btn-link {
+  padding: 0;
+  height: auto;
+  font-size: 12px;
+}
+.waiting-stale {
+  margin: 0 0 8px;
+  color: var(--danger);
+  font-size: 12px;
 }
 
 /* Session rows open the detail modal; keyboard focus is visible, not just hover. */

@@ -6,7 +6,7 @@ import { sessionFromUrl, sessionHash, useNav } from '@/stores/nav';
 import { useTheme } from '@/stores/theme';
 import { usePlan, useSessions, useDeps } from '@/lib/queries';
 import { OPEN_EVENT, inTauri } from '@/lib/tauri';
-import { openTarget, waitingCount } from '@/lib/view';
+import { openTarget, waitingItems } from '@/lib/view';
 import type { DepsList, StatusReply } from '@/lib/types';
 import { Titlebar } from './Titlebar';
 import { StatusBar } from './StatusBar';
@@ -92,7 +92,8 @@ export function Shell() {
             sessions={sessions}
             daemon={status}
             legacy={!status.data || !('api' in status.data)}
-            waiting={waitingCount(sessions.data, deps.data)}
+            waiting={waitingItems(sessions.data, deps.data)}
+            waitingStale={deps.isError || sessions.isError}
           />
         )}
       </main>

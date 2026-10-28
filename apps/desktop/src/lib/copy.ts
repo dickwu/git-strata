@@ -6,6 +6,19 @@ export const copy = {
     daemon: 'Daemon',
     waiting: (n: number) => (n === 1 ? '1 waiting for you' : `${n} waiting for you`),
   },
+  waiting: {
+    title: 'Waiting for you',
+    show: (n: number) =>
+      n === 1 ? 'Show the 1 item waiting for you' : `Show the ${n} items waiting for you`,
+    deps: (id: number, repo: string) => `Deps proposal ${id} in ${repo}`,
+    conflict: (n: number, repo: string) =>
+      n === 1 ? `1 conflict in ${repo}` : `${n} conflicts in ${repo}`,
+    fromMain: 'From the main branch',
+    approve: (id: number) => `Review in a terminal: \`git-strata deps approve ${id}\``,
+    resolve: 'Resolve it in the session workspace.',
+    open: (session: string) => `Open ${session}`,
+    stale: 'Could not refresh. These may be out of date.',
+  },
   palette: {
     placeholder: 'Search sessions and screens',
     open: 'Open command palette',

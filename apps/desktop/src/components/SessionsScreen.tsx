@@ -4,7 +4,14 @@ import { Button, Empty, Table, Tag } from 'antd';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { copy } from '@/lib/copy';
 import type { DaemonStatus, StatusReply } from '@/lib/types';
-import { filterRows, knownAgents, sessionRows, usedRepos, type SessionRow } from '@/lib/view';
+import {
+  filterRows,
+  knownAgents,
+  sessionRows,
+  usedRepos,
+  type SessionRow,
+  type WaitingItem,
+} from '@/lib/view';
 import { FilterBar } from './FilterBar';
 import { AgentBadge } from './AgentBadge';
 import { useNav } from '@/stores/nav';
@@ -12,6 +19,7 @@ import { ErrorNote } from './ErrorNote';
 import { RepoTags } from './RepoTags';
 import { SessionTime } from './SessionTime';
 import { useNow } from '@/hooks/useNow';
+import { WaitingNote } from './WaitingNote';
 
 /** "Ok" is the normal case and stays quiet; anything else is a red tag. */
 export function healthTag(h: string) {
@@ -22,13 +30,16 @@ export function SessionsScreen({
   sessions,
   daemon,
   legacy,
-  waiting = 0,
+  waiting = [],
+  waitingStale = false,
 }: {
   sessions: UseQueryResult<StatusReply>;
   daemon: UseQueryResult<DaemonStatus>;
   legacy: boolean;
   /** Things waiting for a human (tray rule), shown in the header. */
-  waiting?: number;
+  waiting?: WaitingItem[];
+  /** The last deps or sessions refresh failed, so `waiting` may be old. */
+  waitingStale?: boolean;
 }) {
   const { openSession, repoFilter, agentFilter, textFilter, toggleRepoFilter, clearFilters } =
     useNav();
@@ -47,12 +58,7 @@ export function SessionsScreen({
     <>
       <div className="toolbar">
         <h1 className="screen-title">{copy.sessions.title}</h1>
-        {waiting > 0 && (
-          <span className="waiting-note" role="status">
-            <span className="dot" data-state="down" aria-hidden />
-            {copy.nav.waiting(waiting)}
-          </span>
-        )}
+        <WaitingNote items={waiting} stale={waitingStale} />
         {legacy && sessions.data && <span className="muted">{copy.sessions.slow}</span>}
       </div>
       <div className="content" style={{ display: 'grid', gap: 12, alignContent: 'start' }}>
