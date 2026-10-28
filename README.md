@@ -120,6 +120,9 @@ Every call prints exactly one compact JSON line on stdout:
 - All three keys are always present. `data` is never null; on an error it may
   still hold partial results (for example repos that already published).
 - Exit status is 0 iff `ok` is true, else 1.
+- Exception: `git-strata session exec` prints no envelope once its command
+  starts; its stdout, stderr and exit status are the command's. A failure
+  before the start (bad arguments, `PortInUse`, ...) is an envelope.
 - Branch on `error.code`, then `error.detail.reason` where present. Never parse `message`.
 - stderr carries only human notices: prompts, alerts, `skipped (not in session ...)`,
   and (only when stderr is a terminal) `pending proposal <id> for <repo>`.
@@ -220,6 +223,28 @@ is killed and nothing is reassigned automatically. Copies of tauri-connector's
 session is created. Once a lease exists, `ports` and `exec` read it from the
 store and work without the daemon.
 
+`--tauri` accepts `tauri dev`, `cargo|npx|bunx|pnpx tauri dev`, `pnpm exec
+tauri dev`, and `bun|pnpm|yarn|npm run <script>` (or `bun|pnpm|yarn <script>`
+for a name that is not one of the package manager's own commands) when the
+script is literally `tauri dev ...` or the bare `tauri` CLI followed by
+`dev` in the command (`"tauri": "tauri"` → `bun run tauri dev`). Options
+that select another package (`--prefix`, `--filter`, `-w`, `--workspace`,
+`--cwd`, ...) and, for npm, any option before its `--` are refused
+(`InvalidInput` `tauri_launcher`), since the script that runs would not be
+the one checked.
+
+The variables reach only `exec`'s command and its children. A connector
+client started separately (or an MCP server already running) selects the
+app with `tauri-connector ... --project <tauri_app_root>` from `session
+ports`, or runs as `git-strata session exec --no-check -- tauri-connector
+...`; never the connector's default ports.
+
+`session ports` lists a workspace with no free block as `"ports": null,
+"reason": "ports_exhausted"` next to the others; `exec` there is `Busy`
+`ports_exhausted`. `--reassign` sends the base it checked; if another caller
+moved the lease in between, the daemon refuses with `Busy` `lease_changed`
+and nothing moves.
+
 ## Headless command sequences
 
 Everything below needs no human, as long as no repo in the publish is gated
@@ -297,7 +322,9 @@ A session workspace cannot run a release build, by design:
   commits or pushes in its sibling repos would make commits strata never
   sees.
 
-There is no `git-strata exec` or build command. A release build runs in the
+There is no build command, and `git-strata session exec` (see
+[Dev servers](#dev-servers-per-session-ports)) only sets dev-port variables
+for a command in the workspace; it is not a release path. A release build runs in the
 **main checkout**, after the change has been published and pushed:
 
 ```sh
@@ -494,6 +521,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Busy` (`publish_unknown`) | an earlier publish of this repo has an unknown outcome; it clears once origin has that commit (checked at each publish), e.g. after the human runs `git-strata push REPO`; a definite remote refusal never blocks |
 | `Busy` (`port_unidentified` / `port_probe_error`) | `session exec` could not identify a port's holder; retry shortly |
 | `Busy` (`ports_exhausted`) | no free port block in `[dev_ports]`; tell the human |
+| `Busy` (`lease_changed`) | `session ports --reassign`: another caller moved the lease since the check; run `session ports --check` again and decide afresh |
 | `Busy` (other) | repo lock held; wait, retry later |
 | `NotTty` | hand the exact command to the human |
 | `NotConfirmed` | report; the human reruns (`plan_changed`: rerun once yourself) |

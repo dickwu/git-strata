@@ -323,9 +323,13 @@ impl Store {
 
     /// Move the lease of an `Active` session's workspace to another usable
     /// block (searching from just after the old one); with no lease, this
-    /// is `ensure`. Nothing else usable: the old lease stays, `Busy
-    /// reason=ports_exhausted`. Same lifecycle errors as `ensure`.
-    pub fn reassign_dev_ports(&self, id: &SessionId, repo: &RepoName) -> Result<DevPortLease> {
+    /// is `ensure`. `checked` is the base the caller checked for listeners
+    /// (`None`: it saw no lease); a lease that differs inside the txn is
+    /// `Busy reason=lease_changed` and nothing moves, so a stale check never
+    /// replaces a lease someone else just took. Nothing else usable: the old
+    /// lease stays, `Busy reason=ports_exhausted`. Same lifecycle errors as
+    /// `ensure`.
+    pub fn reassign_dev_ports(&self, id: &SessionId, repo: &RepoName, checked: Option<u16>) -> Result<DevPortLease> {
         const OP: &str = "reassign_dev_ports";
         self.writable()?;
         let policy = self.required_policy()?;
@@ -333,6 +337,13 @@ impl Store {
         let base = self.write(OP, |c| {
             require_active(c, OP, sid, r)?;
             let old = lease_of(c, sid, r).map_err(|e| sql(e, OP, NOT_WRITTEN))?.map(base_of).transpose()?;
+            if old != checked {
+                return Err(err(
+                    Code::Busy,
+                    format!("the lease of {sid}/{r} changed since it was checked; check it again and rerun"),
+                    json!({ "reason": "lease_changed", "session": sid, "repo": r, "checked": checked, "current": old }),
+                ));
+            }
             let b = allocate(c, &policy, sid, r, old).map_err(|e| sql(e, OP, NOT_WRITTEN))?.ok_or_else(|| exhausted(sid, r))?;
             c.execute("DELETE FROM dev_ports WHERE session = ?1 AND repo = ?2", [sid, r]).map_err(|e| sql(e, OP, NOT_WRITTEN))?;
             c.execute("INSERT INTO dev_ports (session, repo, base) VALUES (?1, ?2, ?3)", params![sid, r, i64::from(b)])

@@ -46,7 +46,7 @@ Fixed `detail.reason` values produced by the CLI: `daemon_down`,
 `unknown_command` (with `detail.commands`), `args`, `repos`, `ticket`,
 `assign_with_from`, `pick`, `stdin`, `not_tty` (code `NotTty`, with
 `detail.command`), `push_unknown`, `launchctl`, `rpc_id`, `unknown_method`,
-`rpc_failed`, `readonly_client`. From `session ports` / `session exec`: `reassign_one`, `ambiguous_repo` (with `detail.repos`), `cwd_mismatch`, `tauri_launcher` (with `detail.fix`), `exec`, `unleased` (a `--all` entry, not an error), `already_running` / `foreign` (code `PortInUse`), `port_unidentified` / `port_probe_error` (code `Busy`), `ports_exhausted` (`Busy`), `not_active` (`NoSuchSession`), `daemon_too_old` (`Unsupported`). From publish: `assigned`, `chain_rewound`,
+`rpc_failed`, `readonly_client`. From `session ports` / `session exec`: `reassign_one`, `ambiguous_repo` (with `detail.repos`), `cwd_mismatch`, `tauri_launcher` (with `detail.fix`), `exec`, `unleased` (a `--all` entry, not an error), `already_running` / `foreign` (code `PortInUse`), `port_unidentified` / `port_probe_error` (code `Busy`), `ports_exhausted` (`Busy`; in `session ports` an entry with `"ports": null`, not an error), `lease_changed` (`Busy`, `--reassign`: check again), `not_active` (`NoSuchSession`), `daemon_too_old` (`Unsupported`). From publish: `assigned`, `chain_rewound`,
 `chain_diverged`, `workspace_changed`, `plan_changed`; from push: `replay_conflict`,
 `replay_deps_unsealed`, `replay_too_long`, `chain_rewound`; from deps:
 `main_moved`; from `config relax`: `not_relaxed`; from the push guard:

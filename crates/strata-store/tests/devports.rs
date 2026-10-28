@@ -113,7 +113,7 @@ fn exhaustion_never_blocks_new_and_ensure_reports_it() {
     assert_reason(&e, Code::Busy, "ports_exhausted");
     // reassign with nowhere to go keeps the old lease
     let leased = got[0].1.clone();
-    assert_reason(&s.reassign_dev_ports(&id, &repo(&leased)).unwrap_err(), Code::Busy, "ports_exhausted");
+    assert_reason(&s.reassign_dev_ports(&id, &repo(&leased), Some(20000)).unwrap_err(), Code::Busy, "ports_exhausted");
     assert_eq!(base(&s, &id, &leased), Some(20000));
 }
 
@@ -124,10 +124,31 @@ fn reassign_moves_to_a_later_block_and_frees_the_old_one() {
     let id = sess("dddddddd");
     active(&env, &s, &id, &["app"]);
     let old = base(&s, &id, "app").unwrap();
-    let new = s.reassign_dev_ports(&id, &repo("app")).unwrap().base;
+    let new = s.reassign_dev_ports(&id, &repo("app"), Some(old)).unwrap().base;
     assert_ne!(old, new);
     assert_eq!(base(&s, &id, "app"), Some(new));
     assert_eq!(leases(&s).len(), 1);
+}
+
+/// Two callers both checked `old`; the first moved the lease, so the
+/// second's check is stale and must not replace the new lease unchecked.
+#[test]
+fn reassign_refuses_a_stale_check() {
+    let (env, s) = setup();
+    s.set_dev_ports_policy(policy(&[20000, 20004, 20008], |_| true));
+    let id = sess("abababab");
+    active(&env, &s, &id, &["app"]);
+    let old = base(&s, &id, "app").unwrap();
+    let first = s.reassign_dev_ports(&id, &repo("app"), Some(old)).unwrap().base;
+    let e = s.reassign_dev_ports(&id, &repo("app"), Some(old)).unwrap_err();
+    assert_reason(&e, Code::Busy, "lease_changed");
+    let d = e.detail.unwrap();
+    assert_eq!(d["checked"], old);
+    assert_eq!(d["current"], first);
+    assert_eq!(base(&s, &id, "app"), Some(first));
+    // a caller that saw no lease is stale too
+    assert_reason(&s.reassign_dev_ports(&id, &repo("app"), None).unwrap_err(), Code::Busy, "lease_changed");
+    assert_eq!(base(&s, &id, "app"), Some(first));
 }
 
 #[test]
@@ -153,7 +174,7 @@ fn ensure_needs_an_active_session_and_removal_releases_for_good() {
     assert_reason(&s.ensure_dev_ports(&a, &repo("app")).unwrap_err(), Code::NoSuchSession, "not_active");
     assert!(s.set_lifecycle(&a, Lifecycle::Removing, Lifecycle::Removed, None, t(21)).unwrap());
     assert_eq!(base(&s, &a, "app"), None);
-    assert_reason(&s.reassign_dev_ports(&a, &repo("app")).unwrap_err(), Code::NoSuchSession, "not_active");
+    assert_reason(&s.reassign_dev_ports(&a, &repo("app"), None).unwrap_err(), Code::NoSuchSession, "not_active");
 }
 
 #[test]

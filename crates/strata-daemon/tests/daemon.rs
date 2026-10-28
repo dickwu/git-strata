@@ -1398,8 +1398,14 @@ fn new_leases_dev_ports_and_ensure_reassign_rm_follow_the_lifecycle() {
         let e = ok(call(&sock, "ports_ensure", p.clone()));
         assert_eq!(e["base"], json!(base), "{e:#}");
         assert_eq!(e["ports"], json!({ "web": base, "connector": base + 1, "connector_mcp": base + 2, "aux": base + 3 }));
-        let r = ok(call(&sock, "ports_reassign", p.clone()));
+        let checked = json!({ "session": id.as_str(), "repo": "tool", "checked": base });
+        let r = ok(call(&sock, "ports_reassign", checked.clone()));
         assert_ne!(r["base"], json!(base), "{r:#}");
+        assert_eq!(ok(call(&sock, "ports_ensure", p.clone()))["base"], r["base"]);
+        // the same check again is stale: the lease stays where it went
+        let stale = call(&sock, "ports_reassign", checked);
+        assert_eq!(stale["error"]["code"], "Busy", "{stale:#}");
+        assert_eq!(stale["error"]["detail"]["reason"], "lease_changed", "{stale:#}");
         assert_eq!(ok(call(&sock, "ports_ensure", p.clone()))["base"], r["base"]);
 
         let r = call(&sock, "ports_ensure", json!({ "session": id.as_str(), "repo": "nope" }));

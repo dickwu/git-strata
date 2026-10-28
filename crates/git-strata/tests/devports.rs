@@ -204,15 +204,43 @@ fn an_old_daemon_cannot_reassign() {
         json!({ "id": req["id"], "ok": false, "error": { "rpc": "UnknownMethod", "message": "unknown method" } })
     }
     let lv = Live::new(&["tool"], &files());
-    let (s, ws) = lv.serve(|_| {
+    let (s, ws, w) = lv.serve(|_| {
         let s = lv.new_session("T-1", "tool");
         let ws = lv.ws(&s, "tool");
-        (s, ws)
+        let w = web(&lease(&lv.run_in(&ws, &["session", "ports"])));
+        (s, ws, w)
     });
     let _ = fs::remove_file(lv.home.socket());
     let d = FakeDaemon::start(&lv.home.socket(), old);
     let r = lv.run_in(&ws, &["session", "ports", "--reassign"]);
     assert_eq!((r.err_code().as_str(), r.reason().as_str()), ("Unsupported", "daemon_too_old"), "{r:?}");
     assert_eq!(d.requests()[0]["method"], "ports_reassign");
-    assert_eq!(d.requests()[0]["params"], json!({ "session": s.as_str(), "repo": "tool" }));
+    // the base the cli checked, so the daemon can refuse a stale check
+    assert_eq!(d.requests()[0]["params"], json!({ "session": s.as_str(), "repo": "tool", "checked": w }));
+}
+
+/// A range with one block: the second workspace of a session gets none.
+/// `ports` lists it (`ports: null, reason: ports_exhausted`) beside the
+/// leased one; `exec` there refuses.
+#[test]
+fn an_exhausted_workspace_is_an_entry_not_a_failed_call() {
+    let lv = Live::new(&["tool", "front"], &files());
+    let lo = 40000 + (std::process::id() % 2000) as u16 * 4;
+    let cfg = lv.home.config_dir().join("config.toml");
+    let mut t = fs::read_to_string(&cfg).unwrap();
+    t.push_str(&format!("\n[dev_ports]\nrange = \"{lo}-{}\"\n", lo + 3));
+    fs::write(&cfg, t).unwrap();
+    lv.serve(|_| {
+        let s = lv.new_session("T-1", "tool,front");
+        let all = lv.run(&["session", "ports", "--session", s.as_str()]);
+        let ls = all.ok()["leases"].as_array().unwrap().clone();
+        assert_eq!(ls.len(), 2, "{all:?}");
+        let (leased, none): (Vec<&Value>, Vec<&Value>) = ls.iter().partition(|l| !l["ports"].is_null());
+        assert_eq!((leased.len(), none.len()), (1, 1), "{all:?}");
+        assert_eq!(web(leased[0]), lo);
+        assert_eq!(none[0]["reason"], "ports_exhausted", "{all:?}");
+        let repo = none[0]["repo"].as_str().unwrap();
+        let r = lv.run_in(&lv.ws(&s, repo), &["session", "exec", "--", "true"]);
+        assert_eq!((r.err_code().as_str(), r.reason().as_str()), ("Busy", "ports_exhausted"), "{r:?}");
+    });
 }

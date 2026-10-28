@@ -341,8 +341,10 @@ impl Store {
     /// 码：ReadOnly、Unsupported(no_policy)、NoSuchSession(not_active：creating / removing / removed)、
     /// InvalidInput(session_unknown：Unknown 的会话保留已有租约，但不发新的)、NoSuchRepo、Busy(ports_exhausted)、Unknown。
     pub fn ensure_dev_ports(&self, id: &SessionId, repo: &RepoName) -> Result<DevPortLease>;
-    /// 把租约挪到另一个可用块（从旧块之后找起）；没有租约时等于 ensure。找不到时旧租约不动，Busy(ports_exhausted)。码同 ensure。
-    pub fn reassign_dev_ports(&self, id: &SessionId, repo: &RepoName) -> Result<DevPortLease>;
+    /// 把租约挪到另一个可用块（从旧块之后找起）；没有租约时等于 ensure。`checked` 是调用方查过监听的 base（None = 它没看到租约）；
+    /// 事务里的租约与它不同 → Busy(lease_changed，detail 带 checked / current)，什么都不动，免得过期的检查替换别人刚换好的租约。
+    /// 找不到时旧租约不动，Busy(ports_exhausted)。其余码同 ensure（生命周期先于 checked 核对）。
+    pub fn reassign_dev_ports(&self, id: &SessionId, repo: &RepoName, checked: Option<u16>) -> Result<DevPortLease>;
 
     /// move_workspace 的意图行：写在建任何暂存之前，状态 Preparing，返回 store 分配的代数 n
     /// （该工作区当前代数与它所有意图里最大的 n 再加 1，永不复用）。staging 是 session 选的暂存路径，必须是

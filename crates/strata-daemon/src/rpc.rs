@@ -243,12 +243,24 @@ pub struct RepoParams {
     pub repo: RepoName,
 }
 
-/// `ports_ensure` / `ports_reassign`: one workspace's dev-port lease.
+/// `ports_ensure`: one workspace's dev-port lease.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortsParams {
     pub session: SessionId,
     pub repo: RepoName,
+}
+
+/// `ports_reassign`: `checked` is the base the caller checked for
+/// listeners (`null` or absent: it saw no lease); the store refuses a lease
+/// that has changed since (`Busy lease_changed`).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReassignParams {
+    pub session: SessionId,
+    pub repo: RepoName,
+    #[serde(default)]
+    pub checked: Option<u16>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -328,7 +340,7 @@ pub enum Params {
     DaemonStatus(DaemonStatusParams),
     Du(DuParams),
     PortsEnsure(PortsParams),
-    PortsReassign(PortsParams),
+    PortsReassign(ReassignParams),
 }
 
 fn typed<T: DeserializeOwned>(v: Value, wrap: fn(T) -> Params) -> Result<Params, String> {

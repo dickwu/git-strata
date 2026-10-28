@@ -81,6 +81,8 @@ pub const TOP: &str = concat!(
   Exit status: 0 iff ok is true, else 1. Branch on error.code, then
   error.detail.reason; never parse message. stderr has human notices only.
   --help / --version print plain text on stdout, exit 0, no JSON.
+  session exec, once its command starts, prints no envelope: stdout, stderr
+  and the exit status are the command's (failures before that: an envelope).
   Bad arguments: InvalidInput, detail.reason \"unknown_command\" (with
   detail.commands, and detail.group inside deps/daemon/config/session) or \"args\".
 
@@ -560,9 +562,14 @@ pub const SESSION_PORTS_AFTER: &str = "OUTPUT
   Needs exactly one session and repo. Refused with PortInUse already_running
   while a process of this workspace listens on its ports; otherwise the lease
   moves to the next free block (the old ports are not reused right away).
+  The daemon moves it only if it is still the lease checked here.
 
 ERRORS
   Busy ports_exhausted   no free block in [dev_ports] range: tell the human
+                         (without --reassign: an entry \"ports\":null,
+                         \"reason\":\"ports_exhausted\", not an error)
+  Busy lease_changed     --reassign: another caller moved the lease since the
+                         check; check again and decide afresh
   Unsupported daemon_too_old  the daemon predates leases: tell the human
   Unsupported no_policy  the daemon runs without [dev_ports]: tell the human
 
@@ -586,8 +593,12 @@ pub const SESSION_EXEC_AFTER: &str = "--tauri
       (inserted before the first bare --)
     bun [run] S | pnpm [run] S | yarn [run] S | npm run S
       where package.json script S is one plain `[NAME=v ...] [bunx|npx] tauri dev
-      [opts]` (no quotes, $, &&, or bare --); no bare -- in the caller args
-      (npm: at most one)
+      [opts]` (no quotes, $, &&, or bare --), or the bare `[bunx|npx] tauri`
+      with `dev` right after S (bun run tauri dev); no bare -- in the caller
+      args (npm: at most one). Without `run`, S must not be one of the package
+      manager's own commands (test, start, workspace, ...). Refused: options
+      that select another package (--prefix, --filter, -w, --workspace, --cwd,
+      ...) and, for npm, any option before its --.
   Anything else: InvalidInput tauri_launcher; run without --tauri and pass
   --config \"$STRATA_TAURI_DEV_CONFIG\" to tauri dev yourself.
 

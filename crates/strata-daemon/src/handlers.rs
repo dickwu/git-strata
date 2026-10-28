@@ -428,7 +428,8 @@ fn session_of(p: &Params) -> Option<SessionId> {
         Params::Rm(p) => Some(p.session.clone()),
         Params::Add(p) => Some(p.session.clone()),
         Params::ResolveMove(p) => Some(p.session.clone()),
-        Params::PortsEnsure(p) | Params::PortsReassign(p) => Some(p.session.clone()),
+        Params::PortsEnsure(p) => Some(p.session.clone()),
+        Params::PortsReassign(p) => Some(p.session.clone()),
         _ => None,
     }
 }
@@ -642,7 +643,7 @@ impl<'d, 'a> Server<'d, 'a> {
             }),
             Params::PortsReassign(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
                 writing();
-                Ok(lease_json(&core.store.reassign_dev_ports(&p.session, &p.repo)?))
+                Ok(lease_json(&core.store.reassign_dev_ports(&p.session, &p.repo, p.checked)?))
             }),
             Params::ResolveMove(p) => {
                 let Some(choice) = resolve::move_choice(p.abandon, p.accept) else {

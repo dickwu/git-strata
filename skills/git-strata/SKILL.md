@@ -206,13 +206,27 @@ git-strata session exec --tauri -- bun run tauri dev
   points `build.devUrl` at `http://localhost:$PORT`. The frontend dev server
   must then listen on `$PORT`. It understands `tauri dev`, `cargo tauri dev`,
   `npx|bunx|pnpx tauri dev`, `pnpm exec tauri dev`, and `bun|pnpm|yarn|npm
-  run <script>` when that script is literally `tauri dev ...`. Anything else
-  is `InvalidInput` `tauri_launcher`; use the form in `detail.fix`:
+  run <script>` when that script is literally `tauri dev ...` (or the bare
+  `tauri` CLI, with `dev` right after the script name: `bun run tauri dev`).
+  `bun|pnpm|yarn <script>` without `run` works too, except for names the
+  package manager uses itself (`test`, `start`, `workspace`, ...: add `run`).
+  Options that pick another package (`--prefix`, `--filter`, `-w`,
+  `--workspace`, `--cwd`, ...) and, for npm, any option before its `--` are
+  refused. Anything else is `InvalidInput` `tauri_launcher`; use the form in
+  `detail.fix`:
   `git-strata session exec -- sh -c 'tauri dev --config "$STRATA_TAURI_DEV_CONFIG"'`.
 - tauri-connector does not read `STRATA_CONNECTOR_PORT` yet and picks its
   own port; find it in the `.connector.json` it writes under your
   workspace's `target/` (copies from the main checkout are removed when the
   session is created).
+- `exec`'s variables reach only the command it starts and its children, not
+  a later connector command or an MCP server that is already running. When
+  you talk to the app from such a client, select it explicitly: `tauri-connector
+  ... --project <tauri_app_root>` (`tauri_app_root`, else `path`, from
+  `git-strata session ports`), or wrap the client:
+  `git-strata session exec --no-check -- tauri-connector ...`. Never connect
+  to the connector's default ports (9555/9556): they may be another
+  session's app.
 - Before starting, `exec` checks the lease's ports (`--no-check` skips it;
   `session ports --check` only reports):
   - `PortInUse` `already_running`: a process of this workspace already
@@ -224,9 +238,13 @@ git-strata session exec --tauri -- bun run tauri dev
   - `Busy` `port_unidentified` / `port_probe_error`: retry shortly.
 - A workspace without a lease yet (e.g. one created before this feature)
   gets one from the daemon on first `ports` / `exec`; an existing lease works
-  without the daemon. `Busy` `daemon_down`: see Troubleshooting.
-  `Unsupported` `daemon_too_old`: the running daemon predates leases; tell
-  the human (install the matching git-strata and restart the daemon).
+  without the daemon. `Busy` `daemon_down` from `ports` / `exec`: report it
+  to the human; do not start the daemon yourself. `Busy` `ports_exhausted`
+  (`ports` shows the workspace with `"ports": null`): no free block; tell the
+  human. `Busy` `lease_changed` (`--reassign`): another caller moved the
+  lease since your check; run `session ports --check` again and decide
+  afresh. `Unsupported` `daemon_too_old`: the running daemon predates leases;
+  tell the human (install the matching git-strata and restart the daemon).
 
 ## Hook: checkpoint after every tool call (Claude Code)
 
@@ -254,7 +272,10 @@ it to Claude Code's settings; git-strata does not write the file:
 ## The JSON envelope
 
 stdout carries exactly one compact JSON line; exit code 0 iff `ok` is true,
-else 1. Human prompts and notices go to stderr only.
+else 1. Human prompts and notices go to stderr only. One exception: a
+`session exec` that starts its command prints no envelope; stdout, stderr
+and the exit status are the command's (a failure before the start is an
+envelope as usual).
 
 ```json
 {"ok":true,"data":{...},"error":null}

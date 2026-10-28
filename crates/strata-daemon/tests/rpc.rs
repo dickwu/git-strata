@@ -191,7 +191,7 @@ fn every_method_parses_its_documented_params() {
         ("daemon_status", json!({})),
         ("du", json!({ "refresh": true })),
         ("ports_ensure", json!({ "session": sid, "repo": "tool" })),
-        ("ports_reassign", json!({ "session": sid, "repo": "tool" })),
+        ("ports_reassign", json!({ "session": sid, "repo": "tool", "checked": 20000 })),
     ];
     assert_eq!(cases.len(), Method::ALL.len());
     for (m, p) in cases {

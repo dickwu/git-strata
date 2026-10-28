@@ -105,12 +105,16 @@ fn lease_of(v: &Value, s: &SessionId, r: &RepoName) -> Result<Lease> {
     Ok(Lease { session: s.clone(), repo: r.clone(), base })
 }
 
+fn reason_of(e: &StrataError) -> Option<&str> {
+    e.detail.as_ref().and_then(|d| d.get("reason")).and_then(Value::as_str)
+}
+
 /// `ports_ensure` / `ports_reassign`. A daemon that predates them refuses
 /// the method before running anything: `Unsupported daemon_too_old`.
-fn daemon_lease(ctx: &Ctx, method: &str, s: &SessionId, r: &RepoName) -> Result<Lease> {
-    match ctx.call(method, json!({ "session": s.as_str(), "repo": r.as_str() }), Kind::Write) {
+fn daemon_lease(ctx: &Ctx, method: &str, params: Value, s: &SessionId, r: &RepoName) -> Result<Lease> {
+    match ctx.call(method, params, Kind::Write) {
         Ok(v) => lease_of(&v, s, r),
-        Err(e) if e.detail.as_ref().and_then(|d| d.get("reason")).and_then(Value::as_str) == Some("unknown_method") => {
+        Err(e) if reason_of(&e) == Some("unknown_method") => {
             Err(StrataError::new(
                 Code::Unsupported,
                 "the running daemon has no dev-port leases; install the matching git-strata and restart the daemon",
@@ -132,7 +136,7 @@ fn stored(store: &Store, s: &SessionId, r: &RepoName) -> Result<Option<Lease>> {
 fn ensured(ctx: &Ctx, store: &Store, s: &SessionId, r: &RepoName) -> Result<Lease> {
     match stored(store, s, r)? {
         Some(l) => Ok(l),
-        None => daemon_lease(ctx, "ports_ensure", s, r),
+        None => daemon_lease(ctx, "ports_ensure", json!({ "session": s.as_str(), "repo": r.as_str() }), s, r),
     }
 }
 
@@ -388,16 +392,31 @@ pub fn ports(ctx: &Ctx, a: &PortsArgs) -> Result<Envelope> {
             let repos: Vec<&str> = ts.iter().map(|t| t.repo.as_str()).collect();
             return Err(invalid("ambiguous_repo", "--reassign moves exactly one workspace's lease; pass --repo", json!({ "repos": repos })));
         };
-        if let Some(old) = stored(&store, &t.session, &t.repo)? {
-            judge(&check(&old, &t.path), Judge::Reassign, t)?;
+        // The daemon moves the lease only if it is still the one checked
+        // here (`Busy lease_changed` otherwise), so a stale check never
+        // replaces a lease another caller just took.
+        let old = stored(&store, &t.session, &t.repo)?;
+        if let Some(old) = &old {
+            judge(&check(old, &t.path), Judge::Reassign, t)?;
         }
-        let l = daemon_lease(ctx, "ports_reassign", &t.session, &t.repo)?;
+        let params = json!({ "session": t.session.as_str(), "repo": t.repo.as_str(), "checked": old.as_ref().map(|l| l.base) });
+        let l = daemon_lease(ctx, "ports_reassign", params, &t.session, &t.repo)?;
         return Ok(Envelope::ok(json!({ "leases": [lease_json(t, Some(&l), &cwd, a.check)] })));
     }
     let mut out = Vec::new();
     for t in &ts {
-        let l = ensured(ctx, &store, &t.session, &t.repo)?;
-        out.push(lease_json(t, Some(&l), &cwd, a.check));
+        // design §2.4 step 4: a workspace with no free block is an entry
+        // (`ports: null, reason: ports_exhausted`), not a failed call; the
+        // other workspaces still render. `exec` keeps the error.
+        match ensured(ctx, &store, &t.session, &t.repo) {
+            Ok(l) => out.push(lease_json(t, Some(&l), &cwd, a.check)),
+            Err(e) if e.code == Code::Busy && reason_of(&e) == Some("ports_exhausted") => {
+                let mut v = lease_json(t, None, &cwd, false);
+                v["reason"] = json!("ports_exhausted");
+                out.push(v);
+            }
+            Err(e) => return Err(e),
+        }
     }
     Ok(Envelope::ok(json!({ "leases": out })))
 }
@@ -466,9 +485,18 @@ fn is_name(s: &str) -> bool {
     b.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
 }
 
+/// What a package script `--tauri` may extend runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptKind {
+    /// `tauri dev [opts]`: the patch goes after the script's own words.
+    Dev,
+    /// The bare CLI (`"tauri": "tauri"`): the command must pass `dev` itself.
+    Cli,
+}
+
 /// §3.3 step 5: a package script `--tauri` may extend — one static command
-/// of literal words: `[NAME=value…] (tauri|bunx tauri|npx tauri) dev [opts]`.
-pub fn script_is_tauri_dev(script: &str) -> std::result::Result<(), String> {
+/// of literal words: `[NAME=value…] (tauri|bunx tauri|npx tauri) [dev [opts]]`.
+pub fn script_is_tauri_dev(script: &str) -> std::result::Result<ScriptKind, String> {
     if script.contains(['\n', '\r']) {
         return Err("the script spans several lines".into());
     }
@@ -488,13 +516,37 @@ pub fn script_is_tauri_dev(script: &str) -> std::result::Result<(), String> {
     }
     let rest = &words[i..];
     let opts = match rest {
+        ["tauri"] | ["bunx" | "npx", "tauri"] => return Ok(ScriptKind::Cli),
         ["tauri", "dev", o @ ..] | ["bunx" | "npx", "tauri", "dev", o @ ..] => o,
-        _ => return Err("the script is not `tauri dev`, `bunx tauri dev` or `npx tauri dev`".into()),
+        _ => return Err("the script is not `tauri [dev]`, `bunx tauri [dev]` or `npx tauri [dev]`".into()),
     };
     if opts.contains(&"--") {
         return Err("the script has a bare `--`".into());
     }
-    Ok(())
+    Ok(ScriptKind::Dev)
+}
+
+/// Names a package manager dispatches to its own command before any
+/// package script (`bun test` is Bun's test runner, `yarn workspace` picks
+/// another package, ...): `--tauri` needs an explicit `run` for these.
+const BUILTINS: &[&str] = &[
+    "a", "add", "audit", "bin", "build", "c", "cache", "config", "create", "dedupe", "deploy", "dlx", "doctor", "env",
+    "exec", "explain", "fetch", "i", "import", "info", "init", "install", "it", "link", "list", "ln", "ls", "node",
+    "npm", "outdated", "pack", "patch", "patch-commit", "plugin", "pm", "prune", "publish", "rb", "rebuild", "remove",
+    "repl", "restart", "rm", "root", "run", "run-script", "server", "set", "setup", "start", "stop", "store", "t",
+    "test", "un", "uninstall", "unlink", "up", "update", "upgrade", "version", "why", "workspace", "workspaces", "x",
+];
+
+/// Options that make a package manager run a different package's script
+/// (or none) even after the script name. npm takes any option before its
+/// `--`; these are refused for every manager.
+const SELECTORS: &[&str] = &[
+    "-C", "-F", "-g", "-r", "-w", "-ws", "--cwd", "--dir", "--filter", "--filter-prod", "--global", "--if-present",
+    "--include-workspace-root", "--prefix", "--recursive", "--workspace", "--workspace-root", "--workspaces",
+];
+
+fn is_selector(w: &str) -> bool {
+    SELECTORS.iter().any(|s| w == *s || w.strip_prefix(s).is_some_and(|r| r.starts_with('=')))
 }
 
 /// §3.3 step 5: where `--tauri` puts the patch, or why it refuses.
@@ -514,15 +566,29 @@ pub fn tauri_plan(argv: &[String], scripts: impl Fn(&str) -> Option<String>) -> 
     // Package scripts: (manager, index of the script name).
     let (pm, si) = match w.as_slice() {
         ["bun" | "pnpm" | "yarn" | "npm", "run", _, ..] => (w[0], 2),
-        ["bun" | "pnpm" | "yarn", s, ..] if !s.starts_with('-') && !matches!(*s, "run" | "exec" | "x" | "dlx") => (w[0], 1),
+        ["bun" | "pnpm" | "yarn", s, ..] if !s.starts_with('-') => {
+            if BUILTINS.contains(s) {
+                return Err(launcher_error(format!("`{} {s}` is the package manager's own command; use `{} run {s}`", w[0], w[0]), argv));
+            }
+            (w[0], 1)
+        }
         _ => return Err(launcher_error("unsupported launcher for --tauri", argv)),
     };
     let name = w[si];
     let Some(script) = scripts(name) else {
         return Err(launcher_error(format!("package.json has no script {name:?} here"), argv));
     };
-    script_is_tauri_dev(&script).map_err(|why| launcher_error(format!("script {name:?}: {why}"), argv))?;
+    let kind = script_is_tauri_dev(&script).map_err(|why| launcher_error(format!("script {name:?}: {why}"), argv))?;
     let tail = &w[si + 1..];
+    // Before npm's `--` everything is npm's; after it (and for the others,
+    // after the name) the words reach the script.
+    let npm_own = if pm == "npm" { tail.iter().position(|x| *x == "--").unwrap_or(tail.len()) } else { 0 };
+    if let Some(o) = tail.iter().find(|x| is_selector(x)).or_else(|| tail[..npm_own].iter().find(|x| x.starts_with('-'))) {
+        return Err(launcher_error(format!("{o:?} would let {pm} run another package's script than the one checked"), argv));
+    }
+    if kind == ScriptKind::Cli && tail.first() != Some(&"dev") {
+        return Err(launcher_error(format!("script {name:?} is the bare tauri CLI; pass `dev` right after it"), argv));
+    }
     let seps = tail.iter().filter(|x| **x == "--").count();
     if pm == "npm" {
         // npm's own separator at most once, nothing after a second one.
@@ -602,6 +668,9 @@ mod tests {
         ("sets", "PORT=1 tauri dev"),
         ("sep", "tauri dev -- --app"),
         ("other", "next dev"),
+        ("tauri", "tauri"),
+        ("test", "tauri dev"),
+        ("workspace", "tauri dev"),
     ];
 
     fn plan(w: &[&str]) -> Result<Vec<String>> {
@@ -624,6 +693,12 @@ mod tests {
         assert_eq!(plan(&["yarn", "bx"]).unwrap(), sv(&["yarn", "bx", "--config", "P"]));
         assert_eq!(plan(&["npm", "run", "tauri:dev"]).unwrap(), sv(&["npm", "run", "tauri:dev", "--", "--config", "P"]));
         assert_eq!(plan(&["npm", "run", "tauri:dev", "--", "-v"]).unwrap(), sv(&["npm", "run", "tauri:dev", "--", "-v", "--config", "P"]));
+        // explicit `run` for a name the manager also uses
+        assert_eq!(plan(&["bun", "run", "test"]).unwrap(), sv(&["bun", "run", "test", "--config", "P"]));
+        // `"tauri": "tauri"` with `dev` from the command
+        assert_eq!(plan(&["bun", "run", "tauri", "dev"]).unwrap(), sv(&["bun", "run", "tauri", "dev", "--config", "P"]));
+        assert_eq!(plan(&["pnpm", "tauri", "dev", "--release"]).unwrap(), sv(&["pnpm", "tauri", "dev", "--release", "--config", "P"]));
+        assert_eq!(plan(&["npm", "run", "tauri", "dev"]).unwrap(), sv(&["npm", "run", "tauri", "dev", "--", "--config", "P"]));
         for bad in [
             &["bun", "run", "dollar"][..],
             &["bun", "run", "chain"],
@@ -636,6 +711,23 @@ mod tests {
             &["npm", "tauri:dev"],
             &["sh", "-c", "tauri dev"],
             &["bun", "x", "tauri", "dev"],
+            // npm or a selector would run another package's script
+            &["npm", "run", "tauri:dev", "--prefix", "../other"],
+            &["npm", "run", "tauri:dev", "--prefix=../other"],
+            &["npm", "run", "tauri:dev", "-w", "app"],
+            &["npm", "run", "tauri:dev", "--workspace=app"],
+            &["npm", "run", "tauri:dev", "--if-present"],
+            &["pnpm", "run", "tauri:dev", "--filter", "app"],
+            &["yarn", "tauri:dev", "--cwd", "../other"],
+            &["bun", "run", "tauri:dev", "--cwd=../other"],
+            // the manager's own commands, not the scripts of that name
+            &["bun", "test"],
+            &["pnpm", "test"],
+            &["yarn", "workspace", "app", "tauri:dev"],
+            // the bare CLI needs `dev`
+            &["bun", "run", "tauri"],
+            &["bun", "run", "tauri", "build"],
+            &["npm", "run", "tauri", "--", "dev"],
         ] {
             let e = plan(bad).unwrap_err();
             assert_eq!(e.detail.as_ref().unwrap()["reason"], "tauri_launcher", "{bad:?}");
