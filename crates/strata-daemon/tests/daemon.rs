@@ -321,6 +321,118 @@ fn status_has_chains_only_on_request_and_top_level_id() {
     core.close().unwrap();
 }
 
+#[test]
+fn status_summary_is_store_only_and_selects_without_workspaces() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let a = new_session(&sock);
+        let b = new_session(&sock);
+        let all = ok(call(&sock, "status", json!({ "cwd": null, "session": null, "all": true, "summary": true })));
+        assert_eq!(all.as_object().unwrap().len(), 1, "only sessions: {all:#}");
+        let ss = all["sessions"].as_array().unwrap();
+        let mut want = vec![a.as_str().to_string(), b.as_str().to_string()];
+        want.sort();
+        let got: Vec<String> = ss.iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(got, want, "sorted by id");
+        for s in ss {
+            assert!(s.get("ticket").is_some_and(Value::is_null), "{s:#}");
+            assert_eq!(s["state"], "Active", "{s:#}");
+            assert_eq!(s["repos"], json!(["tool"]), "{s:#}");
+            assert!(s["created"].is_string(), "{s:#}");
+            assert!(s.get("workspaces").is_none(), "{s:#}");
+        }
+        // --brief: workspaces from the store.
+        let br = ok(call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": a.as_str(), "all": false, "summary": true, "workspaces": true }),
+        ));
+        let w = &br["sessions"][0]["workspaces"][0];
+        assert_eq!(w["repo"], "tool", "{br:#}");
+        assert_eq!(w["health_stored"], "Ok", "{br:#}");
+        assert!(w["checkpoint"].is_null(), "{br:#}");
+        let wa = PathBuf::from(w["path"].as_str().unwrap());
+        let wb = {
+            let v = ok(call(
+                &sock,
+                "status",
+                json!({ "cwd": null, "session": b.as_str(), "all": false, "summary": true, "workspaces": true }),
+            ));
+            PathBuf::from(v["sessions"][0]["workspaces"][0]["path"].as_str().unwrap())
+        };
+        // A checkpoint shows up as the latest one.
+        fs::write(wa.join("summary-edit.txt"), "x\n").unwrap();
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": a.as_str(), "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "x".into() }),
+                "paths": [],
+            }),
+        ));
+        assert_eq!(cp["recorded"], json!(true), "{cp:#}");
+        let br = ok(call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": a.as_str(), "all": false, "summary": true, "workspaces": true }),
+        ));
+        assert_eq!(br["sessions"][0]["workspaces"][0]["checkpoint"], cp["checkpoint"]["id"], "{br:#} {cp:#}");
+        // b's workspace directory gone: --all and --session still answer.
+        let away = wb.with_file_name("tool.away");
+        fs::rename(&wb, &away).unwrap();
+        let all = ok(call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": null, "all": true, "summary": true, "workspaces": true }),
+        ));
+        assert_eq!(all["sessions"].as_array().unwrap().len(), 2, "{all:#}");
+        let one = ok(call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": b.as_str(), "all": false, "summary": true, "workspaces": true }),
+        ));
+        assert_eq!(one["sessions"][0]["workspaces"][0]["health_stored"], "Ok", "store value, not Missing: {one:#}");
+        // cwd: a subdirectory of a's workspace, also through a root alias.
+        let sub = wa.join("cwd-sub");
+        fs::create_dir_all(&sub).unwrap();
+        let mut cwds = vec![sub.clone()];
+        if let Ok(rest) = sub.strip_prefix("/private") {
+            cwds.push(Path::new("/").join(rest));
+        } else if sub.starts_with("/var") || sub.starts_with("/tmp") {
+            cwds.push(Path::new("/private").join(sub.strip_prefix("/").unwrap()));
+        }
+        for c in &cwds {
+            let v = ok(call(&sock, "status", json!({ "cwd": c, "session": null, "all": false, "summary": true })));
+            assert_eq!(v["sessions"][0]["id"], json!(a.as_str()), "{} {v:#}", c.display());
+        }
+        // `tool-extra` beside `tool` is in no workspace.
+        let extra = wa.with_file_name("tool-extra");
+        fs::create_dir_all(&extra).unwrap();
+        let e = call(&sock, "status", json!({ "cwd": extra, "session": null, "all": false, "summary": true }));
+        assert_eq!(e["error"]["code"], "NoSuchSession", "{e:#}");
+        fs::remove_dir(&extra).unwrap();
+        fs::remove_dir(&sub).unwrap();
+        // Bad combinations.
+        let e = call(&sock, "status", json!({ "cwd": null, "session": null, "all": true, "workspaces": true }));
+        assert_eq!(e["error"]["code"], "InvalidInput", "{e:#}");
+        let e = call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": null, "all": true, "summary": true, "chains": true }),
+        );
+        assert_eq!(e["error"]["code"], "InvalidInput", "{e:#}");
+        let e = call(&sock, "status", json!({ "cwd": null, "session": "no-such", "all": false, "summary": true }));
+        assert_ne!(e["ok"], json!(true), "{e:#}");
+        fs::rename(&away, &wb).unwrap();
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 fn push_calls(core: &Core) -> usize {
     core.gits.values().flat_map(|g| g.take_git_calls()).filter(|c| c.args.iter().any(|a| a == "push" || a == "send-pack")).count()
 }

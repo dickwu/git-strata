@@ -549,6 +549,9 @@ impl<'d, 'a> Server<'d, 'a> {
         match p {
             Params::New(p) => self.new_session(p.ticket.as_deref(), &p.repos, p.only),
             Params::Add(p) => self.add_repos(&p.session, &p.repos),
+            Params::Status(p) if p.summary || p.workspaces => {
+                self.status_summary(p.cwd.as_deref(), p.session.as_deref(), p.all, p.chains, p.summary, p.workspaces)
+            }
             Params::Status(p) => self.status(p.cwd.as_deref(), p.session.as_deref(), p.all, p.chains),
             Params::Checkpoint(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
                 let ws = workspace(core, &p.session, &p.repo)?;
@@ -799,6 +802,39 @@ impl<'d, 'a> Server<'d, 'a> {
             }
         }
         Ok(json!({ "report": json_of(&rep), "anchor_unknown": anchor_unknown }))
+    }
+
+    /// `status{summary:true}` (status-perf C): from the store alone, no
+    /// workspace stat, no git, no tree walk. Read only; no queue, no lock.
+    fn status_summary(
+        &self,
+        cwd: Option<&Path>,
+        selector: Option<&str>,
+        all: bool,
+        chains: bool,
+        summary: bool,
+        workspaces: bool,
+    ) -> Result<Value> {
+        if !summary {
+            return Err(StrataError::new(Code::InvalidInput, "status: `workspaces` needs `summary`")
+                .with_detail(json!({ "reason": "workspaces_without_summary" })));
+        }
+        if chains {
+            return Err(StrataError::new(Code::InvalidInput, "status: `summary` and `chains` do not go together")
+                .with_detail(json!({ "reason": "summary_with_chains" })));
+        }
+        let core = self.core();
+        let sel = if all {
+            strata_session::SummarySelect::All
+        } else if let Some(s) = selector {
+            strata_session::SummarySelect::Session(s)
+        } else if let Some(c) = cwd {
+            strata_session::SummarySelect::Cwd(c)
+        } else {
+            strata_session::SummarySelect::All
+        };
+        let v = strata_session::summary(&core.store, &core.config.paths.root, sel, workspaces)?;
+        Ok(json!({ "sessions": json_of(&v) }))
     }
 
     /// Read only; no queue, no lock.

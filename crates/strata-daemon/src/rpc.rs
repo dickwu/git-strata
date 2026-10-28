@@ -109,6 +109,13 @@ pub struct StatusParams {
     /// the reply then has no `chains` key at all.
     #[serde(default)]
     pub chains: bool,
+    /// The store-only summary `ls` / `status --brief` print (status-perf
+    /// C): `{sessions:[SessionSummary]}`. Not with `chains`.
+    #[serde(default)]
+    pub summary: bool,
+    /// With `summary`: each session's workspaces from the store.
+    #[serde(default)]
+    pub workspaces: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]

@@ -30,6 +30,7 @@ mod scene;
 mod seams;
 mod seed;
 mod status;
+mod summary;
 mod sys;
 mod ticket;
 
@@ -37,6 +38,8 @@ pub use failed_move::{MoveResolution, ResolutionReport};
 pub use move_workspace::MoveReport;
 pub use old_tree::{OLD_TREE_TTL, OldTreeKey, OldTreeMode, OldTreeVerdict, Outcome as OldTreeOutcome};
 pub use remove::RemoveReport;
+pub use resolve::{resolve_in, select_in};
+pub use summary::{SessionSummary, SummarySelect, WorkspaceSummary, summary};
 #[cfg(feature = "test-seams")]
 pub use seams::SessionSeam;
 pub use status::{
