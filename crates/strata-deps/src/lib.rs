@@ -21,13 +21,15 @@ mod proposal;
 mod rollout;
 mod seal;
 mod seams;
+mod snapshot;
 
 pub use adopt::adopt;
 pub use attempts::attempts;
 pub use build::{build, clone_into, find_set, key_of};
 pub use drift::{Drift, drift};
 pub use ensure::ensure;
-pub use inputs::{inputs_hash, is_input, nested_seed_caches, platform, set_id, toolchain};
+pub use inputs::{InputRecord, hash_records, input_records, inputs_hash, is_input, nested_seed_caches, platform, set_id, toolchain};
+pub use snapshot::{clean_snapshots, remove_snapshot, snapshot_dir, snapshot_inputs, snapshot_tree};
 pub use open_files::{Hold, OpenFile, open_files};
 pub use proposal::{
     ChainState, Proposal, ProposalOrigin, ProposalState, ProposeArgs, PublishChain, get_proposal, main_tip, observe_main,
