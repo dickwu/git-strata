@@ -27,6 +27,7 @@ mod gens;
 mod open;
 mod records;
 mod retire;
+mod rm_state;
 mod schema;
 mod seams;
 mod sessions;
@@ -38,6 +39,7 @@ mod txn;
 
 #[cfg(feature = "test-seams")]
 pub use seams::{Seam, SyncCounts};
+pub use rm_state::{RebasePending, RmAttempt, RmOutcome};
 pub use devports::{DEV_PORT_BLOCK, DevPortLease, DevPortsPolicy, Probe, bind_probe};
 
 pub type Result<T> = std::result::Result<T, StrataError>;

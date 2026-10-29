@@ -592,6 +592,10 @@ impl Store {
                 if to == Lifecycle::Removed {
                     // store.md §4.4a: a removed session's dev ports are free again.
                     c.execute("DELETE FROM dev_ports WHERE session = ?1", [id]).map_err(w(OP))?;
+                    // rm-followups §2.2 R2 / §1.3: the last rm outcome and any
+                    // deferred rebase go with the session, in this transaction.
+                    c.execute("DELETE FROM rm_attempts WHERE session = ?1", [id]).map_err(w(OP))?;
+                    c.execute("DELETE FROM rebase_pending WHERE session = ?1", [id]).map_err(w(OP))?;
                 }
                 return Ok(Tx::Commit(true));
             }

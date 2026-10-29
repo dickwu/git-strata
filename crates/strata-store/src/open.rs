@@ -158,7 +158,13 @@ fn pragma_text(c: &Connection, name: &str) -> sql::SqlResult<String> {
 }
 
 fn bad_version(shown: &str, uv: u32) -> StrataError {
-    let why = if uv > LATEST { "; a newer git-strata wrote it, install that version" } else { "" };
+    // rm-followups §1.11: an older CLI meeting a store its daemon migrated
+    // says what to do, not only that the version is out of range.
+    let why = if uv > LATEST {
+        format!("; this git-strata is older than the store (v{uv}); install the matching git-strata")
+    } else {
+        String::new()
+    };
     err(
         Code::Corrupt,
         format!("{shown} has schema version {uv}; this strata understands {BASE_VERSION}..={LATEST}{why}"),
