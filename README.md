@@ -169,6 +169,33 @@ Every call prints exactly one compact JSON line on stdout:
 7. **`push REPO`** pushes the publish chain, only when the human asked.
 8. **`rm --session S`** removes the session once its work is published.
 
+**After a publish, sessions follow automatically, but only when it is safe.**
+Every publish, push replay, and a daemon catch-up pass (at start and every
+60 s) try to move each live session that is behind onto the published tree
+(`Auto` policy). A move happens only when the workspace is idle: no process
+has a file or cwd open anywhere under it, nothing in it was written within
+`rebase.quiet_secs` (default 120 s), and the session's edits project onto the
+new tree without conflict (`rm.regenerable` paths excepted). Otherwise the
+move is **deferred**, never forced: `status` shows
+`behind publish N of REPO: auto-rebase deferred (open_files|recent_writes|conflicts|busy, since HH:MM, attempts k)`
+and the catch-up retries with backoff (capped at 30 min). When the publish
+changed install inputs (`package.json`, `bun.lock`), the source moves onto the
+published tree with the session's old deps set (`rebase.deps_changed =
+"move_source"`, the default; `"wait"` keeps the old behaviour) and the deps
+proposal stays Pending for the human. Explicit moves (deps approval rollout)
+are unchanged. If something writes into the pre-move tree after the swap, that
+tree is kept instead of retired (`status`/`ls` list it under `kept_trees`
+with the late-written paths); `rm` refuses until it is published or discarded, and the
+`rm --discard` prompt names it.
+
+**What `rm` counts as published.** An edit is published when a Done publish
+of this session, reachable from origin, has the same bytes (D57), or when a
+move onto the newest such publish would discharge the whole entry (for
+example the publish merged it with origin's changes in the same file). The
+second rule needs that publish's base already built (rm never builds one) and
+counts in `detail.landed.<repo>.rebased` / `rebased_onto`. Everything else
+makes `rm` refuse with `Dirty` and nothing is removed.
+
 ## Seed files (.env)
 
 `seed_files` in `config.toml` (default candidates `CLAUDE.md`, `.env`,

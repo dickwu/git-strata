@@ -1471,3 +1471,10 @@ git commit -m "feat(session): resolve a failed move by abandoning or accepting i
 | D58 种子缓存里的 `.connector.json`（dev-ports，peilin 定） | `new` 与 `add` 克隆名为 `target` 的种子缓存之后，删掉 `target/`、`target/debug/`、`target/release/` 下的 `.connector.json`；只删这三个文件，经 `apfs::remove_rooted`（不跟随符号链接），`NoSuchPath` 忽略。端口本身由 store 的 `dev_ports` 租约给出（store.md §4.4，cli.md D37），session 不碰端口 | 这些文件记录的是主 checkout 里那个应用的端口与 pid；克隆进会话后，按文件找应用的 agent 会连到主 checkout 的进程。删掉之后由会话自己的 `tauri dev` 重新写 | 2026-10-28 |
 | 工作区 `.git` 的接法（design §12 交给构建者） | 每个会话、每个 repo 一个影子仓库（§4.2） | 裁定增补 2 定下 | 2026-10-22 |
 | `rm` 前最后一个 checkpoint 的保留期（design §6.6） | 由 store 的 gc 按 `keep` 回收；session 只在 `RemoveReport` 里给出 `CheckpointId` | 裁定增补 3 定下 | 2026-10-22 |
+
+### rm-followups（2026-10-29，[实现时补的决定]，design r10 §1.8–1.10、R2、R3）
+
+- **R2/R3**：`rm` 的拒绝消息与 `detail.removed/lifecycle`，拒绝或失败记入 `rm_attempts`；`status`/`ls`/`--brief` 的 `RmNotes`（`last_rm`、`rm_interrupted`、`rebase_pending` 行、`kept_trees`）与 `removed_leftovers`（`sessions/` 与 `sessions/.repos/` 各一次 `read_dir`，summary 路径"只读 store"约定的明确例外）。
+- **B2 `rm.regenerable`**：钉住的列表里匹配的 Modified/Added/Untracked 条目不挡 `rm`（照样进 BeforeRemove checkpoint，结果列在 `regenerable`）；BeforeRemove 里不稳定的 regenerable 路径仍然挡。
+- **T3 投影**（remove.rs `Sessions::project`）：阶段 A 在 D57 之后，取最新的 D57 候选（Done、本会话参与、commit 能从 `refs/strata/remotes/origin/<branch>` 到达），且要求 `ws.head` 是它的祖先（不会投影到更旧的树而掩盖回退）；它的基线必须已建好（`base.rs built_base`：先找本会话的 deps 代，再扫 `bases/<repo>/<tree>/*`；rm 从不建基线，没有 → 条目留在 Dirty）。用 `rebase_with(overlay, old, new, PreviewBlobs, RebaseOptions::for_move)` 投影；一个条目只有整体被吸收（它的路径，含改名两端，都不在投影后的条目、冲突、lww 与不稳定集合里）才算已落地。改名在 overlay 里是删除加新增，两边都要各自被吸收。`detail.landed.<repo>` 加 `rebased`、`rebased_onto`，`count` 含两种；投影出错进 `detail.projection_errors`，保守地留下。阶段 B 用 BeforeRemove checkpoint 的条目重算同一投影（`unstable` 取 checkpoint 警告），不再被吸收的 → `changed_during_remove`；只出现在 checkpoint 里的新条目不会新投影。
+- **保留的旧树**：Dirty 拒绝列出旧树里迟到写入的路径；`rm --discard` 的 `RemoveDiscard{kept_trees}` 在 Touch ID 文字里点名这些旧树，凭据绑定到弹框时的列表（之间变了 → `NotConfirmed`，重试）。

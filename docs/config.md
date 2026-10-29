@@ -89,7 +89,7 @@
   [repo.admin.rm]
   regenerable = ["src/constants/permissionMap/generated.json"]
   ```
-- **`[repo.<name>.rebase]`**：[实现时补的决定]（2026-10-29，rm-followups §1.3）`deps_changed = "move_source" | "wait"`（缺省 `move_source`：发布改了安装输入时，自动 rebase 只把源码移到新树、沿用旧依赖集，依赖提案保持 Pending；`wait` = 旧的 `Waiting`）；`quiet_secs`（缺省 120，≤ 86400，V15）是自动 rebase 的安静窗口。（2026-10-29 B2 提交时：这两个键已解析、校验，行为在 C 的后续提交里接线。）
+- **`[repo.<name>.rebase]`**：[实现时补的决定]（2026-10-29，rm-followups §1.3）`deps_changed = "move_source" | "wait"`（缺省 `move_source`：发布改了安装输入时，自动 rebase 只把源码移到新树、沿用旧依赖集，依赖提案保持 Pending；`wait` = 旧的 `Waiting`）；`quiet_secs`（缺省 120，≤ 86400，V15）是自动 rebase 的安静窗口。（2026-10-29 rm-followups 2.2–2.5 起生效：`quiet_secs` 是 Auto 门 G2 的安静窗口，`deps_changed` 决定 C2 只挪源码还是 `Waiting`；只影响自动 rebase（发布、push 重放、daemon 追赶），依赖审批的 rollout 与显式 move 不受影响。）
 - **新键的上线顺序**：`[repo.<name>.rm]`、`[repo.<name>.rebase]` 旧二进制不认（V11），而且一旦 `pins.json` 钉进了非空的 `regenerable`，旧 daemon 也读不了它（旧 CLI 把读不了的 pins.json 当作"要确认"）。所以先把新的 `git-strata` 与 `git-stratad` 一起装好并重启 daemon，再往配置里加这些键。新二进制读没有这些键的配置（缺省值）。
 
 ### 2.4 命令行字符串（`install` 与 `checks`）
