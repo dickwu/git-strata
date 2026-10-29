@@ -36,13 +36,13 @@ mod summary;
 mod sys;
 mod ticket;
 
-pub use activity::{Activity, Idle, busy_reason, walk_activity};
+pub use activity::{Activity, Idle, baseline_of, busy_reason, changed_since, idle_activity, walk_activity};
 pub use failed_move::{MoveResolution, ResolutionReport};
-pub use move_workspace::MoveReport;
+pub use move_workspace::{AUTO_DEFERRED, MoveReport, auto_deferral};
 pub use old_tree::{OLD_TREE_TTL, OldTreeKey, OldTreeMode, OldTreeVerdict, Outcome as OldTreeOutcome};
 pub use remove::{Regenerable, RemoveReport};
 pub use rm_note::{
-    LastRm, RebaseNote, RmInterrupted, RmNotes, leftover_line, local_hhmm, removed_leftover_of, removed_leftovers, rm_notes,
+    KeptTree, LastRm, RebaseNote, RmInterrupted, RmNotes, leftover_line, local_hhmm, removed_leftover_of, removed_leftovers, rm_notes,
     with_leftover_detail,
 };
 pub use resolve::{resolve_in, select_in};

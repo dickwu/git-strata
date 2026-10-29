@@ -219,6 +219,12 @@ pub(crate) fn deferred(reason: &str, detail: Value) -> RebaseReport {
     RebaseReport::Deferred { reason: reason.to_owned(), detail, proposal: None }
 }
 
+/// An `Auto` move's G4 deferral (`Busy`, `auto_deferred`) as a report.
+fn deferred_of(e: &StrataError) -> RebaseReport {
+    let (reason, detail) = strata_session::auto_deferral(e).unwrap_or_else(|| ("busy".into(), Value::Null));
+    RebaseReport::Deferred { reason, detail, proposal: None }
+}
+
 /// rm-followups §1.4 G0: an `Auto` move needs an Active session, no scene on
 /// it or the workspace, no open move intent and the workspace still on `old`.
 fn g0_state(ctx: &Ctx, s: &SessionId, old: &BaseGen) -> Result<Option<RebaseReport>> {
@@ -248,17 +254,24 @@ fn g0_state(ctx: &Ctx, s: &SessionId, old: &BaseGen) -> Result<Option<RebaseRepo
 }
 
 /// rm-followups §1.4 G1–G3 outside every lock: idle workspace, then the
-/// read-only projection. `Ok(None)` → move; `Ok(Some(paths))` is never
-/// returned empty: it is the regenerable conflicts kept on a move.
-fn auto_gates(ctx: &Ctx, s: &SessionId, old: &BaseGen, new: &Base) -> Result<std::result::Result<Vec<RepoPath>, RebaseReport>> {
+/// read-only projection. `Ok(Ok((kept, baseline)))` → move: the
+/// regenerable conflicts kept, and G2's activity snapshot the move
+/// persists and proves again (G4); `Ok(Err(report))` → deferred.
+fn auto_gates(
+    ctx: &Ctx,
+    s: &SessionId,
+    old: &BaseGen,
+    new: &Base,
+) -> Result<std::result::Result<(Vec<RepoPath>, strata_store::MoveBaseline), RebaseReport>> {
     if let Some(d) = g0_state(ctx, s, old)? {
         return Ok(Err(d));
     }
     let ws = workspace(ctx, s)?;
     let quiet = Duration::from_secs(ctx.cfg.rebase.quiet_secs);
-    if let Some(idle) = strata_session::busy_reason(&ws.path, quiet)? {
-        return Ok(Err(deferred(idle.reason, idle.detail)));
-    }
+    let activity = match strata_session::idle_activity(&ws.path, quiet)? {
+        Ok(a) => a,
+        Err(idle) => return Ok(Err(deferred(idle.reason, idle.detail))),
+    };
     let old_base = base_struct(ctx.store, old)?;
     let overlay = current_overlay(ctx, s, &ws, &old_base)?;
     let ignorecase = ctx.git.read_index(&ws.path)?.ignorecase;
@@ -279,7 +292,7 @@ fn auto_gates(ctx: &Ctx, s: &SessionId, old: &BaseGen, new: &Base) -> Result<std
         let shown: Vec<&str> = blocking.iter().take(20).map(|p| p.as_str()).collect();
         return Ok(Err(deferred("conflicts", json!({ "paths": shown, "count": blocking.len() }))));
     }
-    Ok(Ok(kept))
+    Ok(Ok((kept, strata_session::baseline_of(&activity))))
 }
 
 /// A re-check run under the session queue and the repo write lock, given
@@ -341,9 +354,13 @@ pub(crate) fn rebase_one_with(
     // rm-followups §1.4: an `Auto` move of the same deps set first passes
     // the gates outside every lock (another deps set keeps today's path).
     let mut kept: Vec<RepoPath> = Vec::new();
+    let mut baseline: Option<strata_store::MoveBaseline> = None;
     if policy == MovePolicy::Auto && n == old.deps {
         match auto_gates(ctx, s, &old, &new)? {
-            Ok(k) => kept = k,
+            Ok((k, b)) => {
+                kept = k;
+                baseline = Some(b);
+            }
             Err(d) => return Ok(d),
         }
     }
@@ -375,8 +392,13 @@ pub(crate) fn rebase_one_with(
             {
                 return Ok(d);
             }
-            return match ctx.sessions.move_workspace_consuming(s, &repo_id, target.clone(), head.clone(), at.consume) {
+            let moved = match &baseline {
+                Some(b) => ctx.sessions.move_workspace_auto(s, &repo_id, target.clone(), head.clone(), at.consume, b),
+                None => ctx.sessions.move_workspace_consuming(s, &repo_id, target.clone(), head.clone(), at.consume),
+            };
+            return match moved {
                 Ok(r) => Ok(RebaseReport::Moved { dropped: r.dropped, lww: r.lww, regenerable_kept: kept.clone(), deps_pending: None }),
+                Err(e) if strata_session::auto_deferral(&e).is_some() => Ok(deferred_of(&e)),
                 // §1.7: `OpenFiles` is for `Explicit` callers only.
                 Err(e) if e.code == Code::OpenFiles && policy == MovePolicy::Auto => {
                     Ok(deferred("open_files", e.detail.unwrap_or(Value::Null)))
@@ -509,7 +531,7 @@ fn move_source(
         Err(d) => return Ok(d),
     };
     // 2. G0–G3 outside the locks, against the source-only base.
-    let kept = match auto_gates(ctx, s, old, &new)? {
+    let (kept, baseline) = match auto_gates(ctx, s, old, &new)? {
         Ok(k) => k,
         Err(d) => return Ok(with_p(d, &p)),
     };
@@ -527,8 +549,9 @@ fn move_source(
         if let Some(d) = g0_state(ctx, s, old)? {
             return Ok(d);
         }
-        match ctx.sessions.move_workspace_consuming(s, &repo_id, src.clone(), head.clone(), at.consume) {
+        match ctx.sessions.move_workspace_auto(s, &repo_id, src.clone(), head.clone(), at.consume, &baseline) {
             Ok(r) => Ok(RebaseReport::Moved { dropped: r.dropped, lww: r.lww, regenerable_kept: kept.clone(), deps_pending: Some(p.clone()) }),
+            Err(e) if strata_session::auto_deferral(&e).is_some() => Ok(deferred_of(&e)),
             Err(e) if e.code == Code::OpenFiles => Ok(deferred("open_files", e.detail.unwrap_or(Value::Null))),
             Err(e) => Err(e),
         }

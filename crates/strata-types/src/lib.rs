@@ -17,6 +17,6 @@ pub use ids::{
 };
 pub use model::{
     Action, BaseGen, BaseManifest, Batch, Checkpoint, CheckpointReason, ConfirmToken, DepsSet,
-    EntryKind, ManifestEntry, OverlayEntry, PublishTarget, PushOutcome, ReleaseGroup,
+    EntryKind, KeptTreeRef, ManifestEntry, OverlayEntry, PublishTarget, PushOutcome, ReleaseGroup,
     SessionManifest, WorkspaceState, display_url,
 };

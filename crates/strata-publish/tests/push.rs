@@ -193,7 +193,7 @@ fn confirm_without_a_matching_token_stops_before_push() {
         None,
         Some(token(deploy(&fx, "other"))),
         Some(token(Action::PushDeploy { repo: repo_name("front"), branch: "main".into(), url: fx.git_of("tool").push_url("origin").unwrap() })),
-        Some(token(Action::RemoveDiscard { session: s.clone() })),
+        Some(token(Action::RemoveDiscard { session: s.clone(), kept_trees: vec![] })),
     ];
     for (deploy_on_push, confirm) in [(true, true), (false, true)] {
         fx.cfg_mut("tool").deploy_on_push = deploy_on_push;
@@ -678,7 +678,7 @@ fn pre_write_wait_is_busy_post_write_wait_is_not() {
 fn removed_session_is_nosuchsession() {
     let fx = fx();
     let (s, g) = edit(&fx, "src/index.ts", b"export const a = 14\n");
-    fx.sessions().remove(&s, true, Some(token(Action::RemoveDiscard { session: s.clone() }))).unwrap();
+    fx.sessions().remove(&s, true, Some(token(Action::RemoveDiscard { session: s.clone(), kept_trees: vec![] }))).unwrap();
     let e = run(&fx, &g, None).unwrap_err();
     assert_eq!(e.code, Code::NoSuchSession, "{e:?}");
     assert!(fx.store().publishes().unwrap().is_empty(), "no new row");

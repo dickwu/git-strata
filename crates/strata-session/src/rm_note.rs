@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use strata_store::{Lifecycle, RebasePending, RmAttempt, RmOutcome, SessionRecord, Store};
+use strata_store::{Lifecycle, MoveState, RebasePending, RmAttempt, RmOutcome, SessionRecord, Store};
 use strata_types::{Code, RepoName, SessionId, StrataError};
 
 use crate::recover::Leftover;
@@ -32,6 +32,10 @@ pub struct RmNotes {
     /// Deferred post-publish rebases, by repo.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rebase_pending: Vec<RebaseNote>,
+    /// rm-followups §1.4 G4: pre-move trees of `Auto` moves kept because
+    /// they changed after the move (or their baseline is unreadable).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_trees: Vec<KeptTree>,
     /// The lines above as a person reads them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
@@ -39,8 +43,69 @@ pub struct RmNotes {
 
 impl RmNotes {
     pub fn is_empty(&self) -> bool {
-        self.last_rm.is_none() && self.rm_interrupted.is_none() && self.rebase_pending.is_empty()
+        self.last_rm.is_none() && self.rm_interrupted.is_none() && self.rebase_pending.is_empty() && self.kept_trees.is_empty()
     }
+}
+
+/// A kept pre-move tree with its late-write notice.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptTree {
+    pub repo: RepoName,
+    pub path: PathBuf,
+    /// RFC 3339, when the move finished.
+    pub moved_at: String,
+    /// How many paths changed (0 for `baseline_missing`).
+    pub count: u64,
+    /// The first 20 of them, relative to `path`.
+    pub paths: Vec<String>,
+    /// `late_writes`, `walk_error` or `baseline_missing`.
+    pub reason: String,
+}
+
+/// The kept trees of `session`: done `Auto` moves with a late-write notice
+/// whose tree is still there (store reads plus one `lstat` each).
+pub(crate) fn kept_trees(store: &Store, session: &SessionId) -> Result<Vec<KeptTree>> {
+    let rows = store.move_activities(session)?;
+    if rows.iter().all(|r| r.late_writes.is_none()) {
+        return Ok(Vec::new());
+    }
+    let intents = store.move_intents(session)?;
+    let mut out = Vec::new();
+    for r in rows {
+        let Some(n) = &r.late_writes else { continue };
+        let Some(i) = intents.iter().find(|i| i.repo == r.repo && i.n == r.n && i.state == MoveState::Done) else {
+            continue;
+        };
+        let path = i.old_tree.clone().unwrap_or_else(|| i.staging.clone());
+        if !present(&path) {
+            continue;
+        }
+        out.push(KeptTree {
+            repo: r.repo.clone(),
+            path,
+            moved_at: n.get("moved_at").and_then(Value::as_str).unwrap_or("").to_string(),
+            count: n.get("count").and_then(Value::as_u64).unwrap_or(0),
+            paths: n
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|v| v.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default(),
+            reason: n.get("reason").and_then(Value::as_str).unwrap_or("late_writes").to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// "auto-rebase moved REPO at T; N files changed in the pre-move tree
+/// afterwards, kept at PATH".
+pub(crate) fn kept_line(k: &KeptTree) -> String {
+    let at = strata_types::serde_rfc3339::parse(&k.moved_at).map(local_hhmm).unwrap_or_else(|_| "?".into());
+    let p = k.path.display();
+    if k.reason == "baseline_missing" {
+        return format!("auto-rebase moved {} at {at}; its activity baseline is unreadable, the pre-move tree is kept at {p}", k.repo);
+    }
+    let files = if k.count == 1 { "file" } else { "files" };
+    format!("auto-rebase moved {} at {at}; {} {files} changed in the pre-move tree afterwards, kept at {p}", k.repo, k.count)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +277,10 @@ pub fn rm_notes(store: &Store, root: &Path, rec: &SessionRecord) -> Result<RmNot
             attempts: p.attempts,
             since: p.first_at,
         });
+    }
+    for k in kept_trees(store, id)? {
+        out.notes.push(kept_line(&k));
+        out.kept_trees.push(k);
     }
     Ok(out)
 }

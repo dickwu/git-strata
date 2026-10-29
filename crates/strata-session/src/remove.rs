@@ -87,6 +87,17 @@ const INLINE_PATHS: usize = 5;
 
 impl Sessions<'_> {
     /// §5.6.
+    /// The `--discard` confirmation for `id`: the session and the kept
+    /// pre-move trees with late writes it also throws away (rm-followups
+    /// §1.4 G4 item 5). Store reads and one `lstat` per kept tree.
+    pub fn discard_action(&self, id: &SessionId) -> Result<Action> {
+        let kept_trees = crate::rm_note::kept_trees(self.store, id)?
+            .into_iter()
+            .map(|k| strata_types::KeptTreeRef { path: k.path.display().to_string(), count: k.count })
+            .collect();
+        Ok(Action::RemoveDiscard { session: id.clone(), kept_trees })
+    }
+
     pub fn remove(&self, id: &SessionId, discard: bool, confirm: Option<ConfirmToken>) -> Result<RemoveReport> {
         // ---- Phase A: named refusals; nothing is written.
         // 1.
@@ -105,7 +116,7 @@ impl Sessions<'_> {
         }
         // 2. The token is consumed by value here.
         if discard {
-            let expected = Action::RemoveDiscard { session: id.clone() };
+            let expected = self.discard_action(id)?;
             let why = match &confirm {
                 None => Some("missing"),
                 Some(t) if t.action != expected => Some("mismatch"),
@@ -423,15 +434,21 @@ impl Sessions<'_> {
                     repos.insert(repo.as_str().into(), paths_json(&remaining));
                 }
             }
-            // Changed old trees (the rule of §5.5 step 2.9).
+            // Changed old trees (the rule of §5.5 step 2.9; rm-followups
+            // §1.4 G4 item 5: a late-write tree lists its changed paths).
             let cfg = self.repo_cfg(repo)?;
+            let kept = crate::rm_note::kept_trees(self.store, id).unwrap_or_default();
             for i in intents.iter().filter(|i| &i.repo == repo && i.state == MoveState::Done) {
                 let path = i.old_tree.clone().unwrap_or_else(|| i.staging.clone());
                 if !exists(&path) {
                     continue;
                 }
                 if !self.old_tree_unchanged(i, cfg).unwrap_or(false) {
-                    old_trees.push(json!({ "repo": repo.as_str(), "n": i.n, "path": path }));
+                    let mut v = json!({ "repo": repo.as_str(), "n": i.n, "path": path });
+                    if let Some(k) = kept.iter().find(|k| &k.repo == repo && k.path == path) {
+                        v["late_writes"] = json!({ "count": k.count, "paths": k.paths, "reason": k.reason, "moved_at": k.moved_at });
+                    }
+                    old_trees.push(v);
                 }
             }
         }
@@ -644,8 +661,26 @@ fn dirty_message(
     if !scenes.is_empty() {
         parts.push(format!("unresolved: {}", scenes.join(", ")));
     }
-    if !old_trees.is_empty() {
-        let t: Vec<String> = old_trees
+    let (late, plain): (Vec<&Value>, Vec<&Value>) = old_trees.iter().partition(|v| v.get("late_writes").is_some());
+    for v in &late {
+        let l = &v["late_writes"];
+        let repo = v.get("repo").and_then(Value::as_str).unwrap_or("?");
+        let path = v.get("path").and_then(Value::as_str).unwrap_or("?");
+        let count = l.get("count").and_then(Value::as_u64).unwrap_or(0);
+        let shown: Vec<&str> = l.get("paths").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+        if count == 0 {
+            parts.push(format!("{repo}: pre-move tree kept after an auto-rebase (activity baseline unreadable) at {path}; its files are intact there"));
+        } else {
+            let more = if count as usize > shown.len() { format!(", … (+{} more)", count as usize - shown.len()) } else { String::new() };
+            parts.push(format!(
+                "{repo}: {count} {} written to the pre-move tree after an auto-rebase, kept at {path}: {}{more}; the files are intact there",
+                if count == 1 { "file" } else { "files" },
+                shown.join(", ")
+            ));
+        }
+    }
+    if !plain.is_empty() {
+        let t: Vec<String> = plain
             .iter()
             .map(|v| {
                 format!(
@@ -681,6 +716,9 @@ fn dirty_message(
         }
     } else {
         s.push_str(&format!(" Resolve them, or run `git-strata rm --discard {id}` (Touch ID) to remove it anyway."));
+    }
+    if !late.is_empty() {
+        s.push_str(" Copy the files you want out of the kept pre-move tree first: `--discard` moves it to trash too (recoverable until trash gc).");
     }
     s
 }

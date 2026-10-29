@@ -28,6 +28,7 @@ mod open;
 mod records;
 mod retire;
 mod rm_state;
+mod move_activity;
 mod schema;
 mod seams;
 mod sessions;
@@ -39,6 +40,7 @@ mod txn;
 
 #[cfg(feature = "test-seams")]
 pub use seams::{Seam, SyncCounts};
+pub use move_activity::{MoveActivity, MoveBaseline};
 pub use rm_state::{RebasePending, ReplayPlan, RmAttempt, RmOutcome};
 pub use devports::{DEV_PORT_BLOCK, DevPortLease, DevPortsPolicy, Probe, bind_probe};
 

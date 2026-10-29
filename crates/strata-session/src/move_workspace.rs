@@ -132,6 +132,38 @@ impl Sessions<'_> {
         head: CommitOid,
         consume: Option<u64>,
     ) -> Result<MoveReport> {
+        self.move_inner(session, repo, new_base, head, consume, None)
+    }
+
+    /// An `Auto` move (rm-followups §1.4 G4): [`Sessions::move_workspace_consuming`]
+    /// that persists G2's activity snapshot `baseline` with the intent,
+    /// re-applies the G3 conflict rule to the real rebase before the intent,
+    /// re-proves the baseline and scans holders of the whole workspace and
+    /// staging at step 14, and keeps (never retires) an old tree changed
+    /// since the baseline. A deferral is `Busy` with
+    /// `detail.reason = "auto_deferred"` and `detail.defer = {reason, detail}`
+    /// (see [`auto_deferral`]).
+    pub fn move_workspace_auto(
+        &self,
+        session: &SessionId,
+        repo: &RepoId,
+        new_base: BaseGen,
+        head: CommitOid,
+        consume: Option<u64>,
+        baseline: &strata_store::MoveBaseline,
+    ) -> Result<MoveReport> {
+        self.move_inner(session, repo, new_base, head, consume, Some(baseline))
+    }
+
+    fn move_inner(
+        &self,
+        session: &SessionId,
+        repo: &RepoId,
+        new_base: BaseGen,
+        head: CommitOid,
+        consume: Option<u64>,
+        auto: Option<&strata_store::MoveBaseline>,
+    ) -> Result<MoveReport> {
         // ---- Phase A: checks; nothing is written.
         // 1.
         let name = self.repo_name(repo)?;
@@ -331,6 +363,28 @@ impl Sessions<'_> {
         let wsref = WorkspaceRef { session, repo: &name, root: &ws.path, config: cfg, git, store: self.store };
         let cp = self.before.checkpoint(&wsref, &old, CheckpointReason::BeforeRollout)?.checkpoint;
 
+        // rm-followups §1.4 G4: the real rebase, from the checkpoint, before
+        // the intent; a conflict outside `rm.regenerable` defers (the
+        // checkpoint stays, nothing else is written).
+        let mut pre: Option<(Rebased, bool)> = None;
+        if auto.is_some() {
+            let ignorecase = git.read_index(&ws.path)?.ignorecase;
+            let opts = RebaseOptions::for_move(&new, ignorecase)?;
+            let rebased = strata_overlay::rebase(&Overlay::from_checkpoint(&cp), &old, &new, self.store, &opts)?;
+            let patterns = self.regenerable(&name);
+            let regen = crate::Regenerable::new(&patterns, cfg);
+            let blocking: Vec<&RepoPath> = rebased
+                .conflicts
+                .iter()
+                .filter(|p| !cp.entries.iter().any(|e| &e.path == *p && regen.matches(e)))
+                .collect();
+            if !blocking.is_empty() {
+                let shown: Vec<&str> = blocking.iter().take(20).map(|p| p.as_str()).collect();
+                return Err(auto_defer("conflicts", json!({ "paths": shown, "count": blocking.len() })));
+            }
+            pre = Some((rebased, ignorecase));
+        }
+
         // ---- Phase D: the intent and the staging.
         // 12.
         self.live_moves.lock().unwrap_or_else(|x| x.into_inner()).insert((session.clone(), name.clone()));
@@ -338,7 +392,7 @@ impl Sessions<'_> {
         let sname = format!("{MOVE_STAGING_PREFIX}{name}-{}", random_hex(8));
         let staging = root.join(&sname);
         let started = SystemTime::now();
-        let n = self.store.begin_move(session, &name, &new_base, &head, &staging, started)?;
+        let n = self.store.begin_move_with(session, &name, &new_base, &head, &staging, started, auto)?;
         let mv = Mv { session, name: &name, n, staging: staging.clone(), shadow_dir: shadow_dir.clone() };
 
         // 13. prepare.
@@ -347,9 +401,14 @@ impl Sessions<'_> {
             self.store.set_move_phase(session, &name, n, "prepare")?;
             self.seams.hit("move.prepare", Some(&name))?;
             strata_apfs::clone_tree_rooted(&self.store.base_dir(&new_base), &root, &rp(sname.clone()))?;
-            let ignorecase = git.read_index(&ws.path)?.ignorecase;
-            let opts = RebaseOptions::for_move(&new, ignorecase)?;
-            let rebased = strata_overlay::rebase(&Overlay::from_checkpoint(&cp), &old, &new, self.store, &opts)?;
+            let (rebased, ignorecase) = match pre.take() {
+                Some(x) => x,
+                None => {
+                    let ignorecase = git.read_index(&ws.path)?.ignorecase;
+                    let opts = RebaseOptions::for_move(&new, ignorecase)?;
+                    (strata_overlay::rebase(&Overlay::from_checkpoint(&cp), &old, &new, self.store, &opts)?, ignorecase)
+                }
+            };
             strata_overlay::project(self.store, &rebased.overlay, &staging)?;
             let out = self.carry(&ws.path, &staging, &old, &cp.entries, &d, cfg, ignorecase, &name)?;
             // Review P1-14: what the carry took and when, next to the old
@@ -369,12 +428,32 @@ impl Sessions<'_> {
         let rechecked = (|| -> Result<Vec<strata_deps::OpenFile>> {
             self.store.set_move_phase(session, &name, n, "recheck")?;
             self.seams.hit("move.recheck", Some(&name))?;
+            if let Some(b) = auto {
+                // G4 step 14, an early-out only: G2's walk again, then one
+                // scan of the whole workspace and the staging.
+                let changed = match crate::activity::changed_since(&ws.path, b) {
+                    Ok(v) => v,
+                    Err(e) => vec![format!("(walk error: {})", e.message)],
+                };
+                if !changed.is_empty() {
+                    let shown: Vec<&String> = changed.iter().take(20).collect();
+                    return Err(auto_defer("changed_during_move", json!({ "paths": shown, "count": changed.len() })));
+                }
+                let mut h = strata_deps::open_files(&ws.path)?;
+                h.extend(strata_deps::open_files(&staging)?);
+                return Ok(h);
+            }
             let mut h = held_dirs(&ws.path, &d)?;
             h.extend(held_dirs(&staging, &d)?);
             Ok(h)
         })();
         match rechecked {
             Ok(h) if h.is_empty() => {}
+            Ok(h) if auto.is_some() => {
+                let e = open_files_error(&ws.path, h);
+                let e = auto_defer("open_files", e.detail.unwrap_or(Value::Null));
+                return Err(self.prepare_failed(&mv, "recheck", e));
+            }
             Ok(h) => {
                 return Err(self.prepare_failed(&mv, "recheck", open_files_error(&ws.path, h)));
             }
@@ -449,7 +528,38 @@ impl Sessions<'_> {
                 let held = strata_deps::open_files(&staging).map(|h| !h.is_empty()).unwrap_or(true);
                 // Review P1-14: the overlay entries, and every carried
                 // ignored entry as the carry took it.
-                let unchanged = self.tree_matches(session, &name, cfg, &staging, &old, &cp.entries)
+                // rm-followups §1.4 G4 Phase F: an `Auto` move's old tree is
+                // also held to the activity baseline; a change (or a walk
+                // error) keeps it for good, with the late-write notice.
+                let late = match auto {
+                    None => false,
+                    Some(b) => {
+                        let v = match crate::activity::changed_since(&staging, b) {
+                            Ok(v) => v,
+                            Err(e) => vec![format!("(walk error: {})", e.message)],
+                        };
+                        if !v.is_empty() {
+                            let moved = MoveIntent {
+                                session: session.clone(),
+                                repo: name.clone(),
+                                n,
+                                to: new_base.clone(),
+                                head: head.clone(),
+                                staging: staging.clone(),
+                                phase: None,
+                                state: MoveState::Done,
+                                conflicts: None,
+                                old_tree: None,
+                                started,
+                                ended: Some(SystemTime::now()),
+                            };
+                            self.late_notice(&moved, &v, "late_writes");
+                        }
+                        !v.is_empty()
+                    }
+                };
+                let unchanged = !late
+                    && self.tree_matches(session, &name, cfg, &staging, &old, &cp.entries)
                     && untouched(&staging, &old, &cp.entries, &d, cfg, ignorecase, Some(&carried), started);
                 if !held && unchanged && uncarried.is_empty() {
                     let gone = self.store.retire_dir(&staging).is_ok() && {
@@ -476,6 +586,9 @@ impl Sessions<'_> {
             }
         }
         self.forget_old_trees(session);
+        // G4 item 4: every `Auto` tree still kept gets its next pass (after
+        // the forget above, which clears the session's queue).
+        self.queue_auto_trees(session);
 
         Ok(MoveReport {
             session: session.clone(),
@@ -568,6 +681,16 @@ impl Sessions<'_> {
     /// in the old tree's admin dir, or, without one, against the move's
     /// start.
     pub(crate) fn old_tree_unchanged(&self, i: &MoveIntent, cfg: &RepoConfig) -> Result<bool> {
+        // rm-followups §1.4 G4 item 5: an `Auto` move's tree is also held to
+        // its persisted activity baseline (one shared rule).
+        if matches!(self.auto_check(i, &crate::old_tree::old_path(i)), crate::old_tree::AutoCheck::Late) {
+            return Ok(false);
+        }
+        self.old_tree_matches(i, cfg)
+    }
+
+    /// [`Sessions::old_tree_unchanged`] without the activity baseline.
+    pub(crate) fn old_tree_matches(&self, i: &MoveIntent, cfg: &RepoConfig) -> Result<bool> {
         let path = i.old_tree.clone().unwrap_or_else(|| i.staging.clone());
         let Some(cp) = self.rollout_checkpoint(i)? else {
             return Ok(false);
@@ -794,6 +917,24 @@ fn held_dirs(dir: &Path, d: &[RepoPath]) -> Result<Vec<strata_deps::OpenFile>> {
         }
     }
     Ok(out)
+}
+
+/// `detail.reason` of an `Auto` move's deferral.
+pub const AUTO_DEFERRED: &str = "auto_deferred";
+
+fn auto_defer(reason: &str, detail: Value) -> StrataError {
+    StrataError::new(Code::Busy, format!("auto-rebase deferred: {reason}"))
+        .with_detail(json!({ "reason": AUTO_DEFERRED, "defer": { "reason": reason, "detail": detail } }))
+}
+
+/// The `(reason, detail)` of an `Auto` move's deferral, if `e` is one.
+pub fn auto_deferral(e: &StrataError) -> Option<(String, Value)> {
+    let d = e.detail.as_ref()?;
+    if e.code != Code::Busy || d.get("reason")?.as_str()? != AUTO_DEFERRED {
+        return None;
+    }
+    let reason = d["defer"]["reason"].as_str()?.to_string();
+    Some((reason, d["defer"]["detail"].clone()))
 }
 
 fn open_files_error(ws: &Path, holders: Vec<strata_deps::OpenFile>) -> StrataError {

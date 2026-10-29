@@ -761,7 +761,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 Ok(json!({}))
             }
             Params::Rm(p) => {
-                let action = Action::RemoveDiscard { session: p.session.clone() };
+                let action = self.d.sessions.discard_action(&p.session)?;
                 let token = if p.discard { Some(require_validated(&core.confirmer, action.clone())?) } else { None };
                 // Review M5: wait out `publishing` (holding nothing), then the
                 // queue place, the flag checked again under it.

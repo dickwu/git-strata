@@ -659,6 +659,22 @@ impl Store {
     }
 
     pub fn begin_move(&self, id: &SessionId, repo: &RepoName, to: &BaseGen, head: &CommitOid, staging: &Path, at: SystemTime) -> Result<u64> {
+        self.begin_move_with(id, repo, to, head, staging, at, None)
+    }
+
+    /// [`Store::begin_move`] that also writes an `Auto` move's activity
+    /// baseline in the same transaction (rm-followups §1.4 G4, r8).
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_move_with(
+        &self,
+        id: &SessionId,
+        repo: &RepoName,
+        to: &BaseGen,
+        head: &CommitOid,
+        staging: &Path,
+        at: SystemTime,
+        baseline: Option<&crate::MoveBaseline>,
+    ) -> Result<u64> {
         const OP: &str = "begin_move";
         self.writable()?;
         let at = ns(at, "at")?;
@@ -715,6 +731,9 @@ impl Store {
                 params![id, repo, n, to.tree.as_str(), to.deps.as_str(), head.as_str(), staging, at],
             )
             .map_err(w(OP))?;
+            if let Some(b) = baseline {
+                crate::move_activity::insert(c, id, repo, n, b, OP)?;
+            }
             Ok(Tx::Commit(n as u64))
         })
     }

@@ -84,7 +84,7 @@ fn lifecycle(fx: &Fx, id: &SessionId) -> Lifecycle {
 }
 
 fn tok(id: &SessionId) -> Option<ConfirmToken> {
-    Some(ConfirmToken { action: Action::RemoveDiscard { session: id.clone() }, issued: Instant::now(), nonce: 1 })
+    Some(ConfirmToken { action: Action::RemoveDiscard { session: id.clone(), kept_trees: vec![] }, issued: Instant::now(), nonce: 1 })
 }
 
 fn detail(e: &StrataError) -> &serde_json::Map<String, Value> {
@@ -382,7 +382,7 @@ fn remove_discard_checks_the_token() {
     let a_id = id(&new_all(&fx, &s));
     let b_id = id(&new_all(&fx, &s));
     let before = (untouched(&fx, &a_id), untouched(&fx, &b_id));
-    let expected = serde_json::to_value(Action::RemoveDiscard { session: a_id.clone() }).unwrap();
+    let expected = serde_json::to_value(Action::RemoveDiscard { session: a_id.clone(), kept_trees: vec![] }).unwrap();
     let push = ConfirmToken {
         action: Action::PushDeploy { repo: fx.rn("tool"), branch: "main".into(), url: String::new() },
         issued: Instant::now(),

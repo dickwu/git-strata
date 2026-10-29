@@ -2442,6 +2442,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strata-apfs",
+ "strata-confirm",
  "strata-deps",
  "strata-gitio",
  "strata-overlay",
