@@ -455,6 +455,7 @@ CREATE TABLE rebase_pending (
     first_at_ns     INTEGER NOT NULL,
     last_at_ns      INTEGER NOT NULL,
     attempts        INTEGER NOT NULL CHECK (attempts >= 0),
+    unpushed        INTEGER NOT NULL DEFAULT 0 CHECK (unpushed IN (0, 1)),
     PRIMARY KEY (session, repo),
     FOREIGN KEY (session, repo) REFERENCES workspaces (session, repo),
     CHECK ((head IS NULL) = (tree IS NULL)),

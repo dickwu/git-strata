@@ -255,6 +255,35 @@ fn catch_up_drops_a_target_the_session_already_left() {
     assert!(pending(&fx, &b).is_none());
 }
 
+/// Codex P2 B5: a deferral overwrites `reason`, never the tracking
+/// requirement; a replay-style T1 attempt waits for the push as well.
+#[test]
+fn unpushed_target_still_waits_after_a_deferral() {
+    let fx = fx(0);
+    let (s, g) = session_with(&fx, &[("u.txt", b"upsilon\n")]);
+    seams::fail_once(fx.git_of("tool"), FailPoint::BeforePush);
+    let _ = run(&fx, &g).unwrap_err();
+    let r = pending(&fx, &s).expect("a target");
+    assert!(r.unpushed, "{r:?}");
+    assert!(fx.store().defer_pending(&s, &repo_name("tool"), r.rev, "busy", &serde_json::json!({}), SystemTime::now()).unwrap());
+    let r = pending(&fx, &s).unwrap();
+    assert_eq!((r.reason.as_str(), r.unpushed), ("busy", true));
+    assert_eq!(of(&pass(&fx, &cfg(&fx, 0), SystemTime::now()), &s), CatchUp::Unpushed);
+    let d = fx.deps_ctx("tool");
+    let ss = fx.sessions();
+    let ctx = fx.ctx(&d, &ss);
+    assert_eq!(strata_publish::pending::attempt(&ctx, &r, MovePolicy::Auto).unwrap(), None, "T1 waits too");
+    assert!(pending(&fx, &s).is_some_and(|p| p.head == r.head));
+    let head = r.head.clone().unwrap();
+    let main = fx.main("tool");
+    fx.sb.git(&main, &["push", "origin", &format!("{head}:refs/heads/main")]);
+    fx.git_of("tool").fetch("origin", "main").unwrap();
+    match of(&pass(&fx, &cfg(&fx, 0), SystemTime::now()), &s) {
+        CatchUp::Attempted(RebaseReport::Moved { .. }) => {}
+        c => panic!("{c:?}"),
+    }
+}
+
 #[test]
 fn publish_unfinished_waits_for_the_tracking_ref() {
     let fx = fx(0);
@@ -278,4 +307,33 @@ fn publish_unfinished_waits_for_the_tracking_ref() {
         c => panic!("{c:?}"),
     }
     assert!(pending(&fx, &s).is_none());
+}
+
+/// Codex P2 B4: the row is retargeted P → P′ (a replay's copy) in the gap
+/// before the publish's own rebase. T1 attempts the winning target P′ and
+/// the move consumes it; it is never stranded behind a stale `from_*`.
+#[test]
+fn post_publish_rebase_follows_a_retargeted_row() {
+    let mut fx = fx(0);
+    fx.cfg_mut("tool").publish.push = false;
+    let (s, g) = session_with(&fx, &[("r.txt", b"rho\n")]);
+    let pause = seams::pause(fx.git_of("tool"), seams::PublishFault::PauseBeforeRebase);
+    let (published, copy) = std::thread::scope(|sc| {
+        let h = sc.spawn(|| run(&fx, &g));
+        pause.wait_until_paused();
+        let r = pending(&fx, &s).expect("promoted");
+        let p = r.head.clone().unwrap();
+        let main = fx.main("tool");
+        let tree = fx.sb.tree_of(&main, &p);
+        let copy = fx.sb.git(&main, &["commit-tree", &tree, "-p", &p, "-m", "replayed copy"]).trim().to_string();
+        let plan = vec![strata_store::ReplayPlan { session: s.clone(), planned_head: copy.clone(), planned_tree: tree }];
+        fx.store().plan_replay(&repo_name("tool"), &plan, SystemTime::now()).unwrap();
+        assert!(fx.store().settle_planned(&s, &repo_name("tool"), &copy, true, SystemTime::now()).unwrap());
+        pause.release();
+        (h.join().unwrap().unwrap(), copy)
+    });
+    assert_ne!(published.commit.as_str(), copy);
+    let rec = fx.store().session(&s).unwrap().unwrap();
+    assert_eq!(rec.manifest.repos[&repo_name("tool")].head.as_str(), copy, "moved onto the winning target");
+    assert!(pending(&fx, &s).is_none(), "the move consumed it: {:?}", pending(&fx, &s));
 }

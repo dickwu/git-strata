@@ -7,7 +7,7 @@
 //! nothing is ever retired on a cached verdict, only on a fresh judgement
 //! made under the session's queue place and the repo's write lock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,6 +77,10 @@ pub(crate) struct OldTrees {
     /// rm-followups §1.4 G4 item 4: keys queued with a not-before time
     /// (an `Auto` tree's next pass); moved to `pending` once due.
     delayed: Mutex<BTreeMap<OldTreeKey, (Instant, PathBuf, u64)>>,
+    /// rm-followups §1.4 G4 item 5: keys whose clean passes a hold should
+    /// have reset but the store write failed; never retired until a reset
+    /// is persisted.
+    must_reset: Mutex<BTreeSet<OldTreeKey>>,
     wake: Condvar,
 }
 
@@ -249,6 +253,20 @@ impl<'a> Sessions<'a> {
         }
     }
 
+    /// rm-followups §1.4 G4 item 5: a hold on `Auto` move `i`'s tree
+    /// clears its clean passes. A failed write marks the key so the tree
+    /// is never retired until a reset is persisted. True when persisted.
+    fn reset_passes(&self, i: &MoveIntent) -> bool {
+        let key = key_of(i);
+        if self.store.set_move_passes(&i.session, &i.repo, i.n, &[]).is_ok() {
+            lock(&self.old_trees.must_reset).remove(&key);
+            true
+        } else {
+            lock(&self.old_trees.must_reset).insert(key);
+            false
+        }
+    }
+
     /// Writes the late-write notice of move `i` (the first one stands).
     pub(crate) fn late_notice(&self, i: &MoveIntent, paths: &[String], reason: &str) {
         let moved_at = i.ended.unwrap_or(i.started);
@@ -384,12 +402,22 @@ impl<'a> Sessions<'a> {
         };
         // rm-followups §1.4 G4 items 4–5: an `Auto` move's tree is held to
         // its persisted baseline; a hold resets its clean passes.
-        let auto = self.auto_check(i, &path);
-        if !holders.is_empty()
-            && let AutoCheck::Clean(p) = &auto
-            && !p.is_empty()
+        let mut auto = self.auto_check(i, &path);
+        if matches!(&auto, AutoCheck::Clean(_))
+            && lock(&self.old_trees.must_reset).contains(&key_of(i))
         {
-            let _ = self.store.set_move_passes(&i.session, &i.repo, i.n, &[]);
+            // An earlier hold's reset was not persisted: persist it now,
+            // else fail closed.
+            if !self.reset_passes(i) {
+                return Outcome::Kept {
+                    holders,
+                    changed: Some(false),
+                };
+            }
+            auto = AutoCheck::Clean(Vec::new());
+        }
+        if !holders.is_empty() && matches!(&auto, AutoCheck::Clean(_)) {
+            self.reset_passes(i);
         }
         if !holders.is_empty() && !judge_held {
             return Outcome::Kept {
@@ -427,9 +455,16 @@ impl<'a> Sessions<'a> {
                 }
             }
         }
+        if self.seams.hit("old_tree.final_scan", Some(&i.repo)).is_err() {
+            return Outcome::Skipped("seam");
+        }
         match strata_deps::open_files(&path) {
             Ok(h) if h.is_empty() && ino_of(&path) == Some(ino) => {}
             Ok(h) => {
+                // A hold seen by the final scan resets the clean passes too.
+                if matches!(&auto, AutoCheck::Clean(_)) {
+                    self.reset_passes(i);
+                }
                 return Outcome::Kept {
                     holders: h,
                     changed: Some(false),

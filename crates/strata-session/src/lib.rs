@@ -29,6 +29,7 @@ mod remove;
 mod resolve;
 mod rm_note;
 mod scene;
+mod no_wait;
 mod seams;
 mod seed;
 mod status;
@@ -85,7 +86,7 @@ pub struct Sessions<'a> {
     pub(crate) config: &'a Config,
     pub(crate) gits: &'a BTreeMap<RepoName, Git>,
     pub(crate) store: &'a Store,
-    pub(crate) locks: &'a dyn RepoWriteLock,
+    pub(crate) locks: no_wait::SessionLock<'a>,
     pub(crate) env: &'a InstallEnv,
     pub(crate) before: &'a dyn BeforeCheckpoint,
     /// Base staging directories being built by this process (§5.2 step 3).
@@ -135,7 +136,7 @@ impl<'a> Sessions<'a> {
             config,
             gits,
             store,
-            locks,
+            locks: no_wait::SessionLock(locks),
             env,
             before,
             live_staging: Mutex::new(BTreeSet::new()),

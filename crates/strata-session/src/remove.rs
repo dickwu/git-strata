@@ -93,11 +93,29 @@ impl Sessions<'_> {
     /// The `--discard` confirmation for `id`: the session and the kept
     /// pre-move trees with late writes it also throws away (rm-followups
     /// §1.4 G4 item 5). Store reads and one `lstat` per kept tree.
+    ///
+    /// Codex P2 B2: every existing `Auto` old tree is classified against
+    /// its activity baseline first, so a late write since the last pass
+    /// is part of what is confirmed; a changed tree whose notice could
+    /// not be recorded is still listed (count 0), never left out.
     pub fn discard_action(&self, id: &SessionId) -> Result<Action> {
-        let kept_trees = crate::rm_note::kept_trees(self.store, id)?
+        let mut late: Vec<PathBuf> = Vec::new();
+        for i in self.store.move_intents(id)?.iter().filter(|i| i.state == MoveState::Done) {
+            let path = crate::old_tree::old_path(i);
+            if exists(&path) && matches!(self.auto_check(i, &path), crate::old_tree::AutoCheck::Late) {
+                late.push(path);
+            }
+        }
+        let mut kept_trees: Vec<strata_types::KeptTreeRef> = crate::rm_note::kept_trees(self.store, id)?
             .into_iter()
             .map(|k| strata_types::KeptTreeRef { path: k.path.display().to_string(), count: k.count })
             .collect();
+        for p in late {
+            let p = p.display().to_string();
+            if !kept_trees.iter().any(|k| k.path == p) {
+                kept_trees.push(strata_types::KeptTreeRef { path: p, count: 0 });
+            }
+        }
         Ok(Action::RemoveDiscard { session: id.clone(), kept_trees })
     }
 
@@ -118,6 +136,7 @@ impl Sessions<'_> {
             .with_detail(json!({ "reason": "lifecycle", "state": state, "session": id.as_str() })));
         }
         // 2. The token is consumed by value here.
+        let mut confirmed = None;
         if discard {
             let expected = self.discard_action(id)?;
             let why = match &confirm {
@@ -132,6 +151,7 @@ impl Sessions<'_> {
                 )
                 .with_detail(json!({ "expected": expected, "reason": why })));
             }
+            confirmed = Some(expected);
         }
         drop(confirm);
         // 3. Open files; discard does not bypass this and there is no force.
@@ -239,6 +259,20 @@ impl Sessions<'_> {
                 "removed": false,
                 "lifecycle": lc_title(cur),
             })));
+        }
+
+        // Codex P2 B2: what --discard throws away is classified again just
+        // before the visible steps; a tree that changed since the
+        // confirmation needs a new one.
+        if let Some(expected) = confirmed {
+            let now = self.discard_action(id)?;
+            if now != expected {
+                return Err(StrataError::new(
+                    Code::NotConfirmed,
+                    format!("{} What --discard would throw away changed after the confirmation; run the same command again.", self.refused_prefix(&rec)),
+                )
+                .with_detail(json!({ "expected": now, "reason": "changed", "removed": false, "lifecycle": lc_title(cur) })));
+            }
         }
 
         // ---- Phase C: the visible steps.

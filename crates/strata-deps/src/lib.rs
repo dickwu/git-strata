@@ -62,6 +62,12 @@ pub trait RepoWriteLock: Sync {
     /// returns. The outer `Err` is only `Busy` (the bounded wait expired and
     /// `f` did not run); `Ok` carries `f`'s result.
     fn with_write(&self, repo: &RepoName, f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>>;
+    /// `with_write`, but only if the lock is free right now: `Busy`
+    /// otherwise, never waited for (rm-followups §1.6 T2). The default
+    /// waits like `with_write` (a lock nothing else contends for).
+    fn try_write(&self, repo: &RepoName, f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>> {
+        self.with_write(repo, f)
+    }
 }
 
 /// The environment `install` and `<program> --version` run with.

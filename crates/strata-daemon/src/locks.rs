@@ -480,6 +480,19 @@ impl strata_deps::RepoWriteLock for Locks {
             Err(e) => Err(e),
         }
     }
+
+    fn try_write(
+        &self,
+        repo: &RepoName,
+        f: &mut dyn FnMut() -> strata_deps::Result<()>,
+    ) -> strata_deps::Result<strata_deps::Result<()>> {
+        let mut inner = None;
+        self.try_repo(repo, "catch_up", || {
+            inner = Some(f());
+            Ok(())
+        })?;
+        Ok(inner.unwrap_or(Ok(())))
+    }
 }
 
 impl strata_publish::PublishLocks for Locks {

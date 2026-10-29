@@ -289,6 +289,11 @@ pub fn adopt_replay(sc: Scope, plans: &[ReplayPlan]) {
 pub fn attempt(ctx: &Ctx, row: &RebasePending, policy: MovePolicy) -> Result<Option<RebaseReport>> {
     let (Some(head), Some(tree)) = (row.head.as_deref().and_then(oid), row.tree.as_deref()) else { return Ok(None) };
     let Ok(tree) = TreeOid::try_from(tree.to_string()) else { return Ok(None) };
+    // Rule 5 [Codex P2 B5]: a target that must reach the tracking ref
+    // first (a failed publish's commit, a replay's copy) waits for T2.
+    if needs_push(ctx, row, &head) {
+        return Ok(None);
+    }
     let s = &row.session;
     let deps = crate::rebase::workspace_base(ctx, s)?.deps;
     let g = BaseGen { repo: ctx.repo.clone(), tree, deps };
@@ -436,7 +441,7 @@ fn catch_up_row(ctx: &Ctx, row: &RebasePending, now: SystemTime) -> Result<Catch
     if now < row.last_at + wait {
         return Ok(CatchUp::NotDue);
     }
-    if row.reason == "publish_unfinished" && ctx.cfg.publish.push && !pushed(Scope::of(ctx), &head) {
+    if needs_push(ctx, row, &head) {
         return Ok(CatchUp::Unpushed);
     }
     if let Some((why, detail)) = stale(ctx, row, &head)? {
@@ -445,6 +450,13 @@ fn catch_up_row(ctx: &Ctx, row: &RebasePending, now: SystemTime) -> Result<Catch
         return Ok(CatchUp::Dropped(why.to_owned()));
     }
     Ok(CatchUp::Attempted(attempt_t2(ctx, row, &head, tree)?))
+}
+
+/// Rule 5: `row`'s committed target `head` is not on the tracking ref yet
+/// while it must be. The requirement is the row's `unpushed` flag, which
+/// deferrals never clear (the transient `reason` is checked as well).
+fn needs_push(ctx: &Ctx, row: &RebasePending, head: &CommitOid) -> bool {
+    (row.unpushed || row.reason == "publish_unfinished") && ctx.cfg.publish.push && !pushed(Scope::of(ctx), head)
 }
 
 /// Records a non-move outcome of an attempt of `row` (rule 6).

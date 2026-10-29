@@ -75,6 +75,11 @@ pub struct RebasePending {
     #[serde(with = "strata_types::serde_rfc3339")]
     pub last_at: SystemTime,
     pub attempts: u64,
+    /// The committed target must reach the tracking ref before any move
+    /// onto it (rule 5): set with `publish_unfinished` and on a replay's
+    /// adopted copy, kept across deferrals, gone with the target.
+    #[serde(default)]
+    pub unpushed: bool,
 }
 
 fn outcome_text(o: RmOutcome) -> &'static str {
@@ -179,6 +184,7 @@ type PendingRow = (
     i64,
     i64,
     i64,
+    i64,
 );
 
 pub(crate) fn read_rebase_pending(c: &Connection, session: Option<&SessionId>) -> Result<Vec<RebasePending>> {
@@ -188,7 +194,7 @@ pub(crate) fn read_rebase_pending(c: &Connection, session: Option<&SessionId>) -
     let mut st = c
         .prepare(
             "SELECT session, repo, rev, from_tree, from_deps, head, tree, planned_head, planned_tree, planned_publish, \
-                    reason, detail_json, first_at_ns, last_at_ns, attempts \
+                    reason, detail_json, first_at_ns, last_at_ns, attempts, unpushed \
              FROM rebase_pending WHERE ?1 IS NULL OR session = ?1 ORDER BY session, repo",
         )
         .map_err(sql_read)?;
@@ -210,13 +216,14 @@ pub(crate) fn read_rebase_pending(c: &Connection, session: Option<&SessionId>) -
                 r.get(12)?,
                 r.get(13)?,
                 r.get(14)?,
+                r.get(15)?,
             ))
         })
         .map_err(sql_read)?
         .collect::<crate::sql::SqlResult<Vec<_>>>()
         .map_err(sql_read)?;
     let mut out = Vec::with_capacity(rows.len());
-    for (s, repo, rev, ft, fd, head, tree, ph, pt, pp, reason, detail, first, last, attempts) in rows {
+    for (s, repo, rev, ft, fd, head, tree, ph, pt, pp, reason, detail, first, last, attempts, unpushed) in rows {
         out.push(RebasePending {
             session: parse(s, "rebase_pending.session")?,
             repo: parse(repo, "rebase_pending.repo")?,
@@ -235,6 +242,7 @@ pub(crate) fn read_rebase_pending(c: &Connection, session: Option<&SessionId>) -
             first_at: time(first),
             last_at: time(last),
             attempts: nonneg(attempts, "rebase_pending.attempts")?,
+            unpushed: unpushed != 0,
         });
     }
     Ok(out)
@@ -340,7 +348,7 @@ pub(crate) fn consume_on_move(
     let newer = consume.is_some() && !attempted;
     if attempted {
         c.execute(
-            "UPDATE rebase_pending SET head = NULL, tree = NULL, from_tree = ?3, from_deps = ?4 WHERE session = ?1 AND repo = ?2",
+            "UPDATE rebase_pending SET head = NULL, tree = NULL, unpushed = 0, from_tree = ?3, from_deps = ?4 WHERE session = ?1 AND repo = ?2",
             params![session, repo, to.0, to.1],
         )
         .map_err(wp(op))?;
@@ -396,7 +404,7 @@ impl Store {
                 let detail = to_json(&json!({ "publish": publish }), "detail")?;
                 c.execute(
                     "UPDATE rebase_pending SET head = ?3, tree = ?4, rev = ?5 + 1, reason = ?6, detail_json = ?7, \
-                     attempts = 0, last_at_ns = ?8, from_tree = ?9, from_deps = ?10 WHERE session = ?1 AND repo = ?2",
+                     unpushed = (?6 = 'publish_unfinished'), attempts = 0, last_at_ns = ?8, from_tree = ?9, from_deps = ?10 WHERE session = ?1 AND repo = ?2",
                     params![s, rn, head, tree, r, reason, detail, at, ft, fd],
                 )
                 .map_err(wp(OP))?;
@@ -443,7 +451,7 @@ impl Store {
             }
             let n = c
                 .execute(
-                    "UPDATE rebase_pending SET head = NULL, tree = NULL, rev = rev + 1, reason = ?4, detail_json = ?5, \
+                    "UPDATE rebase_pending SET head = NULL, tree = NULL, unpushed = 0, rev = rev + 1, reason = ?4, detail_json = ?5, \
                      last_at_ns = ?6 WHERE session = ?1 AND repo = ?2 AND rev = ?3",
                     params![s, rn, r, reason, detail, at],
                 )
@@ -487,7 +495,8 @@ impl Store {
             }
             let n = c
                 .execute(
-                    "UPDATE rebase_pending SET reason = ?4 WHERE session = ?1 AND repo = ?2 AND rev = ?3 AND head IS NOT NULL",
+                    "UPDATE rebase_pending SET reason = ?4, unpushed = CASE WHEN ?4 = 'publish_unfinished' THEN 1 ELSE unpushed END \
+                     WHERE session = ?1 AND repo = ?2 AND rev = ?3 AND head IS NOT NULL",
                     params![session.as_str(), repo.as_str(), r, reason],
                 )
                 .map_err(wp(OP))?;
@@ -547,7 +556,7 @@ impl Store {
                 let Some((ft, fd)) = ws_base(c, s, rn).map_err(wp(OP))? else { return Ok(Tx::Rollback(false)) };
                 c.execute(
                     "UPDATE rebase_pending SET head = planned_head, tree = planned_tree, planned_head = NULL, planned_tree = NULL, \
-                     rev = rev + 1, reason = 'pending', attempts = 0, last_at_ns = ?4, from_tree = ?5, from_deps = ?6 \
+                     rev = rev + 1, reason = 'pending', unpushed = 1, attempts = 0, last_at_ns = ?4, from_tree = ?5, from_deps = ?6 \
                      WHERE session = ?1 AND repo = ?2 AND planned_head = ?3",
                     params![s, rn, planned_head, at, ft, fd],
                 )

@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use serde_json::{Value, json};
 use strata_apfs::{RemoveKind, RenameMode};
+use strata_deps::RepoWriteLock;
 use strata_types::{BaseGen, BaseManifest, Code, CommitOid, DepsSet, DepsSetId, RepoName, StrataError, TreeOid};
 
 use crate::sys::{random_hex, rp};
@@ -79,7 +80,7 @@ impl Sessions<'_> {
             cfg: self.repo_cfg(repo)?,
             git: self.git(repo)?,
             env: self.env,
-            locks: self.locks,
+            locks: &self.locks,
         })
     }
 

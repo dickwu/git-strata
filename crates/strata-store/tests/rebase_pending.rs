@@ -186,3 +186,36 @@ fn replay_plans_are_adopted_or_cleared() {
     let r = row(&s, &id).unwrap();
     assert_eq!((r.head, r.planned_head), (Some(hex('3')), None));
 }
+
+/// Codex P2 B5: the tracking requirement is its own flag. It is set with
+/// `publish_unfinished` and on an adopted replay copy, survives deferrals
+/// that overwrite `reason`, and goes with the target (a clean promotion,
+/// a consuming move, a discard).
+#[test]
+fn unpushed_survives_deferrals_and_goes_with_the_target() {
+    let (env, s, id) = world(true);
+    let p = publish(&s, &id, 20);
+    assert!(s.promote_pending(&id, &repo("app"), 0, p, Some((&hex('3'), &hex('3'))), "publish_unfinished", t(22)).unwrap());
+    assert!(row(&s, &id).unwrap().unpushed);
+    assert!(s.defer_pending(&id, &repo("app"), 1, "busy", &json!({ "publish": p }), t(23)).unwrap());
+    let r = row(&s, &id).unwrap();
+    assert_eq!((r.reason.as_str(), r.unpushed), ("busy", true));
+    // a clean later publish replaces the target and the requirement
+    let p2 = publish(&s, &id, 30);
+    assert!(s.promote_pending(&id, &repo("app"), 1, p2, Some((&hex('4'), &hex('4'))), "pending", t(31)).unwrap());
+    assert!(!row(&s, &id).unwrap().unpushed);
+    // set_pending_reason(publish_unfinished) sets it; another reason keeps it
+    assert!(s.set_pending_reason(&id, &repo("app"), 2, "publish_unfinished").unwrap());
+    assert!(s.set_pending_reason(&id, &repo("app"), 2, "pending").unwrap());
+    assert!(row(&s, &id).unwrap().unpushed);
+    // a replay's adopted copy must reach the tracking ref too
+    let plan = vec![ReplayPlan { session: id.clone(), planned_head: hex('3'), planned_tree: hex('3') }];
+    assert!(s.promote_pending(&id, &repo("app"), 2, p2, None, "pending", t(32)).is_ok());
+    s.plan_replay(&repo("app"), &plan, t(40)).unwrap();
+    assert!(s.settle_planned(&id, &repo("app"), &hex('3'), true, t(41)).unwrap());
+    let r = row(&s, &id).unwrap();
+    assert_eq!((r.head.as_deref(), r.reason.as_str(), r.unpushed), (Some(hex('3').as_str()), "pending", true));
+    // a consuming move clears it with the target
+    moved(&env, &s, &id, '3', Some(r.rev));
+    assert!(row(&s, &id).is_none());
+}

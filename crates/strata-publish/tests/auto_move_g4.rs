@@ -173,6 +173,45 @@ fn auto_rebase_held_fd_on_old_tree_kept_then_two_passes() {
 }
 
 #[test]
+fn auto_tree_hold_seen_by_final_scan_resets_passes() {
+    let fx = fx();
+    let (b, p) = setup(&fx);
+    let mut holder = None;
+    moved(
+        &paused(&fx, &b, &p, "move.swap", |ws| {
+            holder = Some(Holder(Command::new("/bin/sleep").arg("300").current_dir(ws.join("dir")).spawn().unwrap()));
+            std::thread::sleep(Duration::from_millis(200));
+        })
+        .unwrap(),
+    );
+    let old = old_path(&last_intent(&fx, &b));
+    let ss = fx.sessions();
+    drop(holder);
+    assert!(matches!(check(&ss, &fx, &b), OldTreeOutcome::Kept { .. }), "first clean pass only records");
+    let passes = |fx: &Fx| {
+        let i = last_intent(fx, &b);
+        fx.store().move_activity(&b, &repo_name("tool"), i.n).unwrap().unwrap().passes
+    };
+    assert_eq!(passes(&fx).len(), 1);
+    // A holder that appears between the first and the final scan.
+    ss.arm(SessionSeam::PauseAt { phase: "old_tree.final_scan@tool".into() });
+    let mut late = None;
+    let out = std::thread::scope(|sc| {
+        let h = sc.spawn(|| check(&ss, &fx, &b));
+        ss.wait_paused();
+        late = Some(Holder(Command::new("/bin/sleep").arg("300").current_dir(old.join("dir")).spawn().unwrap()));
+        std::thread::sleep(Duration::from_millis(200));
+        ss.release();
+        h.join().unwrap()
+    });
+    assert!(matches!(out, OldTreeOutcome::Kept { .. }), "{out:?}");
+    assert!(passes(&fx).is_empty(), "a hold seen by the final scan resets the clean passes");
+    drop(late);
+    assert!(matches!(check(&ss, &fx, &b), OldTreeOutcome::Kept { .. }), "two fresh clean passes are needed again");
+    assert!(old.exists());
+}
+
+#[test]
 fn auto_rebase_walk_error_counts_as_changed() {
     let fx = fx();
     let (b, p) = setup(&fx);
@@ -340,5 +379,40 @@ fn rm_discard_names_late_write_tree_and_trashes_it() {
     let e = ss.remove(&b, true, Some(ConfirmToken { action: bare, issued: Instant::now(), nonce: 1 })).unwrap_err();
     assert_eq!(e.code, Code::NotConfirmed, "{e:?}");
     ss.remove(&b, true, Some(ConfirmToken { action, issued: Instant::now(), nonce: 2 })).unwrap();
+    assert!(!old.exists(), "moved to trash");
+}
+
+/// Codex P2 B2: a late write to a kept `Auto` old tree the checker has not
+/// yet recorded still shows in the discard action, and a token minted
+/// before the write no longer covers the removal.
+#[test]
+fn rm_discard_sees_an_unrecorded_late_write() {
+    let fx = fx();
+    let (b, p) = setup(&fx);
+    // A process holding the old tree keeps it after the move.
+    let mut holder = None;
+    moved(
+        &paused(&fx, &b, &p, "move.swap", |ws| {
+            holder = Some(Holder(Command::new("/bin/sleep").arg("300").current_dir(ws.join("dir")).spawn().unwrap()));
+            std::thread::sleep(Duration::from_millis(200));
+        })
+        .unwrap(),
+    );
+    drop(holder);
+    let old = old_path(&last_intent(&fx, &b));
+    assert!(old.exists(), "kept while held");
+    let ss = fx.sessions();
+    let before = ss.discard_action(&b).unwrap();
+    let Action::RemoveDiscard { kept_trees, .. } = &before else { panic!() };
+    assert!(kept_trees.is_empty(), "{kept_trees:?}");
+    fs::write(old.join("dir/b.txt"), b"late\n").unwrap();
+    let now = ss.discard_action(&b).unwrap();
+    let Action::RemoveDiscard { kept_trees, .. } = &now else { panic!() };
+    assert_eq!(kept_trees.len(), 1, "{kept_trees:?}");
+    assert_eq!(kept_trees[0].path, old.display().to_string());
+    let e = ss.remove(&b, true, Some(ConfirmToken { action: before, issued: Instant::now(), nonce: 1 })).unwrap_err();
+    assert_eq!(e.code, Code::NotConfirmed, "{e:?}");
+    assert_eq!(fs::read(old.join("dir/b.txt")).unwrap(), b"late\n");
+    ss.remove(&b, true, Some(ConfirmToken { action: now, issued: Instant::now(), nonce: 2 })).unwrap();
     assert!(!old.exists(), "moved to trash");
 }

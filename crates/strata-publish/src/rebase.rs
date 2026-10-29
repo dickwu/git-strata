@@ -167,6 +167,10 @@ fn under_locks<T>(ctx: &Ctx, sessions: &[SessionId], f: &mut dyn FnMut() -> Resu
 /// (§5.1), so a plain lock `Busy` (no `reason`) is asked again. With locks
 /// that do not wait (T2) it is asked once and a `Busy` is returned.
 fn base_for(ctx: &Ctx, tree: &strata_types::TreeOid, deps: &DepsSetId) -> Result<BaseGen> {
+    if !ctx.locks.waits() {
+        // T2: the base build's own lock takes do not wait either.
+        return ctx.sessions.no_wait(|| ctx.sessions.ensure_base_for(ctx.repo, tree, deps));
+    }
     loop {
         match ctx.sessions.ensure_base_for(ctx.repo, tree, deps) {
             Err(e)
@@ -568,11 +572,21 @@ pub(crate) fn workspace_base(ctx: &Ctx, s: &SessionId) -> Result<BaseGen> {
 /// set is the starting guess for the new base generation. A
 /// `rebase_pending` row whose committed target is this commit is the one
 /// attempted (rm-followups §1.6 T1): a move consumes it, anything else is
-/// recorded on it.
+/// recorded on it. A row whose committed target is another commit (a
+/// replay's copy or a later publish retargeted it meanwhile, or a kept
+/// conflicting target) wins: that target is attempted instead, so the
+/// move never strands it behind a stale `from_*` [Codex P2 B4].
 pub(crate) fn after_publish(ctx: &Ctx, s: &SessionId, tree: &strata_types::TreeOid, head: &CommitOid) -> Result<RebaseReport> {
+    let row = ctx.store.rebase_pending_of(s, ctx.repo).ok().flatten();
+    if let Some(other) = row.as_ref().filter(|r| r.head.is_some() && r.head.as_deref() != Some(head.as_str())) {
+        return Ok(match crate::pending::attempt(ctx, other, MovePolicy::Auto)? {
+            Some(r) => r,
+            None => deferred("unpushed", json!({ "target": other.head, "published": head.as_str() })),
+        });
+    }
     let old = workspace(ctx, s)?.base;
     let g = BaseGen { repo: ctx.repo.clone(), tree: tree.clone(), deps: old.deps };
-    let row = ctx.store.rebase_pending_of(s, ctx.repo).ok().flatten().filter(|r| r.head.as_deref() == Some(head.as_str()));
+    let row = row.filter(|r| r.head.as_deref() == Some(head.as_str()));
     let r = rebase_one_with(ctx, s, &g, head, MovePolicy::Auto, Attempt { consume: row.as_ref().map(|r| r.rev), recheck: None })?;
     if let Some(row) = &row {
         crate::pending::note_outcome(ctx, row, &r);
