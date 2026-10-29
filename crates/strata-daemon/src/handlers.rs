@@ -1517,7 +1517,7 @@ impl Server<'_, '_> {
             })
             .collect();
         if let Some(rp) = &replayed {
-            self.rebase_replayed(repo, git, rp, &mut rebases, &mut warnings);
+            self.rebase_replayed(repo, rp, &mut rebases, &mut warnings);
         }
         if let Some(after) = tips.1.clone()
             && let Some(e) = crate::fetch_after::observe_if_moved(tips.0.as_ref(), Some(&after), &mut || resolve::observe_tip(core, repo, &after))
@@ -1547,25 +1547,26 @@ impl Server<'_, '_> {
         }
     }
 
-    fn rebase_replayed(&self, repo: &RepoName, git: &Git, rp: &resolve::Replayed, rebases: &mut Vec<Value>, warnings: &mut Vec<Value>) {
+    /// rm-followups §1.6 (c): T1 for a replay attempts each row whose
+    /// committed target is one of the copies; a session with no such row is
+    /// not attempted.
+    fn rebase_replayed(&self, repo: &RepoName, rp: &resolve::Replayed, rebases: &mut Vec<Value>, warnings: &mut Vec<Value>) {
         let core = self.core();
-        let records = match core.store.sessions() {
+        let rows = match core.store.rebase_pending(None) {
             Ok(r) => r,
             Err(e) => {
                 warnings.push(json!({ "kind": "RebaseFailed", "repo": repo.as_str(), "code": e.code.as_str(), "message": e.message }));
                 return;
             }
         };
-        for rec in records.into_iter().filter(|r| r.lifecycle != strata_store::Lifecycle::Removed) {
-            let Some(ws) = rec.manifest.repos.get(repo) else { continue };
-            let Some((_, copy)) = rp.map.iter().find(|(old, _)| *old == ws.head) else { continue };
-            let s = rec.manifest.id.clone();
-            let r = git.tree_of(copy).and_then(|tree| {
-                let base = BaseGen { repo: repo.clone(), tree, deps: ws.base.deps.clone() };
-                self.with_publish_ctx(repo, |ctx| strata_publish::rebase_session(ctx, s.clone(), repo, base, copy.clone()))
-            });
+        for row in rows.into_iter().filter(|r| r.repo == *repo) {
+            let Some(copy) = row.head.as_deref().and_then(|h| rp.map.iter().find(|(_, n)| n.as_str() == h)) else { continue };
+            let (from, to) = (copy.0.clone(), copy.1.clone());
+            let s = row.session.clone();
+            let r = self.with_publish_ctx(repo, |ctx| strata_publish::pending::attempt(ctx, &row, strata_publish::MovePolicy::Explicit));
             match r {
-                Ok(report) => rebases.push(json!({ "session": s.as_str(), "from": ws.head.as_str(), "to": copy.as_str(), "report": json_of(&report) })),
+                Ok(Some(report)) => rebases.push(json!({ "session": s.as_str(), "from": from.as_str(), "to": to.as_str(), "report": json_of(&report) })),
+                Ok(None) => {}
                 Err(e) => warnings.push(json!({
                     "kind": "RebaseFailed", "repo": repo.as_str(), "session": s.as_str(), "code": e.code.as_str(), "message": e.message,
                 })),

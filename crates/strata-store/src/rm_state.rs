@@ -239,3 +239,328 @@ pub(crate) fn read_rebase_pending(c: &Connection, session: Option<&SessionId>) -
     }
     Ok(out)
 }
+
+// ---- rebase_pending writers (design §1.6) ---------------------------------
+
+/// One replay retarget or enrollment, written as a planned target before
+/// the replay's ref transaction (§1.6 "Replay retarget and enrollment").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayPlan {
+    pub session: SessionId,
+    pub planned_head: String,
+    pub planned_tree: String,
+}
+
+fn wp(op: &'static str) -> impl Fn(crate::sql::Error) -> StrataError {
+    move |e| sql(e, op, NOT_WRITTEN)
+}
+
+/// The workspace's current `(base tree, base deps)`; `None` when the pair
+/// has no workspace.
+fn ws_base(c: &Connection, session: &str, repo: &str) -> crate::sql::SqlResult<Option<(String, String)>> {
+    use crate::sql::OptionalExtension;
+    c.query_row(
+        "SELECT g.tree, g.deps FROM workspaces w JOIN base_gens g ON g.repo = w.repo AND g.id = w.base_gen \
+         WHERE w.session = ?1 AND w.repo = ?2",
+        params![session, repo],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+    .optional()
+}
+
+fn row_of(c: &Connection, session: &SessionId, repo: &RepoName) -> Result<Option<RebasePending>> {
+    Ok(read_rebase_pending(c, Some(session))?.into_iter().find(|p| p.repo == *repo))
+}
+
+/// A row with no committed target, no planned replay target and no
+/// planned publish carries nothing: it is deleted.
+fn drop_if_empty(c: &Connection, session: &str, repo: &str, op: &'static str) -> Result<()> {
+    c.execute(
+        "DELETE FROM rebase_pending WHERE session = ?1 AND repo = ?2 \
+         AND head IS NULL AND planned_head IS NULL AND planned_publish IS NULL",
+        params![session, repo],
+    )
+    .map_err(wp(op))?;
+    Ok(())
+}
+
+fn rev_i(rev: u64) -> Result<i64> {
+    i64::try_from(rev).map_err(|_| err(Code::InvalidInput, "rev is too large", json!({ "reason": "rev" })))
+}
+
+/// Rule 1 of §1.6, inside `record_publish`'s transaction: every workspace
+/// of the group gets `planned_publish = id` (the row is inserted
+/// when absent; other targets are left as they are).
+pub(crate) fn plan_publish(c: &Connection, op: &'static str, id: i64, pairs: &[(&str, &str)], at_ns: i64) -> Result<()> {
+    if user_version(c)? < V3 {
+        return Ok(());
+    }
+    for (session, repo) in pairs {
+        let Some((tree, deps)) = ws_base(c, session, repo).map_err(wp(op))? else { continue };
+        let n = c
+            .execute("UPDATE rebase_pending SET planned_publish = ?3 WHERE session = ?1 AND repo = ?2", params![session, repo, id])
+            .map_err(wp(op))?;
+        if n == 0 {
+            c.execute(
+                "INSERT INTO rebase_pending (session, repo, rev, from_tree, from_deps, planned_publish, reason, \
+                 first_at_ns, last_at_ns, attempts) VALUES (?1, ?2, 0, ?3, ?4, ?5, 'planned', ?6, ?6, 0)",
+                params![session, repo, tree, deps, id, at_ns],
+            )
+            .map_err(wp(op))?;
+        }
+    }
+    Ok(())
+}
+
+/// §1.6 rule 6, in `finish_move`'s transaction: the move to `(to_tree,
+/// to_deps)` at `head` consumes the row's committed target when it was the
+/// attempted `rev` (or, with no `rev`, when the move landed exactly on that
+/// target); a newer target stays with its `from_*` rewritten to the new
+/// base. Any other row is left as it is (it is stale and dropped later).
+pub(crate) fn consume_on_move(
+    c: &Connection,
+    op: &'static str,
+    session: &str,
+    repo: &str,
+    to: (&str, &str),
+    head: &str,
+    consume: Option<u64>,
+) -> Result<()> {
+    if user_version(c)? < V3 {
+        return Ok(());
+    }
+    let (Ok(sid), Ok(rn)) = (SessionId::try_from(session.to_string()), RepoName::try_from(repo.to_string())) else {
+        return Ok(());
+    };
+    let Some(row) = row_of(c, &sid, &rn)? else { return Ok(()) };
+    let attempted = match consume {
+        Some(r) => row.rev == r,
+        None => row.head.as_deref() == Some(head),
+    };
+    let newer = consume.is_some() && !attempted;
+    if attempted {
+        c.execute(
+            "UPDATE rebase_pending SET head = NULL, tree = NULL, from_tree = ?3, from_deps = ?4 WHERE session = ?1 AND repo = ?2",
+            params![session, repo, to.0, to.1],
+        )
+        .map_err(wp(op))?;
+    } else if newer {
+        c.execute(
+            "UPDATE rebase_pending SET from_tree = ?3, from_deps = ?4 WHERE session = ?1 AND repo = ?2",
+            params![session, repo, to.0, to.1],
+        )
+        .map_err(wp(op))?;
+    }
+    drop_if_empty(c, session, repo, op)
+}
+
+impl Store {
+    /// The row of one pair, if any (empty on a store older than v3).
+    pub fn rebase_pending_of(&self, session: &SessionId, repo: &RepoName) -> Result<Option<RebasePending>> {
+        self.read(|c| row_of(c, session, repo))
+    }
+
+    /// §1.6 rule 2/3: publish `publish` landed `target` (its commit and
+    /// tree). Conditioned on the row's `rev` being `rev` (what the caller
+    /// read under the repo lock): clears `planned_publish` when it is still
+    /// `publish`, and when `set` sets the committed target (`rev + 1`,
+    /// `reason`, attempts 0, `from_*` = the workspace's current base,
+    /// `detail.publish`). `false` when the row is gone or moved on.
+    #[allow(clippy::too_many_arguments)]
+    pub fn promote_pending(
+        &self,
+        session: &SessionId,
+        repo: &RepoName,
+        rev: u64,
+        publish: u64,
+        target: Option<(&str, &str)>,
+        reason: &str,
+        at: SystemTime,
+    ) -> Result<bool> {
+        const OP: &str = "promote_pending";
+        let at = ns(at, "at")?;
+        let (r, p) = (rev_i(rev)?, rev_i(publish)?);
+        self.write(OP, |c| {
+            let Some(row) = row_of(c, session, repo)? else { return Ok(Tx::Rollback(false)) };
+            if row.rev != rev {
+                return Ok(Tx::Rollback(false));
+            }
+            let (s, rn) = (session.as_str(), repo.as_str());
+            c.execute(
+                "UPDATE rebase_pending SET planned_publish = NULL WHERE session = ?1 AND repo = ?2 AND planned_publish = ?3",
+                params![s, rn, p],
+            )
+            .map_err(wp(OP))?;
+            if let Some((head, tree)) = target {
+                let Some((ft, fd)) = ws_base(c, s, rn).map_err(wp(OP))? else { return Ok(Tx::Rollback(false)) };
+                let detail = to_json(&json!({ "publish": publish }), "detail")?;
+                c.execute(
+                    "UPDATE rebase_pending SET head = ?3, tree = ?4, rev = ?5 + 1, reason = ?6, detail_json = ?7, \
+                     attempts = 0, last_at_ns = ?8, from_tree = ?9, from_deps = ?10 WHERE session = ?1 AND repo = ?2",
+                    params![s, rn, head, tree, r, reason, detail, at, ft, fd],
+                )
+                .map_err(wp(OP))?;
+            }
+            drop_if_empty(c, s, rn, OP)?;
+            Ok(Tx::Commit(true))
+        })
+    }
+
+    /// §1.6 rule 3: a publish that is not live and has no reachable commit
+    /// loses its plan; other targets are untouched. `false` when the row's
+    /// `planned_publish` is not `publish`.
+    pub fn clear_planned_publish(&self, session: &SessionId, repo: &RepoName, publish: u64) -> Result<bool> {
+        const OP: &str = "clear_planned_publish";
+        let p = rev_i(publish)?;
+        self.write(OP, |c| {
+            let (s, rn) = (session.as_str(), repo.as_str());
+            if user_version(c)? < V3 {
+                return Ok(Tx::Rollback(false));
+            }
+            let n = c
+                .execute(
+                    "UPDATE rebase_pending SET planned_publish = NULL WHERE session = ?1 AND repo = ?2 AND planned_publish = ?3",
+                    params![s, rn, p],
+                )
+                .map_err(wp(OP))?;
+            drop_if_empty(c, s, rn, OP)?;
+            Ok(if n == 1 { Tx::Commit(true) } else { Tx::Rollback(false) })
+        })
+    }
+
+    /// Drop the committed target of rev `rev` (stale, §1.6 "Staleness", or
+    /// unreachable at a promotion): `rev + 1`, `reason`, `detail`; the row
+    /// is deleted when nothing else is planned. `false` when `rev` moved.
+    pub fn discard_pending_target(&self, session: &SessionId, repo: &RepoName, rev: u64, reason: &str, detail: &Value, at: SystemTime) -> Result<bool> {
+        const OP: &str = "discard_pending_target";
+        let at = ns(at, "at")?;
+        let r = rev_i(rev)?;
+        let detail = to_json(detail, "detail")?;
+        self.write(OP, |c| {
+            let (s, rn) = (session.as_str(), repo.as_str());
+            if user_version(c)? < V3 {
+                return Ok(Tx::Rollback(false));
+            }
+            let n = c
+                .execute(
+                    "UPDATE rebase_pending SET head = NULL, tree = NULL, rev = rev + 1, reason = ?4, detail_json = ?5, \
+                     last_at_ns = ?6 WHERE session = ?1 AND repo = ?2 AND rev = ?3",
+                    params![s, rn, r, reason, detail, at],
+                )
+                .map_err(wp(OP))?;
+            drop_if_empty(c, s, rn, OP)?;
+            Ok(if n == 1 { Tx::Commit(true) } else { Tx::Rollback(false) })
+        })
+    }
+
+    /// §1.6 rule 6: an attempt of rev `rev` was deferred. Only an update of
+    /// that rev (never an insert): `reason`, `detail`, `last_at`,
+    /// `attempts + 1`. `false` when the row moved on meanwhile.
+    pub fn defer_pending(&self, session: &SessionId, repo: &RepoName, rev: u64, reason: &str, detail: &Value, at: SystemTime) -> Result<bool> {
+        const OP: &str = "defer_pending";
+        let at = ns(at, "at")?;
+        let r = rev_i(rev)?;
+        let detail = to_json(detail, "detail")?;
+        self.write(OP, |c| {
+            if user_version(c)? < V3 {
+                return Ok(Tx::Rollback(false));
+            }
+            let n = c
+                .execute(
+                    "UPDATE rebase_pending SET reason = ?4, detail_json = ?5, last_at_ns = ?6, attempts = attempts + 1 \
+                     WHERE session = ?1 AND repo = ?2 AND rev = ?3 AND head IS NOT NULL",
+                    params![session.as_str(), repo.as_str(), r, reason, detail, at],
+                )
+                .map_err(wp(OP))?;
+            Ok(if n == 1 { Tx::Commit(true) } else { Tx::Rollback(false) })
+        })
+    }
+
+    /// The committed target of rev `rev` keeps its place but is marked
+    /// `reason` (rule 5: `publish_unfinished`). `false` when `rev` moved.
+    pub fn set_pending_reason(&self, session: &SessionId, repo: &RepoName, rev: u64, reason: &str) -> Result<bool> {
+        const OP: &str = "set_pending_reason";
+        let r = rev_i(rev)?;
+        self.write(OP, |c| {
+            if user_version(c)? < V3 {
+                return Ok(Tx::Rollback(false));
+            }
+            let n = c
+                .execute(
+                    "UPDATE rebase_pending SET reason = ?4 WHERE session = ?1 AND repo = ?2 AND rev = ?3 AND head IS NOT NULL",
+                    params![session.as_str(), repo.as_str(), r, reason],
+                )
+                .map_err(wp(OP))?;
+            Ok(if n == 1 { Tx::Commit(true) } else { Tx::Rollback(false) })
+        })
+    }
+
+    /// §1.6 replay, before the ref transaction: every plan in one
+    /// transaction (`planned_head/tree`; a pair with no row is inserted,
+    /// `from_*` = its current base). Pairs with no workspace are skipped.
+    pub fn plan_replay(&self, repo: &RepoName, plans: &[ReplayPlan], at: SystemTime) -> Result<()> {
+        const OP: &str = "plan_replay";
+        let at = ns(at, "at")?;
+        if plans.is_empty() {
+            return Ok(());
+        }
+        self.write(OP, |c| {
+            if user_version(c)? < V3 {
+                return Ok(Tx::Rollback(()));
+            }
+            let rn = repo.as_str();
+            for p in plans {
+                let s = p.session.as_str();
+                let Some((ft, fd)) = ws_base(c, s, rn).map_err(wp(OP))? else { continue };
+                let n = c
+                    .execute(
+                        "UPDATE rebase_pending SET planned_head = ?3, planned_tree = ?4 WHERE session = ?1 AND repo = ?2",
+                        params![s, rn, p.planned_head, p.planned_tree],
+                    )
+                    .map_err(wp(OP))?;
+                if n == 0 {
+                    c.execute(
+                        "INSERT INTO rebase_pending (session, repo, rev, from_tree, from_deps, planned_head, planned_tree, \
+                         reason, first_at_ns, last_at_ns, attempts) VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, 'replay', ?7, ?7, 0)",
+                        params![s, rn, ft, fd, p.planned_head, p.planned_tree, at],
+                    )
+                    .map_err(wp(OP))?;
+                }
+            }
+            Ok(Tx::Commit(()))
+        })
+    }
+
+    /// The planned replay target `planned_head` becomes the committed
+    /// target (`rev + 1`, reason `pending`, attempts 0, `from_*` = the
+    /// current base), or, with `adopt = false`, is cleared. Conditioned on
+    /// the row still planning `planned_head`.
+    pub fn settle_planned(&self, session: &SessionId, repo: &RepoName, planned_head: &str, adopt: bool, at: SystemTime) -> Result<bool> {
+        const OP: &str = "settle_planned";
+        let at = ns(at, "at")?;
+        self.write(OP, |c| {
+            let (s, rn) = (session.as_str(), repo.as_str());
+            if user_version(c)? < V3 {
+                return Ok(Tx::Rollback(false));
+            }
+            let n = if adopt {
+                let Some((ft, fd)) = ws_base(c, s, rn).map_err(wp(OP))? else { return Ok(Tx::Rollback(false)) };
+                c.execute(
+                    "UPDATE rebase_pending SET head = planned_head, tree = planned_tree, planned_head = NULL, planned_tree = NULL, \
+                     rev = rev + 1, reason = 'pending', attempts = 0, last_at_ns = ?4, from_tree = ?5, from_deps = ?6 \
+                     WHERE session = ?1 AND repo = ?2 AND planned_head = ?3",
+                    params![s, rn, planned_head, at, ft, fd],
+                )
+                .map_err(wp(OP))?
+            } else {
+                c.execute(
+                    "UPDATE rebase_pending SET planned_head = NULL, planned_tree = NULL WHERE session = ?1 AND repo = ?2 AND planned_head = ?3",
+                    params![s, rn, planned_head],
+                )
+                .map_err(wp(OP))?
+            };
+            drop_if_empty(c, s, rn, OP)?;
+            Ok(if n == 1 { Tx::Commit(true) } else { Tx::Rollback(false) })
+        })
+    }
+}

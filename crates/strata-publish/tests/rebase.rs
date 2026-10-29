@@ -156,6 +156,10 @@ fn row_outcome(fx: &Fx, id: u64) -> serde_json::Value {
     fx.store().publish_record(id).unwrap().unwrap().outcome.unwrap()
 }
 
+fn pending(fx: &Fx, s: &SessionId) -> Option<strata_store::RebasePending> {
+    fx.store().rebase_pending_of(s, &repo_name("tool")).unwrap()
+}
+
 // ---- tests -----------------------------------------------------------------
 
 #[test]
@@ -179,6 +183,7 @@ fn post_publish_rebase_drops_published_paths() {
     assert_eq!(o["rebase"][0]["session"], a.as_str());
     assert_eq!(o["rebase"][0]["kind"], "Moved");
     assert_eq!(o["paths"], serde_json::json!(["from-a"]));
+    assert!(fx.store().rebase_pending(None).unwrap().is_empty(), "both moves consumed their targets");
 }
 
 #[test]
@@ -221,6 +226,9 @@ fn rebase_waits_when_deps_must_change() {
     assert_eq!(fx.base_of(&s, "tool"), before, "the session stays on its old base");
     assert_eq!(fx.read_ref("tool", CHAIN).unwrap(), p.commit.as_str());
     assert_eq!(row_outcome(&fx, p.id)["rebase"][0]["kind"], "Waiting");
+    let r = pending(&fx, &s).expect("a deferred target");
+    assert_eq!((r.head.as_deref(), r.reason.as_str(), r.attempts), (Some(p.commit.as_str()), "deps_changed", 1));
+    assert_eq!(r.detail.as_ref().unwrap()["publish"], p.id);
 }
 
 /// session.md §5.6 step 4.2 (D57): a publish that leaves the session
@@ -325,6 +333,8 @@ fn open_files_does_not_fail_a_landed_publish() {
     assert_eq!(fx.store().publish_record(p.id).unwrap().unwrap().phase, PublishPhase::Done);
     assert_eq!(fx.base_of(&s, "tool"), before, "the session did not move");
     assert_eq!(row_outcome(&fx, p.id)["rebase"][0]["kind"], "OpenFiles");
+    let r = pending(&fx, &s).expect("a deferred target");
+    assert_eq!((r.head.as_deref(), r.reason.as_str(), r.attempts), (Some(p.commit.as_str()), "open_files", 1));
     // After the process is gone a later rebase moves it; the commit is not replayed.
     let d = fx.deps_ctx("tool");
     let ss = fx.sessions();
@@ -333,6 +343,7 @@ fn open_files_does_not_fail_a_landed_publish() {
     let r = rebase_session(&ctx, s.clone(), &repo_name("tool"), ng, p.commit.clone()).unwrap();
     assert!(matches!(r, RebaseReport::Moved { .. }), "{r:?}");
     assert_eq!(fx.store().publishes().unwrap().len(), 1);
+    assert!(pending(&fx, &s).is_none(), "a move onto the target consumes it");
 }
 
 #[test]
@@ -413,7 +424,8 @@ fn failed_publish_keeps_overlay() {
     let e = run(&fx, &gc).unwrap_err();
     assert_eq!(e.code, Code::CheckFailed, "{e:?}");
     assert_eq!((overlay(&fx, &c), fx.base_of(&c, "tool")), before);
-    let _ = a;
+    assert!(pending(&fx, &b).is_none() && pending(&fx, &c).is_none(), "a publish with no commit leaves no plan");
+    assert!(pending(&fx, &a).is_none());
 }
 
 #[test]
@@ -432,6 +444,8 @@ fn rebase_failure_still_reports_the_commit() {
     assert_eq!(o["commit"], c.as_str(), "the record keeps the commit");
     assert!(o.get("error").is_some());
     assert_eq!(fx.base_of(&s, "tool"), before);
+    let r = pending(&fx, &s).expect("the committed target stays");
+    assert_eq!((r.head.as_deref(), r.reason.as_str(), r.planned_publish), (Some(c.as_str()), "publish_unfinished", None));
 }
 
 #[test]
@@ -561,4 +575,37 @@ fn diff_between_previews_uncheckpointed_edits() {
     assert!(!idx.merged);
     assert!(idx.hunks[0].ours.contains("21") && idx.hunks[0].theirs.contains("33"), "{idx:?}");
     assert!(diff.only_a.iter().any(|p| p.as_str() == "a-new.txt"), "{diff:?}");
+}
+
+/// rm-followups §1.6 rule 4: a plan left by a publish that stopped before
+/// promotion is resolved from the record: Running is left alone, a
+/// reachable commit is promoted (`publish_unfinished` unless the row is a
+/// clean Done), no commit clears the plan.
+#[test]
+fn reconstruct_resolves_a_plan_from_the_publish_record() {
+    let fx = fx();
+    let (_a, ga) = session_with(&fx, &[("from-a", b"alpha\n")], None);
+    let pa = run(&fx, &ga).unwrap();
+    let d = fx.deps_ctx("tool");
+    let ss = fx.sessions();
+    let ctx = fx.ctx(&d, &ss);
+    let sc = strata_publish::pending::Scope::of(&ctx);
+    let (b, gb) = session_with(&fx, &[("from-b", b"bravo\n")], None);
+    let id = fx.store().record_publish(&gb, std::time::SystemTime::now()).unwrap();
+    assert_eq!(pending(&fx, &b).unwrap().planned_publish, Some(id));
+    strata_publish::pending::reconstruct(sc).unwrap();
+    assert_eq!(pending(&fx, &b).unwrap().planned_publish, Some(id), "a Running publish is left alone");
+    let o = serde_json::json!({ "commit": pa.commit.as_str(), "error": { "code": "Unknown" } });
+    assert!(fx.store().set_publish_phase(id, PublishPhase::Running, PublishPhase::Unknown, Some(&o), std::time::SystemTime::now()).unwrap());
+    strata_publish::pending::reconstruct(sc).unwrap();
+    let r = pending(&fx, &b).expect("promoted");
+    assert_eq!((r.head.as_deref(), r.planned_publish, r.reason.as_str()), (Some(pa.commit.as_str()), None, "publish_unfinished"));
+    assert_eq!(r.detail.as_ref().unwrap()["publish"], id);
+
+    // no commit anywhere: the plan goes
+    let (c, gc) = session_with(&fx, &[("from-c", b"charlie\n")], None);
+    let id = fx.store().record_publish(&gc, std::time::SystemTime::now()).unwrap();
+    assert!(fx.store().set_publish_phase(id, PublishPhase::Running, PublishPhase::Unknown, Some(&serde_json::json!({})), std::time::SystemTime::now()).unwrap());
+    strata_publish::pending::reconstruct(sc).unwrap();
+    assert!(pending(&fx, &c).is_none());
 }

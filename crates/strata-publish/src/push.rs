@@ -614,6 +614,10 @@ fn after_stage(
     // Review-3 R3: a failure once the object exists (the chain-ref
     // transaction) still says no push was sent and how many checks ran.
     let commit = r.map_err(|e| if written.is_some() { with_landed(e, Value::Null, ran.ran) } else { e })?;
+    // rm-followups §1.6 rule 2: under the lock, the commit is each
+    // session's committed rebase target.
+    let sessions: Vec<SessionId> = group.batches.iter().map(|b| b.session.clone()).collect::<BTreeSet<_>>().into_iter().collect();
+    crate::pending::promote_published(crate::pending::Scope::of(ctx), &sessions, id, &commit, &staged.tree);
     // Step 7.
     seams::fail(ctx.git, FailPoint::BeforePush).map_err(|e| with_landed(after_write(&commit, e), Value::Null, ran.ran))?;
     let push = if pushing {
@@ -742,7 +746,12 @@ pub fn publish_bound(
                 let mut written: Option<CommitOid> = None;
                 let mut inner: Option<Result<Landed>> = None;
                 let r = ctx.locks.with_repo(ctx.repo, &mut || {
-                    inner = Some(locked(ctx, &group, &sessions, confirm.as_ref(), shown.as_ref(), &mut written, &prep, select));
+                    let l = locked(ctx, &group, &sessions, confirm.as_ref(), shown.as_ref(), &mut written, &prep, select);
+                    if l.is_err() {
+                        // rm-followups §1.6 rules 3/5, still under the lock.
+                        crate::pending::resolve_failed(crate::pending::Scope::of(ctx), &queue, id, written.as_ref());
+                    }
+                    inner = Some(l);
                     Ok(())
                 });
                 let r = match r {
@@ -752,7 +761,14 @@ pub fn publish_bound(
                 };
                 match r {
                     Ok(l) => Ok((id, l)),
-                    Err(e) => Err(close_failed(ctx, id, written.as_ref(), e)),
+                    Err(e) => {
+                        if written.is_none() {
+                            for s in &queue {
+                                crate::pending::clear_plan(crate::pending::Scope::of(ctx), s, id);
+                            }
+                        }
+                        Err(close_failed(ctx, id, written.as_ref(), e))
+                    }
                 }
             })());
             Ok(())
@@ -824,6 +840,7 @@ pub fn publish_bound(
             left.as_ref(),
         );
         o["error"] = err_json(&e);
+        crate::pending::mark_unfinished(crate::pending::Scope::of(ctx), &queue, &landed.commit);
         if let Err(se) = ctx.store.set_publish_phase(id, PublishPhase::Running, PublishPhase::Unknown, Some(&o), now()) {
             tracing::warn!(publish = id, error = %se.message, "publish row could not be marked unknown");
         }

@@ -118,6 +118,20 @@ impl Sessions<'_> {
         new_base: BaseGen,
         head: CommitOid,
     ) -> Result<MoveReport> {
+        self.move_workspace_consuming(session, repo, new_base, head, None)
+    }
+
+    /// [`Sessions::move_workspace`] that consumes the `rebase_pending` row
+    /// of rev `consume` in the finishing transaction (rm-followups §1.6
+    /// rule 6).
+    pub fn move_workspace_consuming(
+        &self,
+        session: &SessionId,
+        repo: &RepoId,
+        new_base: BaseGen,
+        head: CommitOid,
+        consume: Option<u64>,
+    ) -> Result<MoveReport> {
         // ---- Phase A: checks; nothing is written.
         // 1.
         let name = self.repo_name(repo)?;
@@ -400,7 +414,7 @@ impl Sessions<'_> {
             phase = "record";
             self.store.set_move_phase(session, &name, n, "record")?;
             self.seams.hit("move.record", Some(&name))?;
-            self.store.finish_move(session, &name, n, &rebased.conflicts, SystemTime::now())
+            self.store.finish_move_consuming(session, &name, n, &rebased.conflicts, SystemTime::now(), consume)
         })();
         if let Err(e) = swapped {
             if is_stop(&e) {

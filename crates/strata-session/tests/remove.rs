@@ -786,4 +786,21 @@ fn status_shows_last_rm_and_rebase_pending_from_the_store() {
     )
     .unwrap();
     assert_eq!(sum[0].rm, st.rm, "ls and --brief carry the same notes");
+
+    // rebase_pending: a replay plan, then its adopted and deferred target
+    let tool = strata_types::RepoName::try_from("tool".to_string()).unwrap();
+    let (h, now) = ("c".repeat(40), std::time::SystemTime::now());
+    let plan = strata_store::ReplayPlan { session: id.clone(), planned_head: h.clone(), planned_tree: h.clone() };
+    fx.store().plan_replay(&tool, &[plan], now).unwrap();
+    let st = s.status(&id).unwrap();
+    assert_eq!(st.rm.notes.last().map(String::as_str), Some("waiting for the replay of tool"), "{:?}", st.rm.notes);
+    assert!(fx.store().settle_planned(&id, &tool, &h, true, now).unwrap());
+    let st = s.status(&id).unwrap();
+    let since = strata_session::local_hhmm(now);
+    assert_eq!(st.rm.notes.last().unwrap(), &format!("behind origin of tool: auto-rebase pending (pending, since {since})"));
+    assert!(fx.store().defer_pending(&id, &tool, 1, "busy", &serde_json::json!({ "publish": 5 }), now).unwrap());
+    let st = s.status(&id).unwrap();
+    assert_eq!(st.rm.notes.last().unwrap(), &format!("behind publish 5 of tool: auto-rebase deferred (busy, since {since}, attempts 1)"));
+    let note = st.rm.rebase_pending.last().unwrap();
+    assert_eq!((note.reason.as_str(), note.publish, note.attempts), ("busy", Some(5), 1));
 }

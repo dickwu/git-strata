@@ -216,16 +216,33 @@ pub fn rm_notes(store: &Store, root: &Path, rec: &SessionRecord) -> Result<RmNot
     Ok(out)
 }
 
+/// The publish a row is behind: its committed target's, else the planned
+/// one.
 fn publish_of(p: &RebasePending) -> Option<u64> {
-    p.planned_publish.or_else(|| p.detail.as_ref()?.get("publish")?.as_u64())
+    let committed = p.detail.as_ref().and_then(|d| d.get("publish")).and_then(serde_json::Value::as_u64);
+    if p.head.is_some() { committed.or(p.planned_publish) } else { p.planned_publish.or(committed) }
 }
 
-/// "app behind publish N: auto-rebase deferred (reason)".
+/// rm-followups §1.6 status: "behind publish N of REPO: auto-rebase
+/// deferred (reason, since HH:MM, attempts k)" for a committed target,
+/// "waiting for publish N of REPO" when only a publish is planned.
 pub(crate) fn rebase_line(p: &RebasePending) -> String {
-    match publish_of(p) {
-        Some(n) => format!("{} behind publish {n}: auto-rebase deferred ({})", p.repo, p.reason),
-        None => format!("{} behind origin: auto-rebase deferred ({})", p.repo, p.reason),
+    let behind = match publish_of(p) {
+        Some(n) => format!("behind publish {n} of {}", p.repo),
+        None => format!("behind origin of {}", p.repo),
+    };
+    if p.head.is_none() {
+        return match (p.planned_publish, p.planned_head.is_some()) {
+            (Some(n), _) => format!("waiting for publish {n} of {}", p.repo),
+            (None, true) => format!("waiting for the replay of {}", p.repo),
+            (None, false) => format!("{behind}: {}", p.reason),
+        };
     }
+    let since = local_hhmm(p.first_at);
+    if p.attempts == 0 {
+        return format!("{behind}: auto-rebase pending ({}, since {since})", p.reason);
+    }
+    format!("{behind}: auto-rebase deferred ({}, since {since}, attempts {})", p.reason, p.attempts)
 }
 
 /// R3: the top-level `sessions/<sid>` and `sessions/.repos/<sid>`

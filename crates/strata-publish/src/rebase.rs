@@ -271,16 +271,13 @@ fn auto_gates(ctx: &Ctx, s: &SessionId, old: &BaseGen, new: &Base) -> Result<std
 
 /// Steps 1–4 of §5.8 for one session. Step 5 (`observe_main`) is the
 /// caller's: `publish` runs it once for the whole group.
-pub(crate) fn rebase_one(ctx: &Ctx, s: &SessionId, new_base: &BaseGen, head: &CommitOid) -> Result<RebaseReport> {
-    rebase_one_with(ctx, s, new_base, head, MovePolicy::Explicit)
-}
-
 pub(crate) fn rebase_one_with(
     ctx: &Ctx,
     s: &SessionId,
     new_base: &BaseGen,
     head: &CommitOid,
     policy: MovePolicy,
+    consume: Option<u64>,
 ) -> Result<RebaseReport> {
     if new_base.repo != *ctx.repo {
         return Err(invalid(
@@ -361,7 +358,7 @@ pub(crate) fn rebase_one_with(
             {
                 return Ok(d);
             }
-            return match ctx.sessions.move_workspace(s, &repo_id, target.clone(), head.clone()) {
+            return match ctx.sessions.move_workspace_consuming(s, &repo_id, target.clone(), head.clone(), consume) {
                 Ok(r) => Ok(RebaseReport::Moved { dropped: r.dropped, lww: r.lww, regenerable_kept: kept.clone() }),
                 Err(e) if e.code == Code::OpenFiles => {
                     Ok(RebaseReport::OpenFiles { detail: e.detail.unwrap_or(Value::Null) })
@@ -392,12 +389,25 @@ pub(crate) fn rebase_one_with(
     })
 }
 
+/// The base of `s`'s workspace of `ctx.repo`.
+pub(crate) fn workspace_base(ctx: &Ctx, s: &SessionId) -> Result<BaseGen> {
+    Ok(workspace(ctx, s)?.base)
+}
+
 /// `publish`'s rebase of one session onto the landed tree: its old deps
-/// set is the starting guess for the new base generation.
+/// set is the starting guess for the new base generation. A
+/// `rebase_pending` row whose committed target is this commit is the one
+/// attempted (rm-followups §1.6 T1): a move consumes it, anything else is
+/// recorded on it.
 pub(crate) fn after_publish(ctx: &Ctx, s: &SessionId, tree: &strata_types::TreeOid, head: &CommitOid) -> Result<RebaseReport> {
     let old = workspace(ctx, s)?.base;
     let g = BaseGen { repo: ctx.repo.clone(), tree: tree.clone(), deps: old.deps };
-    rebase_one(ctx, s, &g, head)
+    let row = ctx.store.rebase_pending_of(s, ctx.repo).ok().flatten().filter(|r| r.head.as_deref() == Some(head.as_str()));
+    let r = rebase_one_with(ctx, s, &g, head, MovePolicy::Explicit, row.as_ref().map(|r| r.rev))?;
+    if let Some(row) = &row {
+        crate::pending::note_outcome(ctx, row, &r);
+    }
+    Ok(r)
 }
 
 fn deps_unsealed(repo: &RepoName, id: &DepsSetId) -> StrataError {
@@ -433,7 +443,7 @@ pub fn rebase_session_with(
             json!({ "repo": repo.as_str(), "ctx_repo": ctx.repo.as_str() }),
         ));
     }
-    let report = rebase_one_with(ctx, &session, &new_base, &head, policy)?;
+    let report = rebase_one_with(ctx, &session, &new_base, &head, policy, None)?;
     // 5. After the lock: main's record, best-effort.
     if deps::main_tip(ctx.cfg, ctx.git).ok().flatten().as_ref() == Some(&head) {
         let dir = ctx.store.base_dir(&BaseGen { deps: workspace(ctx, &session)?.base.deps, ..new_base.clone() });
@@ -443,6 +453,20 @@ pub fn rebase_session_with(
         }
     }
     Ok(report)
+}
+
+/// Step 5 of [`rebase_session_with`] for a rebase made elsewhere
+/// (rm-followups §1.6 attempts): best-effort.
+pub(crate) fn observe_after(ctx: &Ctx, session: &SessionId, new_base: &BaseGen, head: &CommitOid) {
+    if deps::main_tip(ctx.cfg, ctx.git).ok().flatten().as_ref() != Some(head) {
+        return;
+    }
+    let Ok(ws) = workspace(ctx, session) else { return };
+    let dir = ctx.store.base_dir(&BaseGen { deps: ws.base.deps, ..new_base.clone() });
+    let dir = if dir.exists() { dir } else { ctx.store.base_dir(new_base) };
+    if let Err(e) = deps::observe_main(ctx.deps, &new_base.tree, head, &dir) {
+        tracing::warn!(repo = %ctx.repo, error = %e.message, "observe_main failed after rebase");
+    }
 }
 
 // ---- assign (§5.7) --------------------------------------------------------

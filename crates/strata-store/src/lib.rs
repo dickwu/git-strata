@@ -39,7 +39,7 @@ mod txn;
 
 #[cfg(feature = "test-seams")]
 pub use seams::{Seam, SyncCounts};
-pub use rm_state::{RebasePending, RmAttempt, RmOutcome};
+pub use rm_state::{RebasePending, ReplayPlan, RmAttempt, RmOutcome};
 pub use devports::{DEV_PORT_BLOCK, DevPortLease, DevPortsPolicy, Probe, bind_probe};
 
 pub type Result<T> = std::result::Result<T, StrataError>;

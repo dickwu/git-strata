@@ -434,6 +434,15 @@ impl<'a> Daemon<'a> {
             }
             core.warnings.add(DaemonWarning::UnknownPublish { id });
         }
+        // rm-followups §1.6 rule 4: each repo's rebase_pending rows are
+        // reconstructed under its write lock (no publish runs yet).
+        for (repo, git) in core.gits.iter() {
+            let Some(rc) = core.config.repos.get(repo) else { continue };
+            let sc = strata_publish::pending::Scope { store: &core.store, git, repo, branch: &rc.publish.branch };
+            if let Err(e) = core.locks.with_repo(repo, || strata_publish::pending::reconstruct(sc)) {
+                tracing::warn!(repo = %repo, error = %e.message, "rebase_pending reconstruction failed");
+            }
+        }
         // Review M6: kept scenes of uncertain standalone/restore pushes.
         for (repo, commit, scene) in crate::resolve::push_scenes(&core.config.paths.root) {
             core.warnings.add(DaemonWarning::UnknownPush { repo, commit, scene });

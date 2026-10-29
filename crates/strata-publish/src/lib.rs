@@ -11,6 +11,7 @@ use strata_types::{RepoConfig, RepoName, SessionId, StrataError};
 pub mod chain;
 pub(crate) mod deps_select;
 pub mod check;
+pub mod pending;
 pub mod push;
 pub mod rebase;
 pub mod seams;

@@ -157,6 +157,10 @@ impl Store {
                     ins.execute(params![id, bi as i64, pi as i64, b.session.as_str(), b.repo.as_str(), cp, p.as_str()]).map_err(w(OP))?;
                 }
             }
+            // rm-followups §1.6 rule 1: every session pair of the group
+            // plans this publish before any ref moves.
+            let pairs: Vec<(&str, &str)> = group.batches.iter().map(|b| (b.session.as_str(), b.repo.as_str())).collect();
+            crate::rm_state::plan_publish(c, OP, id, &pairs, started)?;
             Ok(Tx::Commit(id as u64))
         })
     }
