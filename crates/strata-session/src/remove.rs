@@ -1,6 +1,6 @@
 //! `remove(id, discard, confirm)` (§5.6): named refusals first, then the
 //! internal clean-up and the BeforeRemove checkpoints, then the visible
-//! steps (Removing, unpin, retire, Removed); a failure after Removing is an
+//! steps (Removing, retire, unpin, Removed); a failure after Removing is an
 //! Unknown scene.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -155,30 +155,7 @@ impl Sessions<'_> {
         }
         drop(confirm);
         // 3. Open files; discard does not bypass this and there is no force.
-        let root = rec.manifest.root.clone();
-        let repos_dir = self.config.paths.root.join("sessions/.repos").join(id.as_str());
-        let mut open = strata_deps::open_files(&root)?;
-        open.extend(strata_deps::open_files(&repos_dir)?);
-        if !open.is_empty() {
-            let mut pids: Vec<i32> = open.iter().map(|o| o.pid).collect();
-            pids.sort_unstable();
-            pids.dedup();
-            return Err(StrataError::new(
-                Code::OpenFiles,
-                format!(
-                    "{} Processes {} hold files in it; close them and run the same command again.",
-                    self.refused_prefix(&rec),
-                    pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
-                ),
-            )
-            .with_detail(json!({
-                "session": id.as_str(),
-                "paths": [root, repos_dir],
-                "open": open,
-                "removed": false,
-                "lifecycle": lc_title(cur),
-            })));
-        }
+        self.refuse_open_files(&rec)?;
         let intents = self.store.move_intents(id)?;
         // 4.
         let judged = if discard { Judged::default() } else { self.dirty_check(&rec, &intents)? };
@@ -275,6 +252,11 @@ impl Sessions<'_> {
             }
         }
 
+        // R4: one batched open-files scan right before Removing; only the
+        // lifecycle and phase writes sit between it and the first retire.
+        self.seams.hit("remove.before_removing", None)?;
+        self.refuse_open_files(&rec)?;
+
         // ---- Phase C: the visible steps.
         self.teardown(&rec, cur)?;
         let regenerable = judged
@@ -285,9 +267,41 @@ impl Sessions<'_> {
         Ok(RemoveReport { session: id.clone(), discarded: discard, checkpoints, regenerable })
     }
 
-    /// §5.6 steps 6–9 from `cur` (Active or Unknown): Removing, unpin,
-    /// retire the session root and its shadow repositories, Removed. A
-    /// failure after Removing is an Unknown scene. Also `new`'s rollback.
+    /// Step 3 and the R4 recheck: refuse while any process holds a file in
+    /// the session root or its shadow repositories (one scan for both).
+    fn refuse_open_files(&self, rec: &SessionRecord) -> Result<()> {
+        let id = &rec.manifest.id;
+        let root = rec.manifest.root.clone();
+        let repos_dir = self.config.paths.root.join("sessions/.repos").join(id.as_str());
+        let open = strata_deps::open_files_many(&[&root, &repos_dir])?;
+        if open.is_empty() {
+            return Ok(());
+        }
+        let mut pids: Vec<i32> = open.iter().map(|o| o.pid).collect();
+        pids.sort_unstable();
+        pids.dedup();
+        Err(StrataError::new(
+            Code::OpenFiles,
+            format!(
+                "{} Processes {} hold files in it; close them and run the same command again.",
+                self.refused_prefix(rec),
+                pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+            ),
+        )
+        .with_detail(json!({
+            "session": id.as_str(),
+            "paths": [root, repos_dir],
+            "open": open,
+            "removed": false,
+            "lifecycle": lc_title(rec.lifecycle),
+        })))
+    }
+
+    /// §5.6 steps 6–9 from `cur` (Active or Unknown): Removing, retire the
+    /// session root and its shadow repositories, unpin, Removed (R4: retire
+    /// before unpin, so no repo-lock wait sits between the last open-files
+    /// scan and the retire). A failure after Removing is an Unknown scene.
+    /// Also `new`'s rollback.
     pub(crate) fn teardown(&self, rec: &SessionRecord, cur: Lifecycle) -> Result<()> {
         let id = &rec.manifest.id;
         let root = rec.manifest.root.clone();
@@ -300,23 +314,9 @@ impl Sessions<'_> {
             )
             .with_detail(json!({ "reason": "lifecycle_changed", "session": id.as_str(), "was": lc_name(cur) })));
         }
-        let mut phase = "unpin";
+        let mut phase = "retire";
         let r = (|| -> Result<()> {
             // 7.
-            self.store.set_session_phase(id, "unpin")?;
-            self.seams.hit("remove.unpin", None)?;
-            let pin = pin_ref(id);
-            for repo in rec.manifest.repos.keys() {
-                let git = self.git(repo)?;
-                self.with_lock_unbounded(repo, || {
-                    if let Some(c) = git.read_ref(&pin)? {
-                        git.delete_ref(&pin, &c)?;
-                    }
-                    Ok(())
-                })?;
-            }
-            // 8.
-            phase = "retire";
             self.store.set_session_phase(id, "retire")?;
             self.seams.hit("remove.retire", None)?;
             for d in [&root, &repos_dir] {
@@ -328,6 +328,20 @@ impl Sessions<'_> {
                     Err(e) if e.code == Code::NoSuchPath => {}
                     Err(e) => return Err(e),
                 }
+            }
+            // 8.
+            phase = "unpin";
+            self.store.set_session_phase(id, "unpin")?;
+            self.seams.hit("remove.unpin", None)?;
+            let pin = pin_ref(id);
+            for repo in rec.manifest.repos.keys() {
+                let git = self.git(repo)?;
+                self.with_lock_unbounded(repo, || {
+                    if let Some(c) = git.read_ref(&pin)? {
+                        git.delete_ref(&pin, &c)?;
+                    }
+                    Ok(())
+                })?;
             }
             // 9.
             phase = "record";

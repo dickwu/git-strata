@@ -614,7 +614,7 @@ fn remove_failure_midway_is_unknown_and_keeps_scene() {
     let e = s.remove(&id, false, None).unwrap_err();
     assert_eq!(e.code, Code::Unknown, "{e:?}");
     assert_eq!(detail_str(&e, "phase"), Some("retire"), "{e:?}");
-    assert_eq!(fx.pins("tool"), "", "the pin went in step 7");
+    assert_ne!(fx.pins("tool"), "", "R4: the pin goes after the retire");
     assert!(session_root(&fx, &id).is_dir() && shadow(&fx, &id, "tool").is_dir(), "the scene is kept");
     assert_eq!(lifecycle(&fx, &id), Lifecycle::Unknown);
     let st = s.status(&id).unwrap();
@@ -803,4 +803,49 @@ fn status_shows_last_rm_and_rebase_pending_from_the_store() {
     assert_eq!(st.rm.notes.last().unwrap(), &format!("behind publish 5 of tool: auto-rebase deferred (busy, since {since}, attempts 1)"));
     let note = st.rm.rebase_pending.last().unwrap();
     assert_eq!((note.reason.as_str(), note.publish, note.attempts), ("busy", Some(5), 1));
+}
+
+/// R4: a holder that appears after Phase B, just before Removing, is seen
+/// by the batched recheck; the session stays Active.
+#[test]
+fn rm_refuses_open_files_found_just_before_removing() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = id(&new_all(&fx, &s));
+    s.arm(SessionSeam::PauseAt { phase: "remove.before_removing".into() });
+    let mut holder = None;
+    let e = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.remove(&id, false, None));
+        s.wait_paused();
+        holder = Some(Worker::spawn("cwd:".into(), Some(&shadow(&fx, &id, "tool"))));
+        s.release();
+        h.join().unwrap()
+    })
+    .unwrap_err();
+    drop(holder);
+    assert_eq!(e.code, Code::OpenFiles, "{e:?}");
+    assert!(e.message.starts_with(&format!("rm refused: nothing was removed; session {id} is still Active")), "{e:?}");
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+    assert!(session_root(&fx, &id).is_dir() && shadow(&fx, &id, "tool").is_dir());
+    s.remove(&id, false, None).unwrap();
+    assert_removed(&fx, &id);
+}
+
+/// R4: teardown retires before it unpins; a failure between the two is an
+/// Unknown scene at `unpin` that `rm --discard` finishes.
+#[test]
+fn teardown_retires_before_unpin_and_discard_finishes() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = id(&new_all(&fx, &s));
+    s.arm(SessionSeam::FailAt { phase: "remove.unpin".into(), errno: libc::EIO });
+    let e = s.remove(&id, false, None).unwrap_err();
+    assert_eq!(e.code, Code::Unknown, "{e:?}");
+    assert_eq!(detail_str(&e, "phase"), Some("unpin"), "{e:?}");
+    assert!(!session_root(&fx, &id).exists() && !repos_dir(&fx, &id).exists(), "retired first");
+    assert_ne!(fx.pins("tool"), "", "the pin is still there");
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Unknown);
+    s.remove(&id, true, tok(&id)).unwrap();
+    assert_eq!(fx.pins("tool"), "");
+    assert_removed(&fx, &id);
 }

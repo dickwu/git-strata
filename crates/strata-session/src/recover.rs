@@ -118,7 +118,7 @@ impl Sessions<'_> {
         for rec in self.store.sessions()? {
             let (op, first) = match rec.lifecycle {
                 Lifecycle::Creating => (SceneOp::New, "root"),
-                Lifecycle::Removing => (SceneOp::Remove, "unpin"),
+                Lifecycle::Removing => (SceneOp::Remove, "retire"),
                 _ => continue,
             };
             let id = rec.manifest.id.clone();
