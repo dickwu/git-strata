@@ -11,6 +11,7 @@ use strata_types::{RepoConfig, RepoName, SessionId, StrataError};
 pub mod chain;
 pub(crate) mod deps_select;
 pub mod check;
+pub mod pending;
 pub mod push;
 pub mod rebase;
 pub mod seams;
@@ -24,7 +25,10 @@ pub mod stage;
 
 pub use chain::{advance_anchor, anchor_ref, chain_ref, merge_base};
 pub use check::{CHECK_OUTPUT_TAIL, ChecksRan, check};
-pub use rebase::{BetweenDiff, HunkPreview, Merge3Preview, RebaseReport, assign, diff_between, rebase_session};
+pub use rebase::{
+    BetweenDiff, HunkPreview, Merge3Preview, MovePolicy, RebaseReport, assign, diff_between, rebase_session,
+    rebase_session_with,
+};
 pub use push::{PublishWarning, Published, WarningKind, commit, publish, publish_bound, push, push_to, remote_changed};
 pub use seams::PUSH_TIMEOUT;
 #[cfg(feature = "test-seams")]
@@ -62,5 +66,11 @@ pub trait PublishLocks: Sync {
     /// out like the queue's.
     fn with_rebase_sessions(&self, sessions: &[SessionId], f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>> {
         self.with_sessions(sessions, f)
+    }
+    /// Whether a `Busy` take is waited out (§5.1 after the first visible
+    /// write). `false` for the catch-up pass (rm-followups §1.6 T2), which
+    /// never queues behind a request: its `Busy` defers the row.
+    fn waits(&self) -> bool {
+        true
     }
 }

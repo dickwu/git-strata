@@ -87,6 +87,8 @@ pub const LOCK_WAIT: Duration = Duration::from_secs(30);
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// D11: how often the reconcile loop runs.
 pub const RECONCILE_EVERY: Duration = Duration::from_secs(3600);
+/// rm-followups §1.6 T2: how often the catch-up pass runs.
+pub const CATCH_UP_EVERY: Duration = Duration::from_secs(60);
 /// How often the reconcile thread refreshes seed copies whose main-checkout
 /// source changed (`Sessions::refresh_seeds`; a few lstats per seed).
 pub const SEED_REFRESH_EVERY: Duration = Duration::from_secs(2);
@@ -149,12 +151,17 @@ pub enum RpcReject {
 }
 
 /// The pinned safety flags of one repo (pins.json).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedFlags {
     pub deploy_on_push: bool,
     pub confirm: bool,
     pub push: bool,
+    /// `rm.regenerable` (rm-followups §1.8). A three-field pins.json reads
+    /// as empty; an empty list is not written, so such a file stays
+    /// readable by an older daemon until a list is pinned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regenerable: Vec<String>,
 }
 
 /// What `daemon_status` and the stderr alert report.

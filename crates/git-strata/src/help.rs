@@ -17,6 +17,8 @@ macro_rules! gate_text {
   missing or unreadable pins.json, or a repo missing from it (new or renamed),
   counts as needs confirmation. The daemon pins such a repo with confirm on;
   a looser config.toml applies only after `git-strata config relax REPO`.
+  rm.regenerable is pinned the same way: a longer or edited list is looser
+  (relax); deleting positive patterns or appending `!` negations is narrower.
 
   Gated commands need a terminal on stdin; most then show a LocalAuthentication
   prompt (Touch ID, or the login password) from the daemon:
@@ -434,14 +436,23 @@ pub const RM_AFTER: &str = concat!(
   git-strata rm --session s-k3q7xm2a              # after its work is published
   git-strata rm --session s-k3q7xm2a --discard    # HUMAN ONLY (TTY + prompt)
 
-Dirty: the session has changes that are not published. A file whose exact
-bytes and mode are in a publish of this session that origin already has does
-not count, even while the session waits on a deps proposal. detail.repos lists
-the rest per repo, detail.landed counts what was skipped, detail.untracked_repos
-names edited untracked siblings, detail.unresolved lists interrupted scenes.
+Dirty: rm refused and nothing was removed; the session is still Active and
+listed by `git-strata ls` (detail.removed = false, detail.lifecycle). The
+message names up to 5 unpublished paths per repo. A file whose exact bytes and
+mode are in a publish of this session that origin already has does not count,
+even while the session waits on a deps proposal. detail.repos lists the rest
+per repo, detail.landed counts what was skipped, detail.untracked_repos names
+edited untracked siblings, detail.unresolved lists interrupted scenes.
 detail.reason = changed_during_remove: files changed while rm ran; retry.
+Paths matching the repo's pinned rm.regenerable (Modified/Added/Untracked, not
+install inputs, tracked healthy repos only) do not block: they are
+checkpointed and listed in data.regenerable (detail.regenerable on Dirty).
 Publish the work, or hand `rm --discard` to the human. Never rm after an
-Unknown outcome.
+Unknown outcome. `git-strata status <sid>` shows the last rm outcome.
+
+Ctrl-C before the request is sent: nothing happened. After it is sent: the
+daemon finishes the rm on its own (it may still be refused); check
+`git-strata status <sid>`.
 
 ",
     gate_text!()

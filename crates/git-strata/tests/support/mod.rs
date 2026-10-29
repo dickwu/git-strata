@@ -154,7 +154,7 @@ impl Home {
         let mut t = format!("[paths]\nroot = {:?}\n", root.to_string_lossy());
         for r in repos {
             t.push_str(&format!(
-                "\n[repo.{n}]\npath = {p:?}\ndefault_branch = \"main\"\ndeps_dirs = []\ndeploy_on_push = {d}\n\n[repo.{n}.publish]\nbranch = \"main\"\npush = {push}\nconfirm = {c}\n",
+                "\n[repo.{n}]\npath = {p:?}\ndefault_branch = \"main\"\ndeps_dirs = []\ndeploy_on_push = {d}\n\n[repo.{n}.publish]\nbranch = \"main\"\npush = {push}\nconfirm = {c}\n\n[repo.{n}.rebase]\nquiet_secs = 0\n",
                 n = r.name,
                 p = self.repo_dir(r.name).to_string_lossy(),
                 d = r.deploy_on_push,

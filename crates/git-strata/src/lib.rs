@@ -12,6 +12,7 @@ pub mod devports;
 pub mod env;
 pub mod envelope;
 mod help;
+pub mod interrupt;
 pub mod launch;
 pub mod local;
 pub mod ro;
@@ -76,7 +77,8 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
             m.insert("pending_proposals".into(), serde_json::Value::Array(pending));
         }
     }
-    emit_stdout(&env)
+    let code = emit_stdout(&env);
+    interrupt::exit_override().unwrap_or(code)
 }
 
 static HINT: std::sync::Mutex<Option<strata_types::SessionId>> = std::sync::Mutex::new(None);

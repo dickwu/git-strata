@@ -592,6 +592,10 @@ impl Store {
                 if to == Lifecycle::Removed {
                     // store.md §4.4a: a removed session's dev ports are free again.
                     c.execute("DELETE FROM dev_ports WHERE session = ?1", [id]).map_err(w(OP))?;
+                    // rm-followups §2.2 R2 / §1.3: the last rm outcome and any
+                    // deferred rebase go with the session, in this transaction.
+                    c.execute("DELETE FROM rm_attempts WHERE session = ?1", [id]).map_err(w(OP))?;
+                    c.execute("DELETE FROM rebase_pending WHERE session = ?1", [id]).map_err(w(OP))?;
                 }
                 return Ok(Tx::Commit(true));
             }
@@ -655,6 +659,22 @@ impl Store {
     }
 
     pub fn begin_move(&self, id: &SessionId, repo: &RepoName, to: &BaseGen, head: &CommitOid, staging: &Path, at: SystemTime) -> Result<u64> {
+        self.begin_move_with(id, repo, to, head, staging, at, None)
+    }
+
+    /// [`Store::begin_move`] that also writes an `Auto` move's activity
+    /// baseline in the same transaction (rm-followups §1.4 G4, r8).
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_move_with(
+        &self,
+        id: &SessionId,
+        repo: &RepoName,
+        to: &BaseGen,
+        head: &CommitOid,
+        staging: &Path,
+        at: SystemTime,
+        baseline: Option<&crate::MoveBaseline>,
+    ) -> Result<u64> {
         const OP: &str = "begin_move";
         self.writable()?;
         let at = ns(at, "at")?;
@@ -711,6 +731,9 @@ impl Store {
                 params![id, repo, n, to.tree.as_str(), to.deps.as_str(), head.as_str(), staging, at],
             )
             .map_err(w(OP))?;
+            if let Some(b) = baseline {
+                crate::move_activity::insert(c, id, repo, n, b, OP)?;
+            }
             Ok(Tx::Commit(n as u64))
         })
     }
@@ -780,6 +803,22 @@ impl Store {
     }
 
     pub fn finish_move(&self, id: &SessionId, repo: &RepoName, n: u64, conflicts: &[RepoPath], at: SystemTime) -> Result<()> {
+        self.finish_move_consuming(id, repo, n, conflicts, at, None)
+    }
+
+    /// [`Store::finish_move`] that also consumes the `rebase_pending` row
+    /// of rev `consume` in the same transaction (rm-followups §1.6 rule 6);
+    /// with `None` a row whose target is exactly this move's head is
+    /// consumed.
+    pub fn finish_move_consuming(
+        &self,
+        id: &SessionId,
+        repo: &RepoName,
+        n: u64,
+        conflicts: &[RepoPath],
+        at: SystemTime,
+        consume: Option<u64>,
+    ) -> Result<()> {
         const OP: &str = "finish_move";
         self.writable()?;
         let at = ns(at, "at")?;
@@ -810,6 +849,7 @@ impl Store {
                 params![id, repo, ni, at],
             )
             .map_err(w(OP))?;
+            crate::rm_state::consume_on_move(c, OP, id, repo, (&it.to_tree, &it.to_deps), &it.head, consume)?;
             Ok(Tx::Commit(()))
         })
     }

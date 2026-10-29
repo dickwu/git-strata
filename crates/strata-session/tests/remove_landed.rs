@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use strata_overlay::{Base, Checkpointed, WorkspaceRef};
 use strata_session::{BeforeCheckpoint, NewReport, Sessions};
 use strata_store::{Lifecycle, PublishPhase};
-use strata_types::{Batch, CheckpointId, CheckpointReason, Code, ReleaseGroup, SessionId, StrataError};
+use strata_types::{Batch, CheckpointId, CheckpointReason, Code, CommitOid, ReleaseGroup, SessionId, StrataError};
 use support::*;
 
 const TRACK: &str = "refs/strata/remotes/origin/main";
@@ -168,9 +168,14 @@ fn remove_edit_after_publish_is_dirty_only_for_that_path() {
     assert_eq!(detail(&e)["repos"]["tool"]["count"], 1);
     assert_eq!(detail(&e)["landed"]["tool"], json!({ "count": 1, "publishes": [n], "commits": [c], "proposals": [21] }));
     assert!(detail(&e).get("landed_errors").is_none());
-    let want = format!("1 more are already published in publish {n}, which left the session waiting on deps proposal #21");
+    let want = format!(
+        "tool: 1 path not published: src/new.ts; 1 already published (publish {n}, which left the session waiting on \
+         deps proposal #21)"
+    );
     assert!(e.message.contains(&want), "{}", e.message);
-    assert!(e.message.contains("changes that are not published (1 path;"), "{}", e.message);
+    assert!(e.message.starts_with("rm refused: nothing was removed; session "), "{}", e.message);
+    assert_eq!(detail(&e)["removed"], false);
+    assert_eq!(detail(&e)["lifecycle"], "Active");
     assert_eq!(lifecycle(&fx, &id(&rep)), Lifecycle::Active);
 }
 
@@ -703,4 +708,164 @@ fn remove_landed_case_only_rename_stays_dirty() {
     let e = dirty(&s, &rep);
     assert_eq!(paths(&e), ["patches/A.patch"]);
     assert_eq!(detail(&e)["landed"], json!({}));
+}
+
+#[test]
+fn rm_changed_during_remove_says_nothing_removed() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = s.new(None, &fx.all()).unwrap();
+    let hook = Meddling(move |w: &Path| fs::write(w.join("src/late.ts"), b"late\n").unwrap());
+    let s2 = Sessions::open(&fx.config, &fx.gits, fx.store(), &fx.lock, &fx.env, &hook).unwrap();
+    let e = s2.remove(&id(&rep), false, None).unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert_eq!(detail(&e)["reason"], "changed_during_remove");
+    assert_eq!(
+        e.message,
+        format!(
+            "rm refused: nothing was removed; session {} is still Active and listed (`git-strata ls`). It changed \
+             while it was being removed (tool); run the same command again.",
+            id(&rep)
+        )
+    );
+    assert_eq!(detail(&e)["removed"], false);
+    assert_eq!(detail(&e)["lifecycle"], "Active");
+    assert_eq!(lifecycle(&fx, &id(&rep)), Lifecycle::Active);
+}
+
+// ------------------------------------------------- rm-followups §1.9 T3
+
+/// A 40-line file with these lines replaced.
+fn lines(edits: &[(usize, &str)]) -> Vec<u8> {
+    let mut v: Vec<String> = (1..=40).map(|i| format!("line {i}")).collect();
+    for (n, t) in edits {
+        v[n - 1] = (*t).to_string();
+    }
+    (v.join("\n") + "\n").into_bytes()
+}
+
+/// A session on a base with `src/big.ts` (40 lines) whose line 1 it edits.
+fn t3_session(fx: &Fx, s: &Sessions<'_>) -> NewReport {
+    land(fx, &[("src/big.ts", &lines(&[]))], &[], true);
+    let rep = s.new(None, &fx.all()).unwrap();
+    fs::write(ws(&rep).join("src/big.ts"), lines(&[(1, "mine")])).unwrap();
+    rep
+}
+
+/// A Done publish of the session whose commit has these files; `fetch`
+/// moves origin's tracking ref, `build` builds its base (as the
+/// post-publish rebase does). The session stays on its old base.
+fn t3_publish(fx: &Fx, s: &Sessions<'_>, rep: &NewReport, writes: &[(&str, &[u8])], deletes: &[&str], fetch: bool, build: bool) -> (u64, String) {
+    let cp = checkpoint(fx, rep);
+    let c = land(fx, writes, deletes, fetch);
+    let n = row(fx, &[(&id(rep), cp)], PublishPhase::Done, outcome(&c, &id(rep)));
+    if build {
+        s.ensure_base(&repo_name("tool"), &CommitOid::try_from(c.clone()).unwrap()).unwrap();
+    }
+    (n, c)
+}
+
+#[test]
+fn rm_t3_projection_discharges_a_hunk_published_with_origin_changes() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = t3_session(&fx, &s);
+    // The publish has the session's line 1 and origin's line 38: not the
+    // session's bytes (D57 misses it), but a move would drop the entry.
+    t3_publish(&fx, &s, &rep, &[("src/big.ts", &lines(&[(1, "mine"), (38, "origin")]))], &[], true, true);
+    removed(&fx, &s, &rep);
+}
+
+#[test]
+fn rm_t3_dirty_detail_counts_rebased_entries() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = t3_session(&fx, &s);
+    let (n, _) = t3_publish(&fx, &s, &rep, &[("src/big.ts", &lines(&[(1, "mine"), (38, "origin")]))], &[], true, true);
+    fx.sb.write(&ws(&rep), "src/other.ts", b"unpublished\n");
+    let e = dirty(&s, &rep);
+    assert_eq!(paths(&e), ["src/other.ts"]);
+    let l = &detail(&e)["landed"]["tool"];
+    assert_eq!(l["rebased"], 1, "{l}");
+    assert_eq!(l["rebased_onto"], n, "{l}");
+    assert_eq!(l["count"], 1, "{l}");
+    assert!(e.message.contains("1 already published (publish"), "{}", e.message);
+}
+
+#[test]
+fn rm_t3_unpublished_hunk_stays_dirty() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = t3_session(&fx, &s);
+    // Only origin's change: the session's line 1 would survive the move.
+    t3_publish(&fx, &s, &rep, &[("src/big.ts", &lines(&[(38, "origin")]))], &[], true, true);
+    let e = dirty(&s, &rep);
+    assert_eq!(paths(&e), ["src/big.ts"]);
+    assert!(detail(&e).get("landed").and_then(|l| l.get("tool")).is_none(), "{e:?}");
+}
+
+#[test]
+fn rm_t3_overlapping_hunks_conflict_and_stay_dirty() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = t3_session(&fx, &s);
+    fs::write(ws(&rep).join("src/big.ts"), lines(&[(20, "mine")])).unwrap();
+    t3_publish(&fx, &s, &rep, &[("src/big.ts", &lines(&[(20, "theirs"), (21, "origin")]))], &[], true, true);
+    let e = dirty(&s, &rep);
+    assert_eq!(paths(&e), ["src/big.ts"]);
+}
+
+#[test]
+fn rm_t3_candidate_must_be_origin_reachable() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = t3_session(&fx, &s);
+    // Pushed, but origin's tracking ref was not moved: not D57-eligible.
+    t3_publish(&fx, &s, &rep, &[("src/big.ts", &lines(&[(1, "mine"), (38, "origin")]))], &[], false, true);
+    let e = dirty(&s, &rep);
+    assert_eq!(paths(&e), ["src/big.ts"]);
+}
+
+#[test]
+fn rm_t3_without_a_built_base_stays_dirty_and_builds_none() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = t3_session(&fx, &s);
+    let (_, c) = t3_publish(&fx, &s, &rep, &[("src/big.ts", &lines(&[(1, "mine"), (38, "origin")]))], &[], true, false);
+    let e = dirty(&s, &rep);
+    assert_eq!(paths(&e), ["src/big.ts"]);
+    let tree = fx.gits[&repo_name("tool")].tree_of(&CommitOid::try_from(c).unwrap()).unwrap();
+    let dir = fx.config.paths.root.join(format!("bases/tool/{tree}"));
+    assert!(!dir.exists(), "rm builds no base: {}", dir.display());
+}
+
+#[test]
+fn rm_t3_rename_needs_both_endpoints_discharged() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = t3_session(&fx, &s);
+    let w = ws(&rep);
+    fs::rename(w.join("src/big.ts"), w.join("src/moved.ts")).unwrap();
+    // The publish has the destination (with origin's change) but keeps the
+    // source: the source's deletion is still the session's own.
+    t3_publish(&fx, &s, &rep, &[("src/moved.ts", &lines(&[(1, "mine"), (38, "origin")]))], &[], true, true);
+    let e = dirty(&s, &rep);
+    // Neither endpoint is discharged on its own.
+    assert_eq!(paths(&e), ["src/big.ts", "src/moved.ts"]);
+    assert_eq!(detail(&e)["landed"], serde_json::json!({}));
+}
+
+#[test]
+fn rm_t3_phase_b_recomputes_the_projection_from_the_checkpoint() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = t3_session(&fx, &s);
+    t3_publish(&fx, &s, &rep, &[("src/big.ts", &lines(&[(1, "mine"), (38, "origin")]))], &[], true, true);
+    let hook = Meddling(|w: &Path| fs::write(w.join("src/big.ts"), lines(&[(1, "mine"), (5, "late")])).unwrap());
+    let s2 = Sessions::open(&fx.config, &fx.gits, fx.store(), &fx.lock, &fx.env, &hook).unwrap();
+    let e = s2.remove(&id(&rep), false, None).unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert_eq!(detail(&e)["reason"], "changed_during_remove");
+    assert_eq!(paths(&e), ["src/big.ts"]);
+    assert_eq!(lifecycle(&fx, &id(&rep)), Lifecycle::Active);
 }

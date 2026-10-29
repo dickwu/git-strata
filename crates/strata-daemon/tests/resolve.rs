@@ -1058,6 +1058,7 @@ fn headless_push_replays_a_diverged_chain_then_pushes() {
         assert_eq!(r["rebases"][0]["session"], json!(s.as_str()), "{r:#}");
         assert_eq!(r["rebases"][0]["report"]["kind"], json!("Moved"), "{r:#}");
         assert_eq!(head(&s), new, "the session follows its replayed commit");
+        assert!(core.store.rebase_pending(None).unwrap().is_empty(), "the adopted replay target was consumed by the move");
         // A second push has nothing left to do.
         let r = call(&sock, "push", json!({ "repo": "tool" }));
         assert_eq!(r["error"]["code"], "NoCommit", "{r:#}");
@@ -1125,6 +1126,7 @@ fn headless_push_conflict_or_failed_check_writes_and_pushes_nothing() {
             let r = call(&sock, "push", json!({ "repo": "tool" }));
             assert_eq!(r["error"]["code"], "CheckFailed", "{r:#}");
             assert_eq!(ch.refs(&fx), before);
+            assert!(core.store.rebase_pending(None).unwrap().is_empty(), "a refused replay leaves no plan");
             assert_eq!(ch.origin_main(&fx), o);
             let k = calls(&core);
             assert_eq!((k.push, k.transactions), (0, 0), "{k:?}");

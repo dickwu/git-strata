@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::*;
-use strata_deps::{DepsConfigKey, inputs_hash, is_input, platform, set_id, toolchain};
+use strata_deps::{DepsConfigKey, inputs_hash, is_input, is_input_folded, platform, set_id, toolchain};
 use strata_types::{Code, RepoConfig};
 
 fn hash(sb: &Sandbox, cfg: &RepoConfig, git: &strata_gitio::Git, root: &Path) -> String {
@@ -327,5 +327,19 @@ fn is_input_matches_entries_and_members() {
     cfg.install_inputs.clear();
     for p in ["package.json", "patches/a.patch"] {
         assert!(!is_input(&cfg, &rp(p)), "{p}");
+    }
+}
+
+/// rm-followups §1.8: case and normalization never hide an install input.
+#[test]
+fn is_input_folded_ignores_case_and_normalization() {
+    let sb = Sandbox::new();
+    let mut cfg = sb.config(&sb.root);
+    cfg.install_inputs = rps(&["package.json", "bun.lock", "patches", "caf\u{e9}.lock"]);
+    for p in ["BUN.LOCK", "Package.JSON", "PATCHES/a.patch", "bun.lock", "cafe\u{301}.lock", "CAF\u{c9}.LOCK"] {
+        assert!(is_input_folded(&cfg, &rp(p)), "{p}");
+    }
+    for p in ["bun.lockb", "sub/BUN.LOCK", "patches2/a.patch"] {
+        assert!(!is_input_folded(&cfg, &rp(p)), "{p}");
     }
 }

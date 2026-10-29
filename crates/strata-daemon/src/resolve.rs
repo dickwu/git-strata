@@ -536,7 +536,7 @@ pub fn chain_resolve(
 
     // 3. Restore asks the human like push, holding nothing.
     // Review P1-15: the approval names origin's push URL read now.
-    let confirm = choice == ChainChoice::Restore && needs_confirm(core.pinned(repo)?);
+    let confirm = choice == ChainChoice::Restore && needs_confirm(&core.pinned(repo)?);
     let url = if confirm { git.push_url(SCENE_REMOTE)? } else { String::new() };
     let action = Action::PushDeploy { repo: repo.clone(), branch: branch.clone(), url: url.clone() };
     let token = if confirm {
@@ -766,6 +766,11 @@ pub(crate) fn push_replaying(
     replayed: &mut Option<Replayed>,
 ) -> Result<CommitOid> {
     let branch = rc.publish.branch.as_str();
+    let pending = strata_publish::pending::Scope { store: &core.store, git, repo, branch };
+    // rm-followups §1.6 rule 4: reconstruction first, under the repo lock.
+    if let Err(e) = strata_publish::pending::reconstruct(pending) {
+        tracing::warn!(repo = %repo, error = %e.message, "rebase_pending reconstruction failed");
+    }
     git.fetch("origin", branch)?;
     let chain = strata_deps::publish_chain(git, branch)?;
     let mut plan = None;
@@ -817,14 +822,14 @@ pub(crate) fn push_replaying(
             if copies.len() != old.len() {
                 return Err(invalid("replay_mismatch", "the replayed range does not match the chain; nothing was written"));
             }
-            transaction(git, &[RefUpdate::set(&chain_name, new.clone(), Some(c.clone())), RefUpdate::set(&anchor_name, o.clone(), a.clone())])?;
-            *replayed = Some(Replayed {
-                from: c.clone(),
-                to: new.clone(),
-                onto: o.clone(),
-                map: old.iter().cloned().zip(copies).collect(),
-                checks_ran: ran.ran,
-            });
+            let map: Vec<(CommitOid, CommitOid)> = old.iter().cloned().zip(copies).collect();
+            // rm-followups §1.6 replay: retarget and enroll before the refs
+            // move, adopt (or clear) after.
+            let plans = strata_publish::pending::plan_replay(pending, &map, &session_heads(core, repo)?)?;
+            let t = transaction(git, &[RefUpdate::set(&chain_name, new.clone(), Some(c.clone())), RefUpdate::set(&anchor_name, o.clone(), a.clone())]);
+            strata_publish::pending::adopt_replay(pending, &plans);
+            t?;
+            *replayed = Some(Replayed { from: c.clone(), to: new.clone(), onto: o.clone(), map, checks_ran: ran.ran });
         }
         crate::handlers::writing();
         strata_publish::push_to(git, rc, repo, wt, None, dest.as_ref().map(PushDest::url))
@@ -833,6 +838,17 @@ pub(crate) fn push_replaying(
         settle_push_scenes(core, git, repo, branch, &tip, dest.as_ref());
     }
     r.map(|_| tip)
+}
+
+/// Every live session's workspace head of `repo`.
+fn session_heads(core: &Core, repo: &RepoName) -> Result<Vec<(SessionId, CommitOid)>> {
+    Ok(core
+        .store
+        .sessions()?
+        .into_iter()
+        .filter(|r| r.lifecycle != strata_store::Lifecycle::Removed)
+        .filter_map(|r| r.manifest.repos.get(repo).map(|w| (r.manifest.id.clone(), w.head.clone())))
+        .collect())
 }
 
 fn reason_of(e: &StrataError) -> Option<&str> {

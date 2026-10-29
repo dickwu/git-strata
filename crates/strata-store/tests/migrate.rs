@@ -1,6 +1,8 @@
 //! store.md §4.4: forward-only schema migrations, v1 -> v2
-//! (`sessions.agent`), run by the writer open on a real v1 store
+//! (`sessions.agent`) -> v3 (rm-followups: `rm_attempts`, `rebase_pending`,
+//! `move_activity`), run by the writer open on a real v1 store
 //! (`tests/fixtures/store-v1.db`, written by the v1 code at main 31769e3).
+//! The v2 -> v3 step from a real v2 store is in `migrate_v3.rs`.
 
 mod support;
 
@@ -131,7 +133,8 @@ fn fixture_is_a_v1_store() {
     assert!(rows["sessions"].iter().all(|r| r.split('|').count() == 8), "v1 sessions have 8 columns");
 }
 
-static DEV_PORTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| "dev_ports".to_string());
+/// The tables v2 and v3 add, all empty after migrating a v1 store.
+const NEW_TABLES: [&str; 4] = ["dev_ports", "move_activity", "rebase_pending", "rm_attempts"];
 
 #[test]
 fn writer_open_migrates_v1_and_keeps_every_row() {
@@ -146,15 +149,18 @@ fn writer_open_migrates_v1_and_keeps_every_row() {
     assert_eq!(t.manifest.ticket.as_deref(), Some("GWD-42"));
     s.close().unwrap();
 
-    assert_eq!(header_u32(&env.db(), 60), 2);
+    assert_eq!(header_u32(&env.db(), 60), 3);
     let (uv, ic, after) = dump_copy(&env.db());
-    assert_eq!((uv, ic.as_str()), (2, "ok"));
-    // v2 adds one table, `dev_ports`, empty: v1 sessions get leases lazily
-    let mut keys: Vec<&String> = before.keys().collect();
-    keys.push(&DEV_PORTS);
+    assert_eq!((uv, ic.as_str()), (3, "ok"));
+    // v2 adds `dev_ports` (v1 sessions get leases lazily), v3 the three
+    // rm-followups tables: all empty
+    let mut keys: Vec<&str> = before.keys().map(String::as_str).collect();
+    keys.extend(NEW_TABLES);
     keys.sort();
-    assert_eq!(keys, after.keys().collect::<Vec<_>>());
-    assert!(after["dev_ports"].is_empty());
+    assert_eq!(keys, after.keys().map(String::as_str).collect::<Vec<_>>());
+    for t in NEW_TABLES {
+        assert!(after[t].is_empty(), "{t}");
+    }
     for (t, rows) in &before {
         if t == "sessions" {
             let widened: Vec<String> = rows.iter().map(|r| format!("{r}|Null")).collect();
@@ -200,7 +206,7 @@ fn new_and_migrated_stores_have_the_same_schema() {
     let (a, b) = (bare(&fresh.db()), bare(&migrated.db()));
     assert_eq!(schema(&a), schema(&b));
     let uv: i64 = a.query_row("PRAGMA user_version", (), |r| r.get(0)).unwrap();
-    assert_eq!(uv, 2);
+    assert_eq!(uv, 3);
 }
 
 #[test]
@@ -223,14 +229,14 @@ fn newer_schema_is_refused_untouched() {
     env.open().close().unwrap();
     {
         let c = bare(&env.db());
-        c.execute_batch("PRAGMA user_version = 3").unwrap();
+        c.execute_batch("PRAGMA user_version = 4").unwrap();
         c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |_| Ok(())).unwrap();
     }
     let before = snapshot(&env.root);
-    let e = env.try_open().err().expect("v3 refused");
+    let e = env.try_open().err().expect("v4 refused");
     assert_reason(&e, Code::Corrupt, "user_version");
-    assert!(e.message.contains("newer git-strata"), "{}", e.message);
-    let e = Store::open_read_only(&env.root).err().expect("v3 refused read-only");
+    assert!(e.message.contains("older than the store (v4)"), "{}", e.message);
+    let e = Store::open_read_only(&env.root).err().expect("v4 refused read-only");
     assert_reason(&e, Code::Corrupt, "user_version");
     let mut after = snapshot(&env.root);
     let mut before = before;
@@ -255,7 +261,7 @@ fn failure_before_commit_leaves_v1_and_the_next_open_migrates() {
     let s = env.open();
     assert_eq!(s.sessions().unwrap().len(), 2);
     s.close().unwrap();
-    assert_eq!(header_u32(&env.db(), 60), 2);
+    assert_eq!(header_u32(&env.db(), 60), 3);
 }
 
 #[test]
@@ -349,12 +355,12 @@ fn uncertain_commit_is_resolved_by_a_fresh_process() {
     let out = run_child("child_migration_commit_sync_fails", &[(ROOT_ENV, env.root.to_str().unwrap())]);
     let so = String::from_utf8_lossy(&out.stdout);
     assert!(so.contains(r#"CODE=Unknown REASON=Some("migration_commit") OUTCOME=Some("uncertain")"#), "{so}\n{}", String::from_utf8_lossy(&out.stderr));
-    // this process is the "fresh process": whatever reached the disk, it opens whole at v2
+    // this process is the "fresh process": whatever reached the disk, it opens whole at v3
     let s = env.open();
     assert_eq!(s.sessions().unwrap().len(), 2);
     s.close().unwrap();
     let (uv, ic, now) = dump_copy(&env.db());
-    assert_eq!((uv, ic.as_str()), (2, "ok"));
+    assert_eq!((uv, ic.as_str()), (3, "ok"));
     for (t, r) in &rows {
         if t != "sessions" {
             assert_eq!(r, &now[t], "{t}");
@@ -372,7 +378,7 @@ fn child_aborts_after_migration_commit() {
 }
 
 #[test]
-fn crash_right_after_commit_keeps_v2() {
+fn crash_right_after_commit_keeps_v3() {
     let env = v1_env();
     let out = run_child("child_aborts_after_migration_commit", &[(ROOT_ENV, env.root.to_str().unwrap())]);
     assert!(!out.status.success());
@@ -380,6 +386,6 @@ fn crash_right_after_commit_keeps_v2() {
     assert_eq!(s.sessions().unwrap().len(), 2);
     s.close().unwrap();
     let (uv, ic, _) = dump_copy(&env.db());
-    assert_eq!((uv, ic.as_str()), (2, "ok"));
+    assert_eq!((uv, ic.as_str()), (3, "ok"));
     assert_eq!(backups(&env).len(), 1, "committed; no second migration");
 }

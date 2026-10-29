@@ -9,7 +9,7 @@ mod error;
 mod ids;
 mod model;
 
-pub use config::{Config, DevPorts, Paths, RepoConfig, StatusConfig};
+pub use config::{Config, DepsChanged, DevPorts, Paths, RebaseConfig, RepoConfig, RmConfig, StatusConfig, regenerable_problem};
 pub use error::{Code, StrataError};
 pub use ids::{
     AgentName, BlobId, CheckpointId, CommitOid, DepsSetId, ProposalId, RepoId, RepoName, RepoPath, SessionId,
@@ -17,6 +17,6 @@ pub use ids::{
 };
 pub use model::{
     Action, BaseGen, BaseManifest, Batch, Checkpoint, CheckpointReason, ConfirmToken, DepsSet,
-    EntryKind, ManifestEntry, OverlayEntry, PublishTarget, PushOutcome, ReleaseGroup,
+    EntryKind, KeptTreeRef, ManifestEntry, OverlayEntry, PublishTarget, PushOutcome, ReleaseGroup,
     SessionManifest, WorkspaceState, display_url,
 };

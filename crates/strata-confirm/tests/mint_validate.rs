@@ -37,7 +37,7 @@ fn push(repo: &str, branch: &str) -> Action {
 
 fn discard(s: &str) -> Action {
     Action::RemoveDiscard {
-        session: SessionId::try_from(s.to_string()).unwrap(),
+        session: SessionId::try_from(s.to_string()).unwrap(), kept_trees: vec![]
     }
 }
 

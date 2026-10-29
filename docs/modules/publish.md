@@ -812,3 +812,10 @@ git commit -m "feat(publish): one merge under the repo lock"
 | D20 确认绑定推送 URL（review P1-15） | `PushDeploy` 带 `url`（弹框前读的 origin 推送 URL，弹框文字显示它）。repo 锁里的闸门再读一次 origin 推送 URL，与凭据不同 → `NotConfirmed`（`remote_changed`），不暂存、不推；相同则推到凭据里的那个 URL。URL 里的用户信息在弹框、cli、错误 detail 与 store 记录里都写成 `***` | 原来凭据只有 repo 与分支：弹框之后改了 `remote.origin.pushurl`（或 `url`），人批准的推送会去一个没见过的远端 | 2026-10-27 |
 
 草稿里的 D1、D2、D3 保持原选择。D11（两次 `update_ref`，失败的那次靠下一次前移补上）撤回：它覆盖了「链与锚点同一次 ref 事务」的裁定。上游要求在 §2 第 3 条。
+
+### rm-followups（2026-10-29，[实现时补的决定]，design: git-strata-review-notes/rm-followups/design.md r10）
+
+- **`MovePolicy::{Explicit, Auto}`**：`after_publish`、`rebase_replayed` 与 daemon 的追赶走 `Auto`；rollout 与显式 move 仍是 `Explicit`。`Auto` 的门：G0 状态；G1 整个工作区根的 `open_files`；G2 整根只看元数据的遍历，`quiet_secs` 内有写或扫描中变了 → 推迟；G3 `rebase_preview`（`PreviewBlobs`，不写 store），非 regenerable 的冲突 → 推迟；G4 在锁里：从 BeforeRollout checkpoint 重算冲突、`begin_move` 同一事务写 `move_activity` 基线、第 14 步再走一遍 G2 与 `open_files_many`（`Busy` + `auto_deferred` → `Deferred`）、交换后 Phase F 发现迟到的写就写通知并保留旧树。任何门不过都是 `RebaseReport::Deferred{reason, detail, proposal}`，从不强挪。
+- **C2**：`deps_changed = "move_source"`（缺省）且新依赖键不同时，先在锁里记下依赖提案（提升的草稿，否则 Main old→n），再只把源码挪到（发布的树，旧依赖集），不安装、不预热；`Moved{deps_pending}`，发布报告 JSON 带漂移提示。`wait` = 原来的 `Waiting`。
+- **`rebase_pending`**（pending.rs）：`record_publish` 事务里写计划（planned_*），`commit_into` 成功后在仓库锁里提升；按可达性解决（含提交后失败的 `publish_unfinished`）；daemon 启动与 replay 开始时在仓库锁里重建；推迟以 `UPDATE … WHERE rev` 更新；`finish_move` 事务里消费。追赶 `catch_up`：每仓库不等锁，退避 quiet·2^(k−1)，封顶 30 min；过期的目标 `discard_pending_target`；运行中的发布 → `busy`。
+- **旧树保留**（old_tree.rs `collect_old_tree`）：有通知或缺基线 → 保留；被持有则重置计数；两次相隔 Q 的干净检查才退役；保留的 Auto 旧树重新排队。

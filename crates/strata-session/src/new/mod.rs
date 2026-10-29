@@ -6,7 +6,8 @@ use serde_json::json;
 use strata_types::{AgentName, Code, CommitOid, RepoName, SessionManifest, StrataError, TreeOid};
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use strata_apfs::{FileKind, IoSide, classify_io_error};
@@ -129,10 +130,16 @@ impl Sessions<'_> {
                 })
                 .collect(),
         };
+        // rm-followups R1: step 7 again, the row and the two root
+        // directories under `enroll`, so the orphan sweep never sees this
+        // id between them; released right after the mkdirs (layout_steps).
+        self.seams.hit("new.enroll", None)?;
+        let enroll = self.enroll.lock().unwrap_or_else(|p| p.into_inner());
+        self.id_free(&manifest.id)?;
         self.store.create_session(&manifest, SystemTime::now())?;
 
         // Phase D, steps 12-14.
-        self.build_layout(&manifest, &plans)?;
+        self.build_layout(&manifest, &plans, enroll)?;
 
         // Step 15: observe main; failures are warnings only.
         let warnings = self.observe_all(&manifest);
@@ -179,16 +186,25 @@ impl Sessions<'_> {
     /// retire both directories, Removed. Only when the rollback fails too
     /// does the Unknown scene (or the rollback's own scene) stay for a human.
     /// A `StopAt` seam returns as is (a crash).
-    fn build_layout(&self, m: &SessionManifest, plans: &BTreeMap<RepoName, (BaseGen, Plan)>) -> Result<()> {
+    /// R1: the rollback retires only the directories this `new` created
+    /// (same identity); any other is left and named in `not_owned`.
+    fn build_layout(
+        &self,
+        m: &SessionManifest,
+        plans: &BTreeMap<RepoName, (BaseGen, Plan)>,
+        enroll: MutexGuard<'_, ()>,
+    ) -> Result<()> {
         let at = Mutex::new(("root", None::<RepoName>));
-        match self.layout_steps(m, plans, &at) {
+        let owned = Mutex::new(Vec::new());
+        match self.layout_steps(m, plans, &at, &owned, enroll) {
             Ok(()) => Ok(()),
             Err(e) if crate::seams::is_stop(&e) => Err(e),
             Err(e) => {
                 let (phase, repo) = at.into_inner().unwrap_or_else(|p| p.into_inner());
                 let unknown = self.new_unknown(m, phase, repo.as_ref(), &e);
-                match self.roll_back_new(m) {
-                    Ok(()) => Err(rolled_back_error(m, phase, repo.as_ref(), &e)),
+                let owned = owned.into_inner().unwrap_or_else(|p| p.into_inner());
+                match self.roll_back_new(m, &owned) {
+                    Ok(not_owned) => Err(rolled_back_error(m, phase, repo.as_ref(), &e, &not_owned)),
                     Err(re) if crate::seams::is_stop(&re) => Err(re),
                     Err(_) => Err(self.scene_error_or(&m.id, unknown)),
                 }
@@ -197,7 +213,7 @@ impl Sessions<'_> {
     }
 
     /// D56: undo a failed `new` from its Unknown row through `teardown`.
-    fn roll_back_new(&self, m: &SessionManifest) -> Result<()> {
+    fn roll_back_new(&self, m: &SessionManifest, owned: &[(PathBuf, crate::orphans::Ident)]) -> Result<Vec<PathBuf>> {
         self.seams.hit("new.rollback", None)?;
         let rec = match self.store.session(&m.id)? {
             Some(r) if r.lifecycle == Lifecycle::Unknown => r,
@@ -206,7 +222,7 @@ impl Sessions<'_> {
                     .with_detail(json!({ "reason": "lifecycle", "session": m.id.as_str() })));
             }
         };
-        self.teardown(&rec, Lifecycle::Unknown)
+        self.teardown(&rec, Lifecycle::Unknown, Some(owned))
     }
 
     /// The error of the scene now on the row (the rollback's own when it
@@ -247,6 +263,8 @@ impl Sessions<'_> {
         m: &SessionManifest,
         plans: &BTreeMap<RepoName, (BaseGen, Plan)>,
         at: &Mutex<(&'static str, Option<RepoName>)>,
+        owned: &Mutex<Vec<(PathBuf, crate::orphans::Ident)>>,
+        enroll: MutexGuard<'_, ()>,
     ) -> Result<()> {
         let id = &m.id;
         let proot = &self.config.paths.root;
@@ -276,8 +294,23 @@ impl Sessions<'_> {
         enter("root")?;
         self.seams.hit("new.root", None)?;
         strata_apfs::mkdir_rooted(proot, &rp("sessions"), 0o755, true)?;
+        let own = |p: PathBuf| -> Result<()> {
+            if let Some(i) = crate::orphans::dir_identity(&p)? {
+                owned.lock().unwrap_or_else(|p| p.into_inner()).push((p, i));
+            }
+            Ok(())
+        };
         strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/{id}")), 0o755, false)?;
-        strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/.repos/{id}")), 0o755, true)?;
+        own(proot.join("sessions").join(id.as_str()))?;
+        // The shared parent may exist; the leaf is created exclusively, so
+        // a `.repos/<id>` made by anyone else fails here (Exists) and is
+        // never recorded as ours (impl-p3 review).
+        strata_apfs::mkdir_rooted(proot, &rp("sessions/.repos"), 0o755, true)?;
+        self.seams.hit("new.repos_dir", None)?;
+        strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/.repos/{id}")), 0o755, false)?;
+        own(proot.join("sessions/.repos").join(id.as_str()))?;
+        self.seams.hit("new.enrolled", None)?;
+        drop(enroll);
 
         // 13.1 and 13.4. Each tracked repo's seed caches are cloned by a
         // background worker as soon as that repo's workspace is cloned
@@ -468,7 +501,13 @@ impl Sessions<'_> {
 /// a git timeout is `Busy` (`git_timeout`: the volume stalled, or a macOS
 /// permission prompt is waiting) and a refused access is `ReadOnly`
 /// (`tcc_denied`).
-fn rolled_back_error(m: &SessionManifest, phase: &str, repo: Option<&RepoName>, e: &StrataError) -> StrataError {
+fn rolled_back_error(
+    m: &SessionManifest,
+    phase: &str,
+    repo: Option<&RepoName>,
+    e: &StrataError,
+    not_owned: &[PathBuf],
+) -> StrataError {
     let cause = crate::scene::cause_of(e);
     let (code, reason, hint) = if has_reason(&cause, "timeout") {
         (
@@ -505,11 +544,22 @@ fn rolled_back_error(m: &SessionManifest, phase: &str, repo: Option<&RepoName>, 
         d.insert("hint".into(), json!(h));
     }
     d.insert("cause".into(), cause);
+    if !not_owned.is_empty() {
+        d.insert("not_owned".into(), json!(not_owned));
+    }
     let at = match repo {
         Some(r) => format!("{phase} of {r}"),
         None => phase.to_string(),
     };
-    StrataError::new(code, format!("new {}: {at} failed: {}; rolled back, nothing kept", m.id, e.message))
+    let kept = if not_owned.is_empty() {
+        "nothing kept".to_string()
+    } else {
+        format!(
+            "left in place (not created by this new; the orphan sweep takes it): {}",
+            not_owned.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        )
+    };
+    StrataError::new(code, format!("new {}: {at} failed: {}; rolled back, {kept}", m.id, e.message))
         .with_detail(serde_json::Value::Object(d))
 }
 

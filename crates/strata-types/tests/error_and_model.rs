@@ -173,7 +173,7 @@ fn session_manifest_skips_absent_ticket() {
 fn confirm_token_is_plain_data_with_a_debug_impl() {
     let token = ConfirmToken {
         action: Action::RemoveDiscard {
-            session: SessionId::try_from("s-k3q7xm2a".to_owned()).unwrap(),
+            session: SessionId::try_from("s-k3q7xm2a".to_owned()).unwrap(), kept_trees: vec![]
         },
         issued: std::time::Instant::now(),
         nonce: 7,

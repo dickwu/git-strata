@@ -56,6 +56,9 @@ pub struct Options {
     /// [`RECONCILE_EVERY`](crate::RECONCILE_EVERY) in production (§5.9);
     /// tests shorten it.
     pub reconcile_every: Duration,
+    /// [`CATCH_UP_EVERY`](crate::CATCH_UP_EVERY) in production
+    /// (rm-followups §1.6 T2); tests lengthen or shorten it.
+    pub catch_up_every: Duration,
 }
 
 impl Options {
@@ -70,6 +73,7 @@ impl Options {
             install_path: crate::install_path_for_home(home),
             alert: Arc::new(|line: &str| eprintln!("git-stratad: {line}")),
             reconcile_every: crate::RECONCILE_EVERY,
+            catch_up_every: crate::CATCH_UP_EVERY,
         }
     }
 }
@@ -256,7 +260,7 @@ pub fn prepare_locked(
     let pins = Pins::load(&crate::pins_path(&opts.config_dir), &config)?;
     for (name, rc) in config.repos.iter_mut() {
         if let Some(f) = pins.pinned(name) {
-            confirm_flow::apply(rc, f);
+            confirm_flow::apply(rc, &f);
         }
     }
     // 6. The store checks its own clean-shutdown marker.
@@ -417,6 +421,9 @@ impl<'a> Daemon<'a> {
         let sessions = Sessions::open(&core.config, &core.gits, &core.store, &core.locks, &core.env, &core.before)?;
         // 9. recover, then gc per repo under its write lock.
         let recovered = sessions.recover()?;
+        for p in &recovered.orphans_retired {
+            tracing::warn!(path = %p.display(), "recover retired an orphan session directory");
+        }
         // status-perf A1: status reads old-tree verdicts the `old-tree`
         // thread makes (started by `serve`, so after this recover).
         sessions.set_old_tree_mode(strata_session::OldTreeMode::Deferred);
@@ -433,6 +440,15 @@ impl<'a> Daemon<'a> {
                 core.store.set_publish_phase(id, PublishPhase::Running, PublishPhase::Unknown, None, now)?;
             }
             core.warnings.add(DaemonWarning::UnknownPublish { id });
+        }
+        // rm-followups §1.6 rule 4: each repo's rebase_pending rows are
+        // reconstructed under its write lock (no publish runs yet).
+        for (repo, git) in core.gits.iter() {
+            let Some(rc) = core.config.repos.get(repo) else { continue };
+            let sc = strata_publish::pending::Scope { store: &core.store, git, repo, branch: &rc.publish.branch };
+            if let Err(e) = core.locks.with_repo(repo, || strata_publish::pending::reconstruct(sc)) {
+                tracing::warn!(repo = %repo, error = %e.message, "rebase_pending reconstruction failed");
+            }
         }
         // Review M6: kept scenes of uncertain standalone/restore pushes.
         for (repo, commit, scene) in crate::resolve::push_scenes(&core.config.paths.root) {
@@ -456,6 +472,20 @@ impl<'a> Daemon<'a> {
             reconcile: Mutex::new(json!({ "runs": 0, "last": null })),
             du: crate::du::Du::open(&core.config.paths.root),
         })
+    }
+
+    /// `config_relax`, then the newly pinned `rm.regenerable` goes to
+    /// `Sessions` at once (rm-followups §1.8: no restart needed).
+    pub fn config_relax_with(&self, repo: &RepoName, between: &dyn Fn()) -> Result<()> {
+        self.core.config_relax_with(repo, between)?;
+        if let Some(f) = self.core.pins.pinned(repo) {
+            self.sessions.set_regenerable(repo, f.regenerable);
+        }
+        Ok(())
+    }
+
+    pub fn config_relax(&self, repo: &RepoName) -> Result<()> {
+        self.config_relax_with(repo, &|| {})
     }
 
     /// Connections being served now (review P1-3: a finished connection

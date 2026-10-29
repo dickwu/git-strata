@@ -170,6 +170,73 @@ pub struct RepoConfig {
     /// (publish.md D21). Empty by default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub check_siblings: Vec<RepoName>,
+    /// `[repo.X.rm]` (rm-followups §1.8). Absent → defaults.
+    #[serde(default, skip_serializing_if = "RmConfig::is_default")]
+    pub rm: RmConfig,
+    /// `[repo.X.rebase]` (rm-followups §1.3). Absent → defaults.
+    #[serde(default, skip_serializing_if = "RebaseConfig::is_default")]
+    pub rebase: RebaseConfig,
+}
+
+/// `[repo.X.rm]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RmConfig {
+    /// Repo-relative globs (the `.lww` dialect, last match wins, `!`
+    /// negates) of files a tool regenerates: their Modified/Added/Untracked
+    /// edits do not block `rm` (they are checkpointed) and a conflict on
+    /// them does not defer an auto-rebase. Pinned like `publish.confirm`:
+    /// a looser list takes effect only after `config relax`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regenerable: Vec<String>,
+}
+
+impl RmConfig {
+    pub fn is_default(&self) -> bool {
+        self.regenerable.is_empty()
+    }
+}
+
+/// What an automatic rebase does when the publish changed the install
+/// inputs (rm-followups decision 1b).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DepsChanged {
+    /// Move the source onto the new tree with the old deps set; the deps
+    /// proposal stays Pending.
+    #[default]
+    MoveSource,
+    /// Do not move (today's `Waiting`).
+    Wait,
+}
+
+/// `[repo.X.rebase]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RebaseConfig {
+    #[serde(default)]
+    pub deps_changed: DepsChanged,
+    /// The quiet window Q of the automatic rebase, in seconds.
+    #[serde(default = "RebaseConfig::default_quiet_secs")]
+    pub quiet_secs: u64,
+}
+
+impl Default for RebaseConfig {
+    fn default() -> Self {
+        RebaseConfig { deps_changed: DepsChanged::default(), quiet_secs: Self::default_quiet_secs() }
+    }
+}
+
+impl RebaseConfig {
+    pub const MAX_QUIET_SECS: u64 = 86_400;
+
+    pub fn default_quiet_secs() -> u64 {
+        120
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl Default for Paths {
@@ -333,6 +400,7 @@ impl Config {
             };
             validate_repo(name, cfg, &self.paths.root)?;
             validate_check_siblings(name, cfg, &self.repos)?;
+            validate_rm_rebase(name, cfg)?;
         }
         if !(1..=StatusConfig::MAX_PARALLEL).contains(&self.status.parallel) {
             return Err(violation(
@@ -587,6 +655,78 @@ fn validate_check_siblings(
         return Err(violation(Code::InvalidInput, Some(repo), "check_siblings", Some(i), "V12", message));
     }
     Ok(())
+}
+
+/// V14: `rm.regenerable` patterns are repo-relative globs: not absolute,
+/// no `..` component, nothing that could match under `.git`, one line each,
+/// not a `.lww` comment or include. V15: `rebase.quiet_secs` ≤ one day.
+fn validate_rm_rebase(name: &RepoName, cfg: &RepoConfig) -> Result<(), StrataError> {
+    let repo = name.as_str();
+    for (i, pat) in cfg.rm.regenerable.iter().enumerate() {
+        if let Some(message) = regenerable_problem(pat) {
+            return Err(violation(Code::InvalidInput, Some(repo), "rm.regenerable", Some(i), "V14", message));
+        }
+    }
+    if cfg.rebase.quiet_secs > RebaseConfig::MAX_QUIET_SECS {
+        return Err(violation(
+            Code::InvalidInput,
+            Some(repo),
+            "rebase.quiet_secs",
+            None,
+            "V15",
+            "rebase.quiet_secs is more than 86400 (one day)",
+        ));
+    }
+    Ok(())
+}
+
+/// Why one `rm.regenerable` pattern is rejected, if it is.
+pub fn regenerable_problem(pat: &str) -> Option<&'static str> {
+    let body = pat.strip_prefix('!').unwrap_or(pat);
+    if body.trim().is_empty() {
+        return Some("rm.regenerable has an empty pattern");
+    }
+    if pat.contains('\n') || pat.contains('\r') || pat.contains('\0') {
+        return Some("rm.regenerable patterns are one line each");
+    }
+    if pat.trim() != pat || body.trim() != body {
+        return Some("rm.regenerable patterns have no leading or trailing blanks");
+    }
+    if pat.starts_with('#') || pat.starts_with("%include") {
+        return Some("rm.regenerable patterns are globs, not .lww comments or includes");
+    }
+    if body.starts_with('/') {
+        return Some("rm.regenerable patterns are repo-relative, not absolute");
+    }
+    let comps: Vec<&str> = body.split('/').collect();
+    if comps.contains(&"..") {
+        return Some("rm.regenerable patterns may not contain ..");
+    }
+    // `.git` itself, or a name glob that could stretch to `.git` (`*`,
+    // `?git`, `.g*`, ...), case-folded as APFS is. A `**` component is
+    // allowed (`generated/**`), but not a pattern of wildcards only.
+    let could_be_git = |c: &str| {
+        let c = c.to_lowercase();
+        c != "**" && (c == ".git" || git_glob(&c.chars().collect::<Vec<_>>(), &".git".chars().collect::<Vec<_>>()))
+    };
+    if comps.iter().any(|c| could_be_git(c)) {
+        return Some("rm.regenerable patterns may not match .git or anything under it");
+    }
+    if comps.iter().all(|c| c.chars().all(|ch| matches!(ch, '*' | '?'))) {
+        return Some("rm.regenerable patterns must name something (not wildcards only)");
+    }
+    None
+}
+
+/// Whether one glob component (`*`, `?`, literals; `\\` escapes) matches `t`.
+fn git_glob(p: &[char], t: &[char]) -> bool {
+    match p.split_first() {
+        None => t.is_empty(),
+        Some(('*', rest)) => (0..=t.len()).any(|k| git_glob(rest, &t[k..])),
+        Some(('?', rest)) => !t.is_empty() && git_glob(rest, &t[1..]),
+        Some(('\\', rest)) if !rest.is_empty() => t.first() == Some(&rest[0]) && git_glob(&rest[1..], &t[1..]),
+        Some((c, rest)) => t.first() == Some(c) && git_glob(rest, &t[1..]),
+    }
 }
 
 fn violation(

@@ -84,6 +84,14 @@
 - **`pin_unpushed`**：新会话钉基线时，发布链领先 `origin/<branch>` 就钉链顶；`false` 则一律钉 `origin/<default_branch>`，新会话看不到已发布未推送的改动，下一次发布必撞（design §6.7）。只在 `publish.branch == default_branch` 时有意义：两者不同时新会话一律钉 `origin/<default_branch>`（见上条 `publish`）。
 - **`check_siblings`**：[实现时补的决定]（2026-10-28，publish.md D21）每项是另一个已配置的 repo（V12）。只在 `checks` 非空时起作用。发布（以及 D2a 的无头重放）staging 时：布局会话钉了它 → 用那个钉；没钉 → 发布在锁外 fetch 它的 `origin/<default_branch>`、前移它的锚点、取 main tip 的基线（可能冷装依赖），克隆进 `<布局根>/<名字>/`。补不上 → `InvalidInput`（`siblings_missing`），`detail.fix` 是 `git-strata add --session <id> --repo …`，检查不跑。缺省空列表 = 旧行为，不碰任何兄弟。旧二进制不认这个键（V11），所以上线顺序是：先把新的 `git-strata` 与 `git-stratad` 一起装好，再改线上配置，最后重启 daemon；若在重启之后才改配置，要再重启一次才生效。
 
+- **`[repo.<name>.rm]` `regenerable`**：[实现时补的决定]（2026-10-29，rm-followups §1.8，B2）工具会重新生成的文件的 glob 列表（与 `.strata/lww` 同一方言与大小写规则：最后匹配者胜，`!` 取反，不含 `/` 的模式匹配任一级名字）。只对跟踪（tracked）且健康的工作区起作用：其中 Modified/Added/Untracked 的条目不再挡 `rm`（照样进 BeforeRemove checkpoint，`rm` 的结果在 `regenerable` 里列出，被拒时列在 `detail.regenerable`）；Deleted/Renamed 永不匹配；`install_inputs`（按卷的大小写折叠与 Unicode 规范化比较，如 `BUN.LOCK`）永不匹配。缺省空。它和 `publish.confirm` 一样被钉进 `pins.json`：收窄（删掉一些正向模式和/或在末尾追加取反；或改成没有任何正向模式的列表，它什么也不匹配）在下次启动时生效；其它任何改动（加或改正向模式、删或改取反、重排）算调松，要人跑 `git-strata config relax REPO`（Touch ID）才生效，生效不需重启 daemon。没有钉住记录的 repo（无 pins.json、名字不在其中、改名）有效列表为空，配置里的列表显示为 ConfigRelaxPending。admin 的示例（只是文档，线上配置不自动加）：
+  ```toml
+  [repo.admin.rm]
+  regenerable = ["src/constants/permissionMap/generated.json"]
+  ```
+- **`[repo.<name>.rebase]`**：[实现时补的决定]（2026-10-29，rm-followups §1.3）`deps_changed = "move_source" | "wait"`（缺省 `move_source`：发布改了安装输入时，自动 rebase 只把源码移到新树、沿用旧依赖集，依赖提案保持 Pending；`wait` = 旧的 `Waiting`）；`quiet_secs`（缺省 120，≤ 86400，V15）是自动 rebase 的安静窗口。（2026-10-29 rm-followups 2.2–2.5 起生效：`quiet_secs` 是 Auto 门 G2 的安静窗口，`deps_changed` 决定 C2 只挪源码还是 `Waiting`；只影响自动 rebase（发布、push 重放、daemon 追赶），依赖审批的 rollout 与显式 move 不受影响。）
+- **新键的上线顺序**：`[repo.<name>.rm]`、`[repo.<name>.rebase]` 旧二进制不认（V11），而且一旦 `pins.json` 钉进了非空的 `regenerable`，旧 daemon 也读不了它（旧 CLI 把读不了的 pins.json 当作"要确认"）。所以先把新的 `git-strata` 与 `git-stratad` 一起装好并重启 daemon，再往配置里加这些键。新二进制读没有这些键的配置（缺省值）。
+
 ### 2.4 命令行字符串（`install` 与 `checks`）
 
 一条命令一个字符串，不经过 shell（切分规则是本文定的 [我的决定]）：
@@ -288,6 +296,8 @@ impl Config {
 | V10 | `checks` 的只读规则（§4.2） | `CheckMutates` | design §6.5 步骤 4、§11 第 15 条 |
 | V11 | 任何表里的未知键都拒绝；`publish` 内联表恰好三个字段 | `InvalidInput` | — |
 | V12 | `check_siblings` 的每项是另一个已配置的 repo：不是本 repo，不重复。`detail` 带 `repo`、`field = "check_siblings"`、`index`、`rule = "V12"`。未知键 V11 由 serde 在解析时报，先于其它规则 | `InvalidInput` | publish.md D21 [实现时补的决定] |
+| V14 | `[repo.<name>.rm] regenerable` 的每项：非空、单行、首尾无空白；不以 `#`、`%include`、`/` 开头（`!` 之后同样）；不含 `..` 段；没有哪一段是 `.git` 或能匹配 `.git` 的名字通配（`*`、`.g*`、`?git` 等，按大小写折叠；`**` 段允许）；不能全是通配（`*`、`**`、`?`）。`detail` 带 `field = "rm.regenerable"`、`index`、`rule = "V14"` | `InvalidInput` | rm-followups §1.8 [实现时补的决定] |
+| V15 | `[repo.<name>.rebase] quiet_secs` ≤ 86400 | `InvalidInput` | rm-followups §1.3 [实现时补的决定] |
 | V13 | `[status] parallel` 在 1..=16 之间。`detail` 带 `repo = null`、`field = "parallel"`、`index = null`、`rule = "V13"`。在全部 repo 表之后检查（不改变已有规则的先后） | `InvalidInput` | status-perf D7 [实现时补的决定] |
 
 ### 4.2 `checks` 只读规则（`CheckMutates`）

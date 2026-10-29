@@ -2209,3 +2209,11 @@ design.md 里标 [交给构建者]、落在本模块的事项：
 | dev 端口租约（§4.4 `dev_ports`、§4.4a） | 租约放在 store 的 `dev_ports` 表，随 agent-id 的 v1 → v2 一起迁移；分配在 store 的写事务里，探测策略由 daemon 注入；会话 Removed 时释放 | 租约要跨进程唯一、随会话生命周期走；放在同一个库里，`UNIQUE(base)` 与写事务就是锁，不需要另一份文件 | 2026-10-28 |
 | 写者中毒（§6.4） | 提交结果不确定之后，写一律 `Unknown` 直到重开；`is_poisoned()` 报给 daemon | 同步失败之后继续写，可能把没落盘的状态当成已提交 | 2026-10-22 |
 | 根目录里的 `search` 与已有 store 旁的其它条目（§3，事故 2026-10-27） | `Store::open` 先看 `store/store.db`：在就直接打开已有 store，不管根目录里还有什么；只有新建时才查陌生条目，`search`（daemon 的搜索索引）也算布局里的名字 | 原来陌生条目检查在 store.db 之前，daemon 建了 `search/` 之后重启就拒绝打开自己的 store | 2026-10-27 |
+
+### rm-followups：store v3（2026-10-29，[实现时补的决定]）
+
+`PRAGMA user_version = 3`，v2 → v3 迁移只加表（有 v2 fixture 测试）：
+- `rm_attempts(session PK, at_ns, outcome ∈ {refused, failed}, detail_json object)`：每个会话最后一次 `rm` 的拒绝或失败（R2），`status` 的 `last_rm`。
+- `rebase_pending(session, repo, rev, from_tree, from_deps, head, tree, planned_head, planned_tree, planned_publish, reason, detail_json, first_at_ns, last_at_ns, …)`：会话落后的自动 rebase 目标；计划与提交的目标分开，`rev` 做条件更新，`finish_move` 事务里消费（design §1.6）。
+- `move_activity(session, repo, n, policy='auto', m0_ns, t0_ns, root_names_json array, entries, late_writes_json, passes_json; FK → move_intents)`：G4 的活动基线，与 `begin_move` 同一事务写入；`set_move_late_writes` 只写一次通知；旧树保留规则读它（design §1.4 G4）。
+新键/新表会被旧二进制拒绝：先升级两个二进制再用。

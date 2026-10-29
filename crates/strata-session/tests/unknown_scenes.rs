@@ -282,6 +282,7 @@ fn unknown_scene_survives_daemon_restart() {
 fn base_staging(l: &Leftover) -> (&str, &Path, &[PathBuf]) {
     match l {
         Leftover::BaseStaging { repo, path, export_temps } => (repo.as_str(), path.as_path(), export_temps.as_slice()),
+        other => panic!("not a base staging leftover: {other:?}"),
     }
 }
 

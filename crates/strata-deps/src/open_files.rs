@@ -328,6 +328,16 @@ pub fn open_files(dir: &Path) -> Result<Vec<OpenFile>> {
     scan(&[dir])?.pop().expect("one result per dir")
 }
 
+/// Every open file under any of `dirs`, from one pass over the processes
+/// (rm-followups R4); any per-directory failure is the error.
+pub fn open_files_many(dirs: &[&Path]) -> Result<Vec<OpenFile>> {
+    let mut out = Vec::new();
+    for r in scan(dirs)? {
+        out.extend(r?);
+    }
+    Ok(out)
+}
+
 /// The batch form: one pass over the processes for several directories.
 /// The outer error is an enumeration failure; inner ones are per directory
 /// (an unusable directory or an injected failure).

@@ -76,8 +76,30 @@ fn git_of<'c>(core: &'c Core, repo: &RepoName) -> Result<&'c Git> {
 /// The repo's configuration with the pinned (effective) safety flags.
 fn effective_cfg(core: &Core, repo: &RepoName) -> Result<RepoConfig> {
     let mut rc = repo_cfg(core, repo)?.clone();
-    apply(&mut rc, core.pinned(repo)?);
+    apply(&mut rc, &core.pinned(repo)?);
     Ok(rc)
+}
+
+/// rm-followups R2: how an rm that did not remove its session ended, for
+/// `status` (still under the session's queue place). A refusal before
+/// anything changed is `Refused`; `Unknown` is `Failed`; other errors
+/// (no such session, a bad token, …) say nothing about the session and
+/// are not recorded. A failed write is logged, never the reply.
+fn record_rm_attempt(core: &Core, s: &SessionId, e: &StrataError) {
+    let outcome = match e.code {
+        Code::Dirty | Code::OpenFiles => strata_store::RmOutcome::Refused,
+        Code::Unknown => strata_store::RmOutcome::Failed,
+        _ => return,
+    };
+    let a = strata_store::RmAttempt {
+        session: s.clone(),
+        at: SystemTime::now(),
+        outcome,
+        detail: json!({ "code": json_of(&e.code), "message": e.message, "detail": e.detail }),
+    };
+    if let Err(w) = core.store.record_rm_attempt(&a) {
+        tracing::warn!(session = %s, error = %w.message, "recording the rm outcome failed");
+    }
 }
 
 /// The session's recorded workspace of `repo`.
@@ -364,6 +386,7 @@ pub fn serve(d: &Daemon<'_>, listener: &std::os::unix::net::UnixListener, extern
         let server = Server::new(d, &trackers);
         s.spawn(|| reconcile_loop(d, &trackers, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
         s.spawn(|| old_tree_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
+        s.spawn(|| catch_up_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
         let r = d.serve(listener, external, &|req| server.handle(req));
         done.store(true, Ordering::SeqCst);
         r
@@ -401,6 +424,81 @@ fn reconcile_loop(d: &Daemon<'_>, trackers: &Trackers<'_>, stop: &dyn Fn() -> bo
             .unwrap_or_else(|_| json!({ "at": json_of(&SystemTime::now()), "panicked": true }));
         d.reconciled(last);
     }
+}
+
+/// rm-followups §1.6 T2 on its own thread (started by `serve`, so after
+/// startup's recover and reconstruction): one [`catch_up_pass`] at once,
+/// then one every `opts.catch_up_every` until `stop` (checked every 20 ms).
+/// A panicking pass is logged, not fatal.
+fn catch_up_loop(d: &Daemon<'_>, stop: &dyn Fn() -> bool) {
+    let every = d.core.opts.catch_up_every;
+    loop {
+        if stop() {
+            return;
+        }
+        if catch_unwind(AssertUnwindSafe(|| catch_up_pass(d, SystemTime::now()))).is_err() {
+            tracing::warn!("the catch-up pass panicked");
+        }
+        let next = std::time::Instant::now() + every;
+        loop {
+            if stop() {
+                return;
+            }
+            let now = std::time::Instant::now();
+            if now >= next {
+                break;
+            }
+            std::thread::sleep((next - now).min(std::time::Duration::from_millis(20)));
+        }
+    }
+}
+
+/// One repo's share of a [`catch_up_pass`]: `Err` when the repo was
+/// skipped, else each row's session and outcome.
+pub type RepoCatchUp = Result<Vec<(SessionId, Result<strata_publish::pending::CatchUp>)>>;
+
+/// One T2 pass over every configured repo, as of `now` (tests pass a
+/// later clock). Each repo's locks are taken without waiting
+/// ([`PublishLocksNoWait`]); a repo whose lock is busy is skipped this
+/// pass. Returns what happened to each row, per repo.
+pub fn catch_up_pass(
+    d: &Daemon<'_>,
+    now: SystemTime,
+) -> Vec<(RepoName, RepoCatchUp)> {
+    let core = d.core;
+    let mut out = Vec::new();
+    for repo in core.config.repos.keys() {
+        let r = (|| {
+            let rc = effective_cfg(core, repo)?;
+            let git = git_of(core, repo)?;
+            let deps = strata_deps::Ctx {
+                store: &core.store,
+                paths: &core.config.paths,
+                repo,
+                cfg: &rc,
+                git,
+                env: &core.env,
+                locks: &core.locks,
+            };
+            let locks = PublishLocksNoWait { locks: &core.locks, du: &d.du };
+            let ctx = strata_publish::Ctx { store: &core.store, git, cfg: &rc, repo, deps: &deps, locks: &locks, sessions: &d.sessions };
+            strata_publish::pending::catch_up(&ctx, now)
+        })();
+        match &r {
+            Err(e) if e.code == Code::Busy => tracing::debug!(repo = %repo, "catch-up: the repo is busy; skipped"),
+            Err(e) => tracing::warn!(repo = %repo, error = %e.message, "catch-up failed"),
+            Ok(rows) => {
+                for (s, o) in rows {
+                    match o {
+                        Ok(o) => tracing::debug!(repo = %repo, session = %s, outcome = ?o, "catch-up"),
+                        Err(e) => tracing::warn!(repo = %repo, session = %s, error = %e.message, "catch-up attempt failed"),
+                    }
+                }
+            }
+        }
+        out.push((repo.clone(), r));
+    }
+    out
 }
 
 /// How long a queued old tree whose session was busy waits before it is
@@ -663,7 +761,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 Ok(json!({}))
             }
             Params::Rm(p) => {
-                let action = Action::RemoveDiscard { session: p.session.clone() };
+                let action = self.d.sessions.discard_action(&p.session)?;
                 let token = if p.discard { Some(require_validated(&core.confirmer, action.clone())?) } else { None };
                 // Review M5: wait out `publishing` (holding nothing), then the
                 // queue place, the flag checked again under it.
@@ -678,7 +776,16 @@ impl<'d, 'a> Server<'d, 'a> {
                         writing();
                         let r = self.d.sessions.remove(&p.session, p.discard, token);
                         self.d.sessions.forget_old_trees(&p.session);
+                        if let Err(e) = &r {
+                            record_rm_attempt(core, &p.session, e);
+                        }
                         let r = r?;
+                        for o in &r.orphans {
+                            tracing::warn!(path = %o.path.display(), "rm retired a recreated session directory");
+                        }
+                        for w in &r.warnings {
+                            tracing::warn!(session = %p.session, error = %w.message, "rm orphan sweep");
+                        }
                         self.d.du.on_remove(p.session.as_str());
                         Ok(json_of(&r))
                     })
@@ -696,16 +803,44 @@ impl<'d, 'a> Server<'d, 'a> {
                 if p.dry_run {
                     // D33: read-only; nothing is locked, deleted or recorded.
                     let pv = core.store.gc_preview(STORE_GC_KEEP, &trash_refs(core))?;
-                    return Ok(json!({ "dry_run": true, "preview": json_of(&pv) }));
+                    let mut pv = json_of(&pv);
+                    // rm-followups R1: the orphans a gc would retire; no
+                    // writes and no `enroll`.
+                    let orphans: Vec<Value> = self
+                        .d
+                        .sessions
+                        .orphans()?
+                        .into_iter()
+                        .map(|(session, path)| json!({ "session": session.as_str(), "path": path }))
+                        .collect();
+                    if let Value::Object(m) = &mut pv {
+                        m.insert("orphans".into(), json!(orphans));
+                    }
+                    return Ok(json!({ "dry_run": true, "preview": pv }));
                 }
                 let repos: Vec<RepoName> = match &p.repo {
                     Some(r) => vec![r.clone()],
                     None => core.config.repos.keys().cloned().collect(),
                 };
+                for repo in &repos {
+                    repo_cfg(core, repo)?;
+                }
+                // rm-followups R1 (ii): before gc_repo, outside every repo
+                // lock; per-item failures are warnings.
+                writing();
+                let sweep = self.d.sessions.sweep_orphans(None);
+                for o in &sweep.retired {
+                    tracing::warn!(path = %o.path.display(), trash = %o.trash.display(), "gc retired an orphan session directory");
+                }
+                for w in &sweep.warnings {
+                    tracing::warn!(error = %w.message, "gc orphan skipped");
+                }
+                let orphans: Vec<Value> =
+                    sweep.retired.iter().map(|o| json!({ "path": o.path, "trash": o.trash })).collect();
+                let orphan_warnings = json_of(&sweep.warnings);
                 let mut done = Vec::new();
                 let mut skipped = Vec::new();
                 for repo in repos {
-                    repo_cfg(core, &repo)?;
                     match core.locks.with_repo(&repo, || {
                         writing();
                         core.store.gc_repo(&repo, GC_KEEP)
@@ -722,7 +857,14 @@ impl<'d, 'a> Server<'d, 'a> {
                 if p.store {
                     writing();
                     let rep = core.store.gc_with(STORE_GC_KEEP, &trash_refs(core))?;
-                    return Ok(json!({ "done": done, "skipped": skipped, "trash": null, "store": json_of(&rep) }));
+                    return Ok(json!({
+                        "done": done,
+                        "skipped": skipped,
+                        "trash": null,
+                        "store": json_of(&rep),
+                        "orphans": orphans,
+                        "orphan_warnings": orphan_warnings,
+                    }));
                 }
                 let trash = if p.repo.is_none() {
                     writing();
@@ -730,11 +872,11 @@ impl<'d, 'a> Server<'d, 'a> {
                 } else {
                     None
                 };
-                Ok(json!({ "done": done, "skipped": skipped, "trash": trash }))
+                Ok(json!({ "done": done, "skipped": skipped, "trash": trash, "orphans": orphans, "orphan_warnings": orphan_warnings }))
             }
             Params::ConfigRelax(p) => {
                 writing();
-                core.config_relax(&p.repo)?;
+                self.d.config_relax(&p.repo)?;
                 Ok(json!({}))
             }
             Params::DaemonStatus(p) => self.d.daemon_status(p.verify),
@@ -861,7 +1003,14 @@ impl<'d, 'a> Server<'d, 'a> {
             strata_session::SummarySelect::All
         };
         let v = strata_session::summary(&core.store, &core.config.paths.root, sel, workspaces)?;
-        Ok(json!({ "sessions": json_of(&v) }))
+        // rm-followups R3: directories of removed sessions (two read_dirs).
+        let left = strata_session::removed_leftovers(&core.store, &core.config.paths.root)?;
+        // Only when there are any: the reply stays `{sessions}` otherwise.
+        let mut out = json!({ "sessions": json_of(&v) });
+        if !left.is_empty() {
+            out["leftovers"] = json_of(&left);
+        }
+        Ok(out)
     }
 
     /// Read only; no queue, no lock.
@@ -871,7 +1020,11 @@ impl<'d, 'a> Server<'d, 'a> {
         let ids: Vec<SessionId> = if all {
             sessions.list()?
         } else if let Some(sel) = selector {
-            vec![sessions.select(sel)?]
+            vec![
+                sessions
+                    .select(sel)
+                    .map_err(|e| strata_session::with_leftover_detail(&core.store, &core.config.paths.root, sel, e))?,
+            ]
         } else if let Some(cwd) = cwd {
             match sessions.resolve(cwd)? {
                 Some((id, _)) => vec![id],
@@ -1281,7 +1434,7 @@ impl<'d, 'a> Server<'d, 'a> {
         if let Some(plan) = plan {
             for repo in &repos {
                 let pinned = core.pinned(repo).map_err(|e| self.decorate_publish_error(e, repo, Vec::new(), already.clone()))?;
-                if pinned.push && needs_confirm(pinned) && !plan.contains(repo) {
+                if pinned.push && needs_confirm(&pinned) && !plan.contains(repo) {
                     let e = StrataError::new(
                         Code::NotConfirmed,
                         format!(
@@ -1306,7 +1459,7 @@ impl<'d, 'a> Server<'d, 'a> {
             let r = (|| {
                 let pinned = core.pinned(&repo)?;
                 let branch = repo_cfg(core, &repo)?.publish.branch.clone();
-                let token = if pinned.push && needs_confirm(pinned) {
+                let token = if pinned.push && needs_confirm(&pinned) {
                     // Review P1-15: the approval names origin's push URL read
                     // now; publish checks it again under the repo lock.
                     let url = git_of(core, &repo)?.push_url(resolve::SCENE_REMOTE)?;
@@ -1385,7 +1538,7 @@ impl<'d, 'a> Server<'d, 'a> {
         let git = git_of(core, repo)?;
         let branch = rc.publish.branch.clone();
         let before = shown.cloned();
-        let confirm = needs_confirm(core.pinned(repo)?);
+        let confirm = needs_confirm(&core.pinned(repo)?);
         // Review P1-15: the approval names origin's push URL read before the
         // prompt; under the lock it must still be that URL (`remote_changed`)
         // and the push goes to exactly it.
@@ -1481,7 +1634,7 @@ impl Server<'_, '_> {
             })
             .collect();
         if let Some(rp) = &replayed {
-            self.rebase_replayed(repo, git, rp, &mut rebases, &mut warnings);
+            self.rebase_replayed(repo, rp, &mut rebases, &mut warnings);
         }
         if let Some(after) = tips.1.clone()
             && let Some(e) = crate::fetch_after::observe_if_moved(tips.0.as_ref(), Some(&after), &mut || resolve::observe_tip(core, repo, &after))
@@ -1511,25 +1664,26 @@ impl Server<'_, '_> {
         }
     }
 
-    fn rebase_replayed(&self, repo: &RepoName, git: &Git, rp: &resolve::Replayed, rebases: &mut Vec<Value>, warnings: &mut Vec<Value>) {
+    /// rm-followups §1.6 (c): T1 for a replay attempts each row whose
+    /// committed target is one of the copies; a session with no such row is
+    /// not attempted.
+    fn rebase_replayed(&self, repo: &RepoName, rp: &resolve::Replayed, rebases: &mut Vec<Value>, warnings: &mut Vec<Value>) {
         let core = self.core();
-        let records = match core.store.sessions() {
+        let rows = match core.store.rebase_pending(None) {
             Ok(r) => r,
             Err(e) => {
                 warnings.push(json!({ "kind": "RebaseFailed", "repo": repo.as_str(), "code": e.code.as_str(), "message": e.message }));
                 return;
             }
         };
-        for rec in records.into_iter().filter(|r| r.lifecycle != strata_store::Lifecycle::Removed) {
-            let Some(ws) = rec.manifest.repos.get(repo) else { continue };
-            let Some((_, copy)) = rp.map.iter().find(|(old, _)| *old == ws.head) else { continue };
-            let s = rec.manifest.id.clone();
-            let r = git.tree_of(copy).and_then(|tree| {
-                let base = BaseGen { repo: repo.clone(), tree, deps: ws.base.deps.clone() };
-                self.with_publish_ctx(repo, |ctx| strata_publish::rebase_session(ctx, s.clone(), repo, base, copy.clone()))
-            });
+        for row in rows.into_iter().filter(|r| r.repo == *repo) {
+            let Some(copy) = row.head.as_deref().and_then(|h| rp.map.iter().find(|(_, n)| n.as_str() == h)) else { continue };
+            let (from, to) = (copy.0.clone(), copy.1.clone());
+            let s = row.session.clone();
+            let r = self.with_publish_ctx(repo, |ctx| strata_publish::pending::attempt(ctx, &row, strata_publish::MovePolicy::Auto));
             match r {
-                Ok(report) => rebases.push(json!({ "session": s.as_str(), "from": ws.head.as_str(), "to": copy.as_str(), "report": json_of(&report) })),
+                Ok(Some(report)) => rebases.push(json!({ "session": s.as_str(), "from": from.as_str(), "to": to.as_str(), "report": json_of(&report) })),
+                Ok(None) => {}
                 Err(e) => warnings.push(json!({
                     "kind": "RebaseFailed", "repo": repo.as_str(), "session": s.as_str(), "code": e.code.as_str(), "message": e.message,
                 })),
@@ -1702,6 +1856,68 @@ fn landed_before(rows: &[strata_store::PublishRecord], b: &strata_types::Batch) 
             json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "push": o.get("push").cloned().unwrap_or(Value::Null) })
         })
     })
+}
+
+/// rm-followups §1.6 T2's locks: every take only if free right now (the
+/// holder shows as `catch_up`), `Busy` otherwise, never waited out; the
+/// rebase's take adds the du hold like [`PublishLocksDu`].
+struct PublishLocksNoWait<'a> {
+    locks: &'a crate::locks::Locks,
+    du: &'a Arc<crate::du::Du>,
+}
+
+const CATCH_UP: &str = "catch_up";
+
+impl strata_publish::PublishLocks for PublishLocksNoWait<'_> {
+    fn with_sessions(
+        &self,
+        sessions: &[SessionId],
+        f: &mut dyn FnMut() -> strata_publish::Result<()>,
+    ) -> strata_publish::Result<strata_publish::Result<()>> {
+        let mut inner = None;
+        self.locks.try_sessions(sessions, CATCH_UP, || {
+            inner = Some(f());
+            Ok(())
+        })?;
+        Ok(inner.unwrap_or(Ok(())))
+    }
+
+    fn with_repo(
+        &self,
+        repo: &RepoName,
+        f: &mut dyn FnMut() -> strata_publish::Result<()>,
+    ) -> strata_publish::Result<strata_publish::Result<()>> {
+        let mut inner = None;
+        self.locks.try_repo(repo, CATCH_UP, || {
+            inner = Some(f());
+            Ok(())
+        })?;
+        Ok(inner.unwrap_or(Ok(())))
+    }
+
+    fn with_rebase_sessions(
+        &self,
+        sessions: &[SessionId],
+        f: &mut dyn FnMut() -> strata_publish::Result<()>,
+    ) -> strata_publish::Result<strata_publish::Result<()>> {
+        let ids: Vec<&str> = sessions.iter().map(SessionId::as_str).collect();
+        let mut refused = None;
+        let r = self.with_sessions(sessions, &mut || match self.du.hold_sessions(&ids, crate::du::HOLD_WAIT) {
+            Ok(_hold) => f(),
+            Err(e) => {
+                refused = Some(e);
+                Ok(())
+            }
+        });
+        match refused {
+            Some(e) => Err(e),
+            None => r,
+        }
+    }
+
+    fn waits(&self) -> bool {
+        false
+    }
 }
 
 /// publish's locks, with the du hold (status-perf D8) on the rebase's take

@@ -154,8 +154,23 @@ pub enum Action {
         url: String,
     },
     DepsApprove { proposal: ProposalId },
-    RemoveDiscard { session: SessionId },
+    /// `kept_trees`: rm-followups §1.4 G4 item 5, the kept pre-move trees
+    /// with a late-write notice the discard also throws away (read before
+    /// the prompt and named on it; `rm` binds the token to the same list).
+    RemoveDiscard {
+        session: SessionId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        kept_trees: Vec<KeptTreeRef>,
+    },
     ConfigRelax { repo: RepoId },
+}
+
+/// A kept pre-move tree named on `rm --discard`'s prompt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptTreeRef {
+    pub path: String,
+    /// Late-written files in it (0: its activity baseline is unreadable).
+    pub count: u64,
 }
 
 /// A push URL as shown to a person (prompt, plan, error detail): the

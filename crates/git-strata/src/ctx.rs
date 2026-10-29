@@ -31,6 +31,18 @@ impl Ctx {
         rpc::call(&self.paths.socket, method, params, kind).map_err(CallError::into_error)
     }
 
+    /// rm-followups R2: a call that a SIGINT/SIGTERM stops (see
+    /// `rpc::call_interruptible`).
+    pub fn call_interruptible(
+        &self,
+        method: &str,
+        params: Value,
+        kind: Kind,
+    ) -> std::result::Result<Result<Value>, rpc::Stopped> {
+        rpc::call_interruptible(&self.paths.socket, method, params, kind, &crate::interrupt::STOP)
+            .map(|r| r.map_err(CallError::into_error))
+    }
+
     /// A call that tells "nothing listening" apart (reads fall back).
     pub fn try_call(&self, method: &str, params: Value, kind: Kind) -> std::result::Result<Value, CallError> {
         rpc::call(&self.paths.socket, method, params, kind)

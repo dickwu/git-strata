@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -13,7 +14,7 @@ use strata_types::{BaseManifest, BlobId, Code, EntryKind, RepoPath, StrataError}
 
 use crate::classify::{Folds, Raw, classify};
 use crate::context::Base;
-use crate::hash::hash_bytes;
+use crate::hash::{hash_bytes, hash_file};
 use crate::lww::{LwwRules, lww_matches};
 use crate::overlay::{MODE_EXEC, MODE_FILE, Overlay, ancestors, entry_blob, entry_from, rp};
 use crate::{MERGE_MAX_BYTES, Result};
@@ -71,6 +72,102 @@ pub struct Rebased {
 }
 
 type Side = Option<(BlobId, u32)>;
+
+/// Where the projection reads the session's blobs and keeps what it makes
+/// (rm-followups §1.4 G3). [`Store`] is the real one; [`PreviewBlobs`]
+/// writes nothing.
+pub trait Blobs {
+    /// All of blob `id`'s bytes, if at most `max` (`TooLarge` otherwise).
+    fn read(&self, id: &BlobId, max: u64) -> Result<Vec<u8>>;
+    /// Keep a clean merge result; its id.
+    fn put(&self, bytes: &[u8]) -> Result<BlobId>;
+    /// §5.8 step 5a: keep the new base's file `p` under `dir`; its id.
+    fn put_base(&self, dir: &Path, p: &RepoPath) -> Result<BlobId>;
+}
+
+impl Blobs for Store {
+    fn read(&self, id: &BlobId, max: u64) -> Result<Vec<u8>> {
+        self.read_blob(id, max)
+    }
+    fn put(&self, bytes: &[u8]) -> Result<BlobId> {
+        self.put_bytes(bytes)
+    }
+    fn put_base(&self, dir: &Path, p: &RepoPath) -> Result<BlobId> {
+        self.put_blob_rooted(dir, p)
+    }
+}
+
+/// `reason` of the error [`PreviewBlobs`] returns when a workspace file no
+/// longer has the bytes the scan saw.
+pub const CHANGED_SINCE_SCAN: &str = "changed_since_scan";
+
+/// Read-only [`Blobs`] for [`rebase_preview`] over an overlay that was never
+/// checkpointed: a blob comes from the store when it is there, else from the
+/// workspace file the overlay names for it (no symlink followed, at most
+/// `max` bytes), whose hash must still be the overlay's id. `put` only hashes.
+pub struct PreviewBlobs<'a> {
+    store: &'a Store,
+    root: &'a Path,
+    by_id: BTreeMap<BlobId, RepoPath>,
+}
+
+impl<'a> PreviewBlobs<'a> {
+    pub fn new(store: &'a Store, root: &'a Path, overlay: &Overlay) -> PreviewBlobs<'a> {
+        let mut by_id = BTreeMap::new();
+        for e in &overlay.entries {
+            if let Some(b) = entry_blob(e) {
+                by_id.entry(b.clone()).or_insert_with(|| e.path.clone());
+            }
+        }
+        PreviewBlobs { store, root, by_id }
+    }
+}
+
+fn changed_since_scan(root: &Path, p: &RepoPath, why: &str) -> StrataError {
+    StrataError::new(Code::Conflict, format!("{} changed since the scan ({why})", root.join(p.as_str()).display()))
+        .with_detail(json!({ "reason": CHANGED_SINCE_SCAN, "path": p.as_str() }))
+}
+
+impl Blobs for PreviewBlobs<'_> {
+    fn read(&self, id: &BlobId, max: u64) -> Result<Vec<u8>> {
+        match self.store.read_blob(id, max) {
+            Err(e) if e.code == Code::Corrupt
+                && e.detail.as_ref().and_then(|d| d["reason"].as_str()) == Some("blob_missing") => {}
+            r => return r,
+        }
+        let Some(p) = self.by_id.get(id) else {
+            return Err(StrataError::new(Code::Corrupt, format!("blob {id} is neither stored nor in the overlay")));
+        };
+        let f = strata_apfs::open_rooted_file(self.root, p).map_err(|e| changed_since_scan(self.root, p, &e.message))?;
+        let mut out = Vec::new();
+        (&f).take(max + 1).read_to_end(&mut out).map_err(|e| changed_since_scan(self.root, p, &e.to_string()))?;
+        if out.len() as u64 > max {
+            return Err(StrataError::new(Code::TooLarge, format!("{} is more than {max} bytes", p.as_str()))
+                .with_detail(json!({ "limit": "read_max", "max": max })));
+        }
+        if hash_bytes(&out) != *id {
+            return Err(changed_since_scan(self.root, p, "its hash differs"));
+        }
+        Ok(out)
+    }
+    fn put(&self, bytes: &[u8]) -> Result<BlobId> {
+        Ok(hash_bytes(bytes))
+    }
+    fn put_base(&self, dir: &Path, p: &RepoPath) -> Result<BlobId> {
+        let f = strata_apfs::open_rooted_file(dir, p)?;
+        Ok(hash_file(&f, &dir.join(p.as_str()))?.0)
+    }
+}
+
+/// What [`rebase_preview`] would do; nothing was written.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Preview {
+    pub conflicts: Vec<RepoPath>,
+    pub dropped: Vec<RepoPath>,
+    pub lww: Vec<RepoPath>,
+    /// Changed on both sides and merged cleanly.
+    pub merged: Vec<RepoPath>,
+}
 
 fn invalid(reason: &str, msg: &str) -> StrataError {
     StrataError::new(Code::InvalidInput, msg.to_owned()).with_detail(json!({ "reason": reason }))
@@ -141,7 +238,7 @@ fn merge_content(
     t: &(BlobId, u32),
     old: &Base,
     new: &Base,
-    store: &Store,
+    store: &dyn Blobs,
 ) -> Result<Merged> {
     if let Some((bb, _)) = b {
         if *bb == o.0 {
@@ -155,7 +252,7 @@ fn merge_content(
     if (b.is_some() && too_big(&old.manifest)) || too_big(&new.manifest) {
         return Ok(Merged::Conflict);
     }
-    let ours = match store.read_blob(&o.0, MERGE_MAX_BYTES) {
+    let ours = match store.read(&o.0, MERGE_MAX_BYTES) {
         Ok(v) => v,
         Err(e) if e.code == Code::TooLarge => return Ok(Merged::Conflict),
         Err(e) => return Err(e),
@@ -171,7 +268,7 @@ fn merge_content(
             if id == o.0 || id == t.0 {
                 Ok(Merged::Take(id))
             } else {
-                Ok(Merged::Take(store.put_bytes(&bytes)?))
+                Ok(Merged::Take(store.put(&bytes)?))
             }
         }
         Merge3::Conflict(_) => Ok(Merged::Conflict),
@@ -202,6 +299,32 @@ pub fn rebase(
     store: &Store,
     opts: &RebaseOptions,
 ) -> Result<Rebased> {
+    Ok(rebase_with(overlay, old, new, store, opts)?.0)
+}
+
+/// rm-followups §1.4 G3: [`rebase`]'s classification with no store write,
+/// over an overlay that need not be checkpointed ([`PreviewBlobs`]). A
+/// workspace file that changed since the scan is `Conflict` with
+/// `detail.reason = "changed_since_scan"`.
+pub fn rebase_preview(
+    overlay: &Overlay,
+    old: &Base,
+    new: &Base,
+    blobs: &PreviewBlobs<'_>,
+    opts: &RebaseOptions,
+) -> Result<Preview> {
+    let (r, merged) = rebase_with(overlay, old, new, blobs, opts)?;
+    Ok(Preview { conflicts: r.conflicts, dropped: r.dropped, lww: r.lww, merged })
+}
+
+/// [`rebase`] over any [`Blobs`]; also the paths merged cleanly.
+pub fn rebase_with(
+    overlay: &Overlay,
+    old: &Base,
+    new: &Base,
+    store: &dyn Blobs,
+    opts: &RebaseOptions,
+) -> Result<(Rebased, Vec<RepoPath>)> {
     // 1. Arguments and V1-V5.
     if overlay.base != old.r#gen {
         return Err(invalid(
@@ -240,6 +363,7 @@ pub fn rebase(
     let mut fin: BTreeMap<RepoPath, (Side, From)> = BTreeMap::new();
     let mut conflicts: BTreeSet<RepoPath> = BTreeSet::new();
     let mut lww: BTreeSet<RepoPath> = BTreeSet::new();
+    let mut merged: BTreeSet<RepoPath> = BTreeSet::new();
     for (p, o) in &ours {
         let b = side(&old.manifest, p);
         let t = side(&new.manifest, p);
@@ -254,6 +378,7 @@ pub fn rebase(
             let (oo, tt) = (o.clone().unwrap(), t.clone().unwrap());
             match merge_content(p, &b, &oo, &tt, old, new, store)? {
                 Merged::Take(blob) => {
+                    merged.insert(p.clone());
                     let side = Some((blob, merge_mode(&b, oo.1, tt.1)));
                     let from = if side == t { From::Base } else { From::Session };
                     (side, from)
@@ -351,7 +476,7 @@ pub fn rebase(
         if m.blob != *blob || input_blobs.contains(blob) {
             continue;
         }
-        let got = store.put_blob_rooted(&new.dir, &e.path).map_err(|err| {
+        let got = store.put_base(&new.dir, &e.path).map_err(|err| {
             if matches!(
                 err.code,
                 Code::NoSuchPath | Code::IsDirectory | Code::NotFile | Code::NotDirectory
@@ -385,10 +510,9 @@ pub fn rebase(
         .filter(|p| !lww.contains(*p) && !still.contains(p))
         .cloned()
         .collect();
-    Ok(Rebased {
-        overlay: out,
-        conflicts: conflicts.into_iter().collect(),
-        dropped,
-        lww: lww.into_iter().collect(),
-    })
+    let merged = merged.into_iter().filter(|p| !conflicts.contains(p)).collect();
+    Ok((
+        Rebased { overlay: out, conflicts: conflicts.into_iter().collect(), dropped, lww: lww.into_iter().collect() },
+        merged,
+    ))
 }

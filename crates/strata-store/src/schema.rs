@@ -429,6 +429,54 @@ CREATE TABLE dev_ports (
 ) STRICT;
 PRAGMA user_version = 2;
 "#,
+}, Migration {
+    to: 3,
+    name: "rebase_pending+move_activity+rm_attempts",
+    sql: r#"
+CREATE TABLE rm_attempts (
+    session     TEXT    PRIMARY KEY NOT NULL REFERENCES sessions (id),
+    at_ns       INTEGER NOT NULL,
+    outcome     TEXT    NOT NULL CHECK (outcome IN ('refused', 'failed')),
+    detail_json TEXT    NOT NULL CHECK (json_valid(detail_json) AND json_type(detail_json) = 'object')
+) STRICT;
+CREATE TABLE rebase_pending (
+    session         TEXT    NOT NULL,
+    repo            TEXT    NOT NULL,
+    rev             INTEGER NOT NULL CHECK (rev >= 0),
+    from_tree       TEXT    NOT NULL CHECK (length(from_tree) = 40 AND from_tree NOT GLOB '*[^0-9a-f]*'),
+    from_deps       TEXT    NOT NULL CHECK (length(from_deps) = 64 AND from_deps NOT GLOB '*[^0-9a-f]*'),
+    head            TEXT    CHECK (head IS NULL OR (length(head) = 40 AND head NOT GLOB '*[^0-9a-f]*')),
+    tree            TEXT    CHECK (tree IS NULL OR (length(tree) = 40 AND tree NOT GLOB '*[^0-9a-f]*')),
+    planned_head    TEXT    CHECK (planned_head IS NULL OR (length(planned_head) = 40 AND planned_head NOT GLOB '*[^0-9a-f]*')),
+    planned_tree    TEXT    CHECK (planned_tree IS NULL OR (length(planned_tree) = 40 AND planned_tree NOT GLOB '*[^0-9a-f]*')),
+    planned_publish INTEGER CHECK (planned_publish IS NULL OR planned_publish >= 1),
+    reason          TEXT    NOT NULL,
+    detail_json     TEXT    CHECK (detail_json IS NULL OR json_valid(detail_json)),
+    first_at_ns     INTEGER NOT NULL,
+    last_at_ns      INTEGER NOT NULL,
+    attempts        INTEGER NOT NULL CHECK (attempts >= 0),
+    unpushed        INTEGER NOT NULL DEFAULT 0 CHECK (unpushed IN (0, 1)),
+    PRIMARY KEY (session, repo),
+    FOREIGN KEY (session, repo) REFERENCES workspaces (session, repo),
+    CHECK ((head IS NULL) = (tree IS NULL)),
+    CHECK ((planned_head IS NULL) = (planned_tree IS NULL))
+) STRICT;
+CREATE TABLE move_activity (
+    session          TEXT    NOT NULL,
+    repo             TEXT    NOT NULL,
+    n                INTEGER NOT NULL,
+    policy           TEXT    NOT NULL CHECK (policy IN ('auto')),
+    m0_ns            INTEGER NOT NULL,
+    t0_ns            INTEGER NOT NULL,
+    root_names_json  TEXT    NOT NULL CHECK (json_valid(root_names_json) AND json_type(root_names_json) = 'array'),
+    entries          INTEGER NOT NULL CHECK (entries >= 0),
+    late_writes_json TEXT    CHECK (late_writes_json IS NULL OR json_valid(late_writes_json)),
+    passes_json      TEXT    CHECK (passes_json IS NULL OR json_valid(passes_json)),
+    PRIMARY KEY (session, repo, n),
+    FOREIGN KEY (session, repo, n) REFERENCES move_intents (session, repo, n)
+) STRICT;
+PRAGMA user_version = 3;
+"#,
 }];
 
 /// The oldest schema version this build opens (and migrates from).
@@ -461,9 +509,10 @@ mod tests {
             assert_eq!(m.to, BASE_VERSION + 1 + i as u32, "{}", m.name);
             assert!(m.sql.trim_end().ends_with(&format!("PRAGMA user_version = {};", m.to)), "{}", m.name);
         }
-        assert_eq!(LATEST, 2);
-        assert_eq!(pending(1).count(), 1);
+        assert_eq!(LATEST, 3);
+        assert_eq!(pending(1).count(), 2);
+        assert_eq!(pending(2).count(), 1);
         assert_eq!(pending(LATEST).count(), 0);
-        assert!(ddl(1) == BASE_DDL && ddl(2).len() > BASE_DDL.len());
+        assert!(ddl(1) == BASE_DDL && ddl(2).len() > BASE_DDL.len() && ddl(3).len() > ddl(2).len());
     }
 }

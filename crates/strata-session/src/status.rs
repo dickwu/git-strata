@@ -16,6 +16,7 @@ use strata_store::{Health, Lifecycle, MoveState, SessionRecord, WorkspaceRecord}
 use strata_types::{CheckpointId, Code, RepoName, RepoPath, SessionId, SessionManifest, StrataError};
 
 use crate::old_tree::OldTreeMode;
+use crate::rm_note::{RmNotes, rm_notes};
 use crate::scene::{Scene, scene_of};
 use crate::seed::{SeedRecord, mtime_of, written_stamp};
 use crate::sys::lstat;
@@ -41,6 +42,9 @@ pub struct SessionStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scene: Option<Scene>,
     pub workspaces: BTreeMap<RepoName, WorkspaceStatus>,
+    /// rm-followups R2/R3: last rm, interrupted teardown, deferred rebases.
+    #[serde(flatten, default)]
+    pub rm: RmNotes,
 }
 
 /// The session lifecycle (§4.3); the store's `Lifecycle` mirrors it.
@@ -191,6 +195,7 @@ impl Sessions<'_> {
         struct Head {
             rec: SessionRecord,
             scene: Option<Scene>,
+            rm: RmNotes,
         }
         // Ordinal (i, 0): the session's own row, read serially.
         let heads: Vec<Result<Head>> = ids
@@ -201,7 +206,8 @@ impl Sessions<'_> {
                     (Some(v), Lifecycle::Unknown) => Some(scene_of(v, "session")?),
                     _ => None,
                 };
-                Ok(Head { rec, scene })
+                let rm = rm_notes(self.store, &self.config.paths.root, &rec)?;
+                Ok(Head { rec, scene, rm })
             })
             .collect();
         // Ordinals (i, 1 + k): workspace k of session i, by RepoName.
@@ -258,6 +264,7 @@ impl Sessions<'_> {
                     phase: rec.phase.clone(),
                     scene: h.scene,
                     workspaces,
+                    rm: h.rm,
                 }),
             });
         }

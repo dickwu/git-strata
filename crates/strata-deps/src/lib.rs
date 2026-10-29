@@ -28,9 +28,9 @@ pub use attempts::attempts;
 pub use build::{build, clone_into, find_set, key_of};
 pub use drift::{Drift, drift};
 pub use ensure::ensure;
-pub use inputs::{InputRecord, hash_records, input_records, inputs_hash, is_input, nested_seed_caches, platform, set_id, toolchain};
+pub use inputs::{InputRecord, hash_records, input_records, inputs_hash, is_input, is_input_folded, nested_seed_caches, platform, set_id, toolchain};
 pub use snapshot::{clean_snapshots, remove_snapshot, snapshot_dir, snapshot_inputs, snapshot_tree};
-pub use open_files::{Hold, OpenFile, open_files};
+pub use open_files::{Hold, OpenFile, open_files, open_files_many};
 pub use proposal::{
     ChainState, Proposal, ProposalOrigin, ProposalState, ProposeArgs, PublishChain, get_proposal, main_tip, observe_main,
     open_proposals, propose, publish_chain,
@@ -62,6 +62,12 @@ pub trait RepoWriteLock: Sync {
     /// returns. The outer `Err` is only `Busy` (the bounded wait expired and
     /// `f` did not run); `Ok` carries `f`'s result.
     fn with_write(&self, repo: &RepoName, f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>>;
+    /// `with_write`, but only if the lock is free right now: `Busy`
+    /// otherwise, never waited for (rm-followups §1.6 T2). The default
+    /// waits like `with_write` (a lock nothing else contends for).
+    fn try_write(&self, repo: &RepoName, f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>> {
+        self.with_write(repo, f)
+    }
 }
 
 /// The environment `install` and `<program> --version` run with.

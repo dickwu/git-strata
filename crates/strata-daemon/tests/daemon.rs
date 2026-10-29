@@ -829,7 +829,9 @@ fn publish_plan_names_the_remaining_repos_and_writes_nothing() {
 fn publish_plan_keeps_a_waiting_sessions_landed_guarded_repo() {
     use strata_confirm::seams::Verdict;
     let mut fx = Dfx::new();
-    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.confirm = true;
+    let tool = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+    tool.publish.confirm = true;
+    tool.rebase.deps_changed = strata_types::DepsChanged::Wait;
     fx.write_config();
     let (c, _log, _) = fx.confirmer(vec![Verdict::pass()]);
     let core = fx.prepare_with(c).unwrap();
@@ -1443,6 +1445,37 @@ fn store_gc_is_opt_in_and_previews_first() {
     core.close().unwrap();
 }
 
+/// rm-followups R1: startup's recover sweeps orphan session dirs; `gc
+/// --store --dry-run` lists one without moving it; `gc` retires it to the
+/// trash and reports it.
+#[test]
+fn gc_and_startup_sweep_orphan_session_dirs() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let sessions = fx.config.paths.root.join("sessions");
+    let early = sessions.join("s-k3q7xm2a");
+    fs::create_dir_all(early.join("a")).unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    assert!(!early.exists(), "startup's recover swept it");
+    let late = sessions.join("s-m4n5p6q7");
+    fs::create_dir_all(late.join("a")).unwrap();
+    serving(&d, || {
+        let p = ok(call(&sock, "gc", json!({ "repo": null, "store": true, "dry_run": true })));
+        assert_eq!(p["preview"]["orphans"], json!([{ "session": "s-m4n5p6q7", "path": late }]), "{p:#}");
+        assert!(late.join("a").is_dir(), "a dry run moves nothing");
+
+        let g = ok(call(&sock, "gc", json!({ "repo": "tool" })));
+        assert_eq!(g["orphans"][0]["path"], json!(late), "{g:#}");
+        assert!(g["orphan_warnings"].as_array().is_none_or(|a| a.is_empty()), "{g:#}");
+        assert!(!late.exists());
+        let g = ok(call(&sock, "gc", json!({ "repo": null })));
+        assert!(g["orphans"].as_array().is_none_or(|a| a.is_empty()), "{g:#}");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 /// session.md D51/D52: `new` with `only` lays out the named repo alone; a
 /// call on a repo the session lacks names `git-strata add`; `add` gives the
 /// session that repo, and the same call then works.
@@ -1609,4 +1642,88 @@ fn finished_connections_release_their_descriptors() {
     });
     drop(d);
     core.close().unwrap();
+}
+
+/// rm-followups §1.6 T2 through the daemon: a publish whose own move was
+/// deferred (a file of the session held open) is caught up by
+/// `catch_up_pass`; while a request holds the session's queue the pass
+/// defers it `busy` at once instead of waiting.
+#[test]
+fn catch_up_pass_moves_a_deferred_session_and_never_waits() {
+    let mut fx = Dfx::new();
+    fx.catch_up_every = Duration::from_secs(3600);
+    // Long enough that a pass that waited is told apart from a slow pass.
+    fx.lock_wait = Duration::from_secs(20);
+    let sock = fx.socket();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    serving(&d, || {
+        let id = new_session(&sock);
+        let root = ws(&core, &id, "tool");
+        external(&root, "printf 'export const a = 5\\n' > src/index.ts && printf 'later\\n' > later.txt");
+        let cp = ok(call(&sock, "checkpoint", json!({
+            "session": id, "repo": "tool",
+            "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+        })));
+        let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+        let g = group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]);
+        let mut holder = Command::new("/bin/sleep")
+            .arg("300")
+            .current_dir("/")
+            .stdin(fs::File::open(root.join("later.txt")).unwrap())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let r = ok(call(&sock, "publish", json!({ "group": g })));
+        let _ = holder.kill();
+        let _ = holder.wait();
+        let rep = &r["published"][0]["rebases"][0]["report"];
+        assert_eq!((rep["kind"].as_str(), rep["reason"].as_str()), (Some("Deferred"), Some("open_files")), "{r:#}");
+        let commit = r["published"][0]["commit"].as_str().unwrap().to_string();
+        let tool = repo_name("tool");
+        let row = core.store.rebase_pending_of(&id, &tool).unwrap().expect("a deferred target");
+        assert_eq!(row.head.as_deref(), Some(commit.as_str()));
+
+        // A request holds the session's queue: the pass does not wait.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|sc| {
+            let core = &core;
+            let id2 = id.clone();
+            sc.spawn(move || {
+                core.locks
+                    .with_sessions(&[id2], || {
+                        held_tx.send(()).unwrap();
+                        rx.recv().ok();
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+            held_rx.recv().unwrap();
+            let t0 = Instant::now();
+            let out = handlers::catch_up_pass(&d, std::time::SystemTime::now());
+            let took = t0.elapsed();
+            tx.send(()).unwrap();
+            assert!(took < core.locks.wait(), "the pass waited: {took:?}");
+            let rows = out.into_iter().find(|(r, _)| *r == tool).unwrap().1.unwrap();
+            match &rows[..] {
+                [(s, Ok(strata_publish::pending::CatchUp::Attempted(strata_publish::RebaseReport::Deferred { reason, .. })))] => {
+                    assert_eq!((s, reason.as_str()), (&id, "busy"));
+                }
+                o => panic!("{o:?}"),
+            }
+        });
+        assert_eq!(core.store.rebase_pending_of(&id, &tool).unwrap().unwrap().reason, "busy");
+
+        // Free: moved onto the published commit, the row consumed.
+        let out = handlers::catch_up_pass(&d, std::time::SystemTime::now());
+        let rows = out.into_iter().find(|(r, _)| *r == tool).unwrap().1.unwrap();
+        assert!(
+            matches!(&rows[..], [(_, Ok(strata_publish::pending::CatchUp::Attempted(strata_publish::RebaseReport::Moved { .. })))]),
+            "{rows:?}"
+        );
+        assert_eq!(core.store.session(&id).unwrap().unwrap().manifest.repos[&tool].head.as_str(), commit);
+        assert!(core.store.rebase_pending_of(&id, &tool).unwrap().is_none());
+        assert_eq!(fs::read(root.join("later.txt")).unwrap(), b"later\n");
+    });
 }

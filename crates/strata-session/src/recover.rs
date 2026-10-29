@@ -21,6 +21,9 @@ pub enum Leftover {
     /// A base staging directory a stopped process (or a failed retirement)
     /// left, with gitio's export temp directories in it.
     BaseStaging { repo: RepoName, path: PathBuf, export_temps: Vec<PathBuf> },
+    /// rm-followups R3: `sessions/<sid>` or `sessions/.repos/<sid>` of a
+    /// session that is Removed or has no row (R1 moves it to trash).
+    RemovedSession { session: SessionId, path: PathBuf },
 }
 
 /// What `recover` did (§5.8).
@@ -37,6 +40,10 @@ pub struct RecoverReport {
     pub retired: Vec<PathBuf>,
     /// Per-item failures; recover goes on past them.
     pub errors: Vec<StrataError>,
+    /// rm-followups R1 (i): orphan session directories retired into the
+    /// trash (their paths before retirement).
+    #[serde(default)]
+    pub orphans_retired: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +106,8 @@ impl Sessions<'_> {
                 out.push(Leftover::BaseStaging { repo: repo.clone(), path, export_temps });
             }
         }
+        // rm-followups R3: directories of removed sessions.
+        out.extend(crate::rm_note::removed_leftovers(self.store, root)?);
         Ok(out)
     }
 
@@ -113,7 +122,7 @@ impl Sessions<'_> {
         for rec in self.store.sessions()? {
             let (op, first) = match rec.lifecycle {
                 Lifecycle::Creating => (SceneOp::New, "root"),
-                Lifecycle::Removing => (SceneOp::Remove, "unpin"),
+                Lifecycle::Removing => (SceneOp::Remove, "retire"),
                 _ => continue,
             };
             let id = rec.manifest.id.clone();
@@ -252,6 +261,12 @@ impl Sessions<'_> {
                 }
             }
         }
+
+        // Step 4 (rm-followups R1 (i)): orphan session directories, after
+        // step 1, so Creating and Removing rows are Unknown and kept.
+        let sweep = self.sweep_orphans(None);
+        rep.orphans_retired.extend(sweep.retired.into_iter().map(|o| o.path));
+        rep.errors.extend(sweep.warnings);
         Ok(rep)
     }
 }

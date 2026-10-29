@@ -38,7 +38,7 @@ fn config_relax_not_applied_on_restart() {
     let core = fx.prepare_with(c).unwrap();
     // First start: the loaded config becomes the pins, not a relaxation.
     assert!(!pending(&core));
-    assert_eq!(core.pinned(&repo_name("tool")).unwrap(), PinnedFlags { deploy_on_push: true, confirm: true, push: true });
+    assert_eq!(core.pinned(&repo_name("tool")).unwrap(), PinnedFlags { deploy_on_push: true, confirm: true, push: true, ..Default::default() });
     core.close().unwrap();
     let before = pins_bytes(&fx);
 
@@ -48,7 +48,7 @@ fn config_relax_not_applied_on_restart() {
         let core = fx.prepare_with(fx.confirmer(vec![Verdict::pass()]).0).unwrap();
         let f = core.pinned(&repo_name("tool")).unwrap();
         assert!(f.deploy_on_push, "relaxation not applied");
-        assert!(confirm_flow::needs_confirm(f), "a push still needs confirming");
+        assert!(confirm_flow::needs_confirm(&f), "a push still needs confirming");
         assert!(core.config.repos[&repo_name("tool")].needs_human_confirm());
         assert!(pending(&core));
         core.close().unwrap();
@@ -88,7 +88,7 @@ fn config_relax_does_not_prompt_on_file_change() {
     let (c, log4, _) = fx.confirmer(vec![]);
     let core = fx.prepare_with(c).unwrap();
     assert!(pending(&core));
-    assert_eq!(core.pinned(&repo_name("tool")).unwrap(), PinnedFlags { deploy_on_push: false, confirm: true, push: false });
+    assert_eq!(core.pinned(&repo_name("tool")).unwrap(), PinnedFlags { deploy_on_push: false, confirm: true, push: false, ..Default::default() });
     core.close().unwrap();
     for l in [log, log2, log3, log4] {
         assert!(l.shown().is_empty());
@@ -307,7 +307,7 @@ fn missing_pins_file_means_needs_confirmation() {
     let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
     let core = fx.prepare_unseeded(c).unwrap();
     let f = core.pinned(&repo_name("tool")).unwrap();
-    assert_eq!(f, PinnedFlags { deploy_on_push: false, confirm: true, push: true });
+    assert_eq!(f, PinnedFlags { deploy_on_push: false, confirm: true, push: true, ..Default::default() });
     assert!(pending(&core), "the looser config waits for config relax");
     assert!(log.shown().is_empty(), "startup never prompts");
     // Only a confirmed relax adopts it.
@@ -328,7 +328,7 @@ fn deleted_pins_file_does_not_loosen() {
     fs::remove_file(strata_daemon::pins_path(&fx.config_dir)).unwrap();
     set_flags(&mut fx, false, false, true);
     let core = fx.prepare_unseeded(fx.confirmer(vec![]).0).unwrap();
-    assert!(confirm_flow::needs_confirm(core.pinned(&repo_name("tool")).unwrap()));
+    assert!(confirm_flow::needs_confirm(&core.pinned(&repo_name("tool")).unwrap()));
     assert!(core.config.repos[&repo_name("tool")].needs_human_confirm());
     assert!(pending(&core));
     core.close().unwrap();
@@ -354,5 +354,128 @@ fn renamed_repo_does_not_reset_the_pin() {
     assert!(f.confirm, "renamed repo is gated");
     assert!(core.config.repos[&repo_name("tool2")].needs_human_confirm());
     assert!(core.warnings.snapshot().contains(&DaemonWarning::ConfigRelaxPending { repo: repo_name("tool2") }));
+    core.close().unwrap();
+}
+
+// ---- rm-followups §1.8 (B2): rm.regenerable is pinned like confirm ----
+
+fn set_regenerable(fx: &mut Dfx, list: &[&str]) {
+    let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+    rc.rm.regenerable = list.iter().map(|s| s.to_string()).collect();
+    fx.write_config();
+}
+
+fn v(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+fn pinned_regen(core: &strata_daemon::startup::Core) -> Vec<String> {
+    core.pinned(&repo_name("tool")).unwrap().regenerable
+}
+
+#[test]
+fn regenerable_narrower_is_syntactic() {
+    use confirm_flow::regenerable_narrower as n;
+    let pin = v(&["gen/**", "!gen/keep.json", "a.json"]);
+    assert!(n(&pin, &pin));
+    assert!(n(&pin, &v(&[])), "emptied: matches nothing");
+    assert!(n(&pin, &v(&["!other.json"])), "no positives left: matches nothing");
+    assert!(n(&pin, &v(&["!gen/keep.json"])));
+    assert!(n(&pin, &v(&["gen/**", "!gen/keep.json"])));
+    assert!(n(&pin, &v(&["gen/**", "!gen/keep.json", "a.json", "!gen/x.json"])), "appended negation");
+    assert!(!n(&pin, &v(&["gen/**", "a.json"])), "negation removed");
+    assert!(!n(&pin, &v(&["gen/**", "!gen/kept.json", "a.json"])), "negation edited");
+    assert!(!n(&pin, &v(&["gen/*", "!gen/keep.json", "a.json"])), "positive edited");
+    assert!(!n(&pin, &v(&["gen/**", "!gen/keep.json", "a.json", "b.json"])), "positive added");
+    assert!(!n(&pin, &v(&["a.json", "gen/**", "!gen/keep.json"])), "reordered");
+    assert!(!n(&pin, &v(&["gen/**", "!gen/x.json", "!gen/keep.json", "a.json"])), "negation inserted mid-list");
+    assert!(!n(&v(&[]), &v(&["a.json"])));
+    assert!(n(&v(&[]), &v(&["!a.json"])));
+}
+
+#[test]
+fn pins_json_without_regenerable_reads_empty_and_list_waits_for_relax() {
+    let mut fx = Dfx::new();
+    // Seeded pins.json in the old three-field format.
+    fx.prepare().unwrap().close().unwrap();
+    let old = pins_bytes(&fx);
+    assert!(!String::from_utf8_lossy(&old).contains("regenerable"));
+    set_regenerable(&mut fx, &["gen/**"]);
+    let core = fx.prepare().unwrap();
+    assert!(pinned_regen(&core).is_empty());
+    assert!(core.config.repos[&repo_name("tool")].rm.regenerable.is_empty(), "effective list is the pin");
+    assert!(pending(&core), "widening shows as pending relax");
+    core.close().unwrap();
+    assert_eq!(pins_bytes(&fx), old, "an empty list is not written");
+}
+
+#[test]
+fn regenerable_unpinned_repo_is_empty_until_relax() {
+    let mut fx = Dfx::new();
+    set_regenerable(&mut fx, &["gen/**"]);
+    let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
+    let core = fx.prepare_unseeded(c).unwrap();
+    assert!(pinned_regen(&core).is_empty());
+    assert!(pending(&core));
+    core.config_relax(&repo_name("tool")).unwrap();
+    assert_eq!(pinned_regen(&core), v(&["gen/**"]));
+    assert_eq!(log.shown().len(), 1);
+    core.close().unwrap();
+    let text = String::from_utf8(pins_bytes(&fx)).unwrap();
+    assert!(text.contains("\"regenerable\""), "{text}");
+}
+
+#[test]
+fn regenerable_widening_and_edits_need_relax_narrowing_applies() {
+    let mut fx = Dfx::new();
+    set_regenerable(&mut fx, &["gen/**", "!gen/keep.json"]);
+    let core = fx.prepare_unseeded(fx.confirmer(vec![Verdict::pass()]).0).unwrap();
+    core.config_relax(&repo_name("tool")).unwrap();
+    core.close().unwrap();
+
+    // Widening (a positive added), an edit, and removing a negation: all pending.
+    for (list, what) in [
+        (&["gen/**", "!gen/keep.json", "more.json"][..], "added"),
+        (&["gen/*.json", "!gen/keep.json"][..], "edited"),
+        (&["gen/**"][..], "negation removed"),
+    ] {
+        set_regenerable(&mut fx, list);
+        let core = fx.prepare().unwrap();
+        assert_eq!(pinned_regen(&core), v(&["gen/**", "!gen/keep.json"]), "{what}");
+        assert_eq!(core.config.repos[&repo_name("tool")].rm.regenerable, v(&["gen/**", "!gen/keep.json"]), "{what}");
+        assert!(pending(&core), "{what}");
+        core.close().unwrap();
+    }
+
+    // Appending a negation is narrower: applied at start, no prompt.
+    set_regenerable(&mut fx, &["gen/**", "!gen/keep.json", "!gen/also.json"]);
+    let (c, log, _) = fx.confirmer(vec![]);
+    let core = fx.prepare_with(c).unwrap();
+    assert_eq!(pinned_regen(&core), v(&["gen/**", "!gen/keep.json", "!gen/also.json"]));
+    assert!(!pending(&core));
+    assert!(log.shown().is_empty());
+    core.close().unwrap();
+
+    // Deleting every positive is narrower too.
+    set_regenerable(&mut fx, &["!gen/keep.json", "!gen/also.json"]);
+    let core = fx.prepare().unwrap();
+    assert_eq!(pinned_regen(&core), v(&["!gen/keep.json", "!gen/also.json"]));
+    assert!(!pending(&core));
+    core.close().unwrap();
+}
+
+#[test]
+fn relax_reloads_regenerable_without_restart() {
+    let mut fx = Dfx::new();
+    fx.prepare().unwrap().close().unwrap();
+    set_regenerable(&mut fx, &["gen/**"]);
+    let (c, _log, _) = fx.confirmer(vec![Verdict::pass()]);
+    let core = fx.prepare_with(c).unwrap();
+    let d = strata_daemon::startup::Daemon::start(&core).unwrap();
+    assert!(d.sessions.regenerable(&repo_name("tool")).is_empty());
+    d.config_relax(&repo_name("tool")).unwrap();
+    assert_eq!(d.sessions.regenerable(&repo_name("tool")), v(&["gen/**"]));
+    assert!(!pending(&core));
+    drop(d);
     core.close().unwrap();
 }

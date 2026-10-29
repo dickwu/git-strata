@@ -89,7 +89,7 @@ fn pin(fx: &Fx, id: &SessionId) -> String {
 }
 
 fn tok(id: &SessionId) -> Option<ConfirmToken> {
-    Some(ConfirmToken { action: Action::RemoveDiscard { session: id.clone() }, issued: Instant::now(), nonce: 1 })
+    Some(ConfirmToken { action: Action::RemoveDiscard { session: id.clone(), kept_trees: vec![] }, issued: Instant::now(), nonce: 1 })
 }
 
 fn gitdir_of(tree: &Path) -> String {

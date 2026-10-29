@@ -48,9 +48,21 @@ fn prompt_reason_names_the_action() {
     );
     assert_eq!(
         prompt_reason(&Action::RemoveDiscard {
-            session: SessionId::try_from("s-k3q7xm2a".to_string()).unwrap()
+            session: SessionId::try_from("s-k3q7xm2a".to_string()).unwrap(), kept_trees: vec![]
         }),
         "discard the unpublished changes of session s-k3q7xm2a and remove it"
+    );
+    assert_eq!(
+        prompt_reason(&Action::RemoveDiscard {
+            session: SessionId::try_from("s-k3q7xm2a".to_string()).unwrap(),
+            kept_trees: vec![
+                strata_types::KeptTreeRef { path: "/s/.repos/x/tool.old".into(), count: 3 },
+                strata_types::KeptTreeRef { path: "/s/t".into(), count: 0 },
+            ],
+        }),
+        "discard the unpublished changes of session s-k3q7xm2a and remove it; \
+         also discards 3 late-written files in the kept pre-move tree /s/.repos/x/tool.old; \
+         also discards the kept pre-move tree /s/t"
     );
     assert_eq!(
         prompt_reason(&Action::ConfigRelax {
