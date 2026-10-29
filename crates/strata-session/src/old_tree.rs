@@ -7,7 +7,7 @@
 //! nothing is ever retired on a cached verdict, only on a fresh judgement
 //! made under the session's queue place and the repo's write lock.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,10 +77,6 @@ pub(crate) struct OldTrees {
     /// rm-followups §1.4 G4 item 4: keys queued with a not-before time
     /// (an `Auto` tree's next pass); moved to `pending` once due.
     delayed: Mutex<BTreeMap<OldTreeKey, (Instant, PathBuf, u64)>>,
-    /// rm-followups §1.4 G4 item 5: keys whose clean passes a hold should
-    /// have reset but the store write failed; never retired until a reset
-    /// is persisted.
-    must_reset: Mutex<BTreeSet<OldTreeKey>>,
     wake: Condvar,
 }
 
@@ -253,17 +249,25 @@ impl<'a> Sessions<'a> {
         }
     }
 
-    /// rm-followups §1.4 G4 item 5: a hold on `Auto` move `i`'s tree
-    /// clears its clean passes. A failed write marks the key so the tree
-    /// is never retired until a reset is persisted. True when persisted.
-    fn reset_passes(&self, i: &MoveIntent) -> bool {
-        let key = key_of(i);
-        if self.store.set_move_passes(&i.session, &i.repo, i.n, &[]).is_ok() {
-            lock(&self.old_trees.must_reset).remove(&key);
-            true
-        } else {
-            lock(&self.old_trees.must_reset).insert(key);
-            false
+    /// rm-followups §1.4 G4 item 5, crash-safe: before either open-files
+    /// scan of an `Auto` tree with recorded clean passes, the passes are
+    /// cleared in the store, so a hold seen by a scan is already persisted
+    /// as a reset and a restart at any point loses passes, never keeps a
+    /// stale one. A scan that sees no hold puts them back
+    /// ([`Self::restore_passes`]). False when the write failed: the tree
+    /// is then not scanned.
+    fn suspend_passes(&self, i: &MoveIntent) -> bool {
+        if self.seams.hit("old_tree.suspend_passes", Some(&i.repo)).is_err() {
+            return false;
+        }
+        self.store.set_move_passes(&i.session, &i.repo, i.n, &[]).is_ok()
+    }
+
+    /// Puts suspended clean passes back (no hold was seen). A failed write
+    /// only loses them (fail closed: two fresh passes are needed).
+    fn restore_passes(&self, i: &MoveIntent, passes: &[i64]) {
+        if !passes.is_empty() {
+            let _ = self.store.set_move_passes(&i.session, &i.repo, i.n, passes);
         }
     }
 
@@ -396,29 +400,29 @@ impl<'a> Sessions<'a> {
         let Some(ino) = ino_of(&path) else {
             return Outcome::Skipped("gone");
         };
+        // rm-followups §1.4 G4 items 4–5: an `Auto` move's tree is held to
+        // its persisted baseline; its clean passes are suspended (cleared
+        // in the store) before the scans and put back only when no scan
+        // saw a hold.
+        let auto = self.auto_check(i, &path);
+        let suspended: Vec<i64> = match &auto {
+            AutoCheck::Clean(p) if !p.is_empty() => {
+                if !self.suspend_passes(i) {
+                    return Outcome::Skipped("passes_write_failed");
+                }
+                p.clone()
+            }
+            _ => Vec::new(),
+        };
         let holders = match strata_deps::open_files(&path) {
             Ok(h) => h,
-            Err(_) => return Outcome::Skipped("open_files_failed"),
-        };
-        // rm-followups §1.4 G4 items 4–5: an `Auto` move's tree is held to
-        // its persisted baseline; a hold resets its clean passes.
-        let mut auto = self.auto_check(i, &path);
-        if matches!(&auto, AutoCheck::Clean(_))
-            && lock(&self.old_trees.must_reset).contains(&key_of(i))
-        {
-            // An earlier hold's reset was not persisted: persist it now,
-            // else fail closed.
-            if !self.reset_passes(i) {
-                return Outcome::Kept {
-                    holders,
-                    changed: Some(false),
-                };
+            Err(_) => {
+                self.restore_passes(i, &suspended);
+                return Outcome::Skipped("open_files_failed");
             }
-            auto = AutoCheck::Clean(Vec::new());
-        }
-        if !holders.is_empty() && matches!(&auto, AutoCheck::Clean(_)) {
-            self.reset_passes(i);
-        }
+        };
+        // A held tree keeps its passes cleared; every other exit below
+        // that does not retire puts them back.
         if !holders.is_empty() && !judge_held {
             return Outcome::Kept {
                 holders,
@@ -428,6 +432,9 @@ impl<'a> Sessions<'a> {
         // A tree that cannot be compared reads as changed.
         let changed = matches!(auto, AutoCheck::Late) || !self.old_tree_matches(i, cfg).unwrap_or(false);
         if changed || !holders.is_empty() || i.old_tree.is_some() {
+            if holders.is_empty() {
+                self.restore_passes(i, &suspended);
+            }
             return Outcome::Kept {
                 holders,
                 changed: Some(changed),
@@ -441,6 +448,7 @@ impl<'a> Sessions<'a> {
             match passes.last() {
                 Some(last) if now.saturating_sub(*last) >= q => {}
                 Some(_) => {
+                    self.restore_passes(i, &suspended);
                     return Outcome::Kept {
                         holders: Vec::new(),
                         changed: Some(false),
@@ -456,27 +464,33 @@ impl<'a> Sessions<'a> {
             }
         }
         if self.seams.hit("old_tree.final_scan", Some(&i.repo)).is_err() {
+            self.restore_passes(i, &suspended);
             return Outcome::Skipped("seam");
         }
         match strata_deps::open_files(&path) {
             Ok(h) if h.is_empty() && ino_of(&path) == Some(ino) => {}
             Ok(h) => {
-                // A hold seen by the final scan resets the clean passes too.
-                if matches!(&auto, AutoCheck::Clean(_)) {
-                    self.reset_passes(i);
+                // A hold seen by the final scan leaves the passes cleared
+                // (already persisted); an inode change alone puts them back.
+                if h.is_empty() {
+                    self.restore_passes(i, &suspended);
                 }
                 return Outcome::Kept {
                     holders: h,
                     changed: Some(false),
                 };
             }
-            Err(_) => return Outcome::Skipped("open_files_failed"),
+            Err(_) => {
+                self.restore_passes(i, &suspended);
+                return Outcome::Skipped("open_files_failed");
+            }
         }
         let admin = self
             .shadow_dir(&i.session, &i.repo)
             .join("worktrees")
             .join(prior_generation(all, i).to_string());
         if self.store.retire_dir(&i.staging).is_err() {
+            self.restore_passes(i, &suspended);
             return Outcome::Kept {
                 holders: Vec::new(),
                 changed: Some(false),

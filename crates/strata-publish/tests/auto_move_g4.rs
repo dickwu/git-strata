@@ -211,6 +211,77 @@ fn auto_tree_hold_seen_by_final_scan_resets_passes() {
     assert!(old.exists());
 }
 
+/// Codex p2-r2 B3: a moved `Auto` tree with its first clean pass on
+/// record, released from the swap-time holder.
+fn one_pass_recorded(fx: &Fx) -> (SessionId, PathBuf) {
+    let (b, p) = setup(fx);
+    let mut holder = None;
+    moved(
+        &paused(fx, &b, &p, "move.swap", |ws| {
+            holder = Some(Holder(Command::new("/bin/sleep").arg("300").current_dir(ws.join("dir")).spawn().unwrap()));
+            std::thread::sleep(Duration::from_millis(200));
+        })
+        .unwrap(),
+    );
+    drop(holder);
+    let old = old_path(&last_intent(fx, &b));
+    assert!(matches!(check(&fx.sessions(), fx, &b), OldTreeOutcome::Kept { .. }), "first clean pass only records");
+    assert_eq!(g4_passes(fx, &b).len(), 1);
+    (b, old)
+}
+
+fn g4_passes(fx: &Fx, b: &SessionId) -> Vec<i64> {
+    let i = last_intent(fx, b);
+    fx.store().move_activity(b, &repo_name("tool"), i.n).unwrap().unwrap().passes
+}
+
+#[test]
+fn auto_tree_hold_then_restart_needs_two_fresh_passes() {
+    let fx = fx();
+    let (b, old) = one_pass_recorded(&fx);
+    let held = Holder(Command::new("/bin/sleep").arg("300").current_dir(old.join("dir")).spawn().unwrap());
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(matches!(check(&fx.sessions(), &fx, &b), OldTreeOutcome::Kept { .. }), "held");
+    // The reset is in the store before the scan, not only in memory.
+    assert!(g4_passes(&fx, &b).is_empty(), "a hold leaves the passes cleared in the store");
+    drop(held);
+    // A restart: a fresh `Sessions` has no in-memory state.
+    let fresh = fx.sessions();
+    assert!(matches!(check(&fresh, &fx, &b), OldTreeOutcome::Kept { .. }), "after a restart the stale pass does not count");
+    assert!(old.exists());
+    assert_eq!(g4_passes(&fx, &b).len(), 1, "one fresh pass");
+}
+
+#[test]
+fn auto_tree_failed_pass_suspend_skips_the_scan() {
+    let fx = fx();
+    let (b, old) = one_pass_recorded(&fx);
+    let held = Holder(Command::new("/bin/sleep").arg("300").current_dir(old.join("dir")).spawn().unwrap());
+    std::thread::sleep(Duration::from_millis(200));
+    let ss = fx.sessions();
+    ss.arm(SessionSeam::FailAt { phase: "old_tree.suspend_passes@tool".into(), errno: libc::EIO });
+    assert_eq!(check(&ss, &fx, &b), OldTreeOutcome::Skipped("passes_write_failed"));
+    assert_eq!(g4_passes(&fx, &b).len(), 1, "nothing scanned, nothing changed");
+    // The next check (write works) sees the hold and clears the passes.
+    assert!(matches!(check(&ss, &fx, &b), OldTreeOutcome::Kept { .. }));
+    assert!(g4_passes(&fx, &b).is_empty());
+    drop(held);
+    assert!(matches!(check(&fx.sessions(), &fx, &b), OldTreeOutcome::Kept { .. }), "two fresh clean passes are needed again");
+    assert!(old.exists());
+}
+
+#[test]
+fn auto_tree_unheld_check_within_q_keeps_its_pass() {
+    let mut fx = fx();
+    let (b, old) = one_pass_recorded(&fx);
+    // Q set after the move (an Auto move itself waits out Q).
+    fx.config.repos.get_mut(&repo_name("tool")).unwrap().rebase.quiet_secs = 3600;
+    let before = g4_passes(&fx, &b);
+    assert!(matches!(check(&fx.sessions(), &fx, &b), OldTreeOutcome::Kept { .. }), "within Q");
+    assert_eq!(g4_passes(&fx, &b), before, "suspended passes are put back when no hold is seen");
+    assert!(old.exists());
+}
+
 #[test]
 fn auto_rebase_walk_error_counts_as_changed() {
     let fx = fx();
