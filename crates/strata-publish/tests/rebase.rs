@@ -26,6 +26,14 @@ fn fx() -> Fx {
     fx
 }
 
+/// `rebase.deps_changed = "wait"` (rm-followups §1.3): a changed deps set
+/// leaves the session `Waiting` on its old base, as before C2.
+fn fx_wait() -> Fx {
+    let mut fx = fx();
+    fx.cfg_mut("tool").rebase.deps_changed = strata_types::DepsChanged::Wait;
+    fx
+}
+
 fn run(fx: &Fx, g: &ReleaseGroup) -> strata_publish::Result<Published> {
     let d = fx.deps_ctx("tool");
     let ss = fx.sessions();
@@ -226,7 +234,7 @@ fn later_edits_survive_rebase() {
 
 #[test]
 fn rebase_waits_when_deps_must_change() {
-    let fx = fx();
+    let fx = fx_wait();
     let pj = new_package_json();
     let (s, g) = session_with(&fx, &[("package.json", &pj)], None);
     let before = fx.base_of(&s, "tool");
@@ -253,7 +261,7 @@ fn rebase_waits_when_deps_must_change() {
 /// waiting on deps no longer makes `rm` Dirty for what it published.
 #[test]
 fn waiting_session_is_removable_without_discard() {
-    let fx = fx();
+    let fx = fx_wait();
     let pj = new_package_json();
     let (s, g) = session_with(&fx, &[("package.json", &pj)], None);
     let p = run(&fx, &g).unwrap();
@@ -277,7 +285,7 @@ fn waiting_session_is_removable_without_discard() {
 
 #[test]
 fn landed_draft_promoted_under_repo_lock() {
-    let fx = fx();
+    let fx = fx_wait();
     let pj = new_package_json();
     let (s, g) = session_with(&fx, &[("package.json", &pj)], None);
     let d = draft(&fx, &s);
@@ -299,7 +307,7 @@ fn landed_draft_promoted_under_repo_lock() {
 
 #[test]
 fn partial_input_publish_does_not_promote() {
-    let fx = fx();
+    let fx = fx_wait();
     let pj = new_package_json();
     let (s, g) = session_with(&fx, &[("package.json", &pj), ("bun.lock", b"# lock v2\n")], Some(&["package.json"]));
     let d = draft(&fx, &s);
@@ -406,7 +414,7 @@ fn observe_failed_is_a_warning() {
 
 #[test]
 fn publish_does_not_build_while_holding_repo_lock() {
-    let fx = fx();
+    let fx = fx_wait();
     let pj = new_package_json();
     let (_s, g) = session_with(&fx, &[("package.json", &pj)], None);
     let n0 = fx.sb.install_count();
@@ -630,4 +638,99 @@ fn reconstruct_resolves_a_plan_from_the_publish_record() {
     assert!(fx.store().set_publish_phase(id, PublishPhase::Running, PublishPhase::Unknown, Some(&serde_json::json!({})), std::time::SystemTime::now()).unwrap());
     strata_publish::pending::reconstruct(sc).unwrap();
     assert!(pending(&fx, &c).is_none());
+}
+
+/// rm-followups §1.3 C2: a publish that changes the deps set moves the
+/// session's source onto (published tree, OLD deps set); nothing is
+/// installed, the proposal stays Pending and is reported, and the later
+/// approval accepts the session (its inputs are the proposal's).
+#[test]
+fn auto_rebase_deps_changed_moves_source_with_old_deps() {
+    let fx = fx();
+    let pj = new_package_json();
+    let (s, g) = session_with(&fx, &[("package.json", &pj)], None);
+    let before = fx.base_of(&s, "tool");
+    let n0 = fx.sb.install_count();
+    let nm_before = fs::read_dir(fx.ws(&s, "tool").join("node_modules")).map(|d| d.count()).ok();
+    let p = run(&fx, &g).unwrap();
+    let prop = match report(&p, &s) {
+        RebaseReport::Moved { deps_pending: Some(prop), .. } => prop.clone(),
+        r => panic!("{r:?}"),
+    };
+    assert_eq!((prop.origin.clone(), &prop.from), (ProposalOrigin::Main, &before.deps));
+    assert_ne!(prop.to, before.deps);
+    assert_eq!(prop.state, ProposalState::Pending);
+    let after = fx.base_of(&s, "tool");
+    assert_eq!(after.tree.as_str(), tree_of(&fx, &p.commit), "the source moved");
+    assert_eq!(after.deps, before.deps, "the deps set did not");
+    assert_eq!(fx.sb.install_count(), n0, "nothing was installed");
+    assert_eq!(fs::read_dir(fx.ws(&s, "tool").join("node_modules")).map(|d| d.count()).ok(), nm_before);
+    assert_eq!(read(&fx, &s, "package.json").unwrap(), pj, "the published inputs");
+    assert!(pending(&fx, &s).is_none(), "the move consumed the row");
+    let o = row_outcome(&fx, p.id);
+    assert_eq!(o["rebase"][0]["kind"], "Moved");
+    let note = o["rebase"][0]["note"].as_str().unwrap();
+    assert!(note.contains(&format!("deps proposal #{} pending", prop.id)) && note.contains("drift"), "{note}");
+    // The approval accepts the session: a move to (same tree, new deps).
+    let d = fx.deps_ctx("tool");
+    let ws = fx.store().session(&s).unwrap().unwrap().manifest.repos[&repo_name("tool")].clone();
+    let dir = fx.store().base_dir(&after);
+    let id = match deps::ensure_target(&d, prop.id, &dir).unwrap() {
+        deps::Target::Ready { proposal } => proposal.id,
+        t => panic!("{t:?}"),
+    };
+    assert!(fx.sb.install_count() > n0, "approval installs the new set");
+    let plan = deps::plan_rollout(&d, id, &[(s.clone(), ws)], true).unwrap();
+    match &plan.steps[..] {
+        [deps::RolloutStep::Move { session, new_base, .. }] => {
+            assert_eq!(session, &s);
+            assert_eq!((&new_base.tree, &new_base.deps), (&after.tree, &prop.to));
+        }
+        st => panic!("{st:?}"),
+    }
+}
+
+/// C2 records the proposal before the gates: a deferral carries it and
+/// the session stays where it was.
+#[test]
+fn auto_rebase_deps_changed_deferral_carries_the_proposal() {
+    let fx = fx();
+    let pj = new_package_json();
+    let (s, g) = session_with(&fx, &[("package.json", &pj)], None);
+    fx.edit(&s, "tool", &[("later.txt", b"later\n")]);
+    let before = fx.base_of(&s, "tool");
+    let p = {
+        let _h = Holder::file(&fx.ws(&s, "tool").join("later.txt"));
+        run(&fx, &g).unwrap()
+    };
+    match report(&p, &s) {
+        RebaseReport::Deferred { reason, proposal: Some(prop), .. } => {
+            assert_eq!(reason, "open_files");
+            assert_eq!(prop.state, ProposalState::Pending);
+            assert!(proposals(&fx).iter().any(|q| q.id == prop.id), "recorded");
+        }
+        r => panic!("{r:?}"),
+    }
+    assert_eq!(fx.base_of(&s, "tool"), before);
+    assert_eq!(pending(&fx, &s).expect("a deferred target").reason, "open_files");
+}
+
+/// C2 with the session's own draft landed: the promoted proposal is the
+/// one reported and the source moves.
+#[test]
+fn auto_rebase_deps_changed_reports_the_promoted_draft() {
+    let fx = fx();
+    let pj = new_package_json();
+    let (s, g) = session_with(&fx, &[("package.json", &pj)], None);
+    let d = draft(&fx, &s);
+    let p = run(&fx, &g).unwrap();
+    match report(&p, &s) {
+        RebaseReport::Moved { deps_pending: Some(prop), .. } => {
+            assert_eq!(prop.origin, ProposalOrigin::Session { session: s.clone() });
+            assert_eq!((&prop.from, &prop.to), (&d.from, &d.to));
+        }
+        r => panic!("{r:?}"),
+    }
+    assert!(drafts_of(&fx, &s).is_empty());
+    assert_eq!(fx.base_of(&s, "tool").deps, d.from, "still the old deps set");
 }

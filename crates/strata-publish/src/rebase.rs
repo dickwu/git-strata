@@ -13,7 +13,7 @@ use strata_gitio::{Merge3, is_binary, merge3};
 use strata_overlay::{Base, Overlay, RebaseOptions, WorkspaceRef};
 use strata_store::{Lifecycle, PublishPhase, Store};
 use strata_types::{
-    BaseGen, Code, CommitOid, DepsSetId, EntryKind, OverlayEntry, RepoName, RepoPath, SessionId, StrataError,
+    BaseGen, DepsChanged, Code, CommitOid, DepsSetId, EntryKind, OverlayEntry, RepoName, RepoPath, SessionId, StrataError,
     WorkspaceState,
 };
 
@@ -43,6 +43,10 @@ pub enum RebaseReport {
         lww: Vec<RepoPath>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         regenerable_kept: Vec<RepoPath>,
+        /// C2 (rm-followups §1.3): the source moved onto the new tree with
+        /// the OLD deps set; this proposal (Pending) brings the new set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deps_pending: Option<Proposal>,
     },
     /// `Auto` only: the session stays on its old base for now. `reason` is
     /// `open_files`, `recent_writes`, `conflicts`, `busy` or `state`.
@@ -318,6 +322,12 @@ pub(crate) fn rebase_one_with(
         target = base_for(ctx, &target.tree, &target.deps)?;
     }
     let (n_inputs, n) = deps::key_of(ctx.deps, &ctx.store.base_dir(&target))?;
+    // rm-followups §1.3 C2: an `Auto` move whose deps set changed moves the
+    // source only, onto (new tree, OLD sealed set); nothing is installed.
+    let c2 = policy == MovePolicy::Auto && n != old.deps && ctx.cfg.rebase.deps_changed == DepsChanged::MoveSource;
+    if c2 {
+        return move_source(ctx, s, &old, new_base, head, &n, &n_inputs, at);
+    }
     if n == old.deps {
         if target.deps != n {
             target = base_for(ctx, &new_base.tree, &n)?;
@@ -357,30 +367,7 @@ pub(crate) fn rebase_one_with(
             return Ok(d);
         }
         // 2. A draft whose input changes all landed is promoted.
-        let draft = deps::open_proposals(ctx.store, Some(ctx.repo))?.into_iter().rev().find(|p| {
-            p.state == ProposalState::AwaitingPublish && p.origin == (ProposalOrigin::Session { session: s.clone() })
-        });
-        let mut promoted: Option<Proposal> = None;
-        if let Some(d) = draft
-            && d.from != n
-            && n != old.deps
-        {
-            let overlay = current_overlay(ctx, s, &ws, &base_struct(ctx.store, &old)?)?;
-            if inputs_landed(ctx, &overlay, &new) {
-                promoted = Some(deps::propose(
-                    ctx.deps,
-                    ProposeArgs {
-                        origin: ProposalOrigin::Session { session: s.clone() },
-                        from: d.from.clone(),
-                        from_inputs: d.from_inputs.clone(),
-                        to: n.clone(),
-                        to_inputs: n_inputs.clone(),
-                        tree: Some(new_base.tree.clone()),
-                        head: Some(head.clone()),
-                    },
-                )?);
-            }
-        }
+        let promoted = if n != old.deps { promote_draft(ctx, s, &ws, &new, &old, &n, &n_inputs, new_base, head)? } else { None };
         // 3. Same deps set: move (G0 again under the locks for `Auto`).
         if n == old.deps {
             if policy == MovePolicy::Auto
@@ -389,7 +376,7 @@ pub(crate) fn rebase_one_with(
                 return Ok(d);
             }
             return match ctx.sessions.move_workspace_consuming(s, &repo_id, target.clone(), head.clone(), at.consume) {
-                Ok(r) => Ok(RebaseReport::Moved { dropped: r.dropped, lww: r.lww, regenerable_kept: kept.clone() }),
+                Ok(r) => Ok(RebaseReport::Moved { dropped: r.dropped, lww: r.lww, regenerable_kept: kept.clone(), deps_pending: None }),
                 // §1.7: `OpenFiles` is for `Explicit` callers only.
                 Err(e) if e.code == Code::OpenFiles && policy == MovePolicy::Auto => {
                     Ok(deferred("open_files", e.detail.unwrap_or(Value::Null)))
@@ -401,26 +388,152 @@ pub(crate) fn rebase_one_with(
             };
         }
         // 4. Another deps set: the session waits on its old base.
-        if let Some(p) = promoted {
-            return Ok(RebaseReport::Waiting { proposal: p });
-        }
-        let from_inputs = deps::find_set(ctx.store, ctx.repo, &old.deps)?
-            .map(|set| set.inputs_hash)
-            .ok_or_else(|| deps_unsealed(ctx.repo, &old.deps))?;
-        let p = deps::propose(
-            ctx.deps,
-            ProposeArgs {
-                origin: ProposalOrigin::Main,
-                from: old.deps.clone(),
-                from_inputs,
-                to: n.clone(),
-                to_inputs: n_inputs.clone(),
-                tree: Some(new_base.tree.clone()),
-                head: Some(head.clone()),
-            },
-        )?;
+        let p = match promoted {
+            Some(p) => p,
+            None => propose_main(ctx, &old, &n, &n_inputs, new_base, head)?,
+        };
         Ok(RebaseReport::Waiting { proposal: p })
     })
+}
+
+/// Step 2: the session's own draft, promoted when all its input changes
+/// landed on the new base. Under the session queue and the repo lock.
+#[allow(clippy::too_many_arguments)]
+fn promote_draft(
+    ctx: &Ctx,
+    s: &SessionId,
+    ws: &WorkspaceState,
+    new: &Base,
+    old: &BaseGen,
+    n: &DepsSetId,
+    n_inputs: &str,
+    new_base: &BaseGen,
+    head: &CommitOid,
+) -> Result<Option<Proposal>> {
+    let draft = deps::open_proposals(ctx.store, Some(ctx.repo))?.into_iter().rev().find(|p| {
+        p.state == ProposalState::AwaitingPublish && p.origin == (ProposalOrigin::Session { session: s.clone() })
+    });
+    let Some(d) = draft else { return Ok(None) };
+    if d.from == *n {
+        return Ok(None);
+    }
+    let overlay = current_overlay(ctx, s, ws, &base_struct(ctx.store, old)?)?;
+    if !inputs_landed(ctx, &overlay, new) {
+        return Ok(None);
+    }
+    Ok(Some(deps::propose(
+        ctx.deps,
+        ProposeArgs {
+            origin: ProposalOrigin::Session { session: s.clone() },
+            from: d.from.clone(),
+            from_inputs: d.from_inputs.clone(),
+            to: n.clone(),
+            to_inputs: n_inputs.to_string(),
+            tree: Some(new_base.tree.clone()),
+            head: Some(head.clone()),
+        },
+    )?))
+}
+
+/// Step 4's Main-origin proposal `old.deps → n`. Under the repo lock.
+fn propose_main(
+    ctx: &Ctx,
+    old: &BaseGen,
+    n: &DepsSetId,
+    n_inputs: &str,
+    new_base: &BaseGen,
+    head: &CommitOid,
+) -> Result<Proposal> {
+    let from_inputs = deps::find_set(ctx.store, ctx.repo, &old.deps)?
+        .map(|set| set.inputs_hash)
+        .ok_or_else(|| deps_unsealed(ctx.repo, &old.deps))?;
+    deps::propose(
+        ctx.deps,
+        ProposeArgs {
+            origin: ProposalOrigin::Main,
+            from: old.deps.clone(),
+            from_inputs,
+            to: n.clone(),
+            to_inputs: n_inputs.to_string(),
+            tree: Some(new_base.tree.clone()),
+            head: Some(head.clone()),
+        },
+    )
+}
+
+/// rm-followups §1.3 C2 under `Auto`: record the deps proposal first (under
+/// the locks, whether or not the move then happens), then move the source
+/// onto (new tree, old deps set) through the same gates as C1. Every
+/// deferral carries the proposal; a move reports it as `deps_pending`.
+#[allow(clippy::too_many_arguments)]
+fn move_source(
+    ctx: &Ctx,
+    s: &SessionId,
+    old: &BaseGen,
+    new_base: &BaseGen,
+    head: &CommitOid,
+    n: &DepsSetId,
+    n_inputs: &str,
+    at: Attempt<'_>,
+) -> Result<RebaseReport> {
+    let mut src = BaseGen { repo: ctx.repo.clone(), tree: new_base.tree.clone(), deps: old.deps.clone() };
+    if !ctx.store.base_dir(&src).exists() || !ctx.store.has_base_gen(&src)? {
+        src = base_for(ctx, &src.tree, &src.deps)?;
+    }
+    let repo_id = ctx.git.repo_id();
+    let queue = [s.clone()];
+    let with_p = |r: RebaseReport, p: &Proposal| match r {
+        RebaseReport::Deferred { reason, detail, .. } => RebaseReport::Deferred { reason, detail, proposal: Some(p.clone()) },
+        r => r,
+    };
+    let new = base_struct(ctx.store, &src)?;
+    // 1. The proposal, before any gate.
+    let first = under_locks(ctx, &queue, &mut || {
+        let ws = workspace(ctx, s)?;
+        if ws.base != *old {
+            return Ok(Err(deferred("state", json!({ "base_changed": true }))));
+        }
+        if let Some(check) = at.recheck
+            && let Some(d) = check(old)?
+        {
+            return Ok(Err(d));
+        }
+        let p = match promote_draft(ctx, s, &ws, &new, old, n, n_inputs, new_base, head)? {
+            Some(p) => p,
+            None => propose_main(ctx, old, n, n_inputs, new_base, head)?,
+        };
+        Ok(Ok(p))
+    })?;
+    let p = match first {
+        Ok(p) => p,
+        Err(d) => return Ok(d),
+    };
+    // 2. G0–G3 outside the locks, against the source-only base.
+    let kept = match auto_gates(ctx, s, old, &new)? {
+        Ok(k) => k,
+        Err(d) => return Ok(with_p(d, &p)),
+    };
+    // 3. Under the locks: G0 again, then today's move.
+    let r = under_locks(ctx, &queue, &mut || {
+        let ws = workspace(ctx, s)?;
+        if ws.base != *old {
+            return Ok(deferred("state", json!({ "base_changed": true })));
+        }
+        if let Some(check) = at.recheck
+            && let Some(d) = check(old)?
+        {
+            return Ok(d);
+        }
+        if let Some(d) = g0_state(ctx, s, old)? {
+            return Ok(d);
+        }
+        match ctx.sessions.move_workspace_consuming(s, &repo_id, src.clone(), head.clone(), at.consume) {
+            Ok(r) => Ok(RebaseReport::Moved { dropped: r.dropped, lww: r.lww, regenerable_kept: kept.clone(), deps_pending: Some(p.clone()) }),
+            Err(e) if e.code == Code::OpenFiles => Ok(deferred("open_files", e.detail.unwrap_or(Value::Null))),
+            Err(e) => Err(e),
+        }
+    })?;
+    Ok(with_p(r, &p))
 }
 
 /// The base of `s`'s workspace of `ctx.repo`.

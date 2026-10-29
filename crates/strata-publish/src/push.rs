@@ -383,6 +383,13 @@ fn report_json(s: &SessionId, r: &RebaseReport) -> Value {
     if let RebaseReport::Waiting { proposal } = r {
         v["proposal"] = json!(proposal.id);
     }
+    // rm-followups §1.7 (C2): the source moved, the deps set did not.
+    if let RebaseReport::Moved { deps_pending: Some(p), .. } = r {
+        v["note"] = json!(format!(
+            "moved source onto the published tree; deps proposal #{} pending, node_modules is the old set (drift)",
+            p.id
+        ));
+    }
     v
 }
 

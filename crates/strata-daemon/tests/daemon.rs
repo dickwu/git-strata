@@ -829,7 +829,9 @@ fn publish_plan_names_the_remaining_repos_and_writes_nothing() {
 fn publish_plan_keeps_a_waiting_sessions_landed_guarded_repo() {
     use strata_confirm::seams::Verdict;
     let mut fx = Dfx::new();
-    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.confirm = true;
+    let tool = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+    tool.publish.confirm = true;
+    tool.rebase.deps_changed = strata_types::DepsChanged::Wait;
     fx.write_config();
     let (c, _log, _) = fx.confirmer(vec![Verdict::pass()]);
     let core = fx.prepare_with(c).unwrap();
@@ -1619,6 +1621,8 @@ fn finished_connections_release_their_descriptors() {
 fn catch_up_pass_moves_a_deferred_session_and_never_waits() {
     let mut fx = Dfx::new();
     fx.catch_up_every = Duration::from_secs(3600);
+    // Long enough that a pass that waited is told apart from a slow pass.
+    fx.lock_wait = Duration::from_secs(20);
     let sock = fx.socket();
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
@@ -1667,7 +1671,9 @@ fn catch_up_pass_moves_a_deferred_session_and_never_waits() {
             held_rx.recv().unwrap();
             let t0 = Instant::now();
             let out = handlers::catch_up_pass(&d, std::time::SystemTime::now());
-            assert!(t0.elapsed() < core.locks.wait(), "the pass waited: {:?}", t0.elapsed());
+            let took = t0.elapsed();
+            tx.send(()).unwrap();
+            assert!(took < core.locks.wait(), "the pass waited: {took:?}");
             let rows = out.into_iter().find(|(r, _)| *r == tool).unwrap().1.unwrap();
             match &rows[..] {
                 [(s, Ok(strata_publish::pending::CatchUp::Attempted(strata_publish::RebaseReport::Deferred { reason, .. })))] => {
@@ -1675,7 +1681,6 @@ fn catch_up_pass_moves_a_deferred_session_and_never_waits() {
                 }
                 o => panic!("{o:?}"),
             }
-            tx.send(()).unwrap();
         });
         assert_eq!(core.store.rebase_pending_of(&id, &tool).unwrap().unwrap().reason, "busy");
 
