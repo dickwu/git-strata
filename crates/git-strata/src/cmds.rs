@@ -1075,6 +1075,13 @@ pub fn gc(ctx: &Ctx, store: bool, dry_run: bool) -> Result<Envelope> {
         return Ok(Envelope::ok(json!({ "dry_run": true, "preview": v["preview"] })));
     }
     let v = ctx.call("gc", json!({ "repo": null, "store": store }), Kind::Write)?;
+    // rm-followups R1: an older daemon has neither key; nothing is printed.
+    for o in v["orphans"].as_array().into_iter().flatten() {
+        eprintln!("gc orphan retired: {} -> {}", o["path"].as_str().unwrap_or("?"), o["trash"].as_str().unwrap_or("?"));
+    }
+    for w in v["orphan_warnings"].as_array().into_iter().flatten() {
+        eprintln!("gc orphan skipped: {}", w["message"].as_str().map(str::to_string).unwrap_or_else(|| w.to_string()));
+    }
     for s in v["skipped"].as_array().into_iter().flatten() {
         eprintln!("gc skipped: {s}");
     }

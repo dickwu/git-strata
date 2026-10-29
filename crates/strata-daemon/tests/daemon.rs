@@ -1445,6 +1445,37 @@ fn store_gc_is_opt_in_and_previews_first() {
     core.close().unwrap();
 }
 
+/// rm-followups R1: startup's recover sweeps orphan session dirs; `gc
+/// --store --dry-run` lists one without moving it; `gc` retires it to the
+/// trash and reports it.
+#[test]
+fn gc_and_startup_sweep_orphan_session_dirs() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let sessions = fx.config.paths.root.join("sessions");
+    let early = sessions.join("s-k3q7xm2a");
+    fs::create_dir_all(early.join("a")).unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    assert!(!early.exists(), "startup's recover swept it");
+    let late = sessions.join("s-m4n5p6q7");
+    fs::create_dir_all(late.join("a")).unwrap();
+    serving(&d, || {
+        let p = ok(call(&sock, "gc", json!({ "repo": null, "store": true, "dry_run": true })));
+        assert_eq!(p["preview"]["orphans"], json!([{ "session": "s-m4n5p6q7", "path": late }]), "{p:#}");
+        assert!(late.join("a").is_dir(), "a dry run moves nothing");
+
+        let g = ok(call(&sock, "gc", json!({ "repo": "tool" })));
+        assert_eq!(g["orphans"][0]["path"], json!(late), "{g:#}");
+        assert!(g["orphan_warnings"].as_array().is_none_or(|a| a.is_empty()), "{g:#}");
+        assert!(!late.exists());
+        let g = ok(call(&sock, "gc", json!({ "repo": null })));
+        assert!(g["orphans"].as_array().is_none_or(|a| a.is_empty()), "{g:#}");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
 /// session.md D51/D52: `new` with `only` lays out the named repo alone; a
 /// call on a repo the session lacks names `git-strata add`; `add` gives the
 /// session that repo, and the same call then works.

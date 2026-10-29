@@ -421,6 +421,9 @@ impl<'a> Daemon<'a> {
         let sessions = Sessions::open(&core.config, &core.gits, &core.store, &core.locks, &core.env, &core.before)?;
         // 9. recover, then gc per repo under its write lock.
         let recovered = sessions.recover()?;
+        for p in &recovered.orphans_retired {
+            tracing::warn!(path = %p.display(), "recover retired an orphan session directory");
+        }
         // status-perf A1: status reads old-tree verdicts the `old-tree`
         // thread makes (started by `serve`, so after this recover).
         sessions.set_old_tree_mode(strata_session::OldTreeMode::Deferred);

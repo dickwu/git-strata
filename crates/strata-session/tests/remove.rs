@@ -849,3 +849,317 @@ fn teardown_retires_before_unpin_and_discard_finishes() {
     assert_eq!(fx.pins("tool"), "");
     assert_removed(&fx, &id);
 }
+
+// ---------------------------------------------------------------- R1 orphan sweep
+
+/// A no-row orphan `sessions/<sid>` with a file in it.
+fn orphan(fx: &Fx, name: &str) -> PathBuf {
+    let d = fx.root().join("sessions").join(name);
+    fs::create_dir_all(d.join("a")).unwrap();
+    fs::write(d.join("a/f"), b"x").unwrap();
+    d
+}
+
+fn removed_with_recreated_root(fx: &Fx, s: &Sessions<'_>) -> SessionId {
+    let id = id(&new_all(fx, s));
+    s.remove(&id, false, None).unwrap();
+    fs::create_dir_all(session_root(fx, &id).join("a/b")).unwrap();
+    id
+}
+
+#[test]
+fn sweep_retires_dir_of_removed_row() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = removed_with_recreated_root(&fx, &s);
+    let before = trash(&fx).len();
+    let sw = s.sweep_orphans(None);
+    assert!(sw.warnings.is_empty(), "{:?}", sw.warnings);
+    assert_eq!(sw.retired.len(), 1, "{sw:?}");
+    assert_eq!(sw.retired[0].session, id);
+    assert_eq!(sw.retired[0].path, session_root(&fx, &id));
+    assert!(sw.retired[0].trash.join("a/b").is_dir(), "moved to trash, not deleted");
+    assert!(!session_root(&fx, &id).exists());
+    assert_eq!(trash(&fx).len(), before + 1);
+}
+
+#[test]
+fn sweep_retires_dir_without_row() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let d = orphan(&fx, "s-k3q7xm2a");
+    let r = fx.root().join("sessions/.repos/s-k3q7xm2a");
+    fs::create_dir_all(&r).unwrap();
+    let sw = s.sweep_orphans(None);
+    assert!(sw.warnings.is_empty(), "{:?}", sw.warnings);
+    let mut got: Vec<PathBuf> = sw.retired.iter().map(|o| o.path.clone()).collect();
+    got.sort();
+    let mut want = vec![d.clone(), r.clone()];
+    want.sort();
+    assert_eq!(got, want);
+    assert!(!d.exists() && !r.exists());
+}
+
+#[test]
+fn sweep_skips_open_files() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let d = orphan(&fx, "s-k3q7xm2a");
+    let w = Worker::spawn(format!("fd:{}", d.join("a/f").display()), None);
+    let sw = s.sweep_orphans(None);
+    assert!(sw.retired.is_empty(), "{sw:?}");
+    assert_eq!(sw.warnings.len(), 1, "{sw:?}");
+    assert_eq!(sw.warnings[0].code, Code::OpenFiles);
+    assert_eq!(reason(&sw.warnings[0]), Some("orphan_open_files"));
+    assert!(d.join("a/f").exists());
+    drop(w);
+    let sw = s.sweep_orphans(None);
+    assert_eq!(sw.retired.len(), 1, "{sw:?}");
+    assert!(!d.exists());
+}
+
+#[test]
+fn sweep_ignores_non_session_names_tmp_symlinks() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let sessions = fx.root().join("sessions");
+    fs::create_dir_all(sessions.join(".repos")).unwrap();
+    let keep = [sessions.join("notes"), sessions.join(".strata-tmp-1234"), sessions.join(".repos/not-an-id")];
+    for k in &keep {
+        fs::create_dir_all(k).unwrap();
+    }
+    let target = fx.root().join("elsewhere");
+    fs::create_dir_all(target.join("x")).unwrap();
+    symlink(&target, sessions.join("s-k3q7xm2a")).unwrap();
+    fs::write(sessions.join("s-m4n5p6q7"), b"a file").unwrap();
+    let sw = s.sweep_orphans(None);
+    assert!(sw.retired.is_empty() && sw.warnings.is_empty(), "{sw:?}");
+    for k in &keep {
+        assert!(k.is_dir(), "{}", k.display());
+    }
+    assert!(fs::symlink_metadata(sessions.join("s-k3q7xm2a")).unwrap().file_type().is_symlink());
+    assert!(target.join("x").is_dir());
+    assert!(sessions.join("s-m4n5p6q7").is_file());
+}
+
+#[test]
+fn sweep_never_touches_creating_active_removing_unknown() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    // Active
+    let active = id(&new_all(&fx, &s));
+    // Creating: a crash in new.
+    s.arm(SessionSeam::StopAt { phase: "new.seed_files".into() });
+    s.set_next_id(sid("s-c2c2c2c2"));
+    s.new(None, &fx.all()).unwrap_err();
+    let creating = sid("s-c2c2c2c2");
+    // Removing: a crash in teardown.
+    let removing = id(&new_all(&fx, &s));
+    s.arm(SessionSeam::StopAt { phase: "remove.unpin".into() });
+    s.remove(&removing, false, None).unwrap_err();
+    fs::create_dir_all(session_root(&fx, &removing).join("again")).unwrap();
+    // Unknown: a failure in teardown, root recreated.
+    let unknown = id(&new_all(&fx, &s));
+    s.arm(SessionSeam::FailAt { phase: "remove.unpin".into(), errno: libc::EIO });
+    s.remove(&unknown, false, None).unwrap_err();
+    fs::create_dir_all(session_root(&fx, &unknown).join("again")).unwrap();
+    for (i, lc) in [(&active, Lifecycle::Active), (&creating, Lifecycle::Creating), (&removing, Lifecycle::Removing), (&unknown, Lifecycle::Unknown)] {
+        assert_eq!(lifecycle(&fx, i), lc);
+    }
+    let sw = s.sweep_orphans(None);
+    assert!(sw.retired.is_empty() && sw.warnings.is_empty(), "{sw:?}");
+    for i in [&active, &creating, &removing, &unknown] {
+        let sw = s.sweep_orphans(Some(i));
+        assert!(sw.retired.is_empty() && sw.warnings.is_empty(), "{i}: {sw:?}");
+        assert!(session_root(&fx, i).is_dir(), "{i}");
+    }
+    assert!(repos_dir(&fx, &active).is_dir() && repos_dir(&fx, &creating).is_dir());
+}
+
+/// A sweep of the id `new` is enrolling waits for `enroll`, then sees the
+/// row and skips.
+#[test]
+fn sweep_races_new() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = sid("s-k3q7xm2a");
+    s.set_next_id(id.clone());
+    s.arm(SessionSeam::PauseAt { phase: "new.enrolled".into() });
+    let (rep, sw, waited) = std::thread::scope(|sc| {
+        let n = sc.spawn(|| s.new(None, &fx.all()));
+        s.wait_paused();
+        assert!(session_root(&fx, &id).is_dir() && repos_dir(&fx, &id).is_dir());
+        assert!(s.sweep_orphans(None).retired.is_empty(), "a Creating row is no orphan");
+        let w = sc.spawn(|| s.sweep_orphans(Some(&id)));
+        std::thread::sleep(Duration::from_millis(300));
+        let waited = !w.is_finished();
+        s.release();
+        (n.join().unwrap(), w.join().unwrap(), waited)
+    });
+    assert!(waited, "the sweep waited for enroll");
+    assert!(sw.retired.is_empty() && sw.warnings.is_empty(), "{sw:?}");
+    rep.unwrap();
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+    assert!(session_root(&fx, &id).is_dir() && repos_dir(&fx, &id).is_dir());
+}
+
+#[test]
+fn sweep_inode_changed_skips() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let d = orphan(&fx, "s-k3q7xm2a");
+    s.arm(SessionSeam::PauseAt { phase: "orphan.enroll".into() });
+    let sw = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.sweep_orphans(None));
+        s.wait_paused();
+        fs::rename(&d, fx.root().join("moved-away")).unwrap();
+        fs::create_dir_all(d.join("new")).unwrap();
+        s.release();
+        h.join().unwrap()
+    });
+    assert!(sw.retired.is_empty() && sw.warnings.is_empty(), "{sw:?}");
+    assert!(d.join("new").is_dir(), "the replacement stays");
+    assert_eq!(s.sweep_orphans(None).retired.len(), 1, "the next sweep takes it");
+}
+
+/// A leftover `.repos/<id>` that appears before enrollment makes `new`
+/// fail with Exists under `enroll`, before any row.
+#[test]
+fn new_fails_on_leftover_repos_dir() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = sid("s-k3q7xm2a");
+    s.set_next_id(id.clone());
+    s.arm(SessionSeam::PauseAt { phase: "new.enroll".into() });
+    let e = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.new(None, &fx.all()));
+        s.wait_paused();
+        fs::create_dir_all(repos_dir(&fx, &id).join("keep")).unwrap();
+        s.release();
+        h.join().unwrap()
+    })
+    .unwrap_err();
+    assert_eq!(e.code, Code::Exists, "{e:?}");
+    assert_eq!(reason(&e), Some("directory"));
+    assert_eq!(fx.session_rows(), 0);
+    assert!(repos_dir(&fx, &id).join("keep").is_dir());
+    assert!(!session_root(&fx, &id).exists());
+}
+
+/// new's rollback retires only what it created; a `.repos/<id>` swapped in
+/// is named in `not_owned` and left for the sweep.
+#[test]
+fn new_rollback_leaves_dirs_it_did_not_create() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = sid("s-k3q7xm2a");
+    s.set_next_id(id.clone());
+    s.arm(SessionSeam::PauseAt { phase: "new.pin".into() });
+    let e = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.new(None, &fx.all()));
+        s.wait_paused();
+        fs::rename(repos_dir(&fx, &id), fx.root().join("moved-away")).unwrap();
+        fs::create_dir_all(repos_dir(&fx, &id).join("theirs")).unwrap();
+        s.arm(SessionSeam::FailAt { phase: "new.seed_files".into(), errno: libc::EIO });
+        s.release();
+        h.join().unwrap()
+    })
+    .unwrap_err();
+    let d = e.detail.as_ref().unwrap();
+    assert_eq!(d["rolled_back"], Value::Bool(true), "{e:?}");
+    assert_eq!(d["not_owned"], serde_json::json!([repos_dir(&fx, &id)]), "{e:?}");
+    assert!(e.message.contains("left in place"), "{e:?}");
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Removed);
+    assert!(!session_root(&fx, &id).exists(), "its own root is retired");
+    assert!(repos_dir(&fx, &id).join("theirs").is_dir(), "not ours: left");
+    let sw = s.sweep_orphans(None);
+    assert_eq!(sw.retired.iter().map(|o| o.path.clone()).collect::<Vec<_>>(), vec![repos_dir(&fx, &id)]);
+}
+
+#[test]
+fn rm_end_sweep_retires_recreated_root() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = id(&new_all(&fx, &s));
+    s.arm(SessionSeam::PauseAt { phase: "remove.unpin".into() });
+    let rep = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.remove(&id, false, None));
+        s.wait_paused();
+        assert!(!session_root(&fx, &id).exists(), "retired");
+        fs::create_dir_all(session_root(&fx, &id).join("a/b")).unwrap();
+        s.release();
+        h.join().unwrap()
+    })
+    .unwrap();
+    assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+    assert_eq!(rep.orphans.len(), 1, "{rep:?}");
+    assert_eq!(rep.orphans[0].path, session_root(&fx, &id));
+    assert!(rep.orphans[0].trash.join("a/b").is_dir());
+    assert_removed(&fx, &id);
+}
+
+#[test]
+fn rm_end_sweep_failure_is_warning() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = id(&new_all(&fx, &s));
+    s.arm(SessionSeam::PauseAt { phase: "remove.unpin".into() });
+    let rep = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.remove(&id, false, None));
+        s.wait_paused();
+        fs::create_dir_all(session_root(&fx, &id).join("a/b")).unwrap();
+        s.arm(SessionSeam::FailAt { phase: "orphan.retire".into(), errno: libc::EIO });
+        s.release();
+        h.join().unwrap()
+    })
+    .unwrap();
+    assert!(rep.orphans.is_empty(), "{rep:?}");
+    assert_eq!(rep.warnings.len(), 1, "{rep:?}");
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Removed, "the committed Removed stands");
+    assert!(session_root(&fx, &id).join("a/b").is_dir());
+    let v = serde_json::to_value(&rep).unwrap();
+    assert!(v["warnings"].is_array() && v.get("orphans").is_none(), "{v}");
+    assert_eq!(s.sweep_orphans(None).retired.len(), 1);
+}
+
+/// `gc --dry-run`'s list (`Sessions::orphans`) writes nothing.
+#[test]
+fn gc_dry_run_reports_orphans_without_writes() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = removed_with_recreated_root(&fx, &s);
+    let d = orphan(&fx, "s-k3q7xm2a");
+    let before = trash(&fx);
+    let mut got = s.orphans().unwrap();
+    got.sort();
+    let mut want = vec![(id.clone(), session_root(&fx, &id)), (sid("s-k3q7xm2a"), d.clone())];
+    want.sort();
+    assert_eq!(got, want);
+    assert_eq!(trash(&fx), before);
+    assert!(d.join("a/f").exists() && session_root(&fx, &id).join("a/b").is_dir());
+}
+
+/// recover step 4 runs after step 1: a Creating row became Unknown and is
+/// kept; a no-row orphan is retired.
+#[test]
+fn recover_sweeps_after_unknown_rewrite() {
+    let mut fx = Fx::with(&["tool"]);
+    let creating = sid("s-c2c2c2c2");
+    {
+        let s = fx.sessions();
+        s.arm(SessionSeam::StopAt { phase: "new.seed_files".into() });
+        s.set_next_id(creating.clone());
+        s.new(None, &fx.all()).unwrap_err();
+    }
+    let d = orphan(&fx, "s-k3q7xm2a");
+    fx.close_store();
+    fx.reopen_store();
+    let s = fx.sessions();
+    let rep = s.recover().unwrap();
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.unknown, vec![creating.clone()]);
+    assert_eq!(rep.orphans_retired, vec![d.clone()]);
+    assert!(!d.exists());
+    assert_eq!(lifecycle(&fx, &creating), Lifecycle::Unknown);
+    assert!(session_root(&fx, &creating).is_dir() && repos_dir(&fx, &creating).is_dir());
+}

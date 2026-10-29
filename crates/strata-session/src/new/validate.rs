@@ -48,7 +48,15 @@ impl Sessions<'_> {
         self.validate_members(&members, &tracked)?;
         // 7. session id; no retry with another one
         let id = self.seams.take_next_id().unwrap_or_else(crate::sys::random_session_id);
-        if self.store.session(&id)?.is_some() {
+        self.id_free(&id)?;
+        Ok(Validated { tracked: tracked.into_iter().collect(), members: members.into_iter().collect(), id })
+    }
+
+    /// Step 7's check: no row, and neither `sessions/<id>` nor
+    /// `sessions/.repos/<id>` exists. `new` runs it again under `enroll`
+    /// (rm-followups R1).
+    pub(crate) fn id_free(&self, id: &SessionId) -> Result<()> {
+        if self.store.session(id)?.is_some() {
             return Err(StrataError::new(Code::Exists, format!("session {id} already has a store row"))
                 .with_detail(json!({ "session": id.as_str(), "reason": "store_row" })));
         }
@@ -59,7 +67,7 @@ impl Sessions<'_> {
                     .with_detail(json!({ "session": id.as_str(), "path": p.to_string_lossy(), "reason": "directory" })));
             }
         }
-        Ok(Validated { tracked: tracked.into_iter().collect(), members: members.into_iter().collect(), id })
+        Ok(())
     }
 
     /// Steps 3-6 for the repos that get a workspace (`members`); seed

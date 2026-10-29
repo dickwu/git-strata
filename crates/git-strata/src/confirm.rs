@@ -117,7 +117,20 @@ pub fn rm(ctx: &Ctx, session: &str, discard: bool) -> Result<Envelope> {
     crate::interrupt::install();
     let params = json!({ "session": id.as_str(), "discard": discard });
     match ctx.call_interruptible("rm", params, Kind::Write) {
-        Ok(r) => Ok(Envelope::ok(r?)),
+        Ok(r) => {
+            let r = r?;
+            // rm-followups R1 (iii): an older daemon has neither key.
+            for o in r["orphans"].as_array().into_iter().flatten() {
+                eprintln!(
+                    "rm: {} was recreated after the retire; moved to trash too",
+                    o["path"].as_str().unwrap_or("?")
+                );
+            }
+            for w in r["warnings"].as_array().into_iter().flatten() {
+                eprintln!("rm warning: {}", w["message"].as_str().map(str::to_string).unwrap_or_else(|| w.to_string()));
+            }
+            Ok(Envelope::ok(r))
+        }
         Err(stopped) => {
             let signal = crate::interrupt::exit_with_signal();
             let (code, reason, msg) = match stopped {

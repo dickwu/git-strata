@@ -780,6 +780,12 @@ impl<'d, 'a> Server<'d, 'a> {
                             record_rm_attempt(core, &p.session, e);
                         }
                         let r = r?;
+                        for o in &r.orphans {
+                            tracing::warn!(path = %o.path.display(), "rm retired a recreated session directory");
+                        }
+                        for w in &r.warnings {
+                            tracing::warn!(session = %p.session, error = %w.message, "rm orphan sweep");
+                        }
                         self.d.du.on_remove(p.session.as_str());
                         Ok(json_of(&r))
                     })
@@ -797,16 +803,44 @@ impl<'d, 'a> Server<'d, 'a> {
                 if p.dry_run {
                     // D33: read-only; nothing is locked, deleted or recorded.
                     let pv = core.store.gc_preview(STORE_GC_KEEP, &trash_refs(core))?;
-                    return Ok(json!({ "dry_run": true, "preview": json_of(&pv) }));
+                    let mut pv = json_of(&pv);
+                    // rm-followups R1: the orphans a gc would retire; no
+                    // writes and no `enroll`.
+                    let orphans: Vec<Value> = self
+                        .d
+                        .sessions
+                        .orphans()?
+                        .into_iter()
+                        .map(|(session, path)| json!({ "session": session.as_str(), "path": path }))
+                        .collect();
+                    if let Value::Object(m) = &mut pv {
+                        m.insert("orphans".into(), json!(orphans));
+                    }
+                    return Ok(json!({ "dry_run": true, "preview": pv }));
                 }
                 let repos: Vec<RepoName> = match &p.repo {
                     Some(r) => vec![r.clone()],
                     None => core.config.repos.keys().cloned().collect(),
                 };
+                for repo in &repos {
+                    repo_cfg(core, repo)?;
+                }
+                // rm-followups R1 (ii): before gc_repo, outside every repo
+                // lock; per-item failures are warnings.
+                writing();
+                let sweep = self.d.sessions.sweep_orphans(None);
+                for o in &sweep.retired {
+                    tracing::warn!(path = %o.path.display(), trash = %o.trash.display(), "gc retired an orphan session directory");
+                }
+                for w in &sweep.warnings {
+                    tracing::warn!(error = %w.message, "gc orphan skipped");
+                }
+                let orphans: Vec<Value> =
+                    sweep.retired.iter().map(|o| json!({ "path": o.path, "trash": o.trash })).collect();
+                let orphan_warnings = json_of(&sweep.warnings);
                 let mut done = Vec::new();
                 let mut skipped = Vec::new();
                 for repo in repos {
-                    repo_cfg(core, &repo)?;
                     match core.locks.with_repo(&repo, || {
                         writing();
                         core.store.gc_repo(&repo, GC_KEEP)
@@ -823,7 +857,14 @@ impl<'d, 'a> Server<'d, 'a> {
                 if p.store {
                     writing();
                     let rep = core.store.gc_with(STORE_GC_KEEP, &trash_refs(core))?;
-                    return Ok(json!({ "done": done, "skipped": skipped, "trash": null, "store": json_of(&rep) }));
+                    return Ok(json!({
+                        "done": done,
+                        "skipped": skipped,
+                        "trash": null,
+                        "store": json_of(&rep),
+                        "orphans": orphans,
+                        "orphan_warnings": orphan_warnings,
+                    }));
                 }
                 let trash = if p.repo.is_none() {
                     writing();
@@ -831,7 +872,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 } else {
                     None
                 };
-                Ok(json!({ "done": done, "skipped": skipped, "trash": trash }))
+                Ok(json!({ "done": done, "skipped": skipped, "trash": trash, "orphans": orphans, "orphan_warnings": orphan_warnings }))
             }
             Params::ConfigRelax(p) => {
                 writing();

@@ -37,6 +37,13 @@ pub struct RemoveReport {
     /// checkpoint).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub regenerable: BTreeMap<RepoName, Vec<RepoPath>>,
+    /// rm-followups R1 (iii): the session's directories something
+    /// recreated after the retire, now in trash too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orphans: Vec<crate::OrphanRetired>,
+    /// Failures of that sweep; the remove itself is done.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<StrataError>,
 }
 
 /// What step 4 let go without blocking: the entries that landed (D57) and
@@ -258,13 +265,22 @@ impl Sessions<'_> {
         self.refuse_open_files(&rec)?;
 
         // ---- Phase C: the visible steps.
-        self.teardown(&rec, cur)?;
+        self.teardown(&rec, cur, None)?;
+        // R1 (iii): the committed Removed stands; a sweep failure is a warning.
+        let sweep = self.sweep_orphans(Some(id));
         let regenerable = judged
             .regenerable
             .into_iter()
             .map(|(r, v)| (r, v.into_iter().map(|e| e.path).collect()))
             .collect();
-        Ok(RemoveReport { session: id.clone(), discarded: discard, checkpoints, regenerable })
+        Ok(RemoveReport {
+            session: id.clone(),
+            discarded: discard,
+            checkpoints,
+            regenerable,
+            orphans: sweep.retired,
+            warnings: sweep.warnings,
+        })
     }
 
     /// Step 3 and the R4 recheck: refuse while any process holds a file in
@@ -301,8 +317,15 @@ impl Sessions<'_> {
     /// session root and its shadow repositories, unpin, Removed (R4: retire
     /// before unpin, so no repo-lock wait sits between the last open-files
     /// scan and the retire). A failure after Removing is an Unknown scene.
-    /// Also `new`'s rollback.
-    pub(crate) fn teardown(&self, rec: &SessionRecord, cur: Lifecycle) -> Result<()> {
+    /// Also `new`'s rollback, which passes `owned`: then only a directory
+    /// whose current (dev, ino) is the one `new` created is retired; the
+    /// others are returned (R1 `not_owned`).
+    pub(crate) fn teardown(
+        &self,
+        rec: &SessionRecord,
+        cur: Lifecycle,
+        owned: Option<&[(PathBuf, crate::orphans::Ident)]>,
+    ) -> Result<Vec<PathBuf>> {
         let id = &rec.manifest.id;
         let root = rec.manifest.root.clone();
         let repos_dir = self.config.paths.root.join("sessions/.repos").join(id.as_str());
@@ -315,6 +338,7 @@ impl Sessions<'_> {
             .with_detail(json!({ "reason": "lifecycle_changed", "session": id.as_str(), "was": lc_name(cur) })));
         }
         let mut phase = "retire";
+        let mut not_owned = Vec::new();
         let r = (|| -> Result<()> {
             // 7.
             self.store.set_session_phase(id, "retire")?;
@@ -322,6 +346,13 @@ impl Sessions<'_> {
             for d in [&root, &repos_dir] {
                 if !exists(d) {
                     continue;
+                }
+                if let Some(own) = owned {
+                    let now = crate::orphans::dir_identity(d)?;
+                    if !own.iter().any(|(p, i)| p == d && Some(*i) == now) {
+                        not_owned.push(d.clone());
+                        continue;
+                    }
                 }
                 match self.store.retire_dir(d) {
                     Ok(_) => {}
@@ -354,7 +385,7 @@ impl Sessions<'_> {
             Ok(())
         })();
         match r {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(not_owned),
             Err(e) if is_stop(&e) => Err(e),
             Err(e) => Err(self.remove_unknown(rec, phase, &e)),
         }

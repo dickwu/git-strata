@@ -357,8 +357,12 @@ impl<'a> Sessions<'a> {
             return Ok(Outcome::Skipped("stopped"));
         }
         // rm-followups §1.4 G4 item 4: a kept `Auto` tree that may yet be
-        // retired is checked again Q later.
-        if matches!(out, Outcome::Kept { .. }) {
+        // retired is checked again Q later; so is one not judged because a
+        // store write or the open-files scan failed (impl-p2 r3 note).
+        if matches!(
+            out,
+            Outcome::Kept { .. } | Outcome::Skipped("passes_write_failed" | "open_files_failed")
+        ) {
             self.queue_auto_trees(&key.session);
         }
         match &out {

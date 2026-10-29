@@ -40,6 +40,10 @@ pub struct RecoverReport {
     pub retired: Vec<PathBuf>,
     /// Per-item failures; recover goes on past them.
     pub errors: Vec<StrataError>,
+    /// rm-followups R1 (i): orphan session directories retired into the
+    /// trash (their paths before retirement).
+    #[serde(default)]
+    pub orphans_retired: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +261,12 @@ impl Sessions<'_> {
                 }
             }
         }
+
+        // Step 4 (rm-followups R1 (i)): orphan session directories, after
+        // step 1, so Creating and Removing rows are Unknown and kept.
+        let sweep = self.sweep_orphans(None);
+        rep.orphans_retired.extend(sweep.retired.into_iter().map(|o| o.path));
+        rep.errors.extend(sweep.warnings);
         Ok(rep)
     }
 }

@@ -24,6 +24,7 @@ mod failed_move;
 mod move_workspace;
 mod new;
 mod old_tree;
+mod orphans;
 mod recover;
 mod remove;
 mod resolve;
@@ -41,6 +42,7 @@ pub use activity::{Activity, Idle, baseline_of, busy_reason, changed_since, idle
 pub use failed_move::{MoveResolution, ResolutionReport};
 pub use move_workspace::{AUTO_DEFERRED, MoveReport, auto_deferral};
 pub use old_tree::{OLD_TREE_TTL, OldTreeKey, OldTreeMode, OldTreeVerdict, Outcome as OldTreeOutcome};
+pub use orphans::{OrphanRetired, Sweep};
 pub use remove::{Regenerable, RemoveReport};
 pub use rm_note::{
     KeptTree, LastRm, RebaseNote, RmInterrupted, RmNotes, leftover_line, local_hhmm, removed_leftover_of, removed_leftovers, rm_notes,
@@ -107,6 +109,10 @@ pub struct Sessions<'a> {
     /// rm-followups §1.8: `rm.regenerable` lists pinned after this was
     /// opened (`config relax`); a repo not here uses its config's list.
     pub(crate) regenerable: Mutex<BTreeMap<RepoName, Vec<String>>>,
+    /// rm-followups R1: `new`'s row-and-root enrollment and the orphan
+    /// sweep's recheck-and-retire exclude each other. A leaf lock: nothing
+    /// else is taken while it is held.
+    pub(crate) enroll: Mutex<()>,
 }
 
 impl<'a> Sessions<'a> {
@@ -147,6 +153,7 @@ impl<'a> Sessions<'a> {
             status_slots: status::Slots::new(config.status.parallel as usize),
             old_trees: old_tree::OldTrees::default(),
             regenerable: Mutex::new(BTreeMap::new()),
+            enroll: Mutex::new(()),
         })
     }
 
