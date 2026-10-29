@@ -21,6 +21,9 @@ pub enum Leftover {
     /// A base staging directory a stopped process (or a failed retirement)
     /// left, with gitio's export temp directories in it.
     BaseStaging { repo: RepoName, path: PathBuf, export_temps: Vec<PathBuf> },
+    /// rm-followups R3: `sessions/<sid>` or `sessions/.repos/<sid>` of a
+    /// session that is Removed or has no row (R1 moves it to trash).
+    RemovedSession { session: SessionId, path: PathBuf },
 }
 
 /// What `recover` did (§5.8).
@@ -99,6 +102,8 @@ impl Sessions<'_> {
                 out.push(Leftover::BaseStaging { repo: repo.clone(), path, export_temps });
             }
         }
+        // rm-followups R3: directories of removed sessions.
+        out.extend(crate::rm_note::removed_leftovers(self.store, root)?);
         Ok(out)
     }
 

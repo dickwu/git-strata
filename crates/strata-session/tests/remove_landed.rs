@@ -168,9 +168,14 @@ fn remove_edit_after_publish_is_dirty_only_for_that_path() {
     assert_eq!(detail(&e)["repos"]["tool"]["count"], 1);
     assert_eq!(detail(&e)["landed"]["tool"], json!({ "count": 1, "publishes": [n], "commits": [c], "proposals": [21] }));
     assert!(detail(&e).get("landed_errors").is_none());
-    let want = format!("1 more are already published in publish {n}, which left the session waiting on deps proposal #21");
+    let want = format!(
+        "tool: 1 path not published: src/new.ts; 1 already published (publish {n}, which left the session waiting on \
+         deps proposal #21)"
+    );
     assert!(e.message.contains(&want), "{}", e.message);
-    assert!(e.message.contains("changes that are not published (1 path;"), "{}", e.message);
+    assert!(e.message.starts_with("rm refused: nothing was removed; session "), "{}", e.message);
+    assert_eq!(detail(&e)["removed"], false);
+    assert_eq!(detail(&e)["lifecycle"], "Active");
     assert_eq!(lifecycle(&fx, &id(&rep)), Lifecycle::Active);
 }
 
@@ -703,4 +708,27 @@ fn remove_landed_case_only_rename_stays_dirty() {
     let e = dirty(&s, &rep);
     assert_eq!(paths(&e), ["patches/A.patch"]);
     assert_eq!(detail(&e)["landed"], json!({}));
+}
+
+#[test]
+fn rm_changed_during_remove_says_nothing_removed() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = s.new(None, &fx.all()).unwrap();
+    let hook = Meddling(move |w: &Path| fs::write(w.join("src/late.ts"), b"late\n").unwrap());
+    let s2 = Sessions::open(&fx.config, &fx.gits, fx.store(), &fx.lock, &fx.env, &hook).unwrap();
+    let e = s2.remove(&id(&rep), false, None).unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert_eq!(detail(&e)["reason"], "changed_during_remove");
+    assert_eq!(
+        e.message,
+        format!(
+            "rm refused: nothing was removed; session {} is still Active and listed (`git-strata ls`). It changed \
+             while it was being removed (tool); run the same command again.",
+            id(&rep)
+        )
+    );
+    assert_eq!(detail(&e)["removed"], false);
+    assert_eq!(detail(&e)["lifecycle"], "Active");
+    assert_eq!(lifecycle(&fx, &id(&rep)), Lifecycle::Active);
 }

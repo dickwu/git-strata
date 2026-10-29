@@ -80,6 +80,28 @@ fn effective_cfg(core: &Core, repo: &RepoName) -> Result<RepoConfig> {
     Ok(rc)
 }
 
+/// rm-followups R2: how an rm that did not remove its session ended, for
+/// `status` (still under the session's queue place). A refusal before
+/// anything changed is `Refused`; `Unknown` is `Failed`; other errors
+/// (no such session, a bad token, …) say nothing about the session and
+/// are not recorded. A failed write is logged, never the reply.
+fn record_rm_attempt(core: &Core, s: &SessionId, e: &StrataError) {
+    let outcome = match e.code {
+        Code::Dirty | Code::OpenFiles => strata_store::RmOutcome::Refused,
+        Code::Unknown => strata_store::RmOutcome::Failed,
+        _ => return,
+    };
+    let a = strata_store::RmAttempt {
+        session: s.clone(),
+        at: SystemTime::now(),
+        outcome,
+        detail: json!({ "code": json_of(&e.code), "message": e.message, "detail": e.detail }),
+    };
+    if let Err(w) = core.store.record_rm_attempt(&a) {
+        tracing::warn!(session = %s, error = %w.message, "recording the rm outcome failed");
+    }
+}
+
 /// The session's recorded workspace of `repo`.
 fn workspace(core: &Core, s: &SessionId, repo: &RepoName) -> Result<WorkspaceState> {
     let Some(rec) = core.store.session(s)? else {
@@ -678,6 +700,9 @@ impl<'d, 'a> Server<'d, 'a> {
                         writing();
                         let r = self.d.sessions.remove(&p.session, p.discard, token);
                         self.d.sessions.forget_old_trees(&p.session);
+                        if let Err(e) = &r {
+                            record_rm_attempt(core, &p.session, e);
+                        }
                         let r = r?;
                         self.d.du.on_remove(p.session.as_str());
                         Ok(json_of(&r))
@@ -861,7 +886,14 @@ impl<'d, 'a> Server<'d, 'a> {
             strata_session::SummarySelect::All
         };
         let v = strata_session::summary(&core.store, &core.config.paths.root, sel, workspaces)?;
-        Ok(json!({ "sessions": json_of(&v) }))
+        // rm-followups R3: directories of removed sessions (two read_dirs).
+        let left = strata_session::removed_leftovers(&core.store, &core.config.paths.root)?;
+        // Only when there are any: the reply stays `{sessions}` otherwise.
+        let mut out = json!({ "sessions": json_of(&v) });
+        if !left.is_empty() {
+            out["leftovers"] = json_of(&left);
+        }
+        Ok(out)
     }
 
     /// Read only; no queue, no lock.
@@ -871,7 +903,11 @@ impl<'d, 'a> Server<'d, 'a> {
         let ids: Vec<SessionId> = if all {
             sessions.list()?
         } else if let Some(sel) = selector {
-            vec![sessions.select(sel)?]
+            vec![
+                sessions
+                    .select(sel)
+                    .map_err(|e| strata_session::with_leftover_detail(&core.store, &core.config.paths.root, sel, e))?,
+            ]
         } else if let Some(cwd) = cwd {
             match sessions.resolve(cwd)? {
                 Some((id, _)) => vec![id],

@@ -26,6 +26,7 @@ mod old_tree;
 mod recover;
 mod remove;
 mod resolve;
+mod rm_note;
 mod scene;
 mod seams;
 mod seed;
@@ -38,6 +39,10 @@ pub use failed_move::{MoveResolution, ResolutionReport};
 pub use move_workspace::MoveReport;
 pub use old_tree::{OLD_TREE_TTL, OldTreeKey, OldTreeMode, OldTreeVerdict, Outcome as OldTreeOutcome};
 pub use remove::RemoveReport;
+pub use rm_note::{
+    LastRm, RebaseNote, RmInterrupted, RmNotes, leftover_line, local_hhmm, removed_leftover_of, removed_leftovers, rm_notes,
+    with_leftover_detail,
+};
 pub use resolve::{resolve_in, select_in};
 pub use summary::{SessionSummary, SummarySelect, WorkspaceSummary, summary};
 #[cfg(feature = "test-seams")]
@@ -63,6 +68,7 @@ pub const MOVE_STAGING_PREFIX: &str = ".strata-tmp-move-";
 /// `bases/<repo>/.staging/`: where base generations are built (§5.2).
 pub const BASE_STAGING_DIR: &str = ".staging";
 /// How many dirty paths `remove`'s `Dirty` detail lists per repo (§5.6).
+/// No longer applied: rm-followups R2 keeps the full lists in `detail`.
 pub const DIRTY_PATHS_CAP: usize = 100;
 
 /// The daemon's `BeforeRollout` / `BeforeRemove` checkpoint (§3): records

@@ -18,11 +18,12 @@ use strata_types::{
 };
 
 use crate::new::pin_ref;
+use crate::rm_note::{interrupted, interrupted_line};
 use crate::scene::{Scene, SceneOp, cause_of, kept_dirs, unknown_error};
 use crate::seams::is_stop;
 use crate::status::{no_such_session, non_empty_dir};
 use crate::sys::lstat;
-use crate::{DIRTY_PATHS_CAP, Result, Sessions};
+use crate::{Result, Sessions};
 
 /// What `remove` did.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +41,14 @@ fn exists(p: &Path) -> bool {
 fn lc_name(l: Lifecycle) -> String {
     format!("{l:?}").to_lowercase()
 }
+
+/// `Active`, `Unknown`, … as `detail.lifecycle` of a refusal (R2).
+fn lc_title(l: Lifecycle) -> String {
+    format!("{l:?}")
+}
+
+/// Paths shown inline per repo in a Dirty refusal; `detail` has them all.
+const INLINE_PATHS: usize = 5;
 
 impl Sessions<'_> {
     /// §5.6.
@@ -88,11 +97,18 @@ impl Sessions<'_> {
             return Err(StrataError::new(
                 Code::OpenFiles,
                 format!(
-                    "processes {} hold files in session {id}; close them and remove again",
+                    "{} Processes {} hold files in it; close them and run the same command again.",
+                    self.refused_prefix(&rec),
                     pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
                 ),
             )
-            .with_detail(json!({ "session": id.as_str(), "paths": [root, repos_dir], "open": open })));
+            .with_detail(json!({
+                "session": id.as_str(),
+                "paths": [root, repos_dir],
+                "open": open,
+                "removed": false,
+                "lifecycle": lc_title(cur),
+            })));
         }
         let intents = self.store.move_intents(id)?;
         // 4.
@@ -138,9 +154,19 @@ impl Sessions<'_> {
         if !changed.is_empty() {
             return Err(StrataError::new(
                 Code::Dirty,
-                format!("session {id} changed while it was being removed; remove it again"),
+                format!(
+                    "{} It changed while it was being removed ({}); run the same command again.",
+                    self.refused_prefix(&rec),
+                    changed.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
+                ),
             )
-            .with_detail(json!({ "session": id.as_str(), "reason": "changed_during_remove", "repos": changed })));
+            .with_detail(json!({
+                "session": id.as_str(),
+                "reason": "changed_during_remove",
+                "repos": changed,
+                "removed": false,
+                "lifecycle": lc_title(cur),
+            })));
         }
 
         // ---- Phase C: the visible steps.
@@ -224,6 +250,20 @@ impl Sessions<'_> {
         err
     }
 
+    /// R2: the start of every refusal before `Removing`, naming the
+    /// session's actual lifecycle at the start of this rm.
+    fn refused_prefix(&self, rec: &SessionRecord) -> String {
+        let id = &rec.manifest.id;
+        let head = "rm refused: nothing was removed;";
+        match rec.lifecycle {
+            Lifecycle::Unknown => match interrupted(&self.config.paths.root, rec) {
+                Some(i) => format!("{head} session {id} is still Unknown ({}).", interrupted_line(id, &i)),
+                None => format!("{head} session {id} is still Unknown (an earlier operation was interrupted)."),
+            },
+            l => format!("{head} session {id} is still {} and listed (`git-strata ls`).", lc_title(l)),
+        }
+    }
+
     /// Why a workspace is not healthy (healthy: not Unknown in the store,
     /// its directory and `.git` present, its shadow repository there): `Some("unknown")` or `Some("missing")`.
     fn unhealthy(&self, rec: &SessionRecord, repo: &RepoName, ws: &WorkspaceState) -> Result<Option<&'static str>> {
@@ -254,7 +294,6 @@ impl Sessions<'_> {
         let mut landed_all: BTreeMap<RepoName, Vec<OverlayEntry>> = BTreeMap::new();
         let mut landed = Map::new();
         let mut landed_errors = Map::new();
-        let mut counts = Counts::default();
         let mut untracked: Vec<Value> = Vec::new();
         let mut old_trees: Vec<Value> = Vec::new();
         if rec.lifecycle == Lifecycle::Unknown {
@@ -298,7 +337,6 @@ impl Sessions<'_> {
                     {
                         Ok(sp) => {
                             if !sp.landed.is_empty() {
-                                counts.add(&sp);
                                 landed.insert(repo.as_str().into(), sp.summary());
                                 landed_all.insert(repo.clone(), sp.landed);
                             }
@@ -314,7 +352,6 @@ impl Sessions<'_> {
                     if !ws.tracked {
                         untracked.push(json!(repo.as_str()));
                     }
-                    counts.remaining += remaining.len();
                     repos.insert(repo.as_str().into(), paths_json(&remaining));
                 }
             }
@@ -333,25 +370,8 @@ impl Sessions<'_> {
         if unresolved.is_empty() && repos.is_empty() && untracked.is_empty() && old_trees.is_empty() {
             return Ok(landed_all);
         }
-        let mut what = Vec::new();
-        if !unresolved.is_empty() {
-            what.push("unresolved scenes");
-        }
-        let unpublished = counts.what();
-        if !repos.is_empty() {
-            what.push(&unpublished);
-        }
-        if !untracked.is_empty() {
-            what.push("untracked repos");
-        }
-        if !old_trees.is_empty() {
-            what.push("changed old trees");
-        }
-        Err(StrataError::new(
-            Code::Dirty,
-            format!("session {id} has {}; remove it with --discard to throw them away", what.join(", ")),
-        )
-        .with_detail({
+        let msg = dirty_message(&self.refused_prefix(rec), id, rec.lifecycle, &repos, &landed, &untracked, &unresolved, &old_trees);
+        Err(StrataError::new(Code::Dirty, msg).with_detail({
             let mut d = json!({
                 "session": id.as_str(),
                 "unresolved": unresolved,
@@ -359,6 +379,8 @@ impl Sessions<'_> {
                 "untracked_repos": untracked,
                 "old_trees": old_trees,
                 "landed": landed,
+                "removed": false,
+                "lifecycle": lc_title(rec.lifecycle),
             });
             if !landed_errors.is_empty() {
                 d["landed_errors"] = Value::Object(landed_errors);
@@ -413,10 +435,12 @@ fn paths_json(entries: &[OverlayEntry]) -> Value {
     list_json(&paths)
 }
 
-/// `{paths, count, truncated}` of these paths.
+/// `{paths, count, truncated}` of these paths. rm-followups R2: `detail`
+/// keeps the full list (only the message is capped, at 5 per repo);
+/// `truncated` stays for compatibility and is always false.
 fn list_json(paths: &[RepoPath]) -> Value {
-    let shown: Vec<&str> = paths.iter().take(DIRTY_PATHS_CAP).map(RepoPath::as_str).collect();
-    json!({ "paths": shown, "count": paths.len(), "truncated": paths.len() > DIRTY_PATHS_CAP })
+    let shown: Vec<&str> = paths.iter().map(RepoPath::as_str).collect();
+    json!({ "paths": shown, "count": paths.len(), "truncated": false })
 }
 
 /// The paths a scan could not read steadily: their digests prove nothing.
@@ -478,50 +502,116 @@ impl Split {
     }
 }
 
-/// The counts of the Dirty message's "changes that are not published" item.
-#[derive(Default)]
-struct Counts {
-    remaining: usize,
-    landed: usize,
-    publishes: Vec<u64>,
-    proposals: Vec<u64>,
+fn join_u64(v: &[u64], sep: &str) -> String {
+    v.iter().map(u64::to_string).collect::<Vec<_>>().join(sep)
 }
 
-impl Counts {
-    fn add(&mut self, sp: &Split) {
-        self.landed += sp.landed.len();
-        for c in &sp.used {
-            self.publishes.push(c.publish);
-            self.proposals.extend(c.proposals.iter().copied());
-        }
-    }
+fn u64s(v: Option<&Value>) -> Vec<u64> {
+    v.and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default()
+}
 
-    fn what(&self) -> String {
-        let base = "changes that are not published".to_string();
-        if self.landed == 0 {
-            return base;
+/// "REPO: N paths not published: p1, … (+k more); M already published
+/// (publish 22, waiting on deps proposal #21)" from the Dirty detail.
+fn repo_line(repo: &str, entry: &Value, landed: Option<&Value>, untracked: bool) -> String {
+    let n = entry.get("count").and_then(Value::as_u64).unwrap_or(0);
+    let shown: Vec<&str> =
+        entry.get("paths").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let inline: Vec<&str> = shown.iter().take(INLINE_PATHS).copied().collect();
+    let more = n.saturating_sub(inline.len() as u64);
+    let mut s = format!("{repo}: {n} {} not published", if n == 1 { "path" } else { "paths" });
+    if !inline.is_empty() {
+        s.push_str(&format!(": {}", inline.join(", ")));
+        if more > 0 {
+            s.push_str(&format!(" (+{more} more)"));
         }
-        let mut publishes = self.publishes.clone();
-        publishes.sort_unstable();
-        publishes.dedup();
-        let mut proposals = self.proposals.clone();
-        proposals.sort_unstable();
-        proposals.dedup();
-        let join = |v: &[u64], sep: &str| v.iter().map(u64::to_string).collect::<Vec<_>>().join(sep);
-        let path = |n: usize| if n == 1 { "path" } else { "paths" };
-        let mut s = format!(
-            "{base} ({} {}; {} more are already published in publish {}",
-            self.remaining,
-            path(self.remaining),
-            self.landed,
-            join(&publishes, ", ")
-        );
-        if !proposals.is_empty() {
-            s.push_str(&format!(", which left the session waiting on deps proposal #{}", join(&proposals, ", #")));
-        }
-        s.push(')');
-        s
     }
+    if untracked {
+        s.push_str(" (untracked repo: no checkpoint keeps them)");
+    }
+    if let Some(l) = landed {
+        let m = l.get("count").and_then(Value::as_u64).unwrap_or(0);
+        if m > 0 {
+            s.push_str(&format!("; {m} already published (publish {}", join_u64(&u64s(l.get("publishes")), ", ")));
+            let props = u64s(l.get("proposals"));
+            if !props.is_empty() {
+                s.push_str(&format!(", which left the session waiting on deps proposal #{}", join_u64(&props, ", #")));
+            }
+            s.push(')');
+        }
+    }
+    s
+}
+
+/// The R2 Dirty refusal (design §2.2).
+#[allow(clippy::too_many_arguments)]
+fn dirty_message(
+    prefix: &str,
+    id: &SessionId,
+    lifecycle: Lifecycle,
+    repos: &Map<String, Value>,
+    landed: &Map<String, Value>,
+    untracked: &[Value],
+    unresolved: &[Value],
+    old_trees: &[Value],
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (repo, entry) in repos {
+        let u = untracked.iter().any(|v| v.as_str() == Some(repo.as_str()));
+        parts.push(repo_line(repo, entry, landed.get(repo), u));
+    }
+    let scenes: Vec<String> = unresolved
+        .iter()
+        .filter(|v| v.get("kind").and_then(Value::as_str) != Some("session_unknown"))
+        .map(|v| {
+            let kind = v.get("kind").and_then(Value::as_str).unwrap_or("scene").replace('_', " ");
+            match v.get("repo").and_then(Value::as_str) {
+                Some(r) => format!("{kind} in {r}"),
+                None => kind,
+            }
+        })
+        .collect();
+    if !scenes.is_empty() {
+        parts.push(format!("unresolved: {}", scenes.join(", ")));
+    }
+    if !old_trees.is_empty() {
+        let t: Vec<String> = old_trees
+            .iter()
+            .map(|v| {
+                format!(
+                    "{} #{}",
+                    v.get("repo").and_then(Value::as_str).unwrap_or("?"),
+                    v.get("n").and_then(Value::as_u64).unwrap_or(0)
+                )
+            })
+            .collect();
+        parts.push(format!("changed old trees: {}", t.join(", ")));
+    }
+    let mut s = prefix.to_string();
+    if !parts.is_empty() {
+        s.push(' ');
+        s.push_str(&parts.join("; "));
+        s.push('.');
+    }
+    if lifecycle == Lifecycle::Unknown {
+        s.push_str(&format!(" Run `git-strata rm --discard {id}` (Touch ID) to finish removing it."));
+    } else if !repos.is_empty() {
+        let is_untracked = |r: &String| untracked.iter().any(|v| v.as_str() == Some(r.as_str()));
+        let lost: Vec<&str> = repos.keys().filter(|r| is_untracked(r)).map(String::as_str).collect();
+        let kept = repos.keys().any(|r| !is_untracked(r));
+        s.push_str(&format!(" Publish them, or run `git-strata rm --discard {id}` (Touch ID) to throw them away"));
+        match (kept, lost.is_empty()) {
+            (true, true) => s.push_str("; the BeforeRemove checkpoint then keeps them until gc."),
+            (true, false) => s.push_str(&format!(
+                "; the BeforeRemove checkpoint then keeps the tracked repos' edits until gc, \
+                 but the edits in untracked {} are lost (no checkpoint).",
+                lost.join(", ")
+            )),
+            (false, _) => s.push_str(&format!("; the edits in untracked {} are then lost (no checkpoint).", lost.join(", "))),
+        }
+    } else {
+        s.push_str(&format!(" Resolve them, or run `git-strata rm --discard {id}` (Touch ID) to remove it anyway."));
+    }
+    s
 }
 
 /// §5.6 step 4.2 (D57): Done publishes this session took part in for
@@ -714,20 +804,46 @@ mod landed_tests {
     }
 
     #[test]
-    fn message_names_publishes_and_proposals() {
-        let mut c = Counts { remaining: 2, ..Counts::default() };
-        assert_eq!(c.what(), "changes that are not published");
-        c.landed = 1;
-        c.publishes = vec![16];
-        assert_eq!(c.what(), "changes that are not published (2 paths; 1 more are already published in publish 16)");
-        c.remaining = 1;
-        c.landed = 18;
-        c.publishes = vec![17, 16, 17];
-        c.proposals = vec![22, 21, 22];
+    fn dirty_message_says_nothing_removed_and_caps_paths() {
+        let id = SessionId::try_from("s-abcdefgh".to_string()).unwrap();
+        let paths: Vec<String> = (0..7).map(|i| format!("p{i}")).collect();
+        let mut repos = Map::new();
+        repos.insert("admin".into(), json!({ "paths": paths, "count": 36, "truncated": false }));
+        let mut landed = Map::new();
+        landed.insert("admin".into(), json!({ "count": 2, "publishes": [16, 17], "proposals": [21] }));
+        let m = dirty_message("PFX", &id, Lifecycle::Active, &repos, &landed, &[], &[], &[]);
         assert_eq!(
-            c.what(),
-            "changes that are not published (1 path; 18 more are already published in publish 16, 17, \
-             which left the session waiting on deps proposal #21, #22)"
+            m,
+            "PFX admin: 36 paths not published: p0, p1, p2, p3, p4 (+31 more); 2 already published (publish 16, 17, \
+             which left the session waiting on deps proposal #21). Publish them, or run \
+             `git-strata rm --discard s-abcdefgh` (Touch ID) to throw them away; the BeforeRemove checkpoint then \
+             keeps them until gc."
         );
+        let one = json!({ "paths": ["a"], "count": 1, "truncated": false });
+        assert_eq!(repo_line("app", &one, None, true), "app: 1 path not published: a (untracked repo: no checkpoint keeps them)");
+        let m = dirty_message("PFX", &id, Lifecycle::Unknown, &Map::new(), &Map::new(), &[], &[json!({"kind": "session_unknown"})], &[]);
+        assert_eq!(m, "PFX Run `git-strata rm --discard s-abcdefgh` (Touch ID) to finish removing it.");
+        // Untracked edits get no checkpoint: never promised one.
+        let mut only = Map::new();
+        only.insert("web".into(), one.clone());
+        let m = dirty_message("PFX", &id, Lifecycle::Active, &only, &Map::new(), &[json!("web")], &[], &[]);
+        assert!(!m.contains("checkpoint then keeps"), "{m}");
+        assert!(m.ends_with("throw them away; the edits in untracked web are then lost (no checkpoint)."), "{m}");
+        let mut mixed = only.clone();
+        mixed.insert("app".into(), one);
+        let m = dirty_message("PFX", &id, Lifecycle::Active, &mixed, &Map::new(), &[json!("web")], &[], &[]);
+        assert!(
+            m.ends_with("keeps the tracked repos' edits until gc, but the edits in untracked web are lost (no checkpoint)."),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn dirty_detail_keeps_every_path() {
+        let paths: Vec<RepoPath> = (0..250).map(|i| RepoPath::try_from(format!("d/p{i:03}")).unwrap()).collect();
+        let v = list_json(&paths);
+        assert_eq!(v["count"], 250);
+        assert_eq!(v["paths"].as_array().unwrap().len(), 250);
+        assert_eq!(v["truncated"], false);
     }
 }

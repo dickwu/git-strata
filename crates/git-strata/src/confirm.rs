@@ -15,7 +15,7 @@ use crate::args::AcceptOrigin;
 use crate::ctx::Ctx;
 use crate::envelope::Envelope;
 use crate::ro::{self, repo_name};
-use crate::rpc::Kind;
+use crate::rpc::{Kind, Stopped};
 use crate::tty::{require_tty_for, stdin_is_tty};
 use crate::{Result, show};
 
@@ -113,8 +113,35 @@ pub fn rm(ctx: &Ctx, session: &str, discard: bool) -> Result<Envelope> {
     if discard {
         eprintln!("remove session {id}: its unpublished changes will be discarded");
     }
-    let data = ctx.call("rm", json!({ "session": id.as_str(), "discard": discard }), Kind::Write)?;
-    Ok(Envelope::ok(data))
+    // R2: Ctrl-C / SIGTERM tell "not sent" from "the daemon goes on".
+    crate::interrupt::install();
+    let params = json!({ "session": id.as_str(), "discard": discard });
+    match ctx.call_interruptible("rm", params, Kind::Write) {
+        Ok(r) => Ok(Envelope::ok(r?)),
+        Err(stopped) => {
+            let signal = crate::interrupt::exit_with_signal();
+            let (code, reason, msg) = match stopped {
+                Stopped::NotSent => {
+                    (Code::NotConfirmed, "interrupted_not_sent", format!("rm of {id} was not sent; nothing happened"))
+                }
+                Stopped::Sent => (
+                    Code::Unknown,
+                    "interrupted_after_send",
+                    format!(
+                        "rm of {id} continues in the daemon and may still finish or be refused; check \
+                         `git-strata status {id}` (last rm outcome)"
+                    ),
+                ),
+            };
+            eprintln!("{msg}");
+            Err(StrataError::new(code, msg).with_detail(json!({
+                "reason": reason,
+                "session": id.as_str(),
+                "sent": stopped == Stopped::Sent,
+                "exit": signal,
+            })))
+        }
+    }
 }
 
 // ---- resolve -------------------------------------------------------------

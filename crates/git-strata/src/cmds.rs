@@ -194,14 +194,23 @@ pub fn status(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
         Ok(v) => {
             alerts(&v["warnings"]);
             for l in v["leftovers"].as_array().into_iter().flatten() {
-                eprintln!("leftover: {l}");
+                eprintln!("{}", leftover_text(l));
             }
             v["sessions"].as_array().cloned().unwrap_or_default().into_iter().map(|s| s["status"].clone()).collect()
         }
-        Err(CallError::Down(_)) => local_status(ctx, sel)?,
+        Err(CallError::Down(_)) => {
+            let (list, left) = local_status(ctx, sel)?;
+            for l in &left {
+                eprintln!("{}", leftover_text(l));
+            }
+            list
+        }
         Err(CallError::Failed(e)) => return Err(e),
     };
     list = list.into_iter().map(with_choices).collect();
+    for st in &list {
+        print_notes(&st["manifest"]["id"], st);
+    }
     if sel.all {
         list.sort_by(|a, b| a["manifest"]["id"].as_str().cmp(&b["manifest"]["id"].as_str()));
         return Ok(Envelope::ok(json!({ "sessions": list })));
@@ -215,6 +224,37 @@ pub fn status(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
 
 // ---- ls, status --brief (status-perf C) ---------------------------------------
 
+/// One `leftovers` entry as a stderr line: R3's removed-session form, or
+/// the JSON as before.
+fn leftover_text(l: &Value) -> String {
+    match (l["kind"].as_str(), l["session"].as_str(), l["path"].as_str()) {
+        (Some("RemovedSession"), Some(s), Some(p)) => strata_session::leftover_line(s, Path::new(p)),
+        _ => format!("leftover: {l}"),
+    }
+}
+
+/// R2/R3: a session's `notes` (last rm, interrupted rm, deferred rebase)
+/// on stderr, `note: <sid>: <line>`.
+fn print_notes(id: &Value, v: &Value) {
+    let id = id.as_str().unwrap_or("?");
+    for n in v["notes"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        eprintln!("note: {id}: {n}");
+    }
+}
+
+/// The removed-session leftovers on stderr and, when there are any, as
+/// `data.leftovers`.
+fn add_leftovers(data: &mut Value, left: Vec<Value>) {
+    for l in &left {
+        eprintln!("{}", leftover_text(l));
+    }
+    if !left.is_empty()
+        && let Some(m) = data.as_object_mut()
+    {
+        m.insert("leftovers".into(), Value::Array(left));
+    }
+}
+
 /// A daemon that predates `summary`/`workspaces` refuses them before
 /// dispatch (`deny_unknown_fields`): an RPC `Failed` naming the field.
 fn predates_summary(e: &StrataError) -> bool {
@@ -225,15 +265,20 @@ fn predates_summary(e: &StrataError) -> bool {
 
 /// `status{summary:true}` from the daemon; the store read only when no
 /// daemon listens (D5) or the daemon predates `summary`. Returns the
-/// sessions and whether they came from the store directly.
-fn summaries(ctx: &Ctx, sel: &Select, workspaces: bool) -> Result<(Vec<Value>, bool)> {
+/// sessions, whether they came from the store directly, and the
+/// removed-session leftovers (R3).
+fn summaries(ctx: &Ctx, sel: &Select, workspaces: bool) -> Result<(Vec<Value>, bool, Vec<Value>)> {
     let here = cwd();
     let mut params = json!({ "cwd": here, "session": sel.session, "all": sel.all, "summary": true });
     if workspaces {
         params["workspaces"] = json!(true);
     }
     match ctx.try_call("status", params, Kind::Read) {
-        Ok(v) => Ok((v["sessions"].as_array().cloned().unwrap_or_default(), false)),
+        Ok(v) => Ok((
+            v["sessions"].as_array().cloned().unwrap_or_default(),
+            false,
+            v["leftovers"].as_array().cloned().unwrap_or_default(),
+        )),
         Err(CallError::Failed(e)) if !predates_summary(&e) => Err(e),
         Err(_) => {
             let config = ctx.config()?;
@@ -245,17 +290,24 @@ fn summaries(ctx: &Ctx, sel: &Select, workspaces: bool) -> Result<(Vec<Value>, b
             } else {
                 strata_session::SummarySelect::Cwd(&here)
             };
+            // `summary` adds R3's orphan detail to a NoSuchSession itself.
             let v = strata_session::summary(&store, &config.paths.root, which, workspaces)?;
             let v = serde_json::to_value(v).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
-            Ok((v.as_array().cloned().unwrap_or_default(), true))
+            let left = strata_session::removed_leftovers(&store, &config.paths.root)?;
+            let left = serde_json::to_value(left).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
+            Ok((v.as_array().cloned().unwrap_or_default(), true, left.as_array().cloned().unwrap_or_default()))
         }
     }
 }
 
 /// `ls`: every live session, by id.
 pub fn ls(ctx: &Ctx) -> Result<Envelope> {
-    let (list, local) = summaries(ctx, &Select { session: None, all: true }, false)?;
+    let (list, local, left) = summaries(ctx, &Select { session: None, all: true }, false)?;
+    for s in &list {
+        print_notes(&s["id"], s);
+    }
     let mut data = json!({ "sessions": list });
+    add_leftovers(&mut data, left);
     if local {
         data["source"] = json!("local");
     }
@@ -266,7 +318,10 @@ pub fn ls(ctx: &Ctx) -> Result<Envelope> {
 /// `--all`), from the store alone.
 pub fn status_brief(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
     both_selectors(sel)?;
-    let (list, local) = summaries(ctx, sel, true)?;
+    let (list, local, left) = summaries(ctx, sel, true)?;
+    for s in &list {
+        print_notes(&s["id"], s);
+    }
     let mut data = if sel.all {
         json!({ "sessions": list })
     } else {
@@ -276,6 +331,9 @@ pub fn status_brief(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
         }
         one
     };
+    // Like `ls` and `status`: every removed session's leftovers, whatever
+    // the selector.
+    add_leftovers(&mut data, left);
     if local && let Some(m) = data.as_object_mut() {
         m.insert("source".into(), json!("local"));
     }
@@ -334,11 +392,18 @@ pub fn table_of(data: &Value) -> String {
         out.push_str(line.trim_end());
         out.push('\n');
     }
+    // R2/R3: the notes under the table, one line each.
+    for s in data["sessions"].as_array().into_iter().flatten() {
+        for n in s["notes"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            out.push_str(&format!("note: {}: {n}\n", s["id"].as_str().unwrap_or("?")));
+        }
+    }
     out
 }
 
 /// §5.1: the daemon is down; `Sessions::open` over the reader store.
-fn local_status(ctx: &Ctx, sel: &Select) -> Result<Vec<Value>> {
+/// Returns the statuses and the removed-session leftovers (R3).
+fn local_status(ctx: &Ctx, sel: &Select) -> Result<(Vec<Value>, Vec<Value>)> {
     let local = Local::open(ctx.config()?)?;
     let sessions = local.sessions()?;
     // status-perf A1, D10: no old-tree walks without the daemon; old trees
@@ -347,14 +412,24 @@ fn local_status(ctx: &Ctx, sel: &Select) -> Result<Vec<Value>> {
     let ids: Vec<SessionId> = if sel.all {
         ro::live(&local.store)?.into_iter().map(|r| r.manifest.id).collect()
     } else {
-        vec![ro::session_or_cwd(&local.store, sel.session.as_deref())?.0]
+        let root = &local.config.paths.root;
+        vec![
+            ro::session_or_cwd(&local.store, sel.session.as_deref())
+                .map_err(|e| match sel.session.as_deref() {
+                    Some(s) => strata_session::with_leftover_detail(&local.store, root, s, e),
+                    None => e,
+                })?
+                .0,
+        ]
     };
     let mut out = Vec::new();
     for st in sessions.status_many(&ids) {
         let st = st?;
         out.push(serde_json::to_value(st).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?);
     }
-    Ok(out)
+    let left = strata_session::removed_leftovers(&local.store, &local.config.paths.root)?;
+    let left = serde_json::to_value(left).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
+    Ok((out, left.as_array().cloned().unwrap_or_default()))
 }
 
 // ---- checkpoint -------------------------------------------------------------

@@ -672,3 +672,118 @@ fn remove_deletes_only_its_own_session() {
     assert_eq!(snapshot(&outside), outside_before);
     assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"keep\n");
 }
+
+// ------------------------------------------------- rm-followups R2/R3
+
+#[test]
+fn rm_dirty_refusal_says_nothing_removed_and_active() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = id(&new_all(&fx, &s));
+    let w = session_root(&fx, &id).join("tool");
+    for i in 0..7 {
+        fx.sb.write(&w, &format!("src/n{i}.ts"), b"new\n");
+    }
+    let e = s.remove(&id, false, None).unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    let m = &e.message;
+    assert!(
+        m.starts_with(&format!(
+            "rm refused: nothing was removed; session {id} is still Active and listed (`git-strata ls`). \
+             tool: 7 paths not published: src/n0.ts, src/n1.ts, src/n2.ts, src/n3.ts, src/n4.ts (+2 more)."
+        )),
+        "{m}"
+    );
+    assert!(m.ends_with(&format!(
+        "Publish them, or run `git-strata rm --discard {id}` (Touch ID) to throw them away; the BeforeRemove \
+         checkpoint then keeps them until gc."
+    )));
+    assert_eq!(detail(&e)["removed"], false);
+    assert_eq!(detail(&e)["lifecycle"], "Active");
+    assert_eq!(detail(&e)["repos"]["tool"]["paths"].as_array().unwrap().len(), 7, "detail keeps them all");
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+    assert!(s.status(&id).is_ok(), "still listed");
+}
+
+#[test]
+fn rm_open_files_refusal_says_nothing_removed() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = id(&new_all(&fx, &s));
+    let holder = Worker::spawn("cwd:".into(), Some(&session_root(&fx, &id).join("tool/src")));
+    let e = s.remove(&id, false, None).unwrap_err();
+    drop(holder);
+    assert_eq!(e.code, Code::OpenFiles, "{e:?}");
+    assert!(e.message.starts_with(&format!("rm refused: nothing was removed; session {id} is still Active")), "{e:?}");
+    assert_eq!(detail(&e)["removed"], false);
+    assert_eq!(detail(&e)["lifecycle"], "Active");
+}
+
+#[test]
+fn rm_interrupted_hint_names_phase_and_remaining_dirs() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = id(&new_all(&fx, &s));
+    s.arm(SessionSeam::FailAt { phase: "remove.retire".into(), errno: libc::EIO });
+    assert_eq!(s.remove(&id, false, None).unwrap_err().code, Code::Unknown);
+    let st = s.status(&id).unwrap();
+    let i = st.rm.rm_interrupted.clone().expect("rm_interrupted");
+    assert_eq!(i.phase, "retire");
+    assert_eq!(i.remaining, vec![session_root(&fx, &id), repos_dir(&fx, &id)]);
+    assert!(!i.root_absent);
+    let want = format!(
+        "rm interrupted at phase retire; remaining: sessions/{id}, sessions/.repos/{id}; needs `git-strata rm --discard {id}`"
+    );
+    assert!(st.rm.notes.contains(&want), "{:?}", st.rm.notes);
+
+    // The root gone, .repos still there.
+    fs::rename(session_root(&fx, &id), fx.sb.path("moved-away")).unwrap();
+    let st = s.status(&id).unwrap();
+    let want = format!(
+        "rm interrupted at phase retire; remaining: sessions/.repos/{id} (root absent); needs `git-strata rm --discard {id}`"
+    );
+    assert!(st.rm.notes.contains(&want), "{:?}", st.rm.notes);
+
+    let e = s.remove(&id, false, None).unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert!(
+        e.message.starts_with(&format!("rm refused: nothing was removed; session {id} is still Unknown ({want}).")),
+        "{e:?}"
+    );
+    assert!(e.message.ends_with(&format!("Run `git-strata rm --discard {id}` (Touch ID) to finish removing it.")), "{e:?}");
+    assert_eq!(detail(&e)["lifecycle"], "Unknown");
+}
+
+#[test]
+fn status_shows_last_rm_and_rebase_pending_from_the_store() {
+    use strata_store::{RmAttempt, RmOutcome};
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = id(&new_all(&fx, &s));
+    assert!(s.status(&id).unwrap().rm.is_empty());
+    fx.sb.write(&session_root(&fx, &id).join("tool"), "src/n.ts", b"new\n");
+    let e = s.remove(&id, false, None).unwrap_err();
+    let a = RmAttempt {
+        session: id.clone(),
+        at: std::time::SystemTime::now(),
+        outcome: RmOutcome::Refused,
+        detail: serde_json::json!({ "code": "Dirty", "message": e.message, "detail": e.detail }),
+    };
+    assert!(fx.store().record_rm_attempt(&a).unwrap());
+    let st = s.status(&id).unwrap();
+    let last = st.rm.last_rm.clone().expect("last_rm");
+    assert_eq!(last.summary, "Dirty (1 path in tool)");
+    assert_eq!(last.code.as_deref(), Some("Dirty"));
+    let want = format!("last rm {} refused: Dirty (1 path in tool); nothing removed", strata_session::local_hhmm(a.at));
+    assert_eq!(st.rm.notes, vec![want]);
+    let v = serde_json::to_value(&st).unwrap();
+    assert_eq!(v["last_rm"]["outcome"], "refused", "{v}");
+    let sum = strata_session::summary(
+        fx.store(),
+        &fx.root(),
+        strata_session::SummarySelect::Session(id.as_str()),
+        false,
+    )
+    .unwrap();
+    assert_eq!(sum[0].rm, st.rm, "ls and --brief carry the same notes");
+}

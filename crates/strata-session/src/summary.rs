@@ -13,6 +13,7 @@ use serde_json::json;
 use strata_store::{Health, Store};
 use strata_types::{CheckpointId, Code, RepoName, SessionId, StrataError};
 
+use crate::rm_note::{RmNotes, rm_notes};
 use crate::resolve::{live_sorted, resolve_in, select_in};
 use crate::{Result, SessionState, WorkspaceHealth};
 
@@ -43,6 +44,10 @@ pub struct SessionSummary {
     /// Only for `status --brief` (`workspaces:true`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspaces: Option<Vec<WorkspaceSummary>>,
+    /// rm-followups R3: last rm, interrupted teardown, deferred rebases
+    /// (store reads plus two `lstat`s for an interrupted teardown).
+    #[serde(flatten, default)]
+    pub rm: RmNotes,
 }
 
 /// One workspace in `status --brief`, from the store alone.
@@ -68,7 +73,7 @@ pub fn summary(
     let mut recs = match sel {
         SummarySelect::All => live_sorted(store)?,
         SummarySelect::Session(s) => {
-            let id = select_in(store, s)?;
+            let id = select_in(store, s).map_err(|e| crate::rm_note::with_leftover_detail(store, root, s, e))?;
             store.session(&id)?.into_iter().collect()
         }
         SummarySelect::Cwd(cwd) => match resolve_in(store, root, cwd)? {
@@ -114,6 +119,7 @@ pub fn summary(
         } else {
             None
         };
+        let rm = rm_notes(store, root, &rec)?;
         out.push(SessionSummary {
             id: rec.manifest.id.clone(),
             ticket: rec.manifest.ticket.clone(),
@@ -122,6 +128,7 @@ pub fn summary(
             repos: rec.manifest.repos.keys().cloned().collect(),
             phase: rec.phase.clone(),
             workspaces: ws,
+            rm,
         });
     }
     Ok(out)
