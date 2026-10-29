@@ -301,6 +301,8 @@ exit $rc
             deploy_on_push: false,
             pin_unpushed: true,
             check_siblings: Vec::new(),
+            rm: Default::default(),
+            rebase: Default::default(),
         }
     }
 }
@@ -651,6 +653,8 @@ pub fn bun_config(path: &Path) -> RepoConfig {
         deploy_on_push: false,
         pin_unpushed: true,
         check_siblings: Vec::new(),
+        rm: Default::default(),
+        rebase: Default::default(),
     }
 }
 

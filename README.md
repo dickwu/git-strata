@@ -486,7 +486,19 @@ show `ConfigRelaxPending`. The human then runs `git-strata config relax REPO`
 (TTY + prompt), which writes the file's flags into the pin; with nothing to
 relax it returns `InvalidInput` `not_relaxed`. Pins of repos removed from the
 config are kept. Format:
-`{"repos":{"<name>":{"deploy_on_push":bool,"confirm":bool,"push":bool}}}`.
+`{"repos":{"<name>":{"deploy_on_push":bool,"confirm":bool,"push":bool,"regenerable":[...]}}}`
+(`regenerable` is written only when non-empty).
+
+**`rm.regenerable` is pinned too.** `[repo.<name>.rm] regenerable = [globs]`
+(the `.strata/lww` dialect) lists files a tool regenerates; their unpublished
+Modified/Added/Untracked edits in a tracked, healthy workspace do not block
+`rm` (they are checkpointed and listed). A narrower list (positive patterns
+deleted and/or negations appended at the end) applies at the next start; any
+other change is a loosening that needs `config relax REPO`, which applies it
+without a daemon restart. A repo with no pin has an empty effective list.
+Example (docs only): `regenerable = ["src/constants/permissionMap/generated.json"]`
+under `[repo.admin.rm]`. Add the new keys only after both binaries are
+upgraded and the daemon restarted.
 
 ## Push guards
 

@@ -76,7 +76,7 @@ fn git_of<'c>(core: &'c Core, repo: &RepoName) -> Result<&'c Git> {
 /// The repo's configuration with the pinned (effective) safety flags.
 fn effective_cfg(core: &Core, repo: &RepoName) -> Result<RepoConfig> {
     let mut rc = repo_cfg(core, repo)?.clone();
-    apply(&mut rc, core.pinned(repo)?);
+    apply(&mut rc, &core.pinned(repo)?);
     Ok(rc)
 }
 
@@ -759,7 +759,7 @@ impl<'d, 'a> Server<'d, 'a> {
             }
             Params::ConfigRelax(p) => {
                 writing();
-                core.config_relax(&p.repo)?;
+                self.d.config_relax(&p.repo)?;
                 Ok(json!({}))
             }
             Params::DaemonStatus(p) => self.d.daemon_status(p.verify),
@@ -1317,7 +1317,7 @@ impl<'d, 'a> Server<'d, 'a> {
         if let Some(plan) = plan {
             for repo in &repos {
                 let pinned = core.pinned(repo).map_err(|e| self.decorate_publish_error(e, repo, Vec::new(), already.clone()))?;
-                if pinned.push && needs_confirm(pinned) && !plan.contains(repo) {
+                if pinned.push && needs_confirm(&pinned) && !plan.contains(repo) {
                     let e = StrataError::new(
                         Code::NotConfirmed,
                         format!(
@@ -1342,7 +1342,7 @@ impl<'d, 'a> Server<'d, 'a> {
             let r = (|| {
                 let pinned = core.pinned(&repo)?;
                 let branch = repo_cfg(core, &repo)?.publish.branch.clone();
-                let token = if pinned.push && needs_confirm(pinned) {
+                let token = if pinned.push && needs_confirm(&pinned) {
                     // Review P1-15: the approval names origin's push URL read
                     // now; publish checks it again under the repo lock.
                     let url = git_of(core, &repo)?.push_url(resolve::SCENE_REMOTE)?;
@@ -1421,7 +1421,7 @@ impl<'d, 'a> Server<'d, 'a> {
         let git = git_of(core, repo)?;
         let branch = rc.publish.branch.clone();
         let before = shown.cloned();
-        let confirm = needs_confirm(core.pinned(repo)?);
+        let confirm = needs_confirm(&core.pinned(repo)?);
         // Review P1-15: the approval names origin's push URL read before the
         // prompt; under the lock it must still be that URL (`remote_changed`)
         // and the push goes to exactly it.

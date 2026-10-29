@@ -23,39 +23,86 @@ use crate::{PinnedFlags, Result};
 
 /// The flags a repo's configuration file asks for.
 pub fn flags_of(rc: &RepoConfig) -> PinnedFlags {
-    PinnedFlags { deploy_on_push: rc.deploy_on_push, confirm: rc.publish.confirm, push: rc.publish.push }
+    PinnedFlags {
+        deploy_on_push: rc.deploy_on_push,
+        confirm: rc.publish.confirm,
+        push: rc.publish.push,
+        regenerable: rc.rm.regenerable.clone(),
+    }
+}
+
+/// rm-followups §1.8: whether the `rm.regenerable` list `file` is no looser
+/// than `pin`, decided syntactically: `file` is `pin` with some positive
+/// patterns deleted and/or negations appended at the end. Deleting a
+/// positive rule can only move a path's last match to an earlier rule; an
+/// appended negation can only exclude. Anything else (a negation removed or
+/// edited, a positive added or edited, a reorder) is looser. A list with
+/// no positive pattern matches nothing and is always narrower.
+pub fn regenerable_narrower(pin: &[String], file: &[String]) -> bool {
+    if file.iter().all(|f| f.starts_with('!')) {
+        return true;
+    }
+    let mut j = 0;
+    let mut i = 0;
+    // Match `file` in order against `pin`, skipping only positives of `pin`.
+    while i < file.len() {
+        let mut k = j;
+        while k < pin.len() && pin[k] != file[i] && !pin[k].starts_with('!') {
+            k += 1;
+        }
+        if k < pin.len() && pin[k] == file[i] {
+            j = k + 1;
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    // What `pin` has left must be deletable (positives only) and what
+    // `file` has left must be appended negations.
+    pin[j..].iter().all(|p| !p.starts_with('!')) && file[i..].iter().all(|f| f.starts_with('!'))
 }
 
 /// The stricter of `pin` and `file`, field by field (a tightening applies at
 /// once, a relaxation does not).
-pub fn tighten(pin: PinnedFlags, file: PinnedFlags) -> PinnedFlags {
+pub fn tighten(pin: &PinnedFlags, file: &PinnedFlags) -> PinnedFlags {
     PinnedFlags {
         deploy_on_push: pin.deploy_on_push || file.deploy_on_push,
         confirm: pin.confirm || file.confirm,
         push: pin.push && file.push,
+        regenerable: if regenerable_narrower(&pin.regenerable, &file.regenerable) {
+            file.regenerable.clone()
+        } else {
+            pin.regenerable.clone()
+        },
     }
 }
 
 /// Whether `file` is looser than `pin` in any field.
-pub fn relaxes(pin: PinnedFlags, file: PinnedFlags) -> bool {
-    (pin.deploy_on_push && !file.deploy_on_push) || (pin.confirm && !file.confirm) || (!pin.push && file.push)
+pub fn relaxes(pin: &PinnedFlags, file: &PinnedFlags) -> bool {
+    (pin.deploy_on_push && !file.deploy_on_push)
+        || (pin.confirm && !file.confirm)
+        || (!pin.push && file.push)
+        || !regenerable_narrower(&pin.regenerable, &file.regenerable)
 }
 
-/// The pin of a repo that has none yet: the configured flags, but gated.
-pub fn unpinned(file: PinnedFlags) -> PinnedFlags {
-    PinnedFlags { confirm: true, ..file }
+/// The pin of a repo that has none yet: the configured flags, but gated,
+/// and no `rm.regenerable` (fail closed: the configured list waits for
+/// `config relax`).
+pub fn unpinned(file: &PinnedFlags) -> PinnedFlags {
+    PinnedFlags { confirm: true, regenerable: Vec::new(), ..file.clone() }
 }
 
 /// `needs_human_confirm` over pinned flags: `confirm` alone gates.
-pub fn needs_confirm(f: PinnedFlags) -> bool {
+pub fn needs_confirm(f: &PinnedFlags) -> bool {
     f.confirm
 }
 
 /// Apply pinned (effective) flags onto a repo config.
-pub fn apply(rc: &mut RepoConfig, f: PinnedFlags) {
+pub fn apply(rc: &mut RepoConfig, f: &PinnedFlags) {
     rc.deploy_on_push = f.deploy_on_push;
     rc.publish.confirm = f.confirm;
     rc.publish.push = f.push;
+    rc.rm.regenerable = f.regenerable.clone();
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,8 +145,8 @@ impl Pins {
         let mut pinned = existing.clone().map(|p| p.repos).unwrap_or_default();
         for (n, f) in &file {
             let next = match pinned.get(n) {
-                Some(pin) => tighten(*pin, *f),
-                None => unpinned(*f),
+                Some(pin) => tighten(pin, f),
+                None => unpinned(f),
             };
             pinned.insert(n.clone(), next);
         }
@@ -121,12 +168,12 @@ impl Pins {
 
     /// The effective flags of `repo` (the pinned ones).
     pub fn pinned(&self, repo: &RepoName) -> Option<PinnedFlags> {
-        self.state().pinned.get(repo).copied()
+        self.state().pinned.get(repo).cloned()
     }
 
     /// What the configuration file asks for.
     pub fn file(&self, repo: &RepoName) -> Option<PinnedFlags> {
-        self.state().file.get(repo).copied()
+        self.state().file.get(repo).cloned()
     }
 
     /// Repos whose file is looser than the pin (`ConfigRelaxPending`).
@@ -134,7 +181,7 @@ impl Pins {
         let s = self.state();
         s.file
             .iter()
-            .filter(|(n, f)| s.pinned.get(*n).is_some_and(|p| relaxes(*p, **f)))
+            .filter(|(n, f)| s.pinned.get(*n).is_some_and(|p| relaxes(p, f)))
             .map(|(n, _)| n.clone())
             .collect()
     }
@@ -142,7 +189,7 @@ impl Pins {
     /// Accept the file's flags for `repo` (after `validate`), write.
     fn accept(&self, repo: &RepoName) -> Result<()> {
         let mut s = self.state();
-        let Some(f) = s.file.get(repo).copied() else {
+        let Some(f) = s.file.get(repo).cloned() else {
             return Err(StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}")));
         };
         let mut next = s.pinned.clone();
@@ -225,7 +272,7 @@ pub fn config_relax_with(
     let (Some(pin), Some(file)) = (pins.pinned(repo), pins.file(repo)) else {
         return Err(StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}")));
     };
-    if !relaxes(pin, file) {
+    if !relaxes(&pin, &file) {
         return Err(StrataError::new(
             Code::InvalidInput,
             format!("{repo}: the configuration is not looser than the pinned flags"),

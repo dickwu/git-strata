@@ -32,6 +32,41 @@ pub struct RemoveReport {
     pub discarded: bool,
     /// The BeforeRemove checkpoint of each tracked repo, recorded now.
     pub checkpoints: BTreeMap<RepoName, CheckpointId>,
+    /// rm-followups §1.8: the unpublished `rm.regenerable` paths of each
+    /// tracked repo that did not block the remove (they are in its
+    /// checkpoint).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub regenerable: BTreeMap<RepoName, Vec<RepoPath>>,
+}
+
+/// What step 4 let go without blocking: the entries that landed (D57) and
+/// the `rm.regenerable` ones (§1.8), per tracked repo.
+#[derive(Default)]
+struct Judged {
+    landed: BTreeMap<RepoName, Vec<OverlayEntry>>,
+    regenerable: BTreeMap<RepoName, Vec<OverlayEntry>>,
+}
+
+/// rm-followups §1.8: the effective `rm.regenerable` rules of one repo.
+pub(crate) struct Regenerable<'c> {
+    rules: strata_overlay::LwwRules,
+    cfg: &'c strata_types::RepoConfig,
+}
+
+impl<'c> Regenerable<'c> {
+    pub(crate) fn new(patterns: &[String], cfg: &'c strata_types::RepoConfig) -> Self {
+        Regenerable { rules: strata_overlay::LwwRules::parse(&patterns.join("\n")), cfg }
+    }
+
+    /// Modified/Added/Untracked only (a deletion or a rename is never
+    /// regenerable) and never an install input, whatever its case or
+    /// normalization.
+    pub(crate) fn matches(&self, e: &OverlayEntry) -> bool {
+        matches!(e.kind, EntryKind::Added { .. } | EntryKind::Modified { .. } | EntryKind::Untracked { .. })
+            && !self.rules.is_empty()
+            && strata_overlay::lww_matches(&self.rules, &e.path)
+            && !strata_deps::is_input_folded(self.cfg, &e.path)
+    }
 }
 
 fn exists(p: &Path) -> bool {
@@ -112,7 +147,7 @@ impl Sessions<'_> {
         }
         let intents = self.store.move_intents(id)?;
         // 4.
-        let landed = if discard { BTreeMap::new() } else { self.dirty_check(&rec, &intents)? };
+        let judged = if discard { Judged::default() } else { self.dirty_check(&rec, &intents)? };
 
         // ---- Phase B: internal clean-up and the BeforeRemove checkpoints.
         // 5.1
@@ -143,8 +178,20 @@ impl Sessions<'_> {
                 checkpoints.insert(repo.clone(), cp.checkpoint.id);
                 // 5.3 (D57): what is about to be retired is what step 4 let go.
                 if !discard {
-                    let judged = landed.get(repo).map(Vec::as_slice).unwrap_or(&[]);
-                    let left = recheck(self.store, git, id, repo, &cfg.publish.branch, judged, &cp.checkpoint.entries, &cp.warnings);
+                    let mut let_go: Vec<OverlayEntry> = judged.landed.get(repo).cloned().unwrap_or_default();
+                    let_go.extend(judged.regenerable.get(repo).cloned().unwrap_or_default());
+                    let regen = Regenerable::new(&self.regenerable(repo), cfg);
+                    let left = recheck(
+                        self.store,
+                        git,
+                        id,
+                        repo,
+                        &cfg.publish.branch,
+                        &let_go,
+                        &cp.checkpoint.entries,
+                        &cp.warnings,
+                        &|e| regen.matches(e),
+                    );
                     if !left.is_empty() {
                         changed.insert(repo.as_str().into(), list_json(&left));
                     }
@@ -171,7 +218,12 @@ impl Sessions<'_> {
 
         // ---- Phase C: the visible steps.
         self.teardown(&rec, cur)?;
-        Ok(RemoveReport { session: id.clone(), discarded: discard, checkpoints })
+        let regenerable = judged
+            .regenerable
+            .into_iter()
+            .map(|(r, v)| (r, v.into_iter().map(|e| e.path).collect()))
+            .collect();
+        Ok(RemoveReport { session: id.clone(), discarded: discard, checkpoints, regenerable })
     }
 
     /// §5.6 steps 6–9 from `cur` (Active or Unknown): Removing, unpin,
@@ -287,7 +339,9 @@ impl Sessions<'_> {
 
     /// §5.6 step 4: Dirty with one section per rule, or the entries of each
     /// tracked repo that are not counted because they landed (D57).
-    fn dirty_check(&self, rec: &SessionRecord, intents: &[MoveIntent]) -> Result<BTreeMap<RepoName, Vec<OverlayEntry>>> {
+    /// A healthy tracked repo's `rm.regenerable` entries do not count
+    /// either (rm-followups §1.8); they are listed as `regenerable`.
+    fn dirty_check(&self, rec: &SessionRecord, intents: &[MoveIntent]) -> Result<Judged> {
         let id = &rec.manifest.id;
         let mut unresolved: Vec<Value> = Vec::new();
         let mut repos = Map::new();
@@ -295,6 +349,8 @@ impl Sessions<'_> {
         let mut landed = Map::new();
         let mut landed_errors = Map::new();
         let mut untracked: Vec<Value> = Vec::new();
+        let mut regen_all: BTreeMap<RepoName, Vec<OverlayEntry>> = BTreeMap::new();
+        let mut regen_json = Map::new();
         let mut old_trees: Vec<Value> = Vec::new();
         if rec.lifecycle == Lifecycle::Unknown {
             unresolved.push(json!({ "kind": "session_unknown", "scene": rec.scene.clone().unwrap_or(Value::Null) }));
@@ -330,7 +386,7 @@ impl Sessions<'_> {
                 let mut t = strata_overlay::Tracker::new(&ws.path, strata_overlay::DEFAULT_DIRTY_CAPACITY);
                 let scan = strata_overlay::compute(&wsref, &base, &mut t, None)?;
                 let entries = scan.overlay.entries;
-                let remaining = if !ws.tracked || entries.is_empty() {
+                let mut remaining = if !ws.tracked || entries.is_empty() {
                     entries
                 } else {
                     match split_landed(self.store, git, id, repo, &cfg.publish.branch, entries.clone(), &unstable(&scan.warnings))
@@ -348,6 +404,18 @@ impl Sessions<'_> {
                         }
                     }
                 };
+                // §1.8: tracked and healthy only (an untracked repo has no
+                // checkpoint to keep them).
+                if ws.tracked {
+                    let regen = Regenerable::new(&self.regenerable(repo), cfg);
+                    let (r, keep): (Vec<OverlayEntry>, Vec<OverlayEntry>) =
+                        std::mem::take(&mut remaining).into_iter().partition(|e| regen.matches(e));
+                    remaining = keep;
+                    if !r.is_empty() {
+                        regen_json.insert(repo.as_str().into(), paths_json(&r));
+                        regen_all.insert(repo.clone(), r);
+                    }
+                }
                 if !remaining.is_empty() {
                     if !ws.tracked {
                         untracked.push(json!(repo.as_str()));
@@ -368,7 +436,7 @@ impl Sessions<'_> {
             }
         }
         if unresolved.is_empty() && repos.is_empty() && untracked.is_empty() && old_trees.is_empty() {
-            return Ok(landed_all);
+            return Ok(Judged { landed: landed_all, regenerable: regen_all });
         }
         let msg = dirty_message(&self.refused_prefix(rec), id, rec.lifecycle, &repos, &landed, &untracked, &unresolved, &old_trees);
         Err(StrataError::new(Code::Dirty, msg).with_detail({
@@ -384,6 +452,9 @@ impl Sessions<'_> {
             });
             if !landed_errors.is_empty() {
                 d["landed_errors"] = Value::Object(landed_errors);
+            }
+            if !regen_json.is_empty() {
+                d["regenerable"] = Value::Object(regen_json);
             }
             d
         }))
@@ -756,6 +827,7 @@ fn recheck(
     judged: &[OverlayEntry],
     entries: &[OverlayEntry],
     warnings: &[OverlayWarning],
+    regenerable: &dyn Fn(&OverlayEntry) -> bool,
 ) -> Vec<RepoPath> {
     let unstable = unstable(warnings);
     let mut left = unstable.clone();
@@ -763,7 +835,7 @@ fn recheck(
     for e in entries {
         if touches(e, &unstable) {
             left.insert(e.path.clone());
-        } else if !judged.contains(e) {
+        } else if !judged.contains(e) && !regenerable(e) {
             new.push(e.clone());
         }
     }

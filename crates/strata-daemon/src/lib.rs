@@ -149,12 +149,17 @@ pub enum RpcReject {
 }
 
 /// The pinned safety flags of one repo (pins.json).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedFlags {
     pub deploy_on_push: bool,
     pub confirm: bool,
     pub push: bool,
+    /// `rm.regenerable` (rm-followups §1.8). A three-field pins.json reads
+    /// as empty; an empty list is not written, so such a file stays
+    /// readable by an older daemon until a list is pinned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regenerable: Vec<String>,
 }
 
 /// What `daemon_status` and the stderr alert report.

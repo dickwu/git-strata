@@ -253,6 +253,8 @@ publish = { branch = "master", push = false, confirm = false }
         deploy_on_push: true,
         pin_unpushed: true,
         check_siblings: Vec::new(),
+        rm: Default::default(),
+        rebase: Default::default(),
     };
     assert!(!built.needs_human_confirm());
     built.publish.confirm = true;
@@ -449,6 +451,8 @@ fn validate_commands_reports_repo_null_until_config_validate_fills_it() {
         deploy_on_push: false,
         pin_unpushed: true,
         check_siblings: Vec::new(),
+        rm: Default::default(),
+        rebase: Default::default(),
     };
     let err = cfg.validate_commands().unwrap_err();
     assert_eq!(err.code, Code::CheckMutates);
@@ -672,4 +676,61 @@ fn dev_ports_default_to_2500_blocks_and_validate_their_range() {
         assert_eq!(e.detail.as_ref().unwrap()["field"], field, "{t}");
     }
     assert_eq!(rule(&parse(&with("ranges = \"1-2\"")).unwrap_err()), "V11");
+}
+
+fn rm_repo(extra: &str) -> String {
+    minimal(&format!("{}{extra}\n", bare_repo("tool", "/Volumes/GWD/inter/tool")))
+}
+
+#[test]
+fn config_without_new_keys_loads_with_defaults() {
+    let cfg = parse(&minimal(&bare_repo("tool", "/Volumes/GWD/inter/tool"))).unwrap();
+    let tool = cfg.repo(&repo("tool")).unwrap();
+    assert!(tool.rm.regenerable.is_empty());
+    assert_eq!(tool.rebase.deps_changed, strata_types::DepsChanged::MoveSource);
+    assert_eq!(tool.rebase.quiet_secs, 120);
+}
+
+#[test]
+fn rm_and_rebase_tables_parse() {
+    let cfg = parse(&rm_repo(
+        "[repo.tool.rm]\nregenerable = [\"src/constants/permissionMap/generated.json\", \"generated/**\", \"!generated/keep.json\"]\n[repo.tool.rebase]\ndeps_changed = \"wait\"\nquiet_secs = 86400\n",
+    ))
+    .unwrap();
+    let tool = cfg.repo(&repo("tool")).unwrap();
+    assert_eq!(tool.rm.regenerable.len(), 3);
+    assert_eq!(tool.rebase.deps_changed, strata_types::DepsChanged::Wait);
+    assert_eq!(tool.rebase.quiet_secs, 86400);
+}
+
+#[test]
+fn v14_rejects_bad_regenerable_patterns() {
+    for bad in [
+        "", " a.json", "a.json ", "! a.json", "#c", "%include x", "/abs.json", "!/abs", "a/../b",
+        ".git/x", ".GIT/config", "*", "**", "?", "!*", "a/.g*/x", "*/?git",
+    ] {
+        let toml_pat = bad.replace('\\', "\\\\").replace('"', "\\\"");
+        let err = parse(&rm_repo(&format!("[repo.tool.rm]\nregenerable = [\"{toml_pat}\"]\n")))
+            .expect_err(bad);
+        assert_eq!(err.code, Code::InvalidInput, "{bad}");
+        assert_eq!(rule(&err), "V14", "{bad}");
+        assert_eq!(err.detail.as_ref().unwrap()["field"], "rm.regenerable");
+    }
+    for nl in ["a\\nb", "a\\rb"] {
+        let err = parse(&rm_repo(&format!("[repo.tool.rm]\nregenerable = [\"{nl}\"]\n"))).unwrap_err();
+        assert_eq!(rule(&err), "V14", "{nl}");
+    }
+    for good in ["generated/**", "**/gen.json", "*.gen.ts", "!keep.json", "a/b/c.json"] {
+        parse(&rm_repo(&format!("[repo.tool.rm]\nregenerable = [\"{good}\"]\n"))).expect(good);
+    }
+}
+
+#[test]
+fn v15_bounds_quiet_secs_and_unknown_rm_keys_are_v11() {
+    let err = parse(&rm_repo("[repo.tool.rebase]\nquiet_secs = 86401\n")).unwrap_err();
+    assert_eq!(rule(&err), "V15");
+    let err = parse(&rm_repo("[repo.tool.rm]\nregenerables = []\n")).unwrap_err();
+    assert_eq!(err.code, Code::InvalidInput);
+    let err = parse(&rm_repo("[repo.tool.rebase]\ndeps_changed = \"later\"\n")).unwrap_err();
+    assert_eq!(err.code, Code::InvalidInput);
 }

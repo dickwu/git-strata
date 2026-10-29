@@ -101,6 +101,9 @@ pub struct Sessions<'a> {
     pub(crate) status_slots: status::Slots,
     /// status-perf A1: the old-tree mode, verdict table and queue.
     pub(crate) old_trees: old_tree::OldTrees,
+    /// rm-followups §1.8: `rm.regenerable` lists pinned after this was
+    /// opened (`config relax`); a repo not here uses its config's list.
+    pub(crate) regenerable: Mutex<BTreeMap<RepoName, Vec<String>>>,
 }
 
 impl<'a> Sessions<'a> {
@@ -140,6 +143,7 @@ impl<'a> Sessions<'a> {
             fetch_window: Mutex::new(Duration::ZERO),
             status_slots: status::Slots::new(config.status.parallel as usize),
             old_trees: old_tree::OldTrees::default(),
+            regenerable: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -148,6 +152,20 @@ impl<'a> Sessions<'a> {
     /// the repo lock). Zero turns the skip off.
     pub fn set_fetch_window(&self, w: Duration) {
         *self.fetch_window.lock().unwrap_or_else(|p| p.into_inner()) = w;
+    }
+
+    /// rm-followups §1.8: the effective `rm.regenerable` of `repo` from now
+    /// on (the daemon calls this after `config relax` pinned a new list).
+    pub fn set_regenerable(&self, repo: &RepoName, patterns: Vec<String>) {
+        self.regenerable.lock().unwrap_or_else(|p| p.into_inner()).insert(repo.clone(), patterns);
+    }
+
+    /// The effective `rm.regenerable` of `repo`.
+    pub fn regenerable(&self, repo: &RepoName) -> Vec<String> {
+        if let Some(v) = self.regenerable.lock().unwrap_or_else(|p| p.into_inner()).get(repo) {
+            return v.clone();
+        }
+        self.config.repos.get(repo).map(|rc| rc.rm.regenerable.clone()).unwrap_or_default()
     }
 
     pub(crate) fn fetch_is_fresh(&self, repo: &RepoName) -> bool {

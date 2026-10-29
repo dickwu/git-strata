@@ -256,7 +256,7 @@ pub fn prepare_locked(
     let pins = Pins::load(&crate::pins_path(&opts.config_dir), &config)?;
     for (name, rc) in config.repos.iter_mut() {
         if let Some(f) = pins.pinned(name) {
-            confirm_flow::apply(rc, f);
+            confirm_flow::apply(rc, &f);
         }
     }
     // 6. The store checks its own clean-shutdown marker.
@@ -456,6 +456,20 @@ impl<'a> Daemon<'a> {
             reconcile: Mutex::new(json!({ "runs": 0, "last": null })),
             du: crate::du::Du::open(&core.config.paths.root),
         })
+    }
+
+    /// `config_relax`, then the newly pinned `rm.regenerable` goes to
+    /// `Sessions` at once (rm-followups §1.8: no restart needed).
+    pub fn config_relax_with(&self, repo: &RepoName, between: &dyn Fn()) -> Result<()> {
+        self.core.config_relax_with(repo, between)?;
+        if let Some(f) = self.core.pins.pinned(repo) {
+            self.sessions.set_regenerable(repo, f.regenerable);
+        }
+        Ok(())
+    }
+
+    pub fn config_relax(&self, repo: &RepoName) -> Result<()> {
+        self.config_relax_with(repo, &|| {})
     }
 
     /// Connections being served now (review P1-3: a finished connection

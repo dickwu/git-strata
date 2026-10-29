@@ -536,7 +536,7 @@ pub fn chain_resolve(
 
     // 3. Restore asks the human like push, holding nothing.
     // Review P1-15: the approval names origin's push URL read now.
-    let confirm = choice == ChainChoice::Restore && needs_confirm(core.pinned(repo)?);
+    let confirm = choice == ChainChoice::Restore && needs_confirm(&core.pinned(repo)?);
     let url = if confirm { git.push_url(SCENE_REMOTE)? } else { String::new() };
     let action = Action::PushDeploy { repo: repo.clone(), branch: branch.clone(), url: url.clone() };
     let token = if confirm {

@@ -90,6 +90,17 @@ pub fn is_input(cfg: &RepoConfig, path: &RepoPath) -> bool {
         .any(|e| under(path.as_str(), e.as_str()))
 }
 
+/// `is_input` under the volume's name rules: `path` and every entry
+/// compared by their case-fold keys (Unicode caseless, NFD), so
+/// `BUN.LOCK` or a decomposed spelling of an input still counts
+/// (rm-followups §1.8: an install input is never regenerable).
+pub fn is_input_folded(cfg: &RepoConfig, path: &RepoPath) -> bool {
+    let p = strata_apfs::case_fold_key(path.as_str());
+    cfg.install_inputs
+        .iter()
+        .any(|e| under(&p, &strata_apfs::case_fold_key(e.as_str())))
+}
+
 /// The compile-time target triple (§4.3).
 pub fn platform() -> String {
     format!("{}-apple-darwin", std::env::consts::ARCH)

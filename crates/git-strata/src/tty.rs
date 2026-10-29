@@ -74,7 +74,7 @@ impl Pins {
     fn pinned(&self, repo: &RepoName) -> Option<Option<PinnedFlags>> {
         match self {
             Pins::Missing => Some(None),
-            Pins::Read(m) => Some(m.get(repo).copied()),
+            Pins::Read(m) => Some(m.get(repo).cloned()),
             Pins::Unreadable => None,
         }
     }
@@ -124,7 +124,7 @@ mod tests {
         assert!(Pins::Missing.needs_confirm(Some(&c), &app));
         assert!(Pins::Read(BTreeMap::new()).needs_confirm(Some(&c), &app));
         assert!(Pins::Unreadable.needs_confirm(Some(&c), &app));
-        let open = PinnedFlags { deploy_on_push: false, confirm: false, push: true };
+        let open = PinnedFlags { deploy_on_push: false, confirm: false, push: true, ..Default::default() };
         let pinned = Pins::Read([(app.clone(), open)].into_iter().collect());
         assert!(!pinned.needs_confirm(Some(&c), &app));
         assert!(pinned.needs_confirm(Some(&config(true)), &app));
