@@ -850,6 +850,34 @@ fn teardown_retires_before_unpin_and_discard_finishes() {
     assert_removed(&fx, &id);
 }
 
+/// R4 crash coverage: a crash between retire and unpin, then a restart:
+/// recover makes it Unknown (phase unpin) and `rm --discard` finishes.
+#[test]
+fn teardown_crash_after_retire_recovers_and_discard_finishes() {
+    let mut fx = Fx::with(&["tool"]);
+    let id = {
+        let s = fx.sessions();
+        let id = id(&new_all(&fx, &s));
+        s.arm(SessionSeam::StopAt { phase: "remove.unpin".into() });
+        s.remove(&id, false, None).unwrap_err();
+        id
+    };
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Removing);
+    assert!(!session_root(&fx, &id).exists() && !repos_dir(&fx, &id).exists(), "retired first");
+    assert_ne!(fx.pins("tool"), "", "the pin is still there");
+    fx.close_store();
+    fx.reopen_store();
+    let s = fx.sessions();
+    let rep = s.recover().unwrap();
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Unknown);
+    let e = s.remove(&id, false, None).unwrap_err();
+    assert!(e.message.contains("interrupted at phase unpin"), "{e:?}");
+    s.remove(&id, true, tok(&id)).unwrap();
+    assert_eq!(fx.pins("tool"), "");
+    assert_removed(&fx, &id);
+}
+
 // ---------------------------------------------------------------- R1 orphan sweep
 
 /// A no-row orphan `sessions/<sid>` with a file in it.
@@ -1162,4 +1190,30 @@ fn recover_sweeps_after_unknown_rewrite() {
     assert!(!d.exists());
     assert_eq!(lifecycle(&fx, &creating), Lifecycle::Unknown);
     assert!(session_root(&fx, &creating).is_dir() && repos_dir(&fx, &creating).is_dir());
+}
+
+/// impl-p3 review: a `.repos/<id>` created by someone else between the
+/// parent mkdir and the leaf mkdir fails `new` (exclusive leaf) and is
+/// never retired by its rollback: it is named in `not_owned`.
+#[test]
+fn new_rollback_never_claims_a_repos_dir_made_before_its_mkdir() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let id = sid("s-k3q7xm2a");
+    s.set_next_id(id.clone());
+    s.arm(SessionSeam::PauseAt { phase: "new.repos_dir".into() });
+    let e = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.new(None, &fx.all()));
+        s.wait_paused();
+        fs::create_dir_all(repos_dir(&fx, &id).join("theirs")).unwrap();
+        s.release();
+        h.join().unwrap()
+    })
+    .unwrap_err();
+    let d = e.detail.as_ref().unwrap();
+    assert_eq!(d["rolled_back"], Value::Bool(true), "{e:?}");
+    assert_eq!(d["not_owned"], serde_json::json!([repos_dir(&fx, &id)]), "{e:?}");
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Removed);
+    assert!(!session_root(&fx, &id).exists(), "its own root is retired");
+    assert!(repos_dir(&fx, &id).join("theirs").is_dir(), "not ours: left");
 }

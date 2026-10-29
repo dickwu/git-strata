@@ -302,12 +302,13 @@ impl Sessions<'_> {
         };
         strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/{id}")), 0o755, false)?;
         own(proot.join("sessions").join(id.as_str()))?;
-        let repos_dir = proot.join("sessions/.repos").join(id.as_str());
-        let fresh = lstat(&repos_dir).map_err(|e| classify_io_error(&e, IoSide::Read, &repos_dir))?.is_none();
-        strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/.repos/{id}")), 0o755, true)?;
-        if fresh {
-            own(repos_dir)?;
-        }
+        // The shared parent may exist; the leaf is created exclusively, so
+        // a `.repos/<id>` made by anyone else fails here (Exists) and is
+        // never recorded as ours (impl-p3 review).
+        strata_apfs::mkdir_rooted(proot, &rp("sessions/.repos"), 0o755, true)?;
+        self.seams.hit("new.repos_dir", None)?;
+        strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/.repos/{id}")), 0o755, false)?;
+        own(proot.join("sessions/.repos").join(id.as_str()))?;
         self.seams.hit("new.enrolled", None)?;
         drop(enroll);
 
