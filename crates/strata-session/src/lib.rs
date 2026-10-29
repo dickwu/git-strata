@@ -16,6 +16,7 @@ use strata_overlay::{Base, Checkpointed, WorkspaceRef};
 use strata_store::Store;
 use strata_types::{CheckpointReason, Code, Config, RepoConfig, RepoName, SessionId, StrataError};
 
+mod activity;
 mod base;
 mod carry;
 mod dispatch;
@@ -35,10 +36,11 @@ mod summary;
 mod sys;
 mod ticket;
 
+pub use activity::{Activity, Idle, busy_reason, walk_activity};
 pub use failed_move::{MoveResolution, ResolutionReport};
 pub use move_workspace::MoveReport;
 pub use old_tree::{OLD_TREE_TTL, OldTreeKey, OldTreeMode, OldTreeVerdict, Outcome as OldTreeOutcome};
-pub use remove::RemoveReport;
+pub use remove::{Regenerable, RemoveReport};
 pub use rm_note::{
     LastRm, RebaseNote, RmInterrupted, RmNotes, leftover_line, local_hhmm, removed_leftover_of, removed_leftovers, rm_notes,
     with_leftover_detail,

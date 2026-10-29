@@ -168,7 +168,7 @@ fn post_publish_rebase_drops_published_paths() {
     assert!(overlay_paths(&fx, &b).is_empty(), "{:?}", overlay(&fx, &b));
     let pa = run(&fx, &ga).unwrap();
     match report(&pa, &a) {
-        RebaseReport::Moved { dropped } => assert_eq!(dropped, &rps(&["from-a"])),
+        RebaseReport::Moved { dropped, .. } => assert_eq!(dropped, &rps(&["from-a"])),
         r => panic!("{r:?}"),
     }
     assert_eq!(fx.base_of(&a, "tool").tree.as_str(), tree_of(&fx, &pa.commit));

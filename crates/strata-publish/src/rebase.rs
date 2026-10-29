@@ -20,12 +20,38 @@ use strata_types::{
 use crate::stage::{Src, Ver, cap_text, git_mode, read_rooted};
 use crate::{Ctx, Result};
 
+/// Who asked for a move (rm-followups §1.3): an `Explicit` caller (rollout,
+/// `git-strata rebase`) moves now or gets `OpenFiles`; an `Auto` move (after
+/// a publish) is made only when the workspace is idle and the projection has
+/// no conflict outside `rm.regenerable`, else it is `Deferred`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MovePolicy {
+    Explicit,
+    Auto,
+}
+
 /// What the post-publish rebase did to one session (§3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind")]
 pub enum RebaseReport {
     /// The workspace is on the new base; `dropped` left the overlay.
-    Moved { dropped: Vec<RepoPath> },
+    /// `regenerable_kept`: conflicting `rm.regenerable` paths whose session
+    /// version was kept (`Auto` only).
+    Moved {
+        dropped: Vec<RepoPath>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        lww: Vec<RepoPath>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        regenerable_kept: Vec<RepoPath>,
+    },
+    /// `Auto` only: the session stays on its old base for now. `reason` is
+    /// `open_files`, `recent_writes`, `conflicts`, `busy` or `state`.
+    Deferred {
+        reason: String,
+        detail: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        proposal: Option<Proposal>,
+    },
     /// The new base needs another deps set; the session stays on its old
     /// base. `proposal` is the one recorded or promoted.
     Waiting { proposal: Proposal },
@@ -176,9 +202,86 @@ fn inputs_landed(ctx: &Ctx, overlay: &Overlay, new: &Base) -> bool {
     })
 }
 
+fn deferred(reason: &str, detail: Value) -> RebaseReport {
+    RebaseReport::Deferred { reason: reason.to_owned(), detail, proposal: None }
+}
+
+/// rm-followups §1.4 G0: an `Auto` move needs an Active session, no scene on
+/// it or the workspace, no open move intent and the workspace still on `old`.
+fn g0_state(ctx: &Ctx, s: &SessionId, old: &BaseGen) -> Result<Option<RebaseReport>> {
+    let rec = match ctx.store.session(s)? {
+        Some(r) if r.lifecycle != Lifecycle::Removed => r,
+        _ => return Err(no_such_session(s)),
+    };
+    let ws_scene = rec.workspaces.get(ctx.repo).and_then(|w| w.scene.clone());
+    let open_intent = ctx
+        .store
+        .move_intents(s)?
+        .iter()
+        .any(|i| i.repo == *ctx.repo && matches!(i.state, strata_store::MoveState::Preparing | strata_store::MoveState::Swapping));
+    let base = rec.manifest.repos.get(ctx.repo).map(|w| w.base.clone());
+    if rec.lifecycle != Lifecycle::Active || rec.scene.is_some() || ws_scene.is_some() || open_intent || base.as_ref() != Some(old) {
+        return Ok(Some(deferred(
+            "state",
+            json!({
+                "lifecycle": format!("{:?}", rec.lifecycle),
+                "scene": rec.scene.is_some() || ws_scene.is_some(),
+                "open_move": open_intent,
+                "base_changed": base.as_ref() != Some(old),
+            }),
+        )));
+    }
+    Ok(None)
+}
+
+/// rm-followups §1.4 G1–G3 outside every lock: idle workspace, then the
+/// read-only projection. `Ok(None)` → move; `Ok(Some(paths))` is never
+/// returned empty: it is the regenerable conflicts kept on a move.
+fn auto_gates(ctx: &Ctx, s: &SessionId, old: &BaseGen, new: &Base) -> Result<std::result::Result<Vec<RepoPath>, RebaseReport>> {
+    if let Some(d) = g0_state(ctx, s, old)? {
+        return Ok(Err(d));
+    }
+    let ws = workspace(ctx, s)?;
+    let quiet = Duration::from_secs(ctx.cfg.rebase.quiet_secs);
+    if let Some(idle) = strata_session::busy_reason(&ws.path, quiet)? {
+        return Ok(Err(deferred(idle.reason, idle.detail)));
+    }
+    let old_base = base_struct(ctx.store, old)?;
+    let overlay = current_overlay(ctx, s, &ws, &old_base)?;
+    let ignorecase = ctx.git.read_index(&ws.path)?.ignorecase;
+    let opts = RebaseOptions::for_move(new, ignorecase)?;
+    let blobs = strata_overlay::PreviewBlobs::new(ctx.store, &ws.path, &overlay);
+    let preview = match strata_overlay::rebase_preview(&overlay, &old_base, new, &blobs, &opts) {
+        Ok(p) => p,
+        Err(e) if e.detail.as_ref().and_then(|d| d["reason"].as_str()) == Some(strata_overlay::CHANGED_SINCE_SCAN) => {
+            return Ok(Err(deferred("recent_writes", e.detail.unwrap_or(Value::Null))));
+        }
+        Err(e) => return Err(e),
+    };
+    let patterns = ctx.sessions.regenerable(ctx.repo);
+    let regen = strata_session::Regenerable::new(&patterns, ctx.cfg);
+    let (kept, blocking): (Vec<RepoPath>, Vec<RepoPath>) =
+        preview.conflicts.into_iter().partition(|p| overlay.get(p).is_some_and(|e| ws.tracked && regen.matches(e)));
+    if !blocking.is_empty() {
+        let shown: Vec<&str> = blocking.iter().take(20).map(|p| p.as_str()).collect();
+        return Ok(Err(deferred("conflicts", json!({ "paths": shown, "count": blocking.len() }))));
+    }
+    Ok(Ok(kept))
+}
+
 /// Steps 1–4 of §5.8 for one session. Step 5 (`observe_main`) is the
 /// caller's: `publish` runs it once for the whole group.
 pub(crate) fn rebase_one(ctx: &Ctx, s: &SessionId, new_base: &BaseGen, head: &CommitOid) -> Result<RebaseReport> {
+    rebase_one_with(ctx, s, new_base, head, MovePolicy::Explicit)
+}
+
+pub(crate) fn rebase_one_with(
+    ctx: &Ctx,
+    s: &SessionId,
+    new_base: &BaseGen,
+    head: &CommitOid,
+    policy: MovePolicy,
+) -> Result<RebaseReport> {
     if new_base.repo != *ctx.repo {
         return Err(invalid(
             "repo_mismatch",
@@ -206,6 +309,15 @@ pub(crate) fn rebase_one(ctx: &Ctx, s: &SessionId, new_base: &BaseGen, head: &Co
         tracing::warn!(repo = %ctx.repo, error = %e.message, "the new base's deps set could not be ensured");
     }
     let new = base_struct(ctx.store, &target)?;
+    // rm-followups §1.4: an `Auto` move of the same deps set first passes
+    // the gates outside every lock (another deps set keeps today's path).
+    let mut kept: Vec<RepoPath> = Vec::new();
+    if policy == MovePolicy::Auto && n == old.deps {
+        match auto_gates(ctx, s, &old, &new)? {
+            Ok(k) => kept = k,
+            Err(d) => return Ok(d),
+        }
+    }
     let repo_id = ctx.git.repo_id();
     let queue = [s.clone()];
     under_locks(ctx, &queue, &mut || {
@@ -242,10 +354,15 @@ pub(crate) fn rebase_one(ctx: &Ctx, s: &SessionId, new_base: &BaseGen, head: &Co
                 )?);
             }
         }
-        // 3. Same deps set: move.
+        // 3. Same deps set: move (G0 again under the locks for `Auto`).
         if n == old.deps {
+            if policy == MovePolicy::Auto
+                && let Some(d) = g0_state(ctx, s, &old)?
+            {
+                return Ok(d);
+            }
             return match ctx.sessions.move_workspace(s, &repo_id, target.clone(), head.clone()) {
-                Ok(r) => Ok(RebaseReport::Moved { dropped: r.dropped }),
+                Ok(r) => Ok(RebaseReport::Moved { dropped: r.dropped, lww: r.lww, regenerable_kept: kept.clone() }),
                 Err(e) if e.code == Code::OpenFiles => {
                     Ok(RebaseReport::OpenFiles { detail: e.detail.unwrap_or(Value::Null) })
                 }
@@ -297,6 +414,18 @@ pub fn rebase_session(
     new_base: BaseGen,
     head: CommitOid,
 ) -> Result<RebaseReport> {
+    rebase_session_with(ctx, session, repo, new_base, head, MovePolicy::Explicit)
+}
+
+/// [`rebase_session`] under `policy` (rm-followups §1.3).
+pub fn rebase_session_with(
+    ctx: &Ctx,
+    session: SessionId,
+    repo: &RepoName,
+    new_base: BaseGen,
+    head: CommitOid,
+    policy: MovePolicy,
+) -> Result<RebaseReport> {
     if repo != ctx.repo {
         return Err(invalid(
             "repo_mismatch",
@@ -304,7 +433,7 @@ pub fn rebase_session(
             json!({ "repo": repo.as_str(), "ctx_repo": ctx.repo.as_str() }),
         ));
     }
-    let report = rebase_one(ctx, &session, &new_base, &head)?;
+    let report = rebase_one_with(ctx, &session, &new_base, &head, policy)?;
     // 5. After the lock: main's record, best-effort.
     if deps::main_tip(ctx.cfg, ctx.git).ok().flatten().as_ref() == Some(&head) {
         let dir = ctx.store.base_dir(&BaseGen { deps: workspace(ctx, &session)?.base.deps, ..new_base.clone() });

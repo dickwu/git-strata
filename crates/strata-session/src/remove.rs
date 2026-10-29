@@ -48,20 +48,20 @@ struct Judged {
 }
 
 /// rm-followups §1.8: the effective `rm.regenerable` rules of one repo.
-pub(crate) struct Regenerable<'c> {
+pub struct Regenerable<'c> {
     rules: strata_overlay::LwwRules,
     cfg: &'c strata_types::RepoConfig,
 }
 
 impl<'c> Regenerable<'c> {
-    pub(crate) fn new(patterns: &[String], cfg: &'c strata_types::RepoConfig) -> Self {
+    pub fn new(patterns: &[String], cfg: &'c strata_types::RepoConfig) -> Self {
         Regenerable { rules: strata_overlay::LwwRules::parse(&patterns.join("\n")), cfg }
     }
 
     /// Modified/Added/Untracked only (a deletion or a rename is never
     /// regenerable) and never an install input, whatever its case or
     /// normalization.
-    pub(crate) fn matches(&self, e: &OverlayEntry) -> bool {
+    pub fn matches(&self, e: &OverlayEntry) -> bool {
         matches!(e.kind, EntryKind::Added { .. } | EntryKind::Modified { .. } | EntryKind::Untracked { .. })
             && !self.rules.is_empty()
             && strata_overlay::lww_matches(&self.rules, &e.path)
