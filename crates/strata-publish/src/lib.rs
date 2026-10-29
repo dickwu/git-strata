@@ -67,4 +67,10 @@ pub trait PublishLocks: Sync {
     fn with_rebase_sessions(&self, sessions: &[SessionId], f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>> {
         self.with_sessions(sessions, f)
     }
+    /// Whether a `Busy` take is waited out (§5.1 after the first visible
+    /// write). `false` for the catch-up pass (rm-followups §1.6 T2), which
+    /// never queues behind a request: its `Busy` defers the row.
+    fn waits(&self) -> bool {
+        true
+    }
 }

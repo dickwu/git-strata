@@ -87,6 +87,8 @@ pub const LOCK_WAIT: Duration = Duration::from_secs(30);
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// D11: how often the reconcile loop runs.
 pub const RECONCILE_EVERY: Duration = Duration::from_secs(3600);
+/// rm-followups §1.6 T2: how often the catch-up pass runs.
+pub const CATCH_UP_EVERY: Duration = Duration::from_secs(60);
 /// How often the reconcile thread refreshes seed copies whose main-checkout
 /// source changed (`Sessions::refresh_seeds`; a few lstats per seed).
 pub const SEED_REFRESH_EVERY: Duration = Duration::from_secs(2);

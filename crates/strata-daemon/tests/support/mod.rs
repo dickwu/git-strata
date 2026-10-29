@@ -305,7 +305,9 @@ exit $rc
             pin_unpushed: true,
             check_siblings: Vec::new(),
             rm: Default::default(),
-            rebase: Default::default(),
+            // rm-followups: no quiet window, so a publish moves its own
+            // session at once (tests of the window set it).
+            rebase: strata_types::RebaseConfig { quiet_secs: 0, ..Default::default() },
         }
     }
 }
@@ -350,6 +352,8 @@ pub struct Dfx {
     pub lock_wait: Duration,
     /// `Options::reconcile_every` (production value unless a test shortens it).
     pub reconcile_every: Duration,
+    /// `Options::catch_up_every` (production value unless a test changes it).
+    pub catch_up_every: Duration,
 }
 
 impl Dfx {
@@ -368,7 +372,7 @@ impl Dfx {
         let config = Config { paths: Paths { root: sb.path("strata") }, repos, status: Default::default(), dev_ports: Default::default() };
         let config_dir = sb.path("cfg");
         let sock_dir = tempfile::Builder::new().prefix("sd-").tempdir_in("/tmp").expect("sock dir");
-        let fx = Dfx { sb, config, config_dir, sock_dir, alerts: Arc::new(Mutex::new(Vec::new())), lock_wait: Duration::from_millis(300), reconcile_every: strata_daemon::RECONCILE_EVERY };
+        let fx = Dfx { sb, config, config_dir, sock_dir, alerts: Arc::new(Mutex::new(Vec::new())), lock_wait: Duration::from_millis(300), reconcile_every: strata_daemon::RECONCILE_EVERY, catch_up_every: strata_daemon::CATCH_UP_EVERY };
         fx.write_config();
         fx
     }
@@ -419,6 +423,7 @@ impl Dfx {
             install_path: self.sb.install_path(),
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
             reconcile_every: self.reconcile_every,
+            catch_up_every: self.catch_up_every,
         }
     }
 

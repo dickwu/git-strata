@@ -56,6 +56,9 @@ pub struct Options {
     /// [`RECONCILE_EVERY`](crate::RECONCILE_EVERY) in production (§5.9);
     /// tests shorten it.
     pub reconcile_every: Duration,
+    /// [`CATCH_UP_EVERY`](crate::CATCH_UP_EVERY) in production
+    /// (rm-followups §1.6 T2); tests lengthen or shorten it.
+    pub catch_up_every: Duration,
 }
 
 impl Options {
@@ -70,6 +73,7 @@ impl Options {
             install_path: crate::install_path_for_home(home),
             alert: Arc::new(|line: &str| eprintln!("git-stratad: {line}")),
             reconcile_every: crate::RECONCILE_EVERY,
+            catch_up_every: crate::CATCH_UP_EVERY,
         }
     }
 }

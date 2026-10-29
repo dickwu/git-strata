@@ -4,14 +4,14 @@
 //! best-effort after the first visible write: a store or git error is
 //! logged and the row is left for the next reconstruction.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 use strata_gitio::{Git, remote_ref};
 use strata_store::{PublishPhase, RebasePending, RefOp, RefOutcome, ReplayPlan, Store};
-use strata_types::{BaseGen, CommitOid, RepoName, SessionId, TreeOid};
+use strata_types::{BaseGen, Code, CommitOid, RepoName, SessionId, TreeOid};
 
-use crate::rebase::{MovePolicy, RebaseReport};
+use crate::rebase::{Attempt, MovePolicy, RebaseReport, deferred};
 use crate::{Ctx, Result, anchor_ref, chain_ref};
 
 const REMOTE: &str = "origin";
@@ -292,10 +292,159 @@ pub fn attempt(ctx: &Ctx, row: &RebasePending, policy: MovePolicy) -> Result<Opt
     let s = &row.session;
     let deps = crate::rebase::workspace_base(ctx, s)?.deps;
     let g = BaseGen { repo: ctx.repo.clone(), tree, deps };
-    let r = crate::rebase::rebase_one_with(ctx, s, &g, &head, policy, Some(row.rev))?;
+    let r = crate::rebase::rebase_one_with(ctx, s, &g, &head, policy, Attempt { consume: Some(row.rev), recheck: None })?;
     note_outcome(ctx, row, &r);
     crate::rebase::observe_after(ctx, s, &g, &head);
     Ok(Some(r))
+}
+
+// ---- T2: the catch-up pass -------------------------------------------------
+
+/// The longest wait between two catch-up attempts of one row.
+pub const BACKOFF_CAP: Duration = Duration::from_secs(30 * 60);
+
+/// T2's wait after `attempts` deferrals: Q, 2Q, 4Q … capped at
+/// [`BACKOFF_CAP`], where Q is `rebase.quiet_secs`. A fresh target
+/// (`attempts == 0`, also after every new publish) waits nothing.
+pub fn backoff(quiet_secs: u64, attempts: u64) -> Duration {
+    if attempts == 0 {
+        return Duration::ZERO;
+    }
+    let shift = (attempts - 1).min(32) as u32;
+    let secs = quiet_secs.saturating_mul(1u64 << shift);
+    Duration::from_secs(secs).min(BACKOFF_CAP)
+}
+
+/// What one catch-up pass did with one row.
+// One short-lived value per row per pass; boxing the report buys nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CatchUp {
+    /// Its backoff has not passed yet.
+    NotDue,
+    /// `publish_unfinished` and not on the tracking ref yet (rule 5).
+    Unpushed,
+    /// Stale (§1.6): the row's target was dropped with this reason
+    /// (`stale_base`, `already_based`, `stale_target`).
+    Dropped(String),
+    /// Attempted under `Auto`.
+    Attempted(RebaseReport),
+}
+
+/// Whether a publish of `s` is running: the store's `publishing` flag
+/// (daemon.md §3), set from `record_publish` to the publish's close, across
+/// its lock-free gap before its own post-publish rebase.
+fn publishing(store: &Store, s: &SessionId) -> Result<bool> {
+    Ok(store
+        .open_publishes()?
+        .iter()
+        .any(|r| r.phase == PublishPhase::Running && r.group.batches.iter().any(|b| &b.session == s)))
+}
+
+/// §1.6 staleness, read-only: why the row's target is no longer worth an
+/// attempt, if it is not.
+fn stale(ctx: &Ctx, row: &RebasePending, head: &CommitOid) -> Result<Option<(&'static str, Value)>> {
+    let ws = crate::rebase::workspace(ctx, &row.session)?;
+    if ws.base.tree.as_str() != row.from_tree || ws.base.deps.as_str() != row.from_deps {
+        let d = json!({ "base": ws.base.tree.as_str(), "deps": ws.base.deps.as_str(), "from": row.from_tree });
+        return Ok(Some(("stale_base", d)));
+    }
+    if ctx.git.is_ancestor(head, &ws.head).unwrap_or(false) {
+        return Ok(Some(("already_based", json!({ "head": head.as_str(), "base_head": ws.head.as_str() }))));
+    }
+    if !reachable(Scope::of(ctx), head) {
+        return Ok(Some(("stale_target", json!({ "head": head.as_str() }))));
+    }
+    Ok(None)
+}
+
+/// One T2 attempt of `row` (§1.6): `Auto`, the locks taken without
+/// waiting (`ctx.locks` must be a non-waiting form), and under them the
+/// re-checks: the row's rev and target unchanged, no running publish of the
+/// session, the workspace still on the row's `from`, the target reachable.
+/// Lifecycle Active is G0, run again under the locks by `Auto`. A `Busy`
+/// (a lock, the base build) defers the row with reason `busy`.
+fn attempt_t2(ctx: &Ctx, row: &RebasePending, head: &CommitOid, tree: TreeOid) -> Result<RebaseReport> {
+    let s = &row.session;
+    let sc = Scope::of(ctx);
+    let recheck = |old: &BaseGen| -> Result<Option<RebaseReport>> {
+        let cur = ctx.store.rebase_pending_of(s, ctx.repo)?;
+        if cur.as_ref().map(|r| (r.rev, r.head.as_deref())) != Some((row.rev, Some(head.as_str()))) {
+            return Ok(Some(deferred("state", json!({ "row_changed": true }))));
+        }
+        if publishing(ctx.store, s)? {
+            return Ok(Some(deferred("busy", json!({ "publishing": true }))));
+        }
+        if old.tree.as_str() != row.from_tree || old.deps.as_str() != row.from_deps {
+            return Ok(Some(deferred("state", json!({ "base_changed": true }))));
+        }
+        if !reachable(sc, head) {
+            return Ok(Some(deferred("state", json!({ "unreachable": head.as_str() }))));
+        }
+        Ok(None)
+    };
+    let deps = crate::rebase::workspace_base(ctx, s)?.deps;
+    let g = BaseGen { repo: ctx.repo.clone(), tree, deps };
+    let at = Attempt { consume: Some(row.rev), recheck: Some(&recheck) };
+    let r = match crate::rebase::rebase_one_with(ctx, s, &g, head, MovePolicy::Auto, at) {
+        Ok(r) => r,
+        Err(e) if e.code == Code::Busy => {
+            deferred("busy", json!({ "message": e.message, "detail": e.detail.unwrap_or(Value::Null) }))
+        }
+        Err(e) => return Err(e),
+    };
+    note_outcome(ctx, row, &r);
+    if matches!(r, RebaseReport::Moved { .. }) {
+        crate::rebase::observe_after(ctx, s, &g, head);
+    }
+    Ok(r)
+}
+
+/// T2 (§1.6) for `ctx.repo` at `now`: first, as its own short step under
+/// the repo write lock taken without waiting, every row is reconstructed
+/// (rule 4; `Busy` → the whole repo is skipped this pass, `Err`); the lock
+/// is released before any session queue is taken. Then each row with a
+/// committed target, one session at a time: not before its backoff;
+/// `publish_unfinished` only once pushed (a repo that does not push:
+/// at once); dropped when stale; else attempted under `Auto`.
+/// `ctx.locks` must not wait ([`PublishLocks::waits`](crate::PublishLocks::waits)
+/// `false`): T2 never queues in front of a request.
+pub fn catch_up(ctx: &Ctx, now: SystemTime) -> Result<Vec<(SessionId, Result<CatchUp>)>> {
+    let sc = Scope::of(ctx);
+    let mut inner = Ok(());
+    ctx.locks.with_repo(ctx.repo, &mut || {
+        inner = reconstruct(sc);
+        Ok(())
+    })??;
+    inner?;
+    let rows: Vec<RebasePending> =
+        ctx.store.rebase_pending(None)?.into_iter().filter(|r| r.repo == *ctx.repo && r.head.is_some()).collect();
+    let mut out = Vec::new();
+    for row in rows {
+        let s = row.session.clone();
+        out.push((s, catch_up_row(ctx, &row, now)));
+    }
+    Ok(out)
+}
+
+fn catch_up_row(ctx: &Ctx, row: &RebasePending, now: SystemTime) -> Result<CatchUp> {
+    let (Some(head), Some(tree)) = (row.head.as_deref().and_then(oid), row.tree.as_deref()) else {
+        return Ok(CatchUp::NotDue);
+    };
+    let Ok(tree) = TreeOid::try_from(tree.to_string()) else { return Ok(CatchUp::NotDue) };
+    let wait = backoff(ctx.cfg.rebase.quiet_secs, row.attempts);
+    if now < row.last_at + wait {
+        return Ok(CatchUp::NotDue);
+    }
+    if row.reason == "publish_unfinished" && ctx.cfg.publish.push && !pushed(Scope::of(ctx), &head) {
+        return Ok(CatchUp::Unpushed);
+    }
+    if let Some((why, detail)) = stale(ctx, row, &head)? {
+        tracing::warn!(session = %row.session, repo = %ctx.repo, head = %head, why, "rebase_pending: stale target dropped");
+        ctx.store.discard_pending_target(&row.session, ctx.repo, row.rev, why, &detail, SystemTime::now())?;
+        return Ok(CatchUp::Dropped(why.to_owned()));
+    }
+    Ok(CatchUp::Attempted(attempt_t2(ctx, row, &head, tree)?))
 }
 
 /// Records a non-move outcome of an attempt of `row` (rule 6).

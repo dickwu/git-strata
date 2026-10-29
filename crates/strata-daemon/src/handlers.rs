@@ -386,6 +386,7 @@ pub fn serve(d: &Daemon<'_>, listener: &std::os::unix::net::UnixListener, extern
         let server = Server::new(d, &trackers);
         s.spawn(|| reconcile_loop(d, &trackers, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
         s.spawn(|| old_tree_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
+        s.spawn(|| catch_up_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
         let r = d.serve(listener, external, &|req| server.handle(req));
         done.store(true, Ordering::SeqCst);
         r
@@ -423,6 +424,81 @@ fn reconcile_loop(d: &Daemon<'_>, trackers: &Trackers<'_>, stop: &dyn Fn() -> bo
             .unwrap_or_else(|_| json!({ "at": json_of(&SystemTime::now()), "panicked": true }));
         d.reconciled(last);
     }
+}
+
+/// rm-followups §1.6 T2 on its own thread (started by `serve`, so after
+/// startup's recover and reconstruction): one [`catch_up_pass`] at once,
+/// then one every `opts.catch_up_every` until `stop` (checked every 20 ms).
+/// A panicking pass is logged, not fatal.
+fn catch_up_loop(d: &Daemon<'_>, stop: &dyn Fn() -> bool) {
+    let every = d.core.opts.catch_up_every;
+    loop {
+        if stop() {
+            return;
+        }
+        if catch_unwind(AssertUnwindSafe(|| catch_up_pass(d, SystemTime::now()))).is_err() {
+            tracing::warn!("the catch-up pass panicked");
+        }
+        let next = std::time::Instant::now() + every;
+        loop {
+            if stop() {
+                return;
+            }
+            let now = std::time::Instant::now();
+            if now >= next {
+                break;
+            }
+            std::thread::sleep((next - now).min(std::time::Duration::from_millis(20)));
+        }
+    }
+}
+
+/// One repo's share of a [`catch_up_pass`]: `Err` when the repo was
+/// skipped, else each row's session and outcome.
+pub type RepoCatchUp = Result<Vec<(SessionId, Result<strata_publish::pending::CatchUp>)>>;
+
+/// One T2 pass over every configured repo, as of `now` (tests pass a
+/// later clock). Each repo's locks are taken without waiting
+/// ([`PublishLocksNoWait`]); a repo whose lock is busy is skipped this
+/// pass. Returns what happened to each row, per repo.
+pub fn catch_up_pass(
+    d: &Daemon<'_>,
+    now: SystemTime,
+) -> Vec<(RepoName, RepoCatchUp)> {
+    let core = d.core;
+    let mut out = Vec::new();
+    for repo in core.config.repos.keys() {
+        let r = (|| {
+            let rc = effective_cfg(core, repo)?;
+            let git = git_of(core, repo)?;
+            let deps = strata_deps::Ctx {
+                store: &core.store,
+                paths: &core.config.paths,
+                repo,
+                cfg: &rc,
+                git,
+                env: &core.env,
+                locks: &core.locks,
+            };
+            let locks = PublishLocksNoWait { locks: &core.locks, du: &d.du };
+            let ctx = strata_publish::Ctx { store: &core.store, git, cfg: &rc, repo, deps: &deps, locks: &locks, sessions: &d.sessions };
+            strata_publish::pending::catch_up(&ctx, now)
+        })();
+        match &r {
+            Err(e) if e.code == Code::Busy => tracing::debug!(repo = %repo, "catch-up: the repo is busy; skipped"),
+            Err(e) => tracing::warn!(repo = %repo, error = %e.message, "catch-up failed"),
+            Ok(rows) => {
+                for (s, o) in rows {
+                    match o {
+                        Ok(o) => tracing::debug!(repo = %repo, session = %s, outcome = ?o, "catch-up"),
+                        Err(e) => tracing::warn!(repo = %repo, session = %s, error = %e.message, "catch-up attempt failed"),
+                    }
+                }
+            }
+        }
+        out.push((repo.clone(), r));
+    }
+    out
 }
 
 /// How long a queued old tree whose session was busy waits before it is
@@ -1563,7 +1639,7 @@ impl Server<'_, '_> {
             let Some(copy) = row.head.as_deref().and_then(|h| rp.map.iter().find(|(_, n)| n.as_str() == h)) else { continue };
             let (from, to) = (copy.0.clone(), copy.1.clone());
             let s = row.session.clone();
-            let r = self.with_publish_ctx(repo, |ctx| strata_publish::pending::attempt(ctx, &row, strata_publish::MovePolicy::Explicit));
+            let r = self.with_publish_ctx(repo, |ctx| strata_publish::pending::attempt(ctx, &row, strata_publish::MovePolicy::Auto));
             match r {
                 Ok(Some(report)) => rebases.push(json!({ "session": s.as_str(), "from": from.as_str(), "to": to.as_str(), "report": json_of(&report) })),
                 Ok(None) => {}
@@ -1739,6 +1815,68 @@ fn landed_before(rows: &[strata_store::PublishRecord], b: &strata_types::Batch) 
             json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "push": o.get("push").cloned().unwrap_or(Value::Null) })
         })
     })
+}
+
+/// rm-followups §1.6 T2's locks: every take only if free right now (the
+/// holder shows as `catch_up`), `Busy` otherwise, never waited out; the
+/// rebase's take adds the du hold like [`PublishLocksDu`].
+struct PublishLocksNoWait<'a> {
+    locks: &'a crate::locks::Locks,
+    du: &'a Arc<crate::du::Du>,
+}
+
+const CATCH_UP: &str = "catch_up";
+
+impl strata_publish::PublishLocks for PublishLocksNoWait<'_> {
+    fn with_sessions(
+        &self,
+        sessions: &[SessionId],
+        f: &mut dyn FnMut() -> strata_publish::Result<()>,
+    ) -> strata_publish::Result<strata_publish::Result<()>> {
+        let mut inner = None;
+        self.locks.try_sessions(sessions, CATCH_UP, || {
+            inner = Some(f());
+            Ok(())
+        })?;
+        Ok(inner.unwrap_or(Ok(())))
+    }
+
+    fn with_repo(
+        &self,
+        repo: &RepoName,
+        f: &mut dyn FnMut() -> strata_publish::Result<()>,
+    ) -> strata_publish::Result<strata_publish::Result<()>> {
+        let mut inner = None;
+        self.locks.try_repo(repo, CATCH_UP, || {
+            inner = Some(f());
+            Ok(())
+        })?;
+        Ok(inner.unwrap_or(Ok(())))
+    }
+
+    fn with_rebase_sessions(
+        &self,
+        sessions: &[SessionId],
+        f: &mut dyn FnMut() -> strata_publish::Result<()>,
+    ) -> strata_publish::Result<strata_publish::Result<()>> {
+        let ids: Vec<&str> = sessions.iter().map(SessionId::as_str).collect();
+        let mut refused = None;
+        let r = self.with_sessions(sessions, &mut || match self.du.hold_sessions(&ids, crate::du::HOLD_WAIT) {
+            Ok(_hold) => f(),
+            Err(e) => {
+                refused = Some(e);
+                Ok(())
+            }
+        });
+        match refused {
+            Some(e) => Err(e),
+            None => r,
+        }
+    }
+
+    fn waits(&self) -> bool {
+        false
+    }
 }
 
 /// publish's locks, with the du hold (status-perf D8) on the rebase's take

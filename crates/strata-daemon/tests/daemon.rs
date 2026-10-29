@@ -1610,3 +1610,84 @@ fn finished_connections_release_their_descriptors() {
     drop(d);
     core.close().unwrap();
 }
+
+/// rm-followups §1.6 T2 through the daemon: a publish whose own move was
+/// deferred (a file of the session held open) is caught up by
+/// `catch_up_pass`; while a request holds the session's queue the pass
+/// defers it `busy` at once instead of waiting.
+#[test]
+fn catch_up_pass_moves_a_deferred_session_and_never_waits() {
+    let mut fx = Dfx::new();
+    fx.catch_up_every = Duration::from_secs(3600);
+    let sock = fx.socket();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    serving(&d, || {
+        let id = new_session(&sock);
+        let root = ws(&core, &id, "tool");
+        external(&root, "printf 'export const a = 5\\n' > src/index.ts && printf 'later\\n' > later.txt");
+        let cp = ok(call(&sock, "checkpoint", json!({
+            "session": id, "repo": "tool",
+            "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+        })));
+        let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+        let g = group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]);
+        let mut holder = Command::new("/bin/sleep")
+            .arg("300")
+            .current_dir("/")
+            .stdin(fs::File::open(root.join("later.txt")).unwrap())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let r = ok(call(&sock, "publish", json!({ "group": g })));
+        let _ = holder.kill();
+        let _ = holder.wait();
+        let rep = &r["published"][0]["rebases"][0]["report"];
+        assert_eq!((rep["kind"].as_str(), rep["reason"].as_str()), (Some("Deferred"), Some("open_files")), "{r:#}");
+        let commit = r["published"][0]["commit"].as_str().unwrap().to_string();
+        let tool = repo_name("tool");
+        let row = core.store.rebase_pending_of(&id, &tool).unwrap().expect("a deferred target");
+        assert_eq!(row.head.as_deref(), Some(commit.as_str()));
+
+        // A request holds the session's queue: the pass does not wait.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|sc| {
+            let core = &core;
+            let id2 = id.clone();
+            sc.spawn(move || {
+                core.locks
+                    .with_sessions(&[id2], || {
+                        held_tx.send(()).unwrap();
+                        rx.recv().ok();
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+            held_rx.recv().unwrap();
+            let t0 = Instant::now();
+            let out = handlers::catch_up_pass(&d, std::time::SystemTime::now());
+            assert!(t0.elapsed() < core.locks.wait(), "the pass waited: {:?}", t0.elapsed());
+            let rows = out.into_iter().find(|(r, _)| *r == tool).unwrap().1.unwrap();
+            match &rows[..] {
+                [(s, Ok(strata_publish::pending::CatchUp::Attempted(strata_publish::RebaseReport::Deferred { reason, .. })))] => {
+                    assert_eq!((s, reason.as_str()), (&id, "busy"));
+                }
+                o => panic!("{o:?}"),
+            }
+            tx.send(()).unwrap();
+        });
+        assert_eq!(core.store.rebase_pending_of(&id, &tool).unwrap().unwrap().reason, "busy");
+
+        // Free: moved onto the published commit, the row consumed.
+        let out = handlers::catch_up_pass(&d, std::time::SystemTime::now());
+        let rows = out.into_iter().find(|(r, _)| *r == tool).unwrap().1.unwrap();
+        assert!(
+            matches!(&rows[..], [(_, Ok(strata_publish::pending::CatchUp::Attempted(strata_publish::RebaseReport::Moved { .. })))]),
+            "{rows:?}"
+        );
+        assert_eq!(core.store.session(&id).unwrap().unwrap().manifest.repos[&tool].head.as_str(), commit);
+        assert!(core.store.rebase_pending_of(&id, &tool).unwrap().is_none());
+        assert_eq!(fs::read(root.join("later.txt")).unwrap(), b"later\n");
+    });
+}

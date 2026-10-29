@@ -304,7 +304,9 @@ exit $rc
             pin_unpushed: true,
             check_siblings: Vec::new(),
             rm: Default::default(),
-            rebase: Default::default(),
+            // rm-followups: no quiet window, so a publish moves its own
+            // session at once (tests of the window set it).
+            rebase: strata_types::RebaseConfig { quiet_secs: 0, ..Default::default() },
         }
     }
 }

@@ -97,7 +97,7 @@ fn no_such_session(s: &SessionId) -> StrataError {
 }
 
 /// A live session's workspace of `ctx.repo`.
-fn workspace(ctx: &Ctx, s: &SessionId) -> Result<WorkspaceState> {
+pub(crate) fn workspace(ctx: &Ctx, s: &SessionId) -> Result<WorkspaceState> {
     let rec = match ctx.store.session(s)? {
         Some(r) if r.lifecycle != Lifecycle::Removed => r,
         _ => return Err(no_such_session(s)),
@@ -126,6 +126,8 @@ fn sleep_busy() {
 
 /// The session queue (for `sessions`) then the repo write lock, both
 /// waited for without a bound: this runs after the first visible write.
+/// With locks that do not wait (T2, rm-followups §1.6) a `Busy` take is
+/// returned instead.
 fn under_locks<T>(ctx: &Ctx, sessions: &[SessionId], f: &mut dyn FnMut() -> Result<T>) -> Result<T> {
     loop {
         let mut slot: Option<Result<T>> = None;
@@ -135,14 +137,14 @@ fn under_locks<T>(ctx: &Ctx, sessions: &[SessionId], f: &mut dyn FnMut() -> Resu
                     slot = Some(f());
                     Ok(())
                 }) {
-                    Err(e) if e.code == Code::Busy => sleep_busy(),
+                    Err(e) if e.code == Code::Busy && ctx.locks.waits() => sleep_busy(),
                     Err(e) => return Err(e),
                     Ok(r) => return r,
                 }
             }
         });
         match r {
-            Err(e) if e.code == Code::Busy => sleep_busy(),
+            Err(e) if e.code == Code::Busy && ctx.locks.waits() => sleep_busy(),
             Err(e) => return Err(e),
             Ok(r) => {
                 r?;
@@ -158,11 +160,18 @@ fn under_locks<T>(ctx: &Ctx, sessions: &[SessionId], f: &mut dyn FnMut() -> Resu
 
 /// `ensure_base_for`, whose base step takes the repo write lock with the
 /// bounded wait: after the first visible write that wait is not bounded
-/// (§5.1), so a plain lock `Busy` (no `reason`) is asked again.
+/// (§5.1), so a plain lock `Busy` (no `reason`) is asked again. With locks
+/// that do not wait (T2) it is asked once and a `Busy` is returned.
 fn base_for(ctx: &Ctx, tree: &strata_types::TreeOid, deps: &DepsSetId) -> Result<BaseGen> {
     loop {
         match ctx.sessions.ensure_base_for(ctx.repo, tree, deps) {
-            Err(e) if e.code == Code::Busy && e.detail.as_ref().and_then(|d| d.get("reason")).is_none() => sleep_busy(),
+            Err(e)
+                if ctx.locks.waits()
+                    && e.code == Code::Busy
+                    && e.detail.as_ref().and_then(|d| d.get("reason")).is_none() =>
+            {
+                sleep_busy()
+            }
             r => return r,
         }
     }
@@ -202,7 +211,7 @@ fn inputs_landed(ctx: &Ctx, overlay: &Overlay, new: &Base) -> bool {
     })
 }
 
-fn deferred(reason: &str, detail: Value) -> RebaseReport {
+pub(crate) fn deferred(reason: &str, detail: Value) -> RebaseReport {
     RebaseReport::Deferred { reason: reason.to_owned(), detail, proposal: None }
 }
 
@@ -269,6 +278,19 @@ fn auto_gates(ctx: &Ctx, s: &SessionId, old: &BaseGen, new: &Base) -> Result<std
     Ok(Ok(kept))
 }
 
+/// A re-check run under the session queue and the repo write lock, given
+/// the workspace's base the attempt started from: `Some` ends the attempt
+/// with that report before anything is written (T2, rm-followups §1.6).
+pub(crate) type Recheck<'r> = &'r dyn Fn(&BaseGen) -> Result<Option<RebaseReport>>;
+
+/// How one attempt runs (rm-followups §1.6): `consume` is the
+/// `rebase_pending` rev a move deletes in `finish_move`'s transaction.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Attempt<'r> {
+    pub consume: Option<u64>,
+    pub recheck: Option<Recheck<'r>>,
+}
+
 /// Steps 1–4 of §5.8 for one session. Step 5 (`observe_main`) is the
 /// caller's: `publish` runs it once for the whole group.
 pub(crate) fn rebase_one_with(
@@ -277,7 +299,7 @@ pub(crate) fn rebase_one_with(
     new_base: &BaseGen,
     head: &CommitOid,
     policy: MovePolicy,
-    consume: Option<u64>,
+    at: Attempt<'_>,
 ) -> Result<RebaseReport> {
     if new_base.repo != *ctx.repo {
         return Err(invalid(
@@ -319,12 +341,20 @@ pub(crate) fn rebase_one_with(
     let queue = [s.clone()];
     under_locks(ctx, &queue, &mut || {
         let ws = workspace(ctx, s)?;
+        if ws.base != old && policy == MovePolicy::Auto {
+            return Ok(deferred("state", json!({ "base_changed": true })));
+        }
         if ws.base != old {
             return Err(invalid(
                 "base_changed",
                 format!("session {s} moved to another base while its rebase waited"),
                 json!({ "session": s.as_str(), "base": ws.base.tree.as_str(), "deps": ws.base.deps.as_str() }),
             ));
+        }
+        if let Some(check) = at.recheck
+            && let Some(d) = check(&old)?
+        {
+            return Ok(d);
         }
         // 2. A draft whose input changes all landed is promoted.
         let draft = deps::open_proposals(ctx.store, Some(ctx.repo))?.into_iter().rev().find(|p| {
@@ -358,8 +388,12 @@ pub(crate) fn rebase_one_with(
             {
                 return Ok(d);
             }
-            return match ctx.sessions.move_workspace_consuming(s, &repo_id, target.clone(), head.clone(), consume) {
+            return match ctx.sessions.move_workspace_consuming(s, &repo_id, target.clone(), head.clone(), at.consume) {
                 Ok(r) => Ok(RebaseReport::Moved { dropped: r.dropped, lww: r.lww, regenerable_kept: kept.clone() }),
+                // §1.7: `OpenFiles` is for `Explicit` callers only.
+                Err(e) if e.code == Code::OpenFiles && policy == MovePolicy::Auto => {
+                    Ok(deferred("open_files", e.detail.unwrap_or(Value::Null)))
+                }
                 Err(e) if e.code == Code::OpenFiles => {
                     Ok(RebaseReport::OpenFiles { detail: e.detail.unwrap_or(Value::Null) })
                 }
@@ -403,7 +437,7 @@ pub(crate) fn after_publish(ctx: &Ctx, s: &SessionId, tree: &strata_types::TreeO
     let old = workspace(ctx, s)?.base;
     let g = BaseGen { repo: ctx.repo.clone(), tree: tree.clone(), deps: old.deps };
     let row = ctx.store.rebase_pending_of(s, ctx.repo).ok().flatten().filter(|r| r.head.as_deref() == Some(head.as_str()));
-    let r = rebase_one_with(ctx, s, &g, head, MovePolicy::Explicit, row.as_ref().map(|r| r.rev))?;
+    let r = rebase_one_with(ctx, s, &g, head, MovePolicy::Auto, Attempt { consume: row.as_ref().map(|r| r.rev), recheck: None })?;
     if let Some(row) = &row {
         crate::pending::note_outcome(ctx, row, &r);
     }
@@ -443,7 +477,7 @@ pub fn rebase_session_with(
             json!({ "repo": repo.as_str(), "ctx_repo": ctx.repo.as_str() }),
         ));
     }
-    let report = rebase_one_with(ctx, &session, &new_base, &head, policy, None)?;
+    let report = rebase_one_with(ctx, &session, &new_base, &head, policy, Attempt::default())?;
     // 5. After the lock: main's record, best-effort.
     if deps::main_tip(ctx.cfg, ctx.git).ok().flatten().as_ref() == Some(&head) {
         let dir = ctx.store.base_dir(&BaseGen { deps: workspace(ctx, &session)?.base.deps, ..new_base.clone() });

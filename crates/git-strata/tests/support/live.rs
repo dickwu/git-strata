@@ -124,7 +124,7 @@ impl Live {
                 "deps_dirs = []"
             };
             t.push_str(&format!(
-                "\n[repo.{n}]\npath = {p:?}\ndefault_branch = \"main\"\n{deps}\ndeploy_on_push = {g}\n\n[repo.{n}.publish]\nbranch = \"main\"\npush = {g}\nconfirm = {g}\n",
+                "\n[repo.{n}]\npath = {p:?}\ndefault_branch = \"main\"\n{deps}\ndeploy_on_push = {g}\n\n[repo.{n}.publish]\nbranch = \"main\"\npush = {g}\nconfirm = {g}\n\n[repo.{n}.rebase]\nquiet_secs = 0\n",
                 p = p.to_string_lossy(),
             ));
         }
@@ -142,6 +142,7 @@ impl Live {
             install_path: format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.bin.display()),
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
             reconcile_every: strata_daemon::RECONCILE_EVERY,
+            catch_up_every: strata_daemon::CATCH_UP_EVERY,
         }
     }
 

@@ -190,13 +190,31 @@ fn post_publish_rebase_drops_published_paths() {
 fn later_edits_survive_rebase() {
     let fx = fx();
     let (s, g) = session_with(&fx, &[("src/index.ts", b"export const a = 1\n")], None);
+    let before = fx.base_of(&s, "tool");
     // Written after the selected checkpoint.
     fx.edit(&s, "tool", &[("src/index.ts", b"export const a = 2\n"), ("later.txt", b"later\n")]);
     let p = run(&fx, &g).unwrap();
     let main = fx.main("tool");
     let blob = fx.sb.git(&main, &["show", &format!("{}:src/index.ts", p.commit.as_str())]);
     assert_eq!(blob.trim_end(), "export const a = 1", "the later bytes are not in the commit");
-    assert!(matches!(report(&p, &s), RebaseReport::Moved { .. }));
+    // rm-followups §1.4 G3: the later edit conflicts with the published
+    // bytes, so the post-publish (Auto) move defers and keeps the target.
+    match report(&p, &s) {
+        RebaseReport::Deferred { reason, detail, .. } => {
+            assert_eq!(reason, "conflicts");
+            assert_eq!(detail["paths"], serde_json::json!(["src/index.ts"]), "{detail}");
+        }
+        r => panic!("{r:?}"),
+    }
+    assert_eq!(fx.base_of(&s, "tool"), before, "the session did not move");
+    assert_eq!(pending(&fx, &s).expect("a deferred target").reason, "conflicts");
+    // An explicit rebase moves it and keeps the later bytes.
+    let d = fx.deps_ctx("tool");
+    let ss = fx.sessions();
+    let ctx = fx.ctx(&d, &ss);
+    let ng = BaseGen { repo: repo_name("tool"), tree: fx.git_of("tool").tree_of(&p.commit).unwrap(), deps: before.deps };
+    let r = rebase_session(&ctx, s.clone(), &repo_name("tool"), ng, p.commit.clone()).unwrap();
+    assert!(matches!(r, RebaseReport::Moved { .. }), "{r:?}");
     assert_eq!(read(&fx, &s, "src/index.ts").unwrap(), b"export const a = 2\n");
     assert_eq!(read(&fx, &s, "later.txt").unwrap(), b"later\n");
     let paths = overlay_paths(&fx, &s);
@@ -325,14 +343,18 @@ fn open_files_does_not_fail_a_landed_publish() {
     let h = Holder::file(&held);
     let p = run(&fx, &g).expect("the publish succeeds");
     match report(&p, &s) {
-        RebaseReport::OpenFiles { detail } => assert!(detail["holders"].as_array().is_some_and(|a| !a.is_empty()), "{detail}"),
+        // rm-followups §1.7: under Auto open files defer the move.
+        RebaseReport::Deferred { reason, detail, .. } => {
+            assert_eq!(reason, "open_files");
+            assert!(detail["holders"].as_array().is_some_and(|a| !a.is_empty()), "{detail}");
+        }
         r => panic!("{r:?}"),
     }
     drop(h);
     assert_eq!(fx.read_ref("tool", CHAIN).unwrap(), p.commit.as_str());
     assert_eq!(fx.store().publish_record(p.id).unwrap().unwrap().phase, PublishPhase::Done);
     assert_eq!(fx.base_of(&s, "tool"), before, "the session did not move");
-    assert_eq!(row_outcome(&fx, p.id)["rebase"][0]["kind"], "OpenFiles");
+    assert_eq!(row_outcome(&fx, p.id)["rebase"][0]["kind"], "Deferred");
     let r = pending(&fx, &s).expect("a deferred target");
     assert_eq!((r.head.as_deref(), r.reason.as_str(), r.attempts), (Some(p.commit.as_str()), "open_files", 1));
     // After the process is gone a later rebase moves it; the commit is not replayed.
