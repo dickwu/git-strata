@@ -121,6 +121,30 @@ impl Sessions<'_> {
         }
     }
 
+    /// A registered generation of `tree`, `prefer`'s deps first; never
+    /// builds or verifies anything (rm-followups §1.9 T3).
+    pub(crate) fn built_base(&self, repo: &RepoName, tree: &TreeOid, prefer: &DepsSetId) -> Result<Option<BaseGen>> {
+        let g = BaseGen { repo: repo.clone(), tree: tree.clone(), deps: prefer.clone() };
+        if self.store.has_base_gen(&g)? {
+            return Ok(Some(g));
+        }
+        let dir = rp(format!("bases/{repo}/{tree}"));
+        for item in strata_apfs::list_dir(&self.config.paths.root, Some(&dir)) {
+            let (p, _) = match item {
+                Ok(x) => x,
+                Err(e) if matches!(e.code, Code::NoSuchPath) => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            let Some(name) = Path::new(p.as_str()).file_name().and_then(|n| n.to_str()) else { continue };
+            let Ok(d) = DepsSetId::try_from(name.to_string()) else { continue };
+            let g = BaseGen { repo: repo.clone(), tree: tree.clone(), deps: d };
+            if self.store.has_base_gen(&g)? {
+                return Ok(Some(g));
+            }
+        }
+        Ok(None)
+    }
+
     /// §5.2 step 2.
     fn hot_base(&self, repo: &RepoName, tree: &TreeOid, given: Option<&DepsSet>) -> Result<Option<BaseGen>> {
         if let Some(set) = given {

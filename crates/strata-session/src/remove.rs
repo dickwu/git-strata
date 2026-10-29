@@ -45,6 +45,9 @@ pub struct RemoveReport {
 struct Judged {
     landed: BTreeMap<RepoName, Vec<OverlayEntry>>,
     regenerable: BTreeMap<RepoName, Vec<OverlayEntry>>,
+    /// rm-followups §1.9 T3: the entries a move onto this candidate tree
+    /// discharges as a whole; Phase B recomputes them from the checkpoint.
+    projected: BTreeMap<RepoName, (TreeOid, Vec<OverlayEntry>)>,
 }
 
 /// rm-followups §1.8: the effective `rm.regenerable` rules of one repo.
@@ -191,6 +194,17 @@ impl Sessions<'_> {
                 if !discard {
                     let mut let_go: Vec<OverlayEntry> = judged.landed.get(repo).cloned().unwrap_or_default();
                     let_go.extend(judged.regenerable.get(repo).cloned().unwrap_or_default());
+                    // §1.9 T3: a projected entry stays let go only if the same
+                    // projection over the checkpoint still discharges it.
+                    if let Some((onto, ents)) = judged.projected.get(repo) {
+                        let ov = strata_overlay::Overlay { base: ws.base.clone(), entries: cp.checkpoint.entries.clone() };
+                        let still = self
+                            .project(repo, ws, git, &base, &ov, ents, onto, &unstable(&cp.warnings))
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                        let_go.extend(ents.iter().filter(|e| still.contains(e)).cloned());
+                    }
                     let regen = Regenerable::new(&self.regenerable(repo), cfg);
                     let left = recheck(
                         self.store,
@@ -359,10 +373,12 @@ impl Sessions<'_> {
         let mut landed_all: BTreeMap<RepoName, Vec<OverlayEntry>> = BTreeMap::new();
         let mut landed = Map::new();
         let mut landed_errors = Map::new();
+        let mut projection_errors = Map::new();
         let mut untracked: Vec<Value> = Vec::new();
         let mut regen_all: BTreeMap<RepoName, Vec<OverlayEntry>> = BTreeMap::new();
         let mut regen_json = Map::new();
         let mut old_trees: Vec<Value> = Vec::new();
+        let mut projected_all: BTreeMap<RepoName, (TreeOid, Vec<OverlayEntry>)> = BTreeMap::new();
         if rec.lifecycle == Lifecycle::Unknown {
             unresolved.push(json!({ "kind": "session_unknown", "scene": rec.scene.clone().unwrap_or(Value::Null) }));
         }
@@ -396,16 +412,62 @@ impl Sessions<'_> {
                 let wsref = WorkspaceRef { session: id, repo, root: &ws.path, config: cfg, git, store: self.store };
                 let mut t = strata_overlay::Tracker::new(&ws.path, strata_overlay::DEFAULT_DIRTY_CAPACITY);
                 let scan = strata_overlay::compute(&wsref, &base, &mut t, None)?;
-                let entries = scan.overlay.entries;
+                let unstable_paths = unstable(&scan.warnings);
+                let full = scan.overlay;
+                let entries = full.entries.clone();
                 let mut remaining = if !ws.tracked || entries.is_empty() {
                     entries
                 } else {
-                    match split_landed(self.store, git, id, repo, &cfg.publish.branch, entries.clone(), &unstable(&scan.warnings))
+                    match split_landed(self.store, git, id, repo, &cfg.publish.branch, entries.clone(), &unstable_paths)
                     {
-                        Ok(sp) => {
-                            if !sp.landed.is_empty() {
-                                landed.insert(repo.as_str().into(), sp.summary());
-                                landed_all.insert(repo.clone(), sp.landed);
+                        Ok(mut sp) => {
+                            // §1.9 T3: what is left, projected onto the newest
+                            // D57-eligible publish (the move's judgement).
+                            let regen = Regenerable::new(&self.regenerable(repo), cfg);
+                            let rest: Vec<OverlayEntry> =
+                                sp.remaining.iter().filter(|e| !regen.matches(e)).cloned().collect();
+                            let mut rebased = 0usize;
+                            let mut onto_publish = None;
+                            // Only a publish newer than the base: onto an older
+                            // tree, a revert to its content would look discharged.
+                            let newer = |c: &Candidate| {
+                                c.commit != ws.head && git.is_ancestor(&ws.head, &c.commit).unwrap_or(false)
+                            };
+                            if let Some(c) = sp.newest.take().filter(|c| !rest.is_empty() && newer(c)) {
+                                let tree = git.tree_of(&c.commit);
+                                match tree.and_then(|t| {
+                                    self.project(repo, ws, git, &base, &full, &rest, &t, &unstable_paths)
+                                        .map(|r| r.map(|d| (t, d)))
+                                }) {
+                                    Ok(Some((t, d))) if !d.is_empty() => {
+                                        sp.remaining.retain(|e| !d.contains(e));
+                                        rebased = d.len();
+                                        onto_publish = Some(c.publish);
+                                        projected_all.insert(repo.clone(), (t, d));
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        projection_errors.insert(repo.as_str().into(), json!(e.message));
+                                    }
+                                }
+                            }
+                            if !sp.landed.is_empty() || rebased > 0 {
+                                let mut v = sp.summary();
+                                if let Some(n) = onto_publish {
+                                    v["count"] = json!(sp.landed.len() + rebased);
+                                    v["rebased"] = json!(rebased);
+                                    v["rebased_onto"] = json!(n);
+                                    let mut ps = u64s(v.get("publishes"));
+                                    if !ps.contains(&n) {
+                                        ps.push(n);
+                                        ps.sort_unstable();
+                                    }
+                                    v["publishes"] = json!(ps);
+                                }
+                                landed.insert(repo.as_str().into(), v);
+                                if !sp.landed.is_empty() {
+                                    landed_all.insert(repo.clone(), sp.landed);
+                                }
                             }
                             sp.remaining
                         }
@@ -453,7 +515,7 @@ impl Sessions<'_> {
             }
         }
         if unresolved.is_empty() && repos.is_empty() && untracked.is_empty() && old_trees.is_empty() {
-            return Ok(Judged { landed: landed_all, regenerable: regen_all });
+            return Ok(Judged { landed: landed_all, regenerable: regen_all, projected: projected_all });
         }
         let msg = dirty_message(&self.refused_prefix(rec), id, rec.lifecycle, &repos, &landed, &untracked, &unresolved, &old_trees);
         Err(StrataError::new(Code::Dirty, msg).with_detail({
@@ -467,6 +529,9 @@ impl Sessions<'_> {
                 "removed": false,
                 "lifecycle": lc_title(rec.lifecycle),
             });
+            if !projection_errors.is_empty() {
+                d["projection_errors"] = Value::Object(projection_errors);
+            }
             if !landed_errors.is_empty() {
                 d["landed_errors"] = Value::Object(landed_errors);
             }
@@ -558,6 +623,7 @@ fn git_mode(mode: u32) -> u32 {
 }
 
 /// One Done publish of this session whose commit origin has (D57).
+#[derive(Clone)]
 struct Candidate {
     publish: u64,
     commit: CommitOid,
@@ -571,6 +637,8 @@ struct Split {
     landed: Vec<OverlayEntry>,
     /// The candidates something landed at, newest first.
     used: Vec<Candidate>,
+    /// rm-followups §1.9 T3: the newest candidate, the projection's target.
+    newest: Option<Candidate>,
 }
 
 impl Split {
@@ -723,6 +791,48 @@ fn dirty_message(
     s
 }
 
+impl Sessions<'_> {
+    /// rm-followups §1.9 T3: of `rest`, the entries that a move of
+    /// `overlay` onto tree `onto` would discharge as a whole: no path they
+    /// touch (both rename endpoints) is in the projected overlay, a
+    /// conflict, an `.lww` path or unstable. `None` when `onto` is the base
+    /// tree or no base of it is built (nothing is built here).
+    #[allow(clippy::too_many_arguments)]
+    fn project(
+        &self,
+        repo: &RepoName,
+        ws: &WorkspaceState,
+        git: &Git,
+        old: &strata_overlay::Base,
+        overlay: &strata_overlay::Overlay,
+        rest: &[OverlayEntry],
+        onto: &TreeOid,
+        unstable: &BTreeSet<RepoPath>,
+    ) -> Result<Option<Vec<OverlayEntry>>> {
+        if *onto == old.r#gen.tree {
+            return Ok(None);
+        }
+        let Some(g) = self.built_base(repo, onto, &old.r#gen.deps)? else {
+            return Ok(None);
+        };
+        let new = self.base_of(&g)?;
+        let ignorecase = git.read_index(&ws.path)?.ignorecase;
+        let opts = strata_overlay::RebaseOptions::for_move(&new, ignorecase)?;
+        let blobs = strata_overlay::PreviewBlobs::new(self.store, &ws.path, overlay);
+        let (r, _) = strata_overlay::rebase_with(overlay, old, &new, &blobs, &opts)?;
+        let mut blocked: BTreeSet<RepoPath> = unstable.clone();
+        for e in &r.overlay.entries {
+            blocked.insert(e.path.clone());
+            if let EntryKind::Renamed { from, .. } = &e.kind {
+                blocked.insert(from.clone());
+            }
+        }
+        blocked.extend(r.conflicts.iter().cloned());
+        blocked.extend(r.lww.iter().cloned());
+        Ok(Some(rest.iter().filter(|e| !touches(e, &blocked)).cloned().collect()))
+    }
+}
+
 /// §5.6 step 4.2 (D57): Done publishes this session took part in for
 /// `repo`, whose commit origin's tracking ref already has; newest first.
 fn candidates(store: &Store, git: &Git, session: &SessionId, repo: &RepoName, branch: &str) -> Result<Vec<Candidate>> {
@@ -817,7 +927,9 @@ fn split_landed(
 ) -> Result<Split> {
     let (mut pending, never): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| !touches(e, unstable));
     let mut sp = Split::default();
-    for c in candidates(store, git, session, repo, branch)? {
+    let cands = candidates(store, git, session, repo, branch)?;
+    sp.newest = cands.first().cloned();
+    for c in cands {
         if pending.is_empty() {
             break;
         }
