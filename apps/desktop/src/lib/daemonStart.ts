@@ -101,12 +101,16 @@ export function startErrorText(e: unknown): StartError {
   }
 }
 
-/** The foreign variant's text: from a failed start, else from legacy_agent's refusal. */
+/**
+ * The foreign variant's text: from a failed start, else from legacy_agent's refusal. A failed
+ * start's refusal counts only while legacy_agent has not since reported a non-foreign agent,
+ * so once the human fixes it (and the query refetches) the Start button comes back.
+ */
 export function foreignText(
   agent: LegacyAgent | undefined,
   err: StartError | null
 ): StartError | null {
-  if (err?.foreign) return err;
+  if (err?.foreign && (agent === undefined || agent.state === 'foreign')) return err;
   const r: GuiError | undefined = agent?.state === 'foreign' ? agent.refusal : undefined;
   return r
     ? startErrorText(r)

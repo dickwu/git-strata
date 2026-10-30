@@ -76,9 +76,11 @@ describe('foreign (cli.md D38)', () => {
     expect(t.title).toContain('/Users/x/Library');
     expect(t.hint).toContain('launchctl bootout gui/$(id -u)/com.gwd.git-stratad');
   });
-  test('foreignText prefers a failed start, then the refusal, else nothing', () => {
+  test('foreignText: a failed start until legacy_agent says otherwise, then the refusal, else nothing', () => {
     const e = startErrorText(other);
-    expect(foreignText(agent('loaded'), e)).toBe(e);
+    expect(foreignText(undefined, e)).toBe(e);
+    expect(foreignText(agent('foreign'), e)).toBe(e);
+    expect(foreignText(agent('loaded'), e)).toBeNull();
     expect(foreignText({ ...agent('foreign'), refusal: home }, null)?.title).toBe(
       startErrorText(home).title
     );

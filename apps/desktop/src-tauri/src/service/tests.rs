@@ -529,6 +529,19 @@ fn loaded_path_reads_only_the_top_level_path() {
         "nested and stdout paths do not count"
     );
     assert_eq!(scope::loaded_path(""), None);
+    // A nested dict before the top-level line, and a depth-0 `path =`.
+    let t = "path = /depth0\nsvc = {\n\tsub = {\n\t\tpath = /nested\n\t}\n\tpath = /top\n}\n";
+    assert_eq!(scope::loaded_path(t).as_deref(), Some("/top"));
+}
+
+#[test]
+fn anchored_keeps_a_deleted_tail_under_a_canonical_ancestor() {
+    let d = tempfile::tempdir().unwrap();
+    let canon = std::fs::canonicalize(d.path()).unwrap();
+    assert_eq!(
+        scope::anchored(&d.path().join("gone/x.plist")),
+        canon.join("gone/x.plist")
+    );
 }
 
 #[test]

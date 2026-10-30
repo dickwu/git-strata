@@ -113,7 +113,7 @@ export function DaemonDownAlert() {
   const agent = useLegacyAgent();
   const err = useDaemonStart((x) => x.error);
   const e = err ? startErrorText(err) : null;
-  const foreign = downVariant(agent.data) === 'foreign' || Boolean(e?.foreign);
+  const foreign = foreignText(agent.data, e) !== null;
   const setup = downVariant(agent.data) === 'setup' || Boolean(e?.setup);
   return (
     <Alert
