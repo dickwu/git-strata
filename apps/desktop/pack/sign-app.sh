@@ -19,7 +19,7 @@ macos="$app/Contents/MacOS"
 prefix="io.github.dickwu.git-strata"
 
 sign() { # file identifier
-  codesign --force "${kc[@]}" --sign "$id" --identifier "$2" --options runtime "${ts[@]}" "$1"
+  codesign --force ${kc[@]+"${kc[@]}"} --sign "$id" --identifier "$2" --options runtime "${ts[@]}" "$1"
 }
 for need in git-stratad git-strata; do
   [[ -f "$macos/$need" ]] || { echo "error: $macos/$need is missing" >&2; exit 1; }
@@ -27,5 +27,5 @@ done
 sign "$macos/git-stratad" "$prefix.daemon"
 sign "$macos/git-strata" "$prefix.cli"
 [[ -f "$macos/strata-pack-probe" ]] && sign "$macos/strata-pack-probe" "$prefix.pack-probe"
-codesign --force "${kc[@]}" --sign "$id" --options runtime "${ts[@]}" "$app"
+codesign --force ${kc[@]+"${kc[@]}"} --sign "$id" --options runtime "${ts[@]}" "$app"
 codesign --verify --deep --strict --verbose=2 "$app"

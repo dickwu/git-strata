@@ -28,8 +28,9 @@ class GitStrata < Formula
       stable opt path (upgrades then need no plist edit):
 
         mkdir -p ~/Library/LaunchAgents
-        git-stratad --print-plist #{opt_bin}/git-stratad > /tmp/git-stratad.plist &&
-          mv /tmp/git-stratad.plist ~/Library/LaunchAgents/com.gwd.git-stratad.plist
+        t=$(mktemp ~/Library/LaunchAgents/.git-stratad.XXXXXX) &&
+          git-stratad --print-plist #{opt_bin}/git-stratad > "$t" &&
+          mv "$t" ~/Library/LaunchAgents/com.gwd.git-stratad.plist
         mkdir -p ~/Library/Application\\ Support/git-strata
         cp #{opt_pkgshare}/config.toml ~/Library/Application\\ Support/git-strata/
         # edit config.toml, then:

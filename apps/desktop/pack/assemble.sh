@@ -71,12 +71,12 @@ kc=()
 [[ -n "${STRATA_SIGN_KEYCHAIN:-}" && "$id" != "-" ]] && kc=(--keychain "$STRATA_SIGN_KEYCHAIN")
 ts=(--timestamp=none)
 [[ "${STRATA_SIGN_KIND:-}" == developer-id ]] && ts=(--timestamp)
-codesign --force "${kc[@]}" --sign "$id" "${ts[@]}" "$dmg"
+codesign --force ${kc[@]+"${kc[@]}"} --sign "$id" "${ts[@]}" "$dmg"
 {
   echo
   echo "## Artifacts"
   echo
-  echo "- \`$(basename "$dmg")\` sha256 \`$(shasum -a 256 "$dmg" | cut -d' ' -f1)\`"
+  echo "- \`$(basename "$dmg")\` sha256 before notarization/stapling (final: SHA256SUMS.txt) \`$(shasum -a 256 "$dmg" | cut -d' ' -f1)\`"
   echo "- bundle size: $(du -sh "$app" | cut -f1)"
 } >> "$record"
 echo "$dmg"

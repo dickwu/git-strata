@@ -195,7 +195,7 @@ jobs:
 
   publish:
     needs: build
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -223,6 +223,13 @@ jobs:
           \`sudo xattr -dr com.apple.quarantine "/Applications/GIT STRATA.app"\`.
           NOTES
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # Only a draft may get new files: replacing published assets would break
+            # the sha256 already in dickwu/homebrew-tap. Bump the version instead.
+            draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+            if [[ "$draft" != true ]]; then
+              echo "::error::release $TAG is already published; refusing to replace its assets"
+              exit 1
+            fi
             gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
