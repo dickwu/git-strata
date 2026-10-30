@@ -1,0 +1,44 @@
+cask "git-strata-desktop" do
+  version "@VERSION@"
+
+  on_arm do
+    sha256 "@DMG_SHA256@"
+
+    url "https://github.com/dickwu/git-strata/releases/download/v#{version}/Git-Strata_#{version}_arm64.dmg"
+  end
+
+  name "GIT STRATA"
+  desc "Desktop app for git-strata sessions"
+  homepage "https://github.com/dickwu/git-strata"
+
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
+  depends_on arch: :arm64
+  depends_on formula: "dickwu/tap/git-strata"
+  depends_on macos: :ventura
+
+  app "GIT STRATA.app"
+
+  # Only the app's own bundle-id paths. Never ~/Library/Application Support/git-strata:
+  # that is the daemon's config, pins and store, owned by the git-strata formula.
+  zap trash: [
+    "~/Library/Application Support/io.github.dickwu.git-strata",
+    "~/Library/Caches/io.github.dickwu.git-strata",
+    "~/Library/Preferences/io.github.dickwu.git-strata.plist",
+    "~/Library/Saved Application State/io.github.dickwu.git-strata.savedState",
+    "~/Library/WebKit/io.github.dickwu.git-strata",
+  ]
+
+  caveats <<~EOS
+    Unless this release is notarized, macOS blocks the first open: allow it in
+    System Settings > Privacy & Security > Open Anyway.
+    If the app is not listed there, run:
+      sudo xattr -dr com.apple.quarantine "/Applications/GIT STRATA.app"
+
+    The app drives the daemon from the git-strata formula (LaunchAgent
+    com.gwd.git-stratad); see `brew info dickwu/tap/git-strata`.
+  EOS
+end

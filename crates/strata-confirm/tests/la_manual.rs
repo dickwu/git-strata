@@ -13,7 +13,7 @@ fn push() -> Action {
     Action::PushDeploy {
         repo: RepoName::try_from("tool".to_string()).unwrap(),
         branch: "main".to_string(),
-        url: "git@github.com:inter/tool.git".to_string(),
+        url: "git@github.com:acme/tool.git".to_string(),
     }
 }
 
@@ -35,7 +35,7 @@ fn manual_prompt_round_trip() {
         prompt_timeout: Duration::from_secs(10),
     });
     eprintln!(
-        "Prompt 1 of 3: check it says '… is trying to push tool to origin/main at git@github.com:inter/tool.git.', then PASS it (Touch ID or password)."
+        "Prompt 1 of 3: check it says '… is trying to push tool to origin/main at git@github.com:acme/tool.git.', then PASS it (Touch ID or password)."
     );
     let token = c.require(push()).expect("prompt 1 should pass");
     c.validate(&token, &push()).expect("token validates");

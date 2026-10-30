@@ -199,10 +199,10 @@ fn prompt_holds_no_queue_or_repo_lock() {
 fn action_mismatch_is_not_confirmed() {
     let fx = Dfx::new();
     let (c, _, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass()]);
-    let a = Action::PushDeploy { repo: repo_name("tool"), branch: "main".into(), url: "git@github.com:inter/tool.git".into() };
+    let a = Action::PushDeploy { repo: repo_name("tool"), branch: "main".into(), url: "git@github.com:acme/tool.git".into() };
     let token = require_validated(&c, a.clone()).unwrap();
     recheck(&token, &a).unwrap();
-    let other = Action::PushDeploy { repo: repo_name("tool"), branch: "release".into(), url: "git@github.com:inter/tool.git".into() };
+    let other = Action::PushDeploy { repo: repo_name("tool"), branch: "release".into(), url: "git@github.com:acme/tool.git".into() };
     let e = recheck(&token, &other).unwrap_err();
     assert_eq!(e.code, Code::NotConfirmed);
     // Redeemed once: validating the same token again is refused.

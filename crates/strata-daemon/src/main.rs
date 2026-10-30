@@ -24,6 +24,11 @@ fn fail(e: &StrataError) -> ExitCode {
     ExitCode::FAILURE
 }
 
+fn fail_quiet(e: &StrataError) -> ExitCode {
+    eprintln!("git-stratad: {}", e.message);
+    ExitCode::FAILURE
+}
+
 fn run() -> Result<(), StrataError> {
     startup::refuse_test_seams()?;
     let home = std::env::var_os("HOME").ok_or_else(|| {
@@ -116,6 +121,7 @@ fn run() -> Result<(), StrataError> {
 fn print(inv: Invocation) -> Result<(), StrataError> {
     match inv {
         Invocation::Serve => unreachable!("serve is not a print"),
+        Invocation::Help => print!("{}", plist::USAGE),
         Invocation::Version => println!("git-stratad {}", env!("CARGO_PKG_VERSION")),
         Invocation::PrintPlist(bin) => {
             let home = std::env::var_os("HOME")
@@ -138,13 +144,15 @@ fn main() -> ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     match plist::parse_invocation(&args) {
         Ok(Invocation::Serve) => {}
+        // Print invocations report errors on stderr only, so a failed
+        // `--print-plist > file` never leaves JSON in the plist.
         Ok(inv) => {
             return match print(inv) {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(e) => fail(&e),
+                Err(e) => fail_quiet(&e),
             };
         }
-        Err(e) => return fail(&e),
+        Err(e) => return fail_quiet(&e),
     }
     match run() {
         Ok(()) => ExitCode::SUCCESS,

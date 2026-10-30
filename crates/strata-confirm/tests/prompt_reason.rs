@@ -10,7 +10,7 @@ fn repo(name: &str) -> RepoName {
 }
 
 fn push(r: &str, branch: &str) -> Action {
-    push_at(r, branch, "git@github.com:inter/tool.git")
+    push_at(r, branch, "git@github.com:acme/tool.git")
 }
 
 fn push_at(r: &str, branch: &str, url: &str) -> Action {
@@ -29,15 +29,15 @@ fn printable_ascii(s: &str) -> bool {
 fn prompt_reason_names_the_action() {
     assert_eq!(
         prompt_reason(&push("tool", "main")),
-        "push tool to origin/main at git@github.com:inter/tool.git"
+        "push tool to origin/main at git@github.com:acme/tool.git"
     );
     // Review P1-15: the URL is on the prompt, its userinfo redacted.
     assert_eq!(
-        prompt_reason(&push_at("tool", "main", "https://x-access-token:ghp_secret@github.com/inter/tool.git")),
-        "push tool to origin/main at https://***@github.com/inter/tool.git"
+        prompt_reason(&push_at("tool", "main", "https://x-access-token:ghp_secret@github.com/acme/tool.git")),
+        "push tool to origin/main at https://***@github.com/acme/tool.git"
     );
     assert_ne!(
-        prompt_reason(&push_at("tool", "main", "git@github.com:inter/tool.git")),
+        prompt_reason(&push_at("tool", "main", "git@github.com:acme/tool.git")),
         prompt_reason(&push_at("tool", "main", "git@github.com:evil/tool.git"))
     );
     assert_eq!(
@@ -74,7 +74,7 @@ fn prompt_reason_names_the_action() {
     // Escaping: bidi override, zero-width space, newline, backslash.
     assert_eq!(
         prompt_reason(&push("tool", "a\u{202E}b\u{200B}c\nd\\e")),
-        "push tool to origin/a\\u{202E}b\\u{200B}c\\u{A}d\\\\e at git@github.com:inter/tool.git"
+        "push tool to origin/a\\u{202E}b\\u{200B}c\\u{A}d\\\\e at git@github.com:acme/tool.git"
     );
 
     // Two PushDeploy that differ only in branch read differently.

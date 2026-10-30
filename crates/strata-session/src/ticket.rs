@@ -44,7 +44,7 @@ mod tests {
 
     #[test]
     fn forms() {
-        for ok in ["9246", "gwd-9246", "a.b_c-d", "s-k3q7xm2", "s-k3q7xm2a1", "s_k3q7xm2a"] {
+        for ok in ["9246", "abc-9246", "a.b_c-d", "s-k3q7xm2", "s-k3q7xm2a1", "s_k3q7xm2a"] {
             assert!(validate(ok).is_ok(), "{ok}");
         }
         let long = "a".repeat(65);

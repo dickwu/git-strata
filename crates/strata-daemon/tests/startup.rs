@@ -435,6 +435,7 @@ fn print_plist_and_version_only_print() {
     let os = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
     assert_eq!(parse_invocation(&[]).unwrap(), Invocation::Serve);
     assert_eq!(parse_invocation(&os(&["-V"])).unwrap(), Invocation::Version);
+    assert_eq!(parse_invocation(&os(&["-h"])).unwrap(), Invocation::Help);
     assert_eq!(parse_invocation(&os(&["--print-plist"])).unwrap(), Invocation::PrintPlist(None));
     for bad in [&["--print-plist", "rel/git-stratad"][..], &["--serve"], &["--print-plist", "/a", "/b"]] {
         let e = parse_invocation(&os(bad)).unwrap_err();
@@ -459,7 +460,14 @@ fn print_plist_and_version_only_print() {
     let out = run(&["--version"]);
     assert!(out.status.success());
     assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("git-stratad {}\n", env!("CARGO_PKG_VERSION")));
-    let out = run(&["--bogus"]);
-    assert!(!out.status.success());
+    let out = run(&["--help"]);
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), strata_daemon::plist::USAGE);
+    for bad in [&["--bogus"][..], &["--print-plist", "rel/git-stratad"]] {
+        let out = run(bad);
+        assert!(!out.status.success(), "{bad:?}");
+        assert!(out.stdout.is_empty(), "errors go to stderr only: {bad:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).starts_with("git-stratad: "), "{bad:?}");
+    }
     assert!(!strata_daemon::config_dir_for_home(home.path()).exists(), "nothing created under HOME");
 }

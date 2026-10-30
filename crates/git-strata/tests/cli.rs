@@ -51,13 +51,13 @@ fn paths(v: &Value) -> Vec<String> {
 
 #[test]
 fn hook_checkpoint_is_idempotent_per_tool_call() {
-    let lv = Live::new(&["hr-core", "tool"], &base_files());
+    let lv = Live::new(&["core-lib", "tool"], &base_files());
     let (s, tws, input) = lv.serve(|_| {
-        let s = lv.new_session("T-1", "hr-core,tool");
+        let s = lv.new_session("T-1", "core-lib,tool");
         let tws = lv.ws(&s, "tool");
-        let hws = lv.ws(&s, "hr-core");
+        let hws = lv.ws(&s, "core-lib");
         write(&tws, "a.txt", b"changed\n");
-        write(&hws, "b.txt", b"new in hr-core\n");
+        write(&hws, "b.txt", b"new in core-lib\n");
         let input = json!({
             "session_id": "claude",
             "cwd": tws,
@@ -65,7 +65,7 @@ fn hook_checkpoint_is_idempotent_per_tool_call() {
             "tool_input": {
                 "file_paths": [
                     tws.join("a.txt"),
-                    format!("{}/../hr-core/b.txt", tws.display()),
+                    format!("{}/../core-lib/b.txt", tws.display()),
                     "/private/tmp/outside-any-session.txt",
                 ],
             },
@@ -74,13 +74,13 @@ fn hook_checkpoint_is_idempotent_per_tool_call() {
         let r1 = lv.run_piped(&tws, &["checkpoint", "--tool-call", "tu-1"], input.as_bytes());
         let d1 = r1.ok();
         let got = ids(&d1);
-        assert_eq!(got.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(), vec!["hr-core", "tool"], "{d1}");
+        assert_eq!(got.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(), vec!["core-lib", "tool"], "{d1}");
         assert!(r1.stderr.contains("outside-any-session"), "the outside path is reported: {}", r1.stderr);
         for c in d1["checkpoints"].as_array().unwrap() {
             assert_eq!(c["reason"], json!({ "kind": "ToolCall", "id": "tu-1" }));
             assert_eq!(c["session"], json!(s.as_str()));
         }
-        // hr-core's row records b.txt (not cwd's repo).
+        // core-lib's row records b.txt (not cwd's repo).
         let h = &d1["checkpoints"][0];
         assert!(paths(&h["entries"]).contains(&"b.txt".to_string()), "{h}");
         // The same call again: the same rows.
@@ -88,7 +88,7 @@ fn hook_checkpoint_is_idempotent_per_tool_call() {
         assert_eq!(ids(&r2.ok()), got);
         (s, tws, input)
     });
-    for repo in ["hr-core", "tool"] {
+    for repo in ["core-lib", "tool"] {
         assert_eq!(store_rows(&lv, &s, repo, "tu-1").len(), 1, "one row per (session, repo, tool call)");
     }
     // A third run with no daemon at all still answers: no write RPC is sent.

@@ -17,6 +17,7 @@ Design documents (Chinese) are in [docs/](docs/README.md); the agent skill is
 ## Contents
 
 - [Install and daemon](#install-and-daemon)
+- [macOS Installation](#macos-installation)
 - [Paths](#paths)
 - [Output: the JSON envelope](#output-the-json-envelope)
 - [Session lifecycle](#session-lifecycle)
@@ -41,25 +42,35 @@ FSEvents and launchd.
 ### Homebrew
 
 ```sh
-brew tap dickwu/git-strata
-brew install git-strata                    # CLI + daemon, built from source
+brew install dickwu/tap/git-strata         # CLI + daemon (prebuilt, Apple silicon)
 # the LaunchAgent is a human step (see below); write it once, pointing at the
 # stable opt path so upgrades need no plist edit:
-git-stratad --print-plist "$(brew --prefix)/opt/git-strata/bin/git-stratad" \
-  > ~/Library/LaunchAgents/com.gwd.git-stratad.plist
+mkdir -p ~/Library/LaunchAgents
+git-stratad --print-plist "$(brew --prefix)/opt/git-strata/bin/git-stratad" > /tmp/git-stratad.plist \
+  && mv /tmp/git-stratad.plist ~/Library/LaunchAgents/com.gwd.git-stratad.plist
 mkdir -p ~/Library/Application\ Support/git-strata
 cp "$(brew --prefix)/share/git-strata/config.toml" \
   ~/Library/Application\ Support/git-strata/config.toml  # then edit
 git-strata daemon start
 ```
 
+Set `[paths] root` in `config.toml` to a directory on the same APFS volume as
+your repos (the default `~/.strata` only works when they live on the startup
+volume). After `brew upgrade git-strata`, run `git-strata daemon stop` then
+`git-strata daemon start`. Unless the release is signed with a stable identity, macOS may
+ask again for access to a removable volume after an upgrade (see
+[docs/release.md](docs/release.md)). To uninstall:
+`git-strata daemon stop`, remove `~/Library/LaunchAgents/com.gwd.git-stratad.plist`,
+then `brew uninstall git-strata` (otherwise launchd keeps restarting a missing binary).
+
 Use the single agent `com.gwd.git-stratad` above, not `brew services`: a
 second (`homebrew.mxcl.*`) agent would run a second daemon on the same socket
 and lock, and neither the CLI nor the GUI manages it.
 
-The desktop app is a cask: `brew install --cask git-strata-desktop`. The app
-is not notarized yet, so Gatekeeper blocks the first open; allow it once in
-System Settings > Privacy & Security > Open Anyway.
+The desktop app (Apple silicon only for now) is a cask:
+`brew install --cask dickwu/tap/git-strata-desktop`. It uses the formula's daemon. If macOS
+blocks the first open, see [macOS Installation](#macos-installation). Release builds, signing
+modes and the tap update: [docs/release.md](docs/release.md).
 
 `git-stratad --version` prints the version; `git-stratad --print-plist [BIN]`
 prints the plist below for this `HOME` (BIN: absolute path, default the
@@ -134,6 +145,35 @@ STRATA_CODESIGN_IDENTITY="git-strata dev" scripts/dev-install.sh
 `add-trusted-cert` asks for the login password; the first signing may ask to
 "Always Allow" codesign to use the key; the first start of a newly signed
 daemon asks once for the removable-volume permission.
+
+## macOS Installation
+
+Unless a release is notarized, macOS blocks the first open of the desktop app
+(`GIT STRATA.app`, from the cask). To allow it:
+
+1. Open System Settings > Privacy & Security.
+2. Click "Open Anyway" next to the message about GIT STRATA.
+
+If the app is not listed there, remove the quarantine attribute:
+
+```sh
+sudo xattr -dr com.apple.quarantine "/Applications/GIT STRATA.app"
+```
+
+The formula's `git-strata` and `git-stratad` need no such step: Homebrew does
+not quarantine formula downloads (only cask downloads).
+
+If the app still will not start, reset its own state (bundle id
+`io.github.dickwu.git-strata`) and open it again:
+
+```sh
+rm -rf ~/Library/Application\ Support/io.github.dickwu.git-strata/
+rm -rf ~/Library/Caches/io.github.dickwu.git-strata/
+rm -rf ~/Library/Saved\ Application\ State/io.github.dickwu.git-strata.savedState/
+```
+
+This leaves `~/Library/Application Support/git-strata/` alone: that directory
+holds the daemon's config, socket and session data. Do not delete it.
 
 ## Paths
 
@@ -245,7 +285,7 @@ makes `rm` refuse with `Dirty` and nothing is removed.
 `.env.local`, `.claude/settings.local.json`) are gitignored, untracked files
 that a repo needs to run. `new` clones each one present in the main checkout
 into every workspace of the session (tracked or not). Today that is
-staff-api `.env` and front `.env.local`.
+billing-api `.env` and front `.env.local`.
 
 - **Kept current.** Every 2 s (`SEED_REFRESH_EVERY`) the daemon re-clones a
   seed copy whose main-checkout source changed, as long as the copy is still
@@ -345,7 +385,7 @@ Everything below needs no human, as long as no repo in the publish is gated
 git-strata daemon status                     # data.running must be true
 # not running: tell the human (they run `git-strata daemon start`); never start it yourself
 
-git-strata new PROJ-123 --repo tool --repo staff-api
+git-strata new PROJ-123 --repo tool --repo billing-api
 #  -> S = data.manifest.id, W = data.manifest.repos.tool.path
 git-strata add --session "$S" --repo front   # only if front is needed later
 cd "$W"                                      # edit files here
@@ -365,8 +405,8 @@ history modifiers applied to `$S`, so `"$S:tool.ts"` silently becomes a
 different string.
 
 **`--from SESSION:PATH`.** PATH is relative to the repo root of the workspace
-that holds it, with no repo prefix: for `staff-api/app/x.php` in session `S`
-write `--from "${S}:app/x.php"`, never `"${S}:staff-api/app/x.php"`. A
+that holds it, with no repo prefix: for `billing-api/app/x.php` in session `S`
+write `--from "${S}:app/x.php"`, never `"${S}:billing-api/app/x.php"`. A
 directory publishes every checkpointed path under it. The repo is found by
 looking the path up in each workspace (on disk or in its base); when several
 workspaces have it, the one repo whose checkpoints in the session changed it
@@ -486,10 +526,10 @@ pin), `git-strata push REPO` handles this headless:
 checks_ran} | null, rebases: [{session, from, to, report}], warnings}`.
 
 ```sh
-git-strata push staff-api
+git-strata push billing-api
 #  -> ok: data.replayed shows the replay (null when origin had not moved)
 #  -> Conflict replay_conflict: fix in a session and publish, or hand
-#     `git-strata chain --repo staff-api ...` to the human
+#     `git-strata chain --repo billing-api ...` to the human
 ```
 
 What stays human: a **rewound** chain (origin dropped commits that were
@@ -511,7 +551,7 @@ Pushing right after each publish keeps the window small.
 `publish.confirm = true`; that is the only gate
 (`RepoConfig::needs_human_confirm`). `deploy_on_push` is information (a push
 to that repo deploys) and gates nothing by itself, so a repo may set
-`deploy_on_push = true` with `publish.confirm = false` (e.g. staff-api, whose
+`deploy_on_push = true` with `publish.confirm = false` (e.g. billing-api, whose
 publish and push run headless). The CLI uses the pinned `confirm` in
 `pins.json` ORed with `config.toml`; a missing or unreadable `pins.json`, or
 a repo missing from it (new or renamed), counts as needs confirmation. The

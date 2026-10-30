@@ -115,6 +115,8 @@ pub fn plist_text(bin: &Path, home: &Path) -> String {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
     Serve,
+    /// `--help` / `-h`: [`USAGE`].
+    Help,
     /// `--version` / `-V`.
     Version,
     /// `--print-plist [BIN]`: the agent plist for `BIN` (absolute; default
@@ -124,10 +126,17 @@ pub enum Invocation {
     PrintPlist(Option<PathBuf>),
 }
 
+pub const USAGE: &str = "usage: git-stratad                          serve (launchd starts it this way)
+       git-stratad --version | -V
+       git-stratad --print-plist [ABSOLUTE_BIN]  print the LaunchAgent plist for $HOME
+       git-stratad --help | -h
+";
+
 pub fn parse_invocation(args: &[std::ffi::OsString]) -> Result<Invocation> {
     let bad = |m: String| StrataError::new(Code::InvalidInput, m).with_detail(json!({ "reason": "args" }));
     match args {
         [] => Ok(Invocation::Serve),
+        [a] if a == "--help" || a == "-h" => Ok(Invocation::Help),
         [a] if a == "--version" || a == "-V" => Ok(Invocation::Version),
         [a] if a == "--print-plist" => Ok(Invocation::PrintPlist(None)),
         [a, bin] if a == "--print-plist" => {
@@ -138,7 +147,7 @@ pub fn parse_invocation(args: &[std::ffi::OsString]) -> Result<Invocation> {
             Ok(Invocation::PrintPlist(Some(bin)))
         }
         _ => Err(bad(format!(
-            "git-stratad takes no arguments when serving; usage: git-stratad [--version | --print-plist [ABSOLUTE_BIN]] (got {:?})",
+            "unexpected arguments {:?}; see git-stratad --help",
             args
         ))),
     }

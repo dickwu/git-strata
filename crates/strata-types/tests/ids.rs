@@ -9,7 +9,7 @@ fn name(s: &str) -> Result<RepoName, strata_types::StrataError> {
 
 #[test]
 fn repo_name_accepts_checkout_directory_names() {
-    for raw in ["tool", "staff-api", "foo.bar", "a_b", "A1"] {
+    for raw in ["tool", "billing-api", "foo.bar", "a_b", "A1"] {
         let n = name(raw).unwrap();
         assert_eq!(n.to_string(), raw);
         assert_eq!(n.as_str(), raw);

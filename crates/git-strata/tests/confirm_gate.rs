@@ -63,7 +63,7 @@ fn confirm_commands_refuse_non_tty() {
 #[test]
 fn deploy_on_push_without_confirm_is_headless() {
     // 2026-10-26: publish.confirm alone gates; deploy_on_push is information.
-    // A staff-api-like repo (deploy_on_push, confirm = false, push = false)
+    // A billing-api-like repo (deploy_on_push, confirm = false, push = false)
     // pushes and publishes without a terminal: the CLI connects.
     let h = Home::new();
     h.write_config(&[RepoSpec { name: "api", push: false, confirm: false, deploy_on_push: true }]);

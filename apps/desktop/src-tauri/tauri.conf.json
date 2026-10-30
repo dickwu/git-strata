@@ -45,7 +45,7 @@
     "targets": ["app"],
     "category": "DeveloperTool",
     "copyright": "Copyright 2026 Peilin Wu",
-    "license": "MIT",
+    "license": "MIT OR Apache-2.0",
     "shortDescription": "Watch and approve git-strata sessions.",
     "publisher": "Peilin Wu",
     "icon": [

@@ -1,0 +1,230 @@
+# Release: build git-strata + git-stratad and GIT STRATA.app on an Apple
+# silicon runner, sign them, and attach them to a GitHub Release that the
+# dickwu/homebrew-tap formula (tarball) and cask (DMG) download.
+#
+# Triggers: pushing a v* tag (builds + creates a draft release), or by hand (builds and
+# uploads workflow artifacts only; nothing is published).
+#
+# Signing picks the first identity whose secrets are set:
+#   developer-id  APPLE_DEVELOPER_ID_P12 (base64 .p12), APPLE_DEVELOPER_ID_P12_PASSWORD;
+#                 notarized when APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID are set too.
+#                 Variable APPLE_DEVELOPER_ID_CERT_SHA1 (optional) pins the certificate.
+#   self-signed   STRATA_CODESIGN_P12, STRATA_CODESIGN_P12_PASSWORD (see desktop-pack.yml);
+#                 variable STRATA_CODESIGN_CERT_SHA1 (optional) pins the certificate.
+#   adhoc         no secrets (the default).
+# What each means for Gatekeeper, TCC and Touch ID: docs/release.md.
+#
+# The release is created as a DRAFT. Publishing it (by hand, after checking the
+# files) fires homebrew.yml, which updates dickwu/homebrew-tap. A release made
+# with GITHUB_TOKEN would not trigger other workflows anyway.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: '13.0'
+  TARGET: aarch64-apple-darwin
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sign_kind: ${{ steps.kind.outputs.kind }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Version (tag, crates and app must agree)
+        id: version
+        run: |
+          v_cli="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="git-strata") | .version')"
+          v_daemon="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="strata-daemon") | .version')"
+          v_app="$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)"
+          echo "git-strata $v_cli, strata-daemon $v_daemon, app $v_app"
+          [[ "$v_cli" == "$v_daemon" && "$v_cli" == "$v_app" ]] || { echo "::error::versions differ"; exit 1; }
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            [[ "$GITHUB_REF_NAME" == "v$v_cli" ]] || { echo "::error::tag $GITHUB_REF_NAME is not v$v_cli"; exit 1; }
+          fi
+          echo "version=$v_cli" >> "$GITHUB_OUTPUT"
+
+      - name: Pick the signing identity
+        id: kind
+        env:
+          DEVID_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          SELF_P12: ${{ secrets.STRATA_CODESIGN_P12 }}
+        run: |
+          if [[ -n "$DEVID_P12" ]]; then kind=developer-id
+          elif [[ -n "$SELF_P12" ]]; then kind=self-signed
+          else kind=adhoc; fi
+          echo "Signing: $kind"
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+          echo "STRATA_SIGN_KIND=$kind" >> "$GITHUB_ENV"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Build git-strata and git-stratad (release)
+        run: cargo build --release --locked --target "$TARGET" -p strata-daemon -p git-strata
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: bun install --frozen-lockfile
+
+      - name: Frontend checks
+        working-directory: apps/desktop
+        run: bun run typecheck
+
+      - name: Build the app bundle (unsigned; signed below)
+        working-directory: apps/desktop
+        run: bun run tauri build --bundles app --target aarch64-apple-darwin
+        env:
+          CI: true
+
+      - name: Release build has no connector and keeps a CSP
+        run: |
+          bash apps/desktop/scripts/check-release-no-connector.sh \
+            apps/desktop/src-tauri/target/aarch64-apple-darwin/release/git-strata-desktop
+
+      - name: Import the Developer ID identity
+        if: steps.kind.outputs.kind == 'developer-id'
+        run: apps/desktop/pack/import-identity.sh
+        env:
+          STRATA_CODESIGN_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          STRATA_CODESIGN_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          STRATA_CODESIGN_CERT_SHA1: ${{ vars.APPLE_DEVELOPER_ID_CERT_SHA1 }}
+
+      - name: Import the self-signed identity
+        if: steps.kind.outputs.kind == 'self-signed'
+        run: apps/desktop/pack/import-identity.sh
+        env:
+          STRATA_CODESIGN_P12: ${{ secrets.STRATA_CODESIGN_P12 }}
+          STRATA_CODESIGN_P12_PASSWORD: ${{ secrets.STRATA_CODESIGN_P12_PASSWORD }}
+          STRATA_CODESIGN_CERT_SHA1: ${{ vars.STRATA_CODESIGN_CERT_SHA1 }}
+
+      - name: Sign and pack the CLI tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          id="${STRATA_SIGN_ID:--}"
+          scripts/release/package-cli.sh "target/$TARGET/release" "$id" "$VERSION" dist
+
+      - name: Assemble, sign, check DRs, make the DMG
+        run: |
+          id="${STRATA_SIGN_ID:--}"
+          apps/desktop/pack/assemble.sh \
+            "apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/GIT STRATA.app" \
+            "target/$TARGET/release" "$id" pack-out
+          mv pack-out/*.dmg dist/
+          cat pack-out/pack-record.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notarize (Developer ID with notarization secrets only)
+        if: steps.kind.outputs.kind == 'developer-id'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [[ -z "$APPLE_ID" || -z "$APPLE_APP_SPECIFIC_PASSWORD" || -z "$APPLE_TEAM_ID" ]]; then
+            echo "::warning::Developer ID signed but not notarized (APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID missing)"
+            exit 0
+          fi
+          notarize() {
+            xcrun notarytool submit "$1" --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" --wait --timeout 30m
+          }
+          # The DMG: notarizing it also notarizes the app inside; staple the ticket to the DMG.
+          dmg="dist/Git-Strata_${VERSION}_arm64.dmg"
+          notarize "$dmg"
+          xcrun stapler staple "$dmg"
+          # The CLI binaries: bare Mach-O cannot be stapled; notarize a zip so Gatekeeper
+          # finds the ticket online. (Homebrew's download does not quarantine them anyway.)
+          tmp="$(mktemp -d)"
+          tar -C "$tmp" -xzf "dist/git-strata-$VERSION-$TARGET.tar.gz"
+          ditto -c -k "$tmp/git-strata-$VERSION-$TARGET/bin" "$tmp/cli.zip"
+          notarize "$tmp/cli.zip"
+
+      - name: Remove the signing keychain
+        if: always() && env.STRATA_SIGN_KEYCHAIN != ''
+        run: security delete-keychain "$STRATA_SIGN_KEYCHAIN" || true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          shasum -a 256 -- * > SHA256SUMS.txt
+          for f in *.tar.gz *.dmg; do shasum -a 256 -- "$f" > "$f.sha256"; done
+          cat SHA256SUMS.txt
+          { echo; echo "## SHA256SUMS"; echo; echo '```'; cat SHA256SUMS.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke the tarball (version and print-plist only; never starts a daemon)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tmp="$(mktemp -d)"
+          tar -C "$tmp" -xzf "dist/git-strata-$VERSION-$TARGET.tar.gz"
+          d="$tmp/git-strata-$VERSION-$TARGET"
+          "$d/bin/git-strata" --version
+          "$d/bin/git-stratad" --version
+          "$d/bin/git-stratad" --print-plist /opt/homebrew/opt/git-strata/bin/git-stratad | plutil -lint -
+          test -f "$d/share/git-strata/config.toml"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: release-${{ steps.version.outputs.version }}-arm64
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-${{ needs.build.outputs.version }}-arm64
+          path: dist
+
+      - name: Create (draft) or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          KIND: ${{ needs.build.outputs.sign_kind }}
+        run: |
+          cat > notes.md <<NOTES
+          Apple silicon (arm64), macOS 13+. Signing: **$KIND** (see docs/release.md).
+
+          \`\`\`sh
+          brew install dickwu/tap/git-strata                 # CLI + daemon
+          brew install --cask dickwu/tap/git-strata-desktop  # desktop app
+          \`\`\`
+
+          If macOS blocks the app: System Settings > Privacy & Security > Open Anyway, or
+          \`sudo xattr -dr com.apple.quarantine "/Applications/GIT STRATA.app"\`.
+          NOTES
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+              --title "git-strata $TAG" --notes-file notes.md --generate-notes
+          fi

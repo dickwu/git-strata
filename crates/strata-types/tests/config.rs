@@ -139,8 +139,8 @@ fn v2_rejects_relative_dot_and_trailing_slash() {
         "tool",
         "/Volumes/Code/src/../tool",
         "/Volumes/Code/src/tool/",
-        "/Volumes//GWD/inter/tool",
-        "~/inter/tool",
+        "/Volumes//Code/src/tool",
+        "~/src/tool",
     ] {
         let err = parse(&minimal(&bare_repo("tool", path))).unwrap_err();
         assert_eq!(rule(&err), "V2", "{path}");
@@ -223,8 +223,8 @@ publish = {{ branch = "main", push = true, confirm = false }}
 #[test]
 fn deploy_on_push_is_information_and_confirm_is_the_only_gate() {
     let text = r#"
-[repo.staff-api]
-path = "/Volumes/Code/src/staff-api"
+[repo.billing-api]
+path = "/Volumes/Code/src/billing-api"
 default_branch = "master"
 deps_dirs = []
 deploy_on_push = true
@@ -233,11 +233,11 @@ publish = { branch = "master", push = false, confirm = false }
     // V5 is gone: deploy_on_push = true with confirm = false parses and
     // does not ask a human.
     let cfg = parse(text).unwrap_or_else(|err| panic!("{err} {:?}", err.detail));
-    let staff = cfg.repo(&repo("staff-api")).unwrap();
+    let staff = cfg.repo(&repo("billing-api")).unwrap();
     assert!(staff.deploy_on_push);
     assert!(!staff.needs_human_confirm());
     let mut built = RepoConfig {
-        path: "/Volumes/Code/src/staff-api".into(),
+        path: "/Volumes/Code/src/billing-api".into(),
         default_branch: "master".into(),
         deps_dirs: vec![],
         seed_caches: vec![],
@@ -380,8 +380,8 @@ publish = { branch = "dev", push = true, confirm = false }
 "#;
     assert_eq!(rule(&parse(other_branch).unwrap_err()), "design-6.7");
     let no_deps = r#"
-[repo.staff-api]
-path = "/Volumes/Code/src/staff-api"
+[repo.billing-api]
+path = "/Volumes/Code/src/billing-api"
 default_branch = "master"
 deps_dirs = []
 pin_unpushed = false

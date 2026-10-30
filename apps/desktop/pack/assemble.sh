@@ -34,7 +34,7 @@ exe="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Inf
   echo "# Pack record"
   echo
   echo "- commit: ${GITHUB_SHA:-local}  run: ${GITHUB_RUN_ID:-local}"
-  echo "- version: $version  arch: $arch  signing: $([[ $id == - ]] && echo ad-hoc || echo "self-signed $id")"
+  echo "- version: $version  arch: $arch  signing: $([[ $id == - ]] && echo ad-hoc || echo "${STRATA_SIGN_KIND:-self-signed} $id")"
   echo "- built on: $(sw_vers -productVersion) $(uname -m), $(xcrun swiftc --version 2>&1 | head -1)"
   echo
   echo "## Designated requirements"
@@ -48,7 +48,11 @@ for pair in "$exe:$prefix" "git-stratad:$prefix.daemon" "git-strata:$prefix.cli"
   ident="$(codesign -dv "$macos/$bin" 2>&1 | sed -n 's/^Identifier=//p')"
   echo "- \`$bin\` identifier \`$ident\`: \`$dr\`" >> "$record"
   [[ "$ident" == "$want" ]] || { echo "error: $bin identifier is $ident, want $want" >&2; fail=1; }
-  if [[ "$id" != "-" ]]; then
+  if [[ "${STRATA_SIGN_KIND:-}" == developer-id ]]; then
+    # Developer ID: Apple anchor + team, nothing build-specific.
+    grep -q "anchor apple generic" <<<"$dr" || { echo "error: $bin DR is not a Developer ID DR: $dr" >&2; fail=1; }
+    grep -q "cdhash" <<<"$dr" && { echo "error: $bin DR contains a cdhash: $dr" >&2; fail=1; }
+  elif [[ "$id" != "-" ]]; then
     # The property TCC relies on: identifier + this certificate, nothing build-specific.
     # A self-signed certificate is its own root, so codesign writes `certificate root`.
     grep -Eqi "certificate (root|leaf) = H\"$id\"" <<<"$dr" || { echo "error: $bin DR does not pin certificate $id: $dr" >&2; fail=1; }
@@ -65,7 +69,9 @@ hdiutil create -volname "GIT STRATA" -srcfolder "$stage" -fs HFS+ -format UDZO -
 rm -rf "$stage"
 kc=()
 [[ -n "${STRATA_SIGN_KEYCHAIN:-}" && "$id" != "-" ]] && kc=(--keychain "$STRATA_SIGN_KEYCHAIN")
-codesign --force "${kc[@]}" --sign "$id" --timestamp=none "$dmg"
+ts=(--timestamp=none)
+[[ "${STRATA_SIGN_KIND:-}" == developer-id ]] && ts=(--timestamp)
+codesign --force "${kc[@]}" --sign "$id" "${ts[@]}" "$dmg"
 {
   echo
   echo "## Artifacts"
