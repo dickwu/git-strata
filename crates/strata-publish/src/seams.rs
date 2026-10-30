@@ -30,6 +30,9 @@ pub(crate) enum Point {
     /// deps-drift §2.4: R1 is closed and no publish lock is held, before
     /// the cold install of the staged install inputs starts.
     BeforeColdInstall,
+    /// deps-drift §2.4: the cold install built and sealed the set and R1's
+    /// snapshot is removed, before round 2 (no publish lock held).
+    AfterColdInstall,
 }
 
 /// Steps after `commit_tree` where a test can inject one failure
@@ -90,6 +93,9 @@ mod imp {
         /// Stop after R1 closed, before the cold install (deps-drift §2.4),
         /// with no publish lock held.
         PauseBeforeColdInstall,
+        /// Stop after the cold install, before round 2 (deps-drift §2.4),
+        /// with no publish lock held.
+        PauseAfterColdInstall,
     }
 
     #[derive(Default)]
@@ -160,6 +166,7 @@ mod imp {
             PublishFault::PauseBeforeRebase => Point::BeforeRebase,
             PublishFault::PauseAfterSiblingPlace => Point::AfterSiblingPlace,
             PublishFault::PauseBeforeColdInstall => Point::BeforeColdInstall,
+            PublishFault::PauseAfterColdInstall => Point::AfterColdInstall,
             PublishFault::PauseDuringPush => return Pause(Some(Inner::Git(git.pause_push_before_send()))),
             PublishFault::PauseBeforePushRecorded => return Pause(Some(Inner::Git(git.pause_push_before_record()))),
         };
