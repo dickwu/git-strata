@@ -22,6 +22,8 @@ cask "git-strata-desktop" do
 
   app "GIT STRATA.app"
 
+  uninstall quit: "io.github.dickwu.git-strata"
+
   # Only the app's own bundle-id paths. Never ~/Library/Application Support/git-strata:
   # that is the daemon's config, pins and store, owned by the git-strata formula.
   zap trash: [

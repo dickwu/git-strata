@@ -58,9 +58,8 @@ git-strata daemon start
 Set `[paths] root` in `config.toml` to a directory on the same APFS volume as
 your repos (the default `~/.strata` only works when they live on the startup
 volume). After `brew upgrade git-strata`, run `git-strata daemon stop` then
-`git-strata daemon start`. Unless the release is signed with a stable identity, macOS may
-ask again for access to a removable volume after an upgrade (see
-[docs/release.md](docs/release.md)). To uninstall:
+`git-strata daemon start`. macOS may ask again for the daemon's access to a
+removable volume after an upgrade (see [docs/release.md](docs/release.md)). To uninstall:
 `git-strata daemon stop`, remove `~/Library/LaunchAgents/com.gwd.git-stratad.plist`,
 then `brew uninstall git-strata` (otherwise launchd keeps restarting a missing binary).
 

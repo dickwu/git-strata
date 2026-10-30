@@ -149,8 +149,12 @@ jobs:
             exit 0
           fi
           notarize() {
-            xcrun notarytool submit "$1" --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-              --team-id "$APPLE_TEAM_ID" --wait --timeout 30m
+            local out status
+            out="$(xcrun notarytool submit "$1" --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" --wait --timeout 30m --output-format json)"
+            echo "$out"
+            status="$(plutil -extract status raw -o - - <<< "$out")"
+            [[ "$status" == Accepted ]] || { echo "::error::notarization of $1: $status"; exit 1; }
           }
           # The DMG: notarizing it also notarizes the app inside; staple the ticket to the DMG.
           dmg="dist/Git-Strata_${VERSION}_arm64.dmg"
