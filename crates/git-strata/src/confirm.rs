@@ -841,7 +841,8 @@ fn dedup(lines: Vec<String>) -> Vec<String> {
 }
 
 /// deps-drift §2.5: the one-line text of a deps warning (its
-/// `detail.message`), `None` for other kinds.
+/// `detail.message`), `None` for other kinds. Each message starts with its
+/// repo's name, so `dedup` only merges the same warning of the same repo.
 fn deps_warning_line(w: &Value) -> Option<&str> {
     match w.get("kind").and_then(Value::as_str)? {
         "DepsSubstituted" | "DepsReinstalled" | "DepsInputsLeft" => w.get("detail")?.get("message")?.as_str(),

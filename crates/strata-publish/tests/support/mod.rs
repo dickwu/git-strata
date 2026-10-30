@@ -890,6 +890,13 @@ impl Default for QueueLock {
     }
 }
 
+impl QueueLock {
+    /// The sessions whose queue place is taken right now.
+    pub fn held_now(&self) -> Vec<String> {
+        self.held.lock().unwrap().iter().cloned().collect()
+    }
+}
+
 impl PublishLocks for Fx {
     fn with_sessions(
         &self,

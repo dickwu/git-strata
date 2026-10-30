@@ -520,9 +520,10 @@ impl Drop for Go {
 }
 
 /// Test 8: lock order. While a cold install is stuck (outside every publish
-/// lock), another session's publish takes the queue and the repo lock and
-/// lands; a second publish needing the same set waits on the build lock
-/// and then gets the sealed set (one install).
+/// lock), no session queue place and no repo write lock is held, and
+/// another session's publish takes both and lands; a second publish needing
+/// the same set is seen waiting on the build lock (seam) and then gets the
+/// sealed set (one install).
 #[test]
 fn cold_install_holds_no_publish_lock() {
     let fx = fx();
@@ -537,6 +538,7 @@ fn cold_install_holds_no_publish_lock() {
     let gc = select(&fx, &c, &[("src/c.ts", b"export const c = 3\n")]);
     let started = fx.sb.state.join("started");
     let go = fx.sb.state.join("go");
+    let b_waits = Arc::new(AtomicBool::new(false));
     let wait = |what: &str, f: &dyn Fn() -> bool| {
         let t0 = std::time::Instant::now();
         while !f() {
@@ -548,16 +550,24 @@ fn cold_install_holds_no_publish_lock() {
         let _go = Go(go.clone());
         let ha = sc.spawn(|| run(&fx, &ga));
         wait("a's cold install", &|| started.exists());
-        // a's install is stuck: c publishes through the queue and the lock.
+        // a's install is stuck: it holds no queue place and no repo lock.
+        assert!(fx.queues.held_now().is_empty(), "queue held during the cold install: {:?}", fx.queues.held_now());
+        assert!(fx.lock.holds().iter().all(|h| h.end.is_some()), "repo lock held during the cold install");
+        // c publishes through the queue and the repo lock.
         let pc = run(&fx, &gc);
-        let hb = sc.spawn(|| run(&fx, &gb));
-        // b's R1 closes `Drift` too; it then needs the same set.
-        wait("b's R1", &|| {
-            rows(&fx).iter().filter(|r| r.group.batches.iter().any(|x| x.session == b)).any(|r| {
-                r.phase == PublishPhase::Done && r.outcome.as_ref().is_some_and(|o| o["stopped"] == "Drift")
-            })
+        let flag = b_waits.clone();
+        let (fxr, gbr) = (&fx, &gb);
+        let hb = sc.spawn(move || {
+            strata_deps::test_seams::on_build_lock_busy(Box::new(move || flag.store(true, Ordering::SeqCst)));
+            let r = run(fxr, gbr);
+            strata_deps::test_seams::reset();
+            r
         });
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // b's R1 closes `Drift` too; it then needs the same set and finds
+        // a's build lock held.
+        wait("b on a's build lock", &|| b_waits.load(Ordering::SeqCst) || hb.is_finished());
+        assert!(b_waits.load(Ordering::SeqCst), "b finished without waiting on the build lock");
+        assert!(!ha.is_finished(), "a is still installing");
         fs::write(&go, b"").unwrap();
         (ha.join().unwrap(), hb.join().unwrap(), pc)
     });
@@ -568,7 +578,8 @@ fn cold_install_holds_no_publish_lock() {
     assert_eq!(fx.sb.install_count(), installs + 1, "one install for both");
     let (wa, wb) = (warning(&pa, WarningKind::DepsReinstalled), warning(&pb, WarningKind::DepsReinstalled));
     assert_eq!(wa["used"], wb["used"], "the same set: {wa} {wb}");
-    assert_eq!(fx.origin_head("tool", "main"), [pa.commit.as_str(), pb.commit.as_str()].into_iter().find(|c| *c == fx.origin_head("tool", "main")).unwrap());
+    let head = fx.origin_head("tool", "main");
+    assert!([pa.commit.as_str(), pb.commit.as_str()].contains(&head.as_str()), "origin main {head} is a or b");
     assert!(fx.store().open_publishes().unwrap().is_empty());
 }
 
@@ -652,6 +663,103 @@ fn partial_selection_is_diagnosed_as_selection() {
     assert!(w["hint"].as_str().unwrap().contains("differ from the session workspace"), "{w}");
 }
 
+fn assert_selection(p: &Published) -> String {
+    let w = p.warnings.iter().find(|w| matches!(w.kind, WarningKind::DepsReinstalled | WarningKind::DepsSubstituted)).expect("a deps warning");
+    assert_eq!(w.detail["cause"], "selection", "{:?}", w.detail);
+    assert!(w.detail.get("fix").is_none(), "{:?}", w.detail);
+    assert!(w.detail.get("action").is_none(), "{:?}", w.detail);
+    let hint = w.detail["hint"].as_str().unwrap().to_string();
+    assert!(hint.contains("differ from the session workspace"), "{hint}");
+    hint
+}
+
+/// r5 6(a): an old checkpoint's lock vs a later workspace lock → `selection`.
+#[test]
+fn old_checkpoint_lock_against_a_newer_workspace_lock_is_selection() {
+    let fx = fx();
+    let s = fx.new_session(&["tool"]);
+    fx.edit(&s, "tool", &[("bun.lock", b"lock v9\n")]);
+    let c = fx.checkpoint(&s, "tool");
+    fx.edit(&s, "tool", &[("bun.lock", b"lock v10\n")]);
+    let p = run(&fx, &group(vec![batch(&s, "tool", c.id, &["bun.lock"])])).expect("publish");
+    assert_selection(&p);
+}
+
+/// r5 6(b): the old checkpoint changed the lock, the workspace reverted it
+/// (W = A) → `selection`, not `base_moved`.
+#[test]
+fn old_checkpoint_lock_after_a_workspace_revert_is_selection() {
+    let fx = fx();
+    let s = fx.new_session(&["tool"]);
+    fx.edit(&s, "tool", &[("bun.lock", b"lock v9\n")]);
+    let c = fx.checkpoint(&s, "tool");
+    fx.edit(&s, "tool", &[("bun.lock", b"lock v1\n")]);
+    let p = run(&fx, &group(vec![batch(&s, "tool", c.id, &["bun.lock"])])).expect("publish");
+    assert_selection(&p);
+}
+
+/// r5 6(c): the checkpoint moved dep x to 2, the workspace moved it back but
+/// kept a version bump → `selection`; the hint does not tell anyone to drop
+/// the path.
+#[test]
+fn reverted_dep_with_a_kept_version_bump_is_selection() {
+    let fx = fx();
+    let s = fx.new_session(&["tool"]);
+    let x2 = PACKAGE_JSON.replace("1.0.87", "1.0.88").replace("^1.0.0", "^2.0.0");
+    fx.edit(&s, "tool", &[("package.json", x2.as_bytes())]);
+    let c = fx.checkpoint(&s, "tool");
+    let bump = PACKAGE_JSON.replace("1.0.87", "1.0.88");
+    fx.edit(&s, "tool", &[("package.json", bump.as_bytes())]);
+    let p = run(&fx, &group(vec![batch(&s, "tool", c.id, &["package.json"])])).expect("publish");
+    let hint = assert_selection(&p);
+    for no in ["remove", "drop", "package.json"] {
+        assert!(!hint.contains(no), "{no}: {hint}");
+    }
+}
+
+/// r5 6(d): `install_inputs = ["config/lock"]`; the workspace later replaced
+/// the `config/` dir with a file → `selection`, and the warning holds no
+/// command that selects only `config/lock`.
+#[test]
+fn input_dir_replaced_by_a_file_is_selection() {
+    let mut fx = fx();
+    fx.land_on_origin("tool", "main", &[("config/lock", b"c1\n")], "config");
+    fx.cfg_mut("tool").install_inputs = rps(&["config/lock"]);
+    let s = fx.new_session(&["tool"]);
+    fx.edit(&s, "tool", &[("config/lock", b"c2\n")]);
+    let c = fx.checkpoint(&s, "tool");
+    let ws = fx.ws(&s, "tool");
+    fs::remove_dir_all(ws.join("config")).unwrap();
+    fs::write(ws.join("config"), b"now a file\n").unwrap();
+    let p = run(&fx, &group(vec![batch(&s, "tool", c.id, &["config/lock"])])).expect("publish");
+    assert_selection(&p);
+    let w = p.warnings.iter().find(|w| matches!(w.kind, WarningKind::DepsReinstalled | WarningKind::DepsSubstituted)).unwrap();
+    let all = w.detail.to_string();
+    assert!(!all.contains("git-strata"), "no command in the warning: {all}");
+}
+
+/// r5 11: main changed one part of package.json and the session another,
+/// the merge is clean and no set exists → `mixed`; no `fix`, and the hint
+/// names no approve, no republish, no command on the session's workspace.
+#[test]
+fn one_input_changed_by_main_and_the_session_is_mixed() {
+    let fx = fx();
+    let s = fx.new_session(&["tool"]);
+    let main_pkg = PACKAGE_JSON.replace("^1.0.0", "^1.1.0");
+    fx.land_on_origin("tool", "main", &[("package.json", main_pkg.as_bytes())], "x 1.1");
+    let ses_pkg = PACKAGE_JSON.replace(r#""name": "tool""#, r#""name": "tool-s""#);
+    let p = run(&fx, &select(&fx, &s, &[("package.json", ses_pkg.as_bytes())])).expect("publish");
+    let w = warning(&p, WarningKind::DepsReinstalled);
+    assert_eq!(w["cause"], "mixed", "{w}");
+    assert!(w.get("fix").is_none(), "{w}");
+    let hint = w["hint"].as_str().unwrap();
+    for no in ["deps approve", "publish again", "republish", &s.to_string()] {
+        assert!(!hint.contains(no), "{no}: {hint}");
+    }
+    let staged = fx.sb.git(&fx.main("tool"), &["show", &format!("{}:package.json", p.commit)]);
+    assert!(staged.contains("tool-s") && staged.contains("^1.1.0"), "merged: {staged}");
+}
+
 /// Test 18 (mixed): main moved one input and the session another → the
 /// merged inputs; and a group of two sessions → `mixed`. No `fix`.
 #[test]
@@ -710,6 +818,36 @@ fn base_moved_hint_names_an_approvable_proposal() {
     assert_eq!(w.detail["cause"], "base_moved", "{:?}", w.detail);
     let hint = w.detail["hint"].as_str().unwrap();
     assert!(hint.contains(&format!("git-strata deps approve {}", q.id)), "{hint}");
+
+}
+
+/// r5 18(b): a Pending proposal to the same inputs, but main got a
+/// source-only commit since (its head is not main's tip) → `base_moved`
+/// without `deps approve`.
+#[test]
+fn base_moved_hint_skips_a_proposal_for_an_older_tip() {
+    let fx = fx();
+    let s = fx.new_session(&["tool"]);
+    fx.land_on_origin("tool", "main", &[("bun.lock", b"lock v2\n")], "lock");
+    let git = fx.git_of("tool");
+    let head = CommitOid::try_from(fx.read_ref("tool", ORIGIN).unwrap()).unwrap();
+    let tree = git.tree_of(&head).unwrap();
+    let dir = fx.sb.root.join("observed");
+    git.export_tree(&tree, &dir).unwrap();
+    let q = strata_deps::observe_main(&fx.deps_ctx("tool"), &tree, &head, &dir).unwrap().expect("a proposal");
+    assert_eq!(q.state, strata_deps::ProposalState::Pending);
+    let moved = fx.land_on_origin("tool", "main", &[("src/m.ts", b"export const m = 1\n")], "source only");
+    assert_ne!(Some(moved.as_str()), q.head.as_ref().map(|h| h.as_str()));
+    let open = strata_deps::open_proposals(fx.store(), Some(&repo_name("tool"))).unwrap();
+    let q2 = open.iter().find(|x| x.id == q.id).expect("the proposal is open before the publish");
+    assert_eq!(q2.state, strata_deps::ProposalState::Pending);
+    assert_eq!(q2.to_inputs, q.to_inputs);
+    let p = run(&fx, &select(&fx, &s, &[("src/s.ts", b"export const s = 1\n")])).expect("publish");
+    let w = p.warnings.iter().find(|w| matches!(w.kind, WarningKind::DepsReinstalled | WarningKind::DepsSubstituted)).expect("a deps warning");
+    assert_eq!(w.detail["cause"], "base_moved", "{:?}", w.detail);
+    assert!(w.detail.get("fix").is_none(), "{:?}", w.detail);
+    let hint = w.detail["hint"].as_str().unwrap();
+    assert!(!hint.contains("deps approve"), "{hint}");
 }
 
 /// Test 19: `gc_repo` right after the cold install (normal keep) leaves
@@ -737,7 +875,7 @@ fn gc_after_the_cold_install_keeps_the_set() {
     assert_eq!(main.set, used);
     assert_eq!(main.head.as_str(), p.commit.as_str());
     store.gc_repo(&repo_name("tool"), std::time::Duration::ZERO).expect("gc_repo");
-    assert!(strata_deps::find_set(store, &repo_name("tool"), &used).unwrap().is_some(), "deps_main pins it");
+    assert!(strata_deps::find_set(store, &repo_name("tool"), &used).unwrap().is_some(), "zero-keep gc keeps the landed set");
 }
 
 /// Test 22: main has a `.gitattributes` filter rule and no matching file;
