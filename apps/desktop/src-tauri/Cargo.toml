@@ -1,0 +1,44 @@
+[package]
+name = "git-strata-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Git Strata: the macOS desktop app over git-stratad (docs/modules/gui.md)"
+publish = false
+
+# Its own workspace and Cargo.lock: the core workspace excludes this
+# directory (gui.md §2.1), so tauri never enters the daemon's build.
+[workspace]
+
+[lib]
+name = "strata_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+# gui.md §2.3: the desktop depends only on strata-client, strata-types,
+# tauri and its plugins, and tokio; plus libc for getuid (the launchctl
+# `gui/<uid>` domain, S0), already in the graph through tauri.
+strata-client = { path = "../../../crates/strata-client" }
+strata-types = { path = "../../../crates/strata-types" }
+tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2.7"
+tauri-plugin-os = "2.4"
+tauri-plugin-single-instance = "2.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "time", "sync"] }
+libc = "0.2"
+# Dev-only UI automation (gui.md §8.1 UI checks; G4: never in a release
+# build). Off unless `bun run tauri:dev` passes --features dev-connector.
+tauri-plugin-connector = { version = "0.17", optional = true }
+
+[features]
+default = []
+dev-connector = ["dep:tauri-plugin-connector"]
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

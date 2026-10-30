@@ -1,0 +1,76 @@
+p29858
+f9
+d0xc5ab686ca4e6ce6a
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f50
+d0xe6cb5e1ba54a71a8
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f51
+d0x901c693b47507061
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f52
+d0x3de5f8d483ee2b34
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f53
+d0x17971ddaafb2104f
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f54
+d0xa79bca522f8de91b
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f55
+d0x8673e93ca6381681
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f56
+d0x36366010e2b38859
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f57
+d0x45d5c5f73d4ea24
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f58
+d0x116415f57f2c1a58
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f59
+d0x2bd1f5869fdff44
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f60
+d0x3741c0a9f06b495
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f61
+d0x719d439e5d997041
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f62
+d0xe319f6b3bee36e0b
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f63
+d0x4df63dd5e5a522c2
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f64
+d0x4423e8a5ed671229
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f65
+d0x669b7339c6b7d3b0
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f66
+d0x67c2db93363bd9d5
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f67
+d0xe6cb5e1ba54a71a8
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f68
+d0xe7a4a2c2505e45fb
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f69
+d0xe6cb5e1ba54a71a8
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f77
+d0x9bbe9bddb29ff410
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f79
+d0xcd46fa0c6d95ee48
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f80
+d0xe771206060805fd9
+n/Users/user/Library/Application Support/git-strata/daemon.sock
+f81
+d0xec70472906e1953a
+n/Users/user/Library/Application Support/git-strata/daemon.sock

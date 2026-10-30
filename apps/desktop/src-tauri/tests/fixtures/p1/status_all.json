@@ -1,0 +1,159 @@
+{
+  "holds": [],
+  "leftovers": [],
+  "sessions": [
+    {
+      "checkpoints": [
+        {
+          "at": 1793122275,
+          "base": {
+            "deps": "a286a8822dfc1ea09e45f5bf16792c3d51dce0732dc75574c6f36f5cad41cb41",
+            "repo": "tool",
+            "tree": "811de321c50f05833972ab301c244579f062fc84"
+          },
+          "entries": 2,
+          "id": 1,
+          "reason": {
+            "kind": "Manual",
+            "message": "first edits"
+          },
+          "repo": "tool"
+        },
+        {
+          "at": 1793122275,
+          "base": {
+            "deps": "a434d2d770f8554a6c3e7e33299e78b20dc73b9a9d87ccbe50e4f72b8bce38ba",
+            "repo": "web",
+            "tree": "de22df02854b26c22b86c6e0fd104870dcd7e016"
+          },
+          "entries": 0,
+          "id": 2,
+          "reason": {
+            "kind": "Manual",
+            "message": "first edits"
+          },
+          "repo": "web"
+        }
+      ],
+      "in_flight": null,
+      "queued": 0,
+      "status": {
+        "created": "2026-10-27T17:31:14.575882Z",
+        "manifest": {
+          "id": "S1",
+          "repos": {
+            "tool": {
+              "base": {
+                "deps": "a286a8822dfc1ea09e45f5bf16792c3d51dce0732dc75574c6f36f5cad41cb41",
+                "repo": "tool",
+                "tree": "811de321c50f05833972ab301c244579f062fc84"
+              },
+              "head": "03f2ef69ecdb11ec0345ab181555013a4c55d51c",
+              "path": "/sandbox/strata/sessions/S1/tool",
+              "tracked": true
+            },
+            "web": {
+              "base": {
+                "deps": "a434d2d770f8554a6c3e7e33299e78b20dc73b9a9d87ccbe50e4f72b8bce38ba",
+                "repo": "web",
+                "tree": "de22df02854b26c22b86c6e0fd104870dcd7e016"
+              },
+              "head": "69ef075315971387f8398290dbf2b4e33c03f2ad",
+              "path": "/sandbox/strata/sessions/S1/web",
+              "tracked": true
+            }
+          },
+          "root": "/sandbox/strata/sessions/S1",
+          "ticket": "T-101"
+        },
+        "phase": "finalize",
+        "state": "Active",
+        "workspaces": {
+          "tool": {
+            "checkpoint": 1,
+            "conflicts": [],
+            "generation": 1,
+            "health": "Ok",
+            "pending": [],
+            "seeds": [],
+            "warnings": []
+          },
+          "web": {
+            "checkpoint": 2,
+            "conflicts": [],
+            "generation": 1,
+            "health": "Ok",
+            "pending": [],
+            "seeds": [],
+            "warnings": []
+          }
+        }
+      }
+    },
+    {
+      "checkpoints": [],
+      "in_flight": null,
+      "queued": 0,
+      "status": {
+        "created": "2026-10-27T17:31:15.110873Z",
+        "manifest": {
+          "id": "S2",
+          "repos": {
+            "tool": {
+              "base": {
+                "deps": "a286a8822dfc1ea09e45f5bf16792c3d51dce0732dc75574c6f36f5cad41cb41",
+                "repo": "tool",
+                "tree": "811de321c50f05833972ab301c244579f062fc84"
+              },
+              "head": "03f2ef69ecdb11ec0345ab181555013a4c55d51c",
+              "path": "/sandbox/strata/sessions/S2/tool",
+              "tracked": true
+            },
+            "web": {
+              "base": {
+                "deps": "a434d2d770f8554a6c3e7e33299e78b20dc73b9a9d87ccbe50e4f72b8bce38ba",
+                "repo": "web",
+                "tree": "de22df02854b26c22b86c6e0fd104870dcd7e016"
+              },
+              "head": "69ef075315971387f8398290dbf2b4e33c03f2ad",
+              "path": "/sandbox/strata/sessions/S2/web",
+              "tracked": false
+            }
+          },
+          "root": "/sandbox/strata/sessions/S2",
+          "ticket": "T-102"
+        },
+        "phase": "finalize",
+        "state": "Active",
+        "workspaces": {
+          "tool": {
+            "conflicts": [],
+            "drift": {
+              "found_inputs": "eaacff60728d8dc498510bd41a9a54dad021c238ed40d74c673ad9b9d05b7253",
+              "pinned": "a286a8822dfc1ea09e45f5bf16792c3d51dce0732dc75574c6f36f5cad41cb41",
+              "pinned_inputs": "281d5e0f700d1eb8fd8e8717359d4c193fd12d582b9fb6f2c8b85724676e1313"
+            },
+            "generation": 1,
+            "health": "Ok",
+            "pending": [],
+            "seeds": [],
+            "warnings": []
+          },
+          "web": {
+            "conflicts": [],
+            "generation": 1,
+            "health": "Ok",
+            "pending": [],
+            "seeds": [],
+            "warnings": [
+              {
+                "kind": "NotCheckpointed"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "warnings": []
+}

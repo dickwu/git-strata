@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-du"
+description = "Enables the du command without any pre-configured scope."
+commands.allow = ["du"]
+
+[[permission]]
+identifier = "deny-du"
+description = "Denies the du command without any pre-configured scope."
+commands.deny = ["du"]

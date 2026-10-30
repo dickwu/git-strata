@@ -1,0 +1,484 @@
+@import 'tailwindcss';
+@import './fonts.css';
+
+/* Tailwind dark: follows the theme store (data-theme on <html>), not only the OS. */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/*
+ * gui.md §8.2 tokens. Contrast-bearing values are mirrored in src/lib/tokens.ts and
+ * checked by src/lib/contrast.test.ts (ui_accent_contrast) — change both together.
+ */
+:root {
+  --bg-app: #f6f5f2;
+  --bg-panel: #ffffff;
+  --bg-sunken: #efece6;
+  --border: #e3dfd7;
+  --border-strong: #b9b2a6;
+  --text: #181613;
+  --text-muted: #6b665e;
+  --accent: #2e6f8e;
+  --accent-text: #245a74;
+  --on-accent: #ffffff;
+  --danger: #d4493a;
+  --mount-live: #1f9d55;
+  --layer-base: #b8ae9c;
+  --layer-deps: #8c9a7a;
+  --layer-session: var(--accent);
+  --layer-chain: #c98a3d;
+  --font-ui: 'Inter', -apple-system, system-ui, sans-serif;
+  --font-title: 'Inter Tight', 'Inter', -apple-system, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --bg-app: #0e0d0c;
+  --bg-panel: #17171a;
+  --bg-sunken: #0a0a0a;
+  --border: #2a2927;
+  --border-strong: #4a4743;
+  --text: #ecebe7;
+  --text-muted: #9b958b;
+  --accent: #6fb3d2;
+  --accent-text: #8cc4de;
+  --on-accent: #0e0d0c;
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg-app);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 20px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* Shell grid (§5.1): titlebar 36, content, status bar 30. No sidebar (t87u). */
+.shell {
+  display: grid;
+  grid-template-rows: 36px 1fr 30px;
+  grid-template-columns: 1fr;
+  grid-template-areas:
+    'title'
+    'main'
+    'status';
+  height: 100vh;
+}
+
+.titlebar {
+  grid-area: title;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Room for the macOS traffic lights (titleBarStyle Overlay). */
+  padding: 0 12px 0 80px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-app);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The all-caps name gets caps spacing (letterspaced capitals read evenly). */
+.wordmark {
+  font-family: var(--font-title);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+}
+
+.nav-item {
+  white-space: nowrap;
+}
+
+.main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.toolbar {
+  height: 52px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.content {
+  flex: 1;
+  overflow: auto;
+  padding: 20px;
+  /* One column that may shrink below its content, so a wide table scrolls inside itself. */
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.statusbar {
+  grid-area: status;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-app);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.screen-title {
+  font-family: var(--font-title);
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+.nav-item:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+/*
+ * Current place / active palette row: a teal tint with a teal edge, not a solid fill, so
+ * the teal repo tags stay the one saturated element on screen.
+ */
+.nav-item[aria-current='page'],
+.nav-item[data-active='true'] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.dot[data-state='up'] {
+  background: var(--mount-live);
+}
+.dot[data-state='down'] {
+  background: var(--danger);
+}
+
+/* Focus is always visible (§8.2). */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Repo tags in the Sessions list. Tracked repos (checkpoint, publish) carry the teal; reference
+ * workspaces stay muted with a dashed edge. All tags show; they wrap and the row grows. */
+.repo-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 4px;
+  min-width: 0;
+}
+.repo-tag {
+  height: 18px;
+  max-width: 100%;
+  padding: 0 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.repo-tag[data-used='true'] {
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+.repo-tag[data-used='true']:hover {
+  border-color: var(--accent);
+}
+.repo-tag[aria-pressed='true'],
+.filter-tag[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+/* Unused: in the session, not tracked, no changes. Muted, dashed, inert. */
+.repo-tag[data-used='false'] {
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: default;
+}
+/* Rows grow with their tags; every cell starts at the top line. */
+.sessions-table .ant-table-tbody > tr > td {
+  vertical-align: top;
+}
+
+.filter-bar {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+}
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.filter-count {
+  font-variant-numeric: tabular-nums;
+}
+.filter-group {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  align-items: start;
+  gap: 8px;
+}
+.filter-group-label {
+  padding-top: 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.filter-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+}
+.filter-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 4px 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.filter-tag:hover {
+  border-color: var(--accent);
+}
+.filter-tag-count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.filter-tag[aria-pressed='true'] .filter-tag-count {
+  background: color-mix(in srgb, var(--on-accent) 20%, transparent);
+  color: inherit;
+}
+/* State over phase, like ticket over agent: two short lines instead of one wide one. */
+.stacked-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.ticket-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.agent-badge {
+  padding: 0 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+/* Time column: created (muted) then age (text), tabular so the column does not jitter as it ticks. */
+.session-time {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  border-radius: 3px;
+}
+.session-time time {
+  color: var(--text-muted);
+}
+/* In the Sessions list the two parts stack (created over age) so the column stays narrow. */
+.sessions-table .session-time {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.session-age {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.inline-code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.waiting-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  padding: 2px 8px;
+  margin-left: -8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+.waiting-note:hover,
+.waiting-note[aria-expanded='true'] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.waiting-note:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.waiting-list {
+  width: 340px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.waiting-list ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.waiting-list li {
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.waiting-list li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.waiting-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.waiting-label {
+  font-weight: 500;
+}
+.waiting-how {
+  margin-top: 2px;
+  font-size: 12px;
+}
+.waiting-origin {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+.waiting-origin .waiting-review {
+  margin-left: auto;
+}
+.waiting-origin .ant-btn-link {
+  padding: 0;
+  height: auto;
+  font-size: 12px;
+}
+.waiting-stale {
+  margin: 0 0 8px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+/* Session rows open the detail modal; keyboard focus is visible, not just hover. */
+.sessions-table .ant-table-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Session detail modal (t87u). */
+.session-modal-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding-right: 32px;
+  font-weight: 400;
+}
+.session-modal-time {
+  margin-left: auto;
+}
+.session-modal-body {
+  max-height: calc(100vh - 200px);
+  overflow-y: auto;
+  overflow-x: hidden;
+}

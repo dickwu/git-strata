@@ -2,3 +2,13 @@
 **/*.rs.bk
 .DS_Store
 .omc/
+
+# Desktop app (apps/desktop)
+node_modules/
+/apps/desktop/dist/
+/apps/desktop/.next/
+/apps/desktop/out/
+/apps/desktop/next-env.d.ts
+/apps/desktop/src-tauri/target/
+/apps/desktop/src-tauri/gen/
+*.tsbuildinfo

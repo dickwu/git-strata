@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 strata-types = { path = "../strata-types" }
+strata-client = { path = "../strata-client" }
 strata-daemon = { path = "../strata-daemon" }
 strata-store = { path = "../strata-store" }
 strata-gitio = { path = "../strata-gitio" }

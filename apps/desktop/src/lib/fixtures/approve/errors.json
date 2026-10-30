@@ -1,0 +1,153 @@
+{
+  "cancelled": {
+    "code": "NotConfirmed",
+    "message": "cancelled",
+    "detail": {
+      "reason": "cancelled"
+    }
+  },
+  "timeout": {
+    "code": "NotConfirmed",
+    "message": "timed out",
+    "detail": {
+      "reason": "timeout"
+    }
+  },
+  "prompt_in_progress": {
+    "code": "NotConfirmed",
+    "message": "a prompt is open",
+    "detail": {
+      "reason": "prompt_in_progress"
+    }
+  },
+  "superseded": {
+    "code": "NoSuchProposal",
+    "message": "proposal 22 is not pending",
+    "detail": {
+      "proposal": 22,
+      "state": {
+        "kind": "Superseded",
+        "by": 28
+      },
+      "replacement": {
+        "id": 28,
+        "repo": "admin",
+        "origin": {
+          "kind": "Main"
+        },
+        "from": "4683432000000000000000000000000000000000000000000000000000000000",
+        "from_inputs": "i2",
+        "to": "f00dcafe00000000000000000000000000000000000000000000000000000000",
+        "to_inputs": "i3",
+        "state": {
+          "kind": "Pending"
+        },
+        "created": "2026-10-28T16:02:00Z"
+      }
+    }
+  },
+  "superseded_no_replacement": {
+    "code": "NoSuchProposal",
+    "message": "proposal 22 is not pending",
+    "detail": {
+      "proposal": 22,
+      "state": {
+        "kind": "Superseded",
+        "by": 27
+      }
+    }
+  },
+  "already_applied": {
+    "code": "NoSuchProposal",
+    "message": "proposal 22 is not pending",
+    "detail": {
+      "proposal": 22,
+      "state": {
+        "kind": "Applied"
+      }
+    }
+  },
+  "head_moved": {
+    "code": "HeadMoved",
+    "message": "main moved",
+    "detail": {
+      "reason": "main_moved",
+      "proposal": 22,
+      "head": "aaa0000000000000000000000000000000000000",
+      "tip": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "lock_wait": {
+    "code": "Busy",
+    "message": "waited 30000 ms before anything was written",
+    "detail": {
+      "reason": "lock_wait",
+      "lock": {
+        "repo": "admin"
+      },
+      "holder": "deps_approve",
+      "holder_session": null
+    }
+  },
+  "lock_wait_no_holder": {
+    "code": "Busy",
+    "message": "waited",
+    "detail": {
+      "reason": "lock_wait",
+      "lock": {
+        "repo": "admin"
+      },
+      "holder": null,
+      "holder_session": null
+    }
+  },
+  "shutting_down": {
+    "code": "ReadOnly",
+    "message": "the daemon is shutting down",
+    "detail": {
+      "reason": "shutting_down"
+    }
+  },
+  "build_lock_busy": {
+    "code": "Busy",
+    "message": "build lock busy",
+    "detail": {
+      "reason": "build_lock_busy"
+    }
+  },
+  "daemon_down": {
+    "code": "Busy",
+    "message": "daemon down",
+    "detail": {
+      "reason": "daemon_down"
+    }
+  },
+  "in_flight": {
+    "code": "Busy",
+    "message": "already running",
+    "detail": {
+      "reason": "request_in_flight"
+    }
+  },
+  "unsupported": {
+    "code": "Unsupported",
+    "message": "no gui",
+    "detail": {
+      "reason": "no_gui_session"
+    }
+  },
+  "socket_closed": {
+    "code": "Unknown",
+    "message": "the daemon closed the connection",
+    "detail": {
+      "reason": "socket_closed"
+    }
+  },
+  "other": {
+    "code": "Corrupt",
+    "message": "something odd",
+    "detail": {
+      "reason": "weird"
+    }
+  }
+}

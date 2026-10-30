@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-exclude = ["vendor"]
-members = ["crates/strata-types", "crates/strata-apfs", "crates/strata-confirm", "crates/strata-gitio", "crates/strata-store", "crates/strata-deps", "crates/strata-overlay", "crates/strata-session", "crates/strata-search", "crates/strata-publish", "crates/strata-daemon", "crates/git-strata"]
+exclude = ["vendor", "apps/desktop/src-tauri"]
+members = ["crates/strata-types", "crates/strata-client", "crates/strata-apfs", "crates/strata-confirm", "crates/strata-gitio", "crates/strata-store", "crates/strata-deps", "crates/strata-overlay", "crates/strata-session", "crates/strata-search", "crates/strata-publish", "crates/strata-daemon", "crates/git-strata"]
 
 [workspace.package]
 edition = "2024"

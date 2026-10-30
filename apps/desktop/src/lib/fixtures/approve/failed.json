@@ -1,0 +1,93 @@
+{
+  "results": [
+    {
+      "session": "s-aaaaaaaa",
+      "kind": "moved",
+      "report": {
+        "session": "s-aaaaaaaa",
+        "repo": "admin",
+        "from": {
+          "repo": "admin",
+          "tree": "4b825dc600000000000000000000000000000000",
+          "deps": "468343aa00000000000000000000000000000000000000000000000000000000"
+        },
+        "from_head": "3b416ebaa0000000000000000000000000000000",
+        "to": {
+          "repo": "admin",
+          "tree": "4b825dc600000000000000000000000000000000",
+          "deps": "ed8aac1100000000000000000000000000000000000000000000000000000000"
+        },
+        "head": "ed8aac0100000000000000000000000000000000",
+        "dropped": [],
+        "conflicts": [],
+        "lww": [],
+        "uncarried": [],
+        "checkpoint": 7
+      }
+    },
+    {
+      "session": "s-gggggggg",
+      "kind": "skipped",
+      "code": "OpenFiles",
+      "detail": {
+        "path": "/v/s-gggggggg/admin",
+        "holders": [
+          {
+            "pid": 9,
+            "command": "node",
+            "path": "/v/s-gggggggg/admin/node_modules/esbuild/bin/esbuild",
+            "hold": "Mapped"
+          }
+        ]
+      }
+    },
+    {
+      "session": "s-hhhhhhhh",
+      "kind": "skipped",
+      "code": "Busy",
+      "detail": {
+        "reason": "lock_wait",
+        "lock": {
+          "session": "s-hhhhhhhh"
+        },
+        "holder": "publish",
+        "holder_session": "s-hhhhhhhh"
+      }
+    },
+    {
+      "session": "s-iiiiiiii",
+      "kind": "skipped",
+      "code": "Corrupt",
+      "detail": {
+        "message": "workspace manifest unreadable"
+      }
+    },
+    {
+      "session": "s-llllllll",
+      "kind": "skipped",
+      "code": "Corrupt",
+      "detail": {
+        "kind": "Error",
+        "error": {
+          "code": "Corrupt",
+          "message": "deps set 12 is missing its manifest"
+        }
+      }
+    }
+  ],
+  "proposal": {
+    "id": 22,
+    "repo": "admin",
+    "created": "2026-10-28T15:46:00Z",
+    "origin": {
+      "kind": "Main"
+    },
+    "state": {
+      "kind": "Pending"
+    },
+    "from": "468343aa00000000000000000000000000000000000000000000000000000000",
+    "to": "ed8aac1100000000000000000000000000000000000000000000000000000000",
+    "from_inputs": "i1",
+    "to_inputs": "i2"
+  }
+}

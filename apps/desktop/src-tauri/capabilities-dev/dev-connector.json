@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "dev-connector",
+  "description": "tauri-plugin-connector for UI checks. Outside capabilities/ on purpose: build.rs adds this directory only for a debug build with the dev-connector feature (gui.md G4).",
+  "windows": ["main"],
+  "permissions": ["connector:default"]
+}

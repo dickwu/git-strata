@@ -58,7 +58,7 @@
 - 虚拟文件系统（FSKit / macFUSE / NFS 环回）。可作为日后只读展示层。
 - 容器、Linux、Windows。
 - 替代 git 的任何部分：分支管理、远端协作、历史查看仍用 git。
-- 图形界面。v1 只有 CLI（JSON 输出）；给人看的页面以后再说。[我的决定]
+- v1 里的图形界面。v1 先出 CLI（JSON 输出）；GUI 按 [docs/modules/gui.md](modules/gui.md) 在 v1 之后做，daemon 仍是唯一的权威与确认门。[我的决定；GUI 部分按 peilin t49u 修订]
 - hunk 级别的批次挑选。批次按路径挑，整文件进出。[我的决定，与 tgrep "按整文件不按 hunk" 一致]
 - 跨机器共享 Store。
 
@@ -295,7 +295,7 @@ agent 和用户是同一个 uid，且常以 bypass 权限运行，所以 flag �
 2. Rust；macOS API 走 `libc` / `objc2`；索引层以 `tgrep-core` 为库依赖。
 3. 一台机器一个 daemon（launchd agent），unix socket RPC。
 4. 批次按整文件路径，不按 hunk。
-5. v1 无 GUI，只有 CLI + JSON；人看的页面以后再议。
+5. v1 先出 CLI + JSON；GUI 在 v1 之后按 docs/modules/gui.md 做，不改变 daemon 是唯一确认门。
 6. 一推上线的仓库要人类确认。确认是 §6.9 的 LocalAuthentication，不是 flag。要推且要确认时，凭据在 commit 之前。
 7. 保留 `.lww` 规则，默认为空。
 8. Store 走持久（WAL + checkpoint 边界 fsync），不采用 LayerFS 的 Disposable。

@@ -1,0 +1,311 @@
+{
+  "bases": {
+    "all": {
+      "allocated": 0,
+      "as_of": null,
+      "complete": false,
+      "errors": 0,
+      "exact": true,
+      "files": 0,
+      "logical": 0,
+      "pending": 4,
+      "private": 0,
+      "shared": 0,
+      "stale": 0,
+      "units": 4
+    },
+    "repos": {
+      "tool": {
+        "allocated": 0,
+        "as_of": null,
+        "complete": false,
+        "errors": 0,
+        "exact": true,
+        "files": 0,
+        "logical": 0,
+        "pending": 2,
+        "private": 0,
+        "shared": 0,
+        "stale": 0,
+        "units": 2
+      },
+      "web": {
+        "allocated": 0,
+        "as_of": null,
+        "complete": false,
+        "errors": 0,
+        "exact": true,
+        "files": 0,
+        "logical": 0,
+        "pending": 2,
+        "private": 0,
+        "shared": 0,
+        "stale": 0,
+        "units": 2
+      }
+    }
+  },
+  "deps": {
+    "all": {
+      "allocated": 0,
+      "as_of": null,
+      "complete": false,
+      "errors": 0,
+      "exact": true,
+      "files": 0,
+      "logical": 0,
+      "pending": 5,
+      "private": 0,
+      "shared": 0,
+      "stale": 0,
+      "units": 5
+    },
+    "repos": {
+      "tool": {
+        "allocated": 0,
+        "as_of": null,
+        "complete": false,
+        "errors": 0,
+        "exact": true,
+        "files": 0,
+        "logical": 0,
+        "pending": 4,
+        "private": 0,
+        "shared": 0,
+        "stale": 0,
+        "units": 4
+      },
+      "web": {
+        "allocated": 0,
+        "as_of": null,
+        "complete": false,
+        "errors": 0,
+        "exact": true,
+        "files": 0,
+        "logical": 0,
+        "pending": 1,
+        "private": 0,
+        "shared": 0,
+        "stale": 0,
+        "units": 1
+      }
+    }
+  },
+  "now": "2026-10-27T17:31:16.645Z",
+  "root": "/sandbox/strata",
+  "savings": {
+    "cumulative": {
+      "before_since": "unknown",
+      "logical": 6830,
+      "private": 180224,
+      "removed": 0,
+      "savings": 0,
+      "sessions": 2,
+      "since": "2026-10-27T17:31:14.822Z",
+      "sized": 2,
+      "unsized": 0
+    },
+    "live": {
+      "as_of": "2026-10-27T17:31:14.821Z",
+      "complete": true,
+      "logical": 6830,
+      "private": 180224,
+      "savings": 0
+    }
+  },
+  "scan": {
+    "done": 13,
+    "failed": [],
+    "full": false,
+    "last_full": null,
+    "queued": 253,
+    "running": true,
+    "started": "2026-10-27T17:31:16.646Z"
+  },
+  "sessions": {
+    "all": {
+      "allocated": 262144,
+      "as_of": "2026-10-27T17:31:14.821Z",
+      "complete": true,
+      "errors": 0,
+      "exact": true,
+      "files": 64,
+      "logical": 6830,
+      "pending": 0,
+      "private": 180224,
+      "shared": 81920,
+      "stale": 0,
+      "units": 4
+    },
+    "list": [
+      {
+        "allocated": 131072,
+        "as_of": "2026-10-27T17:31:15.359Z",
+        "complete": true,
+        "errors": 0,
+        "exact": true,
+        "files": 32,
+        "logical": 3415,
+        "pending": 0,
+        "private": 90112,
+        "savings": 0,
+        "session": "S2",
+        "shared": 40960,
+        "stale": 0,
+        "units": 2
+      },
+      {
+        "allocated": 131072,
+        "as_of": "2026-10-27T17:31:14.821Z",
+        "complete": true,
+        "errors": 0,
+        "exact": true,
+        "files": 32,
+        "logical": 3415,
+        "pending": 0,
+        "private": 90112,
+        "savings": 0,
+        "session": "S1",
+        "shared": 40960,
+        "stale": 0,
+        "units": 2
+      }
+    ]
+  },
+  "store": {
+    "all": {
+      "allocated": 675840,
+      "as_of": "2026-10-27T17:31:16.645Z",
+      "complete": false,
+      "errors": 0,
+      "exact": true,
+      "files": 4,
+      "logical": 747808,
+      "pending": 261,
+      "private": 675840,
+      "shared": 0,
+      "stale": 0,
+      "units": 265
+    },
+    "blobs": {
+      "allocated": 0,
+      "as_of": null,
+      "complete": false,
+      "errors": 0,
+      "exact": true,
+      "files": 0,
+      "logical": 0,
+      "pending": 256,
+      "private": 0,
+      "shared": 0,
+      "stale": 0,
+      "units": 256
+    },
+    "db": {
+      "allocated": 675840,
+      "as_of": "2026-10-27T17:31:16.645Z",
+      "complete": true,
+      "errors": 0,
+      "exact": true,
+      "files": 4,
+      "logical": 747808,
+      "pending": 0,
+      "private": 675840,
+      "shared": 0,
+      "stale": 0,
+      "units": 4
+    },
+    "other": {
+      "allocated": 0,
+      "as_of": null,
+      "complete": true,
+      "errors": 0,
+      "exact": true,
+      "files": 0,
+      "logical": 0,
+      "pending": 0,
+      "private": 0,
+      "shared": 0,
+      "stale": 0,
+      "units": 0
+    },
+    "tmp": {
+      "allocated": 0,
+      "as_of": null,
+      "complete": false,
+      "errors": 0,
+      "exact": true,
+      "files": 0,
+      "logical": 0,
+      "pending": 1,
+      "private": 0,
+      "shared": 0,
+      "stale": 0,
+      "units": 1
+    },
+    "trash": {
+      "allocated": 0,
+      "as_of": null,
+      "complete": false,
+      "eligible": {
+        "allocated": 0,
+        "as_of": null,
+        "complete": true,
+        "entries": 0,
+        "errors": 0,
+        "exact": true,
+        "files": 0,
+        "logical": 0,
+        "pending": 0,
+        "private": 0,
+        "reclaim_max": 0,
+        "reclaim_min": 0,
+        "shared": 0,
+        "stale": 0,
+        "units": 0
+      },
+      "entries": 4,
+      "errors": 0,
+      "exact": true,
+      "files": 0,
+      "floor_secs": 3600,
+      "gc": "git-strata gc",
+      "logical": 0,
+      "pending": 4,
+      "private": 0,
+      "shared": 0,
+      "stale": 0,
+      "units": 4,
+      "young": {
+        "allocated": 0,
+        "as_of": null,
+        "complete": false,
+        "entries": 4,
+        "errors": 0,
+        "exact": true,
+        "files": 0,
+        "logical": 0,
+        "pending": 4,
+        "private": 0,
+        "shared": 0,
+        "stale": 0,
+        "units": 4
+      }
+    }
+  },
+  "took_ms": 1,
+  "total": {
+    "allocated": 937984,
+    "as_of": "2026-10-27T17:31:14.821Z",
+    "complete": false,
+    "errors": 0,
+    "exact": true,
+    "files": 68,
+    "logical": 754638,
+    "pending": 270,
+    "private": 856064,
+    "shared": 81920,
+    "stale": 0,
+    "units": 278
+  }
+}

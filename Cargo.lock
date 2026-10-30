@@ -931,6 +931,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "strata-client",
  "strata-daemon",
  "strata-deps",
  "strata-gitio",
@@ -2340,6 +2341,16 @@ dependencies = [
  "strata-types",
  "tempfile",
  "unicode-normalization",
+]
+
+[[package]]
+name = "strata-client"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "strata-types",
+ "tempfile",
 ]
 
 [[package]]

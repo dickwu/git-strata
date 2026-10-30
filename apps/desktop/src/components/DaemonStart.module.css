@@ -1,0 +1,74 @@
+/*
+ * The Start daemon control inside the down notice. Quiet by design: the button is the one
+ * accent; progress is a single live line; the terminal command sits below as a fallback.
+ */
+.body {
+  display: grid;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+/* A slow breathing dot while launchd and the socket are being waited on. */
+.pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: breathe 1.4s ease-in-out infinite;
+}
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.error {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+  border-radius: 0 6px 6px 0;
+}
+.errorTitle {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.output {
+  margin: 2px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.fallback {
+  color: var(--text-muted);
+  font-size: 13px;
+}
