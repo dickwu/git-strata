@@ -426,7 +426,10 @@ pub(crate) fn cold_install(ctx: &Ctx, e: &StrataError, first_row: u64) -> Result
     })();
     let left = remove_snapshot_warning(ctx, first_row);
     match r {
-        Ok((set, install_ms)) => Ok(Installed { set: set.id, inputs: set.inputs_hash, first_row, install_ms, left }),
+        Ok((set, install_ms)) => {
+            seams::hit(ctx.git, Point::AfterColdInstall);
+            Ok(Installed { set: set.id, inputs: set.inputs_hash, first_row, install_ms, left })
+        }
         Err(be) => {
             let mut detail = be.detail.clone().filter(Value::is_object).unwrap_or_else(|| json!({}));
             detail["stage"] = json!("deps_install");

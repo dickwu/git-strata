@@ -32,6 +32,7 @@ mod imp {
         pub(super) static SYNCS: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
         pub(super) static SNAPSHOT_CLONE: RefCell<Option<SnapHook>> = const { RefCell::new(None) };
         pub(super) static SNAPSHOT_HASH_WRONG: Cell<bool> = const { Cell::new(false) };
+        pub(super) static BUILD_LOCK_BUSY: RefCell<Option<Hook>> = const { RefCell::new(None) };
     }
 
     pub(super) type SnapHook = Box<dyn FnMut(&Path, &strata_types::RepoPath)>;
@@ -100,6 +101,17 @@ pub(crate) fn before_main_lock() {
 pub(crate) fn before_main_cas() {
     #[cfg(feature = "test-seams")]
     imp::call_kept(&imp::BEFORE_MAIN_CAS);
+}
+
+/// `lock_build` found the build lock held by someone else (the first
+/// `EWOULDBLOCK` of one call), before it waits.
+pub(crate) fn build_lock_busy() {
+    #[cfg(feature = "test-seams")]
+    {
+        if let Some(mut h) = imp::BUILD_LOCK_BUSY.with(|s| s.borrow_mut().take()) {
+            h();
+        }
+    }
 }
 
 /// publish's input snapshot: after a file was cloned into its slot, before
@@ -181,6 +193,12 @@ pub mod test_seams {
         imp::SNAPSHOT_CLONE.with(|s| *s.borrow_mut() = Some(hook));
     }
 
+    /// Called once, by this thread's next build-lock wait: the first time a
+    /// `lock_build` finds the lock held, before it sleeps.
+    pub fn on_build_lock_busy(hook: Box<dyn FnMut()>) {
+        imp::BUILD_LOCK_BUSY.with(|s| *s.borrow_mut() = Some(hook));
+    }
+
     /// This thread's next publish input snapshot hashes wrong once.
     pub fn snapshot_hash_wrong() {
         imp::SNAPSHOT_HASH_WRONG.with(|c| c.set(true));
@@ -201,6 +219,7 @@ pub mod test_seams {
         imp::SYNCS.with(|c| c.set((0, 0, 0)));
         imp::SNAPSHOT_CLONE.with(|s| *s.borrow_mut() = None);
         imp::SNAPSHOT_HASH_WRONG.with(|c| c.set(false));
+        imp::BUILD_LOCK_BUSY.with(|s| *s.borrow_mut() = None);
         imp::RESET_DURING.with(|r| r.set(true));
     }
 }

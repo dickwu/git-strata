@@ -6,7 +6,7 @@ mod support;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{Value, json};
@@ -944,4 +944,101 @@ fn publish_push_refused_keeps_commit_and_push_in_data() {
         assert_eq!(env["data"]["pushes"][0]["outcome"]["kind"], "Refused", "{env}");
         assert!(env["data"]["pushes"][0]["outcome"]["message"].as_str().unwrap().contains("denied by policy"), "{env}");
     });
+}
+
+/// deps-drift §3 test 3 (and the CLI side of §2.5): a bun repo whose check
+/// compares the installed `x` with package.json. `flag` makes the check
+/// fail; `push` turns pushing on.
+fn deps_checked(push: bool) -> (Live, PathBuf) {
+    let lv = Live::with_deps(&["tool"], &base_files(), &["tool"]);
+    let flag = lv.sb.join("check-fails");
+    let check = lv.bin.join("same-deps");
+    fs::write(
+        &check,
+        format!("#!/bin/sh\ncmp -s package.json node_modules/x/package.json || {{ echo 'deps do not match'; exit 9; }}\n[ ! -e '{}' ] || {{ echo 'flagged'; exit 7; }}\n", flag.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&check, fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = lv.home.config_dir().join("config.toml");
+    let mut t = fs::read_to_string(&cfg).unwrap().replace("\ndeploy_on_push", &format!("\nchecks = [{:?}]\ndeploy_on_push", check.to_string_lossy()));
+    if push {
+        t = t.replace("\npush = false", "\npush = true");
+    }
+    fs::write(&cfg, t).unwrap();
+    (lv, flag)
+}
+
+const DEPS_NEW: &str = "{\n  \"name\": \"tool\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": { \"x\": \"^1.0.0\", \"y\": \"^2.0.0\" }\n}\n";
+
+/// The deps-warning lines in `stderr` (deps-drift §2.5 messages).
+fn deps_lines(stderr: &str) -> usize {
+    stderr.lines().filter(|l| l.starts_with("warning: ") && l.contains("install inputs differ from the session's deps set")).count()
+}
+
+/// deps-drift §3 test 3: `deps propose --switch` first (moved), then the
+/// publish runs its checks with P and warns nothing.
+#[test]
+fn switched_session_publishes_without_a_deps_warning() {
+    let (lv, _) = deps_checked(false);
+    lv.serve(|_| {
+        let a = lv.new_session("T-1", "tool");
+        let wa = lv.ws(&a, "tool");
+        write(&wa, "package.json", DEPS_NEW.as_bytes());
+        let d = lv.run_in(&wa, &["deps", "propose", "--switch"]).ok();
+        assert_eq!(d["switched"]["kind"], json!("moved"), "{d:#}");
+        let r = lv.run(&["publish", "--from", &format!("{a}:package.json")]);
+        let d = r.ok();
+        assert!(d["checks_ran"].as_u64().unwrap() >= 1, "{d:#}");
+        assert!(!r.stderr.contains("warning"), "{r:?}");
+    });
+}
+
+/// deps-drift §2.5 (CLI): a failure before any commit still prints the
+/// deps warning (the early error return), and a failure after the commit
+/// prints it once although the daemon also copies it into
+/// `landed.warnings`.
+#[test]
+fn publish_failures_print_the_deps_warning_once() {
+    let (lv, flag) = deps_checked(true);
+    let git = strata_gitio::Git::open(&lv.main("tool")).unwrap();
+    let t0 = std::cell::Cell::new(None::<std::time::Instant>);
+    lv.serve(|_| {
+        let a = lv.new_session("T-1", "tool");
+        let b = lv.new_session("T-2", "tool");
+        let c = lv.new_session("T-3", "tool");
+        // a seals the set for DEPS_NEW (cold install, unswitched).
+        write(&lv.ws(&a, "tool"), "package.json", DEPS_NEW.as_bytes());
+        let r = lv.run(&["publish", "--from", &format!("{a}:package.json")]);
+        r.ok();
+        assert_eq!(deps_lines(&r.stderr), 1, "{r:?}");
+
+        // b: source only, main's inputs moved → substituted; the check
+        // fails before the commit.
+        fs::write(&flag, b"").unwrap();
+        write(&lv.ws(&b, "tool"), "n.txt", b"n\n");
+        let r = lv.run(&["publish", "--from", &format!("{b}:n.txt")]);
+        assert_eq!(r.err_code(), "CheckFailed", "{r:?}");
+        assert_eq!(r.env()["error"]["detail"]["deps_warning"]["kind"], "DepsSubstituted", "{r:?}");
+        assert_eq!(deps_lines(&r.stderr), 1, "printed before the early error: {r:?}");
+        fs::remove_file(&flag).unwrap();
+
+        // c: the push outlasts its timeout after the commit → Unknown with
+        // the commit in data; the warning is printed once.
+        let hook = lv.sb.join("tool-origin.git/hooks/pre-receive");
+        fs::write(&hook, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        strata_publish::seams::set_push_timeout(&git, Some(std::time::Duration::from_millis(300)));
+        t0.set(Some(std::time::Instant::now()));
+        write(&lv.ws(&c, "tool"), "m.txt", b"m\n");
+        let r = lv.run(&["publish", "--from", &format!("{c}:m.txt")]);
+        assert_eq!(r.err_code(), "Unknown", "{r:?}");
+        let env = r.env();
+        assert!(env["data"]["commits"]["tool"].is_string(), "{env}");
+        assert_eq!(env["error"]["detail"]["deps_warning"]["kind"], "DepsSubstituted", "{env}");
+        assert_eq!(deps_lines(&r.stderr), 1, "printed once: {r:?}");
+    });
+    strata_publish::seams::set_push_timeout(&git, None);
+    if let Some(t) = t0.get() {
+        std::thread::sleep(std::time::Duration::from_secs(3).saturating_sub(t.elapsed()));
+    }
 }

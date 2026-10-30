@@ -733,6 +733,11 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
                 before.push(l.clone());
             }
             if before.is_empty() && already.is_empty() {
+                // deps-drift §2.5: a failure before any commit (a check, a
+                // refused gate) still says what the checks used.
+                for m in failure_warning_lines(&e) {
+                    eprintln!("warning: {m}");
+                }
                 return Err(e);
             }
             // A definite remote refusal after the commit is `PushRefused`
@@ -764,6 +769,7 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
     let mut pushes = Vec::new();
     let mut bad: Option<StrataError> = None;
     let mut touched = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
     for p in published {
         let repo = p.get("repo").and_then(Value::as_str).unwrap_or_default().to_string();
         if let Some(c) = p.get("commit") {
@@ -771,10 +777,10 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
         }
         checks += p.get("checks_ran").and_then(Value::as_u64).unwrap_or(0);
         for w in p.get("warnings").and_then(Value::as_array).into_iter().flatten() {
-            match deps_warning_line(w) {
-                Some(m) => eprintln!("warning: {m}"),
-                None => eprintln!("warning ({repo}): {w}"),
-            }
+            lines.push(match deps_warning_line(w) {
+                Some(m) => format!("warning: {m}"),
+                None => format!("warning ({repo}): {w}"),
+            });
         }
         touched.push(repo.clone());
         if let Some(o) = p.get("push").filter(|o| !o.is_null()) {
@@ -794,9 +800,12 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
             }
         }
     }
-    // deps-drift §2.5: a failure after staging still says what the checks used.
-    if let Some(m) = failed.as_ref().and_then(|e| e.detail.as_ref()).and_then(|d| d.get("deps_warning")).and_then(deps_warning_line) {
-        eprintln!("warning: {m}");
+    // deps-drift §2.5: a failure after staging still says what the checks
+    // used. The daemon also copies the failing repo's `deps_warning` into
+    // its `landed.warnings`, so each line is printed once.
+    lines.extend(failed.as_ref().map(failure_warning_lines).unwrap_or_default().into_iter().map(|m| format!("warning: {m}")));
+    for l in dedup(lines) {
+        eprintln!("{l}");
     }
     let waiting = waiting_proposals(config, &touched);
     let data = json!({ "commits": commits, "checks_ran": checks, "waiting": waiting, "pushes": pushes, "already_published": already });
@@ -806,8 +815,34 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
     }
 }
 
+/// deps-drift §2.5: the deps lines a publish error carries: the staged
+/// `deps_warning` and a `deps_inputs_left` snapshot report.
+fn failure_warning_lines(e: &StrataError) -> Vec<String> {
+    let Some(d) = e.detail.as_ref() else { return Vec::new() };
+    let mut out = Vec::new();
+    if let Some(m) = d.get("deps_warning").and_then(deps_warning_line) {
+        out.push(m.to_string());
+    }
+    if let Some(m) = d.get("deps_inputs_left").and_then(|l| l.get("message")).and_then(Value::as_str) {
+        out.push(m.to_string());
+    }
+    out
+}
+
+/// `lines` in order, each once.
+fn dedup(lines: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in lines {
+        if !out.contains(&l) {
+            out.push(l);
+        }
+    }
+    out
+}
+
 /// deps-drift §2.5: the one-line text of a deps warning (its
-/// `detail.message`), `None` for other kinds.
+/// `detail.message`), `None` for other kinds. Each message starts with its
+/// repo's name, so `dedup` only merges the same warning of the same repo.
 fn deps_warning_line(w: &Value) -> Option<&str> {
     match w.get("kind").and_then(Value::as_str)? {
         "DepsSubstituted" | "DepsReinstalled" | "DepsInputsLeft" => w.get("detail")?.get("message")?.as_str(),
@@ -850,5 +885,26 @@ mod tests {
         }
         assert!(!bare_refusal(&unknown(serde_json::json!({ "reason": "push_unknown", "kind": "Unknown" }))));
         assert!(!bare_refusal(&StrataError::new(Code::PushRefused, "x")));
+    }
+
+    /// deps-drift §2.5: the deps lines of a failure, read from
+    /// `deps_warning` and `deps_inputs_left`; other kinds are not lines.
+    #[test]
+    fn failure_warning_lines_read_both_deps_keys() {
+        let w = json!({ "kind": "DepsSubstituted", "detail": { "message": "used X" } });
+        let e = unknown(json!({ "deps_warning": w, "deps_inputs_left": { "message": "left /s" } }));
+        assert_eq!(failure_warning_lines(&e), vec!["used X".to_string(), "left /s".to_string()]);
+        let other = unknown(json!({ "deps_warning": { "kind": "ObserveFailed", "detail": { "message": "m" } } }));
+        assert!(failure_warning_lines(&other).is_empty());
+        assert!(failure_warning_lines(&StrataError::new(Code::Unknown, "x")).is_empty());
+    }
+
+    /// The failing repo's `deps_warning` is also in its `landed.warnings`:
+    /// printed once, order kept.
+    #[test]
+    fn dedup_keeps_the_first_of_each_line() {
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(dedup(l(&["a", "b", "a", "c", "b"])), l(&["a", "b", "c"]));
+        assert!(dedup(Vec::new()).is_empty());
     }
 }

@@ -270,6 +270,12 @@ pub enum PublishFault {
     PauseBeforePushRecorded,
     /// 每个会话的发布后 rebase 之前停住：队列和 repo 锁都已放下，行仍是 `Running`（`publishing` 间隙）。review M5 的测试用。[实现时补的决定]
     PauseBeforeRebase,
+    /// 检查兄弟仓库重新核对之后、布局建立和克隆它们之前停住（D21）。
+    PauseAfterSiblingPlace,
+    /// R1 关闭之后、冷安装之前停住（deps-drift §2.4），不持有任何发布锁。
+    PauseBeforeColdInstall,
+    /// 冷安装之后、第二轮之前停住（deps-drift §2.4），不持有任何发布锁。
+    PauseAfterColdInstall,
 }
 ```
 
