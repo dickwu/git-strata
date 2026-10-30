@@ -11,8 +11,13 @@
 //! The decision (`kickstart` when loaded, `bootstrap` of the plist when
 //! not) and the wait for the socket live here, over [`ServiceManager`], so
 //! the tests drive them with a fake and never run launchctl.
+//!
+//! cli.md D38 (scope.rs): only when HOME is the login home, and only an
+//! agent launchd loaded from that home's plist; anything else is
+//! `foreign_home` / `foreign_agent` before a kickstart or bootstrap.
 
 pub mod launchctl;
+pub mod scope;
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -43,8 +48,9 @@ pub fn plist_for_home(home: &Path) -> PathBuf {
 
 /// The only launchd operations the GUI has. No stop, no bootout, no kill.
 pub trait ServiceManager: Send + Sync {
-    /// Whether launchd has the job in `gui/<uid>` (`launchctl print`).
-    fn is_loaded(&self, label: &str) -> Result<bool, GuiError>;
+    /// launchd's dump of the job in `gui/<uid>` (`launchctl print`), or
+    /// `None` when launchd does not have it.
+    fn print(&self, label: &str) -> Result<Option<String>, GuiError>;
     /// Start a loaded job that is not running. Without `-k`: a running
     /// job is left alone.
     fn kickstart(&self, label: &str) -> Result<(), GuiError>;
@@ -63,15 +69,21 @@ pub enum AgentState {
     Installed,
     /// No plist and not loaded: setup is needed, Start is not offered.
     NotInstalled,
+    /// D38: HOME is not the login home, or the loaded agent comes from
+    /// another plist. Start is not offered; `refusal` says which.
+    Foreign,
 }
 
 /// The `legacy_agent` reply: enough for the down notice to pick its variant.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LegacyAgent {
     pub state: AgentState,
     pub label: &'static str,
     pub plist: String,
     pub command: &'static str,
+    /// `foreign_home` / `foreign_agent` when `state` is `Foreign`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<GuiError>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -237,8 +249,11 @@ pub fn main_only(label: &str) -> Result<(), GuiError> {
     }
 }
 
+/// `plist` is this (login) home's plist; a loaded agent from any other
+/// plist is `foreign_agent` (D38).
 pub fn agent_state(sm: &dyn ServiceManager, plist: &Path) -> Result<AgentState, GuiError> {
-    if sm.is_loaded(AGENT_LABEL)? {
+    if let Some(dump) = sm.print(AGENT_LABEL)? {
+        scope::owned(&dump, plist)?;
         Ok(AgentState::Loaded)
     } else if plist.is_file() {
         Ok(AgentState::Installed)
@@ -254,6 +269,8 @@ pub fn choose(state: AgentState, plist: &Path) -> Result<Action, GuiError> {
         AgentState::Loaded => Ok(Action::Kickstart),
         AgentState::Installed => Ok(Action::Bootstrap),
         AgentState::NotInstalled => Err(GuiError::plist_missing(plist)),
+        // agent_state returns the refusal itself; never a state to act on.
+        AgentState::Foreign => Err(GuiError::internal("refusing a foreign launch agent")),
     }
 }
 
@@ -312,6 +329,9 @@ where
 /// The managed state behind `legacy_agent` / `daemon_start`.
 pub struct Starter {
     home: Option<PathBuf>,
+    /// The login home (D38); `None` when it cannot be resolved, which
+    /// refuses every start.
+    login: Option<PathBuf>,
     sm: Arc<dyn ServiceManager>,
     policy: WaitPolicy,
     busy: AtomicBool,
@@ -325,47 +345,79 @@ impl Drop for Slot<'_> {
 }
 
 impl Starter {
-    pub fn new(home: Option<PathBuf>, sm: Arc<dyn ServiceManager>, policy: WaitPolicy) -> Starter {
+    pub fn new(
+        home: Option<PathBuf>,
+        login: Option<PathBuf>,
+        sm: Arc<dyn ServiceManager>,
+        policy: WaitPolicy,
+    ) -> Starter {
         Starter {
             home,
+            login,
             sm,
             policy,
             busy: AtomicBool::new(false),
         }
     }
 
-    /// HOME from the environment (the socket uses the same), the real
-    /// launchctl, the production wait.
+    /// HOME from the environment (the socket uses the same), the login
+    /// home from the password database, the real launchctl, the
+    /// production wait.
     pub fn from_env() -> Starter {
         let home = std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(PathBuf::from);
         Starter::new(
             home,
+            scope::login_home(),
             Arc::new(launchctl::Launchctl::new()),
             WaitPolicy::PRODUCTION,
         )
     }
 
+    fn home(&self) -> Result<&Path, GuiError> {
+        self.home.as_deref().ok_or_else(GuiError::no_home)
+    }
+
+    /// D38: the plist of the canonical login home, or `foreign_home`
+    /// before any launchctl.
     fn plist(&self) -> Result<PathBuf, GuiError> {
-        self.home
-            .as_deref()
-            .map(plist_for_home)
-            .ok_or_else(GuiError::no_home)
+        let home = scope::lifecycle_scope(self.home()?, self.login.as_deref())?;
+        Ok(plist_for_home(&home))
     }
 
     pub async fn agent(&self) -> Result<LegacyAgent, GuiError> {
-        let plist = self.plist()?;
+        let home = self.home()?;
+        let foreign = |plist: &Path, e: GuiError| LegacyAgent {
+            state: AgentState::Foreign,
+            label: AGENT_LABEL,
+            plist: plist.to_string_lossy().into_owned(),
+            command: CLI_START,
+            refusal: Some(e),
+        };
+        let plist = match self.plist() {
+            Ok(p) => p,
+            Err(e) if e.reason() == Some("foreign_home") => {
+                return Ok(foreign(&plist_for_home(home), e));
+            }
+            Err(e) => return Err(e),
+        };
         let sm = self.sm.clone();
         let p = plist.clone();
-        let state = tokio::task::spawn_blocking(move || agent_state(sm.as_ref(), &p))
+        let state = match tokio::task::spawn_blocking(move || agent_state(sm.as_ref(), &p))
             .await
-            .map_err(|e| GuiError::internal(format!("agent check panicked: {e}")))??;
+            .map_err(|e| GuiError::internal(format!("agent check panicked: {e}")))?
+        {
+            Ok(s) => s,
+            Err(e) if e.reason() == Some("foreign_agent") => return Ok(foreign(&plist, e)),
+            Err(e) => return Err(e),
+        };
         Ok(LegacyAgent {
             state,
             label: AGENT_LABEL,
             plist: plist.to_string_lossy().into_owned(),
             command: CLI_START,
+            refusal: None,
         })
     }
 

@@ -12,6 +12,8 @@ use super::*;
 #[derive(Default)]
 struct Fake {
     loaded: bool,
+    /// The top-level `path = ` launchd reports when loaded.
+    loaded_from: Option<String>,
     fail: Option<&'static str>,
     calls: Mutex<Vec<String>>,
 }
@@ -33,9 +35,10 @@ impl Fake {
 }
 
 impl ServiceManager for Fake {
-    fn is_loaded(&self, label: &str) -> Result<bool, GuiError> {
+    fn print(&self, label: &str) -> Result<Option<String>, GuiError> {
         self.calls.lock().unwrap().push(format!("print {label}"));
-        self.result("print").map(|()| self.loaded)
+        self.result("print")?;
+        Ok(self.loaded.then(|| dump(self.loaded_from.as_deref())))
     }
     fn kickstart(&self, label: &str) -> Result<(), GuiError> {
         self.calls
@@ -68,8 +71,27 @@ fn home(with_plist: bool) -> tempfile::TempDir {
     d
 }
 
+/// A `launchctl print` service dump shaped like macOS 15's.
+fn dump(path: Option<&str>) -> String {
+    let p = path.map(|p| format!("\tpath = {p}\n")).unwrap_or_default();
+    format!(
+        "gui/501/{AGENT_LABEL} = {{\n\tactive count = 1\n{p}\tstdout path = /tmp/o.log\n\tenvironment = {{\n\t\tpath = /nested\n\t}}\n\tstate = running\n}}\n"
+    )
+}
+
+/// HOME and the login home are the same directory.
 fn starter(home: &Path, fake: Arc<Fake>) -> Starter {
-    Starter::new(Some(home.to_path_buf()), fake, FAST)
+    Starter::new(
+        Some(home.to_path_buf()),
+        Some(home.to_path_buf()),
+        fake,
+        FAST,
+    )
+}
+
+/// The plist path the app uses: under the canonical home (D38).
+fn canon_plist(home: &Path) -> PathBuf {
+    plist_for_home(&std::fs::canonicalize(home).unwrap())
 }
 
 fn down() -> Result<Value, GuiError> {
@@ -160,7 +182,7 @@ fn unloaded_agent_with_plist_is_bootstrapped_from_that_plist() {
         fake.calls(),
         vec![
             format!("print {AGENT_LABEL}"),
-            format!("bootstrap {}", plist_for_home(h.path()).display())
+            format!("bootstrap {}", canon_plist(h.path()).display())
         ]
     );
 }
@@ -176,7 +198,7 @@ fn no_plist_is_setup_needed_and_runs_nothing_after_print() {
     assert_eq!(e.reason(), Some("plist_missing"));
     assert_eq!(
         e.detail["plist"],
-        plist_for_home(h.path()).to_string_lossy().as_ref()
+        canon_plist(h.path()).to_string_lossy().as_ref()
     );
     assert_eq!(fake.calls(), vec![format!("print {AGENT_LABEL}")]);
     assert!(seen.lock().unwrap().is_empty());
@@ -315,6 +337,7 @@ fn one_start_at_a_time() {
     });
     let s = Arc::new(Starter::new(
         Some(h.path().to_path_buf()),
+        Some(h.path().to_path_buf()),
         fake,
         WaitPolicy {
             interval: Duration::from_millis(20),
@@ -347,7 +370,7 @@ fn one_start_at_a_time() {
 
 #[test]
 fn no_home_is_no_home() {
-    let s = Starter::new(None, Arc::new(Fake::default()), FAST);
+    let s = Starter::new(None, None, Arc::new(Fake::default()), FAST);
     let mut on = |_p: Progress| {};
     assert_eq!(
         rt().block_on(s.start(scripted(vec![Ok(json!({}))]), &mut on))
@@ -355,6 +378,163 @@ fn no_home_is_no_home() {
             .reason(),
         Some("no_home")
     );
+}
+
+// ---- D38 (cli.md): login home only, own agent only ----
+
+#[test]
+fn a_foreign_home_is_refused_before_any_launchctl() {
+    let h = home(true);
+    let login = home(true);
+    let fake = Arc::new(Fake {
+        loaded: true,
+        ..Fake::default()
+    });
+    let s = Starter::new(
+        Some(h.path().to_path_buf()),
+        Some(login.path().to_path_buf()),
+        fake.clone(),
+        FAST,
+    );
+    let (seen, mut on) = collect();
+    let e = rt()
+        .block_on(s.start(scripted(vec![Ok(json!({}))]), &mut on))
+        .unwrap_err();
+    assert_eq!(e.code, "InvalidInput");
+    assert_eq!(e.reason(), Some("foreign_home"));
+    assert_eq!(e.detail["home"], h.path().to_string_lossy().as_ref());
+    assert_eq!(
+        e.detail["login_home"],
+        login.path().to_string_lossy().as_ref()
+    );
+    assert!(seen.lock().unwrap().is_empty());
+    let a = rt().block_on(s.agent()).unwrap();
+    assert_eq!(a.state, AgentState::Foreign);
+    assert_eq!(a.refusal.unwrap().reason(), Some("foreign_home"));
+    assert!(
+        fake.calls().is_empty(),
+        "no launchctl at all: {:?}",
+        fake.calls()
+    );
+}
+
+#[test]
+fn an_unresolvable_login_home_is_refused() {
+    let h = home(true);
+    let fake = Arc::new(Fake::default());
+    let s = Starter::new(Some(h.path().to_path_buf()), None, fake.clone(), FAST);
+    let mut on = |_p: Progress| {};
+    let e = rt()
+        .block_on(s.start(scripted(vec![Ok(json!({}))]), &mut on))
+        .unwrap_err();
+    assert_eq!(e.reason(), Some("foreign_home"));
+    assert!(e.detail["login_home"].is_null());
+    let missing = h.path().join("gone");
+    let e = scope::lifecycle_scope(&missing, Some(&missing)).unwrap_err();
+    assert_eq!(
+        e.reason(),
+        Some("foreign_home"),
+        "a HOME that does not exist"
+    );
+    assert!(fake.calls().is_empty());
+}
+
+#[test]
+fn a_symlinked_alias_of_the_login_home_is_the_login_home() {
+    let login = home(true);
+    let links = tempfile::tempdir().unwrap();
+    let alias = links.path().join("alias");
+    std::os::unix::fs::symlink(login.path(), &alias).unwrap();
+    let fake = Arc::new(Fake::default());
+    let s = Starter::new(
+        Some(alias),
+        Some(login.path().to_path_buf()),
+        fake.clone(),
+        FAST,
+    );
+    let mut on = |_p: Progress| {};
+    let r = rt()
+        .block_on(s.start(scripted(vec![Ok(json!({}))]), &mut on))
+        .unwrap();
+    assert_eq!(r.action, Action::Bootstrap);
+    assert_eq!(
+        fake.calls()[1],
+        format!("bootstrap {}", canon_plist(login.path()).display()),
+        "bootstraps the canonical plist"
+    );
+}
+
+#[test]
+fn an_agent_loaded_from_another_plist_is_foreign_and_not_kickstarted() {
+    let h = home(true);
+    let other = home(true);
+    let fake = Arc::new(Fake {
+        loaded: true,
+        loaded_from: Some(canon_plist(other.path()).to_string_lossy().into_owned()),
+        ..Fake::default()
+    });
+    let (seen, mut on) = collect();
+    let e = rt()
+        .block_on(starter(h.path(), fake.clone()).start(scripted(vec![Ok(json!({}))]), &mut on))
+        .unwrap_err();
+    assert_eq!(e.code, "InvalidInput");
+    assert_eq!(e.reason(), Some("foreign_agent"));
+    assert_eq!(
+        e.detail["loaded_path"],
+        canon_plist(other.path()).to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        e.detail["expected"],
+        canon_plist(h.path()).to_string_lossy().as_ref()
+    );
+    assert_eq!(fake.calls(), vec![format!("print {AGENT_LABEL}")]);
+    assert!(seen.lock().unwrap().is_empty());
+    let a = rt().block_on(starter(h.path(), fake).agent()).unwrap();
+    assert_eq!(a.state, AgentState::Foreign);
+    assert_eq!(a.refusal.unwrap().reason(), Some("foreign_agent"));
+}
+
+#[test]
+fn our_own_plist_under_an_alias_or_without_a_path_line_is_ours() {
+    let h = home(true);
+    let links = tempfile::tempdir().unwrap();
+    let alias = links.path().join("alias");
+    std::os::unix::fs::symlink(h.path(), &alias).unwrap();
+    for from in [
+        Some(plist_for_home(&alias).to_string_lossy().into_owned()),
+        None,
+    ] {
+        let fake = Arc::new(Fake {
+            loaded: true,
+            loaded_from: from,
+            ..Fake::default()
+        });
+        let mut on = |_p: Progress| {};
+        let r = rt()
+            .block_on(starter(h.path(), fake).start(scripted(vec![Ok(json!({}))]), &mut on))
+            .unwrap();
+        assert_eq!(r.action, Action::Kickstart);
+    }
+}
+
+#[test]
+fn loaded_path_reads_only_the_top_level_path() {
+    assert_eq!(
+        scope::loaded_path(&dump(Some("/Users/a/Library/LaunchAgents/x.plist"))).as_deref(),
+        Some("/Users/a/Library/LaunchAgents/x.plist")
+    );
+    assert_eq!(
+        scope::loaded_path(&dump(None)),
+        None,
+        "nested and stdout paths do not count"
+    );
+    assert_eq!(scope::loaded_path(""), None);
+}
+
+#[test]
+fn the_login_home_resolves_from_the_password_database() {
+    let l = scope::login_home().expect("the test user has a passwd entry");
+    assert!(l.is_absolute());
 }
 
 #[test]
@@ -430,6 +610,7 @@ fn service_never_stops_and_spawns_only_launchctl() {
     let files = [
         ("mod.rs", include_str!("mod.rs")),
         ("launchctl.rs", include_str!("launchctl.rs")),
+        ("scope.rs", include_str!("scope.rs")),
         (
             "commands/service.rs",
             include_str!("../commands/service.rs"),

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { copy } from './copy';
-import { downVariant, phaseText, startErrorText } from './daemonStart';
+import { downVariant, foreignText, phaseText, startErrorText } from './daemonStart';
 import type { LegacyAgent } from './types';
 
 const err = (detail: Record<string, unknown>, message = 'm') => ({ code: 'Busy', message, detail });
@@ -35,6 +35,58 @@ describe('downVariant', () => {
     expect(downVariant(agent('installed'))).toBe('start');
     expect(downVariant(agent('loaded'))).toBe('start');
     expect(downVariant(undefined)).toBe('start');
+  });
+});
+
+describe('foreign (cli.md D38)', () => {
+  const home = {
+    code: 'InvalidInput',
+    message: 'm',
+    detail: { reason: 'foreign_home', home: '/tmp/h', login_home: '/Users/x' },
+  };
+  const other = {
+    code: 'InvalidInput',
+    message: 'm',
+    detail: {
+      reason: 'foreign_agent',
+      loaded_path: '/Users/y/Library/LaunchAgents/com.gwd.git-stratad.plist',
+      expected: '/Users/x/Library/LaunchAgents/com.gwd.git-stratad.plist',
+    },
+  };
+  test('a foreign agent state is the foreign variant, with no Start button', () => {
+    expect(downVariant({ ...agent('foreign'), refusal: home })).toBe('foreign');
+  });
+  test('foreign_home names both homes and says nothing was done', () => {
+    const t = startErrorText(home);
+    expect(t.foreign).toBe(true);
+    expect(t.title).toContain('`/tmp/h`');
+    expect(t.title).toContain('`/Users/x`');
+    expect(t.title).toContain('did nothing');
+    expect(
+      startErrorText({
+        ...home,
+        detail: { reason: 'foreign_home', home: '/tmp/h', login_home: null },
+      }).title
+    ).toBe(copy.start.foreign.homeUnknown('/tmp/h'));
+  });
+  test('foreign_agent names both plists and the manual unload for a human', () => {
+    const t = startErrorText(other);
+    expect(t.foreign).toBe(true);
+    expect(t.title).toContain('/Users/y/Library');
+    expect(t.title).toContain('/Users/x/Library');
+    expect(t.hint).toContain('launchctl bootout gui/$(id -u)/com.gwd.git-stratad');
+  });
+  test('foreignText prefers a failed start, then the refusal, else nothing', () => {
+    const e = startErrorText(other);
+    expect(foreignText(agent('loaded'), e)).toBe(e);
+    expect(foreignText({ ...agent('foreign'), refusal: home }, null)?.title).toBe(
+      startErrorText(home).title
+    );
+    expect(foreignText(agent('foreign'), null)?.title).toBe(copy.start.foreign.title);
+    expect(foreignText(agent('loaded'), null)).toBeNull();
+    expect(
+      foreignText(agent('loaded'), startErrorText(err({ reason: 'start_timeout', seconds: 30 })))
+    ).toBeNull();
   });
 });
 

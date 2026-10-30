@@ -216,12 +216,14 @@ export interface DuReply {
 }
 
 /** legacy_agent (src-tauri/src/service/mod.rs LegacyAgent). */
-export type AgentState = 'loaded' | 'installed' | 'not_installed';
+export type AgentState = 'loaded' | 'installed' | 'not_installed' | 'foreign';
 export interface LegacyAgent {
   state: AgentState;
   label: string;
   plist: string;
   command: string;
+  /** state 'foreign' (cli.md D38): the foreign_home / foreign_agent error. */
+  refusal?: GuiError;
 }
 
 /** daemon_start progress, one per change (service::Progress, tagged by `phase`). */

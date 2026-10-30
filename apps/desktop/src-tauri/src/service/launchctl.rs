@@ -70,7 +70,10 @@ pub fn argv(verb: Verb, label: &str, plist: Option<&Path>) -> Vec<String> {
 pub struct Outcome {
     pub status: Option<i32>,
     pub success: bool,
+    /// stderr, or stdout when stderr is empty (for error messages).
     pub text: String,
+    /// stdout as is (capped).
+    pub out: String,
 }
 
 fn capped(mut r: impl Read + Send + 'static) -> thread::JoinHandle<Vec<u8>> {
@@ -143,14 +146,16 @@ impl Launchctl {
             h.and_then(|h| h.join().ok()).unwrap_or_default()
         };
         let (out, err) = (join(out), join(err));
+        let out = String::from_utf8_lossy(&out).into_owned();
         let mut text = String::from_utf8_lossy(&err).into_owned();
         if text.trim().is_empty() {
-            text = String::from_utf8_lossy(&out).into_owned();
+            text = out.clone();
         }
         Ok(Outcome {
             status: status.code(),
             success: status.success(),
             text,
+            out,
         })
     }
 
@@ -165,12 +170,11 @@ impl Launchctl {
 }
 
 impl ServiceManager for Launchctl {
-    fn is_loaded(&self, label: &str) -> Result<bool, GuiError> {
+    fn print(&self, label: &str) -> Result<Option<String>, GuiError> {
         // Non-zero (113, "could not find service") means not loaded, as in
-        // `git-strata daemon start`.
-        Ok(self
-            .run(Verb::Print, argv(Verb::Print, label, None))?
-            .success)
+        // `git-strata daemon start`. The dump is on stdout.
+        let o = self.run(Verb::Print, argv(Verb::Print, label, None))?;
+        Ok(o.success.then_some(o.out))
     }
 
     fn kickstart(&self, label: &str) -> Result<(), GuiError> {

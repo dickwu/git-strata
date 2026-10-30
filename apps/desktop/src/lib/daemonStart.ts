@@ -1,11 +1,16 @@
 import { copy } from './copy';
 import { asGuiError, reason } from './tauri';
-import type { LegacyAgent, StartProgress } from './types';
+import type { GuiError, LegacyAgent, StartProgress } from './types';
 
 const s = copy.start;
 
-/** What the down notice offers: a Start button, or the setup-needed variant (no plist). */
-export function downVariant(agent: LegacyAgent | undefined): 'start' | 'setup' {
+/**
+ * What the down notice offers: a Start button, the setup-needed variant (no plist), or the
+ * foreign variant (cli.md D38: not the login home, or another install's agent), which has no
+ * button.
+ */
+export function downVariant(agent: LegacyAgent | undefined): 'start' | 'setup' | 'foreign' {
+  if (agent?.state === 'foreign') return 'foreign';
   return agent?.state === 'not_installed' ? 'setup' : 'start';
 }
 
@@ -35,6 +40,8 @@ export interface StartError {
   output?: string;
   /** plist_missing: show the setup variant rather than a bare error. */
   setup?: string;
+  /** foreign_home / foreign_agent: show the foreign variant, no Start button. */
+  foreign?: boolean;
 }
 
 const str = (v: unknown): string | undefined =>
@@ -44,6 +51,23 @@ export function startErrorText(e: unknown): StartError {
   const g = asGuiError(e);
   const d = (g.detail && typeof g.detail === 'object' ? g.detail : {}) as Record<string, unknown>;
   switch (reason(g)) {
+    case 'foreign_home': {
+      const home = str(d.home) ?? '$HOME';
+      const login = str(d.login_home);
+      return {
+        title: login ? s.foreign.home(home, login) : s.foreign.homeUnknown(home),
+        foreign: true,
+      };
+    }
+    case 'foreign_agent':
+      return {
+        title: s.foreign.agent(
+          str(d.loaded_path) ?? 'another plist',
+          str(d.expected) ?? 'this home'
+        ),
+        hint: s.foreign.agentHint,
+        foreign: true,
+      };
     case 'plist_missing': {
       const plist = str(d.plist) ?? '~/Library/LaunchAgents/com.gwd.git-stratad.plist';
       return { title: s.errors.plistMissing(plist), hint: s.setup.hint(plist), setup: plist };
@@ -75,4 +99,18 @@ export function startErrorText(e: unknown): StartError {
     default:
       return { title: g.message || copy.errors.unknown };
   }
+}
+
+/** The foreign variant's text: from a failed start, else from legacy_agent's refusal. */
+export function foreignText(
+  agent: LegacyAgent | undefined,
+  err: StartError | null
+): StartError | null {
+  if (err?.foreign) return err;
+  const r: GuiError | undefined = agent?.state === 'foreign' ? agent.refusal : undefined;
+  return r
+    ? startErrorText(r)
+    : agent?.state === 'foreign'
+      ? { title: s.foreign.title, foreign: true }
+      : null;
 }

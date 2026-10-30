@@ -3,7 +3,7 @@
 import { Alert, App, Button } from 'antd';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { copy } from '@/lib/copy';
-import { downVariant, phaseText, startErrorText } from '@/lib/daemonStart';
+import { downVariant, foreignText, phaseText, startErrorText } from '@/lib/daemonStart';
 import { call } from '@/lib/tauri';
 import type { LegacyAgent } from '@/lib/types';
 import { useDaemonStart } from '@/stores/daemonStart';
@@ -25,7 +25,8 @@ export function useLegacyAgent() {
 /**
  * The down notice body (design §6.1, S0): a Start daemon button that kickstarts or
  * bootstraps the launchd agent and waits for its socket, with the terminal command kept as
- * a fallback. No plist means setup is needed, and no button. The GUI never stops the daemon.
+ * a fallback. No plist means setup is needed, and no button. A foreign HOME or another
+ * install's agent (cli.md D38) gets no button either. The GUI never stops the daemon.
  */
 export function DaemonStart({ agent }: { agent: LegacyAgent | undefined }) {
   const { running, progress, error, start } = useDaemonStart();
@@ -34,6 +35,7 @@ export function DaemonStart({ agent }: { agent: LegacyAgent | undefined }) {
   const err = error ? startErrorText(error) : null;
   const setup = downVariant(agent) === 'setup' || Boolean(err?.setup);
   const plist = err?.setup ?? agent?.plist ?? '';
+  const foreign = foreignText(agent, err);
 
   const onStart = async () => {
     const done = await start();
@@ -42,6 +44,21 @@ export function DaemonStart({ agent }: { agent: LegacyAgent | undefined }) {
       await qc.invalidateQueries();
     }
   };
+
+  if (foreign) {
+    return (
+      <div className={css.body} role="alert">
+        <span className={css.errorTitle}>
+          <Inline text={foreign.title} />
+        </span>
+        {foreign.hint && (
+          <span>
+            <Inline text={foreign.hint} />
+          </span>
+        )}
+      </div>
+    );
+  }
 
   if (setup) {
     return (
@@ -95,12 +112,14 @@ export function DaemonStart({ agent }: { agent: LegacyAgent | undefined }) {
 export function DaemonDownAlert() {
   const agent = useLegacyAgent();
   const err = useDaemonStart((x) => x.error);
-  const setup = downVariant(agent.data) === 'setup' || Boolean(err && startErrorText(err).setup);
+  const e = err ? startErrorText(err) : null;
+  const foreign = downVariant(agent.data) === 'foreign' || Boolean(e?.foreign);
+  const setup = downVariant(agent.data) === 'setup' || Boolean(e?.setup);
   return (
     <Alert
       type="warning"
       showIcon
-      title={setup ? s.setup.title : copy.daemon.down}
+      title={foreign ? s.foreign.title : setup ? s.setup.title : copy.daemon.down}
       description={<DaemonStart agent={agent.data} />}
     />
   );

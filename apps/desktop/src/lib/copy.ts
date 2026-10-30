@@ -196,6 +196,17 @@ export const copy = {
       hint: (plist: string) =>
         `Install \`${plist}\` as the README section "Install and daemon" describes, then start it. Setting it up from here comes later.`,
     },
+    foreign: {
+      title: 'This app cannot start the daemon here.',
+      home: (home: string, login: string) =>
+        `The app runs with home directory \`${home}\`, which is not your login home \`${login}\`. It starts only the login user's launch agent, so it did nothing. Start the daemon from your own login session.`,
+      homeUnknown: (home: string) =>
+        `The app runs with home directory \`${home}\` and could not confirm it is your login home, so it did nothing.`,
+      agent: (loaded: string, expected: string) =>
+        `The loaded launch agent comes from \`${loaded}\`, not \`${expected}\`, so starting it would start another install's daemon. Nothing was done.`,
+      agentHint:
+        'If that install is retired, unload it in a terminal with `launchctl bootout gui/$(id -u)/com.gwd.git-stratad`, then try again.',
+    },
     errors: {
       plistMissing: (plist: string) => `No launch agent at \`${plist}\`.`,
       launchctl: (step: string, status: number | null) =>
