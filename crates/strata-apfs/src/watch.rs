@@ -117,7 +117,7 @@ struct State {
     /// The root as opened: path, device and inode. Incident 2026-10-27:
     /// `kFSEventStreamCreateFlagWatchRoot` cost a kqueue plus an event-only
     /// descriptor on the root and every ancestor (about 8 per workspace on
-    /// /Volumes/GWD/inter, 15 under /var/folders), enough to run the daemon
+    /// an external APFS volume, 15 under /var/folders), enough to run the daemon
     /// out of descriptors. Instead each delivered batch checks that the
     /// path still names the same directory.
     root: (CString, u64, u64),

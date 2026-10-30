@@ -30,8 +30,46 @@ Design documents (Chinese) are in [docs/](docs/README.md); the agent skill is
 - [Error codes and what to do](#error-codes-and-what-to-do)
 - [Disk usage (`du`)](#disk-usage-du)
 - [Commands](#commands)
+- [License](#license)
 
 ## Install and daemon
+
+Requirements: macOS 13 or later (Apple silicon or Intel), the repos and the
+data root on one APFS volume. macOS only: git-strata uses APFS clones,
+FSEvents and launchd.
+
+### Homebrew
+
+```sh
+brew tap dickwu/git-strata
+brew install git-strata                    # CLI + daemon, built from source
+# the LaunchAgent is a human step (see below); write it once, pointing at the
+# stable opt path so upgrades need no plist edit:
+git-stratad --print-plist "$(brew --prefix)/opt/git-strata/bin/git-stratad" \
+  > ~/Library/LaunchAgents/com.gwd.git-stratad.plist
+mkdir -p ~/Library/Application\ Support/git-strata
+cp "$(brew --prefix)/share/git-strata/config.toml" \
+  ~/Library/Application\ Support/git-strata/config.toml  # then edit
+git-strata daemon start
+```
+
+Use the single agent `com.gwd.git-stratad` above, not `brew services`: a
+second (`homebrew.mxcl.*`) agent would run a second daemon on the same socket
+and lock, and neither the CLI nor the GUI manages it.
+
+The desktop app is a cask: `brew install --cask git-strata-desktop`. The app
+is not notarized yet, so Gatekeeper blocks the first open; allow it once in
+System Settings > Privacy & Security > Open Anyway.
+
+`git-stratad --version` prints the version; `git-stratad --print-plist [BIN]`
+prints the plist below for this `HOME` (BIN: absolute path, default the
+running binary) and does nothing else.
+
+A sample config is [examples/config.toml](examples/config.toml) (the formula
+installs it as `$(brew --prefix)/share/git-strata/config.toml`);
+the reference is [docs/config.md](docs/config.md).
+
+### The daemon
 
 Two binaries: `git-strata` (the CLI) and `git-stratad` (the per-user daemon).
 Write commands go through the daemon over a unix socket.
@@ -105,7 +143,7 @@ daemon asks once for the removable-volume permission.
 | Pinned safety flags | `~/Library/Application Support/git-strata/pins.json` |
 | Daemon socket | `~/Library/Application Support/git-strata/daemon.sock` |
 | Daemon stderr log | `~/Library/Application Support/git-strata/daemon.err.log` |
-| Data root | `[paths] root` in `config.toml`; default `/Volumes/GWD/inter/.strata` |
+| Data root | `[paths] root` in `config.toml`; default `~/.strata` (must share an APFS volume with the repos) |
 | Session workspaces | `<root>/sessions/<session-id>/<repo>/` |
 
 Only `$HOME` moves the first four; there is no flag or env var. The data root
@@ -385,7 +423,7 @@ git-strata checkpoint -m "release: <what>"               # in the workspace
 git-strata publish --from "${S}:path/a" --from "${S}:path/b"
 #  -> data.commits.<repo> = C; data.pushes[].outcome.kind must be "Pushed"
 #     (repo with publish.push = false: git-strata push <repo>, human on a TTY if gated)
-cd <main checkout of the repo>                          # e.g. /Volumes/GWD/inter/tool
+cd <main checkout of the repo>                          # e.g. ~/code/web
 git status --porcelain                                  # must be empty
 git pull --ff-only                                      # fast-forwards to C
 git rev-parse HEAD                                      # must equal C
@@ -690,3 +728,9 @@ Flags, defaults and `data` shapes:
 | `config relax REPO` | yes |
 | `session ports [--session S] [--repo R] [--all] [--check] [--reassign]` | no |
 | `session exec [--session S] [--repo R] [--tauri] [--no-check] -- CMD...` | no |
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Contributions are dual licensed
+the same way unless stated otherwise.

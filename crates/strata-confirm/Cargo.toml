@@ -3,6 +3,8 @@ name = "strata-confirm"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Human confirmation for git-strata: LocalAuthentication (Touch ID or login password), single-use confirm tokens"
 
 [features]

@@ -121,12 +121,12 @@ fn numeric_ids_reject_values_sqlite_cannot_store() {
 
 #[test]
 fn repo_id_and_view_id_are_opaque_wrappers() {
-    let id = RepoId::new("/Volumes/GWD/inter/tool/.git".into());
+    let id = RepoId::new("/Volumes/Code/src/tool/.git".into());
     assert_eq!(
         id.get(),
-        std::path::Path::new("/Volumes/GWD/inter/tool/.git")
+        std::path::Path::new("/Volumes/Code/src/tool/.git")
     );
-    assert_eq!(id.to_string(), "/Volumes/GWD/inter/tool/.git");
+    assert_eq!(id.to_string(), "/Volumes/Code/src/tool/.git");
     let view = ViewId::new("view-1".to_owned());
     assert_eq!(view.get(), "view-1");
     assert_eq!(view.to_string(), "view-1");

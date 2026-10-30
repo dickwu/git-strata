@@ -26,7 +26,7 @@ same binary. Full command and flag table: [reference.md](reference.md).
   `~/Library/Application Support/git-strata/daemon.sock`, the pinned safety
   flags `~/Library/Application Support/git-strata/pins.json` (no env var or
   flag changes them; only `$HOME` does). Workspaces live under the data root
-  (`[paths] root`, default `/Volumes/GWD/inter/.strata`) as
+  (`[paths] root`, default `~/.strata`) as
   `<root>/sessions/<session-id>/<repo>/`.
 - The daemon reads `config.toml` only at start; after a config change, tell
   the human the daemon needs a restart. Do not restart it yourself.

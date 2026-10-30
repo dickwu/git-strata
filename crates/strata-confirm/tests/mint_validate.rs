@@ -144,8 +144,8 @@ fn wrong_action_is_refused() {
         (approve(1), approve(2)),
         (discard("s-aaaaaaaa"), push("tool", "main")),
         (
-            relax("/Volumes/GWD/inter/tool"),
-            relax("/Volumes/GWD/inter/front"),
+            relax("/Volumes/Code/src/tool"),
+            relax("/Volumes/Code/src/front"),
         ),
     ];
     let (c, _clock, _log) = seamed(passes(pairs.len()));

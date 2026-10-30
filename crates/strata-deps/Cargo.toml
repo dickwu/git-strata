@@ -3,6 +3,8 @@ name = "strata-deps"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "git-strata deps: install-input keys, sealed deps-set generations, cold installs, drift, proposals and rollout plans"
 
 [features]

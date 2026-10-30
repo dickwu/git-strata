@@ -28,8 +28,8 @@ impl Fs {
     }
 }
 
-/// A sparse image mounted under a temp dir (never under /Volumes/GWD:
-/// `hdiutil attach -mountpoint` there is refused). Drop detaches and deletes.
+/// A sparse image mounted under a temp dir (never under a
+/// /Volumes mount: `hdiutil attach -mountpoint` there is refused). Drop detaches and deletes.
 pub struct Image {
     pub dir: tempfile::TempDir,
     pub mount: PathBuf,

@@ -427,3 +427,39 @@ fn poisoned_store_ends_serve_for_a_restart() {
     drop(d);
     let _ = core.close();
 }
+
+#[test]
+fn print_plist_and_version_only_print() {
+    use std::ffi::OsString;
+    use strata_daemon::plist::{Invocation, parse_invocation, plist_text};
+    let os = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+    assert_eq!(parse_invocation(&[]).unwrap(), Invocation::Serve);
+    assert_eq!(parse_invocation(&os(&["-V"])).unwrap(), Invocation::Version);
+    assert_eq!(parse_invocation(&os(&["--print-plist"])).unwrap(), Invocation::PrintPlist(None));
+    for bad in [&["--print-plist", "rel/git-stratad"][..], &["--serve"], &["--print-plist", "/a", "/b"]] {
+        let e = parse_invocation(&os(bad)).unwrap_err();
+        assert_eq!(e.code, Code::InvalidInput, "{bad:?}");
+        assert_eq!(e.detail.unwrap()["reason"], json!("args"), "{bad:?}");
+    }
+    // The (seams) binary prints before the seams refusal and creates nothing.
+    let home = tempfile::Builder::new().prefix("sd-").tempdir_in("/tmp").unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_git-stratad"))
+            .args(args)
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap()
+    };
+    let bin = "/opt/homebrew/opt/git-strata/bin/git-stratad";
+    let out = run(&["--print-plist", bin]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), plist_text(Path::new(bin), home.path()));
+    let out = run(&["--version"]);
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("git-stratad {}\n", env!("CARGO_PKG_VERSION")));
+    let out = run(&["--bogus"]);
+    assert!(!out.status.success());
+    assert!(!strata_daemon::config_dir_for_home(home.path()).exists(), "nothing created under HOME");
+}

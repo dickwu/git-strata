@@ -19,6 +19,6 @@ Before `exec`, the guard removes the three config variables and its two control 
 
 Scratch source, probes, and targets were removed. Only this report was added to the checkout; the pre-existing untracked `.omc/` was left alone.
 
-**Independent review unavailable:** both required role agents failed with unsupported model `gpt-5.5`. The [code-review skill](/Users/gwddeveloper/.codex/skills/code-review/SKILL.md) says “do not approve or mark the review merge-ready” when a lane cannot launch. Approval therefore requires rerunning the reviewer and architect lanes with supported role models.
+**Independent review unavailable:** both required role agents failed with unsupported model `gpt-5.5`. The code-review skill (`~/.codex/skills/code-review/SKILL.md`) says “do not approve or mark the review merge-ready” when a lane cannot launch. Approval therefore requires rerunning the reviewer and architect lanes with supported role models.
 
 Recommendation: REQUEST CHANGES — independent-review gate only; the scoped technical fix passes.

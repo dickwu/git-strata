@@ -134,10 +134,10 @@ fn push_outcome_and_action_use_kind_tags() {
     assert_eq!(json["kind"], "DepsApprove");
     assert_eq!(json["proposal"], 4);
     let relax = Action::ConfigRelax {
-        repo: RepoId::new("/Volumes/GWD/inter/tool/.git".into()),
+        repo: RepoId::new("/Volumes/Code/src/tool/.git".into()),
     };
     let json = serde_json::to_value(&relax).unwrap();
-    assert_eq!(json["repo"], "/Volumes/GWD/inter/tool/.git");
+    assert_eq!(json["repo"], "/Volumes/Code/src/tool/.git");
 }
 
 #[test]
@@ -146,7 +146,7 @@ fn session_manifest_skips_absent_ticket() {
         id: SessionId::try_from("s-k3q7xm2a".to_owned()).unwrap(),
         ticket: None,
         agent: None,
-        root: "/Volumes/GWD/inter/.strata/sessions/s-k3q7xm2a".into(),
+        root: "/Volumes/Code/src/.strata/sessions/s-k3q7xm2a".into(),
         repos: std::collections::BTreeMap::from([(
             rn("tool"),
             WorkspaceState {
@@ -157,7 +157,7 @@ fn session_manifest_skips_absent_ticket() {
                 },
                 head: CommitOid::try_from("0123456789abcdef0123456789abcdef01234567".to_owned())
                     .unwrap(),
-                path: "/Volumes/GWD/inter/.strata/sessions/s-k3q7xm2a/tool".into(),
+                path: "/Volumes/Code/src/.strata/sessions/s-k3q7xm2a/tool".into(),
                 tracked: true,
             },
         )]),

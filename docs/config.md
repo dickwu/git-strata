@@ -230,7 +230,7 @@ pub struct RepoConfig {
 // Default for Paths：root = Paths::default_root()
 
 impl Paths {
-    pub fn default_root() -> PathBuf;     // /Volumes/GWD/inter/.strata
+    pub fn default_root() -> PathBuf;     // $HOME/.strata
     pub fn store(&self) -> PathBuf;       // <root>/store
     pub fn bases(&self) -> PathBuf;       // <root>/bases
     pub fn deps(&self) -> PathBuf;        // <root>/deps

@@ -3,6 +3,8 @@ name = "strata-apfs"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "APFS primitives for git-strata: clonefile, rooted no-follow I/O, bulk attributes, FSEvents"
 
 [features]

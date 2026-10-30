@@ -92,7 +92,7 @@ PATHS
   config     ~/Library/Application Support/git-strata/config.toml
   pins       ~/Library/Application Support/git-strata/pins.json
   socket     ~/Library/Application Support/git-strata/daemon.sock
-  data root  [paths] root in config.toml (default /Volumes/GWD/inter/.strata);
+  data root  [paths] root in config.toml (default ~/.strata);
              workspaces are <root>/sessions/<session-id>/<repo>/
   Only $HOME moves the first three; there is no flag or env var.
 
@@ -106,8 +106,8 @@ DAEMON
 
 HEADLESS FLOW (no human needed)
   git-strata daemon status                       # data.running
-  git-strata new PROJ-1 --repo tool --repo staff-api  # data.manifest.id, .repos.<repo>.path
-  cd <data.manifest.repos.tool.path>             # edit files there
+  git-strata new PROJ-1 --repo web --repo api    # data.manifest.id, .repos.<repo>.path
+  cd <data.manifest.repos.web.path>              # edit files there
   git-strata add --repo front                    # only if another repo is needed later
   git-strata checkpoint -m \"what changed\"
   git-strata diff
@@ -166,10 +166,10 @@ that is none of these should `export STRATA_AGENT=<name>` (1-64 of
 [A-Za-z0-9._-], starting with a letter or digit) before running `new`.";
 
 pub const NEW_AFTER: &str = "EXAMPLES
-  git-strata new PROJ-123 --repo staff-api            # one workspace
-  git-strata new PROJ-123 --repo tool --repo staff-api
+  git-strata new PROJ-123 --repo api                  # one workspace
+  git-strata new PROJ-123 --repo web --repo api
   git-strata new --ticket PROJ-123 --repos tool       # every repo, tool tracked
-  STRATA_AGENT=aider git-strata new PROJ-123 --repo tool
+  STRATA_AGENT=aider git-strata new PROJ-123 --repo web
 
 DATA
   {manifest:{id, ticket?, agent?, root, repos:{<repo>:{base, head, path, tracked}}}, warnings:[]}
@@ -235,7 +235,7 @@ the table; an error is still the JSON envelope.
 
 pub const CHECKPOINT_AFTER: &str = "EXAMPLES
   git-strata checkpoint -m \"parse config first\"
-  git-strata checkpoint -m \"only these\" --path src/a.ts --path ../staff-api/x.php
+  git-strata checkpoint -m \"only these\" --path src/a.ts --path ../api/x.php
   git-strata checkpoint --tool-call       # hook mode: hook JSON on stdin
 
 Each path goes to the session repo whose workspace holds it; paths outside the
@@ -273,7 +273,7 @@ DATA {paths:[{session, repo, path}]}. Works without the daemon.
 pub const DIFF_AFTER: &str = "EXAMPLES
   git-strata diff                                   # this session vs its base (= --base)
   git-strata diff --session PROJ-123
-  git-strata diff --between s-aaaa1111 s-bbbb2222 --repo tool
+  git-strata diff --between s-aaaa1111 s-bbbb2222 --repo web
 
 Shows current workspace content, checkpointed or not. Binary / >64 MiB entries
 carry code Binary / TooLarge instead of a preview; the call stays ok.
@@ -309,7 +309,7 @@ In zsh write \"${S}:path\", not \"$S:path\" ($S:t, $S:h, ... are modifiers).
 
 --FROM PATHS
   PATH is relative to the repo root, with no repo prefix:
-  staff-api/app/x.php in session S is --from S:app/x.php. The repo is the
+  api/app/x.php in session S is --from S:app/x.php. The repo is the
   workspace that has PATH (on disk or in its base). When several do, the one
   whose checkpoints in S changed PATH is taken. To name the repo outright:
     --from S:REPO:PATH      e.g. --from S:admin:src/a.ts
@@ -518,7 +518,8 @@ INSTALL
   (Label com.gwd.git-stratad, ProgramArguments the git-stratad binary, RunAtLoad,
   KeepAlive, LimitLoadToSessionType Aqua, PATH ~/.bun/bin:/opt/homebrew/bin:
   /usr/local/bin:/usr/bin:/bin, StandardErrorPath ~/Library/Application
-  Support/git-strata/daemon.err.log). The CLI does not write it.
+  Support/git-strata/daemon.err.log). The CLI does not write it; the human
+  can print it with `git-stratad --print-plist [ABSOLUTE_BIN]`.
 
 EXAMPLES
   git-strata daemon status   # {running, socket, session?, holders, unknown_publishes, alerts}
@@ -551,7 +552,7 @@ REPO` replays it headless (push --help, ORIGIN MOVED).
 
 pub const CONFIG_AFTER: &str = concat!(
     "EXAMPLE (human only)
-  git-strata config relax staff-api
+  git-strata config relax api
 
 Accepts a loosened config.toml into pins.json after the daemon reported
 ConfigRelaxPending. InvalidInput not_relaxed: config is not looser than the

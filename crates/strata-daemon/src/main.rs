@@ -1,9 +1,11 @@
 //! git-stratad: the per-user daemon. Started by launchd (`RunAtLoad`,
-//! `KeepAlive.SuccessfulExit = false`); never exits on idle.
+//! `KeepAlive.SuccessfulExit = false`); never exits on idle. With
+//! `--version` or `--print-plist [BIN]` it only prints (plist::Invocation).
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use strata_daemon::plist::{self, Invocation};
 use strata_daemon::startup::{self, Daemon, InstanceLock, Options};
 use strata_daemon::waiting::{self, Policy, WaitState, Waiting};
 use strata_types::StrataError;
@@ -109,7 +111,41 @@ fn run() -> Result<(), StrataError> {
     result.and(closed)
 }
 
+/// `--version` / `--print-plist` (plist::Invocation): print and exit,
+/// before the seams check, the lock or anything under HOME.
+fn print(inv: Invocation) -> Result<(), StrataError> {
+    match inv {
+        Invocation::Serve => unreachable!("serve is not a print"),
+        Invocation::Version => println!("git-stratad {}", env!("CARGO_PKG_VERSION")),
+        Invocation::PrintPlist(bin) => {
+            let home = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|h| h.is_absolute())
+                .ok_or_else(|| StrataError::new(strata_types::Code::InvalidInput, "HOME is not an absolute path"))?;
+            let bin = match bin {
+                Some(b) => b,
+                None => std::env::current_exe().map_err(|e| {
+                    StrataError::new(strata_types::Code::Unknown, format!("cannot resolve this executable: {e}"))
+                })?,
+            };
+            print!("{}", plist::plist_text(&bin, &home));
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    match plist::parse_invocation(&args) {
+        Ok(Invocation::Serve) => {}
+        Ok(inv) => {
+            return match print(inv) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(&e),
+            };
+        }
+        Err(e) => return fail(&e),
+    }
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(&e),

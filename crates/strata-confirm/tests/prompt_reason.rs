@@ -66,9 +66,9 @@ fn prompt_reason_names_the_action() {
     );
     assert_eq!(
         prompt_reason(&Action::ConfigRelax {
-            repo: RepoId::new(PathBuf::from("/Volumes/GWD/inter/tool"))
+            repo: RepoId::new(PathBuf::from("/Volumes/Code/src/tool"))
         }),
-        "apply relaxed push settings for /Volumes/GWD/inter/tool"
+        "apply relaxed push settings for /Volumes/Code/src/tool"
     );
 
     // Escaping: bidi override, zero-width space, newline, backslash.
