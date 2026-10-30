@@ -31,8 +31,9 @@ same binary. Full command and flag table: [reference.md](reference.md).
 - The daemon reads `config.toml` only at start; after a config change, tell
   the human the daemon needs a restart. Do not restart it yourself.
 - **Agents never start, stop or restart the daemon** (`git-strata daemon
-  start` / `stop` are human-only, and never run `launchctl`, not even with a
-  temp `HOME`: the LaunchAgent domain is per user, not per HOME). Check it
+  start` / `stop` are human-only; never run them, or `launchctl`, yourself,
+  not even with a temp `HOME`: the LaunchAgent domain is per user, not per
+  HOME). Check it
   with `git-strata daemon status` (`data.running`). If it is down, keep
   working in the workspace and tell the human it is down so they can run
   `git-strata daemon start`. While it is down the hook answers `Busy`

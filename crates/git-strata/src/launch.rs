@@ -265,7 +265,7 @@ mod tests {
         assert!(calls(&m).is_empty());
     }
 
-    // U4: HOME missing (empty) or not a directory: refused with zero calls.
+    // U4: HOME empty or a path that does not exist: refused with zero calls.
     #[test]
     fn missing_home_refuses_with_zero_calls() {
         let h = homes();
