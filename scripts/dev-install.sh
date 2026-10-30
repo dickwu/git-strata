@@ -10,6 +10,18 @@
 # grants across rebuilds; unsigned/ad-hoc builds re-prompt every time.
 set -eu
 cd "$(dirname "$0")/.."
+
+# cli.md D38: daemon stop/start act only for the login user's HOME (the
+# launchd gui/<uid> domain is per user, not per HOME). Refuse up front so a
+# foreign HOME never swaps binaries under a live daemon whose stop refused.
+login_user="$(id -un)"
+[ -n "$login_user" ] || { echo "dev-install: cannot resolve the login user" >&2; exit 1; }
+login_home="$(eval "cd ~$login_user" 2>/dev/null && pwd -P)" || login_home=""
+home_real="$(cd "$HOME" 2>/dev/null && pwd -P)" || home_real=""
+if [ -z "$login_home" ] || [ "$login_home" != "$home_real" ]; then
+    echo "dev-install: HOME=$HOME is not the login home ${login_home:-(unresolved)}; refusing (cli.md D38)" >&2
+    exit 1
+fi
 BIN="${CARGO_BIN:-$HOME/.cargo/bin}"
 OUT="${CARGO_TARGET_DIR:-target}/release"
 
@@ -26,7 +38,9 @@ fi
 start=1
 [ "${1:-}" = "--no-start" ] && start=0
 if [ "$start" = 1 ] && [ -x "$BIN/git-strata" ]; then
-    "$BIN/git-strata" daemon stop || true
+    # Fail rather than swap binaries under a daemon that did not stop. (The
+    # first install of D38 still stops through the previous binary.)
+    "$BIN/git-strata" daemon stop
 fi
 backup="$(mktemp -d "${TMPDIR:-/tmp}/git-strata-prev.XXXXXX")"
 for b in git-strata git-stratad; do

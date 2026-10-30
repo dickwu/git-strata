@@ -320,10 +320,10 @@ pub enum SessionCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum DaemonCmd {
-    /// launchctl bootstrap the per-user agent
+    /// HUMAN ONLY: launchctl bootstrap the per-user agent (login HOME only)
     #[command(after_long_help = crate::help::DAEMON_AFTER)]
     Start,
-    /// launchctl bootout the per-user agent
+    /// HUMAN ONLY: launchctl bootout the per-user agent (login HOME only)
     #[command(after_long_help = crate::help::DAEMON_AFTER)]
     Stop,
     /// Whether the daemon runs, its locks and alerts

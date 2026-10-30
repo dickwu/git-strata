@@ -20,7 +20,7 @@ pub fn needs_daemon(method: Method) -> bool {
 }
 
 fn daemon_down(socket: &Path, why: &str) -> StrataError {
-    StrataError::new(Code::Busy, format!("the daemon is not running ({why}); nothing was written; run `git-strata daemon start`"))
+    StrataError::new(Code::Busy, format!("the daemon is not running ({why}); nothing was written; ask the human to run `git-strata daemon start`"))
         .with_detail(json!({ "reason": "daemon_down", "socket": socket.to_string_lossy() }))
 }
 
