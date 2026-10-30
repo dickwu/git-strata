@@ -28,13 +28,17 @@ same binary. Full command and flag table: [reference.md](reference.md).
   flag changes them; only `$HOME` does). Workspaces live under the data root
   (`[paths] root`, default `/Volumes/GWD/inter/.strata`) as
   `<root>/sessions/<session-id>/<repo>/`.
-- The daemon reads `config.toml` only at start; a config change needs
-  `git-strata daemon stop` then `git-strata daemon start`.
-- Write commands need the daemon. Check with `git-strata daemon status`
-  (`data.running`). Start it with `git-strata daemon start` (loads the per-user
-  LaunchAgent `com.gwd.git-stratad`; `data.already = true` if it was up). If
-  that returns `InvalidInput` with `detail.reason = "no_plist"`, the LaunchAgent
-  is not installed: tell the human; do not write a plist yourself.
+- The daemon reads `config.toml` only at start; after a config change, tell
+  the human the daemon needs a restart. Do not restart it yourself.
+- **Agents never start, stop or restart the daemon** (`git-strata daemon
+  start` / `stop` are human-only; never run them, or `launchctl`, yourself,
+  not even with a temp `HOME`: the LaunchAgent domain is per user, not per
+  HOME). Check it
+  with `git-strata daemon status` (`data.running`). If it is down, keep
+  working in the workspace and tell the human it is down so they can run
+  `git-strata daemon start`. While it is down the hook answers `Busy`
+  `daemon_down` and that checkpoint is not recorded: tell the human which
+  edits were not checkpointed. Do not write a plist yourself.
 - Without the daemon, only these work (read-only, straight from the store):
   `status`, `grep`, `files`, `diff`, `deps list`, `daemon status`, and a
   repeated `checkpoint --tool-call ID` whose checkpoint already exists. Every
@@ -299,7 +303,7 @@ envelope as usual).
 
 ```json
 {"ok":true,"data":{...},"error":null}
-{"ok":false,"data":{},"error":{"code":"Busy","message":"daemon is not running","detail":{"reason":"daemon_down"}}}
+{"ok":false,"data":{},"error":{"code":"Busy","message":"the daemon is not running; ask the human to run `git-strata daemon start`","detail":{"reason":"daemon_down"}}}
 ```
 
 All three keys are always present; `data` is never null. Branch on
@@ -308,7 +312,7 @@ All three keys are always present; `data` is never null. Branch on
 
 | `error.code` (`detail.reason`) | What an agent should do |
 | --- | --- |
-| `Busy` (`daemon_down`) | Run `git-strata daemon start`, then retry once. |
+| `Busy` (`daemon_down`) | Keep working; tell the human the daemon is down (they run `git-strata daemon start`). Retry once `daemon status` shows `running`. Never start it yourself. |
 | `Busy` (`workspace_changed`) | A file changed while reading it; retry. |
 | `Busy` (other) | Repo lock held by another operation; wait and retry later. |
 | `NotTty` | Command needs a human at a terminal. Stop; give the exact command to the human. |
@@ -348,7 +352,7 @@ All three keys are always present; `data` is never null. Branch on
    flag in `pins.json` ORed with `config.toml`); `deploy_on_push` is
    information only. A publish into
    a repo with `publish.push = false` is never gated; only its later `push`
-   is. Loosening the config needs a daemon restart plus the human's
+   is. Loosening the config needs a daemon restart (by the human) plus the human's
    `config relax` (until then `daemon status` alerts `ConfigRelaxPending`).
    Full rule: README.md "Confirmation gate (Touch ID / TTY)".
    - `git-strata config relax <REPO>`
@@ -374,8 +378,10 @@ All three keys are always present; `data` is never null. Branch on
 
 ## Troubleshooting
 
-- `Busy` `daemon_down` right after `daemon start`: check `daemon status`; the
-  LaunchAgent may still be starting. If `no_plist`, the human must install it.
+- `Busy` `daemon_down`: check `daemon status`; if it is down, tell the human.
+  Right after the human started it, the LaunchAgent may still be starting.
+- `InvalidInput` `foreign_home` / `foreign_agent` / `no_plist` from `daemon
+  start|stop`: you should not have run it; tell the human and do not retry.
 - `NoSuchSession` from a hook: the hook's cwd is outside every workspace;
   `cd` into `data.manifest.repos.<repo>.path` before working.
 - `publish` says `no_batch` or `NoMatch`: you have not checkpointed the paths.

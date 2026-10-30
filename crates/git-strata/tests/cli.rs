@@ -6,7 +6,7 @@ mod support;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::{Value, json};
@@ -285,84 +285,30 @@ fn history_is_read_from_the_store_alone() {
     assert_eq!(all["sessions"][0]["workspaces"]["tool"]["checkpoint"], json!(2));
 }
 
-fn fake_launchctl(dir: &Path) -> (PathBuf, PathBuf) {
-    let bin = dir.join("fakebin");
-    fs::create_dir_all(&bin).unwrap();
-    let log = dir.join("launchctl.log");
-    let state = dir.join("launchctl.loaded");
-    let script = format!(
-        "#!/bin/sh\necho \"$*\" >> '{log}'\ncase \"$1\" in\n print) [ -f '{state}' ] && exit 0; exit 113;;\n bootstrap) touch '{state}';;\n bootout) rm -f '{state}';;\n *) exit 64;;\nesac\nexit 0\n",
-        log = log.display(),
-        state = state.display()
-    );
-    let p = bin.join("launchctl");
-    fs::write(&p, script).unwrap();
-    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
-    (bin, log)
-}
-
+/// I1 (cli.md D38, the 2026-10-28 incident): under a temp HOME, `daemon
+/// stop`/`start` refuse before any `launchctl`. PATH holds only a recorder
+/// (builtins only), so even a regressed guard could reach nothing but the
+/// recorder, never the real `/bin/launchctl`. The lifecycle itself is
+/// covered by launch.rs unit tests with a mock.
 #[test]
-fn daemon_stop_waits_until_launchd_drops_the_agent() {
-    // launchd can keep listing the service for a moment after bootout.
+fn daemon_start_stop_refuse_a_foreign_home_without_launchctl() {
     let h = Home::new();
     let bin = h.path().join("fakebin");
     fs::create_dir_all(&bin).unwrap();
     let log = h.path().join("launchctl.log");
-    let lag = h.path().join("launchctl.lag");
-    fs::write(&lag, "").unwrap();
-    let script = format!(
-        "#!/bin/sh\necho \"$*\" >> '{log}'\ncase \"$1\" in\n print) n=$(wc -c < '{lag}'); [ \"$n\" -lt 4 ] && {{ printf x >> '{lag}'; exit 0; }}; exit 113;;\n bootout) exit 0;;\n *) exit 64;;\nesac\n",
-        log = log.display(),
-        lag = lag.display(),
-    );
     let p = bin.join("launchctl");
-    fs::write(&p, script).unwrap();
+    fs::write(&p, format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 0\n", log.display())).unwrap();
     fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
-    let r = support::Run::from(h.cmd(&["daemon", "stop"]).env("PATH", &path).output().unwrap());
-    assert_eq!(r.ok(), json!({}));
-    let got: Vec<String> = fs::read_to_string(&log).unwrap().lines().map(String::from).collect();
-    let uid = unsafe { libc::getuid() };
-    let t = format!("gui/{uid}/com.gwd.git-stratad");
-    // loaded before bootout, still listed three times after, then gone.
-    let mut want = vec![format!("print {t}"), format!("bootout {t}")];
-    want.extend(std::iter::repeat_n(format!("print {t}"), 4));
-    assert_eq!(got, want);
-}
-
-#[test]
-fn daemon_start_stop_do_not_use_the_socket() {
-    let h = Home::new();
-    let (bin, log) = fake_launchctl(h.path());
     let plist = strata_daemon::plist::agent_plist_path(h.path());
     fs::create_dir_all(plist.parent().unwrap()).unwrap();
     fs::write(&plist, "<plist/>\n").unwrap();
     let fake = FakeDaemon::start(&h.socket(), |_| json!({ "id": 0, "result": {} }));
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
-    let run = |args: &[&str]| support::Run::from(h.cmd(args).env("PATH", &path).output().unwrap());
-    assert_eq!(run(&["daemon", "start"]).ok(), json!({}));
-    assert_eq!(run(&["daemon", "start"]).ok(), json!({ "already": true }));
-    assert_eq!(run(&["daemon", "stop"]).ok(), json!({}));
-    assert_eq!(run(&["daemon", "stop"]).ok(), json!({ "already": true }));
+    for verb in ["stop", "start"] {
+        let r = support::Run::from(h.cmd(&["daemon", verb]).env("PATH", &bin).output().unwrap());
+        assert_eq!((r.err_code().as_str(), r.reason().as_str()), ("InvalidInput", "foreign_home"), "daemon {verb}");
+    }
+    assert!(!log.exists(), "launchctl was run: {:?}", fs::read_to_string(&log));
     assert_eq!(fake.connections(), 0, "no byte on the socket");
-    let uid = unsafe { libc::getuid() };
-    let t = format!("gui/{uid}/com.gwd.git-stratad");
-    let want = vec![
-        format!("print {t}"),
-        format!("bootstrap gui/{uid} {}", plist.display()),
-        format!("print {t}"),
-        format!("print {t}"),
-        format!("bootout {t}"),
-        format!("print {t}"),
-        format!("print {t}"),
-    ];
-    let got: Vec<String> = fs::read_to_string(&log).unwrap().lines().map(String::from).collect();
-    assert_eq!(got, want);
-    // Without the plist, start refuses before launchctl.
-    fs::remove_file(&plist).unwrap();
-    let r = run(&["daemon", "start"]);
-    assert_eq!((r.err_code().as_str(), r.reason().as_str()), ("InvalidInput", "no_plist"));
-    assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), want.len());
 }
 
 #[test]

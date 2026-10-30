@@ -24,7 +24,7 @@ is not running.
 | `rm` | `--session <S>` (required), `--discard` | `--discard`: yes + confirm | no | `RemoveReport` |
 | `gc` | — (also empties `store/trash` entries older than 1 h that nothing names; refused/stuck on stderr) | no | no | `{}` |
 | `du` | `--refresh` (re-size everything in the background; returns at once) | no | no | `{root,now,total,store{all,db,blobs,tmp,other,trash{...,entries,eligible{entries,reclaim_min,reclaim_max},young,floor_secs,gc}},bases{all,repos},deps{all,repos},sessions{all,list[{session,savings,...}]},savings{live,cumulative},scan{running,started,done,queued,full,failed,last_full},took_ms}`; every figure `{logical,allocated,private,shared,files,exact,errors,units,stale,pending,complete,as_of}` |
-| `daemon start` / `daemon stop` | — | no | yes (uses launchd, not the socket) | `{}` or `{already:true}` |
+| `daemon start` / `daemon stop` (human only; login HOME only, D38) | — | no | yes (uses launchd, not the socket) | `{}` or `{already:true}` |
 | `daemon status` | — | no | yes | `{running,socket,session?,holders:[],unknown_publishes:[],alerts:[]}` |
 | `resolve` | `--session <S> --repo <R>` + exactly one of `--abandon` / `--accept` | yes | no | `ResolutionReport` |
 | `chain` | `--repo <R>` + exactly one of `--accept-origin <replay\|drop>` / `--restore` | yes (`--restore` may also confirm) | no | `{repo,choice,outcome?\|refs_moved?}` |
@@ -43,6 +43,7 @@ ticket. Without it, the session comes from the cwd.
 Fixed `detail.reason` values produced by the CLI: `daemon_down`,
 `socket_closed`, `both_selectors`, `checkpoint_reason`, `diff_mode`,
 `no_batch`, `no_choice`, `both_choices`, `not_ancestor`, `no_plist`,
+`foreign_home`, `foreign_agent`,
 `unknown_command` (with `detail.commands`), `args`, `repos`, `ticket`,
 `assign_with_from`, `pick`, `stdin`, `not_tty` (code `NotTty`, with
 `detail.command`), `push_unknown`, `launchctl`, `rpc_id`, `unknown_method`,

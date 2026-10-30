@@ -162,7 +162,7 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Gc { store, dry_run } => cmds::gc(&ctx, store, dry_run),
         Cmd::Du { refresh } => cmds::du(&ctx, refresh),
         Cmd::Daemon(DaemonCmd::Start) => launch::start(&ctx.paths.home),
-        Cmd::Daemon(DaemonCmd::Stop) => launch::stop(),
+        Cmd::Daemon(DaemonCmd::Stop) => launch::stop(&ctx.paths.home),
         Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status(),
         Cmd::Session(SessionCmd::Ports { session, repo, all, check, reassign }) => devports::ports(
             &ctx,

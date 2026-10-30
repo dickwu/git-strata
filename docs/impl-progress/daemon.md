@@ -81,7 +81,8 @@ Not merged.
   &dyn Launchd)` takes the launchctl seam; tests pass a temp HOME and a
   recording fake, and lint the written plist with `plutil -convert json`
   (read-only). The production `install_agent(bin)` (HOME + real
-  `/bin/launchctl bootstrap gui/<uid>`) is never called by a test.
+  `/bin/launchctl bootstrap gui/<uid>`, after the D38 `lifecycle_scope`
+  guard refuses a HOME that is not the login home) is never called by a test.
 - **Plist HOME.** The plist follows the §3 sample exactly (no `HOME` in
   `EnvironmentVariables`; launchd supplies HOME to a user agent); "HOME
   written absolute" is read as the absolute `StandardErrorPath`.

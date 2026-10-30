@@ -43,7 +43,7 @@ impl From<CallError> for StrataError {
 }
 
 pub fn daemon_down(socket: &Path) -> StrataError {
-    StrataError::new(Code::Busy, "the daemon is not running; run `git-strata daemon start`")
+    StrataError::new(Code::Busy, "the daemon is not running; ask the human to run `git-strata daemon start`")
         .with_detail(json!({ "reason": "daemon_down", "socket": socket.to_string_lossy() }))
 }
 

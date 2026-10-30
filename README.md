@@ -49,12 +49,17 @@ plist; installing it is a human step. Its content (from
 | Command | What it does | Result |
 | --- | --- | --- |
 | `git-strata daemon status` | Asks the socket; never fails for a down daemon or missing config | `{running, socket, session?, holders:[], unknown_publishes:[], alerts:[]}` |
-| `git-strata daemon start` | `launchctl bootstrap gui/<uid> <plist>` | `{}`; `{already:true}` if loaded; `InvalidInput` `no_plist` if the plist is missing |
-| `git-strata daemon stop` | `launchctl bootout`, then waits up to 10 s until launchd drops the agent | `{}`; `Unknown` `launchctl` (`step: bootout_wait`) on timeout |
+| `git-strata daemon start` | `launchctl bootstrap gui/<uid> <plist>` | `{}`; `{already:true}` if loaded; `InvalidInput` `no_plist` if the plist is missing; `foreign_home` / `foreign_agent` (below) |
+| `git-strata daemon stop` | `launchctl bootout`, then waits up to 10 s until launchd drops the agent | `{}`; `Unknown` `launchctl` (`step: bootout_wait`) on timeout; `foreign_home` / `foreign_agent` (below) |
 
-`start` / `stop` use launchd, not the socket. The daemon reads `config.toml`
-only when it starts, so after editing the config run `daemon stop` then
-`daemon start`.
+`start` / `stop` use launchd, not the socket, and are for the human only:
+agents never run them (or `launchctl`). Because the `gui/<uid>` domain is per
+user, not per `HOME`, both refuse with `InvalidInput` `foreign_home` (before any
+`launchctl`) unless `HOME` resolves to the login user's home, and with
+`foreign_agent` when the loaded agent came from a plist other than this home's;
+the message gives the `launchctl bootout` the human can run to clear it. The
+daemon reads `config.toml` only when it starts, so after editing the config the
+human runs `daemon stop` then `daemon start`.
 
 Without a running daemon only these work, read-only, straight from the store:
 `status`, `grep`, `files`, `diff`, `deps list`, `daemon status`, and
@@ -114,7 +119,7 @@ Every call prints exactly one compact JSON line on stdout:
 
 ```json
 {"ok":true,"data":{...},"error":null}
-{"ok":false,"data":{},"error":{"code":"Busy","message":"the daemon is not running; run `git-strata daemon start`","detail":{"reason":"daemon_down","socket":"..."}}}
+{"ok":false,"data":{},"error":{"code":"Busy","message":"the daemon is not running; ask the human to run `git-strata daemon start`","detail":{"reason":"daemon_down","socket":"..."}}}
 ```
 
 - All three keys are always present. `data` is never null; on an error it may
@@ -300,7 +305,7 @@ Everything below needs no human, as long as no repo in the publish is gated
 
 ```sh
 git-strata daemon status                     # data.running must be true
-git-strata daemon start                      # only if not running; then retry once
+# not running: tell the human (they run `git-strata daemon start`); never start it yourself
 
 git-strata new PROJ-123 --repo tool --repo staff-api
 #  -> S = data.manifest.id, W = data.manifest.repos.tool.path
@@ -576,7 +581,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 
 | `error.code` (`detail.reason`) | Agent action |
 | --- | --- |
-| `Busy` (`daemon_down`) | `git-strata daemon start`, retry once |
+| `Busy` (`daemon_down`) | tell the human (they run `git-strata daemon start`); retry once it runs |
 | `Busy` (`workspace_changed`) | a file changed while read; retry |
 | `Busy` (`publish_unknown`) | an earlier publish of this repo has an unknown outcome; it clears once origin has that commit (checked at each publish), e.g. after the human runs `git-strata push REPO`; a definite remote refusal never blocks |
 | `Busy` (`port_unidentified` / `port_probe_error`) | `session exec` could not identify a port's holder; retry shortly |

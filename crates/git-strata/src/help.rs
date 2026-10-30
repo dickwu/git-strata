@@ -98,7 +98,8 @@ PATHS
 
 DAEMON
   Write commands go to the daemon (LaunchAgent com.gwd.git-stratad).
-  Busy with detail.reason daemon_down: run `git-strata daemon start`, retry once.
+  Busy with detail.reason daemon_down: tell the human (they run `git-strata
+  daemon start`); retry once it is running. Agents never start/stop it.
   Without the daemon only these work: status, grep, files, diff, deps list,
   daemon status, session ports/exec of a workspace that already has its
   ports (and repeating a --tool-call checkpoint that already exists).
@@ -114,7 +115,7 @@ HEADLESS FLOW (no human needed)
   git-strata rm --session <id>
 
 ERRORS (code -> what an agent does)
-  Busy daemon_down   daemon start, retry once      Busy other       wait, retry later
+  Busy daemon_down   tell the human, retry later   Busy other       wait, retry later
   NotTty             hand the command to a human   NotConfirmed     report; human reruns
                                                    (plan_changed: rerun it yourself once)
   Conflict           fix detail.conflicts in detail.repo, rerun the same publish
@@ -183,7 +184,7 @@ ERRORS
   InvalidInput agent       --agent or STRATA_AGENT is not a valid agent name (nothing created)
   NoSuchRepo               a repo name is not in config.toml
   NoSuchBranch             a repo has no origin/<default_branch> tip (the session's repos are fetched)
-  Busy daemon_down         run `git-strata daemon start`, retry once
+  Busy daemon_down         tell the human (they run `git-strata daemon start`)
 ";
 
 pub const ADD_AFTER: &str = "Gives an existing (active) session workspaces for more repos, tracked, built
@@ -509,7 +510,10 @@ EXAMPLES
   git-strata du --refresh   # full background recompute
 ";
 
-pub const DAEMON_AFTER: &str = "INSTALL
+pub const DAEMON_AFTER: &str = "start/stop: HUMAN ONLY. Agents never run them (or launchctl); on daemon_down
+they tell the human. Both act only when HOME is the login user's home (D38).
+
+INSTALL
   The per-user LaunchAgent is ~/Library/LaunchAgents/com.gwd.git-stratad.plist
   (Label com.gwd.git-stratad, ProgramArguments the git-stratad binary, RunAtLoad,
   KeepAlive, LimitLoadToSessionType Aqua, PATH ~/.bun/bin:/opt/homebrew/bin:
@@ -521,10 +525,14 @@ EXAMPLES
   git-strata daemon start    # launchctl bootstrap gui/<uid> <plist>; {already:true} if loaded
   git-strata daemon stop     # launchctl bootout; waits up to 10 s until unloaded
 
-The daemon reads config.toml only at start: after editing it, run
+The daemon reads config.toml only at start: after editing it, the human runs
 `daemon stop` then `daemon start`. start/stop use launchd, not the socket.
 ERRORS InvalidInput no_plist (LaunchAgent not installed: tell the human; do
-not write the plist yourself), Unknown launchctl (launchctl failed or timed out).
+not write the plist yourself), InvalidInput foreign_home (HOME is not the login
+home; nothing done), InvalidInput foreign_agent (the loaded agent comes from
+another plist, e.g. one bootstrapped from a temp HOME; nothing done, the
+message names the `launchctl bootout` the human can run), Unknown launchctl
+(launchctl failed or timed out).
 ";
 
 pub const RESOLVE_AFTER: &str = "HUMAN ONLY. Exactly one of --abandon / --accept (none: InvalidInput
