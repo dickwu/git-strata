@@ -26,7 +26,7 @@ same binary. Full command and flag table: [reference.md](reference.md).
   `~/Library/Application Support/git-strata/daemon.sock`, the pinned safety
   flags `~/Library/Application Support/git-strata/pins.json` (no env var or
   flag changes them; only `$HOME` does). Workspaces live under the data root
-  (`[paths] root`, default `/Volumes/GWD/inter/.strata`) as
+  (`[paths] root`, default `~/.strata`) as
   `<root>/sessions/<session-id>/<repo>/`.
 - The daemon reads `config.toml` only at start; after a config change, tell
   the human the daemon needs a restart. Do not restart it yourself.
@@ -53,7 +53,7 @@ same binary. Full command and flag table: [reference.md](reference.md).
 #    needs that sibling too: pass it, or add it later (step 1b).
 #    (Without --repo, `--repos A,B` gives EVERY configured repo a workspace
 #    and tracks only A,B; do not edit the untracked siblings.)
-git-strata new PROJ-123 --repo tool --repo hr-core
+git-strata new PROJ-123 --repo tool --repo core-lib
 #    data.manifest.id                  -> session id, e.g. "s-k3q7xm2a"
 #    data.manifest.repos.<repo>.path   -> that repo's workspace directory
 #    data.warnings                     -> [] when fine
@@ -75,7 +75,7 @@ cd "<data.manifest.repos.tool.path>"
 
 # 3. Checkpoint (one of --tool-call / -m, never both)
 git-strata checkpoint -m "parse config before connect"
-git-strata checkpoint -m "only these" --path src/a.ts --path ../hr-core/x.php
+git-strata checkpoint -m "only these" --path src/a.ts --path ../core-lib/x.php
 
 # 4. Inspect
 git-strata status                    # this session; --all for every session
@@ -119,7 +119,7 @@ Notes:
   edit out, revert it (or `restore` the path) before publishing.
   Without `--from` it is interactive on a TTY and `InvalidInput`
   (`no_batch`) otherwise, so agents always pass `--from SESSION:PATH`.
-  PATH is relative to the repo root with no repo prefix (`staff-api/app/x.php`
+  PATH is relative to the repo root with no repo prefix (`billing-api/app/x.php`
   is `--from "${S}:app/x.php"`). Write `"${S}:path"`, never `"$S:path"`: zsh
   reads `$S:t`, `$S:h`, ... as modifiers. Path mistakes come back before any
   TTY check: `InvalidInput` `from_repo_prefix` (rerun with
@@ -346,7 +346,7 @@ All three keys are always present; `data` is never null. Branch on
    - `git-strata deps approve <ID> [--sessions S,S]`
    - `git-strata push <REPO>` when the repo needs confirmation (its pinned
      `publish.confirm` is true; `deploy_on_push` alone does not gate, so e.g.
-     staff-api with `confirm = false` publishes and pushes headless)
+     billing-api with `confirm = false` publishes and pushes headless)
    - `git-strata publish` when it pushes to a repo that needs confirmation
    A repo needs confirmation when `publish.confirm` is true (the pinned
    flag in `pins.json` ORed with `config.toml`); `deploy_on_push` is

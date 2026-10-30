@@ -239,7 +239,7 @@ agent 和用户是同一个 uid，且常以 bypass 权限运行，所以 flag �
 
 ## 7. 数据与存储
 
-- 位置：Store、基线缓存、依赖集缓存、工作区**全部在与主 checkout 同一个卷上**，默认 `/Volumes/GWD/inter/.strata/{store,bases,deps,sessions}/`；`~/Library/Application Support/git-strata/` 只放配置和 daemon 的 socket。原因：`clonefile` 只在同卷内有效，**跨卷退化成复制**，而内置盘只剩约 40 GB。
+- 位置：Store、基线缓存、依赖集缓存、工作区**全部在与主 checkout 同一个卷上**，默认 `<root>/{store,bases,deps,sessions}/`（`[paths] root`，缺省 `$HOME/.strata`，开源准备时改；之前是 `/Volumes/GWD/inter/.strata`）；`~/Library/Application Support/git-strata/` 只放配置和 daemon 的 socket。原因：`clonefile` 只在同卷内有效，**跨卷退化成复制**，而内置盘只剩约 40 GB。
 - 元数据引擎：Turso（`turso` crate，钉 `=0.9.0-pre.1`；SQLite 文件格式兼容，不链接系统 libsqlite3）。WAL，开多进程 WAL（`experimental_multiprocess_wal`），daemon 写、CLI 只读打开可以同时进行；checkpoint 边界 `synchronous=FULL`（与 LayerFS 的 Disposable 不同：我们的数据量小，而"恢复"要求可靠）。引擎与 store.md 所写 SQLite 行为的差异和缺口见 docs/impl-progress/store.md「Engine: Turso」。
 - 选 Turso 是为日后的项目向量化留路：嵌入可以放进同一个 store.db，用 `vector32` / `vector_distance_cos` 查询（现在不建向量表）。
 - Blob：按 BLAKE3 内容寻址，一文件一 blob，存为普通文件；写入 = 从工作区 `clonefile` 到 blob 路径（零拷贝），读出 = 反向克隆。超过阈值（默认 64 MiB，tgrep 的经验）的文件只记录哈希与克隆，不进索引。

@@ -103,7 +103,7 @@ fn new_typed_refusals_leave_no_trace() {
         let before: Vec<(String, MainSnap)> = orig.iter().map(|(n, p)| (n.clone(), MainSnap::at(&fx.sb, p))).collect();
         let s = fx.sessions();
         let repos = if name == "unknown repo" { vec![fx.rn("tool"), fx.rn("nope")] } else { vec![fx.rn("tool")] };
-        let e = s.new(Some("gwd-1"), &repos).expect_err(name);
+        let e = s.new(Some("abc-1"), &repos).expect_err(name);
         assert_eq!(e.code, code, "{name}: {e:?}");
         for (k, v) in details {
             assert_eq!(detail_str(&e, k), Some(*v), "{name}: detail.{k} in {e:?}");
@@ -157,7 +157,7 @@ fn new_validates_ticket() {
     let s = fx.sessions();
     let tool = [fx.rn("tool")];
     let long = "a".repeat(65);
-    for bad in ["../foreign", "", long.as_str(), "gwd 9246", "gwd:9246"] {
+    for bad in ["../foreign", "", long.as_str(), "abc 9246", "abc:9246"] {
         let e = s.new(Some(bad), &tool).unwrap_err();
         assert_eq!(e.code, Code::InvalidInput, "{bad:?}: {e:?}");
         assert_eq!(detail_str(&e, "field"), Some("ticket"));
@@ -168,7 +168,7 @@ fn new_validates_ticket() {
     }
     assert_eq!(fx.lock.holds().len(), 0, "refused tickets never reach the lock");
     assert_no_trace(&fx);
-    for ok in ["9246", "gwd-9246", "a.b_c-d"] {
+    for ok in ["9246", "abc-9246", "a.b_c-d"] {
         let r = s.new(Some(ok), &tool);
         assert!(reached_build(&r), "{ok}: {r:?}");
     }

@@ -1,0 +1,58 @@
+# Example ~/Library/Application Support/git-strata/config.toml.
+# Format: docs/config.md. Every repo path and [paths] root must sit on the same
+# APFS volume (sessions are clonefile copies of the bases).
+
+[paths]
+root = "/Users/you/code/.strata"
+
+# A web app whose pushes to main deploy: publishing asks a human first.
+[repo.web]
+path = "/Users/you/code/web"
+default_branch = "main"
+deps_dirs = ["node_modules"]
+seed_caches = [".next/cache", "node_modules/.cache"]
+seed_files = [".env.local"]
+install_inputs = ["package.json", "bun.lock"]
+install = "bun install --frozen-lockfile"
+checks = ["bunx tsc --noEmit --incremental false"]
+publish = { branch = "main", push = true, confirm = true }
+deploy_on_push = true
+pin_unpushed = true
+check_siblings = ["ui-kit"]   # web's checks read ../ui-kit
+
+# A shared component library that web links against.
+[repo.ui-kit]
+path = "/Users/you/code/ui-kit"
+default_branch = "main"
+deps_dirs = ["node_modules"]
+install_inputs = ["package.json", "bun.lock"]
+install = "bun install --frozen-lockfile"
+checks = ["bunx tsc --noEmit --incremental false"]
+publish = { branch = "main", push = true, confirm = false }
+deploy_on_push = false
+pin_unpushed = true
+
+# An API whose default branch deploys on push; publish commits locally and
+# leaves the push to a human.
+[repo.api]
+path = "/Users/you/code/api"
+default_branch = "master"
+deps_dirs = ["vendor"]
+seed_files = [".env"]
+install_inputs = ["composer.json", "composer.lock"]
+install = "composer install --no-interaction"
+checks = []
+publish = { branch = "master", push = false, confirm = false }
+deploy_on_push = true
+pin_unpushed = true
+
+# A Rust service with no install step.
+[repo.worker]
+path = "/Users/you/code/worker"
+default_branch = "main"
+deps_dirs = []
+seed_caches = ["target"]
+checks = ["cargo check --locked"]
+publish = { branch = "main", push = true, confirm = false }
+deploy_on_push = false
+pin_unpushed = true

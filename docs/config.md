@@ -35,7 +35,7 @@
 
 | 字段 | 类型 | 缺省 | 语义 | 出处 |
 | --- | --- | --- | --- | --- |
-| `root` | string（绝对路径） | `/Volumes/GWD/inter/.strata` | Store、基线缓存、依赖集缓存、工作区的共同根；必须与每个仓库的 `path` 在同一卷（`clonefile` 只在同卷有效，跨卷是错误，不是降级） | design §7、§3 |
+| `root` | string（绝对路径） | `$HOME/.strata`（2026-10-30 起；之前是 `/Volumes/GWD/inter/.strata`） | Store、基线缓存、依赖集缓存、工作区的共同根；必须与每个仓库的 `path` 在同一卷（`clonefile` 只在同卷有效，跨卷是错误，不是降级） | design §7、§3 |
 
 ### 2.2 `[repo.<name>]`
 
@@ -230,7 +230,7 @@ pub struct RepoConfig {
 // Default for Paths：root = Paths::default_root()
 
 impl Paths {
-    pub fn default_root() -> PathBuf;     // /Volumes/GWD/inter/.strata
+    pub fn default_root() -> PathBuf;     // $HOME/.strata
     pub fn store(&self) -> PathBuf;       // <root>/store
     pub fn bases(&self) -> PathBuf;       // <root>/bases
     pub fn deps(&self) -> PathBuf;        // <root>/deps

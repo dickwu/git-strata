@@ -3,6 +3,8 @@ name = "git-strata-desktop"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dickwu/git-strata"
 description = "Git Strata: the macOS desktop app over git-stratad (docs/modules/gui.md)"
 publish = false
 

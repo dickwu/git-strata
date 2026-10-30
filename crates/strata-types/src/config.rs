@@ -248,8 +248,11 @@ impl Default for Paths {
 }
 
 impl Paths {
+    /// `$HOME/.strata`. It must share an APFS volume with every repo, so set
+    /// `[paths] root` when the repos live elsewhere (docs/config.md).
     pub fn default_root() -> PathBuf {
-        PathBuf::from("/Volumes/GWD/inter/.strata")
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).unwrap_or_else(|| "/".into());
+        PathBuf::from(home).join(".strata")
     }
 
     pub fn store(&self) -> PathBuf {

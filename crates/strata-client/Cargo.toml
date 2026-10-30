@@ -3,6 +3,8 @@ name = "strata-client"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "git-strata: the pure json-lines transport to git-stratad, shared by the CLI and the desktop app (gui.md §3.1)"
 
 [dependencies]

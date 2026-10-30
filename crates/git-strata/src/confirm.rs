@@ -374,7 +374,7 @@ type Batch = BTreeMap<(SessionId, RepoName), Vec<RepoPath>>;
 /// The repo of `path` in session `id` (cli.md D30): the workspace that has
 /// it on disk or in its base. Every path error is the caller's input, so it
 /// is reported before any gate: `InvalidInput` `from_repo_prefix` when PATH
-/// starts with a repo name (`S:staff-api/x` for `S:x`), `InvalidInput`
+/// starts with a repo name (`S:api/x` for `S:x`), `InvalidInput`
 /// `from_path` when no workspace has it. When several workspaces have it,
 /// the one repo whose checkpoints in the session changed it wins (cli.md
 /// D31); with none or several such repos it is `AmbiguousMatch` `from_repo`

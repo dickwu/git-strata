@@ -10,7 +10,7 @@ fn minimal(extra_repo: &str) -> String {
     format!(
         r#"
 [paths]
-root = "/Volumes/GWD/inter/.strata"
+root = "/Volumes/Code/src/.strata"
 
 {extra_repo}
 "#
@@ -42,23 +42,23 @@ fn rule(err: &strata_types::StrataError) -> String {
 
 #[test]
 fn minimal_config_applies_defaults_and_locates_a_repo() {
-    let cfg = parse(&minimal(&bare_repo("tool", "/Volumes/GWD/inter/tool"))).unwrap();
-    assert_eq!(cfg.paths.root, PathBuf::from("/Volumes/GWD/inter/.strata"));
+    let cfg = parse(&minimal(&bare_repo("tool", "/Volumes/Code/src/tool"))).unwrap();
+    assert_eq!(cfg.paths.root, PathBuf::from("/Volumes/Code/src/.strata"));
     assert_eq!(
         cfg.paths.store(),
-        PathBuf::from("/Volumes/GWD/inter/.strata/store")
+        PathBuf::from("/Volumes/Code/src/.strata/store")
     );
     assert_eq!(
         cfg.paths.bases(),
-        PathBuf::from("/Volumes/GWD/inter/.strata/bases")
+        PathBuf::from("/Volumes/Code/src/.strata/bases")
     );
     assert_eq!(
         cfg.paths.deps(),
-        PathBuf::from("/Volumes/GWD/inter/.strata/deps")
+        PathBuf::from("/Volumes/Code/src/.strata/deps")
     );
     assert_eq!(
         cfg.paths.sessions(),
-        PathBuf::from("/Volumes/GWD/inter/.strata/sessions")
+        PathBuf::from("/Volumes/Code/src/.strata/sessions")
     );
     let tool = cfg.repo(&repo("tool")).unwrap();
     assert!(tool.deps_dirs.is_empty());
@@ -77,7 +77,7 @@ fn minimal_config_applies_defaults_and_locates_a_repo() {
 fn omitted_paths_and_deps_lists_use_documented_defaults() {
     let text = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 install_inputs = ["package.json"]
 install = "bun install"
@@ -95,7 +95,7 @@ publish = { branch = "main", push = true, confirm = false }
 fn explicit_empty_seed_files_are_not_the_default_candidates() {
     let text = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = []
 seed_files = []
@@ -109,7 +109,7 @@ publish = { branch = "main", push = true, confirm = false }
 
 #[test]
 fn v1_name_must_match_path_basename_and_table_must_be_nonempty() {
-    let err = parse(&minimal(&bare_repo("tool", "/Volumes/GWD/inter/other"))).unwrap_err();
+    let err = parse(&minimal(&bare_repo("tool", "/Volumes/Code/src/other"))).unwrap_err();
     assert_eq!(err.code, Code::InvalidInput);
     assert_eq!(rule(&err), "V1");
     let empty = Config {
@@ -125,7 +125,7 @@ fn v1_name_must_match_path_basename_and_table_must_be_nonempty() {
 fn quoted_repo_keys_with_dots_are_legal_names() {
     let text = r#"
 [repo."foo.bar"]
-path = "/Volumes/GWD/inter/foo.bar"
+path = "/Volumes/Code/src/foo.bar"
 default_branch = "main"
 deps_dirs = []
 publish = { branch = "main", push = true, confirm = false }
@@ -137,17 +137,17 @@ publish = { branch = "main", push = true, confirm = false }
 fn v2_rejects_relative_dot_and_trailing_slash() {
     for path in [
         "tool",
-        "/Volumes/GWD/inter/../tool",
-        "/Volumes/GWD/inter/tool/",
-        "/Volumes//GWD/inter/tool",
-        "~/inter/tool",
+        "/Volumes/Code/src/../tool",
+        "/Volumes/Code/src/tool/",
+        "/Volumes//Code/src/tool",
+        "~/src/tool",
     ] {
         let err = parse(&minimal(&bare_repo("tool", path))).unwrap_err();
         assert_eq!(rule(&err), "V2", "{path}");
     }
     let err = parse(&format!(
         "{}\n[paths]\nroot = \"relative\"\n",
-        bare_repo("tool", "/Volumes/GWD/inter/tool")
+        bare_repo("tool", "/Volumes/Code/src/tool")
     ));
     // paths table written twice is a toml error; use a single document instead.
     let _ = err;
@@ -156,7 +156,7 @@ fn v2_rejects_relative_dot_and_trailing_slash() {
 root = "relative/.strata"
 
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = []
 publish = { branch = "main", push = true, confirm = false }
@@ -168,10 +168,10 @@ publish = { branch = "main", push = true, confirm = false }
 fn v3_rejects_root_nested_in_a_checkout_or_the_reverse() {
     let inside_checkout = r#"
 [paths]
-root = "/Volumes/GWD/inter/tool/.strata"
+root = "/Volumes/Code/src/tool/.strata"
 
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = []
 publish = { branch = "main", push = true, confirm = false }
@@ -179,10 +179,10 @@ publish = { branch = "main", push = true, confirm = false }
     assert_eq!(rule(&parse(inside_checkout).unwrap_err()), "V3");
     let checkout_inside_root = r#"
 [paths]
-root = "/Volumes/GWD/inter/.strata"
+root = "/Volumes/Code/src/.strata"
 
 [repo.tool]
-path = "/Volumes/GWD/inter/.strata/tool"
+path = "/Volumes/Code/src/.strata/tool"
 default_branch = "main"
 deps_dirs = []
 publish = { branch = "main", push = true, confirm = false }
@@ -209,7 +209,7 @@ fn v4_rejects_illegal_branch_names() {
         let text = format!(
             r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "{branch}"
 deps_dirs = []
 publish = {{ branch = "main", push = true, confirm = false }}
@@ -223,8 +223,8 @@ publish = {{ branch = "main", push = true, confirm = false }}
 #[test]
 fn deploy_on_push_is_information_and_confirm_is_the_only_gate() {
     let text = r#"
-[repo.staff-api]
-path = "/Volumes/GWD/inter/staff-api"
+[repo.billing-api]
+path = "/Volumes/Code/src/billing-api"
 default_branch = "master"
 deps_dirs = []
 deploy_on_push = true
@@ -233,11 +233,11 @@ publish = { branch = "master", push = false, confirm = false }
     // V5 is gone: deploy_on_push = true with confirm = false parses and
     // does not ask a human.
     let cfg = parse(text).unwrap_or_else(|err| panic!("{err} {:?}", err.detail));
-    let staff = cfg.repo(&repo("staff-api")).unwrap();
+    let staff = cfg.repo(&repo("billing-api")).unwrap();
     assert!(staff.deploy_on_push);
     assert!(!staff.needs_human_confirm());
     let mut built = RepoConfig {
-        path: "/Volumes/GWD/inter/staff-api".into(),
+        path: "/Volumes/Code/src/billing-api".into(),
         default_branch: "master".into(),
         deps_dirs: vec![],
         seed_caches: vec![],
@@ -267,7 +267,7 @@ publish = { branch = "master", push = false, confirm = false }
 fn v6_rejects_git_duplicates_and_nesting_inside_one_list() {
     let text = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = [".git"]
 install_inputs = ["package.json"]
@@ -277,7 +277,7 @@ publish = { branch = "main", push = true, confirm = false }
     assert_eq!(rule(&parse(text).unwrap_err()), "V6");
     let nested = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = ["node_modules", "node_modules/pkg"]
 install_inputs = ["package.json"]
@@ -291,7 +291,7 @@ publish = { branch = "main", push = true, confirm = false }
 fn v7_allows_seed_cache_under_deps_and_rejects_other_overlap() {
     let ok = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = ["node_modules"]
 seed_caches = ["node_modules/.cache"]
@@ -302,7 +302,7 @@ publish = { branch = "main", push = true, confirm = false }
     assert!(parse(ok).is_ok());
     let equal = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = ["node_modules"]
 seed_caches = ["node_modules"]
@@ -313,7 +313,7 @@ publish = { branch = "main", push = true, confirm = false }
     assert_eq!(rule(&parse(equal).unwrap_err()), "V7");
     let seed_file_under_deps = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = ["node_modules"]
 seed_files = ["node_modules/.env"]
@@ -328,7 +328,7 @@ publish = { branch = "main", push = true, confirm = false }
 fn v8_requires_install_and_inputs_exactly_when_deps_dirs_are_present() {
     let deps_without_install = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = ["node_modules"]
 publish = { branch = "main", push = true, confirm = false }
@@ -336,7 +336,7 @@ publish = { branch = "main", push = true, confirm = false }
     assert_eq!(rule(&parse(deps_without_install).unwrap_err()), "V8");
     let install_without_deps = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = []
 install = "bun install"
@@ -345,7 +345,7 @@ publish = { branch = "main", push = true, confirm = false }
     assert_eq!(rule(&parse(install_without_deps).unwrap_err()), "V8");
     let inputs_without_deps = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = []
 install_inputs = ["package.json"]
@@ -358,7 +358,7 @@ publish = { branch = "main", push = true, confirm = false }
 fn design_6_7_deps_repos_must_publish_the_default_branch_and_pin_unpushed() {
     let unpinned = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = ["node_modules"]
 install_inputs = ["package.json"]
@@ -371,7 +371,7 @@ publish = { branch = "main", push = true, confirm = false }
     assert_eq!(rule(&err), "design-6.7");
     let other_branch = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = ["node_modules"]
 install_inputs = ["package.json"]
@@ -380,8 +380,8 @@ publish = { branch = "dev", push = true, confirm = false }
 "#;
     assert_eq!(rule(&parse(other_branch).unwrap_err()), "design-6.7");
     let no_deps = r#"
-[repo.staff-api]
-path = "/Volumes/GWD/inter/staff-api"
+[repo.billing-api]
+path = "/Volumes/Code/src/billing-api"
 default_branch = "master"
 deps_dirs = []
 pin_unpushed = false
@@ -395,7 +395,7 @@ fn with_check(line: &str) -> String {
     format!(
         r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = []
 checks = ["{escaped}"]
@@ -435,7 +435,7 @@ fn v9_rejects_shell_metacharacters_and_v10_rejects_mutating_checks() {
 #[test]
 fn validate_commands_reports_repo_null_until_config_validate_fills_it() {
     let cfg = RepoConfig {
-        path: "/Volumes/GWD/inter/tool".into(),
+        path: "/Volumes/Code/src/tool".into(),
         default_branch: "main".into(),
         deps_dirs: vec![],
         seed_caches: vec![],
@@ -463,7 +463,7 @@ fn validate_commands_reports_repo_null_until_config_validate_fills_it() {
 fn unknown_keys_are_v11_and_toml_syntax_errors_keep_the_parser_message() {
     let text = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = []
 extra = true
@@ -487,7 +487,7 @@ publish = { branch = "main", push = true, confirm = false }
 fn only_the_first_violation_in_file_order_is_reported() {
     let text = r#"
 [repo.zzz]
-path = "/Volumes/GWD/inter/zzz"
+path = "/Volumes/Code/src/zzz"
 default_branch = "main"
 deps_dirs = []
 checks = ["prettier --write ."]
@@ -504,13 +504,13 @@ publish = { branch = "main", push = true, confirm = false }
     assert_eq!(err.detail.unwrap()["repo"], "zzz");
     let text = r#"
 [repo.zzz]
-path = "/Volumes/GWD/inter/other"
+path = "/Volumes/Code/src/other"
 default_branch = "main"
 deps_dirs = []
 publish = { branch = "main", push = true, confirm = false }
 
 [repo.aaa]
-path = "/Volumes/GWD/inter/aaa"
+path = "/Volumes/Code/src/aaa"
 default_branch = "main"
 deps_dirs = []
 checks = ["prettier --write ."]
@@ -525,7 +525,7 @@ publish = { branch = "main", push = true, confirm = false }
 fn repo_path_lists_reject_illegal_entries_at_parse() {
     let text = r#"
 [repo.tool]
-path = "/Volumes/GWD/inter/tool"
+path = "/Volumes/Code/src/tool"
 default_branch = "main"
 deps_dirs = ["../outside"]
 install_inputs = ["package.json"]
@@ -537,31 +537,26 @@ publish = { branch = "main", push = true, confirm = false }
 }
 
 #[test]
-fn default_inter_config_parses() {
-    let text = include_str!("../default-config.toml");
+fn example_config_parses() {
+    let text = include_str!("../../../examples/config.toml");
     let cfg = parse(text).unwrap_or_else(|err| panic!("{err} {:?}", err.detail));
-    assert!(cfg.repos.len() > 10, "{}", cfg.repos.len());
-    assert!(
-        cfg.repo(&repo("tool")).unwrap().needs_human_confirm()
-            || !cfg.repo(&repo("tool")).unwrap().deploy_on_push
-    );
-    // staff-api: deploys on push but publishes headless (2026-10-26).
-    assert!(!cfg.repo(&repo("staff-api")).unwrap().needs_human_confirm());
-    assert!(cfg.repo(&repo("staff-api")).unwrap().deploy_on_push);
-    assert!(!cfg.repo(&repo("staff-api")).unwrap().publish.push);
-    assert!(cfg.repo(&repo("front")).unwrap().deploy_on_push);
-    assert!(cfg.repo(&repo("front")).unwrap().needs_human_confirm());
-    // D21: the dev-link checks' siblings.
-    assert_eq!(cfg.repo(&repo("admin")).unwrap().check_siblings, vec![repo("admin-shared"), repo("admin-time-off")]);
-    assert_eq!(cfg.repo(&repo("tool")).unwrap().check_siblings.len(), 7);
-    assert!(cfg.repo(&repo("front")).unwrap().check_siblings.is_empty());
+    assert_eq!(cfg.repos.len(), 4);
+    assert!(cfg.repo(&repo("web")).unwrap().deploy_on_push);
+    assert!(cfg.repo(&repo("web")).unwrap().needs_human_confirm());
+    // api: deploys on push but publishes headless, without pushing.
+    assert!(!cfg.repo(&repo("api")).unwrap().needs_human_confirm());
+    assert!(cfg.repo(&repo("api")).unwrap().deploy_on_push);
+    assert!(!cfg.repo(&repo("api")).unwrap().publish.push);
+    // D21: the checks' siblings.
+    assert_eq!(cfg.repo(&repo("web")).unwrap().check_siblings, vec![repo("ui-kit")]);
+    assert!(cfg.repo(&repo("worker")).unwrap().check_siblings.is_empty());
 }
 
 fn sib_repo(name: &str, extra: &str) -> String {
     format!(
         r#"
 [repo.{name}]
-path = "/Volumes/GWD/inter/{name}"
+path = "/Volumes/Code/src/{name}"
 default_branch = "main"
 deps_dirs = []
 publish = {{ branch = "main", push = true, confirm = false }}
@@ -629,7 +624,7 @@ fn a_misspelt_check_siblings_key_is_v11() {
 /// rejects anything else with V13; unknown keys in it are still V11.
 #[test]
 fn status_parallel_defaults_and_bounds() {
-    let repo = bare_repo("tool", "/Volumes/GWD/inter/tool");
+    let repo = bare_repo("tool", "/Volumes/Code/src/tool");
     let cfg = parse(&minimal(&repo)).unwrap();
     assert_eq!(cfg.status.parallel, 4);
     assert!(!toml::to_string(&cfg).unwrap().contains("[status]"), "the default table is not written back");
@@ -651,7 +646,7 @@ fn status_parallel_defaults_and_bounds() {
 
 #[test]
 fn dev_ports_default_to_2500_blocks_and_validate_their_range() {
-    let base = minimal(&bare_repo("tool", "/Volumes/GWD/inter/tool"));
+    let base = minimal(&bare_repo("tool", "/Volumes/Code/src/tool"));
     let c = parse(&base).unwrap();
     assert_eq!(c.dev_ports, strata_types::DevPorts::default());
     let blocks = c.dev_ports.blocks().unwrap();
@@ -679,12 +674,12 @@ fn dev_ports_default_to_2500_blocks_and_validate_their_range() {
 }
 
 fn rm_repo(extra: &str) -> String {
-    minimal(&format!("{}{extra}\n", bare_repo("tool", "/Volumes/GWD/inter/tool")))
+    minimal(&format!("{}{extra}\n", bare_repo("tool", "/Volumes/Code/src/tool")))
 }
 
 #[test]
 fn config_without_new_keys_loads_with_defaults() {
-    let cfg = parse(&minimal(&bare_repo("tool", "/Volumes/GWD/inter/tool"))).unwrap();
+    let cfg = parse(&minimal(&bare_repo("tool", "/Volumes/Code/src/tool"))).unwrap();
     let tool = cfg.repo(&repo("tool")).unwrap();
     assert!(tool.rm.regenerable.is_empty());
     assert_eq!(tool.rebase.deps_changed, strata_types::DepsChanged::MoveSource);

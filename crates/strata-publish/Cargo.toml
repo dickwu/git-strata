@@ -3,6 +3,8 @@ name = "strata-publish"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "git-strata publish: path-level merge of release groups into one commit per repo, checks, the publish chain and push"
 
 [features]

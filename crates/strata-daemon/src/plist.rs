@@ -109,6 +109,50 @@ pub fn plist_text(bin: &Path, home: &Path) -> String {
     )
 }
 
+/// What `git-stratad` does with command-line arguments. launchd starts it
+/// with none (serve); the rest only print and never touch launchd, the
+/// socket or the store.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Invocation {
+    Serve,
+    /// `--help` / `-h`: [`USAGE`].
+    Help,
+    /// `--version` / `-V`.
+    Version,
+    /// `--print-plist [BIN]`: the agent plist for `BIN` (absolute; default
+    /// this executable) and `$HOME`, for the human to save as
+    /// `~/Library/LaunchAgents/com.gwd.git-stratad.plist`. A Homebrew
+    /// install passes the stable `opt` path so upgrades keep it valid.
+    PrintPlist(Option<PathBuf>),
+}
+
+pub const USAGE: &str = "usage: git-stratad                          serve (launchd starts it this way)
+       git-stratad --version | -V
+       git-stratad --print-plist [ABSOLUTE_BIN]  print the LaunchAgent plist for $HOME
+       git-stratad --help | -h
+";
+
+pub fn parse_invocation(args: &[std::ffi::OsString]) -> Result<Invocation> {
+    let bad = |m: String| StrataError::new(Code::InvalidInput, m).with_detail(json!({ "reason": "args" }));
+    match args {
+        [] => Ok(Invocation::Serve),
+        [a] if a == "--help" || a == "-h" => Ok(Invocation::Help),
+        [a] if a == "--version" || a == "-V" => Ok(Invocation::Version),
+        [a] if a == "--print-plist" => Ok(Invocation::PrintPlist(None)),
+        [a, bin] if a == "--print-plist" => {
+            let bin = PathBuf::from(bin);
+            if !bin.is_absolute() {
+                return Err(bad(format!("--print-plist needs an absolute path, got {}", bin.display())));
+            }
+            Ok(Invocation::PrintPlist(Some(bin)))
+        }
+        _ => Err(bad(format!(
+            "unexpected arguments {:?}; see git-stratad --help",
+            args
+        ))),
+    }
+}
+
 /// `<home>/Library/LaunchAgents/<label>.plist`.
 pub fn agent_plist_path(home: &Path) -> PathBuf {
     home.join("Library/LaunchAgents").join(format!("{AGENT_LABEL}.plist"))

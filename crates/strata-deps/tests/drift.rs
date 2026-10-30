@@ -20,8 +20,8 @@ fn deps_dir_writes_are_not_drift() {
 
     // dev-link writes, a new .bin entry, a removed package.
     let nm = ws.join("node_modules");
-    fs::create_dir_all(nm.join("@inter/hr-core/src")).unwrap();
-    fs::write(nm.join("@inter/hr-core/src/a.ts"), b"export const a = 1\n").unwrap();
+    fs::create_dir_all(nm.join("@acme/core-lib/src")).unwrap();
+    fs::write(nm.join("@acme/core-lib/src/a.ts"), b"export const a = 1\n").unwrap();
     fs::write(nm.join(".bin/extra"), b"#!/bin/sh\n").unwrap();
     fs::remove_dir_all(nm.join("x")).unwrap();
     assert_eq!(drift(&fx.cfg, &fx.git, &ws, &set).unwrap(), None);

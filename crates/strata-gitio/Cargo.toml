@@ -3,6 +3,8 @@ name = "strata-gitio"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "git plumbing for git-strata: sanitized git commands, index and ignore reads, exports, shadow repositories, publish staging, merge3"
 
 [features]
