@@ -238,7 +238,7 @@ cli 不拥有表，不拥有目录。它读的配置目录是 `~/Library/Applica
 
 ```json
 {"ok":true,"data":{},"error":null}
-{"ok":false,"data":{},"error":{"code":"Busy","message":"daemon is not running","detail":{"reason":"daemon_down"}}}
+{"ok":false,"data":{},"error":{"code":"Busy","message":"the daemon is not running; ask the human to run `git-strata daemon start`","detail":{"reason":"daemon_down"}}}
 ```
 
 - 一行，紧凑（`serde_json` 的紧凑格式，不是 pretty），末尾一个 `\n`，stdout 上没有别的字节（D12）。
@@ -440,7 +440,7 @@ git commit -m "feat(cli): require tty before confirm"
 - Consumes: §3 的方法表；daemon 没在跑时才 `Sessions::open`；search 的 `grep` / `files`；`deps::open_proposals`
 - Produces: 子命令全集、本地只读路径、`--tool-call` 幂等
 
-- [ ] **Step 1: 写失败的测试**：`hook_checkpoint_is_idempotent_per_tool_call`、`daemon_up_read_does_not_open_sessions`、`readonly_works_without_daemon`、`history_is_read_from_the_store_alone`、`daemon_start_stop_do_not_use_the_socket`、`git_strata_is_the_same_binary`，以及 §7 里 `binary_file_is_marked_not_rejected` 到 `listing_is_one_document` 的各行
+- [ ] **Step 1: 写失败的测试**：`hook_checkpoint_is_idempotent_per_tool_call`、`daemon_up_read_does_not_open_sessions`、`readonly_works_without_daemon`、`history_is_read_from_the_store_alone`、`daemon_start_stop_do_not_use_the_socket`（D38 之前的名字；已由 launch.rs 的 U* 单元测试和 `daemon_start_stop_refuse_a_foreign_home_without_launchctl` 取代）、`git_strata_is_the_same_binary`，以及 §7 里 `binary_file_is_marked_not_rejected` 到 `listing_is_one_document` 的各行
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p git-strata --test cli`

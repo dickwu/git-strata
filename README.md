@@ -50,7 +50,7 @@ plist; installing it is a human step. Its content (from
 | --- | --- | --- |
 | `git-strata daemon status` | Asks the socket; never fails for a down daemon or missing config | `{running, socket, session?, holders:[], unknown_publishes:[], alerts:[]}` |
 | `git-strata daemon start` | `launchctl bootstrap gui/<uid> <plist>` | `{}`; `{already:true}` if loaded; `InvalidInput` `no_plist` if the plist is missing; `foreign_home` / `foreign_agent` (below) |
-| `git-strata daemon stop` | `launchctl bootout`, then waits up to 10 s until launchd drops the agent | `{}`; `Unknown` `launchctl` (`step: bootout_wait`) on timeout |
+| `git-strata daemon stop` | `launchctl bootout`, then waits up to 10 s until launchd drops the agent | `{}`; `Unknown` `launchctl` (`step: bootout_wait`) on timeout; `foreign_home` / `foreign_agent` (below) |
 
 `start` / `stop` use launchd, not the socket, and are for the human only:
 agents never run them (or `launchctl`). Because the `gui/<uid>` domain is per

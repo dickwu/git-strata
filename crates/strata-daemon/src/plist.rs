@@ -122,8 +122,9 @@ pub fn login_home() -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
     // SAFETY: getuid/sysconf have no failure mode that matters here.
     let uid = unsafe { libc::getuid() };
+    const MAX: usize = 1 << 20;
     let mut size = match unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) } {
-        n if n > 0 => n as usize,
+        n if n > 0 => (n as usize).min(MAX),
         _ => 4096,
     };
     loop {
@@ -133,8 +134,8 @@ pub fn login_home() -> Option<PathBuf> {
         let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
         let mut out: *mut libc::passwd = std::ptr::null_mut();
         let rc = unsafe { libc::getpwuid_r(uid, &mut pw, buf.as_mut_ptr(), size, &mut out) };
-        if rc == libc::ERANGE && size < (1 << 20) {
-            size *= 2;
+        if rc == libc::ERANGE && size < MAX {
+            size = (size * 2).min(MAX);
             continue;
         }
         if rc != 0 || out.is_null() || pw.pw_dir.is_null() {

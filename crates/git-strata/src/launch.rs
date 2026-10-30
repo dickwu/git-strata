@@ -265,6 +265,19 @@ mod tests {
         assert!(calls(&m).is_empty());
     }
 
+    // U4: HOME missing (empty) or not a directory: refused with zero calls.
+    #[test]
+    fn missing_home_refuses_with_zero_calls() {
+        let h = homes();
+        with_plist(&h.home);
+        let m = mock(|_, _| (true, String::new()));
+        for home in [PathBuf::new(), h.home.join("missing")] {
+            assert_eq!(reason(stop_with(&home, Some(&h.home), &m)), json!("foreign_home"));
+            assert_eq!(reason(start_with(&home, Some(&h.home), &m)), json!("foreign_home"));
+        }
+        assert!(calls(&m).is_empty());
+    }
+
     // U2/U5 (was daemon_stop_waits_until_launchd_drops_the_agent): owned
     // agent, still listed three times after bootout, then gone (D24).
     #[test]

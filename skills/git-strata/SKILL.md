@@ -35,10 +35,9 @@ same binary. Full command and flag table: [reference.md](reference.md).
   temp `HOME`: the LaunchAgent domain is per user, not per HOME). Check it
   with `git-strata daemon status` (`data.running`). If it is down, keep
   working in the workspace and tell the human it is down so they can run
-  `git-strata daemon start`. Once the offline spool ships, checkpoints made
-  while it is down are kept and replayed; until then the hook answers `Busy`
-  `daemon_down` and that checkpoint is not recorded. Do not write a plist
-  yourself.
+  `git-strata daemon start`. While it is down the hook answers `Busy`
+  `daemon_down` and that checkpoint is not recorded: tell the human which
+  edits were not checkpointed. Do not write a plist yourself.
 - Without the daemon, only these work (read-only, straight from the store):
   `status`, `grep`, `files`, `diff`, `deps list`, `daemon status`, and a
   repeated `checkpoint --tool-call ID` whose checkpoint already exists. Every
@@ -303,7 +302,7 @@ envelope as usual).
 
 ```json
 {"ok":true,"data":{...},"error":null}
-{"ok":false,"data":{},"error":{"code":"Busy","message":"daemon is not running","detail":{"reason":"daemon_down"}}}
+{"ok":false,"data":{},"error":{"code":"Busy","message":"the daemon is not running; ask the human to run `git-strata daemon start`","detail":{"reason":"daemon_down"}}}
 ```
 
 All three keys are always present; `data` is never null. Branch on
