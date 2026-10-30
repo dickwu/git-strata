@@ -223,7 +223,8 @@ pub fn replay_base(git: &Git, chain: &PublishChain, c: &CommitOid) -> Result<Opt
 /// outcome is unknown) the directory is kept, an `UnknownPush` warning is
 /// raised and an error result carries `detail.scene`; a restart reports
 /// every kept scene again (`push_scenes`). Otherwise the directory is
-/// removed. A later definite `Pushed` of a commit that contains the
+/// removed, rooted and checked: anything left is `Unknown` (`scene_outcome`,
+/// publish.md D21). A later definite `Pushed` of a commit that contains the
 /// scene's commit settles it (`settle_push_scenes`).
 ///
 /// [实现时补的决定] (review-2 N4) The record also names the remote and the
@@ -235,7 +236,7 @@ pub fn replay_base(git: &Git, chain: &PublishChain, c: &CommitOid) -> Result<Opt
 /// (`push_url`, `dest` read before the push; null when unreadable). Only a
 /// definite push whose `PushDest` equals both exactly settles it.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn with_staging<T>(
+pub(crate) fn with_staging<T: Serialize>(
     core: &Core,
     git: &Git,
     repo: &RepoName,
@@ -255,9 +256,9 @@ pub(crate) fn with_staging<T>(
         "push_url": dest.map(|d| d.push_url.as_str()),
     })
     .to_string();
-    if let Err(e) = fs::write(&intent, body) {
+    if let Err(e) = write_scene_record(&dir, &intent, body.as_bytes()) {
         let _ = fs::remove_dir_all(&dir);
-        return Err(classify_io_error(&e, IoSide::Write, &intent));
+        return Err(e);
     }
     let r = (|| {
         let wt = dir.join(repo.as_str());
@@ -276,8 +277,84 @@ pub(crate) fn with_staging<T>(
             e.with_detail(d)
         });
     }
-    let _ = fs::remove_dir_all(&dir);
-    r
+    // publish.md D21: the scene may hold cloned check siblings; it is removed
+    // rooted, idempotent and checked (see `scene_outcome`).
+    let removed = scene_rel(&dir).and_then(|rel| strata_publish::remove_layout(&core.config.paths.root, &rel));
+    scene_outcome(&dir, r, removed)
+}
+
+/// The result of a push scene once its removal was tried (publish.md D21,
+/// as publish's own layout cleanup, push.rs step 9): removed → `r` as is;
+/// not removed → `Unknown` (reason `cleanup`) naming the scene, with the
+/// definite result kept (`detail.push` after a push, `detail.cause` after
+/// a named error). Never dropped silently.
+pub(crate) fn scene_outcome<T: Serialize>(dir: &Path, r: Result<T>, removed: Result<()>) -> Result<T> {
+    let mut u = match removed {
+        Ok(()) => return r,
+        Err(u) => u,
+    };
+    let d = u.detail.get_or_insert_with(|| json!({}));
+    if let Some(m) = d.as_object_mut() {
+        m.insert("scene".into(), json!(dir.to_string_lossy()));
+        match &r {
+            Ok(v) => {
+                m.insert("push".into(), serde_json::to_value(v).unwrap_or(Value::Null));
+            }
+            Err(cause) => {
+                m.insert(
+                    "cause".into(),
+                    json!({ "code": cause.code.as_str(), "message": cause.message, "detail": cause.detail }),
+                );
+            }
+        }
+    }
+    u.message = match r {
+        Ok(_) => "the push finished but its scene could not be removed".into(),
+        Err(_) => "the push scene could not be removed".into(),
+    };
+    Err(u)
+}
+
+/// `dir` (a scene under `<root>/daemon/push`) relative to the strata root.
+fn scene_rel(dir: &Path) -> Result<strata_types::RepoPath> {
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    strata_types::RepoPath::try_from(format!("{PUSH_SCENES}/{name}"))
+}
+
+/// Review P1-13 (D34): the attempt record must be on the medium before
+/// anything is pushed, or a power loss after the push leaves no scene and
+/// the unknown push is never reported. Temp file → write → F_FULLFSYNC →
+/// rename → F_FULLFSYNC the scene directory and its parent (the scene
+/// directory itself was just created). Any failure is returned and the
+/// caller pushes nothing.
+fn write_scene_record(dir: &Path, intent: &Path, body: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let io = |e: std::io::Error, p: &Path| classify_io_error(&e, IoSide::Write, p);
+    let tmp = dir.join(format!(".{SCENE_FILE}.tmp"));
+    {
+        let mut f = fs::File::create(&tmp).map_err(|e| io(e, &tmp))?;
+        f.write_all(body).map_err(|e| io(e, &tmp))?;
+        sync_path_file(&f, &tmp)?;
+    }
+    fs::rename(&tmp, intent).map_err(|e| io(e, intent))?;
+    for d in [Some(dir), dir.parent()].into_iter().flatten() {
+        let f = fs::File::open(d).map_err(|e| io(e, d))?;
+        sync_path_file(&f, d)?;
+    }
+    Ok(())
+}
+
+/// F_FULLFSYNC, falling back to fsync where the volume does not support it.
+fn sync_path_file(f: &fs::File, shown: &Path) -> Result<()> {
+    #[cfg(feature = "test-seams")]
+    if crate::seams::scene_sync_fails(shown) {
+        return Err(classify_io_error(&std::io::Error::from_raw_os_error(libc::EIO), IoSide::Write, shown));
+    }
+    match strata_apfs::full_fsync(f) {
+        Ok(()) => Ok(()),
+        Err(e) if e.code == Code::Unsupported => f.sync_all().map_err(|e| classify_io_error(&e, IoSide::Write, shown)),
+        Err(e) => Err(e),
+    }
 }
 
 /// Where standalone and restore pushes stage (under `paths.root`).
@@ -285,7 +362,7 @@ pub(crate) const PUSH_SCENES: &str = "daemon/push";
 /// The attempt record inside a push directory.
 const SCENE_FILE: &str = "push.json";
 /// The remote every standalone and restore push goes to.
-const SCENE_REMOTE: &str = "origin";
+pub(crate) const SCENE_REMOTE: &str = "origin";
 
 /// Review M6: every kept push scene under `root` (`repo`, `commit`, the
 /// directory), for the startup report. A directory without a readable
@@ -311,6 +388,17 @@ impl PushDest {
     /// The push URL the push is sent to (review-4 F1).
     pub(crate) fn url(&self) -> &str {
         &self.push_url
+    }
+}
+
+/// Review P1-15: under the repo lock, before any staging, origin's push
+/// destination read now (`dest`) must have the push URL the human approved
+/// (`approved`); otherwise `NotConfirmed` (`remote_changed`) and nothing is
+/// staged or pushed. An unreadable URL is the same refusal (now `""`).
+pub(crate) fn check_approved_url(approved: &str, dest: Option<&PushDest>) -> Result<()> {
+    match dest {
+        Some(d) if d.push_url == approved => Ok(()),
+        d => Err(strata_publish::remote_changed(approved, d.map(PushDest::url).unwrap_or(""))),
     }
 }
 
@@ -447,12 +535,18 @@ pub fn chain_resolve(
     let (_, seen) = rewound_or_diverged(strata_deps::publish_chain(git, &branch)?)?;
 
     // 3. Restore asks the human like push, holding nothing.
-    let action = Action::PushDeploy { repo: repo.clone(), branch: branch.clone() };
-    let token = if choice == ChainChoice::Restore && needs_confirm(core.pinned(repo)?) {
+    // Review P1-15: the approval names origin's push URL read now.
+    let confirm = choice == ChainChoice::Restore && needs_confirm(&core.pinned(repo)?);
+    let url = if confirm { git.push_url(SCENE_REMOTE)? } else { String::new() };
+    let action = Action::PushDeploy { repo: repo.clone(), branch: branch.clone(), url: url.clone() };
+    let token = if confirm {
         Some(require_validated(&core.confirmer, action.clone())?)
     } else {
         None
     };
+    if token.is_some() {
+        crate::after_confirm(&core.config.paths.root);
+    }
 
     let mut tips = (None, None);
     let out = core.locks.with_repo(repo, || {
@@ -496,6 +590,9 @@ pub fn chain_resolve(
                 let verify = [RefUpdate::verify(&chain_name, Some(c.clone()))];
                 let uncertain = |r: &Result<PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
                 let dest = push_dest(git);
+                if token.is_some() {
+                    check_approved_url(&url, dest.as_ref())?;
+                }
                 let outcome = with_staging(core, git, repo, &branch, &c, dest.as_ref(), uncertain, |wt| {
                     crate::handlers::writing();
                     // Review-4 F1: to exactly the recorded destination.
@@ -665,12 +762,19 @@ pub(crate) fn push_replaying(
     git: &Git,
     rc: &strata_types::RepoConfig,
     repo: &RepoName,
+    prep: &strata_publish::siblings::Prepared,
     replayed: &mut Option<Replayed>,
 ) -> Result<CommitOid> {
     let branch = rc.publish.branch.as_str();
+    let pending = strata_publish::pending::Scope { store: &core.store, git, repo, branch };
+    // rm-followups §1.6 rule 4: reconstruction first, under the repo lock.
+    if let Err(e) = strata_publish::pending::reconstruct(pending) {
+        tracing::warn!(repo = %repo, error = %e.message, "rebase_pending reconstruction failed");
+    }
     git.fetch("origin", branch)?;
     let chain = strata_deps::publish_chain(git, branch)?;
     let mut plan = None;
+    let mut supplies = Vec::new();
     let tip = match &chain {
         Some(ch) if ch.state == ChainState::Leads && ch.top.is_some() => ch.top.clone().expect("leads has a top"),
         Some(ch) if ch.state == ChainState::Diverged && ch.top.is_some() => {
@@ -683,6 +787,8 @@ pub(crate) fn push_replaying(
             // A Conflict here comes before any ref write: the refs are unchanged.
             let new = git.replay_commits(&base, &c, &ch.origin).map_err(|e| replay_conflict(e, repo, branch, ch, &c))?;
             plan = Some((c, ch.origin.clone(), ch.anchor.clone(), old, new.clone()));
+            // publish.md D21: the check siblings, re-checked before the scene.
+            supplies = strata_publish::siblings::place(&core.store, git, rc, repo, None, prep)?;
             new
         }
         Some(ch) if ch.state == ChainState::Rewound => {
@@ -706,20 +812,24 @@ pub(crate) fn push_replaying(
     let dest = push_dest(git);
     let r = with_staging(core, git, repo, branch, &tip, dest.as_ref(), uncertain, |wt| {
         if let Some((c, o, a, old, new)) = &plan {
+            if let Some(scene) = wt.parent() {
+                strata_publish::siblings::clone_supplies(&supplies, scene)
+                    .map_err(|m| strata_publish::siblings::missing_error(repo, None, std::slice::from_ref(&m)))?;
+            }
             clone_deps_for_checks(core, git, rc, repo, wt)?;
             let ran = strata_publish::check(rc, wt)?;
             let copies = range_oldest_first(git, o, new)?;
             if copies.len() != old.len() {
                 return Err(invalid("replay_mismatch", "the replayed range does not match the chain; nothing was written"));
             }
-            transaction(git, &[RefUpdate::set(&chain_name, new.clone(), Some(c.clone())), RefUpdate::set(&anchor_name, o.clone(), a.clone())])?;
-            *replayed = Some(Replayed {
-                from: c.clone(),
-                to: new.clone(),
-                onto: o.clone(),
-                map: old.iter().cloned().zip(copies).collect(),
-                checks_ran: ran.ran,
-            });
+            let map: Vec<(CommitOid, CommitOid)> = old.iter().cloned().zip(copies).collect();
+            // rm-followups §1.6 replay: retarget and enroll before the refs
+            // move, adopt (or clear) after.
+            let plans = strata_publish::pending::plan_replay(pending, &map, &session_heads(core, repo)?)?;
+            let t = transaction(git, &[RefUpdate::set(&chain_name, new.clone(), Some(c.clone())), RefUpdate::set(&anchor_name, o.clone(), a.clone())]);
+            strata_publish::pending::adopt_replay(pending, &plans);
+            t?;
+            *replayed = Some(Replayed { from: c.clone(), to: new.clone(), onto: o.clone(), map, checks_ran: ran.ran });
         }
         crate::handlers::writing();
         strata_publish::push_to(git, rc, repo, wt, None, dest.as_ref().map(PushDest::url))
@@ -730,6 +840,60 @@ pub(crate) fn push_replaying(
     r.map(|_| tip)
 }
 
+/// Every live session's workspace head of `repo`.
+fn session_heads(core: &Core, repo: &RepoName) -> Result<Vec<(SessionId, CommitOid)>> {
+    Ok(core
+        .store
+        .sessions()?
+        .into_iter()
+        .filter(|r| r.lifecycle != strata_store::Lifecycle::Removed)
+        .filter_map(|r| r.manifest.repos.get(repo).map(|w| (r.manifest.id.clone(), w.head.clone())))
+        .collect())
+}
+
 fn reason_of(e: &StrataError) -> Option<&str> {
     e.detail.as_ref().and_then(|d| d.get("reason")).and_then(Value::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stuck() -> StrataError {
+        StrataError::new(Code::Unknown, "the staging layout could not be removed")
+            .with_detail(json!({ "path": "/x/daemon/push/1-2", "stuck": 1, "reason": "cleanup" }))
+    }
+
+    #[test]
+    fn a_removed_scene_leaves_the_result_as_is() {
+        let dir = Path::new("/x/daemon/push/1-2");
+        assert_eq!(scene_outcome(dir, Ok(PushOutcome::Pushed), Ok(())).unwrap(), PushOutcome::Pushed);
+        let e = scene_outcome::<PushOutcome>(dir, Err(StrataError::new(Code::CheckFailed, "c")), Ok(())).unwrap_err();
+        assert_eq!(e.code, Code::CheckFailed);
+    }
+
+    #[test]
+    fn a_stuck_scene_after_a_push_is_unknown_keeping_the_push() {
+        let dir = Path::new("/x/daemon/push/1-2");
+        let e = scene_outcome(dir, Ok(PushOutcome::Pushed), Err(stuck())).unwrap_err();
+        assert_eq!(e.code, Code::Unknown);
+        let d = e.detail.unwrap();
+        assert_eq!(d["reason"], "cleanup");
+        assert_eq!(d["scene"], "/x/daemon/push/1-2");
+        assert_eq!(d["push"], json!({ "kind": "Pushed" }));
+        assert!(d.get("cause").is_none());
+    }
+
+    #[test]
+    fn a_stuck_scene_after_an_error_is_unknown_keeping_the_cause() {
+        let dir = Path::new("/x/daemon/push/1-2");
+        let cause = StrataError::new(Code::InvalidInput, "missing").with_detail(json!({ "reason": "siblings_missing" }));
+        let e = scene_outcome::<PushOutcome>(dir, Err(cause), Err(stuck())).unwrap_err();
+        assert_eq!(e.code, Code::Unknown);
+        let d = e.detail.unwrap();
+        assert_eq!((d["reason"].as_str(), d["scene"].as_str()), (Some("cleanup"), Some("/x/daemon/push/1-2")));
+        assert_eq!(d["cause"]["code"], "InvalidInput");
+        assert_eq!(d["cause"]["detail"]["reason"], "siblings_missing");
+        assert!(d.get("push").is_none());
+    }
 }

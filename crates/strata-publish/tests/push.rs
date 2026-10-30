@@ -43,8 +43,13 @@ fn token(action: Action) -> ConfirmToken {
     ConfirmToken { action, issued: Instant::now(), nonce: 7 }
 }
 
-fn deploy(branch: &str) -> Action {
-    Action::PushDeploy { repo: repo_name("tool"), branch: branch.into() }
+/// Review P1-15: the approval names origin's push URL as read now.
+fn deploy(fx: &Fx, branch: &str) -> Action {
+    deploy_at(branch, &fx.git_of("tool").push_url("origin").unwrap())
+}
+
+fn deploy_at(branch: &str, url: &str) -> Action {
+    Action::PushDeploy { repo: repo_name("tool"), branch: branch.into(), url: url.into() }
 }
 
 /// Every git call since the last take: `"<subcommand> <argv…> cwd=… <GIT_* env>"`.
@@ -186,9 +191,9 @@ fn confirm_without_a_matching_token_stops_before_push() {
     let (s, g) = edit(&fx, "src/index.ts", b"export const a = 2\n");
     let bad = [
         None,
-        Some(token(deploy("other"))),
-        Some(token(Action::PushDeploy { repo: repo_name("front"), branch: "main".into() })),
-        Some(token(Action::RemoveDiscard { session: s.clone() })),
+        Some(token(deploy(&fx, "other"))),
+        Some(token(Action::PushDeploy { repo: repo_name("front"), branch: "main".into(), url: fx.git_of("tool").push_url("origin").unwrap() })),
+        Some(token(Action::RemoveDiscard { session: s.clone(), kept_trees: vec![] })),
     ];
     for (deploy_on_push, confirm) in [(true, true), (false, true)] {
         fx.cfg_mut("tool").deploy_on_push = deploy_on_push;
@@ -211,12 +216,49 @@ fn confirm_without_a_matching_token_stops_before_push() {
         }
     }
     // The matching action pushes.
-    let p = run(&fx, &g, Some(token(deploy("main")))).unwrap();
+    let p = run(&fx, &g, Some(token(deploy(&fx, "main")))).unwrap();
     assert_eq!(p.push, Some(PushOutcome::Pushed));
     assert_eq!(fx.origin_head("tool", "main"), p.commit.as_str());
     let changes = fx.store().ref_changes(p.id).unwrap();
     let pushed = changes.iter().find(|c| c.op == strata_store::RefOp::Push).expect("push recorded");
-    assert_eq!(pushed.confirmed, Some(deploy("main")));
+    assert_eq!(pushed.confirmed, Some(deploy(&fx, "main")));
+}
+
+/// Review P1-15: the approval names origin's push URL. When origin's push
+/// URL under the lock is not the approved one (it was changed after the
+/// prompt), publish and push are `NotConfirmed` (`remote_changed`, both
+/// URLs in the detail) before any staging, and nothing reaches either
+/// remote. With the approved URL restored, the same kind of token pushes.
+#[test]
+fn a_confirmed_push_is_bound_to_the_approved_url() {
+    let mut fx = fx();
+    fx.cfg_mut("tool").publish.confirm = true;
+    let origin = fx.origin_head("tool", "main");
+    let approved = fx.git_of("tool").push_url("origin").unwrap();
+    let other = fx.sb.root.join("elsewhere.git");
+    fx.sb.git(&fx.sb.root, &["init", "-q", "--bare", other.to_str().unwrap()]);
+    let main = fx.main("tool");
+    fx.sb.git(&main, &["config", "remote.origin.pushurl", other.to_str().unwrap()]);
+    let (s, g) = edit(&fx, "src/index.ts", b"export const a = 9\n");
+    calls(&fx);
+    let e = run(&fx, &g, Some(token(deploy_at("main", &approved)))).unwrap_err();
+    assert_eq!(e.code, Code::NotConfirmed, "{e:?}");
+    let d = e.detail.clone().unwrap();
+    assert_eq!(d["reason"], "remote_changed", "{e:?}");
+    assert_eq!(d["confirmed"], approved.as_str());
+    assert_eq!(d["now"], other.to_str().unwrap());
+    let cs = calls(&fx);
+    assert!(!touched_layout(&cs), "no staging: {cs:#?}");
+    assert_eq!(ran(&cs, "push"), 0);
+    assert!(layouts(&fx, &s).is_empty());
+    assert_eq!(fx.read_ref("tool", CHAIN), None);
+    assert_eq!(fx.origin_head("tool", "main"), origin);
+    assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", other.to_str().unwrap(), "for-each-ref"]), "", "nothing reached the other remote");
+    // A token for the URL as it is now pushes there (the human approved it).
+    fx.sb.git(&main, &["config", "--unset", "remote.origin.pushurl"]);
+    let p = run(&fx, &g, Some(token(deploy_at("main", &approved)))).unwrap();
+    assert_eq!(p.push, Some(PushOutcome::Pushed));
+    assert_eq!(fx.origin_head("tool", "main"), p.commit.as_str());
 }
 
 #[test]
@@ -282,7 +324,14 @@ fn push_refused_keeps_local_chain() {
     assert_eq!(fx.read_ref("tool", CHAIN).unwrap(), c);
     assert_eq!(fx.read_ref("tool", TRACK).unwrap(), origin);
     assert_eq!(fx.origin_head("tool", "main"), origin);
-    assert_eq!(last_row(&fx).phase, PublishPhase::Unknown);
+    // Review P0-2: a definite refusal closes the row (`Done`, stopped
+    // `PushRefused`), so it does not block the repo's next publish.
+    let r = last_row(&fx);
+    assert_eq!(r.phase, PublishPhase::Done);
+    let o = r.outcome.unwrap();
+    assert_eq!(o["stopped"], "PushRefused", "{o}");
+    assert_eq!(o["commit"], c.as_str(), "{o}");
+    assert_eq!(o["push"]["kind"], "Refused", "{o}");
     assert_eq!(state(&fx), ChainState::Leads);
 
     // The standalone push has written nothing yet: PushRefused.
@@ -333,13 +382,13 @@ fn push_false_leaves_chain_local() {
     assert_eq!(e.code, Code::NotConfirmed);
     assert_eq!(ran(&calls(&fx), "push"), 0);
     assert_eq!(fx.read_ref("tool", ANCHOR).unwrap(), origin);
-    let out = push(fx.git_of("tool"), &cfg, &repo_name("tool"), &st, Some(token(deploy("main")))).unwrap();
+    let out = push(fx.git_of("tool"), &cfg, &repo_name("tool"), &st, Some(token(deploy(&fx, "main")))).unwrap();
     assert_eq!(out, PushOutcome::Pushed);
     assert_eq!(fx.origin_head("tool", "main"), p.commit.as_str());
     assert_eq!(fx.read_ref("tool", ANCHOR).unwrap(), p.commit.as_str());
     assert_eq!(fx.read_ref("tool", TRACK).unwrap(), p.commit.as_str());
     // Nothing leads any more: NoCommit.
-    let e = push(fx.git_of("tool"), &cfg, &repo_name("tool"), &st, Some(token(deploy("main")))).unwrap_err();
+    let e = push(fx.git_of("tool"), &cfg, &repo_name("tool"), &st, Some(token(deploy(&fx, "main")))).unwrap_err();
     assert_eq!(e.code, Code::NoCommit);
 }
 
@@ -445,7 +494,9 @@ fn injected_failure_after_commit_is_unknown() {
                 assert_eq!(fx.origin_head("tool", "main"), c);
                 assert_eq!(layouts(&fx, &s).len(), 1, "the scene stays");
             }
-            FailPoint::BeforeRebase => unreachable!(),
+            FailPoint::BeforeRebase | FailPoint::SiblingAnchor | FailPoint::ColdInstall | FailPoint::ColdInstallPanic => {
+                unreachable!()
+            }
         }
         let r = last_row(&fx);
         assert_eq!(r.phase, PublishPhase::Unknown, "{at:?}");
@@ -627,7 +678,7 @@ fn pre_write_wait_is_busy_post_write_wait_is_not() {
 fn removed_session_is_nosuchsession() {
     let fx = fx();
     let (s, g) = edit(&fx, "src/index.ts", b"export const a = 14\n");
-    fx.sessions().remove(&s, true, Some(token(Action::RemoveDiscard { session: s.clone() }))).unwrap();
+    fx.sessions().remove(&s, true, Some(token(Action::RemoveDiscard { session: s.clone(), kept_trees: vec![] }))).unwrap();
     let e = run(&fx, &g, None).unwrap_err();
     assert_eq!(e.code, Code::NoSuchSession, "{e:?}");
     assert!(fx.store().publishes().unwrap().is_empty(), "no new row");
@@ -712,4 +763,60 @@ fn refusal_with_a_moved_row_keeps_the_recording_error_and_the_result() {
     assert_eq!(d["checks_ran"], 1, "{d}");
     assert_eq!(d["commit"].as_str().unwrap(), fx.read_ref("tool", CHAIN).unwrap());
     assert_eq!(last_row(&fx).outcome.unwrap()["note"], "moved", "the other writer's outcome stays");
+}
+
+/// Review P0-2: a refused publish does not block the next one; the next
+/// publish pushes the whole chain (the refused commit and its own).
+#[test]
+fn refused_publish_does_not_block_the_next() {
+    let fx = fx();
+    hook(&fx, "echo 'denied by policy' >&2\nexit 1");
+    let (_s, g) = edit(&fx, "src/index.ts", b"export const a = 41\n");
+    let e = run(&fx, &g, None).unwrap_err();
+    let first = commit_of(&e);
+    fs::remove_file(origin_dir(&fx).join("hooks/pre-receive")).unwrap();
+    let (_s2, g2) = edit(&fx, "src/other.ts", b"export const b = 41\n");
+    let p = run(&fx, &g2, None).unwrap();
+    assert_eq!(p.push, Some(PushOutcome::Pushed));
+    assert_eq!(fx.origin_head("tool", "main"), p.commit.as_str());
+    assert!(fx.git_of("tool").is_ancestor(&strata_types::CommitOid::try_from(first).unwrap(), &p.commit).unwrap());
+}
+
+/// Review P0-2: an `Unknown` row whose commit is now on the remote is
+/// reconciled (`Done`, `reconciled`) by the next publish of the repo; one
+/// whose commit is not on the remote keeps refusing. Nothing is replayed.
+#[test]
+fn unknown_row_is_reconciled_when_the_remote_has_the_commit() {
+    let fx = fx();
+    let t0 = Instant::now();
+    hook(&fx, "sleep 2\nexit 1");
+    seams::set_push_timeout(fx.git_of("tool"), Some(Duration::from_millis(300)));
+    let (_s, g) = edit(&fx, "src/index.ts", b"export const a = 42\n");
+    let e = run(&fx, &g, None).unwrap_err();
+    assert_eq!(e.code, Code::Unknown, "{e:?}");
+    let c = commit_of(&e);
+    let id = last_row(&fx).group.id;
+    assert_eq!(row(&fx, id).phase, PublishPhase::Unknown);
+    seams::set_push_timeout(fx.git_of("tool"), None);
+    std::thread::sleep(Duration::from_secs(3).saturating_sub(t0.elapsed()));
+    fs::remove_file(origin_dir(&fx).join("hooks/pre-receive")).unwrap();
+
+    // Not on the remote yet: still refused, still Unknown.
+    let (_s2, g2) = edit(&fx, "src/other.ts", b"export const b = 42\n");
+    let e = run(&fx, &g2, None).unwrap_err();
+    assert_eq!(reason(&e), Some("publish_unknown"), "{e:?}");
+    assert_eq!(row(&fx, id).phase, PublishPhase::Unknown);
+
+    // The human pushes the chain; the next publish reconciles and runs.
+    let st = staging_for(&fx, &c);
+    let cfg = fx.config.repos[&repo_name("tool")].clone();
+    assert_eq!(push(fx.git_of("tool"), &cfg, &repo_name("tool"), &st, None).unwrap(), PushOutcome::Pushed);
+    let p = run(&fx, &g2, None).unwrap();
+    assert_eq!(p.push, Some(PushOutcome::Pushed));
+    let r = row(&fx, id);
+    assert_eq!(r.phase, PublishPhase::Done);
+    let o = r.outcome.unwrap();
+    assert_eq!(o["commit"], c.as_str(), "{o}");
+    assert_eq!(o["push"]["kind"], "Pushed", "{o}");
+    assert!(o["reconciled"]["remote"].is_string(), "{o}");
 }

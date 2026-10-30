@@ -21,7 +21,7 @@ use crate::errors::{NOT_WRITTEN, PARTIAL, annotate, err, errno, sql, sql_read};
 use crate::open::hex32;
 use crate::seams::Seam;
 use crate::txn::Tx;
-use crate::{GcReport, Result, Store, TrashReport};
+use crate::{GcPreview, GcReport, Result, Store, TrashReport};
 
 const OP_GC: &str = "gc";
 const OP_REPO: &str = "gc_repo";
@@ -96,6 +96,8 @@ struct Run<'a> {
     batch: u64,
     batches: u64,
     report: GcReport,
+    /// What names a trash entry (store.md §5.11a); empty for `gc_repo`.
+    refs: Vec<PathBuf>,
 }
 
 impl<'a> Run<'a> {
@@ -126,9 +128,10 @@ impl<'a> Run<'a> {
             stuck: Vec::new(),
             verified: 0,
             corrupt: Vec::new(),
+            trash_refused: Vec::new(),
             error: None,
         };
-        Ok(Run { st, op, cutoff, floor, batch, batches: 0, report })
+        Ok(Run { st, op, cutoff, floor, batch, batches: 0, report, refs: Vec::new() })
     }
 
     /// Guard (b): old enough to touch.
@@ -224,34 +227,7 @@ impl<'a> Run<'a> {
         let st = self.st;
         let cutoff = self.cutoff;
         // 1. the retention set, from one snapshot
-        let (r, d, attempts, runs) = st.read(|c| {
-            let r = removable_sessions(c, cutoff)?;
-            let (_, d) = proposal_set(c, cutoff)?;
-            let mut a = c
-                .prepare(
-                    "SELECT id, state, staging FROM deps_attempts \
-                     WHERE state IN ('sealed', 'refused', 'failed') AND ended_ns < ?1 ORDER BY id",
-                )
-                .map_err(sql_read)?;
-            let attempts = a
-                .query_map([cutoff], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
-                .map_err(sql_read)?
-                .collect::<crate::sql::SqlResult<Vec<_>>>()
-                .map_err(sql_read)?;
-            let mut g = c
-                .prepare(
-                    "SELECT id FROM gc_runs WHERE ended_ns < ?1 \
-                     AND id NOT IN (SELECT MAX(id) FROM gc_runs GROUP BY scope) ORDER BY id",
-                )
-                .map_err(sql_read)?;
-            let runs = g.query_map([cutoff], |r| r.get::<_, i64>(0)).map_err(sql_read)?.collect::<crate::sql::SqlResult<Vec<_>>>().map_err(sql_read)?;
-            Ok((r, d, attempts, runs))
-        })?;
-        let attempts: Vec<i64> = attempts
-            .into_iter()
-            .filter(|(_, state, staging)| state != "failed" || staging_gone(Path::new(staging)))
-            .map(|(id, _, _)| id)
-            .collect();
+        let (r, d, attempts, runs) = st.read(|c| retention(c, cutoff))?;
         st.seams.pause_if(&Seam::GcPauseBeforeRows);
 
         // 2. rows, in reference order
@@ -302,11 +278,17 @@ impl<'a> Run<'a> {
     }
 
     fn delete_sessions(&mut self, r: &[String]) -> Result<()> {
-        const TABLES: [(&str, &str); 6] = [
+        // FK-safe order: v3's move_activity before move_intents, and
+        // rebase_pending / rm_attempts before workspaces and sessions.
+        const TABLES: [(&str, &str); 10] = [
             ("overlay_entries", "session"),
             ("checkpoints", "session"),
             ("seeds", "session"),
+            ("move_activity", "session"),
             ("move_intents", "session"),
+            ("rebase_pending", "session"),
+            ("rm_attempts", "session"),
+            ("dev_ports", "session"),
             ("workspaces", "session"),
             ("sessions", "id"),
         ];
@@ -527,6 +509,13 @@ impl<'a> Run<'a> {
                 None => self.old(&a),
             };
             if !old {
+                continue;
+            }
+            // The same protection as `gc_trash` (review GS-09): an entry
+            // a row or a git link still names stays.
+            if self.st.trash_named(&self.refs, &p) {
+                let s = self.shown(&p);
+                self.report.trash_refused.push(s);
                 continue;
             }
             let fails = self.st.seams.take(|s| match s {
@@ -883,6 +872,38 @@ fn staging_gone(p: &Path) -> bool {
     matches!(std::fs::symlink_metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// Step 1 of `gc` (§5.11): removable sessions R, proposals D, closed
+/// attempts and old gc records past the cutoff.
+#[allow(clippy::type_complexity)]
+fn retention(c: &Connection, cutoff: i64) -> Result<(Vec<String>, BTreeSet<i64>, Vec<i64>, Vec<i64>)> {
+    let r = removable_sessions(c, cutoff)?;
+    let (_, d) = proposal_set(c, cutoff)?;
+    let mut a = c
+        .prepare(
+            "SELECT id, state, staging FROM deps_attempts \
+             WHERE state IN ('sealed', 'refused', 'failed') AND ended_ns < ?1 ORDER BY id",
+        )
+        .map_err(sql_read)?;
+    let attempts = a
+        .query_map([cutoff], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+        .map_err(sql_read)?
+        .collect::<crate::sql::SqlResult<Vec<_>>>()
+        .map_err(sql_read)?;
+    let mut g = c
+        .prepare(
+            "SELECT id FROM gc_runs WHERE ended_ns < ?1 \
+             AND id NOT IN (SELECT MAX(id) FROM gc_runs GROUP BY scope) ORDER BY id",
+        )
+        .map_err(sql_read)?;
+    let runs = g.query_map([cutoff], |r| r.get::<_, i64>(0)).map_err(sql_read)?.collect::<crate::sql::SqlResult<Vec<_>>>().map_err(sql_read)?;
+    let attempts: Vec<i64> = attempts
+        .into_iter()
+        .filter(|(_, state, staging)| state != "failed" || staging_gone(Path::new(staging)))
+        .map(|(id, _, _)| id)
+        .collect();
+    Ok((r, d, attempts, runs))
+}
+
 fn removable_sessions(c: &Connection, cutoff: i64) -> Result<Vec<String>> {
     let q = format!("SELECT s.id FROM sessions s WHERE ?1 IS NULL AND {SESSION_GONE} ORDER BY s.id");
     let mut st = c.prepare(&q).map_err(sql_read)?;
@@ -962,9 +983,17 @@ impl Store {
     /// unreferenced blobs, stale temp entries and trash; then a budgeted
     /// integrity scan of the blobs.
     pub fn gc(&self, keep: Duration) -> Result<GcReport> {
+        self.gc_with(keep, &[])
+    }
+
+    /// [`Store::gc`] whose trash step also spares what `extra` names (the
+    /// git links the daemon knows; store.md §5.11a). Trash entries a row
+    /// or `extra` names are listed in the report's `trash_refused`.
+    pub fn gc_with(&self, keep: Duration, extra: &[PathBuf]) -> Result<GcReport> {
         self.writable()?;
         let _one = self.gc_running.lock().unwrap_or_else(|p| p.into_inner());
         let mut run = Run::new(self, OP_GC, None, keep)?;
+        run.refs = self.trash_refs(extra)?;
         let mut cursor: Option<String> = None;
         let res = self
             .read(|c| {
@@ -975,6 +1004,68 @@ impl Store {
             .map(|v: Option<Option<String>>| cursor = v.flatten())
             .and_then(|()| run.gc_body(&mut cursor));
         run.finish(res, cursor)
+    }
+
+    /// What [`Store::gc_with`] would reclaim now, writing nothing (the
+    /// `gc --store --dry-run` preview; store.md §5.11b). Counts are read
+    /// from one snapshot and are an upper bound: each batch re-checks.
+    /// Blobs count those no kept session's entry references whose file is
+    /// missing or past the age floor; trash follows `gc_trash`'s rules.
+    pub fn gc_preview(&self, keep: Duration, extra: &[PathBuf]) -> Result<GcPreview> {
+        let run = Run::new(self, OP_GC, None, keep)?;
+        let cutoff = run.cutoff;
+        let (r, d, attempts, runs) = self.read(|c| retention(c, cutoff))?;
+        let rows: Vec<(String, i64)> = self.read(|c| {
+            let q = format!(
+                "SELECT b.id, b.size FROM blobs b WHERE NOT EXISTS (SELECT 1 FROM overlay_entries o WHERE o.blob = b.id \
+                 AND o.session NOT IN (SELECT s.id FROM sessions s WHERE ?1 IS NULL AND {SESSION_GONE})) ORDER BY b.id"
+            );
+            let mut q = c.prepare(&q).map_err(sql_read)?;
+            q.query_map(params![Option::<i64>::None, cutoff], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(sql_read)?
+                .collect::<crate::sql::SqlResult<Vec<_>>>()
+                .map_err(sql_read)
+        })?;
+        let mut out = GcPreview {
+            keep_secs: keep.as_secs(),
+            floor_secs: run.floor.as_secs(),
+            sessions: r,
+            proposals: d.len() as u64,
+            attempts: attempts.len() as u64,
+            gc_runs: runs.len() as u64,
+            ..GcPreview::default()
+        };
+        for (id, size) in rows {
+            let rel = rp(format!("store/blobs/{}/{id}", &id[..2]));
+            let gone = match strata_apfs::attrs_of(&self.real_root, &rel) {
+                Ok(a) => run.old(&a),
+                Err(e) if e.code == Code::NoSuchPath => true,
+                Err(e) => return Err(e),
+            };
+            if gone {
+                out.blobs += 1;
+                out.blob_bytes += size.max(0) as u64;
+            }
+        }
+        let refs = self.trash_refs(extra)?;
+        let trash = rp("store/trash");
+        if run.real_dir(&trash)? {
+            for (p, a) in run.list(&trash)? {
+                let named = last_name(&p).split_once('-').and_then(|(ms, _)| ms.parse::<u128>().ok());
+                let old = match named {
+                    Some(ms) => now_ms().saturating_sub(ms) >= run.floor.as_millis(),
+                    None => run.old(&a),
+                };
+                if !old {
+                    out.trash_young += 1;
+                } else if self.trash_named(&refs, &p) {
+                    out.trash_refused.push(self.root.join(p.as_str()));
+                } else {
+                    out.trash_eligible += 1;
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Reclaim one repo's base generations and deps sets past `keep` that
@@ -999,24 +1090,7 @@ impl Store {
         self.writable()?;
         let _one = self.gc_running.lock().unwrap_or_else(|p| p.into_inner());
         let run = Run::new(self, "gc_trash", None, Duration::ZERO)?;
-        let mut refs: Vec<PathBuf> = self.read(|c| {
-            let mut q = c
-                .prepare(
-                    "SELECT root FROM sessions UNION SELECT path FROM workspaces \
-                     UNION SELECT staging FROM deps_attempts UNION SELECT staging FROM move_intents",
-                )
-                .map_err(sql_read)?;
-            q.query_map((), |r| r.get::<_, String>(0))
-                .map_err(sql_read)?
-                .collect::<crate::sql::SqlResult<Vec<_>>>()
-                .map_err(sql_read)
-        })?
-        .into_iter()
-        .map(PathBuf::from)
-        .collect();
-        refs.extend(extra.iter().cloned());
-        let canon: Vec<PathBuf> = refs.iter().filter_map(|p| std::fs::canonicalize(p).ok()).collect();
-        refs.extend(canon);
+        let refs = self.trash_refs(extra)?;
         let mut report = TrashReport::default();
         let trash = rp("store/trash");
         if !run.real_dir(&trash)? {
@@ -1033,8 +1107,7 @@ impl Store {
                 continue;
             }
             let shown = self.root.join(p.as_str());
-            let real = self.real_root.join(p.as_str());
-            if refs.iter().any(|r| r.starts_with(&shown) || r.starts_with(&real)) {
+            if self.trash_named(&refs, &p) {
                 report.refused.push(shown);
                 continue;
             }
@@ -1053,11 +1126,43 @@ impl Store {
         Ok(report)
     }
 
+    /// The trash reference set (§5.11a): every `sessions.root`,
+    /// `workspaces.path`, `deps_attempts.staging` and `move_intents.staging`,
+    /// plus `extra`, each also in its canonical form.
+    fn trash_refs(&self, extra: &[PathBuf]) -> Result<Vec<PathBuf>> {
+        let mut refs: Vec<PathBuf> = self.read(|c| {
+            let mut q = c
+                .prepare(
+                    "SELECT root FROM sessions UNION SELECT path FROM workspaces \
+                     UNION SELECT staging FROM deps_attempts UNION SELECT staging FROM move_intents",
+                )
+                .map_err(sql_read)?;
+            q.query_map((), |r| r.get::<_, String>(0))
+                .map_err(sql_read)?
+                .collect::<crate::sql::SqlResult<Vec<_>>>()
+                .map_err(sql_read)
+        })?
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+        refs.extend(extra.iter().cloned());
+        let canon: Vec<PathBuf> = refs.iter().filter_map(|p| std::fs::canonicalize(p).ok()).collect();
+        refs.extend(canon);
+        Ok(refs)
+    }
+
+    /// Some reference lies inside the trash entry `rel` (or is it).
+    fn trash_named(&self, refs: &[PathBuf], rel: &RepoPath) -> bool {
+        let shown = self.root.join(rel.as_str());
+        let real = self.real_root.join(rel.as_str());
+        refs.iter().any(|r| r.starts_with(&shown) || r.starts_with(&real))
+    }
+
     /// The newest gc report of `scope` (`None` = the global `gc`).
     pub fn last_gc_report(&self, scope: Option<&RepoName>) -> Result<Option<GcReport>> {
         let s = scope.map(|r| r.as_str().to_owned());
         let text: Option<String> = self.read(|c| {
-            c.query_row("SELECT report FROM gc_runs WHERE scope IS ?1 ORDER BY id DESC LIMIT 1", [s], |r| r.get(0))
+            c.query_row("SELECT report FROM gc_runs WHERE scope IS ?1 ORDER BY id DESC LIMIT 1", [s.clone()], |r| r.get(0))
                 .optional()
                 .map_err(sql_read)
         })?;

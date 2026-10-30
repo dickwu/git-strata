@@ -904,6 +904,95 @@ fn confirmed_push_is_bound_to_the_shown_chain_top() {
     }
 }
 
+/// Sets origin's push URL of `main` to `other` once a confirmation passed
+/// (between the prompt and the push), through the daemon's test seam.
+fn redirect_after_confirm(root: &Path, main: &Path, other: &Path) {
+    let (main, other) = (main.to_path_buf(), other.to_path_buf());
+    strata_daemon::seams::set_after_confirm(
+        root,
+        Some(std::sync::Arc::new(move || {
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args(["config", "remote.origin.pushurl"])
+                .arg(&other)
+                .status()
+                .unwrap();
+            assert!(st.success());
+        })),
+    );
+}
+
+fn unredirect(root: &Path, fx: &Dfx, main: &Path) {
+    strata_daemon::seams::set_after_confirm(root, None);
+    fx.sb.git(main, &["config", "--unset", "remote.origin.pushurl"]);
+}
+
+/// Review P1-15: a confirmed restore or push is bound to origin's push URL
+/// read before the prompt (the prompt names it). A push URL changed after
+/// the confirmation is `NotConfirmed` (`remote_changed`): no ref moves and
+/// nothing reaches either remote. With the URL unchanged it goes through.
+#[test]
+fn confirmed_push_is_bound_to_the_approved_url() {
+    // chain_resolve Restore.
+    {
+        let mut fx = Dfx::new();
+        set_confirm(&mut fx);
+        let ch = Chain::new(&fx);
+        ch.rewind_origin(&fx, &ch.p);
+        let elsewhere = fx.sb.root.join("elsewhere.git");
+        fx.sb.git(&fx.sb.root, &["init", "-q", "--bare", elsewhere.to_str().unwrap()]);
+        let (c, log, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass()]);
+        let core = fx.prepare_with(c).unwrap();
+        sync(&core);
+        let root = core.config.paths.root.clone();
+        redirect_after_confirm(&root, &ch.main, &elsewhere);
+        let before = ch.refs(&fx);
+        let shown = CommitOid::try_from(ch.c.clone()).unwrap();
+        let (r, _) = resolve_shown(&core, ChainChoice::Restore, Some(&shown));
+        assert_eq!(code_reason(&r), (Code::NotConfirmed, "remote_changed".into()), "{r:?}");
+        assert!(log.shown()[0].contains("tool-origin.git"), "the prompt names the URL: {:?}", log.shown());
+        assert_eq!(ch.refs(&fx), before);
+        assert_eq!(ch.origin_main(&fx), ch.p);
+        assert_eq!(calls(&core).push, 0);
+        assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", elsewhere.to_str().unwrap(), "for-each-ref"]), "");
+        unredirect(&root, &fx, &ch.main);
+        let (r, _) = resolve_shown(&core, ChainChoice::Restore, Some(&shown));
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(ch.origin_main(&fx), ch.c);
+        core.close().unwrap();
+    }
+    // push over the socket.
+    {
+        let mut fx = Dfx::new();
+        set_confirm(&mut fx);
+        let ch = Chain::new(&fx);
+        let elsewhere = fx.sb.root.join("elsewhere.git");
+        fx.sb.git(&fx.sb.root, &["init", "-q", "--bare", elsewhere.to_str().unwrap()]);
+        let (c, _log, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass()]);
+        let core = fx.prepare_with(c).unwrap();
+        sync(&core);
+        let root = core.config.paths.root.clone();
+        redirect_after_confirm(&root, &ch.main, &elsewhere);
+        let d = Daemon::start(&core).unwrap();
+        let sock = fx.socket();
+        serving(&d, || {
+            let r = call(&sock, "push", json!({ "repo": "tool", "shown": ch.c }));
+            assert_eq!(r["error"]["code"], "NotConfirmed", "{r:#}");
+            assert_eq!(r["error"]["detail"]["reason"], "remote_changed", "{r:#}");
+            assert_eq!(r["error"]["detail"]["now"], json!(elsewhere.to_str().unwrap()), "{r:#}");
+            assert_eq!(ch.origin_main(&fx), ch.a, "nothing pushed");
+            assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", elsewhere.to_str().unwrap(), "for-each-ref"]), "");
+            unredirect(&root, &fx, &ch.main);
+            let r = ok(call(&sock, "push", json!({ "repo": "tool", "shown": ch.c })));
+            assert_eq!(r["commit"], json!(ch.c), "{r:#}");
+            assert_eq!(ch.origin_main(&fx), ch.c);
+        });
+        drop(d);
+        core.close().unwrap();
+    }
+}
+
 /// C2 on C on the chain (a local publish that landed after the display).
 fn advance_chain(fx: &Dfx, ch: &Chain) -> String {
     let sb = &fx.sb;
@@ -969,6 +1058,7 @@ fn headless_push_replays_a_diverged_chain_then_pushes() {
         assert_eq!(r["rebases"][0]["session"], json!(s.as_str()), "{r:#}");
         assert_eq!(r["rebases"][0]["report"]["kind"], json!("Moved"), "{r:#}");
         assert_eq!(head(&s), new, "the session follows its replayed commit");
+        assert!(core.store.rebase_pending(None).unwrap().is_empty(), "the adopted replay target was consumed by the move");
         // A second push has nothing left to do.
         let r = call(&sock, "push", json!({ "repo": "tool" }));
         assert_eq!(r["error"]["code"], "NoCommit", "{r:#}");
@@ -1036,6 +1126,7 @@ fn headless_push_conflict_or_failed_check_writes_and_pushes_nothing() {
             let r = call(&sock, "push", json!({ "repo": "tool" }));
             assert_eq!(r["error"]["code"], "CheckFailed", "{r:#}");
             assert_eq!(ch.refs(&fx), before);
+            assert!(core.store.rebase_pending(None).unwrap().is_empty(), "a refused replay leaves no plan");
             assert_eq!(ch.origin_main(&fx), o);
             let k = calls(&core);
             assert_eq!((k.push, k.transactions), (0, 0), "{k:?}");
@@ -1096,4 +1187,185 @@ fn confirmed_repo_push_never_replays() {
     });
     drop(d);
     core.close().unwrap();
+}
+
+// ---- push: the check siblings of a headless replay (publish.md D21) ----
+
+/// tool's checks need `../admin` (check_siblings). A headless replay clones
+/// admin's main-tip base next to the replayed tree, the checks see it, and
+/// the scene (sibling included) is gone afterwards.
+#[test]
+fn headless_replay_supplies_the_check_siblings() {
+    let mut fx = Dfx::with(&["tool", "admin"]);
+    {
+        let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+        rc.checks = vec!["test -f o.txt".into(), "test -f ../admin/package.json".into()];
+        rc.check_siblings = vec![repo_name("admin")];
+    }
+    fx.write_config();
+    let ch = Chain::new(&fx);
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        new_session(&sock); // seals the deps set the replay needs
+        let o = ch.advance_origin(&fx, &[("o.txt", b"o\n")]);
+        let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
+        assert_eq!(r["push"]["kind"], json!("Pushed"), "{r:#}");
+        assert_eq!(r["replayed"]["onto"], json!(o), "{r:#}");
+        assert_eq!(r["replayed"]["checks_ran"], json!(2), "{r:#}");
+        let scenes = fx.sb.path("strata").join("daemon").join("push");
+        let left: Vec<_> = fs::read_dir(&scenes).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        assert!(left.is_empty(), "the scene and its sibling are removed: {left:?}");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
+/// A sibling that cannot be supplied refuses a replay up front:
+/// `siblings_missing` with the push retry as the fix; nothing written or
+/// pushed. A push that needs no replay is not refused for it.
+#[test]
+fn headless_replay_with_a_missing_sibling_is_siblings_missing() {
+    let mut fx = Dfx::with(&["tool", "admin"]);
+    {
+        let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+        rc.checks = vec!["true".into()];
+        rc.check_siblings = vec![repo_name("admin")];
+        let ac = fx.config.repos.get_mut(&repo_name("admin")).unwrap();
+        ac.default_branch = "no-such-branch".into();
+        ac.publish.branch = "no-such-branch".into();
+    }
+    fx.write_config();
+    let ch = Chain::new(&fx);
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let o = ch.advance_origin(&fx, &[("o.txt", b"o\n")]);
+        let before = ch.refs(&fx);
+        core.gits[&repo_name("tool")].take_git_calls();
+        let r = call(&sock, "push", json!({ "repo": "tool" }));
+        assert_eq!(r["error"]["code"], "InvalidInput", "{r:#}");
+        let det = &r["error"]["detail"];
+        assert_eq!(det["reason"], "siblings_missing", "{r:#}");
+        assert_eq!(det["repo"], "tool", "{r:#}");
+        assert_eq!(det["session"], Value::Null, "{r:#}");
+        assert_eq!(det["missing"][0]["repo"], "admin", "{r:#}");
+        assert_eq!(det["missing"][0]["why"], "main_tip_unavailable", "{r:#}");
+        assert_eq!(det["fix"], "retry `git-strata push tool`", "{r:#}");
+        assert_eq!(ch.refs(&fx), before);
+        assert_eq!(ch.origin_main(&fx), o);
+        // The in-memory replay may have run; no ref was written, nothing pushed.
+        let k = calls(&core);
+        assert_eq!((k.push, k.transactions), (0, 0), "{k:?}");
+        let scenes = fx.sb.path("strata").join("daemon").join("push");
+        let left: Vec<_> = fs::read_dir(&scenes).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        assert!(left.is_empty(), "no scene was made: {left:?}");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
+/// A push that needs no replay never needs the siblings: the Leads chain is
+/// pushed though admin cannot be supplied.
+#[test]
+fn a_leads_push_is_not_refused_for_a_missing_sibling() {
+    let mut fx = Dfx::with(&["tool", "admin"]);
+    {
+        let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+        rc.checks = vec!["true".into()];
+        rc.check_siblings = vec![repo_name("admin")];
+        let ac = fx.config.repos.get_mut(&repo_name("admin")).unwrap();
+        ac.default_branch = "no-such-branch".into();
+        ac.publish.branch = "no-such-branch".into();
+    }
+    fx.write_config();
+    let ch = Chain::new(&fx);
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
+        assert_eq!(r["push"]["kind"], json!("Pushed"), "{r:#}");
+        assert_eq!(r["replayed"], Value::Null, "{r:#}");
+        assert_eq!(ch.origin_main(&fx), ch.refs(&fx).0, "{r:#}");
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
+/// Sibling preparation that is `Busy` or `Unknown` stops every push before
+/// the repo lock, a Leads one included: nothing is pushed or written; once
+/// the cause is gone the same push goes through.
+#[test]
+fn a_busy_or_unknown_sibling_prep_stops_even_a_leads_push() {
+    let mut fx = Dfx::with(&["tool", "admin"]);
+    {
+        let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+        rc.checks = vec!["true".into()];
+        rc.check_siblings = vec![repo_name("admin")];
+    }
+    fx.write_config();
+    let ch = Chain::new(&fx);
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let (tool, admin) = (repo_name("tool"), repo_name("admin"));
+    serving(&d, || {
+        let origin = ch.origin_main(&fx);
+        let before = ch.refs(&fx);
+        core.gits[&tool].take_git_calls();
+        // admin's lock held elsewhere: Busy naming the sibling.
+        std::thread::scope(|s| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+            let (core_r, admin_r) = (&core, &admin);
+            s.spawn(move || {
+                core_r
+                    .locks
+                    .with_repo(admin_r, || {
+                        tx.send(()).unwrap();
+                        let _ = done_rx.recv_timeout(Duration::from_secs(30));
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+            rx.recv().unwrap();
+            let r = call(&sock, "push", json!({ "repo": "tool" }));
+            done_tx.send(()).unwrap();
+            assert_eq!(r["error"]["code"], "Busy", "{r:#}");
+            assert_eq!(r["error"]["detail"]["sibling"], "admin", "{r:#}");
+        });
+        // admin's anchor cannot be advanced after its fetch: Unknown.
+        strata_publish::seams::fail_once(&core.gits[&admin], strata_publish::seams::FailPoint::SiblingAnchor);
+        let r = call(&sock, "push", json!({ "repo": "tool" }));
+        assert_eq!(r["error"]["code"], "Unknown", "{r:#}");
+        assert_eq!(r["error"]["detail"]["reason"], "anchor_transaction", "{r:#}");
+        assert_eq!(r["error"]["detail"]["sibling"], "admin", "{r:#}");
+        let k = calls(&core);
+        assert_eq!((k.fetch, k.push, k.transactions), (0, 0, 0), "tool untouched: {k:?}");
+        assert_eq!(ch.refs(&fx), before);
+        assert_eq!(ch.origin_main(&fx), origin, "nothing pushed");
+        let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
+        assert_eq!(r["push"]["kind"], json!("Pushed"), "{r:#}");
+        assert_eq!(ch.origin_main(&fx), ch.refs(&fx).0);
+    });
+    drop(d);
+    core.close().unwrap();
+}
+
+/// The push scene is removed rooted and checked (D21): a failed removal
+/// is never dropped silently.
+#[test]
+fn push_scene_cleanup_is_rooted_and_checked() {
+    let body = src("resolve.rs");
+    let start = body.find("pub(crate) fn with_staging").expect("with_staging");
+    let rest = &body[start..];
+    let end = rest.find("\nfn scene_rel").expect("scene_rel follows");
+    // After the uncertain branch (the scene is kept for an Unknown push).
+    let f = &rest[rest.find("if uncertain(&r)").expect("uncertain")..end];
+    assert!(f.contains("strata_publish::remove_layout"), "{f}");
+    assert!(f.contains("scene_outcome(&dir, r, removed)"), "the removal decides the result: {f}");
+    assert!(!f.contains("remove_dir_all"), "{f}");
 }

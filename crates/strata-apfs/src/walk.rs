@@ -16,6 +16,31 @@ use crate::rooted::{DIR_FLAGS, Fd, components, dir_open_error, open_root_fd, ope
 use crate::sys;
 use crate::{DEFAULT_BULK_BUFFER_BYTES, MAX_BULK_BUFFER_BYTES, MAX_WALK_DEPTH, MIN_BULK_BUFFER_BYTES, Result};
 
+thread_local! {
+    static WALK_STOP: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// status-perf A1: run `f` with every [`Walk`] made on this thread given up
+/// once `stop` is set: checked before each directory is read, the walk
+/// then yields one `Busy` error (`reason: "stopped"`) and ends. Nests; the
+/// previous flag comes back when `f` returns or unwinds.
+pub fn with_walk_stop<R>(stop: std::sync::Arc<std::sync::atomic::AtomicBool>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<std::sync::Arc<std::sync::atomic::AtomicBool>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            WALK_STOP.with(|s| *s.borrow_mut() = prev);
+        }
+    }
+    let _restore = Restore(WALK_STOP.with(|s| s.borrow_mut().replace(stop)));
+    f()
+}
+
+fn walk_stopped() -> bool {
+    WALK_STOP.with(|s| s.borrow().as_ref().is_some_and(|b| b.load(std::sync::atomic::Ordering::SeqCst)))
+}
+
 /// Options for [`walk_with`]. Default: the whole tree, depth limited only by
 /// `MAX_WALK_DEPTH`, a `DEFAULT_BULK_BUFFER_BYTES` buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -303,6 +328,13 @@ impl Iterator for Walk<'_> {
                 continue;
             };
             if top.entries.is_none() {
+                if walk_stopped() {
+                    self.done = true;
+                    self.stack.clear();
+                    let e = StrataError::new(Code::Busy, "walk stopped")
+                        .with_detail(serde_json::json!({ "reason": "stopped" }));
+                    return Some(Err(e));
+                }
                 let shown = match &top.rel {
                     Some(r) => self.root.join(r.as_str()),
                     None => self.root.clone(),

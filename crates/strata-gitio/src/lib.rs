@@ -93,6 +93,33 @@ impl Git {
         &self.inner.common_dir
     }
 
+    /// Review P1-5: remove `refs/strata/**/*.lock` files last modified
+    /// before `before` (a killed ref transaction leaves them, and git never
+    /// does). Only the daemon writes `refs/strata/`; a lock newer than
+    /// `before` may belong to a live git (`pack-refs`) and is kept.
+    /// Returns the removed paths.
+    pub fn clear_stale_strata_locks(&self, before: std::time::SystemTime) -> Vec<PathBuf> {
+        fn walk(dir: &Path, before: std::time::SystemTime, out: &mut Vec<PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let Ok(ft) = e.file_type() else { continue };
+                let p = e.path();
+                if ft.is_dir() {
+                    walk(&p, before, out);
+                } else if ft.is_file() && p.extension().is_some_and(|x| x == "lock") {
+                    let old = e.metadata().and_then(|m| m.modified()).is_ok_and(|m| m < before);
+                    if old && std::fs::remove_file(&p).is_ok() {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.inner.common_dir.join("refs/strata"), before, &mut out);
+        out.sort();
+        out
+    }
+
     /// The repository's identity: the realpath of its common dir.
     pub fn repo_id(&self) -> RepoId {
         RepoId::new(self.inner.common_dir.clone())

@@ -11,6 +11,9 @@ use crate::Result;
 pub enum SessionSeam {
     /// Inject an I/O error with this errno at the start of the phase.
     FailAt { phase: String, errno: i32 },
+    /// `FailAt`, then the same error at `new.rollback`: a `new` that fails
+    /// and cannot roll back, so its Unknown scene stays (D56).
+    FailKeepAt { phase: String, errno: i32 },
     /// Return at the start of the phase without updating any state: a crash.
     StopAt { phase: String },
     /// Stop at the start of the phase until `release`.
@@ -74,15 +77,20 @@ impl Seams {
                 };
                 let hit = match armed.as_ref() {
                     Some(SessionSeam::FailAt { phase: p, .. })
+                    | Some(SessionSeam::FailKeepAt { phase: p, .. })
                     | Some(SessionSeam::StopAt { phase: p })
                     | Some(SessionSeam::PauseAt { phase: p }) => matches(p),
                     None => false,
                 };
-                if hit { armed.take() } else { None }
+                let seam = if hit { armed.take() } else { None };
+                if let Some(SessionSeam::FailKeepAt { errno, .. }) = &seam {
+                    *armed = Some(SessionSeam::FailAt { phase: "new.rollback".into(), errno: *errno });
+                }
+                seam
             };
             match seam {
                 None => {}
-                Some(SessionSeam::FailAt { errno, .. }) => {
+                Some(SessionSeam::FailAt { errno, .. }) | Some(SessionSeam::FailKeepAt { errno, .. }) => {
                     let err = std::io::Error::from_raw_os_error(errno);
                     let mut e = strata_apfs::classify_io_error(
                         &err,

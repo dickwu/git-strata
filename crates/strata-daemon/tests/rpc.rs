@@ -96,9 +96,9 @@ fn method_table_has_the_twenty_names() {
     assert_eq!(
         names,
         [
-            "new", "status", "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_approve",
+            "new", "add", "status", "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_approve",
             "deps_list", "publish", "publish_plan", "push", "assign", "rm", "gc", "resolve_move", "chain_resolve", "config_relax",
-            "daemon_status", "du"
+            "daemon_status", "du", "ports_ensure", "ports_reassign"
         ]
     );
     let ro: Vec<&str> = Method::ALL.iter().filter(|m| m.is_read_only()).map(|m| m.name()).collect();
@@ -169,6 +169,7 @@ fn every_method_parses_its_documented_params() {
     let sid = "s-abcdefgh";
     let cases = [
         ("new", json!({ "ticket": null, "repos": ["tool"] })),
+        ("add", json!({ "session": sid, "repos": ["front"] })),
         ("status", json!({ "cwd": "/x", "session": null, "all": false })),
         ("checkpoint", json!({ "session": sid, "repo": "tool", "reason": { "kind": "Manual", "message": "m" }, "paths": [] })),
         ("restore", json!({ "session": sid, "repo": "tool", "checkpoint": 3, "paths": null })),
@@ -189,14 +190,38 @@ fn every_method_parses_its_documented_params() {
         ("config_relax", json!({ "repo": "tool" })),
         ("daemon_status", json!({})),
         ("du", json!({ "refresh": true })),
+        ("ports_ensure", json!({ "session": sid, "repo": "tool" })),
+        ("ports_reassign", json!({ "session": sid, "repo": "tool", "checked": 20000 })),
     ];
     assert_eq!(cases.len(), Method::ALL.len());
     for (m, p) in cases {
         let q = req(json!({ "id": 1, "method": m, "params": p })).unwrap_or_else(|r| panic!("{m}: {:?}", r.0));
         assert_eq!(q.method.name(), m);
     }
+    let q = req(json!({ "id": 1, "method": "new", "params": { "ticket": null, "repos": ["tool"], "only": true } })).unwrap();
+    assert!(matches!(q.params, Params::New(ref p) if p.only));
+    let q = req(json!({ "id": 1, "method": "new", "params": { "ticket": null, "repos": ["tool"] } })).unwrap();
+    assert!(matches!(q.params, Params::New(ref p) if !p.only));
     let q = req(json!({ "id": 1, "method": "daemon_status", "params": { "verify": true } })).unwrap();
     assert_eq!(q.params, Params::DaemonStatus(rpc::DaemonStatusParams { verify: true }));
+}
+
+/// `new.agent`: `agent` is optional, nullable, and a plain string on the
+/// wire (the handler validates the name); a non-string is a shape error.
+#[test]
+fn new_agent_is_an_optional_string() {
+    let new = |p: Value| req(json!({ "id": 1, "method": "new", "params": p }));
+    let agent_of = |q: rpc::Request| match q.params {
+        Params::New(p) => p.agent,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(agent_of(new(json!({ "ticket": null, "repos": ["tool"] })).unwrap()), None);
+    assert_eq!(agent_of(new(json!({ "ticket": null, "repos": ["tool"], "agent": null })).unwrap()), None);
+    assert_eq!(agent_of(new(json!({ "ticket": null, "repos": ["tool"], "agent": "codex" })).unwrap()), Some("codex".into()));
+    // Not validated here: the handler answers InvalidInput reason agent.
+    assert_eq!(agent_of(new(json!({ "ticket": null, "repos": ["tool"], "agent": "bad name" })).unwrap()), Some("bad name".into()));
+    let r = new(json!({ "ticket": null, "repos": ["tool"], "agent": 5 })).expect_err("a number is a shape error").0;
+    assert_eq!(rpc_of(&r), "Failed", "{r:#}");
 }
 
 #[test]

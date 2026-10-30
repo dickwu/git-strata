@@ -357,3 +357,73 @@ fn two_names_for_one_repository_is_name_taken() {
     assert_eq!(e.code, Code::NameTaken, "{e:?}");
     assert_eq!(reason(&e), Some("repo_id"));
 }
+
+/// Review P1-5: a ref transaction killed between prepare and commit leaves
+/// `refs/strata/**/*.lock`; startup removes the old ones and says so, and
+/// keeps a lock newer than its own start (a live git may hold it).
+#[test]
+fn stale_strata_ref_locks_are_removed_at_startup() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let common = core.gits[&repo_name("tool")].common_dir().to_path_buf();
+    let dir = common.join("refs/strata/publish");
+    fs::create_dir_all(&dir).unwrap();
+    let stale = dir.join("main.lock");
+    fs::write(&stale, "0000\n").unwrap();
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    fs::File::options().write(true).open(&stale).unwrap().set_modified(old).unwrap();
+    let fresh = dir.join("live.lock");
+    fs::write(&fresh, "").unwrap();
+    let later = SystemTime::now() + Duration::from_secs(3600);
+    fs::File::options().write(true).open(&fresh).unwrap().set_modified(later).unwrap();
+    // Not a lock: kept.
+    let keep = dir.join("main");
+    fs::write(&keep, "0000\n").unwrap();
+
+    let d = Daemon::start(&core).unwrap();
+    assert!(!stale.exists(), "stale lock removed");
+    assert!(fresh.exists(), "a lock newer than the start is kept");
+    assert!(keep.exists());
+    let w = status(&d)["warnings"].clone();
+    let want = serde_json::to_value(DaemonWarning::StaleRefLock { repo: repo_name("tool"), path: stale.clone() }).unwrap();
+    assert!(w.as_array().unwrap().contains(&want), "{w}");
+    assert!(fx.alerts().iter().any(|l| l.contains("stale ref lock")), "{:?}", fx.alerts());
+    drop(d);
+    core.close().unwrap();
+}
+
+/// Review P1-7: a poisoned store writer never recovered while the daemon
+/// lived. The serve loop now drains and returns an error (the binary exits
+/// non-zero, launchd restarts it, the reopen runs WAL recovery).
+#[test]
+fn poisoned_store_ends_serve_for_a_restart() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let listener = startup::bind(&d.core.opts.socket).unwrap();
+    let ext = AtomicBool::new(false);
+    let r = std::thread::scope(|s| {
+        let h = s.spawn(|| d.serve(&listener, &ext, &|req| d.handle(req)));
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert!(strata_daemon::rpc::ready(&fx.socket(), Duration::from_secs(5)));
+            core.store.poison_for_test();
+            let t = Instant::now();
+            while !h.is_finished() && t.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            h.is_finished()
+        }));
+        if ok.as_ref().map_or(true, |f| !f) {
+            d.request_stop();
+        }
+        let r = h.join().unwrap();
+        assert!(ok.unwrap(), "serve did not end on its own");
+        r
+    });
+    let e = r.expect_err("serve ends with an error when the store is poisoned");
+    assert_eq!(e.code, Code::Unknown);
+    assert_eq!(reason(&e), Some("store_poisoned_restart"));
+    assert!(fx.alerts().iter().any(|l| l.contains("poisoned")), "{:?}", fx.alerts());
+    drop(d);
+    let _ = core.close();
+}

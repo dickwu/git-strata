@@ -66,10 +66,7 @@ pub fn base_of(store: &Store, g: &BaseGen) -> Result<Base> {
 /// scan; reads only, no store write, no `Sessions`).
 pub fn overlay_of(config: &Config, store: &Store, git: &Git, s: &SessionId, repo: &RepoName) -> Result<Overlay> {
     let rec = crate::ro::record(store, s)?;
-    let ws = rec.manifest.repos.get(repo).cloned().ok_or_else(|| {
-        StrataError::new(Code::NoSuchRepo, format!("session {s} has no repo {repo}"))
-            .with_detail(json!({ "session": s.as_str(), "repo": repo.as_str() }))
-    })?;
+    let ws = rec.manifest.repos.get(repo).cloned().ok_or_else(|| StrataError::not_in_session(s.as_str(), repo.as_str()))?;
     let cfg = config.repo(repo)?;
     let base = base_of(store, &ws.base)?;
     let w = WorkspaceRef { session: s, repo, root: &ws.path, config: cfg, git, store };

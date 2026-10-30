@@ -11,6 +11,8 @@ use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,8 +27,21 @@ use crate::{Git, Result};
 const STDERR_TAIL: usize = 4096;
 /// Timeout of the read-only queries that read live shadow config (§5.1 step 5).
 pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout of `git init` of a shadow repository. It only writes a few
+/// small files, but a volume busy with a large `clonefile` (a seed cache of
+/// hundreds of GB) or a pending macOS permission prompt stalls those
+/// metadata writes for tens of seconds; 10 s failed `new` (incident
+/// 2026-10-27, s-kooeepw3).
+pub(crate) const INIT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Timeout of attach's read-tree and refresh.
 pub(crate) const ATTACH_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long after git exits its pipes may stay open when the run has no
+/// timeout (a hook's background child holding them, review P1-11).
+const DRAIN_GRACE: Duration = Duration::from_secs(10);
+/// The least time draining gets after git exits, even past the deadline.
+const DRAIN_MIN: Duration = Duration::from_millis(500);
+/// After killing the process group, how long to wait for the pipes to close.
+const DRAIN_AFTER_KILL: Duration = Duration::from_secs(1);
 
 /// Options for one run.
 #[derive(Default)]
@@ -117,79 +132,118 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
     })?;
     let pid = child.id() as libc::pid_t;
 
+    // Every pipe thread reports its end on `done` (also when it panics), so
+    // draining blocks on a channel instead of polling the threads.
+    let (done_tx, done_rx) = mpsc::channel::<()>();
     let stdin_thread = match (opts.stdin, child.stdin.take()) {
-        (Some(bytes), Some(mut sink)) => Some(thread::spawn(move || {
-            let _ = sink.write_all(&bytes);
-            drop(sink);
+        (Some(bytes), Some(mut sink)) => Some(thread::spawn({
+            let done = Done(done_tx.clone());
+            move || {
+                let _done = done;
+                let _ = sink.write_all(&bytes);
+                drop(sink);
+            }
         })),
         _ => None,
     };
     let mut so = child.stdout.take().expect("stdout piped");
     let mut se = child.stderr.take().expect("stderr piped");
-    let out_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = so.read_to_end(&mut buf);
-        buf
-    });
-    let err_thread = thread::spawn(move || {
-        let mut tail: Vec<u8> = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            match se.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    tail.extend_from_slice(&chunk[..n]);
-                    if tail.len() > STDERR_TAIL * 2 {
-                        let cut = tail.len() - STDERR_TAIL;
-                        tail.drain(..cut);
-                    }
+    let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let out_thread = {
+        let buf = stdout_buf.clone();
+        let done = Done(done_tx.clone());
+        thread::spawn(move || {
+            let _done = done;
+            let mut chunk = [0u8; 64 * 1024];
+            loop {
+                match so.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buf.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(&chunk[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
                 }
             }
-        }
-        if tail.len() > STDERR_TAIL {
-            let cut = tail.len() - STDERR_TAIL;
-            tail.drain(..cut);
-        }
-        tail
-    });
+        })
+    };
+    let err_thread = {
+        let buf = stderr_buf.clone();
+        let done = Done(done_tx);
+        thread::spawn(move || {
+            let _done = done;
+            let mut chunk = [0u8; 8192];
+            loop {
+                match se.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut tail = buf.lock().unwrap_or_else(|p| p.into_inner());
+                        tail.extend_from_slice(&chunk[..n]);
+                        if tail.len() > STDERR_TAIL * 2 {
+                            let cut = tail.len() - STDERR_TAIL;
+                            tail.drain(..cut);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+        })
+    };
 
     let mut timed_out = false;
-    let status = match opts.timeout {
+    let deadline = opts.timeout.map(|t| Instant::now() + t);
+    let status = match deadline {
         None => child.wait(),
-        Some(t) => {
-            let deadline = Instant::now() + t;
-            let mut nap = Duration::from_millis(1);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(s)) => break Ok(s),
-                    Ok(None) => {}
-                    Err(e) => break Err(e),
-                }
-                let now = Instant::now();
-                if now >= deadline {
+        // A thread blocks in wait(2) and hands the status over, so git's
+        // exit is seen at once instead of on the next poll.
+        Some(deadline) => {
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                let _ = tx.send(child.wait());
+            });
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(s) => s,
+                Err(RecvTimeoutError::Timeout) => {
                     timed_out = true;
                     // SAFETY: plain syscall on the child's own process group.
                     unsafe {
                         libc::killpg(pid, libc::SIGKILL);
                     }
-                    break child.wait();
+                    rx.recv().unwrap_or_else(|_| Err(std::io::Error::other("wait thread ended")))
                 }
-                thread::sleep(nap.min(deadline - now));
-                nap = (nap * 2).min(Duration::from_millis(50));
+                Err(RecvTimeoutError::Disconnected) => Err(std::io::Error::other("wait thread ended")),
             }
         }
     };
-    if timed_out {
-        // Make sure stragglers that kept the pipes open are gone too.
+    // Review P1-11: git has exited, but a hook may have left a background
+    // child holding stdout/stderr (or stdin). Draining is bounded too: by
+    // the run's own deadline (at least DRAIN_MIN past git's exit), or by
+    // DRAIN_GRACE when the run has none. Past it the rest of git's process
+    // group is killed, and after DRAIN_AFTER_KILL the output read so far is
+    // used and the reader threads are left to end on their own (a straggler
+    // that left the group can still hold a pipe).
+    let exited = Instant::now();
+    let drain_by = match deadline {
+        Some(d) if !timed_out => d.max(exited + DRAIN_MIN),
+        Some(_) => exited + DRAIN_MIN,
+        None => exited + DRAIN_GRACE,
+    };
+    let mut threads: Vec<thread::JoinHandle<()>> = vec![out_thread, err_thread];
+    threads.extend(stdin_thread);
+    let mut pending = threads.len();
+    if !join_by(&mut threads, &done_rx, &mut pending, drain_by) {
+        // SAFETY: plain syscall on the child's own process group.
         unsafe {
             libc::killpg(pid, libc::SIGKILL);
         }
+        join_by(&mut threads, &done_rx, &mut pending, Instant::now() + DRAIN_AFTER_KILL);
     }
-    if let Some(h) = stdin_thread {
-        let _ = h.join();
+    let stdout = std::mem::take(&mut *stdout_buf.lock().unwrap_or_else(|p| p.into_inner()));
+    let mut stderr = std::mem::take(&mut *stderr_buf.lock().unwrap_or_else(|p| p.into_inner()));
+    if stderr.len() > STDERR_TAIL {
+        let cut = stderr.len() - STDERR_TAIL;
+        stderr.drain(..cut);
     }
-    let stdout = out_thread.join().unwrap_or_default();
-    let stderr = err_thread.join().unwrap_or_default();
     if timed_out {
         return Err(errd(
             Code::Unknown,
@@ -201,6 +255,34 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
         errd(Code::Unknown, format!("waiting for git failed: {e}"), json!({ "reason": "wait" }))
     })?;
     Ok(Out { status: status.code(), stdout, stderr })
+}
+
+/// Sends on drop: a pipe thread's end, however it ends.
+struct Done(Sender<()>);
+
+impl Drop for Done {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
+/// Wait until every thread in `ts` has reported on `done` by `by`, then
+/// join them; `true` when all did. `pending` counts the reports still due
+/// and carries over to a later call. Unjoined handles stay in `ts`
+/// (dropping one detaches the thread).
+fn join_by(ts: &mut Vec<thread::JoinHandle<()>>, done: &mpsc::Receiver<()>, pending: &mut usize, by: Instant) -> bool {
+    while *pending > 0 {
+        match done.recv_timeout(by.saturating_duration_since(Instant::now())) {
+            Ok(()) => *pending -= 1,
+            Err(RecvTimeoutError::Timeout) => return false,
+            // Every sender is gone: every thread has ended.
+            Err(RecvTimeoutError::Disconnected) => *pending = 0,
+        }
+    }
+    for t in ts.drain(..) {
+        let _ = t.join();
+    }
+    true
 }
 
 /// `Unknown` for a git that exited non-zero where no specific class applies.
@@ -266,3 +348,54 @@ pub(crate) fn flag(prefix: &str, p: &Path) -> OsString {
     s
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sh(script: &str) -> Command {
+        let mut c = Command::new("/bin/sh");
+        c.arg("-c").arg(script);
+        c
+    }
+
+    /// Review P1-11: a background child holding stdout after the command
+    /// exits (a hook's `cmd &`) no longer hangs the run: the output read so
+    /// far and the exit status come back, and the straggler is killed.
+    #[test]
+    fn a_background_child_holding_the_pipes_does_not_hang_the_run() {
+        let seams = Seams::default();
+        let marker = std::env::temp_dir().join(format!("gitio-drain-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let script = format!("echo out; echo err >&2; (sleep 3; touch {}) & exit 0", marker.display());
+        let t = Instant::now();
+        let out = run(&seams, sh(&script), Opts::default().timeout(Duration::from_secs(1))).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(3), "bounded by the deadline: {:?}", t.elapsed());
+        assert_eq!(out.status, Some(0));
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"err\n");
+        std::thread::sleep(Duration::from_secs(4));
+        assert!(!marker.exists(), "the straggler was killed with the process group");
+    }
+
+    #[test]
+    fn without_a_timeout_draining_is_bounded_by_the_grace() {
+        let seams = Seams::default();
+        let t = Instant::now();
+        let out = run(&seams, sh("echo out; sleep 60 & exit 3"), Opts::default()).unwrap();
+        let took = t.elapsed();
+        assert!(took >= DRAIN_GRACE && took < DRAIN_GRACE + Duration::from_secs(5), "{took:?}");
+        assert_eq!(out.status, Some(3));
+        assert_eq!(out.stdout, b"out\n");
+    }
+
+    #[test]
+    fn a_plain_run_still_returns_promptly_with_all_output() {
+        let seams = Seams::default();
+        let t = Instant::now();
+        let out = run(&seams, sh("head -c 300000 /dev/zero; echo done >&2"), Opts::default()).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(2));
+        assert_eq!(out.stdout.len(), 300000);
+        assert_eq!(out.stderr, b"done\n");
+    }
+}

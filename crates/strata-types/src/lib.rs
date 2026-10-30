@@ -9,14 +9,14 @@ mod error;
 mod ids;
 mod model;
 
-pub use config::{Config, Paths, RepoConfig};
+pub use config::{Config, DepsChanged, DevPorts, Paths, RebaseConfig, RepoConfig, RmConfig, StatusConfig, regenerable_problem};
 pub use error::{Code, StrataError};
 pub use ids::{
-    BlobId, CheckpointId, CommitOid, DepsSetId, ProposalId, RepoId, RepoName, RepoPath, SessionId,
+    AgentName, BlobId, CheckpointId, CommitOid, DepsSetId, ProposalId, RepoId, RepoName, RepoPath, SessionId,
     TreeOid, ViewId,
 };
 pub use model::{
     Action, BaseGen, BaseManifest, Batch, Checkpoint, CheckpointReason, ConfirmToken, DepsSet,
-    EntryKind, ManifestEntry, OverlayEntry, PublishTarget, PushOutcome, ReleaseGroup,
-    SessionManifest, WorkspaceState,
+    EntryKind, KeptTreeRef, ManifestEntry, OverlayEntry, PublishTarget, PushOutcome, ReleaseGroup,
+    SessionManifest, WorkspaceState, display_url,
 };

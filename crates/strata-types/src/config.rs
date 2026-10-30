@@ -13,6 +13,125 @@ pub struct Config {
     pub paths: Paths,
     #[serde(rename = "repo")]
     pub repos: std::collections::BTreeMap<RepoName, RepoConfig>,
+    /// `[status]` (config.md §2.5, status-perf D7). Omitted when default,
+    /// so a config without the table writes back without it.
+    #[serde(default, skip_serializing_if = "StatusConfig::is_default")]
+    pub status: StatusConfig,
+    /// `[dev_ports]`: the port blocks leased to session workspaces for dev
+    /// servers (config.md §2.6). Optional; absent → defaults.
+    #[serde(default)]
+    pub dev_ports: DevPorts,
+}
+
+/// `[status]`: how `status` runs (status-perf D7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusConfig {
+    /// How many workspaces `status` evaluates at once, across all requests
+    /// of one process (1..=16, V13).
+    #[serde(default = "StatusConfig::default_parallel")]
+    pub parallel: u32,
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        Self { parallel: Self::default_parallel() }
+    }
+}
+
+impl StatusConfig {
+    pub const MAX_PARALLEL: u32 = 16;
+
+    pub fn default_parallel() -> u32 {
+        4
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `[dev_ports]` (config.md §2.6): `range = "LO-HI"` (inclusive) is split
+/// into 4-aligned blocks of [`DevPorts::BLOCK`] ports; a block holding any
+/// port of `exclude` is never leased.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevPorts {
+    #[serde(default = "DevPorts::default_range")]
+    pub range: String,
+    #[serde(default)]
+    pub exclude: Vec<u16>,
+}
+
+impl Default for DevPorts {
+    fn default() -> Self {
+        Self { range: Self::default_range(), exclude: Vec::new() }
+    }
+}
+
+/// Ranges a dev-port range must not overlap: common dev-server defaults
+/// (3000–3999 for Next, the Hub on 3000; 4001 for git-strata's own desktop
+/// GUI; 5173 for Vite; 8080) and tauri-plugin-connector's default ranges
+/// (bridge 9300–9400, git-strata 9300; WS/MCP 9555–9656, which holds the
+/// GIT STRATA app's 9555/9556 and the Hub's pinned WS 9640–9649 / MCP
+/// 9650–9654).
+const DEV_PORTS_FORBIDDEN: &[(u16, u16)] = &[(3000, 3999), (4001, 4001), (5173, 5173), (8080, 8080), (9300, 9400), (9555, 9656)];
+
+impl DevPorts {
+    /// Ports per lease: web, connector, connector_mcp, aux.
+    pub const BLOCK: u16 = 4;
+
+    pub fn default_range() -> String {
+        "20000-29999".to_string()
+    }
+
+    fn bad(field: &str, rule: &str, message: String) -> StrataError {
+        violation(Code::InvalidInput, None, field, None, rule, &message)
+    }
+
+    /// `(lo, hi)` of `range`, inclusive; the P1/P2 rules.
+    pub fn bounds(&self) -> Result<(u16, u16), StrataError> {
+        let field = "dev_ports.range";
+        let parsed = self.range.split_once('-').and_then(|(a, b)| Some((a.trim().parse::<u16>().ok()?, b.trim().parse::<u16>().ok()?)));
+        let Some((lo, hi)) = parsed.filter(|(lo, hi)| lo <= hi) else {
+            return Err(Self::bad(field, "P1", format!("dev_ports.range {:?} is not \"LO-HI\" with LO <= HI", self.range)));
+        };
+        if lo < 1024 || hi > 49151 {
+            return Err(Self::bad(field, "P2", format!("dev_ports.range {lo}-{hi} must lie within 1024-49151 (below macOS's ephemeral ports)")));
+        }
+        if let Some((a, b)) = DEV_PORTS_FORBIDDEN.iter().find(|(a, b)| lo <= *b && *a <= hi) {
+            return Err(Self::bad(field, "P2", format!("dev_ports.range {lo}-{hi} overlaps {a}-{b}, a default dev-server or connector port range")));
+        }
+        Ok((lo, hi))
+    }
+
+    /// The bases of every usable block, ascending.
+    pub fn blocks(&self) -> Result<Vec<u16>, StrataError> {
+        let (lo, hi) = self.bounds()?;
+        let first = lo.div_ceil(Self::BLOCK) * Self::BLOCK;
+        let mut v = Vec::new();
+        let mut b = u32::from(first);
+        while b + u32::from(Self::BLOCK) - 1 <= u32::from(hi) {
+            let base = b as u16;
+            if !self.exclude.iter().any(|p| (base..base + Self::BLOCK).contains(p)) {
+                v.push(base);
+            }
+            b += u32::from(Self::BLOCK);
+        }
+        Ok(v)
+    }
+
+    /// P1–P3: a well-formed range outside the forbidden ranges that leaves
+    /// at least one block; exclusions must be ports (not 0).
+    pub fn validate(&self) -> Result<(), StrataError> {
+        if let Some(i) = self.exclude.iter().position(|p| *p == 0) {
+            return Err(violation(Code::InvalidInput, None, "dev_ports.exclude", Some(i), "P1", "dev_ports.exclude has port 0"));
+        }
+        if self.blocks()?.is_empty() {
+            return Err(Self::bad("dev_ports.range", "P3", format!("dev_ports.range {:?} with its exclusions leaves no block of 4 ports", self.range)));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +163,80 @@ pub struct RepoConfig {
     pub deploy_on_push: bool,
     #[serde(default = "RepoConfig::default_pin_unpushed")]
     pub pin_unpushed: bool,
+    /// Repos that must sit at `../<name>` of the staged repo for its
+    /// `checks` to be trustworthy (dev-link; config.md §2.3 item 5).
+    /// Publish supplies each one: the layout session's pinned base when the
+    /// session has the repo, else the repo's current main-tip base
+    /// (publish.md D21). Empty by default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_siblings: Vec<RepoName>,
+    /// `[repo.X.rm]` (rm-followups §1.8). Absent → defaults.
+    #[serde(default, skip_serializing_if = "RmConfig::is_default")]
+    pub rm: RmConfig,
+    /// `[repo.X.rebase]` (rm-followups §1.3). Absent → defaults.
+    #[serde(default, skip_serializing_if = "RebaseConfig::is_default")]
+    pub rebase: RebaseConfig,
+}
+
+/// `[repo.X.rm]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RmConfig {
+    /// Repo-relative globs (the `.lww` dialect, last match wins, `!`
+    /// negates) of files a tool regenerates: their Modified/Added/Untracked
+    /// edits do not block `rm` (they are checkpointed) and a conflict on
+    /// them does not defer an auto-rebase. Pinned like `publish.confirm`:
+    /// a looser list takes effect only after `config relax`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regenerable: Vec<String>,
+}
+
+impl RmConfig {
+    pub fn is_default(&self) -> bool {
+        self.regenerable.is_empty()
+    }
+}
+
+/// What an automatic rebase does when the publish changed the install
+/// inputs (rm-followups decision 1b).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DepsChanged {
+    /// Move the source onto the new tree with the old deps set; the deps
+    /// proposal stays Pending.
+    #[default]
+    MoveSource,
+    /// Do not move (today's `Waiting`).
+    Wait,
+}
+
+/// `[repo.X.rebase]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RebaseConfig {
+    #[serde(default)]
+    pub deps_changed: DepsChanged,
+    /// The quiet window Q of the automatic rebase, in seconds.
+    #[serde(default = "RebaseConfig::default_quiet_secs")]
+    pub quiet_secs: u64,
+}
+
+impl Default for RebaseConfig {
+    fn default() -> Self {
+        RebaseConfig { deps_changed: DepsChanged::default(), quiet_secs: Self::default_quiet_secs() }
+    }
+}
+
+impl RebaseConfig {
+    pub const MAX_QUIET_SECS: u64 = 86_400;
+
+    pub fn default_quiet_secs() -> u64 {
+        120
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl Default for Paths {
@@ -206,8 +399,20 @@ impl Config {
                 continue;
             };
             validate_repo(name, cfg, &self.paths.root)?;
+            validate_check_siblings(name, cfg, &self.repos)?;
+            validate_rm_rebase(name, cfg)?;
         }
-        Ok(())
+        if !(1..=StatusConfig::MAX_PARALLEL).contains(&self.status.parallel) {
+            return Err(violation(
+                Code::InvalidInput,
+                None,
+                "parallel",
+                None,
+                "V13",
+                "status.parallel is not between 1 and 16",
+            ));
+        }
+        self.dev_ports.validate()
     }
 }
 
@@ -428,6 +633,100 @@ fn stamp_repo(mut err: StrataError, repo: &str) -> StrataError {
     }
     err.detail = Some(detail);
     err
+}
+
+/// V12: every `check_siblings` entry is another configured repo, listed once.
+fn validate_check_siblings(
+    name: &RepoName,
+    cfg: &RepoConfig,
+    repos: &std::collections::BTreeMap<RepoName, RepoConfig>,
+) -> Result<(), StrataError> {
+    let repo = name.as_str();
+    for (i, s) in cfg.check_siblings.iter().enumerate() {
+        let message = if s == name {
+            "check_siblings names the repo itself"
+        } else if !repos.contains_key(s) {
+            "check_siblings names a repo that is not configured"
+        } else if cfg.check_siblings[..i].contains(s) {
+            "check_siblings lists a repo twice"
+        } else {
+            continue;
+        };
+        return Err(violation(Code::InvalidInput, Some(repo), "check_siblings", Some(i), "V12", message));
+    }
+    Ok(())
+}
+
+/// V14: `rm.regenerable` patterns are repo-relative globs: not absolute,
+/// no `..` component, nothing that could match under `.git`, one line each,
+/// not a `.lww` comment or include. V15: `rebase.quiet_secs` ≤ one day.
+fn validate_rm_rebase(name: &RepoName, cfg: &RepoConfig) -> Result<(), StrataError> {
+    let repo = name.as_str();
+    for (i, pat) in cfg.rm.regenerable.iter().enumerate() {
+        if let Some(message) = regenerable_problem(pat) {
+            return Err(violation(Code::InvalidInput, Some(repo), "rm.regenerable", Some(i), "V14", message));
+        }
+    }
+    if cfg.rebase.quiet_secs > RebaseConfig::MAX_QUIET_SECS {
+        return Err(violation(
+            Code::InvalidInput,
+            Some(repo),
+            "rebase.quiet_secs",
+            None,
+            "V15",
+            "rebase.quiet_secs is more than 86400 (one day)",
+        ));
+    }
+    Ok(())
+}
+
+/// Why one `rm.regenerable` pattern is rejected, if it is.
+pub fn regenerable_problem(pat: &str) -> Option<&'static str> {
+    let body = pat.strip_prefix('!').unwrap_or(pat);
+    if body.trim().is_empty() {
+        return Some("rm.regenerable has an empty pattern");
+    }
+    if pat.contains('\n') || pat.contains('\r') || pat.contains('\0') {
+        return Some("rm.regenerable patterns are one line each");
+    }
+    if pat.trim() != pat || body.trim() != body {
+        return Some("rm.regenerable patterns have no leading or trailing blanks");
+    }
+    if pat.starts_with('#') || pat.starts_with("%include") {
+        return Some("rm.regenerable patterns are globs, not .lww comments or includes");
+    }
+    if body.starts_with('/') {
+        return Some("rm.regenerable patterns are repo-relative, not absolute");
+    }
+    let comps: Vec<&str> = body.split('/').collect();
+    if comps.contains(&"..") {
+        return Some("rm.regenerable patterns may not contain ..");
+    }
+    // `.git` itself, or a name glob that could stretch to `.git` (`*`,
+    // `?git`, `.g*`, ...), case-folded as APFS is. A `**` component is
+    // allowed (`generated/**`), but not a pattern of wildcards only.
+    let could_be_git = |c: &str| {
+        let c = c.to_lowercase();
+        c != "**" && (c == ".git" || git_glob(&c.chars().collect::<Vec<_>>(), &".git".chars().collect::<Vec<_>>()))
+    };
+    if comps.iter().any(|c| could_be_git(c)) {
+        return Some("rm.regenerable patterns may not match .git or anything under it");
+    }
+    if comps.iter().all(|c| c.chars().all(|ch| matches!(ch, '*' | '?'))) {
+        return Some("rm.regenerable patterns must name something (not wildcards only)");
+    }
+    None
+}
+
+/// Whether one glob component (`*`, `?`, literals; `\\` escapes) matches `t`.
+fn git_glob(p: &[char], t: &[char]) -> bool {
+    match p.split_first() {
+        None => t.is_empty(),
+        Some(('*', rest)) => (0..=t.len()).any(|k| git_glob(rest, &t[k..])),
+        Some(('?', rest)) => !t.is_empty() && git_glob(rest, &t[1..]),
+        Some(('\\', rest)) if !rest.is_empty() => t.first() == Some(&rest[0]) && git_glob(&rest[1..], &t[1..]),
+        Some((c, rest)) => t.first() == Some(c) && git_glob(rest, &t[1..]),
+    }
 }
 
 fn violation(

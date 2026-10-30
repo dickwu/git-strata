@@ -54,7 +54,7 @@ pub use eintr::{EINTR_ATTEMPTS, retry_eintr, retry_eintr_n};
 pub use casefold::{case_fold_eq, case_fold_key};
 pub use watch::{WatchEvent, WatchOptions, Watcher, watch, watch_with};
 pub use usage::{Usage, usage_of, usage_with};
-pub use walk::{Walk, WalkOptions, list_dir, walk, walk_with};
+pub use walk::{Walk, WalkOptions, list_dir, walk, walk_with, with_walk_stop};
 pub use volume::{VolumeCaps, nearest_existing_ancestor, same_volume, volume_caps};
 
 pub type Result<T> = std::result::Result<T, StrataError>;

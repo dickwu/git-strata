@@ -20,6 +20,9 @@ mod imp {
     /// Where a scan, checkpoint or restore stops until `release_fault`.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum OverlayFault {
+        /// After the walk found `path` and took its first attrs, before its
+        /// content is opened.
+        PauseBeforeRead { path: RepoPath },
         /// After the content of `path` was hashed, before its second attrs.
         PauseAfterHash { path: RepoPath },
         /// Scan (compute, checkpoint): after the inbox snapshot was taken,
@@ -124,6 +127,15 @@ pub(crate) fn after_hash(_root: &Path, _path: &RepoPath) {
     hit(
         _root,
         |f| matches!(f, F::PauseAfterHash { path } if path == _path),
+    );
+}
+
+#[inline]
+pub(crate) fn before_read(_root: &Path, _path: &RepoPath) {
+    #[cfg(feature = "test-seams")]
+    hit(
+        _root,
+        |f| matches!(f, F::PauseBeforeRead { path } if path == _path),
     );
 }
 

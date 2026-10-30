@@ -132,7 +132,7 @@ fn session(env: &Env, s: &Store, name: &str, b: &BaseGen) -> SessionId {
     let root = env.root.join("sessions").join(id.as_str());
     let mut repos = BTreeMap::new();
     repos.insert(repo("app"), WorkspaceState { base: b.clone(), head: head('1'), path: root.join("app"), tracked: true });
-    s.create_session(&SessionManifest { id: id.clone(), ticket: None, root, repos }, t(10)).unwrap();
+    s.create_session(&SessionManifest { id: id.clone(), ticket: None, agent: None, root, repos }, t(10)).unwrap();
     assert!(s.set_lifecycle(&id, Lifecycle::Creating, Lifecycle::Active, None, t(11)).unwrap());
     id
 }
@@ -973,4 +973,70 @@ fn gc_trash_removes_only_old_unreferenced_trash() {
     let r = s.gc_trash(&[]).unwrap();
     assert_eq!(r.removed, 1);
     assert!(trash(&env).is_empty());
+}
+
+/// Review GS-09: the global gc's trash step spares what `gc_trash` spares
+/// (a row or a caller path naming the entry), and lists it.
+#[test]
+fn gc_trash_step_spares_referenced_trash() {
+    let (env, s) = setup();
+    let t_dir = env.store_dir().join("trash");
+    fs::create_dir_all(&t_dir).unwrap();
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let old = now_ms - 2 * 3600 * 1000;
+    let free = t_dir.join(format!("{old}-{}", "1".repeat(32)));
+    let by_row = t_dir.join(format!("{old}-{}", "3".repeat(32)));
+    let by_extra = t_dir.join(format!("{old}-{}", "4".repeat(32)));
+    for d in [&free, &by_row, &by_extra] {
+        mk(d);
+    }
+    let id = session(&env, &s, "livelive", &g('1', 'a'));
+    let ws = env.root.join("sessions").join(id.as_str());
+    fs::create_dir_all(&ws).unwrap();
+    symlink(&by_row, ws.join("app")).unwrap();
+    let r = s.gc_with(FOREVER, &[by_extra.join("objects")]).unwrap();
+    assert_eq!(r.trash_removed, 1, "{r:?}");
+    assert_eq!(r.trash_refused.len(), 2, "{r:?}");
+    assert!(!exists(&free));
+    assert!(by_row.exists() && by_extra.exists());
+    // the plain `gc` still spares the row-named entry
+    let r = s.gc(FOREVER).unwrap();
+    assert_eq!((r.trash_removed, r.trash_refused.len()), (1, 1), "{r:?}");
+    assert!(by_row.exists() && !exists(&by_extra));
+}
+
+/// `gc_preview` (the `gc --store --dry-run` answer) names what `gc` would
+/// reclaim and writes nothing.
+#[test]
+fn gc_preview_counts_and_writes_nothing() {
+    let (env, s) = setup();
+    let g1 = g('1', 'a');
+    let a = session(&env, &s, "aaaaaaaa", &g1);
+    let b = session(&env, &s, "bbbbbbbb", &g1);
+    let x = s.put_bytes(b"only a").unwrap();
+    let y = s.put_bytes(b"shared").unwrap();
+    cp(&s, &a, &g1, CheckpointReason::BeforeRemove, vec![added("f", &x), added("g", &y)]);
+    cp(&s, &b, &g1, CheckpointReason::BeforeRemove, vec![added("g", &y)]);
+    remove(&s, &a);
+    let t_dir = env.store_dir().join("trash");
+    fs::create_dir_all(&t_dir).unwrap();
+    let old = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() - 2 * 3600 * 1000;
+    mk(&t_dir.join(format!("{old}-{}", "1".repeat(32))));
+    floor0(&s);
+    let tables = ["sessions", "checkpoints", "overlay_entries", "blobs", "gc_runs"];
+    let before: Vec<i64> = tables.iter().map(|t| count(&env, &format!("SELECT count(*) FROM {t}"))).collect();
+    let p = s.gc_preview(FOREVER, &[]).unwrap();
+    assert!(p.sessions.is_empty() && p.blobs == 0, "{p:?}");
+    let p = s.gc_preview(K0, &[]).unwrap();
+    assert_eq!(p.sessions, vec![a.as_str().to_owned()], "{p:?}");
+    assert_eq!((p.blobs, p.blob_bytes), (1, 6), "only a's own blob: {p:?}");
+    assert_eq!((p.trash_eligible, p.trash_young, p.trash_refused.len()), (1, 0, 0), "{p:?}");
+    let after: Vec<i64> = tables.iter().map(|t| count(&env, &format!("SELECT count(*) FROM {t}"))).collect();
+    assert_eq!(before, after, "the preview wrote nothing");
+    assert!(blob_path(&env, &x).exists());
+    assert_eq!(trash(&env).len(), 1);
+    // and the real run reclaims what the preview named
+    let r = s.gc(K0).unwrap();
+    assert_eq!((r.sessions, r.blobs, r.trash_removed), (1, 1, 1), "{r:?}");
+    assert!(!blob_path(&env, &x).exists() && blob_path(&env, &y).exists());
 }

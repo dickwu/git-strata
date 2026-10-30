@@ -81,7 +81,8 @@ Not merged.
   &dyn Launchd)` takes the launchctl seam; tests pass a temp HOME and a
   recording fake, and lint the written plist with `plutil -convert json`
   (read-only). The production `install_agent(bin)` (HOME + real
-  `/bin/launchctl bootstrap gui/<uid>`) is never called by a test.
+  `/bin/launchctl bootstrap gui/<uid>`, after the D38 `lifecycle_scope`
+  guard refuses a HOME that is not the login home) is never called by a test.
 - **Plist HOME.** The plist follows the §3 sample exactly (no `HOME` in
   `EnvironmentVariables`; launchd supplies HOME to a user agent); "HOME
   written absolute" is read as the absolute `StandardErrorPath`.
@@ -378,3 +379,8 @@ calls `publish::publish`, never `stage`. Every remote is a local bare repo.
   nothing recorded; drift → AwaitingPublish, approve of it refused with
   its state and no prompt; `switch` moves the proposer (same tree, new
   deps set) with no prompt.
+
+## dev-ports (impl/dev-ports, 2026-10-28)
+
+- Methods `ports_ensure` / `ports_reassign` (`{session, repo}` → `{base}`), on the session queue; `features` = `["new.agent", "session.ports"]`; policy from `[dev_ports]` at startup (daemon.md D39).
+- Test: `new_leases_dev_ports_and_ensure_reassign_rm_follow_the_lifecycle`.

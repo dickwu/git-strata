@@ -10,17 +10,21 @@ use strata_apfs::{IoSide, classify_io_error, nearest_existing_ancestor, same_vol
 use strata_types::{Code, RepoName, SessionId, StrataError};
 
 use crate::sys::{lstat, real_dir, special_kind, within};
+use super::Layout;
 use crate::{Result, Sessions, no_such_repo, ticket};
 
 /// What phase A settled.
 pub(crate) struct Validated {
     /// The requested repos, deduplicated, in `RepoName` order.
     pub(crate) tracked: Vec<RepoName>,
+    /// The repos that get a workspace: every configured repo, or with
+    /// `Layout::Only` the requested ones (D51).
+    pub(crate) members: Vec<RepoName>,
     pub(crate) id: SessionId,
 }
 
 impl Sessions<'_> {
-    pub(crate) fn validate_new(&self, ticket_: Option<&str>, repos: &[RepoName]) -> Result<Validated> {
+    pub(crate) fn validate_new(&self, ticket_: Option<&str>, repos: &[RepoName], layout: Layout) -> Result<Validated> {
         // 1. ticket
         if let Some(t) = ticket_ {
             ticket::validate(t)?;
@@ -37,8 +41,41 @@ impl Sessions<'_> {
             }
             tracked.insert(r.clone());
         }
-        // 3. every configured checkout, and the root when it exists
-        for (name, rc) in &self.config.repos {
+        let members: BTreeSet<RepoName> = match layout {
+            Layout::Siblings => self.config.repos.keys().cloned().collect(),
+            Layout::Only => tracked.clone(),
+        };
+        self.validate_members(&members, &tracked)?;
+        // 7. session id; no retry with another one
+        let id = self.seams.take_next_id().unwrap_or_else(crate::sys::random_session_id);
+        self.id_free(&id)?;
+        Ok(Validated { tracked: tracked.into_iter().collect(), members: members.into_iter().collect(), id })
+    }
+
+    /// Step 7's check: no row, and neither `sessions/<id>` nor
+    /// `sessions/.repos/<id>` exists. `new` runs it again under `enroll`
+    /// (rm-followups R1).
+    pub(crate) fn id_free(&self, id: &SessionId) -> Result<()> {
+        if self.store.session(id)?.is_some() {
+            return Err(StrataError::new(Code::Exists, format!("session {id} already has a store row"))
+                .with_detail(json!({ "session": id.as_str(), "reason": "store_row" })));
+        }
+        let sessions = self.config.paths.root.join("sessions");
+        for p in [sessions.join(id.as_str()), sessions.join(".repos").join(id.as_str())] {
+            if lstat(&p).map_err(|e| classify_io_error(&e, IoSide::Read, &p))?.is_some() {
+                return Err(StrataError::new(Code::Exists, format!("{} already exists", p.display()))
+                    .with_detail(json!({ "session": id.as_str(), "path": p.to_string_lossy(), "reason": "directory" })));
+            }
+        }
+        Ok(())
+    }
+
+    /// Steps 3-6 for the repos that get a workspace (`members`); seed
+    /// caches are checked for the `tracked` ones. Shared by `new` and `add`.
+    pub(crate) fn validate_members(&self, members: &BTreeSet<RepoName>, tracked: &BTreeSet<RepoName>) -> Result<()> {
+        let scope = || self.config.repos.iter().filter(|(n, _)| members.contains(*n));
+        // 3. every member checkout, and the root when it exists
+        for (name, rc) in scope() {
             check_dir(&rc.path, Some(name), "path")?;
         }
         let root = &self.config.paths.root;
@@ -53,7 +90,7 @@ impl Sessions<'_> {
         }
         let caps = volume_caps(&anc)?;
         let fold = !caps.case_sensitive;
-        for (name, rc) in &self.config.repos {
+        for (name, rc) in scope() {
             let w = real_dir(&rc.path)?;
             let c = self.git(name)?.repo_id().get().to_path_buf();
             let c = real_dir(&c).unwrap_or(c);
@@ -77,7 +114,7 @@ impl Sessions<'_> {
             }
         }
         // 5. volume
-        for (name, rc) in &self.config.repos {
+        for (name, rc) in scope() {
             let same = same_volume(&anc, &rc.path).map_err(|e| classify_io_error(&e, IoSide::Read, &rc.path))?;
             if !same {
                 return Err(StrataError::new(
@@ -106,7 +143,7 @@ impl Sessions<'_> {
             .with_detail(json!({ "reason": "no_clone", "fs_type": caps.fs_type, "root": root.to_string_lossy() })));
         }
         // 6. seed sources: types only, by lstat
-        for (name, rc) in &self.config.repos {
+        for (name, rc) in scope() {
             let (files, explicit) = rc.seed_files();
             if explicit {
                 for (index, p) in files.iter().enumerate() {
@@ -165,20 +202,7 @@ impl Sessions<'_> {
                 }
             }
         }
-        // 7. session id; no retry with another one
-        let id = self.seams.take_next_id().unwrap_or_else(crate::sys::random_session_id);
-        if self.store.session(&id)?.is_some() {
-            return Err(StrataError::new(Code::Exists, format!("session {id} already has a store row"))
-                .with_detail(json!({ "session": id.as_str(), "reason": "store_row" })));
-        }
-        let sessions = root.join("sessions");
-        for p in [sessions.join(id.as_str()), sessions.join(".repos").join(id.as_str())] {
-            if lstat(&p).map_err(|e| classify_io_error(&e, IoSide::Read, &p))?.is_some() {
-                return Err(StrataError::new(Code::Exists, format!("{} already exists", p.display()))
-                    .with_detail(json!({ "session": id.as_str(), "path": p.to_string_lossy(), "reason": "directory" })));
-            }
-        }
-        Ok(Validated { tracked: tracked.into_iter().collect(), id })
+        Ok(())
     }
 }
 

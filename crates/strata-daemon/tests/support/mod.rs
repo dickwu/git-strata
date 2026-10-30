@@ -303,6 +303,11 @@ exit $rc
             },
             deploy_on_push: false,
             pin_unpushed: true,
+            check_siblings: Vec::new(),
+            rm: Default::default(),
+            // rm-followups: no quiet window, so a publish moves its own
+            // session at once (tests of the window set it).
+            rebase: strata_types::RebaseConfig { quiet_secs: 0, ..Default::default() },
         }
     }
 }
@@ -347,6 +352,8 @@ pub struct Dfx {
     pub lock_wait: Duration,
     /// `Options::reconcile_every` (production value unless a test shortens it).
     pub reconcile_every: Duration,
+    /// `Options::catch_up_every` (production value unless a test changes it).
+    pub catch_up_every: Duration,
 }
 
 impl Dfx {
@@ -362,10 +369,10 @@ impl Dfx {
             sb.bare_origin(&p);
             repos.insert(repo_name(n), sb.config(&p));
         }
-        let config = Config { paths: Paths { root: sb.path("strata") }, repos };
+        let config = Config { paths: Paths { root: sb.path("strata") }, repos, status: Default::default(), dev_ports: Default::default() };
         let config_dir = sb.path("cfg");
         let sock_dir = tempfile::Builder::new().prefix("sd-").tempdir_in("/tmp").expect("sock dir");
-        let fx = Dfx { sb, config, config_dir, sock_dir, alerts: Arc::new(Mutex::new(Vec::new())), lock_wait: Duration::from_millis(300), reconcile_every: strata_daemon::RECONCILE_EVERY };
+        let fx = Dfx { sb, config, config_dir, sock_dir, alerts: Arc::new(Mutex::new(Vec::new())), lock_wait: Duration::from_millis(300), reconcile_every: strata_daemon::RECONCILE_EVERY, catch_up_every: strata_daemon::CATCH_UP_EVERY };
         fx.write_config();
         fx
     }
@@ -378,6 +385,28 @@ impl Dfx {
     pub fn write_config_text(&self, text: &str) {
         fs::create_dir_all(&self.config_dir).unwrap();
         fs::write(self.config_dir.join("config.toml"), text).unwrap();
+    }
+
+    /// Before a start with no pins.json: pin the config on disk as if a
+    /// human had accepted it (a repo with no pin needs confirmation, so the
+    /// daemon itself never adopts it). Never overwrites pins.json: later
+    /// config changes go through the daemon's tighten / pending.
+    pub fn seed_pins(&self) {
+        let p = strata_daemon::pins_path(&self.config_dir);
+        if p.exists() {
+            return;
+        }
+        if let Ok(text) = fs::read_to_string(self.config_dir.join("config.toml"))
+            && let Ok(c) = Config::parse(&text)
+        {
+            fs::write(p, pins_json(&c)).unwrap();
+        }
+    }
+
+    /// One start without seeding pins.json (the "no pin" cases).
+    pub fn prepare_unseeded(&self, c: Confirmer) -> strata_daemon::Result<Core> {
+        let env = self.sb.git_env();
+        startup::prepare(self.options(), c, &move |p: &Path| Git::open_with_env(p, &env))
     }
 
     pub fn socket(&self) -> PathBuf {
@@ -394,6 +423,7 @@ impl Dfx {
             install_path: self.sb.install_path(),
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
             reconcile_every: self.reconcile_every,
+            catch_up_every: self.catch_up_every,
         }
     }
 
@@ -445,6 +475,7 @@ impl Dfx {
     }
 
     pub fn prepare_once(&self, c: Confirmer) -> strata_daemon::Result<Core> {
+        self.seed_pins();
         let env = self.sb.git_env();
         startup::prepare(self.options(), c, &move |p: &Path| Git::open_with_env(p, &env))
     }
@@ -495,4 +526,19 @@ pub fn reason(e: &strata_types::StrataError) -> Option<&str> {
 
 fn is_daemon_running(e: &strata_types::StrataError) -> bool {
     e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|r| r.as_str()) == Some("daemon_running")
+}
+
+/// pins.json for `config` exactly as configured.
+pub fn pins_json(config: &Config) -> String {
+    let repos: serde_json::Map<String, serde_json::Value> = config
+        .repos
+        .iter()
+        .map(|(n, rc)| {
+            (
+                n.as_str().to_string(),
+                serde_json::json!({ "deploy_on_push": rc.deploy_on_push, "confirm": rc.publish.confirm, "push": rc.publish.push }),
+            )
+        })
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({ "repos": repos })).unwrap()
 }

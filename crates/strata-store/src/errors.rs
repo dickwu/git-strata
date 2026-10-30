@@ -62,7 +62,7 @@ pub(crate) fn read_only_handle() -> StrataError {
 pub(crate) fn poisoned() -> StrataError {
     err(
         Code::Unknown,
-        "the store writer is poisoned after an uncertain commit; reopen the store",
+        "the store writer is poisoned after an uncertain commit; git-stratad restarts itself to reopen the store: retry once `git-strata daemon status` answers",
         json!({ "reason": "poisoned", "outcome": NOT_WRITTEN }),
     )
 }
@@ -76,7 +76,7 @@ pub(crate) fn no_such_session(id: &str) -> StrataError {
 }
 
 pub(crate) fn no_such_repo(session: &str, repo: &str) -> StrataError {
-    err(Code::NoSuchRepo, format!("session {session} has no workspace for {repo}"), json!({ "session": session, "repo": repo }))
+    StrataError::not_in_session(session, repo)
 }
 
 /// `io::Error` → `StrataError` via apfs, plus `op`; `outcome` on `Unknown`.

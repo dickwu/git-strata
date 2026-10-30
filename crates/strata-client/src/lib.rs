@@ -5,11 +5,18 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use strata_types::{Code, StrataError};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The next request id (one counter per process, shared with the cli's
+/// interruptible calls).
+pub fn next_id() -> String {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed).to_string()
+}
 
 /// Whether a call writes (a broken connection after sending is then
 /// `Unknown socket_closed`) or only reads (`Busy daemon_down`).
@@ -42,7 +49,7 @@ impl From<CallError> for StrataError {
 }
 
 pub fn daemon_down(socket: &Path) -> StrataError {
-    StrataError::new(Code::Busy, "the daemon is not running; run `git-strata daemon start`")
+    StrataError::new(Code::Busy, "the daemon is not running; ask the human to run `git-strata daemon start`")
         .with_detail(json!({ "reason": "daemon_down", "socket": socket.to_string_lossy() }))
 }
 
@@ -54,8 +61,21 @@ pub fn listening(socket: &Path) -> bool {
 
 /// Send `method` with `params`; the reply's `data`, or its error as is.
 pub fn call(socket: &Path, method: &str, params: Value, kind: Kind) -> Result<Value, CallError> {
+    call_inner(socket, method, params, kind, None)
+}
+
+/// `call`, giving up (as a broken connection) when sending or the reply
+/// takes longer than `deadline` each. For probes that must not hang.
+pub fn call_within(socket: &Path, method: &str, params: Value, kind: Kind, deadline: Duration) -> Result<Value, CallError> {
+    call_inner(socket, method, params, kind, Some(deadline))
+}
+
+fn call_inner(socket: &Path, method: &str, params: Value, kind: Kind, deadline: Option<Duration>) -> Result<Value, CallError> {
     let mut stream = UnixStream::connect(socket).map_err(|_| CallError::Down(daemon_down(socket)))?;
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed).to_string();
+    if deadline.is_some() && (stream.set_read_timeout(deadline).is_err() || stream.set_write_timeout(deadline).is_err()) {
+        return Err(CallError::Down(daemon_down(socket)));
+    }
+    let id = next_id();
     let line = format!("{}\n", json!({ "id": id, "method": method, "params": params }));
     let broken = || match kind {
         Kind::Write => CallError::Failed(
@@ -75,13 +95,19 @@ pub fn call(socket: &Path, method: &str, params: Value, kind: Kind) -> Result<Va
     if !reply.ends_with('\n') {
         return Err(broken());
     }
+    parse_reply(method, &id, &reply)
+}
+
+/// One reply line (without or with its newline) checked against the
+/// request id: its `data`, or its error.
+pub fn parse_reply(method: &str, id: &str, reply: &str) -> Result<Value, CallError> {
     let v: Value = serde_json::from_str(reply.trim_end()).map_err(|e| {
         CallError::Failed(
             StrataError::new(Code::InvalidInput, format!("the daemon's reply is not JSON: {e}"))
                 .with_detail(json!({ "reason": "rpc_failed", "method": method })),
         )
     })?;
-    if v.get("id") != Some(&Value::String(id.clone())) {
+    if v.get("id") != Some(&Value::String(id.to_string())) {
         return Err(CallError::Failed(
             StrataError::new(Code::InvalidInput, "the daemon answered another request id")
                 .with_detail(json!({ "reason": "rpc_id", "method": method, "sent": id, "got": v.get("id") })),

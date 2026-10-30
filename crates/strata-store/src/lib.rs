@@ -20,12 +20,15 @@ mod blob;
 mod checkpoints;
 mod codec;
 mod deps;
+mod devports;
 mod errors;
 mod gc;
 mod gens;
 mod open;
 mod records;
 mod retire;
+mod rm_state;
+mod move_activity;
 mod schema;
 mod seams;
 mod sessions;
@@ -37,6 +40,9 @@ mod txn;
 
 #[cfg(feature = "test-seams")]
 pub use seams::{Seam, SyncCounts};
+pub use move_activity::{MoveActivity, MoveBaseline};
+pub use rm_state::{RebasePending, ReplayPlan, RmAttempt, RmOutcome};
+pub use devports::{DEV_PORT_BLOCK, DevPortLease, DevPortsPolicy, Probe, bind_probe};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 
@@ -58,6 +64,8 @@ pub struct Store {
     pub(crate) gc_running: Mutex<()>,
     pub(crate) poisoned: AtomicBool,
     pub(crate) seams: seams::Seams,
+    /// How new dev-port leases are chosen (the daemon sets it from config).
+    pub(crate) dev_ports: Mutex<Option<std::sync::Arc<devports::DevPortsPolicy>>>,
 }
 
 impl Store {
@@ -95,6 +103,12 @@ impl Store {
 
 #[cfg(feature = "test-seams")]
 impl Store {
+    /// Mark the writer poisoned, as an uncertain COMMIT would (callers'
+    /// tests of what follows poisoning).
+    pub fn poison_for_test(&self) {
+        self.poisoned.store(true, Ordering::SeqCst);
+    }
+
     pub fn arm(&self, seam: Seam) {
         self.seams.arm(seam)
     }
@@ -382,6 +396,26 @@ pub struct TrashReport {
     pub stuck: Vec<PathBuf>,
 }
 
+/// `Store::gc_preview`: what the global `gc` would reclaim now (store.md
+/// §5.11b). Nothing is written to produce it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcPreview {
+    pub keep_secs: u64,
+    pub floor_secs: u64,
+    /// Removed sessions past keep that no running/unknown publish names.
+    pub sessions: Vec<String>,
+    pub proposals: u64,
+    pub attempts: u64,
+    pub gc_runs: u64,
+    /// Blob rows only reclaimable sessions reference, file missing or past
+    /// the age floor.
+    pub blobs: u64,
+    pub blob_bytes: u64,
+    pub trash_eligible: u64,
+    pub trash_young: u64,
+    pub trash_refused: Vec<PathBuf>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -407,6 +441,10 @@ pub struct GcReport {
     pub stuck: Vec<PathBuf>,
     pub verified: u64,
     pub corrupt: Vec<BlobId>,
+    /// Old trash entries the global `gc` left because a row or a git link
+    /// still names them (store.md §5.11 step 5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trash_refused: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<StrataError>,
 }

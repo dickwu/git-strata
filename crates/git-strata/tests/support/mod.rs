@@ -50,7 +50,8 @@ impl Home {
         let mut c = Command::new(BIN);
         for (k, _) in std::env::vars_os() {
             let up = k.to_string_lossy().to_ascii_uppercase();
-            if up.starts_with("GIT_") || up.starts_with("STRATA") {
+            // Agent markers too: `new` would record the agent running the tests.
+            if ["GIT_", "STRATA", "CLAUDE", "CODEX", "CURSOR"].iter().any(|p| up.starts_with(p)) {
                 c.env_remove(&k);
             }
         }
@@ -153,7 +154,7 @@ impl Home {
         let mut t = format!("[paths]\nroot = {:?}\n", root.to_string_lossy());
         for r in repos {
             t.push_str(&format!(
-                "\n[repo.{n}]\npath = {p:?}\ndefault_branch = \"main\"\ndeps_dirs = []\ndeploy_on_push = {d}\n\n[repo.{n}.publish]\nbranch = \"main\"\npush = {push}\nconfirm = {c}\n",
+                "\n[repo.{n}]\npath = {p:?}\ndefault_branch = \"main\"\ndeps_dirs = []\ndeploy_on_push = {d}\n\n[repo.{n}.publish]\nbranch = \"main\"\npush = {push}\nconfirm = {c}\n\n[repo.{n}.rebase]\nquiet_secs = 0\n",
                 n = r.name,
                 p = self.repo_dir(r.name).to_string_lossy(),
                 d = r.deploy_on_push,
@@ -161,7 +162,24 @@ impl Home {
                 c = r.confirm,
             ));
         }
-        fs::write(self.config_dir().join("config.toml"), t).unwrap();
+        fs::write(self.config_dir().join("config.toml"), &t).unwrap();
+        // A repo with no pin needs confirmation: pin the first config as if
+        // a human had accepted it; later writes go through tighten/pending.
+        let pins = self.config_dir().join("pins.json");
+        if !pins.exists() {
+            let c = strata_types::Config::parse(&t).expect("fixture config");
+            let repos: serde_json::Map<String, serde_json::Value> = c
+                .repos
+                .iter()
+                .map(|(n, rc)| {
+                    (
+                        n.as_str().to_string(),
+                        serde_json::json!({ "deploy_on_push": rc.deploy_on_push, "confirm": rc.publish.confirm, "push": rc.publish.push }),
+                    )
+                })
+                .collect();
+            fs::write(pins, serde_json::to_string_pretty(&serde_json::json!({ "repos": repos })).unwrap()).unwrap();
+        }
     }
 
     /// Run with stdin on a fresh pseudo-terminal (the master end is kept
@@ -207,7 +225,8 @@ pub fn git(dir: &Path, home: &Path, args: &[&str]) -> String {
 }
 
 /// A fake daemon on the HOME socket: records every request line and
-/// answers each with `reply(request)`.
+/// answers each with `reply(request)` (`null`: closes the connection
+/// without answering).
 pub struct FakeDaemon {
     pub requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     pub connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -238,7 +257,11 @@ impl FakeDaemon {
                         while r.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
                             let v: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap_or(serde_json::Value::Null);
                             rq.lock().unwrap().push(v.clone());
-                            let mut out = reply(&v).to_string();
+                            let answer = reply(&v);
+                            if answer.is_null() {
+                                break; // `null`: close without a reply
+                            }
+                            let mut out = answer.to_string();
                             out.push('\n');
                             let _ = w.write_all(out.as_bytes());
                             line.clear();

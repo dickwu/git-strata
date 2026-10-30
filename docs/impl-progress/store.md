@@ -178,8 +178,15 @@ later migration that adds such a table (it would bump `user_version`).
   back; Turso uses that one sync type for commits and checkpoints. SIGKILL
   after a returned commit loses nothing (`tests/crash.rs`). The test VFS
   (`src/vfs.rs`) is now a Turso `IO` wrapper counting WAL syncs.
-- Migration: `user_version = 1`, `application_id` pinned; any other
-  version is refused unchanged (no migrations exist yet).
+- Migration (2026-10-27): `user_version` 1..=`LATEST` (2) is accepted,
+  `application_id` pinned; anything newer or older is refused unchanged.
+  The writer open migrates forward in one `BEGIN IMMEDIATE` after a
+  verified clone backup at `store/backups/store-v<from>-<ns>.db`
+  (store.md §4.4a); v1 -> v2 adds `sessions.agent`. The `user_version`
+  written in the transaction is authoritative (opens read the PRAGMA);
+  the post-COMMIT TRUNCATE checkpoint is best effort. Tests:
+  `tests/migrate.rs` on a real v1 fixture (`tests/fixtures/store-v1.db`,
+  made by the v1 code at main 31769e3).
 - Integrity: `quick_check` / `integrity_check` work; a corrupt page is
   `Corrupt`, a non-database file is refused.
 
@@ -209,9 +216,18 @@ the rusqlite design):
 7. Turso stores the CREATE text normalized and adds
    `__turso_internal_seq_*` tables, so a store.db made by the old
    rusqlite build fails the schema check (`Corrupt{schema}`). No deployed
-   stores exist; `user_version` stays 1.
+   stores exist. (Since 2026-10-27 `user_version` is 2; see Migration.)
 8. There is no READONLY_RECOVERY error code to map; that case is not
    reachable.
+10. After another process changes the schema (a migration), an existing
+   connection fails each explicit `BEGIN` read with "Database schema
+   changed" until it runs one autocommit statement. `read_txn` runs
+   `SELECT count(*) FROM sqlite_schema` outside a transaction and retries
+   the read once (`tests/migrate.rs::read_only_handle_survives_another_process_migrating`).
+11. `GLOB` and `length()` stop at an embedded NUL, so the
+   `sessions.agent` CHECK adds `length(CAST(agent AS BLOB)) = length(agent)`
+   (also rejects non-ASCII); `tests/guards.rs` checks the CHECK against
+   `AgentName` case by case.
 9. (Not an engine gap; closed.) The flaky `Busy` on `store/LOCK` right
    after a close + reopen came from `tests/open.rs` spawning a `sleep`
    child while sibling tests in the same binary had stores open. On macOS
@@ -380,3 +396,9 @@ Results: `cargo test -p strata-store` 133 passed / 0 failed / 3 ignored
   by default (no hdiutil or human needed; uchg via `lchflags`).
 - Task 9 also removed three dead helpers in errors.rs (`detail_str`,
   `json_err`, `R`) so `cargo build` is warning-free.
+
+## dev-ports (impl/dev-ports, 2026-10-28)
+
+- `dev_ports(session, repo, base)` in v2 (`sessions.agent+dev_ports`); `DevPortLease`, `set_dev_ports_policy`, `dev_port_leases` (None on v1), `ensure_dev_ports`, `reassign_dev_ports`; lease at `create_session` / `add_workspaces`; release at `set_lifecycle(Removed)`; gc deletes `dev_ports` rows before workspaces.
+- Allocation: start at fnv1a64("session/repo") mod blocks (reassign: after the old block), at most 64 blocks probed, a block is taken by a lease or by any bind failure on 0.0.0.0 / [::] / 127.0.0.1.
+- Tests: `fnv_is_the_reference_function`, `bind_probe_sees_a_listener_and_its_absence`, `without_a_policy_nothing_is_leased_and_ensure_is_unsupported`, `new_and_add_lease_distinct_blocks_that_pass_the_probe`, `exhaustion_never_blocks_new_and_ensure_reports_it`, `reassign_moves_to_a_later_block_and_frees_the_old_one`, `ensure_needs_an_active_session_and_removal_releases_for_good`, `read_only_handles_cannot_lease`; the v2 migration tests cover the table.

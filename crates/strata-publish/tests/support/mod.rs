@@ -302,6 +302,11 @@ exit $rc
             },
             deploy_on_push: false,
             pin_unpushed: true,
+            check_siblings: Vec::new(),
+            rm: Default::default(),
+            // rm-followups: no quiet window, so a publish moves its own
+            // session at once (tests of the window set it).
+            rebase: strata_types::RebaseConfig { quiet_secs: 0, ..Default::default() },
         }
     }
 }
@@ -534,7 +539,7 @@ impl Fx {
             repos.insert(repo_name(n), sb.config(&main));
         }
         let root = sb.root.join("strata");
-        let config = Config { paths: Paths { root }, repos };
+        let config = Config { paths: Paths { root }, repos, status: Default::default(), dev_ports: Default::default() };
         Fx::from_parts(sb, config)
     }
 
@@ -882,6 +887,13 @@ impl Default for QueueLock {
             wait: Mutex::new(Duration::from_secs(60)),
             calls: Mutex::new(Vec::new()),
         }
+    }
+}
+
+impl QueueLock {
+    /// The sessions whose queue place is taken right now.
+    pub fn held_now(&self) -> Vec<String> {
+        self.held.lock().unwrap().iter().cloned().collect()
     }
 }
 

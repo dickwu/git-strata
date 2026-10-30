@@ -31,12 +31,13 @@ fn push(repo: &str, branch: &str) -> Action {
     Action::PushDeploy {
         repo: RepoName::try_from(repo.to_string()).unwrap(),
         branch: branch.to_string(),
+        url: "git@github.com:inter/tool.git".to_string(),
     }
 }
 
 fn discard(s: &str) -> Action {
     Action::RemoveDiscard {
-        session: SessionId::try_from(s.to_string()).unwrap(),
+        session: SessionId::try_from(s.to_string()).unwrap(), kept_trees: vec![]
     }
 }
 

@@ -5,8 +5,10 @@
 //! NULL)` checks are spelled as AND/OR (Turso cannot type the `=` form in a
 //! STRICT CHECK); the accepted rows are identical.
 
-/// Every table, index and trigger, plus `application_id` and `user_version`.
-pub(crate) const DDL: &str = r#"PRAGMA application_id = 1398035009;
+/// Every table, index and trigger of schema version 1, plus `application_id`
+/// and `user_version`. Frozen: never edit this text (stores in the field
+/// were made from it); change the schema by appending to [`MIGRATIONS`].
+pub(crate) const BASE_DDL: &str = r#"PRAGMA application_id = 1398035009;
 PRAGMA user_version = 1;
 
 CREATE TABLE deps_sets (
@@ -398,4 +400,119 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
 "#;
 
 pub(crate) const APPLICATION_ID: i64 = 1398035009;
-pub(crate) const USER_VERSION: i64 = 1;
+
+/// One forward-only schema step (store.md §4.4): `sql` takes a store at
+/// `to - 1` to `to` and ends with `PRAGMA user_version = {to};`. It runs in
+/// one transaction with every other pending step; append-only, never edited.
+pub(crate) struct Migration {
+    pub(crate) to: u32,
+    pub(crate) name: &'static str,
+    pub(crate) sql: &'static str,
+}
+
+/// v2: `sessions.agent`, the agent that created the session (immutable; the
+/// CHECK is the `AgentName` alphabet); and `dev_ports`, the per-workspace
+/// dev-port leases (store.md §4.4a: one 4-aligned block `base..base+3`;
+/// `UNIQUE(base)` means no two leases overlap).
+pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
+    to: 2,
+    name: "sessions.agent+dev_ports",
+    sql: r#"
+ALTER TABLE sessions ADD COLUMN agent TEXT CHECK (agent IS NULL OR (length(agent) BETWEEN 1 AND 64 AND length(CAST(agent AS BLOB)) = length(agent) AND agent GLOB '[A-Za-z0-9]*' AND agent NOT GLOB '*[^A-Za-z0-9._-]*'));
+CREATE TRIGGER sessions_agent_guard BEFORE UPDATE ON sessions WHEN NEW.agent IS NOT OLD.agent BEGIN SELECT RAISE(ABORT, 'immutable: sessions.agent'); END;
+CREATE TABLE dev_ports (
+    session TEXT    NOT NULL REFERENCES sessions (id),
+    repo    TEXT    NOT NULL,
+    base    INTEGER NOT NULL UNIQUE CHECK (base BETWEEN 1024 AND 65532 AND base % 4 = 0),
+    PRIMARY KEY (session, repo),
+    FOREIGN KEY (session, repo) REFERENCES workspaces (session, repo)
+) STRICT;
+PRAGMA user_version = 2;
+"#,
+}, Migration {
+    to: 3,
+    name: "rebase_pending+move_activity+rm_attempts",
+    sql: r#"
+CREATE TABLE rm_attempts (
+    session     TEXT    PRIMARY KEY NOT NULL REFERENCES sessions (id),
+    at_ns       INTEGER NOT NULL,
+    outcome     TEXT    NOT NULL CHECK (outcome IN ('refused', 'failed')),
+    detail_json TEXT    NOT NULL CHECK (json_valid(detail_json) AND json_type(detail_json) = 'object')
+) STRICT;
+CREATE TABLE rebase_pending (
+    session         TEXT    NOT NULL,
+    repo            TEXT    NOT NULL,
+    rev             INTEGER NOT NULL CHECK (rev >= 0),
+    from_tree       TEXT    NOT NULL CHECK (length(from_tree) = 40 AND from_tree NOT GLOB '*[^0-9a-f]*'),
+    from_deps       TEXT    NOT NULL CHECK (length(from_deps) = 64 AND from_deps NOT GLOB '*[^0-9a-f]*'),
+    head            TEXT    CHECK (head IS NULL OR (length(head) = 40 AND head NOT GLOB '*[^0-9a-f]*')),
+    tree            TEXT    CHECK (tree IS NULL OR (length(tree) = 40 AND tree NOT GLOB '*[^0-9a-f]*')),
+    planned_head    TEXT    CHECK (planned_head IS NULL OR (length(planned_head) = 40 AND planned_head NOT GLOB '*[^0-9a-f]*')),
+    planned_tree    TEXT    CHECK (planned_tree IS NULL OR (length(planned_tree) = 40 AND planned_tree NOT GLOB '*[^0-9a-f]*')),
+    planned_publish INTEGER CHECK (planned_publish IS NULL OR planned_publish >= 1),
+    reason          TEXT    NOT NULL,
+    detail_json     TEXT    CHECK (detail_json IS NULL OR json_valid(detail_json)),
+    first_at_ns     INTEGER NOT NULL,
+    last_at_ns      INTEGER NOT NULL,
+    attempts        INTEGER NOT NULL CHECK (attempts >= 0),
+    unpushed        INTEGER NOT NULL DEFAULT 0 CHECK (unpushed IN (0, 1)),
+    PRIMARY KEY (session, repo),
+    FOREIGN KEY (session, repo) REFERENCES workspaces (session, repo),
+    CHECK ((head IS NULL) = (tree IS NULL)),
+    CHECK ((planned_head IS NULL) = (planned_tree IS NULL))
+) STRICT;
+CREATE TABLE move_activity (
+    session          TEXT    NOT NULL,
+    repo             TEXT    NOT NULL,
+    n                INTEGER NOT NULL,
+    policy           TEXT    NOT NULL CHECK (policy IN ('auto')),
+    m0_ns            INTEGER NOT NULL,
+    t0_ns            INTEGER NOT NULL,
+    root_names_json  TEXT    NOT NULL CHECK (json_valid(root_names_json) AND json_type(root_names_json) = 'array'),
+    entries          INTEGER NOT NULL CHECK (entries >= 0),
+    late_writes_json TEXT    CHECK (late_writes_json IS NULL OR json_valid(late_writes_json)),
+    passes_json      TEXT    CHECK (passes_json IS NULL OR json_valid(passes_json)),
+    PRIMARY KEY (session, repo, n),
+    FOREIGN KEY (session, repo, n) REFERENCES move_intents (session, repo, n)
+) STRICT;
+PRAGMA user_version = 3;
+"#,
+}];
+
+/// The oldest schema version this build opens (and migrates from).
+pub(crate) const BASE_VERSION: u32 = 1;
+/// The schema version this build writes.
+pub(crate) const LATEST: u32 = BASE_VERSION + MIGRATIONS.len() as u32;
+
+/// The full DDL of schema version `v` (`BASE_VERSION..=LATEST`).
+pub(crate) fn ddl(v: u32) -> String {
+    let mut s = String::from(BASE_DDL);
+    for m in MIGRATIONS.iter().filter(|m| m.to <= v) {
+        s.push_str(m.sql);
+    }
+    s
+}
+
+/// The steps that take `from` to `LATEST`, as one batch.
+pub(crate) fn pending(from: u32) -> impl Iterator<Item = &'static Migration> {
+    MIGRATIONS.iter().filter(move |m| m.to > from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrations_are_contiguous_and_set_their_version() {
+        assert!(BASE_DDL.contains("PRAGMA user_version = 1;"));
+        for (i, m) in MIGRATIONS.iter().enumerate() {
+            assert_eq!(m.to, BASE_VERSION + 1 + i as u32, "{}", m.name);
+            assert!(m.sql.trim_end().ends_with(&format!("PRAGMA user_version = {};", m.to)), "{}", m.name);
+        }
+        assert_eq!(LATEST, 3);
+        assert_eq!(pending(1).count(), 2);
+        assert_eq!(pending(2).count(), 1);
+        assert_eq!(pending(LATEST).count(), 0);
+        assert!(ddl(1) == BASE_DDL && ddl(2).len() > BASE_DDL.len() && ddl(3).len() > ddl(2).len());
+    }
+}

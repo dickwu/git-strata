@@ -9,7 +9,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use strata_deps::{ChainState, publish_chain};
+use strata_deps::{ChainState, PublishChain, publish_chain};
 use strata_gitio::{Git, RefUpdate, remote_ref};
 use strata_store::{PublishPhase, RefChange, RefOp, RefOutcome};
 use strata_types::{
@@ -20,6 +20,7 @@ use crate::chain::{advance_anchor, anchor_ref, chain_ref, refuse_state};
 use crate::check::{check, remove_staged_layout};
 use crate::rebase::RebaseReport;
 use crate::seams::{self, FailPoint, Point};
+use crate::deps_select::{Installed, Select};
 use crate::stage::{self, Staged};
 use crate::{Ctx, Result};
 
@@ -50,9 +51,39 @@ pub struct PublishWarning {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum WarningKind {
     ObserveFailed,
+    /// deps-drift §2.5: the checks used a sealed set for the staged install
+    /// inputs instead of the session's pinned set.
+    DepsSubstituted,
+    /// deps-drift §2.5: this publish installed the set for the staged
+    /// install inputs (R1 closed `Drift`, `detail.first_row`) and the checks
+    /// used it.
+    DepsReinstalled,
+    /// deps-drift §2.4: the cold install's input snapshot stayed behind.
+    DepsInputsLeft,
 }
 
-fn err_json(e: &StrataError) -> Value {
+/// deps-drift §2.5: an error after staging carries what the checks used
+/// (`detail.deps_warning`); a key already set is kept.
+fn with_warning(mut e: StrataError, w: Option<&PublishWarning>) -> StrataError {
+    let Some(w) = w else { return e };
+    let d = e.detail.get_or_insert_with(|| json!({}));
+    if let Some(m) = d.as_object_mut() {
+        m.entry("deps_warning").or_insert_with(|| serde_json::to_value(w).unwrap_or(Value::Null));
+    }
+    e
+}
+
+/// deps-drift §2.4: R1's snapshot that stayed (`DepsInputsLeft`) also
+/// rides on an error returned after the commit.
+fn with_left(mut e: StrataError, w: Option<&PublishWarning>) -> StrataError {
+    let Some(w) = w else { return e };
+    if let Some(m) = e.detail.get_or_insert_with(|| json!({})).as_object_mut() {
+        m.entry("deps_inputs_left").or_insert_with(|| w.detail.clone());
+    }
+    e
+}
+
+pub(crate) fn err_json(e: &StrataError) -> Value {
     json!({ "code": e.code.as_str(), "message": e.message, "detail": e.detail })
 }
 
@@ -115,7 +146,7 @@ fn with_landed(e: StrataError, push: Value, checks_ran: u32) -> StrataError {
 /// the refusal it wraps.
 fn carry(inner: &StrataError, mut extra: Value) -> Value {
     if let (Some(d), Value::Object(m)) = (inner.detail.as_ref(), &mut extra) {
-        for k in ["commit", "push", "checks_ran"] {
+        for k in ["commit", "push", "checks_ran", "deps_warning"] {
             if let Some(v) = d.get(k)
                 && !m.contains_key(k)
             {
@@ -129,20 +160,61 @@ fn carry(inner: &StrataError, mut extra: Value) -> Value {
 // ---- confirmation (§5.6) -------------------------------------------------
 
 /// The confirmation gate: when the push needs a human, the token's action
-/// must be exactly `PushDeploy { repo, branch: cfg.publish.branch }`. Only
+/// must be `PushDeploy { repo, branch: cfg.publish.branch, url }`. Only
 /// the action is checked (nonce and age are confirm's job). Returns the
 /// confirmed action. Reads nothing else: no flag, env var or config bypass.
-fn confirm_gate(cfg: &RepoConfig, repo: &RepoName, confirm: Option<ConfirmToken>) -> Result<Option<Action>> {
+///
+/// [实现时补的决定] (review P1-15) `url` is the push URL the human approved;
+/// origin's push URL read now (the caller holds the repo lock) must be
+/// exactly it, otherwise `NotConfirmed` (`remote_changed`, detail
+/// `confirmed` / `now` redacted) and nothing is pushed. The push then goes to
+/// exactly `url` ([`confirmed_url`]).
+fn confirm_gate(git: &Git, cfg: &RepoConfig, repo: &RepoName, confirm: Option<&ConfirmToken>) -> Result<Option<Action>> {
     if !cfg.needs_human_confirm() {
         return Ok(None);
     }
-    let want = Action::PushDeploy { repo: repo.clone(), branch: cfg.publish.branch.clone() };
+    let branch = &cfg.publish.branch;
+    let want = json!({ "kind": "PushDeploy", "repo": repo.as_str(), "branch": branch });
     match confirm {
-        Some(t) if t.action == want => Ok(Some(t.action)),
-        Some(t) => Err(StrataError::new(Code::NotConfirmed, "the confirmation is for a different action")
-            .with_detail(json!({ "reason": "action_mismatch", "want": want, "got": t.action }))),
-        None => Err(StrataError::new(Code::NotConfirmed, format!("pushing {repo} to {} needs a confirmation", cfg.publish.branch))
+        Some(t) => match &t.action {
+            Action::PushDeploy { repo: r, branch: b, url } if r == repo && b == branch => {
+                let now = git.push_url(REMOTE)?;
+                if *url != now {
+                    return Err(remote_changed(url, &now));
+                }
+                Ok(Some(t.action.clone()))
+            }
+            _ => Err(StrataError::new(Code::NotConfirmed, "the confirmation is for a different action")
+                .with_detail(json!({ "reason": "action_mismatch", "want": want, "got": t.action }))),
+        },
+        None => Err(StrataError::new(Code::NotConfirmed, format!("pushing {repo} to {branch} needs a confirmation"))
             .with_detail(json!({ "reason": "missing", "want": want }))),
+    }
+}
+
+/// `NotConfirmed`, reason `remote_changed`: origin's push URL is not the one
+/// the human approved (review P1-15). Both URLs redacted.
+pub fn remote_changed(confirmed: &str, now: &str) -> StrataError {
+    StrataError::new(
+        Code::NotConfirmed,
+        format!(
+            "origin's push URL changed after the confirmation ({} → {}); nothing was pushed, confirm again",
+            strata_types::display_url(confirmed),
+            strata_types::display_url(now)
+        ),
+    )
+    .with_detail(json!({
+        "reason": "remote_changed",
+        "confirmed": strata_types::display_url(confirmed),
+        "now": strata_types::display_url(now),
+    }))
+}
+
+/// The URL a confirmed push goes to: the approved one.
+fn confirmed_url(confirmed: Option<&Action>) -> Option<&str> {
+    match confirmed {
+        Some(Action::PushDeploy { url, .. }) => Some(url.as_str()),
+        _ => None,
     }
 }
 
@@ -244,7 +316,14 @@ pub fn push(git: &Git, cfg: &RepoConfig, repo: &RepoName, staging: &Path, confir
 /// record names the destination the push went to. [实现时补的决定]
 /// (review-4 F1)
 pub fn push_to(git: &Git, cfg: &RepoConfig, repo: &RepoName, staging: &Path, confirm: Option<ConfirmToken>, url: Option<&str>) -> Result<PushOutcome> {
-    confirm_gate(cfg, repo, confirm)?;
+    let confirmed = confirm_gate(git, cfg, repo, confirm.as_ref())?;
+    // Review P1-15: a confirmed push goes to the approved URL; a caller's
+    // URL (the scene's) must be that one.
+    let url = match (confirmed_url(confirmed.as_ref()), url) {
+        (Some(c), Some(u)) if c != u => return Err(remote_changed(c, u)),
+        (Some(c), _) => Some(c),
+        (None, u) => u,
+    };
     match send(git, &cfg.publish.branch, staging, url)? {
         PushOutcome::Pushed => Ok(PushOutcome::Pushed),
         PushOutcome::Refused(m) => Err(StrataError::new(Code::PushRefused, "the remote refused the push")
@@ -304,6 +383,13 @@ fn report_json(s: &SessionId, r: &RebaseReport) -> Value {
     if let RebaseReport::Waiting { proposal } = r {
         v["proposal"] = json!(proposal.id);
     }
+    // rm-followups §1.7 (C2): the source moved, the deps set did not.
+    if let RebaseReport::Moved { deps_pending: Some(p), .. } = r {
+        v["note"] = json!(format!(
+            "moved source onto the published tree; deps proposal #{} pending, node_modules is the old set (drift)",
+            p.id
+        ));
+    }
     v
 }
 
@@ -328,7 +414,19 @@ fn close_failed(ctx: &Ctx, id: u64, written: Option<&CommitOid>, e: StrataError)
     }
     let mut o = outcome_base(ctx);
     o["commit"] = json!(written.map(|c| c.as_str()));
-    let to = if e.code == Code::Unknown {
+    let to = if is_bare_refusal(&e) {
+        // Review P0-2 (publish.md D-refused): the remote said no. The
+        // commit stays on the local chain and nothing is in flight, so
+        // the outcome is definite: the row closes `Done` with the refusal
+        // and does not block the repo's next publish.
+        o["stopped"] = json!(Code::PushRefused.as_str());
+        if let Some(d) = e.detail.as_ref() {
+            o["push"] = d.get("push").cloned().unwrap_or(Value::Null);
+            o["checks_ran"] = d.get("checks_ran").cloned().unwrap_or(Value::Null);
+            o["message"] = d.get("message").cloned().unwrap_or(Value::Null);
+        }
+        PublishPhase::Done
+    } else if e.code == Code::Unknown {
         o["error"] = err_json(&e);
         PublishPhase::Unknown
     } else {
@@ -339,6 +437,10 @@ fn close_failed(ctx: &Ctx, id: u64, written: Option<&CommitOid>, e: StrataError)
         {
             o["conflicts"] = c.clone();
         }
+        // deps-drift §2.3: what the deps selection found.
+        if e.code == Code::Drift {
+            o["deps"] = e.detail.clone().unwrap_or(Value::Null);
+        }
         PublishPhase::Done
     };
     match ctx.store.set_publish_phase(id, PublishPhase::Running, to, Some(&o), now()) {
@@ -348,6 +450,69 @@ fn close_failed(ctx: &Ctx, id: u64, written: Option<&CommitOid>, e: StrataError)
             tracing::warn!(publish = id, error = %se.message, "publish row could not be closed");
             unknown_with("row_not_closed", "the publish row could not be closed", Some(&e), carry(&e, json!({ "publish": id, "store": err_json(&se) })))
         }
+    }
+}
+
+/// The definite refusal `locked` returns after the commit: `Unknown` with
+/// `detail.kind = "PushRefused"` and no `reason` (anything wrapped after
+/// it carries a `reason` and stays unknown).
+fn is_bare_refusal(e: &StrataError) -> bool {
+    e.code == Code::Unknown
+        && e.detail
+            .as_ref()
+            .is_some_and(|d| d.get("kind").and_then(Value::as_str) == Some("PushRefused") && d.get("reason").is_none())
+}
+
+/// The commit an `Unknown` row wrote: `outcome.commit`, else the applied
+/// chain-ref update recorded for the row (a row closed by startup has no
+/// outcome).
+fn row_commit(ctx: &Ctx, r: &strata_store::PublishRecord) -> Option<CommitOid> {
+    if let Some(c) = r.outcome.as_ref().and_then(|o| o.get("commit")).and_then(Value::as_str) {
+        return CommitOid::try_from(c.to_owned()).ok();
+    }
+    let changes = ctx.store.ref_changes(r.group.id).ok()?;
+    changes.into_iter().rev().find(|c| c.op == RefOp::UpdateRef && c.outcome == RefOutcome::Applied).map(|c| c.new)
+}
+
+/// Review P0-2: the way out of an `Unknown` row. Before the §6 check, the
+/// repo's `Unknown` rows are reconciled against the remote under the repo
+/// lock: a row whose commit is now contained in `origin/<branch>` (fetched
+/// here) did land, so it closes `Done` with `push = Pushed` and
+/// `reconciled` naming the remote tip. A row whose commit is not on the
+/// remote stays `Unknown` (status keeps reporting it); the human pushes
+/// the chain with `git-strata push REPO` (which pushes that commit when
+/// it is still on the chain) and the next publish reconciles. Nothing is
+/// replayed. Fetch or git failures leave the rows as they are.
+fn reconcile_unknown(ctx: &Ctx) {
+    let Ok(open) = ctx.store.open_publishes() else { return };
+    let rows: Vec<_> = open
+        .into_iter()
+        .filter(|r| r.phase == PublishPhase::Unknown && r.group.batches.iter().any(|b| b.repo == *ctx.repo))
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    let branch = &ctx.cfg.publish.branch;
+    let r = ctx.locks.with_repo(ctx.repo, &mut || {
+        let tip = ctx.git.fetch(REMOTE, branch)?;
+        for row in &rows {
+            let Some(c) = row_commit(ctx, row) else { continue };
+            if !ctx.git.is_ancestor(&c, &tip).unwrap_or(false) {
+                continue;
+            }
+            let mut o = row.outcome.clone().filter(Value::is_object).unwrap_or_else(|| outcome_base(ctx));
+            o["commit"] = json!(c.as_str());
+            o["push"] = serde_json::to_value(PushOutcome::Pushed).unwrap_or(Value::Null);
+            o["reconciled"] = json!({ "remote": tip.as_str(), "branch": branch });
+            match ctx.store.set_publish_phase(row.group.id, PublishPhase::Unknown, PublishPhase::Done, Some(&o), now()) {
+                Ok(_) => tracing::info!(publish = row.group.id, commit = c.as_str(), "unknown publish reconciled: the remote has the commit"),
+                Err(e) => tracing::warn!(publish = row.group.id, error = %e.message, "unknown publish not reconciled"),
+            }
+        }
+        Ok(())
+    });
+    if let Err(e) | Ok(Err(e)) = r {
+        tracing::warn!(repo = %ctx.repo, error = %e.message, "unknown publishes not reconciled");
     }
 }
 
@@ -370,13 +535,16 @@ fn record_ref(ctx: &Ctx, change: RefChange) {
 
 /// Steps 2 (inside the lock) to 7. `written` is set once `commit_tree`
 /// returned.
+#[allow(clippy::too_many_arguments)]
 fn locked(
     ctx: &Ctx,
     group: &ReleaseGroup,
     sessions: &BTreeSet<SessionId>,
-    confirm: Option<ConfirmToken>,
+    confirm: Option<&ConfirmToken>,
     shown: Option<&Option<CommitOid>>,
     written: &mut Option<CommitOid>,
+    prep: &crate::siblings::Prepared,
+    select: Select,
 ) -> Result<Landed> {
     let branch = &ctx.cfg.publish.branch;
     let id = group.id;
@@ -396,7 +564,7 @@ fn locked(
     // Step 3: the gate, before any staging write.
     ctx.cfg.validate_commands()?;
     let pushing = ctx.cfg.publish.push;
-    let confirmed = if pushing { confirm_gate(ctx.cfg, ctx.repo, confirm)? } else { None };
+    let confirmed = if pushing { confirm_gate(ctx.git, ctx.cfg, ctx.repo, confirm)? } else { None };
     if let (Some(_), Some(shown)) = (&confirmed, shown)
         && *shown != chain.top
     {
@@ -410,11 +578,29 @@ fn locked(
     }
     let plan = stage::plan(ctx, group, &base)?;
     // Steps 4–5.
-    let staged = stage::build(ctx, group, &base, &plan)?;
+    let staged = stage::build(ctx, group, &base, &plan, prep, select)?;
+    let dw = staged.deps_warning.clone();
+    after_stage(ctx, group, &chain, &base, confirmed, pushing, staged, written).map_err(|e| with_warning(e, dw.as_ref()))
+}
+
+/// Steps 5 (checks) to 7 of [`locked`], after the layout is staged.
+#[allow(clippy::too_many_arguments)]
+fn after_stage(
+    ctx: &Ctx,
+    group: &ReleaseGroup,
+    chain: &PublishChain,
+    base: &CommitOid,
+    confirmed: Option<Action>,
+    pushing: bool,
+    staged: Staged,
+    written: &mut Option<CommitOid>,
+) -> Result<Landed> {
+    let branch = &ctx.cfg.publish.branch;
+    let id = group.id;
     let ran = check(ctx.cfg, &staged.worktree)?;
     // Step 6: the first visible write.
     let expected = chain.top.clone();
-    let r = commit_into(ctx.git, branch, &staged, &base, expected.as_ref(), &message(ctx, group), written);
+    let r = commit_into(ctx.git, branch, &staged, base, expected.as_ref(), &message(ctx, group), written);
     if let Some(c) = written.as_ref() {
         let head_moved = matches!(&r, Err(e) if e.detail.as_ref().and_then(|d| d.get("reason")) == Some(&json!("head_moved")));
         if r.is_ok() || head_moved {
@@ -435,10 +621,14 @@ fn locked(
     // Review-3 R3: a failure once the object exists (the chain-ref
     // transaction) still says no push was sent and how many checks ran.
     let commit = r.map_err(|e| if written.is_some() { with_landed(e, Value::Null, ran.ran) } else { e })?;
+    // rm-followups §1.6 rule 2: under the lock, the commit is each
+    // session's committed rebase target.
+    let sessions: Vec<SessionId> = group.batches.iter().map(|b| b.session.clone()).collect::<BTreeSet<_>>().into_iter().collect();
+    crate::pending::promote_published(crate::pending::Scope::of(ctx), &sessions, id, &commit, &staged.tree);
     // Step 7.
     seams::fail(ctx.git, FailPoint::BeforePush).map_err(|e| with_landed(after_write(&commit, e), Value::Null, ran.ran))?;
     let push = if pushing {
-        let out = send(ctx.git, branch, &staged.worktree, None);
+        let out = send(ctx.git, branch, &staged.worktree, confirmed_url(confirmed.as_ref()));
         let (outcome, detail) = match &out {
             Ok(PushOutcome::Pushed) => (RefOutcome::Pushed, None),
             Ok(PushOutcome::Refused(m)) => (RefOutcome::Refused, Some(m.clone())),
@@ -487,6 +677,23 @@ pub fn publish(ctx: &Ctx, group: &ReleaseGroup, confirm: Option<ConfirmToken>) -
     publish_bound(ctx, group, confirm, None)
 }
 
+/// deps-drift §2.4: removes the snapshots of the rows publish recorded
+/// (an absent one is a no-op) on every exit, unwinding included.
+struct SnapshotGuard<'a> {
+    ctx: &'a Ctx<'a>,
+    rows: std::cell::RefCell<Vec<u64>>,
+}
+
+impl Drop for SnapshotGuard<'_> {
+    fn drop(&mut self) {
+        for r in self.rows.get_mut().drain(..) {
+            if !strata_deps::remove_snapshot(self.ctx.deps.paths, self.ctx.repo, r) {
+                tracing::warn!(publish = r, "the install-input snapshot could not be removed");
+            }
+        }
+    }
+}
+
 /// [`publish`] bound to a shown plan (review H2): with `shown =
 /// Some(top)` and a push that is confirmed, the chain top read under the
 /// repo lock (after the fetch) must be `top` (`None`: no local chain);
@@ -516,37 +723,93 @@ pub fn publish_bound(
     }
     let sessions: BTreeSet<SessionId> = mine.batches.iter().map(|b| b.session.clone()).collect();
     let queue: Vec<SessionId> = sessions.iter().cloned().collect();
+    // D21: the check siblings the layout session (the smallest id) lacks,
+    // prepared with no queue place and no lock but each sibling's own; a
+    // sibling that cannot be supplied refuses before the row exists.
+    let layout = queue.first().expect("non-empty");
+    let prep = crate::siblings::prepare(ctx, Some(layout))?;
+    if !prep.missing.is_empty() {
+        return Err(crate::siblings::missing_error(ctx.repo, Some(layout), &prep.missing));
+    }
 
-    // Step 2: queue, row, lock.
-    let mut confirm = confirm;
-    let mut slot: Option<Result<(u64, Landed)>> = None;
-    ctx.locks.with_sessions(&queue, &mut || {
-        slot = Some((|| {
-            refuse_open(ctx, &sessions, None, false)?;
-            let id = ctx.store.record_publish(&mine, now())?;
-            let group = ReleaseGroup { id, batches: mine.batches.clone() };
-            let mut written: Option<CommitOid> = None;
-            let mut inner: Option<Result<Landed>> = None;
-            let r = ctx.locks.with_repo(ctx.repo, &mut || {
-                inner = Some(locked(ctx, &group, &sessions, confirm.take(), shown.as_ref(), &mut written));
-                Ok(())
-            });
-            let r = match r {
-                Err(e) => Err(e),
-                Ok(Err(e)) => Err(e),
-                Ok(Ok(())) => inner.unwrap_or_else(|| Err(unknown_with("lock", "the repo lock never ran", None, json!({})))),
-            };
-            match r {
-                Ok(l) => Ok((id, l)),
-                Err(e) => Err(close_failed(ctx, id, written.as_ref(), e)),
+    // Step 2: queue, row, lock; deps-drift §2.1: at most two rounds, the
+    // second after a cold install with no publish lock held.
+    let mut installed: Option<Installed> = None;
+    // Unwind safety: whatever R1 snapshot exists is removed when this
+    // returns or unwinds (the explicit removals below report what stays).
+    let snaps = SnapshotGuard { ctx, rows: std::cell::RefCell::new(Vec::new()) };
+    let (id, landed) = loop {
+        reconcile_unknown(ctx);
+        let select = Select::Publish { allow_install: installed.is_none(), installed: installed.as_ref() };
+        let mut row: Option<u64> = None;
+        let mut slot: Option<Result<(u64, Landed)>> = None;
+        let q = ctx.locks.with_sessions(&queue, &mut || {
+            slot = Some((|| {
+                refuse_open(ctx, &sessions, None, false)?;
+                let id = ctx.store.record_publish(&mine, now())?;
+                row = Some(id);
+                snaps.rows.borrow_mut().push(id);
+                let group = ReleaseGroup { id, batches: mine.batches.clone() };
+                let mut written: Option<CommitOid> = None;
+                let mut inner: Option<Result<Landed>> = None;
+                let r = ctx.locks.with_repo(ctx.repo, &mut || {
+                    let l = locked(ctx, &group, &sessions, confirm.as_ref(), shown.as_ref(), &mut written, &prep, select);
+                    if l.is_err() {
+                        // rm-followups §1.6 rules 3/5, still under the lock.
+                        crate::pending::resolve_failed(crate::pending::Scope::of(ctx), &queue, id, written.as_ref());
+                    }
+                    inner = Some(l);
+                    Ok(())
+                });
+                let r = match r {
+                    Err(e) => Err(e),
+                    Ok(Err(e)) => Err(e),
+                    Ok(Ok(())) => inner.unwrap_or_else(|| Err(unknown_with("lock", "the repo lock never ran", None, json!({})))),
+                };
+                match r {
+                    Ok(l) => Ok((id, l)),
+                    Err(e) => {
+                        if written.is_none() {
+                            for s in &queue {
+                                crate::pending::clear_plan(crate::pending::Scope::of(ctx), s, id);
+                            }
+                        }
+                        Err(close_failed(ctx, id, written.as_ref(), e))
+                    }
+                }
+            })());
+            Ok(())
+        });
+        let r = q.and_then(|q| q).and_then(|()| {
+            slot.take().unwrap_or_else(|| Err(unknown_with("queue", "the session queue never ran", None, json!({}))))
+        });
+        match r {
+            Ok(x) => break x,
+            Err(e) if installed.is_none() && crate::deps_select::is_install_needed(&e) && row.is_some() => {
+                installed = Some(crate::deps_select::cold_install(ctx, &e, row.expect("row"))?);
             }
-        })());
-        Ok(())
-    })??;
-    let (id, landed) = slot.unwrap_or_else(|| Err(unknown_with("queue", "the session queue never ran", None, json!({}))))?;
+            Err(mut e) => {
+                // §2.2: a snapshot that no cold install uses; what stays
+                // (this one, or R1's after a cold install) is reported.
+                let left = row
+                    .and_then(|r| crate::deps_select::remove_snapshot_warning(ctx, r))
+                    .or_else(|| installed.as_ref().and_then(|i| i.left.clone()));
+                if let Some(w) = left
+                    && let Some(d) = e.detail.get_or_insert_with(|| json!({})).as_object_mut()
+                {
+                    d.insert("deps_inputs_left".into(), w.detail);
+                }
+                return Err(e);
+            }
+        }
+    };
 
     // Step 8: lock and queue released; observe main, then the rebase.
-    let mut warnings = Vec::new();
+    let mut warnings = prep.warnings.clone();
+    warnings.extend(landed.staged.deps_warning.clone());
+    warnings.extend(installed.as_ref().and_then(|i| i.left.clone()));
+    let dw = landed.staged.deps_warning.clone();
+    let left = installed.as_ref().and_then(|i| i.left.clone());
     if let Err(e) = strata_deps::observe_main(ctx.deps, &landed.staged.tree, &landed.commit, &landed.staged.worktree) {
         warnings.push(PublishWarning { kind: WarningKind::ObserveFailed, detail: err_json(&e) });
     }
@@ -579,8 +842,12 @@ pub fn publish_bound(
         .and_then(|()| seams::fail(ctx.git, FailPoint::BeforeDone))
         .and_then(|()| remove_staged_layout(&landed.staged.worktree));
     if let Err(e) = fin {
-        let e = with_landed(after_write(&landed.commit, e), o["push"].clone(), landed.checks_ran);
+        let e = with_left(
+            with_warning(with_landed(after_write(&landed.commit, e), o["push"].clone(), landed.checks_ran), dw.as_ref()),
+            left.as_ref(),
+        );
         o["error"] = err_json(&e);
+        crate::pending::mark_unfinished(crate::pending::Scope::of(ctx), &queue, &landed.commit);
         if let Err(se) = ctx.store.set_publish_phase(id, PublishPhase::Running, PublishPhase::Unknown, Some(&o), now()) {
             tracing::warn!(publish = id, error = %se.message, "publish row could not be marked unknown");
         }
@@ -589,14 +856,25 @@ pub fn publish_bound(
     match ctx.store.set_publish_phase(id, PublishPhase::Running, PublishPhase::Done, Some(&o), now()) {
         Ok(true) => {}
         Ok(false) => {
-            return Err(unknown_with(
-                "row_moved",
-                "the publish row was not Running at the end",
-                None,
-                json!({ "publish": id, "commit": landed.commit.as_str(), "push": o["push"].clone(), "checks_ran": landed.checks_ran }),
+            return Err(with_left(
+                with_warning(
+                    unknown_with(
+                        "row_moved",
+                        "the publish row was not Running at the end",
+                        None,
+                        json!({ "publish": id, "commit": landed.commit.as_str(), "push": o["push"].clone(), "checks_ran": landed.checks_ran }),
+                    ),
+                    dw.as_ref(),
+                ),
+                left.as_ref(),
             ));
         }
-        Err(e) => return Err(with_landed(after_write(&landed.commit, e), o["push"].clone(), landed.checks_ran)),
+        Err(e) => {
+            return Err(with_left(
+                with_warning(with_landed(after_write(&landed.commit, e), o["push"].clone(), landed.checks_ran), dw.as_ref()),
+                left.as_ref(),
+            ));
+        }
     }
     Ok(Published { id, commit: landed.commit, checks_ran: landed.checks_ran, push: landed.push, warnings, rebases })
 }

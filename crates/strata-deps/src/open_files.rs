@@ -249,7 +249,8 @@ fn holds_of(pid: i32, keep: &dyn Fn(&[u8]) -> bool, with_own_evt: bool) -> Resul
         }
         // The calling process's own event-only descriptors (FSEvents opens
         // the watch root and its ancestors `O_EVTONLY` for
-        // `kFSEventStreamCreateFlagWatchRoot`): they never keep a file busy
+        // `kFSEventStreamCreateFlagWatchRoot`, which strata-apfs no longer
+        // sets since 2026-10-27; kept for any other): they never keep a file busy
         // and belong to the daemon's own Trackers, which it drops itself
         // [实现时补的决定].
         let evt = info.pfi.fi_openflags & libc::O_EVTONLY as u32 != 0;
@@ -325,6 +326,16 @@ fn command_of(pid: i32) -> String {
 /// Every open file under `dir` (§5.11).
 pub fn open_files(dir: &Path) -> Result<Vec<OpenFile>> {
     scan(&[dir])?.pop().expect("one result per dir")
+}
+
+/// Every open file under any of `dirs`, from one pass over the processes
+/// (rm-followups R4); any per-directory failure is the error.
+pub fn open_files_many(dirs: &[&Path]) -> Result<Vec<OpenFile>> {
+    let mut out = Vec::new();
+    for r in scan(dirs)? {
+        out.extend(r?);
+    }
+    Ok(out)
 }
 
 /// The batch form: one pass over the processes for several directories.

@@ -792,20 +792,20 @@ fn move_workspace_keeps_old_tree_while_in_use() {
         let n = intents(&fx, &id).last().unwrap().n;
         let kept = |s: &Sessions<'_>| {
             warnings(s, &id).into_iter().find_map(|x| match x {
-                StatusWarning::OldTreeKept { path, n: k, holders, changed, retained } => {
+                StatusWarning::OldTreeKept { path, n: k, holders, changed, retained, .. } => {
                     Some((path, k, holders, changed, retained))
                 }
                 _ => None,
             })
         };
         let (path, k, holders, ch, retained) = kept(&s).expect("OldTreeKept");
-        assert_eq!((path.clone(), k, ch, retained), (old.clone(), n, false, false));
+        assert_eq!((path.clone(), k, ch, retained), (old.clone(), n, Some(false), false));
         assert!(holders.iter().any(|h| h.pid == holder.pid()), "{holders:?}");
 
         if changed {
             fs::write(old.join("src/late.ts"), b"late\n").unwrap();
             let (_, _, _, ch, _) = kept(&s).unwrap();
-            assert!(ch, "a write into the old tree reads as changed");
+            assert_eq!(ch, Some(true), "a write into the old tree reads as changed");
         }
         drop(holder);
         let to2 = target(&fx, &s, "tool", &[("src/up2.ts", b"up\n")]);
@@ -819,6 +819,56 @@ fn move_workspace_keeps_old_tree_while_in_use() {
             assert!(!admin(&fx, &id, "tool", 1).exists(), "with its admin dir");
             assert!(kept(&s).is_none());
         }
+    }
+}
+
+/// Review P1-14 (GS-01): an ignored file edited in the old tree after the
+/// carry took it (before the swap) is not in the new tree; the old tree
+/// must be kept, not retired. Both a carried file and a file inside a
+/// directory carried whole; and, as the control, no edit → retired.
+#[test]
+fn move_workspace_keeps_old_tree_with_a_late_ignored_edit() {
+    for late in [None, Some("late.env"), Some("build/out.txt")] {
+        let fx = Fx::with(&["tool"]);
+        let s = fx.sessions();
+        ignore(&fx, "tool", "late.env\nbuild/\n");
+        let rep = new_tool(&fx, &s);
+        let id = id(&rep);
+        let w = ws(&rep, "tool");
+        fs::write(w.join("late.env"), b"v1\n").unwrap();
+        fs::create_dir_all(w.join("build")).unwrap();
+        fs::write(w.join("build/out.txt"), b"v1\n").unwrap();
+        let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
+        s.arm(SessionSeam::PauseAt { phase: "move.recheck".into() });
+        let r = std::thread::scope(|sc| {
+            let h = sc.spawn(|| mv(&fx, &s, &id, &to));
+            s.wait_paused();
+            if let Some(p) = late {
+                fs::write(w.join(p), b"v2\n").unwrap();
+            }
+            s.release();
+            h.join().unwrap().unwrap()
+        });
+        assert!(r.uncarried.is_empty(), "{r:?}");
+        let Some(p) = late else {
+            assert!(r.old_tree.is_none(), "nothing late: the old tree goes ({r:?})");
+            assert_eq!(fs::read(w.join("late.env")).unwrap(), b"v1\n");
+            continue;
+        };
+        let old = r.old_tree.clone().unwrap_or_else(|| panic!("{p}: the old tree is kept ({r:?})"));
+        assert_eq!(fs::read(old.join(p)).unwrap(), b"v2\n", "{p}: the late edit survives in the old tree");
+        assert_eq!(fs::read(w.join(p)).unwrap(), b"v1\n", "{p}: the new tree has what the carry took");
+        let n = intents(&fx, &id).last().unwrap().n;
+        assert_eq!(intent(&fx, &id, n).old_tree.as_deref(), Some(old.as_path()), "{p}: retained");
+        let kept = warnings(&s, &id).into_iter().find_map(|x| match x {
+            StatusWarning::OldTreeKept { changed, retained, .. } => Some((changed, retained)),
+            _ => None,
+        });
+        assert_eq!(kept, Some((Some(true), true)), "{p}");
+        // A later move does not collect it either.
+        let to2 = target(&fx, &s, "tool", &[("src/up2.ts", b"up\n")]);
+        mv(&fx, &s, &id, &to2).unwrap();
+        assert!(old.join(p).is_file(), "{p}: still kept after the next move");
     }
 }
 
@@ -1170,4 +1220,139 @@ fn base_generation_never_modified_in_place() {
     let set_after: Vec<_> = set0.dirs.iter().map(|d| picture(&dir0.join(d.as_str()))).collect();
     assert_eq!(set_after, set_pics);
     assert_eq!(picture(&fx.store().base_dir(&to.0)).iter().find(|e| e.0 == "src/up.ts").unwrap().5, b"up\n");
+}
+
+// ------------------------------------------- status-perf A1: old-tree verdicts
+
+fn old_kept(s: &Sessions<'_>, id: &SessionId) -> Option<StatusWarning> {
+    warnings(s, id).into_iter().find(|x| matches!(x, StatusWarning::OldTreeKept { .. }))
+}
+
+fn old_key(id: &SessionId, n: u64) -> strata_session::OldTreeKey {
+    strata_session::OldTreeKey { session: id.clone(), repo: repo_name("tool"), n }
+}
+
+fn no_stop() -> Arc<std::sync::atomic::AtomicBool> {
+    Arc::new(std::sync::atomic::AtomicBool::new(false))
+}
+
+/// Deferred status never judges: no verdict → `changed: null`,
+/// `unchecked: true`, no holders, and the intent is queued; the background
+/// check then retires the idle unchanged tree with its admin dir, and the
+/// table is only a hint (status after it reports nothing).
+#[test]
+fn deferred_status_queues_and_the_background_check_retires() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = new_tool(&fx, &s);
+    let id = id(&rep);
+    let w = ws(&rep, "tool");
+    let holder = Holder::cwd(&w.join("src"));
+    std::thread::sleep(Duration::from_millis(100));
+    let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
+    let old = mv(&fx, &s, &id, &to).unwrap().old_tree.expect("kept while in use");
+    let n = intents(&fx, &id).last().unwrap().n;
+    s.set_old_tree_mode(strata_session::OldTreeMode::Deferred);
+    let w0 = old_kept(&s, &id).expect("OldTreeKept");
+    let StatusWarning::OldTreeKept { holders, changed, unchecked, checked_at, .. } = &w0 else { unreachable!() };
+    assert!(holders.is_empty() && changed.is_none() && *unchecked && checked_at.is_none(), "{w0:?}");
+    let v = serde_json::to_value(&w0).unwrap();
+    assert_eq!(v["changed"], serde_json::Value::Null, "{v}");
+    assert_eq!(v["unchecked"], true, "{v}");
+    let (k, p, i) = s.next_old_tree(Duration::ZERO).expect("queued");
+    assert_eq!((k.clone(), p.clone()), (old_key(&id, n), old.clone()));
+    assert!(s.next_old_tree(Duration::ZERO).is_none(), "queued once");
+
+    // Held: a verdict with the holders, not retired.
+    let out = s.check_old_tree(&k, &p, i, &no_stop()).unwrap();
+    assert!(
+        matches!(&out, strata_session::OldTreeOutcome::Kept { holders, changed: Some(false) } if !holders.is_empty()),
+        "{out:?}"
+    );
+    assert!(old.is_dir());
+    let w1 = old_kept(&s, &id).expect("still kept");
+    let StatusWarning::OldTreeKept { holders, changed, unchecked, checked_at, .. } = &w1 else { unreachable!() };
+    assert!(holders.iter().any(|h| h.pid == holder.pid()), "{w1:?}");
+    assert_eq!((*changed, *unchecked, checked_at.is_some()), (Some(false), false, true), "{w1:?}");
+    assert!(serde_json::to_value(&w1).unwrap()["checked_at"].is_string());
+    assert!(s.next_old_tree(Duration::ZERO).is_none(), "a fresh verdict is not queued again");
+
+    // Idle: the cached `changed:false` is not trusted, the judgement is
+    // made again, then retired.
+    drop(holder);
+    let out = s.check_old_tree(&k, &p, i, &no_stop()).unwrap();
+    assert_eq!(out, strata_session::OldTreeOutcome::Retired);
+    assert!(!old.exists(), "retired");
+    assert!(!admin(&fx, &id, "tool", 1).exists(), "with its admin dir");
+    assert!(s.old_tree_verdict(&k).is_none());
+    assert!(old_kept(&s, &id).is_none());
+}
+
+/// A changed tree gets `changed: true` and is never retired; a stop gives
+/// up without a verdict; an intent that no longer matches is dropped.
+#[test]
+fn background_check_keeps_changed_trees_and_honours_stop() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = new_tool(&fx, &s);
+    let id = id(&rep);
+    let w = ws(&rep, "tool");
+    let holder = Holder::cwd(&w.join("src"));
+    std::thread::sleep(Duration::from_millis(100));
+    let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
+    let old = mv(&fx, &s, &id, &to).unwrap().old_tree.expect("kept while in use");
+    drop(holder);
+    let n = intents(&fx, &id).last().unwrap().n;
+    let k = old_key(&id, n);
+    let i = ino(&old);
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let out = s.check_old_tree(&k, &old, i, &stop).unwrap();
+    assert_eq!(out, strata_session::OldTreeOutcome::Skipped("stopped"));
+    assert!(old.is_dir() && s.old_tree_verdict(&k).is_none(), "a stop writes nothing, retires nothing");
+
+    let out = s.check_old_tree(&k, &old, i + 1, &no_stop()).unwrap();
+    assert_eq!(out, strata_session::OldTreeOutcome::Skipped("intent_changed"));
+    let out = s.check_old_tree(&old_key(&id, n + 7), &old, i, &no_stop()).unwrap();
+    assert_eq!(out, strata_session::OldTreeOutcome::Skipped("no_intent"));
+
+    fs::write(old.join("src/late.ts"), b"late\n").unwrap();
+    let out = s.check_old_tree(&k, &old, i, &no_stop()).unwrap();
+    assert_eq!(out, strata_session::OldTreeOutcome::Kept { holders: vec![], changed: Some(true) });
+    assert!(old.is_dir(), "a changed tree is never retired");
+    assert_eq!(s.old_tree_verdict(&k).map(|v| v.changed), Some(true));
+    s.set_old_tree_mode(strata_session::OldTreeMode::Deferred);
+    let StatusWarning::OldTreeKept { changed, unchecked, .. } = old_kept(&s, &id).unwrap() else { unreachable!() };
+    assert_eq!((changed, unchecked), (Some(true), false));
+    s.forget_old_trees(&id);
+    assert!(s.old_tree_verdict(&k).is_none(), "forgotten after move/restore/rm");
+}
+
+/// The half-retired sweep: an old tree retired without its admin dir (a
+/// crash between the two) loses the admin dir too; the current
+/// generation's admin dir is never touched.
+#[test]
+fn half_retired_sweep_takes_only_a_stale_admin_dir() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = new_tool(&fx, &s);
+    let id = id(&rep);
+    let w = ws(&rep, "tool");
+    let holder = Holder::cwd(&w.join("src"));
+    std::thread::sleep(Duration::from_millis(100));
+    let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
+    let old = mv(&fx, &s, &id, &to).unwrap().old_tree.expect("kept while in use");
+    drop(holder);
+    let stale = admin(&fx, &id, "tool", 1);
+    assert!(stale.is_dir());
+    let gen_now = generation(&fx, &id, "tool");
+    let current = admin(&fx, &id, "tool", gen_now);
+    assert!(current.is_dir());
+    assert!(s.sweep_half_retired(&id, &repo_name("tool")).unwrap().is_empty(), "the old tree is still there");
+    fx.store().retire_dir(&old).unwrap();
+    let done = s.sweep_half_retired(&id, &repo_name("tool")).unwrap();
+    assert_eq!(done, vec![stale.clone()]);
+    assert!(!stale.exists() && current.is_dir(), "only the stale admin dir");
+    assert!(s.sweep_half_retired(&id, &repo_name("tool")).unwrap().is_empty(), "idempotent");
+    assert_eq!(health(&s, &id), WorkspaceHealth::Ok);
 }

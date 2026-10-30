@@ -219,6 +219,27 @@ pub fn seed_files(plan: &[SeedSource], to: &Path) -> Result<Vec<SeedRecord>> {
     Ok(out)
 }
 
+/// Where tauri-connector's discovery looks for its `.connector.json` (its
+/// pid file), relative to a `target` directory.
+const CONNECTOR_FILES: [&str; 3] = [".connector.json", "debug/.connector.json", "release/.connector.json"];
+
+/// dev-ports §3.6: a seed cache named `target` was cloned from the main
+/// checkout, so it may carry that app's `.connector.json`; drop it so a fresh
+/// workspace never advertises another app's ports. Absent files are fine.
+pub(crate) fn drop_connector_files(ws: &Path, cache: &RepoPath) -> Result<()> {
+    if cache.as_str().rsplit('/').next() != Some("target") {
+        return Ok(());
+    }
+    for f in CONNECTOR_FILES {
+        match strata_apfs::remove_rooted(ws, &crate::sys::rp(format!("{cache}/{f}")), strata_apfs::RemoveKind::File) {
+            Ok(()) => {}
+            Err(e) if e.code == Code::NoSuchPath => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// `a`, `a/b`, … for `a/b/c` (proper ancestors, outermost first).
 pub(crate) fn ancestors(p: &RepoPath) -> Vec<RepoPath> {
     let s = p.as_str();
@@ -397,4 +418,30 @@ fn refresh_one(git: &Git, ws: &Path, repo: &strata_types::RepoName, s: &SeedReco
     }
     strata_apfs::remove_rooted(layout, &tmp, strata_apfs::RemoveKind::File)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connector_files_are_dropped_only_from_target_caches() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(d.path()).unwrap();
+        for dir in ["src-tauri/target/debug", "node_modules"] {
+            std::fs::create_dir_all(ws.join(dir)).unwrap();
+        }
+        for f in ["src-tauri/target/.connector.json", "src-tauri/target/debug/.connector.json", "node_modules/.connector.json"] {
+            std::fs::write(ws.join(f), b"{}").unwrap();
+        }
+        // release/ is absent: fine.
+        drop_connector_files(&ws, &crate::sys::rp("src-tauri/target")).unwrap();
+        drop_connector_files(&ws, &crate::sys::rp("node_modules")).unwrap();
+        assert!(!ws.join("src-tauri/target/.connector.json").exists());
+        assert!(!ws.join("src-tauri/target/debug/.connector.json").exists());
+        assert!(ws.join("src-tauri/target/debug").is_dir());
+        assert!(ws.join("node_modules/.connector.json").exists(), "not a target cache");
+        // a missing cache dir is fine too
+        drop_connector_files(&ws, &crate::sys::rp("target")).unwrap();
+    }
 }

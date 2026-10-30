@@ -5,7 +5,7 @@ use std::time::{Instant, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BlobId, CheckpointId, CommitOid, DepsSetId, ProposalId, RepoId, RepoName, RepoPath, SessionId,
+    AgentName, BlobId, CheckpointId, CommitOid, DepsSetId, ProposalId, RepoId, RepoName, RepoPath, SessionId,
     TreeOid,
 };
 
@@ -115,6 +115,10 @@ pub struct SessionManifest {
     pub id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// The AI agent that created the session (CLI detection or `--agent`);
+    /// absent for sessions from before schema v2 or with no agent detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentName>,
     pub root: PathBuf,
     pub repos: BTreeMap<RepoName, WorkspaceState>,
 }
@@ -137,8 +141,52 @@ pub struct ConfirmToken {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Action {
-    PushDeploy { repo: RepoName, branch: String },
+    /// `url`: origin's effective push URL, read before the prompt and shown
+    /// on it (userinfo redacted, [`display_url`]); the push goes to exactly
+    /// it, and a different URL under the repo lock is `NotConfirmed`
+    /// (`remote_changed`). Serialized redacted too (store records, error
+    /// details never hold a token); empty only in a record written before
+    /// review P1-15 (`serde(default)`). [实现时补的决定]
+    PushDeploy {
+        repo: RepoName,
+        branch: String,
+        #[serde(default, serialize_with = "ser_display_url")]
+        url: String,
+    },
     DepsApprove { proposal: ProposalId },
-    RemoveDiscard { session: SessionId },
+    /// `kept_trees`: rm-followups §1.4 G4 item 5, the kept pre-move trees
+    /// with a late-write notice the discard also throws away (read before
+    /// the prompt and named on it; `rm` binds the token to the same list).
+    RemoveDiscard {
+        session: SessionId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        kept_trees: Vec<KeptTreeRef>,
+    },
     ConfigRelax { repo: RepoId },
+}
+
+/// A kept pre-move tree named on `rm --discard`'s prompt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptTreeRef {
+    pub path: String,
+    /// Late-written files in it (0: its activity baseline is unreadable).
+    pub count: u64,
+}
+
+/// A push URL as shown to a person (prompt, plan, error detail): the
+/// userinfo of a `scheme://userinfo@host/...` URL (which may hold a token)
+/// becomes `***`; anything else is kept as is. The binding itself always
+/// compares the full URL. [实现时补的决定] (review P1-15)
+pub fn display_url(url: &str) -> String {
+    let Some(i) = url.find("://") else { return url.to_string() };
+    let rest = &url[i + 3..];
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => format!("{}***{}", &url[..i + 3], &rest[at..]),
+        None => url.to_string(),
+    }
+}
+
+fn ser_display_url<S: serde::Serializer>(url: &str, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&display_url(url))
 }

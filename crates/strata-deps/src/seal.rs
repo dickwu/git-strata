@@ -55,6 +55,7 @@ pub(crate) fn lock_build(ctx: &Ctx, lay: &Layout, id: &DepsSetId) -> Result<Buil
     let lock_path = lay.deps.join(rel.as_str());
     let start = Instant::now();
     let mut interval = POLL_START;
+    let mut told = false;
     loop {
         // SAFETY: flock on a descriptor we own.
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -64,7 +65,12 @@ pub(crate) fn lock_build(ctx: &Ctx, lay: &Layout, id: &DepsSetId) -> Result<Buil
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
             Some(libc::EINTR) => continue,
-            Some(libc::EWOULDBLOCK) => {}
+            Some(libc::EWOULDBLOCK) => {
+                if !told {
+                    told = true;
+                    seams::build_lock_busy();
+                }
+            }
             _ => {
                 return Err(strata_apfs::classify_io_error(
                     &err,

@@ -3,13 +3,16 @@
 //! goes to stderr only. The binary never runs `git` itself and never
 //! calls strata-confirm (§1): confirmations happen in the daemon.
 
+pub mod agent;
 pub mod args;
 pub mod cmds;
 pub mod confirm;
 pub mod ctx;
+pub mod devports;
 pub mod env;
 pub mod envelope;
 mod help;
+pub mod interrupt;
 pub mod launch;
 pub mod local;
 pub mod ro;
@@ -24,7 +27,7 @@ use clap::error::ErrorKind;
 use serde_json::json;
 use strata_types::{Code, StrataError};
 
-use crate::args::{Cli, Cmd, ConfigCmd, DaemonCmd, DepsCmd};
+use crate::args::{Cli, Cmd, ConfigCmd, DaemonCmd, DepsCmd, SessionCmd};
 use crate::ctx::Ctx;
 use crate::envelope::{Envelope, emit_stdout};
 
@@ -47,7 +50,13 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
             _ => return emit_stdout(&Envelope::err(parse_error(&argv, &e))),
         },
     };
+    // status-perf C: `ls --table` prints a table instead of a successful
+    // envelope (a stated exception to D19); errors stay envelopes.
+    let table = matches!(cli.cmd, Cmd::Ls { table: true });
     let mut env = dispatch(cli.cmd);
+    if table && env.ok {
+        return cmds::emit_table(&env);
+    }
     // D20: on success, the proposals still Pending for the session the
     // command resolved go into `data.pending_proposals` (before the
     // envelope is written); a failed read changes nothing.
@@ -68,7 +77,8 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
             m.insert("pending_proposals".into(), serde_json::Value::Array(pending));
         }
     }
-    emit_stdout(&env)
+    let code = emit_stdout(&env);
+    interrupt::exit_override().unwrap_or(code)
 }
 
 static HINT: std::sync::Mutex<Option<strata_types::SessionId>> = std::sync::Mutex::new(None);
@@ -137,8 +147,11 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Resolve { session, repo, abandon, accept } => c::resolve(&ctx, &session, &repo, abandon, accept),
         Cmd::Chain { repo, accept_origin, restore } => c::chain(&ctx, &repo, accept_origin, restore),
         Cmd::Config(ConfigCmd::Relax { repo }) => c::config_relax(&ctx, &repo),
-        Cmd::New { ticket_flag, ticket, repos } => cmds::new(&ctx, ticket_flag, ticket, &repos),
-        Cmd::Status { sel } => cmds::status(&ctx, &sel),
+        Cmd::New { ticket_flag, ticket, repo, repos, agent } => cmds::new(&ctx, ticket_flag, ticket, &repo, &repos, agent.as_deref()),
+        Cmd::Add { session, repo } => cmds::add(&ctx, session, &repo),
+        Cmd::Status { sel, brief: true } => cmds::status_brief(&ctx, &sel),
+        Cmd::Status { sel, brief: false } => cmds::status(&ctx, &sel),
+        Cmd::Ls { .. } => cmds::ls(&ctx),
         Cmd::Checkpoint { tool_call, message, session, paths } => cmds::checkpoint(&ctx, tool_call, message, session, &paths),
         Cmd::Restore { checkpoint, paths, session } => cmds::restore(&ctx, &checkpoint, &paths, session),
         Cmd::Grep { pattern, sel } => cmds::grep(&ctx, &pattern, &sel),
@@ -146,10 +159,18 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Diff { base, session, between, repo } => cmds::diff(&ctx, base, session, between, repo),
         Cmd::Deps(DepsCmd::Propose { session, repo, switch }) => cmds::deps_propose(&ctx, session, repo, switch),
         Cmd::Deps(DepsCmd::List { repo }) => cmds::deps_list(&ctx, repo),
-        Cmd::Gc => cmds::gc(&ctx),
+        Cmd::Gc { store, dry_run } => cmds::gc(&ctx, store, dry_run),
         Cmd::Du { refresh } => cmds::du(&ctx, refresh),
         Cmd::Daemon(DaemonCmd::Start) => launch::start(&ctx.paths.home),
-        Cmd::Daemon(DaemonCmd::Stop) => launch::stop(),
+        Cmd::Daemon(DaemonCmd::Stop) => launch::stop(&ctx.paths.home),
         Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status(),
+        Cmd::Session(SessionCmd::Ports { session, repo, all, check, reassign }) => devports::ports(
+            &ctx,
+            &devports::PortsArgs { session: session.as_deref(), repo: repo.as_deref(), all, check, reassign },
+        ),
+        Cmd::Session(SessionCmd::Exec { session, repo, tauri, no_check, cmd }) => devports::exec(
+            &ctx,
+            &devports::ExecArgs { session: session.as_deref(), repo: repo.as_deref(), tauri, no_check, cmd: &cmd },
+        ),
     }
 }

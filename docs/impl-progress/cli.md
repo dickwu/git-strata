@@ -101,7 +101,7 @@ Not merged.
   `files`, `diff`, `deps list` and `daemon status` (the RPC table's
   read-only rows plus `daemon status`, which reports `running:false`).
   Every other command is `Busy`, `detail.reason = "daemon_down"` (D2),
-  with "run `git-strata daemon start`" in the message. `checkpoint` is a
+  with "ask the human to run `git-strata daemon start`" in the message. `checkpoint` is a
   write, so the hook is `Busy daemon_down` too.
 - **Base-mode `diff` is always local** (the overlay against base, read
   from the workspace and store); `diff --between` uses the daemon when it
@@ -131,8 +131,11 @@ Not merged.
 - **Hook path set.** A hook payload whose paths map to no tracked repo
   checkpoints every tracked repo of the session (full checkpoint).
 - **`daemon status`** holders include the method and session.
-- **`daemon start|stop`** run `launchctl` from `PATH` (tests put a fake
-  first; nothing is loaded into the real domain). `start` needs the plist
+- **`daemon start|stop`** run `launchctl` from `PATH` through the
+  `launch::Launchctl` seam (unit tests mock it; the one integration test
+  runs with a recorder-only PATH and expects zero calls). D38: only when
+  HOME is the login home (`foreign_home` otherwise, before any launchctl)
+  and only on an agent loaded from this home's plist (`foreign_agent`). `start` needs the plist
   (`InvalidInput` `no_plist`); `stop` does not. Already loaded / not loaded
   → `{already:true}`. A launchctl failure is `Unknown`, reason
   `launchctl`. Neither touches the socket.
@@ -167,3 +170,9 @@ Not merged.
   ID` wins over `tool_use_id`. cli.md §3.5 hook command is now
   `git-strata checkpoint --tool-call`. Test:
   `hook_tool_call_id_comes_from_stdin_tool_use_id`.
+
+### dev-ports (D37, 2026-10-28)
+
+- `session ports [--session S] [--repo R] [--all] [--check] [--reassign]` and `session exec [--session S] [--repo R] [--tauri] [--no-check] -- CMD...` (crates/git-strata/src/devports.rs); `PortInUse` error code (40 codes).
+- Unit tests: `env_and_app_root`, `direct_launchers_get_the_patch_before_the_app_separator`, `package_scripts_must_be_literal_tauri_dev`, `states_follow_listeners_then_the_probe`, `judge_follows_the_action_table`, `lsof_fields_parse_per_process`.
+- Integration (tests/devports.rs): `ports_are_leased_at_new_read_without_the_daemon_and_exec_runs_with_them`, `selection_errors`, `tauri_gets_the_dev_url_patch_and_scripts_are_checked`, `the_check_reassign_and_an_own_server`, `an_old_daemon_cannot_reassign`.

@@ -140,6 +140,22 @@ fn ensure_base_builds_outside_the_lock() {
     assert!(fx.store().has_base_gen(&g).unwrap());
     assert_eq!(fx.sb.install_count(), installs, "ensure_base_for never installs");
 
+    // rm-followups §1.6 T2: inside `no_wait` a held repo lock is `Busy`
+    // at once; nothing is registered and the staging is retired.
+    let h3 = commit_oid(&fx.sb.commit(&main, &[("nowait.txt", b"n\n")], "nowait"));
+    let t3 = fx.gits[&tool].tree_of(&h3).unwrap();
+    let g3 = BaseGen { repo: tool.clone(), tree: t3.clone(), deps: g2.deps.clone() };
+    {
+        let _guard = fx.lock.hold("tool");
+        let t0 = Instant::now();
+        let e = s.no_wait(|| s.ensure_base_for(&tool, &t3, &g2.deps)).unwrap_err();
+        assert_eq!(e.code, Code::Busy, "{e:?}");
+        assert!(t0.elapsed() < Duration::from_secs(5), "no wait: {:?}", t0.elapsed());
+        assert!(!fx.store().has_base_gen(&g3).unwrap());
+        assert!(staging_empty(&fx, "tool"));
+    }
+    assert_eq!(s.ensure_base_for(&tool, &t3, &g2.deps).unwrap(), g3, "outside no_wait it waits as before");
+
     let unsealed = DepsSetId::try_from("ab".repeat(32)).unwrap();
     let e = s.ensure_base_for(&tool, &tree, &unsealed).unwrap_err();
     assert_eq!(e.code, Code::InvalidInput, "{e:?}");

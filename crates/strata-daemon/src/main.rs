@@ -34,6 +34,14 @@ fn run() -> Result<(), StrataError> {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
     }
+    // Incident 2026-10-27: launchd's default soft descriptor limit (256)
+    // ran out with 25 live workspaces (each watcher holds ~8). Raise it
+    // before anything is opened.
+    match startup::raise_fd_limit() {
+        Ok((before, after)) if after > before => (opts.alert)(&format!("raised the open-file limit from {before} to {after}")),
+        Ok(_) => {}
+        Err(e) => (opts.alert)(&format!("cannot raise the open-file limit: {e}")),
+    }
     // 2. Single instance, held across the store wait below.
     let mut instance = Some(InstanceLock::take(&strata_daemon::lock_path(&opts.config_dir))?);
     let open_git = |p: &std::path::Path| strata_gitio::Git::open(p);
@@ -42,8 +50,16 @@ fn run() -> Result<(), StrataError> {
     // backoff instead of exiting into a launchd KeepAlive respawn loop.
     // Meanwhile the socket answers Busy / store_unavailable.
     let state = WaitState::default();
-    let mut waiting: Option<Waiting> = None;
     let alert = opts.alert.clone();
+    // Review P1-6: answer `Busy starting` before the first attempt, which
+    // may itself stall in a syscall while TCC decides.
+    let mut waiting: Option<Waiting> = match waiting::answer_early(&opts.socket, &state) {
+        Ok(w) => Some(w),
+        Err(m) => {
+            alert(&format!("cannot answer on the socket while starting: {m}"));
+            None
+        }
+    };
     let got = waiting::wait_until(
         || startup::prepare_locked(opts.clone(), strata_confirm::Confirmer::new(), &open_git, &mut instance),
         Policy::PRODUCTION,
@@ -52,9 +68,7 @@ fn run() -> Result<(), StrataError> {
         &mut |e, n, wait| {
             state.failed(e, n, wait);
             if waiting.is_none() {
-                match startup::bind(&opts.socket).map_err(|e| e.message).and_then(|l| {
-                    Waiting::start(l, state.clone()).map_err(|e| e.to_string())
-                }) {
+                match waiting::answer_early(&opts.socket, &state) {
                     Ok(w) => waiting = Some(w),
                     Err(m) => alert(&format!("cannot answer on the socket while waiting: {m}")),
                 }
@@ -80,6 +94,9 @@ fn run() -> Result<(), StrataError> {
     state.starting();
     let result = (|| {
         let daemon = Daemon::start(&core)?;
+        // session.md D53: back-to-back `new`/`add` reuse a fetch younger
+        // than this (publish fetches for itself). Tests keep the default 0.
+        daemon.sessions.set_fetch_window(strata_session::NEW_FETCH_WINDOW);
         // The waiting socket, when there was one, becomes the real one.
         let listener = match waiting.take().and_then(Waiting::finish) {
             Some(l) => l,

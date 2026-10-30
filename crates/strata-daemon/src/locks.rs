@@ -234,6 +234,10 @@ impl Locks {
         Holder { method, session, since: SystemTime::now(), started: Instant::now() }
     }
 
+    fn holder_as(method: &str) -> Holder {
+        Holder { method: method.into(), session: None, since: SystemTime::now(), started: Instant::now() }
+    }
+
     fn take_error(&self, e: TakeError, what: serde_json::Value, waited: Duration) -> StrataError {
         match e {
             TakeError::ShuttingDown => StrataError::new(Code::ReadOnly, "the daemon is shutting down")
@@ -253,6 +257,17 @@ impl Locks {
 
     /// Run `f` while holding `repo`'s write lock.
     pub fn with_repo<T>(&self, repo: &RepoName, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.repo_take(repo, None, f)
+    }
+
+    /// rm-followups §1.6 T2: [`Locks::with_repo`] only if the lock is free
+    /// right now; else `Busy` (`reason: "lock_wait"`), nothing ran. The
+    /// holder shows as `holder` (`catch_up`).
+    pub fn try_repo<T>(&self, repo: &RepoName, holder: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.repo_take(repo, Some(holder), f)
+    }
+
+    fn repo_take<T>(&self, repo: &RepoName, try_as: Option<&str>, f: impl FnOnce() -> Result<T>) -> Result<T> {
         let Some(fifo) = self.repos.get(repo) else {
             return Err(StrataError::new(Code::NoSuchRepo, format!("no repo {repo}"))
                 .with_detail(json!({ "repo": repo.as_str() })));
@@ -262,9 +277,12 @@ impl Locks {
             return Err(StrataError::new(Code::Busy, format!("the write lock of {repo} is already held by this request"))
                 .with_detail(json!({ "reason": "reentrant", "repo": repo.as_str() })));
         }
-        let bound = take_bound(self.wait);
+        let (bound, holder) = match try_as {
+            None => (take_bound(self.wait), Self::holder_now()),
+            Some(m) => (Some(Duration::ZERO), Self::holder_as(m)),
+        };
         let t0 = Instant::now();
-        fifo.acquire(bound, &self.closed, Self::holder_now())
+        fifo.acquire(bound, &self.closed, holder)
             .map_err(|e| self.take_error(e, json!({ "repo": repo.as_str() }), t0.elapsed()))?;
         CTX.with(|c| {
             if let Some(x) = c.borrow_mut().as_mut() {
@@ -296,6 +314,13 @@ impl Locks {
         self.sessions_bounded(ids, None, f)
     }
 
+    /// rm-followups §1.6 T2: [`Locks::with_sessions`] where every place is
+    /// taken only if free right now; else `Busy` (`reason: "lock_wait"`)
+    /// and the places already taken are released.
+    pub fn try_sessions<T>(&self, ids: &[SessionId], holder: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.sessions_take(ids, None, Some(holder), f)
+    }
+
     /// [`Locks::with_sessions`] where every take of this call, not only the
     /// request's first, waits at most until `deadline` (review-2 N5: one
     /// overall bound across a wait that may take the queue more than once).
@@ -305,6 +330,16 @@ impl Locks {
     }
 
     fn sessions_bounded<T>(&self, ids: &[SessionId], deadline: Option<Instant>, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.sessions_take(ids, deadline, None, f)
+    }
+
+    fn sessions_take<T>(
+        &self,
+        ids: &[SessionId],
+        deadline: Option<Instant>,
+        try_as: Option<&str>,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
         let want: BTreeSet<SessionId> = ids.iter().cloned().collect();
         let fifos: Vec<(SessionId, Arc<Fifo>)> = want
             .into_iter()
@@ -316,13 +351,19 @@ impl Locks {
             .collect();
         let mut guards: Vec<Held<'_>> = Vec::new();
         for (id, fifo) in &fifos {
-            let first = take_bound(self.wait);
-            let bound = match deadline {
-                Some(d) if !is_visible() => Some(d.saturating_duration_since(Instant::now())),
-                _ => first,
+            let (bound, holder) = match try_as {
+                Some(m) => (Some(Duration::ZERO), Holder { session: Some(id.clone()), ..Self::holder_as(m) }),
+                None => {
+                    let first = take_bound(self.wait);
+                    let bound = match deadline {
+                        Some(d) if !is_visible() => Some(d.saturating_duration_since(Instant::now())),
+                        _ => first,
+                    };
+                    (bound, Self::holder_now())
+                }
             };
             let t0 = Instant::now();
-            fifo.acquire(bound, &self.closed, Self::holder_now())
+            fifo.acquire(bound, &self.closed, holder)
                 .map_err(|e| self.take_error(e, json!({ "session": id.as_str() }), t0.elapsed()))?;
             CTX.with(|c| {
                 if let Some(x) = c.borrow_mut().as_mut() {
@@ -438,6 +479,19 @@ impl strata_deps::RepoWriteLock for Locks {
             Ok(()) => Ok(inner.unwrap_or(Ok(()))),
             Err(e) => Err(e),
         }
+    }
+
+    fn try_write(
+        &self,
+        repo: &RepoName,
+        f: &mut dyn FnMut() -> strata_deps::Result<()>,
+    ) -> strata_deps::Result<strata_deps::Result<()>> {
+        let mut inner = None;
+        self.try_repo(repo, "catch_up", || {
+            inner = Some(f());
+            Ok(())
+        })?;
+        Ok(inner.unwrap_or(Ok(())))
     }
 }
 

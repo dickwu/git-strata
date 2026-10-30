@@ -73,7 +73,7 @@ fn active(env: &Env, s: &Store, id: &SessionId) {
     for (r, tracked) in [("app", true), ("lib", true), ("web", false)] {
         repos.insert(repo(r), WorkspaceState { base: g(r, '1'), head: head('1'), path: root.join(r), tracked });
     }
-    s.create_session(&SessionManifest { id: id.clone(), ticket: None, root, repos }, t(10)).unwrap();
+    s.create_session(&SessionManifest { id: id.clone(), ticket: None, agent: None, root, repos }, t(10)).unwrap();
     assert!(s.set_lifecycle(id, Lifecycle::Creating, Lifecycle::Active, None, t(11)).unwrap());
 }
 
@@ -240,7 +240,7 @@ fn ref_audit_only_strata_refs_for_update_ref() {
     c2.old = None;
     let mut c3 = change(RefOp::Push, "refs/heads/main", RefOutcome::Pushed, Some(p));
     c3.at = t(61);
-    c3.confirmed = Some(Action::PushDeploy { repo: repo("app"), branch: "main".into() });
+    c3.confirmed = Some(Action::PushDeploy { repo: repo("app"), branch: "main".into(), url: String::new() });
     c3.detail = Some("remote: ok".into());
     let mut c4 = change(RefOp::Push, "refs/heads/main", RefOutcome::Refused, None);
     c4.at = t(62);

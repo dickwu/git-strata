@@ -25,6 +25,12 @@ pub enum Seam {
     GcBatchRows { rows: u64 },
     GcPauseBeforeRows,
     GcPauseAfterBatch { n: u64 },
+    /// Next open: the schema migration fails after its statements, before COMMIT.
+    MigrateFailsBeforeCommit,
+    /// Next open: the instrumented VFS fails the migration COMMIT's WAL sync.
+    MigrateCommitSyncFails,
+    /// Next open: `process::abort()` right after the migration COMMIT.
+    MigrateAbortAfterCommit,
 }
 
 /// See store.md §3.

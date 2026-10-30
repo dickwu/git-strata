@@ -24,6 +24,15 @@ pub(crate) enum Point {
     /// Before each session's post-publish rebase: the queue and the repo
     /// lock are released, the row is still `Running` (the `publishing` gap).
     BeforeRebase,
+    /// After the check siblings were re-checked (`siblings::place`), before
+    /// the layout directory exists and they are cloned (publish.md D21).
+    AfterSiblingPlace,
+    /// deps-drift §2.4: R1 is closed and no publish lock is held, before
+    /// the cold install of the staged install inputs starts.
+    BeforeColdInstall,
+    /// deps-drift §2.4: the cold install built and sealed the set and R1's
+    /// snapshot is removed, before round 2 (no publish lock held).
+    AfterColdInstall,
 }
 
 /// Steps after `commit_tree` where a test can inject one failure
@@ -37,6 +46,15 @@ pub enum FailPoint {
     BeforeDone,
     /// Before each session's post-publish rebase.
     BeforeRebase,
+    /// Inside a check sibling's fetch section, before its anchor step
+    /// (keyed by the sibling's git; publish.md D21).
+    SiblingAnchor,
+    /// deps-drift §2.4: in place of the cold install (R1 closed, no publish
+    /// lock held), as if the daemon stopped there.
+    ColdInstall,
+    /// deps-drift §2.4: a panic in place of the cold install (the daemon
+    /// catches handler panics and keeps serving).
+    ColdInstallPanic,
 }
 
 #[cfg(feature = "test-seams")]
@@ -69,6 +87,15 @@ mod imp {
         /// Stop before a session's post-publish rebase, with the session
         /// queue and the repo lock released and the row still `Running`.
         PauseBeforeRebase,
+        /// Stop after the check siblings were re-checked, before the layout
+        /// exists and they are cloned (publish.md D21).
+        PauseAfterSiblingPlace,
+        /// Stop after R1 closed, before the cold install (deps-drift §2.4),
+        /// with no publish lock held.
+        PauseBeforeColdInstall,
+        /// Stop after the cold install, before round 2 (deps-drift §2.4),
+        /// with no publish lock held.
+        PauseAfterColdInstall,
     }
 
     #[derive(Default)]
@@ -137,6 +164,9 @@ mod imp {
             PublishFault::PauseBeforeCommit => Point::BeforeCommit,
             PublishFault::PauseAfterCommit => Point::AfterCommit,
             PublishFault::PauseBeforeRebase => Point::BeforeRebase,
+            PublishFault::PauseAfterSiblingPlace => Point::AfterSiblingPlace,
+            PublishFault::PauseBeforeColdInstall => Point::BeforeColdInstall,
+            PublishFault::PauseAfterColdInstall => Point::AfterColdInstall,
             PublishFault::PauseDuringPush => return Pause(Some(Inner::Git(git.pause_push_before_send()))),
             PublishFault::PauseBeforePushRecorded => return Pause(Some(Inner::Git(git.pause_push_before_record()))),
         };
@@ -176,6 +206,10 @@ mod imp {
         let Some(a) = t.get_mut(&key(git)) else { return Ok(()) };
         let Some(i) = a.fails.iter().position(|f| *f == at) else { return Ok(()) };
         a.fails.remove(i);
+        drop(t);
+        if at == FailPoint::ColdInstallPanic {
+            panic!("injected panic at {at:?}");
+        }
         Err(StrataError::new(Code::Unknown, format!("injected failure at {at:?}"))
             .with_detail(json!({ "reason": "injected", "at": format!("{at:?}") })))
     }

@@ -3,10 +3,11 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use strata_types::{Code, CommitOid, RepoName, SessionManifest, StrataError, TreeOid};
+use strata_types::{AgentName, Code, CommitOid, RepoName, SessionManifest, StrataError, TreeOid};
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use strata_apfs::{FileKind, IoSide, classify_io_error};
@@ -14,7 +15,7 @@ use strata_store::{Lifecycle, SeedRow};
 use strata_types::{BaseGen, RepoPath, SessionId, WorkspaceState};
 
 use crate::scene::{Scene, SceneOp, cause_of, kept_dirs, unknown_error};
-use crate::seed::{SeedSource, ancestors, seed_files, seed_plan};
+use crate::seed::{SeedSource, ancestors, drop_connector_files, seed_files, seed_plan};
 use crate::sys::{lstat, rp};
 use crate::{Result, Sessions, dispatch};
 
@@ -24,6 +25,11 @@ pub(crate) struct Plan {
     /// Seed caches to clone (tracked repos only).
     pub(crate) caches: Vec<RepoPath>,
 }
+
+/// Background workers cloning seed caches during `new`'s layout (D54).
+/// APFS runs clonefile calls on one volume one at a time (measured, D54),
+/// so more workers would not make the caches land sooner.
+const CACHE_WORKERS: usize = 1;
 
 /// `refs/strata/pins/<id>` in the main checkout (§4.2).
 pub(crate) fn pin_ref(id: &SessionId) -> String {
@@ -40,7 +46,21 @@ fn with_repo(mut e: StrataError, repo: &RepoName) -> StrataError {
     e
 }
 
+pub(crate) mod add;
 pub(crate) mod validate;
+
+/// Which repos a new session gets a workspace of (session.md D51).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layout {
+    /// Every configured repo, the requested ones tracked (design §3 sibling
+    /// layout, §6.1). The default.
+    #[default]
+    Siblings,
+    /// Only the requested repos, all tracked. More can be added later with
+    /// `Sessions::add`.
+    Only,
+}
 
 /// `new`'s result: the manifest, plus warnings about observing main after
 /// the session was built (§5.1 step 15) [D15].
@@ -64,8 +84,20 @@ impl Sessions<'_> {
     /// Create a session of `repos` (§5.1).
     #[allow(clippy::new_ret_no_self)] // `new` is the spec's operation name, not a constructor
     pub fn new(&self, ticket: Option<&str>, repos: &[RepoName]) -> Result<NewReport> {
-        let v = self.validate_new(ticket, repos)?;
-        let heads: BTreeMap<RepoName, (CommitOid, TreeOid)> = self.resolve_heads(&v.tracked)?.into_iter().collect();
+        self.new_with(ticket, repos, Layout::Siblings)
+    }
+
+    /// `new` with an explicit layout (D51): `Layout::Only` builds workspaces
+    /// of the requested repos only and fetches only those.
+    pub fn new_with(&self, ticket: Option<&str>, repos: &[RepoName], layout: Layout) -> Result<NewReport> {
+        self.new_as(ticket, repos, layout, None)
+    }
+
+    /// `new_with`, recording which agent created the session (stored with
+    /// the session row, immutable; `None` = not known).
+    pub fn new_as(&self, ticket: Option<&str>, repos: &[RepoName], layout: Layout, agent: Option<&AgentName>) -> Result<NewReport> {
+        let v = self.validate_new(ticket, repos, layout)?;
+        let heads: BTreeMap<RepoName, (CommitOid, TreeOid)> = self.resolve_heads(&v.members)?.into_iter().collect();
         let all: Vec<RepoName> = heads.keys().cloned().collect();
 
         // Phase B, steps 9-10: base generations and seed plans (cache fill).
@@ -83,6 +115,7 @@ impl Sessions<'_> {
         let manifest = SessionManifest {
             id: v.id.clone(),
             ticket: ticket.map(str::to_string),
+            agent: agent.cloned(),
             root: root.clone(),
             repos: all
                 .iter()
@@ -97,10 +130,16 @@ impl Sessions<'_> {
                 })
                 .collect(),
         };
+        // rm-followups R1: step 7 again, the row and the two root
+        // directories under `enroll`, so the orphan sweep never sees this
+        // id between them; released right after the mkdirs (layout_steps).
+        self.seams.hit("new.enroll", None)?;
+        let enroll = self.enroll.lock().unwrap_or_else(|p| p.into_inner());
+        self.id_free(&manifest.id)?;
         self.store.create_session(&manifest, SystemTime::now())?;
 
         // Phase D, steps 12-14.
-        self.build_layout(&manifest, &plans)?;
+        self.build_layout(&manifest, &plans, enroll)?;
 
         // Step 15: observe main; failures are warnings only.
         let warnings = self.observe_all(&manifest);
@@ -142,17 +181,60 @@ impl Sessions<'_> {
     }
 
     /// §5.1 steps 12-14. Any failure here is after the first visible write:
-    /// the session becomes `Unknown` with its scene, nothing is undone
-    /// (§6.1 rule 3). A `StopAt` seam returns as is (a crash).
-    fn build_layout(&self, m: &SessionManifest, plans: &BTreeMap<RepoName, (BaseGen, Plan)>) -> Result<()> {
+    /// the session becomes `Unknown` with its scene, then `new` rolls the
+    /// session back as `remove --discard` would (D56): Removing, unpin,
+    /// retire both directories, Removed. Only when the rollback fails too
+    /// does the Unknown scene (or the rollback's own scene) stay for a human.
+    /// A `StopAt` seam returns as is (a crash).
+    /// R1: the rollback retires only the directories this `new` created
+    /// (same identity); any other is left and named in `not_owned`.
+    fn build_layout(
+        &self,
+        m: &SessionManifest,
+        plans: &BTreeMap<RepoName, (BaseGen, Plan)>,
+        enroll: MutexGuard<'_, ()>,
+    ) -> Result<()> {
         let at = Mutex::new(("root", None::<RepoName>));
-        match self.layout_steps(m, plans, &at) {
+        let owned = Mutex::new(Vec::new());
+        match self.layout_steps(m, plans, &at, &owned, enroll) {
             Ok(()) => Ok(()),
             Err(e) if crate::seams::is_stop(&e) => Err(e),
             Err(e) => {
                 let (phase, repo) = at.into_inner().unwrap_or_else(|p| p.into_inner());
-                Err(self.new_unknown(m, phase, repo.as_ref(), &e))
+                let unknown = self.new_unknown(m, phase, repo.as_ref(), &e);
+                let owned = owned.into_inner().unwrap_or_else(|p| p.into_inner());
+                match self.roll_back_new(m, &owned) {
+                    Ok(not_owned) => Err(rolled_back_error(m, phase, repo.as_ref(), &e, &not_owned)),
+                    Err(re) if crate::seams::is_stop(&re) => Err(re),
+                    Err(_) => Err(self.scene_error_or(&m.id, unknown)),
+                }
             }
+        }
+    }
+
+    /// D56: undo a failed `new` from its Unknown row through `teardown`.
+    fn roll_back_new(&self, m: &SessionManifest, owned: &[(PathBuf, crate::orphans::Ident)]) -> Result<Vec<PathBuf>> {
+        self.seams.hit("new.rollback", None)?;
+        let rec = match self.store.session(&m.id)? {
+            Some(r) if r.lifecycle == Lifecycle::Unknown => r,
+            _ => {
+                return Err(StrataError::new(Code::Unknown, format!("new {}: the row is not Unknown; not rolled back", m.id))
+                    .with_detail(json!({ "reason": "lifecycle", "session": m.id.as_str() })));
+            }
+        };
+        self.teardown(&rec, Lifecycle::Unknown, Some(owned))
+    }
+
+    /// The error of the scene now on the row (the rollback's own when it
+    /// got past Removing), else `fallback`; status shows the same error.
+    fn scene_error_or(&self, id: &SessionId, fallback: StrataError) -> StrataError {
+        match self.store.session(id) {
+            Ok(Some(r)) if r.lifecycle == Lifecycle::Unknown => r
+                .scene
+                .and_then(|v| serde_json::from_value::<Scene>(v).ok())
+                .map(|s| s.error)
+                .unwrap_or(fallback),
+            _ => fallback,
         }
     }
 
@@ -181,6 +263,8 @@ impl Sessions<'_> {
         m: &SessionManifest,
         plans: &BTreeMap<RepoName, (BaseGen, Plan)>,
         at: &Mutex<(&'static str, Option<RepoName>)>,
+        owned: &Mutex<Vec<(PathBuf, crate::orphans::Ident)>>,
+        enroll: MutexGuard<'_, ()>,
     ) -> Result<()> {
         let id = &m.id;
         let proot = &self.config.paths.root;
@@ -210,14 +294,96 @@ impl Sessions<'_> {
         enter("root")?;
         self.seams.hit("new.root", None)?;
         strata_apfs::mkdir_rooted(proot, &rp("sessions"), 0o755, true)?;
+        let own = |p: PathBuf| -> Result<()> {
+            if let Some(i) = crate::orphans::dir_identity(&p)? {
+                owned.lock().unwrap_or_else(|p| p.into_inner()).push((p, i));
+            }
+            Ok(())
+        };
         strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/{id}")), 0o755, false)?;
-        strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/.repos/{id}")), 0o755, true)?;
+        own(proot.join("sessions").join(id.as_str()))?;
+        // The shared parent may exist; the leaf is created exclusively, so
+        // a `.repos/<id>` made by anyone else fails here (Exists) and is
+        // never recorded as ours (impl-p3 review).
+        strata_apfs::mkdir_rooted(proot, &rp("sessions/.repos"), 0o755, true)?;
+        self.seams.hit("new.repos_dir", None)?;
+        strata_apfs::mkdir_rooted(proot, &rp(format!("sessions/.repos/{id}")), 0o755, false)?;
+        own(proot.join("sessions/.repos").join(id.as_str()))?;
+        self.seams.hit("new.enrolled", None)?;
+        drop(enroll);
 
-        // 13.1 workspace
+        // 13.1 and 13.4. Each tracked repo's seed caches are cloned by a
+        // background worker as soon as that repo's workspace is cloned
+        // (D54), overlapping the other repos' clones only (D56).
+        let wants_cache = |r: &RepoName| m.repos[r].tracked;
+        let (tx, rx) = std::sync::mpsc::channel::<RepoName>();
+        let tx = Mutex::new(Some(tx));
+        let rx = Mutex::new(rx);
+        let cache_errs: Mutex<BTreeMap<RepoName, StrataError>> = Mutex::new(BTreeMap::new());
+        let cache_one = |r: &RepoName| -> Result<()> {
+            self.seams.hit("new.seed_caches", Some(r))?;
+            let cfg = self.repo_cfg(r)?;
+            let ws = &m.repos[r].path;
+            for c in &plans[r].1.caches {
+                if let Some(parent) = ancestors(c).last() {
+                    strata_apfs::mkdir_rooted(ws, parent, 0o755, true)?;
+                }
+                strata_apfs::clone_tree_rooted(&cfg.path.join(c.as_str()), ws, c)?;
+                drop_connector_files(ws, c)?;
+            }
+            Ok(())
+        };
+        // 13.1 workspace. The seed caches are cloned behind the workspace
+        // clones and joined before step 13.2: a clonefile of a large cache
+        // stalls the volume's metadata writes, and the git steps run under
+        // timeouts (incident 2026-10-27: a 216 GB src-tauri/target clone
+        // made four shadow `git init`s time out).
         enter("workspace")?;
-        each("workspace", &repos, &|r| {
-            strata_apfs::clone_tree_rooted(&self.store.base_dir(&plans[r].0), &m.root, &rp(r.as_str()))
-        })?;
+        let abort = std::sync::atomic::AtomicBool::new(false);
+        let ws_res = std::thread::scope(|sc| {
+            for _ in 0..CACHE_WORKERS {
+                sc.spawn(|| {
+                    loop {
+                        let next = rx.lock().unwrap_or_else(|p| p.into_inner()).recv();
+                        let Ok(r) = next else { return };
+                        // Once a workspace or one repo's caches failed no
+                        // further repo starts (as dispatch).
+                        if abort.load(std::sync::atomic::Ordering::SeqCst)
+                            || !cache_errs.lock().unwrap_or_else(|p| p.into_inner()).is_empty()
+                        {
+                            continue;
+                        }
+                        if let Err(e) = cache_one(&r) {
+                            cache_errs.lock().unwrap_or_else(|p| p.into_inner()).insert(r, e);
+                        }
+                    }
+                });
+            }
+            let r = each("workspace", &repos, &|r| {
+                strata_apfs::clone_tree_rooted(&self.store.base_dir(&plans[r].0), &m.root, &rp(r.as_str()))?;
+                if wants_cache(r)
+                    && let Some(tx) = tx.lock().unwrap_or_else(|p| p.into_inner()).as_ref()
+                {
+                    let _ = tx.send(r.clone());
+                }
+                Ok(())
+            });
+            if r.is_err() {
+                abort.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            // Closing the channel lets the workers finish what was sent; the
+            // scope joins them.
+            tx.lock().unwrap_or_else(|p| p.into_inner()).take();
+            r
+        });
+        ws_res?;
+
+        // 13.4 seed_caches (tracked repos only): the workers are joined.
+        enter("seed_caches")?;
+        if let Some((r, e)) = cache_errs.into_inner().unwrap_or_else(|p| p.into_inner()).into_iter().next() {
+            at.lock().unwrap_or_else(|p| p.into_inner()).1 = Some(r);
+            return Err(e);
+        }
 
         // 13.2 git
         enter("git")?;
@@ -237,21 +403,6 @@ impl Sessions<'_> {
         each("pin", &repos, &|r| {
             let git = self.git(r)?;
             self.with_lock_unbounded(r, || git.update_ref(&pin_ref(id), &m.repos[r].head, None))
-        })?;
-
-        // 13.4 seed_caches (tracked repos only)
-        enter("seed_caches")?;
-        let tracked: Vec<RepoName> = repos.iter().filter(|r| m.repos[*r].tracked).cloned().collect();
-        each("seed_caches", &tracked, &|r| {
-            let cfg = self.repo_cfg(r)?;
-            let ws = &m.repos[r].path;
-            for c in &plans[r].1.caches {
-                if let Some(parent) = ancestors(c).last() {
-                    strata_apfs::mkdir_rooted(ws, parent, 0o755, true)?;
-                }
-                strata_apfs::clone_tree_rooted(&cfg.path.join(c.as_str()), ws, c)?;
-            }
-            Ok(())
         })?;
 
         // 13.5 seed_files
@@ -309,20 +460,30 @@ impl Sessions<'_> {
             .collect()
     }
 
-    /// §5.1 step 8 for every configured repo: fetch the default branch and
-    /// read the chain top in one critical section, then the tree.
-    pub(crate) fn resolve_heads(&self, _tracked: &[RepoName]) -> Result<Vec<(RepoName, (CommitOid, TreeOid))>> {
-        let all: Vec<RepoName> = self.config.repos.keys().cloned().collect();
-        dispatch::each_repo(&all, &|r| self.seams.hit("head", Some(r)), &|r| self.head_of(r))
+    /// §5.1 step 8 for the session's repos: fetch the default branch and
+    /// read the chain top in one critical section, then the tree. Fetches
+    /// run `FETCH_WORKERS` wide (D53); a repo fetched successfully within
+    /// the fetch window is not fetched again.
+    pub(crate) fn resolve_heads(&self, members: &[RepoName]) -> Result<Vec<(RepoName, (CommitOid, TreeOid))>> {
+        dispatch::each_repo_n(dispatch::FETCH_WORKERS, members, &|r| self.seams.hit("head", Some(r)), &|r| self.head_of(r))
     }
 
     fn head_of(&self, repo: &RepoName) -> Result<(CommitOid, TreeOid)> {
         let cfg = self.repo_cfg(repo)?;
         let git = self.git(repo)?;
+        let fresh = self.fetch_is_fresh(repo);
+        let mut fetched_at = None;
         let head = self.with_lock(repo, || {
-            git.fetch("origin", &cfg.default_branch)?;
+            if !fresh {
+                let t = std::time::Instant::now();
+                git.fetch("origin", &cfg.default_branch)?;
+                fetched_at = Some(t);
+            }
             strata_deps::main_tip(cfg, git)
         })?;
+        if let Some(t) = fetched_at {
+            self.fetched.lock().unwrap_or_else(|p| p.into_inner()).insert(repo.clone(), t);
+        }
         let Some(head) = head else {
             return Err(StrataError::new(
                 Code::NoSuchBranch,
@@ -332,5 +493,123 @@ impl Sessions<'_> {
         };
         let tree = git.tree_of(&head)?;
         Ok((head, tree))
+    }
+}
+
+/// D56: the error of a `new` that failed and was rolled back. Nothing of
+/// the session is left, so the code is the cause's, not `Unknown`, except:
+/// a git timeout is `Busy` (`git_timeout`: the volume stalled, or a macOS
+/// permission prompt is waiting) and a refused access is `ReadOnly`
+/// (`tcc_denied`).
+fn rolled_back_error(
+    m: &SessionManifest,
+    phase: &str,
+    repo: Option<&RepoName>,
+    e: &StrataError,
+    not_owned: &[PathBuf],
+) -> StrataError {
+    let cause = crate::scene::cause_of(e);
+    let (code, reason, hint) = if has_reason(&cause, "timeout") {
+        (
+            Code::Busy,
+            "git_timeout".to_string(),
+            Some(
+                "git timed out: the data volume stalled (a large clone, Time Machine, Spotlight) or a macOS \
+                 permission prompt for git-stratad is waiting (System Settings > Privacy & Security); retry",
+            ),
+        )
+    } else if denied(&cause) {
+        (
+            Code::ReadOnly,
+            "tcc_denied".to_string(),
+            Some(
+                "macOS refused access (TCC): allow git-stratad under Privacy & Security \
+                 (Files and Folders > Removable Volumes, or Full Disk Access); retry",
+            ),
+        )
+    } else {
+        let r = e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|v| v.as_str()).unwrap_or("rolled_back");
+        (e.code, r.to_string(), None)
+    };
+    let mut d = serde_json::Map::new();
+    d.insert("reason".into(), json!(reason));
+    d.insert("op".into(), json!("new"));
+    d.insert("session".into(), json!(m.id.as_str()));
+    d.insert("phase".into(), json!(phase));
+    if let Some(r) = repo {
+        d.insert("repo".into(), json!(r.as_str()));
+    }
+    d.insert("rolled_back".into(), json!(true));
+    if let Some(h) = hint {
+        d.insert("hint".into(), json!(h));
+    }
+    d.insert("cause".into(), cause);
+    if !not_owned.is_empty() {
+        d.insert("not_owned".into(), json!(not_owned));
+    }
+    let at = match repo {
+        Some(r) => format!("{phase} of {r}"),
+        None => phase.to_string(),
+    };
+    let kept = if not_owned.is_empty() {
+        "nothing kept".to_string()
+    } else {
+        format!(
+            "left in place (not created by this new; the orphan sweep takes it): {}",
+            not_owned.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        )
+    };
+    StrataError::new(code, format!("new {}: {at} failed: {}; rolled back, {kept}", m.id, e.message))
+        .with_detail(serde_json::Value::Object(d))
+}
+
+/// Whether `v` or any error nested in it carries `"reason": want`.
+fn has_reason(v: &serde_json::Value, want: &str) -> bool {
+    match v {
+        serde_json::Value::Object(m) => {
+            m.get("reason").and_then(|r| r.as_str()) == Some(want) || m.values().any(|x| has_reason(x, want))
+        }
+        serde_json::Value::Array(a) => a.iter().any(|x| has_reason(x, want)),
+        _ => false,
+    }
+}
+
+/// EPERM anywhere in the cause, or git's "Operation not permitted": what a
+/// TCC refusal looks like from here.
+fn denied(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Object(m) => {
+            m.get("errno").and_then(|e| e.as_i64()) == Some(i64::from(libc::EPERM))
+                || m.get("stderr").and_then(|s| s.as_str()).is_some_and(|s| s.contains("Operation not permitted"))
+                || m.values().any(denied)
+        }
+        serde_json::Value::Array(a) => a.iter().any(denied),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shapes gitio gives: a timeout (`reason: timeout`), possibly
+    /// wrapped by `as_unknown`, and git's EPERM stderr.
+    #[test]
+    fn rolled_back_cause_classification() {
+        let timeout = StrataError::new(Code::Unknown, "git init timed out")
+            .with_detail(json!({ "reason": "timeout", "args": ["init", "--bare"], "stderr": "" }));
+        let wrapped = StrataError::new(Code::Unknown, "shadow")
+            .with_detail(json!({ "code": "Unknown", "message": "git init timed out", "detail": { "reason": "timeout" } }));
+        let tcc = StrataError::new(Code::Unknown, "git init failed")
+            .with_detail(json!({ "stderr": "fatal: cannot mkdir x: Operation not permitted" }));
+        let eperm = StrataError::new(Code::ReadOnly, "clone").with_detail(json!({ "errno": libc::EPERM }));
+        let other = StrataError::new(Code::Unknown, "full").with_detail(json!({ "errno": libc::ENOSPC }));
+        assert!(has_reason(&cause_of(&timeout), "timeout"));
+        assert!(has_reason(&cause_of(&wrapped), "timeout"));
+        assert!(!has_reason(&cause_of(&tcc), "timeout"));
+        assert!(denied(&cause_of(&tcc)));
+        assert!(denied(&cause_of(&eperm)));
+        assert!(!denied(&cause_of(&other)));
+        assert!(!denied(&cause_of(&timeout)));
     }
 }

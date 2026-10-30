@@ -9,10 +9,13 @@ use strata_store::Store;
 use strata_types::{RepoConfig, RepoName, SessionId, StrataError};
 
 pub mod chain;
+pub(crate) mod deps_select;
 pub mod check;
+pub mod pending;
 pub mod push;
 pub mod rebase;
 pub mod seams;
+pub mod siblings;
 /// Review-2 N1: stage's selection rules as a read-only query, for the
 /// daemon's re-run filter (the daemon never stages: it calls `publish`).
 pub mod selection {
@@ -22,12 +25,15 @@ pub mod stage;
 
 pub use chain::{advance_anchor, anchor_ref, chain_ref, merge_base};
 pub use check::{CHECK_OUTPUT_TAIL, ChecksRan, check};
-pub use rebase::{BetweenDiff, HunkPreview, Merge3Preview, RebaseReport, assign, diff_between, rebase_session};
-pub use push::{PublishWarning, Published, WarningKind, commit, publish, publish_bound, push, push_to};
+pub use rebase::{
+    BetweenDiff, HunkPreview, Merge3Preview, MovePolicy, RebaseReport, assign, diff_between, rebase_session,
+    rebase_session_with,
+};
+pub use push::{PublishWarning, Published, WarningKind, commit, publish, publish_bound, push, push_to, remote_changed};
 pub use seams::PUSH_TIMEOUT;
 #[cfg(feature = "test-seams")]
 pub use seams::PublishFault;
-pub use stage::{HUNK_TEXT_CAP, Staged, stage};
+pub use stage::{HUNK_TEXT_CAP, Staged, remove_layout, stage};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 
@@ -54,4 +60,17 @@ pub trait PublishLocks: Sync {
     fn with_sessions(&self, sessions: &[SessionId], f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>>;
     /// Hold `repo`'s write lock while `f` runs.
     fn with_repo(&self, repo: &RepoName, f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>>;
+    /// The rebase's take of its sessions' queue places (§5.8): what
+    /// `with_sessions` holds plus anything else a workspace move needs
+    /// quiet (the daemon's du hold, status-perf D8). A `Busy` is waited
+    /// out like the queue's.
+    fn with_rebase_sessions(&self, sessions: &[SessionId], f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>> {
+        self.with_sessions(sessions, f)
+    }
+    /// Whether a `Busy` take is waited out (§5.1 after the first visible
+    /// write). `false` for the catch-up pass (rm-followups §1.6 T2), which
+    /// never queues behind a request: its `Busy` defers the row.
+    fn waits(&self) -> bool {
+        true
+    }
 }

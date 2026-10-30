@@ -21,6 +21,7 @@ Design documents (Chinese) are in [docs/](docs/README.md); the agent skill is
 - [Output: the JSON envelope](#output-the-json-envelope)
 - [Session lifecycle](#session-lifecycle)
 - [Seed files (.env)](#seed-files-env)
+- [Dev servers: per-session ports](#dev-servers-per-session-ports)
 - [Headless command sequences](#headless-command-sequences)
 - [Release builds from a session](#release-builds-from-a-session)
 - [Publish conflicts: fix and rerun](#publish-conflicts-fix-and-rerun)
@@ -41,24 +42,60 @@ plist; installing it is a human step. Its content (from
 `strata_daemon::plist::plist_text`):
 
 - `Label` `com.gwd.git-stratad`; `ProgramArguments` the absolute path of `git-stratad`
-- `RunAtLoad` true, `KeepAlive` true, `LimitLoadToSessionType` `Aqua`, `ProcessType` `Interactive`
+- `RunAtLoad` true, `KeepAlive` true, `LimitLoadToSessionType` `Aqua`, `ProcessType` `Interactive`, `ExitTimeOut` 900 (a stop waits for in-flight writes instead of killing them)
 - `EnvironmentVariables.PATH` `~/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`
 - `StandardErrorPath` `~/Library/Application Support/git-strata/daemon.err.log`
 
 | Command | What it does | Result |
 | --- | --- | --- |
 | `git-strata daemon status` | Asks the socket; never fails for a down daemon or missing config | `{running, socket, session?, holders:[], unknown_publishes:[], alerts:[]}` |
-| `git-strata daemon start` | `launchctl bootstrap gui/<uid> <plist>` | `{}`; `{already:true}` if loaded; `InvalidInput` `no_plist` if the plist is missing |
-| `git-strata daemon stop` | `launchctl bootout`, then waits up to 10 s until launchd drops the agent | `{}`; `Unknown` `launchctl` (`step: bootout_wait`) on timeout |
+| `git-strata daemon start` | `launchctl bootstrap gui/<uid> <plist>` | `{}`; `{already:true}` if loaded; `InvalidInput` `no_plist` if the plist is missing; `foreign_home` / `foreign_agent` (below) |
+| `git-strata daemon stop` | `launchctl bootout`, then waits up to 10 s until launchd drops the agent | `{}`; `Unknown` `launchctl` (`step: bootout_wait`) on timeout; `foreign_home` / `foreign_agent` (below) |
 
-`start` / `stop` use launchd, not the socket. The daemon reads `config.toml`
-only when it starts, so after editing the config run `daemon stop` then
-`daemon start`.
+`start` / `stop` use launchd, not the socket, and are for the human only:
+agents never run them (or `launchctl`). Because the `gui/<uid>` domain is per
+user, not per `HOME`, both refuse with `InvalidInput` `foreign_home` (before any
+`launchctl`) unless `HOME` resolves to the login user's home, and with
+`foreign_agent` when the loaded agent came from a plist other than this home's;
+the message gives the `launchctl bootout` the human can run to clear it. The
+daemon reads `config.toml` only when it starts, so after editing the config the
+human runs `daemon stop` then `daemon start`.
 
 Without a running daemon only these work, read-only, straight from the store:
 `status`, `grep`, `files`, `diff`, `deps list`, `daemon status`, and
 repeating a `checkpoint --tool-call ID` whose checkpoint already exists.
 Everything else returns `Busy` with `detail.reason = "daemon_down"`.
+
+### Dev install
+
+`scripts/dev-install.sh` builds both binaries in release mode, stops the
+daemon, keeps the previous binaries in a temp directory, copies both into
+`~/.cargo/bin` together and starts the daemon again (`--no-start` only builds
+and copies).
+
+Signing is opt-in through `STRATA_CODESIGN_IDENTITY`. With it set, both
+binaries are signed with that identity and fixed identifiers
+(`com.gwd.git-stratad`, `com.gwd.git-strata`), so macOS privacy grants (the
+"removable volume" prompt) survive rebuilds; unsigned builds re-prompt after
+every install. For local development a self-signed identity is enough:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+  -keyout key.pem -out cert.pem -subj "/CN=git-strata dev" \
+  -addext "basicConstraints=critical,CA:false" \
+  -addext "keyUsage=critical,digitalSignature" \
+  -addext "extendedKeyUsage=critical,codeSigning"
+/usr/bin/openssl pkcs12 -export -inkey key.pem -in cert.pem -name "git-strata dev" -out dev.p12
+security import dev.p12 -k ~/Library/Keychains/login.keychain-db -T /usr/bin/codesign
+security add-trusted-cert -r trustRoot -p codeSign -k ~/Library/Keychains/login.keychain-db cert.pem
+security find-identity -v -p codesigning     # lists "git-strata dev"
+# then delete key.pem, cert.pem, dev.p12
+STRATA_CODESIGN_IDENTITY="git-strata dev" scripts/dev-install.sh
+```
+
+`add-trusted-cert` asks for the login password; the first signing may ask to
+"Always Allow" codesign to use the key; the first start of a newly signed
+daemon asks once for the removable-volume permission.
 
 ## Paths
 
@@ -82,12 +119,15 @@ Every call prints exactly one compact JSON line on stdout:
 
 ```json
 {"ok":true,"data":{...},"error":null}
-{"ok":false,"data":{},"error":{"code":"Busy","message":"the daemon is not running; run `git-strata daemon start`","detail":{"reason":"daemon_down","socket":"..."}}}
+{"ok":false,"data":{},"error":{"code":"Busy","message":"the daemon is not running; ask the human to run `git-strata daemon start`","detail":{"reason":"daemon_down","socket":"..."}}}
 ```
 
 - All three keys are always present. `data` is never null; on an error it may
   still hold partial results (for example repos that already published).
 - Exit status is 0 iff `ok` is true, else 1.
+- Exception: `git-strata session exec` prints no envelope once its command
+  starts; its stdout, stderr and exit status are the command's. A failure
+  before the start (bad arguments, `PortInUse`, ...) is an envelope.
 - Branch on `error.code`, then `error.detail.reason` where present. Never parse `message`.
 - stderr carries only human notices: prompts, alerts, `skipped (not in session ...)`,
   and (only when stderr is a terminal) `pending proposal <id> for <repo>`.
@@ -100,15 +140,28 @@ Every call prints exactly one compact JSON line on stdout:
 
 ## Session lifecycle
 
-1. **`new`** creates a session. Every repo in `config.toml` is fetched
-   (`git fetch origin <default_branch>`) and gets a workspace, because sibling
-   repos link to each other by relative path. `--repos A,B` is required and
-   chooses which repos are **tracked**: only tracked repos are watched,
-   checkpointed and published. Untracked siblings stay pinned at their base;
-   do not edit them. An edit there is never checkpointed and makes `rm`
-   return `Dirty` (`detail.untracked_repos`).
+1. **`new`** creates a session. Two forms:
+   - `--repo R` (repeatable or `R1,R2`): only these repos are fetched
+     (`git fetch origin <default_branch>`, up to 8 at a time) and get a
+     workspace, all **tracked**. Fast; agents should use it. A repo that links
+     a sibling by relative path (`../other`) needs that sibling in the session
+     too: name it, or `git-strata add` it later.
+   - `--repos A,B` (no `--repo`; the original form): every repo in
+     `config.toml` is fetched and gets a workspace, because sibling repos link
+     to each other by relative path; `A,B` are the **tracked** ones. Only
+     tracked repos are watched, checkpointed and published. Untracked siblings
+     stay pinned at their base; do not edit them. An edit there is never
+     checkpointed and makes `rm` return `Dirty` (`detail.untracked_repos`).
+   Giving both is `InvalidInput` (`repo_flags`). The daemon reuses a fetch of
+   the same repo younger than 30 s (back-to-back `new`/`add`); publish always
+   fetches for itself.
    Result: `data.manifest.id` (the session id, `s-` + 8 base32 chars) and
    `data.manifest.repos.<repo>.{path, tracked, base, head}`.
+   **`add --repo R [--session S]`** gives an existing active session
+   workspaces for more repos (tracked), built like `new` builds them. Repos it
+   already has are listed in `data.already` and left alone. A command naming a
+   repo the session lacks fails `NoSuchRepo` with `detail.reason`
+   `not_in_session` and `detail.fix` = that `add` command.
 2. **Work** in `data.manifest.repos.<repo>.path`. Commands without `--session`
    take the session from the cwd. `--session` accepts an id or a ticket.
 3. **`checkpoint`** records edits (`-m MSG`, or `--tool-call [ID]` from a hook).
@@ -120,6 +173,33 @@ Every call prints exactly one compact JSON line on stdout:
    branch (after taking a fresh `BeforePublish` checkpoint of each batch).
 7. **`push REPO`** pushes the publish chain, only when the human asked.
 8. **`rm --session S`** removes the session once its work is published.
+
+**After a publish, sessions follow automatically, but only when it is safe.**
+Every publish, push replay, and a daemon catch-up pass (at start and every
+60 s) try to move each live session that is behind onto the published tree
+(`Auto` policy). A move happens only when the workspace is idle: no process
+has a file or cwd open anywhere under it, nothing in it was written within
+`rebase.quiet_secs` (default 120 s), and the session's edits project onto the
+new tree without conflict (`rm.regenerable` paths excepted). Otherwise the
+move is **deferred**, never forced: `status` shows
+`behind publish N of REPO: auto-rebase deferred (open_files|recent_writes|conflicts|busy, since HH:MM, attempts k)`
+and the catch-up retries with backoff (capped at 30 min). When the publish
+changed install inputs (`package.json`, `bun.lock`), the source moves onto the
+published tree with the session's old deps set (`rebase.deps_changed =
+"move_source"`, the default; `"wait"` keeps the old behaviour) and the deps
+proposal stays Pending for the human. Explicit moves (deps approval rollout)
+are unchanged. If something writes into the pre-move tree after the swap, that
+tree is kept instead of retired (`status`/`ls` list it under `kept_trees`
+with the late-written paths); `rm` refuses until it is published or discarded, and the
+`rm --discard` prompt names it.
+
+**What `rm` counts as published.** An edit is published when a Done publish
+of this session, reachable from origin, has the same bytes (D57), or when a
+move onto the newest such publish would discharge the whole entry (for
+example the publish merged it with origin's changes in the same file). The
+second rule needs that publish's base already built (rm never builds one) and
+counts in `detail.landed.<repo>.rebased` / `rebased_onto`. Everything else
+makes `rm` refuse with `Dirty` and nothing is removed.
 
 ## Seed files (.env)
 
@@ -144,6 +224,80 @@ staff-api `.env` and front `.env.local`.
   print or log seed contents (`.env` holds production credentials).
 - Symlink seeds are recreated at `new` and not refreshed.
 
+## Dev servers: per-session ports
+
+Each session workspace leases a block of 4 TCP ports from the daemon when
+the session is created (`new`, `add`), so concurrent `tauri dev` / `next dev`
+runs in different sessions do not collide. Roles: `web` (base), `connector`
+(+1), `connector_mcp` (+2), `aux` (+3). The main checkout has no lease and
+keeps the project's own ports. A lease is released when the session is
+removed. Range and exclusions: `[dev_ports]` in `config.toml`
+([docs/config.md](docs/config.md) §2.6; default `20000-29999`).
+
+```bash
+git-strata session ports [--session S] [--repo R] [--check]   # read the lease
+git-strata session ports --all                                # every live workspace, read-only
+git-strata session exec -- bun run dev                        # PORT=<web> and the rest set
+git-strata session exec --tauri -- bun run tauri dev          # also tauri dev --config <devUrl patch>
+git-strata session ports --reassign --session S --repo R      # move one lease to another block
+```
+
+`exec` replaces itself with the command, run in the workspace with `PORT`,
+`STRATA_DEV_PORT`, `STRATA_CONNECTOR_PORT`, `STRATA_CONNECTOR_MCP_PORT`,
+`STRATA_AUX_PORT`, `STRATA_SESSION`, `STRATA_REPO`,
+`TAURI_CONNECTOR_PROJECT` and `STRATA_TAURI_DEV_CONFIG`
+(`{"build":{"devUrl":"http://localhost:<web>"}}`). Committed files are never
+edited. Before starting it checks the ports (`--no-check` skips): a listener
+from this workspace is `PortInUse` `already_running`; any other listener is
+`PortInUse` `foreign` with `detail.fix` = the `--reassign` command. Nothing
+is killed and nothing is reassigned automatically. Copies of tauri-connector's
+`.connector.json` in cloned `target/` seed caches are deleted when the
+session is created. Once a lease exists, `ports` and `exec` read it from the
+store and work without the daemon.
+
+`--tauri` accepts `tauri dev`, `cargo|npx|bunx|pnpx tauri dev`, `pnpm exec
+tauri dev`, and `bun|pnpm|yarn|npm run <script>` (always with `run`: without
+it the package manager may run its own command of that name) when the
+script is literally `tauri dev ...` or the bare `tauri` CLI followed by
+`dev` in the command (`"tauri": "tauri"` → `bun run tauri dev`, or
+`npm run tauri -- dev`). A script name that starts with `-` is refused. Options
+that select another package (`--prefix`, `--filter`, `-w`, `--workspace`,
+`--cwd`, ...) and, for npm, any option before its `--` are refused
+(`InvalidInput` `tauri_launcher`), since the script that runs would not be
+the one checked.
+
+`exec` does not set tauri-connector's own variables. tauri-connector
+(0.17.7 and later) binds exactly the ports in `TAURI_CONNECTOR_PORT`,
+`TAURI_CONNECTOR_MCP_PORT` and `TAURI_CONNECTOR_BRIDGE_PORT`, so map the
+lease onto them in an `sh -c` form:
+
+```bash
+git-strata session exec -- sh -c 'TAURI_CONNECTOR_PORT=$STRATA_CONNECTOR_PORT \
+  TAURI_CONNECTOR_MCP_PORT=$STRATA_CONNECTOR_MCP_PORT \
+  TAURI_CONNECTOR_BRIDGE_PORT=$STRATA_AUX_PORT \
+  exec bunx tauri dev --config "$STRATA_TAURI_DEV_CONFIG"'
+```
+
+The connector's precedence is: a port set in the app's builder code, then
+the exact env variable, then `TAURI_CONNECTOR_*_PORT_RANGE`, then a range
+set in the builder, then its default ports. An exact port that is busy is
+not replaced: the connector does not start and the app keeps running (a
+`.connector.json` left by an earlier run then names a dead pid). The ports
+it bound are recorded in `.connector.json` under the app's `target/`.
+
+The variables reach only `exec`'s command and its children. A connector
+client started separately (or an MCP server already running) selects the
+app with `tauri-connector ... --project <tauri_app_root>` from `session
+ports`, or runs as `git-strata session exec --no-check -- tauri-connector
+...` (with no `--port`, the CLI uses `TAURI_CONNECTOR_PORT`, so map it the
+same way in that `sh -c`); never the connector's default ports.
+
+`session ports` lists a workspace with no free block as `"ports": null,
+"reason": "ports_exhausted"` next to the others; `exec` there is `Busy`
+`ports_exhausted`. `--reassign` sends the base it checked; if another caller
+moved the lease in between, the daemon refuses with `Busy` `lease_changed`
+and nothing moves.
+
 ## Headless command sequences
 
 Everything below needs no human, as long as no repo in the publish is gated
@@ -151,10 +305,11 @@ Everything below needs no human, as long as no repo in the publish is gated
 
 ```sh
 git-strata daemon status                     # data.running must be true
-git-strata daemon start                      # only if not running; then retry once
+# not running: tell the human (they run `git-strata daemon start`); never start it yourself
 
-git-strata new PROJ-123 --repos tool,staff-api
+git-strata new PROJ-123 --repo tool --repo staff-api
 #  -> S = data.manifest.id, W = data.manifest.repos.tool.path
+git-strata add --session "$S" --repo front   # only if front is needed later
 cd "$W"                                      # edit files here
 git-strata checkpoint -m "parse config before connect"
 git-strata diff                              # vs the base
@@ -175,15 +330,21 @@ different string.
 that holds it, with no repo prefix: for `staff-api/app/x.php` in session `S`
 write `--from "${S}:app/x.php"`, never `"${S}:staff-api/app/x.php"`. A
 directory publishes every checkpointed path under it. The repo is found by
-looking the path up in each workspace (on disk or in its base). Path errors
+looking the path up in each workspace (on disk or in its base); when several
+workspaces have it, the one repo whose checkpoints in the session changed it
+is taken. To name the repo outright, write **`--from "${S}:REPO:PATH"`**
+(e.g. `--from "${S}:admin:src/utils/a.ts"`). The text between the first and
+second `:` counts as REPO only when it is one of the session's repos;
+otherwise everything after the first `:` is PATH, so a PATH that itself
+starts with `<repo>:` is written `${S}:<repo>:<repo>:...`. Path errors
 come back before any TTY check and send nothing to the daemon:
 
 | error | when | `detail` |
 | --- | --- | --- |
 | `InvalidInput` `from_syntax` | no `:`, empty session, or not a repo path | |
 | `InvalidInput` `from_repo_prefix` | PATH starts with a repo name of the session and the rest exists in that repo | `{path, session, repo, expected}`; rerun with `expected` |
-| `InvalidInput` `from_path` | no workspace of a multi-repo session has PATH | `{path, session, repos, expected}` |
-| `AmbiguousMatch` `from_repo` | several workspaces have PATH | `{path, session, candidates}` |
+| `InvalidInput` `from_path` | no workspace of a multi-repo session has PATH, or `S:REPO:PATH` and REPO's workspace lacks it (or REPO is not in the session) | `{path, session, repos, expected}` |
+| `AmbiguousMatch` `from_repo` | several workspaces have PATH and not exactly one of their checkpoints changed it | `{path, session, candidates, changed_in, expected}`; rerun with one of `expected` (`S:REPO:PATH`) |
 
 In a single-repo session any other path is taken as that repo's (the daemon
 then reports a path that is not checkpointed as `NoMatch`).
@@ -214,7 +375,9 @@ A session workspace cannot run a release build, by design:
   commits or pushes in its sibling repos would make commits strata never
   sees.
 
-There is no `git-strata exec` or build command. A release build runs in the
+There is no build command, and `git-strata session exec` (see
+[Dev servers](#dev-servers-per-session-ports)) only sets dev-port variables
+for a command in the workspace; it is not a release path. A release build runs in the
 **main checkout**, after the change has been published and pushed:
 
 ```sh
@@ -312,8 +475,12 @@ Pushing right after each publish keeps the window small.
 to that repo deploys) and gates nothing by itself, so a repo may set
 `deploy_on_push = true` with `publish.confirm = false` (e.g. staff-api, whose
 publish and push run headless). The CLI uses the pinned `confirm` in
-`pins.json` ORed with `config.toml`; an unreadable `pins.json`, or a repo
-missing from it, counts as needs confirmation.
+`pins.json` ORed with `config.toml`; a missing or unreadable `pins.json`, or
+a repo missing from it (new or renamed), counts as needs confirmation. The
+daemon pins such a repo with `confirm` on, so deleting `pins.json` or renaming
+a repo never loosens the gate; a looser `config.toml` (including a fresh
+install's `confirm = false` repos) applies only after `git-strata config relax
+REPO` (Touch ID).
 
 **Which commands are gated.** They need a terminal on stdin; most then show a
 LocalAuthentication prompt (Touch ID, or the login password) from the daemon:
@@ -351,7 +518,19 @@ show `ConfigRelaxPending`. The human then runs `git-strata config relax REPO`
 (TTY + prompt), which writes the file's flags into the pin; with nothing to
 relax it returns `InvalidInput` `not_relaxed`. Pins of repos removed from the
 config are kept. Format:
-`{"repos":{"<name>":{"deploy_on_push":bool,"confirm":bool,"push":bool}}}`.
+`{"repos":{"<name>":{"deploy_on_push":bool,"confirm":bool,"push":bool,"regenerable":[...]}}}`
+(`regenerable` is written only when non-empty).
+
+**`rm.regenerable` is pinned too.** `[repo.<name>.rm] regenerable = [globs]`
+(the `.strata/lww` dialect) lists files a tool regenerates; their unpublished
+Modified/Added/Untracked edits in a tracked, healthy workspace do not block
+`rm` (they are checkpointed and listed). A narrower list (positive patterns
+deleted and/or negations appended at the end) applies at the next start; any
+other change is a loosening that needs `config relax REPO`, which applies it
+without a daemon restart. A repo with no pin has an empty effective list.
+Example (docs only): `regenerable = ["src/constants/permissionMap/generated.json"]`
+under `[repo.admin.rm]`. Add the new keys only after both binaries are
+upgraded and the daemon restarted.
 
 ## Push guards
 
@@ -402,14 +581,18 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 
 | `error.code` (`detail.reason`) | Agent action |
 | --- | --- |
-| `Busy` (`daemon_down`) | `git-strata daemon start`, retry once |
+| `Busy` (`daemon_down`) | tell the human (they run `git-strata daemon start`); retry once it runs |
 | `Busy` (`workspace_changed`) | a file changed while read; retry |
+| `Busy` (`publish_unknown`) | an earlier publish of this repo has an unknown outcome; it clears once origin has that commit (checked at each publish), e.g. after the human runs `git-strata push REPO`; a definite remote refusal never blocks |
+| `Busy` (`port_unidentified` / `port_probe_error`) | `session exec` could not identify a port's holder; retry shortly |
+| `Busy` (`ports_exhausted`) | no free port block in `[dev_ports]`; tell the human |
+| `Busy` (`lease_changed`) | `session ports --reassign`: another caller moved the lease since the check; run `session ports --check` again and decide afresh |
 | `Busy` (other) | repo lock held; wait, retry later |
 | `NotTty` | hand the exact command to the human |
 | `NotConfirmed` | report; the human reruns (`plan_changed`: rerun once yourself) |
-| `AmbiguousMatch` | ticket matches several sessions; use an id from `detail` (`from_repo`: a `--from` path is in several repos, see `detail.candidates`) |
+| `AmbiguousMatch` | ticket matches several sessions; use an id from `detail` (`from_repo`: a `--from` path is in several repos; rerun with one of `detail.expected`, the `S:REPO:PATH` form) |
 | `NoSuchSession` | cd into a workspace or pass `--session` |
-| `NoSuchRepo` | name not in config |
+| `NoSuchRepo` | name not in config; `not_in_session`: run `detail.fix` (`git-strata add --session S --repo R`) |
 | `NoSuchBranch` | (`new`) a repo has no `origin/<default_branch>`; tell the human |
 | `InvalidInput` | fix arguments per `detail.reason` (`from_repo_prefix` / `from_path`: rewrite `--from` as `detail.expected` says); `chain_diverged` on a repo without confirmation: `git-strata push REPO` replays it (see [Origin moved](#origin-moved-under-the-unpushed-chain-push-replays)), then rerun; `chain_rewound`, or diverged on a gated repo: human runs `chain`; push-guard reasons above: tell the human |
 | `Conflict` | fix and rerun the same publish (above) |
@@ -425,6 +608,8 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Unknown` | outcome uncertain (`push_unknown`, `socket_closed`, `launchctl`): do not retry, `gc` or `rm`; tell the human |
 | `Binary` / `TooLarge` | per-entry markers in `diff` / `grep`; not a call failure |
 | `Corrupt` | store damage; stop, tell the human |
+| `PortInUse` | `already_running`: reuse the server this workspace already runs; `foreign`: run `detail.fix` (`session ports --reassign`) for your own session, then `exec` again |
+| `Unsupported` (`daemon_too_old`) | the daemon predates dev-port leases; tell the human |
 
 The full closed set of codes: Conflict, HeadMoved, Dirty, Busy, NoSuchPath,
 NoSuchBranch, NoSuchCommit, NoCommit, NoMergeBase, IsDirectory, NotDirectory,
@@ -432,7 +617,7 @@ NotFile, Binary, NotText, NoMatch, AmbiguousMatch, Exists, NotEmpty,
 NameTaken, ReservedName, ReadOnly, TooLarge, InvalidInput, NoSuchSession,
 NoSuchRepo, NoSuchCheckpoint, NoSuchProposal, NoSuchView, NotConfirmed,
 NotTty, OpenFiles, CrossVolume, Drift, CheckFailed, CheckMutates,
-PushRefused, Unknown, Unsupported, Corrupt.
+PushRefused, Unknown, Unsupported, Corrupt, PortInUse.
 
 ## Disk usage (`du`)
 
@@ -468,6 +653,13 @@ them, except entries a session, workspace, deps staging, move intent,
 alternates file or worktree link still names (reported as refused on
 stderr). Before 2026-10-26 nothing emptied `store/trash`.
 
+Store-wide gc is opt-in: `git-strata gc --store --dry-run` reports what it
+would reclaim (rows and checkpoints of sessions removed more than 30 days
+ago, blobs only they reference, decided deps proposals, closed attempts,
+store/tmp leftovers, old trash) and changes nothing; `git-strata gc --store`
+does it and runs a budgeted blob integrity scan. Nothing runs it
+automatically.
+
 ## Commands
 
 Flags, defaults and `data` shapes:
@@ -476,7 +668,8 @@ Flags, defaults and `data` shapes:
 
 | Command | Human needed |
 | --- | --- |
-| `new [TICKET] [--ticket T] --repos A,B` | no |
+| `new [TICKET] [--ticket T] (--repo R... \| --repos A,B)` | no |
+| `add --repo R... [--session S]` | no |
 | `status [--session S \| --all]` | no |
 | `checkpoint (--tool-call [ID] \| -m MSG) [--session S] [--path P]...` | no |
 | `restore CHECKPOINT [PATHS]... [--session S]` | no |
@@ -495,3 +688,5 @@ Flags, defaults and `data` shapes:
 | `resolve --session S --repo R (--abandon \| --accept)` | yes |
 | `chain --repo R (--accept-origin replay\|drop \| --restore)` | yes |
 | `config relax REPO` | yes |
+| `session ports [--session S] [--repo R] [--all] [--check] [--reassign]` | no |
+| `session exec [--session S] [--repo R] [--tauri] [--no-check] -- CMD...` | no |

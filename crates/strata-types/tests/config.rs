@@ -115,6 +115,8 @@ fn v1_name_must_match_path_basename_and_table_must_be_nonempty() {
     let empty = Config {
         paths: Paths::default(),
         repos: Default::default(),
+        status: Default::default(),
+        dev_ports: Default::default(),
     };
     assert_eq!(rule(&empty.validate().unwrap_err()), "V1");
 }
@@ -250,6 +252,9 @@ publish = { branch = "master", push = false, confirm = false }
         },
         deploy_on_push: true,
         pin_unpushed: true,
+        check_siblings: Vec::new(),
+        rm: Default::default(),
+        rebase: Default::default(),
     };
     assert!(!built.needs_human_confirm());
     built.publish.confirm = true;
@@ -445,6 +450,9 @@ fn validate_commands_reports_repo_null_until_config_validate_fills_it() {
         },
         deploy_on_push: false,
         pin_unpushed: true,
+        check_siblings: Vec::new(),
+        rm: Default::default(),
+        rebase: Default::default(),
     };
     let err = cfg.validate_commands().unwrap_err();
     assert_eq!(err.code, Code::CheckMutates);
@@ -543,4 +551,186 @@ fn default_inter_config_parses() {
     assert!(!cfg.repo(&repo("staff-api")).unwrap().publish.push);
     assert!(cfg.repo(&repo("front")).unwrap().deploy_on_push);
     assert!(cfg.repo(&repo("front")).unwrap().needs_human_confirm());
+    // D21: the dev-link checks' siblings.
+    assert_eq!(cfg.repo(&repo("admin")).unwrap().check_siblings, vec![repo("admin-shared"), repo("admin-time-off")]);
+    assert_eq!(cfg.repo(&repo("tool")).unwrap().check_siblings.len(), 7);
+    assert!(cfg.repo(&repo("front")).unwrap().check_siblings.is_empty());
+}
+
+fn sib_repo(name: &str, extra: &str) -> String {
+    format!(
+        r#"
+[repo.{name}]
+path = "/Volumes/GWD/inter/{name}"
+default_branch = "main"
+deps_dirs = []
+publish = {{ branch = "main", push = true, confirm = false }}
+{extra}
+"#
+    )
+}
+
+#[test]
+fn check_siblings_defaults_to_empty_and_names_other_configured_repos() {
+    let cfg = parse(&(sib_repo("tool", "") + &sib_repo("admin", ""))).unwrap();
+    assert!(cfg.repo(&repo("tool")).unwrap().check_siblings.is_empty());
+    let cfg = parse(&(sib_repo("tool", r#"check_siblings = ["admin"]"#) + &sib_repo("admin", ""))).unwrap();
+    assert_eq!(cfg.repo(&repo("tool")).unwrap().check_siblings, vec![repo("admin")]);
+}
+
+#[test]
+fn v12_rejects_self_unconfigured_and_duplicate_siblings() {
+    for (list, index, needle) in [
+        (r#"["tool"]"#, 0, "itself"),
+        (r#"["admin", "nope"]"#, 1, "not configured"),
+        (r#"["admin", "admin"]"#, 1, "twice"),
+    ] {
+        let text = sib_repo("tool", &format!("check_siblings = {list}")) + &sib_repo("admin", "");
+        let err = parse(&text).unwrap_err();
+        assert_eq!(err.code, Code::InvalidInput, "{list}");
+        assert!(err.message.contains(needle), "{list}: {}", err.message);
+        let d = err.detail.unwrap();
+        assert_eq!(d["rule"], "V12", "{list}");
+        assert_eq!(d["repo"], "tool");
+        assert_eq!(d["field"], "check_siblings");
+        assert_eq!(d["index"], index, "{list}");
+    }
+    let err = parse(&sib_repo("tool", r#"check_siblings = ["Bad/Name"]"#)).unwrap_err();
+    assert_eq!(err.code, Code::InvalidInput);
+}
+
+#[test]
+fn v12_keeps_the_file_order_of_violations() {
+    // An earlier repo's V12 wins over a later repo's V1 (file order, not
+    // name order: zzz comes first).
+    let text = sib_repo("zzz", r#"check_siblings = ["nope"]"#)
+        + r#"
+[repo.aaa]
+path = "/not-the-basename"
+default_branch = "main"
+deps_dirs = []
+publish = { branch = "main", push = true, confirm = false }
+"#;
+    let err = parse(&text).unwrap_err();
+    assert_eq!(rule(&err), "V12");
+    assert_eq!(err.detail.unwrap()["repo"], "zzz");
+    // Within one repo the per-repo rules (V10 here) come first.
+    let text = sib_repo("aaa", "checks = [\"prettier --write .\"]\ncheck_siblings = [\"nope\"]");
+    assert_eq!(rule(&parse(&text).unwrap_err()), "V10");
+}
+
+#[test]
+fn a_misspelt_check_siblings_key_is_v11() {
+    let err = parse(&(sib_repo("tool", r#"check_sibling = ["admin"]"#) + &sib_repo("admin", ""))).unwrap_err();
+    assert_eq!(rule(&err), "V11");
+}
+
+/// status-perf D7: `[status] parallel` defaults to 4, accepts 1..=16, and
+/// rejects anything else with V13; unknown keys in it are still V11.
+#[test]
+fn status_parallel_defaults_and_bounds() {
+    let repo = bare_repo("tool", "/Volumes/GWD/inter/tool");
+    let cfg = parse(&minimal(&repo)).unwrap();
+    assert_eq!(cfg.status.parallel, 4);
+    assert!(!toml::to_string(&cfg).unwrap().contains("[status]"), "the default table is not written back");
+    for ok in [1, 16] {
+        let cfg = parse(&format!("{}\n[status]\nparallel = {ok}\n", minimal(&repo))).unwrap();
+        assert_eq!(cfg.status.parallel, ok);
+    }
+    let cfg = parse(&format!("{}\n[status]\n", minimal(&repo))).unwrap();
+    assert_eq!(cfg.status.parallel, 4, "an empty table keeps the default");
+    for bad in [0, 17] {
+        let err = parse(&format!("{}\n[status]\nparallel = {bad}\n", minimal(&repo))).unwrap_err();
+        assert_eq!(err.code, Code::InvalidInput);
+        assert_eq!(rule(&err), "V13");
+        assert_eq!(err.detail.as_ref().unwrap()["field"], "parallel");
+    }
+    let err = parse(&format!("{}\n[status]\nparallel = 2\nfast = true\n", minimal(&repo))).unwrap_err();
+    assert_eq!(rule(&err), "V11");
+}
+
+#[test]
+fn dev_ports_default_to_2500_blocks_and_validate_their_range() {
+    let base = minimal(&bare_repo("tool", "/Volumes/GWD/inter/tool"));
+    let c = parse(&base).unwrap();
+    assert_eq!(c.dev_ports, strata_types::DevPorts::default());
+    let blocks = c.dev_ports.blocks().unwrap();
+    assert_eq!((blocks.len(), blocks[0], *blocks.last().unwrap()), (2500, 20000, 29996));
+
+    let with = |t: &str| format!("{base}\n[dev_ports]\n{t}\n");
+    let c = parse(&with("range = \"20001-20011\"\nexclude = [20005]")).unwrap();
+    assert_eq!(c.dev_ports.blocks().unwrap(), vec![20008]);
+    for (t, r, field) in [
+        ("range = \"x\"", "P1", "dev_ports.range"),
+        ("range = \"30000-20000\"", "P1", "dev_ports.range"),
+        ("range = \"50000-50100\"", "P2", "dev_ports.range"),
+        ("range = \"9000-9600\"", "P2", "dev_ports.range"),
+        ("range = \"4000-4003\"", "P2", "dev_ports.range"),
+        ("range = \"20001-20003\"", "P3", "dev_ports.range"),
+        ("range = \"20000-20003\"\nexclude = [20002]", "P3", "dev_ports.range"),
+        ("exclude = [0]", "P1", "dev_ports.exclude"),
+    ] {
+        let e = parse(&with(t)).unwrap_err();
+        assert_eq!(e.code, Code::InvalidInput, "{t}");
+        assert_eq!(rule(&e), r, "{t}");
+        assert_eq!(e.detail.as_ref().unwrap()["field"], field, "{t}");
+    }
+    assert_eq!(rule(&parse(&with("ranges = \"1-2\"")).unwrap_err()), "V11");
+}
+
+fn rm_repo(extra: &str) -> String {
+    minimal(&format!("{}{extra}\n", bare_repo("tool", "/Volumes/GWD/inter/tool")))
+}
+
+#[test]
+fn config_without_new_keys_loads_with_defaults() {
+    let cfg = parse(&minimal(&bare_repo("tool", "/Volumes/GWD/inter/tool"))).unwrap();
+    let tool = cfg.repo(&repo("tool")).unwrap();
+    assert!(tool.rm.regenerable.is_empty());
+    assert_eq!(tool.rebase.deps_changed, strata_types::DepsChanged::MoveSource);
+    assert_eq!(tool.rebase.quiet_secs, 120);
+}
+
+#[test]
+fn rm_and_rebase_tables_parse() {
+    let cfg = parse(&rm_repo(
+        "[repo.tool.rm]\nregenerable = [\"src/constants/permissionMap/generated.json\", \"generated/**\", \"!generated/keep.json\"]\n[repo.tool.rebase]\ndeps_changed = \"wait\"\nquiet_secs = 86400\n",
+    ))
+    .unwrap();
+    let tool = cfg.repo(&repo("tool")).unwrap();
+    assert_eq!(tool.rm.regenerable.len(), 3);
+    assert_eq!(tool.rebase.deps_changed, strata_types::DepsChanged::Wait);
+    assert_eq!(tool.rebase.quiet_secs, 86400);
+}
+
+#[test]
+fn v14_rejects_bad_regenerable_patterns() {
+    for bad in [
+        "", " a.json", "a.json ", "! a.json", "#c", "%include x", "/abs.json", "!/abs", "a/../b",
+        ".git/x", ".GIT/config", "*", "**", "?", "!*", "a/.g*/x", "*/?git",
+    ] {
+        let toml_pat = bad.replace('\\', "\\\\").replace('"', "\\\"");
+        let err = parse(&rm_repo(&format!("[repo.tool.rm]\nregenerable = [\"{toml_pat}\"]\n")))
+            .expect_err(bad);
+        assert_eq!(err.code, Code::InvalidInput, "{bad}");
+        assert_eq!(rule(&err), "V14", "{bad}");
+        assert_eq!(err.detail.as_ref().unwrap()["field"], "rm.regenerable");
+    }
+    for nl in ["a\\nb", "a\\rb"] {
+        let err = parse(&rm_repo(&format!("[repo.tool.rm]\nregenerable = [\"{nl}\"]\n"))).unwrap_err();
+        assert_eq!(rule(&err), "V14", "{nl}");
+    }
+    for good in ["generated/**", "**/gen.json", "*.gen.ts", "!keep.json", "a/b/c.json"] {
+        parse(&rm_repo(&format!("[repo.tool.rm]\nregenerable = [\"{good}\"]\n"))).expect(good);
+    }
+}
+
+#[test]
+fn v15_bounds_quiet_secs_and_unknown_rm_keys_are_v11() {
+    let err = parse(&rm_repo("[repo.tool.rebase]\nquiet_secs = 86401\n")).unwrap_err();
+    assert_eq!(rule(&err), "V15");
+    let err = parse(&rm_repo("[repo.tool.rm]\nregenerables = []\n")).unwrap_err();
+    assert_eq!(err.code, Code::InvalidInput);
+    let err = parse(&rm_repo("[repo.tool.rebase]\ndeps_changed = \"later\"\n")).unwrap_err();
+    assert_eq!(err.code, Code::InvalidInput);
 }

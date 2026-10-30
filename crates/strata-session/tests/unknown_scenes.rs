@@ -45,7 +45,7 @@ fn only_session(fx: &Fx) -> SessionId {
 /// `new` failing with ENOSPC at the start of `workspace` for `tool`, the
 /// second repo in RepoName order.
 fn fail_new_at_second_workspace(fx: &Fx, s: &Sessions<'_>) -> (SessionId, StrataError) {
-    s.arm(SessionSeam::FailAt { phase: "new.workspace@tool".into(), errno: libc::ENOSPC });
+    s.arm(SessionSeam::FailKeepAt { phase: "new.workspace@tool".into(), errno: libc::ENOSPC });
     let e = s.new(Some("T-1"), &fx.all()).unwrap_err();
     (only_session(fx), e)
 }
@@ -107,6 +107,75 @@ fn new_failure_after_writing_began_is_unknown() {
     let st2 = s.status(&id).unwrap();
     assert_eq!(st2.state, SessionState::Unknown);
     assert_eq!(st2.scene.unwrap().error, e);
+}
+
+/// D56 (incident 2026-10-27, s-kooeepw3): a `new` that fails at any step
+/// rolls itself back. No directory, shadow or pin is left, the row is
+/// Removed, and the error says so (`rolled_back`); the same ticket works
+/// again.
+#[test]
+fn new_failure_rolls_back_every_step() {
+    for phase in ["new.root", "new.workspace@tool", "new.seed_caches@tool", "new.git@tool", "new.pin@tool", "new.seed_files@tool", "new.finalize"] {
+        let fx = Fx::new();
+        let s = fx.sessions();
+        s.arm(SessionSeam::FailAt { phase: phase.into(), errno: libc::ENOSPC });
+        let e = s.new(Some("T-1"), &fx.all()).unwrap_err();
+        let id = only_session(&fx);
+        assert_eq!(detail(&e).get("rolled_back"), Some(&serde_json::json!(true)), "{phase}: {e:?}");
+        assert_eq!(detail_str(&e, "op"), Some("new"), "{phase}");
+        assert_eq!(detail_str(&e, "session"), Some(id.as_str()), "{phase}");
+        assert!(detail(&e).contains_key("cause"), "{phase}: {e:?}");
+        assert!(e.message.contains("rolled back"), "{phase}: {}", e.message);
+
+        assert_eq!(fx.session_dirs(), Vec::<String>::new(), "{phase}");
+        assert_eq!(fx.pins("front"), "", "{phase}");
+        assert_eq!(fx.pins("tool"), "", "{phase}");
+        let rec = fx.store().session(&id).unwrap().expect("row");
+        assert_eq!(rec.lifecycle, Lifecycle::Removed, "{phase}");
+
+        let again = s.new(Some("T-1"), &fx.all()).unwrap();
+        assert!(again.manifest.root.is_dir(), "{phase}");
+    }
+}
+
+/// D56: the seed caches are cloned and joined before any timed git step, so
+/// a large cache clone cannot stall the shadow `git init`s: a cache failure
+/// is seen before a shadow or pin exists.
+#[test]
+fn new_joins_seed_caches_before_git() {
+    let fx = Fx::new();
+    let s = fx.sessions();
+    s.arm(SessionSeam::FailKeepAt { phase: "new.seed_caches@tool".into(), errno: libc::EIO });
+    let e = s.new(Some("T-1"), &fx.all()).unwrap_err();
+    let id = only_session(&fx);
+    assert_eq!(e.code, Code::Unknown, "{e:?}");
+    let rec = fx.store().session(&id).unwrap().expect("row");
+    assert_eq!(rec.lifecycle, Lifecycle::Unknown);
+    assert_eq!(rec.phase.as_deref(), Some("seed_caches"));
+    assert!(session_root(&fx, &id).join("tool/package.json").is_file());
+    assert!(!shadow(&fx, &id, "front").exists());
+    assert!(!shadow(&fx, &id, "tool").exists());
+    assert_eq!(fx.pins("front"), "");
+    assert_eq!(fx.pins("tool"), "");
+}
+
+/// Incident 2026-10-27: a shadow directory left by a `git init` that never
+/// finished (only a `config`, no marker) made `status` fail outright. It is
+/// reported (`ShadowInvalid`) and status answers.
+#[test]
+fn status_survives_a_half_built_shadow() {
+    let fx = Fx::new();
+    let s = fx.sessions();
+    s.arm(SessionSeam::FailKeepAt { phase: "new.git@tool".into(), errno: libc::EIO });
+    s.new(Some("T-1"), &fx.all()).unwrap_err();
+    let id = only_session(&fx);
+    let sh = shadow(&fx, &id, "tool");
+    fs::create_dir_all(&sh).unwrap();
+    fs::write(sh.join("config"), b"[core]\n\trepositoryformatversion = 0\n").unwrap();
+    let st = s.status(&id).unwrap();
+    assert_eq!(st.state, SessionState::Unknown);
+    let w = format!("{:?}", st);
+    assert!(w.contains("ShadowInvalid"), "{w}");
 }
 
 #[test]
@@ -213,6 +282,7 @@ fn unknown_scene_survives_daemon_restart() {
 fn base_staging(l: &Leftover) -> (&str, &Path, &[PathBuf]) {
     match l {
         Leftover::BaseStaging { repo, path, export_temps } => (repo.as_str(), path.as_path(), export_temps.as_slice()),
+        other => panic!("not a base staging leftover: {other:?}"),
     }
 }
 

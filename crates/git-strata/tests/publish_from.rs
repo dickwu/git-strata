@@ -68,3 +68,54 @@ fn publish_from_prefix_is_caught_in_a_single_repo_session() {
         assert!(lv.requests.lock().unwrap()[seen..].is_empty());
     });
 }
+
+/// cli.md D31: `S:PATH` in several repos goes to the one repo whose
+/// checkpoints changed it; `S:REPO:PATH` names the repo outright.
+#[test]
+fn publish_from_prefers_the_changed_repo_and_takes_a_repo_qualified_form() {
+    let lv = Live::new(&["app", "lib"], &[("a.txt", b"one\n"), ("src/x.ts", b"x\n"), ("src/y.ts", b"y\n")]);
+    lv.serve(|_core| {
+        let s = lv.new_session("T-3", "app,lib");
+        let app = lv.ws(&s, "app");
+        let lib = lv.ws(&s, "lib");
+
+        // No checkpoint changed src/x.ts yet: ambiguous, with the S:REPO:PATH hint.
+        let both = format!("{s}:src/x.ts");
+        let r = lv.run_in(&lv.sb, &["publish", "--from", &both]);
+        assert_eq!(r.err_code(), "AmbiguousMatch", "{r:?}");
+        let d = &r.env()["error"]["detail"];
+        assert_eq!(d["expected"][0], format!("{s}:app:src/x.ts"), "{d}");
+        assert!(r.env()["error"]["message"].as_str().unwrap().contains("SESSION:REPO:PATH"), "{r:?}");
+
+        // Only app's checkpoint changes src/x.ts: S:PATH picks app.
+        write(&app, "src/x.ts", b"x2\n");
+        lv.run_in(&app, &["checkpoint", "-m", "x"]).ok();
+        let r = lv.run_in(&lv.sb, &["publish", "--from", &both]);
+        let d = r.ok();
+        let commits = d["commits"].as_object().expect("commits");
+        assert_eq!(commits.keys().collect::<Vec<_>>(), vec!["app"], "{d}");
+
+        // Explicit repo: S:app:src/y.ts (in both, changed in neither checkpoint yet).
+        write(&app, "src/y.ts", b"y2\n");
+        let explicit = format!("{s}:app:src/y.ts");
+        let r = lv.run_in(&lv.sb, &["publish", "--from", &explicit]);
+        let d = r.ok();
+        assert_eq!(d["commits"].as_object().unwrap().keys().collect::<Vec<_>>(), vec!["app"], "{d}");
+
+        // Both repos changed it: ambiguous again, changed_in lists both.
+        write(&app, "a.txt", b"app\n");
+        write(&lib, "a.txt", b"lib\n");
+        lv.run_in(&app, &["checkpoint", "-m", "a"]).ok();
+        lv.run_in(&lib, &["checkpoint", "-m", "a"]).ok();
+        let r = lv.run_in(&lv.sb, &["publish", "--from", &format!("{s}:a.txt")]);
+        assert_eq!(r.err_code(), "AmbiguousMatch", "{r:?}");
+        assert_eq!(r.env()["error"]["detail"]["changed_in"], serde_json::json!(["app", "lib"]));
+
+        // REPO:PATH with a path the repo lacks, and an unknown repo.
+        let r = lv.run_in(&lv.sb, &["publish", "--from", &format!("{s}:lib:nope.txt")]);
+        assert_eq!(r.reason(), "from_path", "{r:?}");
+        let r = lv.run_in(&lv.sb, &["publish", "--from", &format!("{s}:zzz:src/x.ts")]);
+        assert_eq!(r.err_code(), "InvalidInput", "{r:?}");
+        assert_eq!(r.reason(), "from_path", "{r:?}");
+    });
+}

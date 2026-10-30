@@ -30,7 +30,12 @@ mod imp {
         pub(super) static BEFORE_MAIN_LOCK: RefCell<Option<Hook>> = const { RefCell::new(None) };
         pub(super) static BEFORE_MAIN_CAS: RefCell<Option<Hook>> = const { RefCell::new(None) };
         pub(super) static SYNCS: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
+        pub(super) static SNAPSHOT_CLONE: RefCell<Option<SnapHook>> = const { RefCell::new(None) };
+        pub(super) static SNAPSHOT_HASH_WRONG: Cell<bool> = const { Cell::new(false) };
+        pub(super) static BUILD_LOCK_BUSY: RefCell<Option<Hook>> = const { RefCell::new(None) };
     }
+
+    pub(super) type SnapHook = Box<dyn FnMut(&Path, &strata_types::RepoPath)>;
 
     /// Take the hook out of `slot`, run it, and put it back afterwards (also
     /// on unwind) unless the hook installed a replacement or `reset` ran.
@@ -98,6 +103,40 @@ pub(crate) fn before_main_cas() {
     imp::call_kept(&imp::BEFORE_MAIN_CAS);
 }
 
+/// `lock_build` found the build lock held by someone else (the first
+/// `EWOULDBLOCK` of one call), before it waits.
+pub(crate) fn build_lock_busy() {
+    #[cfg(feature = "test-seams")]
+    {
+        if let Some(mut h) = imp::BUILD_LOCK_BUSY.with(|s| s.borrow_mut().take()) {
+            h();
+        }
+    }
+}
+
+/// publish's input snapshot: after a file was cloned into its slot, before
+/// it is renamed to `dst` (relative to the snapshot directory `snap`).
+#[allow(unused_variables)]
+pub(crate) fn after_snapshot_clone(snap: &Path, dst: &strata_types::RepoPath) {
+    #[cfg(feature = "test-seams")]
+    {
+        if let Some(mut h) = imp::SNAPSHOT_CLONE.with(|s| s.borrow_mut().take()) {
+            h(snap, dst);
+        }
+    }
+}
+
+/// publish's input snapshot: the hash it verifies (a test can make it wrong).
+pub(crate) fn snapshot_hash(h: String) -> String {
+    #[cfg(feature = "test-seams")]
+    {
+        if imp::SNAPSHOT_HASH_WRONG.with(|c| c.replace(false)) {
+            return format!("{h}-wrong");
+        }
+    }
+    h
+}
+
 #[allow(unused_variables)]
 pub(crate) fn count_sync(kind: Sync) {
     #[cfg(feature = "test-seams")]
@@ -146,6 +185,25 @@ pub mod test_seams {
         imp::BEFORE_MAIN_CAS.with(|s| *s.borrow_mut() = Some(hook));
     }
 
+    /// Called once, by this thread's next publish input snapshot, after the
+    /// first file is cloned into its slot and before it is renamed to
+    /// `tree/<member>` (`snap` is the snapshot directory).
+    #[allow(clippy::type_complexity)]
+    pub fn after_snapshot_clone(hook: Box<dyn FnMut(&Path, &strata_types::RepoPath)>) {
+        imp::SNAPSHOT_CLONE.with(|s| *s.borrow_mut() = Some(hook));
+    }
+
+    /// Called once, by this thread's next build-lock wait: the first time a
+    /// `lock_build` finds the lock held, before it sleeps.
+    pub fn on_build_lock_busy(hook: Box<dyn FnMut()>) {
+        imp::BUILD_LOCK_BUSY.with(|s| *s.borrow_mut() = Some(hook));
+    }
+
+    /// This thread's next publish input snapshot hashes wrong once.
+    pub fn snapshot_hash_wrong() {
+        imp::SNAPSHOT_HASH_WRONG.with(|c| c.set(true));
+    }
+
     /// Syncs done by this thread's seals: (files with F_BARRIERFSYNC,
     /// directories with F_BARRIERFSYNC, F_FULLFSYNC calls).
     pub fn sync_counts() -> (u64, u64, u64) {
@@ -159,6 +217,9 @@ pub mod test_seams {
         imp::BEFORE_MAIN_LOCK.with(|s| *s.borrow_mut() = None);
         imp::BEFORE_MAIN_CAS.with(|s| *s.borrow_mut() = None);
         imp::SYNCS.with(|c| c.set((0, 0, 0)));
+        imp::SNAPSHOT_CLONE.with(|s| *s.borrow_mut() = None);
+        imp::SNAPSHOT_HASH_WRONG.with(|c| c.set(false));
+        imp::BUILD_LOCK_BUSY.with(|s| *s.borrow_mut() = None);
         imp::RESET_DURING.with(|r| r.set(true));
     }
 }

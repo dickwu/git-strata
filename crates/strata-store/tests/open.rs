@@ -43,7 +43,7 @@ fn open_creates_layout_on_empty_root() {
         assert!(env.store_dir().join("LOCK").is_file());
         let db = env.db();
         assert_eq!(header_u32(&db, 68), 1398035009);
-        assert_eq!(header_u32(&db, 60), 1);
+        assert_eq!(header_u32(&db, 60), 3);
         let b = fs::read(&db).unwrap();
         assert_eq!((b[18], b[19]), (2, 2));
         assert!(!s.is_read_only());
@@ -94,6 +94,27 @@ fn open_refuses_nonempty_foreign_root() {
     let entries = detail(&e, "entries").unwrap().as_array().unwrap();
     assert!(entries.iter().any(|v| v == "notes.txt"));
     assert_eq!(snapshot(&env.root), before);
+}
+
+/// Incident 2026-10-27: the daemon's search index lives at
+/// `<root>/search`; a store root holding it, or anything else beside an
+/// existing store.db, still opens. A fresh root may hold `search` too.
+#[test]
+fn open_accepts_search_dir_and_extra_entries_beside_an_existing_store() {
+    let env = env();
+    env.open().close().unwrap();
+    fs::create_dir_all(env.root.join("search/repo")).unwrap();
+    fs::write(env.root.join("search/repo/index"), b"x").unwrap();
+    env.open().close().unwrap();
+    fs::write(env.root.join("notes.txt"), b"mine").unwrap();
+    env.open().close().unwrap();
+    assert!(env.root.join("search/repo/index").exists());
+    assert!(env.root.join("notes.txt").exists());
+
+    let fresh = support::env();
+    fs::create_dir_all(fresh.root.join("search/repo")).unwrap();
+    fresh.open().close().unwrap();
+    assert!(fresh.db().exists());
 }
 
 #[test]
@@ -226,7 +247,7 @@ fn open_refuses_schema_drift() {
 
 #[test]
 fn open_refuses_unknown_user_version() {
-    for v in [0, 2] {
+    for v in [0, 4] {
         let env = env();
         env.open().close().unwrap();
         {
@@ -346,6 +367,7 @@ fn read_only_open_refuses_every_write() {
     let session = strata_types::SessionManifest {
         id: sid.clone(),
         ticket: None,
+        agent: None,
         root: sroot.clone(),
         repos: [(repo.clone(), strata_types::WorkspaceState { base: base.clone(), head: head.clone(), path: sroot.join(repo.as_str()), tracked: true })]
             .into_iter()

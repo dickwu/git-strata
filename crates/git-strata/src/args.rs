@@ -32,7 +32,7 @@ pub struct Select {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
-    /// Create a session with one workspace per repo
+    /// Create a session of workspaces (--repo: only those repos)
     #[command(long_about = crate::help::NEW, after_long_help = crate::help::NEW_AFTER)]
     New {
         /// Ticket name (also accepted positionally)
@@ -41,15 +41,43 @@ pub enum Cmd {
         /// Ticket name
         #[arg(value_name = "TICKET")]
         ticket: Option<String>,
-        /// Repos to track, comma separated (required; every configured repo still gets a workspace)
+        /// A repo the session gets, tracked (repeatable or comma separated); only these get a workspace
+        #[arg(long = "repo", value_delimiter = ',', value_name = "R")]
+        repo: Vec<String>,
+        /// Repos to track, comma separated; every configured repo still gets a workspace (the full sibling layout)
         #[arg(long, value_delimiter = ',', value_name = "A,B")]
         repos: Vec<String>,
+        /// The AI agent creating the session (default: STRATA_AGENT, else detected: claude-code, codex, cursor-agent)
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
+    },
+    /// Add workspaces of more repos to an existing session
+    #[command(after_long_help = crate::help::ADD_AFTER)]
+    Add {
+        /// Session id or ticket (default: the session of the current directory)
+        #[arg(long)]
+        session: Option<String>,
+        /// A repo to add, tracked (repeatable or comma separated)
+        #[arg(long = "repo", value_delimiter = ',', value_name = "R")]
+        repo: Vec<String>,
     },
     /// Session status (cwd's session, --session, or --all)
     #[command(after_long_help = crate::help::STATUS_AFTER)]
     Status {
         #[command(flatten)]
         sel: Select,
+        /// From the store alone: the session fields and each workspace's
+        /// recorded health, path and checkpoint (no drift, seeds, mirrors,
+        /// old trees)
+        #[arg(long)]
+        brief: bool,
+    },
+    /// List live sessions from the store (id, ticket, state, repos, created)
+    #[command(after_long_help = crate::help::LS_AFTER)]
+    Ls {
+        /// A table for people instead of the envelope (errors stay envelopes)
+        #[arg(long)]
+        table: bool,
     },
     /// Record a checkpoint (exactly one of --tool-call / -m)
     #[command(after_long_help = crate::help::CHECKPOINT_AFTER)]
@@ -117,8 +145,8 @@ pub enum Cmd {
     /// Publish session changes to the publish branch
     #[command(long_about = crate::help::PUBLISH, after_long_help = crate::help::PUBLISH_AFTER)]
     Publish {
-        /// SESSION:PATH to include (repeatable; without it, interactive on a TTY)
-        #[arg(long = "from", value_name = "S:PATH")]
+        /// SESSION:PATH or SESSION:REPO:PATH to include (repeatable; without it, interactive on a TTY)
+        #[arg(long = "from", value_name = "S:[REPO:]PATH")]
         from: Vec<String>,
         /// Same as `git-strata assign --file FILE --session SESSION`
         #[arg(long, num_args = 2, value_names = ["FILE", "SESSION"])]
@@ -152,7 +180,15 @@ pub enum Cmd {
     },
     /// Collect garbage (old bases, removed sessions, old store/trash)
     #[command(after_long_help = crate::help::GC_AFTER)]
-    Gc,
+    Gc {
+        /// Also run the store-wide gc: removed sessions past 30 days, their
+        /// checkpoints and blobs, decided proposals, store/tmp, blob scrub
+        #[arg(long)]
+        store: bool,
+        /// With --store: report what it would reclaim, change nothing
+        #[arg(long, requires = "store")]
+        dry_run: bool,
+    },
     /// Disk usage of the data root (cached; CoW-aware)
     #[command(after_long_help = crate::help::DU_AFTER)]
     Du {
@@ -195,6 +231,9 @@ pub enum Cmd {
     /// Configuration
     #[command(subcommand, subcommand_required = true, after_long_help = crate::help::CONFIG_AFTER)]
     Config(ConfigCmd),
+    /// Per-workspace dev ports (dev server, tauri-connector) and running with them
+    #[command(subcommand, subcommand_required = true, after_long_help = crate::help::SESSION_AFTER)]
+    Session(SessionCmd),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -238,11 +277,53 @@ pub enum DepsCmd {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum SessionCmd {
+    /// A workspace's leased dev ports and the env that hands them out
+    #[command(long_about = crate::help::SESSION_PORTS, after_long_help = crate::help::SESSION_PORTS_AFTER)]
+    Ports {
+        /// Session id or ticket (default: cwd's session)
+        #[arg(long)]
+        session: Option<String>,
+        /// Repo name (default: cwd's repo, else every repo of the session)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Every live session's workspaces; read-only (unleased ones show ports null)
+        #[arg(long)]
+        all: bool,
+        /// Also report who listens on each port
+        #[arg(long)]
+        check: bool,
+        /// Move this workspace's lease to a free block (exactly one session and repo)
+        #[arg(long)]
+        reassign: bool,
+    },
+    /// Run a command in a workspace with its dev-port env
+    #[command(long_about = crate::help::SESSION_EXEC, after_long_help = crate::help::SESSION_EXEC_AFTER)]
+    Exec {
+        /// Session id or ticket (default: cwd's session)
+        #[arg(long)]
+        session: Option<String>,
+        /// Repo name (default: cwd's repo, or the session's only repo)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Point tauri dev's devUrl at the web port (adds --config to the command)
+        #[arg(long)]
+        tauri: bool,
+        /// Skip the port availability check
+        #[arg(long)]
+        no_check: bool,
+        /// The command and its arguments, after --
+        #[arg(last = true, required = true, value_name = "CMD")]
+        cmd: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum DaemonCmd {
-    /// launchctl bootstrap the per-user agent
+    /// HUMAN ONLY: launchctl bootstrap the per-user agent (login HOME only)
     #[command(after_long_help = crate::help::DAEMON_AFTER)]
     Start,
-    /// launchctl bootout the per-user agent
+    /// HUMAN ONLY: launchctl bootout the per-user agent (login HOME only)
     #[command(after_long_help = crate::help::DAEMON_AFTER)]
     Stop,
     /// Whether the daemon runs, its locks and alerts

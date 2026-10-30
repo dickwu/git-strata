@@ -389,7 +389,7 @@ LAError 的码取自 SDK 27.0 的 `LAPublicDefines.h` 与 `LAError.h`：19 个�
 
 | `Action` | 文字 |
 | --- | --- |
-| `PushDeploy { repo, branch }` | `push <repo> to origin/<branch>` |
+| `PushDeploy { repo, branch, url }` | `push <repo> to origin/<branch> at <url>`（`url` 的 `scheme://用户信息@` 写成 `scheme://***@`，再转义；review P1-15） |
 | `DepsApprove { proposal }` | `approve dependency proposal <proposal>` |
 | `RemoveDiscard { session }` | `discard the unpublished changes of session <session> and remove it` |
 | `ConfigRelax { repo }` | `apply relaxed push settings for <repo>`（`RepoId` 的路径） |
@@ -456,7 +456,7 @@ confirm 不写任何对外可见的东西（§5.9），它的每一个失败都�
 | 测试名 | 断言 | 来源（矩阵行 或 新增） |
 | --- | --- | --- |
 | `token_has_no_clone_copy_or_serde` | 静态断言（`static_assertions::assert_not_impl_any!`、`assert_impl_all!`）：`ConfirmToken` 不实现 `Clone`、`Copy`、`Serialize`、`DeserializeOwned`；`Confirmer` 实现 `Send` 与 `Sync`；objc2 的 `LAContext` 不实现 `Send`（所以 `Confirmer` 存不下上下文，每次只能新建，C1）。一个凭据只能按值移走一次，复制、序列化都编译不过 | 新增（types.md §2.2、§4；C5） |
-| `prompt_reason_names_the_action` | 四个变体的文字逐字等于 §5.6 的表：`push tool to origin/main`、`approve dependency proposal 12`、`discard the unpublished changes of session s-k3q7xm2a and remove it`、`apply relaxed push settings for /Volumes/GWD/inter/tool`；对任何输入，结果非空、只含可打印 ASCII；`branch` 里的 U+202E、U+200B、换行、`\` 依次输出为 `\u{202E}`、`\u{200B}`、`\u{A}`、`\\`；两个只差 `branch` 的 `PushDeploy` 文字不同 | 新增 |
+| `prompt_reason_names_the_action` | 四个变体的文字逐字等于 §5.6 的表：`push tool to origin/main at git@github.com:inter/tool.git`、`approve dependency proposal 12`、`discard the unpublished changes of session s-k3q7xm2a and remove it`、`apply relaxed push settings for /Volumes/GWD/inter/tool`；对任何输入，结果非空、只含可打印 ASCII；`branch` 里的 U+202E、U+200B、换行、`\` 依次输出为 `\u{202E}`、`\u{200B}`、`\u{A}`、`\\`；两个只差 `branch` 的 `PushDeploy` 文字不同；只差 `url` 的也不同；`https://x-access-token:ghp_secret@github.com/...` 显示成 `https://***@github.com/...`，文字里没有令牌（P1-15） | 新增 |
 | `require_pass_mints_a_registered_token` | 脚本 `Verdict::pass()`：`require(PushDeploy { tool, main })` 返回的凭据 `action` 与之相同；`PromptLog::shown` 恰好一条，等于 `prompt_reason` 的结果；`validate(&t, &action)` 为 Ok。同一动作再 `require` 一次：又弹一次框（`shown` 两条），两个 nonce 不同，各自只能核销一次（每个动作各弹一次，不缓存） | 新增（design §6.9） |
 | `token_single_use` | 同一凭据第二次 `validate` → `NotConfirmed`，`reason = "used"`；先以错误的 `expected` 核销一次（`mismatch`），再以正确的 `expected` 核销 → `used`：失败的核销也用掉 nonce；`FakeClock::advance(RECORD_RETENTION)` 之后再核销 → `unknown`（记录已清扫）；三种情形都不成功，`record_count` 随清扫回到 0 | 新增（design §6.9 "一次一用"；C2） |
 | `token_expires` | 签发后 `advance(29 s)` → Ok；另一个凭据 `advance(30 s)` → `expired`，`detail.age_ms` 不小于 30000；再一个凭据只 `sleep(31 s)`（`Instant` 不动，模拟合盖）→ `expired`；过期的凭据之后再核销 → `used` | 新增（C3、§5.7） |

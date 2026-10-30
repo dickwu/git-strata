@@ -301,6 +301,9 @@ exit $rc
             },
             deploy_on_push: false,
             pin_unpushed: true,
+            check_siblings: Vec::new(),
+            rm: Default::default(),
+            rebase: Default::default(),
         }
     }
 }
@@ -426,6 +429,26 @@ impl RepoWriteLock for TestLock {
         repo: &RepoName,
         f: &mut dyn FnMut() -> strata_deps::Result<()>,
     ) -> strata_deps::Result<strata_deps::Result<()>> {
+        let wait = *self.wait.lock().unwrap();
+        self.take(repo, f, wait)
+    }
+
+    fn try_write(
+        &self,
+        repo: &RepoName,
+        f: &mut dyn FnMut() -> strata_deps::Result<()>,
+    ) -> strata_deps::Result<strata_deps::Result<()>> {
+        self.take(repo, f, Duration::ZERO)
+    }
+}
+
+impl TestLock {
+    fn take(
+        &self,
+        repo: &RepoName,
+        f: &mut dyn FnMut() -> strata_deps::Result<()>,
+        wait: Duration,
+    ) -> strata_deps::Result<strata_deps::Result<()>> {
         let mine = HELD.with(|h| h.borrow().clone());
         assert!(
             mine.is_empty(),
@@ -435,7 +458,6 @@ impl RepoWriteLock for TestLock {
             self.busy_next.fetch_sub(1, Ordering::SeqCst);
             return Err(StrataError::new(Code::Busy, format!("repo {repo} write lock is busy")));
         }
-        let wait = *self.wait.lock().unwrap();
         let deadline = std::time::Instant::now() + wait;
         let mut held = self.held.lock().unwrap();
         while held.contains_key(repo.as_str()) {
@@ -520,7 +542,7 @@ impl Fx {
             repos.insert(repo_name(n), sb.config(&main));
         }
         let root = sb.root.join("strata");
-        let config = Config { paths: Paths { root }, repos };
+        let config = Config { paths: Paths { root }, repos, status: Default::default(), dev_ports: Default::default() };
         Fx::from_parts(sb, config)
     }
 

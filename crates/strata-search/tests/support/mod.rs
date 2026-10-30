@@ -301,6 +301,9 @@ exit $rc
             },
             deploy_on_push: false,
             pin_unpushed: true,
+            check_siblings: Vec::new(),
+            rm: Default::default(),
+            rebase: Default::default(),
         }
     }
 }
@@ -520,7 +523,7 @@ impl Fx {
             repos.insert(repo_name(n), sb.config(&main));
         }
         let root = sb.root.join("strata");
-        let config = Config { paths: Paths { root }, repos };
+        let config = Config { paths: Paths { root }, repos, status: Default::default(), dev_ports: Default::default() };
         Fx::from_parts(sb, config)
     }
 

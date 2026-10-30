@@ -32,7 +32,7 @@ use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,9 @@ pub const MUTABLE_TTL: Duration = Duration::from_secs(600);
 pub const IMMUTABLE_TTL: Duration = Duration::from_secs(24 * 3600);
 /// Scan threads of one pass.
 pub const WORKERS: usize = 4;
+/// How long a hold waits for a running scan of its session to stop
+/// (status-perf D8); past it the caller gets `Busy du_cancel_timeout`.
+pub const HOLD_WAIT: Duration = Duration::from_secs(5);
 /// store's gc age floor for trash entries (store.md §5.11).
 pub const TRASH_FLOOR: Duration = Duration::from_secs(3600);
 const SAVE_EVERY: Duration = Duration::from_secs(3);
@@ -316,14 +319,63 @@ struct ScanState {
     /// with the wall time of their `new` when it was measured.
     new_due: HashMap<String, Option<u64>>,
     last_save: Option<Instant>,
+    /// Sessions held by a write (status-perf D8): their units are neither
+    /// queued nor scanned while held. A count per session.
+    holds: HashMap<String, usize>,
+    /// The scans running now, each with its own cancel token.
+    active: HashMap<String, Arc<AtomicBool>>,
+}
+
+impl ScanState {
+    fn held(&self, key: &str) -> bool {
+        session_of(key).is_some_and(|sid| self.holds.contains_key(sid))
+    }
+
+    fn scanning(&self, sid: &str) -> bool {
+        self.active.keys().any(|k| session_of(k) == Some(sid))
+    }
+}
+
+/// The session a unit key belongs to: the first path component after
+/// `sessions/.repos/` or `sessions/` (`.repos` itself is no session).
+/// The one decoder for keys → sessions (recording, removal, holds).
+pub fn session_of(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("sessions/.repos/").or_else(|| key.strip_prefix("sessions/"))?;
+    let sid = rest.split('/').next().unwrap_or("");
+    (!sid.is_empty() && sid != ".repos").then_some(sid)
+}
+
+/// A write's hold on its sessions' du units (status-perf D8); released on
+/// drop. Units become queueable again; nothing is queued by the release.
+pub struct DuHold {
+    du: Arc<Du>,
+    sids: Vec<String>,
+}
+
+impl Drop for DuHold {
+    fn drop(&mut self) {
+        let mut st = lock(&self.du.scan);
+        for sid in &self.sids {
+            if let Some(n) = st.holds.get_mut(sid) {
+                *n -= 1;
+                if *n == 0 {
+                    st.holds.remove(sid);
+                }
+            }
+        }
+    }
 }
 
 /// The du state of one daemon; shared with its scan thread.
+/// Lock order (review P1-4): `recorded` → `scan` → `cache`. A path that
+/// needs two of them takes them in that order or one at a time.
 pub struct Du {
     root: PathBuf,
     dir: PathBuf,
     cache: Mutex<CacheFile>,
     scan: Mutex<ScanState>,
+    /// Signalled (with `scan`) when a scan ends.
+    scan_done: Condvar,
     recorded: Mutex<Option<HashSet<String>>>,
     stop: AtomicBool,
 }
@@ -372,6 +424,7 @@ impl Du {
             dir,
             cache: Mutex::new(cache),
             scan: Mutex::new(ScanState::default()),
+            scan_done: Condvar::new(),
             recorded: Mutex::new(None),
             stop: AtomicBool::new(false),
         }))
@@ -399,10 +452,12 @@ impl Du {
         let mut groups: BTreeMap<Group, Agg> = BTreeMap::new();
         let (mut eligible, mut young) = (Agg::default(), Agg::default());
         let (mut eligible_n, mut young_n) = (0u64, 0u64);
+        // Review P1-4: lock order is `recorded` → `scan` → `cache`; the
+        // queue is read before the cache lock, never inside it.
+        let queued = lock(&self.scan).queued.clone();
         {
             let mut cache = lock(&self.cache);
             let present: HashSet<&str> = units.iter().map(|u| u.key.as_str()).collect();
-            let queued = lock(&self.scan).queued.clone();
             cache.units.retain(|k, _| present.contains(k.as_str()) || queued.contains(k));
             for u in &units {
                 let path = self.root.join(&u.key);
@@ -631,7 +686,7 @@ impl Du {
         {
             let mut st = lock(&self.scan);
             for k in keys.iter().rev() {
-                if st.queued.insert(k.clone()) {
+                if !st.held(k) && st.queued.insert(k.clone()) {
                     st.queue.push_front(k.clone());
                 }
             }
@@ -664,6 +719,46 @@ impl Du {
         self.save();
     }
 
+    /// Hold `sids` against du (status-perf D8): their queued units leave the
+    /// queue, no unit of theirs is queued or scanned while held, and a
+    /// running scan of one is cancelled and waited for, up to `wait`. Past
+    /// it: `Busy` (`du_cancel_timeout`), nothing held.
+    pub fn hold_sessions(self: &Arc<Self>, sids: &[&str], wait: Duration) -> crate::Result<DuHold> {
+        let end = Instant::now() + wait;
+        let mut st = lock(&self.scan);
+        for sid in sids {
+            *st.holds.entry((*sid).to_owned()).or_default() += 1;
+        }
+        let hold = DuHold { du: Arc::clone(self), sids: sids.iter().map(|s| (*s).to_owned()).collect() };
+        let mine = |k: &str| session_of(k).is_some_and(|s| sids.contains(&s));
+        st.queue.retain(|k| !mine(k));
+        let active: HashSet<&String> = st.active.keys().collect();
+        let gone: Vec<String> = st.queued.iter().filter(|k| mine(k) && !active.contains(k)).cloned().collect();
+        for k in gone {
+            st.queued.remove(&k);
+        }
+        for (k, t) in &st.active {
+            if mine(k) {
+                t.store(true, Ordering::SeqCst);
+            }
+        }
+        while sids.iter().any(|sid| st.scanning(sid)) {
+            let now = Instant::now();
+            if now >= end {
+                drop(st);
+                drop(hold);
+                return Err(strata_types::StrataError::new(
+                    strata_types::Code::Busy,
+                    format!("the disk-usage scan of {} did not stop within {}s", sids.join(", "), wait.as_secs()),
+                )
+                .with_detail(json!({ "reason": "du_cancel_timeout", "sessions": sids })));
+            }
+            st = self.scan_done.wait_timeout(st, end - now).unwrap_or_else(|p| p.into_inner()).0;
+        }
+        drop(st);
+        Ok(hold)
+    }
+
     fn enqueue(self: &Arc<Self>, keys: Vec<String>, full: bool) {
         {
             let mut st = lock(&self.scan);
@@ -671,7 +766,7 @@ impl Du {
                 st.full_started = Some(now_ms());
             }
             for k in keys {
-                if st.queued.insert(k.clone()) {
+                if !st.held(&k) && st.queued.insert(k.clone()) {
                     st.queue.push_back(k);
                 }
             }
@@ -733,18 +828,30 @@ impl Du {
             if self.stop.load(Ordering::SeqCst) {
                 return;
             }
-            let key = {
+            // Dequeue and register as active in one `scan` critical
+            // section: a hold sees either a queued key or an active scan.
+            let (key, token) = {
                 let mut st = lock(&self.scan);
-                match st.queue.pop_front() {
-                    Some(k) => k,
-                    None => return,
-                }
+                let key = loop {
+                    match st.queue.pop_front() {
+                        Some(k) if st.held(&k) => {
+                            st.queued.remove(&k);
+                        }
+                        Some(k) => break k,
+                        None => return,
+                    }
+                };
+                let token = Arc::new(AtomicBool::new(false));
+                st.active.insert(key.clone(), token.clone());
+                (key, token)
             };
-            self.scan_unit(&key);
+            self.scan_unit_with(&key, &token);
             let save = {
                 let mut st = lock(&self.scan);
+                st.active.remove(&key);
                 st.queued.remove(&key);
                 st.done += 1;
+                self.scan_done.notify_all();
                 let due = st.last_save.is_none_or(|t| t.elapsed() >= SAVE_EVERY);
                 if due {
                     st.last_save = Some(Instant::now());
@@ -759,23 +866,44 @@ impl Du {
 
     /// Size one unit now (the pass calls this; tests call it directly).
     pub fn scan_unit(&self, key: &str) {
+        self.scan_unit_with(key, &AtomicBool::new(false));
+    }
+
+    /// [`Du::scan_unit`], given up when `cancel` is set (a hold). A
+    /// cancelled scan writes nothing: the cache keeps its last figures.
+    fn scan_unit_with(&self, key: &str, cancel: &AtomicBool) {
+        self.scan_unit_using(key, cancel, &|p, stop| usage_with(p, stop));
+    }
+
+    /// [`Du::scan_unit_with`] with the sizing function given (tests reach
+    /// the walk's `NoSuchPath` branch without racing a rename).
+    fn scan_unit_using(&self, key: &str, cancel: &AtomicBool, size: &SizeFn) {
         let path = self.root.join(key);
         let Some((ino, mtime)) = stat(&path) else {
-            lock(&self.cache).units.remove(key);
+            self.forget_unless_cancelled(key, cancel);
             return;
         };
         let started = now_ms();
         let t = Instant::now();
-        match usage_with(&path, &|| self.stop.load(Ordering::SeqCst)) {
+        let stopped = || self.stop.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst);
+        match size(&path, &stopped) {
             Ok(u) => {
                 let e = Entry { fig: u.into(), ino, mtime_ns: mtime, as_of_ms: started, took_ms: t.elapsed().as_millis() as u64 };
+                // The last cancel check and the write are one `scan`
+                // critical section, serialised with a hold's registration.
+                let _st = lock(&self.scan);
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
                 lock(&self.cache).units.insert(key.to_owned(), e);
             }
             Err(e) if e.code == strata_types::Code::NoSuchPath => {
-                lock(&self.cache).units.remove(key);
+                if !self.forget_unless_cancelled(key, cancel) {
+                    return;
+                }
             }
             Err(e) => {
-                if !self.stop.load(Ordering::SeqCst) {
+                if !stopped() {
                     let mut st = lock(&self.scan);
                     st.failed.push_back((key.to_owned(), e.message));
                     while st.failed.len() > MAX_FAILED {
@@ -785,9 +913,21 @@ impl Du {
                 return;
             }
         }
-        if let Some(sid) = key.strip_prefix("sessions/.repos/").or_else(|| key.strip_prefix("sessions/")) {
+        if let Some(sid) = session_of(key) {
             self.maybe_record(sid);
         }
+    }
+
+    /// Drop `key`'s cached figures because its root is gone, unless a hold
+    /// cancelled the scan: the check and the removal are one `scan`
+    /// critical section, like the insert. False when cancelled.
+    fn forget_unless_cancelled(&self, key: &str, cancel: &AtomicBool) -> bool {
+        let _st = lock(&self.scan);
+        if cancel.load(Ordering::SeqCst) {
+            return false;
+        }
+        lock(&self.cache).units.remove(key);
+        true
     }
 
     /// First sizing of a session: `new` (created by this daemon) or `seen`.
@@ -857,11 +997,14 @@ unsafe extern "C" {
 
 /// This thread's disk I/O at utility priority (sys/resource.h:
 /// IOPOL_TYPE_DISK 0, IOPOL_SCOPE_THREAD 1, IOPOL_UTILITY 4).
-fn utility_io() {
+pub(crate) fn utility_io() {
     unsafe {
         setiopolicy_np(0, 1, 4);
     }
 }
+
+/// How a unit is sized: [`usage_with`] outside tests.
+type SizeFn = dyn Fn(&Path, &dyn Fn() -> bool) -> crate::Result<Usage>;
 
 #[cfg(test)]
 mod tests {
@@ -955,6 +1098,168 @@ mod tests {
         let recs = du.records();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].event, "seen");
+    }
+
+    /// Review P1-4: `report` (cache, then scan) against `scan_json` and
+    /// the pass end (scan, then cache) deadlocked. Hammer both.
+    #[test]
+    fn session_of_decodes_unit_keys() {
+        assert_eq!(session_of("sessions/s-a"), Some("s-a"));
+        assert_eq!(session_of("sessions/.repos/s-a"), Some("s-a"));
+        assert_eq!(session_of("sessions/s-a/app"), Some("s-a"));
+        assert_eq!(session_of("sessions/.repos/s-a/app.git"), Some("s-a"));
+        assert_eq!(session_of("sessions/.repos"), None);
+        assert_eq!(session_of("sessions/"), None);
+        assert_eq!(session_of("store/tmp"), None);
+        assert_eq!(session_of("bases/app/t1"), None);
+    }
+
+    #[test]
+    fn a_hold_unqueues_and_blocks_its_session_until_released() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        // No pass runs: units are queued by hand.
+        {
+            let mut st = lock(&du.scan);
+            st.running = true;
+            for k in ["sessions/s-aaaaaaaa", "sessions/.repos/s-aaaaaaaa", "store/tmp"] {
+                st.queued.insert(k.to_owned());
+                st.queue.push_back(k.to_owned());
+            }
+        }
+        let hold = du.hold_sessions(&["s-aaaaaaaa"], Duration::from_millis(10)).unwrap();
+        {
+            let st = lock(&du.scan);
+            assert_eq!(st.queue.iter().map(String::as_str).collect::<Vec<_>>(), ["store/tmp"]);
+            assert!(!st.queued.contains("sessions/s-aaaaaaaa"));
+        }
+        du.on_new("s-aaaaaaaa");
+        du.enqueue(vec!["sessions/s-aaaaaaaa".into(), "bases/app/t1".into()], false);
+        {
+            let st = lock(&du.scan);
+            assert!(!st.queued.contains("sessions/s-aaaaaaaa") && !st.queued.contains("sessions/.repos/s-aaaaaaaa"));
+            assert!(st.queued.contains("bases/app/t1"));
+        }
+        drop(hold);
+        assert!(lock(&du.scan).holds.is_empty());
+        du.enqueue(vec!["sessions/s-aaaaaaaa".into()], false);
+        assert!(lock(&du.scan).queued.contains("sessions/s-aaaaaaaa"));
+        lock(&du.scan).running = false;
+    }
+
+    #[test]
+    fn a_hold_cancels_the_running_scan_and_waits_for_it() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let key = "sessions/s-aaaaaaaa".to_owned();
+        let token = Arc::new(AtomicBool::new(false));
+        lock(&du.scan).active.insert(key.clone(), token.clone());
+        let other = Arc::new(AtomicBool::new(false));
+        lock(&du.scan).active.insert("store/tmp".into(), other.clone());
+        // Nobody ends the scan: Busy, the token set, nothing left held.
+        let e = du.hold_sessions(&["s-aaaaaaaa"], Duration::from_millis(50)).err().unwrap();
+        assert_eq!(e.code, strata_types::Code::Busy);
+        assert_eq!(e.detail.as_ref().unwrap()["reason"], "du_cancel_timeout");
+        assert!(token.load(Ordering::SeqCst));
+        assert!(!other.load(Ordering::SeqCst), "another unit's scan is left alone");
+        assert!(lock(&du.scan).holds.is_empty());
+        // The scan ends while the hold waits: the hold is granted.
+        token.store(false, Ordering::SeqCst);
+        let d2 = du.0.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let st = &mut lock(&d2.scan);
+            st.active.remove("sessions/s-aaaaaaaa");
+            d2.scan_done.notify_all();
+        });
+        let hold = du.hold_sessions(&["s-aaaaaaaa"], Duration::from_secs(5)).unwrap();
+        assert!(token.load(Ordering::SeqCst));
+        t.join().unwrap();
+        // A new scan's token is not touched by the release.
+        let fresh = Arc::new(AtomicBool::new(false));
+        lock(&du.scan).active.insert("sessions/.repos/s-bbbbbbbb".into(), fresh.clone());
+        drop(hold);
+        assert!(!fresh.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_cancelled_scan_keeps_the_last_figures() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let key = "sessions/s-aaaaaaaa";
+        du.scan_unit(key);
+        let before = lock(&du.cache).units.get(key).copied().unwrap();
+        file(&root.join("sessions/s-aaaaaaaa/app/g"), 50_000);
+        du.scan_unit_with(key, &AtomicBool::new(true));
+        assert_eq!(lock(&du.cache).units.get(key).copied().unwrap().fig.logical, before.fig.logical);
+        assert!(lock(&du.scan).failed.is_empty(), "a cancel is no failure");
+        du.scan_unit(key);
+        assert!(lock(&du.cache).units.get(key).copied().unwrap().fig.logical > before.fig.logical);
+    }
+
+    #[test]
+    fn a_cancelled_scan_of_a_gone_root_keeps_the_last_figures() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let key = "sessions/s-aaaaaaaa";
+        du.scan_unit(key);
+        assert!(lock(&du.cache).units.contains_key(key));
+        std::fs::rename(root.join(key), root.join("sessions/gone")).unwrap();
+        du.scan_unit_with(key, &AtomicBool::new(true));
+        assert!(lock(&du.cache).units.contains_key(key), "a cancelled scan removes nothing");
+        du.scan_unit(key);
+        assert!(!lock(&du.cache).units.contains_key(key));
+    }
+
+    #[test]
+    fn a_root_gone_mid_walk_is_forgotten_unless_cancelled() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let key = "sessions/s-aaaaaaaa";
+        du.scan_unit(key);
+        assert!(lock(&du.cache).units.contains_key(key));
+        // The root stats, then the walk finds it gone (`NoSuchPath`).
+        let gone = |_: &Path, _: &dyn Fn() -> bool| -> crate::Result<Usage> {
+            Err(strata_types::StrataError::new(strata_types::Code::NoSuchPath, "gone mid walk"))
+        };
+        du.scan_unit_using(key, &AtomicBool::new(true), &gone);
+        assert!(lock(&du.cache).units.contains_key(key), "a cancelled scan removes nothing");
+        assert!(lock(&du.scan).failed.is_empty(), "NoSuchPath is no failure");
+        du.scan_unit_using(key, &AtomicBool::new(false), &gone);
+        assert!(!lock(&du.cache).units.contains_key(key), "not cancelled: forgotten");
+        assert!(lock(&du.scan).failed.is_empty());
+    }
+
+    #[test]
+    fn report_and_scan_status_do_not_deadlock() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let d2 = du.0.clone();
+        std::thread::spawn(move || {
+            std::thread::scope(|s| {
+                let a = &d2;
+                s.spawn(move || {
+                    for _ in 0..300 {
+                        a.report(true);
+                    }
+                });
+                s.spawn(move || {
+                    for _ in 0..20_000 {
+                        let _ = a.scan_json();
+                    }
+                });
+            });
+            let _ = tx.send(());
+        });
+        assert!(rx.recv_timeout(Duration::from_secs(60)).is_ok(), "report and scan_json deadlocked");
+        assert!(du.wait_idle(Duration::from_secs(30)));
     }
 
     #[test]

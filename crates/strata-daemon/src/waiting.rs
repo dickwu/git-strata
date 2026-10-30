@@ -92,10 +92,15 @@ impl ErrorLog {
 
 /// Whether a startup error is worth waiting out: it came from the file
 /// system (`errno`, `io_kind` or `io` in its detail) and is not "another
-/// daemon is running" or a test-seam refusal.
+/// daemon is running", a test-seam refusal, or an uncertain schema
+/// migration COMMIT (store.md §4.4: only a fresh process re-runs WAL
+/// recovery, so the daemon must exit and let launchd start a new one).
 pub fn retryable(e: &StrataError) -> bool {
     let Some(d) = e.detail.as_ref() else { return false };
-    if matches!(d.get("reason").and_then(Value::as_str), Some("daemon_running" | "test_seams" | "no_instance_lock")) {
+    if matches!(
+        d.get("reason").and_then(Value::as_str),
+        Some("daemon_running" | "test_seams" | "no_instance_lock" | "migration_commit")
+    ) {
         return false;
     }
     d.get("errno").is_some() || d.get("io_kind").is_some() || d.get("io").is_some()
@@ -212,6 +217,15 @@ impl WaitState {
     }
 }
 
+/// Review P1-6: bind the socket and answer from `state` (`Busy starting`
+/// at first) before the first store attempt, so a stall inside that attempt
+/// (macOS TCC holding a syscall) never leaves the socket silent.
+pub fn answer_early(socket: &Path, state: &WaitState) -> std::result::Result<Waiting, String> {
+    crate::startup::bind(socket)
+        .map_err(|e| e.message)
+        .and_then(|l| Waiting::start(l, state.clone()).map_err(|e| e.to_string()))
+}
+
 /// The socket while waiting: every request gets [`WaitState::error`].
 /// [`Waiting::finish`] stops accepting and hands the listener back, so the
 /// real accept loop takes over the same socket (queued connections included).
@@ -227,18 +241,31 @@ impl Waiting {
         let stop = Arc::new(AtomicBool::new(false));
         let (st, s2) = (stop.clone(), state.clone());
         let thread = std::thread::Builder::new().name("strata-waiting".into()).spawn(move || {
+            // Review P1-3: at most MAX_CONNS connection threads at once.
+            let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             while !st.load(Ordering::SeqCst) {
+                if live.load(Ordering::SeqCst) >= crate::startup::MAX_CONNS {
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let _ = stream.set_nonblocking(false);
                         let s3 = s2.clone();
-                        let _ = std::thread::Builder::new().name("strata-waiting-conn".into()).spawn(move || {
-                            let Ok(mut w) = stream.try_clone() else { return };
-                            // Like the real server: no read timeout; the peer owns the connection.
-                            let mut r = BufReader::new(stream);
-                            let mut h = |req: Request| s3.reply(&req);
-                            let _ = rpc::serve_connection(&mut r, &mut w, MAX_FRAME, &mut h);
+                        let l2 = live.clone();
+                        l2.fetch_add(1, Ordering::SeqCst);
+                        let spawned = std::thread::Builder::new().name("strata-waiting-conn".into()).spawn(move || {
+                            if let Ok(mut w) = stream.try_clone() {
+                                // Like the real server: no read timeout; the peer owns the connection.
+                                let mut r = BufReader::new(stream);
+                                let mut h = |req: Request| s3.reply(&req);
+                                let _ = rpc::serve_connection(&mut r, &mut w, MAX_FRAME, &mut h);
+                            }
+                            l2.fetch_sub(1, Ordering::SeqCst);
                         });
+                        if spawned.is_err() {
+                            live.fetch_sub(1, Ordering::SeqCst);
+                        }
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(20)),
                     Err(_) => std::thread::sleep(Duration::from_millis(20)),
@@ -312,6 +339,9 @@ mod tests {
             .with_detail(json!({ "reason": "daemon_running", "errno": 35 }));
         assert!(!retryable(&running));
         assert!(!retryable(&StrataError::new(Code::InvalidInput, "bad config")));
+        let uncertain = StrataError::new(Code::Unknown, "COMMIT of the schema migration failed")
+            .with_detail(serde_json::json!({ "reason": "migration_commit", "outcome": "uncertain", "errno": libc::EIO }));
+        assert!(!retryable(&uncertain), "an uncertain migration COMMIT exits for a fresh process");
         let missing = StrataError::new(Code::InvalidInput, "repo x: /a does not exist")
             .with_detail(json!({ "reason": "missing", "io": "Interrupted system call (os error 4)" }));
         assert!(retryable(&missing));
@@ -398,6 +428,30 @@ mod tests {
         );
         assert_eq!(r.unwrap(), None);
         assert_eq!(calls.get(), 1);
+    }
+
+    /// Review P1-6: the socket answers while the first attempt is still
+    /// blocked (nothing has failed yet).
+    #[test]
+    fn the_socket_answers_during_a_blocked_first_attempt() {
+        let dir = tempfile::Builder::new().prefix("sw").tempdir_in("/tmp").unwrap();
+        let sock = dir.path().join("d.sock");
+        let state = WaitState::default();
+        let w = answer_early(&sock, &state).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let blocked = std::thread::spawn(move || {
+            // A first prepare attempt stuck in a syscall.
+            let _ = rx.recv_timeout(Duration::from_secs(30));
+        });
+        let e = crate::client::call(&sock, "daemon_status", json!({ "verify": false })).unwrap_err();
+        assert_eq!(e.code, Code::Busy, "{e:?}");
+        assert_eq!(e.detail.unwrap()["reason"], "starting");
+        tx.send(()).unwrap();
+        blocked.join().unwrap();
+        state.failed(&io_err(libc::EINTR), 1, Duration::from_secs(1));
+        let e = crate::client::call(&sock, "daemon_status", json!({ "verify": false })).unwrap_err();
+        assert_eq!(e.detail.unwrap()["reason"], "store_unavailable");
+        assert!(w.finish().is_some());
     }
 
     #[test]

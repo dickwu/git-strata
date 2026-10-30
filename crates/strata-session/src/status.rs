@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,8 @@ use strata_gitio::MirrorDrift;
 use strata_store::{Health, Lifecycle, MoveState, SessionRecord, WorkspaceRecord};
 use strata_types::{CheckpointId, Code, RepoName, RepoPath, SessionId, SessionManifest, StrataError};
 
+use crate::old_tree::OldTreeMode;
+use crate::rm_note::{RmNotes, rm_notes};
 use crate::scene::{Scene, scene_of};
 use crate::seed::{SeedRecord, mtime_of, written_stamp};
 use crate::sys::lstat;
@@ -21,6 +25,12 @@ use crate::{Result, Sessions};
 /// A session's status (design §6.3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionStatus {
+    /// `manifest.id`, at the top level (status-perf D3).
+    pub id: SessionId,
+    /// `manifest.ticket`, at the top level; null when there is none.
+    pub ticket: Option<String>,
+    /// `manifest.id` and `manifest.ticket` duplicate the two fields above
+    /// and are deprecated; they go in the next major version.
     pub manifest: SessionManifest,
     pub state: SessionState,
     #[serde(with = "strata_types::serde_rfc3339")]
@@ -32,6 +42,9 @@ pub struct SessionStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scene: Option<Scene>,
     pub workspaces: BTreeMap<RepoName, WorkspaceStatus>,
+    /// rm-followups R2/R3: last rm, interrupted teardown, deferred rebases.
+    #[serde(flatten, default)]
+    pub rm: RmNotes,
 }
 
 /// The session lifecycle (§4.3); the store's `Lifecycle` mirrors it.
@@ -65,6 +78,26 @@ pub enum WorkspaceHealth {
     Unknown,
 }
 
+/// deps-drift §2.7: the workspace's drift plus what to do about it (a
+/// hint only).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriftStatus {
+    #[serde(flatten)]
+    pub drift: Drift,
+    pub fix: String,
+    pub note: String,
+}
+
+/// The note `status` adds to a drift (deps-drift §2.7).
+pub const DRIFT_NOTE: &str = "publish checks use the deps set matching the published install inputs; it installs that set itself when none is sealed, which makes the publish slower";
+
+impl std::ops::Deref for DriftStatus {
+    type Target = Drift;
+    fn deref(&self) -> &Drift {
+        &self.drift
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceStatus {
     pub health: WorkspaceHealth,
@@ -77,7 +110,7 @@ pub struct WorkspaceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<CheckpointId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drift: Option<Drift>,
+    pub drift: Option<DriftStatus>,
     pub pending: Vec<Proposal>,
     pub conflicts: Vec<RepoPath>,
     pub seeds: Vec<SeedRecord>,
@@ -93,9 +126,25 @@ pub enum StatusWarning {
     MirrorDrift { items: Vec<MirrorDriftItem> },
     PrePushGuardUnknown { detail: StrataError },
     ShadowMissing { path: PathBuf },
+    /// The shadow directory exists but is not this repo's shadow
+    /// repository (`reason` from gitio, e.g. `no-marker`).
+    ShadowInvalid { path: PathBuf, reason: String },
     MoveLeftover { n: u64, staging: PathBuf },
     MoveAwaitingRecover { n: u64, staging: PathBuf },
-    OldTreeKept { path: PathBuf, n: u64, holders: Vec<OpenFile>, changed: bool, retained: bool },
+    /// `changed: null` + `unchecked: true`: not judged yet (status-perf
+    /// A1, D10); `checked_at`: when the background judgement was made
+    /// (absent when judged in the request).
+    OldTreeKept {
+        path: PathBuf,
+        n: u64,
+        holders: Vec<OpenFile>,
+        changed: Option<bool>,
+        retained: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unchecked: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_rfc3339")]
+        checked_at: Option<SystemTime>,
+    },
     RestoreScene { path: PathBuf },
 }
 
@@ -133,24 +182,94 @@ pub(crate) fn no_such_session(id: &str) -> StrataError {
 impl Sessions<'_> {
     /// §5.5 steps 1, 2 and 3.
     pub fn status(&self, id: &SessionId) -> Result<SessionStatus> {
-        let rec = self.live_session(id)?;
-        let state = SessionState::from(rec.lifecycle);
-        let scene = match (&rec.scene, rec.lifecycle) {
-            (Some(v), Lifecycle::Unknown) => Some(scene_of(v, "session")?),
-            _ => None,
-        };
-        let mut workspaces = BTreeMap::new();
-        for (repo, row) in &rec.workspaces {
-            workspaces.insert(repo.clone(), self.workspace_status(&rec, repo, row)?);
+        self.status_many(std::slice::from_ref(id)).pop().unwrap_or_else(|| Err(no_such_session(id.as_str())))
+    }
+
+    /// status-perf A4: `status` of each id, one result per id in the order
+    /// given. The workspaces of all of them are read on the shared slots,
+    /// at most `[status] parallel` at once in this process; the results are
+    /// put together in the serial order, never the order they finish in,
+    /// and a session's error is the one the serial walk would have hit
+    /// first (its own row before its workspaces, workspaces by repo).
+    pub fn status_many(&self, ids: &[SessionId]) -> Vec<Result<SessionStatus>> {
+        struct Head {
+            rec: SessionRecord,
+            scene: Option<Scene>,
+            rm: RmNotes,
         }
-        Ok(SessionStatus {
-            manifest: rec.manifest.clone(),
-            state,
-            created: rec.created,
-            phase: rec.phase.clone(),
-            scene,
-            workspaces,
-        })
+        // Ordinal (i, 0): the session's own row, read serially.
+        let heads: Vec<Result<Head>> = ids
+            .iter()
+            .map(|id| {
+                let rec = self.live_session(id)?;
+                let scene = match (&rec.scene, rec.lifecycle) {
+                    (Some(v), Lifecycle::Unknown) => Some(scene_of(v, "session")?),
+                    _ => None,
+                };
+                let rm = rm_notes(self.store, &self.config.paths.root, &rec)?;
+                Ok(Head { rec, scene, rm })
+            })
+            .collect();
+        // Ordinals (i, 1 + k): workspace k of session i, by RepoName.
+        let tasks: Vec<(usize, &RepoName, &WorkspaceRecord)> = heads
+            .iter()
+            .enumerate()
+            .filter_map(|(i, h)| h.as_ref().ok().map(|h| (i, h)))
+            .flat_map(|(i, h)| h.rec.workspaces.iter().map(move |(repo, row)| (i, repo, row)))
+            .collect();
+        let done = on_slots(&self.status_slots, &tasks, |&(i, repo, row)| {
+            heads[i].as_ref().ok().map(|h| self.workspace_status(&h.rec, repo, row))
+        });
+        let n = tasks.len();
+        drop(tasks);
+        let mut done = done.into_iter().map(Option::flatten);
+        let mut out = Vec::with_capacity(ids.len());
+        let mut t = 0;
+        for h in heads {
+            let h = match h {
+                Ok(h) => h,
+                Err(e) => {
+                    out.push(Err(e));
+                    continue;
+                }
+            };
+            let mut workspaces = BTreeMap::new();
+            let mut first_err = None;
+            for repo in h.rec.workspaces.keys() {
+                let r = done.next().flatten();
+                t += 1;
+                match r {
+                    Some(Ok(w)) => {
+                        workspaces.insert(repo.clone(), w);
+                    }
+                    Some(Err(e)) => {
+                        first_err.get_or_insert(e);
+                    }
+                    None => {
+                        first_err.get_or_insert_with(|| {
+                            StrataError::new(Code::Unknown, format!("status of {repo} was not read"))
+                        });
+                    }
+                }
+            }
+            let rec = h.rec;
+            out.push(match first_err {
+                Some(e) => Err(e),
+                None => Ok(SessionStatus {
+                    id: rec.manifest.id.clone(),
+                    ticket: rec.manifest.ticket.clone(),
+                    manifest: rec.manifest.clone(),
+                    state: SessionState::from(rec.lifecycle),
+                    created: rec.created,
+                    phase: rec.phase.clone(),
+                    scene: h.scene,
+                    workspaces,
+                    rm: h.rm,
+                }),
+            });
+        }
+        debug_assert_eq!(t, n);
+        out
     }
 
     /// The session's row unless it is missing or Removed.
@@ -186,6 +305,13 @@ impl Sessions<'_> {
                     warnings.push(StatusWarning::ShadowMissing { path: shadow_dir });
                     None
                 }
+                // Not a shadow of this repo (e.g. half-built, no marker):
+                // the workspace is Missing; status still answers.
+                Err(e) if e.code == Code::InvalidInput => {
+                    let reason = e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|r| r.as_str()).unwrap_or("");
+                    warnings.push(StatusWarning::ShadowInvalid { path: shadow_dir, reason: reason.to_string() });
+                    None
+                }
                 Err(e) => return Err(e),
             };
             let ok = dir_ok && git_ok && shadow.is_some();
@@ -206,6 +332,11 @@ impl Sessions<'_> {
                 Some(set) if !set.dirs.is_empty() => strata_deps::drift(cfg, git, &ws.path, &set)?,
                 _ => None,
             }
+            .map(|drift| DriftStatus {
+                drift,
+                fix: format!("git-strata deps propose --session {} --repo {repo} --switch", id.as_str()),
+                note: DRIFT_NOTE.to_owned(),
+            })
         } else {
             None
         };
@@ -268,6 +399,33 @@ impl Sessions<'_> {
                     if lstat(&path).map_err(|e| read_err(&e, &path))?.is_none() {
                         continue;
                     }
+                    let retained = i.old_tree.is_some();
+                    if self.old_tree_mode() == OldTreeMode::Deferred {
+                        // status-perf A1: only the verdict table; what it
+                        // lacks is queued for the background thread.
+                        let hint = crate::old_tree::ino_of(&path).and_then(|ino| self.old_tree_hint(&i, &path, ino));
+                        warnings.push(match hint {
+                            Some(v) => StatusWarning::OldTreeKept {
+                                path,
+                                n: i.n,
+                                holders: v.holders,
+                                changed: Some(v.changed),
+                                retained,
+                                unchecked: false,
+                                checked_at: Some(v.checked_at),
+                            },
+                            None => StatusWarning::OldTreeKept {
+                                path,
+                                n: i.n,
+                                holders: Vec::new(),
+                                changed: None,
+                                retained,
+                                unchecked: true,
+                                checked_at: None,
+                            },
+                        });
+                        continue;
+                    }
                     let holders = strata_deps::open_files(&path)?;
                     // A tree that cannot be compared reads as changed: it
                     // is then never collected automatically.
@@ -276,8 +434,10 @@ impl Sessions<'_> {
                         path,
                         n: i.n,
                         holders,
-                        changed,
-                        retained: i.old_tree.is_some(),
+                        changed: Some(changed),
+                        retained,
+                        unchecked: false,
+                        checked_at: None,
                     });
                 }
                 _ => {}
@@ -336,5 +496,142 @@ impl From<&strata_store::SeedRow> for SeedRecord {
             source_mtime: r.source_mtime,
             copied: r.copied,
         }
+    }
+}
+
+impl Sessions<'_> {
+    /// status-perf A4: `f` of each item on the same shared slots as the
+    /// workspace reads of [`Sessions::status_many`] (the daemon's chains
+    /// go through here), one result per item in the order given.
+    pub fn on_status_slots<T: Sync, R: Send>(&self, items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<Option<R>> {
+        on_slots(&self.status_slots, items, f)
+    }
+}
+
+/// `f` of each item, at most `slots.cap()` workers here and at most the
+/// slots' free count across every caller at once; each call holds one
+/// slot. Results in item order; `None` only for an item never run.
+pub(crate) fn on_slots<T: Sync, R: Send>(slots: &Slots, items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<Option<R>> {
+    let done: Vec<Mutex<Option<R>>> = items.iter().map(|_| Mutex::new(None)).collect();
+    let next = AtomicUsize::new(0);
+    let run = || {
+        loop {
+            let t = next.fetch_add(1, Ordering::Relaxed);
+            let Some(item) = items.get(t) else { break };
+            let r = {
+                let _slot = slots.take();
+                f(item)
+            };
+            *done[t].lock().unwrap_or_else(|p| p.into_inner()) = Some(r);
+        }
+    };
+    let workers = slots.cap().min(items.len());
+    if workers <= 1 {
+        run();
+    } else {
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(run);
+            }
+        });
+    }
+    done.into_iter().map(|m| m.into_inner().unwrap_or_else(|p| p.into_inner())).collect()
+}
+
+/// status-perf A4: a counting semaphore. `take` blocks until a slot is
+/// free; the guard gives it back. Nothing holds a slot while waiting for
+/// another, so the slots cannot deadlock.
+pub(crate) struct Slots {
+    cap: usize,
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+pub(crate) struct Slot<'a>(&'a Slots);
+
+impl Slots {
+    pub(crate) fn new(cap: usize) -> Slots {
+        let cap = cap.max(1);
+        Slots { cap, free: Mutex::new(cap), freed: Condvar::new() }
+    }
+
+    pub(crate) fn cap(&self) -> usize {
+        self.cap
+    }
+
+    fn lock(&self) -> MutexGuard<'_, usize> {
+        self.free.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub(crate) fn take(&self) -> Slot<'_> {
+        let mut free = self.lock();
+        while *free == 0 {
+            free = self.freed.wait(free).unwrap_or_else(|p| p.into_inner());
+        }
+        *free -= 1;
+        Slot(self)
+    }
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        *self.0.lock() += 1;
+        self.0.freed.notify_one();
+    }
+}
+
+/// `Option<SystemTime>` as an RFC 3339 string (status-perf A1 `checked_at`).
+mod opt_rfc3339 {
+    use std::time::SystemTime;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(t: &Option<SystemTime>, s: S) -> Result<S::Ok, S::Error> {
+        match t {
+            Some(t) => strata_types::serde_rfc3339::serialize(t, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SystemTime>, D::Error> {
+        match Option::<String>::deserialize(d)? {
+            Some(text) => strata_types::serde_rfc3339::parse(&text).map(Some).map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::{Slots, on_slots};
+
+    /// Two callers at once share the one cap: never more than `cap`
+    /// items run together, and each caller gets its results in order.
+    #[test]
+    fn slots_are_shared_across_concurrent_callers() {
+        let slots = Slots::new(2);
+        let (now, max) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let items: Vec<usize> = (0..8).collect();
+        let work = |&i: &usize| {
+            let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+            max.fetch_max(n, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(20));
+            now.fetch_sub(1, Ordering::SeqCst);
+            i * 10
+        };
+        let (a, b) = std::thread::scope(|s| {
+            let a = s.spawn(|| on_slots(&slots, &items, work));
+            let b = s.spawn(|| on_slots(&slots, &items, work));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        let want: Vec<Option<usize>> = items.iter().map(|i| Some(i * 10)).collect();
+        assert_eq!(a, want);
+        assert_eq!(b, want);
+        assert!(max.load(Ordering::SeqCst) <= 2, "max {} at once", max.load(Ordering::SeqCst));
+        // Two callers of 2 workers each would reach 4 at once on private pools; the shared cap keeps it at 2.
+        assert!(max.load(Ordering::SeqCst) >= 2, "the cap was used in full");
     }
 }

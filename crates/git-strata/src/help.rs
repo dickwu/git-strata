@@ -13,8 +13,12 @@ macro_rules! gate_text {
         "CONFIRMATION GATE (Touch ID / TTY)
   A repo needs confirmation when publish.confirm = true; that is the only gate.
   deploy_on_push is information (a push deploys) and gates nothing by itself.
-  The flag used is the pinned confirm (pins.json) ORed with config.toml; an
-  unreadable pins.json, or a repo missing from it, counts as needs confirmation.
+  The flag used is the pinned confirm (pins.json) ORed with config.toml; a
+  missing or unreadable pins.json, or a repo missing from it (new or renamed),
+  counts as needs confirmation. The daemon pins such a repo with confirm on;
+  a looser config.toml applies only after `git-strata config relax REPO`.
+  rm.regenerable is pinned the same way: a longer or edited list is looser
+  (relax); deleting positive patterns or appending `!` negations is narrower.
 
   Gated commands need a terminal on stdin; most then show a LocalAuthentication
   prompt (Touch ID, or the login password) from the daemon:
@@ -79,8 +83,10 @@ pub const TOP: &str = concat!(
   Exit status: 0 iff ok is true, else 1. Branch on error.code, then
   error.detail.reason; never parse message. stderr has human notices only.
   --help / --version print plain text on stdout, exit 0, no JSON.
+  session exec, once its command starts, prints no envelope: stdout, stderr
+  and the exit status are the command's (failures before that: an envelope).
   Bad arguments: InvalidInput, detail.reason \"unknown_command\" (with
-  detail.commands, and detail.group inside deps/daemon/config) or \"args\".
+  detail.commands, and detail.group inside deps/daemon/config/session) or \"args\".
 
 PATHS
   config     ~/Library/Application Support/git-strata/config.toml
@@ -92,29 +98,34 @@ PATHS
 
 DAEMON
   Write commands go to the daemon (LaunchAgent com.gwd.git-stratad).
-  Busy with detail.reason daemon_down: run `git-strata daemon start`, retry once.
+  Busy with detail.reason daemon_down: tell the human (they run `git-strata
+  daemon start`); retry once it is running. Agents never start/stop it.
   Without the daemon only these work: status, grep, files, diff, deps list,
-  daemon status (and repeating a --tool-call checkpoint that already exists).
+  daemon status, session ports/exec of a workspace that already has its
+  ports (and repeating a --tool-call checkpoint that already exists).
 
 HEADLESS FLOW (no human needed)
   git-strata daemon status                       # data.running
-  git-strata new PROJ-1 --repos tool,staff-api   # data.manifest.id, .repos.<repo>.path
+  git-strata new PROJ-1 --repo tool --repo staff-api  # data.manifest.id, .repos.<repo>.path
   cd <data.manifest.repos.tool.path>             # edit files there
+  git-strata add --repo front                    # only if another repo is needed later
   git-strata checkpoint -m \"what changed\"
   git-strata diff
   git-strata publish --from <id>:src/a.ts --from <id>:src/b.ts
   git-strata rm --session <id>
 
 ERRORS (code -> what an agent does)
-  Busy daemon_down   daemon start, retry once      Busy other       wait, retry later
+  Busy daemon_down   tell the human, retry later   Busy other       wait, retry later
   NotTty             hand the command to a human   NotConfirmed     report; human reruns
                                                    (plan_changed: rerun it yourself once)
   Conflict           fix detail.conflicts in detail.repo, rerun the same publish
   Conflict assigned  another session owns the path; do not retry
   NoMatch / no_batch checkpoint the paths, then publish
   NoSuchSession      cd into a workspace or pass --session
+  NoSuchRepo not_in_session  run detail.fix (git-strata add --session S --repo R)
+  InvalidInput siblings_missing  publish checks need sibling repos: run detail.fix
   AmbiguousMatch     use a session id from detail
-  Dirty              rm on unpublished work: publish it, or ask the human (rm --discard)
+  Dirty              rm on work that is not published: publish it, or ask the human (rm --discard)
   CheckFailed        fix the code, checkpoint, publish again
   OpenFiles          stop the process you started (detail has pids), retry
   NoCommit           nothing to do; not a failure
@@ -122,6 +133,8 @@ ERRORS (code -> what an agent does)
   PushRefused        report the remote's words to the human
   Unknown            outcome uncertain: do not retry, gc or rm; tell the human
   Corrupt            stop; tell the human
+  PortInUse foreign  run detail.fix (session ports --reassign), then rerun
+  PortInUse already_running  this workspace's server is up: reuse it
 
 ",
     gate_text!(),
@@ -133,38 +146,91 @@ Per-command detail: git-strata <command> --help. Full reference: README.md.
 "
 );
 
-pub const NEW: &str = "Create a session: one workspace per configured repo.
+pub const NEW: &str = "Create a session of workspaces (APFS clones of base snapshots).
 
-Every repo in config.toml gets a workspace (an APFS clone of its base snapshot),
-because sibling repos link to each other by relative path. --repos chooses which
-repos are tracked: only tracked repos are watched, checkpointed and published.
-Untracked siblings are pinned at their base; do not edit them (an edit there is
-never checkpointed, and makes `rm` return Dirty with detail.untracked_repos).";
+--repo R (repeatable, or R1,R2): the session gets workspaces for these repos
+only, all tracked. This is the fast form; agents should use it. Repos that link
+to a sibling by relative path (../other) need that sibling too: pass it, or add
+it later with `git-strata add --repo other`.
+
+--repos A,B (no --repo): every repo in config.toml gets a workspace, because
+sibling repos link to each other by relative path; A,B are the tracked ones.
+Only tracked repos are watched, checkpointed and published. Untracked siblings
+are pinned at their base; do not edit them (an edit there is never checkpointed,
+and makes `rm` return Dirty with detail.untracked_repos).
+
+The session records which AI agent created it (data.manifest.agent; status and
+the GUI show it): --agent NAME, else STRATA_AGENT, else detected from the shell
+(Claude Code -> claude-code, Codex -> codex, Cursor -> cursor-agent). An agent
+that is none of these should `export STRATA_AGENT=<name>` (1-64 of
+[A-Za-z0-9._-], starting with a letter or digit) before running `new`.";
 
 pub const NEW_AFTER: &str = "EXAMPLES
-  git-strata new PROJ-123 --repos tool,staff-api
-  git-strata new --ticket PROJ-123 --repos tool
+  git-strata new PROJ-123 --repo staff-api            # one workspace
+  git-strata new PROJ-123 --repo tool --repo staff-api
+  git-strata new --ticket PROJ-123 --repos tool       # every repo, tool tracked
+  STRATA_AGENT=aider git-strata new PROJ-123 --repo tool
 
 DATA
-  {manifest:{id, ticket?, root, repos:{<repo>:{base, head, path, tracked}}}, warnings:[]}
+  {manifest:{id, ticket?, agent?, root, repos:{<repo>:{base, head, path, tracked}}}, warnings:[]}
+  warnings may hold {kind:AgentNotRecorded, agent, reason:daemon_too_old}: the
+  running daemon predates agent recording; the session was created without it.
   Use data.manifest.id as SESSION and data.manifest.repos.<repo>.path as the cwd.
 
 ERRORS
-  InvalidInput repos   --repos missing or empty (it is required)
-  InvalidInput ticket  ticket given both positionally and with --ticket
-  NoSuchRepo           a --repos name is not in config.toml
-  NoSuchBranch         a repo has no origin/<default_branch> tip (every repo is fetched)
-  Busy daemon_down     run `git-strata daemon start`, retry once
+  InvalidInput repos       neither --repo nor --repos given, or an empty name
+  InvalidInput repo_flags  --repo and --repos both given
+  InvalidInput ticket      ticket given both positionally and with --ticket
+  InvalidInput agent       --agent or STRATA_AGENT is not a valid agent name (nothing created)
+  NoSuchRepo               a repo name is not in config.toml
+  NoSuchBranch             a repo has no origin/<default_branch> tip (the session's repos are fetched)
+  Busy daemon_down         tell the human (they run `git-strata daemon start`)
+";
+
+pub const ADD_AFTER: &str = "Gives an existing (active) session workspaces for more repos, tracked, built
+as `new` builds them (base snapshot, worktree, pin, caches, seed files).
+
+EXAMPLES
+  git-strata add --repo front                     # the session of the cwd
+  git-strata add --session PROJ-123 --repo front --repo admin
+
+A command that names a repo the session lacks fails NoSuchRepo with
+detail.reason not_in_session and detail.fix: this command.
+
+DATA {session, added:{<repo>:{base, head, path, tracked}}, already:{...}, warnings:[]}
+  A repo already in the session is listed in already and left as it is.
+
+ERRORS
+  InvalidInput repos       no --repo given
+  InvalidInput lifecycle   the session is not active
+  NoSuchRepo               a repo is not in config.toml
+  NoSuchSession            no such session (or the cwd is not in one: pass --session)
+  Exists add_leftover      a leftover from an earlier failed add is in the way;
+                           detail.path names it (`git-strata rm` of the session clears it)
+  Any other error while building: nothing was recorded and the session is as it
+  was; detail.op is \"add\" and detail.kept lists the partial directories left
+  under the session root (`git-strata rm` of the session retires them).
 ";
 
 pub const STATUS_AFTER: &str = "EXAMPLES
   git-strata status                  # the session of the cwd
   git-strata status --session PROJ-123
   git-strata status --all            # {sessions:[...]}
+  git-strata status --brief          # store only: no drift/seeds/mirrors/old trees
 
 A workspace with health Unknown carries choices [\"abandon\",\"accept\"]: a move
 stopped midway; that is the human's `git-strata resolve`. Works without the daemon.
---session with --all is InvalidInput both_selectors.
+--session or --repo with --all is InvalidInput both_selectors.
+";
+
+pub const LS_AFTER: &str = "EXAMPLES
+  git-strata ls                      # {sessions:[{id,ticket,state,created,repos,phase?}]}
+  git-strata ls --table              # ID TICKET STATE REPOS CREATED
+
+From the store alone, sorted by id; never stats a workspace or runs git.
+Without the daemon (or with one that predates it) the store is read
+directly and data.source is \"local\". With --table a success prints only
+the table; an error is still the JSON envelope.
 ";
 
 pub const CHECKPOINT_AFTER: &str = "EXAMPLES
@@ -244,13 +310,22 @@ In zsh write \"${S}:path\", not \"$S:path\" ($S:t, $S:h, ... are modifiers).
 --FROM PATHS
   PATH is relative to the repo root, with no repo prefix:
   staff-api/app/x.php in session S is --from S:app/x.php. The repo is the
-  workspace that has PATH (on disk or in its base). Path errors come before
-  any TTY check and send nothing:
+  workspace that has PATH (on disk or in its base). When several do, the one
+  whose checkpoints in S changed PATH is taken. To name the repo outright:
+    --from S:REPO:PATH      e.g. --from S:admin:src/a.ts
+  The text between the first and second ':' is REPO only when it is one of
+  S's repos; otherwise all after the first ':' is PATH (so a PATH that
+  starts with <repo>: is written S:<repo>:<repo>:...).
+  Path errors come before any TTY check and send nothing:
   InvalidInput from_syntax       no ':', empty session, not a repo path
   InvalidInput from_repo_prefix  PATH starts with a repo name; rerun with
                                  error.detail.expected
-  InvalidInput from_path         no workspace has PATH (detail.repos)
-  AmbiguousMatch from_repo       several do (detail.candidates)
+  InvalidInput from_path         no workspace has PATH (detail.repos), or
+                                 S:REPO:PATH and REPO's workspace lacks it
+  AmbiguousMatch from_repo       several have it and not exactly one
+                                 changed it (detail.candidates, changed_in);
+                                 rerun with one of detail.expected
+                                 (S:REPO:PATH)
 
 DURATION
   The reply comes after checks, commit, push and the rebase of every session.
@@ -282,11 +357,21 @@ OTHER ERRORS
   CheckFailed        the repo's check failed in staging: fix, rerun
   PushRefused        the commit landed (data.commits) but the remote refused
   Unknown push_unknown  push outcome unknown: do not retry; tell the human
+  Busy publish_unknown  an earlier publish of the repo is Unknown. It clears
+                     by itself once origin has that commit (checked on each
+                     publish); the human can `git-strata push REPO` first
   InvalidInput chain_rewound / chain_diverged  origin moved under an unpushed
                      chain. diverged on a repo without confirmation: run
                      `git-strata push REPO` (it replays), then rerun publish.
                      Otherwise the human runs `git-strata chain`
   NotConfirmed plan_changed  nothing written: rerun once yourself
+  InvalidInput siblings_missing  the repo's checks need sibling repos
+                     (check_siblings) that could not be supplied; nothing
+                     written. Run detail.fix (git-strata add --session S
+                     --repo R ...) or follow detail.missing[].next, then rerun
+  Busy / Unknown with detail.sibling  preparing that sibling (fetch, anchor)
+                     was busy or unknown; Busy: retry later; Unknown: tell
+                     the human
 
 ",
     gate_text!(),
@@ -327,6 +412,9 @@ ORIGIN MOVED (repos that need no confirmation)
              not built; open a session (`new`) on the repo, then push again
   InvalidInput chain_rewound -> origin dropped pushed commits: human only
              (`git-strata chain`); push never replays a rewound chain
+  InvalidInput siblings_missing -> the replay's checks need sibling repos
+             (check_siblings) that could not be supplied; nothing written or
+             pushed. Follow detail.missing[].next, then push again
   A repo that needs confirmation is never replayed by push: its push sends
   only a chain that leads origin; diverged is NoCommit, the human runs chain.
 
@@ -349,10 +437,23 @@ pub const RM_AFTER: &str = concat!(
   git-strata rm --session s-k3q7xm2a              # after its work is published
   git-strata rm --session s-k3q7xm2a --discard    # HUMAN ONLY (TTY + prompt)
 
-Dirty: the session still has changes against its base. detail.repos lists
-paths per repo, detail.untracked_repos names edited untracked siblings,
-detail.unresolved lists interrupted scenes. Publish the work, or hand
-`rm --discard` to the human. Never rm after an Unknown outcome.
+Dirty: rm refused and nothing was removed; the session is still Active and
+listed by `git-strata ls` (detail.removed = false, detail.lifecycle). The
+message names up to 5 unpublished paths per repo. A file whose exact bytes and
+mode are in a publish of this session that origin already has does not count,
+even while the session waits on a deps proposal. detail.repos lists the rest
+per repo, detail.landed counts what was skipped, detail.untracked_repos names
+edited untracked siblings, detail.unresolved lists interrupted scenes.
+detail.reason = changed_during_remove: files changed while rm ran; retry.
+Paths matching the repo's pinned rm.regenerable (Modified/Added/Untracked, not
+install inputs, tracked healthy repos only) do not block: they are
+checkpointed and listed in data.regenerable (detail.regenerable on Dirty).
+Publish the work, or hand `rm --discard` to the human. Never rm after an
+Unknown outcome. `git-strata status <sid>` shows the last rm outcome.
+
+Ctrl-C before the request is sent: nothing happened. After it is sent: the
+daemon finishes the rm on its own (it may still be refused); check
+`git-strata status <sid>`.
 
 ",
     gate_text!()
@@ -363,6 +464,18 @@ pub const GC_AFTER: &str = "Removes old bases and leftovers of removed sessions,
 deps staging, move intent, alternates file or worktree link names (refused
 entries stay). Skipped / refused / stuck items are printed on stderr; data is
 {}. Do not run it after an Unknown outcome.
+
+--store also runs the store-wide gc (opt-in; never automatic): rows of
+sessions removed more than 30 days ago (their checkpoints can no longer be
+restored), decided deps proposals, closed deps attempts, old gc records,
+blobs nothing kept references, store/tmp leftovers older than 1 h, the same
+trash rule as above, and a budgeted (2 GiB) blob integrity scan. Sessions a
+running or Unknown publish names are kept. data is {store: report}; corrupt
+blobs are listed, never deleted.
+--store --dry-run changes nothing: data is {dry_run: true, preview:
+{keep_secs, floor_secs, sessions[], proposals, attempts, gc_runs, blobs,
+blob_bytes, trash_eligible, trash_young, trash_refused[]}}, an upper bound
+of what --store would reclaim now. Run it first.
 ";
 
 pub const DU_AFTER: &str = "Read-only. Answers from the daemon's size cache in about a second; every
@@ -397,7 +510,10 @@ EXAMPLES
   git-strata du --refresh   # full background recompute
 ";
 
-pub const DAEMON_AFTER: &str = "INSTALL
+pub const DAEMON_AFTER: &str = "start/stop: HUMAN ONLY. Agents never run them (or launchctl); on daemon_down
+they tell the human. Both act only when HOME is the login user's home (D38).
+
+INSTALL
   The per-user LaunchAgent is ~/Library/LaunchAgents/com.gwd.git-stratad.plist
   (Label com.gwd.git-stratad, ProgramArguments the git-stratad binary, RunAtLoad,
   KeepAlive, LimitLoadToSessionType Aqua, PATH ~/.bun/bin:/opt/homebrew/bin:
@@ -409,10 +525,14 @@ EXAMPLES
   git-strata daemon start    # launchctl bootstrap gui/<uid> <plist>; {already:true} if loaded
   git-strata daemon stop     # launchctl bootout; waits up to 10 s until unloaded
 
-The daemon reads config.toml only at start: after editing it, run
+The daemon reads config.toml only at start: after editing it, the human runs
 `daemon stop` then `daemon start`. start/stop use launchd, not the socket.
 ERRORS InvalidInput no_plist (LaunchAgent not installed: tell the human; do
-not write the plist yourself), Unknown launchctl (launchctl failed or timed out).
+not write the plist yourself), InvalidInput foreign_home (HOME is not the login
+home; nothing done), InvalidInput foreign_agent (the loaded agent comes from
+another plist, e.g. one bootstrapped from a temp HOME; nothing done, the
+message names the `launchctl bootout` the human can run), Unknown launchctl
+(launchctl failed or timed out).
 ";
 
 pub const RESOLVE_AFTER: &str = "HUMAN ONLY. Exactly one of --abandon / --accept (none: InvalidInput
@@ -440,3 +560,90 @@ pin (nothing to do). NoSuchRepo: unknown repo.
 ",
     gate_text!()
 );
+
+pub const SESSION_AFTER: &str = "Every session workspace (not the main checkout) leases a block of 4 TCP ports
+(web, connector, connector_mcp, aux) when it is created, so concurrent dev
+servers and tauri-connector instances of different sessions never collide.
+Committed config stays untouched: the ports reach the processes as env vars.
+
+EXAMPLES
+  git-strata session ports                      # this workspace's ports and env
+  git-strata session exec -- bun run dev        # dev server on $PORT
+  git-strata session exec --tauri -- bun run tauri:dev
+  git-strata session ports --reassign --session S --repo R   # after PortInUse foreign
+";
+
+pub const SESSION_PORTS: &str = "A workspace's leased dev ports and the env that hands them out.
+
+Read-only for a workspace that already has a lease (no daemon needed). A
+workspace without one (created before leases) gets one from the daemon
+(ports_ensure). --all lists every live workspace and never writes; unleased
+ones show \"ports\":null,\"reason\":\"unleased\".";
+
+pub const SESSION_PORTS_AFTER: &str = "OUTPUT
+  data.leases[]: {session, repo, path, ports{web,connector,connector_mcp,aux},
+  env{PORT, STRATA_DEV_PORT, STRATA_CONNECTOR_PORT, STRATA_CONNECTOR_MCP_PORT,
+  STRATA_AUX_PORT, STRATA_SESSION, STRATA_REPO, TAURI_CONNECTOR_PROJECT,
+  STRATA_TAURI_DEV_CONFIG}, tauri_app_root, check?}
+  check (with --check): per role {state: free|ours|foreign|unidentified|
+  probe_error, listeners[{pid, command, in_workspace}]}. Advisory only.
+
+--reassign
+  Needs exactly one session and repo. Refused with PortInUse already_running
+  while a process of this workspace listens on its ports; otherwise the lease
+  moves to the next free block (the old ports are not reused right away).
+  The daemon moves it only if it is still the lease checked here.
+
+ERRORS
+  Busy ports_exhausted   no free block in [dev_ports] range: tell the human
+                         (without --reassign: an entry \"ports\":null,
+                         \"reason\":\"ports_exhausted\", not an error)
+  Busy lease_changed     --reassign: another caller moved the lease since the
+                         check; check again and decide afresh
+  Unsupported daemon_too_old  the daemon predates leases: tell the human
+  Unsupported no_policy  the daemon has no port-allocation policy installed
+                         (not about [dev_ports], which is optional): tell
+                         the human
+
+EXAMPLES
+  git-strata session ports --check
+  git-strata session ports --all
+";
+
+pub const SESSION_EXEC: &str = "Run a command in a workspace with its dev-port env (exec: the command
+replaces git-strata; its exit status is the command's).
+
+The env (see `session ports --help`) overrides inherited values. Run from
+inside the workspace the command keeps the cwd; from outside every workspace
+it runs at the workspace root; from another workspace: InvalidInput
+cwd_mismatch. Before running, the 4 ports are checked (--no-check skips).";
+
+pub const SESSION_EXEC_AFTER: &str = "--tauri
+  Adds --config '{\"build\":{\"devUrl\":\"http://localhost:<web>\"}}' to tauri dev,
+  so the webview loads this workspace's dev server. Accepted launchers:
+    tauri dev | cargo tauri dev | npx/bunx/pnpx tauri dev | pnpm exec tauri dev
+      (inserted before the first bare --)
+    bun run S | pnpm run S | yarn run S | npm run S
+      where package.json script S is one plain `[NAME=v ...] [bunx|npx] tauri dev
+      [opts]` (no quotes, $, &&, or bare --), or the bare `[bunx|npx] tauri`
+      with `dev` right after S (bun run tauri dev, npm run tauri -- dev); no
+      bare -- in the caller args (npm: at most one). `run` is required (without
+      it the manager may run its own command S); S must not start with -.
+      Refused: options
+      that select another package (--prefix, --filter, -w, --workspace, --cwd,
+      ...) and, for npm, any option before its --.
+  Anything else: InvalidInput tauri_launcher; run without --tauri and pass
+  --config \"$STRATA_TAURI_DEV_CONFIG\" to tauri dev yourself.
+
+ERRORS (from the port check)
+  PortInUse already_running  this workspace already serves on its ports
+  PortInUse foreign          run detail.fix (session ports --reassign ...)
+  Busy port_unidentified     retry shortly
+  Busy port_probe_error      retry
+  NoSuchPath                 the command was not found
+
+EXAMPLES
+  git-strata session exec -- bun run dev
+  git-strata session exec --tauri -- bun run tauri:dev
+  git-strata session exec --session PROJ-1 --repo front -- npm run dev
+";

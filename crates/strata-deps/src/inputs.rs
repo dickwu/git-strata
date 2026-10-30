@@ -90,6 +90,17 @@ pub fn is_input(cfg: &RepoConfig, path: &RepoPath) -> bool {
         .any(|e| under(path.as_str(), e.as_str()))
 }
 
+/// `is_input` under the volume's name rules: `path` and every entry
+/// compared by their case-fold keys (Unicode caseless, NFD), so
+/// `BUN.LOCK` or a decomposed spelling of an input still counts
+/// (rm-followups §1.8: an install input is never regenerable).
+pub fn is_input_folded(cfg: &RepoConfig, path: &RepoPath) -> bool {
+    let p = strata_apfs::case_fold_key(path.as_str());
+    cfg.install_inputs
+        .iter()
+        .any(|e| under(&p, &strata_apfs::case_fold_key(e.as_str())))
+}
+
 /// The compile-time target triple (§4.3).
 pub fn platform() -> String {
     format!("{}-apple-darwin", std::env::consts::ARCH)
@@ -135,7 +146,6 @@ pub fn empty_inputs_hash() -> String {
 }
 
 struct Record {
-    path: String,
     tag: u8,
     digest: Option<[u8; 32]>,
 }
@@ -168,21 +178,18 @@ fn file_record(root: &Path, path: &RepoPath) -> Result<Record> {
     let name = path.as_str().rsplit('/').next().unwrap_or("");
     if let Some(canon) = canonical_manifest(name, &bytes) {
         return Ok(Record {
-            path: path.as_str().to_owned(),
             tag: TAG_MANIFEST,
             digest: Some(*blake3::hash(&canon).as_bytes()),
         });
     }
     Ok(Record {
-        path: path.as_str().to_owned(),
         tag: TAG_FILE,
         digest: Some(*blake3::hash(&bytes).as_bytes()),
     })
 }
 
-fn link_record(path: &RepoPath, target: &Path) -> Record {
+fn link_record(target: &Path) -> Record {
     Record {
-        path: path.as_str().to_owned(),
         tag: TAG_SYMLINK,
         digest: Some(*blake3::hash(target.as_os_str().as_bytes()).as_bytes()),
     }
@@ -263,26 +270,46 @@ fn resolve_inputs(
     Ok(out)
 }
 
-/// §5.1 and §4.3.
-pub fn inputs_hash(cfg: &RepoConfig, git: &Git, root: &Path) -> Result<String> {
-    let mut h = blake3::Hasher::new_derive_key(INPUTS_CONTEXT);
+/// One canonical install-input record (§5.1): what `inputs_hash` hashes
+/// for one member or absent entry. Two records are equal exactly when the
+/// hash treats them the same (publish's drift diagnosis compares them).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputRecord {
+    pub path: RepoPath,
+    tag: u8,
+    digest: Option<[u8; 32]>,
+}
+
+/// The records `inputs_hash` hashes, in its order (byte order, deduplicated).
+pub fn input_records(cfg: &RepoConfig, git: &Git, root: &Path) -> Result<Vec<InputRecord>> {
+    let mut out = Vec::new();
     for (path, m) in resolve_inputs(cfg, git, root)? {
         let r = match m {
-            None => Record {
-                path: path.as_str().to_owned(),
-                tag: TAG_ABSENT,
-                digest: None,
-            },
+            None => Record { tag: TAG_ABSENT, digest: None },
             Some(Member::File) => file_record(root, &path)?,
-            Some(Member::Link(target)) => link_record(&path, &target),
+            Some(Member::Link(target)) => link_record(&target),
         };
-        write_bytes(&mut h, r.path.as_bytes());
+        out.push(InputRecord { path, tag: r.tag, digest: r.digest });
+    }
+    Ok(out)
+}
+
+/// The inputs hash of `records` (as [`input_records`] returns them).
+pub fn hash_records(records: &[InputRecord]) -> String {
+    let mut h = blake3::Hasher::new_derive_key(INPUTS_CONTEXT);
+    for r in records {
+        write_bytes(&mut h, r.path.as_str().as_bytes());
         h.update(&[r.tag]);
         if let Some(d) = &r.digest {
             h.update(d);
         }
     }
-    Ok(h.finalize().to_hex().to_string())
+    h.finalize().to_hex().to_string()
+}
+
+/// §5.1 and §4.3.
+pub fn inputs_hash(cfg: &RepoConfig, git: &Git, root: &Path) -> Result<String> {
+    Ok(hash_records(&input_records(cfg, git, root)?))
 }
 
 fn dir_members(

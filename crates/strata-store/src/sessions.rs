@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use crate::sql::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
-use strata_types::{BaseGen, Code, CommitOid, RepoName, RepoPath, SessionId, SessionManifest, StrataError, WorkspaceState};
+use strata_types::{AgentName, BaseGen, Code, CommitOid, RepoName, RepoPath, SessionId, SessionManifest, StrataError, WorkspaceState};
 
 use crate::codec::*;
 use crate::errors::{NOT_WRITTEN, bad_row, err, invalid, invalid_field, no_such_repo, no_such_session, sql, sql_read, too_large};
@@ -246,6 +246,7 @@ fn collect<T>(c: &Connection, q: &str, p: impl crate::sql::Params, f: fn(&Row) -
 struct SessionRow {
     id: String,
     ticket: Option<String>,
+    agent: Option<String>,
     root: String,
     lifecycle: String,
     phase: Option<String>,
@@ -255,22 +256,27 @@ struct SessionRow {
 }
 
 fn session_rows(c: &Connection, id: Option<&str>) -> Result<Vec<SessionRow>> {
+    // A read-only handle may meet a v1 store (daemon not yet upgraded) or
+    // see it migrate under it: ask this transaction's snapshot.
+    let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(sql_read)?;
+    let agent = if v >= 2 { "agent" } else { "NULL" };
     let mut st = c
-        .prepare(
-            "SELECT id, ticket, root, lifecycle, phase, scene, created_ns, removed_ns FROM sessions \
-             WHERE ?1 IS NULL OR id = ?1 ORDER BY created_ns, id",
-        )
+        .prepare(&format!(
+            "SELECT id, ticket, {agent}, root, lifecycle, phase, scene, created_ns, removed_ns FROM sessions \
+             WHERE ?1 IS NULL OR id = ?1 ORDER BY created_ns, id"
+        ))
         .map_err(sql_read)?;
     st.query_map([id], |r| {
         Ok(SessionRow {
             id: r.get(0)?,
             ticket: r.get(1)?,
-            root: r.get(2)?,
-            lifecycle: r.get(3)?,
-            phase: r.get(4)?,
-            scene: r.get(5)?,
-            created: r.get(6)?,
-            removed: r.get(7)?,
+            agent: r.get(2)?,
+            root: r.get(3)?,
+            lifecycle: r.get(4)?,
+            phase: r.get(5)?,
+            scene: r.get(6)?,
+            created: r.get(7)?,
+            removed: r.get(8)?,
         })
     })
     .map_err(sql_read)?
@@ -340,7 +346,7 @@ fn load_session(c: &Connection, s: SessionRow) -> Result<SessionRecord> {
         );
     }
     Ok(SessionRecord {
-        manifest: SessionManifest { id: parse(s.id, "session id")?, ticket: s.ticket, root: pathbuf(s.root), repos },
+        manifest: SessionManifest { id: parse(s.id, "session id")?, ticket: s.ticket, agent: s.agent.map(AgentName::try_from).transpose().map_err(|e| bad_row(format!("sessions.agent: {}", e.message)))?, root: pathbuf(s.root), repos },
         lifecycle,
         created: time(s.created),
         removed: opt_time(s.removed),
@@ -388,6 +394,7 @@ impl Store {
             ws.push((repo.as_str(), st, want));
         }
         let at = ns(at, "at")?;
+        let policy = self.dev_ports_policy();
         self.write(OP, |c| {
             if session_lifecycle(c, id).map_err(w(OP))?.is_some() {
                 return Err(err(Code::Exists, format!("session {id} already has a row"), json!({ "reason": "store_row", "session": id })));
@@ -415,8 +422,8 @@ impl Store {
                 gens.push(g);
             }
             c.execute(
-                "INSERT INTO sessions (id, ticket, root, lifecycle, created_ns) VALUES (?1, ?2, ?3, 'creating', ?4)",
-                params![id, manifest.ticket, root, at],
+                "INSERT INTO sessions (id, ticket, agent, root, lifecycle, created_ns) VALUES (?1, ?2, ?3, ?4, 'creating', ?5)",
+                params![id, manifest.ticket, manifest.agent.as_ref().map(|a| a.as_str()), root, at],
             )
             .map_err(w(OP))?;
             for ((repo, st, path), g) in ws.iter().zip(gens) {
@@ -426,6 +433,112 @@ impl Store {
                     params![id, repo, g, st.head.as_str(), path, st.tracked as i64],
                 )
                 .map_err(w(OP))?;
+                crate::devports::lease_new(c, policy.as_deref(), id, repo).map_err(w(OP))?;
+            }
+            Ok(Tx::Commit(()))
+        })
+    }
+
+    /// Add workspaces to an `Active` session (session.md D52, `add`): one
+    /// transaction inserts the workspace rows (generation 1, health ok,
+    /// same path and base rules as `create_session`) and their seed rows.
+    /// A repo already in the session is `Exists` (`reason: "workspace_exists"`).
+    pub fn add_workspaces(
+        &self,
+        id: &SessionId,
+        repos: &BTreeMap<RepoName, WorkspaceState>,
+        seeds: &BTreeMap<RepoName, Vec<SeedRow>>,
+    ) -> Result<()> {
+        const OP: &str = "add_workspaces";
+        self.writable()?;
+        let id = id.as_str();
+        if repos.is_empty() {
+            return Err(invalid_field("repos", format!("no workspaces to add to session {id}")));
+        }
+        let root = self.session_root_text(id)?;
+        let mut ws = Vec::new();
+        for (repo, st) in repos {
+            let want = format!("{root}/{}", repo.as_str());
+            if st.path.to_str() != Some(want.as_str()) {
+                return Err(err(
+                    Code::InvalidInput,
+                    format!("workspace path of {repo} must be {want}, not {}", st.path.display()),
+                    json!({ "field": "path", "repo": repo.as_str(), "expected": want }),
+                ));
+            }
+            if st.base.repo != *repo {
+                return Err(err(
+                    Code::InvalidInput,
+                    format!("workspace {repo} names a base of {}", st.base.repo),
+                    json!({ "reason": "repo_mismatch", "repo": repo.as_str(), "base_repo": st.base.repo.as_str() }),
+                ));
+            }
+            let mut rows = Vec::new();
+            for s in seeds.get(repo).map(Vec::as_slice).unwrap_or(&[]) {
+                rows.push((
+                    s.path.as_str().to_string(),
+                    path_text(&s.source, "source")?,
+                    s.link.as_deref().map(|l| path_text(l, "link")).transpose()?,
+                    int(s.size, "size")?,
+                    ns(s.source_mtime, "source_mtime")?,
+                    ns(s.copied, "copied")?,
+                ));
+            }
+            ws.push((repo.as_str(), st, want, rows));
+        }
+        if let Some(r) = seeds.keys().find(|r| !repos.contains_key(*r)) {
+            return Err(invalid_field("seeds", format!("seeds given for {r}, which is not being added")));
+        }
+        let policy = self.dev_ports_policy();
+        self.write(OP, |c| {
+            let lc = session_lifecycle(c, id).map_err(w(OP))?.ok_or_else(|| no_such_session(id))?;
+            if lc != "active" {
+                return Err(lifecycle_err(id, &lc, "active"));
+            }
+            for (repo, st, path, rows) in &ws {
+                if workspace(c, id, repo).map_err(w(OP))?.is_some() {
+                    return Err(err(
+                        Code::Exists,
+                        format!("session {id} already has a workspace of {repo}"),
+                        json!({ "reason": "workspace_exists", "session": id, "repo": repo }),
+                    ));
+                }
+                let g = base_gen_id(c, repo, st.base.tree.as_str(), st.base.deps.as_str()).map_err(w(OP))?;
+                let Some(g) = g else {
+                    return Err(err(
+                        Code::InvalidInput,
+                        format!("base {}/{}/{} is not registered", repo, st.base.tree, st.base.deps),
+                        json!({ "reason": "base_unregistered", "repo": repo, "tree": st.base.tree.as_str(), "deps": st.base.deps.as_str() }),
+                    ));
+                };
+                let other: Option<String> =
+                    c.query_row("SELECT session FROM workspaces WHERE path = ?1", [path], |r| r.get(0)).optional().map_err(w(OP))?;
+                if let Some(other) = other {
+                    return Err(err(Code::Exists, format!("{path} belongs to session {other}"), json!({ "reason": "path_taken", "path": path, "session": other })));
+                }
+                c.execute(
+                    "INSERT INTO workspaces (session, repo, base_gen, head, path, tracked, generation, health, conflicts) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'ok', '[]')",
+                    params![id, repo, g, st.head.as_str(), path, st.tracked as i64],
+                )
+                .map_err(w(OP))?;
+                let mut seen = BTreeSet::new();
+                for r in rows {
+                    if !seen.insert(r.0.as_str()) {
+                        return Err(err(
+                            Code::InvalidInput,
+                            format!("seed {} of {id}/{repo} is given twice", r.0),
+                            json!({ "reason": "seed_exists", "path": r.0 }),
+                        ));
+                    }
+                    c.execute(
+                        "INSERT INTO seeds (session, repo, path, source, link, size, source_mtime_ns, copied_ns) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![id, repo, r.0, r.1, r.2, r.3, r.4, r.5],
+                    )
+                    .map_err(w(OP))?;
+                }
+                crate::devports::lease_new(c, policy.as_deref(), id, repo).map_err(w(OP))?;
             }
             Ok(Tx::Commit(()))
         })
@@ -476,6 +589,14 @@ impl Store {
                 )
                 .map_err(w(OP))?;
             if n == 1 {
+                if to == Lifecycle::Removed {
+                    // store.md §4.4a: a removed session's dev ports are free again.
+                    c.execute("DELETE FROM dev_ports WHERE session = ?1", [id]).map_err(w(OP))?;
+                    // rm-followups §2.2 R2 / §1.3: the last rm outcome and any
+                    // deferred rebase go with the session, in this transaction.
+                    c.execute("DELETE FROM rm_attempts WHERE session = ?1", [id]).map_err(w(OP))?;
+                    c.execute("DELETE FROM rebase_pending WHERE session = ?1", [id]).map_err(w(OP))?;
+                }
                 return Ok(Tx::Commit(true));
             }
             session_lifecycle(c, id).map_err(w(OP))?.ok_or_else(|| no_such_session(id))?;
@@ -538,6 +659,22 @@ impl Store {
     }
 
     pub fn begin_move(&self, id: &SessionId, repo: &RepoName, to: &BaseGen, head: &CommitOid, staging: &Path, at: SystemTime) -> Result<u64> {
+        self.begin_move_with(id, repo, to, head, staging, at, None)
+    }
+
+    /// [`Store::begin_move`] that also writes an `Auto` move's activity
+    /// baseline in the same transaction (rm-followups §1.4 G4, r8).
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_move_with(
+        &self,
+        id: &SessionId,
+        repo: &RepoName,
+        to: &BaseGen,
+        head: &CommitOid,
+        staging: &Path,
+        at: SystemTime,
+        baseline: Option<&crate::MoveBaseline>,
+    ) -> Result<u64> {
         const OP: &str = "begin_move";
         self.writable()?;
         let at = ns(at, "at")?;
@@ -594,6 +731,9 @@ impl Store {
                 params![id, repo, n, to.tree.as_str(), to.deps.as_str(), head.as_str(), staging, at],
             )
             .map_err(w(OP))?;
+            if let Some(b) = baseline {
+                crate::move_activity::insert(c, id, repo, n, b, OP)?;
+            }
             Ok(Tx::Commit(n as u64))
         })
     }
@@ -663,6 +803,22 @@ impl Store {
     }
 
     pub fn finish_move(&self, id: &SessionId, repo: &RepoName, n: u64, conflicts: &[RepoPath], at: SystemTime) -> Result<()> {
+        self.finish_move_consuming(id, repo, n, conflicts, at, None)
+    }
+
+    /// [`Store::finish_move`] that also consumes the `rebase_pending` row
+    /// of rev `consume` in the same transaction (rm-followups §1.6 rule 6);
+    /// with `None` a row whose target is exactly this move's head is
+    /// consumed.
+    pub fn finish_move_consuming(
+        &self,
+        id: &SessionId,
+        repo: &RepoName,
+        n: u64,
+        conflicts: &[RepoPath],
+        at: SystemTime,
+        consume: Option<u64>,
+    ) -> Result<()> {
         const OP: &str = "finish_move";
         self.writable()?;
         let at = ns(at, "at")?;
@@ -693,6 +849,7 @@ impl Store {
                 params![id, repo, ni, at],
             )
             .map_err(w(OP))?;
+            crate::rm_state::consume_on_move(c, OP, id, repo, (&it.to_tree, &it.to_deps), &it.head, consume)?;
             Ok(Tx::Commit(()))
         })
     }

@@ -23,7 +23,7 @@ use crate::{ChainChoice, MAX_FRAME, RpcReject};
 
 macro_rules! methods {
     ($($variant:ident = $name:literal, ro = $ro:literal;)*) => {
-        /// The 21 methods (daemon.md §4).
+        /// The 22 methods (daemon.md §4).
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub enum Method { $($variant),* }
 
@@ -49,6 +49,7 @@ macro_rules! methods {
 
 methods! {
     New = "new", ro = false;
+    Add = "add", ro = false;
     Status = "status", ro = true;
     Checkpoint = "checkpoint", ro = false;
     Restore = "restore", ro = false;
@@ -69,6 +70,8 @@ methods! {
     ConfigRelax = "config_relax", ro = false;
     DaemonStatus = "daemon_status", ro = true;
     Du = "du", ro = true;
+    PortsEnsure = "ports_ensure", ro = false;
+    PortsReassign = "ports_reassign", ro = false;
 }
 
 /// A field that must be present but may be `null` (a missing one is
@@ -83,6 +86,24 @@ pub struct NewParams {
     #[serde(deserialize_with = "nullable")]
     pub ticket: Option<String>,
     pub repos: Vec<RepoName>,
+    /// Only `repos` get a workspace (session.md D51); absent means false.
+    #[serde(default)]
+    pub only: bool,
+    /// Which agent created the session; absent or null means not known.
+    /// A plain string on the wire: the handler validates it as an
+    /// `AgentName` so a bad name answers `InvalidInput` reason `agent`.
+    /// Old daemons reject the field (deny_unknown_fields), so the CLI sends
+    /// it only when `daemon_status.features` has `new.agent`.
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+/// `add` (session.md D52): more repos for an existing session.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddParams {
+    pub session: SessionId,
+    pub repos: Vec<RepoName>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -93,6 +114,17 @@ pub struct StatusParams {
     #[serde(deserialize_with = "nullable")]
     pub session: Option<String>,
     pub all: bool,
+    /// Compute each repo's publish chain (status-perf D2). Off by default:
+    /// the reply then has no `chains` key at all.
+    #[serde(default)]
+    pub chains: bool,
+    /// The store-only summary `ls` / `status --brief` print (status-perf
+    /// C): `{sessions:[SessionSummary]}`. Not with `chains`.
+    #[serde(default)]
+    pub summary: bool,
+    /// With `summary`: each session's workspaces from the store.
+    #[serde(default)]
+    pub workspaces: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -156,6 +188,21 @@ pub struct DepsApproveParams {
     pub sessions: Option<Vec<SessionId>>,
 }
 
+/// D33: `store` adds the store-wide gc (`Store::gc_with`: removed
+/// sessions, proposals, attempts, blobs, tmp, trash, scrub) after the repo
+/// gcs; `dry_run` (only with `store`) answers `Store::gc_preview` and
+/// writes nothing. Both default to false (the old `{ "repo": .. }` call).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GcParams {
+    #[serde(deserialize_with = "nullable")]
+    pub repo: Option<RepoName>,
+    #[serde(default)]
+    pub store: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepoOptParams {
@@ -205,6 +252,26 @@ pub struct PushParams {
 #[serde(deny_unknown_fields)]
 pub struct RepoParams {
     pub repo: RepoName,
+}
+
+/// `ports_ensure`: one workspace's dev-port lease.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortsParams {
+    pub session: SessionId,
+    pub repo: RepoName,
+}
+
+/// `ports_reassign`: `checked` is the base the caller checked for
+/// listeners (`null` or absent: it saw no lease); the store refuses a lease
+/// that has changed since (`Busy lease_changed`).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReassignParams {
+    pub session: SessionId,
+    pub repo: RepoName,
+    #[serde(default)]
+    pub checked: Option<u16>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -262,6 +329,7 @@ pub struct DuParams {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Params {
     New(NewParams),
+    Add(AddParams),
     Status(StatusParams),
     Checkpoint(CheckpointParams),
     Restore(RestoreParams),
@@ -276,12 +344,14 @@ pub enum Params {
     Push(PushParams),
     Assign(AssignParams),
     Rm(RmParams),
-    Gc(RepoOptParams),
+    Gc(GcParams),
     ResolveMove(ResolveMoveParams),
     ChainResolve(ChainResolveParams),
     ConfigRelax(RepoParams),
     DaemonStatus(DaemonStatusParams),
     Du(DuParams),
+    PortsEnsure(PortsParams),
+    PortsReassign(ReassignParams),
 }
 
 fn typed<T: DeserializeOwned>(v: Value, wrap: fn(T) -> Params) -> Result<Params, String> {
@@ -297,6 +367,7 @@ impl Params {
         }
         match method {
             Method::New => typed(v, Params::New),
+            Method::Add => typed(v, Params::Add),
             Method::Status => typed(v, Params::Status),
             Method::Checkpoint => typed(v, Params::Checkpoint),
             Method::Restore => typed(v, Params::Restore),
@@ -323,6 +394,8 @@ impl Params {
             Method::ConfigRelax => typed(v, Params::ConfigRelax),
             Method::DaemonStatus => typed(v, Params::DaemonStatus),
             Method::Du => typed(v, Params::Du),
+            Method::PortsEnsure => typed(v, Params::PortsEnsure),
+            Method::PortsReassign => typed(v, Params::PortsReassign),
         }
     }
 }

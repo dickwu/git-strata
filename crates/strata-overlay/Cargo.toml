@@ -17,7 +17,6 @@ strata-apfs = { path = "../strata-apfs" }
 strata-gitio = { path = "../strata-gitio" }
 strata-store = { path = "../strata-store" }
 blake3 = { version = "1", features = ["mmap", "rayon"] }
-memmap2 = "0.9"
 rayon = "1"
 unicode-normalization = "0.1"
 libc = "0.2.191"
@@ -25,6 +24,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
+memmap2 = "0.9"
 tempfile = "3"
 proptest = "1"
 strata-overlay = { path = ".", features = ["test-seams"] }

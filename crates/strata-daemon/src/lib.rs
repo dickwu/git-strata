@@ -31,6 +31,51 @@ pub mod waiting;
 pub mod seams {
     pub use strata_confirm::Confirmer;
     pub use strata_confirm::seams::{FakeClock, PromptLog, ScriptedAuth, Verdict, bypass_env_names};
+
+    static SCENE_SYNC_FAILS: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+    /// Review P1-13: make every fsync of a push scene record under `root`
+    /// fail with EIO (`on`), or stop doing so. Keyed by root so parallel
+    /// tests are unaffected.
+    pub fn set_scene_sync_fails(root: &std::path::Path, on: bool) {
+        let mut v = SCENE_SYNC_FAILS.lock().unwrap_or_else(|p| p.into_inner());
+        v.retain(|r| r != root);
+        if on {
+            v.push(root.to_path_buf());
+        }
+    }
+
+    pub(crate) fn scene_sync_fails(p: &std::path::Path) -> bool {
+        SCENE_SYNC_FAILS.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|r| p.starts_with(r))
+    }
+
+    type Hook = std::sync::Arc<dyn Fn() + Send + Sync>;
+    static AFTER_CONFIRM: std::sync::Mutex<Vec<(std::path::PathBuf, Hook)>> = std::sync::Mutex::new(Vec::new());
+
+    /// Review P1-15: run `hook` after every passed push confirmation of the
+    /// daemon whose root is `root`, before its repo lock is taken (`None`
+    /// removes it). Keyed by root so parallel tests are unaffected.
+    pub fn set_after_confirm(root: &std::path::Path, hook: Option<Hook>) {
+        let mut v = AFTER_CONFIRM.lock().unwrap_or_else(|p| p.into_inner());
+        v.retain(|(r, _)| r != root);
+        if let Some(h) = hook {
+            v.push((root.to_path_buf(), h));
+        }
+    }
+
+    pub(crate) fn after_confirm(root: &std::path::Path) {
+        let h = AFTER_CONFIRM.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(r, _)| r == root).map(|(_, h)| h.clone());
+        if let Some(h) = h {
+            h();
+        }
+    }
+}
+
+/// Test seam point after a passed push confirmation (no-op in a normal
+/// build); see `seams::set_after_confirm`.
+pub(crate) fn after_confirm(_root: &Path) {
+    #[cfg(feature = "test-seams")]
+    seams::after_confirm(_root);
 }
 
 pub type Result<T> = std::result::Result<T, StrataError>;
@@ -42,11 +87,18 @@ pub const LOCK_WAIT: Duration = Duration::from_secs(30);
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// D11: how often the reconcile loop runs.
 pub const RECONCILE_EVERY: Duration = Duration::from_secs(3600);
+/// rm-followups §1.6 T2: how often the catch-up pass runs.
+pub const CATCH_UP_EVERY: Duration = Duration::from_secs(60);
 /// How often the reconcile thread refreshes seed copies whose main-checkout
 /// source changed (`Sessions::refresh_seeds`; a few lstats per seed).
 pub const SEED_REFRESH_EVERY: Duration = Duration::from_secs(2);
 /// D12: `gc_repo` keep window.
 pub const GC_KEEP: Duration = Duration::from_secs(14 * 24 * 3600);
+/// D33: the store-wide gc's keep (removed sessions, decided proposals,
+/// closed attempts). Longer than [`GC_KEEP`]: what it deletes (checkpoints
+/// of removed sessions) cannot be rebuilt. Only `git-strata gc --store`
+/// runs it.
+pub const STORE_GC_KEEP: Duration = Duration::from_secs(30 * 24 * 3600);
 /// D1: the system part of the PATH installs and checks run with (launchd
 /// gives a bare PATH). [`install_path_for_home`] puts `~/.bun/bin` in front.
 pub const DEFAULT_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
@@ -57,6 +109,11 @@ pub const DEFAULT_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 pub fn install_path_for_home(home: &Path) -> String {
     format!("{}:{DEFAULT_PATH}", home.join(".bun/bin").display())
 }
+
+/// Optional request features this daemon serves, listed in
+/// `daemon_status.features` so a newer CLI can tell what an older daemon
+/// would reject. Additive only. `new.agent`: `new` takes `agent`.
+pub const FEATURES: &[&str] = &["new.agent", "session.ports"];
 
 /// The launchd label of the agent.
 pub const AGENT_LABEL: &str = "com.gwd.git-stratad";
@@ -94,12 +151,17 @@ pub enum RpcReject {
 }
 
 /// The pinned safety flags of one repo (pins.json).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedFlags {
     pub deploy_on_push: bool,
     pub confirm: bool,
     pub push: bool,
+    /// `rm.regenerable` (rm-followups §1.8). A three-field pins.json reads
+    /// as empty; an empty list is not written, so such a file stays
+    /// readable by an older daemon until a list is pinned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regenerable: Vec<String>,
 }
 
 /// What `daemon_status` and the stderr alert report.
@@ -117,6 +179,9 @@ pub enum DaemonWarning {
     /// Review M6: a standalone (or restore) push whose outcome is unknown;
     /// its staging directory `scene` (with `push.json`) is kept.
     UnknownPush { repo: RepoName, commit: strata_types::CommitOid, scene: PathBuf },
+    /// Review P1-5: a `refs/strata/**/*.lock` left by a killed ref
+    /// transaction, removed at startup.
+    StaleRefLock { repo: RepoName, path: PathBuf },
 }
 
 /// One held repo write lock (status / daemon_status).

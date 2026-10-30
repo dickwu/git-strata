@@ -81,7 +81,7 @@ fn manifest(env: &Env, id: &SessionId) -> SessionManifest {
     let mut repos = BTreeMap::new();
     repos.insert(repo("app"), WorkspaceState { base: g("app", '1', 'a'), head: head('1'), path: root.join("app"), tracked: true });
     repos.insert(repo("lib"), WorkspaceState { base: g("lib", '1', 'a'), head: head('2'), path: root.join("lib"), tracked: false });
-    SessionManifest { id: id.clone(), ticket: Some("T-1".into()), root, repos }
+    SessionManifest { id: id.clone(), ticket: Some("T-1".into()), agent: None, root, repos }
 }
 fn active(env: &Env, s: &Store, id: &SessionId) {
     s.create_session(&manifest(env, id), t(10)).unwrap();

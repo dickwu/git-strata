@@ -160,7 +160,7 @@ Claude Code 会话 B ──┤  strata CLI (JSON)   │
 
 1. 对清单里**每个兄弟仓库**（不只是 `--repos` 指定的）：`git fetch` 主 checkout 的 `origin`，取发布链或默认分支的 tree OID（§6.7）；若该 OID 的基线不存在，建一个：从 git 对象导出源码树到基线缓存 `bases/<repo>/<oid>/`，再把匹配的依赖集克隆进去。依赖集不存在时先**认领**：主 checkout 现成的 `node_modules`/`vendor` 若其安装输入哈希与基线一致，直接 `clonefile` 封存为第一代（今天 `cp -Rc` 的做法，秒级）；不一致才冷装（tool 的 `bun install` 几分钟；`target` 冷编译 30–40 分钟——所以种子缓存永远只克隆、不冷建）。[我的决定] "不比今天慢"的比较对象是温热的主 checkout。
 2. `clonefile` 基线缓存到 `<root>/sessions/<session-id>/<repo>/`，`.git` 用 `git worktree add --detach` 等价的方式接到主 checkout 的 object store（这样工作区里的 `git status`、`git log` 都正常，且不复制对象）。[交给构建者：worktree 方式 vs 独立 `.git` 文件指向 common dir]
-3. 写清单；对 `--repos` 指定的仓库开始监听；其余仓库标记"钉住、无 overlay"。
+3. 写清单；对 `--repos` 指定的仓库开始监听；其余仓库标记"钉住、无 overlay"。清单还记下创建会话的 AI agent（`manifest.agent`：`--agent`，否则 `STRATA_AGENT`，否则 cli 从 Claude Code、Codex、Cursor 设的环境变量认出；都没有就不记），status 与 GUI 显示它（cli.md D36）。
 4. 种子缓存与种子文件从主 checkout 克隆/复制（§4）。
 5. 打印各工作区路径（JSON）。
 
@@ -244,6 +244,7 @@ agent 和用户是同一个 uid，且常以 bypass 权限运行，所以 flag �
 - 选 Turso 是为日后的项目向量化留路：嵌入可以放进同一个 store.db，用 `vector32` / `vector_distance_cos` 查询（现在不建向量表）。
 - Blob：按 BLAKE3 内容寻址，一文件一 blob，存为普通文件；写入 = 从工作区 `clonefile` 到 blob 路径（零拷贝），读出 = 反向克隆。超过阈值（默认 64 MiB，tgrep 的经验）的文件只记录哈希与克隆，不进索引。
 - 基线缓存与依赖集缓存都是普通目录树，键在路径里，封存后只读（`chflags uchg` 或仅靠约定 [交给构建者]）。
+- schema 版本：store.db 的 `user_version`（现在是 2）。新版的写者 open 只前进地迁移旧库，迁移前先在 `store/backups/` 留一份核对过的克隆，整段在一个事务里；比自己新的库拒绝打开（store.md §4.4a）。只读的 cli 不迁移。cli 与 daemon 要一起装：旧 cli 拒绝读 v2 的库。
 - 空间回收：generation 引用计数（会话清单、checkpoint、发布记录）；无引用且超过保留期才删。[保留期交给构建者]
 
 ---

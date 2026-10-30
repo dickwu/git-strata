@@ -23,6 +23,11 @@ pub fn push_plan(repo: &RepoName, rc: &RepoConfig, why: &str) -> Option<CommitOi
             return None;
         }
     };
+    // Review P1-15: the URL the approval binds (redacted; the prompt shows it too).
+    match git.push_url("origin") {
+        Ok(u) => eprintln!("  to {}", strata_types::display_url(&u)),
+        Err(e) => eprintln!("  (cannot read origin's push URL: {})", e.message),
+    }
     match publish_chain(&git, branch) {
         Ok(Some(ch)) => match &ch.top {
             Some(top) => {

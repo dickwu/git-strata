@@ -7,7 +7,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use strata_deps::{Hold, open_files};
+use strata_deps::{Hold, open_files, open_files_many};
 
 const WORKER_ENV: &str = "STRATA_DEPS_OPEN_FILES_WORKER";
 
@@ -236,4 +236,32 @@ fn own_event_only_fd_copied_into_a_spawning_child_is_not_a_holder() {
     // SAFETY: our fd.
     unsafe { libc::close(evt) };
     assert_eq!(seen, vec![], "after {scans} scans (own pid {})", std::process::id());
+}
+
+/// rm-followups R4: the batched form finds what the per-path calls find.
+#[test]
+fn open_files_many_one_pass_equals_per_path() {
+    let tmp = tempfile::Builder::new().prefix("strata-deps-ofm-").tempdir().unwrap();
+    let base = fs::canonicalize(tmp.path()).unwrap();
+    let (a, b, c) = (base.join("a"), base.join("b"), base.join("c"));
+    for d in [&a, &b, &c] {
+        fs::create_dir_all(d).unwrap();
+    }
+    fs::write(a.join("x"), b"x\n").unwrap();
+    let fd = spawn(format!("fd:{}", a.join("x").display()), None);
+    let cwd = spawn("cwd:".into(), Some(&b));
+    let key = |v: Vec<strata_deps::OpenFile>| {
+        let mut v: Vec<(i32, PathBuf)> = v.into_iter().map(|o| (o.pid, o.path)).collect();
+        v.sort();
+        v
+    };
+    let mut each = open_files(&a).unwrap();
+    each.extend(open_files(&b).unwrap());
+    each.extend(open_files(&c).unwrap());
+    let many = open_files_many(&[&a, &b, &c]).unwrap();
+    assert_eq!(key(many), key(each));
+    assert_eq!(open_files_many(&[&a, &b]).unwrap().len(), 2);
+    assert!(open_files_many(&[&c, &base.join("missing")]).unwrap().is_empty());
+    stop(fd);
+    stop(cwd);
 }

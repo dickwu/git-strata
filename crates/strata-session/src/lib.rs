@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use strata_deps::{InstallEnv, RepoWriteLock};
 use strata_gitio::Git;
@@ -15,34 +16,54 @@ use strata_overlay::{Base, Checkpointed, WorkspaceRef};
 use strata_store::Store;
 use strata_types::{CheckpointReason, Code, Config, RepoConfig, RepoName, SessionId, StrataError};
 
+mod activity;
 mod base;
 mod carry;
 mod dispatch;
 mod failed_move;
 mod move_workspace;
 mod new;
+mod old_tree;
+mod orphans;
 mod recover;
 mod remove;
 mod resolve;
+mod rm_note;
 mod scene;
+mod no_wait;
 mod seams;
 mod seed;
 mod status;
+mod summary;
 mod sys;
 mod ticket;
 
+pub use activity::{Activity, Idle, baseline_of, busy_reason, changed_since, idle_activity, walk_activity};
 pub use failed_move::{MoveResolution, ResolutionReport};
-pub use move_workspace::MoveReport;
-pub use remove::RemoveReport;
+pub use move_workspace::{AUTO_DEFERRED, MoveReport, auto_deferral};
+pub use old_tree::{OLD_TREE_TTL, OldTreeKey, OldTreeMode, OldTreeVerdict, Outcome as OldTreeOutcome};
+pub use orphans::{OrphanRetired, Sweep};
+pub use remove::{Regenerable, RemoveReport};
+pub use rm_note::{
+    KeptTree, LastRm, RebaseNote, RmInterrupted, RmNotes, leftover_line, local_hhmm, removed_leftover_of, removed_leftovers, rm_notes,
+    with_leftover_detail,
+};
+pub use resolve::{resolve_in, select_in};
+pub use summary::{SessionSummary, SummarySelect, WorkspaceSummary, summary};
 #[cfg(feature = "test-seams")]
 pub use seams::SessionSeam;
 pub use status::{
-    MirrorDriftItem, SessionState, SessionStatus, StatusWarning, WorkspaceHealth, WorkspaceStatus,
+    DRIFT_NOTE, DriftStatus, MirrorDriftItem, SessionState, SessionStatus, StatusWarning, WorkspaceHealth, WorkspaceStatus,
 };
 pub use recover::{IntentRef, Leftover, RecoverReport};
 pub use scene::{Scene, SceneOp};
 pub use new::NewReport;
 pub use new::NewWarning;
+pub use new::Layout;
+pub use new::add::{ADD_STAGING_PREFIX, AddReport};
+
+/// The fetch window the daemon gives `new` and `add` (D53).
+pub const NEW_FETCH_WINDOW: Duration = Duration::from_secs(30);
 pub use seed::{SEED_MARK, SEED_STAGING_PREFIX, SeedRecord, SeedRefresh, SeedSource, seed_files, seed_plan};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
@@ -52,6 +73,7 @@ pub const MOVE_STAGING_PREFIX: &str = ".strata-tmp-move-";
 /// `bases/<repo>/.staging/`: where base generations are built (§5.2).
 pub const BASE_STAGING_DIR: &str = ".staging";
 /// How many dirty paths `remove`'s `Dirty` detail lists per repo (§5.6).
+/// No longer applied: rm-followups R2 keeps the full lists in `detail`.
 pub const DIRTY_PATHS_CAP: usize = 100;
 
 /// The daemon's `BeforeRollout` / `BeforeRemove` checkpoint (§3): records
@@ -66,7 +88,7 @@ pub struct Sessions<'a> {
     pub(crate) config: &'a Config,
     pub(crate) gits: &'a BTreeMap<RepoName, Git>,
     pub(crate) store: &'a Store,
-    pub(crate) locks: &'a dyn RepoWriteLock,
+    pub(crate) locks: no_wait::SessionLock<'a>,
     pub(crate) env: &'a InstallEnv,
     pub(crate) before: &'a dyn BeforeCheckpoint,
     /// Base staging directories being built by this process (§5.2 step 3).
@@ -74,6 +96,23 @@ pub struct Sessions<'a> {
     /// Moves in progress in this process (§5.5 step 2.9).
     pub(crate) live_moves: Mutex<BTreeSet<(SessionId, RepoName)>>,
     pub(crate) seams: seams::Seams,
+    /// When `new`/`add` last fetched each repo successfully (D53).
+    pub(crate) fetched: Mutex<BTreeMap<RepoName, Instant>>,
+    /// How long such a fetch counts as fresh; zero (the default) always
+    /// fetches. The daemon sets `NEW_FETCH_WINDOW`.
+    pub(crate) fetch_window: Mutex<Duration>,
+    /// status-perf A4: the slots shared by every status read of this
+    /// process, `[status] parallel` of them (read when opened).
+    pub(crate) status_slots: status::Slots,
+    /// status-perf A1: the old-tree mode, verdict table and queue.
+    pub(crate) old_trees: old_tree::OldTrees,
+    /// rm-followups §1.8: `rm.regenerable` lists pinned after this was
+    /// opened (`config relax`); a repo not here uses its config's list.
+    pub(crate) regenerable: Mutex<BTreeMap<RepoName, Vec<String>>>,
+    /// rm-followups R1: `new`'s row-and-root enrollment and the orphan
+    /// sweep's recheck-and-retire exclude each other. A leaf lock: nothing
+    /// else is taken while it is held.
+    pub(crate) enroll: Mutex<()>,
 }
 
 impl<'a> Sessions<'a> {
@@ -103,13 +142,54 @@ impl<'a> Sessions<'a> {
             config,
             gits,
             store,
-            locks,
+            locks: no_wait::SessionLock(locks),
             env,
             before,
             live_staging: Mutex::new(BTreeSet::new()),
             live_moves: Mutex::new(BTreeSet::new()),
             seams: seams::Seams::default(),
+            fetched: Mutex::new(BTreeMap::new()),
+            fetch_window: Mutex::new(Duration::ZERO),
+            status_slots: status::Slots::new(config.status.parallel as usize),
+            old_trees: old_tree::OldTrees::default(),
+            regenerable: Mutex::new(BTreeMap::new()),
+            enroll: Mutex::new(()),
         })
+    }
+
+    /// D53: a repo that `new` or `add` fetched successfully less than `w`
+    /// ago is not fetched again by them (the chain top is still read under
+    /// the repo lock). Zero turns the skip off.
+    pub fn set_fetch_window(&self, w: Duration) {
+        *self.fetch_window.lock().unwrap_or_else(|p| p.into_inner()) = w;
+    }
+
+    /// rm-followups §1.8: the effective `rm.regenerable` of `repo` from now
+    /// on (the daemon calls this after `config relax` pinned a new list).
+    pub fn set_regenerable(&self, repo: &RepoName, patterns: Vec<String>) {
+        self.regenerable.lock().unwrap_or_else(|p| p.into_inner()).insert(repo.clone(), patterns);
+    }
+
+    /// The effective `rm.regenerable` of `repo`.
+    pub fn regenerable(&self, repo: &RepoName) -> Vec<String> {
+        if let Some(v) = self.regenerable.lock().unwrap_or_else(|p| p.into_inner()).get(repo) {
+            return v.clone();
+        }
+        self.config.repos.get(repo).map(|rc| rc.rm.regenerable.clone()).unwrap_or_default()
+    }
+
+    pub(crate) fn fetch_is_fresh(&self, repo: &RepoName) -> bool {
+        let w = *self.fetch_window.lock().unwrap_or_else(|p| p.into_inner());
+        if w.is_zero() {
+            return false;
+        }
+        self.fetched.lock().unwrap_or_else(|p| p.into_inner()).get(repo).is_some_and(|t| t.elapsed() < w)
+    }
+
+    /// `repo`'s configuration and git handle, for callers that work on a
+    /// repo outside any session (publish's check siblings, publish.md D21).
+    pub fn repo_handles(&self, repo: &RepoName) -> Result<(&'a RepoConfig, &'a Git)> {
+        Ok((self.repo_cfg(repo)?, self.git(repo)?))
     }
 
     pub(crate) fn repo_cfg(&self, repo: &RepoName) -> Result<&'a RepoConfig> {

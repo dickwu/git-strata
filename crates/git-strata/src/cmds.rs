@@ -84,24 +84,93 @@ fn repo_for(config: &Config, store: &Store, s: &SessionId, flag: Option<&str>, c
 
 // ---- new --------------------------------------------------------------------
 
-pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, repos: &[String]) -> Result<Envelope> {
-    if repos.is_empty() || repos.iter().any(|r| r.is_empty()) {
-        return Err(invalid("repos", "--repos needs at least one repo name"));
+pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only: &[String], repos: &[String], agent_flag: Option<&str>) -> Result<Envelope> {
+    if !only.is_empty() && !repos.is_empty() {
+        return Err(invalid(
+            "repo_flags",
+            "pass either --repo (the session gets only those repos) or --repos (every repo gets a workspace), not both",
+        ));
+    }
+    let list = if only.is_empty() { repos } else { only };
+    if list.is_empty() || list.iter().any(|r| r.is_empty()) {
+        return Err(invalid("repos", "pass --repo R (repeatable) or --repos A,B with at least one repo name"));
     }
     let ticket = match (ticket_flag, ticket) {
         (Some(a), Some(b)) => return Err(invalid("ticket", format!("the ticket is given twice ({a:?} and {b:?})"))),
         (a, b) => a.or(b),
     };
-    let names: Vec<RepoName> = repos.iter().map(|r| repo_name(r)).collect::<Result<_>>()?;
-    let v = ctx.call("new", json!({ "ticket": ticket, "repos": names }), Kind::Write)?;
+    let names: Vec<RepoName> = list.iter().map(|r| repo_name(r)).collect::<Result<_>>()?;
+    let agent = crate::agent::detect(agent_flag, |k| std::env::var_os(k))?;
+    // `only` is sent only when set, so this CLI still talks to a daemon
+    // that predates it (its params refuse unknown fields).
+    let mut params = json!({ "ticket": ticket, "repos": names });
+    if !only.is_empty() {
+        params["only"] = json!(true);
+    } else {
+        // `--repos` only picks the tracked repos (D51); say so, since it is
+        // easy to take for `--repo`.
+        eprintln!(
+            "note: --repos tracks {}; every configured repo still gets a workspace (pass --repo R for only these)",
+            list.join(",")
+        );
+    }
+    // `agent` goes only to a daemon that lists `new.agent`; an older one
+    // would refuse the unknown field.
+    let mut dropped = None;
+    if let Some(a) = &agent {
+        if crate::agent::daemon_takes_agent(&ctx.paths.socket) {
+            params["agent"] = json!(a.as_str());
+        } else {
+            dropped = agent.as_ref();
+        }
+    }
+    let v = match ctx.try_call("new", params.clone(), Kind::Write) {
+        Ok(v) => v,
+        // The daemon was swapped for an older one since the probe: it
+        // refused the field before running anything, so send it again
+        // without (only this refusal; nothing else is replayed).
+        Err(CallError::Failed(e)) if params.get("agent").is_some() && crate::agent::refused_unknown_agent(&e) => {
+            params.as_object_mut().expect("an object").remove("agent");
+            dropped = agent.as_ref();
+            ctx.call("new", params, Kind::Write)?
+        }
+        Err(e) => return Err(e.into_error()),
+    };
     for w in v["anchor_unknown"].as_array().into_iter().flatten() {
         eprintln!("warning: anchor unknown: {w}");
     }
-    let report = v.get("session").cloned().unwrap_or(Value::Null);
+    let mut report = v.get("session").cloned().unwrap_or(Value::Null);
+    if let Some(a) = dropped {
+        eprintln!("warning: the daemon predates agent recording; the session does not record agent {a} (install the matching git-strata and restart the daemon)");
+        if let Some(ws) = report.get_mut("warnings").and_then(Value::as_array_mut) {
+            ws.push(crate::agent::not_recorded(a));
+        } else if let Some(o) = report.as_object_mut() {
+            o.insert("warnings".into(), json!([crate::agent::not_recorded(a)]));
+        }
+    }
     if let Some(s) = sid(&report["manifest"]["id"]) {
         hint(s);
     }
     Ok(Envelope::ok(report))
+}
+
+// ---- add --------------------------------------------------------------------
+
+/// cli.md `add`: more repos for an existing session (session.md D52).
+pub fn add(ctx: &Ctx, session: Option<String>, repos: &[String]) -> Result<Envelope> {
+    if repos.is_empty() || repos.iter().any(|r| r.is_empty()) {
+        return Err(invalid("repos", "pass --repo R (repeatable) with at least one repo name"));
+    }
+    let config = ctx.config()?;
+    let names: Vec<RepoName> = repos.iter().map(|r| known_repo(&config, r)).collect::<Result<_>>()?;
+    let store = ro::open_store(&config)?;
+    let (s, _) = ro::session_or_cwd(&store, session.as_deref())?;
+    let v = ctx.call("add", json!({ "session": s, "repos": names }), Kind::Write)?;
+    for w in v["anchor_unknown"].as_array().into_iter().flatten() {
+        eprintln!("warning: anchor unknown: {w}");
+    }
+    hint(s);
+    Ok(Envelope::ok(v.get("report").cloned().unwrap_or(Value::Null)))
 }
 
 // ---- status -------------------------------------------------------------------
@@ -125,14 +194,23 @@ pub fn status(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
         Ok(v) => {
             alerts(&v["warnings"]);
             for l in v["leftovers"].as_array().into_iter().flatten() {
-                eprintln!("leftover: {l}");
+                eprintln!("{}", leftover_text(l));
             }
             v["sessions"].as_array().cloned().unwrap_or_default().into_iter().map(|s| s["status"].clone()).collect()
         }
-        Err(CallError::Down(_)) => local_status(ctx, sel)?,
+        Err(CallError::Down(_)) => {
+            let (list, left) = local_status(ctx, sel)?;
+            for l in &left {
+                eprintln!("{}", leftover_text(l));
+            }
+            list
+        }
         Err(CallError::Failed(e)) => return Err(e),
     };
     list = list.into_iter().map(with_choices).collect();
+    for st in &list {
+        print_notes(&st["manifest"]["id"], st);
+    }
     if sel.all {
         list.sort_by(|a, b| a["manifest"]["id"].as_str().cmp(&b["manifest"]["id"].as_str()));
         return Ok(Envelope::ok(json!({ "sessions": list })));
@@ -144,21 +222,214 @@ pub fn status(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
     Ok(Envelope::ok(one))
 }
 
+// ---- ls, status --brief (status-perf C) ---------------------------------------
+
+/// One `leftovers` entry as a stderr line: R3's removed-session form, or
+/// the JSON as before.
+fn leftover_text(l: &Value) -> String {
+    match (l["kind"].as_str(), l["session"].as_str(), l["path"].as_str()) {
+        (Some("RemovedSession"), Some(s), Some(p)) => strata_session::leftover_line(s, Path::new(p)),
+        _ => format!("leftover: {l}"),
+    }
+}
+
+/// R2/R3: a session's `notes` (last rm, interrupted rm, deferred rebase)
+/// on stderr, `note: <sid>: <line>`.
+fn print_notes(id: &Value, v: &Value) {
+    let id = id.as_str().unwrap_or("?");
+    for n in v["notes"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        eprintln!("note: {id}: {n}");
+    }
+}
+
+/// The removed-session leftovers on stderr and, when there are any, as
+/// `data.leftovers`.
+fn add_leftovers(data: &mut Value, left: Vec<Value>) {
+    for l in &left {
+        eprintln!("{}", leftover_text(l));
+    }
+    if !left.is_empty()
+        && let Some(m) = data.as_object_mut()
+    {
+        m.insert("leftovers".into(), Value::Array(left));
+    }
+}
+
+/// A daemon that predates `summary`/`workspaces` refuses them before
+/// dispatch (`deny_unknown_fields`): an RPC `Failed` naming the field.
+fn predates_summary(e: &StrataError) -> bool {
+    let rpc_failed = e.code == Code::InvalidInput
+        && e.detail.as_ref().and_then(|d| d.get("rpc")).and_then(Value::as_str) == Some("Failed");
+    rpc_failed && (e.message.contains("unknown field `summary`") || e.message.contains("unknown field `workspaces`"))
+}
+
+/// `status{summary:true}` from the daemon; the store read only when no
+/// daemon listens (D5) or the daemon predates `summary`. Returns the
+/// sessions, whether they came from the store directly, and the
+/// removed-session leftovers (R3).
+fn summaries(ctx: &Ctx, sel: &Select, workspaces: bool) -> Result<(Vec<Value>, bool, Vec<Value>)> {
+    let here = cwd();
+    let mut params = json!({ "cwd": here, "session": sel.session, "all": sel.all, "summary": true });
+    if workspaces {
+        params["workspaces"] = json!(true);
+    }
+    match ctx.try_call("status", params, Kind::Read) {
+        Ok(v) => Ok((
+            v["sessions"].as_array().cloned().unwrap_or_default(),
+            false,
+            v["leftovers"].as_array().cloned().unwrap_or_default(),
+        )),
+        Err(CallError::Failed(e)) if !predates_summary(&e) => Err(e),
+        Err(_) => {
+            let config = ctx.config()?;
+            let store = ro::open_store(&config)?;
+            let which = if sel.all {
+                strata_session::SummarySelect::All
+            } else if let Some(s) = sel.session.as_deref() {
+                strata_session::SummarySelect::Session(s)
+            } else {
+                strata_session::SummarySelect::Cwd(&here)
+            };
+            // `summary` adds R3's orphan detail to a NoSuchSession itself.
+            let v = strata_session::summary(&store, &config.paths.root, which, workspaces)?;
+            let v = serde_json::to_value(v).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
+            let left = strata_session::removed_leftovers(&store, &config.paths.root)?;
+            let left = serde_json::to_value(left).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
+            Ok((v.as_array().cloned().unwrap_or_default(), true, left.as_array().cloned().unwrap_or_default()))
+        }
+    }
+}
+
+/// `ls`: every live session, by id.
+pub fn ls(ctx: &Ctx) -> Result<Envelope> {
+    let (list, local, left) = summaries(ctx, &Select { session: None, all: true }, false)?;
+    for s in &list {
+        print_notes(&s["id"], s);
+    }
+    let mut data = json!({ "sessions": list });
+    add_leftovers(&mut data, left);
+    if local {
+        data["source"] = json!("local");
+    }
+    Ok(Envelope::ok(data))
+}
+
+/// `status --brief`: as `status` (one session, or `{sessions}` with
+/// `--all`), from the store alone.
+pub fn status_brief(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
+    both_selectors(sel)?;
+    let (list, local, left) = summaries(ctx, sel, true)?;
+    for s in &list {
+        print_notes(&s["id"], s);
+    }
+    let mut data = if sel.all {
+        json!({ "sessions": list })
+    } else {
+        let one = list.into_iter().next().ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
+        if let Some(s) = sid(&one["id"]) {
+            hint(s);
+        }
+        one
+    };
+    // Like `ls` and `status`: every removed session's leftovers, whatever
+    // the selector.
+    add_leftovers(&mut data, left);
+    if local && let Some(m) = data.as_object_mut() {
+        m.insert("source".into(), json!("local"));
+    }
+    Ok(Envelope::ok(data))
+}
+
+/// `ls --table` on success: `ID TICKET STATE REPOS CREATED`, one row per
+/// session. Returns the exit code.
+pub fn emit_table(env: &Envelope) -> i32 {
+    use std::io::Write;
+    let text = table_of(&env.data);
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    let r = lock.write_all(text.as_bytes()).and_then(|()| lock.flush());
+    if let Err(e) = &r {
+        let _ = writeln!(std::io::stderr(), "git-strata: stdout_write_failed: {e}");
+    }
+    if env.data["source"] == "local" {
+        eprintln!("note: read from the store directly (no daemon answering summary)");
+    }
+    env.exit_code(&r)
+}
+
+/// The `ls --table` text for `ls`'s `data`.
+pub fn table_of(data: &Value) -> String {
+    let head = ["ID", "TICKET", "STATE", "REPOS", "CREATED"];
+    let mut rows: Vec<[String; 5]> = vec![head.map(str::to_string)];
+    for s in data["sessions"].as_array().into_iter().flatten() {
+        let text = |v: &Value| v.as_str().map(str::to_string).unwrap_or_else(|| "-".into());
+        let repos: Vec<&str> = s["repos"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        rows.push([
+            text(&s["id"]),
+            text(&s["ticket"]),
+            text(&s["state"]),
+            if repos.is_empty() { "-".into() } else { repos.join(",") },
+            text(&s["created"]),
+        ]);
+    }
+    let mut width = [0usize; 5];
+    for r in &rows {
+        for (w, c) in width.iter_mut().zip(r) {
+            *w = (*w).max(c.chars().count());
+        }
+    }
+    let mut out = String::new();
+    for r in &rows {
+        let mut line = String::new();
+        for (i, c) in r.iter().enumerate() {
+            if i + 1 == r.len() {
+                line.push_str(c);
+            } else {
+                line.push_str(c);
+                line.push_str(&" ".repeat(width[i] - c.chars().count() + 2));
+            }
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    // R2/R3: the notes under the table, one line each.
+    for s in data["sessions"].as_array().into_iter().flatten() {
+        for n in s["notes"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            out.push_str(&format!("note: {}: {n}\n", s["id"].as_str().unwrap_or("?")));
+        }
+    }
+    out
+}
+
 /// §5.1: the daemon is down; `Sessions::open` over the reader store.
-fn local_status(ctx: &Ctx, sel: &Select) -> Result<Vec<Value>> {
+/// Returns the statuses and the removed-session leftovers (R3).
+fn local_status(ctx: &Ctx, sel: &Select) -> Result<(Vec<Value>, Vec<Value>)> {
     let local = Local::open(ctx.config()?)?;
     let sessions = local.sessions()?;
+    // status-perf A1, D10: no old-tree walks without the daemon; old trees
+    // report `unchecked`.
+    sessions.set_old_tree_mode(strata_session::OldTreeMode::Deferred);
     let ids: Vec<SessionId> = if sel.all {
         ro::live(&local.store)?.into_iter().map(|r| r.manifest.id).collect()
     } else {
-        vec![ro::session_or_cwd(&local.store, sel.session.as_deref())?.0]
+        let root = &local.config.paths.root;
+        vec![
+            ro::session_or_cwd(&local.store, sel.session.as_deref())
+                .map_err(|e| match sel.session.as_deref() {
+                    Some(s) => strata_session::with_leftover_detail(&local.store, root, s, e),
+                    None => e,
+                })?
+                .0,
+        ]
     };
     let mut out = Vec::new();
-    for id in ids {
-        let st = sessions.status(&id)?;
+    for st in sessions.status_many(&ids) {
+        let st = st?;
         out.push(serde_json::to_value(st).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?);
     }
-    Ok(out)
+    let left = strata_session::removed_leftovers(&local.store, &local.config.paths.root)?;
+    let left = serde_json::to_value(left).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
+    Ok((out, left.as_array().cloned().unwrap_or_default()))
 }
 
 // ---- checkpoint -------------------------------------------------------------
@@ -798,8 +1069,19 @@ pub fn deps_list(ctx: &Ctx, repo: Option<String>) -> Result<Envelope> {
 
 // ---- gc -------------------------------------------------------------------------------
 
-pub fn gc(ctx: &Ctx) -> Result<Envelope> {
-    let v = ctx.call("gc", json!({ "repo": null }), Kind::Write)?;
+pub fn gc(ctx: &Ctx, store: bool, dry_run: bool) -> Result<Envelope> {
+    if dry_run {
+        let v = ctx.call("gc", json!({ "repo": null, "store": true, "dry_run": true }), Kind::Write)?;
+        return Ok(Envelope::ok(json!({ "dry_run": true, "preview": v["preview"] })));
+    }
+    let v = ctx.call("gc", json!({ "repo": null, "store": store }), Kind::Write)?;
+    // rm-followups R1: an older daemon has neither key; nothing is printed.
+    for o in v["orphans"].as_array().into_iter().flatten() {
+        eprintln!("gc orphan retired: {} -> {}", o["path"].as_str().unwrap_or("?"), o["trash"].as_str().unwrap_or("?"));
+    }
+    for w in v["orphan_warnings"].as_array().into_iter().flatten() {
+        eprintln!("gc orphan skipped: {}", w["message"].as_str().map(str::to_string).unwrap_or_else(|| w.to_string()));
+    }
     for s in v["skipped"].as_array().into_iter().flatten() {
         eprintln!("gc skipped: {s}");
     }
@@ -812,6 +1094,19 @@ pub fn gc(ctx: &Ctx) -> Result<Envelope> {
         for p in t["stuck"].as_array().into_iter().flatten() {
             eprintln!("gc trash stuck: {p}");
         }
+    }
+    let s = &v["store"];
+    if s.is_object() {
+        for p in s["trash_refused"].as_array().into_iter().flatten() {
+            eprintln!("gc trash refused (still referenced): {p}");
+        }
+        for p in s["stuck"].as_array().into_iter().flatten() {
+            eprintln!("gc stuck: {p}");
+        }
+        for b in s["corrupt"].as_array().into_iter().flatten() {
+            eprintln!("gc scrub: corrupt blob {b} (kept; tell the human)");
+        }
+        return Ok(Envelope::ok(json!({ "store": s })));
     }
     Ok(Envelope::ok(json!({})))
 }
@@ -851,6 +1146,14 @@ pub fn daemon_status() -> Result<Envelope> {
             data["unknown_publishes"] = json!(unknown);
             warnings.iter().for_each(alert);
             data["alerts"] = json!(warnings);
+            // The daemon's descriptor count (open, soft limit, ...), as is.
+            if let Some(f) = v.get("fds") {
+                data["fds"] = f.clone();
+            }
+            // Optional request features (absent from older daemons).
+            if let Some(f) = v.get("features") {
+                data["features"] = f.clone();
+            }
         }
         Err(CallError::Down(_)) => {}
         Err(CallError::Failed(e)) => return Err(e),

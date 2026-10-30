@@ -15,7 +15,7 @@ use serde_json::json;
 use strata_apfs::{RemoveKind, RenameMode};
 use strata_types::{Code, StrataError};
 
-use crate::command::{Opts, QUERY_TIMEOUT, failed, flag};
+use crate::command::{INIT_TIMEOUT, Opts, QUERY_TIMEOUT, failed, flag};
 use crate::err::{as_unknown, errd, path_str};
 use crate::{Git, Result, config, fsx};
 
@@ -346,7 +346,7 @@ impl Git {
             "--object-format=sha1",
         ]);
         cmd.arg(dir);
-        let out = self.run(cmd, Opts::default().timeout(QUERY_TIMEOUT))?;
+        let out = self.run(cmd, Opts::default().timeout(INIT_TIMEOUT))?;
         if !out.ok() {
             return Err(failed("init", &out));
         }
