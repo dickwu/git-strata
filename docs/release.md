@@ -1,6 +1,6 @@
 # Releasing git-strata
 
-Releases are built by `.github/workflows/release.yml` on a `macos-14` (Apple
+Releases are built by `.github/workflows/release.yml` on a `macos-15` (Apple
 silicon) runner and installed with Homebrew from the existing tap
 [dickwu/homebrew-tap](https://github.com/dickwu/homebrew-tap):
 
