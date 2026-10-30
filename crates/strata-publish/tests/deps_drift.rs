@@ -552,7 +552,9 @@ fn cold_install_holds_no_publish_lock() {
         wait("a's cold install", &|| started.exists());
         // a's install is stuck: it holds no queue place and no repo lock.
         assert!(fx.queues.held_now().is_empty(), "queue held during the cold install: {:?}", fx.queues.held_now());
-        assert!(fx.lock.holds().iter().all(|h| h.end.is_some()), "repo lock held during the cold install");
+        let holds = fx.lock.holds();
+        assert!(!holds.is_empty(), "a's R1 took the repo lock");
+        assert!(holds.iter().all(|h| h.end.is_some()), "repo lock held during the cold install");
         // c publishes through the queue and the repo lock.
         let pc = run(&fx, &gc);
         let flag = b_waits.clone();
@@ -566,8 +568,14 @@ fn cold_install_holds_no_publish_lock() {
         // b's R1 closes `Drift` too; it then needs the same set and finds
         // a's build lock held.
         wait("b on a's build lock", &|| b_waits.load(Ordering::SeqCst) || hb.is_finished());
-        assert!(b_waits.load(Ordering::SeqCst), "b finished without waiting on the build lock");
+        if !b_waits.load(Ordering::SeqCst) {
+            let r = hb.join().unwrap();
+            panic!("b finished without waiting on the build lock: {:?}", r.err());
+        }
         assert!(!ha.is_finished(), "a is still installing");
+        // b waits on the build lock holding no queue place and no repo lock.
+        assert!(fx.queues.held_now().is_empty(), "queue held while b waits: {:?}", fx.queues.held_now());
+        assert!(fx.lock.holds().iter().all(|h| h.end.is_some()), "repo lock held while b waits");
         fs::write(&go, b"").unwrap();
         (ha.join().unwrap(), hb.join().unwrap(), pc)
     });
@@ -668,12 +676,16 @@ fn assert_selection(p: &Published) -> String {
     assert_eq!(w.detail["cause"], "selection", "{:?}", w.detail);
     assert!(w.detail.get("fix").is_none(), "{:?}", w.detail);
     assert!(w.detail.get("action").is_none(), "{:?}", w.detail);
+    let paths = w.detail["paths"].as_array().expect("paths is an array");
+    assert!(paths.iter().all(|v| v.is_string()), "every path is a plain string, no per-path action: {:?}", w.detail);
     let hint = w.detail["hint"].as_str().unwrap().to_string();
     assert!(hint.contains("differ from the session workspace"), "{hint}");
     hint
 }
 
 /// r5 6(a): an old checkpoint's lock vs a later workspace lock → `selection`.
+/// The r5 "switch" step is left out on purpose: `diagnose` never reads the
+/// pin, only S/B/W/A, so the switch does not change the outcome.
 #[test]
 fn old_checkpoint_lock_against_a_newer_workspace_lock_is_selection() {
     let fx = fx();
