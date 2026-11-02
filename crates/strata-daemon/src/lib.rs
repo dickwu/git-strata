@@ -179,6 +179,7 @@ pub enum DaemonWarning {
     StorePoisoned,
     VerifyFailed { message: String },
     AnchorNotAdvanced { repo: RepoName },
+    FetchFailed { repo: RepoName },
     /// Review M6: a standalone (or restore) push whose outcome is unknown;
     /// its staging directory `scene` (with `push.json`) is kept.
     UnknownPush { repo: RepoName, commit: strata_types::CommitOid, scene: PathBuf },
@@ -203,3 +204,6 @@ pub enum ChainChoice {
     AcceptOriginDrop,
     Restore,
 }
+
+pub mod main_sync;
+pub mod periodic_fetch;

@@ -830,6 +830,9 @@ pub fn publish_bound(
         Ok(())
     })();
 
+    if let Err(e) = crate::main_follow::reconcile(ctx) {
+        warnings.push(PublishWarning { kind: WarningKind::ObserveFailed, detail: err_json(&e) });
+    }
     // Step 9.
     let mut o = outcome_base(ctx);
     o["commit"] = json!(landed.commit.as_str());

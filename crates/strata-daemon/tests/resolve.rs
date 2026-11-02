@@ -21,6 +21,20 @@ use strata_session::{MoveResolution, ResolutionReport};
 use strata_types::{Code, CommitOid, SessionId, StrataError};
 use support::*;
 
+// These tests count one explicit request's Git writes and confirmation
+// bindings. Background follow/fetch behavior is exercised in main_sync.rs.
+fn request_fx() -> Dfx { request_fx_with(&["tool"]) }
+fn request_fx_with(names: &[&str]) -> Dfx {
+    let mut fx = Dfx::with(names);
+    for cfg in fx.config.repos.values_mut() {
+        cfg.sync.fetch_secs = 0;
+        cfg.sync.follow_main = Some(false);
+        cfg.sync.deps = strata_types::SyncDeps::Confirm;
+    }
+    fx.write_config();
+    fx
+}
+
 fn serving<R>(d: &Daemon<'_>, f: impl FnOnce() -> R) -> R {
     let listener = startup::bind(&d.core.opts.socket).unwrap();
     let ext = AtomicBool::new(false);
@@ -223,7 +237,7 @@ fn resolve_move_exclusive_choice() {
     assert_eq!(resolve::move_choice(true, true), None);
     assert_eq!(resolve::move_choice(false, false), None);
 
-    let fx = Dfx::new();
+    let fx = request_fx();
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
     let sock = fx.socket();
@@ -246,7 +260,7 @@ fn resolve_move_exclusive_choice() {
 
 #[test]
 fn resolve_move_skips_tty_and_confirm() {
-    let mut fx = Dfx::new();
+    let mut fx = request_fx();
     set_confirm(&mut fx);
     // No scripted verdict: any prompt would fail the call.
     let (c, log, _) = fx.confirmer(vec![]);
@@ -274,7 +288,7 @@ fn resolve_move_skips_tty_and_confirm() {
 
 #[test]
 fn resolve_move_queues_and_does_not_hold_repo_lock() {
-    let fx = Dfx::new();
+    let fx = request_fx();
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
     let sock = fx.socket();
@@ -347,7 +361,7 @@ fn resolve_move_queues_and_does_not_hold_repo_lock() {
 fn chain_resolve_accept_origin_does_not_push() {
     // Drop: chain and anchor both to o, one transaction, no push.
     {
-        let fx = Dfx::new();
+        let fx = request_fx();
         let ch = Chain::new(&fx);
         let o = ch.advance_origin(&fx, &[("o.txt", b"o\n")]);
         let core = fx.prepare().unwrap();
@@ -362,7 +376,7 @@ fn chain_resolve_accept_origin_does_not_push() {
     }
     // Replay: the range is the advanced a..c, not the old anchor's.
     {
-        let fx = Dfx::new();
+        let fx = request_fx();
         let ch = Chain::new(&fx);
         // The anchor lags at P; merge_base(o, c) = A is past it.
         fx.sb.git(&ch.main, &["update-ref", ANCHOR, &ch.p]);
@@ -388,7 +402,7 @@ fn chain_resolve_accept_origin_does_not_push() {
     }
     // Replay conflict: before any transaction, refs byte-identical.
     {
-        let fx = Dfx::new();
+        let fx = request_fx();
         let ch = Chain::new(&fx);
         let c2 = fx.sb.commit(&ch.main, &[("a.txt", b"chain\n")], "C2");
         fx.sb.git(&ch.main, &["reset", "-q", "--hard", &ch.a]);
@@ -405,7 +419,7 @@ fn chain_resolve_accept_origin_does_not_push() {
     }
     // Rewound without an anchor: no replay range, nothing written.
     {
-        let fx = Dfx::new();
+        let fx = request_fx();
         let ch = Chain::new(&fx);
         fx.sb.git(&ch.main, &["update-ref", "-d", ANCHOR]);
         let core = fx.prepare().unwrap();
@@ -422,7 +436,7 @@ fn chain_resolve_accept_origin_does_not_push() {
 fn chain_resolve_restore_pushes_only_fast_forward() {
     // Rewound to P: C is a fast-forward of origin.
     {
-        let fx = Dfx::new();
+        let fx = request_fx();
         let ch = Chain::new(&fx);
         ch.rewind_origin(&fx, &ch.p);
         let core = fx.prepare().unwrap();
@@ -440,7 +454,7 @@ fn chain_resolve_restore_pushes_only_fast_forward() {
     }
     // Rewound to an unrelated Q, and Diverged: not a fast-forward.
     for diverge in [false, true] {
-        let fx = Dfx::new();
+        let fx = request_fx();
         let ch = Chain::new(&fx);
         let o = if diverge { ch.advance_origin(&fx, &[("o.txt", b"o\n")]) } else { ch.rewind_to_unrelated(&fx) };
         let core = fx.prepare().unwrap();
@@ -467,7 +481,7 @@ fn chain_resolve_restore_pushes_only_fast_forward() {
 /// or without `repo_id` / `push_url` (written before R4) stays.
 #[test]
 fn chain_resolve_restore_settles_only_matching_push_scenes() {
-    let fx = Dfx::new();
+    let fx = request_fx();
     let ch = Chain::new(&fx);
     ch.rewind_origin(&fx, &ch.p);
     let tool = fx.config.repos[&repo_name("tool")].path.clone();
@@ -513,7 +527,7 @@ fn chain_resolve_restore_settles_only_matching_push_scenes() {
 /// scene for A settles — it is true that A has the commit.
 #[test]
 fn chain_resolve_restore_pushes_to_the_recorded_url_across_a_b_a() {
-    let fx = Dfx::new();
+    let fx = request_fx();
     let ch = Chain::new(&fx);
     ch.rewind_origin(&fx, &ch.p);
     let tool = fx.config.repos[&repo_name("tool")].path.clone();
@@ -570,7 +584,7 @@ fn chain_resolve_restore_pushes_to_the_recorded_url_across_a_b_a() {
 /// settles nothing: the kept scene for A stays.
 #[test]
 fn chain_resolve_restore_is_pinned_against_url_rewriting() {
-    let fx = Dfx::new();
+    let fx = request_fx();
     let ch = Chain::new(&fx);
     ch.rewind_origin(&fx, &ch.p);
     let tool = fx.config.repos[&repo_name("tool")].path.clone();
@@ -617,7 +631,7 @@ fn chain_resolve_restore_is_pinned_against_url_rewriting() {
 /// kept scene for A stays.
 #[test]
 fn chain_resolve_restore_rule_added_between_check_and_push_is_refused() {
-    let fx = Dfx::new();
+    let fx = request_fx();
     let ch = Chain::new(&fx);
     ch.rewind_origin(&fx, &ch.p);
     let tool = fx.config.repos[&repo_name("tool")].path.clone();
@@ -667,7 +681,7 @@ fn chain_resolve_restore_rule_added_between_check_and_push_is_refused() {
 /// with the anchor advanced alone.
 #[test]
 fn chain_resolve_restore_records_tracking_and_anchor_together() {
-    let fx = Dfx::new();
+    let fx = request_fx();
     let ch = Chain::new(&fx);
     ch.rewind_origin(&fx, &ch.p);
     let core = fx.prepare().unwrap();
@@ -698,7 +712,7 @@ fn chain_resolve_restore_records_tracking_and_anchor_together() {
 fn chain_resolve_restore_checks_push_deploy() {
     // Refused at the prompt: no fetch, no push, refs unchanged.
     {
-        let mut fx = Dfx::new();
+        let mut fx = request_fx();
         set_confirm(&mut fx);
         let ch = Chain::new(&fx);
         ch.rewind_origin(&fx, &ch.p);
@@ -717,7 +731,7 @@ fn chain_resolve_restore_checks_push_deploy() {
     }
     // Approved: one prompt, one push.
     {
-        let mut fx = Dfx::new();
+        let mut fx = request_fx();
         set_confirm(&mut fx);
         let ch = Chain::new(&fx);
         ch.rewind_origin(&fx, &ch.p);
@@ -732,7 +746,7 @@ fn chain_resolve_restore_checks_push_deploy() {
     }
     // Accepting origin never prompts, even when confirm is pinned.
     for choice in [ChainChoice::AcceptOriginDrop, ChainChoice::AcceptOriginReplay] {
-        let mut fx = Dfx::new();
+        let mut fx = request_fx();
         set_confirm(&mut fx);
         let ch = Chain::new(&fx);
         ch.advance_origin(&fx, &[("o.txt", b"o\n")]);
@@ -751,7 +765,7 @@ fn chain_resolve_restore_checks_push_deploy() {
 fn chain_resolve_refs_under_repo_lock() {
     // Not a fork before the lock: refused with no fetch and no write.
     {
-        let fx = Dfx::new();
+        let fx = request_fx();
         let ch = Chain::new(&fx); // chain leads origin
         let core = fx.prepare().unwrap();
         sync(&core);
@@ -766,7 +780,7 @@ fn chain_resolve_refs_under_repo_lock() {
     // A fork that the fetch inside the lock shows healed: classified again
     // under the lock, refused before any compare-and-swap.
     {
-        let fx = Dfx::new();
+        let fx = request_fx();
         let ch = Chain::new(&fx);
         ch.rewind_origin(&fx, &ch.p);
         let core = fx.prepare().unwrap();
@@ -780,7 +794,7 @@ fn chain_resolve_refs_under_repo_lock() {
     }
     // The repo lock held elsewhere: Busy, and nothing ran outside it.
     {
-        let fx = Dfx::new();
+        let fx = request_fx();
         let ch = Chain::new(&fx);
         ch.advance_origin(&fx, &[("o.txt", b"o\n")]);
         let core = fx.prepare().unwrap();
@@ -813,7 +827,7 @@ fn chain_resolve_refs_under_repo_lock() {
     }
     // Through the socket: the same handler, refs under the lock.
     {
-        let fx = Dfx::new();
+        let fx = request_fx();
         let ch = Chain::new(&fx);
         let o = ch.advance_origin(&fx, &[("o.txt", b"o\n")]);
         let core = fx.prepare().unwrap();
@@ -854,7 +868,7 @@ fn publish_calls_publish_not_stage() {
 fn confirmed_push_is_bound_to_the_shown_chain_top() {
     // chain_resolve Restore.
     {
-        let mut fx = Dfx::new();
+        let mut fx = request_fx();
         set_confirm(&mut fx);
         let ch = Chain::new(&fx);
         ch.rewind_origin(&fx, &ch.p);
@@ -878,7 +892,7 @@ fn confirmed_push_is_bound_to_the_shown_chain_top() {
     }
     // push over the socket.
     {
-        let mut fx = Dfx::new();
+        let mut fx = request_fx();
         set_confirm(&mut fx);
         let ch = Chain::new(&fx);
         let c2 = advance_chain(&fx, &ch);
@@ -936,7 +950,7 @@ fn unredirect(root: &Path, fx: &Dfx, main: &Path) {
 fn confirmed_push_is_bound_to_the_approved_url() {
     // chain_resolve Restore.
     {
-        let mut fx = Dfx::new();
+        let mut fx = request_fx();
         set_confirm(&mut fx);
         let ch = Chain::new(&fx);
         ch.rewind_origin(&fx, &ch.p);
@@ -964,7 +978,7 @@ fn confirmed_push_is_bound_to_the_approved_url() {
     }
     // push over the socket.
     {
-        let mut fx = Dfx::new();
+        let mut fx = request_fx();
         set_confirm(&mut fx);
         let ch = Chain::new(&fx);
         let elsewhere = fx.sb.root.join("elsewhere.git");
@@ -1019,7 +1033,7 @@ fn no_force(k: &Calls) {
 /// that sat on C onto its copy.
 #[test]
 fn headless_push_replays_a_diverged_chain_then_pushes() {
-    let mut fx = Dfx::new();
+    let mut fx = request_fx();
     {
         let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
         rc.checks = vec!["test -f o.txt".into(), "test -d node_modules".into()];
@@ -1076,7 +1090,7 @@ fn headless_push_replays_a_diverged_chain_then_pushes() {
 fn headless_push_conflict_or_failed_check_writes_and_pushes_nothing() {
     // Conflict.
     {
-        let fx = Dfx::new();
+        let fx = request_fx();
         let ch = Chain::new(&fx);
         let c2 = fx.sb.commit(&ch.main, &[("a.txt", b"chain\n")], "C2");
         fx.sb.git(&ch.main, &["reset", "-q", "--hard", &ch.a]);
@@ -1106,7 +1120,7 @@ fn headless_push_conflict_or_failed_check_writes_and_pushes_nothing() {
     }
     // A failing check.
     {
-        let mut fx = Dfx::new();
+        let mut fx = request_fx();
         fx.config.repos.get_mut(&repo_name("tool")).unwrap().checks = vec!["false".into()];
         fx.write_config();
         let ch = Chain::new(&fx);
@@ -1136,7 +1150,7 @@ fn headless_push_conflict_or_failed_check_writes_and_pushes_nothing() {
     }
     // Rewound.
     {
-        let fx = Dfx::new();
+        let fx = request_fx();
         let ch = Chain::new(&fx);
         let q = ch.rewind_to_unrelated(&fx);
         let core = fx.prepare().unwrap();
@@ -1163,7 +1177,7 @@ fn headless_push_conflict_or_failed_check_writes_and_pushes_nothing() {
 /// Diverged chain is still not replayed (`NoCommit`, the human's `chain`).
 #[test]
 fn confirmed_repo_push_never_replays() {
-    let mut fx = Dfx::new();
+    let mut fx = request_fx();
     set_confirm(&mut fx);
     let ch = Chain::new(&fx);
     let o = ch.advance_origin(&fx, &[("o.txt", b"o\n")]);
@@ -1196,7 +1210,7 @@ fn confirmed_repo_push_never_replays() {
 /// the scene (sibling included) is gone afterwards.
 #[test]
 fn headless_replay_supplies_the_check_siblings() {
-    let mut fx = Dfx::with(&["tool", "admin"]);
+    let mut fx = request_fx_with(&["tool", "admin"]);
     {
         let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
         rc.checks = vec!["test -f o.txt".into(), "test -f ../admin/package.json".into()];
@@ -1227,7 +1241,7 @@ fn headless_replay_supplies_the_check_siblings() {
 /// pushed. A push that needs no replay is not refused for it.
 #[test]
 fn headless_replay_with_a_missing_sibling_is_siblings_missing() {
-    let mut fx = Dfx::with(&["tool", "admin"]);
+    let mut fx = request_fx_with(&["tool", "admin"]);
     {
         let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
         rc.checks = vec!["true".into()];
@@ -1271,7 +1285,7 @@ fn headless_replay_with_a_missing_sibling_is_siblings_missing() {
 /// pushed though admin cannot be supplied.
 #[test]
 fn a_leads_push_is_not_refused_for_a_missing_sibling() {
-    let mut fx = Dfx::with(&["tool", "admin"]);
+    let mut fx = request_fx_with(&["tool", "admin"]);
     {
         let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
         rc.checks = vec!["true".into()];
@@ -1300,7 +1314,7 @@ fn a_leads_push_is_not_refused_for_a_missing_sibling() {
 /// the cause is gone the same push goes through.
 #[test]
 fn a_busy_or_unknown_sibling_prep_stops_even_a_leads_push() {
-    let mut fx = Dfx::with(&["tool", "admin"]);
+    let mut fx = request_fx_with(&["tool", "admin"]);
     {
         let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
         rc.checks = vec!["true".into()];

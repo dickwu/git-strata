@@ -162,6 +162,12 @@ fn prepare_one(ctx: &Ctx, s: &RepoName, warnings: &mut Vec<PublishWarning>) -> s
         detail["repo"] = json!(s.as_str());
         warnings.push(PublishWarning { kind: WarningKind::ObserveFailed, detail });
     }
+    let mut effective = cfg.clone();
+    effective.sync.deps = ctx.locks.sync_deps(s, cfg.sync.deps);
+    let follow = strata_deps::Ctx { cfg: &effective, ..dctx };
+    if let Err(e) = crate::main_follow::reconcile_deps(&follow) {
+        tracing::warn!(repo=%s, error=%e.message, "check sibling: main-follow failed");
+    }
     Ok(g)
 }
 

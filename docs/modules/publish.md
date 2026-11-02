@@ -831,3 +831,39 @@ git commit -m "feat(publish): one merge under the repo lock"
 `MovePolicy::Agent` is reserved for the sync implementation. In this foundation
 it is normalized to Auto before rebase gates, preserving Auto's existing safety
 behavior. The sync part supplies the Agent-specific move entry point and gates.
+
+### Main-sync: T4 reconcile and C3 dependency moves
+
+`main_follow` runs after new/add, publish's group rebase, standalone push,
+chain resolution and check-sibling fetches, and after reconstruction in every
+T2 pass. Split-branch repos are excluded. Only Active, tracked, healthy
+workspaces without an unresolved scene or open move intent are enrolled.
+A behind workspace gets a `source=main` target; an ahead or diverged workspace
+is left alone. A resolved move's retained scene JSON is audit history only
+when its latest intent is Done, Abandoned or Refused.
+
+Committed main/publish targets advance only to strict descendants; unfinished
+or unpushed publish targets stay put. Retargeting refreshes `from_tree` and
+`from_deps`, clears `to_deps`, and preserves open-files/recent-writes/conflicts
+backoff. Keys are shared per immutable tree within each pass and recomputed
+with the current toolchain/install identity on the next pass. Exports and keys
+are prepared outside the repo lock; the locked reconcile rechecks the tip and
+uses `observe_main_locked`. No locked helper acquires the repo lock again.
+
+In an effective `sync.deps=apply` repo, T4 also enrolls `(main tree, old deps)`
+residue with `to_deps=key(tree)`, even after a proposal settled or an earlier
+observation failed. Changed identities get a new owning Pending proposal.
+OwnChange/Drift and terminal unsealed installs have no deps-only row. An
+unsealed deps-only target records its proposal and defers with `installing` or
+`waiting_install` and normal backoff; it never takes C2 or reports a no-op move.
+`already_based` drops it only once its dependency target is met.
+
+C3 precedes C2: Auto + apply + a sealed target + the rollout classifier's
+OwnChange/Drift checks moves the full `(tree, new deps)` through G0–G4.
+`base_for` builds that actual target before the gates, with T2's no-wait lock
+behavior; no temporary `(tree, old deps)` base is built to discover the key.
+Draft promotion/proposal bookkeeping remains intact. Unsealed source targets
+keep C2/wait behavior; apply-mode Auto does not prewarm on the T2 thread.
+After C3 and each T2 pass, a Pending proposal settles through `auto_applied`
+only when no non-Removed tracked workspace differs, including Unknown and
+Creating sessions. `confirm` keeps the existing human dependency rollout.

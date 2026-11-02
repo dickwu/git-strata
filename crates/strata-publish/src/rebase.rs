@@ -237,19 +237,33 @@ fn g0_state(ctx: &Ctx, s: &SessionId, old: &BaseGen) -> Result<Option<RebaseRepo
         Some(r) if r.lifecycle != Lifecycle::Removed => r,
         _ => return Err(no_such_session(s)),
     };
-    let ws_scene = rec.workspaces.get(ctx.repo).and_then(|w| w.scene.clone());
-    let open_intent = ctx
-        .store
-        .move_intents(s)?
-        .iter()
-        .any(|i| i.repo == *ctx.repo && matches!(i.state, strata_store::MoveState::Preparing | strata_store::MoveState::Swapping));
+    let ws_scene = crate::main_follow::workspace_has_scene(
+        ctx.store,
+        s,
+        ctx.repo,
+        rec.workspaces
+            .get(ctx.repo)
+            .is_some_and(|w| w.scene.is_some()),
+    )?;
+    let open_intent = ctx.store.move_intents(s)?.iter().any(|i| {
+        i.repo == *ctx.repo
+            && matches!(
+                i.state,
+                strata_store::MoveState::Preparing | strata_store::MoveState::Swapping
+            )
+    });
     let base = rec.manifest.repos.get(ctx.repo).map(|w| w.base.clone());
-    if rec.lifecycle != Lifecycle::Active || rec.scene.is_some() || ws_scene.is_some() || open_intent || base.as_ref() != Some(old) {
+    if rec.lifecycle != Lifecycle::Active
+        || rec.scene.is_some()
+        || ws_scene
+        || open_intent
+        || base.as_ref() != Some(old)
+    {
         return Ok(Some(deferred(
             "state",
             json!({
                 "lifecycle": format!("{:?}", rec.lifecycle),
-                "scene": rec.scene.is_some() || ws_scene.is_some(),
+                "scene": rec.scene.is_some() || ws_scene,
                 "open_move": open_intent,
                 "base_changed": base.as_ref() != Some(old),
             }),
@@ -324,7 +338,11 @@ pub(crate) fn rebase_one_with(
     at: Attempt<'_>,
 ) -> Result<RebaseReport> {
     // main-sync sync part TODO: implement Agent gates; until then retain Auto safety.
-    let policy = if policy == MovePolicy::Agent { MovePolicy::Auto } else { policy };
+    let policy = if policy == MovePolicy::Agent {
+        MovePolicy::Auto
+    } else {
+        policy
+    };
     if new_base.repo != *ctx.repo {
         return Err(invalid(
             "repo_mismatch",
@@ -333,28 +351,90 @@ pub(crate) fn rebase_one_with(
         ));
     }
     if ctx.git.tree_of(head)? != new_base.tree {
-        return Err(invalid("tree_mismatch", "the head's tree is not the new base's tree".into(), json!({})));
+        return Err(invalid(
+            "tree_mismatch",
+            "the head's tree is not the new base's tree".into(),
+            json!({}),
+        ));
     }
-    let old = workspace(ctx, s)?.base;
-    // 1. Outside every lock: the new base directory, then its key.
-    let mut target = new_base.clone();
-    if !ctx.store.base_dir(&target).exists() {
-        target = base_for(ctx, &target.tree, &target.deps)?;
+    let ws = workspace(ctx, s)?;
+    let old = ws.base.clone();
+    // Hash only the immutable target inputs first. C3 never builds (tree,
+    // old deps) just to discover that it needs (tree, new deps) (NB10).
+    let export = crate::main_follow::TempTree::export(ctx.deps, &new_base.tree)?;
+    let (n_inputs, n) = deps::key_of(ctx.deps, &export.path())?;
+    let apply = ctx.cfg.sync.deps == strata_types::SyncDeps::Apply;
+    let classified = if policy == MovePolicy::Auto && apply && n != old.deps {
+        deps::classify_rollout(ctx.deps, s, &ws, &n_inputs)?.is_some()
+    } else {
+        false
+    };
+    let sealed = deps::find_set(ctx.store, ctx.repo, &n)?.is_some();
+    let deps_only = at.consume.is_some()
+        && ctx
+            .store
+            .rebase_pending_of(s, ctx.repo)?
+            .is_some_and(|r| Some(r.rev) == at.consume && r.to_deps.is_some() && ws.head == *head);
+    if deps_only && policy == MovePolicy::Auto {
+        if !apply
+            || classified
+            || crate::main_follow::install_failed(ctx.deps, &n)?
+            || n == old.deps
+        {
+            return under_locks(ctx, std::slice::from_ref(s), &mut || {
+                if let Some(check) = at.recheck
+                    && let Some(d) = check(&old)?
+                {
+                    return Ok(d);
+                }
+                if let Some(rev) = at.consume {
+                    ctx.store.drop_pending(s, ctx.repo, rev)?;
+                }
+                Ok(deferred("state", json!({ "deps_only_dropped": true })))
+            });
+        }
+        if !sealed {
+            return under_locks(ctx, std::slice::from_ref(s), &mut || {
+                if let Some(check) = at.recheck
+                    && let Some(d) = check(&old)?
+                {
+                    return Ok(d);
+                }
+                let p = propose_main(ctx, &old, &n, &n_inputs, new_base, head)?;
+                let installing = ctx
+                    .store
+                    .deps_auto(p.id)?
+                    .is_some_and(|a| a.state == strata_store::DepsAutoState::Installing);
+                Ok(RebaseReport::Deferred {
+                    reason: if installing {
+                        "installing"
+                    } else {
+                        "waiting_install"
+                    }
+                    .into(),
+                    detail: json!({ "proposal": p.id }),
+                    proposal: Some(p),
+                })
+            });
+        }
     }
-    let (n_inputs, n) = deps::key_of(ctx.deps, &ctx.store.base_dir(&target))?;
-    // rm-followups §1.3 C2: an `Auto` move whose deps set changed moves the
-    // source only, onto (new tree, OLD sealed set); nothing is installed.
-    let c2 = policy == MovePolicy::Auto && n != old.deps && ctx.cfg.rebase.deps_changed == DepsChanged::MoveSource;
+    let c3 = policy == MovePolicy::Auto && apply && n != old.deps && sealed && !classified;
+    let c2 = policy == MovePolicy::Auto
+        && n != old.deps
+        && !c3
+        && ctx.cfg.rebase.deps_changed == DepsChanged::MoveSource;
     if c2 {
         return move_source(ctx, s, &old, new_base, head, &n, &n_inputs, at);
     }
-    if n == old.deps {
-        if target.deps != n {
-            target = base_for(ctx, &new_base.tree, &n)?;
-        }
-    } else if let Err(e) = deps::ensure(ctx.deps, &ctx.store.base_dir(&target)) {
-        // §5.2 step 8: build the new set here, outside the lock, so the
-        // later rollout is fast. Not needed for the proposal itself.
+    // C3's real base is built outside the locks, before G0-G4. T2's
+    // no-wait base builder maps contention to its ordinary busy deferral.
+    let target_deps = if n == old.deps || c3 { &n } else { &old.deps };
+    let target = base_for(ctx, &new_base.tree, target_deps)?;
+    if n != old.deps
+        && !c3
+        && !(policy == MovePolicy::Auto && apply)
+        && let Err(e) = deps::ensure(ctx.deps, &ctx.store.base_dir(&target))
+    {
         tracing::warn!(repo = %ctx.repo, error = %e.message, "the new base's deps set could not be ensured");
     }
     let new = base_struct(ctx.store, &target)?;
@@ -362,7 +442,25 @@ pub(crate) fn rebase_one_with(
     // the gates outside every lock (another deps set keeps today's path).
     let mut kept: Vec<RepoPath> = Vec::new();
     let mut baseline: Option<strata_store::MoveBaseline> = None;
-    if policy == MovePolicy::Auto && n == old.deps {
+    if c3 {
+        let stopped = under_locks(ctx, std::slice::from_ref(s), &mut || {
+            let ws = workspace(ctx, s)?;
+            if ws.base != old {
+                return Ok(Some(deferred("state", json!({ "base_changed": true }))));
+            }
+            if let Some(check) = at.recheck
+                && let Some(d) = check(&old)?
+            {
+                return Ok(Some(d));
+            }
+            if promote_draft(ctx, s, &ws, &new, &old, &n, &n_inputs, new_base, head)?.is_none() {
+                propose_main(ctx, &old, &n, &n_inputs, new_base, head)?;
+            }
+            Ok(None)
+        })?;
+        if let Some(d) = stopped { return Ok(d); }
+    }
+    if policy == MovePolicy::Auto && (n == old.deps || c3) {
         match auto_gates(ctx, s, &old, &new)? {
             Ok((k, b)) => {
                 kept = k;
@@ -390,29 +488,59 @@ pub(crate) fn rebase_one_with(
         {
             return Ok(d);
         }
+        if c3 && deps::classify_rollout(ctx.deps, s, &ws, &n_inputs)?.is_some() {
+            return Ok(deferred("state", json!({ "deps_inputs_changed": true })));
+        }
         // 2. A draft whose input changes all landed is promoted.
-        let promoted = if n != old.deps { promote_draft(ctx, s, &ws, &new, &old, &n, &n_inputs, new_base, head)? } else { None };
+        let promoted = if n != old.deps {
+            promote_draft(ctx, s, &ws, &new, &old, &n, &n_inputs, new_base, head)?
+        } else {
+            None
+        };
         // 3. Same deps set: move (G0 again under the locks for `Auto`).
-        if n == old.deps {
+        if n == old.deps || c3 {
             if policy == MovePolicy::Auto
                 && let Some(d) = g0_state(ctx, s, &old)?
             {
                 return Ok(d);
             }
             let moved = match &baseline {
-                Some(b) => ctx.sessions.move_workspace_auto(s, &repo_id, target.clone(), head.clone(), at.consume, b),
-                None => ctx.sessions.move_workspace_consuming(s, &repo_id, target.clone(), head.clone(), at.consume),
+                Some(b) => ctx.sessions.move_workspace_auto(
+                    s,
+                    &repo_id,
+                    target.clone(),
+                    head.clone(),
+                    at.consume,
+                    b,
+                ),
+                None => ctx.sessions.move_workspace_consuming(
+                    s,
+                    &repo_id,
+                    target.clone(),
+                    head.clone(),
+                    at.consume,
+                ),
             };
             return match moved {
-                Ok(r) => Ok(RebaseReport::Moved { dropped: r.dropped, lww: r.lww, regenerable_kept: kept.clone(), deps_pending: None }),
+                Ok(r) => {
+                    if c3 {
+                        crate::main_follow::settle_auto(ctx.deps)?;
+                    }
+                    Ok(RebaseReport::Moved {
+                        dropped: r.dropped,
+                        lww: r.lww,
+                        regenerable_kept: kept.clone(),
+                        deps_pending: None,
+                    })
+                }
                 Err(e) if strata_session::auto_deferral(&e).is_some() => Ok(deferred_of(&e)),
                 // §1.7: `OpenFiles` is for `Explicit` callers only.
                 Err(e) if e.code == Code::OpenFiles && policy == MovePolicy::Auto => {
                     Ok(deferred("open_files", e.detail.unwrap_or(Value::Null)))
                 }
-                Err(e) if e.code == Code::OpenFiles => {
-                    Ok(RebaseReport::OpenFiles { detail: e.detail.unwrap_or(Value::Null) })
-                }
+                Err(e) if e.code == Code::OpenFiles => Ok(RebaseReport::OpenFiles {
+                    detail: e.detail.unwrap_or(Value::Null),
+                }),
                 Err(e) => Err(e),
             };
         }

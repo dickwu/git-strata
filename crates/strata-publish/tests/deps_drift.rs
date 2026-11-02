@@ -106,7 +106,10 @@ fn initial_inputs() -> String {
 /// publishes with the installed set, `DepsReinstalled`.
 #[test]
 fn unswitched_inputs_are_installed_and_published() {
-    let fx = fx();
+    let mut fx = fx();
+    // Confirm mode retains the original D1 source-only pin behavior;
+    // apply-mode sealed C3 is covered by main_follow.rs.
+    fx.cfg_mut("tool").sync.deps = strata_types::SyncDeps::Confirm;
     let s = fx.new_session(&["tool"]);
     let pin = fx.base_of(&s, "tool").deps;
     let installs = fx.sb.install_count();

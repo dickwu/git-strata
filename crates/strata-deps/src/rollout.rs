@@ -258,6 +258,49 @@ fn corrupt_pinned(ws: &WorkspaceState) -> StrataError {
     .with_detail(json!({ "repo": ws.base.repo.as_str(), "set": ws.base.deps.as_str() }))
 }
 
+/// The shared OwnChange/Drift classifier for approval and automatic moves.
+/// Inputs matching the target are intentional (including C2 residue), even
+/// when they no longer match the workspace's pinned set. No locks are taken.
+pub fn classify_rollout(
+    ctx: &Ctx,
+    session: &SessionId,
+    ws: &WorkspaceState,
+    to_inputs: &str,
+) -> Result<Option<SkipReason>> {
+    let found = inputs_hash(ctx.cfg, ctx.git, &ws.path)?;
+    let own = ctx
+        .store
+        .proposals(Some(ctx.repo), true)?
+        .into_iter()
+        .map(from_record)
+        .find(|q| {
+            q.state == ProposalState::AwaitingPublish
+                && q.origin
+                    == (ProposalOrigin::Session {
+                        session: session.clone(),
+                    })
+                && q.to_inputs != to_inputs
+        });
+    if let Some(q) = own {
+        let base_inputs = inputs_hash(ctx.cfg, ctx.git, &ctx.store.base_dir(&ws.base))?;
+        if found != base_inputs && found != to_inputs {
+            return Ok(Some(SkipReason::OwnChange { proposal: q.id }));
+        }
+    }
+    let pinned =
+        find_set(ctx.store, &ws.base.repo, &ws.base.deps)?.ok_or_else(|| corrupt_pinned(ws))?;
+    if found != pinned.inputs_hash && found != to_inputs {
+        return Ok(Some(SkipReason::Drift {
+            drift: Drift {
+                pinned: pinned.id,
+                pinned_inputs: pinned.inputs_hash,
+                found_inputs: found,
+            },
+        }));
+    }
+    Ok(None)
+}
+
 /// §5.10 `plan_rollout`: read-only.
 pub fn plan_rollout(
     ctx: &Ctx,
@@ -288,13 +331,6 @@ pub fn plan_rollout(
         deps: p.to.clone(),
     };
     let to_set = find_set(ctx.store, &p.repo, &p.to)?;
-    let drafts: Vec<Proposal> = ctx
-        .store
-        .proposals(Some(&p.repo), true)?
-        .into_iter()
-        .map(from_record)
-        .filter(|q| q.state == ProposalState::AwaitingPublish && q.id != p.id)
-        .collect();
     // 3.
     let moves: Vec<(SessionId, Move)> = sessions
         .iter()
@@ -314,38 +350,11 @@ pub fn plan_rollout(
                 return Err(SkipReason::NotReady);
             };
             let error = |error: StrataError| SkipReason::Error { error };
-            let mut found: Option<String> = None;
-            let own = drafts.iter().find(|q| {
-                q.origin == ProposalOrigin::Session { session: s.clone() }
-                    && q.to_inputs != p.to_inputs
-            });
-            if let Some(q) = own {
-                let f = inputs_hash(ctx.cfg, ctx.git, &ws.path).map_err(error)?;
-                let base_inputs =
-                    inputs_hash(ctx.cfg, ctx.git, &ctx.store.base_dir(&ws.base)).map_err(error)?;
-                if f != base_inputs && f != p.to_inputs {
-                    return Err(SkipReason::OwnChange { proposal: q.id });
-                }
-                found = Some(f);
+            if let Some(reason) = classify_rollout(ctx, s, ws, &p.to_inputs).map_err(error)?{
+                    return Err(reason);
             }
-            let pinned = match find_set(ctx.store, &ws.base.repo, &ws.base.deps) {
-                Ok(Some(set)) => set,
-                Ok(None) => return Err(error(corrupt_pinned(ws))),
-                Err(e) => return Err(error(e)),
-            };
-            let found = match found {
-                Some(f) => f,
-                None => inputs_hash(ctx.cfg, ctx.git, &ws.path).map_err(error)?,
-            };
-            if found != pinned.inputs_hash && found != p.to_inputs {
-                return Err(SkipReason::Drift {
-                    drift: Drift {
-                        pinned: pinned.id.clone(),
-                        pinned_inputs: pinned.inputs_hash.clone(),
-                        found_inputs: found,
-                    },
-                });
-            }
+            let pinned = find_set(ctx.store, &ws.base.repo, &ws.base.deps) .map_err(error)?
+                .ok_or_else(|| error(corrupt_pinned(ws)))?;
             Ok(deps_dirs_of(ctx, ws, &pinned, to_set))
         })();
         match step {
