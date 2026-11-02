@@ -98,7 +98,7 @@ deps 用不到 `remove_rooted`、`remove_tree_rooted` 与 `make_removable`：它
 **对 daemon**（daemon.md 还没写）：实现 `RepoWriteLock`（有界等待之后 `Busy`）并放进 `Ctx`；给出 `InstallEnv`（显式 PATH 与时限）；按 §5.12 的顺序执行 `deps approve` 与 `deps propose`：`Target::Replaced` 时什么都不移动、把替换提议报给人；`deps propose` 的 `propose` 在 repo 写锁里调用。另外六条：
 
 1. approve 与提出者自换在拿 repo 写锁之前，先按 SessionId 升序占住要移动的会话的队列位置，持着 repo 写锁时从不等队列位置（module-rulings "Lock order: session queue before repo lock"）。
-2. approve 得到 `HeadMoved`（reason main_moved）时什么都没移动：观察主干，把取代它的那一条交给人重新确认，从不自动批准（module-rulings "approve refuses a Pending whose head is no longer main's tip"、"A confirmation names the exact plan"）。
+2. approve 得到 `HeadMoved`（reason main_moved）时什么都没移动：观察主干，把取代它的那一条交给人重新确认；`confirm` 模式从不自动批准，`apply` 模式的后台 worker 可准备新的 Pending（module-rulings "approve refuses a Pending whose head is no longer main's tip"、"A confirmation names the exact plan"）。
 3. 任何让 `main_tip` 移动的 fetch 之后调 `observe_main`；一次观察失败了，之后再观察一次（module-rulings "observe_main is best-effort for its callers"）。
 4. status 并入 `attempts` 与 `publish_chain` 的判定：链被回退或分叉时，连同 a..c 上还没推送的发布一起报出。
 5. daemon 执行的 fetch、push（push 返回 `Pushed` 之后 gitio 会移动 origin 的跟踪 ref，gitio.md §4.1）与链、锚点的 ref 事务，都持着该 repo 的写锁（module-rulings "Every update of a ref main_tip reads runs under the repo lock"）。`main_tip` 读的 ref 因此只在锁里动，approve 在锁里对它的核对（§5.10 `plan_rollout` 第 1 步）在这段锁里一直成立。
@@ -265,6 +265,7 @@ pub struct Proposal {
     /// 被替换的依赖集，以及它记录的安装输入哈希。
     pub from: DepsSetId,
     pub from_inputs: String,
+    pub from_head: Option<CommitOid>,
     /// 新的依赖集，以及它的安装输入哈希。提议可以先于这个依赖集封存而存在（§5.9）。
     pub to: DepsSetId,
     pub to_inputs: String,
@@ -310,6 +311,7 @@ pub struct ProposeArgs {
     pub origin: ProposalOrigin,
     pub from: DepsSetId,
     pub from_inputs: String,
+    pub from_head: Option<CommitOid>,
     pub to: DepsSetId,
     pub to_inputs: String,
     /// 两者同为 Some，或同为 None。同为 None 只允许 origin = Session。
@@ -650,7 +652,7 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 | D4 | 依赖集是自包含的。封存的依赖目录里只有目录、属主可读的普通文件，以及相对目标在仓库布局里经词法解析不出仓库根的符号链接（module-rulings T8 I2 裁定）。这样的链接可以在封存目录里悬空，例如 insurance-check 的 `sidecar/node_modules/cloakbrowser → ../vendor/cloakbrowser`，克隆进工作区后指向工作区自己的那份；绝对链接与出仓库根的链接一律不收。所以依赖集克隆到哪个工作区，都不会经符号链接指回主 checkout 或别的会话 | 第 2 条 |
 | D5 | 种子缓存不封存。`nested_seed_caches` 里的路径永远不在封存的依赖集里（design §4："不同步、不 checkpoint、不封存"） | — |
 | D6 | 每个 (repo, id) 同一时刻至多一个建造者（flock）。尝试记录在拿到建造锁、算出 id 之后才写，所以同一 (repo, id) 的别的 running 记录一定属于死掉的建造者。锁的顺序固定为建造锁 → repo 写锁，repo 写锁只包住封存，从不包住 install。拿不到建造锁就等；锁打不开就报错，从不无锁建造。空依赖集没有什么可建，只靠 repo 写锁串行化（§5.6） | 第 5 条 |
-| D7 | deps 产出的移动只有 `RolloutStep::Move`，它带一整个 `BaseGen` 和匹配的 head：基线与依赖一起移动（不变量 8"两者只会一起移动"）。Move 只出现在三处：Pending 提议的 `plan_rollout`（daemon 在人类确认之后调用，tree 与 deps 都取自那条提议）；提出者对 Pending 提议的 `plan_switch`（同上，只是不需要确认）；提出者对 AwaitingPublish 提议的 `plan_switch`（tree 不动、deps 换成 `to`，前提是工作区当前的安装输入哈希等于 `to_inputs`，即改写后的不变量 8 所说"依赖集与工作区当前内容相符"）。依赖目录上有打开的文件就是 Skip | 第 4、8 条 |
+| D7 | deps 产出的移动只有 `RolloutStep::Move`，它带一整个 `BaseGen` 和匹配的 head：基线与依赖一起移动（不变量 8"两者只会一起移动"）。人工批准和提出者自换的 Move 出现在三处（main-sync 的 C3 自动路径见文末补充）：Pending 提议的 `plan_rollout`（daemon 在人类确认之后调用，tree 与 deps 都取自那条提议）；提出者对 Pending 提议的 `plan_switch`（同上，只是不需要确认）；提出者对 AwaitingPublish 提议的 `plan_switch`（tree 不动、deps 换成 `to`，前提是工作区当前的安装输入哈希等于 `to_inputs`，即改写后的不变量 8 所说"依赖集与工作区当前内容相符"）。依赖目录上有打开的文件就是 Skip | 第 4、8 条 |
 | D8 | 失败的冷装不重放。同一依赖集最近一次冷装尝试失败、而且暂存还在时，deps 不再跑 install，直接返回 `Unknown`（reason previous_attempt）。唯一的例外是持有者死掉、被关成 failed（reason interrupted）的尝试：下一个建造者重来一次；连续两次 interrupted 也拒绝。status 经 `attempts` 报出现场 | 第 6 条 |
 | D9 | 对主 checkout 只读。认领只从它往外克隆，只遍历和读安装输入；从不写它的工作树、索引或 refs | 第 2 条 |
 | D10 | 提议的状态只前进（§4.5）；目标设定之后不改，`to` 从不改写：批准时封存出别的 id，就登记替换提议（§5.10）；落地时草稿的键变了，也是登记一条新草稿取代它（§4.5）；主干在依赖集不变时移动了，同样登记一条只换目标的 Pending 取代它（§5.9）；deps 不删记录 | 第 4 条：approve 移到的就是登记时、人看到的那个目标 |
@@ -790,6 +792,18 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 - publish 用同一个比较（deps-drift §2.2）：对 staged 工作树算 `input_records` + `hash_records`，与布局会话所钉集合的 `inputs_hash` 比；不等时替换已 sealed 的集合或冷装，只警告。status 的 drift 带 `fix`（`git-strata deps propose --session <S> --repo <R> --switch`）与 `note`（publish 会自己用对应的集合跑检查，但工作区仍是旧的）。
 
 ### 5.9 `propose(ctx, args)`、`publish_chain(git, branch)`、`main_tip(cfg, git)` 与 `observe_main(ctx, tree, head, export)`
+
+Main-sync v4 adds optional `from_head` to `Proposal`, `ProposeArgs`, and the store
+records. When observing a new dependency target, it is the head of the `deps_main`
+row being replaced. A same-`to`, target-only copy preserves the original value,
+as does an install-identity replacement. Legacy rows have None (omitted in JSON).
+
+`observe_main_locked(ctx, tree, head, inputs_hash, set_id)` is the caller-held-lock
+entry point. Prepare the export and `key_of` result before taking the repo write
+lock, then recheck the tip under that lock. The wrapper never takes the lock and
+preserves `main_not_recorded` error handling. The original `observe_main` remains
+the self-locking convenience API.
+
 
 提议与主干记录的每一次写都在该 repo 的写锁里，锁里后写者胜（module-rulings "deps follows main's current tip"，修订了 Addendum 3/4"Locks"）。`observe_main` 与 `ensure_target` 的登记自己经 `ctx.locks` 取锁；`propose` 由调用方持锁调用：daemon 的 `deps propose`、publish 的 `rebase_session`（§5.12），以及在锁里调它的 `observe_main`。裁定只要求带目标的写在锁里；草稿与替换提议也放进锁里是本文的选择 [我的决定]：落地那一支要连写两次（下面"会话的改动已落地"），会话自己的草稿夹在两次写之间的话，就可能被当成落地的那条。下面的比较并交换因此都是兜底：锁里它们只在有人不持锁写记录时失败。
 
@@ -938,6 +952,23 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 - **`session::new`**：对每个兄弟仓库，fetch 之后用 `main_tip` 钉住 tip，把 tree 导出到自己新建的目录，`ensure`（不持有锁），然后持 repo 写锁 `find_set` 复查、`clone_into`、改名并登记基线 generation，放开锁之后 `observe_main(ctx, tree, head, 基线目录)`，它自己取锁；失败时 `new` 照常完成，只报警告 `ObserveFailed`（§2 对 session 的第 4 条）。种子缓存（包括 `nested_seed_caches`）之后再从主 checkout 克隆进工作区。
 - **谁观察主干**：移动主干 tip 的调用（`new` 的 fetch、发布推进或推送了链）随后调 `observe_main`；daemon 在任何让 `main_tip` 移动的 fetch 之后也观察，一次观察失败了就再观察一次（module-rulings "approve refuses a Pending whose head is no longer main's tip"、"observe_main is best-effort for its callers"）。head 已经不是 tip 的观察什么都不写，所以主干记录最后总由最近那次移动的观察写成当前的 tip。观察落后的那一段（例如 publish 为合并基线 fetch 之后发布失败），由 approve 在锁里对 `main_tip` 的核对兜住：目标已不是 tip 的 Pending 批准不了（§5.10）。
 - **status 与 stderr 提示**：用 `open_proposals`，每次 CLI 调用的 stderr 只提示 Pending 的提议（design §6.4 第 4 步）；用 `attempts` 报出现场（不变量 6）；用 `drift` 报出各工作区的漂移；用 `publish_chain` 报出发布链被回退或分叉，连同 a..c 上还没推送的发布；等待中的会话按 §4.5 的规则显示。
+
+### 5.13a Package summaries (main-sync §7.2)
+
+`strata_deps::changes(git, cfg, from_head, to_head) -> Result<Changes>` reads committed
+`install_inputs` only. `Changes` has `summary`, `packages` (`name`, nullable `from`/`to`,
+`kind: added|removed|changed`, `direct`) and `truncated`. Parsers cover Bun JSONC,
+npm package-lock v2/v3, Composer, Pub and Cargo locks. Companion manifests supply directness
+and direct-spec fallback; an unparsed input is reported as `<file> changed (no parser)`.
+Known lockfile results supersede duplicate manifest results, and direct dependencies sort first.
+
+Each blob is size-checked before reading (16 MiB maximum); results contain at most 50 packages
+and a one-line summary of at most 120 Unicode characters. A 200 ms response budget encloses
+Git reads and parsing. A single bounded worker prevents timed-out requests accumulating parser
+threads; competing requests return a best-effort `Busy changes_busy`. Each Git read receives the
+remaining deadline, and parsing checks the deadline between inputs. The bounded 128-entry memory
+cache (entries above 256 KiB are not retained) keys on file names and before/after blob IDs, including companion manifests; source-only
+commits can reuse the result. No store, checkout, install or network mutation occurs.
 
 ### 5.13 复杂度与验收数字
 
@@ -1417,3 +1448,32 @@ design.md 标为 [交给构建者]、并且落在本模块的决定：
 | `install` 的切分 | 用 config.md §2.4 的切分函数（`validate_commands` 用的同一个） | 只能有一份切分规则；config.md 还没公开这个函数的名字，T15 要补上 | 待定（config.md） |
 
 需要 T15 改 types.md 的地方：`DepsSetId` 的注释补上依赖配置一段（§4.3）；`Drift` 行补上 special_file、symlink_escapes、unreadable_file、changed_during_clone、inputs_changed 这些 reason；§6.2 的"谁返回"在 `Busy`、`Corrupt`、`Exists`（`clone_into`）、`IsDirectory`（建造锁、取来的安装输入）、`HeadMoved`（`plan_rollout`、`plan_switch`）补上 deps（`NoSuchProposal`、`NotDirectory`、`NotFile` 已列了 deps）；含义一栏：`Busy` 补上提议与主干记录的并发冲突（proposal_race、main_race）与建造锁到时仍拿不到（build_lock_busy），`HeadMoved` 补上"批准时提议的目标已不是主干的 tip"（main_moved），`NoSuchProposal` 补上 `plan_switch` 的不是提出者、不再开着，`NotFile` 补上"建造锁的位置上不是普通文件"。
+
+### Main-sync automatic preparation and classifier
+
+The effective pinned `sync.deps=apply` policy adds automatic C3 moves to D7:
+dependency directories may be replaced after human approval, by the existing
+proposer switch, or by a sealed C3 target passing Auto G0–G4. The daemon worker
+prepares every Pending origin (Main and landed Session), never AwaitingPublish.
+It calls `ensure_target` without a confirmer and serializes jobs per repo;
+the existing dependency build lock still serializes installs with new/publish.
+
+`classify_rollout(ctx, session, workspace, to_inputs)` is shared by
+`plan_rollout`, T4 and C3. It returns OwnChange/Drift using the existing rule
+that current inputs matching either the pinned set or the target are valid.
+Status drift alone is not an automatic-rollout classifier: C2 residue already
+contains the target inputs while retaining the old set.
+
+Automatic preparation records installing → ready, or terminal install_failed
+for D10 install failures and `previous_attempt`. Transient Busy/ReadOnly and
+other non-install errors retry; NoSuchProposal deletes the job row. Replaced
+proposals are picked up on later passes in apply repos. Failed staging is
+preserved for human inspection and cleanup. Any path sealing the target makes
+it ready again, including a human approval that could not move busy sessions.
+Settlement writes both Applied and the deps_auto applied audit atomically.
+Confirm-mode replacement approval and confirmation remain unchanged.
+
+Sync repeats `classify_rollout` after its lock-free ensure gap, before moving.
+A different AwaitingPublish session draft is reported as OwnChange rather than
+generic Drift. The classifier does not scan holders, build a set, acquire a
+repo lock, or decide the pinned sync policy.

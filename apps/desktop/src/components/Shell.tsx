@@ -1,13 +1,14 @@
 'use client';
 
 import { useEffect } from 'react';
+import { useNow } from '@/hooks/useNow';
 import { useQueryClient } from '@tanstack/react-query';
 import { sessionFromUrl, sessionHash, useNav } from '@/stores/nav';
 import { useTheme } from '@/stores/theme';
 import { usePlan, useSessions, useDeps } from '@/lib/queries';
 import { OPEN_EVENT, inTauri } from '@/lib/tauri';
-import { openTarget, waitingItems } from '@/lib/view';
-import type { DepsList, StatusReply } from '@/lib/types';
+import { openTarget, waitingGroups } from '@/lib/view';
+import type { DaemonStatus, DepsList, StatusReply } from '@/lib/types';
 import { Titlebar } from './Titlebar';
 import { StatusBar } from './StatusBar';
 import { CommandPalette } from './CommandPalette';
@@ -24,6 +25,7 @@ export function Shell() {
   // Kept warm so a tray "deps" item can find its session.
   const deps = useDeps(plan.deps);
   const qc = useQueryClient();
+  const now = useNow();
 
   // ⌘K / Ctrl+K opens the palette.
   useEffect(() => {
@@ -68,7 +70,8 @@ export function Shell() {
         const t = openTarget(
           e.payload,
           qc.getQueryData<StatusReply>(['sessions']),
-          qc.getQueryData<DepsList>(['deps'])
+          qc.getQueryData<DepsList>(['deps']),
+          qc.getQueryData<DaemonStatus>(['daemonStatus'])
         );
         openSession(t.session);
       }).then((u) => {
@@ -93,12 +96,12 @@ export function Shell() {
             sessions={sessions}
             daemon={status}
             legacy={!status.data || !('api' in status.data)}
-            waiting={waitingItems(sessions.data, deps.data)}
+            waiting={waitingGroups(sessions.data, deps.data, status.data, now)}
             waitingStale={deps.isError || sessions.isError}
           />
         )}
       </main>
-      <SessionDetailModal id={session} interval={plan.session} />
+      <SessionDetailModal id={session} interval={plan.session} daemon={status.data} />
       <ReviewModal />
       <StatusBar status={status} sessions={sessions.data} />
       <CommandPalette

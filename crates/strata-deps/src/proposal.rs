@@ -24,6 +24,8 @@ pub struct Proposal {
     pub origin: ProposalOrigin,
     pub from: DepsSetId,
     pub from_inputs: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_head: Option<CommitOid>,
     pub to: DepsSetId,
     pub to_inputs: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,6 +59,7 @@ pub struct ProposeArgs {
     pub origin: ProposalOrigin,
     pub from: DepsSetId,
     pub from_inputs: String,
+    pub from_head: Option<CommitOid>,
     pub to: DepsSetId,
     pub to_inputs: String,
     pub tree: Option<TreeOid>,
@@ -119,6 +122,7 @@ pub(crate) fn from_record(r: ProposalRecord) -> Proposal {
         },
         from: r.from,
         from_inputs: r.from_inputs,
+        from_head: r.from_head.clone(),
         to: r.to,
         to_inputs: r.to_inputs,
         tree: r.tree,
@@ -230,6 +234,7 @@ fn propose_round(
             origin,
             from: args.from.clone(),
             from_inputs: args.from_inputs.clone(),
+            from_head: args.from_head.clone(),
             to: args.to.clone(),
             to_inputs: args.to_inputs.clone(),
             tree,
@@ -259,6 +264,7 @@ fn propose_round(
             origin: c.origin.clone(),
             from: c.from.clone(),
             from_inputs: c.from_inputs.clone(),
+            from_head: c.from_head.clone(),
             to: c.to.clone(),
             to_inputs: c.to_inputs.clone(),
             tree: Some(tree.clone()),
@@ -332,6 +338,7 @@ pub(crate) fn built(id: ProposalId, new: NewProposal, now: SystemTime) -> Propos
         },
         from: new.from,
         from_inputs: new.from_inputs,
+        from_head: new.from_head.clone(),
         to: new.to,
         to_inputs: new.to_inputs,
         tree: new.tree,
@@ -406,13 +413,7 @@ pub fn observe_main(
     seams::before_main_lock();
     let mut out: Option<Result<Option<Proposal>>> = None;
     ctx.locks.with_write(ctx.repo, &mut || {
-        let mut got: Option<Proposal> = None;
-        let r = observe_locked(ctx, tree, head, &inputs, &id, &mut got);
-        out = Some(match (r, got) {
-            (Ok(v), _) => Ok(v),
-            (Err(e), None) => Err(e),
-            (Err(e), Some(p)) => Err(not_recorded(&p, e)),
-        });
+        out = Some(observe_main_locked(ctx, tree, head, &inputs, &id));
         Ok(())
     })??;
     out.unwrap_or_else(|| {
@@ -421,6 +422,18 @@ pub fn observe_main(
             "observe_main: the write lock never ran",
         ))
     })
+}
+
+/// Observe a prepared main tip while the caller holds this repo's write lock.
+/// This function never acquires that lock. Prepare the exported install inputs
+/// and `key_of` result before locking, then recheck the tip under the lock;
+/// `inputs` and `id` must describe `tree` at `head` with the current config.
+pub fn observe_main_locked(ctx: &Ctx, tree: &TreeOid, head: &CommitOid, inputs: &str, id: &DepsSetId) -> Result<Option<Proposal>> {
+    let mut got = None;
+    match observe_locked(ctx, tree, head, inputs, id, &mut got) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(match got { Some(p) => not_recorded(&p, e), None => e }),
+    }
 }
 
 fn not_recorded(p: &Proposal, error: StrataError) -> StrataError {
@@ -463,6 +476,7 @@ fn observe_locked(
             origin: ProposalOrigin::Main,
             from,
             from_inputs,
+            from_head: old.as_ref().filter(|o| o.set != *id).map(|o| o.head.clone()),
             to: id.clone(),
             to_inputs: inputs.to_owned(),
             tree: Some(tree.clone()),

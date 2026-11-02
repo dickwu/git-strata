@@ -91,12 +91,14 @@ fn roundtrip(sock: &Path, lines: &[&[u8]]) -> Vec<Value> {
 }
 
 #[test]
-fn method_table_has_the_twenty_names() {
+fn method_table_has_the_documented_names() {
     let names: Vec<&str> = Method::ALL.iter().map(|m| m.name()).collect();
     assert_eq!(
         names,
         [
-            "new", "add", "status", "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_approve",
+            "new", "add", "status",
+            "sync",
+            "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_approve",
             "deps_list", "publish", "publish_plan", "push", "assign", "rm", "gc", "resolve_move", "chain_resolve", "config_relax",
             "daemon_status", "du", "ports_ensure", "ports_reassign"
         ]
@@ -170,13 +172,38 @@ fn every_method_parses_its_documented_params() {
     let cases = [
         ("new", json!({ "ticket": null, "repos": ["tool"] })),
         ("add", json!({ "session": sid, "repos": ["front"] })),
-        ("status", json!({ "cwd": "/x", "session": null, "all": false })),
-        ("checkpoint", json!({ "session": sid, "repo": "tool", "reason": { "kind": "Manual", "message": "m" }, "paths": [] })),
-        ("restore", json!({ "session": sid, "repo": "tool", "checkpoint": 3, "paths": null })),
-        ("grep", json!({ "pattern": "x", "session": null, "all": true, "ignore_case": false })),
-        ("files", json!({ "session": sid, "repo": "tool", "glob": "*.ts" })),
-        ("diff", json!({ "a": sid, "b": "s-bcdefghi", "repo": "tool" })),
-        ("deps_propose", json!({ "session": sid, "repo": "tool", "switch": true })),
+        (
+            "status",
+            json!({ "cwd": "/x", "session": null, "all": false }),
+        ),
+        (
+            "sync",
+            json!({ "cwd": "/x", "session": null, "check": true }),
+        ),
+        (
+            "checkpoint",
+            json!({ "session": sid, "repo": "tool", "reason": { "kind": "Manual", "message": "m" }, "paths": [] }),
+        ),
+        (
+            "restore",
+            json!({ "session": sid, "repo": "tool", "checkpoint": 3, "paths": null }),
+        ),
+        (
+            "grep",
+            json!({ "pattern": "x", "session": null, "all": true, "ignore_case": false }),
+        ),
+        (
+            "files",
+            json!({ "session": sid, "repo": "tool", "glob": "*.ts" }),
+        ),
+        (
+            "diff",
+            json!({ "a": sid, "b": "s-bcdefghi", "repo": "tool" }),
+        ),
+        (
+            "deps_propose",
+            json!({ "session": sid, "repo": "tool", "switch": true }),
+        ),
         ("deps_approve", json!({ "proposal": 1, "sessions": null })),
         ("deps_list", json!({ "repo": null })),
         ("publish", json!({ "group": { "id": 0, "batches": [] } })),

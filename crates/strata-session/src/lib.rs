@@ -23,6 +23,7 @@ mod dispatch;
 mod failed_move;
 mod move_workspace;
 mod new;
+mod no_wait;
 mod old_tree;
 mod orphans;
 mod recover;
@@ -30,7 +31,6 @@ mod remove;
 mod resolve;
 mod rm_note;
 mod scene;
-mod no_wait;
 mod seams;
 mod seed;
 mod status;
@@ -41,26 +41,28 @@ mod ticket;
 pub use activity::{Activity, Idle, baseline_of, busy_reason, changed_since, idle_activity, walk_activity};
 pub use failed_move::{MoveResolution, ResolutionReport};
 pub use move_workspace::{AUTO_DEFERRED, MoveReport, auto_deferral};
-pub use old_tree::{OLD_TREE_TTL, OldTreeKey, OldTreeMode, OldTreeVerdict, Outcome as OldTreeOutcome};
+pub use new::Layout;
+pub use new::NewReport;
+pub use new::NewWarning;
+pub use new::add::{ADD_STAGING_PREFIX, AddReport};
+pub use old_tree::{
+    OLD_TREE_TTL, OldTreeKey, OldTreeMode, OldTreeVerdict, Outcome as OldTreeOutcome,
+};
 pub use orphans::{OrphanRetired, Sweep};
+pub use recover::{IntentRef, Leftover, RecoverReport};
 pub use remove::{Regenerable, RemoveReport};
+pub use resolve::{resolve_in, select_in};
 pub use rm_note::{
     KeptTree, LastRm, RebaseNote, RmInterrupted, RmNotes, leftover_line, local_hhmm, removed_leftover_of, removed_leftovers, rm_notes,
     with_leftover_detail,
 };
-pub use resolve::{resolve_in, select_in};
-pub use summary::{SessionSummary, SummarySelect, WorkspaceSummary, summary};
+pub use scene::{Scene, SceneOp};
 #[cfg(feature = "test-seams")]
 pub use seams::SessionSeam;
 pub use status::{
     DRIFT_NOTE, DriftStatus, MirrorDriftItem, SessionState, SessionStatus, StatusWarning, WorkspaceHealth, WorkspaceStatus,
 };
-pub use recover::{IntentRef, Leftover, RecoverReport};
-pub use scene::{Scene, SceneOp};
-pub use new::NewReport;
-pub use new::NewWarning;
-pub use new::Layout;
-pub use new::add::{ADD_STAGING_PREFIX, AddReport};
+pub use summary::{BehindStatus, SessionSummary, SummarySelect, WorkspaceSummary, summary};
 
 /// The fetch window the daemon gives `new` and `add` (D53).
 pub const NEW_FETCH_WINDOW: Duration = Duration::from_secs(30);

@@ -118,7 +118,9 @@ fn prepare_one(ctx: &Ctx, s: &RepoName, warnings: &mut Vec<PublishWarning>) -> s
     let branch = &cfg.default_branch;
     let mut head = None;
     let r = ctx.locks.with_repo(s, &mut || {
-        git.fetch(REMOTE, branch)?;
+        let fetched = git.fetch(REMOTE, branch);
+        let _ = ctx.store.record_fetch(s, fetched.is_ok(), fetched.as_ref().err().map(|e| e.message.as_str()), std::time::SystemTime::now());
+        fetched?;
         seams::fail(git, FailPoint::SiblingAnchor).and_then(|()| advance_anchor(git, branch).map(|_| ())).map_err(
             |e| {
                 unknown_with(
@@ -161,6 +163,12 @@ fn prepare_one(ctx: &Ctx, s: &RepoName, warnings: &mut Vec<PublishWarning>) -> s
         let mut detail = err_json(&e);
         detail["repo"] = json!(s.as_str());
         warnings.push(PublishWarning { kind: WarningKind::ObserveFailed, detail });
+    }
+    let mut effective = cfg.clone();
+    effective.sync.deps = ctx.locks.sync_deps(s, cfg.sync.deps);
+    let follow = strata_deps::Ctx { cfg: &effective, ..dctx };
+    if let Err(e) = crate::main_follow::reconcile_deps(&follow) {
+        tracing::warn!(repo=%s, error=%e.message, "check sibling: main-follow failed");
     }
     Ok(g)
 }

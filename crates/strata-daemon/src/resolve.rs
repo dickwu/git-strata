@@ -552,7 +552,16 @@ pub fn chain_resolve(
     let out = core.locks.with_repo(repo, || {
         tips.0 = strata_deps::main_tip(cfg, git).ok().flatten();
         // 4. Fetch, read again, classify before any compare-and-swap.
-        git.fetch("origin", &branch)?;
+        let fetched = git.fetch("origin", &branch);
+        if branch == cfg.default_branch {
+            let _ = core.store.record_fetch(
+                repo,
+                fetched.is_ok(),
+                fetched.as_ref().err().map(|e| e.message.as_str()),
+                SystemTime::now(),
+            );
+        }
+        fetched?;
         let (chain, c) = rewound_or_diverged(strata_deps::publish_chain(git, &branch)?)?;
         let (o, a) = (chain.origin.clone(), chain.anchor.clone());
         let mut done = ChainResolved {
@@ -642,12 +651,21 @@ pub fn chain_resolve(
         Ok(done)
     });
     // 9. After the lock: observe when main moved; failure is a warning.
-    let mut done = out?;
+    let follow = || {
+        if let Err(e) = crate::main_sync::reconcile(core, repo) {
+            tracing::warn!(repo=%repo, error=%e.message, "main-follow after chain resolve failed");
+        }
+    };
+    let mut done = match out {
+        Ok(done) => done,
+        Err(e) => { follow(); return Err(e); }
+    };
     if let Some(after) = tips.1.clone()
         && let Some(e) = observe_if_moved(tips.0.as_ref(), Some(&after), &mut || observe(&after))
     {
         done.warnings.push(json!({ "kind": "ObserveFailed", "repo": repo.as_str(), "code": e.code.as_str(), "message": e.message }));
     }
+    follow();
     Ok(done)
 }
 
@@ -771,12 +789,23 @@ pub(crate) fn push_replaying(
     if let Err(e) = strata_publish::pending::reconstruct(pending) {
         tracing::warn!(repo = %repo, error = %e.message, "rebase_pending reconstruction failed");
     }
-    git.fetch("origin", branch)?;
+    let fetched = git.fetch("origin", branch);
+    if branch == rc.default_branch {
+        let _ = core.store.record_fetch(
+            repo,
+            fetched.is_ok(),
+            fetched.as_ref().err().map(|e| e.message.as_str()),
+            SystemTime::now(),
+        );
+    }
+    fetched?;
     let chain = strata_deps::publish_chain(git, branch)?;
     let mut plan = None;
     let mut supplies = Vec::new();
     let tip = match &chain {
-        Some(ch) if ch.state == ChainState::Leads && ch.top.is_some() => ch.top.clone().expect("leads has a top"),
+        Some(ch) if ch.state == ChainState::Leads && ch.top.is_some() => {
+            ch.top.clone().expect("leads has a top")
+        }
         Some(ch) if ch.state == ChainState::Diverged && ch.top.is_some() => {
             let c = ch.top.clone().expect("diverged has a top");
             let Some(base) = replay_base(git, ch, &c)? else {

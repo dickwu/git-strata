@@ -553,6 +553,7 @@ fn open_proposals_skip_removed_sessions() {
         origin: origin.cloned(),
         from: set_id('a'),
         from_inputs: "a".repeat(64),
+        from_head: None,
         to: set_id(to),
         to_inputs: to.to_string().repeat(64),
         tree: origin.is_none().then(|| tree('5')),

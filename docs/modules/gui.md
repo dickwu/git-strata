@@ -208,7 +208,7 @@ GUI 不拥有持久业务数据。它写的东西都由人按按钮触发：首�
 - **G4 无自动化面**：发布构建里没有 `tauri-plugin-connector`、MCP、WebSocket 端口。
 - **G5 不读数据卷**：GUI 进程不打开 `paths.root` 之下和任何仓库 `path` 之下的文件，计划、diff、分配都经 daemon。唯一例外是引导时用系统对话框选目录（只拿路径，不读内容）。
 - **G6 不信任仓库内容**：diff、路径、提交信息、ticket、提议理由都是 agent 写的，按纯文本渲染（Monaco 只读、AntD 文本），不渲染 HTML / Markdown，严格 CSP。
-- **G7 托盘不批准、不显示 agent 文本**：托盘只显示种类、编号与仓库名（如 "Deps proposal 12 in tool"），不显示 ticket、提交标题、提议理由；点击只打开主窗口到对应对话框；Quit 只退 GUI。
+- **G7 托盘不批准、不显示 agent 文本**：托盘只显示种类、编号、仓库名与受影响会话数（如 "Deps proposal 12 in tool · 2 sessions"），不显示 ticket、提交标题、提议理由；点击只打开主窗口到对应对话框；Quit 只退 GUI。
 - **G8 bundle 内 cli 与外部 cli 同权**：bundle 里的 `git-strata` 没有额外能力，确认仍由 daemon 弹框。
 - **G9 不在有写操作时重启 daemon**：GUI 发起的任何 daemon 停止 / 重启 / 升级 / 迁移都先走 §5.9 的 drain；不用 `launchctl kickstart -k`，不发 SIGKILL。
 
@@ -244,6 +244,26 @@ GUI 不拥有持久业务数据。它写的东西都由人按按钮触发：首�
 | **Dependencies** | 提议、影响的会话、planned moves | deps_list、deps_approve |
 | **Allocations** | 基线代与依赖集（谁引用、大小、创建时间）、进行中的克隆与依赖构建、卷剩余空间、du 的 logical / allocated / private / 可回收 trash 与 `as_of`；gc 按钮（§5.5） | allocations、du、watch |
 | **Settings** | 引导各步状态、daemon PATH、Open at login、迁移与回滚、日志位置 | 本机 |
+
+#### Main-sync attribution (wave 1)
+
+`waitingGroups` groups the Sessions header by repository. Each proposal shows `Deps #N · from main`
+or its origin session link, one line of `changes.summary`, and affected sessions derived only from
+that repo's `ws.pending`. Each `ticket · session-id` opens the existing detail modal. Legacy summaries
+carry “since session base”. The existing confirm-mode review/Touch ID flow is retained.
+
+With `daemon_status.features` containing `status.upstream`, apply-mode proposals are collapsed under
+“Applying from main”, with moved/deferred counts. They enter the waiting count only for install
+failure, own dependency changes, drift, an unhealthy/scene/not-following workspace, divergence,
+waiting-human state, or a deferral strictly older than 24 hours. Conflicts and `auto.reason=conflicts`
+point to “needs the session's agent” and offer Copy for `git-strata sync --session S --repo R`, never
+an approval. Copy does not execute the command.
+
+The same capability gates cached `↓N` list badges and the detail modal's per-repo “From main”
+sections (behind/unchecked/capped, up to 20 commit subjects, deps summary/state/mode, auto reason,
+since and attempts, conflict paths and the suggested command). Old daemons keep the existing
+waiting behavior and show no upstream section or badge. The tray follows the same stuck threshold
+and adds only `· N sessions`; tickets, subjects, paths and agent reasons remain excluded (G7).
 
 ### 5.2 写作规则
 
@@ -439,7 +459,7 @@ README 第一节改成「下载 app → 首次打开 → 引导」，cli 用法�
 - 关窗（⌘W、红点）→ 隐藏窗口并切 `ActivationPolicy::Accessory`；点 Dock / Finder 里的 app（`RunEvent::Reopen`）或托盘 `Open GIT STRATA` → 显示窗口并切回 `Regular`。⌘Q / 托盘 `Quit GIT STRATA` 才退出 GUI；退出 GUI 不影响 daemon。
 - 图标（peilin 14:1x 选定 concept b「workspace fork」）：app 图标是青色渐变圆角方块上，一个白色 Y 形分叉连起三块等距视角的工作区平板。托盘图标是同一图形的模板图（黑色、透明底，18 pt；按 2 单位网格简化成三块扁平菱形 + Y 叉，叉与板之间留 1 px 空隙），状态靠形状：正常 / 有待处理（小圆点）/ daemon 不可达或数据过期（斜杠）。源文件在 `apps/desktop/src-tauri/icons/src/`（`app-icon.svg`、`tray-template*.svg`），`render.sh` 用 rsvg-convert 与 `tauri icon` 生成全部尺寸与 icns。
 - **判活**：watch 有 heartbeat（§5.3）；45 s 没有任何行即重连；数据超过 60 s 未更新时托盘状态行写 "Updated 2 min ago"，不显示过期的「healthy」。
-- 托盘菜单：状态行（"Daemon running · 5 sessions"）；"Waiting for you" 下最多 5 项，只含种类、编号、仓库名（G7）；"Open GIT STRATA"；"Pause notifications for 1 hour"；"Quit GIT STRATA"。点待处理项 → 先强制取新数据，再打开主窗口到对应对话框。
+- 托盘菜单：状态行（"Daemon running · 5 sessions"）；"Waiting for you" 下最多 5 项，只含种类、编号、仓库名、受影响会话数（G7）；"Open GIT STRATA"；"Pause notifications for 1 hour"；"Quit GIT STRATA"。点待处理项 → 先强制取新数据，再打开主窗口到对应对话框。
 - 窗口隐藏时保持 watch；回退轮询按 §5.3 的统一表（隐藏行）。
 - "Open at login"（`SMAppService.mainApp`，默认关）。登录启动时不弹窗口（识别方式由 P-pack 验证；识别不了就提供 "Start hidden" 偏好）。
 

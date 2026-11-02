@@ -21,7 +21,9 @@ pub mod plist;
 pub mod resolve;
 pub mod rpc;
 pub mod startup;
+pub mod sync_move;
 pub mod track;
+pub mod upstream;
 pub mod waiting;
 
 /// The confirm seams a test daemon is built with (feature `test-seams`
@@ -113,7 +115,7 @@ pub fn install_path_for_home(home: &Path) -> String {
 /// Optional request features this daemon serves, listed in
 /// `daemon_status.features` so a newer CLI can tell what an older daemon
 /// would reject. Additive only. `new.agent`: `new` takes `agent`.
-pub const FEATURES: &[&str] = &["new.agent", "session.ports"];
+pub const FEATURES: &[&str] = &["new.agent", "session.ports", "status.upstream", "sync"];
 
 /// The launchd label of the agent.
 pub const AGENT_LABEL: &str = "com.gwd.git-stratad";
@@ -154,6 +156,9 @@ pub enum RpcReject {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedFlags {
+    /// None only while reading an entry written before main-sync. Always written.
+    #[serde(default)]
+    pub sync_deps: Option<strata_types::SyncDeps>,
     pub deploy_on_push: bool,
     pub confirm: bool,
     pub push: bool,
@@ -176,6 +181,7 @@ pub enum DaemonWarning {
     StorePoisoned,
     VerifyFailed { message: String },
     AnchorNotAdvanced { repo: RepoName },
+    FetchFailed { repo: RepoName },
     /// Review M6: a standalone (or restore) push whose outcome is unknown;
     /// its staging directory `scene` (with `push.json`) is kept.
     UnknownPush { repo: RepoName, commit: strata_types::CommitOid, scene: PathBuf },
@@ -200,3 +206,6 @@ pub enum ChainChoice {
     AcceptOriginDrop,
     Restore,
 }
+
+pub mod main_sync;
+pub mod periodic_fetch;

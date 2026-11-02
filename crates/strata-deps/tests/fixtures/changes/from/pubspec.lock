@@ -1,0 +1,12 @@
+packages:
+  react:
+    dependency: "direct main"
+    description:
+      name: react
+    source: hosted
+    version: "18.2.0"
+  old:
+    dependency: transitive
+    version: "1.0"
+sdks:
+  dart: ">=3.0"

@@ -477,7 +477,119 @@ CREATE TABLE move_activity (
 ) STRICT;
 PRAGMA user_version = 3;
 "#,
-}];
+}, Migration {
+    to: 4,
+    name: "main-sync",
+    sql: r#"
+ALTER TABLE rebase_pending ADD COLUMN source TEXT NOT NULL DEFAULT 'publish' CHECK (source IN ('publish','replay','main'));
+ALTER TABLE rebase_pending ADD COLUMN to_deps TEXT CHECK (to_deps IS NULL OR (length(to_deps) = 64 AND to_deps NOT GLOB '*[^0-9a-f]*'));
+ALTER TABLE deps_proposals ADD COLUMN from_head TEXT CHECK (from_head IS NULL OR (length(from_head) = 40 AND from_head NOT GLOB '*[^0-9a-f]*'));
+CREATE TABLE deps_auto (
+    proposal   INTEGER PRIMARY KEY REFERENCES deps_proposals (id),
+    state      TEXT NOT NULL CHECK (state IN ('installing','ready','install_failed','applied')),
+    error_json TEXT CHECK (error_json IS NULL OR json_valid(error_json)),
+    at_ns      INTEGER NOT NULL
+) STRICT;
+CREATE TABLE repo_fetch (
+    repo     TEXT PRIMARY KEY NOT NULL,
+    at_ns    INTEGER NOT NULL,
+    ok       INTEGER NOT NULL CHECK (ok IN (0,1)),
+    error    TEXT,
+    ok_at_ns INTEGER
+) STRICT;
+CREATE TABLE sync_report (
+    session    TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    target     TEXT NOT NULL CHECK (length(target) = 40 AND target NOT GLOB '*[^0-9a-f]*'),
+    generation INTEGER NOT NULL,
+    path       TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    ours_blob  TEXT CHECK (ours_blob IS NULL OR (length(ours_blob) = 64 AND ours_blob NOT GLOB '*[^0-9a-f]*')),
+    hunks_json TEXT NOT NULL CHECK (json_valid(hunks_json)),
+    PRIMARY KEY (session, repo, path),
+    FOREIGN KEY (session, repo) REFERENCES workspaces (session, repo)
+) STRICT;
+CREATE TABLE move_activity_v4_copy (
+    session          TEXT    NOT NULL,
+    repo             TEXT    NOT NULL,
+    n                INTEGER NOT NULL,
+    policy           TEXT    NOT NULL CHECK (policy IN ('auto','agent')),
+    m0_ns            INTEGER NOT NULL,
+    t0_ns            INTEGER NOT NULL,
+    root_names_json  TEXT    NOT NULL CHECK (json_valid(root_names_json) AND json_type(root_names_json) = 'array'),
+    entries          INTEGER NOT NULL CHECK (entries >= 0),
+    late_writes_json TEXT    CHECK (late_writes_json IS NULL OR json_valid(late_writes_json)),
+    passes_json      TEXT    CHECK (passes_json IS NULL OR json_valid(passes_json)),
+    PRIMARY KEY (session, repo, n),
+    FOREIGN KEY (session, repo, n) REFERENCES move_intents (session, repo, n)
+) STRICT;
+INSERT INTO move_activity_v4_copy SELECT * FROM move_activity;
+DROP TABLE move_activity;
+CREATE TABLE move_activity (
+    session          TEXT    NOT NULL,
+    repo             TEXT    NOT NULL,
+    n                INTEGER NOT NULL,
+    policy           TEXT    NOT NULL CHECK (policy IN ('auto','agent')),
+    m0_ns            INTEGER NOT NULL,
+    t0_ns            INTEGER NOT NULL,
+    root_names_json  TEXT    NOT NULL CHECK (json_valid(root_names_json) AND json_type(root_names_json) = 'array'),
+    entries          INTEGER NOT NULL CHECK (entries >= 0),
+    late_writes_json TEXT    CHECK (late_writes_json IS NULL OR json_valid(late_writes_json)),
+    passes_json      TEXT    CHECK (passes_json IS NULL OR json_valid(passes_json)),
+    PRIMARY KEY (session, repo, n),
+    FOREIGN KEY (session, repo, n) REFERENCES move_intents (session, repo, n)
+) STRICT;
+INSERT INTO move_activity SELECT * FROM move_activity_v4_copy;
+DROP TABLE move_activity_v4_copy;
+PRAGMA user_version = 4;
+"#,
+    },
+    Migration {
+        to: 5,
+        name: "sync_resolution_history+conflict_acknowledgement",
+        sql: r#"
+DROP TRIGGER workspaces_update_guard;
+CREATE TRIGGER workspaces_update_guard BEFORE UPDATE ON workspaces
+WHEN NEW.session IS NOT OLD.session OR NEW.repo IS NOT OLD.repo OR NEW.path IS NOT OLD.path OR NEW.tracked IS NOT OLD.tracked
+  OR ((NEW.base_gen IS NOT OLD.base_gen OR NEW.head IS NOT OLD.head OR NEW.generation IS NOT OLD.generation OR NEW.conflicts IS NOT OLD.conflicts)
+      AND NOT (NEW.generation > OLD.generation AND OLD.tracked = 1 AND NEW.health = 'ok'
+               AND NEW.generation IS (SELECT MAX(n) FROM move_intents WHERE session = NEW.session AND repo = NEW.repo))
+      AND NOT (NEW.base_gen IS OLD.base_gen AND NEW.head IS OLD.head AND NEW.generation IS OLD.generation
+               AND OLD.tracked = 1 AND OLD.health = 'ok' AND NEW.health = 'ok'
+               AND NEW.scene IS OLD.scene
+               AND (OLD.scene IS NULL
+                    OR (SELECT state FROM move_intents WHERE session = NEW.session AND repo = NEW.repo ORDER BY n DESC LIMIT 1) IN ('done', 'abandoned', 'refused'))
+               AND (SELECT lifecycle FROM sessions WHERE id = NEW.session) IS 'active'
+               AND NOT EXISTS (SELECT 1 FROM move_intents WHERE session = NEW.session AND repo = NEW.repo AND state IN ('preparing', 'swapping'))
+               AND json_array_length(NEW.conflicts) < json_array_length(OLD.conflicts)
+               AND NOT EXISTS (SELECT 1 FROM json_each(NEW.conflicts) AS n WHERE n.type <> 'text' OR NOT EXISTS (SELECT 1 FROM json_each(OLD.conflicts) AS o WHERE o.value = n.value))))
+  OR (NEW.health IS NOT OLD.health
+      AND NOT (OLD.health = 'ok' AND NEW.health = 'unknown')
+      AND NOT (OLD.health = 'unknown' AND NEW.health = 'ok'
+               AND (SELECT lifecycle FROM sessions WHERE id = NEW.session) IS 'active'
+               AND (SELECT state FROM move_intents WHERE session = NEW.session AND repo = NEW.repo ORDER BY n DESC LIMIT 1) IS 'unknown'))
+  OR (NEW.scene IS NOT OLD.scene AND NOT (OLD.health = 'ok' AND NEW.health = 'unknown'))
+BEGIN SELECT RAISE(ABORT, 'illegal update: workspaces'); END;
+CREATE TABLE sync_move_history (
+    session TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    resolution_json TEXT NOT NULL CHECK (json_valid(resolution_json) AND json_type(resolution_json) = 'object'),
+    PRIMARY KEY (session, repo, n),
+    FOREIGN KEY (session, repo, n) REFERENCES move_intents (session, repo, n)
+) STRICT;
+CREATE TRIGGER sync_move_history_insert_guard BEFORE INSERT ON sync_move_history
+WHEN (SELECT state FROM move_intents WHERE session = NEW.session AND repo = NEW.repo AND n = NEW.n) IS NOT 'preparing'
+BEGIN SELECT RAISE(ABORT, 'resolution outside preparing move'); END;
+CREATE TRIGGER sync_move_history_no_update BEFORE UPDATE ON sync_move_history
+BEGIN SELECT RAISE(ABORT, 'immutable: sync_move_history'); END;
+CREATE TRIGGER sync_move_history_delete_gc_only BEFORE DELETE ON sync_move_history
+WHEN NOT (SELECT active FROM strata_gc_gate)
+BEGIN SELECT RAISE(ABORT, 'delete outside gc: sync_move_history'); END;
+PRAGMA user_version = 5;
+"#,
+    },
+];
 
 /// The oldest schema version this build opens (and migrates from).
 pub(crate) const BASE_VERSION: u32 = 1;
@@ -509,9 +621,10 @@ mod tests {
             assert_eq!(m.to, BASE_VERSION + 1 + i as u32, "{}", m.name);
             assert!(m.sql.trim_end().ends_with(&format!("PRAGMA user_version = {};", m.to)), "{}", m.name);
         }
-        assert_eq!(LATEST, 3);
-        assert_eq!(pending(1).count(), 2);
-        assert_eq!(pending(2).count(), 1);
+        assert_eq!(LATEST, 5);
+        assert_eq!(pending(1).count(), 4);
+        assert_eq!(pending(2).count(), 3);
+        assert_eq!(pending(3).count(), 2);
         assert_eq!(pending(LATEST).count(), 0);
         assert!(ddl(1) == BASE_DDL && ddl(2).len() > BASE_DDL.len() && ddl(3).len() > ddl(2).len());
     }

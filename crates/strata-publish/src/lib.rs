@@ -12,6 +12,7 @@ pub mod chain;
 pub(crate) mod deps_select;
 pub mod check;
 pub mod pending;
+pub mod main_follow;
 pub mod push;
 pub mod rebase;
 pub mod seams;
@@ -70,6 +71,10 @@ pub trait PublishLocks: Sync {
     /// Whether a `Busy` take is waited out (§5.1 after the first visible
     /// write). `false` for the catch-up pass (rm-followups §1.6 T2), which
     /// never queues behind a request: its `Busy` defers the row.
+    /// Effective policy for a check sibling whose raw config comes from Sessions.
+    fn sync_deps(&self, _repo: &RepoName, configured: strata_types::SyncDeps) -> strata_types::SyncDeps {
+        configured
+    }
     fn waits(&self) -> bool {
         true
     }

@@ -143,6 +143,7 @@ impl Live {
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
             reconcile_every: strata_daemon::RECONCILE_EVERY,
             catch_up_every: strata_daemon::CATCH_UP_EVERY,
+            background_main_sync: false,
         }
     }
 

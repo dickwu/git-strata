@@ -572,3 +572,31 @@ fn agent_column_matches_agent_name_and_is_immutable() {
     ok(c, &format!("UPDATE sessions SET lifecycle = 'active' WHERE id = '{named}'"));
     assert_eq!(one(c, &format!("SELECT agent FROM sessions WHERE id = '{named}'")), r#"Text("claude-code")"#);
 }
+
+#[test]
+fn conflict_acknowledgement_guard_only_removes_paths() {
+    let f = fx();
+    let c = &f.c;
+    ok(
+        c,
+        "UPDATE sessions SET lifecycle = 'active'; UPDATE move_intents SET state = 'swapping', conflicts = '[\"a\",\"b\"]'; UPDATE workspaces SET generation = 2, conflicts = '[\"a\",\"b\"]'; UPDATE move_intents SET state = 'done', ended_ns = 1;",
+    );
+    refused(
+        c,
+        "UPDATE workspaces SET conflicts = '[\"new\"]'",
+        "illegal update: workspaces",
+    );
+    refused(
+        c,
+        "UPDATE workspaces SET conflicts = '[]', head = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+        "illegal update: workspaces",
+    );
+    refused(
+        c,
+        "UPDATE workspaces SET conflicts = '[]', generation = 3",
+        "illegal update: workspaces",
+    );
+    ok(c, "UPDATE workspaces SET conflicts = '[\"b\"]'");
+    assert_eq!(one(c, "SELECT generation FROM workspaces"), "Integer(2)");
+    ok(c, "UPDATE workspaces SET conflicts = '[]'");
+}

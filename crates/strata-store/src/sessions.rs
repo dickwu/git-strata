@@ -122,6 +122,45 @@ fn n_int(n: u64) -> Result<i64> {
 }
 
 impl Store {
+    /// Clear acknowledged kept-side conflicts without manufacturing a move.
+    /// The caller holds the session queue and repo lock. All paths must be
+    /// present; an unrelated path rolls back the entire acknowledgement.
+    pub fn clear_conflicts(
+        &self,
+        session: &SessionId,
+        repo: &RepoName,
+        paths: &[RepoPath],
+    ) -> Result<()> {
+        const OP: &str = "clear_conflicts";
+        self.writable()?;
+        self.write(OP, |c| {
+            let raw: Option<String> = c
+                .query_row(
+                    "SELECT conflicts FROM workspaces WHERE session = ?1 AND repo = ?2",
+                    params![session.as_str(), repo.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(w(OP))?;
+            let raw = raw.ok_or_else(|| no_such_session(session.as_str()))?;
+            let mut conflicts = conflicts_of(&raw, "workspaces.conflicts")?;
+            if paths.iter().any(|p| !conflicts.contains(p)) {
+                return Err(err(
+                    Code::InvalidInput,
+                    "path is not a workspace conflict",
+                    json!({"reason":"resolved_unrelated", "paths":paths}),
+                ));
+            }
+            conflicts.retain(|p| !paths.contains(p));
+            c.execute(
+                "UPDATE workspaces SET conflicts = ?3 WHERE session = ?1 AND repo = ?2",
+                params![session.as_str(), repo.as_str(), conflicts_json(&conflicts)],
+            )
+            .map_err(w(OP))?;
+            Ok(Tx::Commit(()))
+        })
+    }
+
     /// `<root>/sessions/<id>`, as configured (the text callers use).
     pub(crate) fn session_root_text(&self, id: &str) -> Result<String> {
         Ok(format!("{}/sessions/{id}", path_text(&self.root, "root")?.trim_end_matches('/')))
@@ -596,6 +635,7 @@ impl Store {
                     // deferred rebase go with the session, in this transaction.
                     c.execute("DELETE FROM rm_attempts WHERE session = ?1", [id]).map_err(w(OP))?;
                     c.execute("DELETE FROM rebase_pending WHERE session = ?1", [id]).map_err(w(OP))?;
+                    c.execute("DELETE FROM sync_report WHERE session = ?1", [id]).map_err(w(OP))?;
                 }
                 return Ok(Tx::Commit(true));
             }
@@ -675,6 +715,23 @@ impl Store {
         at: SystemTime,
         baseline: Option<&crate::MoveBaseline>,
     ) -> Result<u64> {
+        self.begin_move_with_policy(id, repo, to, head, staging, at, baseline, crate::MoveActivityPolicy::Auto)
+    }
+
+    /// Begin a move with its activity policy recorded in the same transaction.
+    /// `baseline` must be supplied by callers requiring activity auditing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_move_with_policy(
+        &self,
+        id: &SessionId,
+        repo: &RepoName,
+        to: &BaseGen,
+        head: &CommitOid,
+        staging: &Path,
+        at: SystemTime,
+        baseline: Option<&crate::MoveBaseline>,
+        policy: crate::MoveActivityPolicy,
+    ) -> Result<u64> {
         const OP: &str = "begin_move";
         self.writable()?;
         let at = ns(at, "at")?;
@@ -732,7 +789,7 @@ impl Store {
             )
             .map_err(w(OP))?;
             if let Some(b) = baseline {
-                crate::move_activity::insert(c, id, repo, n, b, OP)?;
+                crate::move_activity::insert(c, id, repo, n, b, policy, OP)?;
             }
             Ok(Tx::Commit(n as u64))
         })
@@ -850,6 +907,7 @@ impl Store {
             )
             .map_err(w(OP))?;
             crate::rm_state::consume_on_move(c, OP, id, repo, (&it.to_tree, &it.to_deps), &it.head, consume)?;
+            crate::main_sync::delete_report(c, id, repo, OP)?;
             Ok(Tx::Commit(()))
         })
     }
@@ -910,6 +968,7 @@ impl Store {
                 return Err(no_failed());
             }
             if accept {
+                crate::main_sync::delete_report(c, id, repo, OP)?;
                 let g = base_gen_id(c, repo, &it.to_tree, &it.to_deps)
                     .map_err(w(OP))?
                     .ok_or_else(|| base_gen_missing(repo, &it.to_tree, &it.to_deps))?;

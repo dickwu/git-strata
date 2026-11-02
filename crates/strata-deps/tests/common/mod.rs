@@ -303,6 +303,7 @@ exit $rc
             check_siblings: Vec::new(),
             rm: Default::default(),
             rebase: Default::default(),
+            sync: Default::default(),
         }
     }
 }
@@ -655,6 +656,7 @@ pub fn bun_config(path: &Path) -> RepoConfig {
         check_siblings: Vec::new(),
         rm: Default::default(),
         rebase: Default::default(),
+        sync: Default::default(),
     }
 }
 

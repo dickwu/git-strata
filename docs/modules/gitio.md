@@ -66,6 +66,12 @@ gitio 是 strata 里唯一起 git 子进程的模块。它从 tgrep 借了两段
 
 ## 3. 公开接口（Rust）
 
+Main-sync adds two read-only local-history helpers: `Git::count_between(base, tip, limit)`
+runs `rev-list --count --max-count=limit` across all reachable parents;
+`Git::history_between(base, tip, limit)` returns bounded `CommitSummary {oid, subject, author, sessions}`
+records. The sessions come from Git's parsed final `sessions:` trailer, split on commas;
+the daemon compares exact session ids for `own`. Neither helper fetches or changes refs/index/worktrees.
+
 ```rust
 // crates/strata-gitio/src/lib.rs —— 签名清单（不是实现）
 use std::collections::BTreeSet;
@@ -522,6 +528,14 @@ gitio 自己不拿 strata 的锁，靠 git 的锁文件（ref 锁、`index.lock`
 `tree_contains(tree, path)`：先按上面第 2–4 步得到这个 tree 的结论与路径表（路径表已被淘汰就再跑一次 ls-tree），结论是错误就原样返回。`path` 是表里的一个条目（文件或符号链接），或是某个条目的上级目录 → `true` [我的决定：目录也算在 tree 里，于是一个与被跟踪目录同名的显式种子条目照样被拒]；ignorecase 时按 ASCII 不区分大小写，与 `IndexInfo::is_tracked`、`tracked_under` 同一规则（§9）。session 用它判种子文件"在基线 tree 里未被跟踪"（config.md §4.3）：那时工作区还不存在，没有 index 可读。
 
 复杂度 O(tree 的文件数)，一次子进程；`tree_contains` 命中缓存时 O(log 文件数)。tool 有 4196 个文件，staff-api 有 4947 个（2026-10-22 各自的 origin 默认分支）。`WorkspaceState.head` 的不变量 `tree_of(head) == base.tree` 走缓存。
+
+#### Bounded install-input reads (main-sync)
+
+`commit_items_within(head, paths, timeout)` reads the requested commit's entries directly via
+literal-path `ls-tree`, without whole-tree validation or export. `object_bytes_within(oid, timeout)`
+reads an immutable blob through the same sanitized command runner. The package-summary caller
+checks the tree entry's size before reading it and passes its remaining 200 ms budget to both.
+Existing `tree_items` and `object_bytes` behavior is unchanged.
 
 ### 5.5 `export_tree(tree, dst)`
 
@@ -1315,3 +1329,11 @@ git commit -m "test(gitio): the main checkout changes only in objects and refs/s
 | 计划之外的公开项 | [我的决定] `common_dir`、`is_binary` 与两个常量 | daemon 报错时要给出路径；`Binary` 与 merge3 用同一个判定 | 2026-10-22 |
 | 测试接缝（module-rulings Addendum 4） | [我的决定] cargo feature `test-seams` 下挂在 `Git` 上的九个入口：`open_with_env`、`set_env`、`set_fetch_timeout`、`take_git_calls`、`take_sync_events`、`pause_export_before_rename`、`pause_attach_before_index`、`pause_attach_before_read_tree`、`pause_attach_before_readback`（§3 末尾）；版本解析不开接缝，用 `src/repo.rs` 的单测 | 子进程的参数、环境与缓存命中只能在起子进程的那一处看到，而 `command` 是 crate 私有；持久化的顺序只能在同步层看到；120 s 的 fetch 超时在测试里太长；导出的改名竞态、attach 时管理目录被换、3.1 记下身份之后 read-tree 之前上级被换、refresh 之后暂存被换，都要停在两步之间才测得确定（Addendum 4：用停住接缝，不用 errno 故障点）；`set_env` 让每个用例有自己的全局配置与 `EMAIL`，不改测试进程的环境；`open_with_env` 让 `open` 自己的子进程也只读沙箱里的配置（review N8） | 2026-10-22 |
 | 导出耗时 | 待定 | design §8 没有导出的数字；首个 spike 实测 tool（4196 个文件）与 staff-api（4947 个）后写回 | — |
+
+### Main-sync text resolution
+
+`merge3_favour_ours(base, ours, theirs)` uses the same region construction as
+`merge3`. Overlaps choose ours; non-overlapping upstream hunks are retained.
+Binary files and inconsistent merge-region results still conflict. The
+caller must first validate regions against the saved sync report; this
+primitive does not grant permission to resolve arbitrary new overlaps.

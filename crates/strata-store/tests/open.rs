@@ -43,7 +43,7 @@ fn open_creates_layout_on_empty_root() {
         assert!(env.store_dir().join("LOCK").is_file());
         let db = env.db();
         assert_eq!(header_u32(&db, 68), 1398035009);
-        assert_eq!(header_u32(&db, 60), 3);
+        assert_eq!(header_u32(&db, 60), 5);
         let b = fs::read(&db).unwrap();
         assert_eq!((b[18], b[19]), (2, 2));
         assert!(!s.is_read_only());
@@ -247,7 +247,7 @@ fn open_refuses_schema_drift() {
 
 #[test]
 fn open_refuses_unknown_user_version() {
-    for v in [0, 4] {
+    for v in [0, 6] {
         let env = env();
         env.open().close().unwrap();
         {
@@ -342,6 +342,7 @@ fn read_only_open_refuses_every_write() {
         origin: None,
         from: set('a'),
         from_inputs: "a".repeat(64),
+        from_head: None,
         to: set('b'),
         to_inputs: "b".repeat(64),
         tree: Some(tree.clone()),

@@ -1,7 +1,7 @@
 //! rm-followups §1.4 G4 (r8): the durable activity baseline of an `Auto`
-//! move, written in `begin_move`'s transaction and kept through Done. Its
+//! or `Agent` move, written in `begin_move`'s transaction and kept through Done. Its
 //! late-write notice and its clean passes live in the same row. A row
-//! exists only for `Auto` moves: `Explicit` moves keep today's rules.
+//! exists for moves with a baseline; `Explicit` moves keep today's rules.
 
 use crate::sql::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,16 @@ pub struct MoveBaseline {
     pub entries: u64,
 }
 
+/// The move policy recorded with a durable activity baseline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveActivityPolicy { Auto, Agent }
+impl MoveActivityPolicy {
+    pub(crate) fn text(self) -> &'static str {
+        match self { Self::Auto => "auto", Self::Agent => "agent" }
+    }
+}
+
 /// One `move_activity` row. `baseline` is `None` when the stored baseline
 /// cannot be read (the caller fails closed: the tree is kept).
 #[derive(Clone, Debug, PartialEq)]
@@ -35,6 +45,7 @@ pub struct MoveActivity {
     pub session: SessionId,
     pub repo: RepoName,
     pub n: u64,
+    pub policy: MoveActivityPolicy,
     pub baseline: Option<MoveBaseline>,
     /// The late-write notice (`{moved_at, paths, count, reason}`), if any.
     pub late_writes: Option<Value>,
@@ -42,10 +53,10 @@ pub struct MoveActivity {
     pub passes: Vec<i64>,
 }
 
-type Raw = (String, String, i64, i64, i64, String, i64, Option<String>, Option<String>);
+type Raw = (String, String, i64, i64, i64, String, i64, Option<String>, Option<String>, String);
 
 fn of_raw(r: Raw) -> Result<MoveActivity> {
-    let (s, repo, n, m0, t0, names, entries, late, passes) = r;
+    let (s, repo, n, m0, t0, names, entries, late, passes, policy) = r;
     let root_names: Option<Vec<String>> = serde_json::from_str(&names).ok();
     let baseline = match (root_names, u64::try_from(entries)) {
         (Some(root_names), Ok(entries)) => Some(MoveBaseline { m0_ns: m0, t0_ns: t0, root_names, entries }),
@@ -60,33 +71,37 @@ fn of_raw(r: Raw) -> Result<MoveActivity> {
         session: crate::codec::parse(s, "move_activity.session")?,
         repo: crate::codec::parse(repo, "move_activity.repo")?,
         n: crate::codec::nonneg(n, "move_activity.n")?,
+        policy: match policy.as_str() {
+            "auto" => MoveActivityPolicy::Auto, "agent" => MoveActivityPolicy::Agent,
+            _ => return Err(crate::errors::bad_row(format!("move_activity.policy {policy:?}"))),
+        },
         baseline,
         late_writes: late.and_then(|l| serde_json::from_str(&l).ok()),
         passes,
     })
 }
 
-const COLS: &str = "session, repo, n, m0_ns, t0_ns, root_names_json, entries, late_writes_json, passes_json";
+const COLS: &str = "session, repo, n, m0_ns, t0_ns, root_names_json, entries, late_writes_json, passes_json, policy";
 
 fn raw(r: &crate::sql::Row) -> crate::sql::SqlResult<Raw> {
-    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
+    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
 }
 
 /// Inserts the row of move `n` (inside `begin_move`'s transaction).
-pub(crate) fn insert(c: &crate::sql::Connection, id: &str, repo: &str, n: i64, b: &MoveBaseline, op: &'static str) -> Result<()> {
+pub(crate) fn insert(c: &crate::sql::Connection, id: &str, repo: &str, n: i64, b: &MoveBaseline, policy: MoveActivityPolicy, op: &'static str) -> Result<()> {
     let names = to_json(&b.root_names, "root_names")?;
     let entries = i64::try_from(b.entries).unwrap_or(i64::MAX);
     c.execute(
         "INSERT INTO move_activity (session, repo, n, policy, m0_ns, t0_ns, root_names_json, entries) \
-         VALUES (?1, ?2, ?3, 'auto', ?4, ?5, ?6, ?7)",
-        params![id, repo, n, b.m0_ns, b.t0_ns, names, entries],
+         VALUES (?1, ?2, ?3, ?8, ?4, ?5, ?6, ?7)",
+        params![id, repo, n, b.m0_ns, b.t0_ns, names, entries, policy.text()],
     )
     .map_err(w(op))?;
     Ok(())
 }
 
 impl Store {
-    /// The row of move `n` of `session`/`repo`, if it was an `Auto` move
+    /// The row of move `n` of `session`/`repo`, if it had an activity baseline
     /// (none on a store older than v3).
     pub fn move_activity(&self, session: &SessionId, repo: &RepoName, n: u64) -> Result<Option<MoveActivity>> {
         let ni = i64::try_from(n).unwrap_or(i64::MAX);

@@ -18,6 +18,7 @@ pub mod local;
 pub mod ro;
 pub mod rpc;
 pub mod show;
+pub mod sync;
 pub mod tty;
 
 use std::ffi::OsString;
@@ -39,8 +40,21 @@ pub fn run() -> i32 {
 }
 
 pub fn run_args(argv: Vec<OsString>) -> i32 {
+    // Arm before parsing or reading stdin/environment. Hook failures are
+    // deliberately silent, including invalid flags and a blocked stdin.
+    let hook = argv.get(1).is_some_and(|s| s == "sync") && argv.iter().any(|s| s == "--hook");
+    let started = std::time::Instant::now();
+    let _timer = if hook {
+        match sync::Deadline::start(started) {
+            Some(t) => Some(t),
+            None => return 0,
+        }
+    } else {
+        None
+    };
     let cli = match Cli::try_parse_from(&argv) {
         Ok(c) => c,
+        Err(_) if hook => return 0,
         Err(e) => match e.kind() {
             // D19: help and version are clap text, exit 0, no envelope.
             ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
@@ -50,6 +64,11 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
             _ => return emit_stdout(&Envelope::err(parse_error(&argv, &e))),
         },
     };
+    if let Cmd::Sync(ref args) = cli.cmd
+        && args.hook
+    {
+        return sync::hook(args, started);
+    }
     // status-perf C: `ls --table` prints a table instead of a successful
     // envelope (a stated exception to D19); errors stay envelopes.
     let table = matches!(cli.cmd, Cmd::Ls { table: true });
@@ -139,6 +158,7 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
     }
     let ctx = Ctx::from_env()?;
     match cmd {
+        Cmd::Sync(args) => sync::run(&ctx, &args),
         Cmd::Deps(DepsCmd::Approve { id, sessions }) => c::deps_approve(&ctx, &id, &sessions),
         Cmd::Push { repo } => c::push(&ctx, &repo),
         Cmd::Publish { from, assign } => c::publish(&ctx, &from, assign.as_deref()),

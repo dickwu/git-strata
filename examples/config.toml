@@ -20,6 +20,13 @@ deploy_on_push = true
 pin_unpushed = true
 check_siblings = ["ui-kit"]   # web's checks read ../ui-kit
 
+# Main-sync defaults (new CLI and daemon required). A new repo needs one
+# `git-strata config relax web` before pinned sync.deps becomes apply.
+[repo.web.sync]
+follow_main = true
+deps = "apply"     # use "confirm" for human approval of dependency changes
+fetch_secs = 900   # 0 disables periodic fetch; otherwise 60..=86400
+
 # A shared component library that web links against.
 [repo.ui-kit]
 path = "/Users/you/code/ui-kit"

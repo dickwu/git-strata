@@ -76,6 +76,7 @@ impl AppState {
                     s.up = Some(true);
                     s.updated = Some(now);
                     match r {
+                        Read::DaemonStatus => s.daemon_status = Some(v.clone()),
                         Read::Sessions => s.sessions = Some(v.clone()),
                         Read::DepsList => s.deps = Some(v.clone()),
                         _ => {}

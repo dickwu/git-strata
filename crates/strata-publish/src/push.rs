@@ -18,9 +18,9 @@ use strata_types::{
 
 use crate::chain::{advance_anchor, anchor_ref, chain_ref, refuse_state};
 use crate::check::{check, remove_staged_layout};
+use crate::deps_select::{Installed, Select};
 use crate::rebase::RebaseReport;
 use crate::seams::{self, FailPoint, Point};
-use crate::deps_select::{Installed, Select};
 use crate::stage::{self, Staged};
 use crate::{Ctx, Result};
 
@@ -494,7 +494,11 @@ fn reconcile_unknown(ctx: &Ctx) {
     }
     let branch = &ctx.cfg.publish.branch;
     let r = ctx.locks.with_repo(ctx.repo, &mut || {
-        let tip = ctx.git.fetch(REMOTE, branch)?;
+        let fetched = ctx.git.fetch(REMOTE, branch);
+        if branch == &ctx.cfg.default_branch {
+            let _ = ctx.store.record_fetch(ctx.repo, fetched.is_ok(), fetched.as_ref().err().map(|e| e.message.as_str()), SystemTime::now());
+        }
+        let tip = fetched?;
         for row in &rows {
             let Some(c) = row_commit(ctx, row) else { continue };
             if !ctx.git.is_ancestor(&c, &tip).unwrap_or(false) {
@@ -549,7 +553,16 @@ fn locked(
     let branch = &ctx.cfg.publish.branch;
     let id = group.id;
     refuse_open(ctx, sessions, Some(id), true)?;
-    ctx.git.fetch(REMOTE, branch)?;
+    let fetched = ctx.git.fetch(REMOTE, branch);
+    if branch == &ctx.cfg.default_branch {
+        let _ = ctx.store.record_fetch(
+            ctx.repo,
+            fetched.is_ok(),
+            fetched.as_ref().err().map(|e| e.message.as_str()),
+            SystemTime::now(),
+        );
+    }
+    fetched?;
     advance_anchor(ctx.git, branch)?;
     let chain = publish_chain(ctx.git, branch)?.ok_or_else(|| {
         StrataError::new(Code::NoSuchBranch, format!("origin/{branch} has not been fetched"))
@@ -830,6 +843,9 @@ pub fn publish_bound(
         Ok(())
     })();
 
+    if let Err(e) = crate::main_follow::reconcile(ctx) {
+        warnings.push(PublishWarning { kind: WarningKind::ObserveFailed, detail: err_json(&e) });
+    }
     // Step 9.
     let mut o = outcome_base(ctx);
     o["commit"] = json!(landed.commit.as_str());

@@ -13,8 +13,8 @@ use serde_json::json;
 use strata_store::{Health, Store};
 use strata_types::{CheckpointId, Code, RepoName, SessionId, StrataError};
 
-use crate::rm_note::{RmNotes, rm_notes};
 use crate::resolve::{live_sorted, resolve_in, select_in};
+use crate::rm_note::{RmNotes, rm_notes};
 use crate::{Result, SessionState, WorkspaceHealth};
 
 /// Which sessions a summary covers.
@@ -31,6 +31,9 @@ pub enum SummarySelect<'a> {
 /// One session in `ls` / `status --brief`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummary {
+    /// Local fallback is explicitly unchecked; the daemon fills warmed counts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub behind: BTreeMap<RepoName, BehindStatus>,
     pub id: SessionId,
     /// Null when the session has none (always present, as in `SessionStatus`).
     pub ticket: Option<String>,
@@ -53,6 +56,10 @@ pub struct SessionSummary {
 /// One workspace in `status --brief`, from the store alone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSummary {
+    #[serde(default)]
+    pub behind: Option<u32>,
+    #[serde(default)]
+    pub unchecked: bool,
     pub repo: RepoName,
     /// The health the store records (`Ok` or `Unknown`); a missing
     /// directory is not seen here.
@@ -60,6 +67,12 @@ pub struct WorkspaceSummary {
     pub path: PathBuf,
     /// The latest checkpoint; none when untracked or never checkpointed.
     pub checkpoint: Option<CheckpointId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BehindStatus {
+    pub behind: Option<u32>,
+    pub unchecked: bool,
 }
 
 /// The summaries `sel` names, by session id. A cwd in no session's
@@ -105,6 +118,8 @@ pub fn summary(
                     _ => WorkspaceHealth::Ok,
                 };
                 v.push(WorkspaceSummary {
+                    behind: None,
+                    unchecked: true,
                     repo: repo.clone(),
                     health_stored: health,
                     path: st.path.clone(),
@@ -121,6 +136,21 @@ pub fn summary(
         };
         let rm = rm_notes(store, root, &rec)?;
         out.push(SessionSummary {
+            behind: rec
+                .manifest
+                .repos
+                .iter()
+                .filter(|(_, ws)| ws.tracked)
+                .map(|(repo, _)| {
+                    (
+                        repo.clone(),
+                        BehindStatus {
+                            behind: None,
+                            unchecked: true,
+                        },
+                    )
+                })
+                .collect(),
             id: rec.manifest.id.clone(),
             ticket: rec.manifest.ticket.clone(),
             state: SessionState::from(rec.lifecycle),

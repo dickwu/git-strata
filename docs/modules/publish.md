@@ -821,7 +821,69 @@ git commit -m "feat(publish): one merge under the repo lock"
 
 ### rm-followups（2026-10-29，[实现时补的决定]，design: git-strata-review-notes/rm-followups/design.md r10）
 
-- **`MovePolicy::{Explicit, Auto}`**：`after_publish`、`rebase_replayed` 与 daemon 的追赶走 `Auto`；rollout 与显式 move 仍是 `Explicit`。`Auto` 的门：G0 状态；G1 整个工作区根的 `open_files`；G2 整根只看元数据的遍历，`quiet_secs` 内有写或扫描中变了 → 推迟；G3 `rebase_preview`（`PreviewBlobs`，不写 store），非 regenerable 的冲突 → 推迟；G4 在锁里：从 BeforeRollout checkpoint 重算冲突、`begin_move` 同一事务写 `move_activity` 基线、第 14 步再走一遍 G2 与 `open_files_many`（`Busy` + `auto_deferred` → `Deferred`）、交换后 Phase F 发现迟到的写就写通知并保留旧树。任何门不过都是 `RebaseReport::Deferred{reason, detail, proposal}`，从不强挪。
+- **`MovePolicy::{Explicit, Auto, Agent}`**：`after_publish`、`rebase_replayed` 与 daemon 的追赶走 `Auto`；rollout 与显式 move 仍是 `Explicit`。`Auto` 的门：G0 状态；G1 整个工作区根的 `open_files`；G2 整根只看元数据的遍历，`quiet_secs` 内有写或扫描中变了 → 推迟；G3 `rebase_preview`（`PreviewBlobs`，不写 store），非 regenerable 的冲突 → 推迟；G4 在锁里：从 BeforeRollout checkpoint 重算冲突、`begin_move` 同一事务写 `move_activity` 基线、第 14 步再走一遍 G2 与 `open_files_many`（`Busy` + `auto_deferred` → `Deferred`）、交换后 Phase F 发现迟到的写就写通知并保留旧树。任何门不过都是 `RebaseReport::Deferred{reason, detail, proposal}`，从不强挪。
 - **C2**：`deps_changed = "move_source"`（缺省）且新依赖键不同时，先在锁里记下依赖提案（提升的草稿，否则 Main old→n），再只把源码挪到（发布的树，旧依赖集），不安装、不预热；`Moved{deps_pending}`，发布报告 JSON 带漂移提示。`wait` = 原来的 `Waiting`。
 - **`rebase_pending`**（pending.rs）：`record_publish` 事务里写计划（planned_*），`commit_into` 成功后在仓库锁里提升；按可达性解决（含提交后失败的 `publish_unfinished`）；daemon 启动与 replay 开始时在仓库锁里重建；推迟以 `UPDATE … WHERE rev` 更新；`finish_move` 事务里消费。追赶 `catch_up`：每仓库不等锁，退避 quiet·2^(k−1)，封顶 30 min；过期的目标 `discard_pending_target`；运行中的发布 → `busy`。
 - **旧树保留**（old_tree.rs `collect_old_tree`）：有通知或缺基线 → 保留；被持有则重置计数；两次相隔 Q 的干净检查才退役；保留的 Auto 旧树重新排队。
+
+### Main-sync and O7
+
+Main-sync upstream reporting is daemon enrichment: after `publish_bound` returns and the whole
+publishing group's post-publish rebase has run, the reply adds `upstream` keyed by each original
+session id (including rerun/already-published batches). Enrichment failure cannot change the
+publish result. The CLI preserves the field while retaining its existing push outcome/error rules.
+Default-branch fetches in publish, unknown-publish reconciliation and sibling preparation record
+fetch success/failure in `repo_fetch`; publishing a split branch does not claim default-branch freshness.
+
+
+`MovePolicy::Agent` uses `walk_activity` rather than the Auto quiet-window /
+whole-workspace-holder gates and dispatches to `move_workspace_agent`.
+The sync daemon handler owns dependency preparation and report-bound
+resolution; ordinary publish rebases remain Auto.
+
+Before merging a release group's paths, `stage::plan` intersects each
+batch's selected changes (including rename sources) with that session's
+workspace conflicts. Any intersection returns `Conflict`,
+`detail.reason = "move_conflict"`, `paths`, per-session conflicts, and fix
+`git-strata sync --repo <repo> --resolved PATH` (or `--keep PATH`, naming the repo), with the
+report's `--target … --generation …` when sync saved a conflict report. Neither LWW
+nor a new checkpoint acknowledges these conflicts. Publishing other paths
+remains allowed. Legacy up-to-date conflicts can be acknowledged by sync
+without a report/target through `Store::clear_conflicts`, including on repos
+that do not follow main.
+
+### Main-sync: T4 reconcile and C3 dependency moves
+
+`main_follow` runs after new/add, publish's group rebase, standalone push,
+chain resolution and check-sibling fetches, and after reconstruction in every
+T2 pass. Split-branch repos are excluded. Only Active, tracked, healthy
+workspaces without an unresolved scene or open move intent are enrolled.
+A behind workspace gets a `source=main` target; an ahead or diverged workspace
+is left alone. A resolved move's retained scene JSON is audit history only
+when its latest intent is Done, Abandoned or Refused.
+
+Committed main/publish targets advance only to strict descendants; unfinished
+or unpushed publish targets stay put. Retargeting refreshes `from_tree` and
+`from_deps`, clears `to_deps`, and preserves open-files/recent-writes/conflicts
+backoff. Keys are shared per immutable tree within each pass and recomputed
+with the current toolchain/install identity on the next pass. Exports and keys
+are prepared outside the repo lock; the locked reconcile rechecks the tip and
+uses `observe_main_locked`. No locked helper acquires the repo lock again.
+
+In an effective `sync.deps=apply` repo, T4 also enrolls `(main tree, old deps)`
+residue with `to_deps=key(tree)`, even after a proposal settled or an earlier
+observation failed. Changed identities get a new owning Pending proposal.
+OwnChange/Drift and terminal unsealed installs have no deps-only row. An
+unsealed deps-only target records its proposal and defers with `installing` or
+`waiting_install` and normal backoff; it never takes C2 or reports a no-op move.
+`already_based` drops it only once its dependency target is met.
+
+C3 precedes C2: Auto + apply + a sealed target + the rollout classifier's
+OwnChange/Drift checks moves the full `(tree, new deps)` through G0–G4.
+`base_for` builds that actual target before the gates, with T2's no-wait lock
+behavior; no temporary `(tree, old deps)` base is built to discover the key.
+Draft promotion/proposal bookkeeping remains intact. Unsealed source targets
+keep C2/wait behavior; apply-mode Auto does not prewarm on the T2 thread.
+After C3 and each T2 pass, a Pending proposal settles through `auto_applied`
+only when no non-Removed tracked workspace differs, including Unknown and
+Creating sessions. `confirm` keeps the existing human dependency rollout.

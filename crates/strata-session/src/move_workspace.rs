@@ -93,6 +93,12 @@ struct Mv<'m> {
     shadow_dir: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+struct AgentMove<'a> {
+    options: &'a RebaseOptions,
+    kept: &'a [RepoPath],
+}
+
 impl Sessions<'_> {
     /// The configured repo whose main checkout has this RepoId.
     pub fn repo_name(&self, repo: &RepoId) -> Result<RepoName> {
@@ -132,7 +138,7 @@ impl Sessions<'_> {
         head: CommitOid,
         consume: Option<u64>,
     ) -> Result<MoveReport> {
-        self.move_inner(session, repo, new_base, head, consume, None)
+        self.move_inner(session, repo, new_base, head, consume, None, None)
     }
 
     /// An `Auto` move (rm-followups §1.4 G4): [`Sessions::move_workspace_consuming`]
@@ -152,9 +158,59 @@ impl Sessions<'_> {
         consume: Option<u64>,
         baseline: &strata_store::MoveBaseline,
     ) -> Result<MoveReport> {
-        self.move_inner(session, repo, new_base, head, consume, Some(baseline))
+        self.move_inner(session, repo, new_base, head, consume, Some(baseline), None)
     }
 
+    /// Agent moves keep G0/G2/G4, but check only dependency-directory
+    /// holders. The caller snapshots with `walk_activity`, without a quiet window.
+    pub fn move_workspace_agent(
+        &self,
+        session: &SessionId,
+        repo: &RepoId,
+        new_base: BaseGen,
+        head: CommitOid,
+        consume: Option<u64>,
+        baseline: &strata_store::MoveBaseline,
+    ) -> Result<MoveReport> {
+        let new = self.base_of(&new_base)?;
+        let opts = RebaseOptions::for_move(&new, false)?;
+        self.move_workspace_agent_resolving(
+            session,
+            repo,
+            new_base,
+            head,
+            consume,
+            baseline,
+            &opts,
+            &[],
+        )
+    }
+
+    /// An Agent move with the report-bound, per-call resolution decisions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn move_workspace_agent_resolving(
+        &self,
+        session: &SessionId,
+        repo: &RepoId,
+        new_base: BaseGen,
+        head: CommitOid,
+        consume: Option<u64>,
+        baseline: &strata_store::MoveBaseline,
+        options: &RebaseOptions,
+        kept: &[RepoPath],
+    ) -> Result<MoveReport> {
+        self.move_inner(
+            session,
+            repo,
+            new_base,
+            head,
+            consume,
+            Some(baseline),
+            Some(AgentMove { options, kept }),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn move_inner(
         &self,
         session: &SessionId,
@@ -163,6 +219,7 @@ impl Sessions<'_> {
         head: CommitOid,
         consume: Option<u64>,
         auto: Option<&strata_store::MoveBaseline>,
+        agent: Option<AgentMove<'_>>,
     ) -> Result<MoveReport> {
         // ---- Phase A: checks; nothing is written.
         // 1.
@@ -229,6 +286,18 @@ impl Sessions<'_> {
                 "repo": name.as_str(),
                 "scene": row.scene.clone().unwrap_or(Value::Null),
             })));
+        }
+        if agent.is_some() {
+            let open_move = self.store.move_intents(session)?.iter().any(|i| {
+                i.repo == name && matches!(i.state, MoveState::Preparing | MoveState::Swapping)
+            });
+            let scene = rec.scene.is_some() || self.store.workspace_scene_live(session, &name, row.scene.is_some())?;
+            if scene || open_move {
+                return Err(auto_defer(
+                    "state",
+                    json!({"scene": scene, "open_move":open_move}),
+                ));
+            }
         }
         for p in [ws.path.clone(), ws.path.join(".git")] {
             if !exists(&p) {
@@ -369,8 +438,17 @@ impl Sessions<'_> {
         let mut pre: Option<(Rebased, bool)> = None;
         if auto.is_some() {
             let ignorecase = git.read_index(&ws.path)?.ignorecase;
-            let opts = RebaseOptions::for_move(&new, ignorecase)?;
-            let rebased = strata_overlay::rebase(&Overlay::from_checkpoint(&cp), &old, &new, self.store, &opts)?;
+            let mut opts = RebaseOptions::for_move(&new, ignorecase)?;
+            if let Some(a) = agent {
+                opts.resolutions = a.options.resolutions.clone();
+            }
+            let rebased = strata_overlay::rebase(
+                &Overlay::from_checkpoint(&cp),
+                &old,
+                &new,
+                self.store,
+                &opts,
+            )?;
             let patterns = self.regenerable(&name);
             let regen = crate::Regenerable::new(&patterns, cfg);
             let blocking: Vec<&RepoPath> = rebased
@@ -380,7 +458,22 @@ impl Sessions<'_> {
                 .collect();
             if !blocking.is_empty() {
                 let shown: Vec<&str> = blocking.iter().take(20).map(|p| p.as_str()).collect();
-                return Err(auto_defer("conflicts", json!({ "paths": shown, "count": blocking.len() })));
+                return Err(auto_defer(
+                    "conflicts",
+                    json!({ "paths": shown, "count": blocking.len() }),
+                ));
+            }
+            let mut rebased = rebased;
+            if agent.is_some() {
+                rebased.conflicts.clear();
+            }
+            // O7: kept-side conflicts left by an earlier Explicit move survive
+            // automatic and Agent moves; only an acknowledgement clears them.
+            for p in &row.conflicts {
+                let acked = agent.is_some_and(|a| a.options.resolutions.contains_key(p) || a.kept.contains(p));
+                if !acked && !rebased.conflicts.contains(p) {
+                    rebased.conflicts.push(p.clone());
+                }
             }
             pre = Some((rebased, ignorecase));
         }
@@ -392,21 +485,67 @@ impl Sessions<'_> {
         let sname = format!("{MOVE_STAGING_PREFIX}{name}-{}", random_hex(8));
         let staging = root.join(&sname);
         let started = SystemTime::now();
-        let n = self.store.begin_move_with(session, &name, &new_base, &head, &staging, started, auto)?;
-        let mv = Mv { session, name: &name, n, staging: staging.clone(), shadow_dir: shadow_dir.clone() };
+        let policy = if agent.is_some() {
+            strata_store::MoveActivityPolicy::Agent
+        } else {
+            strata_store::MoveActivityPolicy::Auto
+        };
+        let n = self.store.begin_move_with_policy(
+            session, &name, &new_base, &head, &staging, started, auto, policy,
+        )?;
+        let mv = Mv {
+            session,
+            name: &name,
+            n,
+            staging: staging.clone(),
+            shadow_dir: shadow_dir.clone(),
+        };
 
         // 13. prepare.
         let old_admin = shadow_dir.join("worktrees").join(row.generation.to_string());
         let prepared = (|| -> Result<(Rebased, Vec<RepoPath>, Carried, bool)> {
             self.store.set_move_phase(session, &name, n, "prepare")?;
+            if let Some(a) = agent {
+                let resolved: Vec<_> = a
+                    .options
+                    .resolutions
+                    .keys()
+                    .filter(|p| !a.kept.contains(p))
+                    .collect();
+                let whole_file: Vec<_> = a
+                    .options
+                    .resolutions
+                    .iter()
+                    .filter(|(_, r)| matches!(r, strata_overlay::Resolution::WholeFile))
+                    .map(|(p, _)| p)
+                    .collect();
+                self.store.record_sync_resolution(
+                    session,
+                    &name,
+                    n,
+                    &json!({"resolved":resolved,"kept":a.kept,"whole_file":whole_file}),
+                )?;
+            }
             self.seams.hit("move.prepare", Some(&name))?;
             strata_apfs::clone_tree_rooted(&self.store.base_dir(&new_base), &root, &rp(sname.clone()))?;
             let (rebased, ignorecase) = match pre.take() {
                 Some(x) => x,
                 None => {
                     let ignorecase = git.read_index(&ws.path)?.ignorecase;
-                    let opts = RebaseOptions::for_move(&new, ignorecase)?;
-                    (strata_overlay::rebase(&Overlay::from_checkpoint(&cp), &old, &new, self.store, &opts)?, ignorecase)
+                    let mut opts = RebaseOptions::for_move(&new, ignorecase)?;
+                    if let Some(a) = agent {
+                        opts.resolutions = a.options.resolutions.clone();
+                    }
+                    (
+                        strata_overlay::rebase(
+                            &Overlay::from_checkpoint(&cp),
+                            &old,
+                            &new,
+                            self.store,
+                            &opts,
+                        )?,
+                        ignorecase,
+                    )
                 }
             };
             strata_overlay::project(self.store, &rebased.overlay, &staging)?;
@@ -439,9 +578,11 @@ impl Sessions<'_> {
                     let shown: Vec<&String> = changed.iter().take(20).collect();
                     return Err(auto_defer("changed_during_move", json!({ "paths": shown, "count": changed.len() })));
                 }
-                let mut h = strata_deps::open_files(&ws.path)?;
-                h.extend(strata_deps::open_files(&staging)?);
-                return Ok(h);
+                if agent.is_none() {
+                    let mut h = strata_deps::open_files(&ws.path)?;
+                    h.extend(strata_deps::open_files(&staging)?);
+                    return Ok(h);
+                }
             }
             let mut h = held_dirs(&ws.path, &d)?;
             h.extend(held_dirs(&staging, &d)?);
@@ -449,7 +590,7 @@ impl Sessions<'_> {
         })();
         match rechecked {
             Ok(h) if h.is_empty() => {}
-            Ok(h) if auto.is_some() => {
+            Ok(h) if auto.is_some() && agent.is_none() => {
                 let e = open_files_error(&ws.path, h);
                 let e = auto_defer("open_files", e.detail.unwrap_or(Value::Null));
                 return Err(self.prepare_failed(&mv, "recheck", e));

@@ -59,6 +59,9 @@ pub struct Options {
     /// [`CATCH_UP_EVERY`](crate::CATCH_UP_EVERY) in production
     /// (rm-followups §1.6 T2); tests lengthen or shorten it.
     pub catch_up_every: Duration,
+    /// Test-only scheduler admission; direct worker passes remain callable.
+    #[cfg(feature = "test-seams")]
+    pub background_main_sync: bool,
 }
 
 impl Options {
@@ -74,6 +77,8 @@ impl Options {
             alert: Arc::new(|line: &str| eprintln!("git-stratad: {line}")),
             reconcile_every: crate::RECONCILE_EVERY,
             catch_up_every: crate::CATCH_UP_EVERY,
+            #[cfg(feature = "test-seams")]
+            background_main_sync: true,
         }
     }
 }
@@ -210,6 +215,7 @@ impl BeforeCheckpoint for DaemonBefore {
 
 /// Everything the daemon owns for its lifetime (steps 2–7).
 pub struct Core {
+    pub upstream: crate::upstream::Cache,
     pub opts: Options,
     pub config: Config,
     pub store: Store,
@@ -221,6 +227,7 @@ pub struct Core {
     pub warnings: Warnings,
     /// `pins.json`: the effective safety flags.
     pub pins: Pins,
+    pub main_sync: crate::main_sync::State,
     instance: InstanceLock,
 }
 
@@ -270,6 +277,9 @@ pub fn prepare_locked(
     for p in strata_deps::clean_snapshots(&config.paths) {
         tracing::warn!(path = %p.display(), "an install-input snapshot could not be removed");
     }
+    // Main-sync whole-tree exports left by a killed daemon (removed on Drop
+    // otherwise). Entries are `<pid>-…`; a live owner's are kept.
+    sweep_exports(&config.paths.root);
     // Dev-port leases (config [dev_ports]); validated with the config.
     store.set_dev_ports_policy(Some(strata_store::DevPortsPolicy::probing(config.dev_ports.blocks()?)));
     // 7. One Git per repo; two names for one repository → NameTaken.
@@ -298,6 +308,8 @@ pub fn prepare_locked(
             .with_detail(json!({ "reason": "no_instance_lock" })));
     };
     Ok(Core {
+        main_sync: Default::default(),
+        upstream: Default::default(),
         pins,
         env: InstallEnv { path: opts.install_path.clone(), timeout: InstallEnv::DEFAULT_TIMEOUT },
         before: DaemonBefore,
@@ -343,6 +355,11 @@ fn check_realpath_root(root: &Path) -> Result<()> {
 }
 
 impl Core {
+    /// The current pinned dependency policy, including a later `config relax`.
+    pub fn effective_sync_deps(&self, repo: &RepoName) -> strata_types::SyncDeps {
+        self.pins.effective_sync_deps(repo)
+    }
+
     /// The effective (pinned) flags of `repo`.
     pub fn pinned(&self, repo: &RepoName) -> Result<PinnedFlags> {
         self.pins
@@ -786,4 +803,23 @@ pub fn quarantine_entries(root: &Path) -> Vec<PathBuf> {
         }
     }
     out.into_iter().collect()
+}
+
+fn sweep_exports(root: &Path) {
+    for sub in ["daemon/main-follow", "daemon/sync"] {
+        let Ok(entries) = std::fs::read_dir(root.join(sub)) else { continue };
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let Some(pid) = name.to_str().and_then(|n| n.split('-').next()).and_then(|p| p.parse::<i32>().ok()) else {
+                continue;
+            };
+            // SAFETY: kill with signal 0 only checks that the process exists.
+            let alive = pid == std::process::id() as i32
+                || unsafe { libc::kill(pid, 0) } == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+            if !alive && let Err(err) = std::fs::remove_dir_all(e.path()) {
+                tracing::warn!(path = %e.path().display(), %err, "a stale main-sync export could not be removed");
+            }
+        }
+    }
 }

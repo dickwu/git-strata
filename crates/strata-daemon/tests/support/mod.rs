@@ -308,6 +308,7 @@ exit $rc
             // rm-followups: no quiet window, so a publish moves its own
             // session at once (tests of the window set it).
             rebase: strata_types::RebaseConfig { quiet_secs: 0, ..Default::default() },
+            sync: Default::default(),
         }
     }
 }
@@ -424,6 +425,8 @@ impl Dfx {
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
             reconcile_every: self.reconcile_every,
             catch_up_every: self.catch_up_every,
+            // Legacy RPC tests control their own fetch/install timelines.
+            background_main_sync: false,
         }
     }
 

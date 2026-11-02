@@ -26,7 +26,7 @@ fn no_such_attempt(id: u64) -> StrataError {
     err(Code::InvalidInput, format!("no deps attempt {id}"), json!({ "reason": "no_such_attempt", "attempt": id }))
 }
 
-fn no_such_proposal(id: ProposalId) -> StrataError {
+pub(crate) fn no_such_proposal(id: ProposalId) -> StrataError {
     err(Code::InvalidInput, format!("no proposal {id}"), json!({ "reason": "no_such_proposal", "proposal": id.get() }))
 }
 
@@ -34,6 +34,11 @@ const ATTEMPT_COLS: &str = "id, repo, set_id, kind, state, staging, pid, started
 const PROPOSAL_COLS: &str = "id, repo, origin_session, from_set, from_inputs, to_set, to_inputs, tree, head, state, \
                              superseded_by, created_ns, updated_ns";
 const MAIN_COLS: &str = "repo, tree, head, inputs_hash, set_id, observed_ns";
+
+fn proposal_cols(c: &Connection) -> Result<String> {
+    let from_head = if crate::rm_state::user_version(c)? >= crate::rm_state::V4 { "from_head" } else { "NULL" };
+    Ok(format!("{PROPOSAL_COLS}, {from_head}"))
+}
 
 fn attempt_row(r: &Row) -> crate::sql::SqlResult<Result<DepsAttempt>> {
     let id: i64 = r.get(0)?;
@@ -87,6 +92,7 @@ fn proposal_row(r: &Row) -> crate::sql::SqlResult<Result<ProposalRecord>> {
     let by: Option<i64> = r.get(10)?;
     let created: i64 = r.get(11)?;
     let updated: i64 = r.get(12)?;
+    let from_head: Option<String> = r.get(13)?;
     Ok((|| {
         let status = proposal_status_of(&state)?;
         let superseded_by = by.map(|b| seq(b, "superseded_by").map(|b| ProposalId::from(b as i64))).transpose()?;
@@ -102,6 +108,7 @@ fn proposal_row(r: &Row) -> crate::sql::SqlResult<Result<ProposalRecord>> {
             origin: opt_parse(origin, "session id")?,
             from: parse(from, "deps set id")?,
             from_inputs,
+            from_head: opt_parse(from_head, "from_head")?,
             to: parse(to, "deps set id")?,
             to_inputs,
             tree: opt_parse(tree, "tree oid")?,
@@ -391,7 +398,7 @@ impl Store {
             }
             c.execute(
                 "INSERT INTO deps_proposals (id, repo, origin_session, from_set, from_inputs, to_set, to_inputs, tree, head, \
-                 state, created_ns, updated_ns) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+                 state, created_ns, updated_ns, from_head) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12)",
                 params![
                     n,
                     new.repo.as_str(),
@@ -403,7 +410,8 @@ impl Store {
                     new.tree.as_ref().map(TreeOid::as_str),
                     new.head.as_ref().map(CommitOid::as_str),
                     if target { "pending" } else { "awaiting_publish" },
-                    at
+                    at,
+                    new.from_head.as_ref().map(CommitOid::as_str)
                 ],
             )
             .map_err(|e| sql(e, OP, NOT_WRITTEN))?;
@@ -555,7 +563,7 @@ impl Store {
 
     pub fn proposal(&self, id: ProposalId) -> Result<Option<ProposalRecord>> {
         let Ok(pid) = i64::try_from(id.get()) else { return Ok(None) };
-        self.read(|c| one(c, &format!("SELECT {PROPOSAL_COLS} FROM deps_proposals WHERE id = ?1"), [pid], proposal_row))
+        self.read(|c| one(c, &format!("SELECT {} FROM deps_proposals WHERE id = ?1", proposal_cols(c)?), [pid], proposal_row))
     }
 
     pub fn proposals(&self, repo: Option<&RepoName>, open_only: bool) -> Result<Vec<ProposalRecord>> {
@@ -565,8 +573,10 @@ impl Store {
         } else {
             ""
         };
-        let q = format!("SELECT {PROPOSAL_COLS} FROM deps_proposals WHERE (?1 IS NULL OR repo = ?1) {open} ORDER BY id");
-        self.read(|c| collect(c, &q, [repo.map(RepoName::as_str)], proposal_row))
+        self.read(|c| {
+            let q = format!("SELECT {} FROM deps_proposals WHERE (?1 IS NULL OR repo = ?1) {open} ORDER BY id", proposal_cols(c)?);
+            collect(c, &q, [repo.map(RepoName::as_str)], proposal_row)
+        })
     }
 
     pub fn deps_main(&self, repo: &RepoName) -> Result<Option<DepsMain>> {

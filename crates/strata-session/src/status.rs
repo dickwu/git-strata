@@ -25,6 +25,9 @@ use crate::{Result, Sessions};
 /// A session's status (design §6.3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionStatus {
+    /// Daemon enrichment from local refs, store and its live Tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<strata_types::Upstream>,
     /// `manifest.id`, at the top level (status-perf D3).
     pub id: SessionId,
     /// `manifest.ticket`, at the top level; null when there is none.
@@ -100,6 +103,8 @@ impl std::ops::Deref for DriftStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<strata_types::RepoUpstream>,
     pub health: WorkspaceHealth,
     /// The admin-dir generation (§4.2).
     pub generation: u64,
@@ -168,9 +173,10 @@ impl From<MirrorDrift> for MirrorDriftItem {
             MirrorDrift::Exclude => item("info_exclude"),
             MirrorDrift::Attributes => item("info_attributes"),
             MirrorDrift::Config { key } => MirrorDriftItem { key: Some(key), ..item("config") },
-            MirrorDrift::PrePushGuardDisabled { hooks_path, hook_replaced } => {
-                MirrorDriftItem { hooks_path, hook_replaced: Some(hook_replaced), ..item("pre_push_guard_disabled") }
-            }
+            MirrorDrift::PrePushGuardDisabled { hooks_path,
+                hook_replaced,
+            } => MirrorDriftItem { hooks_path, hook_replaced: Some(hook_replaced), ..item("pre_push_guard_disabled")
+            },
         }
     }
 }
@@ -256,6 +262,7 @@ impl Sessions<'_> {
             out.push(match first_err {
                 Some(e) => Err(e),
                 None => Ok(SessionStatus {
+                    upstream: None,
                     id: rec.manifest.id.clone(),
                     ticket: rec.manifest.ticket.clone(),
                     manifest: rec.manifest.clone(),
@@ -374,9 +381,12 @@ impl Sessions<'_> {
         if let Some(shadow) = &shadow {
             match git.shadow_drift(shadow, &ws.path) {
                 Ok(items) if items.is_empty() => {}
-                Ok(items) => warnings
-                    .push(StatusWarning::MirrorDrift { items: items.into_iter().map(MirrorDriftItem::from).collect() }),
-                Err(e) if e.code == Code::Unknown => warnings.push(StatusWarning::PrePushGuardUnknown { detail: e }),
+                Ok(items) => warnings.push(StatusWarning::MirrorDrift {
+                    items: items.into_iter().map(MirrorDriftItem::from).collect(),
+                }),
+                Err(e) if e.code == Code::Unknown => {
+                    warnings.push(StatusWarning::PrePushGuardUnknown { detail: e })
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -385,14 +395,16 @@ impl Sessions<'_> {
         let live = self.is_live_move(id, repo);
         for i in self.store.move_intents(id)?.into_iter().filter(|i| &i.repo == repo) {
             match i.state {
-                MoveState::Preparing if !live => {
-                    warnings.push(StatusWarning::MoveLeftover { n: i.n, staging: i.staging.clone() })
-                }
-                MoveState::Swapping if !live => {
-                    warnings.push(StatusWarning::MoveAwaitingRecover { n: i.n, staging: i.staging.clone() })
-                }
-                MoveState::Abandoned if lstat(&i.staging).map_err(|e| read_err(&e, &i.staging))?.is_some() => {
-                    warnings.push(StatusWarning::MoveLeftover { n: i.n, staging: i.staging.clone() })
+                MoveState::Preparing if !live => warnings.push(StatusWarning::MoveLeftover { n: i.n, staging: i.staging.clone(),
+                }),
+                MoveState::Swapping if !live => warnings.push(StatusWarning::MoveAwaitingRecover { n: i.n, staging: i.staging.clone(),
+                }),
+                MoveState::Abandoned
+                    if lstat(&i.staging)
+                        .map_err(|e| read_err(&e, &i.staging))?
+                        .is_some() => {
+                    warnings.push(StatusWarning::MoveLeftover { n: i.n, staging: i.staging.clone(),
+                    })
                 }
                 MoveState::Done => {
                     let path = i.old_tree.clone().unwrap_or_else(|| i.staging.clone());
@@ -451,6 +463,7 @@ impl Sessions<'_> {
         }
 
         Ok(WorkspaceStatus {
+            upstream: None,
             health,
             generation: row.generation,
             scene,

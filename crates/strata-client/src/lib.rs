@@ -10,6 +10,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use strata_types::{Code, StrataError};
 
+pub mod deps;
+
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The next request id (one counter per process, shared with the cli's

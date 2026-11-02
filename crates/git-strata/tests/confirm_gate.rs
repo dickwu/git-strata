@@ -197,6 +197,7 @@ fn fixture(lv: &Live, core: &Core) -> Fx {
             origin: strata_deps::ProposalOrigin::Main,
             from: base.deps.clone(),
             from_inputs: "1".repeat(64),
+            from_head: None,
             to: DepsSetId::try_from(to).unwrap(),
             to_inputs: "2".repeat(64),
             tree: Some(TreeOid::try_from(tree).unwrap()),

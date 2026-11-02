@@ -21,7 +21,11 @@ use support::*;
 const CHAIN: &str = "refs/strata/publish/main";
 
 fn fx() -> Fx {
-    let fx = Fx::with(&["tool"]);
+    let mut fx = Fx::with(&["tool"]);
+    // This file specifies explicit/C1/C2 behavior; main_follow.rs covers
+    // the default T4/C3 policy and residue enrollment.
+    fx.cfg_mut("tool").sync.follow_main = Some(false);
+    fx.cfg_mut("tool").sync.deps = strata_types::SyncDeps::Confirm;
     fx.git_of("tool").fetch("origin", "main").unwrap();
     fx
 }
@@ -124,6 +128,7 @@ fn draft(fx: &Fx, s: &SessionId) -> Proposal {
                     origin: ProposalOrigin::Session { session: s.clone() },
                     from: old.deps.clone(),
                     from_inputs: from_inputs.clone(),
+                    from_head: None,
                     to: to.clone(),
                     to_inputs: to_inputs.clone(),
                     tree: None,

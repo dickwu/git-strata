@@ -35,15 +35,17 @@ mod shadow;
 mod stage;
 mod staging;
 mod tree;
+mod upstream;
 mod worktree;
 
-#[cfg(feature = "test-seams")]
-pub use seams::{GitCall, Pause, SyncEvent};
 pub use index::IndexInfo;
-pub use merge::{Hunk, Merge3, is_binary, merge3};
+pub use merge::{Hunk, Merge3, is_binary, merge3, merge3_favour_ours};
 pub use publish_io::{RefUpdate, TreeBlob, TreeItem};
 pub use remote::remote_ref;
+#[cfg(feature = "test-seams")]
+pub use seams::{GitCall, Pause, SyncEvent};
 pub use shadow::{MirrorDrift, Shadow};
+pub use upstream::CommitSummary;
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 

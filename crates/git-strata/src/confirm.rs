@@ -134,9 +134,10 @@ pub fn rm(ctx: &Ctx, session: &str, discard: bool) -> Result<Envelope> {
         Err(stopped) => {
             let signal = crate::interrupt::exit_with_signal();
             let (code, reason, msg) = match stopped {
-                Stopped::NotSent => {
-                    (Code::NotConfirmed, "interrupted_not_sent", format!("rm of {id} was not sent; nothing happened"))
-                }
+                Stopped::NotSent => (
+                    Code::NotConfirmed,
+                    "interrupted_not_sent", format!("rm of {id} was not sent; nothing happened"),
+                ),
                 Stopped::Sent => (
                     Code::Unknown,
                     "interrupted_after_send",
@@ -587,7 +588,12 @@ fn interactive_batch(config: &Config) -> Result<Batch> {
         }
         let pick = match t.parse::<usize>() {
             Ok(n) if n >= 1 && n <= items.len() => vec![items[n - 1].clone()],
-            Ok(_) => return Err(invalid("pick", format!("{t} is not one of the numbers shown"))),
+            Ok(_) => {
+                return Err(invalid(
+                    "pick",
+                    format!("{t} is not one of the numbers shown"),
+                ));
+            }
             Err(_) => {
                 let v: Vec<_> = items.iter().filter(|(_, p)| p.as_str() == t).cloned().collect();
                 if v.is_empty() {
@@ -718,9 +724,19 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
     let reply = ctx.call("publish", json!({ "group": { "id": 0, "batches": batches }, "shown": shown, "plan": plan }), Kind::Write);
     match reply {
         Ok(data) => {
-            let published = data.get("published").and_then(Value::as_array).cloned().unwrap_or_default();
-            let already = data.get("already_published").and_then(Value::as_array).cloned().unwrap_or_default();
-            Ok(publish_envelope(&config, &published, &already, None))
+            let published = data
+                .get("published")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let already = data
+                .get("already_published")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut envelope = publish_envelope(&config, &published, &already, None);
+            carry_upstream(&mut envelope, &data);
+            Ok(envelope)
         }
         Err(e) => {
             // Review H4: what landed before the stop (in this call or an
@@ -745,6 +761,14 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
             let refused = bare_refusal(&e);
             Ok(publish_envelope(&config, &before, &already, (!refused).then_some(e)))
         }
+    }
+}
+
+/// Preserve enrichment through the CLI's rebuilt publish envelope, even
+/// when its existing push-outcome rules turn a daemon ok into an error.
+fn carry_upstream(envelope: &mut Envelope, daemon: &Value) {
+    if let Some(upstream) = daemon.get("upstream") {
+        envelope.data["upstream"] = upstream.clone();
     }
 }
 
@@ -845,7 +869,9 @@ fn dedup(lines: Vec<String>) -> Vec<String> {
 /// repo's name, so `dedup` only merges the same warning of the same repo.
 fn deps_warning_line(w: &Value) -> Option<&str> {
     match w.get("kind").and_then(Value::as_str)? {
-        "DepsSubstituted" | "DepsReinstalled" | "DepsInputsLeft" => w.get("detail")?.get("message")?.as_str(),
+        "DepsSubstituted" | "DepsReinstalled" | "DepsInputsLeft" => {
+            w.get("detail")?.get("message")?.as_str()
+        }
         _ => None,
     }
 }
@@ -865,6 +891,29 @@ fn waiting_proposals(config: &Config, repos: &[String]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_publish_reply_carries_upstream() {
+        let config = Config {
+            paths: strata_types::Paths {
+                root: std::path::PathBuf::from("/unused"),
+            },
+            repos: Default::default(),
+            status: Default::default(),
+            dev_ports: Default::default(),
+        };
+        let upstream = json!({ "s-abcdefgh": { "clean": false, "repos": {} } });
+        for kind in ["Pushed", "Refused", "Unknown"] {
+            let published =
+                [json!({"repo":"tool","commit":"abc","checks_ran":1,"push":{"kind":kind}})];
+            let mut envelope = publish_envelope(&config, &published, &[], None);
+            let (ok, error) = (envelope.ok, serde_json::to_value(&envelope.error).unwrap());
+            carry_upstream(&mut envelope, &json!({"upstream":upstream}));
+            assert_eq!(envelope.data["upstream"], upstream);
+            assert_eq!(envelope.ok, ok);
+            assert_eq!(serde_json::to_value(&envelope.error).unwrap(), error);
+        }
+    }
 
     fn unknown(d: Value) -> StrataError {
         StrataError::new(Code::Unknown, "x").with_detail(d)

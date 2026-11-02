@@ -1,0 +1,2 @@
+// bun JSONC
+{"lockfileVersion":1,"workspaces":{"":{"dependencies":{"react":"^19","zod":"3"}}},"packages":{"react":["react@19.0.0","",{},"hash"],"zod":["zod@3.0","",{},"hash"],},}

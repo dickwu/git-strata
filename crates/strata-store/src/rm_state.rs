@@ -1,7 +1,8 @@
 //! Schema v3 (rm-followups §1.11, §2.2 R2): the last `rm` outcome of a
 //! session and the deferred post-publish rebases. Every reader checks
 //! `user_version >= 3` first: a new CLI on a store an old daemon still
-//! serves (v2) sees no rows, not an error. Writers run on a migrated
+//! serves (v2) sees no rows, not an error. On v3, new source/to_deps
+//! fields read as Publish/None. Writers run on a migrated
 //! (latest) handle only.
 
 use std::time::SystemTime;
@@ -9,7 +10,7 @@ use std::time::SystemTime;
 use crate::sql::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use strata_types::{Code, RepoName, SessionId, StrataError};
+use strata_types::{BaseGen, Code, CommitOid, DepsSetId, RepoName, SessionId, StrataError, TreeOid};
 
 use crate::codec::{ns, nonneg, parse, time, to_json};
 use crate::errors::{NOT_WRITTEN, bad_row, err, sql, sql_read};
@@ -20,6 +21,7 @@ use crate::{Result, Store};
 /// The first schema version with `rm_attempts`, `rebase_pending` and
 /// `move_activity`.
 pub(crate) const V3: i64 = 3;
+pub(crate) const V4: i64 = 4;
 
 fn w(op: &'static str) -> impl Fn(crate::sql::Error) -> StrataError {
     move |e| sql(e, op, NOT_WRITTEN)
@@ -51,6 +53,16 @@ pub struct RmAttempt {
     pub detail: Value,
 }
 
+/// Why a pending target was enrolled. Gates and precedence do not depend on it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingSource {
+    #[default]
+    Publish,
+    Replay,
+    Main,
+}
+
 /// One deferred post-publish rebase (design §1.3). Written from phase C
 /// on; read here so status shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +70,10 @@ pub struct RebasePending {
     pub session: SessionId,
     pub repo: RepoName,
     pub rev: u64,
+    #[serde(default)]
+    pub source: PendingSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_deps: Option<DepsSetId>,
     pub from_tree: String,
     pub from_deps: String,
     /// The committed (attemptable) target.
@@ -185,17 +201,20 @@ type PendingRow = (
     i64,
     i64,
     i64,
+    String,
+    Option<String>,
 );
 
 pub(crate) fn read_rebase_pending(c: &Connection, session: Option<&SessionId>) -> Result<Vec<RebasePending>> {
     if user_version(c)? < V3 {
         return Ok(Vec::new());
     }
+    let extra = if user_version(c)? >= V4 { "source, to_deps" } else { "'publish', NULL" };
     let mut st = c
         .prepare(
-            "SELECT session, repo, rev, from_tree, from_deps, head, tree, planned_head, planned_tree, planned_publish, \
-                    reason, detail_json, first_at_ns, last_at_ns, attempts, unpushed \
-             FROM rebase_pending WHERE ?1 IS NULL OR session = ?1 ORDER BY session, repo",
+            &format!("SELECT session, repo, rev, from_tree, from_deps, head, tree, planned_head, planned_tree, planned_publish, \
+                    reason, detail_json, first_at_ns, last_at_ns, attempts, unpushed, {extra} \
+             FROM rebase_pending WHERE ?1 IS NULL OR session = ?1 ORDER BY session, repo"),
         )
         .map_err(sql_read)?;
     let rows: Vec<PendingRow> = st
@@ -217,17 +236,26 @@ pub(crate) fn read_rebase_pending(c: &Connection, session: Option<&SessionId>) -
                 r.get(13)?,
                 r.get(14)?,
                 r.get(15)?,
+                r.get(16)?,
+                r.get(17)?,
             ))
         })
         .map_err(sql_read)?
         .collect::<crate::sql::SqlResult<Vec<_>>>()
         .map_err(sql_read)?;
     let mut out = Vec::with_capacity(rows.len());
-    for (s, repo, rev, ft, fd, head, tree, ph, pt, pp, reason, detail, first, last, attempts, unpushed) in rows {
+    for (s, repo, rev, ft, fd, head, tree, ph, pt, pp, reason, detail, first, last, attempts, unpushed, source, to_deps) in rows {
         out.push(RebasePending {
             session: parse(s, "rebase_pending.session")?,
             repo: parse(repo, "rebase_pending.repo")?,
             rev: nonneg(rev, "rebase_pending.rev")?,
+            source: match source.as_str() {
+                "publish" => PendingSource::Publish,
+                "replay" => PendingSource::Replay,
+                "main" => PendingSource::Main,
+                _ => return Err(bad_row(format!("rebase_pending.source {source:?}"))),
+            },
+            to_deps: to_deps.map(|v| parse(v, "rebase_pending.to_deps")).transpose()?,
             from_tree: ft,
             from_deps: fd,
             head,
@@ -283,6 +311,10 @@ fn row_of(c: &Connection, session: &SessionId, repo: &RepoName) -> Result<Option
 /// A row with no committed target, no planned replay target and no
 /// planned publish carries nothing: it is deleted.
 fn drop_if_empty(c: &Connection, session: &str, repo: &str, op: &'static str) -> Result<()> {
+    c.execute(
+        "UPDATE rebase_pending SET to_deps = NULL WHERE session = ?1 AND repo = ?2 AND head IS NULL",
+        params![session, repo],
+    ).map_err(wp(op))?;
     c.execute(
         "DELETE FROM rebase_pending WHERE session = ?1 AND repo = ?2 \
          AND head IS NULL AND planned_head IS NULL AND planned_publish IS NULL",
@@ -348,7 +380,7 @@ pub(crate) fn consume_on_move(
     let newer = consume.is_some() && !attempted;
     if attempted {
         c.execute(
-            "UPDATE rebase_pending SET head = NULL, tree = NULL, unpushed = 0, from_tree = ?3, from_deps = ?4 WHERE session = ?1 AND repo = ?2",
+            "UPDATE rebase_pending SET head = NULL, tree = NULL, to_deps = NULL, unpushed = 0, from_tree = ?3, from_deps = ?4 WHERE session = ?1 AND repo = ?2",
             params![session, repo, to.0, to.1],
         )
         .map_err(wp(op))?;
@@ -403,7 +435,7 @@ impl Store {
                 let Some((ft, fd)) = ws_base(c, s, rn).map_err(wp(OP))? else { return Ok(Tx::Rollback(false)) };
                 let detail = to_json(&json!({ "publish": publish }), "detail")?;
                 c.execute(
-                    "UPDATE rebase_pending SET head = ?3, tree = ?4, rev = ?5 + 1, reason = ?6, detail_json = ?7, \
+                    "UPDATE rebase_pending SET head = ?3, tree = ?4, to_deps = NULL, source = 'publish', rev = ?5 + 1, reason = ?6, detail_json = ?7, \
                      unpushed = (?6 = 'publish_unfinished'), attempts = 0, last_at_ns = ?8, from_tree = ?9, from_deps = ?10 WHERE session = ?1 AND repo = ?2",
                     params![s, rn, head, tree, r, reason, detail, at, ft, fd],
                 )
@@ -451,7 +483,7 @@ impl Store {
             }
             let n = c
                 .execute(
-                    "UPDATE rebase_pending SET head = NULL, tree = NULL, unpushed = 0, rev = rev + 1, reason = ?4, detail_json = ?5, \
+                    "UPDATE rebase_pending SET head = NULL, tree = NULL, to_deps = NULL, unpushed = 0, rev = rev + 1, reason = ?4, detail_json = ?5, \
                      last_at_ns = ?6 WHERE session = ?1 AND repo = ?2 AND rev = ?3",
                     params![s, rn, r, reason, detail, at],
                 )
@@ -530,7 +562,7 @@ impl Store {
                 if n == 0 {
                     c.execute(
                         "INSERT INTO rebase_pending (session, repo, rev, from_tree, from_deps, planned_head, planned_tree, \
-                         reason, first_at_ns, last_at_ns, attempts) VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, 'replay', ?7, ?7, 0)",
+                         source, reason, first_at_ns, last_at_ns, attempts) VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, 'replay', 'replay', ?7, ?7, 0)",
                         params![s, rn, ft, fd, p.planned_head, p.planned_tree, at],
                     )
                     .map_err(wp(OP))?;
@@ -555,7 +587,7 @@ impl Store {
             let n = if adopt {
                 let Some((ft, fd)) = ws_base(c, s, rn).map_err(wp(OP))? else { return Ok(Tx::Rollback(false)) };
                 c.execute(
-                    "UPDATE rebase_pending SET head = planned_head, tree = planned_tree, planned_head = NULL, planned_tree = NULL, \
+                    "UPDATE rebase_pending SET head = planned_head, tree = planned_tree, to_deps = NULL, source = 'replay', planned_head = NULL, planned_tree = NULL, \
                      rev = rev + 1, reason = 'pending', unpushed = 1, attempts = 0, last_at_ns = ?4, from_tree = ?5, from_deps = ?6 \
                      WHERE session = ?1 AND repo = ?2 AND planned_head = ?3",
                     params![s, rn, planned_head, at, ft, fd],
@@ -569,6 +601,71 @@ impl Store {
                 .map_err(wp(OP))?
             };
             drop_if_empty(c, s, rn, OP)?;
+            Ok(if n == 1 { Tx::Commit(true) } else { Tx::Rollback(false) })
+        })
+    }
+}
+
+impl Store {
+    /// Insert a main target only if no pending row exists. The caller holds
+    /// the repo write lock and has checked workspace eligibility.
+    #[allow(clippy::too_many_arguments)]
+    pub fn enroll_main(&self, session: &SessionId, repo: &RepoName, from: &BaseGen,
+        head: &CommitOid, tree: &TreeOid, to_deps: Option<DepsSetId>, at: SystemTime) -> Result<bool> {
+        const OP: &str = "enroll_main";
+        if from.repo != *repo { return Err(crate::errors::invalid("repo_mismatch", "the base belongs to another repo")); }
+        let at = ns(at, "at")?;
+        self.write(OP, |c| {
+            let n = c.execute(
+                "INSERT INTO rebase_pending (session, repo, rev, from_tree, from_deps, head, tree, source, to_deps, reason, first_at_ns, last_at_ns, attempts) \
+                 VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, 'main', ?7, 'pending', ?8, ?8, 0) ON CONFLICT (session, repo) DO NOTHING",
+                params![session.as_str(), repo.as_str(), from.tree.as_str(), from.deps.as_str(), head.as_str(), tree.as_str(), to_deps.as_ref().map(DepsSetId::as_str), at],
+            ).map_err(wp(OP))?;
+            Ok(if n == 1 { Tx::Commit(true) } else { Tx::Rollback(false) })
+        })
+    }
+
+    /// CAS a committed target, rewriting the observed base (NB6). Busy-row
+    /// backoff and its reason/detail survive when `keep_backoff` is true.
+    #[allow(clippy::too_many_arguments)]
+    pub fn retarget_pending(&self, session: &SessionId, repo: &RepoName, rev: u64,
+        head: &CommitOid, tree: &TreeOid, from: &BaseGen, keep_backoff: bool, at: SystemTime) -> Result<bool> {
+        const OP: &str = "retarget_pending";
+        if from.repo != *repo { return Err(crate::errors::invalid("repo_mismatch", "the base belongs to another repo")); }
+        let (rev, at) = (rev_i(rev)?, ns(at, "at")?);
+        self.write(OP, |c| {
+            let n = c.execute(
+                "UPDATE rebase_pending SET head = ?4, tree = ?5, to_deps = NULL, rev = rev + 1, from_tree = ?6, from_deps = ?7, \
+                 attempts = CASE WHEN ?8 THEN attempts ELSE 0 END, last_at_ns = CASE WHEN ?8 THEN last_at_ns ELSE ?9 END, \
+                 reason = CASE WHEN ?8 THEN reason ELSE 'pending' END, detail_json = CASE WHEN ?8 THEN detail_json ELSE NULL END \
+                 WHERE session = ?1 AND repo = ?2 AND rev = ?3",
+                params![session.as_str(), repo.as_str(), rev, head.as_str(), tree.as_str(), from.tree.as_str(), from.deps.as_str(), keep_backoff, at],
+            ).map_err(wp(OP))?;
+            Ok(if n == 1 { Tx::Commit(true) } else { Tx::Rollback(false) })
+        })
+    }
+
+    /// CAS the dependency target; a changed target starts a fresh attempt.
+    pub fn set_pending_to_deps(&self, session: &SessionId, repo: &RepoName, rev: u64, to_deps: Option<DepsSetId>, at: SystemTime) -> Result<bool> {
+        const OP: &str = "set_pending_to_deps";
+        let (rev, at) = (rev_i(rev)?, ns(at, "at")?);
+        self.write(OP, |c| {
+            let n = c.execute(
+                "UPDATE rebase_pending SET to_deps = ?4, attempts = 0, last_at_ns = ?5, rev = rev + 1, reason = 'pending', detail_json = NULL \
+                 WHERE session = ?1 AND repo = ?2 AND rev = ?3 AND head IS NOT NULL",
+                params![session.as_str(), repo.as_str(), rev, to_deps.as_ref().map(DepsSetId::as_str), at],
+            ).map_err(wp(OP))?;
+            Ok(if n == 1 { Tx::Commit(true) } else { Tx::Rollback(false) })
+        })
+    }
+
+    /// Delete exactly the revision the caller examined under the repo lock.
+    pub fn drop_pending(&self, session: &SessionId, repo: &RepoName, rev: u64) -> Result<bool> {
+        const OP: &str = "drop_pending";
+        let rev = rev_i(rev)?;
+        self.write(OP, |c| {
+            let n = c.execute("DELETE FROM rebase_pending WHERE session = ?1 AND repo = ?2 AND rev = ?3",
+                params![session.as_str(), repo.as_str(), rev]).map_err(wp(OP))?;
             Ok(if n == 1 { Tx::Commit(true) } else { Tx::Rollback(false) })
         })
     }

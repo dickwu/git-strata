@@ -354,7 +354,9 @@ fn stale(ctx: &Ctx, row: &RebasePending, head: &CommitOid) -> Result<Option<(&'s
         let d = json!({ "base": ws.base.tree.as_str(), "deps": ws.base.deps.as_str(), "from": row.from_tree });
         return Ok(Some(("stale_base", d)));
     }
-    if ctx.git.is_ancestor(head, &ws.head).unwrap_or(false) {
+    if ctx.git.is_ancestor(head, &ws.head).unwrap_or(false)
+        && row.to_deps.as_ref().is_none_or(|d| *d == ws.base.deps)
+    {
         return Ok(Some(("already_based", json!({ "head": head.as_str(), "base_head": ws.head.as_str() }))));
     }
     if !reachable(Scope::of(ctx), head) {
@@ -416,12 +418,14 @@ fn attempt_t2(ctx: &Ctx, row: &RebasePending, head: &CommitOid, tree: TreeOid) -
 /// `false`): T2 never queues in front of a request.
 pub fn catch_up(ctx: &Ctx, now: SystemTime) -> Result<Vec<(SessionId, Result<CatchUp>)>> {
     let sc = Scope::of(ctx);
-    let mut inner = Ok(());
+    let prepared = crate::main_follow::prepare(ctx.deps)?;
     ctx.locks.with_repo(ctx.repo, &mut || {
-        inner = reconstruct(sc);
-        Ok(())
+        reconstruct(sc)?;
+        if let Some(p) = &prepared {
+            crate::main_follow::reconcile_locked(ctx.deps, p)?;
+        }
+        crate::main_follow::settle_auto(ctx.deps)
     })??;
-    inner?;
     let rows: Vec<RebasePending> =
         ctx.store.rebase_pending(None)?.into_iter().filter(|r| r.repo == *ctx.repo && r.head.is_some()).collect();
     let mut out = Vec::new();

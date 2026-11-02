@@ -121,7 +121,13 @@ fn descriptor_count_is_stable_across_requests() {
 #[test]
 fn out_of_descriptors_the_daemon_sheds_with_busy_and_recovers() {
     let _g = serial();
-    let fx = Dfx::new();
+    let mut fx = Dfx::new();
+    // The descriptor-pressure test requires no background I/O between connect and accept.
+    let cfg = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+    cfg.sync.fetch_secs = 0;
+    cfg.sync.follow_main = Some(false);
+    cfg.sync.deps = strata_types::SyncDeps::Confirm;
+    fx.write_config();
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
     let sock = fx.socket();

@@ -803,3 +803,38 @@ fn non_utf8_link_target_refused_before_commit() {
         assert!(!c.args.iter().any(|a| a == "commit-tree"));
     }
 }
+
+#[test]
+fn publish_refuses_unacknowledged_move_conflict() {
+    let fx = Fx::with(&["tool"]);
+    let initial = seed(&fx, &[("a", b"base\n")]);
+    let s = fx.new_session(&["tool"]);
+    fx.edit(&s, "tool", &[("a", b"ours\n")]);
+    let head = seed(&fx, &[("a", b"theirs\n")]);
+    assert_ne!(head, initial);
+    let ss = fx.sessions();
+    let rn = repo_name("tool");
+    let old = fx.base_of(&s, "tool");
+    let git = fx.git_of("tool");
+    let target = ss
+        .ensure_base_for(&rn, &git.tree_of(&head).unwrap(), &old.deps)
+        .unwrap();
+    let moved = ss
+        .move_workspace(&s, &git.repo_id(), target, head.clone())
+        .unwrap();
+    assert_eq!(moved.conflicts, vec![rp("a")]);
+    let c = cp(&fx, &s);
+    let err = run(&fx, &one(&s, &c, &["a"]), &head).err().unwrap();
+    assert_eq!(err.code, Code::Conflict);
+    let detail = err.detail.unwrap();
+    assert_eq!(detail["reason"], "move_conflict");
+    assert_eq!(detail["paths"][0], "a");
+    assert!(
+        detail["fix"]
+            .as_str()
+            .unwrap()
+            .contains("--resolved PATH")
+    );
+    fx.store().clear_conflicts(&s, &rn, &[rp("a")]).unwrap();
+    run(&fx, &one(&s, &c, &["a"]), &head).unwrap();
+}
