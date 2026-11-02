@@ -501,6 +501,24 @@ pub(crate) fn plan(ctx: &Ctx, group: &ReleaseGroup, base: &CommitOid) -> Result<
         }
         loaded.push((cp, changes));
     }
+    // O7: publishing is not acknowledgement of a kept-side move conflict.
+    let mut move_conflicts = Vec::new();
+    for (cp, changes) in &loaded {
+        if let Some(rec) = ctx.store.session(&cp.session)?
+            && let Some(ws) = rec.workspaces.get(ctx.repo)
+        {
+            for (path, _) in changes {
+                if ws.conflicts.contains(path) {
+                    move_conflicts.push(json!({"path":path, "session":cp.session}));
+                }
+            }
+        }
+    }
+    if !move_conflicts.is_empty() {
+        return Err(StrataError::new(Code::Conflict, "acknowledge the workspace move conflicts before publishing")
+            .with_detail(json!({"reason":"move_conflict", "paths":move_conflicts.iter().map(|c|c["path"].clone()).collect::<Vec<_>>(),
+                "conflicts":move_conflicts, "fix":"git-strata sync --resolved PATH --target … --generation …"})));
+    }
     // §5.7: a path named by `assign` goes only with the named session.
     let named = crate::rebase::assignments(ctx.store, ctx.repo)?;
     let mut refused: Vec<Value> = Vec::new();

@@ -403,6 +403,7 @@ fn rebase_moves_on_both_sides_do_not_conflict() {
         ignorecase,
         volume_case_sensitive,
         merge: true,
+        resolutions: BTreeMap::new(),
     };
     for (ic, cs) in [(false, false), (true, true)] {
         let r = run(&w, &case, &new1, &opts(ic, cs));
@@ -573,4 +574,116 @@ fn project_materializes_entries_onto_a_clone() {
     assert_eq!(e.code, Code::InvalidInput);
     assert_eq!(e.detail.unwrap()["reason"], "dst_outside_sessions");
     assert_eq!(tree(&elsewhere), before);
+}
+
+fn resolution_options(w: &World, ov: &Overlay, new: &Base) -> RebaseOptions {
+    let mut opts = move_opts(new);
+    let conflicts =
+        strata_overlay::rebase_conflicts(ov, &w.base, new, &w.store, &[rp("a")]).unwrap();
+    let c = &conflicts[0];
+    opts.resolutions.insert(
+        rp("a"),
+        if c.kind == "text" {
+            strata_overlay::Resolution::Text(
+                c.hunks
+                    .iter()
+                    .map(|h| strata_overlay::ConflictRegion {
+                        theirs_start: h.theirs_start,
+                        theirs_len: h.theirs_len,
+                    })
+                    .collect(),
+            )
+        } else {
+            strata_overlay::Resolution::WholeFile
+        },
+    );
+    opts
+}
+
+#[test]
+fn sync_resolved_merges_nonoverlapping_upstream_hunks() {
+    let w = World::with(|m| put(m, "a", &lines(12, &[])));
+    w.write("a", &lines(12, &[(2, "ours")]));
+    let ov = ckpt(&w);
+    let (new, _) = w.next_base(|m| put(m, "a", &lines(12, &[(2, "theirs"), (10, "upstream")])));
+    let opts = resolution_options(&w, &ov, &new);
+    w.write("a", &lines(12, &[(2, "both")]));
+    let r = run(&w, &ckpt(&w), &new, &opts);
+    assert!(r.conflicts.is_empty());
+    let dst = clone_in_session(&w, &new.dir, "resolved");
+    project(&w.store, &r.overlay, &dst).unwrap();
+    assert_eq!(
+        fs::read(dst.join("a")).unwrap(),
+        lines(12, &[(2, "both"), (10, "upstream")])
+    );
+}
+
+#[test]
+fn sync_resolved_overlap_changed_rejected() {
+    let w = World::with(|m| put(m, "a", &lines(12, &[])));
+    w.write("a", &lines(12, &[(2, "ours")]));
+    let ov = ckpt(&w);
+    let (new, _) = w.next_base(|m| put(m, "a", &lines(12, &[(2, "theirs"), (5, "upstream")])));
+    let opts = resolution_options(&w, &ov, &new);
+    w.write(
+        "a",
+        &lines(12, &[(2, "both"), (3, "adjacent"), (4, "adjacent")]),
+    );
+    let e = rebase(&ckpt(&w), &w.base, &new, &w.store, &opts).unwrap_err();
+    assert_eq!(e.detail.unwrap()["reason"], "resolved_overlap_changed");
+}
+
+#[test]
+fn sync_resolved_clean_or_shrunk_regions_accepted() {
+    let w = World::with(|m| put(m, "a", &lines(12, &[])));
+    w.write("a", &lines(12, &[(2, "ours"), (3, "ours")]));
+    let ov = ckpt(&w);
+    let (new, _) = w.next_base(|m| put(m, "a", &lines(12, &[(2, "theirs"), (3, "theirs")])));
+    let opts = resolution_options(&w, &ov, &new);
+    w.write("a", &lines(12, &[(2, "resolved"), (3, "theirs")]));
+    assert!(run(&w, &ckpt(&w), &new, &opts).conflicts.is_empty());
+    w.write("a", &lines(12, &[(2, "theirs"), (3, "theirs")]));
+    assert!(run(&w, &ckpt(&w), &new, &opts).conflicts.is_empty());
+    w.write("a", &lines(12, &[]));
+    assert!(run(&w, &ckpt(&w), &new, &opts).conflicts.is_empty());
+}
+
+#[test]
+fn sync_resolved_binary_and_delete_whole_file() {
+    for delete in [false, true] {
+        let w = World::with(|m| put(m, "a", b"base\0"));
+        w.write("a", b"ours\0");
+        let ov = ckpt(&w);
+        let (new, _) = w.next_base(|m| put(m, "a", b"theirs\0"));
+        let opts = resolution_options(&w, &ov, &new);
+        if delete {
+            w.remove("a");
+        } else {
+            w.write("a", b"both\0");
+        }
+        let r = run(&w, &ckpt(&w), &new, &opts);
+        assert!(r.conflicts.is_empty());
+        let dst = clone_in_session(&w, &new.dir, "resolved");
+        project(&w.store, &r.overlay, &dst).unwrap();
+        if delete {
+            assert!(!dst.join("a").exists());
+        } else {
+            assert_eq!(fs::read(dst.join("a")).unwrap(), b"both\0");
+        }
+    }
+}
+
+#[test]
+fn sync_conflict_hunk_lengths_are_not_display_caps() {
+    let w = World::with(|m| put(m, "a", &lines(2000, &[])));
+    w.write("a", &b"ours line\n".repeat(2000));
+    let ov = ckpt(&w);
+    let (new, _) = w.next_base(|m| put(m, "a", &b"upstream line\n".repeat(2000)));
+    let report =
+        strata_overlay::rebase_conflicts(&ov, &w.base, &new, &w.store, &[rp("a")]).unwrap();
+    let h = &report[0].hunks[0];
+    assert_eq!(h.theirs_len, 2000);
+    assert!(h.truncated);
+    assert!(h.theirs.len() <= 4096);
+    assert!(h.theirs.lines().count() < h.theirs_len);
 }

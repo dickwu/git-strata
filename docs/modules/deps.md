@@ -1448,3 +1448,13 @@ design.md 标为 [交给构建者]、并且落在本模块的决定：
 | `install` 的切分 | 用 config.md §2.4 的切分函数（`validate_commands` 用的同一个） | 只能有一份切分规则；config.md 还没公开这个函数的名字，T15 要补上 | 待定（config.md） |
 
 需要 T15 改 types.md 的地方：`DepsSetId` 的注释补上依赖配置一段（§4.3）；`Drift` 行补上 special_file、symlink_escapes、unreadable_file、changed_during_clone、inputs_changed 这些 reason；§6.2 的"谁返回"在 `Busy`、`Corrupt`、`Exists`（`clone_into`）、`IsDirectory`（建造锁、取来的安装输入）、`HeadMoved`（`plan_rollout`、`plan_switch`）补上 deps（`NoSuchProposal`、`NotDirectory`、`NotFile` 已列了 deps）；含义一栏：`Busy` 补上提议与主干记录的并发冲突（proposal_race、main_race）与建造锁到时仍拿不到（build_lock_busy），`HeadMoved` 补上"批准时提议的目标已不是主干的 tip"（main_moved），`NoSuchProposal` 补上 `plan_switch` 的不是提出者、不再开着，`NotFile` 补上"建造锁的位置上不是普通文件"。
+
+### Shared rollout input classification
+
+`rollout_input_skip(ctx, session, workspace, to_inputs)` is the OwnChange /
+Drift portion of `plan_rollout`, usable before a target dependency set is
+sealed. Both rollout and sync use it. Sync repeats it after its lock-free
+ensure gap before moving. A mismatch with the pinned and target inputs
+preserves the old set; a different AwaitingPublish session draft is reported
+as OwnChange rather than generic Drift. This helper does not scan holders,
+build a set, acquire a repo lock, or decide the pinned sync policy.

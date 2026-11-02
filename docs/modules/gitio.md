@@ -1323,3 +1323,11 @@ git commit -m "test(gitio): the main checkout changes only in objects and refs/s
 | 计划之外的公开项 | [我的决定] `common_dir`、`is_binary` 与两个常量 | daemon 报错时要给出路径；`Binary` 与 merge3 用同一个判定 | 2026-10-22 |
 | 测试接缝（module-rulings Addendum 4） | [我的决定] cargo feature `test-seams` 下挂在 `Git` 上的九个入口：`open_with_env`、`set_env`、`set_fetch_timeout`、`take_git_calls`、`take_sync_events`、`pause_export_before_rename`、`pause_attach_before_index`、`pause_attach_before_read_tree`、`pause_attach_before_readback`（§3 末尾）；版本解析不开接缝，用 `src/repo.rs` 的单测 | 子进程的参数、环境与缓存命中只能在起子进程的那一处看到，而 `command` 是 crate 私有；持久化的顺序只能在同步层看到；120 s 的 fetch 超时在测试里太长；导出的改名竞态、attach 时管理目录被换、3.1 记下身份之后 read-tree 之前上级被换、refresh 之后暂存被换，都要停在两步之间才测得确定（Addendum 4：用停住接缝，不用 errno 故障点）；`set_env` 让每个用例有自己的全局配置与 `EMAIL`，不改测试进程的环境；`open_with_env` 让 `open` 自己的子进程也只读沙箱里的配置（review N8） | 2026-10-22 |
 | 导出耗时 | 待定 | design §8 没有导出的数字；首个 spike 实测 tool（4196 个文件）与 staff-api（4947 个）后写回 | — |
+
+### Main-sync text resolution
+
+`merge3_favour_ours(base, ours, theirs)` uses the same region construction as
+`merge3`. Overlaps choose ours; non-overlapping upstream hunks are retained.
+Binary files and inconsistent merge-region results still conflict. The
+caller must first validate regions against the saved sync report; this
+primitive does not grant permission to resolve arbitrary new overlaps.

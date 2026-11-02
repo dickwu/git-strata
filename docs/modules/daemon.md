@@ -65,11 +65,12 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 未知方法 → RPC `UnknownMethod`。参数对不上 → RPC `Failed`。
 
-方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 24 个以外不加方法（`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
+方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 25 个以外不加方法（`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
 
 | method | 作用 | 是否只读 |
 | --- | --- | --- |
 | `new` | `session::new` | 否 |
+| `sync` | `sync_move::run`：Agent moves and report-bound conflict resolution; upstream dispatches read-only checks separately | 否 |
 | `add` | `session::add`：给已有会话加仓库的工作区（session.md D52）；排这个会话的队，之后对每个加上的仓库推进锚点（同 `new` 之后） | 否 |
 | `status` | 读，不排队，不等写锁 | 是 |
 | `checkpoint` | 记检查点 | 否 |
@@ -99,6 +100,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | method | params | data |
 | --- | --- | --- |
 | `new` | `{ "ticket": string\|null, "repos": [RepoName], "only"?: bool, "agent"?: string\|null }` | `NewReport`。`only` 为真时会话只有 `repos` 这些工作区（session.md D51）；缺省为假，cli 只在 `--repo` 时才发这个字段，好让新 cli 也能用旧 daemon。`agent`（D38）是创建会话的 AI agent 名；缺省或 null 表示不知道；在调 session 之前按 types.md `AgentName` 校验，不合法 → `InvalidInput`（`detail.reason = "agent"`），什么都不写；不是字符串 → RPC `Failed`。它进会话清单的 `agent`，`new` 的回复与 `status` 里都在 `manifest.agent`（没有就省略这个键）。cli 只在 `daemon_status.features` 含 `"new.agent"` 时才发这个字段 |
+| `sync` | `SyncRequest {session, repos?, check?, fetch?, resolved?, keep?, target?, generation?, accept_diverged?}` | `{session, fetched, repos, next}`; non-check moves, report persistence and legacy conflict acknowledgement (see Main-sync non-check handler) |
 | `add` | `{ "session": SessionId, "repos": [RepoName] }` | `{ report: AddReport, anchor_unknown }`（session.md D52） |
 | `status` | `{ "cwd": string\|null, "session": string\|null, "all": bool, "chains"?: bool, "summary"?: bool, "workspaces"?: bool }` | 见 §5.4；`chains` 缺省 false。`summary: true`（status-perf C）：只读 store，回 `{ sessions: [SessionSummary] }`（cli.md §3.2 `status --brief`），按 id 升序，选择优先级同普通 status（`all` > `session` > `cwd` > 全部）；不 stat 工作区、不跑 git、不走旧树，不进池。`workspaces: true` 给每个会话带上 `workspaces`，只在 `summary` 时合法，否则 `InvalidInput`（`workspaces_without_summary`）；`summary` 与 `chains: true` 同给 → `InvalidInput`（`summary_with_chains`）。旧 daemon 不认识这两个字段，以 RPC `Failed`「unknown field」拒绝，cli 读 store 回退 |
 | `checkpoint` | `{ "session", "repo", "reason": CheckpointReason, "paths": [RepoPath] }` | `Checkpointed`；`paths` 可空 |
@@ -957,3 +959,39 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 - **追赶循环** `catch_up_loop`：启动时与每 `CATCH_UP_EVERY` = 60 s 一次，对每个仓库不等锁地重建 `rebase_pending`，再对到期的行以 `Auto` 重试（退避 quiet·2^(k−1)，封顶 30 min）；不带 RequestScope；会话锁不等待，拿到后重查。
 - **启动第 10 步**在仓库锁里重建 `rebase_pending`；旧树队列在启动时收入崩溃后留下的 Auto 旧树，按持久化的 `move_activity` 基线判断（缺基线 → 保留）。
 - `status`/`ls`/`--brief` 经共享的 `rm_notes` 带上 `last_rm`、`rebase_pending` 行、保留的旧树与 `leftovers`；daemon 把 `rm` 的拒绝/失败写进 `rm_attempts`。
+
+### Main-sync non-check handler
+
+`sync_move::run(&Daemon, SyncRequest) -> Result<Value, StrataError>` handles
+the mutating path. `SyncRequest` is exported by strata-types and carries
+session, optional repos, check, fetch (default true), resolved/keep paths,
+target, generation, and accept_diverged. The daemon advertises `sync`.
+The temporary dispatch in this branch rejects check=true before writes;
+the upstream part supplies read-only checks, CLI transport, and the single
+`upstream::for_session` enrichment call at integration.
+
+The handler fetches following default branches under repo locks, records
+fetch success/failure, runs fetch-after anchor maintenance and observes
+main. Failed fetches continue against local refs. Its minimal
+`enroll_session` hook reconciles this session's source-behind row and
+retargets strict ancestors while preserving busy backoff. Integration
+replaces this hook with the follow part's complete T4 (including deps-only
+identity reconciliation). Split/non-following repos return `not_following`.
+
+Dependency keys come from a temporary target export. Apply-mode sync checks
+worker Installing state and otherwise ensures before taking a session queue
+or repo lock. Confirm, OwnChange and Drift retain the pinned set and move
+source only. The actual scan/preview/swap runs under
+`with_queue_not_publishing` then the repo lock, rechecks target, generation,
+input ownership and G0, and uses walk_activity for G2/G4. A running own
+publish returns waiting after the bounded wait. Successful repos precede
+any later error in `detail.done`.
+
+Conflict reports are persisted before `Conflict sync_conflict`. Resolutions
+need the saved target/generation and a reported path; unchanged bytes need
+explicit keep. Missing/stale reports return HeadMoved with a fresh report.
+The only binding exception is O7: an up-to-date workspace with no report
+may clear named legacy conflicts atomically and return `conflicts_cleared`.
+No-op sync otherwise leaves conflicts intact. Diverged bases require an
+explicit acceptance only after neither chain nor tracking ref reaches the
+old head; read errors fail closed.

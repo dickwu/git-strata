@@ -681,6 +681,7 @@ fn refresh_seeds_pass(d: &Daemon<'_>) {
 
 fn session_of(p: &Params) -> Option<SessionId> {
     match p {
+        Params::Sync(p) => Some(p.session.clone()),
         Params::Checkpoint(p) => Some(p.session.clone()),
         Params::Restore(p) => Some(p.session.clone()),
         Params::Files(p) => Some(p.session.clone()),
@@ -729,6 +730,19 @@ impl<'d, 'a> Server<'d, 'a> {
         match p {
             Params::New(p) => self.new_session(p.ticket.as_deref(), &p.repos, p.only, p.agent.clone()),
             Params::Add(p) => self.add_repos(&p.session, &p.repos),
+            Params::Sync(p) => {
+                let result = crate::sync_move::run(self.d, p.clone());
+                // Includes repos moved before a later repo returned a conflict.
+                if !p.check {
+                    let _ = core.locks.with_sessions(std::slice::from_ref(&p.session), || {
+                        if let Some(rec) = core.store.session(&p.session)? {
+                            for repo in rec.manifest.repos.keys() { self.trackers.restart(&p.session, repo); }
+                        }
+                        Ok(())
+                    });
+                }
+                result
+            },
             Params::Status(p) if p.summary || p.workspaces => {
                 self.status_summary(p.cwd.as_deref(), p.session.as_deref(), p.all, p.chains, p.summary, p.workspaces)
             }

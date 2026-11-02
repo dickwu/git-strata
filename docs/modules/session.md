@@ -1485,3 +1485,22 @@ git commit -m "feat(session): resolve a failed move by abandoning or accepting i
 - **T3 投影**（remove.rs `Sessions::project`）：阶段 A 在 D57 之后，取最新的 D57 候选（Done、本会话参与、commit 能从 `refs/strata/remotes/origin/<branch>` 到达），且要求 `ws.head` 是它的祖先（不会投影到更旧的树而掩盖回退）；它的基线必须已建好（`base.rs built_base`：先找本会话的 deps 代，再扫 `bases/<repo>/<tree>/*`；rm 从不建基线，没有 → 条目留在 Dirty）。用 `rebase_with(overlay, old, new, PreviewBlobs, RebaseOptions::for_move)` 投影；一个条目只有整体被吸收（它的路径，含改名两端，都不在投影后的条目、冲突、lww 与不稳定集合里）才算已落地。改名在 overlay 里是删除加新增，两边都要各自被吸收。`detail.landed.<repo>` 加 `rebased`、`rebased_onto`，`count` 含两种；投影出错进 `detail.projection_errors`，保守地留下。阶段 B 用 BeforeRemove checkpoint 的条目重算同一投影（`unstable` 取 checkpoint 警告），不再被吸收的 → `changed_during_remove`；只出现在 checkpoint 里的新条目不会新投影。
 - **R1 孤儿清扫**（§5.6 末尾、§5.8 第 4 步）：三个入口——daemon 启动时的 `recover`、`gc`（每次非 dry-run 的 gc，先校验所有仓库配置，再 `sweep_orphans(None)`；返回加 `orphans: [{path, trash}]` 与 `orphan_warnings`，CLI 在 stderr 打 `gc orphan retired: <path> -> <trash>`/`gc orphan skipped: <message>`）、`rm` 末尾（`RemoveReport.orphans/warnings`）。`gc --store --dry-run` 的 `preview.orphans = [{session, path}]` 只列不动。`new` 的回滚只退役它自己建出的目录（建时记下 (dev, ino)；`sessions/.repos` 照常带父目录建，`.repos/<id>` 本身独占地建（接缝 `new.repos_dir` 在两者之间），别人先建出的 → `Exists`，回滚不收它）；对不上的列进错误的 `detail.not_owned`，消息里 "nothing kept" 换成 "rolled back, left in place (not created by this new; the orphan sweep takes it): …"，留给清扫。
 - **保留的旧树**：Dirty 拒绝列出旧树里迟到写入的路径；`rm --discard` 的 `RemoveDiscard{kept_trees}` 在 Touch ID 文字里点名这些旧树，凭据绑定到弹框时的列表（之间变了 → `NotConfirmed`，重试）。
+
+### Main-sync Agent moves
+
+`move_workspace_agent(session, repo_id, target, head, consume, baseline)`
+retains G0, the G2 snapshot and G4 rechecks/old-tree preservation. Callers use
+`walk_activity`, not `idle_activity`, so there is no quiet-window wait.
+Dependency-directory holders are checked before staging and again at step
+14 on every Agent move, including source-only moves; they return
+`OpenFiles`. Whole-workspace holder scans do not gate an Agent swap.
+
+`move_workspace_agent_resolving(..., baseline, options, kept)` uses the same
+report-bound `RebaseOptions` for its checkpoint-based projection. A conflict
+outside pinned regenerable paths refuses before the intent. Successful
+Agent moves have an empty conflict list (regenerable kept paths are reported
+separately), clear the saved sync report, and consume the selected pending
+revision in the finish transaction. The activity row records policy `agent`.
+Resolution decisions are written to `sync_move_history` while Preparing;
+the associated move state shows whether they landed. Late writes after the
+last check keep the old tree and its durable G4 notice.

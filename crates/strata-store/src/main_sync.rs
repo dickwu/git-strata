@@ -347,4 +347,37 @@ impl Store {
             Ok(Tx::Commit(()))
         })
     }
+    /// Resolution choices associated with an Agent move, before it swaps.
+    /// The move's own state determines whether these choices landed.
+    pub fn record_sync_resolution(
+        &self,
+        session: &SessionId,
+        repo: &RepoName,
+        n: u64,
+        resolution: &Value,
+    ) -> Result<()> {
+        const OP: &str = "record_sync_resolution";
+        let body = to_json(resolution, "resolution")?;
+        let ni =
+            i64::try_from(n).map_err(|_| crate::errors::bad_row("move generation overflow"))?;
+        self.write(OP, |c| {
+            c.execute("INSERT INTO sync_move_history (session, repo, n, resolution_json) VALUES (?1, ?2, ?3, ?4)",
+                params![session.as_str(), repo.as_str(), ni, body]).map_err(w(OP))?;
+            Ok(Tx::Commit(()))
+        })
+    }
+
+    /// Durable resolution history, including the associated move's state.
+    pub fn sync_move_history(&self, session: &SessionId, repo: &RepoName) -> Result<Vec<Value>> {
+        self.read(|c| {
+            if user_version(c)? < 5 { return Ok(Vec::new()); }
+            let mut q = c.prepare("SELECT h.n, i.state, h.resolution_json FROM sync_move_history h JOIN move_intents i ON i.session = h.session AND i.repo = h.repo AND i.n = h.n WHERE h.session = ?1 AND h.repo = ?2 ORDER BY h.n").map_err(sql_read)?;
+            let rows = q.query_map(params![session.as_str(),repo.as_str()], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).map_err(sql_read)?
+                .collect::<crate::sql::SqlResult<Vec<_>>>().map_err(sql_read)?;
+            rows.into_iter().map(|(n,state,body)| {
+                let mut v: Value = from_json(&body,"sync_move_history.resolution_json")?;
+                v["generation"] = serde_json::json!(n); v["state"] = serde_json::json!(state); Ok(v)
+            }).collect()
+        })
+    }
 }
