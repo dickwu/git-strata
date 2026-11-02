@@ -164,6 +164,7 @@ fn deps_list_changes_legacy_base_and_best_effort_error() {
             to_inputs: "3".repeat(64),
             head: Some(head),
             tree: Some(tree),
+            from_head: None,
         };
         let pid = core.store.record_proposal(&proposal, None, SystemTime::now()).unwrap().unwrap();
         let until = std::time::Instant::now() + Duration::from_secs(5);

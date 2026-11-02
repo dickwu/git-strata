@@ -74,8 +74,16 @@ fn git_of<'c>(core: &'c Core, repo: &RepoName) -> Result<&'c Git> {
 }
 
 /// Legacy proposals compare against the oldest affected workspace head, labelled on the wire.
-fn changes_base(core: &Core, p: &strata_deps::Proposal) -> Result<Option<CommitOid>> {
-    // main-sync: prefer p.from_head once found lands
+/// The commit a proposal's package summary is diffed from, and whether it is the
+/// legacy session-base fallback (proposals recorded before store v4 have no `from_head`).
+fn changes_base(core: &Core, p: &strata_deps::Proposal) -> Result<Option<(CommitOid, bool)>> {
+    if let Some(from) = &p.from_head {
+        return Ok(Some((from.clone(), false)));
+    }
+    Ok(legacy_changes_base(core, p)?.map(|h| (h, true)))
+}
+
+fn legacy_changes_base(core: &Core, p: &strata_deps::Proposal) -> Result<Option<CommitOid>> {
     let git = git_of(core, &p.repo)?;
     let mut sessions = core.store.sessions()?;
     sessions.sort_by_key(|s| s.created);
@@ -113,12 +121,14 @@ fn deps_list(core: &Core, repo: Option<&RepoName>) -> Result<Value> {
             let Some(to) = &p.head else {
                 return Ok(None);
             };
-            let Some(from) = changes_base(core, &p)? else {
+            let Some((from, legacy)) = changes_base(core, &p)? else {
                 return Ok(None);
             };
             let mut changes =
                 json_of(&strata_deps::changes(git_of(core, &p.repo)?, repo_cfg(core, &p.repo)?, &from, to)?);
-            changes["since"] = json!("session_base");
+            if legacy {
+                changes["since"] = json!("session_base");
+            }
             Ok(Some(changes))
         })();
         match enriched {
