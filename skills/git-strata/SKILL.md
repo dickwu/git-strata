@@ -88,7 +88,9 @@ git-strata files 'src/**/*.ts'       # glob optional
 git-strata restore 42
 git-strata restore 42 src/a.ts
 
-# 6. Publish checkpointed content into a commit
+# 6. Before you finish: inspect upstream, then publish checkpointed content
+git-strata sync --check
+# If upstream.clean is false: sync, resolve, re-run checks, checkpoint, publish.
 git-strata publish --from s-k3q7xm2a:src/a.ts --from s-k3q7xm2a:src/b.ts
 
 # 7. Push the publish chain (only if the human asked; may need a TTY)
@@ -99,6 +101,22 @@ git-strata rm --session s-k3q7xm2a
 ```
 
 Notes:
+
+- Before you finish, run `git-strata sync --check`. When `upstream.clean` is
+  false, run `git-strata sync`, resolve its reported conflicts, re-run your
+  checks, checkpoint and publish. After `result: moved` or `source_only`,
+  `cd` back into the workspace by its path and restart processes you started
+  there: the old shell/process cwd may still refer to the previous tree.
+  Read `data.upstream` in publish and rm replies too (publish is keyed by
+  session id), and act on any unclean entry. For a Dirty rm, the order is
+  sync → checks → checkpoint → publish → rm.
+- Upstream is informational: it never by itself refuses publish or rm.
+  Behind counts cap at 1000; `capped` means at least that many. `ls` and
+  `status --brief` are cache-only; null/unchecked means not yet checked.
+  `sync --check` uses local refs; `as_of` describes fetch freshness.
+  `Unsupported daemon_too_old` on sync means the human must install matching
+  CLI/daemon versions. During staged rollout, `not_implemented` means sync
+  moves are not available yet; report that state instead of retrying.
 
 - `--session` takes a session id or a ticket. A ticket shared by several
   sessions gives `AmbiguousMatch`; use an id from `detail`. `--session` and
@@ -292,6 +310,23 @@ it to Claude Code's settings; git-strata does not write the file:
   value uses that ID.
 - No other agent's hook format is documented; for other agents run
   `git-strata checkpoint -m "..."` yourself after edits.
+
+## Optional Stop hook: upstream before finishing (Claude Code)
+
+Enable this only after the deployed daemon advertises both `sync` and
+`status.upstream`. The human adds the entry; git-strata does not change settings:
+
+```json
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"git-strata sync --check --hook"}]}]}}
+```
+
+The hook resolves its input cwd and checks cached upstream. It returns control
+once when a following repo has main/deps changes and your unpublished work or
+conflicts need attention. Follow its sync → resolve → checks → publish reason.
+An unchanged workspace behind main is left to the background mover. Cold
+cache, daemon errors, non-workspace cwd and the five-second deadline are silent.
+`stop_hook_active:true` never blocks again. A block is `{decision,reason}` and
+the process always exits zero, rather than using the usual envelope.
 
 ## The JSON envelope
 

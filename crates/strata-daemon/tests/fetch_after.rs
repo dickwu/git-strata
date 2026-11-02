@@ -232,7 +232,10 @@ fn hint_and_flush_off_callback_thread() {
     assert!(t.inbox().pending().full, "no path list → full scan");
     // Dropped on this (request/shutdown) thread, not in the callback.
     track::drop_tracker(t);
+}
 
+#[test]
+fn watcher_operations_stay_on_request_threads() {
     // The daemon never builds a watcher callback of its own and calls hint,
     // flush and require_full only from track.rs (request thread).
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

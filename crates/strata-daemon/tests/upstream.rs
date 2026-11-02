@@ -1,0 +1,676 @@
+//! Main-sync §5: isolated repositories/stores and in-process handlers only.
+mod support;
+use serde_json::{Value, json};
+use std::fs;
+use std::time::SystemTime;
+use strata_daemon::{
+    handlers::{Server, Trackers},
+    rpc::{Method, Params, Request},
+    startup::{Core, Daemon},
+    upstream::ReadMode,
+};
+use strata_types::{CommitOid, SessionId, Upstream};
+use support::*;
+
+fn call(server: &Server<'_, '_>, method: &str, params: Value) -> Value {
+    let method = Method::from_name(method).unwrap();
+    server
+        .handle(Request {
+            id: json!(1),
+            method,
+            params: Params::parse(method, params).unwrap(),
+        })
+        .0
+}
+fn ok(reply: Value) -> Value {
+    assert_eq!(reply["ok"], true, "{reply}");
+    reply["data"].clone()
+}
+fn new(server: &Server<'_, '_>) -> SessionId {
+    serde_json::from_value(ok(call(server, "new", json!({"ticket":null,"repos":["tool"]})))["session"]["manifest"]["id"].clone()).unwrap()
+}
+fn check(server: &Server<'_, '_>, s: &SessionId, hook: bool) -> Upstream {
+    serde_json::from_value(
+        ok(call(
+            server,
+            "sync",
+            json!({"session":s,"check":true,"hook":hook}),
+        ))["upstream"]
+            .clone(),
+    )
+    .unwrap()
+}
+fn advance(fx: &Dfx, core: &Core, message: &str) -> CommitOid {
+    let main = fx.main("tool");
+    let head = CommitOid::try_from(fx.sb.commit(&main, &[], message)).unwrap();
+    let git = &core.gits[&repo_name("tool")];
+    let name = strata_gitio::remote_ref("origin", "main");
+    git.ref_transaction(&[strata_gitio::RefUpdate::set(
+        &name,
+        head.clone(),
+        git.read_ref(&name).unwrap(),
+    )])
+    .unwrap();
+    head
+}
+
+#[test]
+fn behind_capped_at_1000() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    let git = &core.gits[&repo_name("tool")];
+    let row = core.store.session(&s).unwrap().unwrap();
+    let ws = &row.manifest.repos[&repo_name("tool")];
+    let mut head = ws.head.clone();
+    for i in 0..1002 {
+        head = git
+            .commit_tree(&ws.base.tree, &head, &format!("commit {i}\n"))
+            .unwrap();
+    }
+    let name = strata_gitio::remote_ref("origin", "main");
+    git.ref_transaction(&[strata_gitio::RefUpdate::set(
+        &name,
+        head,
+        git.read_ref(&name).unwrap(),
+    )])
+    .unwrap();
+    let up = check(&server, &s, false);
+    let r = &up.repos[&repo_name("tool")];
+    assert_eq!(r.behind, Some(1000));
+    assert!(r.capped);
+    assert!(!r.diverged);
+    assert_eq!(r.commits.len(), 20);
+    assert!(!up.clean);
+}
+
+#[test]
+fn diverged_head_not_enrolled_and_reported_with_base_only() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let original = fx.sb.head(&fx.main("tool"));
+    advance(&fx, &core, "base-only");
+    let s = new(&server);
+    // new fetches origin, so give the session a branch through origin first.
+    let git = &core.gits[&repo_name("tool")];
+    let mut row = core.store.session(&s).unwrap().unwrap();
+    let ws = row.manifest.repos.get_mut(&repo_name("tool")).unwrap();
+    ws.head = git
+        .commit_tree(
+            &ws.base.tree,
+            &CommitOid::try_from(original.clone()).unwrap(),
+            "ours\n",
+        )
+        .unwrap();
+    let ours = ws.head.clone();
+    let tip = git
+        .commit_tree(
+            &ws.base.tree,
+            &CommitOid::try_from(original).unwrap(),
+            "theirs\n",
+        )
+        .unwrap();
+    let name = strata_gitio::remote_ref("origin", "main");
+    git.ref_transaction(&[strata_gitio::RefUpdate::set(
+        &name,
+        tip,
+        git.read_ref(&name).unwrap(),
+    )])
+    .unwrap();
+    let up = core
+        .upstream
+        .session(&core, &row, ReadMode::Full, |_, _, _| Default::default())
+        .unwrap();
+    let r = &up.repos[&repo_name("tool")];
+    assert!(r.diverged);
+    assert_eq!(r.behind, Some(1));
+    assert_eq!(r.base_only, vec![ours]);
+    assert!(core.store.rebase_pending(Some(&s)).unwrap().is_empty());
+}
+
+#[test]
+fn ahead_only_is_not_diverged() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    let mut row = core.store.session(&s).unwrap().unwrap();
+    let ws = row.manifest.repos.get_mut(&repo_name("tool")).unwrap();
+    ws.head = core.gits[&repo_name("tool")]
+        .commit_tree(&ws.base.tree, &ws.head, "ahead\n")
+        .unwrap();
+    let up = core
+        .upstream
+        .session(&core, &row, ReadMode::Full, |_, _, _| Default::default())
+        .unwrap();
+    let r = &up.repos[&repo_name("tool")];
+    assert!(!r.diverged);
+    assert_eq!(r.behind, Some(0));
+    assert!(up.clean);
+}
+
+#[test]
+fn upstream_clean_definition() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    let up = check(&server, &s, false);
+    assert!(up.clean);
+    assert!(up.as_of.is_some());
+    let mut repos = up.repos.clone();
+    repos.get_mut(&repo_name("tool")).unwrap().unpublished = Some(true);
+    assert!(strata_daemon::upstream::is_clean(&repos));
+    repos.get_mut(&repo_name("tool")).unwrap().behind = None;
+    assert!(!strata_daemon::upstream::is_clean(&repos));
+    let mut repos = up.repos;
+    repos.get_mut(&repo_name("tool")).unwrap().conflicts = vec![rp("a")];
+    assert!(!strata_daemon::upstream::is_clean(&repos));
+}
+
+#[test]
+fn ls_reads_cache_only() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    let git = &core.gits[&repo_name("tool")];
+    git.take_git_calls();
+    for workspaces in [false, true] {
+        let data = ok(call(
+            &server,
+            "status",
+            json!({"cwd":null,"session":s,"all":false,"summary":true,"workspaces":workspaces}),
+        ));
+        assert_eq!(
+            data["sessions"][0]["behind"]["tool"],
+            json!({"behind":null,"unchecked":true})
+        );
+        if workspaces {
+            assert_eq!(data["sessions"][0]["workspaces"][0]["unchecked"], true);
+        }
+    }
+    assert!(git.take_git_calls().is_empty());
+    advance(&fx, &core, "other");
+    core.upstream.warm(&core);
+    git.take_git_calls();
+    let data = ok(call(
+        &server,
+        "status",
+        json!({"cwd":null,"session":s,"all":false,"summary":true}),
+    ));
+    assert_eq!(data["sessions"][0]["behind"]["tool"]["behind"], 1);
+    let hook = check(&server, &s, true);
+    assert_eq!(hook.repos[&repo_name("tool")].behind, Some(1));
+    assert!(git.take_git_calls().is_empty());
+}
+
+#[test]
+fn sync_check_never_fetches_or_writes() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    advance(&fx, &core, "upstream");
+    let git = &core.gits[&repo_name("tool")];
+    git.take_git_calls();
+    let before = core.store.sync_counts();
+    let row = core.store.session(&s).unwrap();
+    core.store.arm(strata_store::Seam::CommitSyncFails);
+    assert_eq!(
+        check(&server, &s, false).repos[&repo_name("tool")].behind,
+        Some(1)
+    );
+    assert_eq!(core.store.sync_counts(), before);
+    assert_eq!(core.store.session(&s).unwrap(), row);
+    assert!(core.store.rebase_pending(Some(&s)).unwrap().is_empty());
+    assert!(
+        git.take_git_calls()
+            .iter()
+            .all(|c| !c.args.iter().any(|a| a == "fetch"))
+    );
+}
+
+#[test]
+fn unpublished_cold_reads_true() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    checkpoint(&core, &s, "tool");
+    assert_eq!(
+        check(&server, &s, false).repos[&repo_name("tool")].unpublished,
+        Some(true)
+    );
+}
+
+#[test]
+fn unpublished_true_after_empty_checkpoint_then_edit_and_background_reconcile() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    checkpoint(&core, &s, "tool");
+    trackers.reconcile_once();
+    // An unavailable FSEvents service is conservatively unpublished too;
+    // the deterministic Tracker test covers the clean-to-dirty transition.
+    assert!(
+        core.store
+            .latest_checkpoint(&s, &repo_name("tool"))
+            .unwrap()
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    fs::write(ws(&core, &s, "tool").join("src/index.ts"), "changed\n").unwrap();
+    trackers.reconcile_once();
+    assert_eq!(
+        check(&server, &s, true).repos[&repo_name("tool")].unpublished,
+        Some(true)
+    );
+    trackers.clear();
+}
+
+#[test]
+fn unpublished_from_tracker_no_walk() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    checkpoint(&core, &s, "tool");
+    trackers.reconcile_once();
+    check(&server, &s, false);
+    let git = &core.gits[&repo_name("tool")];
+    git.take_git_calls();
+    let count = core.store.sync_counts();
+    check(&server, &s, true);
+    assert!(git.take_git_calls().is_empty());
+    assert_eq!(count, core.store.sync_counts());
+    trackers.clear();
+}
+
+#[test]
+fn commits_use_publish_trailer_and_are_capped() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    advance(
+        &fx,
+        &core,
+        &format!("own\n\nsessions: s-deadbeef, {s}\npaths: 1\n"),
+    );
+    advance(&fx, &core, "other");
+    let up = check(&server, &s, false);
+    let commits = &up.repos[&repo_name("tool")].commits;
+    assert_eq!(commits.len(), 2);
+    assert!(!commits[0].own);
+    assert!(commits[1].own);
+    assert_eq!(commits[1].author, "Strata Test");
+}
+
+#[test]
+fn rm_upstream_captured_before_teardown() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    advance(&fx, &core, "upstream");
+    let out = ok(call(&server, "rm", json!({"session":s,"discard":false})));
+    assert_eq!(out["upstream"]["repos"]["tool"]["behind"], 1);
+    assert_eq!(
+        core.store.session(&s).unwrap().unwrap().lifecycle,
+        strata_store::Lifecycle::Removed
+    );
+}
+
+#[test]
+fn rm_dirty_detail_upstream() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    advance(&fx, &core, "upstream");
+    fs::write(ws(&core, &s, "tool").join("dirty.txt"), "mine").unwrap();
+    let out = call(&server, "rm", json!({"session":s,"discard":false}));
+    assert_eq!(out["error"]["code"], "Dirty");
+    assert_eq!(
+        out["error"]["detail"]["upstream"]["repos"]["tool"]["behind"],
+        1
+    );
+}
+
+#[test]
+fn publish_reply_upstream_after_rebase() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    fs::write(ws(&core, &s, "tool").join("new.txt"), "mine").unwrap();
+    let cp = checkpoint(&core, &s, "tool");
+    let out = ok(call(
+        &server,
+        "publish",
+        json!({"group":group(vec![batch(&s,"tool",cp.id,&["new.txt"])]),"shown":{}}),
+    ));
+    assert_eq!(
+        out["upstream"][s.as_str()]["repos"]["tool"]["base_head"],
+        out["published"][0]["commit"]
+    );
+    assert_eq!(out["upstream"][s.as_str()]["repos"]["tool"]["behind"], 0);
+}
+
+#[test]
+fn publish_upstream_keyed_by_session_multi_session_group() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let a = new(&server);
+    let b = new(&server);
+    fs::write(ws(&core, &a, "tool").join("a.txt"), "a").unwrap();
+    fs::write(ws(&core, &b, "tool").join("b.txt"), "b").unwrap();
+    let acp = checkpoint(&core, &a, "tool");
+    let bcp = checkpoint(&core, &b, "tool");
+    let out = ok(call(
+        &server,
+        "publish",
+        json!({"group":group(vec![batch(&a,"tool",acp.id,&["a.txt"]),batch(&b,"tool",bcp.id,&["b.txt"])]),"shown":{}}),
+    ));
+    for s in [&a, &b] {
+        assert_eq!(out["upstream"][s.as_str()]["repos"]["tool"]["behind"], 0);
+    }
+    assert_eq!(out["upstream"].as_object().unwrap().len(), 2);
+}
+
+#[test]
+fn fetch_failure_retains_success_as_of() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    let before = check(&server, &s, false).as_of;
+    core.store
+        .record_fetch(
+            &repo_name("tool"),
+            false,
+            Some("offline"),
+            SystemTime::now(),
+        )
+        .unwrap();
+    assert!(before.is_some());
+    assert_eq!(check(&server, &s, false).as_of, before);
+}
+
+#[test]
+fn upstream_failure_does_not_change_outcome() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    fs::write(ws(&core, &s, "tool").join("new.txt"), "mine").unwrap();
+    let cp = checkpoint(&core, &s, "tool");
+    core.upstream.fail_for_test(true);
+    let dirty = call(&server, "rm", json!({"session":s,"discard":false}));
+    assert_eq!(dirty["error"]["code"], "Dirty");
+    assert!(dirty["error"]["detail"].get("upstream").is_none());
+    let published = ok(call(
+        &server,
+        "publish",
+        json!({"group":group(vec![batch(&s,"tool",cp.id,&["new.txt"])]),"shown":{}}),
+    ));
+    assert!(published.get("upstream").is_none());
+    assert!(published["published"][0]["commit"].is_string());
+    let removed = ok(call(&server, "rm", json!({"session":s,"discard":false})));
+    assert!(removed.get("upstream").is_none());
+}
+
+#[test]
+fn unpublished_true_after_failed_publish() {
+    let mut fx = Dfx::new();
+    fx.config.repos.get_mut(&repo_name("tool")).unwrap().checks = vec!["exit 1".into()];
+    fx.write_config();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    fs::write(ws(&core, &s, "tool").join("new.txt"), "mine").unwrap();
+    let cp = checkpoint(&core, &s, "tool");
+    let result = call(
+        &server,
+        "publish",
+        json!({"group":group(vec![batch(&s,"tool",cp.id,&["new.txt"])]),"shown":{}}),
+    );
+    assert_eq!(result["ok"], false);
+    assert!(
+        core.store
+            .publishes()
+            .unwrap()
+            .iter()
+            .any(|r| r.phase == strata_store::PublishPhase::Done)
+    );
+    trackers.reconcile_once();
+    assert_eq!(
+        check(&server, &s, true).repos[&repo_name("tool")].unpublished,
+        Some(true)
+    );
+    trackers.clear();
+}
+
+#[test]
+fn unpublished_true_after_partial_publish() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    for p in ["a.txt", "b.txt"] {
+        fs::write(ws(&core, &s, "tool").join(p), p).unwrap();
+    }
+    let cp = checkpoint(&core, &s, "tool");
+    ok(call(
+        &server,
+        "publish",
+        json!({"group":group(vec![batch(&s,"tool",cp.id,&["a.txt"])]),"shown":{}}),
+    ));
+    trackers.reconcile_once();
+    assert_eq!(
+        check(&server, &s, true).repos[&repo_name("tool")].unpublished,
+        Some(true)
+    );
+    trackers.clear();
+}
+
+#[test]
+fn status_and_t2_warm_upstream() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    let target = advance(&fx, &core, "main");
+    strata_daemon::handlers::catch_up_pass(&d, SystemTime::now());
+    // The follow part may move this idle workspace during T2. Judge its
+    // resulting base, and read the cache BEFORE full status can fill it.
+    let after = core.store.session(&s).unwrap().unwrap();
+    let expected = u32::from(after.manifest.repos[&repo_name("tool")].head != target);
+    let cached = check(&server, &s, true);
+    assert!(!cached.repos[&repo_name("tool")].unchecked);
+    assert_eq!(cached.repos[&repo_name("tool")].behind, Some(expected));
+    let out = ok(call(
+        &server,
+        "status",
+        json!({"session":s,"cwd":null,"all":false}),
+    ));
+    assert_eq!(
+        out["sessions"][0]["status"]["upstream"]["repos"]["tool"]["behind"],
+        expected
+    );
+    assert_eq!(
+        out["sessions"][0]["status"]["workspaces"]["tool"]["upstream"]["behind"],
+        expected
+    );
+    assert!(strata_daemon::FEATURES.contains(&"status.upstream"));
+}
+
+#[test]
+fn deps_and_auto_fields_follow_store_and_cached_summary() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    let repo = repo_name("tool");
+    let row = core.store.session(&s).unwrap().unwrap();
+    let ws = &row.manifest.repos[&repo];
+    let set = core
+        .store
+        .deps_set(&repo, &ws.base.deps)
+        .unwrap()
+        .unwrap()
+        .set;
+    let target = advance(&fx, &core, "deps update");
+    let tree = core.gits[&repo].tree_of(&target).unwrap();
+    let p = core
+        .store
+        .record_proposal(
+            &strata_store::NewProposal {
+                repo: repo.clone(),
+                origin: None,
+                from: ws.base.deps.clone(),
+                from_inputs: set.inputs_hash,
+                from_head: Some(ws.head.clone()),
+                to: strata_types::DepsSetId::try_from("b".repeat(64)).unwrap(),
+                to_inputs: "b".repeat(64),
+                tree: Some(tree.clone()),
+                head: Some(target.clone()),
+            },
+            None,
+            SystemTime::now(),
+        )
+        .unwrap()
+        .unwrap();
+    core.store
+        .enroll_main(&s, &repo, &ws.base, &target, &tree, None, SystemTime::now())
+        .unwrap();
+    let pending = core.store.rebase_pending_of(&s, &repo).unwrap().unwrap();
+    core.store
+        .defer_pending(
+            &s,
+            &repo,
+            pending.rev,
+            "conflicts",
+            &json!({"paths":["src/a"]}),
+            SystemTime::now(),
+        )
+        .unwrap();
+    for (state, want) in [
+        (strata_store::DepsAutoState::Installing, "installing"),
+        (strata_store::DepsAutoState::Ready, "ready"),
+        (strata_store::DepsAutoState::InstallFailed, "install_failed"),
+    ] {
+        core.store
+            .set_deps_auto(p, state, None, SystemTime::now())
+            .unwrap();
+        let up = check(&server, &s, false);
+        let r = &up.repos[&repo];
+        assert_eq!(r.deps.as_ref().unwrap().state, want);
+        assert_eq!(r.deps.as_ref().unwrap().mode, strata_types::SyncDeps::Apply);
+        assert!(r.deps.as_ref().unwrap().summary.is_some());
+        assert!(!up.clean);
+        let auto = r.auto.as_ref().unwrap();
+        assert_eq!(auto.source, "main");
+        assert_eq!(auto.state, "deferred");
+        assert_eq!(auto.reason.as_deref(), Some("conflicts"));
+        assert_eq!(auto.attempts, 1);
+        assert_eq!(auto.target.as_ref().unwrap().head, target);
+        assert_eq!(auto.detail.as_ref().unwrap()["paths"], json!(["src/a"]));
+    }
+    core.gits[&repo].take_git_calls();
+    let up = check(&server, &s, true);
+    assert!(up.repos[&repo].deps.as_ref().unwrap().summary.is_some());
+    assert!(core.gits[&repo].take_git_calls().is_empty());
+    let live = |found: String| strata_daemon::upstream::Live {
+        unpublished: true,
+        inputs: Some((found, "base inputs".into())),
+    };
+    let up = core
+        .upstream
+        .session(&core, &row, ReadMode::Cached, |_, _, _| {
+            live("c".repeat(64))
+        })
+        .unwrap();
+    assert_eq!(up.repos[&repo].deps.as_ref().unwrap().state, "drift");
+    let up = core
+        .upstream
+        .session(&core, &row, ReadMode::Cached, |_, _, _| {
+            live("b".repeat(64))
+        })
+        .unwrap();
+    assert_eq!(
+        up.repos[&repo].deps.as_ref().unwrap().state,
+        "install_failed",
+        "inputs already at target are not drift"
+    );
+    core.store
+        .record_proposal(
+            &strata_store::NewProposal {
+                repo: repo.clone(),
+                origin: Some(s.clone()),
+                from: ws.base.deps.clone(),
+                from_inputs: "a".repeat(64),
+                from_head: Some(ws.head.clone()),
+                to: strata_types::DepsSetId::try_from("d".repeat(64)).unwrap(),
+                to_inputs: "d".repeat(64),
+                tree: None,
+                head: None,
+            },
+            None,
+            SystemTime::now(),
+        )
+        .unwrap();
+    let up = core
+        .upstream
+        .session(&core, &row, ReadMode::Cached, |_, _, _| {
+            live("c".repeat(64))
+        })
+        .unwrap();
+    assert_eq!(up.repos[&repo].deps.as_ref().unwrap().state, "own_change");
+}

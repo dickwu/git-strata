@@ -31,7 +31,7 @@ use strata_types::{CheckpointReason, Code, Config, RepoId, RepoName, StrataError
 use crate::confirm_flow::{self, Pins};
 use crate::locks::Locks;
 use crate::rpc::{self, Reply, Request};
-use crate::{DaemonWarning, PinnedFlags, GC_KEEP, LOCK_WAIT, MAX_FRAME, Result};
+use crate::{DaemonWarning, GC_KEEP, LOCK_WAIT, MAX_FRAME, PinnedFlags, Result};
 
 /// Review P1-3: connections served at once; more wait in the backlog.
 pub const MAX_CONNS: usize = 128;
@@ -127,7 +127,12 @@ impl InstanceLock {
 }
 
 fn make_private_dir(dir: &Path) -> Result<()> {
-    match retry_eintr(|| fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)) {
+    match retry_eintr(|| {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }) {
         Ok(()) => Ok(()),
         Err(e) => Err(classify_io_error(&e, IoSide::Write, dir)),
     }
@@ -210,6 +215,7 @@ impl BeforeCheckpoint for DaemonBefore {
 
 /// Everything the daemon owns for its lifetime (steps 2–7).
 pub struct Core {
+    pub upstream: crate::upstream::Cache,
     pub opts: Options,
     pub config: Config,
     pub store: Store,
@@ -298,6 +304,7 @@ pub fn prepare_locked(
             .with_detail(json!({ "reason": "no_instance_lock" })));
     };
     Ok(Core {
+        upstream: Default::default(),
         pins,
         env: InstallEnv { path: opts.install_path.clone(), timeout: InstallEnv::DEFAULT_TIMEOUT },
         before: DaemonBefore,
@@ -360,7 +367,12 @@ impl Core {
     pub fn config_relax_with(&self, repo: &RepoName, between: &dyn Fn()) -> Result<()> {
         let id = match self.gits.get(repo) {
             Some(g) => g.repo_id(),
-            None => return Err(StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}"))),
+            None => {
+                return Err(StrataError::new(
+                    Code::NoSuchRepo,
+                    format!("no repo named {repo}"),
+                ));
+            }
         };
         confirm_flow::config_relax_with(&self.confirmer, &self.pins, repo, id, between)?;
         self.warnings.remove(|w| matches!(w, DaemonWarning::ConfigRelaxPending { repo: r } if r == repo));
@@ -449,9 +461,14 @@ impl<'a> Daemon<'a> {
         // rm-followups §1.6 rule 4: each repo's rebase_pending rows are
         // reconstructed under its write lock (no publish runs yet).
         for (repo, git) in core.gits.iter() {
-            let Some(rc) = core.config.repos.get(repo) else { continue };
-            let sc = strata_publish::pending::Scope { store: &core.store, git, repo, branch: &rc.publish.branch };
-            if let Err(e) = core.locks.with_repo(repo, || strata_publish::pending::reconstruct(sc)) {
+            let Some(rc) = core.config.repos.get(repo) else {
+                continue;
+            };
+            let sc = strata_publish::pending::Scope { store: &core.store, git, repo, branch: &rc.publish.branch,
+            };
+            if let Err(e) = core
+                .locks
+                .with_repo(repo, || strata_publish::pending::reconstruct(sc)) {
                 tracing::warn!(repo = %repo, error = %e.message, "rebase_pending reconstruction failed");
             }
         }
@@ -587,7 +604,9 @@ impl<'a> Daemon<'a> {
                             self.conns.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
                         });
                     }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(20)),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20))
+                    }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                     Err(e) if matches!(e.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE)) => {
                         let fd_errors = self.fd_errors.fetch_add(1, Ordering::SeqCst) + 1;
@@ -759,9 +778,12 @@ pub fn bind(socket: &Path) -> Result<UnixListener> {
 pub fn quarantine_entries(root: &Path) -> Vec<PathBuf> {
     let mut out = BTreeSet::new();
     let repos = root.join("sessions/.repos");
-    let Ok(sessions) = fs::read_dir(&repos) else { return Vec::new() };
+    let Ok(sessions) = fs::read_dir(&repos) else { return Vec::new();
+    };
     for s in sessions.flatten() {
-        let Ok(shadows) = fs::read_dir(s.path()) else { continue };
+        let Ok(shadows) = fs::read_dir(s.path()) else {
+            continue;
+        };
         for sh in shadows.flatten() {
             let shadow = sh.path();
             if !shadow.extension().is_some_and(|e| e == "git") {

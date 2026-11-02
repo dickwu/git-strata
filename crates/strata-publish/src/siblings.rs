@@ -82,7 +82,13 @@ fn pinned(store: &Store, layout: Option<&SessionId>) -> Result<BTreeMap<RepoName
     };
     Ok(store
         .session(l)?
-        .map(|rec| rec.manifest.repos.into_iter().map(|(r, ws)| (r, ws.base)).collect())
+        .map(|rec| {
+            rec.manifest
+                .repos
+                .into_iter()
+                .map(|(r, ws)| (r, ws.base))
+                .collect()
+        })
         .unwrap_or_default())
 }
 
@@ -118,7 +124,9 @@ fn prepare_one(ctx: &Ctx, s: &RepoName, warnings: &mut Vec<PublishWarning>) -> s
     let branch = &cfg.default_branch;
     let mut head = None;
     let r = ctx.locks.with_repo(s, &mut || {
-        git.fetch(REMOTE, branch)?;
+        let fetched = git.fetch(REMOTE, branch);
+        let _ = ctx.store.record_fetch(s, fetched.is_ok(), fetched.as_ref().err().map(|e| e.message.as_str()), std::time::SystemTime::now());
+        fetched?;
         seams::fail(git, FailPoint::SiblingAnchor).and_then(|()| advance_anchor(git, branch).map(|_| ())).map_err(
             |e| {
                 unknown_with(

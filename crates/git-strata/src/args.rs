@@ -32,6 +32,8 @@ pub struct Select {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
+    /// Merge main into the current session, or inspect local upstream state
+    Sync(SyncArgs),
     /// Create a session of workspaces (--repo: only those repos)
     #[command(long_about = crate::help::NEW, after_long_help = crate::help::NEW_AFTER)]
     New {
@@ -234,6 +236,42 @@ pub enum Cmd {
     /// Per-workspace dev ports (dev server, tauri-connector) and running with them
     #[command(subcommand, subcommand_required = true, after_long_help = crate::help::SESSION_AFTER)]
     Session(SessionCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct SyncArgs {
+    #[arg(long)]
+    pub session: Option<String>,
+    #[arg(long = "repo", value_delimiter = ',', value_name = "R", value_parser = sync_repo)]
+    pub repos: Vec<strata_types::RepoName>,
+    /// Read local refs and store only; never fetch or move
+    #[arg(long)]
+    pub check: bool,
+    #[arg(long)]
+    pub no_fetch: bool,
+    #[arg(long, value_name = "PATH", num_args = 1.., requires_all = ["target", "generation"], value_parser = sync_path)]
+    pub resolved: Vec<strata_types::RepoPath>,
+    #[arg(long, value_name = "PATH", num_args = 1.., requires_all = ["target", "generation"], value_parser = sync_path)]
+    pub keep: Vec<strata_types::RepoPath>,
+    #[arg(long, value_name = "HEAD", requires = "generation", value_parser = sync_head)]
+    pub target: Option<strata_types::CommitOid>,
+    #[arg(long, requires = "target")]
+    pub generation: Option<u64>,
+    #[arg(long)]
+    pub accept_diverged: bool,
+    /// Optional Stop hook: cache only, silent on errors, five second deadline
+    #[arg(long, requires = "check")]
+    pub hook: bool,
+}
+
+fn sync_repo(s: &str) -> Result<strata_types::RepoName, strata_types::StrataError> {
+    s.to_owned().try_into()
+}
+fn sync_path(s: &str) -> Result<strata_types::RepoPath, strata_types::StrataError> {
+    s.to_owned().try_into()
+}
+fn sync_head(s: &str) -> Result<strata_types::CommitOid, strata_types::StrataError> {
+    s.to_owned().try_into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

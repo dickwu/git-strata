@@ -204,7 +204,9 @@ impl Sessions<'_> {
                 let unknown = self.new_unknown(m, phase, repo.as_ref(), &e);
                 let owned = owned.into_inner().unwrap_or_else(|p| p.into_inner());
                 match self.roll_back_new(m, &owned) {
-                    Ok(not_owned) => Err(rolled_back_error(m, phase, repo.as_ref(), &e, &not_owned)),
+                    Ok(not_owned) => {
+                        Err(rolled_back_error(m, phase, repo.as_ref(), &e, &not_owned))
+                    }
                     Err(re) if crate::seams::is_stop(&re) => Err(re),
                     Err(_) => Err(self.scene_error_or(&m.id, unknown)),
                 }
@@ -278,9 +280,16 @@ impl Sessions<'_> {
         let each = |phase: &'static str, repos: &[RepoName], f: &(dyn Fn(&RepoName) -> Result<()> + Sync)| -> Result<()> {
             let failed = Mutex::new(std::collections::BTreeSet::new());
             let mark = |r: &RepoName| {
-                failed.lock().unwrap_or_else(|p| p.into_inner()).insert(r.clone());
+                failed
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(r.clone());
             };
-            let seam = |r: &RepoName| self.seams.hit(&format!("new.{phase}"), Some(r)).inspect_err(|_| mark(r));
+            let seam = |r: &RepoName| {
+                self.seams
+                    .hit(&format!("new.{phase}"), Some(r))
+                    .inspect_err(|_| mark(r))
+            };
             let run = |r: &RepoName| f(r).inspect_err(|_| mark(r));
             let out = dispatch::each_repo(repos, &seam, &run);
             if out.is_err() {
@@ -476,7 +485,14 @@ impl Sessions<'_> {
         let head = self.with_lock(repo, || {
             if !fresh {
                 let t = std::time::Instant::now();
-                git.fetch("origin", &cfg.default_branch)?;
+                let fetched = git.fetch("origin", &cfg.default_branch);
+                let _ = self.store.record_fetch(
+                    repo,
+                    fetched.is_ok(),
+                    fetched.as_ref().err().map(|e| e.message.as_str()),
+                    SystemTime::now(),
+                );
+                fetched?;
                 fetched_at = Some(t);
             }
             strata_deps::main_tip(cfg, git)

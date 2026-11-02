@@ -21,7 +21,9 @@ pub mod plist;
 pub mod resolve;
 pub mod rpc;
 pub mod startup;
+pub mod sync_move;
 pub mod track;
+pub mod upstream;
 pub mod waiting;
 
 /// The confirm seams a test daemon is built with (feature `test-seams`
@@ -113,7 +115,7 @@ pub fn install_path_for_home(home: &Path) -> String {
 /// Optional request features this daemon serves, listed in
 /// `daemon_status.features` so a newer CLI can tell what an older daemon
 /// would reject. Additive only. `new.agent`: `new` takes `agent`.
-pub const FEATURES: &[&str] = &["new.agent", "session.ports"];
+pub const FEATURES: &[&str] = &["new.agent", "session.ports", "status.upstream"];
 
 /// The launchd label of the agent.
 pub const AGENT_LABEL: &str = "com.gwd.git-stratad";

@@ -828,6 +828,13 @@ git commit -m "feat(publish): one merge under the repo lock"
 
 ### Main-sync foundation: Agent policy
 
+Main-sync upstream reporting is daemon enrichment: after `publish_bound` returns and the whole
+publishing group's post-publish rebase has run, the reply adds `upstream` keyed by each original
+session id (including rerun/already-published batches). Enrichment failure cannot change the
+publish result. The CLI preserves the field while retaining its existing push outcome/error rules.
+Default-branch fetches in publish, unknown-publish reconciliation and sibling preparation record
+fetch success/failure in `repo_fetch`; publishing a split branch does not claim default-branch freshness.
+
 `MovePolicy::Agent` is reserved for the sync implementation. In this foundation
 it is normalized to Auto before rebase gates, preserving Auto's existing safety
 behavior. The sync part supplies the Agent-specific move entry point and gates.

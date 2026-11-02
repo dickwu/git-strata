@@ -191,6 +191,8 @@ fn base_of(core: &Core, g: &BaseGen) -> Result<Base> {
 
 struct Tracked {
     root: PathBuf,
+    generation: Option<u64>,
+    inputs: Option<(String, String)>,
     watching: bool,
     tracker: Tracker,
 }
@@ -204,6 +206,10 @@ pub struct Trackers<'a> {
     map: Mutex<BTreeMap<(SessionId, RepoName), Tracked>>,
 }
 
+#[cfg(test)]
+#[path = "../tests/unit/upstream_tracker.rs"]
+mod upstream_tracker_tests;
+
 impl<'a> Trackers<'a> {
     pub fn new(core: &'a Core) -> Trackers<'a> {
         Trackers { core, map: Mutex::new(BTreeMap::new()) }
@@ -211,28 +217,108 @@ impl<'a> Trackers<'a> {
 
     /// The caller holds `s`'s queue.
     fn take(&self, s: &SessionId, repo: &RepoName, ws: &WorkspaceState) -> Tracked {
+        let generation = self
+            .core
+            .store
+            .session(s)
+            .ok()
+            .flatten()
+            .and_then(|r| r.workspaces.get(repo).map(|w| w.generation));
         let old = guard(&self.map).remove(&(s.clone(), repo.clone()));
         let mut t = match old {
             Some(t) if t.root == ws.path => t,
             Some(t) => {
                 drop_tracker(t.tracker);
-                Tracked { root: ws.path.clone(), watching: false, tracker: Tracker::new(&ws.path, DEFAULT_DIRTY_CAPACITY) }
+                Tracked { root: ws.path.clone(),
+                    generation,
+                    inputs: None,
+                    watching: false, tracker: Tracker::new(&ws.path, DEFAULT_DIRTY_CAPACITY),
+                }
             }
-            None => Tracked { root: ws.path.clone(), watching: false, tracker: Tracker::new(&ws.path, DEFAULT_DIRTY_CAPACITY) },
+            None => Tracked { root: ws.path.clone(),
+                generation,
+                inputs: None,
+                watching: false, tracker: Tracker::new(&ws.path, DEFAULT_DIRTY_CAPACITY),
+            },
         };
-        if t.tracker.last().is_some_and(|o| o.base != ws.base) {
+        if t.generation != generation || t.tracker.last().is_some_and(|o| o.base != ws.base) {
             t.tracker.reset();
             t.watching = false;
         }
+        t.generation = generation;
         if !t.watching {
             t.watching = track::watch_or_full(&mut t.tracker);
         }
         t
     }
 
-    fn put(&self, s: &SessionId, repo: &RepoName, t: Tracked) {
+    fn put(&self, s: &SessionId, repo: &RepoName, mut t: Tracked) {
+        // Fill alongside the existing scan, never from an upstream read.
+        // An error/missing scan leaves classification unknown.
+        t.inputs = t
+            .tracker
+            .base()
+            .filter(|_| !t.tracker.needs_full())
+            .and_then(|base| {
+                let cfg = self.core.config.repos.get(repo)?;
+                let git = self.core.gits.get(repo)?;
+                Some((
+                    strata_deps::inputs_hash(cfg, git, &t.root).ok()?,
+                    strata_deps::inputs_hash(cfg, git, &self.core.store.base_dir(base)).ok()?,
+                ))
+            });
         if let Some(old) = guard(&self.map).insert((s.clone(), repo.clone()), t) {
             drop_tracker(old.tracker);
+        }
+    }
+
+    /// §5/NB9/NB11: no scan, no checkpoint, no publish watermark. An
+    /// absent, checked-out, reset or stale Tracker is conservatively dirty.
+    pub fn unpublished(
+        &self,
+        s: &SessionId,
+        repo: &RepoName,
+        ws: &WorkspaceState,
+        generation: u64,
+        flush: bool,
+    ) -> bool {
+        self.live(s, repo, ws, generation, flush).unpublished
+    }
+
+    pub(crate) fn live(
+        &self,
+        s: &SessionId,
+        repo: &RepoName,
+        ws: &WorkspaceState,
+        generation: u64,
+        flush: bool,
+    ) -> crate::upstream::Live {
+        let Ok(map) = self.map.try_lock() else {
+            return Default::default();
+        };
+        let Some(t) = map.get(&(s.clone(), repo.clone())) else {
+            return Default::default();
+        };
+        let ready = track::ready_for_upstream(&t.tracker, flush);
+        if !t.watching
+            || t.root != ws.path
+            || t.generation != Some(generation)
+            || !ready
+            || t.tracker.base() != Some(&ws.base)
+            || t.tracker.last().is_none()
+        {
+            return Default::default();
+        }
+        crate::upstream::Live {
+            unpublished: !t.tracker.last().is_some_and(|o| o.entries.is_empty())
+                || !self
+                    .core
+                    .store
+                    .latest_checkpoint(s, repo)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|cp| cp.base == ws.base && cp.entries.is_empty()),
+            inputs: t.inputs.clone(),
         }
     }
 
@@ -269,7 +355,8 @@ impl<'a> Trackers<'a> {
 
     /// The tracked workspaces of every Active session.
     fn tracked(&self) -> Vec<(SessionId, RepoName)> {
-        let Ok(all) = self.core.store.sessions() else { return Vec::new() };
+        let Ok(all) = self.core.store.sessions() else { return Vec::new();
+        };
         all.into_iter()
             .filter(|r| r.lifecycle == strata_store::Lifecycle::Active)
             .flat_map(|r| {
@@ -330,7 +417,9 @@ impl<'a> Trackers<'a> {
             }
             match core.locks.with_repo(repo, || core.store.gc_repo(repo, GC_KEEP).map(|_| ())) {
                 Ok(()) => gc.push(json!({ "repo": repo.as_str(), "ok": true })),
-                Err(e) => gc.push(json!({ "repo": repo.as_str(), "ok": false, "error": json_of(&e) })),
+                Err(e) => {
+                    gc.push(json!({ "repo": repo.as_str(), "ok": false, "error": json_of(&e) }))
+                }
             }
         }
         json!({ "at": json_of(&SystemTime::now()), "scanned": scanned, "skipped": skipped, "failed": failed, "gc": gc })
@@ -452,9 +541,21 @@ pub fn serve(d: &Daemon<'_>, listener: &std::os::unix::net::UnixListener, extern
     let done = AtomicBool::new(false);
     let r = std::thread::scope(|s| {
         let server = Server::new(d, &trackers);
-        s.spawn(|| reconcile_loop(d, &trackers, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
-        s.spawn(|| old_tree_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
-        s.spawn(|| catch_up_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
+        s.spawn(|| {
+            reconcile_loop(d, &trackers, &|| {
+                done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
+            })
+        });
+        s.spawn(|| {
+            old_tree_loop(d, &|| {
+                done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
+            })
+        });
+        s.spawn(|| {
+            catch_up_loop(d, &|| {
+                done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
+            })
+        });
         let r = d.serve(listener, external, &|req| server.handle(req));
         done.store(true, Ordering::SeqCst);
         r
@@ -553,19 +654,26 @@ pub fn catch_up_pass(
             strata_publish::pending::catch_up(&ctx, now)
         })();
         match &r {
-            Err(e) if e.code == Code::Busy => tracing::debug!(repo = %repo, "catch-up: the repo is busy; skipped"),
+            Err(e) if e.code == Code::Busy => {
+                tracing::debug!(repo = %repo, "catch-up: the repo is busy; skipped")
+            }
             Err(e) => tracing::warn!(repo = %repo, error = %e.message, "catch-up failed"),
             Ok(rows) => {
                 for (s, o) in rows {
                     match o {
-                        Ok(o) => tracing::debug!(repo = %repo, session = %s, outcome = ?o, "catch-up"),
-                        Err(e) => tracing::warn!(repo = %repo, session = %s, error = %e.message, "catch-up attempt failed"),
+                        Ok(o) => {
+                            tracing::debug!(repo = %repo, session = %s, outcome = ?o, "catch-up")
+                        }
+                        Err(e) => {
+                            tracing::warn!(repo = %repo, session = %s, error = %e.message, "catch-up attempt failed")
+                        }
                     }
                 }
             }
         }
         out.push((repo.clone(), r));
     }
+    core.upstream.warm(core);
     out
 }
 
@@ -612,11 +720,15 @@ fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
             };
             let r = catch_unwind(AssertUnwindSafe(|| {
                 d.core.locks.try_session(&key.session, || {
-                    d.core.locks.with_repo(&key.repo, || d.sessions.check_old_tree(&key, &path, ino, &flag))
+                    d.core.locks.with_repo(&key.repo, || {
+                        d.sessions.check_old_tree(&key, &path, ino, &flag)
+                    })
                 })
             }));
             match r {
-                Ok(None) => later.push((std::time::Instant::now() + OLD_TREE_RETRY, key, path, ino)),
+                Ok(None) => {
+                    later.push((std::time::Instant::now() + OLD_TREE_RETRY, key, path, ino))
+                }
                 Ok(Some(Ok(out))) => {
                     tracing::debug!(session = %key.session, repo = %key.repo, n = key.n, outcome = ?out, "old tree checked");
                 }
@@ -705,6 +817,79 @@ impl<'d, 'a> Server<'d, 'a> {
         self.d.core
     }
 
+    fn upstream_best_effort(&self, id: &SessionId) -> Option<strata_types::Upstream> {
+        let read = || -> Result<_> {
+            let row = self
+                .core()
+                .store
+                .session(id)?
+                .ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
+            self.core().upstream.session(
+                self.core(),
+                &row,
+                crate::upstream::ReadMode::Full,
+                |r, ws, generation| self.trackers.live(id, r, ws, generation, false),
+            )
+        };
+        match catch_unwind(AssertUnwindSafe(read)) {
+            Ok(Ok(upstream)) => Some(upstream),
+            Ok(Err(e)) => {
+                tracing::debug!(session = %id, error = %e, "upstream enrichment omitted");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(session = %id, "upstream enrichment panicked; omitted");
+                None
+            }
+        }
+    }
+
+    fn sync_check(&self, p: &crate::rpc::SyncParams) -> Result<Value> {
+        let core = self.core();
+        let id = if let Some(selector) = &p.session {
+            self.d.sessions.select(selector)?
+        } else if let Some(cwd) = &p.cwd {
+            self.d
+                .sessions
+                .resolve(cwd)?
+                .map(|(s, _)| s)
+                .ok_or_else(|| StrataError::new(Code::NoSuchSession, "cwd is not in a session"))?
+        } else {
+            return Err(StrataError::new(
+                Code::NoSuchSession,
+                "sync needs a session or workspace cwd",
+            ));
+        };
+        let mut row = core
+            .store
+            .session(&id)?
+            .ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
+        for repo in &p.repos {
+            repo_cfg(core, repo)?;
+            if !row.manifest.repos.get(repo).is_some_and(|w| w.tracked) {
+                return Err(StrataError::new(
+                    Code::InvalidInput,
+                    format!("{repo} is not tracked in {id}"),
+                )
+                .with_detail(json!({ "reason": "not_tracked", "repo": repo })));
+            }
+        }
+        if !p.repos.is_empty() {
+            row.manifest.repos.retain(|r, _| p.repos.contains(r));
+        }
+        let mode = if p.hook {
+            crate::upstream::ReadMode::Cached
+        } else {
+            crate::upstream::ReadMode::Full
+        };
+        let upstream = core
+            .upstream
+            .session(core, &row, mode, |r, ws, generation| {
+                self.trackers.live(&id, r, ws, generation, p.hook)
+            })?;
+        Ok(json!({ "session": id, "upstream": upstream }))
+    }
+
     /// One request: scope, handler, panic → `Failed` / `Unknown`.
     pub fn handle(&self, req: Request) -> Reply {
         let name = req.method.name();
@@ -717,10 +902,16 @@ impl<'d, 'a> Server<'d, 'a> {
             Ok(Err(e)) => Reply::error(&req.id, &e),
             Err(_) if wrote => Reply::error(
                 &req.id,
-                &StrataError::new(Code::Unknown, format!("{name} panicked after it may have written; nothing is replayed"))
-                    .with_detail(json!({ "reason": "handler_panicked", "method": name })),
+                &StrataError::new(
+                    Code::Unknown,
+                    format!("{name} panicked after it may have written; nothing is replayed"),
+                )
+                .with_detail(json!({ "reason": "handler_panicked", "method": name })),
             ),
-            Err(_) => Reply::rejected(&req.id, RpcReject::Failed, format!("{name} panicked before writing anything")),
+            Err(_) => Reply::rejected(
+                &req.id,
+                RpcReject::Failed, format!("{name} panicked before writing anything"),
+            ),
         }
     }
 
@@ -733,6 +924,17 @@ impl<'d, 'a> Server<'d, 'a> {
                 self.status_summary(p.cwd.as_deref(), p.session.as_deref(), p.all, p.chains, p.summary, p.workspaces)
             }
             Params::Status(p) => self.status(p.cwd.as_deref(), p.session.as_deref(), p.all, p.chains),
+            Params::Sync(p) => {
+                // This branch must stay before fetch, observation, enrollment,
+                // queues, write locks and the non-check handler.
+                if p.check {
+                    return self.sync_check(p);
+                }
+                if p.hook {
+                    return Err(StrataError::new(Code::InvalidInput, "--hook requires --check"));
+                }
+                crate::sync_move::run(self.d, self.trackers, p)
+            }
             Params::Checkpoint(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
                 let ws = workspace(core, &p.session, &p.repo)?;
                 let base = base_of(core, &ws.base)?;
@@ -840,6 +1042,7 @@ impl<'d, 'a> Server<'d, 'a> {
                     // status-perf D8: du lets go of the session first, and
                     // stays off it until its figures are dropped.
                     self.with_du_hold(std::slice::from_ref(&p.session), || {
+                        let upstream = self.upstream_best_effort(&p.session);
                         self.trackers.drop_session(&p.session);
                         writing();
                         let r = self.d.sessions.remove(&p.session, p.discard, token);
@@ -847,7 +1050,13 @@ impl<'d, 'a> Server<'d, 'a> {
                         if let Err(e) = &r {
                             record_rm_attempt(core, &p.session, e);
                         }
-                        let r = r?;
+                        let r = r.map_err(|mut e| {
+                            if e.code == Code::Dirty && let Some(upstream) = &upstream
+                                && let Some(detail) = e.detail.get_or_insert_with(|| json!({})).as_object_mut() {
+                                detail.insert("upstream".into(), json_of(upstream));
+                            }
+                            e
+                        })?;
                         for o in &r.orphans {
                             tracing::warn!(path = %o.path.display(), "rm retired a recreated session directory");
                         }
@@ -855,7 +1064,9 @@ impl<'d, 'a> Server<'d, 'a> {
                             tracing::warn!(session = %p.session, error = %w.message, "rm orphan sweep");
                         }
                         self.d.du.on_remove(p.session.as_str());
-                        Ok(json_of(&r))
+                        let mut data = json_of(&r);
+                        if let Some(upstream) = upstream { data["upstream"] = json_of(&upstream); }
+                        Ok(data)
                     })
                 })
             }
@@ -1070,7 +1281,18 @@ impl<'d, 'a> Server<'d, 'a> {
         } else {
             strata_session::SummarySelect::All
         };
-        let v = strata_session::summary(&core.store, &core.config.paths.root, sel, workspaces)?;
+        let mut v = strata_session::summary(&core.store, &core.config.paths.root, sel, workspaces)?;
+        for summary in &mut v {
+            if let Some(row) = core.store.session(&summary.id)? {
+                summary.behind = core.upstream.behind(core, &row);
+                for ws in summary.workspaces.iter_mut().flatten() {
+                    if let Some(b) = summary.behind.get(&ws.repo) {
+                        ws.behind = b.behind;
+                        ws.unchecked = b.unchecked;
+                    }
+                }
+            }
+        }
         // rm-followups R3: directories of removed sessions (two read_dirs).
         let left = strata_session::removed_leftovers(&core.store, &core.config.paths.root)?;
         // Only when there are any: the reply stays `{sessions}` otherwise.
@@ -1088,11 +1310,9 @@ impl<'d, 'a> Server<'d, 'a> {
         let ids: Vec<SessionId> = if all {
             sessions.list()?
         } else if let Some(sel) = selector {
-            vec![
-                sessions
-                    .select(sel)
-                    .map_err(|e| strata_session::with_leftover_detail(&core.store, &core.config.paths.root, sel, e))?,
-            ]
+            vec![sessions.select(sel).map_err(|e| {
+                strata_session::with_leftover_detail(&core.store, &core.config.paths.root, sel, e)
+            })?]
         } else if let Some(cwd) = cwd {
             match sessions.resolve(cwd)? {
                 Some((id, _)) => vec![id],
@@ -1108,7 +1328,13 @@ impl<'d, 'a> Server<'d, 'a> {
         // in the serial order, so the first error below is today's.
         let mut out = Vec::new();
         for (id, st) in ids.iter().zip(sessions.status_many(&ids)) {
-            let st = st?;
+            let mut st = st?;
+            if let Some(upstream) = self.upstream_best_effort(id) {
+                for (repo, ws) in &mut st.workspaces {
+                    ws.upstream = upstream.repos.get(repo).cloned();
+                }
+                st.upstream = Some(upstream);
+            }
             report_guard_disabled(&core.warnings, &st, &core.config.paths.root);
             let cps: Vec<Value> = core
                 .store
@@ -1175,7 +1401,12 @@ impl<'d, 'a> Server<'d, 'a> {
         let ids = match (session, all) {
             (_, true) => self.d.sessions.list()?,
             (Some(s), false) => vec![s.clone()],
-            (None, false) => return Err(StrataError::new(Code::InvalidInput, "grep needs a session or all")),
+            (None, false) => {
+                return Err(StrataError::new(
+                    Code::InvalidInput,
+                    "grep needs a session or all",
+                ));
+            }
         };
         for id in &ids {
             if let Some(rec) = core.store.session(id)? {
@@ -1256,7 +1487,9 @@ impl<'d, 'a> Server<'d, 'a> {
         // 4.
         let switched = if switch {
             let target_tree = match &p.state {
-                strata_deps::ProposalState::Pending => p.tree.clone().unwrap_or_else(|| ws.base.tree.clone()),
+                strata_deps::ProposalState::Pending => {
+                    p.tree.clone().unwrap_or_else(|| ws.base.tree.clone())
+                }
                 _ => ws.base.tree.clone(),
             };
             self.base_for(repo, &target_tree, &p.to)?;
@@ -1336,7 +1569,9 @@ impl<'d, 'a> Server<'d, 'a> {
             .store
             .sessions()?
             .into_iter()
-            .filter(|r| r.lifecycle != strata_store::Lifecycle::Removed && r.manifest.repos.contains_key(&repo))
+            .filter(|r| {
+                r.lifecycle != strata_store::Lifecycle::Removed && r.manifest.repos.contains_key(&repo)
+            })
             .map(|r| r.manifest.id)
             .collect();
         let complete = only.is_none();
@@ -1497,12 +1732,16 @@ impl<'d, 'a> Server<'d, 'a> {
         plan: Option<&BTreeSet<RepoName>>,
     ) -> Result<Value> {
         let core = self.core();
+        let upstream_sessions: BTreeSet<_> =
+            group.batches.iter().map(|b| b.session.clone()).collect();
         let rows = core.store.publishes()?;
         let (group, mut already) = rerun_plan(core, &rows, group)?;
         let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
         if let Some(plan) = plan {
             for repo in &repos {
-                let pinned = core.pinned(repo).map_err(|e| self.decorate_publish_error(e, repo, Vec::new(), already.clone()))?;
+                let pinned = core.pinned(repo).map_err(|e| {
+                    self.decorate_publish_error(e, repo, Vec::new(), already.clone())
+                })?;
                 if pinned.push && needs_confirm(&pinned) && !plan.contains(repo) {
                     let e = StrataError::new(
                         Code::NotConfirmed,
@@ -1541,7 +1780,9 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
                 writing();
                 let bound = token.as_ref().map(|_| shown.get(&repo).cloned().flatten());
-                self.with_publish_ctx(&repo, |ctx| strata_publish::publish_bound(ctx, &group, token, bound.clone()))
+                self.with_publish_ctx(&repo, |ctx| {
+                    strata_publish::publish_bound(ctx, &group, token, bound.clone())
+                })
             })();
             match r {
                 Ok(p) => done.push(json!({
@@ -1568,7 +1809,16 @@ impl<'d, 'a> Server<'d, 'a> {
                 Err(e) => return Err(self.decorate_publish_error(e, &repo, done, already)),
             }
         }
-        Ok(json!({ "published": done, "already_published": already }))
+        // `publish_bound` has finished its post-publish group rebase here.
+        let upstream: BTreeMap<_, _> = upstream_sessions
+            .iter()
+            .filter_map(|s| self.upstream_best_effort(s).map(|u| (s, u)))
+            .collect();
+        let mut data = json!({ "published": done, "already_published": already });
+        if !upstream.is_empty() {
+            data["upstream"] = json_of(&upstream);
+        }
+        Ok(data)
     }
 
     /// The common decoration of a `publish` error (review-2 N6, M4;
@@ -1640,7 +1890,9 @@ impl<'d, 'a> Server<'d, 'a> {
             };
             // Review M6: the scene is kept (and reported) when the outcome
             // is unknown; see `resolve::with_staging`.
-            let uncertain = |r: &Result<strata_types::PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
+            let uncertain = |r: &Result<strata_types::PushOutcome>| {
+                r.as_ref().is_err_and(|e| e.code == Code::Unknown)
+            };
             // Review-3 R4: the destination is read before the push.
             let dest = resolve::push_dest(git);
             if token.is_some() {
@@ -1706,7 +1958,9 @@ impl Server<'_, '_> {
             self.rebase_replayed(repo, rp, &mut rebases, &mut warnings);
         }
         if let Some(after) = tips.1.clone()
-            && let Some(e) = crate::fetch_after::observe_if_moved(tips.0.as_ref(), Some(&after), &mut || resolve::observe_tip(core, repo, &after))
+            && let Some(e) = crate::fetch_after::observe_if_moved(tips.0.as_ref(), Some(&after), &mut || {
+                    resolve::observe_tip(core, repo, &after)
+                })
         {
             warnings.push(json!({ "kind": "ObserveFailed", "repo": repo.as_str(), "code": e.code.as_str(), "message": e.message }));
         }
@@ -1746,10 +2000,17 @@ impl Server<'_, '_> {
             }
         };
         for row in rows.into_iter().filter(|r| r.repo == *repo) {
-            let Some(copy) = row.head.as_deref().and_then(|h| rp.map.iter().find(|(_, n)| n.as_str() == h)) else { continue };
+            let Some(copy) = row
+                .head
+                .as_deref()
+                .and_then(|h| rp.map.iter().find(|(_, n)| n.as_str() == h)) else {
+                continue;
+            };
             let (from, to) = (copy.0.clone(), copy.1.clone());
             let s = row.session.clone();
-            let r = self.with_publish_ctx(repo, |ctx| strata_publish::pending::attempt(ctx, &row, strata_publish::MovePolicy::Auto));
+            let r = self.with_publish_ctx(repo, |ctx| {
+                strata_publish::pending::attempt(ctx, &row, strata_publish::MovePolicy::Auto)
+            });
             match r {
                 Ok(Some(report)) => rebases.push(json!({ "session": s.as_str(), "from": from.as_str(), "to": to.as_str(), "report": json_of(&report) })),
                 Ok(None) => {}
@@ -1772,7 +2033,9 @@ fn landed_after_commit(repo: &RepoName, commit: Value, d: &Value) -> Value {
     let push = match (d.get("push"), d.get("kind").and_then(Value::as_str)) {
         (Some(p), _) => p.clone(),
         (None, Some("Unknown")) => json!({ "kind": "Unknown" }),
-        (None, Some("PushRefused")) => json!({ "kind": "Refused", "message": d.get("message").cloned().unwrap_or(json!("")) }),
+        (None, Some("PushRefused")) => {
+            json!({ "kind": "Refused", "message": d.get("message").cloned().unwrap_or(json!("")) })
+        }
         _ => Value::Null,
     };
     let checks = d.get("checks_ran").cloned().unwrap_or(Value::Null);
@@ -1867,23 +2130,35 @@ fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_
         if r.phase != PublishPhase::Done {
             continue;
         }
-        let Some(o) = r.outcome.as_ref() else { continue };
-        let Some(commit) = o.get("commit").and_then(Value::as_str) else { continue };
-        let mine: Vec<&RepoPath> =
-            r.group.batches.iter().filter(|x| x.session == b.session && x.repo == b.repo).flat_map(|x| x.paths.iter()).collect();
+        let Some(o) = r.outcome.as_ref() else {
+            continue;
+        };
+        let Some(commit) = o.get("commit").and_then(Value::as_str) else {
+            continue;
+        };
+        let mine: Vec<&RepoPath> = r
+            .group
+            .batches
+            .iter()
+            .filter(|x| x.session == b.session && x.repo == b.repo)
+            .flat_map(|x| x.paths.iter())
+            .collect();
         let files: Vec<RepoPath> = o
             .get("paths")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
-            .filter(|f| at_or_under(f, p.as_str()) && mine.iter().any(|q| at_or_under(f, q.as_str())))
+            .filter(|f| {
+                at_or_under(f, p.as_str()) && mine.iter().any(|q| at_or_under(f, q.as_str()))
+            })
             .filter_map(|f| RepoPath::try_from(f.to_string()).ok())
             .collect();
         if files.is_empty() {
             continue;
         }
-        let Ok(c) = CommitOid::try_from(commit.to_string()) else { return Ok(None) };
+        let Ok(c) = CommitOid::try_from(commit.to_string()) else { return Ok(None);
+        };
         let git = git_of(core, &b.repo)?;
         // Review P1-8: the row's commit may be gone (replayed or dropped
         // off the chain, then pruned by git gc). That cannot prove the
@@ -1894,7 +2169,9 @@ fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_
             Err(e) => return Err(e),
         };
         let now = git.tree_items(base, &files)?;
-        let key = |m: &BTreeMap<String, strata_gitio::TreeItem>, f: &RepoPath| m.get(f.as_str()).map(|i| (i.mode, i.oid.clone()));
+        let key = |m: &BTreeMap<String, strata_gitio::TreeItem>, f: &RepoPath| {
+            m.get(f.as_str()).map(|i| (i.mode, i.oid.clone()))
+        };
         if files.iter().all(|f| key(&now, f) == key(&then, f)) {
             return Ok(Some(json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "push": o.get("push").cloned().unwrap_or(Value::Null) })));
         }
