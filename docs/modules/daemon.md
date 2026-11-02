@@ -957,3 +957,37 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 - **追赶循环** `catch_up_loop`：启动时与每 `CATCH_UP_EVERY` = 60 s 一次，对每个仓库不等锁地重建 `rebase_pending`，再对到期的行以 `Auto` 重试（退避 quiet·2^(k−1)，封顶 30 min）；不带 RequestScope；会话锁不等待，拿到后重查。
 - **启动第 10 步**在仓库锁里重建 `rebase_pending`；旧树队列在启动时收入崩溃后留下的 Auto 旧树，按持久化的 `move_activity` 基线判断（缺基线 → 保留）。
 - `status`/`ls`/`--brief` 经共享的 `rm_notes` 带上 `last_rm`、`rebase_pending` 行、保留的旧树与 `leftovers`；daemon 把 `rm` 的拒绝/失败写进 `rm_attempts`。
+
+### Main-sync background scheduling
+
+`main_sync` and `periodic_fetch` own background dependency preparation and
+fetching, separately from the T2 catch-up thread. Each repo has at most one
+install job and one periodic fetch; all automatic dependency decisions use
+`Core::effective_sync_deps` (including check siblings via PublishLocks).
+Workers export the proposal tree into a private temporary directory under
+`<root>/daemon/main-follow` and remove it on every exit. They retain failed
+install staging owned by strata-deps. T2 reconciles and moves sealed targets;
+it never cold-installs dependencies in apply mode.
+
+When `sync.fetch_secs > 0`, a non-split repo is fetched at most once per
+interval (failures count). The bounded, noninteractive fetch writes only
+`refs/strata/fetch/<default>`, with no daemon lock held. It skips an occupied
+repo or an already-running periodic job. After preparing temporary canonical exports
+and install-input keys outside the lock, it try-locks the repo and
+requires a fast-forward from the pre-fetch tracking value. One ref transaction
+verifies the staging ref and CASes the tracking ref against that pre-fetch
+value; a concurrent update or rewind is not overwritten. It then calls
+`advance_anchor_locked`, `observe_main_locked` and T4 without taking the repo
+lock recursively. A changed main tip discards its prepared key until the next
+reconcile. `record_fetch` preserves the last successful fetch time across
+failures; FetchFailed is deduplicated per repo and cleared on success.
+
+T4 also runs after each new/add, publish group rebase, standalone push,
+chain-resolution fetch and sibling fetch. Turning periodic fetch off affects
+freshness only; every T2 pass still reconciles local refs after reconstruction.
+No feature flag or upstream/sync RPC is introduced by these workers.
+
+The current gitio API exports whole trees, so key preparation uses its canonical
+checkout export (including CRLF, filters and encodings), then hashes only
+install_inputs. A selective canonical export can reduce temporary I/O later;
+raw blob extraction is not equivalent. Exports are not registered base generations.

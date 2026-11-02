@@ -184,6 +184,11 @@ impl Core {
                 _ => true,
             });
         }
+        for repo in &repos {
+            if let Err(e) = crate::main_sync::reconcile(self, repo) {
+                tracing::warn!(repo=%repo, error=%e.message, "main-follow after new/add failed");
+            }
+        }
         out
     }
 

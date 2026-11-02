@@ -59,6 +59,9 @@ pub struct Options {
     /// [`CATCH_UP_EVERY`](crate::CATCH_UP_EVERY) in production
     /// (rm-followups §1.6 T2); tests lengthen or shorten it.
     pub catch_up_every: Duration,
+    /// Test-only scheduler admission; direct worker passes remain callable.
+    #[cfg(feature = "test-seams")]
+    pub background_main_sync: bool,
 }
 
 impl Options {
@@ -74,6 +77,8 @@ impl Options {
             alert: Arc::new(|line: &str| eprintln!("git-stratad: {line}")),
             reconcile_every: crate::RECONCILE_EVERY,
             catch_up_every: crate::CATCH_UP_EVERY,
+            #[cfg(feature = "test-seams")]
+            background_main_sync: true,
         }
     }
 }
@@ -221,6 +226,7 @@ pub struct Core {
     pub warnings: Warnings,
     /// `pins.json`: the effective safety flags.
     pub pins: Pins,
+    pub main_sync: crate::main_sync::State,
     instance: InstanceLock,
 }
 
@@ -298,6 +304,7 @@ pub fn prepare_locked(
             .with_detail(json!({ "reason": "no_instance_lock" })));
     };
     Ok(Core {
+        main_sync: Default::default(),
         pins,
         env: InstallEnv { path: opts.install_path.clone(), timeout: InstallEnv::DEFAULT_TIMEOUT },
         before: DaemonBefore,

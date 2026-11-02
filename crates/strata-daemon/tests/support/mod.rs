@@ -425,6 +425,8 @@ impl Dfx {
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
             reconcile_every: self.reconcile_every,
             catch_up_every: self.catch_up_every,
+            // Legacy RPC tests control their own fetch/install timelines.
+            background_main_sync: false,
         }
     }
 

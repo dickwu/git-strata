@@ -37,7 +37,7 @@ pub use proposal::{
     ChainState, Proposal, ProposalOrigin, ProposalState, ProposeArgs, PublishChain, get_proposal, main_tip, observe_main, observe_main_locked,
     open_proposals, propose, publish_chain,
 };
-pub use rollout::{RolloutPlan, RolloutStep, SkipReason, Target, ensure_target, plan_rollout, plan_switch, record_rollout};
+pub use rollout::{RolloutPlan, RolloutStep, SkipReason, Target, classify_rollout, ensure_target, plan_rollout, plan_switch, record_rollout};
 #[cfg(feature = "test-seams")]
 pub use seams::test_seams;
 

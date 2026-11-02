@@ -642,12 +642,21 @@ pub fn chain_resolve(
         Ok(done)
     });
     // 9. After the lock: observe when main moved; failure is a warning.
-    let mut done = out?;
+    let follow = || {
+        if let Err(e) = crate::main_sync::reconcile(core, repo) {
+            tracing::warn!(repo=%repo, error=%e.message, "main-follow after chain resolve failed");
+        }
+    };
+    let mut done = match out {
+        Ok(done) => done,
+        Err(e) => { follow(); return Err(e); }
+    };
     if let Some(after) = tips.1.clone()
         && let Some(e) = observe_if_moved(tips.0.as_ref(), Some(&after), &mut || observe(&after))
     {
         done.warnings.push(json!({ "kind": "ObserveFailed", "repo": repo.as_str(), "code": e.code.as_str(), "message": e.message }));
     }
+    follow();
     Ok(done)
 }
 

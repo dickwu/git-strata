@@ -237,7 +237,11 @@ fn catch_up_defers_a_session_with_a_running_publish() {
 
 #[test]
 fn catch_up_drops_a_target_the_session_already_left() {
-    let fx = fx(120);
+    let mut fx = fx(120);
+    // Exercise the legacy stale-base cleanup independently of T4 retargeting.
+    let rc = fx.cfg_mut("tool");
+    rc.sync.follow_main = Some(false);
+    rc.sync.deps = strata_types::SyncDeps::Confirm;
     let (b, _p) = deferred_b(&fx);
     // A later publish of A; B is moved onto it explicitly (not the row's
     // target, so the row is left on B's old base).

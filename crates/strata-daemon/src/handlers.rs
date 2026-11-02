@@ -455,6 +455,14 @@ pub fn serve(d: &Daemon<'_>, listener: &std::os::unix::net::UnixListener, extern
         s.spawn(|| reconcile_loop(d, &trackers, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
         s.spawn(|| old_tree_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
         s.spawn(|| catch_up_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)));
+        for repo in d.core.config.repos.keys() {
+            for install in [true, false] {
+                let done = &done;
+                s.spawn(move || crate::main_sync::run_loop(d.core, repo, install, &|| {
+                    done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
+                }));
+            }
+        }
         let r = d.serve(listener, external, &|req| server.handle(req));
         done.store(true, Ordering::SeqCst);
         r
@@ -548,7 +556,7 @@ pub fn catch_up_pass(
                 env: &core.env,
                 locks: &core.locks,
             };
-            let locks = PublishLocksNoWait { locks: &core.locks, du: &d.du };
+            let locks = PublishLocksNoWait { locks: &core.locks, du: &d.du, pins: &core.pins };
             let ctx = strata_publish::Ctx { store: &core.store, git, cfg: &rc, repo, deps: &deps, locks: &locks, sessions: &d.sessions };
             strata_publish::pending::catch_up(&ctx, now)
         })();
@@ -1447,7 +1455,7 @@ impl<'d, 'a> Server<'d, 'a> {
             env: &core.env,
             locks: &core.locks,
         };
-        let locks = PublishLocksDu { locks: &core.locks, du: &self.d.du };
+        let locks = PublishLocksDu { locks: &core.locks, du: &self.d.du, pins: &core.pins };
         let ctx = strata_publish::Ctx { store: &core.store, git, cfg: &rc, repo, deps: &deps, locks: &locks, sessions: &self.d.sessions };
         f(&ctx)
     }
@@ -1710,6 +1718,9 @@ impl Server<'_, '_> {
         {
             warnings.push(json!({ "kind": "ObserveFailed", "repo": repo.as_str(), "code": e.code.as_str(), "message": e.message }));
         }
+        if let Err(e) = crate::main_sync::reconcile(core, repo) {
+            tracing::warn!(repo=%repo, error=%e.message, "main-follow after push failed");
+        }
         let replay = replayed.as_ref().map(resolve::Replayed::json);
         match r {
             Ok(tip) => Ok(json!({
@@ -1931,6 +1942,7 @@ fn landed_before(rows: &[strata_store::PublishRecord], b: &strata_types::Batch) 
 /// holder shows as `catch_up`), `Busy` otherwise, never waited out; the
 /// rebase's take adds the du hold like [`PublishLocksDu`].
 struct PublishLocksNoWait<'a> {
+    pins: &'a crate::confirm_flow::Pins,
     locks: &'a crate::locks::Locks,
     du: &'a Arc<crate::du::Du>,
 }
@@ -1938,6 +1950,10 @@ struct PublishLocksNoWait<'a> {
 const CATCH_UP: &str = "catch_up";
 
 impl strata_publish::PublishLocks for PublishLocksNoWait<'_> {
+    fn sync_deps(&self, repo: &RepoName, _: strata_types::SyncDeps) -> strata_types::SyncDeps {
+        self.pins.effective_sync_deps(repo)
+    }
+
     fn with_sessions(
         &self,
         sessions: &[SessionId],
@@ -1993,11 +2009,16 @@ impl strata_publish::PublishLocks for PublishLocksNoWait<'_> {
 /// of its session: queue → du hold → repo lock. A hold that times out is
 /// the take's `Busy`, which the rebase waits out like the queue's.
 struct PublishLocksDu<'a> {
+    pins: &'a crate::confirm_flow::Pins,
     locks: &'a crate::locks::Locks,
     du: &'a Arc<crate::du::Du>,
 }
 
 impl strata_publish::PublishLocks for PublishLocksDu<'_> {
+    fn sync_deps(&self, repo: &RepoName, _: strata_types::SyncDeps) -> strata_types::SyncDeps {
+        self.pins.effective_sync_deps(repo)
+    }
+
     fn with_sessions(
         &self,
         sessions: &[SessionId],
