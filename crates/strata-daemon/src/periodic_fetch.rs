@@ -102,6 +102,17 @@ fn fetch_due_inner(
             })
         })
     })();
+    // §2.3: losing the lock or the CAS to a concurrent fetch skips the round;
+    // it is not a fetch failure and raises no warning.
+    if let Err(e) = &result
+        && (e.code == Code::Busy
+            || (e.code == Code::HeadMoved
+                && e.detail.as_ref().and_then(|d| d.get("reason")).is_none()))
+    {
+        core.store
+            .record_fetch(repo, false, Some("skipped: concurrent fetch or lock"), now)?;
+        return Ok(FetchStep::Skipped);
+    }
     core.store.record_fetch(
         repo,
         result.is_ok(),

@@ -416,7 +416,7 @@ value; workers should use the accessor for subsequent passes.
 
 `ObserveFailed` 不在 `DaemonWarning` 里重定义。它是 `NewWarning` 或这次 RPC 的 `data.warnings`。
 
-`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.ports"]`（D38、D39）；没有这个键的 daemon 一个也不支持。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
+`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.ports", "status.upstream", "sync"]`（D38、D39；后两项见 main-sync）；没有这个键的 daemon 一个也不支持。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
 
 stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看见某个影子仓库的 `PrePushGuardDisabled`。同一条不重复打。JSON 里都有，不靠人去翻日志。
 
@@ -982,16 +982,21 @@ repo or an already-running periodic job. After preparing temporary canonical exp
 and install-input keys outside the lock, it try-locks the repo and
 requires a fast-forward from the pre-fetch tracking value. One ref transaction
 verifies the staging ref and CASes the tracking ref against that pre-fetch
-value; a concurrent update or rewind is not overwritten. It then calls
+value; a concurrent update or rewind is not overwritten. Losing that
+try-lock or CAS to a concurrent fetch skips the round: it is recorded with
+error `skipped: …` and adds no FetchFailed. It then calls
 `advance_anchor_locked`, `observe_main_locked` and T4 without taking the repo
 lock recursively. A changed main tip discards its prepared key until the next
 reconcile. `record_fetch` preserves the last successful fetch time across
 failures; FetchFailed is deduplicated per repo and cleared on success.
+Startup removes `daemon/main-follow/<pid>-…` and `daemon/sync/<pid>-…`
+exports whose owning process is gone (a killed daemon skips Drop).
 
 T4 also runs after each new/add, publish group rebase, standalone push,
 chain-resolution fetch and sibling fetch. Turning periodic fetch off affects
 freshness only; every T2 pass still reconciles local refs after reconstruction.
-No feature flag or upstream/sync RPC is introduced by these workers.
+These workers add no feature flag of their own; `status.upstream` and the
+`sync` RPC are advertised separately (cli.md §3.2).
 
 The current gitio API exports whole trees, so key preparation uses its canonical
 checkout export (including CRLF, filters and encodings), then hashes only

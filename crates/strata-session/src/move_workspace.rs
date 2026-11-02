@@ -291,10 +291,11 @@ impl Sessions<'_> {
             let open_move = self.store.move_intents(session)?.iter().any(|i| {
                 i.repo == name && matches!(i.state, MoveState::Preparing | MoveState::Swapping)
             });
-            if rec.scene.is_some() || row.scene.is_some() || open_move {
+            let scene = rec.scene.is_some() || self.store.workspace_scene_live(session, &name, row.scene.is_some())?;
+            if scene || open_move {
                 return Err(auto_defer(
                     "state",
-                    json!({"scene": rec.scene.is_some() || row.scene.is_some(), "open_move":open_move}),
+                    json!({"scene": scene, "open_move":open_move}),
                 ));
             }
         }
@@ -465,6 +466,14 @@ impl Sessions<'_> {
             let mut rebased = rebased;
             if agent.is_some() {
                 rebased.conflicts.clear();
+            }
+            // O7: kept-side conflicts left by an earlier Explicit move survive
+            // automatic and Agent moves; only an acknowledgement clears them.
+            for p in &row.conflicts {
+                let acked = agent.is_some_and(|a| a.options.resolutions.contains_key(p) || a.kept.contains(p));
+                if !acked && !rebased.conflicts.contains(p) {
+                    rebased.conflicts.push(p.clone());
+                }
             }
             pre = Some((rebased, ignorecase));
         }

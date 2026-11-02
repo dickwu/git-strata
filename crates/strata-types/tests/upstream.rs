@@ -33,6 +33,7 @@ fn upstream_optional_fields_omit_and_round_trip() {
         from: DepsSetId::try_from("a".repeat(64)).unwrap(),
         to: DepsSetId::try_from("b".repeat(64)).unwrap(),
         summary: None,
+        error: None,
     });
     let upstream = Upstream {
         as_of: None,

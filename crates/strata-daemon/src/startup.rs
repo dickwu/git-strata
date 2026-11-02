@@ -277,6 +277,9 @@ pub fn prepare_locked(
     for p in strata_deps::clean_snapshots(&config.paths) {
         tracing::warn!(path = %p.display(), "an install-input snapshot could not be removed");
     }
+    // Main-sync whole-tree exports left by a killed daemon (removed on Drop
+    // otherwise). Entries are `<pid>-…`; a live owner's are kept.
+    sweep_exports(&config.paths.root);
     // Dev-port leases (config [dev_ports]); validated with the config.
     store.set_dev_ports_policy(Some(strata_store::DevPortsPolicy::probing(config.dev_ports.blocks()?)));
     // 7. One Git per repo; two names for one repository → NameTaken.
@@ -800,4 +803,23 @@ pub fn quarantine_entries(root: &Path) -> Vec<PathBuf> {
         }
     }
     out.into_iter().collect()
+}
+
+fn sweep_exports(root: &Path) {
+    for sub in ["daemon/main-follow", "daemon/sync"] {
+        let Ok(entries) = std::fs::read_dir(root.join(sub)) else { continue };
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let Some(pid) = name.to_str().and_then(|n| n.split('-').next()).and_then(|p| p.parse::<i32>().ok()) else {
+                continue;
+            };
+            // SAFETY: kill with signal 0 only checks that the process exists.
+            let alive = pid == std::process::id() as i32
+                || unsafe { libc::kill(pid, 0) } == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+            if !alive && let Err(err) = std::fs::remove_dir_all(e.path()) {
+                tracing::warn!(path = %e.path().display(), %err, "a stale main-sync export could not be removed");
+            }
+        }
+    }
 }

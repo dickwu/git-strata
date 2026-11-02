@@ -51,7 +51,14 @@ fn req(s: &SessionId) -> SyncRequest {
     }
 }
 fn with_session(f: impl FnOnce(&Dfx, &Daemon<'_>, &SessionId)) {
-    let fx = fixture();
+    with_session_quiet(None, f)
+}
+fn with_session_quiet(quiet: Option<u64>, f: impl FnOnce(&Dfx, &Daemon<'_>, &SessionId)) {
+    let mut fx = fixture();
+    if let Some(q) = quiet {
+        fx.config.repos.get_mut(&repo_name("tool")).unwrap().rebase.quiet_secs = q;
+        fx.write_config();
+    }
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
     let id = d
@@ -875,5 +882,59 @@ fn sync_enrollment_preserves_unpushed_pending_target() {
                 .as_deref(),
             Some(first.as_str())
         );
+    });
+}
+
+/// impl-r1 B1: legacy kept-side conflicts from an Explicit move. Neither an
+/// automatic (T4/T2) nor an Agent move that did not name them clears them.
+fn legacy_conflict(fx: &Dfx, d: &Daemon<'_>, s: &SessionId) {
+    fs::write(ws(d.core, s, "tool").join("a"), lines(&[(2, "ours")])).unwrap();
+    let head = land(fx, &[("a", &lines(&[(2, "theirs")]))]);
+    let rn = repo_name("tool");
+    let git = &d.core.gits[&rn];
+    git.fetch("origin", "main").unwrap();
+    let old = d.core.store.session(s).unwrap().unwrap().manifest.repos[&rn].base.clone();
+    let target = d.sessions.ensure_base_for(&rn, &git.tree_of(&head).unwrap(), &old.deps).unwrap();
+    d.core.locks.with_repo(&rn, || d.sessions.move_workspace(s, &git.repo_id(), target, head)).unwrap();
+    assert_eq!(d.core.store.session(s).unwrap().unwrap().workspaces[&rn].conflicts, vec![rp("a")]);
+}
+
+#[test]
+fn legacy_conflicts_survive_automatic_follow() {
+    // T2 runs the automatic move now; the walk's quiet window is wall-clock.
+    with_session_quiet(Some(0), |fx, d, s| {
+        legacy_conflict(fx, d, s);
+        let rn = repo_name("tool");
+        let head = land(fx, &[("b", &lines(&[(5, "unrelated")]))]);
+        d.core.gits[&rn].fetch("origin", "main").unwrap();
+        strata_daemon::main_sync::reconcile(d.core, &rn).unwrap();
+        assert!(d.core.store.rebase_pending_of(s, &rn).unwrap().is_some());
+        strata_daemon::handlers::catch_up_pass(d, SystemTime::now() + std::time::Duration::from_secs(7200));
+        let rec = d.core.store.session(s).unwrap().unwrap();
+        assert_eq!(rec.manifest.repos[&rn].head, head, "the automatic move ran");
+        assert_eq!(rec.workspaces[&rn].conflicts, vec![rp("a")]);
+        // O7: still acknowledgeable once up to date.
+        let mut r = req(s);
+        r.fetch = false;
+        r.keep = vec![rp("a")];
+        assert_eq!(sync_move::run(d, r).unwrap()["repos"]["tool"]["result"], "conflicts_cleared");
+    });
+}
+
+#[test]
+fn legacy_conflicts_survive_unacknowledged_agent_sync() {
+    with_session(|fx, d, s| {
+        legacy_conflict(fx, d, s);
+        let rn = repo_name("tool");
+        let head = land(fx, &[("b", &lines(&[(5, "unrelated")]))]);
+        let v = sync_move::run(d, req(s)).unwrap();
+        assert_eq!(v["repos"]["tool"]["result"], "moved", "{v}");
+        let rec = d.core.store.session(s).unwrap().unwrap();
+        assert_eq!(rec.manifest.repos[&rn].head, head);
+        assert_eq!(rec.workspaces[&rn].conflicts, vec![rp("a")]);
+        let mut r = req(s);
+        r.resolved = vec![rp("a")];
+        assert_eq!(sync_move::run(d, r).unwrap()["repos"]["tool"]["result"], "conflicts_cleared");
+        assert!(d.core.store.session(s).unwrap().unwrap().workspaces[&rn].conflicts.is_empty());
     });
 }

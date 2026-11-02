@@ -101,6 +101,19 @@ pub(crate) fn delete_report(
 }
 
 impl Store {
+    /// Whether a workspace's scene JSON still describes an unresolved failed
+    /// move. `resolve_move` keeps the JSON as history; a terminal latest
+    /// intent (Done, Abandoned, Refused) proves it was resolved. Every gate
+    /// (Auto follow, Agent sync, upstream) uses this one predicate.
+    pub fn workspace_scene_live(&self, session: &SessionId, repo: &RepoName, scene: bool) -> Result<bool> {
+        if !scene {
+            return Ok(false);
+        }
+        Ok(!self.move_intents(session)?.iter().filter(|m| m.repo == *repo).max_by_key(|m| m.n).is_some_and(|m| {
+            matches!(m.state, crate::MoveState::Done | crate::MoveState::Abandoned | crate::MoveState::Refused)
+        }))
+    }
+
     pub fn deps_auto(&self, proposal: ProposalId) -> Result<Option<DepsAuto>> {
         let id = int(proposal.get(), "proposal")?;
         self.read(|c| {

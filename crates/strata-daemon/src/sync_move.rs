@@ -56,7 +56,7 @@ fn g0(core: &Core, s: &SessionId, repo: &RepoName, rec: &SessionRecord) -> Resul
         });
     if rec.lifecycle != Lifecycle::Active
         || rec.scene.is_some()
-        || row.scene.is_some()
+        || core.store.workspace_scene_live(s, repo, row.scene.is_some())?
         || row.health != Health::Ok
         || open
     {

@@ -62,6 +62,10 @@ pub struct UpstreamDeps {
     pub to: DepsSetId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// `install_failed` only: the worker's error; `detail.staging` is the
+    /// kept staging to inspect and remove before `deps approve` (O8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

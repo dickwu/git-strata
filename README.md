@@ -758,6 +758,7 @@ Flags, defaults and `data` shapes:
 | `deps approve ID [--sessions S,S]` | yes |
 | `publish --from S:PATH... ` / `publish --assign FILE SESSION` | only when gated |
 | `push REPO` | only when gated |
+| `sync [--session S] [--repo R]... [--check [--hook]] [--no-fetch] [--resolved PATH \| --keep PATH]... [--target HEAD --generation N] [--accept-diverged]` | no (`--accept-diverged` only on the human's say-so) |
 | `assign --file PATH --session S` | no |
 | `rm --session S [--discard]` | `--discard` only |
 | `gc` | no |

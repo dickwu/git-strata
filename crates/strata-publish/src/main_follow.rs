@@ -141,29 +141,15 @@ pub fn install_failed(ctx: &deps::Ctx, target: &DepsSetId) -> Result<bool> {
     Ok(false)
 }
 
-/// `resolve_move` retains the scene JSON as history. A terminal latest
-/// intent proves it was resolved; a later refusal did not create a new scene.
-/// An unresolved scene still blocks Auto.
+/// `resolve_move` retains the scene JSON as history; see
+/// [`strata_store::Store::workspace_scene_live`].
 pub(crate) fn workspace_has_scene(
     store: &strata_store::Store,
     session: &strata_types::SessionId,
     repo: &strata_types::RepoName,
     scene: bool,
 ) -> Result<bool> {
-    if !scene {
-        return Ok(false);
-    }
-    Ok(!store
-        .move_intents(session)?
-        .iter()
-        .filter(|m| m.repo == *repo)
-        .max_by_key(|m| m.n)
-        .is_some_and(|m| {
-            matches!(
-                m.state,
-                MoveState::Done | MoveState::Abandoned | MoveState::Refused
-            )
-        }))
+    store.workspace_scene_live(session, repo, scene)
 }
 
 /// Caller holds the repo lock. No helper on this path takes it again.

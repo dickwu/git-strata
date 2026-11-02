@@ -70,7 +70,8 @@ export interface UpstreamRepo {
   main?: { head: string; tree: string } | null;
   base_head?: string;
   commits?: UpstreamCommit[];
-  base_only?: UpstreamCommit[];
+  /** Commit IDs in T..W.head (≤ 20); the daemon sends IDs only. */
+  base_only?: string[];
   deps?: {
     proposal: number;
     mode: 'apply' | 'confirm';
@@ -78,6 +79,8 @@ export interface UpstreamRepo {
     from: string;
     to: string;
     summary?: string;
+    /** `install_failed` only: the worker's error; `detail.staging` is kept for inspection. */
+    error?: { message?: string; detail?: { staging?: string; [key: string]: unknown } } | null;
   } | null;
   auto?: {
     source: string;

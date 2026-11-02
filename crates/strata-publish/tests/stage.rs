@@ -833,7 +833,7 @@ fn publish_refuses_unacknowledged_move_conflict() {
         detail["fix"]
             .as_str()
             .unwrap()
-            .contains("git-strata sync --resolved")
+            .contains("--resolved PATH")
     );
     fx.store().clear_conflicts(&s, &rn, &[rp("a")]).unwrap();
     run(&fx, &one(&s, &c, &["a"]), &head).unwrap();

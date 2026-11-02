@@ -229,9 +229,9 @@ function UpstreamDetails({
         <details>
           <summary>Commits only in this session</summary>
           <ul>
-            {u.base_only!.slice(0, 20).map((c) => (
-              <li key={c.oid}>
-                <code>{short(c.oid)}</code> {c.subject}
+            {u.base_only!.slice(0, 20).map((oid) => (
+              <li key={oid}>
+                <code>{short(oid)}</code>
               </li>
             ))}
           </ul>
@@ -244,6 +244,20 @@ function UpstreamDetails({
           <span className="muted">
             · {u.deps.state.replace(/_/g, ' ')} · {u.deps.mode}
           </span>
+        </p>
+      )}
+      {u.deps?.state === 'install_failed' && (
+        <p className="muted">
+          {u.deps.error?.message ?? 'The dependency install failed.'}{' '}
+          {typeof u.deps.error?.detail?.staging === 'string' ? (
+            <>
+              Inspect the kept staging <code>{u.deps.error.detail.staging}</code>, remove it, then
+              run{' '}
+            </>
+          ) : (
+            'Then run '
+          )}
+          <code>git-strata deps approve {u.deps.proposal}</code>.
         </p>
       )}
       {u.auto && (

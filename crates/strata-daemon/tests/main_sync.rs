@@ -365,8 +365,16 @@ fn periodic_fetch_cas_under_try_lock() {
             stage(g, branch, &a)
         },
     )
-    .unwrap_err();
-    assert_eq!(e.code, Code::HeadMoved);
+    .unwrap();
+    // A lost CAS skips the round; it is not a fetch failure.
+    assert_eq!(e, FetchStep::Skipped);
+    assert!(
+        !core
+            .warnings
+            .snapshot()
+            .iter()
+            .any(|w| matches!(w, strata_daemon::DaemonWarning::FetchFailed { .. }))
+    );
     assert_eq!(
         git.read_ref("refs/strata/remotes/origin/main").unwrap(),
         Some(b)
@@ -475,11 +483,18 @@ fn periodic_fetch_try_lock_after_network_does_not_wait() {
             entered.wait();
             stage(g, b, &head)
         })
-        .unwrap_err();
+        .unwrap();
         release.wait();
         holder.unwrap().join().unwrap().unwrap();
-        assert_eq!(e.code, Code::Busy);
+        assert_eq!(e, FetchStep::Skipped);
     });
+    assert!(
+        !core
+            .warnings
+            .snapshot()
+            .iter()
+            .any(|w| matches!(w, strata_daemon::DaemonWarning::FetchFailed { .. }))
+    );
     assert_eq!(
         git.read_ref("refs/strata/remotes/origin/main").unwrap(),
         Some(old)
@@ -725,4 +740,22 @@ fn serving_schedules_worker_and_t2_until_applied() {
             "the scheduled worker and T2 did not settle the proposal"
         );
     });
+}
+
+#[test]
+fn startup_sweeps_dead_exports_only() {
+    let f = Dfx::new();
+    let root = &f.config.paths.root;
+    // Above macOS pid_max (99998), so never a live process.
+    let dead = root.join("daemon/sync/999999-1-1");
+    let dead_follow = root.join("daemon/main-follow/999999-2-2");
+    let live = root.join(format!("daemon/sync/{}-3-3", std::process::id()));
+    for d in [&dead, &dead_follow, &live] {
+        std::fs::create_dir_all(d.join("tree")).unwrap();
+        std::fs::write(d.join("tree/x"), b"x").unwrap();
+    }
+    let _core = f.prepare().unwrap();
+    assert!(!dead.exists() && !dead_follow.exists());
+    assert!(live.exists());
+    std::fs::remove_dir_all(&live).unwrap();
 }

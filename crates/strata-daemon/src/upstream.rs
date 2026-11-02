@@ -186,13 +186,12 @@ impl Cache {
         let mut repos = BTreeMap::new();
         let mut fetched = Vec::new();
         for (repo, ws) in &row.manifest.repos {
-            let Some(rec) = row
-                .workspaces
-                .get(repo)
-                .filter(|r| r.health == Health::Ok && r.scene.is_none())
-            else {
+            let Some(rec) = row.workspaces.get(repo).filter(|r| r.health == Health::Ok) else {
                 continue;
             };
+            if core.store.workspace_scene_live(&row.manifest.id, repo, rec.scene.is_some())? {
+                continue;
+            }
             if !ws.tracked {
                 continue;
             }
@@ -400,6 +399,11 @@ impl Cache {
             }
             .into(),
         };
+        let error = if state == "install_failed" {
+            core.store.deps_auto(p.id)?.and_then(|a| a.error)
+        } else {
+            None
+        };
         Ok(Some(UpstreamDeps {
             proposal: p.id,
             mode: policy,
@@ -407,6 +411,7 @@ impl Cache {
             from: p.from.clone(),
             to: p.to.clone(),
             summary,
+            error,
         }))
     }
 

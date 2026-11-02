@@ -596,11 +596,12 @@ confirm 只被 daemon 用
 
 `strata-types::upstream` exports `Upstream`, `RepoUpstream`, `UpstreamMain`,
 `UpstreamCommit`, `UpstreamDeps`, and `UpstreamAuto` (also re-exported at the crate
-root). They implement serde and match main-sync design §5. Optional fields omit
+root). They implement serde and match main-sync design §5. `UpstreamDeps.error` is the stored install error for `install_failed`
+(`detail.staging` names the kept scene). `base_only` lists commit ids.
+Optional fields omit
 None; optional lists omit empty values. Dependency mode uses `SyncDeps` and ids
-use the existing validated identifier types. This foundation does not emit the
-new status fields: `SessionStatus`/`WorkspaceStatus` live in `strata-session`, and
-the upstream consumer part adds them there.
+use the existing validated identifier types. The optional `upstream` fields on
+`SessionStatus`/`WorkspaceStatus` (in `strata-session`) carry these types.
 
 ### Sync request
 

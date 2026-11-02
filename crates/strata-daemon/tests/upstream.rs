@@ -550,6 +550,11 @@ fn status_and_t2_warm_upstream() {
 }
 
 #[test]
+fn features_lists_sync() {
+    assert!(strata_daemon::FEATURES.contains(&"sync"));
+}
+
+#[test]
 fn deps_and_auto_fields_follow_store_and_cached_summary() {
     let fx = Dfx::new();
     let core = fx.prepare().unwrap();
@@ -673,4 +678,50 @@ fn deps_and_auto_fields_follow_store_and_cached_summary() {
         })
         .unwrap();
     assert_eq!(up.repos[&repo].deps.as_ref().unwrap().state, "own_change");
+}
+
+/// impl-r1 B2: `resolve_move` keeps the scene JSON as history. A resolved
+/// scene must not hide the workspace from upstream (or the Stop hook) nor
+/// block Agent sync; an unresolved one still does.
+#[test]
+fn resolved_scene_history_reported_and_syncable() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    let rn = repo_name("tool");
+    let ws = core.store.session(&s).unwrap().unwrap().manifest.repos[&rn].clone();
+    let n = core
+        .store
+        .begin_move(&s, &rn, &ws.base, &ws.head, &ws.path.with_file_name(".scene-move"), SystemTime::now())
+        .unwrap();
+    core.store
+        .set_move_state(
+            &s,
+            &rn,
+            n,
+            strata_store::MoveState::Preparing,
+            strata_store::MoveState::Swapping,
+            Some(&[]),
+            SystemTime::now(),
+        )
+        .unwrap();
+    core.store.fail_move(&s, &rn, n, &json!({"failed":"swap"}), SystemTime::now()).unwrap();
+    let head = advance(&fx, &core, "upstream after scene");
+    assert!(core.store.workspace_scene_live(&s, &rn, true).unwrap());
+    assert!(!check(&server, &s, false).repos.contains_key(&rn), "an unresolved scene is the human's");
+    core.store.resolve_move(&s, &rn, n, false, SystemTime::now()).unwrap();
+    assert!(core.store.session(&s).unwrap().unwrap().workspaces[&rn].scene.is_some());
+    assert!(!core.store.workspace_scene_live(&s, &rn, true).unwrap());
+    for hook in [false, true] {
+        let u = check(&server, &s, hook);
+        assert_eq!(u.repos[&rn].behind, Some(1), "hook={hook}");
+        assert!(!u.clean, "hook={hook}");
+    }
+    let v = ok(call(&server, "sync", json!({"session":s,"fetch":false})));
+    assert_eq!(v["repos"]["tool"]["result"], "moved", "{v}");
+    let now = core.store.session(&s).unwrap().unwrap();
+    assert_eq!(now.manifest.repos[&rn].head, head);
 }
