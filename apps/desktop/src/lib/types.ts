@@ -19,6 +19,7 @@ export interface DaemonStatus {
   /** Added in P2 (gui.md §3.4). Absent on every daemon P1 can talk to. */
   api?: number;
   version?: string;
+  features?: string[];
   /** Descriptor use (daemons from ffe316b on). Optional: older daemons omit it. */
   fds?: { open: number; limit: number; accept_errors: number };
   /** Not sent by any daemon yet; typed so the status modal picks them up when they are. */
@@ -48,6 +49,65 @@ export interface Workspace {
   seeds: unknown[];
   /** Counted only in P1; see `OldTreeKeptWarning` for the one with a tri-state field. */
   warnings: unknown[];
+  scene?: unknown;
+  upstream?: UpstreamRepo;
+}
+
+/** main-sync §5. Cold list-cache entries have null behind and unchecked=true. */
+export interface UpstreamCommit {
+  oid: string;
+  subject: string;
+  author: string;
+  own: boolean;
+}
+export interface UpstreamRepo {
+  behind: number | null;
+  unchecked?: boolean;
+  capped?: boolean;
+  following?: boolean;
+  diverged?: boolean;
+  unpublished?: boolean;
+  main?: { head: string; tree: string } | null;
+  base_head?: string;
+  commits?: UpstreamCommit[];
+  base_only?: UpstreamCommit[];
+  deps?: {
+    proposal: number;
+    mode: 'apply' | 'confirm';
+    state: string;
+    from: string;
+    to: string;
+    summary?: string;
+  } | null;
+  auto?: {
+    source: string;
+    state: 'waiting' | 'deferred' | 'pending';
+    reason?: string | null;
+    since: string;
+    attempts: number;
+    target?: string;
+    detail?: { paths?: string[]; [key: string]: unknown };
+  } | null;
+  conflicts?: string[];
+  fix?: string;
+  as_of?: string | null;
+}
+export interface Upstream {
+  as_of?: string | null;
+  clean: boolean;
+  repos: Record<string, UpstreamRepo>;
+}
+export interface PackageChanges {
+  summary: string;
+  packages: Array<{
+    name: string;
+    from: string | null;
+    to: string | null;
+    kind: 'added' | 'removed' | 'changed';
+    direct: boolean;
+  }>;
+  truncated: boolean;
+  since?: 'session_base';
 }
 
 /**
@@ -90,6 +150,8 @@ export interface SessionEntry {
     phase: string;
     state: string;
     workspaces: Record<string, Workspace>;
+    scene?: unknown;
+    upstream?: Upstream;
   };
 }
 
@@ -123,6 +185,8 @@ export interface Proposal {
   /** Main's tree and commit the proposal was made from. */
   tree?: string | null;
   head?: string | null;
+  from_head?: string | null;
+  changes?: PackageChanges;
 }
 
 /** A session's move report (strata-session MoveReport); only what the modal reads is typed. */

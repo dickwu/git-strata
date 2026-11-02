@@ -4,7 +4,7 @@
 //! G7: a "Waiting for you" item names only its kind, its number and the
 //! repository. Tickets, commit titles, checkpoint messages, paths and
 //! proposal reasons never reach the menu: the labels below are assembled
-//! from those three fields and nothing else.
+//! from those fields and the affected-session count only.
 
 use std::time::{Duration, SystemTime};
 
@@ -35,15 +35,25 @@ pub struct WaitingItem {
     /// The proposal id, or the number of conflicted paths.
     pub number: u64,
     pub repo: String,
+    pub sessions: usize,
 }
 
 impl WaitingItem {
     pub fn label(&self) -> String {
-        match self.kind {
+        let label = match self.kind {
             WaitingKind::DepsProposal => format!("Deps proposal {} in {}", self.number, self.repo),
             WaitingKind::Conflict if self.number == 1 => format!("1 conflict in {}", self.repo),
             WaitingKind::Conflict => format!("{} conflicts in {}", self.number, self.repo),
-        }
+        };
+        format!(
+            "{label} · {} {}",
+            self.sessions,
+            if self.sessions == 1 {
+                "session"
+            } else {
+                "sessions"
+            }
+        )
     }
 
     /// The menu item id; the front end gets the same string to open.
@@ -65,6 +75,8 @@ pub struct Snapshot {
     pub sessions: Option<Value>,
     /// The `deps_list` reply.
     pub deps: Option<Value>,
+    /// Latest daemon_status, used solely for additive capability gates.
+    pub daemon_status: Option<Value>,
     /// When `up` was last set from a read.
     pub updated: Option<SystemTime>,
 }
@@ -93,38 +105,130 @@ fn active_sessions(status: &Value) -> usize {
         .unwrap_or(0)
 }
 
-/// Pending deps proposals (they wait for a human to approve), then
-/// workspaces with conflicted paths, in reply order.
+/// Legacy callers retain confirm behavior until the capability is advertised.
 pub fn waiting(sessions: Option<&Value>, deps: Option<&Value>) -> Vec<WaitingItem> {
+    waiting_at(sessions, deps, false, SystemTime::now())
+}
+
+fn upstream<'a>(s: &'a Value, repo: &str) -> &'a Value {
+    if s["status"]["manifest"]["repos"][repo]["tracked"] == false {
+        return &Value::Null;
+    }
+    let ws = &s["status"]["workspaces"][repo]["upstream"];
+    if !ws.is_null() {
+        ws
+    } else {
+        &s["status"]["upstream"]["repos"][repo]
+    }
+}
+fn affected(s: &Value, repo: &str, id: u64) -> bool {
+    s["status"]["workspaces"][repo]["pending"]
+        .as_array()
+        .is_some_and(|ps| {
+            ps.iter()
+                .any(|p| p.as_u64() == Some(id) || p["id"].as_u64() == Some(id))
+        })
+}
+fn timestamp(text: &str) -> Option<SystemTime> {
+    if let Ok(t) = strata_types::serde_rfc3339::parse(text) {
+        return Some(t);
+    }
+    let at = text.len().checked_sub(6)?;
+    let offset = text.get(at..)?;
+    if !matches!(offset.as_bytes()[0], b'+' | b'-') || offset.as_bytes()[3] != b':' {
+        return None;
+    }
+    let hours: u64 = offset.get(1..3)?.parse().ok()?;
+    let minutes: u64 = offset.get(4..6)?.parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    let t = strata_types::serde_rfc3339::parse(&format!("{}Z", text.get(..at)?)).ok()?;
+    let d = Duration::from_secs(hours * 3600 + minutes * 60);
+    if offset.starts_with('+') {
+        t.checked_sub(d)
+    } else {
+        t.checked_add(d)
+    }
+}
+fn stuck(s: &Value, repo: &str, now: SystemTime) -> bool {
+    let ws = &s["status"]["workspaces"][repo];
+    let u = upstream(s, repo);
+    matches!(
+        u["deps"]["state"].as_str(),
+        Some("install_failed" | "own_change" | "drift" | "waiting_human")
+    ) || ws["health"].as_str().is_some_and(|h| h != "Ok")
+        || !ws["scene"].is_null()
+        || !s["status"]["scene"].is_null()
+        || u["following"] == false
+        || u["diverged"] == true
+        || (u["auto"]["state"] == "deferred"
+            && u["auto"]["since"]
+                .as_str()
+                .and_then(timestamp)
+                .and_then(|t| now.duration_since(t).ok())
+                .is_some_and(|d| d > Duration::from_secs(86400)))
+}
+fn waiting_at(
+    sessions: Option<&Value>,
+    deps: Option<&Value>,
+    enabled: bool,
+    now: SystemTime,
+) -> Vec<WaitingItem> {
     let mut out = Vec::new();
+    let ss = sessions
+        .and_then(|s| s["sessions"].as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     if let Some(ps) = deps.and_then(|d| d["proposals"].as_array()) {
+        let mut ps: Vec<_> = ps.iter().collect();
+        ps.sort_by_key(|p| p["id"].as_u64());
         for p in ps {
             if p["state"]["kind"].as_str() != Some("Pending") {
                 continue;
             }
             if let (Some(id), Some(repo)) = (p["id"].as_u64(), p["repo"].as_str()) {
+                let affected: Vec<_> = ss.iter().filter(|s| affected(s, repo, id)).collect();
+                let applies = |s: &&Value, mode: &str| {
+                    let u = upstream(s, repo);
+                    u["deps"]["proposal"].as_u64() == Some(id) && u["deps"]["mode"] == mode
+                };
+                let applying = enabled
+                    && affected.iter().any(|s| applies(s, "apply"))
+                    && !affected.iter().any(|s| applies(s, "confirm"));
+                if applying && !affected.iter().any(|s| stuck(s, repo, now)) {
+                    continue;
+                }
                 out.push(WaitingItem {
                     kind: WaitingKind::DepsProposal,
                     number: id,
                     repo: repo.to_string(),
+                    sessions: affected.len(),
                 });
             }
         }
     }
-    if let Some(ss) = sessions.and_then(|s| s["sessions"].as_array()) {
-        for s in ss {
-            let Some(wss) = s["status"]["workspaces"].as_object() else {
-                continue;
+    for s in ss {
+        let Some(wss) = s["status"]["workspaces"].as_object() else {
+            continue;
+        };
+        for (repo, ws) in wss {
+            let u = if enabled {
+                upstream(s, repo)
+            } else {
+                &Value::Null
             };
-            for (repo, ws) in wss {
-                let n = ws["conflicts"].as_array().map_or(0, Vec::len);
-                if n > 0 {
-                    out.push(WaitingItem {
-                        kind: WaitingKind::Conflict,
-                        number: n as u64,
-                        repo: repo.clone(),
-                    });
-                }
+            let n = ws["conflicts"]
+                .as_array()
+                .map_or(0, Vec::len)
+                .max(u["conflicts"].as_array().map_or(0, Vec::len));
+            if n > 0 || u["auto"]["reason"] == "conflicts" {
+                out.push(WaitingItem {
+                    kind: WaitingKind::Conflict,
+                    number: n.max(1) as u64,
+                    repo: repo.clone(),
+                    sessions: 1,
+                });
             }
         }
     }
@@ -143,7 +247,12 @@ fn ago(d: Duration) -> String {
 
 pub fn model(s: &Snapshot, now: SystemTime) -> TrayModel {
     let stale = s.updated.map(|t| now.duration_since(t).unwrap_or_default());
-    let all = waiting(s.sessions.as_ref(), s.deps.as_ref());
+    let enabled = s
+        .daemon_status
+        .as_ref()
+        .and_then(|d| d["features"].as_array())
+        .is_some_and(|features| features.iter().any(|f| f == "status.upstream"));
+    let all = waiting_at(s.sessions.as_ref(), s.deps.as_ref(), enabled, now);
     let more = all.len().saturating_sub(MAX_WAITING);
     let shown: Vec<_> = all.into_iter().take(MAX_WAITING).collect();
     let (icon, status_line) = match (s.up, stale) {
@@ -171,5 +280,58 @@ pub fn model(s: &Snapshot, now: SystemTime) -> TrayModel {
         status_line,
         waiting: shown,
         more,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    fn fixture() -> (Value, Value) {
+        (
+            json!({"sessions":[{"status":{"manifest":{"repos":{"tool":{"tracked":true}}},"workspaces":{"tool":{"health":"Ok","pending":[{"id":75}],"upstream":{"behind":3,"deps":{"proposal":75,"mode":"apply","state":"ready"},"auto":{"state":"deferred","reason":"open_files","since":"2026-11-01T12:00:00Z"}}}}}}]}),
+            json!({"proposals":[{"id":75,"repo":"tool","state":{"kind":"Pending"}}]}),
+        )
+    }
+    #[test]
+    fn tray_affected_count_and_apply_stuck_threshold() {
+        let (sessions, deps) = fixture();
+        let now = timestamp("2026-11-02T12:00:00Z").unwrap();
+        let legacy = waiting_at(Some(&sessions), Some(&deps), false, now);
+        assert_eq!(legacy[0].sessions, 1);
+        assert_eq!(legacy[0].label(), "Deps proposal 75 in tool · 1 session");
+        assert!(waiting_at(Some(&sessions), Some(&deps), true, now).is_empty());
+        assert_eq!(
+            waiting_at(
+                Some(&sessions),
+                Some(&deps),
+                true,
+                now + Duration::from_millis(1)
+            )
+            .len(),
+            1
+        );
+        assert_eq!(timestamp("2026-11-02T06:00:00-06:00"), Some(now));
+        assert_eq!(timestamp("2026-11-02T14:00:00+02:00"), Some(now));
+    }
+    #[test]
+    fn tray_surfaces_all_stuck_states_and_agent_conflicts() {
+        let now = timestamp("2026-11-02T11:00:00Z").unwrap();
+        for state in ["install_failed", "own_change", "drift", "waiting_human"] {
+            let (mut s, d) = fixture();
+            s["sessions"][0]["status"]["workspaces"]["tool"]["upstream"]["deps"]["state"] =
+                json!(state);
+            assert_eq!(
+                waiting_at(Some(&s), Some(&d), true, now).len(),
+                1,
+                "{state}"
+            );
+        }
+        let (mut s, d) = fixture();
+        s["sessions"][0]["status"]["workspaces"]["tool"]["upstream"]["auto"]["reason"] =
+            json!("conflicts");
+        let waiting = waiting_at(Some(&s), Some(&d), true, now);
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].kind, WaitingKind::Conflict);
     }
 }

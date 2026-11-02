@@ -440,6 +440,7 @@ body {
 }
 .waiting-origin {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -481,4 +482,67 @@ body {
   max-height: calc(100vh - 200px);
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* main-sync: quiet repository attribution, using the existing panel and type tokens. */
+.waiting-group h3,
+.upstream-section h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.waiting-group + .waiting-group {
+  margin-top: 16px;
+}
+.waiting-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 6px 0;
+}
+.applying-note {
+  color: var(--text-muted);
+  font-size: 12px;
+  position: relative;
+}
+.applying-note summary {
+  cursor: pointer;
+}
+.applying-list {
+  position: absolute;
+  top: 24px;
+  left: 0;
+  width: min(520px, 80vw);
+  max-height: 60vh;
+  overflow: auto;
+  z-index: 10;
+  color: var(--text);
+}
+.applying-list ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.applying-list li + li {
+  margin-top: 12px;
+}
+.copy-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.copy-command code {
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.upstream-repo + .upstream-repo {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.upstream-repo p {
+  margin: 8px 0;
+}
+.upstream-repo ul {
+  padding-left: 20px;
 }

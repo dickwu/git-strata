@@ -317,6 +317,7 @@ fn snap(sessions: Value, deps: Value, age: Duration, now: SystemTime) -> Snapsho
         up: Some(true),
         sessions: Some(sessions),
         deps: Some(deps),
+        daemon_status: None,
         updated: Some(now - age),
     }
 }
@@ -426,8 +427,8 @@ fn gui_tray_no_agent_text() {
     assert_eq!(m.waiting.len(), MAX_WAITING);
     assert_eq!(m.more, 3);
     let labels: Vec<_> = m.waiting.iter().map(|w| w.label()).collect();
-    assert_eq!(labels[0], "Deps proposal 10 in tool");
-    assert_eq!(labels[4], "2 conflicts in tool");
+    assert_eq!(labels[0], "Deps proposal 10 in tool · 0 sessions");
+    assert_eq!(labels[4], "2 conflicts in tool · 1 session");
     let mut text = vec![m.status_line.clone()];
     text.extend(labels);
     text.extend(m.waiting.iter().map(|w| w.id()));

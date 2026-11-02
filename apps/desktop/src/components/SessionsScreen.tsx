@@ -10,7 +10,7 @@ import {
   sessionRows,
   usedRepos,
   type SessionRow,
-  type WaitingItem,
+  type WaitingGroup,
 } from '@/lib/view';
 import { FilterBar } from './FilterBar';
 import { AgentBadge } from './AgentBadge';
@@ -37,14 +37,14 @@ export function SessionsScreen({
   daemon: UseQueryResult<DaemonStatus>;
   legacy: boolean;
   /** Things waiting for a human (tray rule), shown in the header. */
-  waiting?: WaitingItem[];
+  waiting?: WaitingGroup[];
   /** The last deps or sessions refresh failed, so `waiting` may be old. */
   waitingStale?: boolean;
 }) {
   const { openSession, repoFilter, agentFilter, textFilter, toggleRepoFilter, clearFilters } =
     useNav();
   const now = useNow();
-  const all = sessionRows(sessions.data);
+  const all = sessionRows(sessions.data, daemon.data);
   const repos = usedRepos(all);
   const agents = knownAgents(all);
   // A selected repo or agent no current session has drops out of the filter (t73u).
@@ -58,7 +58,7 @@ export function SessionsScreen({
     <>
       <div className="toolbar">
         <h1 className="screen-title">{copy.sessions.title}</h1>
-        <WaitingNote items={waiting} stale={waitingStale} />
+        <WaitingNote groups={waiting} stale={waitingStale} />
         {legacy && sessions.data && <span className="muted">{copy.sessions.slow}</span>}
       </div>
       <div className="content" style={{ display: 'grid', gap: 12, alignContent: 'start' }}>
@@ -138,6 +138,12 @@ export function SessionsScreen({
                 render: (_, r) => (
                   <div className="stacked-cell">
                     <span>{r.state}</span>
+                    {r.behind != null && r.behind > 0 && (
+                      <Tag title="Commits behind main">
+                        ↓{r.behind}
+                        {r.behindCapped ? '+' : ''}
+                      </Tag>
+                    )}
                     <span className="muted">{r.phase}</span>
                   </div>
                 ),

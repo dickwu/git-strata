@@ -10,6 +10,8 @@ import {
   usedRepos,
   waitingCount,
   waitingItems,
+  waitingGroups,
+  STUCK_AFTER,
   sessionDetail,
   sessionRows,
   short,
@@ -310,5 +312,111 @@ describe('waitingCount (Sessions header note, same rule as the tray)', () => {
     expect(waitingItems(undefined, d)).toHaveLength(1);
     d.proposals[0].state = { kind: 'Applied' };
     expect(waitingItems(undefined, d)).toHaveLength(0);
+  });
+});
+
+describe('main-sync waiting groups', () => {
+  const now = Date.parse('2026-11-02T12:00:00Z');
+  const capable = { ...daemon, features: ['status.upstream'] };
+  function pending() {
+    const s = structuredClone(all);
+    const p = {
+      ...deps.proposals[0],
+      id: 75,
+      repo: 'web',
+      state: { kind: 'Pending' },
+      origin: { kind: 'Main' },
+    };
+    for (const entry of s.sessions) {
+      entry.status.manifest.repos.web.tracked = true;
+      entry.status.workspaces.web.health = 'Ok';
+      entry.status.workspaces.web.pending = [p];
+      entry.status.workspaces.web.upstream = {
+        behind: 3,
+        deps: { proposal: 75, mode: 'apply', state: 'installing', from: p.from, to: p.to },
+        auto: {
+          source: 'main',
+          state: 'deferred',
+          reason: 'open_files',
+          since: new Date(now - 3600000).toISOString(),
+          attempts: 2,
+        },
+      };
+    }
+    return { s, d: { proposals: [p] } };
+  }
+  test('grouping and affected sessions follow pending, not proposal origin', () => {
+    const { s, d } = pending();
+    s.sessions[1].status.workspaces.web.pending = [];
+    d.proposals.push({ ...d.proposals[0], id: 76, repo: 'tool' });
+    const groups = waitingGroups(s, d);
+    expect(groups.map((g) => g.repo)).toEqual(['tool', 'web']);
+    expect(groups[1].items[0].affected?.map((x) => x.id)).toEqual([
+      s.sessions[0].status.manifest.id,
+    ]);
+    expect(groups[1].items[0].affected?.[0].ticket).toBe(s.sessions[0].status.manifest.ticket);
+  });
+  test('apply-repo collapsing and feature gate', () => {
+    const { s, d } = pending();
+    expect(waitingGroups(s, d, capable, now)[0].items).toHaveLength(0);
+    expect(waitingGroups(s, d, capable, now)[0].applying).toHaveLength(1);
+    expect(waitingCount(s, d, capable, now)).toBe(0);
+    expect(waitingGroups(s, d, daemon, now)[0].items).toHaveLength(1);
+  });
+  test('stuck threshold is strictly more than 24 hours', () => {
+    const { s, d } = pending();
+    for (const e of s.sessions)
+      e.status.workspaces.web.upstream!.auto!.since = new Date(now - STUCK_AFTER).toISOString();
+    expect(waitingCount(s, d, capable, now)).toBe(0);
+    expect(waitingCount(s, d, capable, now + 1)).toBe(1);
+  });
+  test.each(['install_failed', 'own_change', 'drift', 'waiting_human'])(
+    '%s needs attention immediately',
+    (state) => {
+      const { s, d } = pending();
+      s.sessions[0].status.workspaces.web.upstream!.deps!.state = state;
+      expect(waitingGroups(s, d, capable, now)[0].items[0].number).toBe(75);
+    }
+  );
+  test('unhealthy, scene, not following and diverged cannot hide in applying', () => {
+    for (const condition of ['unhealthy', 'scene', 'following', 'diverged']) {
+      const { s, d } = pending();
+      const w = s.sessions[0].status.workspaces.web;
+      if (condition === 'unhealthy') w.health = 'Missing';
+      if (condition === 'scene') w.scene = {};
+      if (condition === 'following') w.upstream!.following = false;
+      if (condition === 'diverged') w.upstream!.diverged = true;
+      expect(waitingCount(s, d, capable, now)).toBe(1);
+    }
+  });
+  test('an unhealthy workspace without upstream still needs the human in an apply repo', () => {
+    const { s, d } = pending();
+    s.sessions[0].status.workspaces.web.health = 'Missing';
+    delete s.sessions[0].status.workspaces.web.upstream;
+    const item = waitingGroups(s, d, capable, now)[0].items[0];
+    expect(item.mode).toBe('apply');
+    expect(item.reason).toBe('needs the human: workspace unhealthy');
+  });
+  test('auto conflicts point to the session agent and do not create a deps approval', () => {
+    const { s, d } = pending();
+    const e = s.sessions[0];
+    e.status.workspaces.web.upstream!.auto!.reason = 'conflicts';
+    const items = waitingGroups(s, d, capable, now)[0].items;
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe('conflict');
+    expect(items[0].command).toBe(`git-strata sync --session ${e.status.manifest.id} --repo web`);
+  });
+  test('cached behind and detail upstream require the capability; cold entries are not zero', () => {
+    const { s } = pending();
+    expect(sessionRows(s)[0].behind).toBeUndefined();
+    expect(sessionRows(s, capable)[0].behind).toBe(3);
+    const id = s.sessions[0].status.manifest.id;
+    expect(sessionDetail(s, id)?.repos.find((r) => r.repo === 'web')?.upstream).toBeUndefined();
+    expect(
+      sessionDetail(s, id, capable)?.repos.find((r) => r.repo === 'web')?.upstream?.behind
+    ).toBe(3);
+    for (const e of s.sessions)
+      e.status.workspaces.web.upstream = { behind: null, unchecked: true };
+    expect(sessionRows(s, capable)[0].behind).toBeUndefined();
   });
 });

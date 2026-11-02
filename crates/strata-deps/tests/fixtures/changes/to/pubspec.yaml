@@ -1,0 +1,5 @@
+name: app
+dependencies:
+  react: "19.0.0"
+dev_dependencies:
+  zod: "3.0"

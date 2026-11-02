@@ -428,7 +428,13 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 
 **`diff`**：不排队。`publish::diff_between`。
 
-**`deps_list`**：不排队。`open_proposals`。
+**`deps_list`**：不排队。`open_proposals`。 Each pending proposal may carry additive
+`changes: {summary, packages, truncated, since?}` from `strata_deps::changes`; enrichment failure
+omits the field and leaves the reply and proposal state unchanged. In this wave the proposal type
+has no `from_head`: `changes_base` selects the oldest affected session workspace head (the same
+tracked / different deps-set predicate as `ws.pending`) and labels `changes.since = "session_base"`.
+The marked helper is the integration point for the foundation part's `from_head`. Reads do not
+request confirmation, build deps, or acquire a repo write lock.
 
 **`publish_plan`**：不排队。`publish` 开头那一步重跑过滤（`rerun_plan`，即 D22 的按选择子、按内容判定）原样跑一遍，返回还要提交的仓库与 `already_published`，不写（review-2 N2）[实现时补的决定]。
 
