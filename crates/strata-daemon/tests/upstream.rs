@@ -725,3 +725,30 @@ fn resolved_scene_history_reported_and_syncable() {
     let now = core.store.session(&s).unwrap().unwrap();
     assert_eq!(now.manifest.repos[&rn].head, head);
 }
+
+#[test]
+fn add_runs_main_follow_for_added_repos() {
+    // T4 after `add`, as after `new`: other sessions on the repo learn of a
+    // tracking-ref move the add observed.
+    let fx = Dfx::with(&["tool", "front"]);
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s1 = new(&server);
+    let rn = repo_name("tool");
+    let s2: SessionId = serde_json::from_value(
+        ok(call(&server, "new", json!({"ticket":null,"repos":["front"],"only":true})))["session"]["manifest"]["id"].clone(),
+    )
+    .unwrap();
+    let main = fx.main("tool");
+    fx.sb.commit(&main, &[("src/moved.ts", b"moved\n")], "moved");
+    fx.sb.git(&main, &["push", "-q", "origin", "main"]);
+    core.gits[&rn].fetch("origin", "main").unwrap();
+    assert!(core.store.rebase_pending_of(&s1, &rn).unwrap().is_none());
+    ok(call(&server, "add", json!({"session":s2,"repos":["tool"]})));
+    assert!(
+        core.store.rebase_pending_of(&s1, &rn).unwrap().is_some(),
+        "add reconciled the added repo"
+    );
+}

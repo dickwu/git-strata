@@ -241,7 +241,9 @@ Publish refuses paths still in `ws.conflicts` with `move_conflict`. For a
 legacy conflict on an up-to-date workspace with no saved sync report,
 `git-strata sync --repo R --resolved PATH` (or `--keep PATH`) acknowledges
 only those paths and returns `conflicts_cleared`; no target or generation is
-needed in this one case. Read and resolve the file before acknowledging it.
+needed in this one case. The same works on a repo that does not follow main
+(`following: false`); there sync never moves the workspace and only
+acknowledges. Read and resolve the file before acknowledging it.
 Such conflicts survive later automatic and `sync` moves until you name
 the path with `--resolved`/`--keep` (or it is acknowledged as above).
 

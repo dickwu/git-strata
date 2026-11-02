@@ -436,10 +436,10 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 
 **`deps_list`**：不排队。`open_proposals`。 Each pending proposal may carry additive
 `changes: {summary, packages, truncated, since?}` from `strata_deps::changes`; enrichment failure
-omits the field and leaves the reply and proposal state unchanged. In this wave the proposal type
-has no `from_head`: `changes_base` selects the oldest affected session workspace head (the same
-tracked / different deps-set predicate as `ws.pending`) and labels `changes.since = "session_base"`.
-The marked helper is the integration point for the foundation part's `from_head`. Reads do not
+omits the field and leaves the reply and proposal state unchanged. `changes_base` diffs from the proposal's `from_head` (store v4).
+A proposal recorded before v4 has none; it falls back to the oldest affected session workspace
+head (the same tracked / different deps-set predicate as `ws.pending`) and labels
+`changes.since = "session_base"`. Reads do not
 request confirmation, build deps, or acquire a repo write lock.
 
 **`publish_plan`**：不排队。`publish` 开头那一步重跑过滤（`rerun_plan`，即 D22 的按选择子、按内容判定）原样跑一遍，返回还要提交的仓库与 `already_published`，不写（review-2 N2）[实现时补的决定]。
@@ -1018,7 +1018,9 @@ fetch success/failure, runs fetch-after anchor maintenance and observes
 main. Failed fetches continue against local refs. It then runs the
 complete T4 (`main_sync::reconcile`: observe + enroll/retarget, including
 deps-only identity reconciliation), even when the fetch did not move the
-tip. Split/non-following repos return `not_following`.
+tip. Split/non-following repos return `not_following`; with `--resolved`/`--keep`
+they only acknowledge the named workspace conflicts (O7, D-b) under the session
+queue and repo lock and return `conflicts_cleared` with `following: false`.
 
 Dependency keys come from a temporary target export. Apply-mode sync checks
 worker Installing state and otherwise ensures before taking a session queue

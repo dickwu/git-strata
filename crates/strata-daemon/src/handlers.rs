@@ -1278,6 +1278,10 @@ impl<'d, 'a> Server<'d, 'a> {
                 if let Err(e) = core.advance_anchor(repo) {
                     anchor_unknown.push(json!({ "repo": repo.as_str(), "error": json_of(&e) }));
                 }
+                // T4 after add, as after new (the session queue is released).
+                if let Err(e) = crate::main_sync::reconcile(core, repo) {
+                    tracing::warn!(repo=%repo, error=%e.message, "main-follow after add failed");
+                }
             }
         }
         Ok(json!({ "report": json_of(&rep), "anchor_unknown": anchor_unknown }))

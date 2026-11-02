@@ -2273,8 +2273,9 @@ design.md 里标 [交给构建者]、落在本模块的事项：
 Versions 1–4 remain frozen. Version 5 replaces only the workspace update
 guard and adds `sync_move_history(session, repo, n, resolution_json object)`
 with a foreign key to the move intent. The guard permits a strict subset
-of conflicts on an Active, healthy, tracked workspace with no scene or
-open move, only while base, head and generation stay identical. Existing
+of conflicts on an Active, healthy, tracked workspace with no live scene
+(none, or retained history whose latest move intent is done, abandoned or
+refused) and no open move, only while base, head and generation stay identical. Existing
 move and health-transition guards otherwise retain their behavior.
 
 `clear_conflicts(session, repo, paths)` validates every named path, removes

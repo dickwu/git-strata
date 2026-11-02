@@ -192,6 +192,8 @@ pub fn run(d: &Daemon<'_>, req: SyncRequest) -> Result<Value> {
     for repo in &repos {
         let r = if core.repo_cfg(repo)?.follow_main() {
             sync_one(d, &req, repo, &named)
+        } else if !named.is_empty() {
+            acknowledge_unfollowed(d, &req, repo, &named)
         } else {
             Ok(json!({"result":"not_following"}))
         };
@@ -294,6 +296,28 @@ fn source_reason(
         Some(_) => unreachable!("input classifier returns only own-change or drift"),
         None if mode == SyncDeps::Confirm => Some(json!({"state":"waiting_human"})),
         None => None,
+    })
+}
+
+/// D-b for a repo that does not follow main: O7 still refuses publishing its
+/// recorded conflicts, so `--resolved`/`--keep` acknowledge them here without
+/// any tip, report or move (there is no sync report for such a repo).
+fn acknowledge_unfollowed(
+    d: &Daemon<'_>,
+    req: &SyncRequest,
+    repo: &RepoName,
+    named: &BTreeSet<RepoPath>,
+) -> Result<Value> {
+    let core = d.core;
+    crate::resolve::with_queue_not_publishing(core, &req.session, || {
+        core.locks.with_repo(repo, || {
+            let now = record(core, &req.session)?;
+            workspace(&now, repo)?;
+            g0(core, &req.session, repo, &now)?;
+            core.store
+                .clear_conflicts(&req.session, repo, &named.iter().cloned().collect::<Vec<_>>())?;
+            Ok(json!({"result":"conflicts_cleared","following":false,"resolved":req.resolved,"kept":req.keep}))
+        })
     })
 }
 

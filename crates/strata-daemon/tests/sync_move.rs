@@ -938,3 +938,68 @@ fn legacy_conflicts_survive_unacknowledged_agent_sync() {
         assert!(d.core.store.session(s).unwrap().unwrap().workspaces[&rn].conflicts.is_empty());
     });
 }
+
+#[test]
+fn legacy_conflicts_acknowledged_after_recovered_move_scene() {
+    with_session(|fx, d, s| {
+        legacy_conflict(fx, d, s);
+        let rn = repo_name("tool");
+        let st = &d.core.store;
+        let ws = st.session(s).unwrap().unwrap().manifest.repos[&rn].clone();
+        let n = st
+            .begin_move(s, &rn, &ws.base, &ws.head, &ws.path.with_file_name(".scene-move"), SystemTime::now())
+            .unwrap();
+        st.set_move_state(
+            s,
+            &rn,
+            n,
+            strata_store::MoveState::Preparing,
+            strata_store::MoveState::Swapping,
+            Some(&[rp("a")]),
+            SystemTime::now(),
+        )
+        .unwrap();
+        st.fail_move(s, &rn, n, &serde_json::json!({"failed":"swap"}), SystemTime::now()).unwrap();
+        st.resolve_move(s, &rn, n, true, SystemTime::now()).unwrap();
+        let rec = st.session(s).unwrap().unwrap();
+        assert!(rec.workspaces[&rn].scene.is_some(), "the scene stays as history");
+        assert_eq!(rec.workspaces[&rn].conflicts, vec![rp("a")]);
+        let mut r = req(s);
+        r.fetch = false;
+        r.keep = vec![rp("a")];
+        assert_eq!(sync_move::run(d, r).unwrap()["repos"]["tool"]["result"], "conflicts_cleared");
+        assert!(st.session(s).unwrap().unwrap().workspaces[&rn].conflicts.is_empty());
+    });
+}
+
+#[test]
+fn legacy_conflicts_acknowledged_on_repo_not_following() {
+    // O7 refuses publishing recorded conflicts on every repo, so a split repo
+    // (no main-follow) still needs `--keep`/`--resolved` to acknowledge them.
+    let mut fx = fixture();
+    let cfg = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+    cfg.publish.branch = "work".into();
+    cfg.deps_dirs.clear();
+    cfg.seed_caches.clear();
+    cfg.install_inputs.clear();
+    cfg.install = None;
+    fx.write_config();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let s = d.sessions.new(None, &[repo_name("tool")]).unwrap().manifest.id;
+    legacy_conflict(&fx, &d, &s);
+    let rn = repo_name("tool");
+    let mut r = req(&s);
+    r.fetch = false;
+    r.keep = vec![rp("b")];
+    let e = sync_move::run(&d, r).unwrap_err();
+    assert_eq!(e.detail.unwrap()["reason"], "resolved_unrelated");
+    assert_eq!(core.store.session(&s).unwrap().unwrap().workspaces[&rn].conflicts, vec![rp("a")]);
+    let mut r = req(&s);
+    r.fetch = false;
+    r.keep = vec![rp("a")];
+    let v = sync_move::run(&d, r).unwrap();
+    assert_eq!(v["repos"]["tool"]["result"], "conflicts_cleared", "{v}");
+    assert!(core.store.session(&s).unwrap().unwrap().workspaces[&rn].conflicts.is_empty());
+    assert_eq!(sync_move::run(&d, req(&s)).unwrap()["repos"]["tool"]["result"], "not_following");
+}

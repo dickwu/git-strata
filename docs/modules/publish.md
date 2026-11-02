@@ -845,11 +845,12 @@ Before merging a release group's paths, `stage::plan` intersects each
 batch's selected changes (including rename sources) with that session's
 workspace conflicts. Any intersection returns `Conflict`,
 `detail.reason = "move_conflict"`, `paths`, per-session conflicts, and fix
-`git-strata sync --repo R --resolved PATH` (or `--keep PATH`), with the
+`git-strata sync --repo <repo> --resolved PATH` (or `--keep PATH`, naming the repo), with the
 report's `--target … --generation …` when sync saved a conflict report. Neither LWW
 nor a new checkpoint acknowledges these conflicts. Publishing other paths
 remains allowed. Legacy up-to-date conflicts can be acknowledged by sync
-without a report/target through `Store::clear_conflicts`.
+without a report/target through `Store::clear_conflicts`, including on repos
+that do not follow main.
 
 ### Main-sync: T4 reconcile and C3 dependency moves
 

@@ -517,7 +517,7 @@ pub(crate) fn plan(ctx: &Ctx, group: &ReleaseGroup, base: &CommitOid) -> Result<
     if !move_conflicts.is_empty() {
         return Err(StrataError::new(Code::Conflict, "acknowledge the workspace move conflicts before publishing")
             .with_detail(json!({"reason":"move_conflict", "paths":move_conflicts.iter().map(|c|c["path"].clone()).collect::<Vec<_>>(),
-                "conflicts":move_conflicts, "fix":"git-strata sync --repo R --resolved PATH (or --keep PATH); add the report's --target … --generation … when sync saved a conflict report"})));
+                "conflicts":move_conflicts, "fix":format!("git-strata sync --repo {} --resolved PATH (or --keep PATH); add the report's --target … --generation … when sync saved a conflict report", ctx.repo.as_str())})));
     }
     // §5.7: a path named by `assign` goes only with the named session.
     let named = crate::rebase::assignments(ctx.store, ctx.repo)?;

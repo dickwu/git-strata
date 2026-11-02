@@ -1501,8 +1501,9 @@ Dependency-directory holders are checked before staging and again at step
 `move_workspace_agent_resolving(..., baseline, options, kept)` uses the same
 report-bound `RebaseOptions` for its checkpoint-based projection. A conflict
 outside pinned regenerable paths refuses before the intent. Successful
-Agent moves have an empty conflict list (regenerable kept paths are reported
-separately), clear the saved sync report, and consume the selected pending
+Agent moves record no new conflicts (regenerable kept paths are reported
+separately); earlier workspace conflicts the move does not name in
+`--resolved`/`--keep` are kept, as they are on automatic moves, clear the saved sync report, and consume the selected pending
 revision in the finish transaction. The activity row records policy `agent`.
 Resolution decisions are written to `sync_move_history` while Preparing;
 the associated move state shows whether they landed. Late writes after the
