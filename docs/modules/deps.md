@@ -939,6 +939,23 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 - **谁观察主干**：移动主干 tip 的调用（`new` 的 fetch、发布推进或推送了链）随后调 `observe_main`；daemon 在任何让 `main_tip` 移动的 fetch 之后也观察，一次观察失败了就再观察一次（module-rulings "approve refuses a Pending whose head is no longer main's tip"、"observe_main is best-effort for its callers"）。head 已经不是 tip 的观察什么都不写，所以主干记录最后总由最近那次移动的观察写成当前的 tip。观察落后的那一段（例如 publish 为合并基线 fetch 之后发布失败），由 approve 在锁里对 `main_tip` 的核对兜住：目标已不是 tip 的 Pending 批准不了（§5.10）。
 - **status 与 stderr 提示**：用 `open_proposals`，每次 CLI 调用的 stderr 只提示 Pending 的提议（design §6.4 第 4 步）；用 `attempts` 报出现场（不变量 6）；用 `drift` 报出各工作区的漂移；用 `publish_chain` 报出发布链被回退或分叉，连同 a..c 上还没推送的发布；等待中的会话按 §4.5 的规则显示。
 
+### 5.13a Package summaries (main-sync §7.2)
+
+`strata_deps::changes(git, cfg, from_head, to_head) -> Result<Changes>` reads committed
+`install_inputs` only. `Changes` has `summary`, `packages` (`name`, nullable `from`/`to`,
+`kind: added|removed|changed`, `direct`) and `truncated`. Parsers cover Bun JSONC,
+npm package-lock v2/v3, Composer, Pub and Cargo locks. Companion manifests supply directness
+and direct-spec fallback; an unparsed input is reported as `<file> changed (no parser)`.
+Known lockfile results supersede duplicate manifest results, and direct dependencies sort first.
+
+Each blob is size-checked before reading (16 MiB maximum); results contain at most 50 packages
+and a one-line summary of at most 120 Unicode characters. A 200 ms response budget encloses
+Git reads and parsing. A single bounded worker prevents timed-out requests accumulating parser
+threads; competing requests return a best-effort `Busy changes_busy`. Each Git read receives the
+remaining deadline, and parsing checks the deadline between inputs. The bounded 128-entry memory
+cache (entries above 256 KiB are not retained) keys on file names and before/after blob IDs, including companion manifests; source-only
+commits can reuse the result. No store, checkout, install or network mutation occurs.
+
 ### 5.13 复杂度与验收数字
 
 | 操作 | 复杂度 | 目标（首个 spike 实测后修正，同 design §8） |

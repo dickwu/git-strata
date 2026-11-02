@@ -12,6 +12,7 @@ use strata_types::{DepsSetId, Paths, RepoConfig, RepoName, RepoPath, StrataError
 mod adopt;
 mod attempts;
 mod build;
+mod changes;
 mod drift;
 mod ensure;
 mod inputs;
@@ -24,6 +25,7 @@ mod seams;
 mod snapshot;
 
 pub use adopt::adopt;
+pub use changes::{ChangeKind, Changes, PackageChange, changes};
 pub use attempts::attempts;
 pub use build::{build, clone_into, find_set, key_of};
 pub use drift::{Drift, drift};

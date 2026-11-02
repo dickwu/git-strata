@@ -3,6 +3,7 @@
 //! and blob bytes by object id. Read-only except `ref_transaction`.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use serde_json::json;
 use strata_types::{Code, CommitOid, RepoPath, TreeOid};
@@ -99,17 +100,31 @@ impl Git {
     /// (`ls-tree -r -t -z -l --full-tree <tree> -- <paths>`), keyed by path.
     /// Directories appear as `tree` items. Read-only.
     pub fn tree_items(&self, tree: &TreeOid, paths: &[RepoPath]) -> Result<BTreeMap<String, TreeItem>> {
+        self.read_tree_items(tree.as_str(), paths, Opts::c())
+    }
+
+    /// Bounded, read-only install-input lookup without validating/exporting the whole tree.
+    pub fn commit_items_within(
+        &self,
+        head: &CommitOid,
+        paths: &[RepoPath],
+        timeout: Duration,
+    ) -> Result<BTreeMap<String, TreeItem>> {
+        self.read_tree_items(head.as_str(), paths, Opts::c().timeout(timeout))
+    }
+
+    fn read_tree_items(&self, tree: &str, paths: &[RepoPath], opts: Opts) -> Result<BTreeMap<String, TreeItem>> {
         let mut map = BTreeMap::new();
         if paths.is_empty() {
             return Ok(map);
         }
         let mut c = self.repo_command();
         c.env("GIT_LITERAL_PATHSPECS", "1");
-        c.args(["ls-tree", "-r", "-t", "-z", "-l", "--full-tree", tree.as_str(), "--"]);
+        c.args(["ls-tree", "-r", "-t", "-z", "-l", "--full-tree", tree, "--"]);
         for p in paths {
             c.arg(p.as_str());
         }
-        let out = self.run(c, Opts::c())?;
+        let out = self.run(c, opts)?;
         if !out.ok() {
             return Err(failed("ls-tree", &out));
         }
@@ -141,12 +156,21 @@ impl Git {
 
     /// The bytes of blob `oid` (`cat-file blob`).
     pub fn object_bytes(&self, oid: &str) -> Result<Vec<u8>> {
+        self.read_object_bytes(oid, Opts::c())
+    }
+
+    /// Bounded blob read. Callers enforce their byte limit from immutable tree metadata first.
+    pub fn object_bytes_within(&self, oid: &str, timeout: Duration) -> Result<Vec<u8>> {
+        self.read_object_bytes(oid, Opts::c().timeout(timeout))
+    }
+
+    fn read_object_bytes(&self, oid: &str, opts: Opts) -> Result<Vec<u8>> {
         if oid.len() != 40 || !oid.bytes().all(|c| c.is_ascii_hexdigit()) {
             return Err(errd(Code::InvalidInput, format!("bad object id {oid:?}"), json!({ "oid": oid })));
         }
         let mut c = self.repo_command();
         c.args(["cat-file", "blob", oid]);
-        let out = self.run(c, Opts::c())?;
+        let out = self.run(c, opts)?;
         if !out.ok() {
             return Err(failed("cat-file", &out));
         }

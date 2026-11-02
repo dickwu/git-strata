@@ -73,6 +73,64 @@ fn git_of<'c>(core: &'c Core, repo: &RepoName) -> Result<&'c Git> {
     })
 }
 
+/// Legacy proposals compare against the oldest affected workspace head, labelled on the wire.
+fn changes_base(core: &Core, p: &strata_deps::Proposal) -> Result<Option<CommitOid>> {
+    // main-sync: prefer p.from_head once found lands
+    let git = git_of(core, &p.repo)?;
+    let mut sessions = core.store.sessions()?;
+    sessions.sort_by_key(|s| s.created);
+    let mut oldest: Option<CommitOid> = None;
+    for s in sessions {
+        if s.lifecycle == strata_store::Lifecycle::Removed {
+            continue;
+        }
+        let Some(ws) = s.manifest.repos.get(&p.repo) else {
+            continue;
+        };
+        if !ws.tracked || ws.base.deps == p.to {
+            continue;
+        }
+        if oldest.as_ref().is_none_or(|head| head == &ws.head) {
+            oldest = Some(ws.head.clone());
+        } else if let Some(head) = &oldest
+            && git.is_ancestor(&ws.head, head)?
+        {
+            oldest = Some(ws.head.clone());
+        }
+    }
+    Ok(oldest)
+}
+
+fn deps_list(core: &Core, repo: Option<&RepoName>) -> Result<Value> {
+    let mut proposals = Vec::new();
+    for p in strata_deps::open_proposals(&core.store, repo)? {
+        let mut row = json_of(&p);
+        // Enrichment has no bearing on proposal eligibility or deps_list success.
+        let enriched = (|| -> Result<Option<Value>> {
+            if p.state != strata_deps::ProposalState::Pending {
+                return Ok(None);
+            }
+            let Some(to) = &p.head else {
+                return Ok(None);
+            };
+            let Some(from) = changes_base(core, &p)? else {
+                return Ok(None);
+            };
+            let mut changes =
+                json_of(&strata_deps::changes(git_of(core, &p.repo)?, repo_cfg(core, &p.repo)?, &from, to)?);
+            changes["since"] = json!("session_base");
+            Ok(Some(changes))
+        })();
+        match enriched {
+            Ok(Some(changes)) => row["changes"] = changes,
+            Err(e) => tracing::debug!(proposal = p.id.get(), error = %e, "deps summary omitted"),
+            Ok(None) => {}
+        }
+        proposals.push(row);
+    }
+    Ok(json!({ "proposals": proposals }))
+}
+
 /// The repo's configuration with the pinned (effective) safety flags.
 fn effective_cfg(core: &Core, repo: &RepoName) -> Result<RepoConfig> {
     let mut rc = repo_cfg(core, repo)?.clone();
@@ -735,7 +793,7 @@ impl<'d, 'a> Server<'d, 'a> {
                     .collect();
                 Ok(json!({ "only_a": json_of(&d.only_a), "only_b": json_of(&d.only_b), "both": both }))
             }),
-            Params::DepsList(p) => Ok(json!({ "proposals": json_of(&strata_deps::open_proposals(&core.store, p.repo.as_ref())?) })),
+            Params::DepsList(p) => deps_list(core, p.repo.as_ref()),
             Params::Publish(p) => self.publish(&p.group, &p.shown, p.plan.as_ref()),
             Params::PublishPlan(p) => {
                 // Review-2 N2: what `publish` would do with this group, without

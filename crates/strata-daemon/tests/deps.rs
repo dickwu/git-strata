@@ -136,3 +136,56 @@ fn propose_switch_moves_the_proposer_without_prompt() {
     });
     assert!(log.shown().is_empty());
 }
+
+#[test]
+fn deps_list_changes_legacy_base_and_best_effort_error() {
+    use std::time::SystemTime;
+    use strata_store::NewProposal;
+    use strata_types::{CommitOid, DepsSetId, TreeOid};
+    let fx = Dfx::new();
+    let (c, log, _) = fx.confirmer(vec![]);
+    let core = fx.prepare_with(c).unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let id = new_session(&sock);
+        let repo = repo_name("tool");
+        let session = core.store.session(&id).unwrap().unwrap();
+        let from = session.manifest.repos[&repo].base.deps.clone();
+        let main = fx.sb.path("tool");
+        let head = CommitOid::try_from(fx.sb.commit(&main, &[("package.json", NEW_DEP.as_bytes())], "add y")).unwrap();
+        let tree = core.gits[&repo].tree_of(&head).unwrap();
+        let proposal = NewProposal {
+            repo: repo.clone(),
+            origin: None,
+            from,
+            from_inputs: "1".repeat(64),
+            to: DepsSetId::try_from("2".repeat(64)).unwrap(),
+            to_inputs: "3".repeat(64),
+            head: Some(head),
+            tree: Some(tree),
+        };
+        let pid = core.store.record_proposal(&proposal, None, SystemTime::now()).unwrap().unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        let l = loop {
+            let reply = ok(call(&sock, "deps_list", json!({"repo":"tool"})));
+            if reply["proposals"][0].get("changes").is_some() || std::time::Instant::now() >= until {
+                break reply;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(l["proposals"][0]["id"], pid.get());
+        assert_eq!(l["proposals"][0]["changes"]["since"], "session_base", "{l:#}");
+        assert!(l["proposals"][0]["changes"]["summary"].as_str().unwrap().contains("+y ^2.0.0"), "{l:#}");
+        let bad = NewProposal {
+            head: Some(CommitOid::try_from("9".repeat(40)).unwrap()),
+            tree: Some(TreeOid::try_from("8".repeat(40)).unwrap()),
+            ..proposal
+        };
+        let next = core.store.record_proposal(&bad, Some(pid), SystemTime::now()).unwrap().unwrap();
+        let l = ok(call(&sock, "deps_list", json!({"repo":"tool"})));
+        assert_eq!(l["proposals"][0]["id"], next.get());
+        assert!(l["proposals"][0].get("changes").is_none(), "{l:#}");
+    });
+    assert!(log.shown().is_empty(), "read-only enrichment must not confirm");
+}

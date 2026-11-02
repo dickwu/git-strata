@@ -1,5 +1,12 @@
 /** Daemon replies → what the screens show. Pure; tested against the P1 fixtures. */
-import type { Checkpoint, DaemonStatus, DepsList, StatusReply, SessionEntry } from './types';
+import type {
+  Checkpoint,
+  DaemonStatus,
+  DepsList,
+  StatusReply,
+  SessionEntry,
+  UpstreamRepo,
+} from './types';
 
 /** One repo in a session. Tracked repos checkpoint and publish; the rest are reference workspaces. */
 export interface RepoChip {
@@ -30,9 +37,12 @@ export interface SessionRow {
   /** Worst workspace health: anything other than "Ok" wins. */
   health: string;
   created: string;
+  behind?: number;
+  behindCapped?: boolean;
 }
 
 export interface RepoView {
+  upstream?: UpstreamRepo;
   repo: string;
   head: string;
   baseTree: string;
@@ -136,60 +146,165 @@ export function filterRows(rows: SessionRow[], f: RowFilter): SessionRow[] {
   });
 }
 
-/** One thing that waits for a human, as the tray lists it (src-tauri/src/tray_model.rs). */
+/** One repo's proposal or workspace that needs attention. */
 export interface WaitingItem {
   key: string;
   kind: 'deps' | 'conflict';
-  /** The proposal id, or the number of conflicted paths. */
   number: number;
   repo: string;
-  /** The session it belongs to; null for a proposal that came from the main branch. */
   session: string | null;
-  /** When the proposal was made (ISO); conflicts carry no time. */
   since: string | null;
+  summary?: string;
+  summarySince?: 'session_base';
+  affected?: Array<{ id: string; ticket: string | null }>;
+  mode?: 'apply' | 'confirm';
+  reason?: string;
+  command?: string;
+  progress?: string;
 }
-
-/**
- * What waits for a human: pending deps proposals, then workspaces with conflicted paths.
- * Same rule as the tray's "Waiting for you" (src-tauri/src/tray_model.rs `waiting`), so
- * the Sessions header note and the tray agree.
- */
-export function waitingItems(
+export interface WaitingGroup {
+  repo: string;
+  items: WaitingItem[];
+  applying: WaitingItem[];
+}
+export const STUCK_AFTER = 24 * 60 * 60 * 1000;
+export function hasUpstream(daemon: DaemonStatus | undefined): boolean {
+  return daemon?.features?.includes('status.upstream') === true;
+}
+/** Workspace-level and session-level upstream are the same view, at different RPC depths. */
+export function repoUpstream(s: SessionEntry, repo: string): UpstreamRepo | undefined {
+  if (s.status.manifest.repos[repo]?.tracked === false) return undefined;
+  return s.status.workspaces?.[repo]?.upstream ?? s.status.upstream?.repos?.[repo];
+}
+export function syncCommand(session: string, repo: string): string {
+  // Real ids/names are validated by strata-types. Quoting also keeps imported fixtures safe.
+  const quote = (v: string) => (/^[a-zA-Z0-9_.-]+$/.test(v) ? v : `'${v.replace(/'/g, "'\\''")}'`);
+  return `git-strata sync --session ${quote(session)} --repo ${quote(repo)}`;
+}
+function pendingIncludes(s: SessionEntry, repo: string, id: number): boolean {
+  return (s.status.workspaces?.[repo]?.pending ?? []).some(
+    (p) => p === id || (typeof p === 'object' && p !== null && 'id' in p && p.id === id)
+  );
+}
+function stuckReason(s: SessionEntry, repo: string, now: number): string | undefined {
+  const w = s.status.workspaces?.[repo];
+  const u = repoUpstream(s, repo);
+  const state = u?.deps?.state;
+  if (state === 'install_failed') return 'install failed';
+  if (state === 'own_change') return 'session has its own dependency changes';
+  if (state === 'drift') return 'dependency drift';
+  if (w && w.health !== 'Ok') return 'needs the human: workspace unhealthy';
+  if (w?.scene || s.status.scene) return 'needs the human: scene';
+  if (u?.following === false) return 'needs the human: not following main';
+  if (u?.diverged) return 'needs the human: diverged';
+  if (state === 'waiting_human') return 'needs the human';
+  if (u?.auto?.state === 'deferred') {
+    const since = Date.parse(u.auto.since);
+    if (Number.isFinite(since) && now - since > STUCK_AFTER)
+      return `deferred over 24 h: ${(u.auto.reason ?? 'waiting').replace(/_/g, ' ')}`;
+  }
+  return undefined;
+}
+/** Group by repo; apply-mode progress stays out of the human waiting count (O6). */
+export function waitingGroups(
   sessions: StatusReply | undefined,
-  deps: DepsList | undefined
-): WaitingItem[] {
-  const proposals: WaitingItem[] = (deps?.proposals ?? [])
-    .filter((p) => p.state?.kind === 'Pending')
-    .sort((a, b) => a.id - b.id)
-    .map((p) => ({
+  deps: DepsList | undefined,
+  daemon?: DaemonStatus,
+  now = Date.now()
+): WaitingGroup[] {
+  const upstream = hasUpstream(daemon);
+  const ss = sessions?.sessions ?? [];
+  const groups = new Map<string, WaitingGroup>();
+  const group = (repo: string) => {
+    if (!groups.has(repo)) groups.set(repo, { repo, items: [], applying: [] });
+    return groups.get(repo)!;
+  };
+  for (const p of [...(deps?.proposals ?? [])].sort((a, b) => a.id - b.id)) {
+    if (p.state?.kind !== 'Pending') continue;
+    const affected = ss.filter((s) => pendingIncludes(s, p.repo, p.id));
+    const states = upstream ? affected.map((s) => repoUpstream(s, p.repo)) : [];
+    // Mode is per repo. One affected workspace can supply it even when another is unhealthy.
+    const mode =
+      states.some((u) => u?.deps?.proposal === p.id && u.deps.mode === 'apply') &&
+      !states.some((u) => u?.deps?.proposal === p.id && u.deps.mode === 'confirm')
+        ? 'apply'
+        : 'confirm';
+    const reason =
+      mode === 'apply' ? affected.map((s) => stuckReason(s, p.repo, now)).find(Boolean) : undefined;
+    const moved = ss.filter(
+      (s) =>
+        s.status.manifest.repos[p.repo]?.tracked &&
+        s.status.manifest.repos[p.repo]?.base.deps === p.to
+    ).length;
+    const deferred = states.filter((u) => u?.auto?.state === 'deferred');
+    const reasons = [
+      ...new Set(deferred.map((u) => u?.auto?.reason?.replace(/_/g, ' ')).filter(Boolean)),
+    ];
+    const it: WaitingItem = {
       key: `deps:${p.id}`,
       kind: 'deps',
       number: p.id,
       repo: p.repo,
       session: p.origin?.kind === 'Session' ? (p.origin.session ?? null) : null,
       since: p.created ?? null,
-    }));
-  const conflicts: WaitingItem[] = (sessions?.sessions ?? []).flatMap((s) =>
-    Object.entries(s.status.workspaces ?? {})
-      .filter(([, w]) => (w.conflicts?.length ?? 0) > 0)
-      .map(([repo, w]) => ({
+      summary: p.changes?.summary,
+      summarySince: p.changes?.since,
+      affected: affected.map((s) => ({
+        id: s.status.manifest.id,
+        ticket: s.status.manifest.ticket ?? null,
+      })),
+      mode,
+      reason,
+      progress: `${moved}/${moved + affected.length} moved${deferred.length ? `, ${deferred.length} deferred${reasons.length ? `: ${reasons.join(', ')}` : ''}` : ''}`,
+    };
+    (mode === 'apply' && !reason ? group(p.repo).applying : group(p.repo).items).push(it);
+  }
+  for (const s of ss) {
+    for (const [repo, w] of Object.entries(s.status.workspaces ?? {})) {
+      const u = upstream ? repoUpstream(s, repo) : undefined;
+      const n = Math.max(w.conflicts?.length ?? 0, u?.conflicts?.length ?? 0);
+      if (n === 0 && u?.auto?.reason !== 'conflicts') continue;
+      group(repo).items.push({
         key: `conflict:${s.status.manifest.id}:${repo}`,
-        kind: 'conflict' as const,
-        number: w.conflicts?.length ?? 0,
+        kind: 'conflict',
+        number: n,
         repo,
         session: s.status.manifest.id,
         since: null,
-      }))
-  );
-  return [...proposals, ...conflicts];
+        affected: [{ id: s.status.manifest.id, ticket: s.status.manifest.ticket ?? null }],
+        reason: "needs the session's agent",
+        command: upstream ? syncCommand(s.status.manifest.id, repo) : undefined,
+      });
+    }
+  }
+  return [...groups.values()].sort((a, b) => a.repo.localeCompare(b.repo));
 }
-
-/** How many things wait for a human (see `waitingItems`). */
+/** Flat compatibility view for review targets and existing callers. */
+export function waitingItems(
+  sessions: StatusReply | undefined,
+  deps: DepsList | undefined,
+  daemon?: DaemonStatus,
+  now = Date.now()
+): WaitingItem[] {
+  return waitingGroups(sessions, deps, daemon, now)
+    .flatMap((g) => g.items)
+    .sort((a, b) =>
+      a.kind === b.kind
+        ? a.kind === 'deps'
+          ? a.number - b.number
+          : a.key.localeCompare(b.key)
+        : a.kind === 'deps'
+          ? -1
+          : 1
+    );
+}
 export function waitingCount(
   sessions: StatusReply | undefined,
-  deps: DepsList | undefined
+  deps: DepsList | undefined,
+  daemon?: DaemonStatus,
+  now = Date.now()
 ): number {
-  return waitingItems(sessions, deps).length;
+  return waitingGroups(sessions, deps, daemon, now).reduce((n, g) => n + g.items.length, 0);
 }
 
 /**
@@ -203,10 +318,17 @@ export function sessionAge(created: string, state: string, now: number): number 
   return Number.isNaN(t) ? null : Math.max(0, now - t);
 }
 
-function row(s: SessionEntry): SessionRow {
+function row(s: SessionEntry, daemon?: DaemonStatus): SessionRow {
+  const ups = hasUpstream(daemon)
+    ? Object.keys(s.status.manifest.repos)
+        .map((repo) => repoUpstream(s, repo))
+        .filter((u) => u && !u.unchecked && u.behind != null)
+    : [];
   const ws = Object.values(s.status.workspaces ?? {});
   const bad = ws.map((w) => w.health).find((h) => h !== 'Ok');
   return {
+    behind: ups.length ? ups.reduce((n, u) => n + (u?.behind ?? 0), 0) : undefined,
+    behindCapped: ups.some((u) => u?.capped),
     id: s.status.manifest.id,
     ticket: s.status.manifest.ticket ?? null,
     state: s.status.state,
@@ -221,8 +343,10 @@ function row(s: SessionEntry): SessionRow {
   };
 }
 
-export function sessionRows(reply: StatusReply | undefined): SessionRow[] {
-  return (reply?.sessions ?? []).map(row).sort((a, b) => b.created.localeCompare(a.created));
+export function sessionRows(reply: StatusReply | undefined, daemon?: DaemonStatus): SessionRow[] {
+  return (reply?.sessions ?? [])
+    .map((s) => row(s, daemon))
+    .sort((a, b) => b.created.localeCompare(a.created));
 }
 
 function reasonText(c: Checkpoint): string {
@@ -231,7 +355,8 @@ function reasonText(c: Checkpoint): string {
 
 export function sessionDetail(
   reply: StatusReply | undefined,
-  id: string
+  id: string,
+  daemon?: DaemonStatus
 ): SessionDetailView | null {
   const s = reply?.sessions.find((x) => x.status.manifest.id === id);
   if (!s) return null;
@@ -240,6 +365,7 @@ export function sessionDetail(
     const c = reply?.chains?.[repo];
     return {
       repo,
+      upstream: hasUpstream(daemon) ? repoUpstream(s, repo) : undefined,
       head: m.head,
       baseTree: m.base.tree,
       depsSet: m.base.deps,
@@ -262,7 +388,7 @@ export function sessionDetail(
       reason: reasonText(c),
       entries: c.entries,
     }));
-  return { row: row(s), root: s.status.manifest.root, repos, checkpoints };
+  return { row: row(s, daemon), root: s.status.manifest.root, repos, checkpoints };
 }
 
 function warningText(w: unknown): string {
@@ -298,16 +424,27 @@ export function daemonView(s: DaemonStatus): DaemonView {
 export function openTarget(
   id: string,
   sessions: StatusReply | undefined,
-  deps: DepsList | undefined
+  deps: DepsList | undefined,
+  daemon?: DaemonStatus
 ): { session: string | null } {
   const [, kind, arg] = id.split(':');
   if (kind === 'deps') {
     const p = deps?.proposals.find((x) => String(x.id) === arg);
-    return { session: p?.origin.kind === 'Session' ? (p.origin.session ?? null) : null };
+    return {
+      session:
+        p?.origin.kind === 'Session'
+          ? (p.origin.session ?? null)
+          : p
+            ? (sessions?.sessions.find((s) => pendingIncludes(s, p.repo, p.id))?.status.manifest
+                .id ?? null)
+            : null,
+    };
   }
   if (kind === 'conflict') {
     const s = sessions?.sessions.find(
-      (x) => (x.status.workspaces[arg]?.conflicts?.length ?? 0) > 0
+      (x) =>
+        (x.status.workspaces[arg]?.conflicts?.length ?? 0) > 0 ||
+        (hasUpstream(daemon) && repoUpstream(x, arg)?.auto?.reason === 'conflicts')
     );
     return { session: s?.status.manifest.id ?? null };
   }

@@ -1,0 +1,5 @@
+name: app
+dependencies:
+  react: "18.2.0"
+dev_dependencies:
+  old: "1.0"

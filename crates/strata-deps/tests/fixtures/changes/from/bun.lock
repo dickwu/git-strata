@@ -1,0 +1,1 @@
+{"lockfileVersion":1,"workspaces":{"":{"dependencies":{"react":"^18"}}},"packages":{"react":["react@18.2.0","",{},"hash"],"old":["old@1.0","",{},"hash"]}}

@@ -523,6 +523,14 @@ gitio 自己不拿 strata 的锁，靠 git 的锁文件（ref 锁、`index.lock`
 
 复杂度 O(tree 的文件数)，一次子进程；`tree_contains` 命中缓存时 O(log 文件数)。tool 有 4196 个文件，staff-api 有 4947 个（2026-10-22 各自的 origin 默认分支）。`WorkspaceState.head` 的不变量 `tree_of(head) == base.tree` 走缓存。
 
+#### Bounded install-input reads (main-sync)
+
+`commit_items_within(head, paths, timeout)` reads the requested commit's entries directly via
+literal-path `ls-tree`, without whole-tree validation or export. `object_bytes_within(oid, timeout)`
+reads an immutable blob through the same sanitized command runner. The package-summary caller
+checks the tree entry's size before reading it and passes its remaining 200 ms budget to both.
+Existing `tree_items` and `object_bytes` behavior is unchanged.
+
 ### 5.5 `export_tree(tree, dst)`
 
 1. 拒绝，此时还什么都没写（G9）：tree 校验同 §5.4；`dst` 已存在（lstat）→ `Exists`，不碰它；`dst` 的父目录不存在 → `NoSuchPath`，是符号链接或不是目录 → `NotDirectory`；`dst` 在主 checkout 的工作树或 common dir 里 → `InvalidInput`；`dst` 的名字当不了单级 `RepoPath`（apfs 的函数只收 `RepoPath`：要是 UTF-8，不能是 `.` 或 `..`）→ `InvalidInput`；第 2 步的临时目录名 `.export-<dst 的名字>-<nonce>` 超过 `apfs::NAME_MAX_UTF16_UNITS` 个 UTF-16 码元 → `InvalidInput`（review B7）；按第 2 步的 `T/tree` 算（git 写的是它下面的路径，`T` 的名字比 `dst` 长），加上最长的路径达到 `apfs::PATH_MAX_BYTES` 字节（1024：macOS 的 `PATH_MAX` 含结尾的 NUL）→ `InvalidInput`。
