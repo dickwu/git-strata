@@ -221,12 +221,7 @@ impl Sessions<'_> {
             .iter()
             .enumerate()
             .filter_map(|(i, h)| h.as_ref().ok().map(|h| (i, h)))
-            .flat_map(|(i, h)| {
-                h.rec
-                    .workspaces
-                    .iter()
-                    .map(move |(repo, row)| (i, repo, row))
-            })
+            .flat_map(|(i, h)| h.rec.workspaces.iter().map(move |(repo, row)| (i, repo, row)))
             .collect();
         let done = on_slots(&self.status_slots, &tasks, |&(i, repo, row)| {
             heads[i].as_ref().ok().map(|h| self.workspace_status(&h.rec, repo, row))

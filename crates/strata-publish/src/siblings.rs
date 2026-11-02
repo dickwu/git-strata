@@ -82,13 +82,7 @@ fn pinned(store: &Store, layout: Option<&SessionId>) -> Result<BTreeMap<RepoName
     };
     Ok(store
         .session(l)?
-        .map(|rec| {
-            rec.manifest
-                .repos
-                .into_iter()
-                .map(|(r, ws)| (r, ws.base))
-                .collect()
-        })
+        .map(|rec| rec.manifest.repos.into_iter().map(|(r, ws)| (r, ws.base)).collect())
         .unwrap_or_default())
 }
 

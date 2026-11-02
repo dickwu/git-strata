@@ -617,13 +617,7 @@ mod tests {
         assert!(BASE_DDL.contains("PRAGMA user_version = 1;"));
         for (i, m) in MIGRATIONS.iter().enumerate() {
             assert_eq!(m.to, BASE_VERSION + 1 + i as u32, "{}", m.name);
-            assert!(
-                m.sql
-                    .trim_end()
-                    .ends_with(&format!("PRAGMA user_version = {};", m.to)),
-                "{}",
-                m.name
-            );
+            assert!(m.sql.trim_end().ends_with(&format!("PRAGMA user_version = {};", m.to)), "{}", m.name);
         }
         assert_eq!(LATEST, 5);
         assert_eq!(pending(1).count(), 4);

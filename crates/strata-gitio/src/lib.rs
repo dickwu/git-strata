@@ -102,9 +102,7 @@ impl Git {
     /// Returns the removed paths.
     pub fn clear_stale_strata_locks(&self, before: std::time::SystemTime) -> Vec<PathBuf> {
         fn walk(dir: &Path, before: std::time::SystemTime, out: &mut Vec<PathBuf>) {
-            let Ok(rd) = std::fs::read_dir(dir) else {
-                return;
-            };
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
             for e in rd.flatten() {
                 let Ok(ft) = e.file_type() else { continue };
                 let p = e.path();

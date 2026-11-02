@@ -355,8 +355,7 @@ impl<'a> Trackers<'a> {
 
     /// The tracked workspaces of every Active session.
     fn tracked(&self) -> Vec<(SessionId, RepoName)> {
-        let Ok(all) = self.core.store.sessions() else { return Vec::new();
-        };
+        let Ok(all) = self.core.store.sessions() else { return Vec::new() };
         all.into_iter()
             .filter(|r| r.lifecycle == strata_store::Lifecycle::Active)
             .flat_map(|r| {
@@ -728,9 +727,7 @@ fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
             };
             let r = catch_unwind(AssertUnwindSafe(|| {
                 d.core.locks.try_session(&key.session, || {
-                    d.core.locks.with_repo(&key.repo, || {
-                        d.sessions.check_old_tree(&key, &path, ino, &flag)
-                    })
+                    d.core.locks.with_repo(&key.repo, || d.sessions.check_old_tree(&key, &path, ino, &flag))
                 })
             }));
             match r {
@@ -914,16 +911,10 @@ impl<'d, 'a> Server<'d, 'a> {
             Ok(Err(e)) => Reply::error(&req.id, &e),
             Err(_) if wrote => Reply::error(
                 &req.id,
-                &StrataError::new(
-                    Code::Unknown,
-                    format!("{name} panicked after it may have written; nothing is replayed"),
-                )
-                .with_detail(json!({ "reason": "handler_panicked", "method": name })),
+                &StrataError::new(Code::Unknown, format!("{name} panicked after it may have written; nothing is replayed"))
+                    .with_detail(json!({ "reason": "handler_panicked", "method": name })),
             ),
-            Err(_) => Reply::rejected(
-                &req.id,
-                RpcReject::Failed, format!("{name} panicked before writing anything"),
-            ),
+            Err(_) => Reply::rejected(&req.id, RpcReject::Failed, format!("{name} panicked before writing anything")),
         }
     }
 
@@ -1350,9 +1341,11 @@ impl<'d, 'a> Server<'d, 'a> {
         let ids: Vec<SessionId> = if all {
             sessions.list()?
         } else if let Some(sel) = selector {
-            vec![sessions.select(sel).map_err(|e| {
-                strata_session::with_leftover_detail(&core.store, &core.config.paths.root, sel, e)
-            })?]
+            vec![
+                sessions
+                    .select(sel)
+                    .map_err(|e| strata_session::with_leftover_detail(&core.store, &core.config.paths.root, sel, e))?,
+            ]
         } else if let Some(cwd) = cwd {
             match sessions.resolve(cwd)? {
                 Some((id, _)) => vec![id],
@@ -1609,9 +1602,7 @@ impl<'d, 'a> Server<'d, 'a> {
             .store
             .sessions()?
             .into_iter()
-            .filter(|r| {
-                r.lifecycle != strata_store::Lifecycle::Removed && r.manifest.repos.contains_key(&repo)
-            })
+            .filter(|r| r.lifecycle != strata_store::Lifecycle::Removed && r.manifest.repos.contains_key(&repo))
             .map(|r| r.manifest.id)
             .collect();
         let complete = only.is_none();
@@ -1779,9 +1770,7 @@ impl<'d, 'a> Server<'d, 'a> {
         let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
         if let Some(plan) = plan {
             for repo in &repos {
-                let pinned = core.pinned(repo).map_err(|e| {
-                    self.decorate_publish_error(e, repo, Vec::new(), already.clone())
-                })?;
+                let pinned = core.pinned(repo).map_err(|e| self.decorate_publish_error(e, repo, Vec::new(), already.clone()))?;
                 if pinned.push && needs_confirm(&pinned) && !plan.contains(repo) {
                     let e = StrataError::new(
                         Code::NotConfirmed,
@@ -1820,9 +1809,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
                 writing();
                 let bound = token.as_ref().map(|_| shown.get(&repo).cloned().flatten());
-                self.with_publish_ctx(&repo, |ctx| {
-                    strata_publish::publish_bound(ctx, &group, token, bound.clone())
-                })
+                self.with_publish_ctx(&repo, |ctx| strata_publish::publish_bound(ctx, &group, token, bound.clone()))
             })();
             match r {
                 Ok(p) => done.push(json!({
@@ -1930,9 +1917,7 @@ impl<'d, 'a> Server<'d, 'a> {
             };
             // Review M6: the scene is kept (and reported) when the outcome
             // is unknown; see `resolve::with_staging`.
-            let uncertain = |r: &Result<strata_types::PushOutcome>| {
-                r.as_ref().is_err_and(|e| e.code == Code::Unknown)
-            };
+            let uncertain = |r: &Result<strata_types::PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
             // Review-3 R4: the destination is read before the push.
             let dest = resolve::push_dest(git);
             if token.is_some() {
@@ -1998,9 +1983,7 @@ impl Server<'_, '_> {
             self.rebase_replayed(repo, rp, &mut rebases, &mut warnings);
         }
         if let Some(after) = tips.1.clone()
-            && let Some(e) = crate::fetch_after::observe_if_moved(tips.0.as_ref(), Some(&after), &mut || {
-                    resolve::observe_tip(core, repo, &after)
-                })
+            && let Some(e) = crate::fetch_after::observe_if_moved(tips.0.as_ref(), Some(&after), &mut || resolve::observe_tip(core, repo, &after))
         {
             warnings.push(json!({ "kind": "ObserveFailed", "repo": repo.as_str(), "code": e.code.as_str(), "message": e.message }));
         }
@@ -2043,17 +2026,10 @@ impl Server<'_, '_> {
             }
         };
         for row in rows.into_iter().filter(|r| r.repo == *repo) {
-            let Some(copy) = row
-                .head
-                .as_deref()
-                .and_then(|h| rp.map.iter().find(|(_, n)| n.as_str() == h)) else {
-                continue;
-            };
+            let Some(copy) = row.head.as_deref().and_then(|h| rp.map.iter().find(|(_, n)| n.as_str() == h)) else { continue };
             let (from, to) = (copy.0.clone(), copy.1.clone());
             let s = row.session.clone();
-            let r = self.with_publish_ctx(repo, |ctx| {
-                strata_publish::pending::attempt(ctx, &row, strata_publish::MovePolicy::Auto)
-            });
+            let r = self.with_publish_ctx(repo, |ctx| strata_publish::pending::attempt(ctx, &row, strata_publish::MovePolicy::Auto));
             match r {
                 Ok(Some(report)) => rebases.push(json!({ "session": s.as_str(), "from": from.as_str(), "to": to.as_str(), "report": json_of(&report) })),
                 Ok(None) => {}
@@ -2173,35 +2149,23 @@ fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_
         if r.phase != PublishPhase::Done {
             continue;
         }
-        let Some(o) = r.outcome.as_ref() else {
-            continue;
-        };
-        let Some(commit) = o.get("commit").and_then(Value::as_str) else {
-            continue;
-        };
-        let mine: Vec<&RepoPath> = r
-            .group
-            .batches
-            .iter()
-            .filter(|x| x.session == b.session && x.repo == b.repo)
-            .flat_map(|x| x.paths.iter())
-            .collect();
+        let Some(o) = r.outcome.as_ref() else { continue };
+        let Some(commit) = o.get("commit").and_then(Value::as_str) else { continue };
+        let mine: Vec<&RepoPath> =
+            r.group.batches.iter().filter(|x| x.session == b.session && x.repo == b.repo).flat_map(|x| x.paths.iter()).collect();
         let files: Vec<RepoPath> = o
             .get("paths")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
-            .filter(|f| {
-                at_or_under(f, p.as_str()) && mine.iter().any(|q| at_or_under(f, q.as_str()))
-            })
+            .filter(|f| at_or_under(f, p.as_str()) && mine.iter().any(|q| at_or_under(f, q.as_str())))
             .filter_map(|f| RepoPath::try_from(f.to_string()).ok())
             .collect();
         if files.is_empty() {
             continue;
         }
-        let Ok(c) = CommitOid::try_from(commit.to_string()) else { return Ok(None);
-        };
+        let Ok(c) = CommitOid::try_from(commit.to_string()) else { return Ok(None) };
         let git = git_of(core, &b.repo)?;
         // Review P1-8: the row's commit may be gone (replayed or dropped
         // off the chain, then pruned by git gc). That cannot prove the
@@ -2212,9 +2176,7 @@ fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_
             Err(e) => return Err(e),
         };
         let now = git.tree_items(base, &files)?;
-        let key = |m: &BTreeMap<String, strata_gitio::TreeItem>, f: &RepoPath| {
-            m.get(f.as_str()).map(|i| (i.mode, i.oid.clone()))
-        };
+        let key = |m: &BTreeMap<String, strata_gitio::TreeItem>, f: &RepoPath| m.get(f.as_str()).map(|i| (i.mode, i.oid.clone()));
         if files.iter().all(|f| key(&now, f) == key(&then, f)) {
             return Ok(Some(json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "push": o.get("push").cloned().unwrap_or(Value::Null) })));
         }

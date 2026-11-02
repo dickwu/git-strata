@@ -273,13 +273,7 @@ fn planned_moves(config: &Config, store: &Store, id: ProposalId, only: &[Session
         .ok()?
         .into_iter()
         .filter(|r| only.is_empty() || only.contains(&r.manifest.id))
-        .filter_map(|r| {
-            r.manifest
-                .repos
-                .get(&p.repo)
-                .cloned()
-                .map(|ws| (r.manifest.id.clone(), ws))
-        })
+        .filter_map(|r| r.manifest.repos.get(&p.repo).cloned().map(|ws| (r.manifest.id.clone(), ws)))
         .collect();
     let plan = strata_deps::plan_rollout(&ctx, id, &list, only.is_empty()).ok()?;
     let moves = plan
@@ -354,20 +348,13 @@ pub fn deps_approve(ctx: &Ctx, id: &str, sessions: &[String]) -> Result<Envelope
 // ---- assign ------------------------------------------------------------------
 
 pub fn assign(ctx: &Ctx, file: &str, session: &str) -> Result<Envelope> {
-    let path = RepoPath::try_from(file.to_string()).map_err(|e| {
-        invalid(
-            "path",
-            format!("{file:?} is not a repo path: {}", e.message),
-        )
-    })?;
+    let path = RepoPath::try_from(file.to_string())
+        .map_err(|e| invalid("path", format!("{file:?} is not a repo path: {}", e.message)))?;
     let config = ctx.config()?;
     let store = ro::open_store(&config)?;
     let id = ro::select(&store, session)?;
     let records = store.publishes()?;
-    let mentions = |o: &Option<Value>| {
-        o.as_ref()
-            .is_some_and(|v| v.to_string().contains(&format!("\"{}\"", path.as_str())))
-    };
+    let mentions = |o: &Option<Value>| o.as_ref().is_some_and(|v| v.to_string().contains(&format!("\"{}\"", path.as_str())));
     let group = records
         .iter()
         .rev()
@@ -467,14 +454,11 @@ fn ws_has(store: &Store, repo: &RepoName, ws: &strata_types::WorkspaceState, p: 
 /// checkpoint counts as not changing it.
 fn checkpoints_changed(store: &Store, id: &SessionId, repo: &RepoName, path: &RepoPath) -> bool {
     let under = format!("{}/", path.as_str());
-    let Ok(infos) = store.checkpoints(id, Some(repo)) else { return false;
-    };
+    let Ok(infos) = store.checkpoints(id, Some(repo)) else { return false };
     infos.iter().any(|info| {
-        store.checkpoint(id, info.id).is_ok_and(|c| {
-            c.entries
-                .iter()
-                .any(|e| e.path == *path || e.path.as_str().starts_with(&under))
-        })
+        store
+            .checkpoint(id, info.id)
+            .is_ok_and(|c| c.entries.iter().any(|e| e.path == *path || e.path.as_str().starts_with(&under)))
     })
 }
 
@@ -506,12 +490,7 @@ fn parse_from(entries: &[String]) -> Result<Vec<FromEntry>> {
     entries
         .iter()
         .map(|e| {
-            let (s, p) = e.split_once(':').ok_or_else(|| {
-                invalid(
-                    "from_syntax",
-                    format!("{e:?} is not SESSION:PATH or SESSION:REPO:PATH"),
-                )
-            })?;
+            let (s, p) = e.split_once(':').ok_or_else(|| invalid("from_syntax", format!("{e:?} is not SESSION:PATH or SESSION:REPO:PATH")))?;
             if s.is_empty() {
                 return Err(invalid("from_syntax", format!("{e:?} names no session")));
             }
@@ -538,12 +517,7 @@ fn build_batch(config: &Config, from: &[FromEntry]) -> Result<Batch> {
         let id = ro::select(&store, &f.session)?;
         let rec = ro::record(&store, &id)?;
         let (repo, path) = if let Some((repo, p)) = split_repo(&rec, &f.rest) {
-            let path = RepoPath::try_from(p.clone()).map_err(|x| {
-                invalid(
-                    "from_syntax",
-                    format!("{p:?} is not a repo path: {}", x.message),
-                )
-            })?;
+            let path = RepoPath::try_from(p.clone()).map_err(|x| invalid("from_syntax", format!("{p:?} is not a repo path: {}", x.message)))?;
             let ws = &rec.manifest.repos[repo];
             if !ws_has(&store, repo, ws, &path) {
                 return Err(StrataError::new(
@@ -730,12 +704,7 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
             .map_err(tty_refused)?;
         plan.get("repos")
             .and_then(Value::as_array)
-            .ok_or_else(|| {
-                tty_refused(invalid(
-                    "rpc_failed",
-                    "the daemon's publish_plan reply has no repos",
-                ))
-            })?
+            .ok_or_else(|| tty_refused(invalid("rpc_failed", "the daemon's publish_plan reply has no repos")))?
             .iter()
             .filter_map(Value::as_str)
             .filter_map(|r| RepoName::try_from(r.to_string()).ok())
@@ -772,14 +741,7 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
         Err(e) => {
             // Review H4: what landed before the stop (in this call or an
             // earlier one) is reported in `data`; the error names the repo.
-            let list = |k: &str| {
-                e.detail
-                    .as_ref()
-                    .and_then(|d| d.get(k))
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default()
-            };
+            let list = |k: &str| e.detail.as_ref().and_then(|d| d.get(k)).and_then(Value::as_array).cloned().unwrap_or_default();
             // Review M4: the failing repo's commit (and what is known of
             // its push) when the error came after its commit was written.
             let (mut before, already) = (list("published_before"), list("already_published"));
@@ -816,9 +778,9 @@ fn carry_upstream(envelope: &mut Envelope, daemon: &Value) {
 /// a refusal is not one; it stays the error.
 fn bare_refusal(e: &StrataError) -> bool {
     e.code == Code::Unknown
-        && e.detail.as_ref().is_some_and(|d| {
-            d.get("kind").and_then(Value::as_str) == Some("PushRefused") && d.get("reason").is_none()
-        })
+        && e.detail
+            .as_ref()
+            .is_some_and(|d| d.get("kind").and_then(Value::as_str) == Some("PushRefused") && d.get("reason").is_none())
 }
 
 /// `{commits, checks_ran, waiting, pushes, already_published}`; `ok` only
@@ -880,8 +842,7 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
 /// deps-drift §2.5: the deps lines a publish error carries: the staged
 /// `deps_warning` and a `deps_inputs_left` snapshot report.
 fn failure_warning_lines(e: &StrataError) -> Vec<String> {
-    let Some(d) = e.detail.as_ref() else { return Vec::new();
-    };
+    let Some(d) = e.detail.as_ref() else { return Vec::new() };
     let mut out = Vec::new();
     if let Some(m) = d.get("deps_warning").and_then(deps_warning_line) {
         out.push(m.to_string());
@@ -916,13 +877,10 @@ fn deps_warning_line(w: &Value) -> Option<&str> {
 }
 
 fn waiting_proposals(config: &Config, repos: &[String]) -> Vec<Value> {
-    let Ok(store) = ro::open_store(config) else { return Vec::new();
-    };
+    let Ok(store) = ro::open_store(config) else { return Vec::new() };
     let mut out = Vec::new();
     for r in repos {
-        let Ok(name) = RepoName::try_from(r.clone()) else {
-            continue;
-        };
+        let Ok(name) = RepoName::try_from(r.clone()) else { continue };
         if let Ok(ps) = strata_deps::open_proposals(&store, Some(&name)) {
             out.extend(ps.into_iter().filter(|p| p.state == strata_deps::ProposalState::AwaitingPublish).map(|p| json!(p)));
         }

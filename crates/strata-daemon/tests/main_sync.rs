@@ -244,6 +244,13 @@ fn t4_identity_refresh_real_locks_no_reentrant_wait() {
     );
     exports_empty(&core);
 }
+/// Session creation fetches main and records it (upstream freshness), so the
+/// first periodic fetch is due one interval after that.
+/// (The fixture interval is 900 s; an hour past the recorded fetch is due.)
+fn due(core: &Core) -> SystemTime {
+    let at = core.store.repo_fetch(&repo_name("tool")).unwrap().map(|f| f.at);
+    at.unwrap_or_else(SystemTime::now) + Duration::from_secs(3600)
+}
 #[test]
 fn periodic_fetch_real_locks_observes_in_same_pass() {
     let f = Dfx::new();
@@ -255,7 +262,7 @@ fn periodic_fetch_real_locks_observes_in_same_pass() {
     let r = periodic_fetch::fetch_due_with(
         &core,
         &repo_name("tool"),
-        SystemTime::now(),
+        due(&core),
         &mut |git, b| {
             assert!(core.locks.holds().is_empty());
             stage(git, b, &h)
@@ -281,7 +288,7 @@ fn periodic_fetch_respects_interval_and_failure() {
     let f = Dfx::new();
     let core = f.prepare().unwrap();
     session(&core);
-    let now = SystemTime::now();
+    let now = due(&core);
     let mut calls = 0;
     assert!(
         periodic_fetch::fetch_due_with(&core, &repo_name("tool"), now, &mut |_, _| {
@@ -344,7 +351,7 @@ fn periodic_fetch_cas_under_try_lock() {
     let e = periodic_fetch::fetch_due_with(
         &core,
         &repo_name("tool"),
-        SystemTime::now(),
+        due(&core),
         &mut |g, branch| {
             core.locks
                 .with_repo(&repo_name("tool"), || {
@@ -374,13 +381,13 @@ fn periodic_fetch_holds_no_lock() {
         .read_ref("refs/strata/remotes/origin/main")
         .unwrap()
         .unwrap();
-    periodic_fetch::fetch_due_with(&core, &repo_name("tool"), SystemTime::now(), &mut |g, b| {
+    periodic_fetch::fetch_due_with(&core, &repo_name("tool"), due(&core), &mut |g, b| {
         assert!(core.locks.holds().is_empty());
         assert_eq!(
             periodic_fetch::fetch_due_with(
                 &core,
                 &repo_name("tool"),
-                SystemTime::now(),
+                due(&core),
                 &mut |_, _| panic!("reentered")
             )
             .unwrap(),
@@ -402,7 +409,7 @@ fn periodic_fetch_skips_busy_repo_and_rejects_rewind() {
                 periodic_fetch::fetch_due_with(
                     &core,
                     &repo,
-                    SystemTime::now(),
+                    due(&core),
                     &mut |_, _| panic!("busy")
                 )
                 .unwrap(),
@@ -416,7 +423,7 @@ fn periodic_fetch_skips_busy_repo_and_rejects_rewind() {
         .unwrap()
         .unwrap();
     advance(&f, &core);
-    let e = periodic_fetch::fetch_due_with(&core, &repo, SystemTime::now(), &mut |g, b| {
+    let e = periodic_fetch::fetch_due_with(&core, &repo, due(&core), &mut |g, b| {
         stage(g, b, &old)
     })
     .unwrap_err();
@@ -435,7 +442,7 @@ fn periodic_fetch_export_temp_removed() {
     );
     f.sb.git(&f.main("tool"), &["push", "-q", "origin", "main"]);
     assert_eq!(
-        periodic_fetch::fetch_due(&core, &repo_name("tool"), SystemTime::now()).unwrap(),
+        periodic_fetch::fetch_due(&core, &repo_name("tool"), due(&core)).unwrap(),
         FetchStep::Fetched
     );
     assert_eq!(pending(&core).head.unwrap().as_str(), h);
@@ -457,7 +464,7 @@ fn periodic_fetch_try_lock_after_network_does_not_wait() {
     let release = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
         let mut holder = None;
-        let e = periodic_fetch::fetch_due_with(&core, &repo, SystemTime::now(), &mut |g, b| {
+        let e = periodic_fetch::fetch_due_with(&core, &repo, due(&core), &mut |g, b| {
             holder = Some(scope.spawn(|| {
                 core.locks.with_repo(&repo, || {
                     entered.wait();

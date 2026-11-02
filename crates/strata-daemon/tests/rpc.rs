@@ -171,7 +171,6 @@ fn every_method_parses_its_documented_params() {
     let sid = "s-abcdefgh";
     let cases = [
         ("new", json!({ "ticket": null, "repos": ["tool"] })),
-        ("sync", json!({ "session": sid, "check": false, "fetch": true })),
         ("add", json!({ "session": sid, "repos": ["front"] })),
         (
             "status",
@@ -397,9 +396,9 @@ fn no_duplex_trailing_byte() {
     // lines before them are answered.
     let input = format!("{}\nxyz", status_req(json!(1)));
     let mut out = Vec::new();
-    rpc::serve_connection(
-        &mut Cursor::new(input.into_bytes()), &mut out, MAX_FRAME, &mut |q| Reply::ok(&q.id, json!({})),
-    )
+    rpc::serve_connection(&mut Cursor::new(input.into_bytes()), &mut out, MAX_FRAME, &mut |q| {
+        Reply::ok(&q.id, json!({}))
+    })
     .unwrap();
     assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 1);
 }

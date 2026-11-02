@@ -70,10 +70,9 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | method | 作用 | 是否只读 |
 | --- | --- | --- |
 | `new` | `session::new` | 否 |
-| `sync` | `sync_move::run`：Agent moves and report-bound conflict resolution; upstream dispatches read-only checks separately | 否 |
 | `add` | `session::add`：给已有会话加仓库的工作区（session.md D52）；排这个会话的队，之后对每个加上的仓库推进锚点（同 `new` 之后） | 否 |
 | `status` | 读，不排队，不等写锁 | 是 |
-| `sync` | `check:true` 在任何写操作前分支；否则交给 `sync_move::run` | 否 |
+| `sync` | `check:true`（及 `hook`）在任何写操作前分支到只读 lane；否则交给 `sync_move::run`（Agent moves、report-bound 冲突解决） | 否 |
 | `checkpoint` | 记检查点 | 否 |
 | `restore` | 恢复到一个检查点 | 否 |
 | `grep` | `search::grep`；零命中是空列表 | 是 |
@@ -105,7 +104,7 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | method | params | data |
 | --- | --- | --- |
 | `new` | `{ "ticket": string\|null, "repos": [RepoName], "only"?: bool, "agent"?: string\|null }` | `NewReport`。`only` 为真时会话只有 `repos` 这些工作区（session.md D51）；缺省为假，cli 只在 `--repo` 时才发这个字段，好让新 cli 也能用旧 daemon。`agent`（D38）是创建会话的 AI agent 名；缺省或 null 表示不知道；在调 session 之前按 types.md `AgentName` 校验，不合法 → `InvalidInput`（`detail.reason = "agent"`），什么都不写；不是字符串 → RPC `Failed`。它进会话清单的 `agent`，`new` 的回复与 `status` 里都在 `manifest.agent`（没有就省略这个键）。cli 只在 `daemon_status.features` 含 `"new.agent"` 时才发这个字段 |
-| `sync` | `SyncRequest {session, repos?, check?, fetch?, resolved?, keep?, target?, generation?, accept_diverged?}` | `{session, fetched, repos, next}`; non-check moves, report persistence and legacy conflict acknowledgement (see Main-sync non-check handler) |
+| `sync` | `SyncParams {session?, cwd?, repos?, check?, fetch?, resolved?, keep?, target?, generation?, accept_diverged?, hook?}`（非 check 映射为 `SyncRequest`） | check: `{session, upstream}`；否则 `{session, fetched, repos, next, upstream?}`; non-check moves, report persistence and legacy conflict acknowledgement (see Main-sync non-check handler) |
 | `add` | `{ "session": SessionId, "repos": [RepoName] }` | `{ report: AddReport, anchor_unknown }`（session.md D52） |
 | `status` | `{ "cwd": string\|null, "session": string\|null, "all": bool, "chains"?: bool, "summary"?: bool, "workspaces"?: bool }` | 见 §5.4；`chains` 缺省 false。`summary: true`（status-perf C）：只读 store，回 `{ sessions: [SessionSummary] }`（cli.md §3.2 `status --brief`），按 id 升序，选择优先级同普通 status（`all` > `session` > `cwd` > 全部）；不 stat 工作区、不跑 git、不走旧树，不进池。`workspaces: true` 给每个会话带上 `workspaces`，只在 `summary` 时合法，否则 `InvalidInput`（`workspaces_without_summary`）；`summary` 与 `chains: true` 同给 → `InvalidInput`（`summary_with_chains`）。旧 daemon 不认识这两个字段，以 RPC `Failed`「unknown field」拒绝，cli 读 store 回退 |
 | `checkpoint` | `{ "session", "repo", "reason": CheckpointReason, "paths": [RepoPath] }` | `Checkpointed`；`paths` 可空 |

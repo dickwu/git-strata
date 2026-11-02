@@ -564,42 +564,13 @@ fn agent_column_matches_agent_name_and_is_immutable() {
         assert_eq!(sql, rust, "AgentName and the CHECK disagree on {name:?}");
     }
     let (named, none) = (format!("s-{}", sid(1000)), "s-zzzzzzzz");
-    ok(
-        c,
-        &format!(
-            "INSERT INTO sessions (id, ticket, root, lifecycle, created_ns, agent) VALUES ('{none}', NULL, '/w/n', 'creating', 0, NULL)"
-        ),
-    );
-    refused(
-        c,
-        &format!("UPDATE sessions SET agent = 'codex' WHERE id = '{named}'"),
-        "immutable: sessions.agent",
-    );
-    refused(
-        c,
-        &format!("UPDATE sessions SET agent = NULL WHERE id = '{named}'"),
-        "immutable: sessions.agent",
-    );
-    refused(
-        c,
-        &format!("UPDATE sessions SET agent = 'codex' WHERE id = '{none}'"),
-        "immutable: sessions.agent",
-    );
-    ok(
-        c,
-        &format!("UPDATE sessions SET agent = 'claude-code' WHERE id = '{named}'"),
-    );
-    ok(
-        c,
-        &format!("UPDATE sessions SET lifecycle = 'active' WHERE id = '{named}'"),
-    );
-    assert_eq!(
-        one(
-            c,
-            &format!("SELECT agent FROM sessions WHERE id = '{named}'")
-        ),
-        r#"Text("claude-code")"#
-    );
+    ok(c, &format!("INSERT INTO sessions (id, ticket, root, lifecycle, created_ns, agent) VALUES ('{none}', NULL, '/w/n', 'creating', 0, NULL)"));
+    refused(c, &format!("UPDATE sessions SET agent = 'codex' WHERE id = '{named}'"), "immutable: sessions.agent");
+    refused(c, &format!("UPDATE sessions SET agent = NULL WHERE id = '{named}'"), "immutable: sessions.agent");
+    refused(c, &format!("UPDATE sessions SET agent = 'codex' WHERE id = '{none}'"), "immutable: sessions.agent");
+    ok(c, &format!("UPDATE sessions SET agent = 'claude-code' WHERE id = '{named}'"));
+    ok(c, &format!("UPDATE sessions SET lifecycle = 'active' WHERE id = '{named}'"));
+    assert_eq!(one(c, &format!("SELECT agent FROM sessions WHERE id = '{named}'")), r#"Text("claude-code")"#);
 }
 
 #[test]

@@ -458,9 +458,9 @@ fn close_failed(ctx: &Ctx, id: u64, written: Option<&CommitOid>, e: StrataError)
 /// it carries a `reason` and stays unknown).
 fn is_bare_refusal(e: &StrataError) -> bool {
     e.code == Code::Unknown
-        && e.detail.as_ref().is_some_and(|d| {
-            d.get("kind").and_then(Value::as_str) == Some("PushRefused") && d.get("reason").is_none()
-        })
+        && e.detail
+            .as_ref()
+            .is_some_and(|d| d.get("kind").and_then(Value::as_str) == Some("PushRefused") && d.get("reason").is_none())
 }
 
 /// The commit an `Unknown` row wrote: `outcome.commit`, else the applied
@@ -484,14 +484,10 @@ fn row_commit(ctx: &Ctx, r: &strata_store::PublishRecord) -> Option<CommitOid> {
 /// it is still on the chain) and the next publish reconciles. Nothing is
 /// replayed. Fetch or git failures leave the rows as they are.
 fn reconcile_unknown(ctx: &Ctx) {
-    let Ok(open) = ctx.store.open_publishes() else {
-        return;
-    };
+    let Ok(open) = ctx.store.open_publishes() else { return };
     let rows: Vec<_> = open
         .into_iter()
-        .filter(|r| {
-            r.phase == PublishPhase::Unknown && r.group.batches.iter().any(|b| b.repo == *ctx.repo)
-        })
+        .filter(|r| r.phase == PublishPhase::Unknown && r.group.batches.iter().any(|b| b.repo == *ctx.repo))
         .collect();
     if rows.is_empty() {
         return;
@@ -637,10 +633,7 @@ fn after_stage(
     }
     // Review-3 R3: a failure once the object exists (the chain-ref
     // transaction) still says no push was sent and how many checks ran.
-    let commit = r.map_err(|e| {
-        if written.is_some() { with_landed(e, Value::Null, ran.ran) } else { e
-        }
-    })?;
+    let commit = r.map_err(|e| if written.is_some() { with_landed(e, Value::Null, ran.ran) } else { e })?;
     // rm-followups §1.6 rule 2: under the lock, the commit is each
     // session's committed rebase target.
     let sessions: Vec<SessionId> = group.batches.iter().map(|b| b.session.clone()).collect::<BTreeSet<_>>().into_iter().collect();
@@ -784,13 +777,7 @@ pub fn publish_bound(
                 let r = match r {
                     Err(e) => Err(e),
                     Ok(Err(e)) => Err(e),
-                    Ok(Ok(())) => inner.unwrap_or_else(|| {
-                        Err(unknown_with(
-                            "lock",
-                            "the repo lock never ran", None,
-                            json!({}),
-                        ))
-                    }),
+                    Ok(Ok(())) => inner.unwrap_or_else(|| Err(unknown_with("lock", "the repo lock never ran", None, json!({})))),
                 };
                 match r {
                     Ok(l) => Ok((id, l)),
@@ -807,13 +794,7 @@ pub fn publish_bound(
             Ok(())
         });
         let r = q.and_then(|q| q).and_then(|()| {
-            slot.take().unwrap_or_else(|| {
-                Err(unknown_with(
-                    "queue",
-                    "the session queue never ran", None,
-                    json!({}),
-                ))
-            })
+            slot.take().unwrap_or_else(|| Err(unknown_with("queue", "the session queue never ran", None, json!({}))))
         });
         match r {
             Ok(x) => break x,

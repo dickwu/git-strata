@@ -518,11 +518,7 @@ impl Sessions<'_> {
                 )?;
             }
             self.seams.hit("move.prepare", Some(&name))?;
-            strata_apfs::clone_tree_rooted(
-                &self.store.base_dir(&new_base),
-                &root,
-                &rp(sname.clone()),
-            )?;
+            strata_apfs::clone_tree_rooted(&self.store.base_dir(&new_base), &root, &rp(sname.clone()))?;
             let (rebased, ignorecase) = match pre.take() {
                 Some(x) => x,
                 None => {
@@ -571,10 +567,7 @@ impl Sessions<'_> {
                 };
                 if !changed.is_empty() {
                     let shown: Vec<&String> = changed.iter().take(20).collect();
-                    return Err(auto_defer(
-                        "changed_during_move",
-                        json!({ "paths": shown, "count": changed.len() }),
-                    ));
+                    return Err(auto_defer("changed_during_move", json!({ "paths": shown, "count": changed.len() })));
                 }
                 if agent.is_none() {
                     let mut h = strata_deps::open_files(&ws.path)?;

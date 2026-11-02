@@ -280,16 +280,9 @@ impl Sessions<'_> {
         let each = |phase: &'static str, repos: &[RepoName], f: &(dyn Fn(&RepoName) -> Result<()> + Sync)| -> Result<()> {
             let failed = Mutex::new(std::collections::BTreeSet::new());
             let mark = |r: &RepoName| {
-                failed
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(r.clone());
+                failed.lock().unwrap_or_else(|p| p.into_inner()).insert(r.clone());
             };
-            let seam = |r: &RepoName| {
-                self.seams
-                    .hit(&format!("new.{phase}"), Some(r))
-                    .inspect_err(|_| mark(r))
-            };
+            let seam = |r: &RepoName| self.seams.hit(&format!("new.{phase}"), Some(r)).inspect_err(|_| mark(r));
             let run = |r: &RepoName| f(r).inspect_err(|_| mark(r));
             let out = dispatch::each_repo(repos, &seam, &run);
             if out.is_err() {

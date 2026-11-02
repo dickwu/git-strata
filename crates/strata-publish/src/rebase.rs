@@ -363,11 +363,7 @@ pub(crate) fn rebase_one_with(
         ));
     }
     if ctx.git.tree_of(head)? != new_base.tree {
-        return Err(invalid(
-            "tree_mismatch",
-            "the head's tree is not the new base's tree".into(),
-            json!({}),
-        ));
+        return Err(invalid("tree_mismatch", "the head's tree is not the new base's tree".into(), json!({})));
     }
     let ws = workspace(ctx, s)?;
     let old = ws.base.clone();
@@ -506,11 +502,7 @@ pub(crate) fn rebase_one_with(
             return Ok(deferred("state", json!({ "deps_inputs_changed": true })));
         }
         // 2. A draft whose input changes all landed is promoted.
-        let promoted = if n != old.deps {
-            promote_draft(ctx, s, &ws, &new, &old, &n, &n_inputs, new_base, head)?
-        } else {
-            None
-        };
+        let promoted = if n != old.deps { promote_draft(ctx, s, &ws, &new, &old, &n, &n_inputs, new_base, head)? } else { None };
         // 3. Same deps set: move (G0 again under the locks for `Auto`).
         if n == old.deps || c3 {
             if policy != MovePolicy::Explicit
