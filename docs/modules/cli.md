@@ -112,11 +112,28 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata session ports` | `[--session S] [--repo R]`，或 `--all`（只读，列出全部活会话的工作区，没有租约的 `ports: null`、`reason: "unleased"`，不分配）。`--check`：每个端口的监听者与状态。`--reassign`：把恰好一个工作区的租约挪到别的块，把查过的 base 作为 `checked` 发给 daemon，租约在此期间被别人挪过 → `Busy lease_changed`（D37）。没有空闲块的工作区是一条 `ports: null`、`reason: "ports_exhausted"` 的记录，其他工作区照常列出（`exec` 仍报错） | `--all` 与 `--session` 或 `--repo` 同给 → `both_selectors`；`--reassign --all` → `reassign_one`；`--reassign` 选中多个工作区 → `ambiguous_repo`（`detail.repos`）；都是 `InvalidInput` |
 | `git-strata session exec` | `[--session S] [--repo R] [--tauri] [--no-check] -- <cmd…>`：在恰好一个工作区里、带着它的端口环境变量（§3.2）用 `execvp` 替换本进程跑命令（D37） | 选中多个 → `ambiguous_repo`；cwd 在另一个会话工作区里 → `cwd_mismatch`；`--tauri` 认不出启动方式 → `tauri_launcher`（`detail.fix`）；都是 `InvalidInput`。`--` 之后没有命令 → `args` |
 
-未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`ls`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`session`、`status`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
+未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`ls`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`session`、`status`、`sync`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
 
 `-h` / `--help` 与 `--version` 走 clap 的文本，打在 stdout，退出码 0。它们不是子命令，不套信封（D19）。另一个例外：`ls --table` 成功时 stdout 只有表格（D36）；出错时照常是完整错误信封、退出码非 0。除此之外，stdout 上只有信封。
 
 ### 3.2 每个子命令的 `data`
+
+Main-sync adds `git-strata sync [--session S] [--repo R]... [--check] [--no-fetch] [--resolved PATH | --keep PATH]... [--target HEAD --generation N] [--accept-diverged] [--hook]`.
+`--target` and `--generation` go together. `--resolved` / `--keep` are forwarded without them; the daemon requires both when a saved conflict report exists (`resolution_binding_required`) and accepts neither only for O7's legacy conflict acknowledgement. The CLI forwards non-check requests to the daemon; it does not implement moves locally. `sync --check` returns `{session, upstream}` from local refs/store and exits zero even when upstream is not clean. An older daemon's `unknown_method` becomes `Unsupported reason=daemon_too_old`.
+
+Full status adds optional `status.upstream` and `status.workspaces.R.upstream`. Each tracked healthy repo reports following, behind (capped at 1000), capped, diverged/base_only (at most 20), main/base_head, at most 20 commits with author/subject/own (the `sessions:` publish trailer), pending deps including package summary, auto state, conflicts, conservative unpublished and a sync command. `clean` requires zero behind and no deps/auto/conflicts; unpublished alone does not make upstream unclean. `as_of` is the oldest known successful fetch among included repos, omitted when any freshness is unknown. Failed fetches retain the last success.
+
+`ls` and `status --brief` add `behind: {R: {behind: number|null, unchecked: bool}}`; brief also puts behind/unchecked on each workspace. These are cache-only, including after a base changes; a cold cache or local fallback reports null/unchecked without Git or a workspace scan. T2 warms the cache. Publish success carries `data.upstream` keyed by session, computed after post-publish rebase and preserved through the CLI's existing push-outcome classification. Rm success carries its pre-teardown upstream; Dirty carries `error.detail.upstream`. Upstream failures omit enrichment without changing outcome/code.
+
+#### Optional Stop hook
+
+After deploying a daemon that advertises `sync` as well as `status.upstream`, the human may add:
+
+```json
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"git-strata sync --check --hook"}]}]}}
+```
+
+This mode reads `{cwd, stop_hook_active}` on stdin and resolves the session from that cwd. It reads only cached upstream and store/Tracker state, flushing the Tracker without scanning. Cold behind is treated as zero. It blocks only a following tracked repo with behind > 0 or pending deps, together with unpublished work, auto reason `conflicts`, or stored conflicts. A clean workspace waiting for background movement is not blocked. The block is a plain `{decision:"block",reason:"…"}` line, with sync/resolve/check/publish instructions; deps-only reasons say main's dependencies changed. `stop_hook_active:true` is always silent, preventing a second block. A five-second process timer covers stdin, setup, socket connect/send/read and output; `call_within` gets the remaining budget. Every error, timeout, unknown method or non-workspace is silent and exits zero. This mode is an exception to the ordinary JSON envelope.
 
 类型按 types.md §2.2 序列化：字段名 snake_case，`Option` 为 `None` 不输出，时间是 RFC 3339 UTC，带数据的枚举用 `kind`。cli 不重新定义 `SessionStatus`、`Proposal`、`Checkpoint`、`Hit`、`PushOutcome`、`NewReport`、`RemoveReport`、`ResolutionReport`。
 

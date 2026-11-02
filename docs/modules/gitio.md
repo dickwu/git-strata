@@ -66,6 +66,12 @@ gitio 是 strata 里唯一起 git 子进程的模块。它从 tgrep 借了两段
 
 ## 3. 公开接口（Rust）
 
+Main-sync adds two read-only local-history helpers: `Git::count_between(base, tip, limit)`
+runs `rev-list --count --max-count=limit` across all reachable parents;
+`Git::history_between(base, tip, limit)` returns bounded `CommitSummary {oid, subject, author, sessions}`
+records. The sessions come from Git's parsed final `sessions:` trailer, split on commas;
+the daemon compares exact session ids for `own`. Neither helper fetches or changes refs/index/worktrees.
+
 ```rust
 // crates/strata-gitio/src/lib.rs —— 签名清单（不是实现）
 use std::collections::BTreeSet;

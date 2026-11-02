@@ -18,6 +18,15 @@ pub fn prepare_tool_call(tracker: &Tracker, paths: &[RepoPath]) {
     tracker.flush();
 }
 
+/// Main-sync NB9: flush on the request thread, then inspect without
+/// draining events or scanning the workspace. The hook uses this path.
+pub fn ready_for_upstream(tracker: &Tracker, flush: bool) -> bool {
+    if flush {
+        tracker.flush();
+    }
+    !tracker.needs_full() && tracker.inbox().is_empty()
+}
+
 /// Start watching (request thread). If the watch cannot start, the next
 /// reconcile must be a full scan. Returns whether it is watching.
 pub fn watch_or_full(tracker: &mut Tracker) -> bool {

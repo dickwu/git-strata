@@ -306,7 +306,7 @@ impl Tracker {
     pub fn last(&self) -> Option<&Overlay>;
     /// 当前的告警，status 用它。
     pub fn warnings(&self) -> &[OverlayWarning];
-    /// 下一次扫描是否必须全扫：新建或 reset 之后还没扫成过，或者 inbox 要求全扫（事件丢失、脏集合溢出、require_full）。
+    /// 下一次扫描是否必须全扫：新建、reset 或 watch 之后还没扫成过，或者 inbox 要求全扫（事件丢失、脏集合溢出、require_full）。
     /// 换了基线、X 或 ignorecase 变了由 compute 自己发现（§5.5 第 1、2 步）；扫描失败不改变它，快照并回 inbox（§5.5 第 7 步）。
     pub fn needs_full(&self) -> bool;
     /// 工作区被换成新一代的树之后由 daemon 调用（Addendum 3）：丢掉缓存、原始差异与监听，
@@ -319,6 +319,9 @@ impl Tracker {
 pub struct Inbox { /* 私有：Arc<Mutex<…>> */ }
 
 impl Inbox {
+    /// Main-sync NB9: read without consuming. True only with no path,
+    /// subtree or full-rescan event pending; does not imply a completed scan.
+    pub fn is_empty(&self) -> bool;
     /// 收一个监听事件（§5.4）。
     pub fn note(&self, event: &WatchEvent);
     /// 收已知改过的路径：daemon 在 ToolCall checkpoint 之前交来 PostToolUse 钩子带来的、Edit 与 Write 等写过的文件（§5.6 第 2 步）。

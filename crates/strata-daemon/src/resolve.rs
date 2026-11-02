@@ -39,11 +39,9 @@ pub fn move_choice(abandon: bool, accept: bool) -> Option<MoveResolution> {
 
 /// Whether a publish of `session` is running (its `publishing` flag).
 fn publishing(core: &Core, session: &SessionId) -> Result<bool> {
-    Ok(core
-        .store
-        .open_publishes()?
-        .iter()
-        .any(|r| r.phase == PublishPhase::Running && r.group.batches.iter().any(|b| &b.session == session)))
+    Ok(core.store.open_publishes()?.iter().any(|r| {
+        r.phase == PublishPhase::Running && r.group.batches.iter().any(|b| &b.session == session)
+    }))
 }
 
 /// Wait for `session`'s publishing flag to clear, holding no queue and no
@@ -422,13 +420,22 @@ struct SceneRecord {
 
 fn scene_records(root: &Path) -> Vec<SceneRecord> {
     let mut out = Vec::new();
-    let Ok(rd) = fs::read_dir(root.join(PUSH_SCENES)) else { return out };
+    let Ok(rd) = fs::read_dir(root.join(PUSH_SCENES)) else { return out;
+    };
     for e in rd.flatten() {
         let dir = e.path();
-        let Ok(text) = fs::read_to_string(dir.join(SCENE_FILE)) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-        let repo = v["repo"].as_str().and_then(|r| serde_json::from_value::<RepoName>(json!(r)).ok());
-        let commit = v["commit"].as_str().and_then(|c| serde_json::from_value::<CommitOid>(json!(c)).ok());
+        let Ok(text) = fs::read_to_string(dir.join(SCENE_FILE)) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let repo = v["repo"]
+            .as_str()
+            .and_then(|r| serde_json::from_value::<RepoName>(json!(r)).ok());
+        let commit = v["commit"]
+            .as_str()
+            .and_then(|c| serde_json::from_value::<CommitOid>(json!(c)).ok());
         let text_of = |k: &str| v[k].as_str().map(str::to_string);
         if let (Some(repo), Some(commit)) = (repo, commit) {
             out.push(SceneRecord {
@@ -552,7 +559,16 @@ pub fn chain_resolve(
     let out = core.locks.with_repo(repo, || {
         tips.0 = strata_deps::main_tip(cfg, git).ok().flatten();
         // 4. Fetch, read again, classify before any compare-and-swap.
-        git.fetch("origin", &branch)?;
+        let fetched = git.fetch("origin", &branch);
+        if branch == cfg.default_branch {
+            let _ = core.store.record_fetch(
+                repo,
+                fetched.is_ok(),
+                fetched.as_ref().err().map(|e| e.message.as_str()),
+                SystemTime::now(),
+            );
+        }
+        fetched?;
         let (chain, c) = rewound_or_diverged(strata_deps::publish_chain(git, &branch)?)?;
         let (o, a) = (chain.origin.clone(), chain.anchor.clone());
         let mut done = ChainResolved {
@@ -780,12 +796,23 @@ pub(crate) fn push_replaying(
     if let Err(e) = strata_publish::pending::reconstruct(pending) {
         tracing::warn!(repo = %repo, error = %e.message, "rebase_pending reconstruction failed");
     }
-    git.fetch("origin", branch)?;
+    let fetched = git.fetch("origin", branch);
+    if branch == rc.default_branch {
+        let _ = core.store.record_fetch(
+            repo,
+            fetched.is_ok(),
+            fetched.as_ref().err().map(|e| e.message.as_str()),
+            SystemTime::now(),
+        );
+    }
+    fetched?;
     let chain = strata_deps::publish_chain(git, branch)?;
     let mut plan = None;
     let mut supplies = Vec::new();
     let tip = match &chain {
-        Some(ch) if ch.state == ChainState::Leads && ch.top.is_some() => ch.top.clone().expect("leads has a top"),
+        Some(ch) if ch.state == ChainState::Leads && ch.top.is_some() => {
+            ch.top.clone().expect("leads has a top")
+        }
         Some(ch) if ch.state == ChainState::Diverged && ch.top.is_some() => {
             let c = ch.top.clone().expect("diverged has a top");
             let Some(base) = replay_base(git, ch, &c)? else {
@@ -822,9 +849,14 @@ pub(crate) fn push_replaying(
     let r = with_staging(core, git, repo, branch, &tip, dest.as_ref(), uncertain, |wt| {
         if let Some((c, o, a, old, new)) = &plan {
             if let Some(scene) = wt.parent() {
-                strata_publish::siblings::clone_supplies(&supplies, scene)
-                    .map_err(|m| strata_publish::siblings::missing_error(repo, None, std::slice::from_ref(&m)))?;
-            }
+                strata_publish::siblings::clone_supplies(&supplies, scene).map_err(|m| {
+                        strata_publish::siblings::missing_error(
+                            repo,
+                            None,
+                            std::slice::from_ref(&m),
+                        )
+                    })?;
+                }
             clone_deps_for_checks(core, git, rc, repo, wt)?;
             let ran = strata_publish::check(rc, wt)?;
             let copies = range_oldest_first(git, o, new)?;
@@ -856,7 +888,12 @@ fn session_heads(core: &Core, repo: &RepoName) -> Result<Vec<(SessionId, CommitO
         .sessions()?
         .into_iter()
         .filter(|r| r.lifecycle != strata_store::Lifecycle::Removed)
-        .filter_map(|r| r.manifest.repos.get(repo).map(|w| (r.manifest.id.clone(), w.head.clone())))
+        .filter_map(|r| {
+            r.manifest
+                .repos
+                .get(repo)
+                .map(|w| (r.manifest.id.clone(), w.head.clone()))
+        })
         .collect())
 }
 

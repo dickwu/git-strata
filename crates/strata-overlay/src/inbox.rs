@@ -111,6 +111,13 @@ pub struct InboxView {
 }
 
 impl Inbox {
+    /// No queued path/subtree events and no rescan request. This does not
+    /// consume events; callers must separately check that a scan completed.
+    pub fn is_empty(&self) -> bool {
+        let p = self.lock();
+        !p.full && p.paths.is_empty() && p.subtrees.is_empty()
+    }
+
     pub(crate) fn new(root: &Path, capacity: usize, fold: Fold) -> Inbox {
         Inbox {
             inner: Arc::new(Mutex::new(Pending {

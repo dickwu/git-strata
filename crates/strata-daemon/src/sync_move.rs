@@ -110,49 +110,6 @@ fn scan(
     strata_overlay::reconcile_full(&wr, old)
 }
 
-/// Minimal T4 hook until the follow lane is integrated. Caller holds repo
-/// lock. Reconcile this session even when the fetch did not move the tip.
-pub fn enroll_session(core: &Core, s: &SessionId, repo: &RepoName, tip: &CommitOid) -> Result<()> {
-    let rec = record(core, s)?;
-    if !core.repo_cfg(repo)?.follow_main() || g0(core, s, repo, &rec).is_err() {
-        return Ok(());
-    }
-    let ws = workspace(&rec, repo)?;
-    let git = core.git(repo)?;
-    if !git.is_ancestor(&ws.head, tip)? || ws.head == *tip {
-        return Ok(());
-    }
-    let tree = git.tree_of(tip)?;
-    if let Some(row) = core.store.rebase_pending_of(s, repo)? {
-        if !row.unpushed
-            && !matches!(row.reason.as_str(), "unpushed" | "publish_unfinished")
-            && let Some(head) = row.head.as_deref()
-        {
-            let head = CommitOid::try_from(head.to_owned())?;
-            if head != *tip && git.is_ancestor(&head, tip)? {
-                let backoff = matches!(
-                    row.reason.as_str(),
-                    "open_files" | "recent_writes" | "conflicts"
-                );
-                core.store.retarget_pending(
-                    s,
-                    repo,
-                    row.rev,
-                    tip,
-                    &tree,
-                    &ws.base,
-                    backoff,
-                    SystemTime::now(),
-                )?;
-            }
-        }
-    } else {
-        core.store
-            .enroll_main(s, repo, &ws.base, tip, &tree, None, SystemTime::now())?;
-    }
-    Ok(())
-}
-
 /// Non-check handler; the upstream lane dispatches `check` before this call.
 pub fn run(d: &Daemon<'_>, req: SyncRequest) -> Result<Value> {
     if req.check {
@@ -227,15 +184,9 @@ pub fn run(d: &Daemon<'_>, req: SyncRequest) -> Result<Value> {
             })?;
             fetched.insert(repo.clone(), result);
         }
-        if let Some(tip) = strata_deps::main_tip(cfg, core.git(repo)?)? {
-            crate::resolve::observe_tip(core, repo, &tip)?;
-            core.locks.with_repo(repo, || {
-                if strata_deps::main_tip(cfg, core.git(repo)?)?.as_ref() == Some(&tip) {
-                    enroll_session(core, &req.session, repo, &tip)?;
-                }
-                Ok(())
-            })?;
-        }
+        // T4 (observe + reconcile every eligible workspace) even when the
+        // fetch did not move the tip; it takes the repo lock itself.
+        crate::main_sync::reconcile(core, repo)?;
     }
     let mut done = BTreeMap::new();
     for repo in &repos {
@@ -256,8 +207,7 @@ pub fn run(d: &Daemon<'_>, req: SyncRequest) -> Result<Value> {
             }
         }
     }
-    // Integration: add upstream through only crate::upstream::for_session
-    // when that module exists. This lane does not construct its wire shape.
+    // The dispatcher adds `upstream` (best effort) after the tracker restart.
     Ok(
         json!({"session":req.session,"fetched":fetched,"repos":done,"next":"re-run your checks, checkpoint, then git-strata publish"}),
     )

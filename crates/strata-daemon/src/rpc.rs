@@ -49,9 +49,9 @@ macro_rules! methods {
 
 methods! {
     New = "new", ro = false;
-    Sync = "sync", ro = false;
     Add = "add", ro = false;
     Status = "status", ro = true;
+    Sync = "sync", ro = false;
     Checkpoint = "checkpoint", ro = false;
     Restore = "restore", ro = false;
     Grep = "grep", ro = true;
@@ -126,6 +126,39 @@ pub struct StatusParams {
     /// With `summary`: each session's workspaces from the store.
     #[serde(default)]
     pub workspaces: bool,
+}
+
+/// Main-sync: check branches before every mutation. Hook is a cache-only
+/// check, with a Tracker flush; it is never an authorization to move.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncParams {
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub repos: Vec<RepoName>,
+    #[serde(default)]
+    pub check: bool,
+    #[serde(default = "fetch_default")]
+    pub fetch: bool,
+    #[serde(default)]
+    pub resolved: Vec<RepoPath>,
+    #[serde(default)]
+    pub keep: Vec<RepoPath>,
+    #[serde(default)]
+    pub target: Option<CommitOid>,
+    #[serde(default)]
+    pub generation: Option<u64>,
+    #[serde(default)]
+    pub accept_diverged: bool,
+    #[serde(default)]
+    pub hook: bool,
+}
+
+fn fetch_default() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -330,9 +363,9 @@ pub struct DuParams {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Params {
     New(NewParams),
-    Sync(strata_types::SyncRequest),
     Add(AddParams),
     Status(StatusParams),
+    Sync(SyncParams),
     Checkpoint(CheckpointParams),
     Restore(RestoreParams),
     Grep(GrepParams),
@@ -369,9 +402,9 @@ impl Params {
         }
         match method {
             Method::New => typed(v, Params::New),
-            Method::Sync => typed(v, Params::Sync),
             Method::Add => typed(v, Params::Add),
             Method::Status => typed(v, Params::Status),
+            Method::Sync => typed(v, Params::Sync),
             Method::Checkpoint => typed(v, Params::Checkpoint),
             Method::Restore => typed(v, Params::Restore),
             Method::Grep => typed(v, Params::Grep),
@@ -474,7 +507,12 @@ pub fn parse_request(line: &[u8]) -> Result<Request, Reply> {
     };
     let id = match obj.remove("id") {
         Some(id @ (Value::String(_) | Value::Number(_))) => id,
-        Some(_) => return Err(failed(&Value::Null, "id must be a string or a number".into())),
+        Some(_) => {
+            return Err(failed(
+                &Value::Null,
+                "id must be a string or a number".into(),
+            ));
+        }
         None => return Err(failed(&Value::Null, "missing id".into())),
     };
     let method = match obj.remove("method") {

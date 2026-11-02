@@ -65,7 +65,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 未知方法 → RPC `UnknownMethod`。参数对不上 → RPC `Failed`。
 
-方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 25 个以外不加方法（`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
+方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 25 个以外不加方法（`sync` 是 main-sync 加的；`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
 
 | method | 作用 | 是否只读 |
 | --- | --- | --- |
@@ -73,6 +73,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `sync` | `sync_move::run`：Agent moves and report-bound conflict resolution; upstream dispatches read-only checks separately | 否 |
 | `add` | `session::add`：给已有会话加仓库的工作区（session.md D52）；排这个会话的队，之后对每个加上的仓库推进锚点（同 `new` 之后） | 否 |
 | `status` | 读，不排队，不等写锁 | 是 |
+| `sync` | `check:true` 在任何写操作前分支；否则交给 `sync_move::run` | 否 |
 | `checkpoint` | 记检查点 | 否 |
 | `restore` | 恢复到一个检查点 | 否 |
 | `grep` | `search::grep`；零命中是空列表 | 是 |
@@ -96,6 +97,10 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `ports_reassign` | `store::reassign_dev_ports`：把租约挪到另一块（D39） | 否 |
 
 `params` 的字段（serde，未知字段 → RPC `Failed`）[我的决定 D4]：
+
+Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos?: [RepoName], check?: bool, fetch?: bool, resolved?: [RepoPath], keep?: [RepoPath], target?: CommitOid|null, generation?: u64|null, accept_diverged?: bool, hook?: bool}`。`fetch` 缺省 true，其余布尔值缺省 false。`check` 回复 `{session, upstream}`，只读本地 refs/store，不取写锁、不 fetch、observe、enroll 或写检查点。`hook` 只在 check 时合法：使用缓存，判断 unpublished 前 flush live Tracker，不扫描工作区。非 check 路径先解析 session（选择器或 cwd），再调用 `sync_move::run`；无论成败都重启该 session 的 Tracker，成功回复再尽力附加 `upstream`。features 增加 `status.upstream` 与 `sync`。
+
+`Core.upstream` 是有界历史缓存（repo + base head + main tip，最多 512 条），T2 每轮结束预热。full status/check/publish/rm 补算缺失项；ls/brief/hook 不运行 Git，冷项 `unchecked:true`。会话 `upstream` 与各 `WorkspaceStatus.upstream` 同源；publish 在整个 group 的 rebase 完成后按 session id 返回，rm 在清掉 Tracker/工作区前捕获，Dirty 放在 detail。失败只省略 enrichment 并记录日志，不改变 publish/rm 的 code/outcome。
 
 | method | params | data |
 | --- | --- | --- |
@@ -1000,17 +1005,16 @@ raw blob extraction is not equivalent. Exports are not registered base generatio
 the mutating path. `SyncRequest` is exported by strata-types and carries
 session, optional repos, check, fetch (default true), resolved/keep paths,
 target, generation, and accept_diverged. The daemon advertises `sync`.
-The temporary dispatch in this branch rejects check=true before writes;
-the upstream part supplies read-only checks, CLI transport, and the single
-`upstream::for_session` enrichment call at integration.
+The RPC dispatcher routes `check` (and `hook`) to the read-only lane before
+any mutation, maps the wire `SyncParams` to `SyncRequest`, and adds the
+best-effort `upstream` object to a successful reply.
 
 The handler fetches following default branches under repo locks, records
 fetch success/failure, runs fetch-after anchor maintenance and observes
-main. Failed fetches continue against local refs. Its minimal
-`enroll_session` hook reconciles this session's source-behind row and
-retargets strict ancestors while preserving busy backoff. Integration
-replaces this hook with the follow part's complete T4 (including deps-only
-identity reconciliation). Split/non-following repos return `not_following`.
+main. Failed fetches continue against local refs. It then runs the
+complete T4 (`main_sync::reconcile`: observe + enroll/retarget, including
+deps-only identity reconciliation), even when the fetch did not move the
+tip. Split/non-following repos return `not_following`.
 
 Dependency keys come from a temporary target export. Apply-mode sync checks
 worker Installing state and otherwise ensures before taking a session queue

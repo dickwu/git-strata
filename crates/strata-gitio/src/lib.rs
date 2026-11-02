@@ -35,6 +35,7 @@ mod shadow;
 mod stage;
 mod staging;
 mod tree;
+mod upstream;
 mod worktree;
 
 pub use index::IndexInfo;
@@ -44,6 +45,7 @@ pub use remote::remote_ref;
 #[cfg(feature = "test-seams")]
 pub use seams::{GitCall, Pause, SyncEvent};
 pub use shadow::{MirrorDrift, Shadow};
+pub use upstream::CommitSummary;
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 
@@ -100,7 +102,9 @@ impl Git {
     /// Returns the removed paths.
     pub fn clear_stale_strata_locks(&self, before: std::time::SystemTime) -> Vec<PathBuf> {
         fn walk(dir: &Path, before: std::time::SystemTime, out: &mut Vec<PathBuf>) {
-            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
             for e in rd.flatten() {
                 let Ok(ft) = e.file_type() else { continue };
                 let p = e.path();

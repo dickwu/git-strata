@@ -828,6 +828,14 @@ git commit -m "feat(publish): one merge under the repo lock"
 
 ### Main-sync and O7
 
+Main-sync upstream reporting is daemon enrichment: after `publish_bound` returns and the whole
+publishing group's post-publish rebase has run, the reply adds `upstream` keyed by each original
+session id (including rerun/already-published batches). Enrichment failure cannot change the
+publish result. The CLI preserves the field while retaining its existing push outcome/error rules.
+Default-branch fetches in publish, unknown-publish reconciliation and sibling preparation record
+fetch success/failure in `repo_fetch`; publishing a split branch does not claim default-branch freshness.
+
+
 `MovePolicy::Agent` uses `walk_activity` rather than the Auto quiet-window /
 whole-workspace-holder gates and dispatches to `move_workspace_agent`.
 The sync daemon handler owns dependency preparation and report-bound

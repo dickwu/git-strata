@@ -96,7 +96,9 @@ fn method_table_has_the_documented_names() {
     assert_eq!(
         names,
         [
-            "new", "sync", "add", "status", "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_approve",
+            "new", "add", "status",
+            "sync",
+            "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_approve",
             "deps_list", "publish", "publish_plan", "push", "assign", "rm", "gc", "resolve_move", "chain_resolve", "config_relax",
             "daemon_status", "du", "ports_ensure", "ports_reassign"
         ]
@@ -171,13 +173,38 @@ fn every_method_parses_its_documented_params() {
         ("new", json!({ "ticket": null, "repos": ["tool"] })),
         ("sync", json!({ "session": sid, "check": false, "fetch": true })),
         ("add", json!({ "session": sid, "repos": ["front"] })),
-        ("status", json!({ "cwd": "/x", "session": null, "all": false })),
-        ("checkpoint", json!({ "session": sid, "repo": "tool", "reason": { "kind": "Manual", "message": "m" }, "paths": [] })),
-        ("restore", json!({ "session": sid, "repo": "tool", "checkpoint": 3, "paths": null })),
-        ("grep", json!({ "pattern": "x", "session": null, "all": true, "ignore_case": false })),
-        ("files", json!({ "session": sid, "repo": "tool", "glob": "*.ts" })),
-        ("diff", json!({ "a": sid, "b": "s-bcdefghi", "repo": "tool" })),
-        ("deps_propose", json!({ "session": sid, "repo": "tool", "switch": true })),
+        (
+            "status",
+            json!({ "cwd": "/x", "session": null, "all": false }),
+        ),
+        (
+            "sync",
+            json!({ "cwd": "/x", "session": null, "check": true }),
+        ),
+        (
+            "checkpoint",
+            json!({ "session": sid, "repo": "tool", "reason": { "kind": "Manual", "message": "m" }, "paths": [] }),
+        ),
+        (
+            "restore",
+            json!({ "session": sid, "repo": "tool", "checkpoint": 3, "paths": null }),
+        ),
+        (
+            "grep",
+            json!({ "pattern": "x", "session": null, "all": true, "ignore_case": false }),
+        ),
+        (
+            "files",
+            json!({ "session": sid, "repo": "tool", "glob": "*.ts" }),
+        ),
+        (
+            "diff",
+            json!({ "a": sid, "b": "s-bcdefghi", "repo": "tool" }),
+        ),
+        (
+            "deps_propose",
+            json!({ "session": sid, "repo": "tool", "switch": true }),
+        ),
         ("deps_approve", json!({ "proposal": 1, "sessions": null })),
         ("deps_list", json!({ "repo": null })),
         ("publish", json!({ "group": { "id": 0, "batches": [] } })),
@@ -370,9 +397,9 @@ fn no_duplex_trailing_byte() {
     // lines before them are answered.
     let input = format!("{}\nxyz", status_req(json!(1)));
     let mut out = Vec::new();
-    rpc::serve_connection(&mut Cursor::new(input.into_bytes()), &mut out, MAX_FRAME, &mut |q| {
-        Reply::ok(&q.id, json!({}))
-    })
+    rpc::serve_connection(
+        &mut Cursor::new(input.into_bytes()), &mut out, MAX_FRAME, &mut |q| Reply::ok(&q.id, json!({})),
+    )
     .unwrap();
     assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 1);
 }

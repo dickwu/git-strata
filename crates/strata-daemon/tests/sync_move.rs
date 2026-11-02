@@ -849,10 +849,7 @@ fn sync_enrollment_preserves_unpushed_pending_target() {
         let rn = repo_name("tool");
         let first = land(fx, &[("one", b"one")]);
         d.core.gits[&rn].fetch("origin", "main").unwrap();
-        d.core
-            .locks
-            .with_repo(&rn, || sync_move::enroll_session(d.core, s, &rn, &first))
-            .unwrap();
+        strata_daemon::main_sync::reconcile(d.core, &rn).unwrap();
         let row = d.core.store.rebase_pending_of(s, &rn).unwrap().unwrap();
         d.core
             .store
@@ -865,12 +862,9 @@ fn sync_enrollment_preserves_unpushed_pending_target() {
         let pending = d.core.store.rebase_pending_of(s, &rn).unwrap().unwrap();
         assert_eq!(pending.reason, "pending");
         assert!(pending.unpushed);
-        let last = land(fx, &[("two", b"two")]);
+        land(fx, &[("two", b"two")]);
         d.core.gits[&rn].fetch("origin", "main").unwrap();
-        d.core
-            .locks
-            .with_repo(&rn, || sync_move::enroll_session(d.core, s, &rn, &last))
-            .unwrap();
+        strata_daemon::main_sync::reconcile(d.core, &rn).unwrap();
         assert_eq!(
             d.core
                 .store

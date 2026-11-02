@@ -50,6 +50,8 @@ pub struct Tracker {
     pub(crate) st: State,
     pub(crate) inbox: Inbox,
     watcher: Option<Watcher>,
+    #[cfg(feature = "test-seams")]
+    flush_event: std::sync::Mutex<Option<strata_apfs::WatchEvent>>,
 }
 
 impl Tracker {
@@ -60,6 +62,8 @@ impl Tracker {
             st: State::default(),
             inbox: Inbox::new(root, capacity, Fold::of(root)),
             watcher: None,
+            #[cfg(feature = "test-seams")]
+            flush_event: std::sync::Mutex::new(None),
         }
     }
 
@@ -72,6 +76,8 @@ impl Tracker {
     /// `.git` is excluded at the source, X is filtered in `Inbox::note`.
     pub fn watch(&mut self) -> Result<()> {
         self.watcher = None;
+        self.st.scanned = false;
+        self.inbox.require_full();
         let inbox = self.inbox.clone();
         let opts = WatchOptions {
             exclude: vec![RepoPath::try_from(".git".to_owned()).expect("valid path")],
@@ -86,6 +92,22 @@ impl Tracker {
         if let Some(w) = &self.watcher {
             w.flush();
         }
+        #[cfg(feature = "test-seams")]
+        if let Some(event) = self
+            .flush_event
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            self.inbox.note(&event);
+        }
+    }
+
+    /// Simulate a watcher callback queued until the next flush. Test only;
+    /// permits proving the hook ordering without an OS event service.
+    #[cfg(feature = "test-seams")]
+    pub fn event_on_flush(&self, event: strata_apfs::WatchEvent) {
+        *self.flush_event.lock().unwrap_or_else(|p| p.into_inner()) = Some(event);
     }
 
     /// The base of the latest scan; `None` before the first one.

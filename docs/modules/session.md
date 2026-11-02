@@ -260,6 +260,8 @@ pub enum NewWarning {
 /// 一个会话的状态（design §6.3）。JSON 形状由 cli.md 引用。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionStatus {
+    /// Daemon-only main-sync enrichment; omitted by local read-only status.
+    pub upstream: Option<strata_types::Upstream>,
     /// = manifest.id（status-perf D3：顶层也给一份）。
     pub id: SessionId,
     /// = manifest.ticket；没有时是 null（顶层总是有这个键）。
@@ -288,6 +290,7 @@ pub enum WorkspaceHealth { Ok, Missing, Unknown }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceStatus {
+    pub upstream: Option<strata_types::RepoUpstream>,
     pub health: WorkspaceHealth,
     /// 管理目录的代数（§4.2）。
     pub generation: u64,
