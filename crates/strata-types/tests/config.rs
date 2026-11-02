@@ -255,6 +255,7 @@ publish = { branch = "master", push = false, confirm = false }
         check_siblings: Vec::new(),
         rm: Default::default(),
         rebase: Default::default(),
+        sync: Default::default(),
     };
     assert!(!built.needs_human_confirm());
     built.publish.confirm = true;
@@ -453,6 +454,7 @@ fn validate_commands_reports_repo_null_until_config_validate_fills_it() {
         check_siblings: Vec::new(),
         rm: Default::default(),
         rebase: Default::default(),
+        sync: Default::default(),
     };
     let err = cfg.validate_commands().unwrap_err();
     assert_eq!(err.code, Code::CheckMutates);
@@ -728,4 +730,40 @@ fn v15_bounds_quiet_secs_and_unknown_rm_keys_are_v11() {
     assert_eq!(err.code, Code::InvalidInput);
     let err = parse(&rm_repo("[repo.tool.rebase]\ndeps_changed = \"later\"\n")).unwrap_err();
     assert_eq!(err.code, Code::InvalidInput);
+}
+
+#[test]
+fn v16_rejects_follow_main_true_on_split_repo() {
+    let cfg = rm_repo("[repo.tool.sync]\nfollow_main = true\n")
+        .replace("publish = { branch = \"main\"", "publish = { branch = \"release\"");
+    let e = parse(&cfg).unwrap_err();
+    assert_eq!(rule(&e), "V16");
+    assert_eq!(e.detail.unwrap()["field"], "sync.follow_main");
+}
+
+#[test]
+fn v16_rejects_follow_main_false_with_apply() {
+    let e = parse(&rm_repo("[repo.tool.sync]\nfollow_main = false\n")).unwrap_err();
+    assert_eq!(rule(&e), "V16");
+    parse(&rm_repo("[repo.tool.sync]\nfollow_main = false\ndeps = \"confirm\"\n")).unwrap();
+}
+
+#[test]
+fn sync_defaults_bounds_and_serialization() {
+    use strata_types::SyncDeps;
+    let c = parse(&rm_repo("")).unwrap();
+    let r = c.repo(&repo("tool")).unwrap();
+    assert!(r.follow_main());
+    assert_eq!(r.sync.deps, SyncDeps::Apply);
+    assert_eq!(r.sync.fetch_secs, 900);
+    assert!(serde_json::to_value(r).unwrap().get("sync").is_none());
+    let split = parse(&rm_repo("").replace("publish = { branch = \"main\"", "publish = { branch = \"release\"")).unwrap();
+    assert!(!split.repo(&repo("tool")).unwrap().follow_main());
+    for n in [0, 60, 900, 86400] {
+        parse(&rm_repo(&format!("[repo.tool.sync]\nfetch_secs = {n}\n"))).unwrap();
+    }
+    for n in [1, 59, 86401] {
+        assert_eq!(rule(&parse(&rm_repo(&format!("[repo.tool.sync]\nfetch_secs = {n}\n"))).unwrap_err()), "V16");
+    }
+    assert_eq!(rule(&parse(&rm_repo("[repo.tool.sync]\nunknown = true\n")).unwrap_err()), "V11");
 }

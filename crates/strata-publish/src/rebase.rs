@@ -28,6 +28,7 @@ use crate::{Ctx, Result};
 pub enum MovePolicy {
     Explicit,
     Auto,
+    Agent,
 }
 
 /// What the post-publish rebase did to one session (§3).
@@ -322,6 +323,8 @@ pub(crate) fn rebase_one_with(
     policy: MovePolicy,
     at: Attempt<'_>,
 ) -> Result<RebaseReport> {
+    // main-sync sync part TODO: implement Agent gates; until then retain Auto safety.
+    let policy = if policy == MovePolicy::Agent { MovePolicy::Auto } else { policy };
     if new_base.repo != *ctx.repo {
         return Err(invalid(
             "repo_mismatch",
@@ -453,6 +456,7 @@ fn promote_draft(
             origin: ProposalOrigin::Session { session: s.clone() },
             from: d.from.clone(),
             from_inputs: d.from_inputs.clone(),
+            from_head: d.from_head.clone(),
             to: n.clone(),
             to_inputs: n_inputs.to_string(),
             tree: Some(new_base.tree.clone()),
@@ -479,6 +483,7 @@ fn propose_main(
             origin: ProposalOrigin::Main,
             from: old.deps.clone(),
             from_inputs,
+            from_head: None,
             to: n.clone(),
             to_inputs: n_inputs.to_string(),
             tree: Some(new_base.tree.clone()),

@@ -280,7 +280,7 @@ impl<'a> Run<'a> {
     fn delete_sessions(&mut self, r: &[String]) -> Result<()> {
         // FK-safe order: v3's move_activity before move_intents, and
         // rebase_pending / rm_attempts before workspaces and sessions.
-        const TABLES: [(&str, &str); 10] = [
+        const TABLES: [(&str, &str); 11] = [
             ("overlay_entries", "session"),
             ("checkpoints", "session"),
             ("seeds", "session"),
@@ -289,6 +289,7 @@ impl<'a> Run<'a> {
             ("rebase_pending", "session"),
             ("rm_attempts", "session"),
             ("dev_ports", "session"),
+            ("sync_report", "session"),
             ("workspaces", "session"),
             ("sessions", "id"),
         ];
@@ -374,6 +375,7 @@ impl<'a> Run<'a> {
                     picked = cand;
                 }
                 for x in &picked {
+                    c.execute("DELETE FROM deps_auto WHERE proposal = ?1", [x]).map_err(sqle(op))?;
                     c.execute("DELETE FROM deps_proposals WHERE id = ?1", [x]).map_err(sqle(op))?;
                 }
                 Ok(Tx::Commit(picked.len() as u64))
@@ -405,7 +407,7 @@ impl<'a> Run<'a> {
         let rows: Vec<(String, i64)> = st.read(|c| {
             let mut q = c
                 .prepare(
-                    "SELECT id, size FROM blobs b WHERE NOT EXISTS (SELECT 1 FROM overlay_entries o WHERE o.blob = b.id) ORDER BY id",
+                    "SELECT id, size FROM blobs b WHERE NOT EXISTS (SELECT 1 FROM overlay_entries o WHERE o.blob = b.id) AND NOT EXISTS (SELECT 1 FROM sync_report r WHERE r.ours_blob = b.id) ORDER BY id",
                 )
                 .map_err(sql_read)?;
             q.query_map((), |r| Ok((r.get(0)?, r.get(1)?))).map_err(sql_read)?.collect::<crate::sql::SqlResult<Vec<_>>>().map_err(sql_read)
@@ -425,7 +427,7 @@ impl<'a> Run<'a> {
                 let mut out = Vec::new();
                 for (id, size, rel) in chunk {
                     let k = c
-                        .execute("DELETE FROM blobs WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM overlay_entries WHERE blob = ?1)", [id])
+                        .execute("DELETE FROM blobs WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM overlay_entries WHERE blob = ?1) AND NOT EXISTS (SELECT 1 FROM sync_report WHERE ours_blob = ?1)", [id])
                         .map_err(sqle(op))?;
                     if k == 1 {
                         out.push((*size, rel.clone()));
@@ -1016,9 +1018,12 @@ impl Store {
         let cutoff = run.cutoff;
         let (r, d, attempts, runs) = self.read(|c| retention(c, cutoff))?;
         let rows: Vec<(String, i64)> = self.read(|c| {
+            let reports = if crate::rm_state::user_version(c)? >= crate::rm_state::V4 {
+                "AND NOT EXISTS (SELECT 1 FROM sync_report r WHERE r.ours_blob = b.id)"
+            } else { "" };
             let q = format!(
                 "SELECT b.id, b.size FROM blobs b WHERE NOT EXISTS (SELECT 1 FROM overlay_entries o WHERE o.blob = b.id \
-                 AND o.session NOT IN (SELECT s.id FROM sessions s WHERE ?1 IS NULL AND {SESSION_GONE})) ORDER BY b.id"
+                 AND o.session NOT IN (SELECT s.id FROM sessions s WHERE ?1 IS NULL AND {SESSION_GONE})) {reports} ORDER BY b.id"
             );
             let mut q = c.prepare(&q).map_err(sql_read)?;
             q.query_map(params![Option::<i64>::None, cutoff], |r| Ok((r.get(0)?, r.get(1)?)))

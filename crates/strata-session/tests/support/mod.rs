@@ -304,6 +304,7 @@ exit $rc
             check_siblings: Vec::new(),
             rm: Default::default(),
             rebase: Default::default(),
+            sync: Default::default(),
         }
     }
 }

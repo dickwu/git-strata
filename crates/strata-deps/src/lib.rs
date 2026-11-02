@@ -32,7 +32,7 @@ pub use inputs::{InputRecord, hash_records, input_records, inputs_hash, is_input
 pub use snapshot::{clean_snapshots, remove_snapshot, snapshot_dir, snapshot_inputs, snapshot_tree};
 pub use open_files::{Hold, OpenFile, open_files, open_files_many};
 pub use proposal::{
-    ChainState, Proposal, ProposalOrigin, ProposalState, ProposeArgs, PublishChain, get_proposal, main_tip, observe_main,
+    ChainState, Proposal, ProposalOrigin, ProposalState, ProposeArgs, PublishChain, get_proposal, main_tip, observe_main, observe_main_locked,
     open_proposals, propose, publish_chain,
 };
 pub use rollout::{RolloutPlan, RolloutStep, SkipReason, Target, ensure_target, plan_rollout, plan_switch, record_rollout};

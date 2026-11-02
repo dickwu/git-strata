@@ -596,6 +596,7 @@ impl Store {
                     // deferred rebase go with the session, in this transaction.
                     c.execute("DELETE FROM rm_attempts WHERE session = ?1", [id]).map_err(w(OP))?;
                     c.execute("DELETE FROM rebase_pending WHERE session = ?1", [id]).map_err(w(OP))?;
+                    c.execute("DELETE FROM sync_report WHERE session = ?1", [id]).map_err(w(OP))?;
                 }
                 return Ok(Tx::Commit(true));
             }
@@ -675,6 +676,23 @@ impl Store {
         at: SystemTime,
         baseline: Option<&crate::MoveBaseline>,
     ) -> Result<u64> {
+        self.begin_move_with_policy(id, repo, to, head, staging, at, baseline, crate::MoveActivityPolicy::Auto)
+    }
+
+    /// Begin a move with its activity policy recorded in the same transaction.
+    /// `baseline` must be supplied by callers requiring activity auditing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_move_with_policy(
+        &self,
+        id: &SessionId,
+        repo: &RepoName,
+        to: &BaseGen,
+        head: &CommitOid,
+        staging: &Path,
+        at: SystemTime,
+        baseline: Option<&crate::MoveBaseline>,
+        policy: crate::MoveActivityPolicy,
+    ) -> Result<u64> {
         const OP: &str = "begin_move";
         self.writable()?;
         let at = ns(at, "at")?;
@@ -732,7 +750,7 @@ impl Store {
             )
             .map_err(w(OP))?;
             if let Some(b) = baseline {
-                crate::move_activity::insert(c, id, repo, n, b, OP)?;
+                crate::move_activity::insert(c, id, repo, n, b, policy, OP)?;
             }
             Ok(Tx::Commit(n as u64))
         })
@@ -850,6 +868,7 @@ impl Store {
             )
             .map_err(w(OP))?;
             crate::rm_state::consume_on_move(c, OP, id, repo, (&it.to_tree, &it.to_deps), &it.head, consume)?;
+            crate::main_sync::delete_report(c, id, repo, OP)?;
             Ok(Tx::Commit(()))
         })
     }
@@ -910,6 +929,7 @@ impl Store {
                 return Err(no_failed());
             }
             if accept {
+                crate::main_sync::delete_report(c, id, repo, OP)?;
                 let g = base_gen_id(c, repo, &it.to_tree, &it.to_deps)
                     .map_err(w(OP))?
                     .ok_or_else(|| base_gen_missing(repo, &it.to_tree, &it.to_deps))?;

@@ -8,8 +8,10 @@ mod config;
 mod error;
 mod ids;
 mod model;
+pub mod upstream;
+pub use upstream::{Upstream, RepoUpstream, UpstreamMain, UpstreamCommit, UpstreamDeps, UpstreamAuto};
 
-pub use config::{Config, DepsChanged, DevPorts, Paths, RebaseConfig, RepoConfig, RmConfig, StatusConfig, regenerable_problem};
+pub use config::{Config, DepsChanged, DevPorts, Paths, RebaseConfig, RepoConfig, RmConfig, StatusConfig, SyncConfig, SyncDeps, regenerable_problem};
 pub use error::{Code, StrataError};
 pub use ids::{
     AgentName, BlobId, CheckpointId, CommitOid, DepsSetId, ProposalId, RepoId, RepoName, RepoPath, SessionId,

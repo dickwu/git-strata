@@ -343,6 +343,11 @@ fn check_realpath_root(root: &Path) -> Result<()> {
 }
 
 impl Core {
+    /// The current pinned dependency policy, including a later `config relax`.
+    pub fn effective_sync_deps(&self, repo: &RepoName) -> strata_types::SyncDeps {
+        self.pins.effective_sync_deps(repo)
+    }
+
     /// The effective (pinned) flags of `repo`.
     pub fn pinned(&self, repo: &RepoName) -> Result<PinnedFlags> {
         self.pins

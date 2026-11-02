@@ -726,6 +726,7 @@ fn args(origin: ProposalOrigin, from: char, to: char, t: Option<&Tip>) -> Propos
         origin,
         from: set(from),
         from_inputs: hex(from),
+        from_head: None,
         to: set(to),
         to_inputs: hex(to),
         tree: t.map(|t| t.tree.clone()),
@@ -1027,6 +1028,7 @@ fn open_proposals_lists_open_and_live_only() {
         origin: None,
         from: set('a'),
         from_inputs: hex('a'),
+        from_head: None,
         to: set('b'),
         to_inputs: hex('b'),
         tree: Some(t1.tree.clone()),
@@ -1051,4 +1053,44 @@ fn open_proposals_lists_open_and_live_only() {
             .code,
         Code::NoSuchProposal
     );
+}
+
+#[test]
+fn target_only_copy_keeps_from_head() {
+    let fx = setup();
+    fx.git.fetch("origin", "main").unwrap();
+    let t1 = tip(&fx);
+    assert!(observe(&fx, &t1).unwrap().is_none());
+    let t2 = advance(&fx, &[("bun.lock", b"lock v2\n")], "deps change");
+    let p = observe(&fx, &t2).unwrap().unwrap();
+    assert_eq!(p.from_head, Some(t1.head.clone()));
+    let t3 = advance(&fx, &[("README", b"source-only commit\n")], "source");
+    let copied = observe(&fx, &t3).unwrap().unwrap();
+    assert_ne!(copied.id, p.id);
+    assert_eq!(copied.from_head, p.from_head);
+    assert_eq!((copied.from, copied.from_inputs, copied.to), (p.from, p.from_inputs, p.to));
+    let t4 = advance(&fx, &[("bun.lock", b"lock v3\n")], "next deps");
+    let fresh = observe(&fx, &t4).unwrap().unwrap();
+    assert_eq!(fresh.from_head, Some(t3.head));
+}
+
+#[test]
+fn observe_main_locked_never_takes_repo_lock() {
+    struct AlreadyHeld;
+    impl strata_deps::RepoWriteLock for AlreadyHeld {
+        fn with_write(&self, _: &strata_types::RepoName, _: &mut dyn FnMut() -> strata_deps::Result<()>) -> strata_deps::Result<strata_deps::Result<()>> {
+            panic!("caller already holds the non-reentrant lock");
+        }
+    }
+    let fx = setup();
+    fx.git.fetch("origin", "main").unwrap();
+    let t1 = tip(&fx);
+    observe(&fx, &t1).unwrap();
+    let t2 = advance(&fx, &[("bun.lock", b"new lock\n")], "deps");
+    let (inputs, id) = key(&fx, &t2);
+    let mut ctx = fx.ctx();
+    ctx.locks = &AlreadyHeld;
+    let p = strata_deps::observe_main_locked(&ctx, &t2.tree, &t2.head, &inputs, &id).unwrap().unwrap();
+    assert_eq!(p.from_head, Some(t1.head));
+    assert_eq!(main_row(&fx), row_for(&fx, &t2));
 }

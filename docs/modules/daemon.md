@@ -330,6 +330,16 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 
 panic：写前 → 该请求 RPC `Failed`，进程继续。写后 → 对该请求答 `Unknown`，现场留下，status 报出。两种都释放锁。
 
+Main-sync pins add `PinnedFlags.sync_deps: Option<SyncDeps>` with serde default
+and no skip-on-serialize. For an existing entry, None becomes the configured
+value and is written back at startup. No entry/file pins Confirm; malformed
+files fail startup. Apply → Confirm tightens; Confirm → Apply needs `config_relax`
+and appears as `ConfigRelaxPending` until accepted. `needs_confirm` continues to
+look only at publish's `confirm` flag. `Core::effective_sync_deps(repo)` reads the
+current pin, including a relaxation accepted after startup, and defaults to
+Confirm for an unknown repo. The startup config also receives the effective
+value; workers should use the accessor for subsequent passes.
+
 ## 5. 流程与算法
 
 ### 5.1 启动

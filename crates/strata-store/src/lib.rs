@@ -16,6 +16,9 @@ use strata_types::{
     ReleaseGroup, RepoName, RepoPath, SessionId, SessionManifest, StrataError, TreeOid,
 };
 
+mod main_sync;
+pub use main_sync::{DepsAuto, DepsAutoState, RepoFetch, SyncReportRow};
+
 mod blob;
 mod checkpoints;
 mod codec;
@@ -40,8 +43,8 @@ mod txn;
 
 #[cfg(feature = "test-seams")]
 pub use seams::{Seam, SyncCounts};
-pub use move_activity::{MoveActivity, MoveBaseline};
-pub use rm_state::{RebasePending, ReplayPlan, RmAttempt, RmOutcome};
+pub use move_activity::{MoveActivity, MoveActivityPolicy, MoveBaseline};
+pub use rm_state::{PendingSource, RebasePending, ReplayPlan, RmAttempt, RmOutcome};
 pub use devports::{DEV_PORT_BLOCK, DevPortLease, DevPortsPolicy, Probe, bind_probe};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
@@ -283,6 +286,7 @@ pub struct NewProposal {
     pub origin: Option<SessionId>,
     pub from: DepsSetId,
     pub from_inputs: String,
+    pub from_head: Option<CommitOid>,
     pub to: DepsSetId,
     pub to_inputs: String,
     pub tree: Option<TreeOid>,
@@ -296,6 +300,7 @@ pub struct ProposalRecord {
     pub origin: Option<SessionId>,
     pub from: DepsSetId,
     pub from_inputs: String,
+    pub from_head: Option<CommitOid>,
     pub to: DepsSetId,
     pub to_inputs: String,
     pub tree: Option<TreeOid>,

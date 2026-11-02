@@ -176,6 +176,47 @@ pub struct RepoConfig {
     /// `[repo.X.rebase]` (rm-followups §1.3). Absent → defaults.
     #[serde(default, skip_serializing_if = "RebaseConfig::is_default")]
     pub rebase: RebaseConfig,
+    /// Follow the default branch and prepare its dependency changes.
+    #[serde(default, skip_serializing_if = "SyncConfig::is_default")]
+    pub sync: SyncConfig,
+}
+
+/// Whether main's dependency proposals may be applied without confirmation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncDeps {
+    #[default]
+    Apply,
+    Confirm,
+}
+
+impl SyncDeps {
+    fn is_default(&self) -> bool { *self == Self::Apply }
+}
+
+/// `[repo.X.sync]`. Resolve `follow_main` through [`RepoConfig::follow_main`]
+/// because its default depends on the repo's publish branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_main: Option<bool>,
+    #[serde(default, skip_serializing_if = "SyncDeps::is_default")]
+    pub deps: SyncDeps,
+    #[serde(default = "SyncConfig::default_fetch_secs", skip_serializing_if = "SyncConfig::is_default_fetch_secs")]
+    pub fetch_secs: u64,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self { follow_main: None, deps: SyncDeps::Apply, fetch_secs: Self::default_fetch_secs() }
+    }
+}
+
+impl SyncConfig {
+    pub fn default_fetch_secs() -> u64 { 900 }
+    fn is_default_fetch_secs(value: &u64) -> bool { *value == Self::default_fetch_secs() }
+    pub fn is_default(&self) -> bool { *self == Self::default() }
 }
 
 /// `[repo.X.rm]`.
@@ -277,6 +318,9 @@ fn must_path(text: &str) -> RepoPath {
 }
 
 impl RepoConfig {
+    pub fn follow_main(&self) -> bool {
+        self.sync.follow_main.unwrap_or(self.publish.branch == self.default_branch)
+    }
     pub fn default_deps_dirs() -> Vec<RepoPath> {
         vec![must_path("node_modules"), must_path("vendor")]
     }
@@ -679,6 +723,16 @@ fn validate_rm_rebase(name: &RepoName, cfg: &RepoConfig) -> Result<(), StrataErr
             "V15",
             "rebase.quiet_secs is more than 86400 (one day)",
         ));
+    }
+    let problem = if cfg.sync.fetch_secs != 0 && !(60..=86_400).contains(&cfg.sync.fetch_secs) {
+        Some(("sync.fetch_secs", "sync.fetch_secs must be 0 or 60..=86400"))
+    } else if cfg.sync.follow_main == Some(true) && cfg.publish.branch != cfg.default_branch {
+        Some(("sync.follow_main", "follow_main = true requires publish.branch = default_branch"))
+    } else if !cfg.follow_main() && cfg.sync.deps == SyncDeps::Apply && cfg.publish.branch == cfg.default_branch {
+        Some(("sync.deps", "sync.deps = apply requires follow_main = true on a non-split repo"))
+    } else { None };
+    if let Some((field, message)) = problem {
+        return Err(violation(Code::InvalidInput, Some(repo), field, None, "V16", message));
     }
     Ok(())
 }
