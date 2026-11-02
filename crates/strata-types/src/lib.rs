@@ -8,8 +8,10 @@ mod config;
 mod error;
 mod ids;
 mod model;
+mod sync;
 pub mod upstream;
-pub use upstream::{Upstream, RepoUpstream, UpstreamMain, UpstreamCommit, UpstreamDeps, UpstreamAuto};
+pub use sync::SyncRequest;
+pub use upstream::{RepoUpstream, Upstream, UpstreamAuto, UpstreamCommit, UpstreamDeps, UpstreamMain};
 
 pub use config::{Config, DepsChanged, DevPorts, Paths, RebaseConfig, RepoConfig, RmConfig, StatusConfig, SyncConfig, SyncDeps, regenerable_problem};
 pub use error::{Code, StrataError};

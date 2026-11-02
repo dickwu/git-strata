@@ -8,7 +8,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use strata_gitio::{Merge3, merge3};
+use strata_gitio::{Merge3, is_binary, merge3, merge3_favour_ours};
 use strata_store::Store;
 use strata_types::{BaseManifest, BlobId, Code, EntryKind, RepoPath, StrataError};
 
@@ -32,6 +32,67 @@ pub struct RebaseOptions {
     /// true: regular files changed on both sides are tried with merge3.
     /// false: every both-sides change conflicts; rebase writes no blob.
     pub merge: bool,
+    /// A sync report authorizes only these paths and overlapping regions.
+    /// This is per call, never a persistent `.lww` rule.
+    pub resolutions: BTreeMap<RepoPath, Resolution>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictRegion {
+    pub theirs_start: usize,
+    pub theirs_len: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolution {
+    Text(Vec<ConflictRegion>),
+    WholeFile,
+}
+
+/// Uncapped lengths are authoritative even when display text is truncated.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictHunk {
+    pub base_start: usize,
+    pub ours_start: usize,
+    pub theirs_start: usize,
+    pub base_len: usize,
+    pub ours_len: usize,
+    pub theirs_len: usize,
+    pub base: String,
+    pub ours: String,
+    pub theirs: String,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebaseConflict {
+    pub path: RepoPath,
+    pub kind: String,
+    pub base: Option<BlobId>,
+    pub ours: Option<BlobId>,
+    pub theirs: Option<BlobId>,
+    pub hunks: Vec<ConflictHunk>,
+}
+
+fn line_count(bytes: &[u8]) -> usize {
+    bytes.split_inclusive(|b| *b == b'\n').count()
+}
+
+fn hunk_detail(h: &strata_gitio::Hunk) -> ConflictHunk {
+    const CAP: usize = 4096;
+    let text = |v: &[u8]| String::from_utf8_lossy(&v[..v.len().min(CAP)]).into_owned();
+    ConflictHunk {
+        base_start: h.base_start,
+        ours_start: h.ours_start,
+        theirs_start: h.theirs_start,
+        base_len: line_count(&h.base),
+        ours_len: line_count(&h.ours),
+        theirs_len: line_count(&h.theirs),
+        base: text(&h.base),
+        ours: text(&h.ours),
+        theirs: text(&h.theirs),
+        truncated: h.base.len() > CAP || h.ours.len() > CAP || h.theirs.len() > CAP,
+    }
 }
 
 impl RebaseOptions {
@@ -43,6 +104,7 @@ impl RebaseOptions {
             ignorecase,
             volume_case_sensitive: strata_apfs::volume_caps(&new.dir)?.case_sensitive,
             merge: true,
+            resolutions: BTreeMap::new(),
         })
     }
 
@@ -53,6 +115,7 @@ impl RebaseOptions {
             ignorecase,
             volume_case_sensitive,
             merge: false,
+            resolutions: BTreeMap::new(),
         }
     }
 }
@@ -195,6 +258,92 @@ fn side(m: &BaseManifest, p: &RepoPath) -> Side {
     m.entries.get(p).map(|e| (e.blob.clone(), e.mode))
 }
 
+/// The workspace state represented by an overlay, including unchanged
+/// files and rename sources. Blob ids are store BLAKE3 ids, not Git oids.
+pub fn overlay_side(overlay: &Overlay, old: &Base, p: &RepoPath) -> Option<(BlobId, u32)> {
+    if let Some(e) = overlay.get(p) {
+        return entry_blob(e).map(|b| (b.clone(), e.mode));
+    }
+    if overlay.entries.iter().any(|e| entry_from(e) == Some(p)) {
+        return None;
+    }
+    side(&old.manifest, p)
+}
+
+/// Describe G3's conflicting paths without storing or modifying files.
+pub fn rebase_conflicts(
+    overlay: &Overlay,
+    old: &Base,
+    new: &Base,
+    blobs: &dyn Blobs,
+    paths: &[RepoPath],
+) -> Result<Vec<RebaseConflict>> {
+    paths
+        .iter()
+        .map(|p| {
+            let (b, o, t) = (
+                side(&old.manifest, p),
+                overlay_side(overlay, old, p),
+                side(&new.manifest, p),
+            );
+            let mut kind = "type";
+            let mut hunks = Vec::new();
+            if o.is_none() || t.is_none() {
+                kind = "delete_modify";
+            } else if let Some((ours_blob, _)) = &o
+                && regular(&o)
+                && regular(&t)
+                && (b.is_none() || regular(&b))
+            {
+                let oversized = [old, new].iter().any(|base| {
+                    base.manifest
+                        .entries
+                        .get(p)
+                        .is_some_and(|e| e.size > MERGE_MAX_BYTES)
+                });
+                if oversized {
+                    kind = "too_large";
+                } else {
+                    let base = if b.is_some() {
+                        read_base(old, p)?
+                    } else {
+                        Vec::new()
+                    };
+                    let theirs = read_base(new, p)?;
+                    match blobs.read(ours_blob, MERGE_MAX_BYTES) {
+                        Err(e) if e.code == Code::TooLarge => kind = "too_large",
+                        Err(e) => return Err(e),
+                        Ok(ours) => {
+                            kind = if is_binary(&base) || is_binary(&ours) || is_binary(&theirs) {
+                                "binary"
+                            } else {
+                                "text"
+                            };
+                            if kind == "text"
+                                && let Merge3::Conflict(h) = merge3(&base, &ours, &theirs)
+                            {
+                                hunks = h.iter().map(hunk_detail).collect();
+                            }
+                            // A prefix/type collision can involve otherwise clean text.
+                            if kind == "text" && hunks.is_empty() {
+                                kind = "type";
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(RebaseConflict {
+                path: p.clone(),
+                kind: kind.into(),
+                base: b.map(|s| s.0),
+                ours: o.map(|s| s.0),
+                theirs: t.map(|s| s.0),
+                hunks,
+            })
+        })
+        .collect()
+}
+
 fn regular(s: &Side) -> bool {
     matches!(s, Some((_, MODE_FILE | MODE_EXEC)))
 }
@@ -231,6 +380,7 @@ enum Merged {
 }
 
 /// §5.8 step 3.4: content of a regular file changed on both sides.
+#[allow(clippy::too_many_arguments)]
 fn merge_content(
     p: &RepoPath,
     b: &Side,
@@ -239,6 +389,7 @@ fn merge_content(
     old: &Base,
     new: &Base,
     store: &dyn Blobs,
+    resolution: Option<&Resolution>,
 ) -> Result<Merged> {
     if let Some((bb, _)) = b {
         if *bb == o.0 {
@@ -262,7 +413,29 @@ fn merge_content(
         None => Vec::new(),
     };
     let theirs = read_base(new, p)?;
-    match merge3(&base, &ours, &theirs) {
+    let mut result = merge3(&base, &ours, &theirs);
+    if let (Merge3::Conflict(hunks), Some(Resolution::Text(reported))) = (&result, resolution) {
+        let fits = !is_binary(&base)
+            && !is_binary(&ours)
+            && !is_binary(&theirs)
+            && hunks.iter().all(|h| {
+                reported.iter().any(|r| {
+                    h.theirs_start >= r.theirs_start
+                        && h.theirs_start.saturating_add(line_count(&h.theirs))
+                            <= r.theirs_start.saturating_add(r.theirs_len)
+                })
+            });
+        if !fits {
+            return Err(StrataError::new(
+                Code::InvalidInput,
+                "resolution overlaps upstream outside the reported hunks",
+            )
+            .with_detail(json!({"reason":"resolved_overlap_changed", "path":p,
+                    "hunks":hunks.iter().map(hunk_detail).collect::<Vec<_>>()})));
+        }
+        result = merge3_favour_ours(&base, &ours, &theirs);
+    }
+    match result {
         Merge3::Clean(bytes) => {
             let id = hash_bytes(&bytes);
             if id == o.0 || id == t.0 {
@@ -358,6 +531,12 @@ pub fn rebase_with(
         }
         ours.insert(e.path.clone(), blob.map(|b| (b, e.mode)));
     }
+    // A resolution can restore the original bytes or absence, leaving no
+    // overlay entry. It still needs to participate in the projection.
+    for p in opts.resolutions.keys() {
+        ours.entry(p.clone())
+            .or_insert_with(|| side(&old.manifest, p));
+    }
 
     // 3. Per-path three-way judgement.
     let mut fin: BTreeMap<RepoPath, (Side, From)> = BTreeMap::new();
@@ -369,14 +548,14 @@ pub fn rebase_with(
         let t = side(&new.manifest, p);
         let r = if *o == t {
             (t, From::Base)
-        } else if t == b {
+        } else if t == b || matches!(opts.resolutions.get(p), Some(Resolution::WholeFile)) {
             (o.clone(), From::Session)
-        } else if lww_matches(&opts.lww, p) {
+        } else if !opts.resolutions.contains_key(p) && lww_matches(&opts.lww, p) {
             lww.insert(p.clone());
             (o.clone(), From::Session)
         } else if opts.merge && regular(o) && regular(&t) && (b.is_none() || regular(&b)) {
             let (oo, tt) = (o.clone().unwrap(), t.clone().unwrap());
-            match merge_content(p, &b, &oo, &tt, old, new, store)? {
+            match merge_content(p, &b, &oo, &tt, old, new, store, opts.resolutions.get(p))? {
                 Merged::Take(blob) => {
                     merged.insert(p.clone());
                     let side = Some((blob, merge_mode(&b, oo.1, tt.1)));
@@ -384,11 +563,23 @@ pub fn rebase_with(
                     (side, from)
                 }
                 Merged::Conflict => {
+                    if opts.resolutions.contains_key(p) {
+                        return Err(invalid(
+                            "resolved_overlap_changed",
+                            "the resolved text path is no longer text-mergeable",
+                        ));
+                    }
                     conflicts.insert(p.clone());
                     (o.clone(), From::Session)
                 }
             }
         } else {
+            if opts.resolutions.contains_key(p) {
+                return Err(invalid(
+                    "resolved_overlap_changed",
+                    "the resolved text path changed type or was deleted",
+                ));
+            }
             conflicts.insert(p.clone());
             (o.clone(), From::Session)
         };
@@ -417,8 +608,12 @@ pub fn rebase_with(
         for a in ancestors(p) {
             if live.get(a) == Some(&From::Base) {
                 kill.insert(a.to_owned());
-                conflicts.insert(rp(a));
-                conflicts.insert(rp(p));
+                if !matches!(opts.resolutions.get(&rp(a)), Some(Resolution::WholeFile))
+                    || !matches!(opts.resolutions.get(&rp(p)), Some(Resolution::WholeFile))
+                {
+                    conflicts.insert(rp(a));
+                    conflicts.insert(rp(p));
+                }
             }
         }
         let under = format!("{p}/");
@@ -428,8 +623,12 @@ pub fn rebase_with(
             }
             if *g == From::Base {
                 kill.insert((*q).to_owned());
-                conflicts.insert(rp(q));
-                conflicts.insert(rp(p));
+                if !matches!(opts.resolutions.get(&rp(q)), Some(Resolution::WholeFile))
+                    || !matches!(opts.resolutions.get(&rp(p)), Some(Resolution::WholeFile))
+                {
+                    conflicts.insert(rp(q));
+                    conflicts.insert(rp(p));
+                }
             }
         }
     }

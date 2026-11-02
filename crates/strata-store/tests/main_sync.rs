@@ -259,3 +259,90 @@ fn accepted_recovery_and_session_removal_clear_sync_report() {
         assert!(s.sync_report(&sid(), &repo()).unwrap().is_empty());
     }
 }
+
+#[test]
+fn clear_conflicts_is_atomic_and_keeps_other_paths() {
+    let env = env();
+    let s = env.open();
+    world(&env, &s);
+    let n = s
+        .begin_move(
+            &sid(),
+            &repo(),
+            &gen1(),
+            &head(),
+            &env.root.join("sessions").join(sid().as_str()).join(".move"),
+            t(20),
+        )
+        .unwrap();
+    let conflicts = vec![rp("a"), rp("b")];
+    s.set_move_state(
+        &sid(),
+        &repo(),
+        n,
+        MoveState::Preparing,
+        MoveState::Swapping,
+        Some(&conflicts),
+        t(21),
+    )
+    .unwrap();
+    s.finish_move(&sid(), &repo(), n, &conflicts, t(22))
+        .unwrap();
+    assert!(
+        s.clear_conflicts(&sid(), &repo(), &[rp("a"), rp("unrelated")])
+            .is_err()
+    );
+    assert_eq!(
+        s.session(&sid()).unwrap().unwrap().workspaces[&repo()].conflicts,
+        conflicts
+    );
+    s.clear_conflicts(&sid(), &repo(), &[rp("a")]).unwrap();
+    let rec = s.session(&sid()).unwrap().unwrap();
+    assert_eq!(rec.workspaces[&repo()].conflicts, vec![rp("b")]);
+    assert_eq!(rec.workspaces[&repo()].generation, n);
+}
+
+#[test]
+fn sync_move_history_keeps_resolution_choices() {
+    let env = env();
+    let s = env.open();
+    world(&env, &s);
+    let n = s
+        .begin_move(
+            &sid(),
+            &repo(),
+            &gen1(),
+            &head(),
+            &env.root.join("sessions").join(sid().as_str()).join(".move"),
+            t(20),
+        )
+        .unwrap();
+    s.record_sync_resolution(
+        &sid(),
+        &repo(),
+        n,
+        &json!({"resolved":["a"],"kept":["b"],"whole_file":[]}),
+    )
+    .unwrap();
+    s.set_move_state(
+        &sid(),
+        &repo(),
+        n,
+        MoveState::Preparing,
+        MoveState::Swapping,
+        Some(&[]),
+        t(21),
+    )
+    .unwrap();
+    s.finish_move(&sid(), &repo(), n, &[], t(22)).unwrap();
+    let v = s.sync_move_history(&sid(), &repo()).unwrap();
+    assert_eq!(v[0]["state"], "done");
+    assert_eq!(v[0]["kept"], json!(["b"]));
+    assert!(
+        s.record_sync_resolution(&sid(), &repo(), n, &json!({}))
+            .is_err()
+    );
+    s.close().unwrap();
+    let s = env.open();
+    assert_eq!(s.sync_move_history(&sid(), &repo()).unwrap(), v);
+}

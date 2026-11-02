@@ -282,14 +282,32 @@ fn auto_gates(
     old: &BaseGen,
     new: &Base,
 ) -> Result<std::result::Result<(Vec<RepoPath>, strata_store::MoveBaseline), RebaseReport>> {
+    policy_gates(ctx, s, old, new, MovePolicy::Auto)
+}
+
+fn policy_gates(
+    ctx: &Ctx,
+    s: &SessionId,
+    old: &BaseGen,
+    new: &Base,
+    policy: MovePolicy,
+) -> Result<std::result::Result<(Vec<RepoPath>, strata_store::MoveBaseline), RebaseReport>> {
     if let Some(d) = g0_state(ctx, s, old)? {
         return Ok(Err(d));
     }
     let ws = workspace(ctx, s)?;
     let quiet = Duration::from_secs(ctx.cfg.rebase.quiet_secs);
-    let activity = match strata_session::idle_activity(&ws.path, quiet)? {
-        Ok(a) => a,
-        Err(idle) => return Ok(Err(deferred(idle.reason, idle.detail))),
+    let activity = if policy == MovePolicy::Agent {
+        let a = strata_session::walk_activity(&ws.path)?;
+        if a.late.is_some() {
+            return Ok(Err(deferred("recent_writes", json!({"path":a.late}))));
+        }
+        a
+    } else {
+        match strata_session::idle_activity(&ws.path, quiet)? {
+            Ok(a) => a,
+            Err(idle) => return Ok(Err(deferred(idle.reason, idle.detail))),
+        }
     };
     let old_base = base_struct(ctx.store, old)?;
     let overlay = current_overlay(ctx, s, &ws, &old_base)?;
@@ -337,12 +355,6 @@ pub(crate) fn rebase_one_with(
     policy: MovePolicy,
     at: Attempt<'_>,
 ) -> Result<RebaseReport> {
-    // main-sync sync part TODO: implement Agent gates; until then retain Auto safety.
-    let policy = if policy == MovePolicy::Agent {
-        MovePolicy::Auto
-    } else {
-        policy
-    };
     if new_base.repo != *ctx.repo {
         return Err(invalid(
             "repo_mismatch",
@@ -458,10 +470,12 @@ pub(crate) fn rebase_one_with(
             }
             Ok(None)
         })?;
-        if let Some(d) = stopped { return Ok(d); }
+        if let Some(d) = stopped {
+            return Ok(d);
+        }
     }
-    if policy == MovePolicy::Auto && (n == old.deps || c3) {
-        match auto_gates(ctx, s, &old, &new)? {
+    if policy != MovePolicy::Explicit && (n == old.deps || c3) {
+        match policy_gates(ctx, s, &old, &new, policy)? {
             Ok((k, b)) => {
                 kept = k;
                 baseline = Some(b);
@@ -499,12 +513,20 @@ pub(crate) fn rebase_one_with(
         };
         // 3. Same deps set: move (G0 again under the locks for `Auto`).
         if n == old.deps || c3 {
-            if policy == MovePolicy::Auto
+            if policy != MovePolicy::Explicit
                 && let Some(d) = g0_state(ctx, s, &old)?
             {
                 return Ok(d);
             }
             let moved = match &baseline {
+                Some(b) if policy == MovePolicy::Agent => ctx.sessions.move_workspace_agent(
+                    s,
+                    &repo_id,
+                    target.clone(),
+                    head.clone(),
+                    at.consume,
+                    b,
+                ),
                 Some(b) => ctx.sessions.move_workspace_auto(
                     s,
                     &repo_id,

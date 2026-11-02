@@ -1472,3 +1472,8 @@ preserved for human inspection and cleanup. Any path sealing the target makes
 it ready again, including a human approval that could not move busy sessions.
 Settlement writes both Applied and the deps_auto applied audit atomically.
 Confirm-mode replacement approval and confirmation remain unchanged.
+
+Sync repeats `classify_rollout` after its lock-free ensure gap, before moving.
+A different AwaitingPublish session draft is reported as OwnChange rather than
+generic Drift. The classifier does not scan holders, build a set, acquire a
+repo lock, or decide the pinned sync policy.

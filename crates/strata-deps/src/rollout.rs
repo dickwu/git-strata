@@ -350,10 +350,11 @@ pub fn plan_rollout(
                 return Err(SkipReason::NotReady);
             };
             let error = |error: StrataError| SkipReason::Error { error };
-            if let Some(reason) = classify_rollout(ctx, s, ws, &p.to_inputs).map_err(error)?{
-                    return Err(reason);
+            if let Some(reason) = classify_rollout(ctx, s, ws, &p.to_inputs).map_err(error)? {
+                return Err(reason);
             }
-            let pinned = find_set(ctx.store, &ws.base.repo, &ws.base.deps) .map_err(error)?
+            let pinned = find_set(ctx.store, &ws.base.repo, &ws.base.deps)
+                .map_err(error)?
                 .ok_or_else(|| error(corrupt_pinned(ws)))?;
             Ok(deps_dirs_of(ctx, ws, &pinned, to_set))
         })();

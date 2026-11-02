@@ -1077,3 +1077,37 @@ fn sync_report_ours_blob_resolvable_after_edit() {
     s.delete_sync_report(&id, &repo("app")).unwrap();
     assert_eq!(s.gc(K0).unwrap().blobs, 1);
 }
+
+#[test]
+fn gc_deletes_sync_move_history_before_intents() {
+    let (env, s) = setup();
+    let id = session(&env, &s, "historya", &g('1', 'a'));
+    let n = s
+        .begin_move(
+            &id,
+            &repo("app"),
+            &g('1', 'a'),
+            &head('2'),
+            &env.root.join("sessions").join(id.as_str()).join(".move"),
+            t(20),
+        )
+        .unwrap();
+    s.record_sync_resolution(&id, &repo("app"), n, &serde_json::json!({"kept":["a"]}))
+        .unwrap();
+    s.set_move_state(
+        &id,
+        &repo("app"),
+        n,
+        MoveState::Preparing,
+        MoveState::Swapping,
+        Some(&[]),
+        t(21),
+    )
+    .unwrap();
+    s.finish_move(&id, &repo("app"), n, &[], t(22)).unwrap();
+    remove(&s, &id);
+    floor0(&s);
+    s.gc(K0).unwrap();
+    assert_eq!(count(&env, "SELECT count(*) FROM sync_move_history"), 0);
+    assert!(s.session(&id).unwrap().is_none());
+}

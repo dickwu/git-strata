@@ -49,6 +49,7 @@ macro_rules! methods {
 
 methods! {
     New = "new", ro = false;
+    Sync = "sync", ro = false;
     Add = "add", ro = false;
     Status = "status", ro = true;
     Checkpoint = "checkpoint", ro = false;
@@ -329,6 +330,7 @@ pub struct DuParams {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Params {
     New(NewParams),
+    Sync(strata_types::SyncRequest),
     Add(AddParams),
     Status(StatusParams),
     Checkpoint(CheckpointParams),
@@ -367,6 +369,7 @@ impl Params {
         }
         match method {
             Method::New => typed(v, Params::New),
+            Method::Sync => typed(v, Params::Sync),
             Method::Add => typed(v, Params::Add),
             Method::Status => typed(v, Params::Status),
             Method::Checkpoint => typed(v, Params::Checkpoint),

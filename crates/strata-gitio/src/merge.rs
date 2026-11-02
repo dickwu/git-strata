@@ -34,6 +34,16 @@ pub fn is_binary(bytes: &[u8]) -> bool {
 
 /// Three-way merge of `ours` and `theirs` against `base`.
 pub fn merge3(base: &[u8], ours: &[u8], theirs: &[u8]) -> Merge3 {
+    merge3_with(base, ours, theirs, false)
+}
+
+/// Merge text, choosing ours only inside overlapping regions. Binary and
+/// inconsistent regions still conflict; callers must explicitly resolve those.
+pub fn merge3_favour_ours(base: &[u8], ours: &[u8], theirs: &[u8]) -> Merge3 {
+    merge3_with(base, ours, theirs, true)
+}
+
+fn merge3_with(base: &[u8], ours: &[u8], theirs: &[u8], favour_ours: bool) -> Merge3 {
     if ours == theirs || theirs == base {
         return Merge3::Clean(ours.to_vec());
     }
@@ -62,6 +72,7 @@ pub fn merge3(base: &[u8], ours: &[u8], theirs: &[u8]) -> Merge3 {
         match r.mode {
             Mode::Theirs => out.extend(cat(&t, r.i2, r.chg2)),
             Mode::Ours | Mode::Same => out.extend(cat(&o, r.i1, r.chg1)),
+            Mode::Conflict if favour_ours => out.extend(cat(&o, r.i1, r.chg1)),
             Mode::Conflict => hunks.push(Hunk {
                 base_start: r.i0 + 1,
                 ours_start: r.i1 + 1,

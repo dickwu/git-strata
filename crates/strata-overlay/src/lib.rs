@@ -39,7 +39,11 @@ pub use lww::{LwwRules, lww_matches};
 pub use manifest::build_manifest;
 pub use overlay::*;
 pub use project::project;
-pub use rebase::{Blobs, CHANGED_SINCE_SCAN, Preview, PreviewBlobs, RebaseOptions, Rebased, rebase, rebase_preview, rebase_with};
+pub use rebase::{
+    Blobs, CHANGED_SINCE_SCAN, ConflictHunk, ConflictRegion, Preview, PreviewBlobs, RebaseConflict,
+    RebaseOptions, Rebased, Resolution, overlay_side, rebase, rebase_conflicts, rebase_preview,
+    rebase_with,
+};
 pub use restore::{RestoreRequest, Restored, restore};
 pub use tracker::Tracker;
 

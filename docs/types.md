@@ -601,3 +601,12 @@ None; optional lists omit empty values. Dependency mode uses `SyncDeps` and ids
 use the existing validated identifier types. This foundation does not emit the
 new status fields: `SessionStatus`/`WorkspaceStatus` live in `strata-session`, and
 the upstream consumer part adds them there.
+
+### Sync request
+
+`SyncRequest` is the shared agent RPC input: `session`, optional `repos`,
+`check` (false), `fetch` (true), `resolved`/`keep` (empty paths), optional
+`target: CommitOid` and `generation: u64`, and `accept_diverged` (false).
+Unknown fields are rejected. The move handler enforces report binding;
+legacy up-to-date workspace conflicts are the sole unbound acknowledgement
+case. Upstream data remains the separate shared upstream wire types.

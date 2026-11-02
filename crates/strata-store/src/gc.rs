@@ -280,11 +280,12 @@ impl<'a> Run<'a> {
     fn delete_sessions(&mut self, r: &[String]) -> Result<()> {
         // FK-safe order: v3's move_activity before move_intents, and
         // rebase_pending / rm_attempts before workspaces and sessions.
-        const TABLES: [(&str, &str); 11] = [
+        const TABLES: [(&str, &str); 12] = [
             ("overlay_entries", "session"),
             ("checkpoints", "session"),
             ("seeds", "session"),
             ("move_activity", "session"),
+            ("sync_move_history", "session"),
             ("move_intents", "session"),
             ("rebase_pending", "session"),
             ("rm_attempts", "session"),

@@ -243,6 +243,8 @@ pub struct RebaseOptions {
     /// true：两边都改了的普通文件先试 gitio::merge3，合得上就取合并结果（经 store::put_bytes 存下）。
     /// false：两边都改了一律算冲突、取会话一侧，rebase 不写任何 blob（§5.8）。
     pub merge: bool,
+    /// Main-sync: per-call, report-bound overlapping-hunk or whole-file decisions.
+    pub resolutions: BTreeMap<RepoPath, Resolution>,
 }
 
 impl RebaseOptions {
@@ -1301,3 +1303,22 @@ git commit -m "feat(overlay): restore scenes, verification and cross-base projec
 | §5.10 `.lww` 的大小写 | 区分大小写，按 NFC 之后的字节比较 | 同一份规则在每个会话、每台机器上给出同样的判定 |
 | §5.12 dst 的位置 | 必须在 `<store.root()>/sessions/` 之下，否则 `InvalidInput` | 一道便宜的防线：`project` 写不到主 checkout、基线目录或 blob 存储里 |
 | §5.12 临时名 | dst 正下方的 `.strata-project-<序号>` | Addendum 7、8：取到 strata 自己的目录正下方，再 `rename_rooted` 到位置上 |
+
+### Main-sync resolution projection
+
+`RebaseOptions.resolutions` is a per-call map of `RepoPath` to
+`Resolution::Text(Vec<ConflictRegion>)` or `WholeFile`. It never changes
+`.lww`. Text resolution first computes the ordinary three-way conflict
+regions. Every current region in theirs-coordinates must fit within one
+saved `{theirs_start, theirs_len}` interval; disappeared or smaller regions
+are accepted. A new or expanded region returns `InvalidInput` with reason
+`resolved_overlap_changed` and the new hunks. Only then does
+`merge3_favour_ours` take ours inside overlaps and merge other upstream
+hunks. Non-text resolutions take the current file state, including absence.
+
+`rebase_conflicts` supplies kind, BLAKE3 side ids and display hunks.
+`ConflictHunk` stores full line counts separately from text capped at 4096
+bytes per side. `overlay_side` includes unchanged paths and rename sources,
+so restoring a reported path to its base state still participates in the
+projection. The same options are used in preview and the checkpoint-based
+move, before any swap.

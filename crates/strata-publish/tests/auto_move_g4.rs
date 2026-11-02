@@ -487,3 +487,26 @@ fn rm_discard_sees_an_unrecorded_late_write() {
     ss.remove(&b, true, Some(ConfirmToken { action: now, issued: Instant::now(), nonce: 2 })).unwrap();
     assert!(!old.exists(), "moved to trash");
 }
+
+#[test]
+fn agent_policy_does_not_use_auto_quiet_window() {
+    let mut fx = fx();
+    let (b, p) = setup(&fx);
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .rebase
+        .quiet_secs = 3600;
+    let ss = fx.sessions();
+    moved(&attempt(&fx, &ss, &b, &p, MovePolicy::Agent).unwrap());
+    let intent = last_intent(&fx, &b);
+    assert_eq!(
+        fx.store()
+            .move_activity(&b, &repo_name("tool"), intent.n)
+            .unwrap()
+            .unwrap()
+            .policy,
+        strata_store::MoveActivityPolicy::Agent
+    );
+}

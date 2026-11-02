@@ -168,6 +168,64 @@ Notes:
   to the human with `detail.log_tail`; do not retry in a loop (a retry
   returns `previous_attempt`).
 
+## Keeping up with main
+
+| Command | Purpose |
+| --- | --- |
+| `git-strata sync [--check] [--repo R]` | Inspect upstream, or fetch and merge it into this session. |
+| `git-strata sync --repo R --resolved PATH --target HEAD --generation N` | Finish the reported conflict after editing it. Repeat `--resolved` for each path. |
+| `git-strata sync --repo R --keep PATH --target HEAD --generation N` | Explicitly acknowledge that your current side of the reported conflict is correct. |
+
+Main's commits and dependencies merge into idle workspaces automatically.
+To merge now, run `git-strata sync`. You never run `deps approve`; when
+sync reports `waiting_human`, give the proposed approval command to the human.
+Sync preserves your dependency inputs when they are your own draft or drift.
+
+On `Conflict` with `detail.reason = "sync_conflict"`, read `detail.conflicts`.
+Edit each listed path to contain both your changes and upstream's `theirs`.
+Edit only inside the reported hunks: adjacent edits can fuse a region with a
+previously clean upstream change and are refused as `resolved_overlap_changed`.
+Make unrelated edits after syncing. Then run:
+
+```sh
+git-strata sync --repo R --resolved PATH --target HEAD --generation N
+```
+
+Use HEAD and N from `detail.target.head` and `detail.generation`.
+Upstream's non-overlapping hunks merge automatically. Inside a conflicting
+hunk your text wins, so compare it with `theirs`; restoring your old bytes
+is not a resolution (`resolved_unchanged`). Use `--keep` only after deciding
+explicitly that your existing side is correct. For non-text conflicts
+(binary, deletion, mode/type, oversized files), your current file or absence
+is taken whole and reported under `whole_file`: compare with `theirs` first.
+Paths absent from the saved report are `resolved_unrelated`.
+
+`HeadMoved` supplies a fresh report. Re-check it against the latest upstream.
+That report captures your already-edited bytes: another unchanged
+`--resolved` is refused. Re-resolve, or use `--keep` with the new binding after
+checking that your resolution remains correct. A move to the originally
+reported target before the target changes also completes that resolution.
+
+After `moved` or `source_only`, `cd` back to the workspace by its path and
+restart processes you started there; existing shells can remain in the kept
+old tree. Re-run checks, checkpoint, then publish. On `result: waiting`
+(worker installing or your own publish running), wait 30 seconds and retry
+at most five times. Apply the same bound to repeated `HeadMoved` and
+`Busy auto_deferred` with `recent_writes`, `changed_since_scan`, or
+`changed_during_move`. Agent sync takes a fresh `walk_activity` snapshot;
+it does not wait for the Auto policy's quiet window. After five attempts,
+publish what is allowed and report the remaining state to the human.
+
+On `base_diverged`, stop and tell the human about chain recovery. Never pass
+`--accept-diverged` on your own. It is accepted only after the old workspace
+head is reachable from neither the publish chain nor the tracking ref.
+
+Publish refuses paths still in `ws.conflicts` with `move_conflict`. For a
+legacy conflict on an up-to-date workspace with no saved sync report,
+`git-strata sync --repo R --resolved PATH` (or `--keep PATH`) acknowledges
+only those paths and returns `conflicts_cleared`; no target or generation is
+needed in this one case. Read and resolve the file before acknowledging it.
+
 ## Publish conflict: fix and re-run
 
 This is the expected loop for agents; the human is not needed unless the
@@ -322,6 +380,10 @@ All three keys are always present; `data` is never null. Branch on
 | `NoSuchRepo` | Repo name not in config; check `--repo` / argument. With `detail.reason` `not_in_session`: the session has no workspace of that repo; run `detail.fix` (`git-strata add --session S --repo R`), then retry. |
 | `InvalidInput` | Fix arguments per `detail.reason` (`checkpoint_reason`, `diff_mode`, `both_selectors`, `no_batch`, `unknown_command` with `detail.commands`, ...). `chain_diverged` from publish on a repo that needs no confirmation: run `git-strata push <REPO>` (it fetches, replays the unpushed chain onto origin, reruns checks, pushes a fast-forward), then rerun the publish; `replay_deps_unsealed` from push: open a session on the repo, push again. `chain_rewound`, or diverged on a gated repo: hand to the human (`chain`). |
 | `Conflict` | Same hunk changed on both sides (another session or upstream); nothing committed in `detail.repo`, earlier repos of the call may have landed (`data.commits`). Fix, checkpoint, re-run the same publish ("Publish conflict: fix and re-run"); between sessions, who resolves can be set by `publish --assign`. |
+| `Conflict` (`sync_conflict`) | Edit the listed hunks, then sync with `--resolved`, the reported target and generation. Earlier successful repos appear in `detail.done`. |
+| `Conflict` (`base_diverged`) | Tell the human; chain recovery must precede accepting the dropped base. |
+| `Conflict` (`move_conflict`) | Publish is blocked until the listed workspace conflicts are acknowledged through sync. |
+| `InvalidInput` (`resolved_unchanged`, `resolved_unrelated`, `resolved_overlap_changed`) | Use the saved report: edit the conflict, select a reported path, or undo edits that expanded its overlap. `--keep` explicitly accepts unchanged bytes. |
 | `Conflict` (`assigned`) | The path is assigned to another session; only that session may publish it. Do not retry from yours. |
 | `NoCommit` | Nothing new to commit or push. Not a failure to fix. |
 | `Conflict` `replay_conflict` (from `push`) | Origin moved and `detail.commit` of the unpushed chain does not apply onto `detail.origin`. Nothing was written or pushed. Fix the conflicting change in a session and publish, or hand `git-strata chain --repo R ...` to the human. Do not retry the push unchanged. |
@@ -331,7 +393,7 @@ All three keys are always present; `data` is never null. Branch on
 | `OpenFiles` | A process holds files in the directory (`detail` has pids). Stop it (only if you started it) and retry. |
 | `CheckFailed` | The repo's check failed in staging; fix the code, checkpoint, publish again. |
 | `CheckMutates` | Configured check writes files; config problem, tell the human. |
-| `HeadMoved` | Another publish or main moved first. Re-read state; do not loop. |
+| `HeadMoved` | Another publish or main moved first. For sync, use the fresh report and re-resolve; already-resolved unchanged bytes need an explicit `--keep`. Bound retries as above. |
 | `PushRefused` | Remote refused (detail has its words). Report to the human. |
 | `Unknown` | Outcome uncertain (e.g. push timeout, `socket_closed`). Do not retry or clean up; run `status` and tell the human. Exception: `detail.reason` `poisoned` means nothing was written; the daemon restarts itself to reopen the store, so retry once after `git-strata daemon status` answers again. |
 | `Binary` / `TooLarge` | Per-entry markers in `diff` / `grep` results; not a call failure. |

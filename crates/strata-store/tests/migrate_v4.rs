@@ -73,7 +73,7 @@ fn v3_to_v4_migration_keeps_rows() {
     assert_eq!(s.rebase_pending(None).unwrap(), pending);
     assert_eq!(s.move_activities(&sid()).unwrap(), activity);
     s.close().unwrap();
-    assert_eq!(version(&env), 4);
+    assert_eq!(version(&env), 5);
     let fresh = support::env();
     fresh.open().close().unwrap();
     assert_eq!(
