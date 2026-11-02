@@ -129,4 +129,15 @@ mod tests {
         assert!(!pinned.needs_confirm(Some(&c), &app));
         assert!(pinned.needs_confirm(Some(&config(true)), &app));
     }
+    #[test]
+    fn sync_confirmation_does_not_gate_publish_tty() {
+        let app = strata_types::RepoName::try_from("app".to_string()).unwrap();
+        let c = config(false);
+        for mode in [strata_types::SyncDeps::Apply, strata_types::SyncDeps::Confirm] {
+            let flags = PinnedFlags { confirm: false, push: true, sync_deps: Some(mode), ..Default::default() };
+            let pins = Pins::Read([(app.clone(), flags)].into_iter().collect());
+            assert!(!pins.needs_confirm(Some(&c), &app));
+        }
+    }
+
 }

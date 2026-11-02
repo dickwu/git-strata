@@ -1,0 +1,31 @@
+//! Run this helper against the v3 source at c296625 (before applying v4).
+//! See fixtures/README.md. It deliberately refuses to overwrite a fixture.
+mod support;
+
+use strata_store::{MoveBaseline, NewProposal, ReplayPlan};
+use strata_types::{CommitOid, DepsSetId};
+use support::world::*;
+
+#[test]
+#[ignore = "fixture generator: run only against the pinned v3 source"]
+fn generate_v3_fixture() {
+    let env = support::env();
+    let s = env.open();
+    world(&env, &s);
+    let head = CommitOid::try_from("2".repeat(40)).unwrap();
+    s.record_proposal(&NewProposal {
+        repo: repo(), origin: None, from: gen1().deps,
+        from_inputs: "a".repeat(64), to: DepsSetId::try_from("b".repeat(64)).unwrap(),
+        to_inputs: "b".repeat(64), tree: Some(gen1().tree), head: Some(head.clone()),
+    }, None, t(20)).unwrap();
+    s.plan_replay(&repo(), &[ReplayPlan { session: sid(), planned_head: head.to_string(), planned_tree: gen1().tree.to_string() }], t(21)).unwrap();
+    s.settle_planned(&sid(), &repo(), head.as_str(), true, t(22)).unwrap();
+    s.begin_move_with(&sid(), &repo(), &gen1(), &head, &env.root.join("sessions").join(sid().as_str()).join(".m2"), t(23),
+        Some(&MoveBaseline { m0_ns: 1, t0_ns: 2, root_names: vec!["a".into()], entries: 1 })).unwrap();
+    s.close().unwrap();
+    let bytes = std::fs::read(env.db()).unwrap();
+    assert_eq!(u32::from_be_bytes(bytes[60..64].try_into().unwrap()), 3);
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/store-v3.db");
+    use std::io::Write;
+    std::fs::OpenOptions::new().write(true).create_new(true).open(out).unwrap().write_all(&bytes).unwrap();
+}

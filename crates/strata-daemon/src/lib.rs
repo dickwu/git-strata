@@ -154,6 +154,9 @@ pub enum RpcReject {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedFlags {
+    /// None only while reading an entry written before main-sync. Always written.
+    #[serde(default)]
+    pub sync_deps: Option<strata_types::SyncDeps>,
     pub deploy_on_push: bool,
     pub confirm: bool,
     pub push: bool,

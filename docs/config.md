@@ -56,6 +56,33 @@
 | `pin_unpushed` | bool | `true` | 新会话钉基线时，发布链领先 origin 就钉链顶 | design §6.7 |
 | `check_siblings` | string 数组（`RepoName`） | `[]` | `checks` 要在 `../<名字>` 找到的兄弟 repo；会话里没有时发布从它的 main tip 基线补上 | publish.md D21 [实现时补的决定] |
 
+The optional `[repo.<name>.sync]` table controls main-sync:
+
+```toml
+[repo.web.sync]
+follow_main = true
+deps = "apply"
+fetch_secs = 900
+```
+
+`follow_main` defaults to `publish.branch == default_branch`; split-branch repos
+cannot enable it. `deps` is `apply` (default) or `confirm`. `fetch_secs` is 900 by
+default, 0 to disable periodic fetch, or 60..=86400. A non-split repo cannot use
+`follow_main = false` with `deps = "apply"` (V16). Unknown fields are rejected.
+In Rust, `SyncConfig.follow_main: Option<bool>` preserves omission; callers use
+`RepoConfig::follow_main()` for the resolved value. Default sync settings are
+omitted on serialization.
+
+`sync.deps` is pinned independently of publish confirmation. Existing pins entries
+without `sync_deps` adopt the configured value at startup and write it back.
+Missing entries (including a missing pins file) use `confirm` and report
+`ConfigRelaxPending` when the config requests `apply`. `apply` → `confirm` tightens
+at startup; `confirm` → `apply` needs `git-strata config relax REPO`. Malformed pins
+still refuse startup. This setting does not change the TTY/Touch ID gate for
+publishing. Install matching new CLI/daemon binaries and restart before adding
+`[repo.<name>.sync]`; older binaries reject the table, and older daemons reject
+pins files containing `sync_deps` (remove that field when rolling back).
+
 ### 2.3 字段语义
 
 - **`path`**：主 checkout 的路径。加载配置时它必须已经存在，并且等于它的 realpath：绝对、没有尾部 `/`、任何分量都不是符号链接。不是 realpath 的，加载时 `InvalidInput`，`detail` 写出 realpath（module-rulings「Repo paths in config are realpaths」）。通过之后 session、deps、apfs 把 `path` 原样往下传，不再解析。词法上的绝对与已规范化仍由 V2 在无 I/O 的 `validate` 里拒绝。
@@ -298,6 +325,7 @@ impl Config {
 | V12 | `check_siblings` 的每项是另一个已配置的 repo：不是本 repo，不重复。`detail` 带 `repo`、`field = "check_siblings"`、`index`、`rule = "V12"`。未知键 V11 由 serde 在解析时报，先于其它规则 | `InvalidInput` | publish.md D21 [实现时补的决定] |
 | V14 | `[repo.<name>.rm] regenerable` 的每项：非空、单行、首尾无空白；不以 `#`、`%include`、`/` 开头（`!` 之后同样）；不含 `..` 段；没有哪一段是 `.git` 或能匹配 `.git` 的名字通配（`*`、`.g*`、`?git` 等，按大小写折叠；`**` 段允许）；不能全是通配（`*`、`**`、`?`）。`detail` 带 `field = "rm.regenerable"`、`index`、`rule = "V14"` | `InvalidInput` | rm-followups §1.8 [实现时补的决定] |
 | V15 | `[repo.<name>.rebase] quiet_secs` ≤ 86400 | `InvalidInput` | rm-followups §1.3 [实现时补的决定] |
+| V16 | `sync.fetch_secs` is 0 or 60..=86400; split repos cannot explicitly enable `follow_main`; non-split repos cannot disable it with `deps = "apply"` | `InvalidInput` | main-sync §3.1 |
 | V13 | `[status] parallel` 在 1..=16 之间。`detail` 带 `repo = null`、`field = "parallel"`、`index = null`、`rule = "V13"`。在全部 repo 表之后检查（不改变已有规则的先后） | `InvalidInput` | status-perf D7 [实现时补的决定] |
 
 ### 4.2 `checks` 只读规则（`CheckMutates`）

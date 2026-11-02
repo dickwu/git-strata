@@ -1177,6 +1177,7 @@ impl<'d, 'a> Server<'d, 'a> {
                     origin: strata_deps::ProposalOrigin::Session { session: s.clone() },
                     from: ws.base.deps.clone(),
                     from_inputs: pinned.inputs_hash.clone(),
+                    from_head: None,
                     to: set.id.clone(),
                     to_inputs: set.inputs_hash.clone(),
                     tree: None,

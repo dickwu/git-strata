@@ -825,3 +825,9 @@ git commit -m "feat(publish): one merge under the repo lock"
 - **C2**：`deps_changed = "move_source"`（缺省）且新依赖键不同时，先在锁里记下依赖提案（提升的草稿，否则 Main old→n），再只把源码挪到（发布的树，旧依赖集），不安装、不预热；`Moved{deps_pending}`，发布报告 JSON 带漂移提示。`wait` = 原来的 `Waiting`。
 - **`rebase_pending`**（pending.rs）：`record_publish` 事务里写计划（planned_*），`commit_into` 成功后在仓库锁里提升；按可达性解决（含提交后失败的 `publish_unfinished`）；daemon 启动与 replay 开始时在仓库锁里重建；推迟以 `UPDATE … WHERE rev` 更新；`finish_move` 事务里消费。追赶 `catch_up`：每仓库不等锁，退避 quiet·2^(k−1)，封顶 30 min；过期的目标 `discard_pending_target`；运行中的发布 → `busy`。
 - **旧树保留**（old_tree.rs `collect_old_tree`）：有通知或缺基线 → 保留；被持有则重置计数；两次相隔 Q 的干净检查才退役；保留的 Auto 旧树重新排队。
+
+### Main-sync foundation: Agent policy
+
+`MovePolicy::Agent` is reserved for the sync implementation. In this foundation
+it is normalized to Auto before rebase gates, preserving Auto's existing safety
+behavior. The sync part supplies the Agent-specific move entry point and gates.

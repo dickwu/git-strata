@@ -18,7 +18,7 @@ use support::world::*;
 use support::*;
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/store-v2.db");
-const NEW_TABLES: [&str; 3] = ["move_activity", "rebase_pending", "rm_attempts"];
+const NEW_TABLES: [&str; 6] = ["move_activity", "rebase_pending", "rm_attempts", "deps_auto", "repo_fetch", "sync_report"];
 
 fn header_u32(db: &Path, off: usize) -> u32 {
     let b = fs::read(db).unwrap();
@@ -128,15 +128,17 @@ fn v2_to_v3_migration_forward_only() {
     assert!(s.rebase_pending(None).unwrap().is_empty());
     s.close().unwrap();
 
-    assert_eq!(header_u32(&env.db(), 60), 3);
+    assert_eq!(header_u32(&env.db(), 60), 4);
     let (uv, ic, after) = dump_copy(&env.db());
-    assert_eq!((uv, ic.as_str()), (3, "ok"));
+    assert_eq!((uv, ic.as_str()), (4, "ok"));
     let mut keys: Vec<&str> = before.keys().map(String::as_str).collect();
     keys.extend(NEW_TABLES);
     keys.sort();
     assert_eq!(keys, after.keys().map(String::as_str).collect::<Vec<_>>());
     for (t, rows) in &before {
-        assert_eq!(rows, &after[t], "{t} unchanged");
+        if t == "deps_proposals" {
+            assert_eq!(rows.iter().map(|r| format!("{r}|Null")).collect::<Vec<_>>(), after[t]);
+        } else { assert_eq!(rows, &after[t], "{t} unchanged"); }
     }
     for t in NEW_TABLES {
         assert!(after[t].is_empty(), "{t}");
@@ -152,7 +154,7 @@ fn v2_to_v3_migration_forward_only() {
     let s = env.open();
     s.close().unwrap();
     assert_eq!(backups(&env), b, "no second backup");
-    assert_eq!(header_u32(&env.db(), 60), 3);
+    assert_eq!(header_u32(&env.db(), 60), 4);
 }
 
 #[test]
@@ -201,13 +203,13 @@ fn open_rejects_newer_store_with_upgrade_hint() {
     env.open().close().unwrap();
     {
         let c = bare(&env.db());
-        c.execute_batch("PRAGMA user_version = 4").unwrap();
+        c.execute_batch("PRAGMA user_version = 5").unwrap();
         c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |_| Ok(())).unwrap();
     }
-    for e in [env.try_open().err().expect("v4 refused"), Store::open_read_only(&env.root).err().expect("v4 refused ro")] {
+    for e in [env.try_open().err().expect("v5 refused"), Store::open_read_only(&env.root).err().expect("v5 refused ro")] {
         assert_reason(&e, Code::Corrupt, "user_version");
         assert!(
-            e.message.contains("this git-strata is older than the store (v4); install the matching git-strata"),
+            e.message.contains("this git-strata is older than the store (v5); install the matching git-strata"),
             "{}",
             e.message
         );

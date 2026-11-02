@@ -52,6 +52,7 @@ fn pending(r: &str, from: char, to: char, t_: char) -> NewProposal {
         origin: None,
         from: set_id(from),
         from_inputs: inputs(from),
+        from_head: None,
         to: set_id(to),
         to_inputs: inputs(to),
         tree: Some(tree(t_)),

@@ -265,6 +265,7 @@ pub struct Proposal {
     /// 被替换的依赖集，以及它记录的安装输入哈希。
     pub from: DepsSetId,
     pub from_inputs: String,
+    pub from_head: Option<CommitOid>,
     /// 新的依赖集，以及它的安装输入哈希。提议可以先于这个依赖集封存而存在（§5.9）。
     pub to: DepsSetId,
     pub to_inputs: String,
@@ -310,6 +311,7 @@ pub struct ProposeArgs {
     pub origin: ProposalOrigin,
     pub from: DepsSetId,
     pub from_inputs: String,
+    pub from_head: Option<CommitOid>,
     pub to: DepsSetId,
     pub to_inputs: String,
     /// 两者同为 Some，或同为 None。同为 None 只允许 origin = Session。
@@ -790,6 +792,18 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 - publish 用同一个比较（deps-drift §2.2）：对 staged 工作树算 `input_records` + `hash_records`，与布局会话所钉集合的 `inputs_hash` 比；不等时替换已 sealed 的集合或冷装，只警告。status 的 drift 带 `fix`（`git-strata deps propose --session <S> --repo <R> --switch`）与 `note`（publish 会自己用对应的集合跑检查，但工作区仍是旧的）。
 
 ### 5.9 `propose(ctx, args)`、`publish_chain(git, branch)`、`main_tip(cfg, git)` 与 `observe_main(ctx, tree, head, export)`
+
+Main-sync v4 adds optional `from_head` to `Proposal`, `ProposeArgs`, and the store
+records. When observing a new dependency target, it is the head of the `deps_main`
+row being replaced. A same-`to`, target-only copy preserves the original value,
+as does an install-identity replacement. Legacy rows have None (omitted in JSON).
+
+`observe_main_locked(ctx, tree, head, inputs_hash, set_id)` is the caller-held-lock
+entry point. Prepare the export and `key_of` result before taking the repo write
+lock, then recheck the tip under that lock. The wrapper never takes the lock and
+preserves `main_not_recorded` error handling. The original `observe_main` remains
+the self-locking convenience API.
+
 
 提议与主干记录的每一次写都在该 repo 的写锁里，锁里后写者胜（module-rulings "deps follows main's current tip"，修订了 Addendum 3/4"Locks"）。`observe_main` 与 `ensure_target` 的登记自己经 `ctx.locks` 取锁；`propose` 由调用方持锁调用：daemon 的 `deps propose`、publish 的 `rebase_session`（§5.12），以及在锁里调它的 `observe_main`。裁定只要求带目标的写在锁里；草稿与替换提议也放进锁里是本文的选择 [我的决定]：落地那一支要连写两次（下面"会话的改动已落地"），会话自己的草稿夹在两次写之间的话，就可能被当成落地的那条。下面的比较并交换因此都是兜底：锁里它们只在有人不持锁写记录时失败。
 

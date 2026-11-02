@@ -604,6 +604,7 @@ pub struct NewProposal {
     pub origin: Option<SessionId>,
     pub from: DepsSetId,
     pub from_inputs: String,
+    pub from_head: Option<CommitOid>,
     pub to: DepsSetId,
     pub to_inputs: String,
     pub tree: Option<TreeOid>,
@@ -618,6 +619,7 @@ pub struct ProposalRecord {
     pub origin: Option<SessionId>,
     pub from: DepsSetId,
     pub from_inputs: String,
+    pub from_head: Option<CommitOid>,
     pub to: DepsSetId,
     pub to_inputs: String,
     pub tree: Option<TreeOid>,
@@ -1356,6 +1358,54 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
 - **读者与迁移**：已经打开的只读 `Store`（同一进程或另一个进程，例如正在跑的 cli）跨过迁移照常工作。另一个进程迁移之后，Turso 的旧连接在每个显式读事务的第一句碰表的语句上报 `Database schema changed`，直到这个连接执行一句自动提交的语句重新载入 schema；所以 `read_txn` 遇到它时先执行一句自动提交的 `SELECT count(*) FROM sqlite_schema`，再把整个读事务重做一次（只一次）。读函数因此是可重放的（`Fn`）。
 - **恢复到旧版本**：迁移不可逆，旧版 git-strata 拒绝 v2 的库（`Corrupt`，`user_version`）。要回到旧版：停 daemon（`launchctl bootout`），把 `store/store.db` 与它的 `-wal`、`-shm`、`-tshm` 挪开，把 `store/backups/store-v1-<ns>.db` 复制成 `store/store.db`，装回旧版本再启动。迁移之后新建的会话不在备份里（它们的目录还在 `sessions/` 下，旧版会把库里没有的目录当成陌生东西）；所以只在迁移后马上发现问题时这样做。
 
+### 4.4b Main-sync schema v4 and APIs
+
+The single frozen v3 → v4 migration is `schema.rs`'s `main-sync` entry, ending
+`PRAGMA user_version = 4;`. It adds `rebase_pending.source` (`publish` default,
+`replay`, `main`), nullable 64-hex `to_deps`, and nullable 40-hex proposal
+`from_head`. `move_activity` is copied through a temporary table and recreated
+with policy `auto|agent`, without `ALTER TABLE ... RENAME`; fresh and migrated DDL
+therefore compare identically. The v3 fixture and its generator are documented in
+`crates/strata-store/tests/fixtures/README.md`.
+
+- `enroll_main(session, repo, from, head, tree, to_deps, at)` inserts only; an
+  existing row returns false. `retarget_pending(..., rev, head, tree, from,
+  keep_backoff, at)` and `set_pending_to_deps(..., rev, to_deps, at)` CAS the
+  revision and advance it. Retarget clears `to_deps` and rewrites `from_*`;
+  `keep_backoff` preserves attempts/time/reason/detail. Setting a dependency
+  target resets attempts/time. `drop_pending(..., rev)` deletes only that revision.
+  Publish promotion, replay adoption, and consumed targets also clear `to_deps`.
+- `deps_auto(proposal PK/FK, state, error_json, at_ns)` records `installing|ready|
+  install_failed|applied`. The store exposes `deps_auto`, `deps_auto_all(repo?)`,
+  `set_deps_auto`, `delete_deps_auto`, and `auto_applied`. The last method applies
+  a Pending proposal and records its automatic decision in one transaction;
+  other states return false. Superseded work may delete its audit row outside GC;
+  GC deletes audit rows before their decided proposals.
+- `repo_fetch(repo PK, at_ns, ok, error, ok_at_ns)` is written by `record_fetch`
+  and read by `repo_fetch`. A failure changes the attempt fields but preserves
+  `ok_at_ns`, the last success used for upstream freshness.
+- `sync_report(session, repo, target, generation, path, kind, ours_blob,
+  hunks_json)` has PK `(session, repo, path)` and a workspace FK. `SyncReportRow`
+  includes the target/generation binding, path, kind, optional store BLAKE3
+  `ours_blob` (None = our path absent), and JSON `hunks`. `put_sync_report` requires
+  rows matching its target/generation arguments and replaces the pair atomically.
+  It validates and registers physical blobs under L3 before its L2 transaction,
+  like checkpoints; hunk lengths are never capped. `sync_report` reads it and
+  `delete_sync_report` clears it. Successful `finish_move`, consuming finishes,
+  accepted recovery, and session removal clear reports in their own transaction.
+  GC removes reports before workspaces and protects their blobs in both selection
+  and deletion predicates (including the dry-run preview).
+- `MoveActivityPolicy::{Auto,Agent}` is readable in activity rows.
+  `begin_move_with_policy` adds a policy argument to `begin_move_with`'s signature;
+  existing writers still default to Auto. A supplied baseline is persisted in the
+  same transaction as the move intent.
+
+Read-only stores are not migrated: v1/v2/v3 readers return no v4-table rows,
+proposal `from_head = None`, and v3 pending rows read as source Publish with no
+`to_deps`. Reader connections continue working across a writer migration. New
+writers require v4; old binaries refuse the newer schema. `deps_auto` and
+`sync_report` deletions are intentional exceptions to the history-only GC rule.
+
 ### 4.5 不变量
 
 | # | 不变量 | 落实 design §9 |
@@ -1379,7 +1429,7 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
 - **mode 不在 blob 里**：blob 文件一律 0444；条目的 mode 记在 `overlay_entries.mode`，取值同 git。同一路径的类型变化（文件 ↔ 符号链接）或 mode 变化是**一条** `Modified`（或 `Added`）条目，带新的 mode（120000 即符号链接），从不在同一路径上记 `Deleted` 加 `Added`：键 (session, checkpoint, path) 本来就不允许，`record_checkpoint` 在写之前就以 `InvalidInput` 拒绝（增补 4"Same-path type change"，overlay 与 publish 一致）。
 - **断电**：提交时请求 `F_FULLFSYNC`，它要求设备把缓存写到介质（fcntl(2)）；设备或 USB 桥是否照做，store 管不了。§7 证明的是同步调用确实发出了，不声称断电级持久（3a:670）。
 - **基线文件**不在 blob 存储里（§4.1）。基线目录里文件的完整性，由读基线目录的模块核对（overlay.md、session.md）。
-- **只靠时间窗保护的 blob**（增补 4"Blob protection"）：blob 的行只由 `record_checkpoint` 登记。put 之后、登记之前，或者只被一次操作临时使用（例如三方合并的结果先 put 再 get）的 blob，只有 1 小时的年龄下限保护它。某个模块的现场若要让一个 blob 活得更久，就要经一个登记它的 store 方法；目前这样的方法只有 `record_checkpoint`，需要别的就在该模块的 §2 列出，store.md 再加。
+- **只靠时间窗保护的 blob**（增补 4"Blob protection"）：blob 的行只由 `record_checkpoint` 登记。put 之后、登记之前，或者只被一次操作临时使用（例如三方合并的结果先 put 再 get）的 blob，只有 1 小时的年龄下限保护它。某个模块的现场若要让一个 blob 活得更久，就要经一个登记它的 store 方法；登记方法包括 `record_checkpoint` 与 v4 的 `put_sync_report`（§4.4b）。
 
 ## 5. 流程与算法
 

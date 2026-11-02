@@ -1,0 +1,18 @@
+# Store migration fixtures
+
+`store-v3.db` was generated from the unchanged v3 source at
+`c296625498d20edcccb7fc7ebd83a8226e16ad82` using the store APIs and the
+existing `support::world` fixture. It contains an active tracked workspace,
+a Pending proposal, an adopted replay target, and an Auto move activity row.
+
+To reproduce in an isolated checkout of that commit, copy
+`generate_v3_fixture.rs.txt` to `tests/generate_v3_fixture.rs`, then run:
+
+```
+CARGO_TARGET_DIR=$PWD/target RUSTC_WRAPPER=sccache cargo test -p strata-store --test generate_v3_fixture -- --ignored
+```
+
+The helper checks schema version 3 and refuses to overwrite an existing file.
+It closes the store before copying its standalone SQLite database, so no WAL
+sidecars are required. Its source is retained as text because it intentionally
+uses the pre-v4 API.

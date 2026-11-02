@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strata_apfs::{IoSide, classify_io_error};
 use strata_confirm::Confirmer;
-use strata_types::{Action, Code, Config, ConfirmToken, RepoConfig, RepoName, StrataError};
+use strata_types::{Action, Code, Config, ConfirmToken, RepoConfig, RepoName, StrataError, SyncDeps};
 
 use crate::{PinnedFlags, Result};
 
@@ -28,6 +28,7 @@ pub fn flags_of(rc: &RepoConfig) -> PinnedFlags {
         confirm: rc.publish.confirm,
         push: rc.publish.push,
         regenerable: rc.rm.regenerable.clone(),
+        sync_deps: Some(rc.sync.deps),
     }
 }
 
@@ -66,6 +67,8 @@ pub fn regenerable_narrower(pin: &[String], file: &[String]) -> bool {
 /// once, a relaxation does not).
 pub fn tighten(pin: &PinnedFlags, file: &PinnedFlags) -> PinnedFlags {
     PinnedFlags {
+        sync_deps: Some(if pin.sync_deps.or(file.sync_deps).unwrap_or(SyncDeps::Confirm) == SyncDeps::Confirm
+            || file.sync_deps.unwrap_or(SyncDeps::Confirm) == SyncDeps::Confirm { SyncDeps::Confirm } else { SyncDeps::Apply }),
         deploy_on_push: pin.deploy_on_push || file.deploy_on_push,
         confirm: pin.confirm || file.confirm,
         push: pin.push && file.push,
@@ -83,13 +86,14 @@ pub fn relaxes(pin: &PinnedFlags, file: &PinnedFlags) -> bool {
         || (pin.confirm && !file.confirm)
         || (!pin.push && file.push)
         || !regenerable_narrower(&pin.regenerable, &file.regenerable)
+        || (pin.sync_deps == Some(SyncDeps::Confirm) && file.sync_deps == Some(SyncDeps::Apply))
 }
 
 /// The pin of a repo that has none yet: the configured flags, but gated,
-/// and no `rm.regenerable` (fail closed: the configured list waits for
+/// `sync_deps = Confirm`, and no `rm.regenerable` (the configured values wait for
 /// `config relax`).
 pub fn unpinned(file: &PinnedFlags) -> PinnedFlags {
-    PinnedFlags { confirm: true, regenerable: Vec::new(), ..file.clone() }
+    PinnedFlags { confirm: true, regenerable: Vec::new(), sync_deps: Some(SyncDeps::Confirm), ..file.clone() }
 }
 
 /// `needs_human_confirm` over pinned flags: `confirm` alone gates.
@@ -103,6 +107,7 @@ pub fn apply(rc: &mut RepoConfig, f: &PinnedFlags) {
     rc.publish.confirm = f.confirm;
     rc.publish.push = f.push;
     rc.rm.regenerable = f.regenerable.clone();
+    rc.sync.deps = f.sync_deps.unwrap_or(SyncDeps::Confirm);
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +174,12 @@ impl Pins {
     /// The effective flags of `repo` (the pinned ones).
     pub fn pinned(&self, repo: &RepoName) -> Option<PinnedFlags> {
         self.state().pinned.get(repo).cloned()
+    }
+
+    /// Effective automatic-dependency policy; missing repos fail closed.
+    /// Read on each pass so a successful `config relax` takes effect at once.
+    pub fn effective_sync_deps(&self, repo: &RepoName) -> SyncDeps {
+        self.state().pinned.get(repo).and_then(|p| p.sync_deps).unwrap_or(SyncDeps::Confirm)
     }
 
     /// What the configuration file asks for.

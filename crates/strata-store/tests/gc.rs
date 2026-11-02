@@ -252,6 +252,7 @@ fn gc_reclaims_removed_sessions_after_keep() {
         origin: Some(a.clone()),
         from: set_id('a'),
         from_inputs: "1".repeat(64),
+        from_head: None,
         to: set_id('b'),
         to_inputs: "2".repeat(64),
         tree: None,
@@ -305,6 +306,7 @@ fn gc_keeps_pending_proposal_deps() {
         origin: None,
         from: set_id(from),
         from_inputs: "1".repeat(64),
+        from_head: None,
         to: set_id(to),
         to_inputs: "2".repeat(64),
         tree: Some(tree('1')),
@@ -678,6 +680,7 @@ fn gc_deletes_supersede_chains_across_batches() {
         origin: origin.clone(),
         from: set_id('a'),
         from_inputs: "1".repeat(64),
+        from_head: None,
         to: set_id(to),
         to_inputs: "2".repeat(64),
         tree: origin.is_none().then(|| tree('1')),
@@ -1039,4 +1042,38 @@ fn gc_preview_counts_and_writes_nothing() {
     let r = s.gc(K0).unwrap();
     assert_eq!((r.sessions, r.blobs, r.trash_removed), (1, 1, 1), "{r:?}");
     assert!(!blob_path(&env, &x).exists() && blob_path(&env, &y).exists());
+}
+
+#[test]
+fn gc_deletes_deps_auto_with_proposal() {
+    let (env, s) = setup();
+    let p = NewProposal { repo: repo("app"), origin: None, from: set_id('a'), from_inputs: "a".repeat(64),
+        from_head: None, to: set_id('b'), to_inputs: "b".repeat(64), tree: Some(tree('1')), head: Some(head('1')) };
+    let id = s.record_proposal(&p, None, t(20)).unwrap().unwrap();
+    s.set_deps_auto(id, DepsAutoState::Ready, None, t(21)).unwrap();
+    assert_eq!(s.gc(K0).unwrap().proposals, 0);
+    assert!(s.deps_auto(id).unwrap().is_some());
+    assert!(s.auto_applied(id, t(22)).unwrap());
+    assert_eq!(s.gc(K0).unwrap().proposals, 1);
+    assert!(s.proposal(id).unwrap().is_none());
+    assert!(s.deps_auto(id).unwrap().is_none());
+    assert_eq!(count(&env, "SELECT count(*) FROM deps_auto"), 0);
+}
+
+#[test]
+fn sync_report_ours_blob_resolvable_after_edit() {
+    let (env, s) = setup();
+    let id = session(&env, &s, "livelive", &g('1', 'a'));
+    let old = s.put_bytes(b"conflicting bytes before edit").unwrap();
+    let row = SyncReportRow { target: head('2'), generation: 1, path: rp("f"), kind: "text".into(),
+        ours_blob: Some(old.clone()), hunks: serde_json::json!([{"theirs_len": 1000000}]) };
+    s.put_sync_report(&id, &repo("app"), &head('2'), 1, &[row]).unwrap();
+    // The new edit has no checkpoint reference to the old blob.
+    s.put_bytes(b"new resolution bytes").unwrap();
+    floor0(&s);
+    assert_eq!(s.gc_preview(K0, &[]).unwrap().blobs, 0, "report retains its registered blob");
+    assert_eq!(s.gc(K0).unwrap().blobs, 1);
+    assert_eq!(s.read_blob(&old, 1024).unwrap(), b"conflicting bytes before edit");
+    s.delete_sync_report(&id, &repo("app")).unwrap();
+    assert_eq!(s.gc(K0).unwrap().blobs, 1);
 }

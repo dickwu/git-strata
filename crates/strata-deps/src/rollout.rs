@@ -144,6 +144,7 @@ pub fn ensure_target(ctx: &Ctx, id: ProposalId, tree_dir: &Path) -> Result<Targe
         },
         from: p.from.clone(),
         from_inputs: p.from_inputs.clone(),
+        from_head: p.from_head.clone(),
         to: set.id.clone(),
         to_inputs: set.inputs_hash.clone(),
         tree: p.tree.clone(),

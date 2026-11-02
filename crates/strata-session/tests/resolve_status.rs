@@ -521,6 +521,7 @@ fn record_pending(fx: &Fx, repo: &str, from: &DepsSetId, to: &DepsSetId) -> stra
                 origin: None,
                 from: from.clone(),
                 from_inputs: deps_inputs(fx, repo, from),
+                from_head: None,
                 to: to.clone(),
                 to_inputs: deps_inputs(fx, repo, to),
                 tree: Some(TreeOid::try_from(tree).unwrap()),

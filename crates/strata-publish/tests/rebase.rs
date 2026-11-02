@@ -124,6 +124,7 @@ fn draft(fx: &Fx, s: &SessionId) -> Proposal {
                     origin: ProposalOrigin::Session { session: s.clone() },
                     from: old.deps.clone(),
                     from_inputs: from_inputs.clone(),
+                    from_head: None,
                     to: to.clone(),
                     to_inputs: to_inputs.clone(),
                     tree: None,
