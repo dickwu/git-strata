@@ -1612,7 +1612,13 @@ dependencies = [
 name = "git-strata-desktop"
 version = "0.1.2"
 dependencies = [
+ "block2",
  "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-graphics",
+ "objc2-foundation",
+ "png",
  "serde",
  "serde_json",
  "strata-client",

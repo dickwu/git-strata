@@ -1,102 +1,113 @@
-//! The state the commands share: the daemon handle and the last replies
-//! (for the menu-bar item, which has no reads of its own in P1).
-
-use std::sync::Mutex;
-use std::time::SystemTime;
-
+//! Shared snapshots are recorded by blocking read flights, never by their waiters.
+use crate::{
+    daemon::{Daemon, Read},
+    error::GuiError,
+    tray_snapshot::{Snapshot, Stamp},
+};
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 
-use crate::daemon::{Daemon, Read};
-use crate::error::GuiError;
-use crate::tray_model::Snapshot;
-
-type OnChange = Box<dyn Fn(&Snapshot) + Send + Sync>;
+type OnChange = Arc<dyn Fn() + Send + Sync>;
+#[derive(Default)]
+pub(crate) struct SnapshotStore {
+    pub snapshot: Mutex<Snapshot>,
+    on_change: Mutex<Option<OnChange>>,
+}
+impl SnapshotStore {
+    pub fn record(
+        &self,
+        r: &Read,
+        generation: Option<u64>,
+        started: Stamp,
+        completed: Stamp,
+        result: &Result<Value, GuiError>,
+    ) {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .record(r, generation, started, completed, result);
+    }
+    pub fn attempt(&self, r: &Read, now: Stamp) {
+        if let Some(input) = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .input_mut(r)
+        {
+            input.last_attempt = Some(now);
+        }
+    }
+    pub fn timeout(&self, r: &Read, now: Stamp) {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .timeout(r, now);
+        self.notify();
+    }
+    pub fn notify(&self) {
+        let callback = self
+            .on_change
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+}
 
 pub struct AppState {
     daemon: Option<Daemon>,
-    snapshot: Mutex<Snapshot>,
-    on_change: Mutex<Option<OnChange>>,
+    store: Arc<SnapshotStore>,
 }
-
 impl AppState {
-    /// `daemon` is `None` when HOME is unset: every read then fails with
-    /// `no_home` instead of guessing a socket.
-    pub fn new(daemon: Option<Daemon>) -> AppState {
-        AppState {
-            daemon,
-            snapshot: Mutex::new(Snapshot::default()),
-            on_change: Mutex::new(None),
-        }
+    pub fn new(daemon: Option<Daemon>) -> Self {
+        let store = daemon.as_ref().map(|d| d.store.clone()).unwrap_or_default();
+        Self { daemon, store }
     }
-
-    pub fn set_on_change(&self, f: impl Fn(&Snapshot) + Send + Sync + 'static) {
-        *self.on_change.lock().unwrap_or_else(|p| p.into_inner()) = Some(Box::new(f));
+    pub fn set_on_change(&self, f: impl Fn() + Send + Sync + 'static) {
+        *self
+            .store
+            .on_change
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(f));
     }
-
     pub fn socket(&self) -> Option<String> {
         self.daemon
             .as_ref()
             .map(|d| d.socket().to_string_lossy().into_owned())
     }
-
     pub fn snapshot(&self) -> Snapshot {
-        self.snapshot
+        self.store
+            .snapshot
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
     }
-
     pub async fn read(&self, r: Read) -> Result<Value, GuiError> {
-        let d = self.daemon.as_ref().ok_or_else(GuiError::no_home)?;
-        let res = d.read(r.clone()).await;
-        self.record(&r, &res, SystemTime::now());
-        res
+        self.daemon
+            .as_ref()
+            .ok_or_else(GuiError::no_home)?
+            .read(r)
+            .await
     }
-
-    /// `deps_approve` (daemon.rs). Not recorded in the snapshot: the front
-    /// end refetches deps and sessions after every outcome, and those
-    /// reads update the menu bar.
+    pub async fn poll_read(&self, r: Read) -> Result<Value, GuiError> {
+        self.daemon
+            .as_ref()
+            .ok_or_else(GuiError::no_home)?
+            .poll_read(r)
+            .await
+    }
+    /// A write is never a tray input. The window refetches after every outcome.
     pub async fn deps_approve(
         &self,
         proposal: u64,
         sessions: Option<Vec<String>>,
     ) -> Result<Value, GuiError> {
-        let d = self.daemon.as_ref().ok_or_else(GuiError::no_home)?;
-        d.deps_approve(proposal, sessions).await
-    }
-
-    /// A reply says the daemon is up; `daemon_down` and `daemon_timeout`
-    /// say it is not. Other errors (a refused request, one already in
-    /// flight) say nothing about liveness and leave the snapshot alone.
-    pub fn record(&self, r: &Read, res: &Result<Value, GuiError>, now: SystemTime) {
-        let snap = {
-            let mut s = self.snapshot.lock().unwrap_or_else(|p| p.into_inner());
-            match res {
-                Ok(v) => {
-                    s.up = Some(true);
-                    s.updated = Some(now);
-                    match r {
-                        Read::DaemonStatus => s.daemon_status = Some(v.clone()),
-                        Read::Sessions => s.sessions = Some(v.clone()),
-                        Read::DepsList => s.deps = Some(v.clone()),
-                        _ => {}
-                    }
-                }
-                Err(e) if matches!(e.reason(), Some("daemon_down" | "daemon_timeout")) => {
-                    s.up = Some(false);
-                    s.updated = Some(now);
-                }
-                Err(_) => return,
-            }
-            s.clone()
-        };
-        if let Some(f) = self
-            .on_change
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        self.daemon
             .as_ref()
-        {
-            f(&snap);
-        }
+            .ok_or_else(GuiError::no_home)?
+            .deps_approve(proposal, sessions)
+            .await
     }
 }

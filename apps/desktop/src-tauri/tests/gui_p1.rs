@@ -15,7 +15,7 @@ use strata_desktop_lib::daemon::{Daemon, Read};
 use strata_desktop_lib::lifecycle::{self, Shell};
 use strata_desktop_lib::socket::socket_for_home;
 use strata_desktop_lib::state::AppState;
-use strata_desktop_lib::tray_model::{self, Icon, MAX_WAITING, Snapshot};
+use strata_desktop_lib::tray_model::{self, DownWhy, Icon, Input, MAX_WAITING, Snapshot, Stamp};
 
 fn fixture(name: &str) -> Value {
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -74,8 +74,10 @@ impl Fake {
                     }
                     Mode::Refuse => json!({ "id": req["id"], "ok": false, "error": {
                         "code": "NoMatch", "message": "no such session", "detail": { "reason": "session_unknown" } } }),
-                    Mode::PreChains if req["params"].get("chains").is_some() => json!({ "id": req["id"], "ok": false, "error": {
-                        "rpc": "Failed", "message": "invalid params: unknown field `chains`, expected one of `cwd`, `session`, `all`" } }),
+                    Mode::PreChains if req["params"].get("chains").is_some() => {
+                        json!({ "id": req["id"], "ok": false, "error": {
+                        "rpc": "Failed", "message": "invalid params: unknown field `chains`, expected one of `cwd`, `session`, `all`" } })
+                    }
                     Mode::Fixtures | Mode::PreChains => {
                         json!({ "id": req["id"], "ok": true, "data": fixture(fixture_for(&req)) })
                     }
@@ -204,9 +206,16 @@ fn gui_session_read_retries_without_chains_on_an_older_daemon() {
     let reqs = fake.requests();
     assert_eq!(reqs.len(), 2, "{reqs:?}");
     assert_eq!(reqs[0]["params"]["chains"], json!(true));
-    assert_eq!(reqs[1]["params"], json!({ "cwd": null, "session": "S1", "all": false }));
+    assert_eq!(
+        reqs[1]["params"],
+        json!({ "cwd": null, "session": "S1", "all": false })
+    );
     rt().block_on(d.read(Read::Sessions)).unwrap();
-    assert_eq!(fake.requests().len(), 3, "status{{all}} carries no chains: one request");
+    assert_eq!(
+        fake.requests().len(),
+        3,
+        "status{{all}} carries no chains: one request"
+    );
 }
 
 /// A daemon that accepts but never answers: the read gives up at its
@@ -281,21 +290,28 @@ fn gui_state_records_liveness_and_lists() {
     let state = AppState::new(Some(Daemon::new(fake.socket.clone())));
     let changes = Arc::new(Mutex::new(0));
     let c2 = changes.clone();
-    state.set_on_change(move |_| *c2.lock().unwrap() += 1);
-    assert_eq!(state.snapshot().up, None);
+    state.set_on_change(move || *c2.lock().unwrap() += 1);
+    assert!(state.snapshot().last_status_ok.is_none());
     let rt = rt();
     rt.block_on(state.read(Read::Sessions)).unwrap();
     rt.block_on(state.read(Read::DepsList)).unwrap();
     let s = state.snapshot();
-    assert_eq!(s.up, Some(true));
-    assert_eq!(s.sessions, Some(fixture("status_all")));
-    assert_eq!(s.deps, Some(fixture("deps_list")));
+    assert!(s.last_down.is_none());
+    assert_eq!(s.sessions.value, Some(fixture("status_all")));
+    assert_eq!(s.deps.value, Some(fixture("deps_list")));
     assert_eq!(*changes.lock().unwrap(), 2);
 
     // A refused request says nothing about liveness.
     let refused = Err(strata_desktop_lib::error::GuiError::in_flight("status"));
-    state.record(&Read::Sessions, &refused, SystemTime::now());
-    assert_eq!(state.snapshot().up, Some(true));
+    let mut snapshot = state.snapshot();
+    snapshot.record(
+        &Read::Sessions,
+        Some(2),
+        Stamp::now(),
+        Stamp::now(),
+        &refused,
+    );
+    assert!(snapshot.last_down.is_none());
     assert_eq!(*changes.lock().unwrap(), 2);
 
     drop(fake);
@@ -305,7 +321,10 @@ fn gui_state_records_liveness_and_lists() {
         .unwrap();
     let down = AppState::new(Some(Daemon::new(dir.path().join("absent.sock"))));
     rt.block_on(down.read(Read::DaemonStatus)).unwrap_err();
-    assert_eq!(down.snapshot().up, Some(false));
+    assert_eq!(
+        down.snapshot().last_down.map(|(_, why)| why),
+        Some(DownWhy::NotRunning)
+    );
 
     let no_home = AppState::new(None);
     let e = rt.block_on(no_home.read(Read::DaemonStatus)).unwrap_err();
@@ -314,11 +333,31 @@ fn gui_state_records_liveness_and_lists() {
 
 fn snap(sessions: Value, deps: Value, age: Duration, now: SystemTime) -> Snapshot {
     Snapshot {
-        up: Some(true),
-        sessions: Some(sessions),
-        deps: Some(deps),
-        daemon_status: None,
-        updated: Some(now - age),
+        sessions: Input {
+            value: Some(sessions),
+            at: Some(Stamp {
+                wall: now - age,
+                ..Stamp::now()
+            }),
+            ..Default::default()
+        },
+        deps: Input {
+            value: Some(deps),
+            at: Some(Stamp {
+                wall: now - age,
+                ..Stamp::now()
+            }),
+            ..Default::default()
+        },
+        daemon_status: Input {
+            value: Some(json!({"api":1,"fds":{},"features":[]})),
+            at: Some(Stamp {
+                wall: now - age,
+                ..Stamp::now()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
     }
 }
 
@@ -328,12 +367,17 @@ fn gui_tray_status_lines() {
     let m = tray_model::model(&Snapshot::default(), now);
     assert_eq!(
         (m.icon, m.status_line.as_str()),
-        (Icon::Down, "Checking the daemon…")
+        (Icon::Checking, "Checking the daemon…")
     );
 
     let down = Snapshot {
-        up: Some(false),
-        updated: Some(now),
+        last_down: Some((
+            Stamp {
+                wall: now,
+                ..Stamp::now()
+            },
+            DownWhy::NotRunning,
+        )),
         ..Default::default()
     };
     let m = tray_model::model(&down, now);
@@ -374,7 +418,7 @@ fn gui_tray_status_lines() {
     let m = tray_model::model(&stale, now);
     assert_eq!(
         (m.icon, m.status_line.as_str()),
-        (Icon::Down, "Updated 3 min ago")
+        (Icon::Checking, "Not updated for 3 min")
     );
 }
 
@@ -421,7 +465,7 @@ fn gui_tray_no_agent_text() {
 
     let now = SystemTime::now();
     let m = tray_model::model(&snap(sessions, deps, Duration::ZERO, now), now);
-    assert_eq!(m.icon, Icon::Pending);
+    assert_eq!(m.icon, Icon::Waiting);
     // 4 pending proposals + 4 workspaces with conflicts; the
     // AwaitingPublish one is not waiting for the human.
     assert_eq!(m.waiting.len(), MAX_WAITING);
@@ -429,7 +473,7 @@ fn gui_tray_no_agent_text() {
     let labels: Vec<_> = m.waiting.iter().map(|w| w.label()).collect();
     assert_eq!(labels[0], "Deps proposal 10 in tool · 0 sessions");
     assert_eq!(labels[4], "2 conflicts in tool · 1 session");
-    let mut text = vec![m.status_line.clone()];
+    let mut text = vec![m.status_line.clone(), m.tooltip.clone()];
     text.extend(labels);
     text.extend(m.waiting.iter().map(|w| w.id()));
     for t in &text {
