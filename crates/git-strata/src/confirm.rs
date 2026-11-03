@@ -9,7 +9,9 @@ use std::io::BufRead;
 use serde_json::{Value, json};
 use strata_gitio::Git;
 use strata_store::Store;
-use strata_types::{CheckpointId, Code, Config, ProposalId, RepoName, RepoPath, SessionId, StrataError};
+use strata_types::{
+    CheckpointId, Code, Config, ProposalId, RepoName, RepoPath, SessionId, StrataError,
+};
 
 use crate::args::AcceptOrigin;
 use crate::ctx::Ctx;
@@ -97,7 +99,30 @@ pub fn config_relax(ctx: &Ctx, repo: &str) -> Result<Envelope> {
     let config = ctx.config().ok();
     known_repo(config.as_ref(), &name)?;
     eprintln!("confirm relaxing the pinned safety settings of {name} to what config.toml says");
-    let data = ctx.call("config_relax", json!({ "repo": name.as_str() }), Kind::Write)?;
+    let mut params = json!({ "repo": name.as_str() });
+    if crate::reload::supported(ctx)? {
+        let cfg = config
+            .as_ref()
+            .and_then(|c| c.repos.get(&name))
+            .ok_or_else(|| {
+                StrataError::new(
+                    Code::InvalidInput,
+                    "read config.toml before confirming its flags",
+                )
+            })?;
+        let shown = strata_daemon::confirm_flow::flags_of(cfg);
+        let pinned = std::fs::read(&ctx.paths.pins)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .map(|p| p["repos"][name.as_str()].clone());
+        eprintln!(
+            "{} -> {}",
+            pinned.unwrap_or(Value::Null),
+            serde_json::to_value(&shown).unwrap()
+        );
+        params["shown"] = serde_json::to_value(shown).unwrap();
+    }
+    let data = ctx.call("config_relax", params, Kind::Write)?;
     Ok(Envelope::ok(data))
 }
 

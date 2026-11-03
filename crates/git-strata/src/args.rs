@@ -371,6 +371,9 @@ pub enum DaemonCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCmd {
+    /// Apply safe config changes without restarting the daemon (no TTY needed)
+    #[command(after_long_help = crate::help::CONFIG_RELOAD_AFTER)]
+    Reload,
     /// Accept a relaxed safety setting of a repo (needs a TTY and confirmation)
     #[command(after_long_help = crate::help::CONFIG_AFTER)]
     Relax {

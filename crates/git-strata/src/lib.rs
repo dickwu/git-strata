@@ -15,6 +15,7 @@ mod help;
 pub mod interrupt;
 pub mod launch;
 pub mod local;
+mod reload;
 pub mod ro;
 pub mod rpc;
 pub mod show;
@@ -69,6 +70,9 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
     {
         return sync::hook(args, started);
     }
+    if matches!(cli.cmd, Cmd::Config(ConfigCmd::Reload)) {
+        return reload::run();
+    }
     // status-perf C: `ls --table` prints a table instead of a successful
     // envelope (a stated exception to D19); errors stay envelopes.
     let table = matches!(cli.cmd, Cmd::Ls { table: true });
@@ -90,10 +94,17 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
         {
             if tty::stderr_is_tty() {
                 for p in &pending {
-                    eprintln!("pending proposal {} for {}", p["id"], p["repo"].as_str().unwrap_or(""));
+                    eprintln!(
+                        "pending proposal {} for {}",
+                        p["id"],
+                        p["repo"].as_str().unwrap_or("")
+                    );
                 }
             }
-            m.insert("pending_proposals".into(), serde_json::Value::Array(pending));
+            m.insert(
+                "pending_proposals".into(),
+                serde_json::Value::Array(pending),
+            );
         }
     }
     let code = emit_stdout(&env);
@@ -148,10 +159,16 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
     use crate::confirm as c;
     // Argument checks that need no environment come first.
     match &cmd {
-        Cmd::Resolve { abandon, accept, .. } if *abandon == *accept => {
+        Cmd::Resolve {
+            abandon, accept, ..
+        } if *abandon == *accept => {
             return c::resolve_choice_error(*abandon as usize + *accept as usize);
         }
-        Cmd::Chain { accept_origin, restore, .. } if accept_origin.is_some() == *restore => {
+        Cmd::Chain {
+            accept_origin,
+            restore,
+            ..
+        } if accept_origin.is_some() == *restore => {
             return c::resolve_choice_error(accept_origin.is_some() as usize + *restore as usize);
         }
         _ => {}
@@ -164,33 +181,91 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Publish { from, assign } => c::publish(&ctx, &from, assign.as_deref()),
         Cmd::Assign { file, session } => c::assign(&ctx, &file, &session),
         Cmd::Rm { session, discard } => c::rm(&ctx, &session, discard),
-        Cmd::Resolve { session, repo, abandon, accept } => c::resolve(&ctx, &session, &repo, abandon, accept),
-        Cmd::Chain { repo, accept_origin, restore } => c::chain(&ctx, &repo, accept_origin, restore),
+        Cmd::Resolve {
+            session,
+            repo,
+            abandon,
+            accept,
+        } => c::resolve(&ctx, &session, &repo, abandon, accept),
+        Cmd::Chain {
+            repo,
+            accept_origin,
+            restore,
+        } => c::chain(&ctx, &repo, accept_origin, restore),
+        Cmd::Config(ConfigCmd::Reload) => reload::request(&ctx).map(|(env, _)| env),
         Cmd::Config(ConfigCmd::Relax { repo }) => c::config_relax(&ctx, &repo),
-        Cmd::New { ticket_flag, ticket, repo, repos, agent } => cmds::new(&ctx, ticket_flag, ticket, &repo, &repos, agent.as_deref()),
+        Cmd::New {
+            ticket_flag,
+            ticket,
+            repo,
+            repos,
+            agent,
+        } => cmds::new(&ctx, ticket_flag, ticket, &repo, &repos, agent.as_deref()),
         Cmd::Add { session, repo } => cmds::add(&ctx, session, &repo),
         Cmd::Status { sel, brief: true } => cmds::status_brief(&ctx, &sel),
         Cmd::Status { sel, brief: false } => cmds::status(&ctx, &sel),
         Cmd::Ls { .. } => cmds::ls(&ctx),
-        Cmd::Checkpoint { tool_call, message, session, paths } => cmds::checkpoint(&ctx, tool_call, message, session, &paths),
-        Cmd::Restore { checkpoint, paths, session } => cmds::restore(&ctx, &checkpoint, &paths, session),
+        Cmd::Checkpoint {
+            tool_call,
+            message,
+            session,
+            paths,
+        } => cmds::checkpoint(&ctx, tool_call, message, session, &paths),
+        Cmd::Restore {
+            checkpoint,
+            paths,
+            session,
+        } => cmds::restore(&ctx, &checkpoint, &paths, session),
         Cmd::Grep { pattern, sel } => cmds::grep(&ctx, &pattern, &sel),
         Cmd::Files { glob, sel } => cmds::files(&ctx, glob.as_deref(), &sel),
-        Cmd::Diff { base, session, between, repo } => cmds::diff(&ctx, base, session, between, repo),
-        Cmd::Deps(DepsCmd::Propose { session, repo, switch }) => cmds::deps_propose(&ctx, session, repo, switch),
+        Cmd::Diff {
+            base,
+            session,
+            between,
+            repo,
+        } => cmds::diff(&ctx, base, session, between, repo),
+        Cmd::Deps(DepsCmd::Propose {
+            session,
+            repo,
+            switch,
+        }) => cmds::deps_propose(&ctx, session, repo, switch),
         Cmd::Deps(DepsCmd::List { repo }) => cmds::deps_list(&ctx, repo),
         Cmd::Gc { store, dry_run } => cmds::gc(&ctx, store, dry_run),
         Cmd::Du { refresh } => cmds::du(&ctx, refresh),
         Cmd::Daemon(DaemonCmd::Start) => launch::start(&ctx.paths.home),
         Cmd::Daemon(DaemonCmd::Stop) => launch::stop(&ctx.paths.home),
         Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status(),
-        Cmd::Session(SessionCmd::Ports { session, repo, all, check, reassign }) => devports::ports(
+        Cmd::Session(SessionCmd::Ports {
+            session,
+            repo,
+            all,
+            check,
+            reassign,
+        }) => devports::ports(
             &ctx,
-            &devports::PortsArgs { session: session.as_deref(), repo: repo.as_deref(), all, check, reassign },
+            &devports::PortsArgs {
+                session: session.as_deref(),
+                repo: repo.as_deref(),
+                all,
+                check,
+                reassign,
+            },
         ),
-        Cmd::Session(SessionCmd::Exec { session, repo, tauri, no_check, cmd }) => devports::exec(
+        Cmd::Session(SessionCmd::Exec {
+            session,
+            repo,
+            tauri,
+            no_check,
+            cmd,
+        }) => devports::exec(
             &ctx,
-            &devports::ExecArgs { session: session.as_deref(), repo: repo.as_deref(), tauri, no_check, cmd: &cmd },
+            &devports::ExecArgs {
+                session: session.as_deref(),
+                repo: repo.as_deref(),
+                tauri,
+                no_check,
+                cmd: &cmd,
+            },
         ),
     }
 }

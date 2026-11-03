@@ -9,7 +9,10 @@ use serde_json::{Map, Value, json};
 use strata_overlay::Overlay;
 use strata_search::{GrepOpts, Search, Which};
 use strata_store::Store;
-use strata_types::{CheckpointId, CheckpointReason, Code, Config, EntryKind, RepoName, RepoPath, SessionId, StrataError};
+use strata_types::{
+    CheckpointId, CheckpointReason, Code, Config, EntryKind, RepoName, RepoPath, SessionId,
+    StrataError,
+};
 
 use crate::args::Select;
 use crate::ctx::Ctx;
@@ -1142,9 +1145,24 @@ pub fn daemon_status() -> Result<Envelope> {
             data["running"] = json!(true);
             data["holders"] = json!(v["holds"].as_array().cloned().unwrap_or_default());
             let warnings = v["warnings"].as_array().cloned().unwrap_or_default();
-            let unknown: Vec<Value> = warnings.iter().filter_map(|w| w.get("UnknownPublish").map(|u| u["id"].clone())).collect();
+            let unknown: Vec<Value> = warnings
+                .iter()
+                .filter_map(|w| w.get("UnknownPublish").map(|u| u["id"].clone()))
+                .collect();
             data["unknown_publishes"] = json!(unknown);
-            warnings.iter().for_each(alert);
+            for warning in &warnings {
+                if let Some(failure) = warning.get("ConfigReloadFailed") {
+                    eprintln!(
+                        "config.toml not applied: {}",
+                        failure["reason"].as_str().unwrap_or("reload failed")
+                    );
+                } else {
+                    alert(warning);
+                }
+            }
+            if let Some(config) = v.get("config") {
+                data["config"] = config.clone();
+            }
             data["alerts"] = json!(warnings);
             // The daemon's descriptor count (open, soft limit, ...), as is.
             if let Some(f) = v.get("fds") {
@@ -1158,7 +1176,12 @@ pub fn daemon_status() -> Result<Envelope> {
         Err(CallError::Down(_)) => {}
         Err(CallError::Failed(e)) => return Err(e),
     }
-    let lookup = move || ctx.config().ok().and_then(|c| ro::open_store(&c).ok()).and_then(|s| ro::cwd_session(&s).ok().flatten());
+    let lookup = move || {
+        ctx.config()
+            .ok()
+            .and_then(|c| ro::open_store(&c).ok())
+            .and_then(|s| ro::cwd_session(&s).ok().flatten())
+    };
     // With the daemon up the answer is already in hand; the cwd lookup reads
     // the store on the volume, which can block (a wedged volume), so it gets
     // STATUS_LOOKUP_WAIT on its own thread and is dropped after that.
