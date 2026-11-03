@@ -293,10 +293,12 @@ impl Cache {
                     auto,
                     conflicts: rec.conflicts.clone(),
                     unpublished: Some(live.unpublished),
-                    fix: Some(format!(
-                        "git-strata sync --session {} --repo {repo}",
-                        row.manifest.id
-                    )),
+                    fix: cfg.follow_main().then(|| {
+                        format!(
+                            "git-strata sync --session {} --repo {repo}",
+                            row.manifest.id
+                        )
+                    }),
                 },
             );
         }

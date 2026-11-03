@@ -56,7 +56,12 @@ fn with_session(f: impl FnOnce(&Dfx, &Daemon<'_>, &SessionId)) {
 fn with_session_quiet(quiet: Option<u64>, f: impl FnOnce(&Dfx, &Daemon<'_>, &SessionId)) {
     let mut fx = fixture();
     if let Some(q) = quiet {
-        fx.config.repos.get_mut(&repo_name("tool")).unwrap().rebase.quiet_secs = q;
+        fx.config
+            .repos
+            .get_mut(&repo_name("tool"))
+            .unwrap()
+            .rebase
+            .quiet_secs = q;
         fx.write_config();
     }
     let core = fx.prepare().unwrap();
@@ -260,6 +265,51 @@ fn resolved_missing_reported_path_still_refuses() {
         assert_eq!(reason(&e), Some("sync_conflict"));
         assert!(d.core.store.move_intents(s).unwrap().is_empty());
     });
+}
+
+#[test]
+fn sync_partial_resolution_can_repeat_accepted_paths() {
+    for keep in [false, true] {
+        with_session(|fx, d, s| {
+            fs::write(ws(d.core, s, "tool").join("b"), lines(&[(2, "ours")])).unwrap();
+            land(fx, &[("b", &lines(&[(2, "theirs"), (10, "upstream b")]))]);
+            let first = conflict(fx, d, s);
+            let rn = repo_name("tool");
+            let original = d.core.store.sync_report(s, &rn).unwrap();
+            let mut r = resolve(s, &first);
+            if keep {
+                r.keep = std::mem::take(&mut r.resolved);
+            } else {
+                fs::write(ws(d.core, s, "tool").join("a"), lines(&[(2, "both")])).unwrap();
+            }
+            for _ in 0..2 {
+                let e = sync_move::run(d, r.clone()).unwrap_err();
+                assert_eq!(e.code, Code::Conflict, "{e:?}");
+                let detail = e.detail.as_ref().unwrap();
+                assert_eq!(detail[if keep { "kept" } else { "resolved" }][0], "a");
+                assert_eq!(detail["conflicts"].as_array().unwrap().len(), 1);
+                assert_eq!(detail["conflicts"][0]["path"], "b");
+                let report = d.core.store.sync_report(s, &rn).unwrap();
+                assert_eq!(
+                    report.iter().find(|row| row.path == rp("a")),
+                    original.iter().find(|row| row.path == rp("a"))
+                );
+                assert!(d.core.store.move_intents(s).unwrap().is_empty());
+            }
+            fs::write(ws(d.core, s, "tool").join("b"), lines(&[(2, "both b")])).unwrap();
+            r.resolved.push(rp("b"));
+            let v = sync_move::run(d, r).unwrap();
+            assert_eq!(v["repos"]["tool"]["result"], "moved");
+            assert_eq!(
+                fs::read(ws(d.core, s, "tool").join("a")).unwrap(),
+                lines(&[(2, if keep { "ours" } else { "both" }), (10, "upstream")])
+            );
+            assert_eq!(
+                fs::read(ws(d.core, s, "tool").join("b")).unwrap(),
+                lines(&[(2, "both b"), (10, "upstream b")])
+            );
+        });
+    }
 }
 
 #[test]
@@ -681,6 +731,26 @@ fn sync_confirm_and_drift_move_source_only() {
                 .deps,
             old
         );
+        let again = sync_move::run(&d, req(&s)).unwrap();
+        assert_eq!(again["repos"]["tool"]["result"], "waiting");
+        assert_eq!(
+            again["repos"]["tool"]["deps"]["state"],
+            v["repos"]["tool"]["deps"]["state"]
+        );
+        assert_eq!(
+            again["repos"]["tool"]["deps"]["proposal"],
+            v["repos"]["tool"]["deps"]["proposal"]
+        );
+        assert!(again["repos"]["tool"]["deps"]["proposal"].is_number());
+        if confirm {
+            assert_eq!(
+                again["repos"]["tool"]["deps"]["fix"],
+                format!(
+                    "ask the human: git-strata deps approve {}",
+                    v["repos"]["tool"]["deps"]["proposal"]
+                )
+            );
+        }
     }
 }
 
@@ -893,10 +963,23 @@ fn legacy_conflict(fx: &Dfx, d: &Daemon<'_>, s: &SessionId) {
     let rn = repo_name("tool");
     let git = &d.core.gits[&rn];
     git.fetch("origin", "main").unwrap();
-    let old = d.core.store.session(s).unwrap().unwrap().manifest.repos[&rn].base.clone();
-    let target = d.sessions.ensure_base_for(&rn, &git.tree_of(&head).unwrap(), &old.deps).unwrap();
-    d.core.locks.with_repo(&rn, || d.sessions.move_workspace(s, &git.repo_id(), target, head)).unwrap();
-    assert_eq!(d.core.store.session(s).unwrap().unwrap().workspaces[&rn].conflicts, vec![rp("a")]);
+    let old = d.core.store.session(s).unwrap().unwrap().manifest.repos[&rn]
+        .base
+        .clone();
+    let target = d
+        .sessions
+        .ensure_base_for(&rn, &git.tree_of(&head).unwrap(), &old.deps)
+        .unwrap();
+    d.core
+        .locks
+        .with_repo(&rn, || {
+            d.sessions.move_workspace(s, &git.repo_id(), target, head)
+        })
+        .unwrap();
+    assert_eq!(
+        d.core.store.session(s).unwrap().unwrap().workspaces[&rn].conflicts,
+        vec![rp("a")]
+    );
 }
 
 #[test]
@@ -909,7 +992,10 @@ fn legacy_conflicts_survive_automatic_follow() {
         d.core.gits[&rn].fetch("origin", "main").unwrap();
         strata_daemon::main_sync::reconcile(d.core, &rn).unwrap();
         assert!(d.core.store.rebase_pending_of(s, &rn).unwrap().is_some());
-        strata_daemon::handlers::catch_up_pass(d, SystemTime::now() + std::time::Duration::from_secs(7200));
+        strata_daemon::handlers::catch_up_pass(
+            d,
+            SystemTime::now() + std::time::Duration::from_secs(7200),
+        );
         let rec = d.core.store.session(s).unwrap().unwrap();
         assert_eq!(rec.manifest.repos[&rn].head, head, "the automatic move ran");
         assert_eq!(rec.workspaces[&rn].conflicts, vec![rp("a")]);
@@ -917,7 +1003,10 @@ fn legacy_conflicts_survive_automatic_follow() {
         let mut r = req(s);
         r.fetch = false;
         r.keep = vec![rp("a")];
-        assert_eq!(sync_move::run(d, r).unwrap()["repos"]["tool"]["result"], "conflicts_cleared");
+        assert_eq!(
+            sync_move::run(d, r).unwrap()["repos"]["tool"]["result"],
+            "conflicts_cleared"
+        );
     });
 }
 
@@ -934,8 +1023,15 @@ fn legacy_conflicts_survive_unacknowledged_agent_sync() {
         assert_eq!(rec.workspaces[&rn].conflicts, vec![rp("a")]);
         let mut r = req(s);
         r.resolved = vec![rp("a")];
-        assert_eq!(sync_move::run(d, r).unwrap()["repos"]["tool"]["result"], "conflicts_cleared");
-        assert!(d.core.store.session(s).unwrap().unwrap().workspaces[&rn].conflicts.is_empty());
+        assert_eq!(
+            sync_move::run(d, r).unwrap()["repos"]["tool"]["result"],
+            "conflicts_cleared"
+        );
+        assert!(
+            d.core.store.session(s).unwrap().unwrap().workspaces[&rn]
+                .conflicts
+                .is_empty()
+        );
     });
 }
 
@@ -947,7 +1043,14 @@ fn legacy_conflicts_acknowledged_after_recovered_move_scene() {
         let st = &d.core.store;
         let ws = st.session(s).unwrap().unwrap().manifest.repos[&rn].clone();
         let n = st
-            .begin_move(s, &rn, &ws.base, &ws.head, &ws.path.with_file_name(".scene-move"), SystemTime::now())
+            .begin_move(
+                s,
+                &rn,
+                &ws.base,
+                &ws.head,
+                &ws.path.with_file_name(".scene-move"),
+                SystemTime::now(),
+            )
             .unwrap();
         st.set_move_state(
             s,
@@ -959,16 +1062,33 @@ fn legacy_conflicts_acknowledged_after_recovered_move_scene() {
             SystemTime::now(),
         )
         .unwrap();
-        st.fail_move(s, &rn, n, &serde_json::json!({"failed":"swap"}), SystemTime::now()).unwrap();
+        st.fail_move(
+            s,
+            &rn,
+            n,
+            &serde_json::json!({"failed":"swap"}),
+            SystemTime::now(),
+        )
+        .unwrap();
         st.resolve_move(s, &rn, n, true, SystemTime::now()).unwrap();
         let rec = st.session(s).unwrap().unwrap();
-        assert!(rec.workspaces[&rn].scene.is_some(), "the scene stays as history");
+        assert!(
+            rec.workspaces[&rn].scene.is_some(),
+            "the scene stays as history"
+        );
         assert_eq!(rec.workspaces[&rn].conflicts, vec![rp("a")]);
         let mut r = req(s);
         r.fetch = false;
         r.keep = vec![rp("a")];
-        assert_eq!(sync_move::run(d, r).unwrap()["repos"]["tool"]["result"], "conflicts_cleared");
-        assert!(st.session(s).unwrap().unwrap().workspaces[&rn].conflicts.is_empty());
+        assert_eq!(
+            sync_move::run(d, r).unwrap()["repos"]["tool"]["result"],
+            "conflicts_cleared"
+        );
+        assert!(
+            st.session(s).unwrap().unwrap().workspaces[&rn]
+                .conflicts
+                .is_empty()
+        );
     });
 }
 
@@ -986,7 +1106,12 @@ fn legacy_conflicts_acknowledged_on_repo_not_following() {
     fx.write_config();
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
-    let s = d.sessions.new(None, &[repo_name("tool")]).unwrap().manifest.id;
+    let s = d
+        .sessions
+        .new(None, &[repo_name("tool")])
+        .unwrap()
+        .manifest
+        .id;
     legacy_conflict(&fx, &d, &s);
     let rn = repo_name("tool");
     let mut r = req(&s);
@@ -994,12 +1119,152 @@ fn legacy_conflicts_acknowledged_on_repo_not_following() {
     r.keep = vec![rp("b")];
     let e = sync_move::run(&d, r).unwrap_err();
     assert_eq!(e.detail.unwrap()["reason"], "resolved_unrelated");
-    assert_eq!(core.store.session(&s).unwrap().unwrap().workspaces[&rn].conflicts, vec![rp("a")]);
+    assert_eq!(
+        core.store.session(&s).unwrap().unwrap().workspaces[&rn].conflicts,
+        vec![rp("a")]
+    );
     let mut r = req(&s);
     r.fetch = false;
     r.keep = vec![rp("a")];
     let v = sync_move::run(&d, r).unwrap();
     assert_eq!(v["repos"]["tool"]["result"], "conflicts_cleared", "{v}");
-    assert!(core.store.session(&s).unwrap().unwrap().workspaces[&rn].conflicts.is_empty());
-    assert_eq!(sync_move::run(&d, req(&s)).unwrap()["repos"]["tool"]["result"], "not_following");
+    assert_eq!(v["repos"]["tool"]["following"], false);
+    assert!(
+        core.store.session(&s).unwrap().unwrap().workspaces[&rn]
+            .conflicts
+            .is_empty()
+    );
+    assert_eq!(
+        sync_move::run(&d, req(&s)).unwrap()["repos"]["tool"]["result"],
+        "not_following"
+    );
+}
+
+#[test]
+fn legacy_conflicts_acknowledged_before_behind_or_diverged_move() {
+    for diverged in [false, true] {
+        for keep in [false, true] {
+            with_session(|fx, d, s| {
+                legacy_conflict(fx, d, s);
+                let rn = repo_name("tool");
+                let before = d.core.store.session(s).unwrap().unwrap();
+                let git = &d.core.gits[&rn];
+                let main = fx.main("tool");
+                if diverged {
+                    let parent = fx.sb.git(&main, &["rev-parse", "HEAD^"]);
+                    let tree = fx.sb.tree_of(&main, "HEAD");
+                    let other = fx
+                        .sb
+                        .git(&main, &["commit-tree", &tree, "-p", &parent, "-m", "fork"]);
+                    fx.sb.git(
+                        &main,
+                        &["update-ref", "refs/strata/remotes/origin/main", &other],
+                    );
+                } else {
+                    land(fx, &[("b", &lines(&[(5, "behind")]))]);
+                    git.fetch("origin", "main").unwrap();
+                }
+                let moves = d.core.store.move_intents(s).unwrap().len();
+                let mut r = req(s);
+                r.fetch = false;
+                if keep {
+                    r.keep = vec![rp("a")];
+                } else {
+                    r.resolved = vec![rp("a")];
+                }
+                let v = sync_move::run(d, r).unwrap();
+                assert_eq!(v["repos"]["tool"]["result"], "conflicts_cleared", "{v}");
+                assert_eq!(v["repos"]["tool"]["following"], true);
+                let after = d.core.store.session(s).unwrap().unwrap();
+                assert_eq!(before.manifest.repos, after.manifest.repos);
+                assert_eq!(
+                    before.workspaces[&rn].generation,
+                    after.workspaces[&rn].generation
+                );
+                assert!(after.workspaces[&rn].conflicts.is_empty());
+                assert_eq!(d.core.store.move_intents(s).unwrap().len(), moves);
+            });
+        }
+    }
+}
+
+#[test]
+fn legacy_conflicts_acknowledged_with_unrelated_saved_report() {
+    with_session(|fx, d, s| {
+        legacy_conflict(fx, d, s);
+        let rn = repo_name("tool");
+        fs::write(ws(d.core, s, "tool").join("b"), lines(&[(2, "ours")])).unwrap();
+        land(fx, &[("b", &lines(&[(2, "theirs")]))]);
+        let conflict = sync_move::run(d, req(s)).unwrap_err();
+        assert_eq!(reason(&conflict), Some("sync_conflict"));
+        let report = d.core.store.sync_report(s, &rn).unwrap();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].path, rp("b"));
+        let before = d.core.store.session(s).unwrap().unwrap();
+        let mut r = req(s);
+        r.resolved = vec![rp("a")];
+        let v = sync_move::run(d, r).unwrap();
+        assert_eq!(v["repos"]["tool"]["result"], "conflicts_cleared");
+        assert_eq!(d.core.store.sync_report(s, &rn).unwrap(), report);
+        let after = d.core.store.session(s).unwrap().unwrap();
+        assert_eq!(before.manifest.repos, after.manifest.repos);
+        assert!(after.workspaces[&rn].conflicts.is_empty());
+    });
+}
+
+#[test]
+fn legacy_conflicts_acknowledged_with_follow_main_false_and_g0_refuses() {
+    for open_move in [false, true] {
+        let mut fx = fixture();
+        let rn = repo_name("tool");
+        let cfg = fx.config.repos.get_mut(&rn).unwrap();
+        cfg.sync.follow_main = Some(false);
+        cfg.sync.deps = strata_types::SyncDeps::Confirm;
+        fx.write_config();
+        let core = fx.prepare().unwrap();
+        let d = Daemon::start(&core).unwrap();
+        let s = d
+            .sessions
+            .new(None, std::slice::from_ref(&rn))
+            .unwrap()
+            .manifest
+            .id;
+        legacy_conflict(&fx, &d, &s);
+        let before = core.store.session(&s).unwrap().unwrap();
+        if open_move {
+            let w = &before.manifest.repos[&rn];
+            core.store
+                .begin_move(
+                    &s,
+                    &rn,
+                    &w.base,
+                    &w.head,
+                    &w.path.with_file_name(".open-move"),
+                    SystemTime::now(),
+                )
+                .unwrap();
+        }
+        let mut r = req(&s);
+        r.keep = vec![rp("a")];
+        if open_move {
+            let e = sync_move::run(&d, r).unwrap_err();
+            assert_eq!(e.code, Code::Busy);
+            assert_eq!(e.detail.as_ref().unwrap()["defer"]["reason"], "state");
+            assert_eq!(
+                e.detail.as_ref().unwrap()["defer"]["detail"]["open_move"],
+                true
+            );
+            assert_eq!(
+                core.store.session(&s).unwrap().unwrap().workspaces[&rn].conflicts,
+                vec![rp("a")]
+            );
+        } else {
+            let v = sync_move::run(&d, r).unwrap();
+            assert_eq!(v["repos"]["tool"]["result"], "conflicts_cleared");
+            assert_eq!(v["repos"]["tool"]["following"], false);
+            let after = core.store.session(&s).unwrap().unwrap();
+            assert!(after.workspaces[&rn].conflicts.is_empty());
+            assert_eq!(before.manifest.repos, after.manifest.repos);
+        }
+    }
 }
