@@ -179,7 +179,7 @@ export function repoUpstream(s: SessionEntry, repo: string): UpstreamRepo | unde
 export function syncCommand(session: string, repo: string): string {
   // Real ids/names are validated by strata-types. Quoting also keeps imported fixtures safe.
   const quote = (v: string) => (/^[a-zA-Z0-9_.-]+$/.test(v) ? v : `'${v.replace(/'/g, "'\\''")}'`);
-  return `git-strata sync --session ${quote(session)} --repo ${quote(repo)}`;
+  return `cd ~ && git-strata sync --session ${quote(session)} --repo ${quote(repo)}`;
 }
 function pendingIncludes(s: SessionEntry, repo: string, id: number): boolean {
   return (s.status.workspaces?.[repo]?.pending ?? []).some(

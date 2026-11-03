@@ -474,7 +474,9 @@ describe('main-sync waiting groups', () => {
     const items = waitingGroups(s, d, capable, now)[0].items;
     expect(items).toHaveLength(1);
     expect(items[0].kind).toBe('conflict');
-    expect(items[0].command).toBe(`git-strata sync --session ${e.status.manifest.id} --repo web`);
+    expect(items[0].command).toBe(
+      `cd ~ && git-strata sync --session ${e.status.manifest.id} --repo web`
+    );
   });
   test('cached behind and detail upstream require the capability; cold entries are not zero', () => {
     const { s } = pending();
