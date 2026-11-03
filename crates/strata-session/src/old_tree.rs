@@ -86,6 +86,8 @@ pub(crate) struct OldTrees {
 pub(crate) enum AutoCheck {
     /// No `move_activity` row: an `Explicit` move (today's rules).
     Explicit,
+    /// Interrupted: no judgement and no permanent late-write notice.
+    Skipped,
     /// Changed since the baseline, a late-write notice already there, or
     /// no readable baseline: never retired.
     Late,
@@ -136,20 +138,17 @@ impl<'a> Sessions<'a> {
         ino: u64,
     ) -> Option<OldTreeVerdict> {
         let key = key_of(i);
-        let v = lock(&self.old_trees.verdicts)
-            .get(&key)
-            .filter(|v| v.path == path && v.ino == ino)
-            .cloned();
-        let fresh = v
-            .as_ref()
-            .is_some_and(|v| v.checked_at.elapsed().is_ok_and(|age| age < OLD_TREE_TTL));
-        if !fresh {
+        let v = lock(&self.old_trees.verdicts).get(&key).filter(|v| v.path == path && v.ino == ino).cloned();
+        let fresh = v.as_ref().is_some_and(|v| v.checked_at.elapsed().is_ok_and(|age| age < OLD_TREE_TTL));
+        if !fresh && !lock(&self.old_trees.delayed).contains_key(&key) {
             self.queue_old_tree(key, path.to_path_buf(), ino);
         }
         v
     }
 
     fn queue_old_tree(&self, key: OldTreeKey, path: PathBuf, ino: u64) {
+        let delayed = lock(&self.old_trees.delayed);
+        if delayed.contains_key(&key) { return; }
         lock(&self.old_trees.pending).insert(key, (path, ino));
         self.old_trees.wake.notify_all();
     }
@@ -163,8 +162,9 @@ impl<'a> Sessions<'a> {
 
     /// Queue `key` for a check no earlier than `at` (an earlier due time
     /// already queued stands).
-    pub(crate) fn queue_old_tree_at(&self, key: OldTreeKey, path: PathBuf, ino: u64, at: Instant) {
+    pub fn queue_old_tree_at(&self, key: OldTreeKey, path: PathBuf, ino: u64, at: Instant) {
         let mut d = lock(&self.old_trees.delayed);
+        lock(&self.old_trees.pending).remove(&key);
         match d.get(&key) {
             Some((due, ..)) if *due <= at => {}
             _ => {
@@ -236,12 +236,15 @@ impl<'a> Sessions<'a> {
             self.late_notice(i, &[], "baseline_missing");
             return AutoCheck::Late;
         };
-        match crate::activity::changed_since(path, b) {
+        match crate::activity::changed_since_with(path, b, || {
+            self.seams.hit("old_tree.activity_directory", Some(&i.repo))
+        }) {
             Ok(v) if v.is_empty() => AutoCheck::Clean(row.passes),
             Ok(v) => {
                 self.late_notice(i, &v, "late_writes");
                 AutoCheck::Late
             }
+            Err(e) if crate::activity::stopped(&e) => AutoCheck::Skipped,
             Err(e) => {
                 self.late_notice(i, &[format!("(walk error: {})", e.message)], "walk_error");
                 AutoCheck::Late
@@ -375,10 +378,20 @@ impl<'a> Sessions<'a> {
                     ino,
                     changed: *changed,
                     holders: holders.clone(),
-                    checked_at: SystemTime::now(),
+                    checked_at: lock(&self.old_trees.verdicts)
+                        .get(key)
+                        .filter(|v| {
+                            !holders.is_empty()
+                                && v.path == path
+                                && v.ino == ino
+                                && v.checked_at.elapsed().is_ok_and(|age| age < OLD_TREE_TTL)
+                        })
+                        .map(|v| v.checked_at)
+                        .unwrap_or_else(SystemTime::now),
                 };
                 lock(&self.old_trees.verdicts).insert(key.clone(), v);
             }
+            Outcome::Skipped("yielded") => {}
             _ => {
                 lock(&self.old_trees.verdicts).remove(key);
             }
@@ -404,20 +417,18 @@ impl<'a> Sessions<'a> {
         let Some(ino) = ino_of(&path) else {
             return Outcome::Skipped("gone");
         };
-        // rm-followups §1.4 G4 items 4–5: an `Auto` move's tree is held to
-        // its persisted baseline; its clean passes are suspended (cleared
-        // in the store) before the scans and put back only when no scan
-        // saw a hold.
-        let auto = self.auto_check(i, &path);
-        let suspended: Vec<i64> = match &auto {
-            AutoCheck::Clean(p) if !p.is_empty() => {
-                if !self.suspend_passes(i) {
-                    return Outcome::Skipped("passes_write_failed");
-                }
-                p.clone()
-            }
-            _ => Vec::new(),
+        if strata_apfs::walk_stopped() {
+            return Outcome::Skipped("yielded");
+        }
+        // Crash-safe reset before the first scan. A later interruption only
+        // restores these passes if no holder was observed in this pass.
+        let suspended = match self.store.move_activity(&i.session, &i.repo, i.n) {
+            Ok(row) => row.map(|r| r.passes).unwrap_or_default(),
+            Err(_) => return Outcome::Skipped("passes_read_failed"),
         };
+        if !suspended.is_empty() && !self.suspend_passes(i) {
+            return Outcome::Skipped("passes_write_failed");
+        }
         let holders = match strata_deps::open_files(&path) {
             Ok(h) => h,
             Err(_) => {
@@ -425,24 +436,57 @@ impl<'a> Sessions<'a> {
                 return Outcome::Skipped("open_files_failed");
             }
         };
-        // A held tree keeps its passes cleared; every other exit below
-        // that does not retire puts them back.
-        if !holders.is_empty() && !judge_held {
-            return Outcome::Kept {
-                holders,
-                changed: None,
-            };
-        }
-        // A tree that cannot be compared reads as changed.
-        let changed = matches!(auto, AutoCheck::Late) || !self.old_tree_matches(i, cfg).unwrap_or(false);
-        if changed || !holders.is_empty() || i.old_tree.is_some() {
+        if self.seams.hit("old_tree.after_scan", Some(&i.repo)).is_err() {
             if holders.is_empty() {
                 self.restore_passes(i, &suspended);
             }
-            return Outcome::Kept {
-                holders,
-                changed: Some(changed),
+            return Outcome::Skipped("seam");
+        }
+        if strata_apfs::walk_stopped() {
+            if holders.is_empty() {
+                self.restore_passes(i, &suspended);
+            }
+            return Outcome::Skipped("yielded");
+        }
+        if !holders.is_empty() {
+            if !judge_held {
+                return Outcome::Kept { holders, changed: None };
+            }
+            let cached = self.old_tree_verdict(&key_of(i)).filter(|v| {
+                v.path == path && v.ino == ino && v.checked_at.elapsed().is_ok_and(|age| age < OLD_TREE_TTL)
+            });
+            let changed = match cached {
+                Some(v) => v.changed,
+                None => {
+                    if self.seams.hit("old_tree.before_compare", Some(&i.repo)).is_err() {
+                        return Outcome::Skipped("seam");
+                    }
+                    !self.old_tree_matches(i, cfg).unwrap_or(false)
+                }
             };
+            if strata_apfs::walk_stopped() {
+                return Outcome::Skipped("yielded");
+            }
+            return Outcome::Kept { holders, changed: Some(changed) };
+        }
+        let auto = match self.auto_check(i, &path) {
+            AutoCheck::Clean(_) => AutoCheck::Clean(suspended.clone()),
+            other => other,
+        };
+        if matches!(auto, AutoCheck::Skipped) || strata_apfs::walk_stopped() {
+            self.restore_passes(i, &suspended);
+            return Outcome::Skipped("yielded");
+        }
+        let changed = matches!(auto, AutoCheck::Late) || !self.old_tree_matches(i, cfg).unwrap_or(false);
+        if strata_apfs::walk_stopped() {
+            self.restore_passes(i, &suspended);
+            return Outcome::Skipped("yielded");
+        }
+        if changed || i.old_tree.is_some() {
+            // A late notice clears its clean history permanently. Do not
+            // resurrect passes that were suspended before that judgement.
+            if !matches!(auto, AutoCheck::Late) { self.restore_passes(i, &suspended); }
+            return Outcome::Kept { holders, changed: Some(changed) };
         }
         // Two consecutive clean passes at least Q apart before an `Auto`
         // tree is retired; this one is recorded (a restart keeps it).
@@ -489,10 +533,11 @@ impl<'a> Sessions<'a> {
                 return Outcome::Skipped("open_files_failed");
             }
         }
-        let admin = self
-            .shadow_dir(&i.session, &i.repo)
-            .join("worktrees")
-            .join(prior_generation(all, i).to_string());
+        if strata_apfs::walk_stopped() {
+            self.restore_passes(i, &suspended);
+            return Outcome::Skipped("yielded");
+        }
+        let admin = self.shadow_dir(&i.session, &i.repo).join("worktrees").join(prior_generation(all, i).to_string());
         if self.store.retire_dir(&i.staging).is_err() {
             self.restore_passes(i, &suspended);
             return Outcome::Kept {
@@ -530,6 +575,7 @@ impl<'a> Sessions<'a> {
             .iter()
             .filter(|i| &i.repo == repo && i.state == MoveState::Done)
         {
+            if strata_apfs::walk_stopped() { break; }
             if ino_of(&old_path(i)).is_some() || ino_of(&i.staging).is_some() {
                 continue;
             }

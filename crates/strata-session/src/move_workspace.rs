@@ -45,6 +45,8 @@ pub struct MoveReport {
     /// content).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_tree: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Value>,
 }
 
 fn invalid(reason: &str, message: String, mut detail: Map<String, Value>) -> StrataError {
@@ -288,9 +290,11 @@ impl Sessions<'_> {
             })));
         }
         if agent.is_some() {
-            let open_move = self.store.move_intents(session)?.iter().any(|i| {
-                i.repo == name && matches!(i.state, MoveState::Preparing | MoveState::Swapping)
-            });
+            let open_move = self
+                .store
+                .move_intents(session)?
+                .iter()
+                .any(|i| i.repo == name && matches!(i.state, MoveState::Preparing | MoveState::Swapping));
             let scene = rec.scene.is_some() || self.store.workspace_scene_live(session, &name, row.scene.is_some())?;
             if scene || open_move {
                 return Err(auto_defer(
@@ -343,6 +347,7 @@ impl Sessions<'_> {
                 lww: vec![],
                 uncarried: vec![],
                 old_tree: None,
+                warnings: Vec::new(),
             });
         }
         // 5.
@@ -387,7 +392,7 @@ impl Sessions<'_> {
         dset.extend(old_set.dirs.iter().cloned());
         dset.extend(new_set.dirs.iter().cloned());
         let d: Vec<RepoPath> = dset.into_iter().collect();
-        let holders = held_dirs(&ws.path, &d)?;
+        let holders = held_dirs(&ws.path, &d, auto.is_none() || agent.is_some())?;
         if !holders.is_empty() {
             return Err(open_files_error(&ws.path, holders));
         }
@@ -572,6 +577,7 @@ impl Sessions<'_> {
                 // scan of the whole workspace and the staging.
                 let changed = match crate::activity::changed_since(&ws.path, b) {
                     Ok(v) => v,
+                    Err(e) if crate::activity::stopped(&e) => return Err(e),
                     Err(e) => vec![format!("(walk error: {})", e.message)],
                 };
                 if !changed.is_empty() {
@@ -584,8 +590,8 @@ impl Sessions<'_> {
                     return Ok(h);
                 }
             }
-            let mut h = held_dirs(&ws.path, &d)?;
-            h.extend(held_dirs(&staging, &d)?);
+            let mut h = held_dirs(&ws.path, &d, auto.is_none() || agent.is_some())?;
+            h.extend(held_dirs(&staging, &d, auto.is_none() || agent.is_some())?);
             Ok(h)
         })();
         match rechecked {
@@ -599,6 +605,13 @@ impl Sessions<'_> {
                 return Err(self.prepare_failed(&mv, "recheck", open_files_error(&ws.path, h)));
             }
             Err(e) => return Err(self.prepare_failed(&mv, "recheck", e)),
+        }
+        // Final Explicit/Agent cwd check, under the lock immediately before
+        // making the intent Swapping. Any refusal still cleans up preparation.
+        if (auto.is_none() || agent.is_some())
+            && let Err(e) = crate::cwd::check_holders(&ws.path)
+        {
+            return Err(self.prepare_failed(&mv, "recheck", e));
         }
         // 15.
         match self.store.set_move_state(
@@ -662,21 +675,30 @@ impl Sessions<'_> {
 
         // ---- Phase F: the old tree (now at S). Failures here only show in
         // `old_tree` and status.
+        let mut old_holders = Vec::new();
         let old_tree = match self.seams.hit("move.old_tree", Some(&name)) {
             Err(e) if is_stop(&e) => return Err(e),
             Err(_) => Some(staging.clone()),
             Ok(()) => {
-                let held = strata_deps::open_files(&staging).map(|h| !h.is_empty()).unwrap_or(true);
+                let held = match strata_deps::open_files(&staging) {
+                    Ok(holders) => { old_holders = holders; !old_holders.is_empty() }
+                    Err(_) => true,
+                };
                 // Review P1-14: the overlay entries, and every carried
                 // ignored entry as the carry took it.
                 // rm-followups §1.4 G4 Phase F: an `Auto` move's old tree is
                 // also held to the activity baseline; a change (or a walk
                 // error) keeps it for good, with the late-write notice.
+                let mut unjudged = false;
                 let late = match auto {
                     None => false,
                     Some(b) => {
                         let v = match crate::activity::changed_since(&staging, b) {
                             Ok(v) => v,
+                            Err(e) if crate::activity::stopped(&e) => {
+                                unjudged = true;
+                                Vec::new()
+                            }
                             Err(e) => vec![format!("(walk error: {})", e.message)],
                         };
                         if !v.is_empty() {
@@ -699,17 +721,19 @@ impl Sessions<'_> {
                         !v.is_empty()
                     }
                 };
-                let unchanged = !late
+                let unchanged = !unjudged
+                    && !late
                     && self.tree_matches(session, &name, cfg, &staging, &old, &cp.entries)
                     && untouched(&staging, &old, &cp.entries, &d, cfg, ignorecase, Some(&carried), started);
-                if !held && unchanged && uncarried.is_empty() {
+                unjudged |= strata_apfs::walk_stopped();
+                if !held && unchanged && !unjudged && uncarried.is_empty() {
                     let gone = self.store.retire_dir(&staging).is_ok() && {
                         let _ = self.retire_present(&old_admin);
                         true
                     };
                     if gone { None } else { Some(staging.clone()) }
                 } else {
-                    if !uncarried.is_empty() || !unchanged {
+                    if !uncarried.is_empty() || (!unjudged && !unchanged) {
                         let _ = self.store.set_old_tree(session, &name, n, &staging);
                     }
                     Some(staging.clone())
@@ -743,6 +767,7 @@ impl Sessions<'_> {
             conflicts: rebased.conflicts,
             lww: rebased.lww,
             uncarried,
+            warnings: crate::cwd::held_warnings(old_tree.as_deref(), &old_holders),
             old_tree,
         })
     }
@@ -824,7 +849,10 @@ impl Sessions<'_> {
     pub(crate) fn old_tree_unchanged(&self, i: &MoveIntent, cfg: &RepoConfig) -> Result<bool> {
         // rm-followups §1.4 G4 item 5: an `Auto` move's tree is also held to
         // its persisted activity baseline (one shared rule).
-        if matches!(self.auto_check(i, &crate::old_tree::old_path(i)), crate::old_tree::AutoCheck::Late) {
+        if matches!(
+            self.auto_check(i, &crate::old_tree::old_path(i)),
+            crate::old_tree::AutoCheck::Late | crate::old_tree::AutoCheck::Skipped
+        ) {
             return Ok(false);
         }
         self.old_tree_matches(i, cfg)
@@ -1049,7 +1077,7 @@ fn sorted(mut v: Vec<OverlayEntry>) -> Vec<OverlayEntry> {
 }
 
 /// Open files under each existing `dir/<d>`.
-fn held_dirs(dir: &Path, d: &[RepoPath]) -> Result<Vec<strata_deps::OpenFile>> {
+fn held_dirs(dir: &Path, d: &[RepoPath], defer_cwd: bool) -> Result<Vec<strata_deps::OpenFile>> {
     let mut out = Vec::new();
     for p in d {
         let full = dir.join(p.as_str());
@@ -1057,6 +1085,10 @@ fn held_dirs(dir: &Path, d: &[RepoPath]) -> Result<Vec<strata_deps::OpenFile>> {
             out.extend(strata_deps::open_files(&full)?);
         }
     }
+    // Explicit/Agent cwd holds (including those inside dependency dirs) are
+    // judged by the final whole-workspace guard and its narrow overrides.
+    // Descriptors and mappings remain unconditional dependency protections.
+    if defer_cwd { out.retain(|h| h.hold != strata_deps::Hold::Cwd); }
     Ok(out)
 }
 

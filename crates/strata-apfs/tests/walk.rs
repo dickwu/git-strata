@@ -725,3 +725,17 @@ fn with_walk_stop_ends_walks_at_the_next_directory() {
     });
     assert_eq!(names(walk(&r, &yes)).len(), full, "gone after the closure");
 }
+
+#[test]
+fn nested_walk_stop_scopes_honor_shutdown_and_restore_after_unwind() {
+    use std::sync::{Arc,atomic::AtomicBool};
+    assert!(!strata_apfs::walk_stopped());
+    strata_apfs::with_walk_stop(Arc::new(AtomicBool::new(true)),|| {
+        strata_apfs::with_walk_stop(Arc::new(AtomicBool::new(false)),|| {
+            assert!(strata_apfs::walk_stopped(),"an inner yield scope cannot mask shutdown");
+        });
+        assert!(strata_apfs::walk_stopped());
+    });
+    let _=std::panic::catch_unwind(||strata_apfs::with_walk_stop(Arc::new(AtomicBool::new(true)),||panic!("fixture")));
+    assert!(!strata_apfs::walk_stopped(),"unwinding restores the previous scope");
+}

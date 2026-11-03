@@ -104,10 +104,9 @@ fn entry_paths(e: &[OverlayEntry]) -> BTreeSet<String> {
 
 fn base_dirs(fx: &Fx, repo: &str) -> BTreeSet<String> {
     match fs::read_dir(fx.root().join("bases").join(repo)) {
-        Ok(rd) => rd
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| !n.starts_with('.'))
-            .collect(),
+        Ok(rd) => {
+            rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| !n.starts_with('.')).collect()
+        }
         Err(_) => BTreeSet::new(),
     }
 }
@@ -194,7 +193,6 @@ fn resolve_by_cwd_inside_workspace() {
         for p in [
             root.clone(),
             root.join("node_modules"),
-            root.join(".strata-tmp-move-tool-2"),
             root.join(".strata-tmp-restore-tool"),
             shadow(&fx, &sid, "tool"),
             fx.main("tool"),
@@ -205,6 +203,10 @@ fn resolve_by_cwd_inside_workspace() {
         ] {
             assert_eq!(s.resolve(&p).unwrap(), None, "{}", p.display());
         }
+        let error = s.resolve(&root.join(".strata-tmp-move-tool-2")).unwrap_err();
+        assert_eq!(error.code, Code::NoSuchSession);
+        assert_eq!(error.detail.as_ref().unwrap()["reason"], "stale_cwd");
+        assert_eq!(error.detail.as_ref().unwrap()["workspace"], serde_json::json!(w));
         fs::remove_dir(root.join(".strata-tmp-move-tool-2")).unwrap();
         fs::remove_dir(root.join(".strata-tmp-restore-tool")).unwrap();
 

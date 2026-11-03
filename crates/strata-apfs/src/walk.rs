@@ -17,28 +17,29 @@ use crate::sys;
 use crate::{DEFAULT_BULK_BUFFER_BYTES, MAX_BULK_BUFFER_BYTES, MAX_WALK_DEPTH, MIN_BULK_BUFFER_BYTES, Result};
 
 thread_local! {
-    static WALK_STOP: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
-        const { std::cell::RefCell::new(None) };
+    static WALK_STOP: std::cell::RefCell<Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// status-perf A1: run `f` with every [`Walk`] made on this thread given up
-/// once `stop` is set: checked before each directory is read, the walk
-/// then yields one `Busy` error (`reason: "stopped"`) and ends. Nests; the
-/// previous flag comes back when `f` returns or unwinds.
+/// Run with a cooperative stop flag. Nested scopes honor every active
+/// flag, allowing shutdown and a per-item contention yield to coexist.
 pub fn with_walk_stop<R>(stop: std::sync::Arc<std::sync::atomic::AtomicBool>, f: impl FnOnce() -> R) -> R {
-    struct Restore(Option<std::sync::Arc<std::sync::atomic::AtomicBool>>);
+    struct Restore;
     impl Drop for Restore {
         fn drop(&mut self) {
-            let prev = self.0.take();
-            WALK_STOP.with(|s| *s.borrow_mut() = prev);
+            WALK_STOP.with(|s| {
+                s.borrow_mut().pop();
+            });
         }
     }
-    let _restore = Restore(WALK_STOP.with(|s| s.borrow_mut().replace(stop)));
+    WALK_STOP.with(|s| s.borrow_mut().push(stop));
+    let _restore = Restore;
     f()
 }
 
-fn walk_stopped() -> bool {
-    WALK_STOP.with(|s| s.borrow().as_ref().is_some_and(|b| b.load(std::sync::atomic::Ordering::SeqCst)))
+/// Whether a walk on this thread should stop before its next directory.
+pub fn walk_stopped() -> bool {
+    WALK_STOP.with(|s| s.borrow().iter().any(|b| b.load(std::sync::atomic::Ordering::SeqCst)))
 }
 
 /// Options for [`walk_with`]. Default: the whole tree, depth limited only by
@@ -196,7 +197,9 @@ impl<'f> Walk<'f> {
             // Gone, or no longer a directory: as if it were never there.
             Err(libc::ENOENT) | Err(libc::ENOTDIR) | Err(libc::ELOOP) => {}
             Err(libc::EACCES) => self.out.push_back(Err(unreadable(libc::EACCES, &shown))),
-            Err(e @ (libc::EMFILE | libc::ENFILE)) => self.out.push_back(Err(errno_error(Code::Unknown, e, &shown, None))),
+            Err(e @ (libc::EMFILE | libc::ENFILE)) => {
+                self.out.push_back(Err(errno_error(Code::Unknown, e, &shown, None)))
+            }
             Err(e) => self.out.push_back(Err(classify_errno(e, IoSide::Read, &shown))),
         }
     }

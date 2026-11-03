@@ -18,6 +18,23 @@ use strata_types::{Code, RepoName, SessionId, StrataError};
 
 use crate::{DaemonWarning, LockHold, Result};
 
+thread_local! {
+    static YIELD_TO: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Only cooperative old-tree work installs this flag. Every lock it takes
+/// carries the same flag, so either a repo or session waiter can yield it.
+pub fn with_yield<R>(flag: Arc<AtomicBool>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Arc<AtomicBool>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            YIELD_TO.with(|y| *y.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(YIELD_TO.with(|y| y.borrow_mut().replace(flag)));
+    f()
+}
+
 /// The per-thread request context (D8).
 #[derive(Debug)]
 struct Ctx {
@@ -108,12 +125,13 @@ struct Holder {
     session: Option<SessionId>,
     since: SystemTime,
     started: Instant,
+    yield_to: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Default)]
 struct State {
     holder: Option<Holder>,
-    queue: VecDeque<u64>,
+    queue: VecDeque<(u64, Holder)>,
     next: u64,
 }
 
@@ -144,24 +162,31 @@ impl Fifo {
         let mut st = lock(&self.st);
         let ticket = st.next;
         st.next += 1;
-        st.queue.push_back(ticket);
+        st.queue.push_back((ticket, holder.clone()));
         loop {
             if closed.load(Ordering::SeqCst) {
-                st.queue.retain(|&t| t != ticket);
+                st.queue.retain(|(t, _)| *t != ticket);
                 self.cv.notify_all();
                 return Err(TakeError::ShuttingDown);
             }
-            if st.holder.is_none() && st.queue.front() == Some(&ticket) {
+            if st.holder.is_none() && st.queue.front().map(|(t, _)| t) == Some(&ticket) {
                 st.queue.pop_front();
-                st.holder = Some(holder);
+                st.holder = Some(Holder { since: SystemTime::now(), started: Instant::now(), ..holder });
                 return Ok(());
+            }
+            // Every actual waiter, including post-visible unbounded takes,
+            // asks a cooperative background holder to release promptly.
+            if bound != Some(Duration::ZERO)
+                && let Some(flag) = st.holder.as_ref().and_then(|h| h.yield_to.as_ref())
+            {
+                flag.store(true, Ordering::SeqCst);
             }
             match deadline {
                 None => st = self.cv.wait(st).unwrap_or_else(|p| p.into_inner()),
                 Some(d) => {
                     let now = Instant::now();
                     if now >= d {
-                        st.queue.retain(|&t| t != ticket);
+                        st.queue.retain(|(t, _)| *t != ticket);
                         let h = st.holder.clone();
                         self.cv.notify_all();
                         return Err(TakeError::Timeout(h));
@@ -231,27 +256,38 @@ impl Locks {
 
     fn holder_now() -> Holder {
         let (method, session) = ctx_method();
-        Holder { method, session, since: SystemTime::now(), started: Instant::now() }
+        Holder {
+            method,
+            session,
+            since: SystemTime::now(),
+            started: Instant::now(),
+            yield_to: YIELD_TO.with(|y| y.borrow().clone()),
+        }
     }
 
     fn holder_as(method: &str) -> Holder {
-        Holder { method: method.into(), session: None, since: SystemTime::now(), started: Instant::now() }
+        Holder {
+            method: method.into(),
+            session: None,
+            since: SystemTime::now(),
+            started: Instant::now(),
+            yield_to: YIELD_TO.with(|y| y.borrow().clone()),
+        }
     }
 
     fn take_error(&self, e: TakeError, what: serde_json::Value, waited: Duration) -> StrataError {
         match e {
             TakeError::ShuttingDown => StrataError::new(Code::ReadOnly, "the daemon is shutting down")
                 .with_detail(json!({ "reason": "shutting_down" })),
-            TakeError::Timeout(h) => StrataError::new(
-                Code::Busy,
-                format!("waited {} ms before anything was written", waited.as_millis()),
-            )
-            .with_detail(json!({
-                "reason": "lock_wait",
-                "lock": what,
-                "holder": h.as_ref().map(|h| h.method.clone()),
-                "holder_session": h.as_ref().and_then(|h| h.session.as_ref().map(|s| s.as_str().to_string())),
-            })),
+            TakeError::Timeout(h) => {
+                StrataError::new(Code::Busy, format!("waited {} ms before anything was written", waited.as_millis()))
+                    .with_detail(json!({
+                        "reason": "lock_wait",
+                        "lock": what,
+                        "holder": h.as_ref().map(|h| h.method.clone()),
+                        "holder_session": h.as_ref().and_then(|h| h.session.as_ref().map(|s| s.as_str().to_string())),
+                    }))
+            }
         }
     }
 
@@ -395,9 +431,15 @@ impl Locks {
     /// §5.9: run `f` holding `id`'s queue place only if it is free right
     /// now (no waiting, no queueing behind a request). `None` = busy, the
     /// caller skips. The holder shows as method `reconcile`.
-    pub fn try_session<T>(&self, id: &SessionId, f: impl FnOnce() -> Result<T>) -> Option<Result<T>> {
+    pub fn try_session<T>(&self, id: &SessionId, method: &str, f: impl FnOnce() -> Result<T>) -> Option<Result<T>> {
         let fifo = self.queue_of(id);
-        let holder = Holder { method: "reconcile".into(), session: Some(id.clone()), since: SystemTime::now(), started: Instant::now() };
+        let holder = Holder {
+            method: method.into(),
+            session: Some(id.clone()),
+            since: SystemTime::now(),
+            started: Instant::now(),
+            yield_to: YIELD_TO.with(|y| y.borrow().clone()),
+        };
         match fifo.acquire(Some(Duration::ZERO), &self.closed, holder) {
             Err(TakeError::Timeout(_)) => None,
             Err(e) => Some(Err(self.take_error(e, json!({ "session": id.as_str() }), Duration::ZERO))),
@@ -431,6 +473,48 @@ impl Locks {
                 })
             })
             .collect()
+    }
+
+    /// Snapshot only the small FIFO state mutexes, never acquire a queue place.
+    pub fn queue_snapshot(&self) -> Vec<serde_json::Value> {
+        lock(&self.queues)
+            .iter()
+            .filter_map(|(session, fifo)| {
+                let state = lock(&fifo.st);
+                if state.holder.is_none() && state.queue.is_empty() {
+                    return None;
+                }
+                Some(json!({ "session": session, "holder": state.holder.as_ref().map(|h| &h.method),
+                "since": state.holder.as_ref().map(|h| h.since),
+                "queued": state.queue.iter().map(|(_, w)| &w.method).collect::<Vec<_>>() }))
+            })
+            .collect()
+    }
+
+    /// Ages belong to individual attempts, including bounded retries by
+    /// Sessions::with_lock_unbounded; no claim about a total retry age.
+    pub fn long_waits(&self) -> Vec<DaemonWarning> {
+        let mut out = Vec::new();
+        let mut collect = |fifo: &Fifo, repo: Option<RepoName>, session: Option<SessionId>| {
+            for (_, waiter) in &lock(&fifo.st).queue {
+                if waiter.started.elapsed() >= self.wait {
+                    out.push(DaemonWarning::LongWait {
+                        repo: repo.clone(),
+                        session: session.clone().or_else(|| waiter.session.clone()),
+                        method: waiter.method.clone(),
+                        since: waiter.since,
+                        attempt_since: waiter.since,
+                    });
+                }
+            }
+        };
+        for (repo, fifo) in &self.repos {
+            collect(fifo, Some(repo.clone()), None);
+        }
+        for (session, fifo) in lock(&self.queues).iter() {
+            collect(fifo, None, Some(session.clone()));
+        }
+        out
     }
 
     /// The method holding `id`'s queue place (in flight), if any.

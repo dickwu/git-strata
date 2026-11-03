@@ -327,7 +327,13 @@ fn remove_refuses_unpublished_without_discard() {
     let w = ws(&rep, "tool");
     let holder = Worker::spawn("cwd:".into(), Some(&w.join("src")));
     let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
-    let old = mv(&fx, &s, &id2, &to).unwrap().old_tree.expect("kept while in use");
+    let old = strata_session::cwd::with_move_cwd(
+        strata_session::cwd::MoveCwd { allow_cwd_holders: true, ..Default::default() },
+        || mv(&fx, &s, &id2, &to),
+    )
+    .unwrap()
+    .old_tree
+    .expect("kept while in use");
     drop(holder);
     fs::write(old.join("src/late.ts"), b"late\n").unwrap();
     let a = untouched(&fx, &id2);

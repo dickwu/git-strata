@@ -19,6 +19,7 @@ use strata_types::{CheckpointReason, Code, Config, RepoConfig, RepoName, Session
 mod activity;
 mod base;
 mod carry;
+pub mod cwd;
 mod dispatch;
 mod failed_move;
 mod move_workspace;

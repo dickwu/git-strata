@@ -289,7 +289,7 @@ fn holds_of(pid: i32, keep: &dyn Fn(&[u8]) -> bool, with_own_evt: bool) -> Resul
 }
 
 /// `pid`'s parent, or `None` when it cannot be read.
-fn ppid_of(pid: i32) -> Option<i32> {
+pub fn process_parent(pid: i32) -> Option<i32> {
     let mut bi: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
     // SAFETY: buffer is a proc_bsdinfo.
@@ -379,7 +379,7 @@ pub(crate) fn scan(dirs: &[&Path]) -> Result<Vec<Result<Vec<OpenFile>>>> {
         // A direct child's event-only fd on a path we hold event-only
         // ourselves is that copy, and event-only fds never keep a file busy
         // anyway [实现时补的决定].
-        if pid != own_pid() && holds.iter().any(|h| h.2) && ppid_of(pid) == Some(own_pid()) {
+        if pid != own_pid() && holds.iter().any(|h| h.2) && process_parent(pid) == Some(own_pid()) {
             if own_evt.is_none() {
                 let mine = holds_of(own_pid(), &keep, true)?.unwrap_or_default();
                 own_evt = Some(mine.into_iter().filter(|h| h.2).map(|h| h.0).collect());

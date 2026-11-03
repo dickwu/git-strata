@@ -192,3 +192,61 @@ fn deps_list_changes_legacy_base_and_best_effort_error() {
     });
     assert!(log.shown().is_empty(), "read-only enrichment must not confirm");
 }
+
+/// A shell-owned child represents another user's shell to an in-process
+/// daemon. Closing stdin asks only the children this fixture started to exit.
+struct CwdHolder(std::process::Child);
+impl CwdHolder {
+    fn new(path: &Path) -> Self {
+        use std::process::{Command, Stdio};
+        let mut shell = Command::new("/bin/sh")
+            .args(["-c", "/bin/sleep 300 & child=$!; echo $child; read done; kill $child; wait $child 2>/dev/null"])
+            .current_dir(path).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        let mut ready=String::new();BufReader::new(shell.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+        assert!(ready.trim().parse::<i32>().unwrap()>0);
+        std::thread::sleep(Duration::from_millis(50));
+        Self(shell)
+    }
+}
+impl Drop for CwdHolder {
+    fn drop(&mut self) { drop(self.0.stdin.take()); let _=self.0.wait(); }
+}
+
+#[test]
+fn propose_switch_refuses_other_cwd_and_override_reports_the_old_tree() {
+    let fx=Dfx::new();let core=fx.prepare().unwrap();let d=Daemon::start(&core).unwrap();let sock=fx.socket();
+    serving(&d,|| {
+        let id=new_session(&sock);let root=ws(&core,&id,"tool");let _holder=CwdHolder::new(&root);
+        let before=core.store.session(&id).unwrap().unwrap().manifest.repos[&repo_name("tool")].clone();
+        std::fs::write(root.join("package.json"),NEW_DEP).unwrap();
+        let reply=ok(call(&sock,"deps_propose",json!({"session":id,"repo":"tool","switch":true})));
+        assert_eq!(reply["switched"][0]["code"],"OpenFiles","{reply:#}");
+        assert_eq!(reply["switched"][0]["detail"]["reason"],"cwd_holders");
+        assert_eq!(core.store.session(&id).unwrap().unwrap().manifest.repos[&repo_name("tool")].base,before.base);
+        let reply=ok(call(&sock,"deps_propose",json!({"session":id,"repo":"tool","switch":true,"allow_cwd_holders":true})));
+        assert_eq!(reply["switched"][0]["kind"],"moved","{reply:#}");
+        assert_eq!(reply["switched"][0]["report"]["warnings"][0]["reason"],"cwd_stale");
+    });
+}
+
+#[test]
+fn approval_skips_cwd_holders_unless_explicitly_overridden() {
+    use strata_confirm::seams::Verdict;
+    let fx=Dfx::new();let (auth,_,_)=fx.confirmer(vec![Verdict::pass(),Verdict::pass()]);
+    let core=fx.prepare_with(auth).unwrap();let d=Daemon::start(&core).unwrap();let sock=fx.socket();
+    serving(&d,|| {
+        let id=new_session(&sock);let root=ws(&core,&id,"tool");let _holder=CwdHolder::new(&root);
+        let main=fx.main("tool");let repo=repo_name("tool");
+        let head=strata_types::CommitOid::try_from(fx.sb.commit(&main,&[("package.json",NEW_DEP.as_bytes())],"new deps")).unwrap();
+        fx.sb.git(&main,&["push","-q","origin","main"]);core.gits.get(&repo).unwrap().fetch("origin","main").unwrap();
+        let tree=core.gits.get(&repo).unwrap().tree_of(&head).unwrap();
+        let ctx=strata_deps::Ctx {store:&core.store, paths:&core.config.paths,repo:&repo,cfg:core.config.repos.get(&repo).unwrap(),git:core.gits.get(&repo).unwrap(),env:&core.env,locks:&core.locks};
+        let proposal=strata_deps::observe_main(&ctx,&tree,&head,&main).unwrap().unwrap();
+        let reply=ok(call(&sock,"deps_approve",json!({"proposal":proposal.id,"sessions":[id]})));
+        assert_eq!(reply["results"][0]["code"],"OpenFiles","{reply:#}");
+        assert_eq!(reply["results"][0]["detail"]["reason"],"cwd_holders");
+        let reply=ok(call(&sock,"deps_approve",json!({"proposal":proposal.id,"sessions":[id],"allow_cwd_holders":true})));
+        assert_eq!(reply["results"][0]["kind"],"moved","{reply:#}");
+        assert_eq!(reply["results"][0]["report"]["warnings"][0]["reason"],"cwd_stale");
+    });
+}
