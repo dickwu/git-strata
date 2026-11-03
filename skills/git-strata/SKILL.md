@@ -121,11 +121,13 @@ with "ask the human". Never run a human-only command (hard rule 1) yourself. Exc
 | You got | Do |
 | --- | --- |
 | `Busy daemon_down` | keep working; tell the human; retry after `daemon status` shows running |
+| `Busy publish_unknown` | do not loop; tell the human ([errors.md](errors.md)) |
 | `Busy` (other) | another operation holds the lock; wait and retry |
 | `NotTty` / human-only command | stop; give the human the exact command |
 | `NoSuchSession` | `cd` into your workspace or pass `--session` |
 | `NoSuchRepo not_in_session` | run `detail.fix` (`git-strata add --session S --repo R`) |
-| `NoMatch` / `InvalidInput no_batch` | checkpoint the paths, pass `--from SESSION:PATH` |
+| `InvalidInput no_batch` | pass the batch: `--from SESSION:PATH` (repeatable) |
+| `NoMatch` | a `--from` path is not checkpointed: checkpoint it, rerun |
 | `Conflict` (publish) | fix the listed paths, rerun the same publish ([publish.md](publish.md)) |
 | `Conflict sync_conflict` / `HeadMoved` | resolve the report ([sync.md](sync.md)) |
 | `Conflict assigned` | another session owns the path; do not retry |

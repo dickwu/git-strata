@@ -28,7 +28,7 @@ data root (`[paths] root`, default `~/.strata`) as
 | `restore <CHECKPOINT> [PATHS]...` | `--session <S>` | no | no | `{checkpoint,session}` |
 | `grep <PATTERN>` | regex; `--session <S>` or `--all` | no | yes | `{hits:[...],skipped?:[{session,repo,path,code}]}` |
 | `files [GLOB]` | `--session <S>` or `--all` | no | yes | `{paths:[{session,repo,path}]}` |
-| `diff` | one of `--base` (default) / `--session <S>` / `--between <A> <B>`; `--repo <REPO>` (required with `--between`) | no | yes | `{repo,only_a:[{path,kind}],only_b:[],both:[]}` (`repo` null when nothing matched); `--between`: `both:[{path,kind,preview?,code?}]` |
+| `diff` | mode `--base` (default, this or `--session <S>`'s session vs its base) or `--between <A> <B>` (exclusive with `--base`/`--session`); `--repo <REPO>` (required with `--between`) | no | yes | `{repo,only_a:[{path,kind}],only_b:[],both:[]}` (`repo` null when nothing matched); `--between`: `both:[{path,kind,preview?,code?}]` |
 | `deps propose` | `--session <S>`, `--repo <R>` (default: cwd's), `--switch` (move this session only) | no | no | `Proposal`; with `--switch`: `{ proposal, switched: { session, kind: moved\|skipped, code?, detail? } }` |
 | `deps approve <ID>` | `--sessions <S,S>` (default: all sessions of the repo) | yes + confirm | no | `{results:[{session,kind:"moved"\|"skipped",code?,detail?}]}` |
 | `deps list` | `--repo <R>` | no | yes | `{proposals:[...]}`; daemon rows carry effective pinned `mode: "apply" \| "confirm"` |

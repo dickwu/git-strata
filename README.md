@@ -161,7 +161,8 @@ npx skills add dickwu/git-strata --skill git-strata -g -a claude-code -a codex -
 # only the current project (writes .agents/skills/ and .claude/skills/)
 npx skills add dickwu/git-strata --skill git-strata -a claude-code -a codex -a cursor -y
 npx skills add dickwu/git-strata --list     # what the repo offers
-npx skills update git-strata -g             # later: pull the latest skill
+npx skills update git-strata -g             # later: pull the latest (global install)
+npx skills update git-strata -p             # ... or the project install
 ```
 
 `-a` takes any agent the CLI knows (`npx skills add --help`). The CLI copies

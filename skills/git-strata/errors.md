@@ -17,7 +17,6 @@ envelope as usual).
 
 All three keys are always present; `data` is never null. Branch on
 `error.code`, then `error.detail.reason` where present. Never parse `message`.
-`--help` / `--version` print plain clap text (no envelope).
 
 | `error.code` (`detail.reason`) | What an agent should do |
 | --- | --- |
@@ -31,7 +30,7 @@ All three keys are always present; `data` is never null. Branch on
 | `AmbiguousMatch` | Ticket matches several sessions; retry with an id from `detail`. |
 | `NoSuchSession` | Wrong selector, or cwd is not inside a workspace; `cd` into one or pass `--session`. |
 | `NoSuchRepo` | Repo name not in config; check `--repo` / argument. With `detail.reason` `not_in_session`: the session has no workspace of that repo; run `detail.fix` (`git-strata add --session S --repo R`), then retry. |
-| `InvalidInput` | Fix arguments per `detail.reason` (`checkpoint_reason`, `diff_mode`, `both_selectors`, `no_batch`, `unknown_command` with `detail.commands`, ...). `siblings_missing`: the repo's checks need sibling repos; run `detail.fix` (`git-strata add --session S --repo R ...`) or follow `detail.missing[].next`, then rerun. `chain_diverged` from publish on a repo that needs no confirmation, when you were asked to publish or push it: run `git-strata push <REPO>` (it fetches, replays the unpushed chain onto origin, reruns checks, pushes a fast-forward), then rerun the publish; `replay_deps_unsealed` from push: open a session on the repo, push again. `chain_rewound`, or diverged on a gated repo: hand to the human (`chain`). |
+| `InvalidInput` | Fix arguments per `detail.reason` (`checkpoint_reason`, `diff_mode`, `both_selectors`, `no_batch`, `unknown_command` with `detail.commands`, ...). `siblings_missing`: the repo's checks need sibling repos; run `detail.fix` (`git-strata add --session S --repo R ...`) or follow `detail.missing[].next`, then rerun. `chain_diverged` from publish on a repo that needs no confirmation: this is a push (the repo usually has `publish.push = false`), so only when the human asked you to push this repo run `git-strata push <REPO>` (it fetches, replays the unpushed chain onto origin, reruns checks, pushes a fast-forward), then rerun the publish; otherwise stop and tell the human the chain diverged and needs `git-strata push <REPO>`. `replay_deps_unsealed` from push: open a session on the repo, push again. `chain_rewound`, or diverged on a gated repo: hand to the human (`chain`). |
 | `Conflict` (publish) | Same hunk changed on both sides (another session or upstream); nothing committed in `detail.repo`, earlier repos of the call may have landed (`data.commits`). Fix, checkpoint, re-run the same publish ([publish.md](publish.md)); between sessions, who resolves can be set by `publish --assign`. |
 | `Conflict` (`sync_conflict`) | Edit the listed hunks, then sync with `--resolved`, the reported target and generation. Earlier successful repos appear in `detail.done`. |
 | `Conflict` (`base_diverged`) | Tell the human; chain recovery must precede accepting the dropped base. |
@@ -85,7 +84,9 @@ the [0.1.2 release notes](https://github.com/dickwu/git-strata/blob/main/docs/re
   start|stop`: you should not have run it; tell the human and do not retry.
 - `NoSuchSession` from a hook: the hook's cwd is outside every workspace;
   `cd` into `data.manifest.repos.<repo>.path` before working.
-- `publish` says `no_batch` or `NoMatch`: you have not checkpointed the paths.
+- `publish` says `InvalidInput no_batch`: you gave no `--from`; an agent must
+  name the batch with `--from SESSION:PATH`. `NoMatch`: a `--from` path is not
+  checkpointed; checkpoint it and rerun.
 - A path you edited is missing from a checkpoint: it was outside the session's
   workspaces, or you passed `--path` and left it out.
 - `status` shows health `Unknown` with `choices: ["abandon","accept"]`: a move
