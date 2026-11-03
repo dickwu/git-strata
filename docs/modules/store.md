@@ -1356,7 +1356,7 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
   4. `COMMIT`。确定的失败（约束、`Busy`）→ `not_written`。其它失败 → `Unknown`（`reason = "migration_commit"`，`outcome = "uncertain"`，`detail` 带 `from`、`to`、`backup`）：新 schema 是否落盘不知道，而 Turso 只在新进程里重跑 WAL 恢复，所以调用方必须退出；daemon 不在进程内重试这个错误（waiting.rs `retryable` 排除它），launchd 重启后的 open 读到的要么是完整的旧版本（再迁移一次），要么是完整的新版本（`uncertain_commit_is_resolved_by_a_fresh_process`）。
   5. 提交之后尽力做一次 TRUNCATE 检查点，并在 stderr 写一行迁移与备份路径。这一步只整理文件，不是版本的依据：所有 open 都以 PRAGMA 读到的 `user_version`（事务里写下的）为准；检查点没做成时文件头还是旧版本号，那也是 §5.2 第 2 步接受的值。提交之后进程立刻死掉，下次 open 看到的是 v5（LATEST），不再迁移（`crash_right_after_commit_keeps_v5`）。
 - **读者与迁移**：已经打开的只读 `Store`（同一进程或另一个进程，例如正在跑的 cli）跨过迁移照常工作。另一个进程迁移之后，Turso 的旧连接在每个显式读事务的第一句碰表的语句上报 `Database schema changed`，直到这个连接执行一句自动提交的语句重新载入 schema；所以 `read_txn` 遇到它时先执行一句自动提交的 `SELECT count(*) FROM sqlite_schema`，再把整个读事务重做一次（只一次）。读函数因此是可重放的（`Fn`）。
-- **恢复到旧版本**：迁移不可逆，旧版 git-strata 拒绝 v2 的库（`Corrupt`，`user_version`）。要回到旧版：停 daemon（`launchctl bootout`），把 `store/store.db` 与它的 `-wal`、`-shm`、`-tshm` 挪开，把 `store/backups/store-v1-<ns>.db` 复制成 `store/store.db`，装回旧版本再启动。迁移之后新建的会话不在备份里（它们的目录还在 `sessions/` 下，旧版会把库里没有的目录当成陌生东西）；所以只在迁移后马上发现问题时这样做。
+- **恢复到旧版本**：迁移不可逆；旧二进制拒绝高于其支持版本的库（`Corrupt`，`user_version`），v4/v5 不能直接降级。先停稳 daemon，将 `store/store.db` 及它的 `-wal`、`-shm`、`-tshm` 移到一旁保留，再把兼容旧版本的 `store/backups/store-v<from>-<ns>.db` 复制成 `store/store.db`，安装匹配的一对旧 CLI / daemon，最后才启动。例：从 v3 直接迁到 v5 的备份是 `store-v3-<ns>.db`，回滚时恢复它，而不是找 v1 备份。main-sync 还会写回 pins 的 `sync_deps`；旧 daemon 不认识此字段，启动前须从每个 pin 移除它，并移除 config.toml 的 `[repo.<name>.sync]` 表。备份之后记录的会话和修改不在恢复的库里（目录可能仍在 `sessions/` 下）；先核对影响并保留当前库，不能把恢复旧库当作合并迁移后的数据。
 
 ### 4.4b Main-sync schema v4 and APIs
 
@@ -1405,6 +1405,18 @@ proposal `from_head = None`, and v3 pending rows read as source Publish with no
 `to_deps`. Reader connections continue working across a writer migration. New
 main-sync APIs require at least v4; current writers migrate to v5. Old binaries refuse schemas newer than they understand. `deps_auto` and
 `sync_report` deletions are intentional exceptions to the history-only GC rule.
+
+### 4.4c Main-sync schema v5 guards
+
+The unreleased v5 migration adds immutable `sync_move_history` rows, inserted
+only while their move intent is Preparing and deleted only through GC before
+that intent. Its conflicts-only workspace update exception permits removing
+existing text paths without changing base, head, generation, scene or tracking.
+The session must be Active and the workspace tracked and healthy, with no open
+Preparing/Swapping intent. A retained scene additionally requires its latest
+intent to be Done, Abandoned or Refused; a scene with no intent is refused
+(the latest-state subquery uses `COALESCE(..., '')`). The v5 migration is edited
+in place; there is no v6 migration.
 
 ### 4.5 不变量
 

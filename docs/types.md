@@ -590,7 +590,7 @@ confirm 只被 daemon 用
 
 `strata-confirm` 只负责签发和校验凭据（LocalAuthentication：Touch ID 或登录密码），不检查 TTY；TTY 检查（`require_tty`）在 cli 里。"confirm 只被 daemon 用"在 crate 层面成立：session 与 publish 只使用数据类型 `ConfirmToken` 和 `Action`，这两个类型放在 `strata-types` 里（§4）。
 
-基线与依赖一起移动（不变量 8）的原子动作是 `session::move_workspace(session: &SessionId, repo: &RepoId, new_base: BaseGen, head: CommitOid) -> Result<MoveReport>`（定义见 session.md §3）。这里的 `Result<T>` 即 `Result<T, StrataError>`；移动之后，`WorkspaceState` 的 `base` 和 `head` 一起更新。daemon 处理 `deps approve` 时调它，`publish::rebase_session` 做发布后 rebase 时也调它。发布后的新基线如果需要另一个依赖集，`rebase_session` 不移动这个会话，而是产生一个依赖变更提议，等 `deps approve`（不变量 4 优先于 design §6.4 的最后一句）。`deps` 只计算依赖集、提议和 rollout 计划，不调用 `session` 或 `publish`，依赖方向也不允许它这样做。
+基线与依赖一起移动（不变量 8）的原子动作是 `session::move_workspace(session: &SessionId, repo: &RepoId, new_base: BaseGen, head: CommitOid) -> Result<MoveReport>`（定义见 session.md §3）。这里的 `Result<T>` 即 `Result<T, StrataError>`；移动之后，`WorkspaceState` 的 `base` 和 `head` 一起更新。daemon 处理 `deps approve` 时调它，`publish::rebase_session` 做发布后 rebase 时也调它。发布后的新基线如果需要另一个依赖集，产生依赖变更提议；有效 `sync.deps = apply` 时可经 Auto 门走 C3，`confirm` 时等人类 `deps approve`。依赖未就绪、会话自改或漂移时，C2 可只移源码并保留旧依赖，报告待处理状态；这不等于依赖已同步。`deps` 只计算依赖集、提议和 rollout 计划，不调用 `session` 或 `publish`，依赖方向也不允许它这样做。
 
 ### Main-sync upstream wire types
 
@@ -608,6 +608,11 @@ use the existing validated identifier types. The optional `upstream` fields on
 `SyncRequest` is the shared agent RPC input: `session`, optional `repos`,
 `check` (false), `fetch` (true), `resolved`/`keep` (empty paths), optional
 `target: CommitOid` and `generation: u64`, and `accept_diverged` (false).
-Unknown fields are rejected. The move handler enforces report binding;
-legacy up-to-date workspace conflicts are the sole unbound acknowledgement
-case. Upstream data remains the separate shared upstream wire types.
+Unknown fields are rejected. The move handler requires target/generation for
+resolutions unless an acknowledgement case applies: O7 legacy conflicts on an
+up-to-date workspace with no saved report; named workspace conflicts in a
+non-following repo; or legacy-only named paths on a behind/diverged workspace
+with no saved report. These cases clear only named conflicts under the queue,
+repo lock and G0, without moving the workspace. Other resolutions require a
+matching saved report; a supplied but stale/missing report gives HeadMoved.
+Upstream data remains the separate shared upstream wire types.
