@@ -197,7 +197,7 @@ pub fn reconcile_locked(ctx: &deps::Ctx, p: &PreparedMain) -> Result<()> {
                 {
                     ctx.store.drop_pending(id, ctx.repo, row.rev)?;
                 } else {
-                    ensure_owner(ctx, &ws.base, p)?;
+                    ensure_owner(ctx, ws, p)?;
                     if row.to_deps.as_ref() != Some(&p.deps) {
                         ctx.store.set_pending_to_deps(
                             id,
@@ -243,7 +243,7 @@ pub fn reconcile_locked(ctx: &deps::Ctx, p: &PreparedMain) -> Result<()> {
             {
                 continue;
             }
-            ensure_owner(ctx, &ws.base, p)?;
+            ensure_owner(ctx, ws, p)?;
             Some(p.deps.clone())
         } else if ctx.git.is_ancestor(&ws.head, &p.head)? {
             None
@@ -265,7 +265,7 @@ pub fn reconcile_locked(ctx: &deps::Ctx, p: &PreparedMain) -> Result<()> {
 
 // An observation with an already-current deps_main (or no previous record)
 // need not create a Pending. Residue still needs an owner before its row exists.
-fn ensure_owner(ctx: &deps::Ctx, from: &strata_types::BaseGen, p: &PreparedMain) -> Result<()> {
+fn ensure_owner(ctx: &deps::Ctx, ws: &strata_types::WorkspaceState, p: &PreparedMain) -> Result<()> {
     if deps::find_set(ctx.store, ctx.repo, &p.deps)?.is_some()
         || deps::open_proposals(ctx.store, Some(ctx.repo))?
             .iter()
@@ -273,16 +273,16 @@ fn ensure_owner(ctx: &deps::Ctx, from: &strata_types::BaseGen, p: &PreparedMain)
     {
         return Ok(());
     }
-    let pinned = deps::find_set(ctx.store, ctx.repo, &from.deps)?.ok_or_else(|| {
+    let pinned = deps::find_set(ctx.store, ctx.repo, &ws.base.deps)?.ok_or_else(|| {
         StrataError::new(Code::Corrupt, "residue workspace has no sealed pinned set")
     })?;
     deps::propose(
         ctx,
         deps::ProposeArgs {
             origin: deps::ProposalOrigin::Main,
-            from: from.deps.clone(),
+            from: ws.base.deps.clone(),
             from_inputs: pinned.inputs_hash,
-            from_head: None,
+            from_head: Some(ws.head.clone()),
             to: p.deps.clone(),
             to_inputs: p.inputs.clone(),
             tree: Some(p.tree.clone()),

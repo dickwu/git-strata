@@ -14,7 +14,8 @@ use strata_gitio::{Git, TreeItem};
 use strata_types::{Code, CommitOid, RepoConfig, RepoPath, StrataError};
 
 const BLOB_LIMIT: u64 = 16 * 1024 * 1024;
-const BUDGET: Duration = Duration::from_millis(200);
+const RESPONSE_BUDGET: Duration = Duration::from_millis(200);
+const WORKER_BUDGET: Duration = Duration::from_secs(5);
 const PACKAGE_LIMIT: usize = 50;
 const CACHE_LIMIT: usize = 128;
 
@@ -65,7 +66,8 @@ fn remaining(deadline: Instant) -> Result<Duration> {
 /// Compare committed install inputs. One bounded worker prevents concurrent slow parsers
 /// or storage from accumulating detached work. A timeout/occupied slot is best-effort
 /// failure: the caller omits enrichment. The worker stops between reads/parsers, and each
-/// Git read has the remaining deadline; the response never waits for parser completion.
+/// Git read has the remaining worker deadline. The 200 ms response wait is separate
+/// so slower work can finish within 5 s and populate the cache for the next poll.
 pub fn changes(
     git: &Git,
     cfg: &RepoConfig,
@@ -76,7 +78,7 @@ pub fn changes(
         return Ok(finish(Vec::new(), &[], false));
     }
     let (git, cfg, from, to) = (git.clone(), cfg.clone(), from_head.clone(), to_head.clone());
-    within_budget(BUDGET, move |deadline| {
+    within_budget(RESPONSE_BUDGET, move |deadline| {
         compare(&git, &cfg, &from, &to, deadline)
     })
 }
@@ -85,7 +87,8 @@ fn within_budget(
     budget: Duration,
     work: impl FnOnce(Instant) -> Result<Changes> + Send + 'static,
 ) -> Result<Changes> {
-    let deadline = Instant::now() + budget;
+    let response_deadline = Instant::now() + budget;
+    let worker_deadline = Instant::now() + WORKER_BUDGET;
     if RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
         .is_err()
@@ -103,12 +106,12 @@ fn within_budget(
     std::thread::Builder::new()
         .name("deps-summary".into())
         .spawn(move || {
-            let result = work(deadline);
+            let result = work(worker_deadline);
             drop(slot);
             let _ = tx.send(result);
         })
         .map_err(|_| unavailable("changes_worker"))?;
-    rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    rx.recv_timeout(response_deadline.saturating_duration_since(Instant::now()))
         .map_err(|_| unavailable("changes_budget"))?
 }
 
@@ -342,7 +345,37 @@ fn diff_packages(a: &Packages, b: &Packages) -> Vec<PackageChange> {
         })
         .collect()
 }
+
+/// Specs can embed several URLs (Cargo tables and Pub mappings). Redact each
+/// authority with the shared display policy, including URLs in names/fallbacks.
+fn redact_urls(mut text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    while let Some(scheme) = text.find("://") {
+        let start = scheme + 3;
+        let end = text[start..]
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, '/' | '?' | '#' | '"' | '\\' | '<' | '>')
+            })
+            .map_or(text.len(), |i| start + i);
+        // Advance only past the marker/userinfo so a later URL in a table is
+        // still visited, even when the preceding URL has no path component.
+        let next = text[start..end]
+            .rfind('@')
+            .map_or(start, |at| start + at + 1);
+        out.push_str(&strata_types::display_url(&text[..next]));
+        text = &text[next..];
+    }
+    out.push_str(text);
+    out
+}
+
 fn finish(mut packages: Vec<PackageChange>, fallbacks: &[String], mut truncated: bool) -> Changes {
+    // Sanitize before formatting, truncation, serialization, or cache insertion.
+    for p in &mut packages {
+        p.name = redact_urls(&p.name);
+        p.from = p.from.as_deref().map(redact_urls);
+        p.to = p.to.as_deref().map(redact_urls);
+    }
     packages.sort_by(|a, b| {
         b.direct
             .cmp(&a.direct)
@@ -365,7 +398,7 @@ fn finish(mut packages: Vec<PackageChange>, fallbacks: &[String], mut truncated:
             ),
         })
         .collect();
-    phrases.extend(fallbacks.iter().cloned());
+    phrases.extend(fallbacks.iter().map(|s| redact_urls(s)));
     let summary = if phrases.is_empty() {
         "No package changes".into()
     } else {
@@ -456,10 +489,9 @@ fn parse(name: &str, bytes: &[u8]) -> Option<Packages> {
             }
             for p in v["packages"].as_object()?.values() {
                 let spec = p.as_array()?.first()?.as_str()?;
-                let (name, version) = spec.rsplit_once('@')?;
-                if name.is_empty() {
-                    return None;
-                }
+                // Skip a leading scope marker; URL userinfo belongs to the version.
+                let at = spec.char_indices().skip(1).find(|(_, c)| *c == '@')?.0;
+                let (name, version) = (&spec[..at], &spec[at + 1..]);
                 add(&mut out, name, version, direct.contains_key(name));
             }
         }
@@ -709,6 +741,110 @@ fn pubspec(text: &str, lock: bool) -> Option<Packages> {
 mod tests {
     use super::*;
     #[test]
+    fn bun_package_names_and_url_versions_are_safe() {
+        for (spec, name, version) in [
+            ("plain@1.2.3", "plain", "1.2.3"),
+            ("@scope/pkg@1.2.3", "@scope/pkg", "1.2.3"),
+            (
+                "plain@git+ssh://git@host/repo#ref",
+                "plain",
+                "git+ssh://***@host/repo#ref",
+            ),
+            (
+                "@scope/pkg@https://user:token@host/pkg.tgz",
+                "@scope/pkg",
+                "https://***@host/pkg.tgz",
+            ),
+        ] {
+            let input =
+                serde_json::to_vec(&serde_json::json!({"packages":{"pkg":[spec]}})).unwrap();
+            let parsed = parse("bun.lock", &input).unwrap();
+            let changes = finish(diff_packages(&Packages::new(), &parsed), &[], false);
+            assert_eq!(changes.packages[0].name, name);
+            assert_eq!(changes.packages[0].to.as_deref(), Some(version));
+            let wire = serde_json::to_string(&changes).unwrap();
+            assert!(!wire.contains("user:token"));
+            assert!(!wire.contains("git@host"));
+        }
+    }
+
+    #[test]
+    fn every_parser_redacts_url_credentials_in_summary_fields() {
+        let url = "https://user:secret@host/pkg";
+        let json = |v: Value| serde_json::to_vec(&v).unwrap();
+        let cases = [
+            ("package.json", json(serde_json::json!({"dependencies":{"pkg":url}}))),
+            ("composer.json", json(serde_json::json!({"require":{"pkg":url}}))),
+            ("package-lock.json", json(serde_json::json!({"lockfileVersion":3,"packages":{"node_modules/pkg":{"version":url,"resolved":url}}}))),
+            ("npm-shrinkwrap.json", json(serde_json::json!({"lockfileVersion":2,"packages":{"node_modules/pkg":{"version":url,"resolved":url}}}))),
+            ("bun.lock", json(serde_json::json!({"packages":{"pkg":[format!("pkg@{url}")]}}))),
+            ("composer.lock", json(serde_json::json!({"packages":[{"name":"pkg","version":url}]}))),
+            ("Cargo.lock", format!("[[package]]\nname = 'pkg'\nversion = '{url}'\nsource = 'git+{url}'\n").into_bytes()),
+            ("Cargo.toml", format!("[dependencies]\npkg = {{ git = '{url}', registry = 'https://other:private@mirror/repo' }}\n").into_bytes()),
+            ("pubspec.lock", format!("packages:\n  pkg:\n    version: '{url}'\n").into_bytes()),
+            ("pubspec.yaml", format!("dependencies:\n  pkg:\n    git:\n      url: '{url}'\n    hosted: 'https://other:private@mirror/repo'\n").into_bytes()),
+        ];
+        for (file, input) in cases {
+            let packages = parse(file, &input).unwrap();
+            for rows in [
+                diff_packages(&Packages::new(), &packages),
+                diff_packages(&packages, &Packages::new()),
+            ] {
+                let changes = finish(rows, &[], false);
+                let wire = serde_json::to_string(&changes).unwrap();
+                assert!(!changes.packages.is_empty(), "{file}");
+                assert!(!wire.contains("user:secret"), "{file}: {wire}");
+                assert!(!wire.contains("other:private"), "{file}: {wire}");
+                assert!(wire.contains("https://***@host/pkg"), "{file}: {wire}");
+            }
+        }
+    }
+
+    #[test]
+    fn summary_redacts_names_and_fallbacks_before_clipping() {
+        let changes = finish(
+            vec![PackageChange {
+                name: "https://user:secret@host/pkg".into(),
+                from: Some("https://old:password@host/pkg".into()),
+                to: Some("https://new:token@host/pkg".into()),
+                kind: ChangeKind::Changed,
+                direct: true,
+            }],
+            &["https://fallback:password@host/file changed (no parser)".into()],
+            false,
+        );
+        let wire = serde_json::to_string(&changes).unwrap();
+        for secret in [
+            "user:secret",
+            "old:password",
+            "new:token",
+            "fallback:password",
+        ] {
+            assert!(!wire.contains(secret), "{wire}");
+        }
+    }
+
+    #[test]
+    fn url_redaction_preserves_safe_specs_and_handles_embedded_authorities() {
+        for (text, expected) in [
+            ("@scope/pkg@^1.2", "@scope/pkg@^1.2"),
+            ("https://host/pkg@ref", "https://host/pkg@ref"),
+            ("https://user:p'ass@host", "https://***@host"),
+            ("git+ssh://git@host/pkg", "git+ssh://***@host/pkg"),
+            (
+                "https://u%40ser:pass%3Aword@[::1]:8080/pkg",
+                "https://***@[::1]:8080/pkg",
+            ),
+            (
+                "git = 'https://host', registry = 'https://user:pass@mirror'",
+                "git = 'https://host', registry = 'https://***@mirror'",
+            ),
+        ] {
+            assert_eq!(redact_urls(text), expected);
+        }
+    }
+
+    #[test]
     fn summary_caps_and_direct_first() {
         let rows = (0..70)
             .map(|i| PackageChange {
@@ -749,7 +885,7 @@ mod tests {
         assert_eq!(error.detail.unwrap()["reason"], "changes_budget");
         assert!(start.elapsed() < Duration::from_millis(200));
         assert_eq!(
-            within_budget(BUDGET, |_| panic!("must not spawn another parser"))
+            within_budget(RESPONSE_BUDGET, |_| panic!("must not spawn another parser"))
                 .unwrap_err()
                 .detail
                 .unwrap()["reason"],
@@ -762,6 +898,8 @@ mod tests {
     fn unsupported_or_malformed_inputs_do_not_invent_packages() {
         for (name, bytes) in [
             ("bun.lockb", b"binary".as_slice()),
+            ("pnpm-lock.yaml", b"resolution: https://user:token@host/pkg"),
+            ("yarn.lock", b"resolved https://user:token@host/pkg"),
             (
                 "package-lock.json",
                 br#"{"lockfileVersion":1,"dependencies":{}}"#,
