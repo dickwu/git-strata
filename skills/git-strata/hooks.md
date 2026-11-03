@@ -7,7 +7,7 @@ the same work by hand:
 - after each meaningful edit: `git-strata checkpoint -m "what changed"`
 - before you finish: `git-strata sync --check` (see [sync.md](sync.md))
 
-`docs/modules/cli.md` §3.5 documents the hook input for Claude Code only. Other
+[cli.md §3.5](https://github.com/dickwu/git-strata/blob/main/docs/modules/cli.md) documents the hook input for Claude Code only. Other
 agents (Codex, Cursor, ...) run the two commands above themselves.
 
 ## Checkpoint after every tool call (Claude Code)

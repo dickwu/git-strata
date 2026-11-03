@@ -36,8 +36,9 @@ When this skill and the binary disagree, the binary wins:
   `git-strata daemon start`. **Never start, stop or restart the daemon
   yourself**, never run `launchctl` or `brew services`, and never write its
   plist, not even with a temp `HOME`. Without the daemon only `status`,
-  `ls`, `grep`, `files`, `diff`, `deps list`, `daemon status` and a repeated
-  `checkpoint --tool-call ID` work; the rest return `Busy` `daemon_down`, and
+  `ls`, `grep`, `files`, `diff`, `deps list`, `daemon status`, a repeated
+  `checkpoint --tool-call ID`, and `session ports`/`session exec` of a
+  workspace that already holds its port lease work; the rest return `Busy` `daemon_down`, and
   edits made meanwhile are not checkpointed (tell the human which).
 - Config is `~/Library/Application Support/git-strata/config.toml`; the daemon
   reads it only at start. After a config change, tell the human the daemon
@@ -56,10 +57,11 @@ git-strata new PROJ-123 --repo api --repo web
 #    data.manifest.id                -> SESSION, e.g. s-k3q7xm2a
 #    data.manifest.repos.<repo>.path -> that repo's workspace: work only there
 #    A repo that links a sibling by relative path (../x) needs that sibling too.
-git-strata add --repo front          # later: another repo for the same session
 
 # 2. Work inside the workspace; commands without --session use the cwd.
 cd "<data.manifest.repos.api.path>"
+git-strata add --repo front          # later, from inside it: another repo
+                                     # (or anywhere: add --session <SESSION> --repo front)
 
 # 3. Checkpoint after each meaningful edit (no hook? do it yourself).
 git-strata checkpoint -m "parse config before connect"
@@ -69,7 +71,8 @@ git-strata checkpoint -m "only these" --path src/a.ts --path ../web/x.ts
 git-strata status                    # this session (--all: every session)
 git-strata diff                      # this session vs its base
 git-strata grep 'TODO'               # files 'src/**/*.ts' lists paths
-git-strata restore 42 [src/a.ts]     # back to checkpoint 42 (all or listed paths)
+git-strata restore 42                # back to checkpoint 42 (every path)
+git-strata restore 42 src/a.ts       # ... or only the listed paths
 
 # 5. Before you finish: is main ahead of you?
 git-strata sync --check              # data.upstream.clean; see sync.md if false
@@ -112,7 +115,7 @@ stdout is exactly one JSON line; exit code 0 iff `ok` is true:
 Branch on `error.code`, then `error.detail.reason`; never parse `message`.
 When a reply carries a `fix` (in `detail`, `upstream`, `deps` or a warning),
 it is the command to run next, or the text to hand the human when it starts
-with "ask the human". Never run a human-only command (hard rule 1) yourself. Exceptions to the envelope: `--help`/`--version`, a
+with "ask the human". Never run a human-only command (hard rule 1) yourself. Exceptions to the envelope: `--help`/`--version`, `ls --table`, a
 `session exec` that started its command, and `sync --check --hook`.
 
 | You got | Do |
@@ -158,8 +161,11 @@ Everything else: [errors.md](errors.md).
    come from `publish`; pushes from `git-strata push` or publish.
 4. Do not push unless the human asked.
 5. After `Unknown`, do not replay, `gc` or `rm`; leave the scene for the human.
-6. Seed files (`.env`, `.env.local`, ...) are cloned from the main checkout.
-   Never print, `cat`, log, `git add` or commit them.
+6. Seed files (`.env`, `.env.local`, ...) are cloned from the main checkout
+   and refreshed when it changes, unless you edited the copy (then `status`
+   warns `SeedStale`). They are never checkpointed or published. Never print,
+   `cat`, log, `git add` or commit them. Details: README
+   [Seed files (.env)](https://github.com/dickwu/git-strata/blob/main/README.md#seed-files-env).
 7. Run `gc` only when the human asks (`gc --store --dry-run` first).
 8. Release builds never run in a workspace: publish (and push), then build in
    the main checkout after `git pull --ff-only` ([publish.md](publish.md)).

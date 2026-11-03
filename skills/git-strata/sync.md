@@ -186,4 +186,4 @@ a later repo fails. The move handler's reasons and related outcomes are:
 | `waiting` / `publishing`, `installing` | Transient; wait 30 seconds, at most five retries. |
 | `waiting` / `waiting_human`, `own_change`, `drift` | Pass on `deps.fix`, proposal and reason to the human; stop retrying. |
 | `Corrupt manifest_missing` / `sync_report` | Missing base manifest or invalid saved report; preserve the workspace and stop for human recovery. |
-| `Unsupported daemon_too_old` / `sync_check_unavailable` | Ask the human to install matching CLI/daemon versions. `sync_check_unavailable` is a legacy internal diagnostic; current check dispatch should never return it. |
+| `Unsupported daemon_too_old` | Ask the human to install matching CLI/daemon versions. |

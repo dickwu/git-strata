@@ -3,7 +3,9 @@
 ## The JSON envelope
 
 stdout carries exactly one compact JSON line; exit code 0 iff `ok` is true,
-else 1. Human prompts and notices go to stderr only. One exception: a
+else 1. Human prompts and notices go to stderr only. Exceptions: `--help`/`--version`;
+`ls --table` prints a text table; `sync --check --hook` prints the hook's
+own JSON (see [hooks.md](hooks.md)); and a
 `session exec` that starts its command prints no envelope; stdout, stderr
 and the exit status are the command's (a failure before the start is an
 envelope as usual).
@@ -21,13 +23,15 @@ All three keys are always present; `data` is never null. Branch on
 | --- | --- |
 | `Busy` (`daemon_down`) | Keep working; tell the human the daemon is down (they run `git-strata daemon start`). Retry once `daemon status` shows `running`. Never start it yourself. |
 | `Busy` (`workspace_changed`) | A file changed while reading it; retry. |
+| `Busy` (`publish_unknown`) | An earlier publish of this repo is `Unknown`. It clears by itself once origin has that commit (checked on each publish). Do not loop: tell the human; they may run `git-strata push <REPO>` first. |
+| `Busy` / `Unknown` with `detail.sibling` | Preparing that sibling repo (fetch, anchor) was busy or unknown. `Busy`: retry later. `Unknown`: stop and tell the human. |
 | `Busy` (other) | Repo lock held by another operation; wait and retry later. |
 | `NotTty` | Command needs a human at a terminal. Stop; give the exact command to the human. |
 | `NotConfirmed` | Human confirmation failed / was cancelled / expired. Report it; the human reruns. Exception: `detail.reason` `plan_changed` (publish) means no confirmation was attempted and nothing was written: rerun the same command yourself first; if that rerun returns `NotTty`, hand the command to the human. |
 | `AmbiguousMatch` | Ticket matches several sessions; retry with an id from `detail`. |
 | `NoSuchSession` | Wrong selector, or cwd is not inside a workspace; `cd` into one or pass `--session`. |
 | `NoSuchRepo` | Repo name not in config; check `--repo` / argument. With `detail.reason` `not_in_session`: the session has no workspace of that repo; run `detail.fix` (`git-strata add --session S --repo R`), then retry. |
-| `InvalidInput` | Fix arguments per `detail.reason` (`checkpoint_reason`, `diff_mode`, `both_selectors`, `no_batch`, `unknown_command` with `detail.commands`, ...). `chain_diverged` from publish on a repo that needs no confirmation: run `git-strata push <REPO>` (it fetches, replays the unpushed chain onto origin, reruns checks, pushes a fast-forward), then rerun the publish; `replay_deps_unsealed` from push: open a session on the repo, push again. `chain_rewound`, or diverged on a gated repo: hand to the human (`chain`). |
+| `InvalidInput` | Fix arguments per `detail.reason` (`checkpoint_reason`, `diff_mode`, `both_selectors`, `no_batch`, `unknown_command` with `detail.commands`, ...). `siblings_missing`: the repo's checks need sibling repos; run `detail.fix` (`git-strata add --session S --repo R ...`) or follow `detail.missing[].next`, then rerun. `chain_diverged` from publish on a repo that needs no confirmation, when you were asked to publish or push it: run `git-strata push <REPO>` (it fetches, replays the unpushed chain onto origin, reruns checks, pushes a fast-forward), then rerun the publish; `replay_deps_unsealed` from push: open a session on the repo, push again. `chain_rewound`, or diverged on a gated repo: hand to the human (`chain`). |
 | `Conflict` (publish) | Same hunk changed on both sides (another session or upstream); nothing committed in `detail.repo`, earlier repos of the call may have landed (`data.commits`). Fix, checkpoint, re-run the same publish ([publish.md](publish.md)); between sessions, who resolves can be set by `publish --assign`. |
 | `Conflict` (`sync_conflict`) | Edit the listed hunks, then sync with `--resolved`, the reported target and generation. Earlier successful repos appear in `detail.done`. |
 | `Conflict` (`base_diverged`) | Tell the human; chain recovery must precede accepting the dropped base. |
@@ -59,13 +63,14 @@ a `fix` yourself (SKILL.md, hard rule 1).
 with a temp `HOME`: the LaunchAgent domain is per user, not per HOME). Check
 it with `git-strata daemon status` (`data.running`). If it is down, keep
 working in the workspace and tell the human it is down so they can run
-`git-strata daemon start`. While it is down the hook answers `Busy`
-`daemon_down` and that checkpoint is not recorded: tell the human which edits
+`git-strata daemon start`. While it is down `checkpoint` (by hand or from a
+hook) answers `Busy` `daemon_down` and that checkpoint is not recorded: tell the human which edits
 were not checkpointed. Do not write a plist yourself.
 
 Without the daemon, only these work (read-only, straight from the store):
-`status`, `ls`, `grep`, `files`, `diff`, `deps list`, `daemon status`, and a
-repeated `checkpoint --tool-call ID` whose checkpoint already exists. Every
+`status`, `ls`, `grep`, `files`, `diff`, `deps list`, `daemon status`, a
+repeated `checkpoint --tool-call ID` whose checkpoint already exists, and
+`session ports`/`session exec` of a workspace that already holds its lease. Every
 other command returns `Busy` with `detail.reason = "daemon_down"`.
 
 Installing, upgrading and rolling back git-strata (including the 0.1.2 store

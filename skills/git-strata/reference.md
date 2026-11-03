@@ -28,7 +28,7 @@ data root (`[paths] root`, default `~/.strata`) as
 | `restore <CHECKPOINT> [PATHS]...` | `--session <S>` | no | no | `{checkpoint,session}` |
 | `grep <PATTERN>` | regex; `--session <S>` or `--all` | no | yes | `{hits:[...],skipped?:[{session,repo,path,code}]}` |
 | `files [GLOB]` | `--session <S>` or `--all` | no | yes | `{paths:[{session,repo,path}]}` |
-| `diff` | one of `--base` (default) / `--session <S>` / `--between <A> <B>`; `--repo <REPO>` (required with `--between`) | no | yes | `{only_a:[],only_b:[],both:[{path,kind,preview?,code?}]}` |
+| `diff` | one of `--base` (default) / `--session <S>` / `--between <A> <B>`; `--repo <REPO>` (required with `--between`) | no | yes | `{repo,only_a:[{path,kind}],only_b:[],both:[]}` (`repo` null when nothing matched); `--between`: `both:[{path,kind,preview?,code?}]` |
 | `deps propose` | `--session <S>`, `--repo <R>` (default: cwd's), `--switch` (move this session only) | no | no | `Proposal`; with `--switch`: `{ proposal, switched: { session, kind: moved\|skipped, code?, detail? } }` |
 | `deps approve <ID>` | `--sessions <S,S>` (default: all sessions of the repo) | yes + confirm | no | `{results:[{session,kind:"moved"\|"skipped",code?,detail?}]}` |
 | `deps list` | `--repo <R>` | no | yes | `{proposals:[...]}`; daemon rows carry effective pinned `mode: "apply" \| "confirm"` |
@@ -87,9 +87,12 @@ CheckMutates, PushRefused, Unknown, Unsupported, Corrupt, PortInUse.
   message, not yours). `--tool-call ID` is idempotent per (session, repo, ID):
   every new ID records a row (even with no change), and repeating it returns
   the same rows.
-- `diff` and `diff --between` preview current workspace content, checkpointed
-  or not. Identical files are not listed; binary / >64 MiB entries carry
-  `code: "Binary"` / `"TooLarge"` instead of a preview and the call stays ok.
+- `diff` lists the changed paths and their kinds against the base, from
+  current workspace content, checkpointed or not. `diff --between A B`
+  also previews paths both sides changed (`both[].preview`, `Clean` or
+  `Conflict` hunks). Identical files are not listed; binary / >64 MiB entries
+  carry `code: "Binary"` / `"TooLarge"` instead of a preview and the call
+  stays ok.
 - `grep` with no hits is `ok` with `"hits": []` (not an error). Skipped binary
   or oversized files are listed in `data.skipped`.
 
