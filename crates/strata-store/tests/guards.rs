@@ -44,6 +44,7 @@ fn fx() -> Fx {
          INSERT INTO checkpoints VALUES ('s-aaaaaaaa', 1, 'r', 1, 0, 'manual', 'm', 1);
          INSERT INTO overlay_entries VALUES ('s-aaaaaaaa', 1, 'a.txt', 'modified', '{B}', NULL, 33188);
          INSERT INTO move_intents VALUES ('s-aaaaaaaa', 'r', 2, '{T}', '{D2}', '{H}', '/stg', NULL, 'preparing', NULL, NULL, 0, NULL);
+         INSERT INTO sync_move_history VALUES ('s-aaaaaaaa', 'r', 2, '{{}}');
          INSERT INTO deps_proposals (repo, origin_session, from_set, from_inputs, to_set, to_inputs, state, created_ns, updated_ns)
            VALUES ('r', 's-aaaaaaaa', '{D}', '{I}', '{D2}', '{I}', 'awaiting_publish', 0, 0);"
     ))
@@ -103,7 +104,7 @@ fn dump(c: &Connection, table: &str) -> Vec<String> {
     .unwrap()
 }
 
-const IMMUTABLE: [(&str, &str); 10] = [
+const IMMUTABLE: [(&str, &str); 11] = [
     ("deps_sets", "platform = 'q'"),
     ("base_trees", "files = 2"),
     ("manifest_entries", "size = 4"),
@@ -114,6 +115,7 @@ const IMMUTABLE: [(&str, &str); 10] = [
     ("overlay_entries", "mode = 33261"),
     ("publish_items", "path = 'b'"),
     ("refs_audit", "detail = 'x'"),
+    ("sync_move_history", "resolution_json = '{\"keep\":[\"a\"]}'"),
 ];
 
 #[test]
@@ -179,10 +181,11 @@ fn committed_rows_are_immutable() {
     assert_eq!(one(c, "SELECT files FROM base_trees"), "Integer(1)");
 }
 
-const GC_TABLES: [&str; 15] = [
+const GC_TABLES: [&str; 16] = [
     "overlay_entries",
     "checkpoints",
     "seeds",
+    "sync_move_history",
     "move_intents",
     "workspaces",
     "sessions",
@@ -596,7 +599,169 @@ fn conflict_acknowledgement_guard_only_removes_paths() {
         "UPDATE workspaces SET conflicts = '[]', generation = 3",
         "illegal update: workspaces",
     );
+    refused(c, "UPDATE workspaces SET conflicts = '[]', base_gen = 2", "illegal update: workspaces");
     ok(c, "UPDATE workspaces SET conflicts = '[\"b\"]'");
     assert_eq!(one(c, "SELECT generation FROM workspaces"), "Integer(2)");
     ok(c, "UPDATE workspaces SET conflicts = '[]'");
+}
+
+/// A recovered move leaves its scene as history while the workspace is healthy.
+fn retained_scene() -> Fx {
+    let f = fx();
+    ok(
+        &f.c,
+        "UPDATE sessions SET lifecycle = 'active';
+         UPDATE move_intents SET state = 'swapping', conflicts = '[\"a\",\"b\"]';
+         UPDATE workspaces SET generation = 2, conflicts = '[\"a\",\"b\"]';
+         UPDATE move_intents SET state = 'unknown', ended_ns = 1;
+         UPDATE workspaces SET health = 'unknown', scene = '{\"move\":2}';
+         UPDATE workspaces SET health = 'ok';
+         UPDATE move_intents SET state = 'done';",
+    );
+    f
+}
+
+fn next_intent(c: &Connection) {
+    ok(
+        c,
+        &format!(
+            "INSERT INTO move_intents VALUES ('s-aaaaaaaa', 'r', 3, '{T}', '{D2}', '{H}', '/stg3', NULL, 'preparing', NULL, NULL, 2, NULL)"
+        ),
+    );
+}
+
+#[test]
+fn conflict_acknowledgement_allows_retained_scene_after_terminal_intent() {
+    for state in ["done", "abandoned", "refused"] {
+        let f = retained_scene();
+        let c = &f.c;
+        if state != "done" {
+            next_intent(c);
+            ok(
+                c,
+                &format!("UPDATE move_intents SET state = '{state}', ended_ns = 3 WHERE n = 3"),
+            );
+        }
+        let fields =
+            "SELECT json_array(base_gen, head, generation, health, scene, tracked) FROM workspaces";
+        let before = one(c, fields);
+        ok(c, "UPDATE workspaces SET conflicts = '[\"b\"]'");
+        assert_eq!(
+            one(c, "SELECT conflicts FROM workspaces"),
+            "Text(\"[\\\"b\\\"]\")"
+        );
+        assert_eq!(one(c, fields), before, "latest intent {state}");
+        ok(c, "UPDATE workspaces SET conflicts = '[]'");
+        assert_eq!(
+            one(c, "SELECT scene FROM workspaces"),
+            "Text(\"{\\\"move\\\":2}\")"
+        );
+    }
+}
+
+#[test]
+fn conflict_acknowledgement_refuses_open_or_unresolved_intent() {
+    for state in ["preparing", "swapping", "unknown"] {
+        let f = retained_scene();
+        let c = &f.c;
+        next_intent(c);
+        if state != "preparing" {
+            ok(
+                c,
+                "UPDATE move_intents SET state = 'swapping', conflicts = '[]' WHERE n = 3",
+            );
+        }
+        if state == "unknown" {
+            ok(
+                c,
+                "UPDATE move_intents SET state = 'unknown', ended_ns = 3 WHERE n = 3",
+            );
+        }
+        let before = dump(c, "workspaces");
+        refused(
+            c,
+            "UPDATE workspaces SET conflicts = '[\"b\"]'",
+            "illegal update: workspaces",
+        );
+        assert_eq!(dump(c, "workspaces"), before, "latest intent {state}");
+    }
+}
+
+#[test]
+fn conflict_acknowledgement_refuses_inactive_or_unhealthy_workspace() {
+    for setup in [
+        "UPDATE sessions SET lifecycle = 'removing'",
+        "UPDATE workspaces SET health = 'unknown'",
+    ] {
+        let f = retained_scene();
+        ok(&f.c, setup);
+        let before = dump(&f.c, "workspaces");
+        refused(
+            &f.c,
+            "UPDATE workspaces SET conflicts = '[\"b\"]'",
+            "illegal update: workspaces",
+        );
+        assert_eq!(dump(&f.c, "workspaces"), before, "{setup}");
+    }
+}
+
+#[test]
+fn conflict_acknowledgement_refuses_untracked_workspace() {
+    let f = retained_scene();
+    let c = &f.c;
+    // Normal writes cannot create this row. Seed the adversarial fixture,
+    // then restore the exact production trigger before testing its guard.
+    let guard: String = c
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name = 'workspaces_update_guard'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    ok(
+        c,
+        "DROP TRIGGER workspaces_update_guard; UPDATE workspaces SET tracked = 0;",
+    );
+    ok(c, &guard);
+    let before = dump(c, "workspaces");
+    refused(
+        c,
+        "UPDATE workspaces SET conflicts = '[\"b\"]'",
+        "illegal update: workspaces",
+    );
+    assert_eq!(dump(c, "workspaces"), before);
+}
+
+#[test]
+fn conflict_acknowledgement_refuses_scene_without_intent() {
+    let f = retained_scene();
+    // Simulate missing history through the raw GC gate, not the store API.
+    f.gc.store(true, std::sync::atomic::Ordering::SeqCst);
+    ok(
+        &f.c,
+        "DELETE FROM sync_move_history; DELETE FROM move_intents;",
+    );
+    f.gc.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(one(&f.c, "SELECT count(*) FROM move_intents"), "Integer(0)");
+    let before = dump(&f.c, "workspaces");
+    refused(
+        &f.c,
+        "UPDATE workspaces SET conflicts = '[\"b\"]'",
+        "illegal update: workspaces",
+    );
+    assert_eq!(dump(&f.c, "workspaces"), before);
+}
+
+#[test]
+fn sync_move_history_insert_requires_preparing_intent() {
+    for state in ["swapping", "done", "abandoned", "refused", "unknown"] {
+        let f = fx();
+        session_in(&f.c, "s-historya", "active");
+        intent_in(&f.c, "s-historya", state);
+        refused(
+            &f.c,
+            "INSERT INTO sync_move_history VALUES ('s-historya', 'r', 2, '{}')",
+            "resolution outside preparing move",
+        );
+    }
 }

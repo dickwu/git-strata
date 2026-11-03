@@ -596,8 +596,21 @@ show `ConfigRelaxPending`. The human then runs `git-strata config relax REPO`
 (TTY + prompt), which writes the file's flags into the pin; with nothing to
 relax it returns `InvalidInput` `not_relaxed`. Pins of repos removed from the
 config are kept. Format:
-`{"repos":{"<name>":{"deploy_on_push":bool,"confirm":bool,"push":bool,"regenerable":[...]}}}`
-(`regenerable` is written only when non-empty).
+`{"repos":{"<name>":{"deploy_on_push":bool,"confirm":bool,"push":bool,"sync_deps":"apply|confirm","regenerable":[...]}}}`
+(`sync_deps` is always written; `regenerable` only when non-empty).
+
+**Main-sync upgrade and rollback.** Stop the daemon, install matching CLI and
+daemon binaries (Homebrew formula and desktop cask), configure
+`[repo.<name>.sync]`, then start. Set `deps = "confirm"` before that start to
+keep human approval; also set `follow_main = false` to keep source following
+off. An existing pin without `sync_deps` adopts the default `apply`, so existing
+Pending proposals can auto-apply on the first start without that opt-out.
+Store v4/v5 and pins containing `sync_deps` are not downgrade-safe. For rollback,
+stop the daemon, preserve the current database and sidecars, restore the
+compatible `store/backups/store-v<from>-<ns>.db` (for example, `store-v3-<ns>.db`
+after v3 → v5), install both old binaries, and remove the sync tables and each
+pin's `sync_deps` before starting. The restored store omits work recorded after
+the backup; see [store recovery](docs/modules/store.md).
 
 **`rm.regenerable` is pinned too.** `[repo.<name>.rm] regenerable = [globs]`
 (the `.strata/lww` dialect) lists files a tool regenerates; their unpublished
@@ -673,7 +686,9 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `NoSuchRepo` | name not in config; `not_in_session`: run `detail.fix` (`git-strata add --session S --repo R`) |
 | `NoSuchBranch` | (`new`) a repo has no `origin/<default_branch>`; tell the human |
 | `InvalidInput` | fix arguments per `detail.reason` (`from_repo_prefix` / `from_path`: rewrite `--from` as `detail.expected` says); `chain_diverged` on a repo without confirmation: `git-strata push REPO` replays it (see [Origin moved](#origin-moved-under-the-unpushed-chain-push-replays)), then rerun; `chain_rewound`, or diverged on a gated repo: human runs `chain`; push-guard reasons above: tell the human |
-| `Conflict` | fix and rerun the same publish (above) |
+| `Conflict` (publish) | fix and rerun the same publish (above); `move_conflict` first needs named acknowledgement through sync |
+| `Conflict` (`sync_conflict`) | resolve every reported path with `sync --resolved`/`--keep` and the supplied target/generation; see the [agent workflow](skills/git-strata/SKILL.md#keeping-up-with-main) |
+| `Conflict` (`base_diverged`) | stop and ask the human to recover the chain; never accept divergence on your own |
 | `Conflict` (`assigned`) | another session owns the path; do not retry |
 | `NoMatch` | a `--from` path is not checkpointed; checkpoint, rerun |
 | `NoCommit` | nothing new; not a failure |
@@ -681,13 +696,13 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `OpenFiles` | a process holds files (`detail` has pids); stop it only if you started it, retry |
 | `CheckFailed` | the repo's check failed in staging; fix, checkpoint, publish again |
 | `CheckMutates` | config problem; tell the human |
-| `HeadMoved` | another publish or main moved first; re-read state, do not loop |
+| `HeadMoved` | sync: review the fresh report and re-resolve (or deliberately keep) with its binding, at most five retries; other commands: re-read state, do not loop |
 | `PushRefused` | report the remote's words to the human |
 | `Unknown` | outcome uncertain (`push_unknown`, `socket_closed`, `launchctl`): do not retry, `gc` or `rm`; tell the human |
 | `Binary` / `TooLarge` | per-entry markers in `diff` / `grep`; not a call failure |
 | `Corrupt` | store damage; stop, tell the human |
 | `PortInUse` | `already_running`: reuse the server this workspace already runs; `foreign`: run `detail.fix` (`session ports --reassign`) for your own session, then `exec` again |
-| `Unsupported` (`daemon_too_old`) | the daemon predates dev-port leases; tell the human |
+| `Unsupported` (`daemon_too_old`) | the daemon lacks the requested feature (e.g. sync or dev-port leases); ask the human to install matching CLI/daemon versions |
 
 The full closed set of codes: Conflict, HeadMoved, Dirty, Busy, NoSuchPath,
 NoSuchBranch, NoSuchCommit, NoCommit, NoMergeBase, IsDirectory, NotDirectory,

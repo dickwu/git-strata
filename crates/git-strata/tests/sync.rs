@@ -2,7 +2,8 @@ mod support;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
-use std::process::Stdio;
+use std::process::{Child, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use support::{FakeDaemon, Home, Run};
 
@@ -13,6 +14,8 @@ fn data(behind: Option<u32>, unpublished: bool) -> Value {
     }}}})
 }
 fn hook(home: &Home, active: bool) -> Run {
+    warm_executable(home);
+    let start = Instant::now();
     let mut child = home
         .cmd(&["sync", "--check", "--hook"])
         .stdin(Stdio::piped())
@@ -26,6 +29,28 @@ fn hook(home: &Home, active: bool) -> Run {
         json!({"cwd":home.path(),"stop_hook_active":active})
     )
     .unwrap();
+    hook_output_within_deadline(child, start)
+}
+
+fn hook_output_within_deadline(mut child: Child, start: Instant) -> Run {
+    // Five-second hook contract, plus process scheduling/loader margin.
+    let limit = Duration::from_millis(5750);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if start.elapsed() >= limit {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!("hook exceeded {limit:?}; killed and reaped child: {output:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        start.elapsed() < limit,
+        "hook deadline exceeded: {:?}",
+        start.elapsed()
+    );
     child.wait_with_output().unwrap().into()
 }
 fn silent(run: Run) {
@@ -93,7 +118,8 @@ fn sync_forwards_all_flags_and_noncheck_to_daemon() {
 }
 
 /// The daemon decides whether a resolution needs target/generation: a saved
-/// conflict report requires both, a legacy up-to-date conflict (O7) does not.
+/// conflict report requires both; named legacy acknowledgements (including
+/// behind/diverged workspaces without a report and non-following repos) do not.
 #[test]
 fn resolution_binding_is_left_to_the_daemon() {
     let home = Home::new();
@@ -178,28 +204,47 @@ fn stalled(trickle: bool) {
     let home = Home::new();
     warm_executable(&home);
     let listener = UnixListener::bind(home.socket()).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (done, until_done) = mpsc::channel();
     let t = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if until_done.recv_timeout(Duration::from_millis(10))
+                        != Err(RecvTimeoutError::Timeout)
+                    {
+                        return false;
+                    }
+                }
+                Err(e) => panic!("accept fake daemon connection: {e}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
         let mut line = String::new();
         BufReader::new(stream.try_clone().unwrap())
             .read_line(&mut line)
             .unwrap();
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_millis(5400) {
+        assert!(!line.is_empty(), "hook did not send a request");
+        // Keep the peer open until the test ends. Closing near five seconds
+        // would let a hook with no deadline pass merely because it saw EOF.
+        while until_done.recv_timeout(Duration::from_millis(100)) == Err(RecvTimeoutError::Timeout)
+        {
             if trickle && stream.write_all(b" ").is_err() {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(100));
         }
+        true
     });
-    let start = Instant::now();
-    silent(hook(&home, false));
-    let elapsed = start.elapsed();
+    let out = hook(&home, false);
+    let _ = done.send(());
     assert!(
-        elapsed < Duration::from_millis(5750),
-        "hook deadline exceeded: {elapsed:?}"
+        t.join().unwrap(),
+        "hook never connected to the stalled daemon"
     );
-    t.join().unwrap();
+    silent(out);
 }
 #[test]
 fn hook_exits_0_on_accepting_silent_daemon() {
@@ -223,13 +268,8 @@ fn hook_process_deadline_covers_stalled_stdin() {
         .spawn()
         .unwrap();
     let input = child.stdin.take().unwrap();
-    silent(child.wait_with_output().unwrap().into());
+    silent(hook_output_within_deadline(child, start));
     drop(input);
-    assert!(
-        start.elapsed() < Duration::from_millis(5750),
-        "hook runtime: {:?}",
-        start.elapsed()
-    );
 }
 
 #[test]

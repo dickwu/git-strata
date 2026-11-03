@@ -24,7 +24,7 @@ deps 负责依赖集（design §4 的 Deps set）里"算"的那一半：算键�
 - **种子缓存与种子文件的克隆**：由 session::new 负责（design §4、§6.1 第 4 步）。deps 只保证封存时排除嵌套在依赖目录里的种子缓存，并用 `nested_seed_caches` 告诉调用方是哪几个。
 - **基线导出与基线 generation 目录**：由 session 负责。它经 `gitio::export_tree` 导出源码树，调 `ensure` 取依赖集，用 `clone_into` 把依赖集克隆进它自己新建的目录，再改名到 `Store::base_dir` 并登记（module-rulings Addendum 3"Base generation layout"）。导出、`ensure` 与清单在锁外，只有复查、`clone_into`、改名与登记那一段在 repo 写锁里；`move_workspace` 在锁里只找基线、从不建（module-rulings "Base generations are built outside the lock"）。deps 只读调用方交来的导出目录。
 - **发布链与锚点的写**：由 publish 负责（module-rulings "The publish chain carries an anchor…"）：它在一个 ref 事务里一起写链与锚点，被回退、分叉的链由它拒绝或重放。deps 只读这两个 ref，给出判定（`publish_chain`）；锚点跟着 origin 沿链前移（a := `merge_base(o, c)`）也由 publish 与 daemon 做（module-rulings "The anchor follows origin along the chain — amended"）。
-- **发布后 rebase**：由 publish::rebase_session 负责。新基线需要另一个依赖集时，它调 `deps::propose` 登记提议，会话停在旧基线上等 `deps approve`（module-rulings 公共条 3：不变量 4 优先于 design §6.4 的最后一句）。deps 对它的要求见 §5.12。
+- **发布后 rebase**：由 publish::rebase_session 负责。新基线需要另一个依赖集时登记提议；有效 `sync.deps = apply` 时经 Auto 门走 C3，`confirm` 时保留人类 `deps approve` 流程，等待期间可按 C2 先移源码、保留旧依赖（文末 main-sync 补充取代早期只等批准的规则）。deps 对它的要求见 §5.12。
 - **repo 写锁与 `Busy`**：由 daemon 负责（module-rulings T13）。daemon 经 `Ctx.locks`（`RepoWriteLock`，§3）把它交给 deps；deps 只在短的临界区里持有它，从不跨过 install（Addendum 3/4"Locks"）：封存（rename、设 mode、同步、登记），以及提议与主干记录的写。`observe_main` 与 `ensure_target` 的登记自己取锁；`propose` 由调用方持锁调用（module-rulings "deps follows main's current tip"，§5.9）。deps 自己另有"每个依赖集一把建造锁"（§4.1）。
 - **持久化**：表、索引、触发器与全部 SQL 都在 store（Addendum 4"Schema ownership"）。deps 拥有自己四类记录的词汇、转换图与含义（§4.2、§4.5），经 store 的具名方法读写，从不执行 SQL。
 - **generation 的回收**：由 store 的 gc 负责（design §7"空间回收"）。依赖集的引用规则与封存目录的回收要求写在 §4.6。
