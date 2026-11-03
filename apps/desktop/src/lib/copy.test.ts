@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { compactTime, copy, duration, fullTime } from './copy';
+import { compactTime, compactTimeParts, copy, duration, fullTime } from './copy';
 import { sessionAge } from './view';
 
 describe('copy', () => {
@@ -32,6 +32,12 @@ describe('Time column', () => {
     expect(compactTime(new Date(2026, 9, 27, 14, 5), now)).toBe('2:05 PM');
     expect(compactTime(new Date(2026, 9, 26, 9, 30), now)).toBe('Oct 26, 9:30 AM');
     expect(compactTime(new Date(2025, 0, 3, 9, 30), now)).toBe('Jan 3, 2025');
+  });
+  test('compactTimeParts: date and clock split where a narrow column may wrap', () => {
+    const now = new Date(2026, 9, 27, 16, 0);
+    expect(compactTimeParts(new Date(2026, 9, 27, 14, 5), now)).toEqual(['2:05 PM']);
+    expect(compactTimeParts(new Date(2026, 9, 26, 9, 30), now)).toEqual(['Oct 26', '9:30 AM']);
+    expect(compactTimeParts(new Date(2025, 0, 3, 9, 30), now)).toEqual(['Jan 3, 2025']);
   });
   test('fullTime carries seconds and a zone', () => {
     expect(fullTime(new Date(2026, 9, 27, 14, 5, 9))).toMatch(/^Oct 27, 2026, 2:05:09\sPM \S+/);

@@ -285,7 +285,7 @@ body {
 }
 .filter-group {
   display: grid;
-  grid-template-columns: 56px 1fr;
+  grid-template-columns: 56px minmax(0, 1fr);
   align-items: start;
   gap: 8px;
 }
@@ -312,11 +312,21 @@ body {
   font: inherit;
   font-size: 12px;
   cursor: pointer;
+  /* A long repo name clips instead of widening the filter bar. */
+  max-width: 100%;
+  min-width: 0;
+}
+.filter-tag-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .filter-tag:hover {
   border-color: var(--accent);
 }
 .filter-tag-count {
+  flex: none;
   min-width: 16px;
   padding: 0 4px;
   border-radius: 3px;
@@ -365,12 +375,22 @@ body {
 .session-time time {
   color: var(--text-muted);
 }
-/* In the Sessions list the two parts stack (created over age) so the column stays narrow. */
+/*
+ * In the Sessions list the two parts stack (created over age) so the column stays narrow.
+ * The created time may wrap between date and clock ("Oct 30," over "12:07 PM"): kept on one
+ * line it overflowed the 112px column and gave the table a sideways scrollbar (t159u).
+ */
 .sessions-table .session-time {
   display: inline-flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
+  max-width: 100%;
+  white-space: normal;
+}
+.session-time-part,
+.session-age {
+  white-space: nowrap;
 }
 .session-age {
   color: var(--text);

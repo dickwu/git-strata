@@ -343,12 +343,20 @@ export function duration(ms: number): string {
 
 /** Local time, as short as it can be: "2:05 PM" today, "Oct 27, 2:05 PM" this year, else "Oct 27, 2025". */
 export function compactTime(t: Date, now: Date): string {
+  return compactTimeParts(t, now).join(', ');
+}
+
+/**
+ * compactTime split where a narrow column may wrap: ["2:05 PM"], ["Oct 27", "2:05 PM"] or
+ * ["Oct 27, 2025"]. Each part stays on one line.
+ */
+export function compactTimeParts(t: Date, now: Date): string[] {
   const sameDay = t.toDateString() === now.toDateString();
-  if (sameDay) return hm(t);
+  if (sameDay) return [hm(t)];
   // Date and time joined by hand: ICU versions differ on ", " vs " at ".
   if (t.getFullYear() === now.getFullYear())
-    return `${t.toLocaleDateString('en', { month: 'short', day: 'numeric' })}, ${hm(t)}`;
-  return t.toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' });
+    return [t.toLocaleDateString('en', { month: 'short', day: 'numeric' }), hm(t)];
+  return [t.toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })];
 }
 
 const hm = (t: Date) => t.toLocaleTimeString('en', { hour: 'numeric', minute: '2-digit' });

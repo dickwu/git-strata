@@ -82,10 +82,10 @@ export function SessionsScreen({
             loading={sessions.isPending && !daemon.isError}
             pagination={false}
             tableLayout="fixed"
-            // Fixed columns take 650px and Repos gets the rest. The table has the full window
-            // width (no sidebar), so this only bites below ~900px: there the table scrolls
-            // sideways so Repos keeps ~210px for its wrapping tags instead of a sliver.
-            scroll={{ x: 860 }}
+            // No scroll.x: fixed columns take 662px and Repos (its tags wrap) gets the rest,
+            // about 160-180px at the 880px minimum window. An interior cell that spills only
+            // overhangs its neighbour's padding; the last column (Time) is the one whose
+            // overflow widens the page, so it must wrap inside its width (t159u).
             locale={{
               emptyText:
                 filtered && all.length > 0 ? (
@@ -163,7 +163,8 @@ export function SessionsScreen({
                 width: 78,
                 render: (n: number) => (n > 0 ? <Tag color="error">{n}</Tag> : n),
               },
-              { title: 'Health', dataIndex: 'health', width: 64, render: healthTag },
+              // 80px: room for an "Unknown" or "Missing" tag, not just "Ok".
+              { title: 'Health', dataIndex: 'health', width: 80, render: healthTag },
               {
                 title: c.time,
                 key: 'time',
