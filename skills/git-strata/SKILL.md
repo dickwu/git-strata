@@ -1,578 +1,165 @@
 ---
 name: git-strata
-description: Use when working in a repo managed by git-strata (macOS), or when the user asks you to start, checkpoint, diff, restore, publish or remove a git-strata session. Gives each agent session its own isolated APFS-cloned workspace over a shared base snapshot; covers the CLI workflow, the JSON envelope, error codes, and the commands an agent must hand to a human.
+description: Use when working in a repo managed by git-strata (macOS), when the cwd is inside a git-strata session workspace (`<root>/sessions/<id>/<repo>`, default root ~/.strata), or when the user asks to start, checkpoint, diff, restore, sync with main, publish, push or remove a git-strata session, or to run a dev server on per-session ports. Gives each agent session its own isolated APFS-cloned workspace over a shared base snapshot. Covers the CLI loop (new, checkpoint, sync --check, publish, rm), the JSON envelope and error codes, main-sync conflict resolution, and the commands an agent must hand to a human. For any agent that runs shell commands (Claude Code, Codex, Cursor and others).
+license: MIT OR Apache-2.0
+compatibility: macOS 13+ on APFS. Needs the git-strata CLI (0.1.2 or later) on PATH and its daemon, which only a human starts.
 ---
 
 # git-strata
 
 git-strata gives every coding session its own workspace: an APFS clone of a
 shared, sealed base snapshot of each repo (plus its dependency set). One
-session's edits never change another session's files, but they are readable:
-`status --all`, `grep`/`files` with `--session S` or `--all`, and
-`diff --session S` / `--between` show other sessions' content. Edits are
-recorded as checkpoints, combined and
-committed by `publish`, and sent to the remote only by `git-strata push` or a
-publish that is configured to push. macOS only (APFS, FSEvents, launchd).
+session's edits never change another session's files, but they are readable
+(`status --all`, `grep`/`files --all`, `diff --session S`). Edits are recorded
+as checkpoints, committed by `publish`, and sent to the remote only by
+`git-strata push` or a publish whose repo is configured to push. macOS only.
+`git strata ...` and `git-strata ...` are the same binary.
 
-Use it when the user (or the repo's setup) works in git-strata sessions, when
-several agents edit the same repos in parallel, or when you are asked to
-checkpoint / restore / publish. `git strata ...` and `git-strata ...` are the
-same binary. Full command and flag table: [reference.md](reference.md).
+This file is the short path. Read the linked files when you hit their topic:
 
-## Prerequisites
+| File | Read it when |
+| --- | --- |
+| [reference.md](reference.md) | you need a command's flags, its `data` shape, or the full `detail.reason` list |
+| [sync.md](sync.md) | `sync --check` is not clean, or you get `sync_conflict`, `HeadMoved`, `waiting`, `base_diverged`, `move_conflict` |
+| [publish.md](publish.md) | you publish, hit a publish `Conflict`, change dependencies, or `rm` says `Dirty` |
+| [dev-ports.md](dev-ports.md) | you start a dev server or `tauri dev`, or get `PortInUse` |
+| [errors.md](errors.md) | any other `ok: false`, and troubleshooting |
+| [hooks.md](hooks.md) | the human wants checkpoints or the upstream check run automatically by agent hooks |
 
-- `git-strata` is on `PATH`. The config lives in
-  `~/Library/Application Support/git-strata/config.toml`; the daemon socket is
-  `~/Library/Application Support/git-strata/daemon.sock`, the pinned safety
-  flags `~/Library/Application Support/git-strata/pins.json` (no env var or
-  flag changes them; only `$HOME` does). Workspaces live under the data root
-  (`[paths] root`, default `~/.strata`) as
-  `<root>/sessions/<session-id>/<repo>/`.
-- The daemon reads `config.toml` only at start; after a config change, tell
-  the human the daemon needs a restart. Do not restart it yourself.
-- **Agents never start, stop or restart the daemon** (`git-strata daemon
-  start` / `stop` are human-only; never run them, or `launchctl`, yourself,
-  not even with a temp `HOME`: the LaunchAgent domain is per user, not per
-  HOME). Check it
-  with `git-strata daemon status` (`data.running`). If it is down, keep
-  working in the workspace and tell the human it is down so they can run
-  `git-strata daemon start`. While it is down the hook answers `Busy`
-  `daemon_down` and that checkpoint is not recorded: tell the human which
-  edits were not checkpointed. Do not write a plist yourself.
-- Main-sync upgrades/rollbacks belong to the human: stop the daemon, install
-  matching CLI+daemon (Homebrew formula+cask), add `[repo.<name>.sync]`, then
-  start. Before that first start, `deps = "confirm"` keeps approval; add
-  `follow_main = false` to disable following too. Existing pins missing
-  `sync_deps` otherwise adopt default `apply` and Pending proposals can auto-apply.
-  Store v4/v5 and pins with `sync_deps` are not downgrade-safe. Rollback requires
-  stopping the daemon, preserving the current database/sidecars, restoring
-  `store/backups/store-v<from>-<ns>.db` (e.g. v3 → v5 uses `store-v3-<ns>.db`),
-  installing both old binaries and removing sync tables plus each pin's
-  `sync_deps` before starting. The restored store lacks post-backup records.
-- Without the daemon, only these work (read-only, straight from the store):
-  `status`, `grep`, `files`, `diff`, `deps list`, `daemon status`, and a
-  repeated `checkpoint --tool-call ID` whose checkpoint already exists. Every
-  other command returns `Busy` with `detail.reason = "daemon_down"`.
+When this skill and the binary disagree, the binary wins:
+`git-strata <command> --help` describes the installed version.
 
-## Workflow
+## Before you start
+
+- `git-strata daemon status` must show `data.running: true`. If it does not,
+  keep working and tell the human the daemon is down; they run
+  `git-strata daemon start`. **Never start, stop or restart the daemon
+  yourself**, never run `launchctl` or `brew services`, and never write its
+  plist, not even with a temp `HOME`. Without the daemon only `status`,
+  `ls`, `grep`, `files`, `diff`, `deps list`, `daemon status` and a repeated
+  `checkpoint --tool-call ID` work; the rest return `Busy` `daemon_down`, and
+  edits made meanwhile are not checkpointed (tell the human which).
+- Config is `~/Library/Application Support/git-strata/config.toml`; the daemon
+  reads it only at start. After a config change, tell the human the daemon
+  needs a restart. Installing, upgrading or rolling back git-strata is the
+  human's job.
+- The session records which agent created it. Claude Code, Codex and Cursor
+  are detected; any other agent runs `export STRATA_AGENT=<name>` (1-64 of
+  `[A-Za-z0-9._-]`, starting with a letter or digit) or passes `--agent NAME`
+  to `new`.
+
+## The loop
 
 ```sh
-# 1. New session (ticket is just a label). Name the repos you will touch with
-#    --repo (repeatable): only those get a workspace, all tracked. This is the
-#    fast form; use it. A repo that links a sibling by relative path (../x)
-#    needs that sibling too: pass it, or add it later (step 1b).
-#    (Without --repo, `--repos A,B` gives EVERY configured repo a workspace
-#    and tracks only A,B; do not edit the untracked siblings.)
-git-strata new PROJ-123 --repo tool --repo core-lib
-#    data.manifest.id                  -> session id, e.g. "s-k3q7xm2a"
-#    data.manifest.repos.<repo>.path   -> that repo's workspace directory
-#    data.warnings                     -> [] when fine
-#    data.manifest.agent               -> the agent recorded for this session
-#    The session records which AI agent created it. Claude Code, Codex and
-#    Cursor are detected from their environment. Any other agent: run
-#    `export STRATA_AGENT=<name>` (e.g. aider; 1-64 of [A-Za-z0-9._-],
-#    starting with a letter or digit) before `new`, or pass --agent <name>.
-#    A warning of kind AgentNotRecorded means the running daemon is older
-#    than this CLI; the session is fine, only the agent is not recorded.
+# 1. Create a session. Name every repo you will touch with --repo (repeatable).
+git-strata new PROJ-123 --repo api --repo web
+#    data.manifest.id                -> SESSION, e.g. s-k3q7xm2a
+#    data.manifest.repos.<repo>.path -> that repo's workspace: work only there
+#    A repo that links a sibling by relative path (../x) needs that sibling too.
+git-strata add --repo front          # later: another repo for the same session
 
-# 1b. Need another repo later? Add it to the same session (tracked):
-git-strata add --repo front            # or: --session S --repo front
-#    data.added.<repo>.path; data.already lists repos it had already.
+# 2. Work inside the workspace; commands without --session use the cwd.
+cd "<data.manifest.repos.api.path>"
 
-# 2. Work inside the workspace. Commands without --session use the cwd.
-cd "<data.manifest.repos.tool.path>"
-#    ... edit files normally ...
-
-# 3. Checkpoint (one of --tool-call / -m, never both)
+# 3. Checkpoint after each meaningful edit (no hook? do it yourself).
 git-strata checkpoint -m "parse config before connect"
-git-strata checkpoint -m "only these" --path src/a.ts --path ../core-lib/x.php
+git-strata checkpoint -m "only these" --path src/a.ts --path ../web/x.ts
 
-# 4. Inspect
-git-strata status                    # this session; --all for every session
-git-strata diff                      # this session vs its pinned base (= --base)
-git-strata diff --between s-aaaa1111 s-bbbb2222 --repo tool   # two sessions
-git-strata grep 'TODO'             # this session; --session S or --all
-git-strata files 'src/**/*.ts'       # glob optional
+# 4. Inspect / undo
+git-strata status                    # this session (--all: every session)
+git-strata diff                      # this session vs its base
+git-strata grep 'TODO'               # files 'src/**/*.ts' lists paths
+git-strata restore 42 [src/a.ts]     # back to checkpoint 42 (all or listed paths)
 
-# 5. Undo to a checkpoint (all paths, or only the listed ones)
-git-strata restore 42
-git-strata restore 42 src/a.ts
+# 5. Before you finish: is main ahead of you?
+git-strata sync --check              # data.upstream.clean; see sync.md if false
+git-strata sync --repo api           # following repos only: merge main now
 
-# 6. Before you finish: inspect upstream, then publish checkpointed content
-git-strata sync --check
-# For unclean following repos: sync, resolve, re-run checks, checkpoint, publish.
-# For following:false: ignore behind; only acknowledge named conflicts.
-git-strata publish --from s-k3q7xm2a:src/a.ts --from s-k3q7xm2a:src/b.ts
+# 6. Publish checkpointed paths (PATH is relative to the repo root)
+S=s-k3q7xm2a
+git-strata publish --from "${S}:src/a.ts" --from "${S}:src/b.ts"
+#    several repos have the path? --from "${S}:REPO:PATH"
 
-# 7. Push the publish chain (only if the human asked; may need a TTY)
-git-strata push tool
+# 7. Push only if the human asked (a gated repo needs the human at a TTY)
+git-strata push api
 
 # 8. Remove the session once its work is published
-git-strata rm --session s-k3q7xm2a
+git-strata rm --session "$S"
 ```
 
-Notes:
-
-- Before you finish, run `git-strata sync --check`. When `upstream.clean` is
-  false, inspect each repo: for `following: true`, run `git-strata sync --repo R`,
-  resolve its reported conflicts, re-run your checks, checkpoint and publish.
-  For `following: false`, ignore behind and only acknowledge named workspace
-  conflicts; the reply emits no sync fix and sync never moves that repo.
-  After `result: moved` or `source_only`,
-  `cd` back into the workspace by its path and restart processes you started
-  there: the old shell/process cwd may still refer to the previous tree.
-  Read `data.upstream` in publish and rm replies too (publish is keyed by
-  session id), applying the same following/non-following rule. For a Dirty rm,
-  the order for following repos is sync → checks → checkpoint → publish → rm.
-- Upstream is informational: it never by itself refuses publish or rm.
-  Behind counts cap at 1000; `capped` means at least that many. `ls` and
-  `status --brief` are cache-only; null/unchecked means not yet checked.
-  `sync --check` uses local refs; `as_of` describes fetch freshness.
-  `Unsupported daemon_too_old` on sync means the human must install matching
-  CLI/daemon versions.
-
-- `--session` takes a session id or a ticket. A ticket shared by several
-  sessions gives `AmbiguousMatch`; use an id from `detail`. `--session` and
-  `--all` together is `InvalidInput` (`both_selectors`).
-- `checkpoint` may record more than one repo of the session: every path is
-  mapped to the session repo whose workspace contains it; paths outside the
-  session are skipped. With no paths, every tracked repo of the session is
-  scanned. `data.checkpoints` has one row per repo recorded.
-- `-m` records a new checkpoint only when something changed since the
-  latest one; with no change it returns that latest checkpoint (its id and
-  message, not yours). `--tool-call ID` is idempotent per (session, repo, ID):
-  every new ID records a row (even with no change), and repeating it returns
-  the same rows.
-- `publish` publishes the selected paths' current content: before sending
-  the publish it records a fresh `BeforePublish` checkpoint of each
-  `--from` batch, so edits made to a selected file up to that moment are
-  included. There is no option to publish an older checkpoint; to keep an
-  edit out, revert it (or `restore` the path) before publishing.
-  Without `--from` it is interactive on a TTY and `InvalidInput`
-  (`no_batch`) otherwise, so agents always pass `--from SESSION:PATH`.
-  PATH is relative to the repo root with no repo prefix (`billing-api/app/x.php`
-  is `--from "${S}:app/x.php"`). Write `"${S}:path"`, never `"$S:path"`: zsh
-  reads `$S:t`, `$S:h`, ... as modifiers. Path mistakes come back before any
-  TTY check: `InvalidInput` `from_repo_prefix` (rerun with
-  `error.detail.expected`), `InvalidInput` `from_path` (no workspace has it),
-  `AmbiguousMatch` `from_repo` (several have it and not exactly one of their
-  checkpoints changed it; rerun with one of `detail.expected`). To pick the
-  repo yourself use `--from "${S}:REPO:PATH"` (e.g. `"${S}:admin:src/a.ts"`);
-  the middle part is REPO only when it is one of the session's repos.
+- `--session` takes a session id or a ticket (`AmbiguousMatch` when a ticket
+  names several; use an id from `detail`). Write `"${S}:path"`, never
+  `"$S:path"`: zsh reads `$S:t`, `$S:h` as modifiers.
+- `checkpoint -m` with nothing changed returns the latest checkpoint;
+  `publish` snapshots the selected paths itself, so it always publishes their
+  current content. To keep an edit out, revert or `restore` it first.
 - `publish` replies only after checks, commit, push and the rebase of every
-  session. `git push` waits for the remote's own hooks (bounded at 120 s,
-  then `Unknown` `push_unknown`), the rebase is unbounded: a minute or two of
-  silence after the remote branch moved is normal. Wait; do not interrupt or
-  rerun.
-- Release builds never run in a workspace (no remotes, detached `HEAD`, push
-  guard). Publish (and push), then in the main checkout `git pull --ff-only`,
-  check `HEAD` equals `data.commits.<repo>`, and run the build there; the
-  build script is the human's step unless they asked you to run it. See
-  README "Release builds from a session".
-- Multi-repo `publish` commits repo by repo. When one repo hits `Conflict`,
-  repos before it have already committed (and pushed, if push is on); the
-  call does not roll them back. See "Publish conflict: fix and re-run" below.
-- `diff` and `diff --between` preview current workspace content, checkpointed
-  or not. Identical files are not listed; binary / >64 MiB entries carry
-  `code: "Binary"` / `"TooLarge"` instead of a preview and the call stays ok.
-- `grep` with no hits is `ok` with `"hits": []` (not an error). Skipped binary
-  or oversized files are listed in `data.skipped`.
-- `deps propose [--session S] [--repo R]` proposes a new dependency set after
-  you change install inputs; `deps list` shows open proposals. Add `--switch`
-  to move your own session onto the proposed set right away (no prompt; other
-  sessions stay pinned). Check `data.switched.kind`: `skipped` with
-  `code: OpenFiles` means a process holds files in your deps dir; stop it (only
-  if you started it) and run again. Approving for other sessions is
-  human-only (below). `data.pending_proposals: [{id, repo}]` in any
-  envelope identifies an open proposal. Inspect its effective mode/state:
-  `apply` can proceed automatically; human-action waits follow the stop rule below.
-- If you change install inputs (package.json deps, bun.lock, patches,
-  pubspec.yaml / pubspec.lock, ...) and publish without switching, publish
-  still runs the checks with deps that match the staged inputs: it uses a
-  sealed set (warning `DepsSubstituted`) or installs one first (slower;
-  warning `DepsReinstalled`, and the history shows an extra row stopped with
-  `Drift`). Plain drift does not refuse the publish; it can still stop with
-  `Drift` when the inputs move again during that install (`deps_drift`) or
-  when the deps dirs overlap files you publish (`deps_select_failed`,
-  `tracked_overlap`: follow its `fix`/`hint`). Still run the warning's `fix`
-  (`deps propose --switch`) so your workspace matches. `status` shows the same
-  `drift.fix`. If that install fails (`detail.stage: "deps_install"`), hand it
-  to the human with `detail.log_tail`; do not retry in a loop (a retry
-  returns `previous_attempt`).
+  session; a minute or two of silence is normal. Wait; never interrupt or rerun.
+- After a sync or automatic move (`result: moved` / `source_only`), `cd` back
+  into the workspace by its path and restart processes you started there.
+- Dev servers: never edit ports in committed files; run them with
+  `git-strata session exec -- <cmd>` ([dev-ports.md](dev-ports.md)).
 
-## Keeping up with main
+## Reading replies
 
-| Command | Purpose |
-| --- | --- |
-| `git-strata sync [--check] [--repo R]` | Inspect upstream, or fetch and merge it into this session. |
-| `git-strata sync --repo R --resolved PATH --target HEAD --generation N` | Finish the reported conflict after editing it. Repeat `--resolved` for each path. |
-| `git-strata sync --repo R --keep PATH --target HEAD --generation N` | Explicitly acknowledge that your current side of the reported conflict is correct. |
-
-Main's source follows automatically in eligible idle workspaces; dependency
-replacement uses the repo's effective `sync.deps` mode (`apply` or `confirm`).
-To merge now, run `git-strata sync --repo R`. When upstream says `following: false`,
-ignore `behind` and only acknowledge named conflicts as below: no sync fix is
-emitted, and a plain sync returns `result: not_following` without moving anything.
-
-On `Conflict` with `detail.reason = "sync_conflict"`, read `detail.conflicts`.
-Edit each listed path to contain both your changes and upstream's `theirs`.
-Edit only inside the reported hunks: adjacent edits can fuse a region with a
-previously clean upstream change and are refused as `resolved_overlap_changed`.
-Make unrelated edits after syncing. Name **every reported conflict path in one
-call**, mixing repeated `--resolved` and `--keep` as needed:
-
-```sh
-git-strata sync --repo R --resolved PATH_A --resolved PATH_B --keep PATH_C --target HEAD --generation N
-```
-
-Use HEAD and N from `detail.target.head` and `detail.generation`; both flags
-are required outside the acknowledgement cases below. Upstream's non-overlapping
-hunks merge automatically. Inside a conflicting hunk your text wins, so compare
-it with `theirs`; restoring your old bytes is not a resolution (`resolved_unchanged`).
-Use `--keep` only after deciding explicitly that your existing side is correct.
-For non-text conflicts (binary, deletion, mode/type, oversized files), your current
-file or absence is taken whole and reported under `whole_file`: compare with
-`theirs` first. Paths absent from the saved report are `resolved_unrelated`.
-A partial submission makes no move. Its `detail.conflicts` lists only remaining
-conflicts, and `detail.resolved` / `detail.kept` list choices accepted in that
-request. The daemon retains their original report rows, but does **not** persist
-choices for automatic reuse. In the next call, repeat all accepted names with
-the same `--resolved` / `--keep` flags and unchanged accepted bytes, together with
-newly resolved names and the same `--target` / `--generation`. Repeating those
-choices is idempotent; omitting their names does not replay them.
-
-`HeadMoved` supplies a fresh report and invalidates the old resolution choices.
-Re-check it against the latest upstream. That report captures your already-edited
-bytes: another unchanged `--resolved` is refused. Re-resolve, or use `--keep`
-with the new binding after checking that your resolution remains correct. A move
-to the originally reported target before the target changes also completes that
-resolution.
-
-After `moved` or `source_only`, `cd` back to the workspace by its path and restart
-processes you started there; existing shells can remain in the old tree. Re-run
-checks, checkpoint, then publish. Read these per-repo reply fields:
-
-| Field | Meaning and action |
-| --- | --- |
-| `lww` | Paths resolved by the configured last-writer-wins rules; review the resulting files and rerun checks. This is separate from hunk-bound `--resolved`. |
-| `regenerable_kept` | Conflicting paths kept under the pinned `rm.regenerable` policy; review or regenerate them and rerun checks. |
-| `accepted_diverged` | Base-only commits (`head`, `subject`) accepted after the human's chain recovery; report them to the human. Never initiate that recovery or acceptance yourself. |
-| `old_tree` | Path of a retained previous workspace, or null. It can contain open handles, late writes or uncarried content. Re-enter the live workspace and restart only your processes; preserve the old tree and report any remaining work. |
-
-For `result: waiting`, inspect `deps.state` or `reason` before retrying:
-
-- `waiting_human`, `own_change` and `drift` do **not** clear by retrying. Both
-  `waiting` and `source_only` carry `deps.state` and the matching pending
-  `deps.proposal` when present. Only `waiting_human` with that proposal gets
-  `deps.fix: "ask the human: git-strata deps approve P"`; `own_change` and `drift`
-  have no approval fix. Relay the state, proposal and supplied fix, then stop the
-  sync loop. Do not invent an approval id. For `source_only`, the source move
-  succeeded but the dependency action remains.
-- Only transient waits (`deps.state: installing` or `reason: publishing`) get
-  a 30-second wait and at most five retries. Use the same bound for repeated
-  `HeadMoved` (review each fresh report) and `Busy auto_deferred` with
-  `recent_writes`, `changed_since_scan` or `changed_during_move`. Agent sync uses a
-  fresh `walk_activity` snapshot, not the Auto policy's quiet window. After the
-  bound, publish what is allowed and report the remaining state to the human.
-
-On `base_diverged`, stop and tell the human about chain recovery. Never pass
-`--accept-diverged` on your own. It is accepted only after the old workspace
-head is reachable from neither the publish chain nor the tracking ref.
-
-Publish refuses paths still in `ws.conflicts` with `move_conflict`. If **all**
-named paths are in `ws.conflicts` and **none** is in the saved sync report,
-`git-strata sync --repo R --resolved PATH` (or `--keep PATH`) acknowledges only
-those paths without target/generation. This works when up to date **and when
-behind or diverged**, even with a separate saved report; that report is preserved.
-The per-repo reply is
-`{"result":"conflicts_cleared","following":true,"resolved":[...],"kept":[...]}`.
-It clears conflict markers before fetch or move preparation, without changing
-base/head/generation or accepting divergence. Named conflicts in a repo with
-`following: false` can likewise be acknowledged under the session queue, repo
-lock and G0; that reply has `following:false`. Read and resolve each file before
-naming it. Mixing legacy-only paths with report paths in a bound resolution
-returns `resolved_unrelated`: use two calls, a legacy-only acknowledgement and
-then a report resolution with its binding. Unnamed legacy conflicts survive
-automatic and sync moves and can be acknowledged separately.
-
-When `upstream.deps.state` is `install_failed`, tell the human: inspect the kept
-staging in `deps.error.detail.staging`, remove it, then run
-`git-strata deps approve P`. Do not delete it yourself or retry the install loop.
-
-### Sync reasons and actions
-
-Earlier successful repos remain in `error.detail.done`; inspect them even when
-a later repo fails. The move handler's reasons and related outcomes are:
-
-| Code / reason or result | Agent action |
-| --- | --- |
-| `Conflict sync_conflict` | Resolve every reported path with the supplied target/generation as above. |
-| `HeadMoved sync_conflict` | Review the fresh report, re-resolve or deliberately keep with its binding; at most five retries. |
-| `InvalidInput resolution_binding_required` | Run plain `sync --repo R` to obtain a report, then supply both `--target` and `--generation`; do not guess either. |
-| `InvalidInput ambiguous_resolution` | Select exactly one repo with `--repo R` and use its report. |
-| `InvalidInput resolved_and_keep` | Choose one flag per path; remove the duplicate choice. |
-| `InvalidInput resolved_unchanged` | Edit the conflict, or deliberately use `--keep` after comparing with upstream. |
-| `InvalidInput resolved_unrelated` | Select a current reported path; acknowledge legacy-only workspace conflicts in a separate call, even when a saved report exists. Do not mix the two groups. |
-| `InvalidInput resolved_overlap_changed` | Recheck the supplied hunks and revise edits that expanded into previously clean upstream regions. |
-| `NoSuchCommit main_missing` | No usable main tip exists; report the repo/ref state to the human and stop. |
-| `InvalidInput` / `NoSuchRepo not_tracked` | Select a tracked workspace; if needed, create a session explicitly with `new --repo R`. Do not edit untracked siblings. |
-| `NoSuchRepo not_in_session` | Run the reply's `fix` (`git-strata add --session S --repo R`). |
-| `NoSuchSession no_such_session` | Use an existing session id or enter its workspace; do not retry a removed session. |
-| `result: not_following` | Informational, not an error: ignore behind, only acknowledge named conflicts, then stop syncing this repo. |
-| `Conflict base_diverged` | Stop; report base-only commits for the human's chain recovery. |
-| `InvalidInput diverged_still_on_chain` | Stop; the old head is still reachable. Do not force or repeat acceptance. |
-| `Busy auto_deferred` | Inspect `defer.reason`: `state` requires status/recovery (stop for unhealthy/inactive state); `recent_writes`, `changed_since_scan`, `changed_during_move` permit only the bounded retry above. `defer.detail.reason: main_or_workspace_moving` is transient too. |
-| `Busy sync_retry` | Preparation raced with main/workspace/dependency ownership. The daemon retries internally; if surfaced, use the same bounded retry. |
-| `waiting` / `publishing`, `installing` | Transient; wait 30 seconds, at most five retries. |
-| `waiting` / `waiting_human`, `own_change`, `drift` | Pass on `deps.fix`, proposal and reason to the human; stop retrying. |
-| `Corrupt manifest_missing` / `sync_report` | Missing base manifest or invalid saved report; preserve the workspace and stop for human recovery. |
-| `Unsupported daemon_too_old` / `sync_check_unavailable` | Ask the human to install matching CLI/daemon versions. `sync_check_unavailable` is a legacy internal diagnostic; current check dispatch should never return it. |
-
-## Publish conflict: fix and re-run
-
-This is the expected loop for agents; the human is not needed unless the
-conflict is `assigned`.
-
-1. `publish` returns `ok: false`, `error.code = "Conflict"`.
-   - `error.detail.repo` is the repo that conflicted; nothing was committed
-     there.
-   - `error.detail.conflicts` lists its paths (with the hunks).
-   - `data.commits` / `data.pushes` hold repos that already landed in this
-     call (also in `error.detail.published_before`). They stay landed.
-     The same holds for any publish error: a repo whose commit was written
-     before its push timed out (`Unknown`) or was refused (`PushRefused`) is
-     in `data.commits` and `data.pushes` too.
-2. Fix the listed paths in that repo's workspace (merge in the upstream
-   change; `git-strata diff` helps).
-3. Optionally `git-strata checkpoint -m "resolve conflict" --path P ...`
-   to keep a named point; the re-run snapshots the paths itself.
-4. Re-run the exact same `publish --from ...` command. Repos that already
-   landed are not committed again: they appear in
-   `data.already_published` as `{repo, publish, commit, push}`, and only the
-   rest is published (`data.commits`). The check is per `--from` path and by
-   content: a path (or directory) whose content is exactly what landed is
-   skipped; anything new or changed under it since (including new files in
-   a directory you selected) is published as a new commit, and the unchanged
-   paths of the same `--from` list do not cause `NoMatch`.
-5. Repeat while another repo conflicts.
-
-## Dev servers and `tauri dev`: per-session ports
-
-Every session workspace gets its own block of 4 ports (a lease), so two
-sessions can run `tauri dev` (or any dev server) at the same time. The main
-checkout has no lease and keeps the project's default ports. Never change
-ports by editing committed files (`tauri.conf.json`, `package.json`,
-`next.config.*`, `.env`); start the server through git-strata instead:
-
-```bash
-cd <your workspace>                     # data.manifest.repos.<repo>.path
-git-strata session ports                # read the lease: data.leases[0].ports / .env
-git-strata session exec -- bun run dev  # any server that reads $PORT (Next.js does)
-git-strata session exec -- sh -c 'vite --port "$PORT" --strictPort'
-git-strata session exec --tauri -- bun run tauri dev
-```
-
-- `exec` runs the command in place of itself (its output, its exit code)
-  in exactly one workspace (`--repo R` when the session has several) with:
-  `PORT` = `STRATA_DEV_PORT` (web), `STRATA_CONNECTOR_PORT`,
-  `STRATA_CONNECTOR_MCP_PORT`, `STRATA_AUX_PORT`, `STRATA_SESSION`,
-  `STRATA_REPO`, `TAURI_CONNECTOR_PROJECT` (the Tauri app dir) and
-  `STRATA_TAURI_DEV_CONFIG`. Child processes (e.g. Tauri's
-  `beforeDevCommand`) inherit them.
-- `--tauri` adds `--config $STRATA_TAURI_DEV_CONFIG` to `tauri dev`, which
-  points `build.devUrl` at `http://localhost:$PORT`. The frontend dev server
-  must then listen on `$PORT`. It understands `tauri dev`, `cargo tauri dev`,
-  `npx|bunx|pnpx tauri dev`, `pnpm exec tauri dev`, and `bun|pnpm|yarn|npm
-  run <script>` when that script is literally `tauri dev ...` (or the bare
-  `tauri` CLI, with `dev` right after the script name: `bun run tauri dev`,
-  `npm run tauri -- dev`). Always write `run`: `bun <script>` without it is
-  refused, since the package manager may run its own command of that name.
-  Options that pick another package (`--prefix`, `--filter`, `-w`,
-  `--workspace`, `--cwd`, ...) and, for npm, any option before its `--` are
-  refused. Anything else is `InvalidInput` `tauri_launcher`; use the form in
-  `detail.fix`:
-  `git-strata session exec -- sh -c 'tauri dev --config "$STRATA_TAURI_DEV_CONFIG"'`.
-- `exec` does not set tauri-connector's variables. tauri-connector 0.17.7+
-  binds exactly `TAURI_CONNECTOR_PORT`, `TAURI_CONNECTOR_MCP_PORT` and
-  `TAURI_CONNECTOR_BRIDGE_PORT`; map the lease onto them:
-  `git-strata session exec -- sh -c 'TAURI_CONNECTOR_PORT=$STRATA_CONNECTOR_PORT TAURI_CONNECTOR_MCP_PORT=$STRATA_CONNECTOR_MCP_PORT TAURI_CONNECTOR_BRIDGE_PORT=$STRATA_AUX_PORT exec tauri dev --config "$STRATA_TAURI_DEV_CONFIG"'`.
-  Precedence: a port in the app's builder code > the exact env variable >
-  `TAURI_CONNECTOR_*_PORT_RANGE` > a builder range > the default. A busy
-  exact port is not replaced: the connector does not start (the app keeps
-  running); free the port or `--reassign`, then restart. The bound ports
-  are in the `.connector.json` under your workspace's `target/` (copies
-  from the main checkout are removed when the session is created).
-- `exec`'s variables reach only the command it starts and its children, not
-  a later connector command or an MCP server that is already running. When
-  you talk to the app from such a client, select it explicitly: `tauri-connector
-  ... --project <tauri_app_root>` (`tauri_app_root`, else `path`, from
-  `git-strata session ports`), or wrap the client:
-  `git-strata session exec --no-check -- sh -c 'TAURI_CONNECTOR_PORT=$STRATA_CONNECTOR_PORT tauri-connector ...'`
-  (without `--port` the CLI uses `TAURI_CONNECTOR_PORT`). Never connect
-  to the connector's default ports (9555/9556): they may be another
-  session's app.
-- Before starting, `exec` checks the lease's ports (`--no-check` skips it;
-  `session ports --check` only reports):
-  - `PortInUse` `already_running`: a process of this workspace already
-    listens. Reuse it; stop it only if you started it.
-  - `PortInUse` `foreign`: something else holds a port. Nothing moves on its
-    own: run `detail.fix` (`git-strata session ports --reassign --session S
-    --repo R`) for your own session, then `exec` again. Never kill a process
-    you did not start.
-  - `Busy` `port_unidentified` / `port_probe_error`: retry shortly.
-- A workspace without a lease yet (e.g. one created before this feature)
-  gets one from the daemon on first `ports` / `exec`; an existing lease works
-  without the daemon. `Busy` `daemon_down` from `ports` / `exec`: report it
-  to the human; do not start the daemon yourself. `Busy` `ports_exhausted`
-  (`ports` shows the workspace with `"ports": null`): no free block; tell the
-  human. `Busy` `lease_changed` (`--reassign`): another caller moved the
-  lease since your check; run `session ports --check` again and decide
-  afresh. `Unsupported` `daemon_too_old`: the running daemon predates leases;
-  tell the human (install the matching git-strata and restart the daemon).
-
-## Hook: checkpoint after every tool call (Claude Code)
-
-`docs/modules/cli.md` §3.5 documents this for Claude Code only. The human adds
-it to Claude Code's settings; git-strata does not write the file:
-
-```json
-{"hooks":{"PostToolUse":[{"matcher":"Edit|Write|Bash|MultiEdit","hooks":[{"type":"command","command":"git-strata checkpoint --tool-call"}]}],"SessionStart":[{"hooks":[{"type":"command","command":"git-strata daemon status"}]}]}}
-```
-
-- The session is resolved from the hook's cwd; do not add `--session`.
-- When `--tool-call` is given and stdin is not a TTY, stdin is read as one JSON
-  object (the hook input). Paths are taken from `tool_input.file_path`,
-  `tool_input.file_paths[]` and `tool_input.edits[].file_path`; relative paths
-  are joined to the object's `cwd`. A tool with no paths (e.g. `Bash`) scans
-  every tracked repo of the session. Example input:
-  `{"tool_use_id":"toolu_01","cwd":"/…/sessions/s-k3q7xm2a/tool","tool_name":"Edit","tool_input":{"file_path":"src/a.ts"}}`
-- `--tool-call` without a value (or with an empty one) takes the id from the
-  JSON's `tool_use_id`. If that is missing or empty too, or stdin is a TTY,
-  the result is `InvalidInput` (`checkpoint_reason`). `--tool-call ID` with a
-  value uses that ID.
-- No other agent's hook format is documented; for other agents run
-  `git-strata checkpoint -m "..."` yourself after edits.
-
-## Optional Stop hook: upstream before finishing (Claude Code)
-
-Enable this only after the deployed daemon advertises both `sync` and
-`status.upstream`. The human adds the entry; git-strata does not change settings:
-
-```json
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"git-strata sync --check --hook"}]}]}}
-```
-
-The hook resolves its input cwd and checks cached upstream. It returns control
-once when a following repo has main/deps changes and your unpublished work or
-conflicts need attention. Follow its sync → resolve → checks → publish reason.
-An unchanged workspace behind main is left to the background mover. Cold
-cache, daemon errors, non-workspace cwd and the five-second deadline are silent.
-`stop_hook_active:true` never blocks again. A block is `{decision,reason}` and
-the process always exits zero, rather than using the usual envelope.
-
-## The JSON envelope
-
-stdout carries exactly one compact JSON line; exit code 0 iff `ok` is true,
-else 1. Human prompts and notices go to stderr only. One exception: a
-`session exec` that starts its command prints no envelope; stdout, stderr
-and the exit status are the command's (a failure before the start is an
-envelope as usual).
+stdout is exactly one JSON line; exit code 0 iff `ok` is true:
 
 ```json
 {"ok":true,"data":{...},"error":null}
-{"ok":false,"data":{},"error":{"code":"Busy","message":"the daemon is not running; ask the human to run `git-strata daemon start`","detail":{"reason":"daemon_down"}}}
+{"ok":false,"data":{},"error":{"code":"Busy","message":"...","detail":{"reason":"daemon_down"}}}
 ```
 
-All three keys are always present; `data` is never null. Branch on
-`error.code`, then `error.detail.reason` where present. Never parse `message`.
-`--help` / `--version` print plain clap text (no envelope).
+Branch on `error.code`, then `error.detail.reason`; never parse `message`.
+When a reply carries a `fix` (in `detail`, `upstream`, `deps` or a warning),
+it is the command to run next, or the text to hand the human when it starts
+with "ask the human". Never run a human-only command (hard rule 1) yourself. Exceptions to the envelope: `--help`/`--version`, a
+`session exec` that started its command, and `sync --check --hook`.
 
-| `error.code` (`detail.reason`) | What an agent should do |
+| You got | Do |
 | --- | --- |
-| `Busy` (`daemon_down`) | Keep working; tell the human the daemon is down (they run `git-strata daemon start`). Retry once `daemon status` shows `running`. Never start it yourself. |
-| `Busy` (`workspace_changed`) | A file changed while reading it; retry. |
-| `Busy` (other) | Repo lock held by another operation; wait and retry later. |
-| `NotTty` | Command needs a human at a terminal. Stop; give the exact command to the human. |
-| `NotConfirmed` | Human confirmation failed / was cancelled / expired. Report it; the human reruns. Exception: `detail.reason` `plan_changed` (publish) means no confirmation was attempted and nothing was written: rerun the same command yourself first; if that rerun returns `NotTty`, hand the command to the human. |
-| `AmbiguousMatch` | Ticket matches several sessions; retry with an id from `detail`. |
-| `NoSuchSession` | Wrong selector, or cwd is not inside a workspace; `cd` into one or pass `--session`. |
-| `NoSuchRepo` | Repo name not in config; check `--repo` / argument. With `detail.reason` `not_in_session`: the session has no workspace of that repo; run `detail.fix` (`git-strata add --session S --repo R`), then retry. |
-| `InvalidInput` | Fix arguments per `detail.reason` (`checkpoint_reason`, `diff_mode`, `both_selectors`, `no_batch`, `unknown_command` with `detail.commands`, ...). `chain_diverged` from publish on a repo that needs no confirmation: run `git-strata push <REPO>` (it fetches, replays the unpushed chain onto origin, reruns checks, pushes a fast-forward), then rerun the publish; `replay_deps_unsealed` from push: open a session on the repo, push again. `chain_rewound`, or diverged on a gated repo: hand to the human (`chain`). |
-| `Conflict` (publish) | Same hunk changed on both sides (another session or upstream); nothing committed in `detail.repo`, earlier repos of the call may have landed (`data.commits`). Fix, checkpoint, re-run the same publish ("Publish conflict: fix and re-run"); between sessions, who resolves can be set by `publish --assign`. |
-| `Conflict` (`sync_conflict`) | Edit the listed hunks, then sync with `--resolved`, the reported target and generation. Earlier successful repos appear in `detail.done`. |
-| `Conflict` (`base_diverged`) | Tell the human; chain recovery must precede accepting the dropped base. |
-| `Conflict` (`move_conflict`) | Publish is blocked until the listed workspace conflicts are acknowledged through sync. |
-| `InvalidInput` (`resolved_unchanged`, `resolved_unrelated`, `resolved_overlap_changed`) | Use the saved report: edit the conflict, select a reported path, or undo edits that expanded its overlap. `--keep` explicitly accepts unchanged bytes. |
-| `Conflict` (`assigned`) | The path is assigned to another session; only that session may publish it. Do not retry from yours. |
-| `NoCommit` | Nothing new to commit or push. Not a failure to fix. |
-| `Conflict` `replay_conflict` (from `push`) | Origin moved and `detail.commit` of the unpushed chain does not apply onto `detail.origin`. Nothing was written or pushed. Fix the conflicting change in a session and publish, or hand `git-strata chain --repo R ...` to the human. Do not retry the push unchanged. |
-| `NoMatch` | A `--from` path is not in the session's checkpoint; checkpoint first. |
-| `Dirty` | `rm` without `--discard` on unpublished work (`detail.repos`; edited untracked siblings in `detail.untracked_repos`). Publish it, or ask the human about `rm --discard`. |
-| `InvalidInput` (`url-rewritten`, `url-is-remote-name`, `empty-url`, `no-such-remote`) | git-strata's push refused before sending: origin's push URL is rewritten or ambiguous in the main checkout's git config. Tell the human; do not edit git config. |
-| `OpenFiles` | A process holds files in the directory (`detail` has pids). Stop it (only if you started it) and retry. |
-| `CheckFailed` | The repo's check failed in staging; fix the code, checkpoint, publish again. |
-| `CheckMutates` | Configured check writes files; config problem, tell the human. |
-| `HeadMoved` | Another publish or main moved first. For sync, use the fresh report and re-resolve; already-resolved unchanged bytes need an explicit `--keep`. Bound retries as above. |
-| `PushRefused` | Remote refused (detail has its words). Report to the human. |
-| `Unknown` | Outcome uncertain (e.g. push timeout, `socket_closed`). Do not retry or clean up; run `status` and tell the human. Exception: `detail.reason` `poisoned` means nothing was written; the daemon restarts itself to reopen the store, so retry once after `git-strata daemon status` answers again. |
-| `Binary` / `TooLarge` | Per-entry markers in `diff` / `grep` results; not a call failure. |
-| `Corrupt` | Store damage. Stop and tell the human. |
+| `Busy daemon_down` | keep working; tell the human; retry after `daemon status` shows running |
+| `Busy` (other) | another operation holds the lock; wait and retry |
+| `NotTty` / human-only command | stop; give the human the exact command |
+| `NoSuchSession` | `cd` into your workspace or pass `--session` |
+| `NoSuchRepo not_in_session` | run `detail.fix` (`git-strata add --session S --repo R`) |
+| `NoMatch` / `InvalidInput no_batch` | checkpoint the paths, pass `--from SESSION:PATH` |
+| `Conflict` (publish) | fix the listed paths, rerun the same publish ([publish.md](publish.md)) |
+| `Conflict sync_conflict` / `HeadMoved` | resolve the report ([sync.md](sync.md)) |
+| `Conflict assigned` | another session owns the path; do not retry |
+| `CheckFailed` | fix the code, checkpoint, publish again |
+| `Dirty` (rm) | publish the work, or ask the human about `rm --discard` |
+| `PortInUse` | [dev-ports.md](dev-ports.md) |
+| `Unknown` | do not retry, `rm` or `gc`; run `status` and tell the human |
+| `Corrupt` | stop and tell the human |
+
+Everything else: [errors.md](errors.md).
 
 ## Hard rules
 
-1. Never bypass a human gate. There is no `--yes` / `--force` / env var, and
-   faking a TTY (`script`, `expect`, a pty) is bypassing. These belong to the
-   human; print the exact command and stop:
+1. Never bypass a human gate. There is no `--yes`, `--force` or env var, and
+   faking a TTY (`script`, `expect`, a pty) is bypassing. These are the
+   human's; print the exact command and stop:
    - `git-strata rm --session S --discard`
    - `git-strata deps approve <ID> [--sessions S,S]`
-   - `git-strata push <REPO>` when the repo needs confirmation (its pinned
-     `publish.confirm` is true; `deploy_on_push` alone does not gate, so e.g.
-     billing-api with `confirm = false` publishes and pushes headless)
-   - `git-strata publish` when it pushes to a repo that needs confirmation
-   A repo needs confirmation when `publish.confirm` is true (the pinned
-   flag in `pins.json` ORed with `config.toml`); `deploy_on_push` is
-   information only. A publish into
-   a repo with `publish.push = false` is never gated; only its later `push`
-   is. Loosening the config needs a daemon restart (by the human) plus the human's
-   `config relax` (until then `daemon status` alerts `ConfigRelaxPending`).
-   Full rule: README.md "Confirmation gate (Touch ID / TTY)".
+   - `git-strata push <REPO>`, and a `publish` that pushes, when the repo
+     needs confirmation (`publish.confirm` true in pins.json or config.toml;
+     `deploy_on_push` alone gates nothing)
    - `git-strata config relax <REPO>`
    - `git-strata resolve --session S --repo R --abandon|--accept`
    - `git-strata chain --repo R --accept-origin replay|drop` or `--restore`
-2. Never edit `.strata/`, base snapshots, dependency-set caches, or anything
-   under the git-strata root other than your own session workspace.
-3. Never run `git push` (or `git commit` / ref updates on the main checkout).
-   Commits come from `publish`; pushes from `git-strata push` / publish. A
-   workspace's pre-push hook refuses `git push` anyway ("push refused in a
-   strata workspace; publish with git-strata publish").
-4. Do not push unless the human asked for it.
+   - `git-strata daemon start|stop`
+
+   Never pass `sync --accept-diverged` on your own: it is valid only after
+   the human's chain recovery ([sync.md](sync.md)).
+2. Work only in your own session's workspaces. Never edit `.strata/`, base
+   snapshots, dependency caches, untracked sibling workspaces, or anything
+   else under the git-strata root.
+3. Never `git push`, `git commit` or move refs in the main checkout. Commits
+   come from `publish`; pushes from `git-strata push` or publish.
+4. Do not push unless the human asked.
 5. After `Unknown`, do not replay, `gc` or `rm`; leave the scene for the human.
-   A standalone `push` that ends `Unknown` keeps its staging directory
-   (`error.detail.scene`) and `daemon status` lists it as `UnknownPush`,
-   also after a restart, until a later definite push of the chain settles it.
-6. Only work in your own session; use `--session` / `--all` to read others.
-7. Seed files (`.env`, `.env.local`, ...) are cloned from the main checkout
-   and kept current by the daemon while you leave them untouched. Never
-   print, `cat`, log, `git add` or commit them; they are gitignored and never
-   checkpointed or published. An edited copy is not refreshed (`status`
-   warns `SeedStale`). README.md "Seed files (.env)".
-
-## Troubleshooting
-
-- `Busy` `daemon_down`: check `daemon status`; if it is down, tell the human.
-  Right after the human started it, the LaunchAgent may still be starting.
-- `InvalidInput` `foreign_home` / `foreign_agent` / `no_plist` from `daemon
-  start|stop`: you should not have run it; tell the human and do not retry.
-- `NoSuchSession` from a hook: the hook's cwd is outside every workspace;
-  `cd` into `data.manifest.repos.<repo>.path` before working.
-- `publish` says `no_batch` or `NoMatch`: you have not checkpointed the paths.
-- A path you edited is missing from a checkpoint: it was outside the session's
-  workspaces, or you passed `--path` and left it out.
-- `status` shows health `Unknown` with `choices: ["abandon","accept"]`: a move
-  failed midway; this is the human's `git-strata resolve`.
-- Unexpected command error: `git-strata <cmd> --help` shows the real flags.
-- Disk space questions: `git-strata du` (read-only, cached, each figure has
-  `as_of`); `du --refresh` re-sizes in the background. `store.trash.eligible`
-  is what `git-strata gc` could reclaim; run `gc` only when the human asks.
-  `gc --store` also deletes checkpoints of sessions removed over 30 days
-  ago: run `gc --store --dry-run` first and only run `--store` when asked.
+6. Seed files (`.env`, `.env.local`, ...) are cloned from the main checkout.
+   Never print, `cat`, log, `git add` or commit them.
+7. Run `gc` only when the human asks (`gc --store --dry-run` first).
+8. Release builds never run in a workspace: publish (and push), then build in
+   the main checkout after `git pull --ff-only` ([publish.md](publish.md)).
