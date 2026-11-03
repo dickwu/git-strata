@@ -10,13 +10,15 @@ This README is written so an agent can run git-strata without asking a human.
 Everything here describes the current code. When in doubt, the binary's
 `git-strata <command> --help` is the authority (`-h` is the one-line summary).
 Design documents (Chinese) are in [docs/](docs/README.md); the agent skill is
-[skills/git-strata/SKILL.md](skills/git-strata/SKILL.md).
+[skills/git-strata/SKILL.md](skills/git-strata/SKILL.md) (install it for your
+agents with `npx skills add`, see [Agent skill](#agent-skill)).
 
 `git-strata ...` and `git strata ...` are the same binary.
 
 ## Contents
 
 - [Install and daemon](#install-and-daemon)
+- [Agent skill](#agent-skill)
 - [macOS Installation](#macos-installation)
 - [Paths](#paths)
 - [Output: the JSON envelope](#output-the-json-envelope)
@@ -145,6 +147,28 @@ STRATA_CODESIGN_IDENTITY="git-strata dev" scripts/dev-install.sh
 `add-trusted-cert` asks for the login password; the first signing may ask to
 "Always Allow" codesign to use the key; the first start of a newly signed
 daemon asks once for the removable-volume permission.
+
+## Agent skill
+
+The skill in [skills/git-strata/](skills/git-strata/SKILL.md) teaches any coding
+agent the session loop, the JSON envelope and which commands are the human's.
+Install it with the [`skills`](https://github.com/vercel-labs/skills) CLI
+(Node 22.20+; nothing to configure in this repo):
+
+```sh
+# every project, for Claude Code, Codex and Cursor
+npx skills add dickwu/git-strata --skill git-strata -g -a claude-code -a codex -a cursor -y
+# only the current project (writes .agents/skills/ and .claude/skills/)
+npx skills add dickwu/git-strata --skill git-strata -a claude-code -a codex -a cursor -y
+npx skills add dickwu/git-strata --list     # what the repo offers
+npx skills update git-strata -g             # later: pull the latest (global install)
+npx skills update git-strata -p             # ... or the project install
+```
+
+`-a` takes any agent the CLI knows (`npx skills add --help`). The CLI copies
+the skill files only; the optional Claude Code hooks (checkpoint after every
+tool call, upstream check before stopping) are a human step in the agent's
+settings, see [hooks.md](skills/git-strata/hooks.md).
 
 ## macOS Installation
 
@@ -291,7 +315,7 @@ Mixing legacy-only and report paths in a bound call gives `resolved_unrelated`;
 use two calls. Dependency `waiting` and `source_only` replies report the state and a
 matching pending proposal when present; only `waiting_human` with that proposal
 gets the human-approval fix. `own_change` and `drift` need attention without an
-approval fix. Follow the [agent workflow](skills/git-strata/SKILL.md#keeping-up-with-main).
+approval fix. Follow the [agent workflow](skills/git-strata/sync.md).
 
 **What `rm` counts as published.** An edit is published when a Done publish
 of this session, reachable from origin, has the same bytes (D57), or when a
@@ -460,7 +484,7 @@ prints nothing for a minute or two after the branch moved on the remote is
 still working: wait for its JSON line and do not interrupt or rerun it.
 
 Hook mode (Claude Code `PostToolUse`): `git-strata checkpoint --tool-call`
-reads the hook JSON on stdin; see [SKILL.md](skills/git-strata/SKILL.md#hook-checkpoint-after-every-tool-call-claude-code).
+reads the hook JSON on stdin; see [hooks.md](skills/git-strata/hooks.md#checkpoint-after-every-tool-call-claude-code).
 
 ## Release builds from a session
 
@@ -709,7 +733,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `NoSuchBranch` | (`new`) a repo has no `origin/<default_branch>`; tell the human |
 | `InvalidInput` | fix arguments per `detail.reason` (`from_repo_prefix` / `from_path`: rewrite `--from` as `detail.expected` says); `chain_diverged` on a repo without confirmation: `git-strata push REPO` replays it (see [Origin moved](#origin-moved-under-the-unpushed-chain-push-replays)), then rerun; `chain_rewound`, or diverged on a gated repo: human runs `chain`; push-guard reasons above: tell the human |
 | `Conflict` (publish) | fix and rerun the same publish (above); `move_conflict` first needs named acknowledgement through sync |
-| `Conflict` (`sync_conflict`) | resolve every reported path with `sync --resolved`/`--keep` and the supplied target/generation; see the [agent workflow](skills/git-strata/SKILL.md#keeping-up-with-main) |
+| `Conflict` (`sync_conflict`) | resolve every reported path with `sync --resolved`/`--keep` and the supplied target/generation; see the [agent workflow](skills/git-strata/sync.md) |
 | `Conflict` (`base_diverged`) | stop and ask the human to recover the chain; never accept divergence on your own |
 | `Conflict` (`assigned`) | another session owns the path; do not retry |
 | `NoMatch` | a `--from` path is not checkpointed; checkpoint, rerun |
