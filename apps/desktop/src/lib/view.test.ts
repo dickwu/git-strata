@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { DaemonStatus, DepsList, StatusReply, Workspace } from './types';
+import type { DaemonStatus, DepsList, Proposal, StatusReply, Workspace } from './types';
 import {
   daemonView,
   filterRows,
@@ -320,7 +320,7 @@ describe('main-sync waiting groups', () => {
   const capable = { ...daemon, features: ['status.upstream'] };
   function pending() {
     const s = structuredClone(all);
-    const p = {
+    const p: Proposal = {
       ...deps.proposals[0],
       id: 75,
       repo: 'web',
@@ -363,6 +363,76 @@ describe('main-sync waiting groups', () => {
     expect(waitingCount(s, d, capable, now)).toBe(0);
     expect(waitingGroups(s, d, daemon, now)[0].items).toHaveLength(1);
   });
+  test('proposal mode works before the sessions and capability polls arrive', () => {
+    const { d } = pending();
+    d.proposals[0].mode = 'apply';
+    for (const observedDaemon of [undefined, daemon, capable]) {
+      expect(waitingCount(undefined, d, observedDaemon, now)).toBe(0);
+      expect(waitingGroups(undefined, d, observedDaemon, now)[0].applying).toHaveLength(1);
+    }
+  });
+  test('proposal mode works when affected workspaces omit upstream', () => {
+    const { s, d } = pending();
+    d.proposals[0].mode = 'apply';
+    for (const e of s.sessions) delete e.status.workspaces.web.upstream;
+    expect(waitingCount(s, d, capable, now)).toBe(0);
+    expect(waitingGroups(s, d, capable, now)[0].applying[0].affected).toHaveLength(2);
+  });
+  test('proposal mode wins over an older workspace mode in either direction', () => {
+    const { s, d } = pending();
+    d.proposals[0].mode = 'confirm';
+    expect(waitingGroups(s, d, capable, now)[0].items[0].mode).toBe('confirm');
+    for (const e of s.sessions) e.status.workspaces.web.upstream!.deps!.mode = 'confirm';
+    d.proposals[0].mode = 'apply';
+    expect(waitingCount(s, d, capable, now)).toBe(0);
+    expect(waitingGroups(s, d, capable, now)[0].applying[0].mode).toBe('apply');
+  });
+  test('apply proposals stay quiet after the last workspace moves and before settlement', () => {
+    const { s, d } = pending();
+    d.proposals[0].mode = 'apply';
+    for (const e of s.sessions) {
+      e.status.workspaces.web.pending = [];
+      e.status.manifest.repos.web.base.deps = d.proposals[0].to;
+      delete e.status.workspaces.web.upstream;
+    }
+    const g = waitingGroups(s, d, capable, now)[0];
+    expect(g.items).toHaveLength(0);
+    expect(g.applying[0].progress).toBe('2/2 moved');
+    expect(waitingCount(s, d, capable, now)).toBe(0);
+  });
+  test('older rows still fall back to workspace mode, then conservative confirm', () => {
+    const { s, d } = pending();
+    expect(waitingCount(s, d, capable, now)).toBe(0);
+    s.sessions[0].status.workspaces.web.upstream!.deps!.mode = 'confirm';
+    expect(waitingGroups(s, d, capable, now)[0].items[0].mode).toBe('confirm');
+    for (const e of s.sessions) delete e.status.workspaces.web.upstream;
+    expect(waitingGroups(s, d, capable, now)[0].items[0].mode).toBe('confirm');
+    expect(waitingCount(undefined, d, capable, now)).toBe(1);
+  });
+  test.each(['unhealthy', 'workspace scene', 'session scene'])(
+    'all affected workspaces without upstream retain their %s reason',
+    (condition) => {
+      const { s, d } = pending();
+      d.proposals[0].mode = 'apply';
+      for (const e of s.sessions) {
+        const w = e.status.workspaces.web;
+        delete w.upstream;
+        if (condition === 'unhealthy') w.health = 'Missing';
+        if (condition === 'workspace scene') w.scene = {};
+        if (condition === 'session scene') e.status.scene = {};
+      }
+      const g = waitingGroups(s, d, capable, now)[0];
+      expect(g.applying).toHaveLength(0);
+      expect(g.items).toHaveLength(1);
+      expect(g.items[0].mode).toBe('apply');
+      expect(g.items[0].reason).toBe(
+        condition === 'unhealthy'
+          ? 'needs the human: workspace unhealthy'
+          : 'needs the human: scene'
+      );
+      expect(waitingCount(s, d, capable, now)).toBe(1);
+    }
+  );
   test('stuck threshold is strictly more than 24 hours', () => {
     const { s, d } = pending();
     for (const e of s.sessions)

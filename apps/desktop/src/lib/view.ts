@@ -223,12 +223,14 @@ export function waitingGroups(
     if (p.state?.kind !== 'Pending') continue;
     const affected = ss.filter((s) => pendingIncludes(s, p.repo, p.id));
     const states = upstream ? affected.map((s) => repoUpstream(s, p.repo)) : [];
-    // Mode is per repo. One affected workspace can supply it even when another is unhealthy.
+    // The proposal has the effective repo policy even when status lags or omits upstream.
+    // Older daemons fall back to affected workspaces, then conservatively to confirm.
     const mode =
-      states.some((u) => u?.deps?.proposal === p.id && u.deps.mode === 'apply') &&
+      p.mode ??
+      (states.some((u) => u?.deps?.proposal === p.id && u.deps.mode === 'apply') &&
       !states.some((u) => u?.deps?.proposal === p.id && u.deps.mode === 'confirm')
         ? 'apply'
-        : 'confirm';
+        : 'confirm');
     const reason =
       mode === 'apply' ? affected.map((s) => stuckReason(s, p.repo, now)).find(Boolean) : undefined;
     const moved = ss.filter(
