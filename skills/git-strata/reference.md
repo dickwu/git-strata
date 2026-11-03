@@ -42,6 +42,7 @@ data root (`[paths] root`, default `~/.strata`) as
 | `daemon status` | — | no | yes | `{running,socket,session?,holders:[],unknown_publishes:[],alerts:[]}` |
 | `resolve` | `--session <S> --repo <R>` + exactly one of `--abandon` / `--accept` | yes | no | `ResolutionReport` |
 | `chain` | `--repo <R>` + exactly one of `--accept-origin <replay\|drop>` / `--restore` | yes (`--restore` may also confirm) | no | `{repo,choice,outcome?\|refs_moved?}` |
+| `config reload` | — | no | no | ReloadReport in data; exits 0/2/3/4 |
 | `config relax <REPO>` | — | yes + confirm | no | — |
 | `session ports` | `--session <S>`, `--repo <R>` (defaults: cwd's session; cwd's repo, else every repo), or `--all` (read-only, every live workspace; unleased ones show `ports: null`, `reason: "unleased"`); `--check` (who listens on each port); `--reassign` (move exactly one workspace's lease to another block) | no | yes when the lease exists | `{leases:[{session,repo,path,tauri_app_root,ports:{web,connector,connector_mcp,aux},env:{...},check?}]}` |
 | `session exec -- <CMD>...` | `--session <S>`, `--repo <R>` (exactly one workspace), `--tauri` (add `--config $STRATA_TAURI_DEV_CONFIG` to `tauri dev`), `--no-check` | no | yes when the lease exists | none: the process becomes `<CMD>` (its output and exit code) with the lease env set |
@@ -111,3 +112,17 @@ session shares its blocks, and Time Machine snapshots can hold freed blocks.
 counts only sessions recorded since `since` (earlier: unknown).
 `store.trash.eligible` is what `git-strata gc` would try to delete; agents do
 not run `gc` unless asked.
+
+
+### Config reload
+
+After editing config.toml, run `git-strata config reload`. Its ordinary envelope
+`data` contains `outcome` (applied/unchanged/rejected/pending), `generation`, `repos`,
+`added`, `changed`, `restart_required`, `pending_relax`, and `reasons`. Check the
+repo name in `repos`, even on unchanged (the poll may already have applied it).
+Exit 0: applied/unchanged; 2: rejected, old catalog kept; 3: pending, rerun; 4: old
+daemon, ask the owner to restart. Other failures use exit 1. No TTY is required.
+Relaxations still require the human's `config relax`. Busy/pins_tightened ends the
+current operation; rerun from the command boundary. Landed publish rebases can
+report Deferred/pins_tightened and are retried by catch-up. Do not restart the
+daemon, use launchctl, or add a repo via an unimplemented add-repo command.

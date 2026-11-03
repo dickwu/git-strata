@@ -77,7 +77,7 @@ omitted on serialization.
 without `sync_deps` adopt the configured value at startup and write it back.
 Missing entries (including a missing pins file) use `confirm` and report
 `ConfigRelaxPending` when the config requests `apply`. `apply` → `confirm` tightens
-at startup; `confirm` → `apply` needs `git-strata config relax REPO`. Malformed pins
+at startup or reload; `confirm` → `apply` needs `git-strata config relax REPO`. Malformed pins
 still refuse startup. This setting does not change the TTY/Touch ID gate for
 publishing.
 
@@ -125,9 +125,9 @@ restored store; preserve the displaced database and its sidecars.
 - **`publish`**：`PublishTarget { branch, push, confirm }`（types.md；design §6.7），三个字段都必须写。`branch` 是发布链 `refs/strata/publish/<branch>` 对应的分支，附录 A 里恒等于 `default_branch`（两者不同时 [我的决定]：发布链以 `origin/<publish.branch>` 为合并基并推到它；新会话仍钉 `origin/<default_branch>`，`pin_unpushed` 只在 `publish.branch == default_branch` 时有意义；细节交给 `publish.md` 与 `session.md`）；`push = true`：发布后立刻把链推到 `origin/<branch>`；`false`：留在本地，之后 `strata push <repo>`；`confirm`：该目标的推送是否需要人类确认。**实际是否需要确认 = `confirm || deploy_on_push`**（`RepoConfig::needs_human_confirm`）。默认 = 直接合主干并推（design §2 目标 7），即 `push = true, confirm = false`；一推上线的仓库 `confirm = true`；staff-api 例外：`push = false`，预期配置是人工 `strata push`（design §6.7，因为推任何分支都会重建生产）。
 - **`deploy_on_push`**：为 `true` 时，推送必须经 design §6.9 的人类确认，没有任何 flag、环境变量或运行期配置能让这次推送绕过（不变量 3、7）；规则 V5 保证 `confirm` 也是 `true`。[实现时补的决定]（2026-10-26，peilin："将api 也改为不用确认"）：上面这句作废。`deploy_on_push` 只是信息（推送算作 `Action::PushDeploy`、status 里显示），不再是门；要不要人类确认只看 `publish.confirm`（`needs_human_confirm() = publish.confirm`），V5 一并撤销。现有配置里 `deploy_on_push = true` 的仓库都显式写了 `confirm = true`，门不变；唯一改的是 staff-api（`confirm = false`，`push = false`、`deploy_on_push = true` 不变）。把 `confirm` 从 true 改成 false 仍是"调松"，要人跑 `git-strata config relax <REPO>`（TTY + Touch ID）才生效。把 `deploy_on_push` 本身改成 `false` 属于"调松"，daemon 只在人类确认之后接受（§1 的钉住规则，[交给 `daemon.md`]）。`true` 的有：staff-api、front 和全部 `@inter/*` 库（admin-time-off、admin-shared、hr-core、hr-tasks、hr-components、hr-time-management、quick-start）——design §3、§11 第 6 条。
 - **`pin_unpushed`**：新会话钉基线时，发布链领先 `origin/<branch>` 就钉链顶；`false` 则一律钉 `origin/<default_branch>`，新会话看不到已发布未推送的改动，下一次发布必撞（design §6.7）。只在 `publish.branch == default_branch` 时有意义：两者不同时新会话一律钉 `origin/<default_branch>`（见上条 `publish`）。
-- **`check_siblings`**：[实现时补的决定]（2026-10-28，publish.md D21）每项是另一个已配置的 repo（V12）。只在 `checks` 非空时起作用。发布（以及 D2a 的无头重放）staging 时：布局会话钉了它 → 用那个钉；没钉 → 发布在锁外 fetch 它的 `origin/<default_branch>`、前移它的锚点、取 main tip 的基线（可能冷装依赖），克隆进 `<布局根>/<名字>/`。补不上 → `InvalidInput`（`siblings_missing`），`detail.fix` 是 `git-strata add --session <id> --repo …`，检查不跑。缺省空列表 = 旧行为，不碰任何兄弟。旧二进制不认这个键（V11），所以上线顺序是：先把新的 `git-strata` 与 `git-stratad` 一起装好，再改线上配置，最后重启 daemon；若在重启之后才改配置，要再重启一次才生效。
+- **`check_siblings`**：[实现时补的决定]（2026-10-28，publish.md D21）每项是另一个已配置的 repo（V12）。只在 `checks` 非空时起作用。发布（以及 D2a 的无头重放）staging 时：布局会话钉了它 → 用那个钉；没钉 → 发布在锁外 fetch 它的 `origin/<default_branch>`、前移它的锚点、取 main tip 的基线（可能冷装依赖），克隆进 `<布局根>/<名字>/`。补不上 → `InvalidInput`（`siblings_missing`），`detail.fix` 是 `git-strata add --session <id> --repo …`，检查不跑。缺省空列表 = 旧行为，不碰任何兄弟。旧二进制不认这个键（V11），所以上线顺序是：先把新的 `git-strata` 与 `git-stratad` 一起装好，再改线上配置，旧 daemon 由 owner 重启；支持 config.reload 的 daemon 改配置后运行 `git-strata config reload`（restart-only 字段仍需重启）。
 
-- **`[repo.<name>.rm]` `regenerable`**：[实现时补的决定]（2026-10-29，rm-followups §1.8，B2）工具会重新生成的文件的 glob 列表（与 `.strata/lww` 同一方言与大小写规则：最后匹配者胜，`!` 取反，不含 `/` 的模式匹配任一级名字）。只对跟踪（tracked）且健康的工作区起作用：其中 Modified/Added/Untracked 的条目不再挡 `rm`（照样进 BeforeRemove checkpoint，`rm` 的结果在 `regenerable` 里列出，被拒时列在 `detail.regenerable`）；Deleted/Renamed 永不匹配；`install_inputs`（按卷的大小写折叠与 Unicode 规范化比较，如 `BUN.LOCK`）永不匹配。缺省空。它和 `publish.confirm` 一样被钉进 `pins.json`：收窄（删掉一些正向模式和/或在末尾追加取反；或改成没有任何正向模式的列表，它什么也不匹配）在下次启动时生效；其它任何改动（加或改正向模式、删或改取反、重排）算调松，要人跑 `git-strata config relax REPO`（Touch ID）才生效，生效不需重启 daemon。没有钉住记录的 repo（无 pins.json、名字不在其中、改名）有效列表为空，配置里的列表显示为 ConfigRelaxPending。admin 的示例（只是文档，线上配置不自动加）：
+- **`[repo.<name>.rm]` `regenerable`**：[实现时补的决定]（2026-10-29，rm-followups §1.8，B2）工具会重新生成的文件的 glob 列表（与 `.strata/lww` 同一方言与大小写规则：最后匹配者胜，`!` 取反，不含 `/` 的模式匹配任一级名字）。只对跟踪（tracked）且健康的工作区起作用：其中 Modified/Added/Untracked 的条目不再挡 `rm`（照样进 BeforeRemove checkpoint，`rm` 的结果在 `regenerable` 里列出，被拒时列在 `detail.regenerable`）；Deleted/Renamed 永不匹配；`install_inputs`（按卷的大小写折叠与 Unicode 规范化比较，如 `BUN.LOCK`）永不匹配。缺省空。它和 `publish.confirm` 一样被钉进 `pins.json`：收窄（删掉一些正向模式和/或在末尾追加取反；或改成没有任何正向模式的列表，它什么也不匹配）在下次启动或成功重载时生效；其它任何改动（加或改正向模式、删或改取反、重排）算调松，要人跑 `git-strata config relax REPO`（Touch ID）才生效，生效不需重启 daemon。没有钉住记录的 repo（无 pins.json、名字不在其中、改名）有效列表为空，配置里的列表显示为 ConfigRelaxPending。admin 的示例（只是文档，线上配置不自动加）：
   ```toml
   [repo.admin.rm]
   regenerable = ["src/constants/permissionMap/generated.json"]
@@ -157,7 +157,7 @@ restored store; preserve the displaced database and its sidecars.
 parallel = 4
 ```
 
-整个表或这个键省略 → 缺省 4；缺省值不写回（序列化时省略整个表）。表里的未知键照样是 V11。daemon 只在启动时读配置，所以改了要重启才生效。**旧二进制不认识 `[status]`**（`Config` 是 `deny_unknown_fields`，V11，整份配置加载失败），所以上线顺序与 `check_siblings` 相同：先把新的 `git-strata` 与 `git-stratad` 一起装好，再改线上配置，最后重启 daemon；若在重启之后才改配置，要再重启一次才生效。
+整个表或这个键省略 → 缺省 4；缺省值不写回（序列化时省略整个表）。表里的未知键照样是 V11。status.parallel 是重载的 restart-only 字段，所以改了要由 owner 重启才生效。**旧二进制不认识 `[status]`**（`Config` 是 `deny_unknown_fields`，V11，整份配置加载失败），所以上线顺序与 `check_siblings` 相同：先把新的 `git-strata` 与 `git-stratad` 一起装好，再改线上配置，旧 daemon 由 owner 重启；支持 config.reload 的 daemon 改配置后运行 `git-strata config reload`（restart-only 字段仍需重启）。
 
 ### 2.6 `[dev_ports]`（可选）[实现时补的决定]（2026-10-28，dev-ports 设计）
 
@@ -173,7 +173,7 @@ parallel = 4
 - P2：范围在 1024–49151 之内（低于 macOS 的临时端口），且不与常见默认端口重叠：3000–3999（Next；Hub 固定 3000）、4001（git-strata 自己的桌面 GUI 的 dev server）、5173（Vite）、8080、9300–9400（tauri-connector bridge；git-strata 固定 9300）、9555–9656（tauri-connector WS/MCP；含 GIT STRATA app 固定的 9555/9556 与 Hub 固定的 WS 9640–9649 / MCP 9650–9654）。所以主 checkout 用默认端口，与任意多个会话共存。
 - P3：去掉 `exclude` 后至少剩一块。
 
-整个表可以不写（全用缺省）。daemon 启动时按它设置分配策略；只有装上带租约的 daemon 后才该写这个表（旧 daemon 会以 V11 拒绝未知键）。分配时对每块的 4 个端口做绑定探测（`0.0.0.0`、`[::]`、`127.0.0.1`，`SO_REUSEADDR`），不通过的块跳过；全部用尽时 `new` / `add` 照常成功，只是没有租约：`session ports` 把这个工作区列成一项 `{"ports": null, "reason": "ports_exhausted"}`（调用本身成功），`session exec` 与 `--reassign` 才回 `Busy ports_exhausted`。
+整个表可以不写（全用缺省）。daemon 启动和重载时按它设置新操作的分配策略，已有租约保留；只有装上带租约的 daemon 后才该写这个表（旧 daemon 会以 V11 拒绝未知键）。分配时对每块的 4 个端口做绑定探测（`0.0.0.0`、`[::]`、`127.0.0.1`，`SO_REUSEADDR`），不通过的块跳过；全部用尽时 `new` / `add` 照常成功，只是没有租约：`session ports` 把这个工作区列成一项 `{"ports": null, "reason": "ports_exhausted"}`（调用本身成功），`session exec` 与 `--reassign` 才回 `Busy ports_exhausted`。
 
 ## 3. Rust 定义（`strata-types`）
 
@@ -772,3 +772,54 @@ pin_unpushed = true
 | 全部 Next 应用 | `tsconfig.json` 里的 `incremental` | admin、front、tool、slate_viewer、surgical-timeout、appointment_patient_viewer、patient_9_grid、maxident-sync、insurance-check 都是 `true` |
 
 没有执行的：全部 `install` 命令（会冷装；hr-core 的 `bun install` 除外，为核对测试在导出里装过一次）、staff-api 的测试（连生产库）、各 Tauri 应用的 Rust 检查。
+
+
+## Hot reload (config.reload)
+
+After editing `config.toml`, run `git-strata config reload`. No terminal or
+confirmation is required. The daemon also polls every two seconds (one additional
+stable interval debounces saves), and SIGHUP requests a reload without restarting.
+Invalid files and files mixing hot and restart-only changes are rejected in full.
+An unchanged file can be retried explicitly after a transient failure. Missing
+checkout paths retry after 60 seconds, with backoff capped at ten minutes.
+
+The usual JSON envelope carries the report in `data`: `outcome`, `generation`,
+`repos`, `added`, `changed`, `restart_required`, `pending_relax`, and `reasons`.
+Exit codes are 0 for applied/unchanged, 2 for rejected, 3 for pending after 15 seconds,
+and 4 when the daemon lacks `config.reload`. Other transport failures use exit 1.
+Check that the intended repository is in `repos` before using it: the poll may
+already have added it, so `added` can be empty. A pending attempt continues; rerun
+the command. A successful report is sent after catalog publication.
+
+| Setting | Reload behavior |
+| --- | --- |
+| New repository name with no retained state | Add atomically, including Git handles, locks, search and background loops |
+| Removed repository, paths.root, status.parallel | Reject; owner restart required |
+| Existing repo path, default_branch, publish.branch, deps_dirs, seed_caches | Reject; owner restart required |
+| publish.push, publish.confirm, deploy_on_push, rm.regenerable, sync.deps | Reconcile pins exactly as startup; loosenings remain pending |
+| seed_files, install_inputs, install, checks | New work uses the new settings; existing workspaces are not rebuilt |
+| pin_unpushed, check_siblings, rebase.*, sync.follow_main, sync.fetch_secs | New operations use the new settings |
+| dev_ports.range, dev_ports.exclude | New allocations use their operation's policy; existing leases stay |
+
+A new or re-added name retains startup's conservative pins (including kept pins
+by name). The owner accepts a pending relaxation with `config relax REPO`. The
+new CLI shows and sends the exact flags; the daemon rechecks applied source,
+identity and flags after confirmation. A rejected/unapplied file cannot be relaxed.
+Older CLIs can use the new daemon except that relaxing without `shown` is refused
+with `shown_required`; new CLIs omit that field against older daemons.
+
+Tightening push, confirm, regenerable or sync.deps fences older operations at their
+next affected repo lock or session queue. `Busy pins_tightened` is final for that
+operation: rerun to admit a fresh snapshot. deploy_on_push is informational and
+does not fence. A landed publish defers rebase through `defer_pending` and closes
+Done, including a fence during base registration. A failed new rolls back through
+teardown; failed add unpins unrecorded additions and reports kept staging paths.
+rm checks its complete current membership before Removing; its teardown unpin and
+new/add rollback unpins are exempt. No automatic retry loop retries a fence.
+
+Limits: repeated tightenings can repeatedly refuse a long install. Siblings-layout
+sessions include all repos, so tightening one can fence every older queue waiter.
+A partially landed multi-repo publish reports the landed and refused repos as a
+stop would. Pure reads and already-held locks finish on their admission snapshot.
+More than 1000 retained catalogs raises a warning; an owner restart frees them.
+Repo removal and `config add-repo` remain outside this phase.

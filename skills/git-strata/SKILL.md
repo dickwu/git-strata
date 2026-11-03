@@ -41,9 +41,10 @@ When this skill and the binary disagree, the binary wins:
   workspace that already holds its port lease work; the rest return `Busy` `daemon_down`, and
   edits made meanwhile are not checkpointed (tell the human which).
 - Config is `~/Library/Application Support/git-strata/config.toml`; the daemon
-  reads it only at start. After a config change, tell the human the daemon
-  needs a restart. Installing, upgrading or rolling back git-strata is the
-  human's job.
+  supports hot reload when `features` contains `config.reload`. After editing it,
+  run `git-strata config reload`, check the name is in `data.repos`, and read
+  `pending_relax` before using a new repo. Rejected restart-only changes and old
+  daemons need an owner restart; installing/upgrading remains the human's job.
 - The session records which agent created it. Claude Code, Codex and Cursor
   are detected; any other agent runs `export STRATA_AGENT=<name>` (1-64 of
   `[A-Za-z0-9._-]`, starting with a letter or digit) or passes `--agent NAME`
@@ -122,6 +123,7 @@ with "ask the human". Never run a human-only command (hard rule 1) yourself. Exc
 | --- | --- |
 | `Busy daemon_down` | keep working; tell the human; retry after `daemon status` shows running |
 | `Busy publish_unknown` | do not loop; tell the human ([errors.md](errors.md)) |
+| `Busy pins_tightened` | rerun the command once on the new catalog; do not loop inside the old operation |
 | `Busy` (other) | another operation holds the lock; wait and retry |
 | `NotTty` / human-only command | stop; give the human the exact command |
 | `NoSuchSession` | `cd` into your workspace or pass `--session` |

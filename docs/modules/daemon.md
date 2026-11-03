@@ -65,7 +65,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 未知方法 → RPC `UnknownMethod`。参数对不上 → RPC `Failed`。
 
-方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 25 个以外不加方法（`sync` 是 main-sync 加的；`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
+方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 26 个以外不加方法（`sync` 是 main-sync 加的；`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
 
 | method | 作用 | 是否只读 |
 | --- | --- | --- |
@@ -89,7 +89,8 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `gc` | `store::gc_repo`；`repo` 为 null 时再 `store::gc_trash`；`store` 时改调 `store::gc_with`，`dry_run` 时只调 `store::gc_preview`（D33） | 否 |
 | `resolve_move` | `session::resolve_failed_move`。不查 TTY，不收凭据 | 否 |
 | `chain_resolve` | 人对 Rewound / Diverged 的显式处理。接受 origin 不推送；恢复只在快进时推 | 否 |
-| `config_relax` | 显式接受一次调松。文件变了不弹框。路径能编译。调松仍要这条命令；调紧立即生效 | 否 |
+| `config_relax` | 显式接受一次调松；shown 绑定展示的配置，确认后重新验证 | 否 |
+| `config_reload` | 校验并原子发布安全配置，等待新的尝试报告，无 TTY 要求 | 否 |
 | `daemon_status` | 锁、队列、Unknown 发布、可选 `quick_check` | 是 |
 | `du` | 数据根的磁盘用量，读缓存（§5.12） | 是 |
 | `ports_ensure` | `store::ensure_dev_ports`：一个工作区的 dev 端口租约，没有就分配（D39） | 否 |
@@ -123,7 +124,8 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `gc` | `{ "repo": RepoName\|null }` | `{ done, skipped, trash }`；`trash` 是 `TrashReport`（`repo` 为 null 时）或 null |
 | `resolve_move` | `{ "session": SessionId, "repo": RepoName, "abandon": bool, "accept": bool }` | `ResolutionReport`。两个布尔必须恰好一个为真，否则 RPC `Failed`，不调用 session |
 | `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice, "shown"?: CommitOid \| null }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
-| `config_relax` | `{ "repo": RepoName }` | `{}`。没有凭据字段。见 §5.5 |
+| `config_reload` | `{}` | ReloadReport，见 Config catalog and reload |
+| `config_relax` | `{ "repo": RepoName, "shown": PinnedFlags }` | `{}`。没有凭据字段。见 §5.5 |
 | `daemon_status` | `{ "verify": bool }` | 见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc` |
 | `du` | `{ "refresh": bool }`（缺省 false） | 见 §5.12 |
 | `ports_ensure` | `{ "session": SessionId, "repo": RepoName }` | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
@@ -502,7 +504,7 @@ and a different key cannot inherit it. With no matching cached value, the summar
    实现（review M7）：不用普通的 `git.push` 再另开事务——那样跟踪 ref 由 push 自己单独推进（失败只记日志），锚点在后一个事务里，崩溃或读者会看到一个动了另一个没动。改用 gitio 的 `push_recorded`（`push_published` 加一组只比较的更新）：远端接受之后，同一个 ref 事务里核对链仍是 c、把跟踪 ref 与锚点一起设成 c，各自对推送前读到的值比较并交换；事务不成 → `Unknown`（本地什么都没动，暂存现场照 M6 保留）。[实现时补的决定]
 9. 放开锁。`main_tip` 动了就 `observe_main`，失败只是 `ObserveFailed`。第 4 步的具名拒绝不被这次观察改成 `Unknown`。ref 事务已经调用过的，失败只能是 `Unknown`。
 
-**`config_relax`**：显式接受一次调松。params 只有 `repo`。不查 TTY。不占会话队列，不拿 repo 写锁。文件变了不弹框：启动、重载、KeepAlive 重启都不调用 `require`。调紧仍立即写回，不要凭据。
+**`config_relax`**：显式接受一次调松。支持 config.reload 的 daemon 还要求 `shown`，确认后在 committer 下重新验证文件与展示的 flags。不查 TTY。不占会话队列，不拿 repo 写锁。文件变了不弹框：启动、重载、KeepAlive 重启都不调用 `require`。调紧仍立即写回，不要凭据。
 
 1. 名字不在配置里 → `NoSuchRepo`，不弹框。
 2. 该 repo 的文件并不比钉松 → `InvalidInput`，`detail.reason = "not_relaxed"`，不弹框 [我的决定 D20]。
@@ -1085,3 +1087,58 @@ proposal and any supplied fix to the human and stop; only
 `installing` or `publishing` waits get bounded retries. Upstream rows with
 `following: false` emit no sync fix; ignore their behind count for sync and only
 acknowledge named conflicts.
+
+
+## Config catalog and reload (phase 1)
+
+`config.reload` in FEATURES advertises `config_reload {}` (write RPC, strict
+unknown-field rejection), source snapshots and `config_relax {repo, shown}`.
+`config_reload` waits for an attempt that began reading after the request counter
+was incremented. Its report is the envelope's data, with the shape and exit codes
+in [config.md](../config.md#hot-reload-configreload). `daemon_status.config` exposes
+`generation`, `hash`, `loaded_at`, `last_attempt` and `restart_required`.
+`ConfigReloadFailed` and `ConfigRestartRequired` warnings surface in status, the
+GUI modal and the feature-gated tray status line; no notification is sent.
+
+A mutex-protected append-only arena owns immutable catalogs. An Acquire/Release
+index publishes a fully built value. Every RPC pins one index before RequestScope;
+scoped session helpers inherit it with spawn_pinned. Background items pin at entry.
+Missing bindings return Corrupt/no_pinned_catalog; a lock take without a binding
+counts as generation 0. Git clones already share their Arc-backed internals.
+The insert-only lock map reuses Arc FIFOs; Held owns the Arc and never retains a
+map read guard while waiting or executing. Paths.root and status.parallel stay
+fixed, so immutable startup borrows of these fields remain valid.
+
+The committer is acquired with no build lock, queue or repo lock held (I4). It
+serializes reload and accepted relaxations, never waits for a human or network,
+and rechecks the current generation after preparation. Validation, same-volume,
+repo identity, retained store state and recovery checks precede publication. New
+loop pairs are fallibly spawned and parked; failure cancels them. The reload
+worker also supervises these loops in its scope. Pins are written durably before
+FIFOs/fences/catalog publication and releasing latches. No request waits for reload;
+`toolcall_does_not_wait_out_approve_ensure` remains an invariant. The config source uses SHA-256 from macOS CommonCrypto; per-repo cache keys
+use the workspace's existing BLAKE3 implementation. Neither adds a dependency. Tracker inputs and upstream summaries/tips carry the source
+configuration key so late old writebacks cannot satisfy new reads.
+
+After reconciliation, a changed push/confirm/regenerable/sync_deps flag stores a
+monotonic fence before publishing the index. No nonexistent `stricter` helper is
+needed; deploy_on_push changes do not fence. Waiters check fences at every wake;
+session queues read the manifest membership under the queue grant, including
+repos added while waiting. Store reads are not cached at enqueue. Closing Locks
+wakes reload waiters too, including poisoned-store exit, before connection joins.
+
+Fence handling spans multiple crates: strata-session's unbounded helper and
+strata-deps seal stop retrying Busy/pins_tightened. Seal closes the attempt as
+interrupted and releases build ownership. New rolls back through teardown; add
+uses exempt cleanup unpins. Remove checks between open-files validation and
+teardown, never within teardown (which new rollback also calls).
+collect_session_leftovers has an ordinary fenced take before Removing. Removal
+unpins after Removing are exempt. strata-publish wraps the whole post-landing
+rebase attempt, including base_for/base registration, and records the ordinary
+`defer_pending` outcome, never `mark_unfinished`. Thus landing closes Done.
+
+Main-sync logs fence exits at debug, other non-ReadOnly errors at warn. A fenced
+deps_auto pass can leave its durable row Installing, as a stop would; a later
+pass resumes or supersedes it when the applicable policy permits. Fetch results prepared under changed repo settings are
+discarded at revalidation. Relaxation publishes without a fence, retains other
+pins, and cannot overwrite a concurrent committed reload from an old snapshot.
