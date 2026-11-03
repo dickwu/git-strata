@@ -1,4 +1,5 @@
 /** Daemon replies → what the screens show. Pure; tested against the P1 fixtures. */
+import { copy } from './copy';
 import type {
   Checkpoint,
   DaemonStatus,
@@ -149,7 +150,7 @@ export function filterRows(rows: SessionRow[], f: RowFilter): SessionRow[] {
 /** One repo's proposal or workspace that needs attention. */
 export interface WaitingItem {
   key: string;
-  kind: 'deps' | 'conflict';
+  kind: 'deps' | 'conflict' | 'deferred' | 'relax';
   number: number;
   repo: string;
   session: string | null;
@@ -186,9 +187,38 @@ function pendingIncludes(s: SessionEntry, repo: string, id: number): boolean {
     (p) => p === id || (typeof p === 'object' && p !== null && 'id' in p && p.id === id)
   );
 }
-function stuckReason(s: SessionEntry, repo: string, now: number): string | undefined {
+export function longDeferral(auto: UpstreamRepo['auto'], now: number): boolean {
+  const since = Date.parse(auto?.since ?? '');
+  return (
+    auto?.state === 'deferred' &&
+    auto.reason !== 'conflicts' &&
+    Number.isFinite(since) &&
+    now - since > STUCK_AFTER
+  );
+}
+/** A missing session-level enrichment is unknown; per-workspace omission is legitimate. */
+export function unavailableUpstream(
+  sessions: StatusReply | undefined,
+  daemon?: DaemonStatus
+): string[] {
+  return hasUpstream(daemon)
+    ? (sessions?.sessions ?? [])
+        .filter((s) => !s.status.upstream)
+        .map((s) => s.status.manifest.id)
+        .sort()
+    : [];
+}
+function knownUpstream(s: SessionEntry, repo: string, enabled: boolean): UpstreamRepo | undefined {
+  return enabled && s.status.upstream ? repoUpstream(s, repo) : undefined;
+}
+function stuckReason(
+  s: SessionEntry,
+  repo: string,
+  now: number,
+  enabled: boolean
+): string | undefined {
   const w = s.status.workspaces?.[repo];
-  const u = repoUpstream(s, repo);
+  const u = knownUpstream(s, repo, enabled);
   const state = u?.deps?.state;
   if (state === 'install_failed') return 'install failed';
   if (state === 'own_change') return 'session has its own dependency changes';
@@ -198,11 +228,7 @@ function stuckReason(s: SessionEntry, repo: string, now: number): string | undef
   if (u?.following === false) return 'needs the human: not following main';
   if (u?.diverged) return 'needs the human: diverged';
   if (state === 'waiting_human') return 'needs the human';
-  if (u?.auto?.state === 'deferred') {
-    const since = Date.parse(u.auto.since);
-    if (Number.isFinite(since) && now - since > STUCK_AFTER)
-      return `deferred over 24 h: ${(u.auto.reason ?? 'waiting').replace(/_/g, ' ')}`;
-  }
+  if (longDeferral(u?.auto, now)) return 'newer changes not applied for over a day';
   return undefined;
 }
 /** Group by repo; apply-mode progress stays out of the human waiting count (O6). */
@@ -215,6 +241,7 @@ export function waitingGroups(
   const upstream = hasUpstream(daemon);
   const ss = sessions?.sessions ?? [];
   const groups = new Map<string, WaitingGroup>();
+  const covered = new Set<string>();
   const group = (repo: string) => {
     if (!groups.has(repo)) groups.set(repo, { repo, items: [], applying: [] });
     return groups.get(repo)!;
@@ -222,7 +249,7 @@ export function waitingGroups(
   for (const p of [...(deps?.proposals ?? [])].sort((a, b) => a.id - b.id)) {
     if (p.state?.kind !== 'Pending') continue;
     const affected = ss.filter((s) => pendingIncludes(s, p.repo, p.id));
-    const states = upstream ? affected.map((s) => repoUpstream(s, p.repo)) : [];
+    const states = upstream ? affected.map((s) => knownUpstream(s, p.repo, upstream)) : [];
     // The proposal has the effective repo policy even when status lags or omits upstream.
     // Older daemons fall back to affected workspaces, then conservatively to confirm.
     const mode =
@@ -232,7 +259,9 @@ export function waitingGroups(
         ? 'apply'
         : 'confirm');
     const reason =
-      mode === 'apply' ? affected.map((s) => stuckReason(s, p.repo, now)).find(Boolean) : undefined;
+      mode === 'apply'
+        ? affected.map((s) => stuckReason(s, p.repo, now, upstream)).find(Boolean)
+        : undefined;
     const moved = ss.filter(
       (s) =>
         s.status.manifest.repos[p.repo]?.tracked &&
@@ -260,10 +289,12 @@ export function waitingGroups(
       progress: `${moved}/${moved + affected.length} moved${deferred.length ? `, ${deferred.length} deferred${reasons.length ? `: ${reasons.join(', ')}` : ''}` : ''}`,
     };
     (mode === 'apply' && !reason ? group(p.repo).applying : group(p.repo).items).push(it);
+    if (mode === 'apply' && reason)
+      for (const s of affected) covered.add(`${s.status.manifest.id}:${p.repo}`);
   }
   for (const s of ss) {
     for (const [repo, w] of Object.entries(s.status.workspaces ?? {})) {
-      const u = upstream ? repoUpstream(s, repo) : undefined;
+      const u = knownUpstream(s, repo, upstream);
       const n = Math.max(w.conflicts?.length ?? 0, u?.conflicts?.length ?? 0);
       if (n === 0 && u?.auto?.reason !== 'conflicts') continue;
       group(repo).items.push({
@@ -279,6 +310,59 @@ export function waitingGroups(
       });
     }
   }
+  const deferred = new Map<string, Array<{ session: SessionEntry; since: string }>>();
+  for (const session of ss)
+    for (const repo of Object.keys(session.status.workspaces ?? {})) {
+      const auto = knownUpstream(session, repo, upstream)?.auto;
+      if (!longDeferral(auto, now) || covered.has(`${session.status.manifest.id}:${repo}`))
+        continue;
+      const rows = deferred.get(repo) ?? [];
+      rows.push({ session, since: auto!.since });
+      deferred.set(repo, rows);
+    }
+  for (const [repo, rows] of deferred) {
+    rows.sort(
+      (a, b) =>
+        Date.parse(a.since) - Date.parse(b.since) ||
+        a.session.status.manifest.id.localeCompare(b.session.status.manifest.id)
+    );
+    group(repo).items.push({
+      key: `deferred:${repo}`,
+      kind: 'deferred',
+      repo,
+      number: rows.length,
+      session: rows[0].session.status.manifest.id,
+      since: rows[0].since,
+      affected: rows.map(({ session }) => ({
+        id: session.status.manifest.id,
+        ticket: session.status.manifest.ticket ?? null,
+      })),
+      reason: copy.tray.deferredReason,
+    });
+  }
+  const relax = new Set<string>();
+  for (const w of Array.isArray(daemon?.warnings) ? daemon.warnings : []) {
+    if (w && typeof w === 'object' && Object.keys(w).length === 1 && 'ConfigRelaxPending' in w) {
+      const payload = w.ConfigRelaxPending;
+      if (
+        payload &&
+        typeof payload === 'object' &&
+        'repo' in payload &&
+        typeof payload.repo === 'string'
+      )
+        relax.add(payload.repo);
+    }
+  }
+  for (const repo of [...relax].sort())
+    group(repo).items.push({
+      key: `relax:${repo}`,
+      kind: 'relax',
+      repo,
+      number: 0,
+      session: null,
+      since: null,
+      reason: copy.tray.relax,
+    });
   return [...groups.values()].sort((a, b) => a.repo.localeCompare(b.repo));
 }
 /** Flat compatibility view for review targets and existing callers. */
@@ -290,15 +374,13 @@ export function waitingItems(
 ): WaitingItem[] {
   return waitingGroups(sessions, deps, daemon, now)
     .flatMap((g) => g.items)
-    .sort((a, b) =>
-      a.kind === b.kind
-        ? a.kind === 'deps'
-          ? a.number - b.number
-          : a.key.localeCompare(b.key)
-        : a.kind === 'deps'
-          ? -1
-          : 1
-    );
+    .sort((a, b) => {
+      const rank = { deps: 0, deferred: 1, relax: 2, conflict: 3 };
+      return (
+        rank[a.kind] - rank[b.kind] ||
+        (a.kind === 'deps' ? a.number - b.number : a.key.localeCompare(b.key))
+      );
+    });
 }
 export function waitingCount(
   sessions: StatusReply | undefined,
@@ -306,7 +388,10 @@ export function waitingCount(
   daemon?: DaemonStatus,
   now = Date.now()
 ): number {
-  return waitingGroups(sessions, deps, daemon, now).reduce((n, g) => n + g.items.length, 0);
+  return waitingGroups(sessions, deps, daemon, now).reduce(
+    (n, g) => n + g.items.filter((i) => i.kind !== 'conflict').length,
+    0
+  );
 }
 
 /**
@@ -397,7 +482,8 @@ function warningText(w: unknown): string {
   if (typeof w === 'string') return w;
   if (w && typeof w === 'object') {
     const o = w as Record<string, unknown>;
-    const kind = typeof o.kind === 'string' ? o.kind : 'Warning';
+    const keys = Object.keys(o);
+    const kind = typeof o.kind === 'string' ? o.kind : keys.length === 1 ? keys[0] : 'Warning';
     const msg = typeof o.message === 'string' ? o.message : null;
     return msg ? `${kind}: ${msg}` : kind;
   }
@@ -414,7 +500,7 @@ export function daemonView(s: DaemonStatus): DaemonView {
       .filter(([, n]) => n > 0)
       .map(([repo, n]) => ({ repo, n }))
       .sort((a, b) => b.n - a.n || a.repo.localeCompare(b.repo)),
-    warnings: (s.warnings ?? []).map(warningText),
+    warnings: (Array.isArray(s.warnings) ? s.warnings : []).map(warningText),
   };
 }
 
@@ -428,8 +514,15 @@ export function openTarget(
   sessions: StatusReply | undefined,
   deps: DepsList | undefined,
   daemon?: DaemonStatus
-): { session: string | null } {
+): { session: string | null; screen?: 'daemon' } {
   const [, kind, arg] = id.split(':');
+  if (kind === 'relax') return { session: null, screen: 'daemon' };
+  if (kind === 'deferred') {
+    const item = waitingGroups(sessions, deps, daemon)
+      .find((g) => g.repo === arg)
+      ?.items.find((i) => i.kind === 'deferred');
+    return { session: item?.session ?? null };
+  }
   if (kind === 'deps') {
     const p = deps?.proposals.find((x) => String(x.id) === arg);
     return {
@@ -446,7 +539,9 @@ export function openTarget(
     const s = sessions?.sessions.find(
       (x) =>
         (x.status.workspaces[arg]?.conflicts?.length ?? 0) > 0 ||
-        (hasUpstream(daemon) && repoUpstream(x, arg)?.auto?.reason === 'conflicts')
+        (hasUpstream(daemon) &&
+          ((knownUpstream(x, arg, true)?.conflicts?.length ?? 0) > 0 ||
+            knownUpstream(x, arg, true)?.auto?.reason === 'conflicts'))
     );
     return { session: s?.status.manifest.id ?? null };
   }

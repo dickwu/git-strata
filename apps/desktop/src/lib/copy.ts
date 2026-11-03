@@ -7,6 +7,18 @@ export const promptText = (id: number) => `approve dependency proposal ${id}`;
 
 export const copy = {
   app: 'GIT STRATA',
+  tray: {
+    deferred: (n: number) =>
+      `Newer changes not applied for over a day (${n} ${n === 1 ? 'session' : 'sessions'})`,
+    deferredReason: 'Newer changes have not been applied for over a day',
+    relax: 'Config relax waiting',
+    openOldest: 'Open oldest session',
+    openDaemon: 'Open Daemon',
+    upstreamUnavailable: 'Upstream detail is unavailable for these sessions:',
+    upstreamCause:
+      'The daemon did not return upstream detail. Its reply does not include the cause.',
+    conflicts: (n: number) => `${n} ${n === 1 ? 'repo conflict' : 'repo conflicts'}`,
+  },
   nav: {
     sessions: 'Sessions',
     daemon: 'Daemon',

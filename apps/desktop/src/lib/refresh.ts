@@ -1,7 +1,9 @@
 import type { QueryClient, QueryKey } from '@tanstack/react-query';
 
 /**
- * Refresh `keys` without cancelling anything. The back end allows one read per kind, so a
+ * Refresh `keys` without cancelling anything. Window reads never join backend poller flights:
+ * they wait, discard the poller result, then start a read of their own. Another window
+ * flight still refuses overlapping window reads. Thus a
  * cancelled-and-restarted read comes back request_in_flight and the cancelled one's reply
  * is lost. Instead: join the reads already in flight, wait for them to end, then ask for
  * reads that start after that.

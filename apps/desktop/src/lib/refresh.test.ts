@@ -43,3 +43,47 @@ describe('refreshAfter: joins in-flight reads, never cancels them', () => {
     unsubscribe();
   });
 });
+
+test('second refresh wave waits out a backend poller and cannot enable Approve from its old reply', async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  let calls = 0;
+  let releasePoller!: () => void;
+  let releaseFresh!: () => void;
+  const poller = new Promise<void>((r) => {
+    releasePoller = r;
+  });
+  const freshReply = new Promise<number>((r) => {
+    releaseFresh = () => r(2);
+  });
+  const starts: number[] = [];
+  const observer = new QueryObserver(qc, {
+    queryKey: ['deps'],
+    queryFn: async () => {
+      if (++calls === 1) return 1;
+      // Native window caller discards the old poller result before starting its read.
+      await poller;
+      starts.push(Date.now());
+      return freshReply;
+    },
+  });
+  const unsubscribe = observer.subscribe(() => {});
+  await tick();
+  let readyAt = Infinity;
+  const finished = refreshAfter(qc, [['deps']]).then((t) => {
+    readyAt = t;
+  });
+  await tick();
+  expect(qc.getQueryData(['deps'])).toBe(1);
+  expect(starts).toHaveLength(0);
+  expect(qc.getQueryState(['deps'])!.dataUpdatedAt >= readyAt).toBe(false);
+  releasePoller();
+  await tick();
+  expect(qc.getQueryState(['deps'])!.dataUpdatedAt >= readyAt).toBe(false);
+  releaseFresh();
+  await finished;
+  expect(starts[starts.length - 1]).toBeGreaterThanOrEqual(readyAt);
+  expect(qc.getQueryData(['deps'])).toBe(2);
+  expect(qc.getQueryState(['deps'])!.dataUpdatedAt >= readyAt).toBe(true);
+  unsubscribe();
+  qc.clear();
+});

@@ -42,7 +42,9 @@ interface ReviewState {
 
 export function targetOf(it: WaitingItem): ReviewTarget | null {
   if (it.kind === 'deps') return { kind: 'deps', id: it.number, repo: it.repo };
-  return it.session ? { kind: 'conflict', session: it.session, repo: it.repo } : null;
+  return it.kind === 'conflict' && it.session
+    ? { kind: 'conflict', session: it.session, repo: it.repo }
+    : null;
 }
 
 export function targetKey(t: ReviewTarget): string {
