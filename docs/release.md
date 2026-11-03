@@ -90,7 +90,10 @@ What this means:
    The first time only: push and merge the tap branch `add-git-strata` (README
    section and placeholder files) BEFORE publishing, so homebrew.yml updates the
    files instead of colliding with the branch later.
-4. Check the draft's files, then publish it (not as a pre-release: homebrew.yml
+4. Check the draft's files. When `docs/release-notes/v<version>.md` exists, put it
+   above the generated notes before publishing:
+   `{ cat docs/release-notes/vX.Y.Z.md; echo; gh release view vX.Y.Z --json body -q .body; } > /tmp/notes.md && gh release edit vX.Y.Z --notes-file /tmp/notes.md`.
+   Then publish it (not as a pre-release: homebrew.yml
    skips pre-releases unless dispatched by hand). Publishing fires
    `.github/workflows/homebrew.yml`, which downloads both artifacts, computes
    their sha256, renders `Formula/git-strata.rb` and `Casks/git-strata-desktop.rb`
