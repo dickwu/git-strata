@@ -281,6 +281,23 @@ pub fn model(s: &Snapshot, now: SystemTime) -> TrayModel {
             )
         }
     };
+    let config_failed = s.daemon_status.as_ref().is_some_and(|d| {
+        d["features"]
+            .as_array()
+            .is_some_and(|features| features.iter().any(|f| f == "config.reload"))
+            && d["warnings"].as_array().is_some_and(|warnings| {
+                warnings.iter().any(|w| {
+                    w.get("ConfigReloadFailed").is_some()
+                        || w.get("ConfigRestartRequired").is_some()
+                })
+            })
+    });
+    let status_line =
+        if s.up == Some(true) && stale.is_none_or(|age| age <= STALE_AFTER) && config_failed {
+            "config.toml not applied — open status".to_string()
+        } else {
+            status_line
+        };
     TrayModel {
         icon,
         status_line,
@@ -293,6 +310,27 @@ pub fn model(s: &Snapshot, now: SystemTime) -> TrayModel {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn config_warning_status_line_requires_feature_and_fresh_daemon() {
+        let now = SystemTime::now();
+        let mut s = Snapshot {
+            up: Some(true),
+            updated: Some(now),
+            daemon_status: Some(
+                json!({"features":["config.reload"], "warnings":[{"ConfigReloadFailed":{"reason":"parse"}}]}),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            model(&s, now).status_line,
+            "config.toml not applied — open status"
+        );
+        s.daemon_status.as_mut().unwrap()["features"] = json!([]);
+        assert_ne!(
+            model(&s, now).status_line,
+            "config.toml not applied — open status"
+        );
+    }
     fn fixture() -> (Value, Value) {
         (
             json!({"sessions":[{"status":{"manifest":{"repos":{"tool":{"tracked":true}}},"workspaces":{"tool":{"health":"Ok","pending":[{"id":75}],"upstream":{"behind":3,"deps":{"proposal":75,"mode":"apply","state":"ready"},"auto":{"state":"deferred","reason":"open_files","since":"2026-11-01T12:00:00Z"}}}}}}]}),

@@ -227,6 +227,23 @@ export function DaemonStatusModal({
                 <Missing live={live} />
               )}
             </Descriptions.Item>
+            {status.data?.config && (
+              <Descriptions.Item label="Configuration" span={2}>
+                <div>Generation {status.data.config.generation}</div>
+                <div className="mono">{status.data.config.hash}</div>
+                <pre>
+                  {JSON.stringify(
+                    {
+                      loaded_at: status.data.config.loaded_at,
+                      last_attempt: status.data.config.last_attempt,
+                      restart_required: status.data.config.restart_required,
+                    },
+                    null,
+                    2
+                  )}
+                </pre>
+              </Descriptions.Item>
+            )}
             <Descriptions.Item label={st.reconcile}>{f ? f.reconcileRuns : '—'}</Descriptions.Item>
             <Descriptions.Item label={st.holds}>{f ? f.holds : '—'}</Descriptions.Item>
             <Descriptions.Item label={st.waiting}>{f ? f.waiting : '—'}</Descriptions.Item>
