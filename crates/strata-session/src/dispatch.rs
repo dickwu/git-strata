@@ -35,11 +35,15 @@ pub(crate) fn each_repo_n<T: Send>(
         failed: bool,
         results: Vec<Option<Result<T>>>,
     }
-    let shared = Mutex::new(Shared { next: 0, failed: false, results: (0..repos.len()).map(|_| None).collect() });
+    let shared = Mutex::new(Shared {
+        next: 0,
+        failed: false,
+        results: (0..repos.len()).map(|_| None).collect(),
+    });
     let workers = n.min(repos.len()).max(1);
     std::thread::scope(|s| {
         for _ in 0..workers {
-            s.spawn(|| {
+            crate::catalog::spawn_pinned(s, || {
                 loop {
                     let i = {
                         let mut sh = shared.lock().unwrap_or_else(|p| p.into_inner());

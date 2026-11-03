@@ -31,26 +31,30 @@ fn fail_quiet(e: &StrataError) -> ExitCode {
 
 fn run() -> Result<(), StrataError> {
     startup::refuse_test_seams()?;
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        StrataError::new(strata_types::Code::InvalidInput, "HOME is not set")
-    })?;
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| StrataError::new(strata_types::Code::InvalidInput, "HOME is not set"))?;
     let opts = Options::for_home(std::path::Path::new(&home));
     // SAFETY: the handler only stores to an atomic. Installed before the
     // store wait so `daemon stop` (SIGTERM) ends a wait at once.
     unsafe {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, on_hup as *const () as libc::sighandler_t);
     }
     // Incident 2026-10-27: launchd's default soft descriptor limit (256)
     // ran out with 25 live workspaces (each watcher holds ~8). Raise it
     // before anything is opened.
     match startup::raise_fd_limit() {
-        Ok((before, after)) if after > before => (opts.alert)(&format!("raised the open-file limit from {before} to {after}")),
+        Ok((before, after)) if after > before => (opts.alert)(&format!(
+            "raised the open-file limit from {before} to {after}"
+        )),
         Ok(_) => {}
         Err(e) => (opts.alert)(&format!("cannot raise the open-file limit: {e}")),
     }
     // 2. Single instance, held across the store wait below.
-    let mut instance = Some(InstanceLock::take(&strata_daemon::lock_path(&opts.config_dir))?);
+    let mut instance = Some(InstanceLock::take(&strata_daemon::lock_path(
+        &opts.config_dir,
+    ))?);
     let open_git = |p: &std::path::Path| strata_gitio::Git::open(p);
     // §5.1a: an I/O error in steps 3–7 (EINTR / EPERM while macOS TCC
     // decides on a removable volume, …) is waited out in-process with
@@ -68,7 +72,14 @@ fn run() -> Result<(), StrataError> {
         }
     };
     let got = waiting::wait_until(
-        || startup::prepare_locked(opts.clone(), strata_confirm::Confirmer::new(), &open_git, &mut instance),
+        || {
+            startup::prepare_locked(
+                opts.clone(),
+                strata_confirm::Confirmer::new(),
+                &open_git,
+                &mut instance,
+            )
+        },
         Policy::PRODUCTION,
         &|| TERM.load(Ordering::SeqCst),
         &|line| alert(line),
@@ -103,7 +114,9 @@ fn run() -> Result<(), StrataError> {
         let daemon = Daemon::start(&core)?;
         // session.md D53: back-to-back `new`/`add` reuse a fetch younger
         // than this (publish fetches for itself). Tests keep the default 0.
-        daemon.sessions.set_fetch_window(strata_session::NEW_FETCH_WINDOW);
+        daemon
+            .sessions
+            .set_fetch_window(strata_session::NEW_FETCH_WINDOW);
         // The waiting socket, when there was one, becomes the real one.
         let listener = match waiting.take().and_then(Waiting::finish) {
             Some(l) => l,
@@ -158,4 +171,8 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(&e),
     }
+}
+
+extern "C" fn on_hup(_: libc::c_int) {
+    strata_daemon::reload::HUP.store(true, std::sync::atomic::Ordering::SeqCst);
 }

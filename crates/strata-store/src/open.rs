@@ -15,7 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::sql::{self, Connection, Mode};
 use serde_json::json;
-use strata_apfs::{IoSide, classify_io_error, full_fsync, nearest_existing_ancestor, retry_eintr, same_volume};
+use strata_apfs::{
+    IoSide, classify_io_error, full_fsync, nearest_existing_ancestor, retry_eintr, same_volume,
+};
 use strata_types::{Code, StrataError};
 
 use crate::errors::{self, NOT_WRITTEN, corrupt, err, sql};
@@ -29,7 +31,8 @@ use crate::{Result, Store};
 /// `NotEmpty` (found with review M6) [实现时补的决定].
 /// Entries a strata root may hold. `search` is the daemon's search index
 /// (strata-search); incident 2026-10-27: a root holding it was refused.
-pub(crate) const LAYOUT_NAMES: [&str; 6] = ["store", "bases", "deps", "sessions", "daemon", "search"];
+pub(crate) const LAYOUT_NAMES: [&str; 6] =
+    ["store", "bases", "deps", "sessions", "daemon", "search"];
 const MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const READER_BUSY_MS: u64 = 2000;
 
@@ -367,6 +370,11 @@ impl Store {
         read_txn(&r, "read", f)
     }
 
+    /// Validate a hot-added checkout exactly as at store startup.
+    pub fn check_checkout(&self, checkout: &Path) -> Result<()> {
+        check_checkout(&self.root, checkout)
+    }
+
     pub fn open(root: &Path, checkouts: &[&Path]) -> Result<Store> {
         if !root.is_absolute() {
             return Err(err(
@@ -376,27 +384,8 @@ impl Store {
             ));
         }
         // 2. same volume, nothing written
-        let anc = retry_eintr(|| nearest_existing_ancestor(root)).map_err(|e| classify_io_error(&e, IoSide::Read, root))?;
-        for c in checkouts {
-            match retry_eintr(|| fs::metadata(c)) {
-                Ok(_) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    return Err(err(
-                        Code::NoSuchPath,
-                        format!("checkout does not exist: {}", c.display()),
-                        json!({ "path": c.to_string_lossy() }),
-                    ));
-                }
-                Err(e) => return Err(classify_io_error(&e, IoSide::Read, c)),
-            }
-            let same = retry_eintr(|| same_volume(&anc, c)).map_err(|e| classify_io_error(&e, IoSide::Read, c))?;
-            if !same {
-                return Err(err(
-                    Code::CrossVolume,
-                    format!("store root {} is not on the same volume as checkout {}", root.display(), c.display()),
-                    json!({ "root": root.to_string_lossy(), "checkout": c.to_string_lossy() }),
-                ));
-            }
+        for checkout in checkouts {
+            check_checkout(root, checkout)?;
         }
         // Incident 2026-10-27: an existing store opens whatever else its
         // root holds; the foreign-entry check below guards only creating
@@ -409,8 +398,12 @@ impl Store {
         match retry_eintr(|| fs::metadata(root)) {
             Ok(m) if m.is_dir() => {
                 let mut foreign = Vec::new();
-                let names = retry_eintr(|| fs::read_dir(root)?.map(|e| e.map(|e| e.file_name())).collect::<io::Result<Vec<_>>>())
-                    .map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
+                let names = retry_eintr(|| {
+                    fs::read_dir(root)?
+                        .map(|e| e.map(|e| e.file_name()))
+                        .collect::<io::Result<Vec<_>>>()
+                })
+                .map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
                 for name in names {
                     let name = name.to_string_lossy().into_owned();
                     if !LAYOUT_NAMES.contains(&name.as_str()) {
@@ -448,11 +441,16 @@ impl Store {
             if dir_has_entries(&p).map_err(|e| ioe(&e, IoSide::Read, &p, "open"))? {
                 return Err(err(
                     Code::Corrupt,
-                    format!("{} has data but store/store.db is missing; refusing to create an empty store over it", root.display()),
+                    format!(
+                        "{} has data but store/store.db is missing; refusing to create an empty store over it",
+                        root.display()
+                    ),
                     json!({ "reason": "store_db_missing", "path": db.to_string_lossy() }),
                 ));
             }
         }
+        let anc = retry_eintr(|| nearest_existing_ancestor(root))
+            .map_err(|e| classify_io_error(&e, IoSide::Read, root))?;
         create(root, &anc)
     }
 
@@ -878,4 +876,35 @@ fn verify_backup(p: &Path, from: u32) -> Result<()> {
 #[allow(dead_code)]
 pub(crate) fn _corrupt_unused() -> StrataError {
     corrupt("x", "y")
+}
+
+fn check_checkout(root: &Path, c: &Path) -> Result<()> {
+    let anc = retry_eintr(|| nearest_existing_ancestor(root))
+        .map_err(|e| classify_io_error(&e, IoSide::Read, root))?;
+    match retry_eintr(|| fs::metadata(c)) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(err(
+                Code::NoSuchPath,
+                format!("checkout does not exist: {}", c.display()),
+                json!({ "path": c.to_string_lossy() }),
+            ));
+        }
+        Err(e) => return Err(classify_io_error(&e, IoSide::Read, c)),
+    }
+    let same =
+        retry_eintr(|| same_volume(&anc, c)).map_err(|e| classify_io_error(&e, IoSide::Read, c))?;
+    if !same {
+        return Err(err(
+            Code::CrossVolume,
+            format!(
+                "store root {} is not on the same volume as checkout {}",
+                root.display(),
+                c.display()
+            ),
+            json!({ "root": root.to_string_lossy(), "checkout": c.to_string_lossy() }),
+        ));
+    }
+
+    Ok(())
 }

@@ -6,12 +6,21 @@ use std::time::SystemTime;
 
 use crate::sql::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
-use strata_types::{AgentName, BaseGen, Code, CommitOid, RepoName, RepoPath, SessionId, SessionManifest, StrataError, WorkspaceState};
+use strata_types::{
+    AgentName, BaseGen, Code, CommitOid, RepoName, RepoPath, SessionId, SessionManifest,
+    StrataError, WorkspaceState,
+};
 
 use crate::codec::*;
-use crate::errors::{NOT_WRITTEN, bad_row, err, invalid, invalid_field, no_such_repo, no_such_session, sql, sql_read, too_large};
+use crate::errors::{
+    NOT_WRITTEN, bad_row, err, invalid, invalid_field, no_such_repo, no_such_session, sql,
+    sql_read, too_large,
+};
 use crate::txn::Tx;
-use crate::{Health, Lifecycle, MoveIntent, MoveState, Result, SeedRow, SessionRecord, Store, WorkspaceRecord};
+use crate::{
+    Health, Lifecycle, MoveIntent, MoveState, Result, SeedRow, SessionRecord, Store,
+    WorkspaceRecord,
+};
 
 // ---------------------------------------------------------------- helpers
 
@@ -232,8 +241,7 @@ fn seed_row(r: &Row) -> crate::sql::SqlResult<Result<(String, SeedRow)>> {
     })())
 }
 
-const INTENT_COLS: &str =
-    "session, repo, n, to_tree, to_deps, head, staging, phase, state, conflicts, old_tree, started_ns, ended_ns";
+const INTENT_COLS: &str = "session, repo, n, to_tree, to_deps, head, staging, phase, state, conflicts, old_tree, started_ns, ended_ns";
 
 fn intent_row(r: &Row) -> crate::sql::SqlResult<Result<MoveIntent>> {
     let session: String = r.get(0)?;
@@ -399,6 +407,16 @@ fn load_session(c: &Connection, s: SessionRow) -> Result<SessionRecord> {
 
 impl Store {
     pub fn create_session(&self, manifest: &SessionManifest, at: SystemTime) -> Result<()> {
+        self.create_session_with_policy(manifest, at, self.dev_ports_policy().as_deref())
+    }
+
+    /// Allocate using the caller's admission policy, never mutable store state.
+    pub fn create_session_with_policy(
+        &self,
+        manifest: &SessionManifest,
+        at: SystemTime,
+        policy: Option<&crate::DevPortsPolicy>,
+    ) -> Result<()> {
         const OP: &str = "create_session";
         self.writable()?;
         let id = manifest.id.as_str();
@@ -409,7 +427,10 @@ impl Store {
         if manifest.root.to_str() != Some(root.as_str()) {
             return Err(err(
                 Code::InvalidInput,
-                format!("session root must be {root}, not {}", manifest.root.display()),
+                format!(
+                    "session root must be {root}, not {}",
+                    manifest.root.display()
+                ),
                 json!({ "field": "root", "expected": root }),
             ));
         }
@@ -419,7 +440,10 @@ impl Store {
             if st.path.to_str() != Some(want.as_str()) {
                 return Err(err(
                     Code::InvalidInput,
-                    format!("workspace path of {repo} must be {want}, not {}", st.path.display()),
+                    format!(
+                        "workspace path of {repo} must be {want}, not {}",
+                        st.path.display()
+                    ),
                     json!({ "field": "path", "repo": repo.as_str(), "expected": want }),
                 ));
             }
@@ -433,7 +457,6 @@ impl Store {
             ws.push((repo.as_str(), st, want));
         }
         let at = ns(at, "at")?;
-        let policy = self.dev_ports_policy();
         self.write(OP, |c| {
             if session_lifecycle(c, id).map_err(w(OP))?.is_some() {
                 return Err(err(Code::Exists, format!("session {id} already has a row"), json!({ "reason": "store_row", "session": id })));
@@ -472,7 +495,7 @@ impl Store {
                     params![id, repo, g, st.head.as_str(), path, st.tracked as i64],
                 )
                 .map_err(w(OP))?;
-                crate::devports::lease_new(c, policy.as_deref(), id, repo).map_err(w(OP))?;
+                crate::devports::lease_new(c, policy, id, repo).map_err(w(OP))?;
             }
             Ok(Tx::Commit(()))
         })
@@ -488,11 +511,25 @@ impl Store {
         repos: &BTreeMap<RepoName, WorkspaceState>,
         seeds: &BTreeMap<RepoName, Vec<SeedRow>>,
     ) -> Result<()> {
+        self.add_workspaces_with_policy(id, repos, seeds, self.dev_ports_policy().as_deref())
+    }
+
+    /// Add workspaces with the operation's pinned allocation policy.
+    pub fn add_workspaces_with_policy(
+        &self,
+        id: &SessionId,
+        repos: &BTreeMap<RepoName, WorkspaceState>,
+        seeds: &BTreeMap<RepoName, Vec<SeedRow>>,
+        policy: Option<&crate::DevPortsPolicy>,
+    ) -> Result<()> {
         const OP: &str = "add_workspaces";
         self.writable()?;
         let id = id.as_str();
         if repos.is_empty() {
-            return Err(invalid_field("repos", format!("no workspaces to add to session {id}")));
+            return Err(invalid_field(
+                "repos",
+                format!("no workspaces to add to session {id}"),
+            ));
         }
         let root = self.session_root_text(id)?;
         let mut ws = Vec::new();
@@ -501,7 +538,10 @@ impl Store {
             if st.path.to_str() != Some(want.as_str()) {
                 return Err(err(
                     Code::InvalidInput,
-                    format!("workspace path of {repo} must be {want}, not {}", st.path.display()),
+                    format!(
+                        "workspace path of {repo} must be {want}, not {}",
+                        st.path.display()
+                    ),
                     json!({ "field": "path", "repo": repo.as_str(), "expected": want }),
                 ));
             }
@@ -517,7 +557,10 @@ impl Store {
                 rows.push((
                     s.path.as_str().to_string(),
                     path_text(&s.source, "source")?,
-                    s.link.as_deref().map(|l| path_text(l, "link")).transpose()?,
+                    s.link
+                        .as_deref()
+                        .map(|l| path_text(l, "link"))
+                        .transpose()?,
                     int(s.size, "size")?,
                     ns(s.source_mtime, "source_mtime")?,
                     ns(s.copied, "copied")?,
@@ -526,9 +569,11 @@ impl Store {
             ws.push((repo.as_str(), st, want, rows));
         }
         if let Some(r) = seeds.keys().find(|r| !repos.contains_key(*r)) {
-            return Err(invalid_field("seeds", format!("seeds given for {r}, which is not being added")));
+            return Err(invalid_field(
+                "seeds",
+                format!("seeds given for {r}, which is not being added"),
+            ));
         }
-        let policy = self.dev_ports_policy();
         self.write(OP, |c| {
             let lc = session_lifecycle(c, id).map_err(w(OP))?.ok_or_else(|| no_such_session(id))?;
             if lc != "active" {
@@ -577,7 +622,7 @@ impl Store {
                     )
                     .map_err(w(OP))?;
                 }
-                crate::devports::lease_new(c, policy.as_deref(), id, repo).map_err(w(OP))?;
+                crate::devports::lease_new(c, policy, id, repo).map_err(w(OP))?;
             }
             Ok(Tx::Commit(()))
         })
@@ -1038,4 +1083,3 @@ impl Store {
         self.read(|c| collect(c, &q, [], intent_row))
     }
 }
-

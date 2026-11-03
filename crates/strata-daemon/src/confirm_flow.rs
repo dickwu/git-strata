@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strata_apfs::{IoSide, classify_io_error};
 use strata_confirm::Confirmer;
-use strata_types::{Action, Code, Config, ConfirmToken, RepoConfig, RepoName, StrataError, SyncDeps};
+use strata_types::{
+    Action, Code, Config, ConfirmToken, RepoConfig, RepoName, StrataError, SyncDeps,
+};
 
 use crate::{PinnedFlags, Result};
 
@@ -163,6 +165,18 @@ impl Pins {
         Ok(pins)
     }
 
+    pub(crate) fn snapshot(&self) -> BTreeMap<RepoName, PinnedFlags> {
+        self.state().pinned.clone()
+    }
+
+    pub(crate) fn replace(
+        &self,
+        pinned: BTreeMap<RepoName, PinnedFlags>,
+        file: BTreeMap<RepoName, PinnedFlags>,
+    ) {
+        *self.state() = PinsState { pinned, file };
+    }
+
     fn state(&self) -> std::sync::MutexGuard<'_, PinsState> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -211,7 +225,7 @@ impl Pins {
     }
 
     /// Atomic replace: temp file (0600) → fsync → rename → fsync dir.
-    fn write(&self, pinned: &BTreeMap<RepoName, PinnedFlags>) -> Result<()> {
+    pub(crate) fn write(&self, pinned: &BTreeMap<RepoName, PinnedFlags>) -> Result<()> {
         let dir = self.path.parent().unwrap_or(Path::new("/"));
         let tmp = dir.join(format!(".pins.json.{}.tmp", std::process::id()));
         let mut body = serde_json::to_vec_pretty(&PinsFile { repos: pinned.clone() })
@@ -292,4 +306,34 @@ pub fn config_relax_with(
     }
     require_validated_with(confirmer, Action::ConfigRelax { repo: repo_id }, between)?;
     pins.accept(repo)
+}
+
+/// Startup and reload reconcile against the latest committed pins. Kept names
+/// remain pinned even when absent from the source file.
+pub fn reconcile(
+    current: &BTreeMap<RepoName, PinnedFlags>,
+    file: &BTreeMap<RepoName, PinnedFlags>,
+) -> (BTreeMap<RepoName, PinnedFlags>, Vec<RepoName>) {
+    let mut pins = current.clone();
+    for (name, flags) in file {
+        pins.insert(
+            name.clone(),
+            current
+                .get(name)
+                .map_or_else(|| unpinned(flags), |p| tighten(p, flags)),
+        );
+    }
+    let pending = file
+        .iter()
+        .filter(|(n, f)| relaxes(&pins[*n], f))
+        .map(|(n, _)| n.clone())
+        .collect();
+    (pins, pending)
+}
+
+pub(crate) fn needs_fence(old: &PinnedFlags, new: &PinnedFlags) -> bool {
+    old.push != new.push
+        || old.confirm != new.confirm
+        || old.regenerable != new.regenerable
+        || old.sync_deps != new.sync_deps
 }

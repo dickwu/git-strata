@@ -449,7 +449,7 @@ impl Sessions<'_> {
                 self.store,
                 &opts,
             )?;
-            let patterns = self.regenerable(&name);
+            let patterns = self.regenerable(&name)?;
             let regen = crate::Regenerable::new(&patterns, cfg);
             let blocking: Vec<&RepoPath> = rebased
                 .conflicts

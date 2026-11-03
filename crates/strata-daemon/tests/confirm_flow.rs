@@ -38,7 +38,7 @@ fn config_relax_not_applied_on_restart() {
     let core = fx.prepare_with(c).unwrap();
     // First start: the loaded config becomes the pins, not a relaxation.
     assert!(!pending(&core));
-    assert_eq!(core.pinned(&repo_name("tool")).unwrap(), PinnedFlags { deploy_on_push: true, confirm: true, push: true, sync_deps: Some(SyncDeps::Apply), ..Default::default() });
+    assert_eq!(current_pin(&core, &repo_name("tool")), PinnedFlags { deploy_on_push: true, confirm: true, push: true, sync_deps: Some(SyncDeps::Apply), ..Default::default() });
     core.close().unwrap();
     let before = pins_bytes(&fx);
 
@@ -46,7 +46,7 @@ fn config_relax_not_applied_on_restart() {
     set_flags(&mut fx, false, true, true);
     for _ in 0..2 {
         let core = fx.prepare_with(fx.confirmer(vec![Verdict::pass()]).0).unwrap();
-        let f = core.pinned(&repo_name("tool")).unwrap();
+        let f = current_pin(&core, &repo_name("tool"));
         assert!(f.deploy_on_push, "relaxation not applied");
         assert!(confirm_flow::needs_confirm(&f), "a push still needs confirming");
         assert!(core.config.repos[&repo_name("tool")].needs_human_confirm());
@@ -69,7 +69,7 @@ fn config_relax_does_not_prompt_on_file_change() {
     set_flags(&mut fx, false, true, true);
     let (c, log2, _) = fx.confirmer(vec![]);
     let core = fx.prepare_with(c).unwrap();
-    assert!(core.pinned(&repo_name("tool")).unwrap().confirm);
+    assert!(current_pin(&core, &repo_name("tool")).confirm);
     assert!(!pending(&core));
     core.close().unwrap();
     let text = String::from_utf8(pins_bytes(&fx)).unwrap();
@@ -80,7 +80,7 @@ fn config_relax_does_not_prompt_on_file_change() {
     set_flags(&mut fx, false, true, false);
     let (c, log3, _) = fx.confirmer(vec![]);
     let core = fx.prepare_with(c).unwrap();
-    assert!(!core.pinned(&repo_name("tool")).unwrap().push);
+    assert!(!current_pin(&core, &repo_name("tool")).push);
     core.close().unwrap();
 
     // Relaxing every field: only pending, never a prompt.
@@ -88,7 +88,7 @@ fn config_relax_does_not_prompt_on_file_change() {
     let (c, log4, _) = fx.confirmer(vec![]);
     let core = fx.prepare_with(c).unwrap();
     assert!(pending(&core));
-    assert_eq!(core.pinned(&repo_name("tool")).unwrap(), PinnedFlags { deploy_on_push: false, confirm: true, push: false, sync_deps: Some(SyncDeps::Apply), ..Default::default() });
+    assert_eq!(current_pin(&core, &repo_name("tool")), PinnedFlags { deploy_on_push: false, confirm: true, push: false, sync_deps: Some(SyncDeps::Apply), ..Default::default() });
     core.close().unwrap();
     for l in [log, log2, log3, log4] {
         assert!(l.shown().is_empty());
@@ -139,7 +139,7 @@ fn config_relax_writes_pin_after_validate() {
     assert_eq!(*shown_between.borrow(), 1, "require ran first");
     assert_eq!(seen_between.borrow().as_deref(), Some(pinned_before.as_slice()), "not written before validate");
     assert_ne!(pins_bytes(&fx), pinned_before);
-    assert!(!core.pinned(&repo_name("tool")).unwrap().deploy_on_push);
+    assert!(!current_pin(&core, &repo_name("tool")).deploy_on_push);
     assert!(!pending(&core));
     assert!(!log.shown()[0].is_empty());
     // Nothing left to relax: InvalidInput not_relaxed, no prompt.
@@ -154,7 +154,7 @@ fn config_relax_writes_pin_after_validate() {
 
     // The relaxation survives a restart and is no longer pending.
     let core = fx.prepare().unwrap();
-    assert!(!core.pinned(&repo_name("tool")).unwrap().deploy_on_push);
+    assert!(!current_pin(&core, &repo_name("tool")).deploy_on_push);
     assert!(!pending(&core));
     core.close().unwrap();
 
@@ -174,7 +174,7 @@ fn prompt_holds_no_queue_or_repo_lock() {
     let (c, log, _) = fx.confirmer(vec![Verdict::Hang]);
     let core = fx.prepare_with(c).unwrap();
     let d = strata_daemon::startup::Daemon::start(&core).unwrap();
-    let sid = d.sessions.new(None, &[repo_name("tool")]).unwrap().manifest.id;
+    let sid = { let _catalog = core.admit(); d.sessions.new(None, &[repo_name("tool")]).unwrap().manifest.id };
     std::thread::scope(|s| {
         let h = s.spawn(|| core.config_relax(&repo_name("tool")));
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -223,19 +223,38 @@ fn daemon_never_returns_not_tty() {
 
 #[test]
 fn install_env_path_is_d1() {
-    assert_eq!(DEFAULT_PATH, "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    assert_eq!(
+        DEFAULT_PATH,
+        "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    );
     // The production layout (under a temp HOME) installs with D1.
     let fx = Dfx::new();
     let home = fx.sb.path("prodhome");
     let mut opts = strata_daemon::startup::Options::for_home(&home);
     let d1 = format!("{}/.bun/bin:{DEFAULT_PATH}", home.display());
     assert_eq!(opts.install_path, d1);
-    assert_eq!(opts.config_dir, home.join("Library/Application Support/git-strata"));
+    assert_eq!(
+        opts.config_dir,
+        home.join("Library/Application Support/git-strata")
+    );
     fs::create_dir_all(&opts.config_dir).unwrap();
     fs::copy(fx.config_dir.join("config.toml"), &opts.config_file).unwrap();
     opts.socket = fx.socket();
-    let env = fx.sb.git_env();
-    let core = strata_daemon::startup::prepare(opts, fx.confirmer(vec![]).0, &move |p: &Path| strata_gitio::Git::open_with_env(p, &env)).unwrap();
+    let env: Vec<(String, Option<std::ffi::OsString>)> = fx
+        .sb
+        .git_env()
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.map(|v| v.to_os_string())))
+        .collect();
+    let core = strata_daemon::startup::prepare(opts, fx.confirmer(vec![]).0, &move |p: &Path| {
+        strata_gitio::Git::open_with_env(
+            p,
+            &env.iter()
+                .map(|(k, v)| (k.as_str(), v.as_deref()))
+                .collect::<Vec<_>>(),
+        )
+    })
+    .unwrap();
     assert_eq!(core.env.path, d1);
     core.close().unwrap();
 }
@@ -306,13 +325,13 @@ fn missing_pins_file_means_needs_confirmation() {
     set_flags(&mut fx, false, false, true);
     let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
     let core = fx.prepare_unseeded(c).unwrap();
-    let f = core.pinned(&repo_name("tool")).unwrap();
+    let f = current_pin(&core, &repo_name("tool"));
     assert_eq!(f, PinnedFlags { deploy_on_push: false, confirm: true, push: true, sync_deps: Some(SyncDeps::Confirm), ..Default::default() });
     assert!(pending(&core), "the looser config waits for config relax");
     assert!(log.shown().is_empty(), "startup never prompts");
     // Only a confirmed relax adopts it.
     core.config_relax(&repo_name("tool")).unwrap();
-    assert!(!core.pinned(&repo_name("tool")).unwrap().confirm);
+    assert!(!current_pin(&core, &repo_name("tool")).confirm);
     assert_eq!(log.shown().len(), 1);
     core.close().unwrap();
 }
@@ -324,11 +343,11 @@ fn deleted_pins_file_does_not_loosen() {
     let mut fx = Dfx::new();
     set_flags(&mut fx, true, true, true);
     fx.prepare().unwrap().close().unwrap();
-    assert!(fx.prepare().unwrap().pinned(&repo_name("tool")).unwrap().confirm);
+    assert!(current_pin(&fx.prepare().unwrap(), &repo_name("tool")).confirm);
     fs::remove_file(strata_daemon::pins_path(&fx.config_dir)).unwrap();
     set_flags(&mut fx, false, false, true);
     let core = fx.prepare_unseeded(fx.confirmer(vec![]).0).unwrap();
-    assert!(confirm_flow::needs_confirm(&core.pinned(&repo_name("tool")).unwrap()));
+    assert!(confirm_flow::needs_confirm(&current_pin(&core, &repo_name("tool"))));
     assert!(core.config.repos[&repo_name("tool")].needs_human_confirm());
     assert!(pending(&core));
     core.close().unwrap();
@@ -350,7 +369,7 @@ fn renamed_repo_does_not_reset_the_pin() {
     fx.config.repos.insert(repo_name("tool2"), rc);
     fx.write_config();
     let core = fx.prepare().unwrap();
-    let f = core.pinned(&repo_name("tool2")).unwrap();
+    let f = current_pin(&core, &repo_name("tool2"));
     assert!(f.confirm, "renamed repo is gated");
     assert!(core.config.repos[&repo_name("tool2")].needs_human_confirm());
     assert!(core.warnings.snapshot().contains(&DaemonWarning::ConfigRelaxPending { repo: repo_name("tool2") }));
@@ -370,7 +389,7 @@ fn v(list: &[&str]) -> Vec<String> {
 }
 
 fn pinned_regen(core: &strata_daemon::startup::Core) -> Vec<String> {
-    core.pinned(&repo_name("tool")).unwrap().regenerable
+    current_pin(core, &repo_name("tool")).regenerable
 }
 
 #[test]
@@ -472,9 +491,9 @@ fn relax_reloads_regenerable_without_restart() {
     let (c, _log, _) = fx.confirmer(vec![Verdict::pass()]);
     let core = fx.prepare_with(c).unwrap();
     let d = strata_daemon::startup::Daemon::start(&core).unwrap();
-    assert!(d.sessions.regenerable(&repo_name("tool")).is_empty());
+    assert!({ let _catalog = core.admit(); d.sessions.regenerable(&repo_name("tool")).unwrap().is_empty() });
     d.config_relax(&repo_name("tool")).unwrap();
-    assert_eq!(d.sessions.regenerable(&repo_name("tool")), v(&["gen/**"]));
+    assert_eq!({ let _catalog = core.admit(); d.sessions.regenerable(&repo_name("tool")).unwrap() }, v(&["gen/**"]));
     assert!(!pending(&core));
     drop(d);
     core.close().unwrap();
@@ -490,12 +509,12 @@ fn pin_relax_needed_for_confirm_to_apply() {
     fx.write_config();
     let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
     let core = fx.prepare_with(c).unwrap();
-    assert_eq!(core.effective_sync_deps(&repo_name("tool")), SyncDeps::Confirm);
+    assert_eq!(current_sync(&core, &repo_name("tool")), SyncDeps::Confirm);
     assert_eq!(core.config.repos[&repo_name("tool")].sync.deps, SyncDeps::Confirm);
     assert!(pending(&core));
     assert!(log.shown().is_empty());
     core.config_relax(&repo_name("tool")).unwrap();
-    assert_eq!(core.effective_sync_deps(&repo_name("tool")), SyncDeps::Apply);
+    assert_eq!(current_sync(&core, &repo_name("tool")), SyncDeps::Apply);
     assert!(!pending(&core));
     assert_eq!(log.shown().len(), 1);
     core.close().unwrap();
@@ -504,7 +523,7 @@ fn pin_relax_needed_for_confirm_to_apply() {
     fx.write_config();
     let (c, log, _) = fx.confirmer(vec![]);
     let core = fx.prepare_with(c).unwrap();
-    assert_eq!(core.effective_sync_deps(&repo_name("tool")), SyncDeps::Confirm);
+    assert_eq!(current_sync(&core, &repo_name("tool")), SyncDeps::Confirm);
     assert!(!pending(&core));
     assert!(log.shown().is_empty());
     core.close().unwrap();
@@ -522,7 +541,7 @@ fn missing_sync_deps_field_pins_config_value() {
         value["repos"]["tool"].as_object_mut().unwrap().remove("sync_deps");
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         let core = fx.prepare().unwrap();
-        assert_eq!(core.effective_sync_deps(&repo_name("tool")), mode);
+        assert_eq!(current_sync(&core, &repo_name("tool")), mode);
         assert!(!pending(&core));
         core.close().unwrap();
         let written: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
@@ -536,11 +555,11 @@ fn new_repo_without_entry_is_confirm_until_relax() {
     fs::write(strata_daemon::pins_path(&fx.config_dir), r#"{"repos":{}}"#).unwrap();
     let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
     let core = fx.prepare_unseeded(c).unwrap();
-    assert_eq!(core.effective_sync_deps(&repo_name("tool")), SyncDeps::Confirm);
+    assert_eq!(current_sync(&core, &repo_name("tool")), SyncDeps::Confirm);
     assert!(pending(&core));
     assert!(log.shown().is_empty());
     core.config_relax(&repo_name("tool")).unwrap();
-    assert_eq!(core.effective_sync_deps(&repo_name("tool")), SyncDeps::Apply);
+    assert_eq!(current_sync(&core, &repo_name("tool")), SyncDeps::Apply);
     core.close().unwrap();
 }
 
@@ -549,7 +568,7 @@ fn missing_pins_file_fails_closed_to_confirm() {
     let fx = Dfx::new();
     let (c, log, _) = fx.confirmer(vec![]);
     let core = fx.prepare_unseeded(c).unwrap();
-    assert_eq!(core.effective_sync_deps(&repo_name("tool")), SyncDeps::Confirm);
+    assert_eq!(current_sync(&core, &repo_name("tool")), SyncDeps::Confirm);
     assert!(pending(&core));
     assert!(log.shown().is_empty());
     core.close().unwrap();
@@ -576,4 +595,12 @@ fn sync_deps_does_not_change_publish_confirmation() {
         let flags = PinnedFlags { confirm: false, sync_deps: Some(mode), ..Default::default() };
         assert!(!confirm_flow::needs_confirm(&flags));
     }
+}
+
+
+fn current_pin(core: &strata_daemon::startup::Core, repo: &strata_types::RepoName) -> PinnedFlags {
+    let _catalog = core.admit(); core.pinned(repo).unwrap()
+}
+fn current_sync(core: &strata_daemon::startup::Core, repo: &strata_types::RepoName) -> SyncDeps {
+    let _catalog = core.admit(); core.effective_sync_deps(repo)
 }

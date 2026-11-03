@@ -20,7 +20,11 @@ use crate::{BASE_STAGING_DIR, Result, Sessions};
 pub enum Leftover {
     /// A base staging directory a stopped process (or a failed retirement)
     /// left, with gitio's export temp directories in it.
-    BaseStaging { repo: RepoName, path: PathBuf, export_temps: Vec<PathBuf> },
+    BaseStaging {
+        repo: RepoName,
+        path: PathBuf,
+        export_temps: Vec<PathBuf>,
+    },
     /// rm-followups R3: `sessions/<sid>` or `sessions/.repos/<sid>` of a
     /// session that is Removed or has no row (R1 moves it to trash).
     RemovedSession { session: SessionId, path: PathBuf },
@@ -77,7 +81,7 @@ impl Sessions<'_> {
     pub fn leftovers(&self) -> Result<Vec<Leftover>> {
         let root = &self.config.paths.root;
         let mut out = Vec::new();
-        for repo in self.config.repos.keys() {
+        for repo in self.configuration()?.repos.keys() {
             for (rel, kind) in self.staging_entries(repo)? {
                 let path = root.join(rel.as_str());
                 if self.is_live_staging(&path) {
@@ -103,7 +107,11 @@ impl Sessions<'_> {
                         }
                     }
                 }
-                out.push(Leftover::BaseStaging { repo: repo.clone(), path, export_temps });
+                out.push(Leftover::BaseStaging {
+                    repo: repo.clone(),
+                    path,
+                    export_temps,
+                });
             }
         }
         // rm-followups R3: directories of removed sessions.
@@ -130,11 +138,22 @@ impl Sessions<'_> {
             let kept = kept_dirs(root, &id, rec.manifest.repos.keys().cloned());
             let error = interrupted(op, &id, &phase, &kept);
             let now = SystemTime::now();
-            let scene = Scene { op, session: id.clone(), repo: None, phase, at: now, kept, error };
+            let scene = Scene {
+                op,
+                session: id.clone(),
+                repo: None,
+                phase,
+                at: now,
+                kept,
+                error,
+            };
             let v = match serde_json::to_value(&scene) {
                 Ok(v) => v,
                 Err(e) => {
-                    rep.errors.push(StrataError::new(Code::Unknown, format!("recover {id}: scene: {e}")));
+                    rep.errors.push(StrataError::new(
+                        Code::Unknown,
+                        format!("recover {id}: scene: {e}"),
+                    ));
                     continue;
                 }
             };
@@ -173,7 +192,11 @@ impl Sessions<'_> {
             if lifecycle == Lifecycle::Removed {
                 continue;
             }
-            let r = IntentRef { session: i.session.clone(), repo: i.repo.clone(), n: i.n };
+            let r = IntentRef {
+                session: i.session.clone(),
+                repo: i.repo.clone(),
+                n: i.n,
+            };
             match i.state {
                 MoveState::Preparing => {
                     if lifecycle == Lifecycle::Active {
@@ -226,8 +249,10 @@ impl Sessions<'_> {
                     let v = match serde_json::to_value(&scene) {
                         Ok(v) => v,
                         Err(e) => {
-                            rep.errors
-                                .push(StrataError::new(Code::Unknown, format!("recover {}: scene: {e}", i.session)));
+                            rep.errors.push(StrataError::new(
+                                Code::Unknown,
+                                format!("recover {}: scene: {e}", i.session),
+                            ));
                             continue;
                         }
                     };
@@ -241,7 +266,7 @@ impl Sessions<'_> {
         }
 
         // Step 3: every base staging entry goes to the trash.
-        for repo in self.config.repos.keys() {
+        for repo in self.configuration()?.repos.keys() {
             let entries = match self.staging_entries(repo) {
                 Ok(v) => v,
                 Err(e) => {
@@ -265,7 +290,8 @@ impl Sessions<'_> {
         // Step 4 (rm-followups R1 (i)): orphan session directories, after
         // step 1, so Creating and Removing rows are Unknown and kept.
         let sweep = self.sweep_orphans(None);
-        rep.orphans_retired.extend(sweep.retired.into_iter().map(|o| o.path));
+        rep.orphans_retired
+            .extend(sweep.retired.into_iter().map(|o| o.path));
         rep.errors.extend(sweep.warnings);
         Ok(rep)
     }

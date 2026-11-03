@@ -95,6 +95,7 @@ fn wait_flag_until(session: &SessionId, deadline: Instant, mut flag: impl FnMut(
 /// lets `f` start late. That expiry is `Busy` `lock_wait` with
 /// `deadline: true`; nothing is written. Once `f` runs it is not bounded.
 pub fn with_queue_not_publishing<T>(core: &Core, session: &SessionId, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _catalog = core.admit();
     guarded_until(&core.locks, session, Instant::now() + core.locks.wait(), || publishing(core, session), f)
 }
 
@@ -143,6 +144,7 @@ pub fn resolve_move(
     resolve: &dyn Fn(&SessionId, &RepoName, MoveResolution) -> Result<ResolutionReport>,
     after_accept: &mut dyn FnMut(),
 ) -> Result<ResolutionReport> {
+    let _catalog = core.admit();
     with_queue_not_publishing(core, session, || {
         crate::handlers::writing();
         let r = resolve(session, repo, choice)?;
@@ -493,6 +495,7 @@ pub(crate) fn settle_push_scenes(core: &Core, git: &Git, repo: &RepoName, branch
 /// directory under `<root>/daemon/observe/`, removed afterwards. Takes the
 /// repo lock itself (through deps).
 pub fn observe_tip(core: &Core, repo: &RepoName, tip: &CommitOid) -> Result<()> {
+    let _catalog = core.admit();
     let git = core.git(repo)?;
     let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let dir = core.config.paths.root.join("daemon/observe").join(format!("{}-{stamp}", std::process::id()));
@@ -526,6 +529,7 @@ pub fn chain_resolve(
     shown: Option<&CommitOid>,
     observe: &mut dyn FnMut(&CommitOid) -> Result<()>,
 ) -> Result<ChainResolved> {
+    let _catalog = core.admit();
     let cfg = core.repo_cfg(repo)?;
     let git = core.git(repo)?;
     let branch = cfg.publish.branch.clone();

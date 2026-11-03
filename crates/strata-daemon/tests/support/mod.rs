@@ -341,7 +341,9 @@ use strata_confirm::Confirmer;
 use strata_confirm::seams::{FakeClock, PromptLog, ScriptedAuth, Verdict};
 use strata_daemon::startup::{self, Core, Options};
 use strata_overlay::{Base, WorkspaceRef};
-use strata_types::{Batch, Checkpoint, CheckpointId, CheckpointReason, Config, Paths, ReleaseGroup, SessionId};
+use strata_types::{
+    Batch, Checkpoint, CheckpointId, CheckpointReason, Config, Paths, ReleaseGroup, SessionId,
+};
 
 /// A sandbox with projects, bare origins, a config dir and a socket dir.
 pub struct Dfx {
@@ -406,8 +408,30 @@ impl Dfx {
 
     /// One start without seeding pins.json (the "no pin" cases).
     pub fn prepare_unseeded(&self, c: Confirmer) -> strata_daemon::Result<Core> {
-        let env = self.sb.git_env();
-        startup::prepare(self.options(), c, &move |p: &Path| Git::open_with_env(p, &env))
+        // Same fork/exec descriptor-inheritance grace as prepare_with; preserve
+        // the deliberately absent pins file while waiting for an old fd to close.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let lock = strata_daemon::lock_path(&self.config_dir);
+        while lock.exists() && std::time::Instant::now() < deadline {
+            match startup::InstanceLock::take(&lock) {
+                Err(e) if is_daemon_running(&e) => std::thread::sleep(Duration::from_millis(20)),
+                _ => break,
+            }
+        }
+        let env: Vec<(String, Option<std::ffi::OsString>)> = self
+            .sb
+            .git_env()
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.map(|v| v.to_os_string())))
+            .collect();
+        startup::prepare(self.options(), c, &move |p: &Path| {
+            Git::open_with_env(
+                p,
+                &env.iter()
+                    .map(|(k, v)| (k.as_str(), v.as_deref()))
+                    .collect::<Vec<_>>(),
+            )
+        })
     }
 
     pub fn socket(&self) -> PathBuf {
@@ -425,6 +449,7 @@ impl Dfx {
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
             reconcile_every: self.reconcile_every,
             catch_up_every: self.catch_up_every,
+            config_poll_every: Duration::from_millis(50),
             // Legacy RPC tests control their own fetch/install timelines.
             background_main_sync: false,
         }
@@ -479,8 +504,20 @@ impl Dfx {
 
     pub fn prepare_once(&self, c: Confirmer) -> strata_daemon::Result<Core> {
         self.seed_pins();
-        let env = self.sb.git_env();
-        startup::prepare(self.options(), c, &move |p: &Path| Git::open_with_env(p, &env))
+        let env: Vec<(String, Option<std::ffi::OsString>)> = self
+            .sb
+            .git_env()
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.map(|v| v.to_os_string())))
+            .collect();
+        startup::prepare(self.options(), c, &move |p: &Path| {
+            Git::open_with_env(
+                p,
+                &env.iter()
+                    .map(|(k, v)| (k.as_str(), v.as_deref()))
+                    .collect::<Vec<_>>(),
+            )
+        })
     }
 
     pub fn main(&self, repo: &str) -> PathBuf {

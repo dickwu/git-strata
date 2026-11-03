@@ -19,6 +19,17 @@ thread_local! {
 pub(crate) struct SessionLock<'a>(pub(crate) &'a dyn RepoWriteLock);
 
 impl RepoWriteLock for SessionLock<'_> {
+    fn with_cleanup(
+        &self,
+        repo: &RepoName,
+        f: &mut dyn FnMut() -> strata_deps::Result<()>,
+    ) -> strata_deps::Result<strata_deps::Result<()>> {
+        self.0.with_cleanup(repo, f)
+    }
+    fn check_fence(&self, repos: &[RepoName]) -> strata_deps::Result<()> {
+        self.0.check_fence(repos)
+    }
+
     fn with_write(&self, repo: &RepoName, f: &mut dyn FnMut() -> strata_deps::Result<()>) -> strata_deps::Result<strata_deps::Result<()>> {
         if NO_WAIT.with(Cell::get) {
             self.0.try_write(repo, f)

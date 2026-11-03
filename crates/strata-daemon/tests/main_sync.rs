@@ -11,6 +11,7 @@ use strata_types::{Code, CommitOid, SessionId, StrataError};
 use support::*;
 
 fn session(core: &Core) -> SessionId {
+    let _catalog = core.admit();
     Daemon::start(core)
         .unwrap()
         .sessions

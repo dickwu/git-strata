@@ -97,28 +97,41 @@ impl Core {
     /// default branch's anchor. A failed transaction adds
     /// `AnchorNotAdvanced` and returns the `Unknown`.
     pub fn advance_anchor(&self, repo: &RepoName) -> Result<AnchorStep> {
+        let _catalog = self.admit();
         let git = self.git(repo)?;
         let branch = self.repo_cfg(repo)?.default_branch.clone();
-        let r = self.locks.with_repo(repo, || advance_anchor_locked(git, &branch));
+        let r = self
+            .locks
+            .with_repo(repo, || advance_anchor_locked(git, &branch));
         if let Err(e) = &r
             && e.code == Code::Unknown
             && reason_of(e) == Some("anchor_transaction")
         {
-            self.warnings.add(DaemonWarning::AnchorNotAdvanced { repo: repo.clone() });
+            self.warnings
+                .add(DaemonWarning::AnchorNotAdvanced { repo: repo.clone() });
         }
         if matches!(r, Ok(AnchorStep::Advanced(_))) {
-            self.warnings.remove(|w| matches!(w, DaemonWarning::AnchorNotAdvanced { repo: r } if r == repo));
+            self.warnings
+                .remove(|w| matches!(w, DaemonWarning::AnchorNotAdvanced { repo: r } if r == repo));
         }
         r
     }
 
     /// The `main_tip` of every configured repo (read before a fetch).
     pub fn main_tips(&self) -> Vec<(RepoName, Option<CommitOid>)> {
-        self.config
+        let _catalog = self.admit();
+        self.snapshot()
+            .expect("operation pinned")
+            .config
             .repos
             .iter()
             .map(|(name, cfg)| {
-                let tip = self.gits.get(name).and_then(|g| strata_deps::main_tip(cfg, g).ok().flatten());
+                let tip = self
+                    .snapshot()
+                    .expect("operation pinned")
+                    .gits
+                    .get(name)
+                    .and_then(|g| strata_deps::main_tip(cfg, g).ok().flatten());
                 (name.clone(), tip)
             })
             .collect()
@@ -127,11 +140,11 @@ impl Core {
     /// `deps::observe_main` for the workspace `new` created in `repo`: the
     /// same (tree, head, export) `new` used. Takes the repo lock itself.
     pub fn observe_new(&self, report: &NewReport, repo: &RepoName) -> Result<()> {
-        let ws = report
-            .manifest
-            .repos
-            .get(repo)
-            .ok_or_else(|| StrataError::new(Code::NoSuchRepo, format!("no workspace of {repo}")))?;
+        let _catalog = self.admit();
+        let ws =
+            report.manifest.repos.get(repo).ok_or_else(|| {
+                StrataError::new(Code::NoSuchRepo, format!("no workspace of {repo}"))
+            })?;
         let ctx = strata_deps::Ctx {
             store: &self.store,
             paths: &self.config.paths,
@@ -141,7 +154,13 @@ impl Core {
             env: &self.env,
             locks: &self.locks,
         };
-        strata_deps::observe_main(&ctx, &ws.base.tree, &ws.head, &self.store.base_dir(&ws.base)).map(|_| ())
+        strata_deps::observe_main(
+            &ctx,
+            &ws.base.tree,
+            &ws.head,
+            &self.store.base_dir(&ws.base),
+        )
+        .map(|_| ())
     }
 
     /// §5.7 after `new` returned: per repo of the session, advance the
@@ -155,6 +174,7 @@ impl Core {
         report: &mut NewReport,
         observe: &dyn Fn(&NewReport, &RepoName) -> Result<()>,
     ) -> AfterNew {
+    let _catalog = self.admit();
         let mut out = AfterNew::default();
         let repos: Vec<RepoName> = report.manifest.repos.keys().cloned().collect();
         for repo in &repos {
@@ -193,11 +213,15 @@ impl Core {
     }
 
     pub(crate) fn git(&self, repo: &RepoName) -> Result<&Git> {
-        self.gits.get(repo).ok_or_else(|| StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}")))
+        self.snapshot()?
+            .gits
+            .get(repo)
+            .ok_or_else(|| StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}")))
     }
 
     pub(crate) fn repo_cfg(&self, repo: &RepoName) -> Result<&strata_types::RepoConfig> {
-        self.config
+        self.snapshot()?
+            .config
             .repos
             .get(repo)
             .ok_or_else(|| StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}")))

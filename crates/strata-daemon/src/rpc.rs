@@ -16,7 +16,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use strata_types::{
-    CheckpointId, CheckpointReason, Code, CommitOid, ProposalId, ReleaseGroup, RepoName, RepoPath, SessionId, StrataError,
+    CheckpointId, CheckpointReason, Code, CommitOid, ProposalId, ReleaseGroup, RepoName, RepoPath,
+    SessionId, StrataError,
 };
 
 use crate::{ChainChoice, MAX_FRAME, RpcReject};
@@ -69,6 +70,7 @@ methods! {
     ResolveMove = "resolve_move", ro = false;
     ChainResolve = "chain_resolve", ro = false;
     ConfigRelax = "config_relax", ro = false;
+    ConfigReload = "config_reload", ro = false;
     DaemonStatus = "daemon_status", ro = true;
     Du = "du", ro = true;
     PortsEnsure = "ports_ensure", ro = false;
@@ -359,6 +361,17 @@ pub struct DuParams {
     pub refresh: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyParams {}
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigRelaxParams {
+    pub repo: RepoName,
+    #[serde(default)]
+    pub shown: Option<crate::PinnedFlags>,
+}
+
 /// The typed params of one request.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Params {
@@ -382,7 +395,8 @@ pub enum Params {
     Gc(GcParams),
     ResolveMove(ResolveMoveParams),
     ChainResolve(ChainResolveParams),
-    ConfigRelax(RepoParams),
+    ConfigRelax(ConfigRelaxParams),
+    ConfigReload(EmptyParams),
     DaemonStatus(DaemonStatusParams),
     Du(DuParams),
     PortsEnsure(PortsParams),
@@ -427,6 +441,7 @@ impl Params {
                 Ok(Params::ResolveMove(p))
             }
             Method::ChainResolve => typed(v, Params::ChainResolve),
+            Method::ConfigReload => typed(v, Params::ConfigReload),
             Method::ConfigRelax => typed(v, Params::ConfigRelax),
             Method::DaemonStatus => typed(v, Params::DaemonStatus),
             Method::Du => typed(v, Params::Du),

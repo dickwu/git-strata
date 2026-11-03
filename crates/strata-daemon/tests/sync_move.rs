@@ -66,6 +66,7 @@ fn with_session_quiet(quiet: Option<u64>, f: impl FnOnce(&Dfx, &Daemon<'_>, &Ses
     }
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
+    let _catalog = core.admit();
     let id = d
         .sessions
         .new(None, &[repo_name("tool")])
@@ -698,6 +699,7 @@ fn sync_confirm_and_drift_move_source_only() {
         }
         let core = fx.prepare().unwrap();
         let d = Daemon::start(&core).unwrap();
+    let _catalog = core.admit();
         let s = d
             .sessions
             .new(None, &[repo_name("tool")])
@@ -797,6 +799,7 @@ fn sync_split_repo_not_following() {
     fx.write_config();
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
+    let _catalog = core.admit();
     let s = d
         .sessions
         .new(None, &[repo_name("tool")])
@@ -1106,6 +1109,7 @@ fn legacy_conflicts_acknowledged_on_repo_not_following() {
     fx.write_config();
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
+    let _catalog = core.admit();
     let s = d
         .sessions
         .new(None, &[repo_name("tool")])
@@ -1223,6 +1227,7 @@ fn legacy_conflicts_acknowledged_with_follow_main_false_and_g0_refuses() {
         fx.write_config();
         let core = fx.prepare().unwrap();
         let d = Daemon::start(&core).unwrap();
+    let _catalog = core.admit();
         let s = d
             .sessions
             .new(None, std::slice::from_ref(&rn))
