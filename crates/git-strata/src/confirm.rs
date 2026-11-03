@@ -288,6 +288,9 @@ fn planned_moves(config: &Config, store: &Store, id: ProposalId, only: &[Session
 }
 
 pub fn deps_approve(ctx: &Ctx, id: &str, sessions: &[String]) -> Result<Envelope> {
+    deps_approve_with_cwd(ctx, id, sessions, &crate::args::CwdArgs::default())
+}
+pub fn deps_approve_with_cwd(ctx: &Ctx, id: &str, sessions: &[String], cwd: &crate::args::CwdArgs) -> Result<Envelope> {
     let n = parse_id(id, "proposal id")?;
     require_tty_for("deps approve")?;
     let pid = ProposalId::try_from(n)?;
@@ -324,7 +327,7 @@ pub fn deps_approve(ctx: &Ctx, id: &str, sessions: &[String]) -> Result<Envelope
         "proposal": n,
         "sessions": if only.is_empty() { Value::Null } else { json!(only.iter().map(|s| s.as_str()).collect::<Vec<_>>()) },
     });
-    match ctx.call("deps_approve", params, Kind::Write) {
+    match crate::cwd_guard::deps_call(ctx, "deps_approve", params, cwd) {
         Ok(data) => Ok(Envelope::ok(json!({ "results": data.get("results").cloned().unwrap_or_else(|| json!([])) }))),
         Err(e) => {
             if e.code == Code::NoSuchProposal {

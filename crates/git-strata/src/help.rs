@@ -3,9 +3,8 @@
 //! current code; keep it in step with README.md.
 //!
 //! The confirmation gate lives in ONE place, `gate_text!`, used by the
-//! top-level help and by `push`, `publish`, `rm`, `deps approve`,
-//! `config relax`. Change the rule there (and in README.md "Confirmation
-//! gate") when the gate changes.
+//! `help gate` topic. Command help carries a summary and topic link. Change
+//! the rule there (and in README.md "Confirmation gate") when it changes.
 
 /// The confirmation gate as the code implements it today.
 macro_rules! gate_text {
@@ -73,8 +72,19 @@ macro_rules! push_guard_text {
     };
 }
 
-pub const TOP: &str = concat!(
-    "OUTPUT
+macro_rules! gate_brief {
+    ($when:literal) => {
+        concat!(
+            "CONFIRMATION: ",
+            $when,
+            "\n",
+            "  Without a TTY: NotTty; stop and give the human the exact command.\n",
+            "  No flag or env skips the gate; faking a TTY is a bypass.\n",
+            "  Full rules: git-strata help gate\n"
+        )
+    };
+}
+const OUTPUT: &str = "OUTPUT
   stdout carries exactly one compact JSON line per call:
     {\"ok\":true,\"data\":{...},\"error\":null}
     {\"ok\":false,\"data\":{...},\"error\":{\"code\":\"Busy\",\"message\":\"...\",\"detail\":{\"reason\":\"daemon_down\"}}}
@@ -82,39 +92,13 @@ pub const TOP: &str = concat!(
   partial results, e.g. repos that already published).
   Exit status: 0 iff ok is true, else 1. Branch on error.code, then
   error.detail.reason; never parse message. stderr has human notices only.
-  --help / --version print plain text on stdout, exit 0, no JSON.
+  help / --help / --version print plain text on stdout, exit 0, no JSON.
   session exec, once its command starts, prints no envelope: stdout, stderr
   and the exit status are the command's (failures before that: an envelope).
   Bad arguments: InvalidInput, detail.reason \"unknown_command\" (with
   detail.commands, and detail.group inside deps/daemon/config/session) or \"args\".
-
-PATHS
-  config     ~/Library/Application Support/git-strata/config.toml
-  pins       ~/Library/Application Support/git-strata/pins.json
-  socket     ~/Library/Application Support/git-strata/daemon.sock
-  data root  [paths] root in config.toml (default ~/.strata);
-             workspaces are <root>/sessions/<session-id>/<repo>/
-  Only $HOME moves the first three; there is no flag or env var.
-
-DAEMON
-  Write commands go to the daemon (LaunchAgent com.gwd.git-stratad).
-  Busy with detail.reason daemon_down: tell the human (they run `git-strata
-  daemon start`); retry once it is running. Agents never start/stop it.
-  Without the daemon only these work: status, grep, files, diff, deps list,
-  daemon status, session ports/exec of a workspace that already has its
-  ports (and repeating a --tool-call checkpoint that already exists).
-
-HEADLESS FLOW (no human needed)
-  git-strata daemon status                       # data.running
-  git-strata new PROJ-1 --repo web --repo api    # data.manifest.id, .repos.<repo>.path
-  cd <data.manifest.repos.web.path>              # edit files there
-  git-strata add --repo front                    # only if another repo is needed later
-  git-strata checkpoint -m \"what changed\"
-  git-strata diff
-  git-strata publish --from <id>:src/a.ts --from <id>:src/b.ts
-  git-strata rm --session <id>
-
-ERRORS (code -> what an agent does)
+";
+const ERRORS: &str = "ERRORS (code -> what an agent does)
   Busy daemon_down   tell the human, retry later   Busy other       wait, retry later
   NotTty             hand the command to a human   NotConfirmed     report; human reruns
                                                    (plan_changed: rerun it yourself once)
@@ -149,25 +133,57 @@ ERRORS (code -> what an agent does)
   Corrupt            stop; tell the human
   PortInUse foreign  run detail.fix (session ports --reassign), then rerun
   PortInUse already_running  this workspace's server is up: reuse it
-
-SYNC ACKNOWLEDGEMENT
+";
+const HEADLESS: &str = "HEADLESS FLOW (no human needed)
+  git-strata daemon status                       # data.running
+  git-strata new PROJ-1 --repo web --repo api    # data.manifest.id, .repos.<repo>.path
+  cd <data.manifest.repos.web.path>              # edit files there
+  git-strata add --repo front                    # only if another repo is needed later
+  git-strata checkpoint -m \"what changed\"
+  git-strata diff
+  cd ~
+  git-strata publish --from <id>:src/a.ts --from <id>:src/b.ts
+  git-strata rm --session <id>
+";
+const SYNC_ACK: &str = "SYNC ACKNOWLEDGEMENT
   Legacy-only: every named path is in ws.conflicts, none in the saved report.
   sync --repo R --resolved PATH (or --keep PATH) clears only those markers,
   even behind/diverged or with a separate report. No binding or move; the
   separate report remains. Non-following repos also allow named acknowledgement.
   Reply: {result:conflicts_cleared, following:true|false, resolved:[...], kept:[...]}
   Mixing legacy-only and report paths in a bound call is resolved_unrelated;
-  use two calls. Partial conflict choices are not saved for automatic reuse.
+  use two calls. Partial conflict choices are not saved for automatic reuse.";
 
-",
-    gate_text!(),
-    "
-",
-    push_guard_text!(),
-    "
-Per-command detail: git-strata <command> --help. Full reference: README.md.
-"
-);
+pub const TOP: &str = "OUTPUT
+  One compact JSON envelope on stdout; human notices on stderr. Exit 0 on
+  success, 1 on error. Full contract: git-strata help output
+
+PATHS
+  Config/pins/socket: ~/Library/Application Support/git-strata/
+  Data root: [paths] root in config.toml (default ~/.strata).
+  Workspaces: <root>/sessions/<session-id>/<repo>/
+
+DAEMON
+  Busy daemon_down: tell the human; retry after they start the daemon.
+  Agents never start/stop it. Local reads remain available when it is down.
+
+HEADLESS FLOW
+  new --repo R; edit; checkpoint -m TEXT; diff; publish --from S:PATH.
+  rm --session S after publishing. Full example: git-strata help headless
+  Sync from outside: cd ~ && git-strata sync --session S; then cd back.
+  Do not use git push. Full rules: git-strata help push-guards
+
+ERRORS
+  Busy: back off. NotTty/NotConfirmed: give the command to the human.
+  Conflict: resolve reported paths. Dirty: publish before rm.
+  OpenFiles: cd out or stop your own processes, then retry.
+  Unknown: do not retry, gc, or rm; inspect status and tell the human.
+  Corrupt: stop and tell the human. Full table: git-strata help errors
+
+TOPICS
+  git-strata help gate | push-guards | errors | errors-publish | output | headless
+  git-strata help sync-ack; git-strata help <command...>
+";
 
 pub const NEW: &str = "Create a session of workspaces (APFS clones of base snapshots).
 
@@ -235,7 +251,24 @@ ERRORS
   under the session root (`git-strata rm` of the session retires them).
 ";
 
-pub const STATUS_AFTER: &str = "EXAMPLES
+pub const SYNC_AFTER: &str = "Run moving sync outside the workspace: cd ~ && git-strata sync --session S.
+Then cd back to the workspace path. --check and --hook may run inside.
+Caller cwd is refused even when up to date, non-following or acknowledging
+conflicts. --allow-cwd accepts your own stale cwd; --allow-cwd-holders accepts
+others. Neither bypasses dependency-file or mapped-file protections.
+
+Default total deadline: 600 s (client policy; a cold install can take longer).
+--timeout SECS overrides GIT_STRATA_TIMEOUT; 0 means unlimited. --hook keeps
+its five-second budget and ignores both. --progress writes stderr notes.
+Unknown client_timeout: the write may still run; inspect status and do not
+retry, gc, or rm. Busy client_timeout: nothing changed; back off before retry.
+";
+
+pub const STATUS_AFTER: &str = "Default total deadline: 30 s, or 120 s with --all. --timeout SECS overrides
+GIT_STRATA_TIMEOUT; 0 means unlimited. Busy client_timeout: back off before
+retrying; it never triggers a local fallback. --progress writes stderr notes.
+
+EXAMPLES
   git-strata status                  # the session of the cwd
   git-strata status --session PROJ-123
   git-strata status --all            # {sessions:[...]}
@@ -306,14 +339,16 @@ repos is InvalidInput reason repo with detail.candidates; pass --repo.
 Works without the daemon. Two modes together is InvalidInput diff_mode.
 ";
 
-pub const DEPS_AFTER: &str = "EXAMPLES
+pub const DEPS_AFTER: &str = concat!(
+    "EXAMPLES
   git-strata deps propose --switch     # after changing install inputs; moves only this session
   git-strata deps list
   git-strata deps approve <ID>         # HUMAN ONLY (TTY + prompt)
 
 propose --switch: check data.switched.kind; skipped with code OpenFiles means a
-process holds files in the deps dir: stop it (only if you started it), rerun.
-";
+process holds files in the deps dir: stop it (only if you started it), rerun.\n",
+    gate_brief!("deps approve always needs a TTY + Touch ID; propose does not.")
+);
 
 pub const PUBLISH: &str = "Publish checkpointed session content as commits on each repo's publish branch.
 
@@ -375,32 +410,11 @@ CONFLICT LOOP (no human needed unless reason is assigned)
      data.already_published and are not committed again.
   4. Repeat while another repo conflicts.
 
-OTHER ERRORS
-  NoMatch            a --from path is not checkpointed: checkpoint, rerun
-  CheckFailed        the repo's check failed in staging: fix, rerun
-  PushRefused        the commit landed (data.commits) but the remote refused
-  Unknown push_unknown  push outcome unknown: do not retry; tell the human
-  Busy publish_unknown  an earlier publish of the repo is Unknown. It clears
-                     by itself once origin has that commit (checked on each
-                     publish); the human can `git-strata push REPO` first
-  InvalidInput chain_rewound / chain_diverged  origin moved under an unpushed
-                     chain. diverged on a repo without confirmation: run
-                     `git-strata push REPO` (it replays), then rerun publish.
-                     Otherwise the human runs `git-strata chain`
-  NotConfirmed plan_changed  nothing written: rerun once yourself
-  InvalidInput siblings_missing  the repo's checks need sibling repos
-                     (check_siblings) that could not be supplied; nothing
-                     written. Run detail.fix (git-strata add --session S
-                     --repo R ...) or follow detail.missing[].next, then rerun
-  Busy / Unknown with detail.sibling  preparing that sibling (fetch, anchor)
-                     was busy or unknown; Busy: retry later; Unknown: tell
-                     the human
+Other errors: git-strata help errors-publish
 
 ",
-    gate_text!(),
-    "
-",
-    push_guard_text!()
+    gate_brief!("pushing batch repos that need confirmation and have work to commit (TTY + Touch ID)."),
+    "\nDo not use git push. Full rules: git-strata help push-guards\n"
 );
 
 pub const PUSH: &str = "Push a repo's publish chain to origin.
@@ -442,10 +456,8 @@ ORIGIN MOVED (repos that need no confirmation)
   only a chain that leads origin; diverged is NoCommit, the human runs chain.
 
 ",
-    gate_text!(),
-    "
-",
-    push_guard_text!()
+    gate_brief!("when this repo needs confirmation (TTY + Touch ID)."),
+    "\nDo not use git push. Full rules: git-strata help push-guards\n"
 );
 
 pub const ASSIGN_AFTER: &str = "EXAMPLE
@@ -479,7 +491,7 @@ daemon finishes the rm on its own (it may still be refused); check
 `git-strata status <sid>`.
 
 ",
-    gate_text!()
+    gate_brief!("rm --discard always needs a TTY + Touch ID.")
 );
 
 pub const GC_AFTER: &str = "Removes old bases and leftovers of removed sessions, and empties
@@ -559,19 +571,23 @@ message names the `launchctl bootout` the human can run), Unknown launchctl
 (launchctl failed or timed out).
 ";
 
-pub const RESOLVE_AFTER: &str = "HUMAN ONLY. Exactly one of --abandon / --accept (none: InvalidInput
+pub const RESOLVE_AFTER: &str = concat!(
+    "HUMAN ONLY. Exactly one of --abandon / --accept (none: InvalidInput
 no_choice; both: both_choices). Needs a TTY; on a non-TTY it is NotTty.
 Agents: when status shows health Unknown, hand
   git-strata resolve --session S --repo R --abandon|--accept
-to the human.
-";
+to the human.\n",
+    gate_brief!("resolve always needs a TTY.")
+);
 
-pub const CHAIN_AFTER: &str = "HUMAN ONLY. Exactly one of --accept-origin replay|drop / --restore.
+pub const CHAIN_AFTER: &str = concat!(
+    "HUMAN ONLY. Exactly one of --accept-origin replay|drop / --restore.
 Needs a TTY; --restore pushes and may also prompt. publish errors
 InvalidInput chain_rewound / chain_diverged mean the human must run this,
 except chain_diverged on a repo that needs no confirmation: `git-strata push
-REPO` replays it headless (push --help, ORIGIN MOVED).
-";
+REPO` replays it headless (push --help, ORIGIN MOVED).\n",
+    gate_brief!("chain always needs a TTY; restore may also prompt.")
+);
 
 pub const CONFIG_AFTER: &str = concat!(
     "EXAMPLE (human only)
@@ -582,7 +598,7 @@ ConfigRelaxPending. InvalidInput not_relaxed: config is not looser than the
 pin (nothing to do). NoSuchRepo: unknown repo.
 
 ",
-    gate_text!()
+    gate_brief!("config relax always needs a TTY + Touch ID.")
 );
 
 pub const SESSION_AFTER: &str = "Every session workspace (not the main checkout) leases a block of 4 TCP ports
@@ -671,3 +687,73 @@ EXAMPLES
   git-strata session exec --tauri -- bun run tauri:dev
   git-strata session exec --session PROJ-1 --repo front -- npm run dev
 ";
+
+const ERRORS_PUBLISH: &str = "OTHER ERRORS
+  NoMatch            a --from path is not checkpointed: checkpoint, rerun
+  CheckFailed        the repo's check failed in staging: fix, rerun
+  PushRefused        the commit landed (data.commits) but the remote refused
+  Unknown push_unknown  push outcome unknown: do not retry; tell the human
+  Busy publish_unknown  an earlier publish of the repo is Unknown. It clears
+                     by itself once origin has that commit (checked on each
+                     publish); the human can `git-strata push REPO` first
+  InvalidInput chain_rewound / chain_diverged  origin moved under an unpushed
+                     chain. diverged on a repo without confirmation: run
+                     `git-strata push REPO` (it replays), then rerun publish.
+                     Otherwise the human runs `git-strata chain`
+  NotConfirmed plan_changed  nothing written: rerun once yourself
+  InvalidInput siblings_missing  the repo's checks need sibling repos
+                     (check_siblings) that could not be supplied; nothing
+                     written. Run detail.fix (git-strata add --session S
+                     --repo R ...) or follow detail.missing[].next, then rerun
+  Busy / Unknown with detail.sibling  preparing that sibling (fetch, anchor)
+                     was busy or unknown; Busy: retry later; Unknown: tell
+                     the human";
+const TOPICS: &[(&str, &str)] = &[
+    ("gate", gate_text!()),
+    ("push-guards", push_guard_text!()),
+    ("errors", ERRORS),
+    ("errors-publish", ERRORS_PUBLISH),
+    ("output", OUTPUT),
+    ("headless", HEADLESS),
+    ("sync-ack", SYNC_ACK),
+];
+
+pub fn render(words: &[String]) -> crate::Result<String> {
+    use clap::CommandFactory;
+    let mut command = crate::args::Cli::command();
+    command.build();
+    if words.is_empty() {
+        return Ok(format!(
+            "Usage: git-strata help [TOPIC | COMMAND ...]\n\nTopics: {}\nCommands: {}\n\n<command> --help describes the installed version.\n",
+            TOPICS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", "),
+            crate::args::top_commands().join(", ")
+        ));
+    }
+    if words.len() == 1
+        && let Some((_, text)) = TOPICS.iter().find(|(name, _)| *name == words[0])
+    {
+        return Ok((*text).to_string());
+    }
+    for word in words {
+        let Some(next) = command.find_subcommand(word).cloned() else {
+            return Err(strata_types::StrataError::new(
+                strata_types::Code::InvalidInput,
+                format!("unknown help topic or command: {}", words.join(" ")),
+            )
+            .with_detail(
+                serde_json::json!({"reason":"help_topic", "topics":TOPICS.iter().map(|(n,_)|n).collect::<Vec<_>>(),
+                    "commands":command.get_subcommands().map(|c|c.get_name()).collect::<Vec<_>>() }),
+            ));
+        };
+        command = next;
+    }
+    // Clap chooses short layout for commands with no long-only text. Use
+    // its --help selection as well as its built command path for byte parity.
+    let mut argv = vec!["git-strata".to_string()];
+    argv.extend_from_slice(words);
+    argv.push("--help".to_string());
+    match crate::args::Cli::command().try_get_matches_from(argv) {
+        Err(e) => Ok(e.to_string()),
+        Ok(_) => Ok(command.render_long_help().to_string()),
+    }
+}

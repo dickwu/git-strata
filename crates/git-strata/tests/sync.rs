@@ -293,3 +293,19 @@ fn hook_deps_conflicts_and_following_rules() {
     v["repos"]["tool"]["following"] = json!(false);
     assert!(reason(&v).is_none());
 }
+
+#[test]
+fn hook_ignores_regular_timeout_flag_and_environment() {
+    let home=Home::new();
+    let _fake=FakeDaemon::start(&home.socket(),|q| {
+        std::thread::sleep(Duration::from_millis(150));
+        json!({"id":q["id"],"ok":true,"data":data(Some(3),true)})
+    });
+    let mut child=home.cmd(&["sync","--check","--hook","--timeout","0.001"])
+        .env("GIT_STRATA_TIMEOUT","invalid-and-ignored")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    writeln!(child.stdin.take().unwrap(),"{}",json!({"cwd":home.path(),"stop_hook_active":false})).unwrap();
+    let result:Run=child.wait_with_output().unwrap().into();
+    assert_eq!(result.code,0);assert!(result.stderr.is_empty());
+    let value:Value=serde_json::from_str(&result.stdout).unwrap();assert_eq!(value["decision"],"block");
+}

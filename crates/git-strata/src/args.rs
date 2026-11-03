@@ -32,7 +32,13 @@ pub struct Select {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
+    /// Read a help topic or a command's installed help
+    Help {
+        #[arg(value_name = "TOPIC|COMMAND")]
+        topic: Vec<String>,
+    },
     /// Merge main into the current session, or inspect local upstream state
+    #[command(after_long_help = crate::help::SYNC_AFTER)]
     Sync(SyncArgs),
     /// Create a session of workspaces (--repo: only those repos)
     #[command(long_about = crate::help::NEW, after_long_help = crate::help::NEW_AFTER)]
@@ -73,6 +79,8 @@ pub enum Cmd {
         /// old trees)
         #[arg(long)]
         brief: bool,
+        #[command(flatten)]
+        wait: WaitArgs,
     },
     /// List live sessions from the store (id, ticket, state, repos, created)
     #[command(after_long_help = crate::help::LS_AFTER)]
@@ -238,8 +246,32 @@ pub enum Cmd {
     Session(SessionCmd),
 }
 
+#[derive(Debug, Args, Clone, Default)]
+pub struct CwdArgs {
+    /// Allow your own cwd/PID chain to stay in the old tree; cd back afterward
+    #[arg(long)]
+    pub allow_cwd: bool,
+    /// Allow other shells to stay in the old tree; reports their stale cwd
+    #[arg(long)]
+    pub allow_cwd_holders: bool,
+}
+
+#[derive(Debug, Args, Clone, Default)]
+pub struct WaitArgs {
+    /// Total seconds to wait (0: unlimited); flag overrides GIT_STRATA_TIMEOUT
+    #[arg(long, value_name = "SECS")]
+    pub timeout: Option<f64>,
+    /// Print waiting notes on stderr even without a TTY
+    #[arg(long)]
+    pub progress: bool,
+}
+
 #[derive(Debug, Args)]
 pub struct SyncArgs {
+    #[command(flatten)]
+    pub cwd: CwdArgs,
+    #[command(flatten)]
+    pub wait: WaitArgs,
     #[arg(long)]
     pub session: Option<String>,
     #[arg(long = "repo", value_delimiter = ',', value_name = "R", value_parser = sync_repo)]
@@ -295,6 +327,8 @@ pub enum DepsCmd {
         /// set now, without confirmation; other sessions stay pinned
         #[arg(long)]
         switch: bool,
+        #[command(flatten)]
+        cwd: CwdArgs,
     },
     /// Approve a proposal (needs a TTY and confirmation)
     #[command(after_long_help = crate::help::DEPS_AFTER)]
@@ -304,6 +338,8 @@ pub enum DepsCmd {
         /// Only these sessions, comma separated
         #[arg(long, value_delimiter = ',', value_name = "S,S")]
         sessions: Vec<String>,
+        #[command(flatten)]
+        cwd: CwdArgs,
     },
     /// List open proposals
     #[command(after_long_help = crate::help::DEPS_AFTER)]

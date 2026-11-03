@@ -8,6 +8,7 @@ pub mod args;
 pub mod cmds;
 pub mod confirm;
 pub mod ctx;
+mod cwd_guard;
 pub mod devports;
 pub mod env;
 pub mod envelope;
@@ -20,6 +21,7 @@ pub mod rpc;
 pub mod show;
 pub mod sync;
 pub mod tty;
+mod wait;
 
 use std::ffi::OsString;
 
@@ -64,6 +66,16 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
             _ => return emit_stdout(&Envelope::err(parse_error(&argv, &e))),
         },
     };
+    if let Cmd::Help { ref topic } = cli.cmd {
+        return match help::render(topic) {
+            Ok(text) => {
+                use std::io::Write;
+                let _ = std::io::stdout().lock().write_all(text.as_bytes());
+                0
+            }
+            Err(e) => emit_stdout(&Envelope::err(e)),
+        };
+    }
     if let Cmd::Sync(ref args) = cli.cmd
         && args.hook
     {
@@ -158,8 +170,9 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
     }
     let ctx = Ctx::from_env()?;
     match cmd {
+        Cmd::Help { .. } => unreachable!("help is dispatched before environment setup"),
         Cmd::Sync(args) => sync::run(&ctx, &args),
-        Cmd::Deps(DepsCmd::Approve { id, sessions }) => c::deps_approve(&ctx, &id, &sessions),
+        Cmd::Deps(DepsCmd::Approve { id, sessions, cwd }) => c::deps_approve_with_cwd(&ctx, &id, &sessions, &cwd),
         Cmd::Push { repo } => c::push(&ctx, &repo),
         Cmd::Publish { from, assign } => c::publish(&ctx, &from, assign.as_deref()),
         Cmd::Assign { file, session } => c::assign(&ctx, &file, &session),
@@ -167,17 +180,23 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Resolve { session, repo, abandon, accept } => c::resolve(&ctx, &session, &repo, abandon, accept),
         Cmd::Chain { repo, accept_origin, restore } => c::chain(&ctx, &repo, accept_origin, restore),
         Cmd::Config(ConfigCmd::Relax { repo }) => c::config_relax(&ctx, &repo),
-        Cmd::New { ticket_flag, ticket, repo, repos, agent } => cmds::new(&ctx, ticket_flag, ticket, &repo, &repos, agent.as_deref()),
+        Cmd::New { ticket_flag, ticket, repo, repos, agent } => {
+            cmds::new(&ctx, ticket_flag, ticket, &repo, &repos, agent.as_deref())
+        }
         Cmd::Add { session, repo } => cmds::add(&ctx, session, &repo),
-        Cmd::Status { sel, brief: true } => cmds::status_brief(&ctx, &sel),
-        Cmd::Status { sel, brief: false } => cmds::status(&ctx, &sel),
+        Cmd::Status { sel, brief: true, wait } => cmds::status_brief_with_wait(&ctx, &sel, &wait),
+        Cmd::Status { sel, brief: false, wait } => cmds::status_with_wait(&ctx, &sel, &wait),
         Cmd::Ls { .. } => cmds::ls(&ctx),
-        Cmd::Checkpoint { tool_call, message, session, paths } => cmds::checkpoint(&ctx, tool_call, message, session, &paths),
+        Cmd::Checkpoint { tool_call, message, session, paths } => {
+            cmds::checkpoint(&ctx, tool_call, message, session, &paths)
+        }
         Cmd::Restore { checkpoint, paths, session } => cmds::restore(&ctx, &checkpoint, &paths, session),
         Cmd::Grep { pattern, sel } => cmds::grep(&ctx, &pattern, &sel),
         Cmd::Files { glob, sel } => cmds::files(&ctx, glob.as_deref(), &sel),
         Cmd::Diff { base, session, between, repo } => cmds::diff(&ctx, base, session, between, repo),
-        Cmd::Deps(DepsCmd::Propose { session, repo, switch }) => cmds::deps_propose(&ctx, session, repo, switch),
+        Cmd::Deps(DepsCmd::Propose { session, repo, switch, cwd }) => {
+            cmds::deps_propose_with_cwd(&ctx, session, repo, switch, &cwd)
+        }
         Cmd::Deps(DepsCmd::List { repo }) => cmds::deps_list(&ctx, repo),
         Cmd::Gc { store, dry_run } => cmds::gc(&ctx, store, dry_run),
         Cmd::Du { refresh } => cmds::du(&ctx, refresh),
