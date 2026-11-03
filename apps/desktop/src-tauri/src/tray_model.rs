@@ -105,7 +105,7 @@ fn active_sessions(status: &Value) -> usize {
         .unwrap_or(0)
 }
 
-/// Legacy callers retain confirm behavior until the capability is advertised.
+/// Without a row mode, legacy callers retain confirm behavior.
 pub fn waiting(sessions: Option<&Value>, deps: Option<&Value>) -> Vec<WaitingItem> {
     waiting_at(sessions, deps, false, SystemTime::now())
 }
@@ -193,9 +193,15 @@ fn waiting_at(
                     let u = upstream(s, repo);
                     u["deps"]["proposal"].as_u64() == Some(id) && u["deps"]["mode"] == mode
                 };
-                let applying = enabled
-                    && affected.iter().any(|s| applies(s, "apply"))
-                    && !affected.iter().any(|s| applies(s, "confirm"));
+                let applying = match p["mode"].as_str() {
+                    Some("apply") => true,
+                    Some("confirm") => false,
+                    _ => {
+                        enabled
+                            && affected.iter().any(|s| applies(s, "apply"))
+                            && !affected.iter().any(|s| applies(s, "confirm"))
+                    }
+                };
                 if applying && !affected.iter().any(|s| stuck(s, repo, now)) {
                     continue;
                 }
@@ -313,6 +319,80 @@ mod tests {
         );
         assert_eq!(timestamp("2026-11-02T06:00:00-06:00"), Some(now));
         assert_eq!(timestamp("2026-11-02T14:00:00+02:00"), Some(now));
+    }
+    #[test]
+    fn tray_proposal_mode_before_sessions_and_capability_polls() {
+        let (_, mut deps) = fixture();
+        deps["proposals"][0]["mode"] = json!("apply");
+        let now = timestamp("2026-11-02T11:00:00Z").unwrap();
+        for enabled in [false, true] {
+            assert!(waiting_at(None, Some(&deps), enabled, now).is_empty());
+        }
+        let snapshot = Snapshot {
+            up: Some(true),
+            deps: Some(deps),
+            updated: Some(now),
+            ..Default::default()
+        };
+        assert_eq!(model(&snapshot, now).icon, Icon::Normal);
+        assert!(model(&snapshot, now).waiting.is_empty());
+    }
+    #[test]
+    fn tray_proposal_mode_without_workspace_upstream_or_remaining_pending() {
+        let (mut sessions, mut deps) = fixture();
+        deps["proposals"][0]["mode"] = json!("apply");
+        let ws = &mut sessions["sessions"][0]["status"]["workspaces"]["tool"];
+        ws.as_object_mut().unwrap().remove("upstream");
+        let now = timestamp("2026-11-02T11:00:00Z").unwrap();
+        assert!(waiting_at(Some(&sessions), Some(&deps), true, now).is_empty());
+        sessions["sessions"][0]["status"]["workspaces"]["tool"]["pending"] = json!([]);
+        assert!(waiting_at(Some(&sessions), Some(&deps), true, now).is_empty());
+    }
+    #[test]
+    fn tray_proposal_mode_overrides_workspace_mode_both_ways() {
+        let (mut sessions, mut deps) = fixture();
+        let now = timestamp("2026-11-02T11:00:00Z").unwrap();
+        deps["proposals"][0]["mode"] = json!("confirm");
+        assert_eq!(waiting_at(Some(&sessions), Some(&deps), true, now).len(), 1);
+        deps["proposals"][0]["mode"] = json!("apply");
+        sessions["sessions"][0]["status"]["workspaces"]["tool"]["upstream"]["deps"]["mode"] =
+            json!("confirm");
+        assert!(waiting_at(Some(&sessions), Some(&deps), true, now).is_empty());
+    }
+    #[test]
+    fn tray_apply_mode_keeps_unhealthy_and_scene_workspaces_without_upstream() {
+        let now = timestamp("2026-11-02T11:00:00Z").unwrap();
+        for condition in ["unhealthy", "workspace scene", "session scene"] {
+            let (mut sessions, mut deps) = fixture();
+            deps["proposals"][0]["mode"] = json!("apply");
+            let status = &mut sessions["sessions"][0]["status"];
+            let ws = &mut status["workspaces"]["tool"];
+            ws.as_object_mut().unwrap().remove("upstream");
+            match condition {
+                "unhealthy" => ws["health"] = json!("Missing"),
+                "workspace scene" => ws["scene"] = json!({}),
+                _ => status["scene"] = json!({}),
+            }
+            let waiting = waiting_at(Some(&sessions), Some(&deps), true, now);
+            assert_eq!(waiting.len(), 1, "{condition}");
+            assert_eq!(waiting[0].sessions, 1);
+        }
+    }
+    #[test]
+    fn tray_older_rows_fall_back_to_workspace_then_confirm() {
+        let (mut sessions, deps) = fixture();
+        let now = timestamp("2026-11-02T11:00:00Z").unwrap();
+        assert!(waiting_at(Some(&sessions), Some(&deps), true, now).is_empty());
+        assert_eq!(
+            waiting_at(Some(&sessions), Some(&deps), false, now).len(),
+            1
+        );
+        sessions["sessions"][0]["status"]["workspaces"]["tool"]
+            .as_object_mut()
+            .unwrap()
+            .remove("upstream");
+        assert_eq!(waiting_at(Some(&sessions), Some(&deps), true, now).len(), 1);
+        assert_eq!(waiting_at(None, Some(&deps), true, now).len(), 1);
     }
     #[test]
     fn tray_surfaces_all_stuck_states_and_agent_conflicts() {

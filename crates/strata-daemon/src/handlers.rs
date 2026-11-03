@@ -135,6 +135,7 @@ fn deps_list(core: &Core, repo: Option<&RepoName>) -> Result<Value> {
     let mut legacy_budget = LEGACY_CHANGES_WORK_LIMIT;
     for p in strata_deps::open_proposals(&core.store, repo)? {
         let mut row = json_of(&p);
+        row["mode"] = json_of(&core.effective_sync_deps(&p.repo));
         // Enrichment has no bearing on proposal eligibility or deps_list success.
         let enriched = (|| -> Result<Option<Value>> {
             if p.state != strata_deps::ProposalState::Pending {
