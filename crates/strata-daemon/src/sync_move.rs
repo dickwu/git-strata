@@ -56,7 +56,9 @@ fn g0(core: &Core, s: &SessionId, repo: &RepoName, rec: &SessionRecord) -> Resul
         });
     if rec.lifecycle != Lifecycle::Active
         || rec.scene.is_some()
-        || core.store.workspace_scene_live(s, repo, row.scene.is_some())?
+        || core
+            .store
+            .workspace_scene_live(s, repo, row.scene.is_some())?
         || row.health != Health::Ok
         || open
     {
@@ -112,13 +114,6 @@ fn scan(
 
 /// Non-check handler; the upstream lane dispatches `check` before this call.
 pub fn run(d: &Daemon<'_>, req: SyncRequest) -> Result<Value> {
-    if req.check {
-        return Err(error(
-            Code::Unsupported,
-            "sync_check_unavailable",
-            "the upstream check handler is not integrated",
-        ));
-    }
     let core = d.core;
     let rec = record(core, &req.session)?;
     let mut repos: Vec<_> = req.repos.clone().unwrap_or_else(|| {
@@ -168,8 +163,24 @@ pub fn run(d: &Daemon<'_>, req: SyncRequest) -> Result<Value> {
         repos = candidates;
     }
     let mut fetched = BTreeMap::new();
+    let mut done = BTreeMap::new();
     crate::handlers::writing();
     for repo in &repos {
+        if !named.is_empty() {
+            match acknowledge_legacy(d, &req, repo, &named) {
+                Ok(Some(v)) => {
+                    done.insert(repo.clone(), v);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(mut e) => {
+                    if let Some(Value::Object(detail)) = &mut e.detail {
+                        detail.insert("done".into(), json!(done));
+                    }
+                    return Err(e);
+                }
+            }
+        }
         let cfg = core.repo_cfg(repo)?;
         if !cfg.follow_main() {
             continue;
@@ -188,14 +199,14 @@ pub fn run(d: &Daemon<'_>, req: SyncRequest) -> Result<Value> {
         // fetch did not move the tip; it takes the repo lock itself.
         crate::main_sync::reconcile(core, repo)?;
     }
-    let mut done = BTreeMap::new();
     for repo in &repos {
+        if done.contains_key(repo) {
+            continue;
+        }
         let r = if core.repo_cfg(repo)?.follow_main() {
             sync_one(d, &req, repo, &named)
-        } else if !named.is_empty() {
-            acknowledge_unfollowed(d, &req, repo, &named)
         } else {
-            Ok(json!({"result":"not_following"}))
+            Ok(json!({"result":"not_following","following":false}))
         };
         match r {
             Ok(v) => {
@@ -299,24 +310,31 @@ fn source_reason(
     })
 }
 
-/// D-b for a repo that does not follow main: O7 still refuses publishing its
-/// recorded conflicts, so `--resolved`/`--keep` acknowledge them here without
-/// any tip, report or move (there is no sync report for such a repo).
-fn acknowledge_unfollowed(
+/// O7 acknowledgements do not require a move. Handle legacy-only requests
+/// before fetching or preparing a target, preserving any unrelated report.
+/// Non-following repos use this same queue, repo lock and G0 protection.
+fn acknowledge_legacy(
     d: &Daemon<'_>,
     req: &SyncRequest,
     repo: &RepoName,
     named: &BTreeSet<RepoPath>,
-) -> Result<Value> {
+) -> Result<Option<Value>> {
     let core = d.core;
+    let following = core.repo_cfg(repo)?.follow_main();
     crate::resolve::with_queue_not_publishing(core, &req.session, || {
         core.locks.with_repo(repo, || {
             let now = record(core, &req.session)?;
             workspace(&now, repo)?;
+            if following
+                && (!named.iter().all(|p| now.workspaces[repo].conflicts.contains(p))
+                    || core.store.sync_report(&req.session, repo)?.iter().any(|r| named.contains(&r.path)))
+            {
+                return Ok(None);
+            }
             g0(core, &req.session, repo, &now)?;
             core.store
                 .clear_conflicts(&req.session, repo, &named.iter().cloned().collect::<Vec<_>>())?;
-            Ok(json!({"result":"conflicts_cleared","following":false,"resolved":req.resolved,"kept":req.keep}))
+            Ok(Some(json!({"result":"conflicts_cleared","following":following,"resolved":req.resolved,"kept":req.keep})))
         })
     })
 }
@@ -354,6 +372,16 @@ fn sync_one(
         let proposal = strata_deps::open_proposals(&core.store, Some(repo))?
             .into_iter()
             .find(|p| p.state == strata_deps::ProposalState::Pending && p.to == n);
+        let deps_reply = reason.clone().map(|mut state| {
+            if let Some(p) = &proposal {
+                state["proposal"] = json!(p.id);
+                if state["state"] == "waiting_human" {
+                    state["fix"] =
+                        json!(format!("ask the human: git-strata deps approve {}", p.id));
+                }
+            }
+            state
+        });
         if n != ws.base.deps
             && reason.is_none()
             && strata_deps::find_set(&core.store, repo, &n)?.is_none()
@@ -433,7 +461,7 @@ fn sync_one(
             if !changed.is_empty() { return Err(busy("changed_since_scan",json!({"paths":changed}))); }
             if target == current.base && head == current.head {
                 let mut v = json!({"result":"up_to_date"});
-                if let Some(r) = &reason { v["result"] = json!("waiting"); v["deps"] = r.clone(); }
+                if let Some(r) = &deps_reply { v["result"] = json!("waiting"); v["deps"] = r.clone(); }
                 return Ok(v);
             }
             let consume = core.store.rebase_pending_of(&req.session,repo)?.map(|r|r.rev);
@@ -444,9 +472,8 @@ fn sync_one(
                 "resolved":req.resolved,"kept":req.keep,"whole_file":whole_file,"lww":moved.lww,"regenerable_kept":kept,
                 "old_tree":moved.old_tree});
             if !dropped.is_empty() { out["accepted_diverged"] = json!(dropped); }
-            if let Some(mut state) = reason.clone() {
-                if let Some(p) = &proposal { state["proposal"] = json!(p.id); if state["state"] == "waiting_human" { state["fix"] = json!(format!("ask the human: git-strata deps approve {}",p.id)); } }
-                out["deps"] = state;
+            if let Some(state) = &deps_reply {
+                out["deps"] = state.clone();
             }
             Ok(out)
         })
@@ -501,10 +528,13 @@ fn conflict_report(
     generation: u64,
     code: Code,
 ) -> Result<StrataError> {
-    // HeadMoved regenerates an ordinary report against the current target;
-    // previous resolution choices do not authorize the new target.
+    // HeadMoved invalidates previous choices. A partial Conflict keeps the
+    // accepted paths' original bindings so repeating their names and bytes is
+    // idempotent; only still-blocking paths need new conflict descriptions.
     let mut plain = opts.clone();
-    plain.resolutions.clear();
+    if code == Code::HeadMoved {
+        plain.resolutions.clear();
+    }
     let blobs = PreviewBlobs::new(&core.store, &ws.path, overlay);
     let preview =
         strata_overlay::rebase_preview(overlay, old, new, &blobs, &plain).map_err(scan_error)?;
@@ -537,8 +567,39 @@ fn conflict_report(
             hunks: json!(c.hunks),
         });
     }
+    if code == Code::Conflict {
+        rows.extend(
+            core.store
+                .sync_report(&req.session, repo)?
+                .into_iter()
+                .filter(|r| {
+                    r.target == *head
+                        && r.generation == generation
+                        && opts.resolutions.contains_key(&r.path)
+                        && !paths.contains(&r.path)
+                }),
+        );
+    }
     core.store
         .put_sync_report(&req.session, repo, head, generation, &rows)?;
-    Ok(StrataError::new(code,"sync needs a resolution against this target and generation")
-        .with_detail(json!({"reason":"sync_conflict","repo":repo,"target":{"head":head,"tree":new.r#gen.tree},"generation":generation,"conflicts":conflicts})))
+    let mut detail = json!({"reason":"sync_conflict","repo":repo,"target":{"head":head,"tree":new.r#gen.tree},"generation":generation,"conflicts":conflicts});
+    if code == Code::Conflict && !opts.resolutions.is_empty() {
+        detail["resolved"] = json!(
+            req.resolved
+                .iter()
+                .filter(|p| !paths.contains(p))
+                .collect::<Vec<_>>()
+        );
+        detail["kept"] = json!(
+            req.keep
+                .iter()
+                .filter(|p| !paths.contains(p))
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(StrataError::new(
+        code,
+        "sync needs a resolution against this target and generation",
+    )
+    .with_detail(detail))
 }
