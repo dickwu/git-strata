@@ -82,10 +82,9 @@ export function SessionsScreen({
             loading={sessions.isPending && !daemon.isError}
             pagination={false}
             tableLayout="fixed"
-            // Fixed columns take 650px and Repos gets the rest. The table has the full window
-            // width (no sidebar), so this only bites below ~900px: there the table scrolls
-            // sideways so Repos keeps ~210px for its wrapping tags instead of a sliver.
-            scroll={{ x: 860 }}
+            // No scroll.x: fixed columns take 646px and Repos gets the rest, which is still
+            // ~190px at the 880px minimum window (its tags wrap). Every cell wraps or clips
+            // inside its own width, so the table never scrolls sideways (t159u).
             locale={{
               emptyText:
                 filtered && all.length > 0 ? (
