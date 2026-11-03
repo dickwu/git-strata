@@ -79,9 +79,25 @@ Missing entries (including a missing pins file) use `confirm` and report
 `ConfigRelaxPending` when the config requests `apply`. `apply` → `confirm` tightens
 at startup; `confirm` → `apply` needs `git-strata config relax REPO`. Malformed pins
 still refuse startup. This setting does not change the TTY/Touch ID gate for
-publishing. Install matching new CLI/daemon binaries and restart before adding
-`[repo.<name>.sync]`; older binaries reject the table, and older daemons reject
-pins files containing `sync_deps` (remove that field when rolling back).
+publishing.
+
+Upgrade in this order: **stop the daemon → install both matching binaries
+(CLI and daemon; with Homebrew, update the formula and desktop cask) → add
+`[repo.<name>.sync]` → start the daemon**. To retain human approval, set
+`deps = "confirm"`; to disable source following too, also set
+`follow_main = false` (a non-split repo needs `deps = "confirm"` with it).
+An existing pin without `sync_deps` adopts the config's default `apply` when
+the table is absent. Existing Pending proposals can therefore auto-apply on
+the first start, and idle sessions begin following main, unless the opt-out
+table is written **before** that start.
+
+Older binaries reject the sync table and pins containing `sync_deps`; store
+v4/v5 is not downgrade-safe either. To roll back, stop the daemon, restore
+the compatible `store/backups/store-v<from>-<ns>.db` as described in
+[store.md](modules/store.md), install the old CLI and
+daemon together, remove the sync tables and each pin's `sync_deps`, then
+start the old daemon. Changes recorded after the backup are absent from the
+restored store; preserve the displaced database and its sidecars.
 
 ### 2.3 字段语义
 

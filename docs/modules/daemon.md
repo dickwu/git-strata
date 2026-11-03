@@ -114,7 +114,7 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `diff` | `{ "a": SessionId, "b": SessionId, "repo" }` | `BetweenDiff` |
 | `deps_propose` | `{ "session", "repo", "switch": bool }` | 提议；`switch` 为真时附带移动结果 |
 | `deps_approve` | `{ "proposal": ProposalId, "sessions": [SessionId]\|null }` | 每个会话一条；`null` = 该 repo 的全部会话 |
-| `deps_list` | `{ "repo": RepoName\|null }` | `open_proposals` |
+| `deps_list` | `{ "repo": RepoName\|null }` | `{proposals:[...]}`；每行含有效的 `mode: "apply" \| "confirm"`，以及可选 `changes` |
 | `publish` | `{ "group": ReleaseGroup, "shown"?: { RepoName: CommitOid \| null }, "plan"?: [RepoName] }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数。`shown` 是 cli 给人看过的每个要确认仓库的链顶（D21）。`plan` 是 cli 的 TTY 检查覆盖了的、会推且要确认的仓库（cli.md D23）；给了 `plan` 时，daemon 自己重算出的要提交仓库里，凡是会推且要确认、却不在 `plan` 里的（`publish_plan` 与 `publish` 之间发布历史变了），在弹框、取凭据、写任何东西之前就拒绝：`NotConfirmed`，`detail.reason = "plan_changed"`，`detail.repo`、`detail.planned`；agent 重跑同一条命令即可（重跑时 cli 会把它算进计划并查 TTY）。不给 `plan`（cli 以外的调用方）不做这项检查（review-3 T1）[实现时补的决定]。回复另带 `already_published: [{repo, publish, commit, push}]`：之前已经落地、这次跳过的仓库（D22）。失败时 `detail.repo` 是停下的仓库，`detail.published_before` 是这次已经提交的仓库。停下的仓库若已写了提交（`detail.commit`，如推送超时或被拒），`detail.landed` 是它的那条 `{repo, commit, push}`，`push` 取已知的结果（`Unknown` / `Refused`，没推为 null）（review M4）[实现时补的决定]；`push` 与 `checks_ran` 取 publish 错误 detail 里写明的值，推送成功后才失败（rebase、关行）的是 `Pushed`（review-2 N3）[实现时补的决定]。`repo` / `published_before` / `already_published` 加在该仓库的任何错误上，不只是 publish 本身的：读配置、确认失败或被取消（`require_validated`）同样带上（review-2 N6）[实现时补的决定]。`plan_changed` 的检查仍在逐仓库循环之前（还什么都没写），但它和它读配置的错误走同一套装饰：带 `repo`，以及重算计划时发现已经落地、这次跳过的 `already_published`（这时 `published_before` 必为空，不出现）（review-4 F2）[实现时补的决定] |
 | `publish_plan` | `{ "group": ReleaseGroup }` | `{ "repos": [RepoName], "already_published": [{repo, publish, commit, push}] }`。与 `publish` 用同一份重跑过滤（D22）：`repos` 是这次 `publish` 还会提交、会确认的仓库，按名字排序；`already_published` 与 `publish` 会报的一致。不排队，不拿锁，不写 Store、ref、工作区，不弹框。只覆盖按内容判定的落地；会话没被 rebase 时 publish 的 `NoCommit` 回退（D22）只有真正 stage 才知道，这类仓库仍在 `repos` 里（`publish_plan_keeps_a_waiting_sessions_landed_guarded_repo`：rebase 为 `Waiting` 的会话，其要确认的仓库仍在 `repos`，cli 照样要 TTY 与确认；skills 的 reference 照此写明，review-3 T3）。group 为空 → `InvalidInput`。cli 用它把 TTY 检查和确认限制在还要做事的仓库上（cli.md §5，review-2 N2）[实现时补的决定] |
 | `push` | `{ "repo": RepoName, "shown"?: CommitOid \| null }` | `{push: PushOutcome, commit}`。`shown` 是 cli 给人看过的链顶（D21）。不要确认的仓库先 fetch，链 `Diverged` 时无头重放再推一次快进，另带 `replayed`（`{from,to,onto,commits,checks_ran}` 或 null）、`rebases`、`warnings`；冲突 `Conflict` `replay_conflict`，不写不推（publish.md D2a）[实现时补的决定] |
@@ -199,6 +199,8 @@ pub enum DaemonWarning {
     VerifyFailed { message: String },
     /// 锚点事务比较并交换两次仍没写成。下次 fetch 再试。
     AnchorNotAdvanced { repo: RepoName },
+    /// 周期 fetch 失败；按 repo 去重，成功后清除，保留上次成功时间。
+    FetchFailed { repo: RepoName },
     /// 单独 `push`（或 restore）的推送结果不确定：暂存目录 `scene`（含 `push.json`）保留。review M6 [实现时补的决定]
     UnknownPush { repo: RepoName, commit: CommitOid, scene: PathBuf },
     /// 启动时删掉的 `refs/strata/**/*.lock`（被杀的 ref 事务留下的）。review P1-5（D29）
@@ -310,7 +312,7 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 | `pins.json` | 每个 `RepoName` 的 `PinnedFlags` | 见下。不在 store 里 |
 | `daemon.err.log` | stderr | launchd |
 
-`pins.json` 是 UTF-8 JSON：`{ "repos": { "<RepoName>": { "deploy_on_push": bool, "confirm": bool, "push": bool } } }`。没有钉的 repo（没有这个文件、文件里没有这个名字：新加的或改了名的 repo）钉成配置的值但 `confirm = true`（`confirm_flow::unpinned`）：缺钉就是"要确认"，删掉 `pins.json` 或给 repo 改名都不会调松；配置里的 `confirm = false` 显示为待定的调松，要人发 `config_relax`（D26）。之后：
+`pins.json` 是 UTF-8 JSON：`{ "repos": { "<RepoName>": { "deploy_on_push": bool, "confirm": bool, "push": bool, "sync_deps": "apply|confirm", "regenerable": [...] } } }`（`sync_deps` 总是写回，`regenerable` 只在非空时写回）。没有钉的 repo（没有这个文件、文件里没有这个名字：新加的或改了名的 repo）钉成配置的值但 `confirm = true`、`sync_deps = "confirm"`（`confirm_flow::unpinned`）：缺钉就是"要确认"，删掉 `pins.json` 或给 repo 改名都不会调松；配置里的 `confirm = false` 显示为待定的调松，要人发 `config_relax`（D26）。之后：
 
 - 调紧立即生效并写回，不要凭据：`deploy_on_push` false→true，`confirm` false→true，`push` true→false。
 - 调松不生效：`deploy_on_push` true→false，`confirm` true→false，`push` false→true。[实现时补的决定]（2026-10-26，peilin："将api 也改为不用确认"）：`confirm_flow::needs_confirm` 只看钉住的 `confirm`；`deploy_on_push` 仍按调紧/调松规则钉住，但只是信息，不单独要求确认。有效值仍是钉住的那份。status 带 `ConfigRelaxPending`。文件变了不弹框，启动、重载、KeepAlive 重启都不弹。要生效必须人发 `config_relax`（§5.5）。
@@ -434,13 +436,27 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 
 **`diff`**：不排队。`publish::diff_between`。
 
-**`deps_list`**：不排队。`open_proposals`。 Each pending proposal may carry additive
-`changes: {summary, packages, truncated, since?}` from `strata_deps::changes`; enrichment failure
-omits the field and leaves the reply and proposal state unchanged. `changes_base` diffs from the proposal's `from_head` (store v4).
-A proposal recorded before v4 has none; it falls back to the oldest affected session workspace
-head (the same tracked / different deps-set predicate as `ws.pending`) and labels
-`changes.since = "session_base"`. Reads do not
-request confirmation, build deps, or acquire a repo write lock.
+**`deps_list`**：不排队。`open_proposals`。 Each proposal carries `mode: "apply" | "confirm"`,
+the repo's effective pinned sync dependency mode; GUI and tray read this field even if no affected
+workspace reports upstream data. Pending proposals may also carry additive
+`changes: {summary, packages, truncated, since?}` from `strata_deps::changes`. Enrichment failure
+omits `changes` from that reply; proposal state and `mode` are unchanged. Each summary call waits
+up to 200 ms for a single worker with a separate 5 s budget. The worker may finish after the
+response timeout and populate the blob cache for a later poll (see deps.md §5.13a).
+New proposals record `from_head`, and `changes_base` diffs from that head. Missing baselines can
+occur in pre-v4 rows and v4/v5 rows written before the constructor fixes; target-only copies can
+preserve a missing value. Those rows use the oldest affected session workspace head (the same
+tracked / different deps-set predicate as `ws.pending`), labelled `changes.since = "session_base"`.
+One shared 16-unit budget covers the entire `deps_list` call: one unit per legacy proposal and
+per eligible workspace inspected. Exhaustion omits that proposal's enrichment instead of using
+a partially selected baseline; proposals with `from_head` bypass this budget. This caps work
+counts, not the wall-clock duration of an individual Git ancestry call. Reads do not request
+confirmation, build deps, or acquire a repo write lock.
+
+Upstream status has a separate last-good summary cache keyed by
+`(session, workspace BaseGen, generation, proposal id)`. Only a successful full read replaces
+that exact key's summary; busy, error and timeout results retain it. Cached reads reuse it,
+and a different key cannot inherit it. With no matching cached value, the summary is omitted.
 
 **`publish_plan`**：不排队。`publish` 开头那一步重跑过滤（`rerun_plan`，即 D22 的按选择子、按内容判定）原样跑一遍，返回还要提交的仓库与 `already_published`，不写（review-2 N2）[实现时补的决定]。
 
@@ -1013,13 +1029,15 @@ The RPC dispatcher routes `check` (and `hook`) to the read-only lane before
 any mutation, maps the wire `SyncParams` to `SyncRequest`, and adds the
 best-effort `upstream` object to a successful reply.
 
-The handler fetches following default branches under repo locks, records
+After any legacy-only acknowledgements described below, the handler fetches
+the remaining following default branches under repo locks, records
 fetch success/failure, runs fetch-after anchor maintenance and observes
 main. Failed fetches continue against local refs. It then runs the
 complete T4 (`main_sync::reconcile`: observe + enroll/retarget, including
 deps-only identity reconciliation), even when the fetch did not move the
-tip. Split/non-following repos return `not_following`; with `--resolved`/`--keep`
-they only acknowledge the named workspace conflicts (O7, D-b) under the session
+tip. Split/non-following repos return `{"result":"not_following","following":false}`;
+with `--resolved`/`--keep` they only acknowledge the named workspace conflicts
+(O7, D-b) under the session
 queue and repo lock and return `conflicts_cleared` with `following: false`.
 
 Dependency keys come from a temporary target export. Apply-mode sync checks
@@ -1031,11 +1049,39 @@ input ownership and G0, and uses walk_activity for G2/G4. A running own
 publish returns waiting after the bounded wait. Successful repos precede
 any later error in `detail.done`.
 
-Conflict reports are persisted before `Conflict sync_conflict`. Resolutions
-need the saved target/generation and a reported path; unchanged bytes need
-explicit keep. Missing/stale reports return HeadMoved with a fresh report.
-The only binding exception is O7: an up-to-date workspace with no report
-may clear named legacy conflicts atomically and return `conflicts_cleared`.
-No-op sync otherwise leaves conflicts intact. Diverged bases require an
-explicit acceptance only after neither chain nor tracking ref reaches the
-old head; read errors fail closed.
+Conflict reports are persisted before `Conflict sync_conflict`. Outside the
+acknowledgement cases below, `--resolved`/`--keep` require target/generation
+(`resolution_binding_required` if omitted) and a path in that saved report;
+unchanged bytes need explicit keep. With a supplied binding, missing/stale
+reports return HeadMoved and a fresh report. Name every reported conflict path
+in one call, mixing `--resolved` and `--keep` as needed. A partial submission makes
+no move: `detail.conflicts` contains only remaining blockers, and `detail.resolved`
+/ `detail.kept` list choices accepted in that request. Their original saved rows
+(ours blob and conflict regions) are retained, but choices are not persisted for
+automatic replay. Repeat accepted names with the same flags and unchanged accepted
+bytes, add newly resolved names, and use the same target/generation. This repeat
+is idempotent; omitted names are not reapplied. HeadMoved regenerates the report
+without those choices and invalidates the old binding.
+
+Unbound acknowledgement covers legacy-only requests (every named path in
+`ws.conflicts`, none in the saved report) and named conflicts in non-following
+repos. Legacy-only requests work even behind/diverged and with a separate report,
+which is preserved. The check runs under the queue, repo lock and G0 before fetch,
+T4, tip/divergence lookup or move preparation. It clears only named paths and
+returns `{"result":"conflicts_cleared","following":true|false,"resolved":[...],"kept":[...]}`;
+base/head/generation stay unchanged, and an acknowledgement-only request has an
+empty `fetched` map. A bound request mixing legacy-only and report paths returns
+`resolved_unrelated`: acknowledge the legacy-only paths in one call, then resolve
+report paths with their binding in another. No-op sync otherwise leaves conflicts
+intact. An actual move from a diverged base requires explicit acceptance only after neither chain
+nor tracking ref reaches the old head; read errors fail closed.
+
+Dependency `waiting` and `source_only` replies use the same decoration: `deps.state`, the
+matching Pending `deps.proposal` when present, and
+`deps.fix: "ask the human: git-strata deps approve P"` only for `waiting_human`
+with that proposal. This includes an already-current source tree. `own_change`
+and `drift` retain their state/details without an approval fix. Relay the state,
+proposal and any supplied fix to the human and stop; only
+`installing` or `publishing` waits get bounded retries. Upstream rows with
+`following: false` emit no sync fix; ignore their behind count for sync and only
+acknowledge named conflicts.

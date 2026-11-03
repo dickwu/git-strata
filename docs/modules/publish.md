@@ -328,7 +328,7 @@ pub enum PublishFault {
 | P4 | 链与锚点的写、fetch、push 都在 repo 写锁里。持锁时不 `build`、不 `ensure` | 锁顺序裁定 |
 | P5 | 推送需要确认时（`deploy_on_push` 或 `publish.confirm`），没有匹配的 `Action::PushDeploy` 就不推。没有 flag、环境变量或配置能绕过。[实现时补的决定]（2026-10-26，peilin："将api 也改为不用确认"）：需要确认只看 `publish.confirm`；`deploy_on_push` 只是信息，不再单独构成门（config.md V5 撤销）。调松 `confirm` 仍要人跑 `config relax` | 不变量 7 |
 | P6 | 推送超时留下链，记 `Unknown`，重启只报出，不重放 | 不变量 6 |
-| P7 | 新基线要换依赖集时，经 `deps::propose` 登记，会话留在旧基线上，等 `deps approve` | 不变量 4，压过 design §6.4 末句 |
+| P7 | 新基线要换依赖集时登记提议；有效 `sync.deps = apply` 时经 Auto 门走 C3，`confirm` 保留人类 `deps approve`。C2 可先移源码、保留旧依赖并报告待处理状态（main-sync） | 不变量 4、8；design §6.4 |
 | P8 | 具名拒绝不得留下指向主 checkout 的 gitfile。`validate_commands`、凭据核对、内存里的冲突判定都在 `attach_staging` 与 `gitio::stage` 之前。冲突不建目录，hunk 在 `Conflict.detail`。目录一旦建了，具名返回之前 `remove_tree_rooted` 必须完成，gitfile 不再是进主 ref 库的路径。删不完则返回 `Unknown`，发布行保持 `Unknown`，status 报出。`commit_tree` 把对象写进主对象库之后，对外只有 `Unknown`，`HeadMoved` 只在 `detail` 里 | 增补 3；本轮修订 |
 | P9 | `.lww`：组内后应用的批次胜；同一会话里较大的 `CheckpointId` 胜。不按 mtime | T10 |
 
@@ -846,11 +846,14 @@ batch's selected changes (including rename sources) with that session's
 workspace conflicts. Any intersection returns `Conflict`,
 `detail.reason = "move_conflict"`, `paths`, per-session conflicts, and fix
 `git-strata sync --repo <repo> --resolved PATH` (or `--keep PATH`, naming the repo), with the
-report's `--target … --generation …` when sync saved a conflict report. Neither LWW
+report's `--target … --generation …` when the named paths belong to its saved report. Neither LWW
 nor a new checkpoint acknowledges these conflicts. Publishing other paths
-remains allowed. Legacy up-to-date conflicts can be acknowledged by sync
-without a report/target through `Store::clear_conflicts`, including on repos
-that do not follow main.
+remains allowed. Legacy-only requests (all named paths in `ws.conflicts`, none
+in the saved report) can be acknowledged without target/generation through
+`Store::clear_conflicts`, even behind/diverged or with a separate saved report.
+That report is preserved and the acknowledgement does not move the workspace.
+Non-following repos also support named acknowledgements. A bound request mixing
+legacy-only and report paths returns `resolved_unrelated`; use two calls.
 
 ### Main-sync: T4 reconcile and C3 dependency moves
 

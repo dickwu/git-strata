@@ -184,11 +184,11 @@ Claude Code 会话 B ──┤  strata CLI (JSON)   │
 1. 某会话改了锁文件（或主干的锁文件变了）：strata 检测到锁文件哈希与当前依赖集不符。
 2. 在 staging 克隆里跑该 repo 配置的安装命令，封存为新依赖集 generation。
 3. 提出变更的会话可立刻切到新依赖集（克隆替换它自己的依赖目录）[用户]。
-4. `strata deps propose` 记录"待确认"；`strata status` 和每次 CLI 调用的 stderr 提示它；**不自动同步**。
-5. 人类经 §6.9 确认后 `strata deps approve <id> [--sessions …]`：对每个目标会话，先检查它没有在依赖目录上打开的文件（dev server）；有则跳过并报告；无则按下面"一起移动"的原子动作替换。
-6. 旧依赖集保留到没有会话或基线引用它。
+4. `strata deps propose` 记录提议；每 repo 的 `[repo.<name>.sync] deps = "apply" | "confirm"` 决定后续处理（decision B）。`apply` 是配置及新钉住配置的默认值：提议发布后成为 Pending，daemon 安装依赖并在通过 Auto 门时自动同步；`confirm` 保留人类批准流程。已有 pin 的收紧/放宽规则见 config.md；缺少整个 pin 条目仍 fail closed 到 `confirm`，需人类 `config relax`。
+5. `apply` 下自动替换须通过 Auto 门（会话健康、无活跃 scene、源码稳定、依赖不是会话自改或漂移、没有依赖目录占用等）；未通过则保留提议并报告原因。`confirm` 下人类经 §6.9 确认后 `strata deps approve <id> [--sessions …]`；这条显式批准路径在 `apply` 下也可用，仍检查依赖目录占用。
+6. 旧依赖集保留到没有会话或基线引用它。`follow_main` 在发布到默认分支的 repo 默认开启，源代码自动跟随 main；分支分离的 repo 不跟随。
 
-**依赖与源码一起移动** [用户，§13 问题 1 选严格匹配]：`deps approve` 对一个会话 = 把它的基线移到新依赖集所属的 tree——源码 rebase（§6.5 第 7 步）和依赖目录替换是**一个原子动作**：先 checkpoint，在临时目录准备好新基线树与新依赖集的克隆，`rename` 交换，冲突标出；该会话有打开的文件时整个跳过并报告。反过来**不**自动成立：发布后 rebase 把基线移到链顶时，若链顶的安装输入变了，不自动换依赖集——而是记一条"待确认"提议（§6.4 第 4 步），该会话停在旧基线上等待 `deps approve`，`status` 显示它在等（§9 不变量 4 优先于本段：依赖目录只在人类确认后替换）。于是 §4 里"基线 = tree OID + 匹配的依赖集"在任何时刻都成立；代价是依赖变了的发布之后，其它会话落后主干直到有人确认——这正是用户要的。
+**依赖与源码一起移动**：完整依赖移动把基线源码与匹配的新依赖集准备在临时目录，先 checkpoint，再原子交换；占用依赖目录时不换。依赖目录只在人类确认后，或该 repo 有效的 `sync.deps = apply` 且通过 Auto 门时自动替换（§9 不变量 4）。等待安装、`confirm`、会话自改或漂移时，符合 C2 条件的源码可先移动并保留旧依赖，报告 `source_only`；后续依赖替换仍遵守上述门，详见 session.md 的移动策略与 deps.md 的 C2/C3。
 
 ### 6.5 发布 `strata publish`
 
@@ -216,7 +216,7 @@ Claude Code 会话 B ──┤  strata CLI (JSON)   │
 - 有依赖目录的仓库必须 `publish.branch` 等于默认分支，并且 `pin_unpushed = true`。否则一条待确认的依赖变更会横跨两条线。配置加载时拒绝这个组合。没有依赖目录的仓库不受这条约束。
 - push=true：发布后立刻把链推到 `origin/<分支>`。push=false：留在本地，之后 `strata push <repo>` 再推。
 - 新会话钉基线：`pin_unpushed` 为真、发布分支等于默认分支、并且链领先时钉链顶；否则钉 o。
-- 参与会话发布后的新基线 = 这次发布产生的 commit 的 tree。依赖集必须跟着变时，不自动换，按 §6.4 等 `deps approve`。
+- 参与会话发布后的新基线 = 这次发布产生的 commit 的 tree。依赖集必须跟着变时，按 §6.4 的有效 `sync.deps` 模式处理：`apply` 经 Auto 门自动替换，`confirm` 等人类 `deps approve`；等待期间可按 C2 先移源码并保留旧依赖。
 - staff-api 这种「推任何分支都重建生产」的仓库，预期配置仍是 push=false + 人工 `strata push`。它没有依赖目录，所以不受默认分支那条约束。
 
 ### 6.8 工作区里的 git [我的决定]
@@ -264,11 +264,11 @@ agent 和用户是同一个 uid，且常以 bypass 权限运行，所以 flag �
 1. 任何写工作区的操作之前先 checkpoint；恢复本身可恢复。
 2. strata 对主 checkout 只读：读它的 `.git`（对象、refs）和种子文件，写只限自己的 `refs/strata/*`；从不改它的工作树、索引或 `refs/heads/*`。
 3. 发布只提交发布组里的路径；推送只推配置的目标；一推上线需**人类**确认（§6.9）。
-4. 依赖目录只在 `deps approve` 之后、且该会话没有打开的文件时替换。
+4. 依赖目录只在人类 `deps approve` 确认后，或该 repo 有效的 `[repo.<name>.sync] deps = "apply"` 且通过 Auto 门时替换；两条路径都拒绝依赖目录占用。`apply` 是新钉住配置的默认值，`confirm` 保留批准流程。
 5. 基线与依赖集 generation 永不原地修改。
 6. 任何不确定的失败（推送超时、合并中断）保留现场、不重放、不清理；`status` 报出来。
 7. 人类确认 = LocalAuthentication 通过 + TTY；没有任何 flag、环境变量或配置能绕过它。
-8. 会话的基线与依赖集永远匹配：两者只会一起移动。
+8. 完整移动的基线与依赖集匹配并原子交换；C2 的 `source_only` 明确保留旧依赖并报告待处理状态，不能把它当成依赖已同步。
 
 ---
 

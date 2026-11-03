@@ -590,7 +590,7 @@ confirm 只被 daemon 用
 
 `strata-confirm` 只负责签发和校验凭据（LocalAuthentication：Touch ID 或登录密码），不检查 TTY；TTY 检查（`require_tty`）在 cli 里。"confirm 只被 daemon 用"在 crate 层面成立：session 与 publish 只使用数据类型 `ConfirmToken` 和 `Action`，这两个类型放在 `strata-types` 里（§4）。
 
-基线与依赖一起移动（不变量 8）的原子动作是 `session::move_workspace(session: &SessionId, repo: &RepoId, new_base: BaseGen, head: CommitOid) -> Result<MoveReport>`（定义见 session.md §3）。这里的 `Result<T>` 即 `Result<T, StrataError>`；移动之后，`WorkspaceState` 的 `base` 和 `head` 一起更新。daemon 处理 `deps approve` 时调它，`publish::rebase_session` 做发布后 rebase 时也调它。发布后的新基线如果需要另一个依赖集，`rebase_session` 不移动这个会话，而是产生一个依赖变更提议，等 `deps approve`（不变量 4 优先于 design §6.4 的最后一句）。`deps` 只计算依赖集、提议和 rollout 计划，不调用 `session` 或 `publish`，依赖方向也不允许它这样做。
+基线与依赖一起移动（不变量 8）的原子动作是 `session::move_workspace(session: &SessionId, repo: &RepoId, new_base: BaseGen, head: CommitOid) -> Result<MoveReport>`（定义见 session.md §3）。这里的 `Result<T>` 即 `Result<T, StrataError>`；移动之后，`WorkspaceState` 的 `base` 和 `head` 一起更新。daemon 处理 `deps approve` 时调它，`publish::rebase_session` 做发布后 rebase 时也调它。发布后的新基线如果需要另一个依赖集，产生依赖变更提议；有效 `sync.deps = apply` 时可经 Auto 门走 C3，`confirm` 时等人类 `deps approve`。依赖未就绪、会话自改或漂移时，C2 可只移源码并保留旧依赖，报告待处理状态；这不等于依赖已同步。`deps` 只计算依赖集、提议和 rollout 计划，不调用 `session` 或 `publish`，依赖方向也不允许它这样做。
 
 ### Main-sync upstream wire types
 
@@ -598,7 +598,9 @@ confirm 只被 daemon 用
 `UpstreamCommit`, `UpstreamDeps`, and `UpstreamAuto` (also re-exported at the crate
 root). They implement serde and match main-sync design §5. `UpstreamDeps.error` is the stored install error for `install_failed`
 (`detail.staging` names the kept scene). `base_only` lists commit ids.
-Optional fields omit
+`RepoUpstream.following` is false for non-following repos, whose `fix` is omitted.
+`UpstreamAuto.target`, when present, is an `UpstreamMain` object `{head, tree}`.
+Fetch freshness is `Upstream.as_of`; there is no per-repo `as_of`. Optional fields omit
 None; optional lists omit empty values. Dependency mode uses `SyncDeps` and ids
 use the existing validated identifier types. The optional `upstream` fields on
 `SessionStatus`/`WorkspaceStatus` (in `strata-session`) carry these types.
@@ -608,6 +610,19 @@ use the existing validated identifier types. The optional `upstream` fields on
 `SyncRequest` is the shared agent RPC input: `session`, optional `repos`,
 `check` (false), `fetch` (true), `resolved`/`keep` (empty paths), optional
 `target: CommitOid` and `generation: u64`, and `accept_diverged` (false).
-Unknown fields are rejected. The move handler enforces report binding;
-legacy up-to-date workspace conflicts are the sole unbound acknowledgement
-case. Upstream data remains the separate shared upstream wire types.
+Unknown fields are rejected. The move handler requires target/generation for
+resolutions unless a named-conflict acknowledgement applies: legacy-only requests
+(every named path in `ws.conflicts`, none in the saved report), including when
+behind/diverged or when a separate report exists; or named workspace conflicts in
+a non-following repo. These cases clear only named conflicts under the queue,
+repo lock and G0, before fetch or move preparation. Base/head/generation and any
+separate report stay unchanged. The per-repo reply is
+`{"result":"conflicts_cleared","following":true|false,"resolved":[...],"kept":[...]}`.
+Other resolutions require a matching saved report; a supplied but stale/missing
+report gives HeadMoved. Mixing legacy-only and report paths in a bound request
+gives `resolved_unrelated`; use separate acknowledgement and resolution calls.
+Partial `Conflict` replies list remaining blockers in `detail.conflicts` and
+accepted names in `detail.resolved` / `detail.kept`. The original report rows are
+retained, but choices are not persisted for automatic reuse: repeat accepted
+names with the same flags/bytes and target/generation, plus newly resolved names.
+Upstream data remains the separate shared upstream wire types.

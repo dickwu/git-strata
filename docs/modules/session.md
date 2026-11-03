@@ -646,7 +646,7 @@ design §6.1 第 2 步把接法交给构建者；增补 2 定为影子仓库，g
 | S5 | 具名拒绝只发生在该操作第一次对外可见的写之前；之后的任何失败都是 `Unknown`，现场原样保留、记进 store，`status` 报出，daemon 重启之后照样报出；session 从不自己重放、清理或回滚它（例外：`new` 失败后自己回滚，见 D56）。只有从未对外可见的内部暂存，才由建它的操作在具名拒绝前拿走，或由之后的操作（这个工作区的下一次移动、这个会话的 `remove`、daemon 启动时的 `recover`）收走（§6.1）。现场只由人越过：会话的经 `rm --discard` 加确认；失败的移动留下的工作区现场，也可以经 `resolve_failed_move` 的 Abandon 或 Accept，它先核对磁盘上的现场与意图的记录，对不上就拒绝（§5.9） | 6 |
 | S6 | `remove(…, discard = true, …)` 只接受 `action` 为 `RemoveDiscard { session: 本会话 }` 的凭据；越过任何未决状态都要它，没有任何参数、环境变量或配置能代替 | 7 |
 | S7 | 依赖目录、种子缓存、种子文件从不以符号链接的形式进入工作区；session 往工作区或暂存树里的每一次写都在根之下逐级 `O_NOFOLLOW` 解析，树里的符号链接从不把写送到会话根之外（增补 3 "Rooted destinations"） | design §3、§4（为不变量 2、4、8 服务） |
-| S8 | 依赖目录只在 `move_workspace` 里被替换，交换之前复查依赖目录上打开的文件；调用方只在 `deps approve` 之后、或提出变更的会话自己要求时（design §6.4 第 3 步）才传入新的依赖集 | 4 |
+| S8 | 依赖目录只在 `move_workspace` 里被替换，交换之前复查依赖目录上打开的文件；调用方在人类 `deps approve` 之后、提出者自换（design §6.4 第 3 步），或有效 `sync.deps = apply` 且通过 Auto 门的 C3 路径传入新依赖集；Agent sync 的对应门见文末 | 4 |
 | S9 | 会话 id 由 40 bit 随机数生成；store 留着一个会话的行（含 `Removed`，直到 gc 按保留期删掉它）期间，`new` 撞上这个 id 一律 `Exists`；行被 gc 删掉之后再撞上的概率是 2^-40。ticket 只是标签，不进任何路径 | design §11 第 18 条 |
 | S10 | 配置里的每个仓库在会话根下都有 `<repo>/`；工作区的 HEAD 是 detached 的，没有 upstream，`pre-push` 在没有 `STRATA_PUBLISH=1` 时拒绝 | design §3、§6.8 |
 | S11 | 每个会话、每个 repo 一个影子仓库；它的镜像只在 `new` 时取一次，会话存活期间从不改写，不见了只报告、从不重建 | 2、8（增补 2） |
@@ -1505,6 +1505,8 @@ Agent moves record no new conflicts (regenerable kept paths are reported
 separately); earlier workspace conflicts the move does not name in
 `--resolved`/`--keep` are kept, as they are on automatic moves, clear the saved sync report, and consume the selected pending
 revision in the finish transaction. The activity row records policy `agent`.
-Resolution decisions are written to `sync_move_history` while Preparing;
+Partial conflicts returned by the daemon before a move do not write resolution
+decisions here; callers must repeat accepted names/flags with the same binding.
+For a move that reaches Preparing, decisions are written to `sync_move_history`;
 the associated move state shows whether they landed. Late writes after the
 last check keep the old tree and its durable G4 notice.

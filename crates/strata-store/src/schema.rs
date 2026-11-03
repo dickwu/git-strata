@@ -558,7 +558,7 @@ WHEN NEW.session IS NOT OLD.session OR NEW.repo IS NOT OLD.repo OR NEW.path IS N
                AND OLD.tracked = 1 AND OLD.health = 'ok' AND NEW.health = 'ok'
                AND NEW.scene IS OLD.scene
                AND (OLD.scene IS NULL
-                    OR (SELECT state FROM move_intents WHERE session = NEW.session AND repo = NEW.repo ORDER BY n DESC LIMIT 1) IN ('done', 'abandoned', 'refused'))
+                    OR COALESCE((SELECT state FROM move_intents WHERE session = NEW.session AND repo = NEW.repo ORDER BY n DESC LIMIT 1), '') IN ('done', 'abandoned', 'refused'))
                AND (SELECT lifecycle FROM sessions WHERE id = NEW.session) IS 'active'
                AND NOT EXISTS (SELECT 1 FROM move_intents WHERE session = NEW.session AND repo = NEW.repo AND state IN ('preparing', 'swapping'))
                AND json_array_length(NEW.conflicts) < json_array_length(OLD.conflicts)

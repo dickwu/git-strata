@@ -88,12 +88,11 @@ export interface UpstreamRepo {
     reason?: string | null;
     since: string;
     attempts: number;
-    target?: string;
+    target?: { head: string; tree: string };
     detail?: { paths?: string[]; [key: string]: unknown };
   } | null;
   conflicts?: string[];
   fix?: string;
-  as_of?: string | null;
 }
 export interface Upstream {
   as_of?: string | null;
@@ -189,6 +188,8 @@ export interface Proposal {
   tree?: string | null;
   head?: string | null;
   from_head?: string | null;
+  /** Effective dependency sync policy; older daemons omit this field. */
+  mode?: 'apply' | 'confirm';
   changes?: PackageChanges;
 }
 

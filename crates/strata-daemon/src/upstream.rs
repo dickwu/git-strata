@@ -293,10 +293,12 @@ impl Cache {
                     auto,
                     conflicts: rec.conflicts.clone(),
                     unpublished: Some(live.unpublished),
-                    fix: Some(format!(
-                        "git-strata sync --session {} --repo {repo}",
-                        row.manifest.id
-                    )),
+                    fix: cfg.follow_main().then(|| {
+                        format!(
+                            "git-strata sync --session {} --repo {repo}",
+                            row.manifest.id
+                        )
+                    }),
                 },
             );
         }
@@ -344,14 +346,17 @@ impl Cache {
                 }
             });
             let mut c = self.0.lock().unwrap_or_else(|p| p.into_inner());
-            c.deps.retain(|(k, _)| *k != key);
-            if let Some(summary) = &summary {
-                c.deps.push_back((key, summary.clone()));
+            // A transient busy/error/timeout keeps the last good value for this
+            // exact key. Other generations/proposals cannot reuse that value;
+            // their old entries age out under the existing cache bound.
+            if let Some(summary) = summary {
+                c.deps.retain(|(k, _)| *k != key);
+                c.deps.push_back((key.clone(), summary));
             }
             while c.deps.len() > CACHE_LIMIT {
                 c.deps.pop_front();
             }
-            summary
+            c.deps.iter().find(|(k, _)| *k == key).map(|(_, s)| s.clone())
         } else {
             self.0
                 .lock()

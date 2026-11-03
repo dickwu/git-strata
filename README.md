@@ -262,14 +262,36 @@ new tree without conflict (`rm.regenerable` paths excepted). Otherwise the
 move is **deferred**, never forced: `status` shows
 `behind publish N of REPO: auto-rebase deferred (open_files|recent_writes|conflicts|busy, since HH:MM, attempts k)`
 and the catch-up retries with backoff (capped at 30 min). When the publish
-changed install inputs (`package.json`, `bun.lock`), the source moves onto the
-published tree with the session's old deps set (`rebase.deps_changed =
-"move_source"`, the default; `"wait"` keeps the old behaviour) and the deps
-proposal stays Pending for the human. Explicit moves (deps approval rollout)
-are unchanged. If something writes into the pre-move tree after the swap, that
+changed install inputs (`package.json`, `bun.lock`), the repo's effective
+`sync.deps` policy controls dependency replacement. In `apply` mode, an eligible
+Auto move can use the new sealed set. While dependencies are unavailable, or
+the workspace has its own dependency changes/drift, source can move with the old
+set (`rebase.deps_changed = "move_source"`, the default; `"wait"` defers that
+source-only move). `confirm` mode keeps replacement pending for human approval.
+If something writes into the pre-move tree after the swap, that
 tree is kept instead of retired (`status`/`ls` list it under `kept_trees`
 with the late-written paths); `rm` refuses until it is published or discarded, and the
 `rm --discard` prompt names it.
+
+**Syncing main explicitly.** `git-strata sync --check` inspects local upstream;
+`git-strata sync --repo R` fetches and attempts a move. A non-following upstream
+entry has `following:false` and no sync `fix`; ignore its behind count and only
+acknowledge named workspace conflicts. A plain sync returns `not_following`.
+On a sync conflict, resolve paths with the report's `--target` / `--generation`.
+A partial reply makes no move and lists remaining conflicts plus
+`detail.resolved` / `detail.kept`. Choices are not saved for automatic reuse:
+repeat accepted names with the same flags and accepted bytes, together with new
+resolutions and the same binding. HeadMoved requires reviewing a fresh report.
+
+Legacy-only acknowledgements (all named paths in `ws.conflicts`, none in the
+saved report) need no binding and make no move, even behind/diverged or with a
+separate report. They return
+`{"result":"conflicts_cleared","following":true|false,"resolved":[...],"kept":[...]}`.
+Mixing legacy-only and report paths in a bound call gives `resolved_unrelated`;
+use two calls. Dependency `waiting` and `source_only` replies report the state and a
+matching pending proposal when present; only `waiting_human` with that proposal
+gets the human-approval fix. `own_change` and `drift` need attention without an
+approval fix. Follow the [agent workflow](skills/git-strata/SKILL.md#keeping-up-with-main).
 
 **What `rm` counts as published.** An edit is published when a Done publish
 of this session, reachable from origin, has the same bytes (D57), or when a
@@ -596,8 +618,21 @@ show `ConfigRelaxPending`. The human then runs `git-strata config relax REPO`
 (TTY + prompt), which writes the file's flags into the pin; with nothing to
 relax it returns `InvalidInput` `not_relaxed`. Pins of repos removed from the
 config are kept. Format:
-`{"repos":{"<name>":{"deploy_on_push":bool,"confirm":bool,"push":bool,"regenerable":[...]}}}`
-(`regenerable` is written only when non-empty).
+`{"repos":{"<name>":{"deploy_on_push":bool,"confirm":bool,"push":bool,"sync_deps":"apply|confirm","regenerable":[...]}}}`
+(`sync_deps` is always written; `regenerable` only when non-empty).
+
+**Main-sync upgrade and rollback.** Stop the daemon, install matching CLI and
+daemon binaries (Homebrew formula and desktop cask), configure
+`[repo.<name>.sync]`, then start. Set `deps = "confirm"` before that start to
+keep human approval; also set `follow_main = false` to keep source following
+off. An existing pin without `sync_deps` adopts the default `apply`, so existing
+Pending proposals can auto-apply on the first start without that opt-out.
+Store v4/v5 and pins containing `sync_deps` are not downgrade-safe. For rollback,
+stop the daemon, preserve the current database and sidecars, restore the
+compatible `store/backups/store-v<from>-<ns>.db` (for example, `store-v3-<ns>.db`
+after v3 → v5), install both old binaries, and remove the sync tables and each
+pin's `sync_deps` before starting. The restored store omits work recorded after
+the backup; see [store recovery](docs/modules/store.md).
 
 **`rm.regenerable` is pinned too.** `[repo.<name>.rm] regenerable = [globs]`
 (the `.strata/lww` dialect) lists files a tool regenerates; their unpublished
@@ -673,7 +708,9 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `NoSuchRepo` | name not in config; `not_in_session`: run `detail.fix` (`git-strata add --session S --repo R`) |
 | `NoSuchBranch` | (`new`) a repo has no `origin/<default_branch>`; tell the human |
 | `InvalidInput` | fix arguments per `detail.reason` (`from_repo_prefix` / `from_path`: rewrite `--from` as `detail.expected` says); `chain_diverged` on a repo without confirmation: `git-strata push REPO` replays it (see [Origin moved](#origin-moved-under-the-unpushed-chain-push-replays)), then rerun; `chain_rewound`, or diverged on a gated repo: human runs `chain`; push-guard reasons above: tell the human |
-| `Conflict` | fix and rerun the same publish (above) |
+| `Conflict` (publish) | fix and rerun the same publish (above); `move_conflict` first needs named acknowledgement through sync |
+| `Conflict` (`sync_conflict`) | resolve every reported path with `sync --resolved`/`--keep` and the supplied target/generation; see the [agent workflow](skills/git-strata/SKILL.md#keeping-up-with-main) |
+| `Conflict` (`base_diverged`) | stop and ask the human to recover the chain; never accept divergence on your own |
 | `Conflict` (`assigned`) | another session owns the path; do not retry |
 | `NoMatch` | a `--from` path is not checkpointed; checkpoint, rerun |
 | `NoCommit` | nothing new; not a failure |
@@ -681,13 +718,13 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `OpenFiles` | a process holds files (`detail` has pids); stop it only if you started it, retry |
 | `CheckFailed` | the repo's check failed in staging; fix, checkpoint, publish again |
 | `CheckMutates` | config problem; tell the human |
-| `HeadMoved` | another publish or main moved first; re-read state, do not loop |
+| `HeadMoved` | sync: review the fresh report and re-resolve (or deliberately keep) with its binding, at most five retries; other commands: re-read state, do not loop |
 | `PushRefused` | report the remote's words to the human |
 | `Unknown` | outcome uncertain (`push_unknown`, `socket_closed`, `launchctl`): do not retry, `gc` or `rm`; tell the human |
 | `Binary` / `TooLarge` | per-entry markers in `diff` / `grep`; not a call failure |
 | `Corrupt` | store damage; stop, tell the human |
 | `PortInUse` | `already_running`: reuse the server this workspace already runs; `foreign`: run `detail.fix` (`session ports --reassign`) for your own session, then `exec` again |
-| `Unsupported` (`daemon_too_old`) | the daemon predates dev-port leases; tell the human |
+| `Unsupported` (`daemon_too_old`) | the daemon lacks the requested feature (e.g. sync or dev-port leases); ask the human to install matching CLI/daemon versions |
 
 The full closed set of codes: Conflict, HeadMoved, Dirty, Busy, NoSuchPath,
 NoSuchBranch, NoSuchCommit, NoCommit, NoMergeBase, IsDirectory, NotDirectory,

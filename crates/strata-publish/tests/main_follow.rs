@@ -564,7 +564,7 @@ fn reconcile_replaces_discarded_stale_target_same_pass() {
 fn deps_only_enrolled_from_deps_main_after_settle() {
     let f = fx();
     let s = f.new_session(&["tool"]);
-    advance(&f, true);
+    let head = advance(&f, true);
     pass(&f);
     let p = strata_deps::open_proposals(f.store(), Some(&f.rn("tool")))
         .unwrap()
@@ -585,7 +585,8 @@ fn deps_only_enrolled_from_deps_main_after_settle() {
             .unwrap()
             .iter()
             .any(|q| q.state == strata_deps::ProposalState::Pending
-                && Some(&q.to) == row(&f, &s).unwrap().to_deps.as_ref())
+                && Some(&q.to) == row(&f, &s).unwrap().to_deps.as_ref()
+                && q.from_head.as_ref() == Some(&head))
     );
 }
 

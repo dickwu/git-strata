@@ -39,6 +39,16 @@ same binary. Full command and flag table: [reference.md](reference.md).
   `git-strata daemon start`. While it is down the hook answers `Busy`
   `daemon_down` and that checkpoint is not recorded: tell the human which
   edits were not checkpointed. Do not write a plist yourself.
+- Main-sync upgrades/rollbacks belong to the human: stop the daemon, install
+  matching CLI+daemon (Homebrew formula+cask), add `[repo.<name>.sync]`, then
+  start. Before that first start, `deps = "confirm"` keeps approval; add
+  `follow_main = false` to disable following too. Existing pins missing
+  `sync_deps` otherwise adopt default `apply` and Pending proposals can auto-apply.
+  Store v4/v5 and pins with `sync_deps` are not downgrade-safe. Rollback requires
+  stopping the daemon, preserving the current database/sidecars, restoring
+  `store/backups/store-v<from>-<ns>.db` (e.g. v3 → v5 uses `store-v3-<ns>.db`),
+  installing both old binaries and removing sync tables plus each pin's
+  `sync_deps` before starting. The restored store lacks post-backup records.
 - Without the daemon, only these work (read-only, straight from the store):
   `status`, `grep`, `files`, `diff`, `deps list`, `daemon status`, and a
   repeated `checkpoint --tool-call ID` whose checkpoint already exists. Every
@@ -90,7 +100,8 @@ git-strata restore 42 src/a.ts
 
 # 6. Before you finish: inspect upstream, then publish checkpointed content
 git-strata sync --check
-# If upstream.clean is false: sync, resolve, re-run checks, checkpoint, publish.
+# For unclean following repos: sync, resolve, re-run checks, checkpoint, publish.
+# For following:false: ignore behind; only acknowledge named conflicts.
 git-strata publish --from s-k3q7xm2a:src/a.ts --from s-k3q7xm2a:src/b.ts
 
 # 7. Push the publish chain (only if the human asked; may need a TTY)
@@ -103,13 +114,16 @@ git-strata rm --session s-k3q7xm2a
 Notes:
 
 - Before you finish, run `git-strata sync --check`. When `upstream.clean` is
-  false, run `git-strata sync`, resolve its reported conflicts, re-run your
-  checks, checkpoint and publish. After `result: moved` or `source_only`,
+  false, inspect each repo: for `following: true`, run `git-strata sync --repo R`,
+  resolve its reported conflicts, re-run your checks, checkpoint and publish.
+  For `following: false`, ignore behind and only acknowledge named workspace
+  conflicts; the reply emits no sync fix and sync never moves that repo.
+  After `result: moved` or `source_only`,
   `cd` back into the workspace by its path and restart processes you started
   there: the old shell/process cwd may still refer to the previous tree.
   Read `data.upstream` in publish and rm replies too (publish is keyed by
-  session id), and act on any unclean entry. For a Dirty rm, the order is
-  sync → checks → checkpoint → publish → rm.
+  session id), applying the same following/non-following rule. For a Dirty rm,
+  the order for following repos is sync → checks → checkpoint → publish → rm.
 - Upstream is informational: it never by itself refuses publish or rm.
   Behind counts cap at 1000; `capped` means at least that many. `ls` and
   `status --brief` are cache-only; null/unchecked means not yet checked.
@@ -170,7 +184,8 @@ Notes:
   `code: OpenFiles` means a process holds files in your deps dir; stop it (only
   if you started it) and run again. Approving for other sessions is
   human-only (below). `data.pending_proposals: [{id, repo}]` in any
-  envelope means a proposal waits for the human.
+  envelope identifies an open proposal. Inspect its effective mode/state:
+  `apply` can proceed automatically; human-action waits follow the stop rule below.
 - If you change install inputs (package.json deps, bun.lock, patches,
   pubspec.yaml / pubspec.lock, ...) and publish without switching, publish
   still runs the checks with deps that match the staged inputs: it uses a
@@ -193,63 +208,125 @@ Notes:
 | `git-strata sync --repo R --resolved PATH --target HEAD --generation N` | Finish the reported conflict after editing it. Repeat `--resolved` for each path. |
 | `git-strata sync --repo R --keep PATH --target HEAD --generation N` | Explicitly acknowledge that your current side of the reported conflict is correct. |
 
-Main's commits and dependencies merge into idle workspaces automatically.
-To merge now, run `git-strata sync`. You never run `deps approve`; when
-sync reports `waiting_human`, give the proposed approval command to the human.
-Sync preserves your dependency inputs when they are your own draft or drift.
+Main's source follows automatically in eligible idle workspaces; dependency
+replacement uses the repo's effective `sync.deps` mode (`apply` or `confirm`).
+To merge now, run `git-strata sync --repo R`. When upstream says `following: false`,
+ignore `behind` and only acknowledge named conflicts as below: no sync fix is
+emitted, and a plain sync returns `result: not_following` without moving anything.
 
 On `Conflict` with `detail.reason = "sync_conflict"`, read `detail.conflicts`.
 Edit each listed path to contain both your changes and upstream's `theirs`.
 Edit only inside the reported hunks: adjacent edits can fuse a region with a
 previously clean upstream change and are refused as `resolved_overlap_changed`.
-Make unrelated edits after syncing. Then run:
+Make unrelated edits after syncing. Name **every reported conflict path in one
+call**, mixing repeated `--resolved` and `--keep` as needed:
 
 ```sh
-git-strata sync --repo R --resolved PATH --target HEAD --generation N
+git-strata sync --repo R --resolved PATH_A --resolved PATH_B --keep PATH_C --target HEAD --generation N
 ```
 
-Use HEAD and N from `detail.target.head` and `detail.generation`.
-Upstream's non-overlapping hunks merge automatically. Inside a conflicting
-hunk your text wins, so compare it with `theirs`; restoring your old bytes
-is not a resolution (`resolved_unchanged`). Use `--keep` only after deciding
-explicitly that your existing side is correct. For non-text conflicts
-(binary, deletion, mode/type, oversized files), your current file or absence
-is taken whole and reported under `whole_file`: compare with `theirs` first.
-Paths absent from the saved report are `resolved_unrelated`.
+Use HEAD and N from `detail.target.head` and `detail.generation`; both flags
+are required outside the acknowledgement cases below. Upstream's non-overlapping
+hunks merge automatically. Inside a conflicting hunk your text wins, so compare
+it with `theirs`; restoring your old bytes is not a resolution (`resolved_unchanged`).
+Use `--keep` only after deciding explicitly that your existing side is correct.
+For non-text conflicts (binary, deletion, mode/type, oversized files), your current
+file or absence is taken whole and reported under `whole_file`: compare with
+`theirs` first. Paths absent from the saved report are `resolved_unrelated`.
+A partial submission makes no move. Its `detail.conflicts` lists only remaining
+conflicts, and `detail.resolved` / `detail.kept` list choices accepted in that
+request. The daemon retains their original report rows, but does **not** persist
+choices for automatic reuse. In the next call, repeat all accepted names with
+the same `--resolved` / `--keep` flags and unchanged accepted bytes, together with
+newly resolved names and the same `--target` / `--generation`. Repeating those
+choices is idempotent; omitting their names does not replay them.
 
-`HeadMoved` supplies a fresh report. Re-check it against the latest upstream.
-That report captures your already-edited bytes: another unchanged
-`--resolved` is refused. Re-resolve, or use `--keep` with the new binding after
-checking that your resolution remains correct. A move to the originally
-reported target before the target changes also completes that resolution.
+`HeadMoved` supplies a fresh report and invalidates the old resolution choices.
+Re-check it against the latest upstream. That report captures your already-edited
+bytes: another unchanged `--resolved` is refused. Re-resolve, or use `--keep`
+with the new binding after checking that your resolution remains correct. A move
+to the originally reported target before the target changes also completes that
+resolution.
 
-After `moved` or `source_only`, `cd` back to the workspace by its path and
-restart processes you started there; existing shells can remain in the kept
-old tree. Re-run checks, checkpoint, then publish. On `result: waiting`
-(worker installing or your own publish running), wait 30 seconds and retry
-at most five times. Apply the same bound to repeated `HeadMoved` and
-`Busy auto_deferred` with `recent_writes`, `changed_since_scan`, or
-`changed_during_move`. Agent sync takes a fresh `walk_activity` snapshot;
-it does not wait for the Auto policy's quiet window. After five attempts,
-publish what is allowed and report the remaining state to the human.
+After `moved` or `source_only`, `cd` back to the workspace by its path and restart
+processes you started there; existing shells can remain in the old tree. Re-run
+checks, checkpoint, then publish. Read these per-repo reply fields:
+
+| Field | Meaning and action |
+| --- | --- |
+| `lww` | Paths resolved by the configured last-writer-wins rules; review the resulting files and rerun checks. This is separate from hunk-bound `--resolved`. |
+| `regenerable_kept` | Conflicting paths kept under the pinned `rm.regenerable` policy; review or regenerate them and rerun checks. |
+| `accepted_diverged` | Base-only commits (`head`, `subject`) accepted after the human's chain recovery; report them to the human. Never initiate that recovery or acceptance yourself. |
+| `old_tree` | Path of a retained previous workspace, or null. It can contain open handles, late writes or uncarried content. Re-enter the live workspace and restart only your processes; preserve the old tree and report any remaining work. |
+
+For `result: waiting`, inspect `deps.state` or `reason` before retrying:
+
+- `waiting_human`, `own_change` and `drift` do **not** clear by retrying. Both
+  `waiting` and `source_only` carry `deps.state` and the matching pending
+  `deps.proposal` when present. Only `waiting_human` with that proposal gets
+  `deps.fix: "ask the human: git-strata deps approve P"`; `own_change` and `drift`
+  have no approval fix. Relay the state, proposal and supplied fix, then stop the
+  sync loop. Do not invent an approval id. For `source_only`, the source move
+  succeeded but the dependency action remains.
+- Only transient waits (`deps.state: installing` or `reason: publishing`) get
+  a 30-second wait and at most five retries. Use the same bound for repeated
+  `HeadMoved` (review each fresh report) and `Busy auto_deferred` with
+  `recent_writes`, `changed_since_scan` or `changed_during_move`. Agent sync uses a
+  fresh `walk_activity` snapshot, not the Auto policy's quiet window. After the
+  bound, publish what is allowed and report the remaining state to the human.
 
 On `base_diverged`, stop and tell the human about chain recovery. Never pass
 `--accept-diverged` on your own. It is accepted only after the old workspace
 head is reachable from neither the publish chain nor the tracking ref.
 
-Publish refuses paths still in `ws.conflicts` with `move_conflict`. For a
-legacy conflict on an up-to-date workspace with no saved sync report,
-`git-strata sync --repo R --resolved PATH` (or `--keep PATH`) acknowledges
-only those paths and returns `conflicts_cleared`; no target or generation is
-needed in this one case. The same works on a repo that does not follow main
-(`following: false`); there sync never moves the workspace and only
-acknowledges. Read and resolve the file before acknowledging it.
-Such conflicts survive later automatic and `sync` moves until you name
-the path with `--resolved`/`--keep` (or it is acknowledged as above).
+Publish refuses paths still in `ws.conflicts` with `move_conflict`. If **all**
+named paths are in `ws.conflicts` and **none** is in the saved sync report,
+`git-strata sync --repo R --resolved PATH` (or `--keep PATH`) acknowledges only
+those paths without target/generation. This works when up to date **and when
+behind or diverged**, even with a separate saved report; that report is preserved.
+The per-repo reply is
+`{"result":"conflicts_cleared","following":true,"resolved":[...],"kept":[...]}`.
+It clears conflict markers before fetch or move preparation, without changing
+base/head/generation or accepting divergence. Named conflicts in a repo with
+`following: false` can likewise be acknowledged under the session queue, repo
+lock and G0; that reply has `following:false`. Read and resolve each file before
+naming it. Mixing legacy-only paths with report paths in a bound resolution
+returns `resolved_unrelated`: use two calls, a legacy-only acknowledgement and
+then a report resolution with its binding. Unnamed legacy conflicts survive
+automatic and sync moves and can be acknowledged separately.
 
-When `upstream.deps.state` is `install_failed`, tell the human: inspect
-the kept staging in `deps.error.detail.staging`, remove it, then run
-`git-strata deps approve P`. Do not delete it yourself.
+When `upstream.deps.state` is `install_failed`, tell the human: inspect the kept
+staging in `deps.error.detail.staging`, remove it, then run
+`git-strata deps approve P`. Do not delete it yourself or retry the install loop.
+
+### Sync reasons and actions
+
+Earlier successful repos remain in `error.detail.done`; inspect them even when
+a later repo fails. The move handler's reasons and related outcomes are:
+
+| Code / reason or result | Agent action |
+| --- | --- |
+| `Conflict sync_conflict` | Resolve every reported path with the supplied target/generation as above. |
+| `HeadMoved sync_conflict` | Review the fresh report, re-resolve or deliberately keep with its binding; at most five retries. |
+| `InvalidInput resolution_binding_required` | Run plain `sync --repo R` to obtain a report, then supply both `--target` and `--generation`; do not guess either. |
+| `InvalidInput ambiguous_resolution` | Select exactly one repo with `--repo R` and use its report. |
+| `InvalidInput resolved_and_keep` | Choose one flag per path; remove the duplicate choice. |
+| `InvalidInput resolved_unchanged` | Edit the conflict, or deliberately use `--keep` after comparing with upstream. |
+| `InvalidInput resolved_unrelated` | Select a current reported path; acknowledge legacy-only workspace conflicts in a separate call, even when a saved report exists. Do not mix the two groups. |
+| `InvalidInput resolved_overlap_changed` | Recheck the supplied hunks and revise edits that expanded into previously clean upstream regions. |
+| `NoSuchCommit main_missing` | No usable main tip exists; report the repo/ref state to the human and stop. |
+| `InvalidInput` / `NoSuchRepo not_tracked` | Select a tracked workspace; if needed, create a session explicitly with `new --repo R`. Do not edit untracked siblings. |
+| `NoSuchRepo not_in_session` | Run the reply's `fix` (`git-strata add --session S --repo R`). |
+| `NoSuchSession no_such_session` | Use an existing session id or enter its workspace; do not retry a removed session. |
+| `result: not_following` | Informational, not an error: ignore behind, only acknowledge named conflicts, then stop syncing this repo. |
+| `Conflict base_diverged` | Stop; report base-only commits for the human's chain recovery. |
+| `InvalidInput diverged_still_on_chain` | Stop; the old head is still reachable. Do not force or repeat acceptance. |
+| `Busy auto_deferred` | Inspect `defer.reason`: `state` requires status/recovery (stop for unhealthy/inactive state); `recent_writes`, `changed_since_scan`, `changed_during_move` permit only the bounded retry above. `defer.detail.reason: main_or_workspace_moving` is transient too. |
+| `Busy sync_retry` | Preparation raced with main/workspace/dependency ownership. The daemon retries internally; if surfaced, use the same bounded retry. |
+| `waiting` / `publishing`, `installing` | Transient; wait 30 seconds, at most five retries. |
+| `waiting` / `waiting_human`, `own_change`, `drift` | Pass on `deps.fix`, proposal and reason to the human; stop retrying. |
+| `Corrupt manifest_missing` / `sync_report` | Missing base manifest or invalid saved report; preserve the workspace and stop for human recovery. |
+| `Unsupported daemon_too_old` / `sync_check_unavailable` | Ask the human to install matching CLI/daemon versions. `sync_check_unavailable` is a legacy internal diagnostic; current check dispatch should never return it. |
 
 ## Publish conflict: fix and re-run
 
@@ -421,7 +498,7 @@ All three keys are always present; `data` is never null. Branch on
 | `NoSuchSession` | Wrong selector, or cwd is not inside a workspace; `cd` into one or pass `--session`. |
 | `NoSuchRepo` | Repo name not in config; check `--repo` / argument. With `detail.reason` `not_in_session`: the session has no workspace of that repo; run `detail.fix` (`git-strata add --session S --repo R`), then retry. |
 | `InvalidInput` | Fix arguments per `detail.reason` (`checkpoint_reason`, `diff_mode`, `both_selectors`, `no_batch`, `unknown_command` with `detail.commands`, ...). `chain_diverged` from publish on a repo that needs no confirmation: run `git-strata push <REPO>` (it fetches, replays the unpushed chain onto origin, reruns checks, pushes a fast-forward), then rerun the publish; `replay_deps_unsealed` from push: open a session on the repo, push again. `chain_rewound`, or diverged on a gated repo: hand to the human (`chain`). |
-| `Conflict` | Same hunk changed on both sides (another session or upstream); nothing committed in `detail.repo`, earlier repos of the call may have landed (`data.commits`). Fix, checkpoint, re-run the same publish ("Publish conflict: fix and re-run"); between sessions, who resolves can be set by `publish --assign`. |
+| `Conflict` (publish) | Same hunk changed on both sides (another session or upstream); nothing committed in `detail.repo`, earlier repos of the call may have landed (`data.commits`). Fix, checkpoint, re-run the same publish ("Publish conflict: fix and re-run"); between sessions, who resolves can be set by `publish --assign`. |
 | `Conflict` (`sync_conflict`) | Edit the listed hunks, then sync with `--resolved`, the reported target and generation. Earlier successful repos appear in `detail.done`. |
 | `Conflict` (`base_diverged`) | Tell the human; chain recovery must precede accepting the dropped base. |
 | `Conflict` (`move_conflict`) | Publish is blocked until the listed workspace conflicts are acknowledged through sync. |

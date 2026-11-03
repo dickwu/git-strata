@@ -24,7 +24,7 @@ deps 负责依赖集（design §4 的 Deps set）里"算"的那一半：算键�
 - **种子缓存与种子文件的克隆**：由 session::new 负责（design §4、§6.1 第 4 步）。deps 只保证封存时排除嵌套在依赖目录里的种子缓存，并用 `nested_seed_caches` 告诉调用方是哪几个。
 - **基线导出与基线 generation 目录**：由 session 负责。它经 `gitio::export_tree` 导出源码树，调 `ensure` 取依赖集，用 `clone_into` 把依赖集克隆进它自己新建的目录，再改名到 `Store::base_dir` 并登记（module-rulings Addendum 3"Base generation layout"）。导出、`ensure` 与清单在锁外，只有复查、`clone_into`、改名与登记那一段在 repo 写锁里；`move_workspace` 在锁里只找基线、从不建（module-rulings "Base generations are built outside the lock"）。deps 只读调用方交来的导出目录。
 - **发布链与锚点的写**：由 publish 负责（module-rulings "The publish chain carries an anchor…"）：它在一个 ref 事务里一起写链与锚点，被回退、分叉的链由它拒绝或重放。deps 只读这两个 ref，给出判定（`publish_chain`）；锚点跟着 origin 沿链前移（a := `merge_base(o, c)`）也由 publish 与 daemon 做（module-rulings "The anchor follows origin along the chain — amended"）。
-- **发布后 rebase**：由 publish::rebase_session 负责。新基线需要另一个依赖集时，它调 `deps::propose` 登记提议，会话停在旧基线上等 `deps approve`（module-rulings 公共条 3：不变量 4 优先于 design §6.4 的最后一句）。deps 对它的要求见 §5.12。
+- **发布后 rebase**：由 publish::rebase_session 负责。新基线需要另一个依赖集时登记提议；有效 `sync.deps = apply` 时经 Auto 门走 C3，`confirm` 时保留人类 `deps approve` 流程，等待期间可按 C2 先移源码、保留旧依赖（文末 main-sync 补充取代早期只等批准的规则）。deps 对它的要求见 §5.12。
 - **repo 写锁与 `Busy`**：由 daemon 负责（module-rulings T13）。daemon 经 `Ctx.locks`（`RepoWriteLock`，§3）把它交给 deps；deps 只在短的临界区里持有它，从不跨过 install（Addendum 3/4"Locks"）：封存（rename、设 mode、同步、登记），以及提议与主干记录的写。`observe_main` 与 `ensure_target` 的登记自己取锁；`propose` 由调用方持锁调用（module-rulings "deps follows main's current tip"，§5.9）。deps 自己另有"每个依赖集一把建造锁"（§4.1）。
 - **持久化**：表、索引、触发器与全部 SQL 都在 store（Addendum 4"Schema ownership"）。deps 拥有自己四类记录的词汇、转换图与含义（§4.2、§4.5），经 store 的具名方法读写，从不执行 SQL。
 - **generation 的回收**：由 store 的 gc 负责（design §7"空间回收"）。依赖集的引用规则与封存目录的回收要求写在 §4.6。
@@ -795,8 +795,11 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 
 Main-sync v4 adds optional `from_head` to `Proposal`, `ProposeArgs`, and the store
 records. When observing a new dependency target, it is the head of the `deps_main`
-row being replaced. A same-`to`, target-only copy preserves the original value,
-as does an install-identity replacement. Legacy rows have None (omitted in JSON).
+row being replaced. New session, rebase and residue-owner proposals record the
+workspace head paired with their source base. A same-`to`, target-only copy
+preserves the original value, as does an install-identity replacement. Missing
+values (omitted in JSON) can remain in pre-v4 rows and v4/v5 rows created by those
+writers before the fix; a schema version alone does not guarantee a baseline.
 
 `observe_main_locked(ctx, tree, head, inputs_hash, set_id)` is the caller-held-lock
 entry point. Prepare the export and `key_of` result before taking the repo write
@@ -960,15 +963,28 @@ the self-locking convenience API.
 `kind: added|removed|changed`, `direct`) and `truncated`. Parsers cover Bun JSONC,
 npm package-lock v2/v3, Composer, Pub and Cargo locks. Companion manifests supply directness
 and direct-spec fallback; an unparsed input is reported as `<file> changed (no parser)`.
+pnpm and Yarn use that filename-only fallback. Package names, `from`/`to` values
+and fallback phrases have URL userinfo redacted before summary formatting,
+clipping, serialization or cache insertion, including URLs embedded in manifest specs.
 Known lockfile results supersede duplicate manifest results, and direct dependencies sort first.
 
 Each blob is size-checked before reading (16 MiB maximum); results contain at most 50 packages
-and a one-line summary of at most 120 Unicode characters. A 200 ms response budget encloses
-Git reads and parsing. A single bounded worker prevents timed-out requests accumulating parser
-threads; competing requests return a best-effort `Busy changes_busy`. Each Git read receives the
-remaining deadline, and parsing checks the deadline between inputs. The bounded 128-entry memory
-cache (entries above 256 KiB are not retained) keys on file names and before/after blob IDs, including companion manifests; source-only
-commits can reuse the result. No store, checkout, install or network mutation occurs.
+and a one-line summary of at most 120 Unicode characters. The caller waits up to 200 ms;
+the single background worker has a separate 5 s budget for Git reads and parsing. A response
+timeout does not cancel that worker: it can finish and populate the cache for the next poll.
+Competing requests return best-effort `Busy changes_busy` while the slot is occupied. Each Git
+read receives the remaining worker deadline, and parsing checks it between inputs. The bounded
+128-entry memory cache (entries above 256 KiB are not retained) keys on file names and before/after
+blob IDs, including companion manifests; later polls and source-only commits can reuse the result.
+No store, checkout, install or network mutation occurs.
+
+The daemon's `deps_list` omits `changes` on enrichment failure. For rows without `from_head`,
+one shared 16-unit legacy-attribution budget per call charges each legacy proposal and each
+eligible workspace inspected; exhaustion omits enrichment rather than selecting a partial
+baseline. Recorded baselines bypass this cap. It is an operation-count limit, not a timeout for
+each ancestry command. Upstream status separately keeps its last good summary for the exact
+`(session, workspace BaseGen, generation, proposal id)` key on busy/error/timeout; another key
+cannot reuse it (daemon.md §5).
 
 ### 5.13 复杂度与验收数字
 
