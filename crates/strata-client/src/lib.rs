@@ -1,15 +1,16 @@
 //! The json-lines client (cli.md §3.4): one connection per call, one
 //! request line, one reply line. Ids are decimal strings counting from 1.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use strata_types::{Code, StrataError};
 
+mod deadline;
 pub mod deps;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -34,12 +35,35 @@ pub enum Kind {
 pub enum CallError {
     Down(StrataError),
     Failed(StrataError),
+    Timeout { method: String, waited: Duration, phase: &'static str, kind: Kind, sent: bool },
 }
 
 impl CallError {
     pub fn into_error(self) -> StrataError {
         match self {
             CallError::Down(e) | CallError::Failed(e) => e,
+            CallError::Timeout { method, waited, phase, kind, sent } => {
+                let in_progress = kind == Kind::Write && sent;
+                let message = if in_progress {
+                    format!(
+                        "{method} may still run in the daemon after {:.3}s; it was not cancelled",
+                        waited.as_secs_f64()
+                    )
+                } else {
+                    format!(
+                        "{method} timed out after {:.3}s; nothing was changed by this request",
+                        waited.as_secs_f64()
+                    )
+                };
+                let mut detail = json!({ "reason": "client_timeout", "method": method,
+                    "waited_secs": waited.as_secs_f64(), "phase": phase, "request_sent": sent,
+                    "fix": if in_progress { "run git-strata status to inspect the result; do not retry, gc, or rm" }
+                        else { "back off before retrying" } });
+                if in_progress {
+                    detail["outcome"] = json!("in_progress");
+                }
+                StrataError::new(if in_progress { Code::Unknown } else { Code::Busy }, message).with_detail(detail)
+            }
         }
     }
 }
@@ -52,7 +76,7 @@ impl From<CallError> for StrataError {
 
 pub fn daemon_down(socket: &Path) -> StrataError {
     StrataError::new(Code::Busy, "the daemon is not running; ask the human to run `git-strata daemon start`")
-        .with_detail(json!({ "reason": "daemon_down", "socket": socket.to_string_lossy() }))
+        .with_detail(json!({ "reason": "daemon_down", "socket": socket.to_string_lossy(), "socket_exists": socket.symlink_metadata().is_ok() }))
 }
 
 /// Whether something accepts connections on `socket` (the probe sends
@@ -66,37 +90,91 @@ pub fn call(socket: &Path, method: &str, params: Value, kind: Kind) -> Result<Va
     call_inner(socket, method, params, kind, None)
 }
 
-/// `call`, giving up (as a broken connection) when sending or the reply
-/// takes longer than `deadline` each. For probes that must not hang.
-pub fn call_within(socket: &Path, method: &str, params: Value, kind: Kind, deadline: Duration) -> Result<Value, CallError> {
-    call_inner(socket, method, params, kind, Some(deadline))
+/// `call` with one total wall-clock budget, including connect, send and reply.
+pub fn call_within(
+    socket: &Path,
+    method: &str,
+    params: Value,
+    kind: Kind,
+    budget: Duration,
+) -> Result<Value, CallError> {
+    call_inner(socket, method, params, kind, Some(budget))
 }
 
-fn call_inner(socket: &Path, method: &str, params: Value, kind: Kind, deadline: Option<Duration>) -> Result<Value, CallError> {
-    let mut stream = UnixStream::connect(socket).map_err(|_| CallError::Down(daemon_down(socket)))?;
-    if deadline.is_some() && (stream.set_read_timeout(deadline).is_err() || stream.set_write_timeout(deadline).is_err()) {
-        return Err(CallError::Down(daemon_down(socket)));
+fn call_inner(
+    socket: &Path,
+    method: &str,
+    params: Value,
+    kind: Kind,
+    budget: Option<Duration>,
+) -> Result<Value, CallError> {
+    let started = Instant::now();
+    let until = budget.map(|b| started.checked_add(b).ok_or_else(|| CallError::Failed(
+        StrataError::new(Code::InvalidInput, "timeout exceeds the monotonic clock range")
+            .with_detail(json!({"reason":"timeout_budget"}))
+    ))).transpose()?;
+    let timeout =
+        |phase, sent| CallError::Timeout { method: method.into(), waited: started.elapsed(), phase, kind, sent };
+    let mut stream = match until {
+        Some(until) => deadline::connect(socket, until),
+        None => UnixStream::connect(socket),
     }
+    .map_err(|e| {
+        if e.kind() == ErrorKind::TimedOut { timeout("connect", false) } else { CallError::Down(daemon_down(socket)) }
+    })?;
     let id = next_id();
     let line = format!("{}\n", json!({ "id": id, "method": method, "params": params }));
-    let broken = || match kind {
-        Kind::Write => CallError::Failed(
-            StrataError::new(Code::Unknown, "the connection to the daemon closed after the request was sent; see `git-strata status`")
-                .with_detail(json!({ "reason": "socket_closed", "method": method })),
+    let broken = |sent| match kind {
+        Kind::Write if sent => CallError::Failed(
+            StrataError::new(
+                Code::Unknown,
+                "the connection to the daemon closed after the request was sent; see `git-strata status`",
+            )
+            .with_detail(json!({ "reason": "socket_closed", "method": method })),
         ),
-        Kind::Read => CallError::Failed(daemon_down(socket)),
+        _ => CallError::Failed(daemon_down(socket)),
     };
-    if stream.write_all(line.as_bytes()).and_then(|_| stream.flush()).is_err() {
-        return Err(broken());
+    let mut bytes = line.as_bytes();
+    while !bytes.is_empty() {
+        if let Some(until) = until {
+            let left = deadline::remaining(until).map_err(|_| timeout("send", false))?;
+            stream.set_write_timeout(Some(left)).map_err(|_| broken(false))?;
+        }
+        match stream.write(bytes) {
+            Ok(0) => return Err(broken(false)),
+            Ok(n) => bytes = &bytes[n..],
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) if until.is_some() && matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Err(timeout("send", false));
+            }
+            Err(_) => return Err(broken(false)),
+        }
     }
-    let mut reply = String::new();
-    match BufReader::new(&stream).read_line(&mut reply) {
-        Ok(0) | Err(_) => return Err(broken()),
-        Ok(_) => {}
+    // Only the final newline makes this a dispatchable request.
+    let mut reply = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        if let Some(until) = until {
+            let left = deadline::remaining(until).map_err(|_| timeout("reply", true))?;
+            stream.set_read_timeout(Some(left)).map_err(|_| broken(true))?;
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => return Err(broken(true)),
+            Ok(n) => {
+                if let Some(end) = buf[..n].iter().position(|b| *b == b'\n') {
+                    reply.extend_from_slice(&buf[..=end]);
+                    break;
+                }
+                reply.extend_from_slice(&buf[..n]);
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) if until.is_some() && matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Err(timeout("reply", true));
+            }
+            Err(_) => return Err(broken(true)),
+        }
     }
-    if !reply.ends_with('\n') {
-        return Err(broken());
-    }
+    let reply = String::from_utf8(reply).map_err(|_| broken(true))?;
     parse_reply(method, &id, &reply)
 }
 
