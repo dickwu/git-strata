@@ -598,7 +598,9 @@ confirm 只被 daemon 用
 `UpstreamCommit`, `UpstreamDeps`, and `UpstreamAuto` (also re-exported at the crate
 root). They implement serde and match main-sync design §5. `UpstreamDeps.error` is the stored install error for `install_failed`
 (`detail.staging` names the kept scene). `base_only` lists commit ids.
-Optional fields omit
+`RepoUpstream.following` is false for non-following repos, whose `fix` is omitted.
+`UpstreamAuto.target`, when present, is an `UpstreamMain` object `{head, tree}`.
+Fetch freshness is `Upstream.as_of`; there is no per-repo `as_of`. Optional fields omit
 None; optional lists omit empty values. Dependency mode uses `SyncDeps` and ids
 use the existing validated identifier types. The optional `upstream` fields on
 `SessionStatus`/`WorkspaceStatus` (in `strata-session`) carry these types.
@@ -609,10 +611,18 @@ use the existing validated identifier types. The optional `upstream` fields on
 `check` (false), `fetch` (true), `resolved`/`keep` (empty paths), optional
 `target: CommitOid` and `generation: u64`, and `accept_diverged` (false).
 Unknown fields are rejected. The move handler requires target/generation for
-resolutions unless an acknowledgement case applies: O7 legacy conflicts on an
-up-to-date workspace with no saved report; named workspace conflicts in a
-non-following repo; or legacy-only named paths on a behind/diverged workspace
-with no saved report. These cases clear only named conflicts under the queue,
-repo lock and G0, without moving the workspace. Other resolutions require a
-matching saved report; a supplied but stale/missing report gives HeadMoved.
+resolutions unless a named-conflict acknowledgement applies: legacy-only requests
+(every named path in `ws.conflicts`, none in the saved report), including when
+behind/diverged or when a separate report exists; or named workspace conflicts in
+a non-following repo. These cases clear only named conflicts under the queue,
+repo lock and G0, before fetch or move preparation. Base/head/generation and any
+separate report stay unchanged. The per-repo reply is
+`{"result":"conflicts_cleared","following":true|false,"resolved":[...],"kept":[...]}`.
+Other resolutions require a matching saved report; a supplied but stale/missing
+report gives HeadMoved. Mixing legacy-only and report paths in a bound request
+gives `resolved_unrelated`; use separate acknowledgement and resolution calls.
+Partial `Conflict` replies list remaining blockers in `detail.conflicts` and
+accepted names in `detail.resolved` / `detail.kept`. The original report rows are
+retained, but choices are not persisted for automatic reuse: repeat accepted
+names with the same flags/bytes and target/generation, plus newly resolved names.
 Upstream data remains the separate shared upstream wire types.

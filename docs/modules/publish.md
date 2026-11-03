@@ -846,11 +846,14 @@ batch's selected changes (including rename sources) with that session's
 workspace conflicts. Any intersection returns `Conflict`,
 `detail.reason = "move_conflict"`, `paths`, per-session conflicts, and fix
 `git-strata sync --repo <repo> --resolved PATH` (or `--keep PATH`, naming the repo), with the
-report's `--target … --generation …` when sync saved a conflict report. Neither LWW
+report's `--target … --generation …` when the named paths belong to its saved report. Neither LWW
 nor a new checkpoint acknowledges these conflicts. Publishing other paths
-remains allowed. Legacy up-to-date conflicts can be acknowledged by sync
-without a report/target through `Store::clear_conflicts`, including on repos
-that do not follow main.
+remains allowed. Legacy-only requests (all named paths in `ws.conflicts`, none
+in the saved report) can be acknowledged without target/generation through
+`Store::clear_conflicts`, even behind/diverged or with a separate saved report.
+That report is preserved and the acknowledgement does not move the workspace.
+Non-following repos also support named acknowledgements. A bound request mixing
+legacy-only and report paths returns `resolved_unrelated`; use two calls.
 
 ### Main-sync: T4 reconcile and C3 dependency moves
 

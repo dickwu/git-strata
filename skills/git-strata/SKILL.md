@@ -233,8 +233,13 @@ Use `--keep` only after deciding explicitly that your existing side is correct.
 For non-text conflicts (binary, deletion, mode/type, oversized files), your current
 file or absence is taken whole and reported under `whole_file`: compare with
 `theirs` first. Paths absent from the saved report are `resolved_unrelated`.
-A partial submission keeps accepted resolutions for that target/generation and
-reports the remaining conflicts; finish those paths with the returned binding.
+A partial submission makes no move. Its `detail.conflicts` lists only remaining
+conflicts, and `detail.resolved` / `detail.kept` list choices accepted in that
+request. The daemon retains their original report rows, but does **not** persist
+choices for automatic reuse. In the next call, repeat all accepted names with
+the same `--resolved` / `--keep` flags and unchanged accepted bytes, together with
+newly resolved names and the same `--target` / `--generation`. Repeating those
+choices is idempotent; omitting their names does not replay them.
 
 `HeadMoved` supplies a fresh report and invalidates the old resolution choices.
 Re-check it against the latest upstream. That report captures your already-edited
@@ -256,11 +261,13 @@ checks, checkpoint, then publish. Read these per-repo reply fields:
 
 For `result: waiting`, inspect `deps.state` or `reason` before retrying:
 
-- `waiting_human`, `own_change` and `drift` do **not** clear by retrying. Pass on
-  the reply's `deps.fix` (for example, `ask the human: git-strata deps approve P`),
-  with its proposal and reason, and stop the sync loop. If no fix is supplied,
-  report that state rather than inventing an approval id. These reasons can also
-  accompany `source_only`; the move succeeded but the dependency action remains.
+- `waiting_human`, `own_change` and `drift` do **not** clear by retrying. Both
+  `waiting` and `source_only` carry `deps.state` and the matching pending
+  `deps.proposal` when present. Only `waiting_human` with that proposal gets
+  `deps.fix: "ask the human: git-strata deps approve P"`; `own_change` and `drift`
+  have no approval fix. Relay the state, proposal and supplied fix, then stop the
+  sync loop. Do not invent an approval id. For `source_only`, the source move
+  succeeded but the dependency action remains.
 - Only transient waits (`deps.state: installing` or `reason: publishing`) get
   a 30-second wait and at most five retries. Use the same bound for repeated
   `HeadMoved` (review each fresh report) and `Busy auto_deferred` with
@@ -272,17 +279,21 @@ On `base_diverged`, stop and tell the human about chain recovery. Never pass
 `--accept-diverged` on your own. It is accepted only after the old workspace
 head is reachable from neither the publish chain nor the tracking ref.
 
-Publish refuses paths still in `ws.conflicts` with `move_conflict`. With no
-saved sync report, if **all** named paths are legacy workspace conflicts,
+Publish refuses paths still in `ws.conflicts` with `move_conflict`. If **all**
+named paths are in `ws.conflicts` and **none** is in the saved sync report,
 `git-strata sync --repo R --resolved PATH` (or `--keep PATH`) acknowledges only
-those paths and returns `conflicts_cleared`, without target/generation. This
-works when up to date **and when behind or diverged**; it clears conflict markers
-without moving the base or accepting divergence. Named conflicts in a repo with
+those paths without target/generation. This works when up to date **and when
+behind or diverged**, even with a separate saved report; that report is preserved.
+The per-repo reply is
+`{"result":"conflicts_cleared","following":true,"resolved":[...],"kept":[...]}`.
+It clears conflict markers before fetch or move preparation, without changing
+base/head/generation or accepting divergence. Named conflicts in a repo with
 `following: false` can likewise be acknowledged under the session queue, repo
-lock and G0, with no workspace move. Read and resolve each file before naming it.
-For a following repo with a saved sync report, use its binding and paths instead
-of mixing unrelated legacy paths into that resolution. Unnamed legacy conflicts
-survive automatic and sync moves; acknowledge them once no report is saved.
+lock and G0; that reply has `following:false`. Read and resolve each file before
+naming it. Mixing legacy-only paths with report paths in a bound resolution
+returns `resolved_unrelated`: use two calls, a legacy-only acknowledgement and
+then a report resolution with its binding. Unnamed legacy conflicts survive
+automatic and sync moves and can be acknowledged separately.
 
 When `upstream.deps.state` is `install_failed`, tell the human: inspect the kept
 staging in `deps.error.detail.staging`, remove it, then run
@@ -301,7 +312,7 @@ a later repo fails. The move handler's reasons and related outcomes are:
 | `InvalidInput ambiguous_resolution` | Select exactly one repo with `--repo R` and use its report. |
 | `InvalidInput resolved_and_keep` | Choose one flag per path; remove the duplicate choice. |
 | `InvalidInput resolved_unchanged` | Edit the conflict, or deliberately use `--keep` after comparing with upstream. |
-| `InvalidInput resolved_unrelated` | Select a current reported path, or a recorded workspace conflict for an acknowledgement; handle unrelated legacy paths separately when no report is saved. |
+| `InvalidInput resolved_unrelated` | Select a current reported path; acknowledge legacy-only workspace conflicts in a separate call, even when a saved report exists. Do not mix the two groups. |
 | `InvalidInput resolved_overlap_changed` | Recheck the supplied hunks and revise edits that expanded into previously clean upstream regions. |
 | `NoSuchCommit main_missing` | No usable main tip exists; report the repo/ref state to the human and stop. |
 | `InvalidInput` / `NoSuchRepo not_tracked` | Select a tracked workspace; if needed, create a session explicitly with `new --repo R`. Do not edit untracked siblings. |

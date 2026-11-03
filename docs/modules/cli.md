@@ -119,7 +119,26 @@ pub fn require_tty() -> Result<(), StrataError>;
 ### 3.2 每个子命令的 `data`
 
 Main-sync adds `git-strata sync [--session S] [--repo R]... [--check] [--no-fetch] [--resolved PATH | --keep PATH]... [--target HEAD --generation N] [--accept-diverged] [--hook]`.
-`--target` and `--generation` go together. `--resolved` / `--keep` are forwarded without them; the daemon requires both (`resolution_binding_required`) unless a named-conflict acknowledgement applies: O7 legacy conflicts on an up-to-date workspace with no report, non-following repos, or legacy-only paths on behind/diverged workspaces with no saved report. Acknowledgement clears only named conflicts and never moves the workspace. The CLI forwards non-check requests to the daemon; it does not implement moves locally. `sync --check` returns `{session, upstream}` from local refs/store and exits zero even when upstream is not clean. An older daemon's `unknown_method` becomes `Unsupported reason=daemon_too_old`.
+`--target` and `--generation` go together. `--resolved` / `--keep` are forwarded without them;
+the daemon requires both (`resolution_binding_required`) unless a named-conflict acknowledgement
+applies: legacy-only requests (every named path in `ws.conflicts`, none in the saved report), or
+named workspace conflicts in non-following repos. Legacy-only requests work even behind/diverged
+and with a separate report, which is preserved. Before fetch/preparation, acknowledgement clears
+only named conflicts and returns the per-repo reply
+`{"result":"conflicts_cleared","following":true|false,"resolved":[...],"kept":[...]}` without moving
+base/head/generation. A bound request mixing legacy-only and report paths returns
+`resolved_unrelated`; use two calls. The CLI forwards non-check requests to the daemon; it does
+not implement moves locally. `sync --check` returns `{session, upstream}` from local refs/store
+and exits zero even when upstream is not clean. An older daemon's `unknown_method` becomes
+`Unsupported reason=daemon_too_old`.
+
+Partial `Conflict` replies make no move and list only remaining conflicts in `detail.conflicts`,
+with accepted names in `detail.resolved` / `detail.kept`. Choices are not persisted for automatic
+reuse: repeat those names with the same flags and accepted bytes, plus newly resolved names,
+using the same `--target` / `--generation`. HeadMoved invalidates them with a fresh report.
+`waiting` and `source_only` carry `deps.state` and the matching pending `deps.proposal` when
+present. Only `waiting_human` with that proposal receives
+`deps.fix: "ask the human: git-strata deps approve P"`; `own_change` and `drift` get no approval fix.
 
 Full status adds optional `status.upstream` and `status.workspaces.R.upstream`. Each tracked healthy repo (health Ok and no live move scene; a scene whose latest intent is Done, Abandoned or Refused is history and does not exclude the repo) reports following, behind (capped at 1000), capped, diverged/base_only (commit ids, at most 20), main/base_head, at most 20 commits with author/subject/own (the `sessions:` publish trailer), pending deps including package summary (with `deps.error`, the stored `{message, detail}` whose `detail.staging` is the kept install scene, when state is `install_failed`), auto state, conflicts, conservative unpublished and, only when following is true, a sync command. For `following: false`, ignore behind for sync and only acknowledge named conflicts; no sync fix is emitted. `clean` requires zero behind and no deps/auto/conflicts; unpublished alone does not make upstream unclean. `as_of` is the oldest known successful fetch among included repos, omitted when any freshness is unknown. Failed fetches retain the last success.
 

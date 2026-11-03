@@ -795,8 +795,11 @@ module-rulings T8 规定，每次发布的版本号变化不得产生新的依�
 
 Main-sync v4 adds optional `from_head` to `Proposal`, `ProposeArgs`, and the store
 records. When observing a new dependency target, it is the head of the `deps_main`
-row being replaced. A same-`to`, target-only copy preserves the original value,
-as does an install-identity replacement. Legacy rows have None (omitted in JSON).
+row being replaced. New session, rebase and residue-owner proposals record the
+workspace head paired with their source base. A same-`to`, target-only copy
+preserves the original value, as does an install-identity replacement. Missing
+values (omitted in JSON) can remain in pre-v4 rows and v4/v5 rows created by those
+writers before the fix; a schema version alone does not guarantee a baseline.
 
 `observe_main_locked(ctx, tree, head, inputs_hash, set_id)` is the caller-held-lock
 entry point. Prepare the export and `key_of` result before taking the repo write
@@ -960,15 +963,28 @@ the self-locking convenience API.
 `kind: added|removed|changed`, `direct`) and `truncated`. Parsers cover Bun JSONC,
 npm package-lock v2/v3, Composer, Pub and Cargo locks. Companion manifests supply directness
 and direct-spec fallback; an unparsed input is reported as `<file> changed (no parser)`.
+pnpm and Yarn use that filename-only fallback. Package names, `from`/`to` values
+and fallback phrases have URL userinfo redacted before summary formatting,
+clipping, serialization or cache insertion, including URLs embedded in manifest specs.
 Known lockfile results supersede duplicate manifest results, and direct dependencies sort first.
 
 Each blob is size-checked before reading (16 MiB maximum); results contain at most 50 packages
-and a one-line summary of at most 120 Unicode characters. A 200 ms response budget encloses
-Git reads and parsing. A single bounded worker prevents timed-out requests accumulating parser
-threads; competing requests return a best-effort `Busy changes_busy`. Each Git read receives the
-remaining deadline, and parsing checks the deadline between inputs. The bounded 128-entry memory
-cache (entries above 256 KiB are not retained) keys on file names and before/after blob IDs, including companion manifests; source-only
-commits can reuse the result. No store, checkout, install or network mutation occurs.
+and a one-line summary of at most 120 Unicode characters. The caller waits up to 200 ms;
+the single background worker has a separate 5 s budget for Git reads and parsing. A response
+timeout does not cancel that worker: it can finish and populate the cache for the next poll.
+Competing requests return best-effort `Busy changes_busy` while the slot is occupied. Each Git
+read receives the remaining worker deadline, and parsing checks it between inputs. The bounded
+128-entry memory cache (entries above 256 KiB are not retained) keys on file names and before/after
+blob IDs, including companion manifests; later polls and source-only commits can reuse the result.
+No store, checkout, install or network mutation occurs.
+
+The daemon's `deps_list` omits `changes` on enrichment failure. For rows without `from_head`,
+one shared 16-unit legacy-attribution budget per call charges each legacy proposal and each
+eligible workspace inspected; exhaustion omits enrichment rather than selecting a partial
+baseline. Recorded baselines bypass this cap. It is an operation-count limit, not a timeout for
+each ancestry command. Upstream status separately keeps its last good summary for the exact
+`(session, workspace BaseGen, generation, proposal id)` key on busy/error/timeout; another key
+cannot reuse it (daemon.md §5).
 
 ### 5.13 复杂度与验收数字
 

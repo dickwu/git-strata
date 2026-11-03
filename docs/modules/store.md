@@ -2301,6 +2301,10 @@ history before move intents, under the existing GC gate.
 
 Sync reports continue to use v4 `sync_report`: report BLAKE3 ours blobs are
 registered and protected by all GC predicates, including preview. Full hunk
-lengths are persisted even when displayed text is truncated. Successful
-moves and session removal clear reports; resolution history follows intent
+lengths are persisted even when displayed text is truncated. On a partial sync
+Conflict, the original rows for accepted paths are retained alongside the
+remaining conflicts. This stores their validation baseline, not decisions to
+replay: callers must repeat accepted names with the same flags/bytes and binding.
+No move intent or `sync_move_history` choice is written by that partial reply.
+Successful moves and session removal clear reports; resolution history follows intent
 retention instead.

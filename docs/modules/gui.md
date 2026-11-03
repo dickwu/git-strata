@@ -251,21 +251,29 @@ GUI 不拥有持久业务数据。它写的东西都由人按按钮触发：首�
 or its origin session link, one line of `changes.summary`, and affected sessions derived only from
 that repo's `ws.pending`. Each `ticket · session-id` opens the existing detail modal. Legacy summaries
 carry “since session base”. Each `deps_list` proposal carries `mode: "apply" | "confirm"`,
-the repository's effective pinned dependency mode. The GUI and tray use that row's
-`mode` even when no affected workspace has upstream data or the sessions poll lags
-behind the proposals poll. The existing confirm-mode review/Touch ID flow is retained.
+the repository's effective pinned dependency mode, even without affected sessions or
+summary enrichment. The GUI and tray use that row's `mode` first, including before
+capability/session polls arrive or after the last affected workspace moves. For older
+replies without `mode`, they use workspace mode only when `status.upstream` is advertised:
+at least one affected workspace must match the proposal in apply mode and none may match
+in confirm mode. Otherwise they fall back to `confirm`. The existing confirm-mode
+review/Touch ID flow is retained.
 
-With `daemon_status.features` containing `status.upstream`, apply-mode proposals are collapsed under
+Apply-mode proposals are collapsed under
 “Applying from main”, with moved/deferred counts. They enter the waiting count only for install
 failure, own dependency changes, drift, an unhealthy/scene/not-following workspace, divergence,
-waiting-human state, or a deferral strictly older than 24 hours. Conflicts and `auto.reason=conflicts`
+waiting-human state, or a deferral strictly older than 24 hours. Unhealthy workspaces and scenes
+retain human attention and their specific GUI reason even when upstream data is absent.
+Conflicts and `auto.reason=conflicts`
 point to “needs the session's agent” and offer Copy for `git-strata sync --session S --repo R`, never
 an approval. Copy does not execute the command.
 
-The same capability gates cached `↓N` list badges and the detail modal's per-repo “From main”
+The `status.upstream` capability gates cached `↓N` list badges and the detail modal's per-repo “From main”
 sections (behind/unchecked/capped, up to 20 commit subjects, deps summary/state/mode, auto reason,
-since and attempts, conflict paths and the suggested command). Old daemons keep the existing
-waiting behavior and show no upstream section or badge. The tray follows the same stuck threshold
+since and attempts, conflict paths and the suggested command). `auto.target`, when present, is
+`{head, tree}`; fetch freshness is top-level `upstream.as_of`, not a per-repo field.
+Old replies without either proposal mode or the capability keep confirm waiting behavior and
+show no upstream section or badge. The tray follows the same stuck threshold
 and adds only `· N sessions`; tickets, subjects, paths and agent reasons remain excluded (G7).
 
 ### 5.2 写作规则

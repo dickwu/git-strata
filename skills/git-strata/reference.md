@@ -76,18 +76,26 @@ For `Conflict sync_conflict`, name every reported path in one call, using repeat
 `--resolved` or `--keep` (one choice per path), `--repo R`, and both
 `--target <detail.target.head>` and `--generation <detail.generation>`.
 `--resolved` requires edited bytes; `--keep` deliberately accepts the current side.
-Non-overlapping upstream hunks still merge. Partial submissions keep accepted
-resolutions for the same target/generation and report the remaining conflicts.
+Non-overlapping upstream hunks still merge. Partial submissions make no move:
+`detail.conflicts` lists only remaining conflicts, while `detail.resolved` and
+`detail.kept` list choices accepted in that request. Original report rows remain,
+but choices are not persisted for automatic reuse. Repeat the accepted names
+with the same flags and unchanged accepted bytes, together with newly resolved
+names and the same `--target` / `--generation`. This repetition is idempotent;
+omitted names are not automatically applied.
 HeadMoved invalidates the old choices and supplies a fresh report; review it,
 re-resolve, or explicitly keep already-edited bytes with its new binding.
 
-The binding exceptions are named-conflict acknowledgements: O7 legacy conflicts
-with no saved report when up to date, legacy-only named paths with no saved
-report even when behind/diverged, and named conflicts in non-following repos.
-They clear only those markers under the queue, repo lock and G0, returning
-`conflicts_cleared` without moving or accepting divergence. Other resolutions
-require binding, even if no report currently exists. For a following repo, finish
-a saved report before separately acknowledging unrelated legacy paths.
+The binding exceptions are named-conflict acknowledgements: legacy-only requests
+(every named path in `ws.conflicts`, none in the saved report), and named workspace
+conflicts in non-following repos. Legacy-only requests work even when behind or
+diverged and when a separate report exists; that report is preserved. Under the
+queue, repo lock and G0, they clear only those markers before fetch/preparation,
+without moving base/head/generation or accepting divergence. Their per-repo reply
+is `{"result":"conflicts_cleared","following":true|false,"resolved":[...],"kept":[...]}`.
+Other resolutions require binding, even if no report currently exists. A bound
+request mixing legacy-only and report paths returns `resolved_unrelated`; use two
+calls, the legacy-only acknowledgement followed by the bound report resolution.
 
 Per-repo `moved` / `source_only` replies contain `from`/`to` heads and deps,
 `resolved`, `kept`, and `whole_file` (non-text resolutions take the current file
@@ -99,14 +107,15 @@ or absence whole). Optional/diagnostic fields:
 | `regenerable_kept` | Conflicting paths retained under pinned `rm.regenerable`; review or regenerate, then rerun checks. |
 | `accepted_diverged` | Accepted base-only commits (`head`, `subject`) after the human's chain recovery; report them, never initiate acceptance yourself. |
 | `old_tree` | Kept previous workspace path or null (open handles, late writes or uncarried content). Re-enter the live workspace by path, restart only your processes, preserve/report remaining old-tree work. |
-| `deps` | State plus proposal/fix when applicable; `source_only` moved source but kept the old set. |
+| `deps` | Both `waiting` and `source_only` carry the state and matching pending proposal when present. Only `waiting_human` with that proposal gets an approval fix; `source_only` moved source but kept the old set. |
 
 After a move, re-enter the workspace, rerun checks, checkpoint and publish.
 `waiting_human`, `own_change` and `drift` do not clear by retrying: pass on the
 reply's `deps.fix` (e.g. `ask the human: git-strata deps approve P`), proposal and
 reason, then stop. This also applies to dependency state on `source_only` and
-on an already-current source tree. If no fix is supplied, report the state;
-do not invent a proposal id. Only transient installing/publishing waits get
+on an already-current source tree. `own_change` and `drift` get no approval fix;
+if no fix is supplied, report the state and do not invent a proposal id.
+Only transient installing/publishing waits get
 30 seconds and at most five retries. The same bound applies to a reviewed
 HeadMoved series or transient `auto_deferred` writes; then publish what is
 allowed and report the remaining state. `install_failed` / `previous_attempt`
@@ -123,7 +132,7 @@ outcomes (including legacy/internal diagnostics) are:
 | `InvalidInput ambiguous_resolution` | Select exactly one repo with `--repo R` and use its report. |
 | `InvalidInput resolved_and_keep` | Choose one flag per path; remove the duplicate choice. |
 | `InvalidInput resolved_unchanged` | Edit the conflict, or deliberately use `--keep` after comparing with upstream. |
-| `InvalidInput resolved_unrelated` | Select a current reported path, or a recorded workspace conflict for an acknowledgement; handle unrelated legacy paths separately when no report is saved. |
+| `InvalidInput resolved_unrelated` | Select a current reported path; acknowledge legacy-only workspace conflicts in a separate call, even when a saved report exists. Do not mix the two groups. |
 | `InvalidInput resolved_overlap_changed` | Recheck the supplied hunks and revise edits that expanded into previously clean upstream regions. |
 | `NoSuchCommit main_missing` | No usable main tip exists; report the repo/ref state to the human and stop. |
 | `InvalidInput` / `NoSuchRepo not_tracked` | Select a tracked workspace; if needed, create a session explicitly with `new --repo R`. Do not edit untracked siblings. |

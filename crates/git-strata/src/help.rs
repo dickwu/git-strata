@@ -121,6 +121,9 @@ ERRORS (code -> what an agent does)
   Conflict (publish) fix detail.conflicts in detail.repo, rerun the same publish
   Conflict sync_conflict  resolve every reported path with sync --resolved/--keep,
                           using detail.target.head and detail.generation
+                     partial: detail.conflicts has only remaining paths;
+                     repeat detail.resolved/kept with the same flags and bytes,
+                     plus new resolutions and the same target/generation
   Conflict assigned  another session owns the path; do not retry
   NoMatch / no_batch checkpoint the paths, then publish
   NoSuchSession      cd into a workspace or pass --session
@@ -135,13 +138,26 @@ ERRORS (code -> what an agent does)
                      (or --keep after review); at most five retries
   HeadMoved (other)   re-read status; do not loop
   sync waiting       retry only installing/publishing waits (30 s, at most five)
-                     waiting_human/own_change/drift: pass on deps.fix and stop
-  sync not_following ignore behind; only acknowledge named workspace conflicts
+                     dependency waits/source_only include deps.state and a matching
+                     pending proposal when present; only waiting_human with
+                     that proposal gets deps.fix. Relay the state/proposal/fix
+                     and stop for waiting_human, own_change or drift
+  sync not_following following:false, no upstream fix; ignore behind and only
+                     acknowledge named workspace conflicts
   PushRefused        report the remote's words to the human
   Unknown            outcome uncertain: do not retry, gc or rm; tell the human
   Corrupt            stop; tell the human
   PortInUse foreign  run detail.fix (session ports --reassign), then rerun
   PortInUse already_running  this workspace's server is up: reuse it
+
+SYNC ACKNOWLEDGEMENT
+  Legacy-only: every named path is in ws.conflicts, none in the saved report.
+  sync --repo R --resolved PATH (or --keep PATH) clears only those markers,
+  even behind/diverged or with a separate report. No binding or move; the
+  separate report remains. Non-following repos also allow named acknowledgement.
+  Reply: {result:conflicts_cleared, following:true|false, resolved:[...], kept:[...]}
+  Mixing legacy-only and report paths in a bound call is resolved_unrelated;
+  use two calls. Partial conflict choices are not saved for automatic reuse.
 
 ",
     gate_text!(),

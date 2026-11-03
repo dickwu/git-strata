@@ -440,12 +440,23 @@ stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看
 the repo's effective pinned sync dependency mode; GUI and tray read this field even if no affected
 workspace reports upstream data. Pending proposals may also carry additive
 `changes: {summary, packages, truncated, since?}` from `strata_deps::changes`. Enrichment failure
-keeps a previously cached summary when available, otherwise omits it; proposal state is unchanged.
-New proposals record `from_head`, and `changes_base` diffs from that head. Only legacy pre-v4 rows
-without it use the oldest affected session workspace head (the same tracked / different deps-set
-predicate as `ws.pending`), labelled `changes.since = "session_base"`. This legacy fallback is
-bounded by work/time limits; exhausting them omits enrichment instead of running uncapped ancestry
-checks. Reads do not request confirmation, build deps, or acquire a repo write lock.
+omits `changes` from that reply; proposal state and `mode` are unchanged. Each summary call waits
+up to 200 ms for a single worker with a separate 5 s budget. The worker may finish after the
+response timeout and populate the blob cache for a later poll (see deps.md §5.13a).
+New proposals record `from_head`, and `changes_base` diffs from that head. Missing baselines can
+occur in pre-v4 rows and v4/v5 rows written before the constructor fixes; target-only copies can
+preserve a missing value. Those rows use the oldest affected session workspace head (the same
+tracked / different deps-set predicate as `ws.pending`), labelled `changes.since = "session_base"`.
+One shared 16-unit budget covers the entire `deps_list` call: one unit per legacy proposal and
+per eligible workspace inspected. Exhaustion omits that proposal's enrichment instead of using
+a partially selected baseline; proposals with `from_head` bypass this budget. This caps work
+counts, not the wall-clock duration of an individual Git ancestry call. Reads do not request
+confirmation, build deps, or acquire a repo write lock.
+
+Upstream status has a separate last-good summary cache keyed by
+`(session, workspace BaseGen, generation, proposal id)`. Only a successful full read replaces
+that exact key's summary; busy, error and timeout results retain it. Cached reads reuse it,
+and a different key cannot inherit it. With no matching cached value, the summary is omitted.
 
 **`publish_plan`**：不排队。`publish` 开头那一步重跑过滤（`rerun_plan`，即 D22 的按选择子、按内容判定）原样跑一遍，返回还要提交的仓库与 `already_published`，不写（review-2 N2）[实现时补的决定]。
 
@@ -1018,13 +1029,15 @@ The RPC dispatcher routes `check` (and `hook`) to the read-only lane before
 any mutation, maps the wire `SyncParams` to `SyncRequest`, and adds the
 best-effort `upstream` object to a successful reply.
 
-The handler fetches following default branches under repo locks, records
+After any legacy-only acknowledgements described below, the handler fetches
+the remaining following default branches under repo locks, records
 fetch success/failure, runs fetch-after anchor maintenance and observes
 main. Failed fetches continue against local refs. It then runs the
 complete T4 (`main_sync::reconcile`: observe + enroll/retarget, including
 deps-only identity reconciliation), even when the fetch did not move the
-tip. Split/non-following repos return `not_following`; with `--resolved`/`--keep`
-they only acknowledge the named workspace conflicts (O7, D-b) under the session
+tip. Split/non-following repos return `{"result":"not_following","following":false}`;
+with `--resolved`/`--keep` they only acknowledge the named workspace conflicts
+(O7, D-b) under the session
 queue and repo lock and return `conflicts_cleared` with `following: false`.
 
 Dependency keys come from a temporary target export. Apply-mode sync checks
@@ -1041,22 +1054,34 @@ acknowledgement cases below, `--resolved`/`--keep` require target/generation
 (`resolution_binding_required` if omitted) and a path in that saved report;
 unchanged bytes need explicit keep. With a supplied binding, missing/stale
 reports return HeadMoved and a fresh report. Name every reported conflict path
-in one call, mixing `--resolved` and `--keep` as needed. A partial submission
-keeps accepted resolutions for the same target/generation and reports only the
-remaining conflicts; a HeadMoved report invalidates the old choices.
+in one call, mixing `--resolved` and `--keep` as needed. A partial submission makes
+no move: `detail.conflicts` contains only remaining blockers, and `detail.resolved`
+/ `detail.kept` list choices accepted in that request. Their original saved rows
+(ours blob and conflict regions) are retained, but choices are not persisted for
+automatic replay. Repeat accepted names with the same flags and unchanged accepted
+bytes, add newly resolved names, and use the same target/generation. This repeat
+is idempotent; omitted names are not reapplied. HeadMoved regenerates the report
+without those choices and invalidates the old binding.
 
-Unbound acknowledgement covers O7 legacy conflicts on an up-to-date workspace,
-named conflicts in non-following repos, and legacy-only named paths on a behind
-or diverged workspace when no sync report is saved. The latter is checked before
-move preparation/divergence refusal. Under the queue, repo lock and G0, it clears
-only the named workspace conflict paths and returns `conflicts_cleared`, without
-moving the workspace. No-op sync otherwise leaves conflicts intact. An actual
-move from a diverged base requires explicit acceptance only after neither chain
+Unbound acknowledgement covers legacy-only requests (every named path in
+`ws.conflicts`, none in the saved report) and named conflicts in non-following
+repos. Legacy-only requests work even behind/diverged and with a separate report,
+which is preserved. The check runs under the queue, repo lock and G0 before fetch,
+T4, tip/divergence lookup or move preparation. It clears only named paths and
+returns `{"result":"conflicts_cleared","following":true|false,"resolved":[...],"kept":[...]}`;
+base/head/generation stay unchanged, and an acknowledgement-only request has an
+empty `fetched` map. A bound request mixing legacy-only and report paths returns
+`resolved_unrelated`: acknowledge the legacy-only paths in one call, then resolve
+report paths with their binding in another. No-op sync otherwise leaves conflicts
+intact. An actual move from a diverged base requires explicit acceptance only after neither chain
 nor tracking ref reaches the old head; read errors fail closed.
 
-`waiting` replies retain the dependency proposal and suggested `fix` where applicable,
-including when source is already up to date. `waiting_human`, `own_change` and
-`drift` require action: relay the reply's `deps.fix` to the human and stop; only
+Dependency `waiting` and `source_only` replies use the same decoration: `deps.state`, the
+matching Pending `deps.proposal` when present, and
+`deps.fix: "ask the human: git-strata deps approve P"` only for `waiting_human`
+with that proposal. This includes an already-current source tree. `own_change`
+and `drift` retain their state/details without an approval fix. Relay the state,
+proposal and any supplied fix to the human and stop; only
 `installing` or `publishing` waits get bounded retries. Upstream rows with
 `following: false` emit no sync fix; ignore their behind count for sync and only
 acknowledge named conflicts.

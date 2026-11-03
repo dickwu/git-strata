@@ -262,14 +262,36 @@ new tree without conflict (`rm.regenerable` paths excepted). Otherwise the
 move is **deferred**, never forced: `status` shows
 `behind publish N of REPO: auto-rebase deferred (open_files|recent_writes|conflicts|busy, since HH:MM, attempts k)`
 and the catch-up retries with backoff (capped at 30 min). When the publish
-changed install inputs (`package.json`, `bun.lock`), the source moves onto the
-published tree with the session's old deps set (`rebase.deps_changed =
-"move_source"`, the default; `"wait"` keeps the old behaviour) and the deps
-proposal stays Pending for the human. Explicit moves (deps approval rollout)
-are unchanged. If something writes into the pre-move tree after the swap, that
+changed install inputs (`package.json`, `bun.lock`), the repo's effective
+`sync.deps` policy controls dependency replacement. In `apply` mode, an eligible
+Auto move can use the new sealed set. While dependencies are unavailable, or
+the workspace has its own dependency changes/drift, source can move with the old
+set (`rebase.deps_changed = "move_source"`, the default; `"wait"` defers that
+source-only move). `confirm` mode keeps replacement pending for human approval.
+If something writes into the pre-move tree after the swap, that
 tree is kept instead of retired (`status`/`ls` list it under `kept_trees`
 with the late-written paths); `rm` refuses until it is published or discarded, and the
 `rm --discard` prompt names it.
+
+**Syncing main explicitly.** `git-strata sync --check` inspects local upstream;
+`git-strata sync --repo R` fetches and attempts a move. A non-following upstream
+entry has `following:false` and no sync `fix`; ignore its behind count and only
+acknowledge named workspace conflicts. A plain sync returns `not_following`.
+On a sync conflict, resolve paths with the report's `--target` / `--generation`.
+A partial reply makes no move and lists remaining conflicts plus
+`detail.resolved` / `detail.kept`. Choices are not saved for automatic reuse:
+repeat accepted names with the same flags and accepted bytes, together with new
+resolutions and the same binding. HeadMoved requires reviewing a fresh report.
+
+Legacy-only acknowledgements (all named paths in `ws.conflicts`, none in the
+saved report) need no binding and make no move, even behind/diverged or with a
+separate report. They return
+`{"result":"conflicts_cleared","following":true|false,"resolved":[...],"kept":[...]}`.
+Mixing legacy-only and report paths in a bound call gives `resolved_unrelated`;
+use two calls. Dependency `waiting` and `source_only` replies report the state and a
+matching pending proposal when present; only `waiting_human` with that proposal
+gets the human-approval fix. `own_change` and `drift` need attention without an
+approval fix. Follow the [agent workflow](skills/git-strata/SKILL.md#keeping-up-with-main).
 
 **What `rm` counts as published.** An edit is published when a Done publish
 of this session, reachable from origin, has the same bytes (D57), or when a

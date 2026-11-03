@@ -1505,6 +1505,8 @@ Agent moves record no new conflicts (regenerable kept paths are reported
 separately); earlier workspace conflicts the move does not name in
 `--resolved`/`--keep` are kept, as they are on automatic moves, clear the saved sync report, and consume the selected pending
 revision in the finish transaction. The activity row records policy `agent`.
-Resolution decisions are written to `sync_move_history` while Preparing;
+Partial conflicts returned by the daemon before a move do not write resolution
+decisions here; callers must repeat accepted names/flags with the same binding.
+For a move that reaches Preparing, decisions are written to `sync_move_history`;
 the associated move state shows whether they landed. Late writes after the
 last check keep the old tree and its durable G4 notice.
