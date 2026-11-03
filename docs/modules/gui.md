@@ -265,7 +265,7 @@ failure, own dependency changes, drift, an unhealthy/scene/not-following workspa
 waiting-human state, or a deferral strictly older than 24 hours. Unhealthy workspaces and scenes
 retain human attention and their specific GUI reason even when upstream data is absent.
 Conflicts and `auto.reason=conflicts`
-point to “needs the session's agent” and offer Copy for `git-strata sync --session S --repo R`, never
+point to “needs the session's agent” and offer Copy for `cd ~ && git-strata sync --session S --repo R`, never
 an approval. Copy does not execute the command.
 
 The `status.upstream` capability gates cached `↓N` list badges and the detail modal's per-repo “From main”

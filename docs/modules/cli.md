@@ -90,7 +90,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata new`（精简） | `--repo R`，可重复或逗号分隔：只有这些 repo 建工作区，全部 tracked（session.md D51；daemon `new` 的 `only = true`）。ticket 同上 | 与 `--repos` 同给 → `InvalidInput`，`detail.reason = "repo_flags"`；两个都不给 → `InvalidInput` |
 | `git-strata new` 的 agent | `--agent NAME`（可选，`new` 与精简形式都有）。创建会话的 AI agent，按 D36 检测：`--agent`，否则 `STRATA_AGENT`（空 = 没设），否则 Claude Code（`CLAUDECODE`、`CLAUDE_CODE_SESSION_ID`、`CLAUDE_CODE_ENTRYPOINT` 任一非空 → `claude-code`）、Codex（`CODEX_THREAD_ID`、`CODEX_SANDBOX` → `codex`）、Cursor（`CURSOR_AGENT` → `cursor-agent`），按这个顺序取第一个；都没有就不记 | `--agent` 或 `STRATA_AGENT` 不是合法的 `AgentName`（types.md）或不是 UTF-8 → `InvalidInput`，`detail = {reason: "agent", source: "--agent" \| "STRATA_AGENT"}`，在连 daemon 之前，什么都不发 |
 | `git-strata add` | `--repo R`（至少一个，可重复或逗号分隔）`[--session S]`，不给 = cwd 的会话（session.md D52） | 没有 `--repo` → `InvalidInput`（`repos`）；未知 repo 透传 `NoSuchRepo`；会话不是 `Active` 透传 session 的码 |
-| `git-strata status` | `[--all]` 或 `[--session S]`。都不给 = cwd 的会话。`[--brief]`：只读 store 的摘要（§3.2，D36） | — |
+| `git-strata status` | `[--all]` 或 `[--session S]`。都不给 = cwd 的会话。`[--brief]`：只读 store 的摘要（§3.2，D36）；`[--timeout SECS] [--progress]` | — |
 | `git-strata ls` | `[--table]`：成功时 stdout 只有表格（D36，对 D19 的修订） | — |
 | `git-strata checkpoint` | `--tool-call [ID]` 与 `-m MSG` 二选一；`ID` 省略或为空时取钩子 stdin JSON 的 `tool_use_id`（§3.5，D22）。`[--session S]`。`--path P` 可重复，P 是工作区里的路径，cli 收成相对该 repo 根的 `RepoPath` | 两个都给，或两个都不给 → `InvalidInput`，`detail.reason = "checkpoint_reason"` |
 | `git-strata restore` | `<checkpoint>`（十进制 `CheckpointId`，超过 `i64::MAX` → `InvalidInput`）`[paths…]` `[--session S]` | 非数字 id → `InvalidInput` |
@@ -112,9 +112,9 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata session ports` | `[--session S] [--repo R]`，或 `--all`（只读，列出全部活会话的工作区，没有租约的 `ports: null`、`reason: "unleased"`，不分配）。`--check`：每个端口的监听者与状态。`--reassign`：把恰好一个工作区的租约挪到别的块，把查过的 base 作为 `checked` 发给 daemon，租约在此期间被别人挪过 → `Busy lease_changed`（D37）。没有空闲块的工作区是一条 `ports: null`、`reason: "ports_exhausted"` 的记录，其他工作区照常列出（`exec` 仍报错） | `--all` 与 `--session` 或 `--repo` 同给 → `both_selectors`；`--reassign --all` → `reassign_one`；`--reassign` 选中多个工作区 → `ambiguous_repo`（`detail.repos`）；都是 `InvalidInput` |
 | `git-strata session exec` | `[--session S] [--repo R] [--tauri] [--no-check] -- <cmd…>`：在恰好一个工作区里、带着它的端口环境变量（§3.2）用 `execvp` 替换本进程跑命令（D37） | 选中多个 → `ambiguous_repo`；cwd 在另一个会话工作区里 → `cwd_mismatch`；`--tauri` 认不出启动方式 → `tauri_launcher`（`detail.fix`）；都是 `InvalidInput`。`--` 之后没有命令 → `args` |
 
-未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`ls`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`session`、`status`、`sync`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
+未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`help`、`ls`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`session`、`status`、`sync`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
 
-`-h` / `--help` 与 `--version` 走 clap 的文本，打在 stdout，退出码 0。它们不是子命令，不套信封（D19）。另一个例外：`ls --table` 成功时 stdout 只有表格（D36）；出错时照常是完整错误信封、退出码非 0。除此之外，stdout 上只有信封。
+`-h` / `--help` 与 `--version` 走 clap 的文本，打在 stdout，退出码 0。它们不套信封（D19）；`git-strata help [TOPIC|COMMAND…]` 子命令也输出纯文本，且不读取环境或配置。另一个例外：`ls --table` 成功时 stdout 只有表格（D36）；出错时照常是完整错误信封、退出码非 0。除此之外，stdout 上只有信封。
 
 ### 3.2 每个子命令的 `data`
 
@@ -230,7 +230,7 @@ pub enum DiffPreview {
 - `running`：daemon 是否在听 socket。没在跑时 cli 本地造这份对象，`running` 为 false，`holders` 与 `unknown_publishes` 为空数组，不假装知道锁。
 - `session`：cwd 能解析出会话才有，否则省略。daemon 回答了时，这个查找（读 config、开 store）放在另一个线程里，最多等 2 秒（`STATUS_LOOKUP_WAIT`）；超时就省略 `session`，加 `"session_lookup": "timed_out"`，信封照常 `ok`。SessionStart 钩子不会因为 store 一时读不动而卡住。daemon 没在跑时直接查。
 - `holders`：谁持着哪把 repo 写锁、从什么时候起。daemon 在跑时由 `daemon_status` 填。
-- `features`：daemon 接受的请求扩展（daemon.md D38，现在是 `["new.agent", "session.ports", "status.upstream", "sync"]`），daemon 在跑时原样透传；旧 daemon 没有这个键。
+- `features`：daemon 接受的请求扩展（daemon.md D38，现在是 `["new.agent", "session.ports", "status.upstream", "sync", "sync.cwd_guard", "deps.cwd_guard", "old_tree.yield", "client.timeout"]`），daemon 在跑时原样透传；旧 daemon 没有这个键。
 - `fds`：daemon 的文件描述符计数（`open`、`limit` 等），daemon 在跑时原样透传 `daemon_status` 的 `fds`（D35）。
 - `alerts`：隔离区、`index-read-back-refused`、`staging-changed` 这类要人看的项，原样透传 daemon 的 warnings。每条同时在 stderr 打一行。
 
@@ -294,7 +294,7 @@ cli 不拥有表，不拥有目录。它读的配置目录是 `~/Library/Applica
 
 ## 5. 流程与算法
 
-cli 不拿 repo 写锁，不占会话队列，不等待建造锁。锁在 daemon 里，顺序是建造锁 → 会话队列 → repo 写锁。写命令发出去之后，cli 不再设截止时间：第一次可见的写之后的等待不受 30 秒截断，客户端提前断开会把一次还在进行的发布看成失败，而 daemon 仍在写（「Waits after a call's first visible write are not bounded」）。连接还没建立时，socket 的连接超时是 200 ms（D6）；连不上就是 daemon 没在跑。
+The CLI takes no repo lock or session queue. Status/sync use one deadline across connect/send/reply: status 30 s, status --all 120 s, sync 600 s. `--timeout SECS` overrides `GIT_STRATA_TIMEOUT`; 0 disables it. This is client policy, not a daemon 600 s bound: sync may still be queued or cold-installing. Other commands keep unbounded calls. Hooks retain their five-second process deadline. Daemon D8 is unchanged: later/post-visible takes stay unbounded.
 
 共同的五步：
 
@@ -504,7 +504,7 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D1 `git strata` | 同一二进制。git 执行 `PATH` 上的 `git-strata` | 初稿已定。两套实现会分叉。不放包装脚本 | 2026-10-23 |
 | D2 daemon 没跑 | 写命令 `Busy`，`detail.reason = "daemon_down"` | 初稿已定。不加码。types.md 把这种情况写成 `ReadOnly` 的那半句不沿用：人能从 reason 看出要先启动 | 2026-10-23 |
 | D5 钩子 stdin | `--tool-call` 且 stdin 非 TTY 时读 Claude Code 的钩子 JSON，取出 `file_path` / `file_paths` / `edits[].file_path` | daemon 要把 Edit/Write 的路径送进 `Inbox::hint`。命令行仍是简报里的那一条，路径不靠人再写一遍 | 2026-10-23 |
-| D6 连接超时 | 还没连上时 200 ms。连上之后写命令不再设截止时间 | 连不上要快失败。连上之后截断会把一次还在写的发布看成客户端失败 | 2026-10-23 |
+| D6 Client deadlines (R2) | status 30 s / --all 120 s; sync 600 s; flag > env; 0 unlimited. Refused/missing socket immediately daemon_down with socket_exists. Complete write timeout → Unknown; read/incomplete frame → Busy. | No cancellation or replay after the final newline; no inference that a queued write started. | 2026-11-03 |
 | D7 RPC 层错误 | `UnknownMethod` / `Failed` 收成 `InvalidInput`，reason 为 `unknown_method` / `rpc_failed` | 这两个不是 `Code`。最近的已有码是参数不被接受 | 2026-10-23 |
 | D9 二进制与非法 UTF-8 | `skipped[]` 与 `preview.code`；文本按每个坏序列一个 U+FFFD | 3e 把形状交给 cli。整个调用不因一个二进制文件失败 | 2026-10-23 |
 | D10 排序与分页 | `RepoPath` 字节序；一次输出，不分页 | 3d 的续页与 inode 序不保留，排序得有一个确定的规则 | 2026-10-23 |
@@ -518,7 +518,7 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D31 `publish --from` 指定仓库、按 checkpoint 消歧 | 新增 `--from S:REPO:PATH`：第一个与第二个 `:` 之间的文本是会话里的某个仓库名时当作 REPO，否则第一个 `:` 之后全部是 PATH（`S:PATH` 不变，PATH 里可以有 `:`；以 `<repo>:` 开头的 PATH 写成 `S:<repo>:<repo>:...`）。REPO 的工作区（磁盘或 base）没有 PATH、或 REPO 形似仓库名但不在会话里 → `InvalidInput` `from_path`。`S:PATH` 有几个仓库都有时，取会话里 checkpoint 改过该路径（目录则其下任一路径）的那一个仓库；没有或不止一个改过 → `AmbiguousMatch` `from_repo`，`detail {path, session, candidates, changed_in, expected}`，`expected` 是每个候选的 `S:REPO:PATH`。只读 store，纯 cli 改动，daemon 不变。[实现时补的决定] | 真实使用里 #9301 的 `src/utils/apis/locationDuty.ts` 在 admin 与 tool 都存在，只有 admin 改过它，`--from` 无法指到 admin，发版被卡 | 2026-10-27 |
 | D17 全部跳过 | `deps approve` 每个会话都 `OpenFiles` 时仍 `ok: true`，条目里是 skipped | types.md：按条目返回，其余照常移动。没有“全部跳过”这个码 | 2026-10-23 |
 | D18 选择要 TTY | `resolve`，以及 `chain` 的 replay / drop：非 TTY 返回 `NotTty`，不连接，不取凭据。`chain --restore` 在仓库要确认时走与 `push` 相同的 `PushDeploy`，会弹框。不再说 chain 从不弹框 | 裁定要求没有人的选择就不运行。replay / drop 不推，所以不取凭据。`--restore` 是推送，用已有的 `PushDeploy`，不新加 `Action` 变体 | 2026-10-23 |
-| D19 `--help` / `--version` | clap 文本，退出码 0，不套信封 | 这两个不是子命令。其余 stdout 只有信封 | 2026-10-23 |
+| D19 Help text | help, --help, --version: text stdout, exit 0. help runs before environment/config setup; unknown topic → InvalidInput help_topic. | Each output ≤ 4096 bytes; index ≤ 1536. Full gate only in help gate; command summaries retain anti-bypass guidance. | 2026-11-03 |
 | D20 待确认提示 | 成功之后读 `deps::open_proposals`，不调用 `Sessions::open`，失败不影响退出码。2026-10-27 起放进 `data.pending_proposals`，stderr 那行只在终端上打 | design §6.4 第 4 步要每次 CLI 都提示。不能为了提示再发一次写 RPC，也不能再开一个 `Sessions` | 2026-10-23 |
 | D21 钉住的值读不出 | 当作要确认，先 `require_tty` | 读不出就放行，等于让一份坏文件跳过 TTY 检查 | 2026-10-23 |
 | D23 publish 的 TTY 检查只看还要做事的仓库（review-2 N2） | 批次里有要推且要确认的仓库时，cli 先发每个批次的 `BeforePublish` checkpoint，再发只读的 `publish_plan`（daemon.md §4），然后只对 `repos` 里那些要推且要确认的仓库 `require_tty`、展示链顶、发 `shown`。全部已经落地 → 不查 TTY，`publish` 回 `already_published`。还有要确认的仓库且不是 TTY → `NotTty`；在此之前送到 daemon 的只有这些 checkpoint 和 `publish_plan`：不发 `publish`，不弹框，不取凭据。checkpoint 或 `publish_plan` 失败且不是 TTY → 仍是 `NotTty`，原错误放在 `detail.plan_error`。批次里没有要确认的仓库时不发 `publish_plan`。`publish` 请求带 `plan`：TTY 检查覆盖了的那些仓库（可以为空）。`publish_plan` 与 `publish` 之间历史可能变（别的发布落地了不同内容），daemon 重算后多出来的要确认仓库不在 `plan` 里 → 在弹框、取凭据之前 `NotConfirmed`（`plan_changed`），什么都不写；agent 重跑，cli 重新计划并查 TTY（review-3 T1）。[实现时补的决定] | agent 重跑是主流程（D22）：之前要确认的仓库已经落地、只剩不用确认的仓库时，非 TTY 的重跑不该因已经落地的仓库被拒。checkpoint 只是记录当下内容，不是要确认的动作；不变量 7 守的是发布、弹框和凭据 | 2026-10-24 |
@@ -532,3 +532,32 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D36 `new` 记录 agent | 检测见 §3.1。只有检测到 agent 时，cli 先用 `daemon_status`（读超时与写超时 `PROBE_DEADLINE` = 5 秒，`rpc::call_within`）看 `features` 有没有 `new.agent`：有才在 `new` 的参数里带 `agent`；没有、超时或出错就不带，会话照常建，加 `AgentNotRecorded` 警告。探测之后 daemon 换成了旧版、拒绝了 `agent`（RPC `Failed` 且消息含 ``unknown field `agent` ``，那时什么都没执行）：去掉 `agent` 重发一次 `new`，同样加警告；别的错误一律不重发。没检测到 agent 不探测、不发字段，与以前的请求逐字节相同。测试的 `Home::cmd` 去掉 `GIT_*`、`STRATA*`、`CLAUDE*`、`CODEX*`、`CURSOR*` 环境变量，跑测试的 agent 不会漏进被测命令 | 旧 daemon 的参数拒绝未知字段，直接发会让新 cli 配旧 daemon 时 `new` 整个失败；探测一次比失败后猜原因可靠。`tests/agent.rs`：新 daemon 拿到 agent；旧 daemon 从没见过这个字段且会话带警告；探测后换成旧 daemon 只重发一次；别的拒绝不重发；没有 agent 不探测；不合法的显式值什么都不发；探测有上限；在进程内 daemon 上端到端（`STRATA_AGENT`、`--agent` 压过环境、`CLAUDE_CODE_ENTRYPOINT`、都没有） | 2026-10-27 |
 | D37 `session ports` / `session exec`（dev-ports，peilin 定） | 并行的 `tauri dev`（不同会话）各用自己的端口，已提交的配置一字不改。daemon 在 `new` / `add` 时给每个会话工作区租一块 4 个端口（store.md §4.4 `dev_ports`，config.md §2.6）；主 checkout 没有租约，用项目的默认端口。cli：(1) 选择：`--session` / cwd 的会话，再 `--repo` / cwd 的 repo / 全部 repo。(2) 租约：先读 store（只读 open，daemon 不在跑也行）；没有才调 `ports_ensure`，daemon 不在跑时透传 `daemon_down`（D3：agent 不启动 daemon）。旧 daemon 回 `UnknownMethod`（`InvalidInput unknown_method`）→ `Unsupported`，`detail.reason = "daemon_too_old"`；不先探 `features`，因为未知方法在执行任何东西之前就被拒绝。(3) 检查（`exec` 默认做，`--no-check` 跳过；`ports --check` 只报告）：对每个端口，`/usr/sbin/lsof -nP -iTCP:<p> -sTCP:LISTEN` 找监听者，再按监听者的 cwd 是否在工作区里分 `ours` / `foreign`；没有监听者时做绑定探测（`0.0.0.0`、`[::]`、`127.0.0.1`），被占是 `unidentified`，探测出错是 `probe_error`。动作表，第一条命中的为准：有本工作区的监听者 → `PortInUse already_running`（`exec` 与 `--reassign` 都拒绝）；`--reassign` 其余情况都继续；有 `foreign` → `PortInUse foreign`，`detail.fix` 是 `git-strata session ports --reassign --session S --repo R`；有 `unidentified` → `Busy port_unidentified`；有 `probe_error` → `Busy port_probe_error`。cli 从不杀进程，也不自动换端口：换由用户（或 agent 按 `fix`）显式跑 `--reassign`。(4) `exec`：cwd 在所选工作区里就留在原地；cwd 不在任何会话工作区里就 chdir 到工作区根；在另一个工作区里 → `cwd_mismatch`。设上九个变量（覆盖继承的值），`execvp`。(5) `--tauri`：把 `--config <STRATA_TAURI_DEV_CONFIG>` 加进 tauri dev 的参数，让 `build.devUrl` 指向 web 端口。直接启动（`tauri dev`、`cargo\|npx\|bunx\|pnpx tauri dev`、`pnpm exec tauri dev`）插在第一个 `--` 之前；包脚本（`bun\|pnpm\|yarn\|npm run X`，必须写 `run`）只在 `package.json` 的脚本恰好是一条字面的 `[NAME=v…] (tauri\|bunx tauri\|npx tauri) dev [opts]`（或裸的 `[bunx\|npx] tauri`，此时转给脚本的第一个参数是 `dev`：`bun run tauri dev`，npm 去掉自己的 `--` 后算，`npm run tauri -- dev` 也行）、不赋 `exec` 要设的变量、不含裸 `--` 时追加在末尾（`npm run` 先补一个 `--`）；命令里再有裸 `--` 会落到 app 而不是 tauri，拒绝。不带 `run` 一律拒绝（包管理器可能跑同名的自带命令，如 `bun test`、`pnpm help`、`yarn workspace`；impl-r2）；脚本名以 `-` 开头拒绝（`npm run --prefix=../x dev` 会被 npm 当成选项，impl-r2 B1）；会换包的选项（`--prefix`、`--filter`、`-w`、`--workspace`、`--cwd` 等）以及 npm 在它的 `--` 之前的任何选项都拒绝，因为跑的就不是校验过的那个脚本（impl-r1 B1）。认不出 → `InvalidInput tauri_launcher`，`detail.fix` 教用 `sh -c 'tauri dev --config "$STRATA_TAURI_DEV_CONFIG"'`。启动方式在拿租约之前就校验，失败不写任何东西 | 端口冲突是并行会话的常态；把端口交给进程（而不是改 `tauri.conf.json`、`.env`）就不碰已提交的文件。只检查不杀进程，是因为监听者可能是另一个会话或人自己的 dev server | 2026-10-28 |
 | D38 `daemon start`/`stop` 只管登录用户的 LaunchAgent（2026-10-28 事故） | 见 §3.2。`gui/<uid>` 域按用户不按 HOME，临时 HOME 的 `daemon stop` 曾把正在用的 agent 卸掉；临时 HOME 的 `start` 会让 daemon 读真实 store（plist 不设 HOME）。所以 HOME 必须是登录 home，否则 `foreign_home`；装上的 agent 来自别的 plist → `foreign_agent`。agent 从不起停 daemon，`daemon_down` 时继续干活并告诉人。测试只用 `Launchctl` 模拟或只有记录器的 PATH | 否决：按 HOME 换 label（launchd 与 GUI 都认固定 label）；没有 `path` 行时拒绝（人就停不了自己的 daemon） | 2026-10-30 |
+
+### R2 deadlines, cwd guards and help topics
+
+`call_within` recomputes remaining time before every syscall, including a
+nonblocking connect. ECONNREFUSED/ENOENT immediately mean daemon_down with
+socket_exists; local read fallbacks remain available for stale sockets.
+EINTR/EAGAIN retries and EINPROGRESS completion stay within the deadline.
+Timeout detail includes method, waited_secs, phase and request_sent. The final
+newline is the dispatch boundary: incomplete requests are Busy; complete writes
+are Unknown with outcome in_progress and “may still run”. Reads are Busy and
+never trigger fallback (including brief status). One 2 s daemon_status probe
+adds holds/queues when available, or daemon_status: unresponsive. Older daemons
+may omit queues. A timeout closes the socket without cancelling daemon work.
+
+A TTY or --progress enables stderr waiting notes every 15 s, using 2 s probes.
+stdout remains one compact JSON envelope; never combine stderr into a jq pipe.
+
+Non-check sync sends defaulted caller_pids/allow_cwd/allow_cwd_holders. A strict
+old daemon's explicit unknown-field rejection permits local checking and one
+resend without new fields. Other errors, especially Unknown, never permit
+resend. No extra capability probe is added. The daemon guards caller cwd before
+fetch/anchor/queue work, even for up-to-date, non-following and acknowledgement
+requests; check/hook are exempt. Run `cd ~ && git-strata sync --session S`, then
+cd back. The additive compatibility path also covers deps approve/propose --switch.
+
+`git-strata help` lists topics and commands: gate, push-guards, errors,
+errors-publish, output, headless, sync-ack. `help <command…>` matches that
+command's --help byte for byte. Full gate/push texts remain single macros.
+`<command> --help` describes the installed version.

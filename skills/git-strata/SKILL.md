@@ -15,6 +15,12 @@ as checkpoints, committed by `publish`, and sent to the remote only by
 `git-strata push` or a publish whose repo is configured to push. macOS only.
 `git strata ...` and `git-strata ...` are the same binary.
 
+A session is not a git branch. Do not `git commit` or switch branches in a
+workspace. Record edits as checkpoints (`git-strata checkpoint`); each
+`git-strata publish` creates one commit per participating repo on its
+`publish.branch`. A session can publish repeatedly, and one publish can include
+several sessions. Do not check out another branch in the workspace.
+
 This file is the short path. Read the linked files when you hit their topic:
 
 | File | Read it when |
@@ -76,10 +82,12 @@ git-strata restore 42 src/a.ts       # ... or only the listed paths
 
 # 5. Before you finish: is main ahead of you?
 git-strata sync --check              # data.upstream.clean; see sync.md if false
-git-strata sync --repo api           # following repos only: merge main now
+cd ~ && git-strata sync --session <SESSION> --repo api  # following repos only
+cd "<data.manifest.repos.api.path>"   # re-enter the current tree
 
 # 6. Publish checkpointed paths (PATH is relative to the repo root)
 S=s-k3q7xm2a
+cd ~
 git-strata publish --from "${S}:src/a.ts" --from "${S}:src/b.ts"
 #    several repos have the path? --from "${S}:REPO:PATH"
 
@@ -93,7 +101,8 @@ git-strata rm --session "$S"
 - `--session` takes a session id or a ticket (`AmbiguousMatch` when a ticket
   names several; use an id from `detail`). Write `"${S}:path"`, never
   `"$S:path"`: zsh reads `$S:t`, `$S:h` as modifiers.
-- `checkpoint -m` with nothing changed returns the latest checkpoint;
+- `checkpoint -m` with nothing changed returns the latest checkpoint and does
+  not record the new message, so it cannot feed a later publish subject;
   `publish` snapshots the selected paths itself, so it always publishes their
   current content. To keep an edit out, revert or `restore` it first.
 - `publish` replies only after checks, commit, push and the rebase of every
@@ -105,7 +114,14 @@ git-strata rm --session "$S"
 
 ## Reading replies
 
-stdout is exactly one JSON line; exit code 0 iff `ok` is true:
+stdout is exactly one compact JSON line; exit code 0 iff `ok` is true.
+`note:` lines and waiting progress go to stderr. Pipe stdout to `jq`; never
+combine streams with `2>&1 | jq`.
+
+`git-strata help gate` (0.1.3+) contains the full confirmation rules;
+`git-strata <command> --help` describes the installed version.
+
+The envelope is:
 
 ```json
 {"ok":true,"data":{...},"error":null}
@@ -115,13 +131,18 @@ stdout is exactly one JSON line; exit code 0 iff `ok` is true:
 Branch on `error.code`, then `error.detail.reason`; never parse `message`.
 When a reply carries a `fix` (in `detail`, `upstream`, `deps` or a warning),
 it is the command to run next, or the text to hand the human when it starts
-with "ask the human". Never run a human-only command (hard rule 1) yourself. Exceptions to the envelope: `--help`/`--version`, `ls --table`, a
+with "ask the human". Never run a human-only command (hard rule 1) yourself. Exceptions to the envelope: `help`, `--help`/`--version`, `ls --table`, a
 `session exec` that started its command, and `sync --check --hook`.
 
 | You got | Do |
 | --- | --- |
 | `Busy daemon_down` | keep working; tell the human; retry after `daemon status` shows running |
 | `Busy publish_unknown` | do not loop; tell the human ([errors.md](errors.md)) |
+| `Busy client_timeout` | back off before retrying; nothing was changed by that request |
+| `Unknown client_timeout` | it may still run; inspect status; do not retry, gc, or rm |
+| `HeadMoved baseline_moved` | rerun the exact `publish --from …` command in `detail.fix` to checkpoint against the new baseline |
+| `OpenFiles caller_cwd` | cd outside and run `sync --session S`; then cd back |
+| `OpenFiles cwd_holders` | ask other holders to cd out; stop only processes you started |
 | `Busy` (other) | another operation holds the lock; wait and retry |
 | `NotTty` / human-only command | stop; give the human the exact command |
 | `NoSuchSession` | `cd` into your workspace or pass `--session` |

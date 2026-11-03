@@ -297,8 +297,22 @@ tree is kept instead of retired (`status`/`ls` list it under `kept_trees`
 with the late-written paths); `rm` refuses until it is published or discarded, and the
 `rm --discard` prompt names it.
 
+**R2 client upgrade.** Update installed skills with `npx skills update git-strata -g`.
+Moving sync now refuses the caller's workspace cwd even when already up to date;
+run it from outside with `--session`, then cd back. Other cwd holders need to
+leave or be explicitly accepted with `--allow-cwd-holders`; the caller's own
+PID chain can be accepted with `--allow-cwd`. Neither overrides dependency-file
+or mapped-file guards. Staging cwd produces `NoSuchSession stale_cwd`.
+
+`status` has a 30 s deadline (120 s with `--all`), `sync` 600 s. Override with
+`--timeout SECS` or `GIT_STRATA_TIMEOUT` (flag wins; 0 unlimited). Hooks retain
+their five-second bound. A timed-out complete write is `Unknown client_timeout`:
+it may still run; check status and do not retry, gc, or rm. Reads/incomplete
+frames are `Busy client_timeout`; back off. `--progress` enables stderr notes
+without a TTY. stdout remains one compact JSON line: never use `2>&1 | jq`.
+
 **Syncing main explicitly.** `git-strata sync --check` inspects local upstream;
-`git-strata sync --repo R` fetches and attempts a move. A non-following upstream
+`cd ~ && git-strata sync --session S --repo R` fetches and attempts a move. A non-following upstream
 entry has `following:false` and no sync `fix`; ignore its behind count and only
 acknowledge named workspace conflicts. A plain sync returns `not_following`.
 On a sync conflict, resolve paths with the report's `--target` / `--generation`.
@@ -588,6 +602,9 @@ confirmation run `git-strata push REPO` first, then rerun the publish.
 Pushing right after each publish keeps the window small.
 
 ## Confirmation gate (Touch ID / TTY)
+
+Installed full rules: `git-strata help gate` (0.1.3+). Command help keeps a
+short summary; `git-strata <command> --help` describes the installed version.
 
 > Keep this section in step with `gate_text!` in
 > `crates/git-strata/src/help.rs`, which is the same text in `--help`.

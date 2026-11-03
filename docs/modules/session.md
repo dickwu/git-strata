@@ -770,7 +770,7 @@ design §6.1 第 2 步把接法交给构建者；增补 2 定为影子仓库，g
 1. 以 `O_DIRECTORY` 打开 cwd，`fcntl(F_GETPATH)` 取真实路径：符号链接已解析，大小写按卷上的写法。打不开 → `Ok(None)`。
 2. 真实路径不在 `<paths.root>/sessions/` 的真实路径之下 → None。
 3. 下一段不能经 `SessionId::try_from` 解析 → None。`.repos` 在这一步落空，所以影子仓库里的路径不属于任何工作区。
-4. 再下一段不是该会话清单里的某个 `RepoName` → None。逐字节比较：目录是 session 按 `RepoName` 建的。会话根本身、dev-link 建的 `node_modules/`、`.strata-tmp-move-*`、`.strata-tmp-restore-*` 在这一步落空。
+4. 再下一段不是该会话清单里的某个 `RepoName` → None。逐字节比较：目录是 session 按 `RepoName` 建的。会话根本身、dev-link 建的 `node_modules/`、`.strata-tmp-restore-*` 在这一步落空。R2: 已知移动暂存/旧树（`.strata-tmp-move-*`）返回 `NoSuchSession`，`reason: stale_cwd`，并给出当前工作区路径。
 5. 查 Store：会话存在、不是 `Removed`、清单里有这个仓库 → `Some((id, repo))`，否则 None。`Creating` 与 `Unknown` 的会话照样识别出来：拿到它的命令（例如 checkpoint）由各自的检查拒绝，而 `status` 正需要认出它。Store 读不出来 → `Err`，原样透传，不吞成"不在会话里"。
 
 复杂度 O(1)，daemon 不在时也能用。
@@ -1153,7 +1153,7 @@ daemon 启动时先调 `recover`（§5.8），然后才跑 gc、接受请求。�
 | `new_warm_under_5s` | 合成一套规模接近 tool 加 21 个兄弟库的配置，基线与依赖集都已在缓存里：记录 `new` 的墙钟时间与各阶段的分解，断言小于 5 s。标 `#[ignore]`，在 spike 里跑，并据此修正目标（§6.5：增补 8 的估算是整套布局很可能超过） | 新增（design §8 验收数字） |
 | `new_same_ticket_creates_another_session` | 同一 ticket 连续 `new` 两次：得到两个不同的会话 id、两个独立的会话根和各自的影子仓库；第二次不复用第一次的目录，也不重建已有的基线与依赖集（Store 里 generation 的行数不变）。`select("9246")` 返回 `AmbiguousMatch`，`detail.candidates` 恰为这两个 id | `sdk/js/test/reinit.mjs::entry`；`layerfs-api/tests/sandbox_operations.rs::create_matching_existing_project_keeps_one_original_hello_and_does_not_reinstall` |
 | `new_lost_reply_is_found_not_replayed` | 调用方没有拿到 `new` 的返回值（测试丢弃它）：会话照常处于 `Active`，`list` 和按 ticket 的 `select` 都能找到它；没有任何重放的路径，再调一次 `new` 得到的是另一个会话 | `layerfs-daemon/tests/kernel_mount_routes.rs::lost_bind_and_attach_acknowledgements_are_located_without_replay` |
-| `resolve_by_cwd_inside_workspace` | cwd 为 `<root>/tool/src/app`，包括大小写不同的拼写、经符号链接到达的同一目录 → `Some((sid, tool))`。cwd 为会话根本身、会话根下 dev-link 建的 `node_modules/`、`.strata-tmp-move-*`、`.strata-tmp-restore-*`、`sessions/.repos/<sid>/tool.git`、主 checkout、不存在的路径 → `None`。`Unknown` 会话的工作区路径 → `Some`；已删除会话的工作区路径 → `None`；Store 读不出来 → `Err`，不是 `None` | `layerfs-sandbox/tests/container_labels.rs::a_missing_or_different_label_or_another_mount_is_a_topology_mismatch` |
+| `resolve_by_cwd_inside_workspace` | cwd 为 `<root>/tool/src/app`，包括大小写不同的拼写、经符号链接到达的同一目录 → `Some((sid, tool))`。cwd 为会话根本身、会话根下 dev-link 建的 `node_modules/`、`.strata-tmp-restore-*`、`sessions/.repos/<sid>/tool.git`、主 checkout、不存在的路径 → `None`。`Unknown` 会话的工作区路径 → `Some`；已删除会话的工作区路径 → `None`；Store 读不出来 → `Err`，不是 `None` | `layerfs-sandbox/tests/container_labels.rs::a_missing_or_different_label_or_another_mount_is_a_topology_mismatch` | R2: .strata-tmp-move-* cwd returns NoSuchSession/stale_cwd with its live workspace, no longer None.
 | `select_by_id_or_ticket` | 会话 id → 该会话；已删除 → `NoSuchSession`。ticket 只有一个会话 → 该会话；没有会话 → `NoSuchSession`；两个会话 → `AmbiguousMatch` 加 `candidates`。不合格的选择器 → `InvalidInput`。`list` 含 `Unknown` 的会话，不含已删除的 | 新增（types.md §6.2 的 `AmbiguousMatch`、`NoSuchSession`） |
 | `sessions_on_one_base_are_isolated` | 两个会话 A、B 钉同一基线：在 A 里写、删、改名文件，B 的工作区、清单与 checkpoint 都不变；A 的 `git stash` 之后，B 的 `git stash list` 为空，A 的 `git stash pop` 取回的是 A 自己的改动；A 的 `git branch x` 在 B 与主 checkout 里都不存在。`new` 之后改主 checkout 的 `info/exclude`，让 A 里一个被 ignore 的文件不再被 ignore：A 里 `git check-ignore` 的结果、A 的 overlay 都不变，`status(A)` 给 `MirrorDrift`。一次被拒绝的 `new`（`NoSuchRepo`）不改变 A 或 B 的任何状态 | `layerfs-daemon/tests/mounted_cycles.rs::simultaneous_mounts_over_related_roots_are_isolated_and_a_stale_token_never_redirects` |
 | `seed_files_listed_in_status_and_never_checkpointed` | `new` 之后，`status` 的每个工作区都列出每个种子文件的 `path`、`source`、`size`、`source_mtime`、`copied`，没有任何内容字段。改写工作区里的 `.env` 后做 checkpoint：entries 里没有任何种子文件路径。之后改写主 checkout 的 `.env` → `SeedStale`；会话把 `.env` 从 `.gitignore` 里删掉 → `SeedNotIgnored`，再做 checkpoint，entries 里仍然没有 `.env`（overlay 的排除集合），工作区里 `git status` 把它列为未跟踪 | 新增（design §4 种子文件） |
@@ -1173,7 +1173,7 @@ daemon 启动时先调 `recover`（§5.8），然后才跑 gc、接受请求。�
 | `move_workspace_projects_overlay_and_marks_conflicts` | 从旧基线移到新基线（模拟一次发布）：会话已发布的路径离开 overlay，记入 `dropped`；未发布、与新基线不重叠的改动经三方合并后写入；同一 hunk 两边都改的路径保留会话版本，列在 `conflicts` 里，`status` 也列出它；overlay 里 mode 0o100755 的文件在新树里仍可执行，0o120000 的条目成为符号链接，目标字节等于 blob 的内容。交换之后对工作区冷扫（`reconcile_full`）得到的条目等于 `rebase` 的结果 | 新增（design §6.5 第 7 步；增补 3 "Projection"；review I9） |
 | `move_workspace_carries_ignored_content` | 移动之后，种子文件、种子缓存（`target/` 里的内容）、`node_modules/.cache`、其它被 ignore 的文件、被 ignore 的符号链接（链接本身，目标不变）和空目录都原样出现在新工作区里，内容相同，blob store 的条目数不因它们增加。被 ignore 的本地文件与新基线新增的同名被跟踪文件相撞 → 不携带，记进 `uncarried`，新树里是被跟踪的版本，本地文件留在保留的旧树里（`retained = true`，再移动一次它也不被收走）。新基线把 `conf` 换成指向会话根之外目录 O 的被跟踪符号链接，而旧树的 `conf/` 下有被 ignore 的文件 → 记进 `uncarried`，O 里没有新条目。FIFO、mode 000 的文件 → `uncarried`。`PauseAt { phase: "move.carry" }` 停在遍历之后，测试把一个要带的被 ignore 文件换成同名目录、删掉另一个，再放行：移动成功，前者记进 `uncarried`（旧树保留），后者既不在新树里也不在 `uncarried` 里，新树里没有 `.strata-carry-*`。被 ignore 的文件带 `uchg`：返回 `ReadOnly`（`detail.path` 是它），意图 `Refused`，暂存退役，工作区不变。被 ignore 的符号链接 `src/gen-link`（`src/` 下有被跟踪的文件，遍历走进 `src/`）在新树里按目标重建，`readlink` 的字节与旧树相同（含非 UTF-8 目标），不是克隆。`PauseAt { phase: "move.carry" }` 停在遍历之后，测试把旧树的 `src` 换成指向会话外目录 O 的符号链接（O 里有一个同名、目标不同的 `gen-link`），再放行：`src/gen-link` 记进 `uncarried`（`attrs_of` 在 `src` 上给 `NotDirectory`），新树里没有来自 O 的链接 | 新增（design §4 种子文件、种子缓存；增补 3 "Rooted destinations"；review I6、M14；module-rulings "clone_from_rooted states its source kind"、"A symlink is recreated, never cloned"） |
 | `move_workspace_keeps_old_tree_with_a_late_ignored_edit` | 被 ignore 的 `late.env` 与 `build/out.txt`（`build/` 整块携带）。`PauseAt { phase: "move.recheck" }` 停在携带之后、交换之前，改其中一个再放行：旧树保留（`old_tree` 有值、意图 `old_tree` 记下、`OldTreeKept { changed: true, retained: true }`），旧树里是改后的内容，新树里是携带时的内容；下一次移动也不收走它。对照：不改 → 旧树退役 | 新增（review P1-14，GS-01） |
-| `move_workspace_keeps_old_tree_while_in_use` | 移动时持有进程的 cwd 在旧工作区里：移动成功，`MoveReport.old_tree` 为 `<root>/.strata-tmp-move-<repo>-<十六进制>/`，旧树原样留着，`status` 带 `OldTreeKept`（含该 pid，`changed = false`，`retained = false`）。两种后续（参数化）：（a）往旧树里写一个文件，`status` 重算出 `changed = true`；持有进程退出之后再移动一次，这棵旧树仍然留着。（b）旧树没被改过，持有进程退出之后再移动一次，它连同它的管理目录一起退役 | 新增（design §2 反目标"丢失未发布改动"；module-rulings T9 的交换规则；review I5） |
+| `move_workspace_keeps_old_tree_while_in_use` | 移动时持有进程的 cwd 在旧工作区里：R2: default refuses OpenFiles/cwd_holders; with --allow-cwd-holders, 移动成功，`MoveReport.old_tree` 为 `<root>/.strata-tmp-move-<repo>-<十六进制>/`，旧树原样留着，`status` 带 `OldTreeKept`（含该 pid，`changed = false`，`retained = false`）。两种后续（参数化）：（a）往旧树里写一个文件，`status` 重算出 `changed = true`；持有进程退出之后再移动一次，这棵旧树仍然留着。（b）旧树没被改过，持有进程退出之后再移动一次，它连同它的管理目录一起退役 | 新增（design §2 反目标"丢失未发布改动"；module-rulings T9 的交换规则；review I5） |
 | `move_workspace_seconds_warm` | 与 `new_warm_under_5s` 同样的规模，新基线与依赖集都已在缓存里：`move_workspace` 的墙钟时间在秒级（目标小于 5 s），分别记录投影、携带（含几十万条目的 `target/`）与 refresh 的耗时。标 `#[ignore]` | 新增（design §8"依赖 rollout = 克隆 + rename，秒级"） |
 | `recover_abandons_pre_visible_move_intents` | （a）`FailAt { phase: "move.prepare", errno: EIO }`：返回 `Unknown`（`phase = "prepare"`，`kept` 是暂存）；工作区健康仍是 `Ok`，`status` 报 `MoveLeftover { n, staging }`；再对同一工作区 `move_workspace`：意图 n 被关成 `Abandoned`、它的暂存与管理目录退役，新的移动用 n + 1 并成功。（b）`StopAt { phase: "move.prepare" }` 之后重开并 `recover()`：意图 `Abandoned`，`RecoverReport.abandoned` 列出它，暂存在 trash 里，工作区与 Store 的 base、head 不变。（c）`FailAt` 以 `ENOTDIR` 在 `move.prepare`：返回 `NotDirectory`，意图当场关成 `Refused`，暂存退役，没有 `MoveLeftover`。（d）不靠注入：把影子仓库的 `worktrees` 换成指向主 checkout `.git/worktrees` 的符号链接，再 `move_workspace`：返回 `NotDirectory`（来自 `attach_worktree`），意图 `Refused`，暂存退役；主 checkout 的 `.git/worktrees/` 的列表与每个字节不变，工作区不变；换上来的条目挪进 `<shadow>/strata-quarantine/worktrees-<nonce>`，不留在原地、不留给 `git gc`，不跟随、不删它指向的目录；下一次 `move_workspace` 由 attach 重建 `worktrees/` 并成功。把 `worktrees` 换成一个普通文件（不是符号链接）同样：条目进隔离区，不留在原地。（e）经 gitio 的测试接缝 `pause_attach_before_index` 停在 attach 建好 `worktrees/<n>/` 之后、建 index 之前：停住时往 `worktrees/<n>/` 里放一个文件 `index` 再放行 → `move_workspace` 返回 `Exists`（来自 attach），意图 `Refused`，`S`（连同 attach 放在 `S/.git/` 下的临时 index）与 `worktrees/<n>/` 都在 store 的 trash 里，没有 `MoveLeftover`，工作区、head 与 pin 不变；改成停住时把 `worktrees/<n>` 换成指向主 checkout `.git` 的符号链接 → 返回 `NotDirectory`，意图 `Refused`，`S` 在 trash 里，换上来的条目挪进 `<shadow>/strata-quarantine/<n>-<nonce>`，不留在 `worktrees/` 里、不留给 `git gc`；不跟随、不删它指向的 `.git`，主 checkout 的 `.git/` 逐字节不变。把 `worktrees/<n>` 换成一个普通文件（不是符号链接）同样：条目进隔离区，不留在原地。之后的移动用 n + 1 并成功；`remove` 之后隔离区里的条目随影子仓库进 trash，`remove_tree_rooted` 不跟随，它指向的东西仍然不变。（f）经 gitio 的接缝 `pause_attach_before_readback` 停在 attach 的 refresh 之后、核对暂存与读回之前：停住时把 `S` 挪开又挪回再放行 → `move_workspace` 返回 `Unknown`（`phase = "prepare"`），`detail.cause` 是 gitio 的错误，其中 `detail.reason = "staging-changed"`；工作区健康仍是 `Ok`，`status` 报 `MoveLeftover`，下一次移动把它关成 `Abandoned`（module-rulings "An attach that may have written outside its staging is raised to the human"） | 新增（增补 3 "Error timing, refined"；增补 4 细化 2；review I4；增补 8 对影子仓库的澄清；gitio @9985e4c §5.6 `attach_worktree` 第 2、3 步的错误时序） |
 | `status_tells_running_moves_from_interrupted_ones` | `PauseAt { phase: "move.prepare" }` 与 `PauseAt { phase: "move.swap" }` 停住时，另一个线程的 `status` 不报这条意图（既不是 `MoveLeftover`，也不是 `MoveAwaitingRecover`），健康是 `Ok`。`StopAt { phase: "move.pin" }` 之后不重开，就是 `fail_move` 本身也失败时的样子（意图停在 `Swapping`，这次调用已经结束）：`status` 报 `MoveAwaitingRecover { n, staging: S }`，健康仍是 `Ok`，`resolve_failed_move` 两种选择都答 `not_failed`，再一次 `move_workspace` 得到 `InvalidInput`（`reason = "move_awaiting_recover"`），不记 checkpoint、什么都不写，`remove` 不带 `--discard` 得 `Dirty`（`unresolved`）；重开并 `recover()` 之后意图与健康都是 `Unknown`，`status` 不再报 `MoveAwaitingRecover`，Accept 成功 | 新增（review M-3） |
@@ -1277,7 +1277,7 @@ git commit -m "feat(session): build the full sibling layout on per-session shado
 - Consumes: `store::Store` 的 `session`、`sessions`、`latest_checkpoint`；`deps::{find_set, drift, open_proposals, Drift, Proposal, ProposalState}`；`gitio::Git` 的 `shadow_at`、`shadow_drift`、`is_ignored`，类型 `MirrorDrift`（含 `PrePushGuardDisabled`）；`overlay::checkpoint`（只在测试里用来造 checkpoint）；`apfs::attrs_of`
 - Produces: `Sessions::resolve`、`Sessions::select`、`Sessions::list`、`Sessions::status`；`SessionStatus`、`SessionState`、`WorkspaceHealth`、`WorkspaceStatus`、`StatusWarning`、`MirrorDriftItem`
 
-- [ ] **Step 1: 写失败的测试**：`new_same_ticket_creates_another_session`、`new_lost_reply_is_found_not_replayed`、`resolve_by_cwd_inside_workspace`、`select_by_id_or_ticket`、`sessions_on_one_base_are_isolated`、`seed_files_listed_in_status_and_never_checkpointed`、`status_warns_untracked_repo_edits_not_checkpointed`、`status_reads_workspace_presence_from_filesystem`、`status_reports_drift_and_pending_proposals`、`status_reports_mirror_drift_and_vanished_shadow`
+- [ ] **Step 1: 写失败的测试**：`new_same_ticket_creates_another_session`、`new_lost_reply_is_found_not_replayed`、`resolve_by_cwd_inside_workspace`、`select_by_id_or_ticket`、`sessions_on_one_base_are_isolated`、`seed_files_listed_in_status_and_never_checkpointed`、`status_warns_untracked_repo_edits_not_checkpointed`、`status_reads_workspace_presence_from_filesystem`、`status_reports_drift_and_pending_proposals`、`status_reports_mirror_drift_and_vanished_shadow` R2: .strata-tmp-move-* cwd returns NoSuchSession/stale_cwd with its live workspace, no longer None.
 - [ ] **Step 2: 跑测试，确认失败**
 
 Run: `cargo test -p strata-session --features test-seams --test resolve_status`
@@ -1436,7 +1436,7 @@ git commit -m "feat(session): resolve a failed move by abandoning or accepting i
 | D13 克隆工作区时拿不拿锁 | 不拿 | 第 11 步写下的工作区行已经引用这个 generation，gc 不回收被引用的 generation | 2026-10-22 |
 | D14 `new` 的持久化 | 进入 `Active` 之前对会话根与影子仓库目录做 `full_fsync` | 记成 `Active` 的会话要扛得住断电（增补 3 "Durability"） | 2026-10-22 |
 | D15 `observe_main` 在 `new` 里的位置与报告 | `finalize` 之后的第 15 步，会话已是 `Active`，不记阶段；每个仓库各观察一次，互不影响；失败只成为 `NewReport.warnings` 里的 `ObserveFailed`（`detail` 是 deps 的原样错误），`new` 照常返回 `Ok`。`new` 因此返回 `NewReport`（清单加警告），而不是只有清单 | module-rulings "observe_main is best-effort for its callers" 定了失败不让 `new` 失败、不改生命周期、报成 `ObserveFailed` 警告，并允许 `new` 把观察放到 `finalize` 之后；它取代了第二轮这一行的"失败即 `Unknown`"。本文定的是位置与形状：放在之后，等写锁的时间不让会话停在 `Creating`，观察中途崩溃留下的是 `Active` 的会话，而不是被 `recover` 记成 `Unknown` 的；警告要有地方报出，返回值能让调用方（daemon、cli）当场看见 | 2026-10-22 |
-| D16 `resolve` 的签名与算法 | `Result<Option<…>>`；真实路径，`sessions/` 下一段是 id，再下一段是清单里的 `RepoName`，会话没删除 | Store 的错误不该被吞成"不在会话里"；只认工作区，暂存与影子仓库不算 | 2026-10-22 |
+| D16 `resolve` 的签名与算法 | `Result<Option<…>>`；真实路径，`sessions/` 下一段是 id，再下一段是清单里的 `RepoName`，会话没删除 | Store 的错误不该被吞成"不在会话里"；工作区返回 Some；R2 的移动暂存返回 NoSuchSession/stale_cwd；影子仓库仍返回 None | 2026-10-22 |
 | D17 `list` 列哪些会话 | 不是 `Removed` 的，含 `Creating` 与 `Unknown` | 未决的现场要能被人看到，才能 `rm --discard` | 2026-10-22 |
 | D18 种子文件"过期" | 来源的 mtime 与记录不同，或来源已不在 → `SeedStale` | 只读元数据，不读内容；只是告警 | 2026-10-22 |
 | D19 `SeedNotIgnored` 的查法 | 每个种子逐个 `is_ignored`；工作区不在时不查 | 种子通常只有几个；`is_ignored` 要经工作区的 `.git`，`Missing` 已经说明了问题 | 2026-10-22 |
@@ -1496,7 +1496,9 @@ retains G0, the G2 snapshot and G4 rechecks/old-tree preservation. Callers use
 `walk_activity`, not `idle_activity`, so there is no quiet-window wait.
 Dependency-directory holders are checked before staging and again at step
 14 on every Agent move, including source-only moves; they return
-`OpenFiles`. Whole-workspace holder scans do not gate an Agent swap.
+`OpenFiles`. R2 additionally scans whole-workspace Cwd holders immediately
+before swap and refuses them unless explicitly accepted. Fd-only holders
+outside dependencies keep the old tree and produce a warning.
 
 `move_workspace_agent_resolving(..., baseline, options, kept)` uses the same
 report-bound `RebaseOptions` for its checkpoint-based projection. A conflict
@@ -1510,3 +1512,28 @@ decisions here; callers must repeat accepted names/flags with the same binding.
 For a move that reaches Preparing, decisions are written to `sync_move_history`;
 the associated move state shows whether they landed. Late writes after the
 last check keep the old tree and its durable G4 notice.
+
+### R2 old-tree and cwd contract (amends earlier move/resolve examples)
+
+Explicit/Agent moves check cwd holders under the lock immediately before
+Swapping; OpenFiles/cwd_holders leaves the workspace unmoved. Request-thread
+overrides are restored on return/unwind: allow_cwd exempts only caller_pids'
+Cwd holds; allow_cwd_holders accepts others. Dependency fd/map guards stay.
+Auto still defers on every holder. Phase F reports held_old_tree for fd/map
+holds and cwd_stale for Cwd holds, including post-scan arrivals. Re-enter the
+live path after sync. Staging cwd yields NoSuchSession/stale_cwd, not a normal
+session; live status cwd remains quiet.
+
+Old-tree collection reads/suspends clean passes before its first holder scan.
+Held trees keep passes cleared; a matching path/inode verdict supplies changed
+for at most ten minutes, otherwise one comparison refreshes it. Held trees
+with fresh verdicts need no activity/content walks. After release, retirement
+still needs fresh activity/content checks, separated clean passes, a final
+holder scan and inode check. Cached changed is display only.
+
+Both activity walks honor cooperative stop at directory boundaries. Interrupted
+walks are unjudged (Skipped), never clean and never permanent walk_error/late
+notices. Yield preserves the previous verdict. Passes are restored only when
+this pass observed no holder; a crash loses passes rather than keeping stale
+ones. Step 14/Phase F keep interrupted trees without late notices. rm/status
+treat Skipped as not retirable. Foreground requests may postpone collection.

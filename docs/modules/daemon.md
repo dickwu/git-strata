@@ -104,7 +104,7 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | method | params | data |
 | --- | --- | --- |
 | `new` | `{ "ticket": string\|null, "repos": [RepoName], "only"?: bool, "agent"?: string\|null }` | `NewReport`。`only` 为真时会话只有 `repos` 这些工作区（session.md D51）；缺省为假，cli 只在 `--repo` 时才发这个字段，好让新 cli 也能用旧 daemon。`agent`（D38）是创建会话的 AI agent 名；缺省或 null 表示不知道；在调 session 之前按 types.md `AgentName` 校验，不合法 → `InvalidInput`（`detail.reason = "agent"`），什么都不写；不是字符串 → RPC `Failed`。它进会话清单的 `agent`，`new` 的回复与 `status` 里都在 `manifest.agent`（没有就省略这个键）。cli 只在 `daemon_status.features` 含 `"new.agent"` 时才发这个字段 |
-| `sync` | `SyncParams {session?, cwd?, repos?, check?, fetch?, resolved?, keep?, target?, generation?, accept_diverged?, hook?}`（非 check 映射为 `SyncRequest`） | check: `{session, upstream}`；否则 `{session, fetched, repos, next, upstream?}`; non-check moves, report persistence and legacy conflict acknowledgement (see Main-sync non-check handler) |
+| `sync` | `SyncParams {session?, cwd?, repos?, check?, fetch?, resolved?, keep?, target?, generation?, accept_diverged?, hook?, caller_pids?, allow_cwd?, allow_cwd_holders?}`（非 check 映射为 `SyncRequest`） | check: `{session, upstream}`；否则 `{session, fetched, repos, next, upstream?}`; non-check moves, report persistence and legacy conflict acknowledgement (see Main-sync non-check handler) |
 | `add` | `{ "session": SessionId, "repos": [RepoName] }` | `{ report: AddReport, anchor_unknown }`（session.md D52） |
 | `status` | `{ "cwd": string\|null, "session": string\|null, "all": bool, "chains"?: bool, "summary"?: bool, "workspaces"?: bool }` | 见 §5.4；`chains` 缺省 false。`summary: true`（status-perf C）：只读 store，回 `{ sessions: [SessionSummary] }`（cli.md §3.2 `status --brief`），按 id 升序，选择优先级同普通 status（`all` > `session` > `cwd` > 全部）；不 stat 工作区、不跑 git、不走旧树，不进池。`workspaces: true` 给每个会话带上 `workspaces`，只在 `summary` 时合法，否则 `InvalidInput`（`workspaces_without_summary`）；`summary` 与 `chains: true` 同给 → `InvalidInput`（`summary_with_chains`）。旧 daemon 不认识这两个字段，以 RPC `Failed`「unknown field」拒绝，cli 读 store 回退 |
 | `checkpoint` | `{ "session", "repo", "reason": CheckpointReason, "paths": [RepoPath] }` | `Checkpointed`；`paths` 可空 |
@@ -124,7 +124,7 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `resolve_move` | `{ "session": SessionId, "repo": RepoName, "abandon": bool, "accept": bool }` | `ResolutionReport`。两个布尔必须恰好一个为真，否则 RPC `Failed`，不调用 session |
 | `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice, "shown"?: CommitOid \| null }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
 | `config_relax` | `{ "repo": RepoName }` | `{}`。没有凭据字段。见 §5.5 |
-| `daemon_status` | `{ "verify": bool }` | 见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc` |
+| `daemon_status` | `{ "verify": bool }` | `holds`, `queues:[{session,holder,since,queued}]`, `repo_waiting`, `warnings`（含 LongWait）；见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc` |
 | `du` | `{ "refresh": bool }`（缺省 false） | 见 §5.12 |
 | `ports_ensure` | `{ "session": SessionId, "repo": RepoName }` | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
 | `ports_reassign` | `{ "session": SessionId, "repo": RepoName, "checked": u16 \| null }`（`checked`：cli 查过监听的那个 base，`null` 或缺省 = 它没看到租约；与事务里的租约不同时 `Busy lease_changed`，什么都不动） | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
@@ -418,7 +418,7 @@ value; workers should use the accessor for subsequent passes.
 
 `ObserveFailed` 不在 `DaemonWarning` 里重定义。它是 `NewWarning` 或这次 RPC 的 `data.warnings`。
 
-`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.ports", "status.upstream", "sync"]`（D38、D39；后两项见 main-sync）；没有这个键的 daemon 一个也不支持。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
+`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.ports", "status.upstream", "sync", "sync.cwd_guard", "deps.cwd_guard", "old_tree.yield", "client.timeout"]`（D38、D39；后两项见 main-sync）；没有这个键的 daemon 一个也不支持。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
 
 stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看见某个影子仓库的 `PrePushGuardDisabled`。同一条不重复打。JSON 里都有，不靠人去翻日志。
 
@@ -550,7 +550,7 @@ daemon 实现 `publish::PublishLocks`（`with_sessions`、`with_repo`），放�
 
 旧树上的进程只列在 status 里，不杀（session 的已知限制）。
 
-旧树线程（status-perf A1，peilin 的 D1）：`serve` 起一条线程。启动时先对每个会话（`try_session` → `with_repo`）跑 `sweep_half_retired`（旧树已退役、管理目录还在且不是当前 gitdir 的，退役那个管理目录），再把所有 `Done` 意图的旧树排进队列。之后循环：`next_old_tree(100 ms)` 取一项，`try_session` → `with_repo` 下调 `check_old_tree`；会话忙（Busy）的项 5 s 后重排。`stop()`（done、stopping、外部停止）为真时置位停止标志，正在进行的遍历在下一个目录处停下。panic 被 `catch_unwind` 接住、记日志，线程继续。已知限制：检查期间线程占着该会话的队列，同一会话的 `rm`、`move` 会排在它后面，可能返回 Busy。`rm`（不论成败）与 `restore` 之后清掉该会话的判定。
+R2 old-tree worker: startup/periodic half-retired sweeps and queued items use try_session("old_tree") then zero-wait try_repo. Busy locks requeue after 5 s, releasing the queue immediately. Both holders carry one per-item yield flag; any actual bounded/unbounded waiter sets it; zero-bound probes do not. Walks stop at the next directory. Yield retries after 5 s, or 50 s after three consecutive yields. Shutdown does not requeue. Frequent foreground traffic may starve collection until idle. The previous verdict survives yield; status cannot bypass its retry delay. Panics are logged; no request is cancelled.
 
 ### 5.12 `du`：磁盘用量
 
@@ -1085,3 +1085,29 @@ proposal and any supplied fix to the human and stop; only
 `installing` or `publishing` waits get bounded retries. Upstream rows with
 `following: false` emit no sync fix; ignore their behind count for sync and only
 acknowledge named conflicts.
+
+### R2 visibility and cwd amendments
+
+D8 remains unchanged: only a request's first pre-visible take is bounded;
+later takes can wait indefinitely. daemon_status adds queues entries
+`{session, holder, since, queued:[method…]}` from FIFO state mutexes, never by
+acquiring the held queue. Repo/session waiters older than LOCK_WAIT produce
+LongWait `{repo?, session?, method, since, attempt_since}` alongside LongHold.
+attempt_since is the current attempt, not a total across bounded retries.
+There is no 600 s daemon long_wait bound. Disconnects never cancel handlers;
+failed reply writes are tolerated without replay.
+
+FEATURES adds sync.cwd_guard, deps.cwd_guard, old_tree.yield and client.timeout
+(informational). SyncParams forwards cwd as SyncRequest.caller_cwd, with
+defaulted caller_pids, allow_cwd and allow_cwd_holders. Canonical component
+containment refuses caller cwd before fetch/anchor/queue work, even when no
+movement would result; check/hook remain read-only. Explicit/Agent movers refuse
+other Cwd holders before swapping. Only caller-chain Cwd holds under allow_cwd
+and daemon direct-child Cwd holds are exempt; fd/map protections stay. A child
+exiting mid-scan may produce a transient named refusal. Params stay strict;
+old CLI defaults are safe. CLI retries only explicit unknown-field parser
+rejections, after local checking. GUI approvals have no override and skip held
+sessions. Move warnings distinguish held_old_tree and cwd_stale.
+
+Staging/retained cwd returns existing NoSuchSession with reason stale_cwd and
+the live workspace path. Normal live workspace status adds no warning.

@@ -1,10 +1,26 @@
 # git-strata command reference
 
-Taken from the 0.1.2 binary's `--help` and `docs/modules/cli.md` §3. When they
+Describes the R2 CLI and `docs/modules/cli.md` §3. When they
 disagree with your installed version, `git-strata <command> --help` wins.
 "Human" = needs a TTY (and, where marked, a LocalAuthentication prompt);
 an agent must hand these to the human. "No daemon" = works when the daemon
 is not running.
+
+`git-strata help [TOPIC|COMMAND…]` (0.1.3+) prints text without environment
+setup. Topics: gate, push-guards, errors, errors-publish, output, headless,
+sync-ack. Each command/topic is at most 4 KiB; the index is at most 1.5 KiB.
+
+Run moving sync outside the workspace: `cd ~ && git-strata sync --session S`,
+then cd back. `--allow-cwd` accepts your own stale cwd; `--allow-cwd-holders`
+accepts others' (also on deps approve/propose --switch). They do not bypass
+file or mapping protections. `status`/`sync` accept `--timeout SECS` (0 unlimited)
+and `--progress`; the flag beats GIT_STRATA_TIMEOUT. Defaults: status 30 s,
+status --all 120 s, sync 600 s. Hooks retain their own five-second budget.
+
+`new --repo R --base REV` parks a session at a local commit. It is still a
+checkpoint/publish session, not a git branch. Publishing is refused until every
+base-only commit is reachable from the publish baseline B or main; B may be
+the leading publish-chain tip. No per-session publish lines are introduced.
 
 ## Paths
 

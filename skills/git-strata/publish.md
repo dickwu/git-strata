@@ -2,6 +2,17 @@
 
 ## Publish
 
+A publish makes one commit per participating repo on its configured
+`publish.branch`, possibly combining multiple sessions. Workspaces stay in the
+checkpoint → publish workflow. Run publishing commands from outside using
+explicit `--from` session ids. B is the staging baseline (the leading publish
+chain when applicable, not necessarily origin). A parked `new --base` session
+cannot publish until its base-only commits are on B or main. If a workspace
+moves between checkpoint and publish, `HeadMoved baseline_moved` asks you to
+rerun the literal `publish --from …` command; equal baseline trees are allowed
+even when their commit ids differ.
+
+
 - `publish` publishes the selected paths' current content: before sending
   the publish it records a fresh `BeforePublish` checkpoint of each
   `--from` batch, so edits made to a selected file up to that moment are
