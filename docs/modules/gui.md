@@ -102,7 +102,7 @@ desktop 放在核心 workspace 之外（`exclude`）的理由：核心的 `cargo
 ### 2.3 crate 依赖
 
 - `strata-client` → `strata-types`、`serde`、`serde_json`。**不依赖** store、gitio、deps、session、daemon。types.md §8 在 P0 增加一层：`strata-client` 与 `strata-types` 之上、其余 crate 之下，只依赖第 0 层；daemon、cli、desktop 可以依赖它。
-- `git-strata-desktop` → `strata-client`、`strata-types`、`tauri` 与插件、`tokio`。不依赖 store / session / overlay / confirm / daemon。
+- `git-strata-desktop` → `strata-client`、`strata-types`、`tauri` 与插件、`tokio`。菜单栏直接使用已锁定版本的 `objc2`、`objc2-foundation`、`objc2-app-kit`、`objc2-core-graphics`、`block2`；`png` 仅为 dev-dependency（资源比对与预览）。`tauri` 固定在 `~2.12` minor，因为使用 `with_inner_tray_icon`。不依赖 store / session / overlay / confirm / daemon。
 - 本地计划读取（cli 的 `show::push_plan`、`confirm.rs` 的 `planned_moves`）**留在 cli**，不进 strata-client；GUI 用 daemon 的计划方法（§3.4）。等 daemon 有了计划方法后 cli 是否也改用，是 cli 自己的事（§9 Q-cli-plan）。
 
 ## 3. 公开接口（Rust）
@@ -138,6 +138,19 @@ pub fn call(socket: &Path, method: &str, params: Value, kind: Kind) -> Result<Va
 - **类型化包装**：`Client { socket }` 上每个方法一个函数，内部就是 `call(..)` + 反序列化。
 
 ### 3.2 Tauri 命令（`src-tauri/src/commands/`）
+
+**Current read flights:** `daemon_status`, `deps_list` and `status{all}` share a key only when
+parameters are identical. The tray poller may join a flight; a window caller never joins one.
+Another window flight still returns `request_in_flight`. Behind a poller flight, the window
+waits under one total deadline, discards its result, then starts its own read with a full deadline
+(total at most 2×). The Start probe follows the window rule. Single-session status and `du`
+keep refuse-on-busy. Request params and `deny_unknown_fields` are unchanged; no new feature is
+added to FEATURES, and upstream-derived states require the existing `status.upstream` string.
+Each blocking flight records once with its per-key generation, then removes its slot, then
+publishes the watch result. Late replies still record; older generations change nothing.
+Caller timeout observations are separate from reply generations. Refresh-after-event gates
+therefore keep their guarantee that a successful window result began after the event.
+
 
 一个 RPC 方法对应一个命令，参数只收标识符与 daemon 给过的计划值，不收「已确认」之类的布尔：
 
@@ -262,7 +275,8 @@ review/Touch ID flow is retained.
 Apply-mode proposals are collapsed under
 “Applying from main”, with moved/deferred counts. They enter the waiting count only for install
 failure, own dependency changes, drift, an unhealthy/scene/not-following workspace, divergence,
-waiting-human state, or a deferral strictly older than 24 hours. Unhealthy workspaces and scenes
+waiting-human state, or a non-conflict deferral strictly older than 24 hours.
+The shared age predicate excludes `auto.reason=conflicts`; `since` measures the pending row's original `first_at`, not time spent in the current state. Bad/missing dates do not pass the threshold. Unhealthy workspaces and scenes
 retain human attention and their specific GUI reason even when upstream data is absent.
 Conflicts and `auto.reason=conflicts`
 point to “needs the session's agent” and offer Copy for `git-strata sync --session S --repo R`, never
@@ -274,7 +288,12 @@ since and attempts, conflict paths and the suggested command). `auto.target`, wh
 `{head, tree}`; fetch freshness is top-level `upstream.as_of`, not a per-repo field.
 Old replies without either proposal mode or the capability keep confirm waiting behavior and
 show no upstream section or badge. The tray follows the same stuck threshold
-and adds only `· N sessions`; tickets, subjects, paths and agent reasons remain excluded (G7).
+and adds only counts and fixed copy; tickets, subjects, paths and agent reasons remain excluded (G7).
+Home also shows Deferred (one per repo, excluding sessions already covered by a stuck apply
+proposal) and ConfigRelaxPending (one per repo, opens Daemon). A Deferred entry opens the
+oldest eligible session, breaking equal dates by session id. Agent conflicts do not increase
+the human waiting count. Missing session-level enrichment is listed by session id in Home and Daemon;
+no cause is inferred from the missing data.
 
 ### 5.2 写作规则
 
@@ -323,6 +342,21 @@ daemon 不拥有领域逻辑（基线、依赖集、克隆写在 session / deps 
 
 #### 5.3.3 GUI 侧
 
+**Implemented tray poller:** independent Rust tasks remain active with the window visible or
+hidden. `daemon_status` runs first, normally every 10 s; `deps_list` every 30 s; `status{all}`
+every 30 s, or 120 s without `api`. A kind's `last_attempt` advances when a poller starts/joins
+or a window starts (not when a window waits/is refused). Due sleeps use the remaining cadence,
+rechecking visibility/recovery at most 5 s apart; there is also a separate 5 s render timer.
+Faster visible-window reads therefore suppress redundant polls. A hung session read cannot
+block the health task. Recent Down/file-handle evidence restricts polling to daemon_status;
+the first status Ok makes sessions/deps due again. Without a `fds` object, health uses 30 s and
+hidden windows do not poll sessions/deps. This gentle legacy plan lets those inputs age into
+Checking (deps after 90 s; legacy sessions after 300 s), and still costs roughly two leaked
+descriptors/minute on the old leaking build until it is upgraded. Frontend background timers
+are not relied on for tray freshness. The watch/summary table below describes the later watch
+interface, not the current tray's read transport.
+
+
 - **watch.rs**：一个线程读流。重连退避 0.5 s → 10 s。45 s 收不到任何行（含 heartbeat）判定失联，关掉重连。旧 daemon（`unknown_method`）或 api 不够 → 切到 poller。
 - **快照协议**：收到 `resync: true` 时：记下 `H`；对失效表里的「全部」查询发 refetch；期间到达的事件照常处理（它们只会再触发一次 refetch）。因为事件只用于失效、数据都从只读方法取，「快照与事件交错」最多导致多取一次，不会丢更新。游标 = 最后处理的 seq。
 - **失效表**（事件 → 前端查询键）：
@@ -339,7 +373,7 @@ daemon 不拥有领域逻辑（基线、依赖集、克隆写在 session / deps 
 | `health` | daemonStatus、waiting |
 | `resync` / 重连 | 全部 |
 
-- **轮询（统一表，§5.8 也用这张）**：
+- **watch/summary 的轮询计划（当前菜单栏读方法见本节开头）**：
 
 | 状态 | daemon_status | status summary | deps_list | du | allocations |
 |---|---|---|---|---|---|
@@ -468,12 +502,106 @@ README 第一节改成「下载 app → 首次打开 → 引导」，cli 用法�
 ### 5.8 菜单栏常驻（D6）
 
 - **单实例**：`tauri-plugin-single-instance`；第二次启动只把已有实例的窗口带到前台。
-- 关窗（⌘W、红点）→ 隐藏窗口并切 `ActivationPolicy::Accessory`；点 Dock / Finder 里的 app（`RunEvent::Reopen`）或托盘 `Open GIT STRATA` → 显示窗口并切回 `Regular`。⌘Q / 托盘 `Quit GIT STRATA` 才退出 GUI；退出 GUI 不影响 daemon。
-- 图标（peilin 14:1x 选定 concept b「workspace fork」）：app 图标是青色渐变圆角方块上，一个白色 Y 形分叉连起三块等距视角的工作区平板。托盘图标是同一图形的模板图（黑色、透明底，18 pt；按 2 单位网格简化成三块扁平菱形 + Y 叉，叉与板之间留 1 px 空隙），状态靠形状：正常 / 有待处理（小圆点）/ daemon 不可达或数据过期（斜杠）。源文件在 `apps/desktop/src-tauri/icons/src/`（`app-icon.svg`、`tray-template*.svg`），`render.sh` 用 rsvg-convert 与 `tauri icon` 生成全部尺寸与 icns。
-- **判活**：watch 有 heartbeat（§5.3）；45 s 没有任何行即重连；数据超过 60 s 未更新时托盘状态行写 "Updated 2 min ago"，不显示过期的「healthy」。
-- 托盘菜单：状态行（"Daemon running · 5 sessions"）；"Waiting for you" 下最多 5 项，只含种类、编号、仓库名、受影响会话数（G7）；"Open GIT STRATA"；"Pause notifications for 1 hour"；"Quit GIT STRATA"。点待处理项 → 先强制取新数据，再打开主窗口到对应对话框。
-- 窗口隐藏时保持 watch；回退轮询按 §5.3 的统一表（隐藏行）。
-- "Open at login"（`SMAppService.mainApp`，默认关）。登录启动时不弹窗口（识别方式由 P-pack 验证；识别不了就提供 "Start hidden" 偏好）。
+- 关窗（⌘W、红点）隐藏窗口并切 `ActivationPolicy::Accessory`；Dock/Finder Reopen 或
+  Open GIT STRATA 显示窗口并切回 Regular。Quit 只退出 GUI，不影响 daemon。
+- Owner-approved r9 replaces the earlier template-only, three-shape decision. The app icon
+  remains the workspace fork; the tray uses the same neutral glyph plus a colored state
+  shape, 18×18 pt. Active session count never colors or widens the icon. No animation,
+  pulse, count beside the icon, acknowledge, snooze, or tray write action.
+
+First matching row wins:
+
+| Priority | State | Shape | Light / dark badge | Meaning / tooltip (after `GIT STRATA: `) |
+|---|---|---|---|---|
+| 1 | Down | slash | `#B0141A` / `#FF7F75` | Daemon isn't running / Daemon isn't responding |
+| 2 | Alert | triangle with knocked-out ! | `#B0141A` / `#FF7F75` | Daemon needs attention: N alerts; file-handle exhaustion/pressure has specific copy |
+| 3 | Checking | dimmed glyph + ellipsis | neutral, 55% | Checking the daemon… / Not updated for N min (hours after 60 min) |
+| 4 | Waiting | filled circle | `#8A4B00` / `#FFB340` | N waiting for you |
+| 5 | Conflict | filled diamond | `#7A35A6` / `#C99BF2` | N distinct repos need an agent |
+| 5a | Checking (partial) | ellipsis | neutral, 55% | Some session details are unavailable |
+| 6 | Syncing | ring | `#245A74` / `#6FB3D2` | Bringing in newer changes |
+| 7 | Normal | glyph only | neutral | All clear, N sessions |
+
+Neutral is black at 85% on light bars, white at 88% on dark bars. Palette is independent of
+app theme/accent. Color is supplementary: all states have distinct shapes. Contrast is at
+least 3:1 against light `#FFFFFF/#E0E0E0/#B0B0B0` and dark `#000000/#262626/#505050`.
+On the 36-unit grid badges center at (29,22): dot radius 5.5; ring radius 4.25/stroke 2.5;
+diamond half-diagonal 6/stroke 1; triangle 12×11/stroke 1.2; ellipsis radius 1.6, spacing 4.6
+at y=24. Slash is (4,4)→(32,32), stroke 3. Knockouts grow badges about 2.5 units; slash knockout
+is 8. Painted geometry stays inside the canvas. The ! can close at 1x; the triangle remains.
+
+**Freshness and liveness.** Each input has a value, unsupported flag, generation, last attempt
+and `(Instant, SystemTime)` start stamp. Age is the larger monotonic/wall duration, clamping
+negative wall durations to zero, so sleep counts and backwards clock steps do not rejuvenate
+data. Fresh limits: health 60 s, deps 90 s, sessions 90 s (300 s without `api`). Missing/stale
+inputs are Checking, above Waiting; oldest contributing age is reported. Only `unknown_method`
+marks an input empty/unsupported. Other refusals retain the last good value and its old age.
+A later Ok clears unsupported.
+
+`daemon_down` from any read is fresh NotRunning evidence. NotResponding needs at least two
+health caller timeouts, coalesced within 4 s, and at least 20 s since `last_status_ok` (the last
+applied health Ok's **completion**, never start stamp), or no Ok. Joined attempts count again;
+a single hung connection can sustain Down. Down evidence lasts 60 s and each observation
+renews it. Health Ok clears Down/file-handle evidence and timeout counts. Other read timeouts
+never set Down. A 17 s steady-state reply timeline does not flap with the 10 s poller grid;
+this is not a guarantee for arbitrary visible-window phase/jitter.
+
+Busy/too_many_open_files from any read is Alert evidence, supersedes Down, and suppresses
+connection-closed Down evidence for 20 s. Repeated shed replies sustain it; it expires 60 s
+after the last reply. Exhaustion may instead close connections without a shed reply, so the
+signal is best effort. Fresh `fds.open >= 0.9 * limit` or increasing `accept_errors` also alerts;
+null counters do not imply pressure. Only a health Ok clears this evidence. The client accepts
+only the exact null-id Busy/too_many_open_files shed exception (cli.md §3.4).
+
+**Warnings.** Error: StorePoisoned, VerifyFailed, UnknownPublish, UnknownPush, Quarantine,
+AttachOutside. Waiting: ConfigRelaxPending. Notice: LongHold, PublishRunning,
+AnchorNotAdvanced, FetchFailed, StaleRefLock, and unknown variants. Notice count appears on
+the status line without changing the icon. Daemon shows variant names. Many error warnings
+persist until the cause is addressed and the daemon restarts; the tray has no clearing action.
+Alert stays above Waiting; its tooltip adds `, M waiting` only with current contributing inputs,
+otherwise `, waiting items not current`.
+
+**Items.** Pending confirm proposals wait; apply proposals wait only when stuck. Deferred adds
+one repo item after a non-conflict deferral exceeds 24 h, aggregating sessions not already
+listed by stuck apply proposals. ConfigRelax adds one repo item. Conflicts stay agent work at
+any age. Pending auto-rebases, waiting installing/waiting_install, and younger non-conflict
+deferrals are Syncing; needs_push, publish_unfinished, proposal presence and lock holds are not.
+All upstream-derived states need `status.upstream` and session-level enrichment. Missing
+session enrichment overrides Syncing/Normal with partial Checking but does not hide proposals
+or direct workspace conflicts. A legitimate missing per-workspace enrichment does not trigger
+Checking. A missing repo can keep partial Checking indefinitely; Home and Daemon list the affected sessions.
+
+The menu shows status, any stale-input line **above** items, and a count-only unavailable-detail
+line that opens Home. At most five items are shown; tooltip/overflow counts include all items.
+Labels contain only fixed copy, repo names and counts (G7). Retained stale entries carry
+`(as of N min ago)` (hours after 60 min); proposals use the oldest sessions/deps contributor,
+ConfigRelax uses health, other items use sessions. Deferred folds age into its session-count
+parenthesis. Captions are part of the menu diff. Clicks refetch before selecting a target:
+`waiting:deps:ID`, `waiting:conflict:REPO`, `waiting:deferred:REPO` (oldest eligible session,
+then id), `waiting:relax:REPO` (Daemon), or Home if no current target exists. Open GIT STRATA
+only brings the window forward; Quit exits GUI.
+
+**Rendering and assets.** `TrayRenderer` separates policy from painting. One renderer mutex
+(off the main thread) covers reading the newest snapshot, modeling, diffing, paint and saving
+last state. Unchanged visuals/menus do not call AppKit. C uses a main-thread cache of handler-drawn
+non-template NSImages, resolving currentDrawingAppearance for each drawing appearance and
+tinting isolated glyph/badge transparency layers. Tooltip and image accessibilityDescription
+track state text (description omits the app-name prefix). No subsequent template reflag or
+set_visible call replaces the drawn image. Inactive-display dimming is intentionally relinquished.
+E (template glyph + dynamic-color, click-through badge view) is the documented fallback;
+a whole-glyph tint or one globally selected light/dark PNG does not meet the design.
+
+`icons/src/tray.svg` is the glyph source. `render-tray.sh` generates separate black/alpha glyph
+and badge masks at 18/36 px, independent of app-icon `render.sh`. Old template assets are removed.
+`render-tray.sh --check` uses the png 0.18.1 example to compare alpha within ±2; masks and palette
+also have unit tests. `preview-tray.py OUTPUT` renders every state, six backgrounds, 1x/2x,
+color/grayscale using the production palette and creates contact sheets. Palette lives in
+`tray_palette.rs`.
+
+C then E passed isolated offscreen appearance probes. Live status-item replicas on two displays,
+menu-open highlight, VoiceOver/tooltip overlay, Increase Contrast/Reduce Transparency, and the
+30-minute hidden-window acceptance test still require a permitted dev-app manual run. No live
+app or daemon was used for this implementation. These are validation gaps, not passed checks.
 
 ### 5.9 安全停机、重启与 drain（G9）
 
@@ -630,8 +758,8 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 
 - **`chains` 按需（status-perf D2）**：daemon 只在 `status` 带 `chains: true` 时回 `chains` 键，否则回复里没有这个键（不是 `{}`）。P1 只在单会话读（`Read::Session`）上发 `chains: true`，会话列表（`status{all}`）不发、详情的链一栏从单会话回复取。比 status-perf 旧的 daemon（`deny_unknown_fields`）以 RPC `Failed`「unknown field `chains`」拒绝：后端在同一个阻塞任务、单飞与超时之内去掉 `chains` 重发一次（最多两次请求，别的错误不重试），旧 daemon 照旧算链。`status_all.json` 不再带 `chains`，`requests.json` 的单会话请求带 `chains: true`。核心侧的 `crates/git-strata/tests/gui_fixtures.rs` 同样在旧 daemon 拒绝时去掉 `chains` 重发，所以 impl/gui 合入 main 之前也能跑。
 - **`OldTreeKept.changed` 可为 null（status-perf A1）**：`null`（同时 `unchecked: true`）表示后台还没判定，读作「未知」，不能当 `false`。P1 只数 warning 个数、不读这个字段；类型见 `types.ts` 的 `OldTreeKeptWarning`。
-- **旧 daemon 护栏（我的决定）**：`daemon_status` 回答里没有 `api` 键就当旧 daemon（P2 之前的所有 daemon，包括 10-27 fd 泄漏的 c98794f 构建）。对它把 `status{all:true}`（每次都对每个会话做 drift 与打开文件检查）降到可见 30 s、隐藏 120 s，单会话 `status` 可见 30 s、隐藏不轮询，`daemon_status` 可见 5 s；有 `api` 的 daemon 用 §5.3.3 的轮询兜底数字（2 / 5 / 10 / 10 / 60 s，隐藏 10 / 30 / 停 / 30 / 停）。daemon 不在（`detail.reason == "daemon_down"`）时只轮询 `daemon_status`（可见 5 s、隐藏 30 s）。`Busy` 的 request_in_flight、超时都不算「不在」。前端不重试，单飞与超时由后端负责（§3.2）。实现在 `src/lib/poll.ts`，测试在 `poll.test.ts`。
-- **托盘**：P1 托盘已读「等你处理」（deps 提案 Pending、有冲突的 workspace），点项发 `strata://open`，前端落到对应会话：`deps:<id>` → 提出该提案的会话，`conflict:<repo>` → 该仓库里第一个有冲突的会话，找不到就停在会话列表。「暂停通知」项本期不做（P1 没有通知）。
+- **旧 daemon 护栏（我的决定）**：`daemon_status` 回答里没有 `api` 键就当旧 daemon（P2 之前的所有 daemon，包括 10-27 fd 泄漏的 c98794f 构建）。对它把 `status{all:true}`（每次都对每个会话做 drift 与打开文件检查）降到可见 30 s、隐藏 120 s，单会话 `status` 可见 30 s、隐藏不轮询，`daemon_status` 可见 5 s；有 `api` 的 daemon 用 §5.3.3 的轮询兜底数字（2 / 5 / 10 / 10 / 60 s，隐藏 10 / 30 / 停 / 30 / 停）。daemon 不在（`detail.reason == "daemon_down"`）时只轮询 `daemon_status`（可见 5 s、隐藏 30 s）。`Busy` 的 request_in_flight、超时都不算「不在」。前端不重试，单飞与超时由后端负责（§3.2）：poller 可 join，窗口等待 poller 后自行开始新读，窗口之间仍拒绝重叠；后台托盘的独立读与 gentle plan 见 §5.3.3。实现在 `src/lib/poll.ts`，测试在 `poll.test.ts`。
+- **托盘**：当前七状态、每项时效、原生轮询、Deferred/ConfigRelax 与点击目标以 §5.8 为准；窗口刷新后才选择目标。没有通知暂停、acknowledge 或 snooze。
 - **strata 柱推迟到 P2**：会话详情先用表格列出每个仓库的 head / base tree / deps 集短哈希、健康、pending、冲突与已发布链状态，checkpoint 按新到旧排；分层柱与 Home、Allocations、Diff 一起在 P2 做。
 - **CSP 的例外**：antd 6 的 CSS-in-JS 在运行时插 `<style>`，所以 `style-src` 保留 `'unsafe-inline'`，并用 `dangerousDisableAssetCspModification: ["style-src"]` 阻止 Tauri 往 style-src 加 hash（加了 hash 后 `'unsafe-inline'` 会被浏览器忽略）。`script-src` 仍只有 `'self'`，Next 静态导出的内联脚本由 Tauri 构建时自动加 hash。
 - **窗口拖动**：标题栏用 `data-tauri-drag-region`，需要 capability `core:window:allow-start-dragging`（已加进 `capabilities/default.json`）。

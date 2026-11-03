@@ -111,3 +111,14 @@ session shares its blocks, and Time Machine snapshots can hold freed blocks.
 counts only sessions recorded since `since` (earlier: unknown).
 `store.trash.eligible` is what `git-strata gc` would try to delete; agents do
 not run `gc` unless asked.
+
+## Desktop menu-bar states
+
+The desktop's read-only tray distinguishes Down (red slash), Alert (red triangle), Checking
+(dim ellipsis), Waiting (amber dot), Conflict (violet diamond), Syncing (teal ring), and Normal.
+Checking means stale/missing input or unavailable session upstream detail; it is not proof
+that the daemon stopped. Conflicts need the session agent and do not count as human waiting.
+A non-conflict auto-deferral older than 24 hours appears as one Deferred item per repo,
+excluding sessions already covered by stuck apply proposals. Config relax items open Daemon.
+Error-class warnings may persist until the cause is dealt with and the human restarts the
+daemon. The tray never acknowledges, snoozes, approves or performs daemon writes.
