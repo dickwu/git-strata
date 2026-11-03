@@ -31,7 +31,9 @@ export function SessionTime({
   );
   return (
     <Tooltip title={tip} placement="topLeft" trigger={['hover', 'focus']}>
-      <span className="session-time" tabIndex={0}>
+      {/* A mouse click must not focus the span: the row's modal would refocus it on
+          close and the focus trigger would reopen the tooltip. Tab still focuses it. */}
+      <span className="session-time" tabIndex={0} onMouseDown={(e) => e.preventDefault()}>
         <time dateTime={t.toISOString()}>
           {/* The ", " sits between the nowrap parts: the only place the line may break. */}
           {compactTimeParts(t, new Date(now)).map((p, i) => (
