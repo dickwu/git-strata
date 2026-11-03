@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use strata_types::{Code, StrataError};
@@ -77,6 +77,12 @@ fn call_inner(socket: &Path, method: &str, params: Value, kind: Kind, deadline: 
     if deadline.is_some() && (stream.set_read_timeout(deadline).is_err() || stream.set_write_timeout(deadline).is_err()) {
         return Err(CallError::Down(daemon_down(socket)));
     }
+    call_on_stream(socket, method, params, kind, deadline, &mut stream)
+}
+
+// Separate the connected stream so the shed EPIPE race can be tested with a
+// half-closed UnixStream pair, without scheduling assumptions or a live daemon.
+fn call_on_stream(socket: &Path, method: &str, params: Value, kind: Kind, deadline: Option<Duration>, stream: &mut UnixStream) -> Result<Value, CallError> {
     let id = next_id();
     let line = format!("{}\n", json!({ "id": id, "method": method, "params": params }));
     let broken = || match kind {
@@ -86,11 +92,23 @@ fn call_inner(socket: &Path, method: &str, params: Value, kind: Kind, deadline: 
         ),
         Kind::Read => CallError::Failed(daemon_down(socket)),
     };
+    // The shed path replies before reading, then closes. A read may hit EPIPE
+    // with a reply already queued; consume that line without resending.
+    let sent_at = Instant::now();
     if stream.write_all(line.as_bytes()).and_then(|_| stream.flush()).is_err() {
-        return Err(broken());
+        if kind == Kind::Write { return Err(broken()); }
+        if let Some(deadline) = deadline {
+            let Some(left) = deadline.checked_sub(sent_at.elapsed()).filter(|d| !d.is_zero()) else { return Err(broken()); };
+            // macOS can reject SO_RCVTIMEO after EPIPE while queued bytes remain
+            // readable. In that case consume only already-queued data; never wait
+            // under the old, longer timeout or extend this request's budget.
+            if stream.set_read_timeout(Some(left)).is_err() && stream.set_nonblocking(true).is_err() {
+                return Err(broken());
+            }
+        }
     }
     let mut reply = String::new();
-    match BufReader::new(&stream).read_line(&mut reply) {
+    match BufReader::new(&*stream).read_line(&mut reply) {
         Ok(0) | Err(_) => return Err(broken()),
         Ok(_) => {}
     }
@@ -109,7 +127,12 @@ pub fn parse_reply(method: &str, id: &str, reply: &str) -> Result<Value, CallErr
                 .with_detail(json!({ "reason": "rpc_failed", "method": method })),
         )
     })?;
-    if v.get("id") != Some(&Value::String(id.to_string())) {
+    // The fd-reserve shed envelope is the only null-id exception.
+    let shed = v.get("id") == Some(&Value::Null)
+        && v.get("ok") == Some(&Value::Bool(false))
+        && v["error"]["code"] == "Busy"
+        && v["error"]["detail"]["reason"] == "too_many_open_files";
+    if !shed && v.get("id") != Some(&Value::String(id.to_string())) {
         return Err(CallError::Failed(
             StrataError::new(Code::InvalidInput, "the daemon answered another request id")
                 .with_detail(json!({ "reason": "rpc_id", "method": method, "sent": id, "got": v.get("id") })),
@@ -138,5 +161,23 @@ fn reply_error(method: &str, err: Option<&Value>) -> StrataError {
             e
         }
         None => StrataError::new(Code::InvalidInput, message).with_detail(json!({ "reason": "rpc_failed", "method": method })),
+    }
+}
+
+#[cfg(test)]
+mod shed_tests {
+    use super::*;
+
+    #[test]
+    fn failed_read_write_consumes_queued_shed_but_writes_stay_unknown() {
+        for kind in [Kind::Read, Kind::Write] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+            client.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            server.write_all(b"{\"id\":null,\"ok\":false,\"error\":{\"code\":\"Busy\",\"detail\":{\"reason\":\"too_many_open_files\"}}}\n").unwrap();
+            server.shutdown(std::net::Shutdown::Write).unwrap();
+            let error = call_on_stream(Path::new("fixture.sock"), "daemon_status", json!({}), kind, Some(Duration::from_secs(1)), &mut client).unwrap_err().into_error();
+            assert_eq!(error.detail.unwrap()["reason"], if kind == Kind::Read { "too_many_open_files" } else { "socket_closed" });
+        }
     }
 }

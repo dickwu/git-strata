@@ -21,6 +21,7 @@ All three keys are always present; `data` is never null. Branch on
 | `error.code` (`detail.reason`) | What an agent should do |
 | --- | --- |
 | `Busy` (`daemon_down`) | Keep working; tell the human the daemon is down (they run `git-strata daemon start`). Retry once `daemon status` shows `running`. Never start it yourself. |
+| `Busy` (`too_many_open_files`) | The daemon answered but is out of file handles. Tell the human; do not treat this as an id mismatch or start another daemon. The desktop shows an Alert and keeps waiting items visible. |
 | `Busy` (`workspace_changed`) | A file changed while reading it; retry. |
 | `Busy` (`publish_unknown`) | An earlier publish of this repo is `Unknown`. It clears by itself once origin has that commit (checked on each publish). Do not loop: tell the human; they may run `git-strata push <REPO>` first. |
 | `Busy` / `Unknown` with `detail.sibling` | Preparing that sibling repo (fetch, anchor) was busy or unknown. `Busy`: retry later. `Unknown`: stop and tell the human. |
