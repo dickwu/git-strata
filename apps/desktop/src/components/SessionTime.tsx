@@ -30,7 +30,7 @@ export function SessionTime({
     </div>
   );
   return (
-    <Tooltip title={tip} placement="topLeft">
+    <Tooltip title={tip} placement="topLeft" trigger={['hover', 'focus']}>
       <span className="session-time" tabIndex={0}>
         <time dateTime={t.toISOString()}>
           {/* The ", " sits between the nowrap parts: the only place the line may break. */}

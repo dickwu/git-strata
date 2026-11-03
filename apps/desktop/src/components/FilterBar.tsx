@@ -39,7 +39,9 @@ function TagGroup({
               aria-label={f.toggle(o.name, o.sessions, on)}
               onClick={() => onToggle(o.name)}
             >
-              <span>{o.name}</span>
+              <span className="filter-tag-name" title={o.name}>
+                {o.name}
+              </span>
               <span className="filter-tag-count" aria-hidden>
                 {o.sessions}
               </span>
