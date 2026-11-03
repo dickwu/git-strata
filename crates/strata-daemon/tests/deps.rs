@@ -99,8 +99,10 @@ fn propose_on_drift_awaits_publish_and_approve_refuses_it() {
     serving(&d, || {
         let id = new_session(&sock);
         let root = ws(&core, &id, "tool");
+        let from_head = core.store.session(&id).unwrap().unwrap().manifest.repos[&repo_name("tool")].head.clone();
         std::fs::write(root.join("package.json"), NEW_DEP).unwrap();
         let p = ok(call(&sock, "deps_propose", json!({ "session": id, "repo": "tool", "switch": false })));
+        assert_eq!(p["proposal"]["from_head"], json!(from_head));
         assert_eq!(p["proposal"]["state"], json!({ "kind": "AwaitingPublish" }), "{p:#}");
         assert!(p["drift"].is_object(), "{p:#}");
         assert_eq!(p["switched"], Value::Null);

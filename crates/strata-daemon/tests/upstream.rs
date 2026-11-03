@@ -40,6 +40,24 @@ fn check(server: &Server<'_, '_>, s: &SessionId, hook: bool) -> Upstream {
     )
     .unwrap()
 }
+fn check_with_summary(server: &Server<'_, '_>, s: &SessionId, hook: bool) -> Upstream {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let up = check(server, s, hook);
+        if up.repos[&repo_name("tool")]
+            .deps
+            .as_ref()
+            .is_some_and(|d| d.summary.is_some())
+        {
+            return up;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "summary stayed cold: {up:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
 fn advance(fx: &Dfx, core: &Core, message: &str) -> CommitOid {
     let main = fx.main("tool");
     let head = CommitOid::try_from(fx.sb.commit(&main, &[], message)).unwrap();
@@ -614,7 +632,7 @@ fn deps_and_auto_fields_follow_store_and_cached_summary() {
         core.store
             .set_deps_auto(p, state, None, SystemTime::now())
             .unwrap();
-        let up = check(&server, &s, false);
+        let up = check_with_summary(&server, &s, false);
         let r = &up.repos[&repo];
         assert_eq!(r.deps.as_ref().unwrap().state, want);
         assert_eq!(r.deps.as_ref().unwrap().mode, strata_types::SyncDeps::Apply);
@@ -629,9 +647,58 @@ fn deps_and_auto_fields_follow_store_and_cached_summary() {
         assert_eq!(auto.detail.as_ref().unwrap()["paths"], json!(["src/a"]));
     }
     core.gits[&repo].take_git_calls();
-    let up = check(&server, &s, true);
+    let up = check_with_summary(&server, &s, true);
     assert!(up.repos[&repo].deps.as_ref().unwrap().summary.is_some());
     assert!(core.gits[&repo].take_git_calls().is_empty());
+
+    // Fail only the summary's tree reads; graph and store metadata stay available.
+    use std::os::unix::fs::PermissionsExt;
+    let git_wrapper = fx.sb.bin.join("git");
+    fs::write(&git_wrapper, "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = ls-tree ]; then exit 1; fi\ndone\nexec /usr/bin/git \"$@\"\n").unwrap();
+    fs::set_permissions(&git_wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(fx.sb.bin.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    core.gits[&repo].set_env("PATH", Some(&path));
+    let good = up.repos[&repo].deps.as_ref().unwrap().summary.clone();
+    let failed = check(&server, &s, false);
+    assert_eq!(failed.repos[&repo].deps.as_ref().unwrap().summary, good);
+    assert_eq!(
+        check(&server, &s, true).repos[&repo]
+            .deps
+            .as_ref()
+            .unwrap()
+            .summary,
+        good
+    );
+    // The same retention rule applies when the response deadline wins.
+    fs::write(&git_wrapper, "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = ls-tree ]; then /bin/sleep 0.4; fi\ndone\nexec /usr/bin/git \"$@\"\n").unwrap();
+    let timed_out = check(&server, &s, false);
+    assert_eq!(timed_out.repos[&repo].deps.as_ref().unwrap().summary, good);
+
+    let mut changed = row.clone();
+    changed.workspaces.get_mut(&repo).unwrap().generation += 1;
+    let cold = core
+        .upstream
+        .session(&core, &changed, ReadMode::Full, |_, _, _| {
+            Default::default()
+        })
+        .unwrap();
+    assert!(
+        cold.repos[&repo].deps.as_ref().unwrap().summary.is_none(),
+        "a new generation cannot reuse the previous summary"
+    );
+    let cached_cold = core
+        .upstream
+        .session(&core, &changed, ReadMode::Cached, |_, _, _| Default::default())
+        .unwrap();
+    assert!(
+        cached_cold.repos[&repo].deps.as_ref().unwrap().summary.is_none(),
+        "cached reads cannot reuse a summary for an obsolete key"
+    );
+    core.gits[&repo].set_env("PATH", None);
     let live = |found: String| strata_daemon::upstream::Live {
         unpublished: true,
         inputs: Some((found, "base inputs".into())),

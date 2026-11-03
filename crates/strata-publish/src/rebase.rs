@@ -408,7 +408,7 @@ pub(crate) fn rebase_one_with(
                 {
                     return Ok(d);
                 }
-                let p = propose_main(ctx, &old, &n, &n_inputs, new_base, head)?;
+                let p = propose_main(ctx, &ws, &n, &n_inputs, new_base, head)?;
                 let installing = ctx
                     .store
                     .deps_auto(p.id)?
@@ -462,7 +462,7 @@ pub(crate) fn rebase_one_with(
                 return Ok(Some(d));
             }
             if promote_draft(ctx, s, &ws, &new, &old, &n, &n_inputs, new_base, head)?.is_none() {
-                propose_main(ctx, &old, &n, &n_inputs, new_base, head)?;
+                propose_main(ctx, &ws, &n, &n_inputs, new_base, head)?;
             }
             Ok(None)
         })?;
@@ -561,7 +561,7 @@ pub(crate) fn rebase_one_with(
         // 4. Another deps set: the session waits on its old base.
         let p = match promoted {
             Some(p) => p,
-            None => propose_main(ctx, &old, &n, &n_inputs, new_base, head)?,
+            None => propose_main(ctx, &ws, &n, &n_inputs, new_base, head)?,
         };
         Ok(RebaseReport::Waiting { proposal: p })
     })
@@ -610,12 +610,13 @@ fn promote_draft(
 /// Step 4's Main-origin proposal `old.deps → n`. Under the repo lock.
 fn propose_main(
     ctx: &Ctx,
-    old: &BaseGen,
+    ws: &WorkspaceState,
     n: &DepsSetId,
     n_inputs: &str,
     new_base: &BaseGen,
     head: &CommitOid,
 ) -> Result<Proposal> {
+    let old = &ws.base;
     let from_inputs = deps::find_set(ctx.store, ctx.repo, &old.deps)?
         .map(|set| set.inputs_hash)
         .ok_or_else(|| deps_unsealed(ctx.repo, &old.deps))?;
@@ -625,7 +626,7 @@ fn propose_main(
             origin: ProposalOrigin::Main,
             from: old.deps.clone(),
             from_inputs,
-            from_head: None,
+            from_head: Some(ws.head.clone()),
             to: n.clone(),
             to_inputs: n_inputs.to_string(),
             tree: Some(new_base.tree.clone()),
@@ -673,7 +674,7 @@ fn move_source(
         }
         let p = match promote_draft(ctx, s, &ws, &new, old, n, n_inputs, new_base, head)? {
             Some(p) => p,
-            None => propose_main(ctx, old, n, n_inputs, new_base, head)?,
+            None => propose_main(ctx, &ws, n, n_inputs, new_base, head)?,
         };
         Ok(Ok(p))
     })?;

@@ -6,7 +6,7 @@ use strata_deps::{ChangeKind, changes};
 use strata_types::CommitOid;
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-// Enrichment intentionally gives up after 200 ms under load. Like the GUI's next poll,
+// The response intentionally gives up after 200 ms under load. Like the GUI's next poll,
 // retry only that transient refusal; parser/data errors remain test failures.
 fn ready(
     git: &strata_gitio::Git,
@@ -28,6 +28,93 @@ fn ready(
         }
         return result;
     }
+}
+
+#[test]
+fn slow_summary_finishes_in_background_and_next_poll_uses_cache() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let sb = Sandbox::new();
+    let main = sb.init_project("main");
+    let from = CommitOid::try_from(sb.commit(
+        &main,
+        &[("package.json", br#"{"dependencies":{"slow":"1"}}"#)],
+        "before",
+    ))
+    .unwrap();
+    let to = CommitOid::try_from(sb.commit(
+        &main,
+        &[("package.json", br#"{"dependencies":{"slow":"2"}}"#)],
+        "after",
+    ))
+    .unwrap();
+    let git = sb.open(&main);
+    let mut cfg = sb.config(&main);
+    cfg.install_inputs = rps(&["package.json"]);
+    let wrapper = sb.bin.join("git");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = cat-file ]; then /bin/sleep 0.4; fi\ndone\nexec /usr/bin/git \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(sb.bin.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    git.set_env("PATH", Some(&path));
+    git.take_git_calls();
+    let start = Instant::now();
+    let err = changes(&git, &cfg, &from, &to).unwrap_err();
+    assert_eq!(err.detail.unwrap()["reason"], "changes_budget");
+    assert!(start.elapsed() < Duration::from_millis(600));
+    let err = changes(&git, &cfg, &from, &to).unwrap_err();
+    assert_eq!(err.detail.unwrap()["reason"], "changes_busy");
+    let result = ready(&git, &cfg, &from, &to).unwrap();
+    assert_eq!(result.summary, "slow 1→2");
+    assert_eq!(
+        git.take_git_calls()
+            .iter()
+            .filter(|c| c.args.iter().any(|a| a == "cat-file"))
+            .count(),
+        2,
+        "only the first background worker reads the two blobs"
+    );
+    assert_eq!(ready(&git, &cfg, &from, &to).unwrap(), result);
+    assert!(
+        git.take_git_calls()
+            .iter()
+            .all(|c| !c.args.iter().any(|a| a == "cat-file"))
+    );
+}
+
+#[test]
+fn unsupported_lockfiles_never_copy_url_credentials_into_fallbacks() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let sb = Sandbox::new();
+    let main = sb.init_project("main");
+    let from = CommitOid::try_from(sb.commit(&main, &[], "before")).unwrap();
+    let to = CommitOid::try_from(sb.commit(
+        &main,
+        &[
+            ("pnpm-lock.yaml", b"resolution: https://user:token@host/pkg"),
+            ("yarn.lock", b"resolved https://user:token@host/pkg"),
+        ],
+        "after",
+    ))
+    .unwrap();
+    let git = sb.open(&main);
+    let mut cfg = sb.config(&main);
+    cfg.install_inputs = rps(&["pnpm-lock.yaml", "yarn.lock"]);
+    let result = ready(&git, &cfg, &from, &to).unwrap();
+    assert!(result.packages.is_empty());
+    assert_eq!(
+        result.summary,
+        "pnpm-lock.yaml changed (no parser), yarn.lock changed (no parser)"
+    );
 }
 
 #[test]

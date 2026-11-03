@@ -73,17 +73,33 @@ fn git_of<'c>(core: &'c Core, repo: &RepoName) -> Result<&'c Git> {
     })
 }
 
-/// Legacy proposals compare against the oldest affected workspace head, labelled on the wire.
-/// The commit a proposal's package summary is diffed from, and whether it is the
-/// legacy session-base fallback (proposals recorded before store v4 have no `from_head`).
-fn changes_base(core: &Core, p: &strata_deps::Proposal) -> Result<Option<(CommitOid, bool)>> {
+// One unit per legacy proposal plus affected workspace inspected, shared by the
+// whole deps_list call. This also caps ancestry queries, not just proposal count.
+const LEGACY_CHANGES_WORK_LIMIT: usize = 16;
+
+/// New proposals record their comparison head. Older rows without `from_head`
+/// (pre-v4 and writers predating that fix) use the oldest affected workspace
+/// head, labelled on the wire, only if the request's legacy budget suffices.
+fn changes_base(
+    core: &Core,
+    p: &strata_deps::Proposal,
+    budget: &mut usize,
+) -> Result<Option<(CommitOid, bool)>> {
     if let Some(from) = &p.from_head {
         return Ok(Some((from.clone(), false)));
     }
-    Ok(legacy_changes_base(core, p)?.map(|h| (h, true)))
+    Ok(legacy_changes_base(core, p, budget)?.map(|h| (h, true)))
 }
 
-fn legacy_changes_base(core: &Core, p: &strata_deps::Proposal) -> Result<Option<CommitOid>> {
+fn legacy_changes_base(
+    core: &Core,
+    p: &strata_deps::Proposal,
+    budget: &mut usize,
+) -> Result<Option<CommitOid>> {
+    let Some(left) = budget.checked_sub(1) else {
+        return Ok(None);
+    };
+    *budget = left;
     let git = git_of(core, &p.repo)?;
     let mut sessions = core.store.sessions()?;
     sessions.sort_by_key(|s| s.created);
@@ -98,6 +114,11 @@ fn legacy_changes_base(core: &Core, p: &strata_deps::Proposal) -> Result<Option<
         if !ws.tracked || ws.base.deps == p.to {
             continue;
         }
+        // Never return a partially selected base when attribution is cut short.
+        let Some(left) = budget.checked_sub(1) else {
+            return Ok(None);
+        };
+        *budget = left;
         if oldest.as_ref().is_none_or(|head| head == &ws.head) {
             oldest = Some(ws.head.clone());
         } else if let Some(head) = &oldest
@@ -111,6 +132,7 @@ fn legacy_changes_base(core: &Core, p: &strata_deps::Proposal) -> Result<Option<
 
 fn deps_list(core: &Core, repo: Option<&RepoName>) -> Result<Value> {
     let mut proposals = Vec::new();
+    let mut legacy_budget = LEGACY_CHANGES_WORK_LIMIT;
     for p in strata_deps::open_proposals(&core.store, repo)? {
         let mut row = json_of(&p);
         // Enrichment has no bearing on proposal eligibility or deps_list success.
@@ -121,7 +143,7 @@ fn deps_list(core: &Core, repo: Option<&RepoName>) -> Result<Value> {
             let Some(to) = &p.head else {
                 return Ok(None);
             };
-            let Some((from, legacy)) = changes_base(core, &p)? else {
+            let Some((from, legacy)) = changes_base(core, &p, &mut legacy_budget)? else {
                 return Ok(None);
             };
             let mut changes =
@@ -1513,7 +1535,7 @@ impl<'d, 'a> Server<'d, 'a> {
                     origin: strata_deps::ProposalOrigin::Session { session: s.clone() },
                     from: ws.base.deps.clone(),
                     from_inputs: pinned.inputs_hash.clone(),
-                    from_head: None,
+                    from_head: Some(ws.head.clone()),
                     to: set.id.clone(),
                     to_inputs: set.inputs_hash.clone(),
                     tree: None,
