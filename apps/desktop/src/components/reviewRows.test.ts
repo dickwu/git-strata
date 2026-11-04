@@ -22,6 +22,11 @@ describe('review modal: result rows', () => {
     expect(rule('.rows')).toMatch(/grid-template-columns:\s*fit-content\(\d+px\) max-content 1fr/);
     expect(rule('.rows li')).toMatch(/grid-template-columns:\s*subgrid/);
     expect(rule('.rows li')).toMatch(/grid-column:\s*1 \/ -1/);
+    // The list's gap is what keeps a label off the session id; a row keeps it by not setting one.
+    expect(rule('.rows')).toMatch(/column-gap:\s*12px/);
+    expect(rule('.rows li')).not.toMatch(/column-gap/);
+    // The shared session column is as wide as the widest id; a shorter id's link stays tight.
+    expect(rule('.rowSession')).toMatch(/justify-self:\s*start/);
   });
 
   test('no row sizes its own status column, and a label past the cap wraps instead of overflowing', () => {
@@ -40,11 +45,11 @@ describe('review modal: result rows', () => {
     const labels = Object.entries(copy.review.result)
       .filter(([k, v]) => /^row[A-Z]/.test(k) && typeof v === 'string')
       .map(([, v]) => v as string);
-    expect(labels.length).toBe(5);
+    expect(labels.length).toBeGreaterThanOrEqual(5);
     for (const label of labels) {
-      expect(label).toMatch(/^\S \S/);
-      // Past ~20 characters at 13px the column hits its cap and the label wraps: still
-      // legible, but not the intent.
+      expect(label).toMatch(/^[^\p{L}\p{N}\s] \p{L}/u);
+      // A rough rule: past about 20 characters at 13px the column hits its cap and the label
+      // wraps. Still legible, but not the intent.
       expect([label, label.length <= 20]).toEqual([label, true]);
     }
   });

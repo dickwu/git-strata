@@ -164,6 +164,7 @@
   font-weight: 400;
 }
 .rowSession {
+  justify-self: start;
   padding: 0;
   height: auto;
 }
