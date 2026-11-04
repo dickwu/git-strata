@@ -839,7 +839,11 @@ fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
                     tracing::debug!(session = %key.session, repo = %key.repo, n = key.n, outcome = ?out, "old tree checked");
                 }
                 Ok(Some(Err(e))) => {
-                    tracing::warn!(session = %key.session, repo = %key.repo, n = key.n, error = %e.message, "old tree check failed");
+                    if strata_deps::pins_tightened(&e) {
+                        later.push((std::time::Instant::now() + OLD_TREE_RETRY, key, path, ino));
+                    } else {
+                        tracing::warn!(session = %key.session, repo = %key.repo, n = key.n, error = %e.message, "old tree check failed");
+                    }
                 }
                 Err(_) => {
                     tracing::warn!(session = %key.session, repo = %key.repo, n = key.n, "old tree check panicked");

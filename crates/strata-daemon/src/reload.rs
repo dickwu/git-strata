@@ -40,9 +40,20 @@ pub struct ReloadState {
     #[cfg(feature = "test-seams")]
     pub fail_spawn: AtomicBool,
     #[cfg(feature = "test-seams")]
-    pub fail_pins: AtomicBool,
+    pub parked_spawned: std::sync::atomic::AtomicUsize,
+    #[cfg(feature = "test-seams")]
+    pub parked_cancelled: std::sync::atomic::AtomicUsize,
+    #[cfg(feature = "test-seams")]
+    pub loops_started: std::sync::atomic::AtomicUsize,
 }
 impl ReloadState {
+    #[cfg(feature = "test-seams")]
+    pub fn requested_for_test(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .requested
+    }
     pub fn wake(&self) {
         self.cv.notify_all();
     }
@@ -53,12 +64,12 @@ impl ReloadState {
         };
         let mut value = json!(report);
         value["at"] = json!(s.at);
-        if let Some(reason) = report
-            .reasons
-            .first()
-            .and_then(|e| e["detail"]["reason"].as_str())
-        {
-            value["reason"] = json!(reason);
+        if let Some(error) = report.reasons.first() {
+            value["reason"] = json!(
+                error["detail"]["reason"]
+                    .as_str()
+                    .unwrap_or("invalid_config")
+            );
         }
         value
     }
@@ -209,7 +220,16 @@ impl Core {
                 .map_err(|e| error("read_failed", e.to_string()))?;
             attempted_hash = source_hash(&bytes)?;
             let text = std::str::from_utf8(&bytes).map_err(|e| error("parse", e.to_string()))?;
-            let source = Config::parse(text)?;
+            let source = Config::parse(text).map_err(|mut e| {
+                let detail = e.detail.get_or_insert_with(|| json!({}));
+                detail["reason"] =
+                    json!(if matches!(detail["rule"].as_str(), Some("toml" | "V11")) {
+                        "parse"
+                    } else {
+                        "invalid_config"
+                    });
+                e
+            })?;
             source.validate()?;
             source.dev_ports.blocks()?;
             for (name, cfg) in &source.repos {
@@ -247,12 +267,16 @@ impl Core {
                         || crate::resolve::push_scenes(&source.paths.root)
                             .iter()
                             .any(|(r, _, _)| r == name)
-                        || source
-                            .paths
-                            .root
-                            .join("quarantine")
-                            .join(name.as_str())
-                            .exists()
+                        || crate::startup::quarantine_entries(&source.paths.root)
+                            .iter()
+                            .any(|p| {
+                                p.strip_prefix(source.paths.root.join("sessions/.repos"))
+                                    .ok()
+                                    .and_then(|p| p.components().nth(1))
+                                    .is_some_and(|c| {
+                                        c.as_os_str() == format!("{name}.git").as_str()
+                                    })
+                            })
                     {
                         restart.push(format!("repos.{name} (stale_rows)"));
                         return Err(error(
@@ -299,15 +323,7 @@ impl Core {
                         branch: &next.config.repos[name].publish.branch,
                     })
                     .map_err(|e| error("recovery_failed", e.message))?;
-                    #[cfg(feature = "test-seams")]
-                    if self.reload.fail_spawn.load(Ordering::SeqCst) {
-                        return Err(error("spawn_failed", "injected loop spawn failure"));
-                    }
                     parked.0.extend(prepare(name)?);
-                }
-                #[cfg(feature = "test-seams")]
-                if self.reload.fail_pins.load(Ordering::SeqCst) {
-                    return Err(error("pins_write_failed", "injected pins write failure"));
                 }
                 self.pins.write(&next.pins)?;
                 let tightened: Vec<_> = current
@@ -391,8 +407,12 @@ impl Core {
     }
 
     fn refresh_config_warnings(&self) {
-        self.warnings
-            .remove(|w| matches!(w, DaemonWarning::ConfigRelaxPending { .. }));
+        self.warnings.remove(|w| {
+            matches!(
+                w,
+                DaemonWarning::ConfigRelaxPending { .. } | DaemonWarning::CatalogGrowth { .. }
+            )
+        });
         for repo in &self.catalog.current().pending_relax {
             self.warnings
                 .add(DaemonWarning::ConfigRelaxPending { repo: repo.clone() });
@@ -502,6 +522,10 @@ pub fn run(core: &Core, stop: &(dyn Fn() -> bool + Sync)) {
         let mut prepare = |repo: &RepoName| -> Result<Vec<Latch>> {
             let mut parked = Parked(Vec::new());
             for install in [true, false] {
+                #[cfg(feature = "test-seams")]
+                if !install && core.reload.fail_spawn.load(Ordering::SeqCst) {
+                    return Err(error("spawn_failed", "injected second loop spawn failure"));
+                }
                 let latch = Latch::default();
                 let child = latch.clone();
                 let repo = repo.clone();
@@ -509,10 +533,17 @@ pub fn run(core: &Core, stop: &(dyn Fn() -> bool + Sync)) {
                     .name(format!("config-{repo}-{install}"))
                     .spawn_scoped(scope, move || {
                         if child.wait() {
+                            #[cfg(feature = "test-seams")]
+                            core.reload.loops_started.fetch_add(1, Ordering::SeqCst);
                             crate::main_sync::run_loop(core, &repo, install, stop);
+                        } else {
+                            #[cfg(feature = "test-seams")]
+                            core.reload.parked_cancelled.fetch_add(1, Ordering::SeqCst);
                         }
                     })
                     .map_err(|e| error("spawn_failed", e.to_string()))?;
+                #[cfg(feature = "test-seams")]
+                core.reload.parked_spawned.fetch_add(1, Ordering::SeqCst);
                 parked.0.push(latch);
             }
             Ok(std::mem::take(&mut parked.0))

@@ -888,18 +888,46 @@ pub fn bind(socket: &Path) -> Result<UnixListener> {
 pub fn quarantine_entries(root: &Path) -> Vec<PathBuf> {
     let mut out = BTreeSet::new();
     let repos = root.join("sessions/.repos");
-    let Ok(sessions) = fs::read_dir(&repos) else { return Vec::new() };
+    // Check every traversed directory with lstat; a link is never a directory
+    // for this scan, including a dangling link at the quarantine location.
+    let real_dir = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    if !real_dir(&root.join("sessions")) || !real_dir(&repos) {
+        return Vec::new();
+    }
+    let Ok(sessions) = fs::read_dir(&repos) else {
+        return Vec::new();
+    };
     for s in sessions.flatten() {
-        let Ok(shadows) = fs::read_dir(s.path()) else { continue };
+        if !real_dir(&s.path()) {
+            continue;
+        }
+        let Ok(shadows) = fs::read_dir(s.path()) else {
+            continue;
+        };
         for sh in shadows.flatten() {
             let shadow = sh.path();
             if !shadow.extension().is_some_and(|e| e == "git") {
                 continue;
             }
-            if let Ok(q) = fs::read_dir(shadow.join("strata-quarantine")) {
-                for e in q.flatten() {
-                    out.insert(e.path());
+            if !real_dir(&shadow) {
+                out.insert(shadow);
+                continue;
+            }
+            let quarantine = shadow.join("strata-quarantine");
+            match fs::symlink_metadata(&quarantine) {
+                Ok(m) if !m.is_dir() => {
+                    out.insert(quarantine);
                 }
+                Ok(_) => {
+                    if let Ok(q) = fs::read_dir(&quarantine) {
+                        for e in q.flatten() {
+                            if fs::symlink_metadata(e.path()).is_ok() {
+                                out.insert(e.path());
+                            }
+                        }
+                    }
+                }
+                Err(_) => {}
             }
             let wt = shadow.join("worktrees");
             match fs::symlink_metadata(&wt) {

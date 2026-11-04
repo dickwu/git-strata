@@ -220,9 +220,7 @@ fn hint_and_flush_off_callback_thread() {
     let root = fx.sb.path("tracked");
     fs::create_dir_all(root.join("src")).unwrap();
     let mut t = Tracker::new(&root, DEFAULT_DIRTY_CAPACITY);
-    // Exercise the same full-scan fallback as production when FSEvents is
-    // unavailable to this sandbox. Hints/flush still run off the callback.
-    track::watch_or_full(&mut t);
+    t.watch().unwrap();
     fs::write(root.join("src/a.ts"), b"a\n").unwrap();
     // On a request thread: hint then flush.
     std::thread::scope(|s| {

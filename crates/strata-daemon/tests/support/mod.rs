@@ -357,6 +357,8 @@ pub struct Dfx {
     pub reconcile_every: Duration,
     /// `Options::catch_up_every` (production value unless a test changes it).
     pub catch_up_every: Duration,
+    /// Polling can be disabled for tests that drive reloads explicitly.
+    pub config_poll_every: Duration,
 }
 
 impl Dfx {
@@ -374,8 +376,21 @@ impl Dfx {
         }
         let config = Config { paths: Paths { root: sb.path("strata") }, repos, status: Default::default(), dev_ports: Default::default() };
         let config_dir = sb.path("cfg");
-        let sock_dir = tempfile::Builder::new().prefix("sd-").tempdir_in("/tmp").expect("sock dir");
-        let fx = Dfx { sb, config, config_dir, sock_dir, alerts: Arc::new(Mutex::new(Vec::new())), lock_wait: Duration::from_millis(300), reconcile_every: strata_daemon::RECONCILE_EVERY, catch_up_every: strata_daemon::CATCH_UP_EVERY };
+        let sock_dir = tempfile::Builder::new()
+            .prefix("sd-")
+            .tempdir_in("/tmp")
+            .expect("sock dir");
+        let fx = Dfx {
+            sb,
+            config,
+            config_dir,
+            sock_dir,
+            alerts: Arc::new(Mutex::new(Vec::new())),
+            lock_wait: Duration::from_millis(300),
+            reconcile_every: strata_daemon::RECONCILE_EVERY,
+            catch_up_every: strata_daemon::CATCH_UP_EVERY,
+            config_poll_every: Duration::from_millis(50),
+        };
         fx.write_config();
         fx
     }
@@ -449,7 +464,7 @@ impl Dfx {
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
             reconcile_every: self.reconcile_every,
             catch_up_every: self.catch_up_every,
-            config_poll_every: Duration::from_millis(50),
+            config_poll_every: self.config_poll_every,
             // Legacy RPC tests control their own fetch/install timelines.
             background_main_sync: false,
         }
