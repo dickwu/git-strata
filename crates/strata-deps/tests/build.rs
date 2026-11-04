@@ -1015,7 +1015,7 @@ fn seal_does_not_retry_a_fence_and_releases_build_ownership() {
     let fx = Fx::new();
     let tree = fx.tree("a");
     let (_, id) = key_of(&fx.ctx(), &tree).unwrap();
-    let refusal = strata_types::StrataError::new(Code::Busy, "the daemon is shutting down")
+    let refusal = strata_types::StrataError::new(Code::Busy, "repository safety pins tightened")
         .with_detail(serde_json::json!({ "reason": "pins_tightened" }));
     *fx.lock.fail.lock().unwrap() = Some(refusal);
     let e = build(&fx.ctx(), &tree, None).unwrap_err();
