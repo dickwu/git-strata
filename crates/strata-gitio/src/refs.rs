@@ -75,6 +75,23 @@ impl Git {
         }
     }
 
+    /// Resolve a caller-supplied local revision without interpreting options.
+    pub fn resolve_rev(&self, rev: &str) -> Result<Option<CommitOid>> {
+        if rev.is_empty() || rev.len() > 256 || rev.starts_with('-') || rev.contains(['\0', '\n', '\r']) {
+            return Err(errd(Code::InvalidInput, "invalid base revision", json!({"reason":"base_rev"})));
+        }
+        self.resolve_commit(rev)
+    }
+
+    /// Refs of every namespace containing a commit (including other pins).
+    pub fn refs_containing(&self, oid: &CommitOid) -> Result<Vec<String>> {
+        let mut c = self.repo_command();
+        c.args(["for-each-ref", "--format=%(refname)", "--contains", oid.as_str()]);
+        let out = self.run(c, Opts::c())?;
+        if !out.ok() { return Err(failed("for-each-ref", &out)); }
+        Ok(String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect())
+    }
+
     /// Whether `ancestor` is an ancestor of (or equal to) `descendant`.
     pub fn is_ancestor(&self, ancestor: &CommitOid, descendant: &CommitOid) -> Result<bool> {
         let mut c = self.repo_command();

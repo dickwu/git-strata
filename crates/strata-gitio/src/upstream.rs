@@ -83,3 +83,75 @@ impl Git {
         Ok(rows)
     }
 }
+
+/// Publish identity parsed by Git from the final trailer paragraph.
+#[derive(Clone, Debug)]
+pub struct PublishCommit {
+    pub oid: CommitOid,
+    pub subject: String,
+    pub publishes: Vec<String>,
+}
+
+impl Git {
+    pub fn commits_between_trailers(&self, anchor: &CommitOid, tip: &CommitOid, limit: usize) -> Result<Vec<PublishCommit>> {
+        let mut c = self.repo_command();
+        c.args(["log", "-z", "--first-parent", "--no-show-signature",
+            "--format=%H%x00%s%x00%(trailers:key=Strata-Publish,valueonly,separator=%x01)",
+            &format!("--max-count={limit}"), tip.as_str(), "--not", anchor.as_str(), "--"]);
+        let out = self.run(c, Opts::c())?;
+        if !out.ok() { return Err(self.missing_commit_or(&[anchor, tip], "log", &out)); }
+        let mut fields = out.stdout.split(|b| *b == 0);
+        let mut rows = Vec::new();
+        while let Some(oid) = fields.next().filter(|b| !b.is_empty()) {
+            let (Some(subject), Some(trailers)) = (fields.next(), fields.next()) else {
+                return Err(crate::command::failed("log trailer fields", &out));
+            };
+            rows.push(PublishCommit {
+                oid: parse_oid(oid, "log")?,
+                subject: String::from_utf8_lossy(subject).into_owned(),
+                publishes: String::from_utf8_lossy(trailers).split(['\u{1}', '\n']).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect(),
+            });
+        }
+        Ok(rows)
+    }
+
+    /// Final changed paths, after clean filters; tree objects are enough.
+    pub fn changed_path_count(&self, base: &CommitOid, tree: &strata_types::TreeOid) -> Result<usize> {
+        let mut c = self.repo_command();
+        c.args(["diff-tree", "-r", "--no-renames", "--no-commit-id", "--name-only", "-z", base.as_str(), tree.as_str(), "--"]);
+        let out = self.run(c, Opts::c())?;
+        if !out.ok() { return Err(crate::command::failed("diff-tree", &out)); }
+        Ok(out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()).count())
+    }
+
+    /// All commits on head that neither accepted publish baseline contains.
+    pub fn base_only(&self, head: &CommitOid, main: &CommitOid, b: &CommitOid, limit: usize) -> Result<(Vec<(CommitOid, String)>, bool)> {
+        let mut c = self.repo_command();
+        c.args(["log", "-z", "--no-show-signature", "--format=%H%x00%s", &format!("--max-count={}", limit.saturating_add(1)), head.as_str(), "--not", main.as_str(), b.as_str(), "--"]);
+        let out = self.run(c, Opts::c())?;
+        if !out.ok() { return Err(self.missing_commit_or(&[head, main, b], "log", &out)); }
+        let mut fields = out.stdout.split(|b| *b == 0);
+        let mut rows = Vec::new();
+        while let Some(oid) = fields.next().filter(|b| !b.is_empty()) {
+            let Some(subject) = fields.next() else { return Err(crate::command::failed("log fields", &out)); };
+            rows.push((parse_oid(oid, "log")?, String::from_utf8_lossy(subject).into_owned()));
+        }
+        let more = rows.len() > limit;
+        rows.truncate(limit);
+        Ok((rows, more))
+    }
+}
+
+impl Git {
+    /// Paths tracked by this workspace's commit, independent of the main index.
+    pub fn tracked_paths(&self, head: &CommitOid) -> Result<Vec<strata_types::RepoPath>> {
+        let mut c = self.repo_command();
+        c.args(["ls-tree", "-r", "-z", "--name-only", head.as_str(), "--"]);
+        let out = self.run(c, Opts::c())?;
+        if !out.ok() { return Err(self.missing_commit_or(&[head], "ls-tree", &out)); }
+        out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()).map(|p| {
+            let p = std::str::from_utf8(p).map_err(|_| crate::command::failed("ls-tree path", &out))?;
+            strata_types::RepoPath::try_from(p.to_owned())
+        }).collect()
+    }
+}
