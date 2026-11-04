@@ -3,12 +3,13 @@
 ## The JSON envelope
 
 stdout carries exactly one compact JSON line; exit code 0 iff `ok` is true,
-else 1. Human prompts and notices go to stderr only. Exceptions: `help`, `--help`/`--version`;
+else 1. Human prompts and notices go to stderr only. Exceptions: successful `help`, `--help`/`--version`;
 `ls --table` prints a text table; `sync --check --hook` prints the hook's
 own JSON (see [hooks.md](hooks.md)); and a
 `session exec` that starts its command prints no envelope; stdout, stderr
 and the exit status are the command's (a failure before the start is an
-envelope as usual).
+envelope as usual). Unknown help topics return an `InvalidInput` / `help_topic`
+envelope.
 
 ```json
 {"ok":true,"data":{...},"error":null}
@@ -28,7 +29,7 @@ All three keys are always present; `data` is never null. Branch on
 | `Unknown client_timeout` | The complete write may still run. Inspect status; do not retry, gc, or rm. Timeout did not cancel it. |
 | `NoSuchSession stale_cwd` | Cwd is in a staging/old tree; cd to `detail.workspace`. |
 | `HeadMoved baseline_moved` | The checkpoint baseline tree no longer equals the workspace head's tree. Rerun the exact `publish --from …` command in `detail.fix`; do not treat this as a sync conflict. |
-| `OpenFiles caller_cwd` | Nothing moved; cd outside and run `git-strata sync --session S`, then cd back to the workspace path. |
+| `OpenFiles caller_cwd` | Nothing moved; run `detail.fix` from outside, preserving its repo/resolution flags, then cd back to the workspace path. |
 | `OpenFiles cwd_holders` | Other shells would be left in the old tree; ask their owners to cd out. `--allow-cwd` only exempts the caller's PID chain; `--allow-cwd-holders` explicitly accepts others. |
 | `Busy` (other) | Repo lock held by another operation; wait and retry later. |
 | `NotTty` | Command needs a human at a terminal. Stop; give the exact command to the human. |

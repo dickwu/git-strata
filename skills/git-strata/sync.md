@@ -39,14 +39,19 @@ envelope); see [hooks.md](hooks.md).
 
 Run every moving sync from outside the workspace: `cd ~ && git-strata sync
 --session S --repo R`, then cd back to the workspace path. Even an up-to-date,
-non-following or acknowledgement-only non-check request is refused from inside.
+non-following or acknowledgement-only non-check request is refused from inside
+a selected workspace. With multiple selected repos, `--keep` / `--resolved`
+paths must identify exactly one repo through its saved report or workspace
+conflicts; otherwise use `--repo` to resolve `ambiguous_resolution`. A cwd in
+another repo does not block that resolution, including with an older daemon.
 `--check` and `--check --hook` never move and can run inside.
 `--allow-cwd` accepts your own shell's stale cwd; it exempts only your PID chain.
 After `cd ~`, an agent's parent process can still hold a cwd inside the
 workspace. The PID-chain exemption requires `--allow-cwd`; moving the child
 shell out does not enable it. Exit or cd that parent out, or explicitly use
-`cd ~ && git-strata sync --session S --repo R --allow-cwd-holders` when keeping
-those holders is intentional; then re-enter the live workspace.
+`cd ~ && git-strata sync --session S --repo R --allow-cwd` when keeping
+that parent is intentional (preserve any other request flags); then re-enter
+the live workspace.
 Other cwd holders are refused unless `--allow-cwd-holders` is given. The same
 holder override exists for `deps approve` and `deps propose --switch`; GUI
 approvals skip held sessions. Fd-only holders outside dependency directories

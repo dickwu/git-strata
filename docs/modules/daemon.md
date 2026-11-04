@@ -1099,6 +1099,8 @@ warnings even after its FIFO entry disappears. Records are deduplicated by
 repo/session/method, replacing the previous attempt. Both since and
 attempt_since describe the latest expired or currently long-waiting attempt,
 never a cumulative retry age. This diagnostic does not change the lock budget.
+A successful repo-lock acquisition clears only the expired warning for that
+repo/session/method, before running the operation; unrelated waits remain.
 There is no 600 s daemon long_wait bound. Disconnects never cancel handlers;
 failed reply writes are tolerated without replay.
 

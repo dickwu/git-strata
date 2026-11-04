@@ -235,7 +235,8 @@ Every call prints exactly one compact JSON line on stdout:
   and (only when stderr is a terminal) `pending proposal <id> for <repo>`.
 - Proposals still pending for the resolved session ride in
   `data.pending_proposals: [{id, repo}]` (key absent when there are none).
-- `--help` / `--version` print plain clap text on stdout and exit 0, with no envelope.
+- Successful `help`, `--help` and `--version` print plain text on stdout and exit 0,
+  with no envelope. Unknown help topics return `InvalidInput` / `help_topic`.
 - Bad arguments give `InvalidInput` with `detail.reason` `unknown_command`
   (plus `detail.commands`, and `detail.group` inside `deps` / `daemon` / `config`)
   or `args`.
@@ -744,10 +745,13 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Busy` (`port_unidentified` / `port_probe_error`) | `session exec` could not identify a port's holder; retry shortly |
 | `Busy` (`ports_exhausted`) | no free port block in `[dev_ports]`; tell the human |
 | `Busy` (`lease_changed`) | `session ports --reassign`: another caller moved the lease since the check; run `session ports --check` again and decide afresh |
+| `Busy` (`client_timeout`) | read deadline or incomplete request; nothing changed by this request, back off before retrying |
+| `Unknown` (`client_timeout`) | the complete write may still run; inspect status, do not retry, `gc` or `rm` |
 | `Busy` (other) | repo lock held; wait, retry later |
 | `NotTty` | hand the exact command to the human |
 | `NotConfirmed` | report; the human reruns (`plan_changed`: rerun once yourself) |
 | `AmbiguousMatch` | ticket matches several sessions; use an id from `detail` (`from_repo`: a `--from` path is in several repos; rerun with one of `detail.expected`, the `S:REPO:PATH` form) |
+| `NoSuchSession` (`stale_cwd`) | cwd is in a staging/old tree; cd to `detail.workspace` |
 | `NoSuchSession` | cd into a workspace or pass `--session` |
 | `NoSuchRepo` | name not in config; `not_in_session`: run `detail.fix` (`git-strata add --session S --repo R`) |
 | `NoSuchBranch` | (`new`) a repo has no `origin/<default_branch>`; tell the human |
@@ -759,7 +763,9 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `NoMatch` | a `--from` path is not checkpointed; checkpoint, rerun |
 | `NoCommit` | nothing new; not a failure |
 | `Dirty` | `rm` on unpublished work (`detail.repos`, `detail.untracked_repos`, `detail.unresolved`); publish it or ask the human for `rm --discard` |
-| `OpenFiles` | a process holds files (`detail` has pids); stop it only if you started it, retry |
+| `OpenFiles` (`caller_cwd`) | run `detail.fix` from outside, preserving its repo/resolution flags; then cd back |
+| `OpenFiles` (`cwd_holders`) | use `--allow-cwd` for your own PID chain; other holders must cd out or be explicitly accepted with `--allow-cwd-holders`; re-enter the workspace after moving |
+| `OpenFiles` (other) | a process holds files (`detail` has pids); stop it only if you started it, retry |
 | `CheckFailed` | the repo's check failed in staging; fix, checkpoint, publish again |
 | `CheckMutates` | config problem; tell the human |
 | `HeadMoved` | sync: review the fresh report and re-resolve (or deliberately keep) with its binding, at most five retries; other commands: re-read state, do not loop |

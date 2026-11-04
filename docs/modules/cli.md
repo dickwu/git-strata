@@ -97,8 +97,8 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata grep` | `<pattern>`。`[--session S]` 或 `[--all]`。都不给 = cwd 的会话（design §6.3；压过初稿“不给就是全部”，见 §9）。没有 `--repo`，没有 type / encoding / glob 之类的 tgrep 选项（T11） | 空 pattern → `InvalidInput` |
 | `git-strata files` | 可选的一个位置参数 glob，交给 search 的 `files`；不给 = 该视图全部文件（D11）。选择器同 grep。没有别的 flag | — |
 | `git-strata diff` | 三选一：`--base`（缺省，cwd 或 `--session` 相对它钉住的基线）、`--session S`（该会话相对它的基线）、`--between A B`（两个选择器）。`--repo R` 在 `--between` 时必填；否则用 cwd 的 repo。`--session S` 既没有 `--repo` 也不在某个 repo 的工作区里时，cli 扫该会话的全部 repo（8 个线程），取有内容改动或有 checkpoint 的那一个；没有一个合格 → `repo: null`、三个空数组；多于一个 → `InvalidInput`，`detail.reason = "repo"`，`detail.candidates` 列出候选 [实现时补的决定，2026-10-27] | 两种模式同时给 → `InvalidInput`，`detail.reason = "diff_mode"` |
-| `git-strata deps propose` | `[--session S] [--repo R] [--switch]`。repo 缺省 = cwd 的 repo。`--switch`：本会话（只有提议者）立刻换到提议的依赖集，不确认（design §6.4 第 3 步、deps §5.10 `plan_switch`）；别的会话不动 [实现时补的决定，review M3] | — |
-| `git-strata deps approve` | `<id>`（`ProposalId`）。`[--sessions S,S]`，不给 = 该 repo 的全部会话，由 daemon 展开 | 非数字或超过 `i64::MAX` → `InvalidInput` |
+| `git-strata deps propose` | `[--session S] [--repo R] [--switch] [--allow-cwd] [--allow-cwd-holders]`。repo 缺省 = cwd 的 repo。`--switch`：本会话（只有提议者）立刻换到提议的依赖集，不确认（design §6.4 第 3 步、deps §5.10 `plan_switch`）；别的会话不动 [实现时补的决定，review M3] | — |
+| `git-strata deps approve` | `<id>`（`ProposalId`）。`[--sessions S,S] [--allow-cwd] [--allow-cwd-holders]`，不给 = 该 repo 的全部会话，由 daemon 展开 | 非数字或超过 `i64::MAX` → `InvalidInput` |
 | `git-strata deps list` | `[--repo R]`。不给 = 全部 repo 的未关闭提议 | — |
 | `git-strata publish` | `[--from S:path]` 或 `[--from S:repo:path]` 可重复。path 是 `RepoPath`（D31）。发布的是这些路径当下的内容：cli 先对每个批次记一条 `BeforePublish` checkpoint，再把它的号交给 `publish`（review L1）；没有选旧 checkpoint 的参数。点到 `Renamed` 的任一半由 publish 选中整个改名，cli 不拆开。一个都不给且 stdin 是 TTY：交互选择（§5.4）。不给且不是 TTY → `InvalidInput`，`detail.reason = "no_batch"` | `S:path` 缺冒号，或 path 不是 `RepoPath` → `InvalidInput` |
 | `git-strata push` | `<repo>` | 未知 repo 透传 `NoSuchRepo` |
@@ -114,7 +114,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 
 未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`help`、`ls`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`session`、`status`、`sync`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
 
-`-h` / `--help` 与 `--version` 走 clap 的文本，打在 stdout，退出码 0。它们不套信封（D19）；`git-strata help [TOPIC|COMMAND…]` 子命令也输出纯文本，且不读取环境或配置。另一个例外：`ls --table` 成功时 stdout 只有表格（D36）；出错时照常是完整错误信封、退出码非 0。除此之外，stdout 上只有信封。
+`-h` / `--help` 与 `--version` 走 clap 的文本，打在 stdout，退出码 0。它们不套信封（D19）；`git-strata help [TOPIC|COMMAND…]` 成功时也输出纯文本，且不读取环境或配置；未知主题返回 `InvalidInput` / `help_topic` 错误信封。另一个例外：`ls --table` 成功时 stdout 只有表格（D36）；出错时照常是完整错误信封、退出码非 0。除此之外，stdout 上只有信封。
 
 ### 3.2 每个子命令的 `data`
 
@@ -160,7 +160,7 @@ This mode reads `{cwd, stop_hook_active}` on stdin and resolves the session from
 | --- | --- | --- |
 | `new` | `NewReport`；`manifest.agent` 是记下的 agent（没有就省略）。agent 没能记下时（daemon 太旧，D36），`warnings` 多一条 `{kind: "AgentNotRecorded", agent, reason: "daemon_too_old"}`，stderr 一行同样的意思 | — |
 | `add` | `AddReport`：`{ session, added: {<repo>: WorkspaceState}, already: {<repo>: WorkspaceState}, warnings }`；锚点未知的 repo 打在 stderr | — |
-| `status` | 一个会话：`SessionStatus`（顶层带 `id`、`ticket`（无则 null）；`manifest.id`、`manifest.ticket` 与之重复，**已弃用**，下一个大版本去掉，新代码读顶层）。warning `OldTreeKept`（status-perf A1）：`changed` 可为 `null`（daemon 还没在后台检查这棵旧树，同时带 `unchecked: true`，此时 `holders` 为空；daemon 不在、走本地回退时总是这样）；检查过的带 `checked_at`（RFC 3339）。旧 GUI 读到 `null` 应当当作「未知」。`--all`：`{ "sessions": [SessionStatus, …] }`，按 `SessionId` 升序。健康为 `Unknown` 的工作区带 `choices: ["abandon", "accept"]`。工作区有 `drift` 时它另带 `fix`（`git-strata deps propose --session <S> --repo <R> --switch`）与 `note`（publish 会用 staged 安装输入对应的依赖集跑检查，但工作区仍是旧的依赖；deps-drift §2.7）。`OldTreeKept` 的 `holders` 原样透传 | — |
+| `status` | 一个会话：`SessionStatus`（顶层带 `id`、`ticket`（无则 null）；`manifest.id`、`manifest.ticket` 与之重复，**已弃用**，下一个大版本去掉，新代码读顶层）。warning `OldTreeKept`（status-perf A1）：`changed` 可为 `null`（daemon 还没在后台检查这棵旧树，同时带 `unchecked: true`，此时 `holders` 为空；daemon 不在、走本地回退时总是这样）；检查过的带 `checked_at`（RFC 3339）。旧 GUI 读到 `null` 应当当作「未知」。`--all`：`{ "sessions": [SessionStatus, …] }`，按 `SessionId` 升序。健康为 `Unknown` 的工作区带 `choices: ["abandon", "accept"]`。工作区有 `drift` 时它另带 `fix`（`cd ~ && git-strata deps propose --session <S> --repo <R> --switch`）与 `note`（publish 会用 staged 安装输入对应的依赖集跑检查，但工作区仍是旧的依赖；deps-drift §2.7）。`OldTreeKept` 的 `holders` 原样透传 | — |
 | `status --brief` | 只来自 store（status-perf C）：`SessionSummary` = `{ id, ticket（无则 null）, state, created（RFC 3339）, repos: [RepoName], phase?, workspaces: [{ repo, health_stored, path, checkpoint }] }`。`state` 是 store 的 lifecycle（`Creating`/`Active`/`Removing`/`Unknown`），没有只能从文件系统得出的 `Missing`；`health_stored` 是 store 记录的健康（`Ok`/`Unknown`），工作区目录缺失在这里看不出；`checkpoint` 是最新检查点，untracked 或没有则 null。不算 drift、seeds、mirrors、旧树，不 stat 工作区，不跑 git。一个会话：该对象；`--all`：`{ "sessions": [SessionSummary, …] }`，按 id 升序。daemon 不在或 daemon 不认识 `summary`/`workspaces` 时读 store，并带 `source: "local"` | — |
 | `ls` | `{ "sessions": [{ id, ticket, state, created, repos, phase? }, …], "source"? }`：全部未 Removed 的会话，按 id 升序，字段同上（没有 `workspaces`）。`source: "local"` 同上。`--table`：`ID  TICKET  STATE  REPOS  CREATED`（ticket 为空写 `-`，repos 用逗号连），不套信封 | — |
 | `checkpoint` | `{ "checkpoints": [Checkpoint, …] }`，该次工具调用或 `-m` 在每个被记的 repo 上的那一行。幂等命中时就是已有的那几行，不是新 id | — |
@@ -553,11 +553,21 @@ Non-check sync sends defaulted caller_pids/allow_cwd/allow_cwd_holders. A strict
 old daemon's explicit unknown-field rejection permits local checking and one
 resend without new fields, using the same absolute deadline. The local sync
 guard selects tracked workspaces from the manifest; untracked siblings cannot
-move. Other errors, especially Unknown, never permit resend. No extra capability
-probe is added. The daemon guards caller cwd before
+move. For a resolution spanning multiple selected repos, it uses saved report
+paths and legacy workspace conflicts to identify exactly one repo, matching
+the daemon. Zero or multiple matches return `ambiguous_resolution`; a cwd in
+another repo does not block the resend. Other errors, especially Unknown, never
+permit resend. No extra capability probe is added. The daemon guards caller cwd before
 fetch/anchor/queue work, even for up-to-date, non-following and acknowledgement
 requests; check/hook are exempt. Run `cd ~ && git-strata sync --session S`, then
 cd back. The additive compatibility path also covers deps approve/propose --switch.
+Run `cd ~ && git-strata deps propose --session S --repo R --switch`, then cd
+back to the workspace path. From inside, `--allow-cwd` accepts the caller PID
+chain's stale cwd. A skipped `OpenFiles` switch with `detail.reason = cwd_holders`
+needs `--allow-cwd` for that chain, other holders to cd out, or an explicit
+`--allow-cwd-holders` override. Other `OpenFiles` skips need the processes holding
+deps files stopped (only if you started them); neither cwd flag bypasses those
+file or mapping protections.
 Legacy deps guards check rollout candidates only and exempt direct children of
 the daemon when its pid can be identified from its instance-lock descriptor.
 

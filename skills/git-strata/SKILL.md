@@ -109,8 +109,9 @@ git-strata rm --session "$S"
   session; a minute or two of silence is normal. Wait; never interrupt or rerun.
 - Even after `cd ~`, an agent's parent process may still hold a cwd in the
   workspace. Exit or move that process out; if intentionally keeping it, use
-  `--allow-cwd-holders` and re-enter the live workspace afterward. The PID-chain
-  exemption only applies with `--allow-cwd`; it is not implied by `cd ~`.
+  `cd ~ && git-strata sync --session S --allow-cwd` (preserving any other
+  request flags), then re-enter the live workspace. This exempts only your
+  PID chain; other holders still need to cd out or `--allow-cwd-holders`.
 - After a sync or automatic move (`result: moved` / `source_only`), `cd` back
   into the workspace by its path and restart processes you started there.
 - Dev servers: never edit ports in committed files; run them with
@@ -136,8 +137,9 @@ The envelope is:
 Branch on `error.code`, then `error.detail.reason`; never parse `message`.
 When a reply carries a `fix` (in `detail`, `upstream`, `deps` or a warning),
 it is the command to run next, or the text to hand the human when it starts
-with "ask the human". Never run a human-only command (hard rule 1) yourself. Exceptions to the envelope: `help`, `--help`/`--version`, `ls --table`, a
+with "ask the human". Never run a human-only command (hard rule 1) yourself. Exceptions to the envelope: successful `help`, `--help`/`--version`, `ls --table`, a
 `session exec` that started its command, and `sync --check --hook`.
+Unknown help topics return an `InvalidInput` / `help_topic` envelope.
 
 | You got | Do |
 | --- | --- |
@@ -146,8 +148,8 @@ with "ask the human". Never run a human-only command (hard rule 1) yourself. Exc
 | `Busy client_timeout` | back off before retrying; nothing was changed by that request |
 | `Unknown client_timeout` | it may still run; inspect status; do not retry, gc, or rm |
 | `HeadMoved baseline_moved` | rerun the exact `publish --from …` command in `detail.fix` to checkpoint against the new baseline |
-| `OpenFiles caller_cwd` | cd outside and run `sync --session S`; then cd back |
-| `OpenFiles cwd_holders` | ask other holders to cd out; stop only processes you started |
+| `OpenFiles caller_cwd` | run `detail.fix` from outside, preserving its repo/resolution flags; then cd back |
+| `OpenFiles cwd_holders` | `--allow-cwd` accepts your own PID chain's stale cwd; other holders must cd out or be explicitly accepted with `--allow-cwd-holders` |
 | `Busy` (other) | another operation holds the lock; wait and retry |
 | `NotTty` / human-only command | stop; give the human the exact command |
 | `NoSuchSession` | `cd` into your workspace or pass `--session` |
