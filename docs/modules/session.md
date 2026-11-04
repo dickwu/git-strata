@@ -1521,8 +1521,9 @@ overrides are restored on return/unwind: allow_cwd exempts only caller_pids'
 Cwd holds; allow_cwd_holders accepts others. Dependency fd/map guards stay.
 Auto still defers on every holder. Phase F reports held_old_tree for fd/map
 holds and cwd_stale for Cwd holds, including post-scan arrivals. Re-enter the
-live path after sync. Staging cwd yields NoSuchSession/stale_cwd, not a normal
-session; live status cwd remains quiet.
+live path after sync. Cwd resolution of live staging trees yields
+NoSuchSession/stale_cwd; Removed sessions' leftover staging trees return None.
+Explicit status session selection works from stale cwd; live status cwd remains quiet.
 
 Old-tree collection reads/suspends clean passes before its first holder scan.
 Held trees keep passes cleared; a matching path/inode verdict supplies changed
@@ -1530,6 +1531,8 @@ for at most ten minutes, otherwise one comparison refreshes it. Held trees
 with fresh verdicts need no activity/content walks. After release, retirement
 still needs fresh activity/content checks, separated clean passes, a final
 holder scan and inode check. Cached changed is display only.
+Held trees use the normal quiet-period/status-TTL schedule, not the short yield
+retry. A failed clean-pass read stays unjudged and is retried.
 
 Both activity walks honor cooperative stop at directory boundaries. Interrupted
 walks are unjudged (Skipped), never clean and never permanent walk_error/late

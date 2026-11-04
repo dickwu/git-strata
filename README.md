@@ -607,7 +607,7 @@ Installed full rules: `git-strata help gate` (0.1.3+). Command help keeps a
 short summary; `git-strata <command> --help` describes the installed version.
 
 > Keep this section in step with `gate_text!` in
-> `crates/git-strata/src/help.rs`, which is the same text in `--help`.
+> `crates/git-strata/src/help.rs`, which supplies `git-strata help gate`.
 > It describes the current code and is expected to change.
 
 **Which repos are gated.** A repo needs confirmation when

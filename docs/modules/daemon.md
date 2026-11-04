@@ -1094,6 +1094,8 @@ later takes can wait indefinitely. daemon_status adds queues entries
 acquiring the held queue. Repo/session waiters older than LOCK_WAIT produce
 LongWait `{repo?, session?, method, since, attempt_since}` alongside LongHold.
 attempt_since is the current attempt, not a total across bounded retries.
+An expired `with_lock_unbounded` attempt logs a LongWait before retrying;
+it no longer has a FIFO entry for the live status snapshot to report.
 There is no 600 s daemon long_wait bound. Disconnects never cancel handlers;
 failed reply writes are tolerated without replay.
 
@@ -1109,5 +1111,7 @@ old CLI defaults are safe. CLI retries only explicit unknown-field parser
 rejections, after local checking. GUI approvals have no override and skip held
 sessions. Move warnings distinguish held_old_tree and cwd_stale.
 
-Staging/retained cwd returns existing NoSuchSession with reason stale_cwd and
-the live workspace path. Normal live workspace status adds no warning.
+For cwd-based status selection, staging/retained cwd returns NoSuchSession
+with reason stale_cwd and the live workspace path. An explicit session selector
+still works from stale cwd; Removed sessions are excluded from this diagnosis.
+Normal live workspace status adds no warning.

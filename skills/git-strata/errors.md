@@ -3,7 +3,7 @@
 ## The JSON envelope
 
 stdout carries exactly one compact JSON line; exit code 0 iff `ok` is true,
-else 1. Human prompts and notices go to stderr only. Exceptions: `--help`/`--version`;
+else 1. Human prompts and notices go to stderr only. Exceptions: `help`, `--help`/`--version`;
 `ls --table` prints a text table; `sync --check --hook` prints the hook's
 own JSON (see [hooks.md](hooks.md)); and a
 `session exec` that starts its command prints no envelope; stdout, stderr

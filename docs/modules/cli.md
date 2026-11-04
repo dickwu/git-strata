@@ -118,7 +118,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 
 ### 3.2 每个子命令的 `data`
 
-Main-sync adds `git-strata sync [--session S] [--repo R]... [--check] [--no-fetch] [--resolved PATH | --keep PATH]... [--target HEAD --generation N] [--accept-diverged] [--hook]`.
+Main-sync adds `git-strata sync [--session S] [--repo R]... [--check] [--no-fetch] [--resolved PATH | --keep PATH]... [--target HEAD --generation N] [--accept-diverged] [--allow-cwd] [--allow-cwd-holders] [--timeout SECONDS] [--progress] [--hook]`.
 `--target` and `--generation` go together. `--resolved` / `--keep` are forwarded without them;
 the daemon requires both (`resolution_binding_required`) unless a named-conflict acknowledgement
 applies: legacy-only requests (every named path in `ws.conflicts`, none in the saved report), or
@@ -551,11 +551,15 @@ stdout remains one compact JSON envelope; never combine stderr into a jq pipe.
 
 Non-check sync sends defaulted caller_pids/allow_cwd/allow_cwd_holders. A strict
 old daemon's explicit unknown-field rejection permits local checking and one
-resend without new fields. Other errors, especially Unknown, never permit
-resend. No extra capability probe is added. The daemon guards caller cwd before
+resend without new fields, using the same absolute deadline. The local sync
+guard selects tracked workspaces from the manifest; untracked siblings cannot
+move. Other errors, especially Unknown, never permit resend. No extra capability
+probe is added. The daemon guards caller cwd before
 fetch/anchor/queue work, even for up-to-date, non-following and acknowledgement
 requests; check/hook are exempt. Run `cd ~ && git-strata sync --session S`, then
 cd back. The additive compatibility path also covers deps approve/propose --switch.
+Legacy deps guards check rollout candidates only and exempt direct children of
+the daemon when its pid can be identified from its instance-lock descriptor.
 
 `git-strata help` lists topics and commands: gate, push-guards, errors,
 errors-publish, output, headless, sync-ack. `help <command…>` matches that
