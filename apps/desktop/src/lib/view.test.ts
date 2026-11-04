@@ -266,12 +266,12 @@ describe('waitingCount (Sessions header note, same rule as the tray)', () => {
     expect(waitingCount(all, deps)).toBe(0);
     expect(waitingCount(undefined, undefined)).toBe(0);
   });
-  test('pending proposals and conflicted workspaces both count', () => {
+  test('human waiting count excludes agent conflicts', () => {
     const d: DepsList = structuredClone(deps);
     d.proposals[0].state = { kind: 'Pending' };
     const s: StatusReply = structuredClone(all);
     s.sessions[0].status.workspaces.web.conflicts = [{ path: 'a' }, { path: 'b' }];
-    expect(waitingCount(s, d)).toBe(2);
+    expect(waitingCount(s, d)).toBe(1);
   });
   test('items: pending proposals by id, then conflicted workspaces, with where they belong', () => {
     const d: DepsList = structuredClone(deps);
@@ -328,6 +328,7 @@ describe('main-sync waiting groups', () => {
       origin: { kind: 'Main' },
     };
     for (const entry of s.sessions) {
+      entry.status.upstream = { clean: true, repos: {} };
       entry.status.manifest.repos.web.tracked = true;
       entry.status.workspaces.web.health = 'Ok';
       entry.status.workspaces.web.pending = [p];
@@ -488,5 +489,107 @@ describe('main-sync waiting groups', () => {
     for (const e of s.sessions)
       e.status.workspaces.web.upstream = { behind: null, unchecked: true };
     expect(sessionRows(s, capable)[0].behind).toBeUndefined();
+  });
+});
+
+describe('tray policy parity', () => {
+  const capable = { ...daemon, features: ['status.upstream'] };
+  function deferred() {
+    const s = structuredClone(all);
+    for (const [i, entry] of s.sessions.entries()) {
+      entry.status.upstream = { clean: true, repos: {} };
+      entry.status.workspaces.web.pending = [];
+      entry.status.manifest.repos.web.tracked = true;
+      entry.status.workspaces.web.upstream = {
+        behind: 1,
+        auto: {
+          state: 'deferred',
+          source: 'replay',
+          reason: 'open_files',
+          since: new Date(Date.now() - (26 + i) * 3600000).toISOString(),
+          attempts: 2,
+        },
+      };
+    }
+    return s;
+  }
+  test('tagged warnings name their variant and malformed lists are empty', () => {
+    expect(
+      daemonView({
+        ...daemon,
+        warnings: [
+          'StorePoisoned',
+          { VerifyFailed: { path: 'secret' } },
+          { ConfigRelaxPending: { repo: 'web' } },
+          { FutureVariant: {} },
+        ],
+      }).warnings
+    ).toEqual(['StorePoisoned', 'VerifyFailed', 'ConfigRelaxPending', 'FutureVariant']);
+    expect(daemonView({ ...daemon, warnings: {} as unknown as unknown[] }).warnings).toEqual([]);
+  });
+  test('Deferred aggregates by repo and opens oldest eligible session; ConfigRelax opens Daemon', () => {
+    const s = deferred();
+    const d = { proposals: [] };
+    const items = waitingItems(s, d, capable);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: 'deferred', repo: 'web', number: 2 });
+    expect(openTarget('waiting:deferred:web', s, d, capable)).toEqual({
+      session: s.sessions[1].status.manifest.id,
+    });
+    expect(openTarget('waiting:relax:web', s, d, capable)).toEqual({
+      session: null,
+      screen: 'daemon',
+    });
+    const warnings = [
+      { ConfigRelaxPending: { repo: 'web', reason: 'secret' } },
+      { ConfigRelaxPending: { repo: 'web' } },
+    ];
+    expect(waitingItems(undefined, undefined, { ...daemon, warnings })).toEqual([
+      {
+        key: 'relax:web',
+        kind: 'relax',
+        repo: 'web',
+        number: 0,
+        session: null,
+        since: null,
+        reason: 'Config relax waiting',
+      },
+    ]);
+  });
+  test('covered apply sessions are excluded from Deferred count, conflict deferrals never wait', () => {
+    const s = deferred();
+    const p = {
+      ...deps.proposals[0],
+      id: 99,
+      repo: 'web',
+      mode: 'apply' as const,
+      state: { kind: 'Pending' },
+    };
+    s.sessions[0].status.workspaces.web.pending = [p];
+    const items = waitingItems(s, { proposals: [p] }, capable);
+    expect(items.map((i) => [i.kind, i.number])).toEqual([
+      ['deps', 99],
+      ['deferred', 1],
+    ]);
+    for (const e of s.sessions) e.status.workspaces.web.upstream!.auto!.reason = 'conflicts';
+    expect(waitingCount(s, { proposals: [p] }, capable)).toBe(0);
+    expect(waitingItems(s, { proposals: [p] }, capable).every((i) => i.kind === 'conflict')).toBe(
+      true
+    );
+  });
+  test('unknown enrichment suppresses upstream items while direct proposals and workspace conflicts survive', async () => {
+    const { unavailableUpstream } = await import('./view');
+    const s = deferred();
+    for (const e of s.sessions) delete e.status.upstream;
+    expect(unavailableUpstream(s, capable)).toHaveLength(2);
+    expect(waitingItems(s, { proposals: [] }, capable)).toHaveLength(0);
+    const p = { ...deps.proposals[0], state: { kind: 'Pending' }, mode: 'confirm' as const };
+    s.sessions[0].status.workspaces.web.conflicts = ['secret'];
+    expect(waitingItems(s, { proposals: [p] }, capable).map((i) => i.kind)).toEqual([
+      'deps',
+      'conflict',
+    ]);
+    s.sessions[0].status.upstream = { clean: false, repos: {} };
+    expect(unavailableUpstream(s, capable)).toEqual([s.sessions[1].status.manifest.id]);
   });
 });

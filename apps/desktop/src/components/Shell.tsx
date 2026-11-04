@@ -7,7 +7,8 @@ import { sessionFromUrl, sessionHash, useNav } from '@/stores/nav';
 import { useTheme } from '@/stores/theme';
 import { usePlan, useSessions, useDeps } from '@/lib/queries';
 import { OPEN_EVENT, inTauri } from '@/lib/tauri';
-import { openTarget, waitingGroups } from '@/lib/view';
+import { refreshAfter } from '@/lib/refresh';
+import { openTarget, waitingGroups, unavailableUpstream } from '@/lib/view';
 import type { DaemonStatus, DepsList, StatusReply } from '@/lib/types';
 import { Titlebar } from './Titlebar';
 import { StatusBar } from './StatusBar';
@@ -66,14 +67,17 @@ export function Shell() {
     let unlisten: (() => void) | undefined;
     let gone = false;
     import('@tauri-apps/api/event').then(({ listen }) =>
-      listen<string>(OPEN_EVENT, (e) => {
+      listen<string>(OPEN_EVENT, async (e) => {
+        await refreshAfter(qc, [['daemonStatus'], ['sessions'], ['deps']]);
+        if (gone) return;
         const t = openTarget(
           e.payload,
           qc.getQueryData<StatusReply>(['sessions']),
           qc.getQueryData<DepsList>(['deps']),
           qc.getQueryData<DaemonStatus>(['daemonStatus'])
         );
-        openSession(t.session);
+        if (t.screen === 'daemon') go('daemon');
+        else openSession(t.session);
       }).then((u) => {
         if (gone) u();
         else unlisten = u;
@@ -83,14 +87,19 @@ export function Shell() {
       gone = true;
       unlisten?.();
     };
-  }, [qc, openSession]);
+  }, [qc, openSession, go]);
 
   return (
     <div className="shell">
       <Titlebar />
       <main className="main">
         {screen === 'daemon' ? (
-          <DaemonScreen status={status} plan={plan} onBack={() => go('sessions')} />
+          <DaemonScreen
+            status={status}
+            plan={plan}
+            unavailable={unavailableUpstream(sessions.data, status.data)}
+            onBack={() => go('sessions')}
+          />
         ) : (
           <SessionsScreen
             sessions={sessions}

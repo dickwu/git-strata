@@ -1,15 +1,9 @@
-//! The read methods P1 uses (gui.md §8.1: existing methods only) and how
-//! they are sent: one connection per request through `strata_client::call`
-//! on a blocking thread, a per-method deadline, and at most one request
-//! of each kind in flight.
-//!
-//! The deadline matters because `strata_client::call` has no read timeout
-//! (P0 moved it verbatim; the cli keeps blocking). The blocking thread
-//! cannot be cancelled, so the in-flight slot stays taken until the
-//! daemon answers or closes: a stuck daemon costs one waiting connection
-//! per read kind, not one per poll.
+//! Caller-aware single-flight reads. Pollers join; window callers wait out
+//! poller flights and start their own read, preserving refresh-after-event gates.
+//! Blocking tasks record before freeing their slot, publish the result, then notify
+//! the renderer. Caller deadlines never cancel a flight or discard its late reply.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,6 +13,9 @@ use strata_client::Kind;
 use strata_types::Code;
 
 use crate::error::GuiError;
+use crate::state::SnapshotStore;
+use crate::tray_snapshot::Stamp;
+use tokio::sync::watch;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Read {
@@ -91,6 +88,51 @@ pub struct Daemon {
     flights: Arc<Mutex<HashSet<String>>>,
     /// Tests shorten every deadline to this.
     deadline_override: Option<Duration>,
+    reads: Arc<Mutex<ReadFlights>>,
+    pub(crate) store: Arc<SnapshotStore>,
+    clock: Arc<dyn Fn() -> Stamp + Send + Sync>,
+}
+
+type Reply = Result<Value, GuiError>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Caller {
+    Window,
+    Poller,
+}
+struct ReadFlight {
+    started_by: Caller,
+    reply: watch::Receiver<Option<Reply>>,
+}
+#[derive(Default)]
+struct ReadFlights {
+    slots: HashMap<String, ReadFlight>,
+    generations: HashMap<String, u64>,
+}
+struct ReadSlot {
+    flights: Arc<Mutex<ReadFlights>>,
+    key: String,
+}
+impl Drop for ReadSlot {
+    fn drop(&mut self) {
+        self.flights
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .slots
+            .remove(&self.key);
+    }
+}
+async fn receive(mut rx: watch::Receiver<Option<Reply>>) -> Reply {
+    loop {
+        // A result may have arrived before this waiter subscribed.
+        if let Some(reply) = rx.borrow().clone() {
+            return reply;
+        }
+        if rx.changed().await.is_err() {
+            return Err(GuiError::internal(
+                "the request thread ended without a reply",
+            ));
+        }
+    }
 }
 
 /// Frees the in-flight slot when the blocking call returns (not when the
@@ -115,6 +157,9 @@ impl Daemon {
             socket,
             flights: Arc::new(Mutex::new(HashSet::new())),
             deadline_override: None,
+            reads: Arc::default(),
+            store: Arc::default(),
+            clock: Arc::new(Stamp::now),
         }
     }
 
@@ -144,33 +189,110 @@ impl Daemon {
         })
     }
 
-    pub async fn read(&self, r: Read) -> Result<Value, GuiError> {
-        let flight = self.take_flight(r.flight_key(), r.method())?;
+    pub async fn read(&self, r: Read) -> Reply {
+        self.read_as(r, Caller::Window).await
+    }
+    pub async fn poll_read(&self, r: Read) -> Reply {
+        self.read_as(r, Caller::Poller).await
+    }
+
+    async fn read_as(&self, r: Read, caller: Caller) -> Reply {
         let deadline = self.deadline_override.unwrap_or_else(|| r.deadline());
-        let (socket, method, params) = (self.socket.clone(), r.method(), r.params());
-        let task = tokio::task::spawn_blocking(move || {
-            let _flight = flight;
-            match strata_client::call(&socket, method, params.clone(), Kind::Read) {
-                // A daemon older than status-perf has no `chains` param
-                // (`deny_unknown_fields`) and computes chains anyway: ask
-                // once more without it. Same thread, flight and deadline;
-                // at most two requests; any other error is returned as is.
-                Err(strata_client::CallError::Failed(e)) if predates_chains(&params, &e) => {
-                    let mut params = params;
-                    if let Some(o) = params.as_object_mut() {
-                        o.remove("chains");
+        let wait_until = tokio::time::Instant::now() + deadline;
+        let key = r.flight_key();
+        let shared = matches!(r, Read::DaemonStatus | Read::Sessions | Read::DepsList);
+        if caller == Caller::Poller {
+            self.store.attempt(&r, (self.clock)());
+        }
+        loop {
+            let (rx, waiting) = {
+                let mut flights = self.reads.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(flight) = flights.slots.get(&key) {
+                    if !shared || (caller == Caller::Window && flight.started_by == Caller::Window)
+                    {
+                        return Err(GuiError::in_flight(r.method()));
                     }
-                    strata_client::call(&socket, method, params, Kind::Read)
+                    (flight.reply.clone(), caller == Caller::Window)
+                } else {
+                    let generation = if shared {
+                        let generation = flights.generations.entry(key.clone()).or_default();
+                        *generation += 1;
+                        Some(*generation)
+                    } else {
+                        None
+                    };
+                    let started = (self.clock)();
+                    if caller == Caller::Window {
+                        self.store.attempt(&r, started);
+                    }
+                    let (tx, rx) = watch::channel(None);
+                    flights.slots.insert(
+                        key.clone(),
+                        ReadFlight {
+                            started_by: caller,
+                            reply: rx.clone(),
+                        },
+                    );
+                    let slot = ReadSlot {
+                        flights: self.reads.clone(),
+                        key: key.clone(),
+                    };
+                    let (socket, r, store, clock) = (
+                        self.socket.clone(),
+                        r.clone(),
+                        self.store.clone(),
+                        self.clock.clone(),
+                    );
+                    tokio::task::spawn_blocking(move || {
+                        // This local drops before captured tx even on unwind. Closed watches
+                        // therefore never leave a dead slot for a window waiter to spin on.
+                        let guard = slot;
+                        let (method, mut params) = (r.method(), r.params());
+                        let result = match strata_client::call(
+                            &socket,
+                            method,
+                            params.clone(),
+                            Kind::Read,
+                        ) {
+                            Err(strata_client::CallError::Failed(e))
+                                if predates_chains(&params, &e) =>
+                            {
+                                if let Some(o) = params.as_object_mut() {
+                                    o.remove("chains");
+                                }
+                                strata_client::call(&socket, method, params, Kind::Read)
+                            }
+                            other => other,
+                        }
+                        .map_err(GuiError::from);
+                        store.record(&r, generation, started, clock(), &result);
+                        drop(guard);
+                        let _ = tx.send(Some(result));
+                        store.notify();
+                    });
+                    (rx, false)
                 }
-                other => other,
+            };
+            let expires = if waiting {
+                wait_until
+            } else {
+                tokio::time::Instant::now() + deadline
+            };
+            match tokio::time::timeout_at(expires, receive(rx)).await {
+                Err(_) => {
+                    self.store.timeout(&r, (self.clock)());
+                    return Err(GuiError::timeout(r.method(), r.deadline().as_secs()));
+                }
+                Ok(_) if waiting => {
+                    // Discard the old flight, including errors/closed watches. Recheck
+                    // under the lock; the wait budget never restarts for another poller.
+                    if tokio::time::Instant::now() >= wait_until {
+                        self.store.timeout(&r, (self.clock)());
+                        return Err(GuiError::timeout(r.method(), r.deadline().as_secs()));
+                    }
+                }
+                Ok(result) => return result,
             }
-        });
-        match tokio::time::timeout(deadline, task).await {
-            Err(_) => Err(GuiError::timeout(method, r.deadline().as_secs())),
-            Ok(Err(join)) => Err(GuiError::internal(format!(
-                "the `{method}` request thread failed: {join}"
-            ))),
-            Ok(Ok(reply)) => reply.map_err(GuiError::from),
         }
     }
 }
@@ -255,3 +377,7 @@ fn predates_chains(params: &Value, e: &strata_types::StrataError) -> bool {
             == Some("Failed")
         && e.message.contains("unknown field `chains`")
 }
+
+#[cfg(test)]
+#[path = "daemon_tray_tests.rs"]
+mod tray_tests;

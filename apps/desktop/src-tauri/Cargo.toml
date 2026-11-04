@@ -21,11 +21,12 @@ tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
 # gui.md §2.3: the desktop depends only on strata-client, strata-types,
-# tauri and its plugins, and tokio; plus libc for getuid (the launchctl
+# tauri and its plugins, tokio, and the locked AppKit drawing crates below;
+# plus libc for getuid (the launchctl
 # `gui/<uid>` domain, S0), already in the graph through tauri.
 strata-client = { path = "../../../crates/strata-client" }
 strata-types = { path = "../../../crates/strata-types" }
-tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
+tauri = { version = "~2.12", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2.7"
 tauri-plugin-os = "2.4"
 tauri-plugin-single-instance = "2.5"
@@ -37,10 +38,18 @@ libc = "0.2"
 # build). Off unless `bun run tauri:dev` passes --features dev-connector.
 tauri-plugin-connector = { version = "0.17", optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSString", "NSGeometry"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSAppearance", "NSColor", "NSGraphicsContext", "NSGraphics", "NSBezierPath", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSView", "NSResponder", "block2", "objc2-core-graphics"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGContext"] }
+block2 = "0.6.2"
+
 [features]
 default = []
 dev-connector = ["dep:tauri-plugin-connector"]
 
 [dev-dependencies]
+png = "0.18.1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

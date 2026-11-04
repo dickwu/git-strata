@@ -19,8 +19,9 @@ function useVisible(): boolean {
   return v;
 }
 
-// The back end allows one request per kind in flight and times out on its own
-// (src-tauri/src/daemon.rs), so the front end never retries on top of it.
+// Native window reads wait out poller flights, then start their own; overlapping window
+// reads are refused. The back end owns the deadlines (src-tauri/src/daemon.rs), so the
+// front end never retries on top of it.
 const base = { retry: false, refetchOnWindowFocus: true, staleTime: 0 } as const;
 
 export function useDaemonStatus(interval: number | false) {

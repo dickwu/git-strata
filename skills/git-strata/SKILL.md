@@ -121,6 +121,7 @@ with "ask the human". Never run a human-only command (hard rule 1) yourself. Exc
 | You got | Do |
 | --- | --- |
 | `Busy daemon_down` | keep working; tell the human; retry after `daemon status` shows running |
+| `Busy too_many_open_files` | the daemon is out of file handles; tell the human; do not retry in a loop or start another daemon ([errors.md](errors.md)) |
 | `Busy publish_unknown` | do not loop; tell the human ([errors.md](errors.md)) |
 | `Busy` (other) | another operation holds the lock; wait and retry |
 | `NotTty` / human-only command | stop; give the human the exact command |

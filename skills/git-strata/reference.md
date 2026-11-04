@@ -67,6 +67,10 @@ Fixed `detail.reason` values produced by the CLI: `daemon_down`,
 `main_moved`; from `config relax`: `not_relaxed`; from the push guard:
 `url-rewritten`, `url-is-remote-name`, `empty-url`, `no-such-remote`.
 
+The client also preserves the daemon's `Busy too_many_open_files` reason when it sheds a
+connection because it is out of file handles, including the null-id shed reply. Tell the
+human; do not treat it as `rpc_id` or retry in a loop (see [errors.md](errors.md)).
+
 The closed set of `error.code` values (types.md): Conflict, HeadMoved, Dirty,
 Busy, NoSuchPath, NoSuchBranch, NoSuchCommit, NoCommit, NoMergeBase,
 IsDirectory, NotDirectory, NotFile, Binary, NotText, NoMatch, AmbiguousMatch,
@@ -111,3 +115,14 @@ session shares its blocks, and Time Machine snapshots can hold freed blocks.
 counts only sessions recorded since `since` (earlier: unknown).
 `store.trash.eligible` is what `git-strata gc` would try to delete; agents do
 not run `gc` unless asked.
+
+## Desktop menu-bar states
+
+The desktop's read-only tray distinguishes Down (red slash), Alert (red triangle), Checking
+(dim ellipsis), Waiting (amber dot), Conflict (violet diamond), Syncing (teal ring), and Normal.
+Checking means stale/missing input or unavailable session upstream detail; it is not proof
+that the daemon stopped. Conflicts need the session agent and do not count as human waiting.
+A non-conflict auto-deferral older than 24 hours appears as one Deferred item per repo,
+excluding sessions already covered by stuck apply proposals. Config relax items open Daemon.
+Error-class warnings may persist until the cause is dealt with and the human restarts the
+daemon. The tray never acknowledges, snoozes, approves or performs daemon writes.

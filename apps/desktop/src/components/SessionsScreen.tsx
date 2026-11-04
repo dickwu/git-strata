@@ -9,6 +9,7 @@ import {
   knownAgents,
   sessionRows,
   usedRepos,
+  unavailableUpstream,
   type SessionRow,
   type WaitingGroup,
 } from '@/lib/view';
@@ -45,6 +46,7 @@ export function SessionsScreen({
     useNav();
   const now = useNow();
   const all = sessionRows(sessions.data, daemon.data);
+  const unavailable = unavailableUpstream(sessions.data, daemon.data);
   const repos = usedRepos(all);
   const agents = knownAgents(all);
   // A selected repo or agent no current session has drops out of the filter (t73u).
@@ -63,6 +65,16 @@ export function SessionsScreen({
       </div>
       <div className="content" style={{ display: 'grid', gap: 12, alignContent: 'start' }}>
         {error ? <ErrorNote error={error} /> : null}
+        {unavailable.length > 0 && (
+          <div role="status" className="muted">
+            {copy.tray.upstreamUnavailable}{' '}
+            {unavailable.map((id) => (
+              <Button key={id} type="link" size="small" onClick={() => openSession(id)}>
+                {id}
+              </Button>
+            ))}
+          </div>
+        )}
         {all.length > 0 && (
           <FilterBar
             repos={repos}

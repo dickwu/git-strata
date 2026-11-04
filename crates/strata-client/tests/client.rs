@@ -201,3 +201,45 @@ fn listening_probes_without_sending() {
     let _l = UnixListener::bind(&sock).unwrap();
     assert!(listening(&sock));
 }
+
+const SHED: &str = "{\"id\":null,\"ok\":false,\"error\":{\"code\":\"Busy\",\"message\":\"too many open files\",\"detail\":{\"reason\":\"too_many_open_files\"}}}\n";
+
+#[test]
+fn shed_reply_is_the_only_null_id_exception() {
+    let e = failed(strata_client::parse_reply("daemon_status", "42", SHED));
+    assert_eq!((e.code, reason(&e)), (Code::Busy, "too_many_open_files"));
+    let original: Value = serde_json::from_str(SHED).unwrap();
+    for (key, value) in [
+        ("id", json!("41")),
+        ("ok", json!(true)),
+        (
+            "error",
+            json!({"code":"Busy","detail":{"reason":"shutting_down"}}),
+        ),
+        (
+            "error",
+            json!({"code":"Unknown","detail":{"reason":"too_many_open_files"}}),
+        ),
+    ] {
+        let mut reply = original.clone();
+        reply[key] = value;
+        assert_eq!(
+            reason(&failed(strata_client::parse_reply(
+                "daemon_status",
+                "42",
+                &reply.to_string()
+            ))),
+            "rpc_id"
+        );
+    }
+    let mut missing_id = original;
+    missing_id.as_object_mut().unwrap().remove("id");
+    assert_eq!(
+        reason(&failed(strata_client::parse_reply(
+            "daemon_status",
+            "42",
+            &missing_id.to_string()
+        ))),
+        "rpc_id"
+    );
+}

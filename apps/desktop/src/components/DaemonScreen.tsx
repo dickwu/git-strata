@@ -8,19 +8,23 @@ import { useDu, useSocket } from '@/lib/queries';
 import type { PollPlan } from '@/lib/poll';
 import type { DaemonStatus } from '@/lib/types';
 import { daemonView } from '@/lib/view';
+import { useNav } from '@/stores/nav';
 import { ErrorNote } from './ErrorNote';
 
 export function DaemonScreen({
   status,
   plan,
   onBack,
+  unavailable = [],
 }: {
   status: UseQueryResult<DaemonStatus>;
   plan: PollPlan;
+  unavailable?: string[];
   /** Back to the session list (the Daemon screen is full-page, reached via ⌘K). */
   onBack: () => void;
 }) {
   const socket = useSocket();
+  const openSession = useNav((s) => s.openSession);
   const du = useDu(plan.du);
   const v = status.data ? daemonView(status.data) : null;
   return (
@@ -90,6 +94,17 @@ export function DaemonScreen({
                 renderItem={(w) => <List.Item>{w}</List.Item>}
               />
             )}
+          </section>
+        )}
+        {unavailable.length > 0 && (
+          <section className="panel">
+            <h2 style={{ margin: '0 0 8px', fontSize: 14 }}>{copy.tray.upstreamUnavailable}</h2>
+            <p className="muted">{copy.tray.upstreamCause}</p>
+            {unavailable.map((id) => (
+              <Button key={id} type="link" onClick={() => openSession(id)}>
+                {id}
+              </Button>
+            ))}
           </section>
         )}
         {!v && !status.isError && <Empty description={copy.status.loading} />}

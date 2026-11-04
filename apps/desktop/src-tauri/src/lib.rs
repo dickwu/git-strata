@@ -9,9 +9,14 @@ pub mod service;
 pub mod socket;
 pub mod state;
 pub mod tray_model;
+pub mod tray_snapshot;
 
 mod commands;
 mod tray;
+pub mod tray_assets;
+#[cfg(target_os = "macos")]
+mod tray_mac;
+pub mod tray_palette;
 
 use std::time::Duration;
 
@@ -85,17 +90,51 @@ pub fn run() {
             let handle = app.handle().clone();
             tray::install(&handle)?;
             let h = handle.clone();
-            app.state::<AppState>().set_on_change(move |snap| {
-                let _ = tray::refresh(&h, snap);
+            app.state::<AppState>().set_on_change(move || {
+                let _ = tray::refresh(&h);
             });
-            // "Updated N min ago" ages without new reads.
+            // Independent tasks: a long status{all} never stalls liveness.
+            for kind in [
+                daemon::Read::DaemonStatus,
+                daemon::Read::Sessions,
+                daemon::Read::DepsList,
+            ] {
+                let h = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        let state = h.state::<AppState>();
+                        let visible = h
+                            .get_webview_window("main")
+                            .is_some_and(|w| w.is_visible().unwrap_or(false));
+                        let now = tray_snapshot::Stamp::now();
+                        let wait = state.snapshot().due_in(&kind, visible, now);
+                        match wait {
+                            Some(wait) if wait.is_zero() => {
+                                let _ = state.poll_read(kind.clone()).await;
+                            }
+                            // Recheck visibility/recovery at least every 5 s, while
+                            // exact due times avoid 5 s quantization of the cadence.
+                            Some(wait) => {
+                                tokio::time::sleep_until(
+                                    tokio::time::Instant::now() + wait.min(Duration::from_secs(5)),
+                                )
+                                .await
+                            }
+                            None => tokio::time::sleep(Duration::from_secs(5)).await,
+                        }
+                        // Missing HOME cannot advance last_attempt; avoid a busy loop.
+                        if state.socket().is_none() {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                    }
+                });
+            }
             let h = handle.clone();
             tauri::async_runtime::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(30));
+                let mut tick = tokio::time::interval(Duration::from_secs(5));
                 loop {
                     tick.tick().await;
-                    let snap = h.state::<AppState>().snapshot();
-                    let _ = tray::refresh(&h, &snap);
+                    let _ = tray::refresh(&h);
                 }
             });
             Ok(())
