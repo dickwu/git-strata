@@ -315,6 +315,42 @@ fn non_tty_refused_before_prompt() {
     });
 }
 
+#[test]
+fn non_tty_publish_plan_preserves_busy_without_prompting() {
+    let lv = guarded_live();
+    lv.serve_scripted(vec![], |core, log| {
+        let session = lv.new_session("T-busy-plan", "app");
+        let workspace = lv.ws(&session, "app");
+        write(&workspace, "a.txt", b"changed\n");
+        let repo = RepoName::try_from("app".to_string()).unwrap();
+        let seen = lv.requests.lock().unwrap().len();
+        core.locks
+            .with_repo(&repo, || {
+                // Force the cached gate to refresh while another writer owns the lock.
+                git(
+                    &lv.main("app"),
+                    lv.home.path(),
+                    &["update-ref", "-d", "refs/strata/remotes/origin/main"],
+                );
+                let reply = lv.run_in(
+                    &workspace,
+                    &["publish", "--from", &format!("{session}:app:a.txt")],
+                );
+                assert_eq!(reply.err_code(), "Busy", "{reply:?}");
+                assert_eq!(reply.reason(), "lock_wait", "{reply:?}");
+                assert!(reply.env()["error"]["detail"].get("plan_error").is_none());
+                Ok(())
+            })
+            .unwrap();
+        assert!(log.shown().is_empty());
+        assert!(core.store.publishes().unwrap().is_empty());
+        assert_eq!(
+            lv.requests.lock().unwrap()[seen..],
+            ["checkpoint", "publish_plan"]
+        );
+    });
+}
+
 /// Review-2 N2: the TTY gate covers only the repos the publish will still
 /// commit. A non-TTY re-run whose guarded repo already landed (same
 /// content) succeeds with `already_published` and no prompt; once that repo

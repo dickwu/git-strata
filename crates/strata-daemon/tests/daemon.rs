@@ -705,6 +705,54 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
         assert_eq!(paths, vec!["src/index.ts"], "{r:#}");
         assert_eq!(origin("tool"), upstream, "tool not pushed");
 
+        // A retry's preflight error retains the repo that already landed,
+        // both when planning and when publishing directly.
+        let mut retry = group(
+            core.store
+                .publishes()
+                .unwrap()
+                .into_iter()
+                .flat_map(|r| r.group.batches)
+                .collect(),
+        );
+        for batch in &mut retry.batches {
+            let checkpoint = ok(call(
+                &sock,
+                "checkpoint",
+                json!({
+                    "session": id, "repo": batch.repo, "reason": {"kind":"BeforePublish"}, "paths": batch.paths,
+                }),
+            ));
+            batch.checkpoint =
+                serde_json::from_value(checkpoint["checkpoint"]["id"].clone()).unwrap();
+        }
+        let tracking = strata_gitio::remote_ref("origin", "main");
+        let cached = core.gits[&repo_name("tool")]
+            .read_ref(&tracking)
+            .unwrap()
+            .unwrap();
+        core.locks
+            .with_repo(&repo_name("tool"), || {
+                fx.sb.git(&main, &["update-ref", "-d", &tracking]);
+                for method in ["publish_plan", "publish"] {
+                    let refused = call(&sock, method, json!({"group":retry}));
+                    assert_eq!(refused["error"]["code"], "Busy", "{refused}");
+                    let detail = &refused["error"]["detail"];
+                    assert_eq!(detail["reason"], "lock_wait", "{refused}");
+                    assert_eq!(detail["repo"], "tool", "{refused}");
+                    assert_eq!(detail["already_published"][0]["repo"], "front", "{refused}");
+                    assert_eq!(
+                        detail["already_published"][0]["commit"],
+                        json!(landed),
+                        "{refused}"
+                    );
+                }
+                fx.sb
+                    .git(&main, &["update-ref", &tracking, cached.as_str()]);
+                Ok(())
+            })
+            .unwrap();
+
         // The agent takes upstream's line and re-runs the same publish.
         external(&ws(&core, &id, "tool"), "printf 'export const t = 9\\n' > src/index.ts");
         push_calls(&core);

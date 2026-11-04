@@ -369,6 +369,34 @@ fn rm_upstream_captured_before_teardown() {
 }
 
 #[test]
+fn rm_discard_retains_pre_removal_unpublished_verdict() {
+    let fx = Dfx::new();
+    let (confirmer, log, _) = fx.confirmer(vec![strata_daemon::seams::Verdict::pass()]);
+    let core = fx.prepare_with(confirmer).unwrap();
+    let daemon = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&daemon, &trackers);
+    let session = new(&server);
+    advance(&fx, &core, "upstream");
+    fs::write(ws(&core, &session, "tool").join("dirty.txt"), "mine").unwrap();
+    let before = check(&server, &session, false);
+    assert_eq!(before.repos[&repo_name("tool")].unpublished, Some(true));
+    let out = ok(call(
+        &server,
+        "rm",
+        json!({"session":session,"discard":true}),
+    ));
+    assert_eq!(out["upstream"]["repos"]["tool"]["behind"], 1);
+    assert_eq!(out["upstream"]["repos"]["tool"]["unpublished"], true);
+    assert_eq!(out["upstream"]["as_of_rm"], "before");
+    assert_eq!(log.shown().len(), 1);
+    assert_eq!(
+        core.store.session(&session).unwrap().unwrap().lifecycle,
+        strata_store::Lifecycle::Removed
+    );
+}
+
+#[test]
 fn rm_dirty_detail_upstream() {
     let fx = Dfx::new();
     let core = fx.prepare().unwrap();
@@ -383,6 +411,10 @@ fn rm_dirty_detail_upstream() {
     assert_eq!(
         out["error"]["detail"]["upstream"]["repos"]["tool"]["behind"],
         1
+    );
+    assert_eq!(
+        out["error"]["detail"]["upstream"]["repos"]["tool"]["unpublished"],
+        true
     );
 }
 

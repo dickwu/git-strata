@@ -675,17 +675,38 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message
         v
     };
     // Review-2 N2: the TTY gate and the confirmations cover only the repos
-    // this publish will still commit. When a pushing, guarded repo is in the
-    // batch, the before-publish checkpoints and the read-only `publish_plan`
-    // come first, so a re-run whose guarded repos already landed is not
-    // refused on a non-TTY. Before the gate nothing but those is sent: no
+    // this publish will still commit. Every batch gets before-publish
+    // checkpoints and a read-only `publish_plan` first, so a re-run whose
+    // guarded repos already landed is not refused on a non-TTY. Before the
+    // gate nothing but those is sent: no
     // `publish`, no prompt, no credential. A failure of either step on a
-    // non-TTY is the gate's `NotTty` (as before), with the failure attached.
-    let guarded: Vec<RepoName> =
-        repos.iter().filter(|r| pins.pushes(Some(&config), r) && pins.needs_confirm(Some(&config), r)).cloned().collect();
+    // non-TTY is the gate's `NotTty` (as before), with the failure attached,
+    // except retryable Busy and baseline refusals, which keep their own code.
+    let guarded: Vec<RepoName> = repos
+        .iter()
+        .filter(|r| pins.pushes(Some(&config), r) && pins.needs_confirm(Some(&config), r))
+        .cloned()
+        .collect();
     let tty_refused = |e: StrataError| -> StrataError {
-        if e.detail.as_ref().and_then(|d| d.get("reason")).and_then(Value::as_str)
-            .is_some_and(|r| matches!(r, "base_not_on_main" | "base_diverged_from_main" | "base_behind_main" | "baseline_moved")) { return e; }
+        if e.code == Code::Busy {
+            return e;
+        }
+        if e.detail
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .and_then(Value::as_str)
+            .is_some_and(|r| {
+                matches!(
+                    r,
+                    "base_not_on_main"
+                        | "base_diverged_from_main"
+                        | "base_behind_main"
+                        | "baseline_moved"
+                )
+            })
+        {
+            return e;
+        }
         match require_tty_for("publish") {
             Err(mut t) => {
                 if let Some(d) = t.detail.as_mut().and_then(Value::as_object_mut) {

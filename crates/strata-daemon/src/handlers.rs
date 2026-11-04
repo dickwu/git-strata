@@ -1076,7 +1076,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 let (g, already) = rerun_plan(core, &core.store.publishes()?, &p.group)?;
                 let repos: BTreeSet<RepoName> = g.batches.iter().map(|b| b.repo.clone()).collect();
                 messages.message_for.retain(|repo, _| repos.contains(repo));
-                let subjects = self.publish_preflight(&g, &messages)?;
+                let subjects = self.publish_preflight(&g, &messages, &already)?;
                 Ok(json!({ "repos": repos, "subjects": subjects, "already_published": already }))
             }
             Params::Push(p) => self.push(&p.repo, p.shown.as_ref()),
@@ -1855,7 +1855,7 @@ impl<'d, 'a> Server<'d, 'a> {
             }
         }
         // Check every repo before any Touch ID prompt or per-repo publish.
-        self.publish_preflight(&group, &messages)?;
+        self.publish_preflight(&group, &messages, &already)?;
         let mut done: Vec<Value> = Vec::new();
         for repo in repos {
             // Review-2 N6: every error of this repo's body (config, the
@@ -1928,7 +1928,12 @@ impl<'d, 'a> Server<'d, 'a> {
         Ok(data)
     }
 
-    fn publish_preflight(&self, group: &strata_types::ReleaseGroup, messages: &strata_publish::message::Messages) -> Result<Value> {
+    fn publish_preflight(
+        &self,
+        group: &strata_types::ReleaseGroup,
+        messages: &strata_publish::message::Messages,
+        already: &[Value],
+    ) -> Result<Value> {
         let mut subjects = serde_json::Map::new();
         let repos: BTreeSet<_> = group.batches.iter().map(|b| b.repo.clone()).collect();
         for repo in repos {
@@ -1946,7 +1951,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
                 let chosen = strata_publish::message::choose(ctx, group, messages)?;
                 Ok(json!({"subject":if chosen.source == strata_publish::message::Source::Legacy { format!("strata publish <assigned id> ({repo})") } else {chosen.subject(group.id, &repo)}, "message_source":chosen.source}))
-            })?;
+            }).map_err(|e| self.decorate_publish_error(e, &repo, Vec::new(), already.to_vec()))?;
             subjects.insert(repo.to_string(), preview);
         }
         Ok(Value::Object(subjects))

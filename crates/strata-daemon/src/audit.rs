@@ -72,14 +72,16 @@ pub fn load(pins: &Path) -> BTreeMap<RepoName, PinMeta> {
         let Ok(f) = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(p)
+            .open(&p)
         else {
             continue;
         };
-        if !f
-            .metadata()
-            .is_ok_and(|m| m.is_file() && m.len() <= ROTATE_BYTES + 65536)
-        {
+        let Ok(metadata) = f.metadata() else { continue };
+        if !metadata.is_file() {
+            continue;
+        }
+        if metadata.len() > ROTATE_BYTES + 65536 {
+            tracing::warn!(path = %p.display(), bytes = metadata.len(), "oversized pin audit sidecar ignored; timestamps from this file are unavailable");
             continue;
         }
         for line in BufReader::new(f).split(b'\n').map_while(Result::ok) {
