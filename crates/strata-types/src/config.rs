@@ -252,7 +252,7 @@ pub enum DepsChanged {
 }
 
 /// `[repo.X.rebase]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RebaseConfig {
     #[serde(default)]
@@ -260,11 +260,14 @@ pub struct RebaseConfig {
     /// The quiet window Q of the automatic rebase, in seconds.
     #[serde(default = "RebaseConfig::default_quiet_secs")]
     pub quiet_secs: u64,
+    /// Opt-in carried-cache globs excluded from the quiet age only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quiet_skip: Vec<String>,
 }
 
 impl Default for RebaseConfig {
     fn default() -> Self {
-        RebaseConfig { deps_changed: DepsChanged::default(), quiet_secs: Self::default_quiet_secs() }
+        RebaseConfig { deps_changed: DepsChanged::default(), quiet_secs: Self::default_quiet_secs(), quiet_skip: Vec::new() }
     }
 }
 
@@ -712,6 +715,11 @@ fn validate_rm_rebase(name: &RepoName, cfg: &RepoConfig) -> Result<(), StrataErr
     for (i, pat) in cfg.rm.regenerable.iter().enumerate() {
         if let Some(message) = regenerable_problem(pat) {
             return Err(violation(Code::InvalidInput, Some(repo), "rm.regenerable", Some(i), "V14", message));
+        }
+    }
+    for (i, pat) in cfg.rebase.quiet_skip.iter().enumerate() {
+        if let Some(message) = regenerable_problem(pat) {
+            return Err(violation(Code::InvalidInput, Some(repo), "rebase.quiet_skip", Some(i), "V16", message));
         }
     }
     if cfg.rebase.quiet_secs > RebaseConfig::MAX_QUIET_SECS {

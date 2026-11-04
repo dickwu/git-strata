@@ -36,6 +36,7 @@ fn upstream_optional_fields_omit_and_round_trip() {
         error: None,
     });
     let upstream = Upstream {
+        as_of_rm: None,
         as_of: None,
         clean: false,
         repos: [(RepoName::try_from("tool".to_string()).unwrap(), row)]
