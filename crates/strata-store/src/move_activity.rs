@@ -22,10 +22,31 @@ fn w(op: &'static str) -> impl Fn(crate::sql::Error) -> StrataError {
 /// `t0_ns` (ns since the epoch), the root's entry names and the entry count.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MoveBaseline {
+    #[serde(default)]
+    pub scope: ActivityScope,
     pub m0_ns: i64,
     pub t0_ns: i64,
     pub root_names: Vec<String>,
     pub entries: u64,
+}
+
+/// Durable roots excluded from activity checks, with carried seed-cache exceptions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityScope {
+    /// APFS identity of these persisted roots; older rows default to exact names.
+    #[serde(default)]
+    pub fold: bool,
+    pub skip: Vec<String>,
+    pub exceptions: Vec<String>,
+}
+
+impl ActivityScope {
+    fn decode(value: Option<&str>) -> Self {
+        value.and_then(|v| serde_json::from_str::<Self>(v).ok())
+            .filter(|s| s.skip.iter().chain(&s.exceptions).all(|p| strata_types::RepoPath::try_from(p.clone()).is_ok()))
+            .unwrap_or_default()
+    }
 }
 
 /// The move policy recorded with a durable activity baseline.
@@ -53,13 +74,13 @@ pub struct MoveActivity {
     pub passes: Vec<i64>,
 }
 
-type Raw = (String, String, i64, i64, i64, String, i64, Option<String>, Option<String>, String);
+type Raw = (String, String, i64, i64, i64, String, i64, Option<String>, Option<String>, String, Option<String>);
 
 fn of_raw(r: Raw) -> Result<MoveActivity> {
-    let (s, repo, n, m0, t0, names, entries, late, passes, policy) = r;
+    let (s, repo, n, m0, t0, names, entries, late, passes, policy, scope) = r;
     let root_names: Option<Vec<String>> = serde_json::from_str(&names).ok();
     let baseline = match (root_names, u64::try_from(entries)) {
-        (Some(root_names), Ok(entries)) => Some(MoveBaseline { m0_ns: m0, t0_ns: t0, root_names, entries }),
+        (Some(root_names), Ok(entries)) => Some(MoveBaseline { scope: ActivityScope::decode(scope.as_deref()), m0_ns: m0, t0_ns: t0, root_names, entries }),
         _ => None,
     };
     let passes = match passes {
@@ -83,18 +104,23 @@ fn of_raw(r: Raw) -> Result<MoveActivity> {
 
 const COLS: &str = "session, repo, n, m0_ns, t0_ns, root_names_json, entries, late_writes_json, passes_json, policy";
 
+fn columns(c: &crate::sql::Connection) -> Result<String> {
+    Ok(format!("{COLS}, {}", if user_version(c)? >= 6 { "skip_json" } else { "NULL" }))
+}
+
 fn raw(r: &crate::sql::Row) -> crate::sql::SqlResult<Raw> {
-    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
+    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?))
 }
 
 /// Inserts the row of move `n` (inside `begin_move`'s transaction).
 pub(crate) fn insert(c: &crate::sql::Connection, id: &str, repo: &str, n: i64, b: &MoveBaseline, policy: MoveActivityPolicy, op: &'static str) -> Result<()> {
     let names = to_json(&b.root_names, "root_names")?;
+    let scope = to_json(&b.scope, "activity scope")?;
     let entries = i64::try_from(b.entries).unwrap_or(i64::MAX);
     c.execute(
-        "INSERT INTO move_activity (session, repo, n, policy, m0_ns, t0_ns, root_names_json, entries) \
-         VALUES (?1, ?2, ?3, ?8, ?4, ?5, ?6, ?7)",
-        params![id, repo, n, b.m0_ns, b.t0_ns, names, entries, policy.text()],
+        "INSERT INTO move_activity (session, repo, n, policy, m0_ns, t0_ns, root_names_json, entries, skip_json) \
+         VALUES (?1, ?2, ?3, ?8, ?4, ?5, ?6, ?7, ?9)",
+        params![id, repo, n, b.m0_ns, b.t0_ns, names, entries, policy.text(), scope],
     )
     .map_err(w(op))?;
     Ok(())
@@ -111,7 +137,7 @@ impl Store {
             }
             let r = c
                 .query_row(
-                    &format!("SELECT {COLS} FROM move_activity WHERE session = ?1 AND repo = ?2 AND n = ?3"),
+                    &format!("SELECT {} FROM move_activity WHERE session = ?1 AND repo = ?2 AND n = ?3", columns(c)?),
                     params![session.as_str(), repo.as_str(), ni],
                     raw,
                 )
@@ -128,7 +154,7 @@ impl Store {
                 return Ok(Vec::new());
             }
             let mut st = c
-                .prepare(&format!("SELECT {COLS} FROM move_activity WHERE session = ?1 ORDER BY repo, n"))
+                .prepare(&format!("SELECT {} FROM move_activity WHERE session = ?1 ORDER BY repo, n", columns(c)?))
                 .map_err(sql_read)?;
             let rows = st
                 .query_map([session.as_str()], raw)

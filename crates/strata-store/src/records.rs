@@ -31,7 +31,7 @@ fn publish_exists(c: &Connection, id: i64) -> crate::sql::SqlResult<bool> {
     Ok(c.query_row("SELECT 1 FROM publishes WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
 }
 
-fn load_publish(c: &Connection, id: i64, phase: String, started: i64, ended: Option<i64>, outcome: Option<String>) -> Result<PublishRecord> {
+fn load_publish(c: &Connection, id: i64, phase: String, started: i64, ended: Option<i64>, outcome: Option<String>, message: Option<String>) -> Result<PublishRecord> {
     let uid = seq(id, "publish id")?;
     let mut st = c
         .prepare("SELECT batch, item, session, repo, checkpoint, path FROM publish_items WHERE publish = ?1 ORDER BY batch, item")
@@ -72,6 +72,7 @@ fn load_publish(c: &Connection, id: i64, phase: String, started: i64, ended: Opt
         return Err(bad_row(format!("publish {id} phase and end time disagree")));
     }
     Ok(PublishRecord {
+        message,
         group: ReleaseGroup { id: uid, batches },
         phase,
         started: time(started),
@@ -81,18 +82,19 @@ fn load_publish(c: &Connection, id: i64, phase: String, started: i64, ended: Opt
 }
 
 fn publishes_where(c: &Connection, cond: &str, arg: Option<i64>) -> Result<Vec<PublishRecord>> {
+    let message = if crate::rm_state::user_version(c)? >= 6 { "message" } else { "NULL" };
     let mut st = c
-        .prepare(&format!("SELECT id, phase, started_ns, ended_ns, outcome FROM publishes WHERE {cond} ORDER BY id"))
+        .prepare(&format!("SELECT id, phase, started_ns, ended_ns, outcome, {message} FROM publishes WHERE {cond} ORDER BY id"))
         .map_err(sql_read)?;
     let map = |r: &crate::sql::Row| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, Option<String>>(4)?))
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, Option<String>>(4)?, r.get::<_, Option<String>>(5)?))
     };
     let rows: Vec<_> = match arg {
         Some(a) => st.query_map([a], map).map_err(sql_read)?.collect::<crate::sql::SqlResult<_>>(),
         None => st.query_map([], map).map_err(sql_read)?.collect::<crate::sql::SqlResult<_>>(),
     }
     .map_err(sql_read)?;
-    rows.into_iter().map(|(id, ph, s, e, o)| load_publish(c, id, ph, s, e, o)).collect()
+    rows.into_iter().map(|(id, ph, s, e, o, m)| load_publish(c, id, ph, s, e, o, m)).collect()
 }
 
 fn pairing_ok(op: RefOp, outcome: RefOutcome) -> bool {
@@ -104,7 +106,14 @@ fn pairing_ok(op: RefOp, outcome: RefOutcome) -> bool {
 
 impl Store {
     pub fn record_publish(&self, group: &ReleaseGroup, at: SystemTime) -> Result<u64> {
+        self.record_publish_with_message(group, None, at)
+    }
+
+    pub fn record_publish_with_message(&self, group: &ReleaseGroup, message: Option<&str>, at: SystemTime) -> Result<u64> {
         const OP: &str = "record_publish";
+        if message.is_some_and(|m| m.is_empty() || m.len() > 65536 || m.contains('\0')) {
+            return Err(invalid("message", "publish message must be 1..=65536 bytes without NUL"));
+        }
         if group.batches.is_empty() {
             return Err(invalid("batches", "a publish needs at least one batch"));
         }
@@ -147,7 +156,7 @@ impl Store {
             }
             let top: i64 = c.query_row("SELECT COALESCE(MAX(id), 0) FROM publishes", [], |r| r.get(0)).map_err(w(OP))?;
             let id = top.max(0).checked_add(1).ok_or_else(|| too_large("release_group_id"))?;
-            c.execute("INSERT INTO publishes (id, phase, started_ns) VALUES (?1, 'running', ?2)", params![id, started]).map_err(w(OP))?;
+            c.execute("INSERT INTO publishes (id, phase, started_ns, message) VALUES (?1, 'running', ?2, ?3)", params![id, started, message]).map_err(w(OP))?;
             let mut ins = c
                 .prepare("INSERT INTO publish_items (publish, batch, item, session, repo, checkpoint, path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
                 .map_err(w(OP))?;

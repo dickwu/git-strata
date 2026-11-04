@@ -128,9 +128,9 @@ fn v2_to_v3_migration_forward_only() {
     assert!(s.rebase_pending(None).unwrap().is_empty());
     s.close().unwrap();
 
-    assert_eq!(header_u32(&env.db(), 60), 5);
+    assert_eq!(header_u32(&env.db(), 60), 6);
     let (uv, ic, after) = dump_copy(&env.db());
-    assert_eq!((uv, ic.as_str()), (5, "ok"));
+    assert_eq!((uv, ic.as_str()), (6, "ok"));
     let mut keys: Vec<&str> = before.keys().map(String::as_str).collect();
     keys.extend(NEW_TABLES);
     keys.sort();
@@ -154,7 +154,7 @@ fn v2_to_v3_migration_forward_only() {
     let s = env.open();
     s.close().unwrap();
     assert_eq!(backups(&env), b, "no second backup");
-    assert_eq!(header_u32(&env.db(), 60), 5);
+    assert_eq!(header_u32(&env.db(), 60), 6);
 }
 
 #[test]
@@ -203,20 +203,20 @@ fn open_rejects_newer_store_with_upgrade_hint() {
     env.open().close().unwrap();
     {
         let c = bare(&env.db());
-        c.execute_batch("PRAGMA user_version = 6").unwrap();
+        c.execute_batch("PRAGMA user_version = 7").unwrap();
         c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |_| Ok(()))
             .unwrap();
     }
     for e in [
-        env.try_open().err().expect("v6 refused"),
+        env.try_open().err().expect("v7 refused"),
         Store::open_read_only(&env.root)
             .err()
-            .expect("v6 refused ro"),
+            .expect("v7 refused ro"),
     ] {
         assert_reason(&e, Code::Corrupt, "user_version");
         assert!(
             e.message.contains(
-                "this git-strata is older than the store (v6); install the matching git-strata"
+                "this git-strata is older than the store (v7); install the matching git-strata"
             ),
             "{}",
             e.message

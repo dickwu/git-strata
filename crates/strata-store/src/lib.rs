@@ -43,7 +43,7 @@ mod txn;
 
 #[cfg(feature = "test-seams")]
 pub use seams::{Seam, SyncCounts};
-pub use move_activity::{MoveActivity, MoveActivityPolicy, MoveBaseline};
+pub use move_activity::{ActivityScope, MoveActivity, MoveActivityPolicy, MoveBaseline};
 pub use rm_state::{PendingSource, RebasePending, ReplayPlan, RmAttempt, RmOutcome};
 pub use devports::{DEV_PORT_BLOCK, DevPortLease, DevPortsPolicy, Probe, bind_probe};
 
@@ -347,6 +347,7 @@ pub struct CheckpointInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishRecord {
+    pub message: Option<String>,
     pub group: ReleaseGroup,
     pub phase: PublishPhase,
     pub started: SystemTime,

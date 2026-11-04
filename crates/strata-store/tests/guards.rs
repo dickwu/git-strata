@@ -30,7 +30,7 @@ fn fx() -> Fx {
          INSERT INTO base_gens VALUES (1, 'r', '{T}', '{D}', 0);
          INSERT INTO base_gens VALUES (2, 'r', '{T}', '{D2}', 0);
          INSERT INTO blobs VALUES ('{B}', 3, 0);
-         INSERT INTO publishes VALUES (1, 'running', 0, NULL, NULL);
+         INSERT INTO publishes (id, phase, started_ns, ended_ns, outcome) VALUES (1, 'running', 0, NULL, NULL);
          INSERT INTO publish_items VALUES (1, 0, 0, 's-aaaaaaaa', 'r', 1, 'a.txt');
          INSERT INTO refs_audit VALUES (1, 0, 'r', 'push', 'refs/heads/main', NULL, '{H}', 'pushed', 1, NULL, NULL);
          INSERT INTO gc_runs VALUES (1, NULL, 0, 0, 'complete', '{{}}', NULL);
@@ -479,7 +479,7 @@ fn state_graphs_are_enforced_by_triggers() {
     );
 
     // ---- publishes
-    let pubrow = |c: &Connection, id: i64| ok(c, &format!("INSERT INTO publishes VALUES ({id}, 'running', 0, NULL, NULL)"));
+    let pubrow = |c: &Connection, id: i64| ok(c, &format!("INSERT INTO publishes (id, phase, started_ns, ended_ns, outcome) VALUES ({id}, 'running', 0, NULL, NULL)"));
     pubrow(c, 10);
     refused(c, "UPDATE publishes SET outcome = '{}' WHERE id = 10", "illegal update: publishes");
     ok(c, "UPDATE publishes SET phase = 'unknown', ended_ns = 1 WHERE id = 10");
@@ -493,7 +493,7 @@ fn state_graphs_are_enforced_by_triggers() {
     refused(c, "UPDATE publishes SET outcome = '{}', ended_ns = 3 WHERE id = 10", "illegal update: publishes");
     pubrow(c, 11);
     ok(c, "UPDATE publishes SET phase = 'done', ended_ns = 1, outcome = '{}' WHERE id = 11");
-    refused(c, "INSERT INTO publishes VALUES (12, 'done', 0, 1, NULL)", "illegal insert: publishes");
+    refused(c, "INSERT INTO publishes (id, phase, started_ns, ended_ns, outcome) VALUES (12, 'done', 0, 1, NULL)", "illegal insert: publishes");
 }
 
 fn sid(k: usize) -> String {
