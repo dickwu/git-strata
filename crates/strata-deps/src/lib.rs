@@ -73,6 +73,9 @@ pub trait RepoWriteLock: Sync {
     fn try_write(&self, repo: &RepoName, f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>> {
         self.with_write(repo, f)
     }
+    /// Record an expired attempt that the caller will retry after a visible
+    /// write. The timestamp belongs to that attempt, not the whole retry loop.
+    fn record_long_wait(&self, _repo: &RepoName, _attempt_since: std::time::SystemTime) {}
 }
 
 /// The environment `install` and `<program> --version` run with.
