@@ -600,7 +600,13 @@ fn status_reports_drift_and_pending_proposals() {
     assert_eq!(d.pinned_inputs, deps_inputs(&fx, "tool", &d1));
     assert_ne!(d.found_inputs, d.pinned_inputs);
     // deps-drift §2.7: a hint with the switch command and the publish note.
-    assert_eq!(d.fix, format!("git-strata deps propose --session {} --repo tool --switch", id(&a).as_str()));
+    assert_eq!(
+        d.fix,
+        format!(
+            "cd ~ && git-strata deps propose --session {} --repo tool --switch",
+            id(&a).as_str()
+        )
+    );
     assert_eq!(d.note, strata_session::DRIFT_NOTE);
     let j = serde_json::to_value(wstat(&s.status(&id(&a)).unwrap(), "tool")).unwrap();
     assert_eq!(j["drift"]["pinned"], serde_json::json!(d1.as_str()));

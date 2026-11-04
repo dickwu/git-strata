@@ -96,7 +96,11 @@ pub(crate) fn rewrite_select_failure(ctx: &Ctx, e: StrataError) -> StrataError {
 }
 
 fn switch_fix(ctx: &Ctx, session: &SessionId) -> String {
-    format!("git-strata deps propose --session {} --repo {} --switch", session.as_str(), ctx.repo)
+    format!(
+        "cd ~ && git-strata deps propose --session {} --repo {} --switch",
+        session.as_str(),
+        ctx.repo
+    )
 }
 
 /// §2.6: the cause of the difference, for the text and `fix` only.
@@ -163,7 +167,7 @@ pub(crate) fn diagnose(
             cause: "unswitched",
             paths,
             hint: format!(
-                "the checks used the deps set matching the published install inputs; run `{fix}` so the session's workspace uses it too, and check that data.switched.kind is \"moved\" (when it is skipped, e.g. OpenFiles, stop the processes you started that hold the deps and run it again)"
+                "the checks used the deps set matching the published install inputs; run `{fix}` so the session's workspace uses it too, check that data.switched.kind is \"moved\", then cd back to the workspace path. For skipped OpenFiles, detail.reason cwd_holders needs --allow-cwd for your own PID chain (accepting its stale cwd), or other holders to cd out / --allow-cwd-holders; other OpenFiles needs the processes holding deps files stopped (only if you started them) before retrying"
             ),
             fix: Some(fix),
         };
