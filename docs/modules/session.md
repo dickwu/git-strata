@@ -1113,7 +1113,7 @@ daemon 启动时先调 `recover`（§5.8），然后才跑 gc、接受请求。�
 ### 6.5 已知限制
 
 - `pre-push` 只拦住习惯性的 `git push`。agent 与用户是同一个 uid，可以设 `STRATA_PUBLISH=1`，或直接绕过钩子，所以它不是安全边界；真正的人类确认在 publish 的推送路径上（design §6.9）。工作区没有 remote，`git push` 不带 URL 本来就会失败。
-- 交换之前只对依赖目录检查打开的文件（design §6.4 第 5 步）。cwd 在工作区里的进程（在工作区里启动的 Claude Code 或 shell）交换之后留在旧树上：继承这个 cwd 的命令在旧树里读写，`resolve` 对旧树里的路径返回 None。旧树因此被保留并在 `status` 里告警；写进旧树的东西没有 checkpoint，`changed` 读的时候重算，有改动时 `remove` 需要 `--discard`（review I5）。按路径重新进入工作区的进程不受影响。
+- Before swapping, Explicit/Agent moves check workspace cwd holders as well as dependency fd/map holders. Cwd holders refuse by default (`OpenFiles/cwd_holders`); `--allow-cwd` exempts only the caller PID chain, and `--allow-cwd-holders` explicitly accepts other cwd holders. Auto moves still defer on any holder. Dependency fd/map holds remain unconditional refusals. Overridden or racing cwd holders stay on the kept old tree: cd back by the live workspace path after moving; old-tree cwd resolution reports `stale_cwd`. Late writes in that tree are uncheckpointed and keep it from retirement.
 - 交换之后，会话的暂存状态和本地 commit 不随工作区走：新管理目录的 index 等于新基线。overlay 里的 `Added` 条目因此变成 `Untracked`，两者发布与检索的待遇相同（types.md `EntryKind`）。本地 commit 的对象还在本会话的影子仓库里，随 `remove` 一起退役。
 - 镜像只在 `new` 时取一次：之后主 checkout 的 `info/exclude`、`info/attributes` 与复制的配置键改了，已有的会话不受影响，只在 `status` 里给 `MirrorDrift`；新会话取新的。
 - 建基线失败之后没能退役的暂存没有意图行，由 daemon 下一次启动时的 `recover` 或 `gc_repo` 过了年龄下限收走；在那之前它占着空间，`leftovers()` 报出它。
@@ -1531,8 +1531,12 @@ for at most ten minutes, otherwise one comparison refreshes it. Held trees
 with fresh verdicts need no activity/content walks. After release, retirement
 still needs fresh activity/content checks, separated clean passes, a final
 holder scan and inode check. Cached changed is display only.
-Held trees use the normal quiet-period/status-TTL schedule, not the short yield
-retry. A failed clean-pass read stays unjudged and is retried.
+Held trees use the normal quiet-period/status-TTL schedule. Status can queue
+a missing or stale verdict during Q; only active loop retries suppress it.
+Q scheduling never drops pending status requests. Yield, Busy and failed
+clean-pass reads stay unjudged and retry after 5 s, increasing to 50 s after
+three consecutive retries without a completed judgement. Verdict invalidation
+preserves other repos' scheduled checks; completed checks clear retry history.
 
 Both activity walks honor cooperative stop at directory boundaries. Interrupted
 walks are unjudged (Skipped), never clean and never permanent walk_error/late

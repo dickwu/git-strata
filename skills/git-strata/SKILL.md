@@ -107,6 +107,10 @@ git-strata rm --session "$S"
   current content. To keep an edit out, revert or `restore` it first.
 - `publish` replies only after checks, commit, push and the rebase of every
   session; a minute or two of silence is normal. Wait; never interrupt or rerun.
+- Even after `cd ~`, an agent's parent process may still hold a cwd in the
+  workspace. Exit or move that process out; if intentionally keeping it, use
+  `--allow-cwd-holders` and re-enter the live workspace afterward. The PID-chain
+  exemption only applies with `--allow-cwd`; it is not implied by `cd ~`.
 - After a sync or automatic move (`result: moved` / `source_only`), `cd` back
   into the workspace by its path and restart processes you started there.
 - Dev servers: never edit ports in committed files; run them with
@@ -118,8 +122,9 @@ stdout is exactly one compact JSON line; exit code 0 iff `ok` is true.
 `note:` lines and waiting progress go to stderr. Pipe stdout to `jq`; never
 combine streams with `2>&1 | jq`.
 
-`git-strata help gate` (0.1.3+) contains the full confirmation rules;
-`git-strata <command> --help` describes the installed version.
+`git-strata help gate`, when available in the installed binary, contains the
+full confirmation rules. On older installs use `git-strata <command> --help`
+for that version's rules.
 
 The envelope is:
 

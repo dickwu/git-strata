@@ -504,7 +504,7 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D1 `git strata` | 同一二进制。git 执行 `PATH` 上的 `git-strata` | 初稿已定。两套实现会分叉。不放包装脚本 | 2026-10-23 |
 | D2 daemon 没跑 | 写命令 `Busy`，`detail.reason = "daemon_down"` | 初稿已定。不加码。types.md 把这种情况写成 `ReadOnly` 的那半句不沿用：人能从 reason 看出要先启动 | 2026-10-23 |
 | D5 钩子 stdin | `--tool-call` 且 stdin 非 TTY 时读 Claude Code 的钩子 JSON，取出 `file_path` / `file_paths` / `edits[].file_path` | daemon 要把 Edit/Write 的路径送进 `Inbox::hint`。命令行仍是简报里的那一条，路径不靠人再写一遍 | 2026-10-23 |
-| D6 Client deadlines (R2) | status 30 s / --all 120 s; sync 600 s; flag > env; 0 unlimited. Refused/missing socket immediately daemon_down with socket_exists. Complete write timeout → Unknown; read/incomplete frame → Busy. | No cancellation or replay after the final newline; no inference that a queued write started. | 2026-11-03 |
+| D6 Client deadlines (R2) | status 30 s / --all 120 s; sync 600 s; flag > env; 0 unlimited. Refused/missing socket immediately daemon_down with socket_exists. Timeout reason is client_timeout: complete write → Unknown; read/incomplete frame → Busy. waited_secs includes any parser-rejection attempt and resend. sync --check --hook ignores --timeout and GIT_STRATA_TIMEOUT and keeps its five-second process budget. | No cancellation or replay after the final newline; no inference that a queued write started. | 2026-11-03 |
 | D7 RPC 层错误 | `UnknownMethod` / `Failed` 收成 `InvalidInput`，reason 为 `unknown_method` / `rpc_failed` | 这两个不是 `Code`。最近的已有码是参数不被接受 | 2026-10-23 |
 | D9 二进制与非法 UTF-8 | `skipped[]` 与 `preview.code`；文本按每个坏序列一个 U+FFFD | 3e 把形状交给 cli。整个调用不因一个二进制文件失败 | 2026-10-23 |
 | D10 排序与分页 | `RepoPath` 字节序；一次输出，不分页 | 3d 的续页与 inode 序不保留，排序得有一个确定的规则 | 2026-10-23 |

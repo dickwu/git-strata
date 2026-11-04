@@ -451,6 +451,7 @@ git-strata add --session "$S" --repo front   # only if front is needed later
 cd "$W"                                      # edit files here
 git-strata checkpoint -m "parse config before connect"
 git-strata diff                              # vs the base
+cd ~                                        # publish and remove outside the workspace
 git-strata publish --from "${S}:src/a.ts" --from "${S}:src/lib"
 #  -> data.commits.<repo> = commit oid; data.pushes = pushes done by publish
 git-strata rm --session "$S"
@@ -520,6 +521,7 @@ for a command in the workspace; it is not a release path. A release build runs i
 
 ```sh
 git-strata checkpoint -m "release: <what>"               # in the workspace
+cd ~                                                    # leave the workspace first
 git-strata publish --from "${S}:path/a" --from "${S}:path/b"
 #  -> data.commits.<repo> = C; data.pushes[].outcome.kind must be "Pushed"
 #     (repo with publish.push = false: git-strata push <repo>, human on a TTY if gated)
@@ -603,8 +605,9 @@ Pushing right after each publish keeps the window small.
 
 ## Confirmation gate (Touch ID / TTY)
 
-Installed full rules: `git-strata help gate` (0.1.3+). Command help keeps a
-short summary; `git-strata <command> --help` describes the installed version.
+Installed full rules: `git-strata help gate`, when supported by the installed
+binary. Command help keeps a short summary; on older installs use
+`git-strata <command> --help` for that version's rules.
 
 > Keep this section in step with `gate_text!` in
 > `crates/git-strata/src/help.rs`, which supplies `git-strata help gate`.
@@ -749,8 +752,8 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `NoSuchRepo` | name not in config; `not_in_session`: run `detail.fix` (`git-strata add --session S --repo R`) |
 | `NoSuchBranch` | (`new`) a repo has no `origin/<default_branch>`; tell the human |
 | `InvalidInput` | fix arguments per `detail.reason` (`from_repo_prefix` / `from_path`: rewrite `--from` as `detail.expected` says); `chain_diverged` on a repo without confirmation: `git-strata push REPO` replays it (see [Origin moved](#origin-moved-under-the-unpushed-chain-push-replays)), then rerun; `chain_rewound`, or diverged on a gated repo: human runs `chain`; push-guard reasons above: tell the human |
-| `Conflict` (publish) | fix and rerun the same publish (above); `move_conflict` first needs named acknowledgement through sync |
-| `Conflict` (`sync_conflict`) | resolve every reported path with `sync --resolved`/`--keep` and the supplied target/generation; see the [agent workflow](skills/git-strata/sync.md) |
+| `Conflict` (publish) | fix and rerun the same publish (above); `move_conflict` first needs `cd ~ && git-strata sync --session S --repo R --resolved PATH` (or `--keep PATH`), with the report's target/generation when required |
+| `Conflict` (`sync_conflict`) | resolve every reported path with `cd ~ && git-strata sync --session S --repo R --resolved PATH` (or `--keep PATH`) and the supplied target/generation; see the [agent workflow](skills/git-strata/sync.md) |
 | `Conflict` (`base_diverged`) | stop and ask the human to recover the chain; never accept divergence on your own |
 | `Conflict` (`assigned`) | another session owns the path; do not retry |
 | `NoMatch` | a `--from` path is not checkpointed; checkpoint, rerun |
@@ -824,19 +827,20 @@ Flags, defaults and `data` shapes:
 
 | Command | Human needed |
 | --- | --- |
+| `help [TOPIC \| COMMAND ...]` | no |
 | `new [TICKET] [--ticket T] (--repo R... \| --repos A,B)` | no |
 | `add --repo R... [--session S]` | no |
-| `status [--session S \| --all]` | no |
+| `status [--session S \| --all] [--brief] [--timeout SECS] [--progress]` | no |
 | `checkpoint (--tool-call [ID] \| -m MSG) [--session S] [--path P]...` | no |
 | `restore CHECKPOINT [PATHS]... [--session S]` | no |
 | `grep PATTERN [--session S \| --all]` | no |
 | `files [GLOB] [--session S \| --all]` | no |
 | `diff [--base \| --session S \| --between A B] [--repo R]` | no |
-| `deps propose [--session S] [--repo R] [--switch]` / `deps list [--repo R]` | no |
-| `deps approve ID [--sessions S,S]` | yes |
+| `deps propose [--session S] [--repo R] [--switch] [--allow-cwd] [--allow-cwd-holders]` / `deps list [--repo R]` | no |
+| `deps approve ID [--sessions S,S] [--allow-cwd] [--allow-cwd-holders]` | yes |
 | `publish --from S:PATH... ` / `publish --assign FILE SESSION` | only when gated |
 | `push REPO` | only when gated |
-| `sync [--session S] [--repo R]... [--check [--hook]] [--no-fetch] [--resolved PATH \| --keep PATH]... [--target HEAD --generation N] [--accept-diverged]` | no (`--accept-diverged` only on the human's say-so) |
+| `sync [--session S] [--repo R]... [--check [--hook]] [--no-fetch] [--resolved PATH \| --keep PATH]... [--target HEAD --generation N] [--accept-diverged] [--allow-cwd] [--allow-cwd-holders] [--timeout SECS] [--progress]` | no (`--accept-diverged` only on the human's say-so) |
 | `assign --file PATH --session S` | no |
 | `rm --session S [--discard]` | `--discard` only |
 | `gc` | no |

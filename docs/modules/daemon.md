@@ -112,8 +112,8 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `grep` | `{ "pattern", "session": string\|null, "all": bool, "ignore_case": bool }` | `Hit` 的数组；零命中是 `[]` |
 | `files` | `{ "session", "repo", "glob" }` | `RepoPath` 的数组 |
 | `diff` | `{ "a": SessionId, "b": SessionId, "repo" }` | `BetweenDiff` |
-| `deps_propose` | `{ "session", "repo", "switch": bool }` | 提议；`switch` 为真时附带移动结果 |
-| `deps_approve` | `{ "proposal": ProposalId, "sessions": [SessionId]\|null }` | 每个会话一条；`null` = 该 repo 的全部会话 |
+| `deps_propose` | `{ "session", "repo", "switch": bool, "caller_pids"?: [i32], "allow_cwd"?: bool, "allow_cwd_holders"?: bool }` | 提议；`switch` 为真时附带移动结果 |
+| `deps_approve` | `{ "proposal": ProposalId, "sessions": [SessionId]\|null, "caller_pids"?: [i32], "allow_cwd"?: bool, "allow_cwd_holders"?: bool }` | 每个会话一条；`null` = 该 repo 的全部会话 |
 | `deps_list` | `{ "repo": RepoName\|null }` | `{proposals:[...]}`；每行含有效的 `mode: "apply" \| "confirm"`，以及可选 `changes` |
 | `publish` | `{ "group": ReleaseGroup, "shown"?: { RepoName: CommitOid \| null }, "plan"?: [RepoName] }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数。`shown` 是 cli 给人看过的每个要确认仓库的链顶（D21）。`plan` 是 cli 的 TTY 检查覆盖了的、会推且要确认的仓库（cli.md D23）；给了 `plan` 时，daemon 自己重算出的要提交仓库里，凡是会推且要确认、却不在 `plan` 里的（`publish_plan` 与 `publish` 之间发布历史变了），在弹框、取凭据、写任何东西之前就拒绝：`NotConfirmed`，`detail.reason = "plan_changed"`，`detail.repo`、`detail.planned`；agent 重跑同一条命令即可（重跑时 cli 会把它算进计划并查 TTY）。不给 `plan`（cli 以外的调用方）不做这项检查（review-3 T1）[实现时补的决定]。回复另带 `already_published: [{repo, publish, commit, push}]`：之前已经落地、这次跳过的仓库（D22）。失败时 `detail.repo` 是停下的仓库，`detail.published_before` 是这次已经提交的仓库。停下的仓库若已写了提交（`detail.commit`，如推送超时或被拒），`detail.landed` 是它的那条 `{repo, commit, push}`，`push` 取已知的结果（`Unknown` / `Refused`，没推为 null）（review M4）[实现时补的决定]；`push` 与 `checks_ran` 取 publish 错误 detail 里写明的值，推送成功后才失败（rebase、关行）的是 `Pushed`（review-2 N3）[实现时补的决定]。`repo` / `published_before` / `already_published` 加在该仓库的任何错误上，不只是 publish 本身的：读配置、确认失败或被取消（`require_validated`）同样带上（review-2 N6）[实现时补的决定]。`plan_changed` 的检查仍在逐仓库循环之前（还什么都没写），但它和它读配置的错误走同一套装饰：带 `repo`，以及重算计划时发现已经落地、这次跳过的 `already_published`（这时 `published_before` 必为空，不出现）（review-4 F2）[实现时补的决定] |
 | `publish_plan` | `{ "group": ReleaseGroup }` | `{ "repos": [RepoName], "already_published": [{repo, publish, commit, push}] }`。与 `publish` 用同一份重跑过滤（D22）：`repos` 是这次 `publish` 还会提交、会确认的仓库，按名字排序；`already_published` 与 `publish` 会报的一致。不排队，不拿锁，不写 Store、ref、工作区，不弹框。只覆盖按内容判定的落地；会话没被 rebase 时 publish 的 `NoCommit` 回退（D22）只有真正 stage 才知道，这类仓库仍在 `repos` 里（`publish_plan_keeps_a_waiting_sessions_landed_guarded_repo`：rebase 为 `Waiting` 的会话，其要确认的仓库仍在 `repos`，cli 照样要 TTY 与确认；skills 的 reference 照此写明，review-3 T3）。group 为空 → `InvalidInput`。cli 用它把 TTY 检查和确认限制在还要做事的仓库上（cli.md §5，review-2 N2）[实现时补的决定] |
@@ -550,7 +550,7 @@ daemon 实现 `publish::PublishLocks`（`with_sessions`、`with_repo`），放�
 
 旧树上的进程只列在 status 里，不杀（session 的已知限制）。
 
-R2 old-tree worker: startup/periodic half-retired sweeps and queued items use try_session("old_tree") then zero-wait try_repo. Busy locks requeue after 5 s, releasing the queue immediately. Both holders carry one per-item yield flag; any actual bounded/unbounded waiter sets it; zero-bound probes do not. Walks stop at the next directory. Yield retries after 5 s, or 50 s after three consecutive yields. Shutdown does not requeue. Frequent foreground traffic may starve collection until idle. The previous verdict survives yield; status cannot bypass its retry delay. Panics are logged; no request is cancelled.
+R2 old-tree worker: startup/periodic half-retired sweeps and queued items use try_session("old_tree") then zero-wait try_repo. Busy locks requeue after 5 s, releasing the queue immediately. Both holders carry one per-item yield flag; any actual bounded/unbounded waiter sets it; zero-bound probes do not. Walks stop at the next directory. Yield, Busy and passes_read_failed retries wait 5 s, or 50 s after three consecutive retries without a completed judgement. Busy or a failed read does not reset escalation. A completed Kept/Retired result is not retried merely because a late waiter set the yield flag. Shutdown does not requeue. Frequent foreground traffic may starve collection until idle. The previous verdict survives yield; status cannot bypass its retry delay. Loop retries are separate from Q scheduling: status can queue a fresh kept Agent/Auto tree during Q. Invalidating verdicts preserves other repos' queued work; completing or dropping a check clears its retry history. Panics are logged; no request is cancelled.
 
 ### 5.12 `du`：磁盘用量
 
@@ -1093,9 +1093,12 @@ later takes can wait indefinitely. daemon_status adds queues entries
 `{session, holder, since, queued:[method…]}` from FIFO state mutexes, never by
 acquiring the held queue. Repo/session waiters older than LOCK_WAIT produce
 LongWait `{repo?, session?, method, since, attempt_since}` alongside LongHold.
-attempt_since is the current attempt, not a total across bounded retries.
-An expired `with_lock_unbounded` attempt logs a LongWait before retrying;
-it no longer has a FIFO entry for the live status snapshot to report.
+Live FIFO waits use their own attempt start. An expired `with_lock_unbounded`
+attempt logs and records a LongWait before retrying, retained in daemon_status
+warnings even after its FIFO entry disappears. Records are deduplicated by
+repo/session/method, replacing the previous attempt. Both since and
+attempt_since describe the latest expired or currently long-waiting attempt,
+never a cumulative retry age. This diagnostic does not change the lock budget.
 There is no 600 s daemon long_wait bound. Disconnects never cancel handlers;
 failed reply writes are tolerated without replay.
 
