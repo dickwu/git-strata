@@ -169,12 +169,16 @@ pub fn run(d: &Daemon<'_>, req: SyncRequest) -> Result<Value> {
         let intents = core.store.move_intents(&req.session)?;
         for repo in &repos {
             let ws = &rec.manifest.repos[repo];
-            let in_old = intents
-                .iter()
-                .filter(|i| &i.repo == repo)
-                .any(|i| strata_session::cwd::inside(cwd, i.old_tree.as_ref().unwrap_or(&i.staging)));
+            let in_old = intents.iter().filter(|i| &i.repo == repo).any(|i| {
+                strata_session::cwd::inside(cwd, i.old_tree.as_ref().unwrap_or(&i.staging))
+            });
             if strata_session::cwd::inside(cwd, &ws.path) || in_old {
-                return Err(strata_session::cwd::refuse_caller(cwd, req.session.as_str(), &ws.path));
+                return Err(strata_session::cwd::refuse_caller(
+                    cwd,
+                    req.session.as_str(),
+                    &ws.path,
+                    &json!(req),
+                ));
             }
         }
     }

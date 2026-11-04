@@ -230,11 +230,14 @@ impl Drop for Held<'_> {
     }
 }
 
+type LongWaitKey = (RepoName, Option<SessionId>, String);
+
 /// The daemon's repo write locks and session queues.
 pub struct Locks {
     wait: Duration,
     repos: BTreeMap<RepoName, Fifo>,
     queues: Mutex<BTreeMap<SessionId, Arc<Fifo>>>,
+    expired_waits: Mutex<BTreeMap<LongWaitKey, DaemonWarning>>,
     closed: AtomicBool,
 }
 
@@ -246,6 +249,7 @@ impl Locks {
             wait,
             repos: repos.into_iter().map(|r| (r, Fifo::default())).collect(),
             queues: Mutex::new(BTreeMap::new()),
+            expired_waits: Mutex::new(BTreeMap::new()),
             closed: AtomicBool::new(false),
         }
     }
@@ -491,16 +495,29 @@ impl Locks {
             .collect()
     }
 
-    /// Ages of live FIFO attempts, never a total retry age. Expired attempts
-    /// retried by Sessions::with_lock_unbounded are logged via record_long_wait.
+    /// Live FIFO waits and expired attempts retried by Sessions. Keep one
+    /// warning per repo/session/method, describing its latest long attempt.
     pub fn long_waits(&self) -> Vec<DaemonWarning> {
-        let mut out = Vec::new();
+        let mut out: Vec<_> = lock(&self.expired_waits).values().cloned().collect();
         let mut collect = |fifo: &Fifo, repo: Option<RepoName>, session: Option<SessionId>| {
             for (_, waiter) in &lock(&fifo.st).queue {
                 if waiter.started.elapsed() >= self.wait {
+                    let session = session.clone().or_else(|| waiter.session.clone());
+                    if let Some(DaemonWarning::LongWait {
+                        since,
+                        attempt_since,
+                        ..
+                    }) = out.iter_mut().find(|w| {
+                        matches!(w, DaemonWarning::LongWait { repo: r, session: s, method, .. }
+                            if r == &repo && s == &session && method == &waiter.method)
+                    }) {
+                        *attempt_since = (*attempt_since).max(waiter.since);
+                        *since = *attempt_since;
+                        continue;
+                    }
                     out.push(DaemonWarning::LongWait {
                         repo: repo.clone(),
-                        session: session.clone().or_else(|| waiter.session.clone()),
+                        session,
                         method: waiter.method.clone(),
                         since: waiter.since,
                         attempt_since: waiter.since,
@@ -554,12 +571,13 @@ impl strata_deps::RepoWriteLock for Locks {
         let (method, session) = ctx_method();
         let warning = DaemonWarning::LongWait {
             repo: Some(repo.clone()),
-            session,
-            method,
+            session: session.clone(),
+            method: method.clone(),
             since: attempt_since,
             attempt_since,
         };
         tracing::warn!(?warning, "retrying an expired post-visible lock attempt");
+        lock(&self.expired_waits).insert((repo.clone(), session, method), warning);
     }
 
     fn with_write(

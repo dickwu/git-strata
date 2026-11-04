@@ -1288,10 +1288,26 @@ fn caller_cwd_refusal_is_before_fetch_even_when_up_to_date_or_acknowledging() {
             request.caller_cwd = Some(w.clone());
             if resolved {
                 request.resolved = vec![rp("a")];
+                request.keep = vec![rp("b")];
+                request.repos = Some(vec![repo_name("tool")]);
+                request.target = Some(before.manifest.repos[&repo_name("tool")].head.clone());
+                request.generation = Some(7);
+                request.fetch = false;
+                request.allow_cwd_holders = true;
+                request.accept_diverged = true;
             }
+            let target = request.target.clone();
             let e = sync_move::run(d, request).unwrap_err();
             assert_eq!(e.code, Code::OpenFiles);
             assert_eq!(reason(&e), Some("caller_cwd"));
+            if let Some(target) = target {
+                assert_eq!(
+                    e.detail.as_ref().unwrap()["fix"],
+                    format!(
+                        "cd ~ && git-strata sync --session {s} --repo tool --resolved a --keep b --target {target} --generation 7 --no-fetch --accept-diverged --allow-cwd-holders"
+                    )
+                );
+            }
             assert_eq!(
                 d.core.store.session(s).unwrap().unwrap().manifest.repos,
                 before.manifest.repos

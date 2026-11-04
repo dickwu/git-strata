@@ -147,6 +147,9 @@ fn foreground_session_and_repo_waiters_yield_and_retry_then_shutdown_drops_the_i
             d.sessions.release();
         });
         assert!(old.is_dir());
+        // A mistaken requeue would only become visible after its 200 ms
+        // delay; checking immediately would pass even with that bug.
+        std::thread::sleep(Duration::from_millis(250));
         assert!(
             d.sessions.next_old_tree(Duration::ZERO).is_none(),
             "shutdown does not requeue"

@@ -747,7 +747,6 @@ fn old_tree_loop_with_retry(
             }
         });
         let _ = catch_unwind(AssertUnwindSafe(|| old_tree_startup(d, &flag)));
-        let mut yields = BTreeMap::<strata_session::OldTreeKey, u32>::new();
         let mut sweep_at = std::time::Instant::now() + crate::RECONCILE_EVERY;
         while !flag.load(Ordering::SeqCst) {
             if std::time::Instant::now() >= sweep_at {
@@ -770,44 +769,24 @@ fn old_tree_loop_with_retry(
                 })
             }));
             if flag.load(Ordering::SeqCst) {
+                d.sessions.finish_old_tree_retry(&key);
                 break;
             }
-            let yielded = yield_to.load(Ordering::SeqCst)
-                || matches!(
-                    &r,
-                    Ok(Some(Ok(strata_session::OldTreeOutcome::Skipped("yielded"))))
-                );
-            let retry = yielded
-                || matches!(&r, Ok(None))
+            // A late waiter can set yield_to after a completed judgement;
+            // only an actually interrupted outcome needs a yield retry.
+            let retry = matches!(&r, Ok(None))
                 || matches!(
                     &r,
                     Ok(Some(Ok(strata_session::OldTreeOutcome::Skipped(
-                        "passes_read_failed"
+                        "yielded" | "passes_read_failed"
                     ))))
                 )
                 || matches!(&r, Ok(Some(Err(e))) if e.code == Code::Busy);
             if retry {
-                let count = if yielded {
-                    let count = yields.entry(key.clone()).or_default();
-                    *count += 1;
-                    *count
-                } else {
-                    yields.remove(&key);
-                    0
-                };
-                let delay = if count >= 3 {
-                    10 * retry_delay
-                } else {
-                    retry_delay
-                };
-                d.sessions.queue_old_tree_at(
-                    key.clone(),
-                    path.clone(),
-                    ino,
-                    std::time::Instant::now() + delay,
-                );
+                d.sessions
+                    .retry_old_tree(key.clone(), path.clone(), ino, retry_delay);
             } else {
-                yields.remove(&key);
+                d.sessions.finish_old_tree_retry(&key);
             }
             match r {
                 Ok(Some(Err(e))) if e.code != Code::Busy => {
