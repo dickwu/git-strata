@@ -2328,7 +2328,10 @@ remains a compatibility wrapper inserting NULL. Generated trailers are not
 stored in `message`.
 
 The v6 migration adds immutable nullable `publishes.message` and nullable
-`move_activity.skip_json` (skip roots, carried seed-cache exception roots, folded tracked quiet-filter exclusions, and volume case-fold identity).
+`move_activity.skip_json` (skip roots, carried seed-cache exception roots, and
+volume case-fold identity). Folded tracked quiet-filter exclusions are needed
+only by the fresh activity walk and are not serialized; older rows containing
+`quiet_tracked` remain readable.
 There are no publish-line columns. A legacy publish has NULL message; chosen
 flag/checkpoint text is recorded before insertion without generated trailers.
 Rust validates the 64 KiB byte cap and NUL; SQL validates character length.

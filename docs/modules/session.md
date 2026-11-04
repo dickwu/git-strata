@@ -1534,7 +1534,10 @@ paths protected using ws.head's tree. Tracked quiet_skip matches remain counted,
 including case-fold aliases, with a once-per-repo daemon-log warning; matching
 untracked paths remain exempt. InvalidInput is reserved for config-shape validation.
 An unreadable scope defers Auto moves as recent_writes, retaining backoff and
-escalation. Explicit sync still works when a glob matches a tracked path.
+escalation; status and hand-back text report the scope error instead of a write age.
+The folded tracked-path set is used only by the fresh quiet-glob walk and is
+not serialized into move rows; older rows containing it remain readable.
+Explicit sync still works when a glob matches a tracked path.
 These globs affect quiet age/scan-late checks
 only; a separate all-carried-entry maximum protects G4/Phase F. Dependency
 writes outside carried caches no longer keep the old tree. Nested caches and

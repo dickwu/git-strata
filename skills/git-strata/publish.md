@@ -125,12 +125,17 @@ rule: the README's [Confirmation gate](https://github.com/dickwu/git-strata/blob
 Publish messages default to distinct latest manual checkpoint subjects in the
 unpublished window, with a bounded body listing messages. `-m` and
 `--message-for REPO=TEXT` override them. Empty/control/reserved-trailer messages
-are refused. Generated sessions/paths/Strata-Publish trailers identify the
+are refused; reserved-key errors name the line and its one-based number in
+`detail.line` / `detail.line_number`. Messages already consumed by a committed
+publish stay consumed after crash recovery, including in the confirmation preview.
+Generated sessions/paths/Strata-Publish trailers identify the
 commit; paths counts changed files, not selectors.
 
 A parked or rewound base not in B or main_tip refuses base_not_on_main before
 confirmation; give its fix to the human. If a workspace baseline moved after
 the checkpoint, HeadMoved baseline_moved gives the literal publish command to
 rerun. This takes fresh checkpoints and does not require accepting divergence.
+If plan-time ref refresh returns `Busy lock_wait`, retry the same publish after
+the other writer finishes; this error remains Busy even without a TTY.
 A successful non-discard rm reports unpublished=false even if automatic rebase
 has not moved the stale base yet; discard retains its pre-rm tracker value.

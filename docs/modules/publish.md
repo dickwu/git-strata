@@ -897,16 +897,20 @@ Creating sessions. `confirm` keeps the existing human dependency rollout.
 when the daemon advertises `publish.message`. Paragraphs from repeated flags
 are joined; per-repo text wins. Text rejects empty subjects, over 64 KiB, C0
 controls except newline/tab, and reserved trailer keys after case/whitespace
-normalization. Fully trailer-shaped user final paragraphs join the generated
-`sessions`, `paths`, `Strata-Publish` block; mixed prose stays separate. Paths
+normalization; reserved-key errors identify the offending `detail.line` and
+one-based `detail.line_number`. Fully trailer-shaped user final paragraphs join
+the generated `sessions`, `paths`, `Strata-Publish` block; mixed prose stays separate. Paths
 count the B-to-final-staged-tree diff. Recovery uses the exact publish trailer,
 falling back to a legacy subject only when that trailer is absent.
 
 Without flags, the latest distinct manual checkpoint subject per session is
 joined in batch order (100 characters, word boundary, ellipsis). The body lists
-the window's manual subjects; only a prior closed row with outcome.commit
-consumes its checkpoint window. Pre-commit stopped rows do not. The body is
-bounded so generated checkpoint messages including trailers fit 60 KiB. The
+the window's manual subjects. A prior closed row consumes its checkpoint window
+when its commit is known from outcome.commit or recovered from an applied
+ref-audit update, including an Unknown row with NULL outcome after startup.
+Preview and execution share this recovery; preview does not rewrite the row.
+Pre-commit stopped rows do not consume messages. The body is bounded so generated
+checkpoint messages including trailers fit 60 KiB. The
 chosen text is inserted immutably in v6 before publish starts; legacy is NULL.
 The plan has additive `subjects[repo]` and replies identify `message_source`.
 

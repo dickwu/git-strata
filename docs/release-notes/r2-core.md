@@ -3,6 +3,8 @@
 - Publish accepts repeated `-m` and per-repo `--message-for`. Without flags, manual
   checkpoint messages supply subjects; tool-call IDs do not. No-change manual
   checkpoints still record no new message. Commits carry recovery trailers.
+  Preview and execution exclude messages consumed by crash-recovered commits,
+  even when startup left the publish outcome empty.
 - `new --base` parks selected workspaces at local commits at/ahead of main.
   Publish refuses with `InvalidInput base_not_on_main` when the workspace base
   is on neither the publish target nor main. Existing rewound-chain sessions
@@ -24,6 +26,12 @@ include `add`, `restore`, `diff`, `deps propose`, `rm`, `resolve`, `assign`,
 the PostToolUse checkpoint hook), `grep`, and `files`. An old checkpoint hook
 fails on every tool call after the migration. A few RPC-only commands still
 answer, which does not make a mixed installation supported.
+
+A 0.1.2 Stop hook can consume the daemon's stuck-episode latch while ignoring
+the new hand-back field, so that episode's hand-back is lost; the
+AutoRebaseStuck warning remains. Upgrade hook callers together with the CLI.
+The latch is in memory, so a daemon restart can repeat a hand-back for a
+still-stuck episode.
 
 Startup prints the verified pre-migration backup path. To downgrade from v6
 to the v5 store used by 0.1.2, the human must:

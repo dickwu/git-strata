@@ -1097,7 +1097,8 @@ new fields have defaults, and the CLI sends them only after feature discovery.
 Pins retain their exact schema. After successful replacement, pin_new, tighten,
 and config_relax changes append/fsync a 0600 audit.jsonl sidecar, rotating at
 1 MiB with one .1 file. Read both files for pins_meta; corrupt/missing history
-only loses timestamps. An append failure never undoes a confirmed pin change;
+only loses timestamps. Files larger than 1 MiB + 64 KiB are ignored with a warning
+that names the file and size. An append failure never undoes a confirmed pin change;
 config_relax replies with audit_write_failed. LocalAuthentication does not
 disclose biometric versus password success, so auth is local_authentication
 for a confirmed relaxation and startup for automatic tightening/new pins.
@@ -1108,9 +1109,13 @@ synthesized VerifyFailed/StorePoisoned use first sighting in this daemon run.
 The CLI preserves alerts and adds alerts_at. Eligible committed deferred rows
 (open_files/recent_writes/changed_during_move) warn AutoRebaseStuck after three
 attempts or 30 minutes; waiting/unpushed/install/publish-unfinished rows never
-escalate. Holders remain blocking. The hook consumes a daemon latch keyed by
-session/repo/deferred revision and row creation time, so hand-back happens once
-per row. Warnings disappear with the row.
+escalate. Holders remain blocking. The hook revalidates the full row snapshot,
+including its revision, before consuming a latch keyed by session/repo and row
+creation time. Retargeting the same episode does not re-fire the hand-back.
+The latch is in memory: restarting the daemon permits one more hand-back for
+each still-stuck episode. Any `hook:true` caller consumes it, including an old
+CLI that ignores `escalation_new`; AutoRebaseStuck remains visible until the
+row stops qualifying or disappears.
 
 Successful non-discard rm overrides upstream unpublished with false from its
 landed judgment, retaining regenerable details. Discard and Dirty refusals keep
