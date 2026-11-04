@@ -829,12 +829,10 @@ fn publish_refuses_unacknowledged_move_conflict() {
     let detail = err.detail.unwrap();
     assert_eq!(detail["reason"], "move_conflict");
     assert_eq!(detail["paths"][0], "a");
-    assert!(
-        detail["fix"]
-            .as_str()
-            .unwrap()
-            .contains("--resolved PATH")
-    );
+    assert!(detail["fix"].as_str().unwrap().starts_with(&format!(
+        "cd ~ && git-strata sync --session {s} --repo tool --resolved PATH"
+    )));
+    assert_eq!(detail["conflicts"][0]["fix"], detail["fix"]);
     fx.store().clear_conflicts(&s, &rn, &[rp("a")]).unwrap();
     run(&fx, &one(&s, &c, &["a"]), &head).unwrap();
 }
