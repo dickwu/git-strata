@@ -1530,8 +1530,12 @@ namespace contains it after removal.
 
 The activity baseline stores skipped dependency roots plus nested seed-cache
 exception roots. Scope comes from configured and pinned-set dirs, with tracked
-paths protected using ws.head's tree. Explicit quiet_skip matches are rejected
-when they cover tracked paths. These globs affect quiet age/scan-late checks
+paths protected using ws.head's tree. Tracked quiet_skip matches remain counted,
+including case-fold aliases, with a once-per-repo daemon-log warning; matching
+untracked paths remain exempt. InvalidInput is reserved for config-shape validation.
+An unreadable scope defers Auto moves as recent_writes, retaining backoff and
+escalation. Explicit sync still works when a glob matches a tracked path.
+These globs affect quiet age/scan-late checks
 only; a separate all-carried-entry maximum protects G4/Phase F. Dependency
 writes outside carried caches no longer keep the old tree. Nested caches and
 Phase F untouched checks stay protected. Persisted scope, not current config,

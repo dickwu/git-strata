@@ -1,6 +1,6 @@
 # git-strata command reference
 
-Taken from the 0.1.2 binary's `--help` and `docs/modules/cli.md` §3. When they
+Taken from the R2 CLI's `--help` and `docs/modules/cli.md` §3. When they
 disagree with your installed version, `git-strata <command> --help` wins.
 "Human" = needs a TTY (and, where marked, a LocalAuthentication prompt);
 an agent must hand these to the human. "No daemon" = works when the daemon
@@ -19,7 +19,7 @@ data root (`[paths] root`, default `~/.strata`) as
 
 | Command | Arguments and flags | Human | No daemon | `data` on success |
 | --- | --- | --- | --- | --- |
-| `new [TICKET]` | `--ticket <T>` (same as positional), `--repo <R>` (repeatable or comma separated; only these repos get a workspace, all tracked; preferred) or `--repos <A,B>` (the tracked repos; every configured repo still gets a workspace); one of the two, not both (`repo_flags`); `--agent <NAME>` (default: `STRATA_AGENT`, else detected: `claude-code`, `codex`, `cursor-agent`; invalid: `InvalidInput` `agent`) | no | no | `{manifest:{id,ticket?,agent?,root,repos:{<repo>:{base,head,path,tracked}}},warnings:[]}`; warning `AgentNotRecorded` (`daemon_too_old`): the daemon predates agent recording, the session is fine |
+| `new [TICKET]` | `--ticket <T>` (same as positional), `--repo <R>` (repeatable or comma separated; only these repos get a workspace, all tracked; preferred) or `--repos <A,B>` (the tracked repos; every configured repo still gets a workspace); one of the two, not both (`repo_flags`); `--agent <NAME>` (default: `STRATA_AGENT`, else detected: `claude-code`, `codex`, `cursor-agent`; invalid: `InvalidInput` `agent`); `--base REV` with one `--repo`, or repeat `--base R=REV` for selected repos (requires `new.base`; incompatible with `--repos`) | no | no | `{manifest:{id,ticket?,agent?,root,repos:{<repo>:{base,head,path,tracked}}},warnings:[]}`; warning `AgentNotRecorded` (`daemon_too_old`): the daemon predates agent recording, the session is fine |
 | `add` | `--repo <R>` (at least one; repeatable or comma separated), `--session <S>` (default: cwd's session) | no | no | `{session,added:{<repo>:WorkspaceState},already:{<repo>:WorkspaceState},warnings:[]}`; `Exists` `add_leftover`: an earlier failed add left `detail.path` (an `rm` of the session clears it) |
 | `ls` | `--table` (a table for people; errors stay envelopes) | no | yes (`data.source: "local"`) | `{sessions:[{id,ticket,state,created,repos,phase?}]}`; cache-only, never runs git |
 | `status` | `--session <S>` or `--all` (default: cwd's session); `--brief` (store only: no drift, seeds, mirrors, old trees) | no | yes | `SessionStatus` (per repo `upstream`: behind/ahead, following, state, fix); `--all`: `{sessions:[...]}`; health `Unknown` with `choices` = the human's `resolve` |

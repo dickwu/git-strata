@@ -144,6 +144,16 @@ restored store; preserve the displaced database and its sidecars.
 3. 工作目录：`checks` 是 staging 树里该仓库的根目录；`install` 是 staging 基线克隆里该仓库的根目录。
 4. 程序名按 daemon 的 `PATH` 解析。launchd agent 的默认 `PATH` 不含 `~/.bun/bin`、`~/.cargo/bin`、`/opt/homebrew/bin`，所以 daemon 的 plist 必须带上用户的 `PATH` [交给 `daemon.md`]（daemon.md D1：`~/.bun/bin` 加 Homebrew 与系统目录；`~/.cargo/bin`、`~/.pub-cache/bin` 不在里面，cargo 用 Homebrew 的）[实现时补的决定]；staff-api 的 php 命令像它自己的 `composer.json` 脚本那样写绝对路径 `/opt/homebrew/bin/php`。
 
+### R2 `[repo.<name>.rebase] quiet_skip`
+
+`quiet_skip = []` is opt-in. Safe repo-relative globs exempt matching untracked
+paths from quiet-window age and scan-late checks. Paths tracked in the workspace
+head always count, including APFS case aliases; a matching tracked path emits
+one `quiet_skip_tracked` daemon-log warning per repo. All carried entries still
+count for G4 and old-tree protection. Invalid glob shape returns `InvalidInput`
+with rule V17; a tracked runtime match is not a config error. Install matching
+R2 CLI/daemon builds before adding this key; 0.1.2 rejects it.
+
 ### 2.5 `[status]`
 
 [实现时补的决定]（2026-10-28，status-perf D7）可省略的表，目前只有一个键：
@@ -342,6 +352,7 @@ impl Config {
 | V14 | `[repo.<name>.rm] regenerable` 的每项：非空、单行、首尾无空白；不以 `#`、`%include`、`/` 开头（`!` 之后同样）；不含 `..` 段；没有哪一段是 `.git` 或能匹配 `.git` 的名字通配（`*`、`.g*`、`?git` 等，按大小写折叠；`**` 段允许）；不能全是通配（`*`、`**`、`?`）。`detail` 带 `field = "rm.regenerable"`、`index`、`rule = "V14"` | `InvalidInput` | rm-followups §1.8 [实现时补的决定] |
 | V15 | `[repo.<name>.rebase] quiet_secs` ≤ 86400 | `InvalidInput` | rm-followups §1.3 [实现时补的决定] |
 | V16 | `sync.fetch_secs` is 0 or 60..=86400; split repos cannot explicitly enable `follow_main`; non-split repos cannot disable it with `deps = "apply"` | `InvalidInput` | main-sync §3.1 |
+| V17 | `rebase.quiet_skip` uses the safe relative-glob shape from V14. Invalid patterns name `field = "rebase.quiet_skip"`; tracked matches at runtime remain counted and warn once per repo. | `InvalidInput` | R2 quiet activity scope |
 | V13 | `[status] parallel` 在 1..=16 之间。`detail` 带 `repo = null`、`field = "parallel"`、`index = null`、`rule = "V13"`。在全部 repo 表之后检查（不改变已有规则的先后） | `InvalidInput` | status-perf D7 [实现时补的决定] |
 
 ### 4.2 `checks` 只读规则（`CheckMutates`）

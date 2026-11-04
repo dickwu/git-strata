@@ -103,7 +103,7 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 
 | method | params | data |
 | --- | --- | --- |
-| `new` | `{ "ticket": string\|null, "repos": [RepoName], "only"?: bool, "agent"?: string\|null }` | `NewReport`。`only` 为真时会话只有 `repos` 这些工作区（session.md D51）；缺省为假，cli 只在 `--repo` 时才发这个字段，好让新 cli 也能用旧 daemon。`agent`（D38）是创建会话的 AI agent 名；缺省或 null 表示不知道；在调 session 之前按 types.md `AgentName` 校验，不合法 → `InvalidInput`（`detail.reason = "agent"`），什么都不写；不是字符串 → RPC `Failed`。它进会话清单的 `agent`，`new` 的回复与 `status` 里都在 `manifest.agent`（没有就省略这个键）。cli 只在 `daemon_status.features` 含 `"new.agent"` 时才发这个字段 |
+| `new` | `{ "ticket": string\|null, "repos": [RepoName], "only"?: bool, "agent"?: string\|null, "base"?: {RepoName: string} }` | `NewReport`。`only` 为真时会话只有 `repos` 这些工作区（session.md D51）；缺省为假，cli 只在 `--repo` 时才发这个字段，好让新 cli 也能用旧 daemon。`agent`（D38）是创建会话的 AI agent 名；缺省或 null 表示不知道；在调 session 之前按 types.md `AgentName` 校验，不合法 → `InvalidInput`（`detail.reason = "agent"`），什么都不写；不是字符串 → RPC `Failed`。它进会话清单的 `agent`，`new` 的回复与 `status` 里都在 `manifest.agent`（没有就省略这个键）。cli 只在 `daemon_status.features` 含 `"new.agent"` 时才发这个字段。`base` 缺省为空，只有 `new.base` feature 可用时才发送，按 session.md 的 local-base 规则校验 |
 | `sync` | `SyncParams {session?, cwd?, repos?, check?, fetch?, resolved?, keep?, target?, generation?, accept_diverged?, hook?}`（非 check 映射为 `SyncRequest`） | check: `{session, upstream}`；否则 `{session, fetched, repos, next, upstream?}`; non-check moves, report persistence and legacy conflict acknowledgement (see Main-sync non-check handler) |
 | `add` | `{ "session": SessionId, "repos": [RepoName] }` | `{ report: AddReport, anchor_unknown }`（session.md D52） |
 | `status` | `{ "cwd": string\|null, "session": string\|null, "all": bool, "chains"?: bool, "summary"?: bool, "workspaces"?: bool }` | 见 §5.4；`chains` 缺省 false。`summary: true`（status-perf C）：只读 store，回 `{ sessions: [SessionSummary] }`（cli.md §3.2 `status --brief`），按 id 升序，选择优先级同普通 status（`all` > `session` > `cwd` > 全部）；不 stat 工作区、不跑 git、不走旧树，不进池。`workspaces: true` 给每个会话带上 `workspaces`，只在 `summary` 时合法，否则 `InvalidInput`（`workspaces_without_summary`）；`summary` 与 `chains: true` 同给 → `InvalidInput`（`summary_with_chains`）。旧 daemon 不认识这两个字段，以 RPC `Failed`「unknown field」拒绝，cli 读 store 回退 |
@@ -418,9 +418,9 @@ value; workers should use the accessor for subsequent passes.
 
 `ObserveFailed` 不在 `DaemonWarning` 里重定义。它是 `NewWarning` 或这次 RPC 的 `data.warnings`。
 
-`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.ports", "status.upstream", "sync"]`（D38、D39；后两项见 main-sync）；没有这个键的 daemon 一个也不支持。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
+`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["publish.message", "new.base", "rebase.quiet_scope", "new.agent", "session.ports", "status.upstream", "sync"]`（D38、D39；后两项见 main-sync）；没有这个键的 daemon 一个也不支持。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
 
-stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看见某个影子仓库的 `PrePushGuardDisabled`。同一条不重复打。JSON 里都有，不靠人去翻日志。
+stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看见某个影子仓库的 `PrePushGuardDisabled`。同一条不重复打。这些警告 JSON 里都有，不靠人去翻日志；R2 activity-scope 的 once-per-repo 日志提示是下文注明的例外。
 
 ### 5.5 各方法
 
@@ -1126,3 +1126,5 @@ cache-fill exception keeps the read request safely retryable and prevents a
 permanent false refusal on non-following split repos. The normal cached fast
 path performs no fetch. Status marks an ahead/diverged graph unchecked when B
 is unavailable rather than guessing that no publish target contains it.
+
+R2 activity warnings `quiet_skip_tracked` and `deps_dir_tracked` are once-per-repo daemon-log warnings. Tracked matches remain counted; they never reject a move. Pin audit appends delimit an unterminated tail before writing the next record, preserving earlier complete history.

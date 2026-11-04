@@ -2,7 +2,7 @@
 name: git-strata
 description: Use when working in a repo managed by git-strata (macOS), when the cwd is inside a git-strata session workspace (`<root>/sessions/<id>/<repo>`, default root ~/.strata), or when the user asks to start, checkpoint, diff, restore, sync with main, publish, push or remove a git-strata session, or to run a dev server on per-session ports. Gives each agent session its own isolated APFS-cloned workspace over a shared base snapshot. Covers the CLI loop (new, checkpoint, sync --check, publish, rm), the JSON envelope and error codes, main-sync conflict resolution, and the commands an agent must hand to a human. For any agent that runs shell commands (Claude Code, Codex, Cursor and others).
 license: MIT OR Apache-2.0
-compatibility: macOS 13+ on APFS. Needs the git-strata CLI (0.1.2 or later) on PATH and its daemon, which only a human starts.
+compatibility: macOS 13+ on APFS. Needs matching git-strata CLI and daemon builds; R2 features require R2 or later. The 0.1.2 CLI cannot read a v6 store. Only a human starts the daemon.
 ---
 
 # git-strata
