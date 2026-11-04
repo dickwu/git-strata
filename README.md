@@ -99,9 +99,15 @@ plist; installing it is a human step. Its content (from
 
 | Command | What it does | Result |
 | --- | --- | --- |
-| `git-strata daemon status` | Asks the socket; never fails for a down daemon or missing config | `{running, socket, session?, holders:[], unknown_publishes:[], alerts:[]}` |
+| `git-strata daemon status` | Asks the socket; never fails for a down daemon or missing config | `{running, socket, session?, holders:[], unknown_publishes:[], alerts:[], config?:{generation,hash,loaded_at,last_attempt,restart_required}}` |
 | `git-strata daemon start` | `launchctl bootstrap gui/<uid> <plist>` | `{}`; `{already:true}` if loaded; `InvalidInput` `no_plist` if the plist is missing; `foreign_home` / `foreign_agent` (below) |
 | `git-strata daemon stop` | `launchctl bootout`, then waits up to 10 s until launchd drops the agent | `{}`; `Unknown` `launchctl` (`step: bootout_wait`) on timeout; `foreign_home` / `foreign_agent` (below) |
+
+`daemon status` copies `config` from the daemon when available; it is absent
+when the daemon is down or an older daemon omits it. `generation`, `hash` and
+`loaded_at` describe the active catalog. `last_attempt` is null before any reload
+attempt, then contains the reload report plus `at` and, on rejection, `reason`;
+`restart_required` lists restart-only fields from that attempt.
 
 `start` / `stop` use launchd, not the socket, and are for the human only:
 agents never run them (or `launchctl`). Because the `gui/<uid>` domain is per
@@ -109,8 +115,9 @@ user, not per `HOME`, both refuse with `InvalidInput` `foreign_home` (before any
 `launchctl`) unless `HOME` resolves to the login user's home, and with
 `foreign_agent` when the loaded agent came from a plist other than this home's;
 the message gives the `launchctl bootout` the human can run to clear it. The
-daemon reads `config.toml` only when it starts, so after editing the config the
-human runs `daemon stop` then `daemon start`.
+daemon reloads supported `config.toml` changes; after editing, run
+`git-strata config reload`. Removal, existing repo identity/exclusion changes,
+`paths.root`, and `status.parallel` still require an owner restart.
 
 Without a running daemon only these work, read-only, straight from the store:
 `status`, `grep`, `files`, `diff`, `deps list`, `daemon status`, and
@@ -226,7 +233,9 @@ Every call prints exactly one compact JSON line on stdout:
 
 - All three keys are always present. `data` is never null; on an error it may
   still hold partial results (for example repos that already published).
-- Exit status is 0 iff `ok` is true, else 1.
+- Exit status is 0 when `ok` is true; ordinary errors use 1.
+  `config reload` uses 2 for rejected config, 3 while pending, and 4 for an
+  older daemon. Transport, argument and output failures still use 1.
 - Exception: `git-strata session exec` prints no envelope once its command
   starts; its stdout, stderr and exit status are the command's. A failure
   before the start (bad arguments, `PortInUse`, ...) is an envelope.
@@ -655,10 +664,10 @@ There is no flag, env var or config value that skips the gate, and faking a
 TTY (`script`, `expect`, a pty) is a bypass. On `NotTty` / `NotConfirmed`,
 stop and give the exact command to the human.
 
-**Changing the flags (pins).** At start the daemon tightens pins at once
+**Changing the flags (pins).** At start and reload the daemon tightens pins at once
 (`confirm` / `deploy_on_push` ORed, `push` ANDed with the file) and writes
-`pins.json`. A loosening (e.g. `confirm` true -> false) is not applied: after
-`daemon stop` + `daemon start` the old pin stays and `daemon status` alerts
+`pins.json`. After editing, run `git-strata config reload`. A loosening
+(e.g. `confirm` true -> false) keeps the old pin and `daemon status` alerts
 show `ConfigRelaxPending`. The human then runs `git-strata config relax REPO`
 (TTY + prompt), which writes the file's flags into the pin; with nothing to
 relax it returns `InvalidInput` `not_relaxed`. Pins of repos removed from the
@@ -683,8 +692,8 @@ the backup; see [store recovery](docs/modules/store.md).
 (the `.strata/lww` dialect) lists files a tool regenerates; their unpublished
 Modified/Added/Untracked edits in a tracked, healthy workspace do not block
 `rm` (they are checkpointed and listed). A narrower list (positive patterns
-deleted and/or negations appended at the end) applies at the next start; any
-other change is a loosening that needs `config relax REPO`, which applies it
+deleted and/or negations appended at the end) applies at reload or start; any
+other change is pending after reload until `config relax REPO` applies it
 without a daemon restart. A repo with no pin has an empty effective list.
 Example (docs only): `regenerable = ["src/constants/permissionMap/generated.json"]`
 under `[repo.admin.rm]`. Add the new keys only after both binaries are
@@ -747,6 +756,8 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Busy` (`lease_changed`) | `session ports --reassign`: another caller moved the lease since the check; run `session ports --check` again and decide afresh |
 | `Busy` (`client_timeout`) | read deadline or incomplete request; nothing changed by this request, back off before retrying |
 | `Unknown` (`client_timeout`) | the complete write may still run; inspect status, do not retry, `gc` or `rm` |
+| `Busy` (`pins_tightened`) | rerun the command with a fresh snapshot of the newly applied config; do not retry inside the old operation |
+| `Busy` (`reload_pending`) | rerun `config reload`; the current attempt continues (exit 3) |
 | `Busy` (other) | repo lock held; wait, retry later |
 | `NotTty` | hand the exact command to the human |
 | `NotConfirmed` | report; the human reruns (`plan_changed`: rerun once yourself) |
@@ -756,6 +767,10 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `NoSuchRepo` | name not in config; `not_in_session`: run `detail.fix` (`git-strata add --session S --repo R`) |
 | `NoSuchBranch` | (`new`) a repo has no `origin/<default_branch>`; tell the human |
 | `InvalidInput` | fix arguments per `detail.reason` (`from_repo_prefix` / `from_path`: rewrite `--from` as `detail.expected` says); `chain_diverged` on a repo without confirmation: `git-strata push REPO` replays it (see [Origin moved](#origin-moved-under-the-unpushed-chain-push-replays)), then rerun; `chain_rewound`, or diverged on a gated repo: human runs `chain`; push-guard reasons above: tell the human |
+| `InvalidInput` (`config_rejected`) | fallback when a rejected `config reload` report supplies no reason; otherwise the daemon's reason is forwarded. Inspect `data.reasons` and `data.restart_required` (exit 2) |
+| `InvalidInput` (`recovery_failed`) | a new repo's pending-rebase reconstruction failed before catalog publication; inspect `data.reasons`, resolve the reported failure, then rerun `config reload` |
+| `InvalidInput` (`shown_required`) | use a CLI that sends the displayed flags with `config relax` |
+| `InvalidInput` (`config_not_applied`) | apply the current file with `config reload` before `config relax` |
 | `Conflict` (publish) | fix and rerun the same publish (above); `move_conflict` first needs `cd ~ && git-strata sync --session S --repo R --resolved PATH` (or `--keep PATH`), with the report's target/generation when required |
 | `Conflict` (`sync_conflict`) | resolve every reported path with `cd ~ && git-strata sync --session S --repo R --resolved PATH` (or `--keep PATH`) and the supplied target/generation; see the [agent workflow](skills/git-strata/sync.md) |
 | `Conflict` (`base_diverged`) | stop and ask the human to recover the chain; never accept divergence on your own |
@@ -774,7 +789,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Binary` / `TooLarge` | per-entry markers in `diff` / `grep`; not a call failure |
 | `Corrupt` | store damage; stop, tell the human |
 | `PortInUse` | `already_running`: reuse the server this workspace already runs; `foreign`: run `detail.fix` (`session ports --reassign`) for your own session, then `exec` again |
-| `Unsupported` (`daemon_too_old`) | the daemon lacks the requested feature (e.g. sync or dev-port leases); ask the human to install matching CLI/daemon versions |
+| `Unsupported` (`daemon_too_old`) | the daemon lacks the requested feature (e.g. sync, dev-port leases or config reload); ask the human to install matching CLI/daemon versions and restart the daemon (`config reload` exits 4) |
 
 The full closed set of codes: Conflict, HeadMoved, Dirty, Busy, NoSuchPath,
 NoSuchBranch, NoSuchCommit, NoCommit, NoMergeBase, IsDirectory, NotDirectory,
@@ -854,6 +869,7 @@ Flags, defaults and `data` shapes:
 | `daemon start \| stop \| status` | no |
 | `resolve --session S --repo R (--abandon \| --accept)` | yes |
 | `chain --repo R (--accept-origin replay\|drop \| --restore)` | yes |
+| `config reload` | no |
 | `config relax REPO` | yes |
 | `session ports [--session S] [--repo R] [--all] [--check] [--reassign]` | no |
 | `session exec [--session S] [--repo R] [--tauri] [--no-check] -- CMD...` | no |

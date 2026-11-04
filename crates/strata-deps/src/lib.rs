@@ -25,13 +25,12 @@ mod seams;
 mod snapshot;
 
 pub use adopt::adopt;
-pub use changes::{ChangeKind, Changes, PackageChange, changes};
 pub use attempts::attempts;
 pub use build::{build, clone_into, find_set, key_of};
+pub use changes::{ChangeKind, Changes, PackageChange, changes};
 pub use drift::{Drift, drift};
 pub use ensure::ensure;
 pub use inputs::{InputRecord, hash_records, input_records, inputs_hash, is_input, is_input_folded, nested_seed_caches, platform, set_id, toolchain};
-pub use snapshot::{clean_snapshots, remove_snapshot, snapshot_dir, snapshot_inputs, snapshot_tree};
 pub use open_files::{Hold, OpenFile, open_files, open_files_many, process_parent};
 pub use proposal::{
     ChainState, Proposal, ProposalOrigin, ProposalState, ProposeArgs, PublishChain, get_proposal,
@@ -43,6 +42,9 @@ pub use rollout::{
 };
 #[cfg(feature = "test-seams")]
 pub use seams::test_seams;
+pub use snapshot::{
+    clean_snapshots, remove_snapshot, snapshot_dir, snapshot_inputs, snapshot_tree,
+};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 
@@ -67,6 +69,19 @@ pub trait RepoWriteLock: Sync {
     /// returns. The outer `Err` is only `Busy` (the bounded wait expired and
     /// `f` did not run); `Ok` carries `f`'s result.
     fn with_write(&self, repo: &RepoName, f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>>;
+    /// Cleanup only: delete a session pin after a committed removal or failed
+    /// new/add. This never authorizes new work and is exempt from policy fences.
+    fn with_cleanup(
+        &self,
+        repo: &RepoName,
+        f: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Result<()>> {
+        self.with_write(repo, f)
+    }
+    /// Check policy fences before committing removal, without taking a lock.
+    fn check_fence(&self, _repos: &[RepoName]) -> Result<()> {
+        Ok(())
+    }
     /// `with_write`, but only if the lock is free right now: `Busy`
     /// otherwise, never waited for (rm-followups §1.6 T2). The default
     /// waits like `with_write` (a lock nothing else contends for).
@@ -147,3 +162,14 @@ pub enum BuildState {
 
 #[doc(hidden)]
 pub use inputs::empty_inputs_hash;
+
+/// A tightened catalog permanently refuses this admitted operation. A new
+/// operation may retry on a new snapshot; contention loops must return it.
+pub fn pins_tightened(e: &StrataError) -> bool {
+    e.code == strata_types::Code::Busy
+        && e.detail
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .and_then(|v| v.as_str())
+            == Some("pins_tightened")
+}

@@ -195,7 +195,7 @@ daemon.md §5 的方法表与「共 21 个方法」那句、`tests/rpc.rs::daemo
 | P2 | `publish_plan` 加参数 `detail: bool` | 是 | 每仓库要发布的提交、chain 顶、pins、目标 URL、已发布跳过项、`waiting_proposals`、Touch ID 文字 | daemon.md §5 publish_plan 行 |
 | P2 | `daemon_status` 加字段 | 是 | `version`、`api`、`epoch`、`draining`、`inflight[]`（§5.9）、`pending_prompt`（见下）、`confirm`（仅 `probe: true` 时探测，结果缓存 60 s） | daemon.md §5 daemon_status 行 |
 | P2 | `Confirmer::pending() -> Option<PendingPrompt{action_kind, method, reason_text, started_at}>`（新，在 **strata-confirm** 的 confirmer.rs） | — | 今天的门是 `Mutex<()>`，`prompt_in_progress` 靠 `try_lock`（confirmer.rs:146-158），里面没有框的信息。新增 `Mutex<Option<PendingPrompt>>`：拿到门之后写入，用 guard 的 Drop 在**每条**退出路径清空；只读，不影响门 | confirm.md §3 |
-| P2 | `config_effective`（新） | 是 | 三份分开给：**daemon 启动时读入并正在执行的**配置与 pins（`Pins.file`，confirm_flow.rs:79-104）、磁盘上现在的 config.toml、待处理的放宽；`revision` = **已读入文本**的哈希（config_relax 用的就是这份，confirm_flow.rs:210-229），另给 `on_disk_differs: bool`，界面写 "Edited since the daemon started" | 方法表 +1 |
+| P2 | `config_effective`（新） | 是 | 三份分开给：**daemon 当前已应用的 catalog** 配置与 pins（`Catalog.source/config/pins`，catalog.rs）、磁盘上现在的 config.toml、待处理的放宽；`revision` = **已应用文本**的哈希（与 `daemon_status.config.hash` 相同），另给 `on_disk_differs: bool`，界面写 "Edited since the config was applied" | 方法表 +1 |
 | P3 | `deps_list` 回答里每个提议加 `planned_moves[]` | 是 | daemon 用与锁内复核**同一个函数**算出的移动（今天 cli 在 confirm.rs 本地算）；方法数不变 | daemon.md §5 deps_list 行、types.md PlannedMove |
 | P3 | `deps_approve` 加参数 `planned: Option<Vec<PlannedMove>>` | 否 | 与 `shown` 同理：daemon 锁内重算 planned moves，不等 → `NotConfirmed plan_changed` | daemon.md §5 deps_approve 行、types.md PlannedMove |
 | P3 | `config_relax` 加参数 `revision: Option<String>` | 否 | 绑定人看过的**已读入**内容（不是磁盘上的字节），不等 → `NotConfirmed config_changed` | daemon.md §5 config_relax 行 |
@@ -392,7 +392,7 @@ interface, not the current tray's read transport.
 2. **publish**（照 cli confirm.rs 的顺序）：`publish_prepare` = ① 对组内每个 (session, repo) 做 `checkpoint{session, repo, reason: BeforePublish, paths}`，参数取法与 cli confirm.rs 完全相同；② 人在对话框里按路径分批时，GUI 在本地组装草稿 `ReleaseGroup.batches`（检查点 id + 选中的路径，与 cli confirm.rs:537-555 的检查点 → batches 组装同款，数据来自 `changes` 与 ① 的检查点 id），不调任何写方法；**`assign` 不是分批调用**——它给一个**已存在的**发布的冲突路径指定解决会话（rebase.rs:339 起，路径不是该发布的冲突 → `NoSuchPath`），只在 Conflict 对话框里用（cli `publish --assign` 同款，confirm.rs:309-327）；③ `publish_plan{group, detail: true}`。展示每仓库的提交、目标 URL、跳过项、`waiting_proposals` → 人点 `Publish` → `publish{group, shown: {repo → chain 顶}, plan: <计划里的仓库集合>}`。`plan` 必须发，daemon 用它判 `plan_changed`。
 3. **deps approve**：`deps_list` 的提议里带 daemon 算的 `planned_moves`（§3.4 P3 行）→ 展示 → `deps_approve{proposal, sessions, planned}`（线上字段名是 `proposal`，rpc.rs:154）。`sessions` 的语义：`null` = 所有受影响的会话，列表 = 只这些；GUI **从不发 `[]`**（`[]` 表示一个也不移，界面上没有这个选项）；全选时发 `null`，部分选择时发列表，一个都没选时按钮置灰。
 4. **rm --discard**：展示会话、各仓库**当前**未发布的改动（对每个仓库现调 `changes`；`fresh: false` 时写 "Couldn't read current changes"，仍允许人决定，但不显示数字）→ `rm{session, discard: true}`。
-5. **config relax**：`config_effective` 展示**正在执行的**值（放宽作用于它）；磁盘文件与之不同时另起一行 "Edited since the daemon started" 并列出差异 → `config_relax{repo, revision}`（revision 是已读入文本的哈希）。
+5. **config relax**：`config_effective` 展示**正在执行的**值（放宽作用于它）；磁盘文件与之不同时另起一行 "Edited since the config was applied" 并列出差异 → `config_relax{repo, revision}`（revision 是已读入文本的哈希）。
 6. **结果处理**：一律按 `code` 与 `detail.reason` 分支：
 
 | 结果 | 界面 |
@@ -406,7 +406,7 @@ interface, not the current tray's read transport.
 | 发布部分成功 | 逐仓库一行：Published（提交）/ Pushed / Already published（跳过）/ Refused（reason）/ Unknown / Not started；整体标题按最差的一项写 |
 | 其它 reason | 显示 message 与 reason 原文，不猜 |
 
-7. **Require confirmation（收紧）**：config 与 pins 只在 daemon 启动时读（startup.rs、confirm_flow.rs），所以收紧**不是**立即生效。GUI 的做法：改写 config.toml 的该仓库 `confirm` 字段（先备份）→ 提示 "Takes effect after the daemon restarts. Restart now?" → 走 §5.9 的安全重启。重启之前，界面同时显示「configured: confirm」与「enforced: no confirm」，不假装已生效。是否让 daemon 热加载收紧，记为 §9 Q-reload。
+7. **Require confirmation（收紧）**：支持 `config.reload` 的 daemon 会轮询配置，也接受 `config_reload {}`；改写 config.toml 的该仓库 `confirm` 字段后（先备份），可运行 `git-strata config reload` 等待应用结果。收紧在 catalog 发布时生效，旧操作在下一次相关取锁时收到 `Busy pins_tightened`；不需要重启。在确认应用成功之前，不把文件中的 configured 值当作已生效的 enforced 值；`daemon_status.config` 与 `ConfigReloadFailed` / `ConfigRestartRequired` 告警给出应用状态。放松仍须 `config_relax` 确认。只有旧 daemon 或 restart-only 字段才需要由 owner 按 §5.9 安全重启；字段范围见 [config.md](../config.md#hot-reload-configreload)。
 
 ### 5.5 gc（D11）
 
@@ -616,7 +616,7 @@ daemon 侧（P5）：
 2. `daemon_status.inflight[]`：每个已接受但未完成的写请求一项：`{method, session?, repo?, phase: queued / confirming / locked / running, started_at}`，覆盖今天 holds / waiters 看不到的阶段（确认框等待中、依赖构建中）。
 3. 收到 SIGTERM：照 daemon.md §5.9 停止 accept、在跑的请求做完、**还在排队的以 `ReadOnly shutting_down` 失败**、订阅者收到 `bye`；plist 的 `ExitTimeOut 900` 给足时间。所以 GUI 必须等 inflight（含 queued）为空才发停机。
 
-GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用一个流程：
+GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 需要重启的配置变更共用一个流程（支持 `config.reload` 的收紧不走此流程）：
 
 1. `drain{on: true}`；旧 daemon（api 不够，没有 drain）→ 走 §5.7 迁移第 3 条的做法（socket 栅栏 + 核验无客户端连接 + 人确认，核验不了就拒绝）。
 2. 显示 inflight 列表，等它变空；等待期间**每 30 s 续租**，一直保持到 daemon 进程退出；人可以 `Cancel`（`drain{on: false}`），也可以等。确认框等待中的项写明 "Waiting for someone to answer a Touch ID prompt"。**没有「强制」按钮。**
@@ -758,7 +758,7 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 | P2 | daemon 只读增补（§3.4 P2 行：status summary、changes、diff_text、allocations、push_plan、publish_plan detail、daemon_status 字段、`Confirmer::pending`、config_effective）＋ strata-client 回答类型与契约测试；GUI 接上 Allocations、Diff、Home | 6 天 | P0；push_plan / publish_plan 的 URL 字段依赖 impl/v1 的 URL 绑定已合并 | 是 |
 | P3 | 确认类对话框：push、publish（checkpoint + 本地 batches + plan；assign 只用于 Conflict）、deps approve（planned）、rm --discard、config relax（revision）、chain resolve / restore、gc（普通确认）；部分成功与 reason 分支；prompt_in_progress 横幅 | 6 天 | P1、P2；impl/v1 的 `remote_changed` | 是（deps_approve、config_relax 两个参数） |
 | P4 | `watch`：hub、连接专用模式、分配差分、FSEvents、失效表、GUI watch.rs 与轮询表 | 5 天 | P2；impl/v1 合并到本分支之后（改动面与 v1 的 handlers / startup 重叠最大） | 是 |
-| P5 | drain 与 inflight、封口与退出码、SuccessfulExit plist、ExitTimeOut、自重定向日志、daemon-env.toml；GUI 的 lifecycle（重启 / 停止 / 收紧配置 / 停稳核验）；cli `daemon start` 对已加载未运行的服务 kickstart | 3 天 | P2 | 是 |
+| P5 | drain 与 inflight、封口与退出码、SuccessfulExit plist、ExitTimeOut、自重定向日志、daemon-env.toml；GUI 的 lifecycle（重启 / 停止 / 需要重启的配置变更 / 停稳核验）；cli `daemon start` 对已加载未运行的服务 kickstart | 3 天 | P2 | 是 |
 | P6 | bundle、注册（按 P-pack 结论选 A / B）、cli 链接、引导、迁移（只针对 peilin 本机的旧安装，含身份核对与 lsof 副本计数）与回滚、通知 | 3 天 | P5、P-pack 结论；bundle 的 daemon 含 §3.4 P6 的前置修复（search 目录、fd 泄漏、fd 余量） | label |
 | P7 | release CI、自签名、updater（download → drain → install）、DMG 说明、README 改写 | 2 天 | P6、P-pack | 否 |
 
@@ -867,7 +867,7 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 - desktop 不进核心 workspace（`exclude`），自己的 Cargo.lock。
 - 事件只用于失效，数据都从只读方法取（§5.3）；分配事件用 daemon 边界上的 store 差分 + FSEvents，不在领域 crate 里插钩子。
 - 订阅者不设队列，只有游标；慢了就断开，靠重连的握手补发或快照。
-- 配置收紧走「改文件 + 安全重启」，不做热加载。
+- 配置收紧走「改文件 + config reload」；支持 `config.reload` 的 daemon 热应用收紧，放松仍走 `config_relax`。旧 daemon 与 restart-only 变更由 owner 安全重启。
 - PATH 用旁路文件 `daemon-env.toml`，不在 config.toml 里加表。
 - daemon 自己写日志到 `~/Library/Logs/git-strata/`。
 - drain 带 ttl，同 uid 可调用。
@@ -875,7 +875,7 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 - P1 对没有 `api` 键的旧 daemon 降低 `status` 轮询频率（§8.1「P1 实现记录」）。
 
 剩余问题（给 peilin）：
-1. **Q-reload**：收紧确认（`confirm = true`）目前要重启 daemon 才生效。要不要让 daemon 定时重读 config.toml，**只对收紧**立即生效？（放松仍走 config_relax。）
+1. **Q-reload（已解决）**：`config.reload` 支持轮询、SIGHUP 与显式重载，安全配置原子发布；收紧会 fence 旧操作，放松保留旧 pins 直到 `config_relax` 确认，restart-only 变更整份拒绝（见 [config.md](../config.md#hot-reload-configreload)）。
 2. **Q-cert**：持有方式已定（D16，peilin 14:1x）：只在 GitHub secret（`STRATA_CODESIGN_P12`、`STRATA_CODESIGN_P12_PASSWORD`，变量 `STRATA_CODESIGN_CERT_SHA1`），本机不留备份；secret 丢了就换新身份，所有用户重新授权一次。你在本机跑 `make-signing-identity.sh`、执行它打印的 `gh` 命令、确认后让它删掉本机副本。仍待定：有效期（脚本默认 10 年，到期也等于换身份）？minisign 私钥（P7）是否同样只放 secret（丢了 = 已安装的用户只能手动下载新版）？
 3. **Q-macos**：最低 macOS 13 可以吗？
 4. **Q-cli-link**：cli 链接到 `~/.local/bin`（免 sudo，选）还是 `/usr/local/bin`？

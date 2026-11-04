@@ -35,8 +35,8 @@ impl Default for Live {
     }
 }
 
-type Key = (RepoName, CommitOid, Option<CommitOid>, Option<CommitOid>);
-type DepsKey = (SessionId, BaseGen, u64, strata_types::ProposalId);
+type Key = (RepoName, CommitOid, Option<CommitOid>, Option<CommitOid>, String);
+type DepsKey = (SessionId, BaseGen, u64, strata_types::ProposalId, String);
 #[derive(Clone)]
 struct Graph {
     main: Option<UpstreamMain>,
@@ -50,7 +50,7 @@ struct Graph {
 #[derive(Default)]
 struct Entries {
     escalations: BTreeMap<(SessionId, RepoName), (std::time::SystemTime, String)>,
-    tips: BTreeMap<RepoName, (Option<CommitOid>, Option<CommitOid>)>,
+    tips: BTreeMap<(RepoName, String), (Option<CommitOid>, Option<CommitOid>)>,
     graphs: VecDeque<(Key, Graph)>,
     deps: VecDeque<(DepsKey, String)>,
 }
@@ -75,22 +75,28 @@ impl Cache {
         mode: ReadMode,
     ) -> Result<Option<Graph>> {
         let (tip, b) = if mode == ReadMode::Full {
-            let tip = strata_deps::main_tip(&core.config.repos[repo], &core.gits[repo])?;
-            let b = strata_publish::merge_base(&core.gits[repo], &core.config.repos[repo]).ok();
+            let tip = strata_deps::main_tip(&core.snapshot()?.config.repos[repo], &core.snapshot()?.gits[repo])?;
+            let b = strata_publish::merge_base(&core.snapshot()?.gits[repo], &core.snapshot()?.config.repos[repo]).ok();
             self.0
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .tips
-                .insert(repo.clone(), (tip.clone(), b.clone()));
+                .insert((repo.clone(), core.cfg_hash(repo)?), (tip.clone(), b.clone()));
             (tip, b)
         } else {
             let c = self.0.lock().unwrap_or_else(|p| p.into_inner());
-            let Some(tip) = c.tips.get(repo) else {
+            let Some(tip) = c.tips.get(&(repo.clone(), core.cfg_hash(repo)?)) else {
                 return Ok(None);
             };
             tip.clone()
         };
-        let key = (repo.clone(), ws.head.clone(), tip.clone(), b.clone());
+        let key = (
+            repo.clone(),
+            ws.head.clone(),
+            tip.clone(),
+            b.clone(),
+            core.cfg_hash(repo)?,
+        );
         if let Some((_, g)) = self
             .0
             .lock()
@@ -104,7 +110,7 @@ impl Cache {
         if mode == ReadMode::Cached {
             return Ok(None);
         }
-        let git = &core.gits[repo];
+        let git = &core.snapshot()?.gits[repo];
         let mut graph = Graph {
             main: None,
             behind: 0,
@@ -309,6 +315,7 @@ impl Cache {
         mode: ReadMode,
         mut live: impl FnMut(&RepoName, &WorkspaceState, u64) -> Live,
     ) -> Result<Upstream> {
+        let _catalog = core.admit();
         #[cfg(feature = "test-seams")]
         if self.1.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(StrataError::new(
@@ -322,13 +329,16 @@ impl Cache {
             let Some(rec) = row.workspaces.get(repo).filter(|r| r.health == Health::Ok) else {
                 continue;
             };
-            if core.store.workspace_scene_live(&row.manifest.id, repo, rec.scene.is_some())? {
+            if core
+                .store
+                .workspace_scene_live(&row.manifest.id, repo, rec.scene.is_some())?
+            {
                 continue;
             }
             if !ws.tracked {
                 continue;
             }
-            let Some(cfg) = core.config.repos.get(repo) else {
+            let Some(cfg) = core.snapshot()?.config.repos.get(repo) else {
                 return Err(StrataError::new(
                     Code::NoSuchRepo,
                     format!("no repo named {repo}"),
@@ -431,10 +441,16 @@ impl Cache {
         else {
             return Ok(None);
         };
-        let key = (row.manifest.id.clone(), ws.base.clone(), generation, p.id);
+        let key = (
+            row.manifest.id.clone(),
+            ws.base.clone(),
+            generation,
+            p.id,
+            core.cfg_hash(repo)?,
+        );
         let summary = if mode == ReadMode::Full {
-            let cfg = &core.config.repos[repo];
-            let git = &core.gits[repo];
+            let cfg = &core.snapshot()?.config.repos[repo];
+            let git = &core.snapshot()?.gits[repo];
             let summary = p.head.as_ref().and_then(|head| {
                 match strata_deps::changes(git, cfg, &ws.head, head) {
                     Ok(c) => Some(c.summary),
@@ -455,7 +471,10 @@ impl Cache {
             while c.deps.len() > CACHE_LIMIT {
                 c.deps.pop_front();
             }
-            c.deps.iter().find(|(k, _)| *k == key).map(|(_, s)| s.clone())
+            c.deps
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, s)| s.clone())
         } else {
             self.0
                 .lock()
@@ -522,6 +541,7 @@ impl Cache {
     /// T2 fills immutable history and package summaries without a request
     /// waiting on it. Errors leave that entry cold; no store writes here.
     pub fn warm(&self, core: &Core) {
+        let _catalog = core.admit();
         if let Ok(rows) = core.store.sessions() {
             for row in rows
                 .into_iter()

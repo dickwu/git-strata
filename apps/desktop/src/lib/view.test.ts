@@ -595,3 +595,23 @@ describe('tray policy parity', () => {
     expect(unavailableUpstream(s, capable)).toEqual([s.sessions[1].status.manifest.id]);
   });
 });
+
+test('reload warnings give the owner a specific status message', () => {
+  const s = {
+    ...daemon,
+    warnings: [
+      { ConfigReloadFailed: { reason: 'invalid_config', detail: {}, hash: 'abc' } },
+      { ConfigRestartRequired: { fields: ['paths.root'] } },
+    ],
+  };
+  expect(daemonView(s).warnings).toEqual([
+    'config.toml not applied: invalid_config',
+    'Config changes need an owner restart: paths.root',
+  ]);
+  expect(
+    daemonView({
+      ...daemon,
+      warnings: [{ ConfigReloadFailed: null }, { ConfigRestartRequired: { fields: 'unknown' } }],
+    }).warnings
+  ).toEqual(['config.toml not applied: reload failed', 'Config changes need an owner restart']);
+});

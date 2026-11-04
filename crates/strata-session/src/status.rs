@@ -13,7 +13,9 @@ use strata_apfs::{IoSide, classify_io_error};
 use strata_deps::{Drift, OpenFile, Proposal, ProposalState};
 use strata_gitio::MirrorDrift;
 use strata_store::{Health, Lifecycle, MoveState, SessionRecord, WorkspaceRecord};
-use strata_types::{CheckpointId, Code, RepoName, RepoPath, SessionId, SessionManifest, StrataError};
+use strata_types::{
+    CheckpointId, Code, RepoName, RepoPath, SessionId, SessionManifest, StrataError,
+};
 
 use crate::old_tree::OldTreeMode;
 use crate::rm_note::{RmNotes, rm_notes};
@@ -126,16 +128,35 @@ pub struct WorkspaceStatus {
 #[serde(tag = "kind")]
 pub enum StatusWarning {
     NotCheckpointed,
-    SeedStale { path: RepoPath },
-    SeedNotIgnored { path: RepoPath },
-    MirrorDrift { items: Vec<MirrorDriftItem> },
-    PrePushGuardUnknown { detail: StrataError },
-    ShadowMissing { path: PathBuf },
+    SeedStale {
+        path: RepoPath,
+    },
+    SeedNotIgnored {
+        path: RepoPath,
+    },
+    MirrorDrift {
+        items: Vec<MirrorDriftItem>,
+    },
+    PrePushGuardUnknown {
+        detail: StrataError,
+    },
+    ShadowMissing {
+        path: PathBuf,
+    },
     /// The shadow directory exists but is not this repo's shadow
     /// repository (`reason` from gitio, e.g. `no-marker`).
-    ShadowInvalid { path: PathBuf, reason: String },
-    MoveLeftover { n: u64, staging: PathBuf },
-    MoveAwaitingRecover { n: u64, staging: PathBuf },
+    ShadowInvalid {
+        path: PathBuf,
+        reason: String,
+    },
+    MoveLeftover {
+        n: u64,
+        staging: PathBuf,
+    },
+    MoveAwaitingRecover {
+        n: u64,
+        staging: PathBuf,
+    },
     /// `changed: null` + `unchecked: true`: not judged yet (status-perf
     /// A1, D10); `checked_at`: when the background judgement was made
     /// (absent when judged in the request).
@@ -150,7 +171,9 @@ pub enum StatusWarning {
         #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_rfc3339")]
         checked_at: Option<SystemTime>,
     },
-    RestoreScene { path: PathBuf },
+    RestoreScene {
+        path: PathBuf,
+    },
 }
 
 /// gitio's `MirrorDrift` as status reports it (D43).
@@ -527,7 +550,11 @@ impl Sessions<'_> {
 /// `f` of each item, at most `slots.cap()` workers here and at most the
 /// slots' free count across every caller at once; each call holds one
 /// slot. Results in item order; `None` only for an item never run.
-pub(crate) fn on_slots<T: Sync, R: Send>(slots: &Slots, items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<Option<R>> {
+pub(crate) fn on_slots<T: Sync, R: Send>(
+    slots: &Slots,
+    items: &[T],
+    f: impl Fn(&T) -> R + Sync,
+) -> Vec<Option<R>> {
     let done: Vec<Mutex<Option<R>>> = items.iter().map(|_| Mutex::new(None)).collect();
     let next = AtomicUsize::new(0);
     let run = || {
@@ -547,11 +574,13 @@ pub(crate) fn on_slots<T: Sync, R: Send>(slots: &Slots, items: &[T], f: impl Fn(
     } else {
         std::thread::scope(|s| {
             for _ in 0..workers {
-                s.spawn(run);
+                crate::catalog::spawn_pinned(s, run);
             }
         });
     }
-    done.into_iter().map(|m| m.into_inner().unwrap_or_else(|p| p.into_inner())).collect()
+    done.into_iter()
+        .map(|m| m.into_inner().unwrap_or_else(|p| p.into_inner()))
+        .collect()
 }
 
 /// status-perf A4: a counting semaphore. `take` blocks until a slot is
@@ -639,14 +668,18 @@ mod tests {
             i * 10
         };
         let (a, b) = std::thread::scope(|s| {
-            let a = s.spawn(|| on_slots(&slots, &items, work));
-            let b = s.spawn(|| on_slots(&slots, &items, work));
+            let a = crate::catalog::spawn_pinned(s, || on_slots(&slots, &items, work));
+            let b = crate::catalog::spawn_pinned(s, || on_slots(&slots, &items, work));
             (a.join().unwrap(), b.join().unwrap())
         });
         let want: Vec<Option<usize>> = items.iter().map(|i| Some(i * 10)).collect();
         assert_eq!(a, want);
         assert_eq!(b, want);
-        assert!(max.load(Ordering::SeqCst) <= 2, "max {} at once", max.load(Ordering::SeqCst));
+        assert!(
+            max.load(Ordering::SeqCst) <= 2,
+            "max {} at once",
+            max.load(Ordering::SeqCst)
+        );
         // Two callers of 2 workers each would reach 4 at once on private pools; the shared cap keeps it at 2.
         assert!(max.load(Ordering::SeqCst) >= 2, "the cap was used in full");
     }

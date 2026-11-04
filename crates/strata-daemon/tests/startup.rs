@@ -130,7 +130,7 @@ fn unknown_publish_reported_on_restart_not_replayed() {
     let (unknown, running) = {
         let core = fx.prepare().unwrap();
         let d = Daemon::start(&core).unwrap();
-        let id = d.sessions.new(None, &[repo_name("tool")]).unwrap().manifest.id;
+        let id = { let _catalog = core.admit(); d.sessions.new(None, &[repo_name("tool")]).unwrap() }.manifest.id;
         fx.sb.write(&ws(&core, &id, "tool"), "src/a.ts", b"a\n");
         let cp = checkpoint(&core, &id, "tool");
         let now = SystemTime::now();
@@ -211,7 +211,7 @@ fn quarantine_is_an_alert() {
     let (id, shadow) = {
         let core = fx.prepare().unwrap();
         let d = Daemon::start(&core).unwrap();
-        let id = d.sessions.new(None, &[repo_name("tool")]).unwrap().manifest.id;
+        let id = { let _catalog = core.admit(); d.sessions.new(None, &[repo_name("tool")]).unwrap() }.manifest.id;
         drop(d);
         core.close().unwrap();
         let shadow = fx.config.paths.root.join(format!("sessions/.repos/{id}/tool.git"));
@@ -442,6 +442,7 @@ fn poisoned_store_ends_serve_for_a_restart() {
     let ext = AtomicBool::new(false);
     let r = std::thread::scope(|s| {
         let h = s.spawn(|| d.serve(&listener, &ext, &|req| d.handle(req)));
+        let reload_waiter = s.spawn(|| core.request_reload(Duration::from_secs(15)));
         let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assert!(strata_daemon::rpc::ready(&fx.socket(), Duration::from_secs(5)));
             core.store.poison_for_test();
@@ -455,6 +456,8 @@ fn poisoned_store_ends_serve_for_a_restart() {
             d.request_stop();
         }
         let r = h.join().unwrap();
+        let refused = reload_waiter.join().unwrap().unwrap_err();
+        assert_eq!(reason(&refused), Some("shutting_down"));
         assert!(ok.unwrap(), "serve did not end on its own");
         r
     });

@@ -47,9 +47,10 @@ When this skill and the binary disagree, the binary wins:
   workspace that already holds its port lease work; the rest return `Busy` `daemon_down`, and
   edits made meanwhile are not checkpointed (tell the human which).
 - Config is `~/Library/Application Support/git-strata/config.toml`; the daemon
-  reads it only at start. After a config change, tell the human the daemon
-  needs a restart. Installing, upgrading or rolling back git-strata is the
-  human's job.
+  supports hot reload when `features` contains `config.reload`. After editing it,
+  run `git-strata config reload`, check the name is in `data.repos`, and read
+  `pending_relax` before using a new repo. Rejected restart-only changes and old
+  daemons need an owner restart; installing/upgrading remains the human's job.
 - The session records which agent created it. Claude Code, Codex and Cursor
   are detected; any other agent runs `export STRATA_AGENT=<name>` (1-64 of
   `[A-Za-z0-9._-]`, starting with a letter or digit) or passes `--agent NAME`
@@ -120,6 +121,8 @@ git-strata rm --session "$S"
 ## Reading replies
 
 stdout is exactly one compact JSON line; exit code 0 iff `ok` is true.
+Ordinary errors use 1; `config reload` uses 2 for rejection, 3 while pending,
+and 4 for an old daemon (argument, transport and output failures use 1).
 `note:` lines and waiting progress go to stderr. Pipe stdout to `jq`; never
 combine streams with `2>&1 | jq`.
 
@@ -151,6 +154,7 @@ Unknown help topics return an `InvalidInput` / `help_topic` envelope.
 | `HeadMoved baseline_moved` | rerun the exact `publish --from …` command in `detail.fix` to checkpoint against the new baseline |
 | `OpenFiles caller_cwd` | run `detail.fix` from outside, preserving its repo/resolution flags; then cd back |
 | `OpenFiles cwd_holders` | `--allow-cwd` accepts your own PID chain's stale cwd; other holders must cd out or be explicitly accepted with `--allow-cwd-holders` |
+| `Busy pins_tightened` | rerun the command once on the new catalog; do not loop inside the old operation |
 | `Busy` (other) | another operation holds the lock; wait and retry |
 | `NotTty` / human-only command | stop; give the human the exact command |
 | `NoSuchSession` | `cd` into your workspace or pass `--session` |

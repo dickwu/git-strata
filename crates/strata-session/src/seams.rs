@@ -150,6 +150,17 @@ impl crate::Sessions<'_> {
         assert!(st.paused, "timed out waiting for a session PauseAt seam");
     }
 
+    /// Bounded wait for tests whose operation can fail before reaching a seam.
+    pub fn wait_paused_timeout(&self, timeout: std::time::Duration) -> bool {
+        let st = self.seams.pause.lock().unwrap_or_else(|p| p.into_inner());
+        self.seams
+            .cv
+            .wait_timeout_while(st, timeout, |s| !s.paused)
+            .unwrap_or_else(|p| p.into_inner())
+            .0
+            .paused
+    }
+
     /// Let the paused step go on.
     pub fn release(&self) {
         let mut st = self.seams.pause.lock().unwrap_or_else(|p| p.into_inner());

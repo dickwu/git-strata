@@ -21,6 +21,7 @@ impl Drop for Holder {
     }
 }
 fn old_tree(d: &Daemon<'_>, fx: &Dfx) -> (SessionId, std::path::PathBuf) {
+    let _catalog = d.core.admit();
     let repo = repo_name("tool");
     let id = d
         .sessions
@@ -73,6 +74,7 @@ fn serving(d: &Daemon<'_>, f: impl FnOnce()) {
                 d,
                 &|| stop.load(Ordering::SeqCst) || d.stopping(),
                 Duration::from_millis(200),
+                &|| {},
             )
         });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));

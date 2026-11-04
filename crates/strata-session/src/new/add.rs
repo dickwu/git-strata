@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strata_apfs::RenameMode;
 use strata_store::{Lifecycle, SeedRow};
-use strata_types::{BaseGen, Code, CommitOid, RepoName, SessionId, StrataError, TreeOid, WorkspaceState};
+use strata_types::{
+    BaseGen, Code, CommitOid, RepoName, SessionId, StrataError, TreeOid, WorkspaceState,
+};
 
 use super::{NewWarning, Plan, pin_ref};
 use crate::seed::{ancestors, seed_files};
@@ -44,11 +46,14 @@ impl Sessions<'_> {
     pub fn add(&self, id: &SessionId, repos: &[RepoName]) -> Result<AddReport> {
         // A. refusals, before any write
         if repos.is_empty() {
-            return Err(StrataError::new(Code::InvalidInput, "add needs at least one repo")
-                .with_detail(json!({ "field": "repos", "reason": "empty" })));
+            return Err(
+                StrataError::new(Code::InvalidInput, "add needs at least one repo")
+                    .with_detail(json!({ "field": "repos", "reason": "empty" })),
+            );
         }
         let rec = self.store.session(id)?.ok_or_else(|| {
-            StrataError::new(Code::NoSuchSession, format!("no session {id}")).with_detail(json!({ "session": id.as_str() }))
+            StrataError::new(Code::NoSuchSession, format!("no session {id}"))
+                .with_detail(json!({ "session": id.as_str() }))
         })?;
         if rec.lifecycle != Lifecycle::Active {
             return Err(StrataError::new(
@@ -62,17 +67,33 @@ impl Sessions<'_> {
             self.repo_cfg(r)?;
             want.insert(r.clone());
         }
-        let already: BTreeMap<RepoName, WorkspaceState> =
-            rec.manifest.repos.iter().filter(|(r, _)| want.contains(*r)).map(|(r, w)| (r.clone(), w.clone())).collect();
-        let new: BTreeSet<RepoName> = want.into_iter().filter(|r| !already.contains_key(r)).collect();
+        let already: BTreeMap<RepoName, WorkspaceState> = rec
+            .manifest
+            .repos
+            .iter()
+            .filter(|(r, _)| want.contains(*r))
+            .map(|(r, w)| (r.clone(), w.clone()))
+            .collect();
+        let new: BTreeSet<RepoName> = want
+            .into_iter()
+            .filter(|r| !already.contains_key(r))
+            .collect();
         if new.is_empty() {
-            return Ok(AddReport { session: id.clone(), added: BTreeMap::new(), already, warnings: Vec::new() });
+            return Ok(AddReport {
+                session: id.clone(),
+                added: BTreeMap::new(),
+                already,
+                warnings: Vec::new(),
+            });
         }
         self.validate_members(&new, &new)?;
         let root = rec.manifest.root.clone();
         for r in &new {
             for p in [root.join(r.as_str()), self.shadow_dir(id, r)] {
-                if lstat(&p).map_err(|e| strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &p))?.is_some() {
+                if lstat(&p)
+                    .map_err(|e| strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &p))?
+                    .is_some()
+                {
                     return Err(StrataError::new(
                         Code::Exists,
                         format!("{} already exists; a failed add left it (remove the session, or start a new one)", p.display()),
@@ -84,7 +105,8 @@ impl Sessions<'_> {
         let new: Vec<RepoName> = new.into_iter().collect();
 
         // B. heads, bases, plans
-        let heads: BTreeMap<RepoName, (CommitOid, TreeOid)> = self.resolve_heads(&new)?.into_iter().collect();
+        let heads: BTreeMap<RepoName, (CommitOid, TreeOid)> =
+            self.resolve_heads(&new)?.into_iter().collect();
         let planned = dispatch::each_repo(&new, &|_| Ok(()), &|r| {
             let (_, tree) = &heads[r];
             let bg = self.base_flow(r, tree, None)?;
@@ -115,7 +137,11 @@ impl Sessions<'_> {
                     .as_ref()
                     .and_then(|d| d.get("kept"))
                     .and_then(|k| k.as_array())
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 for r in &new {
                     let p = root.join(r.as_str());
@@ -128,11 +154,24 @@ impl Sessions<'_> {
         };
 
         // D. record
-        let added: BTreeMap<RepoName, WorkspaceState> = built.iter().map(|(r, (ws, _))| (r.clone(), ws.clone())).collect();
-        let seeds: BTreeMap<RepoName, Vec<SeedRow>> = built.into_iter().map(|(r, (_, s))| (r, s)).collect();
-        if let Err(e) = self.store.add_workspaces(id, &added, &seeds) {
+        let added: BTreeMap<RepoName, WorkspaceState> = built
+            .iter()
+            .map(|(r, (ws, _))| (r.clone(), ws.clone()))
+            .collect();
+        let seeds: BTreeMap<RepoName, Vec<SeedRow>> =
+            built.into_iter().map(|(r, (_, s))| (r, s)).collect();
+        let recorded = if self.catalog.is_some() {
+            self.store
+                .add_workspaces_with_policy(id, &added, &seeds, self.dev_ports_policy()?)
+        } else {
+            self.store.add_workspaces(id, &added, &seeds)
+        };
+        if let Err(e) = recorded {
             self.add_unpin(id, &new);
-            let kept: Vec<String> = added.values().map(|w| w.path.display().to_string()).collect();
+            let kept: Vec<String> = added
+                .values()
+                .map(|w| w.path.display().to_string())
+                .collect();
             return Err(with_kept(e, &kept));
         }
 
@@ -140,13 +179,26 @@ impl Sessions<'_> {
         let mut warnings = Vec::new();
         for (r, ws) in &added {
             let res = self.deps_ctx(r).and_then(|ctx| {
-                strata_deps::observe_main(&ctx, &ws.base.tree, &ws.head, &self.store.base_dir(&ws.base))
+                strata_deps::observe_main(
+                    &ctx,
+                    &ws.base.tree,
+                    &ws.head,
+                    &self.store.base_dir(&ws.base),
+                )
             });
             if let Err(detail) = res {
-                warnings.push(NewWarning::ObserveFailed { repo: r.clone(), detail });
+                warnings.push(NewWarning::ObserveFailed {
+                    repo: r.clone(),
+                    detail,
+                });
             }
         }
-        Ok(AddReport { session: id.clone(), added, already, warnings })
+        Ok(AddReport {
+            session: id.clone(),
+            added,
+            already,
+            warnings,
+        })
     }
 
     /// One repo: clone, caches, git, seed files and pin in staging, then
@@ -183,7 +235,7 @@ impl Sessions<'_> {
         let pin = pin_ref(id);
         for r in repos {
             let Ok(git) = self.git(r) else { continue };
-            let _ = self.with_lock_unbounded(r, || {
+            let _ = self.with_cleanup_lock(r, || {
                 if let Some(c) = git.read_ref(&pin)? {
                     git.delete_ref(&pin, &c)?;
                 }

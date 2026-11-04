@@ -14,10 +14,22 @@ fn prepare(fx: &Dfx) -> Core {
         alert: Arc::new(|_| {}),
         reconcile_every: fx.reconcile_every,
         catch_up_every: fx.catch_up_every,
+        config_poll_every: std::time::Duration::from_millis(50),
         background_main_sync: false,
     };
-    crate::startup::prepare(opts, fx.confirmer(vec![]).0, &|p| {
-        Git::open_with_env(p, &fx.sb.git_env())
+    let env: Vec<(String, Option<std::ffi::OsString>)> = fx
+        .sb
+        .git_env()
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.map(|v| v.to_os_string())))
+        .collect();
+    crate::startup::prepare(opts, fx.confirmer(vec![]).0, &move |p| {
+        Git::open_with_env(
+            p,
+            &env.iter()
+                .map(|(k, v)| (k.as_str(), v.as_deref()))
+                .collect::<Vec<_>>(),
+        )
     })
     .unwrap()
 }
@@ -65,6 +77,7 @@ fn setup(d: &Daemon<'_>, trackers: &Trackers<'_>) -> SessionId {
 fn unpublished_true_when_tracker_reset_unscanned() {
     let fx = Dfx::new();
     let core = prepare(&fx);
+    let _catalog = core.admit();
     let d = Daemon::start(&core).unwrap();
     let trackers = Trackers::new(&core);
     let id = setup(&d, &trackers);
@@ -82,6 +95,7 @@ fn unpublished_true_when_tracker_reset_unscanned() {
 fn unpublished_compares_generation_separately_and_checks_pending_inbox() {
     let fx = Dfx::new();
     let core = prepare(&fx);
+    let _catalog = core.admit();
     let d = Daemon::start(&core).unwrap();
     let trackers = Trackers::new(&core);
     let id = setup(&d, &trackers);
@@ -102,6 +116,7 @@ fn unpublished_compares_generation_separately_and_checks_pending_inbox() {
 fn hook_flushes_tracker_before_reading_inbox() {
     let fx = Dfx::new();
     let core = prepare(&fx);
+    let _catalog = core.admit();
     let d = Daemon::start(&core).unwrap();
     let trackers = Trackers::new(&core);
     let id = setup(&d, &trackers);
@@ -123,6 +138,7 @@ fn hook_flushes_tracker_before_reading_inbox() {
 fn unpublished_uses_reconciled_overlay_even_with_empty_checkpoint() {
     let fx = Dfx::new();
     let core = prepare(&fx);
+    let _catalog = core.admit();
     let d = Daemon::start(&core).unwrap();
     let trackers = Trackers::new(&core);
     let id = setup(&d, &trackers);

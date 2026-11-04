@@ -59,6 +59,7 @@ pub struct Options {
     /// [`CATCH_UP_EVERY`](crate::CATCH_UP_EVERY) in production
     /// (rm-followups §1.6 T2); tests lengthen or shorten it.
     pub catch_up_every: Duration,
+    pub config_poll_every: Duration,
     /// Test-only scheduler admission; direct worker passes remain callable.
     #[cfg(feature = "test-seams")]
     pub background_main_sync: bool,
@@ -77,6 +78,7 @@ impl Options {
             alert: Arc::new(|line: &str| eprintln!("git-stratad: {line}")),
             reconcile_every: crate::RECONCILE_EVERY,
             catch_up_every: crate::CATCH_UP_EVERY,
+            config_poll_every: Duration::from_secs(2),
             #[cfg(feature = "test-seams")]
             background_main_sync: true,
         }
@@ -235,12 +237,19 @@ impl BeforeCheckpoint for DaemonBefore {
     }
 }
 
+pub(crate) type GitOpener = dyn Fn(&Path) -> Result<Git> + Send + Sync;
+
 /// Everything the daemon owns for its lifetime (steps 2–7).
 pub struct Core {
     pub upstream: crate::upstream::Cache,
     pub opts: Options,
     pub config: Config,
-    pub store: Store,
+    pub store: Arc<Store>,
+    pub catalog: strata_session::catalog::CatalogCell<crate::catalog::Catalog>,
+    pub(crate) commit: Mutex<()>,
+    pub reload: Arc<crate::reload::ReloadState>,
+    pub(crate) open_git: Arc<GitOpener>,
+    pub(crate) started: SystemTime,
     pub gits: BTreeMap<RepoName, Git>,
     pub locks: Locks,
     pub env: InstallEnv,
@@ -255,7 +264,11 @@ pub struct Core {
 
 /// Steps 2–7. `open_git` is `Git::open` in production (tests pass
 /// `Git::open_with_env` with a sandbox HOME).
-pub fn prepare(opts: Options, confirmer: Confirmer, open_git: &dyn Fn(&Path) -> Result<Git>) -> Result<Core> {
+pub fn prepare(
+    opts: Options,
+    confirmer: Confirmer,
+    open_git: &(impl Fn(&Path) -> Result<Git> + Clone + Send + Sync + 'static),
+) -> Result<Core> {
     // 2. Single instance before anything else is read.
     let instance = InstanceLock::take(&crate::lock_path(&opts.config_dir))?;
     prepare_locked(opts, confirmer, open_git, &mut Some(instance))
@@ -268,17 +281,22 @@ pub fn prepare(opts: Options, confirmer: Confirmer, open_git: &dyn Fn(&Path) -> 
 pub fn prepare_locked(
     opts: Options,
     confirmer: Confirmer,
-    open_git: &dyn Fn(&Path) -> Result<Git>,
+    open_git: &(impl Fn(&Path) -> Result<Git> + Clone + Send + Sync + 'static),
     instance: &mut Option<InstanceLock>,
 ) -> Result<Core> {
     if instance.is_none() {
-        return Err(StrataError::new(Code::InvalidInput, "prepare_locked without the instance lock")
-            .with_detail(json!({ "reason": "no_instance_lock" })));
+        return Err(StrataError::new(
+            Code::InvalidInput,
+            "prepare_locked without the instance lock",
+        )
+        .with_detail(json!({ "reason": "no_instance_lock" })));
     }
     // 3. Config: parse (TOML + validate in file order), then validate.
-    let text = retry_eintr(|| fs::read_to_string(&opts.config_file)).map_err(|e| classify_io_error(&e, IoSide::Read, &opts.config_file))?;
+    let text = retry_eintr(|| fs::read_to_string(&opts.config_file))
+        .map_err(|e| classify_io_error(&e, IoSide::Read, &opts.config_file))?;
     let mut config = Config::parse(&text)?;
     config.validate()?;
+    let source = config.clone();
     // 4. Every path exists and is its own realpath.
     for (name, rc) in &config.repos {
         check_realpath(name, &rc.path)?;
@@ -294,7 +312,7 @@ pub fn prepare_locked(
     }
     // 6. The store checks its own clean-shutdown marker.
     let checkouts: Vec<&Path> = config.repos.values().map(|r| r.path.as_path()).collect();
-    let store = Store::open(&config.paths.root, &checkouts)?;
+    let store = Arc::new(Store::open(&config.paths.root, &checkouts)?);
     // deps-drift §2.4: publish's install-input snapshots of a stopped daemon.
     for p in strata_deps::clean_snapshots(&config.paths) {
         tracing::warn!(path = %p.display(), "an install-input snapshot could not be removed");
@@ -303,7 +321,9 @@ pub fn prepare_locked(
     // otherwise). Entries are `<pid>-…`; a live owner's are kept.
     sweep_exports(&config.paths.root);
     // Dev-port leases (config [dev_ports]); validated with the config.
-    store.set_dev_ports_policy(Some(strata_store::DevPortsPolicy::probing(config.dev_ports.blocks()?)));
+    store.set_dev_ports_policy(Some(strata_store::DevPortsPolicy::probing(
+        config.dev_ports.blocks()?,
+    )));
     // 7. One Git per repo; two names for one repository → NameTaken.
     let mut gits = BTreeMap::new();
     let mut ids: BTreeMap<RepoId, RepoName> = BTreeMap::new();
@@ -321,19 +341,42 @@ pub fn prepare_locked(
         gits.insert(name.clone(), git);
     }
     let locks = Locks::new(config.repos.keys().cloned(), opts.lock_wait);
+    locks.set_store(store.clone());
+    let reload = Arc::new(crate::reload::ReloadState::default());
+    let wake = reload.clone();
+    locks.set_close_hook(Arc::new(move || wake.wake()));
+    let catalog = strata_session::catalog::CatalogCell::new(crate::catalog::Catalog::build(
+        source,
+        gits.clone(),
+        pins.snapshot(),
+        1,
+        crate::reload::source_hash(text.as_bytes())?,
+    )?);
+    locks.set_catalog(catalog.id());
     let warnings = Warnings::new(opts.alert.clone());
     for repo in pins.pending() {
         warnings.add(DaemonWarning::ConfigRelaxPending { repo });
     }
     let Some(instance) = instance.take() else {
-        return Err(StrataError::new(Code::InvalidInput, "prepare_locked without the instance lock")
-            .with_detail(json!({ "reason": "no_instance_lock" })));
+        return Err(StrataError::new(
+            Code::InvalidInput,
+            "prepare_locked without the instance lock",
+        )
+        .with_detail(json!({ "reason": "no_instance_lock" })));
     };
     Ok(Core {
+        catalog,
+        commit: Mutex::new(()),
+        reload,
+        open_git: Arc::new(open_git.clone()),
+        started: SystemTime::now(),
         main_sync: Default::default(),
         upstream: Default::default(),
         pins,
-        env: InstallEnv { path: opts.install_path.clone(), timeout: InstallEnv::DEFAULT_TIMEOUT },
+        env: InstallEnv {
+            path: opts.install_path.clone(),
+            timeout: InstallEnv::DEFAULT_TIMEOUT,
+        },
         before: DaemonBefore,
         opts,
         config,
@@ -346,7 +389,7 @@ pub fn prepare_locked(
     })
 }
 
-fn check_realpath(name: &RepoName, path: &Path) -> Result<()> {
+pub(crate) fn check_realpath(name: &RepoName, path: &Path) -> Result<()> {
     let real = retry_eintr(|| fs::canonicalize(path)).map_err(|e| {
         StrataError::new(Code::InvalidInput, format!("repo {name}: {} does not exist", path.display()))
             .with_detail(json!({ "reason": "missing", "repo": name.as_str(), "path": path, "io": e.to_string() }))
@@ -361,7 +404,7 @@ fn check_realpath(name: &RepoName, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn check_realpath_root(root: &Path) -> Result<()> {
+pub(crate) fn check_realpath_root(root: &Path) -> Result<()> {
     // The root may not exist yet (Store::open creates it); when it does it
     // must be its realpath too.
     if let Ok(real) = retry_eintr(|| fs::canonicalize(root))
@@ -377,28 +420,49 @@ fn check_realpath_root(root: &Path) -> Result<()> {
 }
 
 impl Core {
+    /// Explicit operation entry; nested domain calls keep their caller's pin.
+    pub fn admit(&self) -> Option<strata_session::catalog::Pin<'_>> {
+        self.catalog
+            .pinned()
+            .is_err()
+            .then(|| self.catalog.enter(|c| c.generation))
+    }
+    pub fn cfg_hash(&self, repo: &RepoName) -> Result<String> {
+        Ok(strata_session::catalog::content_hash(
+            &serde_json::to_vec(&self.snapshot()?.config.repos.get(repo))
+                .map_err(|e| StrataError::new(Code::Corrupt, e.to_string()))?,
+        ))
+    }
+    pub fn snapshot(&self) -> Result<&crate::catalog::Catalog> {
+        self.catalog.pinned()
+    }
     /// The current pinned dependency policy, including a later `config relax`.
     pub fn effective_sync_deps(&self, repo: &RepoName) -> strata_types::SyncDeps {
-        self.pins.effective_sync_deps(repo)
+        self.snapshot()
+            .ok()
+            .and_then(|c| c.pins.get(repo))
+            .and_then(|p| p.sync_deps)
+            .unwrap_or(strata_types::SyncDeps::Confirm)
     }
 
     /// The effective (pinned) flags of `repo`.
     pub fn pinned(&self, repo: &RepoName) -> Result<PinnedFlags> {
-        self.pins
-            .pinned(repo)
+        self.snapshot()?
+            .pins
+            .get(repo)
+            .cloned()
             .ok_or_else(|| StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}")))
     }
 
-    /// `config_relax` (§5.5). `between` runs between `require` and
-    /// `validate` (test seam; the handler passes `&|| {}`).
     pub fn config_relax_with(&self, repo: &RepoName, between: &dyn Fn()) -> Result<()> {
-        let id = match self.gits.get(repo) {
-            Some(g) => g.repo_id(),
-            None => return Err(StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}"))),
-        };
-        confirm_flow::config_relax_with(&self.confirmer, &self.pins, repo, id, between)?;
-        self.warnings.remove(|w| matches!(w, DaemonWarning::ConfigRelaxPending { repo: r } if r == repo));
-        Ok(())
+        let _admission = self.admit();
+        let shown = self
+            .snapshot()?
+            .file_flags
+            .get(repo)
+            .cloned()
+            .ok_or_else(|| StrataError::new(Code::NoSuchRepo, "no repo"))?;
+        self.relax_shown(repo, &shown, between)
     }
 
     pub fn config_relax(&self, repo: &RepoName) -> Result<()> {
@@ -412,9 +476,17 @@ impl Core {
     /// §5.9 after the daemon is gone: `Store::close` (writes the store's
     /// clean-shutdown marker), unlink the socket, release the flock.
     pub fn close(self) -> Result<()> {
-        let Core { store, opts, instance, gits, .. } = self;
-        drop(gits);
-        let r = store.close();
+        let Core {
+            store,
+            opts,
+            instance,
+            locks,
+            ..
+        } = self;
+        drop(locks);
+        let r = Arc::try_unwrap(store)
+            .map_err(|_| StrataError::new(Code::Busy, "store is still borrowed"))?
+            .close();
         let _ = fs::remove_file(&opts.socket);
         drop(instance);
         r
@@ -442,6 +514,7 @@ pub struct Daemon<'a> {
 impl<'a> Daemon<'a> {
     /// Steps 8–11.
     pub fn start(core: &'a Core) -> Result<Daemon<'a>> {
+        let _admission = core.admit();
         // Review P1-5: a ref transaction killed between prepare and commit
         // (SIGKILL, power loss, our own killpg) leaves `refs/strata/*.lock`;
         // every later transaction on that ref would fail. Only locks older
@@ -450,14 +523,26 @@ impl<'a> Daemon<'a> {
         for (repo, git) in core.gits.iter() {
             let _ = core.locks.with_repo(repo, || {
                 for path in git.clear_stale_strata_locks(started) {
-                    core.warnings.alert_once(&format!("removed stale ref lock {}", path.display()));
-                    core.warnings.add(DaemonWarning::StaleRefLock { repo: repo.clone(), path });
+                    core.warnings
+                        .alert_once(&format!("removed stale ref lock {}", path.display()));
+                    core.warnings.add(DaemonWarning::StaleRefLock {
+                        repo: repo.clone(),
+                        path,
+                    });
                 }
                 Ok(())
             });
         }
         // 8. Sessions once.
-        let sessions = Sessions::open(&core.config, &core.gits, &core.store, &core.locks, &core.env, &core.before)?;
+        let sessions = Sessions::open(
+            &core.config,
+            &core.gits,
+            &core.store,
+            &core.locks,
+            &core.env,
+            &core.before,
+        )?
+        .with_catalog(core);
         // 9. recover, then gc per repo under its write lock.
         let recovered = sessions.recover()?;
         for p in &recovered.orphans_retired {
@@ -467,8 +552,13 @@ impl<'a> Daemon<'a> {
         // thread makes (started by `serve`, so after this recover).
         sessions.set_old_tree_mode(strata_session::OldTreeMode::Deferred);
         for repo in core.config.repos.keys() {
-            if let Err(e) = core.locks.with_repo(repo, || core.store.gc_repo(repo, GC_KEEP).map(|_| ())) {
-                core.warnings.add(DaemonWarning::VerifyFailed { message: format!("gc {repo}: {}", e.message) });
+            if let Err(e) = core
+                .locks
+                .with_repo(repo, || core.store.gc_repo(repo, GC_KEEP).map(|_| ()))
+            {
+                core.warnings.add(DaemonWarning::VerifyFailed {
+                    message: format!("gc {repo}: {}", e.message),
+                });
             }
         }
         // 10. Running → Unknown, then report every Unknown. No push, no replay.
@@ -476,22 +566,42 @@ impl<'a> Daemon<'a> {
         for rec in core.store.open_publishes()? {
             let id = rec.group.id;
             if rec.phase == PublishPhase::Running {
-                core.store.set_publish_phase(id, PublishPhase::Running, PublishPhase::Unknown, None, now)?;
+                core.store.set_publish_phase(
+                    id,
+                    PublishPhase::Running,
+                    PublishPhase::Unknown,
+                    None,
+                    now,
+                )?;
             }
             core.warnings.add(DaemonWarning::UnknownPublish { id });
         }
         // rm-followups §1.6 rule 4: each repo's rebase_pending rows are
         // reconstructed under its write lock (no publish runs yet).
         for (repo, git) in core.gits.iter() {
-            let Some(rc) = core.config.repos.get(repo) else { continue };
-            let sc = strata_publish::pending::Scope { store: &core.store, git, repo, branch: &rc.publish.branch };
-            if let Err(e) = core.locks.with_repo(repo, || strata_publish::pending::reconstruct(sc)) {
+            let Some(rc) = core.config.repos.get(repo) else {
+                continue;
+            };
+            let sc = strata_publish::pending::Scope {
+                store: &core.store,
+                git,
+                repo,
+                branch: &rc.publish.branch,
+            };
+            if let Err(e) = core
+                .locks
+                .with_repo(repo, || strata_publish::pending::reconstruct(sc))
+            {
                 tracing::warn!(repo = %repo, error = %e.message, "rebase_pending reconstruction failed");
             }
         }
         // Review M6: kept scenes of uncertain standalone/restore pushes.
         for (repo, commit, scene) in crate::resolve::push_scenes(&core.config.paths.root) {
-            core.warnings.add(DaemonWarning::UnknownPush { repo, commit, scene });
+            core.warnings.add(DaemonWarning::UnknownPush {
+                repo,
+                commit,
+                scene,
+            });
         }
         // 11. Quarantine and non-directory worktrees.
         for path in quarantine_entries(&core.config.paths.root) {
@@ -517,9 +627,6 @@ impl<'a> Daemon<'a> {
     /// `Sessions` at once (rm-followups §1.8: no restart needed).
     pub fn config_relax_with(&self, repo: &RepoName, between: &dyn Fn()) -> Result<()> {
         self.core.config_relax_with(repo, between)?;
-        if let Some(f) = self.core.pins.pinned(repo) {
-            self.sessions.set_regenerable(repo, f.regenerable);
-        }
         Ok(())
     }
 
@@ -683,6 +790,8 @@ impl<'a> Daemon<'a> {
 
     /// `daemon_status`: holds, queues, the daemon's warnings; never waits.
     pub fn daemon_status(&self, verify: bool) -> Result<Value> {
+        let _catalog = self.core.admit();
+        let catalog = self.core.snapshot()?;
         let mut warnings = self.core.warnings.snapshot();
         warnings.extend(self.core.locks.long_holds());
         warnings.extend(self.core.locks.long_waits());
@@ -695,7 +804,9 @@ impl<'a> Daemon<'a> {
             verify_result = match self.core.store.quick_check() {
                 Ok(()) => json!({ "ok": true }),
                 Err(e) => {
-                    warnings.push(DaemonWarning::VerifyFailed { message: e.message.clone() });
+                    warnings.push(DaemonWarning::VerifyFailed {
+                        message: e.message.clone(),
+                    });
                     json!({ "ok": false, "error": e })
                 }
             };
@@ -703,6 +814,11 @@ impl<'a> Daemon<'a> {
         if self.core.store.is_poisoned() && !warnings.contains(&DaemonWarning::StorePoisoned) {
             warnings.push(DaemonWarning::StorePoisoned);
         }
+        let last_attempt = self.core.reload.status();
+        let restart_required = last_attempt["restart_required"].as_array().cloned().unwrap_or_default();
+        let holds: Vec<_> = self.core.locks.holds().into_iter().filter(|h| catalog.config.repos.contains_key(&h.repo)).collect();
+        warnings.retain(|w| !matches!(w, DaemonWarning::ConfigRelaxPending { .. }));
+        warnings.extend(catalog.pending_relax.iter().cloned().map(|repo| DaemonWarning::ConfigRelaxPending { repo }));
         let mut warning_times = self.core.warnings.times(&warnings);
         for (w, time) in warnings.iter().zip(&mut warning_times) {
             if let DaemonWarning::AutoRebaseStuck { session, repo, .. } = w
@@ -712,9 +828,9 @@ impl<'a> Daemon<'a> {
             }
         }
         Ok(json!({
-            "holds": self.core.locks.holds(),
+            "holds": holds,
             "queues": self.core.locks.queue_snapshot(),
-            "repo_waiting": self.core.config.repos.keys()
+            "repo_waiting": catalog.config.repos.keys()
                 .map(|r| (r.as_str().to_string(), self.core.locks.repo_waiting(r)))
                 .collect::<BTreeMap<String, usize>>(),
             "warning_times": warning_times,
@@ -723,6 +839,7 @@ impl<'a> Daemon<'a> {
             "verify": verify_result,
             "reconcile": self.reconcile.lock().unwrap_or_else(|p| p.into_inner()).clone(),
             "features": crate::FEATURES,
+            "config": { "generation": catalog.generation, "hash": catalog.hash, "loaded_at": catalog.loaded_at, "last_attempt": last_attempt, "restart_required": restart_required },
             "fds": {
                 "open": open_fd_count(),
                 "limit": fd_limit().map(|(soft, _)| soft),
@@ -809,18 +926,46 @@ pub fn bind(socket: &Path) -> Result<UnixListener> {
 pub fn quarantine_entries(root: &Path) -> Vec<PathBuf> {
     let mut out = BTreeSet::new();
     let repos = root.join("sessions/.repos");
-    let Ok(sessions) = fs::read_dir(&repos) else { return Vec::new() };
+    // Check every traversed directory with lstat; a link is never a directory
+    // for this scan, including a dangling link at the quarantine location.
+    let real_dir = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    if !real_dir(&root.join("sessions")) || !real_dir(&repos) {
+        return Vec::new();
+    }
+    let Ok(sessions) = fs::read_dir(&repos) else {
+        return Vec::new();
+    };
     for s in sessions.flatten() {
-        let Ok(shadows) = fs::read_dir(s.path()) else { continue };
+        if !real_dir(&s.path()) {
+            continue;
+        }
+        let Ok(shadows) = fs::read_dir(s.path()) else {
+            continue;
+        };
         for sh in shadows.flatten() {
             let shadow = sh.path();
             if !shadow.extension().is_some_and(|e| e == "git") {
                 continue;
             }
-            if let Ok(q) = fs::read_dir(shadow.join("strata-quarantine")) {
-                for e in q.flatten() {
-                    out.insert(e.path());
+            if !real_dir(&shadow) {
+                out.insert(shadow);
+                continue;
+            }
+            let quarantine = shadow.join("strata-quarantine");
+            match fs::symlink_metadata(&quarantine) {
+                Ok(m) if !m.is_dir() => {
+                    out.insert(quarantine);
                 }
+                Ok(_) => {
+                    if let Ok(q) = fs::read_dir(&quarantine) {
+                        for e in q.flatten() {
+                            if fs::symlink_metadata(e.path()).is_ok() {
+                                out.insert(e.path());
+                            }
+                        }
+                    }
+                }
+                Err(_) => {}
             }
             let wt = shadow.join("worktrees");
             match fs::symlink_metadata(&wt) {

@@ -12,8 +12,8 @@ use std::time::SystemTime;
 use crate::sql::Connection;
 use serde::{Deserialize, Serialize};
 use strata_types::{
-    Action, BaseGen, BlobId, CheckpointId, CheckpointReason, CommitOid, DepsSet, DepsSetId, ProposalId,
-    ReleaseGroup, RepoName, RepoPath, SessionId, SessionManifest, StrataError, TreeOid,
+    Action, BaseGen, BlobId, CheckpointId, CheckpointReason, CommitOid, DepsSet, DepsSetId,
+    ProposalId, ReleaseGroup, RepoName, RepoPath, SessionId, SessionManifest, StrataError, TreeOid,
 };
 
 mod main_sync;
@@ -27,25 +27,25 @@ mod devports;
 mod errors;
 mod gc;
 mod gens;
+mod move_activity;
 mod open;
 mod records;
 mod retire;
 mod rm_state;
-mod move_activity;
 mod schema;
 mod seams;
 mod sessions;
 #[doc(hidden)]
 pub mod sql;
+mod txn;
 #[cfg(feature = "test-seams")]
 mod vfs;
-mod txn;
 
-#[cfg(feature = "test-seams")]
-pub use seams::{Seam, SyncCounts};
+pub use devports::{DEV_PORT_BLOCK, DevPortLease, DevPortsPolicy, Probe, bind_probe};
 pub use move_activity::{ActivityScope, MoveActivity, MoveActivityPolicy, MoveBaseline};
 pub use rm_state::{PendingSource, RebasePending, ReplayPlan, RmAttempt, RmOutcome};
-pub use devports::{DEV_PORT_BLOCK, DevPortLease, DevPortsPolicy, Probe, bind_probe};
+#[cfg(feature = "test-seams")]
+pub use seams::{Seam, SyncCounts};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 
@@ -72,6 +72,15 @@ pub struct Store {
 }
 
 impl Store {
+    /// Conservative hot-add guard, including retained manifests/generations.
+    /// No daemon request can create rows for a name absent from its catalog.
+    pub fn repo_has_state(&self, repo: &RepoName) -> Result<bool> {
+        self.read(|c| {
+            let count: i64 = c.query_row("SELECT EXISTS(SELECT 1 FROM workspaces w JOIN sessions s ON s.id=w.session WHERE w.repo=?1 AND s.lifecycle <> 'removed') OR EXISTS(SELECT 1 FROM publish_items i JOIN publishes p ON p.id=i.publish WHERE i.repo=?1 AND p.phase <> 'done') OR EXISTS(SELECT 1 FROM rebase_pending WHERE repo=?1) OR EXISTS(SELECT 1 FROM deps_proposals WHERE repo=?1 AND state IN ('pending','awaiting_publish')) OR EXISTS(SELECT 1 FROM base_trees WHERE repo=?1) OR EXISTS(SELECT 1 FROM base_gens WHERE repo=?1)", [repo.as_str()], |r| r.get(0)).map_err(crate::errors::sql_read)?;
+            Ok(count != 0)
+        })
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -454,5 +463,3 @@ pub struct GcReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<StrataError>,
 }
-
-

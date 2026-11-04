@@ -1,5 +1,6 @@
 //! git-strata, the command-line client (cli.md). Every call prints exactly
-//! one compact JSON envelope on stdout (§4) and exits 0 or 1; human text
+//! one compact JSON envelope on stdout (§4); config reload also uses exit
+//! codes 2/3/4 alongside the usual 0/1. Human text
 //! goes to stderr only. The binary never runs `git` itself and never
 //! calls strata-confirm (§1): confirmations happen in the daemon.
 
@@ -16,6 +17,7 @@ mod help;
 pub mod interrupt;
 pub mod launch;
 pub mod local;
+mod reload;
 pub mod ro;
 pub mod rpc;
 pub mod show;
@@ -84,7 +86,7 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
     // status-perf C: `ls --table` prints a table instead of a successful
     // envelope (a stated exception to D19); errors stay envelopes.
     let table = matches!(cli.cmd, Cmd::Ls { table: true });
-    let mut env = dispatch(cli.cmd);
+    let (mut env, reload_code) = dispatch(cli.cmd);
     if table && env.ok {
         return cmds::emit_table(&env);
     }
@@ -102,13 +104,23 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
         {
             if tty::stderr_is_tty() {
                 for p in &pending {
-                    eprintln!("pending proposal {} for {}", p["id"], p["repo"].as_str().unwrap_or(""));
+                    eprintln!(
+                        "pending proposal {} for {}",
+                        p["id"],
+                        p["repo"].as_str().unwrap_or("")
+                    );
                 }
             }
-            m.insert("pending_proposals".into(), serde_json::Value::Array(pending));
+            m.insert(
+                "pending_proposals".into(),
+                serde_json::Value::Array(pending),
+            );
         }
     }
-    let code = emit_stdout(&env);
+    let code = match reload_code {
+        Some(code) => reload::emit(&env, code),
+        None => emit_stdout(&env),
+    };
     interrupt::exit_override().unwrap_or(code)
 }
 
@@ -146,24 +158,32 @@ fn parse_error(argv: &[OsString], e: &clap::Error) -> StrataError {
     }
 }
 
-fn dispatch(cmd: Cmd) -> Envelope {
-    match cmd {
+fn dispatch(cmd: Cmd) -> (Envelope, Option<i32>) {
+    let mut reload_code = None;
+    let env = match cmd {
         Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status().unwrap_or_else(Envelope::err),
-        cmd => match run_cmd(cmd) {
+        cmd => match run_cmd(cmd, &mut reload_code) {
             Ok(env) => env,
             Err(e) => Envelope::err(e),
         },
-    }
+    };
+    (env, reload_code)
 }
 
-fn run_cmd(cmd: Cmd) -> Result<Envelope> {
+fn run_cmd(cmd: Cmd, reload_code: &mut Option<i32>) -> Result<Envelope> {
     use crate::confirm as c;
     // Argument checks that need no environment come first.
     match &cmd {
-        Cmd::Resolve { abandon, accept, .. } if *abandon == *accept => {
+        Cmd::Resolve {
+            abandon, accept, ..
+        } if *abandon == *accept => {
             return c::resolve_choice_error(*abandon as usize + *accept as usize);
         }
-        Cmd::Chain { accept_origin, restore, .. } if accept_origin.is_some() == *restore => {
+        Cmd::Chain {
+            accept_origin,
+            restore,
+            ..
+        } if accept_origin.is_some() == *restore => {
             return c::resolve_choice_error(accept_origin.is_some() as usize + *restore as usize);
         }
         _ => {}
@@ -177,8 +197,21 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Publish { from, assign, message, message_for } => c::publish(&ctx, &from, assign.as_deref(), &message, &message_for),
         Cmd::Assign { file, session } => c::assign(&ctx, &file, &session),
         Cmd::Rm { session, discard } => c::rm(&ctx, &session, discard),
-        Cmd::Resolve { session, repo, abandon, accept } => c::resolve(&ctx, &session, &repo, abandon, accept),
-        Cmd::Chain { repo, accept_origin, restore } => c::chain(&ctx, &repo, accept_origin, restore),
+        Cmd::Resolve {
+            session,
+            repo,
+            abandon,
+            accept,
+        } => c::resolve(&ctx, &session, &repo, abandon, accept),
+        Cmd::Chain {
+            repo,
+            accept_origin,
+            restore,
+        } => c::chain(&ctx, &repo, accept_origin, restore),
+        Cmd::Config(ConfigCmd::Reload) => reload::request(&ctx).map(|(env, code)| {
+            *reload_code = Some(code);
+            env
+        }),
         Cmd::Config(ConfigCmd::Relax { repo }) => c::config_relax(&ctx, &repo),
         Cmd::New {
             ticket_flag,
@@ -216,13 +249,37 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Daemon(DaemonCmd::Start) => launch::start(&ctx.paths.home),
         Cmd::Daemon(DaemonCmd::Stop) => launch::stop(&ctx.paths.home),
         Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status(),
-        Cmd::Session(SessionCmd::Ports { session, repo, all, check, reassign }) => devports::ports(
+        Cmd::Session(SessionCmd::Ports {
+            session,
+            repo,
+            all,
+            check,
+            reassign,
+        }) => devports::ports(
             &ctx,
-            &devports::PortsArgs { session: session.as_deref(), repo: repo.as_deref(), all, check, reassign },
+            &devports::PortsArgs {
+                session: session.as_deref(),
+                repo: repo.as_deref(),
+                all,
+                check,
+                reassign,
+            },
         ),
-        Cmd::Session(SessionCmd::Exec { session, repo, tauri, no_check, cmd }) => devports::exec(
+        Cmd::Session(SessionCmd::Exec {
+            session,
+            repo,
+            tauri,
+            no_check,
+            cmd,
+        }) => devports::exec(
             &ctx,
-            &devports::ExecArgs { session: session.as_deref(), repo: repo.as_deref(), tauri, no_check, cmd: &cmd },
+            &devports::ExecArgs {
+                session: session.as_deref(),
+                repo: repo.as_deref(),
+                tauri,
+                no_check,
+                cmd: &cmd,
+            },
         ),
     }
 }

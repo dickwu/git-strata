@@ -13,8 +13,8 @@ use strata_gitio::{Merge3, is_binary, merge3};
 use strata_overlay::{Base, Overlay, RebaseOptions, WorkspaceRef};
 use strata_store::{Lifecycle, PublishPhase, Store};
 use strata_types::{
-    BaseGen, DepsChanged, Code, CommitOid, DepsSetId, EntryKind, OverlayEntry, RepoName, RepoPath, SessionId, StrataError,
-    WorkspaceState,
+    BaseGen, Code, CommitOid, DepsChanged, DepsSetId, EntryKind, OverlayEntry, RepoName, RepoPath,
+    SessionId, StrataError, WorkspaceState,
 };
 
 use crate::stage::{Src, Ver, cap_text, git_mode, read_rooted};
@@ -133,7 +133,11 @@ fn sleep_busy() {
 /// waited for without a bound: this runs after the first visible write.
 /// With locks that do not wait (T2, rm-followups §1.6) a `Busy` take is
 /// returned instead.
-fn under_locks<T>(ctx: &Ctx, sessions: &[SessionId], f: &mut dyn FnMut() -> Result<T>) -> Result<T> {
+fn under_locks<T>(
+    ctx: &Ctx,
+    sessions: &[SessionId],
+    f: &mut dyn FnMut() -> Result<T>,
+) -> Result<T> {
     loop {
         let mut slot: Option<Result<T>> = None;
         let r = ctx.locks.with_rebase_sessions(sessions, &mut || {
@@ -142,19 +146,32 @@ fn under_locks<T>(ctx: &Ctx, sessions: &[SessionId], f: &mut dyn FnMut() -> Resu
                     slot = Some(f());
                     Ok(())
                 }) {
-                    Err(e) if e.code == Code::Busy && ctx.locks.waits() => sleep_busy(),
+                    Err(e)
+                        if e.code == Code::Busy
+                            && !strata_deps::pins_tightened(&e)
+                            && ctx.locks.waits() =>
+                    {
+                        sleep_busy()
+                    }
                     Err(e) => return Err(e),
                     Ok(r) => return r,
                 }
             }
         });
         match r {
-            Err(e) if e.code == Code::Busy && ctx.locks.waits() => sleep_busy(),
+            Err(e)
+                if e.code == Code::Busy
+                    && !strata_deps::pins_tightened(&e)
+                    && ctx.locks.waits() =>
+            {
+                sleep_busy()
+            }
             Err(e) => return Err(e),
             Ok(r) => {
                 r?;
                 return slot.unwrap_or_else(|| {
-                    Err(StrataError::new(Code::Unknown, "the repo lock never ran").with_detail(json!({ "reason": "lock" })))
+                    Err(StrataError::new(Code::Unknown, "the repo lock never ran")
+                        .with_detail(json!({ "reason": "lock" })))
                 });
             }
         }
@@ -335,7 +352,7 @@ fn policy_gates(
         }
         Err(e) => return Err(e),
     };
-    let patterns = ctx.sessions.regenerable(ctx.repo);
+    let patterns = ctx.sessions.regenerable(ctx.repo)?;
     let regen = strata_session::Regenerable::new(&patterns, ctx.cfg);
     let (kept, blocking): (Vec<RepoPath>, Vec<RepoPath>) =
         preview.conflicts.into_iter().partition(|p| overlay.get(p).is_some_and(|e| ws.tracked && regen.matches(e)));
@@ -738,18 +755,45 @@ pub(crate) fn workspace_base(ctx: &Ctx, s: &SessionId) -> Result<BaseGen> {
 /// replay's copy or a later publish retargeted it meanwhile, or a kept
 /// conflicting target) wins: that target is attempted instead, so the
 /// move never strands it behind a stale `from_*` [Codex P2 B4].
-pub(crate) fn after_publish(ctx: &Ctx, s: &SessionId, tree: &strata_types::TreeOid, head: &CommitOid) -> Result<RebaseReport> {
+pub(crate) fn after_publish(
+    ctx: &Ctx,
+    s: &SessionId,
+    tree: &strata_types::TreeOid,
+    head: &CommitOid,
+) -> Result<RebaseReport> {
     let row = ctx.store.rebase_pending_of(s, ctx.repo).ok().flatten();
-    if let Some(other) = row.as_ref().filter(|r| r.head.is_some() && r.head.as_deref() != Some(head.as_str())) {
-        return Ok(match crate::pending::attempt(ctx, other, MovePolicy::Auto)? {
-            Some(r) => r,
-            None => deferred("unpushed", json!({ "target": other.head, "published": head.as_str() })),
-        });
+    if let Some(other) = row
+        .as_ref()
+        .filter(|r| r.head.is_some() && r.head.as_deref() != Some(head.as_str()))
+    {
+        return Ok(
+            match crate::pending::attempt(ctx, other, MovePolicy::Auto)? {
+                Some(r) => r,
+                None => deferred(
+                    "unpushed",
+                    json!({ "target": other.head, "published": head.as_str() }),
+                ),
+            },
+        );
     }
     let old = workspace(ctx, s)?.base;
-    let g = BaseGen { repo: ctx.repo.clone(), tree: tree.clone(), deps: old.deps };
+    let g = BaseGen {
+        repo: ctx.repo.clone(),
+        tree: tree.clone(),
+        deps: old.deps,
+    };
     let row = row.filter(|r| r.head.as_deref() == Some(head.as_str()));
-    let r = rebase_one_with(ctx, s, &g, head, MovePolicy::Auto, Attempt { consume: row.as_ref().map(|r| r.rev), recheck: None })?;
+    let r = defer_fenced(rebase_one_with(
+        ctx,
+        s,
+        &g,
+        head,
+        MovePolicy::Auto,
+        Attempt {
+            consume: row.as_ref().map(|r| r.rev),
+            recheck: None,
+        },
+    ))?;
     if let Some(row) = &row {
         crate::pending::note_outcome(ctx, row, &r);
     }
@@ -1112,4 +1156,15 @@ pub fn diff_between(ctx: &Ctx, a: SessionId, b: SessionId, repo: &RepoName) -> R
     }
     out.only_b = mb.keys().filter(|p| !ma.contains_key(*p)).cloned().collect();
     Ok(out)
+}
+
+/// Cover the whole attempt, including preparation/base registration outside
+/// under_locks. Landing succeeded; catch-up retries using a fresh catalog.
+pub(crate) fn defer_fenced(r: Result<RebaseReport>) -> Result<RebaseReport> {
+    match r {
+        Err(e) if strata_deps::pins_tightened(&e) => {
+            Ok(deferred("pins_tightened", e.detail.unwrap_or(Value::Null)))
+        }
+        other => other,
+    }
 }

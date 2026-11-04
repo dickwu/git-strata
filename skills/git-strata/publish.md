@@ -79,8 +79,9 @@ repo with `confirm = false` publishes and pushes headless even when a push
 deploys). A gated `push`, or a `publish` that pushes to a gated repo, needs
 the human at a TTY: print the exact command and stop. A publish into a repo
 with `publish.push = false` is never gated; only its later `push` is.
-Loosening the config needs a daemon restart (by the human) plus the human's
-`config relax` (until then `daemon status` alerts `ConfigRelaxPending`). Full
+After loosening the config, run `git-strata config reload`, then give the human
+`git-strata config relax REPO` (`daemon status` alerts `ConfigRelaxPending`
+until confirmation). Supported changes need no restart. Full
 rule: the README's [Confirmation gate](https://github.com/dickwu/git-strata/blob/main/README.md#confirmation-gate-touch-id--tty).
 
 ## Dependencies

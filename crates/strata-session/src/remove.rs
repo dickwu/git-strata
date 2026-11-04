@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use strata_deps::RepoWriteLock;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -13,8 +14,8 @@ use strata_gitio::{Git, TreeItem};
 use strata_overlay::{OverlayWarning, WorkspaceRef};
 use strata_store::{Health, Lifecycle, MoveIntent, MoveState, PublishPhase, SessionRecord, Store};
 use strata_types::{
-    Action, CheckpointId, CheckpointReason, Code, CommitOid, ConfirmToken, EntryKind, OverlayEntry, RepoName, RepoPath,
-    SessionId, StrataError, TreeOid, WorkspaceState,
+    Action, CheckpointId, CheckpointReason, Code, CommitOid, ConfirmToken, EntryKind, OverlayEntry,
+    RepoName, RepoPath, SessionId, StrataError, TreeOid, WorkspaceState,
 };
 
 use crate::new::pin_ref;
@@ -126,7 +127,12 @@ impl Sessions<'_> {
         Ok(Action::RemoveDiscard { session: id.clone(), kept_trees })
     }
 
-    pub fn remove(&self, id: &SessionId, discard: bool, confirm: Option<ConfirmToken>) -> Result<RemoveReport> {
+    pub fn remove(
+        &self,
+        id: &SessionId,
+        discard: bool,
+        confirm: Option<ConfirmToken>,
+    ) -> Result<RemoveReport> {
         // ---- Phase A: named refusals; nothing is written.
         // 1.
         let rec = match self.store.session(id)? {
@@ -138,9 +144,13 @@ impl Sessions<'_> {
             let state = lc_name(cur);
             return Err(StrataError::new(
                 Code::InvalidInput,
-                format!("session {id} is {state}; another operation is in progress or was interrupted"),
+                format!(
+                    "session {id} is {state}; another operation is in progress or was interrupted"
+                ),
             )
-            .with_detail(json!({ "reason": "lifecycle", "state": state, "session": id.as_str() })));
+            .with_detail(
+                json!({ "reason": "lifecycle", "state": state, "session": id.as_str() }),
+            ));
         }
         // 2. The token is consumed by value here.
         let mut confirmed = None;
@@ -165,7 +175,11 @@ impl Sessions<'_> {
         self.refuse_open_files(&rec)?;
         let intents = self.store.move_intents(id)?;
         // 4.
-        let judged = if discard { Judged::default() } else { self.dirty_check(&rec, &intents)? };
+        let judged = if discard {
+            Judged::default()
+        } else {
+            self.dirty_check(&rec, &intents)?
+        };
 
         // ---- Phase B: internal clean-up and the BeforeRemove checkpoints.
         // 5.1
@@ -191,25 +205,47 @@ impl Sessions<'_> {
                 let cfg = self.repo_cfg(repo)?;
                 let git = self.git(repo)?;
                 let base = self.base_of(&ws.base)?;
-                let wsref = WorkspaceRef { session: id, repo, root: &ws.path, config: cfg, git, store: self.store };
-                let cp = self.before.checkpoint(&wsref, &base, CheckpointReason::BeforeRemove)?;
+                let wsref = WorkspaceRef {
+                    session: id,
+                    repo,
+                    root: &ws.path,
+                    config: cfg,
+                    git,
+                    store: self.store,
+                };
+                let cp = self
+                    .before
+                    .checkpoint(&wsref, &base, CheckpointReason::BeforeRemove)?;
                 checkpoints.insert(repo.clone(), cp.checkpoint.id);
                 // 5.3 (D57): what is about to be retired is what step 4 let go.
                 if !discard {
-                    let mut let_go: Vec<OverlayEntry> = judged.landed.get(repo).cloned().unwrap_or_default();
+                    let mut let_go: Vec<OverlayEntry> =
+                        judged.landed.get(repo).cloned().unwrap_or_default();
                     let_go.extend(judged.regenerable.get(repo).cloned().unwrap_or_default());
                     // §1.9 T3: a projected entry stays let go only if the same
                     // projection over the checkpoint still discharges it.
                     if let Some((onto, ents)) = judged.projected.get(repo) {
-                        let ov = strata_overlay::Overlay { base: ws.base.clone(), entries: cp.checkpoint.entries.clone() };
+                        let ov = strata_overlay::Overlay {
+                            base: ws.base.clone(),
+                            entries: cp.checkpoint.entries.clone(),
+                        };
                         let still = self
-                            .project(repo, ws, git, &base, &ov, ents, onto, &unstable(&cp.warnings))
+                            .project(
+                                repo,
+                                ws,
+                                git,
+                                &base,
+                                &ov,
+                                ents,
+                                onto,
+                                &unstable(&cp.warnings),
+                            )
                             .ok()
                             .flatten()
                             .unwrap_or_default();
                         let_go.extend(ents.iter().filter(|e| still.contains(e)).cloned());
                     }
-                    let regen = Regenerable::new(&self.regenerable(repo), cfg);
+                    let regen = Regenerable::new(&self.regenerable(repo)?, cfg);
                     let left = recheck(
                         self.store,
                         git,
@@ -233,7 +269,11 @@ impl Sessions<'_> {
                 format!(
                     "{} It changed while it was being removed ({}); run the same command again.",
                     self.refused_prefix(&rec),
-                    changed.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
+                    changed
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             )
             .with_detail(json!({
@@ -263,6 +303,12 @@ impl Sessions<'_> {
         // lifecycle and phase writes sit between it and the first retire.
         self.seams.hit("remove.before_removing", None)?;
         self.refuse_open_files(&rec)?;
+
+        // The complete record was read under the session queue. This successful
+        // check is the policy commitment point; teardown is also new's rollback
+        // and must never perform this check itself.
+        self.locks
+            .check_fence(&rec.manifest.repos.keys().cloned().collect::<Vec<_>>())?;
 
         // ---- Phase C: the visible steps.
         self.teardown(&rec, cur, None)?;
@@ -328,9 +374,17 @@ impl Sessions<'_> {
     ) -> Result<Vec<PathBuf>> {
         let id = &rec.manifest.id;
         let root = rec.manifest.root.clone();
-        let repos_dir = self.config.paths.root.join("sessions/.repos").join(id.as_str());
+        let repos_dir = self
+            .config
+            .paths
+            .root
+            .join("sessions/.repos")
+            .join(id.as_str());
         // 6.
-        if !self.store.set_lifecycle(id, cur, Lifecycle::Removing, None, SystemTime::now())? {
+        if !self
+            .store
+            .set_lifecycle(id, cur, Lifecycle::Removing, None, SystemTime::now())?
+        {
             return Err(StrataError::new(
                 Code::InvalidInput,
                 format!("session {id} changed state while it was being removed"),
@@ -367,7 +421,7 @@ impl Sessions<'_> {
             let pin = pin_ref(id);
             for repo in rec.manifest.repos.keys() {
                 let git = self.git(repo)?;
-                self.with_lock_unbounded(repo, || {
+                self.with_cleanup_lock(repo, || {
                     if let Some(c) = git.read_ref(&pin)? {
                         git.delete_ref(&pin, &c)?;
                     }
@@ -378,9 +432,18 @@ impl Sessions<'_> {
             phase = "record";
             self.store.set_session_phase(id, "record")?;
             self.seams.hit("remove.record", None)?;
-            if !self.store.set_lifecycle(id, Lifecycle::Removing, Lifecycle::Removed, None, SystemTime::now())? {
-                return Err(StrataError::new(Code::Corrupt, format!("session {id} left Removing during remove"))
-                    .with_detail(json!({ "reason": "lifecycle_changed", "session": id.as_str() })));
+            if !self.store.set_lifecycle(
+                id,
+                Lifecycle::Removing,
+                Lifecycle::Removed,
+                None,
+                SystemTime::now(),
+            )? {
+                return Err(StrataError::new(
+                    Code::Corrupt,
+                    format!("session {id} left Removing during remove"),
+                )
+                .with_detail(json!({ "reason": "lifecycle_changed", "session": id.as_str() })));
             }
             Ok(())
         })();
@@ -502,7 +565,7 @@ impl Sessions<'_> {
                         Ok(mut sp) => {
                             // §1.9 T3: what is left, projected onto the newest
                             // D57-eligible publish (the move's judgement).
-                            let regen = Regenerable::new(&self.regenerable(repo), cfg);
+                            let regen = Regenerable::new(&self.regenerable(repo)?, cfg);
                             let rest: Vec<OverlayEntry> =
                                 sp.remaining.iter().filter(|e| !regen.matches(e)).cloned().collect();
                             let mut rebased = 0usize;
@@ -559,7 +622,7 @@ impl Sessions<'_> {
                 // §1.8: tracked and healthy only (an untracked repo has no
                 // checkpoint to keep them).
                 if ws.tracked {
-                    let regen = Regenerable::new(&self.regenerable(repo), cfg);
+                    let regen = Regenerable::new(&self.regenerable(repo)?, cfg);
                     let (r, keep): (Vec<OverlayEntry>, Vec<OverlayEntry>) =
                         std::mem::take(&mut remaining).into_iter().partition(|e| regen.matches(e));
                     remaining = keep;

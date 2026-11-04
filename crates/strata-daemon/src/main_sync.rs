@@ -44,6 +44,7 @@ pub(crate) fn with_deps<T>(
     repo: &RepoName,
     f: impl FnOnce(&deps::Ctx) -> Result<T>,
 ) -> Result<T> {
+    let _catalog = core.admit();
     let mut cfg = core.repo_cfg(repo)?.clone();
     cfg.sync.deps = core.effective_sync_deps(repo);
     let ctx = deps::Ctx {
@@ -204,6 +205,9 @@ fn deps_auto_pass_inner(
                 ensure(ctx, p.id, &tmp.path())
             })();
             core.locks.with_repo(repo, || {
+                if core.catalog.current().config.repos.get(repo) != Some(ctx.cfg) {
+                    return Ok(());
+                }
                 // ensure_target may seal after a newer main observation.
                 if deps::get_proposal(&core.store,p.id)?.state != ProposalState::Pending {
                     delete_unapplied(core, p.id)?;
@@ -248,6 +252,9 @@ pub(crate) fn run_loop(core: &Core, repo: &RepoName, install: bool, stop: &dyn F
             }
         }));
         match run {
+            Ok(Err(e)) if strata_deps::pins_tightened(&e) => {
+                tracing::debug!(repo=%repo, "main-sync pass fenced by config reload")
+            }
             Ok(Err(e)) if e.code != Code::ReadOnly => {
                 tracing::warn!(repo=%repo,error=%e.message,"main-sync background pass failed")
             }

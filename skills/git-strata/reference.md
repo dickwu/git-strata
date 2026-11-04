@@ -57,12 +57,19 @@ data root (`[paths] root`, default `~/.strata`) as
 | `gc` | `--store` (also the store-wide gc: sessions removed over 30 days ago, their checkpoints and blobs, decided proposals, store/tmp, blob scrub), `--dry-run` (with `--store`: report only). Plain `gc` also empties `store/trash` entries older than 1 h that nothing names; refused/stuck on stderr. Agents run it only when the human asks, never after `Unknown` | no | no | `{}`; `--store`: `{store: report}`; `--store --dry-run`: `{dry_run:true,preview:{...}}` |
 | `du` | `--refresh` (re-size everything in the background; returns at once) | no | no | `{root,now,total,store{all,db,blobs,tmp,other,trash{...,entries,eligible{entries,reclaim_min,reclaim_max},young,floor_secs,gc}},bases{all,repos},deps{all,repos},sessions{all,list[{session,savings,...}]},savings{live,cumulative},scan{running,started,done,queued,full,failed,last_full},took_ms}`; every figure `{logical,allocated,private,shared,files,exact,errors,units,stale,pending,complete,as_of}` |
 | `daemon start` / `daemon stop` (human only; login HOME only, D38) | — | no | yes (uses launchd, not the socket) | `{}` or `{already:true}` |
-| `daemon status` | — | no | yes | `{running,socket,session?,holders:[],unknown_publishes:[],alerts:[],alerts_at?:[],pins_meta?:{}}` |
+| `daemon status` | — | no | yes | `{running,socket,session?,holders:[],unknown_publishes:[],alerts:[],alerts_at?:[],pins_meta?:{},config?:{generation,hash,loaded_at,last_attempt,restart_required}}` |
 | `resolve` | `--session <S> --repo <R>` + exactly one of `--abandon` / `--accept` | yes | no | `ResolutionReport` |
 | `chain` | `--repo <R>` + exactly one of `--accept-origin <replay\|drop>` / `--restore` | yes (`--restore` may also confirm) | no | `{repo,choice,outcome?\|refs_moved?}` |
+| `config reload` | — | no | no | ReloadReport in data; exits 0/1/2/3/4 |
 | `config relax <REPO>` | — | yes + confirm | no | — |
 | `session ports` | `--session <S>`, `--repo <R>` (defaults: cwd's session; cwd's repo, else every repo), or `--all` (read-only, every live workspace; unleased ones show `ports: null`, `reason: "unleased"`); `--check` (who listens on each port); `--reassign` (move exactly one workspace's lease to another block) | no | yes when the lease exists | `{leases:[{session,repo,path,tauri_app_root,ports:{web,connector,connector_mcp,aux},env:{...},check?}]}` |
 | `session exec -- <CMD>...` | `--session <S>`, `--repo <R>` (exactly one workspace), `--tauri` (add `--config $STRATA_TAURI_DEV_CONFIG` to `tauri dev`), `--no-check` | no | yes when the lease exists | none: the process becomes `<CMD>` (its output and exit code) with the lease env set |
+
+`daemon status` copies `config` when the daemon returns it; the field is absent
+when down or omitted by an older daemon. `generation`, `hash` and `loaded_at`
+describe the active catalog. `last_attempt` is null before any reload attempt,
+then the report plus `at` and a rejection `reason` when present;
+`restart_required` lists restart-only fields from that attempt.
 
 `checkpoint -m` with nothing changed returns the latest checkpoint instead of
 a new one; every new `--tool-call` ID records a row. `publish` records a fresh
@@ -84,7 +91,12 @@ Fixed `detail.reason` values produced by the CLI: `daemon_down`,
 `rpc_failed`, `readonly_client`. From `new`: `repo_flags`, `agent`. From `add`: `add_leftover` (code `Exists`). From `rm`: `changed_during_remove` (code `Dirty`). From `session ports` / `session exec`: `reassign_one`, `ambiguous_repo` (with `detail.repos`), `cwd_mismatch`, `tauri_launcher` (with `detail.fix`), `exec`, `unleased` (a `--all` entry, not an error), `already_running` / `foreign` (code `PortInUse`), `port_unidentified` / `port_probe_error` (code `Busy`), `ports_exhausted` (`Busy`; in `session ports` an entry with `"ports": null`, not an error), `lease_changed` (`Busy`, `--reassign`: check again), `not_active` (`NoSuchSession`), `daemon_too_old` / `no_policy` (`Unsupported`: tell the human); a command `exec` cannot find is `NoSuchPath`. From publish: `assigned`, `chain_rewound`,
 `chain_diverged`, `workspace_changed`, `plan_changed`; from push: `replay_conflict`,
 `replay_deps_unsealed`, `replay_too_long`, `chain_rewound`; from deps:
-`main_moved`; from `config relax`: `not_relaxed`; from the push guard:
+`main_moved`; from `config reload`: the daemon rejection reason (e.g. `parse`,
+`invalid_config`, `restart_required`, `stale_rows`, `spawn_failed`, `recovery_failed`
+for a new repo's pending-rebase reconstruction failure before publication),
+`config_rejected` when unspecified, `reload_pending`, `daemon_too_old`, or
+`invalid_reload_report`; from `config relax`: `not_relaxed`, `shown_required`,
+`config_not_applied`, `action_changed`; from the push guard:
 `url-rewritten`, `url-is-remote-name`, `empty-url`, `no-such-remote`.
 
 The client also preserves the daemon's `Busy too_many_open_files` reason when it sheds a
@@ -154,3 +166,16 @@ A non-conflict auto-deferral older than 24 hours appears as one Deferred item pe
 excluding sessions already covered by stuck apply proposals. Config relax items open Daemon.
 Error-class warnings may persist until the cause is dealt with and the human restarts the
 daemon. The tray never acknowledges, snoozes, approves or performs daemon writes.
+
+### Config reload
+
+After editing config.toml, run `git-strata config reload`. Its ordinary envelope
+`data` contains `outcome` (applied/unchanged/rejected/pending), `generation`, `repos`,
+`added`, `changed`, `restart_required`, `pending_relax`, and `reasons`. Check the
+repo name in `repos`, even on unchanged (the poll may already have applied it).
+Exit 0: applied/unchanged; 2: rejected, old catalog kept; 3: pending, rerun; 4: old
+daemon, ask the owner to restart. Other failures use exit 1. No TTY is required.
+Relaxations still require the human's `config relax`. Busy/pins_tightened ends the
+current operation; rerun from the command boundary. Landed publish rebases can
+report Deferred/pins_tightened and are retried by catch-up. Do not restart the
+daemon, use launchctl, or add a repo via an unimplemented add-repo command.

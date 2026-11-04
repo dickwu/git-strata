@@ -161,6 +161,7 @@ fn startup_and_config_restart_reconcile_existing_sessions() {
         let core = fx.prepare().unwrap();
         let s = {
             let d = Daemon::start(&core).unwrap();
+            let _catalog = core.admit();
             d.sessions
                 .new(None, std::slice::from_ref(&rn))
                 .unwrap()
@@ -219,8 +220,8 @@ fn config_relax_enrolls_deps_on_next_catch_up() {
     let v = ok(call(&server, "sync", json!({"session":s})));
     assert_eq!(v["repos"]["tool"]["result"], "source_only");
     assert!(core.store.rebase_pending_of(&s, &rn).unwrap().is_none());
-    ok(call(&server, "config_relax", json!({"repo":rn})));
-    assert_eq!(core.effective_sync_deps(&rn), SyncDeps::Apply);
+    ok(call(&server, "config_relax", json!({"repo":rn,"shown":strata_daemon::confirm_flow::flags_of(&fx.config.repos[&rn])})));
+    assert_eq!({ let _catalog = core.admit(); core.effective_sync_deps(&rn) }, SyncDeps::Apply);
     handlers::catch_up_pass(&d, SystemTime::now());
     let pending = core
         .store

@@ -65,7 +65,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 未知方法 → RPC `UnknownMethod`。参数对不上 → RPC `Failed`。
 
-方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 25 个以外不加方法（`sync` 是 main-sync 加的；`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
+方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 26 个以外不加方法（`sync` 是 main-sync 加的；`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
 
 | method | 作用 | 是否只读 |
 | --- | --- | --- |
@@ -89,7 +89,8 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `gc` | `store::gc_repo`；`repo` 为 null 时再 `store::gc_trash`；`store` 时改调 `store::gc_with`，`dry_run` 时只调 `store::gc_preview`（D33） | 否 |
 | `resolve_move` | `session::resolve_failed_move`。不查 TTY，不收凭据 | 否 |
 | `chain_resolve` | 人对 Rewound / Diverged 的显式处理。接受 origin 不推送；恢复只在快进时推 | 否 |
-| `config_relax` | 显式接受一次调松。文件变了不弹框。路径能编译。调松仍要这条命令；调紧立即生效 | 否 |
+| `config_relax` | 显式接受一次调松；shown 绑定展示的配置，确认后重新验证 | 否 |
+| `config_reload` | 校验并原子发布安全配置，等待新的尝试报告，无 TTY 要求 | 否 |
 | `daemon_status` | 锁、队列、Unknown 发布、可选 `quick_check` | 是 |
 | `du` | 数据根的磁盘用量，读缓存（§5.12） | 是 |
 | `ports_ensure` | `store::ensure_dev_ports`：一个工作区的 dev 端口租约，没有就分配（D39） | 否 |
@@ -123,7 +124,8 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `gc` | `{ "repo": RepoName\|null }` | `{ done, skipped, trash }`；`trash` 是 `TrashReport`（`repo` 为 null 时）或 null |
 | `resolve_move` | `{ "session": SessionId, "repo": RepoName, "abandon": bool, "accept": bool }` | `ResolutionReport`。两个布尔必须恰好一个为真，否则 RPC `Failed`，不调用 session |
 | `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice, "shown"?: CommitOid \| null }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
-| `config_relax` | `{ "repo": RepoName }` | `{}`。没有凭据字段。见 §5.5 |
+| `config_reload` | `{}` | ReloadReport，见 Config catalog and reload |
+| `config_relax` | `{ "repo": RepoName, "shown"?: PinnedFlags \| null }` | `{pins_meta, warnings?}`。`shown` 在反序列化时可省略或为 null，但 handler 会以 `InvalidInput shown_required` 拒绝；支持 `config.reload` 的客户端必须发送展示的 flags。没有凭据字段。见 §5.5 |
 | `daemon_status` | `{ "verify": bool }` | `holds`, `queues:[{session,holder,since,queued}]`, `repo_waiting`, `warnings`（含 LongWait）；见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc` |
 | `du` | `{ "refresh": bool }`（缺省 false） | 见 §5.12 |
 | `ports_ensure` | `{ "session": SessionId, "repo": RepoName }` | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
@@ -193,6 +195,12 @@ pub enum DaemonWarning {
     PublishRunning { id: u64 },
     /// 配置文件比钉住的值松，还没经 ConfigRelax 接受。
     ConfigRelaxPending { repo: RepoName },
+    /// 重载失败；detail 是 StrataError，hash 是尝试读取的配置哈希（读取/哈希计算失败时可为空）。
+    ConfigReloadFailed { reason: String, detail: serde_json::Value, hash: String },
+    /// 被拒配置中必须重启才能应用的字段。
+    ConfigRestartRequired { fields: Vec<String> },
+    /// 保留的 catalog 超过 1000 个；只保留最新计数，owner 重启可释放。
+    CatalogGrowth { generations: usize },
     /// Store::is_poisoned。
     StorePoisoned,
     /// quick_check 失败，或上一轮 gc 的 partial。
@@ -321,10 +329,10 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 
 | 编号 | 内容 | design §9 |
 | --- | --- | --- |
-| I1 | 一台机器一个进程。锁文件被占时第二个进程以 `Exists` 退出（`detail.reason = "daemon_running"`）。不用 `Busy`：`Busy` 只用于 repo 写锁或会话队列的写前等待 | §5 |
-| I2 | 每 repo 一把写锁，不可重入。先到先得。写前等 `LOCK_WAIT`，超时 `Busy`，什么都没写。写后的等待一直等到拿到，不返回 `Busy`（「Waits after a call's first visible write are not bounded」） | §8、不变量 6 |
-| I3 | 每会话一条队列，先到先得，不可重入。同一会话的 checkpoint、restore、`rm`、`move_workspace`、`resolve_failed_move` 串行。进行中的不取消，后来的排队，不返回错误码 | §8 |
-| I4 | 建造锁 → 会话队列（`SessionId` 升序）→ repo 写锁（一次只拿一个 repo 的）。持有队列或 repo 锁时不等建造锁 | — |
+| I1 | 一台机器一个进程。锁文件被占时第二个进程以 `Exists` 退出（`detail.reason = "daemon_running"`）。`Busy` 用于写前等待和配置 fence 的 `pins_tightened` 拒绝 | §5 |
+| I2 | 每 repo 一把写锁，不可重入。先到先得。写前等 `LOCK_WAIT`，超时 `Busy`，什么都没写。写后的普通锁等待一直等到拿到；配置收紧是例外：每次 take/wake/grant 都可返回 `Busy pins_tightened`，调用不重试。已落地 publish 的 rebase 记 Deferred，publish 行仍为 Done | §8、不变量 6 |
+| I3 | 每会话一条队列，先到先得，不可重入。同一会话的 checkpoint、restore、`rm`、`move_workspace`、`resolve_failed_move` 串行。持有者不取消，后来的排队；每次 take/wake/grant 重新检查会话成员，过时的配置代以 `Busy pins_tightened` 拒绝 | §8 |
+| I4 | 建造锁 → 会话队列（`SessionId` 升序）→ repo 写锁（一次只拿一个 repo 的）。持有队列或 repo 锁时不等建造锁。reload/relax 的 committer 只能在未持有建造锁、队列或 repo 锁时取得；committer 内不等待这些锁，也不等待凭据或网络 | — |
 | I5 | status、grep、files、diff、deps_list、publish_plan、daemon_status 不排队，不等写锁 | §8 |
 | I6 | 启动时把残留的 `PublishPhase::Running` 改成 `Unknown`（store 允许这条边），然后由 `status` 和 `daemon_status` 报出。不重放、不删除、不调用 `git push`。留下 Running 不是不变量 6 的不确定状态 | 不变量 6 |
 | I7 | 凭据不出进程。RPC 参数里没有能代表「已确认」的字段。action 由 daemon 从请求推出，不采用客户端传来的 | 不变量 7 |
@@ -414,11 +422,11 @@ value; workers should use the accessor for subsequent passes.
 
 组装：`session::status`（或 `all`）的 `SessionStatus`，加上 `overlay::compute` 在读时算出的 `changed`（session §2 第 5 条，daemon 照做）、`Tracker::warnings`、`leftovers`、`deps::attempts`、`open_proposals`、每个 repo 的 `publish_chain`（Rewound / Diverged 时带上 a..c；只在 `chains: true` 时算，否则回复里**没有** `chains` 键，不是 `{}`——缺键是「没算」，`{}` 是「算了但没有」。status-perf D2：CLI 从不发 `chains`；GUI 只在会话详情里发。旧 daemon 不认识 `chains`，以 RPC `Failed`「unknown field `chains`」拒绝，GUI 见到这一种拒绝就去掉它重发一次）。健康 `Unknown` 的工作区带上两个选择：`Abandon` 与 `Accept`，不执行。`OldTreeKept.holders` 原样带上。restore 暂存目录非空时，session 的 `RestoreScene` 已经含 `plan.json` 的路径，不另造。
 
-再加上 §3 的 `DaemonWarning`：隔离、attach、超过 30 秒的 `LongHold`、`UnknownPublish`、`PublishRunning`、`ConfigRelaxPending`、`StorePoisoned`。持锁不到 30 秒的不进 `status`（进 `daemon_status`）。
+再加上 §3 的 `DaemonWarning`：隔离、attach、超过 30 秒的 `LongHold`、`UnknownPublish`、`PublishRunning`、`ConfigRelaxPending`、`ConfigReloadFailed`、`ConfigRestartRequired`、`CatalogGrowth`、`StorePoisoned`。持锁不到 30 秒的不进 `status`（进 `daemon_status`）。重载成功（含 unchanged）清除 `ConfigReloadFailed` 与 `ConfigRestartRequired`；`CatalogGrowth` 保留最新计数，只提示一次。
 
 `ObserveFailed` 不在 `DaemonWarning` 里重定义。它是 `NewWarning` 或这次 RPC 的 `data.warnings`。
 
-`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope"]`（D38、D39；后两项见 main-sync）；没有这个键的 daemon 一个也不支持。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
+`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload"]`（D38、D39；`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload）；没有这个键的 daemon 一个也不支持。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
 
 stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看见某个影子仓库的 `PrePushGuardDisabled`。同一条不重复打。这些警告 JSON 里都有，不靠人去翻日志；R2 activity-scope 的 once-per-repo 日志提示是下文注明的例外。
 
@@ -502,7 +510,7 @@ and a different key cannot inherit it. With no matching cached value, the summar
    实现（review M7）：不用普通的 `git.push` 再另开事务——那样跟踪 ref 由 push 自己单独推进（失败只记日志），锚点在后一个事务里，崩溃或读者会看到一个动了另一个没动。改用 gitio 的 `push_recorded`（`push_published` 加一组只比较的更新）：远端接受之后，同一个 ref 事务里核对链仍是 c、把跟踪 ref 与锚点一起设成 c，各自对推送前读到的值比较并交换；事务不成 → `Unknown`（本地什么都没动，暂存现场照 M6 保留）。[实现时补的决定]
 9. 放开锁。`main_tip` 动了就 `observe_main`，失败只是 `ObserveFailed`。第 4 步的具名拒绝不被这次观察改成 `Unknown`。ref 事务已经调用过的，失败只能是 `Unknown`。
 
-**`config_relax`**：显式接受一次调松。params 只有 `repo`。不查 TTY。不占会话队列，不拿 repo 写锁。文件变了不弹框：启动、重载、KeepAlive 重启都不调用 `require`。调紧仍立即写回，不要凭据。
+**`config_relax`**：显式接受一次调松。支持 config.reload 的 daemon 还要求 `shown`，确认后在 committer 下重新验证文件与展示的 flags。不查 TTY。不占会话队列，不拿 repo 写锁。文件变了不弹框：启动、重载、KeepAlive 重启都不调用 `require`。调紧仍立即写回，不要凭据。
 
 1. 名字不在配置里 → `NoSuchRepo`，不弹框。
 2. 该 repo 的文件并不比钉松 → `InvalidInput`，`detail.reason = "not_relaxed"`，不弹框 [我的决定 D20]。
@@ -623,7 +631,7 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | `unknown_publish_reported_on_restart_not_replayed` | 一行 `Unknown` 重启后仍在 status 里；一行 `Running` 被改成 `Unknown` 再报出；两种都不调用 `git push`，也不重放 | 新增 |
 | `cli_readonly_commands_work_without_daemon` | daemon 没听 socket 时，`status`、`grep`、`files` 仍返回 JSON（cli 直接读）；`publish` 与 `push` 失败并说明 daemon 没在跑（`ReadOnly`） | 新增 |
 | `status_does_not_wait_on_write_lock` | 写锁被占住时，`status`、`grep`、`files`、`diff`、`deps_list`、`daemon_status` 都在 1 秒内返回 | `layerfs-api/tests/sdk_reads_during_publish.rs::reads_do_not_wait_for_a_held_publication_lane` |
-| `busy_only_before_first_write` | 调用还没写时，锁超过 30 秒 → `Busy`，什么都没写；已经写过的调用在同样的持锁下等到拿到，不返回 `Busy` | `layerfs-persistence/tests/writer_admission.rs::queued_writers_outlive_the_old_window_and_all_succeed` |
+| `busy_only_before_first_write` | 调用还没写时，锁超过 30 秒 → `Busy`，什么都没写；已经写过的调用在普通竞争下等到拿到；配置 fence 的 `Busy pins_tightened` 仍立即返回 | `layerfs-persistence/tests/writer_admission.rs::queued_writers_outlive_the_old_window_and_all_succeed` |
 | `quarantine_is_an_alert` | 隔离区有一条链接时，status 的 warnings 点名它，stderr 有一行，且这次启动没有对那个影子仓库跑 `git gc`、`worktree prune` 或 `git commit` | 新增 |
 | `locks_released_on_return_error_and_panic` | 处理器正常返回、返回 `Err`、panic 之后，repo 写锁与会话队列都已释放；随后的请求不是因为中毒而 `Busy`；原错误原样返回 | `layerfs-telemetry/tests/observations.rs::optional_windows_release_on_return_error_and_unwind` |
 | `second_instance_refused_then_reacquired` | 持有期间第二个进程得到 `Exists`（reason `daemon_running`），不是 `Busy`；停机后 1 秒内新进程能拿到锁并 bind | `layerfs-telemetry/tests/platform.rs::concurrent_final_handles_release_the_owned_writer` |
@@ -671,6 +679,7 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | `anchor_advances_after_fetch` | fetch 之后、仍在 repo 锁里，`ChainState` 为 Equal、Leads、Behind 或 Diverged 且 `git.merge_base(o, c)` 是旧锚点的后代时，锚点比较并交换到该 commit；Absent 与 Rewound 不动 | 新增 |
 | `observe_failed_does_not_fail_new_or_publish` | `observe_main` 返回错误时 `new` 与 `publish` 仍成功，`data.warnings` 含 `ObserveFailed`；daemon 再观察一次 | 新增 |
 | `toolcall_does_not_wait_out_approve_ensure` | `deps_approve` 的 `ensure_target` 冷装期间，该会话的 ToolCall checkpoint 不等待；移动阶段才排队 | 新增 |
+| `config_relax_not_applied_on_reload_then_confirmed_without_restart` | reload 调松只记 pending_relax / ConfigRelaxPending，pin 字节不变，不弹框；确认后立即采用，后续 reload 不撤销 | `tests/reload.rs` |
 | `config_relax_not_applied_on_restart` | 停机期间把 `deploy_on_push` 从 true 改成 false，重启后推送仍要确认；status 含 `ConfigRelaxPending`；没有弹框 | 新增 |
 | `config_relax_does_not_prompt_on_file_change` | 只改 `pins` 所对的配置文件、不发 `config_relax`：`require` 调用次数为 0。调紧立即写回，不要凭据 | 新增 |
 | `config_relax_writes_pin_after_validate` | 顺序是 `require`，然后 `validate` 核销，然后才写 `pins.json`。validate 失败则钉的字节不变。confirm 不写这个文件 | 新增 |
@@ -1169,3 +1178,79 @@ path performs no fetch. Status marks an ahead/diverged graph unchecked when B
 is unavailable rather than guessing that no publish target contains it.
 
 R2 activity warnings `quiet_skip_tracked` and `deps_dir_tracked` are once-per-repo daemon-log warnings. Tracked matches remain counted; they never reject a move. Pin audit appends delimit an unterminated tail before writing the next record, preserving earlier complete history.
+
+## Config catalog and reload (phase 1)
+
+`config.reload` in FEATURES advertises `config_reload {}` (write RPC, strict
+unknown-field rejection), source snapshots and `config_relax {repo, shown}`.
+`config_reload` waits for an attempt that began reading after the request counter
+was incremented. Its report is the envelope's data, with the shape and exit codes
+in [config.md](../config.md#hot-reload-configreload). `daemon_status.config` exposes
+`generation`, `hash`, `loaded_at`, `last_attempt` and `restart_required`.
+`ConfigReloadFailed` and `ConfigRestartRequired` warnings surface in status, the
+GUI modal and the feature-gated tray status line; no notification is sent.
+
+A mutex-protected append-only arena owns immutable catalogs. An Acquire/Release
+index publishes a fully built value. Every RPC pins one index before RequestScope;
+scoped session helpers inherit it with spawn_pinned. Background items pin at entry.
+Missing bindings return Corrupt/no_pinned_catalog; a lock take without a binding
+counts as generation 0. Git clones already share their Arc-backed internals.
+The insert-only lock map reuses Arc FIFOs; Held owns the Arc and never retains a
+map read guard while waiting or executing. Paths.root and status.parallel stay
+fixed, so immutable startup borrows of these fields remain valid.
+
+The committer is acquired with no build lock, queue or repo lock held (I4). It
+serializes reload and accepted relaxations, never waits for a human or network,
+and rechecks the current generation after preparation. Validation, same-volume,
+repo identity, retained store state and recovery checks precede publication. New
+loop pairs are fallibly spawned and parked; failure cancels them. The reload
+worker also supervises these loops in its scope. Pins are written durably before
+FIFOs/fences/catalog publication and releasing latches. No request waits for reload;
+`toolcall_does_not_wait_out_approve_ensure` remains an invariant. The config source uses SHA-256 from macOS CommonCrypto; per-repo cache keys
+use the workspace's existing BLAKE3 implementation. Neither adds a dependency. Tracker inputs and upstream summaries/tips carry the source
+configuration key so late old writebacks cannot satisfy new reads.
+
+After reconciliation, a changed push/confirm/regenerable/sync_deps flag stores a
+monotonic fence before publishing the index. No nonexistent `stricter` helper is
+needed; deploy_on_push changes do not fence. Waiters check fences at every wake;
+session queues read the manifest membership under the queue grant, including
+repos added while waiting. Store reads are not cached at enqueue. Closing Locks
+wakes reload waiters too, including poisoned-store exit, before connection joins.
+
+Fence handling spans multiple crates: strata-session's unbounded helper and
+strata-deps seal stop retrying Busy/pins_tightened. Seal closes the attempt as
+interrupted and releases build ownership. New rolls back through teardown; add
+uses exempt cleanup unpins. Remove checks between open-files validation and
+teardown, never within teardown (which new rollback also calls).
+collect_session_leftovers has an ordinary fenced take before Removing. Removal
+unpins after Removing are exempt. strata-publish wraps the whole post-landing
+rebase attempt, including base_for/base registration, and records the ordinary
+`defer_pending` outcome, never `mark_unfinished`. Thus landing closes Done.
+
+Main-sync logs fence exits at debug, other non-ReadOnly errors at warn. A fenced
+deps_auto pass can leave its durable row Installing, as a stop would; a later
+pass resumes or supersedes it when the applicable policy permits. Fetch results prepared under changed repo settings are
+discarded at revalidation. Relaxation publishes without a fence, retains other
+pins, and cannot overwrite a concurrent committed reload from an old snapshot.
+
+
+### Review-round implementation choices
+
+Hot-added Git handles and repo identity lookups use the operation's pinned
+catalog, including workspace moves, sync, dependency rollout and publish rebase.
+Hot-add checks the same shadow quarantine enumeration as startup, filtered by
+repo name: `<root>/sessions/.repos/<session>/<repo>.git/strata-quarantine`.
+The scan uses no-follow metadata at each directory boundary and for entries;
+retained quarantine entries without store rows still require an owner restart.
+
+New-repo stale-lock cleanup and pending reconstruction run before the new FIFO
+is published. That FIFO is unreachable to requests, so taking it is unnecessary.
+A pre-prompt `shown` mismatch is `InvalidInput action_changed`; a change after
+confirmation is `NotConfirmed action_changed`. An added repo appears in both
+`added` and `changed` (as `repos.<name>`). These are deliberate deviations from
+the design's wording. CatalogGrowth retains only the latest count and alerts
+once. A fenced old-tree check requeues the item to enter a fresh catalog later.
+
+The worker still polls its condition variable every 20 ms when idle. Tightening
+wakes session queues, and each waiter rereads membership under its FIFO mutex.
+Those bounded efficiency follow-ups are deferred; they do not weaken the fence.

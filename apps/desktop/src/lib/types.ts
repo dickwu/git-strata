@@ -20,6 +20,13 @@ export interface DaemonStatus {
   api?: number;
   version?: string;
   features?: string[];
+  config?: {
+    generation: number;
+    hash: string;
+    loaded_at: unknown;
+    last_attempt: unknown;
+    restart_required: string[] | null;
+  };
   /** Descriptor use (daemons from ffe316b on). Optional: older daemons omit it. */
   fds?: { open: number; limit: number; accept_errors: number };
   /** Not sent by any daemon yet; typed so the status modal picks them up when they are. */

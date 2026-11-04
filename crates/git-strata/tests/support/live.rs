@@ -133,7 +133,10 @@ impl Live {
 
     fn options(&self) -> Options {
         let alerts = self.alerts.clone();
-        let config_dir = self.home.canon().join("Library/Application Support/git-strata");
+        let config_dir = self
+            .home
+            .canon()
+            .join("Library/Application Support/git-strata");
         Options {
             socket: strata_daemon::socket_path(&config_dir),
             config_file: config_dir.join("config.toml"),
@@ -143,6 +146,7 @@ impl Live {
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
             reconcile_every: strata_daemon::RECONCILE_EVERY,
             catch_up_every: strata_daemon::CATCH_UP_EVERY,
+            config_poll_every: Duration::from_millis(50),
             background_main_sync: false,
         }
     }
@@ -158,10 +162,19 @@ impl Live {
 
     /// As `serve_with`, also handing `f` the authenticator's prompt log.
     /// Every request's method is appended to `self.requests`.
-    pub fn serve_scripted<R>(&self, verdicts: Vec<Verdict>, f: impl FnOnce(&Core, &PromptLog) -> R) -> R {
+    pub fn serve_scripted<R>(
+        &self,
+        verdicts: Vec<Verdict>,
+        f: impl FnOnce(&Core, &PromptLog) -> R,
+    ) -> R {
         let auth = ScriptedAuth::new(true, Ok(()), verdicts);
         let log = auth.log();
-        let c = Confirmer::with_seams(auth, FakeClock::new(), Duration::from_secs(2), Duration::from_millis(200));
+        let c = Confirmer::with_seams(
+            auth,
+            FakeClock::new(),
+            Duration::from_secs(2),
+            Duration::from_millis(200),
+        );
         let home = self.home.canon();
         let xdg = home.join(".config");
         let env: Vec<(&str, Option<&OsStr>)> = vec![
@@ -173,7 +186,10 @@ impl Live {
         // a human had accepted it; later writes go through tighten/pending.
         let pins = self.home.config_dir().join("pins.json");
         if !pins.exists() {
-            let c = strata_types::Config::parse(&fs::read_to_string(self.home.config_dir().join("config.toml")).unwrap()).expect("fixture config");
+            let c = strata_types::Config::parse(
+                &fs::read_to_string(self.home.config_dir().join("config.toml")).unwrap(),
+            )
+            .expect("fixture config");
             let repos: serde_json::Map<String, serde_json::Value> = c
                 .repos
                 .iter()
@@ -184,9 +200,25 @@ impl Live {
                     )
                 })
                 .collect();
-            fs::write(pins, serde_json::to_string_pretty(&serde_json::json!({ "repos": repos })).unwrap()).unwrap();
+            fs::write(
+                pins,
+                serde_json::to_string_pretty(&serde_json::json!({ "repos": repos })).unwrap(),
+            )
+            .unwrap();
         }
-        let core = startup::prepare(self.options(), c, &move |p: &Path| Git::open_with_env(p, &env)).expect("prepare");
+        let env: Vec<(String, Option<std::ffi::OsString>)> = env
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.map(|v| v.to_os_string())))
+            .collect();
+        let core = startup::prepare(self.options(), c, &move |p: &Path| {
+            Git::open_with_env(
+                p,
+                &env.iter()
+                    .map(|(k, v)| (k.as_str(), v.as_deref()))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .expect("prepare");
         let d = Daemon::start(&core).expect("daemon start");
         let listener = startup::bind(&core.opts.socket).expect("bind");
         let ext = AtomicBool::new(false);
@@ -201,7 +233,9 @@ impl Live {
                         let name = req.method.name().to_string();
                         let hook = {
                             let mut h = hooks.lock().unwrap();
-                            h.iter().position(|(m, _)| *m == name).map(|i| h.remove(i).1)
+                            h.iter()
+                                .position(|(m, _)| *m == name)
+                                .map(|i| h.remove(i).1)
                         };
                         if let Some(hook) = hook {
                             hook(&core);

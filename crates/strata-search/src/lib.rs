@@ -18,12 +18,14 @@ mod base;
 mod view;
 
 use serde_json::json;
-use tgrep_core::generations::Generation;
 use strata_overlay::Overlay;
 use strata_session::{SessionState, Sessions, WorkspaceHealth};
-use strata_types::{BaseGen, Code, CommitOid, Config, RepoName, RepoPath, SessionId, StrataError, ViewId};
 #[cfg(feature = "test-seams")]
 use strata_types::TreeOid;
+use strata_types::{
+    BaseGen, Code, CommitOid, Config, RepoName, RepoPath, SessionId, StrataError, ViewId,
+};
+use tgrep_core::generations::Generation;
 
 /// types.md §8 `Result<T>`.
 pub type Result<T> = std::result::Result<T, StrataError>;
@@ -144,7 +146,6 @@ struct Pause {
 
 /// The search handle the daemon holds (§3).
 pub struct Search<'a> {
-    config: &'a Config,
     sessions: &'a Sessions<'a>,
     overlays: &'a dyn OverlaySource,
     views: Mutex<BTreeMap<ViewId, Arc<Mutex<View>>>>,
@@ -173,9 +174,12 @@ fn root_changed(what: &str) -> StrataError {
 
 impl<'a> Search<'a> {
     /// No I/O, no views.
-    pub fn open(config: &'a Config, sessions: &'a Sessions<'_>, overlays: &'a dyn OverlaySource) -> Search<'a> {
+    pub fn open(
+        _config: &'a Config,
+        sessions: &'a Sessions<'_>,
+        overlays: &'a dyn OverlaySource,
+    ) -> Search<'a> {
         Search {
-            config,
             sessions,
             overlays,
             views: Mutex::new(BTreeMap::new()),
@@ -196,16 +200,26 @@ impl<'a> Search<'a> {
         match st.state {
             SessionState::Active => {}
             SessionState::Removed => {
-                return Err(StrataError::new(Code::NoSuchSession, format!("session {session} was removed"))
-                    .with_detail(json!({ "session": session.as_str() })));
+                return Err(StrataError::new(
+                    Code::NoSuchSession,
+                    format!("session {session} was removed"),
+                )
+                .with_detail(json!({ "session": session.as_str() })));
             }
             SessionState::Creating | SessionState::Removing => {
-                return Err(err(Code::Busy, format!("session {session} is not active ({:?})", st.state), "not_active"));
+                return Err(err(
+                    Code::Busy,
+                    format!("session {session} is not active ({:?})", st.state),
+                    "not_active",
+                ));
             }
             SessionState::Unknown => {
                 let scene = st.scene.as_ref().and_then(|s| serde_json::to_value(s).ok());
-                return Err(StrataError::new(Code::Unknown, format!("session {session} is in an unknown state"))
-                    .with_detail(json!({ "reason": "session_unknown", "scene": scene })));
+                return Err(StrataError::new(
+                    Code::Unknown,
+                    format!("session {session} is in an unknown state"),
+                )
+                .with_detail(json!({ "reason": "session_unknown", "scene": scene })));
             }
         }
         // 3: the repo must be in this session.
@@ -220,13 +234,19 @@ impl<'a> Search<'a> {
                 // open_root (step 7) names that one NotDirectory.
                 WorkspaceHealth::Missing if std::fs::symlink_metadata(&ws.path).is_ok() => {}
                 WorkspaceHealth::Missing => {
-                    return Err(StrataError::new(Code::NoSuchPath, format!("workspace {} is missing", ws.path.display()))
-                        .with_detail(json!({ "path": ws.path.to_string_lossy() })));
+                    return Err(StrataError::new(
+                        Code::NoSuchPath,
+                        format!("workspace {} is missing", ws.path.display()),
+                    )
+                    .with_detail(json!({ "path": ws.path.to_string_lossy() })));
                 }
                 WorkspaceHealth::Unknown => {
                     let scene = w.scene.as_ref().and_then(|s| serde_json::to_value(s).ok());
-                    return Err(StrataError::new(Code::Unknown, format!("workspace {session}/{repo} is in an unknown state"))
-                        .with_detail(json!({ "reason": "workspace_unknown", "scene": scene })));
+                    return Err(StrataError::new(
+                        Code::Unknown,
+                        format!("workspace {session}/{repo} is in an unknown state"),
+                    )
+                    .with_detail(json!({ "reason": "workspace_unknown", "scene": scene })));
                 }
             }
         }
@@ -234,20 +254,33 @@ impl<'a> Search<'a> {
         let overlay = match self.overlays.last(session, repo) {
             Some(o) => o,
             None if ws.tracked => {
-                return Err(err(Code::Busy, format!("overlay of {session}/{repo} not scanned yet"), "overlay_not_ready"));
+                return Err(err(
+                    Code::Busy,
+                    format!("overlay of {session}/{repo} not scanned yet"),
+                    "overlay_not_ready",
+                ));
             }
             None => Overlay::empty(ws.base.clone()),
         };
         if overlay.base != ws.base {
-            return Err(err(Code::Busy, format!("overlay of {session}/{repo} is on another base"), "base_moved"));
+            return Err(err(
+                Code::Busy,
+                format!("overlay of {session}/{repo} is on another base"),
+                "base_moved",
+            ));
         }
         // 7: the root.
         let root = root_identity(&ws.path)?;
         // 8–12: the shared base. No search lock is held across ensure.
-        let generation = self.bases.ensure(self.config, repo, &ws.head, &ws.base.tree)?;
+        let generation = self.bases.ensure(
+            self.sessions.configuration()?,
+            repo,
+            &ws.head,
+            &ws.base.tree,
+        )?;
         // 13: fill the private live (§5.4). A failure issues no id.
         let fold = !strata_apfs::volume_caps(&ws.path)?.case_sensitive;
-        let excl = view::Excl::new(&self.config.repos[repo], fold);
+        let excl = view::Excl::new(&self.sessions.configuration()?.repos[repo], fold);
         let mut v = View {
             session: session.clone(),
             repo: repo.clone(),
@@ -466,7 +499,6 @@ pub(crate) fn check_glob(glob: &str, fold: bool) -> Result<globset::GlobMatcher>
         .map_err(|e| err(Code::InvalidInput, format!("invalid glob: {e}"), "glob"))?;
     Ok(g.compile_matcher())
 }
-
 
 #[cfg(feature = "test-seams")]
 impl<'a> Search<'a> {

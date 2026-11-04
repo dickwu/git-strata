@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use strata_types::{RepoName, SessionId, StrataError};
 
+pub mod catalog;
 pub mod client;
 pub mod confirm_flow;
 pub mod du;
@@ -18,6 +19,7 @@ pub mod fetch_after;
 pub mod handlers;
 pub mod locks;
 pub mod plist;
+pub mod reload;
 pub mod resolve;
 pub mod rpc;
 pub mod startup;
@@ -32,9 +34,12 @@ pub mod waiting;
 #[cfg(feature = "test-seams")]
 pub mod seams {
     pub use strata_confirm::Confirmer;
-    pub use strata_confirm::seams::{FakeClock, PromptLog, ScriptedAuth, Verdict, bypass_env_names};
+    pub use strata_confirm::seams::{
+        FakeClock, PromptLog, ScriptedAuth, Verdict, bypass_env_names,
+    };
 
-    static SCENE_SYNC_FAILS: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+    static SCENE_SYNC_FAILS: std::sync::Mutex<Vec<std::path::PathBuf>> =
+        std::sync::Mutex::new(Vec::new());
 
     /// Review P1-13: make every fsync of a push scene record under `root`
     /// fail with EIO (`on`), or stop doing so. Keyed by root so parallel
@@ -52,7 +57,8 @@ pub mod seams {
     }
 
     type Hook = std::sync::Arc<dyn Fn() + Send + Sync>;
-    static AFTER_CONFIRM: std::sync::Mutex<Vec<(std::path::PathBuf, Hook)>> = std::sync::Mutex::new(Vec::new());
+    static AFTER_CONFIRM: std::sync::Mutex<Vec<(std::path::PathBuf, Hook)>> =
+        std::sync::Mutex::new(Vec::new());
 
     /// Review P1-15: run `hook` after every passed push confirmation of the
     /// daemon whose root is `root`, before its repo lock is taken (`None`
@@ -127,6 +133,7 @@ pub const FEATURES: &[&str] = &[
     "publish.message",
     "new.base",
     "rebase.quiet_scope",
+    "config.reload",
 ];
 
 /// The launchd label of the agent.
@@ -220,16 +227,40 @@ pub enum DaemonWarning {
     ConfigRelaxPending {
         repo: RepoName,
     },
+    ConfigReloadFailed {
+        reason: String,
+        detail: serde_json::Value,
+        hash: String,
+    },
+    ConfigRestartRequired {
+        fields: Vec<String>,
+    },
+    CatalogGrowth {
+        generations: usize,
+    },
     StorePoisoned,
-    VerifyFailed { message: String },
-    AnchorNotAdvanced { repo: RepoName },
-    FetchFailed { repo: RepoName },
+    VerifyFailed {
+        message: String,
+    },
+    AnchorNotAdvanced {
+        repo: RepoName,
+    },
+    FetchFailed {
+        repo: RepoName,
+    },
     /// Review M6: a standalone (or restore) push whose outcome is unknown;
     /// its staging directory `scene` (with `push.json`) is kept.
-    UnknownPush { repo: RepoName, commit: strata_types::CommitOid, scene: PathBuf },
+    UnknownPush {
+        repo: RepoName,
+        commit: strata_types::CommitOid,
+        scene: PathBuf,
+    },
     /// Review P1-5: a `refs/strata/**/*.lock` left by a killed ref
     /// transaction, removed at startup.
-    StaleRefLock { repo: RepoName, path: PathBuf },
+    StaleRefLock {
+        repo: RepoName,
+        path: PathBuf,
+    },
 }
 
 /// One held repo write lock (status / daemon_status).

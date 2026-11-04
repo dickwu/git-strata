@@ -413,7 +413,9 @@ pub(crate) fn seal(
         match ctx.locks.with_write(ctx.repo, &mut f) {
             Ok(r) => break r,
             Err(busy) if kind == AttemptKind::Adopt => return Err(refuse(ctx, st, busy)),
-            Err(busy) if busy.code == Code::Busy => std::thread::sleep(Duration::from_millis(10)),
+            Err(busy) if busy.code == Code::Busy && !crate::pins_tightened(&busy) => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
             // Review H5 [实现时补的决定]: only `Busy` is retried. A permanent
             // refusal (`ReadOnly` `shutting_down`, …) renamed nothing: close
             // the attempt as interrupted, keep the staging (D8 lets the next

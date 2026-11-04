@@ -482,6 +482,18 @@ function warningText(w: unknown): string {
   if (typeof w === 'string') return w;
   if (w && typeof w === 'object') {
     const o = w as Record<string, unknown>;
+    if ('ConfigReloadFailed' in o) {
+      const detail = o.ConfigReloadFailed as { reason?: unknown } | null;
+      const reason = typeof detail?.reason === 'string' ? detail.reason : 'reload failed';
+      return `config.toml not applied: ${reason}`;
+    }
+    if ('ConfigRestartRequired' in o) {
+      const detail = o.ConfigRestartRequired as { fields?: unknown } | null;
+      const fields = Array.isArray(detail?.fields)
+        ? detail.fields.filter((v) => typeof v === 'string')
+        : [];
+      return `Config changes need an owner restart${fields.length ? `: ${fields.join(', ')}` : ''}`;
+    }
     const keys = Object.keys(o);
     const kind = typeof o.kind === 'string' ? o.kind : keys.length === 1 ? keys[0] : 'Warning';
     const msg = typeof o.message === 'string' ? o.message : null;

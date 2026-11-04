@@ -40,10 +40,10 @@ macro_rules! gate_text {
   exact command to the human.
 
   Loosening config.toml (e.g. confirm true -> false) does not take effect by
-  itself: after `daemon stop` + `daemon start` the daemon keeps the old pin and
+  itself: run `git-strata config reload`; the daemon keeps the old pin and
   reports ConfigRelaxPending in `daemon status` alerts; the human then runs
-  `git-strata config relax REPO`. Tightening counts on the next call (CLI) and
-  is pinned at the next daemon start.
+  `git-strata config relax REPO`. Tightening is pinned during reload and
+  fences older operations before their next lock take.
 "
     };
 }
@@ -90,7 +90,8 @@ const OUTPUT: &str = "OUTPUT
     {\"ok\":false,\"data\":{...},\"error\":{\"code\":\"Busy\",\"message\":\"...\",\"detail\":{\"reason\":\"daemon_down\"}}}
   All three keys are always present; data is never null (on errors it may hold
   partial results, e.g. repos that already published).
-  Exit status: 0 iff ok is true, else 1. Branch on error.code, then
+  Exit status: 0 on success, 1 for ordinary/argument/transport/output errors.
+  config reload: 2 rejected, 3 pending, 4 daemon too old. Branch on error.code, then
   error.detail.reason; never parse message. stderr has human notices only.
   Known help topics/commands, --help and --version print text, exit 0, no JSON.
   Unknown help topics return InvalidInput with detail.reason help_topic.
@@ -101,6 +102,16 @@ const OUTPUT: &str = "OUTPUT
 ";
 const ERRORS: &str = "ERRORS (code -> what an agent does)
   Busy daemon_down   tell the human, retry later   Busy other       wait, retry later
+  Busy pins_tightened rerun with the newly applied config
+  Busy reload_pending rerun config reload; its current attempt continues
+  Unsupported daemon_too_old  ask the owner to upgrade/restart
+  InvalidInput config_rejected  fallback if the rejected report has no reason;
+                               otherwise the daemon reason is forwarded.
+                               Inspect data.reasons and data.restart_required
+  InvalidInput recovery_failed  new-repo pending-rebase recovery failed; inspect
+                               data.reasons, resolve the failure, rerun config reload
+  InvalidInput shown_required  use a CLI that sends the displayed flags
+  InvalidInput config_not_applied  run config reload before config relax
   NotTty             hand the command to a human   NotConfirmed     report; human reruns
                                                    (plan_changed: rerun it yourself once)
   Conflict (publish) fix detail.conflicts in detail.repo, rerun the same publish
@@ -257,7 +268,8 @@ ERRORS
   Busy daemon_down         tell the human (they run `git-strata daemon start`)
 ";
 
-pub const ADD_AFTER: &str = "Gives an existing (active) session workspaces for more repos, tracked, built
+pub const ADD_AFTER: &str =
+    "Gives an existing (active) session workspaces for more repos, tracked, built
 as `new` builds them (base snapshot, worktree, pin, caches, seed files).
 
 EXAMPLES
@@ -387,7 +399,8 @@ Check data.switched.kind. For skipped with code OpenFiles, inspect detail.reason
     gate_brief!("deps approve always needs a TTY + Touch ID; propose does not.")
 );
 
-pub const PUBLISH: &str = "Publish checkpointed session content as commits on each repo's publish branch.
+pub const PUBLISH: &str =
+    "Publish checkpointed session content as commits on each repo's publish branch.
 
 Before publishing, a fresh BeforePublish checkpoint of each --from batch is
 taken, so the paths' current content is what gets committed. Repos commit one
@@ -552,7 +565,8 @@ blob_bytes, trash_eligible, trash_young, trash_refused[]}}, an upper bound
 of what --store would reclaim now. Run it first.
 ";
 
-pub const DU_AFTER: &str = "Read-only. Answers from the daemon's size cache in about a second; every
+pub const DU_AFTER: &str =
+    "Read-only. Answers from the daemon's size cache in about a second; every
 figure has as_of (when it was measured) and stale/pending counts. Units not
 fresh (missing, inode/mtime changed, or older than 10 min for tmp, sessions
 and dot-dirs, 24 h for bases/deps snapshots, blob shards and trash entries)
@@ -584,7 +598,8 @@ EXAMPLES
   git-strata du --refresh   # full background recompute
 ";
 
-pub const DAEMON_AFTER: &str = "start/stop: HUMAN ONLY. Agents never run them (or launchctl); on daemon_down
+pub const DAEMON_AFTER: &str =
+    "start/stop: HUMAN ONLY. Agents never run them (or launchctl); on daemon_down
 they tell the human. Both act only when HOME is the login user's home (D38).
 
 INSTALL
@@ -596,12 +611,20 @@ INSTALL
   can print it with `git-stratad --print-plist [ABSOLUTE_BIN]`.
 
 EXAMPLES
-  git-strata daemon status   # {running, socket, session?, holders, unknown_publishes, alerts, alerts_at, pins_meta}
+  git-strata daemon status   # {running, socket, session?, holders, unknown_publishes,
+                            #  alerts, alerts_at, pins_meta, config?:{generation,hash,loaded_at,last_attempt,
+                            #                   restart_required}}
   git-strata daemon start    # launchctl bootstrap gui/<uid> <plist>; {already:true} if loaded
   git-strata daemon stop     # launchctl bootout; waits up to 10 s until unloaded
 
-The daemon reads config.toml only at start: after editing it, the human runs
-`daemon stop` then `daemon start`. start/stop use launchd, not the socket.
+config is copied when the daemon returns it; absent when down or omitted by an
+older daemon. generation/hash/loaded_at describe the active catalog. last_attempt
+is null before any reload attempt, then the report plus at and a rejection reason
+when present; restart_required lists restart-only fields from that attempt.
+
+After editing config.toml, run `git-strata config reload` and check data.repos.
+Restart-only changes and old daemons require an owner restart. start/stop use
+launchd, not the socket.
 ERRORS InvalidInput no_plist (LaunchAgent not installed: tell the human; do
 not write the plist yourself), InvalidInput foreign_home (HOME is not the login
 home; nothing done), InvalidInput foreign_agent (the loaded agent comes from
@@ -640,7 +663,8 @@ pin (nothing to do). NoSuchRepo: unknown repo.
     gate_brief!("config relax always needs a TTY + Touch ID.")
 );
 
-pub const SESSION_AFTER: &str = "Every session workspace (not the main checkout) leases a block of 4 TCP ports
+pub const SESSION_AFTER: &str =
+    "Every session workspace (not the main checkout) leases a block of 4 TCP ports
 (web, connector, connector_mcp, aux) when it is created, so concurrent dev
 servers and tauri-connector instances of different sessions never collide.
 Committed config stays untouched: the ports reach the processes as env vars.
@@ -689,7 +713,8 @@ EXAMPLES
   git-strata session ports --all
 ";
 
-pub const SESSION_EXEC: &str = "Run a command in a workspace with its dev-port env (exec: the command
+pub const SESSION_EXEC: &str =
+    "Run a command in a workspace with its dev-port env (exec: the command
 replaces git-strata; its exit status is the command's).
 
 The env (see `session ports --help`) overrides inherited values. Run from
@@ -797,3 +822,4 @@ pub fn render(words: &[String]) -> crate::Result<String> {
         Ok(_) => Ok(command.render_long_help().to_string()),
     }
 }
+pub const CONFIG_RELOAD_AFTER: &str = "After editing config.toml, run git-strata config reload. The ordinary JSON envelope's data contains outcome, generation, repos, added, changed, restart_required, pending_relax and reasons. Check membership in repos before using a new repo. No TTY or confirmation is needed. Exit 0: applied/unchanged; 1: argument/transport/output or invalid-report failure; 2: rejected (the daemon reason, or config_rejected); 3: reload_pending (rerun); 4: daemon_too_old. Parse and validation failures preserve data.reasons; unknown outcomes preserve data with invalid_reload_report. Tightenings fence older work; relaxations still require config relax. Repo removal, paths.root, status.parallel, and existing repo identity/exclusion changes require an owner restart.";

@@ -1009,3 +1009,41 @@ fn seal_does_not_retry_a_shutdown_refusal() {
     let set = build(&fx.ctx(), &tree, None).unwrap();
     assert_eq!(set.id, id);
 }
+
+#[test]
+fn seal_does_not_retry_a_fence_and_releases_build_ownership() {
+    let fx = Fx::new();
+    let tree = fx.tree("a");
+    let (_, id) = key_of(&fx.ctx(), &tree).unwrap();
+    let refusal = strata_types::StrataError::new(Code::Busy, "repository safety pins tightened")
+        .with_detail(serde_json::json!({ "reason": "pins_tightened" }));
+    *fx.lock.fail.lock().unwrap() = Some(refusal);
+    let e = build(&fx.ctx(), &tree, None).unwrap_err();
+    assert_eq!(
+        fx.lock.fails.load(Ordering::SeqCst),
+        1,
+        "the refusal was retried"
+    );
+    assert_eq!(e.code, Code::Busy, "{e:?}");
+    assert_eq!(e.detail.as_ref().unwrap()["reason"], "pins_tightened");
+    assert_eq!(fx.lock.enters(), 0);
+    assert!(!fx.store().deps_dir(&fx.repo, &id).exists());
+    assert!(fx.store().deps_set(&fx.repo, &id).unwrap().is_none());
+    let atts = store_attempts(&fx);
+    let last = atts.last().unwrap();
+    assert_eq!(last.state, AttemptState::Failed);
+    assert_eq!(
+        last.error.as_ref().unwrap().detail.as_ref().unwrap()["reason"],
+        "interrupted"
+    );
+    let staging = fx.repo_dir().join(".staging").join(last.id.to_string());
+    assert!(
+        staging.join("seal").is_dir(),
+        "the installed candidate is kept"
+    );
+
+    // The next builder (after a restart) redoes it once and seals.
+    *fx.lock.fail.lock().unwrap() = None;
+    let set = build(&fx.ctx(), &tree, None).unwrap();
+    assert_eq!(set.id, id);
+}

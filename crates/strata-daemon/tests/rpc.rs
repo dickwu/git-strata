@@ -99,7 +99,7 @@ fn method_table_has_the_documented_names() {
             "new", "add", "status",
             "sync",
             "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_approve",
-            "deps_list", "publish", "publish_plan", "push", "assign", "rm", "gc", "resolve_move", "chain_resolve", "config_relax",
+            "deps_list", "publish", "publish_plan", "push", "assign", "rm", "gc", "resolve_move", "chain_resolve", "config_relax", "config_reload",
             "daemon_status", "du", "ports_ensure", "ports_reassign"
         ]
     );
@@ -215,6 +215,7 @@ fn every_method_parses_its_documented_params() {
         ("resolve_move", json!({ "session": sid, "repo": "tool", "abandon": true, "accept": false })),
         ("chain_resolve", json!({ "repo": "tool", "choice": "AcceptOriginDrop" })),
         ("config_relax", json!({ "repo": "tool" })),
+        ("config_reload", json!({})),
         ("daemon_status", json!({})),
         ("du", json!({ "refresh": true })),
         ("ports_ensure", json!({ "session": sid, "repo": "tool" })),

@@ -9,8 +9,8 @@ use serde_json::json;
 use strata_apfs::{IoSide, classify_io_error, nearest_existing_ancestor, same_volume, volume_caps};
 use strata_types::{Code, RepoName, SessionId, StrataError};
 
-use crate::sys::{lstat, real_dir, special_kind, within};
 use super::Layout;
+use crate::sys::{lstat, real_dir, special_kind, within};
 use crate::{Result, Sessions, no_such_repo, ticket};
 
 /// What phase A settled.
@@ -24,32 +24,46 @@ pub(crate) struct Validated {
 }
 
 impl Sessions<'_> {
-    pub(crate) fn validate_new(&self, ticket_: Option<&str>, repos: &[RepoName], layout: Layout) -> Result<Validated> {
+    pub(crate) fn validate_new(
+        &self,
+        ticket_: Option<&str>,
+        repos: &[RepoName],
+        layout: Layout,
+    ) -> Result<Validated> {
         // 1. ticket
         if let Some(t) = ticket_ {
             ticket::validate(t)?;
         }
         // 2. repos
         if repos.is_empty() {
-            return Err(StrataError::new(Code::InvalidInput, "new needs at least one repo")
-                .with_detail(json!({ "field": "repos" })));
+            return Err(
+                StrataError::new(Code::InvalidInput, "new needs at least one repo")
+                    .with_detail(json!({ "field": "repos" })),
+            );
         }
         let mut tracked = BTreeSet::new();
         for r in repos {
-            if !self.config.repos.contains_key(r) {
+            if !self.configuration()?.repos.contains_key(r) {
                 return Err(no_such_repo(r));
             }
             tracked.insert(r.clone());
         }
         let members: BTreeSet<RepoName> = match layout {
-            Layout::Siblings => self.config.repos.keys().cloned().collect(),
+            Layout::Siblings => self.configuration()?.repos.keys().cloned().collect(),
             Layout::Only => tracked.clone(),
         };
         self.validate_members(&members, &tracked)?;
         // 7. session id; no retry with another one
-        let id = self.seams.take_next_id().unwrap_or_else(crate::sys::random_session_id);
+        let id = self
+            .seams
+            .take_next_id()
+            .unwrap_or_else(crate::sys::random_session_id);
         self.id_free(&id)?;
-        Ok(Validated { tracked: tracked.into_iter().collect(), members: members.into_iter().collect(), id })
+        Ok(Validated {
+            tracked: tracked.into_iter().collect(),
+            members: members.into_iter().collect(),
+            id,
+        })
     }
 
     /// Step 7's check: no row, and neither `sessions/<id>` nor
@@ -72,18 +86,27 @@ impl Sessions<'_> {
 
     /// Steps 3-6 for the repos that get a workspace (`members`); seed
     /// caches are checked for the `tracked` ones. Shared by `new` and `add`.
-    pub(crate) fn validate_members(&self, members: &BTreeSet<RepoName>, tracked: &BTreeSet<RepoName>) -> Result<()> {
-        let scope = || self.config.repos.iter().filter(|(n, _)| members.contains(*n));
+    pub(crate) fn validate_members(
+        &self,
+        members: &BTreeSet<RepoName>,
+        tracked: &BTreeSet<RepoName>,
+    ) -> Result<()> {
+        let config = self.configuration()?;
+        let scope = || config.repos.iter().filter(|(n, _)| members.contains(*n));
         // 3. every member checkout, and the root when it exists
         for (name, rc) in scope() {
             check_dir(&rc.path, Some(name), "path")?;
         }
         let root = &self.config.paths.root;
-        if lstat(root).map_err(|e| classify_io_error(&e, IoSide::Read, root))?.is_some() {
+        if lstat(root)
+            .map_err(|e| classify_io_error(&e, IoSide::Read, root))?
+            .is_some()
+        {
             check_dir(root, None, "paths.root")?;
         }
         // 4. aliasing
-        let anc = nearest_existing_ancestor(root).map_err(|e| classify_io_error(&e, IoSide::Read, root))?;
+        let anc = nearest_existing_ancestor(root)
+            .map_err(|e| classify_io_error(&e, IoSide::Read, root))?;
         let mut real_root = real_dir(&anc)?;
         if let Ok(rest) = root.strip_prefix(&anc) {
             real_root.push(rest);
@@ -115,11 +138,16 @@ impl Sessions<'_> {
         }
         // 5. volume
         for (name, rc) in scope() {
-            let same = same_volume(&anc, &rc.path).map_err(|e| classify_io_error(&e, IoSide::Read, &rc.path))?;
+            let same = same_volume(&anc, &rc.path)
+                .map_err(|e| classify_io_error(&e, IoSide::Read, &rc.path))?;
             if !same {
                 return Err(StrataError::new(
                     Code::CrossVolume,
-                    format!("paths.root {} is not on repo {name}'s volume ({})", root.display(), rc.path.display()),
+                    format!(
+                        "paths.root {} is not on repo {name}'s volume ({})",
+                        root.display(),
+                        rc.path.display()
+                    ),
                 )
                 .with_detail(json!({
                     "root": root.to_string_lossy(),
@@ -131,7 +159,11 @@ impl Sessions<'_> {
         if caps.fs_type != "apfs" {
             return Err(StrataError::new(
                 Code::Unsupported,
-                format!("paths.root {} is on {}, not APFS", root.display(), caps.fs_type),
+                format!(
+                    "paths.root {} is on {}, not APFS",
+                    root.display(),
+                    caps.fs_type
+                ),
             )
             .with_detail(json!({ "fs_type": caps.fs_type, "root": root.to_string_lossy() })));
         }
@@ -148,7 +180,9 @@ impl Sessions<'_> {
             if explicit {
                 for (index, p) in files.iter().enumerate() {
                     let src = rc.path.join(p.as_str());
-                    let Some(m) = lstat(&src).map_err(|e| classify_io_error(&e, IoSide::Read, &src))? else {
+                    let Some(m) =
+                        lstat(&src).map_err(|e| classify_io_error(&e, IoSide::Read, &src))?
+                    else {
                         continue;
                     };
                     let detail = json!({
@@ -178,7 +212,9 @@ impl Sessions<'_> {
             if tracked.contains(name) {
                 for (index, c) in rc.seed_caches.iter().enumerate() {
                     let src = rc.path.join(c.as_str());
-                    let Some(m) = lstat(&src).map_err(|e| classify_io_error(&e, IoSide::Read, &src))? else {
+                    let Some(m) =
+                        lstat(&src).map_err(|e| classify_io_error(&e, IoSide::Read, &src))?
+                    else {
                         continue;
                     };
                     let reason = if m.file_type().is_symlink() {
@@ -239,4 +275,3 @@ fn check_dir(p: &Path, repo: Option<&RepoName>, field: &str) -> Result<()> {
     Err(StrataError::new(Code::NotDirectory, format!("{field} {} is not a real directory ({reason})", p.display()))
         .with_detail(detail(json!({ "reason": reason }))))
 }
-

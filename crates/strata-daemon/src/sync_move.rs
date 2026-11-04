@@ -114,6 +114,7 @@ fn scan(
 
 /// Non-check handler; the upstream lane dispatches `check` before this call.
 pub fn run(d: &Daemon<'_>, req: SyncRequest) -> Result<Value> {
+    let _catalog = d.core.admit();
     let core = d.core;
     let rec = record(core, &req.session)?;
     let mut repos: Vec<_> = req.repos.clone().unwrap_or_else(|| {
@@ -480,7 +481,7 @@ fn sync_one(
             }
             let blobs = PreviewBlobs::new(&core.store,&current.path,&overlay);
             let preview = strata_overlay::rebase_preview(&overlay,&old,&new,&blobs,&opts).map_err(scan_error)?;
-            let patterns = d.sessions.regenerable(repo);
+            let patterns = d.sessions.regenerable(repo)?;
             let regen = strata_session::Regenerable::new(&patterns,cfg);
             let (kept,blocking): (Vec<_>,Vec<_>) = preview.conflicts.iter().cloned().partition(|p|overlay.get(p).is_some_and(|e|regen.matches(e)));
             if !blocking.is_empty() {

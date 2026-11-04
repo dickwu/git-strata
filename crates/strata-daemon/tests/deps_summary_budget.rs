@@ -16,6 +16,7 @@ fn legacy_summary_ancestry_is_bounded_per_deps_list() {
     let fx = Dfx::with(&["a", "b", "c"]);
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
+        let _catalog = core.admit();
     let repos = [repo_name("a"), repo_name("b"), repo_name("c")];
     let original = d.sessions.new(None, &repos).unwrap().manifest;
     for i in 0..10 {

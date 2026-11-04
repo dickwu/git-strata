@@ -16,13 +16,18 @@ use std::time::SystemTime;
 use serde_json::{Value, json};
 use strata_apfs::{IoSide, classify_io_error};
 use strata_gitio::Git;
-use strata_overlay::{Base, DEFAULT_DIRTY_CAPACITY, Overlay, RestoreRequest, Tracker, WorkspaceRef};
+use strata_overlay::{
+    Base, DEFAULT_DIRTY_CAPACITY, Overlay, RestoreRequest, Tracker, WorkspaceRef,
+};
 use strata_search::{GrepOpts, Hit, OverlaySource, Search, Which};
 use strata_session::Layout;
 use strata_store::PublishPhase;
-use strata_types::{Action, AgentName, BaseGen, Code, CommitOid, RepoConfig, RepoName, RepoPath, SessionId, StrataError, WorkspaceState};
+use strata_types::{
+    Action, AgentName, BaseGen, Code, CommitOid, RepoConfig, RepoName, RepoPath, SessionId,
+    StrataError, WorkspaceState,
+};
 
-use crate::confirm_flow::{apply, needs_confirm, recheck, require_validated};
+use crate::confirm_flow::{needs_confirm, recheck, require_validated};
 use crate::fetch_after::{alert_attach, report_guard_disabled};
 use crate::locks::{self, RequestScope};
 use crate::resolve;
@@ -62,14 +67,16 @@ fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn repo_cfg<'c>(core: &'c Core, repo: &RepoName) -> Result<&'c RepoConfig> {
-    core.config.repos.get(repo).ok_or_else(|| {
-        StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}")).with_detail(json!({ "repo": repo.as_str() }))
+    core.snapshot()?.config.repos.get(repo).ok_or_else(|| {
+        StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}"))
+            .with_detail(json!({ "repo": repo.as_str() }))
     })
 }
 
 fn git_of<'c>(core: &'c Core, repo: &RepoName) -> Result<&'c Git> {
-    core.gits.get(repo).ok_or_else(|| {
-        StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}")).with_detail(json!({ "repo": repo.as_str() }))
+    core.snapshot()?.gits.get(repo).ok_or_else(|| {
+        StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}"))
+            .with_detail(json!({ "repo": repo.as_str() }))
     })
 }
 
@@ -166,9 +173,7 @@ fn deps_list(core: &Core, repo: Option<&RepoName>) -> Result<Value> {
 
 /// The repo's configuration with the pinned (effective) safety flags.
 fn effective_cfg(core: &Core, repo: &RepoName) -> Result<RepoConfig> {
-    let mut rc = repo_cfg(core, repo)?.clone();
-    apply(&mut rc, &core.pinned(repo)?);
-    Ok(rc)
+    Ok(repo_cfg(core, repo)?.clone())
 }
 
 /// rm-followups R2: how an rm that did not remove its session ended, for
@@ -216,6 +221,7 @@ struct Tracked {
     root: PathBuf,
     generation: Option<u64>,
     inputs: Option<(String, String)>,
+    config_hash: String,
     watching: bool,
     tracker: Tracker,
 }
@@ -252,23 +258,34 @@ impl<'a> Trackers<'a> {
             Some(t) if t.root == ws.path => t,
             Some(t) => {
                 drop_tracker(t.tracker);
-                Tracked { root: ws.path.clone(),
+                Tracked {
+                    root: ws.path.clone(),
                     generation,
                     inputs: None,
-                    watching: false, tracker: Tracker::new(&ws.path, DEFAULT_DIRTY_CAPACITY),
+                    config_hash: String::new(),
+                    watching: false,
+                    tracker: Tracker::new(&ws.path, DEFAULT_DIRTY_CAPACITY),
                 }
             }
-            None => Tracked { root: ws.path.clone(),
+            None => Tracked {
+                root: ws.path.clone(),
                 generation,
                 inputs: None,
-                watching: false, tracker: Tracker::new(&ws.path, DEFAULT_DIRTY_CAPACITY),
+                config_hash: String::new(),
+                watching: false,
+                tracker: Tracker::new(&ws.path, DEFAULT_DIRTY_CAPACITY),
             },
         };
-        if t.generation != generation || t.tracker.last().is_some_and(|o| o.base != ws.base) {
+        let config_hash = self.core.cfg_hash(repo).unwrap_or_default();
+        if t.config_hash != config_hash
+            || t.generation != generation
+            || t.tracker.last().is_some_and(|o| o.base != ws.base)
+        {
             t.tracker.reset();
             t.watching = false;
         }
         t.generation = generation;
+        t.config_hash = config_hash;
         if !t.watching {
             t.watching = track::watch_or_full(&mut t.tracker);
         }
@@ -283,8 +300,19 @@ impl<'a> Trackers<'a> {
             .base()
             .filter(|_| !t.tracker.needs_full())
             .and_then(|base| {
-                let cfg = self.core.config.repos.get(repo)?;
-                let git = self.core.gits.get(repo)?;
+                let cfg = self
+                    .core
+                    .snapshot()
+                    .expect("operation pinned")
+                    .config
+                    .repos
+                    .get(repo)?;
+                let git = self
+                    .core
+                    .snapshot()
+                    .expect("operation pinned")
+                    .gits
+                    .get(repo)?;
                 Some((
                     strata_deps::inputs_hash(cfg, git, &t.root).ok()?,
                     strata_deps::inputs_hash(cfg, git, &self.core.store.base_dir(base)).ok()?,
@@ -323,7 +351,8 @@ impl<'a> Trackers<'a> {
             return Default::default();
         };
         let ready = track::ready_for_upstream(&t.tracker, flush);
-        if !t.watching
+        if t.config_hash != self.core.cfg_hash(repo).unwrap_or_default()
+            || !t.watching
             || t.root != ws.path
             || t.generation != Some(generation)
             || !ready
@@ -392,6 +421,7 @@ impl<'a> Trackers<'a> {
     /// workspace. Only for a session whose queue is free right now (a busy
     /// one gets its Tracker from the request that holds it).
     pub fn watch_tracked(&self) {
+        let _catalog = self.core.admit();
         for (s, repo) in self.tracked() {
             if self.core.locks.is_shut_down() {
                 return;
@@ -411,8 +441,10 @@ impl<'a> Trackers<'a> {
     /// refreshes the cache and writes no checkpoint (D16). Busy sessions
     /// are skipped and listed. Then gc per repo under its write lock.
     pub fn reconcile_once(&self) -> Value {
+        let _catalog = self.core.admit();
         let core = self.core;
-        let (mut scanned, mut skipped, mut failed, mut gc) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut scanned, mut skipped, mut failed, mut gc) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (s, repo) in self.tracked() {
             if core.locks.is_shut_down() {
                 break;
@@ -420,7 +452,14 @@ impl<'a> Trackers<'a> {
             let r = core.locks.try_session(&s, "reconcile", || {
                 let ws = workspace(core, &s, &repo)?;
                 let base = base_of(core, &ws.base)?;
-                let wref = WorkspaceRef { session: &s, repo: &repo, root: &ws.path, config: repo_cfg(core, &repo)?, git: git_of(core, &repo)?, store: &core.store };
+                let wref = WorkspaceRef {
+                    session: &s,
+                    repo: &repo,
+                    root: &ws.path,
+                    config: repo_cfg(core, &repo)?,
+                    git: git_of(core, &repo)?,
+                    store: &core.store,
+                };
                 let mut t = self.take(&s, &repo, &ws);
                 let r = strata_overlay::compute(&wref, &base, &mut t.tracker, None);
                 self.put(&s, &repo, t);
@@ -433,11 +472,20 @@ impl<'a> Trackers<'a> {
                 Some(Err(e)) => failed.push(json!({ "at": at, "error": json_of(&e) })),
             }
         }
-        for repo in core.config.repos.keys() {
+        for repo in core
+            .snapshot()
+            .expect("operation pinned")
+            .config
+            .repos
+            .keys()
+        {
             if core.locks.is_shut_down() {
                 break;
             }
-            match core.locks.with_repo(repo, || core.store.gc_repo(repo, GC_KEEP).map(|_| ())) {
+            match core
+                .locks
+                .with_repo(repo, || core.store.gc_repo(repo, GC_KEEP).map(|_| ()))
+            {
                 Ok(()) => gc.push(json!({ "repo": repo.as_str(), "ok": true })),
                 Err(e) => gc.push(json!({ "repo": repo.as_str(), "ok": false, "error": json_of(&e) })),
             }
@@ -536,7 +584,13 @@ fn trash_refs(core: &Core) -> Vec<PathBuf> {
             }
         }
     }
-    for rc in core.config.repos.values() {
+    for rc in core
+        .snapshot()
+        .expect("operation pinned")
+        .config
+        .repos
+        .values()
+    {
         links(&rc.path.join(".git"), &mut out);
     }
     out
@@ -556,7 +610,11 @@ pub struct Server<'d, 'a> {
 /// reconcile loop (step 13's watchers first, then a pass every
 /// `opts.reconcile_every`); it ends with the accept loop and is joined
 /// before the trackers are dropped (review M1).
-pub fn serve(d: &Daemon<'_>, listener: &std::os::unix::net::UnixListener, external: &AtomicBool) -> Result<()> {
+pub fn serve(
+    d: &Daemon<'_>,
+    listener: &std::os::unix::net::UnixListener,
+    external: &AtomicBool,
+) -> Result<()> {
     let trackers = Trackers::new(d.core);
     let done = AtomicBool::new(false);
     let r = std::thread::scope(|s| {
@@ -572,16 +630,11 @@ pub fn serve(d: &Daemon<'_>, listener: &std::os::unix::net::UnixListener, extern
         s.spawn(|| {
             catch_up_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst))
         });
-        for repo in d.core.config.repos.keys() {
-            for install in [true, false] {
-                let done = &done;
-                s.spawn(move || {
-                    crate::main_sync::run_loop(d.core, repo, install, &|| {
-                        done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
-                    })
-                });
-            }
-        }
+        s.spawn(|| {
+            crate::reload::run(d.core, &|| {
+                done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
+            })
+        });
         let r = d.serve(listener, external, &|req| server.handle(req));
         done.store(true, Ordering::SeqCst);
         r
@@ -656,13 +709,17 @@ pub type RepoCatchUp = Result<Vec<(SessionId, Result<strata_publish::pending::Ca
 /// later clock). Each repo's locks are taken without waiting
 /// ([`PublishLocksNoWait`]); a repo whose lock is busy is skipped this
 /// pass. Returns what happened to each row, per repo.
-pub fn catch_up_pass(
-    d: &Daemon<'_>,
-    now: SystemTime,
-) -> Vec<(RepoName, RepoCatchUp)> {
+pub fn catch_up_pass(d: &Daemon<'_>, now: SystemTime) -> Vec<(RepoName, RepoCatchUp)> {
     let core = d.core;
+    let _catalog = core.admit();
     let mut out = Vec::new();
-    for repo in core.config.repos.keys() {
+    for repo in core
+        .snapshot()
+        .expect("operation pinned")
+        .config
+        .repos
+        .keys()
+    {
         let r = (|| {
             let rc = effective_cfg(core, repo)?;
             let git = git_of(core, repo)?;
@@ -675,8 +732,20 @@ pub fn catch_up_pass(
                 env: &core.env,
                 locks: &core.locks,
             };
-            let locks = PublishLocksNoWait { locks: &core.locks, du: &d.du, pins: &core.pins };
-            let ctx = strata_publish::Ctx { store: &core.store, git, cfg: &rc, repo, deps: &deps, locks: &locks, sessions: &d.sessions };
+            let locks = PublishLocksNoWait {
+                locks: &core.locks,
+                du: &d.du,
+                pins: core,
+            };
+            let ctx = strata_publish::Ctx {
+                store: &core.store,
+                git,
+                cfg: &rc,
+                repo,
+                deps: &deps,
+                locks: &locks,
+                sessions: &d.sessions,
+            };
             strata_publish::pending::catch_up(&ctx, now)
         })();
         match &r {
@@ -715,7 +784,7 @@ const OLD_TREE_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 /// `stop` reaches into the walks: a judgement in progress gives up and
 /// writes no verdict.
 fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
-    old_tree_loop_with_retry(d, stop, OLD_TREE_RETRY);
+    old_tree_loop_with_retry(d, stop, OLD_TREE_RETRY, || {});
 }
 
 #[cfg(feature = "test-seams")]
@@ -723,14 +792,16 @@ pub fn test_old_tree_loop(
     d: &Daemon<'_>,
     stop: &(dyn Fn() -> bool + Sync),
     retry: std::time::Duration,
+    after_admit: &(dyn Fn() + Sync),
 ) {
-    old_tree_loop_with_retry(d, stop, retry);
+    old_tree_loop_with_retry(d, stop, retry, after_admit);
 }
 
 fn old_tree_loop_with_retry(
     d: &Daemon<'_>,
     stop: &(dyn Fn() -> bool + Sync),
     retry_delay: std::time::Duration,
+    after_admit: impl Fn(),
 ) {
     // Background work: this thread's disk I/O at utility priority, like du.
     crate::du::utility_io();
@@ -756,6 +827,8 @@ fn old_tree_loop_with_retry(
             let Some((key, path, ino)) = d.sessions.next_old_tree(std::time::Duration::from_millis(100)) else {
                 continue;
             };
+            let _catalog = d.core.admit();
+            after_admit();
             let yield_to = Arc::new(AtomicBool::new(false));
             let r = catch_unwind(AssertUnwindSafe(|| {
                 crate::locks::with_yield(yield_to.clone(), || {
@@ -805,6 +878,7 @@ fn old_tree_loop_with_retry(
 /// The start of [`old_tree_loop`]: the half-retired sweep of every active
 /// session (busy ones are skipped this time), then every old tree queued.
 fn old_tree_startup(d: &Daemon<'_>, flag: &Arc<AtomicBool>) {
+    let _catalog = d.core.admit();
     let Ok(ids) = d.sessions.list() else { return };
     for id in ids {
         if flag.load(Ordering::SeqCst) {
@@ -849,6 +923,7 @@ fn old_tree_startup(d: &Daemon<'_>, flag: &Arc<AtomicBool>) {
 /// with a request is skipped until the next pass; errors are skipped too
 /// (`status` keeps reporting `SeedStale`). Never reads file contents.
 fn refresh_seeds_pass(d: &Daemon<'_>) {
+    let _catalog = d.core.admit();
     let Ok(ids) = d.sessions.list() else { return };
     for id in ids {
         if d.stopping() {
@@ -966,6 +1041,7 @@ impl<'d, 'a> Server<'d, 'a> {
 
     /// One request: scope, handler, panic → `Failed` / `Unknown`.
     pub fn handle(&self, req: Request) -> Reply {
+        let _catalog = self.core().catalog.enter(|c| c.generation);
         let name = req.method.name();
         let _scope = RequestScope::begin(name, session_of(&req.params));
         WRITING.with(|w| w.set(false));
@@ -976,10 +1052,17 @@ impl<'d, 'a> Server<'d, 'a> {
             Ok(Err(e)) => Reply::error(&req.id, &e),
             Err(_) if wrote => Reply::error(
                 &req.id,
-                &StrataError::new(Code::Unknown, format!("{name} panicked after it may have written; nothing is replayed"))
-                    .with_detail(json!({ "reason": "handler_panicked", "method": name })),
+                &StrataError::new(
+                    Code::Unknown,
+                    format!("{name} panicked after it may have written; nothing is replayed"),
+                )
+                .with_detail(json!({ "reason": "handler_panicked", "method": name })),
             ),
-            Err(_) => Reply::rejected(&req.id, RpcReject::Failed, format!("{name} panicked before writing anything")),
+            Err(_) => Reply::rejected(
+                &req.id,
+                RpcReject::Failed,
+                format!("{name} panicked before writing anything"),
+            ),
         }
     }
 
@@ -1224,7 +1307,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
                 let repos: Vec<RepoName> = match &p.repo {
                     Some(r) => vec![r.clone()],
-                    None => core.config.repos.keys().cloned().collect(),
+                    None => core.snapshot().expect("operation pinned").config.repos.keys().cloned().collect(),
                 };
                 for repo in &repos {
                     repo_cfg(core, repo)?;
@@ -1282,11 +1365,13 @@ impl<'d, 'a> Server<'d, 'a> {
             }
             Params::ConfigRelax(p) => {
                 writing();
-                self.d.config_relax(&p.repo)?;
+                let shown = p.shown.as_ref().ok_or_else(|| StrataError::new(Code::InvalidInput, "upgrade the CLI: config relax requires shown flags").with_detail(json!({ "reason": "shown_required" })))?;
+                core.relax_shown(&p.repo, shown, &|| {})?;
                 let mut reply = json!({"pins_meta":core.pins.metadata()});
                 if let Some(error) = core.pins.audit_error(&p.repo) { reply["warnings"] = json!([{"kind":"audit_write_failed","repo":p.repo,"message":error}]); }
                 Ok(reply)
             }
+            Params::ConfigReload(_) => Ok(json_of(&core.request_reload(crate::reload::RELOAD_WAIT)?)),
             Params::DaemonStatus(p) => self.d.daemon_status(p.verify),
             Params::Du(p) => Ok(self.d.du.report(p.refresh)),
             // design dev-ports §3.1: under the session queue, so serialized
@@ -1294,11 +1379,11 @@ impl<'d, 'a> Server<'d, 'a> {
             // lifecycle inside its write txn.
             Params::PortsEnsure(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
                 writing();
-                Ok(lease_json(&core.store.ensure_dev_ports(&p.session, &p.repo)?))
+                Ok(lease_json(&core.store.ensure_dev_ports_with_policy(&p.session, &p.repo, &core.snapshot()?.dev_ports)?))
             }),
             Params::PortsReassign(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
                 writing();
-                Ok(lease_json(&core.store.reassign_dev_ports(&p.session, &p.repo, p.checked)?))
+                Ok(lease_json(&core.store.reassign_dev_ports_with_policy(&p.session, &p.repo, p.checked, &core.snapshot()?.dev_ports)?))
             }),
             Params::ResolveMove(p) => {
                 let Some(choice) = resolve::move_choice(p.abandon, p.accept) else {
@@ -1357,7 +1442,12 @@ impl<'d, 'a> Server<'d, 'a> {
             Ok(r) => r,
             Err(e) => {
                 for r in repos {
-                    if let Some(c) = core.config.repos.get(r)
+                    if let Some(c) = core
+                        .snapshot()
+                        .expect("operation pinned")
+                        .config
+                        .repos
+                        .get(r)
                         && alert_attach(&core.warnings, &c.path, &e)
                     {
                         break;
@@ -1367,10 +1457,13 @@ impl<'d, 'a> Server<'d, 'a> {
             }
         };
         locks::mark_visible();
-        self.d.du.on_new_timed(rep.manifest.id.as_str(), Some(t0.elapsed()));
+        self.d
+            .du
+            .on_new_timed(rep.manifest.id.as_str(), Some(t0.elapsed()));
         let after = core.after_new(&mut rep, &|r, repo| core.observe_new(r, repo));
         for (repo, _) in &after.anchor_unknown {
-            core.warnings.add(DaemonWarning::AnchorNotAdvanced { repo: repo.clone() });
+            core.warnings
+                .add(DaemonWarning::AnchorNotAdvanced { repo: repo.clone() });
         }
         Ok(json!({
             "session": json_of(&rep),
@@ -1463,7 +1556,13 @@ impl<'d, 'a> Server<'d, 'a> {
     }
 
     /// Read only; no queue, no lock.
-    fn status(&self, cwd: Option<&Path>, selector: Option<&str>, all: bool, with_chains: bool) -> Result<Value> {
+    fn status(
+        &self,
+        cwd: Option<&Path>,
+        selector: Option<&str>,
+        all: bool,
+        with_chains: bool,
+    ) -> Result<Value> {
         let core = self.core();
         let sessions = &self.d.sessions;
         if !all
@@ -1477,17 +1576,18 @@ impl<'d, 'a> Server<'d, 'a> {
         let ids: Vec<SessionId> = if all {
             sessions.list()?
         } else if let Some(sel) = selector {
-            vec![
-                sessions
-                    .select(sel)
-                    .map_err(|e| strata_session::with_leftover_detail(&core.store, &core.config.paths.root, sel, e))?,
-            ]
+            vec![sessions.select(sel).map_err(|e| {
+                strata_session::with_leftover_detail(&core.store, &core.config.paths.root, sel, e)
+            })?]
         } else if let Some(cwd) = cwd {
             match sessions.resolve(cwd)? {
                 Some((id, _)) => vec![id],
                 None => {
-                    return Err(StrataError::new(Code::NoSuchSession, format!("{} is in no session's workspace", cwd.display()))
-                        .with_detail(json!({ "path": cwd.to_string_lossy() })));
+                    return Err(StrataError::new(
+                        Code::NoSuchSession,
+                        format!("{} is in no session's workspace", cwd.display()),
+                    )
+                    .with_detail(json!({ "path": cwd.to_string_lossy() })));
                 }
             }
         } else {
@@ -1532,15 +1632,19 @@ impl<'d, 'a> Server<'d, 'a> {
         // Each repo's chain holds one of the shared `[status] parallel`
         // slots, like a workspace read (A4).
         let chains = if with_chains {
-            let mut todo = Vec::with_capacity(core.gits.len());
-            for (repo, git) in &core.gits {
+            let mut todo =
+                Vec::with_capacity(core.snapshot().expect("operation pinned").gits.len());
+            for (repo, git) in &core.snapshot().expect("operation pinned").gits {
                 todo.push((repo, git, &repo_cfg(core, repo)?.publish.branch));
             }
             let got =
-                sessions.on_status_slots(&todo, |&(_, git, branch)| match strata_deps::publish_chain(git, branch) {
-                    Ok(c) => json_of(&c),
-                    Err(e) => json!({ "error": json_of(&e) }),
-                });
+                sessions.on_status_slots(
+                    &todo,
+                    |&(_, git, branch)| match strata_deps::publish_chain(git, branch) {
+                        Ok(c) => json_of(&c),
+                        Err(e) => json!({ "error": json_of(&e) }),
+                    },
+                );
             let mut chains = serde_json::Map::new();
             for ((repo, _, _), v) in todo.iter().zip(got) {
                 let v =
@@ -1834,7 +1938,11 @@ impl<'d, 'a> Server<'d, 'a> {
         }
     }
 
-    fn with_publish_ctx<T>(&self, repo: &RepoName, f: impl FnOnce(&strata_publish::Ctx) -> Result<T>) -> Result<T> {
+    fn with_publish_ctx<T>(
+        &self,
+        repo: &RepoName,
+        f: impl FnOnce(&strata_publish::Ctx) -> Result<T>,
+    ) -> Result<T> {
         let core = self.core();
         let rc = effective_cfg(core, repo)?;
         let git = git_of(core, repo)?;
@@ -1847,8 +1955,20 @@ impl<'d, 'a> Server<'d, 'a> {
             env: &core.env,
             locks: &core.locks,
         };
-        let locks = PublishLocksDu { locks: &core.locks, du: &self.d.du, pins: &core.pins };
-        let ctx = strata_publish::Ctx { store: &core.store, git, cfg: &rc, repo, deps: &deps, locks: &locks, sessions: &self.d.sessions };
+        let locks = PublishLocksDu {
+            locks: &core.locks,
+            du: &self.d.du,
+            pins: core,
+        };
+        let ctx = strata_publish::Ctx {
+            store: &core.store,
+            git,
+            cfg: &rc,
+            repo,
+            deps: &deps,
+            locks: &locks,
+            sessions: &self.d.sessions,
+        };
         f(&ctx)
     }
 
@@ -2407,7 +2527,7 @@ fn landed_before(rows: &[strata_store::PublishRecord], b: &strata_types::Batch) 
 /// holder shows as `catch_up`), `Busy` otherwise, never waited out; the
 /// rebase's take adds the du hold like [`PublishLocksDu`].
 struct PublishLocksNoWait<'a> {
-    pins: &'a crate::confirm_flow::Pins,
+    pins: &'a Core,
     locks: &'a crate::locks::Locks,
     du: &'a Arc<crate::du::Du>,
 }
@@ -2474,7 +2594,7 @@ impl strata_publish::PublishLocks for PublishLocksNoWait<'_> {
 /// of its session: queue → du hold → repo lock. A hold that times out is
 /// the take's `Busy`, which the rebase waits out like the queue's.
 struct PublishLocksDu<'a> {
-    pins: &'a crate::confirm_flow::Pins,
+    pins: &'a Core,
     locks: &'a crate::locks::Locks,
     du: &'a Arc<crate::du::Du>,
 }

@@ -290,8 +290,12 @@ pub fn adopt_replay(sc: Scope, plans: &[ReplayPlan]) {
 /// publish or replay, T2 later). A move consumes the row in its finishing
 /// transaction; a deferral is recorded on the attempted rev only.
 pub fn attempt(ctx: &Ctx, row: &RebasePending, policy: MovePolicy) -> Result<Option<RebaseReport>> {
-    let (Some(head), Some(tree)) = (row.head.as_deref().and_then(oid), row.tree.as_deref()) else { return Ok(None) };
-    let Ok(tree) = TreeOid::try_from(tree.to_string()) else { return Ok(None) };
+    let (Some(head), Some(tree)) = (row.head.as_deref().and_then(oid), row.tree.as_deref()) else {
+        return Ok(None);
+    };
+    let Ok(tree) = TreeOid::try_from(tree.to_string()) else {
+        return Ok(None);
+    };
     // Rule 5 [Codex P2 B5]: a target that must reach the tracking ref
     // first (a failed publish's commit, a replay's copy) waits for T2.
     if needs_push(ctx, row, &head) {
@@ -299,8 +303,22 @@ pub fn attempt(ctx: &Ctx, row: &RebasePending, policy: MovePolicy) -> Result<Opt
     }
     let s = &row.session;
     let deps = crate::rebase::workspace_base(ctx, s)?.deps;
-    let g = BaseGen { repo: ctx.repo.clone(), tree, deps };
-    let r = crate::rebase::rebase_one_with(ctx, s, &g, &head, policy, Attempt { consume: Some(row.rev), recheck: None })?;
+    let g = BaseGen {
+        repo: ctx.repo.clone(),
+        tree,
+        deps,
+    };
+    let r = crate::rebase::defer_fenced(crate::rebase::rebase_one_with(
+        ctx,
+        s,
+        &g,
+        &head,
+        policy,
+        Attempt {
+            consume: Some(row.rev),
+            recheck: None,
+        },
+    ))?;
     note_outcome(ctx, row, &r);
     crate::rebase::observe_after(ctx, s, &g, &head);
     Ok(Some(r))
@@ -380,12 +398,18 @@ fn stale(ctx: &Ctx, row: &RebasePending, head: &CommitOid) -> Result<Option<(&'s
 /// session, the workspace still on the row's `from`, the target reachable.
 /// Lifecycle Active is G0, run again under the locks by `Auto`. A `Busy`
 /// (a lock, the base build) defers the row with reason `busy`.
-fn attempt_t2(ctx: &Ctx, row: &RebasePending, head: &CommitOid, tree: TreeOid) -> Result<RebaseReport> {
+fn attempt_t2(
+    ctx: &Ctx,
+    row: &RebasePending,
+    head: &CommitOid,
+    tree: TreeOid,
+) -> Result<RebaseReport> {
     let s = &row.session;
     let sc = Scope::of(ctx);
     let recheck = |old: &BaseGen| -> Result<Option<RebaseReport>> {
         let cur = ctx.store.rebase_pending_of(s, ctx.repo)?;
-        if cur.as_ref().map(|r| (r.rev, r.head.as_deref())) != Some((row.rev, Some(head.as_str()))) {
+        if cur.as_ref().map(|r| (r.rev, r.head.as_deref())) != Some((row.rev, Some(head.as_str())))
+        {
             return Ok(Some(deferred("state", json!({ "row_changed": true }))));
         }
         if publishing(ctx.store, s)? {
@@ -395,18 +419,36 @@ fn attempt_t2(ctx: &Ctx, row: &RebasePending, head: &CommitOid, tree: TreeOid) -
             return Ok(Some(deferred("state", json!({ "base_changed": true }))));
         }
         if !reachable(sc, head) {
-            return Ok(Some(deferred("state", json!({ "unreachable": head.as_str() }))));
+            return Ok(Some(deferred(
+                "state",
+                json!({ "unreachable": head.as_str() }),
+            )));
         }
         Ok(None)
     };
     let deps = crate::rebase::workspace_base(ctx, s)?.deps;
-    let g = BaseGen { repo: ctx.repo.clone(), tree, deps };
-    let at = Attempt { consume: Some(row.rev), recheck: Some(&recheck) };
-    let r = match crate::rebase::rebase_one_with(ctx, s, &g, head, MovePolicy::Auto, at) {
+    let g = BaseGen {
+        repo: ctx.repo.clone(),
+        tree,
+        deps,
+    };
+    let at = Attempt {
+        consume: Some(row.rev),
+        recheck: Some(&recheck),
+    };
+    let r = match crate::rebase::defer_fenced(crate::rebase::rebase_one_with(
+        ctx,
+        s,
+        &g,
+        head,
+        MovePolicy::Auto,
+        at,
+    )) {
         Ok(r) => r,
-        Err(e) if e.code == Code::Busy => {
-            deferred("busy", json!({ "message": e.message, "detail": e.detail.unwrap_or(Value::Null) }))
-        }
+        Err(e) if e.code == Code::Busy => deferred(
+            "busy",
+            json!({ "message": e.message, "detail": e.detail.unwrap_or(Value::Null) }),
+        ),
         Err(e) => return Err(e),
     };
     note_outcome(ctx, row, &r);

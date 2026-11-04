@@ -307,21 +307,40 @@ impl Store {
     /// `InvalidInput reason=session_unknown`, `NoSuchRepo`, or
     /// `Busy reason=ports_exhausted`.
     pub fn ensure_dev_ports(&self, id: &SessionId, repo: &RepoName) -> Result<DevPortLease> {
+        self.writable()?;
+        self.ensure_dev_ports_with_policy(id, repo, self.required_policy()?.as_ref())
+    }
+
+    /// Use the policy pinned by the caller at admission.
+    pub fn ensure_dev_ports_with_policy(
+        &self,
+        id: &SessionId,
+        repo: &RepoName,
+        policy: &DevPortsPolicy,
+    ) -> Result<DevPortLease> {
         const OP: &str = "ensure_dev_ports";
         self.writable()?;
-        let policy = self.required_policy()?;
         let (sid, r) = (id.as_str(), repo.as_str());
         let base = self.write(OP, |c| {
             require_active(c, OP, sid, r)?;
             if let Some(b) = lease_of(c, sid, r).map_err(|e| sql(e, OP, NOT_WRITTEN))? {
                 return Ok(Tx::Rollback(base_of(b)?));
             }
-            let b = allocate(c, &policy, sid, r, None).map_err(|e| sql(e, OP, NOT_WRITTEN))?.ok_or_else(|| exhausted(sid, r))?;
-            c.execute("INSERT INTO dev_ports (session, repo, base) VALUES (?1, ?2, ?3)", params![sid, r, i64::from(b)])
-                .map_err(|e| sql(e, OP, NOT_WRITTEN))?;
+            let b = allocate(c, policy, sid, r, None)
+                .map_err(|e| sql(e, OP, NOT_WRITTEN))?
+                .ok_or_else(|| exhausted(sid, r))?;
+            c.execute(
+                "INSERT INTO dev_ports (session, repo, base) VALUES (?1, ?2, ?3)",
+                params![sid, r, i64::from(b)],
+            )
+            .map_err(|e| sql(e, OP, NOT_WRITTEN))?;
             Ok(Tx::Commit(b))
         })?;
-        Ok(DevPortLease { session: id.clone(), repo: repo.clone(), base })
+        Ok(DevPortLease {
+            session: id.clone(),
+            repo: repo.clone(),
+            base,
+        })
     }
 
     /// Move the lease of an `Active` session's workspace to another usable
@@ -332,10 +351,26 @@ impl Store {
     /// replaces a lease someone else just took. Nothing else usable: the old
     /// lease stays, `Busy reason=ports_exhausted`. Same lifecycle errors as
     /// `ensure`.
-    pub fn reassign_dev_ports(&self, id: &SessionId, repo: &RepoName, checked: Option<u16>) -> Result<DevPortLease> {
+    pub fn reassign_dev_ports(
+        &self,
+        id: &SessionId,
+        repo: &RepoName,
+        checked: Option<u16>,
+    ) -> Result<DevPortLease> {
+        self.writable()?;
+        self.reassign_dev_ports_with_policy(id, repo, checked, self.required_policy()?.as_ref())
+    }
+
+    /// Use the policy pinned by the caller at admission.
+    pub fn reassign_dev_ports_with_policy(
+        &self,
+        id: &SessionId,
+        repo: &RepoName,
+        checked: Option<u16>,
+        policy: &DevPortsPolicy,
+    ) -> Result<DevPortLease> {
         const OP: &str = "reassign_dev_ports";
         self.writable()?;
-        let policy = self.required_policy()?;
         let (sid, r) = (id.as_str(), repo.as_str());
         let base = self.write(OP, |c| {
             require_active(c, OP, sid, r)?;
@@ -347,13 +382,17 @@ impl Store {
                     json!({ "reason": "lease_changed", "session": sid, "repo": r, "checked": checked, "current": old }),
                 ));
             }
-            let b = allocate(c, &policy, sid, r, old).map_err(|e| sql(e, OP, NOT_WRITTEN))?.ok_or_else(|| exhausted(sid, r))?;
+            let b = allocate(c, policy, sid, r, old).map_err(|e| sql(e, OP, NOT_WRITTEN))?.ok_or_else(|| exhausted(sid, r))?;
             c.execute("DELETE FROM dev_ports WHERE session = ?1 AND repo = ?2", [sid, r]).map_err(|e| sql(e, OP, NOT_WRITTEN))?;
             c.execute("INSERT INTO dev_ports (session, repo, base) VALUES (?1, ?2, ?3)", params![sid, r, i64::from(b)])
                 .map_err(|e| sql(e, OP, NOT_WRITTEN))?;
             Ok(Tx::Commit(b))
         })?;
-        Ok(DevPortLease { session: id.clone(), repo: repo.clone(), base })
+        Ok(DevPortLease {
+            session: id.clone(),
+            repo: repo.clone(),
+            base,
+        })
     }
 }
 

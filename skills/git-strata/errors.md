@@ -3,7 +3,10 @@
 ## The JSON envelope
 
 stdout carries exactly one compact JSON line; exit code 0 iff `ok` is true,
-else 1. Human prompts and notices go to stderr only. Exceptions: successful `help`, `--help`/`--version`;
+otherwise failures normally use 1. `config reload` uses 2 for rejected config,
+3 while pending, and 4 when the daemon lacks `config.reload`; argument, transport,
+output and invalid-report failures still use 1. Human prompts and notices go to
+stderr only. Exceptions: successful `help`, `--help`/`--version`;
 `ls --table` prints a text table; `sync --check --hook` prints the hook's
 own JSON (see [hooks.md](hooks.md)); and a
 `session exec` that starts its command prints no envelope; stdout, stderr
@@ -32,7 +35,14 @@ All three keys are always present; `data` is never null. Branch on
 | `HeadMoved baseline_moved` | The checkpoint baseline tree no longer equals the workspace head's tree. Rerun the exact `publish --from …` command in `detail.fix`; do not treat this as a sync conflict. |
 | `OpenFiles caller_cwd` | Nothing moved; run `detail.fix` from outside, preserving its repo/resolution flags, then cd back to the workspace path. |
 | `OpenFiles cwd_holders` | Other shells would be left in the old tree; ask their owners to cd out. `--allow-cwd` only exempts the caller's PID chain; `--allow-cwd-holders` explicitly accepts others. |
+| `Busy` (`pins_tightened`) | Rerun the command with a fresh snapshot of the newly applied config; do not retry inside the old operation. |
+| `Busy` (`reload_pending`) | Rerun `config reload`; the current attempt continues (exit 3). |
 | `Busy` (other) | Repo lock held by another operation; wait and retry later. |
+| `InvalidInput` (`config_rejected`) | Fallback when a rejected `config reload` report supplies no reason; otherwise the daemon's reason is forwarded. Inspect `data.reasons` and `data.restart_required` (exit 2). |
+| `InvalidInput` (`recovery_failed`) | A new repo's pending-rebase reconstruction failed before catalog publication; the old catalog remains active. Inspect `data.reasons`, resolve the reported failure, then rerun `config reload`. |
+| `InvalidInput` (`shown_required`) | Use a CLI that sends the displayed flags with `config relax`. |
+| `InvalidInput` (`config_not_applied`) | Apply the current file with `config reload` before `config relax`. |
+| `Unsupported` (`daemon_too_old`) | The daemon lacks the requested feature. Ask the human to install matching CLI/daemon versions and restart the daemon (`config reload` exits 4); do not resend unknown fields to an old daemon. |
 | `NotTty` | Command needs a human at a terminal. Stop; give the exact command to the human. |
 | `NotConfirmed` | Human confirmation failed / was cancelled / expired. Report it; the human reruns. Exception: `detail.reason` `plan_changed` (publish) means no confirmation was attempted and nothing was written: rerun the same command yourself first; if that rerun returns `NotTty`, hand the command to the human. |
 | `AmbiguousMatch` | Ticket matches several sessions; retry with an id from `detail`. |
@@ -40,7 +50,6 @@ All three keys are always present; `data` is never null. Branch on
 | `NoSuchRepo` | Repo name not in config; check `--repo` / argument. With `detail.reason` `not_in_session`: the session has no workspace of that repo; run `detail.fix` (`git-strata add --session S --repo R`), then retry. |
 | `InvalidInput` (`message`) | Use a nonempty publish subject, at most 64 KiB, without control characters or reserved identity trailers. |
 | `InvalidInput` (`message_repo`) | Every `--message-for R=TEXT` must name a repo selected by the original publish request. A retry may keep overrides for already-landed selected repos. |
-| `Unsupported` (`daemon_too_old`) | Ask the human to upgrade CLI and daemon together before using the requested feature; do not resend unknown fields to an old daemon. |
 | `HeadMoved` (`baseline_moved`) | Rerun the complete literal publish command in `detail.fix` to take fresh checkpoints; it preserves selectors and message overrides. |
 | `InvalidInput` | Fix arguments per `detail.reason` (`checkpoint_reason`, `diff_mode`, `both_selectors`, `no_batch`, `unknown_command` with `detail.commands`, ...). `siblings_missing`: the repo's checks need sibling repos; run `detail.fix` (`git-strata add --session S --repo R ...`) or follow `detail.missing[].next`, then rerun. `chain_diverged` from publish on a repo that needs no confirmation: this is a push (the repo usually has `publish.push = false`), so only when the human asked you to push this repo run `git-strata push <REPO>` (it fetches, replays the unpushed chain onto origin, reruns checks, pushes a fast-forward), then rerun the publish; otherwise stop and tell the human the chain diverged and needs `git-strata push <REPO>`. `replay_deps_unsealed` from push: open a session on the repo, push again. `chain_rewound`, or diverged on a gated repo: hand to the human (`chain`). |
 | `Conflict` (publish) | Same hunk changed on both sides (another session or upstream); nothing committed in `detail.repo`, earlier repos of the call may have landed (`data.commits`). Fix, checkpoint, re-run the same publish ([publish.md](publish.md)); between sessions, who resolves can be set by `publish --assign`. |

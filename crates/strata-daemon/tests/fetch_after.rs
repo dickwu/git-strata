@@ -155,7 +155,7 @@ fn observe_failed_does_not_fail_new_or_publish() {
         // new's own observe fails: new succeeds with ObserveFailed; the
         // daemon observes once more; still failing stays a warning.
         d.sessions.arm(SessionSeam::FailAt { phase: "new.observe".into(), errno: libc::EIO });
-        let mut rep = d.sessions.new(None, std::slice::from_ref(&rn)).unwrap();
+        let mut rep = { let _catalog = core.admit(); d.sessions.new(None, std::slice::from_ref(&rn)).unwrap() };
         assert!(matches!(&rep.warnings[..], [NewWarning::ObserveFailed { repo, .. }] if *repo == rn), "{:?}", rep.warnings);
         let calls = Cell::new(0);
         let out = core.after_new(&mut rep, &|_, _| {
@@ -177,13 +177,13 @@ fn observe_failed_does_not_fail_new_or_publish() {
 
         // The retry with the real observe succeeds: the warning goes.
         d.sessions.arm(SessionSeam::FailAt { phase: "new.observe".into(), errno: libc::EIO });
-        let mut rep2 = d.sessions.new(None, std::slice::from_ref(&rn)).unwrap();
+        let mut rep2 = { let _catalog = core.admit(); d.sessions.new(None, std::slice::from_ref(&rn)).unwrap() };
         assert_eq!(rep2.warnings.len(), 1);
         core.after_new(&mut rep2, &|r, repo| core.observe_new(r, repo));
         assert!(rep2.warnings.is_empty(), "{:?}", rep2.warnings);
 
         // No ObserveFailed: the daemon does not observe again.
-        let mut rep3 = d.sessions.new(None, std::slice::from_ref(&rn)).unwrap();
+        let mut rep3 = { let _catalog = core.admit(); d.sessions.new(None, std::slice::from_ref(&rn)).unwrap() };
         let out = core.after_new(&mut rep3, &|_, _| panic!("not observed again"));
         assert!(out.reobserved.is_empty());
     }
@@ -304,14 +304,14 @@ fn pre_push_guard_disabled_is_reported_not_repinned() {
     let rn = repo_name("tool");
     {
         let d = Daemon::start(&core).unwrap();
-        let id = d.sessions.new(None, std::slice::from_ref(&rn)).unwrap().manifest.id;
+        let id = { let _catalog = core.admit(); d.sessions.new(None, std::slice::from_ref(&rn)).unwrap() }.manifest.id;
         let shadow = shadow_dir(&fx.config.paths.root, &id, &rn);
         let hook = shadow.join("hooks/pre-push");
         assert!(hook.is_file(), "{}", hook.display());
         fs::write(&hook, b"#!/bin/sh\nexit 0\n").unwrap();
         let config_before = fs::read(shadow.join("config")).unwrap();
 
-        let st = d.sessions.status(&id).unwrap();
+        let st = { let _catalog = core.admit(); d.sessions.status(&id).unwrap() };
         let ws = &st.workspaces[&rn];
         assert!(
             ws.warnings.iter().any(|w| matches!(w, strata_session::StatusWarning::MirrorDrift { items } if items.iter().any(|i| i.reason == "pre_push_guard_disabled"))),
@@ -320,7 +320,7 @@ fn pre_push_guard_disabled_is_reported_not_repinned() {
         );
         core.gits[&rn].take_git_calls();
         assert_eq!(report_guard_disabled(&core.warnings, &st, &fx.config.paths.root), vec![shadow.clone()]);
-        let st = d.sessions.status(&id).unwrap();
+        let st = { let _catalog = core.admit(); d.sessions.status(&id).unwrap() };
         assert!(report_guard_disabled(&core.warnings, &st, &fx.config.paths.root).is_empty(), "first time only");
         let lines: Vec<String> = fx.alerts().into_iter().filter(|l| l.contains("pre-push guard disabled")).collect();
         assert_eq!(lines.len(), 1, "{lines:?}");

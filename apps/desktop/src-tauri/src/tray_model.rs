@@ -508,6 +508,24 @@ pub fn model_at(s: &Snapshot, now: Stamp) -> TrayModel {
         status_line.push_str(&format!(" · {}", plural(notices, "notice", "notices")));
     }
     let more = all.len().saturating_sub(MAX_WAITING);
+    let config_failed = s.daemon_status.value.as_ref().is_some_and(|d| {
+        d["features"]
+            .as_array()
+            .is_some_and(|features| features.iter().any(|f| f == "config.reload"))
+            && d["warnings"].as_array().is_some_and(|warnings| {
+                warnings.iter().any(|w| {
+                    w.get("ConfigReloadFailed").is_some()
+                        || w.get("ConfigRestartRequired").is_some()
+                })
+            })
+    });
+    if daemon_fresh && config_failed {
+        match icon {
+            Icon::Down => {}
+            Icon::Alert => status_line.push_str(" · config.toml not applied — open status"),
+            _ => status_line = "config.toml not applied — open status".to_string(),
+        }
+    }
     TrayModel {
         icon,
         status_line,
@@ -523,6 +541,54 @@ pub fn model_at(s: &Snapshot, now: Stamp) -> TrayModel {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn config_warning_status_line_requires_feature_and_fresh_daemon() {
+        let now = Stamp::now();
+        let mut s = Snapshot {
+            daemon_status: Input {
+                value: Some(
+                    json!({"features":["config.reload"], "warnings":[{"ConfigReloadFailed":{"reason":"parse"}}]}),
+                ),
+                at: Some(now),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            model_at(&s, now).status_line,
+            "config.toml not applied — open status"
+        );
+        let stale = Stamp {
+            instant: now.instant + STALE_AFTER + Duration::from_secs(1),
+            wall: now.wall + STALE_AFTER + Duration::from_secs(1),
+        };
+        assert_ne!(
+            model_at(&s, stale).status_line,
+            "config.toml not applied — open status"
+        );
+        s.last_down = Some((now, DownWhy::NotRunning));
+        assert_eq!(model_at(&s, now).icon, Icon::Down);
+        assert_ne!(
+            model_at(&s, now).status_line,
+            "config.toml not applied — open status"
+        );
+        s.last_down = None;
+        s.fd_pressure = true;
+        let alert = model_at(&s, now);
+        assert_eq!(alert.icon, Icon::Alert);
+        assert!(
+            alert
+                .status_line
+                .starts_with("Daemon is close to its file-handle limit")
+        );
+        assert!(alert.status_line.contains("config.toml not applied"));
+        s.fd_pressure = false;
+        s.daemon_status.value.as_mut().unwrap()["features"] = json!([]);
+        assert_ne!(
+            model_at(&s, now).status_line,
+            "config.toml not applied — open status"
+        );
+    }
     fn fixture() -> (Value, Value) {
         (
             json!({"sessions":[{"status":{"upstream":{"repos":{}},"manifest":{"repos":{"tool":{"tracked":true}}},"workspaces":{"tool":{"health":"Ok","pending":[{"id":75}],"upstream":{"behind":3,"deps":{"proposal":75,"mode":"apply","state":"ready"},"auto":{"state":"deferred","reason":"open_files","since":"2026-11-01T12:00:00Z"}}}}}}]}),

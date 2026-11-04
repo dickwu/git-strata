@@ -161,7 +161,15 @@ impl Sessions<'_> {
         self.seams.hit("new.enroll", None)?;
         let enroll = self.enroll.lock().unwrap_or_else(|p| p.into_inner());
         self.id_free(&manifest.id)?;
-        self.store.create_session(&manifest, SystemTime::now())?;
+        if self.catalog.is_some() {
+            self.store.create_session_with_policy(
+                &manifest,
+                SystemTime::now(),
+                self.dev_ports_policy()?,
+            )?;
+        } else {
+            self.store.create_session(&manifest, SystemTime::now())?;
+        }
 
         // Phase D, steps 12-14.
         self.build_layout(&manifest, &plans, enroll)?;
@@ -302,16 +310,31 @@ impl Sessions<'_> {
         };
         // One phase over `repos`; the first failing repo in RepoName order
         // (the one dispatch returns) is the scene's repo.
-        let each = |phase: &'static str, repos: &[RepoName], f: &(dyn Fn(&RepoName) -> Result<()> + Sync)| -> Result<()> {
+        let each = |phase: &'static str,
+                    repos: &[RepoName],
+                    f: &(dyn Fn(&RepoName) -> Result<()> + Sync)|
+         -> Result<()> {
             let failed = Mutex::new(std::collections::BTreeSet::new());
             let mark = |r: &RepoName| {
-                failed.lock().unwrap_or_else(|p| p.into_inner()).insert(r.clone());
+                failed
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(r.clone());
             };
-            let seam = |r: &RepoName| self.seams.hit(&format!("new.{phase}"), Some(r)).inspect_err(|_| mark(r));
+            let seam = |r: &RepoName| {
+                self.seams
+                    .hit(&format!("new.{phase}"), Some(r))
+                    .inspect_err(|_| mark(r))
+            };
             let run = |r: &RepoName| f(r).inspect_err(|_| mark(r));
             let out = dispatch::each_repo(repos, &seam, &run);
             if out.is_err() {
-                let first = failed.lock().unwrap_or_else(|p| p.into_inner()).iter().next().cloned();
+                let first = failed
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .iter()
+                    .next()
+                    .cloned();
                 at.lock().unwrap_or_else(|p| p.into_inner()).1 = first;
             }
             out.map(|_| ())
@@ -369,25 +392,35 @@ impl Sessions<'_> {
         let abort = std::sync::atomic::AtomicBool::new(false);
         let ws_res = std::thread::scope(|sc| {
             for _ in 0..CACHE_WORKERS {
-                sc.spawn(|| {
+                crate::catalog::spawn_pinned(sc, || {
                     loop {
                         let next = rx.lock().unwrap_or_else(|p| p.into_inner()).recv();
                         let Ok(r) = next else { return };
                         // Once a workspace or one repo's caches failed no
                         // further repo starts (as dispatch).
                         if abort.load(std::sync::atomic::Ordering::SeqCst)
-                            || !cache_errs.lock().unwrap_or_else(|p| p.into_inner()).is_empty()
+                            || !cache_errs
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .is_empty()
                         {
                             continue;
                         }
                         if let Err(e) = cache_one(&r) {
-                            cache_errs.lock().unwrap_or_else(|p| p.into_inner()).insert(r, e);
+                            cache_errs
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .insert(r, e);
                         }
                     }
                 });
             }
             let r = each("workspace", &repos, &|r| {
-                strata_apfs::clone_tree_rooted(&self.store.base_dir(&plans[r].0), &m.root, &rp(r.as_str()))?;
+                strata_apfs::clone_tree_rooted(
+                    &self.store.base_dir(&plans[r].0),
+                    &m.root,
+                    &rp(r.as_str()),
+                )?;
                 if wants_cache(r)
                     && let Some(tx) = tx.lock().unwrap_or_else(|p| p.into_inner()).as_ref()
                 {
@@ -407,7 +440,12 @@ impl Sessions<'_> {
 
         // 13.4 seed_caches (tracked repos only): the workers are joined.
         enter("seed_caches")?;
-        if let Some((r, e)) = cache_errs.into_inner().unwrap_or_else(|p| p.into_inner()).into_iter().next() {
+        if let Some((r, e)) = cache_errs
+            .into_inner()
+            .unwrap_or_else(|p| p.into_inner())
+            .into_iter()
+            .next()
+        {
             at.lock().unwrap_or_else(|p| p.into_inner()).1 = Some(r);
             return Err(e);
         }
@@ -447,18 +485,25 @@ impl Sessions<'_> {
             let fd = strata_apfs::open_rooted(proot, &rp(rel))?;
             strata_apfs::full_fsync(&fd)?;
         }
-        self.store.set_lifecycle(id, Lifecycle::Creating, Lifecycle::Active, None, SystemTime::now())?;
+        self.store.set_lifecycle(
+            id,
+            Lifecycle::Creating,
+            Lifecycle::Active,
+            None,
+            SystemTime::now(),
+        )?;
         Ok(())
     }
 
     /// §5.1 step 15: every repo is observed; a failure is a warning.
     fn observe_all(&self, m: &SessionManifest) -> Vec<NewWarning> {
         let repos: Vec<RepoName> = m.repos.keys().cloned().collect();
-        let out: Vec<std::sync::Mutex<Option<StrataError>>> = repos.iter().map(|_| std::sync::Mutex::new(None)).collect();
+        let out: Vec<std::sync::Mutex<Option<StrataError>>> =
+            repos.iter().map(|_| std::sync::Mutex::new(None)).collect();
         let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|s| {
             for _ in 0..dispatch::WORKERS.min(repos.len()).max(1) {
-                s.spawn(|| {
+                crate::catalog::spawn_pinned(s, || {
                     loop {
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         if i >= repos.len() {
@@ -469,7 +514,12 @@ impl Sessions<'_> {
                             let ws = &m.repos[r];
                             let ctx = self.deps_ctx(r)?;
                             let tree = &ws.base.tree;
-                            strata_deps::observe_main(&ctx, tree, &ws.head, &self.store.base_dir(&ws.base))
+                            strata_deps::observe_main(
+                                &ctx,
+                                tree,
+                                &ws.head,
+                                &self.store.base_dir(&ws.base),
+                            )
                         });
                         if let Err(e) = res {
                             *out[i].lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
@@ -482,7 +532,9 @@ impl Sessions<'_> {
             .into_iter()
             .zip(out)
             .filter_map(|(repo, e)| {
-                e.into_inner().unwrap_or_else(|p| p.into_inner()).map(|detail| NewWarning::ObserveFailed { repo, detail })
+                e.into_inner()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .map(|detail| NewWarning::ObserveFailed { repo, detail })
             })
             .collect()
     }

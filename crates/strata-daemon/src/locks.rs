@@ -9,8 +9,8 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::json;
@@ -126,6 +126,7 @@ struct Holder {
     since: SystemTime,
     started: Instant,
     yield_to: Option<Arc<AtomicBool>>,
+    generation: Option<u64>,
 }
 
 #[derive(Default)]
@@ -138,6 +139,7 @@ struct State {
 /// One FIFO lock.
 #[derive(Default)]
 struct Fifo {
+    fence: AtomicU64,
     st: Mutex<State>,
     cv: Condvar,
 }
@@ -154,10 +156,17 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 enum TakeError {
     Timeout(Option<Holder>),
     ShuttingDown,
+    Policy(StrataError),
 }
 
 impl Fifo {
-    fn acquire(&self, bound: Option<Duration>, closed: &AtomicBool, holder: Holder) -> std::result::Result<(), TakeError> {
+    fn acquire(
+        &self,
+        bound: Option<Duration>,
+        closed: &AtomicBool,
+        holder: Holder,
+        check: impl Fn() -> Result<()>,
+    ) -> std::result::Result<(), TakeError> {
         let deadline = bound.map(|b| Instant::now() + b);
         let mut st = lock(&self.st);
         let ticket = st.next;
@@ -168,6 +177,19 @@ impl Fifo {
                 st.queue.retain(|(t, _)| *t != ticket);
                 self.cv.notify_all();
                 return Err(TakeError::ShuttingDown);
+            }
+            let policy = if holder
+                .generation
+                .is_some_and(|g| g < self.fence.load(Ordering::SeqCst))
+            {
+                Err(fenced_error())
+            } else {
+                check()
+            };
+            if let Err(e) = policy {
+                st.queue.retain(|(t, _)| *t != ticket);
+                self.cv.notify_all();
+                return Err(TakeError::Policy(e));
             }
             if st.holder.is_none() && st.queue.front().map(|(t, _)| t) == Some(&ticket) {
                 st.queue.pop_front();
@@ -191,7 +213,11 @@ impl Fifo {
                         self.cv.notify_all();
                         return Err(TakeError::Timeout(h));
                     }
-                    st = self.cv.wait_timeout(st, d - now).unwrap_or_else(|p| p.into_inner()).0;
+                    st = self
+                        .cv
+                        .wait_timeout(st, d - now)
+                        .unwrap_or_else(|p| p.into_inner())
+                        .0;
                 }
             }
         }
@@ -219,7 +245,7 @@ impl Fifo {
 
 /// Releases on drop, including during unwinding.
 struct Held<'a> {
-    fifo: &'a Fifo,
+    fifo: Arc<Fifo>,
     on_drop: Box<dyn FnMut() + 'a>,
 }
 
@@ -235,10 +261,13 @@ type LongWaitKey = (RepoName, Option<SessionId>, String);
 /// The daemon's repo write locks and session queues.
 pub struct Locks {
     wait: Duration,
-    repos: BTreeMap<RepoName, Fifo>,
+    catalog_id: AtomicU64,
+    repos: RwLock<BTreeMap<RepoName, Arc<Fifo>>>,
+    store: Mutex<Option<Arc<strata_store::Store>>>,
     queues: Mutex<BTreeMap<SessionId, Arc<Fifo>>>,
     expired_waits: Mutex<BTreeMap<LongWaitKey, DaemonWarning>>,
     closed: AtomicBool,
+    close_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Locks {
@@ -247,18 +276,87 @@ impl Locks {
     pub fn new(repos: impl IntoIterator<Item = RepoName>, wait: Duration) -> Locks {
         Locks {
             wait,
-            repos: repos.into_iter().map(|r| (r, Fifo::default())).collect(),
+            catalog_id: AtomicU64::new(0),
+            repos: RwLock::new(
+                repos
+                    .into_iter()
+                    .map(|r| (r, Arc::new(Fifo::default())))
+                    .collect(),
+            ),
+            store: Mutex::new(None),
             queues: Mutex::new(BTreeMap::new()),
             expired_waits: Mutex::new(BTreeMap::new()),
             closed: AtomicBool::new(false),
+            close_hook: Mutex::new(None),
         }
+    }
+
+    pub fn set_close_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *lock(&self.close_hook) = Some(hook);
+    }
+
+    pub fn set_catalog(&self, id: u64) { self.catalog_id.store(id, Ordering::Relaxed); }
+
+    pub fn set_store(&self, store: Arc<strata_store::Store>) {
+        *lock(&self.store) = Some(store);
+    }
+
+    fn repo_entries(&self) -> BTreeMap<RepoName, Arc<Fifo>> {
+        self.repos.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Insert only: never replace a FIFO that may be held by an older catalog.
+    pub fn insert(&self, repo: RepoName) {
+        self.repos
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(repo)
+            .or_default();
+    }
+
+    pub fn tighten(&self, repos: &[RepoName], generation: u64) {
+        let entries = self.repo_entries();
+        for repo in repos {
+            if let Some(f) = entries.get(repo) {
+                f.fence.fetch_max(generation, Ordering::SeqCst);
+                f.wake();
+            }
+        }
+        let queues: Vec<_> = lock(&self.queues).values().cloned().collect();
+        for q in queues {
+            q.wake();
+        }
+    }
+
+    pub fn check_fence(&self, repos: &[RepoName]) -> Result<()> {
+        let generation = strata_session::catalog::generation_for(self.catalog_id.load(Ordering::Relaxed));
+        let entries = self.repo_entries();
+        if repos.iter().any(|r| {
+            entries
+                .get(r)
+                .is_some_and(|f| generation < f.fence.load(Ordering::SeqCst))
+        }) {
+            Err(fenced_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check_session(&self, id: &SessionId) -> Result<()> {
+        let store = lock(&self.store).clone();
+        if let Some(store) = store
+            && let Some(rec) = store.session(id)?
+        {
+            self.check_fence(&rec.manifest.repos.keys().cloned().collect::<Vec<_>>())?;
+        }
+        Ok(())
     }
 
     pub fn wait(&self) -> Duration {
         self.wait
     }
 
-    fn holder_now() -> Holder {
+    fn holder_now(&self) -> Holder {
         let (method, session) = ctx_method();
         Holder {
             method,
@@ -266,21 +364,24 @@ impl Locks {
             since: SystemTime::now(),
             started: Instant::now(),
             yield_to: YIELD_TO.with(|y| y.borrow().clone()),
+            generation: Some(strata_session::catalog::generation_for(self.catalog_id.load(Ordering::Relaxed))),
         }
     }
 
-    fn holder_as(method: &str) -> Holder {
+    fn holder_as(&self, method: &str) -> Holder {
         Holder {
             method: method.into(),
             session: None,
             since: SystemTime::now(),
             started: Instant::now(),
             yield_to: YIELD_TO.with(|y| y.borrow().clone()),
+            generation: Some(strata_session::catalog::generation_for(self.catalog_id.load(Ordering::Relaxed))),
         }
     }
 
     fn take_error(&self, e: TakeError, what: serde_json::Value, waited: Duration) -> StrataError {
         match e {
+            TakeError::Policy(e) => e,
             TakeError::ShuttingDown => StrataError::new(Code::ReadOnly, "the daemon is shutting down")
                 .with_detail(json!({ "reason": "shutting_down" })),
             TakeError::Timeout(h) => {
@@ -297,32 +398,57 @@ impl Locks {
 
     /// Run `f` while holding `repo`'s write lock.
     pub fn with_repo<T>(&self, repo: &RepoName, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.repo_take(repo, None, f)
+        self.repo_take(repo, None, false, f)
     }
 
     /// rm-followups §1.6 T2: [`Locks::with_repo`] only if the lock is free
     /// right now; else `Busy` (`reason: "lock_wait"`), nothing ran. The
     /// holder shows as `holder` (`catch_up`).
-    pub fn try_repo<T>(&self, repo: &RepoName, holder: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.repo_take(repo, Some(holder), f)
+    pub fn try_repo<T>(
+        &self,
+        repo: &RepoName,
+        holder: &str,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.repo_take(repo, Some(holder), false, f)
     }
 
-    fn repo_take<T>(&self, repo: &RepoName, try_as: Option<&str>, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        let Some(fifo) = self.repos.get(repo) else {
-            return Err(StrataError::new(Code::NoSuchRepo, format!("no repo {repo}"))
-                .with_detail(json!({ "repo": repo.as_str() })));
+    fn repo_take<T>(
+        &self,
+        repo: &RepoName,
+        try_as: Option<&str>,
+        cleanup: bool,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let Some(fifo) = self
+            .repos
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(repo)
+            .cloned()
+        else {
+            return Err(
+                StrataError::new(Code::NoSuchRepo, format!("no repo {repo}"))
+                    .with_detail(json!({ "repo": repo.as_str() })),
+            );
         };
         let reentered = CTX.with(|c| c.borrow().as_ref().is_some_and(|x| x.repos.contains(repo)));
         if reentered {
-            return Err(StrataError::new(Code::Busy, format!("the write lock of {repo} is already held by this request"))
-                .with_detail(json!({ "reason": "reentrant", "repo": repo.as_str() })));
+            return Err(StrataError::new(
+                Code::Busy,
+                format!("the write lock of {repo} is already held by this request"),
+            )
+            .with_detail(json!({ "reason": "reentrant", "repo": repo.as_str() })));
         }
-        let (bound, holder) = match try_as {
-            None => (take_bound(self.wait), Self::holder_now()),
-            Some(m) => (Some(Duration::ZERO), Self::holder_as(m)),
+        let (bound, mut holder) = match try_as {
+            None => (take_bound(self.wait), self.holder_now()),
+            Some(m) => (Some(Duration::ZERO), self.holder_as(m)),
         };
         let t0 = Instant::now();
-        fifo.acquire(bound, &self.closed, holder)
+        if cleanup {
+            holder.generation = None;
+        }
+        fifo.acquire(bound, &self.closed, holder, || Ok(()))
             .map_err(|e| self.take_error(e, json!({ "repo": repo.as_str() }), t0.elapsed()))?;
         CTX.with(|c| {
             if let Some(x) = c.borrow_mut().as_mut() {
@@ -388,7 +514,9 @@ impl Locks {
         let want: BTreeSet<SessionId> = ids.iter().cloned().collect();
         let fifos: Vec<(SessionId, Arc<Fifo>)> = want
             .into_iter()
-            .filter(|id| !CTX.with(|c| c.borrow().as_ref().is_some_and(|x| x.sessions.contains(id))))
+            .filter(|id| {
+                !CTX.with(|c| c.borrow().as_ref().is_some_and(|x| x.sessions.contains(id)))
+            })
             .map(|id| {
                 let q = self.queue_of(&id);
                 (id, q)
@@ -397,18 +525,26 @@ impl Locks {
         let mut guards: Vec<Held<'_>> = Vec::new();
         for (id, fifo) in &fifos {
             let (bound, holder) = match try_as {
-                Some(m) => (Some(Duration::ZERO), Holder { session: Some(id.clone()), ..Self::holder_as(m) }),
+                Some(m) => (
+                    Some(Duration::ZERO),
+                    Holder {
+                        session: Some(id.clone()),
+                        ..self.holder_as(m)
+                    },
+                ),
                 None => {
                     let first = take_bound(self.wait);
                     let bound = match deadline {
-                        Some(d) if !is_visible() => Some(d.saturating_duration_since(Instant::now())),
+                        Some(d) if !is_visible() => {
+                            Some(d.saturating_duration_since(Instant::now()))
+                        }
                         _ => first,
                     };
-                    (bound, Self::holder_now())
+                    (bound, self.holder_now())
                 }
             };
             let t0 = Instant::now();
-            fifo.acquire(bound, &self.closed, holder)
+            fifo.acquire(bound, &self.closed, holder, || self.check_session(id))
                 .map_err(|e| self.take_error(e, json!({ "session": id.as_str() }), t0.elapsed()))?;
             CTX.with(|c| {
                 if let Some(x) = c.borrow_mut().as_mut() {
@@ -417,7 +553,7 @@ impl Locks {
             });
             let id2 = id.clone();
             guards.push(Held {
-                fifo: fifo.as_ref(),
+                fifo: fifo.clone(),
                 on_drop: Box::new(move || {
                     CTX.with(|c| {
                         if let Ok(mut b) = c.try_borrow_mut()
@@ -447,13 +583,23 @@ impl Locks {
             session: Some(id.clone()),
             since: SystemTime::now(),
             started: Instant::now(),
+            generation: Some(strata_session::catalog::generation_for(self.catalog_id.load(Ordering::Relaxed))),
             yield_to: YIELD_TO.with(|y| y.borrow().clone()),
         };
-        match fifo.acquire(Some(Duration::ZERO), &self.closed, holder) {
+        match fifo.acquire(Some(Duration::ZERO), &self.closed, holder, || {
+            self.check_session(id)
+        }) {
             Err(TakeError::Timeout(_)) => None,
-            Err(e) => Some(Err(self.take_error(e, json!({ "session": id.as_str() }), Duration::ZERO))),
+            Err(e) => Some(Err(self.take_error(
+                e,
+                json!({ "session": id.as_str() }),
+                Duration::ZERO,
+            ))),
             Ok(()) => {
-                let _held = Held { fifo: fifo.as_ref(), on_drop: Box::new(|| {}) };
+                let _held = Held {
+                    fifo: fifo.clone(),
+                    on_drop: Box::new(|| {}),
+                };
                 Some(f())
             }
         }
@@ -461,17 +607,22 @@ impl Locks {
 
     /// The held repo write locks.
     pub fn holds(&self) -> Vec<LockHold> {
-        self.repos
+        self.repo_entries()
             .iter()
             .filter_map(|(r, f)| {
-                f.holder().map(|h| LockHold { repo: r.clone(), method: h.method, session: h.session, since: h.since })
+                f.holder().map(|h| LockHold {
+                    repo: r.clone(),
+                    method: h.method,
+                    session: h.session,
+                    since: h.since,
+                })
             })
             .collect()
     }
 
     /// `LongHold` for every repo lock held longer than the lock wait.
     pub fn long_holds(&self) -> Vec<DaemonWarning> {
-        self.repos
+        self.repo_entries()
             .iter()
             .filter_map(|(r, f)| {
                 let h = f.holder()?;
@@ -530,7 +681,7 @@ impl Locks {
                 }
             }
         };
-        for (repo, fifo) in &self.repos {
+        for (repo, fifo) in &self.repo_entries() {
             collect(fifo, Some(repo.clone()), None);
         }
         for (session, fifo) in lock(&self.queues).iter() {
@@ -551,14 +702,20 @@ impl Locks {
 
     /// How many requests wait for `repo`'s write lock.
     pub fn repo_waiting(&self, repo: &RepoName) -> usize {
-        self.repos.get(repo).map(|f| f.waiting()).unwrap_or(0)
+        self.repo_entries()
+            .get(repo)
+            .map(|f| f.waiting())
+            .unwrap_or(0)
     }
 
     /// Fail every waiter (`ReadOnly`, `shutting_down`) and every later
     /// take; holders finish.
     pub fn shutdown(&self) {
         self.closed.store(true, Ordering::SeqCst);
-        for f in self.repos.values() {
+        if let Some(wake) = lock(&self.close_hook).as_ref() {
+            wake();
+        }
+        for f in self.repo_entries().values() {
             f.wake();
         }
         for f in lock(&self.queues).values() {
@@ -585,6 +742,16 @@ impl strata_deps::RepoWriteLock for Locks {
         lock(&self.expired_waits).insert((repo.clone(), session, method), warning);
     }
 
+    fn check_fence(&self, repos: &[RepoName]) -> Result<()> {
+        Locks::check_fence(self, repos)
+    }
+    fn with_cleanup(
+        &self,
+        repo: &RepoName,
+        f: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Result<()>> {
+        self.repo_take(repo, None, true, || Ok(f()))
+    }
     fn with_write(
         &self,
         repo: &RepoName,
@@ -640,4 +807,10 @@ impl strata_publish::PublishLocks for Locks {
         })?;
         Ok(inner.unwrap_or(Ok(())))
     }
+}
+
+fn fenced_error() -> StrataError {
+    StrataError::new(Code::Busy, "the daemon applied a stricter config").with_detail(
+        json!({ "reason": "pins_tightened", "fix": "rerun; the daemon applied a stricter config" }),
+    )
 }

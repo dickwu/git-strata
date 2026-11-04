@@ -43,6 +43,7 @@ fn fetch_due_inner(
     now: SystemTime,
     fetch: &mut dyn FnMut(&Git, &str) -> Result<CommitOid>,
 ) -> Result<FetchStep> {
+    let _catalog = core.admit();
     let cfg = core.repo_cfg(repo)?;
     if cfg.sync.fetch_secs == 0 || cfg.publish.branch != cfg.default_branch {
         return Ok(FetchStep::Skipped);
@@ -87,6 +88,10 @@ fn fetch_due_inner(
                 prepared.push(main_follow::prepare_at(ctx, &top)?);
             }
             core.locks.try_repo(repo, "periodic_fetch", || {
+                if core.catalog.current().config.repos.get(repo) != Some(cfg) {
+                    return Err(StrataError::new(Code::Busy, "configuration changed during fetch")
+                        .with_detail(serde_json::json!({"reason":"config_changed"})));
+                }
                 git.ref_transaction(&[
                     RefUpdate::verify(staging_ref(&cfg.default_branch), Some(fetched.clone())),
                     RefUpdate::set(&tracking, fetched.clone(), expected.clone()),
@@ -110,7 +115,7 @@ fn fetch_due_inner(
                 && e.detail.as_ref().and_then(|d| d.get("reason")).is_none()))
     {
         core.store
-            .record_fetch(repo, false, Some("skipped: concurrent fetch or lock"), now)?;
+            .record_fetch(repo, false, Some("skipped: concurrent fetch, lock, or config change"), now)?;
         return Ok(FetchStep::Skipped);
     }
     core.store.record_fetch(

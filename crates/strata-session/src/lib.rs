@@ -20,6 +20,7 @@ mod activity;
 mod base;
 mod carry;
 pub mod cwd;
+pub mod catalog;
 mod dispatch;
 mod failed_move;
 #[cfg(test)]
@@ -65,13 +66,16 @@ pub use scene::{Scene, SceneOp};
 #[cfg(feature = "test-seams")]
 pub use seams::SessionSeam;
 pub use status::{
-    DRIFT_NOTE, DriftStatus, MirrorDriftItem, SessionState, SessionStatus, StatusWarning, WorkspaceHealth, WorkspaceStatus,
+    DRIFT_NOTE, DriftStatus, MirrorDriftItem, SessionState, SessionStatus, StatusWarning,
+    WorkspaceHealth, WorkspaceStatus,
 };
 pub use summary::{BehindStatus, SessionSummary, SummarySelect, WorkspaceSummary, summary};
 
 /// The fetch window the daemon gives `new` and `add` (D53).
 pub const NEW_FETCH_WINDOW: Duration = Duration::from_secs(30);
-pub use seed::{SEED_MARK, SEED_STAGING_PREFIX, SeedRecord, SeedRefresh, SeedSource, seed_files, seed_plan};
+pub use seed::{
+    SEED_MARK, SEED_STAGING_PREFIX, SeedRecord, SeedRefresh, SeedSource, seed_files, seed_plan,
+};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 
@@ -87,12 +91,18 @@ pub const DIRTY_PATHS_CAP: usize = 100;
 /// with the workspace's Tracker when it has one. Never enters or waits on
 /// the session queue, never waits behind a repo lock.
 pub trait BeforeCheckpoint: Sync {
-    fn checkpoint(&self, ws: &WorkspaceRef<'_>, base: &Base, reason: CheckpointReason) -> Result<Checkpointed>;
+    fn checkpoint(
+        &self,
+        ws: &WorkspaceRef<'_>,
+        base: &Base,
+        reason: CheckpointReason,
+    ) -> Result<Checkpointed>;
 }
 
 /// The session handle the daemon holds (one per process).
 pub struct Sessions<'a> {
     pub(crate) config: &'a Config,
+    catalog: Option<&'a dyn catalog::CatalogSource>,
     pub(crate) gits: &'a BTreeMap<RepoName, Git>,
     pub(crate) store: &'a Store,
     pub(crate) locks: no_wait::SessionLock<'a>,
@@ -113,8 +123,8 @@ pub struct Sessions<'a> {
     pub(crate) status_slots: status::Slots,
     /// status-perf A1: the old-tree mode, verdict table and queue.
     pub(crate) old_trees: old_tree::OldTrees,
-    /// rm-followups §1.8: `rm.regenerable` lists pinned after this was
-    /// opened (`config relax`); a repo not here uses its config's list.
+    /// Compatibility overrides for static handles. Daemon handles ignore
+    /// this map and always read their admission catalog.
     pub(crate) regenerable: Mutex<BTreeMap<RepoName, Vec<String>>>,
     /// rm-followups R1: `new`'s row-and-root enrollment and the orphan
     /// sweep's recheck-and-retire exclude each other. A leaf lock: nothing
@@ -146,6 +156,7 @@ impl<'a> Sessions<'a> {
             })));
         }
         Ok(Sessions {
+            catalog: None,
             config,
             gits,
             store,
@@ -164,6 +175,26 @@ impl<'a> Sessions<'a> {
         })
     }
 
+    /// Use one admission snapshot for every dynamic config read.
+    pub fn with_catalog(mut self, catalog: &'a dyn catalog::CatalogSource) -> Self {
+        self.catalog = Some(catalog);
+        self
+    }
+
+    pub fn configuration(&self) -> Result<&'a Config> {
+        match self.catalog {
+            Some(c) => c.config(),
+            None => Ok(self.config),
+        }
+    }
+
+    fn dev_ports_policy(&self) -> Result<Option<&'a strata_store::DevPortsPolicy>> {
+        match self.catalog {
+            Some(c) => c.dev_ports(),
+            None => Ok(None),
+        }
+    }
+
     /// D53: a repo that `new` or `add` fetched successfully less than `w`
     /// ago is not fetched again by them (the chain top is still read under
     /// the repo lock). Zero turns the skip off.
@@ -171,18 +202,21 @@ impl<'a> Sessions<'a> {
         *self.fetch_window.lock().unwrap_or_else(|p| p.into_inner()) = w;
     }
 
-    /// rm-followups §1.8: the effective `rm.regenerable` of `repo` from now
-    /// on (the daemon calls this after `config relax` pinned a new list).
+    /// Override a static handle's regenerable rules. Catalog-backed daemon
+    /// handles use their immutable admission snapshot instead.
     pub fn set_regenerable(&self, repo: &RepoName, patterns: Vec<String>) {
         self.regenerable.lock().unwrap_or_else(|p| p.into_inner()).insert(repo.clone(), patterns);
     }
 
     /// The effective `rm.regenerable` of `repo`.
-    pub fn regenerable(&self, repo: &RepoName) -> Vec<String> {
-        if let Some(v) = self.regenerable.lock().unwrap_or_else(|p| p.into_inner()).get(repo) {
-            return v.clone();
+    pub fn regenerable(&self, repo: &RepoName) -> Result<Vec<String>> {
+        if self.catalog.is_some() {
+            return Ok(self.configuration()?.repos.get(repo).map(|rc| rc.rm.regenerable.clone()).unwrap_or_default());
         }
-        self.config.repos.get(repo).map(|rc| rc.rm.regenerable.clone()).unwrap_or_default()
+        if let Some(v) = self.regenerable.lock().unwrap_or_else(|p| p.into_inner()).get(repo) {
+            return Ok(v.clone());
+        }
+        Ok(self.config.repos.get(repo).map(|rc| rc.rm.regenerable.clone()).unwrap_or_default())
     }
 
     pub(crate) fn fetch_is_fresh(&self, repo: &RepoName) -> bool {
@@ -200,11 +234,18 @@ impl<'a> Sessions<'a> {
     }
 
     pub(crate) fn repo_cfg(&self, repo: &RepoName) -> Result<&'a RepoConfig> {
-        self.config.repos.get(repo).ok_or_else(|| no_such_repo(repo))
+        self.configuration()?
+            .repos
+            .get(repo)
+            .ok_or_else(|| no_such_repo(repo))
     }
 
     pub(crate) fn git(&self, repo: &RepoName) -> Result<&'a Git> {
-        self.gits.get(repo).ok_or_else(|| no_such_repo(repo))
+        let gits = match self.catalog {
+            Some(c) => c.gits()?,
+            None => self.gits,
+        };
+        gits.get(repo).ok_or_else(|| no_such_repo(repo))
     }
 
     /// One critical section under `repo`'s write lock with the daemon's
@@ -223,7 +264,11 @@ impl<'a> Sessions<'a> {
     /// The same after the call's first visible write: `Busy` from the outer
     /// wait is retried until the lock is had (§6.2; module-rulings "Waits
     /// after a call's first visible write are not bounded").
-    pub(crate) fn with_lock_unbounded<T>(&self, repo: &RepoName, mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    pub(crate) fn with_lock_unbounded<T>(
+        &self,
+        repo: &RepoName,
+        mut f: impl FnMut() -> Result<T>,
+    ) -> Result<T> {
         loop {
             let attempt_since = std::time::SystemTime::now();
             let mut out: Option<T> = None;
@@ -231,7 +276,7 @@ impl<'a> Sessions<'a> {
                 out = Some(f()?);
                 Ok(())
             }) {
-                Err(e) if e.code == Code::Busy => {
+                Err(e) if e.code == Code::Busy && !strata_deps::pins_tightened(&e) => {
                     if e.detail.as_ref().is_some_and(|d| d["reason"] == "lock_wait") {
                         self.locks.record_long_wait(repo, attempt_since);
                     }
@@ -242,6 +287,28 @@ impl<'a> Sessions<'a> {
                 Ok(r) => {
                     r?;
                     return Ok(out.expect("with_write ran the closure"));
+                }
+            }
+        }
+    }
+    pub(crate) fn with_cleanup_lock<T>(
+        &self,
+        repo: &RepoName,
+        mut f: impl FnMut() -> Result<T>,
+    ) -> Result<T> {
+        loop {
+            let mut out = None;
+            match self.locks.with_cleanup(repo, &mut || {
+                out = Some(f()?);
+                Ok(())
+            }) {
+                Err(e) if e.code == Code::Busy && !strata_deps::pins_tightened(&e) => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Err(e) => return Err(e),
+                Ok(r) => {
+                    r?;
+                    return Ok(out.expect("cleanup lock ran closure"));
                 }
             }
         }
