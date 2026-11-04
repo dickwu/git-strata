@@ -770,12 +770,36 @@ fn sync_defaults_bounds_and_serialization() {
 
 #[test]
 fn quiet_skip_uses_relative_safe_globs_and_defaults_empty() {
-    let text=minimal(&bare_repo("tool","/Volumes/Code/src/tool"));
-    assert!(parse(&text).unwrap().repo(&repo("tool")).unwrap().rebase.quiet_skip.is_empty());
-    for pat in ["/tmp/cache","../cache","node/../cache"] {
-        let cfg=format!("{text}\n[repo.tool.rebase]\nquiet_skip = [\"{pat}\"]\n");
-        let e=parse(&cfg).unwrap_err(); assert_eq!(e.code,Code::InvalidInput);
+    let text = minimal(&bare_repo("tool", "/Volumes/Code/src/tool"));
+    assert!(
+        parse(&text)
+            .unwrap()
+            .repo(&repo("tool"))
+            .unwrap()
+            .rebase
+            .quiet_skip
+            .is_empty()
+    );
+    for pat in ["/tmp/cache", "../cache", "node/../cache"] {
+        let cfg = format!("{text}\n[repo.tool.rebase]\nquiet_skip = [\"{pat}\"]\n");
+        let e = parse(&cfg).unwrap_err();
+        assert_eq!(e.code, Code::InvalidInput);
+        assert_eq!(rule(&e), "V17");
+        assert_eq!(e.detail.as_ref().unwrap()["field"], "rebase.quiet_skip");
+        assert!(e.message.contains("rebase.quiet_skip"));
+        assert!(!e.message.contains("rm.regenerable"));
     }
-    let cfg=format!("{text}\n[repo.tool.rebase]\nquiet_skip = [\"**/.phpunit.result.cache\",\".eslintcache\"]\n");
-    assert_eq!(parse(&cfg).unwrap().repo(&repo("tool")).unwrap().rebase.quiet_skip.len(),2);
+    let cfg = format!(
+        "{text}\n[repo.tool.rebase]\nquiet_skip = [\"**/.phpunit.result.cache\",\".eslintcache\"]\n"
+    );
+    assert_eq!(
+        parse(&cfg)
+            .unwrap()
+            .repo(&repo("tool"))
+            .unwrap()
+            .rebase
+            .quiet_skip
+            .len(),
+        2
+    );
 }

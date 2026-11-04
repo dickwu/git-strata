@@ -719,7 +719,15 @@ fn validate_rm_rebase(name: &RepoName, cfg: &RepoConfig) -> Result<(), StrataErr
     }
     for (i, pat) in cfg.rebase.quiet_skip.iter().enumerate() {
         if let Some(message) = regenerable_problem(pat) {
-            return Err(violation(Code::InvalidInput, Some(repo), "rebase.quiet_skip", Some(i), "V16", message));
+            let message = message.replace("rm.regenerable", "rebase.quiet_skip");
+            return Err(violation(
+                Code::InvalidInput,
+                Some(repo),
+                "rebase.quiet_skip",
+                Some(i),
+                "V17",
+                &message,
+            ));
         }
     }
     if cfg.rebase.quiet_secs > RebaseConfig::MAX_QUIET_SECS {

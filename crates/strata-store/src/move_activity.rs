@@ -39,12 +39,23 @@ pub struct ActivityScope {
     pub fold: bool,
     pub skip: Vec<String>,
     pub exceptions: Vec<String>,
+    /// Folded tracked paths that quiet globs must keep counting. This does
+    /// not change the carried-entry walk used by G4 or old-tree checks.
+    #[serde(default)]
+    pub quiet_tracked: std::collections::BTreeSet<String>,
 }
 
 impl ActivityScope {
     fn decode(value: Option<&str>) -> Self {
-        value.and_then(|v| serde_json::from_str::<Self>(v).ok())
-            .filter(|s| s.skip.iter().chain(&s.exceptions).all(|p| strata_types::RepoPath::try_from(p.clone()).is_ok()))
+        value
+            .and_then(|v| serde_json::from_str::<Self>(v).ok())
+            .filter(|s| {
+                s.skip
+                    .iter()
+                    .chain(&s.exceptions)
+                    .chain(&s.quiet_tracked)
+                    .all(|p| strata_types::RepoPath::try_from(p.clone()).is_ok())
+            })
             .unwrap_or_default()
     }
 }
