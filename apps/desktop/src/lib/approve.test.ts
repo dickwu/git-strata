@@ -64,16 +64,21 @@ describe('approve verdict: headline priority Unknown > errors > skipped > moved'
     });
   });
 
-  test('Applied with AlreadyThere / Untracked skips is a success, not "stays waiting"', () => {
+  test('Applied with benign skips, including a parked BaseAhead, needs no reapproval', () => {
     const v = verdict(22, reply(appliedWithSkips));
     expect(v.tone).toBe('success');
     expect(v.title).toBe('Approved. Moved 2 sessions.');
-    expect(v.notes).toEqual(['2 sessions needed no move.']);
+    expect(v.notes).toEqual(['3 sessions needed no move.']);
     expect(v.again).toBe(false);
     expect(v.rows.filter((x) => x.state === 'unchanged').map((x) => x.session)).toEqual([
       's-mmmmmmmm',
       's-nnnnnnnn',
+      's-oooooooo',
     ]);
+    expect(v.rows.find((x) => x.session === 's-oooooooo')).toMatchObject({
+      state: 'unchanged',
+      detail: 'Kept in place to preserve base commits outside the dependency target',
+    });
   });
 
   test('an Unknown row outranks everything and hides Approve again', () => {

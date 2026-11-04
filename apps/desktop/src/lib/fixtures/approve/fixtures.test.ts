@@ -136,7 +136,16 @@ describe('approve fixtures match the core wire (handlers.rs apply_step)', () => 
   test('the core sources parsed', () => {
     expect(CODES.has('NoSuchProposal')).toBe(true);
     expect([...SKIPS].sort()).toEqual(
-      ['AlreadyThere', 'Drift', 'Error', 'NotReady', 'OpenFiles', 'OwnChange', 'Untracked'].sort()
+      [
+        'AlreadyThere',
+        'BaseAhead',
+        'Drift',
+        'Error',
+        'NotReady',
+        'OpenFiles',
+        'OwnChange',
+        'Untracked',
+      ].sort()
     );
     expect([...HOLDS].sort()).toEqual(['Cwd', 'Fd', 'Mapped']);
     expect(BASE_GEN.required).toEqual(['repo', 'tree', 'deps']);
@@ -170,11 +179,28 @@ describe('approve fixtures match the core wire (handlers.rs apply_step)', () => 
                 : undefined;
           expect([where, row.code]).toEqual([where, want]);
           if (d.kind === 'OpenFiles') for (const f of d.files as J[]) openFile(f, where);
+          if (d.kind === 'BaseAhead') {
+            expect(typeOk('CommitOid', d.head, where)).toBe(true);
+            expect(typeOk('CommitOid', d.target, where)).toBe(true);
+          }
           if (d.kind === 'Error') expect(CODES.has(String((d.error as J).code))).toBe(true);
         } else {
           // A failed move: the error's code plus its detail (or {message}).
           expect([where, CODES.has(String(row.code))]).toEqual([where, true]);
-          if (row.code === 'OpenFiles') for (const f of d.holders as J[]) openFile(f, where);
+          if (row.code === 'OpenFiles') {
+            // Move errors use holders_json's relative paths and normalized holds;
+            // planned OpenFiles skips above still serialize the OpenFile struct.
+            const activity = rs('strata-session/src/activity.rs');
+            for (const f of d.holders as J[]) {
+              keysOk(f, OPEN_FILE, where);
+              expect(typeOk('i32', f.pid, where)).toBe(true);
+              expect(typeOk('String', f.command, where)).toBe(true);
+              expect(typeOk('RepoPath', f.path, where)).toBe(true);
+              expect(['fd', 'cwd', 'map']).toContain(String(f.hold));
+              expect(activity).toContain(`=> "${String(f.hold)}"`);
+            }
+            expect(d.count).toBe((d.holders as J[]).length);
+          }
         }
       }
       // The reply's proposal is the whole Proposal (handlers.rs: json_of(&after)).

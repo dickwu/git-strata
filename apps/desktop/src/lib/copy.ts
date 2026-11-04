@@ -137,6 +137,7 @@ export const copy = {
       skip: {
         Untracked: 'Does not track this repo',
         AlreadyThere: 'Already on these dependencies',
+        BaseAhead: 'Kept in place to preserve base commits outside the dependency target',
         NotReady: 'Not ready yet',
         OwnChange: 'Has its own dependency edits',
         Drift: 'Has its own dependency edits',
