@@ -160,12 +160,17 @@ pub const TOP: &str = "OUTPUT
 
 PATHS
   Config/pins/socket: ~/Library/Application Support/git-strata/
+  Only $HOME moves them; no flag or other env var.
   Data root: [paths] root in config.toml (default ~/.strata).
   Workspaces: <root>/sessions/<session-id>/<repo>/
 
 DAEMON
   Busy daemon_down: tell the human; retry after they start the daemon.
-  Agents never start/stop it. Local reads remain available when it is down.
+  Agents never start/stop it. Without it: status, ls, grep, files, diff,
+  deps list, daemon status; repeated checkpoint --tool-call ID; leased session ports/exec.
+
+GATES
+  Some operations require human confirmation at a TTY. git-strata help gate
 
 HEADLESS FLOW
   new --repo R; edit; checkpoint -m TEXT; diff; publish --from S:PATH.
@@ -413,7 +418,9 @@ CONFLICT LOOP (no human needed unless reason is assigned)
 Other errors: git-strata help errors-publish
 
 ",
-    gate_brief!("pushing batch repos that need confirmation and have work to commit (TTY + Touch ID)."),
+    gate_brief!(
+        "batch repos with publish.push = true that need confirmation and have work to commit (TTY + Touch ID)."
+    ),
     "\nDo not use git push. Full rules: git-strata help push-guards\n"
 );
 

@@ -60,13 +60,11 @@ fn stale_socket_sync_is_down_without_waiting_for_its_budget() {
 }
 #[test]
 fn old_daemon_sync_rejects_cwd_locally_before_resend() {
-    let h = Home::new();
-    h.write_config(&[
-        support::RepoSpec { name: "tool", push: false, confirm: false, deploy_on_push: false },
-        support::RepoSpec { name: "tool-old", push: false, confirm: false, deploy_on_push: false },
-    ]);
-    let ws = h.canon().join("root/sessions/s-abcdefgh/tool");
-    std::fs::create_dir_all(&ws).unwrap();
+    let live = support::live::Live::new(&["tool", "tool-old"], &[("a.txt", b"base\n")]);
+    let id = live.serve(|_| live.new_session("legacy", "tool"));
+    let h = &live.home;
+    std::fs::remove_file(h.socket()).unwrap();
+    let ws = live.ws(&id, "tool");
     let d = FakeDaemon::start(&h.socket(), |q| {
         if q["params"].get("caller_pids").is_some() {
             json!({"id":q["id"],"ok":false,"error":{"rpc":"Failed","message":"unknown field `caller_pids`"}})
@@ -83,10 +81,61 @@ fn old_daemon_sync_rejects_cwd_locally_before_resend() {
     assert!(d.requests()[2]["params"].get("caller_pids").is_none());
     let staging = ws.with_file_name(".strata-tmp-move-tool-old-01234567");
     std::fs::create_dir_all(&staging).unwrap();
-    let run: Run = h.cmd(&["sync", "--session", "s-abcdefgh", "--repo", "tool"])
-        .current_dir(&staging).output().unwrap().into();
+    let run: Run = h
+        .cmd(&["sync", "--session", id.as_str(), "--repo", "tool"])
+        .current_dir(&staging)
+        .output()
+        .unwrap()
+        .into();
     run.ok(); // The staged sibling is not the selected repo, despite its prefix.
+    let sibling = live.ws(&id, "tool-old");
+    let run: Run = h
+        .cmd(&["sync", "--session", id.as_str()])
+        .current_dir(&sibling)
+        .output()
+        .unwrap()
+        .into();
+    run.ok(); // Empty selection only moves tracked workspaces, not this sibling.
+    let run: Run = h
+        .cmd(&["sync", "--session", "legacy"])
+        .current_dir(&ws)
+        .output()
+        .unwrap()
+        .into();
+    assert_eq!(run.reason(), "caller_cwd");
+}
 
+#[test]
+fn old_daemon_delayed_rejection_does_not_restart_the_sync_budget() {
+    let h = Home::new();
+    h.write_config(&[support::RepoSpec {
+        name: "tool",
+        push: false,
+        confirm: false,
+        deploy_on_push: false,
+    }]);
+    let d = FakeDaemon::start(&h.socket(), |q| {
+        if q["method"] == "daemon_status" {
+            return json!({"id":q["id"],"ok":true,"data":{"holds":[]}});
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        if q["params"].get("caller_pids").is_some() {
+            json!({"id":q["id"],"ok":false,"error":{"rpc":"Failed","message":"unknown field `caller_pids`"}})
+        } else {
+            json!({"id":q["id"],"ok":true,"data":{"finished":true}})
+        }
+    });
+    // Each reply fits 600 ms separately; both together exceed the one budget.
+    let run = h.run(&["sync", "--timeout", "0.6"]);
+    assert_eq!(run.err_code(), "Unknown", "{run:?}");
+    assert_eq!(run.reason(), "client_timeout");
+    assert_eq!(
+        d.requests()
+            .iter()
+            .filter(|q| q["method"] == "sync")
+            .count(),
+        2
+    );
 }
 
 #[test]

@@ -66,13 +66,15 @@ pub fn run(ctx: &Ctx, args: &SyncArgs) -> Result<Envelope> {
     if !args.check {
         crate::cwd_guard::add(&mut request, &args.cwd);
     }
-    let first =
-        crate::wait::call(ctx, "sync", request.clone(), kind, &args.wait, 600).map_err(|e| old_daemon(e.into_error()));
+    let deadline = crate::wait::deadline(&args.wait, 600)?;
+    let first = crate::wait::call_until(ctx, "sync", request.clone(), kind, &args.wait, deadline)
+        .map_err(|e| old_daemon(e.into_error()));
     let data = match first {
         Err(e) if !args.check && crate::cwd_guard::rejected(&e) => {
             crate::cwd_guard::local_sync(ctx, &request, &args.cwd, &cwd)?;
             crate::cwd_guard::strip(&mut request);
-            crate::wait::call(ctx, "sync", request, kind, &args.wait, 600).map_err(|e| old_daemon(e.into_error()))?
+            crate::wait::call_until(ctx, "sync", request, kind, &args.wait, deadline)
+                .map_err(|e| old_daemon(e.into_error()))?
         }
         other => other?,
     };
@@ -155,7 +157,7 @@ pub fn block_reason(upstream: &Upstream) -> Option<String> {
             let deps = summary.map(|s| format!(" ({s})")).unwrap_or_default();
             format!("main's dependencies changed in {repo}{deps}; run")
         };
-        reasons.push(format!("{prefix} `cd ~ && git-strata sync --session <session-id>`, cd back to the workspace, resolve any conflicts it returns (merge upstream's change, then `sync --resolved PATH --target … --generation …`), re-run checks, then publish."));
+        reasons.push(format!("{prefix} `cd ~ && git-strata sync --session <session-id>`, cd back to the workspace, resolve any conflicts it returns (merge upstream's change, then `cd ~ && git-strata sync --session <session-id> --resolved PATH --target … --generation …`), cd back, re-run checks, then publish."));
     }
     (!reasons.is_empty()).then(|| reasons.join("\n"))
 }

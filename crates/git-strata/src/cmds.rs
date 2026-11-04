@@ -293,11 +293,11 @@ fn summaries(
             v["leftovers"].as_array().cloned().unwrap_or_default(),
         )),
         Err(CallError::Failed(e)) if !predates_summary(&e) => Err(e),
-        Err(e @ CallError::Timeout { .. }) => Err(e.into_error()),
         Err(_) => {
             let config = ctx.config()?;
             let store = ro::open_store(&config)?;
             if !sel.all
+                && sel.session.is_none()
                 && let Some(e) = strata_session::cwd::stale_in(&store, &config.paths.root, &here)?
             {
                 return Err(e);
@@ -428,7 +428,9 @@ pub fn table_of(data: &Value) -> String {
 fn local_status(ctx: &Ctx, sel: &Select) -> Result<(Vec<Value>, Vec<Value>)> {
     let local = Local::open(ctx.config()?)?;
     if !sel.all
-        && let Some(e) = strata_session::cwd::stale_in(&local.store, &local.config.paths.root, &cwd())?
+        && sel.session.is_none()
+        && let Some(e) =
+            strata_session::cwd::stale_in(&local.store, &local.config.paths.root, &cwd())?
     {
         return Err(e);
     }

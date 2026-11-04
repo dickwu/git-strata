@@ -159,6 +159,12 @@ fn hook_blocks_once_with_unpublished_and_behind() {
         block["reason"]
             .as_str()
             .unwrap()
+            .contains("cd ~ && git-strata sync --session s-abcdefgh --resolved PATH")
+    );
+    assert!(
+        block["reason"]
+            .as_str()
+            .unwrap()
             .contains("main moved 3 commits since your base in tool")
     );
     assert_eq!(fake.requests()[0]["params"]["hook"], true);

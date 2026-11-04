@@ -34,21 +34,29 @@ pub fn strip(params: &mut Value) {
     }
 }
 
-/// A legacy sync can be guarded without opening its store: the configured
-/// sessions root and the selected repo component identify the affected cwd.
+/// Legacy sync defaults to the manifest's tracked workspaces, just like
+/// the daemon. Untracked siblings cannot move, even with an empty selection.
 pub fn local_sync(ctx: &Ctx, params: &Value, args: &CwdArgs, cwd: &Path) -> Result<()> {
     if args.allow_cwd || params["check"] == true {
         return Ok(());
     }
     let config = ctx.config()?;
-    let Ok(sessions) = std::fs::canonicalize(config.paths.root.join("sessions")) else { return Ok(()) };
-    let Ok(real) = std::fs::canonicalize(cwd) else { return Ok(()) };
-    let Ok(rest) = real.strip_prefix(&sessions) else { return Ok(()) };
-    let mut parts = rest.components();
-    let Some(session) = parts.next().and_then(|p| p.as_os_str().to_str()) else { return Ok(()) };
-    if strata_types::SessionId::try_from(session.to_owned()).is_err() {
+    let Ok(sessions) = std::fs::canonicalize(config.paths.root.join("sessions")) else {
         return Ok(());
-    }
+    };
+    let Ok(real) = std::fs::canonicalize(cwd) else {
+        return Ok(());
+    };
+    let Ok(rest) = real.strip_prefix(&sessions) else {
+        return Ok(());
+    };
+    let mut parts = rest.components();
+    let Some(session) = parts.next().and_then(|p| p.as_os_str().to_str()) else {
+        return Ok(());
+    };
+    let Ok(id) = strata_types::SessionId::try_from(session.to_owned()) else {
+        return Ok(());
+    };
     // An id selecting a different session cannot move this cwd. Tickets
     // require a store lookup only to disambiguate their target.
     if let Some(selected) = params["session"].as_str() {
@@ -62,16 +70,26 @@ pub fn local_sync(ctx: &Ctx, params: &Value, args: &CwdArgs, cwd: &Path) -> Resu
             return Ok(());
         }
     }
-    let Some(segment) = parts.next().and_then(|p| p.as_os_str().to_str()) else { return Ok(()) };
+    let store = crate::ro::open_store(&config)?;
+    let rec = crate::ro::record(&store, &id)?;
+    let Some(segment) = parts.next().and_then(|p| p.as_os_str().to_str()) else {
+        return Ok(());
+    };
     // A repo name can itself contain '-'; prefer the longest matching
     // name before applying the request's repo selection.
-    let repo = config.repos.keys().filter(|repo| {
-        segment == repo.as_str() || segment.starts_with(&format!(".strata-tmp-move-{repo}-"))
-    }).max_by_key(|repo| repo.as_str().len());
+    let repo = rec
+        .manifest
+        .repos
+        .keys()
+        .filter(|repo| {
+            segment == repo.as_str() || segment.starts_with(&format!(".strata-tmp-move-{repo}-"))
+        })
+        .max_by_key(|repo| repo.as_str().len());
     if let Some(repo) = repo {
         let named = params["repos"].as_array().filter(|a| !a.is_empty());
-        if named.is_none_or(|a| a.iter().any(|v| v.as_str() == Some(repo.as_str()))) {
-            return Err(strata_session::cwd::refuse_caller(&real, session, &sessions.join(session).join(repo.as_str())));
+        let ws = &rec.manifest.repos[repo];
+        if ws.tracked && named.is_none_or(|a| a.iter().any(|v| v.as_str() == Some(repo.as_str()))) {
+            return Err(strata_session::cwd::refuse_caller(&real, session, &ws.path));
         }
     }
     Ok(())
@@ -85,41 +103,150 @@ pub fn deps_call(ctx: &Ctx, method: &str, mut params: Value, args: &CwdArgs) -> 
             // holders locally before sending a legacy request.
             let config = ctx.config()?;
             let store = crate::ro::open_store(&config)?;
-            let wanted_repo = if method == "deps_propose" {
-                params["repo"].as_str().unwrap_or_default().to_owned()
-            } else {
-                let id = params["proposal"]
-                    .as_u64()
-                    .ok_or_else(|| StrataError::new(Code::InvalidInput, "missing proposal"))?;
-                strata_deps::get_proposal(&store, strata_types::ProposalId::try_from(id)?)?.repo.to_string()
+            let workspaces = planned_deps_workspaces(&config, &store, method, &params)?;
+            let policy = strata_session::cwd::MoveCwd {
+                allow_cwd: args.allow_cwd,
+                allow_cwd_holders: args.allow_cwd_holders,
+                caller_pids: caller_pids(),
+                daemon_pid: daemon_pid(ctx),
             };
-            for rec in crate::ro::live(&store)? {
-                if method == "deps_propose" && params["session"].as_str() != Some(rec.manifest.id.as_str()) {
-                    continue;
+            strata_session::cwd::with_move_cwd(policy, || -> Result<()> {
+                for ws in workspaces {
+                    strata_session::cwd::check_holders(&ws.path)?;
                 }
-                if let Some(ids) = params["sessions"].as_array()
-                    && !ids.iter().any(|id| id.as_str() == Some(rec.manifest.id.as_str()))
-                {
-                    continue;
-                }
-                for (repo, ws) in &rec.manifest.repos {
-                    if wanted_repo != repo.as_str() {
-                        continue;
-                    }
-                    strata_session::cwd::with_move_cwd(
-                        strata_session::cwd::MoveCwd {
-                            allow_cwd: args.allow_cwd,
-                            allow_cwd_holders: args.allow_cwd_holders,
-                            caller_pids: caller_pids(),
-                            daemon_pid: None,
-                        },
-                        || strata_session::cwd::check_holders(&ws.path),
-                    )?;
-                }
-            }
+                Ok(())
+            })?;
             strip(&mut params);
             ctx.call(method, params, Kind::Write)
         }
         other => other,
     }
+}
+
+/// The old daemon keeps its instance-lock fd open. Only an unambiguous
+/// holder of that exact path supplies a pid; a missing/ambiguous scan grants
+/// no exemption. This works without adding an RPC field to old daemons.
+fn daemon_pid(ctx: &Ctx) -> Option<i32> {
+    let path = std::fs::canonicalize(strata_daemon::lock_path(&ctx.paths.config_dir)).ok()?;
+    let pids: std::collections::BTreeSet<_> = strata_deps::open_files(&ctx.paths.config_dir)
+        .ok()?
+        .into_iter()
+        .filter(|h| h.hold == strata_deps::Hold::Fd && h.path == path)
+        .map(|h| h.pid)
+        .collect();
+    (pids.len() == 1).then(|| *pids.first().unwrap())
+}
+
+/// Read-only eligibility at the legacy boundary. A not-yet-built target
+/// still needs guarding: approval builds it before planning, and propose
+/// --switch builds from the proposer's drift before recording its proposal.
+fn planned_deps_workspaces(
+    config: &strata_types::Config,
+    store: &strata_store::Store,
+    method: &str,
+    params: &Value,
+) -> Result<Vec<strata_types::WorkspaceState>> {
+    let proposal = if method == "deps_approve" {
+        let id = params["proposal"]
+            .as_u64()
+            .ok_or_else(|| StrataError::new(Code::InvalidInput, "missing proposal"))?;
+        Some(strata_deps::get_proposal(
+            store,
+            strata_types::ProposalId::try_from(id)?,
+        )?)
+    } else {
+        None
+    };
+    let repo = match &proposal {
+        Some(p) => p.repo.clone(),
+        None => crate::ro::repo_name(params["repo"].as_str().unwrap_or_default())?,
+    };
+    let cfg = config.repo(&repo)?;
+    let git = strata_gitio::Git::open(&cfg.path)?;
+    let env = strata_deps::InstallEnv {
+        path: String::new(),
+        timeout: std::time::Duration::ZERO,
+    };
+    let deps = strata_deps::Ctx {
+        store,
+        paths: &config.paths,
+        repo: &repo,
+        cfg,
+        git: &git,
+        env: &env,
+        locks: &crate::local::NoLock,
+    };
+    let candidates: Vec<_> = crate::ro::live(store)?
+        .into_iter()
+        .filter(|rec| {
+            method != "deps_propose" || params["session"].as_str() == Some(rec.manifest.id.as_str())
+        })
+        .filter(|rec| {
+            params["sessions"].as_array().is_none_or(|ids| {
+                ids.iter()
+                    .any(|id| id.as_str() == Some(rec.manifest.id.as_str()))
+            })
+        })
+        .filter_map(|rec| {
+            rec.manifest
+                .repos
+                .get(&repo)
+                .cloned()
+                .map(|ws| (rec.manifest.id, ws))
+        })
+        .collect();
+    let plan = proposal
+        .as_ref()
+        .map(|p| strata_deps::plan_rollout(&deps, p.id, &candidates, false))
+        .transpose()?;
+    let mut out = Vec::new();
+    for (session, ws) in candidates {
+        if !ws.tracked {
+            continue;
+        }
+        let pinned = strata_deps::find_set(store, &repo, &ws.base.deps)?
+            .ok_or_else(|| StrataError::new(Code::Corrupt, "the pinned deps set has no record"))?;
+        if let Some(plan) = &plan {
+            match plan.steps.iter().find(|step| match step {
+                strata_deps::RolloutStep::Move { session: id, .. }
+                | strata_deps::RolloutStep::Skip { session: id, .. } => id == &session,
+            }) {
+                Some(strata_deps::RolloutStep::Move { .. }) => {}
+                Some(strata_deps::RolloutStep::Skip {
+                    reason: strata_deps::SkipReason::NotReady,
+                    ..
+                }) => {
+                    if strata_deps::classify_rollout(
+                        &deps,
+                        &session,
+                        &ws,
+                        &proposal.as_ref().unwrap().to_inputs,
+                    )?
+                    .is_some()
+                    {
+                        continue;
+                    }
+                }
+                _ => continue,
+            }
+        } else if strata_deps::drift(cfg, &git, &ws.path, &pinned)?.is_none() {
+            continue;
+        }
+        // FD/mapping holds already make the legacy planner skip this move.
+        let dirs: Vec<_> = cfg
+            .deps_dirs
+            .iter()
+            .chain(&pinned.dirs)
+            .map(|d| ws.path.join(d.as_str()))
+            .collect();
+        let refs: Vec<_> = dirs.iter().map(|d| d.as_path()).collect();
+        if strata_deps::open_files_many(&refs)?
+            .iter()
+            .any(|h| h.hold != strata_deps::Hold::Cwd)
+        {
+            continue;
+        }
+        out.push(ws);
+    }
+    Ok(out)
 }
