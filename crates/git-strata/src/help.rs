@@ -169,6 +169,18 @@ Per-command detail: git-strata <command> --help. Full reference: README.md.
 "
 );
 
+// Kept separate so the parallel help-size change can move this text intact.
+macro_rules! publish_base_text {
+    () => { "BASE SAFETY
+  A batch's workspace base must be in the publish target B or on main_tip.
+  base_not_on_main: ask the human to push/recover the base commits first;
+  follow detail.fix. Dependency approval never drops parked base commits.
+  HeadMoved baseline_moved: run the literal publish command in detail.fix
+  to take fresh checkpoints after a baseline move.
+
+" };
+}
+
 pub const NEW: &str = "Create a session of workspaces (APFS clones of base snapshots).
 
 --repo R (repeatable, or R1,R2): the session gets workspaces for these repos
@@ -322,6 +334,7 @@ taken, so the paths' current content is what gets committed. Repos commit one
 by one; a repo that landed stays landed when a later repo fails.";
 
 pub const PUBLISH_AFTER: &str = concat!(
+    publish_base_text!(),
     "EXAMPLES
   git-strata publish --from s-k3q7xm2a:src/a.ts --from s-k3q7xm2a:src
   git-strata publish --assign src/a.ts s-k3q7xm2a   # same as `assign`
@@ -363,7 +376,7 @@ RELEASE BUILDS
   data.commits.<repo>, run the build there. See README.md.
 
 DATA
-  {commits:{<repo>:oid}, checks_ran, waiting:[], pushes:[{repo, outcome}],
+  {commits:{<repo>:oid}, message_source:{<repo>:flag|checkpoints|legacy}, checks_ran, waiting:[], pushes:[{repo, outcome}],
    already_published:[{repo, publish, commit, push}]}
 
 CONFLICT LOOP (no human needed unless reason is assigned)
@@ -545,7 +558,7 @@ INSTALL
   can print it with `git-stratad --print-plist [ABSOLUTE_BIN]`.
 
 EXAMPLES
-  git-strata daemon status   # {running, socket, session?, holders, unknown_publishes, alerts}
+  git-strata daemon status   # {running, socket, session?, holders, unknown_publishes, alerts, alerts_at, pins_meta}
   git-strata daemon start    # launchctl bootstrap gui/<uid> <plist>; {already:true} if loaded
   git-strata daemon stop     # launchctl bootout; waits up to 10 s until unloaded
 

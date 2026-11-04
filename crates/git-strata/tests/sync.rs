@@ -293,3 +293,20 @@ fn hook_deps_conflicts_and_following_rules() {
     v["repos"]["tool"]["following"] = json!(false);
     assert!(reason(&v).is_none());
 }
+
+#[test]
+fn stuck_hook_blocks_clean_workspace_once_and_does_not_offer_sync_when_not_following() {
+    let home=Home::new();
+    let _fake=FakeDaemon::start(&home.socket(),|q| {
+        let mut d=data(Some(0),false);
+        let u=&mut d["upstream"]["repos"]["tool"];
+        u["following"]=json!(false);
+        u["auto"]=json!({"source":"main","state":"deferred","reason":"open_files","since":"2026-11-03T12:00:00Z","attempts":3,"escalated_at":"2026-11-03T12:06:00Z","escalation_new":true,"detail":{"holders":[{"pid":123,"command":"node","hold":"cwd","path":"."}],"count":1}});
+        json!({"id":q["id"],"ok":true,"data":d})
+    });
+    let r=hook(&home,false); let block:Value=serde_json::from_str(&r.stdout).unwrap();
+    let reason=block["reason"].as_str().unwrap();
+    assert!(reason.contains("ask the user") && reason.contains("node[123] cwd"));
+    assert!(!reason.contains("git-strata sync"));
+    silent(hook(&home,true));
+}

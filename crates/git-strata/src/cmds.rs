@@ -84,7 +84,8 @@ fn repo_for(config: &Config, store: &Store, s: &SessionId, flag: Option<&str>, c
 
 // ---- new --------------------------------------------------------------------
 
-pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only: &[String], repos: &[String], agent_flag: Option<&str>) -> Result<Envelope> {
+#[allow(clippy::too_many_arguments)]
+pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only: &[String], repos: &[String], agent_flag: Option<&str>, bases: &[String]) -> Result<Envelope> {
     if !only.is_empty() && !repos.is_empty() {
         return Err(invalid(
             "repo_flags",
@@ -100,10 +101,13 @@ pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only:
         (a, b) => a.or(b),
     };
     let names: Vec<RepoName> = list.iter().map(|r| repo_name(r)).collect::<Result<_>>()?;
+    let bases = parse_bases(only, repos, bases)?;
+    if !bases.is_empty() { crate::agent::require_feature(&ctx.paths.socket, "new.base")?; }
     let agent = crate::agent::detect(agent_flag, |k| std::env::var_os(k))?;
     // `only` is sent only when set, so this CLI still talks to a daemon
     // that predates it (its params refuse unknown fields).
     let mut params = json!({ "ticket": ticket, "repos": names });
+    if !bases.is_empty() { params["base"] = json!(bases); }
     if !only.is_empty() {
         params["only"] = json!(true);
     } else {
@@ -152,6 +156,22 @@ pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only:
         hint(s);
     }
     Ok(Envelope::ok(report))
+}
+
+fn parse_bases(only: &[String], repos: &[String], values: &[String]) -> Result<BTreeMap<RepoName, String>> {
+    if !values.is_empty() && (only.is_empty() || !repos.is_empty()) { return Err(invalid("base_flags", "--base requires --repo, not --repos")); }
+    let mut out = BTreeMap::new();
+    for value in values {
+        let (repo, rev) = match value.split_once('=') {
+            Some((r, rev)) if only.iter().any(|name| name == r) => (r, rev),
+            _ if only.len() == 1 => (only[0].as_str(), value.as_str()),
+            _ => return Err(invalid("base_flags", "use --base R=REV naming a --repo workspace")),
+        };
+        strata_session::validate_base_rev(rev)?;
+        let repo = RepoName::try_from(repo.to_string())?;
+        if out.insert(repo, rev.to_string()).is_some() { return Err(invalid("base_flags", "a repo has more than one --base")); }
+    }
+    Ok(out)
 }
 
 // ---- add --------------------------------------------------------------------
@@ -478,6 +498,7 @@ fn checkpoint_json(store: &Store, s: &SessionId, id: CheckpointId) -> Result<Val
 }
 
 pub fn checkpoint(ctx: &Ctx, tool_call: Option<String>, message: Option<String>, session: Option<String>, paths: &[String]) -> Result<Envelope> {
+    if message.as_ref().is_some_and(|m| m.trim().is_empty()) { return Err(invalid("message", "checkpoint message must not be empty")); }
     // Hook mode reads stdin once (non-TTY only); the id falls back to the
     // hook JSON's `tool_use_id` when `--tool-call` has no value (D22).
     let hook_input = if tool_call.is_some() && message.is_none() && !crate::tty::stdin_is_tty() {
@@ -1144,8 +1165,16 @@ pub fn daemon_status() -> Result<Envelope> {
             let warnings = v["warnings"].as_array().cloned().unwrap_or_default();
             let unknown: Vec<Value> = warnings.iter().filter_map(|w| w.get("UnknownPublish").map(|u| u["id"].clone())).collect();
             data["unknown_publishes"] = json!(unknown);
-            warnings.iter().for_each(alert);
+            for warning in &warnings {
+                let at = v["warning_times"].as_array().and_then(|times| times.iter().find(|t| &t["warning"] == warning))
+                    .and_then(|t| t["raised_at"].as_str());
+                if let Some(at) = at.and_then(|s| strata_types::serde_rfc3339::parse(s).ok()) {
+                    eprintln!("alert: {warning} (raised {})", strata_session::local_hhmmss(at));
+                } else { alert(warning); }
+            }
             data["alerts"] = json!(warnings);
+            if let Some(times) = v.get("warning_times") { data["alerts_at"] = times.clone(); }
+            if let Some(meta) = v.get("pins_meta") { data["pins_meta"] = meta.clone(); }
             // The daemon's descriptor count (open, soft limit, ...), as is.
             if let Some(f) = v.get("fds") {
                 data["fds"] = f.clone();

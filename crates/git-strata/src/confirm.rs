@@ -615,13 +615,30 @@ fn interactive_batch(config: &Config) -> Result<Batch> {
     Ok(batch)
 }
 
-pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Result<Envelope> {
+pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message: &[String], message_for: &[String]) -> Result<Envelope> {
     if let Some(a) = assign_to {
         if !from.is_empty() {
             return Err(invalid("assign_with_from", "--assign is its own call; do not combine it with --from"));
         }
         return assign(ctx, &a[0], &a[1]);
     }
+    let mut messages = strata_publish::message::Messages::default();
+    if !message.is_empty() { messages.message = Some(message.join("\n\n")); }
+    for item in message_for {
+        let (repo, text) = item.split_once('=').ok_or_else(|| invalid("message_repo", "--message-for needs REPO=TEXT"))?;
+        let repo = RepoName::try_from(repo.to_string())?;
+        messages.message_for.entry(repo).and_modify(|m| { m.push_str("\n\n"); m.push_str(text); }).or_insert_with(|| text.to_owned());
+    }
+    if let Some(m) = &messages.message { strata_publish::message::validate(m)?; }
+    for m in messages.message_for.values() { strata_publish::message::validate(m)?; }
+    let has_message = messages.message.is_some() || !messages.message_for.is_empty();
+    if has_message { crate::agent::require_feature(&ctx.paths.socket, "publish.message")?; }
+    let add_messages = |params: &mut Value| {
+        if has_message {
+            params["message"] = json!(messages.message);
+            params["message_for"] = json!(messages.message_for);
+        }
+    };
     let config = ctx.config()?;
     let pins = ctx.pins();
     let gate = |repos: &mut dyn Iterator<Item = &RepoName>| -> Result<Vec<RepoName>> {
@@ -667,6 +684,8 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
     let guarded: Vec<RepoName> =
         repos.iter().filter(|r| pins.pushes(Some(&config), r) && pins.needs_confirm(Some(&config), r)).cloned().collect();
     let tty_refused = |e: StrataError| -> StrataError {
+        if e.detail.as_ref().and_then(|d| d.get("reason")).and_then(Value::as_str)
+            .is_some_and(|r| matches!(r, "base_not_on_main" | "base_diverged_from_main" | "base_behind_main" | "baseline_moved")) { return e; }
         match require_tty_for("publish") {
             Err(mut t) => {
                 if let Some(d) = t.detail.as_mut().and_then(Value::as_object_mut) {
@@ -696,24 +715,18 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
         .map_err(|e| if guarded.is_empty() { e } else { tty_refused(e) })?;
         batches.push(json!({ "session": s.as_str(), "repo": r.as_str(), "checkpoint": cid, "paths": ps }));
     }
-    let remaining: Vec<RepoName> = if guarded.is_empty() {
-        Vec::new()
-    } else {
-        let plan = ctx
-            .call("publish_plan", json!({ "group": { "id": 0, "batches": batches } }), Kind::Read)
-            .map_err(tty_refused)?;
-        plan.get("repos")
-            .and_then(Value::as_array)
-            .ok_or_else(|| tty_refused(invalid("rpc_failed", "the daemon's publish_plan reply has no repos")))?
-            .iter()
-            .filter_map(Value::as_str)
-            .filter_map(|r| RepoName::try_from(r.to_string()).ok())
-            .collect()
-    };
+    let mut plan_params = json!({ "group": { "id": 0, "batches": batches } });
+    messages.validate(&serde_json::from_value(plan_params["group"].clone()).map_err(|e| invalid("message", e.to_string()))?)?;
+    add_messages(&mut plan_params);
+    let preview = ctx.call("publish_plan", plan_params, Kind::Read).map_err(|e| if guarded.is_empty() { e } else { tty_refused(e) })?;
+    let remaining: Vec<RepoName> = preview.get("repos").and_then(Value::as_array)
+        .ok_or_else(|| tty_refused(invalid("rpc_failed", "the daemon's publish_plan reply has no repos")))?
+        .iter().filter_map(Value::as_str).filter_map(|r| RepoName::try_from(r.to_string()).ok()).collect();
     let front = gate(&mut guarded.iter().filter(|r| remaining.contains(r)))?;
     let mut shown = serde_json::Map::new();
     for r in &front {
         if let Some(rc) = config.repos.get(r) {
+            if let Some(subject) = preview["subjects"][r.as_str()]["subject"].as_str() { eprintln!("commit ({r}): {subject}"); }
             let top = show::push_plan(r, rc, "publish will ask to confirm");
             shown.insert(r.as_str().to_string(), json!(top));
         }
@@ -721,7 +734,9 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>) -> Resu
     // Review-3 T1: the guarded repos this gate covered; the daemon refuses
     // (before any prompt) a guarded repo outside it.
     let plan: Vec<&str> = front.iter().map(|r| r.as_str()).collect();
-    let reply = ctx.call("publish", json!({ "group": { "id": 0, "batches": batches }, "shown": shown, "plan": plan }), Kind::Write);
+    let mut params = json!({ "group": { "id": 0, "batches": batches }, "shown": shown, "plan": plan });
+    add_messages(&mut params);
+    let reply = ctx.call("publish", params, Kind::Write);
     match reply {
         Ok(data) => {
             let published = data
@@ -832,7 +847,9 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
         eprintln!("{l}");
     }
     let waiting = waiting_proposals(config, &touched);
-    let data = json!({ "commits": commits, "checks_ran": checks, "waiting": waiting, "pushes": pushes, "already_published": already });
+    let mut data = json!({ "commits": commits, "checks_ran": checks, "waiting": waiting, "pushes": pushes, "already_published": already });
+    let sources: BTreeMap<_, _> = published.iter().chain(already).filter_map(|p| Some((p.get("repo")?.as_str()?, p.get("message_source")?.as_str()?))).collect();
+    if !sources.is_empty() { data["message_source"] = json!(sources); }
     match failed.or(bad) {
         Some(e) => Envelope::err_with(e, data),
         None => Envelope::ok(data),
