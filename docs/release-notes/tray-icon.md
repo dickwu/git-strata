@@ -12,9 +12,11 @@ of the app theme; inactive-display dimming is intentionally not retained.
   File-handle shed replies now reach the client as Busy/too_many_open_files, not rpc_id.
 - Home and the tray show long non-conflict deferrals and pending config relax requests.
   Conflicts are counted separately as agent work. Daemon shows warning variant names.
-- Red alerts can persist until their cause is addressed and the daemon restarts. Waiting
+- To clear a persistent red warning, address its cause, then restart the daemon. Waiting
   items remain available, with age captions when retained data is stale. No acknowledge/snooze.
 - On older daemons without `fds`, hidden polling uses only one health read every 30 seconds.
+  A hung daemon can take about 45 seconds to show Down ("isn't responding"),
+  compared with about 25 seconds on the normal cadence; polling phase can change the delay.
   Deps age out after 90 seconds and the icon becomes Checking until reopening or upgrading.
   The pre-fd-fix build still leaks roughly two descriptors per minute under this gentle plan;
   upgrade the daemon to remove that limitation.

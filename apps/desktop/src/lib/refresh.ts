@@ -1,12 +1,11 @@
 import type { QueryClient, QueryKey } from '@tanstack/react-query';
 
 /**
- * Refresh `keys` without cancelling anything. Window reads never join backend poller flights:
- * they wait, discard the poller result, then start a read of their own. Another window
- * flight still refuses overlapping window reads. Thus a
- * cancelled-and-restarted read comes back request_in_flight and the cancelled one's reply
- * is lost. Instead: join the reads already in flight, wait for them to end, then ask for
- * reads that start after that.
+ * Refresh `keys` without cancelling anything. Native window reads wait out backend poller
+ * flights, discard their result, then start their own read. Overlapping native window
+ * reads are still refused, so cancelling and restarting a TanStack read would lose its
+ * reply and return request_in_flight. Instead, join TanStack's own reads already in flight,
+ * wait for them to end, then ask for reads that start after that.
  *
  * Resolves with a time T: every read started before the call to `refreshAfter` has ended by
  * T, so a successful read with `dataUpdatedAt >= T` began after the caller's event (an
@@ -21,7 +20,10 @@ export async function refreshAfter(
       qc.refetchQueries({ queryKey, type: 'active' }, { cancelRefetch: false }).catch(() => {})
     )
   );
-  const after = Date.now();
+  // TanStack stamps replies in whole milliseconds. Exclude first-wave replies even when
+  // they finish in this same tick, and let that boundary pass before starting fresh reads.
+  const after = Date.now() + 1;
+  await new Promise((resolve) => setTimeout(resolve, 1));
   await Promise.all(
     keys.map((queryKey) =>
       qc.invalidateQueries({ queryKey }, { cancelRefetch: false }).catch(() => {})

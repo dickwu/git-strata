@@ -236,7 +236,7 @@ pub enum DiffPreview {
 
 ### 3.4 RPC
 
-请求一行：`{"id":"<十进制>","method":"<上表的方法名>","params":{…}}`。`id` 从 1 递增。回答一行：同一个 `id`，加上信封。`id` 对不上 → `InvalidInput`，`detail.reason = "rpc_id"`。 唯一例外是 daemon 的 fd-reserve shed 回答：`id:null`、`ok:false`、`error.code:"Busy"` 且 `detail.reason:"too_many_open_files"`；client 原样返回该错误。只读请求写入失败后仍在原有 deadline 内尝试读一行（shed 可能已排入回答）；写请求保留 `Unknown socket_closed`，不重发。
+请求一行：`{"id":"<十进制>","method":"<上表的方法名>","params":{…}}`。`id` 从 1 递增。回答一行：同一个 `id`，加上信封。`id` 对不上 → `InvalidInput`，`detail.reason = "rpc_id"`。 唯一例外是 daemon 的 fd-reserve shed 回答：`id:null`、`ok:false`、`error.code:"Busy"` 且 `detail.reason:"too_many_open_files"`；client 原样返回该错误。只读请求写入失败后仍尝试读一行（shed 可能已排入回答）：`call_within` 使用原有发送预算的剩余时间，无法更新 socket timeout 时只读已排队的数据；普通 `call` 没有 deadline。写请求保留 `Unknown socket_closed`，不重发。
 
 daemon 的 `UnknownMethod` 与 `Failed` 不是 `Code`。cli 收成 `InvalidInput`：`detail.reason` 为 `"unknown_method"` 或 `"rpc_failed"`，`detail.method` 是发出去的方法名（D7）。上游的 `StrataError` 原样放进 `error`，码不改写。
 

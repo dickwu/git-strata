@@ -51,7 +51,10 @@ fn proposal(s: &mut Snapshot) {
 fn conflict(s: &mut Snapshot) {
     let mut v = session("s-a", json!({}));
     v["status"]["workspaces"]["repo"]["conflicts"] = json!(["secret path"]);
-    s.sessions.value = Some(json!({"sessions":[v]}));
+    s.sessions.value.as_mut().unwrap()["sessions"]
+        .as_array_mut()
+        .unwrap()
+        .push(v);
 }
 fn activate(s: &mut Snapshot, icon: Icon) {
     match icon {
@@ -72,16 +75,61 @@ fn activate(s: &mut Snapshot, icon: Icon) {
         Icon::Normal => {}
     }
 }
+fn assert_active(s: &Snapshot, icon: Icon) {
+    match icon {
+        Icon::Down => assert!(s.last_down.is_some()),
+        Icon::Alert => assert!(
+            s.daemon_status.value.as_ref().unwrap()["warnings"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("StorePoisoned"))
+        ),
+        Icon::Checking => assert!(s.deps.at.is_none()),
+        Icon::Waiting => assert!(
+            s.deps.value.as_ref().unwrap()["proposals"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["mode"] == "confirm" && p["state"]["kind"] == "Pending")
+        ),
+        Icon::Conflict | Icon::Syncing => {
+            assert!(
+                s.sessions.value.as_ref().unwrap()["sessions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| {
+                        let ws = &v["status"]["workspaces"]["repo"];
+                        if icon == Icon::Conflict {
+                            ws["conflicts"].as_array().is_some_and(|c| !c.is_empty())
+                        } else {
+                            s.upstream_enabled()
+                                && v["status"]["upstream"].is_object()
+                                && ws["upstream"]["auto"]["state"] == "pending"
+                        }
+                    })
+            );
+        }
+        Icon::Normal => panic!("Normal is a fallback, not an independent condition"),
+    }
+}
 #[test]
 fn every_priority_row_and_pair() {
     for (i, first) in Icon::ALL.into_iter().enumerate() {
         let mut s = good(100);
         activate(&mut s, first);
         assert_eq!(model_at(&s, stamp(100)).icon, first);
-        for second in Icon::ALL.into_iter().skip(i + 1) {
+        // Normal has no positive trigger; the standalone row above covers its fallback.
+        for second in Icon::ALL
+            .into_iter()
+            .skip(i + 1)
+            .filter(|s| *s != Icon::Normal)
+        {
             let mut s = good(100);
             activate(&mut s, second);
             activate(&mut s, first);
+            assert_active(&s, first);
+            assert_active(&s, second);
             assert_eq!(
                 model_at(&s, stamp(100)).icon,
                 first,

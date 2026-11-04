@@ -5,6 +5,8 @@
  */
 export const promptText = (id: number) => `approve dependency proposal ${id}`;
 
+const reposNeedingAgent = (n: number) => `${n} ${n === 1 ? 'repo needs' : 'repos need'} an agent`;
+
 export const copy = {
   app: 'GIT STRATA',
   tray: {
@@ -17,7 +19,7 @@ export const copy = {
     upstreamUnavailable: 'Upstream detail is unavailable for these sessions:',
     upstreamCause:
       'The daemon did not return upstream detail. Its reply does not include the cause.',
-    conflicts: (n: number) => `${n} ${n === 1 ? 'repo conflict' : 'repo conflicts'}`,
+    conflicts: reposNeedingAgent,
   },
   nav: {
     sessions: 'Sessions',
@@ -26,8 +28,13 @@ export const copy = {
   },
   waiting: {
     title: 'Waiting for you',
-    show: (n: number) =>
-      n === 1 ? 'Show the 1 item waiting for you' : `Show the ${n} items waiting for you`,
+    show: (n: number, conflicts: number) =>
+      `Show details: ${[
+        n > 0 ? `${n} waiting for you` : null,
+        conflicts > 0 ? reposNeedingAgent(conflicts) : null,
+      ]
+        .filter(Boolean)
+        .join(', ')}`,
     deps: (id: number, repo: string) => `Deps proposal ${id} in ${repo}`,
     conflict: (n: number, repo: string) =>
       n === 1 ? `1 conflict in ${repo}` : `${n} conflicts in ${repo}`,

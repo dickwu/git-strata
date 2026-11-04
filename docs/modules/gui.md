@@ -256,7 +256,7 @@ GUI 不拥有持久业务数据。它写的东西都由人按按钮触发：首�
 | **Publish / push** | §5.4 | push_plan、publish_plan detail |
 | **Dependencies** | 提议、影响的会话、planned moves | deps_list、deps_approve |
 | **Allocations** | 基线代与依赖集（谁引用、大小、创建时间）、进行中的克隆与依赖构建、卷剩余空间、du 的 logical / allocated / private / 可回收 trash 与 `as_of`；gc 按钮（§5.5） | allocations、du、watch |
-| **Settings** | 引导各步状态、daemon PATH、Open at login、迁移与回滚、日志位置 | 本机 |
+| **Settings** | 引导各步状态、daemon PATH、[Open at login](#58-菜单栏常驻d6)、迁移与回滚、日志位置 | 本机 |
 
 #### Main-sync attribution (wave 1)
 
@@ -502,10 +502,11 @@ README 第一节改成「下载 app → 首次打开 → 引导」，cli 用法�
 ### 5.8 菜单栏常驻（D6）
 
 - **单实例**：`tauri-plugin-single-instance`；第二次启动只把已有实例的窗口带到前台。
-- 关窗（⌘W、红点）隐藏窗口并切 `ActivationPolicy::Accessory`；Dock/Finder Reopen 或
-  Open GIT STRATA 显示窗口并切回 Regular。Quit 只退出 GUI，不影响 daemon。
-- Owner-approved r9 replaces the earlier template-only, three-shape decision. The app icon
-  remains the workspace fork; the tray uses the same neutral glyph plus a colored state
+- 关窗（⌘W、红点）→ 隐藏窗口并切 `ActivationPolicy::Accessory`；点 Dock / Finder 里的 app（`RunEvent::Reopen`）或托盘 `Open GIT STRATA` → 显示窗口并切回 `Regular`。⌘Q / 托盘 `Quit GIT STRATA` 才退出 GUI；退出 GUI 不影响 daemon。
+- 图标（peilin 14:1x 选定 concept b「workspace fork」）：app 图标是青色渐变圆角方块上，一个白色 Y 形分叉连起三块等距视角的工作区平板。源文件在 `apps/desktop/src-tauri/icons/src/`（`app-icon.svg`），`render.sh` 用 rsvg-convert 与 `tauri icon` 生成全部尺寸与 icns。
+- "Open at login"（`SMAppService.mainApp`，默认关）。登录启动时不弹窗口（识别方式由 P-pack 验证；识别不了就提供 "Start hidden" 偏好）。
+- Owner-approved r9 replaces the earlier template-only, three-shape tray decision.
+  The tray uses the same neutral workspace-fork glyph plus a colored state
   shape, 18×18 pt. Active session count never colors or widens the icon. No animation,
   pulse, count beside the icon, acknowledge, snooze, or tray write action.
 
@@ -517,7 +518,7 @@ First matching row wins:
 | 2 | Alert | triangle with knocked-out ! | `#B0141A` / `#FF7F75` | Daemon needs attention: N alerts; file-handle exhaustion/pressure has specific copy |
 | 3 | Checking | dimmed glyph + ellipsis | neutral, 55% | Checking the daemon… / Not updated for N min (hours after 60 min) |
 | 4 | Waiting | filled circle | `#8A4B00` / `#FFB340` | N waiting for you |
-| 5 | Conflict | filled diamond | `#7A35A6` / `#C99BF2` | N distinct repos need an agent |
+| 5 | Conflict | filled diamond | `#7A35A6` / `#C99BF2` | N repos need an agent (distinct repositories; singular: 1 repo needs an agent) |
 | 5a | Checking (partial) | ellipsis | neutral, 55% | Some session details are unavailable |
 | 6 | Syncing | ring | `#245A74` / `#6FB3D2` | Bringing in newer changes |
 | 7 | Normal | glyph only | neutral | All clear, N sessions |
@@ -571,9 +572,11 @@ session enrichment overrides Syncing/Normal with partial Checking but does not h
 or direct workspace conflicts. A legitimate missing per-workspace enrichment does not trigger
 Checking. A missing repo can keep partial Checking indefinitely; Home and Daemon list the affected sessions.
 
-The menu shows status, any stale-input line **above** items, and a count-only unavailable-detail
-line that opens Home. At most five items are shown; tooltip/overflow counts include all items.
-Labels contain only fixed copy, repo names and counts (G7). Retained stale entries carry
+The menu shows status, any stale-input line **above** items, and a count-only
+"Upstream detail unavailable" line that brings the main window forward without selecting a
+session; Home and Daemon both list the affected sessions. At most five items are shown;
+tooltip/overflow counts include all items.
+Labels contain only fixed copy, proposal numbers, repo names and counts (G7). Retained stale entries carry
 `(as of N min ago)` (hours after 60 min); proposals use the oldest sessions/deps contributor,
 ConfigRelax uses health, other items use sessions. Deferred folds age into its session-count
 parenthesis. Captions are part of the menu diff. Clicks refetch before selecting a target:
@@ -729,6 +732,13 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 | `gui_dialog_invalidated_on_event` | 对话框打开期间收到相关事件 → 作废重取 | 新增 |
 | `gui_partial_publish_rows` | 部分成功按仓库逐行显示，标题取最差一项 | 新增 |
 | `gui_tray_no_agent_text` | 托盘菜单项不含 ticket、提交标题、提议理由 | 新增 |
+| `tray_policy::every_priority_row_and_pair` | 七态单独成立；每对非 Normal 条件同时保留并分别断言，再检查优先级（包括 Conflict + Syncing） | tray-icon r9 |
+| `tray_policy::lasting_outage_hung_daemon_and_expired_evidence` / `timeout_observations_coalesce_without_blocking_late_reply_generations` | 两次 health 超时、20 s completion 判活、4 s 合并与 60 s 证据有效期 | tray-icon r9 |
+| `tray_policy::stale_generation_changes_neither_values_nor_freshness_nor_liveness` / `sleep_and_backwards_wall_clock_do_not_make_old_data_fresh` | 旧 generation 不覆盖；飞行开始计 freshness，睡眠与时钟回拨不会刷新旧值 | tray-icon r9 |
+| `tray_policy::deferral_threshold_conflict_exclusion_dedup_and_capabilities` / `stale_captions_use_oldest_contributor_counts_ignore_truncation_and_conflicts_dedup` | Deferred 阈值、冲突排除、去重、feature gate；旧值 caption 与截断外计数 | tray-icon r9 |
+| `daemon::tray_tests::held_open_connection_counts_joined_deadlines_for_ten_minutes` / `slow_wire_replies_keep_start_age_and_completion_liveness_separate` | 临时 socket：挂起请求、17 / 26 s reply、调用者 deadline 与迟到记录分开 | tray-icon r9 |
+| `daemon::tray_tests::blocking_task_panic_frees_slot_before_waking_window` | 真实 blocking task panic：先释放 slot，再关闭 watch；窗口随后开始自己的新读 | impl-r1 |
+| `refresh.test.ts` second refresh wave（成功 / daemon_timeout） | 第三次 query 调用等待 poller；有限 T 下旧值不 fresh，独立新读成功才允许 Approve，拒绝仍结束刷新 | impl-r1（bun test） |
 | `gui_single_instance` | 第二次启动只聚焦已有窗口 | 新增 |
 | `gui_release_has_no_connector` | 发布构建的 `cargo tree -e features` 没有 tauri-plugin-connector；CSP 非 null；无 URL scheme | 新增（CI） |
 | `ui_accent_contrast` | 浅深两套主题里强调色文字对背景 ≥ 4.5:1，按钮白字对强调色 ≥ 4.5:1 | 新增（bun test） |
@@ -900,7 +910,7 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 收紧配置共用�
 | updater 声称签了 latest.json | §6：只签包，清单靠 HTTPS，只升不降 |
 | 多仓库部分成功；按 detail.reason 分支 | §5.4 第 6 条结果表 |
 | 引导：DMG / 转移位置；PATH 采集卡住 | §5.6 第 1、5 条 |
-| 托盘：轮询不一致、判活、单实例 | §5.3.3 统一表、§5.8 heartbeat、single-instance |
+| 托盘：轮询不一致、判活、单实例 | §5.3.3 统一表、§5.8 Freshness and liveness、single-instance |
 | G3 不是人手证明；限制引导命令 | G3 改写 |
 | 分期依赖缺 API；工期偏乐观 | §8.1：依赖列明，34–35 天 |
 | P2：deps_approve null vs [] | §5.4 第 3 条 |

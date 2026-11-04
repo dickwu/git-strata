@@ -299,6 +299,16 @@ fn gui_state_records_liveness_and_lists() {
     assert!(s.last_down.is_none());
     assert_eq!(s.sessions.value, Some(fixture("status_all")));
     assert_eq!(s.deps.value, Some(fixture("deps_list")));
+    // Flights publish their reply before notifying; awaiting read is not a callback fence.
+    rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while *changes.lock().unwrap() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both snapshot-change callbacks");
+    });
     assert_eq!(*changes.lock().unwrap(), 2);
 
     // A refused request says nothing about liveness.

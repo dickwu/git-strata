@@ -274,26 +274,68 @@ async fn each_kind_has_its_own_flight_and_window_deadline_restarts_after_wait() 
     assert_eq!(window.await.unwrap().unwrap()["fresh"], true);
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn closed_watch_wakes_window_and_per_session_and_du_still_refuse() {
+async fn blocking_task_panic_frees_slot_before_waking_window() {
+    let fake = Fake::new();
+    let mut d = Daemon::new(fake.socket.clone()).with_deadline(Duration::from_secs(2));
+    let panic_next = Arc::new(AtomicBool::new(false));
+    let flag = panic_next.clone();
+    d.clock = Arc::new(move || {
+        assert!(
+            !flag.swap(false, Ordering::SeqCst),
+            "injected panic in blocking read completion"
+        );
+        Stamp::now()
+    });
+    let d1 = d.clone();
+    let poller = tokio::spawn(async move { d1.poll_read(Read::DaemonStatus).await });
+    let held = fake.next();
+    let key = Read::DaemonStatus.flight_key();
+    let mut closed = d.reads.lock().unwrap().slots[&key].reply.clone();
+    // Poll once to register the real window waiter, but do not let it start a new flight
+    // until the test has observed both the closed watch and the removed old slot.
+    let window = d.read(Read::DaemonStatus);
+    tokio::pin!(window);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(window.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(fake.requests.try_recv().is_err());
+    // Both start-clock calls already happened. The next clock call is inside the
+    // production spawn_blocking closure, after the socket returns and before recording.
+    panic_next.store(true, Ordering::SeqCst);
+    held.reply(json!({"old":true}));
+    assert_eq!(
+        poller.await.unwrap().unwrap_err().reason(),
+        Some("gui_internal")
+    );
+    assert!(!panic_next.load(Ordering::SeqCst));
+    assert!(closed.changed().await.is_err());
+    assert!(!d.reads.lock().unwrap().slots.contains_key(&key));
+    assert!(
+        d.store
+            .snapshot
+            .lock()
+            .unwrap()
+            .daemon_status
+            .value
+            .is_none()
+    );
+
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(window.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    fake.next().reply(json!({"ready":true}));
+    assert_eq!(window.await.unwrap()["ready"], true);
+    assert_eq!(d.reads.lock().unwrap().generations[&key], 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_session_and_du_still_refuse_overlapping_reads() {
     let fake = Fake::new();
     let d = Daemon::new(fake.socket.clone()).with_deadline(Duration::from_secs(1));
-    let (tx, rx) = watch::channel(None);
-    let key = Read::DaemonStatus.flight_key();
-    d.reads.lock().unwrap().slots.insert(
-        key.clone(),
-        ReadFlight {
-            started_by: Caller::Poller,
-            reply: rx,
-        },
-    );
-    let d1 = d.clone();
-    let window = tokio::spawn(async move { d1.read(Read::DaemonStatus).await });
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    // Exactly the unwind ordering: slot is removed before the sender is dropped.
-    d.reads.lock().unwrap().slots.remove(&key);
-    drop(tx);
-    fake.next().reply(json!({"ready":true}));
-    assert_eq!(window.await.unwrap().unwrap()["ready"], true);
     for r in [Read::Du, Read::Session("s-one".into())] {
         let (d1, r1) = (d.clone(), r.clone());
         let first = tokio::spawn(async move { d1.read(r1).await });

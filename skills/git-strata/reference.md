@@ -67,6 +67,10 @@ Fixed `detail.reason` values produced by the CLI: `daemon_down`,
 `main_moved`; from `config relax`: `not_relaxed`; from the push guard:
 `url-rewritten`, `url-is-remote-name`, `empty-url`, `no-such-remote`.
 
+The client also preserves the daemon's `Busy too_many_open_files` reason when it sheds a
+connection because it is out of file handles, including the null-id shed reply. Tell the
+human; do not treat it as `rpc_id` or retry in a loop (see [errors.md](errors.md)).
+
 The closed set of `error.code` values (types.md): Conflict, HeadMoved, Dirty,
 Busy, NoSuchPath, NoSuchBranch, NoSuchCommit, NoCommit, NoMergeBase,
 IsDirectory, NotDirectory, NotFile, Binary, NotText, NoMatch, AmbiguousMatch,

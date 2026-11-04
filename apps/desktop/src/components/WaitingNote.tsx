@@ -146,11 +146,7 @@ export function WaitingNote({
           open={open}
           onOpenChange={setOpen}
         >
-          <button
-            type="button"
-            className="waiting-note"
-            aria-label={`${w.show(count)}${conflicts ? `, ${conflicts} agent conflicts` : ''}`}
-          >
+          <button type="button" className="waiting-note" aria-label={w.show(count, conflicts)}>
             <span className="dot" data-state="down" aria-hidden />
             {count > 0 && copy.nav.waiting(count)}
             {count > 0 && conflicts > 0 && ' · '}
