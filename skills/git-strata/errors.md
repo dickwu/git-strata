@@ -3,7 +3,10 @@
 ## The JSON envelope
 
 stdout carries exactly one compact JSON line; exit code 0 iff `ok` is true,
-else 1. Human prompts and notices go to stderr only. Exceptions: `--help`/`--version`;
+otherwise failures normally use 1. `config reload` uses 2 for rejected config,
+3 while pending, and 4 when the daemon lacks `config.reload`; argument, transport,
+output and invalid-report failures still use 1. Human prompts and notices go to
+stderr only. Exceptions: `--help`/`--version`;
 `ls --table` prints a text table; `sync --check --hook` prints the hook's
 own JSON (see [hooks.md](hooks.md)); and a
 `session exec` that starts its command prints no envelope; stdout, stderr
@@ -24,7 +27,14 @@ All three keys are always present; `data` is never null. Branch on
 | `Busy` (`workspace_changed`) | A file changed while reading it; retry. |
 | `Busy` (`publish_unknown`) | An earlier publish of this repo is `Unknown`. It clears by itself once origin has that commit (checked on each publish). Do not loop: tell the human; they may run `git-strata push <REPO>` first. |
 | `Busy` / `Unknown` with `detail.sibling` | Preparing that sibling repo (fetch, anchor) was busy or unknown. `Busy`: retry later. `Unknown`: stop and tell the human. |
+| `Busy` (`pins_tightened`) | Rerun the command with a fresh snapshot of the newly applied config; do not retry inside the old operation. |
+| `Busy` (`reload_pending`) | Rerun `config reload`; the current attempt continues (exit 3). |
 | `Busy` (other) | Repo lock held by another operation; wait and retry later. |
+| `InvalidInput` (`config_rejected`) | Fallback when a rejected `config reload` report supplies no reason; otherwise the daemon's reason is forwarded. Inspect `data.reasons` and `data.restart_required` (exit 2). |
+| `InvalidInput` (`recovery_failed`) | A new repo's pending-rebase reconstruction failed before catalog publication; the old catalog remains active. Inspect `data.reasons`, resolve the reported failure, then rerun `config reload`. |
+| `InvalidInput` (`shown_required`) | Use a CLI that sends the displayed flags with `config relax`. |
+| `InvalidInput` (`config_not_applied`) | Apply the current file with `config reload` before `config relax`. |
+| `Unsupported` (`daemon_too_old`) | The daemon lacks the requested feature. Ask the human to install matching CLI/daemon versions and restart the daemon (`config reload` exits 4). |
 | `NotTty` | Command needs a human at a terminal. Stop; give the exact command to the human. |
 | `NotConfirmed` | Human confirmation failed / was cancelled / expired. Report it; the human reruns. Exception: `detail.reason` `plan_changed` (publish) means no confirmation was attempted and nothing was written: rerun the same command yourself first; if that rerun returns `NotTty`, hand the command to the human. |
 | `AmbiguousMatch` | Ticket matches several sessions; retry with an id from `detail`. |

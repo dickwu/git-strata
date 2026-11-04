@@ -226,13 +226,14 @@ pub enum DiffPreview {
 ### 3.3 `daemon status` 的 `data`
 
 ```json
-{"running":true,"socket":"/Users/…/Library/Application Support/git-strata/daemon.sock","session":"s-k3q7xm2a","holders":[{"repo":"tool","since":"2026-10-23T00:00:00Z"}],"unknown_publishes":[],"alerts":[]}
+{"running":true,"socket":"/Users/…/Library/Application Support/git-strata/daemon.sock","session":"s-k3q7xm2a","holders":[{"repo":"tool","since":"2026-10-23T00:00:00Z"}],"unknown_publishes":[],"alerts":[],"config":{"generation":1,"hash":"<SHA-256>","loaded_at":{"secs_since_epoch":1792713600,"nanos_since_epoch":0},"last_attempt":null,"restart_required":[]}}
 ```
 
 - `running`：daemon 是否在听 socket。没在跑时 cli 本地造这份对象，`running` 为 false，`holders` 与 `unknown_publishes` 为空数组，不假装知道锁。
 - `session`：cwd 能解析出会话才有，否则省略。daemon 回答了时，这个查找（读 config、开 store）放在另一个线程里，最多等 2 秒（`STATUS_LOOKUP_WAIT`）；超时就省略 `session`，加 `"session_lookup": "timed_out"`，信封照常 `ok`。SessionStart 钩子不会因为 store 一时读不动而卡住。daemon 没在跑时直接查。
 - `holders`：谁持着哪把 repo 写锁、从什么时候起。daemon 在跑时由 `daemon_status` 填。
-- `features`：daemon 接受的请求扩展（daemon.md D38，现在是 `["new.agent", "session.ports", "status.upstream", "sync"]`），daemon 在跑时原样透传；旧 daemon 没有这个键。
+- `features`：daemon 接受的请求扩展（daemon.md D38，现在是 `["new.agent", "session.ports", "status.upstream", "sync", "config.reload"]`），daemon 在跑时原样透传；旧 daemon 没有这个键。
+- `config`：daemon 返回时原样透传；daemon 没在跑或旧 daemon 没有这个键时省略。`generation`、`hash`、`loaded_at` 描述当前已应用的 catalog；`last_attempt` 在尚无重载尝试时为 null，之后是 ReloadReport 加 `at`，拒绝时另带 `reason`；`restart_required` 是该次尝试要求重启的字段列表。
 - `fds`：daemon 的文件描述符计数（`open`、`limit` 等），daemon 在跑时原样透传 `daemon_status` 的 `fds`（D35）。
 - `alerts`：隔离区、`index-read-back-refused`、`staging-changed` 这类要人看的项，原样透传 daemon 的 warnings。每条同时在 stderr 打一行。
 
@@ -542,8 +543,11 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 `features` for `config.reload`, sends `config_reload {}`, and prints the normal
 `{ok,data,error}` envelope. `data` is the ReloadReport documented in
 [config.md](../config.md#hot-reload-configreload). Exit 0 means applied/unchanged;
-2 rejected, 3 pending after 15 seconds (rerun), 4 daemon too old, 1 transport/output
-failure. Failure also prints one reason to stderr. An old daemon gets exactly:
+2 rejected, 3 pending after 15 seconds (rerun), 4 daemon too old, 1 argument,
+transport, output or invalid-report failure. Rejected, pending, too-old and
+invalid-report replies also print their message to stderr; argument and transport
+failures use the ordinary JSON error path without that notice. Output failures
+print a stderr diagnostic. An old daemon gets exactly:
 "this daemon loads config only at start; ask the owner to restart it". The CLI
 never restarts it. After editing config, check membership in data.repos and read
 pending_relax before using a newly configured repo. config add-repo is phase 2.

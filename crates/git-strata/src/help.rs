@@ -120,7 +120,11 @@ ERRORS (code -> what an agent does)
   Busy pins_tightened rerun with the newly applied config
   Busy reload_pending rerun config reload; its current attempt continues
   Unsupported daemon_too_old  ask the owner to upgrade/restart
-  InvalidInput config_rejected  inspect data.reasons and restart_required
+  InvalidInput config_rejected  fallback if the rejected report has no reason;
+                               otherwise the daemon reason is forwarded.
+                               Inspect data.reasons and data.restart_required
+  InvalidInput recovery_failed  new-repo pending-rebase recovery failed; inspect
+                               data.reasons, resolve the failure, rerun config reload
   InvalidInput shown_required  use a CLI that sends the displayed flags
   InvalidInput config_not_applied  run config reload before config relax
   NotTty             hand the command to a human   NotConfirmed     report; human reruns
@@ -556,9 +560,16 @@ INSTALL
   can print it with `git-stratad --print-plist [ABSOLUTE_BIN]`.
 
 EXAMPLES
-  git-strata daemon status   # {running, socket, session?, holders, unknown_publishes, alerts}
+  git-strata daemon status   # {running, socket, session?, holders, unknown_publishes,
+                            #  alerts, config?:{generation,hash,loaded_at,last_attempt,
+                            #                   restart_required}}
   git-strata daemon start    # launchctl bootstrap gui/<uid> <plist>; {already:true} if loaded
   git-strata daemon stop     # launchctl bootout; waits up to 10 s until unloaded
+
+config is copied when the daemon returns it; absent when down or omitted by an
+older daemon. generation/hash/loaded_at describe the active catalog. last_attempt
+is null before any reload attempt, then the report plus at and a rejection reason
+when present; restart_required lists restart-only fields from that attempt.
 
 After editing config.toml, run `git-strata config reload` and check data.repos.
 Restart-only changes and old daemons require an owner restart. start/stop use

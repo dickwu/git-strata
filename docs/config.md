@@ -791,6 +791,12 @@ Check that the intended repository is in `repos` before using it: the poll may
 already have added it, so `added` can be empty. A pending attempt continues; rerun
 the command. A successful report is sent after catalog publication.
 
+On rejection, the CLI forwards the daemon's first reason, falling back to
+`config_rejected` when absent. `recovery_failed` means pending-rebase reconstruction
+for a newly added repo failed before catalog publication; the previous catalog
+remains active. Inspect `data.reasons`, resolve the reported failure, then rerun
+`config reload`.
+
 | Setting | Reload behavior |
 | --- | --- |
 | New repository name with no retained state | Add atomically, including Git handles, locks, search and background loops |
@@ -819,6 +825,7 @@ new/add rollback unpins are exempt. No automatic retry loop retries a fence.
 
 Limits: repeated tightenings can repeatedly refuse a long install. Siblings-layout
 sessions include all repos, so tightening one can fence every older queue waiter.
+A rerun admitted after fences advance but before the new catalog is published can receive `Busy pins_tightened` again; rerun after publication to use the new generation.
 A partially landed multi-repo publish reports the landed and refused repos as a
 stop would. Pure reads and already-held locks finish on their admission snapshot.
 More than 1000 retained catalogs raises a warning; an owner restart frees them.
