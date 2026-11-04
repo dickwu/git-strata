@@ -341,6 +341,11 @@ impl Locks {
                 })
             }),
         };
+        // An expired attempt is no longer waiting once this request has the
+        // lock, even if its operation later returns an error. Other requests'
+        // repo/session/method records remain visible.
+        let (method, session) = ctx_method();
+        lock(&self.expired_waits).remove(&(repo.clone(), session, method));
         f()
     }
 
