@@ -2,7 +2,7 @@
 name: git-strata
 description: Use when working in a repo managed by git-strata (macOS), when the cwd is inside a git-strata session workspace (`<root>/sessions/<id>/<repo>`, default root ~/.strata), or when the user asks to start, checkpoint, diff, restore, sync with main, publish, push or remove a git-strata session, or to run a dev server on per-session ports. Gives each agent session its own isolated APFS-cloned workspace over a shared base snapshot. Covers the CLI loop (new, checkpoint, sync --check, publish, rm), the JSON envelope and error codes, main-sync conflict resolution, and the commands an agent must hand to a human. For any agent that runs shell commands (Claude Code, Codex, Cursor and others).
 license: MIT OR Apache-2.0
-compatibility: macOS 13+ on APFS. Needs the git-strata CLI (0.1.2 or later) on PATH and its daemon, which only a human starts.
+compatibility: macOS 13+ on APFS. Needs matching git-strata CLI and daemon builds; R2 features require R2 or later. The 0.1.2 CLI cannot read a v6 store. Only a human starts the daemon.
 ---
 
 # git-strata
@@ -158,6 +158,9 @@ Unknown help topics return an `InvalidInput` / `help_topic` envelope.
 | `InvalidInput no_batch` | pass the batch: `--from SESSION:PATH` (repeatable) |
 | `NoMatch` | a `--from` path is not checkpointed: checkpoint it, rerun |
 | `Conflict` (publish) | fix the listed paths, rerun the same publish ([publish.md](publish.md)) |
+| `InvalidInput base_not_on_main` / `base_diverged_from_main` | hand `detail.fix` to the human; do not push from main or accept divergence yourself |
+| `InvalidInput base_behind_main` | rerun the `new` command in `detail.fix` without `--base` |
+| `BaseAheadOfMain` warning | local base commits are pinned; publish requires them in B or main_tip |
 | `Conflict sync_conflict` / `HeadMoved` | resolve the report ([sync.md](sync.md)) |
 | `Conflict assigned` | another session owns the path; do not retry |
 | `CheckFailed` | fix the code, checkpoint, publish again |
@@ -200,3 +203,14 @@ Everything else: [errors.md](errors.md).
 7. Run `gc` only when the human asks (`gc --store --dry-run` first).
 8. Release builds never run in a workspace: publish (and push), then build in
    the main checkout after `git pull --ff-only` ([publish.md](publish.md)).
+
+`publish -m "subject"` overrides the commit message (`-m` repeats as paragraphs;
+`--message-for REPO=TEXT` overrides one repo). Otherwise the latest manual
+checkpoint subjects in the unpublished window are used; tool-call IDs are
+excluded. A no-change `checkpoint -m` records no new message. `new T --repo R
+--base LOCAL_REV` parks at a local commit at or ahead of main; it does not adopt
+that commit into the publish chain. Remote publish lines are not supported.
+
+A stuck auto-rebase can hand control back once through the Stop hook. Ask the
+user about named holder processes; stop only processes you own, or cd out of
+those shells. The returned command runs sync from outside the workspace.

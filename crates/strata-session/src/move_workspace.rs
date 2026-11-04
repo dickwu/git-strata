@@ -129,6 +129,11 @@ impl Sessions<'_> {
         self.move_workspace_consuming(session, repo, new_base, head, None)
     }
 
+    /// Dependency rollout/switch moves must preserve every base commit.
+    pub fn move_workspace_checked(&self, session: &SessionId, repo: &RepoId, new_base: BaseGen, head: CommitOid, require_descends: bool) -> Result<MoveReport> {
+        self.move_inner(session, repo, new_base, head, None, None, None, require_descends)
+    }
+
     /// [`Sessions::move_workspace`] that consumes the `rebase_pending` row
     /// of rev `consume` in the finishing transaction (rm-followups §1.6
     /// rule 6).
@@ -140,7 +145,7 @@ impl Sessions<'_> {
         head: CommitOid,
         consume: Option<u64>,
     ) -> Result<MoveReport> {
-        self.move_inner(session, repo, new_base, head, consume, None, None)
+        self.move_inner(session, repo, new_base, head, consume, None, None, false)
     }
 
     /// An `Auto` move (rm-followups §1.4 G4): [`Sessions::move_workspace_consuming`]
@@ -160,7 +165,27 @@ impl Sessions<'_> {
         consume: Option<u64>,
         baseline: &strata_store::MoveBaseline,
     ) -> Result<MoveReport> {
-        self.move_inner(session, repo, new_base, head, consume, Some(baseline), None)
+        let name = self.repo_name(repo)?;
+        let require_descends = !self
+            .store
+            .rebase_pending_of(session, &name)?
+            .is_some_and(|p| {
+                Some(p.rev) == consume
+                    && matches!(
+                        p.source,
+                        strata_store::PendingSource::Publish | strata_store::PendingSource::Replay
+                    )
+            });
+        self.move_inner(
+            session,
+            repo,
+            new_base,
+            head,
+            consume,
+            Some(baseline),
+            None,
+            require_descends,
+        )
     }
 
     /// Agent moves keep G0/G2/G4, but check only dependency-directory
@@ -209,6 +234,7 @@ impl Sessions<'_> {
             consume,
             Some(baseline),
             Some(AgentMove { options, kept }),
+            false,
         )
     }
 
@@ -222,6 +248,7 @@ impl Sessions<'_> {
         consume: Option<u64>,
         auto: Option<&strata_store::MoveBaseline>,
         agent: Option<AgentMove<'_>>,
+        require_descends: bool,
     ) -> Result<MoveReport> {
         // ---- Phase A: checks; nothing is written.
         // 1.
@@ -359,7 +386,11 @@ impl Sessions<'_> {
                 obj(json!({ "head": head.as_str(), "tree": tree.as_str(), "base_tree": new_base.tree.as_str() })),
             ));
         }
-        // 6.
+        // 6. The caller holds the move lock; recheck the actual current head.
+        if require_descends && !git.is_ancestor(&from_head, &head)? {
+            return Err(StrataError::new(Code::Conflict, "dependency move would drop base commits")
+                .with_detail(json!({"reason":"base_ahead","session":session,"repo":name,"head":from_head,"target":head})));
+        }
         if git.merge_base(&from_head, &head)?.is_none() {
             return Err(StrataError::new(Code::NoMergeBase, format!("{from_head} and {head} have no common ancestor"))
                 .with_detail(json!({ "a": from_head.as_str(), "b": head.as_str() })));
@@ -1120,5 +1151,5 @@ fn open_files_error(ws: &Path, holders: Vec<strata_deps::OpenFile>) -> StrataErr
             ws.display()
         ),
     )
-    .with_detail(json!({ "path": ws, "holders": holders }))
+    .with_detail(json!({ "path": ws, "holders": crate::activity::holders_json(ws, &holders, 20), "count":holders.len() }))
 }

@@ -49,7 +49,7 @@ fn schema(env: &Env) -> Vec<(String, String, Option<String>)> {
 }
 
 #[test]
-fn v3_to_v5_migration_keeps_rows() {
+fn v3_to_v6_migration_keeps_rows() {
     let env = fixture();
     assert_eq!(version(&env), 3);
     let ro = Store::open_read_only(&env.root).unwrap();
@@ -73,7 +73,7 @@ fn v3_to_v5_migration_keeps_rows() {
     assert_eq!(s.rebase_pending(None).unwrap(), pending);
     assert_eq!(s.move_activities(&sid()).unwrap(), activity);
     s.close().unwrap();
-    assert_eq!(version(&env), 5);
+    assert_eq!(version(&env), 6);
     let fresh = support::env();
     fresh.open().close().unwrap();
     assert_eq!(

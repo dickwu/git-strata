@@ -1654,3 +1654,20 @@ fn participant_publish_keeps_landed_proposers_pending() {
         ))
     );
 }
+
+#[test]
+fn parked_base_is_skipped_by_rollout_and_switch_and_counts_as_settled() {
+    let w=world(); let fx=&w.fx;
+    fx.sb.commit(&fx.main,&[("only-c",b"C")],"local C"); let c=tip(fx);
+    let s=sid("parkedaa"); let base=bg(fx,&c.tree,&w.d1.id);
+    let ws=ws_new(fx,&s,&base,c.head.as_str(),&c.head,true);
+    fx.sb.git(&fx.main,&["reset","--hard",w.t1.head.as_str()]);
+    let (d,set,p)=w.main_pending(&[("bun.lock",b"new D inputs")]);
+    let plan=plan_rollout(&fx.ctx(),p.id,&[(s.clone(),ws.clone())],true).unwrap();
+    assert!(matches!(&plan.steps[0],RolloutStep::Skip {reason:SkipReason::BaseAhead {head,target},..} if head==&c.head && target==&d.head));
+    assert_eq!(fs::read(ws.path.join("only-c")).unwrap(),b"C");
+    assert_eq!(record_rollout(fx.store(),&plan,&[]).unwrap().state,ProposalState::Applied);
+    let own=propose(&fx.ctx(),pa(session(&s),of(&w.d1),of(&set),Some(&d))).unwrap();
+    let switch=plan_switch(&fx.ctx(),own.id,&s,&ws).unwrap();
+    assert!(matches!(&switch.steps[0],RolloutStep::Skip {reason:SkipReason::BaseAhead {..},..}));
+}

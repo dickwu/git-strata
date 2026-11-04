@@ -589,6 +589,18 @@ BEGIN SELECT RAISE(ABORT, 'delete outside gc: sync_move_history'); END;
 PRAGMA user_version = 5;
 "#,
     },
+    Migration {
+        to: 6,
+        name: "publish_message+activity_scope",
+        sql: r#"
+ALTER TABLE publishes ADD COLUMN message TEXT CHECK (message IS NULL OR length(message) BETWEEN 1 AND 65536);
+CREATE TRIGGER publishes_message_guard BEFORE UPDATE ON publishes
+WHEN NEW.message IS NOT OLD.message
+BEGIN SELECT RAISE(ABORT, 'publishes.message is immutable'); END;
+ALTER TABLE move_activity ADD COLUMN skip_json TEXT;
+PRAGMA user_version = 6;
+"#,
+    },
 ];
 
 /// The oldest schema version this build opens (and migrates from).
@@ -621,10 +633,10 @@ mod tests {
             assert_eq!(m.to, BASE_VERSION + 1 + i as u32, "{}", m.name);
             assert!(m.sql.trim_end().ends_with(&format!("PRAGMA user_version = {};", m.to)), "{}", m.name);
         }
-        assert_eq!(LATEST, 5);
-        assert_eq!(pending(1).count(), 4);
-        assert_eq!(pending(2).count(), 3);
-        assert_eq!(pending(3).count(), 2);
+        assert_eq!(LATEST, 6);
+        assert_eq!(pending(1).count(), 5);
+        assert_eq!(pending(2).count(), 4);
+        assert_eq!(pending(3).count(), 3);
         assert_eq!(pending(LATEST).count(), 0);
         assert!(ddl(1) == BASE_DDL && ddl(2).len() > BASE_DDL.len() && ddl(3).len() > ddl(2).len());
     }

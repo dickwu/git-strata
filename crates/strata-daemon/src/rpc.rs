@@ -84,6 +84,8 @@ fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Resu
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewParams {
+    #[serde(default)]
+    pub base: BTreeMap<RepoName, String>,
     #[serde(deserialize_with = "nullable")]
     pub ticket: Option<String>,
     pub repos: Vec<RepoName>,
@@ -272,12 +274,20 @@ pub struct RepoOptParams {
 #[serde(deny_unknown_fields)]
 pub struct PublishPlanParams {
     pub group: ReleaseGroup,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub message_for: BTreeMap<RepoName, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishParams {
     pub group: ReleaseGroup,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub message_for: BTreeMap<RepoName, String>,
     /// Review H2: the publish chain top the cli showed for each repo it
     /// asked to confirm (`null`: it showed no local chain). A repo that
     /// needs a confirmation is refused (`NotConfirmed`, reason

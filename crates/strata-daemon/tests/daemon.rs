@@ -663,7 +663,23 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
                 })));
                 batches.push(json!({ "session": id, "repo": repo, "checkpoint": cp["checkpoint"]["id"], "paths": paths }));
             }
-            call(&sock, "publish", json!({ "group": { "id": 0, "batches": batches } }))
+            let request = json!({
+                "group": { "id": 0, "batches": batches },
+                "message": "shared publish text",
+                "message_for": { "front": "front override", "tool": "tool override" },
+            });
+            // Planning and execution see the same original arguments on every retry.
+            let mut invalid = request.clone();
+            invalid["message_for"]["not-in-request"] = json!("invalid override");
+            for method in ["publish_plan", "publish"] {
+                let refused = call(&sock, method, invalid.clone());
+                assert_eq!(
+                    refused["error"]["detail"]["reason"], "message_repo",
+                    "{refused}"
+                );
+            }
+            ok(call(&sock, "publish_plan", request.clone()));
+            call(&sock, "publish", request)
         };
         let r = run();
         assert_eq!(r["error"]["code"], "Conflict", "{r:#}");
@@ -673,9 +689,69 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
         let landed = core.gits[&repo_name("front")].read_ref(&chain).unwrap().expect("front committed");
         assert_eq!(det["published_before"][0]["commit"], json!(landed), "{r:#}");
         assert_eq!(origin("front"), landed.as_str(), "front pushed");
-        let paths: Vec<&str> = det["conflicts"].as_array().unwrap().iter().filter_map(|c| c["path"].as_str()).collect();
+        assert_eq!(
+            fx.sb.git(
+                &fx.main("front"),
+                &["show", "-s", "--format=%s", landed.as_str()]
+            ),
+            "front override"
+        );
+        let paths: Vec<&str> = det["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["path"].as_str())
+            .collect();
         assert_eq!(paths, vec!["src/index.ts"], "{r:#}");
         assert_eq!(origin("tool"), upstream, "tool not pushed");
+
+        // A retry's preflight error retains the repo that already landed,
+        // both when planning and when publishing directly.
+        let mut retry = group(
+            core.store
+                .publishes()
+                .unwrap()
+                .into_iter()
+                .flat_map(|r| r.group.batches)
+                .collect(),
+        );
+        for batch in &mut retry.batches {
+            let checkpoint = ok(call(
+                &sock,
+                "checkpoint",
+                json!({
+                    "session": id, "repo": batch.repo, "reason": {"kind":"BeforePublish"}, "paths": batch.paths,
+                }),
+            ));
+            batch.checkpoint =
+                serde_json::from_value(checkpoint["checkpoint"]["id"].clone()).unwrap();
+        }
+        let tracking = strata_gitio::remote_ref("origin", "main");
+        let cached = core.gits[&repo_name("tool")]
+            .read_ref(&tracking)
+            .unwrap()
+            .unwrap();
+        core.locks
+            .with_repo(&repo_name("tool"), || {
+                fx.sb.git(&main, &["update-ref", "-d", &tracking]);
+                for method in ["publish_plan", "publish"] {
+                    let refused = call(&sock, method, json!({"group":retry}));
+                    assert_eq!(refused["error"]["code"], "Busy", "{refused}");
+                    let detail = &refused["error"]["detail"];
+                    assert_eq!(detail["reason"], "lock_wait", "{refused}");
+                    assert_eq!(detail["repo"], "tool", "{refused}");
+                    assert_eq!(detail["already_published"][0]["repo"], "front", "{refused}");
+                    assert_eq!(
+                        detail["already_published"][0]["commit"],
+                        json!(landed),
+                        "{refused}"
+                    );
+                }
+                fx.sb
+                    .git(&main, &["update-ref", &tracking, cached.as_str()]);
+                Ok(())
+            })
+            .unwrap();
 
         // The agent takes upstream's line and re-runs the same publish.
         external(&ws(&core, &id, "tool"), "printf 'export const t = 9\\n' > src/index.ts");
@@ -686,10 +762,24 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
         assert_eq!(r["already_published"][0]["repo"], "front", "{r:#}");
         assert_eq!(r["published"].as_array().unwrap().len(), 1, "{r:#}");
         assert_eq!(r["published"][0]["repo"], "tool", "{r:#}");
-        let t = core.gits[&repo_name("tool")].read_ref(&chain).unwrap().expect("tool committed");
+        let t = core.gits[&repo_name("tool")]
+            .read_ref(&chain)
+            .unwrap()
+            .expect("tool committed");
         assert_eq!(origin("tool"), t.as_str());
-        assert_eq!(fx.sb.git(&main, &["rev-parse", &format!("{t}^")]), upstream, "one commit on upstream");
-        assert_eq!(fx.sb.git(&main, &["show", &format!("{t}:src/other.ts")]), "export const o = 1");
+        assert_eq!(
+            fx.sb.git(&main, &["show", "-s", "--format=%s", t.as_str()]),
+            "tool override"
+        );
+        assert_eq!(
+            fx.sb.git(&main, &["rev-parse", &format!("{t}^")]),
+            upstream,
+            "one commit on upstream"
+        );
+        assert_eq!(
+            fx.sb.git(&main, &["show", &format!("{t}:src/other.ts")]),
+            "export const o = 1"
+        );
         assert_eq!(push_calls(&core), 1, "only tool pushed");
     });
     drop(d);
@@ -794,7 +884,12 @@ fn publish_plan_names_the_remaining_repos_and_writes_nothing() {
             json!({ "id": 0, "batches": batches })
         };
         let plan = ok(call(&sock, "publish_plan", json!({ "group": group() })));
-        assert_eq!(plan, json!({ "repos": ["front", "tool"], "already_published": [] }));
+        assert_eq!(plan["repos"], json!(["front", "tool"]));
+        assert_eq!(plan["already_published"], json!([]));
+        for repo in ["front", "tool"] {
+            assert_eq!(plan["subjects"][repo]["message_source"], "legacy");
+            assert!(plan["subjects"][repo]["subject"].is_string());
+        }
         assert!(core.store.publishes().unwrap().is_empty(), "the plan wrote a publish row");
 
         // front lands, tool's confirmation is cancelled.
@@ -851,7 +946,9 @@ fn publish_plan_keeps_a_waiting_sessions_landed_guarded_repo() {
         let r = ok(call(&sock, "publish", json!({ "group": group(), "shown": { "tool": null } })));
         assert_eq!(r["published"][0]["rebases"][0]["report"]["kind"], "Waiting", "{r:#}");
         let plan = ok(call(&sock, "publish_plan", json!({ "group": group() })));
-        assert_eq!(plan, json!({ "repos": ["tool"], "already_published": [] }), "{plan:#}");
+        assert_eq!(plan["repos"], json!(["tool"]), "{plan:#}");
+        assert_eq!(plan["already_published"], json!([]));
+        assert!(plan["subjects"]["tool"]["subject"].is_string());
     });
     drop(d);
     core.close().unwrap();
@@ -892,6 +989,7 @@ fn publish_failure_after_a_definite_push_reports_the_pushed_commit() {
             assert_eq!(l["commit"], json!(tip), "{at:?}: {r:#}");
             assert_eq!(l["push"]["kind"], "Pushed", "{at:?}: {r:#}");
             assert!(l["checks_ran"].is_u64(), "{at:?}: {r:#}");
+            assert!(l["message_source"].is_string(), "chosen source survives a post-commit failure: {r:#}");
         });
     }
 }
@@ -1173,6 +1271,9 @@ fn rm_waits_for_publishing_in_the_lock_free_gap() {
 #[test]
 fn standalone_push_unknown_keeps_scene_and_reports_across_restart() {
     let mut fx = Dfx::new();
+    // Recovery, not lock-deadline behavior: let startup catch-up release
+    // its repo lock before the next intentional push.
+    fx.lock_wait = Duration::from_secs(5);
     fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.push = false;
     fx.write_config();
     let sock = fx.socket();

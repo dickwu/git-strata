@@ -166,8 +166,9 @@ impl Core {
         let failed: Vec<RepoName> = report
             .warnings
             .iter()
-            .map(|w| match w {
-                NewWarning::ObserveFailed { repo, .. } => repo.clone(),
+            .filter_map(|w| match w {
+                NewWarning::ObserveFailed { repo, .. } => Some(repo.clone()),
+                NewWarning::BaseAheadOfMain { .. } => None,
             })
             .collect();
         for repo in failed {

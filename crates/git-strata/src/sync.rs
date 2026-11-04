@@ -113,6 +113,7 @@ pub(crate) fn hook(args: &SyncArgs, started: Instant) -> i32 {
         if started.elapsed() >= HOOK_BUDGET {
             return None;
         }
+        for warning in data["base_warnings"].as_array().into_iter().flatten().filter_map(Value::as_str) { eprintln!("note: {warning}"); }
         block_reason(&upstream).map(|reason| {
             let reason = reason.replace("<session-id>", data["session"].as_str().unwrap_or("<session-id>"));
             json!({ "decision": "block", "reason": reason })
@@ -127,6 +128,30 @@ pub(crate) fn hook(args: &SyncArgs, started: Instant) -> i32 {
 pub fn block_reason(upstream: &Upstream) -> Option<String> {
     let mut reasons = Vec::new();
     for (repo, u) in &upstream.repos {
+        if let Some(auto) = &u.auto
+            && auto.escalation_new
+            && auto.state == "deferred"
+        {
+            let cause = strata_session::rebase_cause(
+                auto.reason.as_deref().unwrap_or("busy"),
+                auto.detail.as_ref(),
+            );
+            let action = if u.following {
+                format!(
+                    "ask the user to release the named holders or wait for a stopping point, then run `{}` and cd back into the workspace",
+                    u.fix
+                        .as_deref()
+                        .unwrap_or("cd ~ && git-strata sync --session <session-id>")
+                )
+            } else {
+                "ask the user to release the named holders or pause writes, then review the dependency/rebase plan for this non-following repo".into()
+            };
+            reasons.push(format!(
+                "auto-rebase of {repo} has been deferred {} times since {}: {cause}; {action}.",
+                auto.attempts, auto.since
+            ));
+            continue;
+        }
         let behind = if u.unchecked {
             0
         } else {

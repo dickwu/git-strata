@@ -120,7 +120,11 @@ function skipText(detail: Record<string, unknown>): string {
 }
 
 /** Skips record_rollout counts as done: the proposal still becomes Applied with them. */
-export const BENIGN_SKIPS: ReadonlySet<string> = new Set(['Untracked', 'AlreadyThere']);
+export const BENIGN_SKIPS: ReadonlySet<string> = new Set([
+  'Untracked',
+  'AlreadyThere',
+  'BaseAhead',
+]);
 
 export function rowView(row: ApproveRow): RowView {
   if (row.kind === 'moved') {

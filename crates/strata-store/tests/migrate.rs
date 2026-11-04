@@ -149,9 +149,9 @@ fn writer_open_migrates_v1_and_keeps_every_row() {
     assert_eq!(t.manifest.ticket.as_deref(), Some("GWD-42"));
     s.close().unwrap();
 
-    assert_eq!(header_u32(&env.db(), 60), 5);
+    assert_eq!(header_u32(&env.db(), 60), 6);
     let (uv, ic, after) = dump_copy(&env.db());
-    assert_eq!((uv, ic.as_str()), (5, "ok"));
+    assert_eq!((uv, ic.as_str()), (6, "ok"));
     // v2 adds `dev_ports` (v1 sessions get leases lazily), v3 the three
     // rm-followups tables: all empty
     let mut keys: Vec<&str> = before.keys().map(String::as_str).collect();
@@ -206,7 +206,7 @@ fn new_and_migrated_stores_have_the_same_schema() {
     let (a, b) = (bare(&fresh.db()), bare(&migrated.db()));
     assert_eq!(schema(&a), schema(&b));
     let uv: i64 = a.query_row("PRAGMA user_version", (), |r| r.get(0)).unwrap();
-    assert_eq!(uv, 5);
+    assert_eq!(uv, 6);
 }
 
 #[test]
@@ -229,21 +229,21 @@ fn newer_schema_is_refused_untouched() {
     env.open().close().unwrap();
     {
         let c = bare(&env.db());
-        c.execute_batch("PRAGMA user_version = 6").unwrap();
+        c.execute_batch("PRAGMA user_version = 7").unwrap();
         c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |_| Ok(()))
             .unwrap();
     }
     let before = snapshot(&env.root);
-    let e = env.try_open().err().expect("v6 refused");
+    let e = env.try_open().err().expect("v7 refused");
     assert_reason(&e, Code::Corrupt, "user_version");
     assert!(
-        e.message.contains("older than the store (v6)"),
+        e.message.contains("older than the store (v7)"),
         "{}",
         e.message
     );
     let e = Store::open_read_only(&env.root)
         .err()
-        .expect("v6 refused read-only");
+        .expect("v7 refused read-only");
     assert_reason(&e, Code::Corrupt, "user_version");
     let mut after = snapshot(&env.root);
     let mut before = before;
@@ -268,7 +268,7 @@ fn failure_before_commit_leaves_v1_and_the_next_open_migrates() {
     let s = env.open();
     assert_eq!(s.sessions().unwrap().len(), 2);
     s.close().unwrap();
-    assert_eq!(header_u32(&env.db(), 60), 5);
+    assert_eq!(header_u32(&env.db(), 60), 6);
 }
 
 #[test]
@@ -367,7 +367,7 @@ fn uncertain_commit_is_resolved_by_a_fresh_process() {
     assert_eq!(s.sessions().unwrap().len(), 2);
     s.close().unwrap();
     let (uv, ic, now) = dump_copy(&env.db());
-    assert_eq!((uv, ic.as_str()), (5, "ok"));
+    assert_eq!((uv, ic.as_str()), (6, "ok"));
     for (t, r) in &rows {
         if t == "deps_proposals" {
             assert_eq!(r.iter().map(|r| format!("{r}|Null")).collect::<Vec<_>>(), now[t]);
@@ -387,7 +387,7 @@ fn child_aborts_after_migration_commit() {
 }
 
 #[test]
-fn crash_right_after_commit_keeps_v5() {
+fn crash_right_after_commit_keeps_v6() {
     let env = v1_env();
     let out = run_child("child_aborts_after_migration_commit", &[(ROOT_ENV, env.root.to_str().unwrap())]);
     assert!(!out.status.success());
@@ -395,6 +395,6 @@ fn crash_right_after_commit_keeps_v5() {
     assert_eq!(s.sessions().unwrap().len(), 2);
     s.close().unwrap();
     let (uv, ic, _) = dump_copy(&env.db());
-    assert_eq!((uv, ic.as_str()), (5, "ok"));
+    assert_eq!((uv, ic.as_str()), (6, "ok"));
     assert_eq!(backups(&env).len(), 1, "committed; no second migration");
 }

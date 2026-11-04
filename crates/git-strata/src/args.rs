@@ -58,6 +58,9 @@ pub enum Cmd {
         /// The AI agent creating the session (default: STRATA_AGENT, else detected: claude-code, codex, cursor-agent)
         #[arg(long, value_name = "NAME")]
         agent: Option<String>,
+        /// Local revision at or ahead of main (REV for one repo, or R=REV)
+        #[arg(long, value_name = "[R=]REV", allow_hyphen_values = true)]
+        base: Vec<String>,
     },
     /// Add workspaces of more repos to an existing session
     #[command(after_long_help = crate::help::ADD_AFTER)]
@@ -161,6 +164,12 @@ pub enum Cmd {
         /// Same as `git-strata assign --file FILE --session SESSION`
         #[arg(long, num_args = 2, value_names = ["FILE", "SESSION"])]
         assign: Option<Vec<String>>,
+        /// Commit message paragraphs (repeatable)
+        #[arg(short = 'm', long = "message", value_name = "TEXT", conflicts_with = "assign")]
+        message: Vec<String>,
+        /// Override a repo's message (repeatable; paragraphs joined)
+        #[arg(long, value_name = "REPO=TEXT", conflicts_with = "assign")]
+        message_for: Vec<String>,
     },
     /// Push a repo's publish branch (asks for confirmation when configured)
     #[command(long_about = crate::help::PUSH, after_long_help = crate::help::PUSH_AFTER)]

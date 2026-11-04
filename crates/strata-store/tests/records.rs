@@ -141,6 +141,7 @@ fn publish_record_roundtrip_and_phase_machine() {
     let id = s.record_publish(&gr, t(70)).unwrap();
     assert_eq!(id, 1, "input id is ignored");
     let want = PublishRecord {
+        message: None,
         group: ReleaseGroup { id: 1, batches: gr.batches.clone() },
         phase: PublishPhase::Running,
         started: t(70),
@@ -253,4 +254,21 @@ fn ref_audit_only_strata_refs_for_update_ref() {
     let (c, _) = raw(&env.db(), false);
     let stored: String = c.query_row("SELECT confirmed FROM refs_audit WHERE outcome = 'pushed'", [], |r| r.get(0)).unwrap();
     assert_eq!(serde_json::from_str::<serde_json::Value>(&stored).unwrap(), serde_json::to_value(c3.confirmed.unwrap()).unwrap());
+}
+
+#[test]
+fn publish_message_is_recorded_once_and_validated_before_insert() {
+    let (env, s, a, _) = world();
+    let g = group(vec![batch(&a, "app", 1, &["f"])]);
+    for bad in [String::new(), "a\0b".into(), "é".repeat(32769)] {
+        assert_eq!(s.record_publish_with_message(&g, Some(&bad), t(70)).unwrap_err().code, Code::InvalidInput);
+    }
+    assert!(s.publishes().unwrap().is_empty());
+    let id = s.record_publish_with_message(&g, Some("subject\n\nbody"), t(70)).unwrap();
+    assert_eq!(s.publish_record(id).unwrap().unwrap().message.as_deref(), Some("subject\n\nbody"));
+    let c = connect(&env.db());
+    let e = c.execute("UPDATE publishes SET message = 'other' WHERE id = ?1", [id as i64]).unwrap_err();
+    assert!(e.to_string().contains("immutable"));
+    s.set_publish_phase(id, PublishPhase::Running, PublishPhase::Done, Some(&json!({"commit":"a"})), t(71)).unwrap();
+    assert_eq!(s.publish_record(id).unwrap().unwrap().message.as_deref(), Some("subject\n\nbody"));
 }

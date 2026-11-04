@@ -125,6 +125,8 @@ pub struct Pins {
 struct PinsState {
     pinned: BTreeMap<RepoName, PinnedFlags>,
     file: BTreeMap<RepoName, PinnedFlags>,
+    meta: BTreeMap<RepoName, crate::audit::PinMeta>,
+    audit_errors: BTreeMap<RepoName, String>,
 }
 
 impl Pins {
@@ -155,10 +157,19 @@ impl Pins {
             };
             pinned.insert(n.clone(), next);
         }
-        let pins = Pins { path: path.to_path_buf(), inner: Mutex::new(PinsState { pinned, file }) };
-        let changed = existing.map(|e| e.repos) != Some(pins.state().pinned.clone());
+        let old = existing.map(|e| e.repos).unwrap_or_default();
+        let changed = old != pinned;
+        let pins = Pins { path: path.to_path_buf(), inner: Mutex::new(PinsState { pinned, file, meta: crate::audit::load(path), audit_errors: BTreeMap::new() }) };
         if changed {
-            pins.write(&pins.state().pinned)?;
+            let mut state = pins.state();
+            pins.write(&state.pinned)?;
+            for (repo, to) in state.pinned.clone() {
+                let from = old.get(&repo).cloned();
+                if from.as_ref() != Some(&to) {
+                    let entry = crate::audit::Entry::new(if from.is_some() { "tighten" } else { "pin_new" }, repo, from, to);
+                    pins.audit(&mut state, entry);
+                }
+            }
         }
         Ok(pins)
     }
@@ -204,11 +215,23 @@ impl Pins {
             return Err(StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}")));
         };
         let mut next = s.pinned.clone();
-        next.insert(repo.clone(), f);
+        next.insert(repo.clone(), f.clone());
         self.write(&next)?;
+        let from = s.pinned.get(repo).cloned();
         s.pinned = next;
+        self.audit(&mut s, crate::audit::Entry::new("config_relax", repo.clone(), from, f));
         Ok(())
     }
+
+    fn audit(&self, state: &mut PinsState, entry: crate::audit::Entry) {
+        match crate::audit::append(&self.path, &entry) {
+            Ok(()) => { crate::audit::apply(&mut state.meta, &entry); state.audit_errors.remove(&entry.repo); }
+            Err(e) => { state.audit_errors.insert(entry.repo.clone(), e.to_string()); tracing::warn!(repo=%entry.repo, error=%e, "audit_write_failed"); }
+        }
+    }
+
+    pub fn metadata(&self) -> serde_json::Value { serde_json::to_value(&self.state().meta).unwrap_or_else(|_| json!({})) }
+    pub fn audit_error(&self, repo: &RepoName) -> Option<String> { self.state().audit_errors.get(repo).cloned() }
 
     /// Atomic replace: temp file (0600) → fsync → rename → fsync dir.
     fn write(&self, pinned: &BTreeMap<RepoName, PinnedFlags>) -> Result<()> {

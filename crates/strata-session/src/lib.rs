@@ -41,10 +41,12 @@ mod summary;
 mod sys;
 mod ticket;
 
-pub use activity::{Activity, Idle, baseline_of, busy_reason, changed_since, idle_activity, walk_activity};
+#[cfg(feature = "test-seams")]
+pub use activity::walk_activity_during_scan;
+pub use activity::{activity_scope, holders_json, idle_activity_scoped, walk_activity_scoped, Activity, Idle, baseline_of, busy_reason, changed_since, idle_activity, walk_activity};
 pub use failed_move::{MoveResolution, ResolutionReport};
 pub use move_workspace::{AUTO_DEFERRED, MoveReport, auto_deferral};
-pub use new::Layout;
+pub use new::{Layout, validate_base_rev};
 pub use new::NewReport;
 pub use new::NewWarning;
 pub use new::add::{ADD_STAGING_PREFIX, AddReport};
@@ -56,7 +58,7 @@ pub use recover::{IntentRef, Leftover, RecoverReport};
 pub use remove::{Regenerable, RemoveReport};
 pub use resolve::{resolve_in, select_in};
 pub use rm_note::{
-    KeptTree, LastRm, RebaseNote, RmInterrupted, RmNotes, leftover_line, local_hhmm, removed_leftover_of, removed_leftovers, rm_notes,
+    rebase_cause, rebase_stuck, KeptTree, LastRm, RebaseNote, RmInterrupted, RmNotes, leftover_line, local_hhmm, local_hhmmss, removed_leftover_of, removed_leftovers, rm_notes,
     with_leftover_detail,
 };
 pub use scene::{Scene, SceneOp};

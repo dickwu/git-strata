@@ -380,7 +380,7 @@ fn deps_only_unsealed_records_propose_main() {
         strata_publish::MovePolicy::Auto,
     )
     .unwrap();
-    assert!(matches!(out,Some(RebaseReport::Deferred{reason,..}) if reason=="waiting_install"));
+    assert!(matches!(&out,Some(RebaseReport::Deferred{reason,..}) if reason=="waiting_install"), "{out:?}");
     assert!(
         strata_deps::open_proposals(f.store(), Some(d.repo))
             .unwrap()
@@ -892,4 +892,92 @@ fn main_key_matches_canonical_checkout_conversions() {
     assert_eq!(p.deps, strata_deps::key_of(&d, &tmp.path()).unwrap().1);
     reconcile(&f);
     assert!(row(&f, &s).is_some());
+}
+
+#[test]
+fn parked_base_does_not_keep_a_dependency_proposal_pending() {
+    let f=fx(); let normal=f.new_session(&["tool"]); let initial=f.sb.head(&f.main("tool"));
+    let c=f.sb.commit(&f.main("tool"),&[("only-c",b"C")],"local C");
+    let s=f.sessions().new_at(None,&[repo_name("tool")],strata_session::Layout::Only,None,&std::collections::BTreeMap::from([(repo_name("tool"),c.clone())])).unwrap().manifest.id;
+    f.sb.git(&f.main("tool"),&["reset","--hard",&initial]);
+    advance(&f,true); let target=seal_tip(&f); pass(&f);
+    assert_eq!(f.base_of(&normal,"tool").deps,target);
+    assert_ne!(f.base_of(&s,"tool").deps,target);
+    assert_eq!(f.store().session(&s).unwrap().unwrap().manifest.repos[&repo_name("tool")].head.as_str(),c);
+    let d=f.deps_ctx("tool"); main_follow::settle_auto(&d).unwrap();
+    assert!(!strata_deps::open_proposals(f.store(),Some(&repo_name("tool"))).unwrap().iter().any(|p|p.state==strata_deps::ProposalState::Pending && p.to==target));
+}
+
+#[test]
+fn main_target_that_would_drop_a_parked_base_is_discarded() {
+    let f = fx();
+    let repo = repo_name("tool");
+    let main = f.main("tool");
+    let initial = f.sb.head(&main);
+    let local =
+        f.sb.commit(&main, &[("only-local", b"keep")], "parked base");
+    let session = f
+        .sessions()
+        .new_at(
+            None,
+            std::slice::from_ref(&repo),
+            strata_session::Layout::Only,
+            None,
+            &std::collections::BTreeMap::from([(repo.clone(), local.clone())]),
+        )
+        .unwrap()
+        .manifest
+        .id;
+    f.sb.git(&main, &["reset", "--hard", &initial]);
+    let target = advance(&f, false);
+    let ws = f.store().session(&session).unwrap().unwrap().manifest.repos[&repo].clone();
+    f.store()
+        .enroll_main(
+            &session,
+            &repo,
+            &ws.base,
+            &target,
+            &f.git_of("tool").tree_of(&target).unwrap(),
+            None,
+            SystemTime::now(),
+        )
+        .unwrap();
+    let result = pass(&f);
+    assert!(
+        result.iter().any(|(s, result)| s == &session
+            && matches!(result, Ok(pending::CatchUp::Dropped(reason)) if reason == "base_ahead")),
+        "{result:?}"
+    );
+    assert!(row(&f, &session).is_none());
+    assert_eq!(
+        f.store().session(&session).unwrap().unwrap().manifest.repos[&repo]
+            .head
+            .as_str(),
+        local
+    );
+    assert!(f.store().move_intents(&session).unwrap().is_empty());
+}
+
+#[test]
+fn parked_local_base_follows_when_origin_contains_its_child() {
+    let f = fx();
+    let c = f.sb.commit(&f.main("tool"), &[("only-c", b"C")], "local C");
+    let s = f
+        .sessions()
+        .new_at(
+            None,
+            &[repo_name("tool")],
+            strata_session::Layout::Only,
+            None,
+            &std::collections::BTreeMap::from([(repo_name("tool"), c)]),
+        )
+        .unwrap()
+        .manifest
+        .id;
+    let d = advance(&f, false);
+    reconcile(&f);
+    assert!(row(&f,&s).is_some(), "the parked base becomes eligible once origin contains it");
+    pass(&f);
+    assert_eq!(f.store().session(&s).unwrap().unwrap().manifest.repos[&repo_name("tool")].head,d);
+    assert_eq!(std::fs::read(f.ws(&s,"tool").join("only-c")).unwrap(),b"C");
 }

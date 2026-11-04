@@ -892,7 +892,7 @@ impl Store {
 | `SQLITE_DBCONFIG_DEFENSIVE` | 每个连接都开 | 关掉 `writable_schema` 一类改 schema 的后门（沿用 LayerFS 的做法） |
 | `query_only` | 1（读连接） | 读连接写不了 |
 | `application_id` | 1398035009，即 0x53545241（"STRA"） | 建库时写入；在文件头偏移 68，open 靠它认出这是 Store |
-| `user_version` | 5（`schema::LATEST`） | 建库时写入；在文件头偏移 60；旧库由写者 open 前进迁移，v1–v4 SQL 保持冻结；v5 见 Main-sync resolution history and O7 acknowledgement |
+| `user_version` | 6（`schema::LATEST`） | 建库时写入；在文件头偏移 60；旧库由写者 open 前进迁移，v1–v4 SQL 保持冻结；v5 见 Main-sync resolution history and O7 acknowledgement |
 
 `wal_autocheckpoint` 保持 SQLite 的缺省值（1000 页），写者提交时自动做；读事务都很短，不会让 WAL 无限增长。
 
@@ -1316,7 +1316,7 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
   - 这些号都只写 1 到 `i64::MAX`（types.md §3）。下一个号会超过 `i64::MAX` 时，写操作在写任何东西之前返回 `TooLarge`（`detail.limit` 指明是哪种号），已存的状态不变，不回绕（3a:590、3a:596）；`AUTOINCREMENT` 的表在分配之前先查 `sqlite_sequence`，因为 SQLite 自己到顶时报的是 `SQLITE_FULL`，不是一个能区分的错误。读回小于 1 的值说明库坏了：store 先检查，返回 `Corrupt`（`bad_row`），不把它交给 `From<i64>`（types.md §3）。
   - `base_gens.id`、`refs_audit.id`、`gc_runs.id` 只在 store 内部用，不出现在公开接口上。
 - **可变的列**只有这些，其余每张表的每一列写入后都不可改（§4.3 的触发器拦）：`sessions` 的 `lifecycle`、`phase`、`scene`、`removed_ns`；`workspaces` 的 `base_gen`、`head`、`generation`、`conflicts`、`health`、`scene`；`move_intents` 的 `state`、`phase`、`conflicts`、`old_tree`、`ended_ns`；`deps_attempts` 的 `state`、`pid`、`ended_ns`、`error`；`deps_proposals` 的 `state`、`tree`、`head`、`superseded_by`、`updated_ns`；`deps_main` 除 `repo` 以外的列；`publishes` 的 `phase`、`ended_ns`、`outcome`（`unknown` / `done` 的行可以只改 `outcome`，阶段与 `ended_ns` 不变，供 `set_publish_outcome` 与 publish.md §5.7 的 `assign`；`running` 的行不能只改 `outcome`）。状态列只能沿 §4.3 的转换图前进。
-- **schema 版本**：`user_version` 取 `BASE_VERSION`（1）到 `LATEST`（5）。比 `LATEST` 新的（新版 git-strata 写的）、比 1 小的、`application_id` 不对、日志模式不是 WAL、schema 文本与该版本的 `ddl(v)` 有任何差别的库一律拒绝打开（`Corrupt`），不修补、不转换；版本号大于 `LATEST` 时消息提示安装写它的那个版本。旧版本由写者 open 按 §4.4a 前进迁移；只读 open 不迁移，按库自己的版本核对 schema 并照常读（v1 的会话 `agent` 读成 `None`）。
+- **schema 版本**：`user_version` 取 `BASE_VERSION`（1）到 `LATEST`（6）。比 `LATEST` 新的（新版 git-strata 写的）、比 1 小的、`application_id` 不对、日志模式不是 WAL、schema 文本与该版本的 `ddl(v)` 有任何差别的库一律拒绝打开（`Corrupt`），不修补、不转换；版本号大于 `LATEST` 时消息提示安装写它的那个版本。旧版本由写者 open 按 §4.4a 前进迁移；只读 open 不迁移，按库自己的版本核对 schema 并照常读（v1 的会话 `agent` 读成 `None`）。
 - **`sessions.agent`**（v2）：创建会话的 AI agent 名，types.md `AgentName`（1 到 64 个 `[A-Za-z0-9._-]`，首字符是字母或数字），`NULL` 表示不知道。CHECK 与 `AgentName` 逐字符一致：Turso 的 `GLOB` 与 `length()` 在内嵌的 NUL 处停下，所以另加 `length(CAST(agent AS BLOB)) = length(agent)`，它同时挡住非 ASCII；两边的一致性由 `agent_column_matches_agent_name_and_is_immutable` 用一张表逐条核对。写入后不可改（触发器 `sessions_agent_guard`，包括 `NULL` → 值）。
 
 - **`dev_ports`**（v2）[实现时补的决定]（2026-10-28，dev-ports 设计）：每个会话工作区一行租约，`base..base+3` 四个端口（web、connector、connector_mcp、aux）。`UNIQUE(base)` 加上 4 对齐，两条租约不可能重叠。分配：在 daemon 设的策略（config.md §2.6 的块）里，从 `fnv1a64("<session>/<repo>")` 对块数取模的位置起环形找（reassign 从旧块之后起），跳过已租的块与旧块，每块的 4 个端口都通过绑定探测（`0.0.0.0`、`[::]`、`127.0.0.1`，`SO_REUSEADDR`；`EAFNOSUPPORT`、`EADDRNOTAVAIL`、`EPROTONOSUPPORT` 当作通过）才用；一次最多探 64 块。写入时机：`create_session` 与 `add_workspaces` 在同一个写事务里给每个新工作区分一块（找不到就不建，从不让 `new` / `add` 失败）；`ensure_dev_ports`、`reassign_dev_ports`。删除时机：`reassign` 删旧行再插新行；`set_lifecycle` 到 `Removed` 时在同一事务里删掉该会话的全部租约。这是 S2"`DELETE` 只来自 gc"的例外：租约是可回收的分配，不是历史；表上没有 gc 守卫触发器，gc 的删除顺序里它排在 `workspaces` 之前（子行先删）。
@@ -1354,9 +1354,9 @@ CREATE TRIGGER refs_audit_no_delete    BEFORE DELETE ON refs_audit    BEGIN SELE
   2. 备份：`PRAGMA wal_checkpoint(TRUNCATE)` 必须返回 busy = 0 且 `-wal` 长度为 0，最多等 5 秒（每 100 ms 再试）；做不到（有读者持着旧快照）→ `Busy`（`migration_backup`，`not_written`），什么都没改，读者结束后重启 daemon 即可。然后建 `store/backups/`（新建时同步 `store/`），`clonefile` 出 `store/backups/store-v<from>-<ns>.db`，对它与目录做 `F_FULLFSYNC`，再不经 SQLite 核对它：魔数、`application_id`、`user_version = from`、页大小 × 页数等于文件长度。任一步失败就删掉这个克隆，`not_written`。
   3. `BEGIN IMMEDIATE`，依次执行待做的迁移，在事务里回读 `user_version` 必须是 `LATEST`，并按 `ddl(LATEST)` 比对 schema；任一不对 → `ROLLBACK`，`not_written`，库仍是旧版本，下次 open 再试。
   4. `COMMIT`。确定的失败（约束、`Busy`）→ `not_written`。其它失败 → `Unknown`（`reason = "migration_commit"`，`outcome = "uncertain"`，`detail` 带 `from`、`to`、`backup`）：新 schema 是否落盘不知道，而 Turso 只在新进程里重跑 WAL 恢复，所以调用方必须退出；daemon 不在进程内重试这个错误（waiting.rs `retryable` 排除它），launchd 重启后的 open 读到的要么是完整的旧版本（再迁移一次），要么是完整的新版本（`uncertain_commit_is_resolved_by_a_fresh_process`）。
-  5. 提交之后尽力做一次 TRUNCATE 检查点，并在 stderr 写一行迁移与备份路径。这一步只整理文件，不是版本的依据：所有 open 都以 PRAGMA 读到的 `user_version`（事务里写下的）为准；检查点没做成时文件头还是旧版本号，那也是 §5.2 第 2 步接受的值。提交之后进程立刻死掉，下次 open 看到的是 v5（LATEST），不再迁移（`crash_right_after_commit_keeps_v5`）。
+  5. 提交之后尽力做一次 TRUNCATE 检查点，并在 stderr 写一行迁移与备份路径。这一步只整理文件，不是版本的依据：所有 open 都以 PRAGMA 读到的 `user_version`（事务里写下的）为准；检查点没做成时文件头还是旧版本号，那也是 §5.2 第 2 步接受的值。提交之后进程立刻死掉，下次 open 看到的是 v6（LATEST），不再迁移（`crash_right_after_commit_keeps_v6`）。
 - **读者与迁移**：已经打开的只读 `Store`（同一进程或另一个进程，例如正在跑的 cli）跨过迁移照常工作。另一个进程迁移之后，Turso 的旧连接在每个显式读事务的第一句碰表的语句上报 `Database schema changed`，直到这个连接执行一句自动提交的语句重新载入 schema；所以 `read_txn` 遇到它时先执行一句自动提交的 `SELECT count(*) FROM sqlite_schema`，再把整个读事务重做一次（只一次）。读函数因此是可重放的（`Fn`）。
-- **恢复到旧版本**：迁移不可逆；旧二进制拒绝高于其支持版本的库（`Corrupt`，`user_version`），v4/v5 不能直接降级。先停稳 daemon，将 `store/store.db` 及它的 `-wal`、`-shm`、`-tshm` 移到一旁保留，再把兼容旧版本的 `store/backups/store-v<from>-<ns>.db` 复制成 `store/store.db`，安装匹配的一对旧 CLI / daemon，最后才启动。例：从 v3 直接迁到 v5 的备份是 `store-v3-<ns>.db`，回滚时恢复它，而不是找 v1 备份。main-sync 还会写回 pins 的 `sync_deps`；旧 daemon 不认识此字段，启动前须从每个 pin 移除它，并移除 config.toml 的 `[repo.<name>.sync]` 表。备份之后记录的会话和修改不在恢复的库里（目录可能仍在 `sessions/` 下）；先核对影响并保留当前库，不能把恢复旧库当作合并迁移后的数据。
+- **恢复到旧版本**：迁移不可逆；旧二进制拒绝高于其支持版本的库（`Corrupt`，`user_version`），v4/v5/v6 不能直接降级。先停稳 daemon，将 `store/store.db` 及它的 `-wal`、`-shm`、`-tshm` 移到一旁保留，再把兼容旧版本的 `store/backups/store-v<from>-<ns>.db` 复制成 `store/store.db`，安装匹配的一对旧 CLI / daemon，移除旧版不支持的 `rebase.quiet_skip`，最后才启动。例：从 v3 直接迁到 v5 的备份是 `store-v3-<ns>.db`，回滚时恢复它，而不是找 v1 备份。main-sync 还会写回 pins 的 `sync_deps`；旧 daemon 不认识此字段，启动前须从每个 pin 移除它，并移除 config.toml 的 `[repo.<name>.sync]` 表。备份之后记录的会话和修改不在恢复的库里（目录可能仍在 `sessions/` 下）；先核对影响并保留当前库，不能把恢复旧库当作合并迁移后的数据。
 
 ### 4.4b Main-sync schema v4 and APIs
 
@@ -1403,7 +1403,7 @@ therefore compare identically. The v3 fixture and its generator are documented i
 Read-only stores are not migrated: v1/v2/v3 readers return no v4-table rows,
 proposal `from_head = None`, and v3 pending rows read as source Publish with no
 `to_deps`. Reader connections continue working across a writer migration. New
-main-sync APIs require at least v4; current writers migrate to v5. Old binaries refuse schemas newer than they understand. `deps_auto` and
+main-sync APIs require at least v4; current writers migrate to v6. Old binaries refuse schemas newer than they understand. `deps_auto` and
 `sync_report` deletions are intentional exceptions to the history-only GC rule.
 
 ### 4.4c Main-sync schema v5 guards
@@ -1416,7 +1416,7 @@ The session must be Active and the workspace tracked and healthy, with no open
 Preparing/Swapping intent. A retained scene additionally requires its latest
 intent to be Done, Abandoned or Refused; a scene with no intent is refused
 (the latest-state subquery uses `COALESCE(..., '')`). The v5 migration is edited
-in place; there is no v6 migration.
+in place before release; the subsequent R2 v6 migration is described below.
 
 ### 4.5 不变量
 
@@ -1816,7 +1816,7 @@ types.md 把 `detail` 的形状交给返回它的模块。store 的 `detail` 都
 | `open_pins_durable_pragmas` | 写连接回读 `journal_mode = wal`、`synchronous = 2`、`fullfsync = 1`、`checkpoint_fullfsync = 1`、`foreign_keys = 1`、`recursive_triggers = 1`、`trusted_schema = 0`、`busy_timeout = 0`；读连接 `query_only = 1`、`trusted_schema = 0`。strata 只有这一种持久配置，没有 Disposable 档。这是 `checkpoint_write_is_durable_after_crash` 的前置 | layerfs-persistence/tests/sqlite_publication.rs::wal_full_settings_and_unavailable_engine_are_explicit<br>layerfs-persistence/tests/serverless_store.rs::disposable_create_publish_seal_and_reopen_all_layouts<br>layerfs-daemon/tests/r5_10_producer_profile.rs::r5_10_each_mounted_commit_has_one_producer_on_the_one_open_disposable_writer_session |
 | `open_refuses_non_wal_store` | 用原始连接把库改成 `journal_mode = delete`：`open` 返回 `Corrupt`（`journal_mode`），文件字节不变，日志模式仍是 delete | layerfs-persistence/tests/serverless_store.rs::non_wal_store_is_refused_without_conversion |
 | `open_refuses_schema_drift` | 分别删一张表、去掉一个 CHECK 约束、改一列的类型、删一个触发器：`open` 都返回 `Corrupt`（`schema`），文件字节不变，不修补 | layerfs-persistence/tests/history_remediation.rs::reopen_refuses_each_independent_schema_or_binding_corruption<br>layerfs-persistence/tests/old_format_open.rs::a_store_with_any_other_schema_difference_is_still_refused<br>layerfs-project/tests/init_sqlite.rs::a_store_without_acquisition_tables_refuses_init |
-| `open_refuses_unknown_user_version` | `user_version` 改成 0 和 6：`open` 都返回 `Corrupt`（`user_version`），不迁移；版本策略见 §4.4 | layerfs-persistence/tests/sqlite_inode_values.rs::a_store_of_the_value_group_format_is_refused_at_open<br>layerfs-persistence/tests/old_format_open.rs::an_old_format_store_opens_and_records_hints_from_then_on |
+| `open_refuses_unknown_user_version` | `user_version` 改成 0 和 7：`open` 都返回 `Corrupt`（`user_version`），不迁移；版本策略见 §4.4 | layerfs-persistence/tests/sqlite_inode_values.rs::a_store_of_the_value_group_format_is_refused_at_open<br>layerfs-persistence/tests/old_format_open.rs::an_old_format_store_opens_and_records_hints_from_then_on |
 | `open_leaves_unrelated_database_untouched` | `store.db` 的位置上放一个 delete 日志模式的无关 SQLite 库：`open` 返回 `Corrupt`（`application_id`），文件字节与日志模式不变，没有产生 -wal 或 -shm | layerfs-persistence/tests/sqlite_publication.rs::writable_open_does_not_migrate_an_unrelated_database_journal |
 | `second_writer_open_is_busy` | 已有一个写者 `Store`（同一进程里，以及子进程里）时，第二个 `open` 返回 `Busy`（`store-writer`），什么都不写；`open_read_only` 照常成功：Store 只有 daemon 一个写者，cli 只读，没有直连写路径 | layerfs-store-service/tests/kernel_guard.rs::direct_access_is_unsupported_off_linux<br>layerfs-store-service/tests/kernel_guard.rs::direct_access_is_unsupported_on_a_filesystem_outside_the_allowlist |
 | `read_only_open_refuses_every_write` | `open_read_only` 之后取 store 目录的文件列表与字节快照（打开时 SQLite 可能建出 -wal 与 -shm，所以快照在打开之后取，§5.2）；之后每个写函数（put、`record_checkpoint`、`create_session`、`begin_deps_attempt`、`retire_dir`、gc 等）都返回 `ReadOnly`，快照不变；读函数照常 | layerfs-persistence/tests/sqlite_publication.rs::readonly_refusal_and_external_writer_busy_do_not_retry |
@@ -2308,3 +2308,39 @@ replay: callers must repeat accepted names with the same flags/bytes and binding
 No move intent or `sync_move_history` choice is written by that partial reply.
 Successful moves and session removal clear reports; resolution history follows intent
 retention instead.
+
+### R2 schema v6
+
+The exact v5-to-v6 migration is:
+
+```sql
+ALTER TABLE publishes ADD COLUMN message TEXT CHECK (message IS NULL OR length(message) BETWEEN 1 AND 65536);
+CREATE TRIGGER publishes_message_guard BEFORE UPDATE ON publishes
+WHEN NEW.message IS NOT OLD.message
+BEGIN SELECT RAISE(ABORT, 'publishes.message is immutable'); END;
+ALTER TABLE move_activity ADD COLUMN skip_json TEXT;
+PRAGMA user_version = 6;
+```
+
+`record_publish_with_message(group, message, at)` validates and inserts the
+chosen message atomically with the publish row. `record_publish(group, at)`
+remains a compatibility wrapper inserting NULL. Generated trailers are not
+stored in `message`.
+
+The v6 migration adds immutable nullable `publishes.message` and nullable
+`move_activity.skip_json` (skip roots, carried seed-cache exception roots, and
+volume case-fold identity). Folded tracked quiet-filter exclusions are needed
+only by the fresh activity walk and are not serialized; older rows containing
+`quiet_tracked` remain readable.
+There are no publish-line columns. A legacy publish has NULL message; chosen
+flag/checkpoint text is recorded before insertion without generated trailers.
+Rust validates the 64 KiB byte cap and NUL; SQL validates character length.
+Readers select NULL for the new columns on v5, and missing/malformed activity
+scope means a whole-tree check.
+
+Startup verifies a backup under `store/backups/`, migrates atomically, and prints
+`store schema migrated 5 -> 6; a copy of the v5 store is at …`. Migration is
+forward-only. Upgrade CLI and daemon together: older binaries refuse v6 with
+`Corrupt user_version`. The current header-version check includes a matching-version install hint; an older reader or a lagging-header PRAGMA mismatch may omit that hint. Restoring the v5
+backup is the only supported downgrade; it loses subsequent store metadata
+writes but does not undo Git commits or refs.

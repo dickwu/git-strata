@@ -297,14 +297,28 @@ fn policy_gates(
     }
     let ws = workspace(ctx, s)?;
     let quiet = Duration::from_secs(ctx.cfg.rebase.quiet_secs);
+    let scope = match strata_session::activity_scope(ctx.cfg, ctx.git, ctx.store, &ws) {
+        Ok(scope) => scope,
+        Err(e) if policy == MovePolicy::Auto => {
+            // An unreadable scope cannot prove an idle workspace. Use the
+            // ordinary deferral path so retries, backoff and escalation apply.
+            return Ok(Err(deferred(
+                "recent_writes",
+                json!({"activity_scope_error": {
+                    "code":e.code, "message":e.message, "detail":e.detail,
+                }}),
+            )));
+        }
+        Err(e) => return Err(e),
+    };
     let activity = if policy == MovePolicy::Agent {
-        let a = strata_session::walk_activity(&ws.path)?;
-        if a.late.is_some() {
-            return Ok(Err(deferred("recent_writes", json!({"path":a.late}))));
+        let a = strata_session::walk_activity_scoped(&ws.path, &scope, &ctx.cfg.rebase.quiet_skip)?;
+        if let Some(path) = &a.late {
+            return Ok(Err(deferred("recent_writes", json!({"path":path.strip_prefix(&ws.path).unwrap_or(path),"during_scan":true}))));
         }
         a
     } else {
-        match strata_session::idle_activity(&ws.path, quiet)? {
+        match strata_session::idle_activity_scoped(&ws.path, quiet, &scope, &ctx.cfg.rebase.quiet_skip)? {
             Ok(a) => a,
             Err(idle) => return Ok(Err(deferred(idle.reason, idle.detail))),
         }

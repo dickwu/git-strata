@@ -88,6 +88,15 @@ pub fn not_recorded(agent: &AgentName) -> Value {
     json!({ "kind": "AgentNotRecorded", "agent": agent.as_str(), "reason": "daemon_too_old" })
 }
 
+/// Required additive params must never be silently dropped for an old daemon.
+pub fn require_feature(socket: &Path, feature: &str) -> Result<()> {
+    let v = rpc::call_within(socket, "daemon_status", json!({"verify":false}), Kind::Read, PROBE_DEADLINE)
+        .map_err(|e| e.into_error())?;
+    if v["features"].as_array().is_some_and(|f| f.iter().any(|x| x == feature)) { return Ok(()); }
+    Err(StrataError::new(Code::Unsupported, format!("the daemon does not support {feature}; install the matching git-strata"))
+        .with_detail(json!({"reason":"daemon_too_old", "feature":feature})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

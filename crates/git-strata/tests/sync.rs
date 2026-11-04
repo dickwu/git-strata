@@ -315,3 +315,47 @@ fn hook_ignores_regular_timeout_flag_and_environment() {
     assert_eq!(result.code,0);assert!(result.stderr.is_empty());
     let value:Value=serde_json::from_str(&result.stdout).unwrap();assert_eq!(value["decision"],"block");
 }
+
+#[test]
+fn stuck_hook_blocks_clean_workspace_once_and_does_not_offer_sync_when_not_following() {
+    let home=Home::new();
+    let _fake=FakeDaemon::start(&home.socket(),|q| {
+        let mut d=data(Some(0),false);
+        let u=&mut d["upstream"]["repos"]["tool"];
+        u["following"]=json!(false);
+        u["auto"]=json!({"source":"main","state":"deferred","reason":"open_files","since":"2026-11-03T12:00:00Z","attempts":3,"escalated_at":"2026-11-03T12:06:00Z","escalation_new":true,"detail":{"holders":[{"pid":123,"command":"node","hold":"cwd","path":"."}],"count":1}});
+        json!({"id":q["id"],"ok":true,"data":d})
+    });
+    let r = hook(&home, false);
+    let block: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(block["decision"], "block");
+    let reason = block["reason"].as_str().unwrap();
+    assert!(reason.contains("ask the user") && reason.contains("node[123] cwd"));
+    assert!(!reason.contains("git-strata sync"));
+    silent(hook(&home,true));
+}
+
+#[test]
+fn stuck_hook_keeps_base_notes_on_stderr_and_resolves_the_sync_session() {
+    let home = Home::new();
+    let _fake = FakeDaemon::start(&home.socket(), |q| {
+        let mut d = data(Some(0), false);
+        d["base_warnings"] = json!(["tool: base commits not on origin"]);
+        d["upstream"]["repos"]["tool"]["auto"] = json!({
+            "source": "main", "state": "deferred", "reason": "recent_writes",
+            "since": "2026-11-03T12:00:00Z", "attempts": 3,
+            "escalation_new": true, "detail": {"path": "src/a.rs", "age_secs": 2}
+        });
+        json!({"id": q["id"], "ok": true, "data": d})
+    });
+    let run = hook(&home, false);
+    assert_eq!(run.code, 0);
+    assert_eq!(run.stderr, "note: tool: base commits not on origin\n");
+    assert_eq!(run.stdout.lines().count(), 1);
+    let block: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(block["decision"], "block");
+    let reason = block["reason"].as_str().unwrap();
+    assert!(reason.contains("cd ~ && git-strata sync --session s-abcdefgh"));
+    assert!(!reason.contains("<session"));
+    silent(hook(&home, true));
+}

@@ -949,10 +949,19 @@ impl<'d, 'a> Server<'d, 'a> {
         } else {
             crate::upstream::ReadMode::Full
         };
-        let upstream = core
+        let mut upstream = core
             .upstream
-            .session(core, &row, mode, |r, ws, generation| self.trackers.live(&id, r, ws, generation, p.hook))?;
-        Ok(json!({ "session": id, "upstream": upstream }))
+            .session(core, &row, mode, |r, ws, generation| {
+                self.trackers.live(&id, r, ws, generation, p.hook)
+            })?;
+        if p.hook { core.upstream.hand_back(core, &id, &mut upstream)?; }
+        let mut base_warnings = Vec::new();
+        for (repo, u) in &upstream.repos {
+            if u.ahead > 0 && !core.store.checkpoints(&id, Some(repo))?.is_empty() {
+                base_warnings.push(format!("{repo}: base commits not on origin: publish will refuse until they are pushed"));
+            }
+        }
+        Ok(json!({ "session": id, "upstream": upstream, "base_warnings":base_warnings }))
     }
 
     /// One request: scope, handler, panic → `Failed` / `Unknown`.
@@ -977,7 +986,7 @@ impl<'d, 'a> Server<'d, 'a> {
     fn dispatch(&self, p: &Params) -> Result<Value> {
         let core = self.core();
         match p {
-            Params::New(p) => self.new_session(p.ticket.as_deref(), &p.repos, p.only, p.agent.clone()),
+            Params::New(p) => self.new_session(p.ticket.as_deref(), &p.repos, p.only, p.agent.clone(), &p.base),
             Params::Add(p) => self.add_repos(&p.session, &p.repos),
             Params::Status(p) if p.summary || p.workspaces => {
                 self.status_summary(p.cwd.as_deref(), p.session.as_deref(), p.all, p.chains, p.summary, p.workspaces)
@@ -1100,13 +1109,17 @@ impl<'d, 'a> Server<'d, 'a> {
                 Ok(json!({ "only_a": json_of(&d.only_a), "only_b": json_of(&d.only_b), "both": both }))
             }),
             Params::DepsList(p) => deps_list(core, p.repo.as_ref()),
-            Params::Publish(p) => self.publish(&p.group, &p.shown, p.plan.as_ref()),
+            Params::Publish(p) => self.publish(&p.group, &p.shown, p.plan.as_ref(), &strata_publish::message::Messages { message: p.message.clone(), message_for: p.message_for.clone() }),
             Params::PublishPlan(p) => {
                 // Review-2 N2: what `publish` would do with this group, without
                 // writing; the cli gates TTY / confirmation on `repos` only.
+                let mut messages = strata_publish::message::Messages { message: p.message.clone(), message_for: p.message_for.clone() };
+                messages.validate(&p.group)?;
                 let (g, already) = rerun_plan(core, &core.store.publishes()?, &p.group)?;
-                let repos: BTreeSet<&str> = g.batches.iter().map(|b| b.repo.as_str()).collect();
-                Ok(json!({ "repos": repos.into_iter().collect::<Vec<_>>(), "already_published": already }))
+                let repos: BTreeSet<RepoName> = g.batches.iter().map(|b| b.repo.clone()).collect();
+                messages.message_for.retain(|repo, _| repos.contains(repo));
+                let subjects = self.publish_preflight(&g, &messages, &already)?;
+                Ok(json!({ "repos": repos, "subjects": subjects, "already_published": already }))
             }
             Params::Push(p) => self.push(&p.repo, p.shown.as_ref()),
             Params::Assign(p) => {
@@ -1136,7 +1149,8 @@ impl<'d, 'a> Server<'d, 'a> {
                     // status-perf D8: du lets go of the session first, and
                     // stays off it until its figures are dropped.
                     self.with_du_hold(std::slice::from_ref(&p.session), || {
-                        let upstream = self.upstream_best_effort(&p.session);
+                        let mut upstream = self.upstream_best_effort(&p.session);
+                        let before = core.store.session(&p.session).ok().flatten();
                         self.trackers.drop_session(&p.session);
                         writing();
                         let r = self.d.sessions.remove(&p.session, p.discard, token);
@@ -1159,7 +1173,24 @@ impl<'d, 'a> Server<'d, 'a> {
                         }
                         self.d.du.on_remove(p.session.as_str());
                         let mut data = json_of(&r);
-                        if let Some(upstream) = upstream { data["upstream"] = json_of(&upstream); }
+                        if let Some(upstream) = &mut upstream {
+                            upstream.as_of_rm = Some("before".into());
+                            if !p.discard { for repo in upstream.repos.values_mut() { repo.unpublished = Some(false); } }
+                            data["upstream"] = json_of(upstream);
+                        }
+                        let mut unreferenced = Vec::new();
+                        if let Some(before) = before {
+                            for (repo, ws) in before.manifest.repos.iter().filter(|(_, w)| w.tracked) {
+                                if let Ok(git) = git_of(core, repo)
+                                    && let Ok(cfg) = repo_cfg(core, repo)
+                                    && let Ok(Some(main)) = strata_deps::main_tip(cfg, git)
+                                    && !git.is_ancestor(&ws.head, &main).unwrap_or(true)
+                                    && git.refs_containing(&ws.head).is_ok_and(|r| r.is_empty()) {
+                                    unreferenced.push(json!({"kind":"base_rev_unreferenced","repo":repo,"oid":ws.head}));
+                                }
+                            }
+                        }
+                        if !unreferenced.is_empty() { data["base_rev_unreferenced"] = json!(unreferenced); }
                         Ok(data)
                     })
                 })
@@ -1252,7 +1283,9 @@ impl<'d, 'a> Server<'d, 'a> {
             Params::ConfigRelax(p) => {
                 writing();
                 self.d.config_relax(&p.repo)?;
-                Ok(json!({}))
+                let mut reply = json!({"pins_meta":core.pins.metadata()});
+                if let Some(error) = core.pins.audit_error(&p.repo) { reply["warnings"] = json!([{"kind":"audit_write_failed","repo":p.repo,"message":error}]); }
+                Ok(reply)
             }
             Params::DaemonStatus(p) => self.d.daemon_status(p.verify),
             Params::Du(p) => Ok(self.d.du.report(p.refresh)),
@@ -1313,14 +1346,14 @@ impl<'d, 'a> Server<'d, 'a> {
     }
 
     /// §5.7: `new`, then the anchor and the observe retry.
-    fn new_session(&self, ticket: Option<&str>, repos: &[RepoName], only: bool, agent: Option<String>) -> Result<Value> {
+    fn new_session(&self, ticket: Option<&str>, repos: &[RepoName], only: bool, agent: Option<String>, bases: &BTreeMap<RepoName, String>) -> Result<Value> {
         // Validate before anything is written: a bad name creates nothing.
         let agent = agent.map(AgentName::try_from).transpose()?;
         let core = self.core();
         writing();
         let t0 = std::time::Instant::now();
         let layout = if only { Layout::Only } else { Layout::Siblings };
-        let mut rep = match self.d.sessions.new_as(ticket, repos, layout, agent.as_ref()) {
+        let mut rep = match self.d.sessions.new_at(ticket, repos, layout, agent.as_ref(), bases) {
             Ok(r) => r,
             Err(e) => {
                 for r in repos {
@@ -1760,7 +1793,7 @@ impl<'d, 'a> Server<'d, 'a> {
     fn apply_step(&self, step: &strata_deps::RolloutStep, repo_id: &strata_types::RepoId, repo: &RepoName, moved: &mut Vec<SessionId>) -> Value {
         match step {
             strata_deps::RolloutStep::Move { session, new_base, head } => {
-                match self.d.sessions.move_workspace(session, repo_id, new_base.clone(), head.clone()) {
+                match self.d.sessions.move_workspace_checked(session, repo_id, new_base.clone(), head.clone(), true) {
                     Ok(r) => {
                         moved.push(session.clone());
                         self.trackers.restart(session, repo);
@@ -1862,13 +1895,21 @@ impl<'d, 'a> Server<'d, 'a> {
         group: &strata_types::ReleaseGroup,
         shown: &BTreeMap<RepoName, Option<CommitOid>>,
         plan: Option<&BTreeSet<RepoName>>,
+        messages: &strata_publish::message::Messages,
     ) -> Result<Value> {
+        messages.validate(group)?;
+        let requested_group = group;
+        let requested_messages = messages;
         let core = self.core();
         let upstream_sessions: BTreeSet<_> =
             group.batches.iter().map(|b| b.session.clone()).collect();
         let rows = core.store.publishes()?;
         let (group, mut already) = rerun_plan(core, &rows, group)?;
         let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
+        // Membership belongs to the original request. A retry may have already
+        // landed a repo, whose valid override must not reach the smaller group.
+        let mut messages = messages.clone();
+        messages.message_for.retain(|repo, _| repos.contains(repo));
         if let Some(plan) = plan {
             for repo in &repos {
                 let pinned = core.pinned(repo).map_err(|e| self.decorate_publish_error(e, repo, Vec::new(), already.clone()))?;
@@ -1889,6 +1930,8 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
             }
         }
+        // Check every repo before any Touch ID prompt or per-repo publish.
+        self.publish_preflight(&group, &messages, &already)?;
         let mut done: Vec<Value> = Vec::new();
         for repo in repos {
             // Review-2 N6: every error of this repo's body (config, the
@@ -1910,12 +1953,21 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
                 writing();
                 let bound = token.as_ref().map(|_| shown.get(&repo).cloned().flatten());
-                self.with_publish_ctx(&repo, |ctx| strata_publish::publish_bound(ctx, &group, token, bound.clone()))
+                self.with_publish_ctx(&repo, |ctx| {
+                    strata_publish::publish_with_messages(
+                        ctx,
+                        &group,
+                        token,
+                        bound.clone(),
+                        &messages,
+                    )
+                })
             })();
             match r {
                 Ok(p) => done.push(json!({
                     "repo": repo.as_str(),
                     "id": p.id,
+                    "message_source": p.message_source,
                     "commit": p.commit.as_str(),
                     "checks_ran": p.checks_ran,
                     "push": json_of(&p.push),
@@ -1934,7 +1986,10 @@ impl<'d, 'a> Server<'d, 'a> {
                 {
                     already.push(v);
                 }
-                Err(e) => return Err(self.decorate_publish_error(e, &repo, done, already)),
+                Err(e) => {
+                    let e = strata_publish::gate::with_rerun_command(e, requested_group, requested_messages);
+                    return Err(self.decorate_publish_error(e, &repo, done, already));
+                }
             }
         }
         // `publish_bound` has finished its post-publish group rebase here.
@@ -1947,6 +2002,35 @@ impl<'d, 'a> Server<'d, 'a> {
             data["upstream"] = json_of(&upstream);
         }
         Ok(data)
+    }
+
+    fn publish_preflight(
+        &self,
+        group: &strata_types::ReleaseGroup,
+        messages: &strata_publish::message::Messages,
+        already: &[Value],
+    ) -> Result<Value> {
+        let mut subjects = serde_json::Map::new();
+        let repos: BTreeSet<_> = group.batches.iter().map(|b| b.repo.clone()).collect();
+        for repo in repos {
+            // Never queue a plan behind a writer. A cold/stale ref cache may
+            // be filled under a zero-wait lock; no publish/session state moves.
+            let preview = self.with_publish_ctx(&repo, |ctx| {
+                match strata_publish::gate::check_cached(ctx, group, messages) {
+                    Err(e) if strata_publish::gate::needs_refresh(&e) => {
+                        self.core().locks.try_repo(&repo, "publish_plan", || {
+                            strata_publish::gate::refresh_refs(ctx)?;
+                            strata_publish::gate::check_cached(ctx, group, messages)
+                        })?;
+                    }
+                    result => result?,
+                }
+                let chosen = strata_publish::message::choose(ctx, group, messages)?;
+                Ok(json!({"subject":if chosen.source == strata_publish::message::Source::Legacy { format!("strata publish <assigned id> ({repo})") } else {chosen.subject(group.id, &repo)}, "message_source":chosen.source}))
+            }).map_err(|e| self.decorate_publish_error(e, &repo, Vec::new(), already.to_vec()))?;
+            subjects.insert(repo.to_string(), preview);
+        }
+        Ok(Value::Object(subjects))
     }
 
     /// The common decoration of a `publish` error (review-2 N6, M4;
@@ -2167,7 +2251,8 @@ fn landed_after_commit(repo: &RepoName, commit: Value, d: &Value) -> Value {
     let checks = d.get("checks_ran").cloned().unwrap_or(Value::Null);
     // deps-drift §2.5: what the checks used travels with the landed result.
     let warnings: Vec<Value> = d.get("deps_warning").filter(|w| !w.is_null()).cloned().into_iter().collect();
-    json!({ "repo": repo.as_str(), "commit": commit, "checks_ran": checks, "push": push, "warnings": warnings, "rebases": [] })
+    json!({ "repo": repo.as_str(),
+        "message_source": d.get("message_source"), "commit": commit, "checks_ran": checks, "push": push, "warnings": warnings, "rebases": [] })
 }
 
 /// Review-2 N1/N2: the group as `publish` will run it: each batch with the
@@ -2287,7 +2372,7 @@ fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_
             m.get(f.as_str()).map(|i| (i.mode, i.oid.clone()))
         };
         if files.iter().all(|f| key(&now, f) == key(&then, f)) {
-            return Ok(Some(json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "push": o.get("push").cloned().unwrap_or(Value::Null) })));
+            return Ok(Some(json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "message_source": o.get("message_source"), "push": o.get("push").cloned().unwrap_or(Value::Null) })));
         }
         return Ok(None);
     }
@@ -2313,7 +2398,7 @@ fn landed_before(rows: &[strata_store::PublishRecord], b: &strata_types::Batch) 
                 && b.paths.iter().all(|p| x.paths.iter().any(|q| at_or_under(p.as_str(), q.as_str()) || at_or_under(q.as_str(), p.as_str())))
         });
         covers.then(|| {
-            json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "push": o.get("push").cloned().unwrap_or(Value::Null) })
+            json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "message_source": o.get("message_source"), "push": o.get("push").cloned().unwrap_or(Value::Null) })
         })
     })
 }

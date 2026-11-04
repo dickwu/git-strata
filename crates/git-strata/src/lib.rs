@@ -174,15 +174,28 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
         Cmd::Sync(args) => sync::run(&ctx, &args),
         Cmd::Deps(DepsCmd::Approve { id, sessions, cwd }) => c::deps_approve_with_cwd(&ctx, &id, &sessions, &cwd),
         Cmd::Push { repo } => c::push(&ctx, &repo),
-        Cmd::Publish { from, assign } => c::publish(&ctx, &from, assign.as_deref()),
+        Cmd::Publish { from, assign, message, message_for } => c::publish(&ctx, &from, assign.as_deref(), &message, &message_for),
         Cmd::Assign { file, session } => c::assign(&ctx, &file, &session),
         Cmd::Rm { session, discard } => c::rm(&ctx, &session, discard),
         Cmd::Resolve { session, repo, abandon, accept } => c::resolve(&ctx, &session, &repo, abandon, accept),
         Cmd::Chain { repo, accept_origin, restore } => c::chain(&ctx, &repo, accept_origin, restore),
         Cmd::Config(ConfigCmd::Relax { repo }) => c::config_relax(&ctx, &repo),
-        Cmd::New { ticket_flag, ticket, repo, repos, agent } => {
-            cmds::new(&ctx, ticket_flag, ticket, &repo, &repos, agent.as_deref())
-        }
+        Cmd::New {
+            ticket_flag,
+            ticket,
+            repo,
+            repos,
+            agent,
+            base,
+        } => cmds::new(
+            &ctx,
+            ticket_flag,
+            ticket,
+            &repo,
+            &repos,
+            agent.as_deref(),
+            &base,
+        ),
         Cmd::Add { session, repo } => cmds::add(&ctx, session, &repo),
         Cmd::Status { sel, brief: true, wait } => cmds::status_brief_with_wait(&ctx, &sel, &wait),
         Cmd::Status { sel, brief: false, wait } => cmds::status_with_wait(&ctx, &sel, &wait),

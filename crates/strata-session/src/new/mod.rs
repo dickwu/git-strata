@@ -75,6 +75,7 @@ pub struct NewReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum NewWarning {
+    BaseAheadOfMain { repo: RepoName, rev: String, head: CommitOid, main: CommitOid, ahead: u32, commits: Vec<serde_json::Value> },
     /// `deps::observe_main` failed for this repo; `detail` is deps' error
     /// as returned. The session is Active all the same.
     ObserveFailed { repo: RepoName, detail: StrataError },
@@ -96,8 +97,32 @@ impl Sessions<'_> {
     /// `new_with`, recording which agent created the session (stored with
     /// the session row, immutable; `None` = not known).
     pub fn new_as(&self, ticket: Option<&str>, repos: &[RepoName], layout: Layout, agent: Option<&AgentName>) -> Result<NewReport> {
+        self.new_at(ticket, repos, layout, agent, &BTreeMap::new())
+    }
+
+    pub fn new_at(&self, ticket: Option<&str>, repos: &[RepoName], layout: Layout, agent: Option<&AgentName>, bases: &BTreeMap<RepoName, String>) -> Result<NewReport> {
+        if !bases.is_empty() && (layout != Layout::Only || bases.keys().any(|r| !repos.contains(r))) {
+            return Err(StrataError::new(Code::InvalidInput, "--base requires named --repo workspaces")
+                .with_detail(json!({"reason":"base_flags"})));
+        }
+        for rev in bases.values() { validate_base_rev(rev)?; }
         let v = self.validate_new(ticket, repos, layout)?;
-        let heads: BTreeMap<RepoName, (CommitOid, TreeOid)> = self.resolve_heads(&v.members)?.into_iter().collect();
+        let resolved = dispatch::each_repo_n(dispatch::FETCH_WORKERS, &v.members, &|r| self.seams.hit("head", Some(r)), &|r| self.head_at(r, bases.get(r).map(String::as_str))).map_err(|mut e| {
+            if e.detail.as_ref().and_then(|d| d["reason"].as_str()) == Some("base_behind_main") {
+                let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+                let mut command = String::from("git-strata new");
+                if let Some(ticket) = ticket { command.push_str(&format!(" {}", quote(ticket))); }
+                for repo in repos { command.push_str(&format!(" --repo {}", quote(repo.as_str()))); }
+                if let Some(agent) = agent { command.push_str(&format!(" --agent {}", quote(agent.as_str()))); }
+                if let Some(d) = &mut e.detail { d["fix"] = json!(command); }
+            }
+            e
+        })?;
+        let mut base_warnings = Vec::new();
+        let heads: BTreeMap<RepoName, (CommitOid, TreeOid)> = resolved.into_iter().map(|(r, (head, tree, warning))| {
+            if let Some(w) = warning { base_warnings.push(w); }
+            (r, (head, tree))
+        }).collect();
         let all: Vec<RepoName> = heads.keys().cloned().collect();
 
         // Phase B, steps 9-10: base generations and seed plans (cache fill).
@@ -142,8 +167,8 @@ impl Sessions<'_> {
         self.build_layout(&manifest, &plans, enroll)?;
 
         // Step 15: observe main; failures are warnings only.
-        let warnings = self.observe_all(&manifest);
-        Ok(NewReport { manifest, warnings })
+        base_warnings.extend(self.observe_all(&manifest));
+        Ok(NewReport { manifest, warnings: base_warnings })
     }
 
     /// §5.1 step 10: the seed-file plan and, for tracked repos, the seed caches.
@@ -471,10 +496,15 @@ impl Sessions<'_> {
     }
 
     fn head_of(&self, repo: &RepoName) -> Result<(CommitOid, TreeOid)> {
+        self.head_at(repo, None).map(|(h, t, _)| (h, t))
+    }
+
+    fn head_at(&self, repo: &RepoName, rev: Option<&str>) -> Result<(CommitOid, TreeOid, Option<NewWarning>)> {
         let cfg = self.repo_cfg(repo)?;
         let git = self.git(repo)?;
         let fresh = self.fetch_is_fresh(repo);
         let mut fetched_at = None;
+        let mut warning = None;
         let head = self.with_lock(repo, || {
             if !fresh {
                 let t = std::time::Instant::now();
@@ -488,7 +518,30 @@ impl Sessions<'_> {
                 fetched?;
                 fetched_at = Some(t);
             }
-            strata_deps::main_tip(cfg, git)
+            let tip = strata_deps::main_tip(cfg, git)?;
+            let (Some(rev), Some(tip)) = (rev, tip.as_ref()) else { return Ok(tip); };
+            let oid = git.resolve_rev(rev)?.ok_or_else(|| StrataError::new(Code::NoSuchCommit, format!("no local commit {rev}"))
+                .with_detail(json!({"reason":"base_rev", "repo":repo, "rev":rev})))?;
+            if !git.is_ancestor(tip, &oid)? {
+                let behind = git.is_ancestor(&oid, tip)?;
+                let commits = git.history_between(tip, &oid, 20)?;
+                let chain = strata_deps::publish_chain(git, &cfg.publish.branch)?;
+                let chain_tip = cfg.pin_unpushed && cfg.publish.branch == cfg.default_branch
+                    && chain.as_ref().is_some_and(|c| c.state == strata_deps::ChainState::Leads && c.top.as_ref() == Some(tip));
+                let tip_ref = if chain_tip { format!("refs/strata/publish/{}", cfg.publish.branch) } else { format!("origin/{}", cfg.default_branch) };
+                let fix = if behind { format!("git-strata new --repo {repo}") } else {
+                    format!("ask the human: {}rebase {rev} onto main_tip {tip} ({tip_ref}) in the main checkout, then rerun new --base", if chain_tip { format!("push the publish chain with git-strata push {repo} first; ") } else { String::new() })
+                };
+                return Err(StrataError::new(Code::InvalidInput, format!("base {rev} does not descend from main_tip {tip} ({tip_ref})"))
+                    .with_detail(json!({"reason":if behind {"base_behind_main"} else {"base_diverged_from_main"}, "repo":repo, "rev":rev,
+                        "main":tip,"main_ref":tip_ref,"base_only":commits.iter().map(|c| json!({"head":c.oid,"subject":c.subject})).collect::<Vec<_>>(),"fix":fix})));
+            }
+            let ahead = git.count_between(tip, &oid, 1000)?;
+            if ahead > 0 {
+                warning = Some(NewWarning::BaseAheadOfMain { repo: repo.clone(), rev: rev.to_string(), head: oid.clone(), main: tip.clone(), ahead,
+                    commits: git.history_between(tip, &oid, 20)?.iter().map(|c| json!({"head":c.oid,"subject":c.subject})).collect() });
+            }
+            Ok(Some(oid))
         })?;
         if let Some(t) = fetched_at {
             self.fetched.lock().unwrap_or_else(|p| p.into_inner()).insert(repo.clone(), t);
@@ -501,8 +554,17 @@ impl Sessions<'_> {
             .with_detail(json!({ "repo": repo.as_str(), "remote": "origin", "branch": cfg.default_branch })));
         };
         let tree = git.tree_of(&head)?;
-        Ok((head, tree))
+        Ok((head, tree, warning))
     }
+}
+
+/// This release accepts local revisions only, not per-session publish lines.
+pub fn validate_base_rev(rev: &str) -> Result<()> {
+    if rev.is_empty() || rev.len() > 256 || rev.starts_with('-') || rev.contains(['\0','\n','\r']) || rev.starts_with("origin/") || rev.starts_with("refs/remotes/") || rev.starts_with("refs/strata/remotes/") {
+        return Err(StrataError::new(Code::InvalidInput, "--base needs a local revision of 1..=256 bytes without control characters or a leading '-'")
+            .with_detail(json!({"reason":"base_rev"})));
+    }
+    Ok(())
 }
 
 /// D56: the error of a `new` that failed and was rolled back. Nothing of

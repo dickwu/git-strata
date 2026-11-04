@@ -440,8 +440,9 @@ fn sync_one(
             }
             g0(core,&req.session,repo,&now)?;
             divergence(core,repo,&current,&tip,req.accept_diverged)?;
-            let activity = strata_session::walk_activity(&current.path)?;
-            if activity.late.is_some() { return Err(busy("recent_writes",json!({"path":activity.late}))); }
+            let scope = strata_session::activity_scope(cfg, git, &core.store, &current)?;
+            let activity = strata_session::walk_activity_scoped(&current.path, &scope, &cfg.rebase.quiet_skip)?;
+            if let Some(path) = &activity.late { return Err(busy("recent_writes",json!({"path":path.strip_prefix(&current.path).unwrap_or(path),"during_scan":true}))); }
             // Recheck input ownership after the lock-free install gap.
             let current_reason = if n != current.base.deps { source_reason(&ctx,&req.session,&current,&inputs,core.effective_sync_deps(repo))? } else { None };
             if current_reason != reason { return Err(error(Code::Busy,"sync_retry","dependency ownership changed during preparation")); }
@@ -488,7 +489,9 @@ fn sync_one(
             let changed = strata_session::changed_since(&current.path,&baseline)?;
             if !changed.is_empty() { return Err(busy("changed_since_scan",json!({"paths":changed}))); }
             if target == current.base && head == current.head {
-                let mut v = json!({"result":"up_to_date"});
+                let b = strata_publish::merge_base(git, cfg)?;
+                let (base_only, _) = git.base_only(&ws.head, &tip, &b, 1000)?;
+                let mut v = json!({"result":"up_to_date", "ahead":base_only.len()});
                 if let Some(r) = &deps_reply { v["result"] = json!("waiting"); v["deps"] = r.clone(); }
                 return Ok(v);
             }

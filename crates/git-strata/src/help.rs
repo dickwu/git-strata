@@ -204,6 +204,18 @@ TOPICS
   git-strata help sync-ack; git-strata help <command...>
 ";
 
+// Base safety lives in the publish error topic to keep command help bounded.
+macro_rules! publish_base_text {
+    () => { "BASE SAFETY
+  A batch's workspace base must be in the publish target B or on main_tip.
+  base_not_on_main: ask the human to push/recover the base commits first;
+  follow detail.fix. Dependency approval never drops parked base commits.
+  HeadMoved baseline_moved: run the literal publish command in detail.fix
+  to take fresh checkpoints after a baseline move.
+
+" };
+}
+
 pub const NEW: &str = "Create a session of workspaces (APFS clones of base snapshots).
 
 --repo R (repeatable, or R1,R2): the session gets workspaces for these repos
@@ -423,7 +435,7 @@ RELEASE BUILDS
   data.commits.<repo>, run the build there. See README.md.
 
 DATA
-  {commits:{<repo>:oid}, checks_ran, waiting:[], pushes:[{repo, outcome}],
+  {commits:{<repo>:oid}, message_source:{<repo>:flag|checkpoints|legacy}, checks_ran, waiting:[], pushes:[{repo, outcome}],
    already_published:[{repo, publish, commit, push}]}
 
 CONFLICT LOOP (no human needed unless reason is assigned)
@@ -584,7 +596,7 @@ INSTALL
   can print it with `git-stratad --print-plist [ABSOLUTE_BIN]`.
 
 EXAMPLES
-  git-strata daemon status   # {running, socket, session?, holders, unknown_publishes, alerts}
+  git-strata daemon status   # {running, socket, session?, holders, unknown_publishes, alerts, alerts_at, pins_meta}
   git-strata daemon start    # launchctl bootstrap gui/<uid> <plist>; {already:true} if loaded
   git-strata daemon stop     # launchctl bootout; waits up to 10 s until unloaded
 
@@ -715,7 +727,7 @@ EXAMPLES
   git-strata session exec --session PROJ-1 --repo front -- npm run dev
 ";
 
-const ERRORS_PUBLISH: &str = "OTHER ERRORS
+const ERRORS_PUBLISH: &str = concat!(publish_base_text!(), "OTHER ERRORS
   NoMatch            a --from path is not checkpointed: checkpoint, rerun
   CheckFailed        the repo's check failed in staging: fix, rerun
   PushRefused        the commit landed (data.commits) but the remote refused
@@ -735,7 +747,7 @@ const ERRORS_PUBLISH: &str = "OTHER ERRORS
   Busy / Unknown with detail.sibling  preparing that sibling (fetch, anchor)
                      was busy or unknown; Busy: retry later; Unknown: tell
                      the human
-";
+");
 const TOPICS: &[(&str, &str)] = &[
     ("gate", gate_text!()),
     ("push-guards", push_guard_text!()),

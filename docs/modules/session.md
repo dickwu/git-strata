@@ -1544,3 +1544,36 @@ notices. Yield preserves the previous verdict. Passes are restored only when
 this pass observed no holder; a crash loses passes rather than keeping stale
 ones. Step 14/Phase F keep interrupted trees without late notices. rm/status
 treat Skipped as not retirable. Foreground requests may postpone collection.
+
+### R2 local bases, activity, and dependency moves
+
+`new --base REV` is available with one `--repo`; `--base R=REV` can repeat for
+selected repos. `--repos` and remote-branch publish lines are excluded. Resolve
+the local revision, read main_tip, and require tip ancestry under head_of's
+repo lock, then release it before cold base/dependency construction. Freeze
+the OID, attach at it, and retain it with the normal session pin. Unknown,
+older, and divergent revisions refuse before creating the session. Ahead
+bases return `BaseAheadOfMain` and remain parked until main contains them.
+
+Dependency rollout/switch and Main-source automatic moves require a descendant
+target. Planning reports `SkipReason::BaseAhead`; the mover rechecks with
+`require_descends` before writing. These skips settle rollout/automatic proposal
+completion. Publish/replay and explicit accepted-divergence sync retain their
+own rules. rm reports an unreferenced base only when no remaining ref in any
+namespace contains it after removal.
+
+The activity baseline stores skipped dependency roots plus nested seed-cache
+exception roots. Scope comes from configured and pinned-set dirs, with tracked
+paths protected using ws.head's tree. Tracked quiet_skip matches remain counted,
+including case-fold aliases, with a once-per-repo daemon-log warning; matching
+untracked paths remain exempt. InvalidInput is reserved for config-shape validation.
+An unreadable scope defers Auto moves as recent_writes, retaining backoff and
+escalation; status and hand-back text report the scope error instead of a write age.
+The folded tracked-path set is used only by the fresh quiet-glob walk and is
+not serialized into move rows; older rows containing it remain readable.
+Explicit sync still works when a glob matches a tracked path.
+These globs affect quiet age/scan-late checks
+only; a separate all-carried-entry maximum protects G4/Phase F. Dependency
+writes outside carried caches no longer keep the old tree. Nested caches and
+Phase F untouched checks stay protected. Persisted scope, not current config,
+is used after restart; malformed/legacy scope checks the entire tree.

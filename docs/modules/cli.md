@@ -61,7 +61,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata deps propose` | `deps_propose` | 否 | 否 |
 | `git-strata deps approve` | `deps_approve` | 是 | `DepsApprove` |
 | `git-strata deps list` | `deps_list` | 否 | 否 |
-| `git-strata publish` | `publish`（先 `checkpoint`；批次里有要推且要确认的仓库时再 `publish_plan`） | 是，当这次还要提交的仓库里有要推且钉住的值要确认的（review-2 N2） | 每个这样的仓库一次 `PushDeploy`，在该仓库 `commit_tree` 之前。不推的仓库、已经落地的仓库不确认 |
+| `git-strata publish` | `publish`（总是先 `checkpoint`，再 `publish_plan`） | 是，当这次还要提交的仓库里有要推且钉住的值要确认的（review-2 N2） | 每个这样的仓库一次 `PushDeploy`，在该仓库 `commit_tree` 之前。不推的仓库、已经落地的仓库不确认 |
 | `git-strata push` | `push` | 是，当仓库要确认 | `PushDeploy` |
 | `git-strata assign` | `assign` | 否 | 否 |
 | `git-strata rm` | `rm` | `--discard` 时是 | `RemoveDiscard` |
@@ -152,7 +152,7 @@ After deploying a daemon that advertises `sync` as well as `status.upstream`, th
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"git-strata sync --check --hook"}]}]}}
 ```
 
-This mode reads `{cwd, stop_hook_active}` on stdin and resolves the session from that cwd. It reads only cached upstream and store/Tracker state, flushing the Tracker without scanning. Cold behind is treated as zero. It blocks only a following tracked repo with behind > 0 or pending deps, together with unpublished work, auto reason `conflicts`, or stored conflicts. A clean workspace waiting for background movement is not blocked. The block is a plain `{decision:"block",reason:"…"}` line, with sync/resolve/check/publish instructions; deps-only reasons say main's dependencies changed. `stop_hook_active:true` is always silent, preventing a second block. A five-second process timer covers stdin, setup, socket connect/send/read and output; `call_within` gets the remaining budget. Every error, timeout, unknown method or non-workspace is silent and exits zero. This mode is an exception to the ordinary JSON envelope.
+This mode reads `{cwd, stop_hook_active}` on stdin and resolves the session from that cwd. It reads only cached upstream and store/Tracker state, flushing the Tracker without scanning. Cold behind is treated as zero. It blocks a following tracked repo with behind > 0 or pending deps, together with unpublished work, auto reason `conflicts`, or stored conflicts. An eligible deferred Auto row can also trigger a once-per-episode hand-back in the current daemon process regardless of behind/unpublished state, using its current snapshot and revalidated revision. A clean workspace waiting for background movement is not blocked. The block is a plain `{decision:"block",reason:"…"}` line, with sync/resolve/check/publish instructions; deps-only reasons say main's dependencies changed. `stop_hook_active:true` is always silent, preventing a second block. A five-second process timer covers stdin, setup, socket connect/send/read and output; `call_within` gets the remaining budget. Every error, timeout, unknown method or non-workspace is silent and exits zero. This mode is an exception to the ordinary JSON envelope.
 
 类型按 types.md §2.2 序列化：字段名 snake_case，`Option` 为 `None` 不输出，时间是 RFC 3339 UTC，带数据的枚举用 `kind`。cli 不重新定义 `SessionStatus`、`Proposal`、`Checkpoint`、`Hit`、`PushOutcome`、`NewReport`、`RemoveReport`、`ResolutionReport`。
 
@@ -287,7 +287,7 @@ cli 不拥有表，不拥有目录。它读的配置目录是 `~/Library/Applica
 
 不变量：
 
-1. 不变量 7：`deps approve`、要确认的 `push`、会推且要确认的 `publish`、要确认的 `chain --restore`、`config relax`、`rm --discard` 在 `require_tty` 失败时不连接、不发 RPC、不弹框（`publish` 例外：批次里有要确认的仓库时，只先发 `BeforePublish` checkpoint 与只读的 `publish_plan`，用来知道哪些仓库已经落地；不发 `publish`、不弹框、不取凭据，D23）。没有 flag、环境变量或配置项能跳过。配置文件把 `deploy_on_push` 写成 false 也不够：钉住的值若仍要确认，照样先查 TTY（读上游要求 3 的文件；文件不存在则用 `needs_human_confirm()`；文件读不出则当作要确认，D21）。不推的仓库、以及 `chain` 的 replay / drop，不取 `PushDeploy`。
+1. 不变量 7：`deps approve`、要确认的 `push`、会推且要确认的 `publish`、要确认的 `chain --restore`、`config relax`、`rm --discard` 在 `require_tty` 失败时不连接、不发 RPC、不弹框（`publish` 例外：总是先发 `BeforePublish` checkpoint 与只读的 `publish_plan`，检查基线并知道哪些仓库已经落地；不发 `publish`、不弹框、不取凭据，D23）。没有 flag、环境变量或配置项能跳过。配置文件把 `deploy_on_push` 写成 false 也不够：钉住的值若仍要确认，照样先查 TTY（读上游要求 3 的文件；文件不存在则用 `needs_human_confirm()`；文件读不出则当作要确认，D21）。不推的仓库、以及 `chain` 的 replay / drop，不取 `PushDeploy`。
 2. 不变量 6：cli 自己不清理现场。连接在请求写出去之后断开，写命令返回 `Unknown`，`detail.reason = "socket_closed"`，因为不知道 daemon 写到了哪一步。读命令在同样的断开上返回 `Busy`，`detail.reason = "daemon_down"`（读还没写任何东西）。
 3. 不变量 3：cli 不提供绕过推送确认的开关。`assign` 不确认，与 design §6.9 一致。
 4. 一次确认对上的就是那一次计划。被取代的提议、主干已经移开的 head、Rewound / Diverged 的链，都是另一次命令，不是这次命令的重试。
@@ -299,7 +299,7 @@ The CLI takes no repo lock or session queue. Status/sync use one deadline across
 共同的五步：
 
 1. 解析子命令。未知子命令 → `InvalidInput`，`detail.commands` 见 §3.1。不到第 2 步。
-2. 确认类，以及 D18 的 `resolve` 与 `chain` 的选择：`require_tty`。要确认的 `chain --restore`、`config relax` 也在连接前查 TTY。会推且钉住的值要确认的 `publish` 是例外（D23）：批次里有这类仓库时，先连 daemon 发每个批次的 `BeforePublish` checkpoint 与只读的 `publish_plan`，再只对还要提交的那些仓库查 TTY；不是 TTY 时同样返回 `NotTty`，不发 `publish`、不弹框、不取凭据（review-3 T4）。失败即返回 `NotTty`，不到第 3 步。`resolve` / `chain` 在这一步之前就拒绝缺选择或两个都给，同样不连接。`chain --restore` 且 `!is_ancestor(o, c)` → `InvalidInput`，`detail.reason = "not_ancestor"`，不连接、不取凭据、不推。
+2. 确认类，以及 D18 的 `resolve` 与 `chain` 的选择：`require_tty`。要确认的 `chain --restore`、`config relax` 也在连接前查 TTY。`publish` 是例外（D23）：总是先连 daemon 发每个批次的 `BeforePublish` checkpoint 与只读的 `publish_plan`，再只对还要提交且要推、要确认的仓库查 TTY；不是 TTY 时同样返回 `NotTty`，不发 `publish`、不弹框、不取凭据（review-3 T4）。TTY 检查失败即返回 `NotTty`，不到第 3 步；计划阶段的 `Busy` 和基线拒绝保留原错误（D23）。`resolve` / `chain` 在这一步之前就拒绝缺选择或两个都给，同样不连接。`chain --restore` 且 `!is_ancestor(o, c)` → `InvalidInput`，`detail.reason = "not_ancestor"`，不连接、不取凭据、不推。
 3. daemon 在听：写一行请求，读一行回答，原样映射到信封（上游的码不变）。`UnknownMethod` / `Failed` 按 D7。
 4. daemon 没在听：`status`、`grep`、`files`、`diff`、`deps list`、`daemon status` 走本地只读路径（§5.1）。其余返回 `error.code = "Busy"`，`detail.reason = "daemon_down"`，`message` 请人先跑 `git-strata daemon start`（agent 只转告，D38）。不新加码（D2）。
 5. `checkpoint --tool-call ID`：先按 §3.5 查本地。已经都有则返回那几条，不再请 daemon 记第二条。
@@ -345,13 +345,13 @@ JSON 成功之后：若这次解析出了会话，再读一次 `deps::open_propo
 
 ### 5.4 交互式发布选择
 
-`git-strata publish` 没有 `--from`、且 stdin 是 TTY：先取 cwd 会话的 `status`，把有改动的路径按编号打到 stderr，读 stdin 的编号或路径，空行结束，收成 `--from` 等价的批次。读到的不是编号也不是路径 → `InvalidInput`，不发 `publish`。选路径不是确认，不代替 `PushDeploy`。批次收齐之后，按 D23 先发 checkpoint 与 `publish_plan`，再对还要提交的、要推且要确认的仓库 `require_tty`（review-3 T4：不是在连接前），并在该仓库 `commit_tree` 之前各取一次 `PushDeploy`。
+`git-strata publish` 没有 `--from`、且 stdin 是 TTY：先取 cwd 会话的 `status`，把有改动的路径按编号打到 stderr，读 stdin 的编号或路径，空行结束，收成 `--from` 等价的批次。读到的不是编号也不是路径 → `InvalidInput`，不发 `publish`。选路径不是确认，不代替 `PushDeploy`。批次收齐之后，按 D23 总是先发 checkpoint 与 `publish_plan`，再对还要提交的、要推且要确认的仓库 `require_tty`（review-3 T4：不是在连接前），并在该仓库 `commit_tree` 之前各取一次 `PushDeploy`。
 
 ## 6. 失败与恢复
 
 | 情形 | 码 | 连了 daemon 吗 | 留下什么 |
 | --- | --- | --- | --- |
-| 非 TTY 上的确认命令：`deps approve`、要确认的 `push`、会推且要确认的 `publish`、要确认的 `chain --restore`、`config relax`、`rm --discard`，以及 D18 的 `resolve` 与 `chain` 的选择 | `NotTty` | 否（`publish` 例外：只发了 checkpoint 与 `publish_plan`，D23） | 无（`publish` 只留下 `BeforePublish` checkpoint） |
+| 非 TTY 上的确认命令：`deps approve`、要确认的 `push`、会推且要确认的 `publish`、要确认的 `chain --restore`、`config relax`、`rm --discard`，以及 D18 的 `resolve` 与 `chain` 的选择 | `NotTty` | 否（`publish` 例外：所有批次先发 checkpoint 与 `publish_plan`，只有剩余确认仓库才查 TTY，D23） | 无（`publish` 只留下 `BeforePublish` checkpoint） |
 | `chain --restore` 且 `!is_ancestor(o, c)` | `InvalidInput`（`not_ancestor`） | 否 | 无 push |
 | 要推且要确认的仓库，在它的 `commit_tree` 之前没有匹配的 `PushDeploy` | `NotConfirmed` | 是 | 这个仓库没有 commit。不回滚别的仓库 |
 | 未知子命令、缺选择、两个选择都给、参数格式错 | `InvalidInput` | 否 | 无 |
@@ -521,7 +521,7 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D19 Help text | help, --help, --version: text stdout, exit 0. help runs before environment/config setup; unknown topic → InvalidInput help_topic. | Each output ≤ 4096 bytes; index ≤ 1536. Full gate only in help gate; command summaries retain anti-bypass guidance. | 2026-11-03 |
 | D20 待确认提示 | 成功之后读 `deps::open_proposals`，不调用 `Sessions::open`，失败不影响退出码。2026-10-27 起放进 `data.pending_proposals`，stderr 那行只在终端上打 | design §6.4 第 4 步要每次 CLI 都提示。不能为了提示再发一次写 RPC，也不能再开一个 `Sessions` | 2026-10-23 |
 | D21 钉住的值读不出 | 当作要确认，先 `require_tty` | 读不出就放行，等于让一份坏文件跳过 TTY 检查 | 2026-10-23 |
-| D23 publish 的 TTY 检查只看还要做事的仓库（review-2 N2） | 批次里有要推且要确认的仓库时，cli 先发每个批次的 `BeforePublish` checkpoint，再发只读的 `publish_plan`（daemon.md §4），然后只对 `repos` 里那些要推且要确认的仓库 `require_tty`、展示链顶、发 `shown`。全部已经落地 → 不查 TTY，`publish` 回 `already_published`。还有要确认的仓库且不是 TTY → `NotTty`；在此之前送到 daemon 的只有这些 checkpoint 和 `publish_plan`：不发 `publish`，不弹框，不取凭据。checkpoint 或 `publish_plan` 失败且不是 TTY → 仍是 `NotTty`，原错误放在 `detail.plan_error`。批次里没有要确认的仓库时不发 `publish_plan`。`publish` 请求带 `plan`：TTY 检查覆盖了的那些仓库（可以为空）。`publish_plan` 与 `publish` 之间历史可能变（别的发布落地了不同内容），daemon 重算后多出来的要确认仓库不在 `plan` 里 → 在弹框、取凭据之前 `NotConfirmed`（`plan_changed`），什么都不写；agent 重跑，cli 重新计划并查 TTY（review-3 T1）。[实现时补的决定] | agent 重跑是主流程（D22）：之前要确认的仓库已经落地、只剩不用确认的仓库时，非 TTY 的重跑不该因已经落地的仓库被拒。checkpoint 只是记录当下内容，不是要确认的动作；不变量 7 守的是发布、弹框和凭据 | 2026-10-24 |
+| D23 publish 的 TTY 检查只看还要做事的仓库（review-2 N2） | cli 总是先发每个批次的 `BeforePublish` checkpoint，再发只读的 `publish_plan`（daemon.md §4），然后只对 `repos` 里那些要推且要确认的仓库 `require_tty`、展示链顶、发 `shown`。全部已经落地 → 不查 TTY，`publish` 回 `already_published`。还有要确认的仓库且不是 TTY → `NotTty`；在此之前送到 daemon 的只有这些 checkpoint 和 `publish_plan`：不发 `publish`，不弹框，不取凭据。checkpoint 或 `publish_plan` 失败、批次有确认仓库且不是 TTY → 通常为 `NotTty`，原错误放在 `detail.plan_error`；`Busy` 和基线拒绝保留原码，不包装。计划需要刷新缓存而 repo 锁被占时回 `Busy lock_wait`，等持锁者完成后重跑。即使没有要确认的仓库也先发 `publish_plan`，让 R2 基线门检查全部批次；旧 daemon 已接受此方法，新消息字段仍由 `publish.message` 功能探测控制。`publish` 请求带 `plan`：TTY 检查覆盖了的那些仓库（可以为空）。`publish_plan` 与 `publish` 之间历史可能变（别的发布落地了不同内容），daemon 重算后多出来的要确认仓库不在 `plan` 里 → 在弹框、取凭据之前 `NotConfirmed`（`plan_changed`），什么都不写；agent 重跑，cli 重新计划并查 TTY（review-3 T1）。[实现时补的决定] | agent 重跑是主流程（D22）：之前要确认的仓库已经落地、只剩不用确认的仓库时，非 TTY 的重跑不该因已经落地的仓库被拒。checkpoint 只是记录当下内容，不是要确认的动作；不变量 7 守的是发布、弹框和凭据 | 2026-10-24 |
 | D22 钩子的工具调用 id | `--tool-call` 不带值或为空 → 取 stdin JSON 的 `tool_use_id`；仍缺或为空 → `InvalidInput`（`checkpoint_reason`）。§3.5 的命令行改为 `git-strata checkpoint --tool-call`。[实现时补的决定] | Claude Code 不设 `TOOL_USE_ID` 环境变量，原命令行会传空串，每次钩子都失败 | 2026-10-23 |
 | D31 `--repo` 与 `add` | `new --repo R`（可重复）给精简会话；不带时保留 `--repos` 的整套布局；新命令 `add [--session S] --repo R…`。`NoSuchRepo` 的 `not_in_session` 带 `detail.fix` 原样给出这条 `add` 命令。cli 只在 `--repo` 时给 daemon 发 `only` | 见 session.md D51/D52。新 flag 不改 `--repos` 的含义，旧用法与旧 daemon 都不受影响。否决：给 `--repos` 加 `--only` 修饰 | 2026-10-27 |
 | D32 路径落在哪个工作区：末尾的符号链接不跟随（review P1-9） | `checkpoint`/`restore` 等把路径映射到会话与 repo 时，最后一个分量是符号链接就只解析它的父目录、保留链接名；这样落在某个工作区里就用它（链接条目本身）；链接本身不在任何工作区里（外面指进来的链接）才跟随到目标 | 原来整条路径 canonicalize：`restore CP link` 恢复的是链接指向的文件，改过的链接原样不动 | 2026-10-27 |
@@ -575,3 +575,18 @@ the daemon when its pid can be identified from its instance-lock descriptor.
 errors-publish, output, headless, sync-ack. `help <command…>` matches that
 command's --help byte for byte. Full gate/push texts remain single macros.
 `<command> --help` describes the installed version.
+
+### R2 core additions
+
+new --base and publish -m/--message-for are feature-gated. Publish always asks
+for a read-only plan after BeforePublish checkpoints, including unguarded
+repos; base_* and baseline_moved refusals remain their own errors on non-TTYs.
+The plan prints each gated repo's chosen subject. CLI reconstruction preserves
+message_source by repo. The error fix for baseline_moved is a literal publish
+command; unsafe base recovery fixes begin "ask the human". daemon status keeps
+alerts unchanged and adds alerts_at/pins_meta. A stuck deferred auto-rebase
+can trigger one Stop-hook hand-back even when unpublished=false or behind=0;
+non-following repos receive no sync recommendation.
+The base-safety instructions live in `git-strata help errors-publish`, linked
+from publish command help, so the combined message/base flags keep `--help`
+within its 4 KiB budget.

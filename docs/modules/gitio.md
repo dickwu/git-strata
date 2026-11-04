@@ -1337,3 +1337,10 @@ git commit -m "test(gitio): the main checkout changes only in objects and refs/s
 Binary files and inconsistent merge-region results still conflict. The
 caller must first validate regions against the saved sync report; this
 primitive does not grant permission to resolve arbitrary new overlaps.
+
+R2 adds read-only helpers: `resolve_rev` validates the revision and uses
+`rev-parse --verify --quiet --end-of-options REV^{commit}`; `refs_containing`
+queries all ref namespaces. `tracked_paths` reads the workspace head's tree,
+independent of the main index. `base_only` excludes both B and main_tip.
+`commits_between_trailers` lets Git parse the final Strata-Publish trailer block;
+`changed_path_count` counts the final B/staged-tree diff without rename folding.

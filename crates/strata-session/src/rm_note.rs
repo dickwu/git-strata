@@ -130,6 +130,8 @@ pub struct RmInterrupted {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebaseNote {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holders: Vec<Value>,
     pub repo: RepoName,
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -189,6 +191,15 @@ pub(crate) fn interrupted_line(id: &SessionId, i: &RmInterrupted) -> String {
 
 /// `HH:MM TZ` in the local zone (the daemon and the CLI share the machine).
 pub fn local_hhmm(t: SystemTime) -> String {
+    local_clock(t, c"%H:%M %Z")
+}
+
+/// Alert timestamps include seconds; ordinary status notes retain HH:MM.
+pub fn local_hhmmss(t: SystemTime) -> String {
+    local_clock(t, c"%H:%M:%S %Z")
+}
+
+fn local_clock(t: SystemTime, format: &std::ffi::CStr) -> String {
     let secs = match t.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(d) => d.as_secs() as libc::time_t,
         Err(_) => return "?".into(),
@@ -201,7 +212,7 @@ pub fn local_hhmm(t: SystemTime) -> String {
             return "?".into();
         }
         let mut buf = [0u8; 64];
-        let n = libc::strftime(buf.as_mut_ptr().cast(), buf.len(), c"%H:%M %Z".as_ptr(), &tm);
+        let n = libc::strftime(buf.as_mut_ptr().cast(), buf.len(), format.as_ptr(), &tm);
         String::from_utf8_lossy(&buf[..n]).into_owned()
     }
 }
@@ -271,6 +282,7 @@ pub fn rm_notes(store: &Store, root: &Path, rec: &SessionRecord) -> Result<RmNot
     for p in store.rebase_pending(Some(id))? {
         out.notes.push(rebase_line(&p));
         out.rebase_pending.push(RebaseNote {
+            holders: p.detail.as_ref().and_then(|d| d["holders"].as_array()).map(|h| h.iter().take(5).cloned().collect()).unwrap_or_default(),
             repo: p.repo.clone(),
             reason: p.reason.clone(),
             publish: publish_of(&p),
@@ -311,7 +323,7 @@ pub(crate) fn rebase_line(p: &RebasePending) -> String {
     if p.attempts == 0 {
         return format!("{behind}: auto-rebase pending ({}, since {since})", p.reason);
     }
-    format!("{behind}: auto-rebase deferred ({}, since {since}, attempts {})", p.reason, p.attempts)
+    format!("{behind}: auto-rebase deferred ({}, since {since}, attempts {})", rebase_cause(&p.reason, p.detail.as_ref()), p.attempts)
 }
 
 /// R3: the top-level `sessions/<sid>` and `sessions/.repos/<sid>`
@@ -395,4 +407,36 @@ pub fn with_leftover_detail(store: &Store, root: &Path, selector: &str, mut e: S
     d.insert("leftover".into(), serde_json::to_value(&paths).unwrap_or(Value::Null));
     e.detail = Some(Value::Object(d));
     e
+}
+
+/// Stable holder/path details shared by status notes and Stop-hook hand-backs.
+pub fn rebase_cause(reason: &str, detail: Option<&Value>) -> String {
+    let Some(detail) = detail else { return reason.to_string(); };
+    if reason == "open_files" {
+        let holders = detail["holders"].as_array().cloned().unwrap_or_default();
+        let mut names: Vec<String> = holders.iter().take(3).map(|h| format!("{}[{}] {} {}", h["command"].as_str().unwrap_or("process"), h["pid"], h["hold"].as_str().unwrap_or("hold"), h["path"].as_str().unwrap_or(""))).collect();
+        let count = detail["count"].as_u64().unwrap_or(holders.len() as u64);
+        if count > names.len() as u64 { names.push(format!("+{} more", count - names.len() as u64)); }
+        if !names.is_empty() { return format!("open_files: {}", names.join(", ")); }
+    }
+    if reason == "recent_writes" {
+        if let Some(error) = detail["activity_scope_error"]["message"].as_str() {
+            return format!("recent_writes: activity scope unavailable ({error})");
+        }
+        if let Some(error) = detail["walk_error"].as_str() {
+            return format!("recent_writes: scan failed ({error})");
+        }
+        let path = detail["path"].as_str().unwrap_or("workspace");
+        return if detail["during_scan"].as_bool() == Some(true) { format!("recent_writes: {path} written during the scan") }
+            else { format!("recent_writes: {path} {} s ago", detail["age_secs"].as_u64().unwrap_or(0)) };
+    }
+    if reason == "changed_during_move" && let Some(paths) = detail["paths"].as_array() {
+        return format!("changed_during_move: {}", paths.iter().filter_map(Value::as_str).take(3).collect::<Vec<_>>().join(", "));
+    }
+    reason.to_string()
+}
+pub fn rebase_stuck(p: &RebasePending, now: SystemTime) -> bool {
+    p.head.is_some() && !p.unpushed && p.attempts > 0
+        && matches!(p.reason.as_str(), "open_files" | "recent_writes" | "changed_during_move")
+        && (p.attempts >= 3 || now.duration_since(p.first_at).unwrap_or_default().as_secs() >= 1800)
 }

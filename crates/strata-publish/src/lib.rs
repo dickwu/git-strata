@@ -9,6 +9,8 @@ use strata_store::Store;
 use strata_types::{RepoConfig, RepoName, SessionId, StrataError};
 
 pub mod chain;
+pub mod gate;
+pub mod message;
 pub(crate) mod deps_select;
 pub mod check;
 pub mod pending;
@@ -30,7 +32,7 @@ pub use rebase::{
     BetweenDiff, HunkPreview, Merge3Preview, MovePolicy, RebaseReport, assign, diff_between, rebase_session,
     rebase_session_with,
 };
-pub use push::{PublishWarning, Published, WarningKind, commit, publish, publish_bound, push, push_to, remote_changed};
+pub use push::{PublishWarning, Published, WarningKind, commit, publish, publish_bound, publish_with_messages, push, push_to, remote_changed};
 pub use seams::PUSH_TIMEOUT;
 #[cfg(feature = "test-seams")]
 pub use seams::PublishFault;

@@ -38,6 +38,10 @@ All three keys are always present; `data` is never null. Branch on
 | `AmbiguousMatch` | Ticket matches several sessions; retry with an id from `detail`. |
 | `NoSuchSession` | Wrong selector, or cwd is not inside a workspace; `cd` into one or pass `--session`. |
 | `NoSuchRepo` | Repo name not in config; check `--repo` / argument. With `detail.reason` `not_in_session`: the session has no workspace of that repo; run `detail.fix` (`git-strata add --session S --repo R`), then retry. |
+| `InvalidInput` (`message`) | Use a nonempty publish subject, at most 64 KiB, without control characters or reserved identity trailers. |
+| `InvalidInput` (`message_repo`) | Every `--message-for R=TEXT` must name a repo selected by the original publish request. A retry may keep overrides for already-landed selected repos. |
+| `Unsupported` (`daemon_too_old`) | Ask the human to upgrade CLI and daemon together before using the requested feature; do not resend unknown fields to an old daemon. |
+| `HeadMoved` (`baseline_moved`) | Rerun the complete literal publish command in `detail.fix` to take fresh checkpoints; it preserves selectors and message overrides. |
 | `InvalidInput` | Fix arguments per `detail.reason` (`checkpoint_reason`, `diff_mode`, `both_selectors`, `no_batch`, `unknown_command` with `detail.commands`, ...). `siblings_missing`: the repo's checks need sibling repos; run `detail.fix` (`git-strata add --session S --repo R ...`) or follow `detail.missing[].next`, then rerun. `chain_diverged` from publish on a repo that needs no confirmation: this is a push (the repo usually has `publish.push = false`), so only when the human asked you to push this repo run `git-strata push <REPO>` (it fetches, replays the unpushed chain onto origin, reruns checks, pushes a fast-forward), then rerun the publish; otherwise stop and tell the human the chain diverged and needs `git-strata push <REPO>`. `replay_deps_unsealed` from push: open a session on the repo, push again. `chain_rewound`, or diverged on a gated repo: hand to the human (`chain`). |
 | `Conflict` (publish) | Same hunk changed on both sides (another session or upstream); nothing committed in `detail.repo`, earlier repos of the call may have landed (`data.commits`). Fix, checkpoint, re-run the same publish ([publish.md](publish.md)); between sessions, who resolves can be set by `publish --assign`. |
 | `Conflict` (`sync_conflict`) | Edit the listed hunks, then sync with `--resolved`, the reported target and generation. Earlier successful repos appear in `detail.done`. |
@@ -53,7 +57,7 @@ All three keys are always present; `data` is never null. Branch on
 | `OpenFiles` | A process holds files in the directory (`detail` has pids). Stop it (only if you started it) and retry. |
 | `CheckFailed` | The repo's check failed in staging; fix the code, checkpoint, publish again. |
 | `CheckMutates` | Configured check writes files; config problem, tell the human. |
-| `HeadMoved` | Another publish or main moved first. For sync, use the fresh report and re-resolve; already-resolved unchanged bytes need an explicit `--keep`. Bound retries as in [sync.md](sync.md). |
+| `HeadMoved` (other) | Another publish or main moved first. For sync, use the fresh report and re-resolve; already-resolved unchanged bytes need an explicit `--keep`. Bound retries as in [sync.md](sync.md). |
 | `PushRefused` | Remote refused (detail has its words). Report to the human. |
 | `Unknown` | Outcome uncertain (e.g. push timeout, `socket_closed`). Do not retry, gc, or rm; run `status` and tell the human. Exception: `detail.reason` `poisoned` means nothing was written; the daemon restarts itself to reopen the store, so retry once after `git-strata daemon status` answers again. |
 | `Binary` / `TooLarge` | Per-entry markers in `diff` / `grep` results; not a call failure. |
@@ -105,3 +109,13 @@ the [0.1.2 release notes](https://github.com/dickwu/git-strata/blob/main/docs/re
   is what `git-strata gc` could reclaim; run `gc` only when the human asks.
   `gc --store` also deletes checkpoints of sessions removed over 30 days
   ago: run `gc --store --dry-run` first and only run `--store` when asked.
+
+R2 base errors: `base_not_on_main` and `base_diverged_from_main` are human
+hand-offs. If the publish chain has unpushed commits, the human pushes that
+chain first; divergent bases need chain recovery, with sync --accept-diverged
+only if the human approves dropping the named commits. `base_behind_main` gives
+a safe new command without --base. `HeadMoved baseline_moved` gives a literal
+publish --from command to rerun after a baseline change. `BaseAheadOfMain` is
+a warning that publish must wait for the base commits to land.
+
+For Unknown, do not retry, gc or rm. Keep the scene and give status to the human.

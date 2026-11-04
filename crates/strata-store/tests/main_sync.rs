@@ -178,6 +178,7 @@ fn successful_move_clears_sync_report_and_records_agent_policy() {
         world(&env, &s);
         store_report(&s);
         let baseline = MoveBaseline {
+            scope: Default::default(),
             m0_ns: 0,
             t0_ns: 0,
             root_names: vec![],
@@ -345,4 +346,90 @@ fn sync_move_history_keeps_resolution_choices() {
     s.close().unwrap();
     let s = env.open();
     assert_eq!(s.sync_move_history(&sid(), &repo()).unwrap(), v);
+}
+
+#[test]
+fn activity_scope_roundtrips_and_corruption_checks_the_whole_tree() {
+    let env = env();
+    let s = env.open();
+    world(&env, &s);
+    let baseline = MoveBaseline {
+        scope: strata_store::ActivityScope {
+            fold: false,
+            skip: vec!["node_modules".into()],
+            exceptions: vec!["node_modules/.cache".into()],
+            quiet_tracked: ["tracked.tsbuildinfo".into()].into(),
+        },
+        m0_ns: 1,
+        t0_ns: 2,
+        root_names: vec!["node_modules".into()],
+        entries: 3,
+    };
+    let n = s
+        .begin_move_with_policy(
+            &sid(),
+            &repo(),
+            &gen1(),
+            &head(),
+            &env.root.join("sessions").join(sid().as_str()).join(".move"),
+            t(20),
+            Some(&baseline),
+            MoveActivityPolicy::Agent,
+        )
+        .unwrap();
+    let mut persisted = baseline.clone();
+    persisted.scope.quiet_tracked.clear();
+    assert_eq!(
+        s.move_activity(&sid(), &repo(), n)
+            .unwrap()
+            .unwrap()
+            .baseline,
+        Some(persisted.clone())
+    );
+    s.close().unwrap();
+    let s = env.open();
+    assert_eq!(
+        s.move_activity(&sid(), &repo(), n)
+            .unwrap()
+            .unwrap()
+            .baseline,
+        Some(persisted)
+    );
+    let c = connect(&env.db());
+    let encoded: String = c
+        .query_row("SELECT skip_json FROM move_activity", [], |r| r.get(0))
+        .unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+    assert!(legacy.get("quiet_tracked").is_none());
+    // Rows written before this optimization remain readable.
+    legacy["quiet_tracked"] = json!(["tracked.tsbuildinfo"]);
+    c.execute(
+        "UPDATE move_activity SET skip_json = ?1",
+        [legacy.to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        s.move_activity(&sid(), &repo(), n)
+            .unwrap()
+            .unwrap()
+            .baseline,
+        Some(baseline)
+    );
+    for value in [
+        None,
+        Some("not json"),
+        Some(r#"{"skip":["../outside"],"exceptions":[]}"#),
+    ] {
+        c.execute("UPDATE move_activity SET skip_json = ?1", [value])
+            .unwrap();
+        assert_eq!(
+            s.move_activity(&sid(), &repo(), n)
+                .unwrap()
+                .unwrap()
+                .baseline
+                .unwrap()
+                .scope,
+            Default::default()
+        );
+    }
 }

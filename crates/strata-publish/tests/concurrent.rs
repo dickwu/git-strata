@@ -143,12 +143,14 @@ fn conflict_already_landed_stops_the_group() {
         let ha = sc.spawn(|| run(&fx, &ga));
         p.wait_until_paused();
         let hb = sc.spawn(|| run(&fx, &gb));
-        // B has its row and is waiting on the repo lock A holds.
+        // B owns its session queues while its base gate waits for A's
+        // repo lock. R2 refuses invalid bases before recording a row.
         let deadline = Instant::now() + Duration::from_secs(30);
-        while fx.store().publishes().unwrap().len() < 2 {
-            assert!(Instant::now() < deadline, "B never recorded its row");
+        while !gb.batches.iter().all(|b| fx.queues.held_now().contains(&b.session.to_string())) {
+            assert!(Instant::now() < deadline, "B never took its session queues");
             std::thread::sleep(Duration::from_millis(10));
         }
+        assert_eq!(fx.store().publishes().unwrap().len(), 1, "B has not passed its base gate yet");
         std::thread::sleep(Duration::from_millis(200));
         p.release();
         (ha.join().unwrap(), hb.join().unwrap())

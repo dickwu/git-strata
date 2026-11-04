@@ -1091,7 +1091,9 @@ mod tests {
         let s = &r["sessions"]["list"][0];
         assert_eq!(s["session"], "s-aaaaaaaa");
         assert_eq!(s["logical"], 3030);
-        // the cache survived on disk
+        // Scan completion precedes the worker's final save. Persist the
+        // complete cache explicitly before testing the disk representation.
+        du.save();
         let c: CacheFile = serde_json::from_slice(&fs::read(du.cache_path()).unwrap()).unwrap();
         assert!(c.units.contains_key("bases/app/t1"));
         // older sessions get a `seen` record on first sizing
@@ -1330,6 +1332,9 @@ mod tests {
             let du = Du::open(&root);
             du.report(false);
             assert!(du.wait_idle(Duration::from_secs(30)));
+            // wait_idle observes scan completion before the worker's final
+            // save; this test needs a persisted cache before reopening.
+            du.save();
         }
         let du = Du::open(&root);
         let r = du.report(false);

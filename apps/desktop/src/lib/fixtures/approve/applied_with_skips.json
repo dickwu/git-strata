@@ -63,6 +63,15 @@
       "detail": {
         "kind": "Untracked"
       }
+    },
+    {
+      "session": "s-oooooooo",
+      "kind": "skipped",
+      "detail": {
+        "kind": "BaseAhead",
+        "head": "3b416ebaa0000000000000000000000000000000",
+        "target": "ed8aac0100000000000000000000000000000000"
+      }
     }
   ],
   "proposal": {

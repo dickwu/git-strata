@@ -115,7 +115,19 @@ pub fn install_path_for_home(home: &Path) -> String {
 /// Optional request features this daemon serves, listed in
 /// `daemon_status.features` so a newer CLI can tell what an older daemon
 /// would reject. Additive only. `new.agent`: `new` takes `agent`.
-pub const FEATURES: &[&str] = &["new.agent", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard"];
+pub const FEATURES: &[&str] = &[
+    "new.agent",
+    "session.ports",
+    "status.upstream",
+    "sync",
+    "client.timeout",
+    "old_tree.yield",
+    "sync.cwd_guard",
+    "deps.cwd_guard",
+    "publish.message",
+    "new.base",
+    "rebase.quiet_scope",
+];
 
 /// The launchd label of the agent.
 pub const AGENT_LABEL: &str = "com.gwd.git-stratad";
@@ -172,13 +184,42 @@ pub struct PinnedFlags {
 /// What `daemon_status` and the stderr alert report.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DaemonWarning {
-    Quarantine { path: PathBuf },
-    AttachOutside { reason: String, index: PathBuf },
-    LongHold { repo: RepoName, method: String, since: SystemTime },
-    LongWait { repo: Option<RepoName>, session: Option<SessionId>, method: String, since: SystemTime, attempt_since: SystemTime },
-    UnknownPublish { id: u64 },
-    PublishRunning { id: u64 },
-    ConfigRelaxPending { repo: RepoName },
+    AutoRebaseStuck {
+        session: SessionId,
+        repo: RepoName,
+        reason: String,
+        attempts: u64,
+        rev: u64,
+        since: SystemTime,
+    },
+    Quarantine {
+        path: PathBuf,
+    },
+    AttachOutside {
+        reason: String,
+        index: PathBuf,
+    },
+    LongHold {
+        repo: RepoName,
+        method: String,
+        since: SystemTime,
+    },
+    LongWait {
+        repo: Option<RepoName>,
+        session: Option<SessionId>,
+        method: String,
+        since: SystemTime,
+        attempt_since: SystemTime,
+    },
+    UnknownPublish {
+        id: u64,
+    },
+    PublishRunning {
+        id: u64,
+    },
+    ConfigRelaxPending {
+        repo: RepoName,
+    },
     StorePoisoned,
     VerifyFailed { message: String },
     AnchorNotAdvanced { repo: RepoName },
@@ -209,4 +250,5 @@ pub enum ChainChoice {
 }
 
 pub mod main_sync;
+mod audit;
 pub mod periodic_fetch;

@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Upstream {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of_rm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub as_of: Option<String>,
     pub clean: bool,
     pub repos: BTreeMap<RepoName, RepoUpstream>,
@@ -14,6 +16,8 @@ pub struct Upstream {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoUpstream {
+    #[serde(default)]
+    pub ahead: u32,
     pub following: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behind: Option<u32>,
@@ -70,6 +74,10 @@ pub struct UpstreamDeps {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpstreamAuto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub escalation_new: bool,
     pub source: String,
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -35,10 +35,11 @@
           {
             "pid": 9,
             "command": "node",
-            "path": "/v/s-gggggggg/admin/node_modules/esbuild/bin/esbuild",
-            "hold": "Mapped"
+            "path": "node_modules/esbuild/bin/esbuild",
+            "hold": "map"
           }
-        ]
+        ],
+        "count": 1
       }
     },
     {
