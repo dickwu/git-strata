@@ -172,3 +172,71 @@ fn staging_has_the_publishing_repos_sealed_deps() {
     let names = fx.sb.git(&fx.main("tool"), &["ls-tree", "-r", "--name-only", st.tree.as_str()]);
     assert!(!names.contains("node_modules"), "{names}");
 }
+
+/// check-tmpdir: every check runs with TMPDIR/TMP/TEMP in `<layout>/+tmp`,
+/// created before it runs; it leaves with the layout; no checks → no dir.
+#[test]
+fn checks_get_their_own_tmpdir_under_the_layout() {
+    let fx = Fx::with(&["tool"]);
+    let (st, _s) = staged(&fx, &["tool"]);
+    let tmp = st.layout_root().join(strata_publish::CHECK_TMP_DIR);
+    assert_eq!(check(&cfg_with(&fx, &[]), &st.worktree).unwrap().ran, 0);
+    assert!(!tmp.exists(), "no checks, no temp dir");
+    let out = fx.sb.state.join("tmp.txt");
+    let probe = recorder(
+        &fx,
+        "tmpprobe",
+        &format!(
+            "printf '%s\\n%s\\n%s\\n' \"$TMPDIR\" \"$TMP\" \"$TEMP\" > '{o}' && test -d \"$TMPDIR\" && mkdir -p \"$TMPDIR/phpstan\" && echo x > \"$TMPDIR/phpstan/resultCache.php\"",
+            o = out.display()
+        ),
+    );
+    assert_eq!(check(&cfg_with(&fx, &[probe.clone(), probe.clone()]), &st.worktree).unwrap().ran, 2);
+    let text = fs::read_to_string(&out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], format!("{}/", tmp.display()));
+    assert_eq!(lines[1], tmp.display().to_string());
+    assert_eq!(lines[2], tmp.display().to_string());
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(fs::metadata(&tmp).unwrap().permissions().mode() & 0o777, 0o700);
+    assert!(tmp.join("phpstan/resultCache.php").exists());
+    strata_publish::remove_layout(&fx.sb.root, &strata_types::RepoPath::try_from(
+        st.layout_root().strip_prefix(&fx.sb.root).unwrap().to_string_lossy().into_owned()).unwrap()).unwrap();
+    assert!(!tmp.exists(), "the temp dir leaves with the layout");
+
+    // A second publish gets a fresh dir: nothing of the first one's cache.
+    let (st2, _s2) = staged(&fx, &["tool"]);
+    let tmp2 = st2.layout_root().join(strata_publish::CHECK_TMP_DIR);
+    assert_ne!(tmp, tmp2);
+    let seen = fx.sb.state.join("seen.txt");
+    let look = recorder(&fx, "look", &format!("ls -A \"$TMPDIR\" > '{}'; exit 1", seen.display()));
+    let e = check(&cfg_with(&fx, &[look]), &st2.worktree).unwrap_err();
+    assert_eq!(e.code, Code::CheckFailed, "{e:?}");
+    assert_eq!(fs::read_to_string(&seen).unwrap(), "", "starts empty");
+    assert!(!tmp2.exists() && !st2.layout_root().exists(), "removed with the layout on CheckFailed");
+}
+
+/// check-tmpdir: a `+tmp` that cannot be made (a file is in the way) fails
+/// like a spawn error, names the path, runs nothing, removes the layout.
+/// An inherited XDG_CACHE_HOME reaches the check unchanged.
+#[test]
+fn tmpdir_in_the_way_is_a_check_failure_and_xdg_is_kept() {
+    let fx = Fx::with(&["tool"]);
+    let (st, _s) = staged(&fx, &["tool"]);
+    let tmp = st.layout_root().join(strata_publish::CHECK_TMP_DIR);
+    fs::write(&tmp, b"not a dir").unwrap();
+    let ran = recorder(&fx, "ran", "exit 0");
+    let e = check(&cfg_with(&fx, &[ran]), &st.worktree).unwrap_err();
+    assert_eq!(e.code, Code::CheckFailed, "{e:?}");
+    let msg = e.detail.as_ref().unwrap()["spawn_error"].as_str().unwrap().to_string();
+    assert!(msg.contains("+tmp"), "{msg}");
+    assert_eq!(log(&fx), "", "no check process started");
+    assert!(!st.layout_root().exists());
+
+    let (st, _s2) = staged(&fx, &["tool"]);
+    let out = fx.sb.state.join("xdg.txt");
+    let probe = recorder(&fx, "xdg", &format!("printf '%s' \"${{XDG_CACHE_HOME-unset}}\" > '{}'", out.display()));
+    let want = std::env::var("XDG_CACHE_HOME").unwrap_or_else(|_| "unset".into());
+    check(&cfg_with(&fx, &[probe]), &st.worktree).unwrap();
+    assert_eq!(fs::read_to_string(&out).unwrap(), want);
+}

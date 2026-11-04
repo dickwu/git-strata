@@ -34,6 +34,14 @@ even when their commit ids differ.
   then `Unknown` `push_unknown`), the rebase is unbounded: a minute or two of
   silence after the remote branch moved is normal. Wait; do not interrupt or
   rerun.
+- Checks run with `TMPDIR`, `TMP` and `TEMP` set to a fresh, private
+  `<layout root>/+tmp` that is removed with the staging layout. A tool cache
+  that defaults to `$TMPDIR` (phpstan without `tmpDir`) is therefore cold on
+  every publish and never shared with other sessions; do not point a check at
+  a shared temp dir to make it warm. `XDG_CACHE_HOME` and the rest of the
+  environment are unchanged, apart from the `GIT_*` variables checks never
+  get. The path is long (about 80 bytes under `~/.strata`), so a check that
+  binds a Unix socket in `$TMPDIR` has little room (macOS limit 104 bytes).
 - Multi-repo `publish` commits repo by repo. When one repo hits `Conflict`,
   repos before it have already committed (and pushed, if push is on); the
   call does not roll them back. See "Publish conflict: fix and re-run" below.

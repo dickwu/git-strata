@@ -41,9 +41,15 @@ fn tail(bytes: &[u8]) -> String {
 /// Run one check with `cwd` = the staged repo directory, no shell, stdin
 /// closed, stdout and stderr captured together (in order of arrival per
 /// stream; the tail is what the detail keeps).
-fn run_one(argv: &[String], cwd: &Path) -> std::io::Result<(Option<i32>, Option<i32>, Vec<u8>)> {
+fn run_one(argv: &[String], cwd: &Path, tmp: &Path) -> std::io::Result<(Option<i32>, Option<i32>, Vec<u8>)> {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // check-tmpdir: a temp dir of this publish's own, so a tool cache that
+    // lands in $TMPDIR (phpstan without tmpDir) never holds paths of another
+    // session or of an earlier, removed layout.
+    let mut t = tmp.as_os_str().to_os_string();
+    t.push("/");
+    cmd.env("TMPDIR", &t).env("TMP", tmp).env("TEMP", tmp);
     // The staging `.git` gitfile decides the repository; no inherited
     // GIT_* variable may point a check at the main checkout.
     for (k, _) in std::env::vars_os() {
@@ -66,6 +72,31 @@ fn run_one(argv: &[String], cwd: &Path) -> std::io::Result<(Option<i32>, Option<
     Ok((status.code(), status.signal(), out))
 }
 
+/// Name of the per-publish temp dir directly under the layout root. `+` is
+/// not legal in a repo name, so it can never be a sibling repo's directory.
+pub const CHECK_TMP_DIR: &str = "+tmp";
+
+/// `<layout root>/+tmp` for `staged` (`<layout root>/<repo>`), created 0700
+/// (an existing one is reused). It leaves with the layout root.
+pub fn check_tmp_dir(staged: &Path) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let layout = staged
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "staged path has no parent"))?;
+    let tmp = layout.join(CHECK_TMP_DIR);
+    match std::fs::DirBuilder::new().mode(0o700).create(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let m = std::fs::symlink_metadata(&tmp)?;
+            if !m.is_dir() {
+                return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{} is not a directory", tmp.display())));
+            }
+        }
+        Err(e) => return Err(std::io::Error::new(e.kind(), format!("cannot create {}: {e}", tmp.display()))),
+    }
+    Ok(tmp)
+}
+
 /// §3 `check`: `validate_commands` first (a mutating command →
 /// `CheckMutates`, nothing runs), then every check in order in `staged`
 /// (`<layout root>/<repo>`). A failing check removes the layout root before
@@ -73,9 +104,17 @@ fn run_one(argv: &[String], cwd: &Path) -> std::io::Result<(Option<i32>, Option<
 pub fn check(cfg: &RepoConfig, staged: &Path) -> Result<ChecksRan> {
     cfg.validate_commands()?;
     let mut ran = 0u32;
+    let mut tmp: Option<std::path::PathBuf> = None;
     for (index, line) in cfg.checks.iter().enumerate() {
         let argv = argv_of(cfg, line)?;
-        let result = run_one(&argv, staged);
+        let result = match &tmp {
+            Some(t) => run_one(&argv, staged, t),
+            None => check_tmp_dir(staged).and_then(|t| {
+                let r = run_one(&argv, staged, &t);
+                tmp = Some(t);
+                r
+            }),
+        };
         ran += 1;
         let failed = match result {
             Ok((Some(0), _, _)) => None,
