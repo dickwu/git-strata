@@ -42,7 +42,7 @@ data root (`[paths] root`, default `~/.strata`) as
 | `daemon status` | — | no | yes | `{running,socket,session?,holders:[],unknown_publishes:[],alerts:[]}` |
 | `resolve` | `--session <S> --repo <R>` + exactly one of `--abandon` / `--accept` | yes | no | `ResolutionReport` |
 | `chain` | `--repo <R>` + exactly one of `--accept-origin <replay\|drop>` / `--restore` | yes (`--restore` may also confirm) | no | `{repo,choice,outcome?\|refs_moved?}` |
-| `config reload` | — | no | no | ReloadReport in data; exits 0/2/3/4 |
+| `config reload` | — | no | no | ReloadReport in data; exits 0/1/2/3/4 |
 | `config relax <REPO>` | — | yes + confirm | no | — |
 | `session ports` | `--session <S>`, `--repo <R>` (defaults: cwd's session; cwd's repo, else every repo), or `--all` (read-only, every live workspace; unleased ones show `ports: null`, `reason: "unleased"`); `--check` (who listens on each port); `--reassign` (move exactly one workspace's lease to another block) | no | yes when the lease exists | `{leases:[{session,repo,path,tauri_app_root,ports:{web,connector,connector_mcp,aux},env:{...},check?}]}` |
 | `session exec -- <CMD>...` | `--session <S>`, `--repo <R>` (exactly one workspace), `--tauri` (add `--config $STRATA_TAURI_DEV_CONFIG` to `tauri dev`), `--no-check` | no | yes when the lease exists | none: the process becomes `<CMD>` (its output and exit code) with the lease env set |
@@ -65,7 +65,11 @@ Fixed `detail.reason` values produced by the CLI: `daemon_down`,
 `rpc_failed`, `readonly_client`. From `new`: `repo_flags`, `agent`. From `add`: `add_leftover` (code `Exists`). From `rm`: `changed_during_remove` (code `Dirty`). From `session ports` / `session exec`: `reassign_one`, `ambiguous_repo` (with `detail.repos`), `cwd_mismatch`, `tauri_launcher` (with `detail.fix`), `exec`, `unleased` (a `--all` entry, not an error), `already_running` / `foreign` (code `PortInUse`), `port_unidentified` / `port_probe_error` (code `Busy`), `ports_exhausted` (`Busy`; in `session ports` an entry with `"ports": null`, not an error), `lease_changed` (`Busy`, `--reassign`: check again), `not_active` (`NoSuchSession`), `daemon_too_old` / `no_policy` (`Unsupported`: tell the human); a command `exec` cannot find is `NoSuchPath`. From publish: `assigned`, `chain_rewound`,
 `chain_diverged`, `workspace_changed`, `plan_changed`; from push: `replay_conflict`,
 `replay_deps_unsealed`, `replay_too_long`, `chain_rewound`; from deps:
-`main_moved`; from `config relax`: `not_relaxed`; from the push guard:
+`main_moved`; from `config reload`: the daemon rejection reason (e.g. `parse`,
+`invalid_config`, `restart_required`, `stale_rows`, `spawn_failed`),
+`config_rejected` when unspecified, `reload_pending`, `daemon_too_old`, or
+`invalid_reload_report`; from `config relax`: `not_relaxed`, `shown_required`,
+`config_not_applied`, `action_changed`; from the push guard:
 `url-rewritten`, `url-is-remote-name`, `empty-url`, `no-such-remote`.
 
 The closed set of `error.code` values (types.md): Conflict, HeadMoved, Dirty,

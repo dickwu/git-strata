@@ -106,7 +106,9 @@ git-strata rm --session "$S"
 
 ## Reading replies
 
-stdout is exactly one JSON line; exit code 0 iff `ok` is true:
+stdout is exactly one JSON line; exit code 0 iff `ok` is true. Ordinary errors
+use 1; `config reload` uses 2 for rejection, 3 while pending, and 4 for an old
+daemon (argument, transport and output failures still use 1):
 
 ```json
 {"ok":true,"data":{...},"error":null}

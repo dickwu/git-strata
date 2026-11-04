@@ -11,7 +11,7 @@ cli 是人与钩子的入口。它不持有 repo 锁，不进会话队列，不�
 - **做**：§3 的子命令；`git strata` 与 `git-strata` 是同一个二进制（D1）；Claude Code 的 `PostToolUse` / `SessionStart` 命令行；daemon 没在跑时的只读路径。
 - **不做**：不调用 `strata-confirm`。不自己 `Command::new("git")`（要 git 的只读路径走 gitio 已经规定的函数）。不新增错误码。不提供 `--human`、`--yes`、`--force` 或任何“跳过确认”的 flag（design §11 第 5 条：v1 只有 JSON；不变量 7）。不自动批准被取代的提议，不自动处理 Rewound / Diverged 的发布链，不在没有人选的情况下处理失败的移动。
 
-输出风格借用 `gwd`：机器只读这一行 JSON；退出码只有 0 和 1；分支只看 `error.code`，不看 `message`。给人看的提示只写 stderr，不进 JSON（types.md §7）。
+输出风格借用 `gwd`：机器只读这一行 JSON；成功退出 0，普通错误 1；`config reload` 另用 2（拒绝）、3（pending）、4（旧 daemon）；分支只看 `error.code`，不看 `message`。给人看的提示只写 stderr，不进 JSON（types.md §7）。
 
 daemon 没在跑时，只读命令直接读 store 与工作区。写命令失败并说明要请人先跑 `git-strata daemon start`（agent 不自己起停 daemon，D38）。
 
@@ -72,6 +72,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata daemon status` | `daemon_status` | 否 | 否 |
 | `git-strata resolve` | `resolve_move`（上游要求 1） | 是（D18） | 否。没有 `Action` 变体，不弹框 |
 | `git-strata chain` | `chain_resolve`（上游要求 2） | 选择本身要 TTY（D18）。不要确认的仓库分叉时，`push` 自己无头重放（publish.md D2a），`chain` 本身不变。`--restore` 且仓库要确认时，连接前再按 `push` 的钉住值查一次 | `--restore` 且要确认：`PushDeploy`。`--accept-origin replay` / `drop`：不取凭据 |
+| `git-strata config reload` | `config_reload`（先限时 5 s 探测 `config.reload` feature） | 否 | 否 |
 | `git-strata config relax` | `config_relax` | 是 | `ConfigRelax`。`require_tty` 之后连接并弹框，与其他确认命令相同。不因文件变化而跑，也不处理收紧 |
 | `git-strata session ports` | 先只读 open store；没有租约时 `ports_ensure`，`--reassign` 时 `ports_reassign`，`--all` 不调 | 否 | 否 |
 | `git-strata session exec` | 同上，没有租约时 `ports_ensure` | 否 | 否 |
@@ -108,11 +109,12 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata du` | `--refresh` | 缺省 false：只返回缓存，过期的单元在后台重算；true：后台把全部单元重算一遍，立即返回 |
 | `git-strata resolve` | `--session S --repo R`，以及 `--abandon` 与 `--accept` 恰好一个。没有缺省 | 缺选择、或两个都给 → `InvalidInput`，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接 |
 | `git-strata chain` | `--repo R`，以及恰好一个：`--accept-origin replay`、`--accept-origin drop`、`--restore`。没有缺省。`--restore` 在 `!is_ancestor(o, c)` 时不连接、不推 | 缺选择、或两个都给 → `InvalidInput`，`detail.reason = "no_choice"` 或 `"both_choices"`。不连接。不能快进 → `InvalidInput`，`detail.reason = "not_ancestor"`，在任何 push 之前 |
+| `git-strata config reload` | 无参数 | 旧 daemon 返回 Unsupported daemon_too_old（退出 4），不发未知 RPC |
 | `git-strata config relax` | `<repo>` | 未知 repo 透传 `NoSuchRepo`。文件变了不会自己跑这条命令 |
 | `git-strata session ports` | `[--session S] [--repo R]`，或 `--all`（只读，列出全部活会话的工作区，没有租约的 `ports: null`、`reason: "unleased"`，不分配）。`--check`：每个端口的监听者与状态。`--reassign`：把恰好一个工作区的租约挪到别的块，把查过的 base 作为 `checked` 发给 daemon，租约在此期间被别人挪过 → `Busy lease_changed`（D37）。没有空闲块的工作区是一条 `ports: null`、`reason: "ports_exhausted"` 的记录，其他工作区照常列出（`exec` 仍报错） | `--all` 与 `--session` 或 `--repo` 同给 → `both_selectors`；`--reassign --all` → `reassign_one`；`--reassign` 选中多个工作区 → `ambiguous_repo`（`detail.repos`）；都是 `InvalidInput` |
 | `git-strata session exec` | `[--session S] [--repo R] [--tauri] [--no-check] -- <cmd…>`：在恰好一个工作区里、带着它的端口环境变量（§3.2）用 `execvp` 替换本进程跑命令（D37） | 选中多个 → `ambiguous_repo`；cwd 在另一个会话工作区里 → `cwd_mismatch`；`--tauri` 认不出启动方式 → `tauri_launcher`（`detail.fix`）；都是 `InvalidInput`。`--` 之后没有命令 → `args` |
 
-未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`ls`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`session`、`status`、`sync`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax`。
+未知子命令 → `InvalidInput`，`error.detail.commands` 是已知的第一级名字，按字母序：`add`、`assign`、`chain`、`checkpoint`、`config`、`daemon`、`deps`、`diff`、`du`、`files`、`gc`、`grep`、`ls`、`new`、`publish`、`push`、`resolve`、`restore`、`rm`、`session`、`status`、`sync`。`git-strata deps`、`git-strata daemon` 或 `git-strata config` 后面没有第二级 → 同样 `InvalidInput`，`detail.commands` 只列那一组：`propose` / `approve` / `list`，`start` / `stop` / `status`，或 `relax` / `reload`。
 
 `-h` / `--help` 与 `--version` 走 clap 的文本，打在 stdout，退出码 0。它们不是子命令，不套信封（D19）。另一个例外：`ls --table` 成功时 stdout 只有表格（D36）；出错时照常是完整错误信封、退出码非 0。除此之外，stdout 上只有信封。
 
@@ -282,7 +284,7 @@ cli 不拥有表，不拥有目录。它读的配置目录是 `~/Library/Applica
 - `error` 是一个 `StrataError`：`code` 是变体名，`message` 总在，`detail` 按 types.md 省略 `None`。`Busy` 且 daemon 没跑时 `detail` 总有，`reason` 为 `"daemon_down"`。
 - `error.code` 必须是 types.md `Code` 的变体名。闭集 40 个（dev-ports 加了 `PortInUse`，D37），cli 自己不发明码。对不上的 RPC 层名字按 D7 收成 `InvalidInput`。
 - 程序只按 `error.code` 分支。`message` 的措辞可以改。
-- 退出码：信封 `ok` 为 true 且 stdout 的 write 与 flush 都成功 → 0。其余 → 1。不使用别的退出码。
+- 退出码：信封 `ok` 为 true 且 stdout 的 write 与 flush 都成功 → 0。普通错误、参数/传输/stdout 错误 → 1；`config reload` 的 rejected → 2、pending → 3、daemon_too_old → 4。
 - stdout 写失败（管道关掉、flush 失败）按 3b：退出码 1，能写 stderr 就写一行 `stdout_write_failed`，不写半行 JSON，不 panic，不在 `Drop` 里吞掉 flush 错误。显式 `flush` 并检查。
 
 不变量：
@@ -309,7 +311,7 @@ cli 不拿 repo 写锁，不占会话队列，不等待建造锁。锁在 daemon
 1. `deps approve`：读那条 `Proposal`（daemon 在跑就经 `deps_list`，否则 `deps::open_proposals`；两种都不调用 `Sessions::open`）。把 `id`、`repo`、`state`、`from`、`to`、`from_inputs`、`to_inputs`、`tree`、`head` 打到 stderr。凭据只有 `DepsApprove { proposal }`，不含会话：弹框前再逐行列出这次会移动的会话 id（只读的 rollout 计划里判定为移动的那些；同样不调用 `Sessions::open`）。然后才发 `deps_approve`。daemon 弹框。回答是 `NoSuchProposal`：把 `error.detail` 打到 stderr；`detail.state` 若是一个 `ProposalId`，或 `detail.replacement` 是一条 `Proposal`，再把那条替换提议的同样字段打到 stderr。进程到此退出，不发第二次 `approve`。`HeadMoved` 且 `detail.reason = "main_moved"` 同样：打出 `detail.tip`，不重试，不批准另一个 head。
 2. 要确认的 `push`，会推且要确认的 `publish`，以及要确认的 `chain --restore`：先按 §4 判断要不要 TTY（钉住的值；读不出当作要确认）。要确认才展示。凭据只有 `PushDeploy { repo, branch }`，不含提交：stderr 列出这次确认的 a..c 里每个 commit，不只写链顶。`publish` 对批次里每个要推且要确认的仓库各准备一次 `PushDeploy`，在该仓库的 `commit_tree` 之前；没有则该仓库 `NotConfirmed`，这个仓库不提交（front 就是要推且要确认的仓库）。不推的仓库不确认。然后才发请求。daemon 弹框。链在展示之后变了，由 daemon 拒绝；cli 不重发。为此 cli 把展示过的链顶随请求发出（`push`/`chain_resolve` 的 `shown`，`publish` 的 `shown: { repo: top }`，没展示链为 `null`），daemon 在锁里比它（daemon.md D21，review H2）。`publish` 每个仓库的推送结果按 `push` 映射，写进 `data.pushes`：`commit_tree` 之后超时是 `Unknown`，链留下，`ok` 不能为 true；`publish.push` 为假时这次不推，`PushRefused` 留给之后单独的 `git-strata push`。
 3. `rm --discard`：stderr 打一行会话 id 和“未发布的改动会被丢掉”。然后发 `rm`。
-4. `config relax`：`require_tty` 之后才连接，然后用 `ConfigRelax` 弹框并调用 `config_relax`，与其他确认命令相同。不因配置文件变了而跑。收紧不走这条命令。
+4. `config relax`：`require_tty` 之后限时 5 s 探测 `config.reload` feature。新 CLI 展示 config.toml 的 flags，发 `config_relax {repo, shown}`，daemon 核对它们与已应用 source 一致；对旧 daemon 只发 `{repo}`，保持 strict params 兼容。文件尚未 reload → `config_not_applied`；缺 shown → `shown_required`。确认后重新验证展示值，变化时 `action_changed`。不因配置文件变化自动弹框。收紧不走这条命令。
 
 `resolve` 在发 RPC 之前把该工作区的 `scene` 和两条 `choices` 打到 stderr，并写明这次 flag 选的是哪一条。`chain` 的 replay / drop 不取凭据；`--restore` 只有在上面第 2 步要确认时才取 `PushDeploy`。两个命令都只发一次 RPC。
 
@@ -550,3 +552,12 @@ For config relax, the CLI sends shown flags only to a daemon with config.reload;
 old daemons keep the existing repo-only request. New daemons refuse old clients'
 repo-only relaxation with InvalidInput/shown_required. Other RPC Params retain
 deny_unknown_fields; no API version bump or implicit lifecycle action is added.
+
+
+`config reload` is agent-safe. Its feature probe is bounded; the reload request
+itself waits for the daemon's fresh-attempt report. The normal envelope preserves
+the full report in `data`, including rejected, pending, and unrecognized outcomes.
+Rejected reports expose their first daemon reason (`parse`, `invalid_config`,
+`restart_required`, `stale_rows`, `spawn_failed`, etc.), falling back to
+`config_rejected`. Other reload reasons are `reload_pending`, `daemon_too_old`,
+and `invalid_reload_report`. See [config.md](../config.md#hot-reload-configreload).

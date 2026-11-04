@@ -109,8 +109,9 @@ user, not per `HOME`, both refuse with `InvalidInput` `foreign_home` (before any
 `launchctl`) unless `HOME` resolves to the login user's home, and with
 `foreign_agent` when the loaded agent came from a plist other than this home's;
 the message gives the `launchctl bootout` the human can run to clear it. The
-daemon reads `config.toml` only when it starts, so after editing the config the
-human runs `daemon stop` then `daemon start`.
+daemon reloads supported `config.toml` changes; after editing, run
+`git-strata config reload`. Removal, existing repo identity/exclusion changes,
+`paths.root`, and `status.parallel` still require an owner restart.
 
 Without a running daemon only these work, read-only, straight from the store:
 `status`, `grep`, `files`, `diff`, `deps list`, `daemon status`, and
@@ -226,7 +227,9 @@ Every call prints exactly one compact JSON line on stdout:
 
 - All three keys are always present. `data` is never null; on an error it may
   still hold partial results (for example repos that already published).
-- Exit status is 0 iff `ok` is true, else 1.
+- Exit status is 0 when `ok` is true; ordinary errors use 1.
+  `config reload` uses 2 for rejected config, 3 while pending, and 4 for an
+  older daemon. Transport, argument and output failures still use 1.
 - Exception: `git-strata session exec` prints no envelope once its command
   starts; its stdout, stderr and exit status are the command's. A failure
   before the start (bad arguments, `PortInUse`, ...) is an envelope.
@@ -634,10 +637,10 @@ There is no flag, env var or config value that skips the gate, and faking a
 TTY (`script`, `expect`, a pty) is a bypass. On `NotTty` / `NotConfirmed`,
 stop and give the exact command to the human.
 
-**Changing the flags (pins).** At start the daemon tightens pins at once
+**Changing the flags (pins).** At start and reload the daemon tightens pins at once
 (`confirm` / `deploy_on_push` ORed, `push` ANDed with the file) and writes
-`pins.json`. A loosening (e.g. `confirm` true -> false) is not applied: after
-`daemon stop` + `daemon start` the old pin stays and `daemon status` alerts
+`pins.json`. After editing, run `git-strata config reload`. A loosening
+(e.g. `confirm` true -> false) keeps the old pin and `daemon status` alerts
 show `ConfigRelaxPending`. The human then runs `git-strata config relax REPO`
 (TTY + prompt), which writes the file's flags into the pin; with nothing to
 relax it returns `InvalidInput` `not_relaxed`. Pins of repos removed from the
@@ -662,8 +665,8 @@ the backup; see [store recovery](docs/modules/store.md).
 (the `.strata/lww` dialect) lists files a tool regenerates; their unpublished
 Modified/Added/Untracked edits in a tracked, healthy workspace do not block
 `rm` (they are checkpointed and listed). A narrower list (positive patterns
-deleted and/or negations appended at the end) applies at the next start; any
-other change is a loosening that needs `config relax REPO`, which applies it
+deleted and/or negations appended at the end) applies at reload or start; any
+other change is pending after reload until `config relax REPO` applies it
 without a daemon restart. A repo with no pin has an empty effective list.
 Example (docs only): `regenerable = ["src/constants/permissionMap/generated.json"]`
 under `[repo.admin.rm]`. Add the new keys only after both binaries are
@@ -827,6 +830,7 @@ Flags, defaults and `data` shapes:
 | `daemon start \| stop \| status` | no |
 | `resolve --session S --repo R (--abandon \| --accept)` | yes |
 | `chain --repo R (--accept-origin replay\|drop \| --restore)` | yes |
+| `config reload` | no |
 | `config relax REPO` | yes |
 | `session ports [--session S] [--repo R] [--all] [--check] [--reassign]` | no |
 | `session exec [--session S] [--repo R] [--tauri] [--no-check] -- CMD...` | no |

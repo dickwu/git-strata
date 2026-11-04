@@ -323,10 +323,10 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 
 | 编号 | 内容 | design §9 |
 | --- | --- | --- |
-| I1 | 一台机器一个进程。锁文件被占时第二个进程以 `Exists` 退出（`detail.reason = "daemon_running"`）。不用 `Busy`：`Busy` 只用于 repo 写锁或会话队列的写前等待 | §5 |
-| I2 | 每 repo 一把写锁，不可重入。先到先得。写前等 `LOCK_WAIT`，超时 `Busy`，什么都没写。写后的等待一直等到拿到，不返回 `Busy`（「Waits after a call's first visible write are not bounded」） | §8、不变量 6 |
-| I3 | 每会话一条队列，先到先得，不可重入。同一会话的 checkpoint、restore、`rm`、`move_workspace`、`resolve_failed_move` 串行。进行中的不取消，后来的排队，不返回错误码 | §8 |
-| I4 | 建造锁 → 会话队列（`SessionId` 升序）→ repo 写锁（一次只拿一个 repo 的）。持有队列或 repo 锁时不等建造锁 | — |
+| I1 | 一台机器一个进程。锁文件被占时第二个进程以 `Exists` 退出（`detail.reason = "daemon_running"`）。`Busy` 用于写前等待和配置 fence 的 `pins_tightened` 拒绝 | §5 |
+| I2 | 每 repo 一把写锁，不可重入。先到先得。写前等 `LOCK_WAIT`，超时 `Busy`，什么都没写。写后的普通锁等待一直等到拿到；配置收紧是例外：每次 take/wake/grant 都可返回 `Busy pins_tightened`，调用不重试。已落地 publish 的 rebase 记 Deferred，publish 行仍为 Done | §8、不变量 6 |
+| I3 | 每会话一条队列，先到先得，不可重入。同一会话的 checkpoint、restore、`rm`、`move_workspace`、`resolve_failed_move` 串行。持有者不取消，后来的排队；每次 take/wake/grant 重新检查会话成员，过时的配置代以 `Busy pins_tightened` 拒绝 | §8 |
+| I4 | 建造锁 → 会话队列（`SessionId` 升序）→ repo 写锁（一次只拿一个 repo 的）。持有队列或 repo 锁时不等建造锁。reload/relax 的 committer 只能在未持有建造锁、队列或 repo 锁时取得；committer 内不等待这些锁，也不等待凭据或网络 | — |
 | I5 | status、grep、files、diff、deps_list、publish_plan、daemon_status 不排队，不等写锁 | §8 |
 | I6 | 启动时把残留的 `PublishPhase::Running` 改成 `Unknown`（store 允许这条边），然后由 `status` 和 `daemon_status` 报出。不重放、不删除、不调用 `git push`。留下 Running 不是不变量 6 的不确定状态 | 不变量 6 |
 | I7 | 凭据不出进程。RPC 参数里没有能代表「已确认」的字段。action 由 daemon 从请求推出，不采用客户端传来的 | 不变量 7 |
@@ -625,7 +625,7 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | `unknown_publish_reported_on_restart_not_replayed` | 一行 `Unknown` 重启后仍在 status 里；一行 `Running` 被改成 `Unknown` 再报出；两种都不调用 `git push`，也不重放 | 新增 |
 | `cli_readonly_commands_work_without_daemon` | daemon 没听 socket 时，`status`、`grep`、`files` 仍返回 JSON（cli 直接读）；`publish` 与 `push` 失败并说明 daemon 没在跑（`ReadOnly`） | 新增 |
 | `status_does_not_wait_on_write_lock` | 写锁被占住时，`status`、`grep`、`files`、`diff`、`deps_list`、`daemon_status` 都在 1 秒内返回 | `layerfs-api/tests/sdk_reads_during_publish.rs::reads_do_not_wait_for_a_held_publication_lane` |
-| `busy_only_before_first_write` | 调用还没写时，锁超过 30 秒 → `Busy`，什么都没写；已经写过的调用在同样的持锁下等到拿到，不返回 `Busy` | `layerfs-persistence/tests/writer_admission.rs::queued_writers_outlive_the_old_window_and_all_succeed` |
+| `busy_only_before_first_write` | 调用还没写时，锁超过 30 秒 → `Busy`，什么都没写；已经写过的调用在普通竞争下等到拿到；配置 fence 的 `Busy pins_tightened` 仍立即返回 | `layerfs-persistence/tests/writer_admission.rs::queued_writers_outlive_the_old_window_and_all_succeed` |
 | `quarantine_is_an_alert` | 隔离区有一条链接时，status 的 warnings 点名它，stderr 有一行，且这次启动没有对那个影子仓库跑 `git gc`、`worktree prune` 或 `git commit` | 新增 |
 | `locks_released_on_return_error_and_panic` | 处理器正常返回、返回 `Err`、panic 之后，repo 写锁与会话队列都已释放；随后的请求不是因为中毒而 `Busy`；原错误原样返回 | `layerfs-telemetry/tests/observations.rs::optional_windows_release_on_return_error_and_unwind` |
 | `second_instance_refused_then_reacquired` | 持有期间第二个进程得到 `Exists`（reason `daemon_running`），不是 `Busy`；停机后 1 秒内新进程能拿到锁并 bind | `layerfs-telemetry/tests/platform.rs::concurrent_final_handles_release_the_owned_writer` |
@@ -673,6 +673,7 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | `anchor_advances_after_fetch` | fetch 之后、仍在 repo 锁里，`ChainState` 为 Equal、Leads、Behind 或 Diverged 且 `git.merge_base(o, c)` 是旧锚点的后代时，锚点比较并交换到该 commit；Absent 与 Rewound 不动 | 新增 |
 | `observe_failed_does_not_fail_new_or_publish` | `observe_main` 返回错误时 `new` 与 `publish` 仍成功，`data.warnings` 含 `ObserveFailed`；daemon 再观察一次 | 新增 |
 | `toolcall_does_not_wait_out_approve_ensure` | `deps_approve` 的 `ensure_target` 冷装期间，该会话的 ToolCall checkpoint 不等待；移动阶段才排队 | 新增 |
+| `config_relax_not_applied_on_reload_then_confirmed_without_restart` | reload 调松只记 pending_relax / ConfigRelaxPending，pin 字节不变，不弹框；确认后立即采用，后续 reload 不撤销 | `tests/reload.rs` |
 | `config_relax_not_applied_on_restart` | 停机期间把 `deploy_on_push` 从 true 改成 false，重启后推送仍要确认；status 含 `ConfigRelaxPending`；没有弹框 | 新增 |
 | `config_relax_does_not_prompt_on_file_change` | 只改 `pins` 所对的配置文件、不发 `config_relax`：`require` 调用次数为 0。调紧立即写回，不要凭据 | 新增 |
 | `config_relax_writes_pin_after_validate` | 顺序是 `require`，然后 `validate` 核销，然后才写 `pins.json`。validate 失败则钉的字节不变。confirm 不写这个文件 | 新增 |
@@ -1142,3 +1143,25 @@ deps_auto pass can leave its durable row Installing, as a stop would; a later
 pass resumes or supersedes it when the applicable policy permits. Fetch results prepared under changed repo settings are
 discarded at revalidation. Relaxation publishes without a fence, retains other
 pins, and cannot overwrite a concurrent committed reload from an old snapshot.
+
+
+### Review-round implementation choices
+
+Hot-added Git handles and repo identity lookups use the operation's pinned
+catalog, including workspace moves, sync, dependency rollout and publish rebase.
+Hot-add checks the same shadow quarantine enumeration as startup, filtered by
+repo name: `<root>/sessions/.repos/<session>/<repo>.git/strata-quarantine`.
+The scan uses no-follow metadata at each directory boundary and for entries;
+retained quarantine entries without store rows still require an owner restart.
+
+New-repo stale-lock cleanup and pending reconstruction run before the new FIFO
+is published. That FIFO is unreachable to requests, so taking it is unnecessary.
+A pre-prompt `shown` mismatch is `InvalidInput action_changed`; a change after
+confirmation is `NotConfirmed action_changed`. An added repo appears in both
+`added` and `changed` (as `repos.<name>`). These are deliberate deviations from
+the design's wording. CatalogGrowth retains only the latest count and alerts
+once. A fenced old-tree check requeues the item to enter a fresh catalog later.
+
+The worker still polls its condition variable every 20 ms when idle. Tightening
+wakes session queues, and each waiter rereads membership under its FIFO mutex.
+Those bounded efficiency follow-ups are deferred; they do not weaken the fence.
