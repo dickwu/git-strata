@@ -1,5 +1,6 @@
 //! git-strata, the command-line client (cli.md). Every call prints exactly
-//! one compact JSON envelope on stdout (§4) and exits 0 or 1; human text
+//! one compact JSON envelope on stdout (§4); config reload also uses exit
+//! codes 2/3/4 alongside the usual 0/1. Human text
 //! goes to stderr only. The binary never runs `git` itself and never
 //! calls strata-confirm (§1): confirmations happen in the daemon.
 
@@ -70,13 +71,10 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
     {
         return sync::hook(args, started);
     }
-    if matches!(cli.cmd, Cmd::Config(ConfigCmd::Reload)) {
-        return reload::run();
-    }
     // status-perf C: `ls --table` prints a table instead of a successful
     // envelope (a stated exception to D19); errors stay envelopes.
     let table = matches!(cli.cmd, Cmd::Ls { table: true });
-    let mut env = dispatch(cli.cmd);
+    let (mut env, reload_code) = dispatch(cli.cmd);
     if table && env.ok {
         return cmds::emit_table(&env);
     }
@@ -107,7 +105,10 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
             );
         }
     }
-    let code = emit_stdout(&env);
+    let code = match reload_code {
+        Some(code) => reload::emit(&env, code),
+        None => emit_stdout(&env),
+    };
     interrupt::exit_override().unwrap_or(code)
 }
 
@@ -145,17 +146,19 @@ fn parse_error(argv: &[OsString], e: &clap::Error) -> StrataError {
     }
 }
 
-fn dispatch(cmd: Cmd) -> Envelope {
-    match cmd {
+fn dispatch(cmd: Cmd) -> (Envelope, Option<i32>) {
+    let mut reload_code = None;
+    let env = match cmd {
         Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status().unwrap_or_else(Envelope::err),
-        cmd => match run_cmd(cmd) {
+        cmd => match run_cmd(cmd, &mut reload_code) {
             Ok(env) => env,
             Err(e) => Envelope::err(e),
         },
-    }
+    };
+    (env, reload_code)
 }
 
-fn run_cmd(cmd: Cmd) -> Result<Envelope> {
+fn run_cmd(cmd: Cmd, reload_code: &mut Option<i32>) -> Result<Envelope> {
     use crate::confirm as c;
     // Argument checks that need no environment come first.
     match &cmd {
@@ -192,7 +195,10 @@ fn run_cmd(cmd: Cmd) -> Result<Envelope> {
             accept_origin,
             restore,
         } => c::chain(&ctx, &repo, accept_origin, restore),
-        Cmd::Config(ConfigCmd::Reload) => reload::request(&ctx).map(|(env, _)| env),
+        Cmd::Config(ConfigCmd::Reload) => reload::request(&ctx).map(|(env, code)| {
+            *reload_code = Some(code);
+            env
+        }),
         Cmd::Config(ConfigCmd::Relax { repo }) => c::config_relax(&ctx, &repo),
         Cmd::New {
             ticket_flag,

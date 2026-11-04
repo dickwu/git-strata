@@ -80,7 +80,8 @@ pub const TOP: &str = concat!(
     {\"ok\":false,\"data\":{...},\"error\":{\"code\":\"Busy\",\"message\":\"...\",\"detail\":{\"reason\":\"daemon_down\"}}}
   All three keys are always present; data is never null (on errors it may hold
   partial results, e.g. repos that already published).
-  Exit status: 0 iff ok is true, else 1. Branch on error.code, then
+  Exit status: 0 on success, 1 for ordinary/argument/transport/output errors.
+  config reload: 2 rejected, 3 pending, 4 daemon too old. Branch on error.code, then
   error.detail.reason; never parse message. stderr has human notices only.
   --help / --version print plain text on stdout, exit 0, no JSON.
   session exec, once its command starts, prints no envelope: stdout, stderr
@@ -116,6 +117,12 @@ HEADLESS FLOW (no human needed)
 
 ERRORS (code -> what an agent does)
   Busy daemon_down   tell the human, retry later   Busy other       wait, retry later
+  Busy pins_tightened rerun with the newly applied config
+  Busy reload_pending rerun config reload; its current attempt continues
+  Unsupported daemon_too_old  ask the owner to upgrade/restart
+  InvalidInput config_rejected  inspect data.reasons and restart_required
+  InvalidInput shown_required  use a CLI that sends the displayed flags
+  InvalidInput config_not_applied  run config reload before config relax
   NotTty             hand the command to a human   NotConfirmed     report; human reruns
                                                    (plan_changed: rerun it yourself once)
   Conflict (publish) fix detail.conflicts in detail.repo, rerun the same publish
@@ -680,4 +687,4 @@ EXAMPLES
   git-strata session exec --session PROJ-1 --repo front -- npm run dev
 ";
 
-pub const CONFIG_RELOAD_AFTER: &str = "After editing config.toml, run git-strata config reload. The ordinary JSON envelope's data contains outcome, generation, repos, added, changed, restart_required, pending_relax and reasons. Check membership in repos before using a new repo. No TTY or confirmation is needed. Exit 0: applied/unchanged; 2: rejected; 3: pending (rerun); 4: daemon too old. Tightenings fence older work; relaxations still require config relax. Repo removal, paths.root, status.parallel, and existing repo identity/exclusion changes require an owner restart.";
+pub const CONFIG_RELOAD_AFTER: &str = "After editing config.toml, run git-strata config reload. The ordinary JSON envelope's data contains outcome, generation, repos, added, changed, restart_required, pending_relax and reasons. Check membership in repos before using a new repo. No TTY or confirmation is needed. Exit 0: applied/unchanged; 1: argument/transport/output or invalid-report failure; 2: rejected (the daemon reason, or config_rejected); 3: reload_pending (rerun); 4: daemon_too_old. Parse and validation failures preserve data.reasons; unknown outcomes preserve data with invalid_reload_report. Tightenings fence older work; relaxations still require config relax. Repo removal, paths.root, status.parallel, and existing repo identity/exclusion changes require an owner restart.";
