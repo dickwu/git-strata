@@ -430,6 +430,8 @@ o = `publish_chain.origin`，c = 链顶，a = 锚点。前移只在 repo 写锁�
 
 `RepoConfig::validate_commands` 在建目录、`attach_staging`、`gitio::stage` 之前就跑。argv 里有 `--write`，或 `cs-fix` 没有 `--dry-run` → `CheckMutates`，检查进程不启动，不建目录。闸门过了之后，在 `<布局根>/<repo>` 里按序跑 `checks`，cwd 是该目录，不经 shell（config.md §2.4）。非零退出 → 先删掉布局根（§5.2 第 5 步），删完才返回 `CheckFailed`，`detail` 带命令、退出码、输出末尾 8 KiB。不提交。删不完则不是 `CheckFailed`。
 
+**临时目录**（check-tmpdir，0.2.x）：第一条检查启动前建 `<布局根>/+tmp`（0700），每条检查的 `TMPDIR`（带结尾 `/`）、`TMP`、`TEMP` 都指向它。它随布局根一起删（`CheckFailed` 时、发布成功收尾时；会话 `rm` 时整个会话根进 trash）。不同发布、不同会话之间不共享：工具写在 `$TMPDIR` 里的缓存（例如没设 `tmpDir` 的 phpstan 结果缓存）不会再指向已删掉的会话或旧布局里的 `vendor/`。代价是这类缓存每次发布都是冷的；每次布局路径不同、依赖是克隆进布局的，跨发布复用本身就会引用已删的路径。`XDG_CACHE_HOME` 不改：用它的工具按内容做键，改成每次发布的目录只会让它们变冷。`+` 不是合法的 repo 名字字符，所以 `+tmp` 不会和兄弟 repo 撞名。建不了 → 按启动失败处理（`CheckFailed`，`spawn_error`，布局根先删）。只有 `checks` 换临时目录；`install`、`dev exec` 和 agent 自己的 hook 沿用调用方的环境。
+
 配置了 0 条 → 不失败，`checks_ran = 0`（D3）。结果与 `outcome` 里都写这个数。
 
 检查目录里的依赖是 staged 安装输入对应的集合（§5.2 第 4 步的集合选择）：输入没变时是布局会话所钉的 P，变了时是替换或冷装来的集合，并带警告。没配检查时不选、不算 hash、不冷装。

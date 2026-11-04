@@ -27,7 +27,7 @@ pub mod selection {
 pub mod stage;
 
 pub use chain::{advance_anchor, anchor_ref, chain_ref, merge_base};
-pub use check::{CHECK_OUTPUT_TAIL, ChecksRan, check};
+pub use check::{CHECK_OUTPUT_TAIL, CHECK_TMP_DIR, ChecksRan, check};
 pub use rebase::{
     BetweenDiff, HunkPreview, Merge3Preview, MovePolicy, RebaseReport, assign, diff_between, rebase_session,
     rebase_session_with,
