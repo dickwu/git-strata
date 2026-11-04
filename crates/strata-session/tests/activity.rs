@@ -130,11 +130,26 @@ fn deferral_notes_name_bounded_holders_and_write_age() {
     let text=strata_session::rebase_cause("open_files",Some(&detail));
     assert!(text.contains("node[0] cwd src") && text.contains("node[2] cwd src") && text.contains("+5 more"));
     assert!(!text.contains("node[3]"));
-    let legacy=serde_json::json!({"holders":[{"pid":9,"command":"zsh","path":"."}]});
-    assert!(strata_session::rebase_cause("open_files",Some(&legacy)).contains("zsh[9] hold ."));
-    let detail=serde_json::json!({"path":"src/a.rs","age_secs":68});
-    assert!(strata_session::rebase_cause("recent_writes",Some(&detail)).contains("src/a.rs 68 s ago"));
-    let detail=serde_json::json!({"path":"src/a.rs","during_scan":true});
-    assert!(strata_session::rebase_cause("recent_writes",Some(&detail)).contains("written during the scan"));
-    assert_eq!(strata_session::local_hhmmss(std::time::SystemTime::UNIX_EPOCH).matches(':').count(),2);
+    let legacy = serde_json::json!({"holders":[{"pid":9,"command":"zsh","path":"."}]});
+    assert!(strata_session::rebase_cause("open_files", Some(&legacy)).contains("zsh[9] hold ."));
+    let detail = serde_json::json!({"path":"src/a.rs","age_secs":68});
+    assert!(
+        strata_session::rebase_cause("recent_writes", Some(&detail)).contains("src/a.rs 68 s ago")
+    );
+    let detail = serde_json::json!({"path":"src/a.rs","during_scan":true});
+    assert!(
+        strata_session::rebase_cause("recent_writes", Some(&detail))
+            .contains("written during the scan")
+    );
+    let detail = serde_json::json!({"activity_scope_error":{"code":"InvalidInput","message":"cannot read tracked tree"}});
+    assert_eq!(
+        strata_session::rebase_cause("recent_writes", Some(&detail)),
+        "recent_writes: activity scope unavailable (cannot read tracked tree)"
+    );
+    assert_eq!(
+        strata_session::local_hhmmss(std::time::SystemTime::UNIX_EPOCH)
+            .matches(':')
+            .count(),
+        2
+    );
 }

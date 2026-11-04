@@ -420,7 +420,12 @@ pub fn rebase_cause(reason: &str, detail: Option<&Value>) -> String {
         if !names.is_empty() { return format!("open_files: {}", names.join(", ")); }
     }
     if reason == "recent_writes" {
-        if let Some(error) = detail["walk_error"].as_str() { return format!("recent_writes: scan failed ({error})"); }
+        if let Some(error) = detail["activity_scope_error"]["message"].as_str() {
+            return format!("recent_writes: activity scope unavailable ({error})");
+        }
+        if let Some(error) = detail["walk_error"].as_str() {
+            return format!("recent_writes: scan failed ({error})");
+        }
         let path = detail["path"].as_str().unwrap_or("workspace");
         return if detail["during_scan"].as_bool() == Some(true) { format!("recent_writes: {path} written during the scan") }
             else { format!("recent_writes: {path} {} s ago", detail["age_secs"].as_u64().unwrap_or(0)) };

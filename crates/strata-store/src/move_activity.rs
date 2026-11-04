@@ -39,9 +39,9 @@ pub struct ActivityScope {
     pub fold: bool,
     pub skip: Vec<String>,
     pub exceptions: Vec<String>,
-    /// Folded tracked paths that quiet globs must keep counting. This does
-    /// not change the carried-entry walk used by G4 or old-tree checks.
-    #[serde(default)]
+    /// Folded tracked paths used only by the fresh quiet-glob walk. G4 and
+    /// old-tree checks use all carried entries, so this set need not persist.
+    #[serde(default, skip_serializing)]
     pub quiet_tracked: std::collections::BTreeSet<String>,
 }
 

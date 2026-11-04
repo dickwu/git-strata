@@ -377,12 +377,14 @@ fn activity_scope_roundtrips_and_corruption_checks_the_whole_tree() {
             MoveActivityPolicy::Agent,
         )
         .unwrap();
+    let mut persisted = baseline.clone();
+    persisted.scope.quiet_tracked.clear();
     assert_eq!(
         s.move_activity(&sid(), &repo(), n)
             .unwrap()
             .unwrap()
             .baseline,
-        Some(baseline.clone())
+        Some(persisted.clone())
     );
     s.close().unwrap();
     let s = env.open();
@@ -391,11 +393,43 @@ fn activity_scope_roundtrips_and_corruption_checks_the_whole_tree() {
             .unwrap()
             .unwrap()
             .baseline,
-        Some(baseline)
+        Some(persisted)
     );
     let c = connect(&env.db());
-    for value in [None, Some("not json"), Some(r#"{"skip":["../outside"],"exceptions":[]}"#)] {
-        c.execute("UPDATE move_activity SET skip_json = ?1", [value]).unwrap();
-        assert_eq!(s.move_activity(&sid(), &repo(), n).unwrap().unwrap().baseline.unwrap().scope, Default::default());
+    let encoded: String = c
+        .query_row("SELECT skip_json FROM move_activity", [], |r| r.get(0))
+        .unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+    assert!(legacy.get("quiet_tracked").is_none());
+    // Rows written before this optimization remain readable.
+    legacy["quiet_tracked"] = json!(["tracked.tsbuildinfo"]);
+    c.execute(
+        "UPDATE move_activity SET skip_json = ?1",
+        [legacy.to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        s.move_activity(&sid(), &repo(), n)
+            .unwrap()
+            .unwrap()
+            .baseline,
+        Some(baseline)
+    );
+    for value in [
+        None,
+        Some("not json"),
+        Some(r#"{"skip":["../outside"],"exceptions":[]}"#),
+    ] {
+        c.execute("UPDATE move_activity SET skip_json = ?1", [value])
+            .unwrap();
+        assert_eq!(
+            s.move_activity(&sid(), &repo(), n)
+                .unwrap()
+                .unwrap()
+                .baseline
+                .unwrap()
+                .scope,
+            Default::default()
+        );
     }
 }
