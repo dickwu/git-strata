@@ -22,6 +22,8 @@ export async function refreshAfter(
   );
   // TanStack stamps replies in whole milliseconds. Exclude first-wave replies even when
   // they finish in this same tick, and let that boundary pass before starting fresh reads.
+  // setTimeout(1) advances Date.now() by at least 1 ms in Bun and WebKit; real IPC reads
+  // take far longer, so the boundary is always behind every second-wave start.
   const after = Date.now() + 1;
   await new Promise((resolve) => setTimeout(resolve, 1));
   await Promise.all(

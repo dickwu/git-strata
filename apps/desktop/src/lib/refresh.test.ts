@@ -25,6 +25,16 @@ function setup() {
 
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
+// Poll until `done()` holds, bounded so a regression fails instead of hanging. Under load a
+// single fixed tick may not cover refreshAfter's internal timer plus the query turns.
+async function until(done: () => boolean, ms = 2000) {
+  const end = Date.now() + ms;
+  while (!done()) {
+    if (Date.now() > end) throw new Error('condition not reached within ' + ms + ' ms');
+    await new Promise((r) => setTimeout(r, 1));
+  }
+}
+
 describe('refreshAfter: joins in-flight reads, never cancels them', () => {
   test('the outstanding read is kept, and a new one starts after it ends', async () => {
     const { qc, reads, unsubscribe } = setup();
@@ -107,7 +117,7 @@ for (const fails of [false, true]) {
           }
         });
       });
-      await tick();
+      await until(() => calls === 3);
       expect(calls).toBe(3);
       expect(boundary).toBeGreaterThanOrEqual(since);
       expect(Number.isFinite(boundary)).toBe(true);
@@ -120,10 +130,10 @@ for (const fails of [false, true]) {
       expect(settled).toBe(false);
 
       releasePoller();
-      await tick();
+      await until(() => starts.length === 1);
       expect(starts).toHaveLength(1);
       expect(starts[0]).toBeGreaterThanOrEqual(boundary);
-      expect(qc.getQueryData(['deps'])).toBe(2); // The old poller reply (-1) never lands.
+      expect(qc.getQueryData(['deps'])).toBe(2); // The fake's poller value (-1) is never a query reply, so the cache still holds the first wave.
       expect(observer.getCurrentResult().dataUpdatedAt).toBeLessThan(boundary);
       expect(fresh(boundary)).toBe(false);
       expect(settled).toBe(false);
