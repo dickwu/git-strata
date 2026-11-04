@@ -1281,6 +1281,8 @@ fn caller_cwd_refusal_is_before_fetch_even_when_up_to_date_or_acknowledging() {
     with_session(|_, d, s| {
         let w = ws(d.core, s, "tool");
         let before = d.core.store.session(s).unwrap().unwrap();
+        let git = &d.core.gits[&repo_name("tool")];
+        git.take_git_calls();
         for resolved in [false, true] {
             let mut request = req(s);
             request.caller_cwd = Some(w.clone());
@@ -1290,8 +1292,17 @@ fn caller_cwd_refusal_is_before_fetch_even_when_up_to_date_or_acknowledging() {
             let e = sync_move::run(d, request).unwrap_err();
             assert_eq!(e.code, Code::OpenFiles);
             assert_eq!(reason(&e), Some("caller_cwd"));
-            assert_eq!(d.core.store.session(s).unwrap().unwrap().manifest.repos, before.manifest.repos);
+            assert_eq!(
+                d.core.store.session(s).unwrap().unwrap().manifest.repos,
+                before.manifest.repos
+            );
             assert!(d.core.store.move_intents(s).unwrap().is_empty());
+            assert!(
+                git.take_git_calls()
+                    .iter()
+                    .all(|call| !call.args.iter().any(|arg| arg == "fetch")),
+                "caller cwd must be rejected before fetching"
+            );
         }
         let mut request = req(s);
         request.caller_cwd = Some(w.clone());

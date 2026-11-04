@@ -491,8 +491,8 @@ impl Locks {
             .collect()
     }
 
-    /// Ages belong to individual attempts, including bounded retries by
-    /// Sessions::with_lock_unbounded; no claim about a total retry age.
+    /// Ages of live FIFO attempts, never a total retry age. Expired attempts
+    /// retried by Sessions::with_lock_unbounded are logged via record_long_wait.
     pub fn long_waits(&self) -> Vec<DaemonWarning> {
         let mut out = Vec::new();
         let mut collect = |fifo: &Fifo, repo: Option<RepoName>, session: Option<SessionId>| {
@@ -550,6 +550,18 @@ impl Locks {
 }
 
 impl strata_deps::RepoWriteLock for Locks {
+    fn record_long_wait(&self, repo: &RepoName, attempt_since: SystemTime) {
+        let (method, session) = ctx_method();
+        let warning = DaemonWarning::LongWait {
+            repo: Some(repo.clone()),
+            session,
+            method,
+            since: attempt_since,
+            attempt_since,
+        };
+        tracing::warn!(?warning, "retrying an expired post-visible lock attempt");
+    }
+
     fn with_write(
         &self,
         repo: &RepoName,

@@ -715,6 +715,23 @@ const OLD_TREE_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 /// `stop` reaches into the walks: a judgement in progress gives up and
 /// writes no verdict.
 fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
+    old_tree_loop_with_retry(d, stop, OLD_TREE_RETRY);
+}
+
+#[cfg(feature = "test-seams")]
+pub fn test_old_tree_loop(
+    d: &Daemon<'_>,
+    stop: &(dyn Fn() -> bool + Sync),
+    retry: std::time::Duration,
+) {
+    old_tree_loop_with_retry(d, stop, retry);
+}
+
+fn old_tree_loop_with_retry(
+    d: &Daemon<'_>,
+    stop: &(dyn Fn() -> bool + Sync),
+    retry_delay: std::time::Duration,
+) {
     // Background work: this thread's disk I/O at utility priority, like du.
     crate::du::utility_io();
     let flag = Arc::new(AtomicBool::new(false));
@@ -756,10 +773,18 @@ fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
                 break;
             }
             let yielded = yield_to.load(Ordering::SeqCst)
-                || matches!(&r, Ok(Some(Ok(strata_session::OldTreeOutcome::Skipped("yielded")))));
+                || matches!(
+                    &r,
+                    Ok(Some(Ok(strata_session::OldTreeOutcome::Skipped("yielded"))))
+                );
             let retry = yielded
                 || matches!(&r, Ok(None))
-                || matches!(&r, Ok(Some(Ok(strata_session::OldTreeOutcome::Kept { holders, .. }))) if !holders.is_empty())
+                || matches!(
+                    &r,
+                    Ok(Some(Ok(strata_session::OldTreeOutcome::Skipped(
+                        "passes_read_failed"
+                    ))))
+                )
                 || matches!(&r, Ok(Some(Err(e))) if e.code == Code::Busy);
             if retry {
                 let count = if yielded {
@@ -770,8 +795,17 @@ fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
                     yields.remove(&key);
                     0
                 };
-                let delay = if count >= 3 { 10 * OLD_TREE_RETRY } else { OLD_TREE_RETRY };
-                d.sessions.queue_old_tree_at(key.clone(), path.clone(), ino, std::time::Instant::now() + delay);
+                let delay = if count >= 3 {
+                    10 * retry_delay
+                } else {
+                    retry_delay
+                };
+                d.sessions.queue_old_tree_at(
+                    key.clone(),
+                    path.clone(),
+                    ino,
+                    std::time::Instant::now() + delay,
+                );
             } else {
                 yields.remove(&key);
             }
@@ -815,6 +849,7 @@ fn old_tree_startup(d: &Daemon<'_>, flag: &Arc<AtomicBool>) {
                             tracing::info!(session = %id, repo = %repo, path = %p.display(), "retired a half-retired admin dir");
                         }
                     }
+                    Err(e) if e.code == Code::Busy => tracing::debug!(session = %id, repo = %repo, "half-retired sweep: repo busy; skipped"),
                     Err(e) => tracing::warn!(session = %id, repo = %repo, error = %e.message, "half-retired sweep failed"),
                 }
             }
@@ -1377,8 +1412,10 @@ impl<'d, 'a> Server<'d, 'a> {
         }
         let core = self.core();
         if !all
+            && selector.is_none()
             && let Some(cwd) = cwd
-            && let Some(e) = strata_session::cwd::stale_in(&core.store, &core.config.paths.root, cwd)?
+            && let Some(e) =
+                strata_session::cwd::stale_in(&core.store, &core.config.paths.root, cwd)?
         {
             return Err(e);
         }
@@ -1418,8 +1455,10 @@ impl<'d, 'a> Server<'d, 'a> {
         let core = self.core();
         let sessions = &self.d.sessions;
         if !all
+            && selector.is_none()
             && let Some(cwd) = cwd
-            && let Some(e) = strata_session::cwd::stale_in(&core.store, &core.config.paths.root, cwd)?
+            && let Some(e) =
+                strata_session::cwd::stale_in(&core.store, &core.config.paths.root, cwd)?
         {
             return Err(e);
         }
