@@ -297,7 +297,20 @@ fn policy_gates(
     }
     let ws = workspace(ctx, s)?;
     let quiet = Duration::from_secs(ctx.cfg.rebase.quiet_secs);
-    let scope = strata_session::activity_scope(ctx.cfg, ctx.git, ctx.store, &ws)?;
+    let scope = match strata_session::activity_scope(ctx.cfg, ctx.git, ctx.store, &ws) {
+        Ok(scope) => scope,
+        Err(e) if policy == MovePolicy::Auto => {
+            // An unreadable scope cannot prove an idle workspace. Use the
+            // ordinary deferral path so retries, backoff and escalation apply.
+            return Ok(Err(deferred(
+                "recent_writes",
+                json!({"activity_scope_error": {
+                    "code":e.code, "message":e.message, "detail":e.detail,
+                }}),
+            )));
+        }
+        Err(e) => return Err(e),
+    };
     let activity = if policy == MovePolicy::Agent {
         let a = strata_session::walk_activity_scoped(&ws.path, &scope, &ctx.cfg.rebase.quiet_skip)?;
         if let Some(path) = &a.late {

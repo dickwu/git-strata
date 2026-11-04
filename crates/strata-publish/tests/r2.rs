@@ -43,6 +43,66 @@ fn body(fx: &Fx, c: &CommitOid) -> String {
 }
 
 #[test]
+fn baseline_rerun_preserves_the_complete_multi_repo_request() {
+    let fx = fx();
+    let session = fx.new_session(&["tool"]);
+    fx.edit(&session, "tool", &[("mine.txt", b"mine")]);
+    let checkpoint = fx.checkpoint(&session, "tool");
+    let group = group(vec![
+        batch(&session, "tool", checkpoint.id, &["mine.txt"]),
+        batch(&session, "later", checkpoint.id, &["other.txt"]),
+    ]);
+    let messages = Messages {
+        message: Some("shared title".into()),
+        message_for: BTreeMap::from([(repo_name("later"), "later's title".into())]),
+    };
+    let error = strata_types::StrataError::new(Code::HeadMoved, "baseline changed")
+        .with_detail(serde_json::json!({"reason":"baseline_moved", "repo":"tool"}));
+    let error = strata_publish::gate::with_rerun_command(error, &group, &messages);
+    let fix = error.detail.as_ref().unwrap()["fix"].as_str().unwrap();
+    assert!(fix.contains(&format!("--from '{session}:tool:mine.txt'")));
+    assert!(fix.contains(&format!("--from '{session}:later:other.txt'")));
+    assert!(fix.contains("-m 'shared title'"));
+    assert!(fix.contains("--message-for 'later=later'\\''s title'"));
+}
+
+#[test]
+fn tracked_quiet_skip_match_does_not_mark_a_landed_publish_unknown() {
+    let mut fx = fx();
+    fx.cfg_mut("tool").rebase.quiet_skip = vec!["src/index.ts".into()];
+    fx.cfg_mut("tool").rebase.quiet_secs = 3600;
+    let session = fx.new_session(&["tool"]);
+    fx.edit(&session, "tool", &[("src/index.ts", b"tracked edit\n")]);
+    let checkpoint = fx.checkpoint(&session, "tool");
+    let published = run(
+        &fx,
+        &group(vec![batch(
+            &session,
+            "tool",
+            checkpoint.id,
+            &["src/index.ts"],
+        )]),
+        &Messages::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        fx.store()
+            .publish_record(published.id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        strata_store::PublishPhase::Done
+    );
+    let pending = fx
+        .store()
+        .rebase_pending_of(&session, &repo_name("tool"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.reason, "recent_writes");
+    assert_eq!(pending.attempts, 1);
+}
+
+#[test]
 fn custom_message_retains_user_trailers_and_counts_final_changed_files() {
     let fx = fx();
     let s = fx.new_session(&["tool"]);

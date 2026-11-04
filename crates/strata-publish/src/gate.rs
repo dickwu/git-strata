@@ -20,28 +20,35 @@ pub fn check_with_messages(
     b: &CommitOid,
     messages: &crate::message::Messages,
 ) -> Result<()> {
-    check(ctx, group, b).map_err(|mut e| {
-        if e.detail.as_ref().and_then(|d| d["reason"].as_str()) == Some("baseline_moved") {
-            let mut command = rerun_command(group);
-            let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
-            if let Some(message) = &messages.message {
-                command.push_str(&format!(" -m {}", quote(message)));
-            }
-            for (repo, message) in &messages.message_for {
-                if !group.batches.iter().any(|b| &b.repo == repo) {
-                    continue;
-                }
-                command.push_str(&format!(
-                    " --message-for {}",
-                    quote(&format!("{repo}={message}"))
-                ));
-            }
-            if let Some(detail) = &mut e.detail {
-                detail["fix"] = json!(command);
-            }
+    check(ctx, group, b).map_err(|e| with_rerun_command(e, group, messages))
+}
+
+/// Rebind a per-repo refusal to the complete request at the RPC boundary.
+pub fn with_rerun_command(
+    mut e: StrataError,
+    group: &ReleaseGroup,
+    messages: &crate::message::Messages,
+) -> StrataError {
+    if e.detail.as_ref().and_then(|d| d["reason"].as_str()) == Some("baseline_moved") {
+        let mut command = rerun_command(group);
+        let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+        if let Some(message) = &messages.message {
+            command.push_str(&format!(" -m {}", quote(message)));
         }
-        e
-    })
+        for (repo, message) in &messages.message_for {
+            if !group.batches.iter().any(|b| &b.repo == repo) {
+                continue;
+            }
+            command.push_str(&format!(
+                " --message-for {}",
+                quote(&format!("{repo}={message}"))
+            ));
+        }
+        if let Some(detail) = &mut e.detail {
+            detail["fix"] = json!(command);
+        }
+    }
+    e
 }
 
 /// Check the local ref snapshot; this never writes.

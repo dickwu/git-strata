@@ -909,11 +909,72 @@ fn parked_base_does_not_keep_a_dependency_proposal_pending() {
 }
 
 #[test]
+fn main_target_that_would_drop_a_parked_base_is_discarded() {
+    let f = fx();
+    let repo = repo_name("tool");
+    let main = f.main("tool");
+    let initial = f.sb.head(&main);
+    let local =
+        f.sb.commit(&main, &[("only-local", b"keep")], "parked base");
+    let session = f
+        .sessions()
+        .new_at(
+            None,
+            std::slice::from_ref(&repo),
+            strata_session::Layout::Only,
+            None,
+            &std::collections::BTreeMap::from([(repo.clone(), local.clone())]),
+        )
+        .unwrap()
+        .manifest
+        .id;
+    f.sb.git(&main, &["reset", "--hard", &initial]);
+    let target = advance(&f, false);
+    let ws = f.store().session(&session).unwrap().unwrap().manifest.repos[&repo].clone();
+    f.store()
+        .enroll_main(
+            &session,
+            &repo,
+            &ws.base,
+            &target,
+            &f.git_of("tool").tree_of(&target).unwrap(),
+            None,
+            SystemTime::now(),
+        )
+        .unwrap();
+    let result = pass(&f);
+    assert!(
+        result.iter().any(|(s, result)| s == &session
+            && matches!(result, Ok(pending::CatchUp::Dropped(reason)) if reason == "base_ahead")),
+        "{result:?}"
+    );
+    assert!(row(&f, &session).is_none());
+    assert_eq!(
+        f.store().session(&session).unwrap().unwrap().manifest.repos[&repo]
+            .head
+            .as_str(),
+        local
+    );
+    assert!(f.store().move_intents(&session).unwrap().is_empty());
+}
+
+#[test]
 fn parked_local_base_follows_when_origin_contains_its_child() {
-    let f=fx();
-    let c=f.sb.commit(&f.main("tool"),&[("only-c",b"C")],"local C");
-    let s=f.sessions().new_at(None,&[repo_name("tool")],strata_session::Layout::Only,None,&std::collections::BTreeMap::from([(repo_name("tool"),c)])).unwrap().manifest.id;
-    let d=advance(&f,false);
+    let f = fx();
+    let c = f.sb.commit(&f.main("tool"), &[("only-c", b"C")], "local C");
+    let s = f
+        .sessions()
+        .new_at(
+            None,
+            &[repo_name("tool")],
+            strata_session::Layout::Only,
+            None,
+            &std::collections::BTreeMap::from([(repo_name("tool"), c)]),
+        )
+        .unwrap()
+        .manifest
+        .id;
+    let d = advance(&f, false);
     reconcile(&f);
     assert!(row(&f,&s).is_some(), "the parked base becomes eligible once origin contains it");
     pass(&f);

@@ -365,6 +365,12 @@ fn stale(ctx: &Ctx, row: &RebasePending, head: &CommitOid) -> Result<Option<(&'s
     if !reachable(Scope::of(ctx), head) {
         return Ok(Some(("stale_target", json!({ "head": head.as_str() }))));
     }
+    if row.source == strata_store::PendingSource::Main && !ctx.git.is_ancestor(&ws.head, head)? {
+        return Ok(Some((
+            "base_ahead",
+            json!({"head":head,"base_head":ws.head}),
+        )));
+    }
     Ok(None)
 }
 

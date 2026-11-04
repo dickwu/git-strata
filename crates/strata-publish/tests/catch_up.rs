@@ -116,8 +116,38 @@ fn deferred_b(fx: &Fx) -> (SessionId, Published) {
     fx.edit(&b, "tool", &[("later.txt", b"later\n")]);
     let p = run(fx, &gb).unwrap();
     let r = pending(fx, &b).expect("B keeps a target");
-    assert_eq!((r.head.as_deref(), r.reason.as_str(), r.attempts), (Some(p.commit.as_str()), "recent_writes", 1), "{r:?}");
+    assert_eq!(
+        (r.head.as_deref(), r.reason.as_str(), r.attempts),
+        (Some(p.commit.as_str()), "recent_writes", 1),
+        "{r:?}"
+    );
     (b, p)
+}
+
+#[test]
+fn activity_scope_failure_defers_with_backoff_and_escalation() {
+    let fx = fx(3600);
+    let (session, _) = deferred_b(&fx);
+    let initial = pending(&fx, &session).unwrap();
+    let workspace = fx.ws(&session, "tool");
+    let moved = workspace.with_file_name("scope-unavailable");
+    fs::rename(&workspace, &moved).unwrap();
+    let now = SystemTime::now() + Duration::from_secs(3601);
+    let out = pass(&fx, &cfg(&fx, 0), now);
+    fs::rename(&moved, &workspace).unwrap();
+    let CatchUp::Attempted(RebaseReport::Deferred { reason, detail, .. }) = of(&out, &session)
+    else {
+        panic!("expected a scope deferral: {out:?}");
+    };
+    assert_eq!(reason, "recent_writes");
+    assert!(detail.get("activity_scope_error").is_some(), "{detail}");
+    let current = pending(&fx, &session).unwrap();
+    assert_eq!(current.attempts, initial.attempts + 1);
+    assert!(strata_session::rebase_stuck(&current, now));
+    assert!(matches!(
+        of(&pass(&fx, &cfg(&fx, 3600), current.last_at), &session),
+        CatchUp::NotDue
+    ));
 }
 
 #[test]
