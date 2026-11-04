@@ -66,12 +66,63 @@ pub fn inside(cwd: &Path, root: &Path) -> bool {
     }
 }
 
-pub fn refuse_caller(cwd: &Path, session: &str, workspace: &Path) -> StrataError {
-    StrataError::new(Code::OpenFiles, "the caller's cwd is in a workspace that sync may replace").with_detail(
+pub fn refuse_caller(
+    cwd: &Path,
+    session: &str,
+    workspace: &Path,
+    request: &serde_json::Value,
+) -> StrataError {
+    let mut fix = format!("cd ~ && git-strata sync --session {session}");
+    for (field, flag) in [
+        ("repos", "--repo"),
+        ("resolved", "--resolved"),
+        ("keep", "--keep"),
+    ] {
+        for value in request[field]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+        {
+            fix.push_str(&format!(" {flag} {}", shell_word(value)));
+        }
+    }
+    if let Some(target) = request["target"].as_str() {
+        fix.push_str(&format!(" --target {}", shell_word(target)));
+    }
+    if let Some(generation) = request["generation"].as_u64() {
+        fix.push_str(&format!(" --generation {generation}"));
+    }
+    for (field, value, flag) in [
+        ("fetch", false, "--no-fetch"),
+        ("accept_diverged", true, "--accept-diverged"),
+        ("allow_cwd_holders", true, "--allow-cwd-holders"),
+    ] {
+        if request[field] == value {
+            fix.push_str(&format!(" {flag}"));
+        }
+    }
+    StrataError::new(
+        Code::OpenFiles,
+        "the caller's cwd is in a workspace that sync may replace",
+    )
+    .with_detail(
         json!({"reason":"caller_cwd", "session":session,"workspace":workspace,
             "cwd":std::fs::canonicalize(cwd).unwrap_or_else(|_|cwd.to_path_buf()),
-            "fix":format!("cd ~ && git-strata sync --session {session}")}),
+            "fix":fix}),
     )
+}
+
+fn shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_./-".contains(&b))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 pub fn stale(session: &str, workspace: &Path, cwd: &Path) -> StrataError {

@@ -751,8 +751,8 @@ impl Sessions<'_> {
             }
         }
         self.forget_old_trees(session);
-        // G4 item 4: every `Auto` tree still kept gets its next pass (after
-        // the forget above, which clears the session's queue).
+        // G4 item 4: every `Auto` tree still kept gets its next Q pass;
+        // invalidating verdicts above preserves other repos' queued retries.
         self.queue_auto_trees(session);
 
         Ok(MoveReport {

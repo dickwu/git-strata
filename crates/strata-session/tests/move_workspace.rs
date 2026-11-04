@@ -1248,6 +1248,170 @@ fn no_stop() -> Arc<std::sync::atomic::AtomicBool> {
     Arc::new(std::sync::atomic::AtomicBool::new(false))
 }
 
+#[test]
+fn deferred_status_checks_fresh_agent_and_auto_trees_without_bypassing_retries() {
+    use strata_session::{OldTreeMode, OldTreeOutcome};
+    for agent in [false, true] {
+        let fx = Fx::with(&["tool"]);
+        let s = fx.sessions();
+        let rep = new_tool(&fx, &s);
+        let id = id(&rep);
+        let w = ws(&rep, "tool");
+        let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
+        let baseline = strata_session::baseline_of(&strata_session::walk_activity(&w).unwrap());
+        s.arm(SessionSeam::PauseAt {
+            phase: "move.swap".into(),
+        });
+        let mut holder = None;
+        let report = std::thread::scope(|scope| {
+            let mover = scope.spawn(|| {
+                if agent {
+                    s.move_workspace_agent(
+                        &id,
+                        &rid(&fx, "tool"),
+                        to.0.clone(),
+                        to.1.clone(),
+                        None,
+                        &baseline,
+                    )
+                } else {
+                    s.move_workspace_auto(
+                        &id,
+                        &rid(&fx, "tool"),
+                        to.0.clone(),
+                        to.1.clone(),
+                        None,
+                        &baseline,
+                    )
+                }
+            });
+            s.wait_paused();
+            holder = Some(Holder::cwd(&w));
+            s.release();
+            mover.join().unwrap().unwrap()
+        });
+        let old = report.old_tree.expect("held old tree");
+        s.set_old_tree_mode(OldTreeMode::Deferred);
+        assert!(
+            s.next_old_tree(Duration::ZERO).is_none(),
+            "Q is not due yet"
+        );
+        assert!(matches!(
+            old_kept(&s, &id),
+            Some(StatusWarning::OldTreeKept {
+                unchecked: true,
+                ..
+            })
+        ));
+        let (key, path, inode) = s
+            .next_old_tree(Duration::ZERO)
+            .expect("status queues within Q");
+        assert_eq!(path, old);
+
+        // Q rescheduling must not discard an immediate status request.
+        old_kept(&s, &id).unwrap();
+        s.queue_old_tree_at(
+            key.clone(),
+            path.clone(),
+            inode,
+            Instant::now() + Duration::from_secs(120),
+        );
+        assert_eq!(s.next_old_tree(Duration::ZERO).unwrap().0, key);
+        let yielded = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert_eq!(
+            strata_apfs::with_walk_stop(yielded, || s
+                .check_old_tree(&key, &path, inode, &no_stop())
+                .unwrap()),
+            OldTreeOutcome::Skipped("yielded")
+        );
+        let retry = Duration::from_secs(5);
+        assert_eq!(
+            s.retry_old_tree(key.clone(), path.clone(), inode, retry),
+            retry
+        );
+        s.forget_old_trees(&id); // Another move must not erase this retry.
+        old_kept(&s, &id).unwrap();
+        s.queue_all_old_trees().unwrap();
+        s.queue_old_tree_at(key.clone(), path.clone(), inode, Instant::now());
+        assert!(
+            s.next_old_tree(Duration::ZERO).is_none(),
+            "status and Q must respect retry backoff"
+        );
+
+        s.arm(SessionSeam::FailAt {
+            phase: "old_tree.read_passes".into(),
+            errno: libc::EIO,
+        });
+        assert_eq!(
+            s.check_old_tree(&key, &path, inode, &no_stop()).unwrap(),
+            OldTreeOutcome::Skipped("passes_read_failed")
+        );
+        assert_eq!(
+            s.retry_old_tree(key.clone(), path.clone(), inode, retry),
+            retry
+        );
+        assert_eq!(
+            s.retry_old_tree(key.clone(), path.clone(), inode, retry),
+            Duration::from_secs(50)
+        );
+        assert!(s.next_old_tree(Duration::ZERO).is_none());
+        assert!(old.is_dir() && s.old_tree_verdict(&key).is_none());
+        s.finish_old_tree_retry(&key);
+        assert_eq!(
+            s.retry_old_tree(key, path, inode, retry),
+            retry,
+            "completed work discards retry history"
+        );
+
+        // Interrupt the judgement itself, after the callers' other scans.
+        // Both rm and inline status must treat Skipped as potentially changed.
+        drop(holder);
+        s.set_old_tree_mode(OldTreeMode::Inline);
+        for remove in [false, true] {
+            let flag = no_stop();
+            s.arm(SessionSeam::PauseAt {
+                phase: "old_tree.activity_directory".into(),
+            });
+            std::thread::scope(|scope| {
+                let caller = scope.spawn(|| {
+                    strata_apfs::with_walk_stop(flag.clone(), || {
+                        if remove {
+                            let error = s.remove(&id, false, None).unwrap_err();
+                            assert_eq!(error.code, Code::Dirty);
+                            assert_eq!(
+                                error.detail.unwrap()["old_trees"][0]["path"],
+                                serde_json::json!(old)
+                            );
+                        } else {
+                            assert!(matches!(
+                                old_kept(&s, &id),
+                                Some(StatusWarning::OldTreeKept {
+                                    changed: Some(true),
+                                    ..
+                                })
+                            ));
+                        }
+                    })
+                });
+                s.wait_paused();
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                s.release();
+                caller.join().unwrap();
+            });
+            assert!(old.is_dir());
+            let n = intents(&fx, &id).last().unwrap().n;
+            assert!(
+                fx.store()
+                    .move_activity(&id, &fx.rn("tool"), n)
+                    .unwrap()
+                    .unwrap()
+                    .late_writes
+                    .is_none()
+            );
+        }
+    }
+}
+
 /// Deferred status never judges: no verdict → `changed: null`,
 /// `unchecked: true`, no holders, and the intent is queued; the background
 /// check then retires the idle unchanged tree with its admin dir, and the
