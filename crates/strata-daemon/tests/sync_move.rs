@@ -39,6 +39,10 @@ fn land(fx: &Dfx, files: &[(&str, &[u8])]) -> CommitOid {
 }
 fn req(s: &SessionId) -> SyncRequest {
     SyncRequest {
+        caller_cwd: None,
+        caller_pids: Vec::new(),
+        allow_cwd: false,
+        allow_cwd_holders: false,
         session: s.clone(),
         repos: None,
         check: false,
@@ -633,6 +637,9 @@ fn sync_agent_policy_deps_dir_holders_on_source_only_move() {
                 .arg("-c")
                 .arg("printf 'ready\\n'; exec /bin/sleep 60")
                 .current_dir(&dir)
+                // The in-process daemon owns this child, so its cwd is exempt.
+                // Its inherited dependency descriptor must still block the move.
+                .stdin(Stdio::from(fs::File::open(&dir).unwrap()))
                 .stdout(Stdio::piped())
                 .spawn()
                 .unwrap(),
@@ -1267,4 +1274,60 @@ fn legacy_conflicts_acknowledged_with_follow_main_false_and_g0_refuses() {
             assert_eq!(before.manifest.repos, after.manifest.repos);
         }
     }
+}
+
+#[test]
+fn caller_cwd_refusal_is_before_fetch_even_when_up_to_date_or_acknowledging() {
+    with_session(|_, d, s| {
+        let w = ws(d.core, s, "tool");
+        let before = d.core.store.session(s).unwrap().unwrap();
+        let git = &d.core.gits[&repo_name("tool")];
+        git.take_git_calls();
+        for resolved in [false, true] {
+            let mut request = req(s);
+            request.caller_cwd = Some(w.clone());
+            if resolved {
+                request.resolved = vec![rp("a")];
+                request.keep = vec![rp("b")];
+                request.repos = Some(vec![repo_name("tool")]);
+                request.target = Some(before.manifest.repos[&repo_name("tool")].head.clone());
+                request.generation = Some(7);
+                request.fetch = false;
+                request.allow_cwd_holders = true;
+                request.accept_diverged = true;
+            }
+            let target = request.target.clone();
+            let e = sync_move::run(d, request).unwrap_err();
+            assert_eq!(e.code, Code::OpenFiles);
+            assert_eq!(reason(&e), Some("caller_cwd"));
+            if let Some(target) = target {
+                assert_eq!(
+                    e.detail.as_ref().unwrap()["fix"],
+                    format!(
+                        "cd ~ && git-strata sync --session {s} --repo tool --resolved a --keep b --target {target} --generation 7 --no-fetch --accept-diverged --allow-cwd-holders"
+                    )
+                );
+            }
+            assert_eq!(
+                d.core.store.session(s).unwrap().unwrap().manifest.repos,
+                before.manifest.repos
+            );
+            assert!(d.core.store.move_intents(s).unwrap().is_empty());
+            assert!(
+                git.take_git_calls()
+                    .iter()
+                    .all(|call| !call.args.iter().any(|arg| arg == "fetch")),
+                "caller cwd must be rejected before fetching"
+            );
+        }
+        let mut request = req(s);
+        request.caller_cwd = Some(w.clone());
+        request.allow_cwd = true;
+        assert_eq!(sync_move::run(d, request).unwrap()["repos"]["tool"]["result"], "up_to_date");
+        let sibling = w.with_file_name("tool-other");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let mut request = req(s);
+        request.caller_cwd = Some(sibling);
+        sync_move::run(d, request).unwrap();
+    });
 }

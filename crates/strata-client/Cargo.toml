@@ -11,6 +11,7 @@ description = "git-strata: the pure json-lines transport to git-stratad, shared 
 strata-types = { path = "../strata-types" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+libc = "0.2.191"
 
 [dev-dependencies]
 tempfile = "3"

@@ -17,6 +17,44 @@ use strata_store::PublishPhase;
 use strata_types::Code;
 use support::*;
 
+#[test]
+fn expired_unbounded_wait_is_deduplicated_in_daemon_status() {
+    use strata_daemon::locks::RequestScope;
+    use strata_deps::RepoWriteLock;
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let daemon = Daemon::start(&core).unwrap();
+    let first = SystemTime::now() - Duration::from_secs(60);
+    let latest = first + Duration::from_secs(30);
+    let session = strata_types::SessionId::try_from("s-abcdefgh".to_string()).unwrap();
+    let _scope = RequestScope::begin("sync", Some(session.clone()));
+    core.locks.record_long_wait(&repo_name("tool"), first);
+    core.locks.record_long_wait(&repo_name("tool"), latest);
+    core.locks.record_long_wait(&repo_name("tool"), latest);
+    assert!(core.locks.holds().is_empty());
+    let status = daemon.daemon_status(false).unwrap();
+    let waits: Vec<_> = status["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w.get("LongWait"))
+        .collect();
+    assert_eq!(waits.len(), 1, "{status}");
+    assert_eq!(waits[0]["repo"], "tool");
+    assert_eq!(waits[0]["session"], session.as_str());
+    assert_eq!(waits[0]["method"], "sync");
+    assert_eq!(
+        core.locks.long_waits(),
+        vec![DaemonWarning::LongWait {
+            repo: Some(repo_name("tool")),
+            session: Some(session),
+            method: "sync".into(),
+            since: latest,
+            attempt_since: latest,
+        }]
+    );
+}
+
 fn calls_mention(core: &startup::Core, needle: &str) -> Vec<String> {
     let mut out = Vec::new();
     for g in core.gits.values() {

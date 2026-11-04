@@ -50,6 +50,9 @@ fn repo_named(rec: &SessionRecord, seg: &OsStr) -> Option<RepoName> {
 /// selector). Reads the real path of `cwd` and of `<root>/sessions/` once
 /// each; never stats or canonicalizes a workspace path.
 pub fn resolve_in(store: &Store, root: &Path, cwd: &Path) -> Result<Option<(SessionId, RepoName)>> {
+    if let Some(error) = crate::cwd::stale_in(store, root, cwd)? {
+        return Err(error);
+    }
     // 1. The volume's spelling, symlinks resolved.
     let Ok(real) = real_dir_io(cwd) else { return Ok(None) };
     // 2. Under the real path of <root>/sessions/.

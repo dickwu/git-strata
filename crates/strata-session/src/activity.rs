@@ -74,6 +74,7 @@ pub fn walk_activity(root: &Path) -> Result<Activity> {
     }
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        check_walk_stop()?;
         for ent in fs::read_dir(&dir).map_err(|e| walk_error(&dir, &e))? {
             let ent = ent.map_err(|e| walk_error(&dir, &e))?;
             let p = ent.path();
@@ -107,11 +108,21 @@ pub fn baseline_of(a: &Activity) -> strata_store::MoveBaseline {
 /// name added or removed. Empty = unchanged. A walk error is returned (the
 /// caller counts it as changed).
 pub fn changed_since(root: &Path, b: &strata_store::MoveBaseline) -> Result<Vec<String>> {
+    changed_since_with(root, b, || Ok(()))
+}
+
+pub(crate) fn changed_since_with(
+    root: &Path,
+    b: &strata_store::MoveBaseline,
+    mut before_dir: impl FnMut() -> Result<()>,
+) -> Result<Vec<String>> {
     let m0 = b.m0_ns as i128;
     let mut out: Vec<String> = Vec::new();
     let mut names: Vec<String> = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        before_dir()?;
+        check_walk_stop()?;
         for ent in fs::read_dir(&dir).map_err(|e| walk_error(&dir, &e))? {
             let ent = ent.map_err(|e| walk_error(&dir, &e))?;
             let p = ent.path();
@@ -137,6 +148,18 @@ pub fn changed_since(root: &Path, b: &strata_store::MoveBaseline) -> Result<Vec<
     }
     out.sort();
     Ok(out)
+}
+
+pub(crate) fn stopped(error: &strata_types::StrataError) -> bool {
+    error.code == strata_types::Code::Busy && error.detail.as_ref().is_some_and(|d| d["reason"] == "stopped")
+}
+fn check_walk_stop() -> Result<()> {
+    if strata_apfs::walk_stopped() {
+        Err(strata_types::StrataError::new(strata_types::Code::Busy, "walk stopped")
+            .with_detail(json!({"reason":"stopped"})))
+    } else {
+        Ok(())
+    }
 }
 
 fn rel(root: &Path, p: &Path) -> String {

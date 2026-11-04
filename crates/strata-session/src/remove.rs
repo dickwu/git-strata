@@ -109,7 +109,7 @@ impl Sessions<'_> {
         let mut late: Vec<PathBuf> = Vec::new();
         for i in self.store.move_intents(id)?.iter().filter(|i| i.state == MoveState::Done) {
             let path = crate::old_tree::old_path(i);
-            if exists(&path) && matches!(self.auto_check(i, &path), crate::old_tree::AutoCheck::Late) {
+            if exists(&path) && matches!(self.auto_check(i, &path), crate::old_tree::AutoCheck::Late | crate::old_tree::AutoCheck::Skipped) {
                 late.push(path);
             }
         }

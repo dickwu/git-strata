@@ -44,3 +44,20 @@ fn walk_error_counts_as_recent_writes() {
         Err(_) => {}
     }
 }
+
+#[test]
+fn activity_walks_stop_without_converting_interruption_to_a_change() {
+    use std::sync::{Arc, atomic::AtomicBool};
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(d.path().join("a/b")).unwrap();
+    let before = walk_activity(d.path()).unwrap();
+    let baseline = strata_session::baseline_of(&before);
+    let stop = Arc::new(AtomicBool::new(true));
+    strata_apfs::with_walk_stop(stop, || {
+        let e = walk_activity(d.path()).unwrap_err();
+        assert_eq!(e.detail.unwrap()["reason"], "stopped");
+        let e = strata_session::changed_since(d.path(), &baseline).unwrap_err();
+        assert_eq!(e.detail.unwrap()["reason"], "stopped");
+    });
+    assert!(strata_session::changed_since(d.path(), &baseline).unwrap().is_empty());
+}

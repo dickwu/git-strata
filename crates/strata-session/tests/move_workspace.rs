@@ -80,6 +80,18 @@ fn mv(fx: &Fx, s: &Sessions<'_>, id: &SessionId, to: &(BaseGen, CommitOid)) -> s
     s.move_workspace(id, &rid(fx, "tool"), to.0.clone(), to.1.clone())
 }
 
+fn mv_allow(
+    fx: &Fx,
+    s: &Sessions<'_>,
+    id: &SessionId,
+    to: &(BaseGen, CommitOid),
+) -> strata_session::Result<MoveReport> {
+    strata_session::cwd::with_move_cwd(
+        strata_session::cwd::MoveCwd { allow_cwd_holders: true, ..Default::default() },
+        || mv(fx, s, id, to),
+    )
+}
+
 fn state(fx: &Fx, id: &SessionId, repo: &str) -> strata_types::WorkspaceState {
     fx.store().session(id).unwrap().unwrap().manifest.repos[&fx.rn(repo)].clone()
 }
@@ -784,7 +796,7 @@ fn move_workspace_keeps_old_tree_while_in_use() {
         let holder = Holder::cwd(&w.join("src"));
         std::thread::sleep(Duration::from_millis(100));
         let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
-        let r = mv(&fx, &s, &id, &to).unwrap();
+        let r = mv_allow(&fx, &s, &id, &to).unwrap();
         let old = r.old_tree.clone().expect("kept while in use");
         assert!(old.file_name().unwrap().to_string_lossy().starts_with(".strata-tmp-move-tool-"), "{}", old.display());
         assert_eq!(old.parent().unwrap(), session_root(&fx, &id));
@@ -1236,6 +1248,170 @@ fn no_stop() -> Arc<std::sync::atomic::AtomicBool> {
     Arc::new(std::sync::atomic::AtomicBool::new(false))
 }
 
+#[test]
+fn deferred_status_checks_fresh_agent_and_auto_trees_without_bypassing_retries() {
+    use strata_session::{OldTreeMode, OldTreeOutcome};
+    for agent in [false, true] {
+        let fx = Fx::with(&["tool"]);
+        let s = fx.sessions();
+        let rep = new_tool(&fx, &s);
+        let id = id(&rep);
+        let w = ws(&rep, "tool");
+        let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
+        let baseline = strata_session::baseline_of(&strata_session::walk_activity(&w).unwrap());
+        s.arm(SessionSeam::PauseAt {
+            phase: "move.swap".into(),
+        });
+        let mut holder = None;
+        let report = std::thread::scope(|scope| {
+            let mover = scope.spawn(|| {
+                if agent {
+                    s.move_workspace_agent(
+                        &id,
+                        &rid(&fx, "tool"),
+                        to.0.clone(),
+                        to.1.clone(),
+                        None,
+                        &baseline,
+                    )
+                } else {
+                    s.move_workspace_auto(
+                        &id,
+                        &rid(&fx, "tool"),
+                        to.0.clone(),
+                        to.1.clone(),
+                        None,
+                        &baseline,
+                    )
+                }
+            });
+            s.wait_paused();
+            holder = Some(Holder::cwd(&w));
+            s.release();
+            mover.join().unwrap().unwrap()
+        });
+        let old = report.old_tree.expect("held old tree");
+        s.set_old_tree_mode(OldTreeMode::Deferred);
+        assert!(
+            s.next_old_tree(Duration::ZERO).is_none(),
+            "Q is not due yet"
+        );
+        assert!(matches!(
+            old_kept(&s, &id),
+            Some(StatusWarning::OldTreeKept {
+                unchecked: true,
+                ..
+            })
+        ));
+        let (key, path, inode) = s
+            .next_old_tree(Duration::ZERO)
+            .expect("status queues within Q");
+        assert_eq!(path, old);
+
+        // Q rescheduling must not discard an immediate status request.
+        old_kept(&s, &id).unwrap();
+        s.queue_old_tree_at(
+            key.clone(),
+            path.clone(),
+            inode,
+            Instant::now() + Duration::from_secs(120),
+        );
+        assert_eq!(s.next_old_tree(Duration::ZERO).unwrap().0, key);
+        let yielded = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert_eq!(
+            strata_apfs::with_walk_stop(yielded, || s
+                .check_old_tree(&key, &path, inode, &no_stop())
+                .unwrap()),
+            OldTreeOutcome::Skipped("yielded")
+        );
+        let retry = Duration::from_secs(5);
+        assert_eq!(
+            s.retry_old_tree(key.clone(), path.clone(), inode, retry),
+            retry
+        );
+        s.forget_old_trees(&id); // Another move must not erase this retry.
+        old_kept(&s, &id).unwrap();
+        s.queue_all_old_trees().unwrap();
+        s.queue_old_tree_at(key.clone(), path.clone(), inode, Instant::now());
+        assert!(
+            s.next_old_tree(Duration::ZERO).is_none(),
+            "status and Q must respect retry backoff"
+        );
+
+        s.arm(SessionSeam::FailAt {
+            phase: "old_tree.read_passes".into(),
+            errno: libc::EIO,
+        });
+        assert_eq!(
+            s.check_old_tree(&key, &path, inode, &no_stop()).unwrap(),
+            OldTreeOutcome::Skipped("passes_read_failed")
+        );
+        assert_eq!(
+            s.retry_old_tree(key.clone(), path.clone(), inode, retry),
+            retry
+        );
+        assert_eq!(
+            s.retry_old_tree(key.clone(), path.clone(), inode, retry),
+            Duration::from_secs(50)
+        );
+        assert!(s.next_old_tree(Duration::ZERO).is_none());
+        assert!(old.is_dir() && s.old_tree_verdict(&key).is_none());
+        s.finish_old_tree_retry(&key);
+        assert_eq!(
+            s.retry_old_tree(key, path, inode, retry),
+            retry,
+            "completed work discards retry history"
+        );
+
+        // Interrupt the judgement itself, after the callers' other scans.
+        // Both rm and inline status must treat Skipped as potentially changed.
+        drop(holder);
+        s.set_old_tree_mode(OldTreeMode::Inline);
+        for remove in [false, true] {
+            let flag = no_stop();
+            s.arm(SessionSeam::PauseAt {
+                phase: "old_tree.activity_directory".into(),
+            });
+            std::thread::scope(|scope| {
+                let caller = scope.spawn(|| {
+                    strata_apfs::with_walk_stop(flag.clone(), || {
+                        if remove {
+                            let error = s.remove(&id, false, None).unwrap_err();
+                            assert_eq!(error.code, Code::Dirty);
+                            assert_eq!(
+                                error.detail.unwrap()["old_trees"][0]["path"],
+                                serde_json::json!(old)
+                            );
+                        } else {
+                            assert!(matches!(
+                                old_kept(&s, &id),
+                                Some(StatusWarning::OldTreeKept {
+                                    changed: Some(true),
+                                    ..
+                                })
+                            ));
+                        }
+                    })
+                });
+                s.wait_paused();
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                s.release();
+                caller.join().unwrap();
+            });
+            assert!(old.is_dir());
+            let n = intents(&fx, &id).last().unwrap().n;
+            assert!(
+                fx.store()
+                    .move_activity(&id, &fx.rn("tool"), n)
+                    .unwrap()
+                    .unwrap()
+                    .late_writes
+                    .is_none()
+            );
+        }
+    }
+}
+
 /// Deferred status never judges: no verdict → `changed: null`,
 /// `unchecked: true`, no holders, and the intent is queued; the background
 /// check then retires the idle unchanged tree with its admin dir, and the
@@ -1250,7 +1426,7 @@ fn deferred_status_queues_and_the_background_check_retires() {
     let holder = Holder::cwd(&w.join("src"));
     std::thread::sleep(Duration::from_millis(100));
     let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
-    let old = mv(&fx, &s, &id, &to).unwrap().old_tree.expect("kept while in use");
+    let old = mv_allow(&fx, &s, &id, &to).unwrap().old_tree.expect("kept while in use");
     let n = intents(&fx, &id).last().unwrap().n;
     s.set_old_tree_mode(strata_session::OldTreeMode::Deferred);
     let w0 = old_kept(&s, &id).expect("OldTreeKept");
@@ -1300,7 +1476,7 @@ fn background_check_keeps_changed_trees_and_honours_stop() {
     let holder = Holder::cwd(&w.join("src"));
     std::thread::sleep(Duration::from_millis(100));
     let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
-    let old = mv(&fx, &s, &id, &to).unwrap().old_tree.expect("kept while in use");
+    let old = mv_allow(&fx, &s, &id, &to).unwrap().old_tree.expect("kept while in use");
     drop(holder);
     let n = intents(&fx, &id).last().unwrap().n;
     let k = old_key(&id, n);
@@ -1341,7 +1517,7 @@ fn half_retired_sweep_takes_only_a_stale_admin_dir() {
     let holder = Holder::cwd(&w.join("src"));
     std::thread::sleep(Duration::from_millis(100));
     let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
-    let old = mv(&fx, &s, &id, &to).unwrap().old_tree.expect("kept while in use");
+    let old = mv_allow(&fx, &s, &id, &to).unwrap().old_tree.expect("kept while in use");
     drop(holder);
     let stale = admin(&fx, &id, "tool", 1);
     assert!(stale.is_dir());
@@ -1355,4 +1531,141 @@ fn half_retired_sweep_takes_only_a_stale_admin_dir() {
     assert!(!stale.exists() && current.is_dir(), "only the stale admin dir");
     assert!(s.sweep_half_retired(&id, &repo_name("tool")).unwrap().is_empty(), "idempotent");
     assert_eq!(health(&s, &id), WorkspaceHealth::Ok);
+}
+
+#[test]
+fn cwd_holders_refuse_unless_overridden_and_fd_holders_only_warn() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = new_tool(&fx, &s);
+    let id = id(&rep);
+    let w = ws(&rep, "tool");
+    let first = Holder::cwd(&w.join("node_modules/x"));
+    let second = Holder::cwd(&w.join("node_modules/x"));
+    std::thread::sleep(Duration::from_millis(50));
+    let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
+    let inode = ino(&w);
+    let e = mv(&fx, &s, &id, &to).unwrap_err();
+    assert_eq!(e.code, Code::OpenFiles);
+    assert_eq!(reason(&e), Some("cwd_holders"));
+    assert_eq!(ino(&w), inode);
+    let own = strata_session::cwd::MoveCwd { allow_cwd: true, caller_pids: vec![first.pid()], ..Default::default() };
+    let e = strata_session::cwd::with_move_cwd(own.clone(), || mv(&fx, &s, &id, &to)).unwrap_err();
+    let holders = detail(&e)["holders"].as_array().unwrap();
+    assert!(holders.iter().all(|h| h["pid"] != first.pid()));
+    assert!(holders.iter().any(|h| h["pid"] == second.pid()));
+    drop(second);
+    let report = strata_session::cwd::with_move_cwd(own, || mv(&fx, &s, &id, &to)).unwrap();
+    assert!(report.warnings.iter().any(|w| w["reason"] == "cwd_stale"));
+    drop(first);
+    let file = Holder::file(&w.join("src/index.ts"));
+    let to = target(&fx, &s, "tool", &[("src/next.ts", b"next\n")]);
+    let report = mv(&fx, &s, &id, &to).unwrap();
+    assert!(report.warnings.iter().any(|w| w["reason"] == "held_old_tree"));
+    drop(file);
+}
+
+#[test]
+fn daemon_child_cwd_exemption_does_not_exempt_dependency_descriptors() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = new_tool(&fx, &s);
+    let id = id(&rep);
+    let w = ws(&rep, "tool");
+    let child = Holder::cwd(&w);
+    let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
+    let policy = strata_session::cwd::MoveCwd { daemon_pid: Some(std::process::id() as i32), ..Default::default() };
+    strata_session::cwd::with_move_cwd(policy.clone(), || mv(&fx, &s, &id, &to)).unwrap();
+    drop(child);
+    let fd = Holder::file(&w.join("node_modules/x/index.js"));
+    let to = target(&fx, &s, "tool", &[("src/next.ts", b"next\n")]);
+    let e = strata_session::cwd::with_move_cwd(policy, || mv(&fx, &s, &id, &to)).unwrap_err();
+    assert_eq!(e.code, Code::OpenFiles);
+    drop(fd);
+}
+
+#[test]
+fn yielding_preserves_passes_only_without_holders_and_reuses_held_verdicts() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for held in [false, true] {
+        let fx = Fx::with(&["tool"]);
+        let s = fx.sessions();
+        let rep = new_tool(&fx, &s);
+        let id = id(&rep);
+        let w = ws(&rep, "tool");
+        let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
+        let baseline = strata_session::baseline_of(&strata_session::walk_activity(&w).unwrap());
+        // Start a holder after the final Auto scan, to keep the old tree.
+        s.arm(SessionSeam::PauseAt { phase: "move.swap".into() });
+        let mut holder = None;
+        let report = std::thread::scope(|scope| {
+            let move_thread = scope
+                .spawn(|| s.move_workspace_auto(&id, &rid(&fx, "tool"), to.0.clone(), to.1.clone(), None, &baseline));
+            s.wait_paused();
+            holder = Some(Holder::cwd(&w));
+            std::thread::sleep(Duration::from_millis(50));
+            s.release();
+            move_thread.join().unwrap().unwrap()
+        });
+        let path = report.old_tree.unwrap();
+        let n = intents(&fx, &id).last().unwrap().n;
+        let key = old_key(&id, n);
+        let inode = ino(&path);
+        assert!(fx.store().move_activity(&id, &fx.rn("tool"), n).unwrap().unwrap().late_writes.is_none());
+        s.check_old_tree(&key, &path, inode, &no_stop()).unwrap();
+        let previous = s.old_tree_verdict(&key).unwrap();
+        if !held {
+            drop(holder.take());
+        }
+        fx.store().set_move_passes(&id, &fx.rn("tool"), n, &[1]).unwrap();
+        let flag = Arc::new(AtomicBool::new(false));
+        let phase = if held { "old_tree.after_scan" } else { "old_tree.activity_directory" };
+        s.arm(SessionSeam::PauseAt { phase: phase.into() });
+        let out = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                strata_apfs::with_walk_stop(flag.clone(), || s.check_old_tree(&key, &path, inode, &no_stop()).unwrap())
+            });
+            s.wait_paused();
+            flag.store(true, Ordering::SeqCst);
+            s.release();
+            worker.join().unwrap()
+        });
+        assert_eq!(out, strata_session::OldTreeOutcome::Skipped("yielded"));
+        let row = fx.store().move_activity(&id, &fx.rn("tool"), n).unwrap().unwrap();
+        assert_eq!(row.passes, if held { vec![] } else { vec![1] });
+        assert!(row.late_writes.is_none());
+        assert_eq!(s.old_tree_verdict(&key).unwrap(), previous);
+        assert!(path.exists());
+        if held {
+            // A held cached verdict performs no comparison: the failing seam stays armed.
+            s.arm(SessionSeam::StopAt { phase: "old_tree.before_compare".into() });
+            assert!(matches!(
+                s.check_old_tree(&key, &path, inode, &no_stop()).unwrap(),
+                strata_session::OldTreeOutcome::Kept { .. }
+            ));
+        }
+    }
+}
+
+#[test]
+fn stopped_move_checks_keep_work_without_permanent_late_notices() {
+    use std::sync::atomic::{AtomicBool,Ordering};
+    for phase in ["move.recheck","move.old_tree"] {
+        let fx=Fx::with(&["tool"]);let s=fx.sessions();let rep=new_tool(&fx,&s);let id=id(&rep);let w=ws(&rep,"tool");
+        let to=target(&fx,&s,"tool",&[("src/up.ts",b"up\n")]);let before=ino(&w);
+        let baseline=strata_session::baseline_of(&strata_session::walk_activity(&w).unwrap());
+        let flag=Arc::new(AtomicBool::new(false));s.arm(SessionSeam::PauseAt{phase:phase.into()});
+        let result=std::thread::scope(|scope| {
+            let mover=scope.spawn(||strata_apfs::with_walk_stop(flag.clone(),||s.move_workspace_auto(&id,&rid(&fx,"tool"),to.0.clone(),to.1.clone(),None,&baseline)));
+            s.wait_paused();flag.store(true,Ordering::SeqCst);s.release();mover.join().unwrap()
+        });
+        let intent=intents(&fx,&id).last().unwrap().clone();
+        if phase=="move.recheck" {
+            let error=result.unwrap_err();assert_eq!(reason(&error),Some("stopped"));assert_eq!(ino(&w),before);
+        } else {
+            let report=result.unwrap();assert!(report.old_tree.unwrap().is_dir());
+            assert!(intent.old_tree.is_none(),"interruption must not permanently retain the tree");
+        }
+        assert!(fx.store().move_activity(&id,&fx.rn("tool"),intent.n).unwrap().unwrap().late_writes.is_none());
+    }
 }

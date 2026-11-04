@@ -509,15 +509,17 @@ pub(crate) fn plan(ctx: &Ctx, group: &ReleaseGroup, base: &CommitOid) -> Result<
         {
             for (path, _) in changes {
                 if ws.conflicts.contains(path) {
-                    move_conflicts.push(json!({"path":path, "session":cp.session}));
+                    move_conflicts.push(json!({"path":path, "session":cp.session,
+                        "fix":format!("cd ~ && git-strata sync --session {} --repo {} --resolved PATH (or --keep PATH); add the report's --target … --generation … when sync saved a conflict report", cp.session, ctx.repo)}));
                 }
             }
         }
     }
     if !move_conflicts.is_empty() {
+        let fix = move_conflicts[0]["fix"].clone();
         return Err(StrataError::new(Code::Conflict, "acknowledge the workspace move conflicts before publishing")
             .with_detail(json!({"reason":"move_conflict", "paths":move_conflicts.iter().map(|c|c["path"].clone()).collect::<Vec<_>>(),
-                "conflicts":move_conflicts, "fix":format!("git-strata sync --repo {} --resolved PATH (or --keep PATH); add the report's --target … --generation … when sync saved a conflict report", ctx.repo.as_str())})));
+                "conflicts":move_conflicts, "fix":fix})));
     }
     // §5.7: a path named by `assign` goes only with the named session.
     let named = crate::rebase::assignments(ctx.store, ctx.repo)?;

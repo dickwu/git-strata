@@ -341,7 +341,10 @@ impl Sessions<'_> {
             }
             .map(|drift| DriftStatus {
                 drift,
-                fix: format!("git-strata deps propose --session {} --repo {repo} --switch", id.as_str()),
+                fix: format!(
+                    "cd ~ && git-strata deps propose --session {} --repo {repo} --switch",
+                    id.as_str()
+                ),
                 note: DRIFT_NOTE.to_owned(),
             })
         } else {

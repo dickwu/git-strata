@@ -211,7 +211,12 @@ fn scan_candidates(
                 let mut err: Option<StrataError> = None;
                 for r in &rs[at..at + n] {
                     match r {
-                        Ok(v) => files.extend(v.iter().cloned()),
+                        // Both planners feed Explicit moves. The final
+                        // whole-workspace cwd guard applies caller/holder
+                        // exemptions; fd and mapping protection stays here.
+                        Ok(v) => {
+                            files.extend(v.iter().filter(|h| h.hold != crate::Hold::Cwd).cloned())
+                        }
                         Err(e) => {
                             err.get_or_insert_with(|| e.clone());
                         }

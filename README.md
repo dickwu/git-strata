@@ -235,7 +235,8 @@ Every call prints exactly one compact JSON line on stdout:
   and (only when stderr is a terminal) `pending proposal <id> for <repo>`.
 - Proposals still pending for the resolved session ride in
   `data.pending_proposals: [{id, repo}]` (key absent when there are none).
-- `--help` / `--version` print plain clap text on stdout and exit 0, with no envelope.
+- Successful `help`, `--help` and `--version` print plain text on stdout and exit 0,
+  with no envelope. Unknown help topics return `InvalidInput` / `help_topic`.
 - Bad arguments give `InvalidInput` with `detail.reason` `unknown_command`
   (plus `detail.commands`, and `detail.group` inside `deps` / `daemon` / `config`)
   or `args`.
@@ -297,8 +298,22 @@ tree is kept instead of retired (`status`/`ls` list it under `kept_trees`
 with the late-written paths); `rm` refuses until it is published or discarded, and the
 `rm --discard` prompt names it.
 
+**R2 client upgrade.** Update installed skills with `npx skills update git-strata -g`.
+Moving sync now refuses the caller's workspace cwd even when already up to date;
+run it from outside with `--session`, then cd back. Other cwd holders need to
+leave or be explicitly accepted with `--allow-cwd-holders`; the caller's own
+PID chain can be accepted with `--allow-cwd`. Neither overrides dependency-file
+or mapped-file guards. Staging cwd produces `NoSuchSession stale_cwd`.
+
+`status` has a 30 s deadline (120 s with `--all`), `sync` 600 s. Override with
+`--timeout SECS` or `GIT_STRATA_TIMEOUT` (flag wins; 0 unlimited). Hooks retain
+their five-second bound. A timed-out complete write is `Unknown client_timeout`:
+it may still run; check status and do not retry, gc, or rm. Reads/incomplete
+frames are `Busy client_timeout`; back off. `--progress` enables stderr notes
+without a TTY. stdout remains one compact JSON line: never use `2>&1 | jq`.
+
 **Syncing main explicitly.** `git-strata sync --check` inspects local upstream;
-`git-strata sync --repo R` fetches and attempts a move. A non-following upstream
+`cd ~ && git-strata sync --session S --repo R` fetches and attempts a move. A non-following upstream
 entry has `following:false` and no sync `fix`; ignore its behind count and only
 acknowledge named workspace conflicts. A plain sync returns `not_following`.
 On a sync conflict, resolve paths with the report's `--target` / `--generation`.
@@ -437,6 +452,7 @@ git-strata add --session "$S" --repo front   # only if front is needed later
 cd "$W"                                      # edit files here
 git-strata checkpoint -m "parse config before connect"
 git-strata diff                              # vs the base
+cd ~                                        # publish and remove outside the workspace
 git-strata publish --from "${S}:src/a.ts" --from "${S}:src/lib"
 #  -> data.commits.<repo> = commit oid; data.pushes = pushes done by publish
 git-strata rm --session "$S"
@@ -506,6 +522,7 @@ for a command in the workspace; it is not a release path. A release build runs i
 
 ```sh
 git-strata checkpoint -m "release: <what>"               # in the workspace
+cd ~                                                    # leave the workspace first
 git-strata publish --from "${S}:path/a" --from "${S}:path/b"
 #  -> data.commits.<repo> = C; data.pushes[].outcome.kind must be "Pushed"
 #     (repo with publish.push = false: git-strata push <repo>, human on a TTY if gated)
@@ -589,8 +606,12 @@ Pushing right after each publish keeps the window small.
 
 ## Confirmation gate (Touch ID / TTY)
 
+Installed full rules: `git-strata help gate`, when supported by the installed
+binary. Command help keeps a short summary; on older installs use
+`git-strata <command> --help` for that version's rules.
+
 > Keep this section in step with `gate_text!` in
-> `crates/git-strata/src/help.rs`, which is the same text in `--help`.
+> `crates/git-strata/src/help.rs`, which supplies `git-strata help gate`.
 > It describes the current code and is expected to change.
 
 **Which repos are gated.** A repo needs confirmation when
@@ -724,22 +745,27 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Busy` (`port_unidentified` / `port_probe_error`) | `session exec` could not identify a port's holder; retry shortly |
 | `Busy` (`ports_exhausted`) | no free port block in `[dev_ports]`; tell the human |
 | `Busy` (`lease_changed`) | `session ports --reassign`: another caller moved the lease since the check; run `session ports --check` again and decide afresh |
+| `Busy` (`client_timeout`) | read deadline or incomplete request; nothing changed by this request, back off before retrying |
+| `Unknown` (`client_timeout`) | the complete write may still run; inspect status, do not retry, `gc` or `rm` |
 | `Busy` (other) | repo lock held; wait, retry later |
 | `NotTty` | hand the exact command to the human |
 | `NotConfirmed` | report; the human reruns (`plan_changed`: rerun once yourself) |
 | `AmbiguousMatch` | ticket matches several sessions; use an id from `detail` (`from_repo`: a `--from` path is in several repos; rerun with one of `detail.expected`, the `S:REPO:PATH` form) |
+| `NoSuchSession` (`stale_cwd`) | cwd is in a staging/old tree; cd to `detail.workspace` |
 | `NoSuchSession` | cd into a workspace or pass `--session` |
 | `NoSuchRepo` | name not in config; `not_in_session`: run `detail.fix` (`git-strata add --session S --repo R`) |
 | `NoSuchBranch` | (`new`) a repo has no `origin/<default_branch>`; tell the human |
 | `InvalidInput` | fix arguments per `detail.reason` (`from_repo_prefix` / `from_path`: rewrite `--from` as `detail.expected` says); `chain_diverged` on a repo without confirmation: `git-strata push REPO` replays it (see [Origin moved](#origin-moved-under-the-unpushed-chain-push-replays)), then rerun; `chain_rewound`, or diverged on a gated repo: human runs `chain`; push-guard reasons above: tell the human |
-| `Conflict` (publish) | fix and rerun the same publish (above); `move_conflict` first needs named acknowledgement through sync |
-| `Conflict` (`sync_conflict`) | resolve every reported path with `sync --resolved`/`--keep` and the supplied target/generation; see the [agent workflow](skills/git-strata/sync.md) |
+| `Conflict` (publish) | fix and rerun the same publish (above); `move_conflict` first needs `cd ~ && git-strata sync --session S --repo R --resolved PATH` (or `--keep PATH`), with the report's target/generation when required |
+| `Conflict` (`sync_conflict`) | resolve every reported path with `cd ~ && git-strata sync --session S --repo R --resolved PATH` (or `--keep PATH`) and the supplied target/generation; see the [agent workflow](skills/git-strata/sync.md) |
 | `Conflict` (`base_diverged`) | stop and ask the human to recover the chain; never accept divergence on your own |
 | `Conflict` (`assigned`) | another session owns the path; do not retry |
 | `NoMatch` | a `--from` path is not checkpointed; checkpoint, rerun |
 | `NoCommit` | nothing new; not a failure |
 | `Dirty` | `rm` on unpublished work (`detail.repos`, `detail.untracked_repos`, `detail.unresolved`); publish it or ask the human for `rm --discard` |
-| `OpenFiles` | a process holds files (`detail` has pids); stop it only if you started it, retry |
+| `OpenFiles` (`caller_cwd`) | run `detail.fix` from outside, preserving its repo/resolution flags; then cd back |
+| `OpenFiles` (`cwd_holders`) | use `--allow-cwd` for your own PID chain; other holders must cd out or be explicitly accepted with `--allow-cwd-holders`; re-enter the workspace after moving |
+| `OpenFiles` (other) | a process holds files (`detail` has pids); stop it only if you started it, retry |
 | `CheckFailed` | the repo's check failed in staging; fix, checkpoint, publish again |
 | `CheckMutates` | config problem; tell the human |
 | `HeadMoved` | sync: review the fresh report and re-resolve (or deliberately keep) with its binding, at most five retries; other commands: re-read state, do not loop |
@@ -807,19 +833,20 @@ Flags, defaults and `data` shapes:
 
 | Command | Human needed |
 | --- | --- |
+| `help [TOPIC \| COMMAND ...]` | no |
 | `new [TICKET] [--ticket T] (--repo R... \| --repos A,B)` | no |
 | `add --repo R... [--session S]` | no |
-| `status [--session S \| --all]` | no |
+| `status [--session S \| --all] [--brief] [--timeout SECS] [--progress]` | no |
 | `checkpoint (--tool-call [ID] \| -m MSG) [--session S] [--path P]...` | no |
 | `restore CHECKPOINT [PATHS]... [--session S]` | no |
 | `grep PATTERN [--session S \| --all]` | no |
 | `files [GLOB] [--session S \| --all]` | no |
 | `diff [--base \| --session S \| --between A B] [--repo R]` | no |
-| `deps propose [--session S] [--repo R] [--switch]` / `deps list [--repo R]` | no |
-| `deps approve ID [--sessions S,S]` | yes |
+| `deps propose [--session S] [--repo R] [--switch] [--allow-cwd] [--allow-cwd-holders]` / `deps list [--repo R]` | no |
+| `deps approve ID [--sessions S,S] [--allow-cwd] [--allow-cwd-holders]` | yes |
 | `publish --from S:PATH... ` / `publish --assign FILE SESSION` | only when gated |
 | `push REPO` | only when gated |
-| `sync [--session S] [--repo R]... [--check [--hook]] [--no-fetch] [--resolved PATH \| --keep PATH]... [--target HEAD --generation N] [--accept-diverged]` | no (`--accept-diverged` only on the human's say-so) |
+| `sync [--session S] [--repo R]... [--check [--hook]] [--no-fetch] [--resolved PATH \| --keep PATH]... [--target HEAD --generation N] [--accept-diverged] [--allow-cwd] [--allow-cwd-holders] [--timeout SECS] [--progress]` | no (`--accept-diverged` only on the human's say-so) |
 | `assign --file PATH --session S` | no |
 | `rm --session S [--discard]` | `--discard` only |
 | `gc` | no |

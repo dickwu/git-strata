@@ -7,6 +7,14 @@ use serde::{Deserialize, Serialize};
 pub struct SyncRequest {
     pub session: SessionId,
     #[serde(default)]
+    pub caller_cwd: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub caller_pids: Vec<i32>,
+    #[serde(default)]
+    pub allow_cwd: bool,
+    #[serde(default)]
+    pub allow_cwd_holders: bool,
+    #[serde(default)]
     pub repos: Option<Vec<RepoName>>,
     #[serde(default)]
     pub check: bool,

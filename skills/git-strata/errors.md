@@ -3,12 +3,13 @@
 ## The JSON envelope
 
 stdout carries exactly one compact JSON line; exit code 0 iff `ok` is true,
-else 1. Human prompts and notices go to stderr only. Exceptions: `--help`/`--version`;
+else 1. Human prompts and notices go to stderr only. Exceptions: successful `help`, `--help`/`--version`;
 `ls --table` prints a text table; `sync --check --hook` prints the hook's
 own JSON (see [hooks.md](hooks.md)); and a
 `session exec` that starts its command prints no envelope; stdout, stderr
 and the exit status are the command's (a failure before the start is an
-envelope as usual).
+envelope as usual). Unknown help topics return an `InvalidInput` / `help_topic`
+envelope.
 
 ```json
 {"ok":true,"data":{...},"error":null}
@@ -25,6 +26,12 @@ All three keys are always present; `data` is never null. Branch on
 | `Busy` (`workspace_changed`) | A file changed while reading it; retry. |
 | `Busy` (`publish_unknown`) | An earlier publish of this repo is `Unknown`. It clears by itself once origin has that commit (checked on each publish). Do not loop: tell the human; they may run `git-strata push <REPO>` first. |
 | `Busy` / `Unknown` with `detail.sibling` | Preparing that sibling repo (fetch, anchor) was busy or unknown. `Busy`: retry later. `Unknown`: stop and tell the human. |
+| `Busy client_timeout` | Read deadline or final request newline unsent; nothing changed by this request. Back off before retrying. `phase` is connect/send/reply. |
+| `Unknown client_timeout` | The complete write may still run. Inspect status; do not retry, gc, or rm. Timeout did not cancel it. |
+| `NoSuchSession stale_cwd` | Cwd is in a staging/old tree; cd to `detail.workspace`. |
+| `HeadMoved baseline_moved` | The checkpoint baseline tree no longer equals the workspace head's tree. Rerun the exact `publish --from …` command in `detail.fix`; do not treat this as a sync conflict. |
+| `OpenFiles caller_cwd` | Nothing moved; run `detail.fix` from outside, preserving its repo/resolution flags, then cd back to the workspace path. |
+| `OpenFiles cwd_holders` | Other shells would be left in the old tree; ask their owners to cd out. `--allow-cwd` only exempts the caller's PID chain; `--allow-cwd-holders` explicitly accepts others. |
 | `Busy` (other) | Repo lock held by another operation; wait and retry later. |
 | `NotTty` | Command needs a human at a terminal. Stop; give the exact command to the human. |
 | `NotConfirmed` | Human confirmation failed / was cancelled / expired. Report it; the human reruns. Exception: `detail.reason` `plan_changed` (publish) means no confirmation was attempted and nothing was written: rerun the same command yourself first; if that rerun returns `NotTty`, hand the command to the human. |
@@ -48,7 +55,7 @@ All three keys are always present; `data` is never null. Branch on
 | `CheckMutates` | Configured check writes files; config problem, tell the human. |
 | `HeadMoved` | Another publish or main moved first. For sync, use the fresh report and re-resolve; already-resolved unchanged bytes need an explicit `--keep`. Bound retries as in [sync.md](sync.md). |
 | `PushRefused` | Remote refused (detail has its words). Report to the human. |
-| `Unknown` | Outcome uncertain (e.g. push timeout, `socket_closed`). Do not retry or clean up; run `status` and tell the human. Exception: `detail.reason` `poisoned` means nothing was written; the daemon restarts itself to reopen the store, so retry once after `git-strata daemon status` answers again. |
+| `Unknown` | Outcome uncertain (e.g. push timeout, `socket_closed`). Do not retry, gc, or rm; run `status` and tell the human. Exception: `detail.reason` `poisoned` means nothing was written; the daemon restarts itself to reopen the store, so retry once after `git-strata daemon status` answers again. |
 | `Binary` / `TooLarge` | Per-entry markers in `diff` / `grep` results; not a call failure. |
 | `Corrupt` | Store damage. Stop and tell the human. |
 

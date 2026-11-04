@@ -115,7 +115,7 @@ pub fn install_path_for_home(home: &Path) -> String {
 /// Optional request features this daemon serves, listed in
 /// `daemon_status.features` so a newer CLI can tell what an older daemon
 /// would reject. Additive only. `new.agent`: `new` takes `agent`.
-pub const FEATURES: &[&str] = &["new.agent", "session.ports", "status.upstream", "sync"];
+pub const FEATURES: &[&str] = &["new.agent", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard"];
 
 /// The launchd label of the agent.
 pub const AGENT_LABEL: &str = "com.gwd.git-stratad";
@@ -175,6 +175,7 @@ pub enum DaemonWarning {
     Quarantine { path: PathBuf },
     AttachOutside { reason: String, index: PathBuf },
     LongHold { repo: RepoName, method: String, since: SystemTime },
+    LongWait { repo: Option<RepoName>, session: Option<SessionId>, method: String, since: SystemTime, attempt_since: SystemTime },
     UnknownPublish { id: u64 },
     PublishRunning { id: u64 },
     ConfigRelaxPending { repo: RepoName },

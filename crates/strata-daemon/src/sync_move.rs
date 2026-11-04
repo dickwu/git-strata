@@ -162,6 +162,26 @@ pub fn run(d: &Daemon<'_>, req: SyncRequest) -> Result<Value> {
         }
         repos = candidates;
     }
+    if !req.check
+        && !req.allow_cwd
+        && let Some(cwd) = &req.caller_cwd
+    {
+        let intents = core.store.move_intents(&req.session)?;
+        for repo in &repos {
+            let ws = &rec.manifest.repos[repo];
+            let in_old = intents.iter().filter(|i| &i.repo == repo).any(|i| {
+                strata_session::cwd::inside(cwd, i.old_tree.as_ref().unwrap_or(&i.staging))
+            });
+            if strata_session::cwd::inside(cwd, &ws.path) || in_old {
+                return Err(strata_session::cwd::refuse_caller(
+                    cwd,
+                    req.session.as_str(),
+                    &ws.path,
+                    &json!(req),
+                ));
+            }
+        }
+    }
     let mut fetched = BTreeMap::new();
     let mut done = BTreeMap::new();
     crate::handlers::writing();
@@ -204,7 +224,15 @@ pub fn run(d: &Daemon<'_>, req: SyncRequest) -> Result<Value> {
             continue;
         }
         let r = if core.repo_cfg(repo)?.follow_main() {
-            sync_one(d, &req, repo, &named)
+            strata_session::cwd::with_move_cwd(
+                strata_session::cwd::MoveCwd {
+                    allow_cwd: req.allow_cwd,
+                    allow_cwd_holders: req.allow_cwd_holders,
+                    caller_pids: req.caller_pids.clone(),
+                    daemon_pid: Some(std::process::id() as i32),
+                },
+                || sync_one(d, &req, repo, &named),
+            )
         } else {
             Ok(json!({"result":"not_following","following":false}))
         };
@@ -470,7 +498,7 @@ fn sync_one(
             let mut out = json!({"result":if reason.is_some(){"source_only"}else{"moved"},
                 "from":{"head":moved.from_head,"deps":moved.from.deps},"to":{"head":head,"deps":target.deps},
                 "resolved":req.resolved,"kept":req.keep,"whole_file":whole_file,"lww":moved.lww,"regenerable_kept":kept,
-                "old_tree":moved.old_tree});
+                "old_tree":moved.old_tree,"warnings":moved.warnings});
             if !dropped.is_empty() { out["accepted_diverged"] = json!(dropped); }
             if let Some(state) = &deps_reply {
                 out["deps"] = state.clone();

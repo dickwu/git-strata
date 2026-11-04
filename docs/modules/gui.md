@@ -279,7 +279,7 @@ waiting-human state, or a non-conflict deferral strictly older than 24 hours.
 The shared age predicate excludes `auto.reason=conflicts`; `since` measures the pending row's original `first_at`, not time spent in the current state. Bad/missing dates do not pass the threshold. Unhealthy workspaces and scenes
 retain human attention and their specific GUI reason even when upstream data is absent.
 Conflicts and `auto.reason=conflicts`
-point to “needs the session's agent” and offer Copy for `git-strata sync --session S --repo R`, never
+point to “needs the session's agent” and offer Copy for `cd ~ && git-strata sync --session S --repo R`, never
 an approval. Copy does not execute the command.
 
 The `status.upstream` capability gates cached `↓N` list badges and the detail modal's per-repo “From main”

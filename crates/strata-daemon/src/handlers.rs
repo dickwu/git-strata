@@ -396,7 +396,7 @@ impl<'a> Trackers<'a> {
             if self.core.locks.is_shut_down() {
                 return;
             }
-            let _ = self.core.locks.try_session(&s, || {
+            let _ = self.core.locks.try_session(&s, "reconcile", || {
                 let ws = workspace(self.core, &s, &repo)?;
                 let t = self.take(&s, &repo, &ws);
                 self.put(&s, &repo, t);
@@ -417,7 +417,7 @@ impl<'a> Trackers<'a> {
             if core.locks.is_shut_down() {
                 break;
             }
-            let r = core.locks.try_session(&s, || {
+            let r = core.locks.try_session(&s, "reconcile", || {
                 let ws = workspace(core, &s, &repo)?;
                 let base = base_of(core, &ws.base)?;
                 let wref = WorkspaceRef { session: &s, repo: &repo, root: &ws.path, config: repo_cfg(core, &repo)?, git: git_of(core, &repo)?, store: &core.store };
@@ -439,9 +439,7 @@ impl<'a> Trackers<'a> {
             }
             match core.locks.with_repo(repo, || core.store.gc_repo(repo, GC_KEEP).map(|_| ())) {
                 Ok(()) => gc.push(json!({ "repo": repo.as_str(), "ok": true })),
-                Err(e) => {
-                    gc.push(json!({ "repo": repo.as_str(), "ok": false, "error": json_of(&e) }))
-                }
+                Err(e) => gc.push(json!({ "repo": repo.as_str(), "ok": false, "error": json_of(&e) })),
             }
         }
         json!({ "at": json_of(&SystemTime::now()), "scanned": scanned, "skipped": skipped, "failed": failed, "gc": gc })
@@ -474,7 +472,7 @@ impl<'a> Trackers<'a> {
 /// only. Never waits for the queue [实现时补的决定].
 impl OverlaySource for Trackers<'_> {
     fn last(&self, session: &SessionId, repo: &RepoName) -> Option<Overlay> {
-        let warm = self.core.locks.try_session(session, || {
+        let warm = self.core.locks.try_session(session, "reconcile", || {
             let core = self.core;
             let ws = workspace(core, session, repo)?;
             let base = base_of(core, &ws.base)?;
@@ -569,21 +567,19 @@ pub fn serve(d: &Daemon<'_>, listener: &std::os::unix::net::UnixListener, extern
             })
         });
         s.spawn(|| {
-            old_tree_loop(d, &|| {
-                done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
-            })
+            old_tree_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst))
         });
         s.spawn(|| {
-            catch_up_loop(d, &|| {
-                done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
-            })
+            catch_up_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst))
         });
         for repo in d.core.config.repos.keys() {
             for install in [true, false] {
                 let done = &done;
-                s.spawn(move || crate::main_sync::run_loop(d.core, repo, install, &|| {
-                    done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
-                }));
+                s.spawn(move || {
+                    crate::main_sync::run_loop(d.core, repo, install, &|| {
+                        done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
+                    })
+                });
             }
         }
         let r = d.serve(listener, external, &|req| server.handle(req));
@@ -719,6 +715,23 @@ const OLD_TREE_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 /// `stop` reaches into the walks: a judgement in progress gives up and
 /// writes no verdict.
 fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
+    old_tree_loop_with_retry(d, stop, OLD_TREE_RETRY);
+}
+
+#[cfg(feature = "test-seams")]
+pub fn test_old_tree_loop(
+    d: &Daemon<'_>,
+    stop: &(dyn Fn() -> bool + Sync),
+    retry: std::time::Duration,
+) {
+    old_tree_loop_with_retry(d, stop, retry);
+}
+
+fn old_tree_loop_with_retry(
+    d: &Daemon<'_>,
+    stop: &(dyn Fn() -> bool + Sync),
+    retry_delay: std::time::Duration,
+) {
     // Background work: this thread's disk I/O at utility priority, like du.
     crate::du::utility_io();
     let flag = Arc::new(AtomicBool::new(false));
@@ -734,38 +747,55 @@ fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
             }
         });
         let _ = catch_unwind(AssertUnwindSafe(|| old_tree_startup(d, &flag)));
-        let mut later: Vec<(std::time::Instant, strata_session::OldTreeKey, PathBuf, u64)> = Vec::new();
+        let mut sweep_at = std::time::Instant::now() + crate::RECONCILE_EVERY;
         while !flag.load(Ordering::SeqCst) {
-            let now = std::time::Instant::now();
-            later.retain(|(at, k, p, ino)| {
-                if *at <= now {
-                    d.sessions.requeue_old_tree(k.clone(), p.clone(), *ino);
-                    false
-                } else {
-                    true
-                }
-            });
+            if std::time::Instant::now() >= sweep_at {
+                let _ = catch_unwind(AssertUnwindSafe(|| old_tree_startup(d, &flag)));
+                sweep_at = std::time::Instant::now() + crate::RECONCILE_EVERY;
+            }
             let Some((key, path, ino)) = d.sessions.next_old_tree(std::time::Duration::from_millis(100)) else {
                 continue;
             };
+            let yield_to = Arc::new(AtomicBool::new(false));
             let r = catch_unwind(AssertUnwindSafe(|| {
-                d.core.locks.try_session(&key.session, || {
-                    d.core.locks.with_repo(&key.repo, || d.sessions.check_old_tree(&key, &path, ino, &flag))
+                crate::locks::with_yield(yield_to.clone(), || {
+                    d.core.locks.try_session(&key.session, "old_tree", || {
+                        d.core.locks.try_repo(&key.repo, "old_tree", || {
+                            strata_apfs::with_walk_stop(yield_to.clone(), || {
+                                d.sessions.check_old_tree(&key, &path, ino, &flag)
+                            })
+                        })
+                    })
                 })
             }));
+            if flag.load(Ordering::SeqCst) {
+                d.sessions.finish_old_tree_retry(&key);
+                break;
+            }
+            // A late waiter can set yield_to after a completed judgement;
+            // only an actually interrupted outcome needs a yield retry.
+            let retry = matches!(&r, Ok(None))
+                || matches!(
+                    &r,
+                    Ok(Some(Ok(strata_session::OldTreeOutcome::Skipped(
+                        "yielded" | "passes_read_failed"
+                    ))))
+                )
+                || matches!(&r, Ok(Some(Err(e))) if e.code == Code::Busy);
+            if retry {
+                d.sessions
+                    .retry_old_tree(key.clone(), path.clone(), ino, retry_delay);
+            } else {
+                d.sessions.finish_old_tree_retry(&key);
+            }
             match r {
-                Ok(None) => {
-                    later.push((std::time::Instant::now() + OLD_TREE_RETRY, key, path, ino))
-                }
-                Ok(Some(Ok(out))) => {
-                    tracing::debug!(session = %key.session, repo = %key.repo, n = key.n, outcome = ?out, "old tree checked");
-                }
-                Ok(Some(Err(e))) => {
-                    tracing::warn!(session = %key.session, repo = %key.repo, n = key.n, error = %e.message, "old tree check failed");
+                Ok(Some(Err(e))) if e.code != Code::Busy => {
+                    tracing::warn!(session = %key.session, repo = %key.repo, n = key.n, error = %e.message, "old tree check failed")
                 }
                 Err(_) => {
-                    tracing::warn!(session = %key.session, repo = %key.repo, n = key.n, "old tree check panicked");
+                    tracing::warn!(session = %key.session, repo = %key.repo, n = key.n, "old tree check panicked")
                 }
+                _ => {}
             }
         }
         finished.store(true, Ordering::SeqCst);
@@ -774,7 +804,7 @@ fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
 
 /// The start of [`old_tree_loop`]: the half-retired sweep of every active
 /// session (busy ones are skipped this time), then every old tree queued.
-fn old_tree_startup(d: &Daemon<'_>, flag: &AtomicBool) {
+fn old_tree_startup(d: &Daemon<'_>, flag: &Arc<AtomicBool>) {
     let Ok(ids) = d.sessions.list() else { return };
     for id in ids {
         if flag.load(Ordering::SeqCst) {
@@ -784,19 +814,30 @@ fn old_tree_startup(d: &Daemon<'_>, flag: &AtomicBool) {
             Ok(Some(rec)) => rec.manifest.repos.keys().cloned().collect(),
             _ => continue,
         };
-        let _ = d.core.locks.try_session(&id, || {
+        let yielded = Arc::new(AtomicBool::new(false));
+        let _ = crate::locks::with_yield(yielded.clone(), || {
+            d.core.locks.try_session(&id, "old_tree", || {
             for repo in &repos {
-                match d.core.locks.with_repo(repo, || d.sessions.sweep_half_retired(&id, repo)) {
+                if flag.load(Ordering::SeqCst) || yielded.load(Ordering::SeqCst) { break; }
+                match d.core.locks.try_repo(repo, "old_tree", || {
+                    strata_apfs::with_walk_stop(flag.clone(), || strata_apfs::with_walk_stop(yielded.clone(), ||
+                        d.sessions.sweep_half_retired(&id, repo)))
+                }) {
                     Ok(done) => {
                         for p in done {
                             tracing::info!(session = %id, repo = %repo, path = %p.display(), "retired a half-retired admin dir");
                         }
                     }
+                    Err(e) if e.code == Code::Busy => tracing::debug!(session = %id, repo = %repo, "half-retired sweep: repo busy; skipped"),
                     Err(e) => tracing::warn!(session = %id, repo = %repo, error = %e.message, "half-retired sweep failed"),
                 }
             }
             Ok(())
+        })
         });
+        if yielded.load(Ordering::SeqCst) {
+            break;
+        }
     }
     if let Err(e) = d.sessions.queue_all_old_trees() {
         tracing::warn!(error = %e.message, "could not queue the old trees");
@@ -814,7 +855,7 @@ fn refresh_seeds_pass(d: &Daemon<'_>) {
             return;
         }
         if d.sessions.seeds_due(&id).is_ok_and(|v| !v.is_empty()) {
-            let _ = d.core.locks.try_session(&id, || d.sessions.refresh_seeds(&id));
+            let _ = d.core.locks.try_session(&id, "reconcile", || d.sessions.refresh_seeds(&id));
         }
     }
 }
@@ -847,17 +888,11 @@ impl<'d, 'a> Server<'d, 'a> {
 
     fn upstream_best_effort(&self, id: &SessionId) -> Option<strata_types::Upstream> {
         let read = || -> Result<_> {
-            let row = self
-                .core()
-                .store
-                .session(id)?
-                .ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
-            self.core().upstream.session(
-                self.core(),
-                &row,
-                crate::upstream::ReadMode::Full,
-                |r, ws, generation| self.trackers.live(id, r, ws, generation, false),
-            )
+            let row =
+                self.core().store.session(id)?.ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
+            self.core().upstream.session(self.core(), &row, crate::upstream::ReadMode::Full, |r, ws, generation| {
+                self.trackers.live(id, r, ws, generation, false)
+            })
         };
         match catch_unwind(AssertUnwindSafe(read)) {
             Ok(Ok(upstream)) => Some(upstream),
@@ -916,9 +951,7 @@ impl<'d, 'a> Server<'d, 'a> {
         };
         let upstream = core
             .upstream
-            .session(core, &row, mode, |r, ws, generation| {
-                self.trackers.live(&id, r, ws, generation, p.hook)
-            })?;
+            .session(core, &row, mode, |r, ws, generation| self.trackers.live(&id, r, ws, generation, p.hook))?;
         Ok(json!({ "session": id, "upstream": upstream }))
     }
 
@@ -962,6 +995,10 @@ impl<'d, 'a> Server<'d, 'a> {
                 let id = self.sync_session(p)?;
                 let req = strata_types::SyncRequest {
                     session: id.clone(),
+                    caller_cwd: p.cwd.clone(),
+                    caller_pids: p.caller_pids.clone(),
+                    allow_cwd: p.allow_cwd,
+                    allow_cwd_holders: p.allow_cwd_holders,
                     repos: (!p.repos.is_empty()).then(|| p.repos.clone()),
                     check: false,
                     fetch: p.fetch,
@@ -972,6 +1009,9 @@ impl<'d, 'a> Server<'d, 'a> {
                     accept_diverged: p.accept_diverged,
                 };
                 let result = crate::sync_move::run(self.d, req);
+                if result.as_ref().is_err_and(|e| e.detail.as_ref().is_some_and(|d| d["reason"] == "caller_cwd")) {
+                    return result;
+                }
                 // Includes repos moved before a later repo returned a conflict.
                 let _ = core.locks.with_sessions(std::slice::from_ref(&id), || {
                     if let Some(rec) = core.store.session(&id)? {
@@ -1179,7 +1219,9 @@ impl<'d, 'a> Server<'d, 'a> {
                         core.store.gc_repo(&repo, GC_KEEP)
                     }) {
                         Ok(rep) => done.push(json!({ "repo": repo.as_str(), "report": json_of(&rep) })),
-                        Err(e) if e.code == Code::Busy => skipped.push(json!({ "repo": repo.as_str(), "error": json_of(&e) })),
+                        Err(e) if e.code == Code::Busy => {
+                            skipped.push(json!({ "repo": repo.as_str(), "error": json_of(&e) }))
+                        }
                         Err(e) => return Err(e),
                     }
                 }
@@ -1241,14 +1283,32 @@ impl<'d, 'a> Server<'d, 'a> {
                 Ok(json_of(&r))
             }
             Params::ChainResolve(p) => {
-                let r = resolve::chain_resolve(core, &p.repo, p.choice, p.shown.as_ref(), &mut |tip| resolve::observe_tip(core, &p.repo, tip));
+                let r = resolve::chain_resolve(core, &p.repo, p.choice, p.shown.as_ref(), &mut |tip| {
+                    resolve::observe_tip(core, &p.repo, tip)
+                });
                 if r.as_ref().is_err_and(|e| e.code == Code::Unknown) {
                     self.report_unknown();
                 }
                 Ok(json_of(&r?))
             }
-            Params::DepsPropose(p) => self.deps_propose(&p.session, &p.repo, p.switch),
-            Params::DepsApprove(p) => self.deps_approve(p.proposal, p.sessions.as_deref()),
+            Params::DepsPropose(p) => strata_session::cwd::with_move_cwd(
+                strata_session::cwd::MoveCwd {
+                    allow_cwd: p.allow_cwd,
+                    allow_cwd_holders: p.allow_cwd_holders,
+                    caller_pids: p.caller_pids.clone(),
+                    daemon_pid: Some(std::process::id() as i32),
+                },
+                || self.deps_propose(&p.session, &p.repo, p.switch),
+            ),
+            Params::DepsApprove(p) => strata_session::cwd::with_move_cwd(
+                strata_session::cwd::MoveCwd {
+                    allow_cwd: p.allow_cwd,
+                    allow_cwd_holders: p.allow_cwd_holders,
+                    caller_pids: p.caller_pids.clone(),
+                    daemon_pid: Some(std::process::id() as i32),
+                },
+                || self.deps_approve(p.proposal, p.sessions.as_deref()),
+            ),
         }
     }
 
@@ -1330,6 +1390,14 @@ impl<'d, 'a> Server<'d, 'a> {
                 .with_detail(json!({ "reason": "summary_with_chains" })));
         }
         let core = self.core();
+        if !all
+            && selector.is_none()
+            && let Some(cwd) = cwd
+            && let Some(e) =
+                strata_session::cwd::stale_in(&core.store, &core.config.paths.root, cwd)?
+        {
+            return Err(e);
+        }
         let sel = if all {
             strata_session::SummarySelect::All
         } else if let Some(s) = selector {
@@ -1365,6 +1433,14 @@ impl<'d, 'a> Server<'d, 'a> {
     fn status(&self, cwd: Option<&Path>, selector: Option<&str>, all: bool, with_chains: bool) -> Result<Value> {
         let core = self.core();
         let sessions = &self.d.sessions;
+        if !all
+            && selector.is_none()
+            && let Some(cwd) = cwd
+            && let Some(e) =
+                strata_session::cwd::stale_in(&core.store, &core.config.paths.root, cwd)?
+        {
+            return Err(e);
+        }
         let ids: Vec<SessionId> = if all {
             sessions.list()?
         } else if let Some(sel) = selector {
@@ -1547,9 +1623,7 @@ impl<'d, 'a> Server<'d, 'a> {
         // 4.
         let switched = if switch {
             let target_tree = match &p.state {
-                strata_deps::ProposalState::Pending => {
-                    p.tree.clone().unwrap_or_else(|| ws.base.tree.clone())
-                }
+                strata_deps::ProposalState::Pending => p.tree.clone().unwrap_or_else(|| ws.base.tree.clone()),
                 _ => ws.base.tree.clone(),
             };
             self.base_for(repo, &target_tree, &p.to)?;
@@ -2010,7 +2084,9 @@ impl Server<'_, '_> {
             self.rebase_replayed(repo, rp, &mut rebases, &mut warnings);
         }
         if let Some(after) = tips.1.clone()
-            && let Some(e) = crate::fetch_after::observe_if_moved(tips.0.as_ref(), Some(&after), &mut || resolve::observe_tip(core, repo, &after))
+            && let Some(e) = crate::fetch_after::observe_if_moved(tips.0.as_ref(), Some(&after), &mut || {
+                resolve::observe_tip(core, repo, &after)
+            })
         {
             warnings.push(json!({ "kind": "ObserveFailed", "repo": repo.as_str(), "code": e.code.as_str(), "message": e.message }));
         }
@@ -2053,10 +2129,14 @@ impl Server<'_, '_> {
             }
         };
         for row in rows.into_iter().filter(|r| r.repo == *repo) {
-            let Some(copy) = row.head.as_deref().and_then(|h| rp.map.iter().find(|(_, n)| n.as_str() == h)) else { continue };
+            let Some(copy) = row.head.as_deref().and_then(|h| rp.map.iter().find(|(_, n)| n.as_str() == h)) else {
+                continue;
+            };
             let (from, to) = (copy.0.clone(), copy.1.clone());
             let s = row.session.clone();
-            let r = self.with_publish_ctx(repo, |ctx| strata_publish::pending::attempt(ctx, &row, strata_publish::MovePolicy::Auto));
+            let r = self.with_publish_ctx(repo, |ctx| {
+                strata_publish::pending::attempt(ctx, &row, strata_publish::MovePolicy::Auto)
+            });
             match r {
                 Ok(Some(report)) => rebases.push(json!({ "session": s.as_str(), "from": from.as_str(), "to": to.as_str(), "report": json_of(&report) })),
                 Ok(None) => {}
@@ -2203,7 +2283,9 @@ fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_
             Err(e) => return Err(e),
         };
         let now = git.tree_items(base, &files)?;
-        let key = |m: &BTreeMap<String, strata_gitio::TreeItem>, f: &RepoPath| m.get(f.as_str()).map(|i| (i.mode, i.oid.clone()));
+        let key = |m: &BTreeMap<String, strata_gitio::TreeItem>, f: &RepoPath| {
+            m.get(f.as_str()).map(|i| (i.mode, i.oid.clone()))
+        };
         if files.iter().all(|f| key(&now, f) == key(&then, f)) {
             return Ok(Some(json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "push": o.get("push").cloned().unwrap_or(Value::Null) })));
         }

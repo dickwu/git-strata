@@ -188,25 +188,29 @@ fn with_choices(mut st: Value) -> Value {
 }
 
 pub fn status(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
+    status_with_wait(ctx, sel, &crate::args::WaitArgs::default())
+}
+pub fn status_with_wait(ctx: &Ctx, sel: &Select, wait: &crate::args::WaitArgs) -> Result<Envelope> {
     both_selectors(sel)?;
     let params = json!({ "cwd": cwd(), "session": sel.session, "all": sel.all });
-    let mut list: Vec<Value> = match ctx.try_call("status", params, Kind::Read) {
-        Ok(v) => {
-            alerts(&v["warnings"]);
-            for l in v["leftovers"].as_array().into_iter().flatten() {
-                eprintln!("{}", leftover_text(l));
+    let mut list: Vec<Value> =
+        match crate::wait::call(ctx, "status", params, Kind::Read, wait, if sel.all { 120 } else { 30 }) {
+            Ok(v) => {
+                alerts(&v["warnings"]);
+                for l in v["leftovers"].as_array().into_iter().flatten() {
+                    eprintln!("{}", leftover_text(l));
+                }
+                v["sessions"].as_array().cloned().unwrap_or_default().into_iter().map(|s| s["status"].clone()).collect()
             }
-            v["sessions"].as_array().cloned().unwrap_or_default().into_iter().map(|s| s["status"].clone()).collect()
-        }
-        Err(CallError::Down(_)) => {
-            let (list, left) = local_status(ctx, sel)?;
-            for l in &left {
-                eprintln!("{}", leftover_text(l));
+            Err(CallError::Down(_)) => {
+                let (list, left) = local_status(ctx, sel)?;
+                for l in &left {
+                    eprintln!("{}", leftover_text(l));
+                }
+                list
             }
-            list
-        }
-        Err(CallError::Failed(e)) => return Err(e),
-    };
+            Err(e) => return Err(e.into_error()),
+        };
     list = list.into_iter().map(with_choices).collect();
     for st in &list {
         print_notes(&st["manifest"]["id"], st);
@@ -267,13 +271,22 @@ fn predates_summary(e: &StrataError) -> bool {
 /// daemon listens (D5) or the daemon predates `summary`. Returns the
 /// sessions, whether they came from the store directly, and the
 /// removed-session leftovers (R3).
-fn summaries(ctx: &Ctx, sel: &Select, workspaces: bool) -> Result<(Vec<Value>, bool, Vec<Value>)> {
+fn summaries(
+    ctx: &Ctx,
+    sel: &Select,
+    workspaces: bool,
+    wait: Option<&crate::args::WaitArgs>,
+) -> Result<(Vec<Value>, bool, Vec<Value>)> {
     let here = cwd();
     let mut params = json!({ "cwd": here, "session": sel.session, "all": sel.all, "summary": true });
     if workspaces {
         params["workspaces"] = json!(true);
     }
-    match ctx.try_call("status", params, Kind::Read) {
+    let reply = match wait {
+        Some(wait) => crate::wait::call(ctx, "status", params, Kind::Read, wait, if sel.all { 120 } else { 30 }),
+        None => ctx.try_call("status", params, Kind::Read),
+    };
+    match reply {
         Ok(v) => Ok((
             v["sessions"].as_array().cloned().unwrap_or_default(),
             false,
@@ -283,6 +296,12 @@ fn summaries(ctx: &Ctx, sel: &Select, workspaces: bool) -> Result<(Vec<Value>, b
         Err(_) => {
             let config = ctx.config()?;
             let store = ro::open_store(&config)?;
+            if !sel.all
+                && sel.session.is_none()
+                && let Some(e) = strata_session::cwd::stale_in(&store, &config.paths.root, &here)?
+            {
+                return Err(e);
+            }
             let which = if sel.all {
                 strata_session::SummarySelect::All
             } else if let Some(s) = sel.session.as_deref() {
@@ -302,7 +321,7 @@ fn summaries(ctx: &Ctx, sel: &Select, workspaces: bool) -> Result<(Vec<Value>, b
 
 /// `ls`: every live session, by id.
 pub fn ls(ctx: &Ctx) -> Result<Envelope> {
-    let (list, local, left) = summaries(ctx, &Select { session: None, all: true }, false)?;
+    let (list, local, left) = summaries(ctx, &Select { session: None, all: true }, false, None)?;
     for s in &list {
         print_notes(&s["id"], s);
     }
@@ -317,8 +336,11 @@ pub fn ls(ctx: &Ctx) -> Result<Envelope> {
 /// `status --brief`: as `status` (one session, or `{sessions}` with
 /// `--all`), from the store alone.
 pub fn status_brief(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
+    status_brief_with_wait(ctx, sel, &crate::args::WaitArgs::default())
+}
+pub fn status_brief_with_wait(ctx: &Ctx, sel: &Select, wait: &crate::args::WaitArgs) -> Result<Envelope> {
     both_selectors(sel)?;
-    let (list, local, left) = summaries(ctx, sel, true)?;
+    let (list, local, left) = summaries(ctx, sel, true, Some(wait))?;
     for s in &list {
         print_notes(&s["id"], s);
     }
@@ -405,6 +427,13 @@ pub fn table_of(data: &Value) -> String {
 /// Returns the statuses and the removed-session leftovers (R3).
 fn local_status(ctx: &Ctx, sel: &Select) -> Result<(Vec<Value>, Vec<Value>)> {
     let local = Local::open(ctx.config()?)?;
+    if !sel.all
+        && sel.session.is_none()
+        && let Some(e) =
+            strata_session::cwd::stale_in(&local.store, &local.config.paths.root, &cwd())?
+    {
+        return Err(e);
+    }
     let sessions = local.sessions()?;
     // status-perf A1, D10: no old-tree walks without the daemon; old trees
     // report `unchecked`.
@@ -692,7 +721,7 @@ pub fn grep(ctx: &Ctx, pattern: &str, sel: &Select) -> Result<Envelope> {
             (hits, skipped, members)
         }
         Err(CallError::Down(_)) => local_grep(&config, pattern, &ts)?,
-        Err(CallError::Failed(e)) => return Err(e),
+        Err(e) => return Err(e.into_error()),
     };
     // Per member on disk: Binary / TooLarge go to skipped; lines that are
     // not UTF-8 (search drops them, search.md D13) are decoded lossily
@@ -799,7 +828,7 @@ pub fn files(ctx: &Ctx, glob: Option<&str>, sel: &Select) -> Result<Envelope> {
                 }
                 local_files(local.as_ref().unwrap(), s, r, glob)
             }
-            Err(CallError::Failed(e)) => Err(e),
+            Err(e) => Err(e.into_error()),
         };
         match got {
             Ok(ps) => out.extend(ps.into_iter().map(|p| (s.clone(), r.clone(), p))),
@@ -810,7 +839,13 @@ pub fn files(ctx: &Ctx, glob: Option<&str>, sel: &Select) -> Result<Envelope> {
             Err(e) => return Err(e),
         }
     }
-    out.sort_by(|a, b| (a.0.as_str(), a.1.as_str(), a.2.as_str().as_bytes()).cmp(&(b.0.as_str(), b.1.as_str(), b.2.as_str().as_bytes())));
+    out.sort_by(|a, b| {
+        (a.0.as_str(), a.1.as_str(), a.2.as_str().as_bytes()).cmp(&(
+            b.0.as_str(),
+            b.1.as_str(),
+            b.2.as_str().as_bytes(),
+        ))
+    });
     if !sel.all
         && let Some(t) = ts.first()
     {
@@ -894,7 +929,7 @@ pub fn diff(ctx: &Ctx, base: bool, session: Option<String>, between: Option<Vec<
             let raw = match ctx.try_call("diff", json!({ "a": a, "b": b, "repo": r }), Kind::Read) {
                 Ok(v) => v,
                 Err(CallError::Down(_)) => local_between(&config, &a, &b, &r)?,
-                Err(CallError::Failed(e)) => return Err(e),
+                Err(e) => return Err(e.into_error()),
             };
             let git = strata_gitio::Git::open(&config.repo(&r)?.path)?;
             let ka = overlay_of(&config, &store, &git, &a, &r).map(|o| change_kinds(&o)).unwrap_or_default();
@@ -926,11 +961,13 @@ fn diff_default_repo(config: &Config, store: &Store, s: &SessionId) -> Result<Op
     let out: Vec<std::sync::Mutex<Option<Found>>> = repos.iter().map(|_| std::sync::Mutex::new(None)).collect();
     std::thread::scope(|sc| {
         for _ in 0..DIFF_SCAN_WORKERS.min(repos.len()).max(1) {
-            sc.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let Some(r) = repos.get(i) else { return };
-                let res = scan(r);
-                *out[i].lock().unwrap_or_else(|p| p.into_inner()) = Some(res);
+            sc.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some(r) = repos.get(i) else { return };
+                    let res = scan(r);
+                    *out[i].lock().unwrap_or_else(|p| p.into_inner()) = Some(res);
+                }
             });
         }
     });
@@ -1029,11 +1066,25 @@ fn local_between(config: &Config, a: &SessionId, b: &SessionId, r: &RepoName) ->
 /// files are checked there; a skipped move is reported in `switched` with
 /// its code, `ok: true`, like a skipped session of `deps approve` (D17).
 pub fn deps_propose(ctx: &Ctx, session: Option<String>, repo: Option<String>, switch: bool) -> Result<Envelope> {
+    deps_propose_with_cwd(ctx, session, repo, switch, &crate::args::CwdArgs::default())
+}
+pub fn deps_propose_with_cwd(
+    ctx: &Ctx,
+    session: Option<String>,
+    repo: Option<String>,
+    switch: bool,
+    cwd: &crate::args::CwdArgs,
+) -> Result<Envelope> {
     let config = ctx.config()?;
     let store = ro::open_store(&config)?;
     let (s, cwd_repo) = ro::session_or_cwd(&store, session.as_deref())?;
     let r = repo_for(&config, &store, &s, repo.as_deref(), cwd_repo)?;
-    let v = ctx.call("deps_propose", json!({ "session": s, "repo": r, "switch": switch }), Kind::Write)?;
+    let params = json!({ "session": s, "repo": r, "switch": switch });
+    let v = if switch {
+        crate::cwd_guard::deps_call(ctx, "deps_propose", params, cwd)?
+    } else {
+        ctx.call("deps_propose", params, Kind::Write)?
+    };
     hint(s);
     match v.get("proposal").filter(|p| !p.is_null()) {
         Some(p) if switch => {
@@ -1061,7 +1112,7 @@ pub fn deps_list(ctx: &Ctx, repo: Option<String>) -> Result<Envelope> {
             let got = strata_deps::open_proposals(&store, r.as_ref())?;
             got.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect()
         }
-        Err(CallError::Failed(e)) => return Err(e),
+        Err(e) => return Err(e.into_error()),
     };
     ps.sort_by_key(|p| p["id"].as_u64().unwrap_or(u64::MAX));
     Ok(Envelope::ok(json!({ "proposals": ps })))
@@ -1150,15 +1201,18 @@ pub fn daemon_status() -> Result<Envelope> {
             if let Some(f) = v.get("fds") {
                 data["fds"] = f.clone();
             }
+            if let Some(queues) = v.get("queues") { data["queues"] = queues.clone(); }
             // Optional request features (absent from older daemons).
             if let Some(f) = v.get("features") {
                 data["features"] = f.clone();
             }
         }
         Err(CallError::Down(_)) => {}
-        Err(CallError::Failed(e)) => return Err(e),
+        Err(e) => return Err(e.into_error()),
     }
-    let lookup = move || ctx.config().ok().and_then(|c| ro::open_store(&c).ok()).and_then(|s| ro::cwd_session(&s).ok().flatten());
+    let lookup = move || {
+        ctx.config().ok().and_then(|c| ro::open_store(&c).ok()).and_then(|s| ro::cwd_session(&s).ok().flatten())
+    };
     // With the daemon up the answer is already in hand; the cwd lookup reads
     // the store on the volume, which can block (a wedged volume), so it gets
     // STATUS_LOOKUP_WAIT on its own thread and is dropped after that.

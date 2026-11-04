@@ -19,8 +19,11 @@ use strata_types::{CheckpointReason, Code, Config, RepoConfig, RepoName, Session
 mod activity;
 mod base;
 mod carry;
+pub mod cwd;
 mod dispatch;
 mod failed_move;
+#[cfg(test)]
+mod lock_tests;
 mod move_workspace;
 mod new;
 mod no_wait;
@@ -220,12 +223,16 @@ impl<'a> Sessions<'a> {
     /// after a call's first visible write are not bounded").
     pub(crate) fn with_lock_unbounded<T>(&self, repo: &RepoName, mut f: impl FnMut() -> Result<T>) -> Result<T> {
         loop {
+            let attempt_since = std::time::SystemTime::now();
             let mut out: Option<T> = None;
             match self.locks.with_write(repo, &mut || {
                 out = Some(f()?);
                 Ok(())
             }) {
                 Err(e) if e.code == Code::Busy => {
+                    if e.detail.as_ref().is_some_and(|d| d["reason"] == "lock_wait") {
+                        self.locks.record_long_wait(repo, attempt_since);
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(20));
                     continue;
                 }

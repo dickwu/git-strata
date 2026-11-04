@@ -130,8 +130,18 @@ fn unswitched_inputs_are_installed_and_published() {
     assert_eq!(w["first_row"], r1.group.id, "{w}");
     assert_eq!(w["pinned"], pin.as_str(), "{w}");
     assert_ne!(w["used"], pin.as_str(), "{w}");
-    assert!(w["fix"].as_str().unwrap().contains("--switch"), "{w}");
-    assert!(w["message"].as_str().unwrap().contains("install inputs differ"), "{w}");
+    assert_eq!(
+        w["fix"],
+        format!("cd ~ && git-strata deps propose --session {s} --repo tool --switch"),
+        "{w}"
+    );
+    assert!(
+        w["message"]
+            .as_str()
+            .unwrap()
+            .contains("install inputs differ"),
+        "{w}"
+    );
     // The checks saw the new set; the workspace kept its own.
     let log = fs::read_to_string(fx.sb.state.join("checks.log")).unwrap();
     assert_eq!(log.lines().count(), 1, "the checks ran once: {log}");
@@ -505,6 +515,11 @@ fn tracked_overlap_with_the_pinned_dirs_is_drift() {
     let d = detail(&e);
     assert_eq!(d["reason"], "deps_select_failed", "{d}");
     assert_eq!(d["sub"], "tracked_overlap", "{d}");
+    assert_eq!(
+        d["fix"],
+        format!("cd ~ && git-strata deps propose --session {s} --repo tool --switch"),
+        "{d}"
+    );
     assert_eq!(d["dirs"], serde_json::json!(["gen"]), "{d}");
     assert_eq!(fx.sb.install_count(), installs, "no install");
     let r1 = rows(&fx).remove(0);

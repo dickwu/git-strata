@@ -159,6 +159,12 @@ fn hook_blocks_once_with_unpublished_and_behind() {
         block["reason"]
             .as_str()
             .unwrap()
+            .contains("cd ~ && git-strata sync --session s-abcdefgh --resolved PATH")
+    );
+    assert!(
+        block["reason"]
+            .as_str()
+            .unwrap()
             .contains("main moved 3 commits since your base in tool")
     );
     assert_eq!(fake.requests()[0]["params"]["hook"], true);
@@ -292,4 +298,20 @@ fn hook_deps_conflicts_and_following_rules() {
     assert!(reason(&v).is_some());
     v["repos"]["tool"]["following"] = json!(false);
     assert!(reason(&v).is_none());
+}
+
+#[test]
+fn hook_ignores_regular_timeout_flag_and_environment() {
+    let home=Home::new();
+    let _fake=FakeDaemon::start(&home.socket(),|q| {
+        std::thread::sleep(Duration::from_millis(150));
+        json!({"id":q["id"],"ok":true,"data":data(Some(3),true)})
+    });
+    let mut child=home.cmd(&["sync","--check","--hook","--timeout","0.001"])
+        .env("GIT_STRATA_TIMEOUT","invalid-and-ignored")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    writeln!(child.stdin.take().unwrap(),"{}",json!({"cwd":home.path(),"stop_hook_active":false})).unwrap();
+    let result:Run=child.wait_with_output().unwrap().into();
+    assert_eq!(result.code,0);assert!(result.stderr.is_empty());
+    let value:Value=serde_json::from_str(&result.stdout).unwrap();assert_eq!(value["decision"],"block");
 }

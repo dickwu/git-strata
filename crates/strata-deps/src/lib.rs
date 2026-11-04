@@ -32,7 +32,7 @@ pub use drift::{Drift, drift};
 pub use ensure::ensure;
 pub use inputs::{InputRecord, hash_records, input_records, inputs_hash, is_input, is_input_folded, nested_seed_caches, platform, set_id, toolchain};
 pub use snapshot::{clean_snapshots, remove_snapshot, snapshot_dir, snapshot_inputs, snapshot_tree};
-pub use open_files::{Hold, OpenFile, open_files, open_files_many};
+pub use open_files::{Hold, OpenFile, open_files, open_files_many, process_parent};
 pub use proposal::{
     ChainState, Proposal, ProposalOrigin, ProposalState, ProposeArgs, PublishChain, get_proposal,
     main_tip, observe_main, observe_main_locked, open_proposals, propose, publish_chain,
@@ -73,6 +73,9 @@ pub trait RepoWriteLock: Sync {
     fn try_write(&self, repo: &RepoName, f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>> {
         self.with_write(repo, f)
     }
+    /// Record an expired attempt that the caller will retry after a visible
+    /// write. The timestamp belongs to that attempt, not the whole retry loop.
+    fn record_long_wait(&self, _repo: &RepoName, _attempt_since: std::time::SystemTime) {}
 }
 
 /// The environment `install` and `<program> --version` run with.

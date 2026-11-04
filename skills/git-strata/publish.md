@@ -2,6 +2,17 @@
 
 ## Publish
 
+A publish makes one commit per participating repo on its configured
+`publish.branch`, possibly combining multiple sessions. Workspaces stay in the
+checkpoint → publish workflow. Run publishing commands from outside using
+explicit `--from` session ids. B is the staging baseline (the leading publish
+chain when applicable, not necessarily origin). A parked `new --base` session
+cannot publish until its base-only commits are on B or main. If a workspace
+moves between checkpoint and publish, `HeadMoved baseline_moved` asks you to
+rerun the literal `publish --from …` command; equal baseline trees are allowed
+even when their commit ids differ.
+
+
 - `publish` publishes the selected paths' current content: before sending
   the publish it records a fresh `BeforePublish` checkpoint of each
   `--from` batch, so edits made to a selected file up to that moment are
@@ -77,9 +88,15 @@ rule: the README's [Confirmation gate](https://github.com/dickwu/git-strata/blob
 - `deps propose [--session S] [--repo R]` proposes a new dependency set after
   you change install inputs; `deps list` shows open proposals. Add `--switch`
   to move your own session onto the proposed set right away (no prompt; other
-  sessions stay pinned). Check `data.switched.kind`: `skipped` with
-  `code: OpenFiles` means a process holds files in your deps dir; stop it (only
-  if you started it) and run again. Approving for other sessions is
+  sessions stay pinned). Run `cd ~ && git-strata deps propose --session S --repo R --switch`,
+  then cd back to the workspace path after moving. From inside, add `--allow-cwd`
+  to accept your own PID chain's stale cwd, then cd back afterward.
+  Check `data.switched.kind`: for `skipped` with `code: OpenFiles`, inspect
+  `data.switched.detail.reason`. `cwd_holders` means your own shell or parent
+  needs `--allow-cwd`; other holders must cd out, or `--allow-cwd-holders`
+  explicitly accepts their stale cwd too. Other `OpenFiles` means a process
+  holds deps files: stop it only if you started it, then rerun. Neither cwd
+  flag bypasses file or mapping protections. Approving for other sessions is
   human-only (SKILL.md, hard rule 1). `data.pending_proposals: [{id, repo}]` in any
   envelope identifies an open proposal. Inspect its effective mode/state:
   `apply` can proceed automatically; human-action waits follow the stop rule in
@@ -93,8 +110,8 @@ rule: the README's [Confirmation gate](https://github.com/dickwu/git-strata/blob
   `Drift` when the inputs move again during that install (`deps_drift`) or
   when the deps dirs overlap files you publish (`deps_select_failed`,
   `tracked_overlap`: follow its `fix`/`hint`). Still run the warning's `fix`
-  (`deps propose --switch`) so your workspace matches. `status` shows the same
-  `drift.fix`. If that install fails (`detail.stage: "deps_install"`), hand it
+  (the outside-workspace command above) so your workspace matches. `status`
+  shows the same `drift.fix`. If that install fails (`detail.stage: "deps_install"`), hand it
   to the human with `detail.log_tail`; do not retry in a loop (a retry
   returns `previous_attempt`).
 

@@ -31,10 +31,10 @@ function fields(src: string, name: string): Shape {
   const required: string[] = [];
   const optional: string[] = [];
   const types: Record<string, string> = {};
-  for (const f of m[1].matchAll(/pub (\w+): ([^,\n]+),/g)) {
-    const opt = f[2].match(/^Option<(.+)>$/);
-    (opt ? optional : required).push(f[1]);
-    types[f[1]] = opt ? opt[1] : f[2];
+  for (const f of m[1].matchAll(/((?:#\[[^\n]+\]\s*)*)pub (\w+): ([^,\n]+),/g)) {
+    const opt = f[3].match(/^Option<(.+)>$/);
+    (opt || f[1].includes('skip_serializing_if') ? optional : required).push(f[2]);
+    types[f[2]] = opt ? opt[1] : f[3];
   }
   return { required, optional, types };
 }
@@ -85,6 +85,8 @@ function typeOk(t: string, v: unknown, where: string): boolean {
       return typeof v === 'string' && v !== '' && !v.startsWith('/');
     case 'PathBuf':
       return typeof v === 'string' && v.startsWith('/');
+    case 'Value':
+      return true; // Already parsed JSON; additive untyped warning details.
     case 'String':
       return typeof v === 'string';
     case 'i32':
@@ -140,7 +142,7 @@ describe('approve fixtures match the core wire (handlers.rs apply_step)', () => 
     );
     expect([...HOLDS].sort()).toEqual(['Cwd', 'Fd', 'Mapped']);
     expect(BASE_GEN.required).toEqual(['repo', 'tree', 'deps']);
-    expect(MOVE_REPORT.optional.sort()).toEqual(['checkpoint', 'old_tree']);
+    expect(MOVE_REPORT.optional.sort()).toEqual(['checkpoint', 'old_tree', 'warnings']);
     expect(HEX_LEN).toMatchObject({ TreeOid: 40, CommitOid: 40, DepsSetId: 64 });
     expect(NUM_IDS.has('ProposalId')).toBe(true);
     expect(PROPOSAL.required).toContain('created');

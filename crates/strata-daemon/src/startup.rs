@@ -31,7 +31,7 @@ use strata_types::{CheckpointReason, Code, Config, RepoId, RepoName, StrataError
 use crate::confirm_flow::{self, Pins};
 use crate::locks::Locks;
 use crate::rpc::{self, Reply, Request};
-use crate::{DaemonWarning, PinnedFlags, GC_KEEP, LOCK_WAIT, MAX_FRAME, Result};
+use crate::{DaemonWarning, GC_KEEP, LOCK_WAIT, MAX_FRAME, PinnedFlags, Result};
 
 /// Review P1-3: connections served at once; more wait in the backlog.
 pub const MAX_CONNS: usize = 128;
@@ -663,6 +663,7 @@ impl<'a> Daemon<'a> {
     pub fn daemon_status(&self, verify: bool) -> Result<Value> {
         let mut warnings = self.core.warnings.snapshot();
         warnings.extend(self.core.locks.long_holds());
+        warnings.extend(self.core.locks.long_waits());
         let mut verify_result = Value::Null;
         if verify {
             verify_result = match self.core.store.quick_check() {
@@ -678,6 +679,7 @@ impl<'a> Daemon<'a> {
         }
         Ok(json!({
             "holds": self.core.locks.holds(),
+            "queues": self.core.locks.queue_snapshot(),
             "repo_waiting": self.core.config.repos.keys()
                 .map(|r| (r.as_str().to_string(), self.core.locks.repo_waiting(r)))
                 .collect::<BTreeMap<String, usize>>(),

@@ -431,6 +431,9 @@ fn rollout_skips_session_with_open_files() {
         .unwrap();
         assert_eq!(plan.steps.len(), 2, "{plan:#?}");
         match &plan.steps[0] {
+            step @ RolloutStep::Move { .. } if how == Hold::Cwd => {
+                assert_eq!(step, &mv(&s1, &target, &t2.head));
+            }
             RolloutStep::Skip {
                 session,
                 reason: SkipReason::OpenFiles { files },
@@ -444,11 +447,19 @@ fn rollout_skips_session_with_open_files() {
             other => panic!("{kind}: {other:#?}"),
         }
         assert_eq!(plan.steps[1], mv(&s2, &target, &t2.head));
-        // The mover is handed S2 only; S1's workspace is untouched.
+        // Cwd holds reach the final mover guard; fd/map holds skip here.
         let moved = moves(&plan);
-        assert_eq!(moved, vec![s2.clone()]);
+        assert_eq!(
+            moved,
+            if how == Hold::Cwd {
+                vec![s1.clone(), s2.clone()]
+            } else {
+                vec![s2.clone()]
+            }
+        );
         assert_eq!(snapshot(&ws1.path.join("node_modules")), nm1);
-        let after = record_rollout(fx.store(), &plan, &moved).unwrap();
+        // The final guard can still refuse S1. The proposal stays Pending.
+        let after = record_rollout(fx.store(), &plan, std::slice::from_ref(&s2)).unwrap();
         assert_eq!(after.state, ProposalState::Pending);
         assert_eq!((all(fx), main_row(fx)), (rows, mrow));
         stop(child);
@@ -562,6 +573,14 @@ fn proposing_session_may_use_new_deps_before_approval() {
             }]
         ),
         "{plan:#?}"
+    );
+    stop(child);
+
+    let child = hold("cwd", &ws.path.join("node_modules/x"));
+    let plan = plan_switch(&ctx, p.id, &s, &ws).unwrap();
+    assert_eq!(
+        plan.steps,
+        vec![mv(&s, &bg(fx, &w.t1.tree, &dn.id), &ws.head)]
     );
     stop(child);
 

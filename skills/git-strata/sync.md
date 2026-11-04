@@ -15,7 +15,7 @@ git-strata sync --check        # local refs and store only; never fetches or mov
 It returns `{session, upstream}` and exits 0 even when unclean. When
 `upstream.clean` is false, look at each repo:
 
-- `following: true`: run `git-strata sync --repo R`, resolve any reported
+- `following: true`: run `cd ~ && git-strata sync --session S --repo R`, resolve any reported
   conflicts (below), re-run your checks, checkpoint, publish.
 - `following: false`: ignore `behind`; only acknowledge named workspace
   conflicts (below). No sync fix is emitted, and a plain sync returns
@@ -35,17 +35,49 @@ CLI and daemon versions.
 `sync --check --hook` is the optional Stop-hook form (cache only, no
 envelope); see [hooks.md](hooks.md).
 
+## Cwd and timeout rules
+
+Run every moving sync from outside the workspace: `cd ~ && git-strata sync
+--session S --repo R`, then cd back to the workspace path. Even an up-to-date,
+non-following or acknowledgement-only non-check request is refused from inside
+a selected workspace. With multiple selected repos, `--keep` / `--resolved`
+paths must identify exactly one repo through its saved report or workspace
+conflicts; otherwise use `--repo` to resolve `ambiguous_resolution`. A cwd in
+another repo does not block that resolution, including with an older daemon.
+`--check` and `--check --hook` never move and can run inside.
+`--allow-cwd` accepts your own shell's stale cwd; it exempts only your PID chain.
+After `cd ~`, an agent's parent process can still hold a cwd inside the
+workspace. The PID-chain exemption requires `--allow-cwd`; moving the child
+shell out does not enable it. Exit or cd that parent out, or explicitly use
+`cd ~ && git-strata sync --session S --repo R --allow-cwd` when keeping
+that parent is intentional (preserve any other request flags); then re-enter
+the live workspace.
+Other cwd holders are refused unless `--allow-cwd-holders` is given. The same
+holder override exists for `deps approve` and `deps propose --switch`; GUI
+approvals skip held sessions. Fd-only holders outside dependency directories
+may move with `held_old_tree`; overridden/racing cwd holders produce `cwd_stale`.
+Neither flag bypasses dependency-file or mapped-file protections.
+
+Status defaults to 30 seconds (120 with `--all`); sync defaults to 600 seconds,
+a client policy that may expire during a normal cold install. `--timeout SECS`
+overrides `GIT_STRATA_TIMEOUT`; zero disables the deadline. Hooks keep their
+five-second process budget and ignore both. Waiting progress is stderr only,
+every 15 seconds on a TTY or with `--progress`.
+`Busy client_timeout` means a read or an incomplete request: back off before
+retrying. `Unknown client_timeout` means the complete write may still run:
+check status; do not retry, gc, or rm. Timeout does not cancel daemon work.
+
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `git-strata sync [--check] [--repo R]` | Inspect upstream, or fetch and merge it into this session. |
-| `git-strata sync --repo R --resolved PATH --target HEAD --generation N` | Finish the reported conflict after editing it. Repeat `--resolved` for each path. |
-| `git-strata sync --repo R --keep PATH --target HEAD --generation N` | Explicitly acknowledge that your current side of the reported conflict is correct. |
+| `git-strata sync --session S [--check] [--repo R]` | Inspect upstream, or fetch and merge it into this session. |
+| `cd ~ && git-strata sync --session S --repo R --resolved PATH --target HEAD --generation N` | Finish the reported conflict after editing it. Repeat `--resolved` for each path. |
+| `cd ~ && git-strata sync --session S --repo R --keep PATH --target HEAD --generation N` | Explicitly acknowledge that your current side of the reported conflict is correct. |
 
 Main's source follows automatically in eligible idle workspaces; dependency
 replacement uses the repo's effective `sync.deps` mode (`apply` or `confirm`).
-To merge now, run `git-strata sync --repo R`. When upstream says `following: false`,
+To merge now, run `cd ~ && git-strata sync --session S --repo R`. When upstream says `following: false`,
 ignore `behind` and only acknowledge named conflicts as below: no sync fix is
 emitted, and a plain sync returns `result: not_following` without moving anything.
 
@@ -59,7 +91,7 @@ Make unrelated edits after syncing. Name **every reported conflict path in one
 call**, mixing repeated `--resolved` and `--keep` as needed:
 
 ```sh
-git-strata sync --repo R --resolved PATH_A --resolved PATH_B --keep PATH_C --target HEAD --generation N
+cd ~ && git-strata sync --session S --repo R --resolved PATH_A --resolved PATH_B --keep PATH_C --target HEAD --generation N
 ```
 
 Use HEAD and N from `detail.target.head` and `detail.generation`; both flags
@@ -128,7 +160,7 @@ head is reachable from neither the publish chain nor the tracking ref.
 
 Publish refuses paths still in `ws.conflicts` with `move_conflict`. If **all**
 named paths are in `ws.conflicts` and **none** is in the saved sync report,
-`git-strata sync --repo R --resolved PATH` (or `--keep PATH`) acknowledges only
+`cd ~ && git-strata sync --session S --repo R --resolved PATH` (or `--keep PATH`) acknowledges only
 those paths without target/generation. This works when up to date **and when
 behind or diverged**, even with a separate saved report; that report is preserved.
 The per-repo reply is
@@ -166,9 +198,11 @@ a later repo fails. The move handler's reasons and related outcomes are:
 
 | Code / reason or result | Agent action |
 | --- | --- |
+| `NoSuchSession stale_cwd` | cd to `detail.workspace`, the current tree. |
+| `OpenFiles caller_cwd` / `cwd_holders` | Follow the cwd rules above; no move occurred. |
 | `Conflict sync_conflict` | Resolve every reported path with the supplied target/generation as above. |
 | `HeadMoved sync_conflict` | Review the fresh report, re-resolve or deliberately keep with its binding; at most five retries. |
-| `InvalidInput resolution_binding_required` | Run plain `sync --repo R` to obtain a report, then supply both `--target` and `--generation`; do not guess either. |
+| `InvalidInput resolution_binding_required` | Run `cd ~ && git-strata sync --session S --repo R` to obtain a report, then supply both `--target` and `--generation`; do not guess either. |
 | `InvalidInput ambiguous_resolution` | Select exactly one repo with `--repo R` and use its report. |
 | `InvalidInput resolved_and_keep` | Choose one flag per path; remove the duplicate choice. |
 | `InvalidInput resolved_unchanged` | Edit the conflict, or deliberately use `--keep` after comparing with upstream. |

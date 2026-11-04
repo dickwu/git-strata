@@ -27,6 +27,46 @@ fn locks() -> Arc<Locks> {
     Arc::new(Locks::new([rn("front"), rn("tool")], WAIT))
 }
 
+#[test]
+fn acquiring_repo_lock_clears_only_its_expired_long_wait() {
+    use strata_deps::RepoWriteLock;
+    let locks = locks();
+    let session = sid("aaaaaaaa");
+    let other = sid("bbbbbbbb");
+    let attempt = std::time::SystemTime::now() - Duration::from_secs(60);
+    {
+        let _scope = RequestScope::begin("sync", Some(session.clone()));
+        locks.record_long_wait(&rn("tool"), attempt);
+        locks.record_long_wait(&rn("front"), attempt);
+    }
+    {
+        let _scope = RequestScope::begin("sync", Some(other));
+        locks.record_long_wait(&rn("tool"), attempt);
+    }
+    {
+        let _scope = RequestScope::begin("publish", Some(session.clone()));
+        locks.record_long_wait(&rn("tool"), attempt);
+    }
+    assert_eq!(locks.long_waits().len(), 4);
+    let _scope = RequestScope::begin("sync", Some(session.clone()));
+    let error = StrataError::new(Code::Conflict, "operation refused after acquiring lock");
+    let result: strata_daemon::Result<()> = locks.with_repo(&rn("tool"), || {
+        let waits = locks.long_waits();
+        assert_eq!(waits.len(), 3, "{waits:?}");
+        assert!(!waits.iter().any(|wait| matches!(wait,
+            DaemonWarning::LongWait { repo: Some(repo), session: Some(s), method, .. }
+                if repo == &rn("tool") && s == &session && method == "sync"
+        )));
+        Err(error.clone())
+    });
+    assert_eq!(result.unwrap_err(), error);
+    assert_eq!(
+        locks.long_waits().len(),
+        3,
+        "other waits remain after the lock is released"
+    );
+}
+
 fn wait_until(what: &str, f: impl Fn() -> bool) {
     let t = Instant::now();
     while !f() {
@@ -561,4 +601,54 @@ fn guarded_step_does_not_start_after_the_deadline() {
     // Before the deadline, with everything free, it runs.
     guarded_until(&l, &s, Instant::now() + WAIT, || Ok(false), step).unwrap();
     assert_eq!(ran.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn snapshots_expose_waiters_and_unbounded_waits_yield_background_holders() {
+    use std::sync::atomic::AtomicBool;
+    for repo_wait in [false, true] {
+        let l = locks();
+        let s = sid("aaaaaaaa");
+        let r = rn("tool");
+        let yield_to = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (l1, s1, r1, y1, rel) = (l.clone(), s.clone(), r.clone(), yield_to.clone(), release.clone());
+        let holder = thread::spawn(move || {
+            strata_daemon::locks::with_yield(y1, || {
+                l1.try_session(&s1, "old_tree", || {
+                    l1.try_repo(&r1, "old_tree", || {
+                        while !rel.load(Ordering::SeqCst) {
+                            thread::sleep(Duration::from_millis(2));
+                        }
+                        Ok(())
+                    })
+                })
+                .unwrap()
+                .unwrap();
+            })
+        });
+        wait_until("background holder", || l.holds().iter().any(|h| h.method == "old_tree"));
+        assert!(l.try_repo(&r, "probe", || Ok(())).is_err());
+        assert!(l.try_session(&s, "probe", || Ok(())).is_none());
+        assert!(!yield_to.load(Ordering::SeqCst), "zero-bound probes do not yield");
+        let (l2, s2, r2) = (l.clone(), s.clone(), r.clone());
+        let waiter = request("sync", Some(s.clone()), move || {
+            mark_visible();
+            if repo_wait { l2.with_repo(&r2, || Ok(())) } else { l2.with_sessions(&[s2], || Ok(())) }
+        });
+        wait_until("yield requested", || yield_to.load(Ordering::SeqCst));
+        thread::sleep(WAIT + Duration::from_millis(40));
+        let start = Instant::now();
+        let snapshot = l.queue_snapshot();
+        assert!(start.elapsed() < Duration::from_millis(100));
+        assert_eq!(snapshot[0]["holder"], "old_tree");
+        if !repo_wait {
+            assert_eq!(snapshot[0]["queued"], serde_json::json!(["sync"]));
+        }
+        assert!(l.long_waits().iter().any(|w| matches!(w,DaemonWarning::LongWait{method,..} if method=="sync")));
+        release.store(true, Ordering::SeqCst);
+        holder.join().unwrap();
+        waiter.join().unwrap().unwrap();
+        assert!(l.long_waits().is_empty());
+    }
 }

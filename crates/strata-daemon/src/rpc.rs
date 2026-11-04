@@ -134,6 +134,13 @@ pub struct StatusParams {
 #[serde(deny_unknown_fields)]
 pub struct SyncParams {
     #[serde(default)]
+    pub caller_pids: Vec<i32>,
+    #[serde(default)]
+    pub allow_cwd: bool,
+    #[serde(default)]
+    pub allow_cwd_holders: bool,
+
+    #[serde(default)]
     pub session: Option<String>,
     #[serde(default)]
     pub cwd: Option<std::path::PathBuf>,
@@ -209,6 +216,13 @@ pub struct DiffParams {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DepsProposeParams {
+    #[serde(default)]
+    pub caller_pids: Vec<i32>,
+    #[serde(default)]
+    pub allow_cwd: bool,
+    #[serde(default)]
+    pub allow_cwd_holders: bool,
+
     pub session: SessionId,
     pub repo: RepoName,
     pub switch: bool,
@@ -217,6 +231,13 @@ pub struct DepsProposeParams {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DepsApproveParams {
+    #[serde(default)]
+    pub caller_pids: Vec<i32>,
+    #[serde(default)]
+    pub allow_cwd: bool,
+    #[serde(default)]
+    pub allow_cwd_holders: bool,
+
     pub proposal: ProposalId,
     #[serde(deserialize_with = "nullable")]
     pub sessions: Option<Vec<SessionId>>,

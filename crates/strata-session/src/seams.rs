@@ -138,12 +138,16 @@ impl crate::Sessions<'_> {
         *self.seams.armed.lock().unwrap_or_else(|p| p.into_inner()) = Some(seam);
     }
 
-    /// Block until a `PauseAt` has stopped.
+    /// Wait at most ten seconds for a `PauseAt`; a missing retry fails the
+    /// test instead of hanging its scoped threads indefinitely.
     pub fn wait_paused(&self) {
-        let mut st = self.seams.pause.lock().unwrap_or_else(|p| p.into_inner());
-        while !st.paused {
-            st = self.seams.cv.wait(st).unwrap_or_else(|p| p.into_inner());
-        }
+        let st = self.seams.pause.lock().unwrap_or_else(|p| p.into_inner());
+        let (st, _) = self
+            .seams
+            .cv
+            .wait_timeout_while(st, std::time::Duration::from_secs(10), |st| !st.paused)
+            .unwrap_or_else(|p| p.into_inner());
+        assert!(st.paused, "timed out waiting for a session PauseAt seam");
     }
 
     /// Let the paused step go on.

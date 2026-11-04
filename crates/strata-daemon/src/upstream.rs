@@ -295,7 +295,7 @@ impl Cache {
                     unpublished: Some(live.unpublished),
                     fix: cfg.follow_main().then(|| {
                         format!(
-                            "git-strata sync --session {} --repo {repo}",
+                            "cd ~ && git-strata sync --session {} --repo {repo}",
                             row.manifest.id
                         )
                     }),

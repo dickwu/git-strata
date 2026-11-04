@@ -1,10 +1,28 @@
 # git-strata command reference
 
-Taken from the 0.1.2 binary's `--help` and `docs/modules/cli.md` §3. When they
+Describes the R2 CLI and `docs/modules/cli.md` §3. When they
 disagree with your installed version, `git-strata <command> --help` wins.
 "Human" = needs a TTY (and, where marked, a LocalAuthentication prompt);
 an agent must hand these to the human. "No daemon" = works when the daemon
 is not running.
+
+`git-strata help [TOPIC|COMMAND…]`, when available in the installed binary,
+prints text without environment setup. Topics: gate, push-guards, errors,
+errors-publish, output, headless,
+sync-ack. Each command/topic is at most 4 KiB; the index is at most 1.5 KiB.
+Unknown topics return an `InvalidInput` / `help_topic` envelope.
+
+Run moving sync outside the workspace: `cd ~ && git-strata sync --session S`,
+then cd back. `--allow-cwd` accepts your own stale cwd; `--allow-cwd-holders`
+accepts others' (also on deps approve/propose --switch). They do not bypass
+file or mapping protections. `status`/`sync` accept `--timeout SECS` (0 unlimited)
+and `--progress`; the flag beats GIT_STRATA_TIMEOUT. Defaults: status 30 s,
+status --all 120 s, sync 600 s. Hooks retain their own five-second budget.
+
+`new --repo R --base REV` parks a session at a local commit. It is still a
+checkpoint/publish session, not a git branch. Publishing is refused until every
+base-only commit is reachable from the publish baseline B or main; B may be
+the leading publish-chain tip. No per-session publish lines are introduced.
 
 ## Paths
 
@@ -22,15 +40,15 @@ data root (`[paths] root`, default `~/.strata`) as
 | `new [TICKET]` | `--ticket <T>` (same as positional), `--repo <R>` (repeatable or comma separated; only these repos get a workspace, all tracked; preferred) or `--repos <A,B>` (the tracked repos; every configured repo still gets a workspace); one of the two, not both (`repo_flags`); `--agent <NAME>` (default: `STRATA_AGENT`, else detected: `claude-code`, `codex`, `cursor-agent`; invalid: `InvalidInput` `agent`) | no | no | `{manifest:{id,ticket?,agent?,root,repos:{<repo>:{base,head,path,tracked}}},warnings:[]}`; warning `AgentNotRecorded` (`daemon_too_old`): the daemon predates agent recording, the session is fine |
 | `add` | `--repo <R>` (at least one; repeatable or comma separated), `--session <S>` (default: cwd's session) | no | no | `{session,added:{<repo>:WorkspaceState},already:{<repo>:WorkspaceState},warnings:[]}`; `Exists` `add_leftover`: an earlier failed add left `detail.path` (an `rm` of the session clears it) |
 | `ls` | `--table` (a table for people; errors stay envelopes) | no | yes (`data.source: "local"`) | `{sessions:[{id,ticket,state,created,repos,phase?}]}`; cache-only, never runs git |
-| `status` | `--session <S>` or `--all` (default: cwd's session); `--brief` (store only: no drift, seeds, mirrors, old trees) | no | yes | `SessionStatus` (per repo `upstream`: behind/ahead, following, state, fix); `--all`: `{sessions:[...]}`; health `Unknown` with `choices` = the human's `resolve` |
-| `sync` | `--session S`, repeatable `--repo R`, `--check`, `--hook` (requires `--check`; see [hooks.md](hooks.md)), `--no-fetch`, repeatable `--resolved PATH` / `--keep PATH`, `--target HEAD --generation N`, `--accept-diverged` | no; accepting divergence requires the human's prior chain recovery | no | `--check`: `{session,upstream}` (exit 0 even when unclean); move: `{session,fetched,repos,next,upstream?}` with per-repo `moved`, `source_only`, `up_to_date`, `waiting`, `not_following`, or `conflicts_cleared`; `--check --hook`: optional `{decision:"block",reason}` without an envelope, otherwise silent, always exit 0 |
+| `status` | `--session <S>` or `--all` (default: cwd's session); `--brief` (store only: no drift, seeds, mirrors, old trees), `--timeout SECS`, `--progress` | no | yes | `SessionStatus` (per repo `upstream`: behind/ahead, following, state, fix); `--all`: `{sessions:[...]}`; health `Unknown` with `choices` = the human's `resolve` |
+| `sync` | `--session S`, repeatable `--repo R`, `--check`, `--hook` (requires `--check`; see [hooks.md](hooks.md)), `--no-fetch`, repeatable `--resolved PATH` / `--keep PATH`, `--target HEAD --generation N`, `--accept-diverged`, `--allow-cwd`, `--allow-cwd-holders`, `--timeout SECS`, `--progress` | no; accepting divergence requires the human's prior chain recovery | no | `--check`: `{session,upstream}` (exit 0 even when unclean); move: `{session,fetched,repos,next,upstream?}` with per-repo `moved`, `source_only`, `up_to_date`, `waiting`, `not_following`, or `conflicts_cleared`; `--check --hook`: optional `{decision:"block",reason}` without an envelope, otherwise silent, always exit 0 |
 | `checkpoint` | exactly one of `--tool-call [ID]` (no ID: hook JSON `tool_use_id`) / `-m, --message <MSG>`; `--session <S>`; `--path <P>` (repeatable) | no | repeat of an existing `--tool-call` only | `{checkpoints:[Checkpoint,...]}` |
 | `restore <CHECKPOINT> [PATHS]...` | `--session <S>` | no | no | `{checkpoint,session}` |
 | `grep <PATTERN>` | regex; `--session <S>` or `--all` | no | yes | `{hits:[...],skipped?:[{session,repo,path,code}]}` |
 | `files [GLOB]` | `--session <S>` or `--all` | no | yes | `{paths:[{session,repo,path}]}` |
 | `diff` | mode `--base` (default, this or `--session <S>`'s session vs its base) or `--between <A> <B>` (exclusive with `--base`/`--session`); `--repo <REPO>` (required with `--between`) | no | yes | `{repo,only_a:[{path,kind}],only_b:[],both:[]}` (`repo` null when nothing matched); `--between`: `both:[{path,kind,preview?,code?}]` |
-| `deps propose` | `--session <S>`, `--repo <R>` (default: cwd's), `--switch` (move this session only) | no | no | `Proposal`; with `--switch`: `{ proposal, switched: { session, kind: moved\|skipped, code?, detail? } }` |
-| `deps approve <ID>` | `--sessions <S,S>` (default: all sessions of the repo) | yes + confirm | no | `{results:[{session,kind:"moved"\|"skipped",code?,detail?}]}` |
+| `deps propose` | `--session <S>`, `--repo <R>` (default: cwd's), `--switch` (move this session only), `--allow-cwd`, `--allow-cwd-holders` | no | no | `Proposal`; with `--switch`: `{ proposal, switched: { session, kind: moved\|skipped, code?, detail? } }` |
+| `deps approve <ID>` | `--sessions <S,S>` (default: all sessions of the repo), `--allow-cwd`, `--allow-cwd-holders` | yes + confirm | no | `{results:[{session,kind:"moved"\|"skipped",code?,detail?}]}` |
 | `deps list` | `--repo <R>` | no | yes | `{proposals:[...]}`; daemon rows carry effective pinned `mode: "apply" \| "confirm"` |
 | `publish` | `--from <S:PATH>` or `--from <S:REPO:PATH>` (repeatable; none = interactive on a TTY, else `InvalidInput` `no_batch`); `--assign <FILE> <SESSION>` | when a repo it will still commit pushes and needs confirmation. A guarded repo is exempt only when the content check proves its selected paths already landed; a session still on its old base (its rebase is `Waiting` on a deps proposal) still counts, so it can need a TTY and confirmation even though nothing new would be committed. If the daemon's own replan needs a guarded repo outside the set the CLI's TTY check covered (history changed between the plan and the publish), publish returns `NotConfirmed` with `detail.reason` `plan_changed` before prompting or writing anything (`data.already_published` still lists repos that landed earlier): rerun the same command | no | `{commits:{<repo>:oid},checks_ran,waiting:[],pushes:[{repo,outcome}],already_published:[{repo,publish,commit,push}]}`; on `Conflict`, `error.detail.repo` is the stopped repo and `data` keeps the repos that landed |
 | `push <REPO>` | — | when the repo needs confirmation | no | `PushOutcome` `{kind,message}`; for a repo without confirmation also `commit`, `replayed` (`{from,to,onto,commits,checks_ran}` or null), `rebases`, `warnings`: it fetches and replays a diverged chain onto origin first (`Conflict` `replay_conflict` / `CheckFailed` / `replay_deps_unsealed`: nothing written or pushed) |
@@ -55,7 +73,9 @@ Selectors: `--session` accepts a session id (`s-` + 8 base32 chars) or a
 ticket. Without it, the session comes from the cwd.
 
 Fixed `detail.reason` values produced by the CLI: `daemon_down`,
-`socket_closed`, `both_selectors`, `checkpoint_reason`, `diff_mode`,
+`client_timeout` (`Busy` for reads/incomplete requests, `Unknown` for complete writes),
+`timeout` (invalid timeout), `help_topic` (unknown help topic), `stale_cwd`,
+`caller_cwd`, `cwd_holders`, `socket_closed`, `both_selectors`, `checkpoint_reason`, `diff_mode`,
 `no_batch`, `no_choice`, `both_choices`, `not_ancestor`, `no_plist`,
 `foreign_home`, `foreign_agent`,
 `unknown_command` (with `detail.commands`), `args`, `repos`, `ticket`,
