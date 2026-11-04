@@ -356,12 +356,12 @@ fn auto_move_restart_after_done_uses_persisted_baseline() {
     assert!(matches!(out, OldTreeOutcome::Kept { .. }), "{out:?}");
     let n = notice(&fx, &b).expect("notice");
     let paths: Vec<&str> = n["paths"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
-    assert!(paths.iter().any(|p| p.starts_with("node_modules")), "{n}");
+    assert!(!paths.iter().any(|p| p.starts_with("node_modules")), "deps scope survives restart: {n}");
     assert!(paths.contains(&".env"), "{n}");
 }
 
 #[test]
-fn activity_walk_sees_ignored_deps_seed_and_env_writes() {
+fn activity_scope_excludes_deps_but_keeps_seed_and_env_writes() {
     let fx = fx();
     let (b, p) = setup(&fx);
     let r = paused(&fx, &b, &p, "move.swap", |ws| {
@@ -373,7 +373,7 @@ fn activity_walk_sees_ignored_deps_seed_and_env_writes() {
     moved(&r);
     let n = notice(&fx, &b).expect("notice");
     let paths: Vec<&str> = n["paths"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
-    assert!(paths.contains(&"node_modules/seed.js") || paths.contains(&"node_modules"), "{n}");
+    assert!(!paths.iter().any(|p| p.starts_with("node_modules")), "dependency writes are excluded: {n}");
     assert!(paths.contains(&".env.local"), "{n}");
 }
 
@@ -509,4 +509,32 @@ fn agent_policy_does_not_use_auto_quiet_window() {
             .policy,
         strata_store::MoveActivityPolicy::Agent
     );
+}
+
+#[test]
+fn dependency_cache_write_during_move_does_not_defer_or_keep_old_tree() {
+    for seam in ["move.recheck","move.swap"] {
+        let fx=fx(); let (b,p)=setup(&fx);
+        let dir=fx.ws(&b,"tool").join("node_modules"); fs::set_permissions(&dir,fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dir.join("test-cache"),b"before").unwrap();
+        let r=paused(&fx,&b,&p,seam,|ws|fs::write(ws.join("node_modules/test-cache"),b"after").unwrap()).unwrap();
+        moved(&r); assert!(notice(&fx,&b).is_none());
+        assert!(!old_path(&last_intent(&fx,&b)).exists());
+    }
+}
+
+#[test]
+fn quiet_skip_and_nested_seed_caches_still_protect_writes_during_move() {
+    for nested in [false,true] {
+        let mut fx=fx();
+        let path=if nested {"node_modules/.cache/build"} else {".eslintcache"};
+        if nested { fx.cfg_mut("tool").seed_caches.push(rp("node_modules/.cache")); }
+        else { fx.cfg_mut("tool").rebase.quiet_skip.push(".eslintcache".into()); }
+        let (b,p)=setup(&fx); let ws=fx.ws(&b,"tool");
+        if nested { fs::set_permissions(ws.join("node_modules"),fs::Permissions::from_mode(0o755)).unwrap(); fs::create_dir_all(ws.join("node_modules/.cache")).unwrap(); }
+        fs::write(ws.join(path),b"before").unwrap();
+        let r=paused(&fx,&b,&p,"move.recheck",|ws|fs::write(ws.join(path),b"late").unwrap()).unwrap();
+        assert!(matches!(r,RebaseReport::Deferred {ref reason,..} if reason=="changed_during_move"),"{r:?}");
+        assert_eq!(fs::read(ws.join(path)).unwrap(),b"late");
+    }
 }

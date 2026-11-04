@@ -189,8 +189,11 @@ fn commit_of(sc: Scope, id: u64, outcome: Option<&Value>) -> Option<CommitOid> {
     let tip = sc.git.read_ref(&chain_ref(sc.branch)).ok().flatten()?;
     let anchor = sc.git.read_ref(&anchor_ref(sc.branch)).ok().flatten()?;
     let subject = format!("strata publish {id} ({})", sc.repo);
-    let (list, _) = sc.git.commits_between(&anchor, &tip, 500).ok()?;
-    list.into_iter().find(|(_, s)| *s == subject).map(|(c, _)| c)
+    let identity = format!("{id} ({})", sc.repo);
+    let list = sc.git.commits_between_trailers(&anchor, &tip, 500).ok()?;
+    list.iter().find(|c| c.publishes.iter().any(|v| v == &identity))
+        .or_else(|| list.iter().find(|c| c.publishes.is_empty() && c.subject == subject))
+        .map(|c| c.oid.clone())
 }
 
 /// Rule 4: reconstruct every row of the repo. The caller holds the repo

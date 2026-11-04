@@ -639,9 +639,7 @@ fn pre_write_wait_is_busy_post_write_wait_is_not() {
         assert_eq!(e.code, Code::Busy, "{e:?}");
         assert_eq!(ran(&calls(&fx), "commit-tree"), 0);
         assert_eq!(fx.read_ref("tool", CHAIN), None);
-        let r = last_row(&fx);
-        assert_eq!(r.phase, PublishPhase::Done);
-        assert_eq!(r.outcome.as_ref().unwrap()["stopped"], "Busy");
+        assert!(fx.store().publishes().unwrap().is_empty(), "the bounded base gate has not inserted a row");
     }
     // After commit_tree, a holder keeps the lock for longer than the bound:
     // the call waits it out.

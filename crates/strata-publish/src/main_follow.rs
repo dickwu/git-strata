@@ -310,7 +310,7 @@ pub fn settle_auto(ctx: &deps::Ctx) -> Result<()> {
                     && s.manifest
                         .repos
                         .get(ctx.repo)
-                        .is_some_and(|w| w.tracked && w.base.deps != p.to)
+                        .is_some_and(|w| w.tracked && w.base.deps != p.to && p.head.as_ref().is_none_or(|h| ctx.git.is_ancestor(&w.head, h).unwrap_or(true)))
             })
         {
             ctx.store.auto_applied(p.id, SystemTime::now())?;
