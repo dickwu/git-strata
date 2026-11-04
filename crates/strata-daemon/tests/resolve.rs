@@ -850,7 +850,7 @@ fn chain_resolve_refs_under_repo_lock() {
 #[test]
 fn publish_calls_publish_not_stage() {
     let h = src("handlers.rs");
-    assert!(h.contains("strata_publish::publish_bound("), "the publish handler calls publish::publish (bound to the shown plan)");
+    assert!(h.contains("strata_publish::publish_with_messages("), "the publish handler calls the complete publish pipeline with the shown plan and messages");
     for s in ["strata_publish::stage", "stage(", "Staged"] {
         assert!(!h.contains(s), "handlers.rs mentions {s}");
     }

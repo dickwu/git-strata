@@ -140,7 +140,8 @@ fn make_private_dir(dir: &Path) -> Result<()> {
 
 /// The daemon's own warnings: deduplicated, each human alert printed once.
 pub struct Warnings {
-    list: Mutex<Vec<DaemonWarning>>,
+    list: Mutex<Vec<(DaemonWarning, SystemTime)>>,
+    first_seen: Mutex<Vec<(DaemonWarning, SystemTime)>>,
     alert: Arc<dyn Fn(&str) + Send + Sync>,
     /// Keys of the lines `alert_first` already printed.
     seen: Mutex<std::collections::BTreeSet<String>>,
@@ -148,17 +149,17 @@ pub struct Warnings {
 
 impl Warnings {
     fn new(alert: Arc<dyn Fn(&str) + Send + Sync>) -> Warnings {
-        Warnings { list: Mutex::new(Vec::new()), alert, seen: Mutex::new(Default::default()) }
+        Warnings { list: Mutex::new(Vec::new()), first_seen: Mutex::new(Vec::new()), alert, seen: Mutex::new(Default::default()) }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<DaemonWarning>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(DaemonWarning, SystemTime)>> {
         self.list.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Record `w` once. Quarantine and attach alerts also print one line.
     pub fn add(&self, w: DaemonWarning) {
         let mut l = self.lock();
-        if l.contains(&w) {
+        if l.iter().any(|(v, _)| v == &w) {
             return;
         }
         let line = match &w {
@@ -172,7 +173,7 @@ impl Warnings {
             )),
             _ => None,
         };
-        l.push(w);
+        l.push((w, SystemTime::now()));
         drop(l);
         if let Some(line) = line {
             (self.alert)(&line);
@@ -194,11 +195,32 @@ impl Warnings {
     }
 
     pub fn remove(&self, f: impl Fn(&DaemonWarning) -> bool) {
-        self.lock().retain(|w| !f(w));
+        self.lock().retain(|(w, _)| !f(w));
     }
 
     pub fn snapshot(&self) -> Vec<DaemonWarning> {
-        self.lock().clone()
+        self.lock().iter().map(|(w, _)| w.clone()).collect()
+    }
+
+    pub fn times(&self, warnings: &[DaemonWarning]) -> Vec<Value> {
+        let list = self.lock();
+        let mut first = self.first_seen.lock().unwrap_or_else(|p| p.into_inner());
+        let same = |a: &DaemonWarning, b: &DaemonWarning| match (a, b) {
+            (DaemonWarning::AutoRebaseStuck {session:a,repo:ar,rev:av,since:at,..}, DaemonWarning::AutoRebaseStuck {session:b,repo:br,rev:bv,since:bt,..}) => a == b && ar == br && av == bv && at == bt,
+            _ => a == b,
+        };
+        first.retain(|(w,_)| !matches!(w, DaemonWarning::AutoRebaseStuck {..}) || warnings.iter().any(|v| same(w,v)));
+        warnings.iter().map(|w| {
+            let at = match w {
+                DaemonWarning::LongHold { since, .. } => *since,
+                _ => list.iter().find(|(v, _)| v == w).map(|(_, at)| *at).unwrap_or_else(|| {
+                    if let Some((_, at)) = first.iter().find(|(v, _)| same(v, w)) { *at } else {
+                        let at = SystemTime::now(); first.push((w.clone(), at)); at
+                    }
+                }),
+            };
+            json!({"warning":w, "raised_at":strata_types::serde_rfc3339::format(&at).unwrap_or_default()})
+        }).collect()
     }
 }
 
@@ -663,6 +685,10 @@ impl<'a> Daemon<'a> {
     pub fn daemon_status(&self, verify: bool) -> Result<Value> {
         let mut warnings = self.core.warnings.snapshot();
         warnings.extend(self.core.locks.long_holds());
+        let pending = self.core.store.rebase_pending(None).unwrap_or_default();
+        for p in pending.iter().filter(|p| strata_session::rebase_stuck(p, SystemTime::now())) {
+            warnings.push(DaemonWarning::AutoRebaseStuck { session: p.session.clone(), repo: p.repo.clone(), reason:p.reason.clone(), attempts:p.attempts, rev:p.rev, since:p.first_at });
+        }
         let mut verify_result = Value::Null;
         if verify {
             verify_result = match self.core.store.quick_check() {
@@ -676,11 +702,21 @@ impl<'a> Daemon<'a> {
         if self.core.store.is_poisoned() && !warnings.contains(&DaemonWarning::StorePoisoned) {
             warnings.push(DaemonWarning::StorePoisoned);
         }
+        let mut warning_times = self.core.warnings.times(&warnings);
+        for (w, time) in warnings.iter().zip(&mut warning_times) {
+            if let DaemonWarning::AutoRebaseStuck { session, repo, .. } = w
+                && let Some(p) = pending.iter().find(|p| &p.session == session && &p.repo == repo) {
+                time["since"] = json!(strata_types::serde_rfc3339::format(&p.first_at).unwrap_or_default());
+                time["holders"] = json!(p.detail.as_ref().and_then(|d| d["holders"].as_array()).map(|h| h.iter().take(5).cloned().collect::<Vec<_>>()).unwrap_or_default());
+            }
+        }
         Ok(json!({
             "holds": self.core.locks.holds(),
             "repo_waiting": self.core.config.repos.keys()
                 .map(|r| (r.as_str().to_string(), self.core.locks.repo_waiting(r)))
                 .collect::<BTreeMap<String, usize>>(),
+            "warning_times": warning_times,
+            "pins_meta": self.core.pins.metadata(),
             "warnings": warnings,
             "verify": verify_result,
             "reconcile": self.reconcile.lock().unwrap_or_else(|p| p.into_inner()).clone(),
@@ -821,5 +857,25 @@ fn sweep_exports(root: &Path) {
                 tracing::warn!(path = %e.path().display(), %err, "a stale main-sync export could not be removed");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod r2_warning_tests {
+    use super::*;
+    #[test]
+    fn timestamp_siblings_preserve_warning_shape_and_first_sighting() {
+        let w=Warnings::new(Arc::new(|_| {}));
+        w.add(DaemonWarning::StorePoisoned);
+        let first=w.times(&w.snapshot());
+        w.add(DaemonWarning::StorePoisoned);
+        assert_eq!(serde_json::to_value(w.snapshot()).unwrap(),json!(["StorePoisoned"]));
+        assert_eq!(w.times(&w.snapshot()),first);
+        let warning=DaemonWarning::VerifyFailed {message:"check".into()};
+        let first=w.times(std::slice::from_ref(&warning));
+        assert_eq!(w.times(&[warning]),first);
+        let at=SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let held=DaemonWarning::LongHold {repo:RepoName::try_from("app".to_string()).unwrap(),method:"sync".into(),since:at};
+        assert_eq!(w.times(&[held])[0]["raised_at"],"1970-01-01T00:00:01Z");
     }
 }

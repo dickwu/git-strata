@@ -794,7 +794,12 @@ fn publish_plan_names_the_remaining_repos_and_writes_nothing() {
             json!({ "id": 0, "batches": batches })
         };
         let plan = ok(call(&sock, "publish_plan", json!({ "group": group() })));
-        assert_eq!(plan, json!({ "repos": ["front", "tool"], "already_published": [] }));
+        assert_eq!(plan["repos"], json!(["front", "tool"]));
+        assert_eq!(plan["already_published"], json!([]));
+        for repo in ["front", "tool"] {
+            assert_eq!(plan["subjects"][repo]["message_source"], "legacy");
+            assert!(plan["subjects"][repo]["subject"].is_string());
+        }
         assert!(core.store.publishes().unwrap().is_empty(), "the plan wrote a publish row");
 
         // front lands, tool's confirmation is cancelled.
@@ -851,7 +856,9 @@ fn publish_plan_keeps_a_waiting_sessions_landed_guarded_repo() {
         let r = ok(call(&sock, "publish", json!({ "group": group(), "shown": { "tool": null } })));
         assert_eq!(r["published"][0]["rebases"][0]["report"]["kind"], "Waiting", "{r:#}");
         let plan = ok(call(&sock, "publish_plan", json!({ "group": group() })));
-        assert_eq!(plan, json!({ "repos": ["tool"], "already_published": [] }), "{plan:#}");
+        assert_eq!(plan["repos"], json!(["tool"]), "{plan:#}");
+        assert_eq!(plan["already_published"], json!([]));
+        assert!(plan["subjects"]["tool"]["subject"].is_string());
     });
     drop(d);
     core.close().unwrap();
@@ -892,6 +899,7 @@ fn publish_failure_after_a_definite_push_reports_the_pushed_commit() {
             assert_eq!(l["commit"], json!(tip), "{at:?}: {r:#}");
             assert_eq!(l["push"]["kind"], "Pushed", "{at:?}: {r:#}");
             assert!(l["checks_ran"].is_u64(), "{at:?}: {r:#}");
+            assert!(l["message_source"].is_string(), "chosen source survives a post-commit failure: {r:#}");
         });
     }
 }
@@ -1173,6 +1181,9 @@ fn rm_waits_for_publishing_in_the_lock_free_gap() {
 #[test]
 fn standalone_push_unknown_keeps_scene_and_reports_across_restart() {
     let mut fx = Dfx::new();
+    // Recovery, not lock-deadline behavior: let startup catch-up release
+    // its repo lock before the next intentional push.
+    fx.lock_wait = Duration::from_secs(5);
     fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.push = false;
     fx.write_config();
     let sock = fx.socket();

@@ -158,11 +158,11 @@ fn config_relax_writes_pin_after_validate() {
     assert!(!pending(&core));
     core.close().unwrap();
 
-    // confirm itself writes no file into the config dir.
+    // No temporary pin file remains; confirmed pin changes have an audit sidecar.
     let names: Vec<String> = fs::read_dir(&fx.config_dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     let mut names = names;
     names.sort();
-    assert_eq!(names, vec!["config.toml", "daemon.lock", "pins.json"]);
+    assert_eq!(names, vec!["audit.jsonl", "config.toml", "daemon.lock", "pins.json"]);
 }
 
 #[test]
@@ -575,5 +575,32 @@ fn sync_deps_does_not_change_publish_confirmation() {
     for mode in [SyncDeps::Apply, SyncDeps::Confirm] {
         let flags = PinnedFlags { confirm: false, sync_deps: Some(mode), ..Default::default() };
         assert!(!confirm_flow::needs_confirm(&flags));
+    }
+}
+
+#[test]
+fn relax_audit_sidecar_preserves_pins_format_and_append_failure_keeps_relaxation() {
+    for fail in [false,true] {
+        let mut fx=Dfx::new();
+        set_flags(&mut fx,true,true,true);
+        fx.prepare().unwrap().close().unwrap();
+        set_flags(&mut fx,false,true,true);
+        let (c,_,_)=fx.confirmer(vec![Verdict::pass()]);
+        let core=fx.prepare_with(c).unwrap();
+        let audit=strata_daemon::pins_path(&fx.config_dir).with_file_name("audit.jsonl");
+        if fail { fs::remove_file(&audit).unwrap(); fs::create_dir(&audit).unwrap(); }
+        core.config_relax(&repo_name("tool")).unwrap();
+        assert!(!core.pinned(&repo_name("tool")).unwrap().deploy_on_push);
+        let pin:serde_json::Value=serde_json::from_slice(&pins_bytes(&fx)).unwrap();
+        assert!(pin["repos"]["tool"].get("relaxed_at").is_none());
+        assert_eq!(pin.as_object().unwrap().len(),1);
+        if fail { assert!(core.pins.audit_error(&repo_name("tool")).is_some()); }
+        else {
+            let text=fs::read_to_string(audit).unwrap();
+            let e:serde_json::Value=serde_json::from_str(text.lines().last().unwrap()).unwrap();
+            assert_eq!(e["event"],"config_relax"); assert_eq!(e["from"]["deploy_on_push"],true); assert_eq!(e["to"]["deploy_on_push"],false);
+            assert!(e["at"].as_str().is_some());
+            assert!(core.pins.metadata()["tool"]["relaxed_at"].is_string());
+        }
     }
 }

@@ -360,6 +360,8 @@ fn rm_upstream_captured_before_teardown() {
     advance(&fx, &core, "upstream");
     let out = ok(call(&server, "rm", json!({"session":s,"discard":false})));
     assert_eq!(out["upstream"]["repos"]["tool"]["behind"], 1);
+    assert_eq!(out["upstream"]["repos"]["tool"]["unpublished"], false);
+    assert_eq!(out["upstream"]["as_of_rm"], "before");
     assert_eq!(
         core.store.session(&s).unwrap().unwrap().lifecycle,
         strata_store::Lifecycle::Removed
@@ -818,4 +820,121 @@ fn add_runs_main_follow_for_added_repos() {
         core.store.rebase_pending_of(&s1, &rn).unwrap().is_some(),
         "add reconciled the added repo"
     );
+}
+
+#[test]
+fn stuck_rows_warn_and_hand_back_once_then_clear() {
+    let fx=Dfx::new(); let core=fx.prepare().unwrap(); let d=Daemon::start(&core).unwrap();
+    let trackers=Trackers::new(&core); let server=Server::new(&d,&trackers); let s=new(&server);
+    let repo=repo_name("tool"); let rec=core.store.session(&s).unwrap().unwrap(); let w=&rec.manifest.repos[&repo];
+    core.store.enroll_main(&s,&repo,&w.base,&w.head,&w.base.tree,None,SystemTime::now()).unwrap();
+    let p=core.store.rebase_pending_of(&s,&repo).unwrap().unwrap();
+    for _ in 0..3 { core.store.defer_pending(&s,&repo,p.rev,"open_files",&json!({"holders":[{"pid":123,"command":"shell","hold":"cwd","path":"."}],"count":1}),SystemTime::now()).unwrap(); }
+    let status=d.daemon_status(false).unwrap();
+    assert_eq!(status["warnings"].as_array().unwrap().iter().filter(|w| w.get("AutoRebaseStuck").is_some()).count(),1);
+    let first=check(&server,&s,true); let second=check(&server,&s,true);
+    assert!(first.repos[&repo].auto.as_ref().unwrap().escalation_new);
+    assert!(!second.repos[&repo].auto.as_ref().unwrap().escalation_new);
+    assert_eq!(first.repos[&repo].auto.as_ref().unwrap().escalated_at,second.repos[&repo].auto.as_ref().unwrap().escalated_at);
+    core.store.set_pending_reason(&s,&repo,p.rev,"waiting_install").unwrap();
+    assert!(!d.daemon_status(false).unwrap()["warnings"].as_array().unwrap().iter().any(|w|w.get("AutoRebaseStuck").is_some()));
+    core.store.drop_pending(&s,&repo,p.rev).unwrap();
+    assert!(check(&server,&s,true).repos[&repo].auto.is_none());
+}
+
+#[test]
+fn whole_group_base_gate_precedes_every_prompt_and_commit() {
+    let mut fx=Dfx::with(&["aaa","tool"]);
+    for cfg in fx.config.repos.values_mut() { cfg.publish.confirm=true; cfg.publish.push=true; }
+    fx.write_config();
+    let (confirmer,log,_)=fx.confirmer(vec![strata_daemon::seams::Verdict::pass()]);
+    let core=fx.prepare_with(confirmer).unwrap(); let d=Daemon::start(&core).unwrap(); let trackers=Trackers::new(&core); let server=Server::new(&d,&trackers);
+    let first:SessionId=serde_json::from_value(ok(call(&server,"new",json!({"ticket":null,"repos":["aaa"],"only":true})))["session"]["manifest"]["id"].clone()).unwrap();
+    let normal=new(&server);
+    let main=core.config.repos[&repo_name("tool")].path.clone();
+    let local=fx.sb.commit(&main,&[("base-only",b"base")],"parked");
+    let parked:SessionId=serde_json::from_value(ok(call(&server,"new",json!({"ticket":null,"repos":["tool"],"only":true,"base":{"tool":local}})))["session"]["manifest"]["id"].clone()).unwrap();
+    let mut batches=Vec::new();
+    for (id,repo,path) in [(&first,"aaa","first"),(&normal,"tool","normal"),(&parked,"tool","parked")] {
+        fs::write(ws(&core,id,repo).join(path),b"edit").unwrap();
+        let cp=checkpoint(&core,id,repo);
+        batches.push(json!({"session":id,"repo":repo,"checkpoint":cp.id,"paths":[path]}));
+    }
+    let params=json!({"group":{"id":0,"batches":batches}});
+    for method in ["publish_plan","publish"] {
+        let out=call(&server,method,params.clone());
+        assert_eq!(out["error"]["detail"]["reason"],"base_not_on_main","{out}");
+        assert!(out["error"]["detail"]["fix"].as_str().unwrap().starts_with("ask the human"));
+    }
+    assert!(log.shown().is_empty());
+    assert!(core.store.publishes().unwrap().is_empty());
+}
+
+#[test]
+fn parked_status_sync_and_rm_check_other_session_pins_before_warning() {
+    let fx=Dfx::new(); let core=fx.prepare().unwrap(); let d=Daemon::start(&core).unwrap(); let trackers=Trackers::new(&core); let server=Server::new(&d,&trackers);
+    let repo=repo_name("tool"); let main=core.config.repos[&repo].path.clone(); let initial=fx.sb.head(&main);
+    let c=fx.sb.commit(&main,&[("only-c",b"C")],"local C");
+    let make=|| -> SessionId { serde_json::from_value(ok(call(&server,"new",json!({"ticket":null,"repos":["tool"],"only":true,"base":{"tool":c}})))["session"]["manifest"]["id"].clone()).unwrap() };
+    let a=make(); let b=make();
+    let up=check(&server,&a,false); assert_eq!(up.repos[&repo].ahead,1); assert_eq!(up.repos[&repo].base_only[0].as_str(),c);
+    let sync=ok(call(&server,"sync",json!({"session":a,"check":false,"cwd":null})));
+    assert!(sync.to_string().contains("up_to_date")); assert!(sync.to_string().contains("\"ahead\":1"));
+    fx.sb.git(&main,&["reset","--hard",&initial]);
+    let first=ok(call(&server,"rm",json!({"session":a,"discard":false})));
+    assert!(first.get("base_rev_unreferenced").is_none(),"the other session pin keeps C reachable: {first}");
+    let second=ok(call(&server,"rm",json!({"session":b,"discard":false})));
+    assert_eq!(second["base_rev_unreferenced"][0]["oid"],c);
+}
+
+#[test]
+fn divergent_parked_base_requires_human_drop_before_publish() {
+    let fx=Dfx::new(); let core=fx.prepare().unwrap(); let d=Daemon::start(&core).unwrap(); let trackers=Trackers::new(&core); let server=Server::new(&d,&trackers);
+    let repo=repo_name("tool"); let main=fx.main("tool"); let initial=fx.sb.head(&main);
+    let c=fx.sb.commit(&main,&[("only-c",b"C")],"local C");
+    let s:SessionId=serde_json::from_value(ok(call(&server,"new",json!({"ticket":null,"repos":["tool"],"only":true,"base":{"tool":c}})))["session"]["manifest"]["id"].clone()).unwrap();
+    fs::write(ws(&core,&s,"tool").join("mine"),b"mine").unwrap();
+    fx.sb.git(&main,&["reset","--hard",&initial]);
+    fx.sb.commit(&main,&[("only-d",b"D")],"sibling D"); fx.sb.git(&main,&["push","origin","HEAD:main"]); core.gits[&repo].fetch("origin","main").unwrap();
+    let cp=checkpoint(&core,&s,"tool");
+    let params=json!({"group":{"id":0,"batches":[{"session":s,"repo":"tool","checkpoint":cp.id,"paths":["mine"]}]}});
+    let e=call(&server,"publish_plan",params); assert_eq!(e["error"]["detail"]["reason"],"base_not_on_main");
+    assert!(e["error"]["detail"]["fix"].as_str().unwrap().contains("recover the publish chain first"));
+    let e=call(&server,"sync",json!({"session":s,"check":false,"cwd":null,"fetch":true}));
+    assert_eq!(e["error"]["detail"]["reason"],"base_diverged");
+    ok(call(&server,"sync",json!({"session":s,"check":false,"cwd":null,"fetch":true,"accept_diverged":true})));
+    assert!(!ws(&core,&s,"tool").join("only-c").exists());
+    let cp=checkpoint(&core,&s,"tool");
+    let out=ok(call(&server,"publish",json!({"group":{"id":0,"batches":[{"session":s,"repo":"tool","checkpoint":cp.id,"paths":["mine"]}]}})));
+    assert_eq!(out["published"].as_array().unwrap().len(),1);
+}
+
+#[test]
+fn publish_plan_fills_cold_split_target_and_refreshes_a_previously_parked_base() {
+    let mut fx=Dfx::new(); let repo=repo_name("tool"); let main=fx.main("tool");
+    fx.sb.git(&main,&["push","origin","HEAD:release"]);
+    let cfg=fx.config.repos.get_mut(&repo).unwrap();
+    cfg.deps_dirs.clear(); cfg.install=None; cfg.install_inputs.clear(); cfg.seed_caches.clear();
+    cfg.publish.branch="release".into(); cfg.publish.push=false; fx.write_config();
+    let core=fx.prepare().unwrap(); let d=Daemon::start(&core).unwrap(); let trackers=Trackers::new(&core); let server=Server::new(&d,&trackers);
+    let normal=new(&server);
+    fs::write(ws(&core,&normal,"tool").join("normal"),b"normal").unwrap();
+    let cp=checkpoint(&core,&normal,"tool");
+    let group=|s:&SessionId,cp:&strata_types::Checkpoint,path:&str| json!({"group":{"id":0,"batches":[{"session":s,"repo":"tool","checkpoint":cp.id,"paths":[path]}]}});
+    assert!(core.gits[&repo].read_ref("refs/strata/remotes/origin/release").unwrap().is_none());
+    ok(call(&server,"publish_plan",group(&normal,&cp,"normal")));
+    assert!(core.gits[&repo].read_ref("refs/strata/remotes/origin/release").unwrap().is_some());
+    assert!(core.gits[&repo].read_ref("refs/strata/publish/release").unwrap().is_none());
+    assert!(core.store.publishes().unwrap().is_empty());
+    ok(call(&server,"publish",group(&normal,&cp,"normal")));
+    let c=fx.sb.commit(&main,&[("only-c",b"C")],"local C");
+    let parked:SessionId=serde_json::from_value(ok(call(&server,"new",json!({"ticket":null,"repos":["tool"],"only":true,"base":{"tool":c}})))["session"]["manifest"]["id"].clone()).unwrap();
+    fs::write(ws(&core,&parked,"tool").join("mine"),b"mine").unwrap(); let cp=checkpoint(&core,&parked,"tool");
+    let params=group(&parked,&cp,"mine");
+    fx.sb.git(&main,&["update-ref","-d","refs/strata/remotes/origin/release"]);
+    assert!(check(&server,&parked,false).repos[&repo].unchecked, "an unknown publish target cannot prove ahead");
+    let e=call(&server,"publish_plan",params.clone()); assert_eq!(e["error"]["detail"]["reason"],"base_not_on_main");
+    fx.sb.git(&main,&["push","origin","HEAD:main"]);
+    // No explicit fetch and no following sync exists on this split repo.
+    ok(call(&server,"publish_plan",params));
 }

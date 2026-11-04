@@ -115,7 +115,8 @@ pub fn install_path_for_home(home: &Path) -> String {
 /// Optional request features this daemon serves, listed in
 /// `daemon_status.features` so a newer CLI can tell what an older daemon
 /// would reject. Additive only. `new.agent`: `new` takes `agent`.
-pub const FEATURES: &[&str] = &["new.agent", "session.ports", "status.upstream", "sync"];
+pub const FEATURES: &[&str] = &[
+    "publish.message", "new.base", "rebase.quiet_scope","new.agent", "session.ports", "status.upstream", "sync"];
 
 /// The launchd label of the agent.
 pub const AGENT_LABEL: &str = "com.gwd.git-stratad";
@@ -172,6 +173,7 @@ pub struct PinnedFlags {
 /// What `daemon_status` and the stderr alert report.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DaemonWarning {
+    AutoRebaseStuck { session: SessionId, repo: RepoName, reason: String, attempts: u64, rev: u64, since: SystemTime },
     Quarantine { path: PathBuf },
     AttachOutside { reason: String, index: PathBuf },
     LongHold { repo: RepoName, method: String, since: SystemTime },
@@ -208,4 +210,5 @@ pub enum ChainChoice {
 }
 
 pub mod main_sync;
+mod audit;
 pub mod periodic_fetch;

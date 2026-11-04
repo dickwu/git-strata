@@ -35,12 +35,13 @@ impl Default for Live {
     }
 }
 
-type Key = (RepoName, CommitOid, Option<CommitOid>);
+type Key = (RepoName, CommitOid, Option<CommitOid>, Option<CommitOid>);
 type DepsKey = (SessionId, BaseGen, u64, strata_types::ProposalId);
 #[derive(Clone)]
 struct Graph {
     main: Option<UpstreamMain>,
     behind: u32,
+    ahead: u32,
     capped: bool,
     diverged: bool,
     base_only: Vec<CommitOid>,
@@ -48,7 +49,8 @@ struct Graph {
 }
 #[derive(Default)]
 struct Entries {
-    tips: BTreeMap<RepoName, Option<CommitOid>>,
+    escalations: BTreeMap<(SessionId, RepoName), (u64, std::time::SystemTime, String)>,
+    tips: BTreeMap<RepoName, (Option<CommitOid>, Option<CommitOid>)>,
     graphs: VecDeque<(Key, Graph)>,
     deps: VecDeque<(DepsKey, String)>,
 }
@@ -72,14 +74,15 @@ impl Cache {
         ws: &WorkspaceState,
         mode: ReadMode,
     ) -> Result<Option<Graph>> {
-        let tip = if mode == ReadMode::Full {
+        let (tip, b) = if mode == ReadMode::Full {
             let tip = strata_deps::main_tip(&core.config.repos[repo], &core.gits[repo])?;
+            let b = strata_publish::merge_base(&core.gits[repo], &core.config.repos[repo]).ok();
             self.0
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .tips
-                .insert(repo.clone(), tip.clone());
-            tip
+                .insert(repo.clone(), (tip.clone(), b.clone()));
+            (tip, b)
         } else {
             let c = self.0.lock().unwrap_or_else(|p| p.into_inner());
             let Some(tip) = c.tips.get(repo) else {
@@ -87,7 +90,7 @@ impl Cache {
             };
             tip.clone()
         };
-        let key = (repo.clone(), ws.head.clone(), tip.clone());
+        let key = (repo.clone(), ws.head.clone(), tip.clone(), b.clone());
         if let Some((_, g)) = self
             .0
             .lock()
@@ -105,29 +108,31 @@ impl Cache {
         let mut graph = Graph {
             main: None,
             behind: 0,
+            ahead: 0,
             capped: false,
             diverged: false,
             base_only: Vec::new(),
             commits: Vec::new(),
         };
         if let Some(tip) = tip {
+            // Without B we can prove acceptance on main, but cannot decide
+            // an ahead/diverged head. Do not report a guessed ahead count.
+            if b.is_none() && !git.is_ancestor(&ws.head, &tip)? { return Ok(None); }
             graph.main = Some(UpstreamMain {
                 tree: git.tree_of(&tip)?,
                 head: tip.clone(),
             });
+            let (base_only, more) = git.base_only(&ws.head, &tip, b.as_ref().unwrap_or(&tip), 1000)?;
+            graph.ahead = base_only.len() as u32;
+            graph.capped |= more;
+            graph.base_only = base_only.into_iter().take(20).map(|(c, _)| c).collect();
             if !git.is_ancestor(&tip, &ws.head)? {
                 let count = git.count_between(&ws.head, &tip, 1001)?;
                 graph.behind = count.min(1000);
-                graph.capped = count > 1000;
+                graph.capped |= count > 1000;
                 graph.diverged = !git.is_ancestor(&ws.head, &tip)?;
                 graph.commits = git.history_between(&ws.head, &tip, 20)?;
-                if graph.diverged {
-                    graph.base_only = git
-                        .history_between(&tip, &ws.head, 20)?
-                        .into_iter()
-                        .map(|c| c.oid)
-                        .collect();
-                }
+
             }
         }
         let mut c = self.0.lock().unwrap_or_else(|p| p.into_inner());
@@ -137,6 +142,24 @@ impl Cache {
             c.graphs.pop_front();
         }
         Ok(Some(graph))
+    }
+
+    /// Only a Stop-hook check consumes this latch. Status reads do not.
+    pub fn hand_back(&self, core: &Core, id: &SessionId, upstream: &mut Upstream) -> Result<()> {
+        let rows = core.store.rebase_pending(Some(id))?;
+        let now = std::time::SystemTime::now();
+        let mut cache = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        cache.escalations.retain(|(s, repo), (rev, first, _)| s != id || rows.iter().any(|r| &r.repo == repo && r.rev == *rev && r.first_at == *first));
+        for p in rows.iter().filter(|p| strata_session::rebase_stuck(p, now)) {
+            if let Some(auto) = upstream.repos.get_mut(&p.repo).and_then(|u| u.auto.as_mut()) {
+                let key = (id.clone(), p.repo.clone());
+                let fresh = !cache.escalations.contains_key(&key);
+                let (_, _, at) = cache.escalations.entry(key).or_insert_with(|| (p.rev, p.first_at, timestamp(&now)));
+                auto.escalated_at = Some(at.clone());
+                auto.escalation_new = fresh;
+            }
+        }
+        Ok(())
     }
 
     /// No Git, filesystem walk, or store write. A changed base without a
@@ -217,6 +240,9 @@ impl Cache {
                 .rebase_pending_of(&row.manifest.id, repo)?
                 .map(|p| -> Result<_> {
                     Ok(UpstreamAuto {
+                        escalated_at: self.0.lock().unwrap_or_else(|e| e.into_inner()).escalations.get(&(row.manifest.id.clone(), repo.clone()))
+                            .filter(|(rev, first, _)| *rev == p.rev && *first == p.first_at).map(|(_, _, at)| at.clone()),
+                        escalation_new: false,
                         source: match p.source {
                             strata_store::PendingSource::Main => "main",
                             strata_store::PendingSource::Replay => "replay",
@@ -257,6 +283,7 @@ impl Cache {
             repos.insert(
                 repo.clone(),
                 RepoUpstream {
+                    ahead: graph.as_ref().map_or(0, |g| g.ahead),
                     following: cfg.follow_main(),
                     behind: graph.as_ref().map(|g| g.behind),
                     capped: graph.as_ref().is_some_and(|g| g.capped),
@@ -295,7 +322,7 @@ impl Cache {
                     unpublished: Some(live.unpublished),
                     fix: cfg.follow_main().then(|| {
                         format!(
-                            "git-strata sync --session {} --repo {repo}",
+                            "cd ~ && git-strata sync --session {} --repo {repo}",
                             row.manifest.id
                         )
                     }),
@@ -308,6 +335,7 @@ impl Cache {
             None
         };
         Ok(Upstream {
+            as_of_rm: None,
             as_of,
             clean: is_clean(&repos),
             repos,
