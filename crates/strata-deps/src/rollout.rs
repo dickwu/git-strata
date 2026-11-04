@@ -63,6 +63,7 @@ pub enum RolloutStep {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum SkipReason {
+    BaseAhead { head: CommitOid, target: CommitOid },
     Untracked,
     AlreadyThere,
     NotReady,
@@ -350,6 +351,9 @@ pub fn plan_rollout(
                 return Err(SkipReason::NotReady);
             };
             let error = |error: StrataError| SkipReason::Error { error };
+            if !ctx.git.is_ancestor(&ws.head, &head).map_err(error)? {
+                return Err(SkipReason::BaseAhead { head: ws.head.clone(), target: head.clone() });
+            }
             if let Some(reason) = classify_rollout(ctx, s, ws, &p.to_inputs).map_err(error)? {
                 return Err(reason);
             }
@@ -449,6 +453,9 @@ pub fn plan_switch(
         if ws.base == target {
             return Err(SkipReason::AlreadyThere);
         }
+        if !ctx.git.is_ancestor(&ws.head, &head).map_err(error)? {
+            return Err(SkipReason::BaseAhead { head: ws.head.clone(), target: head.clone() });
+        }
         let to_set = match find_set(ctx.store, &p.repo, &p.to) {
             Ok(Some(set)) => set,
             Ok(None) => return Err(SkipReason::NotReady),
@@ -501,7 +508,7 @@ pub fn record_rollout(store: &Store, plan: &RolloutPlan, moved: &[SessionId]) ->
         && plan.steps.iter().all(|s| match s {
             RolloutStep::Move { session, .. } => moved.contains(session),
             RolloutStep::Skip { reason, .. } => {
-                matches!(reason, SkipReason::Untracked | SkipReason::AlreadyThere)
+                matches!(reason, SkipReason::Untracked | SkipReason::AlreadyThere | SkipReason::BaseAhead { .. })
             }
         });
     if done {

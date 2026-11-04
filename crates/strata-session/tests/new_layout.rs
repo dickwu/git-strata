@@ -685,7 +685,7 @@ fn new_reports_a_failed_observation_as_a_warning() {
             })
         };
         assert_eq!(rep.warnings.len(), 1, "{mode}: {:?}", rep.warnings);
-        let NewWarning::ObserveFailed { repo, detail } = &rep.warnings[0];
+        let NewWarning::ObserveFailed { repo, detail } = &rep.warnings[0] else { panic!("expected observation warning") };
         assert_eq!(repo, &first);
         let want = if mode == "fail" { Code::Unknown } else { Code::Busy };
         assert_eq!(detail.code, want, "{mode}: {detail:?}");
@@ -780,4 +780,78 @@ fn new_warm_under_5s() {
     let took = t.elapsed();
     eprintln!("warm new of {} repos: {took:?}", rep.manifest.repos.len());
     assert!(took < Duration::from_secs(5), "{took:?}");
+}
+
+#[test]
+fn local_base_cold_construction_releases_repo_lock() {
+    let fx = Fx::with(&["tool"]);
+    let tool = repo_name("tool");
+    let s = fx.sessions();
+    fx.lock.set_wait(Duration::from_millis(200));
+    for (i, phase) in ["base.export", "base.deps", "base.manifest"].iter().enumerate() {
+        let rev = fx.sb.commit(&fx.main("tool"), &[(&format!("park-{i}"), b"base")], "parked");
+        let bases = BTreeMap::from([(tool.clone(), rev)]);
+        std::thread::scope(|sc| {
+            s.arm(SessionSeam::PauseAt { phase: phase.to_string() });
+            let task = sc.spawn(|| s.new_at(None, std::slice::from_ref(&tool), strata_session::Layout::Only, None, &bases));
+            s.wait_paused();
+            fx.lock_write(&tool, || ()).unwrap_or_else(|e| panic!("{phase} held the repo lock: {e:?}"));
+            s.release();
+            assert_eq!(task.join().unwrap().unwrap().manifest.repos[&tool].head.as_str(), bases[&tool]);
+        });
+    }
+}
+
+#[test]
+fn local_base_refusals_create_no_session_and_dependency_move_cannot_drop_it() {
+    let fx = Fx::with(&["tool"]);
+    let repo = repo_name("tool");
+    let main = fx.main("tool");
+    let initial = fx.sb.head(&main);
+    let s = fx.sessions();
+    let run = |rev: &str| s.new_at(None, std::slice::from_ref(&repo), strata_session::Layout::Only, None, &BTreeMap::from([(repo.clone(),rev.into())]));
+    let e = run("does-not-exist").unwrap_err();
+    assert_eq!(e.code, Code::NoSuchCommit);
+    assert_refused_without_session(&fx, &e);
+    for bad in ["-x", "a\0b", "origin/main", "a\nb"] {
+        let e = run(bad).unwrap_err(); assert_eq!(e.code,Code::InvalidInput); assert_refused_without_session(&fx,&e);
+    }
+    let c = fx.sb.commit(&main,&[("only-c",b"keep C")],"C");
+    let parked = run(&c).unwrap();
+    fx.sb.git(&main,&["reset","--hard",&initial]);
+    let d = push(&fx,"tool",&[("only-d",b"D")],"D");
+    fx.gits[&repo].fetch("origin","main").unwrap();
+    let head=commit_oid(&d); let target=s.ensure_base(&repo,&head).unwrap();
+    let e=s.move_workspace_checked(&parked.manifest.id,&fx.gits[&repo].repo_id(),target,head,true).unwrap_err();
+    assert_eq!(e.code,Code::Conflict); assert_eq!(e.detail.as_ref().unwrap()["reason"],"base_ahead");
+    assert_eq!(fs::read(ws(&parked,"tool").join("only-c")).unwrap(),b"keep C");
+    let e=run(&initial).unwrap_err(); assert_eq!(e.detail.as_ref().unwrap()["reason"],"base_behind_main");
+    let e=run(&c).unwrap_err(); assert_eq!(e.detail.as_ref().unwrap()["reason"],"base_diverged_from_main");
+    assert!(e.detail.as_ref().unwrap()["fix"].as_str().unwrap().starts_with("ask the human"));
+}
+
+#[test]
+fn quiet_scope_protects_workspace_head_tracked_files_not_main_index() {
+    let fx=Fx::with(&["tool"]); let repo=repo_name("tool"); let s=fx.sessions().new(None,std::slice::from_ref(&repo)).unwrap();
+    let mut w=s.manifest.repos[&repo].clone(); let main=fx.main("tool"); let original=fx.sb.head(&main);
+    fs::create_dir_all(main.join("node_modules")).unwrap();
+    fs::write(main.join("node_modules/tracked"),b"tracked").unwrap();
+    fx.sb.git(&main,&["add","-f","node_modules/tracked"]); fx.sb.git(&main,&["commit","-m","tracked dependency"]);
+    w.head=commit_oid(&fx.sb.head(&main));
+    fx.sb.git(&main,&["reset","--hard",&original]);
+    let cfg=&fx.config.repos[&repo];
+    let scope=strata_session::activity_scope(cfg,&fx.gits[&repo],fx.store(),&w).unwrap();
+    assert!(!scope.skip.contains(&"node_modules".to_string()));
+    let mut cfg=cfg.clone();
+    if !strata_apfs::volume_caps(&w.path).unwrap().case_sensitive {
+        cfg.deps_dirs=vec![rp("NODE_MODULES")];
+        let scope=strata_session::activity_scope(&cfg,&fx.gits[&repo],fx.store(),&w).unwrap();
+        assert!(scope.fold);
+        assert!(scope.skip.is_empty(), "case aliases of tracked deps still count");
+        cfg.rebase.quiet_skip=vec!["NODE_MODULES/TRACKED".into()];
+        assert_eq!(strata_session::activity_scope(&cfg,&fx.gits[&repo],fx.store(),&w).unwrap_err().code,Code::InvalidInput);
+    }
+    cfg.rebase.quiet_skip=vec!["node_modules/tracked".into()];
+    let e=strata_session::activity_scope(&cfg,&fx.gits[&repo],fx.store(),&w).unwrap_err();
+    assert_eq!(e.code,Code::InvalidInput); assert_eq!(e.detail.as_ref().unwrap()["reason"],"quiet_skip_tracked");
 }
