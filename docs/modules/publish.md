@@ -292,6 +292,7 @@ pub enum PublishFault {
 | `<repo>/` | 被发布的仓库。只在内存合并与凭据闸门都过了之后，`export_tree` 创建，`attach_staging` 接上。检查的 cwd 是这里 |
 | `<sibling>/` | 配置里其余每个 repo 一份，是该会话所钉基线的 `clonefile`，不是活的工作区。这样 `../<sibling>` 与工作区里的相对路径相同，检查不会写进活的工作区 |
 | `.git-<repo>/` | `attach_staging` 的私有 git 目录。不在主 checkout 里。gitfile 的 commondir 是主 checkout |
+| `+tmp/` | 检查的 `TMPDIR`/`TMP`/`TEMP`（§5.5），第一条检查前建，0700。没有检查就不建 |
 
 具名返回不留下这个目录，也不留下能进主 ref 库的 gitfile。冲突在建目录之前就返回，hunk 在 `Conflict.detail` 里，没有目录可留。目录一旦建了，具名返回之前必须 `apfs::remove_tree_rooted` 完成；删不完则这次返回 `Unknown`，发布行保持 `Unknown`，status 报出。成功并完成 rebase 之后同样删掉它。删的时候不跟随符号链接。
 
@@ -430,7 +431,7 @@ o = `publish_chain.origin`，c = 链顶，a = 锚点。前移只在 repo 写锁�
 
 `RepoConfig::validate_commands` 在建目录、`attach_staging`、`gitio::stage` 之前就跑。argv 里有 `--write`，或 `cs-fix` 没有 `--dry-run` → `CheckMutates`，检查进程不启动，不建目录。闸门过了之后，在 `<布局根>/<repo>` 里按序跑 `checks`，cwd 是该目录，不经 shell（config.md §2.4）。非零退出 → 先删掉布局根（§5.2 第 5 步），删完才返回 `CheckFailed`，`detail` 带命令、退出码、输出末尾 8 KiB。不提交。删不完则不是 `CheckFailed`。
 
-**临时目录**（check-tmpdir，0.2.x）：第一条检查启动前建 `<布局根>/+tmp`（0700），每条检查的 `TMPDIR`（带结尾 `/`）、`TMP`、`TEMP` 都指向它。它随布局根一起删（`CheckFailed` 时、发布成功收尾时；会话 `rm` 时整个会话根进 trash）。不同发布、不同会话之间不共享：工具写在 `$TMPDIR` 里的缓存（例如没设 `tmpDir` 的 phpstan 结果缓存）不会再指向已删掉的会话或旧布局里的 `vendor/`。代价是这类缓存每次发布都是冷的；每次布局路径不同、依赖是克隆进布局的，跨发布复用本身就会引用已删的路径。`XDG_CACHE_HOME` 不改：用它的工具按内容做键，改成每次发布的目录只会让它们变冷。`+` 不是合法的 repo 名字字符，所以 `+tmp` 不会和兄弟 repo 撞名。建不了 → 按启动失败处理（`CheckFailed`，`spawn_error`，布局根先删）。只有 `checks` 换临时目录；`install`、`dev exec` 和 agent 自己的 hook 沿用调用方的环境。
+**临时目录**（check-tmpdir，0.2.x）：第一条检查启动前建 `<布局根>/+tmp`（0700），每条检查的 `TMPDIR`（带结尾 `/`）、`TMP`、`TEMP` 都指向它。它随布局根一起删（`CheckFailed` 时、发布成功收尾时；会话 `rm` 时整个会话根进 trash）。不同发布、不同会话之间不共享：工具写在 `$TMPDIR` 里的缓存（例如没设 `tmpDir` 的 phpstan 结果缓存）不会再指向已删掉的会话或旧布局里的 `vendor/`。代价是这类缓存每次发布都是冷的；每次布局路径不同、依赖是克隆进布局的，跨发布复用本身就会引用已删的路径。`XDG_CACHE_HOME` 不改：用它的工具按内容做键，改成每次发布的目录只会让它们变冷。`+` 不是合法的 repo 名字字符，所以 `+tmp` 不会和兄弟 repo 撞名。建不了 → 按启动失败处理（`CheckFailed`，`spawn_error` 带 `+tmp` 路径，布局根先删）。布局根因 `Unknown` 留下时，`+tmp` 跟着留下，随布局根一起处理。无头重放（resolve.rs）同样调 `check`，那里的 `+tmp` 在 `daemon/push/<pid>-<stamp>/` 场景里，随场景删除。macOS 的 Unix socket 路径上限是 104 字节；默认根下 `TMPDIR` 约 80 字节，在 `$TMPDIR` 里建 socket 的检查只剩很短的文件名余量，`paths.root` 更深时会失败。这是把目录放在布局根里换来的（随布局清理、和会话同生命周期）。只有 `checks` 换临时目录；`install`、`dev exec` 和 agent 自己的 hook 沿用调用方的环境（检查本来就去掉全部 `GIT_*`）。
 
 配置了 0 条 → 不失败，`checks_ran = 0`（D3）。结果与 `outcome` 里都写这个数。
 

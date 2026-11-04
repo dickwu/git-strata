@@ -92,7 +92,7 @@ pub fn check_tmp_dir(staged: &Path) -> std::io::Result<std::path::PathBuf> {
                 return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{} is not a directory", tmp.display())));
             }
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(std::io::Error::new(e.kind(), format!("cannot create {}: {e}", tmp.display()))),
     }
     Ok(tmp)
 }

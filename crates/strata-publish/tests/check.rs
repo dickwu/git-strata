@@ -215,3 +215,28 @@ fn checks_get_their_own_tmpdir_under_the_layout() {
     assert_eq!(fs::read_to_string(&seen).unwrap(), "", "starts empty");
     assert!(!tmp2.exists() && !st2.layout_root().exists(), "removed with the layout on CheckFailed");
 }
+
+/// check-tmpdir: a `+tmp` that cannot be made (a file is in the way) fails
+/// like a spawn error, names the path, runs nothing, removes the layout.
+/// An inherited XDG_CACHE_HOME reaches the check unchanged.
+#[test]
+fn tmpdir_in_the_way_is_a_check_failure_and_xdg_is_kept() {
+    let fx = Fx::with(&["tool"]);
+    let (st, _s) = staged(&fx, &["tool"]);
+    let tmp = st.layout_root().join(strata_publish::CHECK_TMP_DIR);
+    fs::write(&tmp, b"not a dir").unwrap();
+    let ran = recorder(&fx, "ran", "exit 0");
+    let e = check(&cfg_with(&fx, &[ran]), &st.worktree).unwrap_err();
+    assert_eq!(e.code, Code::CheckFailed, "{e:?}");
+    let msg = e.detail.as_ref().unwrap()["spawn_error"].as_str().unwrap().to_string();
+    assert!(msg.contains("+tmp"), "{msg}");
+    assert_eq!(log(&fx), "", "no check process started");
+    assert!(!st.layout_root().exists());
+
+    let (st, _s2) = staged(&fx, &["tool"]);
+    let out = fx.sb.state.join("xdg.txt");
+    let probe = recorder(&fx, "xdg", &format!("printf '%s' \"${{XDG_CACHE_HOME-unset}}\" > '{}'", out.display()));
+    let want = std::env::var("XDG_CACHE_HOME").unwrap_or_else(|_| "unset".into());
+    check(&cfg_with(&fx, &[probe]), &st.worktree).unwrap();
+    assert_eq!(fs::read_to_string(&out).unwrap(), want);
+}
