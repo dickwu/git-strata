@@ -49,7 +49,7 @@ struct Graph {
 }
 #[derive(Default)]
 struct Entries {
-    escalations: BTreeMap<(SessionId, RepoName), (u64, std::time::SystemTime, String)>,
+    escalations: BTreeMap<(SessionId, RepoName), (std::time::SystemTime, String)>,
     tips: BTreeMap<RepoName, (Option<CommitOid>, Option<CommitOid>)>,
     graphs: VecDeque<(Key, Graph)>,
     deps: VecDeque<(DepsKey, String)>,
@@ -146,20 +146,130 @@ impl Cache {
 
     /// Only a Stop-hook check consumes this latch. Status reads do not.
     pub fn hand_back(&self, core: &Core, id: &SessionId, upstream: &mut Upstream) -> Result<()> {
-        let rows = core.store.rebase_pending(Some(id))?;
+        self.hand_back_inner(core, id, upstream, || {})
+    }
+
+    #[cfg(feature = "test-seams")]
+    pub fn hand_back_rechecking_for_test(
+        &self,
+        core: &Core,
+        id: &SessionId,
+        upstream: &mut Upstream,
+        before_recheck: impl FnOnce(),
+    ) -> Result<()> {
+        self.hand_back_inner(core, id, upstream, before_recheck)
+    }
+
+    fn hand_back_inner(
+        &self,
+        core: &Core,
+        id: &SessionId,
+        upstream: &mut Upstream,
+        before_recheck: impl FnOnce(),
+    ) -> Result<()> {
         let now = std::time::SystemTime::now();
-        let mut cache = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        cache.escalations.retain(|(s, repo), (rev, first, _)| s != id || rows.iter().any(|r| &r.repo == repo && r.rev == *rev && r.first_at == *first));
-        for p in rows.iter().filter(|p| strata_session::rebase_stuck(p, now)) {
-            if let Some(auto) = upstream.repos.get_mut(&p.repo).and_then(|u| u.auto.as_mut()) {
-                let key = (id.clone(), p.repo.clone());
-                let fresh = !cache.escalations.contains_key(&key);
-                let (_, _, at) = cache.escalations.entry(key).or_insert_with(|| (p.rev, p.first_at, timestamp(&now)));
-                auto.escalated_at = Some(at.clone());
+        let rows = {
+            let mut cache = self.0.lock().unwrap_or_else(|p| p.into_inner());
+            let rows = core.store.rebase_pending(None)?;
+            cache.escalations.retain(|(s, repo), (first, _)| {
+                rows.iter()
+                    .any(|p| &p.session == s && &p.repo == repo && p.first_at == *first)
+            });
+            rows
+        };
+        before_recheck();
+        for (repo, returned) in &mut upstream.repos {
+            let snapshot = rows.iter().find(|p| &p.session == id && &p.repo == repo);
+            let (current, escalation) = {
+                let mut cache = self.0.lock().unwrap_or_else(|p| p.into_inner());
+                // Serialize latch checks across hooks and revalidate the revision
+                // AND eligibility fields (deferral itself need not bump rev).
+                let current = core.store.rebase_pending_of(id, repo)?;
+                let escalation = current
+                    .as_ref()
+                    .filter(|p| snapshot == Some(*p) && strata_session::rebase_stuck(p, now))
+                    .map(|p| {
+                        let key = (id.clone(), repo.clone());
+                        let fresh = cache
+                            .escalations
+                            .get(&key)
+                            .is_none_or(|(first, _)| *first != p.first_at);
+                        if fresh {
+                            cache
+                                .escalations
+                                .insert(key.clone(), (p.first_at, timestamp(&now)));
+                        }
+                        (cache.escalations[&key].1.clone(), fresh)
+                    });
+                (current, escalation)
+            };
+            returned.auto = current
+                .as_ref()
+                .map(|p| self.auto_snapshot(p, now))
+                .transpose()?;
+            if let Some((at, fresh)) = escalation {
+                let auto = returned
+                    .auto
+                    .as_mut()
+                    .expect("eligible current row was rendered");
+                auto.escalated_at = Some(at);
                 auto.escalation_new = fresh;
             }
         }
+        upstream.clean = is_clean(&upstream.repos);
         Ok(())
+    }
+
+    fn auto_snapshot(
+        &self,
+        p: &strata_store::RebasePending,
+        now: std::time::SystemTime,
+    ) -> Result<UpstreamAuto> {
+        let escalated_at = if strata_session::rebase_stuck(p, now) {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .escalations
+                .get(&(p.session.clone(), p.repo.clone()))
+                .filter(|(first, _)| *first == p.first_at)
+                .map(|(_, at)| at.clone())
+        } else {
+            None
+        };
+        Ok(UpstreamAuto {
+            escalated_at,
+            escalation_new: false,
+            source: match p.source {
+                strata_store::PendingSource::Main => "main",
+                strata_store::PendingSource::Replay => "replay",
+                strata_store::PendingSource::Publish => "publish",
+            }
+            .into(),
+            state: if p.head.is_none()
+                || p.unpushed
+                || matches!(
+                    p.reason.as_str(),
+                    "installing" | "waiting_install" | "needs_push" | "publish_unfinished"
+                ) {
+                "waiting"
+            } else if p.attempts > 0 {
+                "deferred"
+            } else {
+                "pending"
+            }
+            .into(),
+            reason: Some(p.reason.clone()),
+            since: timestamp(&p.first_at),
+            attempts: p.attempts,
+            target: match (&p.head, &p.tree) {
+                (Some(head), Some(tree)) => Some(UpstreamMain {
+                    head: CommitOid::try_from(head.clone())?,
+                    tree: strata_types::TreeOid::try_from(tree.clone())?,
+                }),
+                _ => None,
+            },
+            detail: p.detail.clone(),
+        })
     }
 
     /// No Git, filesystem walk, or store write. A changed base without a
@@ -238,46 +348,7 @@ impl Cache {
             let auto = core
                 .store
                 .rebase_pending_of(&row.manifest.id, repo)?
-                .map(|p| -> Result<_> {
-                    Ok(UpstreamAuto {
-                        escalated_at: self.0.lock().unwrap_or_else(|e| e.into_inner()).escalations.get(&(row.manifest.id.clone(), repo.clone()))
-                            .filter(|(rev, first, _)| *rev == p.rev && *first == p.first_at).map(|(_, _, at)| at.clone()),
-                        escalation_new: false,
-                        source: match p.source {
-                            strata_store::PendingSource::Main => "main",
-                            strata_store::PendingSource::Replay => "replay",
-                            strata_store::PendingSource::Publish => "publish",
-                        }
-                        .into(),
-                        state: if p.head.is_none()
-                            || p.unpushed
-                            || matches!(
-                                p.reason.as_str(),
-                                "installing"
-                                    | "waiting_install"
-                                    | "needs_push"
-                                    | "publish_unfinished"
-                            ) {
-                            "waiting"
-                        } else if p.attempts > 0 {
-                            "deferred"
-                        } else {
-                            "pending"
-                        }
-                        .into(),
-                        reason: Some(p.reason),
-                        since: timestamp(&p.first_at),
-                        attempts: p.attempts,
-                        target: match (p.head, p.tree) {
-                            (Some(head), Some(tree)) => Some(UpstreamMain {
-                                head: CommitOid::try_from(head)?,
-                                tree: strata_types::TreeOid::try_from(tree)?,
-                            }),
-                            _ => None,
-                        },
-                        detail: p.detail,
-                    })
-                })
+                .map(|p| self.auto_snapshot(&p, std::time::SystemTime::now()))
                 .transpose()?;
             fetched.push(core.store.repo_fetch(repo)?.and_then(|f| f.ok_at));
             repos.insert(

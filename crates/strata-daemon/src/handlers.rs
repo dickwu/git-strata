@@ -1071,10 +1071,11 @@ impl<'d, 'a> Server<'d, 'a> {
             Params::PublishPlan(p) => {
                 // Review-2 N2: what `publish` would do with this group, without
                 // writing; the cli gates TTY / confirmation on `repos` only.
-                let (g, already) = rerun_plan(core, &core.store.publishes()?, &p.group)?;
-                let messages = strata_publish::message::Messages { message: p.message.clone(), message_for: p.message_for.clone() };
+                let mut messages = strata_publish::message::Messages { message: p.message.clone(), message_for: p.message_for.clone() };
                 messages.validate(&p.group)?;
+                let (g, already) = rerun_plan(core, &core.store.publishes()?, &p.group)?;
                 let repos: BTreeSet<RepoName> = g.batches.iter().map(|b| b.repo.clone()).collect();
+                messages.message_for.retain(|repo, _| repos.contains(repo));
                 let subjects = self.publish_preflight(&g, &messages)?;
                 Ok(json!({ "repos": repos, "subjects": subjects, "already_published": already }))
             }
@@ -1821,12 +1822,18 @@ impl<'d, 'a> Server<'d, 'a> {
         messages: &strata_publish::message::Messages,
     ) -> Result<Value> {
         messages.validate(group)?;
+        let requested_group = group;
+        let requested_messages = messages;
         let core = self.core();
         let upstream_sessions: BTreeSet<_> =
             group.batches.iter().map(|b| b.session.clone()).collect();
         let rows = core.store.publishes()?;
         let (group, mut already) = rerun_plan(core, &rows, group)?;
         let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
+        // Membership belongs to the original request. A retry may have already
+        // landed a repo, whose valid override must not reach the smaller group.
+        let mut messages = messages.clone();
+        messages.message_for.retain(|repo, _| repos.contains(repo));
         if let Some(plan) = plan {
             for repo in &repos {
                 let pinned = core.pinned(repo).map_err(|e| self.decorate_publish_error(e, repo, Vec::new(), already.clone()))?;
@@ -1848,7 +1855,7 @@ impl<'d, 'a> Server<'d, 'a> {
             }
         }
         // Check every repo before any Touch ID prompt or per-repo publish.
-        self.publish_preflight(&group, messages)?;
+        self.publish_preflight(&group, &messages)?;
         let mut done: Vec<Value> = Vec::new();
         for repo in repos {
             // Review-2 N6: every error of this repo's body (config, the
@@ -1870,7 +1877,15 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
                 writing();
                 let bound = token.as_ref().map(|_| shown.get(&repo).cloned().flatten());
-                self.with_publish_ctx(&repo, |ctx| strata_publish::publish_with_messages(ctx, &group, token, bound.clone(), messages))
+                self.with_publish_ctx(&repo, |ctx| {
+                    strata_publish::publish_with_messages(
+                        ctx,
+                        &group,
+                        token,
+                        bound.clone(),
+                        &messages,
+                    )
+                })
             })();
             match r {
                 Ok(p) => done.push(json!({
@@ -1895,7 +1910,10 @@ impl<'d, 'a> Server<'d, 'a> {
                 {
                     already.push(v);
                 }
-                Err(e) => return Err(self.decorate_publish_error(e, &repo, done, already)),
+                Err(e) => {
+                    let e = strata_publish::gate::with_rerun_command(e, requested_group, requested_messages);
+                    return Err(self.decorate_publish_error(e, &repo, done, already));
+                }
             }
         }
         // `publish_bound` has finished its post-publish group rebase here.

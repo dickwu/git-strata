@@ -579,10 +579,42 @@ fn sync_deps_does_not_change_publish_confirmation() {
 }
 
 #[test]
+fn relaxation_after_a_torn_audit_tail_survives_reload() {
+    use std::io::Write;
+    let mut fx = Dfx::new();
+    set_flags(&mut fx, true, true, true);
+    let core = fx.prepare().unwrap();
+    let pinned_at = core.pins.metadata()["tool"]["pinned_at"].clone();
+    core.close().unwrap();
+    let audit = strata_daemon::pins_path(&fx.config_dir).with_file_name("audit.jsonl");
+    let before = fs::read(&audit).unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&audit)
+        .unwrap()
+        .write_all(b"{\"event\":\"config_relax\",\"at\":\"")
+        .unwrap();
+    set_flags(&mut fx, false, true, true);
+    let (c, _, _) = fx.confirmer(vec![Verdict::pass()]);
+    let core = fx.prepare_with(c).unwrap();
+    core.config_relax(&repo_name("tool")).unwrap();
+    let relaxed_at = core.pins.metadata()["tool"]["relaxed_at"].clone();
+    assert!(relaxed_at.is_string());
+    assert!(core.pins.audit_error(&repo_name("tool")).is_none());
+    assert!(fs::read(&audit).unwrap().starts_with(&before));
+    core.close().unwrap();
+    let core = fx.prepare().unwrap();
+    assert_eq!(core.pins.metadata()["tool"]["pinned_at"], pinned_at);
+    assert_eq!(core.pins.metadata()["tool"]["relaxed_at"], relaxed_at);
+    assert!(!core.pinned(&repo_name("tool")).unwrap().deploy_on_push);
+    core.close().unwrap();
+}
+
+#[test]
 fn relax_audit_sidecar_preserves_pins_format_and_append_failure_keeps_relaxation() {
-    for fail in [false,true] {
-        let mut fx=Dfx::new();
-        set_flags(&mut fx,true,true,true);
+    for fail in [false, true] {
+        let mut fx = Dfx::new();
+        set_flags(&mut fx, true, true, true);
         fx.prepare().unwrap().close().unwrap();
         set_flags(&mut fx,false,true,true);
         let (c,_,_)=fx.confirmer(vec![Verdict::pass()]);

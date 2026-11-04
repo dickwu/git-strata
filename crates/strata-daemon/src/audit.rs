@@ -3,7 +3,7 @@ use crate::PinnedFlags;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::SystemTime;
@@ -104,11 +104,22 @@ pub fn append(pins: &Path, entry: &Entry) -> io::Result<()> {
     }
     let mut f = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&path)?;
     f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    // A crash may leave a partial final JSON record. Preserve it for inspection
+    // but delimit it so the next successful record is independently loadable.
+    if f.metadata()?.len() > 0 {
+        f.seek(SeekFrom::End(-1))?;
+        let mut last = [0];
+        f.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            f.write_all(b"\n")?;
+        }
+    }
     f.write_all(&line)?;
     f.sync_all()?;
     File::open(path.parent().unwrap_or(Path::new(".")))?.sync_all()

@@ -93,6 +93,38 @@ fn resolve(s: &SessionId, e: &StrataError) -> SyncRequest {
 }
 
 #[test]
+fn explicit_sync_accepts_a_quiet_glob_matching_tracked_files() {
+    let mut fx = fixture();
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .rebase
+        .quiet_skip = vec!["a".into()];
+    fx.write_config();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let s = d
+        .sessions
+        .new(None, &[repo_name("tool")])
+        .unwrap()
+        .manifest
+        .id;
+    fs::write(ws(&core, &s, "tool").join("a"), lines(&[(2, "ours")])).unwrap();
+    let head = land(&fx, &[("b", &lines(&[(3, "upstream")]))]);
+    let reply = sync_move::run(&d, req(&s)).unwrap();
+    assert_eq!(reply["repos"]["tool"]["result"], "moved", "{reply}");
+    assert_eq!(
+        core.store.session(&s).unwrap().unwrap().manifest.repos[&repo_name("tool")].head,
+        head
+    );
+    assert_eq!(
+        fs::read(ws(&core, &s, "tool").join("a")).unwrap(),
+        lines(&[(2, "ours")])
+    );
+}
+
+#[test]
 fn sync_conflict_returns_hunks_and_does_not_move() {
     with_session(|fx, d, s| {
         let before = d.core.store.session(s).unwrap().unwrap();

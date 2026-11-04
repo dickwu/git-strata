@@ -823,16 +823,173 @@ fn add_runs_main_follow_for_added_repos() {
 }
 
 #[test]
+fn hand_back_refreshes_the_returned_auto_snapshot_before_consuming_the_latch() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    let repo = repo_name("tool");
+    let row = core.store.session(&s).unwrap().unwrap();
+    let ws = &row.manifest.repos[&repo];
+    let aged = SystemTime::now() - std::time::Duration::from_secs(1801);
+    core.store
+        .enroll_main(&s, &repo, &ws.base, &ws.head, &ws.base.tree, None, aged)
+        .unwrap();
+    let pending = core.store.rebase_pending_of(&s, &repo).unwrap().unwrap();
+    // Deterministic interleaving: session() has captured pending, then the
+    // catch-up worker defers the aged row before hand_back() runs.
+    let mut upstream = check(&server, &s, false);
+    assert_eq!(
+        upstream.repos[&repo].auto.as_ref().unwrap().state,
+        "pending"
+    );
+    core.store
+        .defer_pending(
+            &s,
+            &repo,
+            pending.rev,
+            "recent_writes",
+            &json!({"path":"src/index.ts"}),
+            SystemTime::now(),
+        )
+        .unwrap();
+    core.upstream.hand_back(&core, &s, &mut upstream).unwrap();
+    let auto = upstream.repos[&repo].auto.as_ref().unwrap();
+    assert_eq!(auto.state, "deferred");
+    assert_eq!(auto.attempts, 1);
+    assert!(auto.escalation_new);
+    assert!(
+        !check(&server, &s, true).repos[&repo]
+            .auto
+            .as_ref()
+            .unwrap()
+            .escalation_new
+    );
+    // Main can retarget the same stuck episode without asking twice.
+    core.store
+        .retarget_pending(
+            &s,
+            &repo,
+            pending.rev,
+            &ws.head,
+            &ws.base.tree,
+            &ws.base,
+            true,
+            SystemTime::now(),
+        )
+        .unwrap();
+    let retargeted = core.store.rebase_pending_of(&s, &repo).unwrap().unwrap();
+    assert_ne!(retargeted.rev, pending.rev);
+    assert!(
+        !check(&server, &s, true).repos[&repo]
+            .auto
+            .as_ref()
+            .unwrap()
+            .escalation_new
+    );
+}
+
+#[test]
+fn hand_back_revalidates_a_retargeted_row_before_consuming() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    let repo = repo_name("tool");
+    let row = core.store.session(&s).unwrap().unwrap();
+    let ws = &row.manifest.repos[&repo];
+    let aged = SystemTime::now() - std::time::Duration::from_secs(1801);
+    core.store
+        .enroll_main(&s, &repo, &ws.base, &ws.head, &ws.base.tree, None, aged)
+        .unwrap();
+    let pending = core.store.rebase_pending_of(&s, &repo).unwrap().unwrap();
+    core.store
+        .defer_pending(
+            &s,
+            &repo,
+            pending.rev,
+            "recent_writes",
+            &json!({}),
+            SystemTime::now(),
+        )
+        .unwrap();
+    let mut upstream = check(&server, &s, false);
+    core.upstream
+        .hand_back_rechecking_for_test(&core, &s, &mut upstream, || {
+            // Retarget between the eligible snapshot and latch acquisition.
+            core.store
+                .retarget_pending(
+                    &s,
+                    &repo,
+                    pending.rev,
+                    &ws.head,
+                    &ws.base.tree,
+                    &ws.base,
+                    true,
+                    SystemTime::now(),
+                )
+                .unwrap();
+        })
+        .unwrap();
+    assert!(!upstream.repos[&repo].auto.as_ref().unwrap().escalation_new);
+    assert!(
+        check(&server, &s, true).repos[&repo]
+            .auto
+            .as_ref()
+            .unwrap()
+            .escalation_new
+    );
+    assert!(
+        !check(&server, &s, true).repos[&repo]
+            .auto
+            .as_ref()
+            .unwrap()
+            .escalation_new
+    );
+}
+
+#[test]
 fn stuck_rows_warn_and_hand_back_once_then_clear() {
-    let fx=Dfx::new(); let core=fx.prepare().unwrap(); let d=Daemon::start(&core).unwrap();
-    let trackers=Trackers::new(&core); let server=Server::new(&d,&trackers); let s=new(&server);
-    let repo=repo_name("tool"); let rec=core.store.session(&s).unwrap().unwrap(); let w=&rec.manifest.repos[&repo];
-    core.store.enroll_main(&s,&repo,&w.base,&w.head,&w.base.tree,None,SystemTime::now()).unwrap();
-    let p=core.store.rebase_pending_of(&s,&repo).unwrap().unwrap();
-    for _ in 0..3 { core.store.defer_pending(&s,&repo,p.rev,"open_files",&json!({"holders":[{"pid":123,"command":"shell","hold":"cwd","path":"."}],"count":1}),SystemTime::now()).unwrap(); }
-    let status=d.daemon_status(false).unwrap();
-    assert_eq!(status["warnings"].as_array().unwrap().iter().filter(|w| w.get("AutoRebaseStuck").is_some()).count(),1);
-    let first=check(&server,&s,true); let second=check(&server,&s,true);
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    let repo = repo_name("tool");
+    let rec = core.store.session(&s).unwrap().unwrap();
+    let w = &rec.manifest.repos[&repo];
+    core.store
+        .enroll_main(
+            &s,
+            &repo,
+            &w.base,
+            &w.head,
+            &w.base.tree,
+            None,
+            SystemTime::now(),
+        )
+        .unwrap();
+    let p = core.store.rebase_pending_of(&s, &repo).unwrap().unwrap();
+    for _ in 0..3 {
+        core.store.defer_pending(&s,&repo,p.rev,"open_files",&json!({"holders":[{"pid":123,"command":"shell","hold":"cwd","path":"."}],"count":1}),SystemTime::now()).unwrap();
+    }
+    let status = d.daemon_status(false).unwrap();
+    assert_eq!(
+        status["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w.get("AutoRebaseStuck").is_some())
+            .count(),
+        1
+    );
+    let first = check(&server, &s, true);
+    let second = check(&server, &s, true);
     assert!(first.repos[&repo].auto.as_ref().unwrap().escalation_new);
     assert!(!second.repos[&repo].auto.as_ref().unwrap().escalation_new);
     assert_eq!(first.repos[&repo].auto.as_ref().unwrap().escalated_at,second.repos[&repo].auto.as_ref().unwrap().escalated_at);
