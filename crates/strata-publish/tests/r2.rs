@@ -495,6 +495,99 @@ fn stopped_publish_does_not_consume_but_committed_unknown_does() {
 }
 
 #[test]
+fn recovered_publish_without_outcome_consumes_messages_in_preview_and_commit() {
+    use strata_store::{PublishPhase, RefChange, RefOp, RefOutcome};
+
+    let fx = fx();
+    let session = fx.new_session(&["tool"]);
+    fx.edit(
+        &session,
+        "tool",
+        &[("landed.txt", b"landed"), ("next.txt", b"next")],
+    );
+    let checkpoint = manual(&fx, &session, "consumed checkpoint subject");
+    let landed = group(vec![batch(
+        &session,
+        "tool",
+        checkpoint.id,
+        &["landed.txt"],
+    )]);
+    let now = std::time::SystemTime::now();
+    let id = fx.store().record_publish(&landed, now).unwrap();
+    // Startup closes an interrupted row Unknown without an outcome, even
+    // when its chain update and push already succeeded.
+    assert!(
+        fx.store()
+            .set_publish_phase(id, PublishPhase::Running, PublishPhase::Unknown, None, now)
+            .unwrap()
+    );
+    let commit = CommitOid::try_from(fx.land_on_origin(
+        "tool",
+        "main",
+        &[("landed.txt", b"landed")],
+        "consumed checkpoint subject",
+    ))
+    .unwrap();
+    let next_checkpoint = cp(&fx, &session, CheckpointReason::BeforePublish);
+    let next = group(vec![batch(
+        &session,
+        "tool",
+        next_checkpoint.id,
+        &["next.txt"],
+    )]);
+    let deps = fx.deps_ctx("tool");
+    let sessions = fx.sessions();
+    let ctx = fx.ctx(&deps, &sessions);
+    let mut audit = RefChange {
+        at: now,
+        repo: repo_name("tool"),
+        op: RefOp::UpdateRef,
+        ref_name: "refs/strata/publish/main".into(),
+        old: None,
+        new: commit.clone(),
+        outcome: RefOutcome::HeadMoved,
+        publish: Some(id),
+        confirmed: None,
+        detail: None,
+    };
+    fx.store().record_ref_change(&audit).unwrap();
+    assert_eq!(
+        strata_publish::message::choose(&ctx, &next, &Messages::default())
+            .unwrap()
+            .source,
+        Source::Checkpoints
+    );
+    audit.outcome = RefOutcome::Applied;
+    fx.store().record_ref_change(&audit).unwrap();
+
+    let preview = strata_publish::message::choose(&ctx, &next, &Messages::default()).unwrap();
+    assert_eq!(preview.source, Source::Legacy);
+    assert!(
+        !preview
+            .render(&next, &repo_name("tool"), 1)
+            .contains("consumed checkpoint subject")
+    );
+    let row = fx.store().publish_record(id).unwrap().unwrap();
+    assert_eq!(row.phase, PublishPhase::Unknown);
+    assert!(
+        row.outcome.is_none(),
+        "preview must not reconcile or rewrite the row"
+    );
+
+    let published = run(&fx, &next, &Messages::default()).unwrap();
+    let message = body(&fx, &published.commit);
+    assert_eq!(published.message_source, Source::Legacy);
+    assert!(message.starts_with(&preview.subject(published.id, &repo_name("tool"))));
+    assert!(
+        !message.contains("consumed checkpoint subject"),
+        "{message}"
+    );
+    let recovered = fx.store().publish_record(id).unwrap().unwrap();
+    assert_eq!(recovered.phase, PublishPhase::Done);
+    assert_eq!(recovered.outcome.unwrap()["commit"], commit.as_str());
+}
+
+#[test]
 fn duplicate_latest_checkpoint_still_supplies_the_subject() {
     let fx = fx();
     let s = fx.new_session(&["tool"]);

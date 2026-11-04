@@ -30,7 +30,7 @@ impl Messages {
 }
 
 pub fn validate(message: &str) -> Result<()> {
-    let reserved = message.lines().any(|l| {
+    let reserved = message.lines().enumerate().find(|(_, l)| {
         l.split_once(':').is_some_and(|(key, _)| {
             let key: String = key
                 .chars()
@@ -48,10 +48,15 @@ pub fn validate(message: &str) -> Result<()> {
         || message
             .chars()
             .any(|c| c < '\u{20}' && c != '\n' && c != '\t')
-        || reserved
+        || reserved.is_some()
     {
+        let mut detail = json!({"reason":"message"});
+        if let Some((index, line)) = reserved {
+            detail["line"] = json!(line);
+            detail["line_number"] = json!(index + 1);
+        }
         return Err(StrataError::new(Code::InvalidInput, "publish message needs a nonempty subject, at most 64 KiB, no control characters or reserved trailers")
-            .with_detail(json!({"reason":"message"})));
+            .with_detail(detail));
     }
     Ok(())
 }
@@ -140,7 +145,18 @@ pub fn choose(ctx: &Ctx, group: &ReleaseGroup, messages: &Messages) -> Result<Ch
             source: Source::Flag,
         });
     }
-    let rows = ctx.store.publishes()?;
+    // Startup may have closed a committed row Unknown without an outcome.
+    // Use the same audit recovery as execution, without reconciling the row.
+    let rows: Vec<_> = ctx
+        .store
+        .publishes()?
+        .into_iter()
+        .filter(|r| {
+            r.phase != strata_store::PublishPhase::Running
+                && r.group.batches.iter().any(|b| &b.repo == ctx.repo)
+                && crate::push::row_commit(ctx, r).is_some()
+        })
+        .collect();
     let mut by_session = Vec::new();
     let mut seen_sessions = BTreeSet::new();
     for batch in group.batches.iter().filter(|b| &b.repo == ctx.repo) {
@@ -156,13 +172,6 @@ pub fn choose(ctx: &Ctx, group: &ReleaseGroup, messages: &Messages) -> Result<Ch
             .unwrap_or(0);
         let after = rows
             .iter()
-            .filter(|r| {
-                r.phase != strata_store::PublishPhase::Running
-                    && r.outcome
-                        .as_ref()
-                        .and_then(|o| o.get("commit"))
-                        .is_some_and(|v| v.is_string())
-            })
             .flat_map(|r| &r.group.batches)
             .filter(|b| b.session == batch.session && b.repo == batch.repo)
             .map(|b| u64::from(b.checkpoint))
@@ -270,6 +279,17 @@ mod tests {
         ] {
             validate(m).unwrap();
         }
+    }
+    #[test]
+    fn reserved_message_error_identifies_the_offending_line() {
+        let error = validate("subject\n\npaths: see README").unwrap_err();
+        assert_eq!(error.code, Code::InvalidInput);
+        assert_eq!(
+            error.detail.unwrap(),
+            json!({
+                "reason":"message", "line":"paths: see README", "line_number":3,
+            })
+        );
     }
     #[test]
     fn trailer_merge_requires_a_complete_last_paragraph() {

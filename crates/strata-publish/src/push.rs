@@ -468,8 +468,13 @@ fn is_bare_refusal(e: &StrataError) -> bool {
 /// The commit an `Unknown` row wrote: `outcome.commit`, else the applied
 /// chain-ref update recorded for the row (a row closed by startup has no
 /// outcome).
-fn row_commit(ctx: &Ctx, r: &strata_store::PublishRecord) -> Option<CommitOid> {
-    if let Some(c) = r.outcome.as_ref().and_then(|o| o.get("commit")).and_then(Value::as_str) {
+pub(crate) fn row_commit(ctx: &Ctx, r: &strata_store::PublishRecord) -> Option<CommitOid> {
+    if let Some(c) = r
+        .outcome
+        .as_ref()
+        .and_then(|o| o.get("commit"))
+        .and_then(Value::as_str)
+    {
         return CommitOid::try_from(c.to_owned()).ok();
     }
     let changes = ctx.store.ref_changes(r.group.id).ok()?;
