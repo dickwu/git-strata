@@ -217,6 +217,14 @@ fn resolve_by_cwd_inside_workspace() {
         make_removed(&fx, &id(&gone));
         assert!(ws(&gone, "tool").is_dir());
         assert_eq!(s.resolve(&ws(&gone, "tool")).unwrap(), None);
+        let leftover = session_root(&fx, &id(&gone)).join(".strata-tmp-move-tool-2");
+        fs::create_dir_all(&leftover).unwrap();
+        assert!(
+            strata_session::cwd::stale_in(fx.store(), &fx.root(), &leftover)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(s.resolve(&leftover).unwrap(), None);
         (sid, w)
     };
 

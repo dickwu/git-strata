@@ -27,8 +27,16 @@ impl RepoWriteLock for SessionLock<'_> {
         }
     }
 
-    fn try_write(&self, repo: &RepoName, f: &mut dyn FnMut() -> strata_deps::Result<()>) -> strata_deps::Result<strata_deps::Result<()>> {
+    fn try_write(
+        &self,
+        repo: &RepoName,
+        f: &mut dyn FnMut() -> strata_deps::Result<()>,
+    ) -> strata_deps::Result<strata_deps::Result<()>> {
         self.0.try_write(repo, f)
+    }
+
+    fn record_long_wait(&self, repo: &RepoName, attempt_since: std::time::SystemTime) {
+        self.0.record_long_wait(repo, attempt_since);
     }
 }
 

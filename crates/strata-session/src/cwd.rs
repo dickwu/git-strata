@@ -92,6 +92,9 @@ pub fn stale_in(store: &strata_store::Store, root: &Path, cwd: &Path) -> Result<
     let Some(session) = rest.components().next().and_then(|c| c.as_os_str().to_str()) else { return Ok(None) };
     let Ok(id) = strata_types::SessionId::try_from(session.to_string()) else { return Ok(None) };
     let Some(rec) = store.session(&id)? else { return Ok(None) };
+    if rec.lifecycle == strata_store::Lifecycle::Removed {
+        return Ok(None);
+    }
     let segment = rest.components().nth(1).and_then(|c| c.as_os_str().to_str()).unwrap_or("");
     if rec.manifest.repos.keys().any(|r| r.as_str() == segment) {
         return Ok(None);

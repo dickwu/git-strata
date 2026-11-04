@@ -364,7 +364,10 @@ impl<'a> Sessions<'a> {
         // store write or the open-files scan failed (impl-p2 r3 note).
         if matches!(
             out,
-            Outcome::Kept { .. } | Outcome::Skipped("passes_write_failed" | "open_files_failed")
+            Outcome::Kept { .. }
+                | Outcome::Skipped(
+                    "passes_read_failed" | "passes_write_failed" | "open_files_failed"
+                )
         ) {
             self.queue_auto_trees(&key.session);
         }
@@ -422,7 +425,11 @@ impl<'a> Sessions<'a> {
         }
         // Crash-safe reset before the first scan. A later interruption only
         // restores these passes if no holder was observed in this pass.
-        let suspended = match self.store.move_activity(&i.session, &i.repo, i.n) {
+        let suspended = match self
+            .seams
+            .hit("old_tree.read_passes", Some(&i.repo))
+            .and_then(|()| self.store.move_activity(&i.session, &i.repo, i.n))
+        {
             Ok(row) => row.map(|r| r.passes).unwrap_or_default(),
             Err(_) => return Outcome::Skipped("passes_read_failed"),
         };
