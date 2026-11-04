@@ -106,6 +106,56 @@ fn old_daemon_sync_rejects_cwd_locally_before_resend() {
 }
 
 #[test]
+fn old_daemon_s_shaped_ticket_refuses_cwd_without_legacy_resend() {
+    let live = support::live::Live::new(&["tool"], &[("a.txt", b"base\n")]);
+    let id = live.serve(|_| live.new_session("s-k3q7xm2", "tool"));
+    std::fs::remove_file(live.home.socket()).unwrap();
+    let d = FakeDaemon::start(&live.home.socket(), |q| {
+        if q["params"].get("caller_pids").is_some() {
+            json!({"id":q["id"],"ok":false,"error":{"rpc":"Failed","message":"unknown field `caller_pids`"}})
+        } else {
+            json!({"id":q["id"],"ok":true,"data":{}})
+        }
+    });
+    let head = "0123456789abcdef0123456789abcdef01234567";
+    let run = live.run_in(
+        &live.ws(&id, "tool"),
+        &[
+            "sync",
+            "--session",
+            "s-k3q7xm2",
+            "--repo",
+            "tool",
+            "--resolved",
+            "a.txt",
+            "--keep",
+            "odd ' path.txt",
+            "--target",
+            head,
+            "--generation",
+            "7",
+            "--no-fetch",
+            "--allow-cwd-holders",
+            "--accept-diverged",
+        ],
+    );
+    assert_eq!(run.err_code(), "OpenFiles", "{run:?}");
+    assert_eq!(run.reason(), "caller_cwd");
+    assert_eq!(
+        run.env()["error"]["detail"]["fix"],
+        format!(
+            "cd ~ && git-strata sync --session {id} --repo tool --resolved a.txt --keep 'odd '\\'' path.txt' --target {head} --generation 7 --no-fetch --accept-diverged --allow-cwd-holders"
+        )
+    );
+    assert_eq!(
+        d.requests().len(),
+        1,
+        "a refused caller must not send a legacy request"
+    );
+    assert!(d.requests()[0]["params"].get("caller_pids").is_some());
+}
+
+#[test]
 fn old_daemon_delayed_rejection_does_not_restart_the_sync_budget() {
     let h = Home::new();
     h.write_config(&[support::RepoSpec {
@@ -129,6 +179,13 @@ fn old_daemon_delayed_rejection_does_not_restart_the_sync_budget() {
     let run = h.run(&["sync", "--timeout", "0.6"]);
     assert_eq!(run.err_code(), "Unknown", "{run:?}");
     assert_eq!(run.reason(), "client_timeout");
+    let waited = run.env()["error"]["detail"]["waited_secs"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        waited >= 0.55,
+        "the first rejected attempt must count: waited {waited}s"
+    );
     assert_eq!(
         d.requests()
             .iter()

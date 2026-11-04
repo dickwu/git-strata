@@ -57,20 +57,14 @@ pub fn local_sync(ctx: &Ctx, params: &Value, args: &CwdArgs, cwd: &Path) -> Resu
     let Ok(id) = strata_types::SessionId::try_from(session.to_owned()) else {
         return Ok(());
     };
-    // An id selecting a different session cannot move this cwd. Tickets
-    // require a store lookup only to disambiguate their target.
-    if let Some(selected) = params["session"].as_str() {
-        let id = if selected.starts_with("s-") {
-            selected.to_string()
-        } else {
-            let store = crate::ro::open_store(&config)?;
-            crate::ro::select(&store, selected)?.to_string()
-        };
-        if id != session {
-            return Ok(());
-        }
-    }
     let store = crate::ro::open_store(&config)?;
+    // Use the daemon's full SessionId validation before ticket lookup:
+    // an s-prefixed ticket can still select the caller's workspace.
+    if let Some(selected) = params["session"].as_str()
+        && crate::ro::select(&store, selected)? != id
+    {
+        return Ok(());
+    }
     let rec = crate::ro::record(&store, &id)?;
     let Some(segment) = parts.next().and_then(|p| p.as_os_str().to_str()) else {
         return Ok(());
@@ -89,7 +83,9 @@ pub fn local_sync(ctx: &Ctx, params: &Value, args: &CwdArgs, cwd: &Path) -> Resu
         let named = params["repos"].as_array().filter(|a| !a.is_empty());
         let ws = &rec.manifest.repos[repo];
         if ws.tracked && named.is_none_or(|a| a.iter().any(|v| v.as_str() == Some(repo.as_str()))) {
-            return Err(strata_session::cwd::refuse_caller(&real, session, &ws.path));
+            return Err(strata_session::cwd::refuse_caller(
+                &real, session, &ws.path, params,
+            ));
         }
     }
     Ok(())

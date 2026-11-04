@@ -103,7 +103,8 @@ const ERRORS: &str = "ERRORS (code -> what an agent does)
   NotTty             hand the command to a human   NotConfirmed     report; human reruns
                                                    (plan_changed: rerun it yourself once)
   Conflict (publish) fix detail.conflicts in detail.repo, rerun the same publish
-  Conflict sync_conflict  resolve every reported path with sync --resolved/--keep,
+  Conflict sync_conflict  cd ~ && git-strata sync --session S --repo R --resolved PATH
+                          (or --keep PATH) for every reported path,
                           using detail.target.head and detail.generation
                      partial: detail.conflicts has only remaining paths;
                      repeat detail.resolved/kept with the same flags and bytes,
@@ -116,7 +117,12 @@ const ERRORS: &str = "ERRORS (code -> what an agent does)
   AmbiguousMatch     use a session id from detail
   Dirty              rm on work that is not published: publish it, or ask the human (rm --discard)
   CheckFailed        fix the code, checkpoint, publish again
-  OpenFiles          stop the process you started (detail has pids), retry
+  OpenFiles caller_cwd  run detail.fix outside the workspace; it preserves request flags
+  OpenFiles cwd_holders  cd holders out, or explicitly use --allow-cwd-holders
+  OpenFiles (other)   stop the process you started (detail has pids), retry
+  NoSuchSession stale_cwd  cd back to the live workspace path in detail.fix
+  Busy client_timeout  request not dispatched or read-only; back off before retrying
+  Unknown client_timeout  request sent; inspect status, never replay, gc or rm
   NoCommit           nothing to do; not a failure
   HeadMoved (sync)    read the fresh report; re-resolve with its target/generation
                      (or --keep after review); at most five retries
@@ -147,7 +153,8 @@ const HEADLESS: &str = "HEADLESS FLOW (no human needed)
 ";
 const SYNC_ACK: &str = "SYNC ACKNOWLEDGEMENT
   Legacy-only: every named path is in ws.conflicts, none in the saved report.
-  sync --repo R --resolved PATH (or --keep PATH) clears only those markers,
+  cd ~ && git-strata sync --session S --repo R --resolved PATH (or --keep PATH)
+  clears only those markers,
   even behind/diverged or with a separate report. No binding or move; the
   separate report remains. Non-following repos also allow named acknowledgement.
   Reply: {result:conflicts_cleared, following:true|false, resolved:[...], kept:[...]}
@@ -170,7 +177,9 @@ DAEMON
   deps list, daemon status; repeated checkpoint --tool-call ID; leased session ports/exec.
 
 GATES
-  Some operations require human confirmation at a TTY. git-strata help gate
+  push/pushing publish, rm --discard, deps approve, config relax, resolve/chain:
+  TTY/confirmation rules: git-strata help gate. No flag or env skips the gate;
+  faking a TTY is a bypass. On NotTty, give the human the exact command.
 
 HEADLESS FLOW
   new --repo R; edit; checkpoint -m TEXT; diff; publish --from S:PATH.
@@ -181,7 +190,9 @@ HEADLESS FLOW
 ERRORS
   Busy: back off. NotTty/NotConfirmed: give the command to the human.
   Conflict: resolve reported paths. Dirty: publish before rm.
-  OpenFiles: cd out or stop your own processes, then retry.
+  OpenFiles caller_cwd/cwd_holders: cd out or follow detail.fix.
+  NoSuchSession stale_cwd: cd back to the live workspace path.
+  client_timeout: Busy means read/unsent; Unknown means sent, inspect status.
   Unknown: do not retry, gc, or rm; inspect status and tell the human.
   Corrupt: stop and tell the human. Full table: git-strata help errors
 

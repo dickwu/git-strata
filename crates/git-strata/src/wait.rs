@@ -36,10 +36,18 @@ fn invalid_timeout() -> StrataError {
     .with_detail(json!({ "reason": "timeout" }))
 }
 
-pub fn deadline(args: &WaitArgs, default_secs: u64) -> Result<Option<Instant>> {
-    budget(args, default_secs)?
-        .map(|b| Instant::now().checked_add(b).ok_or_else(invalid_timeout))
-        .transpose()
+#[derive(Clone, Copy)]
+pub struct Deadline {
+    started: Instant,
+    end: Option<Instant>,
+}
+
+pub fn deadline(args: &WaitArgs, default_secs: u64) -> Result<Deadline> {
+    let started = Instant::now();
+    let end = budget(args, default_secs)?
+        .map(|b| started.checked_add(b).ok_or_else(invalid_timeout))
+        .transpose()?;
+    Ok(Deadline { started, end })
 }
 
 pub fn call(
@@ -54,14 +62,14 @@ pub fn call(
     call_until(ctx, method, params, kind, args, deadline)
 }
 
-/// Parser-rejection fallbacks share this deadline with the initial call.
+/// Parser-rejection fallbacks share the initial start and deadline.
 pub fn call_until(
     ctx: &Ctx,
     method: &str,
     params: Value,
     kind: Kind,
     args: &WaitArgs,
-    deadline: Option<Instant>,
+    deadline: Deadline,
 ) -> std::result::Result<Value, CallError> {
     let session = params["session"].as_str().map(str::to_owned);
     let _progress = if args.progress || crate::tty::stderr_is_tty() {
@@ -73,7 +81,7 @@ pub fn call_until(
     } else {
         None
     };
-    let result = match deadline {
+    let result = match deadline.end {
         Some(end) => rpc::call_within(
             &ctx.paths.socket,
             method,
@@ -84,8 +92,21 @@ pub fn call_until(
         None => rpc::call(&ctx.paths.socket, method, params, kind),
     };
     match result {
-        Err(error @ CallError::Timeout { .. }) => {
-            let mut error = error.into_error();
+        Err(CallError::Timeout {
+            method,
+            phase,
+            kind,
+            sent,
+            ..
+        }) => {
+            let mut error = CallError::Timeout {
+                method,
+                waited: deadline.started.elapsed(),
+                phase,
+                kind,
+                sent,
+            }
+            .into_error();
             let detail = error.detail.as_mut().expect("timeout detail");
             if error.code == Code::Unknown {
                 let command = session
