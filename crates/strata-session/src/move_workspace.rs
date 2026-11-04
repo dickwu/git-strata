@@ -102,7 +102,11 @@ struct AgentMove<'a> {
 impl Sessions<'_> {
     /// The configured repo whose main checkout has this RepoId.
     pub fn repo_name(&self, repo: &RepoId) -> Result<RepoName> {
-        for (name, git) in self.gits {
+        let gits = match self.catalog {
+            Some(c) => c.gits()?,
+            None => self.gits,
+        };
+        for (name, git) in gits {
             if git.repo_id() == *repo {
                 return Ok(name.clone());
             }
