@@ -115,8 +115,8 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `deps_propose` | `{ "session", "repo", "switch": bool }` | 提议；`switch` 为真时附带移动结果 |
 | `deps_approve` | `{ "proposal": ProposalId, "sessions": [SessionId]\|null }` | 每个会话一条；`null` = 该 repo 的全部会话 |
 | `deps_list` | `{ "repo": RepoName\|null }` | `{proposals:[...]}`；每行含有效的 `mode: "apply" \| "confirm"`，以及可选 `changes` |
-| `publish` | `{ "group": ReleaseGroup, "shown"?: { RepoName: CommitOid \| null }, "plan"?: [RepoName] }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数。`shown` 是 cli 给人看过的每个要确认仓库的链顶（D21）。`plan` 是 cli 的 TTY 检查覆盖了的、会推且要确认的仓库（cli.md D23）；给了 `plan` 时，daemon 自己重算出的要提交仓库里，凡是会推且要确认、却不在 `plan` 里的（`publish_plan` 与 `publish` 之间发布历史变了），在弹框、取凭据、写任何东西之前就拒绝：`NotConfirmed`，`detail.reason = "plan_changed"`，`detail.repo`、`detail.planned`；agent 重跑同一条命令即可（重跑时 cli 会把它算进计划并查 TTY）。不给 `plan`（cli 以外的调用方）不做这项检查（review-3 T1）[实现时补的决定]。回复另带 `already_published: [{repo, publish, commit, push}]`：之前已经落地、这次跳过的仓库（D22）。失败时 `detail.repo` 是停下的仓库，`detail.published_before` 是这次已经提交的仓库。停下的仓库若已写了提交（`detail.commit`，如推送超时或被拒），`detail.landed` 是它的那条 `{repo, commit, push}`，`push` 取已知的结果（`Unknown` / `Refused`，没推为 null）（review M4）[实现时补的决定]；`push` 与 `checks_ran` 取 publish 错误 detail 里写明的值，推送成功后才失败（rebase、关行）的是 `Pushed`（review-2 N3）[实现时补的决定]。`repo` / `published_before` / `already_published` 加在该仓库的任何错误上，不只是 publish 本身的：读配置、确认失败或被取消（`require_validated`）同样带上（review-2 N6）[实现时补的决定]。`plan_changed` 的检查仍在逐仓库循环之前（还什么都没写），但它和它读配置的错误走同一套装饰：带 `repo`，以及重算计划时发现已经落地、这次跳过的 `already_published`（这时 `published_before` 必为空，不出现）（review-4 F2）[实现时补的决定] |
-| `publish_plan` | `{ "group": ReleaseGroup }` | `{ "repos": [RepoName], "already_published": [{repo, publish, commit, push}] }`。与 `publish` 用同一份重跑过滤（D22）：`repos` 是这次 `publish` 还会提交、会确认的仓库，按名字排序；`already_published` 与 `publish` 会报的一致。不排队，不拿锁，不写 Store、ref、工作区，不弹框。只覆盖按内容判定的落地；会话没被 rebase 时 publish 的 `NoCommit` 回退（D22）只有真正 stage 才知道，这类仓库仍在 `repos` 里（`publish_plan_keeps_a_waiting_sessions_landed_guarded_repo`：rebase 为 `Waiting` 的会话，其要确认的仓库仍在 `repos`，cli 照样要 TTY 与确认；skills 的 reference 照此写明，review-3 T3）。group 为空 → `InvalidInput`。cli 用它把 TTY 检查和确认限制在还要做事的仓库上（cli.md §5，review-2 N2）[实现时补的决定] |
+| `publish` | `{ "group": ReleaseGroup, "message"?: String, "message_for"?: {RepoName: String}, "shown"?: { RepoName: CommitOid \| null }, "plan"?: [RepoName] }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数。`shown` 是 cli 给人看过的每个要确认仓库的链顶（D21）。`plan` 是 cli 的 TTY 检查覆盖了的、会推且要确认的仓库（cli.md D23）；给了 `plan` 时，daemon 自己重算出的要提交仓库里，凡是会推且要确认、却不在 `plan` 里的（`publish_plan` 与 `publish` 之间发布历史变了），在弹框、取凭据、写任何东西之前就拒绝：`NotConfirmed`，`detail.reason = "plan_changed"`，`detail.repo`、`detail.planned`；agent 重跑同一条命令即可（重跑时 cli 会把它算进计划并查 TTY）。不给 `plan`（cli 以外的调用方）不做这项检查（review-3 T1）[实现时补的决定]。回复另带 `already_published: [{repo, publish, commit, push}]`：之前已经落地、这次跳过的仓库（D22）。失败时 `detail.repo` 是停下的仓库，`detail.published_before` 是这次已经提交的仓库。停下的仓库若已写了提交（`detail.commit`，如推送超时或被拒），`detail.landed` 是它的那条 `{repo, commit, push}`，`push` 取已知的结果（`Unknown` / `Refused`，没推为 null）（review M4）[实现时补的决定]；`push` 与 `checks_ran` 取 publish 错误 detail 里写明的值，推送成功后才失败（rebase、关行）的是 `Pushed`（review-2 N3）[实现时补的决定]。`repo` / `published_before` / `already_published` 加在该仓库的任何错误上，不只是 publish 本身的：读配置、确认失败或被取消（`require_validated`）同样带上（review-2 N6）[实现时补的决定]。`plan_changed` 的检查仍在逐仓库循环之前（还什么都没写），但它和它读配置的错误走同一套装饰：带 `repo`，以及重算计划时发现已经落地、这次跳过的 `already_published`（这时 `published_before` 必为空，不出现）（review-4 F2）[实现时补的决定] |
+| `publish_plan` | `{ "group": ReleaseGroup, "message"?: String, "message_for"?: {RepoName: String} }` | `{ "subjects": {RepoName: {subject, message_source}}, "repos": [RepoName], "already_published": [{repo, publish, commit, push}] }`。与 `publish` 用同一份重跑过滤（D22）：`repos` 是这次 `publish` 还会提交、会确认的仓库，按名字排序；`already_published` 与 `publish` 会报的一致。不排队、不等待锁，不写 Store、发布链 ref 或工作区、不弹框；必要时在 try_repo 锁里填充私有 remote-tracking ref 缓存。只覆盖按内容判定的落地；会话没被 rebase 时 publish 的 `NoCommit` 回退（D22）只有真正 stage 才知道，这类仓库仍在 `repos` 里（`publish_plan_keeps_a_waiting_sessions_landed_guarded_repo`：rebase 为 `Waiting` 的会话，其要确认的仓库仍在 `repos`，cli 照样要 TTY 与确认；skills 的 reference 照此写明，review-3 T3）。group 为空 → `InvalidInput`。cli 用它把 TTY 检查和确认限制在还要做事的仓库上（cli.md §5，review-2 N2）[实现时补的决定] |
 | `push` | `{ "repo": RepoName, "shown"?: CommitOid \| null }` | `{push: PushOutcome, commit}`。`shown` 是 cli 给人看过的链顶（D21）。不要确认的仓库先 fetch，链 `Diverged` 时无头重放再推一次快进，另带 `replayed`（`{from,to,onto,commits,checks_ran}` 或 null）、`rebases`、`warnings`；冲突 `Conflict` `replay_conflict`，不写不推（publish.md D2a）[实现时补的决定] |
 | `assign` | `{ "group": ReleaseGroup, "path": RepoPath, "session": SessionId }` | `{}` |
 | `rm` | `{ "session": SessionId, "discard": bool }` | `RemoveReport` |
@@ -1085,3 +1085,44 @@ proposal and any supplied fix to the human and stop; only
 `installing` or `publishing` waits get bounded retries. Upstream rows with
 `following: false` emit no sync fix; ignore their behind count for sync and only
 acknowledge named conflicts.
+
+### R2 protocol additions
+
+FEATURES adds `publish.message`, `new.base`, and informational
+`rebase.quiet_scope`. New/Publish/PublishPlan params keep deny_unknown_fields;
+new fields have defaults, and the CLI sends them only after feature discovery.
+`new.base` is a repo-to-local-revision map; no line fields are introduced.
+`publish_plan.subjects` is a sibling of the existing string-array `repos`.
+
+Pins retain their exact schema. After successful replacement, pin_new, tighten,
+and config_relax changes append/fsync a 0600 audit.jsonl sidecar, rotating at
+1 MiB with one .1 file. Read both files for pins_meta; corrupt/missing history
+only loses timestamps. An append failure never undoes a confirmed pin change;
+config_relax replies with audit_write_failed. LocalAuthentication does not
+disclose biometric versus password success, so auth is local_authentication
+for a confirmed relaxation and startup for automatic tightening/new pins.
+
+`daemon_status.warnings` keeps its JSON shape. Additive `warning_times` entries
+carry the same warning plus raised_at; LongHold uses its hold start, while
+synthesized VerifyFailed/StorePoisoned use first sighting in this daemon run.
+The CLI preserves alerts and adds alerts_at. Eligible committed deferred rows
+(open_files/recent_writes/changed_during_move) warn AutoRebaseStuck after three
+attempts or 30 minutes; waiting/unpushed/install/publish-unfinished rows never
+escalate. Holders remain blocking. The hook consumes a daemon latch keyed by
+session/repo/deferred revision and row creation time, so hand-back happens once
+per row. Warnings disappear with the row.
+
+Successful non-discard rm overrides upstream unpublished with false from its
+landed judgment, retaining regenerable details. Discard and Dirty refusals keep
+the pre-rm values. Successful rm marks upstream.as_of_rm=before for history.
+
+R2 implementation clarification: a cold split publish branch has no private
+tracking ref, and a previously parked base can already have reached origin
+since the cached snapshot. On a missing target or rejected cached ancestry,
+preflight uses a zero-wait repo lock to fetch the configured main/publish refs
+into Git's object/private tracking caches and rechecks. It never queues behind
+a writer, creates a publish row, or moves a chain, anchor, or workspace. This
+cache-fill exception keeps the read request safely retryable and prevents a
+permanent false refusal on non-following split repos. The normal cached fast
+path performs no fetch. Status marks an ahead/diverged graph unchecked when B
+is unavailable rather than guessing that no publish target contains it.

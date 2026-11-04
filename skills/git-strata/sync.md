@@ -187,3 +187,11 @@ a later repo fails. The move handler's reasons and related outcomes are:
 | `waiting` / `waiting_human`, `own_change`, `drift` | Pass on `deps.fix`, proposal and reason to the human; stop retrying. |
 | `Corrupt manifest_missing` / `sync_report` | Missing base manifest or invalid saved report; preserve the workspace and stop for human recovery. |
 | `Unsupported daemon_too_old` | Ask the human to install matching CLI/daemon versions. |
+
+An ahead local base stays parked: sync keeps result=up_to_date and adds ahead.
+Once main contains it, normal follow-main resumes; a divergent main still
+needs the existing human chain-recovery process. Stuck automatic rebases name
+commands, PIDs, holder kind and paths. The Stop hook can ask the user for help
+once per deferred row, including a clean workspace. It never authorizes
+killing someone else's process. For following repos use the supplied
+`cd ~ && git-strata sync --session S --repo R` command, then cd back.

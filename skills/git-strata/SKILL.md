@@ -15,6 +15,11 @@ as checkpoints, committed by `publish`, and sent to the remote only by
 `git-strata push` or a publish whose repo is configured to push. macOS only.
 `git strata ...` and `git-strata ...` are the same binary.
 
+A session is not a git branch. Do not `git commit`, switch branches, or check
+out another branch in a workspace. Record edits as checkpoints; `publish`
+creates one commit per participating repo on its configured publish branch.
+A session may publish repeatedly, and several sessions can share that commit.
+
 This file is the short path. Read the linked files when you hit their topic:
 
 | File | Read it when |
@@ -129,6 +134,10 @@ with "ask the human". Never run a human-only command (hard rule 1) yourself. Exc
 | `InvalidInput no_batch` | pass the batch: `--from SESSION:PATH` (repeatable) |
 | `NoMatch` | a `--from` path is not checkpointed: checkpoint it, rerun |
 | `Conflict` (publish) | fix the listed paths, rerun the same publish ([publish.md](publish.md)) |
+| `HeadMoved baseline_moved` | rerun the literal publish command in `detail.fix` to checkpoint the new baseline |
+| `InvalidInput base_not_on_main` / `base_diverged_from_main` | hand `detail.fix` to the human; do not push from main or accept divergence yourself |
+| `InvalidInput base_behind_main` | rerun the `new` command in `detail.fix` without `--base` |
+| `BaseAheadOfMain` warning | local base commits are pinned; publish requires them in B or main_tip |
 | `Conflict sync_conflict` / `HeadMoved` | resolve the report ([sync.md](sync.md)) |
 | `Conflict assigned` | another session owns the path; do not retry |
 | `CheckFailed` | fix the code, checkpoint, publish again |
@@ -171,3 +180,14 @@ Everything else: [errors.md](errors.md).
 7. Run `gc` only when the human asks (`gc --store --dry-run` first).
 8. Release builds never run in a workspace: publish (and push), then build in
    the main checkout after `git pull --ff-only` ([publish.md](publish.md)).
+
+`publish -m "subject"` overrides the commit message (`-m` repeats as paragraphs;
+`--message-for REPO=TEXT` overrides one repo). Otherwise the latest manual
+checkpoint subjects in the unpublished window are used; tool-call IDs are
+excluded. A no-change `checkpoint -m` records no new message. `new T --repo R
+--base LOCAL_REV` parks at a local commit at or ahead of main; it does not adopt
+that commit into the publish chain. Remote publish lines are not supported.
+
+A stuck auto-rebase can hand control back once through the Stop hook. Ask the
+user about named holder processes; stop only processes you own, or cd out of
+those shells. The returned command runs sync from outside the workspace.

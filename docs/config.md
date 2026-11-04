@@ -772,3 +772,11 @@ pin_unpushed = true
 | 全部 Next 应用 | `tsconfig.json` 里的 `incremental` | admin、front、tool、slate_viewer、surgical-timeout、appointment_patient_viewer、patient_9_grid、maxident-sync、insurance-check 都是 `true` |
 
 没有执行的：全部 `install` 命令（会冷装；hr-core 的 `bun install` 除外，为核对测试在导出里装过一次）、staff-api 的测试（连生产库）、各 Tauri 应用的 Rust 检查。
+
+R2 adds `rebase.quiet_skip = ["**/.phpunit.result.cache", ".eslintcache"]`.
+These opt-in relative globs affect the quiet window only, never during-move
+protection, and cannot match tracked paths. Dependencies are already excluded
+except tracked content and carried seed caches. Upgrade both CLI and daemon
+before adding this key: 0.1.2 rejects unknown configuration fields. Pin-change
+timestamps live in audit.jsonl next to pins.json, with metadata exposed by
+`daemon status`; the pins schema stays unchanged.

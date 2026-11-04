@@ -1510,3 +1510,29 @@ decisions here; callers must repeat accepted names/flags with the same binding.
 For a move that reaches Preparing, decisions are written to `sync_move_history`;
 the associated move state shows whether they landed. Late writes after the
 last check keep the old tree and its durable G4 notice.
+
+### R2 local bases, activity, and dependency moves
+
+`new --base REV` is available with one `--repo`; `--base R=REV` can repeat for
+selected repos. `--repos` and remote-branch publish lines are excluded. Resolve
+the local revision, read main_tip, and require tip ancestry under head_of's
+repo lock, then release it before cold base/dependency construction. Freeze
+the OID, attach at it, and retain it with the normal session pin. Unknown,
+older, and divergent revisions refuse before creating the session. Ahead
+bases return `BaseAheadOfMain` and remain parked until main contains them.
+
+Dependency rollout/switch and Main-source automatic moves require a descendant
+target. Planning reports `SkipReason::BaseAhead`; the mover rechecks with
+`require_descends` before writing. These skips settle rollout/automatic proposal
+completion. Publish/replay and explicit accepted-divergence sync retain their
+own rules. rm reports an unreferenced base only when no remaining ref in any
+namespace contains it after removal.
+
+The activity baseline stores skipped dependency roots plus nested seed-cache
+exception roots. Scope comes from configured and pinned-set dirs, with tracked
+paths protected using ws.head's tree. Explicit quiet_skip matches are rejected
+when they cover tracked paths. These globs affect quiet age/scan-late checks
+only; a separate all-carried-entry maximum protects G4/Phase F. Dependency
+writes outside carried caches no longer keep the old tree. Nested caches and
+Phase F untouched checks stay protected. Persisted scope, not current config,
+is used after restart; malformed/legacy scope checks the entire tree.

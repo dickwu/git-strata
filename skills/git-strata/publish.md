@@ -121,3 +121,16 @@ rule: the README's [Confirmation gate](https://github.com/dickwu/git-strata/blob
 - Paths matching the repo's pinned `rm.regenerable` do not block; they are
   checkpointed and listed in `data.regenerable`.
 - Never `rm` after an `Unknown` outcome.
+
+Publish messages default to distinct latest manual checkpoint subjects in the
+unpublished window, with a bounded body listing messages. `-m` and
+`--message-for REPO=TEXT` override them. Empty/control/reserved-trailer messages
+are refused. Generated sessions/paths/Strata-Publish trailers identify the
+commit; paths counts changed files, not selectors.
+
+A parked or rewound base not in B or main_tip refuses base_not_on_main before
+confirmation; give its fix to the human. If a workspace baseline moved after
+the checkpoint, HeadMoved baseline_moved gives the literal publish command to
+rerun. This takes fresh checkpoints and does not require accepting divergence.
+A successful non-discard rm reports unpublished=false even if automatic rebase
+has not moved the stale base yet; discard retains its pre-rm tracker value.

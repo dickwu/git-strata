@@ -821,7 +821,7 @@ git commit -m "feat(publish): one merge under the repo lock"
 
 ### rm-followups（2026-10-29，[实现时补的决定]，design: git-strata-review-notes/rm-followups/design.md r10）
 
-- **`MovePolicy::{Explicit, Auto, Agent}`**：`after_publish`、`rebase_replayed` 与 daemon 的追赶走 `Auto`；rollout 与显式 move 仍是 `Explicit`。`Auto` 的门：G0 状态；G1 整个工作区根的 `open_files`；G2 整根只看元数据的遍历，`quiet_secs` 内有写或扫描中变了 → 推迟；G3 `rebase_preview`（`PreviewBlobs`，不写 store），非 regenerable 的冲突 → 推迟；G4 在锁里：从 BeforeRollout checkpoint 重算冲突、`begin_move` 同一事务写 `move_activity` 基线、第 14 步再走一遍 G2 与 `open_files_many`（`Busy` + `auto_deferred` → `Deferred`）、交换后 Phase F 发现迟到的写就写通知并保留旧树。任何门不过都是 `RebaseReport::Deferred{reason, detail, proposal}`，从不强挪。
+- **`MovePolicy::{Explicit, Auto, Agent}`**：`after_publish`、`rebase_replayed` 与 daemon 的追赶走 `Auto`；rollout 与显式 move 仍是 `Explicit`。`Auto` 的门：G0 状态；G1 整个工作区根的 `open_files`；G2 按 ActivityScope 的元数据遍历（跳过依赖目录，保留 tracked 文件与嵌套 seed cache），`quiet_secs` 内有写或扫描中变了 → 推迟；G3 `rebase_preview`（`PreviewBlobs`，不写 store），非 regenerable 的冲突 → 推迟；G4 在锁里：从 BeforeRollout checkpoint 重算冲突、`begin_move` 同一事务写 `move_activity` 基线、第 14 步再走一遍 G2 与 `open_files_many`（`Busy` + `auto_deferred` → `Deferred`）、交换后 Phase F 发现迟到的写就写通知并保留旧树。任何门不过都是 `RebaseReport::Deferred{reason, detail, proposal}`，从不强挪。
 - **C2**：`deps_changed = "move_source"`（缺省）且新依赖键不同时，先在锁里记下依赖提案（提升的草稿，否则 Main old→n），再只把源码挪到（发布的树，旧依赖集），不安装、不预热；`Moved{deps_pending}`，发布报告 JSON 带漂移提示。`wait` = 原来的 `Waiting`。
 - **`rebase_pending`**（pending.rs）：`record_publish` 事务里写计划（planned_*），`commit_into` 成功后在仓库锁里提升；按可达性解决（含提交后失败的 `publish_unfinished`）；daemon 启动与 replay 开始时在仓库锁里重建；推迟以 `UPDATE … WHERE rev` 更新；`finish_move` 事务里消费。追赶 `catch_up`：每仓库不等锁，退避 quiet·2^(k−1)，封顶 30 min；过期的目标 `discard_pending_target`；运行中的发布 → `busy`。
 - **旧树保留**（old_tree.rs `collect_old_tree`）：有通知或缺基线 → 保留；被持有则重置计数；两次相隔 Q 的干净检查才退役；保留的 Auto 旧树重新排队。
@@ -890,3 +890,37 @@ keep C2/wait behavior; apply-mode Auto does not prewarm on the T2 thread.
 After C3 and each T2 pass, a Pending proposal settles through `auto_applied`
 only when no non-Removed tracked workspace differs, including Unknown and
 Creating sessions. `confirm` keeps the existing human dependency rollout.
+
+### R2 messages and base gate
+
+`publish` and `publish_plan` accept optional `message` and `message_for` only
+when the daemon advertises `publish.message`. Paragraphs from repeated flags
+are joined; per-repo text wins. Text rejects empty subjects, over 64 KiB, C0
+controls except newline/tab, and reserved trailer keys after case/whitespace
+normalization. Fully trailer-shaped user final paragraphs join the generated
+`sessions`, `paths`, `Strata-Publish` block; mixed prose stays separate. Paths
+count the B-to-final-staged-tree diff. Recovery uses the exact publish trailer,
+falling back to a legacy subject only when that trailer is absent.
+
+Without flags, the latest distinct manual checkpoint subject per session is
+joined in batch order (100 characters, word boundary, ellipsis). The body lists
+the window's manual subjects; only a prior closed row with outcome.commit
+consumes its checkpoint window. Pre-commit stopped rows do not. The body is
+bounded so generated checkpoint messages including trailers fit 60 KiB. The
+chosen text is inserted immutably in v6 before publish starts; legacy is NULL.
+The plan has additive `subjects[repo]` and replies identify `message_source`.
+
+At step 3, under the repo lock and before staging, every batch's current
+workspace head must be an ancestor of B **or** main_tip. Its checkpoint baseline
+tree must equal tree_of(ws.head); deps-only switches and equal-tree commits
+pass. A changed tree returns `HeadMoved baseline_moved` with a literal rerun
+command. An unacceptable head returns `InvalidInput base_not_on_main`, capped
+base-only history, and a human hand-off. Plan and full-group preflight run this
+gate before any per-repo Touch ID prompt; the locked gate rechecks after fetch.
+B may be a leading publish-chain top, including split publish branches.
+
+Cold/stale-ref preflight: before inserting an intent row, a missing B or a
+cached base_not_on_main result refreshes the configured main and publish
+tracking refs under the repo lock, then rechecks. The daemon plan does the same
+cache fill with a zero-wait lock. Only object/private tracking caches change;
+no publish, anchor, workspace or store mutation is performed by the plan.

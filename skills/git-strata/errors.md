@@ -97,3 +97,13 @@ the [0.1.2 release notes](https://github.com/dickwu/git-strata/blob/main/docs/re
   is what `git-strata gc` could reclaim; run `gc` only when the human asks.
   `gc --store` also deletes checkpoints of sessions removed over 30 days
   ago: run `gc --store --dry-run` first and only run `--store` when asked.
+
+R2 base errors: `base_not_on_main` and `base_diverged_from_main` are human
+hand-offs. If the publish chain has unpushed commits, the human pushes that
+chain first; divergent bases need chain recovery, with sync --accept-diverged
+only if the human approves dropping the named commits. `base_behind_main` gives
+a safe new command without --base. `HeadMoved baseline_moved` gives a literal
+publish --from command to rerun after a baseline change. `BaseAheadOfMain` is
+a warning that publish must wait for the base commits to land.
+
+For Unknown, do not retry, gc or rm. Keep the scene and give status to the human.
