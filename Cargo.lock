@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "git-strata"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "clap",
  "libc",
@@ -2333,7 +2333,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "strata-apfs"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "libc",
  "serde_json",
@@ -2345,7 +2345,7 @@ dependencies = [
 
 [[package]]
 name = "strata-client"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "libc",
  "serde",
@@ -2356,7 +2356,7 @@ dependencies = [
 
 [[package]]
 name = "strata-confirm"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "block2",
  "libc",
@@ -2374,7 +2374,7 @@ dependencies = [
 
 [[package]]
 name = "strata-daemon"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "libc",
  "serde",
@@ -2397,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "strata-deps"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "libc",
@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "strata-gitio"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "libc",
  "serde_json",
@@ -2428,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "strata-overlay"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "libc",
@@ -2448,7 +2448,7 @@ dependencies = [
 
 [[package]]
 name = "strata-publish"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "libc",
@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "strata-search"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.4.3",
  "globset",
@@ -2490,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "strata-session"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "libc",
@@ -2508,7 +2508,7 @@ dependencies = [
 
 [[package]]
 name = "strata-store"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "libc",
@@ -2524,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "strata-types"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
