@@ -34,8 +34,8 @@ pub fn strip(params: &mut Value) {
     }
 }
 
-/// Legacy sync defaults to the manifest's tracked workspaces, just like
-/// the daemon. Untracked siblings cannot move, even with an empty selection.
+/// Legacy sync applies the daemon's tracked-workspace and conflict-report
+/// selection before guarding the caller's cwd. Unselected siblings cannot move.
 pub fn local_sync(ctx: &Ctx, params: &Value, args: &CwdArgs, cwd: &Path) -> Result<()> {
     if args.allow_cwd || params["check"] == true {
         return Ok(());
@@ -80,9 +80,51 @@ pub fn local_sync(ctx: &Ctx, params: &Value, args: &CwdArgs, cwd: &Path) -> Resu
         })
         .max_by_key(|repo| repo.as_str().len());
     if let Some(repo) = repo {
-        let named = params["repos"].as_array().filter(|a| !a.is_empty());
+        let explicit = params["repos"].as_array().filter(|a| !a.is_empty());
+        let mut repos: Vec<_> = rec
+            .manifest
+            .repos
+            .iter()
+            .filter(|(r, ws)| {
+                ws.tracked
+                    && explicit.is_none_or(|a| a.iter().any(|v| v.as_str() == Some(r.as_str())))
+            })
+            .map(|(r, _)| r)
+            .collect();
+        let named: std::collections::BTreeSet<_> = ["resolved", "keep"]
+            .iter()
+            .filter_map(|field| params[field].as_array())
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        // Keep this narrowing in step with strata_daemon::sync_move::run:
+        // both saved reports and legacy workspace conflicts identify a repo.
+        if !named.is_empty() && repos.len() > 1 {
+            let mut candidates = Vec::new();
+            for r in repos {
+                if store
+                    .sync_report(&id, r)?
+                    .iter()
+                    .any(|row| named.contains(row.path.as_str()))
+                    || rec.workspaces[r]
+                        .conflicts
+                        .iter()
+                        .any(|p| named.contains(p.as_str()))
+                {
+                    candidates.push(r);
+                }
+            }
+            if candidates.len() != 1 {
+                return Err(StrataError::new(
+                    Code::InvalidInput,
+                    "use --repo to identify the conflict report",
+                )
+                .with_detail(json!({"reason":"ambiguous_resolution"})));
+            }
+            repos = candidates;
+        }
         let ws = &rec.manifest.repos[repo];
-        if ws.tracked && named.is_none_or(|a| a.iter().any(|v| v.as_str() == Some(repo.as_str()))) {
+        if repos.contains(&repo) {
             return Err(strata_session::cwd::refuse_caller(
                 &real, session, &ws.path, params,
             ));

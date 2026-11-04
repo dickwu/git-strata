@@ -1,7 +1,7 @@
 mod support;
 use clap::{Command, CommandFactory};
 use git_strata::args::Cli;
-use support::Home;
+use support::{Home, Run};
 
 fn commands(command: &Command, path: Vec<String>, out: &mut Vec<Vec<String>>) {
     out.push(path.clone());
@@ -14,13 +14,29 @@ fn commands(command: &Command, path: Vec<String>, out: &mut Vec<Vec<String>>) {
 #[test]
 fn all_help_is_bounded_and_gate_has_one_full_output() {
     let home = Home::new(); // No config or live store.
-    let index = home.run(&["help"]);
-    assert_eq!(index.code, 0);
-    assert!(
-        serde_json::from_str::<serde_json::Value>(&index.stdout).is_err(),
-        "help is plain text"
-    );
-    assert!(index.stderr.is_empty());
+    let read_help = |args: &[&str]| {
+        let run = Run::from(home.cmd(args).env_remove("HOME").output().unwrap());
+        assert_eq!(run.code, 0, "{args:?}: {run:?}");
+        assert!(run.stderr.is_empty(), "{args:?}: {run:?}");
+        assert!(
+            run.stdout.ends_with('\n'),
+            "{args:?}: missing trailing newline"
+        );
+        // Help may show indented JSON examples, but never emit an envelope
+        // before or after its text, even when HOME is missing.
+        for line in run.stdout.lines().filter(|line| line.starts_with('{')) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                assert!(
+                    !(value.get("ok").is_some()
+                        && value.get("data").is_some()
+                        && value.get("error").is_some()),
+                    "{args:?}: emitted envelope {line}"
+                );
+            }
+        }
+        run
+    };
+    let index = read_help(&["help"]);
     let topics: Vec<_> = index
         .stdout
         .lines()
@@ -34,18 +50,18 @@ fn all_help_is_bounded_and_gate_has_one_full_output() {
     for path in paths {
         let mut words: Vec<&str> = path.iter().map(String::as_str).collect();
         words.push("--help");
-        let run = home.run(&words);
+        let run = read_help(&words);
         assert_eq!(run.code, 0, "{words:?}: {run:?}");
         assert!(run.stdout.len() <= 4096, "{words:?}: {} bytes", run.stdout.len());
         gate_count += run.stdout.matches("CONFIRMATION GATE (Touch ID / TTY)").count();
         if !path.is_empty() {
             let mut help = vec!["help"];
             help.extend(path.iter().map(String::as_str));
-            assert_eq!(home.run(&help).stdout, run.stdout, "{path:?}");
+            assert_eq!(read_help(&help).stdout, run.stdout, "{path:?}");
         }
     }
     for topic in &topics {
-        let run = home.run(&["help", topic]);
+        let run = read_help(&["help", topic]);
         assert_eq!(run.code, 0);
         assert!(
             run.stdout.len() <= 4096,
@@ -78,14 +94,24 @@ fn all_help_is_bounded_and_gate_has_one_full_output() {
     ] {
         let mut args = words.clone();
         args.push("--help");
-        let run = home.run(&args);
+        let run = read_help(&args);
         assert!(run.stdout.contains("git-strata help gate"), "{words:?}");
         assert!(run.stdout.contains("faking a TTY is a bypass"), "{words:?}");
+        assert!(
+            run.stdout
+                .contains("Without a TTY: NotTty; stop and give the human the exact command."),
+            "{words:?}"
+        );
     }
-    let run = home.run(&["help"]);
+    let run = read_help(&["help"]);
     assert_eq!(run.code, 0);
     assert!(run.stdout.len() <= 1536);
-    let bad = home.run(&["help", "nope"]);
+    let bad = Run::from(
+        home.cmd(&["help", "nope"])
+            .env_remove("HOME")
+            .output()
+            .unwrap(),
+    );
     assert_eq!(bad.err_code(), "InvalidInput");
     assert_eq!(bad.reason(), "help_topic");
     let envelope = bad.env();

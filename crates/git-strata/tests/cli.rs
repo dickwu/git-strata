@@ -872,7 +872,9 @@ fn deps_propose_switch_moves_only_the_proposer() {
 
         // a: moves onto the proposed set, no prompt; c stays pinned.
         write(&wa, "package.json", NEW_DEP.as_bytes());
-        let d = lv.run_in(&wa, &["deps", "propose", "--switch"]).ok();
+        let d = lv
+            .run_in(&wa, &["deps", "propose", "--switch", "--allow-cwd"])
+            .ok();
         assert_eq!(d["switched"]["kind"], json!("moved"), "{d:#}");
         assert_eq!(d["switched"]["session"], json!(a.as_str()), "{d:#}");
         let moved = base(&a);
@@ -888,6 +890,78 @@ fn deps_propose_switch_moves_only_the_proposer() {
         let d = lv.run_in(&wc, &["deps", "propose"]).ok();
         assert!(d["id"].is_number() && d.get("switched").is_none(), "{d:#}");
         assert_eq!(base(&c), pinned);
+    });
+}
+
+/// An intermediate shell keeps the CLI outside the fixture daemon's direct
+/// children, so its cwd is guarded exactly as it is for an agent invocation.
+#[test]
+fn deps_propose_switch_from_shell_requires_allow_cwd() {
+    let lv = Live::with_deps(&["tool"], &base_files(), &["tool"]);
+    lv.serve(|core| {
+        let session = lv.new_session("T-cwd", "tool");
+        let ws = lv.ws(&session, "tool");
+        let base = || {
+            core.store
+                .session(&session)
+                .unwrap()
+                .unwrap()
+                .manifest
+                .repos[&rn("tool")]
+                .base
+                .clone()
+        };
+        let pinned = base();
+        let inputs = support::live::PACKAGE_JSON.replace("^1.0.0", "^2.0.0");
+        write(&ws, "package.json", inputs.as_bytes());
+        let run = |flags: &[&str]| {
+            let template = lv.home.cmd(&[]);
+            let mut shell = Command::new("/bin/sh");
+            for (key, value) in template.get_envs() {
+                match value {
+                    Some(value) => shell.env(key, value),
+                    None => shell.env_remove(key),
+                };
+            }
+            support::Run::from(
+                shell
+                    .arg("-c")
+                    // Work after the binary prevents sh from replacing itself
+                    // with the CLI (which would hide this regression again).
+                    .arg("\"$@\"; result=$?; exit \"$result\"")
+                    .arg("deps-cwd-test")
+                    .arg(BIN)
+                    .args(["deps", "propose", "--switch"])
+                    .args(flags)
+                    .current_dir(&ws)
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .expect("spawn deps through shell"),
+            )
+            .ok()
+        };
+
+        let skipped = run(&[]);
+        assert_eq!(skipped["switched"]["kind"], "skipped", "{skipped:#}");
+        assert_eq!(skipped["switched"]["code"], "OpenFiles", "{skipped:#}");
+        assert_eq!(
+            skipped["switched"]["detail"]["reason"], "cwd_holders",
+            "{skipped:#}"
+        );
+        assert_eq!(base(), pinned, "refused switch leaves the pin unchanged");
+
+        let moved = run(&["--allow-cwd"]);
+        assert_eq!(moved["switched"]["kind"], "moved", "{moved:#}");
+        assert_eq!(moved["switched"]["session"], session.as_str(), "{moved:#}");
+        assert_eq!(
+            base().deps.as_str(),
+            moved["proposal"]["to"].as_str().unwrap()
+        );
+        assert_ne!(base().deps, pinned.deps);
+        assert_eq!(
+            fs::read_to_string(ws.join("node_modules/x/package.json")).unwrap(),
+            inputs
+        );
     });
 }
 

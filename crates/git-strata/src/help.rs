@@ -79,7 +79,7 @@ macro_rules! gate_brief {
             $when,
             "\n",
             "  Without a TTY: NotTty; stop and give the human the exact command.\n",
-            "  No flag or env skips the gate; faking a TTY is a bypass.\n",
+            "  No flag, env or config skips the gate; faking a TTY is a bypass.\n",
             "  Full rules: git-strata help gate\n"
         )
     };
@@ -92,7 +92,8 @@ const OUTPUT: &str = "OUTPUT
   partial results, e.g. repos that already published).
   Exit status: 0 iff ok is true, else 1. Branch on error.code, then
   error.detail.reason; never parse message. stderr has human notices only.
-  help / --help / --version print plain text on stdout, exit 0, no JSON.
+  Known help topics/commands, --help and --version print text, exit 0, no JSON.
+  Unknown help topics return InvalidInput with detail.reason help_topic.
   session exec, once its command starts, prints no envelope: stdout, stderr
   and the exit status are the command's (failures before that: an envelope).
   Bad arguments: InvalidInput, detail.reason \"unknown_command\" (with
@@ -159,7 +160,8 @@ const SYNC_ACK: &str = "SYNC ACKNOWLEDGEMENT
   separate report remains. Non-following repos also allow named acknowledgement.
   Reply: {result:conflicts_cleared, following:true|false, resolved:[...], kept:[...]}
   Mixing legacy-only and report paths in a bound call is resolved_unrelated;
-  use two calls. Partial conflict choices are not saved for automatic reuse.";
+  use two calls. Partial conflict choices are not saved for automatic reuse.
+";
 
 pub const TOP: &str = "OUTPUT
   One compact JSON envelope on stdout; human notices on stderr. Exit 0 on
@@ -178,8 +180,9 @@ DAEMON
 
 GATES
   push/pushing publish, rm --discard, deps approve, config relax, resolve/chain:
-  TTY/confirmation rules: git-strata help gate. No flag or env skips the gate;
-  faking a TTY is a bypass. On NotTty, give the human the exact command.
+  TTY/confirmation rules: git-strata help gate. No flag, env or config skips
+  the gate; faking a TTY is a bypass.
+  Without a TTY: NotTty; stop and give the human the exact command.
 
 HEADLESS FLOW
   new --repo R; edit; checkpoint -m TEXT; diff; publish --from S:PATH.
@@ -357,12 +360,18 @@ Works without the daemon. Two modes together is InvalidInput diff_mode.
 
 pub const DEPS_AFTER: &str = concat!(
     "EXAMPLES
-  git-strata deps propose --switch     # after changing install inputs; moves only this session
+  cd ~ && git-strata deps propose --session S --repo R --switch
   git-strata deps list
   git-strata deps approve <ID>         # HUMAN ONLY (TTY + prompt)
 
-propose --switch: check data.switched.kind; skipped with code OpenFiles means a
-process holds files in the deps dir: stop it (only if you started it), rerun.\n",
+propose --switch moves only this session after changing install inputs. Run
+outside its workspace, then cd back to the workspace path after moving. From
+inside, --allow-cwd accepts your own PID chain's stale cwd; cd back afterward.
+Check data.switched.kind. For skipped with code OpenFiles, inspect detail.reason:
+  cwd_holders: your own shell/parent needs --allow-cwd; other holders must cd
+    out, or --allow-cwd-holders accepts their stale cwd too.
+  Other OpenFiles: a process holds deps files; stop it only if you started it,
+    then rerun. Neither cwd flag bypasses file or mapping protections.\n",
     gate_brief!("deps approve always needs a TTY + Touch ID; propose does not.")
 );
 
@@ -725,7 +734,8 @@ const ERRORS_PUBLISH: &str = "OTHER ERRORS
                      --repo R ...) or follow detail.missing[].next, then rerun
   Busy / Unknown with detail.sibling  preparing that sibling (fetch, anchor)
                      was busy or unknown; Busy: retry later; Unknown: tell
-                     the human";
+                     the human
+";
 const TOPICS: &[(&str, &str)] = &[
     ("gate", gate_text!()),
     ("push-guards", push_guard_text!()),
