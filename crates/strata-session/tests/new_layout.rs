@@ -818,16 +818,57 @@ fn local_base_refusals_create_no_session_and_dependency_move_cannot_drop_it() {
     }
     let c = fx.sb.commit(&main,&[("only-c",b"keep C")],"C");
     let parked = run(&c).unwrap();
-    fx.sb.git(&main,&["reset","--hard",&initial]);
-    let d = push(&fx,"tool",&[("only-d",b"D")],"D");
-    fx.gits[&repo].fetch("origin","main").unwrap();
-    let head=commit_oid(&d); let target=s.ensure_base(&repo,&head).unwrap();
-    let e=s.move_workspace_checked(&parked.manifest.id,&fx.gits[&repo].repo_id(),target,head,true).unwrap_err();
-    assert_eq!(e.code,Code::Conflict); assert_eq!(e.detail.as_ref().unwrap()["reason"],"base_ahead");
-    assert_eq!(fs::read(ws(&parked,"tool").join("only-c")).unwrap(),b"keep C");
-    let e=run(&initial).unwrap_err(); assert_eq!(e.detail.as_ref().unwrap()["reason"],"base_behind_main");
-    let e=run(&c).unwrap_err(); assert_eq!(e.detail.as_ref().unwrap()["reason"],"base_diverged_from_main");
-    assert!(e.detail.as_ref().unwrap()["fix"].as_str().unwrap().starts_with("ask the human"));
+    fx.sb.git(&main, &["reset", "--hard", &initial]);
+    let d = push(&fx, "tool", &[("only-d", b"D")], "D");
+    fx.gits[&repo].fetch("origin", "main").unwrap();
+    let head = commit_oid(&d);
+    let target = s.ensure_base(&repo, &head).unwrap();
+    let e = s
+        .move_workspace_checked(
+            &parked.manifest.id,
+            &fx.gits[&repo].repo_id(),
+            target,
+            head,
+            true,
+        )
+        .unwrap_err();
+    assert_eq!(e.code, Code::Conflict);
+    assert_eq!(e.detail.as_ref().unwrap()["reason"], "base_ahead");
+    // Missing or replaced pending rows must never disable Auto's ancestry guard.
+    let workspace = &parked.manifest.repos[&repo];
+    let baseline =
+        strata_session::baseline_of(&strata_session::walk_activity(&workspace.path).unwrap());
+    let target = s.ensure_base(&repo, &commit_oid(&d)).unwrap();
+    for consume in [None, Some(999)] {
+        let e = s
+            .move_workspace_auto(
+                &parked.manifest.id,
+                &fx.gits[&repo].repo_id(),
+                target.clone(),
+                commit_oid(&d),
+                consume,
+                &baseline,
+            )
+            .unwrap_err();
+        assert_eq!(e.detail.as_ref().unwrap()["reason"], "base_ahead");
+    }
+    assert_eq!(
+        fs::read(ws(&parked, "tool").join("only-c")).unwrap(),
+        b"keep C"
+    );
+    let e = run(&initial).unwrap_err();
+    assert_eq!(e.detail.as_ref().unwrap()["reason"], "base_behind_main");
+    let e = run(&c).unwrap_err();
+    assert_eq!(
+        e.detail.as_ref().unwrap()["reason"],
+        "base_diverged_from_main"
+    );
+    assert!(
+        e.detail.as_ref().unwrap()["fix"]
+            .as_str()
+            .unwrap()
+            .starts_with("ask the human")
+    );
 }
 
 #[test]
@@ -847,11 +888,47 @@ fn quiet_scope_protects_workspace_head_tracked_files_not_main_index() {
         cfg.deps_dirs=vec![rp("NODE_MODULES")];
         let scope=strata_session::activity_scope(&cfg,&fx.gits[&repo],fx.store(),&w).unwrap();
         assert!(scope.fold);
-        assert!(scope.skip.is_empty(), "case aliases of tracked deps still count");
-        cfg.rebase.quiet_skip=vec!["NODE_MODULES/TRACKED".into()];
-        assert_eq!(strata_session::activity_scope(&cfg,&fx.gits[&repo],fx.store(),&w).unwrap_err().code,Code::InvalidInput);
+        assert!(
+            scope.skip.is_empty(),
+            "case aliases of tracked deps still count"
+        );
+        cfg.rebase.quiet_skip = vec!["NODE_MODULES/TRACKED".into()];
+        let scope = strata_session::activity_scope(&cfg, &fx.gits[&repo], fx.store(), &w).unwrap();
+        assert!(scope.skip.is_empty(), "tracked aliases remain counted");
+        assert!(scope.quiet_tracked.contains("node_modules/tracked"));
     }
-    cfg.rebase.quiet_skip=vec!["node_modules/tracked".into()];
-    let e=strata_session::activity_scope(&cfg,&fx.gits[&repo],fx.store(),&w).unwrap_err();
-    assert_eq!(e.code,Code::InvalidInput); assert_eq!(e.detail.as_ref().unwrap()["reason"],"quiet_skip_tracked");
+    cfg.rebase.quiet_skip = vec!["node_modules/*".into()];
+    let scope = strata_session::activity_scope(&cfg, &fx.gits[&repo], fx.store(), &w).unwrap();
+    fs::create_dir_all(w.path.join("node_modules")).unwrap();
+    for name in ["tracked", "untracked"] {
+        fs::write(w.path.join("node_modules").join(name), b"original").unwrap();
+    }
+    let before =
+        strata_session::walk_activity_scoped(&w.path, &scope, &cfg.rebase.quiet_skip).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(w.path.join("node_modules/untracked"), b"quiet cache").unwrap();
+    let cache =
+        strata_session::walk_activity_scoped(&w.path, &scope, &cfg.rebase.quiet_skip).unwrap();
+    assert_eq!(cache.m0_counted, before.m0_counted);
+    assert!(
+        cache.m0_ns > before.m0_ns,
+        "all carried writes still count for G4"
+    );
+    let during =
+        strata_session::walk_activity_during_scan(&w.path, &scope, &cfg.rebase.quiet_skip, || {
+            std::thread::sleep(Duration::from_millis(20));
+            fs::write(w.path.join("node_modules/tracked"), b"tracked edit").unwrap();
+        })
+        .unwrap();
+    assert!(during.m0_counted > cache.m0_counted);
+    assert_eq!(during.late, Some(w.path.join("node_modules/tracked")));
+    let idle = strata_session::idle_activity_scoped(
+        &w.path,
+        Duration::from_secs(3600),
+        &scope,
+        &cfg.rebase.quiet_skip,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(idle.reason, "recent_writes");
 }

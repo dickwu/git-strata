@@ -164,9 +164,26 @@ impl Sessions<'_> {
         baseline: &strata_store::MoveBaseline,
     ) -> Result<MoveReport> {
         let name = self.repo_name(repo)?;
-        let require_descends = self.store.rebase_pending_of(session, &name)?
-            .is_some_and(|p| Some(p.rev) == consume && p.source == strata_store::PendingSource::Main);
-        self.move_inner(session, repo, new_base, head, consume, Some(baseline), None, require_descends)
+        let require_descends = !self
+            .store
+            .rebase_pending_of(session, &name)?
+            .is_some_and(|p| {
+                Some(p.rev) == consume
+                    && matches!(
+                        p.source,
+                        strata_store::PendingSource::Publish | strata_store::PendingSource::Replay
+                    )
+            });
+        self.move_inner(
+            session,
+            repo,
+            new_base,
+            head,
+            consume,
+            Some(baseline),
+            None,
+            require_descends,
+        )
     }
 
     /// Agent moves keep G0/G2/G4, but check only dependency-directory

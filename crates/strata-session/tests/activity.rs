@@ -54,7 +54,12 @@ fn scoped_deps_writes_are_excluded_but_nested_carried_cache_survives_restart() {
     fs::write(root.join("source.rs"), b"source").unwrap();
     fs::write(root.join("node_modules/generated"), b"a").unwrap();
     fs::write(root.join("node_modules/.cache/build"), b"a").unwrap();
-    let scope = strata_store::ActivityScope { fold: false, skip: vec!["node_modules".into()], exceptions: vec!["node_modules/.cache".into()] };
+    let scope = strata_store::ActivityScope {
+        fold: false,
+        skip: vec!["node_modules".into()],
+        exceptions: vec!["node_modules/.cache".into()],
+        ..Default::default()
+    };
     let a = walk_activity_scoped(root, &scope, &[]).unwrap();
     let baseline = baseline_of(&a);
     // Persisted scope, independent of subsequent configuration.
@@ -95,13 +100,26 @@ fn quiet_skip_only_changes_age_and_does_not_weaken_during_move_checks() {
 fn writes_during_scan_obey_deps_and_quiet_exclusions_but_source_counts() {
     let d=tempfile::tempdir().unwrap(); let root=d.path();
     fs::create_dir_all(root.join("node_modules")).unwrap();
-    for p in ["node_modules/cache",".eslintcache","source"] { fs::write(root.join(p),b"a").unwrap(); }
-    let scope=strata_store::ActivityScope {fold:false,skip:vec!["node_modules".into()],exceptions:vec![]};
-    for (path,quiet,late) in [("node_modules/cache",vec![],false),(".eslintcache",vec![".eslintcache".into()],false),("source",vec![],true)] {
-        let a=strata_session::walk_activity_during_scan(root,&scope,&quiet,||{
-            std::thread::sleep(Duration::from_millis(20)); fs::write(root.join(path),b"b").unwrap();
-        }).unwrap();
-        assert_eq!(a.late.is_some(),late,"{path}: {a:?}");
+    for p in ["node_modules/cache", ".eslintcache", "source"] {
+        fs::write(root.join(p), b"a").unwrap();
+    }
+    let scope = strata_store::ActivityScope {
+        fold: false,
+        skip: vec!["node_modules".into()],
+        exceptions: vec![],
+        ..Default::default()
+    };
+    for (path, quiet, late) in [
+        ("node_modules/cache", vec![], false),
+        (".eslintcache", vec![".eslintcache".into()], false),
+        ("source", vec![], true),
+    ] {
+        let a = strata_session::walk_activity_during_scan(root, &scope, &quiet, || {
+            std::thread::sleep(Duration::from_millis(20));
+            fs::write(root.join(path), b"b").unwrap();
+        })
+        .unwrap();
+        assert_eq!(a.late.is_some(), late, "{path}: {a:?}");
     }
 }
 

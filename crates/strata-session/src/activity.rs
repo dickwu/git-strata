@@ -7,7 +7,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use strata_store::ActivityScope;
-use strata_types::{Code, RepoConfig, RepoPath, StrataError, WorkspaceState};
+use strata_types::{RepoConfig, RepoPath, WorkspaceState};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Activity {
@@ -62,6 +62,34 @@ fn quiet_matches(rules: &strata_overlay::LwwRules, path: &str, fold: bool) -> bo
     RepoPath::try_from(key(path, fold)).is_ok_and(|p| strata_overlay::lww_matches(rules, &p))
 }
 
+fn first_scope_warning(repo: &strata_types::RepoName, path: &Path, reason: &'static str) -> bool {
+    type WarningKey = (strata_types::RepoName, PathBuf, &'static str);
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<WarningKey>>> =
+        std::sync::OnceLock::new();
+    WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert((repo.clone(), path.to_path_buf(), reason))
+}
+
+#[cfg(test)]
+mod warning_tests {
+    use super::*;
+
+    #[test]
+    fn scope_warning_is_once_per_repo_and_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = strata_types::RepoName::try_from("app".to_string()).unwrap();
+        let other = strata_types::RepoName::try_from("other".to_string()).unwrap();
+        for reason in ["quiet_skip_tracked", "deps_dir_tracked"] {
+            assert!(first_scope_warning(&repo, root.path(), reason));
+            assert!(!first_scope_warning(&repo, root.path(), reason));
+            assert!(first_scope_warning(&other, root.path(), reason));
+        }
+    }
+}
+
 /// Union configured and currently pinned dependency roots. Tracked protection
 /// uses ws.head, never the main checkout index. Nested carried caches are extra roots.
 pub fn activity_scope(
@@ -73,15 +101,18 @@ pub fn activity_scope(
     let tracked = git.tracked_paths(&ws.head)?;
     let fold = !strata_apfs::volume_caps(&ws.path)?.case_sensitive;
     let quiet = quiet_rules(&cfg.rebase.quiet_skip, fold);
-    if let Some(path) = tracked
+    let quiet_tracked: std::collections::BTreeSet<_> = tracked
         .iter()
-        .find(|p| quiet_matches(&quiet, p.as_str(), fold))
+        .filter(|p| !cfg.rebase.quiet_skip.is_empty() && quiet_matches(&quiet, p.as_str(), fold))
+        .map(|p| key(p.as_str(), fold))
+        .collect();
+    if let Some(path) = quiet_tracked.first()
+        && first_scope_warning(&ws.base.repo, &cfg.path, "quiet_skip_tracked")
     {
-        return Err(StrataError::new(
-            Code::InvalidInput,
-            format!("rebase.quiet_skip matches tracked path {path}"),
-        )
-        .with_detail(json!({"reason":"quiet_skip_tracked","path":path})));
+        eprintln!(
+            "warning: quiet_skip_tracked: {}/{} remains counted for activity",
+            ws.base.repo, path
+        );
     }
     let mut dirs = cfg.deps_dirs.clone();
     if let Some(set) = strata_deps::find_set(store, &ws.base.repo, &ws.base.deps)? {
@@ -91,6 +122,7 @@ pub fn activity_scope(
     dirs.dedup();
     let mut scope = ActivityScope {
         fold,
+        quiet_tracked,
         ..Default::default()
     };
     for dir in dirs {
@@ -98,21 +130,7 @@ pub fn activity_scope(
             .iter()
             .any(|p| under(p.as_str(), dir.as_str(), fold))
         {
-            static WARNED: std::sync::OnceLock<
-                std::sync::Mutex<std::collections::BTreeSet<String>>,
-            > = std::sync::OnceLock::new();
-            let key = format!(
-                "{}:{}:{}",
-                ws.base.repo,
-                cfg.path.display(),
-                key(dir.as_str(), fold)
-            );
-            if WARNED
-                .get_or_init(Default::default)
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(key)
-            {
+            if first_scope_warning(&ws.base.repo, &cfg.path, "deps_dir_tracked") {
                 eprintln!(
                     "warning: deps_dir_tracked: {}/{} is checked for activity",
                     ws.base.repo, dir
@@ -249,7 +267,10 @@ fn walk_activity_inner(
         let c = ctime_ns(md);
         a.entries += 1;
         a.m0_ns = a.m0_ns.max(c);
-        let skipped = quiet_matches(&quiet, &rel(root, path), scope.fold);
+        let relative = rel(root, path);
+        let skipped = !quiet_skip.is_empty()
+            && !scope.quiet_tracked.contains(&key(&relative, scope.fold))
+            && quiet_matches(&quiet, &relative, scope.fold);
         if !skipped {
             if c > a.m0_counted {
                 a.m0_counted = c;
