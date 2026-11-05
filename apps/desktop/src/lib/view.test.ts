@@ -14,6 +14,7 @@ import {
   STUCK_AFTER,
   sessionDetail,
   sessionRows,
+  sessionMarks,
   short,
 } from './view';
 import { bytes, ago } from './copy';
@@ -52,6 +53,47 @@ describe('sessionRows', () => {
     const r = sessionRows(copy).find((x) => x.id === 'S1')!;
     expect(r.health).toBe('Degraded');
     expect(r.conflicts).toBe(2);
+  });
+});
+
+describe('completion marks', () => {
+  const marked = () => {
+    const reply = structuredClone(all);
+    reply.sessions.find((s) => s.status.manifest.id === 'S1')!.status.mark = {
+      state: 'done',
+      note: '<b>landed</b>\tneeds\nreview',
+      by: { kind: 'agent' },
+      at: '2026-11-04T12:00:00Z',
+    };
+    return reply;
+  };
+
+  test('absent legacy marks mean active; done does not change lifecycle or creation order', () => {
+    const rows = sessionRows(marked());
+    expect(rows.map((r) => [r.id, r.mark])).toEqual([
+      ['S2', 'active'],
+      ['S1', 'done'],
+    ]);
+    expect(rows[1].state).toBe('Active');
+    expect(rows[1].note).toBe('<b>landed</b>\tneeds\nreview');
+    expect(sessionRows(all).every((r) => r.mark === 'active' && r.note === null)).toBe(true);
+    expect(sessionMarks(rows)).toEqual([
+      { name: 'active', label: 'Active', sessions: 1 },
+      { name: 'done', label: 'Done', sessions: 1 },
+    ]);
+  });
+
+  test('state is OR within marks and AND with repo/text filters, including note words', () => {
+    const rows = sessionRows(marked());
+    const ids = (r: typeof rows) => r.map((r) => r.id);
+    expect(ids(filterRows(rows, { repos: [], marks: ['done'] }))).toEqual(['S1']);
+    expect(ids(filterRows(rows, { repos: [], marks: ['active'] }))).toEqual(['S2']);
+    expect(ids(filterRows(rows, { repos: [], marks: ['active', 'done'] }))).toEqual(['S2', 'S1']);
+    expect(
+      ids(filterRows(rows, { repos: ['tool'], marks: ['done'], text: 'needs review' }))
+    ).toEqual(['S1']);
+    expect(ids(filterRows(rows, { repos: [], marks: ['active'], text: 'review' }))).toEqual([]);
+    expect(sessionMarks([]).map((x) => x.sessions)).toEqual([0, 0]);
   });
 });
 

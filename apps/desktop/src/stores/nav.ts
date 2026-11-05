@@ -10,8 +10,10 @@ interface NavState {
   repoFilter: string[];
   textFilter: string;
   agentFilter: string[];
+  markFilter: string[];
   toggleRepoFilter: (repo: string) => void;
   toggleAgentFilter: (agent: string) => void;
+  toggleMarkFilter: (mark: string) => void;
   addRepoFilter: (repo: string) => void;
   removeRepoFilter: (repo: string) => void;
   setTextFilter: (text: string) => void;
@@ -52,6 +54,7 @@ export const useNav = create<NavState>((set) => ({
   repoFilter: [],
   textFilter: '',
   agentFilter: [],
+  markFilter: [],
   toggleRepoFilter: (repo) =>
     set((s) => ({
       repoFilter: s.repoFilter.includes(repo)
@@ -64,11 +67,17 @@ export const useNav = create<NavState>((set) => ({
         ? s.agentFilter.filter((a) => a !== agent)
         : [...s.agentFilter, agent],
     })),
+  toggleMarkFilter: (mark) =>
+    set((s) => ({
+      markFilter: s.markFilter.includes(mark)
+        ? s.markFilter.filter((m) => m !== mark)
+        : [...s.markFilter, mark],
+    })),
   addRepoFilter: (repo) =>
     set((s) => (s.repoFilter.includes(repo) ? s : { repoFilter: [...s.repoFilter, repo] })),
   removeRepoFilter: (repo) => set((s) => ({ repoFilter: s.repoFilter.filter((r) => r !== repo) })),
   setTextFilter: (textFilter) => set({ textFilter }),
-  clearFilters: () => set({ repoFilter: [], agentFilter: [], textFilter: '' }),
+  clearFilters: () => set({ repoFilter: [], agentFilter: [], markFilter: [], textFilter: '' }),
   go: (screen) => set({ screen, session: null }),
   openSession: (session) => set({ screen: 'sessions', session }),
   setPalette: (paletteOpen) => set({ paletteOpen }),

@@ -123,6 +123,7 @@ pub fn install_path_for_home(home: &Path) -> String {
 /// would reject. Additive only. `new.agent`: `new` takes `agent`.
 pub const FEATURES: &[&str] = &[
     "new.agent",
+    "session.mark",
     "session.ports",
     "status.upstream",
     "sync",

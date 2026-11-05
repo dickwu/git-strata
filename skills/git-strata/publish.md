@@ -134,14 +134,13 @@ rule: the README's [Confirmation gate](https://github.com/dickwu/git-strata/blob
 
 ## Removing a session
 
-- `git-strata rm --session S` once its work is published. A file whose exact
-  bytes and mode are in a publish of this session that origin already has
-  does not count as unpublished.
-- `Dirty`: nothing was removed and the session is still active.
-  `detail.repos` lists unpublished paths per repo, `detail.untracked_repos`
-  edited untracked siblings, `detail.unresolved` interrupted scenes. Publish
-  the work (for following repos: sync, checks, checkpoint, publish, then rm),
-  or hand `git-strata rm --session S --discard` to the human.
+- When work is published, mark it done and leave removal to the human:
+  `git-strata mark --session S done --note "what landed and what is left"`.
+  Files and checkpoints stay. To resume: `git-strata mark --session S active`.
+- `Dirty` from an existing `rm` automation: nothing was removed. Mark done and
+  tell the human what is unpublished. Never run `rm --discard` or seek a bypass.
+  `detail.repos` lists unpublished paths, `detail.untracked_repos` edited siblings,
+  and `detail.unresolved` interrupted scenes.
   `detail.reason: changed_during_remove` means files changed while rm ran:
   retry.
 - Paths matching the repo's pinned `rm.regenerable` do not block; they are

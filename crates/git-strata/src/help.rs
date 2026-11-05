@@ -28,6 +28,7 @@ macro_rules! gate_text {
     deps approve           always (TTY + prompt)
     config relax           always (TTY + prompt)
     resolve, chain         always need a TTY (chain --restore may also prompt)
+  mark done / mark active are metadata only; agents finish with mark done.
   push REPO of a repo that needs no confirmation runs headless and, when origin
   moved under the unpushed chain (diverged), replays it itself (see push --help).
   publish into a repo with publish.push = false never asks, even when the repo
@@ -127,7 +128,7 @@ const ERRORS: &str = "ERRORS (code -> what an agent does)
   NoSuchRepo not_in_session  run detail.fix (git-strata add --session S --repo R)
   InvalidInput siblings_missing  publish checks need sibling repos: run detail.fix
   AmbiguousMatch     use a session id from detail
-  Dirty              rm on work that is not published: publish it, or ask the human (rm --discard)
+  Dirty              mark done and report unpublished work; never run rm --discard
   CheckFailed        fix the code, checkpoint, publish again
   OpenFiles caller_cwd  run detail.fix outside the workspace; it preserves request flags
   OpenFiles cwd_holders  cd holders out, or explicitly use --allow-cwd-holders
@@ -161,7 +162,7 @@ const HEADLESS: &str = "HEADLESS FLOW (no human needed)
   git-strata diff
   cd ~
   git-strata publish --from <id>:src/a.ts --from <id>:src/b.ts
-  git-strata rm --session <id>
+  git-strata mark --session <id> done --note \"what landed and what is left\"
 ";
 const SYNC_ACK: &str = "SYNC ACKNOWLEDGEMENT
   Legacy-only: every named path is in ws.conflicts, none in the saved report.
@@ -197,13 +198,13 @@ GATES
 
 HEADLESS FLOW
   new --repo R; edit; checkpoint -m TEXT; diff; publish --from S:PATH.
-  rm --session S after publishing. Full example: git-strata help headless
+  mark --session S done after publishing; leave removal to the human. Full example: git-strata help headless
   Sync from outside: cd ~ && git-strata sync --session S; then cd back.
   Do not use git push. Full rules: git-strata help push-guards
 
 ERRORS
   Busy: back off. NotTty/NotConfirmed: give the command to the human.
-  Conflict: resolve reported paths. Dirty: publish before rm.
+  Conflict: resolve reported paths. Dirty: mark done and report unpublished work.
   OpenFiles caller_cwd/cwd_holders: cd out or follow detail.fix.
   NoSuchSession stale_cwd: cd back to the live workspace path.
   client_timeout: Busy means read/unsent; Unknown means sent, inspect status.
@@ -324,7 +325,7 @@ stopped midway; that is the human's `git-strata resolve`. Works without the daem
 
 pub const LS_AFTER: &str = "EXAMPLES
   git-strata ls                      # {sessions:[{id,ticket,state,created,repos,phase?}]}
-  git-strata ls --table              # ID TICKET STATE REPOS CREATED
+  git-strata ls --table              # ID TICKET STATE MARK REPOS CREATED
 
 From the store alone, sorted by id; never stats a workspace or runs git.
 Without the daemon (or with one that predates it) the store is read
@@ -519,11 +520,27 @@ Decides which session resolves a conflicted path. Other sessions then get
 Conflict with reason assigned for that path and must not retry.
 ";
 
+pub const MARK_AFTER: &str = "EXAMPLES
+  git-strata mark --session s-k3q7xm2a done --note \"what landed and what is left\"
+  git-strata mark --session s-k3q7xm2a active
+
+Finish agent work with mark done; leave removal to the human. Active clears the
+mark, note and attribution so work can resume. Neither changes files, checkpoints
+or lifecycle. Only Active/Unknown sessions may be marked. No TTY or confirmation.
+Requires the daemon feature session.mark; an older daemon returns Unsupported
+with reason daemon_too_old. Notes are 1–2000 UTF-8 bytes; tab and newline are
+allowed, other characters below 0x20 are refused. Active takes no note.
+--agent uses the same detection as new; P1 stores setter kind only.
+";
+
 pub const RM_AFTER: &str = concat!(
     "EXAMPLES
-  git-strata rm --session s-k3q7xm2a              # after its work is published
+  git-strata mark --session s-k3q7xm2a done      # agents finish here
+  git-strata rm --session s-k3q7xm2a              # human removal / existing automation
   git-strata rm --session s-k3q7xm2a --discard    # HUMAN ONLY (TTY + prompt)
 
+Agents finish with mark done, not rm; resume with mark active. A Dirty refusal
+means mark done and report what remains; never run rm --discard or seek a bypass.
 Dirty: rm refused and nothing was removed; the session is still Active and
 listed by `git-strata ls` (detail.removed = false, detail.lifecycle). The
 message names up to 5 unpublished paths per repo. A file whose exact bytes and

@@ -892,7 +892,7 @@ impl Store {
 | `SQLITE_DBCONFIG_DEFENSIVE` | 每个连接都开 | 关掉 `writable_schema` 一类改 schema 的后门（沿用 LayerFS 的做法） |
 | `query_only` | 1（读连接） | 读连接写不了 |
 | `application_id` | 1398035009，即 0x53545241（"STRA"） | 建库时写入；在文件头偏移 68，open 靠它认出这是 Store |
-| `user_version` | 6（`schema::LATEST`） | 建库时写入；在文件头偏移 60；旧库由写者 open 前进迁移，v1–v4 SQL 保持冻结；v5 见 Main-sync resolution history and O7 acknowledgement |
+| `user_version` | 7（`schema::LATEST`） | 建库时写入；在文件头偏移 60；旧库由写者 open 前进迁移，v1–v4 SQL 保持冻结；v5 见 Main-sync resolution history and O7 acknowledgement |
 
 `wal_autocheckpoint` 保持 SQLite 的缺省值（1000 页），写者提交时自动做；读事务都很短，不会让 WAL 无限增长。
 
@@ -2344,3 +2344,30 @@ forward-only. Upgrade CLI and daemon together: older binaries refuse v6 with
 `Corrupt user_version`. The current header-version check includes a matching-version install hint; an older reader or a lagging-header PRAGMA mismatch may omit that hint. Restoring the v5
 backup is the only supported downgrade; it loses subsequent store metadata
 writes but does not undo Git commits or refs.
+
+### Session completion marks (schema v7, P1)
+
+Append-only migration 7 (`session_marks`) adds one STRICT table with five columns:
+`session` (PK/FK to sessions), `state` (only `done`), nullable `note`, `by_kind`
+(`agent|cli|gui`), and `at_ns`. Absence of a row means active. The note SQL CHECK
+counts UTF-8 bytes via `length(CAST(note AS BLOB))`, 1–2000 when present; the shared
+Rust validation also rejects C0 controls other than tab/newline. No checkpoints
+rebuild, new checkpoint reason, export table, archive metadata or event table is
+included. Earlier migration SQL stays frozen.
+
+`Store::set_mark(session, state, note, by_kind, at)` checks lifecycle and mutates
+in one transaction. Active/Unknown allow done or undo; Creating/Removing/Removed
+return `InvalidInput reason: "lifecycle"`, even for an idempotent undo. Missing ids
+return `NoSuchSession`. SQL insert/update/delete guards enforce lifecycle and keep
+the session key fixed. Done replaces its note/attribution/time; active deletes the
+row. Marking never changes lifecycle or files. Marks of subsequently removed
+sessions remain with their normal retained store data, then GC deletes them before
+sessions. This cut does not derive an archived mark.
+
+`Store::mark` returns `None` on schemas older than 7, so a new read-only CLI can
+read an older daemon's store without looking up a nonexistent table. Full status
+and store-only summary both carry this optional record. Writer open uses the normal
+verified pre-migration backup, transaction and schema check. `tests/migrate_v7.rs`
+exercises populated v6 checkpoint/overlay rows, unchanged row contents, foreign keys
+on, the v6 backup, the five-column table and its constraints. Existing fixture
+migration and forward-version refusal tests now pin v7 as the latest version.

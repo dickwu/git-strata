@@ -64,6 +64,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata publish` | `publish`（总是先 `checkpoint`，再 `publish_plan`） | 是，当这次还要提交的仓库里有要推且钉住的值要确认的（review-2 N2） | 每个这样的仓库一次 `PushDeploy`，在该仓库 `commit_tree` 之前。不推的仓库、已经落地的仓库不确认 |
 | `git-strata push` | `push` | 是，当仓库要确认 | `PushDeploy` |
 | `git-strata assign` | `assign` | 否 | 否 |
+| `git-strata mark` | `mark` | 否 | 否 |
 | `git-strata rm` | `rm` | `--discard` 时是 | `RemoveDiscard` |
 | `git-strata gc` | `gc` | 否 | 否 |
 | `git-strata du [--refresh]` | `du` | 否 | 否 |
@@ -164,7 +165,7 @@ This mode reads `{cwd, stop_hook_active}` on stdin and resolves the session from
 | `add` | `AddReport`：`{ session, added: {<repo>: WorkspaceState}, already: {<repo>: WorkspaceState}, warnings }`；锚点未知的 repo 打在 stderr | — |
 | `status` | 一个会话：`SessionStatus`（顶层带 `id`、`ticket`（无则 null）；`manifest.id`、`manifest.ticket` 与之重复，**已弃用**，下一个大版本去掉，新代码读顶层）。warning `OldTreeKept`（status-perf A1）：`changed` 可为 `null`（daemon 还没在后台检查这棵旧树，同时带 `unchecked: true`，此时 `holders` 为空；daemon 不在、走本地回退时总是这样）；检查过的带 `checked_at`（RFC 3339）。旧 GUI 读到 `null` 应当当作「未知」。`--all`：`{ "sessions": [SessionStatus, …] }`，按 `SessionId` 升序。健康为 `Unknown` 的工作区带 `choices: ["abandon", "accept"]`。工作区有 `drift` 时它另带 `fix`（`cd ~ && git-strata deps propose --session <S> --repo <R> --switch`）与 `note`（publish 会用 staged 安装输入对应的依赖集跑检查，但工作区仍是旧的依赖；deps-drift §2.7）。`OldTreeKept` 的 `holders` 原样透传 | — |
 | `status --brief` | 只来自 store（status-perf C）：`SessionSummary` = `{ id, ticket（无则 null）, state, created（RFC 3339）, repos: [RepoName], phase?, workspaces: [{ repo, health_stored, path, checkpoint }] }`。`state` 是 store 的 lifecycle（`Creating`/`Active`/`Removing`/`Unknown`），没有只能从文件系统得出的 `Missing`；`health_stored` 是 store 记录的健康（`Ok`/`Unknown`），工作区目录缺失在这里看不出；`checkpoint` 是最新检查点，untracked 或没有则 null。不算 drift、seeds、mirrors、旧树，不 stat 工作区，不跑 git。一个会话：该对象；`--all`：`{ "sessions": [SessionSummary, …] }`，按 id 升序。daemon 不在或 daemon 不认识 `summary`/`workspaces` 时读 store，并带 `source: "local"` | — |
-| `ls` | `{ "sessions": [{ id, ticket, state, created, repos, phase? }, …], "source"? }`：全部未 Removed 的会话，按 id 升序，字段同上（没有 `workspaces`）。`source: "local"` 同上。`--table`：`ID  TICKET  STATE  REPOS  CREATED`（ticket 为空写 `-`，repos 用逗号连），不套信封 | — |
+| `ls` | `{ "sessions": [{ id, ticket, state, mark?, created, repos, phase? }, …], "source"? }`：全部未 Removed 的会话，按 id 升序，字段同上（没有 `workspaces`）。`source: "local"` 同上。`--table`：`ID  TICKET  STATE  MARK  REPOS  CREATED`（ticket 为空写 `-`，repos 用逗号连），不套信封 | — |
 | `checkpoint` | `{ "checkpoints": [Checkpoint, …] }`，该次工具调用或 `-m` 在每个被记的 repo 上的那一行。幂等命中时就是已有的那几行，不是新 id | — |
 | `restore` | `{ "checkpoint": CheckpointId, "session": SessionId }` | — |
 | `grep` | `{ "hits": [Hit, …] }`。零命中是 `"hits": []`，`ok` 为 true，不是 `NoMatch`。`hits` 这个键总在 | 前 8000 字节含 NUL 的文件跳过，不进 `hits`。被跳过的放 `skipped: [{ "session", "repo", "path", "code": "Binary" }]`。超过 64 MiB 的同样按条目，`code` 为 `TooLarge`，不读内容。非法 UTF-8 按宽松解码，每个坏序列一个 U+FFFD，不让整条输出失败（D9） |
@@ -622,3 +623,28 @@ Rejected reports expose their first daemon reason (`parse`, `invalid_config`,
 `restart_required`, `stale_rows`, `spawn_failed`, etc.), falling back to
 `config_rejected`. Other reload reasons are `reload_pending`, `daemon_too_old`,
 and `invalid_reload_report`. See [config.md](../config.md#hot-reload-configreload).
+
+### Session completion marks (P1)
+
+Finish agent work with `git-strata mark --session S done --note "what landed and what is left"`.
+This marks completion without removing files, releasing the workspace, changing the
+lifecycle, or deleting checkpoints. The human handles session removal. Resume with
+`git-strata mark --session S active`, which clears the mark, note and attribution.
+`rm` remains available for existing automation; it is outside the default agent loop.
+A `Dirty` refusal should be handed back as a done mark with the unpublished work
+explained; an agent must never run `rm --discard` or try to bypass its gate.
+
+`--session` is required and resolves an id or ticket like `rm` (`AmbiguousMatch`
+for several matches). States are exactly `done` and `active`. `--note` is optional
+for done, 1–2000 UTF-8 bytes; tab and newline are allowed, other C0 controls refused
+(`InvalidInput reason: "note"`). Active takes no note. `--agent` has the same
+flag/environment/marker precedence as `new`; only setter kind is stored in P1.
+The CLI requires the `session.mark` feature before sending `mark`; older daemons
+return `Unsupported reason: "daemon_too_old"`, without attempting the write.
+No TTY or confirmation is needed. The usual envelope carries `{session, mark}`.
+
+Full status, summaries, `ls`, and `sync --check` carry the optional mark;
+`ls --table` adds MARK (`active` for an absent mark). Status reports `unpublished`
+from the reconciled live overlay. Edits checkpointed and then reverted remain
+restorable but do not count as unpublished, nor does an old checkpoint after its
+content has landed on main. A cold/reset tracker stays conservative until scanned.

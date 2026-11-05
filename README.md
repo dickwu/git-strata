@@ -284,7 +284,27 @@ Every call prints exactly one compact JSON line on stdout:
 6. **`publish --from SESSION:PATH ...`** commits onto each repo's publish
    branch (after taking a fresh `BeforePublish` checkpoint of each batch).
 7. **`push REPO`** pushes the publish chain, only when the human asked.
-8. **`rm --session S`** removes the session once its work is published.
+8. **`mark --session S done --note "what landed and what is left"`** marks the
+   work finished and leaves files and checkpoints for the human to review.
+   Resume with `mark --session S active`, which clears the mark and note.
+
+### Completion marks
+
+`mark` requires a daemon advertising `session.mark` and a session id or unambiguous
+ticket. It is a metadata write, with no TTY or confirmation. Done accepts a note
+of 1–2000 UTF-8 bytes (tab/newline allowed, other C0 controls refused); active
+takes no note. Only Active/Unknown lifecycle sessions may be marked. Agent
+detection follows `new`; the stored setter kind is informational. The usual JSON
+envelope contains `{session, mark}`; status, brief summaries, `ls` and
+`sync --check` expose the mark too, and `ls --table` has a MARK column.
+The app shows a neutral Done badge, a State filter with counts, and the note as
+plain text in the ticket tooltip and text search. An absent mark means active.
+
+Agents finish with `mark done` and leave removal to the human. Existing `rm`
+automation remains supported outside the default loop; discard still requires
+the human's TTY and macOS confirmation. Marking adds no archive/export operation.
+Reverted checkpointed edits remain restorable but no longer count as unpublished;
+that flag follows the current reconciled overlay, with cold trackers conservative.
 
 **After a publish, sessions follow automatically, but only when it is safe.**
 Every publish, push replay, and a daemon catch-up pass (at start and every
@@ -461,10 +481,10 @@ git-strata add --session "$S" --repo front   # only if front is needed later
 cd "$W"                                      # edit files here
 git-strata checkpoint -m "parse config before connect"
 git-strata diff                              # vs the base
-cd ~                                        # publish and remove outside the workspace
+cd ~                                        # publish from outside the workspace
 git-strata publish --from "${S}:src/a.ts" --from "${S}:src/lib"
 #  -> data.commits.<repo> = commit oid; data.pushes = pushes done by publish
-git-strata rm --session "$S"
+git-strata mark --session "$S" done --note "what landed and what is left"
 ```
 
 `diff --session S` outside a workspace and without `--repo` compares the one
@@ -777,7 +797,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Conflict` (`assigned`) | another session owns the path; do not retry |
 | `NoMatch` | a `--from` path is not checkpointed; checkpoint, rerun |
 | `NoCommit` | nothing new; not a failure |
-| `Dirty` | `rm` on unpublished work (`detail.repos`, `detail.untracked_repos`, `detail.unresolved`); publish it or ask the human for `rm --discard` |
+| `Dirty` | `rm` on unpublished work (`detail.repos`, `detail.untracked_repos`, `detail.unresolved`); mark done and tell the human what remains; agents never run `rm --discard` or seek a bypass |
 | `OpenFiles` (`caller_cwd`) | run `detail.fix` from outside, preserving its repo/resolution flags; then cd back |
 | `OpenFiles` (`cwd_holders`) | use `--allow-cwd` for your own PID chain; other holders must cd out or be explicitly accepted with `--allow-cwd-holders`; re-enter the workspace after moving |
 | `OpenFiles` (other) | a process holds files (`detail` has pids); stop it only if you started it, retry |
@@ -863,6 +883,7 @@ Flags, defaults and `data` shapes:
 | `push REPO` | only when gated |
 | `sync [--session S] [--repo R]... [--check [--hook]] [--no-fetch] [--resolved PATH \| --keep PATH]... [--target HEAD --generation N] [--accept-diverged] [--allow-cwd] [--allow-cwd-holders] [--timeout SECS] [--progress]` | no (`--accept-diverged` only on the human's say-so) |
 | `assign --file PATH --session S` | no |
+| `mark --session S done\|active [--note TEXT] [--agent NAME]` | no |
 | `rm --session S [--discard]` | `--discard` only |
 | `gc` | no |
 | `du [--refresh]` | no |

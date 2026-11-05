@@ -601,6 +601,29 @@ ALTER TABLE move_activity ADD COLUMN skip_json TEXT;
 PRAGMA user_version = 6;
 "#,
     },
+    Migration {
+        to: 7,
+        name: "session_marks",
+        sql: r#"
+CREATE TABLE session_marks (
+    session TEXT PRIMARY KEY NOT NULL REFERENCES sessions (id),
+    state TEXT NOT NULL CHECK (state = 'done'),
+    note TEXT CHECK (note IS NULL OR length(CAST(note AS BLOB)) BETWEEN 1 AND 2000),
+    by_kind TEXT NOT NULL CHECK (by_kind IN ('agent', 'cli', 'gui')),
+    at_ns INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER session_marks_insert_guard BEFORE INSERT ON session_marks
+WHEN (SELECT lifecycle FROM sessions WHERE id = NEW.session) NOT IN ('active', 'unknown')
+BEGIN SELECT RAISE(ABORT, 'mark outside active/unknown lifecycle'); END;
+CREATE TRIGGER session_marks_update_guard BEFORE UPDATE ON session_marks
+WHEN NEW.session IS NOT OLD.session OR (SELECT lifecycle FROM sessions WHERE id = NEW.session) NOT IN ('active', 'unknown')
+BEGIN SELECT RAISE(ABORT, 'illegal update: session_marks'); END;
+CREATE TRIGGER session_marks_delete_guard BEFORE DELETE ON session_marks
+WHEN NOT (SELECT active FROM strata_gc_gate) AND (SELECT lifecycle FROM sessions WHERE id = OLD.session) NOT IN ('active', 'unknown')
+BEGIN SELECT RAISE(ABORT, 'delete outside active/unknown lifecycle or gc: session_marks'); END;
+PRAGMA user_version = 7;
+"#,
+    },
 ];
 
 /// The oldest schema version this build opens (and migrates from).
@@ -633,10 +656,10 @@ mod tests {
             assert_eq!(m.to, BASE_VERSION + 1 + i as u32, "{}", m.name);
             assert!(m.sql.trim_end().ends_with(&format!("PRAGMA user_version = {};", m.to)), "{}", m.name);
         }
-        assert_eq!(LATEST, 6);
-        assert_eq!(pending(1).count(), 5);
-        assert_eq!(pending(2).count(), 4);
-        assert_eq!(pending(3).count(), 3);
+        assert_eq!(LATEST, 7);
+        assert_eq!(pending(1).count(), 6);
+        assert_eq!(pending(2).count(), 5);
+        assert_eq!(pending(3).count(), 4);
         assert_eq!(pending(LATEST).count(), 0);
         assert!(ddl(1) == BASE_DDL && ddl(2).len() > BASE_DDL.len() && ddl(3).len() > ddl(2).len());
     }

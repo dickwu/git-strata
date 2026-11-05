@@ -24,6 +24,8 @@ export interface SessionRow {
   id: string;
   ticket: string | null;
   state: string;
+  mark: 'active' | 'done';
+  note: string | null;
   phase: string;
   repos: number;
   /** Used first, then the rest; alphabetical within each. */
@@ -124,6 +126,7 @@ export interface RowFilter {
   repos: string[];
   /** Selected agents: a session must come from one of them (a session has one agent). */
   agents?: string[];
+  marks?: string[];
   text?: string;
 }
 
@@ -135,16 +138,32 @@ export interface RowFilter {
 export function filterRows(rows: SessionRow[], f: RowFilter): SessionRow[] {
   const words = (f.text ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean);
   const agents = f.agents ?? [];
+  const marks = f.marks ?? [];
   return rows.filter((r) => {
     const used = new Set(r.repoList.filter((x) => x.used).map((x) => x.name));
     if (!f.repos.every((x) => used.has(x))) return false;
     if (agents.length > 0 && !(r.agent && agents.includes(r.agent))) return false;
+    if (marks.length > 0 && !marks.includes(r.mark)) return false;
     if (words.length === 0) return true;
-    const hay = [r.ticket ?? '', r.id, r.agent ?? '', ...r.repoList.map((x) => x.name)]
+    const hay = [
+      r.ticket ?? '',
+      r.id,
+      r.agent ?? '',
+      r.note ?? '',
+      ...r.repoList.map((x) => x.name),
+    ]
       .join(' ')
       .toLowerCase();
     return words.every((w) => hay.includes(w));
   });
+}
+
+/** Stable options keep a selected state visible even when its count reaches zero. */
+export function sessionMarks(rows: SessionRow[]) {
+  return [
+    { name: 'active', label: 'Active', sessions: rows.filter((r) => r.mark === 'active').length },
+    { name: 'done', label: 'Done', sessions: rows.filter((r) => r.mark === 'done').length },
+  ];
 }
 
 /** One repo's proposal or workspace that needs attention. */
@@ -419,6 +438,8 @@ function row(s: SessionEntry, daemon?: DaemonStatus): SessionRow {
     id: s.status.manifest.id,
     ticket: s.status.manifest.ticket ?? null,
     state: s.status.state,
+    mark: s.status.mark?.state === 'done' ? 'done' : 'active',
+    note: s.status.mark?.note ?? null,
     phase: s.status.phase,
     repos: Object.keys(s.status.manifest.repos ?? {}).length,
     repoList: repoList(s),

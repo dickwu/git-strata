@@ -65,7 +65,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 未知方法 → RPC `UnknownMethod`。参数对不上 → RPC `Failed`。
 
-方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 26 个以外不加方法（`sync` 是 main-sync 加的；`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
+方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 27 个以外不加方法（`sync` 是 main-sync 加的；`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
 
 | method | 作用 | 是否只读 |
 | --- | --- | --- |
@@ -74,6 +74,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `status` | 读，不排队，不等写锁 | 是 |
 | `sync` | `check:true`（及 `hook`）在任何写操作前分支到只读 lane；否则交给 `sync_move::run`（Agent moves、report-bound 冲突解决） | 否 |
 | `checkpoint` | 记检查点 | 否 |
+| `mark` | 设置或清除工作完成标记，不改生命周期或文件 | 否 |
 | `restore` | 恢复到一个检查点 | 否 |
 | `grep` | `search::grep`；零命中是空列表 | 是 |
 | `files` | `search::files` | 是 |
@@ -109,6 +110,7 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `add` | `{ "session": SessionId, "repos": [RepoName] }` | `{ report: AddReport, anchor_unknown }`（session.md D52） |
 | `status` | `{ "cwd": string\|null, "session": string\|null, "all": bool, "chains"?: bool, "summary"?: bool, "workspaces"?: bool }` | 见 §5.4；`chains` 缺省 false。`summary: true`（status-perf C）：只读 store，回 `{ sessions: [SessionSummary] }`（cli.md §3.2 `status --brief`），按 id 升序，选择优先级同普通 status（`all` > `session` > `cwd` > 全部）；不 stat 工作区、不跑 git、不走旧树，不进池。`workspaces: true` 给每个会话带上 `workspaces`，只在 `summary` 时合法，否则 `InvalidInput`（`workspaces_without_summary`）；`summary` 与 `chains: true` 同给 → `InvalidInput`（`summary_with_chains`）。旧 daemon 不认识这两个字段，以 RPC `Failed`「unknown field」拒绝，cli 读 store 回退 |
 | `checkpoint` | `{ "session", "repo", "reason": CheckpointReason, "paths": [RepoPath] }` | `Checkpointed`；`paths` 可空 |
+| `mark` | `{session: SessionId, state: "done"\|"active", note?: string, agent?: string}` | `{session, mark}`；完成标记见下文 |
 | `restore` | `{ "session", "repo", "checkpoint": CheckpointId, "paths": [RepoPath]\|null }` | `Restored` |
 | `grep` | `{ "pattern", "session": string\|null, "all": bool, "ignore_case": bool }` | `Hit` 的数组；零命中是 `[]` |
 | `files` | `{ "session", "repo", "glob" }` | `RepoPath` 的数组 |
@@ -1254,3 +1256,29 @@ once. A fenced old-tree check requeues the item to enter a fresh catalog later.
 The worker still polls its condition variable every 20 ms when idle. Tightening
 wakes session queues, and each waiter rereads membership under its FIFO mutex.
 Those bounded efficiency follow-ups are deferred; they do not weaken the fence.
+
+### Session completion marks (P1)
+
+`daemon_status.features` includes `session.mark`. `mark` is a non-confirming write
+under the session queue (`with_sessions`), with no repo lock or file operation.
+Its params reject unknown fields. Only lifecycle Active or Unknown may be marked
+or unmarked; other lifecycles return `InvalidInput` with `detail.reason: "lifecycle"`.
+Missing sessions return `NoSuchSession`; queue contention uses the existing `Busy` rules.
+
+`state: "done"` writes `{state: "done", note?, by: {kind: "agent"|"cli"}, at}`;
+`at` is RFC3339. A valid detected/explicit `agent` selects kind `agent`, otherwise
+`cli`; attribution is informational. P1 persists the kind only. Notes must be
+1–2000 UTF-8 bytes. Tab/newline are allowed; every other byte below 0x20 is refused
+with `InvalidInput reason: "note"`. `state: "active"` takes no note and deletes
+the mark and its metadata, returning `mark: {state: "active"}`.
+
+Full `status`, store-only summaries (`ls` / `status --brief`) and `sync{check:true}`
+include optional `mark` for a marked session. An absent mark means active, including
+older stores/readers. No archive, export, events, or checkpoint reason changes are
+part of P1. Optional landed counts are omitted in this marking-only cut.
+
+F1: once the Tracker is reconciled on the current base, `unpublished` means its
+live overlay is nonempty. A historical checkpoint on an old base or containing
+reverted edits does not make the current tree unpublished. Cold/reset trackers
+remain conservatively unpublished until scanned; the Stop hook keeps its existing
+`unwrap_or(true)` rule.

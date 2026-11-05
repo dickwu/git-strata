@@ -27,6 +27,7 @@ mod devports;
 mod errors;
 mod gc;
 mod gens;
+mod marks;
 mod move_activity;
 mod open;
 mod records;

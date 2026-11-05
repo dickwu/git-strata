@@ -61,7 +61,7 @@ All three keys are always present; `data` is never null. Branch on
 | `NoCommit` | Nothing new to commit or push. Not a failure to fix. |
 | `Conflict` `replay_conflict` (from `push`) | Origin moved and `detail.commit` of the unpushed chain does not apply onto `detail.origin`. Nothing was written or pushed. Fix the conflicting change in a session and publish, or hand `git-strata chain --repo R ...` to the human. Do not retry the push unchanged. |
 | `NoMatch` | A `--from` path is not in the session's checkpoint; checkpoint first. |
-| `Dirty` | `rm` without `--discard` on unpublished work (`detail.repos`; edited untracked siblings in `detail.untracked_repos`). Publish it, or ask the human about `rm --discard`. |
+| `Dirty` | `rm` without `--discard` on unpublished work (`detail.repos`; edited untracked siblings in `detail.untracked_repos`). Mark done and tell the human what is unpublished; never run `rm --discard` or seek a bypass. |
 | `InvalidInput` (`url-rewritten`, `url-is-remote-name`, `empty-url`, `no-such-remote`) | git-strata's push refused before sending: origin's push URL is rewritten or ambiguous in the main checkout's git config. Tell the human; do not edit git config. |
 | `OpenFiles` | A process holds files in the directory (`detail` has pids). Stop it (only if you started it) and retry. |
 | `CheckFailed` | The repo's check failed in staging; fix the code, checkpoint, publish again. |

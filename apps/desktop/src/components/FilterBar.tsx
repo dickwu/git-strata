@@ -5,7 +5,7 @@ import { SearchOutlined } from '@ant-design/icons';
 import { copy } from '@/lib/copy';
 import { useNav } from '@/stores/nav';
 
-type Option = { name: string; sessions: number };
+type Option = { name: string; label?: string; sessions: number };
 
 function TagGroup({
   label,
@@ -36,11 +36,11 @@ function TagGroup({
               type="button"
               className="filter-tag"
               aria-pressed={on}
-              aria-label={f.toggle(o.name, o.sessions, on)}
+              aria-label={f.toggle(o.label ?? o.name, o.sessions, on)}
               onClick={() => onToggle(o.name)}
             >
-              <span className="filter-tag-name" title={o.name}>
-                {o.name}
+              <span className="filter-tag-name" title={o.label ?? o.name}>
+                {o.label ?? o.name}
               </span>
               <span className="filter-tag-count" aria-hidden>
                 {o.sessions}
@@ -63,6 +63,8 @@ export function FilterBar({
   agents,
   repoSel,
   agentSel,
+  marks,
+  markSel,
   shown,
   total,
 }: {
@@ -70,12 +72,22 @@ export function FilterBar({
   agents: Option[];
   repoSel: string[];
   agentSel: string[];
+  marks: Option[];
+  markSel: string[];
   shown: number;
   total: number;
 }) {
-  const { textFilter, setTextFilter, toggleRepoFilter, toggleAgentFilter, clearFilters } = useNav();
+  const {
+    textFilter,
+    setTextFilter,
+    toggleRepoFilter,
+    toggleAgentFilter,
+    toggleMarkFilter,
+    clearFilters,
+  } = useNav();
   const f = copy.sessions.filter;
-  const active = repoSel.length > 0 || agentSel.length > 0 || textFilter.trim() !== '';
+  const active =
+    repoSel.length > 0 || agentSel.length > 0 || markSel.length > 0 || textFilter.trim() !== '';
   return (
     <section className="filter-bar" role="search" aria-label={f.label}>
       <div className="filter-row">
@@ -115,6 +127,13 @@ export function FilterBar({
         options={agents}
         selected={agentSel}
         onToggle={toggleAgentFilter}
+      />
+      <TagGroup
+        label={f.state}
+        hint={f.stateHint}
+        options={marks}
+        selected={markSel}
+        onToggle={toggleMarkFilter}
       />
     </section>
   );

@@ -362,14 +362,10 @@ impl<'a> Trackers<'a> {
             return Default::default();
         }
         crate::upstream::Live {
-            unpublished: !t.tracker.last().is_some_and(|o| o.entries.is_empty())
-                || !self
-                    .core
-                    .store
-                    .latest_checkpoint(s, repo)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|cp| cp.base == ws.base && cp.entries.is_empty()),
+            // Historical checkpoints remain restorable, including edits
+            // reverted or already published on a newer base. Only the live
+            // overlay on this reconciled base is unpublished work (F1).
+            unpublished: !t.tracker.last().is_some_and(|o| o.entries.is_empty()),
             inputs: t.inputs.clone(),
         }
     }
@@ -938,6 +934,7 @@ fn refresh_seeds_pass(d: &Daemon<'_>) {
 fn session_of(p: &Params) -> Option<SessionId> {
     match p {
         Params::Checkpoint(p) => Some(p.session.clone()),
+        Params::Mark(p) => Some(p.session.clone()),
         Params::Restore(p) => Some(p.session.clone()),
         Params::Files(p) => Some(p.session.clone()),
         Params::DepsPropose(p) => Some(p.session.clone()),
@@ -1036,7 +1033,12 @@ impl<'d, 'a> Server<'d, 'a> {
                 base_warnings.push(format!("{repo}: base commits not on origin: publish will refuse until they are pushed"));
             }
         }
-        Ok(json!({ "session": id, "upstream": upstream, "base_warnings":base_warnings }))
+        let mut result =
+            json!({ "session": id, "upstream": upstream, "base_warnings":base_warnings });
+        if let Some(mark) = core.store.mark(&id)? {
+            result["mark"] = json_of(&mark);
+        }
+        Ok(result)
     }
 
     /// One request: scope, handler, panic → `Failed` / `Unknown`.
@@ -1121,6 +1123,22 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
                 Ok(v)
             }
+            Params::Mark(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
+                let by = match &p.agent {
+                    Some(agent) => {
+                        strata_types::AgentName::try_from(agent.clone()).map_err(|e| {
+                            StrataError::new(Code::InvalidInput, e.message)
+                                .with_detail(json!({ "reason": "agent" }))
+                        })?;
+                        strata_types::MarkByKind::Agent
+                    }
+                    None => strata_types::MarkByKind::Cli,
+                };
+                strata_types::validate_mark_note(p.note.as_deref())?;
+                writing();
+                let mark = core.store.set_mark(&p.session, p.state, p.note.as_deref(), by, SystemTime::now())?;
+                Ok(json!({ "session": p.session, "mark": mark.map(|m| json_of(&m)).unwrap_or_else(|| json!({"state":"active"})) }))
+            }),
             Params::Checkpoint(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
                 let ws = workspace(core, &p.session, &p.repo)?;
                 let base = base_of(core, &ws.base)?;

@@ -149,6 +149,13 @@ export interface SessionEntry {
   in_flight: unknown;
   queued: number;
   status: {
+    /** Absent on active sessions and daemons predating session.mark. */
+    mark?: {
+      state: 'active' | 'done';
+      note?: string;
+      by: { kind: 'agent' | 'cli' | 'gui' };
+      at: string;
+    };
     created: string;
     manifest: {
       id: string;

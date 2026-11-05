@@ -98,9 +98,29 @@ fn method_table_has_the_documented_names() {
         [
             "new", "add", "status",
             "sync",
-            "checkpoint", "restore", "grep", "files", "diff", "deps_propose", "deps_approve",
-            "deps_list", "publish", "publish_plan", "push", "assign", "rm", "gc", "resolve_move", "chain_resolve", "config_relax", "config_reload",
-            "daemon_status", "du", "ports_ensure", "ports_reassign"
+            "checkpoint",
+            "mark",
+            "restore",
+            "grep",
+            "files",
+            "diff",
+            "deps_propose",
+            "deps_approve",
+            "deps_list",
+            "publish",
+            "publish_plan",
+            "push",
+            "assign",
+            "rm",
+            "gc",
+            "resolve_move",
+            "chain_resolve",
+            "config_relax",
+            "config_reload",
+            "daemon_status",
+            "du",
+            "ports_ensure",
+            "ports_reassign"
         ]
     );
     let ro: Vec<&str> = Method::ALL.iter().filter(|m| m.is_read_only()).map(|m| m.name()).collect();
@@ -172,6 +192,10 @@ fn every_method_parses_its_documented_params() {
     let cases = [
         ("new", json!({ "ticket": null, "repos": ["tool"] })),
         ("add", json!({ "session": sid, "repos": ["front"] })),
+        (
+            "mark",
+            json!({ "session": sid, "state": "done", "note": "ready" }),
+        ),
         (
             "status",
             json!({ "cwd": "/x", "session": null, "all": false }),

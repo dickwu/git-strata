@@ -85,7 +85,7 @@ pub enum Cmd {
         #[command(flatten)]
         wait: WaitArgs,
     },
-    /// List live sessions from the store (id, ticket, state, repos, created)
+    /// List live sessions from the store (id, ticket, state, mark, repos, created)
     #[command(after_long_help = crate::help::LS_AFTER)]
     Ls {
         /// A table for people instead of the envelope (errors stay envelopes)
@@ -187,7 +187,22 @@ pub enum Cmd {
         #[arg(long)]
         session: String,
     },
-    /// Remove a session
+    /// Mark work done or active; leaves the workspace and checkpoints intact
+    #[command(after_long_help = crate::help::MARK_AFTER)]
+    Mark {
+        /// Session id or ticket
+        #[arg(long)]
+        session: String,
+        #[arg(value_parser = ["done", "active"])]
+        state: String,
+        /// Completion note (1–2000 UTF-8 bytes; tabs and newlines allowed)
+        #[arg(long)]
+        note: Option<String>,
+        /// Setter agent (default: STRATA_AGENT, else detected like `new`)
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
+    },
+    /// Remove a session (agents finish with `mark done`)
     #[command(after_long_help = crate::help::RM_AFTER)]
     Rm {
         /// Session id or ticket

@@ -1,8 +1,8 @@
 ---
 name: git-strata
-description: Use when working in a repo managed by git-strata (macOS), when the cwd is inside a git-strata session workspace (`<root>/sessions/<id>/<repo>`, default root ~/.strata), or when the user asks to start, checkpoint, diff, restore, sync with main, publish, push or remove a git-strata session, or to run a dev server on per-session ports. Gives each agent session its own isolated APFS-cloned workspace over a shared base snapshot. Covers the CLI loop (new, checkpoint, sync --check, publish, rm), the JSON envelope and error codes, main-sync conflict resolution, and the commands an agent must hand to a human. For any agent that runs shell commands (Claude Code, Codex, Cursor and others).
+description: Use when working in a repo managed by git-strata (macOS), when the cwd is inside a git-strata session workspace (`<root>/sessions/<id>/<repo>`, default root ~/.strata), or when the user asks to start, checkpoint, diff, restore, sync with main, publish, push or remove a git-strata session, or to run a dev server on per-session ports. Gives each agent session its own isolated APFS-cloned workspace over a shared base snapshot. Covers the CLI loop (new, checkpoint, sync --check, publish, mark done), the JSON envelope and error codes, main-sync conflict resolution, and the commands an agent must hand to a human. For any agent that runs shell commands (Claude Code, Codex, Cursor and others).
 license: MIT OR Apache-2.0
-compatibility: macOS 13+ on APFS. Needs matching git-strata CLI and daemon builds; R2 features require R2 or later. The 0.1.2 CLI cannot read a v6 store. Only a human starts the daemon.
+compatibility: macOS 13+ on APFS. Needs matching git-strata CLI and daemon builds; R2 features require R2 or later. The 0.1.2 CLI cannot read a v6 or v7 store. Only a human starts the daemon.
 ---
 
 # git-strata
@@ -95,10 +95,13 @@ git-strata publish --from "${S}:src/a.ts" --from "${S}:src/b.ts"
 # 7. Push only if the human asked (a gated repo needs the human at a TTY)
 git-strata push api
 
-# 8. Remove the session once its work is published
-git-strata rm --session "$S"
+# 8. When work is published, mark the session done and leave it for human review
+git-strata mark --session "$S" done --note "what landed and what is left"
 ```
 
+- Marking requires the daemon feature `session.mark`; an older daemon returns
+  `Unsupported daemon_too_old`. Done notes are 1–2000 UTF-8 bytes, with tab/newline
+  allowed and other C0 controls refused. Active clears the mark and takes no note.
 - `--session` takes a session id or a ticket (`AmbiguousMatch` when a ticket
   names several; use an id from `detail`). Write `"${S}:path"`, never
   `"$S:path"`: zsh reads `$S:t`, `$S:h` as modifiers.
@@ -168,7 +171,7 @@ Unknown help topics return an `InvalidInput` / `help_topic` envelope.
 | `Conflict sync_conflict` / `HeadMoved` | resolve the report ([sync.md](sync.md)) |
 | `Conflict assigned` | another session owns the path; do not retry |
 | `CheckFailed` | fix the code, checkpoint, publish again |
-| `Dirty` (rm) | publish the work, or ask the human about `rm --discard` |
+| `Dirty` (rm) | mark the session done and tell the human what is unpublished; never run `rm --discard` or seek a bypass |
 | `PortInUse` | [dev-ports.md](dev-ports.md) |
 | `Unknown` | do not retry, `rm` or `gc`; run `status` and tell the human |
 | `Corrupt` | stop and tell the human |
@@ -177,7 +180,10 @@ Everything else: [errors.md](errors.md).
 
 ## Hard rules
 
-1. Never bypass a human gate. There is no `--yes`, `--force` or env var, and
+1. Finish with `mark done`, not `rm`; leave removal to the human. Marking
+   preserves files and checkpoints. To resume, run `git-strata mark --session S active`.
+   `rm` without discard remains available for existing automation, outside this default loop.
+   Never bypass a human gate. There is no `--yes`, `--force` or env var, and
    faking a TTY (`script`, `expect`, a pty) is bypassing. These are the
    human's; print the exact command and stop:
    - `git-strata rm --session S --discard`

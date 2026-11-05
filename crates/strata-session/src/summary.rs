@@ -31,6 +31,8 @@ pub enum SummarySelect<'a> {
 /// One session in `ls` / `status --brief`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<strata_types::SessionMark>,
     /// Local fallback is explicitly unchecked; the daemon fills warmed counts.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub behind: BTreeMap<RepoName, BehindStatus>,
@@ -136,6 +138,7 @@ pub fn summary(
         };
         let rm = rm_notes(store, root, &rec)?;
         out.push(SessionSummary {
+            mark: store.mark(&rec.manifest.id)?,
             behind: rec
                 .manifest
                 .repos
