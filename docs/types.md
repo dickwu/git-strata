@@ -30,7 +30,7 @@
 | `CheckpointReason` | 枚举 | 记这个 checkpoint 的原因 | §4 |
 | `Batch` | 结构 | 从一个会话的一个 repo 挑出的路径 | §4 |
 | `ReleaseGroup` | 结构 | 一次发布的全部批次 | §4 |
-| `PublishTarget` | 结构 | 目标分支、是否推送、是否要确认 | §4 |
+| `PublishTarget` | 结构 | 目标分支、是否推送、是否要确认、是否自动关闭会话 | §4 |
 | `PushOutcome` | 枚举 | 一次推送的结果：推上了、被拒绝、不确定 | §4 |
 | `SessionManifest` | 结构 | 会话清单 | §4 |
 | `WorkspaceState` | 结构 | 会话里一个 repo 的工作区 | §4 |
@@ -296,7 +296,7 @@ pub struct ReleaseGroup {
     pub batches: Vec<Batch>,
 }
 
-/// 发布目标（design §4、§6.7）：每个 repo 一个，即 config.md 里的 `publish = { branch, push, confirm }`。
+/// 发布目标（design §4、§6.7）：每个 repo 一个，即 config.md 里的 `publish = { branch, push, confirm, auto_close }`。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishTarget {
@@ -307,6 +307,9 @@ pub struct PublishTarget {
     /// 推送前是否要人类确认（design §6.9）。`deploy_on_push = true` 的仓库不论此值都要确认。[实现时补的决定]（2026-10-26）作废：只看此值，`deploy_on_push` 只是信息（config.md V5 撤销）。
     /// 不变量 7 在这里的范围是这些仓库，加上钉住规则：把 `deploy_on_push` / `confirm` / `push` 调松要先过 `ConfigRelax`，调紧立即生效。
     pub confirm: bool,
+    /// 该仓库的 `publish.auto_close`（config.md、p1-autoclose §5）：发布/推送完全落地后是否自动把会话工作区移入垃圾区。可省略；缺省（`None`）继承全局 `[publish].auto_close`，全局缺省 `true`。序列化时 `None` 不输出。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_close: Option<bool>,
 }
 
 /// 一次 `git push` 的结果：gitio 的 `push` 产生，publish 消费。

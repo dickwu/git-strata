@@ -299,6 +299,7 @@ exit $rc
                 branch: "main".into(),
                 push: true,
                 confirm: false,
+                auto_close: None,
             },
             deploy_on_push: false,
             pin_unpushed: true,
@@ -540,7 +541,7 @@ impl Fx {
             repos.insert(repo_name(n), sb.config(&main));
         }
         let root = sb.root.join("strata");
-        let config = Config { paths: Paths { root }, repos, status: Default::default(), dev_ports: Default::default() };
+        let config = Config { paths: Paths { root }, repos, status: Default::default(), dev_ports: Default::default(), publish: Default::default() };
         Fx::from_parts(sb, config)
     }
 

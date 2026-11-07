@@ -197,6 +197,12 @@ fn run_cmd(cmd: Cmd, reload_code: &mut Option<i32>) -> Result<Envelope> {
         Cmd::Publish { from, assign, message, message_for } => c::publish(&ctx, &from, assign.as_deref(), &message, &message_for),
         Cmd::Assign { file, session } => c::assign(&ctx, &file, &session),
         Cmd::Rm { session, discard } => c::rm(&ctx, &session, discard),
+        Cmd::Mark {
+            session,
+            state,
+            note,
+            agent,
+        } => cmds::mark(&ctx, &session, &state, note.as_deref(), agent.as_deref()),
         Cmd::Resolve {
             session,
             repo,

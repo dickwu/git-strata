@@ -56,7 +56,7 @@ fn v5_migrates_with_backup_and_exact_schema_and_v5_readers_work() {
     assert!(ro.move_activities(&sid()).unwrap().is_empty());
     drop(ro);
     env.open().close().unwrap();
-    assert_eq!(version(&env), 6);
+    assert_eq!(version(&env), 7);
     let fresh = support::env();
     fresh.open().close().unwrap();
     assert_eq!(schema(&env), schema(&fresh));

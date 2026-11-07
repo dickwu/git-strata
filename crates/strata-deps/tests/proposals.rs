@@ -997,7 +997,9 @@ fn open_proposals_lists_open_and_live_only() {
     let fx = setup();
     let (s1, s2) = (sid("aaaaaaab"), sid("aaaaaaac"));
     make_session(&fx, &s1, false);
-    make_session(&fx, &s2, true);
+    // s2 drafts while live and is removed afterwards: auto-close §3.2 refuses a
+    // draft whose origin is already removed.
+    make_session(&fx, &s2, false);
     let t1 = tip(&fx);
     let ctx = fx.ctx();
     let st = fx.store();
@@ -1018,9 +1020,18 @@ fn open_proposals_lists_open_and_live_only() {
     .unwrap();
     let d2 = propose(
         &ctx,
-        args(ProposalOrigin::Session { session: s2 }, 'a', 'f', None),
+        args(ProposalOrigin::Session { session: s2.clone() }, 'a', 'f', None),
     )
     .unwrap();
+    let at = UNIX_EPOCH + Duration::from_secs(10);
+    assert!(st.set_lifecycle(&s2, Lifecycle::Active, Lifecycle::Removing, None, at).unwrap());
+    assert!(st.set_lifecycle(&s2, Lifecycle::Removing, Lifecycle::Removed, None, at).unwrap());
+    assert_eq!(
+        propose(&ctx, args(ProposalOrigin::Session { session: s2 }, 'a', '0', None))
+            .unwrap_err()
+            .code,
+        Code::NoSuchSession
+    );
 
     let front = repo_name("front");
     let new = NewProposal {

@@ -16,15 +16,15 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use strata_types::{
-    CheckpointId, CheckpointReason, Code, CommitOid, ProposalId, ReleaseGroup, RepoName, RepoPath,
-    SessionId, StrataError,
+    CheckpointId, CheckpointReason, Code, CommitOid, MarkState, ProposalId, ReleaseGroup, RepoName,
+    RepoPath, SessionId, StrataError,
 };
 
 use crate::{ChainChoice, MAX_FRAME, RpcReject};
 
 macro_rules! methods {
     ($($variant:ident = $name:literal, ro = $ro:literal;)*) => {
-        /// The 22 methods (daemon.md §4).
+        /// The methods in daemon.md §4.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub enum Method { $($variant),* }
 
@@ -54,6 +54,7 @@ methods! {
     Status = "status", ro = true;
     Sync = "sync", ro = false;
     Checkpoint = "checkpoint", ro = false;
+    Mark = "mark", ro = false;
     Restore = "restore", ro = false;
     Grep = "grep", ro = true;
     Files = "files", ro = true;
@@ -179,6 +180,16 @@ pub struct CheckpointParams {
     pub repo: RepoName,
     pub reason: CheckpointReason,
     pub paths: Vec<RepoPath>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarkParams {
+    pub session: SessionId,
+    pub state: MarkState,
+    pub note: Option<String>,
+    /// Detected like `new`; used only to attribute the setter kind.
+    pub agent: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -411,6 +422,7 @@ pub enum Params {
     Status(StatusParams),
     Sync(SyncParams),
     Checkpoint(CheckpointParams),
+    Mark(MarkParams),
     Restore(RestoreParams),
     Grep(GrepParams),
     Files(FilesParams),
@@ -451,6 +463,7 @@ impl Params {
             Method::Status => typed(v, Params::Status),
             Method::Sync => typed(v, Params::Sync),
             Method::Checkpoint => typed(v, Params::Checkpoint),
+            Method::Mark => typed(v, Params::Mark),
             Method::Restore => typed(v, Params::Restore),
             Method::Grep => typed(v, Params::Grep),
             Method::Files => typed(v, Params::Files),

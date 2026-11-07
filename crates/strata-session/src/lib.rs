@@ -30,6 +30,7 @@ mod new;
 mod no_wait;
 mod old_tree;
 mod orphans;
+mod outstanding;
 mod recover;
 mod remove;
 mod resolve;
@@ -55,6 +56,7 @@ pub use old_tree::{
     OLD_TREE_TTL, OldTreeKey, OldTreeMode, OldTreeVerdict, Outcome as OldTreeOutcome,
 };
 pub use orphans::{OrphanRetired, Sweep};
+pub use outstanding::{Ancestry, Outstanding, PendingFold, outstanding};
 pub use recover::{IntentRef, Leftover, RecoverReport};
 pub use remove::{Regenerable, RemoveReport};
 pub use resolve::{resolve_in, select_in};

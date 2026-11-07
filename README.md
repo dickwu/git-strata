@@ -124,6 +124,17 @@ Without a running daemon only these work, read-only, straight from the store:
 repeating a `checkpoint --tool-call ID` whose checkpoint already exists.
 Everything else returns `Busy` with `detail.reason = "daemon_down"`.
 
+**Downgrade warning:** a store written by this build (schema v7 whose
+`session_marks.by_kind` CHECK includes `'daemon'`) is not openable by an older
+binary: at open the schema is compared row for row and a mismatch returns
+`Corrupt` with `reason: "schema"` before any mark is read, so clearing daemon
+marks cannot restore compatibility. To roll back, stop the daemon, preserve the
+current database and sidecars, restore a compatible
+`store/backups/store-v<from>-<ns>.db` as described in
+[store recovery](docs/modules/store.md), install matching older CLI and daemon
+binaries together with a config they accept, then start. Work recorded after the
+backup is absent from the restored store.
+
 ### Dev install
 
 `scripts/dev-install.sh` builds both binaries in release mode, stops the
@@ -214,13 +225,17 @@ holds the daemon's config, socket and session data. Do not delete it.
 | Pinned safety flags | `~/Library/Application Support/git-strata/pins.json` |
 | Daemon socket | `~/Library/Application Support/git-strata/daemon.sock` |
 | Daemon stderr log | `~/Library/Application Support/git-strata/daemon.err.log` |
+| Auto-close audit | `~/Library/Application Support/git-strata/sessions-audit.jsonl` |
 | Data root | `[paths] root` in `config.toml`; default `~/.strata` (must share an APFS volume with the repos) |
 | Session workspaces | `<root>/sessions/<session-id>/<repo>/` |
 
-Only `$HOME` moves the first four; there is no flag or env var. The data root
+Only `$HOME` moves the first five; there is no flag or env var. The data root
 holds `store/`, `bases/`, `deps/` and `sessions/`, and must be on the same
 APFS volume as the repos. Agents must not edit anything under the root except
 their own session workspace. Config format: [docs/config.md](docs/config.md).
+`sessions-audit.jsonl` gets one line per session the daemon judged for
+auto-close, closed or not (mode 0600, rotated at 1 MiB to `.1`); the pin
+history stays in its own `audit.jsonl`.
 
 ## Output: the JSON envelope
 
@@ -284,7 +299,84 @@ Every call prints exactly one compact JSON line on stdout:
 6. **`publish --from SESSION:PATH ...`** commits onto each repo's publish
    branch (after taking a fresh `BeforePublish` checkpoint of each batch).
 7. **`push REPO`** pushes the publish chain, only when the human asked.
-8. **`rm --session S`** removes the session once its work is published.
+8. **Read the publish reply.** Read `data.auto_close.sessions[<your session id>]`
+   (`data.closed` is the whole group's and never counts other sessions the push
+   re-judged). If its `closed` is `true` the session is gone: there is nothing
+   to mark or remove; stay out of its path. Otherwise `reasons[0]` says why it
+   stayed open:
+   - `disabled`: the daemon neither closes nor marks for this repo set; mark
+     done and remove by hand as before (`mark done`, then
+     `git-strata rm --session S` when finished).
+   - `unpublished`: publish the listed paths (or `mark active` and keep
+     working). If `detail.regenerable` lists some of them, those are build
+     output by the repo's rule and your own `git-strata rm --session S` lets
+     them go. If `detail.landing.<repo>.historical` lists some, they hold an
+     older publish's content, not main's: publish them if the revert is meant.
+     If `detail.landing.<repo>.why_none` is `no_built_base`, the paths are
+     published but the judge cannot prove it: run `git-strata rm --session S`
+     yourself (it refuses `Dirty`, so it is safe). If it is `no_landed_publish`
+     with `published: true`, they landed as a replayed copy: run
+     `git-strata sync --session S`, then `git-strata rm --session S`.
+   - `open_files`: close the holders, then `git-strata rm --session S` yourself.
+   - `changed_during_remove`: wait until your tools are idle, then
+     `git-strata rm --session S`.
+   - `not_pushed`, `push_refused`: `detail.repo` may be another repo than the
+     one you just published, and an earlier publish of yours may be what is
+     waiting (`detail.outstanding` lists them all). If `detail.on_chain` is
+     `true`, hand the push to the human; the next push of that repo closes the
+     session, and `git-strata rm --session S` is the fallback if it stays
+     listed. If it is `false`, no push lands that commit: tell the human if it
+     was meant to land and run `git-strata rm --session S` when done.
+   - `not_merged`: the repo publishes to another branch than its default, in
+     this call or an earlier one: the daemon never closes such a session; run
+     `git-strata rm --session S` yourself when done and tell the human the
+     merge is theirs.
+   - `kept_trees` with every `changed` false: run `git-strata rm --session S`
+     when you are done.
+   - `embedded_repo`: `detail.embedded_repos` names a nested git repository no
+     publish covers: move out what you need, then `git-strata rm --session S`,
+     which takes it to the trash.
+   - `assigned`: `detail.assigned` lists every path, by repo: publish them, or
+     tell the human to assign them to another session (for a repo that is not
+     one of this session's, only the human can).
+   - `deps_pending` with `detail.own` true and `detail.state`
+     `awaiting_publish`: your own deps draft never landed: publish its install
+     inputs if you meant the change (a repo with `detail.tracked` false cannot
+     be published); no command cancels a draft, so if you dropped the change,
+     run `git-strata rm --session S` when you are done.
+   - `conflicts` with `detail.report` true: your `sync` left a conflict:
+     `cd ~ && git-strata sync --session S --repo <detail.repo>` reports it
+     again; resolve it as that says, or run `git-strata rm --session S` if you
+     no longer want the sync.
+   - `busy`: another operation had the session, nothing was judged or marked;
+     run `git-strata rm --session S` when it is done, or publish again.
+   - `extended`: a repo was added to this session while this call ran: nothing
+     was judged or marked and the session is yours, so publish the new work
+     when it is ready.
+   - anything else: tell the human.
+
+   If `mark.written` is `false` and `mark.skipped` is not `unchanged`, these
+   reasons are in this reply only: act on them now. Never `rm --discard`. A
+   successful publish reply without `data.auto_close` comes from a daemon that
+   lacks the `publish.auto_close` feature: mark the session done and leave
+   removal to the human, as before. Resume kept work with
+   `mark --session S active`.
+
+### Completion marks
+
+`mark` requires a daemon advertising `session.mark` and a session id or unambiguous
+ticket. It is a metadata write, with no TTY or confirmation. Done accepts a note
+of 1–2000 UTF-8 bytes (tab/newline allowed, other C0 controls refused); active
+takes no note. Only Active/Unknown lifecycle sessions may be marked. Agent
+detection follows `new`; the stored setter kind is informational. The usual JSON
+envelope contains `{session, mark}`; status, brief summaries, `ls` and
+`sync --check` expose the mark too, and `ls --table` has a MARK column.
+The app shows a neutral Done badge, a State filter with counts, and the note as
+plain text in the ticket tooltip and text search. An absent mark means active.
+
+A full publish closes its session: the workspace goes to the trash and the checkpoints stay. When it stays open, `data.auto_close` (`reasons[0]`) says why and what is left, including when `rm` is yours to run. A done mark is written only when the judge actually marked the session: `disabled` neither closes nor marks, `busy` and `extended` judge and mark nothing, hook or judge errors leave no mark, and a mark set by another writer is kept. Discard still requires the human's TTY and macOS confirmation. Marking adds no archive/export operation.
+Reverted checkpointed edits remain restorable but no longer count as unpublished;
+that flag follows the current reconciled overlay, with cold trackers conservative.
 
 **After a publish, sessions follow automatically, but only when it is safe.**
 Every publish, push replay, and a daemon catch-up pass (at start and every
@@ -461,10 +553,12 @@ git-strata add --session "$S" --repo front   # only if front is needed later
 cd "$W"                                      # edit files here
 git-strata checkpoint -m "parse config before connect"
 git-strata diff                              # vs the base
-cd ~                                        # publish and remove outside the workspace
+cd ~                                        # publish from outside the workspace
 git-strata publish --from "${S}:src/a.ts" --from "${S}:src/lib"
 #  -> data.commits.<repo> = commit oid; data.pushes = pushes done by publish
-git-strata rm --session "$S"
+#  -> a fully landed session closes itself (data.auto_close.sessions["$S"].closed);
+#     otherwise follow step 8 above for .reasons[0]. Do not mark done after a
+#     close (NoSuchSession); never discard.
 ```
 
 `diff --session S` outside a workspace and without `--repo` compares the one
@@ -558,7 +652,9 @@ No human is needed unless `detail.reason` is `assigned`.
 2. Fix the listed paths in that repo's workspace.
 3. Rerun the **same** `publish --from ...`. Paths whose content already
    landed are reported in `data.already_published` (`{repo, publish, commit, push}`)
-   and not committed again; only the rest is published.
+   and not committed again; only the rest is published. A successful re-run
+   reply carries `data.closed` and `data.auto_close` like a first run's (see
+   step 8 above).
 4. Repeat while another repo conflicts.
 
 `Conflict` with reason `assigned`: the path belongs to another session
@@ -777,7 +873,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Conflict` (`assigned`) | another session owns the path; do not retry |
 | `NoMatch` | a `--from` path is not checkpointed; checkpoint, rerun |
 | `NoCommit` | nothing new; not a failure |
-| `Dirty` | `rm` on unpublished work (`detail.repos`, `detail.untracked_repos`, `detail.unresolved`); publish it or ask the human for `rm --discard` |
+| `Dirty` | `rm` on unpublished work (`detail.repos`, `detail.untracked_repos`, `detail.unresolved`); mark done and tell the human what remains; agents never run `rm --discard` or seek a bypass |
 | `OpenFiles` (`caller_cwd`) | run `detail.fix` from outside, preserving its repo/resolution flags; then cd back |
 | `OpenFiles` (`cwd_holders`) | use `--allow-cwd` for your own PID chain; other holders must cd out or be explicitly accepted with `--allow-cwd-holders`; re-enter the workspace after moving |
 | `OpenFiles` (other) | a process holds files (`detail` has pids); stop it only if you started it, retry |
@@ -863,6 +959,7 @@ Flags, defaults and `data` shapes:
 | `push REPO` | only when gated |
 | `sync [--session S] [--repo R]... [--check [--hook]] [--no-fetch] [--resolved PATH \| --keep PATH]... [--target HEAD --generation N] [--accept-diverged] [--allow-cwd] [--allow-cwd-holders] [--timeout SECS] [--progress]` | no (`--accept-diverged` only on the human's say-so) |
 | `assign --file PATH --session S` | no |
+| `mark --session S done\|active [--note TEXT] [--agent NAME]` | no |
 | `rm --session S [--discard]` | `--discard` only |
 | `gc` | no |
 | `du [--refresh]` | no |

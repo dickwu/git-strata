@@ -28,6 +28,7 @@ macro_rules! gate_text {
     deps approve           always (TTY + prompt)
     config relax           always (TTY + prompt)
     resolve, chain         always need a TTY (chain --restore may also prompt)
+  mark done / mark active ask nothing; a done session can be auto-closed later (git-strata mark --help).
   push REPO of a repo that needs no confirmation runs headless and, when origin
   moved under the unpushed chain (diverged), replays it itself (see push --help).
   publish into a repo with publish.push = false never asks, even when the repo
@@ -127,7 +128,7 @@ const ERRORS: &str = "ERRORS (code -> what an agent does)
   NoSuchRepo not_in_session  run detail.fix (git-strata add --session S --repo R)
   InvalidInput siblings_missing  publish checks need sibling repos: run detail.fix
   AmbiguousMatch     use a session id from detail
-  Dirty              rm on work that is not published: publish it, or ask the human (rm --discard)
+  Dirty              mark done and report unpublished work; never run rm --discard
   CheckFailed        fix the code, checkpoint, publish again
   OpenFiles caller_cwd  run detail.fix outside the workspace; it preserves request flags
   OpenFiles cwd_holders  cd holders out, or explicitly use --allow-cwd-holders
@@ -161,7 +162,7 @@ const HEADLESS: &str = "HEADLESS FLOW (no human needed)
   git-strata diff
   cd ~
   git-strata publish --from <id>:src/a.ts --from <id>:src/b.ts
-  git-strata rm --session <id>
+  # a full publish closes the session; otherwise read data.auto_close
 ";
 const SYNC_ACK: &str = "SYNC ACKNOWLEDGEMENT
   Legacy-only: every named path is in ws.conflicts, none in the saved report.
@@ -197,13 +198,13 @@ GATES
 
 HEADLESS FLOW
   new --repo R; edit; checkpoint -m TEXT; diff; publish --from S:PATH.
-  rm --session S after publishing. Full example: git-strata help headless
+  A full publish closes the session; otherwise read data.auto_close, which says what is left. Full example: git-strata help headless
   Sync from outside: cd ~ && git-strata sync --session S; then cd back.
   Do not use git push. Full rules: git-strata help push-guards
 
 ERRORS
   Busy: back off. NotTty/NotConfirmed: give the command to the human.
-  Conflict: resolve reported paths. Dirty: publish before rm.
+  Conflict: resolve reported paths. Dirty: mark done and report unpublished work.
   OpenFiles caller_cwd/cwd_holders: cd out or follow detail.fix.
   NoSuchSession stale_cwd: cd back to the live workspace path.
   client_timeout: Busy means read/unsent; Unknown means sent, inspect status.
@@ -324,7 +325,7 @@ stopped midway; that is the human's `git-strata resolve`. Works without the daem
 
 pub const LS_AFTER: &str = "EXAMPLES
   git-strata ls                      # {sessions:[{id,ticket,state,created,repos,phase?}]}
-  git-strata ls --table              # ID TICKET STATE REPOS CREATED
+  git-strata ls --table              # ID TICKET STATE MARK REPOS CREATED
 
 From the store alone, sorted by id; never stats a workspace or runs git.
 Without the daemon (or with one that predates it) the store is read
@@ -449,7 +450,7 @@ RELEASE BUILDS
 
 DATA
   {commits:{<repo>:oid}, message_source:{<repo>:flag|checkpoints|legacy}, checks_ran, waiting:[], pushes:[{repo, outcome}],
-   already_published:[{repo, publish, commit, push}]}
+   already_published:[{repo, publish, commit, push}], closed, auto_close:{closed, reasons[], sessions}}
 
 CONFLICT LOOP (no human needed unless reason is assigned)
   1. ok false, error.code Conflict: error.detail.repo conflicted (nothing
@@ -519,10 +520,90 @@ Decides which session resolves a conflicted path. Other sessions then get
 Conflict with reason assigned for that path and must not retry.
 ";
 
+pub const MARK_AFTER: &str = "EXAMPLES
+  git-strata mark --session s-k3q7xm2a done --note \"what landed and what is left\"
+  git-strata mark --session s-k3q7xm2a active
+
+A full publish closes its session by itself. When it stays open, the reply says
+why. A done session, marked by anyone, is closed by the daemon on a later publish
+or push of its repos once everything has landed, unless one of its repos has
+publish.auto_close = false: its workspace goes to the trash (recoverable until
+trash gc) and its checkpoints stay. To keep a session, mark it active: that clears
+the mark, note and attribution. The mark command itself changes no files,
+checkpoints or lifecycle. Only Active/Unknown sessions may be marked. No TTY or confirmation.
+Requires the daemon feature session.mark; an older daemon returns Unsupported
+with reason daemon_too_old. Notes are 1–2000 UTF-8 bytes; tab and newline are
+allowed, other characters below 0x20 are refused. Active takes no note.
+--agent uses the same detection as new; P1 stores setter kind only.
+";
+
 pub const RM_AFTER: &str = concat!(
     "EXAMPLES
-  git-strata rm --session s-k3q7xm2a              # after its work is published
+  git-strata mark --session s-k3q7xm2a done      # the daemon's fallback after a publish
+  git-strata rm --session s-k3q7xm2a              # human removal / existing automation
   git-strata rm --session s-k3q7xm2a --discard    # HUMAN ONLY (TTY + prompt)
+
+Agents finish with publish: a fully landed session closes itself. Publish from `cd ~`.
+Read `data.auto_close.sessions[<your session id>]`
+(`data.closed` is the whole group's and never counts other sessions the push
+re-judged). If its `closed` is `true` the session is gone: there is nothing
+to mark or remove; stay out of its path. Otherwise `reasons[0]` says why it
+stayed open:
+- `disabled`: the daemon neither closes nor marks for this repo set; mark
+  done and remove by hand as before (`mark done`, then
+  `git-strata rm --session S` when finished).
+- `unpublished`: publish the listed paths (or `mark active` and keep
+  working). If `detail.regenerable` lists some of them, those are build
+  output by the repo's rule and your own `git-strata rm --session S` lets
+  them go. If `detail.landing.<repo>.historical` lists some, they hold an
+  older publish's content, not main's: publish them if the revert is meant.
+  If `detail.landing.<repo>.why_none` is `no_built_base`, the paths are
+  published but the judge cannot prove it: run `git-strata rm --session S`
+  yourself (it refuses `Dirty`, so it is safe). If it is `no_landed_publish`
+  with `published: true`, they landed as a replayed copy: run
+  `git-strata sync --session S`, then `git-strata rm --session S`.
+- `open_files`: close the holders, then `git-strata rm --session S` yourself.
+- `changed_during_remove`: wait until your tools are idle, then
+  `git-strata rm --session S`.
+- `not_pushed`, `push_refused`: `detail.repo` may be another repo than the
+  one you just published, and an earlier publish of yours may be what is
+  waiting (`detail.outstanding` lists them all). If `detail.on_chain` is
+  `true`, hand the push to the human; the next push of that repo closes the
+  session, and `git-strata rm --session S` is the fallback if it stays
+  listed. If it is `false`, no push lands that commit: tell the human if it
+  was meant to land and run `git-strata rm --session S` when done.
+- `not_merged`: the repo publishes to another branch than its default, in
+  this call or an earlier one: the daemon never closes such a session; run
+  `git-strata rm --session S` yourself when done and tell the human the
+  merge is theirs.
+- `kept_trees` with every `changed` false: run `git-strata rm --session S`
+  when you are done.
+- `embedded_repo`: `detail.embedded_repos` names a nested git repository no
+  publish covers: move out what you need, then `git-strata rm --session S`,
+  which takes it to the trash.
+- `assigned`: `detail.assigned` lists every path, by repo: publish them, or
+  tell the human to assign them to another session (for a repo that is not
+  one of this session's, only the human can).
+- `deps_pending` with `detail.own` true and `detail.state`
+  `awaiting_publish`: your own deps draft never landed: publish its install
+  inputs if you meant the change (a repo with `detail.tracked` false cannot
+  be published); no command cancels a draft, so if you dropped the change,
+  run `git-strata rm --session S` when you are done.
+- `conflicts` with `detail.report` true: your `sync` left a conflict:
+  `cd ~ && git-strata sync --session S --repo <detail.repo>` reports it
+  again; resolve it as that says, or run `git-strata rm --session S` if you
+  no longer want the sync.
+- `busy`: another operation had the session, nothing was judged or marked;
+  run `git-strata rm --session S` when it is done, or publish again.
+- `extended`: a repo was added to this session while this call ran: nothing
+  was judged or marked and the session is yours, so publish the new work
+  when it is ready.
+- anything else: tell the human.
+
+If `mark.written` is `false` and `mark.skipped` is not `unchanged`, these
+reasons are in this reply only: act on them now. Never `rm --discard`.
+Resume work with mark active. A Dirty refusal means mark done and report what
+remains; never run rm --discard or seek a bypass.
 
 Dirty: rm refused and nothing was removed; the session is still Active and
 listed by `git-strata ls` (detail.removed = false, detail.lifecycle). The

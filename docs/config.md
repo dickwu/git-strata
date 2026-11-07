@@ -9,7 +9,7 @@
 ## 1. 概览
 
 - **一份全局配置**：`~/Library/Application Support/git-strata/config.toml`（TOML 1.0，UTF-8）。该目录只放配置和 daemon 的 socket（design §7）。design §7 把这个目录写作改名前的 `strata/`；本文按项目名用 `git-strata/`，design 的这一处待同步。
-- **只有两种表**：一张 `[paths]`，和每个仓库一张 `[repo.<name>]`。
+- **配置表**：一张 `[paths]`、每个仓库一张 `[repo.<name>]`，以及可选的全局 `[publish]`、`[status]`、`[dev_ports]` 等设置。
 - **没有第二个来源**：strata 不读主 checkout 里的任何 strata 配置文件（不变量 2：对主 checkout 只读，且只读 `.git` 与种子文件）；没有环境变量或命令行 flag 能覆盖配置。对需要确认的仓库（`publish.confirm = true`），没有任何 flag、环境变量或配置项能让它的推送绕过人类确认（不变量 3、7）。[实现时补的决定]（2026-10-26）：门只看 `publish.confirm`，`deploy_on_push` 只是信息，见 §2 `deploy_on_push` 条。但 `deploy_on_push`、`publish.confirm`、`publish.push` 本身就是同一个 uid 可写的文件里的设置，把它们调松等于绕过确认，所以 daemon 钉住（pin）它加载过的这三个值：之后的重载若调松其中任何一个——`deploy_on_push` 由 `true` 变 `false`，`publish.confirm` 由 `true` 变 `false`，`publish.push` 由 `false` 变 `true`——要先过一次人类确认（`Action::ConfigRelax { repo: RepoId }`，types.md §4），调紧立即生效 [交给 `daemon.md`]。
 - **表是完整的，没有继承**：每张 `[repo.<name>]` 只在字段级有缺省值（§2.2 的"缺省"列），不存在"继承一份内置的 inter 默认表"。附录 A 是一份完整可用的 `config.toml`（把各小节的代码块按顺序拼起来即可）；它怎么随二进制分发（`include_str!`、安装时写出……）[交给构建者]，但只许维护这一份文本，不得在代码里手抄第二份。
 - **解析与校验在 `strata-types`，无 I/O**：输入是文本，不是路径；读文件是 daemon 的事。配置无效时使用方必须拒绝使用，不得带着部分配置运行。`strata-types` 为 `Config::parse` 依赖 `toml`（types.md §2.2 已列入）；§2.4 的 argv 切分是几十行的纯字符串代码，自己写，不另加依赖。
@@ -39,7 +39,7 @@
 
 ### 2.2 `[repo.<name>]`
 
-`<name>` 就是 `RepoName`（types.md），必须等于 `path` 的最后一级目录名（规则 V1）；含 `.` 的名字要写成带引号的键（`[repo."foo.bar"]`）。TOML 里 `publish` 写成内联表（`publish = { branch = …, push = …, confirm = … }`），不用 `[repo.<name>.publish]` 子表——这是写法约定，serde 不区分两种写法，也不校验。完整示例见附录 A 的任一仓库。
+`<name>` 就是 `RepoName`（types.md），必须等于 `path` 的最后一级目录名（规则 V1）；含 `.` 的名字要写成带引号的键（`[repo."foo.bar"]`）。TOML 里 `publish` 写成内联表（`publish = { branch = …, push = …, confirm = …, auto_close = … }`），不用 `[repo.<name>.publish]` 子表——这是写法约定，serde 不区分两种写法，也不校验。完整示例见附录 A 的任一仓库。
 
 | 字段 | TOML 类型 | 必填 / 缺省 | 一句话语义 | 出处 |
 | --- | --- | --- | --- | --- |
@@ -52,6 +52,7 @@
 | `install` | string（一条命令行） | 缺省 = 没有 | 在 staging 克隆里冷装依赖的命令 | design §6.1、§6.4 |
 | `checks` | string 数组（命令行，有序） | `[]` | 发布前在 staging 树里跑的检查，只读 | design §6.5 步骤 4 |
 | `publish` | 内联表 `PublishTarget` | 必填 | 发布目标 | design §6.7 |
+| `publish.auto_close` | bool（可省略） | 继承全局 `[publish].auto_close`，全局缺省 `true` | 发布/推送完全落地后自动把会话工作区移入垃圾区；见下文 | p1-autoclose §5 |
 | `deploy_on_push` | bool | `false` | 推送到 `origin/<publish.branch>` 本身就会触发生产部署 | design §3、不变量 3、7 |
 | `pin_unpushed` | bool | `true` | 新会话钉基线时，发布链领先 origin 就钉链顶 | design §6.7 |
 | `check_siblings` | string 数组（`RepoName`） | `[]` | `checks` 要在 `../<名字>` 找到的兄弟 repo；会话里没有时发布从它的 main tip 基线补上 | publish.md D21 [实现时补的决定] |
@@ -72,6 +73,15 @@ default, 0 to disable periodic fetch, or 60..=86400. A non-split repo cannot use
 In Rust, `SyncConfig.follow_main: Option<bool>` preserves omission; callers use
 `RepoConfig::follow_main()` for the resolved value. Default sync settings are
 omitted on serialization.
+
+`publish.auto_close` 默认 **true**。全局可写：
+
+```toml
+[publish]
+auto_close = false
+```
+
+单仓库可在 `[repo.<name>]` 的内联表写 `publish = { branch = "main", push = true, confirm = false, auto_close = false }`，覆盖全局值；省略则继承。会话 manifest 中每个仓库都必须启用，任一关闭就不自动关闭、也不自动标 done。启用时，完全落地到 `origin/<default_branch>` 且通过严格非 discard 检查的 publish/push 会将工作区移入垃圾区，保留 checkpoints；若某个仓库的 `publish.branch` 与 `default_branch` 不同（split-branch），该次 publish 只会把会话标为 done（`not_merged`），不会自动关闭，需人用非 discard 的 `git-strata rm --session S` 移除；有未发布编辑、占用或其它阻碍时保留会话并说明原因。此项可热重载，不是 pinned flag，不需要 `config relax`。
 
 `sync.deps` is pinned independently of publish confirmation. Existing pins entries
 without `sync_deps` adopt the configured value at startup and write it back.
@@ -122,7 +132,7 @@ restored store; preserve the displaced database and its sidecars.
      - front 的 `dev-link.sh` 会对干净的兄弟库 `git reset --hard origin/main`（`front/dev-link.sh:23`），**不得**列入。
      - [实现时补的决定]（2026-10-28）兄弟布局不再靠会话含全部 repo：admin、tool 的 `check_siblings` 列出 dev-link 要的兄弟，发布保证它们在 staging 里（publish.md D21）。
   6. 检查跑在 staging 树里，所以需要种子文件才能跑的检查（maxident-sync、insurance-check 的 `cargo check` 需要 `secrets.rs`）要么不列，要么由 `publish` 把种子文件带进 staging [交给 `publish.md`]；附录 A 对这两个仓库没有启用 Rust 检查。Tauri 应用的 Rust 侧检查同样没有启用：`src-tauri/target` 冷编译要 30–40 分钟（design §6.1）。
-- **`publish`**：`PublishTarget { branch, push, confirm }`（types.md；design §6.7），三个字段都必须写。`branch` 是发布链 `refs/strata/publish/<branch>` 对应的分支，附录 A 里恒等于 `default_branch`（两者不同时 [我的决定]：发布链以 `origin/<publish.branch>` 为合并基并推到它；新会话仍钉 `origin/<default_branch>`，`pin_unpushed` 只在 `publish.branch == default_branch` 时有意义；细节交给 `publish.md` 与 `session.md`）；`push = true`：发布后立刻把链推到 `origin/<branch>`；`false`：留在本地，之后 `strata push <repo>`；`confirm`：该目标的推送是否需要人类确认。**实际是否需要确认 = `confirm || deploy_on_push`**（`RepoConfig::needs_human_confirm`）。默认 = 直接合主干并推（design §2 目标 7），即 `push = true, confirm = false`；一推上线的仓库 `confirm = true`；staff-api 例外：`push = false`，预期配置是人工 `strata push`（design §6.7，因为推任何分支都会重建生产）。
+- **`publish`**：`PublishTarget { branch, push, confirm }`（types.md；design §6.7），三个字段都必须写。`branch` 是发布链 `refs/strata/publish/<branch>` 对应的分支，附录 A 里恒等于 `default_branch`（两者不同时 [我的决定]：发布链以 `origin/<publish.branch>` 为合并基并推到它；新会话仍钉 `origin/<default_branch>`，`pin_unpushed` 只在 `publish.branch == default_branch` 时有意义；细节交给 `publish.md` 与 `session.md`）；`push = true`：发布后立刻把链推到 `origin/<branch>`；`false`：留在本地，之后 `strata push <repo>`；`confirm`：该目标的推送是否需要人类确认。**实际是否需要确认 = `confirm || deploy_on_push`**（`RepoConfig::needs_human_confirm`）。默认 = 直接合主干并推（design §2 目标 7），即 `push = true, confirm = false`；一推上线的仓库 `confirm = true`；staff-api 例外：`push = false`，预期配置是人工 `strata push`（design §6.7，因为推任何分支都会重建生产）。`auto_close` closes a session only when its work is on `origin/<default_branch>`; a repo whose `publish.branch` differs is marked done instead and is removed by hand。
 - **`deploy_on_push`**：为 `true` 时，推送必须经 design §6.9 的人类确认，没有任何 flag、环境变量或运行期配置能让这次推送绕过（不变量 3、7）；规则 V5 保证 `confirm` 也是 `true`。[实现时补的决定]（2026-10-26，peilin："将api 也改为不用确认"）：上面这句作废。`deploy_on_push` 只是信息（推送算作 `Action::PushDeploy`、status 里显示），不再是门；要不要人类确认只看 `publish.confirm`（`needs_human_confirm() = publish.confirm`），V5 一并撤销。现有配置里 `deploy_on_push = true` 的仓库都显式写了 `confirm = true`，门不变；唯一改的是 staff-api（`confirm = false`，`push = false`、`deploy_on_push = true` 不变）。把 `confirm` 从 true 改成 false 仍是"调松"，要人跑 `git-strata config relax <REPO>`（TTY + Touch ID）才生效。把 `deploy_on_push` 本身改成 `false` 属于"调松"，daemon 只在人类确认之后接受（§1 的钉住规则，[交给 `daemon.md`]）。`true` 的有：staff-api、front 和全部 `@inter/*` 库（admin-time-off、admin-shared、hr-core、hr-tasks、hr-components、hr-time-management、quick-start）——design §3、§11 第 6 条。
 - **`pin_unpushed`**：新会话钉基线时，发布链领先 `origin/<branch>` 就钉链顶；`false` 则一律钉 `origin/<default_branch>`，新会话看不到已发布未推送的改动，下一次发布必撞（design §6.7）。只在 `publish.branch == default_branch` 时有意义：两者不同时新会话一律钉 `origin/<default_branch>`（见上条 `publish`）。
 - **`check_siblings`**：[实现时补的决定]（2026-10-28，publish.md D21）每项是另一个已配置的 repo（V12）。只在 `checks` 非空时起作用。发布（以及 D2a 的无头重放）staging 时：布局会话钉了它 → 用那个钉；没钉 → 发布在锁外 fetch 它的 `origin/<default_branch>`、前移它的锚点、取 main tip 的基线（可能冷装依赖），克隆进 `<布局根>/<名字>/`。补不上 → `InvalidInput`（`siblings_missing`），`detail.fix` 是 `git-strata add --session <id> --repo …`，检查不跑。缺省空列表 = 旧行为，不碰任何兄弟。旧二进制不认这个键（V11），所以上线顺序是：先把新的 `git-strata` 与 `git-stratad` 一起装好，再改线上配置，旧 daemon 由 owner 重启；支持 config.reload 的 daemon 改配置后运行 `git-strata config reload`（restart-only 字段仍需重启）。
@@ -133,7 +143,8 @@ restored store; preserve the displaced database and its sidecars.
   regenerable = ["src/constants/permissionMap/generated.json"]
   ```
 - **`[repo.<name>.rebase]`**：[实现时补的决定]（2026-10-29，rm-followups §1.3）`deps_changed = "move_source" | "wait"`（缺省 `move_source`：发布改了安装输入时，自动 rebase 只把源码移到新树、沿用旧依赖集，依赖提案保持 Pending；`wait` = 旧的 `Waiting`）；`quiet_secs`（缺省 120，≤ 86400，V15）是自动 rebase 的安静窗口。（2026-10-29 rm-followups 2.2–2.5 起生效：`quiet_secs` 是 Auto 门 G2 的安静窗口，`deps_changed` 决定 C2 只挪源码还是 `Waiting`；只影响自动 rebase（发布、push 重放、daemon 追赶），依赖审批的 rollout 与显式 move 不受影响。）
-- **新键的上线顺序**：`[repo.<name>.rm]`、`[repo.<name>.rebase]` 旧二进制不认（V11），而且一旦 `pins.json` 钉进了非空的 `regenerable`，旧 daemon 也读不了它（旧 CLI 把读不了的 pins.json 当作"要确认"）。所以先把新的 `git-strata` 与 `git-stratad` 一起装好并重启 daemon，再往配置里加这些键。新二进制读没有这些键的配置（缺省值）。
+- **新键的上线顺序**：`[repo.<name>.rm]`、`[repo.<name>.rebase]` 旧二进制不认（V11），而且一旦 `pins.json` 钉进了非空的 `regenerable`，旧 daemon 也读不了它（旧 CLI 把读不了的 pins.json 当作"要确认"）。所以先把新的 `git-strata` 与 `git-stratad` 一起装好并重启 daemon，再往配置里加这些键。新二进制读没有这些键的配置（缺省值）。 `publish.auto_close` 和全局 `[publish]` 同样要先升级二进制再添加。
+- **降级警告（daemon mark / store v7）**：旧 daemon 既读不了 `by.kind = "daemon"` 的完成标记（store 返回 `bad_row`，`ls`/`status` 会失败），也打不开本二进制写出的 v7 store：`session_marks.by_kind` 的 CHECK 已含 `'daemon'`，打开时的 schema 比对会在读任何 mark 之前以 `Corrupt` / `reason: "schema"` 拒绝。清掉 daemon mark 解决不了这份不兼容。要回退，停 daemon，按 [store.md](modules/store.md) 把兼容的 `store/backups/store-v<from>-<ns>.db` 恢复回来，再装回匹配的旧 CLI 与 daemon（以及对应配置），然后启动；备份之后写入的改动不会出现在恢复后的 store 里，挪开的数据库及其 sidecar 要留着。
 
 ### 2.4 命令行字符串（`install` 与 `checks`）
 

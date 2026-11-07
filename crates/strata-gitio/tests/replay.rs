@@ -5,10 +5,91 @@ mod common;
 use std::fs;
 
 use common::*;
-use strata_types::{Code, CommitOid};
+use strata_gitio::LANDED_COPY_LIMIT;
+use strata_types::{Code, CommitOid, RepoName, SessionId};
 
 fn oid(s: &str) -> CommitOid {
     CommitOid::try_from(s.to_string()).unwrap()
+}
+
+fn rn(s: &str) -> RepoName {
+    RepoName::try_from(s.to_string()).unwrap()
+}
+
+fn sid(s: &str) -> SessionId {
+    SessionId::try_from(s.to_string()).unwrap()
+}
+
+/// Auto-close §2.1: `r` with main at `a`, `chain` = a → C with `message`,
+/// and the copy of C replayed onto `origin` = a → o. Returns (repo, c, copy).
+fn replayed_with(sb: &Sandbox, message: &str) -> (std::path::PathBuf, CommitOid, CommitOid) {
+    let repo = sb.init_repo("r");
+    let a = sb.head(&repo);
+    sb.git(&repo, &["checkout", "-q", "-b", "chain"]);
+    let c = sb.commit_file(&repo, "x.txt", b"x\n", message);
+    sb.git(&repo, &["checkout", "-q", "-b", "origin", &a]);
+    let o = sb.commit_file(&repo, "README.md", b"hello\nfrom origin\n", "o1");
+    let copy = sb.open(&repo).replay_commits(&oid(&a), &oid(&c), &oid(&o)).unwrap();
+    assert_ne!(copy, oid(&c));
+    (repo, oid(&c), copy)
+}
+
+const GROUP_MESSAGE: &str = "fix\n\nsessions: s-aaaaaaaa, s-bbbbbbbb\npaths: 1\nStrata-Publish: 41 (r)\n";
+
+#[test]
+fn landed_copy_finds_a_replayed_commit() {
+    let sb = Sandbox::new();
+    let (repo, c, copy) = replayed_with(&sb, GROUP_MESSAGE);
+    let g = sb.open(&repo);
+    // A group's `sessions: s-a, s-b`: found for either.
+    for s in ["s-aaaaaaaa", "s-bbbbbbbb"] {
+        assert_eq!(g.landed_copy(41, &rn("r"), &sid(s), &c, &copy).unwrap(), Some(copy.clone()));
+    }
+    assert_eq!(g.landed_copy(42, &rn("r"), &sid("s-aaaaaaaa"), &c, &copy).unwrap(), None, "another publish");
+    assert_eq!(g.landed_copy(41, &rn("q"), &sid("s-aaaaaaaa"), &c, &copy).unwrap(), None, "another repo");
+    assert_eq!(g.landed_copy(41, &rn("r"), &sid("s-aaaaaaaa"), &c, &c).unwrap(), None, "the commit itself is no copy");
+}
+
+#[test]
+fn landed_copy_needs_the_session_trailer() {
+    // Another store's publish with the same id names another session.
+    let sb = Sandbox::new();
+    let msg = "fix\n\nsessions: s-otherxxx\npaths: 1\nStrata-Publish: 41 (r)\n";
+    let (repo, c, copy) = replayed_with(&sb, msg);
+    let g = sb.open(&repo);
+    assert_eq!(g.landed_copy(41, &rn("r"), &sid("s-aaaaaaaa"), &c, &copy).unwrap(), None);
+
+    // A subject-only commit, older than the trailer, names no session.
+    let sb = Sandbox::new();
+    let (repo, c, copy) = replayed_with(&sb, "strata publish 41 (r)");
+    let g = sb.open(&repo);
+    assert_eq!(g.landed_copy(41, &rn("r"), &sid("s-aaaaaaaa"), &c, &copy).unwrap(), None);
+}
+
+#[test]
+fn landed_copy_none_when_the_commit_is_pruned() {
+    let sb = Sandbox::new();
+    let (repo, _c, copy) = replayed_with(&sb, GROUP_MESSAGE);
+    let g = sb.open(&repo);
+    let gone = oid(&"1".repeat(40));
+    assert_eq!(g.merge_base(&gone, &copy).unwrap_err().code, Code::NoSuchCommit);
+    assert_eq!(g.landed_copy(41, &rn("r"), &sid("s-aaaaaaaa"), &gone, &copy).unwrap(), None);
+}
+
+#[test]
+fn landed_copy_ignores_a_copy_past_the_limit() {
+    let sb = Sandbox::new();
+    let (repo, c, copy) = replayed_with(&sb, GROUP_MESSAGE);
+    let g = sb.open(&repo);
+    let tree = sb.tree_of(&repo, copy.as_str());
+    let mut tip = copy.as_str().to_string();
+    for i in 0..LANDED_COPY_LIMIT - 1 {
+        tip = sb.git(&repo, &["commit-tree", &tree, "-p", &tip, "-m", &format!("later {i}")]);
+    }
+    let s = sid("s-aaaaaaaa");
+    assert_eq!(g.landed_copy(41, &rn("r"), &s, &c, &oid(&tip)).unwrap(), Some(copy.clone()), "the last one in range");
+    tip = sb.git(&repo, &["commit-tree", &tree, "-p", &tip, "-m", "one more"]);
+    assert_eq!(g.landed_copy(41, &rn("r"), &s, &c, &oid(&tip)).unwrap(), None);
 }
 
 /// main: base a; branch "chain": a → c1 (x.txt) → c2 (y.txt); branch

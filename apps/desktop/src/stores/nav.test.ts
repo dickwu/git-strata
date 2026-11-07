@@ -4,6 +4,22 @@ import { sessionFromUrl, sessionHash, useNav } from './nav';
 beforeEach(() => useNav.getState().clearFilters());
 
 describe('Sessions list filter state', () => {
+  test('completion filters survive navigation and clear with the other filters', () => {
+    const s = () => useNav.getState();
+    expect(s().markFilter).toEqual([]);
+    s().toggleMarkFilter('done');
+    s().openSession('S1');
+    s().openSession(null);
+    s().go('daemon');
+    s().go('sessions');
+    expect(s().markFilter).toEqual(['done']);
+    s().toggleMarkFilter('active');
+    expect(s().markFilter).toEqual(['done', 'active']);
+    s().toggleMarkFilter('done');
+    expect(s().markFilter).toEqual(['active']);
+    s().clearFilters();
+    expect(s().markFilter).toEqual([]);
+  });
   test('add dedupes, remove drops one, clear empties chips and text', () => {
     const s = () => useNav.getState();
     s().addRepoFilter('web');

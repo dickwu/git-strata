@@ -576,6 +576,63 @@ fn open_proposals_skip_removed_sessions() {
     assert_eq!(ids(false), all);
 }
 
+/// Auto-close §3.2: `Removed` hides a draft, so none may land once its session
+/// has left for removal. A row with a target keeps a gone origin as before.
+#[test]
+fn draft_insert_reads_the_origins_lifecycle() {
+    let (env, s) = setup();
+    let (a, b, c) = (sess("aaaaaaaa"), sess("bbbbbbbb"), sess("cccccccc"));
+    for id in [&a, &b] {
+        active(&env, &s, id);
+    }
+    let prop = |r: &str, origin: &SessionId, to: char, target: bool| NewProposal {
+        repo: repo(r),
+        origin: Some(origin.clone()),
+        from: set_id('a'),
+        from_inputs: "a".repeat(64),
+        from_head: None,
+        to: set_id(to),
+        to_inputs: to.to_string().repeat(64),
+        tree: target.then(|| tree('5')),
+        head: target.then(|| head('5')),
+    };
+    let count = || s.proposals(None, false).unwrap().len();
+
+    // Active: inserted.
+    let first = s.record_proposal(&prop("app", &a, 'c', false), None, t(40)).unwrap().unwrap();
+
+    // Removing: refused, nothing new, and the draft it would replace stands.
+    assert!(s.set_lifecycle(&a, Lifecycle::Active, Lifecycle::Removing, None, t(41)).unwrap());
+    let n = count();
+    let e = s.record_proposal(&prop("app", &a, 'd', false), Some(first), t(42)).unwrap_err();
+    assert_reason(&e, Code::InvalidInput, "lifecycle");
+    assert_eq!(e.detail.as_ref().unwrap()["lifecycle"], "removing");
+    assert_eq!(e.detail.as_ref().unwrap()["session"], a.as_str());
+    assert_eq!(count(), n);
+    assert_eq!(s.proposal(first).unwrap().unwrap().status, ProposalStatus::AwaitingPublish);
+
+    // Unknown (with a scene): as today.
+    let scene = json!({ "op": "remove" });
+    assert!(s.set_lifecycle(&a, Lifecycle::Removing, Lifecycle::Unknown, Some(&scene), t(43)).unwrap());
+    s.record_proposal(&prop("lib", &a, 'e', false), None, t(44)).unwrap().unwrap();
+
+    // Removed: no such session, nothing new.
+    assert!(s.set_lifecycle(&b, Lifecycle::Active, Lifecycle::Removing, None, t(45)).unwrap());
+    assert!(s.set_lifecycle(&b, Lifecycle::Removing, Lifecycle::Removed, None, t(46)).unwrap());
+    let n = count();
+    let e = s.record_proposal(&prop("app", &b, 'f', false), None, t(47)).unwrap_err();
+    assert_code(&e, Code::NoSuchSession);
+    assert_eq!(count(), n);
+
+    // An origin with no row: as today.
+    s.record_proposal(&prop("lib", &c, 'f', false), None, t(48)).unwrap().unwrap();
+
+    // A `pending` row naming a `Removed` origin: as today (main-follow and a
+    // human's approval go on working after the proposer's `rm`).
+    let kept = s.record_proposal(&prop("app", &b, 'f', true), None, t(49)).unwrap().unwrap();
+    assert_eq!(s.proposal(kept).unwrap().unwrap().status, ProposalStatus::Pending);
+}
+
 // ------------------------------------------------------------------ retire_dir
 
 #[test]

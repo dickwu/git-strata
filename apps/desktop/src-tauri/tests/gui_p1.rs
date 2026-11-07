@@ -28,6 +28,7 @@ fn fixture(name: &str) -> Value {
 enum Mode {
     /// Answer from the fixtures.
     Fixtures,
+    Marked,
     /// Read the request, then hold the connection without answering
     /// until the test drops the fake.
     Silent,
@@ -78,8 +79,15 @@ impl Fake {
                         json!({ "id": req["id"], "ok": false, "error": {
                         "rpc": "Failed", "message": "invalid params: unknown field `chains`, expected one of `cwd`, `session`, `all`" } })
                     }
-                    Mode::Fixtures | Mode::PreChains => {
-                        json!({ "id": req["id"], "ok": true, "data": fixture(fixture_for(&req)) })
+                    Mode::Fixtures | Mode::PreChains | Mode::Marked => {
+                        let mut data = fixture(fixture_for(&req));
+                        if matches!(mode, Mode::Marked) && req["method"] == "status" {
+                            data["sessions"][0]["status"]["mark"] = json!({
+                                "state":"done", "note":"<b>review</b>",
+                                "by":{"kind":"agent"}, "at":"2026-11-04T12:00:00Z"
+                            });
+                        }
+                        json!({ "id": req["id"], "ok": true, "data": data })
                     }
                 };
                 let _ = conn.write_all(format!("{reply}\n").as_bytes());
@@ -162,6 +170,23 @@ fn gui_reads_send_the_checked_requests() {
         assert_eq!(req["method"], want["method"], "{name}");
         assert_eq!(req["params"], want["params"], "{name}");
     }
+}
+
+#[test]
+fn completion_marks_pass_through_existing_read_only_commands() {
+    let fake = Fake::start(Mode::Marked);
+    let daemon = Daemon::new(fake.socket.clone());
+    rt().block_on(async {
+        for read in [Read::Sessions, Read::Session("S1".into())] {
+            let data = daemon.read(read).await.unwrap();
+            assert_eq!(data["sessions"][0]["status"]["mark"]["state"], "done");
+            assert_eq!(
+                data["sessions"][0]["status"]["mark"]["note"],
+                "<b>review</b>"
+            );
+        }
+    });
+    assert!(fake.requests().iter().all(|r| r["method"] == "status"));
 }
 
 #[test]

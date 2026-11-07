@@ -64,6 +64,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata publish` | `publish`（总是先 `checkpoint`，再 `publish_plan`） | 是，当这次还要提交的仓库里有要推且钉住的值要确认的（review-2 N2） | 每个这样的仓库一次 `PushDeploy`，在该仓库 `commit_tree` 之前。不推的仓库、已经落地的仓库不确认 |
 | `git-strata push` | `push` | 是，当仓库要确认 | `PushDeploy` |
 | `git-strata assign` | `assign` | 否 | 否 |
+| `git-strata mark` | `mark` | 否 | 否 |
 | `git-strata rm` | `rm` | `--discard` 时是 | `RemoveDiscard` |
 | `git-strata gc` | `gc` | 否 | 否 |
 | `git-strata du [--refresh]` | `du` | 否 | 否 |
@@ -154,7 +155,7 @@ After deploying a daemon that advertises `sync` as well as `status.upstream`, th
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"git-strata sync --check --hook"}]}]}}
 ```
 
-This mode reads `{cwd, stop_hook_active}` on stdin and resolves the session from that cwd. It reads only cached upstream and store/Tracker state, flushing the Tracker without scanning. Cold behind is treated as zero. It blocks a following tracked repo with behind > 0 or pending deps, together with unpublished work, auto reason `conflicts`, or stored conflicts. An eligible deferred Auto row can also trigger a once-per-episode hand-back in the current daemon process regardless of behind/unpublished state, using its current snapshot and revalidated revision. A clean workspace waiting for background movement is not blocked. The block is a plain `{decision:"block",reason:"…"}` line, with sync/resolve/check/publish instructions; deps-only reasons say main's dependencies changed. `stop_hook_active:true` is always silent, preventing a second block. A five-second process timer covers stdin, setup, socket connect/send/read and output; `call_within` gets the remaining budget. Every error, timeout, unknown method or non-workspace is silent and exits zero. This mode is an exception to the ordinary JSON envelope.
+This mode reads `{cwd, stop_hook_active}` on stdin and resolves the session from that cwd. It reads only cached upstream and store/Tracker state, flushing the Tracker without scanning. Cold behind is treated as zero. It blocks a following tracked repo with behind > 0 or pending deps, together with unpublished work, auto reason `conflicts`, or stored conflicts. An eligible deferred Auto row can also trigger a once-per-episode hand-back in the current daemon process regardless of behind/unpublished state, using its current snapshot and revalidated revision. A clean workspace waiting for background movement is not blocked. The block is a plain `{decision:"block",reason:"…"}` line, with sync/resolve/check/publish instructions; deps-only reasons say main's dependencies changed. A session marked done is told to run the sync from outside and to stay out of the workspace (a shell inside it holds the session open); run `git-strata mark --session S active` first if you mean to keep working. A session closed by the daemon after a publish that landed everything is gone, so the hook never names it. `stop_hook_active:true` is always silent, preventing a second block. A five-second process timer covers stdin, setup, socket connect/send/read and output; `call_within` gets the remaining budget. Every error, timeout, unknown method or non-workspace is silent and exits zero. This mode is an exception to the ordinary JSON envelope.
 
 类型按 types.md §2.2 序列化：字段名 snake_case，`Option` 为 `None` 不输出，时间是 RFC 3339 UTC，带数据的枚举用 `kind`。cli 不重新定义 `SessionStatus`、`Proposal`、`Checkpoint`、`Hit`、`PushOutcome`、`NewReport`、`RemoveReport`、`ResolutionReport`。
 
@@ -164,7 +165,7 @@ This mode reads `{cwd, stop_hook_active}` on stdin and resolves the session from
 | `add` | `AddReport`：`{ session, added: {<repo>: WorkspaceState}, already: {<repo>: WorkspaceState}, warnings }`；锚点未知的 repo 打在 stderr | — |
 | `status` | 一个会话：`SessionStatus`（顶层带 `id`、`ticket`（无则 null）；`manifest.id`、`manifest.ticket` 与之重复，**已弃用**，下一个大版本去掉，新代码读顶层）。warning `OldTreeKept`（status-perf A1）：`changed` 可为 `null`（daemon 还没在后台检查这棵旧树，同时带 `unchecked: true`，此时 `holders` 为空；daemon 不在、走本地回退时总是这样）；检查过的带 `checked_at`（RFC 3339）。旧 GUI 读到 `null` 应当当作「未知」。`--all`：`{ "sessions": [SessionStatus, …] }`，按 `SessionId` 升序。健康为 `Unknown` 的工作区带 `choices: ["abandon", "accept"]`。工作区有 `drift` 时它另带 `fix`（`cd ~ && git-strata deps propose --session <S> --repo <R> --switch`）与 `note`（publish 会用 staged 安装输入对应的依赖集跑检查，但工作区仍是旧的依赖；deps-drift §2.7）。`OldTreeKept` 的 `holders` 原样透传 | — |
 | `status --brief` | 只来自 store（status-perf C）：`SessionSummary` = `{ id, ticket（无则 null）, state, created（RFC 3339）, repos: [RepoName], phase?, workspaces: [{ repo, health_stored, path, checkpoint }] }`。`state` 是 store 的 lifecycle（`Creating`/`Active`/`Removing`/`Unknown`），没有只能从文件系统得出的 `Missing`；`health_stored` 是 store 记录的健康（`Ok`/`Unknown`），工作区目录缺失在这里看不出；`checkpoint` 是最新检查点，untracked 或没有则 null。不算 drift、seeds、mirrors、旧树，不 stat 工作区，不跑 git。一个会话：该对象；`--all`：`{ "sessions": [SessionSummary, …] }`，按 id 升序。daemon 不在或 daemon 不认识 `summary`/`workspaces` 时读 store，并带 `source: "local"` | — |
-| `ls` | `{ "sessions": [{ id, ticket, state, created, repos, phase? }, …], "source"? }`：全部未 Removed 的会话，按 id 升序，字段同上（没有 `workspaces`）。`source: "local"` 同上。`--table`：`ID  TICKET  STATE  REPOS  CREATED`（ticket 为空写 `-`，repos 用逗号连），不套信封 | — |
+| `ls` | `{ "sessions": [{ id, ticket, state, mark?, created, repos, phase? }, …], "source"? }`：全部未 Removed 的会话，按 id 升序，字段同上（没有 `workspaces`）。`source: "local"` 同上。`--table`：`ID  TICKET  STATE  MARK  REPOS  CREATED`（ticket 为空写 `-`，repos 用逗号连），不套信封 | — |
 | `checkpoint` | `{ "checkpoints": [Checkpoint, …] }`，该次工具调用或 `-m` 在每个被记的 repo 上的那一行。幂等命中时就是已有的那几行，不是新 id | — |
 | `restore` | `{ "checkpoint": CheckpointId, "session": SessionId }` | — |
 | `grep` | `{ "hits": [Hit, …] }`。零命中是 `"hits": []`，`ok` 为 true，不是 `NoMatch`。`hits` 这个键总在 | 前 8000 字节含 NUL 的文件跳过，不进 `hits`。被跳过的放 `skipped: [{ "session", "repo", "path", "code": "Binary" }]`。超过 64 MiB 的同样按条目，`code` 为 `TooLarge`，不读内容。非法 UTF-8 按宽松解码，每个坏序列一个 U+FFFD，不让整条输出失败（D9） |
@@ -173,8 +174,8 @@ This mode reads `{cwd, stop_hook_active}` on stdin and resolves the session from
 | `deps propose` | `Proposal`；带 `--switch` 时是 `{ "proposal": Proposal, "switched": { "session", "kind": "moved"\|"skipped", "code"?, "detail"? } }`。本会话有打开的依赖文件等原因没换：`kind = "skipped"`、带 `code`（如 `OpenFiles`），提议照样记下，仍是 `ok: true`（同 D17） | `OpenFiles`（在 `switched.code` 里） |
 | `deps approve` | `{ "results": [ { "session", "kind": "moved"\|"skipped", "code"?, "detail"? } ] }`。某个会话 `OpenFiles` 则那一条 `kind = "skipped"`，`code = "OpenFiles"`，其余照常。全部跳过仍是 `ok: true`（D17） | `OpenFiles` |
 | `deps list` | `{ "proposals": [Proposal, …] }`，按 `ProposalId` 升序。daemon 返回的每行带有效的 `mode: "apply" \| "confirm"`；没有提议则空数组 | — |
-| `publish` | `{ "commits": { "<repo>": CommitOid }, "checks_ran": <u32>, "waiting": [Proposal, …], "pushes": [ { "repo", "outcome": PushOutcome } ], "already_published": [ { "repo", "publish", "commit", "push" } ] }`。`pushes` 只含这次真的推了的仓库。`already_published` 是重跑时之前已经落地、这次跳过的仓库（daemon.md D22，review H4）。多仓库时某个仓库失败（如 `Conflict`），前面已经提交的仓库照样写进 `data.commits` / `data.pushes`，`error.detail.repo` 是停下的那个仓库。没有检查的仓库 `checks_ran` 为 0，不是错误。冲突不是成功：整次 `ok: false`，`error.code = "Conflict"`，`detail` 用 publish 给的清单，cli 不再截断。`ok: true` 只在每个 `outcome` 都是 `Pushed`（或 `pushes` 为空）时成立，不能把 `Unknown` 藏进成功。`commit_tree` 之后推送超时：`ok: false`，`error.code = "Unknown"`，链留下，`data.pushes` 仍带那个 `PushOutcome`。远端拒绝不在这次里改写成成功：`publish.push` 为假时不推，`PushRefused` 留给之后单独的 `git-strata push`；这次若已经推了且远端拒绝，`ok: false`，`error.code = "PushRefused"`，链留下。这两种情况下停下的仓库的提交和推送结果都在 `data.commits` / `data.pushes` 里（取自 daemon 的 `detail.landed`，review M4） | — |
-| `push` | `PushOutcome`（`kind` + `message`）。`Refused` 不在成功里出现，publish 已把它转成 `PushRefused` | — |
+| `publish` | `{ "commits": { "<repo>": CommitOid }, "checks_ran": <u32>, "waiting": [Proposal, …], "pushes": [ { "repo", "outcome": PushOutcome } ], "already_published": [ { "repo", "publish", "commit", "push" } ], "closed": bool, "auto_close": { "closed": bool, "reasons": [], "sessions" } }`。`pushes` 只含这次真的推了的仓库。`already_published` 是重跑时之前已经落地、这次跳过的仓库（daemon.md D22，review H4）。`closed` 与 `auto_close` 与 `upstream` 一样由信封透传：`closed` 是整组的；`auto_close.sessions[<S>].closed` 说这次是否关闭了某个会话（完整落地且配置允许时为 true）。`already_published` 里有 `Refused` 推送时信封仍是 `ok: false` `PushRefused`，并带 `closed: false`。多仓库时某个仓库失败（如 `Conflict`），前面已经提交的仓库照样写进 `data.commits` / `data.pushes`，`error.detail.repo` 是停下的那个仓库。没有检查的仓库 `checks_ran` 为 0，不是错误。冲突不是成功：整次 `ok: false`，`error.code = "Conflict"`，`detail` 用 publish 给的清单，cli 不再截断。`ok: true` 只在每个 `outcome` 都是 `Pushed`（或 `pushes` 为空）时成立，不能把 `Unknown` 藏进成功。`commit_tree` 之后推送超时：`ok: false`，`error.code = "Unknown"`，链留下，`data.pushes` 仍带那个 `PushOutcome`。远端拒绝不在这次里改写成成功：`publish.push` 为假时不推，`PushRefused` 留给之后单独的 `git-strata push`；这次若已经推了且远端拒绝，`ok: false`，`error.code = "PushRefused"`，链留下。这两种情况下停下的仓库的提交和推送结果都在 `data.commits` / `data.pushes` 里（取自 daemon 的 `detail.landed`，review M4） | — |
+| `push` | `PushOutcome`（`kind` + `message`）。`Refused` 不在成功里出现，publish 已把它转成 `PushRefused`。另带 `closed` 与 `auto_close`（形状同 `publish`），仅当该仓库有 done 标记的会话被判定、`disabled` 或 `extended` 时出现（push 也能关闭会话） | — |
 | `assign` | `{}` | — |
 | `rm` | `RemoveReport` | — |
 | `gc` | `{}`；`--store` 时 `{ store: GcReport }`；`--store --dry-run` 时 `{ dry_run: true, preview: GcPreview }` | daemon 回复里的 `skipped` 与 `trash`（`removed`、`young`、`refused`、`stuck`）打到 stderr；`--store` 时再打 `trash_refused`、`stuck` 与 `corrupt`（D33） |
@@ -517,11 +518,11 @@ git commit -m "feat(cli): subcommands, readonly path, hook idempotency"
 | D15 plist 路径 | `~/Library/LaunchAgents/com.gwd.git-stratad.plist`，域 `gui/<uid>` | `start` 没有路径就无法 bootstrap。Label 用 daemon 已定的 `com.gwd.git-stratad` | 2026-10-23 |
 | D16 重复 start/stop | 已装上或已卸下是成功，`data.already = true` | `launchctl bootstrap` 对已加载的服务会失败。人再跑一次不该看成故障 | 2026-10-23 |
 | D24 `stop` 等服务真正卸下 | `bootout` 之后轮询 `print`，不再列出才返回，最多 10 s | 真实安装里 `stop` 后立刻 `start` 得到 `already` 而 daemon 没在跑。[实现时补的决定] | 2026-10-26 |
-| D30 `publish --from` 的路径错误先报 | `--from S:PATH` 的 PATH 在会话里找不到仓库时，不再先对全部配置仓库做 TTY 检查（那会把路径错误变成 `NotTty`），直接返回：PATH 以会话里某个仓库名开头且去掉它之后在该仓库存在 → `InvalidInput` `from_repo_prefix`，`detail {path, session, repo, expected}`（单仓库会话也查）；多仓库会话里没有仓库有它 → `InvalidInput` `from_path`，`detail {path, session, repos, expected}`，message 写明 SESSION:PATH 格式；几个仓库都有 → `AmbiguousMatch` `from_repo`（不变）。这些都只读 store 与工作区，socket 上没有字节。会话本身读不到时仍先做 TTY 检查（`confirm_commands_refuse_non_tty`）。[实现时补的决定] | 真实使用里 `publish --from S:staff-api/x` 在非 TTY 上得到 `NotTty`，agent 以为要人类，实际是路径写错；路径错误不是要确认的动作，不变量 7 不涉及 | 2026-10-26 |
+| D30 `publish --from` 的路径错误先报 | `--from S:PATH` 的 PATH 在会话里找不到仓库时，不再先对全部配置仓库做 TTY 检查（那会把路径错误变成 `NotTty`），直接返回：PATH 以会话里某个仓库名开头且去掉它之后在该仓库存在 → `InvalidInput` `from_repo_prefix`，`detail {path, session, repo, expected}`（单仓库会话也查）；多仓库会话里没有仓库有它 → `InvalidInput` `from_path`，`detail {path, session, repos, expected}`，message 写明 SESSION:PATH 格式；几个仓库都有 → `AmbiguousMatch` `from_repo`（不变）。这些都只读 store 与工作区，socket 上没有字节。会话不存在（`NoSuchSession`，含完整 publish 关闭之后的重试）同样直接返回，不再先做 TTY 检查，避免把已关闭的会话报成 `NotTty`；其它读不到（如 store 不存在的 `NoSuchPath`）仍先做 TTY 检查（`confirm_commands_refuse_non_tty`）。[实现时补的决定] | 真实使用里 `publish --from S:staff-api/x` 在非 TTY 上得到 `NotTty`，agent 以为要人类，实际是路径写错；路径错误不是要确认的动作，不变量 7 不涉及 | 2026-10-26 |
 | D31 `publish --from` 指定仓库、按 checkpoint 消歧 | 新增 `--from S:REPO:PATH`：第一个与第二个 `:` 之间的文本是会话里的某个仓库名时当作 REPO，否则第一个 `:` 之后全部是 PATH（`S:PATH` 不变，PATH 里可以有 `:`；以 `<repo>:` 开头的 PATH 写成 `S:<repo>:<repo>:...`）。REPO 的工作区（磁盘或 base）没有 PATH、或 REPO 形似仓库名但不在会话里 → `InvalidInput` `from_path`。`S:PATH` 有几个仓库都有时，取会话里 checkpoint 改过该路径（目录则其下任一路径）的那一个仓库；没有或不止一个改过 → `AmbiguousMatch` `from_repo`，`detail {path, session, candidates, changed_in, expected}`，`expected` 是每个候选的 `S:REPO:PATH`。只读 store，纯 cli 改动，daemon 不变。[实现时补的决定] | 真实使用里 #9301 的 `src/utils/apis/locationDuty.ts` 在 admin 与 tool 都存在，只有 admin 改过它，`--from` 无法指到 admin，发版被卡 | 2026-10-27 |
 | D17 全部跳过 | `deps approve` 每个会话都 `OpenFiles` 时仍 `ok: true`，条目里是 skipped | types.md：按条目返回，其余照常移动。没有“全部跳过”这个码 | 2026-10-23 |
 | D18 选择要 TTY | `resolve`，以及 `chain` 的 replay / drop：非 TTY 返回 `NotTty`，不连接，不取凭据。`chain --restore` 在仓库要确认时走与 `push` 相同的 `PushDeploy`，会弹框。不再说 chain 从不弹框 | 裁定要求没有人的选择就不运行。replay / drop 不推，所以不取凭据。`--restore` 是推送，用已有的 `PushDeploy`，不新加 `Action` 变体 | 2026-10-23 |
-| D19 Help text | help, --help, --version: text stdout, exit 0. help runs before environment/config setup; unknown topic → InvalidInput help_topic. | Each output ≤ 4096 bytes; index ≤ 1536. Full gate only in help gate; command summaries retain anti-bypass guidance. | 2026-11-03 |
+| D19 Help text | help, --help, --version: text stdout, exit 0. help runs before environment/config setup; unknown topic → InvalidInput help_topic. | Each output ≤ 4096 bytes, except `rm --help` ≤ 8192 (amended 2026-11-06: RM_AFTER carries the per-reason auto-close recovery map); index ≤ 1536. Full gate only in help gate; command summaries retain anti-bypass guidance. | 2026-11-03 |
 | D20 待确认提示 | 成功之后读 `deps::open_proposals`，不调用 `Sessions::open`，失败不影响退出码。2026-10-27 起放进 `data.pending_proposals`，stderr 那行只在终端上打 | design §6.4 第 4 步要每次 CLI 都提示。不能为了提示再发一次写 RPC，也不能再开一个 `Sessions` | 2026-10-23 |
 | D21 钉住的值读不出 | 当作要确认，先 `require_tty` | 读不出就放行，等于让一份坏文件跳过 TTY 检查 | 2026-10-23 |
 | D23 publish 的 TTY 检查只看还要做事的仓库（review-2 N2） | cli 总是先发每个批次的 `BeforePublish` checkpoint，再发只读的 `publish_plan`（daemon.md §4），然后只对 `repos` 里那些要推且要确认的仓库 `require_tty`、展示链顶、发 `shown`。全部已经落地 → 不查 TTY，`publish` 回 `already_published`。还有要确认的仓库且不是 TTY → `NotTty`；在此之前送到 daemon 的只有这些 checkpoint 和 `publish_plan`：不发 `publish`，不弹框，不取凭据。checkpoint 或 `publish_plan` 失败、批次有确认仓库且不是 TTY → 通常为 `NotTty`，原错误放在 `detail.plan_error`；`Busy` 和基线拒绝保留原码，不包装。计划需要刷新缓存而 repo 锁被占时回 `Busy lock_wait`，等持锁者完成后重跑。即使没有要确认的仓库也先发 `publish_plan`，让 R2 基线门检查全部批次；旧 daemon 已接受此方法，新消息字段仍由 `publish.message` 功能探测控制。`publish` 请求带 `plan`：TTY 检查覆盖了的那些仓库（可以为空）。`publish_plan` 与 `publish` 之间历史可能变（别的发布落地了不同内容），daemon 重算后多出来的要确认仓库不在 `plan` 里 → 在弹框、取凭据之前 `NotConfirmed`（`plan_changed`），什么都不写；agent 重跑，cli 重新计划并查 TTY（review-3 T1）。[实现时补的决定] | agent 重跑是主流程（D22）：之前要确认的仓库已经落地、只剩不用确认的仓库时，非 TTY 的重跑不该因已经落地的仓库被拒。checkpoint 只是记录当下内容，不是要确认的动作；不变量 7 守的是发布、弹框和凭据 | 2026-10-24 |
@@ -622,3 +623,29 @@ Rejected reports expose their first daemon reason (`parse`, `invalid_config`,
 `restart_required`, `stale_rows`, `spawn_failed`, etc.), falling back to
 `config_rejected`. Other reload reasons are `reload_pending`, `daemon_too_old`,
 and `invalid_reload_report`. See [config.md](../config.md#hot-reload-configreload).
+
+### Session completion marks (P1)
+
+A full publish closes its session. `git-strata mark --session S done --note "what landed and what is left"`
+records completion and itself removes no files, releases no workspace, changes no lifecycle
+and deletes no checkpoints, but the daemon can close a done session on a later publish or push
+of its repos once everything has landed. Resume with `git-strata mark --session S active`,
+which clears the mark, note and attribution. `rm` remains available when `data.auto_close`
+says it is yours; a fully landed publish needs no manual `rm`.
+A `Dirty` refusal should be handed back as a done mark with the unpublished work
+explained; an agent must never run `rm --discard` or try to bypass its gate.
+
+`--session` is required and resolves an id or ticket like `rm` (`AmbiguousMatch`
+for several matches). States are exactly `done` and `active`. `--note` is optional
+for done, 1–2000 UTF-8 bytes; tab and newline are allowed, other C0 controls refused
+(`InvalidInput reason: "note"`). Active takes no note. `--agent` has the same
+flag/environment/marker precedence as `new`; only setter kind is stored in P1.
+The CLI requires the `session.mark` feature before sending `mark`; older daemons
+return `Unsupported reason: "daemon_too_old"`, without attempting the write.
+No TTY or confirmation is needed. The usual envelope carries `{session, mark}`.
+
+Full status, summaries, `ls`, and `sync --check` carry the optional mark;
+`ls --table` adds MARK (`active` for an absent mark). Status reports `unpublished`
+from the reconciled live overlay. Edits checkpointed and then reverted remain
+restorable but do not count as unpublished, nor does an old checkpoint after its
+content has landed on main. A cold/reset tracker stays conservative until scanned.

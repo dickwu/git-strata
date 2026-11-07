@@ -66,14 +66,14 @@ fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-fn repo_cfg<'c>(core: &'c Core, repo: &RepoName) -> Result<&'c RepoConfig> {
+pub(crate) fn repo_cfg<'c>(core: &'c Core, repo: &RepoName) -> Result<&'c RepoConfig> {
     core.snapshot()?.config.repos.get(repo).ok_or_else(|| {
         StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}"))
             .with_detail(json!({ "repo": repo.as_str() }))
     })
 }
 
-fn git_of<'c>(core: &'c Core, repo: &RepoName) -> Result<&'c Git> {
+pub(crate) fn git_of<'c>(core: &'c Core, repo: &RepoName) -> Result<&'c Git> {
     core.snapshot()?.gits.get(repo).ok_or_else(|| {
         StrataError::new(Code::NoSuchRepo, format!("no repo named {repo}"))
             .with_detail(json!({ "repo": repo.as_str() }))
@@ -178,20 +178,30 @@ fn effective_cfg(core: &Core, repo: &RepoName) -> Result<RepoConfig> {
 
 /// rm-followups R2: how an rm that did not remove its session ended, for
 /// `status` (still under the session's queue place). A refusal before
-/// anything changed is `Refused`; `Unknown` is `Failed`; other errors
-/// (no such session, a bad token, …) say nothing about the session and
-/// are not recorded. A failed write is logged, never the reply.
-fn record_rm_attempt(core: &Core, s: &SessionId, e: &StrataError) {
+/// anything changed is `Refused`. `Unknown` is `Refused` on a session that
+/// is still `Active` (a failed holder scan or git read touched nothing), and
+/// otherwise `Failed`: it says "after teardown began". Other errors (no such
+/// session, a bad token, …) say nothing about the session and are not
+/// recorded. A failed write is logged, never the reply. `by` names an attempt
+/// that was not the agent's own (auto-close §4).
+fn record_rm_attempt(core: &Core, s: &SessionId, e: &StrataError, by: Option<&Value>) {
     let outcome = match e.code {
         Code::Dirty | Code::OpenFiles => strata_store::RmOutcome::Refused,
-        Code::Unknown => strata_store::RmOutcome::Failed,
+        Code::Unknown => match core.store.session(s) {
+            Ok(Some(r)) if r.lifecycle == strata_store::Lifecycle::Active => strata_store::RmOutcome::Refused,
+            _ => strata_store::RmOutcome::Failed,
+        },
         _ => return,
     };
+    let mut detail = json!({ "code": json_of(&e.code), "message": e.message, "detail": e.detail });
+    if let (Some(d), Some(Value::Object(by))) = (detail.as_object_mut(), by) {
+        d.extend(by.clone());
+    }
     let a = strata_store::RmAttempt {
         session: s.clone(),
         at: SystemTime::now(),
         outcome,
-        detail: json!({ "code": json_of(&e.code), "message": e.message, "detail": e.detail }),
+        detail,
     };
     if let Err(w) = core.store.record_rm_attempt(&a) {
         tracing::warn!(session = %s, error = %w.message, "recording the rm outcome failed");
@@ -362,14 +372,10 @@ impl<'a> Trackers<'a> {
             return Default::default();
         }
         crate::upstream::Live {
-            unpublished: !t.tracker.last().is_some_and(|o| o.entries.is_empty())
-                || !self
-                    .core
-                    .store
-                    .latest_checkpoint(s, repo)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|cp| cp.base == ws.base && cp.entries.is_empty()),
+            // Historical checkpoints remain restorable, including edits
+            // reverted or already published on a newer base. Only the live
+            // overlay on this reconciled base is unpublished work (F1).
+            unpublished: !t.tracker.last().is_some_and(|o| o.entries.is_empty()),
             inputs: t.inputs.clone(),
         }
     }
@@ -603,6 +609,14 @@ pub struct Server<'d, 'a> {
     d: &'d Daemon<'a>,
     trackers: &'d Trackers<'a>,
     search: Search<'d>,
+}
+
+/// Who asks [`Server::remove_session`]. A close has no token to pass and cannot
+/// grow a discard argument: it runs `remove_strict`, which takes neither.
+pub(crate) enum RemoveCall {
+    Agent { discard: bool, token: Option<strata_types::ConfirmToken> },
+    /// `by` goes on the session's `last_rm`, so `status` says whose attempt it was.
+    AutoClose { upstream: strata_types::Upstream, by: Value },
 }
 
 /// Serve `d` with every handler until it stops; trackers are dropped on
@@ -938,6 +952,7 @@ fn refresh_seeds_pass(d: &Daemon<'_>) {
 fn session_of(p: &Params) -> Option<SessionId> {
     match p {
         Params::Checkpoint(p) => Some(p.session.clone()),
+        Params::Mark(p) => Some(p.session.clone()),
         Params::Restore(p) => Some(p.session.clone()),
         Params::Files(p) => Some(p.session.clone()),
         Params::DepsPropose(p) => Some(p.session.clone()),
@@ -957,11 +972,15 @@ impl<'d, 'a> Server<'d, 'a> {
         Server { d, trackers, search }
     }
 
-    fn core(&self) -> &'a Core {
+    pub(crate) fn core(&self) -> &'a Core {
         self.d.core
     }
 
-    fn upstream_best_effort(&self, id: &SessionId) -> Option<strata_types::Upstream> {
+    pub(crate) fn sessions(&self) -> &strata_session::Sessions<'a> {
+        &self.d.sessions
+    }
+
+    pub(crate) fn upstream_best_effort(&self, id: &SessionId) -> Option<strata_types::Upstream> {
         let read = || -> Result<_> {
             let row =
                 self.core().store.session(id)?.ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
@@ -1036,7 +1055,12 @@ impl<'d, 'a> Server<'d, 'a> {
                 base_warnings.push(format!("{repo}: base commits not on origin: publish will refuse until they are pushed"));
             }
         }
-        Ok(json!({ "session": id, "upstream": upstream, "base_warnings":base_warnings }))
+        let mut result =
+            json!({ "session": id, "upstream": upstream, "base_warnings":base_warnings });
+        if let Some(mark) = core.store.mark(&id)? {
+            result["mark"] = json_of(&mark);
+        }
+        Ok(result)
     }
 
     /// One request: scope, handler, panic → `Failed` / `Unknown`.
@@ -1121,6 +1145,22 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
                 Ok(v)
             }
+            Params::Mark(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
+                let by = match &p.agent {
+                    Some(agent) => {
+                        strata_types::AgentName::try_from(agent.clone()).map_err(|e| {
+                            StrataError::new(Code::InvalidInput, e.message)
+                                .with_detail(json!({ "reason": "agent" }))
+                        })?;
+                        strata_types::MarkByKind::Agent
+                    }
+                    None => strata_types::MarkByKind::Cli,
+                };
+                strata_types::validate_mark_note(p.note.as_deref())?;
+                writing();
+                let mark = core.store.set_mark(&p.session, p.state, p.note.as_deref(), by, SystemTime::now())?;
+                Ok(json!({ "session": p.session, "mark": mark.map(|m| json_of(&m)).unwrap_or_else(|| json!({"state":"active"})) }))
+            }),
             Params::Checkpoint(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
                 let ws = workspace(core, &p.session, &p.repo)?;
                 let base = base_of(core, &ws.base)?;
@@ -1213,12 +1253,16 @@ impl<'d, 'a> Server<'d, 'a> {
                     writing();
                     strata_publish::assign(&core.store, p.group, &p.path, p.session.clone())
                 };
-                match repo {
-                    Some(repo) => core.locks.with_repo(&repo, run)?,
-                    // No such publish: assign names the refusal; nothing to lock.
-                    None => run()?,
-                }
-                Ok(json!({}))
+                // Auto-close §3.2: the assignee's queue place first, so that a
+                // close that has read its assignments cannot strand a new one.
+                core.locks.with_sessions(std::slice::from_ref(&p.session), || {
+                    match repo {
+                        Some(repo) => core.locks.with_repo(&repo, run)?,
+                        // No such publish: assign names the refusal; nothing to lock.
+                        None => run()?,
+                    }
+                    Ok(json!({}))
+                })
             }
             Params::Rm(p) => {
                 let action = self.d.sessions.discard_action(&p.session)?;
@@ -1229,53 +1273,36 @@ impl<'d, 'a> Server<'d, 'a> {
                     if let Some(t) = &token {
                         recheck(t, &action)?;
                     }
-                    // status-perf D8: du lets go of the session first, and
-                    // stays off it until its figures are dropped.
-                    self.with_du_hold(std::slice::from_ref(&p.session), || {
-                        let mut upstream = self.upstream_best_effort(&p.session);
-                        let before = core.store.session(&p.session).ok().flatten();
-                        self.trackers.drop_session(&p.session);
-                        writing();
-                        let r = self.d.sessions.remove(&p.session, p.discard, token);
-                        self.d.sessions.forget_old_trees(&p.session);
-                        if let Err(e) = &r {
-                            record_rm_attempt(core, &p.session, e);
+                    let before = core.store.session(&p.session).ok().flatten();
+                    let (r, mut upstream) =
+                        self.remove_session(&p.session, RemoveCall::Agent { discard: p.discard, token });
+                    let r = r.map_err(|mut e| {
+                        if e.code == Code::Dirty && let Some(upstream) = &upstream
+                            && let Some(detail) = e.detail.get_or_insert_with(|| json!({})).as_object_mut() {
+                            detail.insert("upstream".into(), json_of(upstream));
                         }
-                        let r = r.map_err(|mut e| {
-                            if e.code == Code::Dirty && let Some(upstream) = &upstream
-                                && let Some(detail) = e.detail.get_or_insert_with(|| json!({})).as_object_mut() {
-                                detail.insert("upstream".into(), json_of(upstream));
-                            }
-                            e
-                        })?;
-                        for o in &r.orphans {
-                            tracing::warn!(path = %o.path.display(), "rm retired a recreated session directory");
-                        }
-                        for w in &r.warnings {
-                            tracing::warn!(session = %p.session, error = %w.message, "rm orphan sweep");
-                        }
-                        self.d.du.on_remove(p.session.as_str());
-                        let mut data = json_of(&r);
-                        if let Some(upstream) = &mut upstream {
-                            upstream.as_of_rm = Some("before".into());
-                            if !p.discard { for repo in upstream.repos.values_mut() { repo.unpublished = Some(false); } }
-                            data["upstream"] = json_of(upstream);
-                        }
-                        let mut unreferenced = Vec::new();
-                        if let Some(before) = before {
-                            for (repo, ws) in before.manifest.repos.iter().filter(|(_, w)| w.tracked) {
-                                if let Ok(git) = git_of(core, repo)
-                                    && let Ok(cfg) = repo_cfg(core, repo)
-                                    && let Ok(Some(main)) = strata_deps::main_tip(cfg, git)
-                                    && !git.is_ancestor(&ws.head, &main).unwrap_or(true)
-                                    && git.refs_containing(&ws.head).is_ok_and(|r| r.is_empty()) {
-                                    unreferenced.push(json!({"kind":"base_rev_unreferenced","repo":repo,"oid":ws.head}));
-                                }
+                        e
+                    })?;
+                    let mut data = json_of(&r);
+                    if let Some(upstream) = &mut upstream {
+                        upstream.as_of_rm = Some("before".into());
+                        if !p.discard { for repo in upstream.repos.values_mut() { repo.unpublished = Some(false); } }
+                        data["upstream"] = json_of(upstream);
+                    }
+                    let mut unreferenced = Vec::new();
+                    if let Some(before) = before {
+                        for (repo, ws) in before.manifest.repos.iter().filter(|(_, w)| w.tracked) {
+                            if let Ok(git) = git_of(core, repo)
+                                && let Ok(cfg) = repo_cfg(core, repo)
+                                && let Ok(Some(main)) = strata_deps::main_tip(cfg, git)
+                                && !git.is_ancestor(&ws.head, &main).unwrap_or(true)
+                                && git.refs_containing(&ws.head).is_ok_and(|r| r.is_empty()) {
+                                unreferenced.push(json!({"kind":"base_rev_unreferenced","repo":repo,"oid":ws.head}));
                             }
                         }
-                        if !unreferenced.is_empty() { data["base_rev_unreferenced"] = json!(unreferenced); }
-                        Ok(data)
-                    })
+                    }
+                    if !unreferenced.is_empty() { data["base_rev_unreferenced"] = json!(unreferenced); }
+                    Ok(data)
                 })
             }
             Params::Gc(p) => {
@@ -1477,7 +1504,11 @@ impl<'d, 'a> Server<'d, 'a> {
         let core = self.core();
         let rep = core.locks.with_sessions(std::slice::from_ref(session), || {
             writing();
-            self.d.sessions.add(session, repos)
+            let rep = self.d.sessions.add(session, repos)?;
+            if !rep.added.is_empty() {
+                crate::auto_close::clear_daemon_mark(core, session);
+            }
+            Ok(rep)
         })?;
         let mut anchor_unknown = Vec::new();
         if !rep.added.is_empty() {
@@ -1494,6 +1525,49 @@ impl<'d, 'a> Server<'d, 'a> {
             }
         }
         Ok(json!({ "report": json_of(&rep), "anchor_unknown": anchor_unknown }))
+    }
+
+    /// The one way a session is removed through the daemon, under its queue
+    /// place: du lets go of the session first and stays off it until its figures
+    /// are dropped (status-perf D8), the Tracker goes, the remove runs and a
+    /// refusal becomes the session's `last_rm`. An agent's call reads `upstream`
+    /// here; auto-close has read it already and hands it in, so a close reads it
+    /// once. Either way it comes back, because the reply is the caller's.
+    pub(crate) fn remove_session(
+        &self,
+        s: &SessionId,
+        call: RemoveCall,
+    ) -> (Result<strata_session::RemoveReport>, Option<strata_types::Upstream>) {
+        let core = self.core();
+        let (mut upstream, by, agent) = match call {
+            RemoveCall::Agent { discard, token } => (None, None, Some((discard, token))),
+            RemoveCall::AutoClose { upstream, by } => (Some(upstream), Some(by), None),
+        };
+        let removed = self.with_du_hold(std::slice::from_ref(s), || {
+            if agent.is_some() {
+                upstream = self.upstream_best_effort(s);
+            }
+            self.trackers.drop_session(s);
+            writing();
+            let r = match agent {
+                Some((discard, token)) => self.d.sessions.remove(s, discard, token),
+                None => self.d.sessions.remove_strict(s),
+            };
+            self.d.sessions.forget_old_trees(s);
+            if let Err(e) = &r {
+                record_rm_attempt(core, s, e, by.as_ref());
+            }
+            let r = r?;
+            for o in &r.orphans {
+                tracing::warn!(path = %o.path.display(), "rm retired a recreated session directory");
+            }
+            for w in &r.warnings {
+                tracing::warn!(session = %s, error = %w.message, "rm orphan sweep");
+            }
+            self.d.du.on_remove(s.as_str());
+            Ok(r)
+        });
+        (removed, upstream)
     }
 
     /// `status{summary:true}` (status-perf C): from the store alone, no
@@ -2023,6 +2097,7 @@ impl<'d, 'a> Server<'d, 'a> {
         let core = self.core();
         let upstream_sessions: BTreeSet<_> =
             group.batches.iter().map(|b| b.session.clone()).collect();
+        let baselines = crate::auto_close::baselines(core, &upstream_sessions);
         let rows = core.store.publishes()?;
         let (group, mut already) = rerun_plan(core, &rows, group)?;
         let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
@@ -2100,7 +2175,7 @@ impl<'d, 'a> Server<'d, 'a> {
                             .batches
                             .iter()
                             .filter(|b| b.repo == repo)
-                            .map(|b| landed_before(&rows, b))
+                            .map(|b| landed_before(&rows, b).map(|v| refresh_refused(core, b, v)))
                             .collect::<Option<Vec<Value>>>()
                             .and_then(|v| v.into_iter().next_back()) =>
                 {
@@ -2112,15 +2187,30 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
             }
         }
-        // `publish_bound` has finished its post-publish group rebase here.
+        // `publish_bound` has finished its post-publish group rebase here, and
+        // this request holds no queue and no repo lock.
+        let fields = crate::auto_close::after_publish(
+            self,
+            &crate::auto_close::PublishCall {
+                group: requested_group,
+                baselines: &baselines,
+                published: &done,
+                already: &already,
+            },
+        );
         let upstream: BTreeMap<_, _> = upstream_sessions
             .iter()
-            .filter_map(|s| self.upstream_best_effort(s).map(|u| (s, u)))
+            .filter_map(|s| match fields.before.get(s) {
+                // Closed: the read taken before teardown, or nothing at all.
+                Some(before) => before.clone().map(|u| (s, u)),
+                None => self.upstream_best_effort(s).map(|u| (s, u)),
+            })
             .collect();
         let mut data = json!({ "published": done, "already_published": already });
         if !upstream.is_empty() {
             data["upstream"] = json_of(&upstream);
         }
+        fields.apply(&mut data);
         Ok(data)
     }
 
@@ -2204,7 +2294,7 @@ impl<'d, 'a> Server<'d, 'a> {
         if token.is_none() && !rc.needs_human_confirm() {
             return self.push_headless(repo, &rc, git);
         }
-        core.locks.with_repo(repo, || {
+        let (pushed, tip) = core.locks.with_repo(repo, || {
             if let Some(t) = &token {
                 recheck(t, &action)?;
             }
@@ -2238,8 +2328,15 @@ impl<'d, 'a> Server<'d, 'a> {
             if matches!(r, Ok(strata_types::PushOutcome::Pushed)) {
                 resolve::settle_push_scenes(core, git, repo, &branch, &tip, dest.as_ref());
             }
-            Ok(json!({ "push": json_of(&r?), "commit": tip.as_str() }))
-        })
+            Ok((r?, tip))
+        })?;
+        let mut data = json!({ "push": json_of(&pushed), "commit": tip.as_str() });
+        // Outside the repo lock: the close's unpin takes it, and a request that
+        // already holds it would wait for itself.
+        if let Some(fields) = crate::auto_close::after_push(self, repo) {
+            fields.apply(&mut data);
+        }
+        Ok(data)
     }
 }
 
@@ -2299,13 +2396,19 @@ impl Server<'_, '_> {
         }
         let replay = replayed.as_ref().map(resolve::Replayed::json);
         match r {
-            Ok(tip) => Ok(json!({
-                "push": json_of(&strata_types::PushOutcome::Pushed),
-                "commit": tip.as_str(),
-                "replayed": replay,
-                "rebases": rebases,
-                "warnings": warnings,
-            })),
+            Ok(tip) => {
+                let mut data = json!({
+                    "push": json_of(&strata_types::PushOutcome::Pushed),
+                    "commit": tip.as_str(),
+                    "replayed": replay,
+                    "rebases": rebases,
+                    "warnings": warnings,
+                });
+                if let Some(fields) = crate::auto_close::after_push(self, repo) {
+                    fields.apply(&mut data);
+                }
+                Ok(data)
+            }
             Err(mut e) => {
                 if let Some(rp) = replay {
                     let d = e.detail.get_or_insert_with(|| json!({}));
@@ -2401,7 +2504,7 @@ fn rerun_plan(core: &Core, rows: &[strata_store::PublishRecord], group: &strata_
         if paths.is_empty()
             && let Some(v) = proof
         {
-            landed.insert(b.repo.clone(), v);
+            landed.insert(b.repo.clone(), refresh_refused(core, b, v));
         } else {
             kept.push(strata_types::Batch { paths, ..b.clone() });
         }
@@ -2521,6 +2624,36 @@ fn landed_before(rows: &[strata_store::PublishRecord], b: &strata_types::Batch) 
             json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "message_source": o.get("message_source"), "push": o.get("push").cloned().unwrap_or(Value::Null) })
         })
     })
+}
+
+/// An `already_published` entry copies its row's `push`, and a later push leaves
+/// `Refused` in place. So when the entry's commit, or its replayed copy, has
+/// reached `origin/<publish.branch>` since, it reads `Pushed` with
+/// `landed_later: true`. Read-only; the row is not touched, and any git error
+/// leaves the entry as it was.
+fn refresh_refused(core: &Core, b: &strata_types::Batch, mut entry: Value) -> Value {
+    if entry.get("push").and_then(|p| p.get("kind")).and_then(Value::as_str) != Some("Refused") {
+        return entry;
+    }
+    let landed = || -> Result<bool> {
+        let git = git_of(core, &b.repo)?;
+        let branch = &repo_cfg(core, &b.repo)?.publish.branch;
+        let Some(tip) = git.read_ref(&strata_gitio::remote_ref("origin", branch))? else {
+            return Ok(false);
+        };
+        let commit = entry.get("commit").and_then(Value::as_str).unwrap_or_default();
+        let commit = CommitOid::try_from(commit.to_owned())?;
+        if git.is_ancestor(&commit, &tip)? {
+            return Ok(true);
+        }
+        let id = entry.get("publish").and_then(Value::as_u64).unwrap_or(0);
+        Ok(git.landed_copy(id, &b.repo, &b.session, &commit, &tip)?.is_some())
+    };
+    if landed().unwrap_or(false) {
+        entry["push"] = json!({ "kind": "Pushed" });
+        entry["landed_later"] = json!(true);
+    }
+    entry
 }
 
 /// rm-followups §1.6 T2's locks: every take only if free right now (the

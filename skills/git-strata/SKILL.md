@@ -1,8 +1,8 @@
 ---
 name: git-strata
-description: Use when working in a repo managed by git-strata (macOS), when the cwd is inside a git-strata session workspace (`<root>/sessions/<id>/<repo>`, default root ~/.strata), or when the user asks to start, checkpoint, diff, restore, sync with main, publish, push or remove a git-strata session, or to run a dev server on per-session ports. Gives each agent session its own isolated APFS-cloned workspace over a shared base snapshot. Covers the CLI loop (new, checkpoint, sync --check, publish, rm), the JSON envelope and error codes, main-sync conflict resolution, and the commands an agent must hand to a human. For any agent that runs shell commands (Claude Code, Codex, Cursor and others).
+description: Use when working in a repo managed by git-strata (macOS), when the cwd is inside a git-strata session workspace (`<root>/sessions/<id>/<repo>`, default root ~/.strata), or when the user asks to start, checkpoint, diff, restore, sync with main, publish, push or remove a git-strata session, or to run a dev server on per-session ports. Gives each agent session its own isolated APFS-cloned workspace over a shared base snapshot. Covers the CLI loop (new, checkpoint, sync --check, publish, which closes a fully landed session), the JSON envelope and error codes, main-sync conflict resolution, and the commands an agent must hand to a human. For any agent that runs shell commands (Claude Code, Codex, Cursor and others).
 license: MIT OR Apache-2.0
-compatibility: macOS 13+ on APFS. Needs matching git-strata CLI and daemon builds; R2 features require R2 or later. The 0.1.2 CLI cannot read a v6 store. Only a human starts the daemon.
+compatibility: macOS 13+ on APFS. Needs matching git-strata CLI and daemon builds; R2 features require R2 or later. The 0.1.2 CLI cannot read a v6 or v7 store. Only a human starts the daemon.
 ---
 
 # git-strata
@@ -95,10 +95,76 @@ git-strata publish --from "${S}:src/a.ts" --from "${S}:src/b.ts"
 # 7. Push only if the human asked (a gated repo needs the human at a TTY)
 git-strata push api
 
-# 8. Remove the session once its work is published
-git-strata rm --session "$S"
+# 8. Read the publish reply (step 6, run from `cd ~`). A fully landed session is
+#    closed by the publish itself: data.auto_close.sessions["$S"].closed is true,
+#    the session is gone, there is nothing to mark or remove. Otherwise
+#    .reasons[0] says why it stayed open; the first bullet below says what to do.
 ```
 
+- Step 8, in full. Read `data.auto_close.sessions[<your session id>]`
+  (`data.closed` is the whole group's and never counts other sessions the push
+  re-judged). If its `closed` is `true` the session is gone: there is nothing
+  to mark or remove; stay out of its path. Otherwise `reasons[0]` says why it
+  stayed open:
+  - `disabled`: the daemon neither closes nor marks for this repo set; mark
+    done and remove by hand as before (`mark done`, then
+    `git-strata rm --session S` when finished).
+  - `unpublished`: publish the listed paths (or `mark active` and keep
+    working). If `detail.regenerable` lists some of them, those are build
+    output by the repo's rule and your own `git-strata rm --session S` lets
+    them go. If `detail.landing.<repo>.historical` lists some, they hold an
+    older publish's content, not main's: publish them if the revert is meant.
+    If `detail.landing.<repo>.why_none` is `no_built_base`, the paths are
+    published but the judge cannot prove it: run `git-strata rm --session S`
+    yourself (it refuses `Dirty`, so it is safe). If it is `no_landed_publish`
+    with `published: true`, they landed as a replayed copy: run
+    `git-strata sync --session S`, then `git-strata rm --session S`.
+  - `open_files`: close the holders, then `git-strata rm --session S` yourself.
+  - `changed_during_remove`: wait until your tools are idle, then
+    `git-strata rm --session S`.
+  - `not_pushed`, `push_refused`: `detail.repo` may be another repo than the
+    one you just published, and an earlier publish of yours may be what is
+    waiting (`detail.outstanding` lists them all). If `detail.on_chain` is
+    `true`, hand the push to the human; the next push of that repo closes the
+    session, and `git-strata rm --session S` is the fallback if it stays
+    listed. If it is `false`, no push lands that commit: tell the human if it
+    was meant to land and run `git-strata rm --session S` when done.
+  - `not_merged`: the repo publishes to another branch than its default, in
+    this call or an earlier one: the daemon never closes such a session; run
+    `git-strata rm --session S` yourself when done and tell the human the
+    merge is theirs.
+  - `kept_trees` with every `changed` false: run `git-strata rm --session S`
+    when you are done.
+  - `embedded_repo`: `detail.embedded_repos` names a nested git repository no
+    publish covers: move out what you need, then `git-strata rm --session S`,
+    which takes it to the trash.
+  - `assigned`: `detail.assigned` lists every path, by repo: publish them, or
+    tell the human to assign them to another session (for a repo that is not
+    one of this session's, only the human can).
+  - `deps_pending` with `detail.own` true and `detail.state`
+    `awaiting_publish`: your own deps draft never landed: publish its install
+    inputs if you meant the change (a repo with `detail.tracked` false cannot
+    be published); no command cancels a draft, so if you dropped the change,
+    run `git-strata rm --session S` when you are done.
+  - `conflicts` with `detail.report` true: your `sync` left a conflict:
+    `cd ~ && git-strata sync --session S --repo <detail.repo>` reports it
+    again; resolve it as that says, or run `git-strata rm --session S` if you
+    no longer want the sync.
+  - `busy`: another operation had the session, nothing was judged or marked;
+    run `git-strata rm --session S` when it is done, or publish again.
+  - `extended`: a repo was added to this session while this call ran: nothing
+    was judged or marked and the session is yours, so publish the new work
+    when it is ready.
+  - anything else: tell the human.
+
+  If `mark.written` is `false` and `mark.skipped` is not `unchanged`, these
+  reasons are in this reply only: act on them now. Never `rm --discard`. A
+  successful publish reply without `data.auto_close` comes from a daemon that
+  lacks the `publish.auto_close` feature: mark the session done and leave
+  removal to the human, as before.
+- Marking requires the daemon feature `session.mark`; an older daemon returns
+  `Unsupported daemon_too_old`. Done notes are 1–2000 UTF-8 bytes, with tab/newline
+  allowed and other C0 controls refused. Active clears the mark and takes no note.
 - `--session` takes a session id or a ticket (`AmbiguousMatch` when a ticket
   names several; use an id from `detail`). Write `"${S}:path"`, never
   `"$S:path"`: zsh reads `$S:t`, `$S:h` as modifiers.
@@ -140,7 +206,10 @@ The envelope is:
 Branch on `error.code`, then `error.detail.reason`; never parse `message`.
 When a reply carries a `fix` (in `detail`, `upstream`, `deps` or a warning),
 it is the command to run next, or the text to hand the human when it starts
-with "ask the human". Never run a human-only command (hard rule 1) yourself. Exceptions to the envelope: successful `help`, `--help`/`--version`, `ls --table`, a
+with "ask the human". Never run a human-only command (hard rule 1) yourself.
+Exception: an `upstream` with `as_of_rm: "before"` describes a session that
+is already closed (read before teardown); ignore its `fix` and run nothing
+against that session. Exceptions to the envelope: successful `help`, `--help`/`--version`, `ls --table`, a
 `session exec` that started its command, and `sync --check --hook`.
 Unknown help topics return an `InvalidInput` / `help_topic` envelope.
 
@@ -168,7 +237,7 @@ Unknown help topics return an `InvalidInput` / `help_topic` envelope.
 | `Conflict sync_conflict` / `HeadMoved` | resolve the report ([sync.md](sync.md)) |
 | `Conflict assigned` | another session owns the path; do not retry |
 | `CheckFailed` | fix the code, checkpoint, publish again |
-| `Dirty` (rm) | publish the work, or ask the human about `rm --discard` |
+| `Dirty` (rm) | nothing was removed: publish the listed paths (or `mark active` and keep working), or mark the session done and tell the human what is unpublished; never run `rm --discard` or seek a bypass |
 | `PortInUse` | [dev-ports.md](dev-ports.md) |
 | `Unknown` | do not retry, `rm` or `gc`; run `status` and tell the human |
 | `Corrupt` | stop and tell the human |
@@ -177,7 +246,15 @@ Everything else: [errors.md](errors.md).
 
 ## Hard rules
 
-1. Never bypass a human gate. There is no `--yes`, `--force` or env var, and
+1. A full publish closes the session; you need no `rm`. If it stays open,
+   follow `data.auto_close` (step 8), which says whether
+   `git-strata rm --session S`, never with `--discard`, is yours to run. A done
+   mark, yours or the daemon's, lets the daemon close the session on a later
+   publish or push of its repos once everything has landed: the workspace goes
+   to the trash and the checkpoints stay. To keep working, or to keep the
+   workspace, run `git-strata mark --session S active`, and do so before an
+   `add` if you marked it done yourself.
+   Never bypass a human gate. There is no `--yes`, `--force` or env var, and
    faking a TTY (`script`, `expect`, a pty) is bypassing. These are the
    human's; print the exact command and stop:
    - `git-strata rm --session S --discard`

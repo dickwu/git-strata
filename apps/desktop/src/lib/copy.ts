@@ -267,12 +267,14 @@ export const copy = {
     },
     slow: 'Session status is checked every 30 seconds while the window is open.',
     filter: {
-      placeholder: 'Filter by ticket, session, repo or agent',
+      placeholder: 'Filter by ticket, session, repo, agent or note',
       label: 'Filter sessions',
       repos: 'Repos',
       reposHint: 'Show sessions that use all selected repos',
       agents: 'Agents',
       agentsHint: 'Show sessions from any selected agent',
+      state: 'State',
+      stateHint: 'Show sessions with any selected completion mark',
       toggle: (name: string, n: number, on: boolean) =>
         `${name}, used by ${n} ${n === 1 ? 'session' : 'sessions'}${on ? ', selected' : ''}`,
       rowTag: (repo: string, on: boolean) =>

@@ -90,29 +90,71 @@ pub struct PublishCommit {
     pub oid: CommitOid,
     pub subject: String,
     pub publishes: Vec<String>,
+    /// Values of the publish message's `sessions:` trailer.
+    pub sessions: Vec<String>,
 }
+
+/// How far back from the tip [`Git::landed_copy`] looks, first parent.
+pub const LANDED_COPY_LIMIT: usize = 500;
 
 impl Git {
     pub fn commits_between_trailers(&self, anchor: &CommitOid, tip: &CommitOid, limit: usize) -> Result<Vec<PublishCommit>> {
         let mut c = self.repo_command();
         c.args(["log", "-z", "--first-parent", "--no-show-signature",
-            "--format=%H%x00%s%x00%(trailers:key=Strata-Publish,valueonly,separator=%x01)",
+            "--format=%H%x00%s%x00%(trailers:key=Strata-Publish,valueonly,separator=%x01)%x00%(trailers:key=sessions,valueonly,separator=%x1f)",
             &format!("--max-count={limit}"), tip.as_str(), "--not", anchor.as_str(), "--"]);
         let out = self.run(c, Opts::c())?;
         if !out.ok() { return Err(self.missing_commit_or(&[anchor, tip], "log", &out)); }
         let mut fields = out.stdout.split(|b| *b == 0);
         let mut rows = Vec::new();
         while let Some(oid) = fields.next().filter(|b| !b.is_empty()) {
-            let (Some(subject), Some(trailers)) = (fields.next(), fields.next()) else {
+            let (Some(subject), Some(trailers), Some(sessions)) = (fields.next(), fields.next(), fields.next()) else {
                 return Err(crate::command::failed("log trailer fields", &out));
             };
             rows.push(PublishCommit {
                 oid: parse_oid(oid, "log")?,
                 subject: String::from_utf8_lossy(subject).into_owned(),
                 publishes: String::from_utf8_lossy(trailers).split(['\u{1}', '\n']).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect(),
+                sessions: String::from_utf8_lossy(sessions)
+                    .split([',', '\u{1f}', '\n'])
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
             });
         }
         Ok(rows)
+    }
+
+    /// The commit on `tip`'s first-parent line past `merge_base(commit, tip)`
+    /// whose trailers name both `<id> (<repo>)` and `session`: `commit`'s
+    /// replayed copy. Publish ids are per store and `tip` holds other
+    /// developers' commits, so the id alone proves nothing, and a subject-only
+    /// commit names no session. A pruned `commit` has no merge base, so no copy
+    /// is provable: `None`, not an error.
+    pub fn landed_copy(
+        &self,
+        id: u64,
+        repo: &strata_types::RepoName,
+        session: &strata_types::SessionId,
+        commit: &CommitOid,
+        tip: &CommitOid,
+    ) -> Result<Option<CommitOid>> {
+        let anchor = match self.merge_base(commit, tip) {
+            Ok(Some(m)) => m,
+            Ok(None) => return Ok(None),
+            Err(e) if e.code == strata_types::Code::NoSuchCommit => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let wanted = format!("{id} ({repo})");
+        let commits = self.commits_between_trailers(&anchor, tip, LANDED_COPY_LIMIT)?;
+        Ok(commits
+            .into_iter()
+            .find(|c| {
+                c.publishes.iter().any(|p| *p == wanted)
+                    && c.sessions.iter().any(|s| s == session.as_str())
+            })
+            .map(|c| c.oid))
     }
 
     /// Final changed paths, after clean filters; tree objects are enough.

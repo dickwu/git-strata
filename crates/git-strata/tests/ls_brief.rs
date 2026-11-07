@@ -58,7 +58,7 @@ fn ls_and_status_brief_daemon_local_and_old_daemon() {
                 .next()
                 .unwrap()
                 .split_whitespace()
-                .eq(["ID", "TICKET", "STATE", "REPOS", "CREATED"])
+                .eq(["ID", "TICKET", "STATE", "MARK", "REPOS", "CREATED"])
         );
         assert!(
             t.stdout.contains("T-1") && t.stdout.contains(a.as_str()),

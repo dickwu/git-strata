@@ -278,3 +278,320 @@ fn replay_adoption_and_consumed_plans_clear_to_deps() {
     assert_eq!(r.planned_publish, Some(publish));
     assert!(r.head.is_none() && r.to_deps.is_none());
 }
+
+// ---- auto-close §3.2: the target writers and the guard on `Removing` ------
+
+/// A second session of the same store, on `app` at generation 1, left
+/// `Creating` until the caller moves it on.
+fn creating(env: &Env, s: &Store, name: &str, tracked: bool) -> SessionId {
+    let id = sess(name);
+    let root = env.root.join("sessions").join(id.as_str());
+    let mut repos = BTreeMap::new();
+    repos.insert(repo("app"), WorkspaceState { base: g('1'), head: head('1'), path: root.join("app"), tracked });
+    s.create_session(&SessionManifest { id: id.clone(), ticket: None, agent: None, root, repos }, t(10)).unwrap();
+    id
+}
+
+fn second(env: &Env, s: &Store, name: &str) -> SessionId {
+    let id = creating(env, s, name, true);
+    assert!(s.set_lifecycle(&id, Lifecycle::Creating, Lifecycle::Active, None, t(11)).unwrap());
+    id
+}
+
+fn replay_plan(id: &SessionId, c: char) -> ReplayPlan {
+    ReplayPlan { session: id.clone(), planned_head: hex(c), planned_tree: hex(c) }
+}
+
+fn to_removing(s: &Store, id: &SessionId) {
+    assert!(s.set_lifecycle(id, Lifecycle::Active, Lifecycle::Removing, None, t(30)).unwrap());
+}
+
+fn to_removed(s: &Store, id: &SessionId) {
+    assert!(s.set_lifecycle(id, Lifecycle::Removing, Lifecycle::Removed, None, t(31)).unwrap());
+}
+
+/// `enroll_main`, `retarget_pending`, `settle_planned(adopt)` and
+/// `promote_pending(Some)` all answer `false` and write nothing; `plan_replay`
+/// skips only the leaving session.
+#[track_caller]
+fn assert_writers_refuse(s: &Store, empty: &SessionId, full: &SessionId, other: &SessionId, rev: u64) {
+    assert!(!s.enroll_main(empty, &repo("app"), &g('1'), &head('2'), &tree('2'), None, t(40)).unwrap());
+    assert!(row(s, empty).is_none(), "no row for a session leaving for removal");
+    let before = row(s, full);
+    assert!(!s.retarget_pending(full, &repo("app"), rev, &head('4'), &tree('4'), &g('1'), false, t(41)).unwrap());
+    assert!(!s.settle_planned(full, &repo("app"), &hex('3'), true, t(42)).unwrap());
+    assert!(!s.promote_pending(full, &repo("app"), rev, 99, Some((&hex('4'), &hex('4'))), "pending", t(43)).unwrap());
+    assert_eq!(row(s, full), before);
+    s.plan_replay(&repo("app"), &[replay_plan(empty, '4'), replay_plan(other, '4')], t(44)).unwrap();
+    assert!(row(s, empty).is_none(), "a leaving session's plan is skipped");
+    assert_eq!(row(s, other).unwrap().planned_head, Some(hex('4')), "the other plan stands");
+    assert!(s.settle_planned(other, &repo("app"), &hex('4'), false, t(45)).unwrap());
+}
+
+#[test]
+fn target_writers_refuse_a_session_leaving_for_removal() {
+    let (env, s, empty) = world(true);
+    let full = second(&env, &s, "bbbbbbbb");
+    let other = second(&env, &s, "cccccccc");
+    s.enroll_main(&full, &repo("app"), &g('1'), &head('2'), &tree('2'), None, t(20)).unwrap();
+    s.plan_replay(&repo("app"), &[replay_plan(&full, '3')], t(21)).unwrap();
+    let rev = row(&s, &full).unwrap().rev;
+
+    to_removing(&s, &empty);
+    to_removing(&s, &full);
+    assert_writers_refuse(&s, &empty, &full, &other, rev);
+    assert_eq!(row(&s, &full).unwrap().head, Some(hex('2')));
+    assert_eq!(row(&s, &full).unwrap().planned_head, Some(hex('3')));
+
+    // What only clears is unchanged.
+    assert!(s.promote_pending(&full, &repo("app"), rev, 99, None, "pending", t(46)).unwrap());
+    assert!(s.settle_planned(&full, &repo("app"), &hex('3'), false, t(47)).unwrap());
+    assert_eq!(row(&s, &full).unwrap().planned_head, None);
+
+    to_removed(&s, &empty);
+    to_removed(&s, &full);
+    assert!(row(&s, &full).is_none(), "Removed deletes the row");
+    assert_writers_refuse(&s, &empty, &full, &other, rev);
+}
+
+#[test]
+fn replay_writers_keep_creating_and_unknown_main_writers_do_not() {
+    let (env, s, _) = world(true);
+    let scene = json!({ "op": "remove" });
+    let unknown = second(&env, &s, "bbbbbbbb");
+    to_removing(&s, &unknown);
+    assert!(s.set_lifecycle(&unknown, Lifecycle::Removing, Lifecycle::Unknown, Some(&scene), t(31)).unwrap());
+    let making = creating(&env, &s, "cccccccc", true);
+    for id in [&unknown, &making] {
+        assert!(!s.enroll_main(id, &repo("app"), &g('1'), &head('2'), &tree('2'), None, t(40)).unwrap());
+        assert!(row(&s, id).is_none());
+        s.plan_replay(&repo("app"), &[replay_plan(id, '3')], t(41)).unwrap();
+        assert_eq!(row(&s, id).unwrap().planned_head, Some(hex('3')));
+        assert!(s.settle_planned(id, &repo("app"), &hex('3'), true, t(42)).unwrap());
+        let r = row(&s, id).unwrap();
+        assert_eq!(r.head, Some(hex('3')));
+        assert!(!s.retarget_pending(id, &repo("app"), r.rev, &head('4'), &tree('4'), &g('1'), false, t(43)).unwrap());
+        assert_eq!(row(&s, id).unwrap().head, Some(hex('3')));
+        assert!(s.promote_pending(id, &repo("app"), r.rev, 99, Some((&hex('4'), &hex('4'))), "pending", t(44)).unwrap());
+        assert_eq!(row(&s, id).unwrap().head, Some(hex('4')));
+    }
+}
+
+fn keys_of(s: &Store, id: &SessionId) -> Vec<PendingKey> {
+    s.rebase_pending(Some(id)).unwrap().iter().map(PendingKey::of).collect()
+}
+
+fn lifecycle(s: &Store, id: &SessionId) -> Lifecycle {
+    s.session(id).unwrap().unwrap().lifecycle
+}
+
+#[test]
+fn set_removing_if_unchanged_compares_every_key() {
+    let (_env, s, id) = world(true);
+    let guard = |keys: &[PendingKey]| s.set_removing_if_unchanged(&id, Lifecycle::Active, keys, t(50)).unwrap();
+
+    // A new row.
+    let keys = keys_of(&s, &id);
+    s.enroll_main(&id, &repo("app"), &g('1'), &head('2'), &tree('2'), None, t(20)).unwrap();
+    assert_eq!(guard(&keys), IfUnchanged::PendingMoved);
+    assert_eq!(lifecycle(&s, &id), Lifecycle::Active);
+
+    // A moved `rev` and head.
+    let keys = keys_of(&s, &id);
+    let rev = row(&s, &id).unwrap().rev;
+    assert!(s.retarget_pending(&id, &repo("app"), rev, &head('3'), &tree('3'), &g('1'), false, t(21)).unwrap());
+    assert_eq!(guard(&keys), IfUnchanged::PendingMoved);
+
+    // A set `planned_head`.
+    let keys = keys_of(&s, &id);
+    s.plan_replay(&repo("app"), &[replay_plan(&id, '4')], t(22)).unwrap();
+    assert_eq!(guard(&keys), IfUnchanged::PendingMoved);
+
+    // A set `planned_publish`.
+    let keys = keys_of(&s, &id);
+    publish(&s, &id, 23);
+    assert_eq!(guard(&keys), IfUnchanged::PendingMoved);
+    assert_eq!(lifecycle(&s, &id), Lifecycle::Active);
+
+    // A deferral keeps the keys.
+    let keys = keys_of(&s, &id);
+    let rev = row(&s, &id).unwrap().rev;
+    assert!(s.defer_pending(&id, &repo("app"), rev, "recent_writes", &json!({}), t(24)).unwrap());
+    assert_eq!(keys_of(&s, &id), keys);
+
+    // A moved lifecycle.
+    assert_eq!(
+        s.set_removing_if_unchanged(&id, Lifecycle::Unknown, &keys, t(50)).unwrap(),
+        IfUnchanged::LifecycleMoved
+    );
+    assert_eq!(lifecycle(&s, &id), Lifecycle::Active);
+
+    // Equal keys.
+    assert_eq!(guard(&keys), IfUnchanged::Removing);
+    assert_eq!(lifecycle(&s, &id), Lifecycle::Removing);
+    assert_eq!(guard(&keys), IfUnchanged::LifecycleMoved, "only once");
+}
+
+/// A proposal for `app`: `origin` with no target is a draft; with `target`
+/// it is `pending`.
+fn proposal(origin: Option<&SessionId>, to: char, target: bool) -> NewProposal {
+    NewProposal {
+        repo: repo("app"),
+        origin: origin.cloned(),
+        from: set_id('a'),
+        from_inputs: "a".repeat(64),
+        from_head: None,
+        to: set_id(to),
+        to_inputs: to.to_string().repeat(64),
+        tree: target.then(|| tree('5')),
+        head: target.then(|| head('5')),
+    }
+}
+
+/// The items of a refused guard over an unchanged row set.
+#[track_caller]
+fn reopened(s: &Store, id: &SessionId) -> Vec<serde_json::Value> {
+    match s.set_removing_if_unchanged(id, Lifecycle::Active, &keys_of(s, id), t(50)).unwrap() {
+        IfUnchanged::Reopened(items) => {
+            assert_eq!(lifecycle(s, id), Lifecycle::Active, "nothing moved");
+            items
+        }
+        other => panic!("expected Reopened, got {other:?}"),
+    }
+}
+
+#[track_caller]
+fn commits(s: &Store, id: &SessionId) {
+    let got = s.set_removing_if_unchanged(id, Lifecycle::Active, &keys_of(s, id), t(50)).unwrap();
+    assert_eq!(got, IfUnchanged::Removing);
+    assert_eq!(lifecycle(s, id), Lifecycle::Removing);
+}
+
+#[test]
+fn set_removing_if_unchanged_reads_clause_6_proposals_on_a_tracked_repo() {
+    // A `pending` proposal to another set.
+    let (_e, s, id) = world(true);
+    let p = s.record_proposal(&proposal(None, 'b', true), None, t(20)).unwrap().unwrap();
+    let items = reopened(&s, &id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["code"], "deps_pending");
+    assert_eq!(items[0]["repo"], "app");
+    assert_eq!(items[0]["proposal"], json!(p.get()));
+    assert_eq!(items[0]["state"], "pending");
+    assert_eq!(items[0]["own"], false);
+    assert_eq!(items[0]["tracked"], true);
+    assert!(s.proposal(p).unwrap().is_some());
+
+    // One to the base's own set concerns nobody.
+    let (_e, s, id) = world(true);
+    let mut same = proposal(None, 'a', true);
+    same.from = set_id('b');
+    s.record_proposal(&same, None, t(20)).unwrap().unwrap();
+    commits(&s, &id);
+
+    // This session's draft refuses; another session's does not.
+    let (_e, s, id) = world(true);
+    s.record_proposal(&proposal(Some(&id), 'b', false), None, t(20)).unwrap().unwrap();
+    let items = reopened(&s, &id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["state"], "awaiting_publish");
+    assert_eq!(items[0]["own"], true);
+    assert_eq!(items[0]["tracked"], true);
+
+    let (env, s, id) = world(true);
+    let other = second(&env, &s, "bbbbbbbb");
+    s.record_proposal(&proposal(Some(&other), 'b', false), None, t(20)).unwrap().unwrap();
+    commits(&s, &id);
+}
+
+#[test]
+fn set_removing_if_unchanged_reads_clause_6_on_an_untracked_repo() {
+    // Another origin's `pending` on a repo this session has untracked stays open
+    // for the sessions it concerns.
+    let (_e, s, id) = world(false);
+    s.record_proposal(&proposal(None, 'b', true), None, t(20)).unwrap().unwrap();
+    commits(&s, &id);
+
+    // This session's own draft there would vanish with it.
+    let (_e, s, id) = world(false);
+    s.record_proposal(&proposal(Some(&id), 'b', false), None, t(20)).unwrap().unwrap();
+    let items = reopened(&s, &id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["own"], true);
+    assert_eq!(items[0]["tracked"], false);
+    assert_eq!(items[0]["state"], "awaiting_publish");
+
+    // Its own `pending` there refuses too.
+    let (_e, s, id) = world(false);
+    s.record_proposal(&proposal(Some(&id), 'b', true), None, t(20)).unwrap().unwrap();
+    let items = reopened(&s, &id);
+    assert_eq!(items[0]["state"], "pending");
+    assert_eq!(items[0]["own"], true);
+    assert_eq!(items[0]["tracked"], false);
+
+    // Its `applied` and `superseded` ones do not.
+    let (_e, s, id) = world(false);
+    let a = s.record_proposal(&proposal(Some(&id), 'b', true), None, t(20)).unwrap().unwrap();
+    assert!(s.decide_proposal(a, ProposalDecision::Applied, t(21)).unwrap());
+    commits(&s, &id);
+
+    let (_e, s, id) = world(false);
+    let a = s.record_proposal(&proposal(Some(&id), 'b', true), None, t(20)).unwrap().unwrap();
+    s.record_proposal(&proposal(None, 'c', true), Some(a), t(21)).unwrap().unwrap();
+    assert_eq!(s.proposal(a).unwrap().unwrap().status, ProposalStatus::Superseded);
+    commits(&s, &id);
+}
+
+#[test]
+fn a_proposal_found_by_both_reads_is_reported_once() {
+    let (_e, s, id) = world(true);
+    s.record_proposal(&proposal(Some(&id), 'b', true), None, t(20)).unwrap().unwrap();
+    let items = reopened(&s, &id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["own"], true);
+    assert_eq!(items[0]["tracked"], true);
+}
+
+#[test]
+fn set_removing_if_unchanged_reads_clause_6_conflicts() {
+    // A deferral whose reason is `conflicts` keeps the keys and still refuses.
+    let (_e, s, id) = world(true);
+    s.enroll_main(&id, &repo("app"), &g('1'), &head('2'), &tree('2'), None, t(20)).unwrap();
+    let rev = row(&s, &id).unwrap().rev;
+    let keys = keys_of(&s, &id);
+    assert!(s.defer_pending(&id, &repo("app"), rev, "conflicts", &json!({}), t(21)).unwrap());
+    assert_eq!(keys_of(&s, &id), keys);
+    let items = reopened(&s, &id);
+    assert_eq!(items[0]["code"], "conflicts");
+    assert_eq!(items[0]["auto_reason"], "conflicts");
+    assert_eq!(items[0]["repo"], "app");
+
+    // A workspace row with conflicts.
+    let (env, s, id) = world(true);
+    let path = RepoPath::try_from("src/c.ts".to_string()).unwrap();
+    let stg: PathBuf = env.root.join("sessions").join(id.as_str()).join(".m2");
+    let n = s.begin_move(&id, &repo("app"), &g('2'), &head('2'), &stg, t(20)).unwrap();
+    let conflicts = [path];
+    assert!(s.set_move_state(&id, &repo("app"), n, MoveState::Preparing, MoveState::Swapping, Some(&conflicts), t(21)).unwrap());
+    s.finish_move(&id, &repo("app"), n, &conflicts, t(22)).unwrap();
+    let items = reopened(&s, &id);
+    assert_eq!(items[0]["code"], "conflicts");
+    assert_eq!(items[0]["conflicts"], json!(["src/c.ts"]));
+    assert!(items[0].get("report").is_none());
+
+    // A saved `sync` report.
+    let (_e, s, id) = world(true);
+    let row = SyncReportRow {
+        target: head('2'),
+        generation: 1,
+        path: RepoPath::try_from("src/p.ts".to_string()).unwrap(),
+        kind: "content".into(),
+        ours_blob: None,
+        hunks: json!([]),
+    };
+    s.put_sync_report(&id, &repo("app"), &head('2'), 1, &[row]).unwrap();
+    let items = reopened(&s, &id);
+    assert_eq!(items[0]["code"], "conflicts");
+    assert_eq!(items[0]["report"], true);
+    assert_eq!(items[0]["conflicts"], json!(["src/p.ts"]));
+}

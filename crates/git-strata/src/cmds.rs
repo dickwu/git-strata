@@ -85,6 +85,35 @@ fn repo_for(config: &Config, store: &Store, s: &SessionId, flag: Option<&str>, c
     }
 }
 
+/// Completion is an ordinary queued write; feature support is required and
+/// agent detection is identical to `new`. It never removes session files.
+pub fn mark(
+    ctx: &Ctx,
+    session: &str,
+    state: &str,
+    note: Option<&str>,
+    agent: Option<&str>,
+) -> Result<Envelope> {
+    strata_types::validate_mark_note(note)?;
+    let state = match state {
+        "done" => strata_types::MarkState::Done,
+        "active" if note.is_none() => strata_types::MarkState::Active,
+        "active" => return Err(invalid("note", "mark active does not take a note")),
+        _ => return Err(invalid("state", "mark state must be done or active")),
+    };
+    let agent = crate::agent::detect(agent, |k| std::env::var_os(k))?;
+    crate::agent::require_feature(&ctx.paths.socket, "session.mark")?;
+    let config = ctx.config()?;
+    let store = ro::open_store(&config)?;
+    let session = ro::select(&store, session)?;
+    let reply = ctx.call(
+        "mark",
+        json!({ "session": session, "state": state, "note": note, "agent": agent }),
+        Kind::Write,
+    )?;
+    Ok(Envelope::ok(reply))
+}
+
 // ---- new --------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -385,7 +414,7 @@ pub fn status_brief_with_wait(ctx: &Ctx, sel: &Select, wait: &crate::args::WaitA
     Ok(Envelope::ok(data))
 }
 
-/// `ls --table` on success: `ID TICKET STATE REPOS CREATED`, one row per
+/// `ls --table` on success: `ID TICKET STATE MARK REPOS CREATED`, one row per
 /// session. Returns the exit code.
 pub fn emit_table(env: &Envelope) -> i32 {
     use std::io::Write;
@@ -404,8 +433,8 @@ pub fn emit_table(env: &Envelope) -> i32 {
 
 /// The `ls --table` text for `ls`'s `data`.
 pub fn table_of(data: &Value) -> String {
-    let head = ["ID", "TICKET", "STATE", "REPOS", "CREATED"];
-    let mut rows: Vec<[String; 5]> = vec![head.map(str::to_string)];
+    let head = ["ID", "TICKET", "STATE", "MARK", "REPOS", "CREATED"];
+    let mut rows: Vec<[String; 6]> = vec![head.map(str::to_string)];
     for s in data["sessions"].as_array().into_iter().flatten() {
         let text = |v: &Value| v.as_str().map(str::to_string).unwrap_or_else(|| "-".into());
         let repos: Vec<&str> = s["repos"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -413,11 +442,12 @@ pub fn table_of(data: &Value) -> String {
             text(&s["id"]),
             text(&s["ticket"]),
             text(&s["state"]),
+            s["mark"]["state"].as_str().unwrap_or("active").to_string(),
             if repos.is_empty() { "-".into() } else { repos.join(",") },
             text(&s["created"]),
         ]);
     }
-    let mut width = [0usize; 5];
+    let mut width = [0usize; 6];
     for r in &rows {
         for (w, c) in width.iter_mut().zip(r) {
             *w = (*w).max(c.chars().count());

@@ -5,7 +5,7 @@ mod support;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -17,7 +17,8 @@ use strata_overlay::{Base, WorkspaceRef};
 use strata_session::{MoveReport, NewReport, SessionSeam, SessionState, Sessions};
 use strata_store::{Lifecycle, MoveState};
 use strata_types::{
-    Action, BaseGen, CheckpointReason, Code, CommitOid, ConfirmToken, OverlayEntry, RepoId, SessionId, StrataError,
+    Action, BaseGen, CheckpointReason, Code, CommitOid, ConfirmToken, OverlayEntry, RepoId,
+    SessionId, StrataError,
 };
 use support::*;
 
@@ -53,7 +54,11 @@ fn rid(fx: &Fx, repo: &str) -> RepoId {
 
 fn trash(fx: &Fx) -> Vec<String> {
     let mut v: Vec<String> = fs::read_dir(fx.root().join("store/trash"))
-        .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
         .unwrap_or_default();
     v.sort();
     v
@@ -71,7 +76,12 @@ fn target(fx: &Fx, s: &Sessions<'_>, repo: &str, files: &[(&str, &[u8])]) -> (Ba
     (s.ensure_base(&fx.rn(repo), &h).unwrap(), h)
 }
 
-fn mv(fx: &Fx, s: &Sessions<'_>, id: &SessionId, to: &(BaseGen, CommitOid)) -> strata_session::Result<MoveReport> {
+fn mv(
+    fx: &Fx,
+    s: &Sessions<'_>,
+    id: &SessionId,
+    to: &(BaseGen, CommitOid),
+) -> strata_session::Result<MoveReport> {
     s.move_workspace(id, &rid(fx, "tool"), to.0.clone(), to.1.clone())
 }
 
@@ -84,25 +94,52 @@ fn lifecycle(fx: &Fx, id: &SessionId) -> Lifecycle {
 }
 
 fn tok(id: &SessionId) -> Option<ConfirmToken> {
-    Some(ConfirmToken { action: Action::RemoveDiscard { session: id.clone(), kept_trees: vec![] }, issued: Instant::now(), nonce: 1 })
+    Some(ConfirmToken {
+        action: Action::RemoveDiscard {
+            session: id.clone(),
+            kept_trees: vec![],
+        },
+        issued: Instant::now(),
+        nonce: 1,
+    })
 }
 
 fn detail(e: &StrataError) -> &serde_json::Map<String, Value> {
-    e.detail.as_ref().and_then(|d| d.as_object()).expect("detail is an object")
+    e.detail
+        .as_ref()
+        .and_then(|d| d.as_object())
+        .expect("detail is an object")
 }
 
 fn kinds(e: &StrataError) -> Vec<String> {
-    detail(e)["unresolved"].as_array().unwrap().iter().map(|u| u["kind"].as_str().unwrap().to_string()).collect()
+    detail(e)["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["kind"].as_str().unwrap().to_string())
+        .collect()
 }
 
 fn open_pids(e: &StrataError) -> Vec<i64> {
-    detail(e)["open"].as_array().unwrap().iter().map(|o| o["pid"].as_i64().unwrap()).collect()
+    detail(e)["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["pid"].as_i64().unwrap())
+        .collect()
 }
 
 fn base_of(fx: &Fx, g: &BaseGen) -> Base {
     let store = fx.store();
-    let manifest = store.manifest(&g.repo, &g.tree).unwrap().expect("base manifest");
-    Base { r#gen: g.clone(), manifest: std::sync::Arc::new(manifest), dir: store.base_dir(g) }
+    let manifest = store
+        .manifest(&g.repo, &g.tree)
+        .unwrap()
+        .expect("base manifest");
+    Base {
+        r#gen: g.clone(),
+        manifest: std::sync::Arc::new(manifest),
+        dir: store.base_dir(g),
+    }
 }
 
 fn overlay(fx: &Fx, id: &SessionId, root: &Path, g: &BaseGen) -> Vec<OverlayEntry> {
@@ -115,7 +152,9 @@ fn overlay(fx: &Fx, id: &SessionId, root: &Path, g: &BaseGen) -> Vec<OverlayEntr
         git: &fx.gits[&rn],
         store: fx.store(),
     };
-    strata_overlay::reconcile_full(&w, &base_of(fx, g)).unwrap().entries
+    strata_overlay::reconcile_full(&w, &base_of(fx, g))
+        .unwrap()
+        .entries
 }
 
 /// Everything a refused remove must leave as it was.
@@ -157,7 +196,9 @@ const WORKER_ENV: &str = "STRATA_SESSION_REMOVE_WORKER";
 /// `pipe`, block writing into a pipe nobody reads).
 #[test]
 fn holder_worker() {
-    let Ok(spec) = std::env::var(WORKER_ENV) else { return };
+    let Ok(spec) = std::env::var(WORKER_ENV) else {
+        return;
+    };
     let (kind, path) = spec.split_once(':').unwrap();
     let mut keep: Vec<fs::File> = Vec::new();
     match kind {
@@ -167,7 +208,14 @@ fn holder_worker() {
             let len = f.metadata().unwrap().len() as usize;
             // SAFETY: read-only private mapping of an open file.
             let p = unsafe {
-                libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_PRIVATE, f.as_raw_fd(), 0)
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    libc::PROT_READ,
+                    libc::MAP_PRIVATE,
+                    f.as_raw_fd(),
+                    0,
+                )
             };
             assert_ne!(p, libc::MAP_FAILED);
             drop(f);
@@ -200,11 +248,16 @@ struct Worker {
 impl Worker {
     fn spawn(spec: String, cwd: Option<&Path>) -> Worker {
         let mut c = Command::new(std::env::current_exe().unwrap());
-        c.args(["--exact", "holder_worker", "--nocapture", "--test-threads=1"])
-            .env(WORKER_ENV, spec)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+        c.args([
+            "--exact",
+            "holder_worker",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(WORKER_ENV, spec)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
         if let Some(d) = cwd {
             c.current_dir(d);
         }
@@ -213,7 +266,10 @@ impl Worker {
         let mut line = String::new();
         loop {
             line.clear();
-            assert!(out.read_line(&mut line).unwrap() > 0, "worker exited before READY");
+            assert!(
+                out.read_line(&mut line).unwrap() > 0,
+                "worker exited before READY"
+            );
             if line.contains("READY") {
                 break;
             }
@@ -248,26 +304,55 @@ fn workspace_git_never_writes_main_checkout() {
     let id = id(&rep);
     let w = ws(&rep, "tool");
     let pin = format!("refs/strata/pins/{id}");
-    let strip = |refs: &str| refs.lines().filter(|l| !l.starts_with(&pin)).collect::<Vec<_>>().join("\n");
+    let strip = |refs: &str| {
+        refs.lines()
+            .filter(|l| !l.starts_with(&pin))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
-    let c = fx.sb.commit(&w, &[("src/ws.ts", b"ws\n")], "in the workspace");
+    let c = fx
+        .sb
+        .commit(&w, &[("src/ws.ts", b"ws\n")], "in the workspace");
     fs::write(w.join("src/index.ts"), b"stashed\n").unwrap();
     fx.sb.git(&w, &["stash", "-q"]);
     fx.sb.git(&w, &["branch", "topic"]);
-    assert!(!fx.sb.git_output(&w, &["fetch", "origin"]).status.success(), "no remote in the workspace");
+    assert!(
+        !fx.sb.git_output(&w, &["fetch", "origin"]).status.success(),
+        "no remote in the workspace"
+    );
 
     let during = fx.main_snap("tool");
     assert_eq!(during.tree, before.tree);
     assert_eq!(during.git, before.git);
     assert_eq!(during.index, before.index);
-    assert_eq!(strip(&during.refs), strip(&before.refs), "only the pin is new");
+    assert_eq!(
+        strip(&during.refs),
+        strip(&before.refs),
+        "only the pin is new"
+    );
     assert!(during.refs.contains(&pin));
     let main = fx.main("tool");
-    assert!(!fx.sb.git_output(&main, &["cat-file", "-e", &c]).status.success(), "the commit is not in main");
-    assert!(fx.sb.git_output(&shadow(&fx, &id, "tool"), &["cat-file", "-e", &c]).status.success());
+    assert!(
+        !fx.sb
+            .git_output(&main, &["cat-file", "-e", &c])
+            .status
+            .success(),
+        "the commit is not in main"
+    );
+    assert!(
+        fx.sb
+            .git_output(&shadow(&fx, &id, "tool"), &["cat-file", "-e", &c])
+            .status
+            .success()
+    );
 
     s.remove(&id, true, tok(&id)).unwrap();
-    assert_eq!(fx.main_snap("tool"), before, "the pin is gone and nothing else changed");
+    assert_eq!(
+        fx.main_snap("tool"),
+        before,
+        "the pin is gone and nothing else changed"
+    );
     assert_removed(&fx, &id);
 }
 
@@ -283,7 +368,11 @@ fn removed_session_id_never_resolves_or_reissued() {
     assert_eq!(s.select(id.as_str()).unwrap_err().code, Code::NoSuchSession);
     assert_eq!(s.status(&id).unwrap_err().code, Code::NoSuchSession);
     fs::create_dir_all(&w).unwrap();
-    assert_eq!(s.resolve(&w).unwrap(), None, "a recreated directory is no session");
+    assert_eq!(
+        s.resolve(&w).unwrap(),
+        None,
+        "a recreated directory is no session"
+    );
     let dirs = fx.session_dirs();
     s.set_next_id(id.clone());
     let e = s.new(None, &fx.all()).unwrap_err();
@@ -306,9 +395,16 @@ fn remove_refuses_unpublished_without_discard() {
     let calls = fx.before.calls();
     let e = s.remove(&id, false, None).unwrap_err();
     assert_eq!(e.code, Code::Dirty, "{e:?}");
-    let paths: Vec<&str> =
-        detail(&e)["repos"]["tool"]["paths"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
-    assert!(paths.contains(&"src/new.ts") && paths.contains(&"src/index.ts"), "{paths:?}");
+    let paths: Vec<&str> = detail(&e)["repos"]["tool"]["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert!(
+        paths.contains(&"src/new.ts") && paths.contains(&"src/index.ts"),
+        "{paths:?}"
+    );
     assert_eq!(untouched(&fx, &id), a, "a refusal changes nothing");
     assert_eq!(fx.before.calls(), calls, "no checkpoint");
 
@@ -316,9 +412,15 @@ fn remove_refuses_unpublished_without_discard() {
     let want = overlay(&fx, &id, &w, &base);
     let r = s.remove(&id, true, tok(&id)).unwrap();
     assert!(r.discarded);
-    let cp = fx.store().checkpoint(&id, r.checkpoints[&fx.rn("tool")]).unwrap();
+    let cp = fx
+        .store()
+        .checkpoint(&id, r.checkpoints[&fx.rn("tool")])
+        .unwrap();
     assert_eq!(cp.reason, CheckpointReason::BeforeRemove);
-    assert_eq!(cp.entries, want, "the last checkpoint holds the discarded overlay");
+    assert_eq!(
+        cp.entries, want,
+        "the last checkpoint holds the discarded overlay"
+    );
     assert_removed(&fx, &id);
 
     // A changed old tree also needs discard.
@@ -328,7 +430,10 @@ fn remove_refuses_unpublished_without_discard() {
     let holder = Worker::spawn("cwd:".into(), Some(&w.join("src")));
     let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
     let old = strata_session::cwd::with_move_cwd(
-        strata_session::cwd::MoveCwd { allow_cwd_holders: true, ..Default::default() },
+        strata_session::cwd::MoveCwd {
+            allow_cwd_holders: true,
+            ..Default::default()
+        },
         || mv(&fx, &s, &id2, &to),
     )
     .unwrap()
@@ -356,7 +461,10 @@ fn remove_untouched_untracked_repo_needs_no_discard() {
     let id = id(&rep);
     // `front` came along untracked (every sibling joins; design.md:302) and nobody touched it.
     let r = s.remove(&id, false, None).unwrap();
-    assert!(r.checkpoints.contains_key(&fx.rn("tool")) && !r.checkpoints.contains_key(&fx.rn("front")), "{r:?}");
+    assert!(
+        r.checkpoints.contains_key(&fx.rn("tool")) && !r.checkpoints.contains_key(&fx.rn("front")),
+        "{r:?}"
+    );
     assert_eq!(lifecycle(&fx, &id), Lifecycle::Removed);
     assert!(!session_root(&fx, &id).exists() && !repos_dir(&fx, &id).exists());
 }
@@ -372,11 +480,18 @@ fn remove_edited_untracked_repo_requires_discard() {
     let e = s.remove(&id, false, None).unwrap_err();
     assert_eq!(e.code, Code::Dirty, "{e:?}");
     assert_eq!(detail(&e)["untracked_repos"], serde_json::json!(["front"]));
-    assert_eq!(detail(&e)["repos"]["front"]["paths"], serde_json::json!(["src/stray.ts"]), "{e:?}");
+    assert_eq!(
+        detail(&e)["repos"]["front"]["paths"],
+        serde_json::json!(["src/stray.ts"]),
+        "{e:?}"
+    );
     assert!(detail(&e)["repos"].get("tool").is_none(), "{e:?}");
     assert_eq!(untouched(&fx, &id), a);
     let r = s.remove(&id, true, tok(&id)).unwrap();
-    assert!(r.checkpoints.contains_key(&fx.rn("tool")) && !r.checkpoints.contains_key(&fx.rn("front")), "{r:?}");
+    assert!(
+        r.checkpoints.contains_key(&fx.rn("tool")) && !r.checkpoints.contains_key(&fx.rn("front")),
+        "{r:?}"
+    );
     assert_eq!(lifecycle(&fx, &id), Lifecycle::Removed);
     assert!(!session_root(&fx, &id).exists() && !repos_dir(&fx, &id).exists());
 }
@@ -388,19 +503,34 @@ fn remove_discard_checks_the_token() {
     let a_id = id(&new_all(&fx, &s));
     let b_id = id(&new_all(&fx, &s));
     let before = (untouched(&fx, &a_id), untouched(&fx, &b_id));
-    let expected = serde_json::to_value(Action::RemoveDiscard { session: a_id.clone(), kept_trees: vec![] }).unwrap();
+    let expected = serde_json::to_value(Action::RemoveDiscard {
+        session: a_id.clone(),
+        kept_trees: vec![],
+    })
+    .unwrap();
     let push = ConfirmToken {
-        action: Action::PushDeploy { repo: fx.rn("tool"), branch: "main".into(), url: String::new() },
+        action: Action::PushDeploy {
+            repo: fx.rn("tool"),
+            branch: "main".into(),
+            url: String::new(),
+        },
         issued: Instant::now(),
         nonce: 2,
     };
-    for (what, t, why) in [("none", None, "missing"), ("other session", tok(&b_id), "mismatch"), ("push", Some(push), "mismatch")]
-    {
+    for (what, t, why) in [
+        ("none", None, "missing"),
+        ("other session", tok(&b_id), "mismatch"),
+        ("push", Some(push), "mismatch"),
+    ] {
         let e = s.remove(&a_id, true, t).unwrap_err();
         assert_eq!(e.code, Code::NotConfirmed, "{what}: {e:?}");
         assert_eq!(reason(&e), Some(why), "{what}");
         assert_eq!(detail(&e)["expected"], expected, "{what}");
-        assert_eq!((untouched(&fx, &a_id), untouched(&fx, &b_id)), before, "{what}: nothing deleted");
+        assert_eq!(
+            (untouched(&fx, &a_id), untouched(&fx, &b_id)),
+            before,
+            "{what}: nothing deleted"
+        );
     }
     s.remove(&a_id, true, tok(&a_id)).unwrap();
     assert_eq!(lifecycle(&fx, &b_id), Lifecycle::Active);
@@ -413,9 +543,16 @@ fn remove_after_mtime_only_change_needs_no_discard() {
     let rep = new_all(&fx, &s);
     let id = id(&rep);
     let w = ws(&rep, "tool");
-    let prev = fx.store().latest_checkpoint(&id, &fx.rn("tool")).unwrap().map(|c| c.id);
+    let prev = fx
+        .store()
+        .latest_checkpoint(&id, &fx.rn("tool"))
+        .unwrap()
+        .map(|c| c.id);
     std::thread::sleep(Duration::from_millis(20));
-    let st = Command::new("/usr/bin/touch").arg(w.join("src/index.ts")).status().unwrap();
+    let st = Command::new("/usr/bin/touch")
+        .arg(w.join("src/index.ts"))
+        .status()
+        .unwrap();
     assert!(st.success());
     let body = fs::read(w.join("package.json")).unwrap();
     fs::write(w.join("package.json"), &body).unwrap();
@@ -488,16 +625,25 @@ fn remove_has_no_force_path() {
     let a = id(&rep);
     let h = Worker::spawn("cwd:".into(), Some(&ws(&rep, "tool")));
     std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(s.remove(&a, true, tok(&a)).unwrap_err().code, Code::OpenFiles);
+    assert_eq!(
+        s.remove(&a, true, tok(&a)).unwrap_err().code,
+        Code::OpenFiles
+    );
     drop(h);
 
     // Step 5.1 takes the bounded lock: Busy, nothing changed.
     let rep = new_all(&fx, &s);
     let c = id(&rep);
     let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
-    s.arm(SessionSeam::FailAt { phase: "move.prepare".into(), errno: libc::EIO });
+    s.arm(SessionSeam::FailAt {
+        phase: "move.prepare".into(),
+        errno: libc::EIO,
+    });
     mv(&fx, &s, &c, &to).unwrap_err();
-    assert_eq!(fx.store().move_intents(&c).unwrap().last().unwrap().state, MoveState::Preparing);
+    assert_eq!(
+        fx.store().move_intents(&c).unwrap().last().unwrap().state,
+        MoveState::Preparing
+    );
     fx.lock.set_wait(Duration::from_millis(200));
     let before = untouched(&fx, &c);
     {
@@ -522,12 +668,18 @@ fn remove_has_no_force_path() {
         rx.recv().unwrap();
         let t = Instant::now();
         s.remove(&d, false, None).unwrap();
-        assert!(t.elapsed() >= Duration::from_millis(700), "waited past the bounded wait: {:?}", t.elapsed());
+        assert!(
+            t.elapsed() >= Duration::from_millis(700),
+            "waited past the bounded wait: {:?}",
+            t.elapsed()
+        );
     });
     assert_eq!(lifecycle(&fx, &d), Lifecycle::Removed);
 
     // `new` step 13 (git and pin) also waits past the bounded wait.
-    s.arm(SessionSeam::PauseAt { phase: "new.git".into() });
+    s.arm(SessionSeam::PauseAt {
+        phase: "new.git".into(),
+    });
     let r = std::thread::scope(|sc| {
         let t = sc.spawn(|| s.new(None, &fx.all()));
         s.wait_paused();
@@ -543,11 +695,20 @@ fn remove_has_no_force_path() {
 
 #[test]
 fn remove_unresolved_scene_requires_discard_confirmation() {
-    for how in ["ws_unknown", "missing", "restore", "new_unknown", "swapping"] {
+    for how in [
+        "ws_unknown",
+        "missing",
+        "restore",
+        "new_unknown",
+        "swapping",
+    ] {
         let fx = Fx::with(&["tool"]);
         let s = fx.sessions();
         let id = if how == "new_unknown" {
-            s.arm(SessionSeam::FailKeepAt { phase: "new.workspace@tool".into(), errno: libc::ENOSPC });
+            s.arm(SessionSeam::FailKeepAt {
+                phase: "new.workspace@tool".into(),
+                errno: libc::ENOSPC,
+            });
             s.new(None, &fx.all()).unwrap_err();
             let rows = fx.store().sessions().unwrap();
             assert_eq!(rows.len(), 1);
@@ -559,7 +720,10 @@ fn remove_unresolved_scene_requires_discard_confirmation() {
         let want = match how {
             "ws_unknown" => {
                 let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
-                s.arm(SessionSeam::FailAt { phase: "move.pin".into(), errno: libc::EIO });
+                s.arm(SessionSeam::FailAt {
+                    phase: "move.pin".into(),
+                    errno: libc::EIO,
+                });
                 assert_eq!(mv(&fx, &s, &id, &to).unwrap_err().code, Code::Unknown);
                 "workspace_unknown"
             }
@@ -568,7 +732,8 @@ fn remove_unresolved_scene_requires_discard_confirmation() {
                 "workspace_missing"
             }
             "restore" => {
-                let d = session_root(&fx, &id).join(format!("{}tool", strata_overlay::RESTORE_TEMP_PREFIX));
+                let d = session_root(&fx, &id)
+                    .join(format!("{}tool", strata_overlay::RESTORE_TEMP_PREFIX));
                 fs::create_dir_all(&d).unwrap();
                 fs::write(d.join("plan.json"), b"{}").unwrap();
                 "restore_scene"
@@ -576,9 +741,14 @@ fn remove_unresolved_scene_requires_discard_confirmation() {
             "new_unknown" => "session_unknown",
             "swapping" => {
                 let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
-                s.arm(SessionSeam::StopAt { phase: "move.pin".into() });
+                s.arm(SessionSeam::StopAt {
+                    phase: "move.pin".into(),
+                });
                 mv(&fx, &s, &id, &to).unwrap_err();
-                assert_eq!(fx.store().move_intents(&id).unwrap().last().unwrap().state, MoveState::Swapping);
+                assert_eq!(
+                    fx.store().move_intents(&id).unwrap().last().unwrap().state,
+                    MoveState::Swapping
+                );
                 "move_awaiting_recover"
             }
             _ => unreachable!(),
@@ -602,11 +772,20 @@ fn remove_unresolved_scene_requires_discard_confirmation() {
     let s = fx.sessions();
     let id = id(&new_all(&fx, &s));
     let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
-    s.arm(SessionSeam::FailAt { phase: "move.prepare".into(), errno: libc::EIO });
+    s.arm(SessionSeam::FailAt {
+        phase: "move.prepare".into(),
+        errno: libc::EIO,
+    });
     mv(&fx, &s, &id, &to).unwrap_err();
     let n = fx.store().move_intents(&id).unwrap().last().unwrap().n;
     s.remove(&id, false, None).unwrap();
-    let i = fx.store().move_intents(&id).unwrap().into_iter().find(|i| i.n == n).unwrap();
+    let i = fx
+        .store()
+        .move_intents(&id)
+        .unwrap()
+        .into_iter()
+        .find(|i| i.n == n)
+        .unwrap();
     assert_eq!(i.state, MoveState::Abandoned);
     assert_removed(&fx, &id);
 }
@@ -616,12 +795,18 @@ fn remove_failure_midway_is_unknown_and_keeps_scene() {
     let fx = Fx::with(&["tool"]);
     let s = fx.sessions();
     let id = id(&new_all(&fx, &s));
-    s.arm(SessionSeam::FailAt { phase: "remove.retire".into(), errno: libc::EIO });
+    s.arm(SessionSeam::FailAt {
+        phase: "remove.retire".into(),
+        errno: libc::EIO,
+    });
     let e = s.remove(&id, false, None).unwrap_err();
     assert_eq!(e.code, Code::Unknown, "{e:?}");
     assert_eq!(detail_str(&e, "phase"), Some("retire"), "{e:?}");
     assert_ne!(fx.pins("tool"), "", "R4: the pin goes after the retire");
-    assert!(session_root(&fx, &id).is_dir() && shadow(&fx, &id, "tool").is_dir(), "the scene is kept");
+    assert!(
+        session_root(&fx, &id).is_dir() && shadow(&fx, &id, "tool").is_dir(),
+        "the scene is kept"
+    );
     assert_eq!(lifecycle(&fx, &id), Lifecycle::Unknown);
     let st = s.status(&id).unwrap();
     assert_eq!(st.state, SessionState::Unknown);
@@ -649,7 +834,13 @@ fn remove_deletes_only_its_own_session() {
     let outside_before = snapshot(&outside);
     let b_before = untouched(&fx, &b_id);
     let g = &a.manifest.repos[&fx.rn("tool")].base;
-    let bases = fx.store().base_dir(g).ancestors().nth(3).unwrap().to_path_buf();
+    let bases = fx
+        .store()
+        .base_dir(g)
+        .ancestors()
+        .nth(3)
+        .unwrap()
+        .to_path_buf();
     assert!(bases.ends_with("bases"), "{}", bases.display());
     let bases_before = snapshot(&bases);
     let main_before = fx.main_snap("tool");
@@ -658,21 +849,37 @@ fn remove_deletes_only_its_own_session() {
 
     s.remove(&a_id, true, tok(&a_id)).unwrap();
     assert_removed(&fx, &a_id);
-    let new_trash: Vec<String> = trash(&fx).into_iter().filter(|t| !trash_before.contains(t)).collect();
-    assert_eq!(new_trash.len(), 2, "root and .repos go to trash: {new_trash:?}");
+    let new_trash: Vec<String> = trash(&fx)
+        .into_iter()
+        .filter(|t| !trash_before.contains(t))
+        .collect();
+    assert_eq!(
+        new_trash.len(),
+        2,
+        "root and .repos go to trash: {new_trash:?}"
+    );
     assert_eq!(untouched(&fx, &b_id).root, b_before.root);
     assert_eq!(untouched(&fx, &b_id).shadow, b_before.shadow);
     assert_eq!(lifecycle(&fx, &b_id), Lifecycle::Active);
     assert!(fx.pins("tool").contains(b_id.as_str()));
     assert_eq!(snapshot(&bases), bases_before);
     let main_after = fx.main_snap("tool");
-    assert_eq!((main_after.tree, main_after.git, main_after.index), (main_before.tree, main_before.git, main_before.index));
-    let strip = |r: &str| r.lines().filter(|l| !l.starts_with(&a_pin)).collect::<Vec<_>>().join("\n");
+    assert_eq!(
+        (main_after.tree, main_after.git, main_after.index),
+        (main_before.tree, main_before.git, main_before.index)
+    );
+    let strip = |r: &str| {
+        r.lines()
+            .filter(|l| !l.starts_with(&a_pin))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     assert_eq!(main_after.refs, strip(&main_before.refs));
 
     // Emptying trash never follows the symlink out.
     for t in new_trash {
-        let r = strata_apfs::remove_tree_rooted(&fx.root(), &rp(&format!("store/trash/{t}"))).unwrap();
+        let r =
+            strata_apfs::remove_tree_rooted(&fx.root(), &rp(&format!("store/trash/{t}"))).unwrap();
         assert!(r.is_complete());
     }
     assert_eq!(snapshot(&outside), outside_before);
@@ -706,7 +913,14 @@ fn rm_dirty_refusal_says_nothing_removed_and_active() {
     )));
     assert_eq!(detail(&e)["removed"], false);
     assert_eq!(detail(&e)["lifecycle"], "Active");
-    assert_eq!(detail(&e)["repos"]["tool"]["paths"].as_array().unwrap().len(), 7, "detail keeps them all");
+    assert_eq!(
+        detail(&e)["repos"]["tool"]["paths"]
+            .as_array()
+            .unwrap()
+            .len(),
+        7,
+        "detail keeps them all"
+    );
     assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
     assert!(s.status(&id).is_ok(), "still listed");
 }
@@ -716,11 +930,19 @@ fn rm_open_files_refusal_says_nothing_removed() {
     let fx = Fx::with(&["tool"]);
     let s = fx.sessions();
     let id = id(&new_all(&fx, &s));
-    let holder = Worker::spawn("cwd:".into(), Some(&session_root(&fx, &id).join("tool/src")));
+    let holder = Worker::spawn(
+        "cwd:".into(),
+        Some(&session_root(&fx, &id).join("tool/src")),
+    );
     let e = s.remove(&id, false, None).unwrap_err();
     drop(holder);
     assert_eq!(e.code, Code::OpenFiles, "{e:?}");
-    assert!(e.message.starts_with(&format!("rm refused: nothing was removed; session {id} is still Active")), "{e:?}");
+    assert!(
+        e.message.starts_with(&format!(
+            "rm refused: nothing was removed; session {id} is still Active"
+        )),
+        "{e:?}"
+    );
     assert_eq!(detail(&e)["removed"], false);
     assert_eq!(detail(&e)["lifecycle"], "Active");
 }
@@ -730,12 +952,18 @@ fn rm_interrupted_hint_names_phase_and_remaining_dirs() {
     let fx = Fx::with(&["tool"]);
     let s = fx.sessions();
     let id = id(&new_all(&fx, &s));
-    s.arm(SessionSeam::FailAt { phase: "remove.retire".into(), errno: libc::EIO });
+    s.arm(SessionSeam::FailAt {
+        phase: "remove.retire".into(),
+        errno: libc::EIO,
+    });
     assert_eq!(s.remove(&id, false, None).unwrap_err().code, Code::Unknown);
     let st = s.status(&id).unwrap();
     let i = st.rm.rm_interrupted.clone().expect("rm_interrupted");
     assert_eq!(i.phase, "retire");
-    assert_eq!(i.remaining, vec![session_root(&fx, &id), repos_dir(&fx, &id)]);
+    assert_eq!(
+        i.remaining,
+        vec![session_root(&fx, &id), repos_dir(&fx, &id)]
+    );
     assert!(!i.root_absent);
     let want = format!(
         "rm interrupted at phase retire; remaining: sessions/{id}, sessions/.repos/{id}; needs `git-strata rm --discard {id}`"
@@ -753,10 +981,17 @@ fn rm_interrupted_hint_names_phase_and_remaining_dirs() {
     let e = s.remove(&id, false, None).unwrap_err();
     assert_eq!(e.code, Code::Dirty, "{e:?}");
     assert!(
-        e.message.starts_with(&format!("rm refused: nothing was removed; session {id} is still Unknown ({want}).")),
+        e.message.starts_with(&format!(
+            "rm refused: nothing was removed; session {id} is still Unknown ({want})."
+        )),
         "{e:?}"
     );
-    assert!(e.message.ends_with(&format!("Run `git-strata rm --discard {id}` (Touch ID) to finish removing it.")), "{e:?}");
+    assert!(
+        e.message.ends_with(&format!(
+            "Run `git-strata rm --discard {id}` (Touch ID) to finish removing it."
+        )),
+        "{e:?}"
+    );
     assert_eq!(detail(&e)["lifecycle"], "Unknown");
 }
 
@@ -767,7 +1002,8 @@ fn status_shows_last_rm_and_rebase_pending_from_the_store() {
     let s = fx.sessions();
     let id = id(&new_all(&fx, &s));
     assert!(s.status(&id).unwrap().rm.is_empty());
-    fx.sb.write(&session_root(&fx, &id).join("tool"), "src/n.ts", b"new\n");
+    fx.sb
+        .write(&session_root(&fx, &id).join("tool"), "src/n.ts", b"new\n");
     let e = s.remove(&id, false, None).unwrap_err();
     let a = RmAttempt {
         session: id.clone(),
@@ -780,7 +1016,10 @@ fn status_shows_last_rm_and_rebase_pending_from_the_store() {
     let last = st.rm.last_rm.clone().expect("last_rm");
     assert_eq!(last.summary, "Dirty (1 path in tool)");
     assert_eq!(last.code.as_deref(), Some("Dirty"));
-    let want = format!("last rm {} refused: Dirty (1 path in tool); nothing removed", strata_session::local_hhmm(a.at));
+    let want = format!(
+        "last rm {} refused: Dirty (1 path in tool); nothing removed",
+        strata_session::local_hhmm(a.at)
+    );
     assert_eq!(st.rm.notes, vec![want]);
     let v = serde_json::to_value(&st).unwrap();
     assert_eq!(v["last_rm"]["outcome"], "refused", "{v}");
@@ -796,19 +1035,54 @@ fn status_shows_last_rm_and_rebase_pending_from_the_store() {
     // rebase_pending: a replay plan, then its adopted and deferred target
     let tool = strata_types::RepoName::try_from("tool".to_string()).unwrap();
     let (h, now) = ("c".repeat(40), std::time::SystemTime::now());
-    let plan = strata_store::ReplayPlan { session: id.clone(), planned_head: h.clone(), planned_tree: h.clone() };
+    let plan = strata_store::ReplayPlan {
+        session: id.clone(),
+        planned_head: h.clone(),
+        planned_tree: h.clone(),
+    };
     fx.store().plan_replay(&tool, &[plan], now).unwrap();
     let st = s.status(&id).unwrap();
-    assert_eq!(st.rm.notes.last().map(String::as_str), Some("waiting for the replay of tool"), "{:?}", st.rm.notes);
-    assert!(fx.store().settle_planned(&id, &tool, &h, true, now).unwrap());
+    assert_eq!(
+        st.rm.notes.last().map(String::as_str),
+        Some("waiting for the replay of tool"),
+        "{:?}",
+        st.rm.notes
+    );
+    assert!(
+        fx.store()
+            .settle_planned(&id, &tool, &h, true, now)
+            .unwrap()
+    );
     let st = s.status(&id).unwrap();
     let since = strata_session::local_hhmm(now);
-    assert_eq!(st.rm.notes.last().unwrap(), &format!("behind origin of tool: auto-rebase pending (pending, since {since})"));
-    assert!(fx.store().defer_pending(&id, &tool, 1, "busy", &serde_json::json!({ "publish": 5 }), now).unwrap());
+    assert_eq!(
+        st.rm.notes.last().unwrap(),
+        &format!("behind origin of tool: auto-rebase pending (pending, since {since})")
+    );
+    assert!(
+        fx.store()
+            .defer_pending(
+                &id,
+                &tool,
+                1,
+                "busy",
+                &serde_json::json!({ "publish": 5 }),
+                now
+            )
+            .unwrap()
+    );
     let st = s.status(&id).unwrap();
-    assert_eq!(st.rm.notes.last().unwrap(), &format!("behind publish 5 of tool: auto-rebase deferred (busy, since {since}, attempts 1)"));
+    assert_eq!(
+        st.rm.notes.last().unwrap(),
+        &format!(
+            "behind publish 5 of tool: auto-rebase deferred (busy, since {since}, attempts 1)"
+        )
+    );
     let note = st.rm.rebase_pending.last().unwrap();
-    assert_eq!((note.reason.as_str(), note.publish, note.attempts), ("busy", Some(5), 1));
+    assert_eq!(
+        (note.reason.as_str(), note.publish, note.attempts),
+        ("busy", Some(5), 1)
+    );
 }
 
 /// R4: a holder that appears after Phase B, just before Removing, is seen
@@ -818,19 +1092,29 @@ fn rm_refuses_open_files_found_just_before_removing() {
     let fx = Fx::with(&["tool"]);
     let s = fx.sessions();
     let id = id(&new_all(&fx, &s));
-    s.arm(SessionSeam::PauseAt { phase: "remove.before_removing".into() });
+    s.arm(SessionSeam::PauseAt {
+        phase: "remove.before_removing".into(),
+    });
     let mut holder = None;
     let e = std::thread::scope(|sc| {
         let h = sc.spawn(|| s.remove(&id, false, None));
         s.wait_paused();
-        holder = Some(Worker::spawn("cwd:".into(), Some(&shadow(&fx, &id, "tool"))));
+        holder = Some(Worker::spawn(
+            "cwd:".into(),
+            Some(&shadow(&fx, &id, "tool")),
+        ));
         s.release();
         h.join().unwrap()
     })
     .unwrap_err();
     drop(holder);
     assert_eq!(e.code, Code::OpenFiles, "{e:?}");
-    assert!(e.message.starts_with(&format!("rm refused: nothing was removed; session {id} is still Active")), "{e:?}");
+    assert!(
+        e.message.starts_with(&format!(
+            "rm refused: nothing was removed; session {id} is still Active"
+        )),
+        "{e:?}"
+    );
     assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
     assert!(session_root(&fx, &id).is_dir() && shadow(&fx, &id, "tool").is_dir());
     s.remove(&id, false, None).unwrap();
@@ -844,11 +1128,17 @@ fn teardown_retires_before_unpin_and_discard_finishes() {
     let fx = Fx::with(&["tool"]);
     let s = fx.sessions();
     let id = id(&new_all(&fx, &s));
-    s.arm(SessionSeam::FailAt { phase: "remove.unpin".into(), errno: libc::EIO });
+    s.arm(SessionSeam::FailAt {
+        phase: "remove.unpin".into(),
+        errno: libc::EIO,
+    });
     let e = s.remove(&id, false, None).unwrap_err();
     assert_eq!(e.code, Code::Unknown, "{e:?}");
     assert_eq!(detail_str(&e, "phase"), Some("unpin"), "{e:?}");
-    assert!(!session_root(&fx, &id).exists() && !repos_dir(&fx, &id).exists(), "retired first");
+    assert!(
+        !session_root(&fx, &id).exists() && !repos_dir(&fx, &id).exists(),
+        "retired first"
+    );
     assert_ne!(fx.pins("tool"), "", "the pin is still there");
     assert_eq!(lifecycle(&fx, &id), Lifecycle::Unknown);
     s.remove(&id, true, tok(&id)).unwrap();
@@ -864,12 +1154,17 @@ fn teardown_crash_after_retire_recovers_and_discard_finishes() {
     let id = {
         let s = fx.sessions();
         let id = id(&new_all(&fx, &s));
-        s.arm(SessionSeam::StopAt { phase: "remove.unpin".into() });
+        s.arm(SessionSeam::StopAt {
+            phase: "remove.unpin".into(),
+        });
         s.remove(&id, false, None).unwrap_err();
         id
     };
     assert_eq!(lifecycle(&fx, &id), Lifecycle::Removing);
-    assert!(!session_root(&fx, &id).exists() && !repos_dir(&fx, &id).exists(), "retired first");
+    assert!(
+        !session_root(&fx, &id).exists() && !repos_dir(&fx, &id).exists(),
+        "retired first"
+    );
     assert_ne!(fx.pins("tool"), "", "the pin is still there");
     fx.close_store();
     fx.reopen_store();
@@ -912,7 +1207,10 @@ fn sweep_retires_dir_of_removed_row() {
     assert_eq!(sw.retired.len(), 1, "{sw:?}");
     assert_eq!(sw.retired[0].session, id);
     assert_eq!(sw.retired[0].path, session_root(&fx, &id));
-    assert!(sw.retired[0].trash.join("a/b").is_dir(), "moved to trash, not deleted");
+    assert!(
+        sw.retired[0].trash.join("a/b").is_dir(),
+        "moved to trash, not deleted"
+    );
     assert!(!session_root(&fx, &id).exists());
     assert_eq!(trash(&fx).len(), before + 1);
 }
@@ -958,7 +1256,11 @@ fn sweep_ignores_non_session_names_tmp_symlinks() {
     let s = fx.sessions();
     let sessions = fx.root().join("sessions");
     fs::create_dir_all(sessions.join(".repos")).unwrap();
-    let keep = [sessions.join("notes"), sessions.join(".strata-tmp-1234"), sessions.join(".repos/not-an-id")];
+    let keep = [
+        sessions.join("notes"),
+        sessions.join(".strata-tmp-1234"),
+        sessions.join(".repos/not-an-id"),
+    ];
     for k in &keep {
         fs::create_dir_all(k).unwrap();
     }
@@ -971,7 +1273,12 @@ fn sweep_ignores_non_session_names_tmp_symlinks() {
     for k in &keep {
         assert!(k.is_dir(), "{}", k.display());
     }
-    assert!(fs::symlink_metadata(sessions.join("s-k3q7xm2a")).unwrap().file_type().is_symlink());
+    assert!(
+        fs::symlink_metadata(sessions.join("s-k3q7xm2a"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     assert!(target.join("x").is_dir());
     assert!(sessions.join("s-m4n5p6q7").is_file());
 }
@@ -983,28 +1290,43 @@ fn sweep_never_touches_creating_active_removing_unknown() {
     // Active
     let active = id(&new_all(&fx, &s));
     // Creating: a crash in new.
-    s.arm(SessionSeam::StopAt { phase: "new.seed_files".into() });
+    s.arm(SessionSeam::StopAt {
+        phase: "new.seed_files".into(),
+    });
     s.set_next_id(sid("s-c2c2c2c2"));
     s.new(None, &fx.all()).unwrap_err();
     let creating = sid("s-c2c2c2c2");
     // Removing: a crash in teardown.
     let removing = id(&new_all(&fx, &s));
-    s.arm(SessionSeam::StopAt { phase: "remove.unpin".into() });
+    s.arm(SessionSeam::StopAt {
+        phase: "remove.unpin".into(),
+    });
     s.remove(&removing, false, None).unwrap_err();
     fs::create_dir_all(session_root(&fx, &removing).join("again")).unwrap();
     // Unknown: a failure in teardown, root recreated.
     let unknown = id(&new_all(&fx, &s));
-    s.arm(SessionSeam::FailAt { phase: "remove.unpin".into(), errno: libc::EIO });
+    s.arm(SessionSeam::FailAt {
+        phase: "remove.unpin".into(),
+        errno: libc::EIO,
+    });
     s.remove(&unknown, false, None).unwrap_err();
     fs::create_dir_all(session_root(&fx, &unknown).join("again")).unwrap();
-    for (i, lc) in [(&active, Lifecycle::Active), (&creating, Lifecycle::Creating), (&removing, Lifecycle::Removing), (&unknown, Lifecycle::Unknown)] {
+    for (i, lc) in [
+        (&active, Lifecycle::Active),
+        (&creating, Lifecycle::Creating),
+        (&removing, Lifecycle::Removing),
+        (&unknown, Lifecycle::Unknown),
+    ] {
         assert_eq!(lifecycle(&fx, i), lc);
     }
     let sw = s.sweep_orphans(None);
     assert!(sw.retired.is_empty() && sw.warnings.is_empty(), "{sw:?}");
     for i in [&active, &creating, &removing, &unknown] {
         let sw = s.sweep_orphans(Some(i));
-        assert!(sw.retired.is_empty() && sw.warnings.is_empty(), "{i}: {sw:?}");
+        assert!(
+            sw.retired.is_empty() && sw.warnings.is_empty(),
+            "{i}: {sw:?}"
+        );
         assert!(session_root(&fx, i).is_dir(), "{i}");
     }
     assert!(repos_dir(&fx, &active).is_dir() && repos_dir(&fx, &creating).is_dir());
@@ -1018,12 +1340,17 @@ fn sweep_races_new() {
     let s = fx.sessions();
     let id = sid("s-k3q7xm2a");
     s.set_next_id(id.clone());
-    s.arm(SessionSeam::PauseAt { phase: "new.enrolled".into() });
+    s.arm(SessionSeam::PauseAt {
+        phase: "new.enrolled".into(),
+    });
     let (rep, sw, waited) = std::thread::scope(|sc| {
         let n = sc.spawn(|| s.new(None, &fx.all()));
         s.wait_paused();
         assert!(session_root(&fx, &id).is_dir() && repos_dir(&fx, &id).is_dir());
-        assert!(s.sweep_orphans(None).retired.is_empty(), "a Creating row is no orphan");
+        assert!(
+            s.sweep_orphans(None).retired.is_empty(),
+            "a Creating row is no orphan"
+        );
         let w = sc.spawn(|| s.sweep_orphans(Some(&id)));
         std::thread::sleep(Duration::from_millis(300));
         let waited = !w.is_finished();
@@ -1042,7 +1369,9 @@ fn sweep_inode_changed_skips() {
     let fx = Fx::with(&["tool"]);
     let s = fx.sessions();
     let d = orphan(&fx, "s-k3q7xm2a");
-    s.arm(SessionSeam::PauseAt { phase: "orphan.enroll".into() });
+    s.arm(SessionSeam::PauseAt {
+        phase: "orphan.enroll".into(),
+    });
     let sw = std::thread::scope(|sc| {
         let h = sc.spawn(|| s.sweep_orphans(None));
         s.wait_paused();
@@ -1053,7 +1382,11 @@ fn sweep_inode_changed_skips() {
     });
     assert!(sw.retired.is_empty() && sw.warnings.is_empty(), "{sw:?}");
     assert!(d.join("new").is_dir(), "the replacement stays");
-    assert_eq!(s.sweep_orphans(None).retired.len(), 1, "the next sweep takes it");
+    assert_eq!(
+        s.sweep_orphans(None).retired.len(),
+        1,
+        "the next sweep takes it"
+    );
 }
 
 /// A leftover `.repos/<id>` that appears before enrollment makes `new`
@@ -1064,7 +1397,9 @@ fn new_fails_on_leftover_repos_dir() {
     let s = fx.sessions();
     let id = sid("s-k3q7xm2a");
     s.set_next_id(id.clone());
-    s.arm(SessionSeam::PauseAt { phase: "new.enroll".into() });
+    s.arm(SessionSeam::PauseAt {
+        phase: "new.enroll".into(),
+    });
     let e = std::thread::scope(|sc| {
         let h = sc.spawn(|| s.new(None, &fx.all()));
         s.wait_paused();
@@ -1088,26 +1423,44 @@ fn new_rollback_leaves_dirs_it_did_not_create() {
     let s = fx.sessions();
     let id = sid("s-k3q7xm2a");
     s.set_next_id(id.clone());
-    s.arm(SessionSeam::PauseAt { phase: "new.pin".into() });
+    s.arm(SessionSeam::PauseAt {
+        phase: "new.pin".into(),
+    });
     let e = std::thread::scope(|sc| {
         let h = sc.spawn(|| s.new(None, &fx.all()));
         s.wait_paused();
         fs::rename(repos_dir(&fx, &id), fx.root().join("moved-away")).unwrap();
         fs::create_dir_all(repos_dir(&fx, &id).join("theirs")).unwrap();
-        s.arm(SessionSeam::FailAt { phase: "new.seed_files".into(), errno: libc::EIO });
+        s.arm(SessionSeam::FailAt {
+            phase: "new.seed_files".into(),
+            errno: libc::EIO,
+        });
         s.release();
         h.join().unwrap()
     })
     .unwrap_err();
     let d = e.detail.as_ref().unwrap();
     assert_eq!(d["rolled_back"], Value::Bool(true), "{e:?}");
-    assert_eq!(d["not_owned"], serde_json::json!([repos_dir(&fx, &id)]), "{e:?}");
+    assert_eq!(
+        d["not_owned"],
+        serde_json::json!([repos_dir(&fx, &id)]),
+        "{e:?}"
+    );
     assert!(e.message.contains("left in place"), "{e:?}");
     assert_eq!(lifecycle(&fx, &id), Lifecycle::Removed);
     assert!(!session_root(&fx, &id).exists(), "its own root is retired");
-    assert!(repos_dir(&fx, &id).join("theirs").is_dir(), "not ours: left");
+    assert!(
+        repos_dir(&fx, &id).join("theirs").is_dir(),
+        "not ours: left"
+    );
     let sw = s.sweep_orphans(None);
-    assert_eq!(sw.retired.iter().map(|o| o.path.clone()).collect::<Vec<_>>(), vec![repos_dir(&fx, &id)]);
+    assert_eq!(
+        sw.retired
+            .iter()
+            .map(|o| o.path.clone())
+            .collect::<Vec<_>>(),
+        vec![repos_dir(&fx, &id)]
+    );
 }
 
 #[test]
@@ -1115,7 +1468,9 @@ fn rm_end_sweep_retires_recreated_root() {
     let fx = Fx::with(&["tool"]);
     let s = fx.sessions();
     let id = id(&new_all(&fx, &s));
-    s.arm(SessionSeam::PauseAt { phase: "remove.unpin".into() });
+    s.arm(SessionSeam::PauseAt {
+        phase: "remove.unpin".into(),
+    });
     let rep = std::thread::scope(|sc| {
         let h = sc.spawn(|| s.remove(&id, false, None));
         s.wait_paused();
@@ -1137,22 +1492,34 @@ fn rm_end_sweep_failure_is_warning() {
     let fx = Fx::with(&["tool"]);
     let s = fx.sessions();
     let id = id(&new_all(&fx, &s));
-    s.arm(SessionSeam::PauseAt { phase: "remove.unpin".into() });
+    s.arm(SessionSeam::PauseAt {
+        phase: "remove.unpin".into(),
+    });
     let rep = std::thread::scope(|sc| {
         let h = sc.spawn(|| s.remove(&id, false, None));
         s.wait_paused();
         fs::create_dir_all(session_root(&fx, &id).join("a/b")).unwrap();
-        s.arm(SessionSeam::FailAt { phase: "orphan.retire".into(), errno: libc::EIO });
+        s.arm(SessionSeam::FailAt {
+            phase: "orphan.retire".into(),
+            errno: libc::EIO,
+        });
         s.release();
         h.join().unwrap()
     })
     .unwrap();
     assert!(rep.orphans.is_empty(), "{rep:?}");
     assert_eq!(rep.warnings.len(), 1, "{rep:?}");
-    assert_eq!(lifecycle(&fx, &id), Lifecycle::Removed, "the committed Removed stands");
+    assert_eq!(
+        lifecycle(&fx, &id),
+        Lifecycle::Removed,
+        "the committed Removed stands"
+    );
     assert!(session_root(&fx, &id).join("a/b").is_dir());
     let v = serde_json::to_value(&rep).unwrap();
-    assert!(v["warnings"].is_array() && v.get("orphans").is_none(), "{v}");
+    assert!(
+        v["warnings"].is_array() && v.get("orphans").is_none(),
+        "{v}"
+    );
     assert_eq!(s.sweep_orphans(None).retired.len(), 1);
 }
 
@@ -1166,7 +1533,10 @@ fn gc_dry_run_reports_orphans_without_writes() {
     let before = trash(&fx);
     let mut got = s.orphans().unwrap();
     got.sort();
-    let mut want = vec![(id.clone(), session_root(&fx, &id)), (sid("s-k3q7xm2a"), d.clone())];
+    let mut want = vec![
+        (id.clone(), session_root(&fx, &id)),
+        (sid("s-k3q7xm2a"), d.clone()),
+    ];
     want.sort();
     assert_eq!(got, want);
     assert_eq!(trash(&fx), before);
@@ -1181,7 +1551,9 @@ fn recover_sweeps_after_unknown_rewrite() {
     let creating = sid("s-c2c2c2c2");
     {
         let s = fx.sessions();
-        s.arm(SessionSeam::StopAt { phase: "new.seed_files".into() });
+        s.arm(SessionSeam::StopAt {
+            phase: "new.seed_files".into(),
+        });
         s.set_next_id(creating.clone());
         s.new(None, &fx.all()).unwrap_err();
     }
@@ -1207,7 +1579,9 @@ fn new_rollback_never_claims_a_repos_dir_made_before_its_mkdir() {
     let s = fx.sessions();
     let id = sid("s-k3q7xm2a");
     s.set_next_id(id.clone());
-    s.arm(SessionSeam::PauseAt { phase: "new.repos_dir".into() });
+    s.arm(SessionSeam::PauseAt {
+        phase: "new.repos_dir".into(),
+    });
     let e = std::thread::scope(|sc| {
         let h = sc.spawn(|| s.new(None, &fx.all()));
         s.wait_paused();
@@ -1218,8 +1592,531 @@ fn new_rollback_never_claims_a_repos_dir_made_before_its_mkdir() {
     .unwrap_err();
     let d = e.detail.as_ref().unwrap();
     assert_eq!(d["rolled_back"], Value::Bool(true), "{e:?}");
-    assert_eq!(d["not_owned"], serde_json::json!([repos_dir(&fx, &id)]), "{e:?}");
+    assert_eq!(
+        d["not_owned"],
+        serde_json::json!([repos_dir(&fx, &id)]),
+        "{e:?}"
+    );
     assert_eq!(lifecycle(&fx, &id), Lifecycle::Removed);
     assert!(!session_root(&fx, &id).exists(), "its own root is retired");
-    assert!(repos_dir(&fx, &id).join("theirs").is_dir(), "not ours: left");
+    assert!(
+        repos_dir(&fx, &id).join("theirs").is_dir(),
+        "not ours: left"
+    );
+}
+
+/// §10 row 7: the writer is finished and closed before the first late holder scan.
+#[test]
+fn rm_refuses_a_write_finished_before_the_first_holder_scan() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = new_all(&fx, &s);
+    let id = id(&rep);
+    let late = ws(&rep, "tool").join("src/late.ts");
+    s.arm(SessionSeam::PauseAt {
+        phase: "remove.before_removing".into(),
+    });
+    let e = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.remove(&id, false, None));
+        s.wait_paused();
+        fs::write(&late, b"late\n").unwrap();
+        s.release();
+        h.join().unwrap()
+    })
+    .unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert_eq!(detail(&e)["reason"], "changed_during_remove");
+    assert_eq!(detail(&e)["after"], "checkpoint");
+    assert_eq!(
+        detail(&e)["repos"]["tool"]["paths"],
+        serde_json::json!(["src/late.ts"])
+    );
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+    assert_eq!(fs::read(&late).unwrap(), b"late\n");
+    assert!(
+        fx.pins("tool").contains(id.as_str()),
+        "refusal preserves the pin"
+    );
+    let cps = fx.store().checkpoints(&id, None).unwrap();
+    let before_remove: Vec<_> = cps
+        .iter()
+        .filter(|cp| cp.reason == CheckpointReason::BeforeRemove)
+        .collect();
+    assert_eq!(before_remove.len(), 1);
+    assert_eq!(before_remove[0].entries, 0);
+}
+
+#[test]
+fn rm_refuses_a_deletion_after_the_checkpoint() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = new_all(&fx, &s);
+    let id = id(&rep);
+    let deleted = ws(&rep, "tool").join("src/index.ts");
+    assert!(deleted.is_file());
+    s.arm(SessionSeam::PauseAt {
+        phase: "remove.before_removing".into(),
+    });
+    let e = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.remove(&id, false, None));
+        s.wait_paused();
+        fs::remove_file(&deleted).unwrap();
+        s.release();
+        h.join().unwrap()
+    })
+    .unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert_eq!(detail(&e)["reason"], "changed_during_remove");
+    assert_eq!(detail(&e)["after"], "checkpoint");
+    assert_eq!(
+        detail(&e)["repos"]["tool"]["paths"],
+        serde_json::json!(["src/index.ts"])
+    );
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+    assert!(session_root(&fx, &id).is_dir());
+    assert!(!deleted.exists());
+    assert!(fx.pins("tool").contains(id.as_str()));
+    let base = &rep.manifest.repos[&fx.rn("tool")].base;
+    let entries = overlay(&fx, &id, &ws(&rep, "tool"), base);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path.as_str(), "src/index.ts");
+    assert_eq!(entries[0].kind, strata_types::EntryKind::Deleted);
+}
+
+#[test]
+fn rm_discard_is_unchanged_by_the_recheck() {
+    use strata_overlay::Checkpointed;
+    use strata_session::BeforeCheckpoint;
+
+    struct Meddling<F: Fn(&Path) + Sync>(F);
+    impl<F: Fn(&Path) + Sync> BeforeCheckpoint for Meddling<F> {
+        fn checkpoint(
+            &self,
+            ws: &WorkspaceRef<'_>,
+            base: &Base,
+            reason: CheckpointReason,
+        ) -> strata_session::Result<Checkpointed> {
+            (self.0)(ws.root);
+            strata_overlay::checkpoint(ws, base, None, reason)
+        }
+    }
+    let fx = Fx::with(&["front", "tool"]);
+    let s = fx.sessions();
+    let rep = new_all(&fx, &s);
+    let id = id(&rep);
+    let front = ws(&rep, "front");
+    let tool = ws(&rep, "tool");
+    let hook = Meddling(|w: &Path| {
+        if w == tool {
+            fs::write(front.join("src/late.ts"), b"late\n").unwrap();
+        }
+    });
+    let s2 = Sessions::open(&fx.config, &fx.gits, fx.store(), &fx.lock, &fx.env, &hook).unwrap();
+    // Discard must bypass both the recheck and its second holder scan.
+    s2.arm(SessionSeam::FailAt {
+        phase: "remove.after_recheck".into(),
+        errno: libc::EIO,
+    });
+    let r = s2.remove(&id, true, tok(&id)).unwrap();
+    assert!(r.discarded);
+    assert_removed(&fx, &id);
+    assert!(
+        fx.store()
+            .checkpoint(&id, r.checkpoints[&fx.rn("front")])
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+
+    // Repeat with a kept pre-move tree, using the real cwd-holder fixture.
+    let rep = new_all(&fx, &s);
+    let id = rep.manifest.id.clone();
+    let w = ws(&rep, "tool");
+    let holder = Worker::spawn("cwd:".into(), Some(&w.join("src")));
+    let to = target(&fx, &s, "tool", &[("src/up.ts", b"up\n")]);
+    let old = strata_session::cwd::with_move_cwd(
+        strata_session::cwd::MoveCwd {
+            allow_cwd_holders: true,
+            ..Default::default()
+        },
+        || mv(&fx, &s, &id, &to),
+    )
+    .unwrap()
+    .old_tree
+    .expect("kept while in use");
+    drop(holder);
+    let token = ConfirmToken {
+        action: s.discard_action(&id).unwrap(),
+        issued: Instant::now(),
+        nonce: 1,
+    };
+    s.arm(SessionSeam::PauseAt {
+        phase: "remove.before_removing".into(),
+    });
+    let r = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.remove(&id, true, Some(token)));
+        s.wait_paused();
+        fs::write(old.join("src/late.ts"), b"late\n").unwrap();
+        s.arm(SessionSeam::FailAt {
+            phase: "remove.after_recheck".into(),
+            errno: libc::EIO,
+        });
+        s.release();
+        h.join().unwrap()
+    })
+    .unwrap();
+    assert!(r.discarded);
+    assert_removed(&fx, &id);
+}
+
+// §10 row 7 uses the same real cwd-holder/move fixture as remove_refuses_unpublished_without_discard.
+fn kept_old_tree(fx: &Fx, s: &Sessions<'_>) -> (NewReport, PathBuf) {
+    let rep = new_all(fx, s);
+    let id = id(&rep);
+    let holder = Worker::spawn("cwd:".into(), Some(&ws(&rep, "tool").join("src")));
+    let to = target(fx, s, "tool", &[("src/up.ts", b"up\n")]);
+    let old = strata_session::cwd::with_move_cwd(
+        strata_session::cwd::MoveCwd {
+            allow_cwd_holders: true,
+            ..Default::default()
+        },
+        || mv(fx, s, &id, &to),
+    )
+    .unwrap()
+    .old_tree
+    .expect("kept while in use");
+    drop(holder);
+    (rep, old)
+}
+
+#[test]
+fn rm_refuses_an_untracked_repo_write_after_dirty_check() {
+    let fx = Fx::new();
+    let s = fx.sessions();
+    let rep = s.new(Some("T-6"), &[fx.rn("tool")]).unwrap();
+    let id = id(&rep);
+    assert!(!rep.manifest.repos[&fx.rn("front")].tracked);
+    let late = ws(&rep, "front").join("src/late.ts");
+    s.arm(SessionSeam::PauseAt {
+        phase: "remove.before_removing".into(),
+    });
+    let e = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.remove(&id, false, None));
+        s.wait_paused();
+        fs::write(&late, b"late\n").unwrap();
+        s.release();
+        h.join().unwrap()
+    })
+    .unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert_eq!(detail(&e)["reason"], "changed_during_remove");
+    assert_eq!(detail(&e)["after"], "checkpoint");
+    assert_eq!(
+        detail(&e)["repos"]["front"]["paths"],
+        serde_json::json!(["src/late.ts"])
+    );
+    assert_eq!(detail(&e)["repos"].as_object().unwrap().len(), 1);
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+    assert_eq!(fs::read(&late).unwrap(), b"late\n");
+    assert!(shadow(&fx, &id, "front").is_dir());
+    assert!(fx.pins("tool").contains(id.as_str()));
+    assert!(
+        fx.store()
+            .checkpoints(&id, Some(&fx.rn("front")))
+            .unwrap()
+            .is_empty(),
+        "untracked writes have no checkpoint"
+    );
+}
+
+#[test]
+fn rm_refuses_a_write_into_a_kept_old_tree_before_the_first_holder_scan() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let (rep, old) = kept_old_tree(&fx, &s);
+    let id = id(&rep);
+    let late = old.join("src/late.ts");
+    s.arm(SessionSeam::PauseAt {
+        phase: "remove.before_removing".into(),
+    });
+    let e = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.remove(&id, false, None));
+        s.wait_paused();
+        fs::write(&late, b"late\n").unwrap();
+        s.release();
+        h.join().unwrap()
+    })
+    .unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert_eq!(detail(&e)["reason"], "changed_during_remove");
+    assert_eq!(detail(&e)["after"], "checkpoint");
+    let trees = detail(&e)["old_trees"].as_array().unwrap();
+    assert_eq!(trees.len(), 1, "{e:?}");
+    assert_eq!(PathBuf::from(trees[0]["path"].as_str().unwrap()), old);
+    assert!(detail(&e)["repos"].as_object().unwrap().is_empty(), "{e:?}");
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+    assert_eq!(fs::read(&late).unwrap(), b"late\n");
+    let before = untouched(&fx, &id);
+    let e = s.remove(&id, false, None).unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert_eq!(
+        PathBuf::from(detail(&e)["old_trees"][0]["path"].as_str().unwrap()),
+        old
+    );
+    assert!(detail(&e)["repos"].as_object().unwrap().is_empty(), "{e:?}");
+    assert!(
+        detail(&e).get("after").is_none(),
+        "second remove refuses in Phase A"
+    );
+    assert_eq!(
+        untouched(&fx, &id),
+        before,
+        "no second BeforeRemove checkpoint"
+    );
+}
+
+#[test]
+fn rm_refuses_a_kept_old_tree_it_cannot_compare_during_the_recheck() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let (rep, old) = kept_old_tree(&fx, &s);
+    let id = id(&rep);
+    let src = old.join("src");
+    let mode = fs::metadata(&src).unwrap().permissions();
+    s.arm(SessionSeam::PauseAt {
+        phase: "remove.before_removing".into(),
+    });
+    let result = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.remove(&id, false, None));
+        s.wait_paused();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0)).unwrap();
+        s.release();
+        h.join()
+    });
+    // Restore before inspecting the result, including a panicking remove thread.
+    fs::set_permissions(&src, mode).unwrap();
+    let e = result.unwrap().unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert_eq!(detail(&e)["reason"], "changed_during_remove");
+    assert_eq!(detail(&e)["after"], "checkpoint");
+    let trees = detail(&e)["old_trees"].as_array().unwrap();
+    assert_eq!(trees.len(), 1, "{e:?}");
+    assert_eq!(PathBuf::from(trees[0]["path"].as_str().unwrap()), old);
+    assert!(detail(&e)["repos"].as_object().unwrap().is_empty(), "{e:?}");
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+    assert!(src.join("index.ts").is_file());
+    s.remove(&id, false, None).unwrap();
+    assert_removed(&fx, &id);
+}
+
+#[test]
+fn rm_refuses_a_deletion_in_a_kept_old_tree_after_phase_a() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let (rep, old) = kept_old_tree(&fx, &s);
+    let id = id(&rep);
+    let deleted = old.join("src/index.ts");
+    assert!(deleted.is_file());
+    s.arm(SessionSeam::PauseAt {
+        phase: "remove.before_removing".into(),
+    });
+    let e = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.remove(&id, false, None));
+        s.wait_paused();
+        fs::remove_file(&deleted).unwrap();
+        s.release();
+        h.join().unwrap()
+    })
+    .unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert_eq!(detail(&e)["reason"], "changed_during_remove");
+    assert_eq!(detail(&e)["after"], "checkpoint");
+    let trees = detail(&e)["old_trees"].as_array().unwrap();
+    assert_eq!(trees.len(), 1, "{e:?}");
+    assert_eq!(PathBuf::from(trees[0]["path"].as_str().unwrap()), old);
+    assert!(detail(&e)["repos"].as_object().unwrap().is_empty(), "{e:?}");
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+    assert!(old.is_dir());
+    assert!(!deleted.exists());
+    let entries = overlay(&fx, &id, &old, &rep.manifest.repos[&fx.rn("tool")].base);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path.as_str(), "src/index.ts");
+    assert_eq!(entries[0].kind, strata_types::EntryKind::Deleted);
+}
+
+#[test]
+fn remove_strict_refuses_an_unchanged_kept_old_tree() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let (rep, old) = kept_old_tree(&fx, &s);
+    let id = id(&rep);
+    let before = untouched(&fx, &id);
+    let calls = fx.before.calls();
+    let e = s.remove_strict(&id).unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    let trees = detail(&e)["old_trees"].as_array().unwrap();
+    assert_eq!(trees.len(), 1, "{e:?}");
+    assert_eq!(trees[0]["changed"], false);
+    assert_eq!(PathBuf::from(trees[0]["path"].as_str().unwrap()), old);
+    assert!(detail(&e)["repos"].as_object().unwrap().is_empty(), "{e:?}");
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+    assert_eq!(untouched(&fx, &id), before);
+    assert_eq!(fx.before.calls(), calls, "Phase A never checkpoints");
+    assert!(
+        fx.store()
+            .checkpoints(&id, None)
+            .unwrap()
+            .iter()
+            .all(|c| c.reason != CheckpointReason::BeforeRemove)
+    );
+    let r = s.remove(&id, false, None).unwrap();
+    assert!(!r.discarded, "ordinary rm permits an unchanged kept tree");
+    assert_removed(&fx, &id);
+}
+
+#[test]
+fn remove_strict_names_a_changed_kept_old_tree() {
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let (rep, old) = kept_old_tree(&fx, &s);
+    let id = id(&rep);
+    let late = old.join("src/late.ts");
+    fs::write(&late, b"late\n").unwrap();
+    let before = untouched(&fx, &id);
+    let calls = fx.before.calls();
+    let e = s.remove_strict(&id).unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    let trees = detail(&e)["old_trees"].as_array().unwrap();
+    assert_eq!(trees.len(), 1, "{e:?}");
+    assert_eq!(trees[0]["changed"], true);
+    assert_eq!(PathBuf::from(trees[0]["path"].as_str().unwrap()), old);
+    assert!(detail(&e)["repos"].as_object().unwrap().is_empty(), "{e:?}");
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+    assert_eq!(fs::read(&late).unwrap(), b"late\n");
+    assert_eq!(untouched(&fx, &id), before);
+    assert_eq!(fx.before.calls(), calls, "Phase A never checkpoints");
+    assert!(
+        fx.store()
+            .checkpoints(&id, None)
+            .unwrap()
+            .iter()
+            .all(|c| c.reason != CheckpointReason::BeforeRemove)
+    );
+}
+
+#[test]
+fn rm_refuses_a_holder_that_appears_during_the_recheck() {
+    // Each scene starts holder-free; the Worker appears only after step 5.5.
+    for kept in [false, true] {
+        let fx = Fx::with(&["tool"]);
+        let s = fx.sessions();
+        let (rep, root) = if kept {
+            kept_old_tree(&fx, &s)
+        } else {
+            let rep = new_all(&fx, &s);
+            let root = ws(&rep, "tool");
+            (rep, root)
+        };
+        let id = id(&rep);
+        s.arm(SessionSeam::PauseAt {
+            phase: "remove.after_recheck".into(),
+        });
+        let mut holder = None;
+        let e = std::thread::scope(|sc| {
+            let h = sc.spawn(|| s.remove(&id, false, None));
+            s.wait_paused();
+            holder = Some(Worker::spawn("cwd:".into(), Some(&root.join("src"))));
+            s.release();
+            h.join().unwrap()
+        })
+        .unwrap_err();
+        assert_eq!(e.code, Code::OpenFiles, "kept={kept}: {e:?}");
+        assert!(
+            open_pids(&e).contains(&holder.as_ref().unwrap().pid()),
+            "{e:?}"
+        );
+        assert_eq!(detail(&e)["removed"], false);
+        assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+        assert!(root.join("src/index.ts").is_file());
+        assert!(session_root(&fx, &id).is_dir() && shadow(&fx, &id, "tool").is_dir());
+        drop(holder);
+        let r = s.remove(&id, false, None).unwrap();
+        assert!(!r.discarded);
+        assert_removed(&fx, &id);
+    }
+}
+
+#[test]
+fn rm_refuses_an_untracked_repo_that_became_unhealthy_during_the_remove() {
+    let fx = Fx::new();
+    let s = fx.sessions();
+    let rep = s.new(Some("T-6"), &[fx.rn("tool")]).unwrap();
+    let id = id(&rep);
+    assert!(!rep.manifest.repos[&fx.rn("front")].tracked);
+    let front = ws(&rep, "front");
+    let away = front.with_extension("away");
+    s.arm(SessionSeam::PauseAt {
+        phase: "remove.before_removing".into(),
+    });
+    let result = std::thread::scope(|sc| {
+        let h = sc.spawn(|| s.remove(&id, false, None));
+        s.wait_paused();
+        fs::rename(&front, &away).unwrap();
+        s.release();
+        h.join()
+    });
+    let e = result.unwrap().unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert_eq!(detail(&e)["reason"], "changed_during_remove");
+    assert_eq!(detail(&e)["after"], "checkpoint");
+    assert_eq!(detail(&e)["repos"]["front"]["workspace"], "missing");
+    assert_eq!(detail(&e)["repos"].as_object().unwrap().len(), 1);
+    assert_eq!(lifecycle(&fx, &id), Lifecycle::Active);
+    assert!(away.join("src/index.ts").is_file());
+    assert!(!front.exists());
+    assert!(shadow(&fx, &id, "front").is_dir());
+    fs::rename(&away, &front).unwrap();
+    s.remove(&id, false, None).unwrap();
+    assert_removed(&fx, &id);
+}
+
+#[test]
+fn strict_open_files_message_names_no_rerun() {
+    // §10 row 22 nit 4: remove_strict OpenFiles starts "auto-close refused",
+    // names `git-strata rm --session`, and lacks "run the same command";
+    // ordinary remove keeps today's message.
+    let fx = Fx::with(&["tool"]);
+    let s = fx.sessions();
+    let rep = new_all(&fx, &s);
+    let id = id(&rep);
+    let w = ws(&rep, "tool");
+    let holder = Worker::spawn("cwd:".into(), Some(&w.join("src")));
+    std::thread::sleep(Duration::from_millis(100));
+    let e = s.remove_strict(&id).unwrap_err();
+    assert_eq!(e.code, Code::OpenFiles, "{e:?}");
+    assert!(
+        e.message.starts_with("auto-close refused"),
+        "strict message: {e:?}"
+    );
+    assert!(
+        e.message.contains(&format!("git-strata rm --session {id}")),
+        "strict message: {e:?}"
+    );
+    assert!(
+        !e.message.contains("run the same command"),
+        "strict message must not invite a rerun: {e:?}"
+    );
+    let e2 = s.remove(&id, false, None).unwrap_err();
+    assert_eq!(e2.code, Code::OpenFiles, "{e2:?}");
+    assert!(
+        e2.message.contains("run the same command"),
+        "ordinary remove keeps today's message: {e2:?}"
+    );
+    assert!(
+        !e2.message.starts_with("auto-close refused"),
+        "ordinary remove keeps today's message: {e2:?}"
+    );
+    drop(holder);
+    s.remove(&id, false, None).unwrap();
+    assert_removed(&fx, &id);
 }

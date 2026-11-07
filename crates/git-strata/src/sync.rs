@@ -114,7 +114,9 @@ pub(crate) fn hook(args: &SyncArgs, started: Instant) -> i32 {
             return None;
         }
         for warning in data["base_warnings"].as_array().into_iter().flatten().filter_map(Value::as_str) { eprintln!("note: {warning}"); }
-        block_reason(&upstream).map(|reason| {
+        // An older daemon's reply has no `mark`, and gets the old words.
+        let done = data["mark"]["state"].as_str() == Some("done");
+        block_reason(&upstream, done).map(|reason| {
             let reason = reason.replace("<session-id>", data["session"].as_str().unwrap_or("<session-id>"));
             json!({ "decision": "block", "reason": reason })
         })
@@ -125,7 +127,10 @@ pub(crate) fn hook(args: &SyncArgs, started: Instant) -> i32 {
     0
 }
 
-pub fn block_reason(upstream: &Upstream) -> Option<String> {
+/// `done`: the session is marked done, so the sentences for a following repo
+/// stop at the sync. An agent that cds back is a cwd holder, and its later `rm`
+/// refuses `OpenFiles`.
+pub fn block_reason(upstream: &Upstream, done: bool) -> Option<String> {
     let mut reasons = Vec::new();
     for (repo, u) in &upstream.repos {
         if let Some(auto) = &u.auto
@@ -138,10 +143,11 @@ pub fn block_reason(upstream: &Upstream) -> Option<String> {
             );
             let action = if u.following {
                 format!(
-                    "ask the user to release the named holders or wait for a stopping point, then run `{}` and cd back into the workspace",
+                    "ask the user to release the named holders or wait for a stopping point, then run `{}`{}",
                     u.fix
                         .as_deref()
-                        .unwrap_or("cd ~ && git-strata sync --session <session-id>")
+                        .unwrap_or("cd ~ && git-strata sync --session <session-id>"),
+                    if done { "" } else { " and cd back into the workspace" }
                 )
             } else {
                 "ask the user to release the named holders or pause writes, then review the dependency/rebase plan for this non-following repo".into()
@@ -182,7 +188,12 @@ pub fn block_reason(upstream: &Upstream) -> Option<String> {
             let deps = summary.map(|s| format!(" ({s})")).unwrap_or_default();
             format!("main's dependencies changed in {repo}{deps}; run")
         };
-        reasons.push(format!("{prefix} `cd ~ && git-strata sync --session <session-id>`, cd back to the workspace, resolve any conflicts it returns (merge upstream's change, then `cd ~ && git-strata sync --session <session-id> --resolved PATH --target … --generation …`), cd back, re-run checks, then publish."));
+        let then = if done {
+            "; if it returns conflicts, resolve them as it says. This session is marked done: stay out of the workspace, because a shell inside it holds the session open, and run `mark active` first if you mean to keep working."
+        } else {
+            ", cd back to the workspace, resolve any conflicts it returns (merge upstream's change, then `cd ~ && git-strata sync --session <session-id> --resolved PATH --target … --generation …`), cd back, re-run checks, then publish."
+        };
+        reasons.push(format!("{prefix} `cd ~ && git-strata sync --session <session-id>`{then}"));
     }
     (!reasons.is_empty()).then(|| reasons.join("\n"))
 }

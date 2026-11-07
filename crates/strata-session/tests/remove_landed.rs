@@ -393,6 +393,7 @@ fn remove_rechecks_the_before_remove_checkpoint() {
         let e = s2.remove(&id(&rep), false, None).unwrap_err();
         assert_eq!(e.code, Code::Dirty, "{e:?}");
         assert_eq!(detail(&e)["reason"], "changed_during_remove");
+        assert_eq!(detail(&e)["after"], "dirty_check");
         let want = if published { "src/index.ts" } else { "src/late.ts" };
         assert_eq!(paths(&e), [want]);
         assert_eq!(lifecycle(&fx, &id(&rep)), Lifecycle::Active);
@@ -868,4 +869,36 @@ fn rm_t3_phase_b_recomputes_the_projection_from_the_checkpoint() {
     assert_eq!(detail(&e)["reason"], "changed_during_remove");
     assert_eq!(paths(&e), ["src/big.ts"]);
     assert_eq!(lifecycle(&fx, &id(&rep)), Lifecycle::Active);
+}
+
+/// §10 row 7: tool's checkpoint closes a write into already-checkpointed front.
+#[test]
+fn rm_refuses_a_write_finished_after_the_checkpoint_of_another_repo() {
+    let mut fx = Fx::with(&["front", "tool"]);
+    // Ordinary rm may checkpoint regenerable work on retry, but a NEW
+    // regenerable write after its checkpoint must still refuse step 5.5.
+    fx.config.repos.get_mut(&repo_name("front")).unwrap().rm.regenerable = vec!["src/late.ts".into()];
+    let s = fx.sessions();
+    let rep = s.new(None, &fx.all()).unwrap();
+    let front = rep.manifest.repos[&repo_name("front")].path.clone();
+    let tool = ws(&rep);
+    let hook = Meddling(|w: &Path| {
+        if w == tool {
+            fs::write(front.join("src/late.ts"), b"late\n").unwrap();
+        }
+    });
+    let s2 = Sessions::open(&fx.config, &fx.gits, fx.store(), &fx.lock, &fx.env, &hook).unwrap();
+    let e = s2.remove(&id(&rep), false, None).unwrap_err();
+    assert_eq!(e.code, Code::Dirty, "{e:?}");
+    assert_eq!(detail(&e)["reason"], "changed_during_remove");
+    assert_eq!(detail(&e)["after"], "checkpoint");
+    assert_eq!(detail(&e)["repos"]["front"]["paths"], json!(["src/late.ts"]));
+    assert_eq!(lifecycle(&fx, &id(&rep)), Lifecycle::Active);
+    assert_eq!(fs::read(front.join("src/late.ts")).unwrap(), b"late\n");
+    let r = s2.remove(&id(&rep), false, None).unwrap();
+    assert!(!r.discarded);
+    let cp = fx.store().checkpoint(&id(&rep), r.checkpoints[&repo_name("front")]).unwrap();
+    assert_eq!(cp.reason, CheckpointReason::BeforeRemove);
+    assert_eq!(cp.entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["src/late.ts"]);
+    assert_eq!(lifecycle(&fx, &id(&rep)), Lifecycle::Removed);
 }

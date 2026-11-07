@@ -10,6 +10,7 @@ use strata_daemon::{
     upstream::ReadMode,
 };
 use strata_types::{CommitOid, SessionId, Upstream};
+use support::close;
 use support::*;
 
 fn call(server: &Server<'_, '_>, method: &str, params: Value) -> Value {
@@ -462,6 +463,95 @@ fn publish_upstream_keyed_by_session_multi_session_group() {
         assert_eq!(out["upstream"][s.as_str()]["repos"]["tool"]["behind"], 0);
     }
     assert_eq!(out["upstream"].as_object().unwrap().len(), 2);
+}
+
+/// §6 opted-in copy of `publish_reply_upstream_after_rebase`: same `base_head` /
+/// `behind` from the pre-teardown upstream read, plus `as_of_rm == "before"`
+/// and the session actually closes.
+#[test]
+fn publish_reply_upstream_after_rebase_and_closes() {
+    let fx = close::opted_in(&["tool"]);
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let s = new(&server);
+    fs::write(ws(&core, &s, "tool").join("new.txt"), "mine").unwrap();
+    let cp = checkpoint(&core, &s, "tool");
+    let out = ok(call(
+        &server,
+        "publish",
+        json!({"group":group(vec![batch(&s,"tool",cp.id,&["new.txt"])]),"shown":{}}),
+    ));
+    assert_eq!(
+        out["upstream"][s.as_str()]["repos"]["tool"]["base_head"],
+        out["published"][0]["commit"]
+    );
+    assert_eq!(out["upstream"][s.as_str()]["repos"]["tool"]["behind"], 0);
+    assert_eq!(out["upstream"][s.as_str()]["as_of_rm"], "before", "{out}");
+    assert_eq!(out["closed"], true, "{out}");
+    assert_eq!(
+        out["auto_close"]["sessions"][s.as_str()]["closed"],
+        true,
+        "{out}"
+    );
+    assert_eq!(
+        core.store.session(&s).unwrap().unwrap().lifecycle,
+        strata_store::Lifecycle::Removed
+    );
+}
+
+/// §6 opted-in copy of `publish_upstream_keyed_by_session_multi_session_group`:
+/// same per-session `behind` (and `base_head` when present) from the
+/// pre-teardown read, `as_of_rm == "before"`, and both sessions close.
+#[test]
+fn publish_upstream_keyed_by_session_multi_session_group_and_closes() {
+    let fx = close::opted_in(&["tool"]);
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&d, &trackers);
+    let a = new(&server);
+    let b = new(&server);
+    fs::write(ws(&core, &a, "tool").join("a.txt"), "a").unwrap();
+    fs::write(ws(&core, &b, "tool").join("b.txt"), "b").unwrap();
+    let acp = checkpoint(&core, &a, "tool");
+    let bcp = checkpoint(&core, &b, "tool");
+    let out = ok(call(
+        &server,
+        "publish",
+        json!({"group":group(vec![batch(&a,"tool",acp.id,&["a.txt"]),batch(&b,"tool",bcp.id,&["b.txt"])]),"shown":{}}),
+    ));
+    for s in [&a, &b] {
+        assert_eq!(out["upstream"][s.as_str()]["repos"]["tool"]["behind"], 0);
+        assert_eq!(out["upstream"][s.as_str()]["as_of_rm"], "before", "{out}");
+        assert_eq!(
+            out["auto_close"]["sessions"][s.as_str()]["closed"],
+            true,
+            "{out}"
+        );
+        assert_eq!(
+            core.store.session(s).unwrap().unwrap().lifecycle,
+            strata_store::Lifecycle::Removed
+        );
+    }
+    assert_eq!(out["upstream"].as_object().unwrap().len(), 2);
+    assert_eq!(out["closed"], true, "{out}");
+    // Same base_head shape as the single-session copy: each session's tool
+    // base_head is one of the published commits (pre-teardown read).
+    let published: Vec<_> = out["published"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["commit"].clone())
+        .collect();
+    for s in [&a, &b] {
+        let head = &out["upstream"][s.as_str()]["repos"]["tool"]["base_head"];
+        assert!(
+            published.iter().any(|c| c == head),
+            "base_head {head} not in published {published:?}; out={out}"
+        );
+    }
 }
 
 #[test]

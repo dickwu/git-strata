@@ -300,6 +300,7 @@ exit $rc
                 branch: "main".into(),
                 push: true,
                 confirm: false,
+                auto_close: None,
             },
             deploy_on_push: false,
             pin_unpushed: true,
@@ -307,7 +308,10 @@ exit $rc
             rm: Default::default(),
             // rm-followups: no quiet window, so a publish moves its own
             // session at once (tests of the window set it).
-            rebase: strata_types::RebaseConfig { quiet_secs: 0, ..Default::default() },
+            rebase: strata_types::RebaseConfig {
+                quiet_secs: 0,
+                ..Default::default()
+            },
             sync: Default::default(),
         }
     }
@@ -332,6 +336,19 @@ echo "installed"
 
 // ---- store, the repo write lock double, the BeforeCheckpoint double ----
 
+pub mod close;
+
+/// `package.json` with a second dependency: a deps draft's input.
+pub const NEW_DEP: &str = r#"{
+  "name": "tool",
+  "version": "1.0.87",
+  "dependencies": {
+    "x": "^1.0.0",
+    "y": "^2.0.0"
+  }
+}
+"#;
+
 // ---- the daemon fixture ----
 
 use std::collections::BTreeMap;
@@ -342,7 +359,8 @@ use strata_confirm::seams::{FakeClock, PromptLog, ScriptedAuth, Verdict};
 use strata_daemon::startup::{self, Core, Options};
 use strata_overlay::{Base, WorkspaceRef};
 use strata_types::{
-    Batch, Checkpoint, CheckpointId, CheckpointReason, Config, Paths, ReleaseGroup, SessionId,
+    Batch, Checkpoint, CheckpointId, CheckpointReason, Config, Paths, PublishDefaults,
+    ReleaseGroup, SessionId,
 };
 
 /// A sandbox with projects, bare origins, a config dir and a socket dir.
@@ -374,7 +392,17 @@ impl Dfx {
             sb.bare_origin(&p);
             repos.insert(repo_name(n), sb.config(&p));
         }
-        let config = Config { paths: Paths { root: sb.path("strata") }, repos, status: Default::default(), dev_ports: Default::default() };
+        // Off by default (auto-close §10 row 1): six tests go on using a session
+        // after a fully landed publish. A test opts in before `prepare`.
+        let config = Config {
+            paths: Paths {
+                root: sb.path("strata"),
+            },
+            repos,
+            status: Default::default(),
+            dev_ports: Default::default(),
+            publish: PublishDefaults { auto_close: false },
+        };
         let config_dir = sb.path("cfg");
         let sock_dir = tempfile::Builder::new()
             .prefix("sd-")
@@ -397,7 +425,11 @@ impl Dfx {
 
     pub fn write_config(&self) {
         fs::create_dir_all(&self.config_dir).unwrap();
-        fs::write(self.config_dir.join("config.toml"), toml::to_string(&self.config).unwrap()).unwrap();
+        fs::write(
+            self.config_dir.join("config.toml"),
+            toml::to_string(&self.config).unwrap(),
+        )
+        .unwrap();
     }
 
     pub fn write_config_text(&self, text: &str) {
@@ -478,7 +510,12 @@ impl Dfx {
         let auth = ScriptedAuth::new(true, Ok(()), verdicts);
         let log = auth.log();
         let clock = FakeClock::new();
-        let c = Confirmer::with_seams(auth, clock.clone(), Duration::from_secs(2), Duration::from_millis(200));
+        let c = Confirmer::with_seams(
+            auth,
+            clock.clone(),
+            Duration::from_secs(2),
+            Duration::from_millis(200),
+        );
         (c, log, clock)
     }
 
@@ -558,17 +595,43 @@ pub fn checkpoint(core: &Core, id: &SessionId, repo: &str) -> Checkpoint {
     let store = &core.store;
     let rec = store.session(id).unwrap().expect("session row");
     let g = rec.manifest.repos[&rn].base.clone();
-    let manifest = store.manifest(&rn, &g.tree).unwrap().expect("base manifest");
-    let base = Base { dir: store.base_dir(&g), r#gen: g, manifest: Arc::new(manifest) };
-    let root = ws(core, id, repo);
-    let wref = WorkspaceRef { session: id, repo: &rn, root: &root, config: &core.config.repos[&rn], git: &core.gits[&rn], store };
-    strata_overlay::checkpoint(&wref, &base, None, CheckpointReason::Manual { message: "test".into() })
+    let manifest = store
+        .manifest(&rn, &g.tree)
         .unwrap()
-        .checkpoint
+        .expect("base manifest");
+    let base = Base {
+        dir: store.base_dir(&g),
+        r#gen: g,
+        manifest: Arc::new(manifest),
+    };
+    let root = ws(core, id, repo);
+    let wref = WorkspaceRef {
+        session: id,
+        repo: &rn,
+        root: &root,
+        config: &core.config.repos[&rn],
+        git: &core.gits[&rn],
+        store,
+    };
+    strata_overlay::checkpoint(
+        &wref,
+        &base,
+        None,
+        CheckpointReason::Manual {
+            message: "test".into(),
+        },
+    )
+    .unwrap()
+    .checkpoint
 }
 
 pub fn batch(session: &SessionId, repo: &str, cp: CheckpointId, paths: &[&str]) -> Batch {
-    Batch { session: session.clone(), repo: repo_name(repo), checkpoint: cp, paths: rps(paths) }
+    Batch {
+        session: session.clone(),
+        repo: repo_name(repo),
+        checkpoint: cp,
+        paths: rps(paths),
+    }
 }
 
 pub fn group(batches: Vec<Batch>) -> ReleaseGroup {
@@ -576,23 +639,35 @@ pub fn group(batches: Vec<Batch>) -> ReleaseGroup {
 }
 
 pub fn reason(e: &strata_types::StrataError) -> Option<&str> {
-    e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|v| v.as_str())
+    e.detail
+        .as_ref()
+        .and_then(|d| d.get("reason"))
+        .and_then(|v| v.as_str())
 }
 
 fn is_daemon_running(e: &strata_types::StrataError) -> bool {
-    e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|r| r.as_str()) == Some("daemon_running")
+    e.detail
+        .as_ref()
+        .and_then(|d| d.get("reason"))
+        .and_then(|r| r.as_str())
+        == Some("daemon_running")
 }
 
 /// pins.json for `config` exactly as configured.
 pub fn pins_json(config: &Config) -> String {
+    // The three flags as before; `rm.regenerable` only when a fixture sets it
+    // before `prepare`, so that pin actually has it (auto-close §10). Seeding
+    // every flag (sync_deps too) changes the pin-first-start audit and reload
+    // bytes that confirm_flow / reload assert on.
     let repos: serde_json::Map<String, serde_json::Value> = config
         .repos
         .iter()
         .map(|(n, rc)| {
-            (
-                n.as_str().to_string(),
-                serde_json::json!({ "deploy_on_push": rc.deploy_on_push, "confirm": rc.publish.confirm, "push": rc.publish.push }),
-            )
+            let mut pin = serde_json::json!({ "deploy_on_push": rc.deploy_on_push, "confirm": rc.publish.confirm, "push": rc.publish.push });
+            if !rc.rm.regenerable.is_empty() {
+                pin["regenerable"] = serde_json::json!(rc.rm.regenerable);
+            }
+            (n.as_str().to_string(), pin)
         })
         .collect();
     serde_json::to_string_pretty(&serde_json::json!({ "repos": repos })).unwrap()

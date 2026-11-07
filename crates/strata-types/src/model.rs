@@ -100,6 +100,9 @@ pub struct PublishTarget {
     pub branch: String,
     pub push: bool,
     pub confirm: bool,
+    /// `publish.auto_close` for this repo; absent inherits `[publish]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_close: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

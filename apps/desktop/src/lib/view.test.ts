@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { DaemonStatus, DepsList, Proposal, StatusReply, Workspace } from './types';
+import type { AutoCloseReplyFields, DaemonStatus, DepsList, Proposal, StatusReply, Workspace } from './types';
 import {
   daemonView,
   filterRows,
@@ -14,6 +14,7 @@ import {
   STUCK_AFTER,
   sessionDetail,
   sessionRows,
+  sessionMarks,
   short,
 } from './view';
 import { bytes, ago } from './copy';
@@ -52,6 +53,104 @@ describe('sessionRows', () => {
     const r = sessionRows(copy).find((x) => x.id === 'S1')!;
     expect(r.health).toBe('Degraded');
     expect(r.conflicts).toBe(2);
+  });
+});
+
+describe('completion marks', () => {
+  const marked = () => {
+    const reply = structuredClone(all);
+    reply.sessions.find((s) => s.status.manifest.id === 'S1')!.status.mark = {
+      state: 'done',
+      note: '<b>landed</b>\tneeds\nreview',
+      by: { kind: 'agent' },
+      at: '2026-11-04T12:00:00Z',
+    };
+    return reply;
+  };
+
+  test('absent legacy marks mean active; done does not change lifecycle or creation order', () => {
+    const rows = sessionRows(marked());
+    expect(rows.map((r) => [r.id, r.mark])).toEqual([
+      ['S2', 'active'],
+      ['S1', 'done'],
+    ]);
+    expect(rows[1].state).toBe('Active');
+    expect(rows[1].note).toBe('<b>landed</b>\tneeds\nreview');
+    expect(sessionRows(all).every((r) => r.mark === 'active' && r.note === null)).toBe(true);
+    expect(sessionMarks(rows)).toEqual([
+      { name: 'active', label: 'Active', sessions: 1 },
+      { name: 'done', label: 'Done', sessions: 1 },
+    ]);
+  });
+
+  test('a mark the daemon wrote reads like any done mark, with its reasons as the note', () => {
+    const reply = marked();
+    const note = 'auto-close did not close this session: not_pushed:\nfront: base 3f9c… is not on origin/main';
+    reply.sessions.find((s) => s.status.manifest.id === 'S1')!.status.mark = {
+      state: 'done',
+      note,
+      by: { kind: 'daemon' },
+      at: '2026-11-04T12:00:00Z',
+    };
+    const row = sessionRows(reply).find((r) => r.id === 'S1')!;
+    expect(row.mark).toBe('done');
+    expect(row.note).toBe(note);
+  });
+
+  test('publish/push reply fields type-check closed and auto_close', () => {
+    const closed: AutoCloseReplyFields = {
+      closed: true,
+      auto_close: {
+        closed: true,
+        reasons: [],
+        rejudged: [],
+        sessions: {
+          's-aaaaaaaa': {
+            closed: true,
+            in_group: true,
+            reasons: [],
+            detail: {},
+            rm: { session: 's-aaaaaaaa', discarded: false },
+            mark: { written: false },
+          },
+        },
+      },
+    };
+    expect(closed.closed).toBe(true);
+    expect(closed.auto_close!.sessions['s-aaaaaaaa'].closed).toBe(true);
+
+    // Push with only opted-out candidates omits top-level closed (§6).
+    const judgedNone: AutoCloseReplyFields = {
+      auto_close: {
+        closed: false,
+        reasons: [],
+        rejudged: [],
+        sessions: {
+          's-bbbbbbbb': {
+            closed: false,
+            in_group: false,
+            reasons: ['disabled'],
+            detail: { repo: 'front' },
+            mark: { written: false },
+          },
+        },
+      },
+    };
+    expect(judgedNone.closed).toBeUndefined();
+    expect(judgedNone.auto_close!.closed).toBe(false);
+  });
+
+  test('state is OR within marks and AND with repo/text filters, including note words', () => {
+    const rows = sessionRows(marked());
+    const ids = (r: typeof rows) => r.map((r) => r.id);
+    expect(ids(filterRows(rows, { repos: [], marks: ['done'] }))).toEqual(['S1']);
+    expect(ids(filterRows(rows, { repos: [], marks: ['active'] }))).toEqual(['S2']);
+    expect(ids(filterRows(rows, { repos: [], marks: ['active', 'done'] }))).toEqual(['S2', 'S1']);
+    expect(
+      ids(filterRows(rows, { repos: ['tool'], marks: ['done'], text: 'needs review' }))
+    ).toEqual(['S1']);
+    expect(ids(filterRows(rows, { repos: [], marks: ['active'], text: 'review' }))).toEqual([]);
+    expect(sessionMarks([]).map((x) => x.sessions)).toEqual([0, 0]);
   });
 });
 

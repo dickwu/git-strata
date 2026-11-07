@@ -45,6 +45,7 @@ fn unbounded_lock_records_each_expired_attempt_and_preserves_inner_errors() {
         repos: BTreeMap::new(),
         status: Default::default(),
         dev_ports: Default::default(),
+        publish: Default::default(),
     };
     let store = Store::open(&root, &[]).unwrap();
     let gits = BTreeMap::new();

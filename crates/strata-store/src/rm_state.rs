@@ -328,6 +328,22 @@ fn rev_i(rev: u64) -> Result<i64> {
     i64::try_from(rev).map_err(|_| err(Code::InvalidInput, "rev is too large", json!({ "reason": "rev" })))
 }
 
+/// Auto-close §3.2: a session that has left for removal takes no new target.
+/// Read in the writer's own transaction, so `Removed` deletes only what the
+/// close proved. `Creating` and `Unknown` keep their replay targets.
+fn leaving(c: &Connection, session: &str, op: &'static str) -> Result<bool> {
+    Ok(matches!(
+        session_lifecycle(c, session).map_err(wp(op))?.as_deref(),
+        Some("removing" | "removed")
+    ))
+}
+
+/// Main-follow's writers need `active`, the test they already made outside
+/// the transaction, so the two are atomic.
+fn is_active(c: &Connection, session: &str, op: &'static str) -> Result<bool> {
+    Ok(session_lifecycle(c, session).map_err(wp(op))?.as_deref() == Some("active"))
+}
+
 /// Rule 1 of §1.6, inside `record_publish`'s transaction: every workspace
 /// of the group gets `planned_publish = id` (the row is inserted
 /// when absent; other targets are left as they are).
@@ -426,6 +442,9 @@ impl Store {
                 return Ok(Tx::Rollback(false));
             }
             let (s, rn) = (session.as_str(), repo.as_str());
+            if target.is_some() && leaving(c, s, OP)? {
+                return Ok(Tx::Rollback(false));
+            }
             c.execute(
                 "UPDATE rebase_pending SET planned_publish = NULL WHERE session = ?1 AND repo = ?2 AND planned_publish = ?3",
                 params![s, rn, p],
@@ -552,6 +571,9 @@ impl Store {
             let rn = repo.as_str();
             for p in plans {
                 let s = p.session.as_str();
+                if leaving(c, s, OP)? {
+                    continue;
+                }
                 let Some((ft, fd)) = ws_base(c, s, rn).map_err(wp(OP))? else { continue };
                 let n = c
                     .execute(
@@ -585,6 +607,9 @@ impl Store {
                 return Ok(Tx::Rollback(false));
             }
             let n = if adopt {
+                if leaving(c, s, OP)? {
+                    return Ok(Tx::Rollback(false));
+                }
                 let Some((ft, fd)) = ws_base(c, s, rn).map_err(wp(OP))? else { return Ok(Tx::Rollback(false)) };
                 c.execute(
                     "UPDATE rebase_pending SET head = planned_head, tree = planned_tree, to_deps = NULL, source = 'replay', planned_head = NULL, planned_tree = NULL, \
@@ -616,6 +641,9 @@ impl Store {
         if from.repo != *repo { return Err(crate::errors::invalid("repo_mismatch", "the base belongs to another repo")); }
         let at = ns(at, "at")?;
         self.write(OP, |c| {
+            if !is_active(c, session.as_str(), OP)? {
+                return Ok(Tx::Rollback(false));
+            }
             let n = c.execute(
                 "INSERT INTO rebase_pending (session, repo, rev, from_tree, from_deps, head, tree, source, to_deps, reason, first_at_ns, last_at_ns, attempts) \
                  VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, 'main', ?7, 'pending', ?8, ?8, 0) ON CONFLICT (session, repo) DO NOTHING",
@@ -634,6 +662,9 @@ impl Store {
         if from.repo != *repo { return Err(crate::errors::invalid("repo_mismatch", "the base belongs to another repo")); }
         let (rev, at) = (rev_i(rev)?, ns(at, "at")?);
         self.write(OP, |c| {
+            if !is_active(c, session.as_str(), OP)? {
+                return Ok(Tx::Rollback(false));
+            }
             let n = c.execute(
                 "UPDATE rebase_pending SET head = ?4, tree = ?5, to_deps = NULL, rev = rev + 1, from_tree = ?6, from_deps = ?7, \
                  attempts = CASE WHEN ?8 THEN attempts ELSE 0 END, last_at_ns = CASE WHEN ?8 THEN last_at_ns ELSE ?9 END, \

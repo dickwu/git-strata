@@ -82,7 +82,7 @@ pub fn push(ctx: &Ctx, repo: &str) -> Result<Envelope> {
     // Publish.md D2a: a headless push may have replayed the chain first.
     let mut shown_data = outcome.clone();
     if let Some(m) = shown_data.as_object_mut() {
-        for k in ["commit", "replayed", "rebases", "warnings"] {
+        for k in ["commit", "replayed", "rebases", "warnings", "closed", "auto_close"] {
             if let Some(v) = data.get(k) {
                 m.insert(k.into(), v.clone());
             }
@@ -687,8 +687,10 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message
         match build_batch(&config, &parsed) {
             Ok(b) => b,
             // D30: a bad PATH is the caller's input and is reported as it
-            // is; a NotTty here would hide it (no connection either way).
-            Err(e) if is_path_error(&e) => return Err(e),
+            // is; a NotTty here would hide it (no connection either way). So
+            // is a session that is gone: a full publish closes its session,
+            // so a retry after a lost reply lands here.
+            Err(e) if is_path_error(&e) || e.code == Code::NoSuchSession => return Err(e),
             Err(e) => {
                 // The session is unreadable, so the batch's repos are
                 // unknown: gate on every configured repo before reporting.
@@ -799,7 +801,7 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message
                 .cloned()
                 .unwrap_or_default();
             let mut envelope = publish_envelope(&config, &published, &already, None);
-            carry_upstream(&mut envelope, &data);
+            carry_enrichment(&mut envelope, &data);
             Ok(envelope)
         }
         Err(e) => {
@@ -830,9 +832,11 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message
 
 /// Preserve enrichment through the CLI's rebuilt publish envelope, even
 /// when its existing push-outcome rules turn a daemon ok into an error.
-fn carry_upstream(envelope: &mut Envelope, daemon: &Value) {
-    if let Some(upstream) = daemon.get("upstream") {
-        envelope.data["upstream"] = upstream.clone();
+fn carry_enrichment(envelope: &mut Envelope, daemon: &Value) {
+    for key in ["upstream", "closed", "auto_close"] {
+        if let Some(v) = daemon.get(key) {
+            envelope.data[key] = v.clone();
+        }
     }
 }
 
@@ -845,6 +849,21 @@ fn bare_refusal(e: &StrataError) -> bool {
         && e.detail
             .as_ref()
             .is_some_and(|d| d.get("kind").and_then(Value::as_str) == Some("PushRefused") && d.get("reason").is_none())
+}
+
+/// The `PushRefused` of a repo an earlier publish landed and whose push was
+/// refused. Its row stays `Done`, so a re-run cannot clear it and `detail.fix`
+/// names what can. The daemon has already refreshed the entry: a `Refused` here
+/// is a commit still unpushed.
+fn refused_already(already: &[Value]) -> Option<StrataError> {
+    already.iter().find_map(|a| {
+        let push = a.get("push").filter(|o| o.get("kind").and_then(Value::as_str) == Some("Refused"))?;
+        let repo = a.get("repo").and_then(Value::as_str).unwrap_or_default();
+        Some(
+            StrataError::new(Code::PushRefused, push.get("message").and_then(Value::as_str).unwrap_or("refused").to_string())
+                .with_detail(json!({ "repo": repo, "fix": format!("git-strata push {repo}") })),
+        )
+    })
 }
 
 /// `{commits, checks_ran, waiting, pushes, already_published}`; `ok` only
@@ -899,7 +918,7 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
     let mut data = json!({ "commits": commits, "checks_ran": checks, "waiting": waiting, "pushes": pushes, "already_published": already });
     let sources: BTreeMap<_, _> = published.iter().chain(already).filter_map(|p| Some((p.get("repo")?.as_str()?, p.get("message_source")?.as_str()?))).collect();
     if !sources.is_empty() { data["message_source"] = json!(sources); }
-    match failed.or(bad) {
+    match failed.or(bad).or_else(|| refused_already(already)) {
         Some(e) => Envelope::err_with(e, data),
         None => Envelope::ok(data),
     }
@@ -967,6 +986,7 @@ mod tests {
             repos: Default::default(),
             status: Default::default(),
             dev_ports: Default::default(),
+            publish: Default::default(),
         };
         let upstream = json!({ "s-abcdefgh": { "clean": false, "repos": {} } });
         for kind in ["Pushed", "Refused", "Unknown"] {
@@ -974,7 +994,7 @@ mod tests {
                 [json!({"repo":"tool","commit":"abc","checks_ran":1,"push":{"kind":kind}})];
             let mut envelope = publish_envelope(&config, &published, &[], None);
             let (ok, error) = (envelope.ok, serde_json::to_value(&envelope.error).unwrap());
-            carry_upstream(&mut envelope, &json!({"upstream":upstream}));
+            carry_enrichment(&mut envelope, &json!({"upstream":upstream}));
             assert_eq!(envelope.data["upstream"], upstream);
             assert_eq!(envelope.ok, ok);
             assert_eq!(serde_json::to_value(&envelope.error).unwrap(), error);

@@ -14,6 +14,23 @@ use crate::{
     ProposalRecord, ProposalStatus, Result, Store,
 };
 
+/// A draft's origin must not have left for removal: `removing` could land in
+/// neither Phase of a live close, and `Removed` hides the row from every view.
+/// Every other lifecycle, and an origin with no row, inserts as before.
+fn draft_origin_allows(c: &Connection, session: &str) -> Result<()> {
+    let lifecycle = crate::sessions::session_lifecycle(c, session)
+        .map_err(|e| sql(e, "record_proposal", NOT_WRITTEN))?;
+    match lifecycle.as_deref() {
+        Some("removed") => Err(crate::errors::no_such_session(session)),
+        Some("removing") => Err(err(
+            Code::InvalidInput,
+            format!("session {session} is being removed; it can take no deps draft"),
+            json!({ "reason": "lifecycle", "session": session, "lifecycle": "removing" }),
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn hex64(s: &str, field: &str) -> Result<()> {
     if s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         Ok(())
@@ -370,6 +387,12 @@ impl Store {
         let at = ns(at, "at")?;
         let origin = new.origin.as_ref().map(|s| s.as_str().to_owned());
         self.write(OP, |c| {
+            // Auto-close §3.2: `Removed` hides a draft, so none may land once
+            // its session has left for removal. A `pending` row keeps an origin
+            // that may be gone (`same_to`, `ensure_target`) and stays visible.
+            if !target && let Some(session) = origin.as_deref() {
+                draft_origin_allows(c, session)?;
+            }
             let occupant: Option<i64> = if target {
                 c.query_row(
                     "SELECT id FROM deps_proposals WHERE repo = ?1 AND state = 'pending'",

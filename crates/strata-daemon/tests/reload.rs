@@ -180,8 +180,16 @@ fn hot_reload_preserves_pin_audit_history_and_records_changes() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    for (event, repo) in [("config_relax", "tool"), ("tighten", "tool"), ("pin_new", "front")] {
-        assert!(entries.iter().any(|e| e["event"] == event && e["repo"] == repo));
+    for (event, repo) in [
+        ("config_relax", "tool"),
+        ("tighten", "tool"),
+        ("pin_new", "front"),
+    ] {
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["event"] == event && e["repo"] == repo)
+        );
     }
     let pins: Value = serde_json::from_slice(&fs::read(core.pins.path()).unwrap()).unwrap();
     assert_eq!(pins.as_object().unwrap().len(), 1);
@@ -1165,11 +1173,19 @@ fn old_tree_worker_requeues_a_fenced_take_with_a_fresh_catalog() {
     let repo = repo_name("tool");
     let id = {
         let _pin = core.admit();
-        d.sessions.new(None, std::slice::from_ref(&repo)).unwrap().manifest.id
+        d.sessions
+            .new(None, std::slice::from_ref(&repo))
+            .unwrap()
+            .manifest
+            .id
     };
     // The missing intent is dropped only after admission and both lock takes.
     d.sessions.requeue_old_tree(
-        strata_session::OldTreeKey { session: id, repo: repo.clone(), n: 999 },
+        strata_session::OldTreeKey {
+            session: id,
+            repo: repo.clone(),
+            n: 999,
+        },
         fx.sb.path("old-tree-no-longer-present"),
         1,
     );
@@ -1187,7 +1203,10 @@ fn old_tree_worker_requeues_a_fenced_take_with_a_fresh_catalog() {
         }
         admitted.send(generation).unwrap();
         if attempt == 0 {
-            let _ = released.lock().unwrap().recv_timeout(Duration::from_secs(10));
+            let _ = released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
         }
     };
     std::thread::scope(|scope| {
@@ -1234,4 +1253,83 @@ fn quarantine_enumeration_does_not_follow_directory_links() {
     std::os::unix::fs::symlink(outside.join("front.git"), &linked_shadow).unwrap();
     // The shadow link itself is suspicious; no target entry is traversed.
     assert_eq!(startup::quarantine_entries(root), [linked_shadow]);
+}
+
+#[test]
+fn auto_close_follows_a_config_reload() {
+    let mut fx = support::close::opted_in(&["tool"]);
+    fx.config.publish.auto_close = false;
+    fx.write_config();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    serving(&d, || {
+        let (s, group1) = checkpoint_group(&d, "tool");
+        let first = call(&d, "publish", json!({"group": group1, "shown": {}}));
+        assert_eq!(first["ok"], true, "{first}");
+        let f = &first["data"];
+        assert_eq!(f["closed"], false, "{f}");
+        assert_eq!(
+            f["auto_close"]["sessions"][s.as_str()]["reasons"],
+            json!(["disabled"]),
+            "{f}"
+        );
+        assert!(support::close::mark_of(&core, &s).is_none());
+
+        fx.config.publish.auto_close = true;
+        fx.write_config();
+        let reloaded = call(&d, "config_reload", json!({}));
+        assert_eq!(reloaded["ok"], true, "{reloaded}");
+        assert_eq!(reloaded["data"]["outcome"], "applied", "{reloaded}");
+        assert_eq!(
+            reloaded["data"]["restart_required"],
+            json!([]),
+            "{reloaded}"
+        );
+
+        // Fresh edit + publish under the reloaded true flag closes.
+        fs::write(
+            ws(&core, &s, "tool").join("src/index.ts"),
+            "export const v = 43;\n",
+        )
+        .unwrap();
+        let cp2 = call(
+            &d,
+            "checkpoint",
+            json!({
+                "session": s,
+                "repo": "tool",
+                "reason": {"kind": "Manual", "message": "reload-ac-2"},
+                "paths": [],
+            }),
+        );
+        assert_eq!(cp2["ok"], true, "{cp2}");
+        let cp2_id = serde_json::from_value(cp2["data"]["checkpoint"]["id"].clone()).unwrap();
+        let group2 = group(vec![batch(&s, "tool", cp2_id, &["src/index.ts"])]);
+        let second = call(&d, "publish", json!({"group": group2, "shown": {}}));
+        assert_eq!(second["ok"], true, "{second}");
+        assert_eq!(second["data"]["closed"], true, "{second}");
+        assert_eq!(
+            core.store.session(&s).unwrap().unwrap().lifecycle,
+            strata_store::Lifecycle::Removed
+        );
+
+        // Flip back to false on a second session → disabled.
+        let (s2, group3) = checkpoint_group(&d, "tool");
+        fx.config.publish.auto_close = false;
+        fx.write_config();
+        let again = call(&d, "config_reload", json!({}));
+        assert_eq!(again["ok"], true, "{again}");
+        assert_eq!(again["data"]["outcome"], "applied", "{again}");
+        let third = call(&d, "publish", json!({"group": group3, "shown": {}}));
+        assert_eq!(third["ok"], true, "{third}");
+        assert_eq!(
+            third["data"]["auto_close"]["sessions"][s2.as_str()]["reasons"],
+            json!(["disabled"]),
+            "{third}"
+        );
+        assert_eq!(
+            core.store.session(&s2).unwrap().unwrap().lifecycle,
+            strata_store::Lifecycle::Active
+        );
+    });
 }

@@ -115,7 +115,9 @@ impl Live {
     /// config.toml where the repos in `guarded` push, confirm and deploy
     /// on push (the confirm-class fixture); the others do none of these.
     pub fn write_config_guarded(&self, guarded: &[&str]) {
-        let mut t = format!("[paths]\nroot = {:?}\n", self.root.to_string_lossy());
+        // Auto-close off: a Live test asserts what stays open after a publish.
+        // `live_product_default_closes_on_publish` takes this table out.
+        let mut t = format!("[paths]\nroot = {:?}\n\n[publish]\nauto_close = false\n", self.root.to_string_lossy());
         for (n, p) in &self.repos {
             let g = guarded.contains(&n.as_str());
             let deps = if self.deps_repos.contains(n) {

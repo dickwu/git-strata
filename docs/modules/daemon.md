@@ -65,7 +65,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 未知方法 → RPC `UnknownMethod`。参数对不上 → RPC `Failed`。
 
-方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 26 个以外不加方法（`sync` 是 main-sync 加的；`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
+方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 27 个以外不加方法（`sync` 是 main-sync 加的；`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
 
 | method | 作用 | 是否只读 |
 | --- | --- | --- |
@@ -74,6 +74,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `status` | 读，不排队，不等写锁 | 是 |
 | `sync` | `check:true`（及 `hook`）在任何写操作前分支到只读 lane；否则交给 `sync_move::run`（Agent moves、report-bound 冲突解决） | 否 |
 | `checkpoint` | 记检查点 | 否 |
+| `mark` | 设置或清除工作完成标记，不改生命周期或文件 | 否 |
 | `restore` | 恢复到一个检查点 | 否 |
 | `grep` | `search::grep`；零命中是空列表 | 是 |
 | `files` | `search::files` | 是 |
@@ -100,7 +101,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos?: [RepoName], check?: bool, fetch?: bool, resolved?: [RepoPath], keep?: [RepoPath], target?: CommitOid|null, generation?: u64|null, accept_diverged?: bool, hook?: bool}`。`fetch` 缺省 true，其余布尔值缺省 false。`check` 回复 `{session, upstream}`，只读本地 refs/store，不取写锁、不 fetch、observe、enroll 或写检查点。`hook` 只在 check 时合法：使用缓存，判断 unpublished 前 flush live Tracker，不扫描工作区。非 check 路径先解析 session（选择器或 cwd），再调用 `sync_move::run`；无论成败都重启该 session 的 Tracker，成功回复再尽力附加 `upstream`。features 增加 `status.upstream` 与 `sync`。
 
-`Core.upstream` 是有界历史缓存（repo + base head + main tip，最多 512 条），T2 每轮结束预热。full status/check/publish/rm 补算缺失项；ls/brief/hook 不运行 Git，冷项 `unchecked:true`。会话 `upstream` 与各 `WorkspaceStatus.upstream` 同源；publish 在整个 group 的 rebase 完成后按 session id 返回，rm 在清掉 Tracker/工作区前捕获，Dirty 放在 detail。失败只省略 enrichment 并记录日志，不改变 publish/rm 的 code/outcome。
+`Core.upstream` 是有界历史缓存（repo + base head + main tip，最多 512 条），T2 每轮结束预热。full status/check/publish/rm 补算缺失项；ls/brief/hook 不运行 Git，冷项 `unchecked:true`。会话 `upstream` 与各 `WorkspaceStatus.upstream` 同源；publish 在整个 group 的 rebase 完成后按 session id 返回，rm 在清掉 Tracker/工作区前捕获，Dirty 放在 detail。关闭的会话的 `upstream` 在 teardown 之前读出（`as_of_rm: "before"`，各仓库 `unpublished: false`）。失败只省略 enrichment 并记录日志，不改变 publish/rm 的 code/outcome。
 
 | method | params | data |
 | --- | --- | --- |
@@ -109,6 +110,7 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `add` | `{ "session": SessionId, "repos": [RepoName] }` | `{ report: AddReport, anchor_unknown }`（session.md D52） |
 | `status` | `{ "cwd": string\|null, "session": string\|null, "all": bool, "chains"?: bool, "summary"?: bool, "workspaces"?: bool }` | 见 §5.4；`chains` 缺省 false。`summary: true`（status-perf C）：只读 store，回 `{ sessions: [SessionSummary] }`（cli.md §3.2 `status --brief`），按 id 升序，选择优先级同普通 status（`all` > `session` > `cwd` > 全部）；不 stat 工作区、不跑 git、不走旧树，不进池。`workspaces: true` 给每个会话带上 `workspaces`，只在 `summary` 时合法，否则 `InvalidInput`（`workspaces_without_summary`）；`summary` 与 `chains: true` 同给 → `InvalidInput`（`summary_with_chains`）。旧 daemon 不认识这两个字段，以 RPC `Failed`「unknown field」拒绝，cli 读 store 回退 |
 | `checkpoint` | `{ "session", "repo", "reason": CheckpointReason, "paths": [RepoPath] }` | `Checkpointed`；`paths` 可空 |
+| `mark` | `{session: SessionId, state: "done"\|"active", note?: string, agent?: string}` | `{session, mark}`；完成标记见下文 |
 | `restore` | `{ "session", "repo", "checkpoint": CheckpointId, "paths": [RepoPath]\|null }` | `Restored` |
 | `grep` | `{ "pattern", "session": string\|null, "all": bool, "ignore_case": bool }` | `Hit` 的数组；零命中是 `[]` |
 | `files` | `{ "session", "repo", "glob" }` | `RepoPath` 的数组 |
@@ -116,9 +118,9 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `deps_propose` | `{ "session", "repo", "switch": bool, "caller_pids"?: [i32], "allow_cwd"?: bool, "allow_cwd_holders"?: bool }` | 提议；`switch` 为真时附带移动结果 |
 | `deps_approve` | `{ "proposal": ProposalId, "sessions": [SessionId]\|null, "caller_pids"?: [i32], "allow_cwd"?: bool, "allow_cwd_holders"?: bool }` | 每个会话一条；`null` = 该 repo 的全部会话 |
 | `deps_list` | `{ "repo": RepoName\|null }` | `{proposals:[...]}`；每行含有效的 `mode: "apply" \| "confirm"`，以及可选 `changes` |
-| `publish` | `{ "group": ReleaseGroup, "message"?: String, "message_for"?: {RepoName: String}, "shown"?: { RepoName: CommitOid \| null }, "plan"?: [RepoName] }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数。`shown` 是 cli 给人看过的每个要确认仓库的链顶（D21）。`plan` 是 cli 的 TTY 检查覆盖了的、会推且要确认的仓库（cli.md D23）；给了 `plan` 时，daemon 自己重算出的要提交仓库里，凡是会推且要确认、却不在 `plan` 里的（`publish_plan` 与 `publish` 之间发布历史变了），在弹框、取凭据、写任何东西之前就拒绝：`NotConfirmed`，`detail.reason = "plan_changed"`，`detail.repo`、`detail.planned`；agent 重跑同一条命令即可（重跑时 cli 会把它算进计划并查 TTY）。不给 `plan`（cli 以外的调用方）不做这项检查（review-3 T1）[实现时补的决定]。回复另带 `already_published: [{repo, publish, commit, push}]`：之前已经落地、这次跳过的仓库（D22）。失败时 `detail.repo` 是停下的仓库，`detail.published_before` 是这次已经提交的仓库。停下的仓库若已写了提交（`detail.commit`，如推送超时或被拒），`detail.landed` 是它的那条 `{repo, commit, push}`，`push` 取已知的结果（`Unknown` / `Refused`，没推为 null）（review M4）[实现时补的决定]；`push` 与 `checks_ran` 取 publish 错误 detail 里写明的值，推送成功后才失败（rebase、关行）的是 `Pushed`（review-2 N3）[实现时补的决定]。`repo` / `published_before` / `already_published` 加在该仓库的任何错误上，不只是 publish 本身的：读配置、确认失败或被取消（`require_validated`）同样带上（review-2 N6）[实现时补的决定]。`plan_changed` 的检查仍在逐仓库循环之前（还什么都没写），但它和它读配置的错误走同一套装饰：带 `repo`，以及重算计划时发现已经落地、这次跳过的 `already_published`（这时 `published_before` 必为空，不出现）（review-4 F2）[实现时补的决定] |
+| `publish` | `{ "group": ReleaseGroup, "message"?: String, "message_for"?: {RepoName: String}, "shown"?: { RepoName: CommitOid \| null }, "plan"?: [RepoName] }` | 每个 repo 的 commit 与 `PushOutcome`；`group.id` 由 store 分配，客户端传来的值不算数。`shown` 是 cli 给人看过的每个要确认仓库的链顶（D21）。`plan` 是 cli 的 TTY 检查覆盖了的、会推且要确认的仓库（cli.md D23）；给了 `plan` 时，daemon 自己重算出的要提交仓库里，凡是会推且要确认、却不在 `plan` 里的（`publish_plan` 与 `publish` 之间发布历史变了），在弹框、取凭据、写任何东西之前就拒绝：`NotConfirmed`，`detail.reason = "plan_changed"`，`detail.repo`、`detail.planned`；agent 重跑同一条命令即可（重跑时 cli 会把它算进计划并查 TTY）。不给 `plan`（cli 以外的调用方）不做这项检查（review-3 T1）[实现时补的决定]。回复另带 `already_published: [{repo, publish, commit, push}]`：之前已经落地、这次跳过的仓库（D22）。失败时 `detail.repo` 是停下的仓库，`detail.published_before` 是这次已经提交的仓库。停下的仓库若已写了提交（`detail.commit`，如推送超时或被拒），`detail.landed` 是它的那条 `{repo, commit, push}`，`push` 取已知的结果（`Unknown` / `Refused`，没推为 null）（review M4）[实现时补的决定]；`push` 与 `checks_ran` 取 publish 错误 detail 里写明的值，推送成功后才失败（rebase、关行）的是 `Pushed`（review-2 N3）[实现时补的决定]。`repo` / `published_before` / `already_published` 加在该仓库的任何错误上，不只是 publish 本身的：读配置、确认失败或被取消（`require_validated`）同样带上（review-2 N6）[实现时补的决定]。`plan_changed` 的检查仍在逐仓库循环之前（还什么都没写），但它和它读配置的错误走同一套装饰：带 `repo`，以及重算计划时发现已经落地、这次跳过的 `already_published`（这时 `published_before` 必为空，不出现）（review-4 F2）[实现时补的决定]。成功回复另带 `closed`（本组每个会话是否都已关闭）与 `auto_close:{closed, reasons[], rejudged[], sessions}`（§6）。 |
 | `publish_plan` | `{ "group": ReleaseGroup, "message"?: String, "message_for"?: {RepoName: String} }` | `{ "subjects": {RepoName: {subject, message_source}}, "repos": [RepoName], "already_published": [{repo, publish, commit, push}] }`。与 `publish` 用同一份重跑过滤（D22）：`repos` 是这次 `publish` 还会提交、会确认的仓库，按名字排序；`already_published` 与 `publish` 会报的一致。不排队、不等待锁，不写 Store、发布链 ref 或工作区、不弹框；必要时在 try_repo 锁里填充私有 remote-tracking ref 缓存。只覆盖按内容判定的落地；会话没被 rebase 时 publish 的 `NoCommit` 回退（D22）只有真正 stage 才知道，这类仓库仍在 `repos` 里（`publish_plan_keeps_a_waiting_sessions_landed_guarded_repo`：rebase 为 `Waiting` 的会话，其要确认的仓库仍在 `repos`，cli 照样要 TTY 与确认；skills 的 reference 照此写明，review-3 T3）。group 为空 → `InvalidInput`。cli 用它把 TTY 检查和确认限制在还要做事的仓库上（cli.md §5，review-2 N2）[实现时补的决定] |
-| `push` | `{ "repo": RepoName, "shown"?: CommitOid \| null }` | `{push: PushOutcome, commit}`。`shown` 是 cli 给人看过的链顶（D21）。不要确认的仓库先 fetch，链 `Diverged` 时无头重放再推一次快进，另带 `replayed`（`{from,to,onto,commits,checks_ran}` 或 null）、`rebases`、`warnings`；冲突 `Conflict` `replay_conflict`，不写不推（publish.md D2a）[实现时补的决定] |
+| `push` | `{ "repo": RepoName, "shown"?: CommitOid \| null }` | `{push: PushOutcome, commit}`。`shown` 是 cli 给人看过的链顶（D21）。不要确认的仓库先 fetch，链 `Diverged` 时无头重放再推一次快进，另带 `replayed`（`{from,to,onto,commits,checks_ran}` 或 null）、`rebases`、`warnings`；冲突 `Conflict` `replay_conflict`，不写不推（publish.md D2a）[实现时补的决定]。成功且至少有一个 done 标记会话被判定、`disabled` 或 `extended` 时，在放开 repo 锁之后另带同样的 `closed` 与 `auto_close`；拆分分支（`publish.branch != default_branch`）的推送不跑钩子，也不带这两项。 |
 | `assign` | `{ "group": ReleaseGroup, "path": RepoPath, "session": SessionId }` | `{}` |
 | `rm` | `{ "session": SessionId, "discard": bool }` | `RemoveReport` |
 | `gc` | `{ "repo": RepoName\|null }` | `{ done, skipped, trash }`；`trash` 是 `TrashReport`（`repo` 为 null 时）或 null |
@@ -126,7 +128,7 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice, "shown"?: CommitOid \| null }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
 | `config_reload` | `{}` | ReloadReport，见 Config catalog and reload |
 | `config_relax` | `{ "repo": RepoName, "shown"?: PinnedFlags \| null }` | `{pins_meta, warnings?}`。`shown` 在反序列化时可省略或为 null，但 handler 会以 `InvalidInput shown_required` 拒绝；支持 `config.reload` 的客户端必须发送展示的 flags。没有凭据字段。见 §5.5 |
-| `daemon_status` | `{ "verify": bool }` | `holds`, `queues:[{session,holder,since,queued}]`, `repo_waiting`, `warnings`（含 LongWait）；见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc` |
+| `daemon_status` | `{ "verify": bool }` | `holds`, `queues:[{session,holder,since,queued}]`, `repo_waiting`, `warnings`（含 LongWait）, `features`, `sessions_audit_error`（会话审计写入失败信息或 null；见下文 sidecar 说明）；见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc` |
 | `du` | `{ "refresh": bool }`（缺省 false） | 见 §5.12 |
 | `ports_ensure` | `{ "session": SessionId, "repo": RepoName }` | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
 | `ports_reassign` | `{ "session": SessionId, "repo": RepoName, "checked": u16 \| null }`（`checked`：cli 查过监听的那个 base，`null` 或缺省 = 它没看到租约；与事务里的租约不同时 `Busy lease_changed`，什么都不动） | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
@@ -426,7 +428,7 @@ value; workers should use the accessor for subsequent passes.
 
 `ObserveFailed` 不在 `DaemonWarning` 里重定义。它是 `NewWarning` 或这次 RPC 的 `data.warnings`。
 
-`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload"]`（D38、D39；`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload）；没有这个键的 daemon 一个也不支持。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
+`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload"]`（D38、D39；`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload）；没有这个键的 daemon 一个也不支持。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
 
 stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看见某个影子仓库的 `PrePushGuardDisabled`。同一条不重复打。这些警告 JSON 里都有，不靠人去翻日志；R2 activity-scope 的 once-per-repo 日志提示是下文注明的例外。
 
@@ -468,7 +470,7 @@ and a different key cannot inherit it. With no matching cached value, the summar
 
 **`publish_plan`**：不排队。`publish` 开头那一步重跑过滤（`rerun_plan`，即 D22 的按选择子、按内容判定）原样跑一遍，返回还要提交的仓库与 `already_published`，不写（review-2 N2）[实现时补的决定]。
 
-**`deps_propose`**：锁外 `drift`，没有漂移不必提议。有则锁外 `build`。然后占 repo 锁（写前 30 秒）调 `propose`。`switch` 为真：先锁外 `ensure_base_for`，再占该会话队列、拿锁、`plan_switch` 与 `move_workspace`。建造都在占队列之前。
+**`deps_propose`**：锁外 `drift`，没有漂移不必提议。有则锁外 `build`。然后占 repo 锁（写前 30 秒）调 `propose`。`switch` 为真：先锁外 `ensure_base_for`，再占该会话队列、拿锁、`plan_switch` 与 `move_workspace`。建造都在占队列之前。写入无 target 的 draft（有 origin）时，`record_proposal` 在同一事务里读 origin 的 lifecycle：`removing` → `InvalidInput`（`reason: "lifecycle"`），`removed` → `NoSuchSession`；不另加锁或队列，建造仍在占锁之前，插入只占 repo 锁。正在关闭或 `rm` 中的过期 `deps propose` 被告知真相，而不是写入无人会看到的行。
 
 **`deps_approve`**：按 deps.md §5.12。不是 Pending → `NoSuchProposal`，不弹框。弹框在占队列之前，action 是 `DepsApprove { proposal }`。锁外 `ensure_target`；`Target::Replaced` 则什么都不移动，把替换提议的 id 交人，批准它是一次新的确认。Ready 时锁外备好基线 generation。然后按 `SessionId` 升序占齐候选会话的队列，再拿 repo 锁。锁里再 `get_proposal`：已被取代 → `NoSuchProposal`，`detail.state` 指向替换的那条，不自动批准。`P.head` 不是 `main_tip` → `HeadMoved`（reason `main_moved`），什么都没写，放开之后 `observe_main`，把现状交人重新确认。然后 `plan_rollout`，对每个 Move 调 `move_workspace`（调用方已持锁），再 `record_rollout`。某个会话 `OpenFiles` 是 data 里的一条，不是整次失败。冷装在队列和锁之外，所以 ToolCall 不等这次冷装。移动阶段持着队列，ToolCall 等移动做完，不等待被取消。
 
@@ -478,7 +480,7 @@ and a different key cannot inherit it. With no matching cached value, the summar
 
 实现（review M6）：单独 `push` 与 restore 的暂存目录 `<root>/daemon/push/<pid>-<ns>/` 在导出之前先写 `push.json`（`repo`、`commit`），作为这次尝试的持久记录。（review P1-13，D34：先写临时文件、F_FULLFSYNC、改名，再 F_FULLFSYNC 暂存目录和 `daemon/push/`；任何一步失败就删目录、报错、不推送。）结果确定（`Pushed`、`PushRefused` 等）就删掉目录；结果不确定（`Unknown`）就保留目录，告警 `UnknownPush { repo, commit, scene }`，错误的 `detail.scene` 给出路径；重启时扫描这些目录再报一次。不重推。之后同一 repo 一次确定的 `Pushed`，其 commit 包含现场的 commit 时，现场算结清，删目录、撤告警。（review-2 N4）[实现时补的决定] `push.json` 另记 `remote`（`origin`）和 `branch`；只有同一 repo、同一 remote、同一 branch 的确定 `Pushed`（单独 `push`，以及 restore 成功的推送）才结清，且其 commit 须包含现场的 commit。别的分支的现场、以及 N4 之前写的、没有 remote / branch 的记录不自动结清，留给人处理。（review-3 R4）[实现时补的决定] `push.json` 再记仓库身份 `repo_id`（主 checkout common dir 的 realpath，`Git::repo_id`）与推送目的地 `push_url`（推送之前经 gitio `push_url("origin")` 读的，只读本地 config；读不到记 null）。结清要求：这次确定的 `Pushed` 推送之前读到的 `repo_id`、`push_url`，在推送之后重读仍相同，且与现场记录的两项逐字节相等，再加上同一 repo 名、remote、branch 与包含关系。所以 origin 的推送地址在一次不确定的推送之后被改到别的远端，推到新地址的确定推送不结清旧现场；同名而 common dir 不同的仓库也不结清；R4 之前写的、没有这两项的记录不自动结清。地址按字符串比，同一远端的两种写法（别名、`insteadOf` 改写前后）算不同，宁可留着给人处理。（review-4 F1）[实现时补的决定] 推送本身就推到现场记下的那个 `push_url`：单独 `push` 经 publish 的 `push_to`、restore 经 gitio 的 `push_recorded_to`，gitio 不再重读 config。所以记录里的地址就是这次推送实际去的地址，即使 origin 的推送地址在读之后、推之前被改（A→B），或推完又改回（B→A）。结清因此不再在推送之后重读 config 比较：确定的 `Pushed` 就落在记下的地址上，只要求现场的 `repo_id`、`push_url` 与之逐字节相等。读不到推送地址（记 null）时照旧由 gitio 自己读，这种推送不结清任何现场。（review-5 N1）[实现时补的决定] git 对命令行给的地址还会再套 `insteadOf` 改写，所以 gitio 把地址钉住（恒等改写规则；赢不了的 config 在发送前以 `InvalidInput` `url-rewritten` / `url-is-remote-name` 拒绝，见 gitio.md §5.11 第 3 步）。推送之后的核对恢复为兜底：重读的 `PushDest` 须仍等于推送之前的，且 `Git::push_url_exact(push_url)` 仍为真，否则不结清任何现场（保留、照报，留给人处理）。（review-6 漏洞 1）记下的 `push_url` 是裸名、而 common dir 下有老式 `remotes/<名>` / `branches/<名>` 文件时，git 会把它当 remote 名推到文件里的地址；gitio 同样以 `url-is-remote-name` 拒绝，`push_url_exact` 为 false。所以 A→B→A 仍结清 A 的现场（推完已改回 A），推送期间改成 B 或加了改写规则就不结清。（review-6 漏洞 2，D25）[实现时补的决定] gitio 的发送前检查与推送是两个 git 进程，检查之后加、推完又删的改写规则，推后核对查不出来；所以 gitio 让推送进程自己核对它真正要去的地址（守卫 `pre-push`，gitio.md §5.11 第 3 步），不等于记下的 `push_url` 就什么都不发，返回 `InvalidInput`（`url-rewritten`）。单独 `push` 与 restore 因此不会推到 B，旧的 A 现场不被结清。store 的 open 因此把 `daemon` 列为 root 里允许的名字（store.md §5.1 第 3 步）。[实现时补的决定]
 
-**`assign`**：拿该 repo 的写锁，调 `publish::assign`。不占队列，不确认，不推送。
+**`assign`**：先占被点名会话的队列，再拿该 repo 的写锁，调 `publish::assign`。不确认，不推送。
 
 **`rm`**：`discard` 为真则先弹框，action `RemoveDiscard { session }`，不持队列和锁。然后占该会话的队列。不持 repo 锁地调 `session::remove`（它自己取锁）。`publishing` 为真时先等旗标，不等的时候不持别的锁。进行中的 checkpoint 不取消：队列让 `rm` 排在它后面。
 
@@ -1140,7 +1142,14 @@ new fields have defaults, and the CLI sends them only after feature discovery.
 
 Pins retain their exact schema. After successful replacement, pin_new, tighten,
 and config_relax changes append/fsync a 0600 audit.jsonl sidecar, rotating at
-1 MiB with one .1 file. Read both files for pins_meta; corrupt/missing history
+1 MiB with one .1 file. Auto-close writes a second sidecar `sessions-audit.jsonl`
+(`SESSIONS_AUDIT_FILE`, same rotate rules), so pin history is not rotated away by
+session traffic. `daemon_status` always includes `sessions_audit_error`: null when
+there is no recorded session-audit write failure, otherwise the last error string
+from recording an auto-close event to `sessions-audit.jsonl`. As required by the
+auto-close design §7, a failure is logged and reported here; it never changes the
+publish/push reply or undoes a completed close. A later successful session-audit
+record clears the error back to null. Read both pin files for pins_meta; corrupt/missing history
 only loses timestamps. Files larger than 1 MiB + 64 KiB are ignored with a warning
 that names the file and size. An append failure never undoes a confirmed pin change;
 config_relax replies with audit_write_failed. LocalAuthentication does not
@@ -1254,3 +1263,31 @@ once. A fenced old-tree check requeues the item to enter a fresh catalog later.
 The worker still polls its condition variable every 20 ms when idle. Tightening
 wakes session queues, and each waiter rereads membership under its FIFO mutex.
 Those bounded efficiency follow-ups are deferred; they do not weaken the fence.
+
+### Session completion marks (P1)
+
+`daemon_status.features` includes `session.mark` and `publish.auto_close`; the latter
+advertises the publish/push auto-close reply extension used by the skill.
+`mark` is a non-confirming write
+under the session queue (`with_sessions`), with no repo lock or file operation.
+Its params reject unknown fields. Only lifecycle Active or Unknown may be marked
+or unmarked; other lifecycles return `InvalidInput` with `detail.reason: "lifecycle"`.
+Missing sessions return `NoSuchSession`; queue contention uses the existing `Busy` rules.
+
+`state: "done"` writes `{state: "done", note?, by: {kind: "agent"|"cli"}, at}`;
+`at` is RFC3339. A valid detected/explicit `agent` selects kind `agent`, otherwise
+`cli`; attribution is informational. P1 persists the kind only. Notes must be
+1–2000 UTF-8 bytes. Tab/newline are allowed; every other byte below 0x20 is refused
+with `InvalidInput reason: "note"`. `state: "active"` takes no note and deletes
+the mark and its metadata, returning `mark: {state: "active"}`.
+
+Full `status`, store-only summaries (`ls` / `status --brief`) and `sync{check:true}`
+include optional `mark` for a marked session. An absent mark means active, including
+older stores/readers. No archive, export, events, or checkpoint reason changes are
+part of P1. Optional landed counts are omitted in this marking-only cut.
+
+F1: once the Tracker is reconciled on the current base, `unpublished` means its
+live overlay is nonempty. A historical checkpoint on an old base or containing
+reverted edits does not make the current tree unpublished. Cold/reset trackers
+remain conservatively unpublished until scanned; the Stop hook keeps its existing
+`unwrap_or(true)` rule.

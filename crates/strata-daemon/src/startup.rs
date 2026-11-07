@@ -258,6 +258,8 @@ pub struct Core {
     pub warnings: Warnings,
     /// `pins.json`: the effective safety flags.
     pub pins: Pins,
+    /// `sessions-audit.jsonl`: one line per session auto-close judged.
+    pub sessions_audit: crate::audit::AuditFile,
     pub main_sync: crate::main_sync::State,
     instance: InstanceLock,
 }
@@ -305,6 +307,7 @@ pub fn prepare_locked(
     // 5. Pins: tighten now, record relaxations as pending; never prompt.
     //    The loaded config carries the effective (pinned) flags.
     let pins = Pins::load(&crate::pins_path(&opts.config_dir), &config)?;
+    let sessions_audit = crate::audit::AuditFile::sessions(&crate::pins_path(&opts.config_dir));
     for (name, rc) in config.repos.iter_mut() {
         if let Some(f) = pins.pinned(name) {
             confirm_flow::apply(rc, &f);
@@ -373,6 +376,7 @@ pub fn prepare_locked(
         main_sync: Default::default(),
         upstream: Default::default(),
         pins,
+        sessions_audit,
         env: InstallEnv {
             path: opts.install_path.clone(),
             timeout: InstallEnv::DEFAULT_TIMEOUT,
@@ -835,6 +839,7 @@ impl<'a> Daemon<'a> {
                 .collect::<BTreeMap<String, usize>>(),
             "warning_times": warning_times,
             "pins_meta": self.core.pins.metadata(),
+            "sessions_audit_error": self.core.sessions_audit.last_error(),
             "warnings": warnings,
             "verify": verify_result,
             "reconcile": self.reconcile.lock().unwrap_or_else(|p| p.into_inner()).clone(),

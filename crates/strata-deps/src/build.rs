@@ -90,6 +90,13 @@ pub(crate) fn check_volume(ctx: &Ctx, other: &Path) -> Result<()> {
 /// §5.5: a cold install of `tree`'s install inputs (taken from
 /// `inputs_from` when given) sealed as a new generation.
 pub fn build(ctx: &Ctx, tree: &Path, inputs_from: Option<&Path>) -> Result<DepsSet> {
+    let built = build_inner(ctx, tree, inputs_from);
+    // The build lock is already dropped here, on every path.
+    crate::seams::after_build();
+    built
+}
+
+fn build_inner(ctx: &Ctx, tree: &Path, inputs_from: Option<&Path>) -> Result<DepsSet> {
     if ctx.cfg.deps_dirs.is_empty() {
         return seal::seal_empty(ctx);
     }

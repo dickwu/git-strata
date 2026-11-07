@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use strata_types::{RepoName, SessionId, StrataError};
 
+mod auto_close;
 pub mod catalog;
 pub mod client;
 pub mod confirm_flow;
@@ -77,6 +78,10 @@ pub mod seams {
             h();
         }
     }
+
+    /// `audit.after_rotate`: parks a sidecar's append between its rename and
+    /// its open (p1-autoclose §10 row 4).
+    pub use crate::audit::{AfterRotate, set_after_rotate as set_audit_after_rotate};
 }
 
 /// Test seam point after a passed push confirmation (no-op in a normal
@@ -123,6 +128,8 @@ pub fn install_path_for_home(home: &Path) -> String {
 /// would reject. Additive only. `new.agent`: `new` takes `agent`.
 pub const FEATURES: &[&str] = &[
     "new.agent",
+    "session.mark",
+    "publish.auto_close",
     "session.ports",
     "status.upstream",
     "sync",

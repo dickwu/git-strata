@@ -892,7 +892,7 @@ impl Store {
 | `SQLITE_DBCONFIG_DEFENSIVE` | 每个连接都开 | 关掉 `writable_schema` 一类改 schema 的后门（沿用 LayerFS 的做法） |
 | `query_only` | 1（读连接） | 读连接写不了 |
 | `application_id` | 1398035009，即 0x53545241（"STRA"） | 建库时写入；在文件头偏移 68，open 靠它认出这是 Store |
-| `user_version` | 6（`schema::LATEST`） | 建库时写入；在文件头偏移 60；旧库由写者 open 前进迁移，v1–v4 SQL 保持冻结；v5 见 Main-sync resolution history and O7 acknowledgement |
+| `user_version` | 7（`schema::LATEST`） | 建库时写入；在文件头偏移 60；旧库由写者 open 前进迁移，v1–v4 SQL 保持冻结；v5 见 Main-sync resolution history and O7 acknowledgement |
 
 `wal_autocheckpoint` 保持 SQLite 的缺省值（1000 页），写者提交时自动做；读事务都很短，不会让 WAL 无限增长。
 
@@ -1599,7 +1599,7 @@ session 用它拿走会话根、影子仓库、交换之后换下来的旧树、
 - `set_deps_attempt_pid(attempt, pid)`：`pid > 0`，否则 `InvalidInput`。`UPDATE … WHERE id = ? AND state = 'running' AND pid IS NULL`：改了一行 → true；没改到时区分"没有这个尝试"（`InvalidInput`）、"已经记过 pid"（`InvalidInput`）与"已不是 Running"（false）。
 - `end_deps_attempt(attempt, to, error, at)`：`to` 只能是 Failed 或 Refused（否则 `InvalidInput`）。`UPDATE … SET state, ended_ns = at, error = <StrataError 的 JSON> WHERE id = ? AND state = 'running'`：改了一行 → true，否则 false（没有这个尝试 → `InvalidInput`）。
 - `record_deps_set(set, origin, attempt, at)`：origin 为 Empty 时 `attempt` 必须是 None、`set.dirs` 为空；Adopt、Build 时 `attempt` 必须是同一 (repo, set)、种类对应、仍为 Running 的尝试；否则 `InvalidInput`。(repo, id) 已登记 → `Exists`。插 `deps_sets` 一行（`sealed_ns = at`），把尝试改成 Sealed（`ended_ns = at`）。deps 在该 repo 的写锁里把暂存改名到 `deps_dir` 并 `chmod 0555` 之后立刻调用（T8 的 I1 裁定、增补 4"Locks"）。
-- `record_proposal(new, replaces, at)`：先校验（`InvalidInput`）：`from ≠ to`；`tree` 与 `head` 同有同无；没有目标时 `origin` 必须有。位置：有目标 → 该 repo 的 Pending；没有 → 该 repo 该提出会话的 AwaitingPublish。读出位置上现有的那条，与 `replaces` 不符 → `ROLLBACK`，返回 `Ok(None)`。取号 N（同 `begin_deps_attempt`，到顶 → `TooLarge`，`limit = "proposal_id"`）；位置上有旧行就把它改成 Superseded（`superseded_by = N`，`updated_ns = at`）；以显式的 N 插入新行（Pending 或 AwaitingPublish，`created_ns = updated_ns = at`）；`COMMIT` 时检查延迟外键。返回 `Some(N)`。要不要登记、相同的 `to` 已经在了就直接返回它（幂等），这些判断在 deps 读 `proposals` 的时候做（deps.md §5.9）。
+- `record_proposal(new, replaces, at)`：先校验（`InvalidInput`）：`from ≠ to`；`tree` 与 `head` 同有同无；没有目标时 `origin` 必须有。没有目标时，同一写事务里先读提出会话的生命周期：`removing` → `InvalidInput`（`reason = "lifecycle"`，带 `session` 与 `lifecycle`，形状同 `set_mark`）；`removed` → `NoSuchSession`；`active` / `creating` / `unknown` 或缺行照旧。有目标的 Pending 不读生命周期（`same_to`、`ensure_target` 在提出者已 Removed 之后仍可插入保留 origin 的 Pending）。`Err` 回滚，要取代的旧草稿原样留下。位置：有目标 → 该 repo 的 Pending；没有 → 该 repo 该提出会话的 AwaitingPublish。读出位置上现有的那条，与 `replaces` 不符 → `ROLLBACK`，返回 `Ok(None)`。取号 N（同 `begin_deps_attempt`，到顶 → `TooLarge`，`limit = "proposal_id"`）；位置上有旧行就把它改成 Superseded（`superseded_by = N`，`updated_ns = at`）；以显式的 N 插入新行（Pending 或 AwaitingPublish，`created_ns = updated_ns = at`）；`COMMIT` 时检查延迟外键。返回 `Some(N)`。要不要登记、相同的 `to` 已经在了就直接返回它（幂等），这些判断在 deps 读 `proposals` 的时候做（deps.md §5.9）。
 - `promote_proposal(id, tree, head, at)`：没有这条 → `InvalidInput`；不是 AwaitingPublish → false。把该 repo 现有的 Pending，以及该 repo 里 `to` 相同的其它 AwaitingPublish，都改成 Superseded（`superseded_by = id`）；再把 `id` 改成 Pending，写入 `tree`、`head`、`updated_ns`。返回 true。这照搬 deps.md §5.9（ccef28f）的提升规则；deps 的修订轮若要别的取代范围，在它的 §2 列出。
 - `decide_proposal(id, to, at)`：没有这条 → `InvalidInput`；`Superseded { by }` 的 `by` 必须存在且不是 `id`（否则 `InvalidInput`）。`UPDATE … WHERE id = ? AND state = 'pending'`：改了一行 → true，否则 false。approve 发现封存出的 id 与 `P.to` 不同时（T8 的 I5 裁定）不走这里，而是 `record_proposal(替换提议, replaces = Some(P.id))`。
 - `set_deps_main(row, expected)`：`row` 与 `expected` 的 repo 必须相同，否则 `InvalidInput`。在这个写事务里读出该 repo 的现有行，与 `expected` 按写入时的列值逐列比较：六列都比，含 `observed_ns` [我的决定：任何一列不同都说明读与写之间有别的观察写过；只比 set，会把 set 相同而 tree 或 head 更新了的一行当成没变，再用过时的观察盖掉它]；一边有行、一边没有也算不等。不等 → 什么都不写，返回 `(false, 现有行)`；相等 → 预期没有行就 `INSERT`，有就 `UPDATE … WHERE repo = ?` 换成 `row`，返回 `(true, 现有行)`。读、比较与写在同一个写事务里，中间插不进别的写。`row.set` 可以还没有封存（`observe_main` 只记它算得出的，T8 裁定）。增补 7"Main deps record"：deps 的 `observe_main` 先读 `deps_main`、登记提议，最后以读到的那一行作 `expected` 写，所以中途被打断或先后颠倒的一次观察由下一次观察重做；没写成之后怎么办由 deps.md 定。
@@ -2344,3 +2344,30 @@ forward-only. Upgrade CLI and daemon together: older binaries refuse v6 with
 `Corrupt user_version`. The current header-version check includes a matching-version install hint; an older reader or a lagging-header PRAGMA mismatch may omit that hint. Restoring the v5
 backup is the only supported downgrade; it loses subsequent store metadata
 writes but does not undo Git commits or refs.
+
+### Session completion marks (schema v7, P1)
+
+Append-only migration 7 (`session_marks`) adds one STRICT table with five columns:
+`session` (PK/FK to sessions), `state` (only `done`), nullable `note`, `by_kind`
+(`agent|cli|gui|daemon`), and `at_ns`. Absence of a row means active. The note SQL CHECK
+counts UTF-8 bytes via `length(CAST(note AS BLOB))`, 1–2000 when present; the shared
+Rust validation also rejects C0 controls other than tab/newline. No checkpoints
+rebuild, new checkpoint reason, export table, archive metadata or event table is
+included. Earlier migration SQL stays frozen.
+
+`Store::set_mark(session, state, note, by_kind, at)` checks lifecycle and mutates
+in one transaction. Active/Unknown allow done or undo; Creating/Removing/Removed
+return `InvalidInput reason: "lifecycle"`, even for an idempotent undo. Missing ids
+return `NoSuchSession`. SQL insert/update/delete guards enforce lifecycle and keep
+the session key fixed. Done replaces its note/attribution/time; active deletes the
+row. Marking never changes lifecycle or files. Marks of subsequently removed
+sessions remain with their normal retained store data, then GC deletes them before
+sessions. This cut does not derive an archived mark.
+
+`Store::mark` returns `None` on schemas older than 7, so a new read-only CLI can
+read an older daemon's store without looking up a nonexistent table. Full status
+and store-only summary both carry this optional record. Writer open uses the normal
+verified pre-migration backup, transaction and schema check. `tests/migrate_v7.rs`
+exercises populated v6 checkpoint/overlay rows, unchanged row contents, foreign keys
+on, the v6 backup, the five-column table and its constraints. Existing fixture
+migration and forward-version refusal tests now pin v7 as the latest version.

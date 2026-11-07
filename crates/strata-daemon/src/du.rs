@@ -759,6 +759,27 @@ impl Du {
         Ok(hold)
     }
 
+    /// Test-only: plant a session unit in `active` whose cancel token is never
+    /// honoured by a real scan (the unit-test shape at the hold timeout). A
+    /// later [`Self::hold_sessions`] wait past `wait` answers
+    /// `Busy`/`du_cancel_timeout`. No effect on production builds.
+    #[cfg(feature = "test-seams")]
+    pub fn plant_stuck_scan_for_test(self: &Arc<Self>, sid: &str) -> Arc<AtomicBool> {
+        let key = format!("sessions/{sid}");
+        let token = Arc::new(AtomicBool::new(false));
+        lock(&self.scan).active.insert(key, token.clone());
+        token
+    }
+
+    /// Test-only: drop a plant from [`Self::plant_stuck_scan_for_test`] and wake
+    /// any hold waiting on it.
+    #[cfg(feature = "test-seams")]
+    pub fn clear_stuck_scan_for_test(self: &Arc<Self>, sid: &str) {
+        let key = format!("sessions/{sid}");
+        lock(&self.scan).active.remove(&key);
+        self.scan_done.notify_all();
+    }
+
     fn enqueue(self: &Arc<Self>, keys: Vec<String>, full: bool) {
         {
             let mut st = lock(&self.scan);

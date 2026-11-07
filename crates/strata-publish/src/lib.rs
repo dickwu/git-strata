@@ -29,7 +29,7 @@ pub mod stage;
 pub use chain::{advance_anchor, anchor_ref, chain_ref, merge_base};
 pub use check::{CHECK_OUTPUT_TAIL, CHECK_TMP_DIR, ChecksRan, check};
 pub use rebase::{
-    BetweenDiff, HunkPreview, Merge3Preview, MovePolicy, RebaseReport, assign, diff_between, rebase_session,
+    BetweenDiff, HunkPreview, Merge3Preview, MovePolicy, RebaseReport, assign, assigned_to, diff_between, rebase_session,
     rebase_session_with,
 };
 pub use push::{PublishWarning, Published, WarningKind, commit, publish, publish_bound, publish_with_messages, push, push_to, remote_changed};

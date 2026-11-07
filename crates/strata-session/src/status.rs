@@ -27,6 +27,8 @@ use crate::{Result, Sessions};
 /// A session's status (design §6.3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<strata_types::SessionMark>,
     /// Daemon enrichment from local refs, store and its live Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<strata_types::Upstream>,
@@ -225,6 +227,7 @@ impl Sessions<'_> {
             rec: SessionRecord,
             scene: Option<Scene>,
             rm: RmNotes,
+            mark: Option<strata_types::SessionMark>,
         }
         // Ordinal (i, 0): the session's own row, read serially.
         let heads: Vec<Result<Head>> = ids
@@ -236,7 +239,13 @@ impl Sessions<'_> {
                     _ => None,
                 };
                 let rm = rm_notes(self.store, &self.config.paths.root, &rec)?;
-                Ok(Head { rec, scene, rm })
+                let mark = self.store.mark(id)?;
+                Ok(Head {
+                    rec,
+                    scene,
+                    rm,
+                    mark,
+                })
             })
             .collect();
         // Ordinals (i, 1 + k): workspace k of session i, by RepoName.
@@ -285,6 +294,7 @@ impl Sessions<'_> {
             out.push(match first_err {
                 Some(e) => Err(e),
                 None => Ok(SessionStatus {
+                    mark: h.mark,
                     upstream: None,
                     id: rec.manifest.id.clone(),
                     ticket: rec.manifest.ticket.clone(),

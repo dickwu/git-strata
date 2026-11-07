@@ -16,8 +16,8 @@ use common::*;
 use strata_deps::{
     Drift, Hold, Proposal, ProposalOrigin, ProposalState, ProposeArgs, RepoWriteLock, RolloutPlan,
     RolloutStep, SkipReason, Target, build, clone_into, drift, ensure, ensure_target, find_set,
-    get_proposal, inputs_hash, key_of, main_tip, observe_main, plan_rollout, plan_switch, propose,
-    record_rollout, test_seams,
+    get_proposal, inputs_hash, key_of, main_tip, observe_main, open_proposals, plan_rollout,
+    plan_switch, propose, record_rollout, test_seams,
 };
 use strata_store::{Lifecycle, NewProposal, ProposalDecision};
 use strata_types::{
@@ -1670,4 +1670,98 @@ fn parked_base_is_skipped_by_rollout_and_switch_and_counts_as_settled() {
     let own=propose(&fx.ctx(),pa(session(&s),of(&w.d1),of(&set),Some(&d))).unwrap();
     let switch=plan_switch(&fx.ctx(),own.id,&s,&ws).unwrap();
     assert!(matches!(&switch.steps[0],RolloutStep::Skip {reason:SkipReason::BaseAhead {..},..}));
+}
+
+
+/// Auto-close §10 row 23 / §3.2: a Pending whose origin is already Removed stays
+/// listed and keeps that origin across a main retarget (`same_to`).
+#[test]
+fn retarget_keeps_the_origin_of_a_removed_session() {
+    if std::env::var_os(HOLDER_ENV).is_some() {
+        return;
+    }
+    let w = world();
+    let fx = &w.fx;
+    let ctx = fx.ctx();
+    let s = sid("aaaaaaab");
+    let ws = w.ws(&s, true);
+    fs::write(ws.path.join("package.json"), pkg(&["y"])).unwrap();
+    let dn = build(&ctx, &fx.store().base_dir(&w.b1), Some(&ws.path)).unwrap();
+    propose(&ctx, pa(session(&s), of(&w.d1), of(&dn), None)).unwrap();
+    let t2 = advance(fx, &[("package.json", &pkg(&["y"]))], "add y");
+    assert_eq!(key(fx, &t2).1, dn.id);
+    let p = propose(&ctx, pa(session(&s), of(&w.d1), of(&dn), Some(&t2))).unwrap();
+    assert_eq!(p.state, ProposalState::Pending);
+    assert_eq!(p.origin, session(&s));
+
+    let at = SystemTime::now();
+    let st = fx.store();
+    assert!(
+        st.set_lifecycle(&s, Lifecycle::Active, Lifecycle::Removing, None, at)
+            .unwrap()
+    );
+    assert!(
+        st.set_lifecycle(&s, Lifecycle::Removing, Lifecycle::Removed, None, at)
+            .unwrap()
+    );
+
+    let open = open_proposals(st, Some(&fx.repo)).unwrap();
+    assert!(
+        open.iter().any(|q| q.id == p.id),
+        "pending of a removed origin must stay listed: {open:#?}"
+    );
+    assert_eq!(get_proposal(st, p.id).unwrap(), p);
+
+    let t3 = advance(fx, &[("README.md", b"readme\n")], "readme");
+    let p2 = observe(fx, &t3).unwrap().unwrap();
+    assert_eq!(p2.origin, session(&s));
+    assert_eq!(p2.state, ProposalState::Pending);
+    assert_eq!(state(fx, p.id), ProposalState::Superseded { by: p2.id });
+}
+
+/// Auto-close §10 row 23 / §3.2: `ensure_target`'s sealed-id replacement keeps
+/// the origin of a Removed session (the rule stops at drafts).
+#[test]
+fn approve_replacement_keeps_the_origin_of_a_removed_session() {
+    if std::env::var_os(HOLDER_ENV).is_some() {
+        return;
+    }
+    let w = world();
+    let fx = &w.fx;
+    let ctx = fx.ctx();
+    let s = sid("aaaaaaab");
+    let _ws = w.ws(&s, true);
+    // Shape of `approve_files_replacement_when_sealed_id_differs`: `to` is the
+    // bun-1.3.3 key and is not sealed yet, so a toolchain bump forces replace.
+    let t2 = advance(fx, &[("package.json", &pkg(&["y"]))], "add y");
+    let (yi, ya) = key(fx, &t2); // under bun 1.3.3
+    propose(&ctx, pa(session(&s), of(&w.d1), (&ya, &yi), None)).unwrap();
+    let p = propose(&ctx, pa(session(&s), of(&w.d1), (&ya, &yi), Some(&t2))).unwrap();
+    assert_eq!(p.state, ProposalState::Pending);
+    assert_eq!(p.origin, session(&s));
+
+    let at = SystemTime::now();
+    let st = fx.store();
+    assert!(
+        st.set_lifecycle(&s, Lifecycle::Active, Lifecycle::Removing, None, at)
+            .unwrap()
+    );
+    assert!(
+        st.set_lifecycle(&s, Lifecycle::Removing, Lifecycle::Removed, None, at)
+            .unwrap()
+    );
+
+    fx.sb.set_bun_version("1.3.4");
+    let got = ensure_target(&ctx, p.id, &t2.dir).unwrap();
+    let Target::Replaced {
+        superseded,
+        replacement: q,
+    } = got
+    else {
+        panic!("{got:#?}")
+    };
+    assert_eq!(superseded, p.id);
+    assert_eq!(q.origin, session(&s));
+    assert_eq!(q.state, ProposalState::Pending);
+    assert_eq!(state(fx, p.id), ProposalState::Superseded { by: q.id });
 }

@@ -159,3 +159,108 @@ fn unpublished_uses_reconciled_overlay_even_with_empty_checkpoint() {
     assert!(trackers.unpublished(&id, &repo, ws, row.workspaces[&repo].generation, false));
     trackers.clear();
 }
+
+#[test]
+fn unpublished_false_after_checkpointed_edits_are_reverted() {
+    let fx = Dfx::new();
+    let core = prepare(&fx);
+    let _catalog = core.admit();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let id = setup(&d, &trackers);
+    let repo = repo_name("tool");
+    let row = core.store.session(&id).unwrap().unwrap();
+    let ws = &row.manifest.repos[&repo];
+    fs::write(ws.path.join("reverted.txt"), "checkpointed change").unwrap();
+    checkpoint(&core, &id, "tool");
+    assert!(
+        !core
+            .store
+            .latest_checkpoint(&id, &repo)
+            .unwrap()
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    fs::remove_file(ws.path.join("reverted.txt")).unwrap();
+    trackers.reconcile_once();
+    assert!(!trackers.unpublished(&id, &repo, ws, row.workspaces[&repo].generation, false));
+    // Historical content is still restorable, although it is no longer live work.
+    assert!(
+        !core
+            .store
+            .latest_checkpoint(&id, &repo)
+            .unwrap()
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    trackers.clear();
+}
+
+#[test]
+fn unpublished_false_with_empty_overlay_and_checkpoint_on_old_base() {
+    let fx = Dfx::new();
+    let core = prepare(&fx);
+    let _catalog = core.admit();
+    let d = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let id = setup(&d, &trackers);
+    let repo = repo_name("tool");
+    let old = core.store.session(&id).unwrap().unwrap();
+    fs::write(
+        old.manifest.repos[&repo].path.join("landed.txt"),
+        "published content",
+    )
+    .unwrap();
+    checkpoint(&core, &id, "tool");
+    let cp = core.store.latest_checkpoint(&id, &repo).unwrap().unwrap();
+    let server = Server::new(&d, &trackers);
+    let method = crate::rpc::Method::Publish;
+    let params = crate::rpc::Params::parse(
+        method,
+        json!({
+            "group": group(vec![batch(&id, "tool", cp.id, &["landed.txt"])]), "shown": {}
+        }),
+    )
+    .unwrap();
+    let reply = server
+        .handle(crate::rpc::Request {
+            id: json!(1),
+            method,
+            params,
+        })
+        .0;
+    assert_eq!(reply["ok"], true, "{reply}");
+    let row = core.store.session(&id).unwrap().unwrap();
+    let ws = &row.manifest.repos[&repo];
+    let latest = core.store.latest_checkpoint(&id, &repo).unwrap().unwrap();
+    assert_ne!(
+        latest.base, ws.base,
+        "the move leaves its checkpoint on the old base"
+    );
+    trackers.watch_tracked();
+    guard(&trackers.map)
+        .get_mut(&(id.clone(), repo.clone()))
+        .unwrap()
+        .watching = true;
+    trackers.reconcile_once();
+    assert!(!trackers.unpublished(&id, &repo, ws, row.workspaces[&repo].generation, false));
+    let method = crate::rpc::Method::Sync;
+    let params = crate::rpc::Params::parse(method, json!({"session": id, "check": true})).unwrap();
+    let up = server
+        .handle(crate::rpc::Request {
+            id: json!(2),
+            method,
+            params,
+        })
+        .0;
+    assert_eq!(up["ok"], true, "{up}");
+    assert_eq!(up["data"]["upstream"]["repos"]["tool"]["ahead"], 0);
+    assert_eq!(up["data"]["upstream"]["repos"]["tool"]["behind"], 0);
+    assert_eq!(
+        up["data"]["upstream"]["repos"]["tool"]["unpublished"],
+        false
+    );
+    trackers.clear();
+}

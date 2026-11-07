@@ -8,6 +8,7 @@ import {
   filterRows,
   knownAgents,
   sessionRows,
+  sessionMarks,
   usedRepos,
   unavailableUpstream,
   type SessionRow,
@@ -42,17 +43,30 @@ export function SessionsScreen({
   /** The last deps or sessions refresh failed, so `waiting` may be old. */
   waitingStale?: boolean;
 }) {
-  const { openSession, repoFilter, agentFilter, textFilter, toggleRepoFilter, clearFilters } =
-    useNav();
+  const {
+    openSession,
+    repoFilter,
+    agentFilter,
+    markFilter,
+    textFilter,
+    toggleRepoFilter,
+    clearFilters,
+  } = useNav();
   const now = useNow();
   const all = sessionRows(sessions.data, daemon.data);
   const unavailable = unavailableUpstream(sessions.data, daemon.data);
   const repos = usedRepos(all);
   const agents = knownAgents(all);
+  const marks = sessionMarks(all);
   // A selected repo or agent no current session has drops out of the filter (t73u).
   const repoSel = repoFilter.filter((r) => repos.some((x) => x.name === r));
   const agentSel = agentFilter.filter((a) => agents.some((x) => x.name === a));
-  const rows = filterRows(all, { repos: repoSel, agents: agentSel, text: textFilter });
+  const rows = filterRows(all, {
+    repos: repoSel,
+    agents: agentSel,
+    marks: markFilter,
+    text: textFilter,
+  });
   const filtered = rows.length !== all.length;
   const c = copy.sessions.columns;
   const error = daemon.isError ? daemon.error : sessions.isError ? sessions.error : null;
@@ -81,6 +95,8 @@ export function SessionsScreen({
             agents={agents}
             repoSel={repoSel}
             agentSel={agentSel}
+            marks={marks}
+            markSel={markFilter}
             shown={rows.length}
             total={all.length}
           />
@@ -129,7 +145,7 @@ export function SessionsScreen({
                 width: 136,
                 ellipsis: true,
                 render: (_, r) => (
-                  <div className="ticket-cell">
+                  <div className="ticket-cell" title={r.note ?? undefined}>
                     <span style={{ fontFamily: 'var(--font-title)', fontWeight: 600 }}>
                       {r.ticket ?? '—'}
                     </span>
@@ -150,6 +166,7 @@ export function SessionsScreen({
                 render: (_, r) => (
                   <div className="stacked-cell">
                     <span>{r.state}</span>
+                    {r.mark === 'done' && <Tag>Done</Tag>}
                     {r.behind != null && r.behind > 0 && (
                       <Tag title="Commits behind main">
                         ↓{r.behind}

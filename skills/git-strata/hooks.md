@@ -43,6 +43,11 @@ Enable this only after the deployed daemon advertises both `sync` and
 The hook resolves its input cwd and checks cached upstream. It returns control
 once when a following repo has main/deps changes and your unpublished work or
 conflicts need attention. Follow its sync → resolve → checks → publish reason.
+A session marked done is told to run the sync from outside and to stay out of
+the workspace (a shell inside it holds the session open); run
+`git-strata mark --session S active` first if you mean to keep working. A
+session closed by the daemon after a publish that landed everything is gone, so
+the hook never names it.
 An unchanged workspace behind main is left to the background mover. Cold
 cache, daemon errors, non-workspace cwd and the five-second deadline are silent.
 `stop_hook_active:true` never blocks again. A block is `{decision,reason}` and
