@@ -53,7 +53,10 @@ struct Echo {
 }
 
 fn echo_server(limit: usize) -> Echo {
-    let dir = tempfile::Builder::new().prefix("sd-").tempdir_in("/tmp").unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("sd-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let sock = dir.path().join("daemon.sock");
     let l = UnixListener::bind(&sock).unwrap();
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -96,7 +99,9 @@ fn method_table_has_the_documented_names() {
     assert_eq!(
         names,
         [
-            "new", "add", "status",
+            "new",
+            "add",
+            "status",
             "sync",
             "checkpoint",
             "mark",
@@ -123,8 +128,24 @@ fn method_table_has_the_documented_names() {
             "ports_reassign"
         ]
     );
-    let ro: Vec<&str> = Method::ALL.iter().filter(|m| m.is_read_only()).map(|m| m.name()).collect();
-    assert_eq!(ro, ["status", "grep", "files", "diff", "deps_list", "publish_plan", "daemon_status", "du"]);
+    let ro: Vec<&str> = Method::ALL
+        .iter()
+        .filter(|m| m.is_read_only())
+        .map(|m| m.name())
+        .collect();
+    assert_eq!(
+        ro,
+        [
+            "status",
+            "grep",
+            "files",
+            "diff",
+            "deps_list",
+            "publish_plan",
+            "daemon_status",
+            "du"
+        ]
+    );
     for m in Method::ALL {
         assert_eq!(Method::from_name(m.name()), Some(*m));
     }
@@ -180,7 +201,10 @@ fn id_is_echoed_as_string_or_number() {
 fn upstream_error_carries_code_message_detail() {
     let e = StrataError::new(Code::Busy, "held").with_detail(json!({ "repo": "tool" }));
     let r = Reply::error(&json!(3), &e).0;
-    assert_eq!(r, json!({ "id": 3, "ok": false, "error": { "code": "Busy", "message": "held", "detail": { "repo": "tool" } } }));
+    assert_eq!(
+        r,
+        json!({ "id": 3, "ok": false, "error": { "code": "Busy", "message": "held", "detail": { "repo": "tool" } } })
+    );
     let r = Reply::error(&json!(3), &StrataError::new(Code::Conflict, "x")).0;
     assert!(r["error"].get("detail").is_none());
     assert!(r["error"].get("rpc").is_none());
@@ -231,31 +255,53 @@ fn every_method_parses_its_documented_params() {
         ("deps_approve", json!({ "proposal": 1, "sessions": null })),
         ("deps_list", json!({ "repo": null })),
         ("publish", json!({ "group": { "id": 0, "batches": [] } })),
-        ("publish_plan", json!({ "group": { "id": 0, "batches": [] } })),
+        (
+            "publish_plan",
+            json!({ "group": { "id": 0, "batches": [] } }),
+        ),
         ("push", json!({ "repo": "tool" })),
-        ("assign", json!({ "group": 1, "path": "a.txt", "session": sid })),
+        (
+            "assign",
+            json!({ "group": 1, "path": "a.txt", "session": sid }),
+        ),
         ("rm", json!({ "session": sid, "discard": false })),
         ("gc", json!({ "repo": "tool" })),
-        ("resolve_move", json!({ "session": sid, "repo": "tool", "abandon": true, "accept": false })),
-        ("chain_resolve", json!({ "repo": "tool", "choice": "AcceptOriginDrop" })),
+        (
+            "resolve_move",
+            json!({ "session": sid, "repo": "tool", "abandon": true, "accept": false }),
+        ),
+        (
+            "chain_resolve",
+            json!({ "repo": "tool", "choice": "AcceptOriginDrop" }),
+        ),
         ("config_relax", json!({ "repo": "tool" })),
         ("config_reload", json!({})),
         ("daemon_status", json!({})),
         ("du", json!({ "refresh": true })),
         ("ports_ensure", json!({ "session": sid, "repo": "tool" })),
-        ("ports_reassign", json!({ "session": sid, "repo": "tool", "checked": 20000 })),
+        (
+            "ports_reassign",
+            json!({ "session": sid, "repo": "tool", "checked": 20000 }),
+        ),
     ];
     assert_eq!(cases.len(), Method::ALL.len());
     for (m, p) in cases {
-        let q = req(json!({ "id": 1, "method": m, "params": p })).unwrap_or_else(|r| panic!("{m}: {:?}", r.0));
+        let q = req(json!({ "id": 1, "method": m, "params": p }))
+            .unwrap_or_else(|r| panic!("{m}: {:?}", r.0));
         assert_eq!(q.method.name(), m);
     }
     let q = req(json!({ "id": 1, "method": "new", "params": { "ticket": null, "repos": ["tool"], "only": true } })).unwrap();
     assert!(matches!(q.params, Params::New(ref p) if p.only));
-    let q = req(json!({ "id": 1, "method": "new", "params": { "ticket": null, "repos": ["tool"] } })).unwrap();
+    let q =
+        req(json!({ "id": 1, "method": "new", "params": { "ticket": null, "repos": ["tool"] } }))
+            .unwrap();
     assert!(matches!(q.params, Params::New(ref p) if !p.only));
-    let q = req(json!({ "id": 1, "method": "daemon_status", "params": { "verify": true } })).unwrap();
-    assert_eq!(q.params, Params::DaemonStatus(rpc::DaemonStatusParams { verify: true }));
+    let q =
+        req(json!({ "id": 1, "method": "daemon_status", "params": { "verify": true } })).unwrap();
+    assert_eq!(
+        q.params,
+        Params::DaemonStatus(rpc::DaemonStatusParams { verify: true })
+    );
 }
 
 /// `new.agent`: `agent` is optional, nullable, and a plain string on the
@@ -267,12 +313,26 @@ fn new_agent_is_an_optional_string() {
         Params::New(p) => p.agent,
         other => panic!("{other:?}"),
     };
-    assert_eq!(agent_of(new(json!({ "ticket": null, "repos": ["tool"] })).unwrap()), None);
-    assert_eq!(agent_of(new(json!({ "ticket": null, "repos": ["tool"], "agent": null })).unwrap()), None);
-    assert_eq!(agent_of(new(json!({ "ticket": null, "repos": ["tool"], "agent": "codex" })).unwrap()), Some("codex".into()));
+    assert_eq!(
+        agent_of(new(json!({ "ticket": null, "repos": ["tool"] })).unwrap()),
+        None
+    );
+    assert_eq!(
+        agent_of(new(json!({ "ticket": null, "repos": ["tool"], "agent": null })).unwrap()),
+        None
+    );
+    assert_eq!(
+        agent_of(new(json!({ "ticket": null, "repos": ["tool"], "agent": "codex" })).unwrap()),
+        Some("codex".into())
+    );
     // Not validated here: the handler answers InvalidInput reason agent.
-    assert_eq!(agent_of(new(json!({ "ticket": null, "repos": ["tool"], "agent": "bad name" })).unwrap()), Some("bad name".into()));
-    let r = new(json!({ "ticket": null, "repos": ["tool"], "agent": 5 })).expect_err("a number is a shape error").0;
+    assert_eq!(
+        agent_of(new(json!({ "ticket": null, "repos": ["tool"], "agent": "bad name" })).unwrap()),
+        Some("bad name".into())
+    );
+    let r = new(json!({ "ticket": null, "repos": ["tool"], "agent": 5 }))
+        .expect_err("a number is a shape error")
+        .0;
     assert_eq!(rpc_of(&r), "Failed", "{r:#}");
 }
 
@@ -293,7 +353,9 @@ fn too_large_line_is_code_too_large() {
     // Exactly MAX_FRAME is accepted.
     let mut ok = vec![b'y'; MAX_FRAME];
     ok.push(b'\n');
-    assert!(matches!(rpc::read_frame(&mut Cursor::new(ok)).unwrap(), Frame::Line(l) if l.len() == MAX_FRAME));
+    assert!(
+        matches!(rpc::read_frame(&mut Cursor::new(ok)).unwrap(), Frame::Line(l) if l.len() == MAX_FRAME)
+    );
 }
 
 // ---- What the envelope is not.
@@ -322,7 +384,10 @@ fn no_auth_reply_token() {
 fn no_binary_frame() {
     // A short line is a frame; there is no 8192-byte fixed record.
     let mut r = Cursor::new(b"{}\n".to_vec());
-    assert_eq!(rpc::read_frame(&mut r).unwrap(), Frame::Line(b"{}".to_vec()));
+    assert_eq!(
+        rpc::read_frame(&mut r).unwrap(),
+        Frame::Line(b"{}".to_vec())
+    );
     let mut r = Cursor::new([vec![b'a'; 9000], b"\n".to_vec()].concat());
     assert!(matches!(rpc::read_frame(&mut r).unwrap(), Frame::Line(l) if l.len() == 9000));
 }
@@ -340,7 +405,10 @@ fn no_binary_tag_extension() {
     // Additions are serde fields; an unknown field is RPC Failed.
     let v = json!({ "id": 1, "method": "push", "params": { "repo": "tool", "tag": 1 } });
     assert_eq!(rpc_of(&rejected(v)), "Failed");
-    assert_eq!(rpc_of(&parse_request(&[0x01, 0x02, 0x03]).unwrap_err().0), "Failed");
+    assert_eq!(
+        rpc_of(&parse_request(&[0x01, 0x02, 0x03]).unwrap_err().0),
+        "Failed"
+    );
 }
 
 #[test]
@@ -374,7 +442,12 @@ fn no_noise_window() {
 #[test]
 fn no_nonce_record_limit() {
     // `FnOnce` is a closure bound, not a nonce.
-    assert!(!sources().replace("FnOnce", "").to_lowercase().contains("nonce"));
+    assert!(
+        !sources()
+            .replace("FnOnce", "")
+            .to_lowercase()
+            .contains("nonce")
+    );
     assert!(!format!("{:?}", Code::TooLarge).contains("Record"));
     let reply = Reply::too_large(MAX_FRAME).0;
     assert_eq!(reply["error"]["code"], "TooLarge");
@@ -384,7 +457,10 @@ fn no_nonce_record_limit() {
 fn no_encrypted_record() {
     // Requests and replies are readable json text in both directions.
     let e = echo_server(MAX_FRAME);
-    let out = roundtrip(&e.sock, &[format!("{}\n", status_req(json!("q"))).as_bytes()]);
+    let out = roundtrip(
+        &e.sock,
+        &[format!("{}\n", status_req(json!("q"))).as_bytes()],
+    );
     assert_eq!(out[0]["ok"], true);
     assert!(!sources().to_lowercase().contains("encrypt"));
 }
@@ -406,10 +482,15 @@ fn no_duplex_eof_fence() {
     assert_eq!(rpc::read_frame(&mut r).unwrap(), Frame::Eof);
     let mut out = Vec::new();
     let mut n = 0;
-    rpc::serve_connection(&mut Cursor::new(Vec::new()), &mut out, MAX_FRAME, &mut |q| {
-        n += 1;
-        Reply::ok(&q.id, json!({}))
-    })
+    rpc::serve_connection(
+        &mut Cursor::new(Vec::new()),
+        &mut out,
+        MAX_FRAME,
+        &mut |q| {
+            n += 1;
+            Reply::ok(&q.id, json!({}))
+        },
+    )
     .unwrap();
     assert_eq!(n, 0);
     assert!(out.is_empty());
@@ -421,9 +502,12 @@ fn no_duplex_trailing_byte() {
     // lines before them are answered.
     let input = format!("{}\nxyz", status_req(json!(1)));
     let mut out = Vec::new();
-    rpc::serve_connection(&mut Cursor::new(input.into_bytes()), &mut out, MAX_FRAME, &mut |q| {
-        Reply::ok(&q.id, json!({}))
-    })
+    rpc::serve_connection(
+        &mut Cursor::new(input.into_bytes()),
+        &mut out,
+        MAX_FRAME,
+        &mut |q| Reply::ok(&q.id, json!({})),
+    )
     .unwrap();
     assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 1);
 }
@@ -436,7 +520,8 @@ fn no_duplex_read_timeout() {
     let s = UnixStream::connect(&e.sock).unwrap();
     std::thread::sleep(Duration::from_millis(300));
     let mut w = s.try_clone().unwrap();
-    w.write_all(format!("{}\n", status_req(json!(9))).as_bytes()).unwrap();
+    w.write_all(format!("{}\n", status_req(json!(9))).as_bytes())
+        .unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line).unwrap();
@@ -477,7 +562,10 @@ fn no_cleanup_tags() {
 
 #[test]
 fn no_traced_prefix_tag() {
-    assert_eq!(rpc_of(&parse_request(b"\x00traced{}").unwrap_err().0), "Failed");
+    assert_eq!(
+        rpc_of(&parse_request(b"\x00traced{}").unwrap_err().0),
+        "Failed"
+    );
 }
 
 #[test]
@@ -519,6 +607,57 @@ fn no_auth_traced_scope() {
     assert_eq!(ek, ["code", "message"]);
 }
 
+/// The hook has exactly one removal route, and it cannot request discard.
+#[test]
+fn auto_close_never_discards() {
+    let src = include_str!("../src/auto_close.rs");
+    for banned in [
+        "RemoveCall::Agent",
+        "discard",
+        "RemoveDiscard",
+        "require_validated",
+        "ConfirmToken",
+        "remove(",
+    ] {
+        assert!(!src.contains(banned), "auto_close contains {banned}");
+    }
+    assert_eq!(src.matches("remove_session(").count(), 1);
+    assert!(src.contains("remove_session(s, RemoveCall::AutoClose { upstream, by })"));
+}
+
+#[test]
+fn features_lists_publish_auto_close() {
+    assert!(strata_daemon::FEATURES.contains(&"publish.auto_close"));
+    // PublishTarget keeps auto_close and still denies unknown sibling keys.
+    let ok = strata_types::Config::parse(
+        r#"
+[paths]
+root = "/tmp/strata-features-ac"
+[repo.tool]
+path = "/tmp/tool"
+default_branch = "main"
+deps_dirs = []
+publish = { branch = "main", push = true, confirm = false, auto_close = true }
+"#,
+    );
+    assert!(ok.is_ok(), "{ok:?}");
+    let cfg = ok.unwrap();
+    let tool = cfg.repos.keys().next().expect("tool");
+    assert_eq!(cfg.repos[tool].publish.auto_close, Some(true));
+    let bad = strata_types::Config::parse(
+        r#"
+[paths]
+root = "/tmp/strata-features-ac"
+[repo.tool]
+path = "/tmp/tool"
+default_branch = "main"
+deps_dirs = []
+publish = { branch = "main", push = true, confirm = false, auto_clse = true }
+"#,
+    );
+    assert!(bad.is_err(), "unknown sibling key must fail");
+}
+
 #[test]
 fn confirm_is_not_channel_auth() {
     // A credential belongs to the action, not the connection: nothing in
@@ -532,7 +671,10 @@ fn confirm_is_not_channel_auth() {
 fn same_machine_unix_socket() {
     let home = Path::new("/Users/someone");
     let dir = strata_daemon::config_dir_for_home(home);
-    assert_eq!(dir, Path::new("/Users/someone/Library/Application Support/git-strata"));
+    assert_eq!(
+        dir,
+        Path::new("/Users/someone/Library/Application Support/git-strata")
+    );
     assert_eq!(strata_daemon::socket_path(&dir), dir.join("daemon.sock"));
     assert!(!sources().contains("daemonHost"));
 }
@@ -547,7 +689,10 @@ fn no_container_daemon_host() {
 
 #[test]
 fn readiness_is_socket_connect() {
-    let dir = tempfile::Builder::new().prefix("sd-").tempdir_in("/tmp").unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("sd-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let sock = dir.path().join("daemon.sock");
     assert!(!rpc::ready(&sock, Duration::from_millis(50)));
     let _l = UnixListener::bind(&sock).unwrap();
@@ -564,15 +709,25 @@ fn no_container_archive_of_the_binary() {
 
 #[test]
 fn rpc_reject_variants() {
-    assert_eq!(rpc_of(&Reply::rejected(&json!(1), RpcReject::Failed, "m").0), "Failed");
-    assert_eq!(rpc_of(&Reply::rejected(&json!(1), RpcReject::UnknownMethod, "m").0), "UnknownMethod");
+    assert_eq!(
+        rpc_of(&Reply::rejected(&json!(1), RpcReject::Failed, "m").0),
+        "Failed"
+    );
+    assert_eq!(
+        rpc_of(&Reply::rejected(&json!(1), RpcReject::UnknownMethod, "m").0),
+        "UnknownMethod"
+    );
 }
 
 /// Review-3 T4: daemon.md §3's method inventory — the stated count, the
 /// names and the read-only column — agrees with `Method::ALL`.
 #[test]
 fn daemon_md_method_table_matches_rpc() {
-    let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/modules/daemon.md")).unwrap();
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/modules/daemon.md"
+    ))
+    .unwrap();
     let marker = "除表里这 ";
     let at = doc.find(marker).expect("the method-count sentence");
     let rest = &doc[at + marker.len()..];
@@ -594,6 +749,10 @@ fn daemon_md_method_table_matches_rpc() {
     }
     let want: Vec<String> = Method::ALL.iter().map(|m| m.name().to_string()).collect();
     assert_eq!(names, want);
-    let want_ro: Vec<String> = Method::ALL.iter().filter(|m| m.is_read_only()).map(|m| m.name().to_string()).collect();
+    let want_ro: Vec<String> = Method::ALL
+        .iter()
+        .filter(|m| m.is_read_only())
+        .map(|m| m.name().to_string())
+        .collect();
     assert_eq!(ro, want_ro);
 }

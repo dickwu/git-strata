@@ -282,8 +282,7 @@ fn hook_process_deadline_covers_stalled_stdin() {
 fn hook_deps_conflicts_and_following_rules() {
     let mut v = data(Some(0), true)["upstream"].clone();
     v["repos"]["tool"]["deps"] = json!({"proposal":1,"mode":"apply","state":"installing","from":"a".repeat(64),"to":"b".repeat(64),"summary":"react 18.2.0→18.3.1"});
-    let reason =
-        |v: &Value| git_strata::sync::block_reason(&serde_json::from_value(v.clone()).unwrap());
+    let reason = |v: &Value| reason_of(v, false);
     assert!(
         reason(&v)
             .unwrap()
@@ -358,4 +357,143 @@ fn stuck_hook_keeps_base_notes_on_stderr_and_resolves_the_sync_session() {
     assert!(reason.contains("cd ~ && git-strata sync --session s-abcdefgh"));
     assert!(!reason.contains("<session"));
     silent(hook(&home, true));
+}
+
+// ---- p1-autoclose §8: a session the daemon left open ----
+
+fn reason_of(v: &Value, done: bool) -> Option<String> {
+    git_strata::sync::block_reason(&serde_json::from_value(v.clone()).unwrap(), done)
+}
+
+fn escalated_auto() -> Value {
+    json!({
+        "source": "main", "state": "deferred", "reason": "open_files",
+        "since": "2026-11-03T12:00:00Z", "attempts": 3,
+        "escalated_at": "2026-11-03T12:06:00Z", "escalation_new": true,
+        "detail": {"holders": [{"pid": 123, "command": "node", "hold": "cwd", "path": "."}], "count": 1}
+    })
+}
+
+/// What the hook says for the fake daemon on `home`.
+fn hook_reason(home: &Home) -> String {
+    let run = hook(home, false);
+    assert_eq!(run.code, 0, "{run:?}");
+    let block: Value =
+        serde_json::from_str(&run.stdout).unwrap_or_else(|e| panic!("{e}: {run:?}"));
+    assert_eq!(block["decision"], "block", "{run:?}");
+    block["reason"].as_str().unwrap().to_string()
+}
+
+/// A `Moved` session: its base holds its own publish, so `behind` is 0, and a
+/// cold Tracker's absent `unpublished` cannot make the hook speak.
+#[test]
+fn hook_silent_for_a_moved_session_with_cold_tracker() {
+    let mut v = data(Some(0), true)["upstream"].clone();
+    v["repos"]["tool"]
+        .as_object_mut()
+        .unwrap()
+        .remove("unpublished");
+    assert_eq!(reason_of(&v, false), None);
+    assert_eq!(reason_of(&v, true), None);
+}
+
+/// Deferred, open files or `not_pushed`: behind by at least its own publish.
+/// The sync is the way on, so the hook names it, Tracker warm or cold.
+#[test]
+fn hook_names_main_moved_for_a_deferred_session_left_open() {
+    let mut v = data(Some(1), true)["upstream"].clone();
+    let reason = reason_of(&v, true).expect("the hook speaks");
+    assert!(
+        reason.contains("main moved 1 commits since your base in tool"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("cd ~ && git-strata sync --session <session-id>"),
+        "{reason}"
+    );
+    v["repos"]["tool"]
+        .as_object_mut()
+        .unwrap()
+        .remove("unpublished");
+    assert_eq!(reason_of(&v, true), Some(reason));
+}
+
+/// An agent that cds back is a cwd holder, and its later `rm` refuses
+/// `OpenFiles`: for a done session the sentences stop at the sync.
+#[test]
+fn hook_for_a_done_session_never_says_cd_back_or_publish() {
+    let behind = data(Some(1), true)["upstream"].clone();
+    let mut escalated = data(Some(0), false)["upstream"].clone();
+    escalated["repos"]["tool"]["auto"] = escalated_auto();
+    for v in [&behind, &escalated] {
+        let reason = reason_of(v, true).expect("the hook speaks");
+        assert!(!reason.contains("cd back"), "{reason}");
+        assert!(!reason.contains("publish"), "{reason}");
+        assert!(
+            reason.contains("cd ~ && git-strata sync --session <session-id>"),
+            "{reason}"
+        );
+    }
+
+    // The control: with no done mark, today's sentences.
+    let reason = reason_of(&behind, false).expect("the hook speaks");
+    assert!(
+        reason.contains(", cd back to the workspace, resolve any conflicts it returns"),
+        "{reason}"
+    );
+    assert!(reason.contains("re-run checks, then publish."), "{reason}");
+    let reason = reason_of(&escalated, false).expect("the hook speaks");
+    assert!(
+        reason.contains(" and cd back into the workspace."),
+        "{reason}"
+    );
+
+    // End to end: the hook reads the reply's mark.
+    let home = Home::new();
+    let _fake = FakeDaemon::start(&home.socket(), |q| {
+        let mut d = data(Some(1), true);
+        d["mark"] = json!({"state": "done"});
+        json!({"id": q["id"], "ok": true, "data": d})
+    });
+    let reason = hook_reason(&home);
+    assert!(
+        reason.contains("main moved 1 commits since your base in tool"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("cd ~ && git-strata sync --session s-abcdefgh"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("This session is marked done: stay out of the workspace"),
+        "{reason}"
+    );
+    assert!(!reason.contains("cd back"), "{reason}");
+    assert!(!reason.contains("publish"), "{reason}");
+
+    // An older daemon's reply has no `mark`, and gets the old words.
+    let old = Home::new();
+    let _old_fake = FakeDaemon::start(
+        &old.socket(),
+        |q| json!({"id": q["id"], "ok": true, "data": data(Some(1), true)}),
+    );
+    let reason = hook_reason(&old);
+    assert!(reason.contains("cd back to the workspace"), "{reason}");
+    assert!(reason.contains("re-run checks, then publish."), "{reason}");
+}
+
+/// Publishing elsewhere than main is not `behind` main in any way a sync fixes;
+/// only a stuck rebase speaks, and it offers no sync.
+#[test]
+fn hook_silent_for_a_split_branch_repo() {
+    let mut v = data(Some(3), true)["upstream"].clone();
+    v["repos"]["tool"]["following"] = json!(false);
+    assert_eq!(reason_of(&v, false), None);
+    assert_eq!(reason_of(&v, true), None);
+    v["repos"]["tool"]["auto"] = escalated_auto();
+    for done in [false, true] {
+        let reason = reason_of(&v, done).expect("the hook speaks");
+        assert!(reason.contains("non-following"), "{reason}");
+        assert!(!reason.contains("git-strata sync"), "{reason}");
+    }
 }

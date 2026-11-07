@@ -648,3 +648,25 @@ fn non_tty_publish_refuses_a_guarded_repo_the_plan_left_out() {
         assert_eq!(git(&main, lv.home.path(), &["rev-parse", "refs/strata/publish/main"]), landed, "no new commit");
     });
 }
+
+/// p1-autoclose §6: a full publish closes its session, so a retry after a lost
+/// reply names a session that is gone. A guarded repo in the config must not
+/// turn that into "you need a terminal"; `confirm_commands_refuse_non_tty`,
+/// whose `Home` has no store, is the control.
+#[test]
+fn closed_session_on_a_non_tty_is_no_such_session() {
+    let lv = guarded_live();
+    lv.serve_scripted(vec![], |core, log| {
+        let s = lv.new_session("T-closed", "app");
+        lv.run_in(&lv.sb, &["rm", "--session", s.as_str()]).ok();
+        let rec = core.store.session(&s).unwrap();
+        assert!(rec.is_none_or(|r| r.lifecycle == strata_store::Lifecycle::Removed), "rm did not remove");
+
+        let seen = lv.requests.lock().unwrap().len();
+        let r = lv.run_in(&lv.sb, &["publish", "--from", &format!("{s}:a.txt")]);
+        assert_eq!(r.err_code(), "NoSuchSession", "{r:?}");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(lv.requests.lock().unwrap()[seen..].is_empty(), "the retry reached the daemon: {:?}", &lv.requests.lock().unwrap()[seen..]);
+        assert!(log.shown().is_empty(), "the retry prompted: {:?}", log.shown());
+    });
+}

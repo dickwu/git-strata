@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use strata_types::{RepoPath, StrataError};
 
 pub use checkpoint::{Checkpointed, checkpoint};
+pub use classify::changed as changed_paths;
 pub use compute::{Scan, compute, reconcile_full};
 pub use context::{Base, WorkspaceRef};
 #[cfg(feature = "test-seams")]

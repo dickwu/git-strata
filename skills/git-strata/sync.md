@@ -24,6 +24,11 @@ It returns `{session, upstream}` and exits 0 even when unclean. When
 Read `data.upstream` in publish and rm replies too (publish is keyed by session
 id) and apply the same rule. For a `Dirty` rm, the order for following repos is
 sync, checks, checkpoint, publish, rm.
+When a session's `upstream` has `as_of_rm: "before"` (a publish that closed
+the session, or a successful rm), the session is gone: that `upstream`
+was read before teardown and only records history. Do not act on it: run no
+`sync`, `fix` or other command against that session, even when `clean` is
+false.
 
 Upstream is informational: it never by itself refuses publish or rm. Behind
 counts cap at 1000 (`capped` means at least that many). `ls` and

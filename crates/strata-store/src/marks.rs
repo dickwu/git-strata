@@ -43,6 +43,7 @@ impl Store {
                     "agent" => MarkByKind::Agent,
                     "cli" => MarkByKind::Cli,
                     "gui" => MarkByKind::Gui,
+                    "daemon" => MarkByKind::Daemon,
                     _ => return Err(bad_row(format!("session_marks.by_kind {by:?}"))),
                 };
                 Ok(SessionMark {
@@ -95,6 +96,7 @@ impl Store {
                 MarkByKind::Agent => "agent",
                 MarkByKind::Cli => "cli",
                 MarkByKind::Gui => "gui",
+                MarkByKind::Daemon => "daemon",
             };
             c.execute(
                 "INSERT INTO session_marks (session, state, note, by_kind, at_ns) VALUES (?1, 'done', ?2, ?3, ?4) \

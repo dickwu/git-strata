@@ -609,7 +609,7 @@ CREATE TABLE session_marks (
     session TEXT PRIMARY KEY NOT NULL REFERENCES sessions (id),
     state TEXT NOT NULL CHECK (state = 'done'),
     note TEXT CHECK (note IS NULL OR length(CAST(note AS BLOB)) BETWEEN 1 AND 2000),
-    by_kind TEXT NOT NULL CHECK (by_kind IN ('agent', 'cli', 'gui')),
+    by_kind TEXT NOT NULL CHECK (by_kind IN ('agent', 'cli', 'gui', 'daemon')),
     at_ns INTEGER NOT NULL
 ) STRICT;
 CREATE TRIGGER session_marks_insert_guard BEFORE INSERT ON session_marks

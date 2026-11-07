@@ -18,6 +18,8 @@ pub enum SessionSeam {
     StopAt { phase: String },
     /// Stop at the start of the phase until `release`.
     PauseAt { phase: String },
+    /// Panic at the start of the phase: a bug in what runs there.
+    PanicAt { phase: String },
 }
 
 #[cfg(feature = "test-seams")]
@@ -79,7 +81,8 @@ impl Seams {
                     Some(SessionSeam::FailAt { phase: p, .. })
                     | Some(SessionSeam::FailKeepAt { phase: p, .. })
                     | Some(SessionSeam::StopAt { phase: p })
-                    | Some(SessionSeam::PauseAt { phase: p }) => matches(p),
+                    | Some(SessionSeam::PauseAt { phase: p })
+                    | Some(SessionSeam::PanicAt { phase: p }) => matches(p),
                     None => false,
                 };
                 let seam = if hit { armed.take() } else { None };
@@ -120,9 +123,18 @@ impl Seams {
                     st.paused = false;
                     st.released = false;
                 }
+                Some(SessionSeam::PanicAt { .. }) => panic!("seam panic at {phase}"),
             }
         }
         Ok(())
+    }
+}
+
+impl crate::Sessions<'_> {
+    /// A step of the daemon's own at this seam: one `arm` reaches both crates.
+    /// A no-op without `test-seams`.
+    pub fn seam(&self, phase: &str) -> Result<()> {
+        self.seams.hit(phase, None)
     }
 }
 

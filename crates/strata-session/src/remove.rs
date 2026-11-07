@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use strata_gitio::{Git, TreeItem};
 use strata_overlay::{OverlayWarning, WorkspaceRef};
-use strata_store::{Health, Lifecycle, MoveIntent, MoveState, PublishPhase, SessionRecord, Store};
+use strata_store::{
+    Health, IfUnchanged, Lifecycle, MoveIntent, MoveState, PendingKey, PublishPhase, SessionRecord,
+    Store,
+};
 use strata_types::{
     Action, CheckpointId, CheckpointReason, Code, CommitOid, ConfirmToken, EntryKind, OverlayEntry,
     RepoName, RepoPath, SessionId, StrataError, TreeOid, WorkspaceState,
@@ -25,6 +28,10 @@ use crate::seams::is_stop;
 use crate::status::{no_such_session, non_empty_dir};
 use crate::sys::lstat;
 use crate::{Result, Sessions};
+
+mod strict;
+
+use strict::{StrictSections, strict_dirty_message};
 
 /// What `remove` did.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +52,39 @@ pub struct RemoveReport {
     /// Failures of that sweep; the remove itself is done.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<StrataError>,
+    /// Where the session root and its shadow repositories went, in retire
+    /// order. They stay in the trash until trash gc.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trash: Vec<PathBuf>,
+}
+
+/// Who judges a remove (auto-close §3.1).
+enum RemoveMode {
+    Agent { discard: bool, confirm: Option<ConfirmToken> },
+    /// The daemon's auto-close: non-discard, no token and no exemption, and
+    /// nothing but a projection onto the default branch discharges an entry.
+    Strict,
+}
+
+/// What `teardown` did: the directories it would not retire and where the
+/// others went, in retire order.
+pub(crate) struct Torn {
+    pub(crate) not_owned: Vec<PathBuf>,
+    pub(crate) trash: Vec<PathBuf>,
+}
+
+/// The branch whose tracking ref discharges an entry: the one this repo
+/// publishes to for an agent's `rm` (D57), the default branch for a close.
+fn landing_branch(cfg: &strata_types::RepoConfig, strict: bool) -> &str {
+    if strict { &cfg.default_branch } else { &cfg.publish.branch }
+}
+
+fn lifecycle_changed(id: &SessionId, was: Lifecycle) -> StrataError {
+    StrataError::new(
+        Code::InvalidInput,
+        format!("session {id} changed state while it was being removed"),
+    )
+    .with_detail(json!({ "reason": "lifecycle_changed", "session": id.as_str(), "was": lc_name(was) }))
 }
 
 /// What step 4 let go without blocking: the entries that landed (D57) and
@@ -133,6 +173,23 @@ impl Sessions<'_> {
         discard: bool,
         confirm: Option<ConfirmToken>,
     ) -> Result<RemoveReport> {
+        self.remove_with(id, RemoveMode::Agent { discard, confirm })
+    }
+
+    /// Auto-close §3.1: a non-discard remove with no token parameter at all,
+    /// and without what makes an agent's `rm` the human's explicit act: an
+    /// unpublished `rm.regenerable` entry refuses it, so does an entry only a
+    /// historical publish holds, a kept pre-move tree and a nested repository.
+    /// Only a projection onto a publish on `origin/<default_branch>` discharges.
+    pub fn remove_strict(&self, id: &SessionId) -> Result<RemoveReport> {
+        self.remove_with(id, RemoveMode::Strict)
+    }
+
+    fn remove_with(&self, id: &SessionId, mode: RemoveMode) -> Result<RemoveReport> {
+        let (discard, confirm, strict) = match mode {
+            RemoveMode::Agent { discard, confirm } => (discard, confirm, false),
+            RemoveMode::Strict => (false, None, true),
+        };
         // ---- Phase A: named refusals; nothing is written.
         // 1.
         let rec = match self.store.session(id)? {
@@ -140,7 +197,8 @@ impl Sessions<'_> {
             _ => return Err(no_such_session(id.as_str())),
         };
         let cur = rec.lifecycle;
-        if !matches!(cur, Lifecycle::Active | Lifecycle::Unknown) {
+        // A close accepts `Active` only: an `Unknown` session's scene is its record.
+        if !matches!(cur, Lifecycle::Active | Lifecycle::Unknown) || (strict && cur != Lifecycle::Active) {
             let state = lc_name(cur);
             return Err(StrataError::new(
                 Code::InvalidInput,
@@ -172,13 +230,13 @@ impl Sessions<'_> {
         }
         drop(confirm);
         // 3. Open files; discard does not bypass this and there is no force.
-        self.refuse_open_files(&rec)?;
+        self.refuse_open_files(&rec, strict)?;
         let intents = self.store.move_intents(id)?;
         // 4.
         let judged = if discard {
             Judged::default()
         } else {
-            self.dirty_check(&rec, &intents)?
+            self.dirty_check(&rec, &intents, strict)?
         };
 
         // ---- Phase B: internal clean-up and the BeforeRemove checkpoints.
@@ -186,6 +244,7 @@ impl Sessions<'_> {
         self.collect_session_leftovers(&rec, &intents)?;
         // 5.2
         let mut checkpoints = BTreeMap::new();
+        let mut checkpointed: BTreeMap<RepoName, strata_overlay::Overlay> = BTreeMap::new();
         let mut changed = Map::new();
         if cur == Lifecycle::Active {
             for (repo, ws) in &rec.manifest.repos {
@@ -217,6 +276,10 @@ impl Sessions<'_> {
                     .before
                     .checkpoint(&wsref, &base, CheckpointReason::BeforeRemove)?;
                 checkpoints.insert(repo.clone(), cp.checkpoint.id);
+                checkpointed.insert(
+                    repo.clone(),
+                    strata_overlay::Overlay { base: ws.base.clone(), entries: cp.checkpoint.entries.clone() },
+                );
                 // 5.3 (D57): what is about to be retired is what step 4 let go.
                 if !discard {
                     let mut let_go: Vec<OverlayEntry> =
@@ -229,20 +292,24 @@ impl Sessions<'_> {
                             base: ws.base.clone(),
                             entries: cp.checkpoint.entries.clone(),
                         };
-                        let still = self
-                            .project(
-                                repo,
-                                ws,
-                                git,
-                                &base,
-                                &ov,
-                                ents,
-                                onto,
-                                &unstable(&cp.warnings),
-                            )
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default();
+                        let projection = self.project(
+                            repo,
+                            ws,
+                            git,
+                            &base,
+                            &ov,
+                            ents,
+                            onto,
+                            &unstable(&cp.warnings),
+                        );
+                        // Strict: a failed read is no refusal, so it goes up.
+                        // `Ok(None)` stays "nothing discharged": a base gc'd
+                        // since Phase A is a real change.
+                        let still = if strict {
+                            projection?.unwrap_or_default()
+                        } else {
+                            projection.ok().flatten().unwrap_or_default()
+                        };
                         let_go.extend(ents.iter().filter(|e| still.contains(e)).cloned());
                     }
                     let regen = Regenerable::new(&self.regenerable(repo)?, cfg);
@@ -251,11 +318,12 @@ impl Sessions<'_> {
                         git,
                         id,
                         repo,
-                        &cfg.publish.branch,
+                        landing_branch(cfg, strict),
                         &let_go,
                         &cp.checkpoint.entries,
                         &cp.warnings,
-                        &|e| regen.matches(e),
+                        &|e| !strict && regen.matches(e),
+                        strict,
                     );
                     if !left.is_empty() {
                         changed.insert(repo.as_str().into(), list_json(&left));
@@ -264,25 +332,14 @@ impl Sessions<'_> {
             }
         }
         if !changed.is_empty() {
-            return Err(StrataError::new(
-                Code::Dirty,
-                format!(
-                    "{} It changed while it was being removed ({}); run the same command again.",
-                    self.refused_prefix(&rec),
-                    changed
-                        .keys()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            )
-            .with_detail(json!({
-                "session": id.as_str(),
-                "reason": "changed_during_remove",
-                "repos": changed,
-                "removed": false,
-                "lifecycle": lc_title(cur),
-            })));
+            let names: Vec<String> = changed.keys().cloned().collect();
+            return Err(changed_during(
+                &self.refused_prefix(&rec, strict),
+                strict,
+                &rec,
+                &names,
+                json!({ "repos": changed, "after": "dirty_check" }),
+            ));
         }
 
         // Codex P2 B2: what --discard throws away is classified again just
@@ -293,7 +350,7 @@ impl Sessions<'_> {
             if now != expected {
                 return Err(StrataError::new(
                     Code::NotConfirmed,
-                    format!("{} What --discard would throw away changed after the confirmation; run the same command again.", self.refused_prefix(&rec)),
+                    format!("{} What --discard would throw away changed after the confirmation; run the same command again.", self.refused_prefix(&rec, strict)),
                 )
                 .with_detail(json!({ "expected": now, "reason": "changed", "removed": false, "lifecycle": lc_title(cur) })));
             }
@@ -302,7 +359,16 @@ impl Sessions<'_> {
         // R4: one batched open-files scan right before Removing; only the
         // lifecycle and phase writes sit between it and the first retire.
         self.seams.hit("remove.before_removing", None)?;
-        self.refuse_open_files(&rec)?;
+        self.refuse_open_files(&rec, strict)?;
+
+        // Auto-close §3.2, steps 5.5 and 5.6: a write that finished before the
+        // holders scan above is either in a checkpoint or refuses the remove.
+        let mut proved = None;
+        if !discard && cur == Lifecycle::Active {
+            proved = self.post_scan_recheck(&rec, &intents, &checkpointed, strict)?;
+            self.seams.hit("remove.after_recheck", None)?;
+            self.refuse_open_files(&rec, strict)?;
+        }
 
         // The complete record was read under the session queue. This successful
         // check is the policy commitment point; teardown is also new's rollback
@@ -311,7 +377,7 @@ impl Sessions<'_> {
             .check_fence(&rec.manifest.repos.keys().cloned().collect::<Vec<_>>())?;
 
         // ---- Phase C: the visible steps.
-        self.teardown(&rec, cur, None)?;
+        let torn = self.teardown(&rec, cur, None, proved.as_deref())?;
         // R1 (iii): the committed Removed stands; a sweep failure is a warning.
         let sweep = self.sweep_orphans(Some(id));
         let regenerable = judged
@@ -326,12 +392,94 @@ impl Sessions<'_> {
             regenerable,
             orphans: sweep.retired,
             warnings: sweep.warnings,
+            trash: torn.trash,
         })
+    }
+
+    /// Auto-close §3.2 step 5.5, read-only. Between the BeforeRemove checkpoints
+    /// and here a writer that edited and closed a file is seen by no holders
+    /// scan, so what is on disk is compared again: (a) every workspace against
+    /// its checkpoint (an untracked one must still be empty), (b) every kept old
+    /// tree, and (c) for a close, the outstanding targets of §2.1. Returns the
+    /// rows (c) proved, which `teardown`'s first write guards on.
+    fn post_scan_recheck(
+        &self,
+        rec: &SessionRecord,
+        intents: &[MoveIntent],
+        checkpointed: &BTreeMap<RepoName, strata_overlay::Overlay>,
+        strict: bool,
+    ) -> Result<Option<Vec<PendingKey>>> {
+        let id = &rec.manifest.id;
+        let mut changed = Map::new();
+        let mut old_trees: Vec<Value> = Vec::new();
+        for (repo, ws) in &rec.manifest.repos {
+            let cfg = self.repo_cfg(repo)?;
+            if let Some(why) = self.unhealthy(rec, repo, ws)? {
+                let mut v = list_json(&[]);
+                v["workspace"] = json!(why);
+                changed.insert(repo.as_str().into(), v);
+            } else {
+                let git = self.git(repo)?;
+                let base = self.base_of(&ws.base)?;
+                let wsref = WorkspaceRef { session: id, repo, root: &ws.path, config: cfg, git, store: self.store };
+                let mut t = strata_overlay::Tracker::new(&ws.path, strata_overlay::DEFAULT_DIRTY_CAPACITY);
+                let scan = strata_overlay::compute(&wsref, &base, &mut t, None)?;
+                let mut paths: BTreeSet<RepoPath> =
+                    strata_overlay::changed_paths(checkpointed.get(repo), &scan.overlay).into_iter().collect();
+                paths.extend(unstable(&scan.warnings));
+                if strict {
+                    paths.extend(embedded_paths(&scan.warnings));
+                }
+                if !paths.is_empty() {
+                    let paths: Vec<RepoPath> = paths.into_iter().collect();
+                    changed.insert(repo.as_str().into(), list_json(&paths));
+                }
+            }
+            for i in intents.iter().filter(|i| &i.repo == repo && i.state == MoveState::Done) {
+                let path = crate::old_tree::old_path(i);
+                if exists(&path) && !self.old_tree_unchanged(i, cfg).unwrap_or(false) {
+                    old_trees.push(json!({ "repo": repo.as_str(), "n": i.n, "path": path }));
+                }
+            }
+        }
+        let mut items: Vec<crate::Outstanding> = Vec::new();
+        let mut keys = None;
+        if strict {
+            let pending = self.store.rebase_pending(Some(id))?;
+            let rows = self.store.publishes()?;
+            items = crate::outstanding(self.store, |r| self.git(r), |r| self.repo_cfg(r), rec, &pending, &rows)?;
+            keys = Some(pending.iter().map(PendingKey::of).collect());
+        }
+        if changed.is_empty() && old_trees.is_empty() && items.is_empty() {
+            return Ok(keys);
+        }
+        let mut names: Vec<String> = changed.keys().cloned().collect();
+        names.extend(old_trees.iter().map(|v| {
+            format!(
+                "{} #{}",
+                v.get("repo").and_then(Value::as_str).unwrap_or("?"),
+                v.get("n").and_then(Value::as_u64).unwrap_or(0)
+            )
+        }));
+        names.extend(items.iter().map(|i| i.repo.as_str().to_owned()));
+        let outstanding: Vec<Value> = items.iter().map(crate::Outstanding::to_json).collect();
+        Err(changed_during(
+            &self.refused_prefix(rec, strict),
+            strict,
+            rec,
+            &names,
+            json!({
+                "repos": changed,
+                "old_trees": old_trees,
+                "outstanding": outstanding,
+                "after": "checkpoint",
+            }),
+        ))
     }
 
     /// Step 3 and the R4 recheck: refuse while any process holds a file in
     /// the session root or its shadow repositories (one scan for both).
-    fn refuse_open_files(&self, rec: &SessionRecord) -> Result<()> {
+    fn refuse_open_files(&self, rec: &SessionRecord, strict: bool) -> Result<()> {
         let id = &rec.manifest.id;
         let root = rec.manifest.root.clone();
         let repos_dir = self.config.paths.root.join("sessions/.repos").join(id.as_str());
@@ -342,13 +490,16 @@ impl Sessions<'_> {
         let mut pids: Vec<i32> = open.iter().map(|o| o.pid).collect();
         pids.sort_unstable();
         pids.dedup();
+        let held = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+        // A close has no command of the agent's to re-run.
+        let tail = if strict {
+            format!("close them, then run `git-strata rm --session {id}` yourself.")
+        } else {
+            "close them and run the same command again.".to_string()
+        };
         Err(StrataError::new(
             Code::OpenFiles,
-            format!(
-                "{} Processes {} hold files in it; close them and run the same command again.",
-                self.refused_prefix(rec),
-                pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
-            ),
+            format!("{} Processes {held} hold files in it; {tail}", self.refused_prefix(rec, strict)),
         )
         .with_detail(json!({
             "session": id.as_str(),
@@ -365,13 +516,16 @@ impl Sessions<'_> {
     /// scan and the retire). A failure after Removing is an Unknown scene.
     /// Also `new`'s rollback, which passes `owned`: then only a directory
     /// whose current (dev, ino) is the one `new` created is retired; the
-    /// others are returned (R1 `not_owned`).
+    /// others are returned (R1 `not_owned`). A strict close passes `pending`,
+    /// the rows it proved: then step 6 commits only while they, the lifecycle
+    /// and clause 6's proposals and conflicts are as the close left them.
     pub(crate) fn teardown(
         &self,
         rec: &SessionRecord,
         cur: Lifecycle,
         owned: Option<&[(PathBuf, crate::orphans::Ident)]>,
-    ) -> Result<Vec<PathBuf>> {
+        pending: Option<&[PendingKey]>,
+    ) -> Result<Torn> {
         let id = &rec.manifest.id;
         let root = rec.manifest.root.clone();
         let repos_dir = self
@@ -381,18 +535,48 @@ impl Sessions<'_> {
             .join("sessions/.repos")
             .join(id.as_str());
         // 6.
-        if !self
-            .store
-            .set_lifecycle(id, cur, Lifecycle::Removing, None, SystemTime::now())?
-        {
-            return Err(StrataError::new(
-                Code::InvalidInput,
-                format!("session {id} changed state while it was being removed"),
-            )
-            .with_detail(json!({ "reason": "lifecycle_changed", "session": id.as_str(), "was": lc_name(cur) })));
+        match pending {
+            None => {
+                if !self.store.set_lifecycle(id, cur, Lifecycle::Removing, None, SystemTime::now())? {
+                    return Err(lifecycle_changed(id, cur));
+                }
+            }
+            Some(keys) => match self.store.set_removing_if_unchanged(id, cur, keys, SystemTime::now())? {
+                IfUnchanged::Removing => {}
+                IfUnchanged::LifecycleMoved => return Err(lifecycle_changed(id, cur)),
+                IfUnchanged::PendingMoved => {
+                    return Err(changed_during(
+                        &self.refused_prefix(rec, true),
+                        true,
+                        rec,
+                        &["a rebase target".to_string()],
+                        json!({ "repos": {}, "pending_changed": true, "after": "checkpoint" }),
+                    ));
+                }
+                IfUnchanged::Reopened(items) => {
+                    let names: Vec<String> = items
+                        .iter()
+                        .map(|v| {
+                            format!(
+                                "{}: {}",
+                                v.get("repo").and_then(Value::as_str).unwrap_or("?"),
+                                v.get("code").and_then(Value::as_str).unwrap_or("?")
+                            )
+                        })
+                        .collect();
+                    return Err(changed_during(
+                        &self.refused_prefix(rec, true),
+                        true,
+                        rec,
+                        &names,
+                        json!({ "repos": {}, "reopened": items, "after": "checkpoint" }),
+                    ));
+                }
+            },
         }
         let mut phase = "retire";
         let mut not_owned = Vec::new();
+        let mut trash = Vec::new();
         let r = (|| -> Result<()> {
             // 7.
             self.store.set_session_phase(id, "retire")?;
@@ -409,7 +593,7 @@ impl Sessions<'_> {
                     }
                 }
                 match self.store.retire_dir(d) {
-                    Ok(_) => {}
+                    Ok(to) => trash.push(to),
                     Err(e) if e.code == Code::NoSuchPath => {}
                     Err(e) => return Err(e),
                 }
@@ -448,7 +632,7 @@ impl Sessions<'_> {
             Ok(())
         })();
         match r {
-            Ok(()) => Ok(not_owned),
+            Ok(()) => Ok(Torn { not_owned, trash }),
             Err(e) if is_stop(&e) => Err(e),
             Err(e) => Err(self.remove_unknown(rec, phase, &e)),
         }
@@ -471,8 +655,14 @@ impl Sessions<'_> {
 
     /// R2: the start of every refusal before `Removing`, naming the
     /// session's actual lifecycle at the start of this rm.
-    fn refused_prefix(&self, rec: &SessionRecord) -> String {
+    fn refused_prefix(&self, rec: &SessionRecord, strict: bool) -> String {
         let id = &rec.manifest.id;
+        if strict {
+            return format!(
+                "auto-close refused: nothing was removed; session {id} is still {} and listed (`git-strata ls`).",
+                lc_title(rec.lifecycle)
+            );
+        }
         let head = "rm refused: nothing was removed;";
         match rec.lifecycle {
             Lifecycle::Unknown => match interrupted(&self.config.paths.root, rec) {
@@ -508,7 +698,10 @@ impl Sessions<'_> {
     /// tracked repo that are not counted because they landed (D57).
     /// A healthy tracked repo's `rm.regenerable` entries do not count
     /// either (rm-followups §1.8); they are listed as `regenerable`.
-    fn dirty_check(&self, rec: &SessionRecord, intents: &[MoveIntent]) -> Result<Judged> {
+    /// Strict (auto-close §3.1): only the projection onto the current landed
+    /// target discharges, regenerable entries count, every kept old tree and
+    /// every nested repository refuses.
+    fn dirty_check(&self, rec: &SessionRecord, intents: &[MoveIntent], strict: bool) -> Result<Judged> {
         let id = &rec.manifest.id;
         let mut unresolved: Vec<Value> = Vec::new();
         let mut repos = Map::new();
@@ -521,6 +714,8 @@ impl Sessions<'_> {
         let mut regen_json = Map::new();
         let mut old_trees: Vec<Value> = Vec::new();
         let mut projected_all: BTreeMap<RepoName, (TreeOid, Vec<OverlayEntry>)> = BTreeMap::new();
+        let mut landing = Map::new();
+        let mut embedded = Map::new();
         if rec.lifecycle == Lifecycle::Unknown {
             unresolved.push(json!({ "kind": "session_unknown", "scene": rec.scene.clone().unwrap_or(Value::Null) }));
         }
@@ -555,10 +750,32 @@ impl Sessions<'_> {
                 let mut t = strata_overlay::Tracker::new(&ws.path, strata_overlay::DEFAULT_DIRTY_CAPACITY);
                 let scan = strata_overlay::compute(&wsref, &base, &mut t, None)?;
                 let unstable_paths = unstable(&scan.warnings);
+                if strict {
+                    let nested = embedded_paths(&scan.warnings);
+                    if !nested.is_empty() {
+                        embedded.insert(repo.as_str().into(), list_json(&nested));
+                    }
+                }
                 let full = scan.overlay;
                 let entries = full.entries.clone();
                 let mut remaining = if !ws.tracked || entries.is_empty() {
                     entries
+                } else if strict {
+                    let j = self.judge_strict(id, repo, ws, git, &base, &full, &unstable_paths, cfg)?;
+                    landing.insert(repo.as_str().into(), j.landing);
+                    if let Some(v) = j.landed {
+                        landed.insert(repo.as_str().into(), v);
+                    }
+                    if let Some(p) = j.projected {
+                        projected_all.insert(repo.clone(), p);
+                    }
+                    if let Some(e) = j.landed_error {
+                        landed_errors.insert(repo.as_str().into(), json!(e));
+                    }
+                    if let Some(e) = j.projection_error {
+                        projection_errors.insert(repo.as_str().into(), json!(e));
+                    }
+                    j.remaining
                 } else {
                     match split_landed(self.store, git, id, repo, &cfg.publish.branch, entries.clone(), &unstable_paths)
                     {
@@ -620,8 +837,15 @@ impl Sessions<'_> {
                     }
                 };
                 // §1.8: tracked and healthy only (an untracked repo has no
-                // checkpoint to keep them).
-                if ws.tracked {
+                // checkpoint to keep them). A strict remove keeps them all in
+                // `remaining` and only names the ones an agent's `rm` lets go.
+                if ws.tracked && strict {
+                    let regen = Regenerable::new(&self.regenerable(repo)?, cfg);
+                    let r: Vec<OverlayEntry> = remaining.iter().filter(|e| regen.matches(e)).cloned().collect();
+                    if !r.is_empty() {
+                        regen_json.insert(repo.as_str().into(), paths_json(&r));
+                    }
+                } else if ws.tracked {
                     let regen = Regenerable::new(&self.regenerable(repo)?, cfg);
                     let (r, keep): (Vec<OverlayEntry>, Vec<OverlayEntry>) =
                         std::mem::take(&mut remaining).into_iter().partition(|e| regen.matches(e));
@@ -647,8 +871,12 @@ impl Sessions<'_> {
                 if !exists(&path) {
                     continue;
                 }
-                if !self.old_tree_unchanged(i, cfg).unwrap_or(false) {
+                let changed = !self.old_tree_unchanged(i, cfg).unwrap_or(false);
+                if strict || changed {
                     let mut v = json!({ "repo": repo.as_str(), "n": i.n, "path": path });
+                    if strict {
+                        v["changed"] = json!(changed);
+                    }
                     if let Some(k) = kept.iter().find(|k| &k.repo == repo && k.path == path) {
                         v["late_writes"] = json!({ "count": k.count, "paths": k.paths, "reason": k.reason, "moved_at": k.moved_at });
                     }
@@ -656,10 +884,32 @@ impl Sessions<'_> {
                 }
             }
         }
-        if unresolved.is_empty() && repos.is_empty() && untracked.is_empty() && old_trees.is_empty() {
+        if unresolved.is_empty()
+            && repos.is_empty()
+            && untracked.is_empty()
+            && old_trees.is_empty()
+            && embedded.is_empty()
+        {
             return Ok(Judged { landed: landed_all, regenerable: regen_all, projected: projected_all });
         }
-        let msg = dirty_message(&self.refused_prefix(rec), id, rec.lifecycle, &repos, &landed, &untracked, &unresolved, &old_trees);
+        let prefix = self.refused_prefix(rec, strict);
+        let msg = if strict {
+            strict_dirty_message(
+                &prefix,
+                &StrictSections {
+                    repos: &repos,
+                    landed: &landed,
+                    untracked: &untracked,
+                    unresolved: &unresolved,
+                    old_trees: &old_trees,
+                    embedded: &embedded,
+                    regenerable: &regen_json,
+                    landing: &landing,
+                },
+            )
+        } else {
+            dirty_message(&prefix, id, rec.lifecycle, &repos, &landed, &untracked, &unresolved, &old_trees)
+        };
         Err(StrataError::new(Code::Dirty, msg).with_detail({
             let mut d = json!({
                 "session": id.as_str(),
@@ -679,6 +929,12 @@ impl Sessions<'_> {
             }
             if !regen_json.is_empty() {
                 d["regenerable"] = Value::Object(regen_json);
+            }
+            if !landing.is_empty() {
+                d["landing"] = Value::Object(landing);
+            }
+            if !embedded.is_empty() {
+                d["embedded_repos"] = Value::Object(embedded);
             }
             d
         }))
@@ -747,6 +1003,38 @@ fn unstable(warnings: &[OverlayWarning]) -> BTreeSet<RepoPath> {
             _ => None,
         })
         .collect()
+}
+
+/// The nested repositories a scan walked past: their new files are never listed.
+fn embedded_paths(warnings: &[OverlayWarning]) -> Vec<RepoPath> {
+    warnings
+        .iter()
+        .filter_map(|w| match w {
+            OverlayWarning::EmbeddedRepo { path } => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The refusal of a recheck: the session changed between the judgement and the
+/// visible steps. `sections` holds what this recheck found.
+fn changed_during(prefix: &str, strict: bool, rec: &SessionRecord, names: &[String], sections: Value) -> StrataError {
+    let names = names.join(", ");
+    let tail = if strict {
+        format!("It changed while it was being closed ({names}); the next publish or push of its repos judges again.")
+    } else {
+        format!("It changed while it was being removed ({names}); run the same command again.")
+    };
+    let mut detail = json!({
+        "session": rec.manifest.id.as_str(),
+        "reason": "changed_during_remove",
+        "removed": false,
+        "lifecycle": lc_title(rec.lifecycle),
+    });
+    if let (Some(d), Value::Object(found)) = (detail.as_object_mut(), sections) {
+        d.extend(found);
+    }
+    StrataError::new(Code::Dirty, format!("{prefix} {tail}")).with_detail(detail)
 }
 
 fn touches(e: &OverlayEntry, set: &BTreeSet<RepoPath>) -> bool {
@@ -840,6 +1128,40 @@ fn repo_line(repo: &str, entry: &Value, landed: Option<&Value>, untracked: bool)
     s
 }
 
+/// "unresolved: …" for every scene but the session's own, if any.
+fn scenes_line(unresolved: &[Value]) -> Option<String> {
+    let scenes: Vec<String> = unresolved
+        .iter()
+        .filter(|v| v.get("kind").and_then(Value::as_str) != Some("session_unknown"))
+        .map(|v| {
+            let kind = v.get("kind").and_then(Value::as_str).unwrap_or("scene").replace('_', " ");
+            match v.get("repo").and_then(Value::as_str) {
+                Some(r) => format!("{kind} in {r}"),
+                None => kind,
+            }
+        })
+        .collect();
+    (!scenes.is_empty()).then(|| format!("unresolved: {}", scenes.join(", ")))
+}
+
+/// One kept pre-move tree with a recorded late write.
+fn late_line(v: &Value) -> String {
+    let l = &v["late_writes"];
+    let repo = v.get("repo").and_then(Value::as_str).unwrap_or("?");
+    let path = v.get("path").and_then(Value::as_str).unwrap_or("?");
+    let count = l.get("count").and_then(Value::as_u64).unwrap_or(0);
+    let shown: Vec<&str> = l.get("paths").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    if count == 0 {
+        return format!("{repo}: pre-move tree kept after an auto-rebase (activity baseline unreadable) at {path}; its files are intact there");
+    }
+    let more = if count as usize > shown.len() { format!(", … (+{} more)", count as usize - shown.len()) } else { String::new() };
+    format!(
+        "{repo}: {count} {} written to the pre-move tree after an auto-rebase, kept at {path}: {}{more}; the files are intact there",
+        if count == 1 { "file" } else { "files" },
+        shown.join(", ")
+    )
+}
+
 /// The R2 Dirty refusal (design §2.2).
 #[allow(clippy::too_many_arguments)]
 fn dirty_message(
@@ -857,38 +1179,9 @@ fn dirty_message(
         let u = untracked.iter().any(|v| v.as_str() == Some(repo.as_str()));
         parts.push(repo_line(repo, entry, landed.get(repo), u));
     }
-    let scenes: Vec<String> = unresolved
-        .iter()
-        .filter(|v| v.get("kind").and_then(Value::as_str) != Some("session_unknown"))
-        .map(|v| {
-            let kind = v.get("kind").and_then(Value::as_str).unwrap_or("scene").replace('_', " ");
-            match v.get("repo").and_then(Value::as_str) {
-                Some(r) => format!("{kind} in {r}"),
-                None => kind,
-            }
-        })
-        .collect();
-    if !scenes.is_empty() {
-        parts.push(format!("unresolved: {}", scenes.join(", ")));
-    }
+    parts.extend(scenes_line(unresolved));
     let (late, plain): (Vec<&Value>, Vec<&Value>) = old_trees.iter().partition(|v| v.get("late_writes").is_some());
-    for v in &late {
-        let l = &v["late_writes"];
-        let repo = v.get("repo").and_then(Value::as_str).unwrap_or("?");
-        let path = v.get("path").and_then(Value::as_str).unwrap_or("?");
-        let count = l.get("count").and_then(Value::as_u64).unwrap_or(0);
-        let shown: Vec<&str> = l.get("paths").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-        if count == 0 {
-            parts.push(format!("{repo}: pre-move tree kept after an auto-rebase (activity baseline unreadable) at {path}; its files are intact there"));
-        } else {
-            let more = if count as usize > shown.len() { format!(", … (+{} more)", count as usize - shown.len()) } else { String::new() };
-            parts.push(format!(
-                "{repo}: {count} {} written to the pre-move tree after an auto-rebase, kept at {path}: {}{more}; the files are intact there",
-                if count == 1 { "file" } else { "files" },
-                shown.join(", ")
-            ));
-        }
-    }
+    parts.extend(late.iter().map(|v| late_line(v)));
     if !plain.is_empty() {
         let t: Vec<String> = plain
             .iter()
@@ -1067,9 +1360,19 @@ fn split_landed(
     entries: Vec<OverlayEntry>,
     unstable: &BTreeSet<RepoPath>,
 ) -> Result<Split> {
+    let cands = candidates(store, git, session, repo, branch)?;
+    split_on(git, cands, entries, unstable)
+}
+
+/// The content match of `split_landed` over candidates already read.
+fn split_on(
+    git: &Git,
+    cands: Vec<Candidate>,
+    entries: Vec<OverlayEntry>,
+    unstable: &BTreeSet<RepoPath>,
+) -> Result<Split> {
     let (mut pending, never): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| !touches(e, unstable));
     let mut sp = Split::default();
-    let cands = candidates(store, git, session, repo, branch)?;
     sp.newest = cands.first().cloned();
     for c in cands {
         if pending.is_empty() {
@@ -1109,6 +1412,8 @@ fn split_landed(
 /// step 4 did not let go and that are not landed now either. Every
 /// Unstable warning counts, with or without an entry: a path that changed
 /// while it was read can sample as the base and leave no entry at all.
+/// Strict: a new entry is simply left. The historical match this would run
+/// is the one the strict judge refused (auto-close §3.1).
 #[allow(clippy::too_many_arguments)]
 fn recheck(
     store: &Store,
@@ -1120,6 +1425,7 @@ fn recheck(
     entries: &[OverlayEntry],
     warnings: &[OverlayWarning],
     regenerable: &dyn Fn(&OverlayEntry) -> bool,
+    strict: bool,
 ) -> Vec<RepoPath> {
     let unstable = unstable(warnings);
     let mut left = unstable.clone();
@@ -1132,9 +1438,13 @@ fn recheck(
         }
     }
     if !new.is_empty() {
-        let rest = match split_landed(store, git, session, repo, branch, new.clone(), &BTreeSet::new()) {
-            Ok(sp) => sp.remaining,
-            Err(_) => new,
+        let rest = if strict {
+            new
+        } else {
+            match split_landed(store, git, session, repo, branch, new.clone(), &BTreeSet::new()) {
+                Ok(sp) => sp.remaining,
+                Err(_) => new,
+            }
         };
         left.extend(rest.into_iter().map(|e| e.path));
     }

@@ -21,6 +21,38 @@ pub struct Config {
     /// servers (config.md §2.6). Optional; absent → defaults.
     #[serde(default)]
     pub dev_ports: DevPorts,
+    /// `[publish]`: global defaults of the per-repo `publish` table. Omitted
+    /// when default, so a config without the table writes back without it.
+    #[serde(default, skip_serializing_if = "PublishDefaults::is_default")]
+    pub publish: PublishDefaults,
+}
+
+/// `[publish]`: what a repo's `publish` inherits (auto-close §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishDefaults {
+    /// Close a session once a publish or push has landed all of it. Read
+    /// `true` from an empty table through this field's own default.
+    #[serde(default = "PublishDefaults::default_auto_close")]
+    pub auto_close: bool,
+}
+
+/// Hand-written: `#[serde(default)]` on `Config.publish` calls this for an
+/// absent table, and a derived impl would read `false`.
+impl Default for PublishDefaults {
+    fn default() -> Self {
+        Self { auto_close: Self::default_auto_close() }
+    }
+}
+
+impl PublishDefaults {
+    pub fn default_auto_close() -> bool {
+        true
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// `[status]`: how `status` runs (status-perf D7).

@@ -55,6 +55,40 @@ fn done_round_trips_replaces_metadata_and_active_clears_it() {
 }
 
 #[test]
+fn a_daemon_mark_round_trips_and_is_replaced_like_any_other() {
+    let env = env();
+    let store = env.open();
+    world(&env, &store);
+    let mark = store
+        .set_mark(
+            &sid(),
+            MarkState::Done,
+            Some("auto-close did not close this session: unpublished"),
+            MarkByKind::Daemon,
+            t(20),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(mark.by.kind, MarkByKind::Daemon);
+    assert_eq!(store.mark(&sid()).unwrap(), Some(mark));
+    store.close().unwrap();
+
+    let store = env.open();
+    assert_eq!(
+        store.mark(&sid()).unwrap().unwrap().by.kind,
+        MarkByKind::Daemon
+    );
+    assert!(
+        store
+            .set_mark(&sid(), MarkState::Active, None, MarkByKind::Daemon, t(21))
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.mark(&sid()).unwrap().is_none());
+    store.close().unwrap();
+}
+
+#[test]
 fn note_validation_uses_bytes_and_allows_only_tab_and_newline_controls() {
     let env = env();
     let store = env.open();

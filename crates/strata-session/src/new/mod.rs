@@ -257,7 +257,7 @@ impl Sessions<'_> {
                     .with_detail(json!({ "reason": "lifecycle", "session": m.id.as_str() })));
             }
         };
-        self.teardown(&rec, Lifecycle::Unknown, Some(owned))
+        self.teardown(&rec, Lifecycle::Unknown, Some(owned), None).map(|t| t.not_owned)
     }
 
     /// The error of the scene now on the row (the rollback's own when it

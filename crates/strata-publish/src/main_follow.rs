@@ -222,6 +222,7 @@ pub fn reconcile_locked(ctx: &deps::Ctx, p: &PreparedMain) -> Result<()> {
                     row.reason.as_str(),
                     "open_files" | "recent_writes" | "conflicts"
                 );
+                crate::seams::hit(ctx.git, crate::seams::Point::BeforeMainTarget);
                 ctx.store.retarget_pending(
                     id,
                     ctx.repo,
@@ -250,6 +251,7 @@ pub fn reconcile_locked(ctx: &deps::Ctx, p: &PreparedMain) -> Result<()> {
         } else {
             continue;
         };
+        crate::seams::hit(ctx.git, crate::seams::Point::BeforeMainTarget);
         ctx.store.enroll_main(
             id,
             ctx.repo,

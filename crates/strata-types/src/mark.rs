@@ -20,6 +20,8 @@ pub enum MarkByKind {
     Agent,
     Cli,
     Gui,
+    /// The daemon's auto-close fallback: never accepted from the `mark` RPC.
+    Daemon,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

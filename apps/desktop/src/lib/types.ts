@@ -153,7 +153,7 @@ export interface SessionEntry {
     mark?: {
       state: 'active' | 'done';
       note?: string;
-      by: { kind: 'agent' | 'cli' | 'gui' };
+      by: { kind: 'agent' | 'cli' | 'gui' | 'daemon' };
       at: string;
     };
     created: string;
@@ -184,6 +184,41 @@ export interface StatusReply {
   leftovers: unknown[];
   sessions: SessionEntry[];
   warnings: unknown[];
+}
+
+/**
+ * Additive `closed` / `auto_close` fields on a publish or push reply (p1-autoclose §6).
+ * The GUI does not drive publish yet; typed so a later screen can read them without
+ * widening every `unknown`. `closed` is omitted on push when nothing was judged.
+ */
+export interface AutoCloseMarkResult {
+  written: boolean;
+  at?: string;
+  skipped?: string;
+  error?: unknown;
+}
+
+export interface AutoCloseSession {
+  closed: boolean;
+  in_group: boolean;
+  reasons: string[];
+  detail: unknown;
+  rm?: unknown | null;
+  mark?: AutoCloseMarkResult;
+  /** Present when another request already removed a group session (`by: "other"`). */
+  by?: string;
+}
+
+export interface AutoCloseReport {
+  closed: boolean;
+  reasons: string[];
+  rejudged: string[];
+  sessions: Record<string, AutoCloseSession>;
+}
+
+export interface AutoCloseReplyFields {
+  closed?: boolean;
+  auto_close?: AutoCloseReport;
 }
 
 export interface Proposal {

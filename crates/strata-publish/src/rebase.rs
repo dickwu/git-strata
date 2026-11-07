@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use strata_deps::{self as deps, Proposal, ProposalOrigin, ProposalState, ProposeArgs};
 use strata_gitio::{Merge3, is_binary, merge3};
 use strata_overlay::{Base, Overlay, RebaseOptions, WorkspaceRef};
-use strata_store::{Lifecycle, PublishPhase, Store};
+use strata_store::{Lifecycle, PublishPhase, PublishRecord, Store};
 use strata_types::{
     BaseGen, Code, CommitOid, DepsChanged, DepsSetId, EntryKind, OverlayEntry, RepoName, RepoPath,
     SessionId, StrataError, WorkspaceState,
@@ -882,6 +882,15 @@ pub fn assign(store: &Store, id: u64, path: &RepoPath, session: SessionId) -> Re
             .with_detail(json!({ "publish": id, "path": path.as_str() }))
     };
     match store.session(&session)? {
+        // Under the session queue this is a torn remove or a failed `new`
+        // rolling back; neither can resolve a conflict (auto-close §3.2).
+        Some(r) if r.lifecycle == Lifecycle::Removing => {
+            return Err(StrataError::new(
+                Code::InvalidInput,
+                format!("session {session} is removing; another operation is in progress or was interrupted"),
+            )
+            .with_detail(json!({ "reason": "lifecycle", "state": "removing", "session": session.as_str() })));
+        }
         Some(r) if r.lifecycle != Lifecycle::Removed => {}
         _ => return Err(no_such_session(&session)),
     }
@@ -919,10 +928,39 @@ pub fn assign(store: &Store, id: u64, path: &RepoPath, session: SessionId) -> Re
 /// The paths of `repo` named by `assign` and not yet landed since: path →
 /// session. An assignment ends when a later publish lands the path.
 pub(crate) fn assignments(store: &Store, repo: &RepoName) -> Result<BTreeMap<String, SessionId>> {
-    let rows = store.publishes()?;
+    Ok(assignments_in(&store.publishes()?, repo))
+}
+
+/// Auto-close clause 6: the paths assigned to `s` and not landed since, per
+/// repo, whichever repo's publish named it. `assign` does not require `s` to
+/// hold the repo.
+pub fn assigned_to(rows: &[PublishRecord], s: &SessionId) -> BTreeMap<RepoName, Vec<String>> {
+    let repos: BTreeSet<RepoName> = rows
+        .iter()
+        .filter_map(|r| r.outcome.as_ref())
+        .filter(|o| o.get("assigned").and_then(|a| a.as_array()).is_some())
+        .filter_map(|o| o.get("repo").and_then(|r| r.as_str()))
+        .filter_map(|r| RepoName::try_from(r.to_string()).ok())
+        .collect();
+    let mut out = BTreeMap::new();
+    for repo in repos {
+        let paths: Vec<String> = assignments_in(rows, &repo)
+            .into_iter()
+            .filter(|(_, who)| who == s)
+            .map(|(p, _)| p)
+            .collect();
+        if !paths.is_empty() {
+            out.insert(repo, paths);
+        }
+    }
+    out
+}
+
+/// `assignments` over rows already read.
+fn assignments_in(rows: &[PublishRecord], repo: &RepoName) -> BTreeMap<String, SessionId> {
     let of_repo = |o: &Value| o.get("repo").and_then(|r| r.as_str()) == Some(repo.as_str());
     let mut named: BTreeMap<String, (SessionId, u64)> = BTreeMap::new();
-    for r in &rows {
+    for r in rows {
         let Some(o) = &r.outcome else { continue };
         if !of_repo(o) {
             continue;
@@ -937,7 +975,7 @@ pub(crate) fn assignments(store: &Store, repo: &RepoName) -> Result<BTreeMap<Str
             named.insert(p.to_string(), (s, at));
         }
     }
-    for r in &rows {
+    for r in rows {
         let (Some(o), Some(ended)) = (&r.outcome, r.ended) else { continue };
         if r.phase != PublishPhase::Done || !of_repo(o) || o.get("commit").is_none_or(|c| c.is_null()) {
             continue;
@@ -946,7 +984,7 @@ pub(crate) fn assignments(store: &Store, repo: &RepoName) -> Result<BTreeMap<Str
             o.get("paths").and_then(|p| p.as_array()).into_iter().flatten().filter_map(|v| v.as_str()).collect();
         named.retain(|p, (_, at)| !(landed.contains(p.as_str()) && millis(ended) >= *at));
     }
-    Ok(named.into_iter().map(|(p, (s, _))| (p, s)).collect())
+    named.into_iter().map(|(p, (s, _))| (p, s)).collect()
 }
 
 // ---- diff_between (§5.9) --------------------------------------------------

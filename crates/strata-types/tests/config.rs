@@ -117,6 +117,7 @@ fn v1_name_must_match_path_basename_and_table_must_be_nonempty() {
         repos: Default::default(),
         status: Default::default(),
         dev_ports: Default::default(),
+        publish: Default::default(),
     };
     assert_eq!(rule(&empty.validate().unwrap_err()), "V1");
 }
@@ -249,6 +250,7 @@ publish = { branch = "master", push = false, confirm = false }
             branch: "master".into(),
             push: true,
             confirm: false,
+            auto_close: None,
         },
         deploy_on_push: true,
         pin_unpushed: true,
@@ -448,6 +450,7 @@ fn validate_commands_reports_repo_null_until_config_validate_fills_it() {
             branch: "main".into(),
             push: true,
             confirm: false,
+            auto_close: None,
         },
         deploy_on_push: false,
         pin_unpushed: true,
@@ -459,6 +462,70 @@ fn validate_commands_reports_repo_null_until_config_validate_fills_it() {
     let err = cfg.validate_commands().unwrap_err();
     assert_eq!(err.code, Code::CheckMutates);
     assert!(err.detail.unwrap()["repo"].is_null());
+}
+
+/// §10 row 12: one repo with an optional `[publish]` table ahead of it, and
+/// the per-repo `auto_close` in the inline `publish` table.
+fn auto_close_config(global: &str, per_repo: &str) -> String {
+    format!(
+        r#"
+{global}
+[repo.tool]
+path = "/Volumes/Code/src/tool"
+default_branch = "main"
+deps_dirs = []
+publish = {{ branch = "main", push = true, confirm = false{per_repo} }}
+"#
+    )
+}
+
+#[test]
+fn publish_auto_close_defaults_to_true_absent_or_empty() {
+    assert!(strata_types::PublishDefaults::default().auto_close);
+    let absent = parse(&auto_close_config("", "")).unwrap();
+    assert!(absent.publish.auto_close);
+    let empty = parse(&auto_close_config("[publish]\n", "")).unwrap();
+    assert!(empty.publish.auto_close);
+    let tool = absent.repo(&repo("tool")).unwrap();
+    assert_eq!(tool.publish.auto_close, None);
+}
+
+#[test]
+fn publish_auto_close_false_round_trips_and_the_default_writes_nothing() {
+    let off = parse(&auto_close_config("[publish]\nauto_close = false\n", "")).unwrap();
+    assert!(!off.publish.auto_close);
+    let text = toml::to_string(&off).unwrap();
+    assert!(!parse(&text).unwrap().publish.auto_close);
+
+    let default = parse(&auto_close_config("[publish]\n", "")).unwrap();
+    let text = toml::to_string(&default).unwrap();
+    assert!(!text.contains("[publish]"), "{text}");
+    assert!(parse(&text).unwrap().publish.auto_close);
+}
+
+#[test]
+fn publish_auto_close_per_repo_key_is_kept_and_omitted_when_inherited() {
+    for (global, per_repo, want) in [
+        ("[publish]\nauto_close = false\n", ", auto_close = true", Some(true)),
+        ("[publish]\nauto_close = true\n", ", auto_close = false", Some(false)),
+        ("", ", auto_close = false", Some(false)),
+        ("[publish]\nauto_close = false\n", "", None),
+    ] {
+        let cfg = parse(&auto_close_config(global, per_repo)).unwrap();
+        assert_eq!(cfg.repo(&repo("tool")).unwrap().publish.auto_close, want);
+        let back = parse(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.repo(&repo("tool")).unwrap().publish.auto_close, want);
+    }
+    let inherited = parse(&auto_close_config("", "")).unwrap();
+    assert!(!toml::to_string(&inherited).unwrap().contains("auto_close"));
+}
+
+#[test]
+fn publish_table_refuses_unknown_keys_and_wrong_types() {
+    assert!(parse(&auto_close_config("[publish]\nauto_clse = true\n", "")).is_err());
+    assert!(parse(&auto_close_config("[publish]\nauto_close = \"yes\"\n", "")).is_err());
+    // `PublishTarget` stays `deny_unknown_fields` beside the new key.
+    assert!(parse(&auto_close_config("", ", auto_close = true, auto_clse = true")).is_err());
 }
 
 #[test]

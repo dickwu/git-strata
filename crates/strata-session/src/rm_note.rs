@@ -235,8 +235,13 @@ pub(crate) fn attempt_summary(a: &RmAttempt) -> (Option<String>, String) {
             if d.get("unresolved").and_then(Value::as_array).is_some_and(|v| !v.is_empty()) {
                 parts.push("unresolved scenes".into());
             }
-            if d.get("old_trees").and_then(Value::as_array).is_some_and(|v| !v.is_empty()) {
-                parts.push("changed old trees".into());
+            if let Some(trees) = d.get("old_trees").and_then(Value::as_array).filter(|v| !v.is_empty()) {
+                // A strict refusal lists unchanged trees too; an agent's item has no such key.
+                let kept = trees.iter().all(|t| t.get("changed").and_then(Value::as_bool) == Some(false));
+                parts.push(if kept { "kept old trees" } else { "changed old trees" }.into());
+            }
+            if d.get("embedded_repos").and_then(Value::as_object).is_some_and(|m| !m.is_empty()) {
+                parts.push("nested git repositories".into());
             }
             parts.join(", ")
         }

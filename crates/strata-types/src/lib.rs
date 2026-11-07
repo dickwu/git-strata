@@ -14,7 +14,7 @@ pub mod upstream;
 pub use sync::SyncRequest;
 pub use upstream::{RepoUpstream, Upstream, UpstreamAuto, UpstreamCommit, UpstreamDeps, UpstreamMain};
 
-pub use config::{Config, DepsChanged, DevPorts, Paths, RebaseConfig, RepoConfig, RmConfig, StatusConfig, SyncConfig, SyncDeps, regenerable_problem};
+pub use config::{Config, DepsChanged, DevPorts, Paths, PublishDefaults, RebaseConfig, RepoConfig, RmConfig, StatusConfig, SyncConfig, SyncDeps, regenerable_problem};
 pub use error::{Code, StrataError};
 pub use mark::{MarkBy, MarkByKind, MarkState, SessionMark, validate_mark_note};
 pub use ids::{

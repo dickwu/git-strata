@@ -92,7 +92,7 @@ pub(crate) fn classify(
 }
 
 /// Paths whose entry differs between `old` and `new` (Renamed `from` included).
-pub(crate) fn changed(old: Option<&Overlay>, new: &Overlay) -> Vec<RepoPath> {
+pub fn changed(old: Option<&Overlay>, new: &Overlay) -> Vec<RepoPath> {
     let index = |o: &Overlay| -> BTreeMap<RepoPath, OverlayEntry> {
         o.entries
             .iter()

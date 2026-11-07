@@ -207,6 +207,7 @@ fn confirm_token_is_plain_data_with_a_debug_impl() {
         branch: "main".into(),
         push: true,
         confirm: false,
+        auto_close: None,
     };
 }
 

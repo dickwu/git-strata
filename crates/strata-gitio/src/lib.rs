@@ -45,7 +45,7 @@ pub use remote::remote_ref;
 #[cfg(feature = "test-seams")]
 pub use seams::{GitCall, Pause, SyncEvent};
 pub use shadow::{MirrorDrift, Shadow};
-pub use upstream::{CommitSummary, PublishCommit};
+pub use upstream::{CommitSummary, LANDED_COPY_LIMIT, PublishCommit};
 
 pub type Result<T> = std::result::Result<T, StrataError>;
 

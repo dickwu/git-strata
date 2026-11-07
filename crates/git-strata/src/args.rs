@@ -202,7 +202,7 @@ pub enum Cmd {
         #[arg(long, value_name = "NAME")]
         agent: Option<String>,
     },
-    /// Remove a session (agents finish with `mark done`)
+    /// Remove a session (a full publish closes its session by itself)
     #[command(after_long_help = crate::help::RM_AFTER)]
     Rm {
         /// Session id or ticket

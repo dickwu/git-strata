@@ -239,8 +239,7 @@ fn watcher_operations_stay_on_request_threads() {
     // The daemon never builds a watcher callback of its own and calls hint,
     // flush and require_full only from track.rs (request thread).
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    for e in fs::read_dir(&src).unwrap() {
-        let p = e.unwrap().path();
+    for p in rs_files(&src) {
         let text = fs::read_to_string(&p).unwrap();
         let code: String = text.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
         for needle in ["watch_with", "Watcher::", "dispatch_sync", "FlushSync"] {
@@ -255,6 +254,20 @@ fn watcher_operations_stay_on_request_threads() {
     // overlay's callback (the one the daemon gets via Tracker::watch) only notes.
     let overlay = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../strata-overlay/src/tracker.rs")).unwrap();
     assert!(overlay.contains("move |ev| inbox.note(&ev)"), "Tracker::watch callback changed");
+}
+
+/// Every `.rs` file under `dir`, subdirectories (e.g. `auto_close/`) included.
+fn rs_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for e in fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            out.extend(rs_files(&p));
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
+    }
+    out
 }
 
 #[test]

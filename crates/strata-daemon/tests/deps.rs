@@ -49,16 +49,6 @@ fn new_session(socket: &Path) -> SessionId {
     serde_json::from_value(d["session"]["manifest"]["id"].clone()).unwrap()
 }
 
-const NEW_DEP: &str = r#"{
-  "name": "tool",
-  "version": "1.0.87",
-  "dependencies": {
-    "x": "^1.0.0",
-    "y": "^2.0.0"
-  }
-}
-"#;
-
 #[test]
 fn approve_unknown_proposal_is_refused_without_prompt() {
     let fx = Dfx::new();

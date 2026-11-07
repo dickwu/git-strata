@@ -28,6 +28,7 @@ mod imp {
         pub(super) static FAIL_OPEN: RefCell<Vec<(PathBuf, StrataError)>> = const { RefCell::new(Vec::new()) };
         pub(super) static AFTER_ATTEMPT: RefCell<Option<Hook>> = const { RefCell::new(None) };
         pub(super) static BEFORE_MAIN_LOCK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        pub(super) static AFTER_BUILD: RefCell<Option<Hook>> = const { RefCell::new(None) };
         pub(super) static BEFORE_MAIN_CAS: RefCell<Option<Hook>> = const { RefCell::new(None) };
         pub(super) static SYNCS: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
         pub(super) static SNAPSHOT_CLONE: RefCell<Option<SnapHook>> = const { RefCell::new(None) };
@@ -101,6 +102,16 @@ pub(crate) fn before_main_lock() {
 pub(crate) fn before_main_cas() {
     #[cfg(feature = "test-seams")]
     imp::call_kept(&imp::BEFORE_MAIN_CAS);
+}
+
+/// `build` is returning, on any path, with its build lock already dropped.
+pub(crate) fn after_build() {
+    #[cfg(feature = "test-seams")]
+    {
+        if let Some(mut h) = imp::AFTER_BUILD.with(|s| s.borrow_mut().take()) {
+            h();
+        }
+    }
 }
 
 /// `lock_build` found the build lock held by someone else (the first
@@ -179,6 +190,12 @@ pub mod test_seams {
         imp::BEFORE_MAIN_LOCK.with(|s| *s.borrow_mut() = Some(hook));
     }
 
+    /// Called once, when this thread's next `build` returns, on any path, with
+    /// its build lock already dropped (taken out before the call).
+    pub fn after_build(hook: Box<dyn FnMut()>) {
+        imp::AFTER_BUILD.with(|s| *s.borrow_mut() = Some(hook));
+    }
+
     /// Called by this thread's `observe_main` before every compare-and-swap of
     /// the main record, until `reset`.
     pub fn before_main_cas(hook: Box<dyn FnMut()>) {
@@ -215,6 +232,7 @@ pub mod test_seams {
         imp::FAIL_OPEN.with(|f| f.borrow_mut().clear());
         imp::AFTER_ATTEMPT.with(|s| *s.borrow_mut() = None);
         imp::BEFORE_MAIN_LOCK.with(|s| *s.borrow_mut() = None);
+        imp::AFTER_BUILD.with(|s| *s.borrow_mut() = None);
         imp::BEFORE_MAIN_CAS.with(|s| *s.borrow_mut() = None);
         imp::SYNCS.with(|c| c.set((0, 0, 0)));
         imp::SNAPSHOT_CLONE.with(|s| *s.borrow_mut() = None);

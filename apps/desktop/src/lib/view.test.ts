@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { DaemonStatus, DepsList, Proposal, StatusReply, Workspace } from './types';
+import type { AutoCloseReplyFields, DaemonStatus, DepsList, Proposal, StatusReply, Workspace } from './types';
 import {
   daemonView,
   filterRows,
@@ -81,6 +81,63 @@ describe('completion marks', () => {
       { name: 'active', label: 'Active', sessions: 1 },
       { name: 'done', label: 'Done', sessions: 1 },
     ]);
+  });
+
+  test('a mark the daemon wrote reads like any done mark, with its reasons as the note', () => {
+    const reply = marked();
+    const note = 'auto-close did not close this session: not_pushed:\nfront: base 3f9c… is not on origin/main';
+    reply.sessions.find((s) => s.status.manifest.id === 'S1')!.status.mark = {
+      state: 'done',
+      note,
+      by: { kind: 'daemon' },
+      at: '2026-11-04T12:00:00Z',
+    };
+    const row = sessionRows(reply).find((r) => r.id === 'S1')!;
+    expect(row.mark).toBe('done');
+    expect(row.note).toBe(note);
+  });
+
+  test('publish/push reply fields type-check closed and auto_close', () => {
+    const closed: AutoCloseReplyFields = {
+      closed: true,
+      auto_close: {
+        closed: true,
+        reasons: [],
+        rejudged: [],
+        sessions: {
+          's-aaaaaaaa': {
+            closed: true,
+            in_group: true,
+            reasons: [],
+            detail: {},
+            rm: { session: 's-aaaaaaaa', discarded: false },
+            mark: { written: false },
+          },
+        },
+      },
+    };
+    expect(closed.closed).toBe(true);
+    expect(closed.auto_close!.sessions['s-aaaaaaaa'].closed).toBe(true);
+
+    // Push with only opted-out candidates omits top-level closed (§6).
+    const judgedNone: AutoCloseReplyFields = {
+      auto_close: {
+        closed: false,
+        reasons: [],
+        rejudged: [],
+        sessions: {
+          's-bbbbbbbb': {
+            closed: false,
+            in_group: false,
+            reasons: ['disabled'],
+            detail: { repo: 'front' },
+            mark: { written: false },
+          },
+        },
+      },
+    };
+    expect(judgedNone.closed).toBeUndefined();
+    expect(judgedNone.auto_close!.closed).toBe(false);
   });
 
   test('state is OR within marks and AND with repo/text filters, including note words', () => {

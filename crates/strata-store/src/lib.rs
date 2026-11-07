@@ -21,6 +21,7 @@ pub use main_sync::{DepsAuto, DepsAutoState, RepoFetch, SyncReportRow};
 
 mod blob;
 mod checkpoints;
+mod close_guard;
 mod codec;
 mod deps;
 mod devports;
@@ -42,6 +43,7 @@ mod txn;
 #[cfg(feature = "test-seams")]
 mod vfs;
 
+pub use close_guard::{IfUnchanged, PendingKey};
 pub use devports::{DEV_PORT_BLOCK, DevPortLease, DevPortsPolicy, Probe, bind_probe};
 pub use move_activity::{ActivityScope, MoveActivity, MoveActivityPolicy, MoveBaseline};
 pub use rm_state::{PendingSource, RebasePending, ReplayPlan, RmAttempt, RmOutcome};

@@ -33,6 +33,9 @@ pub(crate) enum Point {
     /// deps-drift §2.4: the cold install built and sealed the set and R1's
     /// snapshot is removed, before round 2 (no publish lock held).
     AfterColdInstall,
+    /// Main-follow read the session as Active and holds the repo lock, right
+    /// before it writes a target (auto-close §3.2).
+    BeforeMainTarget,
 }
 
 /// Steps after `commit_tree` where a test can inject one failure
@@ -96,6 +99,9 @@ mod imp {
         /// Stop after the cold install, before round 2 (deps-drift §2.4),
         /// with no publish lock held.
         PauseAfterColdInstall,
+        /// Stop in main-follow, holding the repo lock, right before it writes
+        /// a session's target (auto-close §3.2).
+        PauseBeforeMainTarget,
     }
 
     #[derive(Default)]
@@ -167,6 +173,7 @@ mod imp {
             PublishFault::PauseAfterSiblingPlace => Point::AfterSiblingPlace,
             PublishFault::PauseBeforeColdInstall => Point::BeforeColdInstall,
             PublishFault::PauseAfterColdInstall => Point::AfterColdInstall,
+            PublishFault::PauseBeforeMainTarget => Point::BeforeMainTarget,
             PublishFault::PauseDuringPush => return Pause(Some(Inner::Git(git.pause_push_before_send()))),
             PublishFault::PauseBeforePushRecorded => return Pause(Some(Inner::Git(git.pause_push_before_record()))),
         };

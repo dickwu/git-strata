@@ -212,13 +212,26 @@ fn action_mismatch_is_not_confirmed() {
 #[test]
 fn daemon_never_returns_not_tty() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    for e in fs::read_dir(dir).unwrap() {
-        let p = e.unwrap().path();
+    for p in rs_files(&dir) {
         let src = fs::read_to_string(&p).unwrap();
         for bad in ["NotTty", "require_tty", "isatty"] {
             assert!(!src.contains(bad), "{bad} in {}", p.display());
         }
     }
+}
+
+/// Every `.rs` file under `dir`, subdirectories (e.g. `auto_close/`) included.
+fn rs_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for e in fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            out.extend(rs_files(&p));
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
+    }
+    out
 }
 
 #[test]

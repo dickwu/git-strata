@@ -61,7 +61,11 @@ fn ok(v: Value) -> Value {
 }
 
 fn new_session(socket: &Path) -> SessionId {
-    let d = ok(call(socket, "new", json!({ "ticket": null, "repos": ["tool"] })));
+    let d = ok(call(
+        socket,
+        "new",
+        json!({ "ticket": null, "repos": ["tool"] }),
+    ));
     serde_json::from_value(d["session"]["manifest"]["id"].clone()).unwrap()
 }
 
@@ -71,7 +75,12 @@ fn reason_json(r: CheckpointReason) -> Value {
 
 /// Run `script` with `/bin/sh` in `dir`: another process edits the files.
 fn external(dir: &Path, script: &str) {
-    let st = Command::new("/bin/sh").arg("-c").arg(script).current_dir(dir).status().unwrap();
+    let st = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .current_dir(dir)
+        .status()
+        .unwrap();
     assert!(st.success(), "{script}");
 }
 
@@ -84,12 +93,17 @@ fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
         for e in fs::read_dir(d).unwrap().flatten() {
             let p = e.path();
             let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
-            if [".git", "node_modules", ".cache"].contains(&rel.as_str()) || rel.ends_with(".DS_Store") {
+            if [".git", "node_modules", ".cache"].contains(&rel.as_str())
+                || rel.ends_with(".DS_Store")
+            {
                 continue;
             }
             let m = fs::symlink_metadata(&p).unwrap();
             if m.file_type().is_symlink() {
-                out.insert(rel, format!("-> {}", fs::read_link(&p).unwrap().display()).into_bytes());
+                out.insert(
+                    rel,
+                    format!("-> {}", fs::read_link(&p).unwrap().display()).into_bytes(),
+                );
             } else if m.is_dir() {
                 walk(root, &p, out);
             } else {
@@ -129,32 +143,62 @@ fn e2e_checkpoint_restore_matches_oracle() {
         let oracle = fx.sb.path("oracle");
         fx.sb.archive_into(&fx.main("tool"), "HEAD", &oracle);
         external(&oracle, EDIT);
-        assert_eq!(tree(&root), tree(&oracle), "the workspace starts as the oracle");
+        assert_eq!(
+            tree(&root),
+            tree(&oracle),
+            "the workspace starts as the oracle"
+        );
 
-        let cp = ok(call(&sock, "checkpoint", json!({
-            "session": id, "repo": "tool",
-            "reason": reason_json(CheckpointReason::ToolCall { id: "call-1".into() }),
-            "paths": [],
-        })));
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": id, "repo": "tool",
+                "reason": reason_json(CheckpointReason::ToolCall { id: "call-1".into() }),
+                "paths": [],
+            }),
+        ));
         assert_eq!(cp["recorded"], json!(true), "{cp:#}");
         let cp_id = cp["checkpoint"]["id"].clone();
 
         // Search sees the workspace as the overlay says.
-        let g = ok(call(&sock, "grep", json!({ "pattern": "needle", "session": id, "all": false, "ignore_case": false })));
+        let g = ok(call(
+            &sock,
+            "grep",
+            json!({ "pattern": "needle", "session": id, "all": false, "ignore_case": false }),
+        ));
         let hits = g["hits"].as_array().unwrap();
         assert_eq!(hits.len(), 1, "{g:#}");
         assert_eq!(hits[0]["path"], "docs/deep/x.md");
         assert_eq!(hits[0]["line"], 2);
-        let f = ok(call(&sock, "files", json!({ "session": id, "repo": "tool", "glob": "src/*.ts" })));
+        let f = ok(call(
+            &sock,
+            "files",
+            json!({ "session": id, "repo": "tool", "glob": "src/*.ts" }),
+        ));
         assert_eq!(f["paths"], json!(["src/index.ts", "src/new.ts"]), "{f:#}");
 
         external(&root, TRASH);
         assert_ne!(tree(&root), tree(&oracle));
-        let r = ok(call(&sock, "restore", json!({ "session": id, "repo": "tool", "checkpoint": cp_id, "paths": null })));
-        assert!(r["conflicts"].as_array().is_none_or(|c| c.is_empty()), "{r:#}");
-        assert_eq!(tree(&root), tree(&oracle), "restore matches the independent oracle");
+        let r = ok(call(
+            &sock,
+            "restore",
+            json!({ "session": id, "repo": "tool", "checkpoint": cp_id, "paths": null }),
+        ));
+        assert!(
+            r["conflicts"].as_array().is_none_or(|c| c.is_empty()),
+            "{r:#}"
+        );
+        assert_eq!(
+            tree(&root),
+            tree(&oracle),
+            "restore matches the independent oracle"
+        );
         // The deps dir is not the overlay's: the restore left it alone.
-        assert_eq!(fs::read(root.join("node_modules/x/extra.js")).unwrap(), b"ignored\n");
+        assert_eq!(
+            fs::read(root.join("node_modules/x/extra.js")).unwrap(),
+            b"ignored\n"
+        );
     });
     drop(d);
     core.close().unwrap();
@@ -172,8 +216,19 @@ impl OverlaySource for Cold<'_> {
         let rec = self.store.session(session).ok()??;
         let w = rec.manifest.repos.get(repo)?;
         let m = self.store.manifest(repo, &w.base.tree).ok()??;
-        let base = Base { dir: self.store.base_dir(&w.base), r#gen: w.base.clone(), manifest: std::sync::Arc::new(m) };
-        let wref = WorkspaceRef { session, repo, root: &w.path, config: &self.config.repos[repo], git: &self.gits[repo], store: self.store };
+        let base = Base {
+            dir: self.store.base_dir(&w.base),
+            r#gen: w.base.clone(),
+            manifest: std::sync::Arc::new(m),
+        };
+        let wref = WorkspaceRef {
+            session,
+            repo,
+            root: &w.path,
+            config: &self.config.repos[repo],
+            git: &self.gits[repo],
+            store: self.store,
+        };
         strata_overlay::reconcile_full(&wref, &base).ok()
     }
 
@@ -202,7 +257,10 @@ fn cli_readonly_commands_work_without_daemon() {
 
     // Write methods go through the daemon: none listening → Busy (cli.md D2).
     assert!(client::needs_daemon(Method::Publish) && client::needs_daemon(Method::Push));
-    for (m, p) in [("publish", json!({ "group": { "id": 0, "batches": [] } })), ("push", json!({ "repo": "tool" }))] {
+    for (m, p) in [
+        ("publish", json!({ "group": { "id": 0, "batches": [] } })),
+        ("push", json!({ "repo": "tool" })),
+    ] {
         let e = client::call(&sock, m, p).unwrap_err();
         assert_eq!(e.code, Code::Busy, "{m}: {e:?}");
         assert_eq!(reason(&e), Some("daemon_down"), "{m}");
@@ -214,8 +272,12 @@ fn cli_readonly_commands_work_without_daemon() {
     }
     let store = Store::open_read_only(&fx.config.paths.root).unwrap();
     let env = fx.sb.git_env();
-    let gits: BTreeMap<RepoName, Git> =
-        fx.config.repos.iter().map(|(n, c)| (n.clone(), Git::open_with_env(&c.path, &env).unwrap())).collect();
+    let gits: BTreeMap<RepoName, Git> = fx
+        .config
+        .repos
+        .iter()
+        .map(|(n, c)| (n.clone(), Git::open_with_env(&c.path, &env).unwrap()))
+        .collect();
     let locks = Locks::new(fx.config.repos.keys().cloned(), Duration::from_millis(100));
     let ienv = fx.sb.install_env();
     let sessions = Sessions::open(&fx.config, &gits, &store, &locks, &ienv, &DaemonBefore).unwrap();
@@ -225,12 +287,27 @@ fn cli_readonly_commands_work_without_daemon() {
     let status = json!({ "sessions": [serde_json::to_value(&st).unwrap()] });
     assert_eq!(status["sessions"][0]["manifest"]["id"], json!(id));
 
-    let cold = Cold { store: &store, config: &fx.config, gits: &gits };
+    let cold = Cold {
+        store: &store,
+        config: &fx.config,
+        gits: &gits,
+    };
     let search = Search::open(&fx.config, &sessions, &cold);
     let view = search.attach(&id, &repo_name("tool")).unwrap();
-    let hits = search.grep(Which::One(view.clone()), "needle", &GrepOpts { case_insensitive: false }).unwrap();
+    let hits = search
+        .grep(
+            Which::One(view.clone()),
+            "needle",
+            &GrepOpts {
+                case_insensitive: false,
+            },
+        )
+        .unwrap();
     let grep = json!({ "hits": hits.iter().map(|h| json!({ "path": h.path.as_str(), "line": h.line })).collect::<Vec<_>>() });
-    assert_eq!(grep["hits"], json!([{ "path": "docs/deep/x.md", "line": 2 }]));
+    assert_eq!(
+        grep["hits"],
+        json!([{ "path": "docs/deep/x.md", "line": 2 }])
+    );
     let files = search.files(view.clone(), "src/*.ts").unwrap();
     let files = json!(files.iter().map(|p| p.as_str()).collect::<Vec<_>>());
     assert_eq!(files, json!(["src/index.ts", "src/new.ts"]));
@@ -242,7 +319,10 @@ fn cli_readonly_commands_work_without_daemon() {
 fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
     let t0 = Instant::now();
     while !f() {
-        assert!(t0.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "timed out waiting for {what}"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -276,10 +356,19 @@ fn lost_rpc_reply_is_not_replayed() {
         assert_eq!(count(), 1, "the write ran once");
 
         // Another client only sees the current state; nothing is replayed.
-        let st = ok(call(&sock, "status", json!({ "cwd": null, "session": id.as_str(), "all": false })));
+        let st = ok(call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": id.as_str(), "all": false }),
+        ));
         let cps = st["sessions"][0]["checkpoints"].as_array().unwrap();
         assert_eq!(cps.len(), 1, "{st:#}");
-        assert_eq!(cps[0]["reason"], reason_json(CheckpointReason::Manual { message: "lost".into() }));
+        assert_eq!(
+            cps[0]["reason"],
+            reason_json(CheckpointReason::Manual {
+                message: "lost".into()
+            })
+        );
         assert!(st["sessions"][0]["in_flight"].is_null());
         assert_eq!(st["sessions"][0]["queued"], 0);
         let dst = ok(call(&sock, "daemon_status", json!({})));
@@ -300,10 +389,17 @@ fn status_has_chains_only_on_request_and_top_level_id() {
     serving(&d, || {
         let id = new_session(&sock);
         // Omitted or false: no `chains` key at all.
-        let st = ok(call(&sock, "status", json!({ "cwd": null, "session": null, "all": true })));
+        let st = ok(call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": null, "all": true }),
+        ));
         assert!(st.get("chains").is_none(), "{st:#}");
-        let st =
-            ok(call(&sock, "status", json!({ "cwd": null, "session": id.as_str(), "all": false, "chains": false })));
+        let st = ok(call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": id.as_str(), "all": false, "chains": false }),
+        ));
         assert!(st.get("chains").is_none(), "{st:#}");
         // Top-level id and ticket mirror the (deprecated) manifest fields.
         let s0 = &st["sessions"][0]["status"];
@@ -311,8 +407,11 @@ fn status_has_chains_only_on_request_and_top_level_id() {
         assert_eq!(s0["id"], json!(id.as_str()));
         assert!(s0.get("ticket").is_some_and(|t| *t == s0["manifest"].get("ticket").cloned().unwrap_or(Value::Null)));
         // Requested: one entry per configured repo, as before.
-        let st =
-            ok(call(&sock, "status", json!({ "cwd": null, "session": id.as_str(), "all": false, "chains": true })));
+        let st = ok(call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": id.as_str(), "all": false, "chains": true }),
+        ));
         let chains = st["chains"].as_object().unwrap_or_else(|| panic!("{st:#}"));
         assert_eq!(chains.len(), core.gits.len());
         assert!(chains.contains_key("tool"));
@@ -330,12 +429,19 @@ fn status_summary_is_store_only_and_selects_without_workspaces() {
     serving(&d, || {
         let a = new_session(&sock);
         let b = new_session(&sock);
-        let all = ok(call(&sock, "status", json!({ "cwd": null, "session": null, "all": true, "summary": true })));
+        let all = ok(call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": null, "all": true, "summary": true }),
+        ));
         assert_eq!(all.as_object().unwrap().len(), 1, "only sessions: {all:#}");
         let ss = all["sessions"].as_array().unwrap();
         let mut want = vec![a.as_str().to_string(), b.as_str().to_string()];
         want.sort();
-        let got: Vec<String> = ss.iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
+        let got: Vec<String> = ss
+            .iter()
+            .map(|s| s["id"].as_str().unwrap().to_string())
+            .collect();
         assert_eq!(got, want, "sorted by id");
         for s in ss {
             assert!(s.get("ticket").is_some_and(Value::is_null), "{s:#}");
@@ -380,7 +486,10 @@ fn status_summary_is_store_only_and_selects_without_workspaces() {
             "status",
             json!({ "cwd": null, "session": a.as_str(), "all": false, "summary": true, "workspaces": true }),
         ));
-        assert_eq!(br["sessions"][0]["workspaces"][0]["checkpoint"], cp["checkpoint"]["id"], "{br:#} {cp:#}");
+        assert_eq!(
+            br["sessions"][0]["workspaces"][0]["checkpoint"], cp["checkpoint"]["id"],
+            "{br:#} {cp:#}"
+        );
         // b's workspace directory gone: --all and --session still answer.
         let away = wb.with_file_name("tool.away");
         fs::rename(&wb, &away).unwrap();
@@ -395,7 +504,10 @@ fn status_summary_is_store_only_and_selects_without_workspaces() {
             "status",
             json!({ "cwd": null, "session": b.as_str(), "all": false, "summary": true, "workspaces": true }),
         ));
-        assert_eq!(one["sessions"][0]["workspaces"][0]["health_stored"], "Ok", "store value, not Missing: {one:#}");
+        assert_eq!(
+            one["sessions"][0]["workspaces"][0]["health_stored"], "Ok",
+            "store value, not Missing: {one:#}"
+        );
         // cwd: a subdirectory of a's workspace, also through a root alias.
         let sub = wa.join("cwd-sub");
         fs::create_dir_all(&sub).unwrap();
@@ -406,18 +518,35 @@ fn status_summary_is_store_only_and_selects_without_workspaces() {
             cwds.push(Path::new("/private").join(sub.strip_prefix("/").unwrap()));
         }
         for c in &cwds {
-            let v = ok(call(&sock, "status", json!({ "cwd": c, "session": null, "all": false, "summary": true })));
-            assert_eq!(v["sessions"][0]["id"], json!(a.as_str()), "{} {v:#}", c.display());
+            let v = ok(call(
+                &sock,
+                "status",
+                json!({ "cwd": c, "session": null, "all": false, "summary": true }),
+            ));
+            assert_eq!(
+                v["sessions"][0]["id"],
+                json!(a.as_str()),
+                "{} {v:#}",
+                c.display()
+            );
         }
         // `tool-extra` beside `tool` is in no workspace.
         let extra = wa.with_file_name("tool-extra");
         fs::create_dir_all(&extra).unwrap();
-        let e = call(&sock, "status", json!({ "cwd": extra, "session": null, "all": false, "summary": true }));
+        let e = call(
+            &sock,
+            "status",
+            json!({ "cwd": extra, "session": null, "all": false, "summary": true }),
+        );
         assert_eq!(e["error"]["code"], "NoSuchSession", "{e:#}");
         fs::remove_dir(&extra).unwrap();
         fs::remove_dir(&sub).unwrap();
         // Bad combinations.
-        let e = call(&sock, "status", json!({ "cwd": null, "session": null, "all": true, "workspaces": true }));
+        let e = call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": null, "all": true, "workspaces": true }),
+        );
         assert_eq!(e["error"]["code"], "InvalidInput", "{e:#}");
         let e = call(
             &sock,
@@ -425,7 +554,11 @@ fn status_summary_is_store_only_and_selects_without_workspaces() {
             json!({ "cwd": null, "session": null, "all": true, "summary": true, "chains": true }),
         );
         assert_eq!(e["error"]["code"], "InvalidInput", "{e:#}");
-        let e = call(&sock, "status", json!({ "cwd": null, "session": "no-such", "all": false, "summary": true }));
+        let e = call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": "no-such", "all": false, "summary": true }),
+        );
         assert_ne!(e["ok"], json!(true), "{e:#}");
         fs::rename(&away, &wb).unwrap();
     });
@@ -434,11 +567,20 @@ fn status_summary_is_store_only_and_selects_without_workspaces() {
 }
 
 fn push_calls(core: &Core) -> usize {
-    core.gits.values().flat_map(|g| g.take_git_calls()).filter(|c| c.args.iter().any(|a| a == "push" || a == "send-pack")).count()
+    core.gits
+        .values()
+        .flat_map(|g| g.take_git_calls())
+        .filter(|c| c.args.iter().any(|a| a == "push" || a == "send-pack"))
+        .count()
 }
 
 fn unknown_ids(v: &Value) -> Vec<u64> {
-    v["warnings"].as_array().unwrap().iter().filter_map(|w| w.get("UnknownPublish").map(|u| u["id"].as_u64().unwrap())).collect()
+    v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w.get("UnknownPublish").map(|u| u["id"].as_u64().unwrap()))
+        .collect()
 }
 
 fn origin_dir(fx: &Dfx) -> PathBuf {
@@ -446,7 +588,8 @@ fn origin_dir(fx: &Dfx) -> PathBuf {
 }
 
 fn origin_main(fx: &Dfx) -> String {
-    fx.sb.git(&origin_dir(fx), &["rev-parse", "refs/heads/main"])
+    fx.sb
+        .git(&origin_dir(fx), &["rev-parse", "refs/heads/main"])
 }
 
 #[test]
@@ -466,16 +609,23 @@ fn failure_keeps_scene_no_replay() {
     let chain = strata_publish::chain_ref("main");
     let (id, commit, unknown) = {
         let core = fx.prepare().unwrap();
-        strata_publish::seams::set_push_timeout(&core.gits[&repo_name("tool")], Some(Duration::from_millis(300)));
+        strata_publish::seams::set_push_timeout(
+            &core.gits[&repo_name("tool")],
+            Some(Duration::from_millis(300)),
+        );
         let d = Daemon::start(&core).unwrap();
         let r = serving(&d, || {
             let id = new_session(&sock);
             let root = ws(&core, &id, "tool");
             external(&root, "printf 'export const a = 4\\n' > src/index.ts");
-            let cp = ok(call(&sock, "checkpoint", json!({
-                "session": id, "repo": "tool",
-                "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
-            })));
+            let cp = ok(call(
+                &sock,
+                "checkpoint",
+                json!({
+                    "session": id, "repo": "tool",
+                    "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+                }),
+            ));
             let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
             let g = group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]);
             push_calls(&core);
@@ -487,18 +637,28 @@ fn failure_keeps_scene_no_replay() {
             assert_eq!(push_calls(&core), 1, "pushed once");
 
             // The scene stays: the chain commit, the row, the workspace.
-            let commit = core.gits[&repo_name("tool")].read_ref(&chain).unwrap().expect("chain commit");
+            let commit = core.gits[&repo_name("tool")]
+                .read_ref(&chain)
+                .unwrap()
+                .expect("chain commit");
             assert_eq!(origin_main(&fx), origin);
             let rows = core.store.open_publishes().unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].phase, PublishPhase::Unknown);
             let unknown = rows[0].group.id;
-            assert_eq!(fs::read(root.join("src/index.ts")).unwrap(), b"export const a = 4\n");
+            assert_eq!(
+                fs::read(root.join("src/index.ts")).unwrap(),
+                b"export const a = 4\n"
+            );
             let dst = ok(call(&sock, "daemon_status", json!({})));
             assert_eq!(unknown_ids(&dst), vec![unknown], "{dst:#}");
 
             // Other requests do not replay it; the same publish is refused.
-            ok(call(&sock, "status", json!({ "cwd": null, "session": null, "all": true })));
+            ok(call(
+                &sock,
+                "status",
+                json!({ "cwd": null, "session": null, "all": true }),
+            ));
             let again = call(&sock, "publish", json!({ "group": g }));
             assert_eq!(again["error"]["code"], "Busy", "{again:#}");
             assert_eq!(again["error"]["detail"]["reason"], "publish_unknown");
@@ -516,12 +676,18 @@ fn failure_keeps_scene_no_replay() {
     let d = Daemon::start(&core).unwrap();
     assert_eq!(unknown_ids(&d.daemon_status(false).unwrap()), vec![unknown]);
     assert_eq!(push_calls(&core), 0);
-    assert_eq!(core.gits[&repo_name("tool")].read_ref(&chain).unwrap(), Some(commit));
+    assert_eq!(
+        core.gits[&repo_name("tool")].read_ref(&chain).unwrap(),
+        Some(commit)
+    );
     assert_eq!(origin_main(&fx), origin);
     assert_eq!(core.store.session(&id).unwrap().unwrap().manifest.id, id);
     drop(d);
     core.close().unwrap();
-    strata_publish::seams::set_push_timeout(&strata_gitio::Git::open(&fx.main("tool")).unwrap(), None);
+    strata_publish::seams::set_push_timeout(
+        &strata_gitio::Git::open(&fx.main("tool")).unwrap(),
+        None,
+    );
     std::thread::sleep(Duration::from_secs(3).saturating_sub(t0.elapsed()));
 }
 
@@ -533,7 +699,12 @@ fn failure_keeps_scene_no_replay() {
 fn confirmed_publish_is_bound_to_the_shown_chain_top() {
     use strata_confirm::seams::Verdict;
     let mut fx = Dfx::new();
-    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.confirm = true;
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .publish
+        .confirm = true;
     fx.write_config();
     let (c, log, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass(), Verdict::pass()]);
     let core = fx.prepare_with(c).unwrap();
@@ -545,13 +716,21 @@ fn confirmed_publish_is_bound_to_the_shown_chain_top() {
         let root = ws(&core, &id, "tool");
         let publish = |text: &str, shown: Value| {
             external(&root, &format!("printf '{text}\\n' > src/index.ts"));
-            let cp = ok(call(&sock, "checkpoint", json!({
-                "session": id, "repo": "tool",
-                "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
-            })));
+            let cp = ok(call(
+                &sock,
+                "checkpoint",
+                json!({
+                    "session": id, "repo": "tool",
+                    "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+                }),
+            ));
             let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
             let g = group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]);
-            call(&sock, "publish", json!({ "group": g, "shown": { "tool": shown } }))
+            call(
+                &sock,
+                "publish",
+                json!({ "group": g, "shown": { "tool": shown } }),
+            )
         };
         let git = &core.gits[&repo_name("tool")];
         assert_eq!(git.read_ref(&chain).unwrap(), None);
@@ -566,7 +745,11 @@ fn confirmed_publish_is_bound_to_the_shown_chain_top() {
         assert_eq!(r["error"]["code"], "NotConfirmed", "{r:#}");
         assert_eq!(r["error"]["detail"]["reason"], "chain_moved", "{r:#}");
         assert_eq!(r["error"]["detail"]["now"], json!(x), "{r:#}");
-        assert_eq!(git.read_ref(&chain).unwrap(), Some(x.clone()), "no new commit");
+        assert_eq!(
+            git.read_ref(&chain).unwrap(),
+            Some(x.clone()),
+            "no new commit"
+        );
         assert_eq!(push_calls(&core), 0, "nothing pushed");
 
         // The plan as it is now: published.
@@ -589,7 +772,12 @@ fn confirmed_publish_is_bound_to_the_shown_chain_top() {
 fn publish_refuses_a_guarded_repo_outside_the_plan_before_prompting() {
     use strata_confirm::seams::Verdict;
     let mut fx = Dfx::new();
-    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.confirm = true;
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .publish
+        .confirm = true;
     fx.write_config();
     let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
     let core = fx.prepare_with(c).unwrap();
@@ -600,26 +788,41 @@ fn publish_refuses_a_guarded_repo_outside_the_plan_before_prompting() {
         let id = new_session(&sock);
         let root = ws(&core, &id, "tool");
         external(&root, "printf 'export const a = 7\\n' > src/index.ts");
-        let cp = ok(call(&sock, "checkpoint", json!({
-            "session": id, "repo": "tool",
-            "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
-        })));
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": id, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+            }),
+        ));
         let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
         let g = group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]);
         let git = &core.gits[&repo_name("tool")];
         let origin = origin_main(&fx);
 
-        let r = call(&sock, "publish", json!({ "group": g, "shown": {}, "plan": [] }));
+        let r = call(
+            &sock,
+            "publish",
+            json!({ "group": g, "shown": {}, "plan": [] }),
+        );
         assert_eq!(r["error"]["code"], "NotConfirmed", "{r:#}");
         assert_eq!(r["error"]["detail"]["reason"], "plan_changed", "{r:#}");
         assert_eq!(r["error"]["detail"]["repo"], "tool", "{r:#}");
         assert_eq!(log.shown().len(), 0, "prompted outside the plan");
-        assert!(core.store.publishes().unwrap().is_empty(), "a publish row was written");
+        assert!(
+            core.store.publishes().unwrap().is_empty(),
+            "a publish row was written"
+        );
         assert_eq!(git.read_ref(&chain).unwrap(), None, "a commit was written");
         assert_eq!(origin_main(&fx), origin);
         assert_eq!(push_calls(&core), 0);
 
-        let r = ok(call(&sock, "publish", json!({ "group": g, "shown": { "tool": null }, "plan": ["tool"] })));
+        let r = ok(call(
+            &sock,
+            "publish",
+            json!({ "group": g, "shown": { "tool": null }, "plan": ["tool"] }),
+        ));
         let x = git.read_ref(&chain).unwrap().expect("chain commit");
         assert_eq!(r["published"][0]["commit"], json!(x));
         assert_eq!(log.shown().len(), 1);
@@ -642,25 +845,51 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
     let d = Daemon::start(&core).unwrap();
     let sock = fx.socket();
     let chain = strata_publish::chain_ref("main");
-    let origin = |r: &str| fx.sb.git(&fx.sb.path(&format!("{r}-origin.git")), &["rev-parse", "refs/heads/main"]);
+    let origin = |r: &str| {
+        fx.sb.git(
+            &fx.sb.path(&format!("{r}-origin.git")),
+            &["rev-parse", "refs/heads/main"],
+        )
+    };
     serving(&d, || {
-        let s = ok(call(&sock, "new", json!({ "ticket": null, "repos": ["front", "tool"] })));
+        let s = ok(call(
+            &sock,
+            "new",
+            json!({ "ticket": null, "repos": ["front", "tool"] }),
+        ));
         let id: SessionId = serde_json::from_value(s["session"]["manifest"]["id"].clone()).unwrap();
-        external(&ws(&core, &id, "front"), "printf 'export const f = 1\\n' > src/index.ts");
-        external(&ws(&core, &id, "tool"), "printf 'export const t = 1\\n' > src/index.ts && printf 'export const o = 1\\n' > src/other.ts");
+        external(
+            &ws(&core, &id, "front"),
+            "printf 'export const f = 1\\n' > src/index.ts",
+        );
+        external(
+            &ws(&core, &id, "tool"),
+            "printf 'export const t = 1\\n' > src/index.ts && printf 'export const o = 1\\n' > src/other.ts",
+        );
         // Upstream edits the same line of tool's file.
         let main = fx.main("tool");
-        fx.sb.commit(&main, &[("src/index.ts", b"export const t = 9\n")], "upstream");
+        fx.sb.commit(
+            &main,
+            &[("src/index.ts", b"export const t = 9\n")],
+            "upstream",
+        );
         fx.sb.git(&main, &["push", "-q", "origin", "main"]);
         let upstream = origin("tool");
 
         // What the cli does: a BeforePublish checkpoint per (session, repo), then publish.
         let run = || {
             let mut batches = Vec::new();
-            for (repo, paths) in [("front", vec!["src/index.ts"]), ("tool", vec!["src/index.ts", "src/other.ts"])] {
-                let cp = ok(call(&sock, "checkpoint", json!({
-                    "session": id, "repo": repo, "reason": { "kind": "BeforePublish" }, "paths": paths,
-                })));
+            for (repo, paths) in [
+                ("front", vec!["src/index.ts"]),
+                ("tool", vec!["src/index.ts", "src/other.ts"]),
+            ] {
+                let cp = ok(call(
+                    &sock,
+                    "checkpoint",
+                    json!({
+                        "session": id, "repo": repo, "reason": { "kind": "BeforePublish" }, "paths": paths,
+                    }),
+                ));
                 batches.push(json!({ "session": id, "repo": repo, "checkpoint": cp["checkpoint"]["id"], "paths": paths }));
             }
             let request = json!({
@@ -686,7 +915,10 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
         let det = &r["error"]["detail"];
         assert_eq!(det["repo"], "tool", "{r:#}");
         assert_eq!(det["published_before"][0]["repo"], "front", "{r:#}");
-        let landed = core.gits[&repo_name("front")].read_ref(&chain).unwrap().expect("front committed");
+        let landed = core.gits[&repo_name("front")]
+            .read_ref(&chain)
+            .unwrap()
+            .expect("front committed");
         assert_eq!(det["published_before"][0]["commit"], json!(landed), "{r:#}");
         assert_eq!(origin("front"), landed.as_str(), "front pushed");
         assert_eq!(
@@ -754,10 +986,17 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
             .unwrap();
 
         // The agent takes upstream's line and re-runs the same publish.
-        external(&ws(&core, &id, "tool"), "printf 'export const t = 9\\n' > src/index.ts");
+        external(
+            &ws(&core, &id, "tool"),
+            "printf 'export const t = 9\\n' > src/index.ts",
+        );
         push_calls(&core);
         let r = ok(run());
-        assert_eq!(core.gits[&repo_name("front")].read_ref(&chain).unwrap(), Some(landed.clone()), "no second front commit");
+        assert_eq!(
+            core.gits[&repo_name("front")].read_ref(&chain).unwrap(),
+            Some(landed.clone()),
+            "no second front commit"
+        );
         assert_eq!(origin("front"), landed.as_str());
         assert_eq!(r["already_published"][0]["repo"], "front", "{r:#}");
         assert_eq!(r["published"].as_array().unwrap().len(), 1, "{r:#}");
@@ -796,7 +1035,12 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
 fn publish_confirmation_cancelled_after_a_repo_landed_keeps_it_in_the_envelope() {
     use strata_confirm::seams::Verdict;
     let mut fx = Dfx::with(&["front", "tool"]);
-    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.confirm = true;
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .publish
+        .confirm = true;
     fx.write_config();
     let (c, log, _) = fx.confirmer(vec![Verdict::la(-2), Verdict::pass()]);
     let core = fx.prepare_with(c).unwrap();
@@ -804,19 +1048,34 @@ fn publish_confirmation_cancelled_after_a_repo_landed_keeps_it_in_the_envelope()
     let sock = fx.socket();
     let chain = strata_publish::chain_ref("main");
     serving(&d, || {
-        let s = ok(call(&sock, "new", json!({ "ticket": null, "repos": ["front", "tool"] })));
+        let s = ok(call(
+            &sock,
+            "new",
+            json!({ "ticket": null, "repos": ["front", "tool"] }),
+        ));
         let id: SessionId = serde_json::from_value(s["session"]["manifest"]["id"].clone()).unwrap();
-        external(&ws(&core, &id, "front"), "printf 'export const f = 1\\n' > src/index.ts");
-        external(&ws(&core, &id, "tool"), "printf 'export const t = 1\\n' > src/index.ts");
+        external(
+            &ws(&core, &id, "front"),
+            "printf 'export const f = 1\\n' > src/index.ts",
+        );
+        external(
+            &ws(&core, &id, "tool"),
+            "printf 'export const t = 1\\n' > src/index.ts",
+        );
         let run_plan = |shown: Value, plan: Option<Value>| {
             let mut batches = Vec::new();
             for repo in ["front", "tool"] {
-                let cp = ok(call(&sock, "checkpoint", json!({
-                    "session": id, "repo": repo, "reason": { "kind": "BeforePublish" }, "paths": ["src/index.ts"],
-                })));
+                let cp = ok(call(
+                    &sock,
+                    "checkpoint",
+                    json!({
+                        "session": id, "repo": repo, "reason": { "kind": "BeforePublish" }, "paths": ["src/index.ts"],
+                    }),
+                ));
                 batches.push(json!({ "session": id, "repo": repo, "checkpoint": cp["checkpoint"]["id"], "paths": ["src/index.ts"] }));
             }
-            let mut req = json!({ "group": { "id": 0, "batches": batches }, "shown": { "tool": shown } });
+            let mut req =
+                json!({ "group": { "id": 0, "batches": batches }, "shown": { "tool": shown } });
             if let Some(p) = plan {
                 req["plan"] = p;
             }
@@ -826,11 +1085,18 @@ fn publish_confirmation_cancelled_after_a_repo_landed_keeps_it_in_the_envelope()
         let r = run(Value::Null);
         assert!(r["error"].is_object(), "{r:#}");
         let det = &r["error"]["detail"];
-        let landed = core.gits[&repo_name("front")].read_ref(&chain).unwrap().expect("front committed");
+        let landed = core.gits[&repo_name("front")]
+            .read_ref(&chain)
+            .unwrap()
+            .expect("front committed");
         assert_eq!(det["repo"], "tool", "{r:#}");
         assert_eq!(det["published_before"][0]["repo"], "front", "{r:#}");
         assert_eq!(det["published_before"][0]["commit"], json!(landed), "{r:#}");
-        assert_eq!(core.gits[&repo_name("tool")].read_ref(&chain).unwrap(), None, "tool not committed");
+        assert_eq!(
+            core.gits[&repo_name("tool")].read_ref(&chain).unwrap(),
+            None,
+            "tool not committed"
+        );
 
         // Review-4 F2: the plan left tool out → plan_changed, front still reported.
         let shown_before = log.shown().len();
@@ -840,10 +1106,21 @@ fn publish_confirmation_cancelled_after_a_repo_landed_keeps_it_in_the_envelope()
         assert_eq!(det["reason"], "plan_changed", "{r:#}");
         assert_eq!(det["repo"], "tool", "{r:#}");
         assert_eq!(det["already_published"][0]["repo"], "front", "{r:#}");
-        assert_eq!(det["already_published"][0]["commit"], json!(landed), "{r:#}");
-        assert!(det.get("published_before").is_none(), "nothing landed in this call: {r:#}");
+        assert_eq!(
+            det["already_published"][0]["commit"],
+            json!(landed),
+            "{r:#}"
+        );
+        assert!(
+            det.get("published_before").is_none(),
+            "nothing landed in this call: {r:#}"
+        );
         assert_eq!(log.shown().len(), shown_before, "no prompt");
-        assert_eq!(core.gits[&repo_name("tool")].read_ref(&chain).unwrap(), None, "tool not committed");
+        assert_eq!(
+            core.gits[&repo_name("tool")].read_ref(&chain).unwrap(),
+            None,
+            "tool not committed"
+        );
 
         let r = ok(run(Value::Null));
         assert_eq!(r["already_published"][0]["repo"], "front", "{r:#}");
@@ -861,7 +1138,12 @@ fn publish_confirmation_cancelled_after_a_repo_landed_keeps_it_in_the_envelope()
 fn publish_plan_names_the_remaining_repos_and_writes_nothing() {
     use strata_confirm::seams::Verdict;
     let mut fx = Dfx::with(&["front", "tool"]);
-    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.confirm = true;
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .publish
+        .confirm = true;
     fx.write_config();
     let (c, log, _) = fx.confirmer(vec![Verdict::la(-2)]);
     let core = fx.prepare_with(c).unwrap();
@@ -869,16 +1151,30 @@ fn publish_plan_names_the_remaining_repos_and_writes_nothing() {
     let sock = fx.socket();
     let chain = strata_publish::chain_ref("main");
     serving(&d, || {
-        let s = ok(call(&sock, "new", json!({ "ticket": null, "repos": ["front", "tool"] })));
+        let s = ok(call(
+            &sock,
+            "new",
+            json!({ "ticket": null, "repos": ["front", "tool"] }),
+        ));
         let id: SessionId = serde_json::from_value(s["session"]["manifest"]["id"].clone()).unwrap();
-        external(&ws(&core, &id, "front"), "printf 'export const f = 1\\n' > src/index.ts");
-        external(&ws(&core, &id, "tool"), "printf 'export const t = 1\\n' > src/index.ts");
+        external(
+            &ws(&core, &id, "front"),
+            "printf 'export const f = 1\\n' > src/index.ts",
+        );
+        external(
+            &ws(&core, &id, "tool"),
+            "printf 'export const t = 1\\n' > src/index.ts",
+        );
         let group = || {
             let mut batches = Vec::new();
             for repo in ["front", "tool"] {
-                let cp = ok(call(&sock, "checkpoint", json!({
-                    "session": id, "repo": repo, "reason": { "kind": "BeforePublish" }, "paths": ["src/index.ts"],
-                })));
+                let cp = ok(call(
+                    &sock,
+                    "checkpoint",
+                    json!({
+                        "session": id, "repo": repo, "reason": { "kind": "BeforePublish" }, "paths": ["src/index.ts"],
+                    }),
+                ));
                 batches.push(json!({ "session": id, "repo": repo, "checkpoint": cp["checkpoint"]["id"], "paths": ["src/index.ts"] }));
             }
             json!({ "id": 0, "batches": batches })
@@ -890,24 +1186,53 @@ fn publish_plan_names_the_remaining_repos_and_writes_nothing() {
             assert_eq!(plan["subjects"][repo]["message_source"], "legacy");
             assert!(plan["subjects"][repo]["subject"].is_string());
         }
-        assert!(core.store.publishes().unwrap().is_empty(), "the plan wrote a publish row");
+        assert!(
+            core.store.publishes().unwrap().is_empty(),
+            "the plan wrote a publish row"
+        );
 
         // front lands, tool's confirmation is cancelled.
-        let r = call(&sock, "publish", json!({ "group": group(), "shown": { "tool": null } }));
+        let r = call(
+            &sock,
+            "publish",
+            json!({ "group": group(), "shown": { "tool": null } }),
+        );
         assert_eq!(r["error"]["detail"]["repo"], "tool", "{r:#}");
-        let landed = core.gits[&repo_name("front")].read_ref(&chain).unwrap().expect("front committed");
+        let landed = core.gits[&repo_name("front")]
+            .read_ref(&chain)
+            .unwrap()
+            .expect("front committed");
         let rows = core.store.publishes().unwrap().len();
         let prompts = log.shown().len();
 
         let plan = ok(call(&sock, "publish_plan", json!({ "group": group() })));
         assert_eq!(plan["repos"], json!(["tool"]), "{plan:#}");
         assert_eq!(plan["already_published"][0]["repo"], "front", "{plan:#}");
-        assert_eq!(plan["already_published"][0]["commit"], json!(landed), "{plan:#}");
-        assert_eq!(core.store.publishes().unwrap().len(), rows, "the plan wrote a publish row");
+        assert_eq!(
+            plan["already_published"][0]["commit"],
+            json!(landed),
+            "{plan:#}"
+        );
+        assert_eq!(
+            core.store.publishes().unwrap().len(),
+            rows,
+            "the plan wrote a publish row"
+        );
         assert_eq!(log.shown().len(), prompts, "the plan prompted");
-        assert_eq!(core.gits[&repo_name("tool")].read_ref(&chain).unwrap(), None, "tool committed");
-        assert_eq!(core.gits[&repo_name("front")].read_ref(&chain).unwrap(), Some(landed));
-        let e = call(&sock, "publish_plan", json!({ "group": { "id": 0, "batches": [] } }));
+        assert_eq!(
+            core.gits[&repo_name("tool")].read_ref(&chain).unwrap(),
+            None,
+            "tool committed"
+        );
+        assert_eq!(
+            core.gits[&repo_name("front")].read_ref(&chain).unwrap(),
+            Some(landed)
+        );
+        let e = call(
+            &sock,
+            "publish_plan",
+            json!({ "group": { "id": 0, "batches": [] } }),
+        );
         assert_eq!(e["error"]["code"], "InvalidInput", "{e:#}");
     });
     drop(d);
@@ -934,17 +1259,31 @@ fn publish_plan_keeps_a_waiting_sessions_landed_guarded_repo() {
     let sock = fx.socket();
     serving(&d, || {
         let id = new_session(&sock);
-        external(&ws(&core, &id, "tool"), "sed -i '' 's/1.0.87/1.0.88/; s/\\^1.0.0/^1.0.1/' package.json");
+        external(
+            &ws(&core, &id, "tool"),
+            "sed -i '' 's/1.0.87/1.0.88/; s/\\^1.0.0/^1.0.1/' package.json",
+        );
         let group = || {
-            let cp = ok(call(&sock, "checkpoint", json!({
-                "session": id, "repo": "tool", "reason": { "kind": "BeforePublish" }, "paths": ["package.json"],
-            })));
+            let cp = ok(call(
+                &sock,
+                "checkpoint",
+                json!({
+                    "session": id, "repo": "tool", "reason": { "kind": "BeforePublish" }, "paths": ["package.json"],
+                }),
+            ));
             json!({ "id": 0, "batches": [
                 { "session": id, "repo": "tool", "checkpoint": cp["checkpoint"]["id"], "paths": ["package.json"] },
             ] })
         };
-        let r = ok(call(&sock, "publish", json!({ "group": group(), "shown": { "tool": null } })));
-        assert_eq!(r["published"][0]["rebases"][0]["report"]["kind"], "Waiting", "{r:#}");
+        let r = ok(call(
+            &sock,
+            "publish",
+            json!({ "group": group(), "shown": { "tool": null } }),
+        ));
+        assert_eq!(
+            r["published"][0]["rebases"][0]["report"]["kind"], "Waiting",
+            "{r:#}"
+        );
         let plan = ok(call(&sock, "publish_plan", json!({ "group": group() })));
         assert_eq!(plan["repos"], json!(["tool"]), "{plan:#}");
         assert_eq!(plan["already_published"], json!([]));
@@ -957,12 +1296,20 @@ fn publish_plan_keeps_a_waiting_sessions_landed_guarded_repo() {
 /// Review-2 N1: re-run filtering is per selector and by content. Each
 /// call is what the cli does (a BeforePublish checkpoint, then publish).
 fn publish_selectors(sock: &Path, id: &SessionId, repo: &str, paths: &[&str]) -> Value {
-    let cp = ok(call(sock, "checkpoint", json!({
-        "session": id, "repo": repo, "reason": { "kind": "BeforePublish" }, "paths": paths,
-    })));
-    call(sock, "publish", json!({ "group": { "id": 0, "batches": [
+    let cp = ok(call(
+        sock,
+        "checkpoint",
+        json!({
+            "session": id, "repo": repo, "reason": { "kind": "BeforePublish" }, "paths": paths,
+        }),
+    ));
+    call(
+        sock,
+        "publish",
+        json!({ "group": { "id": 0, "batches": [
         { "session": id, "repo": repo, "checkpoint": cp["checkpoint"]["id"], "paths": paths },
-    ] } }))
+    ] } }),
+    )
 }
 
 /// Review-2 N3: a failure after a definite push (the post-publish rebase,
@@ -980,16 +1327,25 @@ fn publish_failure_after_a_definite_push_reports_the_pushed_commit() {
         let git = core.gits[&repo_name("tool")].clone();
         serving(&d, || {
             let id = new_session(&sock);
-            external(&ws(&core, &id, "tool"), &format!("printf 'export const a = {n}\\n' > src/index.ts"));
+            external(
+                &ws(&core, &id, "tool"),
+                &format!("printf 'export const a = {n}\\n' > src/index.ts"),
+            );
             fail_once(&git, at);
             let r = publish_selectors(&sock, &id, "tool", &["src/index.ts"]);
             assert_eq!(r["error"]["code"], "Unknown", "{at:?}: {r:#}");
             let l = &r["error"]["detail"]["landed"];
-            let tip = git.read_ref(&strata_publish::chain_ref("main")).unwrap().unwrap();
+            let tip = git
+                .read_ref(&strata_publish::chain_ref("main"))
+                .unwrap()
+                .unwrap();
             assert_eq!(l["commit"], json!(tip), "{at:?}: {r:#}");
             assert_eq!(l["push"]["kind"], "Pushed", "{at:?}: {r:#}");
             assert!(l["checks_ran"].is_u64(), "{at:?}: {r:#}");
-            assert!(l["message_source"].is_string(), "chosen source survives a post-commit failure: {r:#}");
+            assert!(
+                l["message_source"].is_string(),
+                "chosen source survives a post-commit failure: {r:#}"
+            );
         });
     }
 }
@@ -1014,21 +1370,42 @@ fn publish_rerun_of_a_directory_selector_commits_new_edits() {
         assert_eq!(r["published"].as_array().unwrap().len(), 1, "{r:#}");
         let first = git.read_ref(&chain).unwrap().expect("first commit");
 
-        external(&root, "printf 'export const a = 2\\n' > src/index.ts && printf 'export const n = 1\\n' > src/new.ts");
+        external(
+            &root,
+            "printf 'export const a = 2\\n' > src/index.ts && printf 'export const n = 1\\n' > src/new.ts",
+        );
         let r = ok(publish_selectors(&sock, &id, "tool", &["src"]));
-        assert_eq!(r["published"].as_array().unwrap().len(), 1, "the new edits publish: {r:#}");
+        assert_eq!(
+            r["published"].as_array().unwrap().len(),
+            1,
+            "the new edits publish: {r:#}"
+        );
         assert_eq!(r["already_published"], json!([]), "{r:#}");
         let second = git.read_ref(&chain).unwrap().expect("second commit");
         assert_ne!(second, first, "a second commit");
         let tree = git.tree_of(&second).unwrap();
-        let show = |p: &str| git.blob_bytes(&tree, &RepoPath::try_from(p.to_string()).unwrap()).unwrap().map(|b| b.bytes);
-        assert_eq!(show("src/index.ts").as_deref(), Some(&b"export const a = 2\n"[..]));
-        assert_eq!(show("src/new.ts").as_deref(), Some(&b"export const n = 1\n"[..]));
+        let show = |p: &str| {
+            git.blob_bytes(&tree, &RepoPath::try_from(p.to_string()).unwrap())
+                .unwrap()
+                .map(|b| b.bytes)
+        };
+        assert_eq!(
+            show("src/index.ts").as_deref(),
+            Some(&b"export const a = 2\n"[..])
+        );
+        assert_eq!(
+            show("src/new.ts").as_deref(),
+            Some(&b"export const n = 1\n"[..])
+        );
 
         let r = ok(publish_selectors(&sock, &id, "tool", &["src"]));
         assert_eq!(r["published"], json!([]), "{r:#}");
         assert_eq!(r["already_published"][0]["commit"], json!(second), "{r:#}");
-        assert_eq!(git.read_ref(&chain).unwrap(), Some(second), "no third commit");
+        assert_eq!(
+            git.read_ref(&chain).unwrap(),
+            Some(second),
+            "no third commit"
+        );
     });
     drop(d);
     core.close().unwrap();
@@ -1051,16 +1428,40 @@ fn publish_rerun_tolerates_a_pruned_landed_commit() {
         external(&root, "printf 'export const a = 7\\n' > src/index.ts");
         let r = ok(publish_selectors(&sock, &id, "tool", &["src/index.ts"]));
         assert_eq!(r["published"].as_array().unwrap().len(), 1, "{r:#}");
-        let done = core.store.publishes().unwrap().into_iter().rev().find(|p| p.phase == PublishPhase::Done).expect("a done row");
+        let done = core
+            .store
+            .publishes()
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|p| p.phase == PublishPhase::Done)
+            .expect("a done row");
         let mut group = done.group.clone();
         group.id = 0;
-        let fake = core.store.record_publish(&group, std::time::SystemTime::now()).unwrap();
+        let fake = core
+            .store
+            .record_publish(&group, std::time::SystemTime::now())
+            .unwrap();
         let gone = json!({ "commit": "0123456789abcdef0123456789abcdef01234567", "paths": ["src/index.ts"], "push": null });
-        assert!(core.store.set_publish_phase(fake, PublishPhase::Running, PublishPhase::Done, Some(&gone), std::time::SystemTime::now()).unwrap());
+        assert!(
+            core.store
+                .set_publish_phase(
+                    fake,
+                    PublishPhase::Running,
+                    PublishPhase::Done,
+                    Some(&gone),
+                    std::time::SystemTime::now()
+                )
+                .unwrap()
+        );
 
         let r = publish_selectors(&sock, &id, "tool", &["src/index.ts"]);
         assert_ne!(r["error"]["code"], "NoSuchCommit", "{r:#}");
-        let plan = call(&sock, "publish_plan", json!({ "group": { "id": 0, "batches": group.batches } }));
+        let plan = call(
+            &sock,
+            "publish_plan",
+            json!({ "group": { "id": 0, "batches": group.batches } }),
+        );
         assert_ne!(plan["error"]["code"], "NoSuchCommit", "{plan:#}");
     });
     drop(d);
@@ -1081,7 +1482,10 @@ fn publish_rerun_of_a_partly_changed_batch_commits_the_changed_path() {
     serving(&d, || {
         let id = new_session(&sock);
         let root = ws(&core, &id, "tool");
-        external(&root, "printf 'export const a = 1\\n' > src/index.ts && printf 'export const o = 1\\n' > src/other.ts");
+        external(
+            &root,
+            "printf 'export const a = 1\\n' > src/index.ts && printf 'export const o = 1\\n' > src/other.ts",
+        );
         let sel = ["src/index.ts", "src/other.ts"];
         ok(publish_selectors(&sock, &id, "tool", &sel));
         let first = git.read_ref(&chain).unwrap().expect("first commit");
@@ -1093,9 +1497,20 @@ fn publish_rerun_of_a_partly_changed_batch_commits_the_changed_path() {
         let second = git.read_ref(&chain).unwrap().expect("second commit");
         assert_ne!(second, first);
         let (t1, t2) = (git.tree_of(&first).unwrap(), git.tree_of(&second).unwrap());
-        let at = |t: &strata_types::TreeOid, p: &str| git.blob_bytes(t, &RepoPath::try_from(p.to_string()).unwrap()).unwrap().map(|b| b.bytes);
-        assert_eq!(at(&t2, "src/index.ts").as_deref(), Some(&b"export const a = 2\n"[..]));
-        assert_eq!(at(&t2, "src/other.ts"), at(&t1, "src/other.ts"), "other unchanged");
+        let at = |t: &strata_types::TreeOid, p: &str| {
+            git.blob_bytes(t, &RepoPath::try_from(p.to_string()).unwrap())
+                .unwrap()
+                .map(|b| b.bytes)
+        };
+        assert_eq!(
+            at(&t2, "src/index.ts").as_deref(),
+            Some(&b"export const a = 2\n"[..])
+        );
+        assert_eq!(
+            at(&t2, "src/other.ts"),
+            at(&t1, "src/other.ts"),
+            "other unchanged"
+        );
     });
     drop(d);
     core.close().unwrap();
@@ -1127,13 +1542,30 @@ fn reconcile_loop_rescans_skips_busy_and_stops() {
             let cps = core.store.checkpoints(&id, Some(&tool)).unwrap().len();
             fs::write(ws(&core, &id, "tool").join("src/missed.ts"), "missed\n").unwrap();
             wait_for("a pass that finds src/missed.ts", || {
-                status()["last"]["scanned"].as_array().into_iter().flatten().any(|e| {
-                    e["session"] == sid && e["changed"].as_array().is_some_and(|c| c.contains(&json!("src/missed.ts")))
-                })
+                status()["last"]["scanned"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|e| {
+                        e["session"] == sid
+                            && e["changed"]
+                                .as_array()
+                                .is_some_and(|c| c.contains(&json!("src/missed.ts")))
+                    })
             });
-            assert_eq!(core.store.checkpoints(&id, Some(&tool)).unwrap().len(), cps, "a pass writes no checkpoint");
+            assert_eq!(
+                core.store.checkpoints(&id, Some(&tool)).unwrap().len(),
+                cps,
+                "a pass writes no checkpoint"
+            );
             let gc = status()["last"]["gc"].clone();
-            assert!(gc.as_array().unwrap().iter().all(|g| g["ok"] == json!(true)), "{gc:#}");
+            assert!(
+                gc.as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|g| g["ok"] == json!(true)),
+                "{gc:#}"
+            );
 
             core.locks
                 .with_sessions(std::slice::from_ref(&id), || {
@@ -1141,8 +1573,16 @@ fn reconcile_loop_rescans_skips_busy_and_stops() {
                     wait_for("a pass that skips the busy session", || {
                         let st = status();
                         st["runs"].as_u64().unwrap() > n
-                            && st["last"]["skipped"].as_array().unwrap().iter().any(|e| e["session"] == sid)
-                            && !st["last"]["scanned"].as_array().unwrap().iter().any(|e| e["session"] == sid)
+                            && st["last"]["skipped"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|e| e["session"] == sid)
+                            && !st["last"]["scanned"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|e| e["session"] == sid)
                     });
                     Ok(())
                 })
@@ -1154,7 +1594,10 @@ fn reconcile_loop_rescans_skips_busy_and_stops() {
         stop_took = t0.elapsed();
         r.unwrap_or_else(|p| std::panic::resume_unwind(p))
     });
-    assert!(stop_took < Duration::from_secs(5), "stop waited {stop_took:?}");
+    assert!(
+        stop_took < Duration::from_secs(5),
+        "stop waited {stop_took:?}"
+    );
     drop(d);
     core.close().unwrap();
 }
@@ -1171,25 +1614,53 @@ fn search_after_checkpoint_sees_uncheckpointed_changes() {
     serving(&d, || {
         let id = new_session(&sock);
         let root = ws(&core, &id, "tool");
-        let cp = ok(call(&sock, "checkpoint", json!({
-            "session": id, "repo": "tool",
-            "reason": reason_json(CheckpointReason::ToolCall { id: "c1".into() }), "paths": [],
-        })));
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": id, "repo": "tool",
+                "reason": reason_json(CheckpointReason::ToolCall { id: "c1".into() }), "paths": [],
+            }),
+        ));
         assert_eq!(cp["recorded"], json!(true), "{cp:#}");
-        let files = |glob: &str| ok(call(&sock, "files", json!({ "session": id, "repo": "tool", "glob": glob })))["paths"].clone();
+        let files = |glob: &str| {
+            ok(call(
+                &sock,
+                "files",
+                json!({ "session": id, "repo": "tool", "glob": glob }),
+            ))["paths"]
+                .clone()
+        };
         let grep = |pat: &str| {
-            let g = ok(call(&sock, "grep", json!({ "pattern": pat, "session": id, "all": false, "ignore_case": false })));
-            g["hits"].as_array().unwrap().iter().map(|h| h["path"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+            let g = ok(call(
+                &sock,
+                "grep",
+                json!({ "pattern": pat, "session": id, "all": false, "ignore_case": false }),
+            ));
+            g["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["path"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
         };
         let before = files("src/*.ts");
         assert_eq!(before, json!(["src/index.ts"]), "{before}");
 
         fs::write(root.join("src/fresh.ts"), "uniqueneedle\n").unwrap();
-        assert_eq!(grep("uniqueneedle"), vec!["src/fresh.ts".to_string()], "a new file");
+        assert_eq!(
+            grep("uniqueneedle"),
+            vec!["src/fresh.ts".to_string()],
+            "a new file"
+        );
         assert_eq!(files("src/*.ts"), json!(["src/fresh.ts", "src/index.ts"]));
 
         fs::rename(root.join("src/fresh.ts"), root.join("src/moved.ts")).unwrap();
-        assert_eq!(grep("uniqueneedle"), vec!["src/moved.ts".to_string()], "a rename");
+        assert_eq!(
+            grep("uniqueneedle"),
+            vec!["src/moved.ts".to_string()],
+            "a rename"
+        );
 
         fs::remove_file(root.join("src/index.ts")).unwrap();
         assert_eq!(files("src/*.ts"), json!(["src/moved.ts"]), "a deletion");
@@ -1199,13 +1670,25 @@ fn search_after_checkpoint_sees_uncheckpointed_changes() {
 
         // Search refreshed the Tracker; the next checkpoint still records
         // what changed since the last checkpoint row.
-        let cp2 = ok(call(&sock, "checkpoint", json!({
-            "session": id, "repo": "tool",
-            "reason": reason_json(CheckpointReason::ToolCall { id: "c2".into() }), "paths": [],
-        })));
+        let cp2 = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": id, "repo": "tool",
+                "reason": reason_json(CheckpointReason::ToolCall { id: "c2".into() }), "paths": [],
+            }),
+        ));
         assert_eq!(cp2["recorded"], json!(true), "{cp2:#}");
-        let paths: Vec<&str> = cp2["checkpoint"]["entries"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap()).collect();
-        assert!(paths.contains(&"src/index.ts") && paths.contains(&".gitignore"), "{paths:?}");
+        let paths: Vec<&str> = cp2["checkpoint"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["path"].as_str().unwrap())
+            .collect();
+        assert!(
+            paths.contains(&"src/index.ts") && paths.contains(&".gitignore"),
+            "{paths:?}"
+        );
     });
     drop(d);
     core.close().unwrap();
@@ -1232,28 +1715,63 @@ fn rm_waits_for_publishing_in_the_lock_free_gap() {
         for (k, discard) in [(2, false), (3, true)] {
             let id = new_session(&sock);
             let root = ws(&core, &id, "tool");
-            external(&root, &format!("printf 'export const a = {k}\\n' > src/index.ts"));
-            let cp = ok(call(&sock, "checkpoint", json!({
-                "session": id, "repo": "tool",
-                "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
-            })));
+            external(
+                &root,
+                &format!("printf 'export const a = {k}\\n' > src/index.ts"),
+            );
+            let cp = ok(call(
+                &sock,
+                "checkpoint",
+                json!({
+                    "session": id, "repo": "tool",
+                    "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+                }),
+            ));
             let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
             let g = group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]);
             let gap = pause(git, PublishFault::PauseBeforeRebase);
             std::thread::scope(|sc| {
                 let publish = sc.spawn(|| call(&sock, "publish", json!({ "group": g })));
                 gap.wait_until_paused();
-                assert_eq!(core.locks.in_flight(&id), None, "the gap holds no queue place");
-                let rm = sc.spawn(|| call(&sock, "rm", json!({ "session": id, "discard": discard })));
+                assert_eq!(
+                    core.locks.in_flight(&id),
+                    None,
+                    "the gap holds no queue place"
+                );
+                let rm =
+                    sc.spawn(|| call(&sock, "rm", json!({ "session": id, "discard": discard })));
                 std::thread::sleep(Duration::from_millis(400));
-                assert!(!rm.is_finished(), "rm waits for publishing: {:#}", if rm.is_finished() { rm.join().unwrap() } else { Value::Null });
+                assert!(
+                    !rm.is_finished(),
+                    "rm waits for publishing: {:#}",
+                    if rm.is_finished() {
+                        rm.join().unwrap()
+                    } else {
+                        Value::Null
+                    }
+                );
                 gap.release();
                 let p = ok(publish.join().unwrap());
-                let mine = p["published"][0]["rebases"].as_array().unwrap().iter().find(|r| r["session"] == json!(id)).cloned();
-                assert_eq!(mine.as_ref().map(|r| &r["report"]["kind"]), Some(&json!("Moved")), "rebase intact: {p:#}");
+                let mine = p["published"][0]["rebases"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["session"] == json!(id))
+                    .cloned();
+                assert_eq!(
+                    mine.as_ref().map(|r| &r["report"]["kind"]),
+                    Some(&json!("Moved")),
+                    "rebase intact: {p:#}"
+                );
                 ok(rm.join().unwrap());
             });
-            assert!(core.store.session(&id).unwrap().is_none_or(|r| r.removed.is_some()), "rm ran after the publish");
+            assert!(
+                core.store
+                    .session(&id)
+                    .unwrap()
+                    .is_none_or(|r| r.removed.is_some()),
+                "rm ran after the publish"
+            );
         }
     });
     assert_eq!(log.shown().len(), 1, "the discard prompted once");
@@ -1274,12 +1792,22 @@ fn standalone_push_unknown_keeps_scene_and_reports_across_restart() {
     // Recovery, not lock-deadline behavior: let startup catch-up release
     // its repo lock before the next intentional push.
     fx.lock_wait = Duration::from_secs(5);
-    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.push = false;
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .publish
+        .push = false;
     fx.write_config();
     let sock = fx.socket();
     let hook = fx.sb.path("tool-origin.git/hooks/pre-receive");
     let scenes = |v: &Value| -> Vec<Value> {
-        v["warnings"].as_array().unwrap().iter().filter_map(|w| w.get("UnknownPush").cloned()).collect()
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|w| w.get("UnknownPush").cloned())
+            .collect()
     };
     let t0;
     let (tip, scene) = {
@@ -1288,27 +1816,63 @@ fn standalone_push_unknown_keeps_scene_and_reports_across_restart() {
         let git = core.gits[&repo_name("tool")].clone();
         let r = serving(&d, || {
             let id = new_session(&sock);
-            external(&ws(&core, &id, "tool"), "printf 'export const a = 7\\n' > src/index.ts");
-            let cp = ok(call(&sock, "checkpoint", json!({
-                "session": id, "repo": "tool",
-                "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
-            })));
+            external(
+                &ws(&core, &id, "tool"),
+                "printf 'export const a = 7\\n' > src/index.ts",
+            );
+            let cp = ok(call(
+                &sock,
+                "checkpoint",
+                json!({
+                    "session": id, "repo": "tool",
+                    "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+                }),
+            ));
             let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
-            ok(call(&sock, "publish", json!({ "group": group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]) })));
+            ok(call(
+                &sock,
+                "publish",
+                json!({ "group": group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]) }),
+            ));
             fs::write(&hook, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
-            fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
             strata_publish::seams::set_push_timeout(&git, Some(Duration::from_millis(300)));
             let r = call(&sock, "push", json!({ "repo": "tool" }));
             strata_publish::seams::set_push_timeout(&git, None);
             assert_eq!(r["error"]["code"], "Unknown", "{r:#}");
-            let scene = PathBuf::from(r["error"]["detail"]["scene"].as_str().expect("detail.scene"));
-            assert!(scene.join("push.json").is_file(), "the attempt record is kept");
-            let rec: Value = serde_json::from_str(&fs::read_to_string(scene.join("push.json")).unwrap()).unwrap();
-            assert_eq!(rec["repo_id"], json!(git.repo_id().get().to_string_lossy()), "{rec:#}");
-            assert_eq!(rec["push_url"], json!(git.push_url("origin").unwrap()), "{rec:#}");
+            let scene = PathBuf::from(
+                r["error"]["detail"]["scene"]
+                    .as_str()
+                    .expect("detail.scene"),
+            );
+            assert!(
+                scene.join("push.json").is_file(),
+                "the attempt record is kept"
+            );
+            let rec: Value =
+                serde_json::from_str(&fs::read_to_string(scene.join("push.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                rec["repo_id"],
+                json!(git.repo_id().get().to_string_lossy()),
+                "{rec:#}"
+            );
+            assert_eq!(
+                rec["push_url"],
+                json!(git.push_url("origin").unwrap()),
+                "{rec:#}"
+            );
             let st = ok(call(&sock, "daemon_status", json!({ "verify": false })));
-            let tip = git.read_ref(&strata_publish::chain_ref("main")).unwrap().unwrap();
-            assert_eq!(scenes(&st), vec![json!({ "repo": "tool", "commit": tip, "scene": scene })], "{st:#}");
+            let tip = git
+                .read_ref(&strata_publish::chain_ref("main"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                scenes(&st),
+                vec![json!({ "repo": "tool", "commit": tip, "scene": scene })],
+                "{st:#}"
+            );
             (tip, scene)
         });
         t0 = Instant::now();
@@ -1323,37 +1887,86 @@ fn standalone_push_unknown_keeps_scene_and_reports_across_restart() {
     let d = Daemon::start(&core).unwrap();
     serving(&d, || {
         let st = ok(call(&sock, "daemon_status", json!({ "verify": false })));
-        assert_eq!(scenes(&st), vec![json!({ "repo": "tool", "commit": tip, "scene": scene })], "{st:#}");
+        assert_eq!(
+            scenes(&st),
+            vec![json!({ "repo": "tool", "commit": tip, "scene": scene })],
+            "{st:#}"
+        );
         // Review-3 R4: the same repo, remote and branch, another destination.
         let tool = fx.config.repos[&repo_name("tool")].path.clone();
         let b = fx.sb.path("tool-b.git");
-        fx.sb.git(&fx.sb.root, &["clone", "-q", "--bare", hook.parent().unwrap().parent().unwrap().to_str().unwrap(), b.to_str().unwrap()]);
-        fx.sb.git(&tool, &["config", "remote.origin.pushurl", b.to_str().unwrap()]);
+        fx.sb.git(
+            &fx.sb.root,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                hook.parent().unwrap().parent().unwrap().to_str().unwrap(),
+                b.to_str().unwrap(),
+            ],
+        );
+        fx.sb.git(
+            &tool,
+            &["config", "remote.origin.pushurl", b.to_str().unwrap()],
+        );
         let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
         assert_eq!(r["push"]["kind"], "Pushed", "{r:#}");
-        assert_eq!(fx.sb.git(&b, &["rev-parse", "refs/heads/main"]), tip.as_str(), "pushed to B");
+        assert_eq!(
+            fx.sb.git(&b, &["rev-parse", "refs/heads/main"]),
+            tip.as_str(),
+            "pushed to B"
+        );
         let st = ok(call(&sock, "daemon_status", json!({ "verify": false })));
-        assert_eq!(scenes(&st), vec![json!({ "repo": "tool", "commit": tip, "scene": scene })], "{st:#}");
-        assert!(scene.exists(), "a push to another destination does not settle the scene");
+        assert_eq!(
+            scenes(&st),
+            vec![json!({ "repo": "tool", "commit": tip, "scene": scene })],
+            "{st:#}"
+        );
+        assert!(
+            scene.exists(),
+            "a push to another destination does not settle the scene"
+        );
         // Back to the recorded destination (B's main mirrored to origin, so
         // origin is not rewound): the next chain commit is pushed to origin
         // and settles the scene.
-        fx.sb.git(&tool, &["config", "--unset", "remote.origin.pushurl"]);
-        let origin = hook.parent().unwrap().parent().unwrap().to_str().unwrap().to_string();
+        fx.sb
+            .git(&tool, &["config", "--unset", "remote.origin.pushurl"]);
+        let origin = hook
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
         fx.sb.git(&b, &["push", "-q", &origin, "main"]);
         let id = new_session(&sock);
-        external(&ws(&core, &id, "tool"), "printf 'export const a = 8\\n' > src/index.ts");
-        let cp = ok(call(&sock, "checkpoint", json!({
-            "session": id, "repo": "tool",
-            "reason": reason_json(CheckpointReason::Manual { message: "m2".into() }), "paths": [],
-        })));
+        external(
+            &ws(&core, &id, "tool"),
+            "printf 'export const a = 8\\n' > src/index.ts",
+        );
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": id, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "m2".into() }), "paths": [],
+            }),
+        ));
         let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
-        ok(call(&sock, "publish", json!({ "group": group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]) })));
+        ok(call(
+            &sock,
+            "publish",
+            json!({ "group": group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]) }),
+        ));
         let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
         assert_eq!(r["push"]["kind"], "Pushed", "{r:#}");
         let st = ok(call(&sock, "daemon_status", json!({ "verify": false })));
         assert!(scenes(&st).is_empty(), "{st:#}");
-        assert!(!scene.exists(), "a definite push of the chain settles the scene");
+        assert!(
+            !scene.exists(),
+            "a definite push of the chain settles the scene"
+        );
     });
 }
 
@@ -1363,31 +1976,61 @@ fn standalone_push_unknown_keeps_scene_and_reports_across_restart() {
 #[test]
 fn standalone_push_needs_a_durable_scene_record() {
     let mut fx = Dfx::new();
-    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.push = false;
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .publish
+        .push = false;
     fx.write_config();
     let sock = fx.socket();
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
     let tool = fx.config.repos[&repo_name("tool")].path.clone();
-    let a_url = fx.sb.git(&tool, &["config", "remote.origin.url"]).trim().to_string();
-    let main_at = || fx.sb.git(&fx.sb.root, &["--git-dir", &a_url, "rev-parse", "refs/heads/main"]).trim().to_string();
+    let a_url = fx
+        .sb
+        .git(&tool, &["config", "remote.origin.url"])
+        .trim()
+        .to_string();
+    let main_at = || {
+        fx.sb
+            .git(
+                &fx.sb.root,
+                &["--git-dir", &a_url, "rev-parse", "refs/heads/main"],
+            )
+            .trim()
+            .to_string()
+    };
     let before = main_at();
     let root = fx.config.paths.root.clone();
     serving(&d, || {
         let id = new_session(&sock);
-        external(&ws(&core, &id, "tool"), "printf 'export const a = 11\\n' > src/index.ts");
-        let cp = ok(call(&sock, "checkpoint", json!({
-            "session": id, "repo": "tool",
-            "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
-        })));
+        external(
+            &ws(&core, &id, "tool"),
+            "printf 'export const a = 11\\n' > src/index.ts",
+        );
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": id, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+            }),
+        ));
         let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
-        ok(call(&sock, "publish", json!({ "group": group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]) })));
+        ok(call(
+            &sock,
+            "publish",
+            json!({ "group": group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]) }),
+        ));
         strata_daemon::seams::set_scene_sync_fails(&root, true);
         let r = call(&sock, "push", json!({ "repo": "tool" }));
         strata_daemon::seams::set_scene_sync_fails(&root, false);
         assert!(r.get("error").is_some(), "{r:#}");
         assert_eq!(main_at(), before, "nothing was pushed");
-        let left: Vec<_> = fs::read_dir(root.join("daemon/push")).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        let left: Vec<_> = fs::read_dir(root.join("daemon/push"))
+            .map(|d| d.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
         assert!(left.is_empty(), "no scene is left: {left:?}");
         let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
         assert_eq!(r["push"]["kind"], "Pushed", "{r:#}");
@@ -1404,28 +2047,62 @@ fn standalone_push_needs_a_durable_scene_record() {
 #[test]
 fn standalone_push_refuses_a_url_rewritten_while_staging() {
     let mut fx = Dfx::new();
-    fx.config.repos.get_mut(&repo_name("tool")).unwrap().publish.push = false;
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .publish
+        .push = false;
     fx.write_config();
     let sock = fx.socket();
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
     let git = core.gits[&repo_name("tool")].clone();
     let tool = fx.config.repos[&repo_name("tool")].path.clone();
-    let a_url = fx.sb.git(&tool, &["config", "remote.origin.url"]).trim().to_string();
+    let a_url = fx
+        .sb
+        .git(&tool, &["config", "remote.origin.url"])
+        .trim()
+        .to_string();
     let b = fx.sb.path("tool-b.git");
-    fx.sb.git(&fx.sb.root, &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()]);
-    let main_at = |dir: &str| fx.sb.git(&fx.sb.root, &["--git-dir", dir, "rev-parse", "refs/heads/main"]).trim().to_string();
+    fx.sb.git(
+        &fx.sb.root,
+        &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()],
+    );
+    let main_at = |dir: &str| {
+        fx.sb
+            .git(
+                &fx.sb.root,
+                &["--git-dir", dir, "rev-parse", "refs/heads/main"],
+            )
+            .trim()
+            .to_string()
+    };
     let before = main_at(&a_url);
     serving(&d, || {
         let id = new_session(&sock);
-        external(&ws(&core, &id, "tool"), "printf 'export const a = 9\\n' > src/index.ts");
-        let cp = ok(call(&sock, "checkpoint", json!({
-            "session": id, "repo": "tool",
-            "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
-        })));
+        external(
+            &ws(&core, &id, "tool"),
+            "printf 'export const a = 9\\n' > src/index.ts",
+        );
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": id, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+            }),
+        ));
         let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
-        ok(call(&sock, "publish", json!({ "group": group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]) })));
-        let tip = git.read_ref(&strata_publish::chain_ref("main")).unwrap().unwrap();
+        ok(call(
+            &sock,
+            "publish",
+            json!({ "group": group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]) }),
+        ));
+        let tip = git
+            .read_ref(&strata_publish::chain_ref("main"))
+            .unwrap()
+            .unwrap();
         let old = fx.config.paths.root.join("daemon/push/1-1");
         fs::create_dir_all(&old).unwrap();
         let body = json!({
@@ -1437,11 +2114,21 @@ fn standalone_push_refuses_a_url_rewritten_while_staging() {
         std::thread::scope(|sc| {
             let t = sc.spawn(|| call(&sock, "push", json!({ "repo": "tool" })));
             let start = Instant::now();
-            while !staging.is_paused() && !t.is_finished() && start.elapsed() < Duration::from_secs(20) {
+            while !staging.is_paused()
+                && !t.is_finished()
+                && start.elapsed() < Duration::from_secs(20)
+            {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            assert!(staging.is_paused(), "push reached the staging pause: {:?}", t.is_finished());
-            fx.sb.git(&tool, &["config", &format!("url.{}.insteadOf", b.display()), &a_url]);
+            assert!(
+                staging.is_paused(),
+                "push reached the staging pause: {:?}",
+                t.is_finished()
+            );
+            fx.sb.git(
+                &tool,
+                &["config", &format!("url.{}.insteadOf", b.display()), &a_url],
+            );
             staging.release();
             let r = t.join().unwrap();
             assert_eq!(r["error"]["code"], "InvalidInput", "{r:#}");
@@ -1475,27 +2162,49 @@ fn du_sizes_sessions_records_new_and_rm_and_gc_empties_trash() {
         let wait_idle = || {
             wait_for("du pass", || {
                 let r = ok(call(&sock, "du", json!({})));
-                !r["scan"]["running"].as_bool().unwrap() && r["scan"]["queued"] == json!(0) && r["store"]["all"]["pending"] == json!(0)
+                !r["scan"]["running"].as_bool().unwrap()
+                    && r["scan"]["queued"] == json!(0)
+                    && r["store"]["all"]["pending"] == json!(0)
             })
         };
         ok(call(&sock, "du", json!({ "refresh": true })));
         wait_idle();
         let r = ok(call(&sock, "du", json!({})));
         let list = r["sessions"]["list"].as_array().unwrap();
-        let s = list.iter().find(|s| s["session"] == json!(id.as_str())).unwrap_or_else(|| panic!("{r:#}"));
+        let s = list
+            .iter()
+            .find(|s| s["session"] == json!(id.as_str()))
+            .unwrap_or_else(|| panic!("{r:#}"));
         assert!(s["logical"].as_u64().unwrap() > 0, "{s}");
         assert!(s["as_of"].is_string());
-        assert!(s["create_ms"].is_u64(), "the daemon times its own `new`: {s}");
+        assert!(
+            s["create_ms"].is_u64(),
+            "the daemon times its own `new`: {s}"
+        );
         assert_eq!(r["savings"]["cumulative"]["timed"], json!(1), "{r:#}");
         let t = &r["store"]["trash"];
         assert!(t["eligible"]["entries"].as_u64().unwrap() >= 1, "{t}");
-        assert!(t["eligible"]["reclaim_max"].as_u64().unwrap() >= 100_000, "{t}");
+        assert!(
+            t["eligible"]["reclaim_max"].as_u64().unwrap() >= 100_000,
+            "{t}"
+        );
         assert_eq!(t["gc"], json!("git-strata gc"));
         assert_eq!(r["savings"]["cumulative"]["sessions"], json!(1), "{r:#}");
 
-        ok(call(&sock, "rm", json!({ "session": id, "discard": false })));
+        ok(call(
+            &sock,
+            "rm",
+            json!({ "session": id, "discard": false }),
+        ));
         let r = ok(call(&sock, "du", json!({})));
-        assert!(r["sessions"]["list"].as_array().unwrap().iter().all(|s| s["session"] != json!(id.as_str())), "{r:#}");
+        assert!(
+            r["sessions"]["list"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["session"] != json!(id.as_str())),
+            "{r:#}"
+        );
         assert_eq!(r["savings"]["cumulative"]["removed"], json!(1), "{r:#}");
 
         let g = ok(call(&sock, "gc", json!({ "repo": null })));
@@ -1524,23 +2233,45 @@ fn store_gc_is_opt_in_and_previews_first() {
     fs::create_dir_all(old.join("x")).unwrap();
     serving(&d, || {
         let r = call(&sock, "gc", json!({ "repo": "tool", "store": true }));
-        assert_eq!(r["error"]["detail"]["reason"], json!("store_with_repo"), "{r:#}");
+        assert_eq!(
+            r["error"]["detail"]["reason"],
+            json!("store_with_repo"),
+            "{r:#}"
+        );
         let r = call(&sock, "gc", json!({ "repo": null, "dry_run": true }));
-        assert_eq!(r["error"]["detail"]["reason"], json!("dry_run_without_store"), "{r:#}");
+        assert_eq!(
+            r["error"]["detail"]["reason"],
+            json!("dry_run_without_store"),
+            "{r:#}"
+        );
 
         let runs = core.store.last_gc_report(None).unwrap();
-        let p = ok(call(&sock, "gc", json!({ "repo": null, "store": true, "dry_run": true })));
+        let p = ok(call(
+            &sock,
+            "gc",
+            json!({ "repo": null, "store": true, "dry_run": true }),
+        ));
         assert_eq!(p["dry_run"], json!(true), "{p:#}");
-        assert!(p["preview"]["trash_eligible"].as_u64().unwrap() >= 1, "{p:#}");
+        assert!(
+            p["preview"]["trash_eligible"].as_u64().unwrap() >= 1,
+            "{p:#}"
+        );
         assert_eq!(p["preview"]["keep_secs"], json!(30 * 24 * 3600), "{p:#}");
         assert!(old.exists(), "a dry run deletes nothing");
-        assert_eq!(core.store.last_gc_report(None).unwrap(), runs, "a dry run records no gc run");
+        assert_eq!(
+            core.store.last_gc_report(None).unwrap(),
+            runs,
+            "a dry run records no gc run"
+        );
 
         let g = ok(call(&sock, "gc", json!({ "repo": null, "store": true })));
         assert!(g["store"]["trash_removed"].as_u64().unwrap() >= 1, "{g:#}");
         assert!(g["store"]["error"].is_null(), "{g:#}");
         assert!(!old.exists());
-        assert!(core.store.last_gc_report(None).unwrap().is_some(), "the store-wide run is recorded");
+        assert!(
+            core.store.last_gc_report(None).unwrap().is_some(),
+            "the store-wide run is recorded"
+        );
     });
     drop(d);
     core.close().unwrap();
@@ -1562,16 +2293,30 @@ fn gc_and_startup_sweep_orphan_session_dirs() {
     let late = sessions.join("s-m4n5p6q7");
     fs::create_dir_all(late.join("a")).unwrap();
     serving(&d, || {
-        let p = ok(call(&sock, "gc", json!({ "repo": null, "store": true, "dry_run": true })));
-        assert_eq!(p["preview"]["orphans"], json!([{ "session": "s-m4n5p6q7", "path": late }]), "{p:#}");
+        let p = ok(call(
+            &sock,
+            "gc",
+            json!({ "repo": null, "store": true, "dry_run": true }),
+        ));
+        assert_eq!(
+            p["preview"]["orphans"],
+            json!([{ "session": "s-m4n5p6q7", "path": late }]),
+            "{p:#}"
+        );
         assert!(late.join("a").is_dir(), "a dry run moves nothing");
 
         let g = ok(call(&sock, "gc", json!({ "repo": "tool" })));
         assert_eq!(g["orphans"][0]["path"], json!(late), "{g:#}");
-        assert!(g["orphan_warnings"].as_array().is_none_or(|a| a.is_empty()), "{g:#}");
+        assert!(
+            g["orphan_warnings"].as_array().is_none_or(|a| a.is_empty()),
+            "{g:#}"
+        );
         assert!(!late.exists());
         let g = ok(call(&sock, "gc", json!({ "repo": null })));
-        assert!(g["orphans"].as_array().is_none_or(|a| a.is_empty()), "{g:#}");
+        assert!(
+            g["orphans"].as_array().is_none_or(|a| a.is_empty()),
+            "{g:#}"
+        );
     });
     drop(d);
     core.close().unwrap();
@@ -1587,23 +2332,50 @@ fn slim_new_then_add_over_the_socket() {
     let d = Daemon::start(&core).unwrap();
     let sock = fx.socket();
     serving(&d, || {
-        let s = ok(call(&sock, "new", json!({ "ticket": null, "repos": ["tool"], "only": true })));
+        let s = ok(call(
+            &sock,
+            "new",
+            json!({ "ticket": null, "repos": ["tool"], "only": true }),
+        ));
         let repos = s["session"]["manifest"]["repos"].as_object().unwrap();
         assert_eq!(repos.keys().collect::<Vec<_>>(), ["tool"], "{s:#}");
         let id: SessionId = serde_json::from_value(s["session"]["manifest"]["id"].clone()).unwrap();
 
-        let r = call(&sock, "files", json!({ "session": id, "repo": "front", "glob": "*" }));
+        let r = call(
+            &sock,
+            "files",
+            json!({ "session": id, "repo": "front", "glob": "*" }),
+        );
         assert_eq!(r["ok"], json!(false), "{r:#}");
         assert_eq!(r["error"]["code"], "NoSuchRepo", "{r:#}");
         assert_eq!(r["error"]["detail"]["reason"], "not_in_session", "{r:#}");
-        assert_eq!(r["error"]["detail"]["fix"], json!(format!("git-strata add --session {id} --repo front")), "{r:#}");
+        assert_eq!(
+            r["error"]["detail"]["fix"],
+            json!(format!("git-strata add --session {id} --repo front")),
+            "{r:#}"
+        );
 
-        let a = ok(call(&sock, "add", json!({ "session": id, "repos": ["front"] })));
-        assert!(a["report"]["added"]["front"]["tracked"].as_bool().unwrap(), "{a:#}");
+        let a = ok(call(
+            &sock,
+            "add",
+            json!({ "session": id, "repos": ["front"] }),
+        ));
+        assert!(
+            a["report"]["added"]["front"]["tracked"].as_bool().unwrap(),
+            "{a:#}"
+        );
         assert_eq!(a["anchor_unknown"], json!([]), "{a:#}");
-        let f = ok(call(&sock, "files", json!({ "session": id, "repo": "front", "glob": "src/*.ts" })));
+        let f = ok(call(
+            &sock,
+            "files",
+            json!({ "session": id, "repo": "front", "glob": "src/*.ts" }),
+        ));
         assert_eq!(f["paths"], json!(["src/index.ts"]), "{f:#}");
-        let again = ok(call(&sock, "add", json!({ "session": id, "repos": ["front"] })));
+        let again = ok(call(
+            &sock,
+            "add",
+            json!({ "session": id, "repos": ["front"] }),
+        ));
         assert_eq!(again["report"]["added"], json!({}), "{again:#}");
         assert!(again["report"]["already"]["front"].is_object(), "{again:#}");
     });
@@ -1623,27 +2395,67 @@ fn new_records_the_agent_and_daemon_status_lists_the_feature() {
     let sock = fx.socket();
     serving(&d, || {
         let dst = ok(call(&sock, "daemon_status", json!({ "verify": false })));
-        assert!(dst["features"].as_array().unwrap().contains(&json!("new.agent")), "{dst:#}");
+        assert!(
+            dst["features"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("new.agent")),
+            "{dst:#}"
+        );
 
-        let s = ok(call(&sock, "new", json!({ "ticket": null, "repos": ["tool"], "agent": "claude-code" })));
+        let s = ok(call(
+            &sock,
+            "new",
+            json!({ "ticket": null, "repos": ["tool"], "agent": "claude-code" }),
+        ));
         assert_eq!(s["session"]["manifest"]["agent"], "claude-code", "{s:#}");
         let id = s["session"]["manifest"]["id"].as_str().unwrap().to_string();
-        let st = ok(call(&sock, "status", json!({ "cwd": null, "session": id, "all": false })));
-        assert_eq!(st["sessions"][0]["status"]["manifest"]["agent"], "claude-code", "{st:#}");
+        let st = ok(call(
+            &sock,
+            "status",
+            json!({ "cwd": null, "session": id, "all": false }),
+        ));
+        assert_eq!(
+            st["sessions"][0]["status"]["manifest"]["agent"], "claude-code",
+            "{st:#}"
+        );
 
-        for p in [json!({ "ticket": null, "repos": ["tool"] }), json!({ "ticket": null, "repos": ["tool"], "agent": null })] {
+        for p in [
+            json!({ "ticket": null, "repos": ["tool"] }),
+            json!({ "ticket": null, "repos": ["tool"], "agent": null }),
+        ] {
             let s = ok(call(&sock, "new", p));
-            assert!(s["session"]["manifest"].get("agent").is_none(), "absent, not null: {s:#}");
+            assert!(
+                s["session"]["manifest"].get("agent").is_none(),
+                "absent, not null: {s:#}"
+            );
         }
-        let count = || ok(call(&sock, "status", json!({ "cwd": null, "session": null, "all": true })))["sessions"].as_array().unwrap().len();
+        let count = || {
+            ok(call(
+                &sock,
+                "status",
+                json!({ "cwd": null, "session": null, "all": true }),
+            ))["sessions"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
         assert_eq!(count(), 3);
 
         for bad in ["", "bad name", "-x", "é"] {
-            let r = call(&sock, "new", json!({ "ticket": null, "repos": ["tool"], "agent": bad }));
+            let r = call(
+                &sock,
+                "new",
+                json!({ "ticket": null, "repos": ["tool"], "agent": bad }),
+            );
             assert_eq!(r["error"]["code"], "InvalidInput", "{bad:?}: {r:#}");
             assert_eq!(r["error"]["detail"]["reason"], "agent", "{bad:?}: {r:#}");
         }
-        let r = call(&sock, "new", json!({ "ticket": null, "repos": ["tool"], "agent": 5 }));
+        let r = call(
+            &sock,
+            "new",
+            json!({ "ticket": null, "repos": ["tool"], "agent": 5 }),
+        );
         assert_eq!(r["ok"], json!(false), "{r:#}");
         assert_eq!(r["error"]["rpc"], "Failed", "{r:#}");
         assert_eq!(count(), 3, "refused requests create nothing");
@@ -1663,39 +2475,78 @@ fn new_leases_dev_ports_and_ensure_reassign_rm_follow_the_lifecycle() {
     let sock = fx.socket();
     serving(&d, || {
         let dst = ok(call(&sock, "daemon_status", json!({ "verify": false })));
-        assert!(dst["features"].as_array().unwrap().contains(&json!("session.ports")), "{dst:#}");
+        assert!(
+            dst["features"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("session.ports")),
+            "{dst:#}"
+        );
         let id = new_session(&sock);
         let leased = core.store.dev_port_leases(Some(&id)).unwrap().unwrap();
         assert_eq!(leased.len(), 1, "{leased:?}");
         let base = leased[0].base;
-        assert!((20000..=29996).contains(&base) && base.is_multiple_of(4), "{base}");
+        assert!(
+            (20000..=29996).contains(&base) && base.is_multiple_of(4),
+            "{base}"
+        );
 
         let p = json!({ "session": id.as_str(), "repo": "tool" });
         let e = ok(call(&sock, "ports_ensure", p.clone()));
         assert_eq!(e["base"], json!(base), "{e:#}");
-        assert_eq!(e["ports"], json!({ "web": base, "connector": base + 1, "connector_mcp": base + 2, "aux": base + 3 }));
+        assert_eq!(
+            e["ports"],
+            json!({ "web": base, "connector": base + 1, "connector_mcp": base + 2, "aux": base + 3 })
+        );
         let checked = json!({ "session": id.as_str(), "repo": "tool", "checked": base });
         let r = ok(call(&sock, "ports_reassign", checked.clone()));
         assert_ne!(r["base"], json!(base), "{r:#}");
-        assert_eq!(ok(call(&sock, "ports_ensure", p.clone()))["base"], r["base"]);
+        assert_eq!(
+            ok(call(&sock, "ports_ensure", p.clone()))["base"],
+            r["base"]
+        );
         // the same check again is stale: the lease stays where it went
         let stale = call(&sock, "ports_reassign", checked);
         assert_eq!(stale["error"]["code"], "Busy", "{stale:#}");
-        assert_eq!(stale["error"]["detail"]["reason"], "lease_changed", "{stale:#}");
-        assert_eq!(ok(call(&sock, "ports_ensure", p.clone()))["base"], r["base"]);
+        assert_eq!(
+            stale["error"]["detail"]["reason"], "lease_changed",
+            "{stale:#}"
+        );
+        assert_eq!(
+            ok(call(&sock, "ports_ensure", p.clone()))["base"],
+            r["base"]
+        );
 
-        let r = call(&sock, "ports_ensure", json!({ "session": id.as_str(), "repo": "nope" }));
+        let r = call(
+            &sock,
+            "ports_ensure",
+            json!({ "session": id.as_str(), "repo": "nope" }),
+        );
         assert_eq!(r["error"]["code"], "NoSuchRepo", "{r:#}");
-        let r = call(&sock, "ports_ensure", json!({ "session": id.as_str(), "repo": "tool", "extra": 1 }));
+        let r = call(
+            &sock,
+            "ports_ensure",
+            json!({ "session": id.as_str(), "repo": "tool", "extra": 1 }),
+        );
         assert_eq!(r["error"]["rpc"], "Failed", "{r:#}");
 
-        ok(call(&sock, "rm", json!({ "session": id.as_str(), "discard": false })));
-        assert_eq!(core.store.dev_port_leases(Some(&id)).unwrap().unwrap(), vec![]);
+        ok(call(
+            &sock,
+            "rm",
+            json!({ "session": id.as_str(), "discard": false }),
+        ));
+        assert_eq!(
+            core.store.dev_port_leases(Some(&id)).unwrap().unwrap(),
+            vec![]
+        );
         for m in ["ports_ensure", "ports_reassign"] {
             let r = call(&sock, m, p.clone());
             assert_eq!(r["error"]["code"], "NoSuchSession", "{m}: {r:#}");
         }
-        assert_eq!(core.store.dev_port_leases(Some(&id)).unwrap().unwrap(), vec![]);
+        assert_eq!(
+            core.store.dev_port_leases(Some(&id)).unwrap().unwrap(),
+            vec![]
+        );
     });
     drop(d);
     core.close().unwrap();
@@ -1731,7 +2582,11 @@ fn finished_connections_release_their_descriptors() {
             }
         }
         std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(d.open_connections(), startup::MAX_CONNS, "no more than MAX_CONNS served at once");
+        assert_eq!(
+            d.open_connections(),
+            startup::MAX_CONNS,
+            "no more than MAX_CONNS served at once"
+        );
         drop(idle);
         let t0 = std::time::Instant::now();
         while d.open_connections() > 0 && t0.elapsed() < Duration::from_secs(10) {
@@ -1761,11 +2616,18 @@ fn catch_up_pass_moves_a_deferred_session_and_never_waits() {
     serving(&d, || {
         let id = new_session(&sock);
         let root = ws(&core, &id, "tool");
-        external(&root, "printf 'export const a = 5\\n' > src/index.ts && printf 'later\\n' > later.txt");
-        let cp = ok(call(&sock, "checkpoint", json!({
-            "session": id, "repo": "tool",
-            "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
-        })));
+        external(
+            &root,
+            "printf 'export const a = 5\\n' > src/index.ts && printf 'later\\n' > later.txt",
+        );
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": id, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "m".into() }), "paths": [],
+            }),
+        ));
         let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
         let g = group(vec![batch(&id, "tool", cp_id, &["src/index.ts"])]);
         let mut holder = Command::new("/bin/sleep")
@@ -1779,10 +2641,18 @@ fn catch_up_pass_moves_a_deferred_session_and_never_waits() {
         let _ = holder.kill();
         let _ = holder.wait();
         let rep = &r["published"][0]["rebases"][0]["report"];
-        assert_eq!((rep["kind"].as_str(), rep["reason"].as_str()), (Some("Deferred"), Some("open_files")), "{r:#}");
+        assert_eq!(
+            (rep["kind"].as_str(), rep["reason"].as_str()),
+            (Some("Deferred"), Some("open_files")),
+            "{r:#}"
+        );
         let commit = r["published"][0]["commit"].as_str().unwrap().to_string();
         let tool = repo_name("tool");
-        let row = core.store.rebase_pending_of(&id, &tool).unwrap().expect("a deferred target");
+        let row = core
+            .store
+            .rebase_pending_of(&id, &tool)
+            .unwrap()
+            .expect("a deferred target");
         assert_eq!(row.head.as_deref(), Some(commit.as_str()));
 
         // A request holds the session's queue: the pass does not wait.
@@ -1806,25 +2676,437 @@ fn catch_up_pass_moves_a_deferred_session_and_never_waits() {
             let took = t0.elapsed();
             tx.send(()).unwrap();
             assert!(took < core.locks.wait(), "the pass waited: {took:?}");
-            let rows = out.into_iter().find(|(r, _)| *r == tool).unwrap().1.unwrap();
+            let rows = out
+                .into_iter()
+                .find(|(r, _)| *r == tool)
+                .unwrap()
+                .1
+                .unwrap();
             match &rows[..] {
-                [(s, Ok(strata_publish::pending::CatchUp::Attempted(strata_publish::RebaseReport::Deferred { reason, .. })))] => {
+                [
+                    (
+                        s,
+                        Ok(strata_publish::pending::CatchUp::Attempted(
+                            strata_publish::RebaseReport::Deferred { reason, .. },
+                        )),
+                    ),
+                ] => {
                     assert_eq!((s, reason.as_str()), (&id, "busy"));
                 }
                 o => panic!("{o:?}"),
             }
         });
-        assert_eq!(core.store.rebase_pending_of(&id, &tool).unwrap().unwrap().reason, "busy");
+        assert_eq!(
+            core.store
+                .rebase_pending_of(&id, &tool)
+                .unwrap()
+                .unwrap()
+                .reason,
+            "busy"
+        );
 
         // Free: moved onto the published commit, the row consumed.
         let out = handlers::catch_up_pass(&d, std::time::SystemTime::now());
-        let rows = out.into_iter().find(|(r, _)| *r == tool).unwrap().1.unwrap();
+        let rows = out
+            .into_iter()
+            .find(|(r, _)| *r == tool)
+            .unwrap()
+            .1
+            .unwrap();
         assert!(
-            matches!(&rows[..], [(_, Ok(strata_publish::pending::CatchUp::Attempted(strata_publish::RebaseReport::Moved { .. })))]),
+            matches!(
+                &rows[..],
+                [(
+                    _,
+                    Ok(strata_publish::pending::CatchUp::Attempted(
+                        strata_publish::RebaseReport::Moved { .. }
+                    ))
+                )]
+            ),
             "{rows:?}"
         );
-        assert_eq!(core.store.session(&id).unwrap().unwrap().manifest.repos[&tool].head.as_str(), commit);
+        assert_eq!(
+            core.store.session(&id).unwrap().unwrap().manifest.repos[&tool]
+                .head
+                .as_str(),
+            commit
+        );
         assert!(core.store.rebase_pending_of(&id, &tool).unwrap().is_none());
         assert_eq!(fs::read(root.join("later.txt")).unwrap(), b"later\n");
+    });
+}
+
+/// §10 row 2: exercise the real confirmed-push handler over its socket.
+/// `call` has a 60-second read timeout; holding the repo lock into the
+/// strict close would deadlock when remove takes that same lock.
+#[test]
+fn push_confirmed_form_closes_done_marked_sessions_outside_the_repo_lock() {
+    use strata_confirm::seams::Verdict;
+    use strata_store::Lifecycle;
+    use strata_types::{MarkByKind, MarkState};
+
+    let mut fx = support::close::opted_in(&["tool"]);
+    // The same pinned flag shape as confirm_flow::set_flags(false, true, false).
+    let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+    rc.deploy_on_push = false;
+    rc.publish.confirm = true;
+    rc.publish.push = false;
+    fx.write_config();
+    let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
+    let core = fx.prepare_with(c).unwrap();
+    let pin = {
+        let _catalog = core.admit();
+        core.pinned(&repo_name("tool")).unwrap()
+    };
+    assert!(pin.confirm && !pin.push);
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let s = new_session(&sock);
+        fs::write(ws(&core, &s, "tool").join("new.txt"), "mine\n").unwrap();
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": s, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "confirmed push".into() }),
+                "paths": [],
+            }),
+        ));
+        let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+        let published = ok(call(
+            &sock,
+            "publish",
+            json!({
+                "group": group(vec![batch(&s, "tool", cp_id, &["new.txt"])])
+            }),
+        ));
+        assert_eq!(published["closed"], false, "{published}");
+        assert_eq!(
+            published["auto_close"]["sessions"][s.as_str()]["reasons"],
+            json!(["not_pushed"]),
+            "{published}"
+        );
+        let mark = support::close::mark_of(&core, &s).unwrap();
+        assert_eq!(mark.state, MarkState::Done);
+        assert_eq!(mark.by.kind, MarkByKind::Daemon);
+        assert!(log.shown().is_empty(), "publish.push=false never prompts");
+        let git = &core.gits[&repo_name("tool")];
+        let shown = git
+            .read_ref(&strata_publish::chain_ref("main"))
+            .unwrap()
+            .unwrap();
+        let out = ok(call(
+            &sock,
+            "push",
+            json!({ "repo": "tool", "shown": shown }),
+        ));
+        assert_eq!(out["push"]["kind"], "Pushed", "{out}");
+        assert_eq!(out["closed"], true, "{out}");
+        assert_eq!(
+            out["auto_close"]["sessions"][s.as_str()]["closed"],
+            true,
+            "{out}"
+        );
+        assert_eq!(
+            core.store.session(&s).unwrap().unwrap().lifecycle,
+            Lifecycle::Removed
+        );
+        assert!(
+            git.read_ref(&format!("refs/strata/pins/{s}"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(log.shown().len(), 1);
+    });
+}
+
+#[test]
+fn push_headless_form_closes_done_marked_sessions() {
+    use strata_store::Lifecycle;
+    use strata_types::{MarkByKind, MarkState};
+
+    let mut fx = support::close::opted_in(&["tool"]);
+    let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
+    rc.publish.confirm = false;
+    rc.publish.push = false;
+    fx.write_config();
+    let core = fx.prepare().unwrap();
+    let pin = {
+        let _catalog = core.admit();
+        core.pinned(&repo_name("tool")).unwrap()
+    };
+    assert!(!pin.confirm && !pin.push);
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let s = new_session(&sock);
+        fs::write(ws(&core, &s, "tool").join("new.txt"), "mine\n").unwrap();
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": s, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "headless push".into() }),
+                "paths": [],
+            }),
+        ));
+        let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+        let published = ok(call(
+            &sock,
+            "publish",
+            json!({
+                "group": group(vec![batch(&s, "tool", cp_id, &["new.txt"])])
+            }),
+        ));
+        assert_eq!(published["closed"], false, "{published}");
+        assert_eq!(
+            published["auto_close"]["sessions"][s.as_str()]["reasons"],
+            json!(["not_pushed"]),
+            "{published}"
+        );
+        let mark = support::close::mark_of(&core, &s).unwrap();
+        assert_eq!(mark.state, MarkState::Done);
+        assert_eq!(mark.by.kind, MarkByKind::Daemon);
+        let out = ok(call(&sock, "push", json!({ "repo": "tool" })));
+        assert_eq!(out["push"]["kind"], "Pushed", "{out}");
+        assert_eq!(out["closed"], true, "{out}");
+        assert_eq!(
+            out["auto_close"]["sessions"][s.as_str()]["closed"],
+            true,
+            "{out}"
+        );
+        assert_eq!(
+            core.store.session(&s).unwrap().unwrap().lifecycle,
+            Lifecycle::Removed
+        );
+        assert!(
+            core.gits[&repo_name("tool")]
+                .read_ref(&format!("refs/strata/pins/{s}"))
+                .unwrap()
+                .is_none()
+        );
+    });
+}
+
+#[test]
+fn push_refused_judges_nothing() {
+    let mut fx = support::close::opted_in(&["tool"]);
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .publish
+        .push = false;
+    fx.write_config();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    let hook = fx.sb.path("tool-origin.git/hooks/pre-receive");
+    serving(&d, || {
+        let s = new_session(&sock);
+        fs::write(ws(&core, &s, "tool").join("new.txt"), "mine\n").unwrap();
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": s, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "refused push".into() }),
+                "paths": [],
+            }),
+        ));
+        let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+        let published = ok(call(
+            &sock,
+            "publish",
+            json!({
+                "group": group(vec![batch(&s, "tool", cp_id, &["new.txt"])])
+            }),
+        ));
+        assert_eq!(
+            published["auto_close"]["sessions"][s.as_str()]["reasons"],
+            json!(["not_pushed"]),
+            "{published}"
+        );
+        // Keep the done mark so a hook that incorrectly ran on Err would have a
+        // candidate: if it rejudged, `at` and the audit count would change.
+        let mark_before = support::close::mark_of(&core, &s).expect("daemon mark from not_pushed");
+        let at_before = mark_before.at;
+        let note_before = mark_before.note.clone();
+        let audits_before = support::close::audit_lines(&fx).len();
+        fs::write(&hook, "#!/bin/sh\necho 'denied by policy' >&2\nexit 1\n").unwrap();
+        fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let refused = call(&sock, "push", json!({ "repo": "tool" }));
+        assert_eq!(refused["ok"], false, "{refused}");
+        let mark = support::close::mark_of(&core, &s).expect("done mark must survive refused push");
+        assert_eq!(
+            mark.at, at_before,
+            "refused push must not rejudge (mark.at would change)"
+        );
+        assert_eq!(
+            mark.note, note_before,
+            "refused push must not rewrite the mark note"
+        );
+        assert_eq!(
+            support::close::audit_lines(&fx).len(),
+            audits_before,
+            "refused push writes no audit line"
+        );
+        assert_eq!(
+            core.store.session(&s).unwrap().unwrap().lifecycle,
+            strata_store::Lifecycle::Active,
+            "refused push must not close the session"
+        );
+    });
+}
+
+#[test]
+fn push_closed_ignores_disabled_sessions() {
+    use strata_store::Lifecycle;
+    use strata_types::{MarkByKind, MarkState};
+
+    let mut fx = support::close::opted_in(&["tool", "front"]);
+    for name in ["tool", "front"] {
+        fx.config
+            .repos
+            .get_mut(&repo_name(name))
+            .unwrap()
+            .publish
+            .push = false;
+    }
+    fx.config
+        .repos
+        .get_mut(&repo_name("front"))
+        .unwrap()
+        .publish
+        .auto_close = Some(false);
+    fx.write_config();
+    let core = fx.prepare().unwrap();
+    let d = Daemon::start(&core).unwrap();
+    let sock = fx.socket();
+    serving(&d, || {
+        let enabled = {
+            let d = ok(call(
+                &sock,
+                "new",
+                json!({ "ticket": null, "repos": ["tool"], "only": true }),
+            ));
+            serde_json::from_value::<SessionId>(d["session"]["manifest"]["id"].clone()).unwrap()
+        };
+        let disabled = {
+            let d = ok(call(
+                &sock,
+                "new",
+                json!({ "ticket": null, "repos": ["tool", "front"], "only": true }),
+            ));
+            serde_json::from_value::<SessionId>(d["session"]["manifest"]["id"].clone()).unwrap()
+        };
+
+        fs::write(ws(&core, &enabled, "tool").join("e.txt"), "e\n").unwrap();
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": enabled, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "enabled".into() }),
+                "paths": [],
+            }),
+        ));
+        let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+        let published = ok(call(
+            &sock,
+            "publish",
+            json!({
+                "group": group(vec![batch(&enabled, "tool", cp_id, &["e.txt"])])
+            }),
+        ));
+        assert_eq!(
+            published["auto_close"]["sessions"][enabled.as_str()]["reasons"],
+            json!(["not_pushed"]),
+            "{published}"
+        );
+        assert_eq!(
+            support::close::mark_of(&core, &enabled).unwrap().by.kind,
+            MarkByKind::Daemon
+        );
+
+        // Disabled session: publish of tool is refused `disabled` (front opted
+        // out), so plant an agent done mark for the push rejudge set.
+        fs::write(ws(&core, &disabled, "tool").join("d.txt"), "d\n").unwrap();
+        let cp = ok(call(
+            &sock,
+            "checkpoint",
+            json!({
+                "session": disabled, "repo": "tool",
+                "reason": reason_json(CheckpointReason::Manual { message: "disabled".into() }),
+                "paths": [],
+            }),
+        ));
+        let cp_id = serde_json::from_value(cp["checkpoint"]["id"].clone()).unwrap();
+        let published = ok(call(
+            &sock,
+            "publish",
+            json!({
+                "group": group(vec![batch(&disabled, "tool", cp_id, &["d.txt"])])
+            }),
+        ));
+        assert_eq!(
+            published["auto_close"]["sessions"][disabled.as_str()]["reasons"],
+            json!(["disabled"]),
+            "{published}"
+        );
+        assert!(support::close::mark_of(&core, &disabled).is_none());
+        ok(call(
+            &sock,
+            "mark",
+            json!({
+                "session": disabled, "state": "done", "agent": "codex"
+            }),
+        ));
+        let mark = support::close::mark_of(&core, &disabled).unwrap();
+        assert_eq!(mark.state, MarkState::Done);
+        assert_eq!(mark.by.kind, MarkByKind::Agent);
+
+        let audits_before = support::close::audit_lines(&fx)
+            .into_iter()
+            .filter(|l| l["session"] == disabled.as_str())
+            .count();
+        let out = ok(call(&sock, "push", json!({ "repo": "tool" })));
+        assert_eq!(out["push"]["kind"], "Pushed", "{out}");
+        assert_eq!(out["closed"], true, "{out}");
+        let rejudged = out["auto_close"]["rejudged"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            rejudged
+                .iter()
+                .any(|v| v.as_str() == Some(enabled.as_str())),
+            "enabled closed: {out}"
+        );
+        assert!(
+            rejudged
+                .iter()
+                .all(|v| v.as_str() != Some(disabled.as_str())),
+            "disabled not in rejudged: {out}"
+        );
+        assert_eq!(
+            out["auto_close"]["sessions"][disabled.as_str()]["reasons"],
+            json!(["disabled"]),
+            "{out}"
+        );
+        assert_eq!(
+            core.store.session(&enabled).unwrap().unwrap().lifecycle,
+            Lifecycle::Removed
+        );
+        assert_eq!(
+            core.store.session(&disabled).unwrap().unwrap().lifecycle,
+            Lifecycle::Active
+        );
+        let audits_after = support::close::audit_lines(&fx)
+            .into_iter()
+            .filter(|l| l["session"] == disabled.as_str())
+            .count();
+        assert_eq!(audits_after, audits_before, "no audit line for disabled");
     });
 }

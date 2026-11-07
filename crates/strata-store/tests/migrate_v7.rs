@@ -115,9 +115,26 @@ fn v6_to_v7_preserves_checkpoints_and_adds_only_marks() {
         c.execute("UPDATE session_marks SET note=?1", ["é".repeat(1001)])
             .is_err()
     );
+    // Auto-close §4: the v7 CHECK was amended in place, before any v7 store
+    // shipped. It names the four kinds and nothing else.
     assert!(
         c.execute("UPDATE session_marks SET by_kind='daemon'", [])
+            .is_ok()
+    );
+    assert!(
+        c.execute("UPDATE session_marks SET by_kind='robot'", [])
             .is_err()
+    );
+    let ddl: String = c
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='session_marks'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        ddl.contains("by_kind IN ('agent', 'cli', 'gui', 'daemon')"),
+        "{ddl}"
     );
     assert!(c.execute("INSERT INTO session_marks (session,state,by_kind,at_ns) VALUES ('s-missingx','done','cli',1)", []).is_err());
     assert!(
