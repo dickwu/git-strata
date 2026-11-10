@@ -21,3 +21,17 @@ uses the pre-v4 API.
 and migrations through v5 from ae24d38 with the pinned Turso engine, then a
 TRUNCATE WAL checkpoint. The v6 migration test verifies its backup and exact
 fresh/migrated schema equality. It contains no live data.
+
+`store-v7-turso-pre1.db` is a populated v7 store written by the 0.2.1
+engine (turso `=0.9.0-pre.1`) at `9e51100`: the `support::world` fixture,
+one Pending proposal and a Done mark. `tests/turso_pre1_v7.rs` opens it on
+the current engine and checks that the schema rows equal a fresh store's,
+that the rows read back, and that a write keeps both true. To reproduce, in
+an isolated checkout of `9e51100` copy `generate_v7_fixture.rs.txt` to
+`tests/generate_v7_fixture.rs` and run:
+
+```
+env -u TMPDIR cargo test --locked -p strata-store --test generate_v7_fixture -- --ignored
+```
+
+The helper checks schema version 7 and refuses to overwrite an existing file.

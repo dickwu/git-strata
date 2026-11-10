@@ -1,0 +1,29 @@
+//! Run this helper against 9e51100 (store v7 on turso =0.9.0-pre.1), before
+//! the turso 0.9.0-pre.5 pin. See fixtures/README.md. It refuses to
+//! overwrite a fixture.
+mod support;
+
+use strata_store::NewProposal;
+use strata_types::{CommitOid, DepsSetId, MarkByKind, MarkState};
+use support::world::*;
+
+#[test]
+#[ignore = "fixture generator: run only against the pinned pre.1 source"]
+fn generate_v7_fixture() {
+    let env = support::env();
+    let s = env.open();
+    world(&env, &s);
+    let head = CommitOid::try_from("2".repeat(40)).unwrap();
+    s.record_proposal(&NewProposal {
+        repo: repo(), origin: None, from: gen1().deps,
+        from_inputs: "a".repeat(64), from_head: None, to: DepsSetId::try_from("b".repeat(64)).unwrap(),
+        to_inputs: "b".repeat(64), tree: Some(gen1().tree), head: Some(head),
+    }, None, t(20)).unwrap();
+    s.set_mark(&sid(), MarkState::Done, Some("written by turso pre.1"), MarkByKind::Cli, t(21)).unwrap();
+    s.close().unwrap();
+    let bytes = std::fs::read(env.db()).unwrap();
+    assert_eq!(u32::from_be_bytes(bytes[60..64].try_into().unwrap()), 7);
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/store-v7-turso-pre1.db");
+    use std::io::Write;
+    std::fs::OpenOptions::new().write(true).create_new(true).open(out).unwrap().write_all(&bytes).unwrap();
+}

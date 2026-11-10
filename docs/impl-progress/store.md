@@ -17,7 +17,7 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 | — metadata engine moved to Turso (user decision 2026-10-23) | done | d52d206 |
 | 9 gc with guards, trash and integrity scan | done | 3e116ff |
 | — turso bumped to =0.9.0-pre.1, gaps re-checked | done | caaba3b |
-| — turso bumped to =0.9.0-pre.5 (deps upgrade) | done | fix/deps-upgrade |
+| — turso bumped to =0.9.0-pre.5 (deps upgrade) | done | 5678369 |
 
 ## Ambiguity decisions
 
@@ -276,16 +276,34 @@ Results: `cargo test -p strata-store` 133 passed / 0 failed / 3 ignored
 
 ### Turso 0.9.0-pre.1 → 0.9.0-pre.5 (2026-11-10)
 
-Part of the full dependency upgrade (branch `fix/deps-upgrade`). `turso`
-and every `turso_*` crate in `Cargo.lock` move together to `0.9.0-pre.5`;
-`turso_sync_engine` and `turso_sync_sdk_kit` leave the graph and
-`turso_sqlite` joins it. The store built with no source changes, and
-`BASE_DDL` and the shipped migrations are untouched: `Store::open`'s
-row-by-row `sqlite_schema` comparison still accepts fresh and migrated
-stores (`open`, `migrate*` tests green). The gap table above was not
-re-probed one by one; the existing tests that pin gaps 2, 5 and 7
-(`query_only` readers, guards.rs ENGINE GAP, the schema check) pass
-unchanged. Still a pre-release: watch for 0.9.0 final.
+Part of the full dependency upgrade. `turso` and every `turso_*` crate in
+`Cargo.lock` move together to `0.9.0-pre.5`; `turso_sync_engine` and
+`turso_sync_sdk_kit` leave the graph and `turso_sqlite` (the SQL dialect
+crate, not a C SQLite) joins it. The store built with no source changes,
+and `BASE_DDL` and the shipped migrations are untouched.
+
+- Schema text: the engine's `BTreeTable::to_sql` was rewritten (table-level
+  UNIQUE now comes before FOREIGN KEY and CHECK; a primary key is inline
+  only if declared inline), and `ADD COLUMN` stores that output. Our tables
+  come out byte-identical: the pre.1-written fixtures `store-v1/v2/v3/v5.db`
+  still migrate to a schema equal to a fresh store's, and
+  `store-v7-turso-pre1.db` (a populated v7 store written by 0.2.1) opens,
+  reads, takes a write and still equals a fresh pre.5 store
+  (`tests/turso_pre1_v7.rs`).
+- Cross-version: the database header, WAL format and `-tshm` layout are
+  unchanged, so a pre.1 and a pre.5 process can share a store.
+- Error mapping: a trigger `RAISE` now surfaces as `Constraint`, so
+  `detail.sqlite_error` on a guard refusal reads `"constraint"` instead of
+  `"error"` (nothing branches on it). Engine messages lost their
+  `Parse error: ` / `Transaction error: ` prefixes; the one message matched
+  in code, "Database schema changed" (`open.rs`), is unchanged.
+- Busy: finalize no longer resumes a statement that returned Busy, so a
+  `BEGIN IMMEDIATE` that reported Busy is not completed behind the caller's
+  back; callers already treat Busy as retryable.
+- The gap table above was not re-probed one by one. Gaps 2 and 7 are pinned
+  by tests (`query_only` readers, the schema check); guards.rs passes
+  whether or not gap 5 (REPLACE bypassing delete triggers) is still open.
+  Still a pre-release: watch for 0.9.0 final.
 
 ## Blockers / notes
 
