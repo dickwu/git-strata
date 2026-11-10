@@ -551,7 +551,7 @@ pub enum Code {
 将来的 Cargo 布局如下，本阶段不创建：
 
 ```text
-Cargo.toml                       workspace, edition 2024, rust-version 1.88
+Cargo.toml                       workspace, edition 2024, rust-version 1.90
 crates/strata-types              ids、错误、配置结构（无 I/O）
 crates/strata-client             与 daemon 通信的纯传输层（json-lines、错误映射；无文件系统、无 store、无 git；gui.md §3.1）
 crates/strata-apfs               clonefile / getattrlistbulk / gen count / FSEvents
