@@ -77,7 +77,7 @@
 
 | 约束 | 事实 | 对设计的影响 |
 | --- | --- | --- |
-| 平台 | 声明的下限是 macOS 26+；Apple Silicon，APFS。模块文档里的 APFS 行为只在本机 macOS 27.0.1（Darwin 27）上量过，macOS 26 没有测 | 可用 `clonefile(2)`、`getattrlistbulk(2)`、`ATTR_CMN_GEN_COUNT`、FSEvents。元数据库不依赖系统 libsqlite3：用 Turso（`turso` crate，钉 `=0.9.0-pre.1`，多进程 WAL），见 §7。把下限抬到 27 才能用 `fchflagsat` 关掉「不可读又带 uchg」那个角；26 未测，不把 27 的测量写成 26 的保证 |
+| 平台 | 声明的下限是 macOS 26+；Apple Silicon，APFS。模块文档里的 APFS 行为只在本机 macOS 27.0.1（Darwin 27）上量过，macOS 26 没有测 | 可用 `clonefile(2)`、`getattrlistbulk(2)`、`ATTR_CMN_GEN_COUNT`、FSEvents。元数据库不依赖系统 libsqlite3：用 Turso（`turso` crate，钉 `=0.9.0-pre.5`，多进程 WAL），见 §7。把下限抬到 27 才能用 `fchflagsat` 关掉「不可读又带 uchg」那个角；26 未测，不把 27 的测量写成 26 的保证 |
 | 兄弟布局 | `admin/front/tool` 的 dev-link 用 `../quick-start`、`../release-notes`、`../node_modules` 等相对路径同步兄弟目录的 `@inter/*` 库 | 一个会话必须克隆**整套兄弟布局**，不是只克隆要改的仓库 |
 | symlink 陷阱 | Turbopack 拒绝 symlink 的 `node_modules` | 依赖共享用 `clonefile`（CoW 克隆），**不用 symlink** |
 | 一推就上线 | staff-api 推 `master` = 生产部署；front 推 `main` = 自动部署；任何分支推 staff-api 都会触发重建 | 发布到这些仓库需显式确认；推送目标可配置 |
@@ -240,7 +240,7 @@ agent 和用户是同一个 uid，且常以 bypass 权限运行，所以 flag �
 ## 7. 数据与存储
 
 - 位置：Store、基线缓存、依赖集缓存、工作区**全部在与主 checkout 同一个卷上**，默认 `<root>/{store,bases,deps,sessions}/`（`[paths] root`，缺省 `$HOME/.strata`，开源准备时改；之前是 `/Volumes/GWD/inter/.strata`）；`~/Library/Application Support/git-strata/` 只放配置和 daemon 的 socket。原因：`clonefile` 只在同卷内有效，**跨卷退化成复制**，而内置盘只剩约 40 GB。
-- 元数据引擎：Turso（`turso` crate，钉 `=0.9.0-pre.1`；SQLite 文件格式兼容，不链接系统 libsqlite3）。WAL，开多进程 WAL（`experimental_multiprocess_wal`），daemon 写、CLI 只读打开可以同时进行；checkpoint 边界 `synchronous=FULL`（与 LayerFS 的 Disposable 不同：我们的数据量小，而"恢复"要求可靠）。引擎与 store.md 所写 SQLite 行为的差异和缺口见 docs/impl-progress/store.md「Engine: Turso」。
+- 元数据引擎：Turso（`turso` crate，钉 `=0.9.0-pre.5`；SQLite 文件格式兼容，不链接系统 libsqlite3）。WAL，开多进程 WAL（`experimental_multiprocess_wal`），daemon 写、CLI 只读打开可以同时进行；checkpoint 边界 `synchronous=FULL`（与 LayerFS 的 Disposable 不同：我们的数据量小，而"恢复"要求可靠）。引擎与 store.md 所写 SQLite 行为的差异和缺口见 docs/impl-progress/store.md「Engine: Turso」。
 - 选 Turso 是为日后的项目向量化留路：嵌入可以放进同一个 store.db，用 `vector32` / `vector_distance_cos` 查询（现在不建向量表）。
 - Blob：按 BLAKE3 内容寻址，一文件一 blob，存为普通文件；写入 = 从工作区 `clonefile` 到 blob 路径（零拷贝），读出 = 反向克隆。超过阈值（默认 64 MiB，tgrep 的经验）的文件只记录哈希与克隆，不进索引。
 - 基线缓存与依赖集缓存都是普通目录树，键在路径里，封存后只读（`chflags uchg` 或仅靠约定 [交给构建者]）。

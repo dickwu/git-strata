@@ -17,6 +17,7 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 | — metadata engine moved to Turso (user decision 2026-10-23) | done | d52d206 |
 | 9 gc with guards, trash and integrity scan | done | 3e116ff |
 | — turso bumped to =0.9.0-pre.1, gaps re-checked | done | caaba3b |
+| — turso bumped to =0.9.0-pre.5 (deps upgrade) | done | fix/deps-upgrade |
 
 ## Ambiguity decisions
 
@@ -151,7 +152,7 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 ## Engine: Turso
 
 User decision (2026-10-23): the metadata DB runs on Turso (crate `turso`,
-pinned `=0.9.0-pre.1` since 2026-10-23, was `=0.8.3`;
+pinned `=0.9.0-pre.5` since 2026-11-10 (`=0.9.0-pre.1` from 2026-10-23, `=0.8.3` before);
 `default-features = false`) instead of rusqlite, so a
 future embeddings/vector table can live in store.db. Blobs stay BLAKE3
 files. No vector features are added; nothing in the schema check blocks a
@@ -273,6 +274,19 @@ Results: `cargo test -p strata-store` 133 passed / 0 failed / 3 ignored
 (×2); standalone repeats: `lock_inherit` 30/30, `open` 40/40 + 10/10,
 `crash`, `engine`, `gc`, `concurrency` 10/10 each.
 
+### Turso 0.9.0-pre.1 → 0.9.0-pre.5 (2026-11-10)
+
+Part of the full dependency upgrade (branch `fix/deps-upgrade`). `turso`
+and every `turso_*` crate in `Cargo.lock` move together to `0.9.0-pre.5`;
+`turso_sync_engine` and `turso_sync_sdk_kit` leave the graph and
+`turso_sqlite` joins it. The store built with no source changes, and
+`BASE_DDL` and the shipped migrations are untouched: `Store::open`'s
+row-by-row `sqlite_schema` comparison still accepts fresh and migrated
+stores (`open`, `migrate*` tests green). The gap table above was not
+re-probed one by one; the existing tests that pin gaps 2, 5 and 7
+(`query_only` readers, guards.rs ENGINE GAP, the schema check) pass
+unchanged. Still a pre-release: watch for 0.9.0 final.
+
 ## Blockers / notes
 
 - Store crate is clippy-clean (`--all-targets`, with and without
@@ -284,8 +298,8 @@ Results: `cargo test -p strata-store` 133 passed / 0 failed / 3 ignored
   `"crates/strata-store"` members entry; no `[workspace.dependencies]`
   are added (crate deps are declared in the crate's own Cargo.toml).
 - New crate-level dep: `memmap2 = "0.9"` (Task 2).
-- Crate deps after the engine move: `turso = "=0.9.0-pre.1"` (default
-  features off; was `=0.8.3`), `memmap2`, `libc`; `rusqlite` is gone from deps and tests.
+- Crate deps after the engine move: `turso = "=0.9.0-pre.5"` (default
+  features off; `=0.9.0-pre.1` before 2026-11-10, `=0.8.3` before that), `memmap2`, `libc`; `rusqlite` is gone from deps and tests.
 - One unexplained failure of one `tests/open.rs` test in a single full
   `cargo test -p strata-store` run during Task 3 (output not captured);
   not reproduced in 26 further runs. Watching.
