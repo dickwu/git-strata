@@ -507,7 +507,7 @@ fn parse(name: &str, bytes: &[u8]) -> Option<Packages> {
             }
         }
         "Cargo.lock" => {
-            let v: toml::Value = std::str::from_utf8(bytes).ok()?.parse().ok()?;
+            let v: toml::Value = toml::from_str(std::str::from_utf8(bytes).ok()?).ok()?;
             for p in v.get("package")?.as_array()? {
                 add(
                     &mut out,
@@ -518,7 +518,7 @@ fn parse(name: &str, bytes: &[u8]) -> Option<Packages> {
             }
         }
         "Cargo.toml" => {
-            let v: toml::Value = std::str::from_utf8(bytes).ok()?.parse().ok()?;
+            let v: toml::Value = toml::from_str(std::str::from_utf8(bytes).ok()?).ok()?;
             cargo_specs(&v, &mut out);
             if let Some(targets) = v.get("target").and_then(toml::Value::as_table) {
                 for t in targets.values() {
