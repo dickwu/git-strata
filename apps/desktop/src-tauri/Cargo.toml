@@ -36,7 +36,7 @@ tokio = { version = "1", features = ["rt", "time", "sync"] }
 libc = "0.2"
 # Dev-only UI automation (gui.md §8.1 UI checks; G4: never in a release
 # build). Off unless `bun run tauri:dev` passes --features dev-connector.
-tauri-plugin-connector = { version = "0.17", optional = true }
+tauri-plugin-connector = { version = "0.17.10", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
