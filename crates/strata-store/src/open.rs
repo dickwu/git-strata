@@ -197,7 +197,8 @@ pub(crate) fn read_txn<T>(c: &Connection, op: &str, f: impl Fn(&Connection) -> R
         match out {
             Err(e) if !retried && schema_changed(&e) => {
                 // Inside BEGIN the connection keeps its stale schema; one
-                // autocommit statement makes it reload (Turso 0.9.0-pre.1).
+                // autocommit statement makes it reload (seen on Turso
+                // 0.9.0-pre.1; pre.5 keeps the same error text).
                 c.query_row("SELECT count(*) FROM sqlite_schema", (), |r| r.get::<_, i64>(0)).map_err(|e| sql(e, op, NOT_WRITTEN))?;
                 retried = true;
             }
@@ -255,7 +256,8 @@ fn pin_writer(c: &Connection, op: &str) -> Result<()> {
     // checkpoints alike, so pinning `fullfsync` covers both.
     pin(c, "foreign_keys", "1", "1", op)?;
     // `recursive_triggers` and `trusted_schema` are unknown to Turso (0.8.3,
-    // 0.9.0-pre.1: accepted, ignored): there are no app-defined SQL functions or virtual
+    // 0.9.0-pre.1: accepted, ignored; on 0.9.0-pre.5 REPLACE still skips the
+    // DELETE trigger, tests/guards.rs): there are no app-defined SQL functions or virtual
     // tables for trusted_schema to guard, and REPLACE's implicit delete is
     // covered by tests/guards.rs against the engine's actual behaviour.
     let bt = pragma_text(c, "busy_timeout").map_err(|e| sql(e, op, NOT_WRITTEN))?;
