@@ -913,7 +913,7 @@ When any clause fails except `disabled`, `gone`, `lifecycle`, `unknown`, **`busy
   cannot open this change's v7 store at all, because its schema check rejects the amended `session_marks.by_kind`
   CHECK as `Corrupt` / `reason: "schema"` before any mark is read (open.rs:293). To roll back, stop the daemon,
   restore a compatible `store/backups/store-v<from>-<ns>.db` as store.md describes, install the matching older CLI and
-  daemon (and a config they accept), then start it; keep the displaced database and its sidecars (config.md:147, §8).
+  daemon (and a config they accept), then start it; keep the displaced database and its sidecars (config.md:148, §8).
 - **Note ownership** (r3, Claude r2 nit 3): the hook writes when `mark(s)` is `None` **or the existing row's
   `by.kind` is `Daemon`**; an agent's, cli's or gui's `done` row is kept. `set_mark`'s upsert replaces `note`,
   `by_kind` and `at_ns` (marks.rs:99-104), which would overwrite an agent's note with the daemon's, so the hook reads
@@ -1227,7 +1227,7 @@ file out of order; each carries its own `at`. A write failure is logged and repo
   `cd ~ && git-strata sync --session S --repo REPO` reports it again; resolve it as that says and the next publish or push of the repo judges again, or run `git-strata rm --session S` yourself if you no longer want the sync"**; any other `conflicts` or `deps_pending`,
   `unresolved`, and `kept_trees` with a `changed: true` item → "tell the human: `status` names it" (r9: "`status` or `git-strata deps list`" for `deps_pending`, because `status` shows no own proposal on an untracked repo, upstream.rs:338-340). The docs
   sentence of §9 item 5 (hooks.md:34-49, cli.md:149-157) gains "or closed by the daemon after a publish that landed
-  everything", and the install note of config.md:136 / README gains the downgrade warning (config.md:147): an older
+  everything", and the install note of config.md:136 / README gains the downgrade warning (config.md:148): an older
   daemon can neither read a daemon-made mark nor open the v7 store (schema check, `Corrupt` / `reason: "schema"`), so
   clearing marks does not help; to roll back, stop the daemon, restore a compatible
   `store/backups/store-v<from>-<ns>.db` (store.md), install the matching older CLI and daemon (and a config they

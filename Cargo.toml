@@ -18,7 +18,7 @@ homepage = "https://github.com/dickwu/git-strata"
 # A deny-by-default correctness lint, off workspace-wide for one `from_mode(0)`
 # in a test. Fix this one first: write `0o0`.
 non_octal_unix_permissions = "allow"  # crates/strata-session/tests/remove.rs
-# Newer than the 1.88 MSRV: clippy 1.88 reports this name as an unknown lint.
+# Added in clippy 1.89; with the 1.90 MSRV every supported clippy knows it.
 cloned_ref_to_slice_refs = "allow"    # crates/strata-daemon/tests/auto_close.rs
 field_reassign_with_default = "allow" # crates/strata-session/src/remove.rs
 large_enum_variant = "allow"          # crates/strata-daemon/src/auto_close.rs
