@@ -5,7 +5,7 @@ members = ["crates/strata-types", "crates/strata-client", "crates/strata-apfs", 
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dickwu/git-strata"
 homepage = "https://github.com/dickwu/git-strata"

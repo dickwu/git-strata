@@ -17,6 +17,7 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 | — metadata engine moved to Turso (user decision 2026-10-23) | done | d52d206 |
 | 9 gc with guards, trash and integrity scan | done | 3e116ff |
 | — turso bumped to =0.9.0-pre.1, gaps re-checked | done | caaba3b |
+| — turso bumped to =0.9.0-pre.5 (deps upgrade) | done | 5678369 |
 
 ## Ambiguity decisions
 
@@ -151,7 +152,7 @@ Branch `impl/store` (worktree `git-strata-wt/store`), from `impl/v1` 779669c.
 ## Engine: Turso
 
 User decision (2026-10-23): the metadata DB runs on Turso (crate `turso`,
-pinned `=0.9.0-pre.1` since 2026-10-23, was `=0.8.3`;
+pinned `=0.9.0-pre.5` since 2026-11-10 (`=0.9.0-pre.1` from 2026-10-23, `=0.8.3` before);
 `default-features = false`) instead of rusqlite, so a
 future embeddings/vector table can live in store.db. Blobs stay BLAKE3
 files. No vector features are added; nothing in the schema check blocks a
@@ -273,6 +274,37 @@ Results: `cargo test -p strata-store` 133 passed / 0 failed / 3 ignored
 (×2); standalone repeats: `lock_inherit` 30/30, `open` 40/40 + 10/10,
 `crash`, `engine`, `gc`, `concurrency` 10/10 each.
 
+### Turso 0.9.0-pre.1 → 0.9.0-pre.5 (2026-11-10)
+
+Part of the full dependency upgrade. `turso` and every `turso_*` crate in
+`Cargo.lock` move together to `0.9.0-pre.5`; `turso_sync_engine` and
+`turso_sync_sdk_kit` leave the graph and `turso_sqlite` (the SQL dialect
+crate, not a C SQLite) joins it. The store built with no source changes,
+and `BASE_DDL` and the shipped migrations are untouched.
+
+- Schema text: the engine's `BTreeTable::to_sql` was rewritten (table-level
+  UNIQUE now comes before FOREIGN KEY and CHECK; a primary key is inline
+  only if declared inline), and `ADD COLUMN` stores that output. Our tables
+  come out byte-identical: the pre.1-written fixtures `store-v1/v2/v3/v5.db`
+  still migrate to a schema equal to a fresh store's, and
+  `store-v7-turso-pre1.db` (a populated v7 store written by 0.2.1) opens,
+  reads, takes a write and still equals a fresh pre.5 store
+  (`tests/turso_pre1_v7.rs`).
+- Cross-version: the database header, WAL format and `-tshm` layout are
+  unchanged, so a pre.1 and a pre.5 process can share a store.
+- Error mapping: a trigger `RAISE` now surfaces as `Constraint`, so
+  `detail.sqlite_error` on a guard refusal reads `"constraint"` instead of
+  `"error"` (nothing branches on it). Engine messages lost their
+  `Parse error: ` / `Transaction error: ` prefixes; the one message matched
+  in code, "Database schema changed" (`open.rs`), is unchanged.
+- Busy: finalize no longer resumes a statement that returned Busy, so a
+  `BEGIN IMMEDIATE` that reported Busy is not completed behind the caller's
+  back; callers already treat Busy as retryable.
+- The gap table above was not re-probed one by one. Gaps 2 and 7 are pinned
+  by tests (`query_only` readers, the schema check); guards.rs passes
+  whether or not gap 5 (REPLACE bypassing delete triggers) is still open.
+  Still a pre-release: watch for 0.9.0 final.
+
 ## Blockers / notes
 
 - Store crate is clippy-clean (`--all-targets`, with and without
@@ -284,8 +316,8 @@ Results: `cargo test -p strata-store` 133 passed / 0 failed / 3 ignored
   `"crates/strata-store"` members entry; no `[workspace.dependencies]`
   are added (crate deps are declared in the crate's own Cargo.toml).
 - New crate-level dep: `memmap2 = "0.9"` (Task 2).
-- Crate deps after the engine move: `turso = "=0.9.0-pre.1"` (default
-  features off; was `=0.8.3`), `memmap2`, `libc`; `rusqlite` is gone from deps and tests.
+- Crate deps after the engine move: `turso = "=0.9.0-pre.5"` (default
+  features off; `=0.9.0-pre.1` before 2026-11-10, `=0.8.3` before that), `memmap2`, `libc`; `rusqlite` is gone from deps and tests.
 - One unexplained failure of one `tests/open.rs` test in a single full
   `cargo test -p strata-store` run during Task 3 (output not captured);
   not reproduced in 26 further runs. Watching.

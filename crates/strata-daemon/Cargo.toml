@@ -35,7 +35,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
-toml = "0.8.23"
+toml = "1.2.1"
 strata-daemon = { path = ".", features = ["test-seams"] }
 
 [lints]

@@ -144,6 +144,7 @@ restored store; preserve the displaced database and its sidecars.
   ```
 - **`[repo.<name>.rebase]`**：[实现时补的决定]（2026-10-29，rm-followups §1.3）`deps_changed = "move_source" | "wait"`（缺省 `move_source`：发布改了安装输入时，自动 rebase 只把源码移到新树、沿用旧依赖集，依赖提案保持 Pending；`wait` = 旧的 `Waiting`）；`quiet_secs`（缺省 120，≤ 86400，V15）是自动 rebase 的安静窗口。（2026-10-29 rm-followups 2.2–2.5 起生效：`quiet_secs` 是 Auto 门 G2 的安静窗口，`deps_changed` 决定 C2 只挪源码还是 `Waiting`；只影响自动 rebase（发布、push 重放、daemon 追赶），依赖审批的 rollout 与显式 move 不受影响。）
 - **新键的上线顺序**：`[repo.<name>.rm]`、`[repo.<name>.rebase]` 旧二进制不认（V11），而且一旦 `pins.json` 钉进了非空的 `regenerable`，旧 daemon 也读不了它（旧 CLI 把读不了的 pins.json 当作"要确认"）。所以先把新的 `git-strata` 与 `git-stratad` 一起装好并重启 daemon，再往配置里加这些键。新二进制读没有这些键的配置（缺省值）。 `publish.auto_close` 和全局 `[publish]` 同样要先升级二进制再添加。
+- **TOML 1.1 语法**：从 toml 1.2（TOML 1.1 规范）起，`Config::parse` 也接受 TOML 1.1 才有的写法，例如跨行、带尾逗号的内联表（`publish = { … }` 写成多行）。0.2.1 及更早的二进制把这种文件当作语法错误（`rule: "toml"`），CLI 与 daemon 都会拒绝它。所以在读这份配置的每个二进制都升级之前，配置文件只用 TOML 1.0 的写法。
 - **降级警告（daemon mark / store v7）**：旧 daemon 既读不了 `by.kind = "daemon"` 的完成标记（store 返回 `bad_row`，`ls`/`status` 会失败），也打不开本二进制写出的 v7 store：`session_marks.by_kind` 的 CHECK 已含 `'daemon'`，打开时的 schema 比对会在读任何 mark 之前以 `Corrupt` / `reason: "schema"` 拒绝。清掉 daemon mark 解决不了这份不兼容。要回退，停 daemon，按 [store.md](modules/store.md) 把兼容的 `store/backups/store-v<from>-<ns>.db` 恢复回来，再装回匹配的旧 CLI 与 daemon（以及对应配置），然后启动；备份之后写入的改动不会出现在恢复后的 store 里，挪开的数据库及其 sidecar 要留着。
 
 ### 2.4 命令行字符串（`install` 与 `checks`）
