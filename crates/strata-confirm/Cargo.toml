@@ -31,3 +31,6 @@ regex = "1"
 serde = "1"
 # Integration tests drive the seams; dependents' release builds never turn them on.
 strata-confirm = { path = ".", features = ["test-seams"] }
+
+[lints]
+workspace = true

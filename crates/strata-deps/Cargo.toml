@@ -26,3 +26,6 @@ toml = "0.8.23"
 tempfile = "3"
 strata-deps = { path = ".", features = ["test-seams"] }
 strata-gitio = { path = "../strata-gitio", features = ["test-seams"] }
+
+[lints]
+workspace = true

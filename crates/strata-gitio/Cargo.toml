@@ -24,3 +24,6 @@ tempfile = "3"
 # The integration tests drive the seams, so the test build of this crate
 # always has them; release builds of dependents never do.
 strata-gitio = { path = ".", features = ["test-seams"] }
+
+[lints]
+workspace = true

@@ -31,3 +31,6 @@ tempfile = "3"
 proptest = "1"
 strata-overlay = { path = ".", features = ["test-seams"] }
 strata-gitio = { path = "../strata-gitio", features = ["test-seams"] }
+
+[lints]
+workspace = true

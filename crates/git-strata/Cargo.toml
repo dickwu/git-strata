@@ -38,3 +38,6 @@ regex = "1"
 strata-daemon = { path = "../strata-daemon", features = ["test-seams"] }
 tempfile = "3"
 libc = "0.2.191"
+
+[lints]
+workspace = true

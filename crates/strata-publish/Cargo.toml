@@ -31,3 +31,6 @@ tracing = "0.1"
 tempfile = "3"
 strata-publish = { path = ".", features = ["test-seams"] }
 strata-confirm = { path = "../strata-confirm" }
+
+[lints]
+workspace = true

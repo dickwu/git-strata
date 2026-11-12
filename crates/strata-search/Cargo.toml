@@ -31,3 +31,6 @@ strata-search = { path = ".", features = ["test-seams"] }
 strata-store = { path = "../strata-store" }
 strata-gitio = { path = "../strata-gitio", features = ["test-seams"] }
 strata-deps = { path = "../strata-deps" }
+
+[lints]
+workspace = true

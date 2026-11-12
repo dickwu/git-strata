@@ -37,3 +37,6 @@ tracing = "0.1"
 tempfile = "3"
 toml = "0.8.23"
 strata-daemon = { path = ".", features = ["test-seams"] }
+
+[lints]
+workspace = true

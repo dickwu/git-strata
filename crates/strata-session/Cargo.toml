@@ -30,3 +30,6 @@ tempfile = "3"
 strata-session = { path = ".", features = ["test-seams"] }
 strata-gitio = { path = "../strata-gitio", features = ["test-seams"] }
 strata-overlay = { path = "../strata-overlay", features = ["test-seams"] }
+
+[lints]
+workspace = true
