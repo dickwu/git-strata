@@ -54,10 +54,16 @@ pub(crate) fn full_sync_path(p: &Path, op: &str, outcome: &str) -> Result<()> {
 
 /// `renamex_np(from, to, RENAME_EXCL)`.
 pub(crate) fn rename_excl(from: &Path, to: &Path) -> io::Result<()> {
-    let a = CString::new(from.as_os_str().as_bytes()).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-    let b = CString::new(to.as_os_str().as_bytes()).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    let a = CString::new(from.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    let b = CString::new(to.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
     let rc = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_EXCL) };
-    if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 fn exists(p: &Path) -> io::Result<bool> {
@@ -81,7 +87,12 @@ fn dir_has_entries(p: &Path) -> io::Result<bool> {
 fn take_lock(store_dir: &Path) -> Result<File> {
     let path = store_dir.join("LOCK");
     let mut opts = OpenOptions::new();
-    opts.read(true).write(true).create(true).truncate(false).mode(0o600).custom_flags(libc::O_CLOEXEC);
+    opts.read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC);
     let f = retry_eintr(|| opts.open(&path)).map_err(|e| ioe(&e, IoSide::Write, &path, "open"))?;
     loop {
         let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -164,13 +175,17 @@ fn bad_version(shown: &str, uv: u32) -> StrataError {
     // rm-followups §1.11: an older CLI meeting a store its daemon migrated
     // says what to do, not only that the version is out of range.
     let why = if uv > LATEST {
-        format!("; this git-strata is older than the store (v{uv}); install the matching git-strata")
+        format!(
+            "; this git-strata is older than the store (v{uv}); install the matching git-strata"
+        )
     } else {
         String::new()
     };
     err(
         Code::Corrupt,
-        format!("{shown} has schema version {uv}; this strata understands {BASE_VERSION}..={LATEST}{why}"),
+        format!(
+            "{shown} has schema version {uv}; this strata understands {BASE_VERSION}..={LATEST}{why}"
+        ),
         json!({ "reason": "user_version", "path": shown, "expected": LATEST, "actual": uv }),
     )
 }
@@ -182,16 +197,26 @@ fn bad_version(shown: &str, uv: u32) -> StrataError {
 /// statement has reloaded its schema.
 fn schema_changed(e: &StrataError) -> bool {
     const MSG: &str = "Database schema changed";
-    e.message.contains(MSG) || e.detail.as_ref().and_then(|d| d.get("message")).and_then(|m| m.as_str()).is_some_and(|m| m.contains(MSG))
+    e.message.contains(MSG)
+        || e.detail
+            .as_ref()
+            .and_then(|d| d.get("message"))
+            .and_then(|m| m.as_str())
+            .is_some_and(|m| m.contains(MSG))
 }
 
 /// Run `f` in one read transaction on `c`; if the store's schema changed
 /// under this connection (a migration by another process), run it again,
 /// once, in a fresh transaction. Reads have no side effects to repeat.
-pub(crate) fn read_txn<T>(c: &Connection, op: &str, f: impl Fn(&Connection) -> Result<T>) -> Result<T> {
+pub(crate) fn read_txn<T>(
+    c: &Connection,
+    op: &str,
+    f: impl Fn(&Connection) -> Result<T>,
+) -> Result<T> {
     let mut retried = false;
     loop {
-        c.execute_batch("BEGIN DEFERRED").map_err(|e| sql(e, op, NOT_WRITTEN))?;
+        c.execute_batch("BEGIN DEFERRED")
+            .map_err(|e| sql(e, op, NOT_WRITTEN))?;
         let out = f(c);
         let end = c.execute_batch(if out.is_ok() { "COMMIT" } else { "ROLLBACK" });
         match out {
@@ -199,7 +224,10 @@ pub(crate) fn read_txn<T>(c: &Connection, op: &str, f: impl Fn(&Connection) -> R
                 // Inside BEGIN the connection keeps its stale schema; one
                 // autocommit statement makes it reload (seen on Turso
                 // 0.9.0-pre.1; pre.5 keeps the same error text).
-                c.query_row("SELECT count(*) FROM sqlite_schema", (), |r| r.get::<_, i64>(0)).map_err(|e| sql(e, op, NOT_WRITTEN))?;
+                c.query_row("SELECT count(*) FROM sqlite_schema", (), |r| {
+                    r.get::<_, i64>(0)
+                })
+                .map_err(|e| sql(e, op, NOT_WRITTEN))?;
                 retried = true;
             }
             Err(e) => return Err(e),
@@ -216,23 +244,38 @@ fn check_identity(c: &Connection, op: &str) -> Result<u32> {
     let s = |e| sql(e, op, NOT_WRITTEN);
     let app = pragma_text(c, "application_id").map_err(s)?;
     if app != APPLICATION_ID.to_string() {
-        return Err(err(Code::Corrupt, "application_id mismatch", json!({ "reason": "application_id", "actual": app })));
+        return Err(err(
+            Code::Corrupt,
+            "application_id mismatch",
+            json!({ "reason": "application_id", "actual": app }),
+        ));
     }
     let uv = pragma_text(c, "user_version").map_err(s)?;
     let v: u32 = match uv.parse() {
         Ok(v) if (BASE_VERSION..=LATEST).contains(&v) => v,
-        _ => return Err(err(Code::Corrupt, "user_version mismatch", json!({ "reason": "user_version", "actual": uv }))),
+        _ => {
+            return Err(err(
+                Code::Corrupt,
+                "user_version mismatch",
+                json!({ "reason": "user_version", "actual": uv }),
+            ));
+        }
     };
     let jm = pragma_text(c, "journal_mode").map_err(s)?;
     if jm != "wal" {
-        return Err(err(Code::Corrupt, "journal_mode is not WAL", json!({ "reason": "journal_mode", "actual": jm })));
+        return Err(err(
+            Code::Corrupt,
+            "journal_mode is not WAL",
+            json!({ "reason": "journal_mode", "actual": jm }),
+        ));
     }
     Ok(v)
 }
 
 /// Set and read back one pragma; mismatch → `Unsupported`.
 fn pin(c: &Connection, name: &str, set: &str, expect: &str, op: &str) -> Result<()> {
-    c.execute_batch(&format!("PRAGMA {name} = {set}")).map_err(|e| sql(e, op, NOT_WRITTEN))?;
+    c.execute_batch(&format!("PRAGMA {name} = {set}"))
+        .map_err(|e| sql(e, op, NOT_WRITTEN))?;
     let got = pragma_text(c, name).map_err(|e| sql(e, op, NOT_WRITTEN))?;
     if got != expect {
         return Err(err(
@@ -248,7 +291,8 @@ fn pin(c: &Connection, name: &str, set: &str, expect: &str, op: &str) -> Result<
 /// `SQLITE_DBCONFIG_DEFENSIVE` has no Turso equivalent; Turso refuses
 /// writes to `sqlite_schema` unconditionally, which is the part we need.
 fn pin_writer(c: &Connection, op: &str) -> Result<()> {
-    c.busy_timeout(Duration::ZERO).map_err(|e| sql(e, op, NOT_WRITTEN))?;
+    c.busy_timeout(Duration::ZERO)
+        .map_err(|e| sql(e, op, NOT_WRITTEN))?;
     pin(c, "synchronous", "FULL", "2", op)?;
     pin(c, "fullfsync", "1", "1", op)?;
     // No `checkpoint_fullfsync` in Turso (unknown pragma, silently ignored):
@@ -262,13 +306,18 @@ fn pin_writer(c: &Connection, op: &str) -> Result<()> {
     // covered by tests/guards.rs against the engine's actual behaviour.
     let bt = pragma_text(c, "busy_timeout").map_err(|e| sql(e, op, NOT_WRITTEN))?;
     if bt != "0" {
-        return Err(err(Code::Unsupported, "busy_timeout did not stick", json!({ "setting": "busy_timeout", "expected": "0", "actual": bt })));
+        return Err(err(
+            Code::Unsupported,
+            "busy_timeout did not stick",
+            json!({ "setting": "busy_timeout", "expected": "0", "actual": bt }),
+        ));
     }
     Ok(())
 }
 
 fn pin_reader(c: &Connection, op: &str) -> Result<()> {
-    c.busy_timeout(Duration::from_millis(READER_BUSY_MS)).map_err(|e| sql(e, op, NOT_WRITTEN))?;
+    c.busy_timeout(Duration::from_millis(READER_BUSY_MS))
+        .map_err(|e| sql(e, op, NOT_WRITTEN))?;
     pin(c, "foreign_keys", "1", "1", op)?;
     pin(c, "query_only", "1", "1", op)?;
     Ok(())
@@ -277,7 +326,8 @@ fn pin_reader(c: &Connection, op: &str) -> Result<()> {
 type SchemaRow = (String, String, String, Option<String>);
 
 fn schema_rows(c: &Connection) -> sql::SqlResult<Vec<SchemaRow>> {
-    let mut st = c.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")?;
+    let mut st =
+        c.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")?;
     let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
     rows.collect()
 }
@@ -285,10 +335,13 @@ fn schema_rows(c: &Connection) -> sql::SqlResult<Vec<SchemaRow>> {
 /// Step 5: the schema must equal the pinned DDL of version `v`, row for row.
 fn check_schema(c: &Connection, op: &str, v: u32) -> Result<()> {
     let mem = sql::open_in_memory().map_err(|e| sql(e, op, NOT_WRITTEN))?;
-    mem.execute_batch(&ddl(v)).map_err(|e| sql(e, op, NOT_WRITTEN))?;
+    mem.execute_batch(&ddl(v))
+        .map_err(|e| sql(e, op, NOT_WRITTEN))?;
     let want = schema_rows(&mem).map_err(|e| sql(e, op, NOT_WRITTEN))?;
     let got = schema_rows(c).map_err(|e| sql(e, op, NOT_WRITTEN))?;
-    let show = |r: Option<&SchemaRow>| r.map(|(t, n, tb, s)| json!({ "type": t, "name": n, "tbl_name": tb, "sql": s }));
+    let show = |r: Option<&SchemaRow>| {
+        r.map(|(t, n, tb, s)| json!({ "type": t, "name": n, "tbl_name": tb, "sql": s }))
+    };
     let n = want.len().max(got.len());
     for i in 0..n {
         let (w, g) = (want.get(i), got.get(i));
@@ -304,7 +357,9 @@ fn check_schema(c: &Connection, op: &str, v: u32) -> Result<()> {
 }
 
 fn quick_check_on(c: &Connection) -> Result<()> {
-    let mut st = c.prepare("PRAGMA quick_check").map_err(|e| sql(e, "quick_check", NOT_WRITTEN))?;
+    let mut st = c
+        .prepare("PRAGMA quick_check")
+        .map_err(|e| sql(e, "quick_check", NOT_WRITTEN))?;
     let rows: Vec<String> = st
         .query_map([], |r| r.get::<_, String>(0))
         .and_then(|it| it.collect())
@@ -313,7 +368,11 @@ fn quick_check_on(c: &Connection) -> Result<()> {
         return Ok(());
     }
     let first: Vec<&String> = rows.iter().take(10).collect();
-    Err(err(Code::Corrupt, "SQLite quick_check found damage", json!({ "reason": "sqlite", "messages": first })))
+    Err(err(
+        Code::Corrupt,
+        "SQLite quick_check found damage",
+        json!({ "reason": "sqlite", "messages": first }),
+    ))
 }
 
 /// Open one store connection (Turso, multi-process WAL). Under
@@ -347,7 +406,11 @@ impl Drop for Reader<'_> {
         if let Some(c) = self.conn.take()
             && c.is_autocommit()
         {
-            self.store.readers.lock().unwrap_or_else(|p| p.into_inner()).push(c);
+            self.store
+                .readers
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(c);
         }
     }
 }
@@ -363,7 +426,10 @@ impl Store {
             Some(c) => c,
             None => open_reader_conn(&self.db_path())?,
         };
-        Ok(Reader { store: self, conn: Some(c_or(conn)) })
+        Ok(Reader {
+            store: self,
+            conn: Some(c_or(conn)),
+        })
     }
 
     /// Run `f` inside one read transaction on a pooled reader.
@@ -467,17 +533,28 @@ impl Store {
             ));
         }
         check_header(&db)?;
-        let real_root = retry_eintr(|| fs::canonicalize(root)).map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
+        let real_root = retry_eintr(|| fs::canonicalize(root))
+            .map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
         let rdb = real_root.join("store").join("store.db");
         let c = open_reader_conn(&rdb)?;
         // Version and schema from one snapshot: a migration in the daemon
         // may land between any two statements otherwise.
-        read_txn(&c, "open", |c| check_identity(c, "open").and_then(|v| check_schema(c, "open", v)))?;
+        read_txn(&c, "open", |c| {
+            check_identity(c, "open").and_then(|v| check_schema(c, "open", v))
+        })?;
         Ok(new_store(root, real_root, true, c, None))
     }
 
     pub fn close(self) -> Result<()> {
-        let Store { real_root, read_only, db, readers, writer_lock, poisoned, .. } = self;
+        let Store {
+            real_root,
+            read_only,
+            db,
+            readers,
+            writer_lock,
+            poisoned,
+            ..
+        } = self;
         let readers = readers.into_inner().unwrap_or_else(|p| p.into_inner());
         for r in readers {
             let _ = r.close();
@@ -510,7 +587,10 @@ impl Store {
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) => {
                     let e = errors::io(&e, IoSide::Write, &marker, "close", NOT_WRITTEN);
-                    return Err(StrataError { code: Code::Unknown, ..e });
+                    return Err(StrataError {
+                        code: Code::Unknown,
+                        ..e
+                    });
                 }
             }
         }
@@ -528,7 +608,13 @@ fn c_or(c: Connection) -> Connection {
     c
 }
 
-fn new_store(root: &Path, real_root: PathBuf, read_only: bool, db: Connection, lock: Option<File>) -> Store {
+fn new_store(
+    root: &Path,
+    real_root: PathBuf,
+    read_only: bool,
+    db: Connection,
+    lock: Option<File>,
+) -> Store {
     Store {
         root: root.to_path_buf(),
         real_root,
@@ -595,7 +681,8 @@ fn create(root: &Path, anc: &Path) -> Result<Store> {
     let probe = tmp.join(format!("probe-{}", hex32()));
     let probe2 = tmp.join(format!("probe-{}", hex32()));
     let probed = (|| -> Result<()> {
-        fs::write(&probe, b"strata clone probe\n").map_err(|e| ioe(&e, IoSide::Write, &probe, "init"))?;
+        fs::write(&probe, b"strata clone probe\n")
+            .map_err(|e| ioe(&e, IoSide::Write, &probe, "init"))?;
         strata_apfs::clone_file(&probe, &probe2)
     })();
     let _ = fs::remove_file(&probe2);
@@ -639,9 +726,12 @@ fn create(root: &Path, anc: &Path) -> Result<Store> {
             ));
         }
         pin_writer(&c, "init")?;
-        c.execute_batch(&format!("BEGIN IMMEDIATE;\n{}\nCOMMIT;", ddl(LATEST))).map_err(|e| sql(e, "init", NOT_WRITTEN))?;
+        c.execute_batch(&format!("BEGIN IMMEDIATE;\n{}\nCOMMIT;", ddl(LATEST)))
+            .map_err(|e| sql(e, "init", NOT_WRITTEN))?;
         let ck: Vec<i64> = c
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok(vec![r.get(0)?, r.get(1)?, r.get(2)?]))
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok(vec![r.get(0)?, r.get(1)?, r.get(2)?])
+            })
             .map_err(|e| sql(e, "init", NOT_WRITTEN))?;
         if ck[0] != 0 {
             return Err(err(
@@ -685,11 +775,13 @@ fn open_existing(root: &Path, lock: Option<File>) -> Result<Store> {
     };
     let db = store_dir.join("store.db");
     check_header(&db)?;
-    let real_root = retry_eintr(|| fs::canonicalize(root)).map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
+    let real_root =
+        retry_eintr(|| fs::canonicalize(root)).map_err(|e| ioe(&e, IoSide::Read, root, "open"))?;
     let rstore = real_root.join("store");
     let rdb = rstore.join("store.db");
     let c = open_conn(&rdb).map_err(|e| sql(e, "open", NOT_WRITTEN))?;
-    c.busy_timeout(Duration::ZERO).map_err(|e| sql(e, "open", NOT_WRITTEN))?;
+    c.busy_timeout(Duration::ZERO)
+        .map_err(|e| sql(e, "open", NOT_WRITTEN))?;
     let v = check_identity(&c, "open")?;
     pin_writer(&c, "open")?;
     check_schema(&c, "open", v)?;
@@ -700,7 +792,10 @@ fn open_existing(root: &Path, lock: Option<File>) -> Result<Store> {
     if exists(&marker).map_err(|e| ioe(&e, IoSide::Read, &marker, "open"))? {
         fs::remove_file(&marker).map_err(|e| {
             let e = errors::io(&e, IoSide::Write, &marker, "open", NOT_WRITTEN);
-            StrataError { code: Code::Unknown, ..e }
+            StrataError {
+                code: Code::Unknown,
+                ..e
+            }
         })?;
         full_sync_path(&rstore, "open", errors::UNCERTAIN)?;
     } else {
@@ -724,10 +819,12 @@ const CHECKPOINT_WAIT: Duration = Duration::from_secs(5);
 /// other writer (or checkpointer) exists; read-only connections may.
 fn migrate(c: &Connection, rstore: &Path, rdb: &Path, from: u32) -> Result<()> {
     let backup = backup(c, rstore, rdb, from)?;
-    c.execute_batch("BEGIN IMMEDIATE").map_err(|e| sql(e, MIGRATE, NOT_WRITTEN))?;
+    c.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| sql(e, MIGRATE, NOT_WRITTEN))?;
     let applied = (|| -> Result<()> {
         for m in pending(from) {
-            c.execute_batch(m.sql).map_err(|e| errors::with(sql(e, MIGRATE, NOT_WRITTEN), "migration", m.name))?;
+            c.execute_batch(m.sql)
+                .map_err(|e| errors::with(sql(e, MIGRATE, NOT_WRITTEN), "migration", m.name))?;
         }
         // Validate inside the transaction (it sees its own schema), so
         // nothing that can fail as NOT_WRITTEN runs after COMMIT.
@@ -765,7 +862,10 @@ fn migrate(c: &Connection, rstore: &Path, rdb: &Path, from: u32) -> Result<()> {
         v.fail_next.store(false, Ordering::SeqCst);
     }
     if let Err(e) = res {
-        let definite = matches!(&e, turso::Error::Constraint(_) | turso::Error::Busy(_) | turso::Error::BusySnapshot(_));
+        let definite = matches!(
+            &e,
+            turso::Error::Constraint(_) | turso::Error::Busy(_) | turso::Error::BusySnapshot(_)
+        );
         let _ = c.execute_batch("ROLLBACK");
         if definite {
             return Err(sql(e, MIGRATE, NOT_WRITTEN));
@@ -777,7 +877,9 @@ fn migrate(c: &Connection, rstore: &Path, rdb: &Path, from: u32) -> Result<()> {
         let msg = e.to_string();
         return Err(err(
             Code::Unknown,
-            format!("COMMIT of the schema migration {from} -> {LATEST} failed; whether it reached the disk is unknown (restart the process to recover): {msg}"),
+            format!(
+                "COMMIT of the schema migration {from} -> {LATEST} failed; whether it reached the disk is unknown (restart the process to recover): {msg}"
+            ),
             json!({ "op": MIGRATE, "outcome": errors::UNCERTAIN, "reason": "migration_commit", "from": from, "to": LATEST, "backup": backup.to_string_lossy(), "message": msg }),
         ));
     }
@@ -790,7 +892,10 @@ fn migrate(c: &Connection, rstore: &Path, rdb: &Path, from: u32) -> Result<()> {
     // effort and only tidies the file: if it fails, the header still says
     // `from` (an accepted value) until a later checkpoint.
     let _ = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |_| Ok(()));
-    eprintln!("git-strata: store schema migrated {from} -> {LATEST}; a copy of the v{from} store is at {}", backup.display());
+    eprintln!(
+        "git-strata: store schema migrated {from} -> {LATEST}; a copy of the v{from} store is at {}",
+        backup.display()
+    );
     Ok(())
 }
 
@@ -802,7 +907,9 @@ fn backup(c: &Connection, rstore: &Path, rdb: &Path, from: u32) -> Result<PathBu
     let deadline = Instant::now() + CHECKPOINT_WAIT;
     loop {
         let ck: Vec<sql::Value> = c
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok(vec![r.get(0)?, r.get(1)?, r.get(2)?]))
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok(vec![r.get(0)?, r.get(1)?, r.get(2)?])
+            })
             .map_err(|e| sql(e, OP, NOT_WRITTEN))?;
         let wal_len = match fs::metadata(&wal) {
             Ok(m) => m.len(),
@@ -827,7 +934,10 @@ fn backup(c: &Connection, rstore: &Path, rdb: &Path, from: u32) -> Result<PathBu
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
         Err(e) => return Err(ioe(&e, IoSide::Write, &dir, OP)),
     };
-    let ns = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let dst = dir.join(format!("store-v{from}-{ns}.db"));
     let done = (|| -> Result<()> {
         strata_apfs::clone_file(rdb, &dst).map_err(|e| errors::annotate(e, OP, NOT_WRITTEN))?;
@@ -853,7 +963,9 @@ fn verify_backup(p: &Path, from: u32) -> Result<()> {
     let bad = |what: String| {
         err(
             Code::Unknown,
-            format!("the pre-migration backup {shown} is not a whole v{from} store ({what}); nothing migrated"),
+            format!(
+                "the pre-migration backup {shown} is not a whole v{from} store ({what}); nothing migrated"
+            ),
             json!({ "reason": "migration_backup", "op": "migrate_backup", "outcome": NOT_WRITTEN, "path": shown }),
         )
     };
@@ -862,7 +974,11 @@ fn verify_backup(p: &Path, from: u32) -> Result<()> {
     }
     let be = |o: usize| u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
     if be(68) != APPLICATION_ID as u32 || be(60) != from {
-        return Err(bad(format!("application_id {} user_version {}", be(68), be(60))));
+        return Err(bad(format!(
+            "application_id {} user_version {}",
+            be(68),
+            be(60)
+        )));
     }
     let ps = match u16::from_be_bytes([bytes[16], bytes[17]]) {
         1 => 65536u64,
@@ -870,7 +986,10 @@ fn verify_backup(p: &Path, from: u32) -> Result<()> {
     };
     let pages = be(28) as u64;
     if pages == 0 || ps * pages != bytes.len() as u64 {
-        return Err(bad(format!("{pages} pages of {ps} bytes but {} bytes long", bytes.len())));
+        return Err(bad(format!(
+            "{pages} pages of {ps} bytes but {} bytes long",
+            bytes.len()
+        )));
     }
     Ok(())
 }

@@ -115,7 +115,10 @@ const IMMUTABLE: [(&str, &str); 11] = [
     ("overlay_entries", "mode = 33261"),
     ("publish_items", "path = 'b'"),
     ("refs_audit", "detail = 'x'"),
-    ("sync_move_history", "resolution_json = '{\"keep\":[\"a\"]}'"),
+    (
+        "sync_move_history",
+        "resolution_json = '{\"keep\":[\"a\"]}'",
+    ),
 ];
 
 #[test]
@@ -126,15 +129,39 @@ fn committed_rows_are_immutable() {
     tables.push(("gc_runs", "outcome = 'partial'"));
     for (t, set) in tables {
         let before = dump(c, t);
-        refused(c, &format!("UPDATE {t} SET {set}"), &format!("immutable: {t}"));
+        refused(
+            c,
+            &format!("UPDATE {t} SET {set}"),
+            &format!("immutable: {t}"),
+        );
         assert_eq!(dump(c, t), before, "{t} changed");
     }
     // the immutable key columns of the mutable tables
-    refused(c, "UPDATE sessions SET root = '/elsewhere'", "illegal update: sessions");
-    refused(c, "UPDATE workspaces SET path = '/elsewhere'", "illegal update: workspaces");
-    refused(c, "UPDATE deps_attempts SET staging = '/elsewhere'", "illegal update: deps_attempts");
-    refused(c, "UPDATE deps_main SET repo = 'q'", "illegal update: deps_main");
-    refused(c, "UPDATE publishes SET started_ns = 5", "illegal update: publishes");
+    refused(
+        c,
+        "UPDATE sessions SET root = '/elsewhere'",
+        "illegal update: sessions",
+    );
+    refused(
+        c,
+        "UPDATE workspaces SET path = '/elsewhere'",
+        "illegal update: workspaces",
+    );
+    refused(
+        c,
+        "UPDATE deps_attempts SET staging = '/elsewhere'",
+        "illegal update: deps_attempts",
+    );
+    refused(
+        c,
+        "UPDATE deps_main SET repo = 'q'",
+        "illegal update: deps_main",
+    );
+    refused(
+        c,
+        "UPDATE publishes SET started_ns = 5",
+        "illegal update: publishes",
+    );
     // REPLACE's implicit delete should hit the delete guard. ENGINE GAP
     // (Turso 0.8.3 through 0.9.0-pre.5, docs/impl-progress/store.md "Engine: Turso"): there is no
     // recursive_triggers, so REPLACE deletes the old row without firing the
@@ -143,13 +170,24 @@ fn committed_rows_are_immutable() {
     // client can do so a Turso fix shows up here.
     let before = dump(c, "blobs");
     let replace = [
-        ("blobs", format!("INSERT OR REPLACE INTO blobs VALUES ('{B}', 9, 9)")),
-        ("deps_sets", format!("INSERT OR REPLACE INTO deps_sets VALUES ('r', '{D}', '{I}', 'z', 'z', '[]', 'empty', 9)")),
+        (
+            "blobs",
+            format!("INSERT OR REPLACE INTO blobs VALUES ('{B}', 9, 9)"),
+        ),
+        (
+            "deps_sets",
+            format!(
+                "INSERT OR REPLACE INTO deps_sets VALUES ('r', '{D}', '{I}', 'z', 'z', '[]', 'empty', 9)"
+            ),
+        ),
     ];
     let mut gap = false;
     for (t, q) in &replace {
         match exec(c, q) {
-            Err(m) => assert!(m.contains(&format!("delete outside gc: {t}")) || m.contains("FOREIGN KEY"), "{t}: {m}"),
+            Err(m) => assert!(
+                m.contains(&format!("delete outside gc: {t}")) || m.contains("FOREIGN KEY"),
+                "{t}: {m}"
+            ),
             Ok(()) => {
                 eprintln!("ENGINE GAP: INSERT OR REPLACE into {t} bypassed the delete guard");
                 gap = true;
@@ -174,10 +212,20 @@ fn committed_rows_are_immutable() {
     assert_eq!(one(c, "SELECT count(*) FROM blobs"), n0);
     // base and deps rows are as first written (unless REPLACE got through)
     if !gap {
-        assert_eq!(dump(c, "deps_sets")[0], format!("Text(\"r\")|Text(\"{D}\")|Text(\"{I}\")|Text(\"p\")|Text(\"t\")|Text(\"[]\")|Text(\"empty\")|Integer(0)|"));
+        assert_eq!(
+            dump(c, "deps_sets")[0],
+            format!(
+                "Text(\"r\")|Text(\"{D}\")|Text(\"{I}\")|Text(\"p\")|Text(\"t\")|Text(\"[]\")|Text(\"empty\")|Integer(0)|"
+            )
+        );
     }
     #[cfg(any())]
-    assert_eq!(dump(c, "deps_sets")[0], format!("Text(\"r\")|Text(\"{D}\")|Text(\"{I}\")|Text(\"p\")|Text(\"t\")|Text(\"[]\")|Text(\"empty\")|Integer(0)|"));
+    assert_eq!(
+        dump(c, "deps_sets")[0],
+        format!(
+            "Text(\"r\")|Text(\"{D}\")|Text(\"{I}\")|Text(\"p\")|Text(\"t\")|Text(\"[]\")|Text(\"empty\")|Integer(0)|"
+        )
+    );
     assert_eq!(one(c, "SELECT files FROM base_trees"), "Integer(1)");
 }
 
@@ -207,14 +255,21 @@ fn delete_outside_gc_is_refused() {
     for t in GC_TABLES {
         let before = dump(c, t);
         assert!(!before.is_empty(), "fixture leaves {t} empty");
-        refused(c, &format!("DELETE FROM {t}"), &format!("delete outside gc: {t}"));
+        refused(
+            c,
+            &format!("DELETE FROM {t}"),
+            &format!("delete outside gc: {t}"),
+        );
         assert_eq!(dump(c, t), before);
     }
     // a connection without the function (like the sqlite3 CLI) cannot delete either
     let b = bare(&f._env.db());
     for t in GC_TABLES {
         let n = one(&b, &format!("SELECT count(*) FROM {t}"));
-        assert!(exec(&b, &format!("DELETE FROM {t}")).is_err(), "{t}: bare delete succeeded");
+        assert!(
+            exec(&b, &format!("DELETE FROM {t}")).is_err(),
+            "{t}: bare delete succeeded"
+        );
         assert_eq!(one(&b, &format!("SELECT count(*) FROM {t}")), n);
     }
     drop(b);
@@ -227,7 +282,11 @@ fn delete_outside_gc_is_refused() {
     // children first, then parents
     for t in GC_TABLES {
         ok(c, &format!("DELETE FROM {t}"));
-        assert_eq!(one(c, &format!("SELECT count(*) FROM {t}")), "Integer(0)", "{t}");
+        assert_eq!(
+            one(c, &format!("SELECT count(*) FROM {t}")),
+            "Integer(0)",
+            "{t}"
+        );
     }
     for t in ["publish_items", "refs_audit", "publishes"] {
         let before = dump(c, t);
@@ -240,7 +299,11 @@ fn delete_outside_gc_is_refused() {
 
 fn lifecycle_set(to: &str, from: &str) -> String {
     let removed = if to == "removed" { "1" } else { "NULL" };
-    let scene = if to == "unknown" && from != "unknown" { "'{\"new\":1}'" } else { "scene" };
+    let scene = if to == "unknown" && from != "unknown" {
+        "'{\"new\":1}'"
+    } else {
+        "scene"
+    };
     format!("lifecycle = '{to}', removed_ns = {removed}, scene = {scene}")
 }
 
@@ -257,7 +320,13 @@ fn session_in(c: &Connection, id: &str, state: &str) {
     };
     let mut from = "creating";
     for to in path {
-        ok(c, &format!("UPDATE sessions SET {} WHERE id = '{id}'", lifecycle_set(to, from)));
+        ok(
+            c,
+            &format!(
+                "UPDATE sessions SET {} WHERE id = '{id}'",
+                lifecycle_set(to, from)
+            ),
+        );
         from = to;
     }
 }
@@ -287,7 +356,10 @@ fn state_graphs_are_enforced_by_triggers() {
             let id = format!("s-{}", sid(k));
             session_in(c, &id, from);
             let before = dump_where(c, "sessions", &id);
-            let sql = format!("UPDATE sessions SET {} WHERE id = '{id}'", lifecycle_set(to, from));
+            let sql = format!(
+                "UPDATE sessions SET {} WHERE id = '{id}'",
+                lifecycle_set(to, from)
+            );
             if allowed.contains(&(from, to)) {
                 ok(c, &sql);
             } else {
@@ -298,38 +370,87 @@ fn state_graphs_are_enforced_by_triggers() {
     }
     // phase only in creating / removing; scene only on entering unknown
     session_in(c, "s-phaseaaa", "creating");
-    ok(c, "UPDATE sessions SET phase = 'p1' WHERE id = 's-phaseaaa'");
-    ok(c, "UPDATE sessions SET lifecycle = 'active' WHERE id = 's-phaseaaa'");
-    refused(c, "UPDATE sessions SET phase = 'p2' WHERE id = 's-phaseaaa'", "illegal update: sessions");
-    refused(c, "UPDATE sessions SET scene = '{}' WHERE id = 's-phaseaaa'", "illegal update: sessions");
-    refused(c, "INSERT INTO sessions VALUES ('s-bbbbbbbb', NULL, '/q', 'active', NULL, NULL, 0, NULL, NULL)", "illegal insert: sessions");
+    ok(
+        c,
+        "UPDATE sessions SET phase = 'p1' WHERE id = 's-phaseaaa'",
+    );
+    ok(
+        c,
+        "UPDATE sessions SET lifecycle = 'active' WHERE id = 's-phaseaaa'",
+    );
+    refused(
+        c,
+        "UPDATE sessions SET phase = 'p2' WHERE id = 's-phaseaaa'",
+        "illegal update: sessions",
+    );
+    refused(
+        c,
+        "UPDATE sessions SET scene = '{}' WHERE id = 's-phaseaaa'",
+        "illegal update: sessions",
+    );
+    refused(
+        c,
+        "INSERT INTO sessions VALUES ('s-bbbbbbbb', NULL, '/q', 'active', NULL, NULL, 0, NULL, NULL)",
+        "illegal insert: sessions",
+    );
 
     // ---- intents: insert guard
     session_in(c, "s-intentaa", "active");
     let w = "session = 's-intentaa' AND repo = 'r'";
     let ins = |n: i64| {
-        format!("INSERT INTO move_intents VALUES ('s-intentaa', 'r', {n}, '{T}', '{D2}', '{H}', '/stg', NULL, 'preparing', NULL, NULL, 0, NULL)")
+        format!(
+            "INSERT INTO move_intents VALUES ('s-intentaa', 'r', {n}, '{T}', '{D2}', '{H}', '/stg', NULL, 'preparing', NULL, NULL, 0, NULL)"
+        )
     };
     ok(c, &ins(2));
     refused(c, &ins(3), "UNIQUE"); // one open intent per workspace
-    ok(c, &format!("UPDATE move_intents SET state = 'refused', ended_ns = 1 WHERE {w} AND n = 2"));
+    ok(
+        c,
+        &format!("UPDATE move_intents SET state = 'refused', ended_ns = 1 WHERE {w} AND n = 2"),
+    );
     refused(c, &ins(2), "illegal insert: move_intents");
     ok(c, &ins(3));
-    ok(c, &format!("UPDATE move_intents SET state = 'abandoned', ended_ns = 1 WHERE {w} AND n = 3"));
+    ok(
+        c,
+        &format!("UPDATE move_intents SET state = 'abandoned', ended_ns = 1 WHERE {w} AND n = 3"),
+    );
     refused(
         c,
-        &format!("INSERT INTO move_intents VALUES ('s-intentaa', 'r', 9, '{T}', '{D2}', '{H}', '/stg', NULL, 'swapping', '[]', NULL, 0, NULL)"),
+        &format!(
+            "INSERT INTO move_intents VALUES ('s-intentaa', 'r', 9, '{T}', '{D2}', '{H}', '/stg', NULL, 'swapping', '[]', NULL, 0, NULL)"
+        ),
         "illegal insert: move_intents",
     );
     // n must exceed the workspace generation too
     ok(c, &ins(4));
-    ok(c, &format!("UPDATE move_intents SET state = 'swapping', conflicts = '[]' WHERE {w} AND n = 4"));
-    ok(c, &format!("UPDATE workspaces SET base_gen = 2, generation = 4, conflicts = '[]' WHERE {w}"));
-    ok(c, &format!("UPDATE move_intents SET state = 'done', ended_ns = 1 WHERE {w} AND n = 4"));
-    assert_eq!(one(c, &format!("SELECT generation FROM workspaces WHERE {w}")), "Integer(4)");
+    ok(
+        c,
+        &format!(
+            "UPDATE move_intents SET state = 'swapping', conflicts = '[]' WHERE {w} AND n = 4"
+        ),
+    );
+    ok(
+        c,
+        &format!("UPDATE workspaces SET base_gen = 2, generation = 4, conflicts = '[]' WHERE {w}"),
+    );
+    ok(
+        c,
+        &format!("UPDATE move_intents SET state = 'done', ended_ns = 1 WHERE {w} AND n = 4"),
+    );
+    assert_eq!(
+        one(c, &format!("SELECT generation FROM workspaces WHERE {w}")),
+        "Integer(4)"
+    );
 
     // ---- intents: every pair of states (unknown → done | abandoned is conditional, tested below)
-    let states = ["preparing", "swapping", "done", "refused", "abandoned", "unknown"];
+    let states = [
+        "preparing",
+        "swapping",
+        "done",
+        "refused",
+        "abandoned",
+        "unknown",
+    ];
     let allowed = [
         ("preparing", "preparing"),
         ("swapping", "swapping"),
@@ -347,9 +468,21 @@ fn state_graphs_are_enforced_by_triggers() {
             session_in(c, &id, "creating");
             intent_in(c, &id, from);
             let w = format!("session = '{id}' AND repo = 'r' AND n = 2");
-            let ended = if matches!(to, "preparing" | "swapping") { "NULL".to_string() } else if from == to { "ended_ns".into() } else { "7".into() };
-            let conflicts = if from == "preparing" && to == "swapping" { "'[]'" } else { "conflicts" };
-            let sql = format!("UPDATE move_intents SET state = '{to}', ended_ns = {ended}, conflicts = {conflicts} WHERE {w}");
+            let ended = if matches!(to, "preparing" | "swapping") {
+                "NULL".to_string()
+            } else if from == to {
+                "ended_ns".into()
+            } else {
+                "7".into()
+            };
+            let conflicts = if from == "preparing" && to == "swapping" {
+                "'[]'"
+            } else {
+                "conflicts"
+            };
+            let sql = format!(
+                "UPDATE move_intents SET state = '{to}', ended_ns = {ended}, conflicts = {conflicts} WHERE {w}"
+            );
             let before = dump_where(c, "move_intents", &id);
             if allowed.contains(&(from, to)) {
                 ok(c, &sql);
@@ -363,48 +496,128 @@ fn state_graphs_are_enforced_by_triggers() {
     session_in(c, "s-conflict", "active");
     intent_in(c, "s-conflict", "preparing");
     let w = "session = 's-conflict' AND repo = 'r' AND n = 2";
-    refused(c, &format!("UPDATE move_intents SET state = 'swapping' WHERE {w}"), "CHECK constraint failed");
-    refused(c, &format!("UPDATE move_intents SET conflicts = '[]' WHERE {w}"), "illegal update: move_intents");
-    ok(c, &format!("UPDATE move_intents SET state = 'swapping', conflicts = '[\"a\"]' WHERE {w}"));
-    refused(c, &format!("UPDATE move_intents SET conflicts = '[]' WHERE {w}"), "illegal update: move_intents");
+    refused(
+        c,
+        &format!("UPDATE move_intents SET state = 'swapping' WHERE {w}"),
+        "CHECK constraint failed",
+    );
+    refused(
+        c,
+        &format!("UPDATE move_intents SET conflicts = '[]' WHERE {w}"),
+        "illegal update: move_intents",
+    );
+    ok(
+        c,
+        &format!("UPDATE move_intents SET state = 'swapping', conflicts = '[\"a\"]' WHERE {w}"),
+    );
+    refused(
+        c,
+        &format!("UPDATE move_intents SET conflicts = '[]' WHERE {w}"),
+        "illegal update: move_intents",
+    );
     ok(c, &format!("UPDATE move_intents SET phase = 'p' WHERE {w}"));
-    ok(c, &format!("UPDATE move_intents SET state = 'unknown', ended_ns = 1 WHERE {w}"));
-    refused(c, &format!("UPDATE move_intents SET phase = 'q' WHERE {w}"), "illegal update: move_intents");
+    ok(
+        c,
+        &format!("UPDATE move_intents SET state = 'unknown', ended_ns = 1 WHERE {w}"),
+    );
+    refused(
+        c,
+        &format!("UPDATE move_intents SET phase = 'q' WHERE {w}"),
+        "illegal update: move_intents",
+    );
 
     // ---- workspaces: base/head/generation only to the intent with the largest n
     let ws = "session = 's-conflict' AND repo = 'r'";
-    refused(c, &format!("UPDATE workspaces SET head = '{T}' WHERE {ws}"), "illegal update: workspaces");
-    refused(c, &format!("UPDATE workspaces SET base_gen = 2, generation = 3 WHERE {ws}"), "illegal update: workspaces");
+    refused(
+        c,
+        &format!("UPDATE workspaces SET head = '{T}' WHERE {ws}"),
+        "illegal update: workspaces",
+    );
+    refused(
+        c,
+        &format!("UPDATE workspaces SET base_gen = 2, generation = 3 WHERE {ws}"),
+        "illegal update: workspaces",
+    );
     // health ok → unknown writes the scene; scene never changes otherwise
-    refused(c, &format!("UPDATE workspaces SET scene = '{{}}' WHERE {ws}"), "illegal update: workspaces");
-    ok(c, &format!("UPDATE workspaces SET health = 'unknown', scene = '{{\"s\":1}}' WHERE {ws}"));
-    refused(c, &format!("UPDATE workspaces SET scene = '{{\"s\":2}}' WHERE {ws}"), "illegal update: workspaces");
+    refused(
+        c,
+        &format!("UPDATE workspaces SET scene = '{{}}' WHERE {ws}"),
+        "illegal update: workspaces",
+    );
+    ok(
+        c,
+        &format!("UPDATE workspaces SET health = 'unknown', scene = '{{\"s\":1}}' WHERE {ws}"),
+    );
+    refused(
+        c,
+        &format!("UPDATE workspaces SET scene = '{{\"s\":2}}' WHERE {ws}"),
+        "illegal update: workspaces",
+    );
     // unknown intent → done needs the workspace back to Ok first
-    refused(c, &format!("UPDATE move_intents SET state = 'done' WHERE {w}"), "illegal update: move_intents");
+    refused(
+        c,
+        &format!("UPDATE move_intents SET state = 'done' WHERE {w}"),
+        "illegal update: move_intents",
+    );
     // unknown → ok only while the session is active and the latest intent is unknown
-    ok(c, "UPDATE sessions SET lifecycle = 'removing' WHERE id = 's-conflict'");
-    refused(c, &format!("UPDATE workspaces SET health = 'ok' WHERE {ws}"), "illegal update: workspaces");
+    ok(
+        c,
+        "UPDATE sessions SET lifecycle = 'removing' WHERE id = 's-conflict'",
+    );
+    refused(
+        c,
+        &format!("UPDATE workspaces SET health = 'ok' WHERE {ws}"),
+        "illegal update: workspaces",
+    );
     // (a fresh session for the positive path)
     session_in(c, "s-resolvea", "active");
     intent_in(c, "s-resolvea", "unknown");
     let ws = "session = 's-resolvea' AND repo = 'r'";
     let w = "session = 's-resolvea' AND repo = 'r' AND n = 2";
     // accept: workspace to Ok at generation n, then the intent to done
-    refused(c, &format!("UPDATE workspaces SET base_gen = 2, generation = 3, health = 'ok' WHERE {ws}"), "illegal update: workspaces");
-    ok(c, &format!("UPDATE workspaces SET base_gen = 2, generation = 2, health = 'ok' WHERE {ws}"));
+    refused(
+        c,
+        &format!("UPDATE workspaces SET base_gen = 2, generation = 3, health = 'ok' WHERE {ws}"),
+        "illegal update: workspaces",
+    );
+    ok(
+        c,
+        &format!("UPDATE workspaces SET base_gen = 2, generation = 2, health = 'ok' WHERE {ws}"),
+    );
     let scene_kept = one(c, &format!("SELECT scene FROM workspaces WHERE {ws}"));
     assert!(scene_kept.contains("Text"), "scene stays as history");
-    refused(c, &format!("UPDATE move_intents SET state = 'abandoned' WHERE {w}"), "illegal update: move_intents");
-    ok(c, &format!("UPDATE move_intents SET state = 'done', old_tree = '/old' WHERE {w}"));
-    refused(c, &format!("UPDATE move_intents SET old_tree = '/other' WHERE {w}"), "illegal update: move_intents");
+    refused(
+        c,
+        &format!("UPDATE move_intents SET state = 'abandoned' WHERE {w}"),
+        "illegal update: move_intents",
+    );
+    ok(
+        c,
+        &format!("UPDATE move_intents SET state = 'done', old_tree = '/old' WHERE {w}"),
+    );
+    refused(
+        c,
+        &format!("UPDATE move_intents SET old_tree = '/other' WHERE {w}"),
+        "illegal update: move_intents",
+    );
     // reject: workspace to Ok without moving, then the intent to abandoned
     session_in(c, "s-rejectaa", "active");
     intent_in(c, "s-rejectaa", "unknown");
     let ws = "session = 's-rejectaa' AND repo = 'r'";
     let w = "session = 's-rejectaa' AND repo = 'r' AND n = 2";
-    ok(c, &format!("UPDATE workspaces SET health = 'ok' WHERE {ws}"));
-    refused(c, &format!("UPDATE move_intents SET state = 'done' WHERE {w}"), "illegal update: move_intents");
-    ok(c, &format!("UPDATE move_intents SET state = 'abandoned' WHERE {w}"));
+    ok(
+        c,
+        &format!("UPDATE workspaces SET health = 'ok' WHERE {ws}"),
+    );
+    refused(
+        c,
+        &format!("UPDATE move_intents SET state = 'done' WHERE {w}"),
+        "illegal update: move_intents",
+    );
+    ok(
+        c,
+        &format!("UPDATE move_intents SET state = 'abandoned' WHERE {w}"),
+    );
     // untracked workspaces never move
     c.execute_batch(&format!(
         "INSERT INTO sessions VALUES ('s-untracka', NULL, '/w/u', 'creating', NULL, NULL, 0, NULL, NULL);
@@ -412,10 +625,16 @@ fn state_graphs_are_enforced_by_triggers() {
     ))
     .unwrap();
     intent_raw(c, "s-untracka");
-    refused(c, "UPDATE workspaces SET base_gen = 2, generation = 2 WHERE session = 's-untracka'", "illegal update: workspaces");
     refused(
         c,
-        &format!("INSERT INTO workspaces VALUES ('s-untracka', 'q', 1, '{H}', '/w/u/q', 1, 2, 'ok', NULL, '[]')"),
+        "UPDATE workspaces SET base_gen = 2, generation = 2 WHERE session = 's-untracka'",
+        "illegal update: workspaces",
+    );
+    refused(
+        c,
+        &format!(
+            "INSERT INTO workspaces VALUES ('s-untracka', 'q', 1, '{H}', '/w/u/q', 1, 2, 'ok', NULL, '[]')"
+        ),
         "illegal insert: workspaces",
     );
 
@@ -428,21 +647,52 @@ fn state_graphs_are_enforced_by_triggers() {
         c.last_insert_rowid()
     };
     let a = att(c);
-    ok(c, &format!("UPDATE deps_attempts SET pid = 42 WHERE id = {a}"));
-    refused(c, &format!("UPDATE deps_attempts SET pid = 43 WHERE id = {a}"), "illegal update: deps_attempts");
-    ok(c, &format!("UPDATE deps_attempts SET state = 'sealed', ended_ns = 1 WHERE id = {a}"));
+    ok(
+        c,
+        &format!("UPDATE deps_attempts SET pid = 42 WHERE id = {a}"),
+    );
+    refused(
+        c,
+        &format!("UPDATE deps_attempts SET pid = 43 WHERE id = {a}"),
+        "illegal update: deps_attempts",
+    );
+    ok(
+        c,
+        &format!("UPDATE deps_attempts SET state = 'sealed', ended_ns = 1 WHERE id = {a}"),
+    );
     for to in ["running", "failed", "refused", "sealed"] {
-        refused(c, &format!("UPDATE deps_attempts SET state = '{to}', ended_ns = 2, error = '{{}}' WHERE id = {a}"), "illegal update: deps_attempts");
+        refused(
+            c,
+            &format!(
+                "UPDATE deps_attempts SET state = '{to}', ended_ns = 2, error = '{{}}' WHERE id = {a}"
+            ),
+            "illegal update: deps_attempts",
+        );
     }
     for to in ["failed", "refused"] {
         let a = att(c);
-        refused(c, &format!("UPDATE deps_attempts SET state = '{to}', ended_ns = 1 WHERE id = {a}"), "CHECK constraint failed");
-        ok(c, &format!("UPDATE deps_attempts SET state = '{to}', ended_ns = 1, error = '{{\"code\":\"x\"}}' WHERE id = {a}"));
-        refused(c, &format!("UPDATE deps_attempts SET state = 'sealed', error = NULL WHERE id = {a}"), "illegal update: deps_attempts");
+        refused(
+            c,
+            &format!("UPDATE deps_attempts SET state = '{to}', ended_ns = 1 WHERE id = {a}"),
+            "CHECK constraint failed",
+        );
+        ok(
+            c,
+            &format!(
+                "UPDATE deps_attempts SET state = '{to}', ended_ns = 1, error = '{{\"code\":\"x\"}}' WHERE id = {a}"
+            ),
+        );
+        refused(
+            c,
+            &format!("UPDATE deps_attempts SET state = 'sealed', error = NULL WHERE id = {a}"),
+            "illegal update: deps_attempts",
+        );
     }
     refused(
         c,
-        &format!("INSERT INTO deps_attempts (repo, set_id, kind, state, staging, started_ns, ended_ns) VALUES ('q', '{D2}', 'adopt', 'sealed', '/st', 0, 1)"),
+        &format!(
+            "INSERT INTO deps_attempts (repo, set_id, kind, state, staging, started_ns, ended_ns) VALUES ('q', '{D2}', 'adopt', 'sealed', '/st', 0, 1)"
+        ),
         "illegal insert: deps_attempts",
     );
 
@@ -457,17 +707,56 @@ fn state_graphs_are_enforced_by_triggers() {
     };
     let p1 = prop(c, "s-p1aaaaaa");
     let p2 = prop(c, "s-p2aaaaaa");
-    refused(c, &format!("UPDATE deps_proposals SET state = 'applied', tree = '{T}', head = '{H}' WHERE id = {p1}"), "illegal update: deps_proposals");
-    ok(c, &format!("UPDATE deps_proposals SET state = 'pending', tree = '{T}', head = '{H}' WHERE id = {p1}"));
-    refused(c, &format!("UPDATE deps_proposals SET tree = '{H}', head = '{T}' WHERE id = {p1}"), "illegal update: deps_proposals");
-    refused(c, &format!("UPDATE deps_proposals SET state = 'awaiting_publish', tree = NULL, head = NULL WHERE id = {p1}"), "illegal update: deps_proposals");
-    ok(c, &format!("UPDATE deps_proposals SET state = 'applied' WHERE id = {p1}"));
+    refused(
+        c,
+        &format!(
+            "UPDATE deps_proposals SET state = 'applied', tree = '{T}', head = '{H}' WHERE id = {p1}"
+        ),
+        "illegal update: deps_proposals",
+    );
+    ok(
+        c,
+        &format!(
+            "UPDATE deps_proposals SET state = 'pending', tree = '{T}', head = '{H}' WHERE id = {p1}"
+        ),
+    );
+    refused(
+        c,
+        &format!("UPDATE deps_proposals SET tree = '{H}', head = '{T}' WHERE id = {p1}"),
+        "illegal update: deps_proposals",
+    );
+    refused(
+        c,
+        &format!(
+            "UPDATE deps_proposals SET state = 'awaiting_publish', tree = NULL, head = NULL WHERE id = {p1}"
+        ),
+        "illegal update: deps_proposals",
+    );
+    ok(
+        c,
+        &format!("UPDATE deps_proposals SET state = 'applied' WHERE id = {p1}"),
+    );
     for to in ["pending", "superseded", "awaiting_publish", "applied"] {
-        refused(c, &format!("UPDATE deps_proposals SET state = '{to}' WHERE id = {p1}"), "illegal update: deps_proposals");
+        refused(
+            c,
+            &format!("UPDATE deps_proposals SET state = '{to}' WHERE id = {p1}"),
+            "illegal update: deps_proposals",
+        );
     }
-    ok(c, &format!("UPDATE deps_proposals SET state = 'superseded', superseded_by = {p1} WHERE id = {p2}"));
+    ok(
+        c,
+        &format!(
+            "UPDATE deps_proposals SET state = 'superseded', superseded_by = {p1} WHERE id = {p2}"
+        ),
+    );
     for to in ["pending", "applied", "awaiting_publish"] {
-        refused(c, &format!("UPDATE deps_proposals SET state = '{to}', superseded_by = NULL WHERE id = {p2}"), "illegal update: deps_proposals");
+        refused(
+            c,
+            &format!(
+                "UPDATE deps_proposals SET state = '{to}', superseded_by = NULL WHERE id = {p2}"
+            ),
+            "illegal update: deps_proposals",
+        );
     }
     refused(
         c,
@@ -479,21 +768,60 @@ fn state_graphs_are_enforced_by_triggers() {
     );
 
     // ---- publishes
-    let pubrow = |c: &Connection, id: i64| ok(c, &format!("INSERT INTO publishes (id, phase, started_ns, ended_ns, outcome) VALUES ({id}, 'running', 0, NULL, NULL)"));
+    let pubrow = |c: &Connection, id: i64| {
+        ok(
+            c,
+            &format!(
+                "INSERT INTO publishes (id, phase, started_ns, ended_ns, outcome) VALUES ({id}, 'running', 0, NULL, NULL)"
+            ),
+        )
+    };
     pubrow(c, 10);
-    refused(c, "UPDATE publishes SET outcome = '{}' WHERE id = 10", "illegal update: publishes");
-    ok(c, "UPDATE publishes SET phase = 'unknown', ended_ns = 1 WHERE id = 10");
-    refused(c, "UPDATE publishes SET phase = 'running', ended_ns = NULL WHERE id = 10", "illegal update: publishes");
-    ok(c, "UPDATE publishes SET phase = 'done', ended_ns = 2 WHERE id = 10");
+    refused(
+        c,
+        "UPDATE publishes SET outcome = '{}' WHERE id = 10",
+        "illegal update: publishes",
+    );
+    ok(
+        c,
+        "UPDATE publishes SET phase = 'unknown', ended_ns = 1 WHERE id = 10",
+    );
+    refused(
+        c,
+        "UPDATE publishes SET phase = 'running', ended_ns = NULL WHERE id = 10",
+        "illegal update: publishes",
+    );
+    ok(
+        c,
+        "UPDATE publishes SET phase = 'done', ended_ns = 2 WHERE id = 10",
+    );
     for to in ["running", "unknown", "done"] {
-        refused(c, &format!("UPDATE publishes SET phase = '{to}' WHERE id = 10"), "illegal update: publishes");
+        refused(
+            c,
+            &format!("UPDATE publishes SET phase = '{to}' WHERE id = 10"),
+            "illegal update: publishes",
+        );
     }
     // publish.md §5.7: `assign` rewrites the outcome of a closed row, nothing else
-    ok(c, "UPDATE publishes SET outcome = '{\"assigned\":[]}' WHERE id = 10");
-    refused(c, "UPDATE publishes SET outcome = '{}', ended_ns = 3 WHERE id = 10", "illegal update: publishes");
+    ok(
+        c,
+        "UPDATE publishes SET outcome = '{\"assigned\":[]}' WHERE id = 10",
+    );
+    refused(
+        c,
+        "UPDATE publishes SET outcome = '{}', ended_ns = 3 WHERE id = 10",
+        "illegal update: publishes",
+    );
     pubrow(c, 11);
-    ok(c, "UPDATE publishes SET phase = 'done', ended_ns = 1, outcome = '{}' WHERE id = 11");
-    refused(c, "INSERT INTO publishes (id, phase, started_ns, ended_ns, outcome) VALUES (12, 'done', 0, 1, NULL)", "illegal insert: publishes");
+    ok(
+        c,
+        "UPDATE publishes SET phase = 'done', ended_ns = 1, outcome = '{}' WHERE id = 11",
+    );
+    refused(
+        c,
+        "INSERT INTO publishes (id, phase, started_ns, ended_ns, outcome) VALUES (12, 'done', 0, 1, NULL)",
+        "illegal insert: publishes",
+    );
 }
 
 fn sid(k: usize) -> String {
@@ -509,13 +837,18 @@ fn sid(k: usize) -> String {
 }
 
 fn dump_where(c: &Connection, table: &str, id: &str) -> Vec<String> {
-    dump(c, table).into_iter().filter(|r| r.contains(id)).collect()
+    dump(c, table)
+        .into_iter()
+        .filter(|r| r.contains(id))
+        .collect()
 }
 
 fn intent_raw(c: &Connection, id: &str) {
     ok(
         c,
-        &format!("INSERT INTO move_intents VALUES ('{id}', 'r', 2, '{T}', '{D2}', '{H}', '/stg', NULL, 'preparing', NULL, NULL, 0, NULL)"),
+        &format!(
+            "INSERT INTO move_intents VALUES ('{id}', 'r', 2, '{T}', '{D2}', '{H}', '/stg', NULL, 'preparing', NULL, NULL, 0, NULL)"
+        ),
     );
 }
 
@@ -537,7 +870,12 @@ fn intent_in(c: &Connection, id: &str, state: &str) {
         "unknown" => {
             up("state = 'swapping', conflicts = '[]'");
             up("state = 'unknown', ended_ns = 1");
-            ok(c, &format!("UPDATE workspaces SET health = 'unknown', scene = '{{\"m\":1}}' WHERE session = '{id}' AND repo = 'r'"));
+            ok(
+                c,
+                &format!(
+                    "UPDATE workspaces SET health = 'unknown', scene = '{{\"m\":1}}' WHERE session = '{id}' AND repo = 'r'"
+                ),
+            );
         }
         _ => unreachable!(),
     }
@@ -552,8 +890,29 @@ fn agent_column_matches_agent_name_and_is_immutable() {
     let long = "a".repeat(64);
     let longer = "a".repeat(65);
     let cases: Vec<&str> = vec![
-        "claude-code", "codex", "cursor-agent", "A", "9", "a.b_c-D", &long, &longer, "", "-x", ".x", "_x", "a b", "a/b",
-        "a\u{0}b", "\u{0}", "é", "aé", "a\n", "a*", "a[b]", "a?", "ａ",
+        "claude-code",
+        "codex",
+        "cursor-agent",
+        "A",
+        "9",
+        "a.b_c-D",
+        &long,
+        &longer,
+        "",
+        "-x",
+        ".x",
+        "_x",
+        "a b",
+        "a/b",
+        "a\u{0}b",
+        "\u{0}",
+        "é",
+        "aé",
+        "a\n",
+        "a*",
+        "a[b]",
+        "a?",
+        "ａ",
     ];
     for (k, name) in cases.iter().enumerate() {
         let id = format!("s-{}", sid(1000 + k));
@@ -567,13 +926,42 @@ fn agent_column_matches_agent_name_and_is_immutable() {
         assert_eq!(sql, rust, "AgentName and the CHECK disagree on {name:?}");
     }
     let (named, none) = (format!("s-{}", sid(1000)), "s-zzzzzzzz");
-    ok(c, &format!("INSERT INTO sessions (id, ticket, root, lifecycle, created_ns, agent) VALUES ('{none}', NULL, '/w/n', 'creating', 0, NULL)"));
-    refused(c, &format!("UPDATE sessions SET agent = 'codex' WHERE id = '{named}'"), "immutable: sessions.agent");
-    refused(c, &format!("UPDATE sessions SET agent = NULL WHERE id = '{named}'"), "immutable: sessions.agent");
-    refused(c, &format!("UPDATE sessions SET agent = 'codex' WHERE id = '{none}'"), "immutable: sessions.agent");
-    ok(c, &format!("UPDATE sessions SET agent = 'claude-code' WHERE id = '{named}'"));
-    ok(c, &format!("UPDATE sessions SET lifecycle = 'active' WHERE id = '{named}'"));
-    assert_eq!(one(c, &format!("SELECT agent FROM sessions WHERE id = '{named}'")), r#"Text("claude-code")"#);
+    ok(
+        c,
+        &format!(
+            "INSERT INTO sessions (id, ticket, root, lifecycle, created_ns, agent) VALUES ('{none}', NULL, '/w/n', 'creating', 0, NULL)"
+        ),
+    );
+    refused(
+        c,
+        &format!("UPDATE sessions SET agent = 'codex' WHERE id = '{named}'"),
+        "immutable: sessions.agent",
+    );
+    refused(
+        c,
+        &format!("UPDATE sessions SET agent = NULL WHERE id = '{named}'"),
+        "immutable: sessions.agent",
+    );
+    refused(
+        c,
+        &format!("UPDATE sessions SET agent = 'codex' WHERE id = '{none}'"),
+        "immutable: sessions.agent",
+    );
+    ok(
+        c,
+        &format!("UPDATE sessions SET agent = 'claude-code' WHERE id = '{named}'"),
+    );
+    ok(
+        c,
+        &format!("UPDATE sessions SET lifecycle = 'active' WHERE id = '{named}'"),
+    );
+    assert_eq!(
+        one(
+            c,
+            &format!("SELECT agent FROM sessions WHERE id = '{named}'")
+        ),
+        r#"Text("claude-code")"#
+    );
 }
 
 #[test]
@@ -599,7 +987,11 @@ fn conflict_acknowledgement_guard_only_removes_paths() {
         "UPDATE workspaces SET conflicts = '[]', generation = 3",
         "illegal update: workspaces",
     );
-    refused(c, "UPDATE workspaces SET conflicts = '[]', base_gen = 2", "illegal update: workspaces");
+    refused(
+        c,
+        "UPDATE workspaces SET conflicts = '[]', base_gen = 2",
+        "illegal update: workspaces",
+    );
     ok(c, "UPDATE workspaces SET conflicts = '[\"b\"]'");
     assert_eq!(one(c, "SELECT generation FROM workspaces"), "Integer(2)");
     ok(c, "UPDATE workspaces SET conflicts = '[]'");
