@@ -440,7 +440,7 @@ fn request_and_abnormal_long_holds_remain_notices() {
             "{method}"
         );
     }
-    for origin in [json!("background"), json!("request"), Value::Null] {
+    for origin in [json!("background"), json!("request")] {
         let mut s = good(now);
         let mut warning = hold("tool", "catch_up", now - 120);
         warning["origin"] = origin;
@@ -458,6 +458,55 @@ fn request_and_abnormal_long_holds_remain_notices() {
         model_at(&s, stamp(now)).status_line,
         "Daemon running, 0 sessions · 1 notice"
     );
+}
+#[test]
+fn null_or_absent_long_hold_origin_uses_legacy_background_rules() {
+    let now = 2_000;
+    for origin in [None, Some(Value::Null)] {
+        let mut s = good(now);
+        let mut warning = hold("tool", "catch_up", now - 120);
+        if let Some(origin) = origin {
+            warning["origin"] = origin;
+        }
+        s.daemon_status.value.as_mut().unwrap()["warnings"] = json!([{"LongHold":warning}]);
+        assert_eq!(
+            model_at(&s, stamp(now)).status_line,
+            "Daemon running, 0 sessions"
+        );
+        s.daemon_status.value.as_mut().unwrap()["features"] =
+            json!(["status.upstream", "daemon_status.activity"]);
+        assert_eq!(
+            model_at(&s, stamp(now)).status_line,
+            "Daemon running, 0 sessions · 1 notice"
+        );
+    }
+}
+#[test]
+fn syncing_tooltip_uses_seconds_for_sub_minute_catch_up_work() {
+    let now = 2_000;
+    for source in ["holds", "warnings"] {
+        for age in [2, 3, 30, 59, 60] {
+            let mut s = good(now);
+            activate(&mut s, Icon::Syncing);
+            let h = hold("tool", "catch_up", now - age);
+            s.daemon_status.value.as_mut().unwrap()[source] = if source == "holds" {
+                json!([h])
+            } else {
+                json!([{"LongHold":h}])
+            };
+            let m = model_at(&s, stamp(now));
+            assert_eq!(m.icon, Icon::Syncing);
+            let expected = if age < 3 {
+                "GIT STRATA: Bringing in newer changes".to_string()
+            } else if age < 60 {
+                format!("GIT STRATA: Bringing in newer changes: tool, {age} s")
+            } else {
+                "GIT STRATA: Bringing in newer changes: tool, 1 min".to_string()
+            };
+            assert_eq!(m.tooltip, expected, "{source}, {age} s");
+            assert_eq!(m.status_line, "Daemon running, 1 session");
+        }
+    }
 }
 #[test]
 fn long_holds_with_unusable_start_times_stay_notices() {

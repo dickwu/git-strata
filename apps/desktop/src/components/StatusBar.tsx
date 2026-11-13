@@ -5,7 +5,14 @@ import { Tooltip } from 'antd';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { copy } from '@/lib/copy';
 import { useDu } from '@/lib/queries';
-import { statusBarModel, type Chip, type ChipTarget, type StatusBarModel } from '@/lib/statusBar';
+import {
+  statusBarModel,
+  type Chip,
+  type ChipTarget,
+  type StatusBarInput,
+  type StatusBarModel,
+} from '@/lib/statusBar';
+import { asGuiError, reason } from '@/lib/tauri';
 import type { DaemonStatus, DepsList, StatusReply } from '@/lib/types';
 import { DaemonStatusModal } from './DaemonStatusModal';
 import { ThemeSwitch } from './ThemeSwitch';
@@ -29,6 +36,53 @@ export function followTarget(target: ChipTarget | undefined, h: StatusBarHandler
   if (target?.kind === 'waiting') h.onWaiting();
   else if (target?.kind === 'session') h.onSession(target.session);
   else h.onOpen(target?.section);
+}
+
+type DaemonHealth = NonNullable<StatusBarInput['health']> & {
+  dataUpdatedAt: number;
+  errorUpdatedAt: number;
+  acceptErrors?: number;
+  lastTimeoutAt?: number;
+};
+
+/** Consume each existing query completion once; clock ticks and ordinary refusals add no evidence. */
+export function observeDaemonHealth(
+  previous: DaemonHealth,
+  status: Pick<UseQueryResult<DaemonStatus>, 'data' | 'dataUpdatedAt' | 'error' | 'errorUpdatedAt'>
+): DaemonHealth {
+  if (
+    previous.dataUpdatedAt === status.dataUpdatedAt &&
+    previous.errorUpdatedAt === status.errorUpdatedAt
+  )
+    return previous;
+  const next = {
+    ...previous,
+    dataUpdatedAt: status.dataUpdatedAt,
+    errorUpdatedAt: status.errorUpdatedAt,
+  };
+  if (status.data !== undefined && status.dataUpdatedAt !== previous.dataUpdatedAt) {
+    next.timeouts = 0;
+    next.lastTimeoutAt = undefined;
+    next.lastOkAt = status.dataUpdatedAt;
+    next.prevAcceptErrors = previous.acceptErrors;
+    const counter = status.data.fds?.accept_errors;
+    next.acceptErrors =
+      typeof counter === 'number' && Number.isFinite(counter) ? counter : undefined;
+  }
+  if (status.error != null && status.errorUpdatedAt !== previous.errorUpdatedAt) {
+    const error = asGuiError(status.error);
+    if (
+      reason(error) === 'daemon_timeout' &&
+      (next.lastTimeoutAt === undefined || status.errorUpdatedAt - next.lastTimeoutAt >= 4000)
+    ) {
+      next.timeouts++;
+      next.lastTimeoutAt = status.errorUpdatedAt;
+    } else if (error.code === 'Busy' && reason(error) === 'too_many_open_files') {
+      next.timeouts = 0;
+      next.lastTimeoutAt = undefined;
+    }
+  }
+  return next;
 }
 
 function action(target: ChipTarget | undefined): string {
@@ -182,6 +236,15 @@ export function StatusBar({
   onSession: (id: string) => void;
 }) {
   const [now, setNow] = useState(() => Date.now());
+  const [health, setHealth] = useState<DaemonHealth>({
+    timeouts: 0,
+    lastOkAt: 0,
+    dataUpdatedAt: 0,
+    errorUpdatedAt: 0,
+  });
+  // Adjust only when the query completes, before rendering its model. No extra effect or poll.
+  const observedHealth = observeDaemonHealth(health, status);
+  if (observedHealth !== health) setHealth(observedHealth);
   // null while closed; otherwise the section the click asked for (none: the top).
   const [modal, setModal] = useState<{ section?: ModalSection } | null>(null);
   useEffect(() => {
@@ -203,6 +266,7 @@ export function StatusBar({
       sessions: sessions.data,
       sessionsUpdatedAt: sessions.dataUpdatedAt,
       deps,
+      health: observedHealth,
       // A du reply cached from before the daemon went away is not shown (as before).
       du: live ? du.data : undefined,
     },

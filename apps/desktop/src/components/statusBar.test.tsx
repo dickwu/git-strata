@@ -4,14 +4,17 @@ import { join } from 'node:path';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { contrast, mix } from '../lib/contrast';
-import type { Chip, StatusBarModel } from '../lib/statusBar';
+import { statusBarModel, type Chip, type StatusBarModel } from '../lib/statusBar';
+import type { DaemonStatus, DuReply } from '../lib/types';
 import { TOKENS, type ThemeName } from '../lib/tokens';
 import {
   StatusBarView,
   followTarget,
+  observeDaemonHealth,
   type ModalSection,
   type StatusBarHandlers,
 } from './StatusBar';
+import { showWaiting } from './Shell';
 import css from './StatusBar.module.css';
 
 type Call = ['open', ModalSection | undefined] | ['waiting'] | ['session', string];
@@ -103,6 +106,48 @@ const all = (html: string, attr: string) =>
   [...html.matchAll(new RegExp(`${attr}="([^"]*)"`, 'g'))].map((m) => m[1]);
 
 describe('StatusBarView', () => {
+  test('inexact savings from the model are absent in the rendered bar', () => {
+    const du = JSON.parse(
+      readFileSync(join(import.meta.dir, '../lib/fixtures/statusBar/incident-0927.json'), 'utf8')
+    ).du as DuReply;
+    du.savings = {
+      live: { logical: 4096, private: 1024, savings: 3072, complete: true, as_of: null },
+      cumulative: {
+        since: null,
+        sessions: 0,
+        sized: 0,
+        unsized: 0,
+        removed: 0,
+        logical: 0,
+        private: 0,
+        savings: 0,
+      },
+    };
+    Object.assign(du.total, { exact: false });
+    const model = statusBarModel(
+      {
+        daemon: {
+          pending: false,
+          data: {
+            holds: [],
+            warnings: [],
+            reconcile: { runs: 0, last: null },
+            repo_waiting: {},
+            verify: null,
+          },
+          error: null,
+          updatedAt: 1000,
+        },
+        sessions: undefined,
+        deps: undefined,
+        du,
+      },
+      1000
+    );
+    const html = render(model);
+    expect(html).not.toContain('status-saved');
+    expect(html).not.toContain('up to');
+  });
   test('three chips in model order, then +N for the rest', () => {
     const html = render(crowded);
     expect(all(html, 'data-chip')).toEqual(['attention', 'waiting', 'conflicts']);
@@ -274,6 +319,188 @@ describe('StatusBarView', () => {
       ['open', 'scan'],
     ]);
   });
+});
+
+describe('daemonStatus query observations', () => {
+  const data = (accept_errors: number): DaemonStatus => ({
+    holds: [],
+    warnings: [],
+    reconcile: { runs: 0, last: null },
+    repo_waiting: {},
+    verify: null,
+    fds: { open: 10, limit: 100, accept_errors },
+  });
+  const initial = () => ({ timeouts: 0, lastOkAt: 0, dataUpdatedAt: 0, errorUpdatedAt: 0 });
+  const error = (why: string) =>
+    Object.assign(new Error('probe failed'), { code: 'Busy', detail: { reason: why } });
+
+  test('counts query timeouts once, coalesces within 4 s, and clears on a successful completion', () => {
+    const query = {
+      data: data(15),
+      dataUpdatedAt: 1000,
+      errorUpdatedAt: 0,
+      error: null as Error | null,
+    };
+    let health = observeDaemonHealth(initial(), query);
+    const model = (now: number) =>
+      statusBarModel(
+        {
+          daemon: {
+            pending: false,
+            data: query.data,
+            updatedAt: query.dataUpdatedAt,
+            error: query.error,
+          },
+          health,
+          sessions: undefined,
+          deps: undefined,
+          du: undefined,
+        },
+        now
+      );
+    expect(health).toMatchObject({ timeouts: 0, lastOkAt: 1000, prevAcceptErrors: undefined });
+    query.error = error('daemon_timeout');
+    query.errorUpdatedAt = 9000;
+    health = observeDaemonHealth(health, query);
+    expect(health.timeouts).toBe(1);
+    expect(observeDaemonHealth(health, query)).toBe(health);
+    expect(model(30_000).daemon.state).toBe('pending');
+    query.errorUpdatedAt = 10_000;
+    health = observeDaemonHealth(health, query);
+    expect(health.timeouts).toBe(1);
+    query.errorUpdatedAt = 17_000;
+    health = observeDaemonHealth(health, query);
+    expect(health.timeouts).toBe(2);
+    expect(model(20_999).daemon.state).toBe('pending');
+    expect(model(21_000).daemon.label).toBe("Daemon isn't responding");
+    query.dataUpdatedAt = 22_000;
+    query.error = null;
+    health = observeDaemonHealth(health, query);
+    expect(health).toMatchObject({ timeouts: 0, lastOkAt: 22_000 });
+    expect(model(22_000).daemon.state).toBe('up');
+    query.error = error('daemon_timeout');
+    query.errorUpdatedAt = 50_000;
+    health = observeDaemonHealth(health, query);
+    expect(health.timeouts).toBe(1);
+    expect(model(50_000).daemon.state).toBe('pending');
+  });
+
+  test.each(['request_in_flight', 'not_tauri', 'shed', 'too_many_open_files'])(
+    '%s never counts as a health timeout',
+    (why) => {
+      const query = {
+        data: data(15),
+        dataUpdatedAt: 1000,
+        errorUpdatedAt: 5000,
+        error: error(why),
+      };
+      expect(observeDaemonHealth(initial(), query).timeouts).toBe(0);
+    }
+  );
+
+  test('accept_errors compares successful replies across errors and counter resets', () => {
+    const query = {
+      data: data(15),
+      dataUpdatedAt: 1000,
+      errorUpdatedAt: 0,
+      error: null as Error | null,
+    };
+    let health = observeDaemonHealth(initial(), query);
+    const chips = () => {
+      const m = statusBarModel(
+        {
+          daemon: {
+            pending: false,
+            data: query.data,
+            updatedAt: query.dataUpdatedAt,
+            error: query.error,
+          },
+          health,
+          sessions: undefined,
+          deps: undefined,
+          du: undefined,
+        },
+        Math.max(query.dataUpdatedAt, query.errorUpdatedAt)
+      );
+      return [...m.chips, ...m.overflow];
+    };
+    expect(chips()).toEqual([]);
+    query.error = error('request_in_flight');
+    query.errorUpdatedAt = 5000;
+    health = observeDaemonHealth(health, query);
+    expect(health.prevAcceptErrors).toBeUndefined();
+    query.data = data(16);
+    query.dataUpdatedAt = 10_000;
+    query.error = null;
+    health = observeDaemonHealth(health, query);
+    expect(health.prevAcceptErrors).toBe(15);
+    expect(chips().map((c) => c.id)).toEqual(['fds']);
+    expect(observeDaemonHealth(health, query)).toBe(health);
+    query.error = error('request_in_flight');
+    query.errorUpdatedAt = 12_000;
+    health = observeDaemonHealth(health, query);
+    expect(chips().map((c) => c.id)).toEqual(['fds']);
+    query.error = null;
+    query.data = data(0);
+    query.dataUpdatedAt = 15_000;
+    health = observeDaemonHealth(health, query);
+    expect(health.prevAcceptErrors).toBe(16);
+    expect(chips()).toEqual([]);
+    query.data = data(1);
+    query.dataUpdatedAt = 20_000;
+    health = observeDaemonHealth(health, query);
+    expect(health.prevAcceptErrors).toBe(0);
+    expect(chips().map((c) => c.id)).toEqual(['fds']);
+  });
+});
+
+describe('Waiting chip navigation', () => {
+  test.each(['missing', 'hidden', 'open', 'no-button'])(
+    'navigates first, focuses the Waiting button and opens only a closed popover (%s)',
+    (state) => {
+      const calls: string[] = [];
+      let frame: FrameRequestCallback | undefined;
+      const oldFrame = Object.getOwnPropertyDescriptor(globalThis, 'requestAnimationFrame');
+      const oldDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+      Object.defineProperty(globalThis, 'requestAnimationFrame', {
+        configurable: true,
+        value: (cb: FrameRequestCallback) => {
+          frame = cb;
+          return 1;
+        },
+      });
+      Object.defineProperty(globalThis, 'document', {
+        configurable: true,
+        value: {
+          querySelector: (selector: string) =>
+            selector === 'button.waiting-note'
+              ? state === 'no-button'
+                ? null
+                : { focus: () => calls.push('focus'), click: () => calls.push('click') }
+              : state === 'missing'
+                ? null
+                : { getClientRects: () => ({ length: state === 'open' ? 1 : 0 }) },
+        },
+      });
+      try {
+        showWaiting((screen) => calls.push(screen));
+        expect(calls).toEqual(['sessions']);
+        frame!(0);
+        expect(calls).toEqual(
+          state === 'no-button'
+            ? ['sessions']
+            : state === 'open'
+              ? ['sessions', 'focus']
+              : ['sessions', 'focus', 'click']
+        );
+      } finally {
+        if (oldFrame) Object.defineProperty(globalThis, 'requestAnimationFrame', oldFrame);
+        else Reflect.deleteProperty(globalThis, 'requestAnimationFrame');
+        if (oldDocument) Object.defineProperty(globalThis, 'document', oldDocument);
+        else Reflect.deleteProperty(globalThis, 'document');
+      }
+    }
+  );
 });
 
 // Chip colours: the tray badge palette (gui.md §5.8), readable as 12px text on the chip tint.

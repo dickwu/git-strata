@@ -120,6 +120,9 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 fn age_text(age: Duration) -> String {
+    if age.as_secs() < 60 {
+        return format!("{} s", age.as_secs());
+    }
     let minutes = age.as_secs() / 60;
     if minutes < 60 {
         format!("{minutes} min")
@@ -320,7 +323,7 @@ fn background_hold(hold: &Value, s: &Snapshot, now: SystemTime) -> bool {
         .as_ref()
         .and_then(|d| d["features"].as_array())
         .is_some_and(|fs| fs.iter().any(|f| f == "daemon_status.activity"));
-    hold.get("origin").is_none()
+    hold.get("origin").is_none_or(Value::is_null)
         && !activity_capable
         && matches!(
             hold["method"].as_str(),
