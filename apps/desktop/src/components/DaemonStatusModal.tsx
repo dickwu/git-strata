@@ -366,6 +366,7 @@ function Savings({ v, tickets }: { v: SavingsView; tickets: Tickets }) {
           {note && <span className="muted"> ({note})</span>}
         </li>
       </ul>
+      {v.cumulative.saved === null && <p className={css.note}>{s.cumulativeAccuracyUnavailable}</p>}
       {v.inexact && <p className={css.note}>{s.inexact}</p>}
       {!v.live.complete && <p className={css.note}>{s.measuring}</p>}
 
