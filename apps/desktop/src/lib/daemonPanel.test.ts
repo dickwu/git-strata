@@ -325,7 +325,12 @@ describe('isLive', () => {
 
 describe('statusFacts', () => {
   test('p1 daemon_status: no version, pid, uptime or fds; counts from the reply', () => {
-    const f = statusFacts(fx<DaemonStatus>('daemon_status'), Date.now());
+    // The p1 fixture now carries the P-b keys; strip them to read it as 0.2.2 sent it.
+    const { version, pid, started, busy, volume, scan, activity, ...old } = fx<
+      DaemonStatus & Record<string, unknown>
+    >('daemon_status');
+    void [version, pid, started, busy, volume, scan, activity];
+    const f = statusFacts(old as DaemonStatus, Date.now());
     expect(f).toEqual({
       version: null,
       api: null,
@@ -523,8 +528,13 @@ describe('scanView', () => {
 
   test('running on 0.2.2: counts only, "412 done, 140 queued"', () => {
     expect(scanText(scanView(scan({}))!, fmt)).toBe('Measuring storage · 412 done, 140 queued');
+    // The p1 fixture is a P-b reply (`active`, `unresolved`); strip them to read it as 0.2.2.
+    const { active, unresolved, ...old } = fx<DuReply>('du').scan as DuScan &
+      Record<string, unknown>;
+    void [active, unresolved];
+    expect(scanText(scanView(old as DuScan)!, fmt)).toBe('Measuring storage · 13 done, 253 queued');
     expect(scanText(scanView(fx<DuReply>('du').scan)!, fmt)).toBe(
-      'Measuring storage · 13 done, 253 queued'
+      'Measuring storage · 13 done · 4 in progress · 253 queued'
     );
     expect(scanText(scanView(scan({ done: 12_345, queued: 1_000 }))!, fmt)).toBe(
       'Measuring storage · 12,345 done, 1,000 queued'
