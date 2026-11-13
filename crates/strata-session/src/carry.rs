@@ -45,7 +45,11 @@ struct Keys {
 
 impl Keys {
     fn key(&self, s: &str) -> String {
-        if self.fold { strata_apfs::case_fold_key(s) } else { s.to_string() }
+        if self.fold {
+            strata_apfs::case_fold_key(s)
+        } else {
+            s.to_string()
+        }
     }
 }
 
@@ -68,7 +72,9 @@ pub(crate) struct CarryOut {
 }
 
 pub(crate) fn ns_of(t: SystemTime) -> u128 {
-    t.duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 enum Outcome {
@@ -80,7 +86,12 @@ enum Outcome {
 
 impl Carry<'_> {
     fn keys(&self) -> Keys {
-        let mut keys = Keys { owned: BTreeSet::new(), above: BTreeSet::new(), prune: BTreeSet::new(), fold: self.fold };
+        let mut keys = Keys {
+            owned: BTreeSet::new(),
+            above: BTreeSet::new(),
+            prune: BTreeSet::new(),
+            fold: self.fold,
+        };
         for p in &self.owned {
             let k = keys.key(p);
             let mut acc = String::new();
@@ -122,7 +133,10 @@ impl Carry<'_> {
         after_walk()?;
         self.process(&keys, found, &mut uncarried, &mut carried)?;
         self.process(&keys, nested, &mut uncarried, &mut carried)?;
-        Ok(CarryOut { uncarried: uncarried.into_iter().collect(), carried })
+        Ok(CarryOut {
+            uncarried: uncarried.into_iter().collect(),
+            carried,
+        })
     }
 
     /// Review P1-14: the first foreign entry of the tree at `self.ws` (the
@@ -132,7 +146,11 @@ impl Carry<'_> {
     /// foreign entry is held to `since` (the move's start). Owned paths are
     /// not looked at (the overlay comparison covers them), nor are the
     /// dependency directories (never carried); the nested seed caches are.
-    pub(crate) fn touched(&self, carried: Option<&Carried>, since: SystemTime) -> Result<Option<RepoPath>> {
+    pub(crate) fn touched(
+        &self,
+        carried: Option<&Carried>,
+        since: SystemTime,
+    ) -> Result<Option<RepoPath>> {
         let keys = self.keys();
         let since = ns_of(since);
         let threshold = |p: &str| -> Option<u128> {
@@ -163,10 +181,7 @@ impl Carry<'_> {
                 return false;
             }
             let k = keys.key(s);
-            if keys.prune.contains(&k) || keys.owned.contains(&k) {
-                return false;
-            }
-            true
+            !(keys.prune.contains(&k) || keys.owned.contains(&k))
         };
         for item in strata_apfs::walk_with(self.ws, &WalkOptions::default(), &filter) {
             let (p, a) = item?;
@@ -190,7 +205,10 @@ impl Carry<'_> {
                 Err(e) if matches!(e.code, Code::NoSuchPath | Code::NotDirectory) => continue,
                 Err(e) => return Err(e),
             }
-            let opts = WalkOptions { start: Some(c.clone()), ..Default::default() };
+            let opts = WalkOptions {
+                start: Some(c.clone()),
+                ..Default::default()
+            };
             for item in strata_apfs::walk_with(self.ws, &opts, &|_: &Path, _: &Attrs| true) {
                 let (p, a) = match item {
                     Ok(x) => x,
@@ -226,10 +244,16 @@ impl Carry<'_> {
             if keys.owned.contains(&k) {
                 return false;
             }
-            found.lock().unwrap_or_else(|x| x.into_inner()).push((s.to_string(), a.clone()));
+            found
+                .lock()
+                .unwrap_or_else(|x| x.into_inner())
+                .push((s.to_string(), a.clone()));
             false
         };
-        let opts = WalkOptions { start: start.cloned(), ..Default::default() };
+        let opts = WalkOptions {
+            start: start.cloned(),
+            ..Default::default()
+        };
         for item in strata_apfs::walk_with(self.ws, &opts, &filter) {
             item?;
         }
@@ -276,11 +300,13 @@ impl Carry<'_> {
     fn one(&self, p: &RepoPath, a: &Attrs) -> Result<Outcome> {
         match strata_apfs::attrs_of(self.dst, p) {
             Ok(there) => {
-                return Ok(if matches!(there.kind, FileKind::Dir) && matches!(a.kind, FileKind::Dir) {
-                    Outcome::Descend
-                } else {
-                    Outcome::Uncarried
-                });
+                return Ok(
+                    if matches!(there.kind, FileKind::Dir) && matches!(a.kind, FileKind::Dir) {
+                        Outcome::Descend
+                    } else {
+                        Outcome::Uncarried
+                    },
+                );
             }
             Err(e) if e.code == Code::NoSuchPath => {}
             // An ancestor in the new tree is a symlink or not a directory.
@@ -303,20 +329,33 @@ impl Carry<'_> {
         match strata_apfs::clone_from_rooted(self.ws, p, &self.dst.join(&tmp), kind) {
             Ok(()) => {}
             Err(e) if e.code == Code::NoSuchPath => return Ok(Outcome::Skipped),
-            Err(e) if matches!(e.code, Code::IsDirectory | Code::NotFile | Code::NotDirectory) => {
+            Err(e)
+                if matches!(
+                    e.code,
+                    Code::IsDirectory | Code::NotFile | Code::NotDirectory
+                ) =>
+            {
                 return Ok(Outcome::Uncarried);
             }
             Err(e) => return Err(e),
         }
-        if let Err(mut e) = strata_apfs::rename_rooted(self.dst, &rp(tmp.clone()), p, RenameMode::Excl) {
+        if let Err(mut e) =
+            strata_apfs::rename_rooted(self.dst, &rp(tmp.clone()), p, RenameMode::Excl)
+        {
             // `detail.path` names the entry being carried (§5.7.1: a `uchg`
             // entry fails here); the temp name is kept alongside.
             let mut d = match e.detail.take() {
                 Some(serde_json::Value::Object(m)) => m,
                 _ => serde_json::Map::new(),
             };
-            d.insert("temp".into(), serde_json::Value::String(self.dst.join(&tmp).display().to_string()));
-            d.insert("path".into(), serde_json::Value::String(p.as_str().to_string()));
+            d.insert(
+                "temp".into(),
+                serde_json::Value::String(self.dst.join(&tmp).display().to_string()),
+            );
+            d.insert(
+                "path".into(),
+                serde_json::Value::String(p.as_str().to_string()),
+            );
             e.detail = Some(serde_json::Value::Object(d));
             return Err(e);
         }
@@ -326,7 +365,10 @@ impl Carry<'_> {
     /// A symlink is recreated from its target, never cloned.
     fn relink(&self, p: &RepoPath) -> Result<Outcome> {
         let target = match strata_apfs::attrs_of(self.ws, p) {
-            Ok(Attrs { kind: FileKind::Symlink { target }, .. }) => target,
+            Ok(Attrs {
+                kind: FileKind::Symlink { target },
+                ..
+            }) => target,
             Ok(_) => return Ok(Outcome::Uncarried),
             Err(e) if e.code == Code::NoSuchPath => return Ok(Outcome::Skipped),
             Err(e) if e.code == Code::NotDirectory => return Ok(Outcome::Uncarried),
