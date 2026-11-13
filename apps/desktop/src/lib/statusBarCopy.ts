@@ -26,6 +26,7 @@ export const statusBarCopy = {
     reconcilePanicked: 'Daemon reconciliation failed',
     auditFailed: 'The sessions audit log could not be written',
     timeout: copy.daemon.stuck,
+    waitingForReply: 'An earlier request is still waiting for the daemon.',
     busy: copy.daemon.busy,
     notInTauri: copy.errors.notInTauri,
     unknownError: copy.errors.unknown,

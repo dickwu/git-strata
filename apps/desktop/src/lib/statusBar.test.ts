@@ -390,6 +390,22 @@ describe('health, waiting and honest facts', () => {
     expect(statusBarModel(i, NOW).daemon.state).toBe('down');
   });
 
+  test('an escalated joined read describes its unanswered request; below threshold stays neutral', () => {
+    const i = input();
+    i.daemon.error = err('request_in_flight');
+    i.health = { timeouts: 2, lastOkAt: NOW };
+    expect(statusBarModel(i, NOW + 19_999).daemon).toEqual({
+      state: 'pending',
+      label: 'Checking the daemon…',
+      detail: copy.daemon.busy,
+    });
+    expect(statusBarModel(i, NOW + 20_000).daemon).toEqual({
+      state: 'down',
+      label: "Daemon isn't responding",
+      detail: 'An earlier request is still waiting for the daemon.',
+    });
+  });
+
   test.each(['request_in_flight', 'not_tauri', 'shed'])(
     '%s without timeout evidence is neutral',
     (why) => {

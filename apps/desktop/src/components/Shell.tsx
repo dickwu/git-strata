@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react';
 import { useNow } from '@/hooks/useNow';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { sessionFromUrl, sessionHash, useNav } from '@/stores/nav';
 import { useTheme } from '@/stores/theme';
 import { usePlan, useSessions, useDeps } from '@/lib/queries';
@@ -17,6 +17,11 @@ import { DaemonScreen } from './DaemonScreen';
 import { SessionsScreen } from './SessionsScreen';
 import { SessionDetailModal } from './SessionDetail';
 import { ReviewModal } from './ReviewModal';
+
+/** Manual refresh must preserve pending reads and their health evidence. */
+export function refreshAll(qc: QueryClient): Promise<void> {
+  return qc.invalidateQueries({}, { cancelRefetch: false });
+}
 
 /** Navigate first, then focus/open the existing Waiting popover without closing an open one. */
 export function showWaiting(go: (screen: 'sessions') => void): void {
@@ -133,7 +138,7 @@ export function Shell() {
       />
       <CommandPalette
         sessions={sessions.data}
-        onRefresh={() => qc.invalidateQueries()}
+        onRefresh={() => refreshAll(qc)}
         onTheme={setTheme}
       />
     </div>
