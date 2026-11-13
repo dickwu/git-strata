@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import appPackage from '../../package.json';
 import incident from './fixtures/statusBar/incident-0927.json';
+import pbFixture from './fixtures/statusBar/pb.json';
 import { copy } from './copy';
 import {
   BACKGROUND_HOLD_MAX_MS,
@@ -13,7 +14,7 @@ import {
   type Chip,
   type StatusBarInput,
 } from './statusBar';
-import type { DaemonStatus, DepsList, DuReply, StatusReply } from './types';
+import type { DaemonActivity, DaemonStatus, DepsList, DuReply, StatusReply } from './types';
 import { waitingCount } from './view';
 
 const NOW = Date.parse(incident.now);
@@ -745,5 +746,268 @@ describe('scan gating and chip order', () => {
     expect(model.chips.map((c) => c.id)).toEqual(['error', 'first-amber', 'second-amber']);
     expect(model.overflow.map((c) => c.id)).toEqual(['blue', 'scan']);
     expect(chips).toEqual(before);
+  });
+});
+
+describe('P-b contract sources', () => {
+  const pbi = () => input(structuredClone(pbFixture.daemon) as DaemonStatus);
+  const work = (fields: Record<string, unknown>) =>
+    ({ ...structuredClone(pbFixture.daemon.activity[0]), ...fields }) as DaemonActivity;
+  const activity = (i: StatusBarInput) => allChips(i).filter((c) => c.id.startsWith('activity:'));
+  const busy = (i: StatusBarInput) => allChips(i).filter((c) => c.id.startsWith('busy:'));
+
+  test('contract-shaped catch-up move names the known ticket, phase, elapsed and wait counts', () => {
+    const i = pbi();
+    i.sessions = fx<StatusReply>('status_all');
+    i.sessions.sessions[0].status.manifest.id = 's-pb9492';
+    i.sessions.sessions[0].status.manifest.ticket = 'gwd-9492';
+    for (const s of i.sessions.sessions)
+      s.status.upstream = {
+        clean: false,
+        repos: {
+          tool: {
+            behind: 1,
+            auto: { state: 'pending', source: 'main', since: incident.now, attempts: 0 },
+          },
+        },
+      };
+    const chip = activity(i)[0];
+    expect(chip).toMatchObject({
+      text: 'Moving gwd-9492 to new main · tool · 2 min · 2 waiting · 2 pending',
+      sev: 'blue',
+      rank: 5,
+      target: { kind: 'modal', section: 'activity' },
+    });
+    expect(chip.tooltip).toContain('Phase: prepare.');
+    expect(chip.tooltip).toContain('waits 30 seconds before writing gets Busy');
+    i.sessionsUpdatedAt = NOW - 300_001;
+    expect(activity(i)[0].text).not.toContain('pending');
+    expect('api' in i.daemon.data!).toBe(false);
+  });
+
+  test.each([
+    [{ kind: 'move', cause: 'publish' }, 'Rebasing after publish · tool'],
+    [{ kind: 'move', cause: 'sync' }, 'Sync moving s-pb9492 · tool'],
+    [{ kind: 'move', cause: 'deps' }, 'Moving s-pb9492 to new dependencies · tool'],
+    [{ kind: 'move', cause: 'replay' }, 'Replaying s-pb9492 · tool'],
+    [{ kind: 'deps_rollout', sessions: 5, done: 2 }, 'Rolling out deps 2/5 · tool'],
+    [{ kind: 'base_build', tree: null }, 'Building base · tool'],
+    [
+      { kind: 'session_create', repo: null, repos: ['tool', 'web', 'api'], step: 'cloning' },
+      'Creating session s-pb9492 · 3 repos',
+    ],
+    [{ kind: 'deps_install', proposal: null }, 'Installing dependencies · tool'],
+    [{ kind: 'publish' }, 'Publishing tool'],
+    [{ kind: 'push' }, 'Pushing tool'],
+  ])('activity kind copy %j', (fields, text) => {
+    const i = pbi();
+    i.daemon.data!.activity = [work(fields)];
+    expect(activity(i)[0].text).toStartWith(`${text} · 2 min`);
+    expect(activity(i)[0].sev).toBe('blue');
+  });
+
+  test('unminted session creation needs neither a repo nor a session', () => {
+    const i = pbi();
+    i.daemon.data!.activity = [
+      work({ kind: 'session_create', repo: null, session: null, repos: ['tool'], step: null }),
+    ];
+    expect(activity(i)[0].text).toStartWith('Creating session · 1 repo · 2 min');
+  });
+
+  test('registry debounce, monotonic elapsed, and the 30 minute boundary', () => {
+    const i = pbi();
+    i.daemon.data!.activity![0].started = new Date(NOW - DAY).toISOString();
+    i.daemon.data!.activity![0].elapsed_ms = 2999;
+    expect(activity(i)).toEqual([]);
+    i.daemon.data!.activity![0].elapsed_ms = 3000;
+    expect(activity(i)[0]).toMatchObject({ sev: 'blue', rank: 5 });
+    i.daemon.data!.activity![0].elapsed_ms = BACKGROUND_HOLD_MAX_MS;
+    expect(activity(i)[0]).toMatchObject({ sev: 'amber', rank: 4 });
+    expect(activity(i)[0].text).toContain('30 min');
+  });
+
+  test('oldest parent work covers child activities and transient deferrals in the same repo', () => {
+    const i = pbi();
+    i.daemon.data!.activity = [
+      work({ kind: 'move', id: 2 }),
+      work({ kind: 'deps_rollout', id: 1, elapsed_ms: 180_000, sessions: 5, done: 2 }),
+      work({ kind: 'base_build', id: 3, elapsed_ms: 60_000, tree: null }),
+    ];
+    i.daemon.data!.warnings = [stuck('recent_writes')];
+    expect(activity(i)).toHaveLength(1);
+    expect(activity(i)[0].text).toStartWith('Rolling out deps 2/5 · tool · 3 min');
+    i.daemon.data!.activity = [
+      work({
+        kind: 'session_create',
+        repo: null,
+        repos: ['tool', 'web'],
+        id: 1,
+        elapsed_ms: 180_000,
+        step: null,
+      }),
+      work({ id: 2 }),
+    ];
+    expect(activity(i)).toHaveLength(1);
+  });
+
+  test('plain background holds need 10 s, no matching activity, and explicit background origin', () => {
+    const i = pbi();
+    i.daemon.data!.activity = [];
+    expect(activity(i)[0].text).toBe('tool busy with daemon work · 2 waiting');
+    const h = i.daemon.data!.holds[0] as Record<string, unknown>;
+    h.elapsed_ms = 10_000;
+    expect(activity(i)).toEqual([]);
+    h.elapsed_ms = 10_001;
+    expect(activity(i)).toHaveLength(1);
+    h.origin = 'request';
+    expect(activity(i)).toEqual([]);
+    h.origin = 'background';
+    i.daemon.data!.warnings = [hold('daemon', 31 * MINUTE, { origin: 'background' })];
+    expect(activity(i)).toEqual([]);
+  });
+
+  test.each(['catch_up', 'publish', 'push'])(
+    'P-b %s LongHold is abnormal amber, with origin/session detail',
+    (method) => {
+      const i = pbi();
+      i.daemon.data!.warnings = [
+        hold(method, MINUTE, {
+          origin: method === 'catch_up' ? 'background' : 'request',
+          session: 's-pb9492',
+        }),
+      ];
+      const chip = allChips(i).find((c) => c.id.startsWith('warning:LongHold'))!;
+      expect(chip).toMatchObject({ sev: 'amber', rank: 4 });
+      expect(chip.text).toContain('(s-pb9492)');
+      expect(chip.text).toContain(method === 'catch_up' ? 'background' : 'request');
+    }
+  );
+
+  test('Busy is grouped by scope after the hold/activity is gone; total is not the headline', () => {
+    const i = pbi();
+    i.daemon.data!.holds = [];
+    i.daemon.data!.activity = [];
+    expect(busy(i)).toHaveLength(1);
+    expect(busy(i)[0]).toMatchObject({
+      sev: 'amber',
+      text: '3 requests got Busy · tool (auto-rebase of s-pb9492)',
+    });
+    i.daemon.data!.busy!.recent.push({
+      ...i.daemon.data!.busy!.recent[0],
+      scope: { repo: 'web' },
+      holder: null,
+    });
+    expect(busy(i).map((c) => c.text)).toEqual([
+      '3 requests got Busy · tool (auto-rebase of s-pb9492)',
+      '1 request got Busy · web',
+    ]);
+    i.daemon.data!.busy!.recent[3].scope = {};
+    expect(busy(i)[1].text).toBe('Some requests got Busy');
+    i.daemon.data!.busy!.truncated = true;
+    expect(busy(i)).toHaveLength(1);
+    expect(busy(i)[0].text).toBe('50+ requests got Busy');
+    i.daemon.data!.busy!.recent.forEach((e) => (e.at = new Date(NOW - 600_001).toISOString()));
+    expect(busy(i)).toEqual([]);
+  });
+
+  test('free-space thresholds use decimal GB caps and keep the previous severity until 110%', () => {
+    const i = pbi();
+    const v = i.daemon.data!.volume!;
+    expect(statusBarModel(i, NOW).right.free?.text).toBe('1.2 TB free');
+    v.size = 1e12;
+    const model = (free: number, previous: 'muted' | 'amber' | 'red' = 'muted') => {
+      v.free = free;
+      return statusBarModel(i, NOW, previous);
+    };
+    expect(model(100e9).spaceLevel).toBe('muted');
+    expect(model(99e9).spaceLevel).toBe('amber');
+    expect(model(20e9).spaceLevel).toBe('amber');
+    const red = model(19e9);
+    expect(red.right.free?.sev).toBe('red');
+    expect(red.chips.find((c) => c.id === 'low-space')).toMatchObject({
+      rank: 1,
+      sev: 'red',
+      target: { kind: 'modal', section: 'trash' },
+    });
+    expect(model(22e9, 'red').spaceLevel).toBe('red');
+    expect(model(22e9 + 1, 'red').spaceLevel).toBe('amber');
+    expect(model(110e9, 'amber').spaceLevel).toBe('amber');
+    expect(model(110e9 + 1, 'amber').spaceLevel).toBe('muted');
+    v.size = 100e9;
+    expect(model(14e9).spaceLevel).toBe('amber');
+    expect(model(4e9).spaceLevel).toBe('red');
+  });
+
+  test('Busy copy does not attribute several holders in a scope to just the most recent one', () => {
+    const i = pbi();
+    i.daemon.data!.busy!.recent[0].holder = 'publish';
+    expect(busy(i)[0].text).toBe('3 requests got Busy · tool');
+  });
+
+  test('stale volume is a dash without a low-space chip, preserving hysteresis until a good sample', () => {
+    const i = pbi();
+    i.daemon.data!.volume!.free = 1;
+    i.daemon.data!.volume!.as_of = new Date(NOW - 60_000).toISOString();
+    expect(statusBarModel(i, NOW).right.free?.sev).toBe('red');
+    i.daemon.data!.volume!.as_of = new Date(NOW - 60_001).toISOString();
+    expect(statusBarModel(i, NOW, 'red')).toMatchObject({
+      spaceLevel: 'red',
+      right: { free: { text: '—', sev: 'muted' } },
+    });
+    expect(allChips(i).some((c) => c.id === 'low-space')).toBe(false);
+    i.daemon.data!.volume = null;
+    expect(statusBarModel(i, NOW, 'red')).toMatchObject({
+      spaceLevel: 'red',
+      right: { free: null },
+    });
+  });
+
+  test('atomic scan counts work without du; unresolved failures do not come from failed history', () => {
+    const i = pbi();
+    expect(allChips(i).find((c) => c.id === 'scan')?.text).toBe(
+      'Measuring storage · 412 done · 4 in progress · 136 queued'
+    );
+    expect(allChips(i).find((c) => c.id === 'scan-unresolved')?.text).toBe(
+      "Couldn't measure 1 item"
+    );
+    i.daemon.data!.scan!.unresolved_n = 0;
+    i.daemon.data!.scan!.full = false;
+    // There is no start time in daemon_status.scan: show running progress until du supplies it.
+    expect(allChips(i).some((c) => c.id === 'scan')).toBe(true);
+    i.du = fx<DuReply>('du');
+    i.du.scan = { ...pbFixture.duScan, started: new Date(NOW - 60_000).toISOString() };
+    expect(allChips(i).some((c) => c.id === 'scan')).toBe(false);
+    expect(allChips(i).some((c) => c.id === 'scan-unresolved')).toBe(false);
+    i.du.scan.started = new Date(NOW - 60_001).toISOString();
+    expect(allChips(i).some((c) => c.id === 'scan')).toBe(true);
+    i.daemon.data!.scan!.running = false;
+    expect(allChips(i).some((c) => c.id === 'scan')).toBe(false);
+    delete i.daemon.data!.scan;
+    expect(allChips(i).find((c) => c.id === 'scan-unresolved')?.text).toBe(
+      "Couldn't measure 1 item"
+    );
+  });
+
+  test('version mismatch and restart use existing identity source and RFC 3339 started', () => {
+    const i = pbi();
+    i.daemon.data!.version = '0.2.3';
+    expect(allChips(i).find((c) => c.id === 'version')).toMatchObject({
+      sev: 'amber',
+      text: `App ${version} · daemon 0.2.3`,
+    });
+    expect(allChips(i).find((c) => c.id === 'restarted')).toMatchObject({
+      sev: 'muted',
+      text: 'Daemon restarted 2 min ago',
+    });
+  });
+
+  test('without the capability new data fields add no chips or free-space facts', () => {
+    const i = pbi();
+    i.daemon.data!.features = ['status.upstream'];
+    expect(activity(i)).toEqual([]);
+    expect(busy(i)).toEqual([]);
+    expect(statusBarModel(i, NOW).right.free).toBeNull();
+    expect(allChips(i).filter((c) => c.id.startsWith('scan'))).toEqual([]);
+    expect('api' in i.daemon.data!).toBe(false);
   });
 });

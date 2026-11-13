@@ -22,6 +22,72 @@ export interface LockHoldJson {
   method: string;
   session: string | null;
   since: SystemTimeJson;
+  origin?: 'request' | 'background';
+  elapsed_ms?: number;
+}
+
+export interface LongHoldJson {
+  repo: string;
+  method: string;
+  since: SystemTimeJson;
+  origin?: 'request' | 'background' | null;
+  session?: string | null;
+}
+
+/** P-b display work, distinct from the admitted requests used by a future drain. */
+interface ActivityBase {
+  id: number;
+  origin: 'request' | 'background';
+  repo: string | null;
+  session: string | null;
+  started: string;
+  elapsed_ms: number;
+  step_elapsed_ms: number;
+}
+
+export type DaemonActivity = ActivityBase &
+  (
+    | {
+        kind: 'move';
+        cause: 'catch_up' | 'publish' | 'sync' | 'deps' | 'replay';
+        phase: 'checkpoint' | 'prepare' | 'recheck' | 'swap' | 'pin' | 'record' | 'old_tree' | null;
+      }
+    | { kind: 'deps_rollout'; sessions: number; done: number }
+    | { kind: 'base_build'; tree: string | null }
+    | { kind: 'session_create'; repos: string[]; step: string | null }
+    | { kind: 'deps_install'; proposal: string | null }
+    | { kind: 'publish' | 'push' }
+  );
+
+export interface BusyEvent {
+  at: string;
+  method: string;
+  session: string | null;
+  reason: 'lock_wait' | 'du_cancel_timeout';
+  scope: { repo?: string; session?: string };
+  holder: string | null;
+  holder_session: string | null;
+}
+
+export interface DaemonBusy {
+  total: number;
+  recent: BusyEvent[];
+  truncated: boolean;
+}
+
+export interface VolumeSpace {
+  free: number;
+  size: number;
+  as_of: string;
+}
+
+export interface DaemonScan {
+  running: boolean;
+  active: number;
+  queued: number;
+  done: number;
+  full: boolean;
+  unresolved_n: number;
 }
 
 /** `queues[]` (locks.rs `queue_snapshot`): a session FIFO and who holds it. */
@@ -60,9 +126,13 @@ export interface DaemonStatus {
   };
   /** Descriptor use (daemons from ffe316b on). Optional: older daemons omit it. */
   fds?: { open: number; limit: number; accept_errors: number };
-  /** Not sent by any daemon yet; typed so the status modal picks them up when they are. */
+  /** P-b identity and display fields. Capability: `daemon_status.activity`; no new `api`. */
   pid?: number;
   started?: string;
+  activity?: DaemonActivity[];
+  busy?: DaemonBusy;
+  volume?: VolumeSpace | null;
+  scan?: DaemonScan;
 }
 
 export interface BaseRef {
@@ -371,6 +441,8 @@ export interface DuScan {
   started?: string | null;
   done?: number;
   full?: boolean;
+  active?: number;
+  unresolved?: Array<{ unit: string; error: string; at: string }>;
   failed?: Array<{ unit: string; error: string }>;
 }
 

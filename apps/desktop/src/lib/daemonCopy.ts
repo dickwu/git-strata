@@ -31,6 +31,16 @@ export const daemonCopy = {
   },
   activity: {
     heading: 'Activity',
+    work: 'Work in progress',
+    kinds: {
+      move: 'Moving session',
+      deps_rollout: 'Rolling out dependencies',
+      base_build: 'Building base',
+      session_create: 'Creating session',
+      deps_install: 'Installing dependencies',
+      publish: 'Publishing',
+      push: 'Pushing',
+    },
     holds: 'Repo locks',
     queues: 'Session queues',
     columns: {
@@ -79,6 +89,11 @@ export const daemonCopy = {
     allocated: 'Allocated, counted once per file; overcounts clones',
     logical: 'Logical size of all files; counts every clone in full',
   },
+  volume: {
+    text: (free: string, size: string) => `Data volume: ${free} free of ${size}`,
+    unavailable: 'Data volume: —',
+    note: "APFS free space is shared across the volume's space pool and excludes purgeable space, so it can differ from Finder. Size minus free is not git-strata usage.",
+  },
   scan: {
     heading: 'Size scan',
     running: (done: string | null, queued: string, active: string | null) => {
@@ -91,9 +106,17 @@ export const daemonCopy = {
     },
     idle: (ended: string | null) => (ended ? `Idle, last full pass ${ended}` : 'Idle'),
     failed: 'Recent measuring errors',
+    unresolvedCount: (n: number) => `Couldn't measure ${n} ${n === 1 ? 'item' : 'items'}`,
     failedNote:
       'Attempt history of the size scan: an error stays listed after a later attempt succeeds.',
     times: (n: number) => `(${n} times)`,
+  },
+  busy: {
+    heading: 'Busy replies',
+    total: (n: number) => `Total since daemon start: ${n.toLocaleString('en-US')}`,
+    truncated: '50+ requests got Busy in the last 10 minutes; only the latest 50 are listed.',
+    recent: 'Recent replies (last 10 minutes)',
+    unknownScope: 'Scope not reported',
   },
   savings: {
     heading: 'Compared with git worktree',
@@ -170,6 +193,7 @@ export const daemonCopy = {
     version: 'Version',
     pid: 'Process ID',
     uptime: 'Uptime',
+    started: 'Started',
     sessions: 'Sessions',
     leftovers: 'Leftover directories',
     leftoversTip:
