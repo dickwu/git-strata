@@ -11,16 +11,19 @@ import {
   ASSUMED_COPY_RATE,
   copyEstimateMs,
   duration,
+  isLive,
   rawJson,
   savingsView,
   scanText,
   scanView,
+  sectionLanding,
   statusFacts,
   storageView,
   systemTimeMs,
   times,
   warningSev,
   when,
+  type SectionBox,
 } from './daemonPanel';
 
 const fx = <T>(name: string): T =>
@@ -148,6 +151,67 @@ describe('savingsView', () => {
     expect(ASSUMED_COPY_RATE).toBe(2e9);
     expect(copyEstimateMs(2e9)).toBe(1000);
     expect(copyEstimateMs(-5)).toBe(0);
+  });
+
+  test('exact or not reported: every bound is a number', () => {
+    for (const v of [savingsView(timedDu())!, savingsView(fx<DuReply>('du'))!]) {
+      expect(v.inexact).toBe(false);
+      expect([v.live.saved, v.live.onDisk, v.cumulative.saved]).not.toContain(null);
+      expect(v.rows.map((r) => [r.onDisk, r.saved]).flat()).not.toContain(null);
+    }
+  });
+
+  // usage.rs: a file with no APFS private size counts its allocated size as private, so the
+  // "at least" can overstate and logical − private understate: neither bound holds.
+  test('exact false: the live and per-session bounds are null, never a number', () => {
+    const du = timedDu();
+    const inexact = { ...sess('s-big', 10e9, 1e6, 2500), exact: false } as DuSession;
+    du.sessions = {
+      all: { ...du.sessions!.all, exact: false } as Usage & { files?: number },
+      list: [inexact, sess('s-small', 2e9, 1e6, null)],
+    };
+    const v = savingsView(du)!;
+    expect([v.live.saved, v.live.onDisk]).toEqual([null, null]);
+    expect(v.live.logical).toBe(12e9); // logical sizes are exact either way
+    // Inexact rows have no saving to rank by: after the exact ones.
+    expect(v.rows.map((r) => [r.session, r.onDisk, r.saved])).toEqual([
+      ['s-small', 1e6, 2e9 - 1e6],
+      ['s-big', null, null],
+    ]);
+    // cumulative reports no accuracy of its own; inexact live sessions void it too
+    expect(v.cumulative.saved).toBeNull();
+    expect(v.inexact).toBe(true);
+    // Time is measured, not derived from private sizes.
+    expect(v.timing?.speedup).toBe(2);
+    expect(v.rows[1].speedup).toBe(2);
+  });
+
+  test('cumulative follows total.exact; exact live sessions keep their bounds', () => {
+    const du = timedDu();
+    du.total = { ...du.total, exact: false } as Usage;
+    const v = savingsView(du)!;
+    expect(v.live.saved).toBe(12e9 - 2e6);
+    expect(v.live.onDisk).toBe(2e6);
+    expect(v.cumulative.saved).toBeNull();
+    expect(v.inexact).toBe(true);
+  });
+
+  test('one inexact row alone: its bounds are null and the view says why', () => {
+    const du = timedDu();
+    du.sessions!.list = [{ ...sess('s-odd', 5e9, 1e9), exact: false } as DuSession];
+    const v = savingsView(du)!;
+    expect(v.rows[0]).toMatchObject({ onDisk: null, saved: null, logical: 5e9 });
+    expect(v.live.saved).toBe(12e9 - 2e6); // sessions.all does not say inexact
+    expect(v.inexact).toBe(true);
+  });
+});
+
+describe('isLive', () => {
+  test('a cached reply after a failed poll is not live; an answer, or data with no error, is', () => {
+    expect(isLive({ isSuccess: true, isError: false, data: {} })).toBe(true);
+    expect(isLive({ isSuccess: false, isError: true, data: {} })).toBe(false);
+    expect(isLive({ isSuccess: false, isError: false, data: {} })).toBe(true);
+    expect(isLive({ isSuccess: false, isError: false, data: undefined })).toBe(false);
   });
 });
 
@@ -536,6 +600,66 @@ describe('warnings', () => {
       '{\n  "FetchFailed": {\n    "repo": "tool"\n  }\n}'
     );
     expect(rawJson(undefined)).toBe('undefined');
+  });
+});
+
+describe('sectionLanding (a chip opens the modal at its section)', () => {
+  // The modal body's children as laid out: the Now list (no data-section) first.
+  const body: SectionBox[] = [
+    { name: undefined, offsetTop: 0 },
+    { name: 'warnings', offsetTop: 180 },
+    { name: 'activity', offsetTop: 420 },
+    { name: 'daemon', offsetTop: 900 },
+  ];
+
+  test('lands on the section and stops', () => {
+    expect(sectionLanding(body, 'activity', 0)).toEqual({ top: 420, done: true });
+    expect(sectionLanding(body, 'warnings', 0)).toEqual({ top: 180, done: true });
+  });
+
+  test('no section asked for: the top, nothing to do', () => {
+    expect(sectionLanding(body, undefined, 0)).toEqual({ top: null, done: true });
+  });
+
+  test('a section that is not there leaves the view at the top and tries again', () => {
+    expect(sectionLanding(body, 'scan', 0)).toEqual({ top: null, done: false });
+    expect(sectionLanding([], 'scan', 0)).toEqual({ top: null, done: false });
+  });
+
+  test('once the reader has scrolled, nothing moves the view', () => {
+    expect(sectionLanding(body, 'activity', 35)).toEqual({ top: null, done: true });
+  });
+
+  /** The modal's effect over a run of renders: lands at most once, then never moves. */
+  const open = (section: string | undefined, renders: Array<SectionBox[] | 'scroll'>) => {
+    let scrollTop = 0;
+    let landed = false;
+    const tops: number[] = [];
+    for (const r of renders) {
+      if (r === 'scroll') {
+        scrollTop += 50; // the reader scrolls
+        continue;
+      }
+      if (landed) continue;
+      const { top, done } = sectionLanding(r, section, scrollTop);
+      if (top !== null) tops.push((scrollTop = top));
+      landed = done;
+    }
+    return tops;
+  };
+  const scan = { name: 'scan', offsetTop: 700 };
+
+  test('renders: the section comes later (du answered) → lands then, once', () => {
+    expect(open('scan', [body, body, [...body, scan], [...body, scan]])).toEqual([700]);
+  });
+
+  test('renders: the section goes and comes back with polls → no second jump', () => {
+    const noActivity = body.filter((c) => c.name !== 'activity');
+    expect(open('activity', [body, noActivity, body])).toEqual([420]);
+  });
+
+  test('renders: the reader scrolls before the section shows up → the view stays', () => {
+    expect(open('scan', [body, 'scroll', [...body, scan]])).toEqual([]);
   });
 });
 

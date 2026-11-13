@@ -13,6 +13,11 @@
  * least"), because blocks a base shares with its sessions count nowhere. `allocated` counts a
  * cloned block once for every file holding it, so over clones it reaches terabytes that were
  * never written; it stays out of user copy except inside a Details disclosure.
+ *
+ * Accuracy: a `du` figure with `exact: false` had files without an APFS private size, whose
+ * allocated size stood in (strata-apfs usage.rs). Its `private` can then overstate what is held
+ * alone and logical − private understate the savings, so neither bound holds: such figures are
+ * null here and show as unavailable.
  */
 import { daemonCopy as t } from './daemonCopy';
 import type { Severity, WarningView } from './statusBar';
@@ -28,8 +33,10 @@ export function copyEstimateMs(logical: number): number {
 export interface SavingsRow {
   session: string;
   logical: number;
-  onDisk: number;
-  saved: number;
+  /** Held only by this session, at least (`private`); null when the row is inexact. */
+  onDisk: number | null;
+  /** logical − private, an upper bound; null when the row is inexact. */
+  saved: number | null;
   files: number | null;
   createMs: number | null;
   copyEstimateMs: number;
@@ -39,9 +46,11 @@ export interface SavingsRow {
 
 export interface SavingsView {
   live: {
-    saved: number;
+    /** Upper bound; null when the live sessions' figures are inexact (`sessions.all.exact`). */
+    saved: number | null;
     logical: number;
-    onDisk: number;
+    /** Lower bound; null when inexact. */
+    onDisk: number | null;
     files: number | null;
     sessions: number;
     complete: boolean;
@@ -49,7 +58,11 @@ export interface SavingsView {
     copyEstimateMs: number;
   };
   cumulative: {
-    saved: number;
+    /**
+     * Upper bound; null when this data root reports inexact figures. The reply carries no
+     * accuracy for the cumulative sum (du.rs `cumulative`), so `total.exact` stands in.
+     */
+    saved: number | null;
     sessions: number;
     sized: number;
     unsized: number;
@@ -68,31 +81,42 @@ export interface SavingsView {
   rows: SavingsRow[];
   /** Rows with no recorded create time (made before the daemon timed sessions). */
   untimed: number;
+  /** Some bound above is null because its figures are inexact: say why. */
+  inexact: boolean;
 }
 
 const ratio = (est: number, measured: number | null) =>
   measured !== null && measured > 0 ? est / measured : null;
 
+/** A `du` figure with `exact: false` (absent on a daemon that does not say: no evidence). */
+const inexact = (f: unknown): boolean =>
+  f !== null && typeof f === 'object' && (f as { exact?: unknown }).exact === false;
+
 /** null: this daemon does not report savings (before the du savings report). */
 export function savingsView(du: DuReply | undefined): SavingsView | null {
   if (!du?.savings || !du.sessions) return null;
   const { live, cumulative: c } = du.savings;
+  // `savings.live` sums the same units as `sessions.all`, which carries their accuracy.
+  const liveExact = !inexact(du.sessions.all);
+  const cumulativeExact = liveExact && !inexact(du.total);
   const rows: SavingsRow[] = du.sessions.list
     .map((s) => {
+      const exact = !inexact(s);
       const createMs = typeof s.create_ms === 'number' ? s.create_ms : null;
       const est = copyEstimateMs(s.logical);
       return {
         session: s.session,
         logical: s.logical,
-        onDisk: s.private,
-        saved: s.savings,
+        onDisk: exact ? s.private : null,
+        saved: exact ? s.savings : null,
         files: typeof s.files === 'number' ? s.files : null,
         createMs,
         copyEstimateMs: est,
         speedup: ratio(est, createMs),
       };
     })
-    .sort((a, b) => b.saved - a.saved);
+    // Inexact rows (no saving to rank by) last, in reply order.
+    .sort((a, b) => (b.saved ?? -1) - (a.saved ?? -1));
   const files = du.sessions.all.files;
   let timing: SavingsView['timing'] = null;
   let timingMissing: SavingsView['timingMissing'] = null;
@@ -111,9 +135,9 @@ export function savingsView(du: DuReply | undefined): SavingsView | null {
   }
   return {
     live: {
-      saved: live.savings,
+      saved: liveExact ? live.savings : null,
       logical: live.logical,
-      onDisk: live.private,
+      onDisk: liveExact ? live.private : null,
       files: typeof files === 'number' ? files : null,
       sessions: du.sessions.list.length,
       complete: live.complete,
@@ -121,7 +145,7 @@ export function savingsView(du: DuReply | undefined): SavingsView | null {
       copyEstimateMs: copyEstimateMs(live.logical),
     },
     cumulative: {
-      saved: c.savings,
+      saved: cumulativeExact ? c.savings : null,
       sessions: c.sessions,
       sized: c.sized,
       unsized: c.unsized,
@@ -132,7 +156,17 @@ export function savingsView(du: DuReply | undefined): SavingsView | null {
     timingMissing,
     rows,
     untimed: rows.filter((r) => r.createMs === null).length,
+    inexact: !cumulativeExact || rows.some((r) => r.saved === null),
   };
+}
+
+/**
+ * The `daemon_status` query answered last time (react-query keeps a reply across a failed
+ * poll). Holds, queues and warnings are shown only from a live answer: a cached hold would
+ * keep aging, and a LongHold turn amber, while the daemon is not answering.
+ */
+export function isLive(q: { isSuccess: boolean; isError: boolean; data: unknown }): boolean {
+  return q.isSuccess || (q.data !== undefined && !q.isError);
 }
 
 export interface StatusFacts {
@@ -482,6 +516,32 @@ export function rawJson(raw: unknown): string {
   } catch {
     return String(raw);
   }
+}
+
+// ---- Opening the modal at a chip's section (design §3.5) ----
+
+/** One child of the modal's scroll box as laid out: its `data-section` and offset from the top. */
+export interface SectionBox {
+  name: string | undefined;
+  offsetTop: number;
+}
+
+/**
+ * Where the modal body scrolls for a chip's `section`, given its children and how far it is
+ * scrolled now. `top`: scroll there (null: leave the view as it is). `done`: stop trying.
+ * A section that is not there (yet) leaves the view at the top, where the Now list shows every
+ * chip, and is tried again on the next render; once the view has landed, or the reader has
+ * scrolled, nothing moves it, so a section that comes and goes with later polls never pulls the
+ * view back.
+ */
+export function sectionLanding(
+  children: readonly SectionBox[],
+  section: string | undefined,
+  scrollTop: number
+): { top: number | null; done: boolean } {
+  if (section === undefined || scrollTop !== 0) return { top: null, done: true };
+  const hit = children.find((c) => c.name === section);
+  return hit ? { top: hit.offsetTop, done: true } : { top: null, done: false };
 }
 
 // ---- Format ----
