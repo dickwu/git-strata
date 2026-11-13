@@ -12,7 +12,7 @@
  * types. Slice A owns the bodies below and their tests; slice B renders `StatusBarModel`;
  * slice C renders `WarningView` in the modal and the Daemon screen.
  */
-import { version as appVersion } from '../../package.json';
+import appPackage from '../../package.json';
 import { ago, bytes } from './copy';
 import { statusBarCopy as t } from './statusBarCopy';
 import { asGuiError, isDaemonDown, reason } from './tauri';
@@ -65,7 +65,7 @@ export interface Chip {
 export interface WarningView {
   /** Variant name, e.g. `LongHold`, `StorePoisoned`. */
   kind: string;
-  /** Mirrors `tray_model.rs::warning_class`, extended with LongHold split by method (§3.1). */
+  /** Tray error/waiting classes, plus method-based LongHold and transient rebase activity. */
   cls: 'error' | 'waiting' | 'notice' | 'activity';
   sev: Severity;
   /** One sentence for people; repo names and ids as plain text. */
@@ -92,6 +92,14 @@ export interface StatusBarInput {
   sessionsUpdatedAt?: number;
   deps: DepsList | undefined;
   du: DuReply | undefined;
+  /** Local observations from existing daemonStatus completions, never a new daemon field. */
+  health?: {
+    timeouts: number;
+    /** Last successful health completion; 0 when none has been observed. */
+    lastOkAt: number;
+    /** Counter from the successful reply preceding daemon.data, absent on the first reply. */
+    prevAcceptErrors?: number;
+  };
 }
 
 export interface StatusBarModel {
@@ -119,6 +127,7 @@ const ERROR_WARNING_KINDS: readonly string[] = [
   'AttachOutside',
 ];
 const HEALTH_FRESH_MS = 60_000;
+const UNRESPONSIVE_AFTER_MS = 20_000;
 const LONG_WAIT_MAX_MS = 10 * 60_000;
 const ACTIVITY_MIN_MS = 3000;
 const TRANSIENT_REBASE_REASONS = new Set([
@@ -275,7 +284,9 @@ function classify(w: unknown, now: number, daemon?: DaemonStatus): WarningView {
         age(since, now) < STUCK_AFTER;
       view.cls = transient ? 'activity' : 'notice';
       view.sev = transient ? 'blue' : 'amber';
-      view.text = t.warning.autoRebaseStuck(repo ?? '', session, string(p.reason) ?? '');
+      view.text = transient
+        ? t.activity.autoRebaseWaiting(repo ?? '', session, string(p.reason) ?? '')
+        : t.warning.autoRebaseStuck(repo ?? '', session, string(p.reason) ?? '');
       break;
     }
     case 'LongHold': {
@@ -335,30 +346,23 @@ function errorTitle(e: unknown): string {
 
 function daemonState(
   input: StatusBarInput['daemon'],
-  now: number
+  now: number,
+  health: StatusBarInput['health']
 ): {
   trigger: StatusBarModel['daemon'];
   healthChip?: Chip;
   fresh: boolean;
 } {
-  const chip = (
-    text: string,
-    sev: Severity,
+  const state = (
     state: 'pending' | 'down',
+    label: string,
     detail: string | null = null,
-    label = text
+    fresh = false
   ) => ({
     trigger: { state, label, detail },
-    healthChip: {
-      id: 'down',
-      rank: 1,
-      sev,
-      text,
-      target: { kind: 'modal', section: 'daemon' },
-    } as Chip,
-    fresh: false,
+    fresh,
   });
-  if (input.pending) return chip(t.daemon.connecting, 'muted', 'pending');
+  if (input.pending) return state('pending', t.daemon.connecting);
   if (input.error != null) {
     const g = asGuiError(input.error);
     if (g.code === 'Busy') {
@@ -368,31 +372,44 @@ function daemonState(
           const text = [1, 4, 13].includes(finite(errno) ?? -1)
             ? t.daemon.permission
             : t.daemon.volumeUnavailable;
-          return chip(text, 'red', 'down', text, t.daemon.offline);
+          return {
+            ...state('down', t.daemon.waitingForVolume),
+            healthChip: {
+              id: 'volume',
+              rank: 1,
+              sev: 'red',
+              text,
+              target: { kind: 'modal', section: 'daemon' },
+            },
+          };
         }
         case 'starting':
-          return chip(t.daemon.starting, 'muted', 'pending');
+          return state('pending', t.daemon.starting);
         case 'too_many_open_files':
-          return chip(
-            t.daemon.fileHandlesExhausted,
-            'red',
-            'down',
-            t.daemon.fileHandlesExhausted,
-            t.daemon.offline
-          );
+          return state('down', t.daemon.fileHandlesExhausted);
       }
     }
-    return isDaemonDown(input.error)
-      ? chip(t.daemon.notRunning, 'red', 'down')
-      : chip(t.daemon.notResponding, 'red', 'down', errorTitle(input.error));
+    if (isDaemonDown(input.error)) return state('down', t.daemon.notRunning);
+    const lastOkAt = Math.max(health?.lastOkAt ?? 0, input.updatedAt);
+    if (
+      (health?.timeouts ?? 0) >= 2 &&
+      (lastOkAt <= 0 || age(lastOkAt, now) >= UNRESPONSIVE_AFTER_MS)
+    )
+      return state('down', t.daemon.notResponding, errorTitle(input.error));
+    // Refusals and a lone timeout do not prove Down or rejuvenate a cached reply.
+    const fresh =
+      input.data !== undefined &&
+      input.updatedAt > 0 &&
+      age(input.updatedAt, now) <= HEALTH_FRESH_MS;
+    return state('pending', t.daemon.checking, errorTitle(input.error), fresh);
   }
-  if (input.data === undefined) return chip(t.daemon.connecting, 'muted', 'pending');
+  if (input.data === undefined) return state('pending', t.daemon.connecting);
   if (input.updatedAt <= 0 || age(input.updatedAt, now) > HEALTH_FRESH_MS) {
     const text =
       input.updatedAt > 0
         ? t.daemon.stale(t.elapsed(age(input.updatedAt, now)))
         : t.daemon.checking;
-    return chip(text, 'muted', 'pending', text, t.daemon.checking);
+    return state('pending', t.daemon.checking, text === t.daemon.checking ? null : text);
   }
   return {
     trigger: {
@@ -406,10 +423,10 @@ function daemonState(
 
 /** Build S1 from already-polled replies. Historical warnings never become fresh health evidence. */
 export function statusBarModel(input: StatusBarInput, now: number): StatusBarModel {
-  const health = daemonState(input.daemon, now);
+  const health = daemonState(input.daemon, now, input.health);
   const daemon = input.daemon.data;
   const all: Chip[] = health.healthChip ? [health.healthChip] : [];
-  const modal = (section: 'warnings' | 'activity' | 'scan'): ChipTarget => ({
+  const modal = (section: 'daemon' | 'warnings' | 'activity' | 'scan'): ChipTarget => ({
     kind: 'modal',
     section,
   });
@@ -435,14 +452,21 @@ export function statusBarModel(input: StatusBarInput, now: number): StatusBarMod
     });
 
   if (health.fresh && daemon) {
+    // The modal hides cached warning sections while the current query is in error.
+    const warningTarget = input.daemon.error == null ? modal('warnings') : modal('daemon');
     const fds = daemon.fds;
-    if (fds && fds.limit > 0 && fds.open >= fds.limit * 0.9) {
+    if (
+      fds &&
+      ((fds.limit > 0 && fds.open >= fds.limit * 0.9) ||
+        (input.health?.prevAcceptErrors !== undefined &&
+          fds.accept_errors > input.health.prevAcceptErrors))
+    ) {
       all.push({
         id: 'fds',
         rank: 1,
         sev: 'red',
         text: t.daemon.fileHandlesLow,
-        target: modal('warnings'),
+        target: modal('daemon'),
       });
     }
     const warnings = (daemon.warnings ?? []).map((w) => classify(w, now, daemon));
@@ -453,20 +477,33 @@ export function statusBarModel(input: StatusBarInput, now: number): StatusBarMod
         rank: 1,
         sev: 'red',
         text: t.daemon.needsAttention(errors),
-        target: modal('warnings'),
+        target: warningTarget,
       });
     const activities = new Map<string, WarningView>();
+    const deferred = new Map<string, number>();
+    const fetchRepos = new Set<string | undefined>();
+    const activityRank = (w: WarningView) =>
+      w.kind !== 'LongHold' ? 2 : warningParts(w.raw).payload.method === 'catch_up' ? 0 : 1;
     for (const w of warnings) {
       if (w.cls === 'activity') {
         if (w.since !== undefined && age(w.since, now) < ACTIVITY_MIN_MS) continue;
         const key = w.repo ?? w.kind;
+        if (w.kind === 'AutoRebaseStuck') deferred.set(key, (deferred.get(key) ?? 0) + 1);
         const previous = activities.get(key);
-        if (!previous || (w.since ?? now) < (previous.since ?? now)) activities.set(key, w);
+        if (
+          !previous ||
+          activityRank(w) < activityRank(previous) ||
+          (activityRank(w) === activityRank(previous) && (w.since ?? now) < (previous.since ?? now))
+        )
+          activities.set(key, w);
       } else if (w.cls === 'notice' && w.sev === 'amber') {
+        const fetching = w.kind === 'FetchFailed' || w.kind === 'AnchorNotAdvanced';
+        if (fetching && fetchRepos.has(w.repo)) continue;
+        if (fetching) fetchRepos.add(w.repo);
         const payload = warningParts(w.raw).payload;
         const id = [
           'warning',
-          w.kind,
+          fetching ? 'fetch' : w.kind,
           w.repo,
           w.session,
           string(payload.method),
@@ -480,7 +517,7 @@ export function statusBarModel(input: StatusBarInput, now: number): StatusBarMod
           sev: 'amber',
           text: w.text,
           since: w.since,
-          target: modal('warnings'),
+          target: warningTarget,
         });
       }
     }
@@ -491,16 +528,16 @@ export function statusBarModel(input: StatusBarInput, now: number): StatusBarMod
         rank: 4,
         sev: 'amber',
         text: t.warning.configRestart(restart),
-        target: modal('warnings'),
+        target: modal('daemon'),
       });
     }
-    if (record(daemon.reconcile.last).panicked === true) {
+    if (record(daemon.reconcile?.last).panicked === true) {
       all.push({
         id: 'reconcile',
         rank: 4,
         sev: 'amber',
         text: t.daemon.reconcilePanicked,
-        target: modal('warnings'),
+        target: modal('daemon'),
       });
     }
     if (record(daemon).sessions_audit_error != null) {
@@ -509,16 +546,16 @@ export function statusBarModel(input: StatusBarInput, now: number): StatusBarMod
         rank: 4,
         sev: 'amber',
         text: t.daemon.auditFailed,
-        target: modal('warnings'),
+        target: modal('daemon'),
       });
     }
-    if (daemon.version && daemon.version !== appVersion) {
+    if (daemon.version && daemon.version !== appPackage.version) {
       all.push({
         id: 'version',
         rank: 4,
         sev: 'amber',
-        text: t.daemon.versionMismatch(appVersion, daemon.version),
-        target: modal('warnings'),
+        text: t.daemon.versionMismatch(appPackage.version, daemon.version),
+        target: modal('daemon'),
       });
     }
     const sessionsFresh =
@@ -544,18 +581,25 @@ export function statusBarModel(input: StatusBarInput, now: number): StatusBarMod
         rank: 4,
         sev: 'amber',
         text: t.needsPush(repo),
-        target: modal('warnings'),
+        target: modal('daemon'),
       });
     }
     for (const [repo, w] of activities) {
+      const lock = w.kind === 'LongHold';
+      const text = lock
+        ? t.activity.deferred(
+            t.activity.counts(w.text, daemon.repo_waiting?.[repo] ?? 0, pending.get(repo) ?? 0),
+            deferred.get(repo) ?? 0
+          )
+        : w.text;
       all.push({
         id: `activity:${repo}`,
         rank: 5,
         sev: 'blue',
-        text: t.activity.counts(w.text, daemon.repo_waiting?.[repo] ?? 0, pending.get(repo) ?? 0),
-        tooltip: w.kind === 'LongHold' ? t.activity.tooltip(repo) : undefined,
+        text,
+        tooltip: lock ? t.activity.tooltip(repo) : undefined,
         since: w.since,
-        target: modal('activity'),
+        target: modal('daemon'),
       });
     }
     const scan = input.du?.scan;
@@ -591,10 +635,15 @@ export function statusBarModel(input: StatusBarInput, now: number): StatusBarMod
       rank: 6,
       sev: 'muted',
       text: t.unavailable,
-      target: modal('warnings'),
+      target: modal('daemon'),
     });
   }
-  const savings = health.fresh ? input.du?.savings?.live : undefined;
+  const du = input.du;
+  const inexact =
+    record(du?.total).exact === false ||
+    record(du?.sessions?.all).exact === false ||
+    du?.sessions?.list.some((s) => record(s).exact === false);
+  const savings = health.fresh && !inexact ? du?.savings?.live : undefined;
   return {
     daemon: health.trigger,
     ...capChips(all),

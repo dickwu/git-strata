@@ -561,7 +561,8 @@ AttachOutside. Waiting: ConfigRelaxPending. Notice: abnormal LongHold, PublishRu
 AnchorNotAdvanced, FetchFailed, StaleRefLock, and unknown variants. On a 0.2.2 daemon, a
 LongHold whose own method is `catch_up`, `old_tree`, `periodic_fetch` or `daemon` is background
 activity below 30 min and is excluded from notices; at 30 min it becomes a notice again.
-Request methods such as `publish`, `push` and `sync` remain notices. An origin-bearing LongHold,
+Request methods such as `publish`, `push` and `sync` remain notices. A LongHold with a present,
+non-null `origin` (absent/null uses the 0.2.2 fallback),
 or any LongHold from a daemon advertising `daemon_status.activity`, is abnormal and remains
 a notice. Notice count appears on the status line without changing the icon. Daemon shows
 human-readable warning text, with raw variants behind Details. Many error warnings
@@ -575,8 +576,9 @@ listed by stuck apply proposals. ConfigRelax adds one repo item. Conflicts stay 
 any age. Pending auto-rebases, waiting installing/waiting_install, and younger non-conflict
 deferrals are Syncing; needs_push, publish_unfinished, proposal presence and lock holds are not.
 Only after this existing rule selects Syncing may a `catch_up` entry in `daemon_status.holds[]`
-or a LongHold add its repo and elapsed time to the tooltip. With several, use the oldest
-valid `since`; tickets never appear (G7). This is text only: the menu status line stays
+or a `LongHold` with method `catch_up` add its repo and elapsed time to the tooltip. Entries
+must be at least 3 s old; ages from 3–59 s use seconds, then whole minutes/hours. With several,
+use the oldest valid `since`; tickets never appear (G7). This is text only: the menu status line stays
 `Daemon running, N sessions` (plus any notices), and no new poll, state, color or priority is added.
 All upstream-derived states need `status.upstream` and session-level enrichment. Missing
 session enrichment overrides Syncing/Normal with partial Checking but does not hide proposals
@@ -997,7 +999,7 @@ daemon modal. Chip targets open the relevant modal section, waiting list or sess
 
 | Order | Color | Contents |
 |---|---|---|
-| 1 | Red (`--danger`) | Daemon down, unavailable data volume, file-handle pressure, Error-class warnings |
+| 1 | Red (`--danger`) | Unavailable data volume guidance, file-handle pressure, Error-class warnings (down/exhaustion are shown once in the daemon trigger) |
 | 2 | Amber (Waiting palette) | Waiting for you |
 | 3 | Purple (Conflict palette) | Repositories needing an agent for conflicts |
 | 4 | Amber (Waiting palette) | Degraded states: abnormal holds, current long waits, actionable auto-rebase failures, config/fetch failures, published but not pushed |
@@ -1008,8 +1010,24 @@ Repository names, session labels and agent-supplied text render as plain text (G
 side retains the savings upper bound, session count and theme control. Free space appears
 only when the daemon reports it; it is absent with 0.2.2. Missing identity fields are not
 inferred from the app version. Health distinguishes checking, not running, not responding
-and stale reads, following §5.8's liveness rules; `store_unavailable` keeps permission/TCC
-guidance separate from a missing data volume, and `starting` means recovery is in progress.
+and stale reads. Local query-completion observations require at least two health timeouts
+and 20 s since the last successful health completion (or no prior Ok) before showing
+unresponsive; timeouts within 4 s coalesce. A successful reply resets the timeout count.
+`request_in_flight`, `not_tauri` and ordinary Busy refusals do not count as timeouts; before
+the threshold the trigger stays neutral Checking. Retained replies keep their original
+60-second health age. A rising `fds.accept_errors` counter across successful replies also
+signals file-handle pressure, even below 90% occupancy; an initial nonzero value or a reset
+does not. Health text is shown once in the trigger, so muted states do not take priority
+over actionable chips. `store_unavailable` uses a volume-wait trigger and separate guidance
+for permission/TCC versus an unavailable volume; `starting` means recovery is in progress.
+
+Only chips backed by `warnings[]` target the Warnings section. Other chips open the
+always-present daemon section, and all chips are also listed under Now at the modal's top.
+Retained warning chips also use the daemon section while a query error hides the warning list.
+FetchFailed and AnchorNotAdvanced share one fetching-failed chip per repo. A
+`sessions_audit_error` chip means writing the sessions audit log failed. The published-but-not-pushed
+chip requires an explicit `needs_push` reason; 0.2.2 never emits it, so that chip cannot
+appear against 0.2.2. Other pending/published states are not treated as proof of a needed push.
 
 ### P-a LongHold fallback
 
@@ -1028,11 +1046,16 @@ entry: warnings, holds and queues are sampled independently.
   including request-held `publish`, `push` and `sync`, are amber notices even at 40 s.
   Missing or unusable start times stay notices. No LongHold alone is red.
 
-An optional LongHold `origin` or the `daemon_status.activity` feature means the daemon
+A present, non-null LongHold `origin` or the `daemon_status.activity` feature means the daemon
 already reports only abnormal LongHolds: every one remains an amber notice, regardless of
 method or age. Error and Waiting variant lists continue to match the tray classifier.
 `AutoRebaseStuck` with `open_files` is amber; `recent_writes` and `changed_during_move` remain
-blue until the existing 24-hour deferral rule, then amber. A LongWait chip says the current
+blue until the existing 24-hour deferral rule, then amber. Blue transient deferrals say
+`Auto-rebase waiting`, reserving `stuck` for amber cases. For a repo with several activities,
+choose a catch-up LongHold first, then another LongHold, then a transient deferral; age breaks
+ties only within a kind. Waiting/pending counts and the lock-wait tooltip belong only to
+the LongHold chip. Transient deferrals beside that hold appear as `N deferred`; pending counts
+require fresh session data. A LongWait chip says the current
 attempt is waiting and is shown only below ten minutes; older entries remain in the modal.
 
 ### Storage and size scans
@@ -1044,13 +1067,44 @@ unavailable, not zero; show `as_of` and `(measuring)` when pending or stale. Tra
 entry counts and eligibility, with no promise of reclaimed bytes. `allocated` and raw
 logical totals appear only behind Details, labelled as counted once per file and therefore
 overcounting APFS clones. They are not an "on disk" total. Savings are `up to X saved`;
-incomplete savings carry `(measuring)` and their observation time.
+incomplete savings carry `(measuring)` and their observation time. S1 hides savings if total,
+session aggregate, or individual live-session figures explicitly report `exact:false`;
+the modal also withholds affected lower/upper bounds rather than treating allocated fallback
+bytes as private measurements.
 
 A scan chip appears only while running and either `full` or older than 60 s. With 0.2.2 it
-reads `Measuring storage · 412 done · 140 queued`, using `du.scan` counts. No percentage, ETA
+reads `Measuring storage · 412 done, 140 queued`, using `du.scan` counts. No percentage, ETA
 or invented active count is shown. `failed[]` is historical attempt data (duplicates and
 resolved failures may remain); show it as `Recent measuring errors` in the modal, without
 an amber failure chip.
+
+### Daemon modal and Daemon screen (S3/S4)
+
+The daemon modal opens from the trigger or a chip. Its Now list includes all S1 chips,
+including overflow. Classified warnings use human-readable text and severity markers;
+each raw entry is behind a neutral Details disclosure. LongHold activity stays blue until
+its fallback time cap, abnormal holds are amber, and only Error-class warnings are red.
+The Activity section lists repo locks, session queue holders, elapsed times, queued method
+counts and per-repo waiting counts. A known session uses its ticket as plain text, with
+the id in its tooltip. Independently sampled holds/queues can be absent even when a
+LongHold warning exists. While the query is in error the modal hides cached warning/activity
+lists instead of aging an old hold as current work.
+
+Storage shows private bounds, their accuracy/measuring state and observation time; group
+figures cover sessions, bases, dependencies and store/trash. Affected bounds are unavailable
+for inexact measurements. Allocated/raw logical counts remain behind Details. Savings retain
+live and cumulative context, per-session figures and creation/copy timing where reported;
+accuracy is preserved when deciding which bounds are available. The scan section shows
+done/queued counts and historical measuring errors. The daemon section provides health,
+socket, session/hold/waiting/warning counts, reconciliation, file handles/accept errors and
+configuration facts. Optional version, pid and uptime are marked unreported when missing;
+none is inferred for 0.2.2.
+
+The full-page Daemon screen, reached through the command palette, reuses the classified
+warning list and private-storage headline. It also shows socket, reconciliation/hold counts,
+per-repo waiting counts, and links to sessions with unavailable upstream detail. Raw warnings
+remain behind Details and allocated clone totals are not used as its storage headline.
+S3/S4 reuse the existing query data; they add no daemon command or poll.
 
 ### Step 2, not yet
 

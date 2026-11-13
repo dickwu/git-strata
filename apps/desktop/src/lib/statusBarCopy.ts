@@ -4,12 +4,12 @@ import { copy } from './copy';
 export const statusBarCopy = {
   daemon: {
     running: 'Daemon running',
-    offline: 'Daemon unreachable',
     connecting: 'Connecting to daemon',
     checking: 'Checking the daemon…',
     notRunning: "Daemon isn't running",
     notResponding: "Daemon isn't responding",
     starting: 'Daemon starting (recovering)',
+    waitingForVolume: 'Daemon waiting for its data volume',
     permission:
       'Waiting for its data volume: allow Removable Volumes access in System Settings → Privacy & Security → Files and Folders',
     volumeUnavailable: 'Data volume not available',
@@ -24,7 +24,7 @@ export const statusBarCopy = {
     restarted: (age: string) => `Daemon restarted ${age}`,
     versionMismatch: (app: string, daemon: string) => `App ${app} · daemon ${daemon}`,
     reconcilePanicked: 'Daemon reconciliation failed',
-    auditFailed: 'Some session details could not be audited',
+    auditFailed: 'The sessions audit log could not be written',
     timeout: copy.daemon.stuck,
     busy: copy.daemon.busy,
     notInTauri: copy.errors.notInTauri,
@@ -60,6 +60,8 @@ export const statusBarCopy = {
       `${repo} locked by ${method} for ${elapsed}`,
   },
   activity: {
+    autoRebaseWaiting: (repo: string, session: string | undefined, reason: string) =>
+      `Auto-rebase waiting · ${repo}${session ? ` · ${session}` : ''} (${reason.replace(/_/g, ' ') || 'see details'})`,
     catchUp: (repo: string, session: string | undefined, elapsed: string) =>
       `Auto-rebase work · ${repo}${session ? ` · ${session}` : ''} · ${elapsed}`,
     oldTree: (repo: string, elapsed: string) => `Cleaning old tree · ${repo} · ${elapsed}`,
@@ -67,6 +69,7 @@ export const statusBarCopy = {
     daemon: (repo: string, elapsed: string) => `${repo} is busy with daemon work · ${elapsed}`,
     counts: (text: string, waiting: number, pending: number) =>
       `${text}${waiting > 0 ? ` · ${waiting} waiting` : ''}${pending > 0 ? ` · ${pending} pending` : ''}`,
+    deferred: (text: string, n: number) => `${text}${n > 0 ? ` · ${n} deferred` : ''}`,
     tooltip: (repo: string) =>
       `New write requests to ${repo} may wait for this work. A request that waits 30 seconds before writing gets Busy and can be retried.`,
   },

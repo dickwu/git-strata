@@ -18,6 +18,18 @@ import { SessionsScreen } from './SessionsScreen';
 import { SessionDetailModal } from './SessionDetail';
 import { ReviewModal } from './ReviewModal';
 
+/** Navigate first, then focus/open the existing Waiting popover without closing an open one. */
+export function showWaiting(go: (screen: 'sessions') => void): void {
+  go('sessions');
+  requestAnimationFrame(() => {
+    const note = document.querySelector<HTMLButtonElement>('button.waiting-note');
+    if (!note) return;
+    note.focus();
+    const list = document.querySelector('.waiting-list');
+    if (!list || list.getClientRects().length === 0) note.click();
+  });
+}
+
 export function Shell() {
   const { screen, session, setPalette, openSession, go } = useNav();
   const setTheme = useTheme((s) => s.setChoice);
@@ -89,20 +101,6 @@ export function Shell() {
     };
   }, [qc, openSession, go]);
 
-  // Status bar "waiting for you" and conflict chips land on the Waiting list in the Sessions
-  // header. WaitingNote has no open hook, so once the screen has rendered, focus its button
-  // and press it as a click would, unless its list is showing (a press would close it).
-  const showWaiting = () => {
-    go('sessions');
-    requestAnimationFrame(() => {
-      const note = document.querySelector<HTMLButtonElement>('button.waiting-note');
-      if (!note) return;
-      note.focus();
-      const list = document.querySelector('.waiting-list');
-      if (!list || list.getClientRects().length === 0) note.click();
-    });
-  };
-
   return (
     <div className="shell">
       <Titlebar />
@@ -130,7 +128,7 @@ export function Shell() {
         status={status}
         sessions={sessions}
         deps={deps.data}
-        onWaiting={showWaiting}
+        onWaiting={() => showWaiting(go)}
         onSession={openSession}
       />
       <CommandPalette

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { version } from '../../package.json';
+import appPackage from '../../package.json';
 import incident from './fixtures/statusBar/incident-0927.json';
 import { copy } from './copy';
 import {
@@ -17,6 +17,7 @@ import type { DaemonStatus, DepsList, DuReply, StatusReply } from './types';
 import { waitingCount } from './view';
 
 const NOW = Date.parse(incident.now);
+const { version } = appPackage;
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
 const stamp = (ms: number) => ({
@@ -136,6 +137,13 @@ describe('warning classification', () => {
     });
   });
 
+  test('null LongHold.origin keeps the 0.2.2 fallback', () => {
+    expect(classifyWarning(hold('catch_up', MINUTE, { origin: null }), NOW)).toMatchObject({
+      cls: 'activity',
+      sev: 'blue',
+    });
+  });
+
   test('LongWait uses the current attempt, and old attempts are modal-only', () => {
     expect(classifyWarning(wait(2 * MINUTE), NOW)).toMatchObject({
       cls: 'notice',
@@ -164,6 +172,7 @@ describe('warning classification', () => {
       expect(classifyWarning(stuck(reason, DAY - 1), NOW)).toMatchObject({
         cls: 'activity',
         sev: 'blue',
+        text: `Auto-rebase waiting · tool · s-stuck (${reason.replace(/_/g, ' ')})`,
       });
       expect(classifyWarning(stuck(reason, DAY), NOW)).toMatchObject({
         cls: 'notice',
@@ -212,7 +221,7 @@ describe('P-a activity and real incident', () => {
     const blue = model.chips.filter((c) => c.sev === 'blue');
     expect(blue).toHaveLength(1);
     expect(blue[0].text).toContain('Auto-rebase work · tool · s-eqyyt2k7');
-    expect(blue[0].target).toEqual({ kind: 'modal', section: 'activity' });
+    expect(blue[0].target).toEqual({ kind: 'modal', section: 'daemon' });
     expect(model.chips.some((c) => c.sev === 'red')).toBe(false);
     expect(JSON.stringify(model)).not.toMatch(/allocated|67 TB|67000000000000/);
     expect(model.chips.find((c) => c.id === 'scan')?.text).toBe(
@@ -272,8 +281,11 @@ describe('P-a activity and real incident', () => {
     expect(new Set(allChips(i).map((c) => c.id)).size).toBe(2);
   });
 
-  test('one activity per repo, with waiting and only fresh upstream pending counts', () => {
-    const i = input(daemon([hold(), stuck('recent_writes')]));
+  test('catch-up beats an older deferred row; only its chip gets lock counts and tooltip', () => {
+    const i = input(daemon([stuck('recent_writes', 10 * MINUTE), hold()]));
+    i.daemon.data!.queues = [
+      { session: 's-eqyyt2k7', holder: 'catch_up', since: stamp(NOW - 3 * MINUTE), queued: [] },
+    ];
     i.daemon.data!.features = ['status.upstream'];
     i.daemon.data!.repo_waiting = { tool: 2 };
     i.sessions = fx<StatusReply>('status_all');
@@ -288,7 +300,13 @@ describe('P-a activity and real incident', () => {
         },
       };
     expect(allChips(i).filter((c) => c.sev === 'blue')).toHaveLength(1);
-    expect(allChips(i).find((c) => c.sev === 'blue')!.text).toContain('· 2 waiting · 2 pending');
+    const chip = allChips(i).find((c) => c.sev === 'blue')!;
+    expect(chip.text).toBe(
+      'Auto-rebase work · tool · s-eqyyt2k7 · 2 min · 2 waiting · 2 pending · 1 deferred'
+    );
+    expect(chip.tooltip).toContain('waits 30 seconds before writing gets Busy');
+    i.daemon.data!.warnings.reverse();
+    expect(allChips(i).find((c) => c.sev === 'blue')).toEqual(chip);
     i.sessionsUpdatedAt = NOW - 301_000;
     expect(allChips(i).find((c) => c.sev === 'blue')!.text).not.toContain('pending');
     i.sessionsUpdatedAt = undefined;
@@ -296,6 +314,20 @@ describe('P-a activity and real incident', () => {
     i.sessionsUpdatedAt = NOW - 91_000;
     i.daemon.data!.api = 1;
     expect(allChips(i).find((c) => c.sev === 'blue')!.text).not.toContain('pending');
+  });
+
+  test('catch-up wins by kind even when another background hold is older', () => {
+    const i = input(daemon([hold('daemon', 5 * MINUTE), hold('catch_up')]));
+    expect(allChips(i).find((c) => c.sev === 'blue')!.text).toContain('Auto-rebase work');
+  });
+
+  test('a deferred row without a LongHold has no lock counts or lock tooltip', () => {
+    const i = input(daemon([stuck('changed_during_move', 10 * MINUTE)]));
+    i.daemon.data!.repo_waiting = { tool: 2 };
+    expect(allChips(i)[0]).toMatchObject({
+      text: 'Auto-rebase waiting · tool · s-stuck (changed during move)',
+      tooltip: undefined,
+    });
   });
 
   test('sub-three-second activity does not flash', () => {
@@ -310,7 +342,7 @@ describe('health, waiting and honest facts', () => {
     message: 'probe failed',
     detail: { reason: why, ...detail },
   });
-  test('connecting, not running and not responding are distinct', () => {
+  test('connecting and not running are distinct, without duplicate trigger chips', () => {
     const i = input();
     i.daemon = { pending: true, data: undefined, error: null, updatedAt: 0 };
     expect(statusBarModel(i, NOW).daemon).toEqual({
@@ -318,25 +350,64 @@ describe('health, waiting and honest facts', () => {
       label: 'Connecting to daemon',
       detail: null,
     });
-    expect(allChips(i)[0]).toMatchObject({
-      sev: 'muted',
-      target: { kind: 'modal', section: 'daemon' },
-    });
+    expect(allChips(i)).toEqual([]);
     i.daemon.pending = false;
     i.daemon.error = err('daemon_down');
     expect(statusBarModel(i, NOW).daemon.label).toBe("Daemon isn't running");
-    expect(allChips(i)[0]).toMatchObject({ sev: 'red', text: "Daemon isn't running" });
+    expect(allChips(i)).toEqual([]);
+  });
+
+  test('not responding requires two health timeouts AND 20 seconds since the last Ok', () => {
+    const i = input();
     i.daemon.error = err('daemon_timeout', { seconds: 8 });
-    expect(statusBarModel(i, NOW).daemon.label).toBe("Daemon isn't responding");
-    expect(allChips(i)[0].text).toBe("Daemon isn't responding");
-    expect(statusBarModel(i, NOW).daemon.detail).toBe(copy.daemon.stuck(8));
-    i.daemon.error = new Error('other transport error');
-    expect(statusBarModel(i, NOW).daemon.detail).toBe('other transport error');
+    i.health = { timeouts: 1, lastOkAt: NOW };
+    expect(statusBarModel(i, NOW + 25_000).daemon.state).toBe('pending');
+    i.health.timeouts = 2;
+    expect(statusBarModel(i, NOW + 19_999).daemon.state).toBe('pending');
+    expect(statusBarModel(i, NOW + 20_000).daemon).toEqual({
+      state: 'down',
+      label: "Daemon isn't responding",
+      detail: copy.daemon.stuck(8),
+    });
+    i.daemon.error = null;
+    i.daemon.updatedAt = NOW + 21_000;
+    i.health = { timeouts: 0, lastOkAt: NOW + 21_000 };
+    expect(statusBarModel(i, NOW + 21_000).daemon.state).toBe('up');
+    i.daemon.error = err('daemon_timeout');
+    i.health.timeouts = 1;
+    expect(statusBarModel(i, NOW + 45_000).daemon.state).toBe('pending');
+  });
+
+  test('timeouts without an earlier Ok still require two observations; omitted health fails neutral', () => {
+    const i = input();
+    i.daemon.data = undefined;
+    i.daemon.updatedAt = 0;
+    i.daemon.error = err('daemon_timeout');
+    expect(statusBarModel(i, NOW).daemon.state).toBe('pending');
+    i.health = { timeouts: 1, lastOkAt: 0 };
+    expect(statusBarModel(i, NOW).daemon.state).toBe('pending');
+    i.health.timeouts = 2;
+    expect(statusBarModel(i, NOW).daemon.state).toBe('down');
+  });
+
+  test.each(['request_in_flight', 'not_tauri', 'shed'])('%s is neutral, not a timeout', (why) => {
+    const i = input(daemon([{ FetchFailed: { repo: 'tool' } }]));
+    i.daemon.error = err(why);
+    i.health = { timeouts: 0, lastOkAt: NOW };
+    const model = statusBarModel(i, NOW + 5000);
+    expect(model.daemon).toMatchObject({ state: 'pending', label: 'Checking the daemon…' });
+    expect(allChips(i, NOW + 5000)).toHaveLength(1);
+    expect(allChips(i, NOW + 5000)[0]).toMatchObject({
+      text: 'Fetching tool failed',
+      target: { kind: 'modal', section: 'daemon' },
+    });
   });
 
   test.each([1, 4, 13])('store permission errno %s uses Removable Volumes guidance', (errno) => {
     const i = input();
     i.daemon.error = err('store_unavailable', { last_error: { detail: { errno } } });
+    expect(statusBarModel(i, NOW).daemon.label).toBe('Daemon waiting for its data volume');
+    expect(statusBarModel(i, NOW).daemon.detail).toBeNull();
     expect(allChips(i)[0]).toMatchObject({ sev: 'red', rank: 1 });
     expect(allChips(i)[0].text).toContain('Waiting for its data volume: allow Removable Volumes');
   });
@@ -352,15 +423,15 @@ describe('health, waiting and honest facts', () => {
     const i = input();
     i.daemon.error = err('starting');
     expect(statusBarModel(i, NOW).daemon.state).toBe('pending');
-    expect(allChips(i)[0]).toMatchObject({ sev: 'muted', text: 'Daemon starting (recovering)' });
+    expect(statusBarModel(i, NOW).daemon.label).toBe('Daemon starting (recovering)');
+    expect(allChips(i)).toEqual([]);
   });
 
   test('stale health is muted and does not present old warnings/activity as current', () => {
     const i = input(daemon(['StorePoisoned', hold()]));
     i.daemon.updatedAt = NOW - 120_000;
-    expect(allChips(i)).toEqual([
-      expect.objectContaining({ sev: 'muted', text: 'Not updated for 2 min' }),
-    ]);
+    expect(allChips(i)).toEqual([]);
+    expect(statusBarModel(i, NOW).daemon.detail).toBe('Not updated for 2 min');
     expect(statusBarModel(i, NOW).daemon.state).toBe('pending');
     i.daemon.updatedAt = NOW - 60_000;
     expect(allChips(i).some((c) => c.sev === 'red')).toBe(true);
@@ -378,9 +449,57 @@ describe('health, waiting and honest facts', () => {
     i.daemon.data!.fds.limit = 0;
     expect(allChips(i)).toEqual([]);
     i.daemon.error = err('too_many_open_files');
-    expect(allChips(i)).toEqual([
-      expect.objectContaining({ sev: 'red', text: 'Daemon is out of file handles' }),
-    ]);
+    expect(statusBarModel(i, NOW).daemon).toMatchObject({
+      state: 'down',
+      label: 'Daemon is out of file handles',
+    });
+    expect(allChips(i)).toEqual([]);
+  });
+
+  test('increasing accept_errors is pressure below 90%; a reset is not', () => {
+    const i = input();
+    i.daemon.data!.fds = { open: 10, limit: 100, accept_errors: 15 };
+    expect(allChips(i)).toEqual([]);
+    i.health = { timeouts: 0, lastOkAt: NOW, prevAcceptErrors: 15 };
+    expect(allChips(i)).toEqual([]);
+    i.daemon.data!.fds.accept_errors = 16;
+    expect(allChips(i)[0]).toMatchObject({
+      id: 'fds',
+      sev: 'red',
+      target: { kind: 'modal', section: 'daemon' },
+    });
+    i.health.prevAcceptErrors = 16;
+    i.daemon.data!.fds.accept_errors = 0;
+    expect(allChips(i)).toEqual([]);
+    i.health.prevAcceptErrors = 0;
+    i.daemon.data!.fds.accept_errors = 1;
+    expect(allChips(i)[0].id).toBe('fds');
+  });
+
+  test('FetchFailed and AnchorNotAdvanced deduplicate per repo', () => {
+    const i = input(
+      daemon([
+        { FetchFailed: { repo: 'tool' } },
+        { AnchorNotAdvanced: { repo: 'tool' } },
+        { FetchFailed: { repo: 'web' } },
+      ])
+    );
+    expect(allChips(i).map((c) => c.text)).toEqual(['Fetching tool failed', 'Fetching web failed']);
+    expect(new Set(allChips(i).map((c) => c.id)).size).toBe(2);
+  });
+
+  test('a daemon reply without reconcile renders safely', () => {
+    const data = daemon() as Partial<DaemonStatus>;
+    delete data.reconcile;
+    expect(allChips(input(data as DaemonStatus))).toEqual([]);
+  });
+
+  test('sessions_audit_error describes an audit-log write failure and has an existing target', () => {
+    const i = input({ ...daemon(), sessions_audit_error: 'disk full' } as DaemonStatus);
+    expect(allChips(i)[0]).toMatchObject({
+      text: 'The sessions audit log could not be written',
+      target: { kind: 'modal', section: 'daemon' },
+    });
   });
 
   test('Error warnings aggregate into one red needs-attention chip', () => {
@@ -424,6 +543,9 @@ describe('health, waiting and honest facts', () => {
     };
     i.daemon.data!.reconcile.last = { panicked: true };
     expect(allChips(i).filter((c) => c.sev === 'amber')).toHaveLength(2);
+    expect(
+      allChips(i).every((c) => c.target?.kind === 'modal' && c.target.section === 'daemon')
+    ).toBe(true);
     i.daemon.data!.warnings.push({ ConfigRestartRequired: { fields: ['root'] } });
     expect(allChips(i).filter((c) => c.text === 'Restart the daemon to apply: root')).toHaveLength(
       1
@@ -451,6 +573,7 @@ describe('health, waiting and honest facts', () => {
         },
       };
     expect(allChips(i).filter((c) => c.text === 'Published but not pushed · tool')).toHaveLength(1);
+    expect(allChips(i)[0].target).toEqual({ kind: 'modal', section: 'daemon' });
     // publish_unfinished also covers failures after a successful push; it is not proof.
     for (const s of i.sessions.sessions)
       s.status.upstream!.repos.tool.auto!.reason = 'publish_unfinished';
@@ -469,6 +592,7 @@ describe('health, waiting and honest facts', () => {
     expect(allChips(i)[0]).toMatchObject({
       sev: 'amber',
       text: `App ${version} · daemon older-version`,
+      target: { kind: 'modal', section: 'daemon' },
     });
     i.daemon.data!.started = new Date(NOW - 2 * MINUTE).toISOString();
     expect(allChips(i).find((c) => c.id === 'restarted')?.text).toBe('Daemon restarted 2 min ago');
@@ -513,6 +637,22 @@ describe('health, waiting and honest facts', () => {
     expect(model.right.saved!.tooltip).toContain('2026-11-13');
     i.daemon.error = err('daemon_down');
     expect(statusBarModel(i, NOW).right.saved).toBeNull();
+  });
+
+  test.each(['total', 'sessions', 'session'])('inexact %s figures hide S1 savings', (where) => {
+    const i = input();
+    i.du = fx<DuReply>('du');
+    i.du.savings!.live.savings = 3072;
+    const figure =
+      where === 'total'
+        ? i.du.total
+        : where === 'sessions'
+          ? i.du.sessions!.all
+          : i.du.sessions!.list[0];
+    Object.assign(figure, { exact: false });
+    expect(statusBarModel(i, NOW).right.saved).toBeNull();
+    Object.assign(figure, { exact: true });
+    expect(statusBarModel(i, NOW).right.saved?.text).toContain('up to');
   });
 });
 
