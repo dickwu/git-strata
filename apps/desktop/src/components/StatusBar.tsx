@@ -45,7 +45,7 @@ type DaemonHealth = NonNullable<StatusBarInput['health']> & {
   lastTimeoutAt?: number;
 };
 
-/** Consume each existing query completion once; clock ticks and ordinary refusals add no evidence. */
+/** Consume each query completion once; joined refusals extend only an observed timeout. */
 export function observeDaemonHealth(
   previous: DaemonHealth,
   status: Pick<UseQueryResult<DaemonStatus>, 'data' | 'dataUpdatedAt' | 'error' | 'errorUpdatedAt'>
@@ -71,13 +71,15 @@ export function observeDaemonHealth(
   }
   if (status.error != null && status.errorUpdatedAt !== previous.errorUpdatedAt) {
     const error = asGuiError(status.error);
+    const why = reason(error);
     if (
-      reason(error) === 'daemon_timeout' &&
+      (why === 'daemon_timeout' ||
+        (why === 'request_in_flight' && next.lastTimeoutAt !== undefined)) &&
       (next.lastTimeoutAt === undefined || status.errorUpdatedAt - next.lastTimeoutAt >= 4000)
     ) {
       next.timeouts++;
       next.lastTimeoutAt = status.errorUpdatedAt;
-    } else if (error.code === 'Busy' && reason(error) === 'too_many_open_files') {
+    } else if (error.code === 'Busy' && why === 'too_many_open_files') {
       next.timeouts = 0;
       next.lastTimeoutAt = undefined;
     }

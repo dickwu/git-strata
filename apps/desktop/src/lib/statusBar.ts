@@ -396,12 +396,16 @@ function daemonState(
       (lastOkAt <= 0 || age(lastOkAt, now) >= UNRESPONSIVE_AFTER_MS)
     )
       return state('down', t.daemon.notResponding, errorTitle(input.error));
-    // Refusals and a lone timeout do not prove Down or rejuvenate a cached reply.
+    // Below the Down threshold, a cached reply keeps its original freshness and age.
     const fresh =
       input.data !== undefined &&
       input.updatedAt > 0 &&
       age(input.updatedAt, now) <= HEALTH_FRESH_MS;
-    return state('pending', t.daemon.checking, errorTitle(input.error), fresh);
+    const detail =
+      lastOkAt > 0 && age(lastOkAt, now) > HEALTH_FRESH_MS
+        ? t.daemon.stale(t.elapsed(age(lastOkAt, now)))
+        : errorTitle(input.error);
+    return state('pending', t.daemon.checking, detail, fresh);
   }
   if (input.data === undefined) return state('pending', t.daemon.connecting);
   if (input.updatedAt <= 0 || age(input.updatedAt, now) > HEALTH_FRESH_MS) {

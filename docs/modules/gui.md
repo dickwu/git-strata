@@ -1012,11 +1012,15 @@ only when the daemon reports it; it is absent with 0.2.2. Missing identity field
 inferred from the app version. Health distinguishes checking, not running, not responding
 and stale reads. Local query-completion observations require at least two health timeouts
 and 20 s since the last successful health completion (or no prior Ok) before showing
-unresponsive; timeouts within 4 s coalesce. A successful reply resets the timeout count.
-`request_in_flight`, `not_tauri` and ordinary Busy refusals do not count as timeouts; before
-the threshold the trigger stays neutral Checking. Retained replies keep their original
-60-second health age. A rising `fds.accept_errors` counter across successful replies also
-signals file-handle pressure, even below 90% occupancy; an initial nonzero value or a reset
+unresponsive; timeouts within 4 s coalesce. A successful reply or a `Busy/too_many_open_files`
+shed resets the timeout count. After a counted timeout, `request_in_flight` counts under the
+same 4 s rule until a successful reply or shed clears that evidence. Without a prior timeout,
+`request_in_flight` adds no timeout evidence; `not_tauri` and ordinary Busy refusals do not
+count either. Before the threshold the trigger stays neutral Checking. Retained replies keep
+their original 60-second health age. When Checking on an error and the last good reply is
+older than 60 s, the detail is "Not updated for N min" (whole minutes; hours after 60 min)
+instead of the error's Busy/retry detail. A rising `fds.accept_errors` counter across successful
+replies also signals file-handle pressure, even below 90% occupancy; an initial nonzero value or a reset
 does not. Health text is shown once in the trigger, so muted states do not take priority
 over actionable chips. `store_unavailable` uses a volume-wait trigger and separate guidance
 for permission/TCC versus an unavailable volume; `starting` means recovery is in progress.
