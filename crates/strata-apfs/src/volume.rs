@@ -4,7 +4,6 @@ use std::ffi::CStr;
 use std::io;
 use std::path::{Path, PathBuf};
 
-
 use crate::error::{IoSide, classify_errno};
 use crate::sys;
 
@@ -32,7 +31,10 @@ pub fn nearest_existing_ancestor(path: &Path) -> io::Result<PathBuf> {
     loop {
         match std::fs::metadata(cur) {
             Ok(_) => return Ok(cur.to_path_buf()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => {
+            Err(e)
+                if e.kind() == io::ErrorKind::NotFound
+                    || e.raw_os_error() == Some(libc::ENOTDIR) =>
+            {
                 match cur.parent() {
                     Some(p) => cur = p,
                     None => return Err(e),
@@ -41,6 +43,34 @@ pub fn nearest_existing_ancestor(path: &Path) -> io::Result<PathBuf> {
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Space of the file system holding a path, in bytes ([`volume_space`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VolumeSpace {
+    /// `f_bavail × f_bsize`: what an unprivileged writer can still
+    /// allocate.
+    pub free: u64,
+    /// `f_blocks × f_bsize`: the capacity.
+    pub size: u64,
+}
+
+/// `statfs` of the file system holding `path` (symlinks followed). On APFS
+/// both figures are the whole container's, which every volume in it
+/// shares; `free` leaves out purgeable space (local snapshots, caches
+/// macOS may evict), so it is below what Finder calls available, and
+/// `size − free` is everything stored in the container, not what one
+/// program uses. Errors carry the `statfs` errno.
+pub fn volume_space(path: &Path) -> io::Result<VolumeSpace> {
+    let c = sys::cpath(path).map_err(io::Error::from_raw_os_error)?;
+    let mut sfs: libc::statfs = unsafe { std::mem::zeroed() };
+    sys::retry(|| unsafe { libc::statfs(c.as_ptr(), &mut sfs) })
+        .map_err(io::Error::from_raw_os_error)?;
+    let block = u64::from(sfs.f_bsize);
+    Ok(VolumeSpace {
+        free: sfs.f_bavail.saturating_mul(block),
+        size: sfs.f_blocks.saturating_mul(block),
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,4 +131,3 @@ pub fn volume_caps(path: &Path) -> crate::Result<VolumeCaps> {
         write_gen_count: flag(fmt, libc::VOL_CAP_FMT_WRITE_GENERATION_COUNT),
     })
 }
-

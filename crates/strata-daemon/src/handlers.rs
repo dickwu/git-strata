@@ -154,8 +154,12 @@ fn deps_list(core: &Core, repo: Option<&RepoName>) -> Result<Value> {
             let Some((from, legacy)) = changes_base(core, &p, &mut legacy_budget)? else {
                 return Ok(None);
             };
-            let mut changes =
-                json_of(&strata_deps::changes(git_of(core, &p.repo)?, repo_cfg(core, &p.repo)?, &from, to)?);
+            let mut changes = json_of(&strata_deps::changes(
+                git_of(core, &p.repo)?,
+                repo_cfg(core, &p.repo)?,
+                &from,
+                to,
+            )?);
             if legacy {
                 changes["since"] = json!("session_base");
             }
@@ -188,7 +192,9 @@ fn record_rm_attempt(core: &Core, s: &SessionId, e: &StrataError, by: Option<&Va
     let outcome = match e.code {
         Code::Dirty | Code::OpenFiles => strata_store::RmOutcome::Refused,
         Code::Unknown => match core.store.session(s) {
-            Ok(Some(r)) if r.lifecycle == strata_store::Lifecycle::Active => strata_store::RmOutcome::Refused,
+            Ok(Some(r)) if r.lifecycle == strata_store::Lifecycle::Active => {
+                strata_store::RmOutcome::Refused
+            }
             _ => strata_store::RmOutcome::Failed,
         },
         _ => return,
@@ -211,18 +217,36 @@ fn record_rm_attempt(core: &Core, s: &SessionId, e: &StrataError, by: Option<&Va
 /// The session's recorded workspace of `repo`.
 fn workspace(core: &Core, s: &SessionId, repo: &RepoName) -> Result<WorkspaceState> {
     let Some(rec) = core.store.session(s)? else {
-        return Err(StrataError::new(Code::NoSuchSession, format!("no session {s}")).with_detail(json!({ "session": s.as_str() })));
+        return Err(
+            StrataError::new(Code::NoSuchSession, format!("no session {s}"))
+                .with_detail(json!({ "session": s.as_str() })),
+        );
     };
-    rec.manifest.repos.get(repo).cloned().ok_or_else(|| StrataError::not_in_session(s.as_str(), repo.as_str()))
+    rec.manifest
+        .repos
+        .get(repo)
+        .cloned()
+        .ok_or_else(|| StrataError::not_in_session(s.as_str(), repo.as_str()))
 }
 
 /// A base generation with its manifest and exported directory.
 fn base_of(core: &Core, g: &BaseGen) -> Result<Base> {
     let m = core.store.manifest(&g.repo, &g.tree)?.ok_or_else(|| {
-        StrataError::new(Code::Unknown, format!("the manifest of base {} of {} is missing", g.tree.as_str(), g.repo))
-            .with_detail(json!({ "reason": "base_manifest_missing", "repo": g.repo.as_str() }))
+        StrataError::new(
+            Code::Unknown,
+            format!(
+                "the manifest of base {} of {} is missing",
+                g.tree.as_str(),
+                g.repo
+            ),
+        )
+        .with_detail(json!({ "reason": "base_manifest_missing", "repo": g.repo.as_str() }))
     })?;
-    Ok(Base { dir: core.store.base_dir(g), r#gen: g.clone(), manifest: Arc::new(m) })
+    Ok(Base {
+        dir: core.store.base_dir(g),
+        r#gen: g.clone(),
+        manifest: Arc::new(m),
+    })
 }
 
 // ---- trackers (§5.4, I8) ---------------------------------------------------
@@ -251,7 +275,10 @@ mod upstream_tracker_tests;
 
 impl<'a> Trackers<'a> {
     pub fn new(core: &'a Core) -> Trackers<'a> {
-        Trackers { core, map: Mutex::new(BTreeMap::new()) }
+        Trackers {
+            core,
+            map: Mutex::new(BTreeMap::new()),
+        }
     }
 
     /// The caller holds `s`'s queue.
@@ -413,12 +440,18 @@ impl<'a> Trackers<'a> {
 
     /// The tracked workspaces of every Active session.
     fn tracked(&self) -> Vec<(SessionId, RepoName)> {
-        let Ok(all) = self.core.store.sessions() else { return Vec::new() };
+        let Ok(all) = self.core.store.sessions() else {
+            return Vec::new();
+        };
         all.into_iter()
             .filter(|r| r.lifecycle == strata_store::Lifecycle::Active)
             .flat_map(|r| {
                 let id = r.manifest.id.clone();
-                r.manifest.repos.into_iter().filter(|(_, w)| w.tracked).map(move |(repo, _)| (id.clone(), repo))
+                r.manifest
+                    .repos
+                    .into_iter()
+                    .filter(|(_, w)| w.tracked)
+                    .map(move |(repo, _)| (id.clone(), repo))
             })
             .collect()
     }
@@ -493,7 +526,9 @@ impl<'a> Trackers<'a> {
                 .with_repo(repo, || core.store.gc_repo(repo, GC_KEEP).map(|_| ()))
             {
                 Ok(()) => gc.push(json!({ "repo": repo.as_str(), "ok": true })),
-                Err(e) => gc.push(json!({ "repo": repo.as_str(), "ok": false, "error": json_of(&e) })),
+                Err(e) => {
+                    gc.push(json!({ "repo": repo.as_str(), "ok": false, "error": json_of(&e) }))
+                }
             }
         }
         json!({ "at": json_of(&SystemTime::now()), "scanned": scanned, "skipped": skipped, "failed": failed, "gc": gc })
@@ -530,7 +565,14 @@ impl OverlaySource for Trackers<'_> {
             let core = self.core;
             let ws = workspace(core, session, repo)?;
             let base = base_of(core, &ws.base)?;
-            let wref = WorkspaceRef { session, repo, root: &ws.path, config: repo_cfg(core, repo)?, git: git_of(core, repo)?, store: &core.store };
+            let wref = WorkspaceRef {
+                session,
+                repo,
+                root: &ws.path,
+                config: repo_cfg(core, repo)?,
+                git: git_of(core, repo)?,
+                store: &core.store,
+            };
             let mut t = self.take(session, repo, &ws);
             let r = strata_overlay::compute(&wref, &base, &mut t.tracker, None);
             self.put(session, repo, t);
@@ -543,18 +585,27 @@ impl OverlaySource for Trackers<'_> {
     }
 
     fn needs_full(&self, session: &SessionId, repo: &RepoName) -> bool {
-        guard(&self.map).get(&(session.clone(), repo.clone())).is_none_or(|t| t.tracker.needs_full())
+        guard(&self.map)
+            .get(&(session.clone(), repo.clone()))
+            .is_none_or(|t| t.tracker.needs_full())
     }
 }
 
 /// `NoSuchProposal` for a proposal that is no longer Pending; `detail.state`
 /// is its state, plus the replacement when `ensure_target` filed one.
-fn not_pending(p: &strata_deps::Proposal, replacement: Option<&strata_deps::Proposal>) -> StrataError {
+fn not_pending(
+    p: &strata_deps::Proposal,
+    replacement: Option<&strata_deps::Proposal>,
+) -> StrataError {
     let mut d = json!({ "proposal": p.id.get(), "state": json_of(&p.state) });
     if let Some(r) = replacement {
         d["replacement"] = json_of(r);
     }
-    StrataError::new(Code::NoSuchProposal, format!("proposal {} is not pending", p.id.get())).with_detail(d)
+    StrataError::new(
+        Code::NoSuchProposal,
+        format!("proposal {} is not pending", p.id.get()),
+    )
+    .with_detail(d)
 }
 
 /// Paths git links name that the store has no row for: alternates and
@@ -564,12 +615,19 @@ fn trash_refs(core: &Core) -> Vec<PathBuf> {
     fn links(git_dir: &Path, out: &mut Vec<PathBuf>) {
         let mut read = |f: PathBuf, base: &Path| {
             if let Ok(t) = fs::read_to_string(&f) {
-                for l in t.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+                for l in t
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                {
                     out.push(base.join(l));
                 }
             }
         };
-        read(git_dir.join("objects/info/alternates"), &git_dir.join("objects"));
+        read(
+            git_dir.join("objects/info/alternates"),
+            &git_dir.join("objects"),
+        );
         read(git_dir.join("commondir"), git_dir);
         if let Ok(d) = fs::read_dir(git_dir.join("worktrees")) {
             for w in d.flatten() {
@@ -614,9 +672,15 @@ pub struct Server<'d, 'a> {
 /// Who asks [`Server::remove_session`]. A close has no token to pass and cannot
 /// grow a discard argument: it runs `remove_strict`, which takes neither.
 pub(crate) enum RemoveCall {
-    Agent { discard: bool, token: Option<strata_types::ConfirmToken> },
+    Agent {
+        discard: bool,
+        token: Option<strata_types::ConfirmToken>,
+    },
     /// `by` goes on the session's `last_rm`, so `status` says whose attempt it was.
-    AutoClose { upstream: strata_types::Upstream, by: Value },
+    AutoClose {
+        upstream: strata_types::Upstream,
+        by: Value,
+    },
 }
 
 /// Serve `d` with every handler until it stops; trackers are dropped on
@@ -639,10 +703,14 @@ pub fn serve(
             })
         });
         s.spawn(|| {
-            old_tree_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst))
+            old_tree_loop(d, &|| {
+                done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
+            })
         });
         s.spawn(|| {
-            catch_up_loop(d, &|| done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst))
+            catch_up_loop(d, &|| {
+                done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
+            })
         });
         s.spawn(|| {
             crate::reload::run(d.core, &|| {
@@ -838,7 +906,10 @@ fn old_tree_loop_with_retry(
                 let _ = catch_unwind(AssertUnwindSafe(|| old_tree_startup(d, &flag)));
                 sweep_at = std::time::Instant::now() + crate::RECONCILE_EVERY;
             }
-            let Some((key, path, ino)) = d.sessions.next_old_tree(std::time::Duration::from_millis(100)) else {
+            let Some((key, path, ino)) = d
+                .sessions
+                .next_old_tree(std::time::Duration::from_millis(100))
+            else {
                 continue;
             };
             let _catalog = d.core.admit();
@@ -944,7 +1015,10 @@ fn refresh_seeds_pass(d: &Daemon<'_>) {
             return;
         }
         if d.sessions.seeds_due(&id).is_ok_and(|v| !v.is_empty()) {
-            let _ = d.core.locks.try_session(&id, "reconcile", || d.sessions.refresh_seeds(&id));
+            let _ = d
+                .core
+                .locks
+                .try_session(&id, "reconcile", || d.sessions.refresh_seeds(&id));
         }
     }
 }
@@ -969,7 +1043,11 @@ fn session_of(p: &Params) -> Option<SessionId> {
 impl<'d, 'a> Server<'d, 'a> {
     pub fn new(d: &'d Daemon<'a>, trackers: &'d Trackers<'a>) -> Server<'d, 'a> {
         let search = Search::open(&d.core.config, &d.sessions, trackers);
-        Server { d, trackers, search }
+        Server {
+            d,
+            trackers,
+            search,
+        }
     }
 
     pub(crate) fn core(&self) -> &'a Core {
@@ -982,11 +1060,17 @@ impl<'d, 'a> Server<'d, 'a> {
 
     pub(crate) fn upstream_best_effort(&self, id: &SessionId) -> Option<strata_types::Upstream> {
         let read = || -> Result<_> {
-            let row =
-                self.core().store.session(id)?.ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
-            self.core().upstream.session(self.core(), &row, crate::upstream::ReadMode::Full, |r, ws, generation| {
-                self.trackers.live(id, r, ws, generation, false)
-            })
+            let row = self
+                .core()
+                .store
+                .session(id)?
+                .ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
+            self.core().upstream.session(
+                self.core(),
+                &row,
+                crate::upstream::ReadMode::Full,
+                |r, ws, generation| self.trackers.live(id, r, ws, generation, false),
+            )
         };
         match catch_unwind(AssertUnwindSafe(read)) {
             Ok(Ok(upstream)) => Some(upstream),
@@ -1048,11 +1132,15 @@ impl<'d, 'a> Server<'d, 'a> {
             .session(core, &row, mode, |r, ws, generation| {
                 self.trackers.live(&id, r, ws, generation, p.hook)
             })?;
-        if p.hook { core.upstream.hand_back(core, &id, &mut upstream)?; }
+        if p.hook {
+            core.upstream.hand_back(core, &id, &mut upstream)?;
+        }
         let mut base_warnings = Vec::new();
         for (repo, u) in &upstream.repos {
             if u.ahead > 0 && !core.store.checkpoints(&id, Some(repo))?.is_empty() {
-                base_warnings.push(format!("{repo}: base commits not on origin: publish will refuse until they are pushed"));
+                base_warnings.push(format!(
+                    "{repo}: base commits not on origin: publish will refuse until they are pushed"
+                ));
             }
         }
         let mut result =
@@ -1071,6 +1159,11 @@ impl<'d, 'a> Server<'d, 'a> {
         WRITING.with(|w| w.set(false));
         let r = catch_unwind(AssertUnwindSafe(|| self.dispatch(&req.params)));
         let wrote = WRITING.with(|w| w.replace(false)) || locks::is_visible();
+        if let Ok(Err(e)) = &r {
+            self.core()
+                .busy
+                .record(name, session_of(&req.params).as_ref(), e);
+        }
         match r {
             Ok(Ok(v)) => Reply::ok(&req.id, v),
             Ok(Err(e)) => Reply::error(&req.id, &e),
@@ -1458,14 +1551,25 @@ impl<'d, 'a> Server<'d, 'a> {
     }
 
     /// §5.7: `new`, then the anchor and the observe retry.
-    fn new_session(&self, ticket: Option<&str>, repos: &[RepoName], only: bool, agent: Option<String>, bases: &BTreeMap<RepoName, String>) -> Result<Value> {
+    fn new_session(
+        &self,
+        ticket: Option<&str>,
+        repos: &[RepoName],
+        only: bool,
+        agent: Option<String>,
+        bases: &BTreeMap<RepoName, String>,
+    ) -> Result<Value> {
         // Validate before anything is written: a bad name creates nothing.
         let agent = agent.map(AgentName::try_from).transpose()?;
         let core = self.core();
         writing();
         let t0 = std::time::Instant::now();
         let layout = if only { Layout::Only } else { Layout::Siblings };
-        let mut rep = match self.d.sessions.new_at(ticket, repos, layout, agent.as_ref(), bases) {
+        let mut rep = match self
+            .d
+            .sessions
+            .new_at(ticket, repos, layout, agent.as_ref(), bases)
+        {
             Ok(r) => r,
             Err(e) => {
                 for r in repos {
@@ -1502,14 +1606,16 @@ impl<'d, 'a> Server<'d, 'a> {
     /// anchor of each added repo, as after `new`.
     fn add_repos(&self, session: &SessionId, repos: &[RepoName]) -> Result<Value> {
         let core = self.core();
-        let rep = core.locks.with_sessions(std::slice::from_ref(session), || {
-            writing();
-            let rep = self.d.sessions.add(session, repos)?;
-            if !rep.added.is_empty() {
-                crate::auto_close::clear_daemon_mark(core, session);
-            }
-            Ok(rep)
-        })?;
+        let rep = core
+            .locks
+            .with_sessions(std::slice::from_ref(session), || {
+                writing();
+                let rep = self.d.sessions.add(session, repos)?;
+                if !rep.added.is_empty() {
+                    crate::auto_close::clear_daemon_mark(core, session);
+                }
+                Ok(rep)
+            })?;
         let mut anchor_unknown = Vec::new();
         if !rep.added.is_empty() {
             locks::mark_visible();
@@ -1537,7 +1643,10 @@ impl<'d, 'a> Server<'d, 'a> {
         &self,
         s: &SessionId,
         call: RemoveCall,
-    ) -> (Result<strata_session::RemoveReport>, Option<strata_types::Upstream>) {
+    ) -> (
+        Result<strata_session::RemoveReport>,
+        Option<strata_types::Upstream>,
+    ) {
         let core = self.core();
         let (mut upstream, by, agent) = match call {
             RemoveCall::Agent { discard, token } => (None, None, Some((discard, token))),
@@ -1582,12 +1691,18 @@ impl<'d, 'a> Server<'d, 'a> {
         workspaces: bool,
     ) -> Result<Value> {
         if !summary {
-            return Err(StrataError::new(Code::InvalidInput, "status: `workspaces` needs `summary`")
-                .with_detail(json!({ "reason": "workspaces_without_summary" })));
+            return Err(StrataError::new(
+                Code::InvalidInput,
+                "status: `workspaces` needs `summary`",
+            )
+            .with_detail(json!({ "reason": "workspaces_without_summary" })));
         }
         if chains {
-            return Err(StrataError::new(Code::InvalidInput, "status: `summary` and `chains` do not go together")
-                .with_detail(json!({ "reason": "summary_with_chains" })));
+            return Err(StrataError::new(
+                Code::InvalidInput,
+                "status: `summary` and `chains` do not go together",
+            )
+            .with_detail(json!({ "reason": "summary_with_chains" })));
         }
         let core = self.core();
         if !all
@@ -1742,7 +1857,13 @@ impl<'d, 'a> Server<'d, 'a> {
         Ok(reply)
     }
 
-    fn grep(&self, pattern: &str, session: Option<&SessionId>, all: bool, ignore_case: bool) -> Result<Value> {
+    fn grep(
+        &self,
+        pattern: &str,
+        session: Option<&SessionId>,
+        all: bool,
+        ignore_case: bool,
+    ) -> Result<Value> {
         let core = self.core();
         let mut targets: Vec<(SessionId, RepoName)> = Vec::new();
         let ids = match (session, all) {
@@ -1761,10 +1882,15 @@ impl<'d, 'a> Server<'d, 'a> {
                     targets.push((id.clone(), repo.clone()));
                 }
             } else if !all {
-                return Err(StrataError::new(Code::NoSuchSession, format!("no session {id}")));
+                return Err(StrataError::new(
+                    Code::NoSuchSession,
+                    format!("no session {id}"),
+                ));
             }
         }
-        let opts = GrepOpts { case_insensitive: ignore_case };
+        let opts = GrepOpts {
+            case_insensitive: ignore_case,
+        };
         let mut hits: Vec<Hit> = Vec::new();
         let mut skipped = Vec::new();
         for (s, repo) in targets {
@@ -1805,8 +1931,14 @@ impl<'d, 'a> Server<'d, 'a> {
             locks: &core.locks,
         };
         let Some(pinned) = strata_deps::find_set(&core.store, repo, &ws.base.deps)? else {
-            return Err(StrataError::new(Code::Corrupt, format!("the pinned deps set {} has no record", ws.base.deps.as_str()))
-                .with_detail(json!({ "repo": repo.as_str(), "set": ws.base.deps.as_str() })));
+            return Err(StrataError::new(
+                Code::Corrupt,
+                format!(
+                    "the pinned deps set {} has no record",
+                    ws.base.deps.as_str()
+                ),
+            )
+            .with_detail(json!({ "repo": repo.as_str(), "set": ws.base.deps.as_str() })));
         };
         // 1.
         let Some(drift) = strata_deps::drift(&rc, git, &ws.path, &pinned)? else {
@@ -1834,7 +1966,9 @@ impl<'d, 'a> Server<'d, 'a> {
         // 4.
         let switched = if switch {
             let target_tree = match &p.state {
-                strata_deps::ProposalState::Pending => p.tree.clone().unwrap_or_else(|| ws.base.tree.clone()),
+                strata_deps::ProposalState::Pending => {
+                    p.tree.clone().unwrap_or_else(|| ws.base.tree.clone())
+                }
                 _ => ws.base.tree.clone(),
             };
             self.base_for(repo, &target_tree, &p.to)?;
@@ -1863,7 +1997,11 @@ impl<'d, 'a> Server<'d, 'a> {
     /// target outside the lock, then queues → repo lock → plan → moves →
     /// record. A replaced proposal moves nothing and is `NoSuchProposal`
     /// with the replacement in `detail` (cli.md §5: never auto-approved).
-    fn deps_approve(&self, id: strata_types::ProposalId, only: Option<&[SessionId]>) -> Result<Value> {
+    fn deps_approve(
+        &self,
+        id: strata_types::ProposalId,
+        only: Option<&[SessionId]>,
+    ) -> Result<Value> {
         let core = self.core();
         // 1.
         let p = strata_deps::get_proposal(&core.store, id)?;
@@ -1886,13 +2024,24 @@ impl<'d, 'a> Server<'d, 'a> {
             locks: &core.locks,
         };
         let Some(tree) = p.tree.clone() else {
-            return Err(StrataError::new(Code::InvalidInput, "a pending proposal without a target")
-                .with_detail(json!({ "reason": "no_target", "proposal": id.get() })));
+            return Err(StrataError::new(
+                Code::InvalidInput,
+                "a pending proposal without a target",
+            )
+            .with_detail(json!({ "reason": "no_target", "proposal": id.get() })));
         };
         // 3. Outside the lock.
         if strata_deps::find_set(&core.store, &repo, &p.to)?.is_none() {
-            let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-            let dir = core.config.paths.root.join("daemon/approve").join(format!("{}-{stamp}", std::process::id()));
+            let stamp = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir = core
+                .config
+                .paths
+                .root
+                .join("daemon/approve")
+                .join(format!("{}-{stamp}", std::process::id()));
             fs::create_dir_all(&dir).map_err(|e| classify_io_error(&e, IoSide::Write, &dir))?;
             let wt = dir.join(repo.as_str());
             let r = git.export_tree(&tree, &wt).and_then(|_| {
@@ -1902,7 +2051,10 @@ impl<'d, 'a> Server<'d, 'a> {
             let _ = fs::remove_dir_all(&dir);
             match r? {
                 strata_deps::Target::Ready { .. } => {}
-                strata_deps::Target::Replaced { superseded, replacement } => {
+                strata_deps::Target::Replaced {
+                    superseded,
+                    replacement,
+                } => {
                     let now = strata_deps::get_proposal(&core.store, superseded)?;
                     return Err(not_pending(&now, Some(&replacement)));
                 }
@@ -1914,15 +2066,21 @@ impl<'d, 'a> Server<'d, 'a> {
             .store
             .sessions()?
             .into_iter()
-            .filter(|r| r.lifecycle != strata_store::Lifecycle::Removed && r.manifest.repos.contains_key(&repo))
+            .filter(|r| {
+                r.lifecycle != strata_store::Lifecycle::Removed
+                    && r.manifest.repos.contains_key(&repo)
+            })
             .map(|r| r.manifest.id)
             .collect();
         let complete = only.is_none();
         if let Some(only) = only {
             for s in only {
                 if !ids.contains(s) {
-                    return Err(StrataError::new(Code::NoSuchSession, format!("no session {s} on {repo}"))
-                        .with_detail(json!({ "session": s.as_str(), "repo": repo.as_str() })));
+                    return Err(StrataError::new(
+                        Code::NoSuchSession,
+                        format!("no session {s} on {repo}"),
+                    )
+                    .with_detail(json!({ "session": s.as_str(), "repo": repo.as_str() })));
                 }
             }
             ids = only.to_vec();
@@ -1947,8 +2105,11 @@ impl<'d, 'a> Server<'d, 'a> {
                     // 6.
                     writing();
                     let mut moved = Vec::new();
-                    let results: Vec<Value> =
-                        plan.steps.iter().map(|st| self.apply_step(st, &repo_id, &repo, &mut moved)).collect();
+                    let results: Vec<Value> = plan
+                        .steps
+                        .iter()
+                        .map(|st| self.apply_step(st, &repo_id, &repo, &mut moved))
+                        .collect();
                     // 7.
                     let after = strata_deps::record_rollout(&core.store, &plan, &moved)?;
                     Ok(json!({ "results": results, "proposal": json_of(&after) }))
@@ -1968,10 +2129,26 @@ impl<'d, 'a> Server<'d, 'a> {
 
     /// One rollout step: a move (`moved`) or a per-entry skip; a failed
     /// move is a skip with its code, never the whole call's failure.
-    fn apply_step(&self, step: &strata_deps::RolloutStep, repo_id: &strata_types::RepoId, repo: &RepoName, moved: &mut Vec<SessionId>) -> Value {
+    fn apply_step(
+        &self,
+        step: &strata_deps::RolloutStep,
+        repo_id: &strata_types::RepoId,
+        repo: &RepoName,
+        moved: &mut Vec<SessionId>,
+    ) -> Value {
         match step {
-            strata_deps::RolloutStep::Move { session, new_base, head } => {
-                match self.d.sessions.move_workspace_checked(session, repo_id, new_base.clone(), head.clone(), true) {
+            strata_deps::RolloutStep::Move {
+                session,
+                new_base,
+                head,
+            } => {
+                match self.d.sessions.move_workspace_checked(
+                    session,
+                    repo_id,
+                    new_base.clone(),
+                    head.clone(),
+                    true,
+                ) {
                     Ok(r) => {
                         moved.push(session.clone());
                         self.trackers.restart(session, repo);
@@ -2001,10 +2178,18 @@ impl<'d, 'a> Server<'d, 'a> {
 
     /// `ensure_base_for` outside the locks; a plain lock `Busy` (no
     /// reason) is asked again, as publish's `base_for` does.
-    fn base_for(&self, repo: &RepoName, tree: &strata_types::TreeOid, deps: &strata_types::DepsSetId) -> Result<BaseGen> {
+    fn base_for(
+        &self,
+        repo: &RepoName,
+        tree: &strata_types::TreeOid,
+        deps: &strata_types::DepsSetId,
+    ) -> Result<BaseGen> {
         loop {
             match self.d.sessions.ensure_base_for(repo, tree, deps) {
-                Err(e) if e.code == Code::Busy && e.detail.as_ref().and_then(|d| d.get("reason")).is_none() => {
+                Err(e)
+                    if e.code == Code::Busy
+                        && e.detail.as_ref().and_then(|d| d.get("reason")).is_none() =>
+                {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 r => return r,
@@ -2051,8 +2236,12 @@ impl<'d, 'a> Server<'d, 'a> {
     fn report_unknown(&self) {
         let core = self.core();
         if let Ok(rows) = core.store.open_publishes() {
-            for r in rows.into_iter().filter(|r| r.phase == PublishPhase::Unknown) {
-                core.warnings.add(DaemonWarning::UnknownPublish { id: r.group.id });
+            for r in rows
+                .into_iter()
+                .filter(|r| r.phase == PublishPhase::Unknown)
+            {
+                core.warnings
+                    .add(DaemonWarning::UnknownPublish { id: r.group.id });
             }
         }
     }
@@ -2107,7 +2296,9 @@ impl<'d, 'a> Server<'d, 'a> {
         messages.message_for.retain(|repo, _| repos.contains(repo));
         if let Some(plan) = plan {
             for repo in &repos {
-                let pinned = core.pinned(repo).map_err(|e| self.decorate_publish_error(e, repo, Vec::new(), already.clone()))?;
+                let pinned = core.pinned(repo).map_err(|e| {
+                    self.decorate_publish_error(e, repo, Vec::new(), already.clone())
+                })?;
                 if pinned.push && needs_confirm(&pinned) && !plan.contains(repo) {
                     let e = StrataError::new(
                         Code::NotConfirmed,
@@ -2139,7 +2330,14 @@ impl<'d, 'a> Server<'d, 'a> {
                     // Review P1-15: the approval names origin's push URL read
                     // now; publish checks it again under the repo lock.
                     let url = git_of(core, &repo)?.push_url(resolve::SCENE_REMOTE)?;
-                    Some(require_validated(&core.confirmer, Action::PushDeploy { repo: repo.clone(), branch, url })?)
+                    Some(require_validated(
+                        &core.confirmer,
+                        Action::PushDeploy {
+                            repo: repo.clone(),
+                            branch,
+                            url,
+                        },
+                    )?)
                 } else {
                     None
                 };
@@ -2248,7 +2446,13 @@ impl<'d, 'a> Server<'d, 'a> {
     /// `detail.landed` after a written commit, `published_before` (the
     /// repos of this call that landed) and `already_published` (the repos
     /// skipped as already landed). An `Unknown` is reported.
-    fn decorate_publish_error(&self, mut e: StrataError, repo: &RepoName, done: Vec<Value>, already: Vec<Value>) -> StrataError {
+    fn decorate_publish_error(
+        &self,
+        mut e: StrataError,
+        repo: &RepoName,
+        done: Vec<Value>,
+        already: Vec<Value>,
+    ) -> StrataError {
         if e.code == Code::Unknown {
             self.report_unknown();
         }
@@ -2283,9 +2487,21 @@ impl<'d, 'a> Server<'d, 'a> {
         // Review P1-15: the approval names origin's push URL read before the
         // prompt; under the lock it must still be that URL (`remote_changed`)
         // and the push goes to exactly it.
-        let url = if confirm { git.push_url(resolve::SCENE_REMOTE)? } else { String::new() };
-        let action = Action::PushDeploy { repo: repo.clone(), branch: branch.clone(), url: url.clone() };
-        let token = if confirm { Some(require_validated(&core.confirmer, action.clone())?) } else { None };
+        let url = if confirm {
+            git.push_url(resolve::SCENE_REMOTE)?
+        } else {
+            String::new()
+        };
+        let action = Action::PushDeploy {
+            repo: repo.clone(),
+            branch: branch.clone(),
+            url: url.clone(),
+        };
+        let token = if confirm {
+            Some(require_validated(&core.confirmer, action.clone())?)
+        } else {
+            None
+        };
         if token.is_some() {
             crate::after_confirm(&core.config.paths.root);
         }
@@ -2300,28 +2516,53 @@ impl<'d, 'a> Server<'d, 'a> {
             }
             let tip = strata_deps::publish_chain(git, &branch)?.and_then(|c| c.top);
             if token.is_some() && tip != before {
-                return Err(StrataError::new(Code::NotConfirmed, "the publish chain moved after the confirmation").with_detail(json!({
+                return Err(StrataError::new(
+                    Code::NotConfirmed,
+                    "the publish chain moved after the confirmation",
+                )
+                .with_detail(json!({
                     "reason": "chain_moved",
                     "confirmed": before.as_ref().map(|c| c.as_str()),
                     "now": tip.as_ref().map(|c| c.as_str()),
                 })));
             }
             let Some(tip) = tip else {
-                return Err(StrataError::new(Code::NoCommit, format!("the publish chain of {repo} has no commit to push"))
-                    .with_detail(json!({ "repo": repo.as_str() })));
+                return Err(StrataError::new(
+                    Code::NoCommit,
+                    format!("the publish chain of {repo} has no commit to push"),
+                )
+                .with_detail(json!({ "repo": repo.as_str() })));
             };
             // Review M6: the scene is kept (and reported) when the outcome
             // is unknown; see `resolve::with_staging`.
-            let uncertain = |r: &Result<strata_types::PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
+            let uncertain = |r: &Result<strata_types::PushOutcome>| {
+                r.as_ref().is_err_and(|e| e.code == Code::Unknown)
+            };
             // Review-3 R4: the destination is read before the push.
             let dest = resolve::push_dest(git);
             if token.is_some() {
                 resolve::check_approved_url(&url, dest.as_ref())?;
             }
-            let r = resolve::with_staging(core, git, repo, &branch, &tip, dest.as_ref(), uncertain, |wt| {
-                writing();
-                strata_publish::push_to(git, &rc, repo, wt, token, dest.as_ref().map(resolve::PushDest::url))
-            });
+            let r = resolve::with_staging(
+                core,
+                git,
+                repo,
+                &branch,
+                &tip,
+                dest.as_ref(),
+                uncertain,
+                |wt| {
+                    writing();
+                    strata_publish::push_to(
+                        git,
+                        &rc,
+                        repo,
+                        wt,
+                        token,
+                        dest.as_ref().map(resolve::PushDest::url),
+                    )
+                },
+            );
             if r.as_ref().is_err_and(|e| e.code == Code::Unknown) {
                 self.report_unknown();
             }
@@ -2385,9 +2626,10 @@ impl Server<'_, '_> {
             self.rebase_replayed(repo, rp, &mut rebases, &mut warnings);
         }
         if let Some(after) = tips.1.clone()
-            && let Some(e) = crate::fetch_after::observe_if_moved(tips.0.as_ref(), Some(&after), &mut || {
-                resolve::observe_tip(core, repo, &after)
-            })
+            && let Some(e) =
+                crate::fetch_after::observe_if_moved(tips.0.as_ref(), Some(&after), &mut || {
+                    resolve::observe_tip(core, repo, &after)
+                })
         {
             warnings.push(json!({ "kind": "ObserveFailed", "repo": repo.as_str(), "code": e.code.as_str(), "message": e.message }));
         }
@@ -2426,7 +2668,13 @@ impl Server<'_, '_> {
     /// rm-followups §1.6 (c): T1 for a replay attempts each row whose
     /// committed target is one of the copies; a session with no such row is
     /// not attempted.
-    fn rebase_replayed(&self, repo: &RepoName, rp: &resolve::Replayed, rebases: &mut Vec<Value>, warnings: &mut Vec<Value>) {
+    fn rebase_replayed(
+        &self,
+        repo: &RepoName,
+        rp: &resolve::Replayed,
+        rebases: &mut Vec<Value>,
+        warnings: &mut Vec<Value>,
+    ) {
         let core = self.core();
         let rows = match core.store.rebase_pending(None) {
             Ok(r) => r,
@@ -2436,7 +2684,11 @@ impl Server<'_, '_> {
             }
         };
         for row in rows.into_iter().filter(|r| r.repo == *repo) {
-            let Some(copy) = row.head.as_deref().and_then(|h| rp.map.iter().find(|(_, n)| n.as_str() == h)) else {
+            let Some(copy) = row
+                .head
+                .as_deref()
+                .and_then(|h| rp.map.iter().find(|(_, n)| n.as_str() == h))
+            else {
                 continue;
             };
             let (from, to) = (copy.0.clone(), copy.1.clone());
@@ -2473,7 +2725,12 @@ fn landed_after_commit(repo: &RepoName, commit: Value, d: &Value) -> Value {
     };
     let checks = d.get("checks_ran").cloned().unwrap_or(Value::Null);
     // deps-drift §2.5: what the checks used travels with the landed result.
-    let warnings: Vec<Value> = d.get("deps_warning").filter(|w| !w.is_null()).cloned().into_iter().collect();
+    let warnings: Vec<Value> = d
+        .get("deps_warning")
+        .filter(|w| !w.is_null())
+        .cloned()
+        .into_iter()
+        .collect();
     json!({ "repo": repo.as_str(),
         "message_source": d.get("message_source"), "commit": commit, "checks_ran": checks, "push": push, "warnings": warnings, "rebases": [] })
 }
@@ -2484,9 +2741,16 @@ fn landed_after_commit(repo: &RepoName, commit: Value, d: &Value) -> Value {
 /// repos none of whose batches remain. Read-only; `publish` and
 /// `publish_plan` share it, so the cli's TTY gate sees the same repos the
 /// publish will confirm.
-fn rerun_plan(core: &Core, rows: &[strata_store::PublishRecord], group: &strata_types::ReleaseGroup) -> Result<(strata_types::ReleaseGroup, Vec<Value>)> {
+fn rerun_plan(
+    core: &Core,
+    rows: &[strata_store::PublishRecord],
+    group: &strata_types::ReleaseGroup,
+) -> Result<(strata_types::ReleaseGroup, Vec<Value>)> {
     if group.batches.is_empty() {
-        return Err(StrataError::new(Code::InvalidInput, "the release group has no batch"));
+        return Err(StrataError::new(
+            Code::InvalidInput,
+            "the release group has no batch",
+        ));
     }
     let mut kept = Vec::new();
     let mut landed: BTreeMap<RepoName, Value> = BTreeMap::new();
@@ -2497,7 +2761,10 @@ fn rerun_plan(core: &Core, rows: &[strata_store::PublishRecord], group: &strata_
                 && !landed.is_empty()
                 && !d.contains_key("already_published")
             {
-                d.insert("already_published".into(), Value::Array(landed.values().cloned().collect()));
+                d.insert(
+                    "already_published".into(),
+                    Value::Array(landed.values().cloned().collect()),
+                );
             }
             e
         })?;
@@ -2509,7 +2776,10 @@ fn rerun_plan(core: &Core, rows: &[strata_store::PublishRecord], group: &strata_
             kept.push(strata_types::Batch { paths, ..b.clone() });
         }
     }
-    let group = strata_types::ReleaseGroup { id: group.id, batches: kept };
+    let group = strata_types::ReleaseGroup {
+        id: group.id,
+        batches: kept,
+    };
     let repos: BTreeSet<RepoName> = group.batches.iter().map(|b| b.repo.clone()).collect();
     landed.retain(|r, _| !repos.contains(r));
     Ok((group, landed.into_values().collect()))
@@ -2530,7 +2800,11 @@ fn rerun_plan(core: &Core, rows: &[strata_store::PublishRecord], group: &strata_
 /// [实现时补的决定]. Rename/type pairs are unaffected: a dropped selector
 /// picked no entry. A checkpoint that cannot be read keeps the batch as is
 /// (stage reports it). Read-only; git errors are returned before any write.
-fn rerun_paths(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_types::Batch) -> Result<(Vec<RepoPath>, Option<Value>)> {
+fn rerun_paths(
+    core: &Core,
+    rows: &[strata_store::PublishRecord],
+    b: &strata_types::Batch,
+) -> Result<(Vec<RepoPath>, Option<Value>)> {
     let Ok(cp) = core.store.checkpoint(&b.session, b.checkpoint) else {
         return Ok((b.paths.clone(), None));
     };
@@ -2558,29 +2832,48 @@ fn rerun_paths(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_typ
 /// file has the same mode and object in that commit as in `base`; `None`
 /// when there is no such row, the content differs, or that row's commit is
 /// no longer in the repository (pruned after a replay or drop).
-fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_types::Batch, base: &strata_types::TreeOid, p: &RepoPath) -> Result<Option<Value>> {
+fn landed_content(
+    core: &Core,
+    rows: &[strata_store::PublishRecord],
+    b: &strata_types::Batch,
+    base: &strata_types::TreeOid,
+    p: &RepoPath,
+) -> Result<Option<Value>> {
     use strata_publish::selection::at_or_under;
     for r in rows.iter().rev() {
         if r.phase != PublishPhase::Done {
             continue;
         }
-        let Some(o) = r.outcome.as_ref() else { continue };
-        let Some(commit) = o.get("commit").and_then(Value::as_str) else { continue };
-        let mine: Vec<&RepoPath> =
-            r.group.batches.iter().filter(|x| x.session == b.session && x.repo == b.repo).flat_map(|x| x.paths.iter()).collect();
+        let Some(o) = r.outcome.as_ref() else {
+            continue;
+        };
+        let Some(commit) = o.get("commit").and_then(Value::as_str) else {
+            continue;
+        };
+        let mine: Vec<&RepoPath> = r
+            .group
+            .batches
+            .iter()
+            .filter(|x| x.session == b.session && x.repo == b.repo)
+            .flat_map(|x| x.paths.iter())
+            .collect();
         let files: Vec<RepoPath> = o
             .get("paths")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
-            .filter(|f| at_or_under(f, p.as_str()) && mine.iter().any(|q| at_or_under(f, q.as_str())))
+            .filter(|f| {
+                at_or_under(f, p.as_str()) && mine.iter().any(|q| at_or_under(f, q.as_str()))
+            })
             .filter_map(|f| RepoPath::try_from(f.to_string()).ok())
             .collect();
         if files.is_empty() {
             continue;
         }
-        let Ok(c) = CommitOid::try_from(commit.to_string()) else { return Ok(None) };
+        let Ok(c) = CommitOid::try_from(commit.to_string()) else {
+            return Ok(None);
+        };
         let git = git_of(core, &b.repo)?;
         // Review P1-8: the row's commit may be gone (replayed or dropped
         // off the chain, then pruned by git gc). That cannot prove the
@@ -2595,7 +2888,9 @@ fn landed_content(core: &Core, rows: &[strata_store::PublishRecord], b: &strata_
             m.get(f.as_str()).map(|i| (i.mode, i.oid.clone()))
         };
         if files.iter().all(|f| key(&now, f) == key(&then, f)) {
-            return Ok(Some(json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "message_source": o.get("message_source"), "push": o.get("push").cloned().unwrap_or(Value::Null) })));
+            return Ok(Some(
+                json!({ "repo": b.repo.as_str(), "publish": r.group.id, "commit": commit, "message_source": o.get("message_source"), "push": o.get("push").cloned().unwrap_or(Value::Null) }),
+            ));
         }
         return Ok(None);
     }
@@ -2632,7 +2927,12 @@ fn landed_before(rows: &[strata_store::PublishRecord], b: &strata_types::Batch) 
 /// `landed_later: true`. Read-only; the row is not touched, and any git error
 /// leaves the entry as it was.
 fn refresh_refused(core: &Core, b: &strata_types::Batch, mut entry: Value) -> Value {
-    if entry.get("push").and_then(|p| p.get("kind")).and_then(Value::as_str) != Some("Refused") {
+    if entry
+        .get("push")
+        .and_then(|p| p.get("kind"))
+        .and_then(Value::as_str)
+        != Some("Refused")
+    {
         return entry;
     }
     let landed = || -> Result<bool> {
@@ -2641,13 +2941,18 @@ fn refresh_refused(core: &Core, b: &strata_types::Batch, mut entry: Value) -> Va
         let Some(tip) = git.read_ref(&strata_gitio::remote_ref("origin", branch))? else {
             return Ok(false);
         };
-        let commit = entry.get("commit").and_then(Value::as_str).unwrap_or_default();
+        let commit = entry
+            .get("commit")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let commit = CommitOid::try_from(commit.to_owned())?;
         if git.is_ancestor(&commit, &tip)? {
             return Ok(true);
         }
         let id = entry.get("publish").and_then(Value::as_u64).unwrap_or(0);
-        Ok(git.landed_copy(id, &b.repo, &b.session, &commit, &tip)?.is_some())
+        Ok(git
+            .landed_copy(id, &b.repo, &b.session, &commit, &tip)?
+            .is_some())
     };
     if landed().unwrap_or(false) {
         entry["push"] = json!({ "kind": "Pushed" });
@@ -2705,7 +3010,10 @@ impl strata_publish::PublishLocks for PublishLocksNoWait<'_> {
     ) -> strata_publish::Result<strata_publish::Result<()>> {
         let ids: Vec<&str> = sessions.iter().map(SessionId::as_str).collect();
         let mut refused = None;
-        let r = self.with_sessions(sessions, &mut || match self.du.hold_sessions(&ids, crate::du::HOLD_WAIT) {
+        let r = self.with_sessions(sessions, &mut || match self
+            .du
+            .hold_sessions(&ids, crate::du::HOLD_WAIT)
+        {
             Ok(_hold) => f(),
             Err(e) => {
                 refused = Some(e);
