@@ -108,7 +108,8 @@ describe('StatusBarView', () => {
     expect(all(html, 'data-chip')).toEqual(['attention', 'waiting', 'conflicts']);
     expect(all(html, 'data-sev')).toEqual(['red', 'amber', 'purple']);
     expect(html).toContain('>+2</button>');
-    expect(html).toContain('aria-label="2 more. Show all in daemon status"');
+    // The accessible name starts with the visible "+2" (label in name).
+    expect(html).toContain('aria-label="+2 more. Show all in daemon status"');
     // Chips past the third are only in the "+2" tooltip and the modal, never drawn in the bar.
     expect(html).not.toContain('locked by publish');
     expect(html).not.toContain('Auto-rebase work');
