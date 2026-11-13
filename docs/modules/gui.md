@@ -1016,9 +1016,11 @@ unresponsive; timeouts within 4 s coalesce. A successful reply or a `Busy/too_ma
 shed resets the timeout count. After a counted timeout, `request_in_flight` counts under the
 same 4 s rule until a successful reply or shed clears that evidence. Without a prior timeout,
 `request_in_flight` adds no timeout evidence; `not_tauri` and ordinary Busy refusals do not
-count either. Before the threshold the trigger stays neutral Checking. Retained replies keep
-their original 60-second health age. When Checking on an error and the last good reply is
-older than 60 s, the detail is "Not updated for N min" (whole minutes; hours after 60 min)
+count either. Before the threshold the trigger stays neutral Checking. After escalation,
+`request_in_flight` uses the detail "An earlier request is still waiting for the daemon."
+Manual Refresh keeps reads already in flight, preserving their eventual timeout evidence.
+Retained replies keep their original 60-second health age. When Checking on an error and the
+last good reply is older than 60 s, the detail is "Not updated for N min" (whole minutes; hours after 60 min)
 instead of the error's Busy/retry detail. A rising `fds.accept_errors` counter across successful
 replies also signals file-handle pressure, even below 90% occupancy; an initial nonzero value or a reset
 does not. Health text is shown once in the trigger, so muted states do not take priority

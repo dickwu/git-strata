@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { contrast, mix } from '../lib/contrast';
@@ -14,7 +15,7 @@ import {
   type ModalSection,
   type StatusBarHandlers,
 } from './StatusBar';
-import { showWaiting } from './Shell';
+import { refreshAll, showWaiting } from './Shell';
 import css from './StatusBar.module.css';
 
 type Call = ['open', ModalSection | undefined] | ['waiting'] | ['session', string];
@@ -443,9 +444,55 @@ describe('daemonStatus query observations', () => {
           state: down ? 'down' : 'pending',
           label: down ? "Daemon isn't responding" : 'Checking the daemon…',
         });
+        if (down)
+          expect(model.daemon.detail).toBe('An earlier request is still waiting for the daemon.');
       }
     }
   );
+
+  test('manual Refresh preserves an in-flight daemon_status read and its timeout evidence', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let reads = 0;
+    let aborts = 0;
+    let rejectRead!: (error: Error) => void;
+    const observer = new QueryObserver(qc, {
+      queryKey: ['daemonStatus'],
+      initialData: data(15),
+      initialDataUpdatedAt: 1000,
+      queryFn: ({ signal }) => {
+        reads++;
+        signal.addEventListener('abort', () => aborts++);
+        return new Promise<DaemonStatus>((_resolve, reject) => {
+          rejectRead = reject;
+        });
+      },
+    });
+    const unsubscribe = observer.subscribe(() => {});
+    try {
+      const query = qc.getQueryCache().find({ queryKey: ['daemonStatus'] })!;
+      const original = query.promise!;
+      const result = original.catch((error: unknown) => error);
+      expect(reads).toBe(1);
+      const refreshed = refreshAll(qc);
+      expect(query.state.isInvalidated).toBe(true);
+      expect(query.promise).toBe(original);
+      expect(reads).toBe(1);
+      expect(aborts).toBe(0);
+
+      const timeout = error('daemon_timeout');
+      rejectRead(timeout);
+      await refreshed;
+      expect(await result).toBe(timeout);
+      expect(query.state.error).toBe(timeout);
+      expect(query.state.fetchStatus).toBe('idle');
+      expect(observeDaemonHealth(initial(), observer.getCurrentResult()).timeouts).toBe(1);
+      expect(reads).toBe(1);
+      expect(aborts).toBe(0);
+    } finally {
+      unsubscribe();
+      qc.clear();
+    }
+  });
 
   test('joined reads use the same 4 s merge boundary as timeouts', () => {
     const query = {

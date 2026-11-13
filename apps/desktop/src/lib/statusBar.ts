@@ -395,7 +395,11 @@ function daemonState(
       (health?.timeouts ?? 0) >= 2 &&
       (lastOkAt <= 0 || age(lastOkAt, now) >= UNRESPONSIVE_AFTER_MS)
     )
-      return state('down', t.daemon.notResponding, errorTitle(input.error));
+      return state(
+        'down',
+        t.daemon.notResponding,
+        reason(g) === 'request_in_flight' ? t.daemon.waitingForReply : errorTitle(input.error)
+      );
     // Below the Down threshold, a cached reply keeps its original freshness and age.
     const fresh =
       input.data !== undefined &&
