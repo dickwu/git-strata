@@ -310,6 +310,26 @@ export const copy = {
     loading: 'Connecting…',
     sessions: (n: number) => (n === 1 ? '1 session' : `${n} sessions`),
   },
+  /**
+   * The bottom status bar's own words: accessible names and the overflow control. The daemon
+   * label, chip text and storage figures come from the model (src/lib/statusBar.ts).
+   */
+  statusBar: {
+    /** A click on a chip or fact lands here, by its target (design §3.5). */
+    show: {
+      daemon: 'Show daemon status',
+      warnings: 'Show warnings in daemon status',
+      activity: 'Show activity in daemon status',
+      storage: 'Show storage in daemon status',
+      scan: 'Show the size scan in daemon status',
+      waiting: 'Show what is waiting for you',
+    },
+    openSession: (id: string) => `Open session ${id}`,
+    /** Accessible name of a chip or fact: its text, then what a click does. */
+    label: (text: string, action: string) => `${text}. ${action}`,
+    more: (n: number) => `+${n}`,
+    moreLabel: (n: number) => `${n} more. Show all in daemon status`,
+  },
   theme: {
     label: 'Theme',
     names: { system: 'System', light: 'Light', dark: 'Dark' },
