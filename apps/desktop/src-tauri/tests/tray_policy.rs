@@ -584,6 +584,118 @@ fn syncing_tooltip_uses_oldest_catch_up_across_holds_and_long_holds() {
         "GIT STRATA: Bringing in newer changes: oldest, 3 min"
     );
 }
+
+fn pb_snapshot(now: u64) -> Snapshot {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../src/lib/fixtures/statusBar/pb.json")).unwrap();
+    let mut s = good(now);
+    s.daemon_status.value = Some(fixture["daemon"].clone());
+    s
+}
+
+#[test]
+fn pb_long_holds_are_notices_without_selecting_an_alert_or_syncing() {
+    let now = 2_000;
+    for method in ["catch_up", "publish", "push", "daemon"] {
+        let mut s = pb_snapshot(now);
+        assert!(s.legacy(), "P-b does not add api or change polling");
+        let mut h = hold("tool", method, now - 40);
+        h["origin"] = json!(if method == "catch_up" || method == "daemon" {
+            "background"
+        } else {
+            "request"
+        });
+        h["session"] = json!("secret session");
+        let warning = json!({"LongHold":h});
+        s.daemon_status.value.as_mut().unwrap()["warnings"] = json!([warning]);
+        assert_eq!(
+            warning_class(&warning, &s, stamp(now).wall),
+            WarningClass::Notice
+        );
+        let m = model_at(&s, stamp(now));
+        assert_eq!(m.icon, Icon::Normal, "{method}");
+        assert_eq!(m.status_line, "Daemon running, 0 sessions · 1 notice");
+        assert!(!m.tooltip.contains("secret"));
+    }
+}
+
+#[test]
+fn pb_syncing_tooltip_uses_oldest_move_and_no_ticket_or_session() {
+    let now = 2_000;
+    let mut s = pb_snapshot(now);
+    activate(&mut s, Icon::Syncing);
+    let m = model_at(&s, stamp(now));
+    assert_eq!(m.icon, Icon::Syncing);
+    assert_eq!(
+        m.tooltip,
+        "GIT STRATA: Bringing in newer changes: tool (2 min)"
+    );
+    assert_eq!(m.status_line, "Daemon running, 1 session");
+    let d = s.daemon_status.value.as_mut().unwrap();
+    let mut older = d["activity"][0].clone();
+    older["id"] = json!(2);
+    older["repo"] = json!("older");
+    older["session"] = json!("secret session");
+    older["elapsed_ms"] = json!(180_000);
+    older["cause"] = json!("sync");
+    let mut publish = older.clone();
+    publish["kind"] = json!("publish");
+    publish["repo"] = json!("not-a-move");
+    publish["elapsed_ms"] = json!(600_000);
+    d["activity"]
+        .as_array_mut()
+        .unwrap()
+        .extend([older, publish]);
+    s.sessions.value.as_mut().unwrap()["sessions"][0]["status"]["manifest"]["ticket"] =
+        json!("secret ticket");
+    let expected = "GIT STRATA: Bringing in newer changes: older (3 min)";
+    assert_eq!(model_at(&s, stamp(now)).tooltip, expected);
+    s.daemon_status.value.as_mut().unwrap()["activity"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    assert_eq!(model_at(&s, stamp(now)).tooltip, expected);
+    assert!(!model_at(&s, stamp(now)).tooltip.contains("secret"));
+}
+
+#[test]
+fn pb_move_tooltip_has_three_second_debounce_and_feature_gate() {
+    let now = 2_000;
+    for (millis, expected) in [
+        (2_999, "GIT STRATA: Bringing in newer changes"),
+        (3_000, "GIT STRATA: Bringing in newer changes: tool (3 s)"),
+        (
+            60_000,
+            "GIT STRATA: Bringing in newer changes: tool (1 min)",
+        ),
+    ] {
+        let mut s = pb_snapshot(now);
+        activate(&mut s, Icon::Syncing);
+        let d = s.daemon_status.value.as_mut().unwrap();
+        d["holds"] = json!([]);
+        d["activity"][0]["elapsed_ms"] = json!(millis);
+        assert_eq!(model_at(&s, stamp(now)).tooltip, expected);
+        s.daemon_status.value.as_mut().unwrap()["features"] = json!(["status.upstream"]);
+        assert_eq!(
+            model_at(&s, stamp(now)).tooltip,
+            "GIT STRATA: Bringing in newer changes"
+        );
+    }
+}
+
+#[test]
+fn pb_activity_alone_never_changes_other_priority_rows() {
+    for icon in Icon::ALL.into_iter().filter(|i| *i != Icon::Syncing) {
+        let mut s = good(120);
+        activate(&mut s, icon);
+        let before = model_at(&s, stamp(120));
+        let pb = pb_snapshot(120);
+        let d = s.daemon_status.value.as_mut().unwrap();
+        d["features"] = json!(["status.upstream", "daemon_status.activity"]);
+        d["activity"] = pb.daemon_status.value.unwrap()["activity"].clone();
+        assert_eq!(model_at(&s, stamp(120)), before, "{icon:?}");
+    }
+}
 #[test]
 fn catch_up_holds_do_not_change_non_syncing_icons_or_copy() {
     for icon in Icon::ALL.into_iter().filter(|i| *i != Icon::Syncing) {

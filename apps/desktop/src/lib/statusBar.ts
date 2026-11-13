@@ -6,17 +6,22 @@
  *
  * Step 1 (P-a) runs against a 0.2.2 daemon: no `activity[]`, `busy`, `volume`, `version`,
  * `pid` or `started`, so background work is recognised from the LongHold's own `method`
- * (§11.3) and no free-space or recorded-Busy chip exists yet.
- *
- * SHARED INTERFACE (landed first on feat/status-bar-states): slices implement against these
- * types. Slice A owns the bodies below and their tests; slice B renders `StatusBarModel`;
- * slice C renders `WarningView` in the modal and the Daemon screen.
+ * (§11.3). P-b display sources are gated by `daemon_status.activity`; legacy polling still
+ * depends only on `api`. Volume hysteresis is passed in by the component, keeping this pure.
  */
 import appPackage from '../../package.json';
 import { ago, bytes } from './copy';
 import { statusBarCopy as t } from './statusBarCopy';
 import { asGuiError, isDaemonDown, reason } from './tauri';
-import type { DaemonStatus, DepsList, DuReply, StatusReply, SystemTimeJson } from './types';
+import type {
+  BusyEvent,
+  DaemonActivity,
+  DaemonStatus,
+  DepsList,
+  DuReply,
+  StatusReply,
+  SystemTimeJson,
+} from './types';
 import {
   hasUpstream,
   repoUpstream,
@@ -40,7 +45,7 @@ export const BACKGROUND_HOLD_MAX_MS = 30 * 60_000;
 
 /** Where a chip click lands. `modal` opens the daemon status modal at a section. */
 export type ChipTarget =
-  | { kind: 'modal'; section: 'daemon' | 'warnings' | 'activity' | 'storage' | 'scan' }
+  | { kind: 'modal'; section: 'daemon' | 'warnings' | 'activity' | 'storage' | 'trash' | 'scan' }
   | { kind: 'waiting' }
   | { kind: 'session'; session: string };
 
@@ -109,12 +114,43 @@ export interface StatusBarModel {
   chips: Chip[];
   /** Chips not shown; the bar renders "+{overflow.length}" opening the modal. */
   overflow: Chip[];
+  /** Retained by the caller across samples, including a stale or unavailable volume. */
+  spaceLevel?: SpaceLevel;
   /** Always-on right side (§3.5). `free` is null until a daemon reports `volume` (step 2). */
   right: {
     free: { text: string; sev: Severity } | null;
     saved: { text: string; tooltip: string } | null;
     sessions: number | null;
   };
+}
+
+export type SpaceLevel = 'muted' | 'amber' | 'red';
+
+export function hasActivityStatus(s: DaemonStatus | undefined): boolean {
+  return s?.features?.includes('daemon_status.activity') === true;
+}
+
+/** Cached volume facts; a stale sample never supplies a current free-space figure. */
+export function volumeView(
+  s: DaemonStatus | undefined,
+  now: number,
+  previous: SpaceLevel = 'muted'
+) {
+  const v = hasActivityStatus(s) ? s?.volume : null;
+  if (!v || !Number.isFinite(v.free) || !Number.isFinite(v.size) || v.free < 0 || v.size <= 0)
+    return null;
+  const sampled = timestamp(v.as_of);
+  const stale = sampled === undefined || sampled > now || now - sampled > 60_000;
+  const amber = Math.min(v.size * 0.15, 100_000_000_000);
+  const red = Math.min(v.size * 0.05, 20_000_000_000);
+  const level: SpaceLevel = stale
+    ? previous
+    : v.free < red || (previous === 'red' && v.free <= red * 1.1)
+      ? 'red'
+      : v.free < amber || (previous !== 'muted' && v.free <= amber * 1.1)
+        ? 'amber'
+        : 'muted';
+  return { ...v, stale, level, text: stale ? '—' : t.free(bytes(v.free)) };
 }
 
 // Keep this literal list equal to Rust's warning_class Error arm (tested against its source).
@@ -294,14 +330,17 @@ function classify(w: unknown, now: number, daemon?: DaemonStatus): WarningView {
       if (!repo || !method || since === undefined) break;
       const elapsedMs = age(since, now);
       const elapsed = t.elapsed(elapsedMs);
-      const newDaemon = p.origin != null || daemon?.features?.includes('daemon_status.activity');
+      const pb = hasActivityStatus(daemon);
+      const newDaemon = p.origin != null || pb;
       const background = ['catch_up', 'old_tree', 'periodic_fetch', 'daemon'].includes(method);
       const normal = !newDaemon && background && elapsedMs < BACKGROUND_HOLD_MAX_MS;
       view.cls = normal ? 'activity' : 'notice';
       view.sev = normal ? 'blue' : 'amber';
-      view.session = session ?? (method === 'catch_up' ? catchUpSession(p, daemon) : undefined);
-      view.text =
-        newDaemon || !background
+      view.session =
+        session ?? (!pb && method === 'catch_up' ? catchUpSession(p, daemon) : undefined);
+      view.text = pb
+        ? t.warning.reportedHold(repo, method, elapsed, string(p.origin), view.session)
+        : newDaemon || !background
           ? t.warning.abnormalHold(repo, method, elapsed)
           : method === 'catch_up'
             ? t.activity.catchUp(repo, view.session, elapsed)
@@ -314,6 +353,163 @@ function classify(w: unknown, now: number, daemon?: DaemonStatus): WarningView {
     }
   }
   return view;
+}
+
+function sessionLabel(id: string | null | undefined, sessions: StatusReply | undefined) {
+  if (!id) return undefined;
+  return (
+    sessions?.sessions.find((s) => s.status.manifest.id === id)?.status.manifest.ticket ||
+    id.slice(0, 10)
+  );
+}
+
+function activityRepos(a: DaemonActivity): string[] {
+  return a.kind === 'session_create' ? a.repos : a.repo ? [a.repo] : [];
+}
+
+function activityText(a: DaemonActivity, sessions: StatusReply | undefined): string | undefined {
+  const session = sessionLabel(a.session, sessions);
+  const repo = a.repo ?? '';
+  switch (a.kind) {
+    case 'move':
+      return `${t.activity.move(a.cause, session ?? 'session')} · ${repo}`;
+    case 'deps_rollout':
+      return `${t.activity.rollout(a.done, a.sessions)} · ${repo}`;
+    case 'base_build':
+      return `${t.activity.base} · ${repo}`;
+    case 'session_create':
+      return t.activity.create(session, a.repos.length);
+    case 'deps_install':
+      return `${t.activity.install} · ${repo}`;
+    case 'publish':
+      return t.activity.publish(repo);
+    case 'push':
+      return t.activity.push(repo);
+  }
+}
+
+/** Display the outermost (oldest) work per repo; parent rollout/create entries cover children. */
+function reportedActivityChips(
+  input: StatusBarInput,
+  now: number,
+  pending: Map<string, number>
+): Chip[] {
+  const daemon = input.daemon.data!;
+  const work = daemon.activity ?? [];
+  const chips: Chip[] = [];
+  const covered = new Set<string>();
+  for (const a of [...work].sort((a, b) => b.elapsed_ms - a.elapsed_ms || a.id - b.id)) {
+    const elapsed = a.elapsed_ms + age(input.daemon.updatedAt, now);
+    if (elapsed < ACTIVITY_MIN_MS) continue;
+    const repos = activityRepos(a);
+    if (repos.some((repo) => covered.has(repo))) continue;
+    const text = activityText(a, input.sessions);
+    if (!text) continue;
+    repos.forEach((repo) => covered.add(repo));
+    const phase = a.kind === 'move' ? a.phase : a.kind === 'session_create' ? a.step : null;
+    const waiting = repos.reduce((n, repo) => n + (daemon.repo_waiting?.[repo] ?? 0), 0);
+    const queued = repos.reduce((n, repo) => n + (pending.get(repo) ?? 0), 0);
+    const long = elapsed >= BACKGROUND_HOLD_MAX_MS;
+    chips.push({
+      id: `activity:${a.repo ?? a.id}`,
+      sev: long ? 'amber' : 'blue',
+      rank: long ? 4 : 5,
+      text: t.activity.counts(`${text} · ${t.elapsed(elapsed)}`, waiting, queued),
+      tooltip: [phase ? t.activity.phase(phase) : null, ...repos.map(t.activity.tooltip)]
+        .filter(Boolean)
+        .join(' '),
+      since: timestamp(a.started),
+      target: { kind: 'modal', section: 'activity' },
+    });
+  }
+  // A plain background lock has no registry entry (e.g. reconcile gc).
+  const working = new Set(work.flatMap(activityRepos));
+  const warned = new Set(
+    (daemon.warnings ?? []).flatMap((w) => {
+      const { kind, payload } = warningParts(w);
+      return kind === 'LongHold' && typeof payload.repo === 'string' ? [payload.repo] : [];
+    })
+  );
+  for (const raw of daemon.holds ?? []) {
+    const h = record(raw);
+    const repo = string(h.repo);
+    const elapsed = finite(h.elapsed_ms);
+    if (
+      h.origin !== 'background' ||
+      !repo ||
+      working.has(repo) ||
+      warned.has(repo) ||
+      covered.has(repo) ||
+      elapsed === undefined ||
+      elapsed <= 10_000
+    )
+      continue;
+    covered.add(repo);
+    chips.push({
+      id: `activity:${repo}`,
+      rank: 5,
+      sev: 'blue',
+      text: t.activity.counts(
+        t.activity.background(repo),
+        daemon.repo_waiting?.[repo] ?? 0,
+        pending.get(repo) ?? 0
+      ),
+      tooltip: t.activity.tooltip(repo),
+      target: { kind: 'modal', section: 'activity' },
+    });
+  }
+  return chips;
+}
+
+export function recentBusy(s: DaemonStatus, now: number): BusyEvent[] {
+  if (!hasActivityStatus(s)) return [];
+  return (s.busy?.recent ?? []).filter((e) => {
+    const at = timestamp(e.at);
+    return at !== undefined && at <= now && now - at <= LONG_WAIT_MAX_MS;
+  });
+}
+
+function busyChips(s: DaemonStatus, sessions: StatusReply | undefined, now: number): Chip[] {
+  const recent = recentBusy(s, now);
+  if (recent.length === 0) return [];
+  const groups = new Map<string, BusyEvent[]>();
+  for (const e of recent) {
+    const key = JSON.stringify([e.scope.repo ?? null, e.scope.session ?? null]);
+    groups.set(key, [...(groups.get(key) ?? []), e]);
+  }
+  // Evicted events have unknown scope. Do not attribute the ring's lower bound to one repo.
+  if (s.busy?.truncated)
+    return [
+      {
+        id: 'busy:truncated',
+        rank: 4,
+        sev: 'amber',
+        text: '50+ requests got Busy',
+        target: { kind: 'modal', section: 'activity' },
+      },
+    ];
+  return [...groups].map(([key, events]) => {
+    const e = events[events.length - 1];
+    const scope =
+      [e.scope.repo, sessionLabel(e.scope.session, sessions)].filter(Boolean).join(' · ') ||
+      undefined;
+    const holderSession = sessionLabel(e.holder_session, sessions);
+    const sameHolder = events.every(
+      (event) => event.holder === e.holder && event.holder_session === e.holder_session
+    );
+    const holder = !sameHolder
+      ? undefined
+      : e.holder === 'catch_up'
+        ? `auto-rebase${holderSession ? ` of ${holderSession}` : ''}`
+        : e.holder || undefined;
+    return {
+      id: `busy:${key}`,
+      rank: 4,
+      sev: 'amber',
+      text: t.busy(String(events.length), scope, holder),
+      target: { kind: 'modal', section: 'activity' },
+    };
+  });
 }
 
 /** Classify an externally tagged daemon warning, including the 0.2.2 method-based fallback. */
@@ -430,11 +626,17 @@ function daemonState(
 }
 
 /** Build S1 from already-polled replies. Historical warnings never become fresh health evidence. */
-export function statusBarModel(input: StatusBarInput, now: number): StatusBarModel {
+export function statusBarModel(
+  input: StatusBarInput,
+  now: number,
+  prevSpaceLevel: SpaceLevel = 'muted'
+): StatusBarModel {
   const health = daemonState(input.daemon, now, input.health);
   const daemon = input.daemon.data;
   const all: Chip[] = health.healthChip ? [health.healthChip] : [];
-  const modal = (section: 'daemon' | 'warnings' | 'activity' | 'scan'): ChipTarget => ({
+  const pb = hasActivityStatus(daemon);
+  const volume = health.fresh ? volumeView(daemon, now, prevSpaceLevel) : null;
+  const modal = (section: 'daemon' | 'warnings' | 'activity' | 'scan' | 'trash'): ChipTarget => ({
     kind: 'modal',
     section,
   });
@@ -592,7 +794,12 @@ export function statusBarModel(input: StatusBarInput, now: number): StatusBarMod
         target: modal('daemon'),
       });
     }
+    const reported = pb ? reportedActivityChips(input, now, pending) : [];
+    all.push(...reported, ...busyChips(daemon, input.sessions, now));
+    const reportedRepos = new Set((daemon.activity ?? []).flatMap(activityRepos));
     for (const [repo, w] of activities) {
+      if (pb && (reportedRepos.has(repo) || reported.some((c) => c.id === `activity:${repo}`)))
+        continue;
       const lock = w.kind === 'LongHold';
       const text = lock
         ? t.activity.deferred(
@@ -610,21 +817,43 @@ export function statusBarModel(input: StatusBarInput, now: number): StatusBarMod
         target: modal('daemon'),
       });
     }
-    const scan = input.du?.scan;
-    const scanStarted = timestamp(scan?.started);
+    const scan = pb ? daemon.scan : input.du?.scan;
+    const scanStarted = timestamp(input.du?.scan?.started);
     if (
       scan?.running &&
-      (scan.full || (scanStarted !== undefined && age(scanStarted, now) > 60_000))
+      (scan.full || (scanStarted !== undefined ? age(scanStarted, now) > 60_000 : pb))
     ) {
       all.push({
         id: 'scan',
         rank: 6,
         sev: 'muted',
-        text: t.scan(scan.done, scan.queued),
+        text:
+          pb && daemon.scan
+            ? t.scanProgress(daemon.scan.done, daemon.scan.active, daemon.scan.queued)
+            : t.scan(scan.done, scan.queued),
         target: modal('scan'),
         since: scanStarted,
       });
     }
+    const unresolved = pb
+      ? (daemon.scan?.unresolved_n ?? input.du?.scan?.unresolved?.length ?? 0)
+      : 0;
+    if (unresolved > 0)
+      all.push({
+        id: 'scan-unresolved',
+        rank: 4,
+        sev: 'amber',
+        text: t.scanUnresolved(unresolved),
+        target: modal('scan'),
+      });
+    if (volume && !volume.stale && volume.level !== 'muted')
+      all.push({
+        id: 'low-space',
+        rank: volume.level === 'red' ? 1 : 4,
+        sev: volume.level,
+        text: t.lowSpace(bytes(volume.free)),
+        target: modal('trash'),
+      });
     const started = timestamp(daemon.started);
     if (started !== undefined && started <= now && age(started, now) < LONG_WAIT_MAX_MS) {
       all.push({
@@ -655,8 +884,9 @@ export function statusBarModel(input: StatusBarInput, now: number): StatusBarMod
   return {
     daemon: health.trigger,
     ...capChips(all),
+    spaceLevel: volume?.level ?? prevSpaceLevel,
     right: {
-      free: null,
+      free: volume ? { text: volume.text, sev: volume.stale ? 'muted' : volume.level } : null,
       saved:
         savings && Number.isFinite(savings.savings) && savings.savings > 0
           ? {

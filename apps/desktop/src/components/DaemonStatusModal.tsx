@@ -7,6 +7,7 @@ import { ago, bytes } from '@/lib/copy';
 import { daemonCopy as t } from '@/lib/daemonCopy';
 import {
   activityView,
+  busyView,
   age,
   count,
   duration,
@@ -19,6 +20,7 @@ import {
   statusFacts,
   storageView,
   times,
+  volumeView,
   warningSev,
   when,
   type ActivityView,
@@ -28,7 +30,7 @@ import {
   type StorageView,
 } from '@/lib/daemonPanel';
 import { useSocket } from '@/lib/queries';
-import type { Chip, ChipTarget, WarningView } from '@/lib/statusBar';
+import { hasActivityStatus, type Chip, type ChipTarget, type WarningView } from '@/lib/statusBar';
 import type { DaemonStatus, DuReply, StatusReply } from '@/lib/types';
 import { daemonView } from '@/lib/view';
 import { ErrorNote } from './ErrorNote';
@@ -151,6 +153,36 @@ export function ActivityBlock({
     id === null ? a.none : <SessionName id={id} tickets={tickets} />;
   return (
     <div>
+      {v.work.length > 0 && (
+        <>
+          <h3 className={css.h3}>{a.work}</h3>
+          <ul className={css.list}>
+            {v.work.map((work) => (
+              <li key={work.id}>
+                {a.kinds[work.kind]}
+                {work.repo ? ` · ${work.repo}` : ''}
+                {work.session && <> · {session(work.session)}</>}
+                {' · '}
+                {duration(work.elapsed_ms)}
+                {work.kind === 'move' && work.phase && <> · {work.phase.replace(/_/g, ' ')}</>}
+                {work.kind === 'session_create' && (
+                  <>
+                    {' '}
+                    · {work.repos.join(', ')}
+                    {work.step ? ` · ${work.step}` : ''}
+                  </>
+                )}
+                {work.kind === 'deps_rollout' && (
+                  <>
+                    {' '}
+                    · {work.done}/{work.sessions}
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       {v.holds.length > 0 && (
         <>
           <h3 className={css.h3}>{a.holds}</h3>
@@ -237,9 +269,8 @@ export function StorageHeadline({ v }: { v: StorageView }) {
 }
 
 /** Storage (design §2.3): private lower bounds by group, trash gc may empty, allocated hidden. */
-export function StorageBlock({ v }: { v: StorageView }) {
+export function StorageBlock({ v, showTrash = true }: { v: StorageView; showTrash?: boolean }) {
   const s = t.storage;
-  const trash = v.trash;
   return (
     <>
       <p className={css.lead}>
@@ -263,15 +294,7 @@ export function StorageBlock({ v }: { v: StorageView }) {
           </table>
         </>
       )}
-      {trash && trash.eligible > 0 && (
-        <p className={css.note}>
-          {s.trashEligible(trash.eligible, age(trash.floorSecs))}{' '}
-          <code className="inline-code">{trash.gc}</code> {s.trashHuman}
-        </p>
-      )}
-      {trash && trash.young > 0 && (
-        <p className={css.note}>{s.trashYoung(trash.young, age(trash.floorSecs))}</p>
-      )}
+      {showTrash && <TrashBlock trash={v.trash} />}
       {(v.allocated !== null || v.logical !== null) && (
         <details className={css.details}>
           <summary>{s.details}</summary>
@@ -295,12 +318,108 @@ export function StorageBlock({ v }: { v: StorageView }) {
   );
 }
 
+function TrashBlock({ trash }: { trash: StorageView['trash'] }) {
+  const s = t.storage;
+  return (
+    <>
+      {trash && trash.eligible > 0 && (
+        <p className={css.note}>
+          {s.trashEligible(trash.eligible, age(trash.floorSecs))}{' '}
+          <code className="inline-code">{trash.gc}</code> {s.trashHuman}
+        </p>
+      )}
+      {trash && trash.young > 0 && (
+        <p className={css.note}>{s.trashYoung(trash.young, age(trash.floorSecs))}</p>
+      )}
+    </>
+  );
+}
+
+export function VolumeBlock({ v }: { v: NonNullable<ReturnType<typeof volumeView>> }) {
+  const s = t.volume;
+  return (
+    <>
+      <p className={css.lead}>{v.stale ? s.unavailable : s.text(bytes(v.free), bytes(v.size))}</p>
+      <p className={css.note}>
+        {t.storage.asOf(when(v.as_of))}. {s.note}
+      </p>
+    </>
+  );
+}
+
+function BusyBlock({
+  v,
+  tickets,
+}: {
+  v: NonNullable<ReturnType<typeof busyView>>;
+  tickets: Tickets;
+}) {
+  return (
+    <>
+      <h3 className={css.h3}>{t.busy.heading}</h3>
+      <p className={css.note}>{t.busy.total(v.total)}</p>
+      {v.truncated && <p className={css.note}>{t.busy.truncated}</p>}
+      {v.recent.length > 0 && (
+        <>
+          <h4>{t.busy.recent}</h4>
+          <ul className={css.list}>
+            {[...v.recent].reverse().map((event, i) => (
+              <li key={i}>
+                {when(event.at)} · {event.method} ·{' '}
+                {event.scope.repo ??
+                  (event.scope.session ? (
+                    <SessionName id={event.scope.session} tickets={tickets} />
+                  ) : (
+                    t.busy.unknownScope
+                  ))}
+                {event.scope.repo && event.scope.session && (
+                  <>
+                    {' '}
+                    · <SessionName id={event.scope.session} tickets={tickets} />
+                  </>
+                )}
+                {' · '}
+                {event.reason.replace(/_/g, ' ')}
+                {event.holder && (
+                  <>
+                    {' '}
+                    · {event.holder}
+                    {event.holder_session && (
+                      <>
+                        {' '}
+                        (<SessionName id={event.holder_session} tickets={tickets} />)
+                      </>
+                    )}
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </>
+  );
+}
+
 /** The size scan: counts only; failures as plain history, never a chip on 0.2.2 (design §11.4). */
 export function ScanBlock({ v }: { v: ScanView }) {
   const s = t.scan;
   return (
     <>
       <p className={css.lead}>{scanText(v)}</p>
+      {v.unresolvedN > 0 && (
+        <>
+          <h3 className={css.h3}>{s.unresolvedCount(v.unresolvedN)}</h3>
+          <ul className={css.failed}>
+            {v.unresolved?.map((f) => (
+              <li key={f.unit}>
+                <span className="mono">{f.unit}</span>: {f.error}{' '}
+                <span className="muted">{when(f.at)}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       {v.failed.length > 0 && (
         <>
           <h3 className={css.h3}>{s.failed}</h3>
@@ -485,16 +604,25 @@ export function DaemonStatusContent({
   const f = status.data ? statusFacts(status.data, now) : null;
   const warnings = data ? daemonView(data, now).warnings : [];
   const activity = data ? activityView(data, now) : null;
+  const pb = hasActivityStatus(data);
+  const volume = volumeView(data, now);
+  const busy = busyView(data, now);
   // An activity chip opens the Activity section, so it is there whenever a warning says the
   // daemon is at work, even if the locks (sampled at another moment) show nothing.
   const daemonWork = warnings.some((w) => w.cls === 'activity');
   const hasActivity = activity
-    ? daemonWork || activity.holds.length + activity.queues.length + activity.waiting.length > 0
+    ? daemonWork ||
+      activity.work.length +
+        activity.holds.length +
+        activity.queues.length +
+        activity.waiting.length >
+        0 ||
+      (busy?.total ?? 0) > 0
     : false;
-  const hasStorage = live && (du.data !== undefined || du.isError);
+  const hasStorage = live && (du.data !== undefined || du.isError || volume !== null);
   const v = savingsView(du.data);
   const storage = live ? storageView(du.data) : null;
-  const scan = live ? scanView(du.data?.scan) : null;
+  const scan = live ? scanView(du.data?.scan, data) : null;
   const tickets = ticketsOf(sessions);
   const leftovers = Array.isArray(sessions?.leftovers) ? sessions.leftovers.length : null;
   const st = t.status;
@@ -531,6 +659,7 @@ export function DaemonStatusContent({
         <Target name="activity">
           <Section title={t.activity.heading}>
             <ActivityBlock v={activity} tickets={tickets} daemonWork={daemonWork} />
+            {busy && <BusyBlock v={busy} tickets={tickets} />}
           </Section>
         </Target>
       )}
@@ -539,11 +668,23 @@ export function DaemonStatusContent({
           {v && <Savings v={v} tickets={tickets} />}
           {!v && du.isSuccess && <p className={css.note}>{t.savings.unavailable}</p>}
           {du.isError && <ErrorNote error={du.error} />}
-          {storage && (
+          {(volume || storage) && (
             <Section title={t.storage.heading}>
-              <StorageBlock v={storage} />
+              {volume && <VolumeBlock v={volume} />}
+              {storage && <StorageBlock v={storage} showTrash={!pb} />}
             </Section>
           )}
+        </Target>
+      )}
+      {pb && (
+        <Target name="trash">
+          <Section title={t.storage.groups.trash}>
+            {storage?.trash ? (
+              <TrashBlock trash={storage.trash} />
+            ) : (
+              <p className={css.note}>Trash measurements are not available yet.</p>
+            )}
+          </Section>
         </Target>
       )}
       {scan && (
@@ -564,8 +705,8 @@ export function DaemonStatusContent({
             </Descriptions.Item>
             <Descriptions.Item label={st.version}>
               {f?.version ? (
-                <span className="mono">
-                  {f.version}
+                <span className="mono muted">
+                  {pb ? `daemon ${f.version}` : f.version}
                   {f.api !== null && ` (api ${f.api})`}
                 </span>
               ) : (
@@ -578,6 +719,11 @@ export function DaemonStatusContent({
             <Descriptions.Item label={st.uptime}>
               {f?.uptimeMs != null ? duration(f.uptimeMs) : <Missing live={live} />}
             </Descriptions.Item>
+            {pb && (
+              <Descriptions.Item label={st.started}>
+                {data?.started ? when(data.started) : <Missing live={live} />}
+              </Descriptions.Item>
+            )}
             <Descriptions.Item label={st.sessions}>
               {sessions ? sessions.sessions.length : '—'}
             </Descriptions.Item>

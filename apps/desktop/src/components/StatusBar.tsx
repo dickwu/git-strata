@@ -11,6 +11,7 @@ import {
   type ChipTarget,
   type StatusBarInput,
   type StatusBarModel,
+  type SpaceLevel,
 } from '@/lib/statusBar';
 import { asGuiError, reason } from '@/lib/tauri';
 import type { DaemonStatus, DepsList, StatusReply } from '@/lib/types';
@@ -238,6 +239,7 @@ export function StatusBar({
   onSession: (id: string) => void;
 }) {
   const [now, setNow] = useState(() => Date.now());
+  const [spaceLevel, setSpaceLevel] = useState<SpaceLevel>('muted');
   const [health, setHealth] = useState<DaemonHealth>({
     timeouts: 0,
     lastOkAt: 0,
@@ -272,8 +274,11 @@ export function StatusBar({
       // A du reply cached from before the daemon went away is not shown (as before).
       du: live ? du.data : undefined,
     },
-    now
+    now,
+    spaceLevel
   );
+  if (model.spaceLevel !== undefined && model.spaceLevel !== spaceLevel)
+    setSpaceLevel(model.spaceLevel);
   return (
     <StatusBarView
       model={model}

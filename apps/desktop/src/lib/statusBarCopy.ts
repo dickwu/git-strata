@@ -59,8 +59,35 @@ export const statusBarCopy = {
       `A request is waiting${repo ? ` on ${repo}` : ''} (current attempt ${elapsed})`,
     abnormalHold: (repo: string, method: string, elapsed: string) =>
       `${repo} locked by ${method} for ${elapsed}`,
+    reportedHold: (
+      repo: string,
+      method: string,
+      elapsed: string,
+      origin?: string,
+      session?: string
+    ) =>
+      `${repo} locked for ${elapsed} by ${method === 'catch_up' ? 'auto-rebase' : method}${session ? ` (${session})` : ''}${origin ? ` · ${origin}` : ''}`,
   },
   activity: {
+    move: (cause: string, session: string) =>
+      cause === 'catch_up'
+        ? `Moving ${session} to new main`
+        : cause === 'publish'
+          ? 'Rebasing after publish'
+          : cause === 'sync'
+            ? `Sync moving ${session}`
+            : cause === 'deps'
+              ? `Moving ${session} to new dependencies`
+              : `Replaying ${session}`,
+    rollout: (done: number, total: number) => `Rolling out deps ${done}/${total}`,
+    base: 'Building base',
+    create: (session: string | undefined, repos: number) =>
+      `Creating session${session ? ` ${session}` : ''} · ${repos} ${repos === 1 ? 'repo' : 'repos'}`,
+    install: 'Installing dependencies',
+    publish: (repo: string) => `Publishing ${repo}`,
+    push: (repo: string) => `Pushing ${repo}`,
+    background: (repo: string) => `${repo} busy with daemon work`,
+    phase: (phase: string) => `Phase: ${phase.replace(/_/g, ' ')}.`,
     autoRebaseWaiting: (repo: string, session: string | undefined, reason: string) =>
       `Auto-rebase waiting · ${repo}${session ? ` · ${session}` : ''} (${reason.replace(/_/g, ' ') || 'see details'})`,
     catchUp: (repo: string, session: string | undefined, elapsed: string) =>
@@ -76,6 +103,15 @@ export const statusBarCopy = {
   },
   scan: (done: number | undefined, queued: number) =>
     `Measuring storage · ${done === undefined ? '' : `${done} done, `}${queued} queued`,
+  scanProgress: (done: number, active: number, queued: number) =>
+    `Measuring storage · ${done} done · ${active} in progress · ${queued} queued`,
+  scanUnresolved: (n: number) => `Couldn't measure ${n} ${n === 1 ? 'item' : 'items'}`,
+  busy: (n: string, scope: string | undefined, holder: string | undefined) =>
+    scope
+      ? `${n} ${n === '1' ? 'request' : 'requests'} got Busy · ${scope}${holder ? ` (${holder})` : ''}`
+      : 'Some requests got Busy',
+  free: (amount: string) => `${amount} free`,
+  lowSpace: (amount: string) => `Data volume is low on space · ${amount} free`,
   saved: (amount: string, measuring: boolean) =>
     `up to ${amount} saved${measuring ? ' (measuring)' : ''}`,
   savedTooltip: (asOf: string | null, measuring: boolean) =>

@@ -3,10 +3,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { bytes } from './copy';
 import { daemonCopy } from './daemonCopy';
+import pbFixture from './fixtures/statusBar/pb.json';
 import { classifyWarning } from './statusBar';
 import type { DaemonStatus, DuReply, DuScan, DuSession, Usage } from './types';
 import {
   activityView,
+  busyView,
   age,
   ASSUMED_COPY_RATE,
   copyEstimateMs,
@@ -21,10 +23,82 @@ import {
   storageView,
   systemTimeMs,
   times,
+  volumeView,
   warningSev,
   when,
   type SectionBox,
 } from './daemonPanel';
+
+describe('P-b daemon detail', () => {
+  const NOW = Date.parse(pbFixture.now);
+  const daemon = () => structuredClone(pbFixture.daemon) as DaemonStatus;
+
+  test('identity reads daemon version/pid/started without synthesizing api', () => {
+    expect(statusFacts(daemon(), NOW)).toMatchObject({
+      version: '0.2.2',
+      pid: 4242,
+      uptimeMs: 120_000,
+      api: null,
+    });
+    expect('api' in daemon()).toBe(false);
+  });
+
+  test('volume facts include volume size and suppress a stale free-space figure', () => {
+    const s = daemon();
+    expect(volumeView(s, NOW)).toMatchObject({
+      text: '1.2 TB free',
+      free: s.volume!.free,
+      size: s.volume!.size,
+      stale: false,
+    });
+    s.volume!.as_of = new Date(NOW - 60_001).toISOString();
+    expect(volumeView(s, NOW)).toMatchObject({ text: '—', stale: true });
+    s.volume = null;
+    expect(volumeView(s, NOW)).toBeNull();
+  });
+
+  test('scan progress comes from atomics even without a du response', () => {
+    const v = scanView(undefined, daemon())!;
+    expect(scanText(v)).toBe('Measuring storage · 412 done · 4 in progress · 136 queued');
+    expect(v.unresolvedN).toBe(1);
+    expect(v.failed).toEqual([]);
+  });
+
+  test('current unresolved units replace old failed history on P-b only', () => {
+    const s = daemon();
+    const scan = structuredClone(pbFixture.duScan);
+    expect(scanView(scan, s)).toMatchObject({
+      unresolvedN: 1,
+      unresolved: scan.unresolved,
+      failed: [],
+    });
+    scan.unresolved = [];
+    s.scan!.unresolved_n = 0;
+    expect(scanView(scan, s)).toMatchObject({ unresolvedN: 0, unresolved: [], failed: [] });
+    s.features = [];
+    expect(scanView(scan, s)).toMatchObject({
+      unresolved: null,
+      failed: [{ unit: 'old/resolved', error: 'old error', times: 1 }],
+    });
+  });
+
+  test('Busy detail retains all-time total but ages recent events out', () => {
+    const s = daemon();
+    expect(busyView(s, NOW)).toMatchObject({ total: 17, recent: s.busy!.recent });
+    expect(busyView(s, NOW + 11 * 60_000)).toMatchObject({ total: 17, recent: [] });
+    s.features = [];
+    expect(busyView(s, NOW)).toBeNull();
+  });
+
+  test('activity and holder subject are read from the contract, without queue inference', () => {
+    const s = daemon();
+    const v = activityView(s, NOW);
+    expect(v.work).toEqual(s.activity!);
+    expect(v.holds[0]).toMatchObject({ session: 's-pb9492', background: true, elapsedMs: 120_000 });
+    s.features = [];
+    expect(activityView(s, NOW).work).toEqual([]);
+  });
+});
 
 const fx = <T>(name: string): T =>
   JSON.parse(
