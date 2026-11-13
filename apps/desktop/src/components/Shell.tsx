@@ -23,7 +23,7 @@ export function Shell() {
   const setTheme = useTheme((s) => s.setChoice);
   const { plan, status } = usePlan();
   const sessions = useSessions(plan.sessions);
-  // Kept warm so a tray "deps" item can find its session.
+  // Kept warm so a tray "deps" item can find its session; the status bar counts from it too.
   const deps = useDeps(plan.deps);
   const qc = useQueryClient();
   const now = useNow();
@@ -89,6 +89,20 @@ export function Shell() {
     };
   }, [qc, openSession, go]);
 
+  // Status bar "waiting for you" and conflict chips land on the Waiting list in the Sessions
+  // header. WaitingNote has no open hook, so once the screen has rendered, focus its button
+  // and press it as a click would, unless its list is showing (a press would close it).
+  const showWaiting = () => {
+    go('sessions');
+    requestAnimationFrame(() => {
+      const note = document.querySelector<HTMLButtonElement>('button.waiting-note');
+      if (!note) return;
+      note.focus();
+      const list = document.querySelector('.waiting-list');
+      if (!list || list.getClientRects().length === 0) note.click();
+    });
+  };
+
   return (
     <div className="shell">
       <Titlebar />
@@ -112,7 +126,13 @@ export function Shell() {
       </main>
       <SessionDetailModal id={session} interval={plan.session} daemon={status.data} />
       <ReviewModal />
-      <StatusBar status={status} sessions={sessions.data} />
+      <StatusBar
+        status={status}
+        sessions={sessions}
+        deps={deps.data}
+        onWaiting={showWaiting}
+        onSession={openSession}
+      />
       <CommandPalette
         sessions={sessions.data}
         onRefresh={() => qc.invalidateQueries()}

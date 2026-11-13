@@ -25,6 +25,17 @@
   --layer-deps: #8c9a7a;
   --layer-session: var(--accent);
   --layer-chain: #c98a3d;
+  /*
+   * Status bar chips (gui.md "Status bar states"): the tray badge palette (gui.md §5.8), so a
+   * chip and the menu-bar icon agree. src/components/statusBar.test.tsx checks these against
+   * the tray and the text against the tinted chip. Red chips draw mark and edge in the danger
+   * colour and their words in the deeper tray red: the danger colour is only 4.0:1 on the app
+   * background.
+   */
+  --sev-red: #b0141a;
+  --sev-amber: #8a4b00;
+  --sev-purple: #7a35a6;
+  --sev-blue: #245a74;
   --font-ui: 'Inter', -apple-system, system-ui, sans-serif;
   --font-title: 'Inter Tight', 'Inter', -apple-system, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
@@ -42,6 +53,10 @@
   --accent: #6fb3d2;
   --accent-text: #8cc4de;
   --on-accent: #0e0d0c;
+  --sev-red: #ff7f75;
+  --sev-amber: #ffb340;
+  --sev-purple: #c99bf2;
+  --sev-blue: #6fb3d2;
   color-scheme: dark;
 }
 
