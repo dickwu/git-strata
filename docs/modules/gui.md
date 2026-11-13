@@ -231,6 +231,8 @@ GUI 不拥有持久业务数据。它写的东西都由人按按钮触发：首�
 
 壳照 R2：36 px 标题栏（⌘K）+ 264 / 56 px 侧栏 + 主区（52 px 工具栏 + 内容 + 30 px 状态栏），右侧可选 Inspector。
 
+窗口底部状态栏（S1）是 daemon 状态的主要入口：左侧为运行状态与数据新鲜度，随后最多三个状态片，余项收进 `+N` 并打开详情。状态片显示需要处理的事、后台活动与尺寸扫描计数；正常后台工作为蓝色，异常持锁为琥珀色，`LongHold` 不单独变红。右侧保留节省量、会话数与主题；卷剩余空间只在 daemon 确实报告时出现（0.2.2 尚不报告）。存储下界与原始数值放在详情中，完整规则见文末 "Status bar states"。
+
 ```
 ┌ titlebar ─────────────────────────────────────────── ⌘K Search sessions ─┐
 ├ sidebar ──────────┬ Waiting for you ────────────────────────────────────── ┤
@@ -243,19 +245,19 @@ GUI 不拥有持久业务数据。它写的东西都由人按按钮触发：首�
 │ Daemon    healthy │                                                        │
 │ Settings          │                                                        │
 ├───────────────────┴───────────────────────────────────────────────────────┤
-│ statusbar: Live · daemon 0.4.0 · du as of 11:40                           │
+│ Daemon running · Auto-rebase work · tool · 2 min   up to X saved · N sessions │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 | 屏 | 内容 | 数据 |
 |---|---|---|
 | **Home = Waiting for you + Active sessions** | 上半：所有需要人的事（待批依赖提议、需确认的推送 / 发布、`ConfigRelaxPending`、`Quarantine`、`UnknownPublish`、`Conflict` 待选、`prompt_in_progress`）；每项一个 Review 按钮。下半：每个活动会话一行横向小地层条（§8.2），点开进详情。空态："Nothing needs you right now. Agents can keep working." | daemon_status、status summary、deps_list |
-| **Daemon** | 运行状态（§5.9 的五种状态分开显示）、版本与 api、`store_unavailable`（附 TCC 引导）、告警（按 DaemonWarning kind 写人话）、进行中的操作、Restart / Stop | daemon_status |
+| **Daemon** | 运行状态（§5.9 的五种状态分开显示）、版本（daemon 提供时）、`store_unavailable`（附 TCC 引导）、告警与后台活动（按 DaemonWarning kind 写人话，原始 JSON 放在 Details）、Restart / Stop | daemon_status |
 | **Sessions** 列表 / 详情 | 列表：ticket、id、仓库数、改动数、最后活动；详情：左侧地层柱，右侧每仓库状态、改动文件、检查点、restore | status summary、status（单会话）、changes |
 | **Diff** | 左文件树，右 Monaco DiffEditor 只读；session vs base、session vs session | changes、diff_text |
 | **Publish / push** | §5.4 | push_plan、publish_plan detail |
 | **Dependencies** | 提议、影响的会话、planned moves | deps_list、deps_approve |
-| **Allocations** | 基线代与依赖集（谁引用、大小、创建时间）、进行中的克隆与依赖构建、卷剩余空间、du 的 logical / allocated / private / 可回收 trash 与 `as_of`；gc 按钮（§5.5） | allocations、du、watch |
+| **Allocations** | 基线代与依赖集（谁引用、大小、创建时间）、进行中的克隆与依赖构建、卷剩余空间（daemon 提供时）、du 的 private 下界（"at least"）、trash 条目与 `as_of`；allocated 仅在 Details 中并说明克隆重复计数，gc 按钮见 §5.5 | allocations、du、watch |
 | **Settings** | 引导各步状态、daemon PATH、[Open at login](#58-菜单栏常驻d6)、迁移与回滚、日志位置 | 本机 |
 
 #### Main-sync attribution (wave 1)
@@ -520,7 +522,7 @@ First matching row wins:
 | 4 | Waiting | filled circle | `#8A4B00` / `#FFB340` | N waiting for you |
 | 5 | Conflict | filled diamond | `#7A35A6` / `#C99BF2` | N repos need an agent (distinct repositories; singular: 1 repo needs an agent) |
 | 5a | Checking (partial) | ellipsis | neutral, 55% | Some session details are unavailable |
-| 6 | Syncing | ring | `#245A74` / `#6FB3D2` | Bringing in newer changes |
+| 6 | Syncing | ring | `#245A74` / `#6FB3D2` | Bringing in newer changes; with observed catch-up work: Bringing in newer changes: tool, 2 min (oldest repo hold when several exist) |
 | 7 | Normal | glyph only | neutral | All clear, N sessions |
 
 Neutral is black at 85% on light bars, white at 88% on dark bars. Palette is independent of
@@ -555,9 +557,14 @@ null counters do not imply pressure. Only a health Ok clears this evidence. The 
 only the exact null-id Busy/too_many_open_files shed exception (cli.md §3.4).
 
 **Warnings.** Error: StorePoisoned, VerifyFailed, UnknownPublish, UnknownPush, Quarantine,
-AttachOutside. Waiting: ConfigRelaxPending. Notice: LongHold, PublishRunning,
-AnchorNotAdvanced, FetchFailed, StaleRefLock, and unknown variants. Notice count appears on
-the status line without changing the icon. Daemon shows variant names. Many error warnings
+AttachOutside. Waiting: ConfigRelaxPending. Notice: abnormal LongHold, PublishRunning,
+AnchorNotAdvanced, FetchFailed, StaleRefLock, and unknown variants. On a 0.2.2 daemon, a
+LongHold whose own method is `catch_up`, `old_tree`, `periodic_fetch` or `daemon` is background
+activity below 30 min and is excluded from notices; at 30 min it becomes a notice again.
+Request methods such as `publish`, `push` and `sync` remain notices. An origin-bearing LongHold,
+or any LongHold from a daemon advertising `daemon_status.activity`, is abnormal and remains
+a notice. Notice count appears on the status line without changing the icon. Daemon shows
+human-readable warning text, with raw variants behind Details. Many error warnings
 persist until the cause is addressed and the daemon restarts; the tray has no clearing action.
 Alert stays above Waiting; its tooltip adds `, M waiting` only with current contributing inputs,
 otherwise `, waiting items not current`.
@@ -567,6 +574,10 @@ one repo item after a non-conflict deferral exceeds 24 h, aggregating sessions n
 listed by stuck apply proposals. ConfigRelax adds one repo item. Conflicts stay agent work at
 any age. Pending auto-rebases, waiting installing/waiting_install, and younger non-conflict
 deferrals are Syncing; needs_push, publish_unfinished, proposal presence and lock holds are not.
+Only after this existing rule selects Syncing may a `catch_up` entry in `daemon_status.holds[]`
+or a LongHold add its repo and elapsed time to the tooltip. With several, use the oldest
+valid `since`; tickets never appear (G7). This is text only: the menu status line stays
+`Daemon running, N sessions` (plus any notices), and no new poll, state, color or priority is added.
 All upstream-derived states need `status.upstream` and session-level enrichment. Missing
 session enrichment overrides Syncing/Normal with partial Checking but does not hide proposals
 or direct workspace conflicts. A legitimate missing per-workspace enrichment does not trigger
@@ -972,3 +983,87 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 需要重启的配�
 | Claude 非阻断 1：`status{all:true}` 对每个会话跑 drift 等，5 s 会把忙误判成 fd 用尽；超时与 EOF 的措辞应分开 | §5.7 迁移第 3 条 ⓪：超时按方法分开，`daemon_status` 5 s、`status{all:true}` 60 s，先发前者；③ 与 §6 的措辞分三种（连不上 / EOF、5 s 超时、60 s 超时），60 s 那种不提 fd；`legacy_migration_refuses_when_rpc_unreachable` 加第四种假 daemon、断言文案不同 |
 | Claude 非阻断 2：reconcile 余量只在最后一次采样时算，人在对话框里停留后 bootout 可能落进下一轮 | §5.7 迁移第 4 条：disable 之前按时钟重算（不发 RPC），不够就回到 ② 等这一轮做完，socket 保持改名；② 注明这次重算；`legacy_reconcile_headroom_rechecked_before_bootout` |
 | Claude 非阻断 3：样本在仓库外（review-notes、/tmp）；「25 个 fd」与「24 个 fd 各 1 份」对不上；`v1:` 行号指向 rebase 前的分支 | 样本脱敏后提交到 `apps/desktop/src-tauri/tests/fixtures/legacy/`（README 写来源、脱敏规则、每个样本的 fd / 地址数与预期结论），正文与 §7 改指这些文件；计数改正：idle 25 fd / 23 地址、one-conn 28 / 24、after-close 26 / 24、settled 24 / 24；事故样本是 255 个编号 fd，r3.5 算进去的 41 行 `txt` 是内存映射；迁移一节与 §3.4 P5 行的 `v1:` 行号全部按 c98794f 核对后改写（rpc.rs 505-520、handlers.rs 1157 / 369-391 / 398-409 / 364-368、lib.rs 44 / 47、seed.rs 379-388、gc.rs 615-618、store.md 1466 / 1658） |
+
+## Status bar states
+
+Step 1 (P-a) is GUI-only and works against the 0.2.2 daemon. The in-window status bar (S1)
+is the primary surface; the daemon modal (S3) and Daemon screen (S4) provide detail. The
+menu-bar tray (S2) keeps the owner-approved r9 states, shapes, colors and priorities in §5.8.
+Its only changes are background LongHold notice counting and the existing Syncing tooltip's
+repo/elapsed text. Holds alone never select Syncing, and tickets never reach the tray (G7).
+
+The bar shows at most three chips, followed by `+N` for the remaining chips; `+N` opens the
+daemon modal. Chip targets open the relevant modal section, waiting list or session. Order is:
+
+| Order | Color | Contents |
+|---|---|---|
+| 1 | Red (`--danger`) | Daemon down, unavailable data volume, file-handle pressure, Error-class warnings |
+| 2 | Amber (Waiting palette) | Waiting for you |
+| 3 | Purple (Conflict palette) | Repositories needing an agent for conflicts |
+| 4 | Amber (Waiting palette) | Degraded states: abnormal holds, current long waits, actionable auto-rebase failures, config/fetch failures, published but not pushed |
+| 5 | Blue (Syncing palette) | Normal background work |
+| 6 | Muted | Size-scan counts and partial details |
+
+Repository names, session labels and agent-supplied text render as plain text (G6). The right
+side retains the savings upper bound, session count and theme control. Free space appears
+only when the daemon reports it; it is absent with 0.2.2. Missing identity fields are not
+inferred from the app version. Health distinguishes checking, not running, not responding
+and stale reads, following §5.8's liveness rules; `store_unavailable` keeps permission/TCC
+guidance separate from a missing data volume, and `starting` means recovery is in progress.
+
+### P-a LongHold fallback
+
+Warnings use serde's externally tagged shape, for example
+`{"LongHold":{"repo":"tool","method":"catch_up","since":{"secs_since_epoch":1800000000,"nanos_since_epoch":0}}}`.
+Classify the LongHold's own method and start time, without requiring a matching `holds[]`
+entry: warnings, holds and queues are sampled independently.
+
+- `catch_up`: blue `Auto-rebase work · tool · 2 min`. A session may be named only when exactly
+  one `queues[]` entry has holder `catch_up` and a `since` no later than the LongHold's
+  (compare seconds and nanoseconds); otherwise use repo-only copy.
+- `old_tree` and `periodic_fetch`: blue `Cleaning old tree` and `Fetching` respectively.
+- `daemon`: neutral blue daemon-work copy; it may be session/base creation or reconcile gc,
+  so it is never labelled auto-rebase.
+- These background methods turn amber at 30 min (`BACKGROUND_HOLD_MAX`). Other methods,
+  including request-held `publish`, `push` and `sync`, are amber notices even at 40 s.
+  Missing or unusable start times stay notices. No LongHold alone is red.
+
+An optional LongHold `origin` or the `daemon_status.activity` feature means the daemon
+already reports only abnormal LongHolds: every one remains an amber notice, regardless of
+method or age. Error and Waiting variant lists continue to match the tray classifier.
+`AutoRebaseStuck` with `open_files` is amber; `recent_writes` and `changed_during_move` remain
+blue until the existing 24-hour deferral rule, then amber. A LongWait chip says the current
+attempt is waiting and is shown only below ten minutes; older entries remain in the modal.
+
+### Storage and size scans
+
+The status-bar storage headline is volume free space only, once available. Details show
+private bytes as `git-strata alone holds at least X`, with the caveat that usage may be much
+higher: blocks shared between bases and sessions are not counted. `exact:false` means
+unavailable, not zero; show `as_of` and `(measuring)` when pending or stale. Trash copy gives
+entry counts and eligibility, with no promise of reclaimed bytes. `allocated` and raw
+logical totals appear only behind Details, labelled as counted once per file and therefore
+overcounting APFS clones. They are not an "on disk" total. Savings are `up to X saved`;
+incomplete savings carry `(measuring)` and their observation time.
+
+A scan chip appears only while running and either `full` or older than 60 s. With 0.2.2 it
+reads `Measuring storage · 412 done · 140 queued`, using `du.scan` counts. No percentage, ETA
+or invented active count is shown. `failed[]` is historical attempt data (duplicates and
+resolved failures may remain); show it as `Recent measuring errors` in the modal, without
+an amber failure chip.
+
+### Step 2, not yet
+
+Daemon P-b will add optional `activity[]`, `busy`, `volume`, `version`, `pid`, `started`,
+holder origin/subject information, and scan `active`/`unresolved` information. It will
+distinguish normal long work from abnormal holds at the source; exception kinds include
+move, deps rollout, base build and session creation, while publish/push holds keep their
+30-second warning rule. The GUI will use activity entries for detailed progress, count
+eligible Busy replies, show sampled volume free space and low-space severity, and report
+daemon identity/restarts. Size scans can then show in-progress counts and amber unresolved
+errors, rather than treating historical `failed[]` entries as current failures.
+
+These are step 2, not yet; P-a requires none of those fields and adds no poll or Tauri
+command. P-b will advertise `daemon_status.activity` without adding `api`, because `api`
+would switch already-shipped apps to faster polling. Display `activity[]` is distinct from
+the admitted-write `inflight[]` list used for safe drain (§5.9).
