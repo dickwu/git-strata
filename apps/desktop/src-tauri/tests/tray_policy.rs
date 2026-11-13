@@ -43,6 +43,9 @@ fn good(t: u64) -> Snapshot {
     }
     s
 }
+fn hold(repo: &str, method: &str, since: u64) -> Value {
+    json!({"repo":repo,"method":method,"since":stamp(since).wall})
+}
 fn proposal(s: &mut Snapshot) {
     s.deps.value = Some(
         json!({"proposals":[{"id":1,"repo":"repo","mode":"confirm","state":{"kind":"Pending"}}]}),
@@ -362,6 +365,8 @@ fn sleep_and_backwards_wall_clock_do_not_make_old_data_fresh() {
 }
 #[test]
 fn warning_classification_including_unknown_and_malformed() {
+    let mut s = good(0);
+    let now = stamp(0).wall;
     for name in [
         "StorePoisoned",
         "VerifyFailed",
@@ -370,9 +375,12 @@ fn warning_classification_including_unknown_and_malformed() {
         "Quarantine",
         "AttachOutside",
     ] {
-        assert_eq!(warning_class(name), WarningClass::Error);
+        assert_eq!(warning_class(&json!(name), &s, now), WarningClass::Error);
     }
-    assert_eq!(warning_class("ConfigRelaxPending"), WarningClass::Waiting);
+    assert_eq!(
+        warning_class(&json!("ConfigRelaxPending"), &s, now),
+        WarningClass::Waiting
+    );
     for name in [
         "LongHold",
         "PublishRunning",
@@ -381,9 +389,8 @@ fn warning_classification_including_unknown_and_malformed() {
         "StaleRefLock",
         "FutureWarning",
     ] {
-        assert_eq!(warning_class(name), WarningClass::Notice);
+        assert_eq!(warning_class(&json!(name), &s, now), WarningClass::Notice);
     }
-    let mut s = good(0);
     s.daemon_status.value.as_mut().unwrap()["warnings"] = json!(["FutureWarning",{"FetchFailed":{"path":"secret"}},{"ConfigRelaxPending":{"repo":"repo","reason":"secret"}}]);
     let m = model_at(&s, stamp(0));
     assert_eq!(m.icon, Icon::Waiting);
@@ -392,6 +399,206 @@ fn warning_classification_including_unknown_and_malformed() {
     assert!(!m.waiting[0].label().contains("secret"));
     s.daemon_status.value.as_mut().unwrap()["warnings"] = json!({"StorePoisoned":{}});
     assert_eq!(model_at(&s, stamp(0)).icon, Icon::Normal);
+}
+#[test]
+fn background_long_holds_use_their_own_method_and_thirty_minute_limit() {
+    let now = 2_000;
+    for method in ["catch_up", "old_tree", "periodic_fetch", "daemon"] {
+        for age in [120, 1_799, 1_800, 1_860] {
+            let mut s = good(now);
+            let d = s.daemon_status.value.as_mut().unwrap();
+            d.as_object_mut().unwrap().remove("api");
+            // The independently sampled holds need not match this warning.
+            d["holds"] =
+                json!([{"repo":"other","method":"publish","session":null,"since":stamp(now).wall}]);
+            d["warnings"] = json!([{"LongHold":hold("tool", method, now - age)}]);
+            let m = model_at(&s, stamp(now));
+            assert_eq!(m.icon, Icon::Normal, "{method}, {age} s");
+            assert_eq!(
+                m.status_line,
+                if age < 1_800 {
+                    "Daemon running, 0 sessions"
+                } else {
+                    "Daemon running, 0 sessions · 1 notice"
+                },
+                "{method}, {age} s"
+            );
+        }
+    }
+}
+#[test]
+fn request_and_abnormal_long_holds_remain_notices() {
+    let now = 2_000;
+    for method in ["publish", "push", "sync", "new", "future_method"] {
+        let mut s = good(now);
+        let d = s.daemon_status.value.as_mut().unwrap();
+        d["holds"] = json!([hold("tool", "catch_up", now - 40)]);
+        d["warnings"] = json!([{"LongHold":hold("tool", method, now - 40)}]);
+        assert_eq!(
+            model_at(&s, stamp(now)).status_line,
+            "Daemon running, 0 sessions · 1 notice",
+            "{method}"
+        );
+    }
+    for origin in [json!("background"), json!("request")] {
+        let mut s = good(now);
+        let mut warning = hold("tool", "catch_up", now - 120);
+        warning["origin"] = origin;
+        s.daemon_status.value.as_mut().unwrap()["warnings"] = json!([{"LongHold":warning}]);
+        assert_eq!(
+            model_at(&s, stamp(now)).status_line,
+            "Daemon running, 0 sessions · 1 notice"
+        );
+    }
+    let mut s = good(now);
+    let d = s.daemon_status.value.as_mut().unwrap();
+    d["features"] = json!(["status.upstream", "daemon_status.activity"]);
+    d["warnings"] = json!([{"LongHold":hold("tool", "catch_up", now - 120)}]);
+    assert_eq!(
+        model_at(&s, stamp(now)).status_line,
+        "Daemon running, 0 sessions · 1 notice"
+    );
+}
+#[test]
+fn null_or_absent_long_hold_origin_uses_legacy_background_rules() {
+    let now = 2_000;
+    for origin in [None, Some(Value::Null)] {
+        let mut s = good(now);
+        let mut warning = hold("tool", "catch_up", now - 120);
+        if let Some(origin) = origin {
+            warning["origin"] = origin;
+        }
+        s.daemon_status.value.as_mut().unwrap()["warnings"] = json!([{"LongHold":warning}]);
+        assert_eq!(
+            model_at(&s, stamp(now)).status_line,
+            "Daemon running, 0 sessions"
+        );
+        s.daemon_status.value.as_mut().unwrap()["features"] =
+            json!(["status.upstream", "daemon_status.activity"]);
+        assert_eq!(
+            model_at(&s, stamp(now)).status_line,
+            "Daemon running, 0 sessions · 1 notice"
+        );
+    }
+}
+#[test]
+fn syncing_tooltip_uses_seconds_for_sub_minute_catch_up_work() {
+    let now = 2_000;
+    for source in ["holds", "warnings"] {
+        for age in [2, 3, 30, 59, 60] {
+            let mut s = good(now);
+            activate(&mut s, Icon::Syncing);
+            let h = hold("tool", "catch_up", now - age);
+            s.daemon_status.value.as_mut().unwrap()[source] = if source == "holds" {
+                json!([h])
+            } else {
+                json!([{"LongHold":h}])
+            };
+            let m = model_at(&s, stamp(now));
+            assert_eq!(m.icon, Icon::Syncing);
+            let expected = if age < 3 {
+                "GIT STRATA: Bringing in newer changes".to_string()
+            } else if age < 60 {
+                format!("GIT STRATA: Bringing in newer changes: tool, {age} s")
+            } else {
+                "GIT STRATA: Bringing in newer changes: tool, 1 min".to_string()
+            };
+            assert_eq!(m.tooltip, expected, "{source}, {age} s");
+            assert_eq!(m.status_line, "Daemon running, 1 session");
+        }
+    }
+}
+#[test]
+fn long_holds_with_unusable_start_times_stay_notices() {
+    let now = 2_000;
+    for since in [
+        Value::Null,
+        json!({}),
+        json!({"secs_since_epoch":1_800_000_000}),
+        json!({"secs_since_epoch":1_800_000_000,"nanos_since_epoch":1_000_000_000}),
+        json!("secret invalid time"),
+        json!(stamp(now + 1).wall),
+    ] {
+        let mut s = good(now);
+        s.daemon_status.value.as_mut().unwrap()["warnings"] =
+            json!([{"LongHold":{"repo":"tool","method":"catch_up","since":since}}]);
+        assert_eq!(
+            model_at(&s, stamp(now)).status_line,
+            "Daemon running, 0 sessions · 1 notice"
+        );
+    }
+}
+#[test]
+fn syncing_tooltip_names_catch_up_repo_and_elapsed_without_changing_status_line() {
+    let now = 2_000;
+    for source in ["holds", "warnings"] {
+        let mut s = good(now);
+        activate(&mut s, Icon::Syncing);
+        s.sessions.value.as_mut().unwrap()["sessions"][0]["status"]["manifest"]["ticket"] =
+            json!("secret ticket");
+        let mut h = hold("tool", "catch_up", now - 120);
+        let d = s.daemon_status.value.as_mut().unwrap();
+        d.as_object_mut().unwrap().remove("api");
+        d[source] = if source == "holds" {
+            h["session"] = Value::Null;
+            json!([h])
+        } else {
+            json!([{"LongHold":h}])
+        };
+        let m = model_at(&s, stamp(now));
+        assert_eq!(m.icon, Icon::Syncing);
+        assert_eq!(
+            m.tooltip,
+            "GIT STRATA: Bringing in newer changes: tool, 2 min"
+        );
+        assert_eq!(m.status_line, "Daemon running, 1 session");
+    }
+}
+#[test]
+fn syncing_tooltip_uses_oldest_catch_up_across_holds_and_long_holds() {
+    let now = 2_000;
+    let mut s = good(now);
+    activate(&mut s, Icon::Syncing);
+    let d = s.daemon_status.value.as_mut().unwrap();
+    d["holds"] = json!([
+        hold("newer", "catch_up", now - 60),
+        hold("tool", "catch_up", now - 120),
+        hold("not-catch-up", "publish", now - 600)
+    ]);
+    assert_eq!(
+        model_at(&s, stamp(now)).tooltip,
+        "GIT STRATA: Bringing in newer changes: tool, 2 min"
+    );
+    s.daemon_status.value.as_mut().unwrap()["holds"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    assert_eq!(
+        model_at(&s, stamp(now)).tooltip,
+        "GIT STRATA: Bringing in newer changes: tool, 2 min"
+    );
+    s.daemon_status.value.as_mut().unwrap()["warnings"] =
+        json!([{"LongHold":hold("oldest", "catch_up", now - 180)}]);
+    assert_eq!(
+        model_at(&s, stamp(now)).tooltip,
+        "GIT STRATA: Bringing in newer changes: oldest, 3 min"
+    );
+}
+#[test]
+fn catch_up_holds_do_not_change_non_syncing_icons_or_copy() {
+    for icon in Icon::ALL.into_iter().filter(|i| *i != Icon::Syncing) {
+        let mut s = good(120);
+        activate(&mut s, icon);
+        let before = model_at(&s, stamp(120));
+        assert_eq!(before.icon, icon);
+        let d = s.daemon_status.value.as_mut().unwrap();
+        d["holds"] = json!([hold("tool", "catch_up", 0)]);
+        d["warnings"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"LongHold":hold("tool", "catch_up", 0)}));
+        assert_eq!(model_at(&s, stamp(120)), before, "{icon:?}");
+    }
 }
 #[test]
 fn deferral_threshold_conflict_exclusion_dedup_and_capabilities() {

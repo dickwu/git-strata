@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react';
 import { useNow } from '@/hooks/useNow';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { sessionFromUrl, sessionHash, useNav } from '@/stores/nav';
 import { useTheme } from '@/stores/theme';
 import { usePlan, useSessions, useDeps } from '@/lib/queries';
@@ -18,12 +18,29 @@ import { SessionsScreen } from './SessionsScreen';
 import { SessionDetailModal } from './SessionDetail';
 import { ReviewModal } from './ReviewModal';
 
+/** Manual refresh must preserve pending reads and their health evidence. */
+export function refreshAll(qc: QueryClient): Promise<void> {
+  return qc.invalidateQueries({}, { cancelRefetch: false });
+}
+
+/** Navigate first, then focus/open the existing Waiting popover without closing an open one. */
+export function showWaiting(go: (screen: 'sessions') => void): void {
+  go('sessions');
+  requestAnimationFrame(() => {
+    const note = document.querySelector<HTMLButtonElement>('button.waiting-note');
+    if (!note) return;
+    note.focus();
+    const list = document.querySelector('.waiting-list');
+    if (!list || list.getClientRects().length === 0) note.click();
+  });
+}
+
 export function Shell() {
   const { screen, session, setPalette, openSession, go } = useNav();
   const setTheme = useTheme((s) => s.setChoice);
   const { plan, status } = usePlan();
   const sessions = useSessions(plan.sessions);
-  // Kept warm so a tray "deps" item can find its session.
+  // Kept warm so a tray "deps" item can find its session; the status bar counts from it too.
   const deps = useDeps(plan.deps);
   const qc = useQueryClient();
   const now = useNow();
@@ -112,10 +129,16 @@ export function Shell() {
       </main>
       <SessionDetailModal id={session} interval={plan.session} daemon={status.data} />
       <ReviewModal />
-      <StatusBar status={status} sessions={sessions.data} />
+      <StatusBar
+        status={status}
+        sessions={sessions}
+        deps={deps.data}
+        onWaiting={() => showWaiting(go)}
+        onSession={openSession}
+      />
       <CommandPalette
         sessions={sessions.data}
-        onRefresh={() => qc.invalidateQueries()}
+        onRefresh={() => refreshAll(qc)}
         onTheme={setTheme}
       />
     </div>

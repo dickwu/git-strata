@@ -10,8 +10,39 @@ export interface GuiError {
   detail: unknown;
 }
 
+/** A Rust `SystemTime` as serde writes it (lock holds, queues, warnings). */
+export interface SystemTimeJson {
+  secs_since_epoch: number;
+  nanos_since_epoch: number;
+}
+
+/** `holds[]` (daemon `LockHold`). `session` is null for `try_*` repo takes (catch-up moves on 0.2.2). */
+export interface LockHoldJson {
+  repo: string;
+  method: string;
+  session: string | null;
+  since: SystemTimeJson;
+}
+
+/** `queues[]` (locks.rs `queue_snapshot`): a session FIFO and who holds it. */
+export interface QueueJson {
+  session: string;
+  holder: string | null;
+  since: SystemTimeJson | null;
+  /** Methods waiting in this session's FIFO. */
+  queued: string[];
+}
+
+/**
+ * One `warnings[]` entry: serde's external tagging of `DaemonWarning`, so a unit variant is a
+ * bare string (`"StorePoisoned"`) and the rest are `{ Variant: { ...fields } }`.
+ */
+export type DaemonWarningJson = string | Record<string, Record<string, unknown> | null>;
+
 export interface DaemonStatus {
   holds: unknown[];
+  /** Session FIFOs. Present on every daemon the app talks to, typed late (status bar §2.2 #11). */
+  queues?: QueueJson[];
   reconcile: { runs: number; last: unknown };
   repo_waiting: Record<string, number>;
   verify: unknown;
@@ -329,7 +360,18 @@ export interface DuReply {
     };
     cumulative: DuCumulative;
   };
-  scan?: { running: boolean; queued: number; last_full: { started: string; ended: string } | null };
+  scan?: DuScan;
+}
+
+/** `du.scan` (du.rs `scan_json`). `failed` is attempt history (last 20, duplicates, not cleared). */
+export interface DuScan {
+  running: boolean;
+  queued: number;
+  last_full: { started: string; ended: string } | null;
+  started?: string | null;
+  done?: number;
+  full?: boolean;
+  failed?: Array<{ unit: string; error: string }>;
 }
 
 /** legacy_agent (src-tauri/src/service/mod.rs LegacyAgent). */

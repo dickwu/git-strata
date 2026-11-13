@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 pub const MAX_WAITING: usize = 5;
 pub const STALE_AFTER: Duration = Duration::from_secs(60);
+pub const BACKGROUND_HOLD_MAX: Duration = Duration::from_secs(30 * 60);
+/// Catch-up holds younger than this are not named in the Syncing tooltip.
+const MIN_ACTIVITY_AGE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
@@ -117,6 +120,9 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 fn age_text(age: Duration) -> String {
+    if age.as_secs() < 60 {
+        return format!("{} s", age.as_secs());
+    }
     let minutes = age.as_secs() / 60;
     if minutes < 60 {
         format!("{minutes} min")
@@ -292,6 +298,7 @@ pub enum WarningClass {
     Error,
     Waiting,
     Notice,
+    Activity,
 }
 pub fn warning_name(w: &Value) -> Option<&str> {
     w.as_str().or_else(|| {
@@ -300,13 +307,64 @@ pub fn warning_name(w: &Value) -> Option<&str> {
             .and_then(|o| o.keys().next().map(String::as_str))
     })
 }
-pub fn warning_class(name: &str) -> WarningClass {
-    match name {
+fn hold_since(hold: &Value) -> Option<SystemTime> {
+    let since = &hold["since"];
+    let secs = since["secs_since_epoch"].as_u64()?;
+    let nanos = u32::try_from(since["nanos_since_epoch"].as_u64()?).ok()?;
+    if nanos >= 1_000_000_000 {
+        return None;
+    }
+    SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs, nanos))
+}
+fn background_hold(hold: &Value, s: &Snapshot, now: SystemTime) -> bool {
+    let activity_capable = s
+        .daemon_status
+        .value
+        .as_ref()
+        .and_then(|d| d["features"].as_array())
+        .is_some_and(|fs| fs.iter().any(|f| f == "daemon_status.activity"));
+    hold.get("origin").is_none_or(Value::is_null)
+        && !activity_capable
+        && matches!(
+            hold["method"].as_str(),
+            Some("catch_up" | "old_tree" | "periodic_fetch" | "daemon")
+        )
+        && hold_since(hold)
+            .and_then(|since| now.duration_since(since).ok())
+            .is_some_and(|age| age < BACKGROUND_HOLD_MAX)
+}
+pub fn warning_class(w: &Value, s: &Snapshot, now: SystemTime) -> WarningClass {
+    match warning_name(w).unwrap_or_default() {
         "StorePoisoned" | "VerifyFailed" | "UnknownPublish" | "UnknownPush" | "Quarantine"
         | "AttachOutside" => WarningClass::Error,
         "ConfigRelaxPending" => WarningClass::Waiting,
+        "LongHold" if background_hold(&w["LongHold"], s, now) => WarningClass::Activity,
         _ => WarningClass::Notice,
     }
+}
+fn syncing_description(s: &Snapshot, now: SystemTime) -> String {
+    let oldest = s.daemon_status.value.as_ref().and_then(|d| {
+        let holds = d["holds"].as_array().into_iter().flatten();
+        let long_holds = d["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|w| w.get("LongHold"));
+        holds
+            .chain(long_holds)
+            .filter(|h| h["method"] == "catch_up")
+            .filter_map(|h| {
+                let repo = h["repo"].as_str()?;
+                let age = now.duration_since(hold_since(h)?).ok()?;
+                // Sub-second catch-up steps run for every repo each minute (design §3.1).
+                (age >= MIN_ACTIVITY_AGE).then_some((repo, age))
+            })
+            .max_by_key(|(_, age)| *age)
+    });
+    oldest.map_or_else(
+        || "Bringing in newer changes".to_string(),
+        |(repo, age)| format!("Bringing in newer changes: {repo}, {}", age_text(age)),
+    )
 }
 fn syncing(sessions: Option<&Value>, enabled: bool, now: SystemTime) -> bool {
     enabled
@@ -358,10 +416,10 @@ pub fn model_at(s: &Snapshot, now: Stamp) -> TrayModel {
         .and_then(|d| d["warnings"].as_array())
     {
         for w in ws {
-            let Some(name) = warning_name(w) else {
+            if warning_name(w).is_none() {
                 continue;
-            };
-            match warning_class(name) {
+            }
+            match warning_class(w, s, now.wall) {
                 WarningClass::Error if daemon_fresh => alerts += 1,
                 WarningClass::Notice if daemon_fresh => notices += 1,
                 WarningClass::Waiting => {
@@ -492,7 +550,7 @@ pub fn model_at(s: &Snapshot, now: Stamp) -> TrayModel {
                 "Some session details are unavailable".to_string(),
             )
         } else if syncing(s.sessions.value.as_ref(), enabled, now.wall) {
-            (Icon::Syncing, "Bringing in newer changes".to_string())
+            (Icon::Syncing, syncing_description(s, now.wall))
         } else {
             (
                 Icon::Normal,

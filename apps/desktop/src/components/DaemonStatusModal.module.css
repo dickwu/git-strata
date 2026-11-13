@@ -10,7 +10,9 @@
   font-size: 12px;
   color: var(--text-muted);
 }
+/* Positioned: a section's offsetTop is measured from here when a chip opens the modal at it. */
 .body {
+  position: relative;
   display: grid;
   gap: 24px;
   max-height: min(70vh, 720px);
@@ -64,8 +66,22 @@
   color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
+.heroPre,
 .heroCap {
   font-size: 14px;
+}
+.heroPre {
+  color: var(--text-muted);
+}
+/* In place of the figure when its bound does not hold (du `exact: false`). */
+.heroNone {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+.asOf {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 .facts {
   margin: 0;
@@ -105,10 +121,155 @@
   align-items: center;
   gap: 6px;
 }
-.warnings {
-  margin: 8px 0 0;
+
+/* A place a chip can open the modal at (status bar design §3.5). */
+.target {
+  display: grid;
+  gap: 24px;
+}
+.lead {
+  margin: 0 0 8px;
+}
+
+/*
+ * Now / Warnings: one line per item, coloured by severity (design §2). Red is only for what a
+ * human must fix (the error class); a lock hold never is. The rest use the tray badge palette
+ * (src-tauri/src/tray_palette.rs): amber Waiting, purple Conflict, blue Syncing.
+ */
+.list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.item {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+.itemBody {
+  min-width: 0;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--sev, var(--text-muted));
+}
+/* Background activity is a ring, like the tray's Syncing badge. */
+.dot[data-sev='blue'] {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--sev);
+}
+.sev {
+  color: var(--sev, var(--text));
+  overflow-wrap: anywhere;
+}
+.dot[data-sev='red'],
+.sev[data-sev='red'] {
+  --sev: var(--danger);
+}
+.dot[data-sev='amber'],
+.sev[data-sev='amber'] {
+  --sev: var(--sev-amber);
+}
+.dot[data-sev='purple'],
+.sev[data-sev='purple'] {
+  --sev: var(--sev-purple);
+}
+.dot[data-sev='blue'],
+.sev[data-sev='blue'] {
+  --sev: var(--sev-blue);
+}
+.dot[data-sev='muted'],
+.sev[data-sev='muted'] {
+  --sev: var(--text-muted);
+}
+.sub {
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* "Details": a warning's raw entry, the allocated sums. Neutral, never in a severity colour. */
+.details {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.details summary {
+  width: fit-content;
+  cursor: pointer;
+}
+.raw {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.dl {
+  display: grid;
+  grid-template-columns: max-content auto;
+  gap: 2px 12px;
+  margin: 6px 0 0;
+}
+.dl dd {
+  margin: 0;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Activity: lock holds and session queues as muted facts. */
+.lockTable,
+.groupTable {
+  border-collapse: collapse;
+  margin: 0 0 8px;
+}
+.lockTable {
+  width: 100%;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.lockTable th,
+.lockTable td,
+.groupTable th,
+.groupTable td {
+  padding: 3px 12px 3px 0;
+  text-align: left;
+  vertical-align: top;
+  font-weight: 400;
+}
+.lockTable thead th {
+  border-bottom: 1px solid var(--border);
+  font-weight: 500;
+}
+.lockTable td {
+  overflow-wrap: anywhere;
+}
+
+/* Storage: private bytes by group. */
+.headline {
+  font-weight: 600;
+}
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Size scan: recent measuring errors (attempt history), plain text. */
+.failed {
+  margin: 0 0 6px;
   padding-left: 18px;
-  color: var(--danger);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 /* "Created in" for a session made before the daemon timed sessions: a dash with a tooltip. */

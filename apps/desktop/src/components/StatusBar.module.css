@@ -1,5 +1,12 @@
+/*
+ * The 30px status bar (gui.md §5.1): daemon trigger, state chips, then the right-hand facts.
+ * The right side never shrinks and sits at the end, so it stays put when chips come and go.
+ * Short of room, the trigger's detail gives way first (down to the dot and label), then the
+ * chips.
+ */
 .trigger {
   display: inline-flex;
+  flex: 0 1000 auto;
   align-items: center;
   gap: 6px;
   height: 22px;
@@ -10,23 +17,195 @@
   background: transparent;
   color: inherit;
   font: inherit;
+  white-space: nowrap;
   cursor: default;
 }
 .trigger:hover {
   background: color-mix(in srgb, var(--text) 7%, transparent);
   color: var(--text);
 }
+.trigger > span {
+  flex: none;
+}
 .name {
   color: var(--text);
 }
-.detail {
+/*
+ * One clamped line instead of nowrap: text that may wrap anywhere has a one-letter minimum
+ * width, so the trigger's floor is its dot and label, and the detail ends in an ellipsis.
+ */
+.trigger > .detail {
+  display: -webkit-box;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-muted);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
 }
-.spacer {
-  flex: 1;
+
+/* Padding with a matching negative margin keeps chip focus rings clear of the clipping edge. */
+.chips {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px;
+  margin: -4px;
+  overflow: hidden;
+}
+
+/*
+ * A chip: the tray's badge palette (gui.md §5.8) as text and edge on a light tint of itself.
+ * --ink paints the mark, edge and tint; --ink-text the words (contrast: statusBar.test.tsx).
+ */
+.chip {
+  --ink: var(--text-muted);
+  --ink-text: var(--text-muted);
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 20px;
+  padding: 0 8px 0 7px;
+  border: 1px solid color-mix(in srgb, var(--ink) 40%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
+  color: var(--ink-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: default;
+}
+.chip:hover {
+  border-color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 16%, transparent);
+}
+.chip[data-sev='red'] {
+  --ink: var(--danger);
+  --ink-text: var(--sev-red);
+}
+.chip[data-sev='amber'] {
+  --ink: var(--sev-amber);
+  --ink-text: var(--sev-amber);
+}
+.chip[data-sev='purple'] {
+  --ink: var(--sev-purple);
+  --ink-text: var(--sev-purple);
+}
+.chip[data-sev='blue'] {
+  --ink: var(--sev-blue);
+  --ink-text: var(--sev-blue);
+}
+.chip[data-sev='muted'] {
+  border-color: var(--border);
+  background: transparent;
+  font-weight: 400;
+}
+.chip[data-sev='muted']:hover {
+  border-color: var(--border-strong);
+  background: transparent;
+  color: var(--text);
+}
+.text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The mark repeats the tray badge's shape, so colour is never the only cue. */
+.mark {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  background: var(--ink);
+}
+/* Alert: triangle. */
+.chip[data-sev='red'] .mark {
+  width: 9px;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+/* Waiting: filled circle. */
+.chip[data-sev='amber'] .mark {
+  border-radius: 50%;
+}
+/* Conflict: diamond. */
+.chip[data-sev='purple'] .mark {
+  width: 7px;
+  height: 7px;
+  margin: 0 0.5px;
+  border-radius: 1px;
+  transform: rotate(45deg);
+}
+/* Syncing: ring. */
+.chip[data-sev='blue'] .mark {
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--ink);
+}
+.chip[data-sev='muted'] .mark {
+  display: none;
+}
+
+.more {
+  flex: none;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+.more:hover {
+  border-color: var(--text-muted);
+  color: var(--text);
+}
+
+.right {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 16px;
+  white-space: nowrap;
 }
 .saved {
   margin-left: 0;
   color: var(--accent);
   font-weight: 500;
+}
+.free {
+  margin-left: 0;
+  color: var(--text-muted);
+}
+.free[data-sev='amber'] {
+  color: var(--sev-amber);
+  font-weight: 500;
+}
+.free[data-sev='red'] {
+  color: var(--sev-red);
+  font-weight: 500;
+}
+
+/* Tooltip bodies. */
+.tip {
+  display: grid;
+  gap: 4px;
+}
+.tipHead {
+  font-weight: 500;
+}
+.tipList {
+  margin: 0;
+  padding-left: 16px;
 }
