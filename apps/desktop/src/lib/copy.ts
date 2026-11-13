@@ -328,7 +328,8 @@ export const copy = {
     /** Accessible name of a chip or fact: its text, then what a click does. */
     label: (text: string, action: string) => `${text}. ${action}`,
     more: (n: number) => `+${n}`,
-    moreLabel: (n: number) => `${n} more. Show all in daemon status`,
+    /** Starts with the visible "+N", so speech control finds the button by what it shows. */
+    moreLabel: (n: number) => `+${n} more. Show all in daemon status`,
   },
   theme: {
     label: 'Theme',
