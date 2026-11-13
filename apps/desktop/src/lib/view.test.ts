@@ -1,7 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AutoCloseReplyFields, DaemonStatus, DepsList, Proposal, StatusReply, Workspace } from './types';
+import type {
+  AutoCloseReplyFields,
+  DaemonStatus,
+  DepsList,
+  Proposal,
+  StatusReply,
+  Workspace,
+} from './types';
 import {
   daemonView,
   filterRows,
@@ -85,7 +92,8 @@ describe('completion marks', () => {
 
   test('a mark the daemon wrote reads like any done mark, with its reasons as the note', () => {
     const reply = marked();
-    const note = 'auto-close did not close this session: not_pushed:\nfront: base 3f9c… is not on origin/main';
+    const note =
+      'auto-close did not close this session: not_pushed:\nfront: base 3f9c… is not on origin/main';
     reply.sessions.find((s) => s.status.manifest.id === 'S1')!.status.mark = {
       state: 'done',
       note,
@@ -198,7 +206,30 @@ describe('daemonView', () => {
       { repo: 'b', n: 3 },
       { repo: 'a', n: 1 },
     ]);
-    expect(v.warnings).toEqual(['Drift: x', 'plain']);
+    // Classified for display (statusBar.ts); the raw entry stays for the Details disclosure.
+    expect(v.warnings.map((w) => w.raw)).toEqual([{ kind: 'Drift', message: 'x' }, 'plain']);
+  });
+  test('LongHold of auto-rebase work: never red, no JSON in its text, raw entry kept', () => {
+    // The 2026-11-13 09:27 shape: a catch_up repo take carries no session on 0.2.2.
+    const since = { secs_since_epoch: 1_794_511_672, nanos_since_epoch: 116_980_000 };
+    const hold = { LongHold: { repo: 'tool', method: 'catch_up', since } };
+    const v = daemonView(
+      {
+        ...daemon,
+        holds: [{ repo: 'tool', method: 'catch_up', session: null, since }],
+        queues: [{ session: 's-eqyyt2k7', holder: 'catch_up', since, queued: ['sync'] }],
+        warnings: [hold],
+      },
+      1_794_511_672_000 + 2 * 60_000
+    );
+    expect(v.warnings).toHaveLength(1);
+    const [w] = v.warnings;
+    expect(w.kind).toBe('LongHold');
+    expect(w.cls).not.toBe('error');
+    expect(w.sev).not.toBe('red');
+    expect(w.text).not.toContain('{');
+    expect(w.text).not.toContain('secs_since_epoch');
+    expect(w.raw).toEqual(hold);
   });
 });
 
@@ -624,7 +655,7 @@ describe('tray policy parity', () => {
           { ConfigRelaxPending: { repo: 'web' } },
           { FutureVariant: {} },
         ],
-      }).warnings
+      }).warnings.map((w) => w.kind)
     ).toEqual(['StorePoisoned', 'VerifyFailed', 'ConfigRelaxPending', 'FutureVariant']);
     expect(daemonView({ ...daemon, warnings: {} as unknown as unknown[] }).warnings).toEqual([]);
   });
@@ -695,22 +726,26 @@ describe('tray policy parity', () => {
   });
 });
 
-test('reload warnings give the owner a specific status message', () => {
-  const s = {
-    ...daemon,
-    warnings: [
-      { ConfigReloadFailed: { reason: 'invalid_config', detail: {}, hash: 'abc' } },
-      { ConfigRestartRequired: { fields: ['paths.root'] } },
-    ],
-  };
-  expect(daemonView(s).warnings).toEqual([
-    'config.toml not applied: invalid_config',
-    'Config changes need an owner restart: paths.root',
+// The owner-facing copy for these ("config.toml not applied: <reason>", "Restart the daemon to
+// apply: <fields>", design §2.1 #6) lives in the shared classifier (statusBar.ts) and its tests.
+test('reload warnings: one plain line each, never red, the raw entry kept, malformed ones too', () => {
+  const warnings = [
+    { ConfigReloadFailed: { reason: 'invalid_config', detail: {}, hash: 'abc' } },
+    { ConfigRestartRequired: { fields: ['paths.root'] } },
+    { ConfigReloadFailed: null },
+    { ConfigRestartRequired: { fields: 'unknown' } },
+  ];
+  const v = daemonView({ ...daemon, warnings }, 0);
+  expect(v.warnings.map((w) => w.kind)).toEqual([
+    'ConfigReloadFailed',
+    'ConfigRestartRequired',
+    'ConfigReloadFailed',
+    'ConfigRestartRequired',
   ]);
-  expect(
-    daemonView({
-      ...daemon,
-      warnings: [{ ConfigReloadFailed: null }, { ConfigRestartRequired: { fields: 'unknown' } }],
-    }).warnings
-  ).toEqual(['config.toml not applied: reload failed', 'Config changes need an owner restart']);
+  expect(v.warnings.map((w) => w.raw)).toEqual(warnings);
+  for (const w of v.warnings) {
+    expect(w.text.length).toBeGreaterThan(0);
+    expect(w.text).not.toMatch(/[{}\n]/);
+    expect(w.sev).not.toBe('red');
+  }
 });

@@ -3,12 +3,15 @@
 import { Button, Descriptions, Empty, List, Tag } from 'antd';
 import { ArrowLeftOutlined } from '@ant-design/icons';
 import type { UseQueryResult } from '@tanstack/react-query';
-import { bytes, copy } from '@/lib/copy';
+import { useNow } from '@/hooks/useNow';
+import { copy } from '@/lib/copy';
+import { storageView } from '@/lib/daemonPanel';
 import { useDu, useSocket } from '@/lib/queries';
 import type { PollPlan } from '@/lib/poll';
 import type { DaemonStatus } from '@/lib/types';
 import { daemonView } from '@/lib/view';
 import { useNav } from '@/stores/nav';
+import { StorageHeadline, WarningList } from './DaemonStatusModal';
 import { ErrorNote } from './ErrorNote';
 
 export function DaemonScreen({
@@ -26,7 +29,10 @@ export function DaemonScreen({
   const socket = useSocket();
   const openSession = useNav((s) => s.openSession);
   const du = useDu(plan.du);
-  const v = status.data ? daemonView(status.data) : null;
+  // Warning severity and text depend on how long a hold has run (status bar ticker cadence).
+  const now = useNow(5_000);
+  const v = status.data ? daemonView(status.data, now) : null;
+  const storage = storageView(du.data);
   return (
     <>
       <div className="toolbar">
@@ -56,9 +62,9 @@ export function DaemonScreen({
                 {copy.daemon.reconcile(v.reconcileRuns)}
               </Descriptions.Item>
               <Descriptions.Item label="Holds">{copy.daemon.holds(v.holds)}</Descriptions.Item>
-              {du.data && (
+              {storage && (
                 <Descriptions.Item label={copy.daemon.storage}>
-                  {bytes(du.data.total.allocated)} on disk ({bytes(du.data.total.logical)} logical)
+                  <StorageHeadline v={storage} />
                 </Descriptions.Item>
               )}
             </Descriptions>
@@ -88,11 +94,7 @@ export function DaemonScreen({
             {v.warnings.length === 0 ? (
               <span className="muted">{copy.daemon.noWarnings}</span>
             ) : (
-              <List
-                size="small"
-                dataSource={v.warnings}
-                renderItem={(w) => <List.Item>{w}</List.Item>}
-              />
+              <WarningList items={v.warnings} />
             )}
           </section>
         )}
