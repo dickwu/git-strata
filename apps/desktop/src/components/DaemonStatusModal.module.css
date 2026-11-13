@@ -169,31 +169,19 @@
 }
 .dot[data-sev='amber'],
 .sev[data-sev='amber'] {
-  --sev: #8a4b00;
+  --sev: var(--sev-amber);
 }
 .dot[data-sev='purple'],
 .sev[data-sev='purple'] {
-  --sev: #7a35a6;
+  --sev: var(--sev-purple);
 }
 .dot[data-sev='blue'],
 .sev[data-sev='blue'] {
-  --sev: #245a74;
+  --sev: var(--sev-blue);
 }
 .dot[data-sev='muted'],
 .sev[data-sev='muted'] {
   --sev: var(--text-muted);
-}
-:global(:root[data-theme='dark']) .dot[data-sev='amber'],
-:global(:root[data-theme='dark']) .sev[data-sev='amber'] {
-  --sev: #ffb340;
-}
-:global(:root[data-theme='dark']) .dot[data-sev='purple'],
-:global(:root[data-theme='dark']) .sev[data-sev='purple'] {
-  --sev: #c99bf2;
-}
-:global(:root[data-theme='dark']) .dot[data-sev='blue'],
-:global(:root[data-theme='dark']) .sev[data-sev='blue'] {
-  --sev: #6fb3d2;
 }
 .sub {
   color: var(--text-muted);

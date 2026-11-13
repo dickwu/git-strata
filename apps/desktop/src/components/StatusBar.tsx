@@ -1,12 +1,6 @@
 'use client';
 
-import {
-  useEffect,
-  useState,
-  type ComponentProps,
-  type ComponentType,
-  type ReactNode,
-} from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Tooltip } from 'antd';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { copy } from '@/lib/copy';
@@ -19,12 +13,6 @@ import css from './StatusBar.module.css';
 
 /** A section of the daemon status modal that a click can open at. */
 export type ModalSection = Extract<ChipTarget, { kind: 'modal' }>['section'];
-
-// INTEGRATION: drop cast when slice C lands (DaemonStatusModal gains `section` and `chips`).
-// Not named Modal: modals.test.ts takes every JSX tag of that name for antd's.
-const DaemonModal = DaemonStatusModal as unknown as ComponentType<
-  ComponentProps<typeof DaemonStatusModal> & { section?: ModalSection; chips?: Chip[] }
->;
 
 const s = copy.statusBar;
 
@@ -227,7 +215,7 @@ export function StatusBar({
       onWaiting={onWaiting}
       onSession={onSession}
     >
-      <DaemonModal
+      <DaemonStatusModal
         open={modal !== null}
         onClose={() => setModal(null)}
         section={modal?.section}

@@ -7,6 +7,8 @@ use std::time::{Duration, SystemTime};
 pub const MAX_WAITING: usize = 5;
 pub const STALE_AFTER: Duration = Duration::from_secs(60);
 pub const BACKGROUND_HOLD_MAX: Duration = Duration::from_secs(30 * 60);
+/// Catch-up holds younger than this are not named in the Syncing tooltip.
+const MIN_ACTIVITY_AGE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
@@ -351,7 +353,8 @@ fn syncing_description(s: &Snapshot, now: SystemTime) -> String {
             .filter_map(|h| {
                 let repo = h["repo"].as_str()?;
                 let age = now.duration_since(hold_since(h)?).ok()?;
-                Some((repo, age))
+                // Sub-second catch-up steps run for every repo each minute (design §3.1).
+                (age >= MIN_ACTIVITY_AGE).then_some((repo, age))
             })
             .max_by_key(|(_, age)| *age)
     });

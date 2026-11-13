@@ -514,7 +514,7 @@ export function daemonView(s: DaemonStatus, now = Date.now()): DaemonView {
       .filter(([, n]) => n > 0)
       .map(([repo, n]) => ({ repo, n }))
       .sort((a, b) => b.n - a.n || a.repo.localeCompare(b.repo)),
-    warnings: (Array.isArray(s.warnings) ? s.warnings : []).map((w) => classifyWarning(w, now)),
+    warnings: (Array.isArray(s.warnings) ? s.warnings : []).map((w) => classifyWarning(w, now, s)),
   };
 }
 

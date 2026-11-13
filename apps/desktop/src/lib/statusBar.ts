@@ -306,8 +306,8 @@ function classify(w: unknown, now: number, daemon?: DaemonStatus): WarningView {
 }
 
 /** Classify an externally tagged daemon warning, including the 0.2.2 method-based fallback. */
-export function classifyWarning(w: unknown, now: number): WarningView {
-  return classify(w, now);
+export function classifyWarning(w: unknown, now: number, daemon?: DaemonStatus): WarningView {
+  return classify(w, now, daemon);
 }
 
 /** Sort by rank then severity, keep order otherwise; split at MAX_CHIPS. */
