@@ -377,7 +377,13 @@ describe('daemonStatus query observations', () => {
     query.error = null;
     health = observeDaemonHealth(health, query);
     expect(health).toMatchObject({ timeouts: 0, lastOkAt: 22_000 });
+    expect(health.lastTimeoutAt).toBeUndefined();
     expect(model(22_000).daemon.state).toBe('up');
+    query.error = error('request_in_flight');
+    query.errorUpdatedAt = 27_000;
+    health = observeDaemonHealth(health, query);
+    expect(health.timeouts).toBe(0);
+    expect(model(45_000).daemon.state).toBe('pending');
     query.error = error('daemon_timeout');
     query.errorUpdatedAt = 50_000;
     health = observeDaemonHealth(health, query);
@@ -386,7 +392,7 @@ describe('daemonStatus query observations', () => {
   });
 
   test.each(['request_in_flight', 'not_tauri', 'shed', 'too_many_open_files'])(
-    '%s never counts as a health timeout',
+    '%s without a prior timeout adds no timeout evidence',
     (why) => {
       const query = {
         data: data(15),
@@ -397,6 +403,89 @@ describe('daemonStatus query observations', () => {
       expect(observeDaemonHealth(initial(), query).timeouts).toBe(0);
     }
   );
+
+  test.each(['daemon_timeout', 'request_in_flight'])(
+    '%s followed by joined reads escalates only with prior timeout evidence and 20 s',
+    (firstError) => {
+      // Use epoch milliseconds so the good reply at t=0 is distinct from no prior Ok.
+      const start = Date.parse('2026-11-13T15:00:00Z');
+      const query = {
+        data: data(15),
+        dataUpdatedAt: start,
+        errorUpdatedAt: 0,
+        error: null as Error | null,
+      };
+      let health = observeDaemonHealth(initial(), query);
+      for (const seconds of [5, 10, 15, 20]) {
+        const now = start + seconds * 1000;
+        query.error = error(seconds === 5 ? firstError : 'request_in_flight');
+        query.errorUpdatedAt = now;
+        health = observeDaemonHealth(health, query);
+        expect(health.timeouts).toBe(firstError === 'daemon_timeout' ? seconds / 5 : 0);
+        expect(observeDaemonHealth(health, query)).toBe(health);
+        const model = statusBarModel(
+          {
+            daemon: {
+              pending: false,
+              data: query.data,
+              updatedAt: query.dataUpdatedAt,
+              error: query.error,
+            },
+            health,
+            sessions: undefined,
+            deps: undefined,
+            du: undefined,
+          },
+          now
+        );
+        const down = firstError === 'daemon_timeout' && seconds === 20;
+        expect(model.daemon).toMatchObject({
+          state: down ? 'down' : 'pending',
+          label: down ? "Daemon isn't responding" : 'Checking the daemon…',
+        });
+      }
+    }
+  );
+
+  test('joined reads use the same 4 s merge boundary as timeouts', () => {
+    const query = {
+      data: data(15),
+      dataUpdatedAt: 1000,
+      errorUpdatedAt: 5000,
+      error: error('daemon_timeout'),
+    };
+    let health = observeDaemonHealth(initial(), query);
+    query.error = error('request_in_flight');
+    query.errorUpdatedAt = 8999;
+    health = observeDaemonHealth(health, query);
+    expect(health).toMatchObject({ timeouts: 1, lastTimeoutAt: 5000 });
+    query.errorUpdatedAt = 9000;
+    health = observeDaemonHealth(health, query);
+    expect(health).toMatchObject({ timeouts: 2, lastTimeoutAt: 9000 });
+    query.errorUpdatedAt = 9001;
+    health = observeDaemonHealth(health, query);
+    expect(health).toMatchObject({ timeouts: 2, lastTimeoutAt: 9000 });
+  });
+
+  test('file-handle shedding clears evidence before a later joined read', () => {
+    const query = {
+      data: data(15),
+      dataUpdatedAt: 1000,
+      errorUpdatedAt: 5000,
+      error: error('daemon_timeout'),
+    };
+    let health = observeDaemonHealth(initial(), query);
+    query.error = error('too_many_open_files');
+    query.errorUpdatedAt = 10_000;
+    health = observeDaemonHealth(health, query);
+    expect(health.timeouts).toBe(0);
+    expect(health.lastTimeoutAt).toBeUndefined();
+    query.error = error('request_in_flight');
+    query.errorUpdatedAt = 15_000;
+    health = observeDaemonHealth(health, query);
+    expect(health.timeouts).toBe(0);
+    expect(health.lastTimeoutAt).toBeUndefined();
+  });
 
   test('accept_errors compares successful replies across errors and counter resets', () => {
     const query = {

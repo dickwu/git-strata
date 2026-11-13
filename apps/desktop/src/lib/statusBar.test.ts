@@ -390,18 +390,21 @@ describe('health, waiting and honest facts', () => {
     expect(statusBarModel(i, NOW).daemon.state).toBe('down');
   });
 
-  test.each(['request_in_flight', 'not_tauri', 'shed'])('%s is neutral, not a timeout', (why) => {
-    const i = input(daemon([{ FetchFailed: { repo: 'tool' } }]));
-    i.daemon.error = err(why);
-    i.health = { timeouts: 0, lastOkAt: NOW };
-    const model = statusBarModel(i, NOW + 5000);
-    expect(model.daemon).toMatchObject({ state: 'pending', label: 'Checking the daemon…' });
-    expect(allChips(i, NOW + 5000)).toHaveLength(1);
-    expect(allChips(i, NOW + 5000)[0]).toMatchObject({
-      text: 'Fetching tool failed',
-      target: { kind: 'modal', section: 'daemon' },
-    });
-  });
+  test.each(['request_in_flight', 'not_tauri', 'shed'])(
+    '%s without timeout evidence is neutral',
+    (why) => {
+      const i = input(daemon([{ FetchFailed: { repo: 'tool' } }]));
+      i.daemon.error = err(why);
+      i.health = { timeouts: 0, lastOkAt: NOW };
+      const model = statusBarModel(i, NOW + 5000);
+      expect(model.daemon).toMatchObject({ state: 'pending', label: 'Checking the daemon…' });
+      expect(allChips(i, NOW + 5000)).toHaveLength(1);
+      expect(allChips(i, NOW + 5000)[0]).toMatchObject({
+        text: 'Fetching tool failed',
+        target: { kind: 'modal', section: 'daemon' },
+      });
+    }
+  );
 
   test.each([1, 4, 13])('store permission errno %s uses Removable Volumes guidance', (errno) => {
     const i = input();
@@ -436,6 +439,36 @@ describe('health, waiting and honest facts', () => {
     i.daemon.updatedAt = NOW - 60_000;
     expect(allChips(i).some((c) => c.sev === 'red')).toBe(true);
   });
+
+  test.each(['request_in_flight', 'daemon_timeout'])(
+    '%s below the Down threshold shows stale age after 60 s',
+    (why) => {
+      const i = input(daemon(['StorePoisoned', hold()]));
+      i.daemon.error = err(why, { seconds: 8 });
+      i.health = { timeouts: why === 'daemon_timeout' ? 1 : 0, lastOkAt: NOW };
+      expect(statusBarModel(i, NOW + 60_000).daemon.detail).toBe(
+        why === 'daemon_timeout' ? copy.daemon.stuck(8) : copy.daemon.busy
+      );
+      for (const [elapsed, detail] of [
+        [60_001, 'Not updated for 1 min'],
+        [179_999, 'Not updated for 2 min'],
+        [3_600_000, 'Not updated for 1 h'],
+      ] as const) {
+        expect(statusBarModel(i, NOW + elapsed).daemon).toEqual({
+          state: 'pending',
+          label: 'Checking the daemon…',
+          detail,
+        });
+        expect(allChips(i, NOW + elapsed)).toEqual([]);
+      }
+      i.daemon.data = undefined;
+      i.daemon.updatedAt = 0;
+      i.health.lastOkAt = 0;
+      expect(statusBarModel(i, NOW + 3_600_000).daemon.detail).toBe(
+        why === 'daemon_timeout' ? copy.daemon.stuck(8) : copy.daemon.busy
+      );
+    }
+  );
 
   test('file handles match tray 90% threshold; historical accept_errors alone are not pressure', () => {
     const i = input();
