@@ -1,6 +1,14 @@
 /** Strings for the status-bar daemon trigger and its modal (gui.md §5.2: sentence case). */
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
+/** What the daemon is doing when it holds a lock or a session queue itself. */
+const DAEMON_WORK_LABEL: ReadonlyMap<string, string> = new Map([
+  ['catch_up', 'auto-rebase'],
+  ['old_tree', 'cleaning an old tree'],
+  ['periodic_fetch', 'fetching'],
+  ['reconcile', 'reconcile'],
+]);
+
 export const daemonCopy = {
   trigger: {
     running: 'Daemon running',
@@ -15,15 +23,95 @@ export const daemonCopy = {
     down: 'Unreachable',
     updated: (ago: string) => `Updated ${ago}`,
   },
+  /** Every status-bar chip, the ones past the bar's "+N" included. */
+  now: {
+    heading: 'Now',
+  },
+  warnings: {
+    heading: 'Warnings',
+    none: 'No warnings.',
+    /** The disclosure holding a warning's raw entry. */
+    details: 'Details',
+  },
+  activity: {
+    heading: 'Activity',
+    holds: 'Repo locks',
+    queues: 'Session queues',
+    columns: {
+      repo: 'Repo',
+      heldBy: 'Held by',
+      session: 'Session',
+      waiting: 'Waiting',
+      elapsed: 'For',
+    },
+    /** A holder: the daemon's own work by name, a request by its method. */
+    holder: (method: string, background: boolean) => {
+      if (!background) return method;
+      const what = DAEMON_WORK_LABEL.get(method);
+      return what ? `Daemon work: ${what}` : 'Daemon work';
+    },
+    none: '—',
+    background:
+      'Daemon work (auto-rebase onto new main, old-tree cleanup, fetching) is normal, not an error. Write requests to the same repo or session wait for it; one that waits 30 s before it has written anything gets Busy and can be retried.',
+    waiting: (list: string) => `Requests waiting: ${list}`,
+    waitingRepo: (repo: string, n: number) => `${repo} ${n}`,
+  },
+  storage: {
+    heading: 'Storage',
+    headline: (b: string) => `git-strata alone holds at least ${b}`,
+    headlineTip: 'Can be much more: blocks a base shares with its sessions are not counted.',
+    headlineUnavailable: 'How much git-strata holds alone: unavailable',
+    unavailableTip: "Some files didn't report a private size, so no lower bound can be given.",
+    unavailable: 'unavailable',
+    measuring: '(measuring)',
+    asOf: (when: string) => `as of ${when}`,
+    groupsHeading: 'Held alone, by group (at least)',
+    groups: {
+      sessions: 'Sessions',
+      bases: 'Bases',
+      deps: 'Dependencies',
+      store: 'Store, without trash',
+      trash: 'Trash',
+    },
+    /** Followed by the gc command and `trashHuman`. */
+    trashEligible: (n: number, age: string) =>
+      `${n.toLocaleString('en-US')} trash ${plural(n, 'entry', 'entries')} older than ${age} can be emptied by`,
+    trashHuman: '(a human command).',
+    trashYoung: (n: number, age: string) =>
+      `${n.toLocaleString('en-US')} trash ${plural(n, 'entry is', 'entries are')} younger than ${age}, so gc leaves ${plural(n, 'it', 'them')} for now.`,
+    details: 'Details',
+    allocated: 'Allocated, counted once per file; overcounts clones',
+    logical: 'Logical size of all files; counts every clone in full',
+  },
+  scan: {
+    heading: 'Size scan',
+    running: (done: string | null, queued: string, active: string | null) => {
+      const counts = [
+        done === null ? null : `${done} done`,
+        active === null ? null : `${active} in progress`,
+        `${queued} queued`,
+      ].filter((p) => p !== null);
+      return `Measuring storage · ${counts.join(active === null ? ', ' : ' · ')}`;
+    },
+    idle: (ended: string | null) => (ended ? `Idle, last full pass ${ended}` : 'Idle'),
+    failed: 'Recent measuring errors',
+    failedNote:
+      'Attempt history of the size scan: an error stays listed after a later attempt succeeds.',
+    times: (n: number) => `(${n} times)`,
+  },
   savings: {
     heading: 'Compared with git worktree',
     intro:
       'Each session clones its repos and dependencies copy-on-write. A plain git worktree writes a full copy of the same files, node_modules and target included.',
+    upTo: 'Up to',
     live: (n: number) => `not written to disk by ${n} live ${plural(n, 'session', 'sessions')}`,
-    onDisk: (onDisk: string, logical: string) => `${onDisk} on disk for ${logical} of files`,
+    asOf: (when: string) => `As of ${when}`,
+    measuringMark: '(measuring)',
+    heldAlone: (held: string, logical: string) =>
+      `${held} held only by the sessions (at least), for ${logical} of files`,
     files: (n: string) => `${n} files a worktree would have written`,
     cumulative: (saved: string, n: number, since: string) =>
-      `${saved} across ${n} ${plural(n, 'session', 'sessions')} recorded since ${since}`,
+      `Up to ${saved} saved across ${n} ${plural(n, 'session', 'sessions')} recorded since ${since}`,
     cumulativeNote: (removed: number, unsized: number) =>
       [
         removed > 0 ? `${removed} since removed` : null,
@@ -35,7 +123,7 @@ export const daemonCopy = {
     unavailable:
       "This daemon doesn't report space savings. Update git-strata and restart the daemon to see them.",
     accuracy:
-      'On disk counts only the blocks a session holds alone (APFS private size). Blocks shared with the base are not counted.',
+      'Held alone counts only the blocks a session holds by itself (APFS private size), so it is a lower bound: blocks shared with the base are not counted. Saved is full size minus that, so it is an upper bound.',
     timeHeading: 'Time to a ready workspace',
     measured: 'Measured',
     estimated: 'git worktree (estimate)',
@@ -54,8 +142,8 @@ export const daemonCopy = {
     columns: {
       session: 'Session',
       logical: 'Full size',
-      onDisk: 'On disk',
-      saved: 'Saved',
+      heldAlone: 'Held alone (at least)',
+      saved: 'Saved (up to)',
       created: 'Created in',
       estimate: 'Worktree (est.)',
     },
@@ -81,12 +169,7 @@ export const daemonCopy = {
     holds: 'Holds',
     waiting: 'Requests waiting',
     warnings: 'Warnings',
-    storage: 'Storage',
-    storageValue: (onDisk: string, logical: string) => `${onDisk} on disk, ${logical} logical`,
     socket: 'Socket',
-    scan: 'Size scan',
-    scanRunning: (queued: number) => `Running, ${queued} queued`,
-    scanIdle: (ended: string | null) => (ended ? `Idle, last full pass ${ended}` : 'Idle'),
     notReported: 'Not reported by this daemon',
   },
 } as const;

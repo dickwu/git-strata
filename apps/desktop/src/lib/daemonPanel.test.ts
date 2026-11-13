@@ -1,14 +1,26 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { DaemonStatus, DuReply, DuSession, Usage } from './types';
+import { bytes } from './copy';
+import { daemonCopy } from './daemonCopy';
+import { classifyWarning } from './statusBar';
+import type { DaemonStatus, DuReply, DuScan, DuSession, Usage } from './types';
 import {
+  activityView,
+  age,
   ASSUMED_COPY_RATE,
   copyEstimateMs,
   duration,
+  rawJson,
   savingsView,
+  scanText,
+  scanView,
   statusFacts,
+  storageView,
+  systemTimeMs,
   times,
+  warningSev,
+  when,
 } from './daemonPanel';
 
 const fx = <T>(name: string): T =>
@@ -172,7 +184,367 @@ describe('statusFacts', () => {
   });
 });
 
+const GiB = 1024 ** 3;
+
+/** One `du` group as du.rs `Agg::json` writes it; fresh and exact unless overridden. */
+const agg = (o: Record<string, unknown> = {}) => ({
+  logical: 0,
+  allocated: 0,
+  private: 0,
+  shared: 0,
+  files: 0,
+  exact: true,
+  errors: 0,
+  units: 1,
+  stale: 0,
+  pending: 0,
+  complete: true,
+  as_of: '2026-11-13T15:30:00Z',
+  ...o,
+});
+
+/** The p1 `du` reply with its `total` and `store` patched (types.ts leaves both loose). */
+const duWith = (patch: { total?: object; store?: object | null }): DuReply => {
+  const p1 = fx<DuReply & { store: Record<string, unknown> }>('du');
+  const { store: _store, ...rest } = p1;
+  return {
+    ...rest,
+    total: { ...p1.total, ...patch.total },
+    ...(patch.store === null ? {} : { store: { ...p1.store, ...patch.store } }),
+  } as DuReply;
+};
+
+/** The 2026-11-13 09:27 incident (design §0): 67 TB allocated, 43 GiB private, 33 GiB trash. */
+const incidentDu = () =>
+  duWith({
+    total: agg({ allocated: 67e12, logical: 66e12, private: 43 * GiB, units: 2000 }),
+    store: {
+      trash: {
+        ...agg({ allocated: 66e12, private: 33 * GiB, units: 1796 }),
+        entries: 1796,
+        eligible: { ...agg({ private: 33 * GiB }), entries: 1790, reclaim_min: 1, reclaim_max: 2 },
+        young: { ...agg(), entries: 6 },
+        floor_secs: 3600,
+        gc: 'git-strata gc',
+      },
+    },
+  });
+
+describe('storageView', () => {
+  test('p1 fixture: headline is total.private; groups add up to it, store without trash', () => {
+    const v = storageView(fx<DuReply>('du'))!;
+    // 270 units still pending: a lower bound that can still grow.
+    expect(v.headline).toEqual({
+      bytes: 856064,
+      state: 'measuring',
+      asOf: '2026-10-27T17:31:14.821Z',
+    });
+    expect(v.groups.map((g) => g.key)).toEqual(['sessions', 'bases', 'deps', 'store', 'trash']);
+    const by = Object.fromEntries(v.groups.map((g) => [g.key, g.fig]));
+    expect(by.sessions).toEqual({ bytes: 180224, state: 'ok', asOf: '2026-10-27T17:31:14.821Z' });
+    // db + blobs + tmp + other; blobs are pending, the oldest measurement is the db's.
+    expect(by.store).toEqual({
+      bytes: 675840,
+      state: 'measuring',
+      asOf: '2026-10-27T17:31:16.645Z',
+    });
+    expect(v.groups.reduce((a, g) => a + (g.fig.bytes ?? 0), 0)).toBe(v.headline.bytes!);
+    expect(v.trash).toEqual({
+      entries: 4,
+      eligible: 0,
+      young: 4,
+      floorSecs: 3600,
+      gc: 'git-strata gc',
+    });
+    expect([v.allocated, v.logical]).toEqual([937984, 754638]);
+  });
+
+  test('exact false ⇒ unavailable, with no number to show', () => {
+    const v = storageView(duWith({ total: { exact: false } }))!;
+    expect(v.headline).toMatchObject({ bytes: null, state: 'unavailable' });
+    const db = storageView(duWith({ store: { db: agg({ private: 9, exact: false }) } }))!;
+    expect(db.groups.find((g) => g.key === 'store')!.fig).toMatchObject({
+      bytes: null,
+      state: 'unavailable',
+    });
+  });
+
+  test('complete false, pending or stale units ⇒ measuring; fresh and complete ⇒ ok', () => {
+    const state = (total: object) => storageView(duWith({ total }))!.headline.state;
+    expect(state(agg({ complete: false, pending: 3 }))).toBe('measuring');
+    expect(state(agg({ stale: 2 }))).toBe('measuring');
+    expect(state(agg())).toBe('ok');
+    expect(storageView(duWith({ total: agg({ as_of: null }) }))!.headline.asOf).toBeNull();
+  });
+
+  test('incident: the headline is the private bound; allocated is only for Details', () => {
+    const v = storageView(incidentDu())!;
+    expect(v.headline).toEqual({ bytes: 43 * GiB, state: 'ok', asOf: '2026-11-13T15:30:00Z' });
+    const headline = daemonCopy.storage.headline(bytes(v.headline.bytes!));
+    expect(headline).toBe(`git-strata alone holds at least ${bytes(43 * GiB)}`);
+    expect(headline).not.toContain(bytes(67e12));
+    expect(v.allocated).toBe(67e12);
+    expect(daemonCopy.storage.headlineTip).toBe(
+      'Can be much more: blocks a base shares with its sessions are not counted.'
+    );
+    expect(daemonCopy.storage.allocated).toContain('counted once per file; overcounts clones');
+  });
+
+  test('trash: entries gc may empty, by the human command; never a promise of freed space', () => {
+    const v = storageView(incidentDu())!;
+    expect(v.trash).toEqual({
+      entries: 1796,
+      eligible: 1790,
+      young: 6,
+      floorSecs: 3600,
+      gc: 'git-strata gc',
+    });
+    const s = daemonCopy.storage;
+    expect(`${s.trashEligible(1790, age(3600))} ${v.trash!.gc} ${s.trashHuman}`).toBe(
+      '1,790 trash entries older than 1 h can be emptied by git-strata gc (a human command).'
+    );
+    expect(s.trashEligible(1, '1 h')).toStartWith('1 trash entry older');
+    const text = [
+      ...Object.values(s).filter((x) => typeof x === 'string'),
+      s.trashEligible(1790, '1 h'),
+      s.trashYoung(6, '1 h'),
+    ].join('\n');
+    expect(text).not.toMatch(/\bfrees?\b|reclaim/i);
+  });
+
+  test('an older du without store figures or trash eligibility shows what it has', () => {
+    const v = storageView(duWith({ store: null }))!;
+    expect(v.groups.map((g) => g.key)).toEqual(['sessions', 'bases', 'deps']);
+    expect(v.trash).toBeNull();
+    const noFloor = duWith({ store: { trash: { ...agg(), entries: 2 } } });
+    expect(storageView(noFloor)!.trash).toBeNull();
+  });
+
+  test('nothing to show without a reply or a total figure', () => {
+    expect(storageView(undefined)).toBeNull();
+    expect(storageView(duWith({ total: { private: undefined } }))).toBeNull();
+  });
+
+  test('age words the gc floor', () => {
+    expect([age(3600), age(7200), age(1800), age(45), age(5400)]).toEqual([
+      '1 h',
+      '2 h',
+      '30 min',
+      '45 s',
+      '90 min',
+    ]);
+  });
+});
+
+describe('scanView', () => {
+  const scan = (o: Partial<DuScan> & Record<string, unknown>): DuScan => ({
+    running: true,
+    queued: 140,
+    last_full: null,
+    started: '2026-11-13T15:27:00Z',
+    done: 412,
+    full: false,
+    failed: [],
+    ...o,
+  });
+  const fmt = (iso: string) => `<${iso}>`;
+
+  test('running on 0.2.2: counts only, "412 done, 140 queued"', () => {
+    expect(scanText(scanView(scan({}))!, fmt)).toBe('Measuring storage · 412 done, 140 queued');
+    expect(scanText(scanView(fx<DuReply>('du').scan)!, fmt)).toBe(
+      'Measuring storage · 13 done, 253 queued'
+    );
+    expect(scanText(scanView(scan({ done: 12_345, queued: 1_000 }))!, fmt)).toBe(
+      'Measuring storage · 12,345 done, 1,000 queued'
+    );
+  });
+
+  test('a newer daemon adds units in progress; an older one may lack done', () => {
+    expect(scanText(scanView(scan({ active: 4, queued: 136 }))!, fmt)).toBe(
+      'Measuring storage · 412 done · 4 in progress · 136 queued'
+    );
+    expect(scanText(scanView(scan({ done: undefined }))!, fmt)).toBe(
+      'Measuring storage · 140 queued'
+    );
+  });
+
+  test('never a percentage or a time left', () => {
+    for (const s of [scan({}), scan({ active: 4 }), scan({ full: true, done: 999, queued: 1 })])
+      expect(scanText(scanView(s)!, fmt)).not.toMatch(/%|eta|left|remaining/i);
+  });
+
+  test('idle: when the last full pass ended, or just idle', () => {
+    const ended = '2026-11-13T15:20:00Z';
+    const idle = scan({ running: false, last_full: { started: '2026-11-13T15:00:00Z', ended } });
+    expect(scanText(scanView(idle)!, fmt)).toBe(`Idle, last full pass <${ended}>`);
+    expect(scanText(scanView(scan({ running: false }))!, fmt)).toBe('Idle');
+  });
+
+  test('failed is history: repeats grouped, newest first, malformed entries skipped', () => {
+    const failed = [
+      { unit: 'sessions/a', error: 'EIO' },
+      { unit: 'bases/b', error: 'ENOENT' },
+      { unit: 'sessions/a', error: 'EIO' },
+      { unit: 7, error: 'x' },
+      { unit: 'store/trash/c', error: 'EPERM' },
+    ] as DuScan['failed'];
+    expect(scanView(scan({ failed }))!.failed).toEqual([
+      { unit: 'store/trash/c', error: 'EPERM', times: 1 },
+      { unit: 'sessions/a', error: 'EIO', times: 2 },
+      { unit: 'bases/b', error: 'ENOENT', times: 1 },
+    ]);
+  });
+
+  test('no scan object, no view', () => {
+    expect(scanView(undefined)).toBeNull();
+    expect(scanView({} as DuScan)).toBeNull();
+  });
+});
+
+describe('activityView', () => {
+  const T = 1_794_511_672; // 2026-11-13 09:27:52 America/Winnipeg
+  const since = { secs_since_epoch: T, nanos_since_epoch: 500_000_000 };
+  const at = (ms: number) => T * 1000 + 500 + ms;
+  const status = (o: Partial<DaemonStatus>): DaemonStatus => ({
+    ...fx<DaemonStatus>('daemon_status'),
+    ...o,
+  });
+
+  test('incident: the catch-up hold is daemon work with no session; the queue names it', () => {
+    const v = activityView(
+      status({
+        holds: [{ repo: 'tool', method: 'catch_up', session: null, since }],
+        queues: [{ session: 's-eqyyt2k7', holder: 'catch_up', since, queued: ['sync'] }],
+        repo_waiting: { tool: 2, web: 0 },
+      }),
+      at(150_000)
+    );
+    expect(v.holds).toEqual([
+      { repo: 'tool', method: 'catch_up', background: true, session: null, elapsedMs: 150_000 },
+    ]);
+    expect(v.queues).toEqual([
+      {
+        session: 's-eqyyt2k7',
+        holder: 'catch_up',
+        background: true,
+        queued: ['sync'],
+        elapsedMs: 150_000,
+      },
+    ]);
+    expect(v.waiting).toEqual([{ repo: 'tool', n: 2 }]);
+    expect(daemonCopy.activity.holder('catch_up', true)).toBe('Daemon work: auto-rebase');
+  });
+
+  test('a request hold is the method itself; old-tree and reconcile are daemon work', () => {
+    const v = activityView(
+      status({
+        holds: [
+          { repo: 'web', method: 'publish', session: 's1', since },
+          { repo: 'tool', method: 'old_tree', session: null, since },
+        ],
+        queues: [{ session: 's2', holder: 'reconcile', since, queued: [] }],
+      }),
+      at(0)
+    );
+    expect(v.holds.map((h) => [h.method, h.background, h.session])).toEqual([
+      ['publish', false, 's1'],
+      ['old_tree', true, null],
+    ]);
+    expect(v.queues[0].background).toBe(true);
+    const label = daemonCopy.activity.holder;
+    expect([label('publish', false), label('old_tree', true), label('daemon', true)]).toEqual([
+      'publish',
+      'Daemon work: cleaning an old tree',
+      'Daemon work',
+    ]);
+  });
+
+  test('a newer daemon: origin decides, and its elapsed_ms is used', () => {
+    const v = activityView(
+      status({
+        holds: [
+          {
+            repo: 'tool',
+            method: 'new',
+            session: null,
+            since,
+            origin: 'background',
+            elapsed_ms: 5000,
+          },
+          { repo: 'web', method: 'catch_up', session: null, since, origin: 'request' },
+        ],
+      }),
+      at(60_000)
+    );
+    expect(v.holds.map((h) => [h.method, h.background, h.elapsedMs])).toEqual([
+      ['catch_up', false, 60_000],
+      ['new', true, 5000],
+    ]);
+  });
+
+  test('longest first; malformed entries and a missing queues key are skipped', () => {
+    const later = { secs_since_epoch: T + 60, nanos_since_epoch: 500_000_000 };
+    const v = activityView(
+      status({
+        holds: [
+          { repo: 'a', method: 'sync', session: 's', since: later },
+          null,
+          { repo: 1, method: 'x' },
+          { repo: 'b', method: 'sync', session: 's', since },
+        ],
+      }),
+      at(120_000)
+    );
+    expect(v.holds.map((h) => [h.repo, h.elapsedMs])).toEqual([
+      ['b', 120_000],
+      ['a', 60_000],
+    ]);
+    expect(v.queues).toEqual([]);
+    expect(systemTimeMs(since)).toBe(T * 1000 + 500);
+    expect(systemTimeMs({ secs_since_epoch: '1' })).toBeNull();
+  });
+});
+
+describe('warnings', () => {
+  const view = (cls: 'error' | 'waiting' | 'notice' | 'activity', sev: string, kind = 'X') =>
+    warningSev({ kind, cls, sev: sev as 'red' });
+
+  test('red only for the error class, never for a LongHold; activity is blue', () => {
+    expect(view('error', 'red', 'StorePoisoned')).toBe('red');
+    expect(view('error', 'amber', 'VerifyFailed')).toBe('red');
+    expect(view('error', 'red', 'LongHold')).toBe('amber');
+    expect(view('notice', 'red', 'LongHold')).toBe('amber');
+    expect(view('activity', 'amber', 'LongHold')).toBe('blue');
+    expect(view('notice', 'red')).toBe('amber');
+    expect(view('waiting', 'amber')).toBe('amber');
+    expect(view('notice', 'muted')).toBe('muted');
+  });
+
+  test('the incident LongHold through the shared classifier: one line, never red', () => {
+    const since = { secs_since_epoch: 1_794_511_672, nanos_since_epoch: 0 };
+    const raw = { LongHold: { repo: 'tool', method: 'catch_up', since } };
+    const w = classifyWarning(raw, 1_794_511_672_000 + 120_000);
+    expect(w.kind).toBe('LongHold');
+    expect(warningSev(w)).not.toBe('red');
+    expect(w.text).not.toMatch(/[{}"]|secs_since_epoch/);
+    expect(w.raw).toEqual(raw);
+  });
+
+  test('rawJson: the raw entry, pretty, for Details only', () => {
+    expect(rawJson('StorePoisoned')).toBe('"StorePoisoned"');
+    expect(rawJson({ FetchFailed: { repo: 'tool' } })).toBe(
+      '{\n  "FetchFailed": {\n    "repo": "tool"\n  }\n}'
+    );
+    expect(rawJson(undefined)).toBe('undefined');
+  });
+});
+
 describe('format', () => {
+  test('when: a dash without a valid time', () => {
+    expect(when(null)).toBe('—');
+    expect(when('not a time')).toBe('—');
+    expect(when('2026-11-13T15:27:52Z')).not.toBe('—');
+  });
   test('duration', () => {
     expect(duration(400)).toBe('0.4 s');
     expect(duration(12_000)).toBe('12 s');

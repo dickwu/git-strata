@@ -1,5 +1,6 @@
 /** Daemon replies → what the screens show. Pure; tested against the P1 fixtures. */
 import { copy } from './copy';
+import { classifyWarning, type WarningView } from './statusBar';
 import type {
   Checkpoint,
   DaemonStatus,
@@ -73,7 +74,11 @@ export interface DaemonView {
   reconcileRuns: number;
   holds: number;
   waiting: Array<{ repo: string; n: number }>;
-  warnings: string[];
+  /**
+   * `warnings[]` classified for display (statusBar.ts `classifyWarning`, shared with the status
+   * bar): one line of text and a severity each; the raw entry is kept for a Details disclosure.
+   */
+  warnings: WarningView[];
 }
 
 export const short = (oid: string | null | undefined, n = 7): string =>
@@ -499,31 +504,7 @@ export function sessionDetail(
   return { row: row(s, daemon), root: s.status.manifest.root, repos, checkpoints };
 }
 
-function warningText(w: unknown): string {
-  if (typeof w === 'string') return w;
-  if (w && typeof w === 'object') {
-    const o = w as Record<string, unknown>;
-    if ('ConfigReloadFailed' in o) {
-      const detail = o.ConfigReloadFailed as { reason?: unknown } | null;
-      const reason = typeof detail?.reason === 'string' ? detail.reason : 'reload failed';
-      return `config.toml not applied: ${reason}`;
-    }
-    if ('ConfigRestartRequired' in o) {
-      const detail = o.ConfigRestartRequired as { fields?: unknown } | null;
-      const fields = Array.isArray(detail?.fields)
-        ? detail.fields.filter((v) => typeof v === 'string')
-        : [];
-      return `Config changes need an owner restart${fields.length ? `: ${fields.join(', ')}` : ''}`;
-    }
-    const keys = Object.keys(o);
-    const kind = typeof o.kind === 'string' ? o.kind : keys.length === 1 ? keys[0] : 'Warning';
-    const msg = typeof o.message === 'string' ? o.message : null;
-    return msg ? `${kind}: ${msg}` : kind;
-  }
-  return String(w);
-}
-
-export function daemonView(s: DaemonStatus): DaemonView {
+export function daemonView(s: DaemonStatus, now = Date.now()): DaemonView {
   return {
     legacy: !('api' in s),
     version: typeof s.version === 'string' ? s.version : null,
@@ -533,7 +514,7 @@ export function daemonView(s: DaemonStatus): DaemonView {
       .filter(([, n]) => n > 0)
       .map(([repo, n]) => ({ repo, n }))
       .sort((a, b) => b.n - a.n || a.repo.localeCompare(b.repo)),
-    warnings: (Array.isArray(s.warnings) ? s.warnings : []).map(warningText),
+    warnings: (Array.isArray(s.warnings) ? s.warnings : []).map((w) => classifyWarning(w, now)),
   };
 }
 
