@@ -17,7 +17,9 @@
  * Accuracy: a `du` figure with `exact: false` had files without an APFS private size, whose
  * allocated size stood in (strata-apfs usage.rs). Its `private` can then overstate what is held
  * alone and logical − private understate the savings, so neither bound holds: such figures are
- * null here and show as unavailable.
+ * null here and show as unavailable. Cumulative savings have no accuracy flag on 0.2.2;
+ * current figures cannot establish the accuracy of removed sessions' persisted measurements,
+ * so that bound is unavailable too.
  */
 import { daemonCopy as t } from './daemonCopy';
 import type { Severity, WarningView } from './statusBar';
@@ -59,8 +61,8 @@ export interface SavingsView {
   };
   cumulative: {
     /**
-     * Upper bound; null when this data root reports inexact figures. The reply carries no
-     * accuracy for the cumulative sum (du.rs `cumulative`), so `total.exact` stands in.
+     * Upper bound; withheld because the cumulative sum (du.rs `cumulative`) carries no
+     * accuracy, including for removed sessions. Current figures cannot stand in for it.
      */
     saved: number | null;
     sessions: number;
@@ -81,7 +83,7 @@ export interface SavingsView {
   rows: SavingsRow[];
   /** Rows with no recorded create time (made before the daemon timed sessions). */
   untimed: number;
-  /** Some bound above is null because its figures are inexact: say why. */
+  /** Some live/session bound is null because its figures are inexact: say why. */
   inexact: boolean;
 }
 
@@ -98,7 +100,6 @@ export function savingsView(du: DuReply | undefined): SavingsView | null {
   const { live, cumulative: c } = du.savings;
   // `savings.live` sums the same units as `sessions.all`, which carries their accuracy.
   const liveExact = !inexact(du.sessions.all);
-  const cumulativeExact = liveExact && !inexact(du.total);
   const rows: SavingsRow[] = du.sessions.list
     .map((s) => {
       const exact = !inexact(s);
@@ -145,7 +146,7 @@ export function savingsView(du: DuReply | undefined): SavingsView | null {
       copyEstimateMs: copyEstimateMs(live.logical),
     },
     cumulative: {
-      saved: cumulativeExact ? c.savings : null,
+      saved: null,
       sessions: c.sessions,
       sized: c.sized,
       unsized: c.unsized,
@@ -156,7 +157,7 @@ export function savingsView(du: DuReply | undefined): SavingsView | null {
     timingMissing,
     rows,
     untimed: rows.filter((r) => r.createMs === null).length,
-    inexact: !cumulativeExact || rows.some((r) => r.saved === null),
+    inexact: !liveExact || rows.some((r) => r.saved === null),
   };
 }
 

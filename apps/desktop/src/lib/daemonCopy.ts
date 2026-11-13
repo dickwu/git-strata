@@ -115,6 +115,8 @@ export const daemonCopy = {
       `Held only by the sessions: unavailable, for ${logical} of files`,
     cumulativeUnavailable: (n: number, since: string) =>
       `Saved across ${n} ${plural(n, 'session', 'sessions')} recorded since ${since}: unavailable`,
+    cumulativeAccuracyUnavailable:
+      "Cumulative savings are unavailable because this daemon doesn't report their measurement accuracy.",
     inexact:
       "Some files didn't report an APFS private size, so their allocated size was counted instead. Held alone is then no lower bound and saved no upper bound, so those figures show as unavailable.",
     inexactRow:

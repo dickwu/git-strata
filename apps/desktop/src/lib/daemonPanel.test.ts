@@ -153,11 +153,12 @@ describe('savingsView', () => {
     expect(copyEstimateMs(-5)).toBe(0);
   });
 
-  test('exact or not reported: every bound is a number', () => {
+  test('exact or not reported: live and session bounds stay available', () => {
     for (const v of [savingsView(timedDu())!, savingsView(fx<DuReply>('du'))!]) {
       expect(v.inexact).toBe(false);
-      expect([v.live.saved, v.live.onDisk, v.cumulative.saved]).not.toContain(null);
+      expect([v.live.saved, v.live.onDisk]).not.toContain(null);
       expect(v.rows.map((r) => [r.onDisk, r.saved]).flat()).not.toContain(null);
+      expect(v.cumulative.saved).toBeNull(); // 0.2.2 reports no historical accuracy
     }
   });
 
@@ -178,7 +179,7 @@ describe('savingsView', () => {
       ['s-small', 1e6, 2e9 - 1e6],
       ['s-big', null, null],
     ]);
-    // cumulative reports no accuracy of its own; inexact live sessions void it too
+    // Cumulative accuracy is unknown independently of the live figures.
     expect(v.cumulative.saved).toBeNull();
     expect(v.inexact).toBe(true);
     // Time is measured, not derived from private sizes.
@@ -186,14 +187,47 @@ describe('savingsView', () => {
     expect(v.rows[1].speedup).toBe(2);
   });
 
-  test('cumulative follows total.exact; exact live sessions keep their bounds', () => {
+  test('removed inexact history stays unavailable after current totals become exact', () => {
     const du = timedDu();
     du.total = { ...du.total, exact: false } as Usage;
+    du.sessions!.all = { ...du.sessions!.all, exact: false } as Usage;
+    du.sessions!.list[0] = { ...du.sessions!.list[0], exact: false } as DuSession;
+    expect(savingsView(du)!.cumulative.saved).toBeNull();
+
+    // Removing that session restores exact current measurements, but its persisted savings
+    // remain in cumulative alongside other removed sessions (du.rs `cumulative`).
+    const remaining = { ...du.sessions!.list[1], exact: true } as DuSession;
+    du.sessions = {
+      all: { ...remaining, files: 1000 },
+      list: [remaining],
+    };
+    du.total = {
+      ...du.total,
+      logical: remaining.logical,
+      private: remaining.private,
+      exact: true,
+    } as Usage;
+    du.savings!.live = {
+      ...du.savings!.live,
+      logical: remaining.logical,
+      private: remaining.private,
+      savings: remaining.savings,
+    };
+    du.savings!.cumulative.removed = 2;
     const v = savingsView(du)!;
-    expect(v.live.saved).toBe(12e9 - 2e6);
-    expect(v.live.onDisk).toBe(2e6);
-    expect(v.cumulative.saved).toBeNull();
-    expect(v.inexact).toBe(true);
+    expect(v.cumulative).toEqual({
+      saved: null,
+      sessions: 3,
+      sized: 3,
+      unsized: 0,
+      removed: 2,
+      since: du.savings!.cumulative.since,
+    });
+    expect(v.live.saved).toBe(10e9 - 1e6);
+    expect(v.live.onDisk).toBe(1e6);
+    expect(v.rows[0]).toMatchObject({ onDisk: 1e6, saved: 10e9 - 1e6 });
+    expect(v.inexact).toBe(false); // Unknown history does not mean current figures are inexact.
+    expect(v.timing).toEqual({ timed: 2, avgCreateMs: 2000, copyEstimateMs: 4000, speedup: 2 });
   });
 
   test('one inexact row alone: its bounds are null and the view says why', () => {

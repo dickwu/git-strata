@@ -285,13 +285,52 @@ describe('daemon modal content', () => {
     expect(html).not.toContain('git-strata alone holds at least');
   });
 
-  test('exact sessions keep their bounds and no inexact note', () => {
+  test('exact sessions keep their bounds; cumulative accuracy remains unknown', () => {
     const html = content();
     expect(html).toMatch(/>Up to</);
-    expect(html).toMatch(/Up to [\d.]+ [KMGT]?B saved across/);
+    expect(html).not.toMatch(/Up to [\d.]+ [KMGT]?B saved across/);
+    expect(html).toMatch(/Saved across 2 sessions recorded since [^<]*: unavailable/);
+    expect(html).toContain(esc(daemonCopy.savings.cumulativeAccuracyUnavailable));
     expect(html).toMatch(/held only by the sessions \(at least\)/);
     expect(html).not.toContain(esc(daemonCopy.savings.inexact));
     expect(html).not.toContain('>unavailable<');
+  });
+
+  test('historical inexact savings stay hidden when only exact sessions remain', () => {
+    const du = inexactDu();
+    const remaining = du.sessions!.list[1];
+    du.total = {
+      ...du.total,
+      logical: remaining.logical,
+      private: remaining.private,
+      exact: true,
+    } as DuReply['total'];
+    du.sessions = { all: { ...remaining, units: 1 }, list: [remaining] };
+    du.savings!.live = {
+      ...du.savings!.live,
+      logical: remaining.logical,
+      private: remaining.private,
+      savings: remaining.savings,
+    };
+    Object.assign(du.savings!.cumulative, {
+      removed: 8,
+      unsized: 2,
+      timed: 2,
+      create_ms: 4000,
+      timed_logical: 16e9,
+    });
+    const html = content({ du: answered(du) });
+    const s = daemonCopy.savings;
+    expect(html).not.toContain(bytes(500 * GiB));
+    expect(html).not.toMatch(/Up to [\d.]+ [KMGT]?B saved across/);
+    expect(html).toMatch(/Saved across 9 sessions recorded since [^<]*: unavailable/);
+    expect(html).toContain(esc(s.cumulativeAccuracyUnavailable));
+    expect(html).toContain(s.cumulativeNote(8, 2));
+    expect(html).toContain(bytes(80 * GiB)); // Exact live/session upper bound.
+    expect(html).toContain(s.heldAlone(bytes(20 * GiB), bytes(100 * GiB)));
+    expect(html).toContain(s.measuredValue('2.0 s', 2));
+    expect(html).toContain(s.estimatedValue('4.0 s'));
+    expect(html).not.toContain(esc(s.inexact));
   });
 
   test('leftover directories: the count from status{all}, a dash before it answers', () => {
