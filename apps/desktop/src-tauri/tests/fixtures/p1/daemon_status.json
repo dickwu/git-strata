@@ -1,5 +1,11 @@
 {
+  "busy": {
+    "recent": [],
+    "total": 0,
+    "truncated": false
+  },
   "holds": [],
+  "pid": 4242,
   "reconcile": {
     "last": null,
     "runs": 0
@@ -8,6 +14,21 @@
     "tool": 0,
     "web": 0
   },
+  "scan": {
+    "active": 0,
+    "done": 0,
+    "full": false,
+    "queued": 0,
+    "running": false,
+    "unresolved_n": 0
+  },
+  "started": "2026-01-01T00:00:00Z",
   "verify": null,
+  "version": "0.2.2",
+  "volume": {
+    "as_of": "2026-01-01T00:00:00Z",
+    "free": 1200000000000,
+    "size": 2000000000000
+  },
   "warnings": []
 }

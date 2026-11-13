@@ -218,14 +218,16 @@ TOPICS
 
 // Base safety lives in the publish error topic to keep command help bounded.
 macro_rules! publish_base_text {
-    () => { "BASE SAFETY
+    () => {
+        "BASE SAFETY
   A batch's workspace base must be in the publish target B or on main_tip.
   base_not_on_main: ask the human to push/recover the base commits first;
   follow detail.fix. Dependency approval never drops parked base commits.
   HeadMoved baseline_moved: run the literal publish command in detail.fix
   to take fresh checkpoints after a baseline move.
 
-" };
+"
+    };
 }
 
 pub const NEW: &str = "Create a session of workspaces (APFS clones of base snapshots).
@@ -295,7 +297,8 @@ ERRORS
   under the session root (`git-strata rm` of the session retires them).
 ";
 
-pub const SYNC_AFTER: &str = "Run moving sync outside the workspace: cd ~ && git-strata sync --session S.
+pub const SYNC_AFTER: &str =
+    "Run moving sync outside the workspace: cd ~ && git-strata sync --session S.
 Then cd back to the workspace path. --check and --hook may run inside.
 Caller cwd is refused even when up to date, non-following or acknowledging
 conflicts. --allow-cwd accepts your own stale cwd; --allow-cwd-holders accepts
@@ -308,7 +311,8 @@ Unknown client_timeout: the write may still run; inspect status and do not
 retry, gc, or rm. Busy client_timeout: nothing changed; back off before retry.
 ";
 
-pub const STATUS_AFTER: &str = "Default total deadline: 30 s, or 120 s with --all. --timeout SECS overrides
+pub const STATUS_AFTER: &str =
+    "Default total deadline: 30 s, or 120 s with --all. --timeout SECS overrides
 GIT_STRATA_TIMEOUT; 0 means unlimited. Busy client_timeout: back off before
 retrying; it never triggers a local fallback. --progress writes stderr notes.
 
@@ -702,6 +706,9 @@ config is copied when the daemon returns it; absent when down or omitted by an
 older daemon. generation/hash/loaded_at describe the active catalog. last_attempt
 is null before any reload attempt, then the report plus at and a rejection reason
 when present; restart_required lists restart-only fields from that attempt.
+activity, busy, volume, scan, version, pid and started are copied the same way
+(feature daemon_status.activity): work in flight, Busy replies of the last 10
+min, the data volume's free/size bytes, size-scan counts, the daemon's identity.
 
 After editing config.toml, run `git-strata config reload` and check data.repos.
 Restart-only changes and old daemons require an owner restart. start/stop use
@@ -833,7 +840,9 @@ EXAMPLES
   git-strata session exec --session PROJ-1 --repo front -- npm run dev
 ";
 
-const ERRORS_PUBLISH: &str = concat!(publish_base_text!(), "OTHER ERRORS
+const ERRORS_PUBLISH: &str = concat!(
+    publish_base_text!(),
+    "OTHER ERRORS
   NoMatch            a --from path is not checkpointed: checkpoint, rerun
   CheckFailed        the repo's check failed in staging: fix, rerun
   PushRefused        the commit landed (data.commits) but the remote refused
@@ -853,7 +862,8 @@ const ERRORS_PUBLISH: &str = concat!(publish_base_text!(), "OTHER ERRORS
   Busy / Unknown with detail.sibling  preparing that sibling (fetch, anchor)
                      was busy or unknown; Busy: retry later; Unknown: tell
                      the human
-");
+"
+);
 const TOPICS: &[(&str, &str)] = &[
     ("gate", gate_text!()),
     ("push-guards", push_guard_text!()),
@@ -871,7 +881,11 @@ pub fn render(words: &[String]) -> crate::Result<String> {
     if words.is_empty() {
         return Ok(format!(
             "Usage: git-strata help [TOPIC | COMMAND ...]\n\nTopics: {}\nCommands: {}\n\n<command> --help describes the installed version.\n",
-            TOPICS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", "),
+            TOPICS
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", "),
             crate::args::top_commands().join(", ")
         ));
     }

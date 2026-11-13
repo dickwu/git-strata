@@ -658,6 +658,41 @@ publish = { branch = "main", push = true, confirm = false, auto_clse = true }
     assert!(bad.is_err(), "unknown sibling key must fail");
 }
 
+/// FEATURES only grows: the strings shipped before keep their places, and
+/// `daemon_status.activity` (the status-bar reply fields) comes right after
+/// them.
+#[test]
+fn features_keep_their_order_and_append_daemon_status_activity() {
+    let shipped = [
+        "new.agent",
+        "session.mark",
+        "publish.auto_close",
+        "session.ports",
+        "status.upstream",
+        "sync",
+        "client.timeout",
+        "old_tree.yield",
+        "sync.cwd_guard",
+        "deps.cwd_guard",
+        "publish.message",
+        "new.base",
+        "rebase.quiet_scope",
+        "config.reload",
+    ];
+    let features = strata_daemon::FEATURES;
+    assert_eq!(&features[..shipped.len()], shipped, "{features:?}");
+    assert_eq!(
+        features.get(shipped.len()),
+        Some(&"daemon_status.activity"),
+        "{features:?}"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    assert!(
+        features.iter().all(|f| seen.insert(*f)),
+        "no string twice: {features:?}"
+    );
+}
+
 #[test]
 fn confirm_is_not_channel_auth() {
     // A credential belongs to the action, not the connection: nothing in

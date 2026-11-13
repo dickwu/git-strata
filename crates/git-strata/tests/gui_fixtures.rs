@@ -8,8 +8,14 @@
 //! and checks every field of the committed fixture is still in the reply
 //! with the same JSON type.
 //!
-//! Regenerate the fixtures (after a deliberate reply change) with
-//! `GUI_FIXTURES=write cargo test -p git-strata --test gui_fixtures`.
+//! Update the fixtures (after a deliberate reply change) with
+//! `GUI_FIXTURES=write cargo test -p git-strata --test gui_fixtures`. A
+//! committed fixture is not rewritten: the desktop's own tests read some of
+//! its values as an older daemon's reply (`du` without `create_ms`,
+//! `daemon_status` without `features`). `write` keeps every committed value
+//! and adds each key of [`added`] that the reply has and the fixture lacks;
+//! a fixture file that does not exist yet is written whole. Replies only
+//! grow, so a reply change lists its new keys in [`added`].
 
 mod support;
 
@@ -24,6 +30,71 @@ const NEW_DEP: &str = "{\n  \"name\": \"tool\",\n  \"version\": \"1.0.0\",\n  \"
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop/src-tauri/tests/fixtures/p1")
+}
+
+/// The version of the desktop app built against the fixtures.
+fn app_version() -> String {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop/package.json");
+    let package: Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+    package["version"]
+        .as_str()
+        .expect("package.json version")
+        .to_owned()
+}
+
+/// The keys `write` adds (fixture, path, value), all from the status-bar
+/// work (feature `daemon_status.activity`). The values are fixed so an
+/// update is the same on every machine and run: machine-specific ones
+/// (`pid`, `started`, `volume`; `version` is the app's, so the pair reads
+/// as matched) and timing-specific ones (work in flight, Busy replies, scan
+/// progress), the latter as a quiet daemon's in `daemon_status` and as the
+/// committed `du` reply's running pass.
+fn added() -> Vec<(&'static str, &'static str, Value)> {
+    vec![
+        ("daemon_status", "version", json!(app_version())),
+        ("daemon_status", "pid", json!(4242)),
+        ("daemon_status", "started", json!("2026-01-01T00:00:00Z")),
+        ("daemon_status", "activity", json!([])),
+        (
+            "daemon_status",
+            "busy",
+            json!({ "total": 0, "recent": [], "truncated": false }),
+        ),
+        (
+            "daemon_status",
+            "volume",
+            json!({ "free": 1_200_000_000_000u64, "size": 2_000_000_000_000u64, "as_of": "2026-01-01T00:00:00Z" }),
+        ),
+        (
+            "daemon_status",
+            "scan",
+            json!({ "running": false, "active": 0, "queued": 0, "done": 0, "full": false, "unresolved_n": 0 }),
+        ),
+        ("du", "scan.active", json!(4)),
+        ("du", "scan.unresolved", json!([])),
+    ]
+}
+
+/// The value at a dotted `path` of objects.
+fn at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.').try_fold(v, |v, k| v.get(k))
+}
+
+/// The fixture `write` leaves for `name`: the committed one plus the keys
+/// of [`added`] it lacks and `reply` has, or the whole reply (with those
+/// keys' fixed values) when nothing is committed yet.
+fn updated(name: &str, committed: Option<Value>, reply: &Value) -> Value {
+    let fresh = committed.is_none();
+    let mut out = committed.unwrap_or_else(|| reply.clone());
+    for (_, path, value) in added().into_iter().filter(|(n, ..)| *n == name) {
+        if at(reply, path).is_some() && (fresh || at(&out, path).is_none()) {
+            let keys: Vec<&str> = path.split('.').collect();
+            let (last, parents) = keys.split_last().expect("a non-empty path");
+            let parent = parents.iter().fold(&mut out, |v, k| &mut v[*k]);
+            parent[*last] = value;
+        }
+    }
+    out
 }
 
 /// Every field the fixture has, the reply has too, with the same JSON
@@ -47,7 +118,9 @@ fn same_shape(path: &str, want: &Value, got: &Value, errs: &mut Vec<String>) {
                 same_shape(&format!("{path}[{i}]"), wv, gv, errs);
             }
         }
-        (Value::Number(_), Value::Number(_)) | (Value::String(_), Value::String(_)) | (Value::Bool(_), Value::Bool(_)) => {}
+        (Value::Number(_), Value::Number(_))
+        | (Value::String(_), Value::String(_))
+        | (Value::Bool(_), Value::Bool(_)) => {}
         _ => errs.push(format!("{path}: fixture {want} vs reply {got}")),
     }
 }
@@ -64,10 +137,17 @@ fn redact(v: &Value, subs: &[(String, String)]) -> Value {
 #[test]
 fn gui_p1_replies_match_fixtures() {
     let dir = fixtures_dir();
-    let requests: Value = serde_json::from_str(&fs::read_to_string(dir.join("requests.json")).expect("requests.json")).unwrap();
+    let requests: Value = serde_json::from_str(
+        &fs::read_to_string(dir.join("requests.json")).expect("requests.json"),
+    )
+    .unwrap();
     let writing = std::env::var("GUI_FIXTURES").as_deref() == Ok("write");
 
-    let lv = Live::with_deps(&["tool", "web"], &[("a.txt", b"one\ntwo\n"), ("src/lib.txt", b"fn x\n")], &["tool"]);
+    let lv = Live::with_deps(
+        &["tool", "web"],
+        &[("a.txt", b"one\ntwo\n"), ("src/lib.txt", b"fn x\n")],
+        &["tool"],
+    );
     let (replies, subs) = lv.serve(|_| {
         let s1 = lv.new_session("T-101", "tool,web");
         let s2 = lv.new_session("T-102", "tool");
@@ -95,7 +175,8 @@ fn gui_p1_replies_match_fixtures() {
             // does this test, so it runs on both sides of that change.
             let reply = match strata_client::call(&socket, method, params.clone(), Kind::Read) {
                 Err(strata_client::CallError::Failed(e))
-                    if params.get("chains").is_some() && e.message.contains("unknown field `chains`") =>
+                    if params.get("chains").is_some()
+                        && e.message.contains("unknown field `chains`") =>
                 {
                     let mut params = params;
                     params.as_object_mut().unwrap().remove("chains");
@@ -108,8 +189,14 @@ fn gui_p1_replies_match_fixtures() {
         }
         let subs = vec![
             (lv.sb.to_string_lossy().into_owned(), "/sandbox".to_string()),
-            (lv.home.canon().to_string_lossy().into_owned(), "/home".to_string()),
-            (lv.home.path().to_string_lossy().into_owned(), "/home".to_string()),
+            (
+                lv.home.canon().to_string_lossy().into_owned(),
+                "/home".to_string(),
+            ),
+            (
+                lv.home.path().to_string_lossy().into_owned(),
+                "/home".to_string(),
+            ),
             (s1.as_str().to_string(), "S1".to_string()),
             (s2.as_str().to_string(), "S2".to_string()),
         ];
@@ -121,11 +208,28 @@ fn gui_p1_replies_match_fixtures() {
         let got = redact(reply, &subs);
         let file = dir.join(format!("{name}.json"));
         if writing {
-            fs::write(&file, serde_json::to_string_pretty(&got).unwrap() + "\n").unwrap();
+            let committed: Option<Value> = fs::read_to_string(&file)
+                .ok()
+                .map(|t| serde_json::from_str(&t).unwrap());
+            let fixture = updated(name, committed.clone(), &got);
+            if committed.as_ref() != Some(&fixture) {
+                fs::write(
+                    &file,
+                    serde_json::to_string_pretty(&fixture).unwrap() + "\n",
+                )
+                .unwrap();
+            }
             continue;
         }
-        let want: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()))).unwrap();
+        let want: Value = serde_json::from_str(
+            &fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display())),
+        )
+        .unwrap();
         same_shape(name, &want, &got, &mut errs);
     }
-    assert!(errs.is_empty(), "replies drifted from the desktop fixtures (regenerate with GUI_FIXTURES=write):\n{}", errs.join("\n"));
+    assert!(
+        errs.is_empty(),
+        "replies drifted from the desktop fixtures (regenerate with GUI_FIXTURES=write):\n{}",
+        errs.join("\n")
+    );
 }

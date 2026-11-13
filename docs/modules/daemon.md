@@ -38,7 +38,7 @@ cli 只在连不上 socket 时自己打开 `Sessions`（只读）。daemon 在�
 5. `observe_main` 失败是警告 `ObserveFailed`（session 的 `NewWarning`，`kind` 为变体名），不是失败的 `new` 或 `publish`。daemon 再观察一次（「observe_main is best-effort for its callers」）。
 6. `index-read-back-refused` 或 `staging-changed`（连字符，以 gitio 9985e4c 的拼写为准，「Attach alert reasons, spelling — final」）时告警，请人看主 checkout 的 `git status` 与 `git diff --cached`。不自动改主 checkout（「An attach that may have written outside its staging is raised to the human」）。
 7. `<shadow>/worktrees` 或 `worktrees/<n>` 不是目录时，session 把它挪进 `<shadow>/strata-quarantine/`。daemon 告警。挪失败则结果是 `Unknown`，仍然告警。不在这种影子仓库上跑 `git gc`、`git worktree prune` 或会触发 auto-maintenance 的 `git commit`（「A symlinked worktrees/<n> is quarantined, never kept」及其 amended 条）。
-8. 持锁超过 30 秒就在 `status` 里写出谁持着哪把锁、从什么时候起（「Waits after a call's first visible write are not bounded」）。
+8. 持锁超过 30 秒就在 `status` 里写出谁持着哪把锁、从什么时候起（「Waits after a call's first visible write are not bounded」）。后台持有者，以及有移动、依赖铺开、建 base 或建会话在跑的持有者，门槛是 30 分钟（`BACKGROUND_HOLD_MAX`，见 Status bar fields）。
 9. launchd 没有用户的 PATH。`install` 和 `checks` 用本文写明的 PATH：`HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` [我的决定 D1]。`HOME/.bun/bin` 是真机安装时补的：这台机器的 bun 由 bun 自己的安装脚本装在 `~/.bun/bin`，不在 Homebrew，缺了它第一次 `new` 就在 admin 的 `bun install` 上报 `NoSuchPath`（每个会话都要给全部兄弟仓库备依赖）[实现时补的决定]。
 10. 确认：daemon 不查 TTY。它核对凭据的 action 与这次请求一致，并且 confirm 说它还没用过、没过期。不符 → `NotConfirmed`。`require_tty` 是 cli 的（「T12 confirm」、confirm.md §5.1）。
 11. 钉住的 `deploy_on_push` / `publish.confirm` / `publish.push` 写在配置目录的文件里，不写进 store（Addendum 5 的 T13 条）。调松要 `Action::ConfigRelax { repo: RepoId }`，该变体由 Task 15 加进 types.md，本文不定义。
@@ -128,7 +128,7 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice, "shown"?: CommitOid \| null }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
 | `config_reload` | `{}` | ReloadReport，见 Config catalog and reload |
 | `config_relax` | `{ "repo": RepoName, "shown"?: PinnedFlags \| null }` | `{pins_meta, warnings?}`。`shown` 在反序列化时可省略或为 null，但 handler 会以 `InvalidInput shown_required` 拒绝；支持 `config.reload` 的客户端必须发送展示的 flags。没有凭据字段。见 §5.5 |
-| `daemon_status` | `{ "verify": bool }` | `holds`, `queues:[{session,holder,since,queued}]`, `repo_waiting`, `warnings`（含 LongWait）, `features`, `sessions_audit_error`（会话审计写入失败信息或 null；见下文 sidecar 说明）；见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc` |
+| `daemon_status` | `{ "verify": bool }` | `holds`, `queues:[{session,holder,since,queued}]`, `repo_waiting`, `warnings`（含 LongWait）, `features`, `sessions_audit_error`（会话审计写入失败信息或 null；见下文 sidecar 说明）；见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc`。状态栏字段 `version`、`pid`、`started`、`activity`、`busy`、`volume`、`scan`（feature `daemon_status.activity`）见 Status bar fields |
 | `du` | `{ "refresh": bool }`（缺省 false） | 见 §5.12 |
 | `ports_ensure` | `{ "session": SessionId, "repo": RepoName }` | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
 | `ports_reassign` | `{ "session": SessionId, "repo": RepoName, "checked": u16 \| null }`（`checked`：cli 查过监听的那个 base，`null` 或缺省 = 它没看到租约；与事务里的租约不同时 `Busy lease_changed`，什么都不动） | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
@@ -424,11 +424,11 @@ value; workers should use the accessor for subsequent passes.
 
 组装：`session::status`（或 `all`）的 `SessionStatus`，加上 `overlay::compute` 在读时算出的 `changed`（session §2 第 5 条，daemon 照做）、`Tracker::warnings`、`leftovers`、`deps::attempts`、`open_proposals`、每个 repo 的 `publish_chain`（Rewound / Diverged 时带上 a..c；只在 `chains: true` 时算，否则回复里**没有** `chains` 键，不是 `{}`——缺键是「没算」，`{}` 是「算了但没有」。status-perf D2：CLI 从不发 `chains`；GUI 只在会话详情里发。旧 daemon 不认识 `chains`，以 RPC `Failed`「unknown field `chains`」拒绝，GUI 见到这一种拒绝就去掉它重发一次）。健康 `Unknown` 的工作区带上两个选择：`Abandon` 与 `Accept`，不执行。`OldTreeKept.holders` 原样带上。restore 暂存目录非空时，session 的 `RestoreScene` 已经含 `plan.json` 的路径，不另造。
 
-再加上 §3 的 `DaemonWarning`：隔离、attach、超过 30 秒的 `LongHold`、`UnknownPublish`、`PublishRunning`、`ConfigRelaxPending`、`ConfigReloadFailed`、`ConfigRestartRequired`、`CatalogGrowth`、`StorePoisoned`。持锁不到 30 秒的不进 `status`（进 `daemon_status`）。重载成功（含 unchanged）清除 `ConfigReloadFailed` 与 `ConfigRestartRequired`；`CatalogGrowth` 保留最新计数，只提示一次。
+再加上 §3 的 `DaemonWarning`：隔离、attach、超过门槛（请求 30 秒，后台与长活动 30 分钟，见 Status bar fields）的 `LongHold`、`UnknownPublish`、`PublishRunning`、`ConfigRelaxPending`、`ConfigReloadFailed`、`ConfigRestartRequired`、`CatalogGrowth`、`StorePoisoned`。持锁不到门槛的不进 `status`（进 `daemon_status`）。重载成功（含 unchanged）清除 `ConfigReloadFailed` 与 `ConfigRestartRequired`；`CatalogGrowth` 保留最新计数，只提示一次。
 
 `ObserveFailed` 不在 `DaemonWarning` 里重定义。它是 `NewWarning` 或这次 RPC 的 `data.warnings`。
 
-`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload"]`（D38、D39；`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload）；没有这个键的 daemon 一个也不支持。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
+`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity"]`（D38、D39；`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload）；没有这个键的 daemon 一个也不支持。最后一项 `daemon_status.activity` 不是请求扩展，而是回复能力：这个 daemon 的 `daemon_status` 带状态栏字段，见 Status bar fields。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
 
 stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看见某个影子仓库的 `PrePushGuardDisabled`。同一条不重复打。这些警告 JSON 里都有，不靠人去翻日志；R2 activity-scope 的 once-per-repo 日志提示是下文注明的例外。
 
@@ -570,7 +570,7 @@ R2 old-tree worker: startup/periodic half-retired sweeps and queued items use tr
 
 **缓存**。`<root>/daemon/du/cache.json`（原子写：临时文件加改名），每个单元记 inode、mtime（ns）、`as_of_ms`（开始量的时刻）、`took_ms`。schema 钉死（`user_version = 1`），所以不进 store.db，放旁车文件 [实现时补的决定]。新鲜的判定：store.db* 每次调用当场量（Live，便宜）；其余单元 inode 或 mtime 变了、或超过 TTL 就过期。TTL：不可变的（`bases`、`deps` 下不以 `.` 开头的快照、blob 分片、trash 条目）24 h，可变的（`store/tmp`、会话、点目录）10 min。目录的 mtime 只反映直接条目，深处的改动要靠 TTL 兜底，所以会话的数字最多旧 10 分钟。
 
-**回复**。`du` 只读缓存、立即返回（目标约 1 s）：每个分组的数字带 `as_of`（参与的单元里最旧的那个）、`units`、`stale`、`pending`、`complete`。过期与缺失的单元排进队列，由后台线程（`strata-du`，4 个工作线程，`setiopolicy_np` 设 utility 级 I/O）量完写回缓存；`refresh: true` 把全部单元排进去。`scan` 报 `running`、`started`、`done`、`queued`、`full`、`failed`、`last_full`。
+**回复**。`du` 只读缓存、立即返回（目标约 1 s）：每个分组的数字带 `as_of`（参与的单元里最旧的那个）、`units`、`stale`、`pending`、`complete`。过期与缺失的单元排进队列，由后台线程（`strata-du`，4 个工作线程，`setiopolicy_np` 设 utility 级 I/O）量完写回缓存；`refresh: true` 把全部单元排进去。`scan` 报 `running`、`started`、`active`（正在量的单元数）、`done`、`queued`、`full`、`failed`、`unresolved`、`last_full`。`failed` 是历史（每次失败一条）；`unresolved` 每个单元至多一条 `{unit, error, at}`（最近一次的错误），该单元量成功或不再存在时删掉。
 
 **trash**。`store.trash` 另带 `entries`、`eligible{entries, reclaim_min, reclaim_max}`（名字里的时刻早于 1 h 的条目；min 是 private 之和，max 是 allocated 之和）、`young`、`floor_secs`、`gc: "git-strata gc"`。`gc_trash` 还会拒绝被点名的条目，`du` 不算这一项，所以 eligible 是上界。
 
@@ -594,8 +594,8 @@ design §8 的数字落在 overlay 与 session 上。daemon 加的约束：check
 | 参数坏、缺 id、未知字段 | RPC `Failed` | 无 | — |
 | 一行超过 16 MiB | `TooLarge` | 无 | 缩小请求 |
 | 第二个进程 | `Exists`（reason `daemon_running`），进程退出 | 无 | 用已在跑的那个 |
-| 写前等锁或等队列超时 | `Busy` | 无 | 重试 |
-| 写后等锁或等队列 | 一直等；超过 30 秒 status 点名持有者 | 已写的留下 | 人看 status |
+| 写前等锁或等队列超时 | `Busy`（计入 `daemon_status.busy`） | 无 | 重试 |
+| 写后等锁或等队列 | 一直等；持有者超过门槛（请求 30 秒，后台与长活动 30 分钟）status 点名它 | 已写的留下 | 人看 status |
 | 会话正在做 checkpoint | 排队，不取消 | 无新的，直到轮到 | 做完再跑 |
 | 凭据不符、用过、过期、action 不对 | `NotConfirmed` | 无 | 重新确认 |
 | 要确认的推送，链顶在弹框之后变了 | `NotConfirmed` | 无 | 重新确认 |
@@ -1291,3 +1291,80 @@ live overlay is nonempty. A historical checkpoint on an old base or containing
 reverted edits does not make the current tree unpublished. Cold/reset trackers
 remain conservatively unpublished until scanned; the Stop hook keeps its existing
 `unwrap_or(true)` rule.
+
+## Status bar fields (P-b)
+
+`daemon_status.features` ends with `daemon_status.activity`. Unlike the strings
+before it, it announces a reply capability, not a request extension: a daemon
+that lists it sends every key below on every `daemon_status` reply (empty or
+null where stated), and a client treats the reply as one of this step only when
+the string is present. No method and no request field were added, and no CLI
+command requires the feature. Timestamps are RFC 3339 strings
+(`strata_types::serde_rfc3339`); durations are integer milliseconds from a
+monotonic clock. Every key is read from memory (a cache, counters or the
+activity registry), never from the file system or the store, and none waits for
+`du`'s `scan` or `cache` mutex.
+
+- `version` (string) is the daemon crate's `CARGO_PKG_VERSION`, `pid` (number)
+  its process id, `started` (string) the time this process started
+  (`Core.started`).
+- `activity` (array, oldest first, `[]` when idle) is the long work in flight.
+  Each item is `{id, kind, origin: "request"|"background", repo, session,
+  started, elapsed_ms, step_elapsed_ms}` plus the fields of its kind: `move`
+  (`cause`: `catch_up`, `publish`, `sync`, `deps` or `replay`; `phase`:
+  `checkpoint`, `prepare`, `recheck`, `swap`, `pin`, `record`, `old_tree` or
+  null), `deps_rollout` (`sessions` in total and `done`; `session` is the child
+  being moved, or null), `base_build` (`tree`), `session_create` (`repos`,
+  `step`; `repo` is null and `session` stays null until the id is minted),
+  `deps_install` (`proposal`), `publish` and `push`. For a kind without steps
+  `step_elapsed_ms` equals `elapsed_ms`.
+- `holds[]` items gain `origin` and `elapsed_ms`. Their `session` is the subject
+  the holder works on when it names one (a catch-up move names the session it
+  moves), else the request's session as before.
+- `LongHold` gains optional `origin` and `session`; older payloads without them
+  still parse. A request holder, publish and push included, raises it after
+  30 s as before. A background holder raises it after `BACKGROUND_HOLD_MAX`
+  (30 min), and so does a holder with a `move`, `deps_rollout`, `base_build` or
+  `session_create` on the held repo in flight, measured by that activity's
+  `step_elapsed_ms`: one slow step raises it, a long rollout of quick moves does
+  not. On a daemon with this feature every `LongHold` is therefore abnormal.
+- `busy` is `{total, recent, truncated}`: the `Busy` replies requests got.
+  `Server::handle` records a reply whose code is `Busy` and whose
+  `detail.reason` is `lock_wait` or `du_cancel_timeout`; other `Busy` reasons
+  (`reentrant`, `lease_changed`, `pins_tightened` …) are not counted. A
+  `recent` entry is `{at, method, session, reason, scope: {repo?, session?},
+  holder, holder_session}`. `method` and `session` are the refused request's;
+  `scope` is the lock it waited for (`detail.lock`, else the error's `repo` and
+  `session`, else the one session of a `du_cancel_timeout`); `holder` and
+  `holder_session` come from the error's detail, null when it has none.
+  `recent` keeps the last 50 replies younger than 10 min, oldest first, and
+  `truncated` says the ring dropped one younger than that; `total` counts since
+  start. A reply is counted when its handler returns, so it stays visible after
+  the hold that caused it is gone.
+- `volume` is `{free, size, as_of}` in bytes, or null before the first
+  successful sample and after a failed one. A detached thread (`strata-volume`)
+  samples the data root's file system with `strata_apfs::volume_space`
+  (apfs.md) at start and every 10 s; `as_of` is the sample's time. On APFS both
+  figures are the whole container's, which its volumes share: `free` leaves out
+  purgeable space, so it is below what Finder calls available, and
+  `size - free` is not what git-strata uses.
+- `scan` is `{running, active, queued, done, full, unresolved_n}`, the size scan
+  of §5.12, from counters the scan updates each time it changes its state.
+  `active` is the units being measured, `unresolved_n` the length of `du`'s
+  `scan.unresolved`.
+
+`du`'s `scan` gains `active` and `unresolved` (§5.12). `unresolved` holds one
+`{unit, error, at}` per unit whose last measurement failed and drops it when the
+unit is measured or disappears; `failed` stays the history of every failure.
+
+`git-strata daemon status` copies `activity`, `busy`, `volume`, `scan`,
+`version`, `pid` and `started` into `data` when the daemon sent them, and
+leaves them out against an older daemon.
+
+Code: `busy.rs` (`BusyLog`, a leaf mutex taken after the handler has returned),
+`volume.rs` (`Volume`; dropping `Core.volume` stops the thread), the `Counts` of
+`du.rs` (copied while the `scan` mutex is held, so each counter follows the
+scan's changes in order; a reader may see the six a moment apart). Tests: `tests/status_bar.rs`, `busy::tests`, `volume::tests`,
+`du::tests::counts_mirror_the_scan_state`,
+`du::tests::unresolved_is_one_entry_per_unit_until_measured_or_gone` and
+`tests/rpc.rs::features_keep_their_order_and_append_daemon_status_activity`.

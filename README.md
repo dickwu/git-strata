@@ -99,7 +99,7 @@ plist; installing it is a human step. Its content (from
 
 | Command | What it does | Result |
 | --- | --- | --- |
-| `git-strata daemon status` | Asks the socket; never fails for a down daemon or missing config | `{running, socket, session?, holders:[], unknown_publishes:[], alerts:[], config?:{generation,hash,loaded_at,last_attempt,restart_required}}` |
+| `git-strata daemon status` | Asks the socket; never fails for a down daemon or missing config | `{running, socket, session?, holders:[], unknown_publishes:[], alerts:[], config?:{generation,hash,loaded_at,last_attempt,restart_required}, version?, pid?, started?, activity?, busy?, volume?, scan?}` |
 | `git-strata daemon start` | `launchctl bootstrap gui/<uid> <plist>` | `{}`; `{already:true}` if loaded; `InvalidInput` `no_plist` if the plist is missing; `foreign_home` / `foreign_agent` (below) |
 | `git-strata daemon stop` | `launchctl bootout`, then waits up to 10 s until launchd drops the agent | `{}`; `Unknown` `launchctl` (`step: bootout_wait`) on timeout; `foreign_home` / `foreign_agent` (below) |
 
@@ -108,6 +108,33 @@ when the daemon is down or an older daemon omits it. `generation`, `hash` and
 `loaded_at` describe the active catalog. `last_attempt` is null before any reload
 attempt, then contains the reload report plus `at` and, on rejection, `reason`;
 `restart_required` lists restart-only fields from that attempt.
+
+A daemon whose `features` include `daemon_status.activity` also sends these
+fields, and `daemon status` copies them the same way (absent when the daemon is
+down or older). They are read from memory, so they never slow the reply:
+
+- `version`, `pid`, `started`: which daemon answered and since when (RFC 3339).
+- `activity`: long work in flight, oldest first (`[]` when idle). Each item has
+  `kind` (`move`, `deps_rollout`, `base_build`, `session_create`,
+  `deps_install`, `publish`, `push`), `origin` (`request` or `background`),
+  `repo`, `session`, `started`, `elapsed_ms`, `step_elapsed_ms`, plus fields of
+  its kind (a move's `cause` and `phase`, a rollout's `sessions` and `done`).
+- `busy`: `{total, recent, truncated}`, the `Busy` replies requests got because
+  a lock or a size scan was slow to let go (`reason` `lock_wait` or
+  `du_cancel_timeout`). `recent` keeps the last 50 of the past 10 minutes,
+  oldest first, each `{at, method, session, reason, scope, holder,
+  holder_session}`; `total` counts since the daemon started.
+- `volume`: `{free, size, as_of}` in bytes for the volume holding the data
+  root, sampled every 10 s; null until a sample succeeds or after one fails. On
+  APFS these are the whole container's figures, and `free` leaves out purgeable
+  space, so it reads lower than Finder's "available".
+- `scan`: the size scan's counts `{running, active, queued, done, full,
+  unresolved_n}` (see [Disk usage](#disk-usage-du)).
+
+A lock held past its threshold shows as a `LongHold` alert: 30 s for a request,
+30 min for background work and for a holder whose move, rollout, base build or
+session creation is in flight (measured per step). It names the holder's
+`method`, `repo`, `since`, `origin` and `session`.
 
 `start` / `stop` use launchd, not the socket, and are for the human only:
 agents never run them (or `launchctl`). Because the `gui/<uid>` domain is per
@@ -902,6 +929,13 @@ a second; `git-strata du --refresh` re-sizes everything in the background
 (poll `du` until `data.scan.running` is false). Every figure carries `as_of`
 (when it was measured) plus `stale` / `pending` unit counts. Read-only; needs
 the daemon.
+
+`data.scan` reports the background pass: `running`, `started`, `active` (units
+being measured now), `done`, `queued`, `full`, `last_full`, `failed` (every
+failed measurement) and `unresolved` (one `{unit, error, at}` per unit whose
+last measurement failed, dropped once that unit is measured or gone).
+`daemon status` carries `running`, `active`, `queued`, `done`, `full` and
+`unresolved_n` (the length of `unresolved`) as `data.scan`.
 
 Groups: `store` (`db` = store.db + -wal/-shm, sized every call; `blobs`, `tmp`,
 `trash`, `other`), `bases.repos.<repo>`, `deps.repos.<repo>`,
