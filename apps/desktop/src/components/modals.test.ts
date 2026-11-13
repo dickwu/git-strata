@@ -5,9 +5,10 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { QueryClient, QueryClientProvider, type UseQueryResult } from '@tanstack/react-query';
 import { bytes } from '@/lib/copy';
+import { daemonCopy } from '@/lib/daemonCopy';
 import { pollPlan } from '@/lib/poll';
 import type { Chip, WarningView } from '@/lib/statusBar';
-import type { DaemonStatus, DuReply } from '@/lib/types';
+import type { DaemonStatus, DuReply, StatusReply } from '@/lib/types';
 import { DaemonScreen } from './DaemonScreen';
 import {
   DaemonStatusContent,
@@ -15,6 +16,7 @@ import {
   type DaemonModalSection,
   type DaemonStatusContentProps,
 } from './DaemonStatusModal';
+import { errorText } from './ErrorNote';
 
 const dir = import.meta.dir;
 
@@ -112,6 +114,65 @@ const content = (p: Partial<DaemonStatusContentProps> = {}) =>
 /** What shows before anything is expanded: the markup without its <details> blocks. */
 const shown = (html: string) => html.replace(/<details[\s\S]*?<\/details>/g, '');
 
+/** Text as React writes it into markup. */
+const esc = (s: string) =>
+  s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+
+/** The chip sections in document order. */
+const sectionsIn = (html: string) => [...html.matchAll(/data-section="(\w+)"/g)].map((m) => m[1]);
+
+const TIMEOUT = {
+  code: 'Unavailable',
+  message: 'timed out',
+  detail: { reason: 'daemon_timeout', seconds: 10 },
+};
+
+/** The daemon_status query after polls stopped answering: react-query keeps the last reply. */
+const notAnswering = (data: DaemonStatus) =>
+  ({
+    ...answered(data),
+    isSuccess: false,
+    isError: true,
+    error: TIMEOUT,
+  }) as unknown as UseQueryResult<DaemonStatus>;
+
+/**
+ * Two live sessions, one of them with files that reported no APFS private size (du
+ * `exact: false`): their sum and the data root's total are inexact too (du.rs `Agg::merge`).
+ */
+const inexactDu = (): DuReply => {
+  const du = incidentDu();
+  const row = (session: string, logical: number, priv: number, exact: boolean) => ({
+    ...du.sessions!.list[0],
+    session,
+    logical,
+    allocated: logical,
+    private: priv,
+    savings: logical - priv,
+    exact,
+  });
+  return {
+    ...du,
+    total: { ...du.total, exact: false },
+    sessions: {
+      all: { ...du.sessions!.all, logical: 350 * GiB, private: 150 * GiB, exact: false },
+      list: [
+        row('s-inexact', 250 * GiB, 130 * GiB, false),
+        row('s-exact', 100 * GiB, 20 * GiB, true),
+      ],
+    },
+    savings: {
+      live: { ...du.savings!.live, logical: 350 * GiB, private: 150 * GiB, savings: 200 * GiB },
+      cumulative: { ...du.savings!.cumulative, sessions: 9, savings: 500 * GiB },
+    },
+  } as DuReply;
+};
+
 describe('daemon modal content', () => {
   test('incident: nothing red; raw JSON and allocated bytes only behind Details', () => {
     const html = content();
@@ -194,6 +255,113 @@ describe('daemon modal content', () => {
     expect(html).not.toContain('data-section="activity"');
     expect(html).not.toContain('git-strata alone holds');
   });
+
+  // Codex impl-r1 B3: with exact false, allocated sizes stood in for private ones, so "held
+  // alone (at least)" can overstate and "up to X saved" understate: no bound is shown.
+  test('inexact sessions: no "at least" or "up to" figure the sizes cannot support', () => {
+    const html = content({ du: answered(inexactDu()) });
+    const s = daemonCopy.savings;
+    expect(html).toContain(s.liveUnavailable(2));
+    expect(html).toContain(s.heldAloneUnavailable(bytes(350 * GiB)));
+    expect(html).toMatch(/Saved across 9 sessions recorded since [^<]*: unavailable/);
+    expect(html).toContain(esc(s.inexact));
+    expect(html).not.toMatch(/held only by the sessions \(at least\)/i);
+    expect(html).not.toMatch(/>Up to<|Up to [\d.]+ [KMGT]?B saved/);
+    // The live bounds, the inexact session's and the cumulative one appear nowhere.
+    for (const n of [150, 200, 130, 120, 500]) expect(html).not.toContain(bytes(n * GiB));
+    // Per session: the exact one keeps both bounds; the inexact one says unavailable twice.
+    const row = (id: string) =>
+      html.match(new RegExp(`<tr[^>]*data-row-key="${id}"[\\s\\S]*?</tr>`))?.[0] ?? '';
+    expect(row('s-exact')).toContain(bytes(20 * GiB));
+    expect(row('s-exact')).toContain(bytes(80 * GiB));
+    expect(row('s-inexact')).toContain(bytes(250 * GiB)); // full size is exact either way
+    expect(row('s-inexact').match(/>unavailable</g)).toHaveLength(2);
+    // Exact rows first: the inexact one has no saving to rank by.
+    expect(html.indexOf('data-row-key="s-exact"')).toBeLessThan(
+      html.indexOf('data-row-key="s-inexact"')
+    );
+    // Storage says the same: the total is unavailable, not a lower bound.
+    expect(html).toContain(daemonCopy.storage.headlineUnavailable);
+    expect(html).not.toContain('git-strata alone holds at least');
+  });
+
+  test('exact sessions keep their bounds and no inexact note', () => {
+    const html = content();
+    expect(html).toMatch(/>Up to</);
+    expect(html).toMatch(/Up to [\d.]+ [KMGT]?B saved across/);
+    expect(html).toMatch(/held only by the sessions \(at least\)/);
+    expect(html).not.toContain(esc(daemonCopy.savings.inexact));
+    expect(html).not.toContain('>unavailable<');
+  });
+
+  test('leftover directories: the count from status{all}, a dash before it answers', () => {
+    const cell = (html: string) =>
+      html
+        .match(/Leftover directories<\/span>[\s\S]*?<td[^>]*>([\s\S]*?)<\/td>/)?.[1]
+        .replace(/<[^>]+>/g, '');
+    const all = fixture<StatusReply>('status_all');
+    const leftovers = [
+      { kind: 'RemovedSession', session: 's-old', path: '/x/sessions/s-old' },
+      { kind: 'BaseStaging', repo: 'tool', path: '/x/bases/tool/.staging/ab', export_temps: [] },
+    ];
+    expect(cell(content({ sessions: { ...all, leftovers } }))).toBe('2');
+    expect(cell(content({ sessions: all }))).toBe('0');
+    expect(cell(content())).toBe('—');
+  });
+});
+
+// Claude impl-r1 NB10 / Codex NB2: a chip opens the modal at a section (statusBar.ts
+// `ChipTarget`). The scroll itself is `sectionLanding` (daemonPanel.test.ts); here, the
+// sections it lands on.
+describe('daemon modal sections', () => {
+  const quiet = () => answered(fixture<DaemonStatus>('daemon_status'));
+  const chip = (section: DaemonModalSection, text = 'chip'): Chip => ({
+    id: section,
+    sev: 'amber',
+    rank: 4,
+    text,
+    target: { kind: 'modal', section },
+  });
+
+  test('Now comes first, then every section a chip can target, in order', () => {
+    const html = content({ chips: [chip('activity')], section: 'activity' });
+    expect(sectionsIn(html)).toEqual(SECTIONS);
+    expect(html.indexOf('>Now<')).toBeGreaterThan(-1);
+    expect(html.indexOf('>Now<')).toBeLessThan(html.indexOf('data-section='));
+  });
+
+  test('warnings[] not empty: the Warnings section is there, whatever the entries are', () => {
+    const lists: unknown[][] = [
+      ['StorePoisoned'],
+      [{ FetchFailed: { repo: 'tool' } }],
+      [{ LongHold: { repo: 'tool', method: 'catch_up', since } }],
+      [{ LongHold: { repo: 'web', method: 'publish', since } }],
+      [{ FutureVariant: {} }],
+      ['plain', null],
+    ];
+    for (const warnings of lists) {
+      const status = answered({ ...fixture<DaemonStatus>('daemon_status'), warnings });
+      expect(sectionsIn(content({ status, section: 'warnings' }))).toContain('warnings');
+    }
+    expect(sectionsIn(content({ status: quiet(), section: 'warnings' }))).not.toContain('warnings');
+  });
+
+  test('an activity warning alone still gives the activity chip its section', () => {
+    // Warnings, holds and queues are sampled at different moments (design §11.3).
+    const status = answered({ ...incidentStatus(), holds: [], queues: [], repo_waiting: {} });
+    const html = content({ status, section: 'activity' });
+    expect(sectionsIn(html)).toContain('activity');
+    expect(html).toContain(esc(daemonCopy.activity.background));
+    expect(html).not.toContain(daemonCopy.activity.holds);
+  });
+
+  test('a chip whose section is not there opens at the top: the Now list, no error', () => {
+    const chips = [chip('warnings', 'Only in the Now list'), chip('activity')];
+    const html = content({ status: quiet(), chips, section: 'warnings' });
+    expect(sectionsIn(html)).toEqual(['storage', 'scan', 'daemon']);
+    expect(html).toContain('Only in the Now list');
+    expect(html.indexOf('>Now<')).toBeLessThan(html.indexOf('data-section='));
+  });
 });
 
 describe('warning list', () => {
@@ -245,26 +413,45 @@ describe('warning list', () => {
 });
 
 describe('daemon screen', () => {
-  test('incident: storage as the private bound, the LongHold as one plain line', () => {
+  const screen = (status: UseQueryResult<DaemonStatus>) => {
     const client = new QueryClient();
     client.setQueryData(['du'], incidentDu());
     client.setQueryData(['socket'], '/tmp/daemon.sock');
-    const html = renderToStaticMarkup(
+    return renderToStaticMarkup(
       createElement(
         QueryClientProvider,
         { client },
         createElement(DaemonScreen, {
-          status: answered(incidentStatus()),
+          status,
           plan: { ...pollPlan({ visible: true, up: true, legacy: true }), du: false },
           onBack: () => {},
         })
       )
     );
+  };
+
+  test('incident: storage as the private bound, the LongHold as one plain line', () => {
+    const html = screen(answered(incidentStatus()));
     expect(html).toContain(`git-strata alone holds at least ${bytes(43 * GiB)}`);
     expect(html).not.toContain(bytes(67e12));
     expect(html).not.toMatch(/on disk/i);
     expect(html).toContain('data-kind="LongHold"');
     expect(html).not.toContain('data-sev="red"');
     expect(shown(html)).not.toContain('secs_since_epoch');
+  });
+
+  // Claude impl-r1 NB7: classified from the cached reply, the hold would keep aging and turn
+  // amber at 30 min while the daemon is not answering (the modal already guarded this).
+  test('daemon not answering: nothing classified or aged from the cached reply', () => {
+    const html = screen(notAnswering(incidentStatus()));
+    expect(html).toContain(esc(errorText(TIMEOUT).title));
+    expect(html).not.toContain('data-kind=');
+    expect(html).not.toContain('data-sev=');
+    expect(html).not.toContain('git-strata alone holds');
+    expect(html).not.toContain('<span class="mono">tool</span>'); // repo_waiting {tool: 2}
+    // The same reply, answered: warnings, waiting and storage are back.
+    const live = screen(answered(incidentStatus()));
+    expect(live).toContain('data-kind="LongHold"');
+    expect(live).toContain('<span class="mono">tool</span>');
   });
 });

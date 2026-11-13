@@ -73,6 +73,11 @@
 .heroPre {
   color: var(--text-muted);
 }
+/* In place of the figure when its bound does not hold (du `exact: false`). */
+.heroNone {
+  font-size: 14px;
+  color: var(--text-muted);
+}
 .asOf {
   margin: 0 0 6px;
   font-size: 12px;

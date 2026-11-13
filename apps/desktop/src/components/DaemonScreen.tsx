@@ -5,7 +5,7 @@ import { ArrowLeftOutlined } from '@ant-design/icons';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { useNow } from '@/hooks/useNow';
 import { copy } from '@/lib/copy';
-import { storageView } from '@/lib/daemonPanel';
+import { isLive, storageView } from '@/lib/daemonPanel';
 import { useDu, useSocket } from '@/lib/queries';
 import type { PollPlan } from '@/lib/poll';
 import type { DaemonStatus } from '@/lib/types';
@@ -31,8 +31,11 @@ export function DaemonScreen({
   const du = useDu(plan.du);
   // Warning severity and text depend on how long a hold has run (status bar ticker cadence).
   const now = useNow(5_000);
-  const v = status.data ? daemonView(status.data, now) : null;
-  const storage = storageView(du.data);
+  // Only from a live answer, as in the modal: classified from a cached reply, a hold would keep
+  // aging (a LongHold turning amber at 30 min) while the daemon is not answering.
+  const live = isLive(status);
+  const v = live && status.data ? daemonView(status.data, now) : null;
+  const storage = live ? storageView(du.data) : null;
   return (
     <>
       <div className="toolbar">

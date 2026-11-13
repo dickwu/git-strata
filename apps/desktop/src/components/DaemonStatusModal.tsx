@@ -10,10 +10,12 @@ import {
   age,
   count,
   duration,
+  isLive,
   rawJson,
   savingsView,
   scanText,
   scanView,
+  sectionLanding,
   statusFacts,
   storageView,
   times,
@@ -37,9 +39,6 @@ export type DaemonModalSection = Extract<ChipTarget, { kind: 'modal' }>['section
 
 /** Session id → ticket (agent text: plain text only). */
 type Tickets = ReadonlyMap<string, string>;
-
-const isLive = (status: UseQueryResult<DaemonStatus>) =>
-  status.isSuccess || (status.data !== undefined && !status.isError);
 
 const ticketsOf = (sessions: StatusReply | undefined): Tickets =>
   new Map(
@@ -72,27 +71,12 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 }
 
 /**
- * A place a chip can open the modal at. Targeted, it scrolls the modal body (its parent, the
- * positioned scroll box) to itself when it mounts: offsetTop ignores the dialog's zoom-in
- * transform, and nothing outside the body scrolls.
+ * A place a chip can open the modal at: a direct child of the modal body (the positioned scroll
+ * box), which scrolls to it (`DaemonStatusContent`).
  */
-function Target({
-  name,
-  focus,
-  children,
-}: {
-  name: DaemonModalSection;
-  focus: boolean;
-  children: ReactNode;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    const box = el?.parentElement;
-    if (focus && el && box) box.scrollTop = el.offsetTop;
-  }, [focus]);
+function Target({ name, children }: { name: DaemonModalSection; children: ReactNode }) {
   return (
-    <div ref={ref} data-section={name} className={css.target}>
+    <div data-section={name} className={css.target}>
       {children}
     </div>
   );
@@ -146,8 +130,20 @@ export function WarningList({ items }: { items: readonly WarningView[] }) {
   );
 }
 
-/** Repo locks and session queues as plain facts; the daemon's own work is named, not flagged. */
-export function ActivityBlock({ v, tickets }: { v: ActivityView; tickets: Tickets }) {
+/**
+ * Repo locks and session queues as plain facts; the daemon's own work is named, not flagged.
+ * `daemonWork`: a warning says the daemon is at work (an activity chip's source), which the
+ * locks, sampled at another moment, may no longer show.
+ */
+export function ActivityBlock({
+  v,
+  tickets,
+  daemonWork = false,
+}: {
+  v: ActivityView;
+  tickets: Tickets;
+  daemonWork?: boolean;
+}) {
   const a = t.activity;
   const c = a.columns;
   const elapsed = (ms: number | null) => (ms === null ? a.none : duration(ms));
@@ -212,7 +208,7 @@ export function ActivityBlock({ v, tickets }: { v: ActivityView; tickets: Ticket
           {a.waiting(v.waiting.map((w) => a.waitingRepo(w.repo, w.n)).join(', '))}
         </p>
       )}
-      {[...v.holds, ...v.queues].some((r) => r.background) && (
+      {(daemonWork || [...v.holds, ...v.queues].some((r) => r.background)) && (
         <p className={css.formula}>{a.background}</p>
       )}
     </div>
@@ -331,6 +327,13 @@ function Savings({ v, tickets }: { v: SavingsView; tickets: Tickets }) {
     v.live.asOf ? s.asOf(when(v.live.asOf)) : null,
     v.live.complete ? null : s.measuringMark,
   ].filter((p) => p !== null);
+  const since = when(v.cumulative.since);
+  // A row whose figures are inexact has neither bound (daemonPanel.ts, Accuracy).
+  const unavailable = (
+    <Tooltip title={s.inexactRow} placement="topRight">
+      <span className="muted">{t.storage.unavailable}</span>
+    </Tooltip>
+  );
   return (
     <section className={css.savings} aria-labelledby="savings-h">
       <h2 id="savings-h" className={css.h}>
@@ -338,19 +341,32 @@ function Savings({ v, tickets }: { v: SavingsView; tickets: Tickets }) {
       </h2>
       <p className={css.intro}>{s.intro}</p>
       <div className={css.hero}>
-        <span className={css.heroPre}>{s.upTo}</span>
-        <span className={css.heroNum}>{bytes(v.live.saved)}</span>
-        <span className={css.heroCap}>{s.live(v.live.sessions)}</span>
+        {v.live.saved === null ? (
+          <span className={css.heroNone}>{s.liveUnavailable(v.live.sessions)}</span>
+        ) : (
+          <>
+            <span className={css.heroPre}>{s.upTo}</span>
+            <span className={css.heroNum}>{bytes(v.live.saved)}</span>
+            <span className={css.heroCap}>{s.live(v.live.sessions)}</span>
+          </>
+        )}
       </div>
       {asOf.length > 0 && <p className={css.asOf}>{asOf.join(' ')}</p>}
       <ul className={css.facts}>
-        <li>{s.heldAlone(bytes(v.live.onDisk), bytes(v.live.logical))}</li>
+        <li>
+          {v.live.onDisk === null
+            ? s.heldAloneUnavailable(bytes(v.live.logical))
+            : s.heldAlone(bytes(v.live.onDisk), bytes(v.live.logical))}
+        </li>
         {v.live.files !== null && <li>{s.files(count(v.live.files))}</li>}
         <li>
-          {s.cumulative(bytes(v.cumulative.saved), v.cumulative.sessions, when(v.cumulative.since))}
+          {v.cumulative.saved === null
+            ? s.cumulativeUnavailable(v.cumulative.sessions, since)
+            : s.cumulative(bytes(v.cumulative.saved), v.cumulative.sessions, since)}
           {note && <span className="muted"> ({note})</span>}
         </li>
       </ul>
+      {v.inexact && <p className={css.note}>{s.inexact}</p>}
       {!v.live.complete && <p className={css.note}>{s.measuring}</p>}
 
       <h3 className={css.h3}>{s.timeHeading}</h3>
@@ -394,12 +410,18 @@ function Savings({ v, tickets }: { v: SavingsView; tickets: Tickets }) {
               render: (id: string) => <SessionName id={id} tickets={tickets} />,
             },
             { title: s.columns.logical, dataIndex: 'logical', align: 'right', render: bytes },
-            { title: s.columns.heldAlone, dataIndex: 'onDisk', align: 'right', render: bytes },
+            {
+              title: s.columns.heldAlone,
+              dataIndex: 'onDisk',
+              align: 'right',
+              render: (b: number | null) => (b === null ? unavailable : bytes(b)),
+            },
             {
               title: s.columns.saved,
               dataIndex: 'saved',
               align: 'right',
-              render: (b: number) => <strong>{bytes(b)}</strong>,
+              render: (b: number | null) =>
+                b === null ? unavailable : <strong>{bytes(b)}</strong>,
             },
             {
               title: s.columns.created,
@@ -462,18 +484,35 @@ export function DaemonStatusContent({
   const f = status.data ? statusFacts(status.data, now) : null;
   const warnings = data ? daemonView(data, now).warnings : [];
   const activity = data ? activityView(data, now) : null;
+  // An activity chip opens the Activity section, so it is there whenever a warning says the
+  // daemon is at work, even if the locks (sampled at another moment) show nothing.
+  const daemonWork = warnings.some((w) => w.cls === 'activity');
   const hasActivity = activity
-    ? activity.holds.length + activity.queues.length + activity.waiting.length > 0
+    ? daemonWork || activity.holds.length + activity.queues.length + activity.waiting.length > 0
     : false;
   const hasStorage = live && (du.data !== undefined || du.isError);
   const v = savingsView(du.data);
   const storage = live ? storageView(du.data) : null;
   const scan = live ? scanView(du.data?.scan) : null;
   const tickets = ticketsOf(sessions);
-  const focus = (name: DaemonModalSection) => section === name;
+  const leftovers = Array.isArray(sessions?.leftovers) ? sessions.leftovers.length : null;
   const st = t.status;
+  // Open at the chip's section once per opening (the modal unmounts its body on close).
+  const body = useRef<HTMLDivElement>(null);
+  const landed = useRef(false);
+  useEffect(() => {
+    const box = body.current;
+    if (landed.current || !box) return;
+    const children = Array.from(box.children, (el) => ({
+      name: (el as HTMLElement).dataset.section,
+      offsetTop: (el as HTMLElement).offsetTop,
+    }));
+    const { top, done } = sectionLanding(children, section, box.scrollTop);
+    if (top !== null) box.scrollTop = top;
+    landed.current = done;
+  });
   return (
-    <div className={css.body}>
+    <div ref={body} className={css.body}>
       {status.isError && <ErrorNote error={status.error} />}
       {chips.length > 0 && (
         <Section title={t.now.heading}>
@@ -481,21 +520,21 @@ export function DaemonStatusContent({
         </Section>
       )}
       {warnings.length > 0 && (
-        <Target name="warnings" focus={focus('warnings')}>
+        <Target name="warnings">
           <Section title={t.warnings.heading}>
             <WarningList items={warnings} />
           </Section>
         </Target>
       )}
       {activity && hasActivity && (
-        <Target name="activity" focus={focus('activity')}>
+        <Target name="activity">
           <Section title={t.activity.heading}>
-            <ActivityBlock v={activity} tickets={tickets} />
+            <ActivityBlock v={activity} tickets={tickets} daemonWork={daemonWork} />
           </Section>
         </Target>
       )}
       {hasStorage && (
-        <Target name="storage" focus={focus('storage')}>
+        <Target name="storage">
           {v && <Savings v={v} tickets={tickets} />}
           {!v && du.isSuccess && <p className={css.note}>{t.savings.unavailable}</p>}
           {du.isError && <ErrorNote error={du.error} />}
@@ -507,13 +546,13 @@ export function DaemonStatusContent({
         </Target>
       )}
       {scan && (
-        <Target name="scan" focus={focus('scan')}>
+        <Target name="scan">
           <Section title={t.scan.heading}>
             <ScanBlock v={scan} />
           </Section>
         </Target>
       )}
-      <Target name="daemon" focus={focus('daemon')}>
+      <Target name="daemon">
         <Section title={st.heading}>
           <Descriptions column={2} size="small" bordered className={css.desc}>
             <Descriptions.Item label={st.state}>
@@ -541,7 +580,16 @@ export function DaemonStatusContent({
             <Descriptions.Item label={st.sessions}>
               {sessions ? sessions.sessions.length : '—'}
             </Descriptions.Item>
-            <Descriptions.Item label={st.fds}>
+            <Descriptions.Item
+              label={
+                <Tooltip title={st.leftoversTip}>
+                  <span>{st.leftovers}</span>
+                </Tooltip>
+              }
+            >
+              {leftovers ?? '—'}
+            </Descriptions.Item>
+            <Descriptions.Item label={st.fds} span={2}>
               {f?.fds ? (
                 <span>
                   {st.fdsValue(count(f.fds.open), count(f.fds.limit))}

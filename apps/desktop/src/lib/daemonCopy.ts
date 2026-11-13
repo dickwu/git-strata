@@ -1,4 +1,7 @@
-/** Strings for the status-bar daemon trigger and its modal (gui.md §5.2: sentence case). */
+/**
+ * Strings for the daemon status modal and the Daemon screen (gui.md §5.2: sentence case). The
+ * status bar's own strings, its daemon trigger included, are in statusBarCopy.ts.
+ */
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
 /** What the daemon is doing when it holds a lock or a session queue itself. */
@@ -10,13 +13,6 @@ const DAEMON_WORK_LABEL: ReadonlyMap<string, string> = new Map([
 ]);
 
 export const daemonCopy = {
-  trigger: {
-    running: 'Daemon running',
-    offline: 'Daemon unreachable',
-    connecting: 'Connecting to daemon',
-    open: 'Show daemon status',
-    saved: (b: string) => `${b} saved`,
-  },
   modal: {
     title: 'Daemon',
     running: 'Running',
@@ -112,6 +108,17 @@ export const daemonCopy = {
     files: (n: string) => `${n} files a worktree would have written`,
     cumulative: (saved: string, n: number, since: string) =>
       `Up to ${saved} saved across ${n} ${plural(n, 'session', 'sessions')} recorded since ${since}`,
+    /** In place of a bound when the figures behind it are inexact (du `exact: false`). */
+    liveUnavailable: (n: number) =>
+      `Savings of ${n} live ${plural(n, 'session', 'sessions')}: unavailable`,
+    heldAloneUnavailable: (logical: string) =>
+      `Held only by the sessions: unavailable, for ${logical} of files`,
+    cumulativeUnavailable: (n: number, since: string) =>
+      `Saved across ${n} ${plural(n, 'session', 'sessions')} recorded since ${since}: unavailable`,
+    inexact:
+      "Some files didn't report an APFS private size, so their allocated size was counted instead. Held alone is then no lower bound and saved no upper bound, so those figures show as unavailable.",
+    inexactRow:
+      "A file in this session didn't report an APFS private size, so no bound can be given.",
     cumulativeNote: (removed: number, unsized: number) =>
       [
         removed > 0 ? `${removed} since removed` : null,
@@ -162,6 +169,9 @@ export const daemonCopy = {
     pid: 'Process ID',
     uptime: 'Uptime',
     sessions: 'Sessions',
+    leftovers: 'Leftover directories',
+    leftoversTip:
+      'Directories that belong to no session: base staging a failed base build left behind, or the directory of a removed session.',
     fds: 'File descriptors',
     fdsValue: (open: string, limit: string) => `${open} open of ${limit}`,
     acceptErrors: (n: number) => (n === 0 ? 'no accept errors' : `${n} accept errors`),
