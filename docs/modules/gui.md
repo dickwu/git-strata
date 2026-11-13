@@ -1097,8 +1097,11 @@ lists instead of aging an old hold as current work.
 Storage shows private bounds, their accuracy/measuring state and observation time; group
 figures cover sessions, bases, dependencies and store/trash. Affected bounds are unavailable
 for inexact measurements. Allocated/raw logical counts remain behind Details. Savings retain
-live and cumulative context, per-session figures and creation/copy timing where reported;
-accuracy is preserved when deciding which bounds are available. The scan section shows
+live context, per-session figures and creation/copy timing where reported; accuracy is
+preserved when deciding which bounds are available. On daemon 0.2.2 cumulative savings have
+no accuracy flag, so the modal withholds the numeric cumulative savings bound even when
+current figures are exact, while keeping recorded-session counts, removed/unmeasured counts
+and creation/copy timing. The scan section shows
 done/queued counts and historical measuring errors. The daemon section provides health,
 socket, session/hold/waiting/warning counts, reconciliation, file handles/accept errors and
 configuration facts. Optional version, pid and uptime are marked unreported when missing;
