@@ -6,18 +6,30 @@
  *
  * Step 1 (P-a) runs against a 0.2.2 daemon: no `activity[]`, `busy`, `volume`, `version`,
  * `pid` or `started`, so background work is recognised from the LongHold's own `method`
- * (§11.3) and no free-space or Busy chip exists yet.
+ * (§11.3) and no free-space or recorded-Busy chip exists yet.
  *
  * SHARED INTERFACE (landed first on feat/status-bar-states): slices implement against these
  * types. Slice A owns the bodies below and their tests; slice B renders `StatusBarModel`;
  * slice C renders `WarningView` in the modal and the Daemon screen.
  */
-import type { DaemonStatus, DepsList, DuReply, StatusReply } from './types';
+import { version as appVersion } from '../../package.json';
+import { ago, bytes } from './copy';
+import { statusBarCopy as t } from './statusBarCopy';
+import { asGuiError, isDaemonDown, reason } from './tauri';
+import type { DaemonStatus, DepsList, DuReply, StatusReply, SystemTimeJson } from './types';
+import {
+  hasUpstream,
+  repoUpstream,
+  STUCK_AFTER,
+  unavailableUpstream,
+  waitingCount,
+  waitingGroups,
+} from './view';
 
 /** Severity tokens (design §2): red = a human must act now; never red for any LongHold. */
 export type Severity = 'red' | 'amber' | 'purple' | 'blue' | 'muted';
 
-/** Display order of severities; also the chip sort's primary key (design §3.5). */
+/** Severity tie-break order after a chip's rank (design §3.5). */
 export const SEVERITY_ORDER: readonly Severity[] = ['red', 'amber', 'purple', 'blue', 'muted'];
 
 /** At most this many chips show in the bar; the rest collapse into "+N" (design §3.5). */
@@ -37,7 +49,7 @@ export interface Chip {
   id: string;
   sev: Severity;
   /**
-   * Order inside the severity band (design §3.5): 1 red, 2 amber waiting-for-you, 3 purple
+   * Display priority (design §3.5): 1 red, 2 amber waiting-for-you, 3 purple
    * conflicts, 4 amber degraded, 5 blue activity, 6 muted. Lower sorts first.
    */
   rank: 1 | 2 | 3 | 4 | 5 | 6;
@@ -97,19 +109,208 @@ export interface StatusBarModel {
   };
 }
 
-/** Classify one warning. Slice A implements; the stub keeps every warning a plain notice. */
-export function classifyWarning(w: unknown, now: number): WarningView {
-  void now;
-  const kind =
-    typeof w === 'string'
-      ? w
-      : w && typeof w === 'object'
-        ? (Object.keys(w)[0] ?? 'Warning')
-        : 'Warning';
-  return { kind, cls: 'notice', sev: 'amber', text: kind, raw: w };
+// Keep this literal list equal to Rust's warning_class Error arm (tested against its source).
+const ERROR_WARNING_KINDS: readonly string[] = [
+  'StorePoisoned',
+  'VerifyFailed',
+  'UnknownPublish',
+  'UnknownPush',
+  'Quarantine',
+  'AttachOutside',
+];
+const HEALTH_FRESH_MS = 60_000;
+const LONG_WAIT_MAX_MS = 10 * 60_000;
+const ACTIVITY_MIN_MS = 3000;
+const TRANSIENT_REBASE_REASONS = new Set([
+  'recent_writes',
+  'changed_during_move',
+  'busy',
+  'installing',
+  'waiting_install',
+]);
+
+function record(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+function string(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+function finite(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+function systemTime(value: unknown): SystemTimeJson | undefined {
+  const r = record(value);
+  const secs = finite(r.secs_since_epoch);
+  const nanos = finite(r.nanos_since_epoch);
+  return secs !== undefined &&
+    Number.isInteger(secs) &&
+    secs >= 0 &&
+    nanos !== undefined &&
+    Number.isInteger(nanos) &&
+    nanos >= 0 &&
+    nanos < 1e9
+    ? { secs_since_epoch: secs, nanos_since_epoch: nanos }
+    : undefined;
+}
+function timestamp(value: unknown): number | undefined {
+  const time = systemTime(value);
+  if (time) return time.secs_since_epoch * 1000 + time.nanos_since_epoch / 1e6;
+  const parsed = typeof value === 'string' ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+const age = (since: number, now: number) => Math.max(0, now - since);
+
+function warningParts(w: unknown): { kind: string; payload: Record<string, unknown> } {
+  const object = record(w);
+  const keys = Object.keys(object);
+  const kind = typeof w === 'string' ? w : keys.length === 1 ? keys[0] : 'Warning';
+  return { kind, payload: record(object[kind]) };
 }
 
-/** Sort by rank then severity, keep order otherwise; split at MAX_CHIPS. Slice A owns it. */
+/** Queues have no repo field; only an unambiguous holder predating this repo hold is usable. */
+function catchUpSession(
+  payload: Record<string, unknown>,
+  daemon?: DaemonStatus
+): string | undefined {
+  const holdTime = systemTime(payload.since);
+  if (!holdTime) return undefined;
+  const candidates = (daemon?.queues ?? []).filter((q) => {
+    const time = systemTime(q.since);
+    return (
+      q.holder === 'catch_up' &&
+      string(q.session) &&
+      time &&
+      (time.secs_since_epoch < holdTime.secs_since_epoch ||
+        (time.secs_since_epoch === holdTime.secs_since_epoch &&
+          time.nanos_since_epoch <= holdTime.nanos_since_epoch))
+    );
+  });
+  return candidates.length === 1 ? candidates[0].session : undefined;
+}
+
+/** Context enriches S1 only; the public two-argument classifier also works on isolated warnings. */
+function classify(w: unknown, now: number, daemon?: DaemonStatus): WarningView {
+  const { kind, payload: p } = warningParts(w);
+  const repo = string(p.repo);
+  const session = string(p.session);
+  const since = timestamp(p.since);
+  const view: WarningView = {
+    kind,
+    cls: 'notice',
+    sev: 'muted',
+    text: t.warning.unknown(kind),
+    repo,
+    session,
+    since,
+    raw: w,
+  };
+  if (ERROR_WARNING_KINDS.includes(kind)) {
+    view.cls = 'error';
+    view.sev = 'red';
+  }
+  switch (kind) {
+    case 'StorePoisoned':
+      view.text = t.warning.storePoisoned;
+      break;
+    case 'VerifyFailed':
+      view.text = t.warning.verifyFailed(string(p.message) ?? '');
+      break;
+    case 'UnknownPublish':
+      view.text = t.warning.unknownPublish(finite(p.id)?.toString() ?? '');
+      break;
+    case 'UnknownPush':
+      view.text = t.warning.unknownPush(repo ?? '');
+      break;
+    case 'Quarantine':
+      view.text = t.warning.quarantine(string(p.path) ?? '');
+      break;
+    case 'AttachOutside':
+      view.text = t.warning.attachOutside(string(p.reason) ?? '');
+      break;
+    case 'ConfigRelaxPending':
+      view.cls = 'waiting';
+      view.sev = 'amber';
+      view.text = t.warning.configRelax(repo ?? '');
+      break;
+    case 'ConfigReloadFailed':
+      view.sev = 'amber';
+      view.text = t.warning.configReload(string(p.reason) ?? '');
+      break;
+    case 'ConfigRestartRequired':
+      view.sev = 'amber';
+      view.text = t.warning.configRestart(
+        Array.isArray(p.fields) ? p.fields.filter((v): v is string => typeof v === 'string') : []
+      );
+      break;
+    case 'FetchFailed':
+    case 'AnchorNotAdvanced':
+      view.sev = 'amber';
+      view.text = t.warning.fetch(repo ?? '');
+      break;
+    case 'CatalogGrowth':
+      view.text = t.warning.catalogGrowth(finite(p.generations));
+      break;
+    case 'StaleRefLock':
+      view.text = t.warning.staleRefLock(repo ?? '');
+      break;
+    case 'PublishRunning':
+      view.text = t.warning.publishRunning;
+      break;
+    case 'LongWait': {
+      const attempt = timestamp(p.attempt_since);
+      view.since = attempt;
+      view.sev = attempt !== undefined && age(attempt, now) < LONG_WAIT_MAX_MS ? 'amber' : 'muted';
+      view.text = t.warning.longWait(
+        repo,
+        t.elapsed(attempt === undefined ? 0 : age(attempt, now))
+      );
+      break;
+    }
+    case 'AutoRebaseStuck': {
+      const transient =
+        TRANSIENT_REBASE_REASONS.has(string(p.reason) ?? '') &&
+        since !== undefined &&
+        age(since, now) < STUCK_AFTER;
+      view.cls = transient ? 'activity' : 'notice';
+      view.sev = transient ? 'blue' : 'amber';
+      view.text = t.warning.autoRebaseStuck(repo ?? '', session, string(p.reason) ?? '');
+      break;
+    }
+    case 'LongHold': {
+      const method = string(p.method);
+      if (!repo || !method || since === undefined) break;
+      const elapsedMs = age(since, now);
+      const elapsed = t.elapsed(elapsedMs);
+      const newDaemon = p.origin != null || daemon?.features?.includes('daemon_status.activity');
+      const background = ['catch_up', 'old_tree', 'periodic_fetch', 'daemon'].includes(method);
+      const normal = !newDaemon && background && elapsedMs < BACKGROUND_HOLD_MAX_MS;
+      view.cls = normal ? 'activity' : 'notice';
+      view.sev = normal ? 'blue' : 'amber';
+      view.session = session ?? (method === 'catch_up' ? catchUpSession(p, daemon) : undefined);
+      view.text =
+        newDaemon || !background
+          ? t.warning.abnormalHold(repo, method, elapsed)
+          : method === 'catch_up'
+            ? t.activity.catchUp(repo, view.session, elapsed)
+            : method === 'old_tree'
+              ? t.activity.oldTree(repo, elapsed)
+              : method === 'periodic_fetch'
+                ? t.activity.fetch(repo)
+                : t.activity.daemon(repo, elapsed);
+      break;
+    }
+  }
+  return view;
+}
+
+/** Classify an externally tagged daemon warning, including the 0.2.2 method-based fallback. */
+export function classifyWarning(w: unknown, now: number): WarningView {
+  return classify(w, now);
+}
+
+/** Sort by rank then severity, keep order otherwise; split at MAX_CHIPS. */
 export function capChips(all: Chip[]): { chips: Chip[]; overflow: Chip[] } {
   const sorted = [...all].sort(
     (a, b) => a.rank - b.rank || SEVERITY_ORDER.indexOf(a.sev) - SEVERITY_ORDER.indexOf(b.sev)
@@ -117,22 +318,296 @@ export function capChips(all: Chip[]): { chips: Chip[]; overflow: Chip[] } {
   return { chips: sorted.slice(0, MAX_CHIPS), overflow: sorted.slice(MAX_CHIPS) };
 }
 
-/** Build the bar. Slice A implements; the stub shows the daemon trigger only. */
-export function statusBarModel(input: StatusBarInput, now: number): StatusBarModel {
-  void now;
-  const up = input.daemon.error === null && input.daemon.data !== undefined;
+/** Minimal pure equivalent of ErrorNote's error title; no component/React import. */
+function errorTitle(e: unknown): string {
+  const g = asGuiError(e);
+  switch (reason(g)) {
+    case 'daemon_timeout':
+      return t.daemon.timeout(finite(record(g.detail).seconds) ?? 0);
+    case 'request_in_flight':
+      return t.daemon.busy;
+    case 'not_tauri':
+      return t.daemon.notInTauri;
+    default:
+      return g.message || t.daemon.unknownError;
+  }
+}
+
+function daemonState(
+  input: StatusBarInput['daemon'],
+  now: number
+): {
+  trigger: StatusBarModel['daemon'];
+  healthChip?: Chip;
+  fresh: boolean;
+} {
+  const chip = (
+    text: string,
+    sev: Severity,
+    state: 'pending' | 'down',
+    detail: string | null = null,
+    label = text
+  ) => ({
+    trigger: { state, label, detail },
+    healthChip: {
+      id: 'down',
+      rank: 1,
+      sev,
+      text,
+      target: { kind: 'modal', section: 'daemon' },
+    } as Chip,
+    fresh: false,
+  });
+  if (input.pending) return chip(t.daemon.connecting, 'muted', 'pending');
+  if (input.error != null) {
+    const g = asGuiError(input.error);
+    if (g.code === 'Busy') {
+      switch (reason(g)) {
+        case 'store_unavailable': {
+          const errno = record(record(record(g.detail).last_error).detail).errno;
+          const text = [1, 4, 13].includes(finite(errno) ?? -1)
+            ? t.daemon.permission
+            : t.daemon.volumeUnavailable;
+          return chip(text, 'red', 'down', text, t.daemon.offline);
+        }
+        case 'starting':
+          return chip(t.daemon.starting, 'muted', 'pending');
+        case 'too_many_open_files':
+          return chip(
+            t.daemon.fileHandlesExhausted,
+            'red',
+            'down',
+            t.daemon.fileHandlesExhausted,
+            t.daemon.offline
+          );
+      }
+    }
+    return isDaemonDown(input.error)
+      ? chip(t.daemon.notRunning, 'red', 'down')
+      : chip(t.daemon.notResponding, 'red', 'down', errorTitle(input.error));
+  }
+  if (input.data === undefined) return chip(t.daemon.connecting, 'muted', 'pending');
+  if (input.updatedAt <= 0 || age(input.updatedAt, now) > HEALTH_FRESH_MS) {
+    const text =
+      input.updatedAt > 0
+        ? t.daemon.stale(t.elapsed(age(input.updatedAt, now)))
+        : t.daemon.checking;
+    return chip(text, 'muted', 'pending', text, t.daemon.checking);
+  }
   return {
-    daemon: {
-      state: input.daemon.pending ? 'pending' : up ? 'up' : 'down',
-      label: input.daemon.pending
-        ? 'Connecting to daemon'
-        : up
-          ? 'Daemon running'
-          : 'Daemon unreachable',
-      detail: null,
+    trigger: {
+      state: 'up',
+      label: t.daemon.running,
+      detail: t.daemon.live(ago(age(input.updatedAt, now))),
     },
-    chips: [],
-    overflow: [],
-    right: { free: null, saved: null, sessions: input.sessions?.sessions.length ?? null },
+    fresh: true,
+  };
+}
+
+/** Build S1 from already-polled replies. Historical warnings never become fresh health evidence. */
+export function statusBarModel(input: StatusBarInput, now: number): StatusBarModel {
+  const health = daemonState(input.daemon, now);
+  const daemon = input.daemon.data;
+  const all: Chip[] = health.healthChip ? [health.healthChip] : [];
+  const modal = (section: 'warnings' | 'activity' | 'scan'): ChipTarget => ({
+    kind: 'modal',
+    section,
+  });
+  const waiting = waitingCount(input.sessions, input.deps, daemon, now);
+  if (waiting > 0)
+    all.push({
+      id: 'waiting',
+      rank: 2,
+      sev: 'amber',
+      text: t.waiting(waiting),
+      target: { kind: 'waiting' },
+    });
+  const conflicts = waitingGroups(input.sessions, input.deps, daemon, now).filter((g) =>
+    g.items.some((i) => i.kind === 'conflict')
+  ).length;
+  if (conflicts > 0)
+    all.push({
+      id: 'conflicts',
+      rank: 3,
+      sev: 'purple',
+      text: t.conflicts(conflicts),
+      target: { kind: 'waiting' },
+    });
+
+  if (health.fresh && daemon) {
+    const fds = daemon.fds;
+    if (fds && fds.limit > 0 && fds.open >= fds.limit * 0.9) {
+      all.push({
+        id: 'fds',
+        rank: 1,
+        sev: 'red',
+        text: t.daemon.fileHandlesLow,
+        target: modal('warnings'),
+      });
+    }
+    const warnings = (daemon.warnings ?? []).map((w) => classify(w, now, daemon));
+    const errors = warnings.filter((w) => w.cls === 'error').length;
+    if (errors > 0)
+      all.push({
+        id: 'warnings',
+        rank: 1,
+        sev: 'red',
+        text: t.daemon.needsAttention(errors),
+        target: modal('warnings'),
+      });
+    const activities = new Map<string, WarningView>();
+    for (const w of warnings) {
+      if (w.cls === 'activity') {
+        if (w.since !== undefined && age(w.since, now) < ACTIVITY_MIN_MS) continue;
+        const key = w.repo ?? w.kind;
+        const previous = activities.get(key);
+        if (!previous || (w.since ?? now) < (previous.since ?? now)) activities.set(key, w);
+      } else if (w.cls === 'notice' && w.sev === 'amber') {
+        const payload = warningParts(w.raw).payload;
+        const id = [
+          'warning',
+          w.kind,
+          w.repo,
+          w.session,
+          string(payload.method),
+          string(payload.hash),
+        ]
+          .filter((part) => part !== undefined)
+          .join(':');
+        all.push({
+          id,
+          rank: 4,
+          sev: 'amber',
+          text: w.text,
+          since: w.since,
+          target: modal('warnings'),
+        });
+      }
+    }
+    const restart = daemon.config?.restart_required;
+    if (restart?.length && !warnings.some((w) => w.kind === 'ConfigRestartRequired')) {
+      all.push({
+        id: 'config-restart',
+        rank: 4,
+        sev: 'amber',
+        text: t.warning.configRestart(restart),
+        target: modal('warnings'),
+      });
+    }
+    if (record(daemon.reconcile.last).panicked === true) {
+      all.push({
+        id: 'reconcile',
+        rank: 4,
+        sev: 'amber',
+        text: t.daemon.reconcilePanicked,
+        target: modal('warnings'),
+      });
+    }
+    if (record(daemon).sessions_audit_error != null) {
+      all.push({
+        id: 'sessions-audit',
+        rank: 4,
+        sev: 'amber',
+        text: t.daemon.auditFailed,
+        target: modal('warnings'),
+      });
+    }
+    if (daemon.version && daemon.version !== appVersion) {
+      all.push({
+        id: 'version',
+        rank: 4,
+        sev: 'amber',
+        text: t.daemon.versionMismatch(appVersion, daemon.version),
+        target: modal('warnings'),
+      });
+    }
+    const sessionsFresh =
+      input.sessionsUpdatedAt !== undefined &&
+      input.sessionsUpdatedAt > 0 &&
+      age(input.sessionsUpdatedAt, now) <= ('api' in daemon ? 90_000 : 300_000);
+    const pending = new Map<string, number>();
+    const needsPush = new Set<string>();
+    if (hasUpstream(daemon))
+      for (const s of input.sessions?.sessions ?? []) {
+        // Match the tray: upstream-derived states require session-level enrichment.
+        if (!s.status.upstream) continue;
+        for (const repo of Object.keys(s.status.workspaces ?? {})) {
+          const auto = repoUpstream(s, repo)?.auto;
+          if (auto?.reason === 'needs_push') needsPush.add(repo);
+          if (sessionsFresh && auto?.state === 'pending')
+            pending.set(repo, (pending.get(repo) ?? 0) + 1);
+        }
+      }
+    for (const repo of [...needsPush].sort()) {
+      all.push({
+        id: `needs-push:${repo}`,
+        rank: 4,
+        sev: 'amber',
+        text: t.needsPush(repo),
+        target: modal('warnings'),
+      });
+    }
+    for (const [repo, w] of activities) {
+      all.push({
+        id: `activity:${repo}`,
+        rank: 5,
+        sev: 'blue',
+        text: t.activity.counts(w.text, daemon.repo_waiting?.[repo] ?? 0, pending.get(repo) ?? 0),
+        tooltip: w.kind === 'LongHold' ? t.activity.tooltip(repo) : undefined,
+        since: w.since,
+        target: modal('activity'),
+      });
+    }
+    const scan = input.du?.scan;
+    const scanStarted = timestamp(scan?.started);
+    if (
+      scan?.running &&
+      (scan.full || (scanStarted !== undefined && age(scanStarted, now) > 60_000))
+    ) {
+      all.push({
+        id: 'scan',
+        rank: 6,
+        sev: 'muted',
+        text: t.scan(scan.done, scan.queued),
+        target: modal('scan'),
+        since: scanStarted,
+      });
+    }
+    const started = timestamp(daemon.started);
+    if (started !== undefined && started <= now && age(started, now) < LONG_WAIT_MAX_MS) {
+      all.push({
+        id: 'restarted',
+        rank: 6,
+        sev: 'muted',
+        text: t.daemon.restarted(ago(age(started, now))),
+        target: { kind: 'modal', section: 'daemon' },
+        since: started,
+      });
+    }
+  }
+  if (unavailableUpstream(input.sessions, daemon).length > 0) {
+    all.push({
+      id: 'unavailable',
+      rank: 6,
+      sev: 'muted',
+      text: t.unavailable,
+      target: modal('warnings'),
+    });
+  }
+  const savings = health.fresh ? input.du?.savings?.live : undefined;
+  return {
+    daemon: health.trigger,
+    ...capChips(all),
+    right: {
+      free: null,
+      saved:
+        savings && Number.isFinite(savings.savings) && savings.savings > 0
+          ? {
+              text: t.saved(bytes(savings.savings), !savings.complete),
+              tooltip: t.savedTooltip(savings.as_of, !savings.complete),
+            }
+          : null,
+      sessions: input.sessions?.sessions.length ?? null,
+    },
   };
 }

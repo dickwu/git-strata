@@ -1,0 +1,83 @@
+{
+  "now": "2026-11-13T15:29:52.000Z",
+  "daemon": {
+    "holds": [
+      {
+        "repo": "tool",
+        "method": "catch_up",
+        "session": null,
+        "since": { "secs_since_epoch": 1794583672, "nanos_since_epoch": 500 }
+      }
+    ],
+    "queues": [
+      {
+        "session": "s-eqyyt2k7",
+        "holder": "catch_up",
+        "since": { "secs_since_epoch": 1794583672, "nanos_since_epoch": 500 },
+        "queued": []
+      }
+    ],
+    "reconcile": { "runs": 1, "last": null },
+    "repo_waiting": { "tool": 0 },
+    "verify": null,
+    "warnings": [
+      {
+        "LongHold": {
+          "repo": "tool",
+          "method": "catch_up",
+          "since": { "secs_since_epoch": 1794583672, "nanos_since_epoch": 500 }
+        }
+      }
+    ],
+    "fds": { "open": 83, "limit": 10240, "accept_errors": 0 }
+  },
+  "du": {
+    "now": "2026-11-13T15:29:52.000Z",
+    "root": "/fixture/strata",
+    "total": {
+      "allocated": 67000000000000,
+      "logical": 66000000000000,
+      "private": 46170898432,
+      "shared": 0,
+      "as_of": "2026-11-13T15:29:50.000Z",
+      "complete": false,
+      "pending": 140,
+      "units": 1800
+    },
+    "bases": {
+      "all": {
+        "allocated": 0,
+        "logical": 0,
+        "private": 0,
+        "shared": 0,
+        "as_of": null,
+        "complete": true,
+        "pending": 0,
+        "units": 0
+      },
+      "repos": {}
+    },
+    "deps": {
+      "all": {
+        "allocated": 0,
+        "logical": 0,
+        "private": 0,
+        "shared": 0,
+        "as_of": null,
+        "complete": true,
+        "pending": 0,
+        "units": 0
+      },
+      "repos": {}
+    },
+    "scan": {
+      "running": true,
+      "started": "2026-11-13T15:27:30.000Z",
+      "done": 412,
+      "queued": 140,
+      "full": false,
+      "failed": [{ "unit": "old-attempt", "error": "historical failure" }],
+      "last_full": null
+    }
+  }
+}
