@@ -218,7 +218,7 @@ describe('daemon modal content', () => {
 
   // Status-bar daemon impl-r2 Claude NB2: with no trash entry the P-b Trash section showed only
   // its heading, and "not available" was hard-coded.
-  test('P-b trash: a measured empty trash says so; "not available" only without counts', () => {
+  test('P-b trash: zero entries say only that none were reported; "not available" only without counts', () => {
     const data = structuredClone(pbFixture.daemon) as DaemonStatus;
     const trashOf = (du: DuReply) =>
       content({ status: answered(data), du: answered(du), now: Date.parse(pbFixture.now) }).match(
