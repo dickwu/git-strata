@@ -38,6 +38,17 @@ export const copy = {
     deps: (id: number, repo: string) => `Deps proposal ${id} in ${repo}`,
     conflict: (n: number, repo: string) =>
       n === 1 ? `1 conflict in ${repo}` : `${n} conflicts in ${repo}`,
+    /**
+     * A conflict card's title says what is wrong; the line under it says who acts. No count:
+     * only `auto.reason=conflicts` reported them (gui.md "Main-sync attribution").
+     */
+    conflictTitle: (n: number) =>
+      n === 0 ? 'Conflicts with main' : `${n} ${n === 1 ? 'conflict' : 'conflicts'} with main`,
+    /** With the sync command (`status.upstream`) or, without it, the Review button. */
+    conflictAgent: (command: boolean) =>
+      command
+        ? "Needs the session's agent: give it the sync command below."
+        : "Needs the session's agent to resolve them in its workspace.",
     fromMain: 'From the main branch',
     approve: (id: number) => `Review in a terminal: \`git-strata deps approve ${id}\``,
     resolve: 'Resolve it in the session workspace.',
@@ -186,6 +197,8 @@ export const copy = {
     busy: 'The daemon is busy. Retrying.',
     legacy:
       'This daemon predates the API version field, so the app reads it gently: session status is fetched less often.',
+    /** A failed poll keeps the last good reply on show for up to 60 s (as the status bar). */
+    lastAnswer: (ago: string) => `Showing the daemon's last answer (${ago}).`,
     reconcile: (runs: number) =>
       runs === 0 ? 'No reconcile has run since the daemon started.' : `Reconcile runs: ${runs}`,
     holds: (n: number) => (n === 0 ? 'No holds' : n === 1 ? '1 hold' : `${n} holds`),

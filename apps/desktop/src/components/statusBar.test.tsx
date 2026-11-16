@@ -124,7 +124,9 @@ describe('StatusBarView', () => {
         savings: 0,
       },
     };
-    Object.assign(du.total, { exact: false });
+    // Allocated bytes stood in for a live session's private bytes (liveSavingsExact).
+    const usage = { ...du.total, logical: 4096, private: 1024, exact: false };
+    du.sessions = { all: usage, list: [] };
     const model = statusBarModel(
       {
         daemon: {

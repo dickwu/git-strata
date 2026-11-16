@@ -6,10 +6,12 @@ import type { UseQueryResult } from '@tanstack/react-query';
 import { copy } from '@/lib/copy';
 import { useDu } from '@/lib/queries';
 import {
+  observeDaemonStart,
   observeScanRun,
   statusBarModel,
   type Chip,
   type ChipTarget,
+  type DaemonStart,
   type StatusBarInput,
   type StatusBarModel,
   type SpaceLevel,
@@ -253,6 +255,9 @@ export function StatusBar({
   const [scanSince, setScanSince] = useState<number | undefined>(undefined);
   const observedScan = observeScanRun(scanSince, status.data, status.dataUpdatedAt);
   if (observedScan !== scanSince) setScanSince(observedScan);
+  const [daemonStart, setDaemonStart] = useState<DaemonStart | undefined>(undefined);
+  const observedStart = observeDaemonStart(daemonStart, status.data);
+  if (observedStart !== daemonStart) setDaemonStart(observedStart);
   // null while closed; otherwise the section the click asked for (none: the top).
   const [modal, setModal] = useState<{ section?: ModalSection } | null>(null);
   useEffect(() => {
@@ -280,6 +285,7 @@ export function StatusBar({
       // A du reply cached from before the daemon went away is not shown (as before).
       du: live ? du.data : undefined,
       scanSince: observedScan,
+      daemonRestarted: observedStart?.restarted === true,
     },
     at,
     spaceLevel
@@ -298,6 +304,7 @@ export function StatusBar({
         onClose={() => setModal(null)}
         section={modal?.section}
         chips={[...model.chips, ...model.overflow]}
+        daemon={model.daemon}
         status={status}
         du={du}
         sessions={sessions.data}

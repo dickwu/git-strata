@@ -38,9 +38,13 @@ class GitStrata < Formula
 
       Set [paths] root in config.toml to a directory on the same APFS volume
       as your repos (default ~/.strata).
-      After `brew upgrade git-strata`: git-strata daemon stop && git-strata daemon start
-      Before `brew uninstall git-strata`: git-strata daemon stop, then remove
-      ~/Library/LaunchAgents/com.gwd.git-stratad.plist.
+      After `brew upgrade git-strata`, restart the agent in place:
+        launchctl kickstart -k gui/$(id -u)/com.gwd.git-stratad
+      then check `git-strata daemon status` and run
+        npx skills update git-strata -g
+      Before `brew uninstall git-strata`: run git-strata daemon stop. Only after
+      it succeeds, remove ~/Library/LaunchAgents/com.gwd.git-stratad.plist,
+      then uninstall. If stop fails or times out, do not continue.
     EOS
   end
 

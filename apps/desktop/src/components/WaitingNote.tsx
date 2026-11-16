@@ -67,14 +67,15 @@ export function WaitingNote({
       <li key={it.key}>
         <div className="waiting-head">
           <span className="waiting-label">
-            {it.kind === 'deps'
-              ? `Deps #${it.number} · `
-              : `${it.number || ''} ${it.number === 1 ? 'conflict' : 'conflicts'} · `}
-            {it.kind === 'deps'
-              ? it.session
-                ? sessionLink(it.session, it.session)
-                : 'from main'
-              : "needs the session's agent"}
+            {it.kind === 'deps' ? (
+              <>
+                {`Deps #${it.number} · `}
+                {it.session ? sessionLink(it.session, it.session) : 'from main'}
+              </>
+            ) : (
+              // What is wrong; who acts is the line under it (`it.reason`).
+              it.title
+            )}
           </span>
           {it.since && (
             <time className="muted" dateTime={it.since} title={fullTime(new Date(it.since))}>

@@ -12,6 +12,7 @@ import type { Chip, WarningView } from '@/lib/statusBar';
 import type { DaemonStatus, DuReply, StatusReply } from '@/lib/types';
 import { DaemonScreen } from './DaemonScreen';
 import {
+  DaemonModalTitle,
   DaemonStatusContent,
   WarningList,
   type DaemonModalSection,
@@ -213,6 +214,60 @@ describe('daemon modal content', () => {
     expect(html).toContain('4 in progress');
     expect(html).toContain('data-section="trash"');
     expect(html).toContain('Trash measurements are not available yet.');
+  });
+
+  // Status-bar daemon impl-r2 Claude NB2: with no trash entry the P-b Trash section showed only
+  // its heading, and "not available" was hard-coded.
+  test('P-b trash: zero entries say only that none were reported; "not available" only without counts', () => {
+    const data = structuredClone(pbFixture.daemon) as DaemonStatus;
+    const trashOf = (du: DuReply) =>
+      content({ status: answered(data), du: answered(du), now: Date.parse(pbFixture.now) }).match(
+        /data-section="trash"[\s\S]*?(?=data-section=|$)/
+      )?.[0] ?? '';
+    const empty = incidentDu() as DuReply & { store: { trash: Record<string, object> } };
+    const trash = empty.store.trash;
+    Object.assign(trash, {
+      entries: 0,
+      eligible: { ...trash.eligible, entries: 0 },
+      young: { ...trash.young, entries: 0 },
+    });
+    expect(trashOf(empty)).toContain(daemonCopy.storage.trashEmpty);
+    expect(trashOf(empty)).not.toContain(daemonCopy.storage.trashUnavailable);
+    // nits r1 Codex B1: du also reports 0 entries for a trash directory it could not read
+    // (du.rs names() -> unlisted), so zero must not be presented as a proven empty trash.
+    expect(trashOf(empty)).toContain('No trash entries reported.');
+    expect(trashOf(empty)).not.toMatch(/nothing in the trash|trash is empty/i);
+    expect(trashOf(incidentDu())).toContain('1,796 trash entries older than 1 h can be emptied by');
+    expect(trashOf(incidentDu())).not.toContain(daemonCopy.storage.trashEmpty);
+  });
+
+  test('an fd limit the daemon could not read shows as unknown, with the open count', () => {
+    const data = { ...incidentStatus(), fds: { open: 36, limit: null, accept_errors: 0 } };
+    expect(content({ status: answered(data) })).toContain('36 open, limit unknown');
+  });
+
+  // impl-r2 Claude NB2: the title tag and State row said red "Unreachable" on any query error
+  // while the bar said neutral Checking. They now repeat the bar's trigger.
+  test('the modal title and State row follow the bar: neutral while checking, red only when down', () => {
+    const checking = {
+      state: 'pending',
+      label: 'Checking the daemon…',
+      detail: 'The daemon is busy. Retrying.',
+    } as const;
+    const html = content({ status: notAnswering(incidentStatus()), daemon: checking });
+    expect(html).toContain('<span class="dot" data-state="pending"></span>Checking the daemon…');
+    expect(html).toContain('The daemon is busy. Retrying.');
+    expect(html).not.toContain('Unreachable');
+    const title = (daemon: DaemonStatusContentProps['daemon']) =>
+      renderToStaticMarkup(createElement(DaemonModalTitle, { daemon: daemon!, updated: null }));
+    expect(title(checking)).toContain('>Checking<');
+    expect(title(checking)).not.toMatch(/Unreachable|tag-error/);
+    const down = { state: 'down', label: "Daemon isn't responding", detail: null } as const;
+    expect(title(down)).toMatch(/tag-error[^>]*>Unreachable</);
+    const up = { state: 'up', label: 'Daemon running', detail: 'Live' } as const;
+    expect(title(up)).toMatch(/tag-success[^>]*>Running</);
+    // Without the bar (a direct render), the last poll alone decides, as before.
+    expect(content({ status: notAnswering(incidentStatus()) })).toContain('Unreachable');
   });
 
   test('P-b cached activity, Busy and volume do not survive an unreachable daemon', () => {
@@ -541,5 +596,29 @@ describe('daemon screen', () => {
     const live = screen(answered(incidentStatus()));
     expect(live).toContain('data-kind="LongHold"');
     expect(live).toContain('<span class="mono">tool</span>');
+  });
+
+  // impl-r2 Claude NB3: one transient refusal blanked the screen. It now keeps the last good
+  // reply while the status bar does (statusBar.ts `retainsReply`: under 60 s, not stopped).
+  test('one transient failure keeps the last good reply on show, marked as the last answer', () => {
+    const recent = Date.now() - 10_000;
+    const failed = (error: unknown) =>
+      ({
+        ...notAnswering(incidentStatus()),
+        error,
+        dataUpdatedAt: recent,
+      }) as UseQueryResult<DaemonStatus>;
+    const html = screen(failed(TIMEOUT));
+    expect(html).toContain(esc(errorText(TIMEOUT).title));
+    expect(html).toMatch(/Showing the daemon&#x27;s last answer \(\d+ s ago\)\./);
+    expect(html).toContain('data-kind="LongHold"');
+    expect(html).toContain('<span class="mono">tool</span>'); // repo_waiting {tool: 2}
+    expect(html).toContain(`git-strata alone holds at least ${bytes(43 * GiB)}`);
+    // A daemon that is not running has no current reply, however recent its last one.
+    const down = screen(
+      failed({ code: 'Unavailable', message: 'down', detail: { reason: 'daemon_down' } })
+    );
+    expect(down).not.toContain('data-kind=');
+    expect(down).not.toContain('last answer');
   });
 });

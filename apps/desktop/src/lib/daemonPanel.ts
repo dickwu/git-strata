@@ -25,6 +25,7 @@ import { daemonCopy as t } from './daemonCopy';
 import {
   activityList,
   hasActivityStatus,
+  liveSavingsExact,
   recentBusy,
   type Severity,
   type WarningView,
@@ -55,7 +56,7 @@ export interface SavingsRow {
 
 export interface SavingsView {
   live: {
-    /** Upper bound; null when the live sessions' figures are inexact (`sessions.all.exact`). */
+    /** Upper bound; null when a live session figure is inexact (`liveSavingsExact`, as S1). */
     saved: number | null;
     logical: number;
     /** Lower bound; null when inexact. */
@@ -66,12 +67,11 @@ export interface SavingsView {
     asOf: string | null;
     copyEstimateMs: number;
   };
+  /**
+   * Counts only, never a savings bound: the cumulative sum (du.rs `cumulative`) carries no
+   * accuracy, including for removed sessions, and current figures cannot stand in for it.
+   */
   cumulative: {
-    /**
-     * Upper bound; withheld because the cumulative sum (du.rs `cumulative`) carries no
-     * accuracy, including for removed sessions. Current figures cannot stand in for it.
-     */
-    saved: number | null;
     sessions: number;
     sized: number;
     unsized: number;
@@ -105,8 +105,8 @@ const inexact = (f: unknown): boolean =>
 export function savingsView(du: DuReply | undefined): SavingsView | null {
   if (!du?.savings || !du.sessions) return null;
   const { live, cumulative: c } = du.savings;
-  // `savings.live` sums the same units as `sessions.all`, which carries their accuracy.
-  const liveExact = !inexact(du.sessions.all);
+  // `savings.live` sums the same units as `sessions`; one rule with S1 decides its accuracy.
+  const liveExact = liveSavingsExact(du);
   const rows: SavingsRow[] = du.sessions.list
     .map((s) => {
       const exact = !inexact(s);
@@ -153,7 +153,6 @@ export function savingsView(du: DuReply | undefined): SavingsView | null {
       copyEstimateMs: copyEstimateMs(live.logical),
     },
     cumulative: {
-      saved: null,
       sessions: c.sessions,
       sized: c.sized,
       unsized: c.unsized,
@@ -183,7 +182,13 @@ export interface StatusFacts {
   pid: number | null;
   /** ms since `started`, from the reply's own clock reading. */
   uptimeMs: number | null;
-  fds: { open: number; limit: number; acceptErrors: number; share: number } | null;
+  /** `limit` null: the daemon could not read it, so `share` (open ÷ limit) is unknown too. */
+  fds: {
+    open: number;
+    limit: number | null;
+    acceptErrors: number;
+    share: number | null;
+  } | null;
   reconcileRuns: number;
   holds: number;
   waiting: number;
@@ -193,18 +198,19 @@ export interface StatusFacts {
 export function statusFacts(s: DaemonStatus, now: number): StatusFacts {
   const started = s.started ? Date.parse(s.started) : NaN;
   const fds = s.fds;
+  const limit = num(fds?.limit);
   return {
     version: s.version ?? null,
     api: typeof s.api === 'number' ? s.api : null,
     pid: typeof s.pid === 'number' ? s.pid : null,
     uptimeMs: Number.isFinite(started) ? Math.max(0, now - started) : null,
     fds:
-      fds && typeof fds.open === 'number' && typeof fds.limit === 'number'
+      fds && typeof fds.open === 'number'
         ? {
             open: fds.open,
-            limit: fds.limit,
+            limit,
             acceptErrors: fds.accept_errors ?? 0,
-            share: fds.limit > 0 ? fds.open / fds.limit : 0,
+            share: limit === null ? null : limit > 0 ? fds.open / limit : 0,
           }
         : null,
     reconcileRuns: s.reconcile?.runs ?? 0,

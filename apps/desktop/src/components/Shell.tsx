@@ -114,6 +114,7 @@ export function Shell() {
           <DaemonScreen
             status={status}
             plan={plan}
+            sessions={sessions.data}
             unavailable={unavailableUpstream(sessions.data, status.data)}
             onBack={() => go('sessions')}
           />

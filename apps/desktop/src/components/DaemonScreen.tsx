@@ -4,11 +4,12 @@ import { Button, Descriptions, Empty, List, Tag } from 'antd';
 import { ArrowLeftOutlined } from '@ant-design/icons';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { useNow } from '@/hooks/useNow';
-import { copy } from '@/lib/copy';
+import { ago, copy } from '@/lib/copy';
 import { isLive, storageView } from '@/lib/daemonPanel';
 import { useDu, useSocket } from '@/lib/queries';
 import type { PollPlan } from '@/lib/poll';
-import type { DaemonStatus } from '@/lib/types';
+import { retainsReply } from '@/lib/statusBar';
+import type { DaemonStatus, StatusReply } from '@/lib/types';
 import { daemonView } from '@/lib/view';
 import { useNav } from '@/stores/nav';
 import { StorageHeadline, WarningList } from './DaemonStatusModal';
@@ -19,10 +20,13 @@ export function DaemonScreen({
   plan,
   onBack,
   unavailable = [],
+  sessions,
 }: {
   status: UseQueryResult<DaemonStatus>;
   plan: PollPlan;
   unavailable?: string[];
+  /** Names a session in a warning by its ticket when this reply knows it. */
+  sessions?: StatusReply;
   /** Back to the session list (the Daemon screen is full-page, reached via ⌘K). */
   onBack: () => void;
 }) {
@@ -30,12 +34,27 @@ export function DaemonScreen({
   const openSession = useNav((s) => s.openSession);
   const du = useDu(plan.du);
   // Warning severity and text depend on how long a hold has run (status bar ticker cadence).
-  const now = useNow(5_000);
-  // Only from a live answer, as in the modal: classified from a cached reply, a hold would keep
-  // aging (a LongHold turning amber at 30 min) while the daemon is not answering.
+  const clock = useNow(5_000);
+  // A reply that arrived after the last tick is no older than its arrival (as in the bar).
+  const now = Math.max(clock, status.dataUpdatedAt);
   const live = isLive(status);
-  const v = live && status.data ? daemonView(status.data, now) : null;
-  const storage = live ? storageView(du.data) : null;
+  // One failed poll keeps the last good reply on show, by the status bar's own rule: at most
+  // 60 s old, from a daemon that is not stopped, starting or shedding. Past that nothing is
+  // classified from the cached reply, where a hold would keep aging (a LongHold turning amber
+  // at 30 min) while the daemon is not answering.
+  const retained =
+    !live &&
+    retainsReply(
+      {
+        pending: status.isPending,
+        data: status.data,
+        error: status.isError ? status.error : null,
+        updatedAt: status.dataUpdatedAt,
+      },
+      now
+    );
+  const v = (live || retained) && status.data ? daemonView(status.data, now, sessions) : null;
+  const storage = live || retained ? storageView(du.data) : null;
   return (
     <>
       <div className="toolbar">
@@ -54,6 +73,9 @@ export function DaemonScreen({
         style={{ display: 'grid', gap: 16, alignContent: 'start', maxWidth: 880 }}
       >
         {status.isError && <ErrorNote error={status.error} />}
+        {retained && v && (
+          <div className="muted">{copy.daemon.lastAnswer(ago(now - status.dataUpdatedAt))}</div>
+        )}
         {v?.legacy && !status.isError && <div className="muted">{copy.daemon.legacy}</div>}
         {v && (
           <section className="panel">
