@@ -124,8 +124,11 @@ export interface DaemonStatus {
     last_attempt: unknown;
     restart_required: string[] | null;
   };
-  /** Descriptor use (daemons from ffe316b on). Optional: older daemons omit it. */
-  fds?: { open: number; limit: number; accept_errors: number };
+  /**
+   * Descriptor use (daemons from ffe316b on). Optional: older daemons omit it. `limit` is null
+   * when the daemon could not read its soft limit (startup.rs `fd_limit`).
+   */
+  fds?: { open: number; limit: number | null; accept_errors: number };
   /** P-b identity and display fields. Capability: `daemon_status.activity`; no new `api`. */
   pid?: number;
   started?: string;

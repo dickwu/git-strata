@@ -59,6 +59,9 @@ export const statusBarCopy = {
       `A request is waiting${repo ? ` on ${repo}` : ''} (current attempt ${elapsed})`,
     abnormalHold: (repo: string, method: string, elapsed: string) =>
       `${repo} locked by ${method} for ${elapsed}`,
+    /** 0.2.2 background hold whose start is later than now: its age is unknown. */
+    holdAheadOfClock: (repo: string, method: string) =>
+      `${repo} locked by ${method} (its start time is ahead of this Mac's clock)`,
     /** P-b: `session` is the ticket when known, else a short id (§3.1). */
     reportedHold: (repo: string, method: string, elapsed: string, session?: string) =>
       `${repo} locked for ${elapsed} by ${method === 'catch_up' ? 'auto-rebase' : method}${session ? ` (${session})` : ''}`,
@@ -93,6 +96,11 @@ export const statusBarCopy = {
     counts: (text: string, waiting: number, pending: number) =>
       `${text}${waiting > 0 ? ` · ${waiting} waiting` : ''}${pending > 0 ? ` · ${pending} pending` : ''}`,
     deferred: (text: string, n: number) => `${text}${n > 0 ? ` · ${n} deferred` : ''}`,
+    /** A deferral chip: the repo's other deferrals, beside the one it names. */
+    moreDeferred: (text: string, n: number) => `${text}${n > 0 ? ` · ${n} more deferred` : ''}`,
+    deferral: (session: string | undefined, reason: string) =>
+      `${session ?? 'a session'} (${reason.replace(/_/g, ' ') || 'see details'})`,
+    alsoDeferred: (items: string[]) => `Also waiting: ${items.join(', ')}.`,
     tooltip: (repo: string) =>
       `New write requests to ${repo} may wait for this work. A request that waits 30 seconds before writing gets Busy and can be retried.`,
   },

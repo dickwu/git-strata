@@ -609,6 +609,31 @@ describe('main-sync waiting groups', () => {
       `cd ~ && git-strata sync --session ${e.status.manifest.id} --repo web`
     );
   });
+  // The card said "needs the session's agent" as both title and subtitle.
+  test('a conflict card says what is wrong in its title and who acts beneath it', () => {
+    const { s, d } = pending();
+    const e = s.sessions[0];
+    e.status.workspaces.web.upstream!.auto!.reason = 'conflicts';
+    const card = () => waitingGroups(s, d, capable, now)[0].items[0];
+    expect(card()).toMatchObject({
+      kind: 'conflict',
+      title: 'Conflicts with main',
+      reason: "Needs the session's agent: give it the sync command below.",
+    });
+    e.status.workspaces.web.conflicts = ['a.ts', 'b.ts'];
+    expect(card().title).toBe('2 conflicts with main');
+    e.status.workspaces.web.conflicts = ['a.ts'];
+    expect(card().title).toBe('1 conflict with main');
+    // Without `status.upstream` there is no sync command; the card offers Review instead.
+    const old = waitingGroups(s, d, daemon, now).find((g) => g.repo === 'web')!.items;
+    expect(old.find((i) => i.kind === 'conflict')).toMatchObject({
+      title: '1 conflict with main',
+      reason: "Needs the session's agent to resolve them in its workspace.",
+      command: undefined,
+    });
+    for (const it of [card(), ...old.filter((i) => i.kind === 'conflict')])
+      expect(it.title).not.toBe(it.reason);
+  });
   test('cached behind and detail upstream require the capability; cold entries are not zero', () => {
     const { s } = pending();
     expect(sessionRows(s)[0].behind).toBeUndefined();

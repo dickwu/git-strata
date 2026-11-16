@@ -19,6 +19,7 @@ import type {
   DaemonStatus,
   DepsList,
   DuReply,
+  QueueJson,
   StatusReply,
   SystemTimeJson,
 } from './types';
@@ -103,6 +104,12 @@ export interface StatusBarInput {
   du: DuReply | undefined;
   /** P-b: epoch ms the App first saw the current scan pass running ({@link observeScanRun}). */
   scanSince?: number;
+  /**
+   * The App saw this daemon replace an earlier one: its pid or start time changed between
+   * replies ({@link observeDaemonStart}). A daemon first seen just after it started (a cold
+   * start or login) was not restarted as far as the App can tell.
+   */
+  daemonRestarted?: boolean;
   /** Local observations from existing daemonStatus completions, never a new daemon field. */
   health?: {
     timeouts: number;
@@ -160,6 +167,17 @@ export function volumeView(
   return { ...v, stale, level, text: stale ? '—' : t.free(bytes(v.free)) };
 }
 
+/**
+ * The one rule for the live savings bound, in S1 ("up to X saved") and the modal: it holds
+ * only when no live session figure reports `exact: false`, for then allocated bytes stood in
+ * for private ones. `savings.live` sums the units of `sessions.all`, so an inexact base,
+ * dependency or store figure (seen in `total`) does not affect it.
+ */
+export function liveSavingsExact(du: DuReply | undefined): boolean {
+  const inexact = (f: unknown) => record(f).exact === false;
+  return !inexact(du?.sessions?.all) && !list(du?.sessions?.list).some(inexact);
+}
+
 // Keep this literal list equal to Rust's warning_class Error arm (tested against its source).
 const ERROR_WARNING_KINDS: readonly string[] = [
   'StorePoisoned',
@@ -185,6 +203,10 @@ function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+/** A reply field that should be a list; anything else (a malformed reply) is empty. */
+function list<T = unknown>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
 }
 function string(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -228,7 +250,8 @@ function catchUpSession(
 ): string | undefined {
   const holdTime = systemTime(payload.since);
   if (!holdTime) return undefined;
-  const candidates = (daemon?.queues ?? []).filter((q) => {
+  const candidates = list<QueueJson>(daemon?.queues).filter((entry) => {
+    const q = record(entry);
     const time = systemTime(q.since);
     return (
       q.holder === 'catch_up' &&
@@ -333,11 +356,12 @@ function classify(
         TRANSIENT_REBASE_REASONS.has(string(p.reason) ?? '') &&
         since !== undefined &&
         age(since, now) < STUCK_AFTER;
+      const label = sessionLabel(session, sessions);
       view.cls = transient ? 'activity' : 'notice';
       view.sev = transient ? 'blue' : 'amber';
       view.text = transient
-        ? t.activity.autoRebaseWaiting(repo ?? '', session, string(p.reason) ?? '')
-        : t.warning.autoRebaseStuck(repo ?? '', session, string(p.reason) ?? '');
+        ? t.activity.autoRebaseWaiting(repo ?? '', label, string(p.reason) ?? '')
+        : t.warning.autoRebaseStuck(repo ?? '', label, string(p.reason) ?? '');
       break;
     }
     case 'LongHold': {
@@ -348,6 +372,13 @@ function classify(
       const pb = hasActivityStatus(daemon);
       const newDaemon = p.origin != null || pb;
       const background = ['catch_up', 'old_tree', 'periodic_fetch', 'daemon'].includes(method);
+      // A start later than now (the wall clock stepped back) shows no age under 30 min, so,
+      // as in the tray, the fallback never calls it normal work; like a missing start time,
+      // it stays a modal notice.
+      if (!newDaemon && background && since > now) {
+        view.text = t.warning.holdAheadOfClock(repo, method);
+        break;
+      }
       const normal = !newDaemon && background && elapsedMs < BACKGROUND_HOLD_MAX_MS;
       view.cls = normal ? 'activity' : 'notice';
       view.sev = normal ? 'blue' : 'amber';
@@ -358,7 +389,7 @@ function classify(
         : newDaemon || !background
           ? t.warning.abnormalHold(repo, method, elapsed)
           : method === 'catch_up'
-            ? t.activity.catchUp(repo, view.session, elapsed)
+            ? t.activity.catchUp(repo, sessionLabel(view.session, sessions), elapsed)
             : method === 'old_tree'
               ? t.activity.oldTree(repo, elapsed)
               : method === 'periodic_fetch'
@@ -415,19 +446,24 @@ function activityText(a: DaemonActivity, sessions: StatusReply | undefined): str
 
 /**
  * Display the outermost (oldest) work per repo; parent rollout/create entries cover children.
+ * A dependency install holds no repo lock, so no request waits for it: lock-holding work in its
+ * repo is shown first, however much younger, and the install's chip carries no waiting count.
  * Always blue: what is abnormal (a step past 30 min, a background hold past 30 min, a request
  * hold past 30 s) the daemon reports as a LongHold, which is the amber chip (§3.1, §12.1, Q3).
  */
 function reportedActivityChips(
   input: StatusBarInput,
   now: number,
-  pending: Map<string, number>
+  pending: Map<string, number>,
+  target: ChipTarget
 ): Chip[] {
   const daemon = input.daemon.data!;
   const work = activityList(daemon);
   const chips: Chip[] = [];
   const covered = new Set<string>();
-  for (const a of [...work].sort((a, b) => b.elapsed_ms - a.elapsed_ms || a.id - b.id)) {
+  const lockFree = (a: DaemonActivity) => a.kind === 'deps_install';
+  const oldest = [...work].sort((a, b) => b.elapsed_ms - a.elapsed_ms || a.id - b.id);
+  for (const a of [...oldest.filter((a) => !lockFree(a)), ...oldest.filter(lockFree)]) {
     const elapsed = a.elapsed_ms + age(input.daemon.updatedAt, now);
     if (elapsed < ACTIVITY_MIN_MS) continue;
     const repos = activityRepos(a);
@@ -436,10 +472,11 @@ function reportedActivityChips(
     if (!text) continue;
     repos.forEach((repo) => covered.add(repo));
     const phase = string(a.kind === 'move' ? a.phase : a.kind === 'session_create' ? a.step : null);
-    const waiting = repos.reduce((n, repo) => n + (daemon.repo_waiting?.[repo] ?? 0), 0);
+    const waiting = lockFree(a)
+      ? 0
+      : repos.reduce((n, repo) => n + (daemon.repo_waiting?.[repo] ?? 0), 0);
     const queued = repos.reduce((n, repo) => n + (pending.get(repo) ?? 0), 0);
-    // A dependency install holds no repo lock: no request waits for it.
-    const locks = a.kind === 'deps_install' ? [] : repos.map(t.activity.tooltip);
+    const locks = lockFree(a) ? [] : repos.map(t.activity.tooltip);
     chips.push({
       id: `activity:${string(a.repo) ?? a.id}`,
       sev: 'blue',
@@ -448,18 +485,18 @@ function reportedActivityChips(
       tooltip:
         [phase ? t.activity.phase(phase) : null, ...locks].filter(Boolean).join(' ') || undefined,
       since: timestamp(a.started),
-      target: { kind: 'modal', section: 'activity' },
+      target,
     });
   }
   // A plain background lock has no registry entry (e.g. reconcile gc).
   const working = new Set(work.flatMap(activityRepos));
   const warned = new Set(
-    (daemon.warnings ?? []).flatMap((w) => {
+    list(daemon.warnings).flatMap((w) => {
       const { kind, payload } = warningParts(w);
       return kind === 'LongHold' && typeof payload.repo === 'string' ? [payload.repo] : [];
     })
   );
-  for (const raw of daemon.holds ?? []) {
+  for (const raw of list(daemon.holds)) {
     const h = record(raw);
     const repo = string(h.repo);
     const elapsed = finite(h.elapsed_ms);
@@ -484,7 +521,7 @@ function reportedActivityChips(
         pending.get(repo) ?? 0
       ),
       tooltip: t.activity.tooltip(repo),
-      target: { kind: 'modal', section: 'activity' },
+      target,
     });
   }
   return chips;
@@ -492,14 +529,25 @@ function reportedActivityChips(
 
 export function recentBusy(s: DaemonStatus, now: number): BusyEvent[] {
   if (!hasActivityStatus(s)) return [];
-  return (s.busy?.recent ?? []).filter((e) => {
-    const at = timestamp(e.at);
+  return list<BusyEvent>(s.busy?.recent).filter((e) => {
+    const event = record(e);
+    const at = timestamp(event.at);
     // A reply newer than `now` (after the caller's last clock tick) is recent.
-    return at !== undefined && age(at, now) <= LONG_WAIT_MAX_MS;
+    return (
+      at !== undefined &&
+      age(at, now) <= LONG_WAIT_MAX_MS &&
+      typeof event.scope === 'object' &&
+      event.scope !== null
+    );
   });
 }
 
-function busyChips(s: DaemonStatus, sessions: StatusReply | undefined, now: number): Chip[] {
+function busyChips(
+  s: DaemonStatus,
+  sessions: StatusReply | undefined,
+  now: number,
+  target: ChipTarget
+): Chip[] {
   const recent = recentBusy(s, now);
   if (recent.length === 0) return [];
   const groups = new Map<string, BusyEvent[]>();
@@ -515,7 +563,7 @@ function busyChips(s: DaemonStatus, sessions: StatusReply | undefined, now: numb
         rank: 4,
         sev: 'amber',
         text: t.busyTruncated,
-        target: { kind: 'modal', section: 'activity' },
+        target,
       },
     ];
   return [...groups].map(([key, events]) => {
@@ -537,7 +585,7 @@ function busyChips(s: DaemonStatus, sessions: StatusReply | undefined, now: numb
       rank: 4,
       sev: 'amber',
       text: t.busy(String(events.length), scope, holder),
-      target: { kind: 'modal', section: 'activity' },
+      target,
     };
   });
 }
@@ -564,6 +612,32 @@ export function observeScanRun(
 ): number | undefined {
   if (!hasActivityStatus(s) || s?.scan?.running !== true) return undefined;
   return Math.max(previous ?? updatedAt, timestamp(s.started) ?? 0);
+}
+
+/** The daemon instance the App last saw, and whether it replaced one the App saw before. */
+export interface DaemonStart {
+  started: string;
+  pid: number | undefined;
+  /** This instance's pid or start time differs from an earlier reply's (§11.7). */
+  restarted: boolean;
+}
+
+/**
+ * Kept across replies by the component, like {@link observeScanRun}: a reply without a start
+ * time (0.2.2, or no reply) changes nothing. The first instance seen is not a restart, so a
+ * daemon that started at login, just before the App, shows no restart chip.
+ */
+export function observeDaemonStart(
+  previous: DaemonStart | undefined,
+  s: DaemonStatus | undefined
+): DaemonStart | undefined {
+  const started = string(s?.started);
+  if (started === undefined) return previous;
+  const pid = finite(s?.pid);
+  if (previous === undefined) return { started, pid, restarted: false };
+  return previous.started === started && previous.pid === pid
+    ? previous
+    : { started, pid, restarted: true };
 }
 
 /** Sort by rank then severity, keep order otherwise; split at MAX_CHIPS. */
@@ -675,6 +749,20 @@ function daemonState(
 }
 
 /**
+ * Whether a failed daemon_status poll keeps its cached reply on show, by S1's own rule: the
+ * daemon is not stopped, starting, shedding or waiting for its volume, the reply is at most
+ * 60 s old, and (with `health`) S1 has not escalated to not responding. One timeout or refusal
+ * then blanks nothing, while a daemon that stopped answering shows nothing old as current.
+ */
+export function retainsReply(
+  daemon: StatusBarInput['daemon'],
+  now: number,
+  health?: StatusBarInput['health']
+): boolean {
+  return daemon.error != null && daemonState(daemon, Math.max(now, daemon.updatedAt), health).fresh;
+}
+
+/**
  * Build S1 from already-polled replies. Historical warnings never become fresh health evidence.
  * `clock` is the caller's time, which ticks every 5 s: a reply that arrived after the last tick
  * proves later time has passed, so its own timestamps (volume sample, Busy replies, daemon start)
@@ -717,12 +805,16 @@ export function statusBarModel(
     });
 
   if (health.fresh && daemon) {
-    // The modal hides cached warning sections while the current query is in error.
+    // The modal hides cached warning and activity sections while the current query is in
+    // error; the Status section is always there.
     const warningTarget = input.daemon.error == null ? modal('warnings') : modal('daemon');
+    const activityTarget = input.daemon.error == null ? modal('activity') : modal('daemon');
     const fds = daemon.fds;
+    // `limit` is null when the daemon could not read it: occupancy is then unknown.
+    const fdLimit = finite(fds?.limit);
     if (
       fds &&
-      ((fds.limit > 0 && fds.open >= fds.limit * 0.9) ||
+      ((fdLimit !== undefined && fdLimit > 0 && fds.open >= fdLimit * 0.9) ||
         (input.health?.prevAcceptErrors !== undefined &&
           fds.accept_errors > input.health.prevAcceptErrors))
     ) {
@@ -734,7 +826,7 @@ export function statusBarModel(
         target: modal('daemon'),
       });
     }
-    const warnings = (daemon.warnings ?? []).map((w) => classify(w, now, daemon, input.sessions));
+    const warnings = list(daemon.warnings).map((w) => classify(w, now, daemon, input.sessions));
     const errors = warnings.filter((w) => w.cls === 'error').length;
     if (errors > 0)
       all.push({
@@ -745,7 +837,7 @@ export function statusBarModel(
         target: warningTarget,
       });
     const activities = new Map<string, WarningView>();
-    const deferred = new Map<string, number>();
+    const deferrals = new Map<string, WarningView[]>();
     const fetchRepos = new Set<string | undefined>();
     const activityRank = (w: WarningView) =>
       w.kind !== 'LongHold' ? 2 : warningParts(w.raw).payload.method === 'catch_up' ? 0 : 1;
@@ -753,7 +845,7 @@ export function statusBarModel(
       if (w.cls === 'activity') {
         if (w.since !== undefined && age(w.since, now) < ACTIVITY_MIN_MS) continue;
         const key = w.repo ?? w.kind;
-        if (w.kind === 'AutoRebaseStuck') deferred.set(key, (deferred.get(key) ?? 0) + 1);
+        if (w.kind === 'AutoRebaseStuck') deferrals.set(key, [...(deferrals.get(key) ?? []), w]);
         const previous = activities.get(key);
         if (
           !previous ||
@@ -849,27 +941,42 @@ export function statusBarModel(
         target: modal('daemon'),
       });
     }
-    const reported = pb ? reportedActivityChips(input, now, pending) : [];
-    all.push(...reported, ...busyChips(daemon, input.sessions, now));
+    const reported = pb ? reportedActivityChips(input, now, pending, activityTarget) : [];
+    all.push(...reported, ...busyChips(daemon, input.sessions, now, activityTarget));
     const reportedRepos = new Set(activityList(daemon).flatMap(activityRepos));
     for (const [repo, w] of activities) {
       if (pb && (reportedRepos.has(repo) || reported.some((c) => c.id === `activity:${repo}`)))
         continue;
       const lock = w.kind === 'LongHold';
+      const deferred = deferrals.get(repo) ?? [];
+      // A deferral chip names one session; the repo's other deferrals are counted on it and
+      // named in its tooltip, so a second one is never hidden.
+      const others = deferred.filter((d) => d !== w);
       const text = lock
         ? t.activity.deferred(
             t.activity.counts(w.text, daemon.repo_waiting?.[repo] ?? 0, pending.get(repo) ?? 0),
-            deferred.get(repo) ?? 0
+            deferred.length
           )
-        : w.text;
+        : t.activity.moreDeferred(w.text, others.length);
       all.push({
         id: `activity:${repo}`,
         rank: 5,
         sev: 'blue',
         text,
-        tooltip: lock ? t.activity.tooltip(repo) : undefined,
+        tooltip: lock
+          ? t.activity.tooltip(repo)
+          : others.length > 0
+            ? t.activity.alsoDeferred(
+                others.map((d) =>
+                  t.activity.deferral(
+                    sessionLabel(d.session, input.sessions),
+                    string(warningParts(d.raw).payload.reason) ?? ''
+                  )
+                )
+              )
+            : undefined,
         since: w.since,
-        target: modal('daemon'),
+        target: activityTarget,
       });
     }
     const scan = pb ? daemon.scan : input.du?.scan;
@@ -911,8 +1018,13 @@ export function statusBarModel(
         text: t.lowSpace(bytes(volume.free)),
         target: modal('trash'),
       });
+    // Only a restart the App saw (pid or start time replaced), never a first start at login.
     const started = timestamp(daemon.started);
-    if (started !== undefined && age(started, now) < LONG_WAIT_MAX_MS) {
+    if (
+      input.daemonRestarted === true &&
+      started !== undefined &&
+      age(started, now) < LONG_WAIT_MAX_MS
+    ) {
       all.push({
         id: 'restarted',
         rank: 6,
@@ -933,11 +1045,7 @@ export function statusBarModel(
     });
   }
   const du = input.du;
-  const inexact =
-    record(du?.total).exact === false ||
-    record(du?.sessions?.all).exact === false ||
-    du?.sessions?.list.some((s) => record(s).exact === false);
-  const savings = health.fresh && !inexact ? du?.savings?.live : undefined;
+  const savings = health.fresh && liveSavingsExact(du) ? du?.savings?.live : undefined;
   return {
     daemon: health.trigger,
     ...capChips(all),

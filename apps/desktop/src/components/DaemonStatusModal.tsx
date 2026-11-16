@@ -30,7 +30,13 @@ import {
   type StorageView,
 } from '@/lib/daemonPanel';
 import { useSocket } from '@/lib/queries';
-import { hasActivityStatus, type Chip, type ChipTarget, type WarningView } from '@/lib/statusBar';
+import {
+  hasActivityStatus,
+  type Chip,
+  type ChipTarget,
+  type StatusBarModel,
+  type WarningView,
+} from '@/lib/statusBar';
 import type { DaemonStatus, DuReply, StatusReply } from '@/lib/types';
 import { daemonView } from '@/lib/view';
 import { ErrorNote } from './ErrorNote';
@@ -41,6 +47,30 @@ export type DaemonModalSection = Extract<ChipTarget, { kind: 'modal' }>['section
 
 /** Session id → ticket (agent text: plain text only). */
 type Tickets = ReadonlyMap<string, string>;
+
+/** The status bar's daemon trigger: the modal states what the bar states. */
+type Trigger = StatusBarModel['daemon'];
+
+/** Without the bar's trigger (a direct render), the last poll alone decides. */
+const triggerOf = (daemon: Trigger | undefined, live: boolean): Trigger =>
+  daemon ?? {
+    state: live ? 'up' : 'down',
+    label: live ? t.modal.state.up : t.modal.state.down,
+    detail: null,
+  };
+
+const TAG_COLOR = { up: 'success', pending: 'default', down: 'error' } as const;
+
+/** The modal title. Its tag follows the bar's trigger: red only while the bar says down. */
+export function DaemonModalTitle({ daemon, updated }: { daemon: Trigger; updated: string | null }) {
+  return (
+    <span className={css.title}>
+      {t.modal.title}
+      <Tag color={TAG_COLOR[daemon.state]}>{t.modal.state[daemon.state]}</Tag>
+      {updated !== null && <span className={css.updated}>{t.modal.updated(updated)}</span>}
+    </span>
+  );
+}
 
 const ticketsOf = (sessions: StatusReply | undefined): Tickets =>
   new Map(
@@ -318,17 +348,20 @@ export function StorageBlock({ v, showTrash = true }: { v: StorageView; showTras
   );
 }
 
+/** What gc may empty, from du's trash counts; a measured empty trash says so. */
 function TrashBlock({ trash }: { trash: StorageView['trash'] }) {
   const s = t.storage;
+  if (!trash) return null;
+  if (trash.entries === 0) return <p className={css.note}>{s.trashEmpty}</p>;
   return (
     <>
-      {trash && trash.eligible > 0 && (
+      {trash.eligible > 0 && (
         <p className={css.note}>
           {s.trashEligible(trash.eligible, age(trash.floorSecs))}{' '}
           <code className="inline-code">{trash.gc}</code> {s.trashHuman}
         </p>
       )}
-      {trash && trash.young > 0 && (
+      {trash.young > 0 && (
         <p className={css.note}>{s.trashYoung(trash.young, age(trash.floorSecs))}</p>
       )}
     </>
@@ -479,13 +512,11 @@ function Savings({ v, tickets }: { v: SavingsView; tickets: Tickets }) {
         </li>
         {v.live.files !== null && <li>{s.files(count(v.live.files))}</li>}
         <li>
-          {v.cumulative.saved === null
-            ? s.cumulativeUnavailable(v.cumulative.sessions, since)
-            : s.cumulative(bytes(v.cumulative.saved), v.cumulative.sessions, since)}
+          {s.cumulativeUnavailable(v.cumulative.sessions, since)}
           {note && <span className="muted"> ({note})</span>}
         </li>
       </ul>
-      {v.cumulative.saved === null && <p className={css.note}>{s.cumulativeAccuracyUnavailable}</p>}
+      <p className={css.note}>{s.cumulativeAccuracyUnavailable}</p>
       {v.inexact && <p className={css.note}>{s.inexact}</p>}
       {!v.live.complete && <p className={css.note}>{s.measuring}</p>}
 
@@ -586,6 +617,8 @@ export interface DaemonStatusContentProps {
   section?: DaemonModalSection;
   /** The status bar's chips, overflow included; listed under "Now" when non-empty. */
   chips?: readonly Chip[];
+  /** The status bar's daemon trigger, repeated in the State row. */
+  daemon?: Trigger;
 }
 
 /** The modal's body. No data hooks, so it renders on its own (tests render it directly). */
@@ -597,8 +630,10 @@ export function DaemonStatusContent({
   socket,
   section,
   chips = [],
+  daemon,
 }: DaemonStatusContentProps) {
   const live = isLive(status);
+  const trigger = triggerOf(daemon, live);
   // Warnings and activity only from a live answer: a stale hold would keep "running".
   const data = live ? status.data : undefined;
   const f = status.data ? statusFacts(status.data, now) : null;
@@ -682,7 +717,7 @@ export function DaemonStatusContent({
             {storage?.trash ? (
               <TrashBlock trash={storage.trash} />
             ) : (
-              <p className={css.note}>Trash measurements are not available yet.</p>
+              <p className={css.note}>{t.storage.trashUnavailable}</p>
             )}
           </Section>
         </Target>
@@ -699,8 +734,11 @@ export function DaemonStatusContent({
           <Descriptions column={2} size="small" bordered className={css.desc}>
             <Descriptions.Item label={st.state}>
               <span className={css.state}>
-                <span className="dot" data-state={live ? 'up' : 'down'} />
-                {live ? t.modal.running : t.modal.down}
+                <span className="dot" data-state={trigger.state} />
+                {trigger.label}
+                {trigger.state !== 'up' && trigger.detail && (
+                  <span className="muted">· {trigger.detail}</span>
+                )}
               </span>
             </Descriptions.Item>
             <Descriptions.Item label={st.version}>
@@ -739,7 +777,7 @@ export function DaemonStatusContent({
             <Descriptions.Item label={st.fds} span={2}>
               {f?.fds ? (
                 <span>
-                  {st.fdsValue(count(f.fds.open), count(f.fds.limit))}
+                  {st.fdsValue(count(f.fds.open), f.fds.limit === null ? null : count(f.fds.limit))}
                   <span className="muted">, {st.acceptErrors(f.fds.acceptErrors)}</span>
                 </span>
               ) : (
@@ -786,6 +824,7 @@ export function DaemonStatusModal({
   now,
   section,
   chips,
+  daemon,
 }: {
   open: boolean;
   onClose: () => void;
@@ -797,6 +836,8 @@ export function DaemonStatusModal({
   section?: DaemonModalSection;
   /** Every current status-bar chip, overflow included. */
   chips?: readonly Chip[];
+  /** The status bar's daemon trigger, so the title and State row say what the bar says. */
+  daemon?: Trigger;
 }) {
   const socket = useSocket();
   const live = isLive(status);
@@ -808,13 +849,10 @@ export function DaemonStatusModal({
       width={760}
       destroyOnHidden
       title={
-        <span className={css.title}>
-          {t.modal.title}
-          <Tag color={live ? 'success' : 'error'}>{live ? t.modal.running : t.modal.down}</Tag>
-          {live && (
-            <span className={css.updated}>{t.modal.updated(ago(now - status.dataUpdatedAt))}</span>
-          )}
-        </span>
+        <DaemonModalTitle
+          daemon={triggerOf(daemon, live)}
+          updated={live ? ago(now - status.dataUpdatedAt) : null}
+        />
       }
     >
       <DaemonStatusContent
@@ -825,6 +863,7 @@ export function DaemonStatusModal({
         socket={socket.data}
         section={section}
         chips={chips}
+        daemon={daemon}
       />
     </Modal>
   );

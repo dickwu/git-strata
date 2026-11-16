@@ -15,8 +15,8 @@ const DAEMON_WORK_LABEL: ReadonlyMap<string, string> = new Map([
 export const daemonCopy = {
   modal: {
     title: 'Daemon',
-    running: 'Running',
-    down: 'Unreachable',
+    /** The title tag by the status bar trigger's state: neutral until the bar says down. */
+    state: { up: 'Running', pending: 'Checking', down: 'Unreachable' },
     updated: (ago: string) => `Updated ${ago}`,
   },
   /** Every status-bar chip, the ones past the bar's "+N" included. */
@@ -85,6 +85,10 @@ export const daemonCopy = {
     trashHuman: '(a human command).',
     trashYoung: (n: number, age: string) =>
       `${n.toLocaleString('en-US')} trash ${plural(n, 'entry is', 'entries are')} younger than ${age}, so gc leaves ${plural(n, 'it', 'them')} for now.`,
+    /** du listed the trash and found no entry. */
+    trashEmpty: 'Nothing in the trash.',
+    /** No du reply with trash counts yet (still waiting, or it failed). */
+    trashUnavailable: 'Trash measurements are not available yet.',
     details: 'Details',
     allocated: 'Allocated, counted once per file; overcounts clones',
     logical: 'Logical size of all files; counts every clone in full',
@@ -129,8 +133,6 @@ export const daemonCopy = {
     heldAlone: (held: string, logical: string) =>
       `${held} held only by the sessions (at least), for ${logical} of files`,
     files: (n: string) => `${n} files a worktree would have written`,
-    cumulative: (saved: string, n: number, since: string) =>
-      `Up to ${saved} saved across ${n} ${plural(n, 'session', 'sessions')} recorded since ${since}`,
     /** In place of a bound when the figures behind it are inexact (du `exact: false`). */
     liveUnavailable: (n: number) =>
       `Savings of ${n} live ${plural(n, 'session', 'sessions')}: unavailable`,
@@ -199,7 +201,8 @@ export const daemonCopy = {
     leftoversTip:
       'Directories that belong to no session: base staging a failed base build left behind, or the directory of a removed session.',
     fds: 'File descriptors',
-    fdsValue: (open: string, limit: string) => `${open} open of ${limit}`,
+    fdsValue: (open: string, limit: string | null) =>
+      limit === null ? `${open} open, limit unknown` : `${open} open of ${limit}`,
     acceptErrors: (n: number) => (n === 0 ? 'no accept errors' : `${n} accept errors`),
     reconcile: 'Reconcile runs',
     holds: 'Holds',

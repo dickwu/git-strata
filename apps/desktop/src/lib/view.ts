@@ -183,6 +183,8 @@ export interface WaitingItem {
   summarySince?: 'session_base';
   affected?: Array<{ id: string; ticket: string | null }>;
   mode?: 'apply' | 'confirm';
+  /** A conflict card's title: what is wrong. `reason` is the line under it: who acts. */
+  title?: string;
   reason?: string;
   command?: string;
   progress?: string;
@@ -329,7 +331,8 @@ export function waitingGroups(
         session: s.status.manifest.id,
         since: null,
         affected: [{ id: s.status.manifest.id, ticket: s.status.manifest.ticket ?? null }],
-        reason: "needs the session's agent",
+        title: copy.waiting.conflictTitle(n),
+        reason: copy.waiting.conflictAgent(upstream),
         command: upstream ? syncCommand(s.status.manifest.id, repo) : undefined,
       });
     }

@@ -5,12 +5,16 @@ import appPackage from '../../package.json';
 import incident from './fixtures/statusBar/incident-0927.json';
 import pbFixture from './fixtures/statusBar/pb.json';
 import { copy } from './copy';
+import { savingsView } from './daemonPanel';
 import {
   BACKGROUND_HOLD_MAX_MS,
   MAX_CHIPS,
   capChips,
   classifyWarning,
+  liveSavingsExact,
+  observeDaemonStart,
   observeScanRun,
+  retainsReply,
   statusBarModel,
   volumeView,
   type Chip,
@@ -212,6 +216,57 @@ describe('warning classification', () => {
     }
     expect(classifyWarning({ LongHold: null }, NOW).sev).not.toBe('red');
   });
+
+  // impl-r3 Claude NB5: the tray counts such a hold as a notice (tray_model.rs
+  // `background_hold`: `duration_since` fails for a start after now); the bar showed it blue.
+  test('a 0.2.2 background hold that starts after now is a modal notice, never blue work', () => {
+    const ahead = hold('catch_up', -2 * MINUTE);
+    expect(classifyWarning(ahead, NOW)).toMatchObject({
+      cls: 'notice',
+      sev: 'muted',
+      text: "tool locked by catch_up (its start time is ahead of this Mac's clock)",
+    });
+    expect(allChips(input(daemon([ahead])))).toEqual([]);
+    // A start exactly at now is an age of zero, as in Rust: still normal work.
+    expect(classifyWarning(hold('catch_up', 0), NOW)).toMatchObject({ cls: 'activity' });
+    // Request and P-b holds need no age to be abnormal: they stay amber.
+    expect(classifyWarning(hold('publish', -2 * MINUTE), NOW)).toMatchObject({ sev: 'amber' });
+    expect(
+      classifyWarning(hold('catch_up', -2 * MINUTE, { origin: 'background' }), NOW)
+    ).toMatchObject({ cls: 'notice', sev: 'amber' });
+  });
+
+  // impl-r3 Claude NB4: a non-array `warnings` threw here, while daemonView and the tray cope.
+  test('malformed daemon lists read as empty: no throw, no chips from them', () => {
+    const bad = { ...daemon(), warnings: {}, holds: {}, queues: {} } as unknown as DaemonStatus;
+    expect(allChips(input(bad))).toEqual([]);
+    const lonely = { ...daemon([hold()]), queues: 'x' } as unknown as DaemonStatus;
+    expect(allChips(input(lonely))[0].text).toBe('Auto-rebase work · tool · 2 min');
+    const pb = Object.assign(structuredClone(pbFixture.daemon), {
+      warnings: 'x',
+      holds: null,
+      activity: {},
+      busy: { total: 1, recent: [null, { at: incident.now, scope: null }], truncated: false },
+    }) as unknown as DaemonStatus;
+    const chips = allChips(input(pb));
+    expect(chips.filter((c) => /^(activity|busy|warning)/.test(c.id))).toEqual([]);
+    expect(chips.map((c) => c.id)).toContain('scan');
+  });
+
+  // impl-r2 Claude NB6: chips named the session by its id although the ticket was known.
+  test('deferral and stuck chips name a known session by ticket, else by id', () => {
+    const i = input(daemon([stuck('open_files')]));
+    expect(allChips(i)[0].text).toBe('Auto-rebase stuck: tool · s-stuck (open files)');
+    i.sessions = fx<StatusReply>('status_all');
+    i.sessions.sessions[0].status.manifest.id = 's-stuck';
+    i.sessions.sessions[0].status.manifest.ticket = 'gwd-9499';
+    expect(allChips(i)[0]).toMatchObject({
+      id: 'warning:AutoRebaseStuck:tool:s-stuck',
+      text: 'Auto-rebase stuck: tool · gwd-9499 (open files)',
+    });
+    i.daemon.data!.warnings = [stuck('recent_writes')];
+    expect(allChips(i)[0].text).toBe('Auto-rebase waiting · tool · gwd-9499 (recent writes)');
+  });
 });
 
 describe('P-a activity and real incident', () => {
@@ -224,7 +279,8 @@ describe('P-a activity and real incident', () => {
     const blue = model.chips.filter((c) => c.sev === 'blue');
     expect(blue).toHaveLength(1);
     expect(blue[0].text).toContain('Auto-rebase work · tool · s-eqyyt2k7');
-    expect(blue[0].target).toEqual({ kind: 'modal', section: 'daemon' });
+    // The modal renders Activity whenever a warning says the daemon is at work.
+    expect(blue[0].target).toEqual({ kind: 'modal', section: 'activity' });
     expect(model.chips.some((c) => c.sev === 'red')).toBe(false);
     expect(JSON.stringify(model)).not.toMatch(/allocated|67 TB|67000000000000/);
     expect(model.chips.find((c) => c.id === 'scan')?.text).toBe(
@@ -336,6 +392,62 @@ describe('P-a activity and real incident', () => {
   test('sub-three-second activity does not flash', () => {
     expect(allChips(input(daemon([hold('catch_up', 2999)])))).toEqual([]);
     expect(allChips(input(daemon([hold('catch_up', 3000)])))[0].sev).toBe('blue');
+  });
+
+  // impl-r2/r3 NB "activity chips open the Status section": the modal renders Activity for
+  // every activity-class warning while the daemon answers, and hides it during an error.
+  test('activity chips open Activity while the daemon answers, the Status section in an error', () => {
+    const answering = input(daemon([hold(), stuck('recent_writes', 10 * MINUTE)]));
+    const pb = input(structuredClone(pbFixture.daemon) as DaemonStatus);
+    const targets = (i: StatusBarInput, now = NOW) =>
+      allChips(i, now)
+        .filter((c) => /^(activity|busy):/.test(c.id))
+        .map((c) => c.target);
+    expect(targets(answering)).toEqual([{ kind: 'modal', section: 'activity' }]);
+    expect(targets(pb)).toEqual([
+      { kind: 'modal', section: 'activity' },
+      { kind: 'modal', section: 'activity' },
+    ]);
+    for (const i of [answering, pb]) {
+      i.daemon.error = { code: 'Busy', message: 'x', detail: { reason: 'request_in_flight' } };
+      i.health = { timeouts: 0, lastOkAt: NOW };
+      expect(targets(i, NOW + 5000).length).toBeGreaterThan(0);
+      expect(
+        targets(i, NOW + 5000).every((t) => t?.kind === 'modal' && t.section === 'daemon')
+      ).toBe(true);
+    }
+  });
+
+  // impl-r2 Claude NB4: with no LongHold, only the oldest deferral of a repo showed.
+  test('a second transient deferral in a repo is counted on its chip and named in the tooltip', () => {
+    const second = {
+      AutoRebaseStuck: {
+        ...stuck('changed_during_move', 5 * MINUTE).AutoRebaseStuck,
+        session: 's-second',
+      },
+    };
+    const i = input(daemon([second, stuck('recent_writes', 10 * MINUTE)]));
+    expect(allChips(i)).toEqual([
+      expect.objectContaining({
+        text: 'Auto-rebase waiting · tool · s-stuck (recent writes) · 1 more deferred',
+        tooltip: 'Also waiting: s-second (changed during move).',
+      }),
+    ]);
+    i.daemon.data!.warnings = [second];
+    expect(allChips(i)[0]).toMatchObject({
+      text: 'Auto-rebase waiting · tool · s-second (changed during move)',
+      tooltip: undefined,
+    });
+  });
+
+  test('the catch-up chip names a known queue session by its ticket', () => {
+    const i = incidentInput();
+    i.sessions = fx<StatusReply>('status_all');
+    i.sessions.sessions[0].status.manifest.id = 's-eqyyt2k7';
+    i.sessions.sessions[0].status.manifest.ticket = 'gwd-9499';
+    const text = allChips(i).find((c) => c.sev === 'blue')!.text;
+    expect(text).toStartWith('Auto-rebase work · tool · gwd-9499 · ');
+    expect(text).not.toContain('s-eqyyt2k7');
   });
 });
 
@@ -528,6 +640,35 @@ describe('health, waiting and honest facts', () => {
     expect(allChips(i)[0].id).toBe('fds');
   });
 
+  // impl-r2 Claude NB8: startup.rs sends `limit: null` when it cannot read the soft limit.
+  test('an unknown fd limit is no occupancy pressure; a rising accept_errors still is', () => {
+    const i = input();
+    i.daemon.data!.fds = { open: 10_000, limit: null, accept_errors: 15 };
+    expect(allChips(i)).toEqual([]);
+    i.health = { timeouts: 0, lastOkAt: NOW, prevAcceptErrors: 14 };
+    expect(allChips(i)[0]).toMatchObject({ id: 'fds', sev: 'red' });
+  });
+
+  // The Daemon screen keeps the last good reply exactly when S1 does (impl-r2 Claude NB3).
+  test('retainsReply: one transient failure keeps a fresh reply; stopped, old or escalated do not', () => {
+    const d = (error: unknown, updatedAt = NOW) => ({
+      pending: false,
+      data: daemon(),
+      error,
+      updatedAt,
+    });
+    expect(retainsReply(d(null), NOW)).toBe(false); // nothing failed: the reply is live
+    expect(retainsReply(d(err('daemon_timeout', { seconds: 5 })), NOW + 10_000)).toBe(true);
+    expect(retainsReply(d(err('request_in_flight')), NOW + 60_000)).toBe(true);
+    expect(retainsReply(d(err('request_in_flight')), NOW + 60_001)).toBe(false);
+    for (const why of ['daemon_down', 'starting', 'too_many_open_files', 'store_unavailable'])
+      expect(retainsReply(d(err(why)), NOW + 1000)).toBe(false);
+    const timeout = d(err('daemon_timeout'));
+    expect(retainsReply(timeout, NOW + 19_999, { timeouts: 2, lastOkAt: NOW })).toBe(true);
+    expect(retainsReply(timeout, NOW + 20_000, { timeouts: 2, lastOkAt: NOW })).toBe(false);
+    expect(retainsReply({ ...timeout, data: undefined, updatedAt: 0 }, NOW)).toBe(false);
+  });
+
   test('FetchFailed and AnchorNotAdvanced deduplicate per repo', () => {
     const i = input(
       daemon([
@@ -647,6 +788,9 @@ describe('health, waiting and honest facts', () => {
       target: { kind: 'modal', section: 'daemon' },
     });
     i.daemon.data!.started = new Date(NOW - 2 * MINUTE).toISOString();
+    // A first start (login, cold start) is not a restart the App saw.
+    expect(allChips(i).some((c) => c.id === 'restarted')).toBe(false);
+    i.daemonRestarted = true;
     expect(allChips(i).find((c) => c.id === 'restarted')?.text).toBe('Daemon restarted 2 min ago');
     i.daemon.data!.started = new Date(NOW - 10 * MINUTE).toISOString();
     expect(allChips(i).some((c) => c.id === 'restarted')).toBe(false);
@@ -691,20 +835,36 @@ describe('health, waiting and honest facts', () => {
     expect(statusBarModel(i, NOW).right.saved).toBeNull();
   });
 
-  test.each(['total', 'sessions', 'session'])('inexact %s figures hide S1 savings', (where) => {
+  test.each(['sessions', 'session'])('inexact %s figures hide S1 savings', (where) => {
     const i = input();
     i.du = fx<DuReply>('du');
     i.du.savings!.live.savings = 3072;
-    const figure =
-      where === 'total'
-        ? i.du.total
-        : where === 'sessions'
-          ? i.du.sessions!.all
-          : i.du.sessions!.list[0];
+    const figure = where === 'sessions' ? i.du.sessions!.all : i.du.sessions!.list[0];
     Object.assign(figure, { exact: false });
     expect(statusBarModel(i, NOW).right.saved).toBeNull();
+    expect(savingsView(i.du)!.live.saved).toBeNull();
     Object.assign(figure, { exact: true });
     expect(statusBarModel(i, NOW).right.saved?.text).toContain('up to');
+    expect(savingsView(i.du)!.live.saved).toBe(3072);
+  });
+
+  // Claude impl-r2 NB5: S1 and the modal decided the live bound by different rules.
+  test('S1 and the modal share one live-savings rule; an inexact total outside the sessions keeps both', () => {
+    const i = input();
+    i.du = fx<DuReply>('du');
+    i.du.savings!.live.savings = 3072;
+    // Only a base, dependency or store unit lacked a private size: the sessions are exact.
+    Object.assign(i.du.total, { exact: false });
+    expect(liveSavingsExact(i.du)).toBe(true);
+    expect(statusBarModel(i, NOW).right.saved?.text).toBe('up to 3.0 KB saved');
+    expect(savingsView(i.du)!.live.saved).toBe(3072);
+    for (const where of ['all', 'row'] as const) {
+      const du = structuredClone(i.du);
+      Object.assign(where === 'all' ? du.sessions!.all : du.sessions!.list[1], { exact: false });
+      expect(liveSavingsExact(du)).toBe(false);
+      expect(statusBarModel({ ...i, du }, NOW).right.saved).toBeNull();
+      expect(savingsView(du)!.live.saved).toBeNull();
+    }
   });
 });
 
@@ -822,6 +982,24 @@ describe('P-b contract sources', () => {
     expect(activity(i)[0].tooltip).toBeUndefined();
     i.daemon.data!.activity = [work({ kind: 'base_build', tree: null })];
     expect(activity(i)[0].tooltip).toContain('may wait for this work');
+  });
+
+  // Status-bar daemon impl-r2 Claude NB1: an older lock-free install covered its repo, hiding a
+  // newer move there, and carried "· N waiting" for requests that wait on the move.
+  test('a dependency install never hides lock-holding work or carries its waiting count', () => {
+    const i = pbi();
+    i.daemon.data!.activity = [
+      work({ kind: 'deps_install', proposal: null, id: 1, elapsed_ms: 10 * MINUTE }),
+      work({ id: 2 }),
+    ];
+    expect(activity(i)).toEqual([
+      expect.objectContaining({
+        text: 'Moving s-pb9492 to new main · tool · 2 min · 2 waiting',
+        tooltip: expect.stringContaining('may wait for this work'),
+      }),
+    ]);
+    i.daemon.data!.activity = [work({ kind: 'deps_install', proposal: null, id: 1 })];
+    expect(activity(i)[0].text).toBe('Installing dependencies · tool · 2 min');
   });
 
   test('malformed activity renders safely: no repos, no usable elapsed time', () => {
@@ -1099,6 +1277,7 @@ describe('P-b contract sources', () => {
     i.daemon.updatedAt = NOW + 4000;
     i.daemon.data!.busy!.recent.forEach((e) => (e.at = new Date(NOW + 2000).toISOString()));
     i.daemon.data!.started = new Date(NOW + 1000).toISOString();
+    i.daemonRestarted = true;
     const model = statusBarModel(i, NOW);
     expect(model.right.free?.sev).toBe('red');
     expect(model.right.free?.text).not.toBe('—');
@@ -1120,10 +1299,43 @@ describe('P-b contract sources', () => {
       sev: 'amber',
       text: `App ${version} · daemon 0.2.3`,
     });
+    i.daemonRestarted = true;
     expect(allChips(i).find((c) => c.id === 'restarted')).toMatchObject({
       sev: 'muted',
       text: 'Daemon restarted 2 min ago',
     });
+  });
+
+  // Status-bar daemon impl-r2 NB3: started under 10 min ago is not proof of a restart.
+  test('the restart chip needs a restart the App saw, never a first start at login', () => {
+    const first = structuredClone(pbFixture.daemon) as DaemonStatus;
+    const seen = observeDaemonStart(undefined, first);
+    expect(seen).toEqual({ started: first.started!, pid: 4242, restarted: false });
+    const i = pbi();
+    i.daemonRestarted = seen!.restarted;
+    expect(allChips(i).some((c) => c.id === 'restarted')).toBe(false);
+    // The same instance again, and replies without identity (0.2.2), change nothing.
+    expect(observeDaemonStart(seen, structuredClone(first))).toBe(seen);
+    const { started: _s, pid: _p, ...legacy } = structuredClone(first);
+    expect(observeDaemonStart(seen, legacy as DaemonStatus)).toBe(seen);
+    expect(observeDaemonStart(seen, undefined)).toBe(seen);
+    expect(observeDaemonStart(undefined, legacy as DaemonStatus)).toBeUndefined();
+    // A new pid, or a new start time with a reused pid, is a restart.
+    const newPid = observeDaemonStart(seen, { ...first, pid: 4343 });
+    expect(newPid).toEqual({ started: first.started!, pid: 4343, restarted: true });
+    const later = new Date(NOW - MINUTE).toISOString();
+    const restarted = observeDaemonStart(seen, { ...first, started: later })!;
+    expect(restarted).toEqual({ started: later, pid: 4242, restarted: true });
+    i.daemon.data!.started = later;
+    i.daemonRestarted = restarted.restarted;
+    expect(allChips(i).find((c) => c.id === 'restarted')?.text).toBe('Daemon restarted 1 min ago');
+    // It stays a restart: the chip ends only when that start is ten minutes old.
+    expect(observeDaemonStart(restarted, { ...first, started: later })).toBe(restarted);
+    const end = Date.parse(later) + 10 * MINUTE;
+    i.daemon.updatedAt = end - 1;
+    expect(allChips(i, end - 1).some((c) => c.id === 'restarted')).toBe(true);
+    i.daemon.updatedAt = end;
+    expect(allChips(i, end).some((c) => c.id === 'restarted')).toBe(false);
   });
 
   test('without the capability new data fields add no chips or free-space facts', () => {

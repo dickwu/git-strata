@@ -281,8 +281,12 @@ waiting-human state, or a non-conflict deferral strictly older than 24 hours.
 The shared age predicate excludes `auto.reason=conflicts`; `since` measures the pending row's original `first_at`, not time spent in the current state. Bad/missing dates do not pass the threshold. Unhealthy workspaces and scenes
 retain human attention and their specific GUI reason even when upstream data is absent.
 Conflicts and `auto.reason=conflicts`
-point to “needs the session's agent” and offer Copy for `cd ~ && git-strata sync --session S --repo R`, never
-an approval. Copy does not execute the command.
+point to the session's agent and offer Copy for `cd ~ && git-strata sync --session S --repo R`, never
+an approval. Copy does not execute the command. A conflict card's title says what is wrong
+(“2 conflicts with main”; “Conflicts with main” when only `auto.reason=conflicts` reports them), and
+the line under it says who acts: “Needs the session's agent: give it the sync command below.”, or,
+without `status.upstream` and so without a command, “Needs the session's agent to resolve them in its
+workspace.” beside Review.
 
 The `status.upstream` capability gates cached `↓N` list badges and the detail modal's per-repo “From main”
 sections (behind/unchecked/capped, up to 20 commit subjects, deps summary/state/mode, auto reason,
@@ -1005,7 +1009,7 @@ daemon modal. Chip targets open the relevant modal section, waiting list or sess
 | 1 | Red (`--danger`) | Critically low volume space, unavailable data volume guidance, file-handle pressure, Error-class warnings (down/exhaustion are shown once in the daemon trigger) |
 | 2 | Amber (Waiting palette) | Waiting for you |
 | 3 | Purple (Conflict palette) | Repositories needing an agent for conflicts |
-| 4 | Amber (Waiting palette) | Degraded states: Busy replies, abnormal holds (every P-b LongHold; on 0.2.2 a request hold or a background hold past 30 min), current long waits, actionable auto-rebase failures, config/fetch failures, published but not pushed, unresolved measuring errors, low space, version mismatch |
+| 4 | Amber (Waiting palette) | Degraded states: Busy replies, abnormal holds (every P-b LongHold; on 0.2.2 a request hold or a background hold past 30 min), current long waits, actionable auto-rebase failures, config not applied or awaiting a restart, fetch failures, a panicked reconciliation pass (`reconcile.last.panicked`), a failed sessions audit-log write (`sessions_audit_error`), published but not pushed, unresolved measuring errors, low space, version mismatch |
 | 5 | Blue (Syncing palette) | Normal background work |
 | 6 | Muted | Size-scan counts and partial details |
 
@@ -1022,6 +1026,10 @@ same 4 s rule until a successful reply or shed clears that evidence. Without a p
 count either. Before the threshold the trigger stays neutral Checking. After escalation,
 `request_in_flight` uses the detail "An earlier request is still waiting for the daemon."
 Manual Refresh keeps reads already in flight, preserving their eventual timeout evidence.
+S1 observes only the window's own `daemon_status` completions. A reply that arrives after the
+window's 5 s deadline is recorded by the tray, which counts it as a good reply, but never reaches
+S1. So while `daemon_status` takes 5–15 s, S1 can show not responding while the tray stays up.
+This is a known gap: the window has no channel for late replies, and none is added here.
 Retained replies keep their original 60-second health age. When Checking on an error and the
 last good reply is older than 60 s, the detail is "Not updated for N min" (whole minutes; hours after 60 min)
 instead of the error's Busy/retry detail. A rising `fds.accept_errors` counter across successful
@@ -1030,10 +1038,11 @@ does not. Health text is shown once in the trigger, so muted states do not take 
 over actionable chips. `store_unavailable` uses a volume-wait trigger and separate guidance
 for permission/TCC versus an unavailable volume; `starting` means recovery is in progress.
 
-Only chips backed by `warnings[]` target the Warnings section. P-b work/Busy chips open
+Only chips backed by `warnings[]` target the Warnings section, except activity chips. Activity
+chips (0.2.2 background LongHolds and transient deferrals, P-b work) and Busy chips open
 Activity, scan chips open Size scan, and low-space chips open Trash (available even while
 waiting for du). Other chips open the daemon section; all chips are also listed under Now.
-Retained warning chips also use the daemon section while a query error hides the warning list.
+Retained warning and activity chips use the daemon section while a query error hides those lists.
 FetchFailed and AnchorNotAdvanced share one fetching-failed chip per repo. A
 `sessions_audit_error` chip means writing the sessions audit log failed. The published-but-not-pushed
 chip requires an explicit `needs_push` reason; 0.2.2 never emits it, so that chip cannot
@@ -1054,7 +1063,10 @@ entry: warnings, holds and queues are sampled independently.
   so it is never labelled auto-rebase.
 - These background methods turn amber at 30 min (`BACKGROUND_HOLD_MAX`). Other methods,
   including request-held `publish`, `push` and `sync`, are amber notices even at 40 s.
-  Missing or unusable start times stay notices. No LongHold alone is red.
+  Missing or unusable start times stay notices. A background start later than the App's clock
+  (the wall clock stepped back) proves no age under 30 min, so, as in the tray, it is never
+  blue work: it is a muted modal notice saying the start time is ahead of this Mac's clock.
+  No LongHold alone is red.
 
 A present, non-null LongHold `origin` or the `daemon_status.activity` feature means the daemon
 already reports only abnormal LongHolds: every one remains an amber notice, regardless of
@@ -1065,7 +1077,10 @@ blue until the existing 24-hour deferral rule, then amber. Blue transient deferr
 choose a catch-up LongHold first, then another LongHold, then a transient deferral; age breaks
 ties only within a kind. Waiting/pending counts and the lock-wait tooltip belong only to
 the LongHold chip. Transient deferrals beside that hold appear as `N deferred`; pending counts
-require fresh session data. A LongWait chip says the current
+require fresh session data. A deferral chip names one session; the repo's other transient
+deferrals appear on it as `N more deferred`, and its tooltip names each
+(`Also waiting: s-… (changed during move).`). These chips name a session by its ticket when
+the sessions reply knows it, else by its id. A LongWait chip says the current
 attempt is waiting and is shown only below ten minutes; older entries remain in the modal.
 
 ### Storage and size scans
@@ -1077,10 +1092,12 @@ unavailable, not zero; show `as_of` and `(measuring)` when pending or stale. Tra
 entry counts and eligibility, with no promise of reclaimed bytes. `allocated` and raw
 logical totals appear only behind Details, labelled as counted once per file and therefore
 overcounting APFS clones. They are not an "on disk" total. Savings are `up to X saved`;
-incomplete savings carry `(measuring)` and their observation time. S1 hides savings if total,
-session aggregate, or individual live-session figures explicitly report `exact:false`;
-the modal also withholds affected lower/upper bounds rather than treating allocated fallback
-bytes as private measurements.
+incomplete savings carry `(measuring)` and their observation time. `savings.live` sums the
+same units as `sessions.all`, so S1 and the modal share one rule: when the session aggregate
+or any live session explicitly reports `exact:false`, S1 hides savings and the modal withholds
+the live lower/upper bounds (and that session's own), rather than treating allocated fallback
+bytes as private measurements. An inexact total, base, dependency or store figure is not part
+of that sum and hides no savings.
 
 A scan chip appears only while running and either `full` or older than 60 s. With 0.2.2 it
 reads `Measuring storage · 412 done, 140 queued`, using `du.scan` counts. No percentage, ETA
@@ -1090,7 +1107,10 @@ an amber failure chip.
 
 ### Daemon modal and Daemon screen (S3/S4)
 
-The daemon modal opens from the trigger or a chip. Its Now list includes all S1 chips,
+The daemon modal opens from the trigger or a chip. Its title tag follows the S1 trigger's
+state, so the two never disagree: green `Running`, neutral `Checking`, and red `Unreachable`
+only while S1 shows the daemon down; the daemon section's State row repeats the trigger's
+label and, unless running, its detail. Its Now list includes all S1 chips,
 including overflow. Classified warnings use human-readable text and severity markers;
 each raw entry is behind a neutral Details disclosure. LongHold activity stays blue until
 its fallback time cap, abnormal holds are amber, and only Error-class warnings are red.
@@ -1104,20 +1124,33 @@ Storage shows private bounds, their accuracy/measuring state and observation tim
 figures cover sessions, bases, dependencies and store/trash. Affected bounds are unavailable
 for inexact measurements. Allocated/raw logical counts remain behind Details. Savings retain
 live context, per-session figures and creation/copy timing where reported; accuracy is
-preserved when deciding which bounds are available. On daemon 0.2.2 cumulative savings have
-no accuracy flag, so the modal withholds the numeric cumulative savings bound even when
-current figures are exact, while keeping recorded-session counts, removed/unmeasured counts
-and creation/copy timing. The scan section shows
+preserved when deciding which bounds are available. No daemon (0.2.2 or P-b) reports the
+accuracy of the cumulative sum (`savings.cumulative`), so the modal never shows a numeric
+cumulative savings bound, even when current figures are exact; it keeps recorded-session
+counts, removed/unmeasured counts and creation/copy timing. Trash gives its entry counts
+and eligibility, `Nothing in the trash.` when du measured it empty, and
+`Trash measurements are not available yet.` only while du has given no trash counts. The
+scan section shows
 done/queued counts and historical measuring errors on 0.2.2, or active/done/queued counts and
 current unresolved units/errors/timestamps on P-b. The daemon section provides health,
-socket, session/hold/waiting/warning counts, reconciliation, file handles/accept errors and
-configuration facts. Optional version, pid, started and uptime are marked unreported when missing;
-none is inferred for 0.2.2.
+socket, session/hold/waiting/warning counts, `Leftover directories` (the sessions reply's
+`leftovers`: directories that belong to no session), reconciliation, file handles/accept
+errors and configuration facts. A file-handle limit the daemon could not read (`fds.limit`
+null) shows as `N open, limit unknown`. Optional version, pid, started and uptime are marked
+unreported when missing; none is inferred for 0.2.2.
 
 The full-page Daemon screen, reached through the command palette, reuses the classified
 warning list and private-storage headline. It also shows socket, reconciliation/hold counts,
 per-repo waiting counts, and links to sessions with unavailable upstream detail. Raw warnings
-remain behind Details and allocated clone totals are not used as its storage headline.
+remain behind Details and allocated clone totals are not used as its storage headline. Its
+warnings name a session by its ticket when the sessions reply knows it. A failed poll does
+not blank it: by S1's freshness rule it keeps the last good reply while that reply is at most
+60 s old and the error is not a stopped, starting, shedding or volume-waiting daemon, says
+`Showing the daemon's last answer (N s ago).` under the error, and drops the `Running` tag.
+Past that it shows nothing from the cached reply. S1's not-responding escalation counts
+timeouts in the status bar and is not applied here: from that escalation (20 s at the
+earliest) until the 60 s limit, the screen can still show the labelled last answer while S1
+says not responding.
 S3/S4 reuse the existing query data; they add no daemon command or poll.
 
 ### P-b sources and compatibility
@@ -1130,13 +1163,17 @@ the presence of `api`, not this reply feature. The 0.2.2 incident fixture and fa
 
 Activity entries younger than 3 s are omitted. The oldest outer activity covers its repo
 (session creation covers its `repos`, suppressing child work chips); there is at most one
-activity chip per repo. Examples: `Moving gwd-9492 to new main · tool · 2 min`, `Rebasing
+activity chip per repo. A dependency install holds no repo lock, so no request waits on it:
+lock-holding work in the same repo (a move, publish or push, for example) covers the repo
+first, however much younger, and an install is shown only for a repo no such work covers.
+Examples: `Moving gwd-9492 to new main · tool · 2 min`, `Rebasing
 after publish · tool`, `Sync moving s-… · tool`, `Rolling out deps 2/5 · tool`, `Building
 base · tool`, `Creating session gwd-9500 · 3 repos`, `Installing dependencies · tool`,
 `Publishing tool`, and `Pushing tool`. S1 uses the session ticket when the sessions reply
 knows it, else a short id. Elapsed time comes from the daemon's monotonic milliseconds;
 the existing five-second UI clock advances it between health replies. Repo waiting counts
-and fresh session pending counts append `N waiting` / `N pending`. The tooltip gives the
+(never on a dependency install's chip) and fresh session pending counts append `N waiting` /
+`N pending`. The tooltip gives the
 move phase or creation step and explains the 30-second Busy refusal/retry rule, except for a
 dependency install, which holds no repo lock.
 
@@ -1178,6 +1215,8 @@ history view and is hidden on P-b, whose failed history may contain resolved att
 
 Daemon identity is reported as muted `daemon 0.2.x`, pid and started/uptime in the modal.
 A version differing from the existing App package version produces amber `App X · daemon Y`.
-A start less than ten minutes ago produces muted `Daemon restarted 2 min ago`.
+Muted `Daemon restarted 2 min ago` appears only for a restart the App saw: a reply whose pid
+or `started` differs from an earlier reply's, while that start is less than ten minutes old.
+The first daemon the App sees, such as one started at login just before it, is no restart.
 Display `activity[]` remains distinct from the admitted-write `inflight[]` list used for
 safe drain (§5.9); display activity is not an admission or quiescence proof.

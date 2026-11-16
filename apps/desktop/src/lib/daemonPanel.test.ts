@@ -232,7 +232,8 @@ describe('savingsView', () => {
       expect(v.inexact).toBe(false);
       expect([v.live.saved, v.live.onDisk]).not.toContain(null);
       expect(v.rows.map((r) => [r.onDisk, r.saved]).flat()).not.toContain(null);
-      expect(v.cumulative.saved).toBeNull(); // 0.2.2 reports no historical accuracy
+      // No daemon reports historical accuracy: the view carries counts, never a bound.
+      expect(v.cumulative).not.toHaveProperty('saved');
     }
   });
 
@@ -254,7 +255,7 @@ describe('savingsView', () => {
       ['s-big', null, null],
     ]);
     // Cumulative accuracy is unknown independently of the live figures.
-    expect(v.cumulative.saved).toBeNull();
+    expect(v.cumulative).not.toHaveProperty('saved');
     expect(v.inexact).toBe(true);
     // Time is measured, not derived from private sizes.
     expect(v.timing?.speedup).toBe(2);
@@ -266,7 +267,7 @@ describe('savingsView', () => {
     du.total = { ...du.total, exact: false } as Usage;
     du.sessions!.all = { ...du.sessions!.all, exact: false } as Usage;
     du.sessions!.list[0] = { ...du.sessions!.list[0], exact: false } as DuSession;
-    expect(savingsView(du)!.cumulative.saved).toBeNull();
+    expect(savingsView(du)!.cumulative).not.toHaveProperty('saved');
 
     // Removing that session restores exact current measurements, but its persisted savings
     // remain in cumulative alongside other removed sessions (du.rs `cumulative`).
@@ -290,7 +291,6 @@ describe('savingsView', () => {
     du.savings!.cumulative.removed = 2;
     const v = savingsView(du)!;
     expect(v.cumulative).toEqual({
-      saved: null,
       sessions: 3,
       sized: 3,
       unsized: 0,
@@ -309,7 +309,9 @@ describe('savingsView', () => {
     du.sessions!.list = [{ ...sess('s-odd', 5e9, 1e9), exact: false } as DuSession];
     const v = savingsView(du)!;
     expect(v.rows[0]).toMatchObject({ onDisk: null, saved: null, logical: 5e9 });
-    expect(v.live.saved).toBe(12e9 - 2e6); // sessions.all does not say inexact
+    // One rule with S1 (liveSavingsExact): an inexact live session voids the live bounds
+    // even when sessions.all does not say so.
+    expect([v.live.saved, v.live.onDisk]).toEqual([null, null]);
     expect(v.inexact).toBe(true);
   });
 });
@@ -358,6 +360,19 @@ describe('statusFacts', () => {
     expect(f.fds).toEqual({ open: 36, limit: 10240, acceptErrors: 0, share: 36 / 10240 });
     expect(f.uptimeMs).toBe(90 * 60 * 1000);
     expect([f.version, f.api, f.pid, f.waiting]).toEqual(['0.1.0', 2, 4242, 3]);
+  });
+
+  test('fds.limit null (soft limit unreadable): open and accept errors stay, share is unknown', () => {
+    const s = {
+      ...fx<DaemonStatus>('daemon_status'),
+      fds: { open: 36, limit: null, accept_errors: 2 },
+    };
+    expect(statusFacts(s, Date.now()).fds).toEqual({
+      open: 36,
+      limit: null,
+      acceptErrors: 2,
+      share: null,
+    });
   });
 });
 
