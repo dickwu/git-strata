@@ -6,7 +6,8 @@
 //! (tests/support/live.rs, temp HOME and socket, never the live one),
 //! sends each request in `requests.json` exactly as the desktop sends it,
 //! and checks every field of the committed fixture is still in the reply
-//! with the same JSON type.
+//! with the same JSON type, and that the fixture has every key of [`added`]
+//! the reply has.
 //!
 //! Update the fixtures (after a deliberate reply change) with
 //! `GUI_FIXTURES=write cargo test -p git-strata --test gui_fixtures`. A
@@ -125,6 +126,16 @@ fn same_shape(path: &str, want: &Value, got: &Value, errs: &mut Vec<String>) {
     }
 }
 
+/// The keys of [`added`] the reply has and the committed fixture lacks,
+/// which `write` would add: the fixture is older than the reply.
+fn missing_added(name: &str, want: &Value, got: &Value, errs: &mut Vec<String>) {
+    for (_, path, _) in added().into_iter().filter(|(n, ..)| *n == name) {
+        if at(got, path).is_some() && at(want, path).is_none() {
+            errs.push(format!("{name}: fixture has no `{path}`, the reply has"));
+        }
+    }
+}
+
 /// Machine paths and per-run ids replaced by stable placeholders.
 fn redact(v: &Value, subs: &[(String, String)]) -> Value {
     let mut s = serde_json::to_string_pretty(v).unwrap();
@@ -226,6 +237,7 @@ fn gui_p1_replies_match_fixtures() {
         )
         .unwrap();
         same_shape(name, &want, &got, &mut errs);
+        missing_added(name, &want, &got, &mut errs);
     }
     assert!(
         errs.is_empty(),

@@ -671,8 +671,11 @@ DATA
   {root, now, total, store{all, db, blobs, tmp, other, trash{..., entries,
    eligible{entries, reclaim_min, reclaim_max}, young, floor_secs, gc}},
    bases{all, repos}, deps{all, repos}, sessions{all, list[{session, savings}]},
-   savings{live, cumulative}, scan{running, started, done, queued, full,
-   failed, last_full}, took_ms}
+   savings{live, cumulative}, scan{running, started, active, done, queued,
+   full, failed, unresolved, last_full}, took_ms}
+  scan.active: units being measured now. scan.failed: every failed
+  measurement; scan.unresolved: one {unit, error, at} per unit whose last
+  measurement failed, until it is measured or confirmed gone.
   savings.live: logical - private of live sessions. savings.cumulative: from
   sessions created/removed since `since`; earlier sessions are unknown.
   trash.eligible is what `git-strata gc` would try to delete (it may still
