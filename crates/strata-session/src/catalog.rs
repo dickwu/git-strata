@@ -148,13 +148,16 @@ impl Drop for Pin<'_> {
     }
 }
 
-/// A scoped helper inherits the parent's exact catalog, even after a reload.
+/// A scoped helper inherits the parent's exact catalog, even after a reload,
+/// and its request tag and work observer (`observe`, status-bar §11.1); all
+/// three are restored when the helper's closure returns or unwinds.
 pub fn spawn_pinned<'s, 'e, F, T>(scope: &'s Scope<'s, 'e>, f: F) -> ScopedJoinHandle<'s, T>
 where
     F: FnOnce() -> T + Send + 's,
     T: Send + 's,
 {
     let bindings = BINDINGS.with(|b| b.borrow().clone());
+    let inherited = crate::observe::inherit();
     scope.spawn(move || {
         let previous = BINDINGS.with(|b| b.replace(bindings));
         let _pin = Pin {
@@ -162,6 +165,7 @@ where
             _borrow: PhantomData,
             _thread: PhantomData,
         };
+        let _observe = inherited.enter();
         f()
     })
 }

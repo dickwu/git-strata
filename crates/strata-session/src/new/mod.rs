@@ -75,7 +75,14 @@ pub struct NewReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum NewWarning {
-    BaseAheadOfMain { repo: RepoName, rev: String, head: CommitOid, main: CommitOid, ahead: u32, commits: Vec<serde_json::Value> },
+    BaseAheadOfMain {
+        repo: RepoName,
+        rev: String,
+        head: CommitOid,
+        main: CommitOid,
+        ahead: u32,
+        commits: Vec<serde_json::Value>,
+    },
     /// `deps::observe_main` failed for this repo; `detail` is deps' error
     /// as returned. The session is Active all the same.
     ObserveFailed { repo: RepoName, detail: StrataError },
@@ -90,42 +97,93 @@ impl Sessions<'_> {
 
     /// `new` with an explicit layout (D51): `Layout::Only` builds workspaces
     /// of the requested repos only and fetches only those.
-    pub fn new_with(&self, ticket: Option<&str>, repos: &[RepoName], layout: Layout) -> Result<NewReport> {
+    pub fn new_with(
+        &self,
+        ticket: Option<&str>,
+        repos: &[RepoName],
+        layout: Layout,
+    ) -> Result<NewReport> {
         self.new_as(ticket, repos, layout, None)
     }
 
     /// `new_with`, recording which agent created the session (stored with
     /// the session row, immutable; `None` = not known).
-    pub fn new_as(&self, ticket: Option<&str>, repos: &[RepoName], layout: Layout, agent: Option<&AgentName>) -> Result<NewReport> {
+    pub fn new_as(
+        &self,
+        ticket: Option<&str>,
+        repos: &[RepoName],
+        layout: Layout,
+        agent: Option<&AgentName>,
+    ) -> Result<NewReport> {
         self.new_at(ticket, repos, layout, agent, &BTreeMap::new())
     }
 
-    pub fn new_at(&self, ticket: Option<&str>, repos: &[RepoName], layout: Layout, agent: Option<&AgentName>, bases: &BTreeMap<RepoName, String>) -> Result<NewReport> {
-        if !bases.is_empty() && (layout != Layout::Only || bases.keys().any(|r| !repos.contains(r))) {
-            return Err(StrataError::new(Code::InvalidInput, "--base requires named --repo workspaces")
-                .with_detail(json!({"reason":"base_flags"})));
+    pub fn new_at(
+        &self,
+        ticket: Option<&str>,
+        repos: &[RepoName],
+        layout: Layout,
+        agent: Option<&AgentName>,
+        bases: &BTreeMap<RepoName, String>,
+    ) -> Result<NewReport> {
+        if !bases.is_empty() && (layout != Layout::Only || bases.keys().any(|r| !repos.contains(r)))
+        {
+            return Err(StrataError::new(
+                Code::InvalidInput,
+                "--base requires named --repo workspaces",
+            )
+            .with_detail(json!({"reason":"base_flags"})));
         }
-        for rev in bases.values() { validate_base_rev(rev)?; }
+        for rev in bases.values() {
+            validate_base_rev(rev)?;
+        }
         let v = self.validate_new(ticket, repos, layout)?;
-        let resolved = dispatch::each_repo_n(dispatch::FETCH_WORKERS, &v.members, &|r| self.seams.hit("head", Some(r)), &|r| self.head_at(r, bases.get(r).map(String::as_str))).map_err(|mut e| {
+        // status-bar §11.2, §12.8: the daemon's `session_create` activity,
+        // from the minted id on; dispatch workers inherit the observer.
+        let observed = crate::observe::begin(crate::observe::Work::SessionCreate {
+            repos: v.members.clone(),
+            session: Some(v.id.clone()),
+        });
+        observed.step("head");
+        let resolved = dispatch::each_repo_n(
+            dispatch::FETCH_WORKERS,
+            &v.members,
+            &|r| self.seams.hit("head", Some(r)),
+            &|r| self.head_at(r, bases.get(r).map(String::as_str)),
+        )
+        .map_err(|mut e| {
             if e.detail.as_ref().and_then(|d| d["reason"].as_str()) == Some("base_behind_main") {
                 let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
                 let mut command = String::from("git-strata new");
-                if let Some(ticket) = ticket { command.push_str(&format!(" {}", quote(ticket))); }
-                for repo in repos { command.push_str(&format!(" --repo {}", quote(repo.as_str()))); }
-                if let Some(agent) = agent { command.push_str(&format!(" --agent {}", quote(agent.as_str()))); }
-                if let Some(d) = &mut e.detail { d["fix"] = json!(command); }
+                if let Some(ticket) = ticket {
+                    command.push_str(&format!(" {}", quote(ticket)));
+                }
+                for repo in repos {
+                    command.push_str(&format!(" --repo {}", quote(repo.as_str())));
+                }
+                if let Some(agent) = agent {
+                    command.push_str(&format!(" --agent {}", quote(agent.as_str())));
+                }
+                if let Some(d) = &mut e.detail {
+                    d["fix"] = json!(command);
+                }
             }
             e
         })?;
         let mut base_warnings = Vec::new();
-        let heads: BTreeMap<RepoName, (CommitOid, TreeOid)> = resolved.into_iter().map(|(r, (head, tree, warning))| {
-            if let Some(w) = warning { base_warnings.push(w); }
-            (r, (head, tree))
-        }).collect();
+        let heads: BTreeMap<RepoName, (CommitOid, TreeOid)> = resolved
+            .into_iter()
+            .map(|(r, (head, tree, warning))| {
+                if let Some(w) = warning {
+                    base_warnings.push(w);
+                }
+                (r, (head, tree))
+            })
+            .collect();
         let all: Vec<RepoName> = heads.keys().cloned().collect();
 
         // Phase B, steps 9-10: base generations and seed plans (cache fill).
+        observed.step("base");
         let planned = dispatch::each_repo(&all, &|_| Ok(()), &|r| {
             let (_, tree) = &heads[r];
             let bg = self.base_flow(r, tree, None)?;
@@ -158,6 +216,7 @@ impl Sessions<'_> {
         // rm-followups R1: step 7 again, the row and the two root
         // directories under `enroll`, so the orphan sweep never sees this
         // id between them; released right after the mkdirs (layout_steps).
+        observed.step("enroll");
         self.seams.hit("new.enroll", None)?;
         let enroll = self.enroll.lock().unwrap_or_else(|p| p.into_inner());
         self.id_free(&manifest.id)?;
@@ -172,15 +231,25 @@ impl Sessions<'_> {
         }
 
         // Phase D, steps 12-14.
-        self.build_layout(&manifest, &plans, enroll)?;
+        self.build_layout(&manifest, &plans, enroll, &observed)?;
 
         // Step 15: observe main; failures are warnings only.
+        observed.step("observe");
         base_warnings.extend(self.observe_all(&manifest));
-        Ok(NewReport { manifest, warnings: base_warnings })
+        Ok(NewReport {
+            manifest,
+            warnings: base_warnings,
+        })
     }
 
     /// §5.1 step 10: the seed-file plan and, for tracked repos, the seed caches.
-    fn plan_repo(&self, repo: &RepoName, bg: &BaseGen, tree: &TreeOid, tracked: bool) -> Result<Plan> {
+    fn plan_repo(
+        &self,
+        repo: &RepoName,
+        bg: &BaseGen,
+        tree: &TreeOid,
+        tracked: bool,
+    ) -> Result<Plan> {
         let cfg = self.repo_cfg(repo)?;
         let git = self.git(repo)?;
         let base = self.store.base_dir(bg);
@@ -226,10 +295,11 @@ impl Sessions<'_> {
         m: &SessionManifest,
         plans: &BTreeMap<RepoName, (BaseGen, Plan)>,
         enroll: MutexGuard<'_, ()>,
+        observed: &crate::observe::Observed,
     ) -> Result<()> {
         let at = Mutex::new(("root", None::<RepoName>));
         let owned = Mutex::new(Vec::new());
-        match self.layout_steps(m, plans, &at, &owned, enroll) {
+        match self.layout_steps(m, plans, &at, &owned, enroll, observed) {
             Ok(()) => Ok(()),
             Err(e) if crate::seams::is_stop(&e) => Err(e),
             Err(e) => {
@@ -248,16 +318,24 @@ impl Sessions<'_> {
     }
 
     /// D56: undo a failed `new` from its Unknown row through `teardown`.
-    fn roll_back_new(&self, m: &SessionManifest, owned: &[(PathBuf, crate::orphans::Ident)]) -> Result<Vec<PathBuf>> {
+    fn roll_back_new(
+        &self,
+        m: &SessionManifest,
+        owned: &[(PathBuf, crate::orphans::Ident)],
+    ) -> Result<Vec<PathBuf>> {
         self.seams.hit("new.rollback", None)?;
         let rec = match self.store.session(&m.id)? {
             Some(r) if r.lifecycle == Lifecycle::Unknown => r,
             _ => {
-                return Err(StrataError::new(Code::Unknown, format!("new {}: the row is not Unknown; not rolled back", m.id))
-                    .with_detail(json!({ "reason": "lifecycle", "session": m.id.as_str() })));
+                return Err(StrataError::new(
+                    Code::Unknown,
+                    format!("new {}: the row is not Unknown; not rolled back", m.id),
+                )
+                .with_detail(json!({ "reason": "lifecycle", "session": m.id.as_str() })));
             }
         };
-        self.teardown(&rec, Lifecycle::Unknown, Some(owned), None).map(|t| t.not_owned)
+        self.teardown(&rec, Lifecycle::Unknown, Some(owned), None)
+            .map(|t| t.not_owned)
     }
 
     /// The error of the scene now on the row (the rollback's own when it
@@ -275,7 +353,13 @@ impl Sessions<'_> {
 
     /// Record the scene and build the error (§6.3). If `set_lifecycle`
     /// fails too the row stays `Creating`; `recover` marks it next start.
-    fn new_unknown(&self, m: &SessionManifest, phase: &str, repo: Option<&RepoName>, e: &StrataError) -> StrataError {
+    fn new_unknown(
+        &self,
+        m: &SessionManifest,
+        phase: &str,
+        repo: Option<&RepoName>,
+        e: &StrataError,
+    ) -> StrataError {
         let kept = kept_dirs(&self.config.paths.root, &m.id, m.repos.keys().cloned());
         let mut extra = serde_json::Map::new();
         if let Some(r) = repo {
@@ -286,9 +370,23 @@ impl Sessions<'_> {
         }
         let err = unknown_error(SceneOp::New, &m.id, None, phase, cause_of(e), &kept, extra);
         let now = SystemTime::now();
-        let scene = Scene { op: SceneOp::New, session: m.id.clone(), repo: repo.cloned(), phase: phase.into(), at: now, kept, error: err.clone() };
+        let scene = Scene {
+            op: SceneOp::New,
+            session: m.id.clone(),
+            repo: repo.cloned(),
+            phase: phase.into(),
+            at: now,
+            kept,
+            error: err.clone(),
+        };
         if let Ok(v) = serde_json::to_value(&scene) {
-            let _ = self.store.set_lifecycle(&m.id, Lifecycle::Creating, Lifecycle::Unknown, Some(&v), now);
+            let _ = self.store.set_lifecycle(
+                &m.id,
+                Lifecycle::Creating,
+                Lifecycle::Unknown,
+                Some(&v),
+                now,
+            );
         }
         err
     }
@@ -300,12 +398,14 @@ impl Sessions<'_> {
         at: &Mutex<(&'static str, Option<RepoName>)>,
         owned: &Mutex<Vec<(PathBuf, crate::orphans::Ident)>>,
         enroll: MutexGuard<'_, ()>,
+        observed: &crate::observe::Observed,
     ) -> Result<()> {
         let id = &m.id;
         let proot = &self.config.paths.root;
         let repos: Vec<RepoName> = m.repos.keys().cloned().collect();
         let enter = |phase: &'static str| -> Result<()> {
             *at.lock().unwrap_or_else(|p| p.into_inner()) = (phase, None);
+            observed.step(phase);
             self.store.set_session_phase(id, phase)
         };
         // One phase over `repos`; the first failing repo in RepoName order
@@ -543,15 +643,27 @@ impl Sessions<'_> {
     /// read the chain top in one critical section, then the tree. Fetches
     /// run `FETCH_WORKERS` wide (D53); a repo fetched successfully within
     /// the fetch window is not fetched again.
-    pub(crate) fn resolve_heads(&self, members: &[RepoName]) -> Result<Vec<(RepoName, (CommitOid, TreeOid))>> {
-        dispatch::each_repo_n(dispatch::FETCH_WORKERS, members, &|r| self.seams.hit("head", Some(r)), &|r| self.head_of(r))
+    pub(crate) fn resolve_heads(
+        &self,
+        members: &[RepoName],
+    ) -> Result<Vec<(RepoName, (CommitOid, TreeOid))>> {
+        dispatch::each_repo_n(
+            dispatch::FETCH_WORKERS,
+            members,
+            &|r| self.seams.hit("head", Some(r)),
+            &|r| self.head_of(r),
+        )
     }
 
     fn head_of(&self, repo: &RepoName) -> Result<(CommitOid, TreeOid)> {
         self.head_at(repo, None).map(|(h, t, _)| (h, t))
     }
 
-    fn head_at(&self, repo: &RepoName, rev: Option<&str>) -> Result<(CommitOid, TreeOid, Option<NewWarning>)> {
+    fn head_at(
+        &self,
+        repo: &RepoName,
+        rev: Option<&str>,
+    ) -> Result<(CommitOid, TreeOid, Option<NewWarning>)> {
         let cfg = self.repo_cfg(repo)?;
         let git = self.git(repo)?;
         let fresh = self.fetch_is_fresh(repo);
@@ -596,14 +708,22 @@ impl Sessions<'_> {
             Ok(Some(oid))
         })?;
         if let Some(t) = fetched_at {
-            self.fetched.lock().unwrap_or_else(|p| p.into_inner()).insert(repo.clone(), t);
+            self.fetched
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(repo.clone(), t);
         }
         let Some(head) = head else {
             return Err(StrataError::new(
                 Code::NoSuchBranch,
-                format!("repo {repo} has no main tip for origin/{}", cfg.default_branch),
+                format!(
+                    "repo {repo} has no main tip for origin/{}",
+                    cfg.default_branch
+                ),
             )
-            .with_detail(json!({ "repo": repo.as_str(), "remote": "origin", "branch": cfg.default_branch })));
+            .with_detail(
+                json!({ "repo": repo.as_str(), "remote": "origin", "branch": cfg.default_branch }),
+            ));
         };
         let tree = git.tree_of(&head)?;
         Ok((head, tree, warning))
@@ -612,7 +732,14 @@ impl Sessions<'_> {
 
 /// This release accepts local revisions only, not per-session publish lines.
 pub fn validate_base_rev(rev: &str) -> Result<()> {
-    if rev.is_empty() || rev.len() > 256 || rev.starts_with('-') || rev.contains(['\0','\n','\r']) || rev.starts_with("origin/") || rev.starts_with("refs/remotes/") || rev.starts_with("refs/strata/remotes/") {
+    if rev.is_empty()
+        || rev.len() > 256
+        || rev.starts_with('-')
+        || rev.contains(['\0', '\n', '\r'])
+        || rev.starts_with("origin/")
+        || rev.starts_with("refs/remotes/")
+        || rev.starts_with("refs/strata/remotes/")
+    {
         return Err(StrataError::new(Code::InvalidInput, "--base needs a local revision of 1..=256 bytes without control characters or a leading '-'")
             .with_detail(json!({"reason":"base_rev"})));
     }
@@ -651,7 +778,12 @@ fn rolled_back_error(
             ),
         )
     } else {
-        let r = e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|v| v.as_str()).unwrap_or("rolled_back");
+        let r = e
+            .detail
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("rolled_back");
         (e.code, r.to_string(), None)
     };
     let mut d = serde_json::Map::new();
@@ -679,18 +811,29 @@ fn rolled_back_error(
     } else {
         format!(
             "left in place (not created by this new; the orphan sweep takes it): {}",
-            not_owned.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+            not_owned
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     };
-    StrataError::new(code, format!("new {}: {at} failed: {}; rolled back, {kept}", m.id, e.message))
-        .with_detail(serde_json::Value::Object(d))
+    StrataError::new(
+        code,
+        format!(
+            "new {}: {at} failed: {}; rolled back, {kept}",
+            m.id, e.message
+        ),
+    )
+    .with_detail(serde_json::Value::Object(d))
 }
 
 /// Whether `v` or any error nested in it carries `"reason": want`.
 fn has_reason(v: &serde_json::Value, want: &str) -> bool {
     match v {
         serde_json::Value::Object(m) => {
-            m.get("reason").and_then(|r| r.as_str()) == Some(want) || m.values().any(|x| has_reason(x, want))
+            m.get("reason").and_then(|r| r.as_str()) == Some(want)
+                || m.values().any(|x| has_reason(x, want))
         }
         serde_json::Value::Array(a) => a.iter().any(|x| has_reason(x, want)),
         _ => false,
@@ -703,7 +846,9 @@ fn denied(v: &serde_json::Value) -> bool {
     match v {
         serde_json::Value::Object(m) => {
             m.get("errno").and_then(|e| e.as_i64()) == Some(i64::from(libc::EPERM))
-                || m.get("stderr").and_then(|s| s.as_str()).is_some_and(|s| s.contains("Operation not permitted"))
+                || m.get("stderr")
+                    .and_then(|s| s.as_str())
+                    .is_some_and(|s| s.contains("Operation not permitted"))
                 || m.values().any(denied)
         }
         serde_json::Value::Array(a) => a.iter().any(denied),
@@ -725,8 +870,10 @@ mod tests {
             .with_detail(json!({ "code": "Unknown", "message": "git init timed out", "detail": { "reason": "timeout" } }));
         let tcc = StrataError::new(Code::Unknown, "git init failed")
             .with_detail(json!({ "stderr": "fatal: cannot mkdir x: Operation not permitted" }));
-        let eperm = StrataError::new(Code::ReadOnly, "clone").with_detail(json!({ "errno": libc::EPERM }));
-        let other = StrataError::new(Code::Unknown, "full").with_detail(json!({ "errno": libc::ENOSPC }));
+        let eperm =
+            StrataError::new(Code::ReadOnly, "clone").with_detail(json!({ "errno": libc::EPERM }));
+        let other =
+            StrataError::new(Code::Unknown, "full").with_detail(json!({ "errno": libc::ENOSPC }));
         assert!(has_reason(&cause_of(&timeout), "timeout"));
         assert!(has_reason(&cause_of(&wrapped), "timeout"));
         assert!(!has_reason(&cause_of(&tcc), "timeout"));

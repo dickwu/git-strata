@@ -103,10 +103,18 @@ impl Sessions<'_> {
             }
         }
         let new: Vec<RepoName> = new.into_iter().collect();
+        // status-bar §11.2: the daemon's `session_create` activity for the
+        // added repos; dispatch workers inherit the observer.
+        let observed = crate::observe::begin(crate::observe::Work::SessionCreate {
+            repos: new.clone(),
+            session: Some(id.clone()),
+        });
 
         // B. heads, bases, plans
+        observed.step("head");
         let heads: BTreeMap<RepoName, (CommitOid, TreeOid)> =
             self.resolve_heads(&new)?.into_iter().collect();
+        observed.step("base");
         let planned = dispatch::each_repo(&new, &|_| Ok(()), &|r| {
             let (_, tree) = &heads[r];
             let bg = self.base_flow(r, tree, None)?;
@@ -116,6 +124,7 @@ impl Sessions<'_> {
         let plans: BTreeMap<RepoName, (BaseGen, Plan)> = planned.into_iter().collect();
 
         // C. build each workspace in staging and move it into place
+        observed.step("build");
         let built = dispatch::each_repo(&new, &|r| self.seams.hit("add.build", Some(r)), &|r| {
             let ws = WorkspaceState {
                 base: plans[r].0.clone(),
@@ -154,6 +163,7 @@ impl Sessions<'_> {
         };
 
         // D. record
+        observed.step("record");
         let added: BTreeMap<RepoName, WorkspaceState> = built
             .iter()
             .map(|(r, (ws, _))| (r.clone(), ws.clone()))
@@ -176,6 +186,7 @@ impl Sessions<'_> {
         }
 
         // E. observe main; failures are warnings
+        observed.step("observe");
         let mut warnings = Vec::new();
         for (r, ws) in &added {
             let res = self.deps_ctx(r).and_then(|ctx| {
@@ -203,17 +214,26 @@ impl Sessions<'_> {
 
     /// One repo: clone, caches, git, seed files and pin in staging, then
     /// rename into place. Returns the seed rows to record.
-    fn add_build(&self, id: &SessionId, root: &std::path::Path, r: &RepoName, ws: &WorkspaceState, plan: &Plan) -> Result<Vec<SeedRow>> {
+    fn add_build(
+        &self,
+        id: &SessionId,
+        root: &std::path::Path,
+        r: &RepoName,
+        ws: &WorkspaceState,
+        plan: &Plan,
+    ) -> Result<Vec<SeedRow>> {
         let sname = format!("{ADD_STAGING_PREFIX}{r}-{}", random_hex(8));
         let staging: PathBuf = root.join(&sname);
         let fail = |e: StrataError| with_kept(e, &[staging.display().to_string()]);
-        strata_apfs::clone_tree_rooted(&self.store.base_dir(&ws.base), root, &rp(&sname)).map_err(fail)?;
+        strata_apfs::clone_tree_rooted(&self.store.base_dir(&ws.base), root, &rp(&sname))
+            .map_err(fail)?;
         let cfg = self.repo_cfg(r)?;
         for c in &plan.caches {
             if let Some(parent) = ancestors(c).last() {
                 strata_apfs::mkdir_rooted(&staging, parent, 0o755, true).map_err(fail)?;
             }
-            strata_apfs::clone_tree_rooted(&cfg.path.join(c.as_str()), &staging, c).map_err(fail)?;
+            strata_apfs::clone_tree_rooted(&cfg.path.join(c.as_str()), &staging, c)
+                .map_err(fail)?;
             crate::seed::drop_connector_files(&staging, c).map_err(fail)?;
         }
         let git = self.git(r)?;
@@ -225,8 +245,10 @@ impl Sessions<'_> {
         })
         .map_err(fail)?;
         let records = seed_files(&plan.files, &staging).map_err(fail)?;
-        self.with_lock_unbounded(r, || git.update_ref(&pin_ref(id), &ws.head, None)).map_err(fail)?;
-        strata_apfs::rename_rooted(root, &rp(&sname), &rp(r.as_str()), RenameMode::Excl).map_err(fail)?;
+        self.with_lock_unbounded(r, || git.update_ref(&pin_ref(id), &ws.head, None))
+            .map_err(fail)?;
+        strata_apfs::rename_rooted(root, &rp(&sname), &rp(r.as_str()), RenameMode::Excl)
+            .map_err(fail)?;
         Ok(records.iter().map(SeedRow::from).collect())
     }
 

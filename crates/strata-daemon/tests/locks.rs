@@ -9,8 +9,9 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use strata_daemon::DaemonWarning;
-use strata_daemon::locks::{Locks, RequestScope, mark_visible};
+use strata_daemon::locks::{Locks, Origin, RequestScope, mark_visible, with_subject};
+use strata_daemon::{DaemonWarning, LockHold};
+use strata_session::observe::{self, RequestTag};
 use strata_types::{Code, RepoName, SessionId, StrataError};
 
 const WAIT: Duration = Duration::from_millis(300);
@@ -70,7 +71,10 @@ fn acquiring_repo_lock_clears_only_its_expired_long_wait() {
 fn wait_until(what: &str, f: impl Fn() -> bool) {
     let t = Instant::now();
     while !f() {
-        assert!(t.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "timed out waiting for {what}"
+        );
         thread::sleep(Duration::from_millis(5));
     }
 }
@@ -163,7 +167,9 @@ fn rm_queued_behind_in_flight_checkpoint() {
     });
     wait_until("cp in flight", || l.in_flight(&s).is_some());
     let (l2, s2, d2) = (l.clone(), s.clone(), done.clone());
-    let rm = request("rm", Some(s.clone()), move || l2.with_sessions(&[s2], || Ok(d2.load(Ordering::SeqCst))));
+    let rm = request("rm", Some(s.clone()), move || {
+        l2.with_sessions(&[s2], || Ok(d2.load(Ordering::SeqCst)))
+    });
     cp.join().unwrap().unwrap();
     // rm ran after the checkpoint completed; it was not Busy (200 ms < wait).
     assert_eq!(rm.join().unwrap().unwrap(), 1);
@@ -184,7 +190,14 @@ fn status_does_not_wait_on_write_lock() {
     b.wait();
     // Read-only paths never touch the locks: they only read the holds.
     let t = Instant::now();
-    for m in ["status", "grep", "files", "diff", "deps_list", "daemon_status"] {
+    for m in [
+        "status",
+        "grep",
+        "files",
+        "diff",
+        "deps_list",
+        "daemon_status",
+    ] {
         let l2 = l.clone();
         let holds = request(m, None, move || l2.holds()).join().unwrap();
         assert_eq!(holds.len(), 1, "{m}");
@@ -267,11 +280,16 @@ fn locks_released_on_return_error_and_panic() {
     let s = sid("cccccccc");
     // Normal return.
     let _scope = RequestScope::begin("checkpoint", Some(s.clone()));
-    l.with_sessions(std::slice::from_ref(&s), || l.with_repo(&rn("tool"), || Ok(()))).unwrap();
+    l.with_sessions(std::slice::from_ref(&s), || {
+        l.with_repo(&rn("tool"), || Ok(()))
+    })
+    .unwrap();
     // Err: passed through unchanged.
     let orig = StrataError::new(Code::Conflict, "boom");
     let e = l
-        .with_sessions(std::slice::from_ref(&s), || l.with_repo(&rn("tool"), || Err::<(), _>(orig.clone())))
+        .with_sessions(std::slice::from_ref(&s), || {
+            l.with_repo(&rn("tool"), || Err::<(), _>(orig.clone()))
+        })
         .unwrap_err();
     assert_eq!(e, orig);
     drop(_scope);
@@ -279,7 +297,9 @@ fn locks_released_on_return_error_and_panic() {
     let (l1, s1) = (l.clone(), s.clone());
     let p = request("checkpoint", Some(s.clone()), move || {
         let _ = l1.with_sessions(&[s1], || {
-            l1.with_repo(&rn("tool"), || -> strata_daemon::Result<()> { panic!("handler panic") })
+            l1.with_repo(&rn("tool"), || -> strata_daemon::Result<()> {
+                panic!("handler panic")
+            })
         });
     })
     .join();
@@ -289,10 +309,12 @@ fn locks_released_on_return_error_and_panic() {
     // Next requests are not Busy (no poison) and get the locks at once.
     let (l2, s2) = (l.clone(), s.clone());
     let t = Instant::now();
-    request("rm", Some(s.clone()), move || l2.with_sessions(&[s2], || l2.with_repo(&rn("tool"), || Ok(()))))
-        .join()
-        .unwrap()
-        .unwrap();
+    request("rm", Some(s.clone()), move || {
+        l2.with_sessions(&[s2], || l2.with_repo(&rn("tool"), || Ok(())))
+    })
+    .join()
+    .unwrap()
+    .unwrap();
     assert!(t.elapsed() < WAIT);
 }
 
@@ -356,7 +378,10 @@ fn shutdown_fails_queued_lets_holder_finish() {
     assert_eq!(holder.join().unwrap().unwrap(), "finished");
     // After shutdown every new take is refused.
     let l3 = l.clone();
-    let e = request("assign", None, move || l3.with_repo(&rn("tool"), || Ok(()))).join().unwrap().unwrap_err();
+    let e = request("assign", None, move || l3.with_repo(&rn("tool"), || Ok(())))
+        .join()
+        .unwrap()
+        .unwrap_err();
     assert_eq!(e.code, Code::ReadOnly);
 }
 
@@ -380,10 +405,18 @@ fn long_hold_named_in_status() {
     let w = l.long_holds();
     assert_eq!(w.len(), 1);
     match &w[0] {
-        DaemonWarning::LongHold { repo, method, since } => {
+        DaemonWarning::LongHold {
+            repo,
+            method,
+            since,
+            origin,
+            session,
+        } => {
             assert_eq!(repo, &rn("tool"));
             assert_eq!(method, "deps_approve");
             assert!(*since <= before);
+            assert_eq!(*origin, Some(Origin::Request));
+            assert_eq!(session.as_ref(), Some(&s));
         }
         other => panic!("{other:?}"),
     }
@@ -431,7 +464,12 @@ fn concurrent_sessions_are_not_refused_for_a_sibling() {
     bar.wait();
     let (l2, b2) = (l.clone(), b.clone());
     let t = Instant::now();
-    request("checkpoint", Some(b.clone()), move || l2.with_sessions(&[b2], || Ok(()))).join().unwrap().unwrap();
+    request("checkpoint", Some(b.clone()), move || {
+        l2.with_sessions(&[b2], || Ok(()))
+    })
+    .join()
+    .unwrap()
+    .unwrap();
     assert!(t.elapsed() < Duration::from_millis(300));
     sibling.join().unwrap().unwrap();
 }
@@ -452,9 +490,17 @@ fn status_sees_in_flight_without_cancelling() {
     b.wait();
     let l2 = l.clone();
     let s2 = s.clone();
-    assert_eq!(request("status", None, move || l2.in_flight(&s2)).join().unwrap().as_deref(), Some("checkpoint"));
+    assert_eq!(
+        request("status", None, move || l2.in_flight(&s2))
+            .join()
+            .unwrap()
+            .as_deref(),
+        Some("checkpoint")
+    );
     let (l3, s3) = (l.clone(), s.clone());
-    let rm = request("rm", Some(s.clone()), move || l3.with_sessions(&[s3], || Ok(())));
+    let rm = request("rm", Some(s.clone()), move || {
+        l3.with_sessions(&[s3], || Ok(()))
+    });
     assert_eq!(cp.join().unwrap().unwrap(), "committed");
     rm.join().unwrap().unwrap();
 }
@@ -519,7 +565,12 @@ fn toolcall_does_not_wait_out_approve_ensure() {
     b.wait();
     let (l2, s2) = (l.clone(), s.clone());
     let t = Instant::now();
-    request("checkpoint", Some(s.clone()), move || l2.with_sessions(&[s2], || Ok(()))).join().unwrap().unwrap();
+    request("checkpoint", Some(s.clone()), move || {
+        l2.with_sessions(&[s2], || Ok(()))
+    })
+    .join()
+    .unwrap()
+    .unwrap();
     assert!(t.elapsed() < Duration::from_millis(300));
     approve.join().unwrap().unwrap();
 }
@@ -528,7 +579,9 @@ fn toolcall_does_not_wait_out_approve_ensure() {
 fn reentrant_repo_take_is_refused_not_deadlocked() {
     let l = locks();
     let _scope = RequestScope::begin("publish", None);
-    let e = l.with_repo(&rn("tool"), || l.with_repo(&rn("tool"), || Ok(()))).unwrap_err();
+    let e = l
+        .with_repo(&rn("tool"), || l.with_repo(&rn("tool"), || Ok(())))
+        .unwrap_err();
     assert_eq!(e.detail.unwrap()["reason"], "reentrant");
     let e = l.with_repo(&rn("nope"), || Ok(())).unwrap_err();
     assert_eq!(e.code, Code::NoSuchRepo);
@@ -561,7 +614,10 @@ fn with_sessions_until_bounds_a_later_take_by_the_deadline() {
     let (r, took) = waiter.join().unwrap();
     let e: StrataError = r.expect_err("the take times out");
     assert_eq!(e.code, Code::Busy, "{e:?}");
-    assert!(took < Duration::from_millis(1000), "bounded by the deadline, took {took:?}");
+    assert!(
+        took < Duration::from_millis(1000),
+        "bounded by the deadline, took {took:?}"
+    );
     holder.join().unwrap().unwrap();
 }
 
@@ -589,7 +645,9 @@ fn guarded_step_does_not_start_after_the_deadline() {
     // after the deadline) sees it clear, so the flag wait returns Ok late.
     let deadline = Instant::now() + Duration::from_millis(100);
     let flag_late = || {
-        thread::sleep(deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(5));
+        thread::sleep(
+            deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(5),
+        );
         Ok(false)
     };
     let t = Instant::now();
@@ -612,7 +670,13 @@ fn snapshots_expose_waiters_and_unbounded_waits_yield_background_holders() {
         let r = rn("tool");
         let yield_to = Arc::new(AtomicBool::new(false));
         let release = Arc::new(AtomicBool::new(false));
-        let (l1, s1, r1, y1, rel) = (l.clone(), s.clone(), r.clone(), yield_to.clone(), release.clone());
+        let (l1, s1, r1, y1, rel) = (
+            l.clone(),
+            s.clone(),
+            r.clone(),
+            yield_to.clone(),
+            release.clone(),
+        );
         let holder = thread::spawn(move || {
             strata_daemon::locks::with_yield(y1, || {
                 l1.try_session(&s1, "old_tree", || {
@@ -627,14 +691,23 @@ fn snapshots_expose_waiters_and_unbounded_waits_yield_background_holders() {
                 .unwrap();
             })
         });
-        wait_until("background holder", || l.holds().iter().any(|h| h.method == "old_tree"));
+        wait_until("background holder", || {
+            l.holds().iter().any(|h| h.method == "old_tree")
+        });
         assert!(l.try_repo(&r, "probe", || Ok(())).is_err());
         assert!(l.try_session(&s, "probe", || Ok(())).is_none());
-        assert!(!yield_to.load(Ordering::SeqCst), "zero-bound probes do not yield");
+        assert!(
+            !yield_to.load(Ordering::SeqCst),
+            "zero-bound probes do not yield"
+        );
         let (l2, s2, r2) = (l.clone(), s.clone(), r.clone());
         let waiter = request("sync", Some(s.clone()), move || {
             mark_visible();
-            if repo_wait { l2.with_repo(&r2, || Ok(())) } else { l2.with_sessions(&[s2], || Ok(())) }
+            if repo_wait {
+                l2.with_repo(&r2, || Ok(()))
+            } else {
+                l2.with_sessions(&[s2], || Ok(()))
+            }
         });
         wait_until("yield requested", || yield_to.load(Ordering::SeqCst));
         thread::sleep(WAIT + Duration::from_millis(40));
@@ -645,10 +718,285 @@ fn snapshots_expose_waiters_and_unbounded_waits_yield_background_holders() {
         if !repo_wait {
             assert_eq!(snapshot[0]["queued"], serde_json::json!(["sync"]));
         }
-        assert!(l.long_waits().iter().any(|w| matches!(w,DaemonWarning::LongWait{method,..} if method=="sync")));
+        assert!(
+            l.long_waits()
+                .iter()
+                .any(|w| matches!(w,DaemonWarning::LongWait{method,..} if method=="sync"))
+        );
         release.store(true, Ordering::SeqCst);
         holder.join().unwrap();
         waiter.join().unwrap().unwrap();
         assert!(l.long_waits().is_empty());
     }
+}
+
+/// The hold of "tool" as seen from inside it.
+fn held(
+    l: &Locks,
+    take: impl FnOnce(
+        &dyn Fn() -> strata_daemon::Result<Vec<LockHold>>,
+    ) -> strata_daemon::Result<Vec<LockHold>>,
+) -> LockHold {
+    let hs = take(&|| Ok(l.holds())).unwrap();
+    assert_eq!(hs.len(), 1, "{hs:?}");
+    hs[0].clone()
+}
+
+/// Status-bar §3.1, §11.1: a hold's origin is whether the taking thread
+/// works for a request (its request scope, or only the session layer's
+/// request tag on a dispatch worker), never whether the take waits.
+#[test]
+fn holder_origin_request_vs_background_at_the_locks() {
+    let l = locks();
+    let tool = rn("tool");
+    // A request's zero-wait take (RPC `publish_plan`): request.
+    let (l1, t1) = (l.clone(), tool.clone());
+    let h = request("publish_plan", None, move || {
+        held(&l1, |f| l1.try_repo(&t1, "publish_plan", f))
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        (h.method.as_str(), h.origin),
+        ("publish_plan", Some(Origin::Request))
+    );
+    // Background takes, waiting (main-sync, reconcile gc) or not (catch-up).
+    let (l1, t1) = (l.clone(), tool.clone());
+    let h = thread::spawn(move || held(&l1, |f| l1.with_repo(&t1, f)))
+        .join()
+        .unwrap();
+    assert_eq!(
+        (h.method.as_str(), h.origin, h.session),
+        ("daemon", Some(Origin::Background), None)
+    );
+    let (l1, t1) = (l.clone(), tool.clone());
+    let h = thread::spawn(move || held(&l1, |f| l1.try_repo(&t1, "catch_up", f)))
+        .join()
+        .unwrap();
+    assert_eq!(
+        (h.method.as_str(), h.origin),
+        ("catch_up", Some(Origin::Background))
+    );
+    // A `new`/`add` worker: no request scope, only the inherited tag.
+    let (l1, t1, s) = (l.clone(), tool.clone(), sid("aaaaaaaa"));
+    let h = thread::spawn(move || {
+        let _tag = observe::enter(
+            Some(RequestTag {
+                method: "add".into(),
+                session: Some(s),
+                id: 7,
+            }),
+            None,
+        );
+        held(&l1, |f| l1.with_repo(&t1, f))
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        (h.method.as_str(), h.origin, h.session),
+        ("add", Some(Origin::Request), Some(sid("aaaaaaaa")))
+    );
+    assert!(h.elapsed_ms.is_some());
+}
+
+/// Status-bar §3.1, §12.7: `with_subject` names the session on the hold, on
+/// `LongHold` and on a waiter's Busy, nests and restores; the waiting
+/// request's own session stays in `LongWait`.
+#[test]
+fn subject_names_the_hold_and_nests_without_touching_long_waits() {
+    let l = locks();
+    let tool = rn("tool");
+    let (outer, inner) = (sid("aaaaaaaa"), sid("bbbbbbbb"));
+    let (l1, t1, o1, i1) = (l.clone(), tool.clone(), outer.clone(), inner.clone());
+    let sessions = thread::spawn(move || {
+        let shown = || held(&l1, |f| l1.try_repo(&t1, "catch_up", f)).session;
+        let nested = with_subject(Some(o1), || {
+            let inner = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_subject(Some(i1), || {
+                    let s = shown();
+                    std::panic::panic_any(s)
+                })
+            }));
+            let inner = *inner.unwrap_err().downcast::<Option<SessionId>>().unwrap();
+            (shown(), inner, shown())
+        });
+        (nested, shown())
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        sessions,
+        (
+            (
+                Some(outer.clone()),
+                Some(inner.clone()),
+                Some(outer.clone())
+            ),
+            None
+        ),
+        "nested subjects restore, also on unwind, and none is left after"
+    );
+
+    // A catch-up move of `outer` holds the lock.
+    let b = Arc::new(Barrier::new(2));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (l1, t1, o1, b1, r1) = (
+        l.clone(),
+        tool.clone(),
+        outer.clone(),
+        b.clone(),
+        release.clone(),
+    );
+    let holder = thread::spawn(move || {
+        with_subject(Some(o1), || {
+            l1.try_repo(&t1, "catch_up", || {
+                b1.wait();
+                while !r1.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Ok(())
+            })
+        })
+    });
+    b.wait();
+    // A waiter that has not written gets Busy naming the moved session.
+    let (l2, t2) = (l.clone(), tool.clone());
+    let e = request("assign", None, move || l2.with_repo(&t2, || Ok(())))
+        .join()
+        .unwrap()
+        .unwrap_err();
+    let d = e.detail.unwrap();
+    assert_eq!(
+        (d["reason"].as_str(), d["holder"].as_str()),
+        (Some("lock_wait"), Some("catch_up"))
+    );
+    assert_eq!(d["holder_session"], outer.as_str());
+    // LongHold names it too, once the background max is passed.
+    l.set_background_hold_max(Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(5));
+    let w = l.long_holds();
+    assert!(
+        matches!(&w[..], [DaemonWarning::LongHold { method, origin: Some(Origin::Background), session: Some(s), .. }]
+            if method == "catch_up" && s == &outer),
+        "{w:?}"
+    );
+    l.set_background_hold_max(strata_daemon::locks::BACKGROUND_HOLD_MAX);
+    // A post-visible waiter with a subject of its own: its LongWait keeps
+    // the request's session; once it holds, the hold shows the subject.
+    let (l3, t3, req_s, sub_s) = (l.clone(), tool.clone(), sid("cccccccc"), sid("dddddddd"));
+    let waiter = request("sync", Some(req_s.clone()), move || {
+        mark_visible();
+        with_subject(Some(sub_s), || l3.with_repo(&t3, || Ok(l3.holds())))
+    });
+    wait_until("long wait", || {
+        l.long_waits().iter().any(|w| {
+            matches!(w, DaemonWarning::LongWait { method, session: Some(s), .. } if method == "sync" && s == &req_s)
+        })
+    });
+    release.store(true, Ordering::SeqCst);
+    holder.join().unwrap().unwrap();
+    let hs = waiter.join().unwrap().unwrap();
+    assert_eq!(hs[0].session, Some(sid("dddddddd")));
+    assert_eq!(hs[0].method, "sync");
+    assert!(l.long_waits().is_empty());
+}
+
+/// Status-bar §3.1, §12.1, Q16: a hold doing exempt long work raises
+/// `LongHold` only once that work's step, counted from the take at the
+/// earliest, passes the background max; a background hold once the hold
+/// passes it; any other request hold after the lock wait, as before. The
+/// exempt work is looked up by the holder's request.
+#[test]
+fn long_hold_rule_by_origin_and_exempt_work() {
+    let l = locks();
+    let tool = rn("tool");
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hold = |method: Option<&'static str>, repo: RepoName| {
+        let (l1, r1) = (l.clone(), release.clone());
+        let b = Arc::new(Barrier::new(2));
+        let b1 = b.clone();
+        let take = move || {
+            // A request thread carries its tag (id 7), as `Server::handle` sets.
+            let _tag = method.map(|m| {
+                observe::enter(
+                    Some(RequestTag {
+                        method: m.into(),
+                        session: None,
+                        id: 7,
+                    }),
+                    None,
+                )
+            });
+            l1.with_repo(&repo, || {
+                b1.wait();
+                while !r1.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Ok(())
+            })
+        };
+        let h = match method {
+            Some(m) => request(m, None, take),
+            None => thread::spawn(take),
+        };
+        b.wait();
+        h
+    };
+    let publish = hold(Some("publish"), tool.clone());
+    let background = hold(None, rn("front"));
+    thread::sleep(WAIT + Duration::from_millis(50));
+    // Past the lock wait: the request hold is raised, the background one not.
+    let raised = |w: &[DaemonWarning]| -> Vec<(String, Option<Origin>)> {
+        w.iter()
+            .map(|w| match w {
+                DaemonWarning::LongHold { repo, origin, .. } => {
+                    (repo.as_str().to_string(), *origin)
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(
+        raised(&l.long_holds()),
+        [("tool".to_string(), Some(Origin::Request))]
+    );
+    // Exempt work in flight on tool (a move whose step just began): not raised.
+    let young = |r: &RepoName, _: Option<u64>| (r == &tool).then_some(Duration::from_millis(1));
+    assert!(raised(&l.long_holds_with(&young)).is_empty());
+    // Work of the holder's own request only (a session creation of request
+    // 7): another request's work does not exempt the hold.
+    let own = |r: &RepoName, req: Option<u64>| {
+        (r == &tool && req == Some(7)).then_some(Duration::from_millis(1))
+    };
+    assert!(raised(&l.long_holds_with(&own)).is_empty());
+    let other = |r: &RepoName, req: Option<u64>| {
+        (r == &tool && req == Some(8)).then_some(Duration::from_millis(1))
+    };
+    assert_eq!(
+        raised(&l.long_holds_with(&other)),
+        [("tool".to_string(), Some(Origin::Request))]
+    );
+    // A step older than the max does not make this young hold long: the
+    // step counts from the take at the earliest.
+    let old = |r: &RepoName, _: Option<u64>| (r == &tool).then_some(Duration::from_secs(3600));
+    assert!(raised(&l.long_holds_with(&old)).is_empty());
+    // Once the hold itself passes a (shortened) max, it is raised, as a
+    // request hold, and so is the background hold.
+    l.set_background_hold_max(WAIT);
+    assert_eq!(
+        raised(&l.long_holds_with(&old)),
+        [
+            ("front".to_string(), Some(Origin::Background)),
+            ("tool".to_string(), Some(Origin::Request))
+        ]
+    );
+    assert_eq!(
+        raised(&l.long_holds_with(&young)),
+        [("front".to_string(), Some(Origin::Background))],
+        "exempt tool stays quiet; front is past the max"
+    );
+    release.store(true, Ordering::SeqCst);
+    publish.join().unwrap().unwrap();
+    background.join().unwrap().unwrap();
+    assert!(l.long_holds().is_empty());
 }
