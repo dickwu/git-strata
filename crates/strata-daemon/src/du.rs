@@ -201,31 +201,59 @@ pub fn status(e: Option<&Entry>, kind: Kind, ino: u64, mtime_ns: i64, now_ms: u6
     }
 }
 
-fn names(dir: &Path) -> Vec<String> {
-    let mut v: Vec<String> = match fs::read_dir(dir) {
-        Ok(d) => d
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    v.sort();
-    v
+/// The units of a [`list_units`] call, and the directories it could not read.
+#[derive(Debug, Default)]
+pub struct Listing {
+    pub units: Vec<Unit>,
+    /// Key prefixes (`sessions/`, `bases/app/` …) of directories that exist
+    /// but could not be listed: a unit under one is unknown, not gone.
+    pub unlisted: Vec<String>,
+}
+
+impl Listing {
+    /// Whether `key` may still exist although this listing lacks it.
+    fn unknown(&self, key: &str) -> bool {
+        self.unlisted.iter().any(|p| key.starts_with(p.as_str()))
+    }
+}
+
+/// The sorted names in `root/rel`. A missing directory has none; one that
+/// cannot be read (`EACCES`, `EIO` …, also part way through) has none either
+/// and goes to `unlisted` as `rel/` (status-bar §11.4: only a confirmed
+/// disappearance drops a unit).
+fn names(root: &Path, rel: &str, unlisted: &mut Vec<String>) -> Vec<String> {
+    let read = fs::read_dir(root.join(rel)).and_then(|d| {
+        d.map(|e| e.map(|e| e.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()
+    });
+    match read {
+        Ok(v) => {
+            let mut v: Vec<String> = v.into_iter().filter_map(|n| n.into_string().ok()).collect();
+            v.sort();
+            v
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => {
+            unlisted.push(format!("{rel}/"));
+            Vec::new()
+        }
+    }
 }
 
 /// Every unit under `root` (§5.12 table). Cheap: readdir of the top levels.
-pub fn list_units(root: &Path) -> Vec<Unit> {
+pub fn list_units(root: &Path) -> Listing {
     let mut out = Vec::new();
+    let mut unlisted = Vec::new();
     let mut push = |key: String, kind: Kind, group: Group| out.push(Unit { key, kind, group });
-    for n in names(&root.join("store")) {
+    for n in names(root, "store", &mut unlisted) {
         match n.as_str() {
             "blobs" => {
-                for s in names(&root.join("store/blobs")) {
+                for s in names(root, "store/blobs", &mut unlisted) {
                     push(format!("store/blobs/{s}"), Kind::Immutable, Group::Blobs);
                 }
             }
             "trash" => {
-                for s in names(&root.join("store/trash")) {
+                for s in names(root, "store/trash", &mut unlisted) {
                     push(format!("store/trash/{s}"), Kind::Immutable, Group::Trash);
                 }
             }
@@ -237,8 +265,8 @@ pub fn list_units(root: &Path) -> Vec<Unit> {
         }
     }
     for (top, base) in [("bases", true), ("deps", false)] {
-        for repo in names(&root.join(top)) {
-            for n in names(&root.join(top).join(&repo)) {
+        for repo in names(root, top, &mut unlisted) {
+            for n in names(root, &format!("{top}/{repo}"), &mut unlisted) {
                 let kind = if n.starts_with('.') {
                     Kind::Mutable
                 } else {
@@ -253,9 +281,9 @@ pub fn list_units(root: &Path) -> Vec<Unit> {
             }
         }
     }
-    for n in names(&root.join("sessions")) {
+    for n in names(root, "sessions", &mut unlisted) {
         if n == ".repos" {
-            for s in names(&root.join("sessions/.repos")) {
+            for s in names(root, "sessions/.repos", &mut unlisted) {
                 push(
                     format!("sessions/.repos/{s}"),
                     Kind::Mutable,
@@ -270,12 +298,16 @@ pub fn list_units(root: &Path) -> Vec<Unit> {
             );
         }
     }
-    out
+    Listing {
+        units: out,
+        unlisted,
+    }
 }
 
-fn stat(p: &Path) -> Option<(u64, i64)> {
-    let m = fs::symlink_metadata(p).ok()?;
-    Some((
+/// Inode and mtime (ns) of `p`, not following a symlink.
+fn stat(p: &Path) -> std::io::Result<(u64, i64)> {
+    let m = fs::symlink_metadata(p)?;
+    Ok((
         m.ino(),
         m.mtime()
             .saturating_mul(1_000_000_000)
@@ -384,8 +416,9 @@ struct ScanState {
     /// The scans running now, each with its own cancel token.
     active: HashMap<String, Arc<AtomicBool>>,
     /// Units whose last scan failed: error and when (ms), one entry per
-    /// unit, dropped when the unit is measured or gone. `failed` is the
-    /// history of attempts instead.
+    /// unit, dropped when the unit is measured or confirmed gone (`ENOENT`,
+    /// or absent from a listing that could read its directory). `failed` is
+    /// the history of attempts instead.
     unresolved: BTreeMap<String, (String, u64)>,
 }
 
@@ -593,31 +626,35 @@ impl Du {
     pub fn report(self: &Arc<Self>, refresh: bool) -> Value {
         let t0 = Instant::now();
         let now = now_ms();
-        let units = list_units(&self.root);
+        let listing = list_units(&self.root);
+        let units = &listing.units;
         let mut due = Vec::new();
         let mut groups: BTreeMap<Group, Agg> = BTreeMap::new();
         let (mut eligible, mut young) = (Agg::default(), Agg::default());
         let (mut eligible_n, mut young_n) = (0u64, 0u64);
         let present: HashSet<&str> = units.iter().map(|u| u.key.as_str()).collect();
+        // A unit missing from the listing is gone unless it is queued or
+        // under a directory that could not be listed (status-bar §11.4).
+        let keep = |k: &str, queued: &HashSet<String>| {
+            present.contains(k) || queued.contains(k) || listing.unknown(k)
+        };
         // Review P1-4: lock order is `recorded` → `scan` → `cache`; the
         // queue is read before the cache lock, never inside it. A unit gone
-        // from the listing (and not queued) is no longer unresolved.
+        // is no longer unresolved.
         let queued = {
             let mut st = self.scan_state();
             let ScanState {
                 unresolved, queued, ..
             } = &mut *st;
-            unresolved.retain(|k, _| present.contains(k.as_str()) || queued.contains(k));
+            unresolved.retain(|k, _| keep(k, queued));
             queued.clone()
         };
         {
             let mut cache = lock(&self.cache);
-            cache
-                .units
-                .retain(|k, _| present.contains(k.as_str()) || queued.contains(k));
-            for u in &units {
+            cache.units.retain(|k, _| keep(k, &queued));
+            for u in units {
                 let path = self.root.join(&u.key);
-                let Some((ino, mtime)) = stat(&path) else {
+                let Ok((ino, mtime)) = stat(&path) else {
                     continue;
                 };
                 let (entry, st) = if u.kind == Kind::Always {
@@ -1132,13 +1169,23 @@ impl Du {
     /// the walk's `NoSuchPath` branch without racing a rename).
     fn scan_unit_using(&self, key: &str, cancel: &AtomicBool, size: &SizeFn) {
         let path = self.root.join(key);
-        let Some((ino, mtime)) = stat(&path) else {
-            self.forget_unless_cancelled(key, cancel);
-            return;
+        let stopped = || self.stop.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst);
+        let (ino, mtime) = match stat(&path) {
+            Ok(s) => s,
+            // Only a confirmed disappearance forgets the unit (status-bar
+            // §11.4); any other error leaves it failed, figures kept.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.forget_unless_cancelled(key, cancel);
+                return;
+            }
+            Err(e) => {
+                let e = strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &path);
+                self.fail_unless_stopped(key, e.message, &stopped);
+                return;
+            }
         };
         let started = now_ms();
         let t = Instant::now();
-        let stopped = || self.stop.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst);
         match size(&path, &stopped) {
             Ok(u) => {
                 let e = Entry {
@@ -1163,14 +1210,7 @@ impl Du {
                 }
             }
             Err(e) => {
-                if !stopped() {
-                    let mut st = self.scan_state();
-                    st.failed.push_back((key.to_owned(), e.message.clone()));
-                    while st.failed.len() > MAX_FAILED {
-                        st.failed.pop_front();
-                    }
-                    st.unresolved.insert(key.to_owned(), (e.message, now_ms()));
-                }
+                self.fail_unless_stopped(key, e.message, &stopped);
                 return;
             }
         }
@@ -1179,10 +1219,25 @@ impl Du {
         }
     }
 
+    /// Record a failed measurement of `key`: one more `failed` entry and its
+    /// `unresolved` error. The cache keeps its last figures. Nothing when
+    /// the daemon stops or a hold cancelled the scan.
+    fn fail_unless_stopped(&self, key: &str, error: String, stopped: &dyn Fn() -> bool) {
+        if stopped() {
+            return;
+        }
+        let mut st = self.scan_state();
+        st.failed.push_back((key.to_owned(), error.clone()));
+        while st.failed.len() > MAX_FAILED {
+            st.failed.pop_front();
+        }
+        st.unresolved.insert(key.to_owned(), (error, now_ms()));
+    }
+
     /// Drop `key`'s cached figures (and its unresolved failure) because its
-    /// root is gone, unless a hold cancelled the scan: the check and the
-    /// removal are one `scan` critical section, like the insert. False when
-    /// cancelled.
+    /// root is gone (`ENOENT`), unless a hold cancelled the scan: the check
+    /// and the removal are one `scan` critical section, like the insert.
+    /// False when cancelled.
     fn forget_unless_cancelled(&self, key: &str, cancel: &AtomicBool) -> bool {
         let mut st = self.scan_state();
         if cancel.load(Ordering::SeqCst) {
@@ -1211,7 +1266,7 @@ impl Du {
                         f.add(&e.fig);
                         as_of = as_of.min(e.as_of_ms);
                     }
-                    None if stat(&self.root.join(k)).is_some() => return,
+                    None if stat(&self.root.join(k)).is_ok() => return,
                     None => {}
                 }
             }
@@ -1323,6 +1378,7 @@ mod tests {
         let (_td, root) = tmp();
         layout(&root);
         let keys: Vec<(String, Kind)> = list_units(&root)
+            .units
             .into_iter()
             .map(|u| (u.key, u.kind))
             .collect();
@@ -1663,6 +1719,125 @@ mod tests {
         assert_eq!(units_of(&du.scan_json()["unresolved"]), [shadow]);
         du.on_remove("s-aaaaaaaa");
         assert!(units_of(&du.scan_json()["unresolved"]).is_empty());
+        assert!(du.wait_idle(Duration::from_secs(30)));
+    }
+
+    /// `dir` at mode 000 until dropped: listing it and `lstat` through it
+    /// fail with `EACCES`.
+    struct Locked(PathBuf);
+
+    impl Locked {
+        fn new(dir: &Path) -> Locked {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+            Locked(dir.to_path_buf())
+        }
+    }
+
+    impl Drop for Locked {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// status-bar §11.4: a unit root that cannot be `lstat`ed for a reason
+    /// other than `ENOENT` is not gone. Its scan is a failure (history and
+    /// `unresolved`, with that error), its cached figures stay, and only a
+    /// later measurement or `ENOENT` resolves it.
+    #[test]
+    fn a_failed_lstat_keeps_the_unit_unresolved() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let fail = |_: &Path, _: &dyn Fn() -> bool| -> crate::Result<Usage> {
+            Err(strata_types::StrataError::new(
+                strata_types::Code::Unknown,
+                "EIO",
+            ))
+        };
+        let (ses, shadow) = ("sessions/s-aaaaaaaa", "sessions/.repos/s-aaaaaaaa");
+        du.scan_unit(ses);
+        du.scan_unit_using(ses, &AtomicBool::new(false), &fail);
+        let figures = lock(&du.cache).units.get(ses).copied();
+        assert!(figures.is_some());
+        {
+            let _locked = Locked::new(&root.join("sessions"));
+            // A cancelled attempt records nothing.
+            du.scan_unit_with(ses, &AtomicBool::new(true));
+            assert_eq!(du.scan_json()["failed"].as_array().unwrap().len(), 1);
+            du.scan_unit(ses);
+            du.scan_unit(shadow);
+        }
+        let scan = du.scan_json();
+        assert_eq!(units_of(&scan["unresolved"]), [shadow, ses], "{scan}");
+        for u in scan["unresolved"].as_array().unwrap() {
+            let error = u["error"].as_str().unwrap();
+            assert!(error.contains("Permission denied"), "{error}");
+        }
+        assert_eq!(scan["failed"].as_array().unwrap().len(), 3, "{scan}");
+        assert_eq!(du.counts()["unresolved_n"], 2);
+        assert_eq!(lock(&du.cache).units.get(ses).copied(), figures);
+        // Readable again: measured, resolved.
+        du.scan_unit(ses);
+        assert_eq!(units_of(&du.scan_json()["unresolved"]), [shadow]);
+        // ENOENT: gone.
+        fs::remove_dir_all(root.join(shadow)).unwrap();
+        du.scan_unit(shadow);
+        assert!(units_of(&du.scan_json()["unresolved"]).is_empty());
+        assert_eq!(du.counts()["unresolved_n"], 0);
+    }
+
+    /// status-bar §11.4: a directory `report` cannot list hides its units
+    /// without proving them gone, so their `unresolved` entries and cached
+    /// figures stay. A listing that reads the directory, or finds it
+    /// missing, drops them.
+    #[test]
+    fn an_unlistable_directory_keeps_its_units() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let fail = |_: &Path, _: &dyn Fn() -> bool| -> crate::Result<Usage> {
+            Err(strata_types::StrataError::new(
+                strata_types::Code::Unknown,
+                "EIO",
+            ))
+        };
+        let (ses, shadow) = ("sessions/s-aaaaaaaa", "sessions/.repos/s-aaaaaaaa");
+        du.scan_unit(ses);
+        du.scan_unit(shadow);
+        du.scan_unit_using(ses, &AtomicBool::new(false), &fail);
+        {
+            let _locked = Locked::new(&root.join("sessions"));
+            let listing = list_units(&root);
+            assert_eq!(listing.unlisted, ["sessions/"]);
+            assert!(
+                listing
+                    .units
+                    .iter()
+                    .all(|u| !u.key.starts_with("sessions/")),
+                "{listing:?}"
+            );
+            du.report(false);
+            assert!(du.wait_idle(Duration::from_secs(30)));
+            assert_eq!(units_of(&du.scan_json()["unresolved"]), [ses]);
+            let cache = lock(&du.cache);
+            assert!(cache.units.contains_key(ses) && cache.units.contains_key(shadow));
+        }
+        assert!(list_units(&root).unlisted.is_empty());
+        // Listed and missing: dropped.
+        fs::remove_dir_all(root.join(ses)).unwrap();
+        du.report(false);
+        assert!(units_of(&du.scan_json()["unresolved"]).is_empty());
+        assert!(!lock(&du.cache).units.contains_key(ses));
+        assert!(du.wait_idle(Duration::from_secs(30)));
+        // A missing directory lists nothing and proves its units gone.
+        du.scan_unit_using(shadow, &AtomicBool::new(false), &fail);
+        fs::remove_dir_all(root.join("sessions")).unwrap();
+        assert!(list_units(&root).unlisted.is_empty());
+        du.report(false);
+        assert!(units_of(&du.scan_json()["unresolved"]).is_empty());
+        assert!(!lock(&du.cache).units.contains_key(shadow));
         assert!(du.wait_idle(Duration::from_secs(30)));
     }
 
