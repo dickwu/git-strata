@@ -912,7 +912,9 @@ describe('scan gating and chip order', () => {
 });
 
 describe('P-b contract sources', () => {
-  const pbi = () => input(structuredClone(pbFixture.daemon) as DaemonStatus);
+  // The fixture is a 0.2.2-era reply; answer as this app's own version so only the
+  // mismatch test below shows a version chip, whatever version the app is bumped to.
+  const pbi = () => input({ ...structuredClone(pbFixture.daemon), version } as DaemonStatus);
   const work = (fields: Record<string, unknown>) =>
     ({ ...structuredClone(pbFixture.daemon.activity[0]), ...fields }) as DaemonActivity;
   const activity = (i: StatusBarInput) => allChips(i).filter((c) => c.id.startsWith('activity:'));
@@ -1294,10 +1296,10 @@ describe('P-b contract sources', () => {
 
   test('version mismatch and restart use existing identity source and RFC 3339 started', () => {
     const i = pbi();
-    i.daemon.data!.version = '0.2.3';
+    i.daemon.data!.version = 'other-version';
     expect(allChips(i).find((c) => c.id === 'version')).toMatchObject({
       sev: 'amber',
-      text: `App ${version} · daemon 0.2.3`,
+      text: `App ${version} · daemon other-version`,
     });
     i.daemonRestarted = true;
     expect(allChips(i).find((c) => c.id === 'restarted')).toMatchObject({
