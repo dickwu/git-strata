@@ -78,7 +78,9 @@ the daemon's `version`, `pid`, `started`, `activity` (long work in flight:
 `{id,kind,origin,repo,session,started,elapsed_ms,step_elapsed_ms,...}`), `busy`
 (`Busy` replies of the last 10 min, `recent[]` items
 `{at,method,session,reason,scope,holder,holder_session}`), `volume` (the data
-root's volume in bytes, null if unsampled) and `scan` (size-scan counts). They
+root's volume in bytes, null if unsampled) and `scan` (size-scan counts), and
+`holders[]` items gain `origin` (`request`/`background`) and `elapsed_ms`, with
+`session` naming the session the holder works on. They
 are informational; nothing an agent does depends on them. A `LongHold` alert
 means a lock held past its threshold (30 s for a request, 30 min for background
 work or a long move, rollout, base build or session creation).

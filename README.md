@@ -130,6 +130,10 @@ down or older). They are read from memory, so they never slow the reply:
   space, so it reads lower than Finder's "available".
 - `scan`: the size scan's counts `{running, active, queued, done, full,
   unresolved_n}` (see [Disk usage](#disk-usage-du)).
+- `holders[]` items gain `origin` (`request` or `background`) and
+  `elapsed_ms` (how long the lock has been held). Their `session` is the session
+  the holder works on when it names one (a catch-up move names the session it
+  moves), else the request's own session.
 
 A lock held past its threshold shows as a `LongHold` alert: 30 s for a request,
 30 min for background work and for a holder whose move, rollout, base build or
