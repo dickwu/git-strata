@@ -3,17 +3,20 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import appPackage from '../../package.json';
 import incident from './fixtures/statusBar/incident-0927.json';
+import pbFixture from './fixtures/statusBar/pb.json';
 import { copy } from './copy';
 import {
   BACKGROUND_HOLD_MAX_MS,
   MAX_CHIPS,
   capChips,
   classifyWarning,
+  observeScanRun,
   statusBarModel,
+  volumeView,
   type Chip,
   type StatusBarInput,
 } from './statusBar';
-import type { DaemonStatus, DepsList, DuReply, StatusReply } from './types';
+import type { DaemonActivity, DaemonStatus, DepsList, DuReply, StatusReply } from './types';
 import { waitingCount } from './view';
 
 const NOW = Date.parse(incident.now);
@@ -745,5 +748,391 @@ describe('scan gating and chip order', () => {
     expect(model.chips.map((c) => c.id)).toEqual(['error', 'first-amber', 'second-amber']);
     expect(model.overflow.map((c) => c.id)).toEqual(['blue', 'scan']);
     expect(chips).toEqual(before);
+  });
+});
+
+describe('P-b contract sources', () => {
+  const pbi = () => input(structuredClone(pbFixture.daemon) as DaemonStatus);
+  const work = (fields: Record<string, unknown>) =>
+    ({ ...structuredClone(pbFixture.daemon.activity[0]), ...fields }) as DaemonActivity;
+  const activity = (i: StatusBarInput) => allChips(i).filter((c) => c.id.startsWith('activity:'));
+  const busy = (i: StatusBarInput) => allChips(i).filter((c) => c.id.startsWith('busy:'));
+
+  test('contract-shaped catch-up move names the known ticket, phase, elapsed and wait counts', () => {
+    const i = pbi();
+    i.sessions = fx<StatusReply>('status_all');
+    i.sessions.sessions[0].status.manifest.id = 's-pb9492';
+    i.sessions.sessions[0].status.manifest.ticket = 'gwd-9492';
+    for (const s of i.sessions.sessions)
+      s.status.upstream = {
+        clean: false,
+        repos: {
+          tool: {
+            behind: 1,
+            auto: { state: 'pending', source: 'main', since: incident.now, attempts: 0 },
+          },
+        },
+      };
+    const chip = activity(i)[0];
+    expect(chip).toMatchObject({
+      text: 'Moving gwd-9492 to new main · tool · 2 min · 2 waiting · 2 pending',
+      sev: 'blue',
+      rank: 5,
+      target: { kind: 'modal', section: 'activity' },
+    });
+    expect(chip.tooltip).toContain('Phase: prepare.');
+    expect(chip.tooltip).toContain('waits 30 seconds before writing gets Busy');
+    i.sessionsUpdatedAt = NOW - 300_001;
+    expect(activity(i)[0].text).not.toContain('pending');
+    expect('api' in i.daemon.data!).toBe(false);
+  });
+
+  test.each([
+    [{ kind: 'move', cause: 'publish' }, 'Rebasing after publish · tool'],
+    [{ kind: 'move', cause: 'sync' }, 'Sync moving s-pb9492 · tool'],
+    [{ kind: 'move', cause: 'deps' }, 'Moving s-pb9492 to new dependencies · tool'],
+    [{ kind: 'move', cause: 'replay' }, 'Replaying s-pb9492 · tool'],
+    [{ kind: 'deps_rollout', sessions: 5, done: 2 }, 'Rolling out deps 2/5 · tool'],
+    [{ kind: 'base_build', tree: null }, 'Building base · tool'],
+    [
+      { kind: 'session_create', repo: null, repos: ['tool', 'web', 'api'], step: 'cloning' },
+      'Creating session s-pb9492 · 3 repos',
+    ],
+    [{ kind: 'deps_install', proposal: null }, 'Installing dependencies · tool'],
+    [{ kind: 'publish' }, 'Publishing tool'],
+    [{ kind: 'push' }, 'Pushing tool'],
+  ])('activity kind copy %j', (fields, text) => {
+    const i = pbi();
+    i.daemon.data!.activity = [work(fields)];
+    expect(activity(i)[0].text).toStartWith(`${text} · 2 min`);
+    expect(activity(i)[0].sev).toBe('blue');
+  });
+
+  test('unminted session creation needs neither a repo nor a session', () => {
+    const i = pbi();
+    i.daemon.data!.activity = [
+      work({ kind: 'session_create', repo: null, session: null, repos: ['tool'], step: null }),
+    ];
+    expect(activity(i)[0].text).toStartWith('Creating session · 1 repo · 2 min');
+  });
+
+  test('a dependency install holds no repo lock: its tooltip promises no wait', () => {
+    const i = pbi();
+    i.daemon.data!.activity = [work({ kind: 'deps_install', proposal: null })];
+    expect(activity(i)[0].tooltip).toBeUndefined();
+    i.daemon.data!.activity = [work({ kind: 'base_build', tree: null })];
+    expect(activity(i)[0].tooltip).toContain('may wait for this work');
+  });
+
+  test('malformed activity renders safely: no repos, no usable elapsed time', () => {
+    const i = pbi();
+    i.daemon.data!.activity = [work({ kind: 'session_create', repo: null, step: 7 })];
+    expect('repos' in i.daemon.data!.activity[0]).toBe(false);
+    expect(activity(i)[0].text).toBe('Creating session s-pb9492 · 2 min');
+    i.daemon.data!.activity = [
+      work({ elapsed_ms: undefined }),
+      work({ id: 2, elapsed_ms: 'x' }),
+      null as unknown as DaemonActivity,
+    ];
+    expect(allChips(i).some((c) => c.text.includes('NaN'))).toBe(false);
+    // Without usable work, the background hold still says the repo is busy.
+    expect(activity(i).map((c) => c.text)).toEqual(['tool busy with daemon work · 2 waiting']);
+  });
+
+  test('registry debounce and monotonic elapsed; work past 30 minutes stays blue', () => {
+    const i = pbi();
+    i.daemon.data!.activity![0].started = new Date(NOW - DAY).toISOString();
+    i.daemon.data!.activity![0].elapsed_ms = 2999;
+    expect(activity(i)).toEqual([]);
+    i.daemon.data!.activity![0].elapsed_ms = 3000;
+    expect(activity(i)[0]).toMatchObject({ sev: 'blue', rank: 5 });
+    i.daemon.data!.activity![0].elapsed_ms = BACKGROUND_HOLD_MAX_MS;
+    expect(activity(i)[0]).toMatchObject({ sev: 'blue', rank: 5 });
+    expect(activity(i)[0].text).toContain('30 min');
+  });
+
+  test.each([
+    [
+      'a rollout with a short current step',
+      { kind: 'deps_rollout', sessions: 12, done: 9, step_elapsed_ms: 2 * MINUTE },
+      'Rolling out deps 9/12 · tool · 40 min',
+    ],
+    [
+      'a dependency install (no lock)',
+      { kind: 'deps_install', proposal: null },
+      'Installing dependencies · tool · 40 min',
+    ],
+  ])('P-b %s is blue at 40 min: only the daemon LongHold is amber', (_, fields, text) => {
+    const i = pbi();
+    i.daemon.data!.activity = [
+      work({
+        ...fields,
+        elapsed_ms: 40 * MINUTE,
+        started: new Date(NOW - 40 * MINUTE).toISOString(),
+      }),
+    ];
+    expect(activity(i)).toEqual([
+      expect.objectContaining({ sev: 'blue', rank: 5, text: expect.stringContaining(text) }),
+    ]);
+    expect(allChips(i).some((c) => c.id.startsWith('warning:LongHold'))).toBe(false);
+  });
+
+  test('a move whose step passed 30 min: the daemon LongHold is the one amber chip', () => {
+    const i = pbi();
+    i.daemon.data!.activity![0].elapsed_ms = 31 * MINUTE;
+    i.daemon.data!.activity![0].step_elapsed_ms = 31 * MINUTE;
+    i.daemon.data!.warnings = [
+      hold('catch_up', 31 * MINUTE, { origin: 'background', session: 's-pb9492' }),
+    ];
+    i.daemon.data!.busy!.recent = [];
+    i.daemon.data!.scan!.unresolved_n = 0;
+    const amber = allChips(i).filter((c) => c.sev === 'amber');
+    expect(amber.map((c) => c.text)).toEqual(['tool locked for 31 min by auto-rebase (s-pb9492)']);
+    expect(activity(i)).toEqual([expect.objectContaining({ sev: 'blue', rank: 5 })]);
+  });
+
+  test('oldest parent work covers child activities and transient deferrals in the same repo', () => {
+    const i = pbi();
+    i.daemon.data!.activity = [
+      work({ kind: 'move', id: 2 }),
+      work({ kind: 'deps_rollout', id: 1, elapsed_ms: 180_000, sessions: 5, done: 2 }),
+      work({ kind: 'base_build', id: 3, elapsed_ms: 60_000, tree: null }),
+    ];
+    i.daemon.data!.warnings = [stuck('recent_writes')];
+    expect(activity(i)).toHaveLength(1);
+    expect(activity(i)[0].text).toStartWith('Rolling out deps 2/5 · tool · 3 min');
+    i.daemon.data!.activity = [
+      work({
+        kind: 'session_create',
+        repo: null,
+        repos: ['tool', 'web'],
+        id: 1,
+        elapsed_ms: 180_000,
+        step: null,
+      }),
+      work({ id: 2 }),
+    ];
+    expect(activity(i)).toHaveLength(1);
+  });
+
+  test('plain background holds need 10 s, no matching activity, and explicit background origin', () => {
+    const i = pbi();
+    i.daemon.data!.activity = [];
+    expect(activity(i)[0].text).toBe('tool busy with daemon work · 2 waiting');
+    const h = i.daemon.data!.holds[0] as Record<string, unknown>;
+    h.elapsed_ms = 10_000;
+    expect(activity(i)).toEqual([]);
+    h.elapsed_ms = 10_001;
+    expect(activity(i)).toHaveLength(1);
+    h.origin = 'request';
+    expect(activity(i)).toEqual([]);
+    h.origin = 'background';
+    i.daemon.data!.warnings = [hold('daemon', 31 * MINUTE, { origin: 'background' })];
+    expect(activity(i)).toEqual([]);
+  });
+
+  test.each(['catch_up', 'publish', 'push'])(
+    'P-b %s LongHold is abnormal amber and names the session by ticket, without internal words',
+    (method) => {
+      const i = pbi();
+      i.daemon.data!.warnings = [
+        hold(method, MINUTE, {
+          origin: method === 'catch_up' ? 'background' : 'request',
+          session: 's-pb9492',
+        }),
+      ];
+      const holder = method === 'catch_up' ? 'auto-rebase' : method;
+      const chip = () => allChips(i).find((c) => c.id.startsWith('warning:LongHold'))!;
+      expect(chip()).toMatchObject({
+        sev: 'amber',
+        rank: 4,
+        text: `tool locked for 1 min by ${holder} (s-pb9492)`,
+      });
+      i.sessions = fx<StatusReply>('status_all');
+      i.sessions.sessions[0].status.manifest.id = 's-pb9492';
+      i.sessions.sessions[0].status.manifest.ticket = 'gwd-9492';
+      expect(chip().text).toBe(`tool locked for 1 min by ${holder} (gwd-9492)`);
+      expect(chip().text).not.toMatch(/request|background/);
+    }
+  );
+
+  test('Busy is grouped by scope after the hold/activity is gone; total is not the headline', () => {
+    const i = pbi();
+    i.daemon.data!.holds = [];
+    i.daemon.data!.activity = [];
+    expect(busy(i)).toHaveLength(1);
+    expect(busy(i)[0]).toMatchObject({
+      sev: 'amber',
+      text: '3 requests got Busy · tool (auto-rebase of s-pb9492)',
+    });
+    i.daemon.data!.busy!.recent.push({
+      ...i.daemon.data!.busy!.recent[0],
+      scope: { repo: 'web' },
+      holder: null,
+    });
+    expect(busy(i).map((c) => c.text)).toEqual([
+      '3 requests got Busy · tool (auto-rebase of s-pb9492)',
+      '1 request got Busy · web',
+    ]);
+    i.daemon.data!.busy!.recent[3].scope = {};
+    expect(busy(i)[1].text).toBe('Some requests got Busy');
+    i.daemon.data!.busy!.truncated = true;
+    expect(busy(i)).toHaveLength(1);
+    expect(busy(i)[0].text).toBe('50+ requests got Busy');
+    i.daemon.data!.busy!.recent.forEach((e) => (e.at = new Date(NOW - 600_001).toISOString()));
+    expect(busy(i)).toEqual([]);
+  });
+
+  test('free-space thresholds use decimal GB caps and keep the previous severity until 110%', () => {
+    const i = pbi();
+    const v = i.daemon.data!.volume!;
+    expect(statusBarModel(i, NOW).right.free?.text).toBe('1.2 TB free');
+    v.size = 1e12;
+    const model = (free: number, previous: 'muted' | 'amber' | 'red' = 'muted') => {
+      v.free = free;
+      return statusBarModel(i, NOW, previous);
+    };
+    expect(model(100e9).spaceLevel).toBe('muted');
+    expect(model(99e9).spaceLevel).toBe('amber');
+    expect(model(20e9).spaceLevel).toBe('amber');
+    const red = model(19e9);
+    expect(red.right.free?.sev).toBe('red');
+    expect(red.chips.find((c) => c.id === 'low-space')).toMatchObject({
+      rank: 1,
+      sev: 'red',
+      target: { kind: 'modal', section: 'trash' },
+    });
+    expect(model(22e9, 'red').spaceLevel).toBe('red');
+    expect(model(22e9 + 1, 'red').spaceLevel).toBe('amber');
+    expect(model(110e9, 'amber').spaceLevel).toBe('amber');
+    expect(model(110e9 + 1, 'amber').spaceLevel).toBe('muted');
+    v.size = 100e9;
+    expect(model(14e9).spaceLevel).toBe('amber');
+    expect(model(4e9).spaceLevel).toBe('red');
+  });
+
+  test('Busy copy does not attribute several holders in a scope to just the most recent one', () => {
+    const i = pbi();
+    i.daemon.data!.busy!.recent[0].holder = 'publish';
+    expect(busy(i)[0].text).toBe('3 requests got Busy · tool');
+  });
+
+  test('stale volume is a dash without a low-space chip, preserving hysteresis until a good sample', () => {
+    const i = pbi();
+    i.daemon.data!.volume!.free = 1;
+    i.daemon.data!.volume!.as_of = new Date(NOW - 60_000).toISOString();
+    expect(statusBarModel(i, NOW).right.free?.sev).toBe('red');
+    i.daemon.data!.volume!.as_of = new Date(NOW - 60_001).toISOString();
+    expect(statusBarModel(i, NOW, 'red')).toMatchObject({
+      spaceLevel: 'red',
+      right: { free: { text: '—', sev: 'muted' } },
+    });
+    expect(allChips(i).some((c) => c.id === 'low-space')).toBe(false);
+    i.daemon.data!.volume = null;
+    expect(statusBarModel(i, NOW, 'red')).toMatchObject({
+      spaceLevel: 'red',
+      right: { free: null },
+    });
+  });
+
+  test('atomic scan counts work without du; unresolved failures do not come from failed history', () => {
+    const i = pbi();
+    expect(allChips(i).find((c) => c.id === 'scan')?.text).toBe(
+      'Measuring storage · 412 done · 4 in progress · 136 queued'
+    );
+    expect(allChips(i).find((c) => c.id === 'scan-unresolved')?.text).toBe(
+      "Couldn't measure 1 item"
+    );
+    i.daemon.data!.scan!.unresolved_n = 0;
+    i.du = fx<DuReply>('du');
+    i.du.scan = { ...pbFixture.duScan };
+    expect(allChips(i).some((c) => c.id === 'scan-unresolved')).toBe(false);
+    i.daemon.data!.scan!.running = false;
+    expect(allChips(i).some((c) => c.id === 'scan')).toBe(false);
+    delete i.daemon.data!.scan;
+    expect(allChips(i).find((c) => c.id === 'scan-unresolved')?.text).toBe(
+      "Couldn't measure 1 item"
+    );
+  });
+
+  test('P-b scan chip: a full pass at once, another only 60 s after the App first saw it', () => {
+    const i = pbi();
+    const scan = () => allChips(i).some((c) => c.id === 'scan');
+    i.daemon.data!.scan!.full = false;
+    // daemon_status.scan has no start time: not yet seen running for long.
+    expect(scan()).toBe(false);
+    i.scanSince = NOW - 60_000;
+    expect(scan()).toBe(false);
+    i.scanSince = NOW - 60_001;
+    expect(scan()).toBe(true);
+    // du's start time may be an earlier pass's: it does not age this one.
+    i.scanSince = NOW - 1000;
+    i.du = fx<DuReply>('du');
+    i.du.scan = { ...pbFixture.duScan, full: false, started: new Date(NOW - DAY).toISOString() };
+    expect(scan()).toBe(false);
+    i.daemon.data!.scan!.full = true;
+    expect(scan()).toBe(true);
+  });
+
+  test('the first sighting of a running pass lasts until a reply says none runs', () => {
+    const s = structuredClone(pbFixture.daemon) as DaemonStatus;
+    const started = Date.parse(s.started!);
+    expect(observeScanRun(undefined, s, NOW)).toBe(NOW);
+    expect(observeScanRun(NOW - 5000, s, NOW)).toBe(NOW - 5000);
+    // A pass of a restarted daemon is no older than that daemon.
+    expect(observeScanRun(started - MINUTE, s, NOW)).toBe(started);
+    s.scan!.running = false;
+    expect(observeScanRun(NOW - 5000, s, NOW)).toBeUndefined();
+    s.scan!.running = true;
+    s.features = ['status.upstream'];
+    expect(observeScanRun(NOW - 5000, s, NOW)).toBeUndefined();
+    expect(observeScanRun(NOW - 5000, undefined, NOW)).toBeUndefined();
+  });
+
+  test('a reply newer than the 5 s clock is current: volume, Busy and restart', () => {
+    const i = pbi();
+    const v = i.daemon.data!.volume!;
+    v.size = 1e12;
+    v.free = 19e9;
+    // Sampled, and answered, after the component's last tick at NOW.
+    v.as_of = new Date(NOW + 3000).toISOString();
+    i.daemon.updatedAt = NOW + 4000;
+    i.daemon.data!.busy!.recent.forEach((e) => (e.at = new Date(NOW + 2000).toISOString()));
+    i.daemon.data!.started = new Date(NOW + 1000).toISOString();
+    const model = statusBarModel(i, NOW);
+    expect(model.right.free?.sev).toBe('red');
+    expect(model.right.free?.text).not.toBe('—');
+    expect(model.chips.find((c) => c.id === 'low-space')).toMatchObject({ rank: 1, sev: 'red' });
+    expect(busy(i).map((c) => c.text)).toEqual([
+      '3 requests got Busy · tool (auto-rebase of s-pb9492)',
+    ]);
+    expect(allChips(i).find((c) => c.id === 'restarted')?.text).toBe('Daemon restarted just now');
+    // Without the reply time, a sample a few seconds ahead of the clock is still fresh.
+    i.daemon.updatedAt = NOW;
+    expect(statusBarModel(i, NOW).right.free?.sev).toBe('red');
+    expect(volumeView(i.daemon.data, NOW)).toMatchObject({ stale: false, level: 'red' });
+  });
+
+  test('version mismatch and restart use existing identity source and RFC 3339 started', () => {
+    const i = pbi();
+    i.daemon.data!.version = '0.2.3';
+    expect(allChips(i).find((c) => c.id === 'version')).toMatchObject({
+      sev: 'amber',
+      text: `App ${version} · daemon 0.2.3`,
+    });
+    expect(allChips(i).find((c) => c.id === 'restarted')).toMatchObject({
+      sev: 'muted',
+      text: 'Daemon restarted 2 min ago',
+    });
+  });
+
+  test('without the capability new data fields add no chips or free-space facts', () => {
+    const i = pbi();
+    i.daemon.data!.features = ['status.upstream'];
+    expect(activity(i)).toEqual([]);
+    expect(busy(i)).toEqual([]);
+    expect(statusBarModel(i, NOW).right.free).toBeNull();
+    expect(allChips(i).filter((c) => c.id.startsWith('scan'))).toEqual([]);
+    expect('api' in i.daemon.data!).toBe(false);
   });
 });

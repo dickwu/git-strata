@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use strata_types::{RepoName, SessionId, StrataError};
 
+pub mod activity;
 mod auto_close;
 pub mod catalog;
 pub mod client;
@@ -54,7 +55,11 @@ pub mod seams {
     }
 
     pub(crate) fn scene_sync_fails(p: &std::path::Path) -> bool {
-        SCENE_SYNC_FAILS.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|r| p.starts_with(r))
+        SCENE_SYNC_FAILS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .any(|r| p.starts_with(r))
     }
 
     type Hook = std::sync::Arc<dyn Fn() + Send + Sync>;
@@ -73,7 +78,12 @@ pub mod seams {
     }
 
     pub(crate) fn after_confirm(root: &std::path::Path) {
-        let h = AFTER_CONFIRM.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(r, _)| r == root).map(|(_, h)| h.clone());
+        let h = AFTER_CONFIRM
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|(r, _)| r == root)
+            .map(|(_, h)| h.clone());
         if let Some(h) = h {
             h();
         }
@@ -126,6 +136,9 @@ pub fn install_path_for_home(home: &Path) -> String {
 /// Optional request features this daemon serves, listed in
 /// `daemon_status.features` so a newer CLI can tell what an older daemon
 /// would reject. Additive only. `new.agent`: `new` takes `agent`.
+/// `daemon_status.activity` names a reply capability instead: the
+/// `daemon_status` fields of the status-bar work (`activity`, `busy`,
+/// `volume`, `scan`, `version`, `pid`, `started`).
 pub const FEATURES: &[&str] = &[
     "new.agent",
     "session.mark",
@@ -141,6 +154,7 @@ pub const FEATURES: &[&str] = &[
     "new.base",
     "rebase.quiet_scope",
     "config.reload",
+    "daemon_status.activity",
 ];
 
 /// The launchd label of the agent.
@@ -217,6 +231,13 @@ pub enum DaemonWarning {
         repo: RepoName,
         method: String,
         since: SystemTime,
+        /// Status-bar §3.1: the holder's origin; absent from an older daemon.
+        #[serde(default)]
+        origin: Option<locks::Origin>,
+        /// The holder's subject (`locks::with_subject`), else its request's
+        /// session; absent from an older daemon.
+        #[serde(default)]
+        session: Option<SessionId>,
     },
     LongWait {
         repo: Option<RepoName>,
@@ -275,8 +296,15 @@ pub enum DaemonWarning {
 pub struct LockHold {
     pub repo: RepoName,
     pub method: String,
+    /// The holder's subject (`locks::with_subject`), else its request's session.
     pub session: Option<SessionId>,
     pub since: SystemTime,
+    /// Status-bar §3.1: absent from an older daemon.
+    #[serde(default)]
+    pub origin: Option<locks::Origin>,
+    /// Status-bar §3.1: how long it has been held; absent from an older daemon.
+    #[serde(default)]
+    pub elapsed_ms: Option<u64>,
 }
 
 /// `chain_resolve`'s choice; serialized as the variant name.
@@ -287,6 +315,8 @@ pub enum ChainChoice {
     Restore,
 }
 
-pub mod main_sync;
 mod audit;
+pub mod busy;
+pub mod main_sync;
 pub mod periodic_fetch;
+pub mod volume;

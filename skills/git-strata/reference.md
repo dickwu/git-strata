@@ -57,9 +57,9 @@ data root (`[paths] root`, default `~/.strata`) as
 | `mark` | `--session <S>` (required), `done [--note TEXT]` or `active`, `[--agent NAME]` | no | no | `{session, mark}`; asks nothing, and a done session can be auto-closed later (`git-strata mark --help`); requires `session.mark`; note 1–2000 UTF-8 bytes, tab/newline allowed; active clears metadata |
 | `rm` | `--session <S>` (required), `--discard` | `--discard`: yes + confirm | no | `RemoveReport` (`data.regenerable`: paths kept under the pinned `rm.regenerable`); A full publish closes the session; run this when `data.auto_close` says it is yours. `Dirty`: mark done and report unpublished work; nothing removed, `detail.repos` / `untracked_repos` / `unresolved`; `Dirty` `changed_during_remove`: retry |
 | `gc` | `--store` (also the store-wide gc: sessions removed over 30 days ago, their checkpoints and blobs, decided proposals, store/tmp, blob scrub), `--dry-run` (with `--store`: report only). Plain `gc` also empties `store/trash` entries older than 1 h that nothing names; refused/stuck on stderr. Agents run it only when the human asks, never after `Unknown` | no | no | `{}`; `--store`: `{store: report}`; `--store --dry-run`: `{dry_run:true,preview:{...}}` |
-| `du` | `--refresh` (re-size everything in the background; returns at once) | no | no | `{root,now,total,store{all,db,blobs,tmp,other,trash{...,entries,eligible{entries,reclaim_min,reclaim_max},young,floor_secs,gc}},bases{all,repos},deps{all,repos},sessions{all,list[{session,savings,...}]},savings{live,cumulative},scan{running,started,done,queued,full,failed,last_full},took_ms}`; every figure `{logical,allocated,private,shared,files,exact,errors,units,stale,pending,complete,as_of}` |
+| `du` | `--refresh` (re-size everything in the background; returns at once) | no | no | `{root,now,total,store{all,db,blobs,tmp,other,trash{...,entries,eligible{entries,reclaim_min,reclaim_max},young,floor_secs,gc}},bases{all,repos},deps{all,repos},sessions{all,list[{session,savings,...}]},savings{live,cumulative},scan{running,started,active,done,queued,full,failed,unresolved,last_full},took_ms}`; `scan.unresolved`: one `{unit,error,at}` per unit whose last measurement failed (`failed` is the history); every figure `{logical,allocated,private,shared,files,exact,errors,units,stale,pending,complete,as_of}` |
 | `daemon start` / `daemon stop` (human only; login HOME only, D38) | — | no | yes (uses launchd, not the socket) | `{}` or `{already:true}` |
-| `daemon status` | — | no | yes | `{running,socket,session?,holders:[],unknown_publishes:[],alerts:[],alerts_at?:[],pins_meta?:{},config?:{generation,hash,loaded_at,last_attempt,restart_required}}` |
+| `daemon status` | — | no | yes | `{running,socket,session?,holders:[],unknown_publishes:[],alerts:[],alerts_at?:[],pins_meta?:{},config?:{generation,hash,loaded_at,last_attempt,restart_required},version?,pid?,started?,activity?:[],busy?:{total,recent,truncated},volume?:{free,size,as_of}\|null,scan?:{running,active,queued,done,full,unresolved_n}}` |
 | `resolve` | `--session <S> --repo <R>` + exactly one of `--abandon` / `--accept` | yes | no | `ResolutionReport` |
 | `chain` | `--repo <R>` + exactly one of `--accept-origin <replay\|drop>` / `--restore` | yes (`--restore` may also confirm) | no | `{repo,choice,outcome?\|refs_moved?}` |
 | `config reload` | — | no | no | ReloadReport in data; exits 0/1/2/3/4 |
@@ -72,6 +72,18 @@ when down or omitted by an older daemon. `generation`, `hash` and `loaded_at`
 describe the active catalog. `last_attempt` is null before any reload attempt,
 then the report plus `at` and a rejection `reason` when present;
 `restart_required` lists restart-only fields from that attempt.
+
+When `features` contains `daemon_status.activity`, `daemon status` also copies
+the daemon's `version`, `pid`, `started`, `activity` (long work in flight:
+`{id,kind,origin,repo,session,started,elapsed_ms,step_elapsed_ms,...}`), `busy`
+(`Busy` replies of the last 10 min, `recent[]` items
+`{at,method,session,reason,scope,holder,holder_session}`), `volume` (the data
+root's volume in bytes, null if unsampled) and `scan` (size-scan counts), and
+`holders[]` items gain `origin` (`request`/`background`) and `elapsed_ms`, with
+`session` naming the session the holder works on. They
+are informational; nothing an agent does depends on them. A `LongHold` alert
+means a lock held past its threshold (30 s for a request, 30 min for background
+work or a long move, rollout, base build or session creation).
 
 `checkpoint -m` with nothing changed returns the latest checkpoint instead of
 a new one; every new `--tool-call` ID records a row. `publish` records a fresh

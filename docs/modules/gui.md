@@ -190,10 +190,10 @@ daemon.md §5 的方法表与「共 21 个方法」那句、`tests/rpc.rs::daemo
 | P2 | `status` 加参数 `summary: bool`（缺省 false） | 是 | 只读 store：每会话的 ticket、仓库、每仓库 `changes_at_checkpoint{count, checkpoint, at}`（该会话该仓库**最新检查点**的 overlay 条目数——历史值，不含检查点之后的编辑；界面写 "as of last checkpoint, <time>"，不当作当前改动数）、最后检查点、最后活动时间；**不跑** drift / shadow_drift / open_files | daemon.md §5 status 行 |
 | P2 | `changes {session, repo}`（新） | 是 | session **当前工作区**相对其基线的改动路径与类型（与 cli `diff` 今天的算法相同，cmds.rs:592 起，读工作区现状，不写检查点）；回答带 `computed_at`；算不了（工作区不可读、跟踪器降级）→ `fresh: false` + `reason`，界面显示 "unknown"，不显示旧数 | 方法表 +1 |
 | P2 | `diff_text {session, repo, path, against: base / {session}, max_bytes}`（新） | 是 | 两侧文本或 `binary / missing / too_large / symlink{target}`，各带版本标识；`path` 走 RepoPath 校验 | 方法表 +1 |
-| P2 | `allocations {repo?}`（新） | 是 | 基线代（`base_gens`）、依赖集（`deps_sets`）、工作区引用（`workspaces`）、进行中的依赖构建（`deps_attempts`）、数据根所在卷的 free / total；大小取 du 缓存（带 `as_of`） | 方法表 +1 |
+| P2 | `allocations {repo?}`（新） | 是 | 基线代（`base_gens`）、依赖集（`deps_sets`）、工作区引用（`workspaces`）、进行中的依赖构建（`deps_attempts`）、数据根所在卷的 free / total（复用 P-b `daemon_status.volume` 的缓存，不在回答时调用文件系统）；大小取 du 缓存（带 `as_of`） | 方法表 +1 |
 | P2 | `push_plan {repo}`（新） | 是 | daemon 读出的 chain 顶（= 要传回的 `shown`）、要推的提交（oid + 标题）、分支、**解析后的目标 URL**（D12，来自 impl/v1）、pins 是否要确认、`deploy_on_push`、Touch ID 框将显示的文字 | 方法表 +1；confirm.md §5 文案含 URL |
 | P2 | `publish_plan` 加参数 `detail: bool` | 是 | 每仓库要发布的提交、chain 顶、pins、目标 URL、已发布跳过项、`waiting_proposals`、Touch ID 文字 | daemon.md §5 publish_plan 行 |
-| P2 | `daemon_status` 加字段 | 是 | `version`、`api`、`epoch`、`draining`、`inflight[]`（§5.9）、`pending_prompt`（见下）、`confirm`（仅 `probe: true` 时探测，结果缓存 60 s） | daemon.md §5 daemon_status 行 |
+| P2 | `daemon_status` 加字段 | 是 | `api`、`epoch`、`draining`、`inflight[]`（§5.9）、`pending_prompt`（见下）、`confirm`（仅 `probe: true` 时探测，结果缓存 60 s）；`version`、`pid`、`started` 已由 P-b 提供。P-b 仅用 `daemon_status.activity` feature，不加 `api`，不改变旧 App 的轮询节奏；`activity[]` 用于展示工作，与 drain 的准入请求列表 `inflight[]` 不同 | daemon.md §5 daemon_status 行 |
 | P2 | `Confirmer::pending() -> Option<PendingPrompt{action_kind, method, reason_text, started_at}>`（新，在 **strata-confirm** 的 confirmer.rs） | — | 今天的门是 `Mutex<()>`，`prompt_in_progress` 靠 `try_lock`（confirmer.rs:146-158），里面没有框的信息。新增 `Mutex<Option<PendingPrompt>>`：拿到门之后写入，用 guard 的 Drop 在**每条**退出路径清空；只读，不影响门 | confirm.md §3 |
 | P2 | `config_effective`（新） | 是 | 三份分开给：**daemon 当前已应用的 catalog** 配置与 pins（`Catalog.source/config/pins`，catalog.rs）、磁盘上现在的 config.toml、待处理的放宽；`revision` = **已应用文本**的哈希（与 `daemon_status.config.hash` 相同），另给 `on_disk_differs: bool`，界面写 "Edited since the config was applied" | 方法表 +1 |
 | P3 | `deps_list` 回答里每个提议加 `planned_moves[]` | 是 | daemon 用与锁内复核**同一个函数**算出的移动（今天 cli 在 confirm.rs 本地算）；方法数不变 | daemon.md §5 deps_list 行、types.md PlannedMove |
@@ -522,7 +522,7 @@ First matching row wins:
 | 4 | Waiting | filled circle | `#8A4B00` / `#FFB340` | N waiting for you |
 | 5 | Conflict | filled diamond | `#7A35A6` / `#C99BF2` | N repos need an agent (distinct repositories; singular: 1 repo needs an agent) |
 | 5a | Checking (partial) | ellipsis | neutral, 55% | Some session details are unavailable |
-| 6 | Syncing | ring | `#245A74` / `#6FB3D2` | Bringing in newer changes; with observed catch-up work: Bringing in newer changes: tool, 2 min (oldest repo hold when several exist) |
+| 6 | Syncing | ring | `#245A74` / `#6FB3D2` | Bringing in newer changes; naming the oldest P-b move, else the oldest catch-up hold: Bringing in newer changes: tool, 2 min |
 | 7 | Normal | glyph only | neutral | All clear, N sessions |
 
 Neutral is black at 85% on light bars, white at 88% on dark bars. Palette is independent of
@@ -575,8 +575,10 @@ one repo item after a non-conflict deferral exceeds 24 h, aggregating sessions n
 listed by stuck apply proposals. ConfigRelax adds one repo item. Conflicts stay agent work at
 any age. Pending auto-rebases, waiting installing/waiting_install, and younger non-conflict
 deferrals are Syncing; needs_push, publish_unfinished, proposal presence and lock holds are not.
-Only after this existing rule selects Syncing may a `catch_up` entry in `daemon_status.holds[]`
-or a `LongHold` with method `catch_up` add its repo and elapsed time to the tooltip. Entries
+Only after this existing rule selects Syncing may a P-b `activity[]` move add its repo and
+monotonic elapsed time to the tooltip, choosing the oldest move when several exist. All move
+causes qualify. Without a usable P-b move, the existing fallback uses a `catch_up` entry in
+`daemon_status.holds[]` or a `LongHold` with method `catch_up`. Entries
 must be at least 3 s old; ages from 3–59 s use seconds, then whole minutes/hours. With several,
 use the oldest valid `since`; tickets never appear (G7). This is text only: the menu status line stays
 `Daemon running, N sessions` (plus any notices), and no new poll, state, color or priority is added.
@@ -626,7 +628,7 @@ daemon 侧（P5）：
 1. `drain{on: true, ttl_s}`：daemon 进入 draining：**新的写请求**一律回 `Busy`，`detail.reason = draining`（只读请求与 watch 照常）；已在排队或执行的写请求照常完成。drain 是**租约**：`ttl_s` 默认 120 s、上限 600 s；再发一次 `drain{on: true, ttl_s}` 就从现在起续期，总时长不设上限（依赖安装可达 60 分钟，strata-deps lib.rs:76）。租约到期自动解除，daemon 重启也解除——GUI 崩溃或睡眠后 daemon 不会永远拒写。`drain{on: false}` 立即解除。回答带 `lease_id`，`daemon_status.draining` 给出 `{lease_id, expires_at, sealed}`。**准入原子性**：写请求的「查 draining」与「登记进 inflight」在同一个临界区里做（同一把 inflight 锁）；drain 的开启也在这把锁里，所以不存在「已解析、未登记」而同时躲过 `Busy draining` 与 inflight 列表的请求。
 1a. `drain{seal: true, lease_id, then: "restart" | "stop"}`（**封口**）：在同一临界区里原子地核对 `lease_id` 是当前的、未过期、`inflight` 为空；不满足 → `Busy`，`detail.reason = not_idle / lease_lost`，什么都不改。满足 → drain 变为 sealed：**不再过期、不能解除**（`drain{on:false}` 回 `InvalidInput sealed`），回答之后 daemon **立即**走自己的 §5.9 停机路径（等同收到 SIGTERM）。**没有「封口后等别人来停」的窗口**，r3.2 的 60 s 自退兜底删除。
 1b. **退出码由封口决定，与收尾是否出错无关**（plist 是 `KeepAlive = { SuccessfulExit = false }`）：`then: restart` → 以 **75**（EX_TEMPFAIL）退出，launchd 拉起新进程；`then: stop` → 以 **0** 退出，launchd 不拉起，服务停在「已加载、未运行」，直到下次登录（RunAtLoad）或幂等启动的 `kickstart`。`core.close()` 出错（main.rs:92 今天是 `result.and(closed)`，会把退出码变成非 0）时：错误写进 err.log 与 `~/Library/Application Support/git-strata/last_shutdown.json`（`{mode, epoch, close_error, at}`），**退出码仍按 `then`**——所以 stop 不会因为收尾出错被拉起一个未封口的进程；restart 本来就要拉起，下一次启动照常走 daemon.md §5.1 的恢复。未封口的 SIGTERM（登出、bootout、人手 `launchctl kill`）同样以 0 退出并记录 close 错误。只有 panic / 被信号杀死 / 启动失败是非 0（launchd 按节流拉起），这是要的行为。main.rs:95-99 的 `ExitCode` 映射在 P5 改。
-2. `daemon_status.inflight[]`：每个已接受但未完成的写请求一项：`{method, session?, repo?, phase: queued / confirming / locked / running, started_at}`，覆盖今天 holds / waiters 看不到的阶段（确认框等待中、依赖构建中）。
+2. `daemon_status.inflight[]`：每个已接受但未完成的写请求一项：`{method, session?, repo?, phase: queued / confirming / locked / running, started_at}`，覆盖今天 holds / waiters 看不到的阶段（确认框等待中、依赖构建中）。P-b `activity[]` 是用于展示的长任务（包括后台工作），不能替代准入栅栏的 `inflight[]`；drain UI 可展示正在等待的请求所对应的 activity。
 3. 收到 SIGTERM：照 daemon.md §5.9 停止 accept、在跑的请求做完、**还在排队的以 `ReadOnly shutting_down` 失败**、订阅者收到 `bye`；plist 的 `ExitTimeOut 900` 给足时间。所以 GUI 必须等 inflight（含 queued）为空才发停机。
 
 GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 需要重启的配置变更共用一个流程（支持 `config.reload` 的收紧不走此流程）：
@@ -988,7 +990,8 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 需要重启的配�
 
 ## Status bar states
 
-Step 1 (P-a) is GUI-only and works against the 0.2.2 daemon. The in-window status bar (S1)
+Step 1 (P-a) is GUI-only and works against the 0.2.2 daemon. Step 2 (P-b) consumes additive
+daemon fields only when `features` contains `daemon_status.activity`. The in-window status bar (S1)
 is the primary surface; the daemon modal (S3) and Daemon screen (S4) provide detail. The
 menu-bar tray (S2) keeps the owner-approved r9 states, shapes, colors and priorities in §5.8.
 Its only changes are background LongHold notice counting and the existing Syncing tooltip's
@@ -999,10 +1002,10 @@ daemon modal. Chip targets open the relevant modal section, waiting list or sess
 
 | Order | Color | Contents |
 |---|---|---|
-| 1 | Red (`--danger`) | Unavailable data volume guidance, file-handle pressure, Error-class warnings (down/exhaustion are shown once in the daemon trigger) |
+| 1 | Red (`--danger`) | Critically low volume space, unavailable data volume guidance, file-handle pressure, Error-class warnings (down/exhaustion are shown once in the daemon trigger) |
 | 2 | Amber (Waiting palette) | Waiting for you |
 | 3 | Purple (Conflict palette) | Repositories needing an agent for conflicts |
-| 4 | Amber (Waiting palette) | Degraded states: abnormal holds, current long waits, actionable auto-rebase failures, config/fetch failures, published but not pushed |
+| 4 | Amber (Waiting palette) | Degraded states: Busy replies, abnormal holds (every P-b LongHold; on 0.2.2 a request hold or a background hold past 30 min), current long waits, actionable auto-rebase failures, config/fetch failures, published but not pushed, unresolved measuring errors, low space, version mismatch |
 | 5 | Blue (Syncing palette) | Normal background work |
 | 6 | Muted | Size-scan counts and partial details |
 
@@ -1027,8 +1030,9 @@ does not. Health text is shown once in the trigger, so muted states do not take 
 over actionable chips. `store_unavailable` uses a volume-wait trigger and separate guidance
 for permission/TCC versus an unavailable volume; `starting` means recovery is in progress.
 
-Only chips backed by `warnings[]` target the Warnings section. Other chips open the
-always-present daemon section, and all chips are also listed under Now at the modal's top.
+Only chips backed by `warnings[]` target the Warnings section. P-b work/Busy chips open
+Activity, scan chips open Size scan, and low-space chips open Trash (available even while
+waiting for du). Other chips open the daemon section; all chips are also listed under Now.
 Retained warning chips also use the daemon section while a query error hides the warning list.
 FetchFailed and AnchorNotAdvanced share one fetching-failed chip per repo. A
 `sessions_audit_error` chip means writing the sessions audit log failed. The published-but-not-pushed
@@ -1104,9 +1108,10 @@ preserved when deciding which bounds are available. On daemon 0.2.2 cumulative s
 no accuracy flag, so the modal withholds the numeric cumulative savings bound even when
 current figures are exact, while keeping recorded-session counts, removed/unmeasured counts
 and creation/copy timing. The scan section shows
-done/queued counts and historical measuring errors. The daemon section provides health,
+done/queued counts and historical measuring errors on 0.2.2, or active/done/queued counts and
+current unresolved units/errors/timestamps on P-b. The daemon section provides health,
 socket, session/hold/waiting/warning counts, reconciliation, file handles/accept errors and
-configuration facts. Optional version, pid and uptime are marked unreported when missing;
+configuration facts. Optional version, pid, started and uptime are marked unreported when missing;
 none is inferred for 0.2.2.
 
 The full-page Daemon screen, reached through the command palette, reuses the classified
@@ -1115,18 +1120,64 @@ per-repo waiting counts, and links to sessions with unavailable upstream detail.
 remain behind Details and allocated clone totals are not used as its storage headline.
 S3/S4 reuse the existing query data; they add no daemon command or poll.
 
-### Step 2, not yet
+### P-b sources and compatibility
 
-Daemon P-b will add optional `activity[]`, `busy`, `volume`, `version`, `pid`, `started`,
-holder origin/subject information, and scan `active`/`unresolved` information. It will
-distinguish normal long work from abnormal holds at the source; exception kinds include
-move, deps rollout, base build and session creation, while publish/push holds keep their
-30-second warning rule. The GUI will use activity entries for detailed progress, count
-eligible Busy replies, show sampled volume free space and low-space severity, and report
-daemon identity/restarts. Size scans can then show in-progress counts and amber unresolved
-errors, rather than treating historical `failed[]` entries as current failures.
+The App accepts optional `activity[]`, `busy`, `volume`, `scan`, `version`, `pid`, `started`,
+holder `origin`/`elapsed_ms`, LongHold `origin`/`session`, and `du.scan.active`/`unresolved`.
+New display sources are gated by `daemon_status.activity`. No request field, RPC method,
+Tauri command, poll or `api` is added. The existing legacy cadence continues to depend on
+the presence of `api`, not this reply feature. The 0.2.2 incident fixture and fallback remain unchanged.
 
-These are step 2, not yet; P-a requires none of those fields and adds no poll or Tauri
-command. P-b will advertise `daemon_status.activity` without adding `api`, because `api`
-would switch already-shipped apps to faster polling. Display `activity[]` is distinct from
-the admitted-write `inflight[]` list used for safe drain (§5.9).
+Activity entries younger than 3 s are omitted. The oldest outer activity covers its repo
+(session creation covers its `repos`, suppressing child work chips); there is at most one
+activity chip per repo. Examples: `Moving gwd-9492 to new main · tool · 2 min`, `Rebasing
+after publish · tool`, `Sync moving s-… · tool`, `Rolling out deps 2/5 · tool`, `Building
+base · tool`, `Creating session gwd-9500 · 3 repos`, `Installing dependencies · tool`,
+`Publishing tool`, and `Pushing tool`. S1 uses the session ticket when the sessions reply
+knows it, else a short id. Elapsed time comes from the daemon's monotonic milliseconds;
+the existing five-second UI clock advances it between health replies. Repo waiting counts
+and fresh session pending counts append `N waiting` / `N pending`. The tooltip gives the
+move phase or creation step and explains the 30-second Busy refusal/retry rule, except for a
+dependency install, which holds no repo lock.
+
+Activity chips stay blue however long the work runs. The daemon judges what is abnormal (a
+move or rollout step past 30 min, a background hold past 30 min, a request hold past 30 s,
+publish/push included) and reports it as a LongHold, so every LongHold from P-b is amber:
+`tool locked for 31 min by auto-rebase (gwd-9492)`, naming the session by ticket when the
+sessions reply knows it, else by short id, and never by origin. No LongHold is red. A plain
+`origin: background` hold over 10 s with no registry activity or LongHold
+gets neutral blue `tool busy with daemon work`. These states do not select a tray icon.
+The modal lists registry work, locks and queues, as well as Busy totals/recent replies.
+
+Busy chips use `busy.recent` within ten minutes, grouped by scope, independently of any
+remaining hold. Known scopes say `3 requests got Busy · tool (auto-rebase of gwd-9492)`;
+unknown scopes use `Some requests got Busy`. A truncated ring uses one aggregate
+`50+ requests got Busy` chip, because evicted events cannot be attributed to a repo.
+`busy.total` is since daemon start and appears only in the modal, alongside recent methods,
+scope, reason, holder/session and times.
+
+The right side shows sampled volume free space. Amber is below `min(15% of size, 100 GB)`;
+red is below `min(5% of size, 20 GB)` (decimal GB thresholds). A level clears only above
+110% of its threshold. The component retains the previous level outside the pure model,
+including across a stale/missing sample. `volume.as_of` over 60 s old shows `—` without a
+low-space chip. Ages are measured from the later of the five-second UI clock and the reply's
+arrival, so a sample, Busy reply or daemon start newer than the last tick is current, never stale. Missing/null volume has no numeric free-space fact. The modal shows free,
+size and sample time with the APFS caveat: this space is shared, excludes purgeable space,
+and can differ from Finder; size minus free is not git-strata usage. Low-space chips land
+on Trash's counts and human gc command, with no promise of bytes reclaimed.
+
+P-b scan chips use the lightweight `daemon_status.scan` counters, so they do not need du:
+`Measuring storage · 412 done · 4 in progress · 136 queued`. They appear only while running
+and for a full pass or a pass older than 60 s. The status contract has no start time, and
+`du.scan.started` may be an earlier pass's, so the App times a pass from the first reply it saw
+running, until a reply shows none running (never before the daemon's `started`). Unresolved count
+comes from `scan.unresolved_n`, falling back to `du.scan.unresolved.length` if not reported.
+Only current unresolved failures create amber `Couldn't measure N items` chips; the modal
+shows unresolved unit/error/time rows. `Recent measuring errors` remains an old-daemon
+history view and is hidden on P-b, whose failed history may contain resolved attempts.
+
+Daemon identity is reported as muted `daemon 0.2.x`, pid and started/uptime in the modal.
+A version differing from the existing App package version produces amber `App X · daemon Y`.
+A start less than ten minutes ago produces muted `Daemon restarted 2 min ago`.
+Display `activity[]` remains distinct from the admitted-write `inflight[]` list used for
+safe drain (§5.9); display activity is not an admission or quiescence proof.

@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { QueryClient, QueryClientProvider, type UseQueryResult } from '@tanstack/react-query';
 import { bytes } from '@/lib/copy';
 import { daemonCopy } from '@/lib/daemonCopy';
+import pbFixture from '@/lib/fixtures/statusBar/pb.json';
 import { pollPlan } from '@/lib/poll';
 import type { Chip, WarningView } from '@/lib/statusBar';
 import type { DaemonStatus, DuReply, StatusReply } from '@/lib/types';
@@ -174,6 +175,54 @@ const inexactDu = (): DuReply => {
 };
 
 describe('daemon modal content', () => {
+  test('P-b identity, activity, Busy, volume and current measuring errors render from the contract', () => {
+    const data = structuredClone(pbFixture.daemon) as DaemonStatus;
+    const du = incidentDu();
+    du.scan = structuredClone(pbFixture.duScan);
+    const html = content({
+      status: answered(data),
+      du: answered(du),
+      now: Date.parse(pbFixture.now),
+    });
+    expect(html).toContain('daemon 0.2.2');
+    expect(html).toContain('4242');
+    expect(html).toContain('Started');
+    expect(html).toContain('Moving session');
+    expect(html).toContain('prepare');
+    expect(html).toContain('Total since daemon start: 17');
+    expect(html).toContain('Recent replies (last 10 minutes)');
+    expect(html).toContain('Data volume: 1.2 TB free of 2.0 TB');
+    expect(html).toContain('purgeable');
+    expect(html).toContain('Finder');
+    expect(html).toContain('Measuring storage · 412 done · 4 in progress · 136 queued');
+    expect(html).toContain(esc("Couldn't measure 1 item"));
+    expect(html).toContain('store/trash/unit-1');
+    expect(html).not.toContain('Recent measuring errors');
+    expect(html).not.toContain('old/resolved');
+    expect(html).toContain('data-section="trash"');
+  });
+
+  test('P-b storage and scan remain usable while du has not answered; trash target exists', () => {
+    const data = structuredClone(pbFixture.daemon) as DaemonStatus;
+    const html = content({
+      status: answered(data),
+      du: { ...answered(undefined), isSuccess: false, isPending: true } as UseQueryResult<DuReply>,
+      now: Date.parse(pbFixture.now),
+    });
+    expect(html).toContain('Data volume: 1.2 TB free of 2.0 TB');
+    expect(html).toContain('4 in progress');
+    expect(html).toContain('data-section="trash"');
+    expect(html).toContain('Trash measurements are not available yet.');
+  });
+
+  test('P-b cached activity, Busy and volume do not survive an unreachable daemon', () => {
+    const data = structuredClone(pbFixture.daemon) as DaemonStatus;
+    const html = content({ status: notAnswering(data), now: Date.parse(pbFixture.now) });
+    expect(html).not.toContain('data-section="activity"');
+    expect(html).not.toContain('Busy replies');
+    expect(html).not.toContain('Data volume:');
+  });
+
   test('incident: nothing red; raw JSON and allocated bytes only behind Details', () => {
     const html = content();
     expect(html).not.toContain('data-sev="red"');

@@ -22,8 +22,15 @@
  * so that bound is unavailable too.
  */
 import { daemonCopy as t } from './daemonCopy';
-import type { Severity, WarningView } from './statusBar';
-import type { DaemonStatus, DuReply, DuScan } from './types';
+import {
+  activityList,
+  hasActivityStatus,
+  recentBusy,
+  type Severity,
+  type WarningView,
+} from './statusBar';
+import type { DaemonActivity, DaemonStatus, DuReply, DuScan } from './types';
+export { volumeView } from './statusBar';
 
 /** Optimistic sustained copy rate for the estimate (bytes per second, decimal GB). */
 export const ASSUMED_COPY_RATE = 2_000_000_000;
@@ -364,11 +371,16 @@ export interface ScanView {
    * the same unit and error once, with how often, newest first.
    */
   failed: Array<{ unit: string; error: string; times: number }>;
+  /** null on old daemons: their failed list is history, not current failures. */
+  unresolved: NonNullable<DuScan['unresolved']> | null;
+  unresolvedN: number;
 }
 
-export function scanView(scan: DuScan | undefined): ScanView | null {
-  if (!scan || typeof scan.running !== 'boolean') return null;
-  const history = Array.isArray(scan.failed) ? scan.failed : [];
+export function scanView(scan: DuScan | undefined, daemon?: DaemonStatus): ScanView | null {
+  const pb = hasActivityStatus(daemon);
+  const progress = pb ? (daemon?.scan ?? scan) : scan;
+  if (!progress || typeof progress.running !== 'boolean') return null;
+  const history = !pb && Array.isArray(scan?.failed) ? scan.failed : [];
   const failed = new Map<string, ScanView['failed'][number]>();
   for (const f of [...history].reverse()) {
     if (!f || typeof f.unit !== 'string' || typeof f.error !== 'string') continue;
@@ -377,12 +389,14 @@ export function scanView(scan: DuScan | undefined): ScanView | null {
     failed.set(key, { unit: f.unit, error: f.error, times: (prev?.times ?? 0) + 1 });
   }
   return {
-    running: scan.running,
-    done: num(scan.done),
-    active: num((scan as DuScan & { active?: unknown }).active),
-    queued: num(scan.queued) ?? 0,
-    lastFull: typeof scan.last_full?.ended === 'string' ? scan.last_full.ended : null,
+    running: progress.running,
+    done: num(progress.done),
+    active: num(progress.active),
+    queued: num(progress.queued) ?? 0,
+    lastFull: typeof scan?.last_full?.ended === 'string' ? scan.last_full.ended : null,
     failed: [...failed.values()],
+    unresolved: pb ? (scan?.unresolved ?? []) : null,
+    unresolvedN: pb ? (daemon?.scan?.unresolved_n ?? scan?.unresolved?.length ?? 0) : 0,
   };
 }
 
@@ -427,6 +441,7 @@ export interface QueueRow {
 }
 
 export interface ActivityView {
+  work: DaemonActivity[];
   holds: HoldRow[];
   queues: QueueRow[];
   /** `repo_waiting`, busiest first. */
@@ -483,6 +498,7 @@ const longestFirst = (a: { elapsedMs: number | null }, b: { elapsedMs: number | 
 export function activityView(s: DaemonStatus, now: number): ActivityView {
   const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
   return {
+    work: hasActivityStatus(s) ? activityList(s) : [],
     holds: list(s.holds)
       .map((h) => holdRow(h, now))
       .filter((r) => r !== null)
@@ -496,6 +512,12 @@ export function activityView(s: DaemonStatus, now: number): ActivityView {
       .map(([repo, n]) => ({ repo, n }))
       .sort((a, b) => b.n - a.n || a.repo.localeCompare(b.repo)),
   };
+}
+
+/** Busy history survives the lock and activity it was refused behind. */
+export function busyView(s: DaemonStatus | undefined, now: number) {
+  if (!s || !hasActivityStatus(s) || !s.busy) return null;
+  return { total: s.busy.total, truncated: s.busy.truncated, recent: recentBusy(s, now) };
 }
 
 // ---- Warnings (design §1 S3, §3.1 last bullet) ----

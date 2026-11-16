@@ -19,8 +19,8 @@ use strata_types::{CheckpointReason, Code, Config, RepoConfig, RepoName, Session
 mod activity;
 mod base;
 mod carry;
-pub mod cwd;
 pub mod catalog;
+pub mod cwd;
 mod dispatch;
 mod failed_move;
 #[cfg(test)]
@@ -28,6 +28,7 @@ mod lock_tests;
 mod move_workspace;
 mod new;
 mod no_wait;
+pub mod observe;
 mod old_tree;
 mod orphans;
 mod outstanding;
@@ -45,13 +46,16 @@ mod ticket;
 
 #[cfg(feature = "test-seams")]
 pub use activity::walk_activity_during_scan;
-pub use activity::{activity_scope, holders_json, idle_activity_scoped, walk_activity_scoped, Activity, Idle, baseline_of, busy_reason, changed_since, idle_activity, walk_activity};
+pub use activity::{
+    Activity, Idle, activity_scope, baseline_of, busy_reason, changed_since, holders_json,
+    idle_activity, idle_activity_scoped, walk_activity, walk_activity_scoped,
+};
 pub use failed_move::{MoveResolution, ResolutionReport};
 pub use move_workspace::{AUTO_DEFERRED, MoveReport, auto_deferral};
-pub use new::{Layout, validate_base_rev};
 pub use new::NewReport;
 pub use new::NewWarning;
 pub use new::add::{ADD_STAGING_PREFIX, AddReport};
+pub use new::{Layout, validate_base_rev};
 pub use old_tree::{
     OLD_TREE_TTL, OldTreeKey, OldTreeMode, OldTreeVerdict, Outcome as OldTreeOutcome,
 };
@@ -61,7 +65,8 @@ pub use recover::{IntentRef, Leftover, RecoverReport};
 pub use remove::{Regenerable, RemoveReport};
 pub use resolve::{resolve_in, select_in};
 pub use rm_note::{
-    rebase_cause, rebase_stuck, KeptTree, LastRm, RebaseNote, RmInterrupted, RmNotes, leftover_line, local_hhmm, local_hhmmss, removed_leftover_of, removed_leftovers, rm_notes,
+    KeptTree, LastRm, RebaseNote, RmInterrupted, RmNotes, leftover_line, local_hhmm, local_hhmmss,
+    rebase_cause, rebase_stuck, removed_leftover_of, removed_leftovers, rm_notes,
     with_leftover_detail,
 };
 pub use scene::{Scene, SceneOp};
@@ -207,18 +212,36 @@ impl<'a> Sessions<'a> {
     /// Override a static handle's regenerable rules. Catalog-backed daemon
     /// handles use their immutable admission snapshot instead.
     pub fn set_regenerable(&self, repo: &RepoName, patterns: Vec<String>) {
-        self.regenerable.lock().unwrap_or_else(|p| p.into_inner()).insert(repo.clone(), patterns);
+        self.regenerable
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(repo.clone(), patterns);
     }
 
     /// The effective `rm.regenerable` of `repo`.
     pub fn regenerable(&self, repo: &RepoName) -> Result<Vec<String>> {
         if self.catalog.is_some() {
-            return Ok(self.configuration()?.repos.get(repo).map(|rc| rc.rm.regenerable.clone()).unwrap_or_default());
+            return Ok(self
+                .configuration()?
+                .repos
+                .get(repo)
+                .map(|rc| rc.rm.regenerable.clone())
+                .unwrap_or_default());
         }
-        if let Some(v) = self.regenerable.lock().unwrap_or_else(|p| p.into_inner()).get(repo) {
+        if let Some(v) = self
+            .regenerable
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(repo)
+        {
             return Ok(v.clone());
         }
-        Ok(self.config.repos.get(repo).map(|rc| rc.rm.regenerable.clone()).unwrap_or_default())
+        Ok(self
+            .config
+            .repos
+            .get(repo)
+            .map(|rc| rc.rm.regenerable.clone())
+            .unwrap_or_default())
     }
 
     pub(crate) fn fetch_is_fresh(&self, repo: &RepoName) -> bool {
@@ -226,7 +249,11 @@ impl<'a> Sessions<'a> {
         if w.is_zero() {
             return false;
         }
-        self.fetched.lock().unwrap_or_else(|p| p.into_inner()).get(repo).is_some_and(|t| t.elapsed() < w)
+        self.fetched
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(repo)
+            .is_some_and(|t| t.elapsed() < w)
     }
 
     /// `repo`'s configuration and git handle, for callers that work on a
@@ -253,7 +280,11 @@ impl<'a> Sessions<'a> {
     /// One critical section under `repo`'s write lock with the daemon's
     /// bounded wait: `Busy` passes through (a named refusal before the first
     /// visible write).
-    pub(crate) fn with_lock<T>(&self, repo: &RepoName, mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    pub(crate) fn with_lock<T>(
+        &self,
+        repo: &RepoName,
+        mut f: impl FnMut() -> Result<T>,
+    ) -> Result<T> {
         let mut out: Option<T> = None;
         let r = self.locks.with_write(repo, &mut || {
             out = Some(f()?);
@@ -279,7 +310,10 @@ impl<'a> Sessions<'a> {
                 Ok(())
             }) {
                 Err(e) if e.code == Code::Busy && !strata_deps::pins_tightened(&e) => {
-                    if e.detail.as_ref().is_some_and(|d| d["reason"] == "lock_wait") {
+                    if e.detail
+                        .as_ref()
+                        .is_some_and(|d| d["reason"] == "lock_wait")
+                    {
                         self.locks.record_long_wait(repo, attempt_since);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -318,6 +352,9 @@ impl<'a> Sessions<'a> {
 }
 
 pub(crate) fn no_such_repo(repo: &RepoName) -> StrataError {
-    StrataError::new(Code::NoSuchRepo, format!("no repo named {repo} in the configuration"))
-        .with_detail(serde_json::json!({ "repo": repo.as_str() }))
+    StrataError::new(
+        Code::NoSuchRepo,
+        format!("no repo named {repo} in the configuration"),
+    )
+    .with_detail(serde_json::json!({ "repo": repo.as_str() }))
 }

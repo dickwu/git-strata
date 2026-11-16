@@ -25,13 +25,19 @@
 //! removed before that are unknown. A `new` record also carries
 //! `create_ms`, the wall time of the `new` handler that made the session
 //! (absent on records written before this field, and on `seen`).
+//!
+//! Scan progress has two readers. `report` (`scan` in the `du` reply) locks
+//! the scan state; `daemon_status.scan` reads [`Du::counts`], copies of the
+//! counters stored each time the scan state is unlocked after a change, so
+//! it never waits for `scan` or `cache` (a worker holds `cache` under
+//! `scan`, and `report` holds `cache` across its lstats).
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -58,11 +64,16 @@ const MAX_FAILED: usize = 20;
 pub const GC_COMMAND: &str = "git-strata gc";
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn ts(ms: u64) -> Value {
-    strata_types::serde_rfc3339::format(&(UNIX_EPOCH + Duration::from_millis(ms))).map(Value::String).unwrap_or(Value::Null)
+    strata_types::serde_rfc3339::format(&(UNIX_EPOCH + Duration::from_millis(ms)))
+        .map(Value::String)
+        .unwrap_or(Value::Null)
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -83,7 +94,10 @@ pub struct Figures {
 
 impl Figures {
     fn zero() -> Figures {
-        Figures { exact: true, ..Figures::default() }
+        Figures {
+            exact: true,
+            ..Figures::default()
+        }
     }
     fn add(&mut self, o: &Figures) {
         self.logical += o.logical;
@@ -97,7 +111,14 @@ impl Figures {
 
 impl From<Usage> for Figures {
     fn from(u: Usage) -> Figures {
-        Figures { logical: u.logical, allocated: u.allocated, private: u.private, files: u.files, errors: u.errors, exact: u.private_exact }
+        Figures {
+            logical: u.logical,
+            allocated: u.allocated,
+            private: u.private,
+            files: u.files,
+            errors: u.errors,
+            exact: u.private_exact,
+        }
     }
 }
 
@@ -170,73 +191,137 @@ pub fn status(e: Option<&Entry>, kind: Kind, ino: u64, mtime_ns: i64, now_ms: u6
         Kind::Immutable => IMMUTABLE_TTL,
         Kind::Mutable => MUTABLE_TTL,
     };
-    if e.ino != ino || e.mtime_ns != mtime_ns || now_ms.saturating_sub(e.as_of_ms) > ttl.as_millis() as u64 {
+    if e.ino != ino
+        || e.mtime_ns != mtime_ns
+        || now_ms.saturating_sub(e.as_of_ms) > ttl.as_millis() as u64
+    {
         Status::Stale
     } else {
         Status::Fresh
     }
 }
 
-fn names(dir: &Path) -> Vec<String> {
-    let mut v: Vec<String> = match fs::read_dir(dir) {
-        Ok(d) => d.filter_map(|e| e.ok()).filter_map(|e| e.file_name().into_string().ok()).collect(),
-        Err(_) => Vec::new(),
-    };
-    v.sort();
-    v
+/// The units of a [`list_units`] call, and the directories it could not read.
+#[derive(Debug, Default)]
+pub struct Listing {
+    pub units: Vec<Unit>,
+    /// Key prefixes (`sessions/`, `bases/app/` …) of directories that exist
+    /// but could not be listed: a unit under one is unknown, not gone.
+    pub unlisted: Vec<String>,
+}
+
+impl Listing {
+    /// Whether `key` may still exist although this listing lacks it.
+    fn unknown(&self, key: &str) -> bool {
+        self.unlisted.iter().any(|p| key.starts_with(p.as_str()))
+    }
+}
+
+/// The sorted names in `root/rel`. A missing directory has none; one that
+/// cannot be read (`EACCES`, `EIO` …, also part way through) has none either
+/// and goes to `unlisted` as `rel/` (status-bar §11.4: only a confirmed
+/// disappearance drops a unit).
+fn names(root: &Path, rel: &str, unlisted: &mut Vec<String>) -> Vec<String> {
+    let read = fs::read_dir(root.join(rel)).and_then(|d| {
+        d.map(|e| e.map(|e| e.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()
+    });
+    match read {
+        Ok(v) => {
+            let mut v: Vec<String> = v.into_iter().filter_map(|n| n.into_string().ok()).collect();
+            v.sort();
+            v
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => {
+            unlisted.push(format!("{rel}/"));
+            Vec::new()
+        }
+    }
 }
 
 /// Every unit under `root` (§5.12 table). Cheap: readdir of the top levels.
-pub fn list_units(root: &Path) -> Vec<Unit> {
+pub fn list_units(root: &Path) -> Listing {
     let mut out = Vec::new();
+    let mut unlisted = Vec::new();
     let mut push = |key: String, kind: Kind, group: Group| out.push(Unit { key, kind, group });
-    for n in names(&root.join("store")) {
+    for n in names(root, "store", &mut unlisted) {
         match n.as_str() {
             "blobs" => {
-                for s in names(&root.join("store/blobs")) {
+                for s in names(root, "store/blobs", &mut unlisted) {
                     push(format!("store/blobs/{s}"), Kind::Immutable, Group::Blobs);
                 }
             }
             "trash" => {
-                for s in names(&root.join("store/trash")) {
+                for s in names(root, "store/trash", &mut unlisted) {
                     push(format!("store/trash/{s}"), Kind::Immutable, Group::Trash);
                 }
             }
             "tmp" => push("store/tmp".into(), Kind::Mutable, Group::Tmp),
-            n if n.starts_with("store.db") || n == "LOCK" => push(format!("store/{n}"), Kind::Always, Group::Db),
+            n if n.starts_with("store.db") || n == "LOCK" => {
+                push(format!("store/{n}"), Kind::Always, Group::Db)
+            }
             n => push(format!("store/{n}"), Kind::Mutable, Group::StoreOther),
         }
     }
     for (top, base) in [("bases", true), ("deps", false)] {
-        for repo in names(&root.join(top)) {
-            for n in names(&root.join(top).join(&repo)) {
-                let kind = if n.starts_with('.') { Kind::Mutable } else { Kind::Immutable };
-                let group = if base { Group::Base(repo.clone()) } else { Group::Deps(repo.clone()) };
+        for repo in names(root, top, &mut unlisted) {
+            for n in names(root, &format!("{top}/{repo}"), &mut unlisted) {
+                let kind = if n.starts_with('.') {
+                    Kind::Mutable
+                } else {
+                    Kind::Immutable
+                };
+                let group = if base {
+                    Group::Base(repo.clone())
+                } else {
+                    Group::Deps(repo.clone())
+                };
                 push(format!("{top}/{repo}/{n}"), kind, group);
             }
         }
     }
-    for n in names(&root.join("sessions")) {
+    for n in names(root, "sessions", &mut unlisted) {
         if n == ".repos" {
-            for s in names(&root.join("sessions/.repos")) {
-                push(format!("sessions/.repos/{s}"), Kind::Mutable, Group::Session(s.clone()));
+            for s in names(root, "sessions/.repos", &mut unlisted) {
+                push(
+                    format!("sessions/.repos/{s}"),
+                    Kind::Mutable,
+                    Group::Session(s.clone()),
+                );
             }
         } else {
-            push(format!("sessions/{n}"), Kind::Mutable, Group::Session(n.clone()));
+            push(
+                format!("sessions/{n}"),
+                Kind::Mutable,
+                Group::Session(n.clone()),
+            );
         }
     }
-    out
+    Listing {
+        units: out,
+        unlisted,
+    }
 }
 
-fn stat(p: &Path) -> Option<(u64, i64)> {
-    let m = fs::symlink_metadata(p).ok()?;
-    Some((m.ino(), m.mtime().saturating_mul(1_000_000_000).saturating_add(m.mtime_nsec())))
+/// Inode and mtime (ns) of `p`, not following a symlink.
+fn stat(p: &Path) -> std::io::Result<(u64, i64)> {
+    let m = fs::symlink_metadata(p)?;
+    Ok((
+        m.ino(),
+        m.mtime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(m.mtime_nsec()),
+    ))
 }
 
 /// Trash entry names start with the retire time in ms (`<ms>-<hex32>`).
 fn trash_age_ms(root: &Path, key: &str, now: u64) -> u64 {
     let name = key.rsplit('/').next().unwrap_or("");
-    if let Some(ms) = name.split_once('-').and_then(|(ms, _)| ms.parse::<u64>().ok()) {
+    if let Some(ms) = name
+        .split_once('-')
+        .and_then(|(ms, _)| ms.parse::<u64>().ok())
+    {
         return now.saturating_sub(ms);
     }
     match fs::symlink_metadata(root.join(key)) {
@@ -260,7 +345,13 @@ struct Agg {
 
 impl Default for Agg {
     fn default() -> Agg {
-        Agg { fig: Figures::zero(), units: 0, stale: 0, pending: 0, oldest: None }
+        Agg {
+            fig: Figures::zero(),
+            units: 0,
+            stale: 0,
+            pending: 0,
+            oldest: None,
+        }
     }
 }
 
@@ -324,6 +415,63 @@ struct ScanState {
     holds: HashMap<String, usize>,
     /// The scans running now, each with its own cancel token.
     active: HashMap<String, Arc<AtomicBool>>,
+    /// Units whose last scan failed: error and when (ms), one entry per
+    /// unit, dropped when the unit is measured or confirmed gone (`ENOENT`,
+    /// or absent from a listing that could read its directory). `failed` is
+    /// the history of attempts instead.
+    unresolved: BTreeMap<String, (String, u64)>,
+}
+
+/// The counters `daemon_status.scan` reads ([`Du::counts`]).
+#[derive(Debug, Default)]
+struct Counts {
+    running: AtomicBool,
+    active: AtomicU64,
+    queued: AtomicU64,
+    done: AtomicU64,
+    full: AtomicBool,
+    unresolved: AtomicU64,
+}
+
+impl Counts {
+    fn copy(&self, st: &ScanState) {
+        let n = |len: usize| len as u64;
+        self.running.store(st.running, Ordering::Relaxed);
+        self.active.store(n(st.active.len()), Ordering::Relaxed);
+        self.queued.store(n(st.queue.len()), Ordering::Relaxed);
+        self.done.store(st.done, Ordering::Relaxed);
+        self.full
+            .store(st.full_started.is_some(), Ordering::Relaxed);
+        self.unresolved
+            .store(n(st.unresolved.len()), Ordering::Relaxed);
+    }
+}
+
+/// The scan state, locked ([`Du::scan_state`]). Dropping it copies the counters
+/// into [`Du::counts`] while the lock is still held, so the copies follow
+/// every change made under it, in order.
+struct ScanGuard<'a> {
+    counts: &'a Counts,
+    st: MutexGuard<'a, ScanState>,
+}
+
+impl Drop for ScanGuard<'_> {
+    fn drop(&mut self) {
+        self.counts.copy(&self.st);
+    }
+}
+
+impl std::ops::Deref for ScanGuard<'_> {
+    type Target = ScanState;
+    fn deref(&self) -> &ScanState {
+        &self.st
+    }
+}
+
+impl std::ops::DerefMut for ScanGuard<'_> {
+    fn deref_mut(&mut self) -> &mut ScanState {
+        &mut self.st
+    }
 }
 
 impl ScanState {
@@ -340,7 +488,9 @@ impl ScanState {
 /// `sessions/.repos/` or `sessions/` (`.repos` itself is no session).
 /// The one decoder for keys → sessions (recording, removal, holds).
 pub fn session_of(key: &str) -> Option<&str> {
-    let rest = key.strip_prefix("sessions/.repos/").or_else(|| key.strip_prefix("sessions/"))?;
+    let rest = key
+        .strip_prefix("sessions/.repos/")
+        .or_else(|| key.strip_prefix("sessions/"))?;
     let sid = rest.split('/').next().unwrap_or("");
     (!sid.is_empty() && sid != ".repos").then_some(sid)
 }
@@ -374,6 +524,8 @@ pub struct Du {
     dir: PathBuf,
     cache: Mutex<CacheFile>,
     scan: Mutex<ScanState>,
+    /// Copies of `scan`'s counters, read without a lock.
+    counts: Counts,
     /// Signalled (with `scan`) when a scan ends.
     scan_done: Condvar,
     recorded: Mutex<Option<HashSet<String>>>,
@@ -418,12 +570,16 @@ impl Du {
             .ok()
             .and_then(|b| serde_json::from_slice::<CacheFile>(&b).ok())
             .filter(|c| c.version == CACHE_VERSION)
-            .unwrap_or(CacheFile { version: CACHE_VERSION, ..CacheFile::default() });
+            .unwrap_or(CacheFile {
+                version: CACHE_VERSION,
+                ..CacheFile::default()
+            });
         DuHandle(Arc::new(Du {
             root: root.to_path_buf(),
             dir,
             cache: Mutex::new(cache),
             scan: Mutex::new(ScanState::default()),
+            counts: Counts::default(),
             scan_done: Condvar::new(),
             recorded: Mutex::new(None),
             stop: AtomicBool::new(false),
@@ -432,6 +588,29 @@ impl Du {
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Lock the scan state; the counters are copied when the guard drops.
+    fn scan_state(&self) -> ScanGuard<'_> {
+        ScanGuard {
+            counts: &self.counts,
+            st: lock(&self.scan),
+        }
+    }
+
+    /// `daemon_status.scan`: `{running, active, queued, done, full,
+    /// unresolved_n}` from the copied counters (no lock; the fields may be
+    /// a moment apart).
+    pub fn counts(&self) -> Value {
+        let c = &self.counts;
+        json!({
+            "running": c.running.load(Ordering::Relaxed),
+            "active": c.active.load(Ordering::Relaxed),
+            "queued": c.queued.load(Ordering::Relaxed),
+            "done": c.done.load(Ordering::Relaxed),
+            "full": c.full.load(Ordering::Relaxed),
+            "unresolved_n": c.unresolved.load(Ordering::Relaxed),
+        })
     }
 
     pub fn cache_path(&self) -> PathBuf {
@@ -447,24 +626,49 @@ impl Du {
     pub fn report(self: &Arc<Self>, refresh: bool) -> Value {
         let t0 = Instant::now();
         let now = now_ms();
-        let units = list_units(&self.root);
+        let listing = list_units(&self.root);
+        let units = &listing.units;
         let mut due = Vec::new();
         let mut groups: BTreeMap<Group, Agg> = BTreeMap::new();
         let (mut eligible, mut young) = (Agg::default(), Agg::default());
         let (mut eligible_n, mut young_n) = (0u64, 0u64);
+        let present: HashSet<&str> = units.iter().map(|u| u.key.as_str()).collect();
+        // A unit missing from the listing is gone unless it is queued or
+        // under a directory that could not be listed (status-bar §11.4).
+        let keep = |k: &str, queued: &HashSet<String>| {
+            present.contains(k) || queued.contains(k) || listing.unknown(k)
+        };
         // Review P1-4: lock order is `recorded` → `scan` → `cache`; the
-        // queue is read before the cache lock, never inside it.
-        let queued = lock(&self.scan).queued.clone();
+        // queue is read before the cache lock, never inside it. A unit gone
+        // is no longer unresolved.
+        let queued = {
+            let mut st = self.scan_state();
+            let ScanState {
+                unresolved, queued, ..
+            } = &mut *st;
+            unresolved.retain(|k, _| keep(k, queued));
+            queued.clone()
+        };
         {
             let mut cache = lock(&self.cache);
-            let present: HashSet<&str> = units.iter().map(|u| u.key.as_str()).collect();
-            cache.units.retain(|k, _| present.contains(k.as_str()) || queued.contains(k));
-            for u in &units {
+            cache.units.retain(|k, _| keep(k, &queued));
+            for u in units {
                 let path = self.root.join(&u.key);
-                let Some((ino, mtime)) = stat(&path) else { continue };
+                let Ok((ino, mtime)) = stat(&path) else {
+                    continue;
+                };
                 let (entry, st) = if u.kind == Kind::Always {
                     match usage_of(&path) {
-                        Ok(us) => (Some(Entry { fig: us.into(), ino, mtime_ns: mtime, as_of_ms: now, took_ms: 0 }), Status::Fresh),
+                        Ok(us) => (
+                            Some(Entry {
+                                fig: us.into(),
+                                ino,
+                                mtime_ns: mtime,
+                                as_of_ms: now,
+                                took_ms: 0,
+                            }),
+                            Status::Fresh,
+                        ),
                         Err(_) => (None, Status::Pending),
                     }
                 } else {
@@ -475,7 +679,10 @@ impl Du {
                     }
                     (e, s)
                 };
-                groups.entry(u.group.clone()).or_default().add(entry.as_ref(), st);
+                groups
+                    .entry(u.group.clone())
+                    .or_default()
+                    .add(entry.as_ref(), st);
                 if u.group == Group::Trash {
                     if trash_age_ms(&self.root, &u.key, now) >= TRASH_FLOOR.as_millis() as u64 {
                         eligible.add(entry.as_ref(), st);
@@ -491,7 +698,13 @@ impl Du {
 
         let get = |g: &Group| groups.get(g).cloned().unwrap_or_default();
         let mut store = Agg::default();
-        for g in [Group::Db, Group::Blobs, Group::Tmp, Group::Trash, Group::StoreOther] {
+        for g in [
+            Group::Db,
+            Group::Blobs,
+            Group::Tmp,
+            Group::Trash,
+            Group::StoreOther,
+        ] {
             store.merge(&get(&g));
         }
         let mut total = store.clone();
@@ -578,15 +791,19 @@ impl Du {
             "started": if st.running { ts(st.started_ms) } else { Value::Null },
             "done": st.done,
             "queued": st.queue.len(),
+            "active": st.active.len(),
             "full": st.full_started.is_some(),
             "failed": st.failed.iter().map(|(k, e)| json!({ "unit": k, "error": e })).collect::<Vec<_>>(),
+            "unresolved": st.unresolved.iter().map(|(k, (e, at))| json!({ "unit": k, "error": e, "at": ts(*at) })).collect::<Vec<_>>(),
             "last_full": last_full.map(|f| json!({ "started": ts(f.started_ms), "ended": ts(f.ended_ms) })).unwrap_or(Value::Null),
         })
     }
 
     /// `create_ms` per session, from its `new` record.
     fn create_times(recs: &[Record]) -> HashMap<&str, u64> {
-        recs.iter().filter_map(|r| Some((r.session.as_str(), r.create_ms?))).collect()
+        recs.iter()
+            .filter_map(|r| Some((r.session.as_str(), r.create_ms?)))
+            .collect()
     }
 
     /// Records, latest per session, summed.
@@ -602,10 +819,16 @@ impl Du {
                 latest.entry(r.session.as_str()).or_insert(r);
             }
         }
-        let (mut logical, mut private, mut known, mut unknown, mut removed) = (0u64, 0u64, 0u64, 0u64, 0u64);
-        let rm: HashSet<&str> = recs.iter().filter(|r| r.event == "rm").map(|r| r.session.as_str()).collect();
+        let (mut logical, mut private, mut known, mut unknown, mut removed) =
+            (0u64, 0u64, 0u64, 0u64, 0u64);
+        let rm: HashSet<&str> = recs
+            .iter()
+            .filter(|r| r.event == "rm")
+            .map(|r| r.session.as_str())
+            .collect();
         // Sessions with both a measured `new` and figures: the time and size of the same set.
-        let (mut timed, mut create_ms, mut timed_logical, mut timed_files) = (0u64, 0u64, 0u64, 0u64);
+        let (mut timed, mut create_ms, mut timed_logical, mut timed_files) =
+            (0u64, 0u64, 0u64, 0u64);
         for (s, r) in &latest {
             if rm.contains(s) {
                 removed += 1;
@@ -644,7 +867,10 @@ impl Du {
 
     pub fn records(&self) -> Vec<Record> {
         match fs::read_to_string(self.records_path()) {
-            Ok(t) => t.lines().filter_map(|l| serde_json::from_str(l).ok()).collect(),
+            Ok(t) => t
+                .lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -653,7 +879,11 @@ impl Du {
     /// first-sizing record is written once even with two units in flight).
     fn append(&self, set: &mut HashSet<String>, r: &Record) {
         let _ = fs::create_dir_all(&self.dir);
-        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(self.records_path()) {
+        if let Ok(mut f) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.records_path())
+        {
             let mut line = serde_json::to_vec(r).unwrap_or_default();
             line.push(b'\n');
             let _ = f.write_all(&line);
@@ -684,7 +914,7 @@ impl Du {
         lock(&self.scan).new_due.insert(sid.to_owned(), ms);
         let keys = Self::session_keys(sid);
         {
-            let mut st = lock(&self.scan);
+            let mut st = self.scan_state();
             for k in keys.iter().rev() {
                 if !st.held(k) && st.queued.insert(k.clone()) {
                     st.queue.push_front(k.clone());
@@ -711,10 +941,26 @@ impl Du {
                 (Some(f), es.iter().map(|e| e.as_of_ms).min())
             }
         };
-        lock(&self.scan).new_due.remove(sid);
+        {
+            let mut st = self.scan_state();
+            st.new_due.remove(sid);
+            for k in &keys {
+                st.unresolved.remove(k);
+            }
+        }
         let mut rec = self.recorded();
         let set = rec.get_or_insert_with(HashSet::new);
-        self.append(set, &Record { event: "rm".into(), session: sid.to_owned(), at_ms: now_ms(), fig, as_of_ms: as_of, create_ms: None });
+        self.append(
+            set,
+            &Record {
+                event: "rm".into(),
+                session: sid.to_owned(),
+                at_ms: now_ms(),
+                fig,
+                as_of_ms: as_of,
+                create_ms: None,
+            },
+        );
         drop(rec);
         self.save();
     }
@@ -729,11 +975,19 @@ impl Du {
         for sid in sids {
             *st.holds.entry((*sid).to_owned()).or_default() += 1;
         }
-        let hold = DuHold { du: Arc::clone(self), sids: sids.iter().map(|s| (*s).to_owned()).collect() };
+        let hold = DuHold {
+            du: Arc::clone(self),
+            sids: sids.iter().map(|s| (*s).to_owned()).collect(),
+        };
         let mine = |k: &str| session_of(k).is_some_and(|s| sids.contains(&s));
         st.queue.retain(|k| !mine(k));
         let active: HashSet<&String> = st.active.keys().collect();
-        let gone: Vec<String> = st.queued.iter().filter(|k| mine(k) && !active.contains(k)).cloned().collect();
+        let gone: Vec<String> = st
+            .queued
+            .iter()
+            .filter(|k| mine(k) && !active.contains(k))
+            .cloned()
+            .collect();
         for k in gone {
             st.queued.remove(&k);
         }
@@ -742,6 +996,8 @@ impl Du {
                 t.store(true, Ordering::SeqCst);
             }
         }
+        // The raw lock (the wait below needs it): copy the counters by hand.
+        self.counts.copy(&st);
         while sids.iter().any(|sid| st.scanning(sid)) {
             let now = Instant::now();
             if now >= end {
@@ -749,11 +1005,19 @@ impl Du {
                 drop(hold);
                 return Err(strata_types::StrataError::new(
                     strata_types::Code::Busy,
-                    format!("the disk-usage scan of {} did not stop within {}s", sids.join(", "), wait.as_secs()),
+                    format!(
+                        "the disk-usage scan of {} did not stop within {}s",
+                        sids.join(", "),
+                        wait.as_secs()
+                    ),
                 )
                 .with_detail(json!({ "reason": "du_cancel_timeout", "sessions": sids })));
             }
-            st = self.scan_done.wait_timeout(st, end - now).unwrap_or_else(|p| p.into_inner()).0;
+            st = self
+                .scan_done
+                .wait_timeout(st, end - now)
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
         }
         drop(st);
         Ok(hold)
@@ -767,7 +1031,7 @@ impl Du {
     pub fn plant_stuck_scan_for_test(self: &Arc<Self>, sid: &str) -> Arc<AtomicBool> {
         let key = format!("sessions/{sid}");
         let token = Arc::new(AtomicBool::new(false));
-        lock(&self.scan).active.insert(key, token.clone());
+        self.scan_state().active.insert(key, token.clone());
         token
     }
 
@@ -776,13 +1040,13 @@ impl Du {
     #[cfg(feature = "test-seams")]
     pub fn clear_stuck_scan_for_test(self: &Arc<Self>, sid: &str) {
         let key = format!("sessions/{sid}");
-        lock(&self.scan).active.remove(&key);
+        self.scan_state().active.remove(&key);
         self.scan_done.notify_all();
     }
 
     fn enqueue(self: &Arc<Self>, keys: Vec<String>, full: bool) {
         {
-            let mut st = lock(&self.scan);
+            let mut st = self.scan_state();
             if full && st.full_started.is_none() {
                 st.full_started = Some(now_ms());
             }
@@ -801,7 +1065,7 @@ impl Du {
     /// Start the pass thread unless one runs.
     fn kick(self: &Arc<Self>) {
         {
-            let mut st = lock(&self.scan);
+            let mut st = self.scan_state();
             if st.running || self.stop.load(Ordering::SeqCst) {
                 return;
             }
@@ -810,9 +1074,11 @@ impl Du {
             st.done = 0;
         }
         let me = Arc::clone(self);
-        let spawned = std::thread::Builder::new().name("strata-du".into()).spawn(move || me.pass());
+        let spawned = std::thread::Builder::new()
+            .name("strata-du".into())
+            .spawn(move || me.pass());
         if spawned.is_err() {
-            lock(&self.scan).running = false;
+            self.scan_state().running = false;
         }
     }
 
@@ -829,12 +1095,15 @@ impl Du {
                     });
                 }
             });
-            let mut st = lock(&self.scan);
+            let mut st = self.scan_state();
             if st.queue.is_empty() || self.stop.load(Ordering::SeqCst) {
                 if let Some(started) = st.full_started.take()
                     && !self.stop.load(Ordering::SeqCst)
                 {
-                    lock(&self.cache).last_full = Some(FullPass { started_ms: started, ended_ms: now_ms() });
+                    lock(&self.cache).last_full = Some(FullPass {
+                        started_ms: started,
+                        ended_ms: now_ms(),
+                    });
                 }
                 st.running = false;
                 drop(st);
@@ -852,7 +1121,7 @@ impl Du {
             // Dequeue and register as active in one `scan` critical
             // section: a hold sees either a queued key or an active scan.
             let (key, token) = {
-                let mut st = lock(&self.scan);
+                let mut st = self.scan_state();
                 let key = loop {
                     match st.queue.pop_front() {
                         Some(k) if st.held(&k) => {
@@ -868,7 +1137,7 @@ impl Du {
             };
             self.scan_unit_with(&key, &token);
             let save = {
-                let mut st = lock(&self.scan);
+                let mut st = self.scan_state();
                 st.active.remove(&key);
                 st.queued.remove(&key);
                 st.done += 1;
@@ -900,22 +1169,39 @@ impl Du {
     /// the walk's `NoSuchPath` branch without racing a rename).
     fn scan_unit_using(&self, key: &str, cancel: &AtomicBool, size: &SizeFn) {
         let path = self.root.join(key);
-        let Some((ino, mtime)) = stat(&path) else {
-            self.forget_unless_cancelled(key, cancel);
-            return;
+        let stopped = || self.stop.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst);
+        let (ino, mtime) = match stat(&path) {
+            Ok(s) => s,
+            // Only a confirmed disappearance forgets the unit (status-bar
+            // §11.4); any other error leaves it failed, figures kept.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.forget_unless_cancelled(key, cancel);
+                return;
+            }
+            Err(e) => {
+                let e = strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &path);
+                self.fail_unless_stopped(key, e.message, &stopped);
+                return;
+            }
         };
         let started = now_ms();
         let t = Instant::now();
-        let stopped = || self.stop.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst);
         match size(&path, &stopped) {
             Ok(u) => {
-                let e = Entry { fig: u.into(), ino, mtime_ns: mtime, as_of_ms: started, took_ms: t.elapsed().as_millis() as u64 };
+                let e = Entry {
+                    fig: u.into(),
+                    ino,
+                    mtime_ns: mtime,
+                    as_of_ms: started,
+                    took_ms: t.elapsed().as_millis() as u64,
+                };
                 // The last cancel check and the write are one `scan`
                 // critical section, serialised with a hold's registration.
-                let _st = lock(&self.scan);
+                let mut st = self.scan_state();
                 if cancel.load(Ordering::SeqCst) {
                     return;
                 }
+                st.unresolved.remove(key);
                 lock(&self.cache).units.insert(key.to_owned(), e);
             }
             Err(e) if e.code == strata_types::Code::NoSuchPath => {
@@ -924,13 +1210,7 @@ impl Du {
                 }
             }
             Err(e) => {
-                if !stopped() {
-                    let mut st = lock(&self.scan);
-                    st.failed.push_back((key.to_owned(), e.message));
-                    while st.failed.len() > MAX_FAILED {
-                        st.failed.pop_front();
-                    }
-                }
+                self.fail_unless_stopped(key, e.message, &stopped);
                 return;
             }
         }
@@ -939,14 +1219,31 @@ impl Du {
         }
     }
 
-    /// Drop `key`'s cached figures because its root is gone, unless a hold
-    /// cancelled the scan: the check and the removal are one `scan`
-    /// critical section, like the insert. False when cancelled.
+    /// Record a failed measurement of `key`: one more `failed` entry and its
+    /// `unresolved` error. The cache keeps its last figures. Nothing when
+    /// the daemon stops or a hold cancelled the scan.
+    fn fail_unless_stopped(&self, key: &str, error: String, stopped: &dyn Fn() -> bool) {
+        if stopped() {
+            return;
+        }
+        let mut st = self.scan_state();
+        st.failed.push_back((key.to_owned(), error.clone()));
+        while st.failed.len() > MAX_FAILED {
+            st.failed.pop_front();
+        }
+        st.unresolved.insert(key.to_owned(), (error, now_ms()));
+    }
+
+    /// Drop `key`'s cached figures (and its unresolved failure) because its
+    /// root is gone (`ENOENT`), unless a hold cancelled the scan: the check
+    /// and the removal are one `scan` critical section, like the insert.
+    /// False when cancelled.
     fn forget_unless_cancelled(&self, key: &str, cancel: &AtomicBool) -> bool {
-        let _st = lock(&self.scan);
+        let mut st = self.scan_state();
         if cancel.load(Ordering::SeqCst) {
             return false;
         }
+        st.unresolved.remove(key);
         lock(&self.cache).units.remove(key);
         true
     }
@@ -969,7 +1266,7 @@ impl Du {
                         f.add(&e.fig);
                         as_of = as_of.min(e.as_of_ms);
                     }
-                    None if stat(&self.root.join(k)).is_some() => return,
+                    None if stat(&self.root.join(k)).is_ok() => return,
                     None => {}
                 }
             }
@@ -978,7 +1275,17 @@ impl Du {
         let new = lock(&self.scan).new_due.remove(sid);
         let event = if new.is_some() { "new" } else { "seen" };
         let create_ms = new.flatten();
-        self.append(set, &Record { event: event.into(), session: sid.to_owned(), at_ms: now_ms(), fig: Some(fig), as_of_ms: Some(as_of), create_ms });
+        self.append(
+            set,
+            &Record {
+                event: event.into(),
+                session: sid.to_owned(),
+                at_ms: now_ms(),
+                fig: Some(fig),
+                as_of_ms: Some(as_of),
+                create_ms,
+            },
+        );
     }
 
     /// Write the cache atomically (tmp + rename).
@@ -993,7 +1300,9 @@ impl Du {
         if fs::create_dir_all(&self.dir).is_err() {
             return;
         }
-        let tmp = self.dir.join(format!(".cache.json.{}.tmp", std::process::id()));
+        let tmp = self
+            .dir
+            .join(format!(".cache.json.{}.tmp", std::process::id()));
         if fs::write(&tmp, &bytes).is_ok() && fs::rename(&tmp, self.cache_path()).is_err() {
             let _ = fs::remove_file(&tmp);
         }
@@ -1032,7 +1341,10 @@ mod tests {
     use super::*;
 
     fn tmp() -> (tempfile::TempDir, PathBuf) {
-        let td = tempfile::Builder::new().prefix("strata-du").tempdir().unwrap();
+        let td = tempfile::Builder::new()
+            .prefix("strata-du")
+            .tempdir()
+            .unwrap();
         let p = fs::canonicalize(td.path()).unwrap();
         (td, p)
     }
@@ -1047,8 +1359,14 @@ mod tests {
         file(&root.join("store/blobs/ab/abcd"), 5000);
         file(&root.join("store/tmp/x"), 10);
         let old = now_ms() - 2 * 3600 * 1000;
-        file(&root.join(format!("store/trash/{old}-{}/a", "1".repeat(32))), 40_000);
-        file(&root.join(format!("store/trash/{}-{}/a", now_ms(), "2".repeat(32))), 20_000);
+        file(
+            &root.join(format!("store/trash/{old}-{}/a", "1".repeat(32))),
+            40_000,
+        );
+        file(
+            &root.join(format!("store/trash/{}-{}/a", now_ms(), "2".repeat(32))),
+            20_000,
+        );
         file(&root.join("bases/app/t1/d1/f"), 3000);
         file(&root.join("deps/app/s1/node_modules/m.js"), 1000);
         file(&root.join("sessions/s-aaaaaaaa/app/f"), 3000);
@@ -1059,7 +1377,11 @@ mod tests {
     fn units_cover_the_layout() {
         let (_td, root) = tmp();
         layout(&root);
-        let keys: Vec<(String, Kind)> = list_units(&root).into_iter().map(|u| (u.key, u.kind)).collect();
+        let keys: Vec<(String, Kind)> = list_units(&root)
+            .units
+            .into_iter()
+            .map(|u| (u.key, u.kind))
+            .collect();
         let k = |s: &str| keys.iter().find(|(k, _)| k == s).map(|(_, kind)| *kind);
         assert_eq!(k("store/store.db"), Some(Kind::Always));
         assert_eq!(k("store/blobs/ab"), Some(Kind::Immutable));
@@ -1068,22 +1390,52 @@ mod tests {
         assert_eq!(k("deps/app/s1"), Some(Kind::Immutable));
         assert_eq!(k("sessions/s-aaaaaaaa"), Some(Kind::Mutable));
         assert_eq!(k("sessions/.repos/s-aaaaaaaa"), Some(Kind::Mutable));
-        assert_eq!(keys.iter().filter(|(k, _)| k.starts_with("store/trash/")).count(), 2);
+        assert_eq!(
+            keys.iter()
+                .filter(|(k, _)| k.starts_with("store/trash/"))
+                .count(),
+            2
+        );
     }
 
     #[test]
     fn status_follows_inode_mtime_and_ttl() {
-        let e = Entry { fig: Figures::zero(), ino: 5, mtime_ns: 100, as_of_ms: 1_000_000, took_ms: 0 };
+        let e = Entry {
+            fig: Figures::zero(),
+            ino: 5,
+            mtime_ns: 100,
+            as_of_ms: 1_000_000,
+            took_ms: 0,
+        };
         let t = 1_000_000;
         assert_eq!(status(None, Kind::Immutable, 5, 100, t), Status::Pending);
         assert_eq!(status(Some(&e), Kind::Immutable, 5, 100, t), Status::Fresh);
-        assert_eq!(status(Some(&e), Kind::Immutable, 6, 100, t), Status::Stale, "new inode");
-        assert_eq!(status(Some(&e), Kind::Immutable, 5, 101, t), Status::Stale, "mtime moved");
+        assert_eq!(
+            status(Some(&e), Kind::Immutable, 6, 100, t),
+            Status::Stale,
+            "new inode"
+        );
+        assert_eq!(
+            status(Some(&e), Kind::Immutable, 5, 101, t),
+            Status::Stale,
+            "mtime moved"
+        );
         let later = t + MUTABLE_TTL.as_millis() as u64 + 1;
-        assert_eq!(status(Some(&e), Kind::Mutable, 5, 100, later), Status::Stale, "mutable TTL");
-        assert_eq!(status(Some(&e), Kind::Immutable, 5, 100, later), Status::Fresh);
+        assert_eq!(
+            status(Some(&e), Kind::Mutable, 5, 100, later),
+            Status::Stale,
+            "mutable TTL"
+        );
+        assert_eq!(
+            status(Some(&e), Kind::Immutable, 5, 100, later),
+            Status::Fresh
+        );
         let much_later = t + IMMUTABLE_TTL.as_millis() as u64 + 1;
-        assert_eq!(status(Some(&e), Kind::Immutable, 5, 100, much_later), Status::Stale, "immutable TTL");
+        assert_eq!(
+            status(Some(&e), Kind::Immutable, 5, 100, much_later),
+            Status::Stale,
+            "immutable TTL"
+        );
     }
 
     #[test]
@@ -1146,22 +1498,37 @@ mod tests {
         {
             let mut st = lock(&du.scan);
             st.running = true;
-            for k in ["sessions/s-aaaaaaaa", "sessions/.repos/s-aaaaaaaa", "store/tmp"] {
+            for k in [
+                "sessions/s-aaaaaaaa",
+                "sessions/.repos/s-aaaaaaaa",
+                "store/tmp",
+            ] {
                 st.queued.insert(k.to_owned());
                 st.queue.push_back(k.to_owned());
             }
         }
-        let hold = du.hold_sessions(&["s-aaaaaaaa"], Duration::from_millis(10)).unwrap();
+        let hold = du
+            .hold_sessions(&["s-aaaaaaaa"], Duration::from_millis(10))
+            .unwrap();
         {
             let st = lock(&du.scan);
-            assert_eq!(st.queue.iter().map(String::as_str).collect::<Vec<_>>(), ["store/tmp"]);
+            assert_eq!(
+                st.queue.iter().map(String::as_str).collect::<Vec<_>>(),
+                ["store/tmp"]
+            );
             assert!(!st.queued.contains("sessions/s-aaaaaaaa"));
         }
         du.on_new("s-aaaaaaaa");
-        du.enqueue(vec!["sessions/s-aaaaaaaa".into(), "bases/app/t1".into()], false);
+        du.enqueue(
+            vec!["sessions/s-aaaaaaaa".into(), "bases/app/t1".into()],
+            false,
+        );
         {
             let st = lock(&du.scan);
-            assert!(!st.queued.contains("sessions/s-aaaaaaaa") && !st.queued.contains("sessions/.repos/s-aaaaaaaa"));
+            assert!(
+                !st.queued.contains("sessions/s-aaaaaaaa")
+                    && !st.queued.contains("sessions/.repos/s-aaaaaaaa")
+            );
             assert!(st.queued.contains("bases/app/t1"));
         }
         drop(hold);
@@ -1180,13 +1547,21 @@ mod tests {
         let token = Arc::new(AtomicBool::new(false));
         lock(&du.scan).active.insert(key.clone(), token.clone());
         let other = Arc::new(AtomicBool::new(false));
-        lock(&du.scan).active.insert("store/tmp".into(), other.clone());
+        lock(&du.scan)
+            .active
+            .insert("store/tmp".into(), other.clone());
         // Nobody ends the scan: Busy, the token set, nothing left held.
-        let e = du.hold_sessions(&["s-aaaaaaaa"], Duration::from_millis(50)).err().unwrap();
+        let e = du
+            .hold_sessions(&["s-aaaaaaaa"], Duration::from_millis(50))
+            .err()
+            .unwrap();
         assert_eq!(e.code, strata_types::Code::Busy);
         assert_eq!(e.detail.as_ref().unwrap()["reason"], "du_cancel_timeout");
         assert!(token.load(Ordering::SeqCst));
-        assert!(!other.load(Ordering::SeqCst), "another unit's scan is left alone");
+        assert!(
+            !other.load(Ordering::SeqCst),
+            "another unit's scan is left alone"
+        );
         assert!(lock(&du.scan).holds.is_empty());
         // The scan ends while the hold waits: the hold is granted.
         token.store(false, Ordering::SeqCst);
@@ -1197,12 +1572,16 @@ mod tests {
             st.active.remove("sessions/s-aaaaaaaa");
             d2.scan_done.notify_all();
         });
-        let hold = du.hold_sessions(&["s-aaaaaaaa"], Duration::from_secs(5)).unwrap();
+        let hold = du
+            .hold_sessions(&["s-aaaaaaaa"], Duration::from_secs(5))
+            .unwrap();
         assert!(token.load(Ordering::SeqCst));
         t.join().unwrap();
         // A new scan's token is not touched by the release.
         let fresh = Arc::new(AtomicBool::new(false));
-        lock(&du.scan).active.insert("sessions/.repos/s-bbbbbbbb".into(), fresh.clone());
+        lock(&du.scan)
+            .active
+            .insert("sessions/.repos/s-bbbbbbbb".into(), fresh.clone());
         drop(hold);
         assert!(!fresh.load(Ordering::SeqCst));
     }
@@ -1217,7 +1596,10 @@ mod tests {
         let before = lock(&du.cache).units.get(key).copied().unwrap();
         file(&root.join("sessions/s-aaaaaaaa/app/g"), 50_000);
         du.scan_unit_with(key, &AtomicBool::new(true));
-        assert_eq!(lock(&du.cache).units.get(key).copied().unwrap().fig.logical, before.fig.logical);
+        assert_eq!(
+            lock(&du.cache).units.get(key).copied().unwrap().fig.logical,
+            before.fig.logical
+        );
         assert!(lock(&du.scan).failed.is_empty(), "a cancel is no failure");
         du.scan_unit(key);
         assert!(lock(&du.cache).units.get(key).copied().unwrap().fig.logical > before.fig.logical);
@@ -1233,7 +1615,10 @@ mod tests {
         assert!(lock(&du.cache).units.contains_key(key));
         std::fs::rename(root.join(key), root.join("sessions/gone")).unwrap();
         du.scan_unit_with(key, &AtomicBool::new(true));
-        assert!(lock(&du.cache).units.contains_key(key), "a cancelled scan removes nothing");
+        assert!(
+            lock(&du.cache).units.contains_key(key),
+            "a cancelled scan removes nothing"
+        );
         du.scan_unit(key);
         assert!(!lock(&du.cache).units.contains_key(key));
     }
@@ -1248,14 +1633,254 @@ mod tests {
         assert!(lock(&du.cache).units.contains_key(key));
         // The root stats, then the walk finds it gone (`NoSuchPath`).
         let gone = |_: &Path, _: &dyn Fn() -> bool| -> crate::Result<Usage> {
-            Err(strata_types::StrataError::new(strata_types::Code::NoSuchPath, "gone mid walk"))
+            Err(strata_types::StrataError::new(
+                strata_types::Code::NoSuchPath,
+                "gone mid walk",
+            ))
         };
         du.scan_unit_using(key, &AtomicBool::new(true), &gone);
-        assert!(lock(&du.cache).units.contains_key(key), "a cancelled scan removes nothing");
+        assert!(
+            lock(&du.cache).units.contains_key(key),
+            "a cancelled scan removes nothing"
+        );
         assert!(lock(&du.scan).failed.is_empty(), "NoSuchPath is no failure");
         du.scan_unit_using(key, &AtomicBool::new(false), &gone);
-        assert!(!lock(&du.cache).units.contains_key(key), "not cancelled: forgotten");
+        assert!(
+            !lock(&du.cache).units.contains_key(key),
+            "not cancelled: forgotten"
+        );
         assert!(lock(&du.scan).failed.is_empty());
+    }
+
+    fn units_of(v: &Value) -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["unit"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// status-bar §11.4: one `unresolved` entry per failing unit, with its
+    /// latest error; it goes when the unit is measured or disappears, while
+    /// `failed` keeps every attempt.
+    #[test]
+    fn unresolved_is_one_entry_per_unit_until_measured_or_gone() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let fail = |_: &Path, _: &dyn Fn() -> bool| -> crate::Result<Usage> {
+            Err(strata_types::StrataError::new(
+                strata_types::Code::Unknown,
+                "EIO",
+            ))
+        };
+        let go = AtomicBool::new(false);
+        let (base, ses, shadow) = (
+            "bases/app/t1",
+            "sessions/s-aaaaaaaa",
+            "sessions/.repos/s-aaaaaaaa",
+        );
+        du.scan_unit_using(base, &go, &fail);
+        du.scan_unit_using(base, &go, &fail);
+        du.scan_unit_using(ses, &go, &fail);
+        let scan = du.scan_json();
+        assert_eq!(scan["failed"].as_array().unwrap().len(), 3, "{scan}");
+        assert_eq!(units_of(&scan["unresolved"]), [base, ses], "{scan}");
+        assert_eq!(scan["unresolved"][0]["error"], "EIO");
+        assert!(
+            strata_types::serde_rfc3339::parse(scan["unresolved"][0]["at"].as_str().unwrap())
+                .is_ok()
+        );
+        assert_eq!(du.counts()["unresolved_n"], 2);
+        // A cancelled attempt is no failure and resolves nothing.
+        du.scan_unit_using(base, &AtomicBool::new(true), &fail);
+        du.scan_unit_with(base, &AtomicBool::new(true));
+        assert_eq!(units_of(&du.scan_json()["unresolved"]), [base, ses]);
+        // Measured: resolved; the history stays.
+        du.scan_unit(base);
+        let scan = du.scan_json();
+        assert_eq!(units_of(&scan["unresolved"]), [ses], "{scan}");
+        assert_eq!(scan["failed"].as_array().unwrap().len(), 3);
+        assert_eq!(du.counts()["unresolved_n"], 1);
+        // Gone when its scan finds the root missing.
+        du.scan_unit_using(base, &go, &fail);
+        fs::remove_dir_all(root.join(base)).unwrap();
+        du.scan_unit(base);
+        assert_eq!(units_of(&du.scan_json()["unresolved"]), [ses]);
+        // Gone when the listing no longer has it.
+        fs::remove_dir_all(root.join(ses)).unwrap();
+        du.report(false);
+        assert!(units_of(&du.scan_json()["unresolved"]).is_empty());
+        assert_eq!(du.counts()["unresolved_n"], 0);
+        // (The pass `report` started measures the rest; let it end.)
+        assert!(du.wait_idle(Duration::from_secs(30)));
+        // Gone with its session's `rm`.
+        du.scan_unit_using(shadow, &go, &fail);
+        assert_eq!(units_of(&du.scan_json()["unresolved"]), [shadow]);
+        du.on_remove("s-aaaaaaaa");
+        assert!(units_of(&du.scan_json()["unresolved"]).is_empty());
+        assert!(du.wait_idle(Duration::from_secs(30)));
+    }
+
+    /// `dir` at mode 000 until dropped: listing it and `lstat` through it
+    /// fail with `EACCES`.
+    struct Locked(PathBuf);
+
+    impl Locked {
+        fn new(dir: &Path) -> Locked {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+            Locked(dir.to_path_buf())
+        }
+    }
+
+    impl Drop for Locked {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// status-bar §11.4: a unit root that cannot be `lstat`ed for a reason
+    /// other than `ENOENT` is not gone. Its scan is a failure (history and
+    /// `unresolved`, with that error), its cached figures stay, and only a
+    /// later measurement or `ENOENT` resolves it.
+    #[test]
+    fn a_failed_lstat_keeps_the_unit_unresolved() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let fail = |_: &Path, _: &dyn Fn() -> bool| -> crate::Result<Usage> {
+            Err(strata_types::StrataError::new(
+                strata_types::Code::Unknown,
+                "EIO",
+            ))
+        };
+        let (ses, shadow) = ("sessions/s-aaaaaaaa", "sessions/.repos/s-aaaaaaaa");
+        du.scan_unit(ses);
+        du.scan_unit_using(ses, &AtomicBool::new(false), &fail);
+        let figures = lock(&du.cache).units.get(ses).copied();
+        assert!(figures.is_some());
+        {
+            let _locked = Locked::new(&root.join("sessions"));
+            // A cancelled attempt records nothing.
+            du.scan_unit_with(ses, &AtomicBool::new(true));
+            assert_eq!(du.scan_json()["failed"].as_array().unwrap().len(), 1);
+            du.scan_unit(ses);
+            du.scan_unit(shadow);
+        }
+        let scan = du.scan_json();
+        assert_eq!(units_of(&scan["unresolved"]), [shadow, ses], "{scan}");
+        for u in scan["unresolved"].as_array().unwrap() {
+            let error = u["error"].as_str().unwrap();
+            assert!(error.contains("Permission denied"), "{error}");
+        }
+        assert_eq!(scan["failed"].as_array().unwrap().len(), 3, "{scan}");
+        assert_eq!(du.counts()["unresolved_n"], 2);
+        assert_eq!(lock(&du.cache).units.get(ses).copied(), figures);
+        // Readable again: measured, resolved.
+        du.scan_unit(ses);
+        assert_eq!(units_of(&du.scan_json()["unresolved"]), [shadow]);
+        // ENOENT: gone.
+        fs::remove_dir_all(root.join(shadow)).unwrap();
+        du.scan_unit(shadow);
+        assert!(units_of(&du.scan_json()["unresolved"]).is_empty());
+        assert_eq!(du.counts()["unresolved_n"], 0);
+    }
+
+    /// status-bar §11.4: a directory `report` cannot list hides its units
+    /// without proving them gone, so their `unresolved` entries and cached
+    /// figures stay. A listing that reads the directory, or finds it
+    /// missing, drops them.
+    #[test]
+    fn an_unlistable_directory_keeps_its_units() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let fail = |_: &Path, _: &dyn Fn() -> bool| -> crate::Result<Usage> {
+            Err(strata_types::StrataError::new(
+                strata_types::Code::Unknown,
+                "EIO",
+            ))
+        };
+        let (ses, shadow) = ("sessions/s-aaaaaaaa", "sessions/.repos/s-aaaaaaaa");
+        du.scan_unit(ses);
+        du.scan_unit(shadow);
+        du.scan_unit_using(ses, &AtomicBool::new(false), &fail);
+        {
+            let _locked = Locked::new(&root.join("sessions"));
+            let listing = list_units(&root);
+            assert_eq!(listing.unlisted, ["sessions/"]);
+            assert!(
+                listing
+                    .units
+                    .iter()
+                    .all(|u| !u.key.starts_with("sessions/")),
+                "{listing:?}"
+            );
+            du.report(false);
+            assert!(du.wait_idle(Duration::from_secs(30)));
+            assert_eq!(units_of(&du.scan_json()["unresolved"]), [ses]);
+            let cache = lock(&du.cache);
+            assert!(cache.units.contains_key(ses) && cache.units.contains_key(shadow));
+        }
+        assert!(list_units(&root).unlisted.is_empty());
+        // Listed and missing: dropped.
+        fs::remove_dir_all(root.join(ses)).unwrap();
+        du.report(false);
+        assert!(units_of(&du.scan_json()["unresolved"]).is_empty());
+        assert!(!lock(&du.cache).units.contains_key(ses));
+        assert!(du.wait_idle(Duration::from_secs(30)));
+        // A missing directory lists nothing and proves its units gone.
+        du.scan_unit_using(shadow, &AtomicBool::new(false), &fail);
+        fs::remove_dir_all(root.join("sessions")).unwrap();
+        assert!(list_units(&root).unlisted.is_empty());
+        du.report(false);
+        assert!(units_of(&du.scan_json()["unresolved"]).is_empty());
+        assert!(!lock(&du.cache).units.contains_key(shadow));
+        assert!(du.wait_idle(Duration::from_secs(30)));
+    }
+
+    /// status-bar §11.4: `counts` follows the scan state through an
+    /// enqueue, a scan in flight, a hold that takes units off the queue and
+    /// the workers' completion, and reads no lock.
+    #[test]
+    fn counts_mirror_the_scan_state() {
+        let (_td, root) = tmp();
+        layout(&root);
+        let du = Du::open(&root);
+        let counts = |running: bool, active: u64, queued: u64, done: u64, full: bool| json!({ "running": running, "active": active, "queued": queued, "done": done, "full": full, "unresolved_n": 0 });
+        assert_eq!(du.counts(), counts(false, 0, 0, 0, false));
+        // No pass thread: the test runs the workers itself.
+        du.scan_state().running = true;
+        let keys = [
+            "bases/app/t1",
+            "store/tmp",
+            "sessions/s-aaaaaaaa",
+            "sessions/.repos/s-aaaaaaaa",
+        ];
+        du.enqueue(keys.iter().map(|k| (*k).to_owned()).collect(), true);
+        assert_eq!(du.counts(), counts(true, 0, 4, 0, true));
+        // `scan` locked elsewhere: `counts` still answers.
+        {
+            let _held = lock(&du.scan);
+            assert_eq!(du.counts(), counts(true, 0, 4, 0, true));
+        }
+        du.scan_state()
+            .active
+            .insert("deps/app/s1".into(), Arc::new(AtomicBool::new(false)));
+        assert_eq!(du.counts(), counts(true, 1, 4, 0, true));
+        du.scan_state().active.remove("deps/app/s1");
+        // A hold takes its session's units off the queue.
+        let hold = du
+            .hold_sessions(&["s-aaaaaaaa"], Duration::from_millis(10))
+            .unwrap();
+        assert_eq!(du.counts(), counts(true, 0, 2, 0, true));
+        drop(hold);
+        // The workers drain the queue; the pass ends.
+        du.pass();
+        assert_eq!(du.counts(), counts(false, 0, 0, 2, false));
+        assert_eq!(du.scan_json()["active"], 0);
     }
 
     #[test]
@@ -1281,7 +1906,10 @@ mod tests {
             });
             let _ = tx.send(());
         });
-        assert!(rx.recv_timeout(Duration::from_secs(60)).is_ok(), "report and scan_json deadlocked");
+        assert!(
+            rx.recv_timeout(Duration::from_secs(60)).is_ok(),
+            "report and scan_json deadlocked"
+        );
         assert!(du.wait_idle(Duration::from_secs(30)));
     }
 
@@ -1298,13 +1926,21 @@ mod tests {
         file(&root.join("bases/app/t1/d2/g"), 500);
         let r = du.report(false);
         assert_eq!(r["bases"]["repos"]["app"]["stale"], 1, "{r}");
-        assert_eq!(r["bases"]["repos"]["app"]["logical"], 3000, "stale figures are still shown");
+        assert_eq!(
+            r["bases"]["repos"]["app"]["logical"], 3000,
+            "stale figures are still shown"
+        );
         assert!(du.wait_idle(Duration::from_secs(30)));
         let r = du.report(false);
         assert_eq!(r["bases"]["repos"]["app"]["logical"], 3500);
         assert_ne!(lock(&du.cache).units["bases/app/t1"], before);
         // a removed trash entry leaves the cache
-        let gone = fs::read_dir(root.join("store/trash")).unwrap().next().unwrap().unwrap().path();
+        let gone = fs::read_dir(root.join("store/trash"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
         fs::remove_dir_all(&gone).unwrap();
         let r = du.report(false);
         assert_eq!(r["store"]["trash"]["entries"], 1);
@@ -1319,12 +1955,29 @@ mod tests {
         assert_eq!(n.fig.unwrap().logical, 7000);
         assert_eq!(n.create_ms, Some(1234));
         let r = du.report(false);
-        let s = r["sessions"]["list"].as_array().unwrap().iter().find(|s| s["session"] == "s-bbbbbbbb").unwrap().clone();
+        let s = r["sessions"]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["session"] == "s-bbbbbbbb")
+            .unwrap()
+            .clone();
         assert_eq!(s["create_ms"], 1234);
         let cum = &r["savings"]["cumulative"];
-        assert_eq!((cum["timed"].clone(), cum["create_ms"].clone(), cum["timed_logical"].clone()), (json!(1), json!(1234), json!(7000)));
+        assert_eq!(
+            (
+                cum["timed"].clone(),
+                cum["create_ms"].clone(),
+                cum["timed_logical"].clone()
+            ),
+            (json!(1), json!(1234), json!(7000))
+        );
         // a `seen` session has no time
-        assert!(recs.iter().filter(|r| r.event == "seen").all(|r| r.create_ms.is_none()));
+        assert!(
+            recs.iter()
+                .filter(|r| r.event == "seen")
+                .all(|r| r.create_ms.is_none())
+        );
         // rm: `rm` record with the cached figures; entries dropped
         fs::remove_dir_all(root.join("sessions/s-bbbbbbbb")).unwrap();
         du.on_remove("s-bbbbbbbb");

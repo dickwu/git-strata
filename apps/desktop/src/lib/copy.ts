@@ -322,6 +322,7 @@ export const copy = {
       activity: 'Show activity in daemon status',
       storage: 'Show storage in daemon status',
       scan: 'Show the size scan in daemon status',
+      trash: 'Show trash in daemon status',
       waiting: 'Show what is waiting for you',
     },
     openSession: (id: string) => `Open session ${id}`,

@@ -1583,3 +1583,46 @@ only; a separate all-carried-entry maximum protects G4/Phase F. Dependency
 writes outside carried caches no longer keep the old tree. Nested caches and
 Phase F untouched checks stay protected. Persisted scope, not current config,
 is used after restart; malformed/legacy scope checks the entire tree.
+
+### Status bar: request tag, activity observer and phases
+
+Status-bar design r3.1 §11.1, §11.2 and §12 (phase P-b). `strata_session::observe`
+holds two per-thread values that the daemon sets, beside `cwd::with_move_cwd`:
+
+- The request tag `RequestTag { method, session, id }`: the client request this
+  thread works for, and the daemon's number for that request. The daemon enters
+  it next to its request scope (`observe::enter`; the returned `Scope` restores
+  the previous values when it drops, unwinding included).
+  `catalog::spawn_pinned` copies it, so the dispatch workers of `new` and `add`
+  carry it. The daemon's locks read it for a hold's method, session and origin
+  when the thread has no request scope of its own; the `id` ties a request's
+  holds to the session creation the same request began. The session a lock
+  names (`locks::with_subject`) is the daemon's; this crate does not set it.
+- The activity observer (`Observer`: `begin(Work) -> id`, `step(id, step)`,
+  `end(id)`), installed by the daemon; `spawn_pinned` copies it as well. With no
+  observer every hook is a no-op, and the crate never depends on the daemon.
+
+`observe::begin(work)` returns an `Observed` guard that ends the work when it is
+dropped (unwinding included); `Observed::step` names the current step. The crate
+reports:
+
+- `Work::Move { repo, session }` for every `move_inner` (every
+  `move_workspace*` entry point), with the steps `checkpoint` (the BeforeRollout
+  checkpoint), `prepare`, `recheck`, `swap`, `pin` and `record` (each beside its
+  `set_move_phase`) and `old_tree` (Phase F). If the thread already has a move
+  of the same repo and session open (the daemon's `sync` opens one as it enters
+  the repo lock), the move joins it instead of beginning another, so one move
+  is reported once.
+- `Work::BaseBuild { repo, tree }` while a base is registered under the repo
+  write lock (§5.2 step 7). The export, deps and manifest steps before it run
+  outside the lock and are not reported.
+- `Work::SessionCreate { repos, session }`: `new` after validation (its members
+  and the new id), with the steps `head`, `base`, `enroll`, the layout phases
+  (`root`, `workspace`, `seed_caches`, `git`, `pin`, `seed_files`, `finalize`)
+  and `observe`; `add` for the repos it adds, with the steps `head`, `base`,
+  `build`, `record` and `observe`.
+
+None of this changes what a call does or returns: no lock, store write or error
+is added. Tests: the `observe` unit tests (nested scopes restore on unwind,
+`spawn_pinned` workers inherit both values, a nested move joins the open one,
+nothing is called without an observer) and the daemon's `tests/activity.rs`.

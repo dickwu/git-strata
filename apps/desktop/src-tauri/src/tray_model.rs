@@ -343,6 +343,24 @@ pub fn warning_class(w: &Value, s: &Snapshot, now: SystemTime) -> WarningClass {
     }
 }
 fn syncing_description(s: &Snapshot, now: SystemTime) -> String {
+    let moving = s.daemon_status.value.as_ref().and_then(|d| {
+        d["features"]
+            .as_array()
+            .filter(|fs| fs.iter().any(|f| f == "daemon_status.activity"))?;
+        d["activity"]
+            .as_array()?
+            .iter()
+            .filter(|a| a["kind"] == "move")
+            .filter_map(|a| {
+                let repo = a["repo"].as_str()?;
+                let age = Duration::from_millis(a["elapsed_ms"].as_u64()?);
+                (age >= MIN_ACTIVITY_AGE).then_some((repo, age))
+            })
+            .max_by_key(|(_, age)| *age)
+    });
+    if let Some((repo, age)) = moving {
+        return format!("Bringing in newer changes: {repo}, {}", age_text(age));
+    }
     let oldest = s.daemon_status.value.as_ref().and_then(|d| {
         let holds = d["holds"].as_array().into_iter().flatten();
         let long_holds = d["warnings"]

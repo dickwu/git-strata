@@ -233,7 +233,8 @@ pub enum DiffPreview {
 - `running`：daemon 是否在听 socket。没在跑时 cli 本地造这份对象，`running` 为 false，`holders` 与 `unknown_publishes` 为空数组，不假装知道锁。
 - `session`：cwd 能解析出会话才有，否则省略。daemon 回答了时，这个查找（读 config、开 store）放在另一个线程里，最多等 2 秒（`STATUS_LOOKUP_WAIT`）；超时就省略 `session`，加 `"session_lookup": "timed_out"`，信封照常 `ok`。SessionStart 钩子不会因为 store 一时读不动而卡住。daemon 没在跑时直接查。
 - `holders`：谁持着哪把 repo 写锁、从什么时候起。daemon 在跑时由 `daemon_status` 填。
-- `features`：daemon 接受的请求扩展（daemon.md D38，现在是 `["new.agent", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload"]`），daemon 在跑时原样透传；旧 daemon 没有这个键。
+- `features`：daemon 支持的扩展（daemon.md D38，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity"]`，与 `strata_daemon::FEATURES` 同序），daemon 在跑时原样透传；旧 daemon 没有这个键。多数是请求扩展；`publish.auto_close` 表示 publish / push 的回复带 auto-close 的结果，最后一项表示 daemon 的回复带下一条的状态栏字段。
+- `activity`、`busy`、`volume`、`scan`、`version`、`pid`、`started`：状态栏字段（feature `daemon_status.activity`，见 daemon.md Status bar fields），daemon 回了哪个就原样透传哪个；旧 daemon 或 daemon 没在跑时省略。`activity` 是在跑的长任务；`busy` 是请求收到的 `Busy`（`{total, recent, truncated}`，`recent` 只留最近 10 分钟）；`volume` 是数据根所在卷的 `{free, size, as_of}`（字节，还没取样成功或取样失败为 null）；`scan` 是 du 扫描的计数；`version`、`pid`、`started` 是 daemon 的版本、进程号与启动时刻。
 - `config`：daemon 返回时原样透传；daemon 没在跑或旧 daemon 没有这个键时省略。`generation`、`hash`、`loaded_at` 描述当前已应用的 catalog；`last_attempt` 在尚无重载尝试时为 null，之后是 ReloadReport 加 `at`，拒绝时另带 `reason`；`restart_required` 是该次尝试要求重启的字段列表。
 - `fds`：daemon 的文件描述符计数（`open`、`limit` 等），daemon 在跑时原样透传 `daemon_status` 的 `fds`（D35）。
 - `alerts`：隔离区、`index-read-back-refused`、`staging-changed` 这类要人看的项，原样透传 daemon 的 warnings。每条同时在 stderr 打一行。

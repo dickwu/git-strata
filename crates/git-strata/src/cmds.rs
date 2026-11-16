@@ -33,7 +33,10 @@ pub fn invalid(reason: &str, message: impl Into<String>) -> StrataError {
 
 fn both_selectors(sel: &Select) -> Result<()> {
     if sel.all && sel.session.is_some() {
-        return Err(invalid("both_selectors", "--all and --session are exclusive"));
+        return Err(invalid(
+            "both_selectors",
+            "--all and --session are exclusive",
+        ));
     }
     Ok(())
 }
@@ -54,11 +57,16 @@ fn cwd() -> PathBuf {
 
 fn absolute(p: &str) -> PathBuf {
     let p = Path::new(p);
-    if p.is_absolute() { p.to_path_buf() } else { cwd().join(p) }
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd().join(p)
+    }
 }
 
 fn sid(v: &Value) -> Option<SessionId> {
-    v.as_str().and_then(|s| SessionId::try_from(s.to_string()).ok())
+    v.as_str()
+        .and_then(|s| SessionId::try_from(s.to_string()).ok())
 }
 
 /// A known repo (`NoSuchRepo` otherwise).
@@ -70,7 +78,13 @@ fn known_repo(config: &Config, name: &str) -> Result<RepoName> {
 
 /// `--repo`, else the cwd's repo when the cwd is in this session, else the
 /// session's only repo.
-fn repo_for(config: &Config, store: &Store, s: &SessionId, flag: Option<&str>, cwd_repo: Option<RepoName>) -> Result<RepoName> {
+fn repo_for(
+    config: &Config,
+    store: &Store,
+    s: &SessionId,
+    flag: Option<&str>,
+    cwd_repo: Option<RepoName>,
+) -> Result<RepoName> {
     if let Some(r) = flag {
         return known_repo(config, r);
     }
@@ -81,7 +95,10 @@ fn repo_for(config: &Config, store: &Store, s: &SessionId, flag: Option<&str>, c
     let mut it = rec.manifest.repos.keys();
     match (it.next(), it.next()) {
         (Some(r), None) => Ok(r.clone()),
-        _ => Err(invalid("repo", format!("session {s} has several repos; pass --repo"))),
+        _ => Err(invalid(
+            "repo",
+            format!("session {s} has several repos; pass --repo"),
+        )),
     }
 }
 
@@ -117,7 +134,15 @@ pub fn mark(
 // ---- new --------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only: &[String], repos: &[String], agent_flag: Option<&str>, bases: &[String]) -> Result<Envelope> {
+pub fn new(
+    ctx: &Ctx,
+    ticket_flag: Option<String>,
+    ticket: Option<String>,
+    only: &[String],
+    repos: &[String],
+    agent_flag: Option<&str>,
+    bases: &[String],
+) -> Result<Envelope> {
     if !only.is_empty() && !repos.is_empty() {
         return Err(invalid(
             "repo_flags",
@@ -126,20 +151,32 @@ pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only:
     }
     let list = if only.is_empty() { repos } else { only };
     if list.is_empty() || list.iter().any(|r| r.is_empty()) {
-        return Err(invalid("repos", "pass --repo R (repeatable) or --repos A,B with at least one repo name"));
+        return Err(invalid(
+            "repos",
+            "pass --repo R (repeatable) or --repos A,B with at least one repo name",
+        ));
     }
     let ticket = match (ticket_flag, ticket) {
-        (Some(a), Some(b)) => return Err(invalid("ticket", format!("the ticket is given twice ({a:?} and {b:?})"))),
+        (Some(a), Some(b)) => {
+            return Err(invalid(
+                "ticket",
+                format!("the ticket is given twice ({a:?} and {b:?})"),
+            ));
+        }
         (a, b) => a.or(b),
     };
     let names: Vec<RepoName> = list.iter().map(|r| repo_name(r)).collect::<Result<_>>()?;
     let bases = parse_bases(only, repos, bases)?;
-    if !bases.is_empty() { crate::agent::require_feature(&ctx.paths.socket, "new.base")?; }
+    if !bases.is_empty() {
+        crate::agent::require_feature(&ctx.paths.socket, "new.base")?;
+    }
     let agent = crate::agent::detect(agent_flag, |k| std::env::var_os(k))?;
     // `only` is sent only when set, so this CLI still talks to a daemon
     // that predates it (its params refuse unknown fields).
     let mut params = json!({ "ticket": ticket, "repos": names });
-    if !bases.is_empty() { params["base"] = json!(bases); }
+    if !bases.is_empty() {
+        params["base"] = json!(bases);
+    }
     if !only.is_empty() {
         params["only"] = json!(true);
     } else {
@@ -165,7 +202,9 @@ pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only:
         // The daemon was swapped for an older one since the probe: it
         // refused the field before running anything, so send it again
         // without (only this refusal; nothing else is replayed).
-        Err(CallError::Failed(e)) if params.get("agent").is_some() && crate::agent::refused_unknown_agent(&e) => {
+        Err(CallError::Failed(e))
+            if params.get("agent").is_some() && crate::agent::refused_unknown_agent(&e) =>
+        {
             params.as_object_mut().expect("an object").remove("agent");
             dropped = agent.as_ref();
             ctx.call("new", params, Kind::Write)?
@@ -177,7 +216,9 @@ pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only:
     }
     let mut report = v.get("session").cloned().unwrap_or(Value::Null);
     if let Some(a) = dropped {
-        eprintln!("warning: the daemon predates agent recording; the session does not record agent {a} (install the matching git-strata and restart the daemon)");
+        eprintln!(
+            "warning: the daemon predates agent recording; the session does not record agent {a} (install the matching git-strata and restart the daemon)"
+        );
         if let Some(ws) = report.get_mut("warnings").and_then(Value::as_array_mut) {
             ws.push(crate::agent::not_recorded(a));
         } else if let Some(o) = report.as_object_mut() {
@@ -190,18 +231,31 @@ pub fn new(ctx: &Ctx, ticket_flag: Option<String>, ticket: Option<String>, only:
     Ok(Envelope::ok(report))
 }
 
-fn parse_bases(only: &[String], repos: &[String], values: &[String]) -> Result<BTreeMap<RepoName, String>> {
-    if !values.is_empty() && (only.is_empty() || !repos.is_empty()) { return Err(invalid("base_flags", "--base requires --repo, not --repos")); }
+fn parse_bases(
+    only: &[String],
+    repos: &[String],
+    values: &[String],
+) -> Result<BTreeMap<RepoName, String>> {
+    if !values.is_empty() && (only.is_empty() || !repos.is_empty()) {
+        return Err(invalid("base_flags", "--base requires --repo, not --repos"));
+    }
     let mut out = BTreeMap::new();
     for value in values {
         let (repo, rev) = match value.split_once('=') {
             Some((r, rev)) if only.iter().any(|name| name == r) => (r, rev),
             _ if only.len() == 1 => (only[0].as_str(), value.as_str()),
-            _ => return Err(invalid("base_flags", "use --base R=REV naming a --repo workspace")),
+            _ => {
+                return Err(invalid(
+                    "base_flags",
+                    "use --base R=REV naming a --repo workspace",
+                ));
+            }
         };
         strata_session::validate_base_rev(rev)?;
         let repo = RepoName::try_from(repo.to_string())?;
-        if out.insert(repo, rev.to_string()).is_some() { return Err(invalid("base_flags", "a repo has more than one --base")); }
+        if out.insert(repo, rev.to_string()).is_some() {
+            return Err(invalid("base_flags", "a repo has more than one --base"));
+        }
     }
     Ok(out)
 }
@@ -211,10 +265,16 @@ fn parse_bases(only: &[String], repos: &[String], values: &[String]) -> Result<B
 /// cli.md `add`: more repos for an existing session (session.md D52).
 pub fn add(ctx: &Ctx, session: Option<String>, repos: &[String]) -> Result<Envelope> {
     if repos.is_empty() || repos.iter().any(|r| r.is_empty()) {
-        return Err(invalid("repos", "pass --repo R (repeatable) with at least one repo name"));
+        return Err(invalid(
+            "repos",
+            "pass --repo R (repeatable) with at least one repo name",
+        ));
     }
     let config = ctx.config()?;
-    let names: Vec<RepoName> = repos.iter().map(|r| known_repo(&config, r)).collect::<Result<_>>()?;
+    let names: Vec<RepoName> = repos
+        .iter()
+        .map(|r| known_repo(&config, r))
+        .collect::<Result<_>>()?;
     let store = ro::open_store(&config)?;
     let (s, _) = ro::session_or_cwd(&store, session.as_deref())?;
     let v = ctx.call("add", json!({ "session": s, "repos": names }), Kind::Write)?;
@@ -222,7 +282,9 @@ pub fn add(ctx: &Ctx, session: Option<String>, repos: &[String]) -> Result<Envel
         eprintln!("warning: anchor unknown: {w}");
     }
     hint(s);
-    Ok(Envelope::ok(v.get("report").cloned().unwrap_or(Value::Null)))
+    Ok(Envelope::ok(
+        v.get("report").cloned().unwrap_or(Value::Null),
+    ))
 }
 
 // ---- status -------------------------------------------------------------------
@@ -245,33 +307,52 @@ pub fn status(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
 pub fn status_with_wait(ctx: &Ctx, sel: &Select, wait: &crate::args::WaitArgs) -> Result<Envelope> {
     both_selectors(sel)?;
     let params = json!({ "cwd": cwd(), "session": sel.session, "all": sel.all });
-    let mut list: Vec<Value> =
-        match crate::wait::call(ctx, "status", params, Kind::Read, wait, if sel.all { 120 } else { 30 }) {
-            Ok(v) => {
-                alerts(&v["warnings"]);
-                for l in v["leftovers"].as_array().into_iter().flatten() {
-                    eprintln!("{}", leftover_text(l));
-                }
-                v["sessions"].as_array().cloned().unwrap_or_default().into_iter().map(|s| s["status"].clone()).collect()
+    let mut list: Vec<Value> = match crate::wait::call(
+        ctx,
+        "status",
+        params,
+        Kind::Read,
+        wait,
+        if sel.all { 120 } else { 30 },
+    ) {
+        Ok(v) => {
+            alerts(&v["warnings"]);
+            for l in v["leftovers"].as_array().into_iter().flatten() {
+                eprintln!("{}", leftover_text(l));
             }
-            Err(CallError::Down(_)) => {
-                let (list, left) = local_status(ctx, sel)?;
-                for l in &left {
-                    eprintln!("{}", leftover_text(l));
-                }
-                list
+            v["sessions"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s["status"].clone())
+                .collect()
+        }
+        Err(CallError::Down(_)) => {
+            let (list, left) = local_status(ctx, sel)?;
+            for l in &left {
+                eprintln!("{}", leftover_text(l));
             }
-            Err(e) => return Err(e.into_error()),
-        };
+            list
+        }
+        Err(e) => return Err(e.into_error()),
+    };
     list = list.into_iter().map(with_choices).collect();
     for st in &list {
         print_notes(&st["manifest"]["id"], st);
     }
     if sel.all {
-        list.sort_by(|a, b| a["manifest"]["id"].as_str().cmp(&b["manifest"]["id"].as_str()));
+        list.sort_by(|a, b| {
+            a["manifest"]["id"]
+                .as_str()
+                .cmp(&b["manifest"]["id"].as_str())
+        });
         return Ok(Envelope::ok(json!({ "sessions": list })));
     }
-    let one = list.into_iter().next().ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
+    let one = list
+        .into_iter()
+        .next()
+        .ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
     if let Some(s) = sid(&one["manifest"]["id"]) {
         hint(s);
     }
@@ -283,8 +364,14 @@ pub fn status_with_wait(ctx: &Ctx, sel: &Select, wait: &crate::args::WaitArgs) -
 /// One `leftovers` entry as a stderr line: R3's removed-session form, or
 /// the JSON as before.
 fn leftover_text(l: &Value) -> String {
-    match (l["kind"].as_str(), l["session"].as_str(), l["path"].as_str()) {
-        (Some("RemovedSession"), Some(s), Some(p)) => strata_session::leftover_line(s, Path::new(p)),
+    match (
+        l["kind"].as_str(),
+        l["session"].as_str(),
+        l["path"].as_str(),
+    ) {
+        (Some("RemovedSession"), Some(s), Some(p)) => {
+            strata_session::leftover_line(s, Path::new(p))
+        }
         _ => format!("leftover: {l}"),
     }
 }
@@ -293,7 +380,12 @@ fn leftover_text(l: &Value) -> String {
 /// on stderr, `note: <sid>: <line>`.
 fn print_notes(id: &Value, v: &Value) {
     let id = id.as_str().unwrap_or("?");
-    for n in v["notes"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+    for n in v["notes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
         eprintln!("note: {id}: {n}");
     }
 }
@@ -315,8 +407,14 @@ fn add_leftovers(data: &mut Value, left: Vec<Value>) {
 /// dispatch (`deny_unknown_fields`): an RPC `Failed` naming the field.
 fn predates_summary(e: &StrataError) -> bool {
     let rpc_failed = e.code == Code::InvalidInput
-        && e.detail.as_ref().and_then(|d| d.get("rpc")).and_then(Value::as_str) == Some("Failed");
-    rpc_failed && (e.message.contains("unknown field `summary`") || e.message.contains("unknown field `workspaces`"))
+        && e.detail
+            .as_ref()
+            .and_then(|d| d.get("rpc"))
+            .and_then(Value::as_str)
+            == Some("Failed");
+    rpc_failed
+        && (e.message.contains("unknown field `summary`")
+            || e.message.contains("unknown field `workspaces`"))
 }
 
 /// `status{summary:true}` from the daemon; the store read only when no
@@ -330,12 +428,20 @@ fn summaries(
     wait: Option<&crate::args::WaitArgs>,
 ) -> Result<(Vec<Value>, bool, Vec<Value>)> {
     let here = cwd();
-    let mut params = json!({ "cwd": here, "session": sel.session, "all": sel.all, "summary": true });
+    let mut params =
+        json!({ "cwd": here, "session": sel.session, "all": sel.all, "summary": true });
     if workspaces {
         params["workspaces"] = json!(true);
     }
     let reply = match wait {
-        Some(wait) => crate::wait::call(ctx, "status", params, Kind::Read, wait, if sel.all { 120 } else { 30 }),
+        Some(wait) => crate::wait::call(
+            ctx,
+            "status",
+            params,
+            Kind::Read,
+            wait,
+            if sel.all { 120 } else { 30 },
+        ),
         None => ctx.try_call("status", params, Kind::Read),
     };
     match reply {
@@ -363,17 +469,31 @@ fn summaries(
             };
             // `summary` adds R3's orphan detail to a NoSuchSession itself.
             let v = strata_session::summary(&store, &config.paths.root, which, workspaces)?;
-            let v = serde_json::to_value(v).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
+            let v = serde_json::to_value(v)
+                .map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
             let left = strata_session::removed_leftovers(&store, &config.paths.root)?;
-            let left = serde_json::to_value(left).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
-            Ok((v.as_array().cloned().unwrap_or_default(), true, left.as_array().cloned().unwrap_or_default()))
+            let left = serde_json::to_value(left)
+                .map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
+            Ok((
+                v.as_array().cloned().unwrap_or_default(),
+                true,
+                left.as_array().cloned().unwrap_or_default(),
+            ))
         }
     }
 }
 
 /// `ls`: every live session, by id.
 pub fn ls(ctx: &Ctx) -> Result<Envelope> {
-    let (list, local, left) = summaries(ctx, &Select { session: None, all: true }, false, None)?;
+    let (list, local, left) = summaries(
+        ctx,
+        &Select {
+            session: None,
+            all: true,
+        },
+        false,
+        None,
+    )?;
     for s in &list {
         print_notes(&s["id"], s);
     }
@@ -390,7 +510,11 @@ pub fn ls(ctx: &Ctx) -> Result<Envelope> {
 pub fn status_brief(ctx: &Ctx, sel: &Select) -> Result<Envelope> {
     status_brief_with_wait(ctx, sel, &crate::args::WaitArgs::default())
 }
-pub fn status_brief_with_wait(ctx: &Ctx, sel: &Select, wait: &crate::args::WaitArgs) -> Result<Envelope> {
+pub fn status_brief_with_wait(
+    ctx: &Ctx,
+    sel: &Select,
+    wait: &crate::args::WaitArgs,
+) -> Result<Envelope> {
     both_selectors(sel)?;
     let (list, local, left) = summaries(ctx, sel, true, Some(wait))?;
     for s in &list {
@@ -399,7 +523,10 @@ pub fn status_brief_with_wait(ctx: &Ctx, sel: &Select, wait: &crate::args::WaitA
     let mut data = if sel.all {
         json!({ "sessions": list })
     } else {
-        let one = list.into_iter().next().ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
+        let one = list
+            .into_iter()
+            .next()
+            .ok_or_else(|| StrataError::new(Code::NoSuchSession, "no session"))?;
         if let Some(s) = sid(&one["id"]) {
             hint(s);
         }
@@ -437,13 +564,22 @@ pub fn table_of(data: &Value) -> String {
     let mut rows: Vec<[String; 6]> = vec![head.map(str::to_string)];
     for s in data["sessions"].as_array().into_iter().flatten() {
         let text = |v: &Value| v.as_str().map(str::to_string).unwrap_or_else(|| "-".into());
-        let repos: Vec<&str> = s["repos"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let repos: Vec<&str> = s["repos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
         rows.push([
             text(&s["id"]),
             text(&s["ticket"]),
             text(&s["state"]),
             s["mark"]["state"].as_str().unwrap_or("active").to_string(),
-            if repos.is_empty() { "-".into() } else { repos.join(",") },
+            if repos.is_empty() {
+                "-".into()
+            } else {
+                repos.join(",")
+            },
             text(&s["created"]),
         ]);
     }
@@ -469,7 +605,12 @@ pub fn table_of(data: &Value) -> String {
     }
     // R2/R3: the notes under the table, one line each.
     for s in data["sessions"].as_array().into_iter().flatten() {
-        for n in s["notes"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        for n in s["notes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
             out.push_str(&format!("note: {}: {n}\n", s["id"].as_str().unwrap_or("?")));
         }
     }
@@ -492,7 +633,10 @@ fn local_status(ctx: &Ctx, sel: &Select) -> Result<(Vec<Value>, Vec<Value>)> {
     // report `unchecked`.
     sessions.set_old_tree_mode(strata_session::OldTreeMode::Deferred);
     let ids: Vec<SessionId> = if sel.all {
-        ro::live(&local.store)?.into_iter().map(|r| r.manifest.id).collect()
+        ro::live(&local.store)?
+            .into_iter()
+            .map(|r| r.manifest.id)
+            .collect()
     } else {
         let root = &local.config.paths.root;
         vec![
@@ -507,10 +651,13 @@ fn local_status(ctx: &Ctx, sel: &Select) -> Result<(Vec<Value>, Vec<Value>)> {
     let mut out = Vec::new();
     for st in sessions.status_many(&ids) {
         let st = st?;
-        out.push(serde_json::to_value(st).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?);
+        out.push(
+            serde_json::to_value(st).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?,
+        );
     }
     let left = strata_session::removed_leftovers(&local.store, &local.config.paths.root)?;
-    let left = serde_json::to_value(left).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
+    let left =
+        serde_json::to_value(left).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
     Ok((out, left.as_array().cloned().unwrap_or_default()))
 }
 
@@ -521,20 +668,29 @@ fn local_status(ctx: &Ctx, sel: &Select) -> Result<(Vec<Value>, Vec<Value>)> {
 /// string, or not JSON → `None`.
 pub fn hook_tool_use_id(input: &str) -> Option<String> {
     let v = serde_json::from_str::<Value>(input).ok()?;
-    v["tool_use_id"].as_str().filter(|s| !s.is_empty()).map(str::to_string)
+    v["tool_use_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// D5: the Claude Code hook input on stdin (one JSON object). Unreadable
 /// or not JSON → no paths (a Bash call has none either).
 pub fn hook_paths(input: &str) -> Vec<PathBuf> {
-    let Ok(v) = serde_json::from_str::<Value>(input) else { return Vec::new() };
+    let Ok(v) = serde_json::from_str::<Value>(input) else {
+        return Vec::new();
+    };
     let base = v["cwd"].as_str().map(PathBuf::from).unwrap_or_else(cwd);
     let ti = &v["tool_input"];
     let mut out = Vec::new();
     let mut push = |p: &Value| {
         if let Some(s) = p.as_str().filter(|s| !s.is_empty()) {
             let p = Path::new(s);
-            out.push(if p.is_absolute() { p.to_path_buf() } else { base.join(p) });
+            out.push(if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                base.join(p)
+            });
         }
     };
     push(&ti["file_path"]);
@@ -550,7 +706,9 @@ pub fn hook_paths(input: &str) -> Vec<PathBuf> {
 fn read_stdin() -> String {
     use std::io::Read;
     let mut s = String::new();
-    let _ = std::io::stdin().take(16 * 1024 * 1024).read_to_string(&mut s);
+    let _ = std::io::stdin()
+        .take(16 * 1024 * 1024)
+        .read_to_string(&mut s);
     s
 }
 
@@ -559,8 +717,16 @@ fn checkpoint_json(store: &Store, s: &SessionId, id: CheckpointId) -> Result<Val
     serde_json::to_value(c).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))
 }
 
-pub fn checkpoint(ctx: &Ctx, tool_call: Option<String>, message: Option<String>, session: Option<String>, paths: &[String]) -> Result<Envelope> {
-    if message.as_ref().is_some_and(|m| m.trim().is_empty()) { return Err(invalid("message", "checkpoint message must not be empty")); }
+pub fn checkpoint(
+    ctx: &Ctx,
+    tool_call: Option<String>,
+    message: Option<String>,
+    session: Option<String>,
+    paths: &[String],
+) -> Result<Envelope> {
+    if message.as_ref().is_some_and(|m| m.trim().is_empty()) {
+        return Err(invalid("message", "checkpoint message must not be empty"));
+    }
     // Hook mode reads stdin once (non-TTY only); the id falls back to the
     // hook JSON's `tool_use_id` when `--tool-call` has no value (D22).
     let hook_input = if tool_call.is_some() && message.is_none() && !crate::tty::stdin_is_tty() {
@@ -580,7 +746,12 @@ pub fn checkpoint(ctx: &Ctx, tool_call: Option<String>, message: Option<String>,
             }
         },
         (None, Some(message)) => CheckpointReason::Manual { message },
-        _ => return Err(invalid("checkpoint_reason", "give exactly one of --tool-call ID and -m MSG")),
+        _ => {
+            return Err(invalid(
+                "checkpoint_reason",
+                "give exactly one of --tool-call ID and -m MSG",
+            ));
+        }
     };
     let config = ctx.config()?;
     let store = ro::open_store(&config)?;
@@ -610,7 +781,13 @@ pub fn checkpoint(ctx: &Ctx, tool_call: Option<String>, message: Option<String>,
     // No path in the session (Bash, or every path outside): every tracked
     // repo of the session, full scan.
     if per_repo.is_empty() && whole.is_empty() {
-        whole = rec.manifest.repos.iter().filter(|(_, w)| w.tracked).map(|(r, _)| r.clone()).collect();
+        whole = rec
+            .manifest
+            .repos
+            .iter()
+            .filter(|(_, w)| w.tracked)
+            .map(|(r, _)| r.clone())
+            .collect();
     }
     let mut todo: BTreeMap<RepoName, Vec<RepoPath>> = BTreeMap::new();
     for r in &whole {
@@ -631,8 +808,12 @@ pub fn checkpoint(ctx: &Ctx, tool_call: Option<String>, message: Option<String>,
             }
         }
     }
-    let missing: Vec<(RepoName, Vec<RepoPath>)> = todo.into_iter().filter(|(r, _)| !done.contains_key(r)).collect();
-    let reason_v = serde_json::to_value(&reason).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
+    let missing: Vec<(RepoName, Vec<RepoPath>)> = todo
+        .into_iter()
+        .filter(|(r, _)| !done.contains_key(r))
+        .collect();
+    let reason_v = serde_json::to_value(&reason)
+        .map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
     for (repo, paths) in missing {
         let params = json!({ "session": s, "repo": repo, "reason": reason_v, "paths": paths });
         match ctx.call("checkpoint", params, Kind::Write) {
@@ -650,14 +831,22 @@ pub fn checkpoint(ctx: &Ctx, tool_call: Option<String>, message: Option<String>,
         }
     }
     hint(s);
-    Ok(Envelope::ok(json!({ "checkpoints": done.into_values().collect::<Vec<_>>() })))
+    Ok(Envelope::ok(
+        json!({ "checkpoints": done.into_values().collect::<Vec<_>>() }),
+    ))
 }
 
 // ---- restore ----------------------------------------------------------------
 
-pub fn restore(ctx: &Ctx, checkpoint: &str, paths: &[String], session: Option<String>) -> Result<Envelope> {
+pub fn restore(
+    ctx: &Ctx,
+    checkpoint: &str,
+    paths: &[String],
+    session: Option<String>,
+) -> Result<Envelope> {
     let n = crate::confirm::parse_id(checkpoint, "checkpoint")?;
-    let id = CheckpointId::try_from(n).map_err(|_| invalid("id", format!("checkpoint {checkpoint} is not an id")))?;
+    let id = CheckpointId::try_from(n)
+        .map_err(|_| invalid("id", format!("checkpoint {checkpoint} is not an id")))?;
     let config = ctx.config()?;
     let store = ro::open_store(&config)?;
     let (s, _) = ro::session_or_cwd(&store, session.as_deref())?;
@@ -667,8 +856,12 @@ pub fn restore(ctx: &Ctx, checkpoint: &str, paths: &[String], session: Option<St
         let located = ro::locate(&store, &absolute(p))?;
         let rp = match located {
             Some((ls, r, Some(rp))) if ls == s && r == cp.repo => rp,
-            _ => RepoPath::try_from(p.clone())
-                .map_err(|_| invalid("path", format!("{p:?} is not a path of {} in session {s}", cp.repo)))?,
+            _ => RepoPath::try_from(p.clone()).map_err(|_| {
+                invalid(
+                    "path",
+                    format!("{p:?} is not a path of {} in session {s}", cp.repo),
+                )
+            })?,
         };
         rps.push(rp);
     }
@@ -711,7 +904,9 @@ enum Probe {
 
 fn probe(root: &Path, p: &RepoPath) -> Probe {
     let full = root.join(p.as_str());
-    let Ok(m) = std::fs::symlink_metadata(&full) else { return Probe::Skip };
+    let Ok(m) = std::fs::symlink_metadata(&full) else {
+        return Probe::Skip;
+    };
     if !m.file_type().is_file() {
         return Probe::Skip;
     }
@@ -749,12 +944,18 @@ pub fn grep(ctx: &Ctx, pattern: &str, sel: &Select) -> Result<Envelope> {
         return Err(invalid("pattern", "the pattern is empty"));
     }
     both_selectors(sel)?;
-    let re = regex::Regex::new(pattern).map_err(|e| invalid("pattern", format!("invalid pattern: {e}")))?;
+    let re = regex::Regex::new(pattern)
+        .map_err(|e| invalid("pattern", format!("invalid pattern: {e}")))?;
     let config = ctx.config()?;
     let store = ro::open_store(&config)?;
     let ts = targets(&store, sel)?;
-    let session = if sel.all { None } else { ts.first().map(|t| t.0.clone()) };
-    let params = json!({ "pattern": pattern, "session": session, "all": sel.all, "ignore_case": false });
+    let session = if sel.all {
+        None
+    } else {
+        ts.first().map(|t| t.0.clone())
+    };
+    let params =
+        json!({ "pattern": pattern, "session": session, "all": sel.all, "ignore_case": false });
     let (mut hits, mut skipped, members) = match ctx.try_call("grep", params, Kind::Read) {
         Ok(v) => {
             let hits = v["hits"].as_array().cloned().unwrap_or_default();
@@ -766,9 +967,14 @@ pub fn grep(ctx: &Ctx, pattern: &str, sel: &Select) -> Result<Envelope> {
                 .collect();
             let mut members = Members::new();
             for (s, r, path) in &ts {
-                let got = ctx.try_call("files", json!({ "session": s, "repo": r, "glob": "**" }), Kind::Read);
+                let got = ctx.try_call(
+                    "files",
+                    json!({ "session": s, "repo": r, "glob": "**" }),
+                    Kind::Read,
+                );
                 if let Ok(f) = got {
-                    let ps: Vec<RepoPath> = serde_json::from_value(f["paths"].clone()).unwrap_or_default();
+                    let ps: Vec<RepoPath> =
+                        serde_json::from_value(f["paths"].clone()).unwrap_or_default();
                     members.insert((s.clone(), r.clone()), (path.clone(), ps));
                 }
             }
@@ -839,7 +1045,11 @@ pub fn grep(ctx: &Ctx, pattern: &str, sel: &Select) -> Result<Envelope> {
 
 type GrepParts = (Vec<Value>, Vec<Value>, Members);
 
-fn local_grep(config: &Config, pattern: &str, ts: &[(SessionId, RepoName, PathBuf)]) -> Result<GrepParts> {
+fn local_grep(
+    config: &Config,
+    pattern: &str,
+    ts: &[(SessionId, RepoName, PathBuf)],
+) -> Result<GrepParts> {
     let local = Local::open(config.clone())?;
     let sessions = local.sessions()?;
     let src = ScanSource { local: &local };
@@ -857,7 +1067,13 @@ fn local_grep(config: &Config, pattern: &str, ts: &[(SessionId, RepoName, PathBu
         let files = search.files(view.clone(), "**");
         let _ = search.detach(view);
         for h in got? {
-            hits.push(hit_json(&h.session, &h.repo, &h.path, h.line as u64, &h.text));
+            hits.push(hit_json(
+                &h.session,
+                &h.repo,
+                &h.path,
+                h.line as u64,
+                &h.text,
+            ));
         }
         members.insert((s.clone(), r.clone()), (path.clone(), files?));
     }
@@ -873,7 +1089,11 @@ pub fn files(ctx: &Ctx, glob: Option<&str>, sel: &Select) -> Result<Envelope> {
     let mut out: Vec<(SessionId, RepoName, RepoPath)> = Vec::new();
     let mut local: Option<Local> = None;
     for (s, r, _) in &ts {
-        let got = match ctx.try_call("files", json!({ "session": s, "repo": r, "glob": glob }), Kind::Read) {
+        let got = match ctx.try_call(
+            "files",
+            json!({ "session": s, "repo": r, "glob": glob }),
+            Kind::Read,
+        ) {
             Ok(v) => serde_json::from_value::<Vec<RepoPath>>(v["paths"].clone())
                 .map_err(|e| StrataError::new(Code::Unknown, format!("files reply: {e}"))),
             Err(CallError::Down(_)) => {
@@ -905,7 +1125,10 @@ pub fn files(ctx: &Ctx, glob: Option<&str>, sel: &Select) -> Result<Envelope> {
     {
         hint(t.0.clone());
     }
-    let paths: Vec<Value> = out.iter().map(|(s, r, p)| json!({ "session": s, "repo": r, "path": p })).collect();
+    let paths: Vec<Value> = out
+        .iter()
+        .map(|(s, r, p)| json!({ "session": s, "repo": r, "path": p }))
+        .collect();
     Ok(Envelope::ok(json!({ "paths": paths })))
 }
 
@@ -946,12 +1169,23 @@ fn change_kinds(o: &Overlay) -> BTreeMap<RepoPath, &'static str> {
 fn sorted_changes(m: &BTreeMap<RepoPath, &'static str>) -> Vec<Value> {
     let mut v: Vec<(&RepoPath, &&str)> = m.iter().collect();
     v.sort_by(|a, b| a.0.as_str().as_bytes().cmp(b.0.as_str().as_bytes()));
-    v.into_iter().map(|(p, k)| json!({ "path": p, "kind": k })).collect()
+    v.into_iter()
+        .map(|(p, k)| json!({ "path": p, "kind": k }))
+        .collect()
 }
 
-pub fn diff(ctx: &Ctx, base: bool, session: Option<String>, between: Option<Vec<String>>, repo: Option<String>) -> Result<Envelope> {
+pub fn diff(
+    ctx: &Ctx,
+    base: bool,
+    session: Option<String>,
+    between: Option<Vec<String>>,
+    repo: Option<String>,
+) -> Result<Envelope> {
     if between.is_some() && (base || session.is_some()) {
-        return Err(invalid("diff_mode", "--between is exclusive with --base and --session"));
+        return Err(invalid(
+            "diff_mode",
+            "--between is exclusive with --base and --session",
+        ));
     }
     let config = ctx.config()?;
     let store = ro::open_store(&config)?;
@@ -969,7 +1203,9 @@ pub fn diff(ctx: &Ctx, base: bool, session: Option<String>, between: Option<Vec<
             };
             hint(s);
             Ok(Envelope::ok(match picked {
-                Some((r, kinds)) => json!({ "repo": r, "only_a": sorted_changes(&kinds), "only_b": [], "both": [] }),
+                Some((r, kinds)) => {
+                    json!({ "repo": r, "only_a": sorted_changes(&kinds), "only_b": [], "both": [] })
+                }
                 None => json!({ "repo": null, "only_a": [], "only_b": [], "both": [] }),
             }))
         }
@@ -986,8 +1222,12 @@ pub fn diff(ctx: &Ctx, base: bool, session: Option<String>, between: Option<Vec<
                 Err(e) => return Err(e.into_error()),
             };
             let git = strata_gitio::Git::open(&config.repo(&r)?.path)?;
-            let ka = overlay_of(&config, &store, &git, &a, &r).map(|o| change_kinds(&o)).unwrap_or_default();
-            let kb = overlay_of(&config, &store, &git, &b, &r).map(|o| change_kinds(&o)).unwrap_or_default();
+            let ka = overlay_of(&config, &store, &git, &a, &r)
+                .map(|o| change_kinds(&o))
+                .unwrap_or_default();
+            let kb = overlay_of(&config, &store, &git, &b, &r)
+                .map(|o| change_kinds(&o))
+                .unwrap_or_default();
             Ok(Envelope::ok(between_json(&raw, &ka, &kb)))
         }
     }
@@ -998,8 +1238,17 @@ pub fn diff(ctx: &Ctx, base: bool, session: Option<String>, between: Option<Vec<
 /// None qualifies → `None` (an empty diff); several → `InvalidInput`,
 /// `reason = "repo"`, with `detail.candidates`. Every workspace is scanned
 /// (reads only), a few at a time.
-fn diff_default_repo(config: &Config, store: &Store, s: &SessionId) -> Result<Option<(RepoName, BTreeMap<RepoPath, &'static str>)>> {
-    let repos: Vec<RepoName> = ro::record(store, s)?.manifest.repos.keys().cloned().collect();
+fn diff_default_repo(
+    config: &Config,
+    store: &Store,
+    s: &SessionId,
+) -> Result<Option<(RepoName, BTreeMap<RepoPath, &'static str>)>> {
+    let repos: Vec<RepoName> = ro::record(store, s)?
+        .manifest
+        .repos
+        .keys()
+        .cloned()
+        .collect();
     type Found = Result<Option<BTreeMap<RepoPath, &'static str>>>;
     let scan = |r: &RepoName| -> Found {
         let kinds = {
@@ -1012,7 +1261,8 @@ fn diff_default_repo(config: &Config, store: &Store, s: &SessionId) -> Result<Op
         Ok(None)
     };
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let out: Vec<std::sync::Mutex<Option<Found>>> = repos.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let out: Vec<std::sync::Mutex<Option<Found>>> =
+        repos.iter().map(|_| std::sync::Mutex::new(None)).collect();
     std::thread::scope(|sc| {
         for _ in 0..DIFF_SCAN_WORKERS.min(repos.len()).max(1) {
             sc.spawn(|| {
@@ -1031,7 +1281,12 @@ fn diff_default_repo(config: &Config, store: &Store, s: &SessionId) -> Result<Op
             Some(Ok(Some(k))) => hits.push((r, k)),
             Some(Ok(None)) => {}
             Some(Err(e)) => return Err(e),
-            None => return Err(StrataError::new(Code::Unknown, format!("diff scan of {r} did not run"))),
+            None => {
+                return Err(StrataError::new(
+                    Code::Unknown,
+                    format!("diff scan of {r} did not run"),
+                ));
+            }
         }
     }
     match hits.len() {
@@ -1039,8 +1294,14 @@ fn diff_default_repo(config: &Config, store: &Store, s: &SessionId) -> Result<Op
         1 => Ok(hits.pop()),
         _ => {
             let names: Vec<&str> = hits.iter().map(|(r, _)| r.as_str()).collect();
-            Err(StrataError::new(Code::InvalidInput, format!("session {s} has changes in several repos ({}); pass --repo", names.join(", ")))
-                .with_detail(json!({ "reason": "repo", "candidates": names })))
+            Err(StrataError::new(
+                Code::InvalidInput,
+                format!(
+                    "session {s} has changes in several repos ({}); pass --repo",
+                    names.join(", ")
+                ),
+            )
+            .with_detail(json!({ "reason": "repo", "candidates": names })))
         }
     }
 }
@@ -1060,17 +1321,29 @@ fn path_list(v: &Value, kinds: &BTreeMap<RepoPath, &'static str>) -> Vec<Value> 
 }
 
 /// The daemon's `diff` reply (publish's `BetweenDiff`) as §3.2's shape.
-fn between_json(raw: &Value, ka: &BTreeMap<RepoPath, &'static str>, kb: &BTreeMap<RepoPath, &'static str>) -> Value {
+fn between_json(
+    raw: &Value,
+    ka: &BTreeMap<RepoPath, &'static str>,
+    kb: &BTreeMap<RepoPath, &'static str>,
+) -> Value {
     let mut both: Vec<(Vec<u8>, Value)> = Vec::new();
     for e in raw["both"].as_array().into_iter().flatten() {
         let p = e["path"].as_str().unwrap_or("").to_string();
-        let kind = RepoPath::try_from(p.clone()).ok().and_then(|rp| ka.get(&rp).copied()).unwrap_or("Modified");
+        let kind = RepoPath::try_from(p.clone())
+            .ok()
+            .and_then(|rp| ka.get(&rp).copied())
+            .unwrap_or("Modified");
         let mut item = json!({ "path": p, "kind": kind });
         if let Some(err) = e.get("error") {
             item["code"] = err["code"].clone();
         } else {
-            let tag = if e["merged"].as_bool().unwrap_or(false) { "Clean" } else { "Conflict" };
-            item["preview"] = json!({ "kind": tag, "hunks": e["hunks"].as_array().cloned().unwrap_or_default() });
+            let tag = if e["merged"].as_bool().unwrap_or(false) {
+                "Clean"
+            } else {
+                "Conflict"
+            };
+            item["preview"] =
+                json!({ "kind": tag, "hunks": e["hunks"].as_array().cloned().unwrap_or_default() });
         }
         both.push((p.into_bytes(), item));
     }
@@ -1097,7 +1370,15 @@ fn local_between(config: &Config, a: &SessionId, b: &SessionId, r: &RepoName) ->
         env: &local.env,
         locks: &crate::local::NoLock,
     };
-    let pctx = strata_publish::Ctx { store: &local.store, git, cfg: rc, repo: r, deps: &deps, locks: &crate::local::NoLock, sessions: &sessions };
+    let pctx = strata_publish::Ctx {
+        store: &local.store,
+        git,
+        cfg: rc,
+        repo: r,
+        deps: &deps,
+        locks: &crate::local::NoLock,
+        sessions: &sessions,
+    };
     let d = strata_publish::diff_between(&pctx, a.clone(), b.clone(), r)?;
     let both: Vec<Value> = d
         .both
@@ -1119,7 +1400,12 @@ fn local_between(config: &Config, a: &SessionId, b: &SessionId, r: &RepoName) ->
 /// deps §5.10 `plan_switch` for this session only: the origin and open
 /// files are checked there; a skipped move is reported in `switched` with
 /// its code, `ok: true`, like a skipped session of `deps approve` (D17).
-pub fn deps_propose(ctx: &Ctx, session: Option<String>, repo: Option<String>, switch: bool) -> Result<Envelope> {
+pub fn deps_propose(
+    ctx: &Ctx,
+    session: Option<String>,
+    repo: Option<String>,
+    switch: bool,
+) -> Result<Envelope> {
     deps_propose_with_cwd(ctx, session, repo, switch, &crate::args::CwdArgs::default())
 }
 pub fn deps_propose_with_cwd(
@@ -1142,9 +1428,16 @@ pub fn deps_propose_with_cwd(
     hint(s);
     match v.get("proposal").filter(|p| !p.is_null()) {
         Some(p) if switch => {
-            let step = v["switched"].as_array().and_then(|a| a.first()).cloned().unwrap_or(Value::Null);
+            let step = v["switched"]
+                .as_array()
+                .and_then(|a| a.first())
+                .cloned()
+                .unwrap_or(Value::Null);
             if step["kind"] != json!("moved") {
-                eprintln!("proposal recorded; this session did not move ({})", step["code"].as_str().unwrap_or("skipped"));
+                eprintln!(
+                    "proposal recorded; this session did not move ({})",
+                    step["code"].as_str().unwrap_or("skipped")
+                );
             }
             Ok(Envelope::ok(json!({ "proposal": p, "switched": step })))
         }
@@ -1158,13 +1451,18 @@ pub fn deps_propose_with_cwd(
 
 pub fn deps_list(ctx: &Ctx, repo: Option<String>) -> Result<Envelope> {
     let config = ctx.config()?;
-    let r = repo.as_deref().map(|r| known_repo(&config, r)).transpose()?;
+    let r = repo
+        .as_deref()
+        .map(|r| known_repo(&config, r))
+        .transpose()?;
     let mut ps: Vec<Value> = match ctx.try_call("deps_list", json!({ "repo": r }), Kind::Read) {
         Ok(v) => v["proposals"].as_array().cloned().unwrap_or_default(),
         Err(CallError::Down(_)) => {
             let store = ro::open_store(&config)?;
             let got = strata_deps::open_proposals(&store, r.as_ref())?;
-            got.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect()
+            got.iter()
+                .map(|p| serde_json::to_value(p).unwrap_or(Value::Null))
+                .collect()
         }
         Err(e) => return Err(e.into_error()),
     };
@@ -1176,16 +1474,32 @@ pub fn deps_list(ctx: &Ctx, repo: Option<String>) -> Result<Envelope> {
 
 pub fn gc(ctx: &Ctx, store: bool, dry_run: bool) -> Result<Envelope> {
     if dry_run {
-        let v = ctx.call("gc", json!({ "repo": null, "store": true, "dry_run": true }), Kind::Write)?;
-        return Ok(Envelope::ok(json!({ "dry_run": true, "preview": v["preview"] })));
+        let v = ctx.call(
+            "gc",
+            json!({ "repo": null, "store": true, "dry_run": true }),
+            Kind::Write,
+        )?;
+        return Ok(Envelope::ok(
+            json!({ "dry_run": true, "preview": v["preview"] }),
+        ));
     }
     let v = ctx.call("gc", json!({ "repo": null, "store": store }), Kind::Write)?;
     // rm-followups R1: an older daemon has neither key; nothing is printed.
     for o in v["orphans"].as_array().into_iter().flatten() {
-        eprintln!("gc orphan retired: {} -> {}", o["path"].as_str().unwrap_or("?"), o["trash"].as_str().unwrap_or("?"));
+        eprintln!(
+            "gc orphan retired: {} -> {}",
+            o["path"].as_str().unwrap_or("?"),
+            o["trash"].as_str().unwrap_or("?")
+        );
     }
     for w in v["orphan_warnings"].as_array().into_iter().flatten() {
-        eprintln!("gc orphan skipped: {}", w["message"].as_str().map(str::to_string).unwrap_or_else(|| w.to_string()));
+        eprintln!(
+            "gc orphan skipped: {}",
+            w["message"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| w.to_string())
+        );
     }
     for s in v["skipped"].as_array().into_iter().flatten() {
         eprintln!("gc skipped: {s}");
@@ -1220,7 +1534,11 @@ pub fn gc(ctx: &Ctx, store: bool, dry_run: bool) -> Result<Envelope> {
 
 /// §5.12: the daemon's cached sizes; `refresh` starts a full background pass.
 pub fn du(ctx: &Ctx, refresh: bool) -> Result<Envelope> {
-    Ok(Envelope::ok(ctx.call("du", json!({ "refresh": refresh }), Kind::Read)?))
+    Ok(Envelope::ok(ctx.call(
+        "du",
+        json!({ "refresh": refresh }),
+        Kind::Read,
+    )?))
 }
 
 // ---- daemon status ----------------------------------------------------------------------
@@ -1228,6 +1546,12 @@ pub fn du(ctx: &Ctx, refresh: bool) -> Result<Envelope> {
 /// How long `daemon status` waits for its cwd-session lookup when the
 /// daemon has already answered.
 pub const STATUS_LOOKUP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `daemon_status` keys `daemon status` copies into `data` unchanged when
+/// the daemon sends them.
+pub const DAEMON_STATUS_PASSTHROUGH: [&str; 7] = [
+    "activity", "busy", "volume", "scan", "version", "pid", "started",
+];
 
 /// §3.3. Never fails for a missing config or a down daemon (SessionStart).
 pub fn daemon_status() -> Result<Envelope> {
@@ -1259,27 +1583,47 @@ pub fn daemon_status() -> Result<Envelope> {
                         failure["reason"].as_str().unwrap_or("reload failed")
                     );
                 } else {
-                    let at = v["warning_times"].as_array().and_then(|times| times.iter().find(|t| &t["warning"] == warning))
+                    let at = v["warning_times"]
+                        .as_array()
+                        .and_then(|times| times.iter().find(|t| &t["warning"] == warning))
                         .and_then(|t| t["raised_at"].as_str());
                     if let Some(at) = at.and_then(|s| strata_types::serde_rfc3339::parse(s).ok()) {
-                        eprintln!("alert: {warning} (raised {})", strata_session::local_hhmmss(at));
-                    } else { alert(warning); }
+                        eprintln!(
+                            "alert: {warning} (raised {})",
+                            strata_session::local_hhmmss(at)
+                        );
+                    } else {
+                        alert(warning);
+                    }
                 }
             }
             if let Some(config) = v.get("config") {
                 data["config"] = config.clone();
             }
             data["alerts"] = json!(warnings);
-            if let Some(times) = v.get("warning_times") { data["alerts_at"] = times.clone(); }
-            if let Some(meta) = v.get("pins_meta") { data["pins_meta"] = meta.clone(); }
+            if let Some(times) = v.get("warning_times") {
+                data["alerts_at"] = times.clone();
+            }
+            if let Some(meta) = v.get("pins_meta") {
+                data["pins_meta"] = meta.clone();
+            }
             // The daemon's descriptor count (open, soft limit, ...), as is.
             if let Some(f) = v.get("fds") {
                 data["fds"] = f.clone();
             }
-            if let Some(queues) = v.get("queues") { data["queues"] = queues.clone(); }
+            if let Some(queues) = v.get("queues") {
+                data["queues"] = queues.clone();
+            }
             // Optional request features (absent from older daemons).
             if let Some(f) = v.get("features") {
                 data["features"] = f.clone();
+            }
+            // Status-bar fields (feature `daemon_status.activity`), as the
+            // daemon sent them; an older daemon sends none of them.
+            for key in DAEMON_STATUS_PASSTHROUGH {
+                if let Some(x) = v.get(key) {
+                    data[key] = x.clone();
+                }
             }
         }
         Err(CallError::Down(_)) => {}

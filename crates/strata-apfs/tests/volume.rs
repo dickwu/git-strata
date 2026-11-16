@@ -57,21 +57,42 @@ fn same_volume_follows_links_and_reports_missing_paths() {
 fn nearest_existing_ancestor_climbs_to_the_first_existing_path() {
     let t = Tmp::new();
     fs::create_dir(t.join("d")).unwrap();
-    assert_eq!(nearest_existing_ancestor(&t.join("d")).unwrap(), t.join("d"));
-    assert_eq!(nearest_existing_ancestor(&t.join("d/leaf")).unwrap(), t.join("d"));
-    assert_eq!(nearest_existing_ancestor(&t.join("d/a/b/c/d/e")).unwrap(), t.join("d"));
+    assert_eq!(
+        nearest_existing_ancestor(&t.join("d")).unwrap(),
+        t.join("d")
+    );
+    assert_eq!(
+        nearest_existing_ancestor(&t.join("d/leaf")).unwrap(),
+        t.join("d")
+    );
+    assert_eq!(
+        nearest_existing_ancestor(&t.join("d/a/b/c/d/e")).unwrap(),
+        t.join("d")
+    );
     fs::write(t.join("file"), "x").unwrap();
-    assert_eq!(nearest_existing_ancestor(&t.join("file/x/y")).unwrap(), t.join("file"));
+    assert_eq!(
+        nearest_existing_ancestor(&t.join("file/x/y")).unwrap(),
+        t.join("file")
+    );
     std::os::unix::fs::symlink("nowhere", t.join("dang")).unwrap();
-    assert_eq!(nearest_existing_ancestor(&t.join("dang/x")).unwrap(), t.path);
+    assert_eq!(
+        nearest_existing_ancestor(&t.join("dang/x")).unwrap(),
+        t.path
+    );
 
     let name = format!("strata-nea-{}", std::process::id());
     let via_tmp = PathBuf::from("/tmp").join(&name).join("x");
-    assert_eq!(nearest_existing_ancestor(&via_tmp).unwrap(), PathBuf::from("/tmp"));
+    assert_eq!(
+        nearest_existing_ancestor(&via_tmp).unwrap(),
+        PathBuf::from("/tmp")
+    );
 
     let rel = nearest_existing_ancestor(Path::new("rel/x")).unwrap_err();
     assert_eq!(rel.kind(), io::ErrorKind::InvalidInput);
-    assert_eq!(classify_io_error(&rel, IoSide::Read, Path::new("rel/x")).code, Code::Unknown);
+    assert_eq!(
+        classify_io_error(&rel, IoSide::Read, Path::new("rel/x")).code,
+        Code::Unknown
+    );
 
     fs::create_dir(t.join("locked")).unwrap();
     set_mode(&t.join("locked"), 0o000);
@@ -87,6 +108,27 @@ fn nearest_existing_ancestor_climbs_to_the_first_existing_path() {
     let anc = nearest_existing_ancestor(&img.path().join("new/deeper")).unwrap();
     assert!(same_volume(&anc, &img.path().join("f")).unwrap());
     assert!(!same_volume(&anc, &t.join("file")).unwrap());
+}
+
+#[test]
+fn volume_space_is_the_space_of_the_volume_holding_the_path() {
+    let img = Image::create(Fs::Apfs, 32);
+    let s = volume_space(img.path()).unwrap();
+    // The 32 MB image's own space, not the host disk's.
+    assert!(s.size > 16 << 20 && s.size <= 32 << 20, "{s:?}");
+    assert!(s.free > 0 && s.free < s.size, "{s:?}");
+    assert!(s.free.abs_diff(img.free_bytes()) < 1 << 20, "{s:?}");
+    // A file answers for its volume; written blocks leave `free`.
+    let f = img.path().join("f");
+    let mut w = fs::File::create(&f).unwrap();
+    io::Write::write_all(&mut w, &vec![7u8; 4 << 20]).unwrap();
+    w.sync_all().unwrap();
+    let after = volume_space(&f).unwrap();
+    assert_eq!(after.size, s.size);
+    assert!(after.free + (2 << 20) <= s.free, "{s:?} then {after:?}");
+    // A missing path is the statfs errno.
+    let e = volume_space(&img.path().join("missing")).unwrap_err();
+    assert_eq!(e.raw_os_error(), Some(libc::ENOENT));
 }
 
 #[test]

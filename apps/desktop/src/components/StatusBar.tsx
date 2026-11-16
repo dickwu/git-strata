@@ -6,11 +6,13 @@ import type { UseQueryResult } from '@tanstack/react-query';
 import { copy } from '@/lib/copy';
 import { useDu } from '@/lib/queries';
 import {
+  observeScanRun,
   statusBarModel,
   type Chip,
   type ChipTarget,
   type StatusBarInput,
   type StatusBarModel,
+  type SpaceLevel,
 } from '@/lib/statusBar';
 import { asGuiError, reason } from '@/lib/tauri';
 import type { DaemonStatus, DepsList, StatusReply } from '@/lib/types';
@@ -238,6 +240,7 @@ export function StatusBar({
   onSession: (id: string) => void;
 }) {
   const [now, setNow] = useState(() => Date.now());
+  const [spaceLevel, setSpaceLevel] = useState<SpaceLevel>('muted');
   const [health, setHealth] = useState<DaemonHealth>({
     timeouts: 0,
     lastOkAt: 0,
@@ -247,6 +250,9 @@ export function StatusBar({
   // Adjust only when the query completes, before rendering its model. No extra effect or poll.
   const observedHealth = observeDaemonHealth(health, status);
   if (observedHealth !== health) setHealth(observedHealth);
+  const [scanSince, setScanSince] = useState<number | undefined>(undefined);
+  const observedScan = observeScanRun(scanSince, status.data, status.dataUpdatedAt);
+  if (observedScan !== scanSince) setScanSince(observedScan);
   // null while closed; otherwise the section the click asked for (none: the top).
   const [modal, setModal] = useState<{ section?: ModalSection } | null>(null);
   useEffect(() => {
@@ -257,6 +263,8 @@ export function StatusBar({
   const live = status.isSuccess || (status.data !== undefined && !status.isError);
   // du answers from the daemon's cache (daemon.md §5.12); the same key the daemon screen polls.
   const du = useDu(live ? 60_000 : false);
+  // The ticker lags a reply that arrived since its last tick; that reply's time has passed.
+  const at = Math.max(now, status.dataUpdatedAt);
   const model = statusBarModel(
     {
       daemon: {
@@ -271,9 +279,13 @@ export function StatusBar({
       health: observedHealth,
       // A du reply cached from before the daemon went away is not shown (as before).
       du: live ? du.data : undefined,
+      scanSince: observedScan,
     },
-    now
+    at,
+    spaceLevel
   );
+  if (model.spaceLevel !== undefined && model.spaceLevel !== spaceLevel)
+    setSpaceLevel(model.spaceLevel);
   return (
     <StatusBarView
       model={model}
@@ -289,7 +301,7 @@ export function StatusBar({
         status={status}
         du={du}
         sessions={sessions.data}
-        now={now}
+        now={at}
       />
     </StatusBarView>
   );

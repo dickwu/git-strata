@@ -1,0 +1,97 @@
+{
+  "now": "2026-11-13T15:29:52.000Z",
+  "daemon": {
+    "features": ["status.upstream", "daemon_status.activity"],
+    "version": "0.2.2",
+    "pid": 4242,
+    "started": "2026-11-13T15:27:52.000Z",
+    "holds": [
+      {
+        "repo": "tool",
+        "method": "catch_up",
+        "session": "s-pb9492",
+        "since": { "secs_since_epoch": 1794583672, "nanos_since_epoch": 0 },
+        "origin": "background",
+        "elapsed_ms": 120000
+      }
+    ],
+    "queues": [],
+    "reconcile": { "runs": 1, "last": null },
+    "repo_waiting": { "tool": 2 },
+    "verify": null,
+    "warnings": [],
+    "activity": [
+      {
+        "id": 1,
+        "kind": "move",
+        "origin": "background",
+        "repo": "tool",
+        "session": "s-pb9492",
+        "started": "2026-11-13T15:27:52.000Z",
+        "elapsed_ms": 120000,
+        "step_elapsed_ms": 8000,
+        "cause": "catch_up",
+        "phase": "prepare"
+      }
+    ],
+    "busy": {
+      "total": 17,
+      "recent": [
+        {
+          "at": "2026-11-13T15:28:00.000Z",
+          "method": "sync",
+          "session": "s-other",
+          "reason": "lock_wait",
+          "scope": { "repo": "tool" },
+          "holder": "catch_up",
+          "holder_session": "s-pb9492"
+        },
+        {
+          "at": "2026-11-13T15:28:30.000Z",
+          "method": "publish",
+          "session": "s-other",
+          "reason": "lock_wait",
+          "scope": { "repo": "tool" },
+          "holder": "catch_up",
+          "holder_session": "s-pb9492"
+        },
+        {
+          "at": "2026-11-13T15:29:00.000Z",
+          "method": "sync",
+          "session": "s-other",
+          "reason": "lock_wait",
+          "scope": { "repo": "tool" },
+          "holder": "catch_up",
+          "holder_session": "s-pb9492"
+        }
+      ],
+      "truncated": false
+    },
+    "volume": { "free": 1319413953331, "size": 2199023255552, "as_of": "2026-11-13T15:29:50.000Z" },
+    "scan": {
+      "running": true,
+      "active": 4,
+      "queued": 136,
+      "done": 412,
+      "full": true,
+      "unresolved_n": 1
+    }
+  },
+  "duScan": {
+    "running": true,
+    "active": 4,
+    "queued": 136,
+    "done": 412,
+    "full": true,
+    "started": "2026-11-13T15:27:52.000Z",
+    "last_full": null,
+    "failed": [{ "unit": "old/resolved", "error": "old error" }],
+    "unresolved": [
+      {
+        "unit": "store/trash/unit-1",
+        "error": "Permission denied",
+        "at": "2026-11-13T15:29:00.000Z"
+      }
+    ]
+  }
+}

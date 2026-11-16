@@ -114,13 +114,15 @@
     }
   },
   "scan": {
+    "active": 4,
     "done": 13,
     "failed": [],
     "full": false,
     "last_full": null,
     "queued": 253,
     "running": true,
-    "started": "2026-10-27T17:31:16.646Z"
+    "started": "2026-10-27T17:31:16.646Z",
+    "unresolved": []
   },
   "sessions": {
     "all": {

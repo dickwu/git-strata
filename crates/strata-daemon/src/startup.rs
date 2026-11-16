@@ -110,17 +110,29 @@ impl InstanceLock {
             make_private_dir(dir)?;
         }
         let mut oo = OpenOptions::new();
-        oo.read(true).write(true).create(true).truncate(false).mode(0o600).custom_flags(libc::O_CLOEXEC);
-        let file = retry_eintr(|| oo.open(path)).map_err(|e| classify_io_error(&e, IoSide::Write, path))?;
+        oo.read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC);
+        let file = retry_eintr(|| oo.open(path))
+            .map_err(|e| classify_io_error(&e, IoSide::Write, path))?;
         let locked = retry_eintr(|| {
             // SAFETY: flock on a descriptor this function owns.
             let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
         });
         if let Err(e) = locked {
             if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                return Err(StrataError::new(Code::Exists, "another git-stratad is running")
-                    .with_detail(json!({ "reason": "daemon_running", "lock": path })));
+                return Err(
+                    StrataError::new(Code::Exists, "another git-stratad is running")
+                        .with_detail(json!({ "reason": "daemon_running", "lock": path })),
+                );
             }
             return Err(classify_io_error(&e, IoSide::Write, path));
         }
@@ -134,7 +146,12 @@ impl InstanceLock {
 }
 
 fn make_private_dir(dir: &Path) -> Result<()> {
-    match retry_eintr(|| fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)) {
+    match retry_eintr(|| {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }) {
         Ok(()) => Ok(()),
         Err(e) => Err(classify_io_error(&e, IoSide::Write, dir)),
     }
@@ -151,7 +168,12 @@ pub struct Warnings {
 
 impl Warnings {
     fn new(alert: Arc<dyn Fn(&str) + Send + Sync>) -> Warnings {
-        Warnings { list: Mutex::new(Vec::new()), first_seen: Mutex::new(Vec::new()), alert, seen: Mutex::new(Default::default()) }
+        Warnings {
+            list: Mutex::new(Vec::new()),
+            first_seen: Mutex::new(Vec::new()),
+            alert,
+            seen: Mutex::new(Default::default()),
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(DaemonWarning, SystemTime)>> {
@@ -189,7 +211,11 @@ impl Warnings {
 
     /// Print `line` the first time `key` is seen; true when printed.
     pub fn alert_first(&self, key: &str, line: &str) -> bool {
-        let fresh = self.seen.lock().unwrap_or_else(|p| p.into_inner()).insert(key.to_owned());
+        let fresh = self
+            .seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key.to_owned());
         if fresh {
             (self.alert)(line);
         }
@@ -208,10 +234,28 @@ impl Warnings {
         let list = self.lock();
         let mut first = self.first_seen.lock().unwrap_or_else(|p| p.into_inner());
         let same = |a: &DaemonWarning, b: &DaemonWarning| match (a, b) {
-            (DaemonWarning::AutoRebaseStuck {session:a,repo:ar,rev:av,since:at,..}, DaemonWarning::AutoRebaseStuck {session:b,repo:br,rev:bv,since:bt,..}) => a == b && ar == br && av == bv && at == bt,
+            (
+                DaemonWarning::AutoRebaseStuck {
+                    session: a,
+                    repo: ar,
+                    rev: av,
+                    since: at,
+                    ..
+                },
+                DaemonWarning::AutoRebaseStuck {
+                    session: b,
+                    repo: br,
+                    rev: bv,
+                    since: bt,
+                    ..
+                },
+            ) => a == b && ar == br && av == bv && at == bt,
             _ => a == b,
         };
-        first.retain(|(w,_)| !matches!(w, DaemonWarning::AutoRebaseStuck {..}) || warnings.iter().any(|v| same(w,v)));
+        first.retain(|(w, _)| {
+            !matches!(w, DaemonWarning::AutoRebaseStuck { .. })
+                || warnings.iter().any(|v| same(w, v))
+        });
         warnings.iter().map(|w| {
             let at = match w {
                 DaemonWarning::LongHold { since, .. } | DaemonWarning::LongWait { since, .. } => *since,
@@ -232,7 +276,12 @@ impl Warnings {
 pub struct DaemonBefore;
 
 impl BeforeCheckpoint for DaemonBefore {
-    fn checkpoint(&self, ws: &WorkspaceRef<'_>, base: &Base, reason: CheckpointReason) -> Result<Checkpointed> {
+    fn checkpoint(
+        &self,
+        ws: &WorkspaceRef<'_>,
+        base: &Base,
+        reason: CheckpointReason,
+    ) -> Result<Checkpointed> {
         strata_overlay::checkpoint(ws, base, None, reason)
     }
 }
@@ -261,6 +310,12 @@ pub struct Core {
     /// `sessions-audit.jsonl`: one line per session auto-close judged.
     pub sessions_audit: crate::audit::AuditFile,
     pub main_sync: crate::main_sync::State,
+    /// `daemon_status.busy`: the `Busy` replies requests got.
+    pub busy: crate::busy::BusyLog,
+    /// `daemon_status.volume`: the data root's volume, sampled on a thread.
+    pub volume: crate::volume::VolumeHandle,
+    /// Status-bar §3.1: long work in flight (`daemon_status.activity`).
+    pub activity: Arc<crate::activity::Activities>,
     instance: InstanceLock,
 }
 
@@ -367,13 +422,17 @@ pub fn prepare_locked(
         )
         .with_detail(json!({ "reason": "no_instance_lock" })));
     };
+    let volume = crate::volume::Volume::start(&config.paths.root);
     Ok(Core {
+        busy: Default::default(),
+        volume,
         catalog,
         commit: Mutex::new(()),
         reload,
         open_git: Arc::new(open_git.clone()),
         started: SystemTime::now(),
         main_sync: Default::default(),
+        activity: Default::default(),
         upstream: Default::default(),
         pins,
         sessions_audit,
@@ -416,7 +475,11 @@ pub(crate) fn check_realpath_root(root: &Path) -> Result<()> {
     {
         return Err(StrataError::new(
             Code::InvalidInput,
-            format!("paths.root {} is not its realpath {}", root.display(), real.display()),
+            format!(
+                "paths.root {} is not its realpath {}",
+                root.display(),
+                real.display()
+            ),
         )
         .with_detail(json!({ "reason": "not_realpath", "path": root, "realpath": real })));
     }
@@ -663,7 +726,12 @@ impl<'a> Daemon<'a> {
     /// Step 12 onwards: serve until [`Daemon::request_stop`] (or `external`
     /// becomes true). Then §5.9: stop accepting, fail queued writers with
     /// `ReadOnly`, let running requests finish, close idle connections.
-    pub fn serve(&self, listener: &UnixListener, external: &AtomicBool, handle: &(dyn Fn(Request) -> Reply + Sync)) -> Result<()> {
+    pub fn serve(
+        &self,
+        listener: &UnixListener,
+        external: &AtomicBool,
+        handle: &(dyn Fn(Request) -> Reply + Sync),
+    ) -> Result<()> {
         listener
             .set_nonblocking(true)
             .map_err(|e| classify_io_error(&e, IoSide::Read, &self.core.opts.socket))?;
@@ -717,24 +785,35 @@ impl<'a> Daemon<'a> {
                             shed(stream);
                             continue;
                         };
-                        self.conns.lock().unwrap_or_else(|p| p.into_inner()).insert(id, c);
+                        self.conns
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .insert(id, c);
                         s.spawn(move || {
                             match stream.try_clone() {
                                 Ok(w) => {
                                     let mut r = BufReader::new(stream);
                                     let mut w = w;
                                     let mut h = |req: Request| handle(req);
-                                    let _ = rpc::serve_connection(&mut r, &mut w, MAX_FRAME, &mut h);
+                                    let _ =
+                                        rpc::serve_connection(&mut r, &mut w, MAX_FRAME, &mut h);
                                 }
                                 Err(_) => shed(stream),
                             }
                             // The clone kept for the stop goes with the connection.
-                            self.conns.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+                            self.conns
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .remove(&id);
                         });
                     }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(20)),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20))
+                    }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(e) if matches!(e.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE)) => {
+                    Err(e)
+                        if matches!(e.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE)) =>
+                    {
                         let fd_errors = self.fd_errors.fetch_add(1, Ordering::SeqCst) + 1;
                         if last_log.is_none_or(|t| t.elapsed() >= FD_LOG_EVERY) {
                             last_log = Some(std::time::Instant::now());
@@ -763,7 +842,12 @@ impl<'a> Daemon<'a> {
             // the middle of a request still writes its reply.
             drop(reserve.take());
             self.core.locks.shutdown();
-            for c in self.conns.lock().unwrap_or_else(|p| p.into_inner()).values() {
+            for c in self
+                .conns
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .values()
+            {
                 let _ = c.shutdown(std::net::Shutdown::Read);
             }
         });
@@ -795,13 +879,39 @@ impl<'a> Daemon<'a> {
     /// `daemon_status`: holds, queues, the daemon's warnings; never waits.
     pub fn daemon_status(&self, verify: bool) -> Result<Value> {
         let _catalog = self.core.admit();
+        // Status-bar §12.3: the activity registry is copied (and released)
+        // before any lock FIFO or store read.
+        let activity = self.core.activity.snapshot();
         let catalog = self.core.snapshot()?;
         let mut warnings = self.core.warnings.snapshot();
-        warnings.extend(self.core.locks.long_holds());
+        warnings.extend(
+            self.core
+                .locks
+                .long_holds_with(&|repo, request| activity.exempt_step(repo, request)),
+        );
+        // Read with the activity snapshot, before the store, so a hold and
+        // the work behind it are shown as of nearly the same moment.
+        let holds: Vec<_> = self
+            .core
+            .locks
+            .holds()
+            .into_iter()
+            .filter(|h| catalog.config.repos.contains_key(&h.repo))
+            .collect();
         warnings.extend(self.core.locks.long_waits());
         let pending = self.core.store.rebase_pending(None).unwrap_or_default();
-        for p in pending.iter().filter(|p| strata_session::rebase_stuck(p, SystemTime::now())) {
-            warnings.push(DaemonWarning::AutoRebaseStuck { session: p.session.clone(), repo: p.repo.clone(), reason:p.reason.clone(), attempts:p.attempts, rev:p.rev, since:p.first_at });
+        for p in pending
+            .iter()
+            .filter(|p| strata_session::rebase_stuck(p, SystemTime::now()))
+        {
+            warnings.push(DaemonWarning::AutoRebaseStuck {
+                session: p.session.clone(),
+                repo: p.repo.clone(),
+                reason: p.reason.clone(),
+                attempts: p.attempts,
+                rev: p.rev,
+                since: p.first_at,
+            });
         }
         let mut verify_result = Value::Null;
         if verify {
@@ -819,20 +929,39 @@ impl<'a> Daemon<'a> {
             warnings.push(DaemonWarning::StorePoisoned);
         }
         let last_attempt = self.core.reload.status();
-        let restart_required = last_attempt["restart_required"].as_array().cloned().unwrap_or_default();
-        let holds: Vec<_> = self.core.locks.holds().into_iter().filter(|h| catalog.config.repos.contains_key(&h.repo)).collect();
+        let restart_required = last_attempt["restart_required"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         warnings.retain(|w| !matches!(w, DaemonWarning::ConfigRelaxPending { .. }));
-        warnings.extend(catalog.pending_relax.iter().cloned().map(|repo| DaemonWarning::ConfigRelaxPending { repo }));
+        warnings.extend(
+            catalog
+                .pending_relax
+                .iter()
+                .cloned()
+                .map(|repo| DaemonWarning::ConfigRelaxPending { repo }),
+        );
         let mut warning_times = self.core.warnings.times(&warnings);
         for (w, time) in warnings.iter().zip(&mut warning_times) {
             if let DaemonWarning::AutoRebaseStuck { session, repo, .. } = w
-                && let Some(p) = pending.iter().find(|p| &p.session == session && &p.repo == repo) {
-                time["since"] = json!(strata_types::serde_rfc3339::format(&p.first_at).unwrap_or_default());
-                time["holders"] = json!(p.detail.as_ref().and_then(|d| d["holders"].as_array()).map(|h| h.iter().take(5).cloned().collect::<Vec<_>>()).unwrap_or_default());
+                && let Some(p) = pending
+                    .iter()
+                    .find(|p| &p.session == session && &p.repo == repo)
+            {
+                time["since"] =
+                    json!(strata_types::serde_rfc3339::format(&p.first_at).unwrap_or_default());
+                time["holders"] = json!(
+                    p.detail
+                        .as_ref()
+                        .and_then(|d| d["holders"].as_array())
+                        .map(|h| h.iter().take(5).cloned().collect::<Vec<_>>())
+                        .unwrap_or_default()
+                );
             }
         }
         Ok(json!({
             "holds": holds,
+            "activity": activity.json(),
             "queues": self.core.locks.queue_snapshot(),
             "repo_waiting": catalog.config.repos.keys()
                 .map(|r| (r.as_str().to_string(), self.core.locks.repo_waiting(r)))
@@ -850,6 +979,15 @@ impl<'a> Daemon<'a> {
                 "limit": fd_limit().map(|(soft, _)| soft),
                 "accept_errors": self.fd_errors.load(Ordering::SeqCst),
             },
+            // Status bar (FEATURES `daemon_status.activity`): who answers,
+            // the Busy replies, the data volume and the size scan. Each
+            // reads a cache or counters, never the file system.
+            "version": env!("CARGO_PKG_VERSION"),
+            "pid": std::process::id(),
+            "started": strata_types::serde_rfc3339::format(&self.core.started).ok(),
+            "busy": self.core.busy.json(),
+            "volume": self.core.volume.json(),
+            "scan": self.du.counts(),
         }))
     }
 }
@@ -867,7 +1005,10 @@ pub const FD_LIMIT: u64 = 10240;
 /// Raise the soft `RLIMIT_NOFILE` to `min(FD_LIMIT, hard)`. Returns the
 /// soft limit before and after. Never lowers it.
 pub fn raise_fd_limit() -> io::Result<(u64, u64)> {
-    let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let mut r = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     // SAFETY: plain syscalls on a local struct.
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } != 0 {
         return Err(io::Error::last_os_error());
@@ -886,8 +1027,12 @@ pub fn raise_fd_limit() -> io::Result<(u64, u64)> {
 
 /// (soft, hard) `RLIMIT_NOFILE`.
 pub fn fd_limit() -> Option<(u64, u64)> {
-    let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-    (unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } == 0).then_some((r.rlim_cur, r.rlim_max))
+    let mut r = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    (unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } == 0)
+        .then_some((r.rlim_cur, r.rlim_max))
 }
 
 /// Descriptors open in this process now (entries of /dev/fd, less the
@@ -903,8 +1048,11 @@ fn shed(stream: UnixStream) {
     use std::io::Write;
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
-    let e = StrataError::new(Code::Busy, "git-stratad is out of file descriptors; try again shortly")
-        .with_detail(json!({ "reason": "too_many_open_files" }));
+    let e = StrataError::new(
+        Code::Busy,
+        "git-stratad is out of file descriptors; try again shortly",
+    )
+    .with_detail(json!({ "reason": "too_many_open_files" }));
     let mut w = &stream;
     let _ = writeln!(w, "{}", rpc::Reply::error(&Value::Null, &e).0);
 }
@@ -921,7 +1069,8 @@ pub fn bind(socket: &Path) -> Result<UnixListener> {
         Err(e) => return Err(classify_io_error(&e, IoSide::Write, socket)),
     }
     let l = UnixListener::bind(socket).map_err(|e| classify_io_error(&e, IoSide::Write, socket))?;
-    fs::set_permissions(socket, fs::Permissions::from_mode(0o600)).map_err(|e| classify_io_error(&e, IoSide::Write, socket))?;
+    fs::set_permissions(socket, fs::Permissions::from_mode(0o600))
+        .map_err(|e| classify_io_error(&e, IoSide::Write, socket))?;
     Ok(l)
 }
 
@@ -995,10 +1144,16 @@ pub fn quarantine_entries(root: &Path) -> Vec<PathBuf> {
 
 fn sweep_exports(root: &Path) {
     for sub in ["daemon/main-follow", "daemon/sync"] {
-        let Ok(entries) = std::fs::read_dir(root.join(sub)) else { continue };
+        let Ok(entries) = std::fs::read_dir(root.join(sub)) else {
+            continue;
+        };
         for e in entries.flatten() {
             let name = e.file_name();
-            let Some(pid) = name.to_str().and_then(|n| n.split('-').next()).and_then(|p| p.parse::<i32>().ok()) else {
+            let Some(pid) = name
+                .to_str()
+                .and_then(|n| n.split('-').next())
+                .and_then(|p| p.parse::<i32>().ok())
+            else {
                 continue;
             };
             // SAFETY: kill with signal 0 only checks that the process exists.
@@ -1017,18 +1172,58 @@ mod r2_warning_tests {
     use super::*;
     #[test]
     fn timestamp_siblings_preserve_warning_shape_and_first_sighting() {
-        let w=Warnings::new(Arc::new(|_| {}));
+        let w = Warnings::new(Arc::new(|_| {}));
         w.add(DaemonWarning::StorePoisoned);
-        let first=w.times(&w.snapshot());
+        let first = w.times(&w.snapshot());
         w.add(DaemonWarning::StorePoisoned);
-        assert_eq!(serde_json::to_value(w.snapshot()).unwrap(),json!(["StorePoisoned"]));
-        assert_eq!(w.times(&w.snapshot()),first);
-        let warning=DaemonWarning::VerifyFailed {message:"check".into()};
-        let first=w.times(std::slice::from_ref(&warning));
-        assert_eq!(w.times(&[warning]),first);
-        let at=SystemTime::UNIX_EPOCH + Duration::from_secs(1);
-        let held=DaemonWarning::LongHold {repo:RepoName::try_from("app".to_string()).unwrap(),method:"sync".into(),since:at};
-        assert_eq!(w.times(&[held])[0]["raised_at"],"1970-01-01T00:00:01Z");
+        assert_eq!(
+            serde_json::to_value(w.snapshot()).unwrap(),
+            json!(["StorePoisoned"])
+        );
+        assert_eq!(w.times(&w.snapshot()), first);
+        let warning = DaemonWarning::VerifyFailed {
+            message: "check".into(),
+        };
+        let first = w.times(std::slice::from_ref(&warning));
+        assert_eq!(w.times(&[warning]), first);
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let held = DaemonWarning::LongHold {
+            repo: RepoName::try_from("app".to_string()).unwrap(),
+            method: "sync".into(),
+            since: at,
+            origin: Some(crate::locks::Origin::Request),
+            session: None,
+        };
+        assert_eq!(w.times(&[held])[0]["raised_at"], "1970-01-01T00:00:01Z");
+    }
+
+    /// Status-bar §3.1: a `LongHold` (and a held lock) an older daemon sent,
+    /// without `origin` and `session`, still reads; a new one carries both.
+    #[test]
+    fn long_hold_and_lock_hold_read_old_payloads() {
+        let old = json!({"LongHold":{"repo":"app","method":"catch_up","since":{"secs_since_epoch":1,"nanos_since_epoch":0}}});
+        let w: DaemonWarning = serde_json::from_value(old).unwrap();
+        assert!(
+            matches!(&w, DaemonWarning::LongHold { origin: None, session: None, method, .. } if method == "catch_up")
+        );
+        let new = DaemonWarning::LongHold {
+            repo: RepoName::try_from("app".to_string()).unwrap(),
+            method: "catch_up".into(),
+            since: SystemTime::UNIX_EPOCH,
+            origin: Some(crate::locks::Origin::Background),
+            session: Some(strata_types::SessionId::try_from("s-aaaaaaaa".to_string()).unwrap()),
+        };
+        let v = serde_json::to_value(&new).unwrap();
+        assert_eq!(
+            (&v["LongHold"]["origin"], &v["LongHold"]["session"]),
+            (&json!("background"), &json!("s-aaaaaaaa"))
+        );
+        assert_eq!(serde_json::from_value::<DaemonWarning>(v).unwrap(), new);
+        let hold: crate::LockHold = serde_json::from_value(
+            json!({"repo":"app","method":"sync","session":null,"since":{"secs_since_epoch":1,"nanos_since_epoch":0}}),
+        )
+        .unwrap();
+        assert_eq!((hold.origin, hold.elapsed_ms), (None, None));
     }
 
     #[test]
