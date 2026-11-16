@@ -85,8 +85,8 @@ export const daemonCopy = {
     trashHuman: '(a human command).',
     trashYoung: (n: number, age: string) =>
       `${n.toLocaleString('en-US')} trash ${plural(n, 'entry is', 'entries are')} younger than ${age}, so gc leaves ${plural(n, 'it', 'them')} for now.`,
-    /** du listed the trash and found no entry. */
-    trashEmpty: 'Nothing in the trash.',
+    /** du reported no trash entry. Not "empty": an unreadable trash directory also reports 0. */
+    trashEmpty: 'No trash entries reported.',
     /** No du reply with trash counts yet (still waiting, or it failed). */
     trashUnavailable: 'Trash measurements are not available yet.',
     details: 'Details',

@@ -348,7 +348,7 @@ export function StorageBlock({ v, showTrash = true }: { v: StorageView; showTras
   );
 }
 
-/** What gc may empty, from du's trash counts; a measured empty trash says so. */
+/** What gc may empty, from du's trash counts; zero entries says only that none were reported. */
 function TrashBlock({ trash }: { trash: StorageView['trash'] }) {
   const s = t.storage;
   if (!trash) return null;

@@ -1080,7 +1080,7 @@ the LongHold chip. Transient deferrals beside that hold appear as `N deferred`; 
 require fresh session data. A deferral chip names one session; the repo's other transient
 deferrals appear on it as `N more deferred`, and its tooltip names each
 (`Also waiting: s-… (changed during move).`). These chips name a session by its ticket when
-the sessions reply knows it, else by its id. A LongWait chip says the current
+the sessions reply knows it, else by its short id. A LongWait chip says the current
 attempt is waiting and is shown only below ten minutes; older entries remain in the modal.
 
 ### Storage and size scans
@@ -1128,7 +1128,8 @@ preserved when deciding which bounds are available. No daemon (0.2.2 or P-b) rep
 accuracy of the cumulative sum (`savings.cumulative`), so the modal never shows a numeric
 cumulative savings bound, even when current figures are exact; it keeps recorded-session
 counts, removed/unmeasured counts and creation/copy timing. Trash gives its entry counts
-and eligibility, `Nothing in the trash.` when du measured it empty, and
+and eligibility, `No trash entries reported.` when du reports zero entries (not "empty":
+du also reports zero for a trash directory it could not read), and
 `Trash measurements are not available yet.` only while du has given no trash counts. The
 scan section shows
 done/queued counts and historical measuring errors on 0.2.2, or active/done/queued counts and

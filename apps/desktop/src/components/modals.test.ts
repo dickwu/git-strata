@@ -233,6 +233,10 @@ describe('daemon modal content', () => {
     });
     expect(trashOf(empty)).toContain(daemonCopy.storage.trashEmpty);
     expect(trashOf(empty)).not.toContain(daemonCopy.storage.trashUnavailable);
+    // nits r1 Codex B1: du also reports 0 entries for a trash directory it could not read
+    // (du.rs names() -> unlisted), so zero must not be presented as a proven empty trash.
+    expect(trashOf(empty)).toContain('No trash entries reported.');
+    expect(trashOf(empty)).not.toMatch(/nothing in the trash|trash is empty/i);
     expect(trashOf(incidentDu())).toContain('1,796 trash entries older than 1 h can be emptied by');
     expect(trashOf(incidentDu())).not.toContain(daemonCopy.storage.trashEmpty);
   });
