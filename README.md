@@ -937,7 +937,8 @@ the daemon.
 `data.scan` reports the background pass: `running`, `started`, `active` (units
 being measured now), `done`, `queued`, `full`, `last_full`, `failed` (every
 failed measurement) and `unresolved` (one `{unit, error, at}` per unit whose
-last measurement failed, dropped once that unit is measured or gone).
+last measurement failed, dropped once that unit is measured or confirmed gone;
+a directory that cannot be read keeps the entries of the units under it).
 `daemon status` carries `running`, `active`, `queued`, `done`, `full` and
 `unresolved_n` (the length of `unresolved`) as `data.scan`.
 

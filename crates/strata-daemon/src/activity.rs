@@ -153,7 +153,8 @@ impl Activity {
             "origin": self.origin,
             "repo": self.repo,
             "session": self.session,
-            "started": strata_types::serde_rfc3339::format(&self.started).unwrap_or_default(),
+            // Null, like the other new timestamps, if it cannot be written.
+            "started": strata_types::serde_rfc3339::format(&self.started).ok(),
             "elapsed_ms": ms(now.saturating_duration_since(self.started_at)),
             "step_elapsed_ms": ms(now.saturating_duration_since(self.step_at)),
         });
@@ -497,5 +498,21 @@ mod tests {
             "{a}"
         );
         assert_eq!(a["origin"], "background");
+    }
+
+    /// status-bar §12.6: `started` is RFC 3339, or null (never `""`) when
+    /// the time cannot be written, like the other new timestamps.
+    #[test]
+    fn started_is_rfc3339_or_null() {
+        let mut a = Activity::new(Kind::Publish, Some(rn("tool")), None);
+        let now = Instant::now();
+        let v = a.json(1, now);
+        let started = v["started"].as_str().unwrap();
+        assert!(
+            strata_types::serde_rfc3339::parse(started).is_ok(),
+            "{started}"
+        );
+        a.started = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+        assert!(a.json(1, now)["started"].is_null());
     }
 }

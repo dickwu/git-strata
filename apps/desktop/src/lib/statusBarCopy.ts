@@ -59,14 +59,9 @@ export const statusBarCopy = {
       `A request is waiting${repo ? ` on ${repo}` : ''} (current attempt ${elapsed})`,
     abnormalHold: (repo: string, method: string, elapsed: string) =>
       `${repo} locked by ${method} for ${elapsed}`,
-    reportedHold: (
-      repo: string,
-      method: string,
-      elapsed: string,
-      origin?: string,
-      session?: string
-    ) =>
-      `${repo} locked for ${elapsed} by ${method === 'catch_up' ? 'auto-rebase' : method}${session ? ` (${session})` : ''}${origin ? ` · ${origin}` : ''}`,
+    /** P-b: `session` is the ticket when known, else a short id (§3.1). */
+    reportedHold: (repo: string, method: string, elapsed: string, session?: string) =>
+      `${repo} locked for ${elapsed} by ${method === 'catch_up' ? 'auto-rebase' : method}${session ? ` (${session})` : ''}`,
   },
   activity: {
     move: (cause: string, session: string) =>
@@ -82,7 +77,7 @@ export const statusBarCopy = {
     rollout: (done: number, total: number) => `Rolling out deps ${done}/${total}`,
     base: 'Building base',
     create: (session: string | undefined, repos: number) =>
-      `Creating session${session ? ` ${session}` : ''} · ${repos} ${repos === 1 ? 'repo' : 'repos'}`,
+      `Creating session${session ? ` ${session}` : ''}${repos > 0 ? ` · ${repos} ${repos === 1 ? 'repo' : 'repos'}` : ''}`,
     install: 'Installing dependencies',
     publish: (repo: string) => `Publishing ${repo}`,
     push: (repo: string) => `Pushing ${repo}`,
@@ -110,6 +105,8 @@ export const statusBarCopy = {
     scope
       ? `${n} ${n === '1' ? 'request' : 'requests'} got Busy · ${scope}${holder ? ` (${holder})` : ''}`
       : 'Some requests got Busy',
+  /** The ring (50 entries) dropped a reply younger than ten minutes: no per-repo count. */
+  busyTruncated: '50+ requests got Busy',
   free: (amount: string) => `${amount} free`,
   lowSpace: (amount: string) => `Data volume is low on space · ${amount} free`,
   saved: (amount: string, measuring: boolean) =>

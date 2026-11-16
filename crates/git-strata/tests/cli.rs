@@ -732,8 +732,10 @@ fn daemon_status_passes_the_status_bar_fields_through() {
                 .contains(&json!("daemon_status.activity")),
             "{ds}"
         );
+        // This daemon has the feature, so it sends all seven and the CLI passes them on.
         for key in KEYS {
-            assert_eq!(ds.get(key).is_some(), raw.get(key).is_some(), "{key}: {ds}");
+            assert!(raw.get(key).is_some(), "{key}: {raw}");
+            assert!(ds.get(key).is_some(), "{key}: {ds}");
         }
         // The in-process daemon is this test process.
         assert_eq!(ds["pid"], json!(std::process::id()), "{ds}");

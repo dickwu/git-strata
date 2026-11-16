@@ -628,7 +628,7 @@ fn pb_syncing_tooltip_uses_oldest_move_and_no_ticket_or_session() {
     assert_eq!(m.icon, Icon::Syncing);
     assert_eq!(
         m.tooltip,
-        "GIT STRATA: Bringing in newer changes: tool (2 min)"
+        "GIT STRATA: Bringing in newer changes: tool, 2 min"
     );
     assert_eq!(m.status_line, "Daemon running, 1 session");
     let d = s.daemon_status.value.as_mut().unwrap();
@@ -648,7 +648,7 @@ fn pb_syncing_tooltip_uses_oldest_move_and_no_ticket_or_session() {
         .extend([older, publish]);
     s.sessions.value.as_mut().unwrap()["sessions"][0]["status"]["manifest"]["ticket"] =
         json!("secret ticket");
-    let expected = "GIT STRATA: Bringing in newer changes: older (3 min)";
+    let expected = "GIT STRATA: Bringing in newer changes: older, 3 min";
     assert_eq!(model_at(&s, stamp(now)).tooltip, expected);
     s.daemon_status.value.as_mut().unwrap()["activity"]
         .as_array_mut()
@@ -663,11 +663,8 @@ fn pb_move_tooltip_has_three_second_debounce_and_feature_gate() {
     let now = 2_000;
     for (millis, expected) in [
         (2_999, "GIT STRATA: Bringing in newer changes"),
-        (3_000, "GIT STRATA: Bringing in newer changes: tool (3 s)"),
-        (
-            60_000,
-            "GIT STRATA: Bringing in newer changes: tool (1 min)",
-        ),
+        (3_000, "GIT STRATA: Bringing in newer changes: tool, 3 s"),
+        (60_000, "GIT STRATA: Bringing in newer changes: tool, 1 min"),
     ] {
         let mut s = pb_snapshot(now);
         activate(&mut s, Icon::Syncing);

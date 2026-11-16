@@ -22,7 +22,13 @@
  * so that bound is unavailable too.
  */
 import { daemonCopy as t } from './daemonCopy';
-import { hasActivityStatus, recentBusy, type Severity, type WarningView } from './statusBar';
+import {
+  activityList,
+  hasActivityStatus,
+  recentBusy,
+  type Severity,
+  type WarningView,
+} from './statusBar';
 import type { DaemonActivity, DaemonStatus, DuReply, DuScan } from './types';
 export { volumeView } from './statusBar';
 
@@ -492,7 +498,7 @@ const longestFirst = (a: { elapsedMs: number | null }, b: { elapsedMs: number | 
 export function activityView(s: DaemonStatus, now: number): ActivityView {
   const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
   return {
-    work: hasActivityStatus(s) ? (s.activity ?? []) : [],
+    work: hasActivityStatus(s) ? activityList(s) : [],
     holds: list(s.holds)
       .map((h) => holdRow(h, now))
       .filter((r) => r !== null)

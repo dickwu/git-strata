@@ -504,7 +504,8 @@ export function sessionDetail(
   return { row: row(s, daemon), root: s.status.manifest.root, repos, checkpoints };
 }
 
-export function daemonView(s: DaemonStatus, now = Date.now()): DaemonView {
+/** `sessions`, when given, names a P-b LongHold's session by its ticket. */
+export function daemonView(s: DaemonStatus, now = Date.now(), sessions?: StatusReply): DaemonView {
   return {
     legacy: !('api' in s),
     version: typeof s.version === 'string' ? s.version : null,
@@ -514,7 +515,9 @@ export function daemonView(s: DaemonStatus, now = Date.now()): DaemonView {
       .filter(([, n]) => n > 0)
       .map(([repo, n]) => ({ repo, n }))
       .sort((a, b) => b.n - a.n || a.repo.localeCompare(b.repo)),
-    warnings: (Array.isArray(s.warnings) ? s.warnings : []).map((w) => classifyWarning(w, now, s)),
+    warnings: (Array.isArray(s.warnings) ? s.warnings : []).map((w) =>
+      classifyWarning(w, now, s, sessions)
+    ),
   };
 }
 

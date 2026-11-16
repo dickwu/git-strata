@@ -583,7 +583,7 @@ R2 old-tree worker: startup/periodic half-retired sweeps and queued items use tr
 
 **缓存**。`<root>/daemon/du/cache.json`（原子写：临时文件加改名），每个单元记 inode、mtime（ns）、`as_of_ms`（开始量的时刻）、`took_ms`。schema 钉死（`user_version = 1`），所以不进 store.db，放旁车文件 [实现时补的决定]。新鲜的判定：store.db* 每次调用当场量（Live，便宜）；其余单元 inode 或 mtime 变了、或超过 TTL 就过期。TTL：不可变的（`bases`、`deps` 下不以 `.` 开头的快照、blob 分片、trash 条目）24 h，可变的（`store/tmp`、会话、点目录）10 min。目录的 mtime 只反映直接条目，深处的改动要靠 TTL 兜底，所以会话的数字最多旧 10 分钟。
 
-**回复**。`du` 只读缓存、立即返回（目标约 1 s）：每个分组的数字带 `as_of`（参与的单元里最旧的那个）、`units`、`stale`、`pending`、`complete`。过期与缺失的单元排进队列，由后台线程（`strata-du`，4 个工作线程，`setiopolicy_np` 设 utility 级 I/O）量完写回缓存；`refresh: true` 把全部单元排进去。`scan` 报 `running`、`started`、`active`（正在量的单元数）、`done`、`queued`、`full`、`failed`、`unresolved`、`last_full`。`failed` 是历史（每次失败一条）；`unresolved` 每个单元至多一条 `{unit, error, at}`（最近一次的错误），该单元量成功或不再存在时删掉。
+**回复**。`du` 只读缓存、立即返回（目标约 1 s）：每个分组的数字带 `as_of`（参与的单元里最旧的那个）、`units`、`stale`、`pending`、`complete`。过期与缺失的单元排进队列，由后台线程（`strata-du`，4 个工作线程，`setiopolicy_np` 设 utility 级 I/O）量完写回缓存；`refresh: true` 把全部单元排进去。`scan` 报 `running`、`started`、`active`（正在量的单元数）、`done`、`queued`、`full`、`failed`、`unresolved`、`last_full`。`failed` 是历史（每次失败一条）；`unresolved` 每个单元至多一条 `{unit, error, at}`（最近一次的错误），该单元量成功或确认不再存在时删掉。确认不再存在指单元根的 `lstat` 得到 `ENOENT`，或者读得了的目录里已经没有它。读不了的目录（`EACCES`、`EIO` 等）证明不了什么，它下面单元的条目和缓存的数字都留着；单元根的 `lstat` 遇到 `ENOENT` 以外的错误，算这个单元又失败一次，记进 `failed` 和 `unresolved`，缓存的数字不动。
 
 **trash**。`store.trash` 另带 `entries`、`eligible{entries, reclaim_min, reclaim_max}`（名字里的时刻早于 1 h 的条目；min 是 private 之和，max 是 allocated 之和）、`young`、`floor_secs`、`gc: "git-strata gc"`。`gc_trash` 还会拒绝被点名的条目，`du` 不算这一项，所以 eligible 是上界。
 
@@ -1325,8 +1325,8 @@ that lists it sends every key below on every `daemon_status` reply (empty or
 null where stated), and a client treats the reply as one of this step only when
 the string is present. No method and no request field were added, and no CLI
 command requires the feature. Timestamps are RFC 3339 strings
-(`strata_types::serde_rfc3339`); durations are integer milliseconds from a
-monotonic clock. Every key is read from memory (a cache, counters or the
+(`strata_types::serde_rfc3339`), or null for a time that cannot be written
+(before 1970); durations are integer milliseconds from a monotonic clock. Every key is read from memory (a cache, counters or the
 activity registry), never from the file system or the store, and none waits for
 `du`'s `scan` or `cache` mutex.
 
@@ -1340,7 +1340,8 @@ activity registry), never from the file system or the store, and none waits for
   `checkpoint`, `prepare`, `recheck`, `swap`, `pin`, `record`, `old_tree` or
   null), `deps_rollout` (`sessions` in total and `done`; `session` is the child
   being moved, or null), `base_build` (`tree`), `session_create` (`repos`,
-  `step`; `repo` is null and `session` stays null until the id is minted),
+  `step`; `repo` is null, and `session` is the new session's id from the
+  start: the id is minted before the activity begins),
   `deps_install` (`proposal`), `publish` and `push`. For a kind without steps
   `step_elapsed_ms` equals `elapsed_ms`.
 - `holds[]` items gain `origin` and `elapsed_ms`. Their `session` is the subject
@@ -1377,7 +1378,11 @@ activity registry), never from the file system or the store, and none waits for
 
 `du`'s `scan` gains `active` and `unresolved` (§5.12). `unresolved` holds one
 `{unit, error, at}` per unit whose last measurement failed and drops it when the
-unit is measured or disappears; `failed` stays the history of every failure.
+unit is measured or confirmed gone: its root's `lstat` gives `ENOENT`, or a
+listing that could read its directory no longer has it. A directory that cannot
+be listed (`EACCES`, `EIO` …) proves nothing, so the units under it keep their
+entries and cached figures; an `lstat` failing with another error is one more
+failure of that unit. `failed` stays the history of every failure.
 
 `git-strata daemon status` copies `activity`, `busy`, `volume`, `scan`,
 `version`, `pid` and `started` into `data` when the daemon sent them, and
@@ -1388,7 +1393,9 @@ Code: `busy.rs` (`BusyLog`, a leaf mutex taken after the handler has returned),
 `du.rs` (copied while the `scan` mutex is held, so each counter follows the
 scan's changes in order; a reader may see the six a moment apart). Tests: `tests/status_bar.rs`, `busy::tests`, `volume::tests`,
 `du::tests::counts_mirror_the_scan_state`,
-`du::tests::unresolved_is_one_entry_per_unit_until_measured_or_gone` and
+`du::tests::unresolved_is_one_entry_per_unit_until_measured_or_gone`,
+`du::tests::a_failed_lstat_keeps_the_unit_unresolved`,
+`du::tests::an_unlistable_directory_keeps_its_units` and
 `tests/rpc.rs::features_keep_their_order_and_append_daemon_status_activity`.
 
 ## Status bar: holder origin, activity and LongHold
