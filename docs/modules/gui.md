@@ -522,7 +522,7 @@ First matching row wins:
 | 4 | Waiting | filled circle | `#8A4B00` / `#FFB340` | N waiting for you |
 | 5 | Conflict | filled diamond | `#7A35A6` / `#C99BF2` | N repos need an agent (distinct repositories; singular: 1 repo needs an agent) |
 | 5a | Checking (partial) | ellipsis | neutral, 55% | Some session details are unavailable |
-| 6 | Syncing | ring | `#245A74` / `#6FB3D2` | Bringing in newer changes; P-b oldest move: Bringing in newer changes: tool (2 min); 0.2.2 fallback: tool, 2 min (oldest catch-up hold) |
+| 6 | Syncing | ring | `#245A74` / `#6FB3D2` | Bringing in newer changes; naming the oldest P-b move, else the oldest catch-up hold: Bringing in newer changes: tool, 2 min |
 | 7 | Normal | glyph only | neutral | All clear, N sessions |
 
 Neutral is black at 85% on light bars, white at 88% on dark bars. Palette is independent of
@@ -1005,7 +1005,7 @@ daemon modal. Chip targets open the relevant modal section, waiting list or sess
 | 1 | Red (`--danger`) | Critically low volume space, unavailable data volume guidance, file-handle pressure, Error-class warnings (down/exhaustion are shown once in the daemon trigger) |
 | 2 | Amber (Waiting palette) | Waiting for you |
 | 3 | Purple (Conflict palette) | Repositories needing an agent for conflicts |
-| 4 | Amber (Waiting palette) | Degraded states: Busy replies, abnormal holds, activity over 30 min, current long waits, actionable auto-rebase failures, config/fetch failures, published but not pushed, unresolved measuring errors, low space, version mismatch |
+| 4 | Amber (Waiting palette) | Degraded states: Busy replies, abnormal holds (every P-b LongHold; on 0.2.2 a request hold or a background hold past 30 min), current long waits, actionable auto-rebase failures, config/fetch failures, published but not pushed, unresolved measuring errors, low space, version mismatch |
 | 5 | Blue (Syncing palette) | Normal background work |
 | 6 | Muted | Size-scan counts and partial details |
 
@@ -1137,11 +1137,15 @@ base · tool`, `Creating session gwd-9500 · 3 repos`, `Installing dependencies 
 knows it, else a short id. Elapsed time comes from the daemon's monotonic milliseconds;
 the existing five-second UI clock advances it between health replies. Repo waiting counts
 and fresh session pending counts append `N waiting` / `N pending`. The tooltip gives the
-move phase or creation step and explains the 30-second Busy refusal/retry rule.
+move phase or creation step and explains the 30-second Busy refusal/retry rule, except for a
+dependency install, which holds no repo lock.
 
-Activity turns amber at 30 min. Every LongHold from P-b is already abnormal and is amber,
-with holder origin/session details, including publish/push request holds; no LongHold is
-red. A plain `origin: background` hold over 10 s with no registry activity or LongHold
+Activity chips stay blue however long the work runs. The daemon judges what is abnormal (a
+move or rollout step past 30 min, a background hold past 30 min, a request hold past 30 s,
+publish/push included) and reports it as a LongHold, so every LongHold from P-b is amber:
+`tool locked for 31 min by auto-rebase (gwd-9492)`, naming the session by ticket when the
+sessions reply knows it, else by short id, and never by origin. No LongHold is red. A plain
+`origin: background` hold over 10 s with no registry activity or LongHold
 gets neutral blue `tool busy with daemon work`. These states do not select a tray icon.
 The modal lists registry work, locks and queues, as well as Busy totals/recent replies.
 
@@ -1156,15 +1160,17 @@ The right side shows sampled volume free space. Amber is below `min(15% of size,
 red is below `min(5% of size, 20 GB)` (decimal GB thresholds). A level clears only above
 110% of its threshold. The component retains the previous level outside the pure model,
 including across a stale/missing sample. `volume.as_of` over 60 s old shows `—` without a
-low-space chip. Missing/null volume has no numeric free-space fact. The modal shows free,
+low-space chip. Ages are measured from the later of the five-second UI clock and the reply's
+arrival, so a sample, Busy reply or daemon start newer than the last tick is current, never stale. Missing/null volume has no numeric free-space fact. The modal shows free,
 size and sample time with the APFS caveat: this space is shared, excludes purgeable space,
 and can differ from Finder; size minus free is not git-strata usage. Low-space chips land
 on Trash's counts and human gc command, with no promise of bytes reclaimed.
 
 P-b scan chips use the lightweight `daemon_status.scan` counters, so they do not need du:
 `Measuring storage · 412 done · 4 in progress · 136 queued`. They appear only while running
-and for a full pass or a pass older than 60 s. The fixed status contract has no start time;
-use `du.scan.started` when available, otherwise show the running scan. Unresolved count
+and for a full pass or a pass older than 60 s. The status contract has no start time, and
+`du.scan.started` may be an earlier pass's, so the App times a pass from the first reply it saw
+running, until a reply shows none running (never before the daemon's `started`). Unresolved count
 comes from `scan.unresolved_n`, falling back to `du.scan.unresolved.length` if not reported.
 Only current unresolved failures create amber `Couldn't measure N items` chips; the modal
 shows unresolved unit/error/time rows. `Recent measuring errors` remains an old-daemon
