@@ -59,11 +59,15 @@ git-strata daemon start
 
 Set `[paths] root` in `config.toml` to a directory on the same APFS volume as
 your repos (the default `~/.strata` only works when they live on the startup
-volume). After `brew upgrade git-strata`, run `git-strata daemon stop` then
-`git-strata daemon start`. macOS may ask again for the daemon's access to a
-removable volume after an upgrade (see [docs/release.md](docs/release.md)). To uninstall:
-`git-strata daemon stop`, remove `~/Library/LaunchAgents/com.gwd.git-stratad.plist`,
-then `brew uninstall git-strata` (otherwise launchd keeps restarting a missing binary).
+volume). After `brew upgrade git-strata`, restart the existing agent with
+`launchctl kickstart -k gui/$(id -u)/com.gwd.git-stratad`, check
+`git-strata daemon status`, then run `npx skills update git-strata -g`. macOS
+may ask again for the daemon's access to a removable volume after an upgrade
+(see [docs/release.md](docs/release.md)). To uninstall, run
+`git-strata daemon stop`; only after it succeeds, remove
+`~/Library/LaunchAgents/com.gwd.git-stratad.plist`, then `brew uninstall git-strata`
+(otherwise launchd keeps restarting a missing binary). If stop fails or times
+out, do not continue.
 
 Use the single agent `com.gwd.git-stratad` above, not `brew services`: a
 second (`homebrew.mxcl.*`) agent would run a second daemon on the same socket
