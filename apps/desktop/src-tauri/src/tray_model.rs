@@ -359,7 +359,7 @@ fn syncing_description(s: &Snapshot, now: SystemTime) -> String {
             .max_by_key(|(_, age)| *age)
     });
     if let Some((repo, age)) = moving {
-        return format!("Bringing in newer changes: {repo} ({})", age_text(age));
+        return format!("Bringing in newer changes: {repo}, {}", age_text(age));
     }
     let oldest = s.daemon_status.value.as_ref().and_then(|d| {
         let holds = d["holds"].as_array().into_iter().flatten();

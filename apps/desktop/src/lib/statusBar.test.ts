@@ -10,7 +10,9 @@ import {
   MAX_CHIPS,
   capChips,
   classifyWarning,
+  observeScanRun,
   statusBarModel,
+  volumeView,
   type Chip,
   type StatusBarInput,
 } from './statusBar';
@@ -814,7 +816,30 @@ describe('P-b contract sources', () => {
     expect(activity(i)[0].text).toStartWith('Creating session · 1 repo · 2 min');
   });
 
-  test('registry debounce, monotonic elapsed, and the 30 minute boundary', () => {
+  test('a dependency install holds no repo lock: its tooltip promises no wait', () => {
+    const i = pbi();
+    i.daemon.data!.activity = [work({ kind: 'deps_install', proposal: null })];
+    expect(activity(i)[0].tooltip).toBeUndefined();
+    i.daemon.data!.activity = [work({ kind: 'base_build', tree: null })];
+    expect(activity(i)[0].tooltip).toContain('may wait for this work');
+  });
+
+  test('malformed activity renders safely: no repos, no usable elapsed time', () => {
+    const i = pbi();
+    i.daemon.data!.activity = [work({ kind: 'session_create', repo: null, step: 7 })];
+    expect('repos' in i.daemon.data!.activity[0]).toBe(false);
+    expect(activity(i)[0].text).toBe('Creating session s-pb9492 · 2 min');
+    i.daemon.data!.activity = [
+      work({ elapsed_ms: undefined }),
+      work({ id: 2, elapsed_ms: 'x' }),
+      null as unknown as DaemonActivity,
+    ];
+    expect(allChips(i).some((c) => c.text.includes('NaN'))).toBe(false);
+    // Without usable work, the background hold still says the repo is busy.
+    expect(activity(i).map((c) => c.text)).toEqual(['tool busy with daemon work · 2 waiting']);
+  });
+
+  test('registry debounce and monotonic elapsed; work past 30 minutes stays blue', () => {
     const i = pbi();
     i.daemon.data!.activity![0].started = new Date(NOW - DAY).toISOString();
     i.daemon.data!.activity![0].elapsed_ms = 2999;
@@ -822,8 +847,48 @@ describe('P-b contract sources', () => {
     i.daemon.data!.activity![0].elapsed_ms = 3000;
     expect(activity(i)[0]).toMatchObject({ sev: 'blue', rank: 5 });
     i.daemon.data!.activity![0].elapsed_ms = BACKGROUND_HOLD_MAX_MS;
-    expect(activity(i)[0]).toMatchObject({ sev: 'amber', rank: 4 });
+    expect(activity(i)[0]).toMatchObject({ sev: 'blue', rank: 5 });
     expect(activity(i)[0].text).toContain('30 min');
+  });
+
+  test.each([
+    [
+      'a rollout with a short current step',
+      { kind: 'deps_rollout', sessions: 12, done: 9, step_elapsed_ms: 2 * MINUTE },
+      'Rolling out deps 9/12 · tool · 40 min',
+    ],
+    [
+      'a dependency install (no lock)',
+      { kind: 'deps_install', proposal: null },
+      'Installing dependencies · tool · 40 min',
+    ],
+  ])('P-b %s is blue at 40 min: only the daemon LongHold is amber', (_, fields, text) => {
+    const i = pbi();
+    i.daemon.data!.activity = [
+      work({
+        ...fields,
+        elapsed_ms: 40 * MINUTE,
+        started: new Date(NOW - 40 * MINUTE).toISOString(),
+      }),
+    ];
+    expect(activity(i)).toEqual([
+      expect.objectContaining({ sev: 'blue', rank: 5, text: expect.stringContaining(text) }),
+    ]);
+    expect(allChips(i).some((c) => c.id.startsWith('warning:LongHold'))).toBe(false);
+  });
+
+  test('a move whose step passed 30 min: the daemon LongHold is the one amber chip', () => {
+    const i = pbi();
+    i.daemon.data!.activity![0].elapsed_ms = 31 * MINUTE;
+    i.daemon.data!.activity![0].step_elapsed_ms = 31 * MINUTE;
+    i.daemon.data!.warnings = [
+      hold('catch_up', 31 * MINUTE, { origin: 'background', session: 's-pb9492' }),
+    ];
+    i.daemon.data!.busy!.recent = [];
+    i.daemon.data!.scan!.unresolved_n = 0;
+    const amber = allChips(i).filter((c) => c.sev === 'amber');
+    expect(amber.map((c) => c.text)).toEqual(['tool locked for 31 min by auto-rebase (s-pb9492)']);
+    expect(activity(i)).toEqual([expect.objectContaining({ sev: 'blue', rank: 5 })]);
   });
 
   test('oldest parent work covers child activities and transient deferrals in the same repo', () => {
@@ -867,7 +932,7 @@ describe('P-b contract sources', () => {
   });
 
   test.each(['catch_up', 'publish', 'push'])(
-    'P-b %s LongHold is abnormal amber, with origin/session detail',
+    'P-b %s LongHold is abnormal amber and names the session by ticket, without internal words',
     (method) => {
       const i = pbi();
       i.daemon.data!.warnings = [
@@ -876,10 +941,18 @@ describe('P-b contract sources', () => {
           session: 's-pb9492',
         }),
       ];
-      const chip = allChips(i).find((c) => c.id.startsWith('warning:LongHold'))!;
-      expect(chip).toMatchObject({ sev: 'amber', rank: 4 });
-      expect(chip.text).toContain('(s-pb9492)');
-      expect(chip.text).toContain(method === 'catch_up' ? 'background' : 'request');
+      const holder = method === 'catch_up' ? 'auto-rebase' : method;
+      const chip = () => allChips(i).find((c) => c.id.startsWith('warning:LongHold'))!;
+      expect(chip()).toMatchObject({
+        sev: 'amber',
+        rank: 4,
+        text: `tool locked for 1 min by ${holder} (s-pb9492)`,
+      });
+      i.sessions = fx<StatusReply>('status_all');
+      i.sessions.sessions[0].status.manifest.id = 's-pb9492';
+      i.sessions.sessions[0].status.manifest.ticket = 'gwd-9492';
+      expect(chip().text).toBe(`tool locked for 1 min by ${holder} (gwd-9492)`);
+      expect(chip().text).not.toMatch(/request|background/);
     }
   );
 
@@ -971,21 +1044,73 @@ describe('P-b contract sources', () => {
       "Couldn't measure 1 item"
     );
     i.daemon.data!.scan!.unresolved_n = 0;
-    i.daemon.data!.scan!.full = false;
-    // There is no start time in daemon_status.scan: show running progress until du supplies it.
-    expect(allChips(i).some((c) => c.id === 'scan')).toBe(true);
     i.du = fx<DuReply>('du');
-    i.du.scan = { ...pbFixture.duScan, started: new Date(NOW - 60_000).toISOString() };
-    expect(allChips(i).some((c) => c.id === 'scan')).toBe(false);
+    i.du.scan = { ...pbFixture.duScan };
     expect(allChips(i).some((c) => c.id === 'scan-unresolved')).toBe(false);
-    i.du.scan.started = new Date(NOW - 60_001).toISOString();
-    expect(allChips(i).some((c) => c.id === 'scan')).toBe(true);
     i.daemon.data!.scan!.running = false;
     expect(allChips(i).some((c) => c.id === 'scan')).toBe(false);
     delete i.daemon.data!.scan;
     expect(allChips(i).find((c) => c.id === 'scan-unresolved')?.text).toBe(
       "Couldn't measure 1 item"
     );
+  });
+
+  test('P-b scan chip: a full pass at once, another only 60 s after the App first saw it', () => {
+    const i = pbi();
+    const scan = () => allChips(i).some((c) => c.id === 'scan');
+    i.daemon.data!.scan!.full = false;
+    // daemon_status.scan has no start time: not yet seen running for long.
+    expect(scan()).toBe(false);
+    i.scanSince = NOW - 60_000;
+    expect(scan()).toBe(false);
+    i.scanSince = NOW - 60_001;
+    expect(scan()).toBe(true);
+    // du's start time may be an earlier pass's: it does not age this one.
+    i.scanSince = NOW - 1000;
+    i.du = fx<DuReply>('du');
+    i.du.scan = { ...pbFixture.duScan, full: false, started: new Date(NOW - DAY).toISOString() };
+    expect(scan()).toBe(false);
+    i.daemon.data!.scan!.full = true;
+    expect(scan()).toBe(true);
+  });
+
+  test('the first sighting of a running pass lasts until a reply says none runs', () => {
+    const s = structuredClone(pbFixture.daemon) as DaemonStatus;
+    const started = Date.parse(s.started!);
+    expect(observeScanRun(undefined, s, NOW)).toBe(NOW);
+    expect(observeScanRun(NOW - 5000, s, NOW)).toBe(NOW - 5000);
+    // A pass of a restarted daemon is no older than that daemon.
+    expect(observeScanRun(started - MINUTE, s, NOW)).toBe(started);
+    s.scan!.running = false;
+    expect(observeScanRun(NOW - 5000, s, NOW)).toBeUndefined();
+    s.scan!.running = true;
+    s.features = ['status.upstream'];
+    expect(observeScanRun(NOW - 5000, s, NOW)).toBeUndefined();
+    expect(observeScanRun(NOW - 5000, undefined, NOW)).toBeUndefined();
+  });
+
+  test('a reply newer than the 5 s clock is current: volume, Busy and restart', () => {
+    const i = pbi();
+    const v = i.daemon.data!.volume!;
+    v.size = 1e12;
+    v.free = 19e9;
+    // Sampled, and answered, after the component's last tick at NOW.
+    v.as_of = new Date(NOW + 3000).toISOString();
+    i.daemon.updatedAt = NOW + 4000;
+    i.daemon.data!.busy!.recent.forEach((e) => (e.at = new Date(NOW + 2000).toISOString()));
+    i.daemon.data!.started = new Date(NOW + 1000).toISOString();
+    const model = statusBarModel(i, NOW);
+    expect(model.right.free?.sev).toBe('red');
+    expect(model.right.free?.text).not.toBe('—');
+    expect(model.chips.find((c) => c.id === 'low-space')).toMatchObject({ rank: 1, sev: 'red' });
+    expect(busy(i).map((c) => c.text)).toEqual([
+      '3 requests got Busy · tool (auto-rebase of s-pb9492)',
+    ]);
+    expect(allChips(i).find((c) => c.id === 'restarted')?.text).toBe('Daemon restarted just now');
+    // Without the reply time, a sample a few seconds ahead of the clock is still fresh.
+    i.daemon.updatedAt = NOW;
+    expect(statusBarModel(i, NOW).right.free?.sev).toBe('red');
+    expect(volumeView(i.daemon.data, NOW)).toMatchObject({ stale: false, level: 'red' });
   });
 
   test('version mismatch and restart use existing identity source and RFC 3339 started', () => {

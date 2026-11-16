@@ -168,7 +168,7 @@ export function ActivityBlock({
                 {work.kind === 'session_create' && (
                   <>
                     {' '}
-                    · {work.repos.join(', ')}
+                    · {(Array.isArray(work.repos) ? work.repos : []).join(', ')}
                     {work.step ? ` · ${work.step}` : ''}
                   </>
                 )}
@@ -602,7 +602,7 @@ export function DaemonStatusContent({
   // Warnings and activity only from a live answer: a stale hold would keep "running".
   const data = live ? status.data : undefined;
   const f = status.data ? statusFacts(status.data, now) : null;
-  const warnings = data ? daemonView(data, now).warnings : [];
+  const warnings = data ? daemonView(data, now, sessions).warnings : [];
   const activity = data ? activityView(data, now) : null;
   const pb = hasActivityStatus(data);
   const volume = volumeView(data, now);

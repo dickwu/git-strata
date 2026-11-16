@@ -40,7 +40,11 @@ export const SEVERITY_ORDER: readonly Severity[] = ['red', 'amber', 'purple', 'b
 /** At most this many chips show in the bar; the rest collapse into "+N" (design §3.5). */
 export const MAX_CHIPS = 3;
 
-/** Background holds turn amber after this long (Q3/Q4: a fixed 30-minute cap). */
+/**
+ * 0.2.2 fallback: a background LongHold turns amber after this long (Q3/Q4: a fixed 30-minute
+ * cap, §11.3). A P-b daemon applies the cap itself and reports the result as a LongHold, so its
+ * activity chips stay blue (§3.1, §12.1).
+ */
 export const BACKGROUND_HOLD_MAX_MS = 30 * 60_000;
 
 /** Where a chip click lands. `modal` opens the daemon status modal at a section. */
@@ -97,6 +101,8 @@ export interface StatusBarInput {
   sessionsUpdatedAt?: number;
   deps: DepsList | undefined;
   du: DuReply | undefined;
+  /** P-b: epoch ms the App first saw the current scan pass running ({@link observeScanRun}). */
+  scanSince?: number;
   /** Local observations from existing daemonStatus completions, never a new daemon field. */
   health?: {
     timeouts: number;
@@ -140,7 +146,8 @@ export function volumeView(
   if (!v || !Number.isFinite(v.free) || !Number.isFinite(v.size) || v.free < 0 || v.size <= 0)
     return null;
   const sampled = timestamp(v.as_of);
-  const stale = sampled === undefined || sampled > now || now - sampled > 60_000;
+  // A sample newer than `now` (taken after the caller's last clock tick) is fresh.
+  const stale = sampled === undefined || age(sampled, now) > 60_000;
   const amber = Math.min(v.size * 0.15, 100_000_000_000);
   const red = Math.min(v.size * 0.05, 20_000_000_000);
   const level: SpaceLevel = stale
@@ -235,8 +242,16 @@ function catchUpSession(
   return candidates.length === 1 ? candidates[0].session : undefined;
 }
 
-/** Context enriches S1 only; the public two-argument classifier also works on isolated warnings. */
-function classify(w: unknown, now: number, daemon?: DaemonStatus): WarningView {
+/**
+ * Context enriches S1 only; the public two-argument classifier also works on isolated warnings.
+ * `sessions` turns a P-b LongHold's session id into its ticket.
+ */
+function classify(
+  w: unknown,
+  now: number,
+  daemon?: DaemonStatus,
+  sessions?: StatusReply
+): WarningView {
   const { kind, payload: p } = warningParts(w);
   const repo = string(p.repo);
   const session = string(p.session);
@@ -339,7 +354,7 @@ function classify(w: unknown, now: number, daemon?: DaemonStatus): WarningView {
       view.session =
         session ?? (!pb && method === 'catch_up' ? catchUpSession(p, daemon) : undefined);
       view.text = pb
-        ? t.warning.reportedHold(repo, method, elapsed, string(p.origin), view.session)
+        ? t.warning.reportedHold(repo, method, elapsed, sessionLabel(view.session, sessions))
         : newDaemon || !background
           ? t.warning.abnormalHold(repo, method, elapsed)
           : method === 'catch_up'
@@ -363,13 +378,23 @@ function sessionLabel(id: string | null | undefined, sessions: StatusReply | und
   );
 }
 
+/** `activity[]` entries that can be shown: objects with a finite `elapsed_ms`. */
+export function activityList(s: DaemonStatus): DaemonActivity[] {
+  return (Array.isArray(s.activity) ? s.activity : []).filter(
+    (a) => finite(record(a).elapsed_ms) !== undefined
+  );
+}
+
 function activityRepos(a: DaemonActivity): string[] {
-  return a.kind === 'session_create' ? a.repos : a.repo ? [a.repo] : [];
+  if (a.kind === 'session_create')
+    return Array.isArray(a.repos) ? a.repos.filter((r) => string(r) !== undefined) : [];
+  const repo = string(a.repo);
+  return repo ? [repo] : [];
 }
 
 function activityText(a: DaemonActivity, sessions: StatusReply | undefined): string | undefined {
   const session = sessionLabel(a.session, sessions);
-  const repo = a.repo ?? '';
+  const repo = string(a.repo) ?? '';
   switch (a.kind) {
     case 'move':
       return `${t.activity.move(a.cause, session ?? 'session')} · ${repo}`;
@@ -378,7 +403,7 @@ function activityText(a: DaemonActivity, sessions: StatusReply | undefined): str
     case 'base_build':
       return `${t.activity.base} · ${repo}`;
     case 'session_create':
-      return t.activity.create(session, a.repos.length);
+      return t.activity.create(session, activityRepos(a).length);
     case 'deps_install':
       return `${t.activity.install} · ${repo}`;
     case 'publish':
@@ -388,14 +413,18 @@ function activityText(a: DaemonActivity, sessions: StatusReply | undefined): str
   }
 }
 
-/** Display the outermost (oldest) work per repo; parent rollout/create entries cover children. */
+/**
+ * Display the outermost (oldest) work per repo; parent rollout/create entries cover children.
+ * Always blue: what is abnormal (a step past 30 min, a background hold past 30 min, a request
+ * hold past 30 s) the daemon reports as a LongHold, which is the amber chip (§3.1, §12.1, Q3).
+ */
 function reportedActivityChips(
   input: StatusBarInput,
   now: number,
   pending: Map<string, number>
 ): Chip[] {
   const daemon = input.daemon.data!;
-  const work = daemon.activity ?? [];
+  const work = activityList(daemon);
   const chips: Chip[] = [];
   const covered = new Set<string>();
   for (const a of [...work].sort((a, b) => b.elapsed_ms - a.elapsed_ms || a.id - b.id)) {
@@ -406,18 +435,18 @@ function reportedActivityChips(
     const text = activityText(a, input.sessions);
     if (!text) continue;
     repos.forEach((repo) => covered.add(repo));
-    const phase = a.kind === 'move' ? a.phase : a.kind === 'session_create' ? a.step : null;
+    const phase = string(a.kind === 'move' ? a.phase : a.kind === 'session_create' ? a.step : null);
     const waiting = repos.reduce((n, repo) => n + (daemon.repo_waiting?.[repo] ?? 0), 0);
     const queued = repos.reduce((n, repo) => n + (pending.get(repo) ?? 0), 0);
-    const long = elapsed >= BACKGROUND_HOLD_MAX_MS;
+    // A dependency install holds no repo lock: no request waits for it.
+    const locks = a.kind === 'deps_install' ? [] : repos.map(t.activity.tooltip);
     chips.push({
-      id: `activity:${a.repo ?? a.id}`,
-      sev: long ? 'amber' : 'blue',
-      rank: long ? 4 : 5,
+      id: `activity:${string(a.repo) ?? a.id}`,
+      sev: 'blue',
+      rank: 5,
       text: t.activity.counts(`${text} · ${t.elapsed(elapsed)}`, waiting, queued),
-      tooltip: [phase ? t.activity.phase(phase) : null, ...repos.map(t.activity.tooltip)]
-        .filter(Boolean)
-        .join(' '),
+      tooltip:
+        [phase ? t.activity.phase(phase) : null, ...locks].filter(Boolean).join(' ') || undefined,
       since: timestamp(a.started),
       target: { kind: 'modal', section: 'activity' },
     });
@@ -465,7 +494,8 @@ export function recentBusy(s: DaemonStatus, now: number): BusyEvent[] {
   if (!hasActivityStatus(s)) return [];
   return (s.busy?.recent ?? []).filter((e) => {
     const at = timestamp(e.at);
-    return at !== undefined && at <= now && now - at <= LONG_WAIT_MAX_MS;
+    // A reply newer than `now` (after the caller's last clock tick) is recent.
+    return at !== undefined && age(at, now) <= LONG_WAIT_MAX_MS;
   });
 }
 
@@ -484,7 +514,7 @@ function busyChips(s: DaemonStatus, sessions: StatusReply | undefined, now: numb
         id: 'busy:truncated',
         rank: 4,
         sev: 'amber',
-        text: '50+ requests got Busy',
+        text: t.busyTruncated,
         target: { kind: 'modal', section: 'activity' },
       },
     ];
@@ -513,8 +543,27 @@ function busyChips(s: DaemonStatus, sessions: StatusReply | undefined, now: numb
 }
 
 /** Classify an externally tagged daemon warning, including the 0.2.2 method-based fallback. */
-export function classifyWarning(w: unknown, now: number, daemon?: DaemonStatus): WarningView {
-  return classify(w, now, daemon);
+export function classifyWarning(
+  w: unknown,
+  now: number,
+  daemon?: DaemonStatus,
+  sessions?: StatusReply
+): WarningView {
+  return classify(w, now, daemon, sessions);
+}
+
+/**
+ * When the App first saw the current P-b scan pass running, kept across replies by the
+ * component (§11.4): `daemon_status.scan` has no start time, and `du.scan.started` may belong
+ * to an earlier pass. Cleared by a reply without a running pass; never before the daemon started.
+ */
+export function observeScanRun(
+  previous: number | undefined,
+  s: DaemonStatus | undefined,
+  updatedAt: number
+): number | undefined {
+  if (!hasActivityStatus(s) || s?.scan?.running !== true) return undefined;
+  return Math.max(previous ?? updatedAt, timestamp(s.started) ?? 0);
 }
 
 /** Sort by rank then severity, keep order otherwise; split at MAX_CHIPS. */
@@ -625,12 +674,18 @@ function daemonState(
   };
 }
 
-/** Build S1 from already-polled replies. Historical warnings never become fresh health evidence. */
+/**
+ * Build S1 from already-polled replies. Historical warnings never become fresh health evidence.
+ * `clock` is the caller's time, which ticks every 5 s: a reply that arrived after the last tick
+ * proves later time has passed, so its own timestamps (volume sample, Busy replies, daemon start)
+ * are never ahead of the model's `now`.
+ */
 export function statusBarModel(
   input: StatusBarInput,
-  now: number,
+  clock: number,
   prevSpaceLevel: SpaceLevel = 'muted'
 ): StatusBarModel {
+  const now = Math.max(clock, input.daemon.updatedAt);
   const health = daemonState(input.daemon, now, input.health);
   const daemon = input.daemon.data;
   const all: Chip[] = health.healthChip ? [health.healthChip] : [];
@@ -679,7 +734,7 @@ export function statusBarModel(
         target: modal('daemon'),
       });
     }
-    const warnings = (daemon.warnings ?? []).map((w) => classify(w, now, daemon));
+    const warnings = (daemon.warnings ?? []).map((w) => classify(w, now, daemon, input.sessions));
     const errors = warnings.filter((w) => w.cls === 'error').length;
     if (errors > 0)
       all.push({
@@ -796,7 +851,7 @@ export function statusBarModel(
     }
     const reported = pb ? reportedActivityChips(input, now, pending) : [];
     all.push(...reported, ...busyChips(daemon, input.sessions, now));
-    const reportedRepos = new Set((daemon.activity ?? []).flatMap(activityRepos));
+    const reportedRepos = new Set(activityList(daemon).flatMap(activityRepos));
     for (const [repo, w] of activities) {
       if (pb && (reportedRepos.has(repo) || reported.some((c) => c.id === `activity:${repo}`)))
         continue;
@@ -818,10 +873,12 @@ export function statusBarModel(
       });
     }
     const scan = pb ? daemon.scan : input.du?.scan;
-    const scanStarted = timestamp(input.du?.scan?.started);
+    // §11.4: only a full pass or one running over 60 s. P-b times the pass from the App's own
+    // first sighting (status has no start); 0.2.2 from du's start of the same pass.
+    const scanStarted = pb ? input.scanSince : timestamp(input.du?.scan?.started);
     if (
       scan?.running &&
-      (scan.full || (scanStarted !== undefined ? age(scanStarted, now) > 60_000 : pb))
+      (scan.full || (scanStarted !== undefined && age(scanStarted, now) > 60_000))
     ) {
       all.push({
         id: 'scan',
@@ -855,7 +912,7 @@ export function statusBarModel(
         target: modal('trash'),
       });
     const started = timestamp(daemon.started);
-    if (started !== undefined && started <= now && age(started, now) < LONG_WAIT_MAX_MS) {
+    if (started !== undefined && age(started, now) < LONG_WAIT_MAX_MS) {
       all.push({
         id: 'restarted',
         rank: 6,
