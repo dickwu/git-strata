@@ -12,8 +12,8 @@ use strata_apfs::RenameMode;
 use strata_overlay::{Base, Overlay, RebaseOptions, Rebased, WorkspaceRef};
 use strata_store::{Health, Lifecycle, MoveIntent, MoveState};
 use strata_types::{
-    BaseGen, CheckpointId, CheckpointReason, Code, CommitOid, OverlayEntry, RepoConfig, RepoId, RepoName, RepoPath,
-    SessionId, StrataError,
+    BaseGen, CheckpointId, CheckpointReason, Code, CommitOid, OverlayEntry, RepoConfig, RepoId,
+    RepoName, RepoPath, SessionId, StrataError,
 };
 
 use crate::carry::{Carried, Carry};
@@ -82,7 +82,10 @@ struct LiveMove<'s> {
 
 impl Drop for LiveMove<'_> {
     fn drop(&mut self) {
-        self.set.lock().unwrap_or_else(|x| x.into_inner()).remove(&self.key);
+        self.set
+            .lock()
+            .unwrap_or_else(|x| x.into_inner())
+            .remove(&self.key);
     }
 }
 
@@ -113,13 +116,19 @@ impl Sessions<'_> {
                 return Ok(name.clone());
             }
         }
-        Err(StrataError::new(Code::NoSuchRepo, format!("no configured repo has id {repo}"))
-            .with_detail(json!({ "repo_id": repo })))
+        Err(StrataError::new(
+            Code::NoSuchRepo,
+            format!("no configured repo has id {repo}"),
+        )
+        .with_detail(json!({ "repo_id": repo })))
     }
 
     /// The set of in-process moves, for status (§5.5 step 2.9).
     pub(crate) fn is_live_move(&self, session: &SessionId, repo: &RepoName) -> bool {
-        self.live_moves.lock().unwrap_or_else(|x| x.into_inner()).contains(&(session.clone(), repo.clone()))
+        self.live_moves
+            .lock()
+            .unwrap_or_else(|x| x.into_inner())
+            .contains(&(session.clone(), repo.clone()))
     }
 
     /// §5.7. The caller holds `repo`'s write lock and built `new_base`.
@@ -134,8 +143,24 @@ impl Sessions<'_> {
     }
 
     /// Dependency rollout/switch moves must preserve every base commit.
-    pub fn move_workspace_checked(&self, session: &SessionId, repo: &RepoId, new_base: BaseGen, head: CommitOid, require_descends: bool) -> Result<MoveReport> {
-        self.move_inner(session, repo, new_base, head, None, None, None, require_descends)
+    pub fn move_workspace_checked(
+        &self,
+        session: &SessionId,
+        repo: &RepoId,
+        new_base: BaseGen,
+        head: CommitOid,
+        require_descends: bool,
+    ) -> Result<MoveReport> {
+        self.move_inner(
+            session,
+            repo,
+            new_base,
+            head,
+            None,
+            None,
+            None,
+            require_descends,
+        )
     }
 
     /// [`Sessions::move_workspace`] that consumes the `rebase_pending` row
@@ -257,11 +282,19 @@ impl Sessions<'_> {
         // ---- Phase A: checks; nothing is written.
         // 1.
         let name = self.repo_name(repo)?;
+        // status-bar §11.2: the daemon's `move` activity, one per move, with
+        // its phase (`checkpoint`, the intent's phases, then `old_tree`).
+        let observed = crate::observe::begin(crate::observe::Work::Move {
+            repo: name.clone(),
+            session: session.clone(),
+        });
         if new_base.repo != name {
             return Err(invalid(
                 "repo_mismatch",
                 format!("the new base is of repo {}, not {name}", new_base.repo),
-                obj(json!({ "repo_id": repo, "name": name.as_str(), "base_repo": new_base.repo.as_str() })),
+                obj(
+                    json!({ "repo_id": repo, "name": name.as_str(), "base_repo": new_base.repo.as_str() }),
+                ),
             ));
         }
         let git = self.git(&name)?;
@@ -305,8 +338,11 @@ impl Sessions<'_> {
             ));
         }
         let row = rec.workspaces.get(&name).ok_or_else(|| {
-            StrataError::new(Code::Corrupt, format!("session {session} has no workspace row for {name}"))
-                .with_detail(json!({ "session": session.as_str(), "repo": name.as_str() }))
+            StrataError::new(
+                Code::Corrupt,
+                format!("session {session} has no workspace row for {name}"),
+            )
+            .with_detail(json!({ "session": session.as_str(), "repo": name.as_str() }))
         })?;
         if row.health == Health::Unknown {
             return Err(StrataError::new(
@@ -321,12 +357,13 @@ impl Sessions<'_> {
             })));
         }
         if agent.is_some() {
-            let open_move = self
-                .store
-                .move_intents(session)?
-                .iter()
-                .any(|i| i.repo == name && matches!(i.state, MoveState::Preparing | MoveState::Swapping));
-            let scene = rec.scene.is_some() || self.store.workspace_scene_live(session, &name, row.scene.is_some())?;
+            let open_move = self.store.move_intents(session)?.iter().any(|i| {
+                i.repo == name && matches!(i.state, MoveState::Preparing | MoveState::Swapping)
+            });
+            let scene = rec.scene.is_some()
+                || self
+                    .store
+                    .workspace_scene_live(session, &name, row.scene.is_some())?;
             if scene || open_move {
                 return Err(auto_defer(
                     "state",
@@ -336,8 +373,13 @@ impl Sessions<'_> {
         }
         for p in [ws.path.clone(), ws.path.join(".git")] {
             if !exists(&p) {
-                return Err(StrataError::new(Code::NoSuchPath, format!("{} is missing", p.display()))
-                    .with_detail(json!({ "path": p, "session": session.as_str(), "repo": name.as_str() })));
+                return Err(StrataError::new(
+                    Code::NoSuchPath,
+                    format!("{} is missing", p.display()),
+                )
+                .with_detail(
+                    json!({ "path": p, "session": session.as_str(), "repo": name.as_str() }),
+                ));
             }
         }
         let shadow_dir = self.shadow_dir(session, &name);
@@ -357,7 +399,10 @@ impl Sessions<'_> {
         if non_empty_dir(&restore)? {
             return Err(StrataError::new(
                 Code::Unknown,
-                format!("an interrupted restore left {}; see git-strata status {session}", restore.display()),
+                format!(
+                    "an interrupted restore left {}; see git-strata status {session}",
+                    restore.display()
+                ),
             )
             .with_detail(json!({ "reason": "restore_scene", "path": restore })));
         }
@@ -386,8 +431,13 @@ impl Sessions<'_> {
         if tree != new_base.tree {
             return Err(invalid(
                 "head_tree",
-                format!("{head} has tree {tree}, not the new base's {}", new_base.tree),
-                obj(json!({ "head": head.as_str(), "tree": tree.as_str(), "base_tree": new_base.tree.as_str() })),
+                format!(
+                    "{head} has tree {tree}, not the new base's {}",
+                    new_base.tree
+                ),
+                obj(
+                    json!({ "head": head.as_str(), "tree": tree.as_str(), "base_tree": new_base.tree.as_str() }),
+                ),
             ));
         }
         // 6. The caller holds the move lock; recheck the actual current head.
@@ -396,8 +446,11 @@ impl Sessions<'_> {
                 .with_detail(json!({"reason":"base_ahead","session":session,"repo":name,"head":from_head,"target":head})));
         }
         if git.merge_base(&from_head, &head)?.is_none() {
-            return Err(StrataError::new(Code::NoMergeBase, format!("{from_head} and {head} have no common ancestor"))
-                .with_detail(json!({ "a": from_head.as_str(), "b": head.as_str() })));
+            return Err(StrataError::new(
+                Code::NoMergeBase,
+                format!("{from_head} and {head} have no common ancestor"),
+            )
+            .with_detail(json!({ "a": from_head.as_str(), "b": head.as_str() })));
         }
         // 7.
         let Some(new_set) = strata_deps::find_set(self.store, &name, &new_base.deps)? else {
@@ -410,14 +463,20 @@ impl Sessions<'_> {
         let Some(old_set) = strata_deps::find_set(self.store, &name, &old_gen.deps)? else {
             return Err(StrataError::new(
                 Code::Corrupt,
-                format!("the workspace's dependency set {} of {name} is missing", old_gen.deps),
+                format!(
+                    "the workspace's dependency set {} of {name} is missing",
+                    old_gen.deps
+                ),
             )
             .with_detail(json!({ "reason": "deps_set_missing", "deps": old_gen.deps.as_str() })));
         };
         if !self.store.has_base_gen(&new_base)? {
             return Err(invalid(
                 "base_unbuilt",
-                format!("base generation {}/{} of {name} is not built", new_base.tree, new_base.deps),
+                format!(
+                    "base generation {}/{} of {name} is not built",
+                    new_base.tree, new_base.deps
+                ),
                 obj(json!({ "base": new_base })),
             ));
         }
@@ -432,13 +491,20 @@ impl Sessions<'_> {
             return Err(open_files_error(&ws.path, holders));
         }
         // 9.
-        let intents: Vec<MoveIntent> =
-            self.store.move_intents(session)?.into_iter().filter(|i| i.repo == name).collect();
+        let intents: Vec<MoveIntent> = self
+            .store
+            .move_intents(session)?
+            .into_iter()
+            .filter(|i| i.repo == name)
+            .collect();
         for i in &intents {
             if i.state == MoveState::Swapping {
                 return Err(invalid(
                     "move_awaiting_recover",
-                    format!("move {} of {session}/{name} stopped in its swap; it waits for recover", i.n),
+                    format!(
+                        "move {} of {session}/{name} stopped in its swap; it waits for recover",
+                        i.n
+                    ),
                     obj(json!({ "n": i.n, "staging": i.staging })),
                 ));
             }
@@ -469,8 +535,19 @@ impl Sessions<'_> {
         let new = self.base_of(&new_base)?;
 
         // ---- Phase C: the BeforeRollout checkpoint.
-        let wsref = WorkspaceRef { session, repo: &name, root: &ws.path, config: cfg, git, store: self.store };
-        let cp = self.before.checkpoint(&wsref, &old, CheckpointReason::BeforeRollout)?.checkpoint;
+        observed.step("checkpoint");
+        let wsref = WorkspaceRef {
+            session,
+            repo: &name,
+            root: &ws.path,
+            config: cfg,
+            git,
+            store: self.store,
+        };
+        let cp = self
+            .before
+            .checkpoint(&wsref, &old, CheckpointReason::BeforeRollout)?
+            .checkpoint;
 
         // rm-followups §1.4 G4: the real rebase, from the checkpoint, before
         // the intent; a conflict outside `rm.regenerable` defers (the
@@ -510,7 +587,8 @@ impl Sessions<'_> {
             // O7: kept-side conflicts left by an earlier Explicit move survive
             // automatic and Agent moves; only an acknowledgement clears them.
             for p in &row.conflicts {
-                let acked = agent.is_some_and(|a| a.options.resolutions.contains_key(p) || a.kept.contains(p));
+                let acked = agent
+                    .is_some_and(|a| a.options.resolutions.contains_key(p) || a.kept.contains(p));
                 if !acked && !rebased.conflicts.contains(p) {
                     rebased.conflicts.push(p.clone());
                 }
@@ -520,8 +598,14 @@ impl Sessions<'_> {
 
         // ---- Phase D: the intent and the staging.
         // 12.
-        self.live_moves.lock().unwrap_or_else(|x| x.into_inner()).insert((session.clone(), name.clone()));
-        let _live = LiveMove { set: &self.live_moves, key: (session.clone(), name.clone()) };
+        self.live_moves
+            .lock()
+            .unwrap_or_else(|x| x.into_inner())
+            .insert((session.clone(), name.clone()));
+        let _live = LiveMove {
+            set: &self.live_moves,
+            key: (session.clone(), name.clone()),
+        };
         let sname = format!("{MOVE_STAGING_PREFIX}{name}-{}", random_hex(8));
         let staging = root.join(&sname);
         let started = SystemTime::now();
@@ -542,8 +626,11 @@ impl Sessions<'_> {
         };
 
         // 13. prepare.
-        let old_admin = shadow_dir.join("worktrees").join(row.generation.to_string());
+        let old_admin = shadow_dir
+            .join("worktrees")
+            .join(row.generation.to_string());
         let prepared = (|| -> Result<(Rebased, Vec<RepoPath>, Carried, bool)> {
+            observed.step("prepare");
             self.store.set_move_phase(session, &name, n, "prepare")?;
             if let Some(a) = agent {
                 let resolved: Vec<_> = a
@@ -567,7 +654,11 @@ impl Sessions<'_> {
                 )?;
             }
             self.seams.hit("move.prepare", Some(&name))?;
-            strata_apfs::clone_tree_rooted(&self.store.base_dir(&new_base), &root, &rp(sname.clone()))?;
+            strata_apfs::clone_tree_rooted(
+                &self.store.base_dir(&new_base),
+                &root,
+                &rp(sname.clone()),
+            )?;
             let (rebased, ignorecase) = match pre.take() {
                 Some(x) => x,
                 None => {
@@ -589,7 +680,16 @@ impl Sessions<'_> {
                 }
             };
             strata_overlay::project(self.store, &rebased.overlay, &staging)?;
-            let out = self.carry(&ws.path, &staging, &old, &cp.entries, &d, cfg, ignorecase, &name)?;
+            let out = self.carry(
+                &ws.path,
+                &staging,
+                &old,
+                &cp.entries,
+                &d,
+                cfg,
+                ignorecase,
+                &name,
+            )?;
             // Review P1-14: what the carry took and when, next to the old
             // tree's admin dir, for later judgements of the kept old tree.
             write_carried(&old_admin, n, &out.carried);
@@ -605,6 +705,7 @@ impl Sessions<'_> {
 
         // 14. recheck.
         let rechecked = (|| -> Result<Vec<strata_deps::OpenFile>> {
+            observed.step("recheck");
             self.store.set_move_phase(session, &name, n, "recheck")?;
             self.seams.hit("move.recheck", Some(&name))?;
             if let Some(b) = auto {
@@ -617,7 +718,10 @@ impl Sessions<'_> {
                 };
                 if !changed.is_empty() {
                     let shown: Vec<&String> = changed.iter().take(20).collect();
-                    return Err(auto_defer("changed_during_move", json!({ "paths": shown, "count": changed.len() })));
+                    return Err(auto_defer(
+                        "changed_during_move",
+                        json!({ "paths": shown, "count": changed.len() }),
+                    ));
                 }
                 if agent.is_none() {
                     let mut h = strata_deps::open_files(&ws.path)?;
@@ -660,9 +764,11 @@ impl Sessions<'_> {
         ) {
             Ok(true) => {}
             Ok(false) => {
-                let e =
-                    StrataError::new(Code::Unknown, format!("move {n} of {session}/{name} left Preparing meanwhile"))
-                        .with_detail(json!({ "reason": "intent_changed", "n": n }));
+                let e = StrataError::new(
+                    Code::Unknown,
+                    format!("move {n} of {session}/{name} left Preparing meanwhile"),
+                )
+                .with_detail(json!({ "reason": "intent_changed", "n": n }));
                 return Err(self.prepare_failed(&mv, "recheck", e));
             }
             Err(e) => return Err(self.prepare_failed(&mv, "recheck", e)),
@@ -671,18 +777,33 @@ impl Sessions<'_> {
         // ---- Phase E: the swap.
         let mut phase = "swap";
         let swapped = (|| -> Result<()> {
+            observed.step("swap");
             self.store.set_move_phase(session, &name, n, "swap")?;
             self.seams.hit("move.swap", Some(&name))?;
-            strata_apfs::rename_rooted(&root, &rp(sname.clone()), &rp(name.as_str()), RenameMode::Swap)?;
+            strata_apfs::rename_rooted(
+                &root,
+                &rp(sname.clone()),
+                &rp(name.as_str()),
+                RenameMode::Swap,
+            )?;
             strata_apfs::full_fsync(&strata_apfs::open_root(&root)?)?;
             phase = "pin";
+            observed.step("pin");
             self.store.set_move_phase(session, &name, n, "pin")?;
             self.seams.hit("move.pin", Some(&name))?;
             git.update_ref(&pin_ref(session), &head, Some(&from_head))?;
             phase = "record";
+            observed.step("record");
             self.store.set_move_phase(session, &name, n, "record")?;
             self.seams.hit("move.record", Some(&name))?;
-            self.store.finish_move_consuming(session, &name, n, &rebased.conflicts, SystemTime::now(), consume)
+            self.store.finish_move_consuming(
+                session,
+                &name,
+                n,
+                &rebased.conflicts,
+                SystemTime::now(),
+                consume,
+            )
         })();
         if let Err(e) = swapped {
             if is_stop(&e) {
@@ -692,7 +813,15 @@ impl Sessions<'_> {
             let mut extra = Map::new();
             extra.insert("repo".into(), json!(name.as_str()));
             extra.insert("n".into(), json!(n));
-            let err = unknown_error(SceneOp::Move, session, Some(&name), phase, cause_of(&e), &kept, extra);
+            let err = unknown_error(
+                SceneOp::Move,
+                session,
+                Some(&name),
+                phase,
+                cause_of(&e),
+                &kept,
+                extra,
+            );
             let scene = Scene {
                 op: SceneOp::Move,
                 session: session.clone(),
@@ -710,13 +839,17 @@ impl Sessions<'_> {
 
         // ---- Phase F: the old tree (now at S). Failures here only show in
         // `old_tree` and status.
+        observed.step("old_tree");
         let mut old_holders = Vec::new();
         let old_tree = match self.seams.hit("move.old_tree", Some(&name)) {
             Err(e) if is_stop(&e) => return Err(e),
             Err(_) => Some(staging.clone()),
             Ok(()) => {
                 let held = match strata_deps::open_files(&staging) {
-                    Ok(holders) => { old_holders = holders; !old_holders.is_empty() }
+                    Ok(holders) => {
+                        old_holders = holders;
+                        !old_holders.is_empty()
+                    }
                     Err(_) => true,
                 };
                 // Review P1-14: the overlay entries, and every carried
@@ -759,7 +892,16 @@ impl Sessions<'_> {
                 let unchanged = !unjudged
                     && !late
                     && self.tree_matches(session, &name, cfg, &staging, &old, &cp.entries)
-                    && untouched(&staging, &old, &cp.entries, &d, cfg, ignorecase, Some(&carried), started);
+                    && untouched(
+                        &staging,
+                        &old,
+                        &cp.entries,
+                        &d,
+                        cfg,
+                        ignorecase,
+                        Some(&carried),
+                        started,
+                    );
                 unjudged |= strata_apfs::walk_stopped();
                 if !held && unchanged && !unjudged && uncarried.is_empty() {
                     let gone = self.store.retire_dir(&staging).is_ok() && {
@@ -810,10 +952,17 @@ impl Sessions<'_> {
     /// A `Base` for a registered generation (§5.7 step 10).
     pub(crate) fn base_of(&self, g: &BaseGen) -> Result<Base> {
         let manifest = self.store.manifest(&g.repo, &g.tree)?.ok_or_else(|| {
-            StrataError::new(Code::Corrupt, format!("base {}/{} of {} has no manifest", g.tree, g.deps, g.repo))
-                .with_detail(json!({ "reason": "manifest_missing", "base": g }))
+            StrataError::new(
+                Code::Corrupt,
+                format!("base {}/{} of {} has no manifest", g.tree, g.deps, g.repo),
+            )
+            .with_detail(json!({ "reason": "manifest_missing", "base": g }))
         })?;
-        Ok(Base { r#gen: g.clone(), manifest: Arc::new(manifest), dir: self.store.base_dir(g) })
+        Ok(Base {
+            r#gen: g.clone(),
+            manifest: Arc::new(manifest),
+            dir: self.store.base_dir(g),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -859,7 +1008,14 @@ impl Sessions<'_> {
         let Ok(git) = self.git(name) else {
             return false;
         };
-        let wsref = WorkspaceRef { session, repo: name, root: dir, config: cfg, git, store: self.store };
+        let wsref = WorkspaceRef {
+            session,
+            repo: name,
+            root: dir,
+            config: cfg,
+            git,
+            store: self.store,
+        };
         match strata_overlay::reconcile_full(&wsref, base) {
             Ok(o) => sorted(o.entries) == sorted(entries.to_vec()),
             Err(_) => false,
@@ -868,9 +1024,16 @@ impl Sessions<'_> {
 
     /// The BeforeRollout checkpoint of a done move: the latest checkpoint of
     /// the workspace at or before the move started (§5.5 step 2.9).
-    pub(crate) fn rollout_checkpoint(&self, i: &MoveIntent) -> Result<Option<strata_types::Checkpoint>> {
+    pub(crate) fn rollout_checkpoint(
+        &self,
+        i: &MoveIntent,
+    ) -> Result<Option<strata_types::Checkpoint>> {
         let infos = self.store.checkpoints(&i.session, Some(&i.repo))?;
-        let Some(info) = infos.iter().filter(|c| c.at <= i.started).max_by_key(|c| (c.at, c.id)) else {
+        let Some(info) = infos
+            .iter()
+            .filter(|c| c.at <= i.started)
+            .max_by_key(|c| (c.at, c.id))
+        else {
             return Ok(None);
         };
         Ok(Some(self.store.checkpoint(&i.session, info.id)?))
@@ -910,12 +1073,27 @@ impl Sessions<'_> {
             }
         }
         let d: Vec<RepoPath> = dset.into_iter().collect();
-        let fold = self.git(&i.repo)?.read_index(&path).map(|x| x.ignorecase).unwrap_or(false);
+        let fold = self
+            .git(&i.repo)?
+            .read_index(&path)
+            .map(|x| x.ignorecase)
+            .unwrap_or(false);
         let all = self.store.move_intents(&i.session)?;
-        let admin =
-            self.shadow_dir(&i.session, &i.repo).join("worktrees").join(prior_generation(&all, i).to_string());
+        let admin = self
+            .shadow_dir(&i.session, &i.repo)
+            .join("worktrees")
+            .join(prior_generation(&all, i).to_string());
         let carried = read_carried(&admin, i.n);
-        Ok(untouched(&path, &base, &cp.entries, &d, cfg, fold, carried.as_ref(), i.started))
+        Ok(untouched(
+            &path,
+            &base,
+            &cp.entries,
+            &d,
+            cfg,
+            fold,
+            carried.as_ref(),
+            i.started,
+        ))
     }
 
     /// Retire `p` unless it is already gone.
@@ -933,7 +1111,12 @@ impl Sessions<'_> {
     /// Take a move's internal staging away: retire the staging and the
     /// admin dir `worktrees/<n>`; a non-directory there (or at `worktrees`)
     /// is quarantined, never followed. Returns the quarantine path, if any.
-    pub(crate) fn collect_leftover(&self, staging: &Path, shadow_dir: &Path, n: u64) -> Result<Option<PathBuf>> {
+    pub(crate) fn collect_leftover(
+        &self,
+        staging: &Path,
+        shadow_dir: &Path,
+        n: u64,
+    ) -> Result<Option<PathBuf>> {
         self.retire_present(staging)?;
         self.collect_admin(shadow_dir, n)
     }
@@ -942,7 +1125,9 @@ impl Sessions<'_> {
     /// quarantining a non-directory there (or at `worktrees`).
     pub(crate) fn collect_admin(&self, shadow_dir: &Path, n: u64) -> Result<Option<PathBuf>> {
         let wt = shadow_dir.join("worktrees");
-        match lstat(&wt).map_err(|e| strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &wt))? {
+        match lstat(&wt)
+            .map_err(|e| strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &wt))?
+        {
             None => return Ok(None),
             Some(m) if !m.is_dir() => {
                 return quarantine(shadow_dir, "worktrees", "worktrees").map(Some);
@@ -950,7 +1135,9 @@ impl Sessions<'_> {
             Some(_) => {}
         }
         let admin = wt.join(n.to_string());
-        match lstat(&admin).map_err(|e| strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &admin))? {
+        match lstat(&admin)
+            .map_err(|e| strata_apfs::classify_io_error(&e, strata_apfs::IoSide::Read, &admin))?
+        {
             None => Ok(None),
             Some(m) if m.is_dir() => self.retire_present(&admin).map(|_| None),
             Some(_) => quarantine(shadow_dir, &format!("worktrees/{n}"), &n.to_string()).map(Some),
@@ -1002,7 +1189,15 @@ impl Sessions<'_> {
         let mut extra = Map::new();
         extra.insert("repo".into(), json!(mv.name.as_str()));
         extra.insert("n".into(), json!(mv.n));
-        unknown_error(SceneOp::Move, mv.session, Some(mv.name), phase, cause_of(&e), &self.prepare_kept(mv), extra)
+        unknown_error(
+            SceneOp::Move,
+            mv.session,
+            Some(mv.name),
+            phase,
+            cause_of(&e),
+            &self.prepare_kept(mv),
+            extra,
+        )
     }
 
     /// `kept` of a prepare-time Unknown: the staging (the intent names it),
@@ -1020,7 +1215,11 @@ impl Sessions<'_> {
 /// The generation a done move `i` replaced: the previous done move's n, or
 /// 1 (the generation `new` attaches).
 pub(crate) fn prior_generation(all: &[MoveIntent], i: &MoveIntent) -> u64 {
-    all.iter().filter(|x| x.repo == i.repo && x.state == MoveState::Done && x.n < i.n).map(|x| x.n).max().unwrap_or(1)
+    all.iter()
+        .filter(|x| x.repo == i.repo && x.state == MoveState::Done && x.n < i.n)
+        .map(|x| x.n)
+        .max()
+        .unwrap_or(1)
 }
 
 /// Move a non-directory entry of the shadow repository into
@@ -1064,7 +1263,10 @@ struct CarriedRecord {
 /// Best effort: without the record, later judgements hold every ignored
 /// entry to the move's start (stricter, never looser).
 fn write_carried(admin: &Path, n: u64, carried: &Carried) {
-    if let Ok(body) = serde_json::to_vec(&CarriedRecord { n, carried: carried.clone() }) {
+    if let Ok(body) = serde_json::to_vec(&CarriedRecord {
+        n,
+        carried: carried.clone(),
+    }) {
         let _ = std::fs::write(admin.join(CARRIED_FILE), body);
     }
 }
@@ -1123,7 +1325,9 @@ fn held_dirs(dir: &Path, d: &[RepoPath], defer_cwd: bool) -> Result<Vec<strata_d
     // Explicit/Agent cwd holds (including those inside dependency dirs) are
     // judged by the final whole-workspace guard and its narrow overrides.
     // Descriptors and mappings remain unconditional dependency protections.
-    if defer_cwd { out.retain(|h| h.hold != strata_deps::Hold::Cwd); }
+    if defer_cwd {
+        out.retain(|h| h.hold != strata_deps::Hold::Cwd);
+    }
     Ok(out)
 }
 
@@ -1131,8 +1335,9 @@ fn held_dirs(dir: &Path, d: &[RepoPath], defer_cwd: bool) -> Result<Vec<strata_d
 pub const AUTO_DEFERRED: &str = "auto_deferred";
 
 fn auto_defer(reason: &str, detail: Value) -> StrataError {
-    StrataError::new(Code::Busy, format!("auto-rebase deferred: {reason}"))
-        .with_detail(json!({ "reason": AUTO_DEFERRED, "defer": { "reason": reason, "detail": detail } }))
+    StrataError::new(Code::Busy, format!("auto-rebase deferred: {reason}")).with_detail(
+        json!({ "reason": AUTO_DEFERRED, "defer": { "reason": reason, "detail": detail } }),
+    )
 }
 
 /// The `(reason, detail)` of an `Auto` move's deferral, if `e` is one.

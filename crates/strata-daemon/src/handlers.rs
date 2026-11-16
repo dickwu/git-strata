@@ -794,6 +794,8 @@ pub type RepoCatchUp = Result<Vec<(SessionId, Result<strata_publish::pending::Ca
 pub fn catch_up_pass(d: &Daemon<'_>, now: SystemTime) -> Vec<(RepoName, RepoCatchUp)> {
     let core = d.core;
     let _catalog = core.admit();
+    // Status-bar §11.2: its moves and base builds show in `activity`.
+    let _observe = crate::activity::enter_background(core);
     let mut out = Vec::new();
     for repo in core
         .snapshot()
@@ -1156,6 +1158,7 @@ impl<'d, 'a> Server<'d, 'a> {
         let _catalog = self.core().catalog.enter(|c| c.generation);
         let name = req.method.name();
         let _scope = RequestScope::begin(name, session_of(&req.params));
+        let _observe = crate::activity::enter_request(self.core(), name, session_of(&req.params));
         WRITING.with(|w| w.set(false));
         let r = catch_unwind(AssertUnwindSafe(|| self.dispatch(&req.params)));
         let wrote = WRITING.with(|w| w.replace(false)) || locks::is_visible();
@@ -1217,7 +1220,8 @@ impl<'d, 'a> Server<'d, 'a> {
                     generation: p.generation,
                     accept_diverged: p.accept_diverged,
                 };
-                let result = crate::sync_move::run(self.d, req);
+                // Status-bar §3.1: its locks name the session it resolved.
+                let result = locks::with_subject(Some(id.clone()), || crate::sync_move::run(self.d, req));
                 if result.as_ref().is_err_and(|e| e.detail.as_ref().is_some_and(|d| d["reason"] == "caller_cwd")) {
                     return result;
                 }
@@ -1980,7 +1984,7 @@ impl<'d, 'a> Server<'d, 'a> {
                         let plan = strata_deps::plan_switch(&ctx, p.id, s, &ws)?;
                         let mut out = Vec::new();
                         for step in &plan.steps {
-                            out.push(self.apply_step(step, &repo_id, repo, &mut Vec::new()));
+                            out.push(self.apply_step(step, &repo_id, repo, &mut Vec::new(), None));
                         }
                         Ok(out)
                     })
@@ -2091,6 +2095,16 @@ impl<'d, 'a> Server<'d, 'a> {
         core.locks.with_sessions(&ids, || {
             self.with_du_hold(&ids, || {
                 core.locks.with_repo(&repo, || {
+                    // Status-bar §11.2, §12.1: one entry for the whole hold;
+                    // its step restarts with each session's move.
+                    let rollout = core.begin_activity(
+                        crate::activity::Kind::DepsRollout {
+                            sessions: ids.len() as u64,
+                            done: 0,
+                        },
+                        Some(repo.clone()),
+                        None,
+                    );
                     recheck(&token, &action)?;
                     let cur = strata_deps::get_proposal(&core.store, id)?;
                     if cur.state != strata_deps::ProposalState::Pending {
@@ -2108,7 +2122,7 @@ impl<'d, 'a> Server<'d, 'a> {
                     let results: Vec<Value> = plan
                         .steps
                         .iter()
-                        .map(|st| self.apply_step(st, &repo_id, &repo, &mut moved))
+                        .map(|st| self.apply_step(st, &repo_id, &repo, &mut moved, Some(&rollout)))
                         .collect();
                     // 7.
                     let after = strata_deps::record_rollout(&core.store, &plan, &moved)?;
@@ -2129,14 +2143,19 @@ impl<'d, 'a> Server<'d, 'a> {
 
     /// One rollout step: a move (`moved`) or a per-entry skip; a failed
     /// move is a skip with its code, never the whole call's failure.
+    /// `rollout` is `deps approve`'s activity, told of each step.
     fn apply_step(
         &self,
         step: &strata_deps::RolloutStep,
         repo_id: &strata_types::RepoId,
         repo: &RepoName,
         moved: &mut Vec<SessionId>,
+        rollout: Option<&crate::activity::ActivityGuard>,
     ) -> Value {
-        match step {
+        if let (Some(r), strata_deps::RolloutStep::Move { session, .. }) = (rollout, step) {
+            r.rollout_move(session);
+        }
+        let v = match step {
             strata_deps::RolloutStep::Move {
                 session,
                 new_base,
@@ -2173,7 +2192,11 @@ impl<'d, 'a> Server<'d, 'a> {
                 }
                 v
             }
+        };
+        if let Some(r) = rollout {
+            r.rollout_done();
         }
+        v
     }
 
     /// `ensure_base_for` outside the locks; a plain lock `Busy` (no
@@ -2218,6 +2241,7 @@ impl<'d, 'a> Server<'d, 'a> {
             locks: &core.locks,
             du: &self.d.du,
             pins: core,
+            repo,
         };
         let ctx = strata_publish::Ctx {
             store: &core.store,
@@ -2511,6 +2535,9 @@ impl<'d, 'a> Server<'d, 'a> {
             return self.push_headless(repo, &rc, git);
         }
         let (pushed, tip) = core.locks.with_repo(repo, || {
+            // Status-bar §11.2: `push` while it holds the repo lock.
+            let _pushing =
+                core.begin_activity(crate::activity::Kind::Push, Some(repo.clone()), None);
             if let Some(t) = &token {
                 recheck(t, &action)?;
             }
@@ -2601,6 +2628,9 @@ impl Server<'_, '_> {
         let mut tips = (None, None);
         let mut replayed: Option<resolve::Replayed> = None;
         let r = core.locks.with_repo(repo, || {
+            // Status-bar §11.2, §12.12: `push` while it holds the repo lock.
+            let _pushing =
+                core.begin_activity(crate::activity::Kind::Push, Some(repo.clone()), None);
             tips.0 = strata_deps::main_tip(rc, git).ok().flatten();
             let r = resolve::push_replaying(core, git, rc, repo, &prep, &mut replayed);
             tips.1 = strata_deps::main_tip(rc, git).ok().flatten();
@@ -3014,7 +3044,8 @@ impl strata_publish::PublishLocks for PublishLocksNoWait<'_> {
             .du
             .hold_sessions(&ids, crate::du::HOLD_WAIT)
         {
-            Ok(_hold) => f(),
+            // Status-bar §3.1: the repo lock names the session it moves.
+            Ok(_hold) => crate::locks::with_subject(only(sessions), &mut *f),
             Err(e) => {
                 refused = Some(e);
                 Ok(())
@@ -3031,6 +3062,14 @@ impl strata_publish::PublishLocks for PublishLocksNoWait<'_> {
     }
 }
 
+/// The session of a take of exactly one session's queue place.
+fn only(sessions: &[SessionId]) -> Option<SessionId> {
+    match sessions {
+        [s] => Some(s.clone()),
+        _ => None,
+    }
+}
+
 /// publish's locks, with the du hold (status-perf D8) on the rebase's take
 /// of its session: queue → du hold → repo lock. A hold that times out is
 /// the take's `Busy`, which the rebase waits out like the queue's.
@@ -3038,6 +3077,8 @@ struct PublishLocksDu<'a> {
     pins: &'a Core,
     locks: &'a crate::locks::Locks,
     du: &'a Arc<crate::du::Du>,
+    /// The repo of the `with_publish_ctx` this serves.
+    repo: &'a RepoName,
 }
 
 impl strata_publish::PublishLocks for PublishLocksDu<'_> {
@@ -3045,12 +3086,22 @@ impl strata_publish::PublishLocks for PublishLocksDu<'_> {
         self.pins.effective_sync_deps(repo)
     }
 
+    /// Only publish's own step takes its sessions' queue places this way
+    /// (the rebase takes them through `with_rebase_sessions`): status-bar
+    /// §11.2's `publish` activity runs while it holds them.
     fn with_sessions(
         &self,
         sessions: &[SessionId],
         f: &mut dyn FnMut() -> strata_publish::Result<()>,
     ) -> strata_publish::Result<strata_publish::Result<()>> {
-        strata_publish::PublishLocks::with_sessions(self.locks, sessions, f)
+        strata_publish::PublishLocks::with_sessions(self.locks, sessions, &mut || {
+            let _publishing = self.pins.begin_activity(
+                crate::activity::Kind::Publish,
+                Some(self.repo.clone()),
+                only(sessions),
+            );
+            crate::locks::with_subject(only(sessions), &mut *f)
+        })
     }
 
     fn with_repo(
@@ -3071,7 +3122,8 @@ impl strata_publish::PublishLocks for PublishLocksDu<'_> {
         let r = strata_publish::PublishLocks::with_sessions(self.locks, sessions, &mut || {
             let held = self.du.hold_sessions(&ids, crate::du::HOLD_WAIT);
             match held {
-                Ok(_hold) => f(),
+                // Status-bar §3.1: the repo lock names the session it moves.
+                Ok(_hold) => crate::locks::with_subject(only(sessions), &mut *f),
                 Err(e) => {
                     refused = Some(e);
                     Ok(())

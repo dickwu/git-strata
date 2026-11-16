@@ -433,6 +433,12 @@ fn sync_one(
         let target = d.sessions.ensure_base_for(repo, &tree, deps)?;
         let result = crate::resolve::with_queue_not_publishing(core, &req.session, || {
             core.locks.with_repo(repo,|| {
+            // Status-bar §12.2: the `move` activity starts with the lock, so it
+            // covers the scan and preview; `move_inner` joins it.
+            let _moving = strata_session::observe::begin(strata_session::observe::Work::Move {
+                repo: repo.clone(),
+                session: req.session.clone(),
+            });
             let now = record(core,&req.session)?;
             let current = workspace(&now,repo)?;
             if current.base != ws.base || current.head != ws.head || now.workspaces[repo].generation != rec.workspaces[repo].generation

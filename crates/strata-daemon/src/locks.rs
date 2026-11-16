@@ -13,13 +13,47 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strata_types::{Code, RepoName, SessionId, StrataError};
 
 use crate::{DaemonWarning, LockHold, Result};
 
+/// Status-bar §3.1, §12.1: how long a background hold, or a hold doing
+/// exempt long work (a move, a deps rollout, a base build, a session
+/// creation), lasts before `LongHold`.
+pub const BACKGROUND_HOLD_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// Who a hold or an activity works for (status-bar §3.1, §11.1): a client's
+/// request (the request scope or the session layer's request tag is set on
+/// the taking thread) or the daemon's own background work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    Request,
+    Background,
+}
+
 thread_local! {
     static YIELD_TO: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+    static SUBJECT: RefCell<Option<SessionId>> = const { RefCell::new(None) };
+}
+
+/// Status-bar §3.1, §12.7: run `f` with `session` as the subject of every
+/// lock this thread takes. `holds[].session`, `LongHold.session` and a
+/// waiter's Busy `holder_session` name it instead of the request's own
+/// session (a catch-up move names the session it moves); the request's
+/// session and the `LongWait` and expired-wait keys stay as they are.
+/// Restored on every exit, including unwinding.
+pub fn with_subject<R>(session: Option<SessionId>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<SessionId>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SUBJECT.with(|s| *s.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(SUBJECT.with(|s| s.replace(session)));
+    f()
 }
 
 /// Only cooperative old-tree work installs this flag. Every lock it takes
@@ -112,21 +146,56 @@ fn take_bound(wait: Duration) -> Option<Duration> {
     })
 }
 
+/// The request this thread works for: the request scope, else the session
+/// layer's request tag (a `new`/`add` dispatch worker, status-bar §11.1),
+/// else the daemon itself.
 fn ctx_method() -> (String, Option<SessionId>) {
-    CTX.with(|c| match c.borrow().as_ref() {
-        Some(x) => (x.method.clone(), x.session.clone()),
-        None => ("daemon".to_string(), None),
+    CTX.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|x| (x.method.clone(), x.session.clone()))
     })
+    .or_else(|| strata_session::observe::request_tag().map(|t| (t.method, t.session)))
+    .unwrap_or_else(|| ("daemon".to_string(), None))
+}
+
+/// The method of the request this thread works for (the request scope, else
+/// the request tag); `None` on background work.
+pub fn request_method() -> Option<String> {
+    CTX.with(|c| c.borrow().as_ref().map(|x| x.method.clone()))
+        .or_else(|| strata_session::observe::request_tag().map(|t| t.method))
+}
+
+/// The origin of what this thread does now: a request when the request
+/// scope or the request tag is set (status-bar §11.1).
+pub fn origin() -> Origin {
+    match request_method() {
+        Some(_) => Origin::Request,
+        None => Origin::Background,
+    }
 }
 
 #[derive(Clone, Debug)]
 struct Holder {
     method: String,
     session: Option<SessionId>,
+    /// [`with_subject`]'s session when taken; shown instead of `session`.
+    subject: Option<SessionId>,
+    origin: Origin,
+    /// The taking thread's request tag id: which request's work it is.
+    request: Option<u64>,
     since: SystemTime,
     started: Instant,
     yield_to: Option<Arc<AtomicBool>>,
     generation: Option<u64>,
+}
+
+impl Holder {
+    /// The session `holds[]`, `LongHold` and Busy name: the subject, else
+    /// the request's session.
+    fn shown_session(&self) -> Option<SessionId> {
+        self.subject.clone().or_else(|| self.session.clone())
+    }
 }
 
 #[derive(Default)]
@@ -152,9 +221,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     })
 }
 
-/// What a take failed with.
+/// What a take failed with. The holder is boxed to keep the error small.
 enum TakeError {
-    Timeout(Option<Holder>),
+    Timeout(Option<Box<Holder>>),
     ShuttingDown,
     Policy(StrataError),
 }
@@ -193,7 +262,11 @@ impl Fifo {
             }
             if st.holder.is_none() && st.queue.front().map(|(t, _)| t) == Some(&ticket) {
                 st.queue.pop_front();
-                st.holder = Some(Holder { since: SystemTime::now(), started: Instant::now(), ..holder });
+                st.holder = Some(Holder {
+                    since: SystemTime::now(),
+                    started: Instant::now(),
+                    ..holder
+                });
                 return Ok(());
             }
             // Every actual waiter, including post-visible unbounded takes,
@@ -209,7 +282,7 @@ impl Fifo {
                     let now = Instant::now();
                     if now >= d {
                         st.queue.retain(|(t, _)| *t != ticket);
-                        let h = st.holder.clone();
+                        let h = st.holder.clone().map(Box::new);
                         self.cv.notify_all();
                         return Err(TakeError::Timeout(h));
                     }
@@ -261,6 +334,8 @@ type LongWaitKey = (RepoName, Option<SessionId>, String);
 /// The daemon's repo write locks and session queues.
 pub struct Locks {
     wait: Duration,
+    /// [`BACKGROUND_HOLD_MAX`] in milliseconds, unless a test shortened it.
+    background_max: AtomicU64,
     catalog_id: AtomicU64,
     repos: RwLock<BTreeMap<RepoName, Arc<Fifo>>>,
     store: Mutex<Option<Arc<strata_store::Store>>>,
@@ -276,6 +351,7 @@ impl Locks {
     pub fn new(repos: impl IntoIterator<Item = RepoName>, wait: Duration) -> Locks {
         Locks {
             wait,
+            background_max: AtomicU64::new(BACKGROUND_HOLD_MAX.as_millis() as u64),
             catalog_id: AtomicU64::new(0),
             repos: RwLock::new(
                 repos
@@ -295,7 +371,9 @@ impl Locks {
         *lock(&self.close_hook) = Some(hook);
     }
 
-    pub fn set_catalog(&self, id: u64) { self.catalog_id.store(id, Ordering::Relaxed); }
+    pub fn set_catalog(&self, id: u64) {
+        self.catalog_id.store(id, Ordering::Relaxed);
+    }
 
     pub fn set_store(&self, store: Arc<strata_store::Store>) {
         *lock(&self.store) = Some(store);
@@ -329,7 +407,8 @@ impl Locks {
     }
 
     pub fn check_fence(&self, repos: &[RepoName]) -> Result<()> {
-        let generation = strata_session::catalog::generation_for(self.catalog_id.load(Ordering::Relaxed));
+        let generation =
+            strata_session::catalog::generation_for(self.catalog_id.load(Ordering::Relaxed));
         let entries = self.repo_entries();
         if repos.iter().any(|r| {
             entries
@@ -356,27 +435,42 @@ impl Locks {
         self.wait
     }
 
-    fn holder_now(&self) -> Holder {
-        let (method, session) = ctx_method();
+    /// [`BACKGROUND_HOLD_MAX`], or what a test set.
+    pub fn background_hold_max(&self) -> Duration {
+        Duration::from_millis(self.background_max.load(Ordering::Relaxed))
+    }
+
+    /// Test seam: shorten (or lengthen) [`BACKGROUND_HOLD_MAX`] for this
+    /// daemon, at any time.
+    #[cfg(feature = "test-seams")]
+    pub fn set_background_hold_max(&self, max: Duration) {
+        self.background_max
+            .store(max.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    fn holder(&self, method: String, session: Option<SessionId>) -> Holder {
         Holder {
             method,
             session,
+            subject: SUBJECT.with(|s| s.borrow().clone()),
+            origin: origin(),
+            request: strata_session::observe::request_tag().map(|t| t.id),
             since: SystemTime::now(),
             started: Instant::now(),
             yield_to: YIELD_TO.with(|y| y.borrow().clone()),
-            generation: Some(strata_session::catalog::generation_for(self.catalog_id.load(Ordering::Relaxed))),
+            generation: Some(strata_session::catalog::generation_for(
+                self.catalog_id.load(Ordering::Relaxed),
+            )),
         }
     }
 
+    fn holder_now(&self) -> Holder {
+        let (method, session) = ctx_method();
+        self.holder(method, session)
+    }
+
     fn holder_as(&self, method: &str) -> Holder {
-        Holder {
-            method: method.into(),
-            session: None,
-            since: SystemTime::now(),
-            started: Instant::now(),
-            yield_to: YIELD_TO.with(|y| y.borrow().clone()),
-            generation: Some(strata_session::catalog::generation_for(self.catalog_id.load(Ordering::Relaxed))),
-        }
+        self.holder(method.into(), None)
     }
 
     fn take_error(&self, e: TakeError, what: serde_json::Value, waited: Duration) -> StrataError {
@@ -390,7 +484,7 @@ impl Locks {
                         "reason": "lock_wait",
                         "lock": what,
                         "holder": h.as_ref().map(|h| h.method.clone()),
-                        "holder_session": h.as_ref().and_then(|h| h.session.as_ref().map(|s| s.as_str().to_string())),
+                        "holder_session": h.as_ref().and_then(|h| h.shown_session().map(|s| s.as_str().to_string())),
                     }))
             }
         }
@@ -488,7 +582,12 @@ impl Locks {
     /// rm-followups §1.6 T2: [`Locks::with_sessions`] where every place is
     /// taken only if free right now; else `Busy` (`reason: "lock_wait"`)
     /// and the places already taken are released.
-    pub fn try_sessions<T>(&self, ids: &[SessionId], holder: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    pub fn try_sessions<T>(
+        &self,
+        ids: &[SessionId],
+        holder: &str,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
         self.sessions_take(ids, None, Some(holder), f)
     }
 
@@ -496,11 +595,21 @@ impl Locks {
     /// request's first, waits at most until `deadline` (review-2 N5: one
     /// overall bound across a wait that may take the queue more than once).
     /// After a visible write the takes wait without bound, as everywhere.
-    pub fn with_sessions_until<T>(&self, ids: &[SessionId], deadline: Instant, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    pub fn with_sessions_until<T>(
+        &self,
+        ids: &[SessionId],
+        deadline: Instant,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
         self.sessions_bounded(ids, Some(deadline), f)
     }
 
-    fn sessions_bounded<T>(&self, ids: &[SessionId], deadline: Option<Instant>, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    fn sessions_bounded<T>(
+        &self,
+        ids: &[SessionId],
+        deadline: Option<Instant>,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
         self.sessions_take(ids, deadline, None, f)
     }
 
@@ -576,16 +685,14 @@ impl Locks {
     /// §5.9: run `f` holding `id`'s queue place only if it is free right
     /// now (no waiting, no queueing behind a request). `None` = busy, the
     /// caller skips. The holder shows as method `reconcile`.
-    pub fn try_session<T>(&self, id: &SessionId, method: &str, f: impl FnOnce() -> Result<T>) -> Option<Result<T>> {
+    pub fn try_session<T>(
+        &self,
+        id: &SessionId,
+        method: &str,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Option<Result<T>> {
         let fifo = self.queue_of(id);
-        let holder = Holder {
-            method: method.into(),
-            session: Some(id.clone()),
-            since: SystemTime::now(),
-            started: Instant::now(),
-            generation: Some(strata_session::catalog::generation_for(self.catalog_id.load(Ordering::Relaxed))),
-            yield_to: YIELD_TO.with(|y| y.borrow().clone()),
-        };
+        let holder = self.holder(method.into(), Some(id.clone()));
         match fifo.acquire(Some(Duration::ZERO), &self.closed, holder, || {
             self.check_session(id)
         }) {
@@ -612,24 +719,53 @@ impl Locks {
             .filter_map(|(r, f)| {
                 f.holder().map(|h| LockHold {
                     repo: r.clone(),
+                    session: h.shown_session(),
                     method: h.method,
-                    session: h.session,
                     since: h.since,
+                    origin: Some(h.origin),
+                    elapsed_ms: Some(h.started.elapsed().as_millis() as u64),
                 })
             })
             .collect()
     }
 
-    /// `LongHold` for every repo lock held longer than the lock wait.
+    /// [`Locks::long_holds_with`] with no exempt work in flight.
     pub fn long_holds(&self) -> Vec<DaemonWarning> {
+        self.long_holds_with(&|_, _| None)
+    }
+
+    /// `LongHold` for every repo lock held too long (status-bar §3.1,
+    /// §12.1, Q16). `exempt(repo, request)` is the age of the current step
+    /// of the exempt long work (a move, a deps rollout, a base build, its
+    /// own request's session creation) the holder of `repo`, taken on a
+    /// thread working for request `request`, does, if any. Such a hold is
+    /// raised only once that step, counted from the take at the earliest,
+    /// has run longer than [`Locks::background_hold_max`]; any other
+    /// background hold once the hold has; any other request hold (publish
+    /// and push included) once the hold has run longer than the lock wait.
+    pub fn long_holds_with(
+        &self,
+        exempt: &dyn Fn(&RepoName, Option<u64>) -> Option<Duration>,
+    ) -> Vec<DaemonWarning> {
+        let max = self.background_hold_max();
         self.repo_entries()
             .iter()
             .filter_map(|(r, f)| {
                 let h = f.holder()?;
-                (h.started.elapsed() > self.wait).then(|| DaemonWarning::LongHold {
+                let held = h.started.elapsed();
+                let raise = match exempt(r, h.request) {
+                    // A step that began before the take (a session creation
+                    // that waited for this lock) does not make a young hold long.
+                    Some(step) => step.min(held) > max,
+                    None if h.origin == Origin::Background => held > max,
+                    None => held > self.wait,
+                };
+                raise.then(|| DaemonWarning::LongHold {
                     repo: r.clone(),
+                    session: h.shown_session(),
                     method: h.method,
                     since: h.since,
+                    origin: Some(h.origin),
                 })
             })
             .collect()
@@ -644,9 +780,11 @@ impl Locks {
                 if state.holder.is_none() && state.queue.is_empty() {
                     return None;
                 }
-                Some(json!({ "session": session, "holder": state.holder.as_ref().map(|h| &h.method),
+                Some(
+                    json!({ "session": session, "holder": state.holder.as_ref().map(|h| &h.method),
                 "since": state.holder.as_ref().map(|h| h.since),
-                "queued": state.queue.iter().map(|(_, w)| &w.method).collect::<Vec<_>>() }))
+                "queued": state.queue.iter().map(|(_, w)| &w.method).collect::<Vec<_>>() }),
+                )
             })
             .collect()
     }
@@ -692,7 +830,10 @@ impl Locks {
 
     /// The method holding `id`'s queue place (in flight), if any.
     pub fn in_flight(&self, id: &SessionId) -> Option<String> {
-        lock(&self.queues).get(id).and_then(|f| f.holder()).map(|h| h.method)
+        lock(&self.queues)
+            .get(id)
+            .and_then(|f| f.holder())
+            .map(|h| h.method)
     }
 
     /// How many requests wait for `id`'s queue place.

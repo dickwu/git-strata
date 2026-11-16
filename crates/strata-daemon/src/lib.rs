@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use strata_types::{RepoName, SessionId, StrataError};
 
+pub mod activity;
 mod auto_close;
 pub mod catalog;
 pub mod client;
@@ -230,6 +231,13 @@ pub enum DaemonWarning {
         repo: RepoName,
         method: String,
         since: SystemTime,
+        /// Status-bar §3.1: the holder's origin; absent from an older daemon.
+        #[serde(default)]
+        origin: Option<locks::Origin>,
+        /// The holder's subject (`locks::with_subject`), else its request's
+        /// session; absent from an older daemon.
+        #[serde(default)]
+        session: Option<SessionId>,
     },
     LongWait {
         repo: Option<RepoName>,
@@ -288,8 +296,15 @@ pub enum DaemonWarning {
 pub struct LockHold {
     pub repo: RepoName,
     pub method: String,
+    /// The holder's subject (`locks::with_subject`), else its request's session.
     pub session: Option<SessionId>,
     pub since: SystemTime,
+    /// Status-bar §3.1: absent from an older daemon.
+    #[serde(default)]
+    pub origin: Option<locks::Origin>,
+    /// Status-bar §3.1: how long it has been held; absent from an older daemon.
+    #[serde(default)]
+    pub elapsed_ms: Option<u64>,
 }
 
 /// `chain_resolve`'s choice; serialized as the variant name.

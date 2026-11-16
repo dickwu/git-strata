@@ -197,6 +197,14 @@ fn deps_auto_pass_inner(
                 continue;
             }
             let outcome = (|| {
+                // Status-bar §11.2: shown while it runs; it holds no lock.
+                let _installing = core.begin_activity(
+                    crate::activity::Kind::DepsInstall {
+                        proposal: Some(p.id),
+                    },
+                    Some(repo.clone()),
+                    None,
+                );
                 let tree = p.tree.as_ref().ok_or_else(|| {
                     StrataError::new(Code::InvalidInput, "pending proposal has no tree")
                 })?;

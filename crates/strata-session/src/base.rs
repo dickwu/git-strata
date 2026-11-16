@@ -8,7 +8,9 @@ use std::time::SystemTime;
 use serde_json::{Value, json};
 use strata_apfs::{RemoveKind, RenameMode};
 use strata_deps::RepoWriteLock;
-use strata_types::{BaseGen, BaseManifest, Code, CommitOid, DepsSet, DepsSetId, RepoName, StrataError, TreeOid};
+use strata_types::{
+    BaseGen, BaseManifest, Code, CommitOid, DepsSet, DepsSetId, RepoName, StrataError, TreeOid,
+};
 
 use crate::sys::{random_hex, rp};
 use crate::{BASE_STAGING_DIR, Result, Sessions, seams};
@@ -37,7 +39,12 @@ struct Fail {
 
 impl Fail {
     fn at(phase: &'static str) -> impl FnOnce(StrataError) -> Fail {
-        move |e| Fail { e, phase, kept: Vec::new(), staging_done: false }
+        move |e| Fail {
+            e,
+            phase,
+            kept: Vec::new(),
+            staging_done: false,
+        }
     }
 }
 
@@ -49,7 +56,10 @@ struct Live<'s> {
 
 impl Drop for Live<'_> {
     fn drop(&mut self) {
-        self.set.lock().unwrap_or_else(|p| p.into_inner()).remove(&self.path);
+        self.set
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.path);
     }
 }
 
@@ -64,7 +74,12 @@ impl Sessions<'_> {
 
     /// `tree` with the given, already sealed deps set; never `deps::ensure`
     /// (§5.2). Called without holding `repo`'s write lock.
-    pub fn ensure_base_for(&self, repo: &RepoName, tree: &TreeOid, deps: &DepsSetId) -> Result<BaseGen> {
+    pub fn ensure_base_for(
+        &self,
+        repo: &RepoName,
+        tree: &TreeOid,
+        deps: &DepsSetId,
+    ) -> Result<BaseGen> {
         self.git(repo)?;
         let Some(set) = strata_deps::find_set(self.store, repo, deps)? else {
             return Err(deps_unsealed(repo, deps));
@@ -84,7 +99,12 @@ impl Sessions<'_> {
         })
     }
 
-    pub(crate) fn base_flow(&self, repo: &RepoName, tree: &TreeOid, given: Option<&DepsSet>) -> Result<BaseGen> {
+    pub(crate) fn base_flow(
+        &self,
+        repo: &RepoName,
+        tree: &TreeOid,
+        given: Option<&DepsSet>,
+    ) -> Result<BaseGen> {
         let mut misses = 0u32;
         let mut gone = 0u32;
         loop {
@@ -124,8 +144,17 @@ impl Sessions<'_> {
 
     /// A registered generation of `tree`, `prefer`'s deps first; never
     /// builds or verifies anything (rm-followups §1.9 T3).
-    pub(crate) fn built_base(&self, repo: &RepoName, tree: &TreeOid, prefer: &DepsSetId) -> Result<Option<BaseGen>> {
-        let g = BaseGen { repo: repo.clone(), tree: tree.clone(), deps: prefer.clone() };
+    pub(crate) fn built_base(
+        &self,
+        repo: &RepoName,
+        tree: &TreeOid,
+        prefer: &DepsSetId,
+    ) -> Result<Option<BaseGen>> {
+        let g = BaseGen {
+            repo: repo.clone(),
+            tree: tree.clone(),
+            deps: prefer.clone(),
+        };
         if self.store.has_base_gen(&g)? {
             return Ok(Some(g));
         }
@@ -136,9 +165,17 @@ impl Sessions<'_> {
                 Err(e) if matches!(e.code, Code::NoSuchPath) => return Ok(None),
                 Err(e) => return Err(e),
             };
-            let Some(name) = Path::new(p.as_str()).file_name().and_then(|n| n.to_str()) else { continue };
-            let Ok(d) = DepsSetId::try_from(name.to_string()) else { continue };
-            let g = BaseGen { repo: repo.clone(), tree: tree.clone(), deps: d };
+            let Some(name) = Path::new(p.as_str()).file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Ok(d) = DepsSetId::try_from(name.to_string()) else {
+                continue;
+            };
+            let g = BaseGen {
+                repo: repo.clone(),
+                tree: tree.clone(),
+                deps: d,
+            };
             if self.store.has_base_gen(&g)? {
                 return Ok(Some(g));
             }
@@ -147,9 +184,18 @@ impl Sessions<'_> {
     }
 
     /// §5.2 step 2.
-    fn hot_base(&self, repo: &RepoName, tree: &TreeOid, given: Option<&DepsSet>) -> Result<Option<BaseGen>> {
+    fn hot_base(
+        &self,
+        repo: &RepoName,
+        tree: &TreeOid,
+        given: Option<&DepsSet>,
+    ) -> Result<Option<BaseGen>> {
         if let Some(set) = given {
-            let g = BaseGen { repo: repo.clone(), tree: tree.clone(), deps: set.id.clone() };
+            let g = BaseGen {
+                repo: repo.clone(),
+                tree: tree.clone(),
+                deps: set.id.clone(),
+            };
             return Ok(self.store.has_base_gen(&g)?.then_some(g));
         }
         let root = &self.config.paths.root;
@@ -160,15 +206,27 @@ impl Sessions<'_> {
                 Err(e) if matches!(e.code, Code::NoSuchPath) => return Ok(None),
                 Err(e) => return Err(e),
             };
-            let Some(name) = Path::new(p.as_str()).file_name().and_then(|n| n.to_str()) else { continue };
-            let Ok(d) = DepsSetId::try_from(name.to_string()) else { continue };
-            let found = BaseGen { repo: repo.clone(), tree: tree.clone(), deps: d };
+            let Some(name) = Path::new(p.as_str()).file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Ok(d) = DepsSetId::try_from(name.to_string()) else {
+                continue;
+            };
+            let found = BaseGen {
+                repo: repo.clone(),
+                tree: tree.clone(),
+                deps: d,
+            };
             if !self.store.has_base_gen(&found)? {
                 continue;
             }
             let ctx = self.deps_ctx(repo)?;
             let (_, id) = strata_deps::key_of(&ctx, &self.store.base_dir(&found))?;
-            let g = BaseGen { repo: repo.clone(), tree: tree.clone(), deps: id };
+            let g = BaseGen {
+                repo: repo.clone(),
+                tree: tree.clone(),
+                deps: id,
+            };
             if self.store.has_base_gen(&g)? {
                 return Ok(Some(g));
             }
@@ -183,9 +241,20 @@ impl Sessions<'_> {
         let rel_b = format!("bases/{repo}/{BASE_STAGING_DIR}/{}", random_hex(16));
         let b = root.join(&rel_b);
         // Step 3: mark live before the directory exists.
-        self.live_staging.lock().unwrap_or_else(|p| p.into_inner()).insert(b.clone());
-        let _live = Live { set: &self.live_staging, path: b.clone() };
-        strata_apfs::mkdir_rooted(root, &rp(format!("bases/{repo}/{BASE_STAGING_DIR}")), 0o755, true)?;
+        self.live_staging
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(b.clone());
+        let _live = Live {
+            set: &self.live_staging,
+            path: b.clone(),
+        };
+        strata_apfs::mkdir_rooted(
+            root,
+            &rp(format!("bases/{repo}/{BASE_STAGING_DIR}")),
+            0o755,
+            true,
+        )?;
         strata_apfs::mkdir_rooted(root, &rp(rel_b.clone()), 0o755, false)?;
 
         match self.base_steps(repo, tree, given, &rel_b, &b) {
@@ -209,11 +278,15 @@ impl Sessions<'_> {
         let b_tree = b.join("tree");
 
         // Step 4: export outside the lock.
-        self.seams.hit("base.export", Some(repo)).map_err(Fail::at("export"))?;
+        self.seams
+            .hit("base.export", Some(repo))
+            .map_err(Fail::at("export"))?;
         git.export_tree(tree, &b_tree).map_err(Fail::at("export"))?;
 
         // Step 5: the deps set.
-        self.seams.hit("base.deps", Some(repo)).map_err(Fail::at("deps"))?;
+        self.seams
+            .hit("base.deps", Some(repo))
+            .map_err(Fail::at("deps"))?;
         let set = match given {
             Some(s) => s.clone(),
             None => {
@@ -231,13 +304,23 @@ impl Sessions<'_> {
         };
 
         // Step 6: the manifest, before the deps dirs are cloned in.
-        self.seams.hit("base.manifest", Some(repo)).map_err(Fail::at("manifest"))?;
-        let manifest = strata_overlay::build_manifest(&b_tree, tree, cfg).map_err(Fail::at("manifest"))?;
+        self.seams
+            .hit("base.manifest", Some(repo))
+            .map_err(Fail::at("manifest"))?;
+        let manifest =
+            strata_overlay::build_manifest(&b_tree, tree, cfg).map_err(Fail::at("manifest"))?;
 
         // Step 7: register, one critical section.
-        self.seams.hit("base.register", Some(repo)).map_err(Fail::at("register"))?;
+        self.seams
+            .hit("base.register", Some(repo))
+            .map_err(Fail::at("register"))?;
         let mut out: Option<std::result::Result<Pass, Fail>> = None;
         let lock = self.locks.with_write(repo, &mut || {
+            // status-bar §11.2: the daemon's `base_build` activity, under the lock.
+            let _building = crate::observe::begin(crate::observe::Work::BaseBuild {
+                repo: repo.clone(),
+                tree: tree.clone(),
+            });
             out = Some(self.register(repo, tree, &set, &manifest, rel_b, b));
             Ok(())
         });
@@ -279,11 +362,18 @@ impl Sessions<'_> {
         let root = &self.config.paths.root;
         let f = Fail::at("register");
         // 7.1
-        if strata_deps::find_set(self.store, repo, &set.id).map_err(Fail::at("register"))?.is_none() {
+        if strata_deps::find_set(self.store, repo, &set.id)
+            .map_err(Fail::at("register"))?
+            .is_none()
+        {
             return Ok(Pass::Miss);
         }
         // 7.2
-        let bg = BaseGen { repo: repo.clone(), tree: tree.clone(), deps: set.id.clone() };
+        let bg = BaseGen {
+            repo: repo.clone(),
+            tree: tree.clone(),
+            deps: set.id.clone(),
+        };
         if self.store.has_base_gen(&bg).map_err(Fail::at("register"))? {
             // Another call registered it first: retire our staging, return it.
             match self.store.retire_dir(b) {
@@ -303,7 +393,8 @@ impl Sessions<'_> {
         }
         // 7.4
         let tree_dir = format!("bases/{repo}/{tree}");
-        strata_apfs::mkdir_rooted(root, &rp(tree_dir.clone()), 0o755, true).map_err(Fail::at("register"))?;
+        strata_apfs::mkdir_rooted(root, &rp(tree_dir.clone()), 0o755, true)
+            .map_err(Fail::at("register"))?;
         let from = rp(format!("{rel_b}/tree"));
         let to = rp(format!("{tree_dir}/{}", set.id));
         let base_dir = self.store.base_dir(&bg);
@@ -311,8 +402,11 @@ impl Sessions<'_> {
             Ok(()) => {}
             Err(e) if e.code == Code::Exists => {
                 // An unregistered leftover of an earlier crash.
-                self.store.retire_dir(&base_dir).map_err(Fail::at("register"))?;
-                strata_apfs::rename_rooted(root, &from, &to, RenameMode::Excl).map_err(Fail::at("register"))?;
+                self.store
+                    .retire_dir(&base_dir)
+                    .map_err(Fail::at("register"))?;
+                strata_apfs::rename_rooted(root, &from, &to, RenameMode::Excl)
+                    .map_err(Fail::at("register"))?;
             }
             Err(e) if e.code == Code::NoSuchPath && !b.exists() => return Ok(Pass::StagingGone),
             Err(e) => return Err(Fail::at("register")(e)),
@@ -324,7 +418,12 @@ impl Sessions<'_> {
                 Ok(_) => Vec::new(),
                 Err(_) => vec![base_dir.clone()],
             };
-            Fail { e, phase: "register", kept, staging_done: false }
+            Fail {
+                e,
+                phase: "register",
+                kept,
+                staging_done: false,
+            }
         };
         // 7.5
         let sync = |rel: &str| -> Result<()> {
@@ -340,7 +439,12 @@ impl Sessions<'_> {
                 // Registered or not, unknowable: keep base_dir, remove the
                 // (empty) staging, report Unknown.
                 let _ = strata_apfs::remove_rooted(root, &rp(rel_b), RemoveKind::EmptyDir);
-                Err(Fail { e, phase: "register", kept: vec![base_dir.clone()], staging_done: true })
+                Err(Fail {
+                    e,
+                    phase: "register",
+                    kept: vec![base_dir.clone()],
+                    staging_done: true,
+                })
             }
             Err(e) => Err(after(e)),
         }
@@ -356,24 +460,41 @@ impl Sessions<'_> {
                 f.kept.push(b.to_path_buf());
                 f.staging_done = true;
                 // Report as a failed retirement: Unknown, kept [B].
-                Err(Fail { e: unknown_base(&self.repo_hint(b), None, "deps", b, &e, &f.kept, &[]), ..f })
+                Err(Fail {
+                    e: unknown_base(&self.repo_hint(b), None, "deps", b, &e, &f.kept, &[]),
+                    ..f
+                })
             }
         }
     }
 
     fn repo_hint(&self, b: &Path) -> String {
         // bases/<repo>/.staging/<x>
-        b.parent().and_then(|p| p.parent()).and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        b.parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
     }
 
     /// The failure path (§5.2 "失败"): retire `B` first, then pass a named
     /// code through or report a half-done write as `Unknown`.
     fn base_failed(&self, repo: &RepoName, tree: &TreeOid, b: &Path, f: Fail) -> Result<Pass> {
         if f.staging_done {
-            if f.e.code == Code::Unknown && f.e.detail.as_ref().and_then(|d| d.get("op")) == Some(&json!("base")) {
+            if f.e.code == Code::Unknown
+                && f.e.detail.as_ref().and_then(|d| d.get("op")) == Some(&json!("base"))
+            {
                 return Err(f.e);
             }
-            return Err(unknown_base(repo.as_str(), Some(tree), f.phase, b, &f.e, &f.kept, &[]));
+            return Err(unknown_base(
+                repo.as_str(),
+                Some(tree),
+                f.phase,
+                b,
+                &f.e,
+                &f.kept,
+                &[],
+            ));
         }
         let mut kept = f.kept.clone();
         let mut retired = Vec::new();
@@ -385,13 +506,24 @@ impl Sessions<'_> {
         if f.e.code != Code::Unknown && kept.is_empty() {
             return Err(f.e);
         }
-        Err(unknown_base(repo.as_str(), Some(tree), f.phase, b, &f.e, &kept, &retired))
+        Err(unknown_base(
+            repo.as_str(),
+            Some(tree),
+            f.phase,
+            b,
+            &f.e,
+            &kept,
+            &retired,
+        ))
     }
 }
 
 fn deps_unsealed(repo: &RepoName, deps: &DepsSetId) -> StrataError {
-    StrataError::new(Code::InvalidInput, format!("deps set {deps} of {repo} is not sealed"))
-        .with_detail(json!({ "reason": "deps_unsealed", "repo": repo.as_str(), "deps": deps.as_str() }))
+    StrataError::new(
+        Code::InvalidInput,
+        format!("deps set {deps} of {repo} is not sealed"),
+    )
+    .with_detail(json!({ "reason": "deps_unsealed", "repo": repo.as_str(), "deps": deps.as_str() }))
 }
 
 /// `Unknown` for `op = "base"` (§6.3).
@@ -410,19 +542,31 @@ fn unknown_base(
     } else {
         format!(
             "kept {}; the next daemon restart collects it",
-            kept.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+            kept.iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     };
-    let paths = |v: &[PathBuf]| Value::from(v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
-    StrataError::new(Code::Unknown, format!("base {repo} {tree_s}: {phase} failed before anything visible changed; {tail}"))
-        .with_detail(json!({
-            "op": "base",
-            "repo": repo,
-            "tree": tree_s,
-            "phase": phase,
-            "path": b.display().to_string(),
-            "cause": cause,
-            "kept": paths(kept),
-            "retired": paths(retired),
-        }))
+    let paths = |v: &[PathBuf]| {
+        Value::from(
+            v.iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>(),
+        )
+    };
+    StrataError::new(
+        Code::Unknown,
+        format!("base {repo} {tree_s}: {phase} failed before anything visible changed; {tail}"),
+    )
+    .with_detail(json!({
+        "op": "base",
+        "repo": repo,
+        "tree": tree_s,
+        "phase": phase,
+        "path": b.display().to_string(),
+        "cause": cause,
+        "kept": paths(kept),
+        "retired": paths(retired),
+    }))
 }

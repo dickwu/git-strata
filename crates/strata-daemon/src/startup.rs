@@ -314,6 +314,8 @@ pub struct Core {
     pub busy: crate::busy::BusyLog,
     /// `daemon_status.volume`: the data root's volume, sampled on a thread.
     pub volume: crate::volume::VolumeHandle,
+    /// Status-bar §3.1: long work in flight (`daemon_status.activity`).
+    pub activity: Arc<crate::activity::Activities>,
     instance: InstanceLock,
 }
 
@@ -430,6 +432,7 @@ pub fn prepare_locked(
         open_git: Arc::new(open_git.clone()),
         started: SystemTime::now(),
         main_sync: Default::default(),
+        activity: Default::default(),
         upstream: Default::default(),
         pins,
         sessions_audit,
@@ -876,9 +879,25 @@ impl<'a> Daemon<'a> {
     /// `daemon_status`: holds, queues, the daemon's warnings; never waits.
     pub fn daemon_status(&self, verify: bool) -> Result<Value> {
         let _catalog = self.core.admit();
+        // Status-bar §12.3: the activity registry is copied (and released)
+        // before any lock FIFO or store read.
+        let activity = self.core.activity.snapshot();
         let catalog = self.core.snapshot()?;
         let mut warnings = self.core.warnings.snapshot();
-        warnings.extend(self.core.locks.long_holds());
+        warnings.extend(
+            self.core
+                .locks
+                .long_holds_with(&|repo, request| activity.exempt_step(repo, request)),
+        );
+        // Read with the activity snapshot, before the store, so a hold and
+        // the work behind it are shown as of nearly the same moment.
+        let holds: Vec<_> = self
+            .core
+            .locks
+            .holds()
+            .into_iter()
+            .filter(|h| catalog.config.repos.contains_key(&h.repo))
+            .collect();
         warnings.extend(self.core.locks.long_waits());
         let pending = self.core.store.rebase_pending(None).unwrap_or_default();
         for p in pending
@@ -914,13 +933,6 @@ impl<'a> Daemon<'a> {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let holds: Vec<_> = self
-            .core
-            .locks
-            .holds()
-            .into_iter()
-            .filter(|h| catalog.config.repos.contains_key(&h.repo))
-            .collect();
         warnings.retain(|w| !matches!(w, DaemonWarning::ConfigRelaxPending { .. }));
         warnings.extend(
             catalog
@@ -949,6 +961,7 @@ impl<'a> Daemon<'a> {
         }
         Ok(json!({
             "holds": holds,
+            "activity": activity.json(),
             "queues": self.core.locks.queue_snapshot(),
             "repo_waiting": catalog.config.repos.keys()
                 .map(|r| (r.as_str().to_string(), self.core.locks.repo_waiting(r)))
@@ -1178,8 +1191,39 @@ mod r2_warning_tests {
             repo: RepoName::try_from("app".to_string()).unwrap(),
             method: "sync".into(),
             since: at,
+            origin: Some(crate::locks::Origin::Request),
+            session: None,
         };
         assert_eq!(w.times(&[held])[0]["raised_at"], "1970-01-01T00:00:01Z");
+    }
+
+    /// Status-bar §3.1: a `LongHold` (and a held lock) an older daemon sent,
+    /// without `origin` and `session`, still reads; a new one carries both.
+    #[test]
+    fn long_hold_and_lock_hold_read_old_payloads() {
+        let old = json!({"LongHold":{"repo":"app","method":"catch_up","since":{"secs_since_epoch":1,"nanos_since_epoch":0}}});
+        let w: DaemonWarning = serde_json::from_value(old).unwrap();
+        assert!(
+            matches!(&w, DaemonWarning::LongHold { origin: None, session: None, method, .. } if method == "catch_up")
+        );
+        let new = DaemonWarning::LongHold {
+            repo: RepoName::try_from("app".to_string()).unwrap(),
+            method: "catch_up".into(),
+            since: SystemTime::UNIX_EPOCH,
+            origin: Some(crate::locks::Origin::Background),
+            session: Some(strata_types::SessionId::try_from("s-aaaaaaaa".to_string()).unwrap()),
+        };
+        let v = serde_json::to_value(&new).unwrap();
+        assert_eq!(
+            (&v["LongHold"]["origin"], &v["LongHold"]["session"]),
+            (&json!("background"), &json!("s-aaaaaaaa"))
+        );
+        assert_eq!(serde_json::from_value::<DaemonWarning>(v).unwrap(), new);
+        let hold: crate::LockHold = serde_json::from_value(
+            json!({"repo":"app","method":"sync","session":null,"since":{"secs_since_epoch":1,"nanos_since_epoch":0}}),
+        )
+        .unwrap();
+        assert_eq!((hold.origin, hold.elapsed_ms), (None, None));
     }
 
     #[test]
