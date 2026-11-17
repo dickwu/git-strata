@@ -131,7 +131,11 @@ down or older). They are read from memory, so they never slow the reply:
 - `volume`: `{free, size, as_of}` in bytes for the volume holding the data
   root, sampled every 10 s; null until a sample succeeds or after one fails. On
   APFS these are the whole container's figures, and `free` leaves out purgeable
-  space, so it reads lower than Finder's "available".
+  space, so it reads lower than Finder's "available". A daemon with feature
+  `daemon_status.volume_name` adds `path` (the data root), `mount` and `name`
+  (e.g. `/Volumes/GWD`, `GWD`); this is the only volume git-strata fills, since
+  the store, sessions and every repo checkout share it, so an external-disk root
+  reports the external disk, not the startup disk.
 - `scan`: the size scan's counts `{running, active, queued, done, full,
   unresolved_n}` (see [Disk usage](#disk-usage-du)).
 - `holders[]` items gain `origin` (`request` or `background`) and

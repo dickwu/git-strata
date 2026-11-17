@@ -128,7 +128,7 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice, "shown"?: CommitOid \| null }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
 | `config_reload` | `{}` | ReloadReport，见 Config catalog and reload |
 | `config_relax` | `{ "repo": RepoName, "shown"?: PinnedFlags \| null }` | `{pins_meta, warnings?}`。`shown` 在反序列化时可省略或为 null，但 handler 会以 `InvalidInput shown_required` 拒绝；支持 `config.reload` 的客户端必须发送展示的 flags。没有凭据字段。见 §5.5 |
-| `daemon_status` | `{ "verify": bool }` | `holds`, `queues:[{session,holder,since,queued}]`, `repo_waiting`, `warnings`（含 LongWait）, `features`, `sessions_audit_error`（会话审计写入失败信息或 null；见下文 sidecar 说明）；见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc`。状态栏字段 `version`、`pid`、`started`、`activity`、`busy`、`volume`、`scan`（feature `daemon_status.activity`）见 Status bar fields |
+| `daemon_status` | `{ "verify": bool }` | `holds`, `queues:[{session,holder,since,queued}]`, `repo_waiting`, `warnings`（含 LongWait）, `features`, `sessions_audit_error`（会话审计写入失败信息或 null；见下文 sidecar 说明）；见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc`。状态栏字段 `version`、`pid`、`started`、`activity`、`busy`、`volume`、`scan`（feature `daemon_status.activity`；`volume` 的 `path`、`mount`、`name` 是 feature `daemon_status.volume_name`）见 Status bar fields |
 | `du` | `{ "refresh": bool }`（缺省 false） | 见 §5.12 |
 | `ports_ensure` | `{ "session": SessionId, "repo": RepoName }` | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
 | `ports_reassign` | `{ "session": SessionId, "repo": RepoName, "checked": u16 \| null }`（`checked`：cli 查过监听的那个 base，`null` 或缺省 = 它没看到租约；与事务里的租约不同时 `Busy lease_changed`，什么都不动） | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
@@ -441,7 +441,7 @@ value; workers should use the accessor for subsequent passes.
 
 `ObserveFailed` 不在 `DaemonWarning` 里重定义。它是 `NewWarning` 或这次 RPC 的 `data.warnings`。
 
-`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity"]`（D38、D39；`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload）；没有这个键的 daemon 一个也不支持。最后一项 `daemon_status.activity` 不是请求扩展，而是回复能力：这个 daemon 的 `daemon_status` 带状态栏字段，见 Status bar fields。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
+`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity", "daemon_status.volume_name"]`（D38、D39；`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload）；没有这个键的 daemon 一个也不支持。最后两项 `daemon_status.activity` 与 `daemon_status.volume_name` 不是请求扩展，而是回复能力：前者表示这个 daemon 的 `daemon_status` 带状态栏字段，后者表示其中的 `volume` 还带 `path`、`mount`、`name`，见 Status bar fields。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
 
 stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看见某个影子仓库的 `PrePushGuardDisabled`。同一条不重复打。这些警告 JSON 里都有，不靠人去翻日志；R2 activity-scope 的 once-per-repo 日志提示是下文注明的例外。
 
@@ -1319,8 +1319,9 @@ remain conservatively unpublished until scanned; the Stop hook keeps its existin
 
 ## Status bar fields (P-b)
 
-`daemon_status.features` ends with `daemon_status.activity`. Unlike the strings
-before it, it announces a reply capability, not a request extension: a daemon
+`daemon_status.features` lists `daemon_status.activity`, followed by
+`daemon_status.volume_name`. Both announce reply capabilities, not request
+extensions. `daemon_status.activity`: a daemon
 that lists it sends every key below on every `daemon_status` reply (empty or
 null where stated), and a client treats the reply as one of this step only when
 the string is present. No method and no request field were added, and no CLI
@@ -1370,7 +1371,16 @@ activity registry), never from the file system or the store, and none waits for
   (apfs.md) at start and every 10 s; `as_of` is the sample's time. On APFS both
   figures are the whole container's, which its volumes share: `free` leaves out
   purgeable space, so it is below what Finder calls available, and
-  `size - free` is not what git-strata uses.
+  `size - free` is not what git-strata uses. With FEATURES
+  `daemon_status.volume_name` the object also says which volume it measured:
+  `path` (the data root, `paths.root`), `mount` (`statfs` `f_mntonname`, e.g.
+  `/Volumes/GWD`) and `name` (`ATTR_VOL_NAME`, e.g. `GWD`), read with
+  `strata_apfs::volume_label` in the same sample; `mount` and `name` are left
+  out when only that read fails. One volume is enough: the data root holds the
+  store, the session trees and the dependency trees, and store open refuses a
+  checkout on another volume (`CrossVolume`), so it is every volume git-strata
+  writes its bulk to (the config dir's small logs and socket aside). A 0.2.3
+  daemon measured the same root without naming it.
 - `scan` is `{running, active, queued, done, full, unresolved_n}`, the size scan
   of §5.12, from counters the scan updates each time it changes its state.
   `active` is the units being measured, `unresolved_n` the length of `du`'s
@@ -1396,7 +1406,7 @@ scan's changes in order; a reader may see the six a moment apart). Tests: `tests
 `du::tests::unresolved_is_one_entry_per_unit_until_measured_or_gone`,
 `du::tests::a_failed_lstat_keeps_the_unit_unresolved`,
 `du::tests::an_unlistable_directory_keeps_its_units` and
-`tests/rpc.rs::features_keep_their_order_and_append_daemon_status_activity`.
+`tests/rpc.rs::features_keep_their_order_and_append_the_reply_capabilities`.
 
 ## Status bar: holder origin, activity and LongHold
 

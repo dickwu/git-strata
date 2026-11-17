@@ -235,7 +235,7 @@ describe('StatusBarView', () => {
       ...calm,
       right: { free: { text: '48 GB free', sev: 'amber' }, saved: null, sessions: null },
     });
-    expect(html).toMatch(/data-sev="amber"[^>]*>48 GB free<\/button>/);
+    expect(html).toMatch(/data-sev="amber"[^>]*><span[^>]*>48 GB free<\/span><\/button>/);
     expect(html).not.toContain('status-saved');
     expect(html).not.toContain('session');
     expect(html).toContain('data-testid="theme-switch"');

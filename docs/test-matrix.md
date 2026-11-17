@@ -77,7 +77,7 @@
 
 | 模块 | 来源以「新增」开头 | 其中恰好是「新增」 |
 | --- | --- | --- |
-| [apfs.md](modules/apfs.md) | 109 | 109 |
+| [apfs.md](modules/apfs.md) | 113 | 113 |
 | [cli.md](modules/cli.md) | 8 | 8 |
 | [confirm.md](modules/confirm.md) | 21 | 5 |
 | [daemon.md](modules/daemon.md) | 21 | 21 |
@@ -88,4 +88,4 @@
 | [search.md](modules/search.md) | 10 | 10 |
 | [session.md](modules/session.md) | 35 | 0 |
 | [store.md](modules/store.md) | 76 | 76 |
-| 合计 | 467 | 353 |
+| 合计 | 471 | 357 |

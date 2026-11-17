@@ -132,6 +132,31 @@ fn volume_space_is_the_space_of_the_volume_holding_the_path() {
 }
 
 #[test]
+fn volume_label_names_the_volume_holding_the_path() {
+    let img = Image::create(Fs::Apfs, 32);
+    fs::create_dir_all(img.path().join("a/b")).unwrap();
+    let mount = fs::canonicalize(img.path()).unwrap();
+    // The image's mount and name, from its root and from deep inside it.
+    for p in [img.path().to_path_buf(), img.path().join("a/b")] {
+        let l = volume_label(&p).unwrap();
+        assert_eq!(fs::canonicalize(&l.mount).unwrap(), mount, "{p:?}: {l:?}");
+        assert_eq!(l.name, "STRATA", "{p:?}: {l:?}");
+    }
+    // The startup disk's data volume is not the image.
+    let t = Tmp::new();
+    let home = volume_label(&t.path).unwrap();
+    assert_ne!(fs::canonicalize(&home.mount).unwrap(), mount, "{home:?}");
+    assert!(!home.name.is_empty(), "{home:?}");
+    // Through the /Users firmlink: the startup disk's data volume.
+    if let Some(h) = std::env::var_os("HOME").filter(|h| Path::new(h).starts_with("/Users")) {
+        let l = volume_label(Path::new(&h)).unwrap();
+        assert_eq!(l.mount, Path::new("/System/Volumes/Data"), "{l:?}");
+    }
+    let e = volume_label(&img.path().join("missing")).unwrap_err();
+    assert_eq!(e.raw_os_error(), Some(libc::ENOENT));
+}
+
+#[test]
 fn volume_caps_per_filesystem() {
     let apfs = Image::create(Fs::Apfs, 32);
     let c = volume_caps(apfs.path()).unwrap();

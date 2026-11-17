@@ -94,8 +94,18 @@ export const daemonCopy = {
     logical: 'Logical size of all files; counts every clone in full',
   },
   volume: {
-    text: (free: string, size: string) => `Data volume: ${free} free of ${size}`,
-    unavailable: 'Data volume: —',
+    text: (volume: string, free: string, size: string) => `${volume}: ${free} free of ${size}`,
+    unavailable: (volume: string) => `${volume}: —`,
+    /** Feature `daemon_status.volume_name`: which disk was measured and for what. */
+    where: (mount: string, path: string | undefined) =>
+      path
+        ? `Mounted at ${mount}; holds the git-strata data root ${path} (store, sessions, dependency trees).`
+        : `Mounted at ${mount}.`,
+    /** A path but no mount (the name read failed). */
+    root: (path: string) =>
+      `The volume holding the git-strata data root ${path} (store, sessions, dependency trees).`,
+    /** An unnamed volume (a 0.2.3 daemon): still the data root's volume. */
+    unnamed: 'The volume holding the git-strata data root (store, sessions, dependency trees).',
     note: "APFS free space is shared across the volume's space pool and excludes purgeable space, so it can differ from Finder. Size minus free is not git-strata usage.",
   },
   scan: {

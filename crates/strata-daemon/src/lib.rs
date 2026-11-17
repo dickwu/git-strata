@@ -138,7 +138,9 @@ pub fn install_path_for_home(home: &Path) -> String {
 /// would reject. Additive only. `new.agent`: `new` takes `agent`.
 /// `daemon_status.activity` names a reply capability instead: the
 /// `daemon_status` fields of the status-bar work (`activity`, `busy`,
-/// `volume`, `scan`, `version`, `pid`, `started`).
+/// `volume`, `scan`, `version`, `pid`, `started`);
+/// `daemon_status.volume_name`: `volume` also says which volume it measured
+/// (`path`, `mount`, `name`).
 pub const FEATURES: &[&str] = &[
     "new.agent",
     "session.mark",
@@ -155,6 +157,7 @@ pub const FEATURES: &[&str] = &[
     "rebase.quiet_scope",
     "config.reload",
     "daemon_status.activity",
+    "daemon_status.volume_name",
 ];
 
 /// The launchd label of the agent.
