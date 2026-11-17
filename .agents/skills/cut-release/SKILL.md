@@ -15,7 +15,7 @@ Before step 1, check all four and stop with a question if any fails: `$ARGUMENTS
 
 ## Steps
 
-1. **Collect what ships.** Take the previous tag from `git describe --tags --abbrev=0` and read `git log --oneline <previous>..HEAD`. Note each store migration added to `MIGRATIONS` in `crates/strata-store/src/schema.rs`, each new `FEATURES` string, config key and CLI command or flag. Done when every commit since the previous tag is classed as user-visible or internal.
+1. **Collect what ships.** Take the previous tag from `git describe --tags --abbrev=0` and read `git log --oneline <previous>..HEAD`. Note each store migration added to `MIGRATIONS` in `crates/strata-store/src/schema.rs`, each new `FEATURES` string, config key and CLI command or flag, and any `rust-version` change in `Cargo.toml` or `apps/desktop/src-tauri/Cargo.toml` (the notes then say which Rust a source build needs). Done when every commit since the previous tag is classed as user-visible or internal.
 
 2. **Bump the version in exactly these 16 files.** Edit the `version` field itself in each one. A search-and-replace of the old version corrupts other lines: `libc = "0.2.191"` contains `0.2.1`.
    - line 3 of each of the 13 `crates/*/Cargo.toml`
