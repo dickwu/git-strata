@@ -224,6 +224,26 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_name_read_keeps_the_space_and_leaves_out_mount_and_name() {
+        // The space reads (fake) but the path does not exist, so the real
+        // name read fails.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let v = Volume::start_with(
+            missing.clone(),
+            Duration::from_millis(5),
+            Arc::new(|_: &Path| Ok(VolumeSpace { free: 1, size: 2 })),
+        );
+        let got = wait_for(&v, |j| !j.is_null());
+        assert_eq!(got["size"], 2, "{got}");
+        assert_eq!(got["path"], json!(missing.to_string_lossy()), "{got}");
+        assert!(
+            got.get("mount").is_none() && got.get("name").is_none(),
+            "{got}"
+        );
+    }
+
+    #[test]
     fn dropping_the_handle_stops_the_sampler() {
         let dir = tempfile::tempdir().unwrap();
         let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));

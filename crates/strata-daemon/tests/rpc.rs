@@ -662,7 +662,7 @@ publish = { branch = "main", push = true, confirm = false, auto_clse = true }
 /// `daemon_status.activity` (the status-bar reply fields) comes right after
 /// them, then `daemon_status.volume_name` (which volume `volume` measured).
 #[test]
-fn features_keep_their_order_and_append_daemon_status_activity() {
+fn features_keep_their_order_and_append_the_reply_capabilities() {
     let shipped = [
         "new.agent",
         "session.mark",

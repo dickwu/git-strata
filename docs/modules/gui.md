@@ -1006,7 +1006,7 @@ daemon modal. Chip targets open the relevant modal section, waiting list or sess
 
 | Order | Color | Contents |
 |---|---|---|
-| 1 | Red (`--danger`) | Critically low volume space, unavailable data volume guidance, file-handle pressure, Error-class warnings (down/exhaustion are shown once in the daemon trigger) |
+| 1 | Red (`--danger`) | Critically low volume space, unavailable store volume guidance, file-handle pressure, Error-class warnings (down/exhaustion are shown once in the daemon trigger) |
 | 2 | Amber (Waiting palette) | Waiting for you |
 | 3 | Purple (Conflict palette) | Repositories needing an agent for conflicts |
 | 4 | Amber (Waiting palette) | Degraded states: Busy replies, abnormal holds (every P-b LongHold; on 0.2.2 a request hold or a background hold past 30 min), current long waits, actionable auto-rebase failures, config not applied or awaiting a restart, fetch failures, a panicked reconciliation pass (`reconcile.last.panicked`), a failed sessions audit-log write (`sessions_audit_error`), published but not pushed, unresolved measuring errors, low space, version mismatch |

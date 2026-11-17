@@ -2,6 +2,7 @@
 
 use std::ffi::CStr;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::error::{IoSide, classify_errno};
@@ -93,14 +94,11 @@ pub fn volume_label(path: &Path) -> io::Result<VolumeLabel> {
     let mut sfs: libc::statfs = unsafe { std::mem::zeroed() };
     sys::retry(|| unsafe { libc::statfs(c.as_ptr(), &mut sfs) })
         .map_err(io::Error::from_raw_os_error)?;
-    let mount = PathBuf::from(
-        unsafe { CStr::from_ptr(sfs.f_mntonname.as_ptr()) }
-            .to_string_lossy()
-            .into_owned(),
-    );
-    // getattrlist on the mount point: volume attributes need the volume's
-    // root (EINVAL otherwise).
-    let mc = sys::cpath(&mount).map_err(io::Error::from_raw_os_error)?;
+    // The mount point's own bytes, never a lossy copy: getattrlist reads
+    // the volume's attributes there (they need the volume's root).
+    let raw = unsafe { CStr::from_ptr(sfs.f_mntonname.as_ptr()) };
+    let mount = PathBuf::from(std::ffi::OsStr::from_bytes(raw.to_bytes()));
+    let mc = raw.to_owned();
     let mut al = libc::attrlist {
         bitmapcount: libc::ATTR_BIT_MAP_COUNT,
         reserved: 0,
@@ -130,7 +128,7 @@ pub fn volume_label(path: &Path) -> io::Result<VolumeLabel> {
 /// The `attrreference_t` name after the u32 length: offset (i32, from the
 /// reference itself) and length (u32, with the NUL).
 fn attr_name(buf: &[u8]) -> Option<String> {
-    let off = i32::from_ne_bytes(buf.get(4..8)?.try_into().ok()?);
+    let off = sys::rd_i32(buf, 4)?;
     let len = sys::rd_u32(buf, 8)? as usize;
     let start = 4usize.checked_add(usize::try_from(off).ok()?)?;
     let bytes = buf.get(start..start.checked_add(len)?)?;
@@ -205,4 +203,39 @@ pub fn volume_caps(path: &Path) -> crate::Result<VolumeCaps> {
         case_sensitive: flag(fmt, libc::VOL_CAP_FMT_CASE_SENSITIVE),
         write_gen_count: flag(fmt, libc::VOL_CAP_FMT_WRITE_GENERATION_COUNT),
     })
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    /// A getattrlist reply: u32 length, attrreference (offset from itself,
+    /// length with the NUL), then the name.
+    fn reply(off: i32, len: u32, name: &[u8]) -> Vec<u8> {
+        let mut b = vec![0u8; 12];
+        b[4..8].copy_from_slice(&off.to_ne_bytes());
+        b[8..12].copy_from_slice(&len.to_ne_bytes());
+        b.extend_from_slice(name);
+        b
+    }
+
+    #[test]
+    fn attr_name_reads_the_reference_and_refuses_bad_ones() {
+        assert_eq!(attr_name(&reply(8, 4, b"GWD\0")), Some("GWD".into()));
+        assert_eq!(
+            attr_name(&reply(8, 6, "Wörk\0".as_bytes())),
+            Some("Wörk".into())
+        );
+        assert_eq!(attr_name(&reply(8, 1, b"\0")), None, "empty name");
+        assert_eq!(attr_name(&reply(-4, 4, b"GWD\0")), None, "negative offset");
+        assert_eq!(attr_name(&reply(8, 40, b"GWD\0")), None, "past the buffer");
+        assert_eq!(attr_name(&reply(8, 3, b"GWD")), None, "no NUL");
+        assert_eq!(attr_name(&[0u8; 6]), None, "truncated reference");
+    }
+
+    #[test]
+    fn fallback_name_is_the_mount_points_last_component() {
+        assert_eq!(fallback_name(Path::new("/Volumes/GWD")), "GWD");
+        assert_eq!(fallback_name(Path::new("/")), "/");
+    }
 }

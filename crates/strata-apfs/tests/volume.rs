@@ -147,6 +147,11 @@ fn volume_label_names_the_volume_holding_the_path() {
     let home = volume_label(&t.path).unwrap();
     assert_ne!(fs::canonicalize(&home.mount).unwrap(), mount, "{home:?}");
     assert!(!home.name.is_empty(), "{home:?}");
+    // Through the /Users firmlink: the startup disk's data volume.
+    if let Some(h) = std::env::var_os("HOME").filter(|h| Path::new(h).starts_with("/Users")) {
+        let l = volume_label(Path::new(&h)).unwrap();
+        assert_eq!(l.mount, Path::new("/System/Volumes/Data"), "{l:?}");
+    }
     let e = volume_label(&img.path().join("missing")).unwrap_err();
     assert_eq!(e.raw_os_error(), Some(libc::ENOENT));
 }

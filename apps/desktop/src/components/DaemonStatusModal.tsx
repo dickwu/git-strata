@@ -375,7 +375,9 @@ export function VolumeBlock({ v }: { v: NonNullable<ReturnType<typeof volumeView
       <p className={css.lead}>
         {v.stale ? s.unavailable(v.label) : s.text(v.label, bytes(v.free), bytes(v.size))}
       </p>
-      <p className={css.note}>{v.mount ? s.where(v.mount, v.path) : s.unnamed}</p>
+      <p className={css.note}>
+        {v.mount ? s.where(v.mount, v.path) : v.path ? s.root(v.path) : s.unnamed}
+      </p>
       <p className={css.note}>
         {t.storage.asOf(when(v.as_of))}. {s.note}
       </p>

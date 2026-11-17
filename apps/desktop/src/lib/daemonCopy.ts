@@ -101,6 +101,9 @@ export const daemonCopy = {
       path
         ? `Mounted at ${mount}; holds the git-strata data root ${path} (store, sessions, dependency trees).`
         : `Mounted at ${mount}.`,
+    /** A path but no mount (the name read failed). */
+    root: (path: string) =>
+      `The volume holding the git-strata data root ${path} (store, sessions, dependency trees).`,
     /** An unnamed volume (a 0.2.3 daemon): still the data root's volume. */
     unnamed: 'The volume holding the git-strata data root (store, sessions, dependency trees).',
     note: "APFS free space is shared across the volume's space pool and excludes purgeable space, so it can differ from Finder. Size minus free is not git-strata usage.",

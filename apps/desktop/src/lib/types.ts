@@ -79,7 +79,7 @@ export interface VolumeSpace {
   free: number;
   size: number;
   as_of: string;
-  /** Feature `daemon_status.volume_name` (0.2.4+): the data root measured (`paths.root`). */
+  /** Feature `daemon_status.volume_name`: the data root measured (`paths.root`). */
   path?: string;
   /** Feature `daemon_status.volume_name`: where the measured volume is mounted. */
   mount?: string;

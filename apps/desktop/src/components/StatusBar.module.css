@@ -188,6 +188,13 @@
   margin-left: 0;
   color: var(--text-muted);
 }
+/* A volume name comes from the daemon (up to 255 characters): keep the right side short. */
+.freeText {
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .free[data-sev='amber'] {
   color: var(--sev-amber);
   font-weight: 500;

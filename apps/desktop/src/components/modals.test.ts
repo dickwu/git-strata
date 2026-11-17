@@ -216,6 +216,14 @@ describe('daemon modal content', () => {
       'Mounted at /Volumes/GWD; holds the git-strata data root /Volumes/GWD/inter/.strata'
     );
     expect(html).not.toContain('Store volume:');
+    // A path without mount/name (the name read failed): the store volume, with its root.
+    delete data.volume!.mount;
+    delete data.volume!.name;
+    const bare = content({ status: answered(data), now: Date.parse(pbFixture.now) });
+    expect(bare).toContain('Store volume: 1.2 TB free of 2.0 TB');
+    expect(bare).toContain(
+      'The volume holding the git-strata data root /Volumes/GWD/inter/.strata'
+    );
   });
 
   test('P-b storage and scan remain usable while du has not answered; trash target exists', () => {

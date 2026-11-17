@@ -441,7 +441,7 @@ value; workers should use the accessor for subsequent passes.
 
 `ObserveFailed` 不在 `DaemonWarning` 里重定义。它是 `NewWarning` 或这次 RPC 的 `data.warnings`。
 
-`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity", "daemon_status.volume_name"]`（D38、D39；`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload）；没有这个键的 daemon 一个也不支持。最后一项 `daemon_status.activity` 不是请求扩展，而是回复能力：这个 daemon 的 `daemon_status` 带状态栏字段，见 Status bar fields。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
+`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity", "daemon_status.volume_name"]`（D38、D39；`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload）；没有这个键的 daemon 一个也不支持。最后两项 `daemon_status.activity` 与 `daemon_status.volume_name` 不是请求扩展，而是回复能力：前者表示这个 daemon 的 `daemon_status` 带状态栏字段，后者表示其中的 `volume` 还带 `path`、`mount`、`name`，见 Status bar fields。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
 
 stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看见某个影子仓库的 `PrePushGuardDisabled`。同一条不重复打。这些警告 JSON 里都有，不靠人去翻日志；R2 activity-scope 的 once-per-repo 日志提示是下文注明的例外。
 
@@ -1319,8 +1319,9 @@ remain conservatively unpublished until scanned; the Stop hook keeps its existin
 
 ## Status bar fields (P-b)
 
-`daemon_status.features` ends with `daemon_status.activity`. Unlike the strings
-before it, it announces a reply capability, not a request extension: a daemon
+`daemon_status.features` lists `daemon_status.activity`, followed by
+`daemon_status.volume_name`. Unlike the strings before them, these announce
+reply capabilities, not request extensions. `daemon_status.activity`: a daemon
 that lists it sends every key below on every `daemon_status` reply (empty or
 null where stated), and a client treats the reply as one of this step only when
 the string is present. No method and no request field were added, and no CLI
