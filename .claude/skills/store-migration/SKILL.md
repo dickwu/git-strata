@@ -26,6 +26,8 @@ A bump is irreversible for users. The daemon migrates the store on its first sta
    - Both `NEW_TABLES` lists, in `migrate.rs` and `migrate_v3.rs`, when the migration adds a table.
    - Test names that carry the number, such as `v3_to_v7_migration_keeps_rows` and `crash_right_after_commit_keeps_v7`.
 
+   In `crates/strata-types/src/lib.rs`, set `STORE_SCHEMA` to the new `LATEST` and raise `DOWNGRADE_FLOOR` to the oldest release that can read the newly written store and other persisted files. The release packager reads these values from `print-release-meta` for the signed app. The updater feed copies the bundle's schema number.
+
 4. **Add `crates/strata-store/tests/migrate_v<N>.rs`.** It proves that a populated store of the previous version migrates, that rows which existed before are unchanged afterwards, and that the migrated schema equals a fresh store's. Obtain the previous-version store in one of two ways:
    - Build a current store with `support::env()` and `support::world`, then strip the new addition and set `PRAGMA user_version` back, as `migrate_v7.rs` does. Stripping yields an exact older schema only while that migration is the newest. The previous `migrate_v<N-1>.rs` therefore has to strip your addition as well, or move to a fixture.
    - Commit a fixture `tests/fixtures/store-v<N-1>.db` produced by the previous commit's code, and record how in `tests/fixtures/README.md`, as `migrate_v6.rs` does with `store-v5.db`.
@@ -38,7 +40,7 @@ A bump is irreversible for users. The daemon migrates the store on its first sta
    - `docs/modules/store.md`: every statement of the current number (search the file for `LATEST` and `user_version`), plus a new section for this version beside the existing per-version ones, in English like them. The DDL block in §4.3 is version 1 and stays as it is.
    - `README.md`: the "Downgrade warning" paragraph.
    - `skills/git-strata/SKILL.md`: the `compatibility:` frontmatter line.
-   - Release notes: the next `docs/release-notes/v<version>.md` opens with an `## Upgrade first: …` section modelled on `v0.2.1.md`. If that file does not exist yet, tell the user the release needs this section.
+   - Release notes: the next `docs/release-notes/v<version>.md` opens with an `## Upgrade first: …` section modelled on `v0.2.1.md`. Its opening paragraph goes into the in-app updater feed. If that file does not exist yet, tell the user the release needs this section.
 
 ## Done
 

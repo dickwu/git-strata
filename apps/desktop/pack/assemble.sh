@@ -6,6 +6,7 @@
 set -euo pipefail
 src_app="$1"; bins="$2"; id="$3"; out="$4"
 here="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$here/../../.." && pwd)"
 prefix="io.github.dickwu.git-strata"
 mkdir -p "$out"
 app="$out/GIT STRATA.app"
@@ -25,11 +26,25 @@ mkdir -p "$app/Contents/Library/LaunchAgents"
 install -m 644 "$here/$prefix.daemon.plist" "$app/Contents/Library/LaunchAgents/$prefix.daemon.plist"
 plutil -lint "$app/Contents/Library/LaunchAgents/$prefix.daemon.plist"
 
+info="$app/Contents/Info.plist"
+version="$(plutil -extract CFBundleShortVersionString raw -expect string "$info")"
+release_meta="$(cd "$root" && cargo run --quiet --locked -p strata-types --example print-release-meta)"
+meta_version="$(jq -er '.version | strings' <<< "$release_meta")"
+[[ "$meta_version" == "$version" ]] || {
+  echo "error: compiled release metadata version $meta_version differs from app version $version" >&2
+  exit 1
+}
+store_schema="$(jq -er '.store_schema | numbers | select(. > 0 and floor == .)' <<< "$release_meta")"
+downgrade_floor="$(jq -er '.downgrade_floor | strings | select(length > 0)' <<< "$release_meta")"
+plutil -replace GitStrataStoreSchema -integer "$store_schema" "$info"
+plutil -replace GitStrataDowngradeFloor -string "$downgrade_floor" "$info"
+mkdir -p "$app/Contents/Resources"
+install -m 644 "$root/examples/config.toml" "$app/Contents/Resources/config.toml"
+
 "$here/sign-app.sh" "$app" "$id"
 
 record="$out/pack-record.md"
-version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
-exe="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+exe="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$info")"
 {
   echo "# Pack record"
   echo
