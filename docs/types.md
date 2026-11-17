@@ -629,3 +629,14 @@ accepted names in `detail.resolved` / `detail.kept`. The original report rows ar
 retained, but choices are not persisted for automatic reuse: repeat accepted
 names with the same flags/bytes and target/generation, plus newly resolved names.
 Upstream data remains the separate shared upstream wire types.
+
+### Compiled upgrade metadata
+
+`strata_types::STORE_SCHEMA` is the highest store schema this release can open.
+The migration author updates it in the same change as `strata-store`'s
+`schema::LATEST`. `strata_types::DOWNGRADE_FLOOR` is the oldest release that
+can read the persisted formats the new release writes. The release owner
+raises it when a store, pins, or config format change requires a newer reader.
+
+The desktop updater and release tools use these constants directly from
+`strata-types`, which has no dependency on `strata-store`.

@@ -10,3 +10,4 @@ pub mod health;
 pub mod service;
 pub mod sessions;
 pub mod storage;
+pub mod update_cmds;

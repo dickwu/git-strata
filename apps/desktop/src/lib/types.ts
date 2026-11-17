@@ -4,6 +4,8 @@
  * else stays `unknown` so a daemon that adds fields does not break the build.
  */
 
+import type { Channel } from '@tauri-apps/api/core';
+
 export interface GuiError {
   code: string;
   message: string;
@@ -111,6 +113,32 @@ export interface QueueJson {
  */
 export type DaemonWarningJson = string | Record<string, Record<string, unknown> | null>;
 
+export type DrainThen = 'restart' | 'stop' | 'hold';
+
+export type DrainRequest =
+  | { on: boolean; ttl_s?: number; lease_id?: string; seal?: never; then?: never }
+  | { seal: true; lease_id: string; then: DrainThen; on?: never; ttl_s?: never };
+
+export interface DrainLease {
+  lease_id: string;
+}
+
+export interface Draining extends DrainLease {
+  /** RFC 3339. A sealed hold has no expiry. */
+  expires_at: string | null;
+  sealed: boolean;
+  then: DrainThen | null;
+}
+
+export interface Inflight {
+  method: string;
+  session?: string;
+  repo?: string;
+  phase: 'queued' | 'confirming' | 'locked' | 'running';
+  /** RFC 3339. */
+  started_at: string;
+}
+
 export interface DaemonStatus {
   holds: unknown[];
   /** Session FIFOs. Present on every daemon the app talks to, typed late (status bar §2.2 #11). */
@@ -141,6 +169,10 @@ export interface DaemonStatus {
   activity?: DaemonActivity[];
   busy?: DaemonBusy;
   volume?: VolumeSpace | null;
+  /** Feature `daemon.drain`. Older daemons omit these fields. */
+  draining?: Draining | null;
+  inflight?: Inflight[];
+  store_schema?: number;
   scan?: DaemonScan;
 }
 
@@ -477,4 +509,95 @@ export type StartProgress =
 export interface Started {
   action: 'kickstart' | 'bootstrap';
   waited_ms: number;
+}
+
+/** Manifest information shown before download. */
+export interface UpdateTarget {
+  version: string;
+  notes?: string;
+  notes_url?: string;
+  /** Advisory until the downloaded bundle has been verified. */
+  store_schema?: number;
+  min_updatable_from?: string;
+}
+
+/** Version-upgrade design §4.3. */
+export type UpdateState =
+  | { phase: 'idle' }
+  | { phase: 'checking' }
+  | { phase: 'up_to_date' }
+  | { phase: 'available'; target: UpdateTarget }
+  | { phase: 'check_failed' }
+  | { phase: 'confirming' }
+  | { phase: 'downloading'; pct: number | null }
+  | { phase: 'verifying_bundle' }
+  | { phase: 'draining'; inflight: Inflight[]; background: LockHoldJson[] }
+  | { phase: 'stopping' }
+  | { phase: 'installing' }
+  | { phase: 'starting_daemon' }
+  | { phase: 'relaunching' }
+  | { phase: 'reconciling' }
+  | { phase: 'waiting_daemon'; since: string }
+  | { phase: 'done' }
+  | { phase: 'daemon_failed'; reason: string }
+  | { phase: 'waiting_permission' }
+  | { phase: 'cancelled' }
+  | { phase: 'not_starting' }
+  | { phase: 'install_failed_unchanged' }
+  | { phase: 'restored'; from: string }
+  | { phase: 'restore_failed' }
+  | { phase: 'cancel_blocked' }
+  | { phase: 'bootout_failed' }
+  | { phase: 'fence_uncertain' };
+
+/** Persisted update transaction (§4.2 step 4). */
+export interface Txn {
+  phase: string;
+  from: string;
+  to: string;
+  from_schema: number;
+  to_schema: number;
+  to_floor: string;
+  /** Required key. Null when the daemon was not serving at the start of the update. */
+  from_daemon: { pid: number; started: string; version: string } | null;
+  program: string;
+  rollback_zip: string;
+  was_enabled?: boolean;
+}
+
+interface UpdateProgressArgs {
+  onProgress: Channel<UpdateState>;
+}
+
+interface UpdateSchemaArgs extends UpdateProgressArgs {
+  /** Target store schema acknowledged in the app's migration warning. */
+  schemaAcknowledgement?: number;
+}
+
+export interface UpdateCommandArgs {
+  update_state: undefined;
+  update_check: undefined;
+  update_install: UpdateSchemaArgs & { target: string };
+  update_cancel: undefined;
+  daemon_restart: UpdateSchemaArgs;
+  daemon_move_into_app: UpdateSchemaArgs;
+  /**
+   * Omit folder choices to keep the existing config. This path requires
+   * schemaAcknowledgement for the target schema (§6.3 step 3).
+   */
+  daemon_setup: UpdateSchemaArgs & { dataRoot?: string; repos?: Record<string, string> };
+  cli_link_install: undefined;
+  update_rollback: UpdateProgressArgs;
+}
+
+export interface UpdateCommandResults {
+  update_state: UpdateState;
+  update_check: UpdateState;
+  update_install: void;
+  update_cancel: void;
+  daemon_restart: void;
+  daemon_move_into_app: void;
+  daemon_setup: void;
+  cli_link_install: void;
+  update_rollback: void;
 }

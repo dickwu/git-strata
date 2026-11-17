@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cli-link-install"
+description = "Enables the cli_link_install command without any pre-configured scope."
+commands.allow = ["cli_link_install"]
+
+[[permission]]
+identifier = "deny-cli-link-install"
+description = "Denies the cli_link_install command without any pre-configured scope."
+commands.deny = ["cli_link_install"]

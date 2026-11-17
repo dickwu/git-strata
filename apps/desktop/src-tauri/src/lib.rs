@@ -17,6 +17,7 @@ pub mod tray_assets;
 #[cfg(target_os = "macos")]
 mod tray_mac;
 pub mod tray_palette;
+pub mod update;
 
 use std::time::Duration;
 
@@ -78,7 +79,8 @@ pub fn run() {
             lifecycle::bring_to_front(&TauriShell(app.clone()))
         }))
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_os::init());
+        .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_updater::Builder::new().build());
     // UI automation for development only (gui.md G4): needs both the
     // dev-connector feature (`bun run tauri:dev`) and a debug build.
     #[cfg(all(feature = "dev-connector", debug_assertions))]
@@ -155,6 +157,15 @@ pub fn run() {
             commands::deps::deps_approve,
             commands::service::legacy_agent,
             commands::service::daemon_start,
+            commands::update_cmds::update_state,
+            commands::update_cmds::update_check,
+            commands::update_cmds::update_install,
+            commands::update_cmds::update_cancel,
+            commands::update_cmds::daemon_restart,
+            commands::update_cmds::daemon_move_into_app,
+            commands::update_cmds::daemon_setup,
+            commands::update_cmds::cli_link_install,
+            commands::update_cmds::update_rollback,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| panic!("error while building {APP_NAME}: {e}"));
@@ -181,6 +192,17 @@ mod tests {
         assert_eq!(conf["app"]["windows"][0]["title"], APP_NAME);
         // The rename is display-only.
         assert_eq!(conf["identifier"], "io.github.dickwu.git-strata");
+    }
+
+    #[test]
+    fn updater_config_requires_a_signed_version() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let updater: tauri_plugin_updater::Config =
+            serde_json::from_value(conf["plugins"]["updater"].clone()).unwrap();
+        assert!(!updater.pubkey.is_empty());
+        assert!(updater.require_signed_version);
+        assert_eq!(conf["bundle"]["createUpdaterArtifacts"], false);
     }
 
     /// t79u: the single-instance plugin must be the first plugin registered
@@ -220,7 +242,7 @@ mod tests {
             .filter_map(|l| l.trim().strip_suffix(','))
             .filter_map(|l| l.rsplit("::").next())
             .collect();
-        assert_eq!(registered.len(), 9);
+        assert_eq!(registered.len(), 18);
         let build = include_str!("../build.rs");
         let cap: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
@@ -242,11 +264,18 @@ mod tests {
                 "{allow} missing from default.json"
             );
         }
-        // No other capability file may grant the launchctl commands.
+        // Check privileged commands against the development capability as well.
         for p in [
             "allow-daemon-start",
             "allow-legacy-agent",
             "allow-deps-approve",
+            "allow-update-install",
+            "allow-update-cancel",
+            "allow-daemon-restart",
+            "allow-daemon-move-into-app",
+            "allow-daemon-setup",
+            "allow-cli-link-install",
+            "allow-update-rollback",
         ] {
             assert!(!include_str!("../capabilities-dev/dev-connector.json").contains(p));
         }
@@ -264,6 +293,7 @@ mod tests {
             ("storage.rs", include_str!("commands/storage.rs")),
             ("service.rs", include_str!("commands/service.rs")),
             ("mod.rs", include_str!("commands/mod.rs")),
+            ("update_cmds.rs", include_str!("commands/update_cmds.rs")),
         ];
         let words = |src: &str| {
             src.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))

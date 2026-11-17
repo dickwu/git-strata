@@ -2,9 +2,8 @@
 //! existing `com.gwd.git-stratad` launch agent from the app, the same way
 //! `git-strata daemon start` does, so a down daemon needs no terminal.
 //!
-//! Start only. The GUI never stops, boots out or signals the agent: the
-//! trait has no such method and `launchctl.rs` has no such verb (a static
-//! test below holds both). With no plist the GUI reports
+//! Start only. The updater's service operations return `Unsupported`
+//! until their launchd implementation lands. With no plist the GUI reports
 //! `plist_missing` and writes nothing; installing a plist from the app is
 //! S1 territory.
 //!
@@ -46,7 +45,7 @@ pub fn plist_for_home(home: &Path) -> PathBuf {
         .join(format!("{AGENT_LABEL}.plist"))
 }
 
-/// The only launchd operations the GUI has. No stop, no bootout, no kill.
+/// Launchd operations available to the GUI.
 pub trait ServiceManager: Send + Sync {
     /// launchd's dump of the job in `gui/<uid>` (`launchctl print`), or
     /// `None` when launchd does not have it.
@@ -57,6 +56,31 @@ pub trait ServiceManager: Send + Sync {
     /// Load the job from this exact plist into `gui/<uid>`; `RunAtLoad`
     /// starts it.
     fn bootstrap(&self, plist: &Path) -> Result<(), GuiError>;
+
+    /// Unload the label after the update coordinator has verified the shutdown or seal.
+    fn bootout(&self, _label: &str) -> Result<(), GuiError> {
+        Err(upgrade_unavailable())
+    }
+    /// Inhibit launches of the label in the login user's domain.
+    fn disable(&self, _label: &str) -> Result<(), GuiError> {
+        Err(upgrade_unavailable())
+    }
+    /// Restore the enabled state of the label in the login user's domain.
+    fn enable(&self, _label: &str) -> Result<(), GuiError> {
+        Err(upgrade_unavailable())
+    }
+    /// Whether the label is disabled in the login user's domain.
+    fn print_disabled(&self, _label: &str) -> Result<bool, GuiError> {
+        Err(upgrade_unavailable())
+    }
+}
+
+fn upgrade_unavailable() -> GuiError {
+    GuiError::new(
+        Code::Unsupported,
+        "daemon upgrade service operations are unavailable",
+        json!({ "reason": "not_implemented" }),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

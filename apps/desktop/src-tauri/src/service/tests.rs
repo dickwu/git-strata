@@ -616,8 +616,8 @@ fn literals(code: &str) -> Vec<String> {
 }
 
 /// §13 Q3, start only: no stop / bootout / kill / remove / unload /
-/// disable / `-k` anywhere launchctl could be handed one, and the only
-/// process the GUI spawns is /bin/launchctl.
+/// disable / `-k` anywhere launchctl could be handed one. The service runs
+/// only /bin/launchctl.
 #[test]
 fn service_never_stops_and_spawns_only_launchctl() {
     let files = [
@@ -646,14 +646,7 @@ fn service_never_stops_and_spawns_only_launchctl() {
                 assert!(!hit, "{name}: string literal {lit:?} contains {f:?}");
             }
         }
-        for f in [
-            "fn stop",
-            "fn bootout",
-            "fn kill",
-            "fn remove",
-            "fn unregister",
-            ".kill(",
-        ] {
+        for f in ["fn stop", "fn kill", "fn remove", "fn unregister", ".kill("] {
             assert!(!c.contains(f), "{name} has {f}");
         }
     }
@@ -677,7 +670,7 @@ fn service_never_stops_and_spawns_only_launchctl() {
     }
 }
 
-/// No other source file in the crate spawns a process.
+/// Process constructors are confined to the launchctl and updater runners.
 #[test]
 fn nothing_else_spawns_a_process() {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -691,14 +684,22 @@ fn nothing_else_spawns_a_process() {
         }
     }
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let launchctl = src.join("service/launchctl.rs");
+    let update_exec = src.join("update/exec.rs");
     let mut files = Vec::new();
     walk(&src, &mut files);
     for f in files {
         let text = std::fs::read_to_string(&f).unwrap();
         let c = code(&text);
         let n = c.matches("Command::new(").count();
-        if f.ends_with("service/launchctl.rs") {
+        if f == launchctl {
             assert_eq!(n, 1);
+        } else if f == update_exec {
+            assert!(
+                n <= 1,
+                "{} has more than one process constructor",
+                f.display()
+            );
         } else {
             assert_eq!(n, 0, "{} spawns a process", f.display());
             assert!(
