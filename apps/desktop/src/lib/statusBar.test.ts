@@ -1211,6 +1211,16 @@ describe('P-b contract sources', () => {
     expect(allChips(i).find((c) => c.id === 'low-space')?.text).toBe(
       'GWD is low on space · 30 GB free'
     );
+    // A long name is cut in the bar and chip so the figure stays; the modal label is whole.
+    v.name = 'A very long external volume name';
+    expect(volumeView(i.daemon.data, NOW)).toMatchObject({
+      label: 'A very long external volume name',
+      shortLabel: 'A very long externa…',
+    });
+    expect(statusBarModel(i, NOW).right.free?.text).toBe('A very long externa… · 30 GB free');
+    expect(allChips(i).find((c) => c.id === 'low-space')?.text).toBe(
+      'A very long externa… is low on space · 30 GB free'
+    );
     // A blank name is no name.
     v.name = ' ';
     expect(volumeView(i.daemon.data, NOW)?.label).toBe('Store volume');

@@ -143,6 +143,9 @@ export function hasActivityStatus(s: DaemonStatus | undefined): boolean {
   return s?.features?.includes('daemon_status.activity') === true;
 }
 
+/** Longest volume name the bar and chip show whole. */
+const NAME_MAX = 20;
+
 /**
  * Cached volume facts; a stale sample never supplies a current free-space figure. The volume is
  * always the one holding the daemon's data root (`paths.root`: store, sessions, dependency
@@ -172,15 +175,20 @@ export function volumeView(
   const name = typeof v.name === 'string' && v.name.trim() !== '' ? v.name : undefined;
   const mount = typeof v.mount === 'string' && v.mount !== '' ? v.mount : undefined;
   const path = typeof v.path === 'string' && v.path !== '' ? v.path : undefined;
+  // The bar and chip keep the figure visible: a long name (APFS allows 255) is cut, the modal
+  // shows it whole.
+  const chars = name === undefined ? [] : Array.from(name);
+  const short = chars.length > NAME_MAX ? `${chars.slice(0, NAME_MAX - 1).join('')}…` : name;
   return {
     ...v,
     name,
     mount,
     path,
     label: name ?? t.storeVolume,
+    shortLabel: short ?? t.storeVolume,
     stale,
     level,
-    text: stale ? '—' : t.free(bytes(v.free), name),
+    text: stale ? '—' : t.free(bytes(v.free), short),
   };
 }
 
@@ -1032,7 +1040,7 @@ export function statusBarModel(
         id: 'low-space',
         rank: volume.level === 'red' ? 1 : 4,
         sev: volume.level,
-        text: t.lowSpace(volume.label, bytes(volume.free)),
+        text: t.lowSpace(volume.shortLabel, bytes(volume.free)),
         target: modal('trash'),
       });
     // Only a restart the App saw (pid or start time replaced), never a first start at login.

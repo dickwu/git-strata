@@ -190,7 +190,7 @@
 }
 /* A volume name comes from the daemon (up to 255 characters): keep the right side short. */
 .freeText {
-  max-width: 24ch;
+  max-width: 40ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

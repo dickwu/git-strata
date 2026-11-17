@@ -44,7 +44,8 @@ fn app_version() -> String {
 }
 
 /// The keys `write` adds (fixture, path, value), all from the status-bar
-/// work (feature `daemon_status.activity`). The values are fixed so an
+/// work (feature `daemon_status.activity`; the `volume.*` names from
+/// `daemon_status.volume_name`). The values are fixed so an
 /// update is the same on every machine and run: machine-specific ones
 /// (`pid`, `started`, `volume`; `version` is the app's, so the pair reads
 /// as matched) and timing-specific ones (work in flight, Busy replies, scan

@@ -94,8 +94,9 @@ pub fn volume_label(path: &Path) -> io::Result<VolumeLabel> {
     let mut sfs: libc::statfs = unsafe { std::mem::zeroed() };
     sys::retry(|| unsafe { libc::statfs(c.as_ptr(), &mut sfs) })
         .map_err(io::Error::from_raw_os_error)?;
-    // The mount point's own bytes, never a lossy copy: getattrlist reads
-    // the volume's attributes there (they need the volume's root).
+    // The mount point's own bytes, never a lossy copy. The name is read
+    // there, on the volume statfs reported, so mount and name always
+    // describe the same volume.
     let raw = unsafe { CStr::from_ptr(sfs.f_mntonname.as_ptr()) };
     let mount = PathBuf::from(std::ffi::OsStr::from_bytes(raw.to_bytes()));
     let mc = raw.to_owned();

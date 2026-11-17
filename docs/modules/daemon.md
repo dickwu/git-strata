@@ -1406,7 +1406,7 @@ scan's changes in order; a reader may see the six a moment apart). Tests: `tests
 `du::tests::unresolved_is_one_entry_per_unit_until_measured_or_gone`,
 `du::tests::a_failed_lstat_keeps_the_unit_unresolved`,
 `du::tests::an_unlistable_directory_keeps_its_units` and
-`tests/rpc.rs::features_keep_their_order_and_append_daemon_status_activity`.
+`tests/rpc.rs::features_keep_their_order_and_append_the_reply_capabilities`.
 
 ## Status bar: holder origin, activity and LongHold
 
