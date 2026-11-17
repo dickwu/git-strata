@@ -5,20 +5,20 @@ members = ["crates/strata-types", "crates/strata-client", "crates/strata-apfs", 
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.100"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dickwu/git-strata"
 homepage = "https://github.com/dickwu/git-strata"
 
 # Clippy baseline. `cargo clippy --workspace --all-targets -- -D warnings` is
-# clean with it on the stable toolchain (measured with 1.99). Each lint allowed
+# clean with it on the stable toolchain (measured with 1.100). Each lint allowed
 # here fires at exactly one site today, named on its line: fix that site, then
 # delete the line.
 [workspace.lints.clippy]
 # A deny-by-default correctness lint, off workspace-wide for one `from_mode(0)`
 # in a test. Fix this one first: write `0o0`.
 non_octal_unix_permissions = "allow"  # crates/strata-session/tests/remove.rs
-# Added in clippy 1.89; with the 1.90 MSRV every supported clippy knows it.
+# Added in clippy 1.89; with the 1.100 MSRV every supported clippy knows it.
 cloned_ref_to_slice_refs = "allow"    # crates/strata-daemon/tests/auto_close.rs
 field_reassign_with_default = "allow" # crates/strata-session/src/remove.rs
 large_enum_variant = "allow"          # crates/strata-daemon/src/auto_close.rs
