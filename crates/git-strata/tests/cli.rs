@@ -764,6 +764,9 @@ fn daemon_status_passes_the_status_bar_fields_through() {
                 "{ds}"
             );
             assert!(volume["as_of"].is_string(), "{ds}");
+            for key in ["path", "mount", "name"] {
+                assert!(volume[key].is_string(), "{ds}");
+            }
         }
     });
     let h = Home::new();

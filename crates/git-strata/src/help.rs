@@ -711,7 +711,9 @@ is null before any reload attempt, then the report plus at and a rejection reaso
 when present; restart_required lists restart-only fields from that attempt.
 activity, busy, volume, scan, version, pid and started are copied the same way
 (feature daemon_status.activity): work in flight, Busy replies of the last 10
-min, the data volume's free/size bytes, size-scan counts, the daemon's identity.
+min, free/size bytes of the volume holding paths.root (store, sessions; with
+path, mount and name under feature daemon_status.volume_name), size-scan counts,
+the daemon's identity.
 
 After editing config.toml, run `git-strata config reload` and check data.repos.
 Restart-only changes and old daemons require an owner restart. start/stop use

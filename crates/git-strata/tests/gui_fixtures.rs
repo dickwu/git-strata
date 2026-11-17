@@ -68,6 +68,13 @@ fn added() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "daemon_status",
+            "volume.path",
+            json!("/Volumes/Work/.strata"),
+        ),
+        ("daemon_status", "volume.mount", json!("/Volumes/Work")),
+        ("daemon_status", "volume.name", json!("Work")),
+        (
+            "daemon_status",
             "scan",
             json!({ "running": false, "active": 0, "queued": 0, "done": 0, "full": false, "unresolved_n": 0 }),
         ),

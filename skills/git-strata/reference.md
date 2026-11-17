@@ -59,7 +59,7 @@ data root (`[paths] root`, default `~/.strata`) as
 | `gc` | `--store` (also the store-wide gc: sessions removed over 30 days ago, their checkpoints and blobs, decided proposals, store/tmp, blob scrub), `--dry-run` (with `--store`: report only). Plain `gc` also empties `store/trash` entries older than 1 h that nothing names; refused/stuck on stderr. Agents run it only when the human asks, never after `Unknown` | no | no | `{}`; `--store`: `{store: report}`; `--store --dry-run`: `{dry_run:true,preview:{...}}` |
 | `du` | `--refresh` (re-size everything in the background; returns at once) | no | no | `{root,now,total,store{all,db,blobs,tmp,other,trash{...,entries,eligible{entries,reclaim_min,reclaim_max},young,floor_secs,gc}},bases{all,repos},deps{all,repos},sessions{all,list[{session,savings,...}]},savings{live,cumulative},scan{running,started,active,done,queued,full,failed,unresolved,last_full},took_ms}`; `scan.unresolved`: one `{unit,error,at}` per unit whose last measurement failed (`failed` is the history); every figure `{logical,allocated,private,shared,files,exact,errors,units,stale,pending,complete,as_of}` |
 | `daemon start` / `daemon stop` (human only; login HOME only, D38) | — | no | yes (uses launchd, not the socket) | `{}` or `{already:true}` |
-| `daemon status` | — | no | yes | `{running,socket,session?,holders:[],unknown_publishes:[],alerts:[],alerts_at?:[],pins_meta?:{},config?:{generation,hash,loaded_at,last_attempt,restart_required},version?,pid?,started?,activity?:[],busy?:{total,recent,truncated},volume?:{free,size,as_of}\|null,scan?:{running,active,queued,done,full,unresolved_n}}` |
+| `daemon status` | — | no | yes | `{running,socket,session?,holders:[],unknown_publishes:[],alerts:[],alerts_at?:[],pins_meta?:{},config?:{generation,hash,loaded_at,last_attempt,restart_required},version?,pid?,started?,activity?:[],busy?:{total,recent,truncated},volume?:{free,size,as_of,path?,mount?,name?}\|null,scan?:{running,active,queued,done,full,unresolved_n}}` |
 | `resolve` | `--session <S> --repo <R>` + exactly one of `--abandon` / `--accept` | yes | no | `ResolutionReport` |
 | `chain` | `--repo <R>` + exactly one of `--accept-origin <replay\|drop>` / `--restore` | yes (`--restore` may also confirm) | no | `{repo,choice,outcome?\|refs_moved?}` |
 | `config reload` | — | no | no | ReloadReport in data; exits 0/1/2/3/4 |
@@ -78,7 +78,8 @@ the daemon's `version`, `pid`, `started`, `activity` (long work in flight:
 `{id,kind,origin,repo,session,started,elapsed_ms,step_elapsed_ms,...}`), `busy`
 (`Busy` replies of the last 10 min, `recent[]` items
 `{at,method,session,reason,scope,holder,holder_session}`), `volume` (the data
-root's volume in bytes, null if unsampled) and `scan` (size-scan counts), and
+root's volume in bytes, null if unsampled; with feature
+`daemon_status.volume_name` also its `path`, `mount` and `name`) and `scan` (size-scan counts), and
 `holders[]` items gain `origin` (`request`/`background`) and `elapsed_ms`, with
 `session` naming the session the holder works on. They
 are informational; nothing an agent does depends on them. A `LongHold` alert

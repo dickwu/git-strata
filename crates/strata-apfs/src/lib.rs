@@ -56,7 +56,8 @@ pub use eintr::{EINTR_ATTEMPTS, retry_eintr, retry_eintr_n};
 pub use error::{IoSide, classify_io_error};
 pub use usage::{Usage, usage_of, usage_with};
 pub use volume::{
-    VolumeCaps, VolumeSpace, nearest_existing_ancestor, same_volume, volume_caps, volume_space,
+    VolumeCaps, VolumeLabel, VolumeSpace, nearest_existing_ancestor, same_volume, volume_caps,
+    volume_label, volume_space,
 };
 pub use walk::{Walk, WalkOptions, list_dir, walk, walk_stopped, walk_with, with_walk_stop};
 pub use watch::{WatchEvent, WatchOptions, Watcher, watch, watch_with};

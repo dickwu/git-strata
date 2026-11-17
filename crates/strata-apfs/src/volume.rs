@@ -73,6 +73,81 @@ pub fn volume_space(path: &Path) -> io::Result<VolumeSpace> {
     })
 }
 
+/// Which volume holds a path ([`volume_label`]): what a person would call it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VolumeLabel {
+    /// `statfs.f_mntonname`: where the volume is mounted (`/Volumes/GWD`,
+    /// `/System/Volumes/Data` for the startup disk's data volume).
+    pub mount: PathBuf,
+    /// The volume's name (`ATTR_VOL_NAME`: `GWD`, `Macintosh HD - Data`);
+    /// the mount point's last component when the volume gives none, `/`
+    /// for the root.
+    pub name: String,
+}
+
+/// `statfs` and `getattrlist(ATTR_VOL_NAME)` of the file system holding
+/// `path` (symlinks and firmlinks followed, like [`volume_space`]). Errors
+/// carry the errno of whichever call failed.
+pub fn volume_label(path: &Path) -> io::Result<VolumeLabel> {
+    let c = sys::cpath(path).map_err(io::Error::from_raw_os_error)?;
+    let mut sfs: libc::statfs = unsafe { std::mem::zeroed() };
+    sys::retry(|| unsafe { libc::statfs(c.as_ptr(), &mut sfs) })
+        .map_err(io::Error::from_raw_os_error)?;
+    let mount = PathBuf::from(
+        unsafe { CStr::from_ptr(sfs.f_mntonname.as_ptr()) }
+            .to_string_lossy()
+            .into_owned(),
+    );
+    // getattrlist on the mount point: volume attributes need the volume's
+    // root (EINVAL otherwise).
+    let mc = sys::cpath(&mount).map_err(io::Error::from_raw_os_error)?;
+    let mut al = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_NAME,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut buf = [0u8; 4 + 8 + 1024];
+    sys::retry(|| unsafe {
+        libc::getattrlist(
+            mc.as_ptr(),
+            &mut al as *mut _ as *mut _,
+            buf.as_mut_ptr() as *mut _,
+            buf.len(),
+            0,
+        )
+    })
+    .map_err(io::Error::from_raw_os_error)?;
+    Ok(VolumeLabel {
+        name: attr_name(&buf).unwrap_or_else(|| fallback_name(&mount)),
+        mount,
+    })
+}
+
+/// The `attrreference_t` name after the u32 length: offset (i32, from the
+/// reference itself) and length (u32, with the NUL).
+fn attr_name(buf: &[u8]) -> Option<String> {
+    let off = i32::from_ne_bytes(buf.get(4..8)?.try_into().ok()?);
+    let len = sys::rd_u32(buf, 8)? as usize;
+    let start = 4usize.checked_add(usize::try_from(off).ok()?)?;
+    let bytes = buf.get(start..start.checked_add(len)?)?;
+    let name = CStr::from_bytes_until_nul(bytes)
+        .ok()?
+        .to_string_lossy()
+        .into_owned();
+    (!name.is_empty()).then_some(name)
+}
+
+fn fallback_name(mount: &Path) -> String {
+    mount
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| mount.to_string_lossy().into_owned())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VolumeCaps {
     /// `statfs.f_fstypename`: `apfs`, `hfs`, `msdos`, ...

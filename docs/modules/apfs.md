@@ -12,7 +12,7 @@ apfs 是最底层的 crate，只管 macOS 文件系统的原语，不知道会�
 2. **根之下的一切文件系统操作，都不跟随符号链接**（裁定 T4、增补 3、增补 8）：调用方对工作区、staging 与 generation 树的读、写、改名、删除都经这一层，自己不再写 `*at` 调用。读：`open_root`（根自己的句柄）、`open_rooted`、`open_rooted_file`、`clone_from_rooted`（从根之下克隆出去，源这一侧同样钉住，调用方要说明源的种类 `CloneKind`）；写：目的地变体 `clone_file_rooted`、`clone_tree_rooted`、`create_file_rooted`、`mkdir_rooted`、`symlink_rooted`；改名：`rename_rooted`（`Excl`、`Swap`）；删除：`remove_rooted`（一个条目）、`remove_tree_rooted`（一整棵树，或任何一个条目：返回报告，不是失败）；另有 `make_removable`（调用方在要改名或删除封存的目录之前显式调用：先清标志、再补属主写位）、`set_file_meta`（经句柄改一个文件或目录的标志、mode、mtime；非目录只在不共用的 inode 上）、`full_fsync`（`F_FULLFSYNC` 的包装）和 `classify_io_error`（errno 到 `Code` 的公开归类）（§5.4、§6）。
 3. **遍历与属性**（design §6.2、§8）：`walk` / `walk_with` 用 `getattrlistbulk` 前序遍历，`attrs_of` 点查，`Attrs` 带纳秒时间、inode 和 gen count，`Attrs::unchanged_since` 把"没被写过"的判法固定下来，`Attrs::last_changed` 给 gc 判年龄用（增补 4），`list_dir` 是单目录列表（§4.2、§5.5、§5.6）。
 4. **监听**（design §6.2）：`watch` 把 FSEvents 的原始信号翻译成 `WatchEvent`：可能脏的路径、该重扫的子树、事件丢了。它只是提示，从不声称完整（裁定 T4，§5.7）。`Watcher::flush()` 是 `FSEventStreamFlushSync` 加对回调队列的排空，实测不是屏障，本文写明它保证什么、不保证什么（增补 8 "Event flush, amended"，§4.2 F、§5.7）。
-5. **卷与名字规则**（design §3 的大小写行、§7）：`same_volume`、`volume_caps` 回答"clonefile 在这两处之间行不行、这个卷分不分大小写"；`volume_space` 回答"这个卷还剩多少、一共多少"；`nearest_existing_ancestor` 是 config.md §4.3 "最近的已存在上级"的那一条规则；`case_fold_eq` 与 `case_fold_key` 是 APFS 大小写不敏感卷上的名字同一性（§5.1、§5.8）。
+5. **卷与名字规则**（design §3 的大小写行、§7）：`same_volume`、`volume_caps` 回答"clonefile 在这两处之间行不行、这个卷分不分大小写"；`volume_space` 回答"这个卷还剩多少、一共多少"，`volume_label` 回答"这是哪个卷"；`nearest_existing_ancestor` 是 config.md §4.3 "最近的已存在上级"的那一条规则；`case_fold_eq` 与 `case_fold_key` 是 APFS 大小写不敏感卷上的名字同一性（§5.1、§5.8）。
 
 **不负责**：
 
@@ -59,7 +59,7 @@ Workspace crate（types.md §8：apfs 在第 1 层，只依赖第 0 层；同层
 | overlay | `walk` / `walk_with`、`WalkOptions`、`list_dir`、`Attrs`、`FileKind`、`attrs_of`、`unchanged_since`、`gen_count_known`；`watch_with`（`exclude` 只放 `.git`）与 `WatchEvent`、`Watcher`、`Watcher::flush`（不是屏障；daemon 经 `Tracker::flush` 调用，从不在回调里）；`volume_caps`（`case_sensitive`：磁盘身份按卷折叠）与 `case_fold_key`（大小写不敏感卷上磁盘拼写的同一性，受限目录的键前缀范围查找用它的路径性质，§5.8）；`open_rooted_file`、`open_rooted`（取临时目录 T 的句柄）、`open_root`、`full_fsync`；`classify_io_error`、`IoSide`。投影与 restore 的写：blob 由 store 的 `get_blob_rooted` 写进临时目录 T（overlay 自己不建 blob 的临时副本），基线文件用 `clone_file_rooted(.., None)` 再在 `open_rooted_file` 的句柄上经 `set_file_meta` 规整（清标志、设 mode 与 mtime；句柄是 FIFO、socket、设备，或 `st_nlink > 1` 的非目录，就什么都不改），overlay 自己再 `rename_rooted(Excl)` 或 `rename_rooted(Swap)` 放进工作区；另有 `mkdir_rooted`、`symlink_rooted`（目标取自 `attrs_of` 读到的符号链接目标）、`create_file_rooted`、`remove_rooted(.., File \| EmptyDir)`（只删自己建的空目录、本次 restore 自己清空的目录，以及证明是留存 checkpoint 里 blob 的逐字节副本的文件；`EmptyDir` 遇到非空目录得 `NotEmpty`，是写竞争，§6） |
 | gitio | 根随场合不同：影子仓库目录（`new` 之后它是 agent 可写的地方，Addendum 8 clarification）里的管理目录 `worktrees/<n>/` 与它里面的四个文件，含 index 的副本：`attrs_of`、`mkdir_rooted`、`create_file_rooted`、`open_rooted`；`tree_dir`：工作区与 staging 树根下的 gitfile（`create_file_rooted`）、attach 的临时 index（`mkdir_rooted`、`open_rooted_file`、`remove_rooted`）；`export_tree` 的 `dst` 的父目录：`mkdir_rooted`、`open_rooted`、`rename_rooted(Excl)`、`remove_rooted(.., File \| EmptyDir)`（只删自己没写成的临时文件和空目录）；`shadow_drift` 读 `hooks/pre-push` 的 `open_rooted_file`；`open_root` 加 `full_fsync`（gitio 的每一次 `F_FULLFSYNC` 都经它）；`classify_io_error` 与 `IoSide`（apfs 给的句柄上的读写失败：写用 `AfterWrite`，读用 `Read`）；`PATH_MAX_BYTES`、`NAME_MAX_UTF16_UNITS`。进程内读文件（工作区或 `dir` 的 `.gitignore`、管理 index、hooks 文件、excludes 文件）走 `open_rooted_file`（FIFO → `NotFile`，不会挂住；裁定 "gitio reads files through apfs"，gitio 下一次修改时落实）。gitio 不用 `remove_tree_rooted`，也不用 `case_fold_eq`：git 身份只折叠 ASCII（§5.8） |
 | search | 读工作区文件的内容与属性：`open_rooted_file`、`attrs_of`、`walk`（具体以 search.md 为准） |
-| daemon | 启停每个 tracked 工作区的 `Watcher`（由 overlay 的 `Tracker` 持有）；启动时用 `volume_caps` 预检；`volume_space`（取样线程每 10 s 量一次数据根，供 `daemon_status.volume`） |
+| daemon | 启停每个 tracked 工作区的 `Watcher`（由 overlay 的 `Tracker` 持有）；启动时用 `volume_caps` 预检；`volume_space` 与 `volume_label`（取样线程每 10 s 量一次数据根，供 `daemon_status.volume`） |
 
 ## 3. 公开接口（Rust）
 
@@ -157,6 +157,14 @@ pub struct VolumeSpace {
 }
 /// path 所在文件系统的 statfs（跟随符号链接），见 §5.1。错误是 statfs 的 errno（不存在 → io::ErrorKind::NotFound）。
 pub fn volume_space(path: &Path) -> io::Result<VolumeSpace>;
+/// 一个卷叫什么：挂载点（statfs f_mntonname）与卷名（ATTR_VOL_NAME；卷不给名字时用挂载点最后一段，根是 "/"）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VolumeLabel {
+    pub mount: PathBuf,
+    pub name: String,
+}
+/// path 所在文件系统的 statfs，再对它的挂载点 getattrlist(ATTR_VOL_NAME)，见 §5.1。错误是失败那一步的 errno。
+pub fn volume_label(path: &Path) -> io::Result<VolumeLabel>;
 
 // ───────────── 克隆 ─────────────
 
@@ -773,7 +781,7 @@ pub mod seams {
 
 ## 5. 流程与算法
 
-### 5.1 卷标识与能力（`same_volume`、`nearest_existing_ancestor`、`volume_caps`、`volume_space`）
+### 5.1 卷标识与能力（`same_volume`、`nearest_existing_ancestor`、`volume_caps`、`volume_space`、`volume_label`）
 
 `same_volume(a, b)`：
 
@@ -799,6 +807,8 @@ config.md §4.3 的规则因此是 `same_volume(&nearest_existing_ancestor(&path
 实测的取值：APFS：clone 是，大小写敏感 否，gen count 是；大小写敏感的 APFS：大小写敏感 是；HFS+：clone 位为 0 且**无效**（`None`，要真的 clone 才会得到 `ENOTSUP`）；MSDOS：clone 位为 0 且有效（`Some(false)`），gen count 否，不支持硬链接。
 
 `volume_space(path)`：一次 `statfs(path)`（`EINTR` 重试），`free = f_bavail × f_bsize`，`size = f_blocks × f_bsize`（饱和乘法）。APFS 上两个数都是整个 container 的，同一 container 里的各个卷共用它们；`free` 不含可清除空间（本地快照、macOS 可以回收的缓存），所以比访达显示的"可用"小；`size − free` 是 container 里存着的全部东西，不是哪一个程序用掉的。不 stat 别的路径，不开文件。daemon 只在自己的取样线程里调用它，请求从不等它（daemon.md Status bar fields）。
+
+`volume_label(path)`：一次 `statfs(path)` 取 `f_mntonname` 作 `mount`，再对 `mount` 做一次 `getattrlist(ATTR_VOL_INFO | ATTR_VOL_NAME)`（卷属性只能在卷根上取）读卷名；名字为空或读不出时用挂载点最后一段。跟随符号链接与 firmlink：`/Users/...` 给出 `/System/Volumes/Data`，`/Volumes/GWD/...` 给出 `/Volumes/GWD`。daemon 在 `volume_space` 的同一次取样里调用它，给 `daemon_status.volume` 的 `mount`、`name`（daemon.md Status bar fields）。
 
 ### 5.2 `clone_tree(src, dst)`
 
@@ -1140,6 +1150,7 @@ store 的 `put_blob` 因此不会把工作区里的符号链接当内容读进 b
 | `nearest_existing_ancestor_climbs_to_the_first_existing_path` | 评审 M17：已存在的路径 → 它自己；叶子不存在 → 父目录；连缺 5 级 → 第一个存在的祖先；路径的某一级是普通文件（`file/x/y`）→ 那个文件（`ENOTDIR` 也往上爬）；中间有悬空符号链接（`dang/x`）→ 符号链接所在的目录；经 `/tmp` 符号链接给出的路径 → 返回值以 `/tmp` 开头，不是 `/private/tmp`（不做 realpath）；相对路径 → `io::ErrorKind::InvalidInput`；路径上有一个 mode 000 的目录而 `stat` 得 `EACCES` → 原样返回 `PermissionDenied`，不往上爬。接上 `same_volume`：镜像挂载点之下尚不存在的 `mnt/new/deeper`，`same_volume(&nearest_existing_ancestor(..)?, 镜像里的文件)` 为 `true`，对内部卷上的文件为 `false`（config.md §4.3 的规则一份实现）。评审 N8：两种错误交给 `classify_io_error(&e, IoSide::Read, path)` 都得 `Unknown`——相对路径的 `InvalidInput`（没有 `raw_os_error`）和 mode 000 目录下的 `PermissionDenied`（`detail.errno` 为 `EACCES`）；读侧的权限错误从不是 `ReadOnly` | 新增 |
 | `volume_caps_per_filesystem` | 用镜像：APFS → `fs_type = "apfs"`、`clone = Some(true)`、`case_sensitive = false`、`write_gen_count = true`；大小写敏感的 APFS → `case_sensitive = true`；HFS+ → `clone = None`；MSDOS → `clone = Some(false)`、`write_gen_count = false`；路径不存在 → `NoSuchPath` | 新增 |
 | `volume_space_is_the_space_of_the_volume_holding_the_path` | 32 MB 的 APFS 镜像：`size` 在 16 MiB 与 32 MiB 之间，`free < size`，`free` 与镜像自己报的可用空间相差不到 1 MiB；写入 4 MiB 并 `fsync` 之后 `free` 至少少 2 MiB；镜像里一个文件的路径给出同一个 `size`；不存在的路径 → `ENOENT` | 新增 |
+| `volume_label_names_the_volume_holding_the_path` | 32 MB 的 APFS 镜像（卷名 `STRATA`）：镜像根与里面的深层目录都给出镜像的挂载点和 `STRATA`；临时目录给出别的挂载点和非空的名字；不存在的路径 → `ENOENT` | 新增 |
 | `errno_mapping_table` | 单元测试，表驱动，直接调公开的 `classify_io_error`，逐行对 §4.2 I：`ENOENT`→`NoSuchPath`，`EEXIST`→`Exists`，`ENOTDIR`→`NotDirectory`，`EISDIR`→`IsDirectory`，`ENOTEMPTY`→`NotEmpty`，`EXDEV`→`CrossVolume`，`ENOTSUP`、`EOPNOTSUPP`→`Unsupported`，`ENAMETOOLONG`、`EINVAL`→`InvalidInput`；`IoSide::Write` 的 `EACCES`、`EPERM`→`ReadOnly`（`reason = no_permission`），`EROFS`→`ReadOnly`（`reason = read_only_volume`），`IoSide::Read` 的同样 errno→`Unknown`；`ENOSPC`、`EIO`、`EDEADLK`、`EMFILE`、`ELOOP`→`Unknown`，`EBUSY`→`Unknown`（`reason = busy`）；`IoSide::AfterWrite` 对上面每一个 errno 都是 `Unknown`；没有 `raw_os_error` 的 `io::Error`→`Unknown`；每个错误的 `detail` 都带 `errno`（数字）与 `path`。评审 N8 的例子：`create_file_rooted` 返回的句柄上 `write_all` 失败，文件已经建出来了，调用方传 `IoSide::AfterWrite`，`EROFS`、`EACCES` 也得 `Unknown`，不是写侧的 `ReadOnly`（现场留着一个文件，不能当"什么都没改"） | 新增 |
 | `classify_io_error_matches_real_syscalls` | 用真实的系统调用造出每个 errno，再把得到的 `io::Error` 交给 `classify_io_error`，核对 §4.2 I 的表（这张表因此是量出来的，不是抄来的）：`File::open` 一个不存在的路径（`ENOENT` → `NoSuchPath`）；`OpenOptions::create_new` 一个已有的文件（`EEXIST` → `Exists`）；把普通文件当目录用（`ENOTDIR` → `NotDirectory`）；对目录 `fs::write`（`EISDIR` → `IsDirectory`）；`remove_dir` 非空目录（`ENOTEMPTY` → `NotEmpty`）；`fs::rename` 跨两个镜像（`EXDEV` → `CrossVolume`）；HFS+ 镜像里的 `clonefile`（`ENOTSUP` → `Unsupported`）；256 个码元的名字（`ENAMETOOLONG` → `InvalidInput`）；mode 000 的文件读（`EACCES` → 读侧 `Unknown`、写侧 `ReadOnly`）；只读挂载的镜像上建文件（`EROFS` → `ReadOnly`，`reason = read_only_volume`）；带 `uchg` 的文件 `remove_file`（`EPERM` → 写侧 `ReadOnly`，`reason = no_permission`：细分成 `immutable` 是各个操作的事，这里不分）；填满的镜像（`ENOSPC` → `Unknown`）。`IoSide::AfterWrite` 对每一个都给 `Unknown` | 新增 |
 | `rooted_open_opens_files_and_directories` | 在根之下按 `RepoPath` 打开普通文件，读到的内容正确；打开目录得到可当 dirfd 用的句柄（调用方拿它做 `make_removable`、`full_fsync`，或当 `openat` 的 dirfd）；`open_rooted_file` 对目录 → `IsDirectory`；空串、`.`、`./dir/file`、`../file`、`dir/../file`、绝对路径连 `RepoPath` 都构造不出来，apfs 的函数没有别的路径入口；根的祖先里有符号链接（`/tmp/…`）时照常打开 | tgrep-core/src/rooted/tests.rs::regular_opens_and_literal_path_validation |
