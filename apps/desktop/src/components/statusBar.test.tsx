@@ -12,6 +12,7 @@ import {
   StatusBarView,
   followTarget,
   observeDaemonHealth,
+  triggerCopy,
   type ModalSection,
   type StatusBarHandlers,
 } from './StatusBar';
@@ -174,7 +175,7 @@ describe('StatusBarView', () => {
     expect(tail(quiet)).toBe(tail(busy));
   });
 
-  test('layout: the right group never shrinks; the trigger detail gives way before chips', () => {
+  test('layout: the right group never shrinks; the trigger stays a fixed hit target; chips take the free width', () => {
     const src = readFileSync(join(import.meta.dir, 'StatusBar.module.css'), 'utf8');
     const rule = (sel: string) => {
       const i = src.indexOf(`\n${sel} {`);
@@ -184,10 +185,9 @@ describe('StatusBarView', () => {
     expect(rule('.right')).toContain('flex: none;');
     expect(rule('.chips')).toContain('flex: 1 1 auto;');
     expect(rule('.chips')).toContain('overflow: hidden;');
-    expect(rule('.trigger')).toContain('flex: 0 1000 auto;');
-    // The detail's floor is one letter, so the trigger never shrinks past its dot and label.
-    expect(rule('.trigger > .detail')).toContain('overflow-wrap: anywhere;');
-    expect(rule('.trigger > .detail')).toContain('-webkit-line-clamp: 1;');
+    // No detail in the bar: the trigger is a compact healthy dot, or the dot plus a short label.
+    expect(rule('.trigger')).toContain('flex: none;');
+    expect(src).not.toContain('.trigger > .detail');
     // Chip words are cut with an ellipsis; the tooltip carries the whole text.
     expect(rule('.text')).toContain('text-overflow: ellipsis;');
   });
@@ -242,17 +242,51 @@ describe('StatusBarView', () => {
     expect(render({ ...calm, right: { ...right, sessions: 1 } })).toContain('>1 session<');
   });
 
-  test('daemon trigger: dot state, label and detail from the model', () => {
+  test('daemon trigger: a healthy state is only the dot; other states keep a short label', () => {
     const html = render({
       ...calm,
       daemon: { state: 'down', label: 'Daemon unreachable', detail: null },
     });
     expect(html).toContain('class="dot" data-state="down"');
     expect(html).toContain('aria-label="Daemon unreachable. Show daemon status"');
-    expect(html).not.toContain(css.detail);
+    expect(html).toContain(`class="${css.name}">Daemon unreachable</span>`);
+    expect(html).not.toContain('data-compact');
+
     const up = render(calm);
+    const full = triggerCopy(running);
+    expect(full).toBe('Daemon running · Updated just now');
+    expect(
+      triggerCopy({
+        state: 'down',
+        label: "Daemon isn't responding",
+        detail: 'An earlier request is still waiting for the daemon.',
+      })
+    ).toBe("Daemon isn't responding · An earlier request is still waiting for the daemon");
     expect(up).toContain('data-state="up"');
-    expect(up).toContain('title="Updated just now">Updated just now</span>');
+    expect(up).toContain('data-compact=""');
+    expect(up).toContain(`aria-label="${full}. Show daemon status"`);
+    // The running label and freshness are hover-only when healthy.
+    expect(up).not.toContain(`class="${css.name}"`);
+    expect(up).not.toContain('>Daemon running<');
+    expect(up).not.toContain('>Updated just now<');
+    const tree = StatusBarView({ model: calm, ...recorder().h });
+    const triggerTip = elements(tree).find((e) => {
+      const c = e.props.children;
+      return isValidElement(c) && (c as El).props['data-testid'] === 'daemon-trigger';
+    })?.props.title;
+    expect(renderToStaticMarkup(<>{triggerTip}</>)).toContain('>Daemon running</div>');
+    expect(renderToStaticMarkup(<>{triggerTip}</>)).toContain('>Updated just now</div>');
+
+    const checking = render({
+      ...calm,
+      daemon: { state: 'pending', label: 'Checking the daemon…', detail: 'Not updated for 2 min' },
+    });
+    expect(checking).toContain('data-state="pending"');
+    expect(checking).toContain(`class="${css.name}">Checking the daemon…</span>`);
+    expect(checking).toContain(
+      'aria-label="Checking the daemon… · Not updated for 2 min. Show daemon status"'
+    );
+    expect(checking).not.toContain('>Not updated for 2 min<');
   });
 
   test('clicks: chips follow their target; +N and the trigger open the modal; storage facts open storage', () => {

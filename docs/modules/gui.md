@@ -231,7 +231,7 @@ GUI 不拥有持久业务数据。它写的东西都由人按按钮触发：首�
 
 壳照 R2：36 px 标题栏（⌘K）+ 264 / 56 px 侧栏 + 主区（52 px 工具栏 + 内容 + 30 px 状态栏），右侧可选 Inspector。
 
-窗口底部状态栏（S1）是 daemon 状态的主要入口：左侧为运行状态与数据新鲜度，随后最多三个状态片，余项收进 `+N` 并打开详情。状态片显示需要处理的事、后台活动与尺寸扫描计数；正常后台工作为蓝色，异常持锁为琥珀色，`LongHold` 不单独变红。右侧保留节省量、会话数与主题；卷剩余空间只在 daemon 确实报告时出现（0.2.2 尚不报告）。存储下界与原始数值放在详情中，完整规则见文末 "Status bar states"。
+窗口底部状态栏（S1）是 daemon 状态的主要入口：左侧为运行状态。守护进程健康（可达且数据新鲜）时，左侧只显示状态点，完整说明（`Daemon running · Live · updated just now`）放在悬停提示与无障碍名称中；检查中、过期、不可达、启动中、等待卷等非健康状态仍在栏内保留短标签，以免被忽略。新鲜度或错误说明在所有状态下都只出现在悬停提示里。随后最多三个状态片，余项收进 `+N` 并打开详情。状态片显示需要处理的事、后台活动与尺寸扫描计数；正常后台工作为蓝色，异常持锁为琥珀色，`LongHold` 不单独变红。右侧保留节省量、会话数与主题；卷剩余空间只在 daemon 确实报告时出现（0.2.2 尚不报告）。存储下界与原始数值放在详情中，完整规则见文末 "Status bar states"。
 
 ```
 ┌ titlebar ─────────────────────────────────────────── ⌘K Search sessions ─┐
@@ -245,7 +245,7 @@ GUI 不拥有持久业务数据。它写的东西都由人按按钮触发：首�
 │ Daemon    healthy │                                                        │
 │ Settings          │                                                        │
 ├───────────────────┴───────────────────────────────────────────────────────┤
-│ Daemon running · Auto-rebase work · tool · 2 min   up to X saved · N sessions │
+│ ●  Auto-rebase work · tool · 2 min                 up to X saved · N sessions │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1034,8 +1034,13 @@ Retained replies keep their original 60-second health age. When Checking on an e
 last good reply is older than 60 s, the detail is "Not updated for N min" (whole minutes; hours after 60 min)
 instead of the error's Busy/retry detail. A rising `fds.accept_errors` counter across successful
 replies also signals file-handle pressure, even below 90% occupancy; an initial nonzero value or a reset
-does not. Health text is shown once in the trigger, so muted states do not take priority
-over actionable chips. `store_unavailable` uses a volume-wait trigger and separate guidance
+does not. When the daemon is healthy (reachable and fresh), the trigger is only the status
+dot; the running label and freshness (`Daemon running · Live · updated just now`)
+are on hover and in the accessible name. Checking, stale, down,
+starting, volume-wait and other non-healthy states keep their short label in the
+bar so they are not missed; freshness or error detail is hover-only in every
+state. Health text is shown once on the trigger, so muted states do not take
+priority over actionable chips. `store_unavailable` uses a volume-wait trigger and separate guidance
 for permission/TCC versus an unavailable volume; `starting` means recovery is in progress.
 
 Only chips backed by `warnings[]` target the Warnings section, except activity chips. Activity

@@ -97,6 +97,22 @@ function action(target: ChipTarget | undefined): string {
   return s.show[target?.section ?? 'daemon'];
 }
 
+/** Visible label plus freshness or error detail, for hover and the accessible name. */
+export function triggerCopy(daemon: StatusBarModel['daemon']): string {
+  if (!daemon.detail) return daemon.label;
+  // Details sometimes already end in a period; the accessible name appends ". Show …".
+  return `${daemon.label} · ${daemon.detail.replace(/\.+$/, '')}`;
+}
+
+function triggerTip(daemon: StatusBarModel['daemon']) {
+  return (
+    <div className={css.tip}>
+      <div className={css.tipHead}>{daemon.label}</div>
+      {daemon.detail && <div>{daemon.detail}</div>}
+    </div>
+  );
+}
+
 /** The full text (the chip may be cut short) and the model's explanation; plain text (G6). */
 function chipTip(chip: Chip) {
   return (
@@ -131,7 +147,9 @@ function chipButton(chip: Chip, h: StatusBarHandlers) {
  * The bar itself, from a finished model (design §3.5): daemon trigger, at most three chips and
  * "+N", then the right-hand facts and the theme switch. No hooks and no state, so tests render
  * it from hand-built models. The chips area takes the free width, so the right side stays put
- * when chips come and go.
+ * when chips come and go. A healthy trigger (`state === 'up'`) is only the status dot; its
+ * label and freshness sit in the tooltip and accessible name. Other states keep the
+ * short label in the bar so they are not missed.
  */
 export function StatusBarView({
   model,
@@ -145,22 +163,20 @@ export function StatusBarView({
   const { daemon, chips, overflow, right } = model;
   return (
     <footer className="statusbar" role="status">
-      <button
-        type="button"
-        className={css.trigger}
-        onClick={() => h.onOpen()}
-        aria-haspopup="dialog"
-        aria-label={s.label(daemon.label, s.show.daemon)}
-        data-testid="daemon-trigger"
-      >
-        <span className="dot" data-state={daemon.state} />
-        <span className={css.name}>{daemon.label}</span>
-        {daemon.detail && (
-          <span className={css.detail} title={daemon.detail}>
-            {daemon.detail}
-          </span>
-        )}
-      </button>
+      <Tooltip title={triggerTip(daemon)} placement="top" mouseEnterDelay={0.35}>
+        <button
+          type="button"
+          className={css.trigger}
+          onClick={() => h.onOpen()}
+          aria-haspopup="dialog"
+          aria-label={s.label(triggerCopy(daemon), s.show.daemon)}
+          data-testid="daemon-trigger"
+          data-compact={daemon.state === 'up' ? '' : undefined}
+        >
+          <span className="dot" data-state={daemon.state} aria-hidden />
+          {daemon.state !== 'up' && <span className={css.name}>{daemon.label}</span>}
+        </button>
+      </Tooltip>
       <div className={css.chips} data-testid="status-chips">
         {chips.map((c) => chipButton(c, h))}
         {overflow.length > 0 && (

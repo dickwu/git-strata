@@ -1,12 +1,12 @@
 /*
  * The 30px status bar (gui.md §5.1): daemon trigger, state chips, then the right-hand facts.
  * The right side never shrinks and sits at the end, so it stays put when chips come and go.
- * Short of room, the trigger's detail gives way first (down to the dot and label), then the
- * chips.
+ * The trigger stays a fixed hit target (a compact healthy dot, or the dot plus a short
+ * non-healthy label). Short of room, the chips give way.
  */
 .trigger {
   display: inline-flex;
-  flex: 0 1000 auto;
+  flex: none;
   align-items: center;
   gap: 6px;
   height: 22px;
@@ -29,21 +29,6 @@
 }
 .name {
   color: var(--text);
-}
-/*
- * One clamped line instead of nowrap: text that may wrap anywhere has a one-letter minimum
- * width, so the trigger's floor is its dot and label, and the detail ends in an ellipsis.
- */
-.trigger > .detail {
-  display: -webkit-box;
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-muted);
-  white-space: normal;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 1;
 }
 
 /* Padding with a matching negative margin keeps chip focus rings clear of the clipping edge. */
