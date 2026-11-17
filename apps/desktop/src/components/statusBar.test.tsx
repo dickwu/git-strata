@@ -250,7 +250,8 @@ describe('StatusBarView', () => {
     expect(html).toContain('class="dot" data-state="down"');
     expect(html).toContain('aria-label="Daemon unreachable. Show daemon status"');
     expect(html).toContain(`class="${css.name}">Daemon unreachable</span>`);
-    expect(html).not.toContain('data-compact');
+    expect(html).not.toMatch(/data-testid="daemon-trigger"[^>]*title=/);
+    expect(html).not.toMatch(/title=[^>]*data-testid="daemon-trigger"/);
 
     const up = render(calm);
     const full = triggerCopy(running);
@@ -263,7 +264,6 @@ describe('StatusBarView', () => {
       })
     ).toBe("Daemon isn't responding · An earlier request is still waiting for the daemon");
     expect(up).toContain('data-state="up"');
-    expect(up).toContain('data-compact=""');
     expect(up).toContain(`aria-label="${full}. Show daemon status"`);
     // The running label and freshness are hover-only when healthy.
     expect(up).not.toContain(`class="${css.name}"`);
@@ -287,6 +287,29 @@ describe('StatusBarView', () => {
       'aria-label="Checking the daemon… · Not updated for 2 min. Show daemon status"'
     );
     expect(checking).not.toContain('>Not updated for 2 min<');
+    expect(checking).not.toMatch(/data-testid="daemon-trigger"[^>]*title=/);
+
+    const dirty = {
+      ...calm,
+      daemon: {
+        state: 'pending' as const,
+        label: 'Checking the daemon…',
+        detail: 'The daemon said <b>no</b>',
+      },
+    };
+    const dirtyHtml = render(dirty);
+    expect(dirtyHtml).toContain(
+      'aria-label="Checking the daemon… · The daemon said &lt;b&gt;no&lt;/b&gt;. Show daemon status"'
+    );
+    expect(dirtyHtml).not.toContain('<b>');
+    const dirtyTree = StatusBarView({ model: dirty, ...recorder().h });
+    const dirtyTip = elements(dirtyTree).find((e) => {
+      const c = e.props.children;
+      return isValidElement(c) && (c as El).props['data-testid'] === 'daemon-trigger';
+    })?.props.title;
+    const dirtyTipHtml = renderToStaticMarkup(<>{dirtyTip}</>);
+    expect(dirtyTipHtml).toContain('The daemon said &lt;b&gt;no&lt;/b&gt;');
+    expect(dirtyTipHtml).not.toContain('<b>');
   });
 
   test('clicks: chips follow their target; +N and the trigger open the modal; storage facts open storage', () => {

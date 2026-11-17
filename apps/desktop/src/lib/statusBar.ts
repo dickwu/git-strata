@@ -121,7 +121,7 @@ export interface StatusBarInput {
 }
 
 export interface StatusBarModel {
-  /** The left-hand daemon trigger: a state dot, plus a short label when not healthy (`up`). */
+  /** The left-hand daemon trigger: a state dot, plus a short label in any state but `up`. */
   daemon: { state: 'pending' | 'up' | 'down'; label: string; detail: string | null };
   /** Chips to show, already sorted and capped at MAX_CHIPS. */
   chips: Chip[];

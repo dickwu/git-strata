@@ -171,7 +171,6 @@ export function StatusBarView({
           aria-haspopup="dialog"
           aria-label={s.label(triggerCopy(daemon), s.show.daemon)}
           data-testid="daemon-trigger"
-          data-compact={daemon.state === 'up' ? '' : undefined}
         >
           <span className="dot" data-state={daemon.state} aria-hidden />
           {daemon.state !== 'up' && <span className={css.name}>{daemon.label}</span>}
