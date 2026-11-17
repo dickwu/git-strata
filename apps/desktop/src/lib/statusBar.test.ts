@@ -540,17 +540,17 @@ describe('health, waiting and honest facts', () => {
   test.each([1, 4, 13])('store permission errno %s uses Removable Volumes guidance', (errno) => {
     const i = input();
     i.daemon.error = err('store_unavailable', { last_error: { detail: { errno } } });
-    expect(statusBarModel(i, NOW).daemon.label).toBe('Daemon waiting for its data volume');
+    expect(statusBarModel(i, NOW).daemon.label).toBe('Daemon waiting for its store volume');
     expect(statusBarModel(i, NOW).daemon.detail).toBeNull();
     expect(allChips(i)[0]).toMatchObject({ sev: 'red', rank: 1 });
-    expect(allChips(i)[0].text).toContain('Waiting for its data volume: allow Removable Volumes');
+    expect(allChips(i)[0].text).toContain('Waiting for its store volume: allow Removable Volumes');
   });
   test.each([2, 5, undefined])(
-    'non-permission store errno %s means unavailable data volume',
+    'non-permission store errno %s means unavailable store volume',
     (errno) => {
       const i = input();
       i.daemon.error = err('store_unavailable', { last_error: { detail: { errno } } });
-      expect(allChips(i)[0].text).toBe('Data volume not available');
+      expect(allChips(i)[0].text).toBe('Store volume not available');
     }
   );
   test('starting is muted recovery, not daemon failure', () => {
@@ -1189,6 +1189,31 @@ describe('P-b contract sources', () => {
     v.size = 100e9;
     expect(model(14e9).spaceLevel).toBe('amber');
     expect(model(4e9).spaceLevel).toBe('red');
+  });
+
+  test('a named volume (daemon_status.volume_name) labels the free space and the low-space chip', () => {
+    const i = pbi();
+    const v = i.daemon.data!.volume!;
+    // A 0.2.3 reply names nothing: the figure is the store volume's, so it still warns.
+    v.size = 2e12;
+    v.free = 30 * 2 ** 30;
+    expect(statusBarModel(i, NOW).right.free?.text).toBe('30 GB free');
+    expect(allChips(i).find((c) => c.id === 'low-space')?.text).toBe(
+      'Store volume is low on space · 30 GB free'
+    );
+    Object.assign(v, { path: '/Volumes/GWD/inter/.strata', mount: '/Volumes/GWD', name: 'GWD' });
+    expect(volumeView(i.daemon.data, NOW)).toMatchObject({
+      label: 'GWD',
+      mount: '/Volumes/GWD',
+      path: '/Volumes/GWD/inter/.strata',
+    });
+    expect(statusBarModel(i, NOW).right.free).toEqual({ text: 'GWD · 30 GB free', sev: 'amber' });
+    expect(allChips(i).find((c) => c.id === 'low-space')?.text).toBe(
+      'GWD is low on space · 30 GB free'
+    );
+    // A blank name is no name.
+    v.name = ' ';
+    expect(volumeView(i.daemon.data, NOW)?.label).toBe('Store volume');
   });
 
   test('Busy copy does not attribute several holders in a scope to just the most recent one', () => {

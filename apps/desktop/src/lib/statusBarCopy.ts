@@ -9,10 +9,10 @@ export const statusBarCopy = {
     notRunning: "Daemon isn't running",
     notResponding: "Daemon isn't responding",
     starting: 'Daemon starting (recovering)',
-    waitingForVolume: 'Daemon waiting for its data volume',
+    waitingForVolume: 'Daemon waiting for its store volume',
     permission:
-      'Waiting for its data volume: allow Removable Volumes access in System Settings → Privacy & Security → Files and Folders',
-    volumeUnavailable: 'Data volume not available',
+      'Waiting for its store volume: allow Removable Volumes access in System Settings → Privacy & Security → Files and Folders',
+    volumeUnavailable: 'Store volume not available',
     fileHandlesLow: 'Daemon is close to its file-handle limit',
     fileHandlesExhausted: 'Daemon is out of file handles',
     live: (age: string) => {
@@ -115,8 +115,11 @@ export const statusBarCopy = {
       : 'Some requests got Busy',
   /** The ring (50 entries) dropped a reply younger than ten minutes: no per-repo count. */
   busyTruncated: '50+ requests got Busy',
-  free: (amount: string) => `${amount} free`,
-  lowSpace: (amount: string) => `Data volume is low on space · ${amount} free`,
+  /** `name` is the measured volume's (feature `daemon_status.volume_name`), when the daemon gave one. */
+  free: (amount: string, name?: string) => (name ? `${name} · ${amount} free` : `${amount} free`),
+  /** What an unnamed volume (a 0.2.3 daemon) is: the one holding the store and the sessions. */
+  storeVolume: 'Store volume',
+  lowSpace: (volume: string, amount: string) => `${volume} is low on space · ${amount} free`,
   saved: (amount: string, measuring: boolean) =>
     `up to ${amount} saved${measuring ? ' (measuring)' : ''}`,
   savedTooltip: (asOf: string | null, measuring: boolean) =>

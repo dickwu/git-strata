@@ -143,7 +143,12 @@ export function hasActivityStatus(s: DaemonStatus | undefined): boolean {
   return s?.features?.includes('daemon_status.activity') === true;
 }
 
-/** Cached volume facts; a stale sample never supplies a current free-space figure. */
+/**
+ * Cached volume facts; a stale sample never supplies a current free-space figure. The volume is
+ * always the one holding the daemon's data root (`paths.root`: store, sessions, dependency
+ * trees; every checkout must share it). A daemon with `daemon_status.volume_name` names it;
+ * an older one (0.2.3) measured the same root without naming it, so it is the store volume.
+ */
 export function volumeView(
   s: DaemonStatus | undefined,
   now: number,
@@ -164,7 +169,19 @@ export function volumeView(
       : v.free < amber || (previous !== 'muted' && v.free <= amber * 1.1)
         ? 'amber'
         : 'muted';
-  return { ...v, stale, level, text: stale ? '—' : t.free(bytes(v.free)) };
+  const name = typeof v.name === 'string' && v.name.trim() !== '' ? v.name : undefined;
+  const mount = typeof v.mount === 'string' && v.mount !== '' ? v.mount : undefined;
+  const path = typeof v.path === 'string' && v.path !== '' ? v.path : undefined;
+  return {
+    ...v,
+    name,
+    mount,
+    path,
+    label: name ?? t.storeVolume,
+    stale,
+    level,
+    text: stale ? '—' : t.free(bytes(v.free), name),
+  };
 }
 
 /**
@@ -1015,7 +1032,7 @@ export function statusBarModel(
         id: 'low-space',
         rank: volume.level === 'red' ? 1 : 4,
         sev: volume.level,
-        text: t.lowSpace(bytes(volume.free)),
+        text: t.lowSpace(volume.label, bytes(volume.free)),
         target: modal('trash'),
       });
     // Only a restart the App saw (pid or start time replaced), never a first start at login.
