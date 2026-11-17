@@ -1212,7 +1212,9 @@ chip `GWD is low on space · 30 GB free`, the modal `GWD: 30 GB free of 2.0 TB` 
 `Mounted at /Volumes/GWD; holds the git-strata data root …`. A 0.2.3 reply has no name; it
 measured the same data root, so the thresholds still apply and the label is `Store volume`
 (`Store volume is low on space · …`), never the ambiguous "Data volume" (on macOS that also
-names the startup disk's APFS Data volume). A blank name counts as none.
+names the startup disk's APFS Data volume). A blank name counts as none. The bar and chip cut
+a name longer than 20 characters to 19 and `…` so the figure stays visible; the modal shows it
+whole.
 
 P-b scan chips use the lightweight `daemon_status.scan` counters, so they do not need du:
 `Measuring storage · 412 done · 4 in progress · 136 queued`. They appear only while running

@@ -808,7 +808,7 @@ config.md §4.3 的规则因此是 `same_volume(&nearest_existing_ancestor(&path
 
 `volume_space(path)`：一次 `statfs(path)`（`EINTR` 重试），`free = f_bavail × f_bsize`，`size = f_blocks × f_bsize`（饱和乘法）。APFS 上两个数都是整个 container 的，同一 container 里的各个卷共用它们；`free` 不含可清除空间（本地快照、macOS 可以回收的缓存），所以比访达显示的"可用"小；`size − free` 是 container 里存着的全部东西，不是哪一个程序用掉的。不 stat 别的路径，不开文件。daemon 只在自己的取样线程里调用它，请求从不等它（daemon.md Status bar fields）。
 
-`volume_label(path)`：一次 `statfs(path)` 取 `f_mntonname` 作 `mount`，再对 `mount` 做一次 `getattrlist(ATTR_VOL_INFO | ATTR_VOL_NAME)`（在 statfs 报出的那个卷上读，`mount` 与 `name` 总是同一个卷的）读卷名；名字为空或读不出时用挂载点最后一段。跟随符号链接与 firmlink：`/Users/...` 给出 `/System/Volumes/Data`，`/Volumes/GWD/...` 给出 `/Volumes/GWD`。daemon 在 `volume_space` 的同一次取样里调用它，给 `daemon_status.volume` 的 `mount`、`name`（daemon.md Status bar fields）。
+`volume_label(path)`：一次 `statfs(path)` 取 `f_mntonname` 作 `mount`，再对 `mount` 做一次 `getattrlist(ATTR_VOL_INFO | ATTR_VOL_NAME)`（在 statfs 报出的那个卷上读，`mount` 与 `name` 总是同一个卷的）读卷名；回答里的名字为空或解析不出时用挂载点最后一段；`statfs` 或 `getattrlist` 本身失败则返回错误（daemon 这时省略 `mount`、`name`）。跟随符号链接与 firmlink：`/Users/...` 给出 `/System/Volumes/Data`，`/Volumes/GWD/...` 给出 `/Volumes/GWD`。daemon 在 `volume_space` 的同一次取样里调用它，给 `daemon_status.volume` 的 `mount`、`name`（daemon.md Status bar fields）。
 
 ### 5.2 `clone_tree(src, dst)`
 

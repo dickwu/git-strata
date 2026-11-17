@@ -1320,8 +1320,8 @@ remain conservatively unpublished until scanned; the Stop hook keeps its existin
 ## Status bar fields (P-b)
 
 `daemon_status.features` lists `daemon_status.activity`, followed by
-`daemon_status.volume_name`. Unlike the strings before them, these announce
-reply capabilities, not request extensions. `daemon_status.activity`: a daemon
+`daemon_status.volume_name`. Both announce reply capabilities, not request
+extensions. `daemon_status.activity`: a daemon
 that lists it sends every key below on every `daemon_status` reply (empty or
 null where stated), and a client treats the reply as one of this step only when
 the string is present. No method and no request field were added, and no CLI
