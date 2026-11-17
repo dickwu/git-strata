@@ -660,9 +660,9 @@ publish = { branch = "main", push = true, confirm = false, auto_clse = true }
 
 /// FEATURES only grows: the strings shipped before keep their places, and
 /// `daemon_status.activity` (the status-bar reply fields) comes right after
-/// them.
+/// them, then `daemon_status.volume_name` (which volume `volume` measured).
 #[test]
-fn features_keep_their_order_and_append_daemon_status_activity() {
+fn features_keep_their_order_and_append_the_reply_capabilities() {
     let shipped = [
         "new.agent",
         "session.mark",
@@ -684,6 +684,11 @@ fn features_keep_their_order_and_append_daemon_status_activity() {
     assert_eq!(
         features.get(shipped.len()),
         Some(&"daemon_status.activity"),
+        "{features:?}"
+    );
+    assert_eq!(
+        features.get(shipped.len() + 1),
+        Some(&"daemon_status.volume_name"),
         "{features:?}"
     );
     let mut seen = std::collections::BTreeSet::new();

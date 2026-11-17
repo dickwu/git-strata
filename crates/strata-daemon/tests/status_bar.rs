@@ -208,6 +208,16 @@ fn volume_reported_and_null_on_error() {
     assert!(size > 0 && free <= size, "{v}");
     let want = strata_apfs::volume_space(&fx.config.paths.root).unwrap();
     assert_eq!(size, want.size, "{v}");
+    // It names the volume holding the data root (the store and the
+    // session trees), not some other disk.
+    let label = strata_apfs::volume_label(&fx.config.paths.root).unwrap();
+    assert_eq!(
+        v["path"],
+        json!(fx.config.paths.root.to_string_lossy()),
+        "{v}"
+    );
+    assert_eq!(v["mount"], json!(label.mount.to_string_lossy()), "{v}");
+    assert_eq!(v["name"], json!(label.name), "{v}");
     let as_of = strata_types::serde_rfc3339::parse(v["as_of"].as_str().unwrap()).unwrap();
     assert!(as_of <= SystemTime::now(), "{v}");
 

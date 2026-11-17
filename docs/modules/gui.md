@@ -1006,7 +1006,7 @@ daemon modal. Chip targets open the relevant modal section, waiting list or sess
 
 | Order | Color | Contents |
 |---|---|---|
-| 1 | Red (`--danger`) | Critically low volume space, unavailable data volume guidance, file-handle pressure, Error-class warnings (down/exhaustion are shown once in the daemon trigger) |
+| 1 | Red (`--danger`) | Critically low volume space, unavailable store volume guidance, file-handle pressure, Error-class warnings (down/exhaustion are shown once in the daemon trigger) |
 | 2 | Amber (Waiting palette) | Waiting for you |
 | 3 | Purple (Conflict palette) | Repositories needing an agent for conflicts |
 | 4 | Amber (Waiting palette) | Degraded states: Busy replies, abnormal holds (every P-b LongHold; on 0.2.2 a request hold or a background hold past 30 min), current long waits, actionable auto-rebase failures, config not applied or awaiting a restart, fetch failures, a panicked reconciliation pass (`reconcile.last.panicked`), a failed sessions audit-log write (`sessions_audit_error`), published but not pushed, unresolved measuring errors, low space, version mismatch |
@@ -1158,7 +1158,8 @@ S3/S4 reuse the existing query data; they add no daemon command or poll.
 
 The App accepts optional `activity[]`, `busy`, `volume`, `scan`, `version`, `pid`, `started`,
 holder `origin`/`elapsed_ms`, LongHold `origin`/`session`, and `du.scan.active`/`unresolved`.
-New display sources are gated by `daemon_status.activity`. No request field, RPC method,
+New display sources are gated by `daemon_status.activity`. `volume.path`, `volume.mount` and
+`volume.name` (feature `daemon_status.volume_name`) name the measured volume. No request field, RPC method,
 Tauri command, poll or `api` is added. The existing legacy cadence continues to depend on
 the presence of `api`, not this reply feature. The 0.2.2 incident fixture and fallback remain unchanged.
 
@@ -1203,6 +1204,17 @@ arrival, so a sample, Busy reply or daemon start newer than the last tick is cur
 size and sample time with the APFS caveat: this space is shared, excludes purgeable space,
 and can differ from Finder; size minus free is not git-strata usage. Low-space chips land
 on Trash's counts and human gc command, with no promise of bytes reclaimed.
+
+The volume is always the one holding the daemon's data root (store, sessions, dependency
+trees; every checkout must share it), never the startup disk as such. A reply with
+`volume.name` labels everything by that name: the right side reads `GWD · 30 GB free`, the
+chip `GWD is low on space · 30 GB free`, the modal `GWD: 30 GB free of 2.0 TB` with
+`Mounted at /Volumes/GWD; holds the git-strata data root …`. A 0.2.3 reply has no name; it
+measured the same data root, so the thresholds still apply and the label is `Store volume`
+(`Store volume is low on space · …`), never the ambiguous "Data volume" (on macOS that also
+names the startup disk's APFS Data volume). A blank name counts as none. The bar and chip cut
+a name longer than 20 characters to 19 and `…` so the figure stays visible; the modal shows it
+whole.
 
 P-b scan chips use the lightweight `daemon_status.scan` counters, so they do not need du:
 `Measuring storage · 412 done · 4 in progress · 136 queued`. They appear only while running

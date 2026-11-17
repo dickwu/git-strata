@@ -192,7 +192,7 @@ describe('daemon modal content', () => {
     expect(html).toContain('prepare');
     expect(html).toContain('Total since daemon start: 17');
     expect(html).toContain('Recent replies (last 10 minutes)');
-    expect(html).toContain('Data volume: 1.2 TB free of 2.0 TB');
+    expect(html).toContain('Store volume: 1.2 TB free of 2.0 TB');
     expect(html).toContain('purgeable');
     expect(html).toContain('Finder');
     expect(html).toContain('Measuring storage · 412 done · 4 in progress · 136 queued');
@@ -203,6 +203,29 @@ describe('daemon modal content', () => {
     expect(html).toContain('data-section="trash"');
   });
 
+  test('a named volume shows its name, mount and what it holds', () => {
+    const data = structuredClone(pbFixture.daemon) as DaemonStatus;
+    Object.assign(data.volume!, {
+      path: '/Volumes/GWD/inter/.strata',
+      mount: '/Volumes/GWD',
+      name: 'GWD',
+    });
+    const html = content({ status: answered(data), now: Date.parse(pbFixture.now) });
+    expect(html).toContain('GWD: 1.2 TB free of 2.0 TB');
+    expect(html).toContain(
+      'Mounted at /Volumes/GWD; holds the git-strata data root /Volumes/GWD/inter/.strata'
+    );
+    expect(html).not.toContain('Store volume:');
+    // A path without mount/name (the name read failed): the store volume, with its root.
+    delete data.volume!.mount;
+    delete data.volume!.name;
+    const bare = content({ status: answered(data), now: Date.parse(pbFixture.now) });
+    expect(bare).toContain('Store volume: 1.2 TB free of 2.0 TB');
+    expect(bare).toContain(
+      'The volume holding the git-strata data root /Volumes/GWD/inter/.strata'
+    );
+  });
+
   test('P-b storage and scan remain usable while du has not answered; trash target exists', () => {
     const data = structuredClone(pbFixture.daemon) as DaemonStatus;
     const html = content({
@@ -210,7 +233,7 @@ describe('daemon modal content', () => {
       du: { ...answered(undefined), isSuccess: false, isPending: true } as UseQueryResult<DuReply>,
       now: Date.parse(pbFixture.now),
     });
-    expect(html).toContain('Data volume: 1.2 TB free of 2.0 TB');
+    expect(html).toContain('Store volume: 1.2 TB free of 2.0 TB');
     expect(html).toContain('4 in progress');
     expect(html).toContain('data-section="trash"');
     expect(html).toContain('Trash measurements are not available yet.');
@@ -275,7 +298,7 @@ describe('daemon modal content', () => {
     const html = content({ status: notAnswering(data), now: Date.parse(pbFixture.now) });
     expect(html).not.toContain('data-section="activity"');
     expect(html).not.toContain('Busy replies');
-    expect(html).not.toContain('Data volume:');
+    expect(html).not.toContain('Store volume:');
   });
 
   test('incident: nothing red; raw JSON and allocated bytes only behind Details', () => {

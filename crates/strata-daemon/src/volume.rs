@@ -5,6 +5,13 @@
 //! `daemon_status` reads only the cache: a wedged volume stalls the sampler,
 //! never the reply, whose `as_of` then ages. A failed sample clears the
 //! cache (`null`) until one succeeds.
+//!
+//! The data root holds the store, the session trees and the dependency
+//! trees, and every configured checkout is on its volume (store open
+//! refuses one that is not, `CrossVolume`), so this one volume is every
+//! volume git-strata writes its bulk to: the sample names it (`path`,
+//! `mount`, `name`; FEATURES `daemon_status.volume_name`) so a client can
+//! say which disk is low instead of a generic "data volume".
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,7 +19,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
-use strata_apfs::VolumeSpace;
+use strata_apfs::{VolumeLabel, VolumeSpace};
 
 /// How often the sampler reads the volume.
 pub const EVERY: Duration = Duration::from_secs(10);
@@ -23,9 +30,19 @@ pub type SampleFn = dyn Fn(&Path) -> io::Result<VolumeSpace> + Send + Sync;
 
 /// The cache the sampler fills.
 pub struct Volume {
-    last: Mutex<Option<(VolumeSpace, SystemTime)>>,
+    path: PathBuf,
+    last: Mutex<Option<Sample>>,
     stopped: Mutex<bool>,
     wake: Condvar,
+}
+
+/// One successful read. `label` is `None` when the volume's name could not
+/// be read although its space could; the reply then leaves `mount` and
+/// `name` out.
+struct Sample {
+    space: VolumeSpace,
+    label: Option<VolumeLabel>,
+    at: SystemTime,
 }
 
 /// Owns the sampler; stops it when dropped (the daemon going away). The
@@ -65,6 +82,7 @@ impl Volume {
     /// (tests). A thread that cannot be spawned leaves the cache empty.
     pub fn start_with(path: PathBuf, every: Duration, sample: Arc<SampleFn>) -> VolumeHandle {
         let v = Arc::new(Volume {
+            path: path.clone(),
             last: Mutex::new(None),
             stopped: Mutex::new(false),
             wake: Condvar::new(),
@@ -85,7 +103,16 @@ impl Volume {
             if let Err(e) = &got {
                 tracing::debug!(path = %path.display(), error = %e, "volume sample failed");
             }
-            *lock(&self.last) = got.ok().map(|space| (space, SystemTime::now()));
+            let got = got.ok().map(|space| Sample {
+                space,
+                label: strata_apfs::volume_label(path)
+                    .inspect_err(|e| {
+                        tracing::debug!(path = %path.display(), error = %e, "volume name read failed")
+                    })
+                    .ok(),
+                at: SystemTime::now(),
+            });
+            *lock(&self.last) = got;
             let end = Instant::now() + every;
             let mut stopped = lock(&self.stopped);
             loop {
@@ -105,15 +132,25 @@ impl Volume {
         }
     }
 
-    /// `{free, size, as_of}` of the last sample, or `null` before the first
-    /// one succeeded or after one failed.
+    /// `{free, size, as_of, path, mount?, name?}` of the last sample, or
+    /// `null` before the first one succeeded or after one failed. `path` is
+    /// the data root that was measured; `mount` and `name` say which volume
+    /// holds it (left out when only the name read failed).
     pub fn json(&self) -> Value {
-        match *lock(&self.last) {
-            Some((space, at)) => json!({
-                "free": space.free,
-                "size": space.size,
-                "as_of": strata_types::serde_rfc3339::format(&at).ok(),
-            }),
+        match &*lock(&self.last) {
+            Some(Sample { space, label, at }) => {
+                let mut v = json!({
+                    "free": space.free,
+                    "size": space.size,
+                    "as_of": strata_types::serde_rfc3339::format(at).ok(),
+                    "path": self.path.to_string_lossy(),
+                });
+                if let Some(l) = label {
+                    v["mount"] = json!(l.mount.to_string_lossy());
+                    v["name"] = json!(l.name);
+                }
+                v
+            }
             None => Value::Null,
         }
     }
@@ -147,6 +184,10 @@ mod tests {
             strata_types::serde_rfc3339::parse(got["as_of"].as_str().unwrap()).is_ok(),
             "{got}"
         );
+        let want = strata_apfs::volume_label(dir.path()).unwrap();
+        assert_eq!(got["path"], json!(dir.path().to_string_lossy()), "{got}");
+        assert_eq!(got["mount"], json!(want.mount.to_string_lossy()), "{got}");
+        assert_eq!(got["name"], json!(want.name), "{got}");
     }
 
     #[test]
@@ -180,6 +221,26 @@ mod tests {
         assert!(wait_for(&v, Value::is_null).is_null());
         fail.store(false, Ordering::SeqCst);
         assert_eq!(wait_for(&v, |j| !j.is_null())["free"], 1);
+    }
+
+    #[test]
+    fn a_failed_name_read_keeps_the_space_and_leaves_out_mount_and_name() {
+        // The space reads (fake) but the path does not exist, so the real
+        // name read fails.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let v = Volume::start_with(
+            missing.clone(),
+            Duration::from_millis(5),
+            Arc::new(|_: &Path| Ok(VolumeSpace { free: 1, size: 2 })),
+        );
+        let got = wait_for(&v, |j| !j.is_null());
+        assert_eq!(got["size"], 2, "{got}");
+        assert_eq!(got["path"], json!(missing.to_string_lossy()), "{got}");
+        assert!(
+            got.get("mount").is_none() && got.get("name").is_none(),
+            "{got}"
+        );
     }
 
     #[test]

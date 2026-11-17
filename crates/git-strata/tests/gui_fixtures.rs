@@ -44,7 +44,8 @@ fn app_version() -> String {
 }
 
 /// The keys `write` adds (fixture, path, value), all from the status-bar
-/// work (feature `daemon_status.activity`). The values are fixed so an
+/// work (feature `daemon_status.activity`; the `volume.*` names from
+/// `daemon_status.volume_name`). The values are fixed so an
 /// update is the same on every machine and run: machine-specific ones
 /// (`pid`, `started`, `volume`; `version` is the app's, so the pair reads
 /// as matched) and timing-specific ones (work in flight, Busy replies, scan
@@ -66,6 +67,13 @@ fn added() -> Vec<(&'static str, &'static str, Value)> {
             "volume",
             json!({ "free": 1_200_000_000_000u64, "size": 2_000_000_000_000u64, "as_of": "2026-01-01T00:00:00Z" }),
         ),
+        (
+            "daemon_status",
+            "volume.path",
+            json!("/Volumes/Work/.strata"),
+        ),
+        ("daemon_status", "volume.mount", json!("/Volumes/Work")),
+        ("daemon_status", "volume.name", json!("Work")),
         (
             "daemon_status",
             "scan",

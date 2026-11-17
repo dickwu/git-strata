@@ -79,6 +79,12 @@ export interface VolumeSpace {
   free: number;
   size: number;
   as_of: string;
+  /** Feature `daemon_status.volume_name`: the data root measured (`paths.root`). */
+  path?: string;
+  /** Feature `daemon_status.volume_name`: where the measured volume is mounted. */
+  mount?: string;
+  /** Feature `daemon_status.volume_name`: the measured volume's name (`GWD`). */
+  name?: string;
 }
 
 export interface DaemonScan {

@@ -199,7 +199,7 @@ export function StatusBarView({
             onClick={() => h.onOpen('storage')}
             data-testid="status-free"
           >
-            {right.free.text}
+            <span className={css.freeText}>{right.free.text}</span>
           </button>
         )}
         {right.saved && (
