@@ -12,9 +12,11 @@ export function CommandPalette({
   sessions,
   onRefresh,
   onTheme,
+  onCheckUpdates,
 }: {
   sessions: StatusReply | undefined;
   onRefresh: () => void;
+  onCheckUpdates: () => void;
   onTheme: (choice: ThemeChoice) => void;
 }) {
   const {
@@ -47,6 +49,7 @@ export function CommandPalette({
       go('sessions');
       if (!agentFilter.includes(a.agent)) toggleAgentFilter(a.agent);
     } else if (a.kind === 'theme') onTheme(a.choice);
+    else if (a.kind === 'check_updates') onCheckUpdates();
     else onRefresh();
     close();
   };

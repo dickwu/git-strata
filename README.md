@@ -187,9 +187,10 @@ Desktop releases through 0.2.x use the formula's daemon. If macOS blocks the
 first open on those releases, see [Legacy macOS installation and reset](#legacy-macos-installation-and-reset-02x-and-earlier).
 For release builds, signing modes and tap updates, see [docs/release.md](docs/release.md).
 
-`git-stratad --version` prints the version; `git-stratad --print-plist [BIN]`
-prints the plist below for this `HOME` (BIN: absolute path, default the
-running binary) and does nothing else.
+`git-stratad --version` prints the version. `git-stratad --print-plist [BIN]`
+renders the LaunchAgent for this `HOME`, using the running binary when BIN is
+omitted. `git-stratad --check-config PATH` validates the config, its canonical
+paths and volume compatibility without opening a store or socket.
 
 A sample config is [examples/config.toml](examples/config.toml) (the formula
 installs it as `$(brew --prefix)/share/git-strata/config.toml`);
@@ -212,9 +213,13 @@ plist; installing it is a human step. Its content (from
 
 | Command | What it does | Result |
 | --- | --- | --- |
-| `git-strata daemon status` | Asks the socket; never fails for a down daemon or missing config | `{running, socket, session?, holders:[], unknown_publishes:[], alerts:[], config?:{generation,hash,loaded_at,last_attempt,restart_required}, version?, pid?, started?, activity?, busy?, volume?, scan?}` |
+| `git-strata daemon status` | Asks the socket; never fails for a down daemon or missing config | `{running, socket, session?, holders:[], unknown_publishes:[], alerts:[], config?:{generation,hash,loaded_at,last_attempt,restart_required}, version?, pid?, started?, activity?, busy?, volume?, scan?, draining?, inflight?, store_schema?}` |
 | `git-strata daemon start` | Bootstraps an unloaded agent or kickstarts a loaded, stopped agent | `{}` on start, `{already:true}` if running. `InvalidInput` `no_plist` if the plist is missing. A disabled agent returns `Unsupported` (`agent_disabled`). Open GIT STRATA to finish an app update if one is in progress. See `foreign_home` / `foreign_agent` below. |
-| `git-strata daemon stop` | `launchctl bootout`, then waits up to 10 s until launchd drops the agent | `{}`; `Unknown` `launchctl` (`step: bootout_wait`) on timeout; `foreign_home` / `foreign_agent` (below) |
+| `git-strata daemon stop` | `launchctl bootout`, then waits up to 10 s for launchd to confirm the label is absent | `{}` after unload or `{already:true}` if absent. `Unknown` `launchctl` at `step: print` for a failed initial probe or `step: bootout_wait` on timeout. See `foreign_home` / `foreign_agent` below. |
+
+`draining`, `inflight` and `store_schema` are optional status fields from
+daemons with `daemon.drain`. If the status reports a sealed Move, open GIT STRATA
+to finish or cancel it. The App manages the drain lease.
 
 `daemon status` copies `config` from the daemon when available; it is absent
 when the daemon is down or an older daemon omits it. `generation`, `hash` and
@@ -999,6 +1004,9 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `error.code` (`detail.reason`) | Agent action |
 | --- | --- |
 | `Busy` (`daemon_down`) | Report it to the human. During an [in-app update](#updating-the-app), let the app finish. Outside an update, the human can run `git-strata daemon start`. Retry once `daemon status` reports `running`. |
+| `Busy` (`draining`) | An in-app stop, restart or Move is draining writes. Wait for the App to finish. |
+| `Busy` (`not_idle` / `lease_lost`) | The App could not seal the drain yet or no longer owns the lease. Check `git-strata daemon status` for the current state. |
+| `InvalidInput` (`sealed`) | An accepted stop or restart is in progress. Wait for the App to finish. |
 | `Busy` (`workspace_changed`) | a file changed while read; retry |
 | `Busy` (`publish_unknown`) | an earlier publish of this repo has an unknown outcome; it clears once origin has that commit (checked at each publish), e.g. after the human runs `git-strata push REPO`; a definite remote refusal never blocks |
 | `Busy` (`port_unidentified` / `port_probe_error`) | `session exec` could not identify a port's holder; retry shortly |

@@ -98,3 +98,9 @@ describe('⌘K theme entries', () => {
     ]);
   });
 });
+
+test('the Check for updates command is searchable by release or version', () => {
+  for (const query of ['check updates', 'upgrade', 'version']) {
+    expect(filterEntries(buildEntries(undefined), query)[0]?.action).toEqual({ kind: 'check_updates' });
+  }
+});

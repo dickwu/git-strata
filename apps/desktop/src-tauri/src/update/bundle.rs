@@ -1,7 +1,8 @@
 //! Bundle inspection, installation and rollback file operations.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strata_types::Code;
 use tauri_plugin_updater::Error::PreviousAppNotRestored;
@@ -11,17 +12,29 @@ use super::txn::Txn;
 use crate::error::GuiError;
 
 /// Release metadata read from the downloaded bundle's Info.plist.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct BundleInfo {
     pub version: String,
     pub store_schema: u32,
     pub downgrade_floor: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct BundleIdentity {
     device: u64,
     inode: u64,
+}
+
+impl BundleIdentity {
+    #[cfg(test)]
+    pub(super) fn at(path: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(path)?;
+        Ok(Self {
+            device: meta.dev(),
+            inode: meta.ino(),
+        })
+    }
 }
 
 pub enum RestoreDecision {
@@ -30,6 +43,19 @@ pub enum RestoreDecision {
     Swap {
         expected: Option<BundleIdentity>,
     },
+}
+
+/// Both signed directory entries immediately before an explicit rollback swap.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ExchangeEvidence {
+    pub(super) staged: PathBuf,
+    pub(super) previous: VerifiedBundle,
+    pub(super) target: VerifiedBundle,
+}
+
+pub enum ExchangeError {
+    NotActivated(GuiError),
+    Uncertain(GuiError),
 }
 
 pub trait BundleOps: Send + Sync {
@@ -61,6 +87,26 @@ pub trait BundleOps: Send + Sync {
             "Guarded bundle restoration is unavailable",
         ))
     }
+    fn exchange_previous(
+        &self,
+        _zip: &Path,
+        _bundle: &Path,
+        _guard: &dyn Fn(&VerifiedBundle) -> Result<VerifiedBundle, GuiError>,
+        _admit: &dyn Fn(&ExchangeEvidence) -> Result<(), GuiError>,
+    ) -> Result<(), ExchangeError> {
+        Err(ExchangeError::NotActivated(GuiError::internal(
+            "Journaled bundle exchange is unavailable",
+        )))
+    }
+
+    fn verify_previous_archive(&self, _bundle: &Path, _txn: &Txn) -> Result<(), GuiError> {
+        Err(GuiError::internal(
+            "Bundle archive verification is unavailable",
+        ))
+    }
+
+    /// The coordinator calls this only after saving a conclusive result.
+    fn discard_exchange(&self, _bundle: &Path, _evidence: &ExchangeEvidence, _swapped: bool) {}
     /// Return CheckFailed with reason bad_codesign only for a conclusive rejection.
     fn codesign_verify(&self, bundle: &Path) -> Result<(), GuiError>;
 
@@ -131,10 +177,43 @@ impl ProbeError {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct VerifiedBundle {
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct VerifiedBundle {
     pub(super) info: BundleInfo,
     pub(super) identity: BundleIdentity,
+}
+
+fn exchange_stage<'a>(bundle: &Path, staged: &'a Path) -> Result<&'a Path, GuiError> {
+    staged
+        .parent()
+        .filter(|dir| {
+            staged.is_absolute()
+                && !staged.components().any(|c| c == Component::ParentDir)
+                && staged.file_name() == bundle.file_name()
+                && dir.file_name().is_some_and(|name| {
+                    name.to_str()
+                        .is_some_and(|name| name.starts_with(".git-strata-bundle."))
+                })
+        })
+        .ok_or_else(|| bundle_error("restore_failed", "Unexpected rollback staging path"))
+}
+
+pub(super) fn verify_exchange_pair(
+    ops: &dyn BundleOps,
+    bundle: &Path,
+    evidence: &ExchangeEvidence,
+) -> Result<(), GuiError> {
+    exchange_stage(bundle, &evidence.staged)?;
+    let previous = probe_bundle(ops, bundle).map_err(ProbeError::into_error)?;
+    let target = probe_bundle(ops, &evidence.staged).map_err(ProbeError::into_error)?;
+    if previous != evidence.previous || target != evidence.target {
+        return Err(bundle_error(
+            "restore_destination_changed",
+            "The installed and staged apps do not match the journaled exchange",
+        ));
+    }
+    confirm_identity(ops, bundle, Some(previous.identity)).map_err(ProbeError::into_error)?;
+    confirm_identity(ops, &evidence.staged, Some(target.identity)).map_err(ProbeError::into_error)
 }
 
 fn bundle_changed() -> ProbeError {
@@ -262,24 +341,16 @@ pub fn install_and_recover(
     bundle: &Path,
     txn: &Txn,
 ) -> InstallReport {
-    // The drain can outlast a replacement by another installer. Recheck under
-    // the fence before handing the destination to the updater plugin.
-    let predecessor = probe_bundle(ops, bundle)
-        .map_err(ProbeError::into_error)
-        .and_then(|app| {
-            if app.info.version != txn.from {
-                return Err(unexpected_version(&app.info.version));
-            }
-            verify_predecessor_schema(&app.info, txn)
-        });
-    if let Err(error) = predecessor {
-        return InstallReport {
-            outcome: InstallOutcome::RestoreFailed(error),
-            installer_error: None,
-            retained_app: None,
-        };
-    }
-    let installer_error = ops.install(update).err();
+    let installer_error = match install_verified(ops, update, bundle, txn) {
+        Ok(result) => result.err(),
+        Err(error) => {
+            return InstallReport {
+                outcome: InstallOutcome::RestoreFailed(error),
+                installer_error: None,
+                retained_app: None,
+            };
+        }
+    };
     let kept = match &installer_error {
         Some(PreviousAppNotRestored(path)) => Some(path.as_path()),
         _ => None,
@@ -312,6 +383,29 @@ pub fn install_and_recover(
         installer_error,
         retained_app,
     }
+}
+
+/// Check the predecessor under the fence immediately before invoking the updater.
+pub(super) fn install_verified(
+    ops: &dyn BundleOps,
+    update: VerifiedUpdate,
+    bundle: &Path,
+    txn: &Txn,
+) -> Result<tauri_plugin_updater::Result<()>, GuiError> {
+    let app = probe_bundle(ops, bundle).map_err(ProbeError::into_error)?;
+    if app.info.version != txn.from {
+        return Err(unexpected_version(&app.info.version));
+    }
+    verify_predecessor_schema(&app.info, txn)?;
+    Ok(ops.install(update))
+}
+
+pub(super) fn restore_interrupted_zip(
+    ops: &dyn BundleOps,
+    bundle: &Path,
+    txn: &Txn,
+) -> Result<(), GuiError> {
+    restore_previous(ops, bundle, txn, &|| recovery_decision(ops, bundle, txn))
 }
 
 pub(super) fn unexpected_version(version: &str) -> GuiError {
@@ -404,7 +498,7 @@ fn recover_install(
     })
 }
 
-/// The same restore used by recovery and explicit rollback.
+/// Restore after an interrupted or failed forward installation.
 pub(super) fn restore_previous(
     ops: &dyn BundleOps,
     bundle: &Path,
@@ -425,6 +519,8 @@ pub(super) fn restore_previous(
 
 #[cfg(target_os = "macos")]
 pub use macos::MacBundleOps;
+#[cfg(target_os = "macos")]
+pub(super) use macos::{decode_move_plist, encode_move_plist};
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -659,6 +755,20 @@ mod macos {
                 .ok_or_else(|| bundle_error("bundle_path", "The installed bundle has no name"))?;
             Ok(staging.join(name))
         }
+
+        fn stage_backup(
+            &self,
+            zip: &Path,
+            bundle: &Path,
+        ) -> Result<(Scratch, PathBuf, VerifiedBundle), GuiError> {
+            self.check_destination(bundle)?;
+            let expected = self.backup_version(zip)?;
+            regular_file(zip, "rollback_zip_path")?;
+            let stage = self.stage_on_install_volume()?;
+            let staged = self.unpack_backup(zip, &stage.0)?;
+            let verified = verify_version(self, &staged, expected)?;
+            Ok((stage, staged, verified))
+        }
     }
 
     impl<R> BundleOps for MacBundleOps<R>
@@ -727,7 +837,7 @@ mod macos {
             self.check_destination(bundle)?;
             let version = self.backup_version(zip)?;
             let reason = "rollback_backup";
-            verify_version(self, bundle, version)?;
+            let predecessor = verify_version(self, bundle, version)?.info;
             fs::create_dir_all(&self.previous_dir)
                 .map_err(|e| fs_error(reason, &self.previous_dir, e))?;
             let scratch = Scratch::new(&self.staging_parent(&self.previous_dir)?)
@@ -741,7 +851,13 @@ mod macos {
             let verify_dir = scratch.0.join("verify");
             fs::create_dir(&verify_dir).map_err(|e| fs_error(reason, &verify_dir, e))?;
             let archived_app = self.unpack_backup(&staged, &verify_dir)?;
-            verify_version(self, &archived_app, version)?;
+            let archived = verify_version(self, &archived_app, &predecessor.version)?.info;
+            if archived.store_schema != predecessor.store_schema {
+                return Err(bundle_error(
+                    "unexpected_bundle_metadata",
+                    "The rollback archive has a different store schema from the verified app",
+                ));
+            }
             sync_backup(&zip_file).map_err(|e| fs_error(reason, &staged, e))?;
             fs::rename(&staged, zip).map_err(|e| fs_error(reason, zip, e))?;
 
@@ -785,12 +901,7 @@ mod macos {
             bundle: &Path,
             decide: &dyn Fn(&BundleInfo) -> Result<RestoreDecision, GuiError>,
         ) -> Result<(), GuiError> {
-            self.check_destination(bundle)?;
-            let expected = self.backup_version(zip)?;
-            regular_file(zip, "rollback_zip_path")?;
-            let stage = self.stage_on_install_volume()?;
-            let staged = self.unpack_backup(zip, &stage.0)?;
-            let verified = verify_version(self, &staged, expected)?;
+            let (stage, staged, verified) = self.stage_backup(zip, bundle)?;
             let RestoreDecision::Swap { expected } = decide(&verified.info)? else {
                 return Ok(());
             };
@@ -804,6 +915,87 @@ mod macos {
                 ));
             }
             Ok(())
+        }
+
+        fn exchange_previous(
+            &self,
+            zip: &Path,
+            bundle: &Path,
+            guard: &dyn Fn(&VerifiedBundle) -> Result<VerifiedBundle, GuiError>,
+            admit: &dyn Fn(&ExchangeEvidence) -> Result<(), GuiError>,
+        ) -> Result<(), ExchangeError> {
+            use ExchangeError::{NotActivated, Uncertain};
+
+            let (stage, staged, previous) = self.stage_backup(zip, bundle).map_err(NotActivated)?;
+            let target = guard(&previous).map_err(NotActivated)?;
+            let evidence = ExchangeEvidence {
+                staged,
+                previous,
+                target,
+            };
+
+            // The admission can have reached the journal even when directory
+            // sync fails. Keep the stage until the coordinator settles it.
+            let stage_dir = stage.keep();
+            admit(&evidence).map_err(Uncertain)?;
+            let previous = verify_version(self, &evidence.staged, &evidence.previous.info.version)
+                .map_err(NotActivated)?;
+            if previous != evidence.previous {
+                return Err(NotActivated(bundle_changed().into_error()));
+            }
+            let target = guard(&previous).map_err(NotActivated)?;
+            if target != evidence.target {
+                return Err(NotActivated(bundle_changed().into_error()));
+            }
+            for (path, expected) in [
+                (bundle, evidence.target.identity),
+                (&evidence.staged, evidence.previous.identity),
+            ] {
+                confirm_identity(self, path, Some(expected))
+                    .map_err(|error| NotActivated(error.into_error()))?;
+            }
+            activate_bundle(&evidence.staged, bundle, Some(evidence.target.identity))
+                .map_err(NotActivated)?;
+            for dir in [
+                stage_dir.as_path(),
+                self.install_parent().map_err(Uncertain)?,
+            ] {
+                File::open(dir)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|error| Uncertain(fs_error("restore_failed", dir, error)))?;
+            }
+            verify_exchange_pair(self, bundle, &evidence).map_err(Uncertain)
+        }
+
+        fn verify_previous_archive(&self, bundle: &Path, txn: &Txn) -> Result<(), GuiError> {
+            if zip_version(&txn.rollback_zip) != Some(txn.from.as_str()) {
+                return Err(bundle_error(
+                    "rollback_zip_version",
+                    "Wrong previous bundle archive",
+                ));
+            }
+            let (_stage, _, previous) = self.stage_backup(&txn.rollback_zip, bundle)?;
+            verify_predecessor_schema(&previous.info, txn)
+        }
+
+        fn discard_exchange(&self, bundle: &Path, evidence: &ExchangeEvidence, swapped: bool) {
+            let Ok(dir) = exchange_stage(bundle, &evidence.staged) else {
+                return;
+            };
+            if self.check_destination(bundle).is_err()
+                || self.outside_protected_roots(dir).is_err()
+                || require_dir(dir).is_err()
+            {
+                return;
+            }
+            let expected = if swapped {
+                &evidence.target
+            } else {
+                &evidence.previous
+            };
+            if probe_bundle(self, &evidence.staged).is_ok_and(|app| &app == expected) {
+                let _ = fs::remove_dir_all(dir);
+            }
         }
 
         fn restore_kept(&self, kept: &Path, bundle: &Path, txn: &Txn) -> Result<(), GuiError> {
@@ -1048,9 +1240,129 @@ mod macos {
         }
     }
 
+    use crate::update::move_daemon::{Plist as MovePlist, PlistValue};
+
+    pub(in crate::update) fn decode_move_plist(bytes: &[u8]) -> Result<MovePlist, GuiError> {
+        autoreleasepool(|_| match decode_value(&Plist::parse(bytes)?.0, 0)? {
+            PlistValue::Dictionary(contents) => Ok(contents),
+            _ => Err(corrupt_plist("Expected a LaunchAgent dictionary")),
+        })
+    }
+
+    pub(in crate::update) fn encode_move_plist(plist: &MovePlist) -> Result<Vec<u8>, GuiError> {
+        autoreleasepool(|_| {
+            let root = encode_dictionary(plist)?;
+            serialize_plist(&root, 200)
+        })
+    }
+
+    fn serialize_plist(root: &AnyObject, format: usize) -> Result<Vec<u8>, GuiError> {
+        // SAFETY: root is a retained plist object. The null out-parameter discards NSError.
+        let data: Option<Retained<NSData>> = unsafe {
+            msg_send![class!(NSPropertyListSerialization), dataWithPropertyList: root,
+                format: format, options: 0usize, error: ptr::null_mut::<*mut AnyObject>()]
+        };
+        data.map(|data| data.to_vec())
+            .ok_or_else(|| corrupt_plist("Cannot encode a LaunchAgent property list"))
+    }
+
+    fn decode_value(value: &AnyObject, depth: usize) -> Result<PlistValue, GuiError> {
+        if depth >= 64 {
+            return Err(corrupt_plist(
+                "The LaunchAgent property list is nested too deeply",
+            ));
+        }
+        if let Some(string) = value.downcast_ref::<NSString>() {
+            return Ok(PlistValue::String(string.to_string()));
+        }
+        // SAFETY: Foundation returns only plist primitives and collections. Reflect
+        // their classes before sending collection- or number-specific selectors.
+        unsafe {
+            if CFGetTypeID(ptr::from_ref(value).cast()) == CFBooleanGetTypeID() {
+                let boolean: objc2::runtime::Bool = msg_send![value, boolValue];
+                return Ok(PlistValue::Bool(boolean.as_bool()));
+            }
+            let dictionary: bool = msg_send![value, isKindOfClass: class!(NSDictionary)];
+            if dictionary {
+                let keys: Retained<AnyObject> = msg_send![value, allKeys];
+                let count: usize = msg_send![&*keys, count];
+                let mut result = MovePlist::new();
+                for index in 0..count {
+                    let key: Retained<NSString> = msg_send![&*keys, objectAtIndex: index];
+                    let member: Retained<AnyObject> = msg_send![value, objectForKey: &*key];
+                    result.insert(key.to_string(), decode_value(&member, depth + 1)?);
+                }
+                return Ok(PlistValue::Dictionary(result));
+            }
+            let array: bool = msg_send![value, isKindOfClass: class!(NSArray)];
+            if array {
+                let count: usize = msg_send![value, count];
+                let mut values = Vec::with_capacity(count);
+                for index in 0..count {
+                    let member: Retained<AnyObject> = msg_send![value, objectAtIndex: index];
+                    values.push(decode_value(&member, depth + 1)?);
+                }
+                return Ok(PlistValue::Array(values));
+            }
+            let wrapper: Retained<AnyObject> = msg_send![class!(NSArray), arrayWithObject: value];
+            Ok(PlistValue::Other(serialize_plist(&wrapper, 200)?))
+        }
+    }
+
+    fn encode_dictionary(values: &MovePlist) -> Result<Retained<AnyObject>, GuiError> {
+        // SAFETY: NSDictionary retains the live keys and values we add.
+        unsafe {
+            let dictionary: Retained<AnyObject> =
+                msg_send![class!(NSMutableDictionary), dictionary];
+            for (key, value) in values {
+                let key = NSString::from_str(key);
+                let value = encode_value(value)?;
+                let _: () = msg_send![&*dictionary, setObject: &*value, forKey: &*key];
+            }
+            Ok(dictionary)
+        }
+    }
+
+    fn encode_value(value: &PlistValue) -> Result<Retained<AnyObject>, GuiError> {
+        // SAFETY: Foundation allocates and retains the plist objects. An opaque
+        // value must decode to the one-element wrapper emitted by decode_value.
+        unsafe {
+            Ok(match value {
+                PlistValue::String(text) => NSString::from_str(text).into_super().into_super(),
+                PlistValue::Bool(boolean) => {
+                    msg_send![class!(NSNumber), numberWithBool: objc2::runtime::Bool::new(*boolean)]
+                }
+                PlistValue::Dictionary(values) => encode_dictionary(values)?,
+                PlistValue::Array(values) => {
+                    let array: Retained<AnyObject> = msg_send![class!(NSMutableArray), array];
+                    for value in values {
+                        let value = encode_value(value)?;
+                        let _: () = msg_send![&*array, addObject: &*value];
+                    }
+                    array
+                }
+                PlistValue::Other(bytes) => {
+                    let data = NSData::with_bytes(bytes);
+                    let array: Option<Retained<AnyObject>> = msg_send![class!(NSPropertyListSerialization),
+                        propertyListWithData: &*data, options: 0usize, format: ptr::null_mut::<usize>(),
+                        error: ptr::null_mut::<*mut AnyObject>()];
+                    let array = array
+                        .filter(|array| msg_send![&**array, isKindOfClass: class!(NSArray)])
+                        .ok_or_else(|| corrupt_plist("Invalid retained property list value"))?;
+                    let count: usize = msg_send![&*array, count];
+                    if count != 1 {
+                        return Err(corrupt_plist("Invalid retained property list value"));
+                    }
+                    msg_send![&*array, objectAtIndex: 0usize]
+                }
+            })
+        }
+    }
+
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
         fn CFGetTypeID(value: *const c_void) -> usize;
+        fn CFBooleanGetTypeID() -> usize;
         fn CFNumberGetTypeID() -> usize;
         fn CFNumberIsFloatType(value: *const c_void) -> u8;
         fn CFNumberGetValue(value: *const c_void, kind: isize, output: *mut c_void) -> u8;
@@ -1238,8 +1550,29 @@ mod tests {
     use super::*;
     use crate::update::{
         exec::Operation,
-        rollback::{StoreEvidence, check, restore_fenced},
+        rollback::{StoreEvidence, check, exchange_fenced, verify_exchange},
     };
+
+    fn restore_fenced(
+        ops: &dyn BundleOps,
+        bundle: &Path,
+        txn: &Txn,
+        config: &Path,
+        root: &Path,
+    ) -> Result<(), GuiError> {
+        let evidence = std::sync::Mutex::new(None);
+        exchange_fenced(ops, bundle, txn, config, root, &|| Ok(()), &|admitted| {
+            *evidence.lock().unwrap() = Some(admitted.clone());
+            Ok(())
+        })
+        .map_err(|error| match error {
+            ExchangeError::NotActivated(error) | ExchangeError::Uncertain(error) => error,
+        })?;
+        let evidence = evidence.into_inner().unwrap().unwrap();
+        verify_exchange(ops, bundle, txn, &evidence)?;
+        ops.discard_exchange(bundle, &evidence, true);
+        Ok(())
+    }
 
     const NAME: &str = "GIT STRATA.app";
     const FROM: &str = "0.3.9";
@@ -1400,6 +1733,19 @@ mod tests {
             bytes: ARCHIVE.to_vec(),
             installer: Box::new(install),
         }
+    }
+
+    #[test]
+    fn move_plist_round_trips_native_scalar_and_collection_types() {
+        let raw = br#"<plist version="1.0"><dict>
+          <key>Enabled</key><true/><key>Integer</key><integer>900</integer>
+          <key>Array</key><array><string>argument</string><real>2.125</real></array>
+          <key>Dictionary</key><dict><key>Data</key><data>AAEC</data></dict>
+          <key>Date</key><date>2026-11-17T15:00:00Z</date>
+        </dict></plist>"#;
+        let decoded = decode_move_plist(raw).unwrap();
+        let encoded = encode_move_plist(&decoded).unwrap();
+        assert_eq!(decode_move_plist(&encoded).unwrap(), decoded);
     }
 
     #[test]
@@ -1657,20 +2003,37 @@ mod tests {
         let stale = txn.rollback_zip.with_file_name("GIT-STRATA-0.3.8.zip");
         fs::write(&stale, "0.3.8").unwrap();
 
-        let ops = layout.ops(|op| match op {
-            Operation::ZipBackup { bundle, zip } => {
-                fake_app(bundle, "0.3.11");
-                fs::write(zip, "0.3.11").unwrap();
-                Ok(())
-            }
-            other => fake_run(other),
-        });
+        for (version, schema, reason) in [
+            ("0.3.11", 8, "bundle_version"),
+            (FROM, 8, "unexpected_bundle_metadata"),
+        ] {
+            fake_app(&layout.app, FROM);
+            let ops = layout.ops(move |op| match op {
+                Operation::ZipBackup { bundle, zip } => {
+                    if version == FROM {
+                        fake_predecessor_with_schema(bundle, schema);
+                    } else {
+                        fake_app(bundle, version);
+                    }
+                    fs::write(zip, "concurrent replacement").unwrap();
+                    Ok(())
+                }
+                Operation::UnzipBackup { staging, .. } if version == FROM => {
+                    fake_predecessor_with_schema(&staging.join(NAME), schema);
+                    Ok(())
+                }
+                Operation::UnzipBackup { staging, .. } => {
+                    fake_app(&staging.join(NAME), version);
+                    Ok(())
+                }
+                other => fake_run(other),
+            });
 
-        let error = ops.save_previous(FROM, None).unwrap_err();
-        assert_eq!(error.reason(), Some("bundle_version"));
-        assert_eq!(fs::read_to_string(&txn.rollback_zip).unwrap(), FROM);
-        assert_eq!(fs::read_to_string(&stale).unwrap(), "0.3.8");
-        assert_eq!(ops.read_info_plist(&layout.app).unwrap().version, "0.3.11");
+            let error = ops.save_previous(FROM, None).unwrap_err();
+            assert_eq!(error.reason(), Some(reason));
+            assert_eq!(fs::read_to_string(&txn.rollback_zip).unwrap(), FROM);
+            assert_eq!(fs::read_to_string(&stale).unwrap(), "0.3.8");
+        }
     }
 
     #[test]
@@ -2258,7 +2621,7 @@ mod tests {
     }
 
     #[test]
-    fn fenced_rollback_accepts_an_already_restored_and_verified_bundle() {
+    fn fenced_rollback_requires_exchange_evidence_for_an_installed_predecessor() {
         let layout = Layout::new();
         let txn = layout.txn();
         fake_app(&layout.app, FROM);
@@ -2267,7 +2630,9 @@ mod tests {
             assert!(matches!(op, Operation::VerifyCodesign { .. }));
             fake_run(op)
         });
-        restore_fenced(&ops, &layout.app, &txn, &layout.config, &layout.store).unwrap();
+        let error =
+            restore_fenced(&ops, &layout.app, &txn, &layout.config, &layout.store).unwrap_err();
+        assert_eq!(error.reason(), Some("unexpected_bundle_version"));
         assert_eq!(ops.read_info_plist(&layout.app).unwrap().version, FROM);
     }
 
@@ -2284,7 +2649,7 @@ mod tests {
             fake_predecessor_with_schema(&layout.app, schema);
             let error =
                 restore_fenced(&ops, &layout.app, &txn, &layout.config, &layout.store).unwrap_err();
-            assert_eq!(error.reason(), Some("unexpected_bundle_metadata"));
+            assert_eq!(error.reason(), Some("unexpected_bundle_version"));
             assert_eq!(
                 ops.read_info_plist(&layout.app).unwrap().store_schema,
                 schema

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import { answerSchema, updateSkillFromApp, useUpdates } from '@/lib/update';
 import { useNow } from '@/hooks/useNow';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { sessionFromUrl, sessionHash, useNav } from '@/stores/nav';
@@ -17,6 +18,9 @@ import { DaemonScreen } from './DaemonScreen';
 import { SessionsScreen } from './SessionsScreen';
 import { SessionDetailModal } from './SessionDetail';
 import { ReviewModal } from './ReviewModal';
+import { MoveDaemon } from './update/MoveDaemon';
+import { SetupDaemon } from './update/SetupDaemon';
+import { CliLink } from './update/CliLink';
 
 /** Manual refresh must preserve pending reads and their health evidence. */
 export function refreshAll(qc: QueryClient): Promise<void> {
@@ -44,6 +48,27 @@ export function Shell() {
   const deps = useDeps(plan.deps);
   const qc = useQueryClient();
   const now = useNow();
+  const update = useUpdates((state) => state.snapshot);
+  const refreshUpdate = useUpdates((state) => state.refresh);
+  const checkUpdate = useUpdates((state) => state.check);
+  const recovery = useUpdates((state) => state.recover);
+  const versions = update.version_details;
+  const schema = update.schema_consent;
+  const refreshDaemon = () => {
+    void refreshAfter(qc, [['daemonStatus'], ['sessions'], ['deps']]);
+    void refreshUpdate();
+  };
+  const versionDetails = versions && {
+    program: versions.program,
+    cli: versions.cli,
+    actions: (
+      <>
+        {versions.move_mode && <MoveDaemon mode={versions.move_mode} onMoved={refreshDaemon} />}
+        {versions.can_setup && <SetupDaemon onReady={refreshDaemon} />}
+        {versions.can_link_cli && <CliLink onInstalled={() => void refreshUpdate()} />}
+      </>
+    ),
+  };
 
   // ⌘K / Ctrl+K opens the palette.
   useEffect(() => {
@@ -136,10 +161,28 @@ export function Shell() {
         deps={deps.data}
         onWaiting={() => showWaiting(go)}
         onSession={openSession}
+        installEligibility={update.install_eligibility}
+        versionDetails={versionDetails}
+        recovery={update.recovery && {
+          start: update.recovery.start ? () => void recovery(true) : undefined,
+          rollback: update.recovery.rollback_version ? {
+            version: update.recovery.rollback_version,
+            run: () => void recovery(false),
+          } : undefined,
+        }}
+        cancelConsent={schema && {
+          id: schema.request_id,
+          from: schema.from_schema ?? undefined,
+          to: schema.to_schema,
+          previousVersion: status.data?.version,
+          decide: (acknowledgement) => void answerSchema(schema.request_id, acknowledgement),
+        }}
+        updateSkill={inTauri() ? updateSkillFromApp : undefined}
       />
       <CommandPalette
         sessions={sessions.data}
         onRefresh={() => refreshAll(qc)}
+        onCheckUpdates={() => void checkUpdate()}
         onTheme={setTheme}
       />
     </div>

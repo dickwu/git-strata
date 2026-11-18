@@ -10,7 +10,8 @@ export type Action =
   | { kind: 'repo'; repo: string }
   | { kind: 'agent'; agent: string }
   | { kind: 'theme'; choice: ThemeChoice }
-  | { kind: 'refresh' };
+  | { kind: 'refresh' }
+  | { kind: 'check_updates' };
 
 export interface Entry {
   key: string;
@@ -65,6 +66,12 @@ export function buildEntries(sessions: StatusReply | undefined): Entry[] {
       label: copy.palette.goTo(copy.nav.daemon),
       keywords: ['status', 'socket', 'warnings'],
       action: { kind: 'screen', screen: 'daemon' },
+    },
+    {
+      key: 'check-updates',
+      label: 'Check for updates…',
+      keywords: ['upgrade', 'version', 'release'],
+      action: { kind: 'check_updates' },
     },
     // One entry per choice, the same three the status bar switch offers (t93u).
     ...THEME_CHOICES.map((choice): Entry => ({

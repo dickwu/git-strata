@@ -12,8 +12,8 @@ use strata_types::{Code, serde_rfc3339};
 
 use super::{
     bundle::{
-        BundleOps, RestoreDecision, probe_bundle, release_version, restore_previous,
-        verify_predecessor_schema, verify_target_info,
+        BundleOps, ExchangeError, ExchangeEvidence, probe_bundle, release_version,
+        verify_exchange_pair, verify_predecessor_schema, verify_target_info,
     },
     txn::Txn,
 };
@@ -86,13 +86,15 @@ pub fn check(txn: &Txn, evidence: StoreEvidence<'_>) -> Result<(), GuiError> {
 /// The explicit rollback's file step. Call only after §6.1 confirms that the
 /// job is unloaded and disabled. Recheck the store and app after preparing the
 /// zip, immediately before replacing the recorded target.
-pub fn restore_fenced(
+pub(super) fn exchange_fenced(
     ops: &dyn BundleOps,
     bundle: &Path,
     txn: &Txn,
     config_dir: &Path,
     data_root: &Path,
-) -> Result<(), GuiError> {
+    check_fence: &dyn Fn() -> Result<(), GuiError>,
+    admit: &dyn Fn(&ExchangeEvidence) -> Result<(), GuiError>,
+) -> Result<(), ExchangeError> {
     let check_store = || {
         check(
             txn,
@@ -102,27 +104,48 @@ pub fn restore_fenced(
             },
         )
     };
-    let decide = || -> Result<RestoreDecision, GuiError> {
-        let app = probe_bundle(ops, bundle)
-            .map_err(|error| disabled("rollback_bundle_unverified", error.into_error()))?;
-        if app.info.version == txn.from {
-            verify_predecessor_schema(&app.info, txn)?;
-            return Ok(RestoreDecision::AlreadyRestored);
-        }
-        verify_target_info(&app.info, txn)?;
-        Ok(RestoreDecision::Swap {
-            expected: Some(app.identity),
-        })
-    };
-    check_store()?;
-    if matches!(decide()?, RestoreDecision::AlreadyRestored) {
-        return check_store();
+    check_store().map_err(ExchangeError::NotActivated)?;
+    verified_target(ops, bundle, txn).map_err(ExchangeError::NotActivated)?;
+    ops.exchange_previous(
+        &txn.rollback_zip,
+        bundle,
+        &|previous| {
+            verify_predecessor_schema(&previous.info, txn)?;
+            let target = verified_target(ops, bundle, txn)?;
+            check_store()?;
+            check_fence()?;
+            Ok(target)
+        },
+        admit,
+    )
+}
+
+pub(super) fn verified_target(
+    ops: &dyn BundleOps,
+    bundle: &Path,
+    txn: &Txn,
+) -> Result<super::bundle::VerifiedBundle, GuiError> {
+    let app = probe_bundle(ops, bundle)
+        .map_err(|error| disabled("rollback_bundle_unverified", error.into_error()))?;
+    verify_target_info(&app.info, txn)?;
+    Ok(app)
+}
+
+pub(super) fn verify_exchange(
+    ops: &dyn BundleOps,
+    bundle: &Path,
+    txn: &Txn,
+    evidence: &ExchangeEvidence,
+) -> Result<(), GuiError> {
+    verify_target_info(&evidence.target.info, txn)?;
+    verify_predecessor_schema(&evidence.previous.info, txn)?;
+    if evidence.previous.info.version != txn.from {
+        return Err(disabled(
+            "rollback_bundle_unverified",
+            "Wrong previous version.",
+        ));
     }
-    restore_previous(ops, bundle, txn, &|| {
-        let decision = decide()?;
-        check_store()?;
-        Ok(decision)
-    })
+    verify_exchange_pair(ops, bundle, evidence)
 }
 
 fn disabled(reason: &str, cause: impl std::fmt::Display) -> GuiError {
@@ -145,7 +168,7 @@ struct StoreState {
     additional: serde_json::Map<String, serde_json::Value>,
 }
 
-fn read_store_schema(config_dir: &Path, data_root: &Path) -> Option<u32> {
+pub(super) fn read_store_schema(config_dir: &Path, data_root: &Path) -> Option<u32> {
     for path in [config_dir, data_root] {
         if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
             return None;

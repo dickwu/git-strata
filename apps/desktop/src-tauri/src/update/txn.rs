@@ -1,10 +1,7 @@
 //! On-disk update transaction (version-upgrade design §4.2).
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::io;
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +9,9 @@ use serde_json::{Map, Value, json};
 use strata_types::{Code, serde_rfc3339};
 
 use crate::error::GuiError;
+
+use super::bundle::ExchangeEvidence;
+use super::state::{RollbackPhase, TxnPhase};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Txn {
@@ -43,6 +43,7 @@ pub(super) struct InstallDetails {
     /// spent on permissions stays out of the budget across app restarts.
     pub(super) permission_wait_elapsed_ms: Option<u64>,
     pub(super) cancel_not_serving: bool,
+    pub(super) stop_requested_ms: Option<u64>,
     /// Exact path returned by the plugin after a failed swap.
     pub(super) kept_bundle: Option<PathBuf>,
     /// Plugin destinations that were vacant before the swap began.
@@ -57,31 +58,170 @@ pub struct DaemonIdentity {
     pub version: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum RollbackDisposition {
+    Continue,
+    RetainTarget,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum RollbackSubject {
+    Serving(DaemonIdentity),
+    NoPid,
+}
+
+impl RollbackSubject {
+    pub(super) fn daemon(&self) -> Option<&DaemonIdentity> {
+        match self {
+            Self::Serving(daemon) => Some(daemon),
+            Self::NoPid => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum RollbackAction {
+    Acquire,
+    Renew,
+    Seal,
+    Release,
+    Disable,
+    Enable,
+    Bootout,
+    Exchange,
+    Kickstart,
+    Bootstrap,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct Admission {
+    pub(super) action: RollbackAction,
+    revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum TargetRecovery {
+    Cancelled,
+    NotStarting,
+    DisableRefused,
+    BootoutFailed,
+    ExchangeRefused,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct RollbackScope {
+    pub(super) plist: PathBuf,
+    pub(super) config_dir: PathBuf,
+    pub(super) data_root: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct RollbackAttempt {
+    parent_id: String,
+    pub(super) id: String,
+    revision: u64,
+    pub(super) disposition: RollbackDisposition,
+    pub(super) phase: RollbackPhase,
+    pub(super) subject: RollbackSubject,
+    pub(super) scope: RollbackScope,
+    pub(super) pending: Option<Admission>,
+    pub(super) was_enabled: bool,
+    pub(super) owns_fence: bool,
+    pub(super) stop_requested_ms: Option<u64>,
+    pub(super) start_requested_ms: Option<u64>,
+    pub(super) seal_accepted: bool,
+    pub(super) stopped: bool,
+    pub(super) bootout_admitted: bool,
+    pub(super) unloaded: bool,
+    pub(super) exchange: Option<ExchangeEvidence>,
+    pub(super) target_recovery: Option<TargetRecovery>,
+}
+
+impl RollbackAttempt {
+    fn new(parent_id: String, subject: RollbackSubject, scope: RollbackScope) -> Self {
+        let phase = match subject {
+            RollbackSubject::Serving(_) => RollbackPhase::Draining,
+            RollbackSubject::NoPid => RollbackPhase::Fencing,
+        };
+        Self {
+            parent_id,
+            id: super::state::new_id(),
+            revision: 0,
+            disposition: RollbackDisposition::Continue,
+            phase,
+            subject,
+            scope,
+            pending: None,
+            was_enabled: false,
+            owns_fence: false,
+            stop_requested_ms: None,
+            start_requested_ms: None,
+            seal_accepted: false,
+            stopped: false,
+            bootout_admitted: false,
+            unloaded: false,
+            exchange: None,
+            target_recovery: None,
+        }
+    }
+
+    pub(super) fn withdrawn(&self) -> bool {
+        self.disposition == RollbackDisposition::RetainTarget
+    }
+
+    pub(super) fn admit(&mut self, action: RollbackAction) {
+        self.pending = Some(Admission {
+            action,
+            revision: self.revision,
+        });
+    }
+
+    pub(super) fn action(&self) -> Option<RollbackAction> {
+        self.pending.map(|admission| admission.action)
+    }
+}
+
 /// The App's `update.json`. All writers of this shared document should use
 /// `edit_document` so a cache refresh cannot overwrite a transaction phase.
 pub struct TxnStore {
     path: PathBuf,
+    #[cfg(test)]
+    fail_cancel_sync: std::sync::atomic::AtomicBool,
 }
 
 impl TxnStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            #[cfg(test)]
+            fail_cancel_sync: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     pub fn load(&self) -> Result<Option<Txn>, GuiError> {
         read_txn(&self.read_document()?)
     }
 
-    pub(super) fn require_idle(&self) -> Result<(), GuiError> {
+    pub(crate) fn require_idle(&self) -> Result<(), GuiError> {
         require_idle(&self.read_document()?)
     }
 
     /// Takes ownership of the rollback zip. An unresolved or unrecognized
     /// transaction must survive another attempt, along with its zip.
     pub fn begin(&self, txn: &Txn) -> Result<(), GuiError> {
+        self.begin_with_id(txn, None)
+    }
+
+    pub(super) fn begin_with_id(&self, txn: &Txn, id: Option<String>) -> Result<(), GuiError> {
         self.edit_document(|document| {
             require_idle(document)?;
-            document.insert("txn".into(), serde_json::to_value(txn).map_err(invalid)?);
+            let mut saved = serde_json::to_value(txn).map_err(invalid)?;
+            saved["id"] = json!(id.unwrap_or_else(super::state::new_id));
+            document.insert("txn".into(), saved);
             Ok(())
         })
     }
@@ -98,6 +238,155 @@ impl TxnStore {
             }
             Ok(())
         })
+    }
+
+    pub(super) fn id(&self, txn: &Txn) -> Result<String, GuiError> {
+        let document = self.read_document()?;
+        check_parent(&document, txn)?;
+        Ok(txn_id(&document["txn"])?.to_owned())
+    }
+
+    pub(super) fn rollback(&self, txn: &Txn) -> Result<Option<RollbackAttempt>, GuiError> {
+        let document = self.read_document()?;
+        check_parent(&document, txn)?;
+        read_rollback(&document["txn"])
+    }
+
+    pub(super) fn begin_rollback(
+        &self,
+        txn: &Txn,
+        parent_id: &str,
+        subject: RollbackSubject,
+        scope: RollbackScope,
+    ) -> Result<(), GuiError> {
+        self.edit_document(|document| {
+            check_parent(document, txn)?;
+            let saved = document.get_mut("txn").ok_or_else(stale_rollback)?;
+            if txn_id(saved)? != parent_id
+                || read_rollback(saved)?.is_some()
+                || !matches!(
+                    TxnPhase::parse(&txn.phase),
+                    Some(
+                        TxnPhase::StartingDaemon
+                            | TxnPhase::Relaunching
+                            | TxnPhase::WaitingDaemon
+                            | TxnPhase::WaitingPermission
+                    )
+                )
+            {
+                return Err(stale_rollback());
+            }
+            let attempt = RollbackAttempt::new(parent_id.into(), subject, scope);
+            saved["rollback"] = serde_json::to_value(attempt).map_err(invalid)?;
+            Ok(())
+        })
+    }
+
+    /// Compare the parent and the complete attempt under the same lock used by
+    /// Cancel. The returned snapshot is usable only after the synced write.
+    pub(super) fn advance_rollback(
+        &self,
+        txn: &Txn,
+        expected: &RollbackAttempt,
+        edit: impl FnOnce(&mut RollbackAttempt),
+    ) -> Result<Option<RollbackAttempt>, GuiError> {
+        let mut changed = None;
+        let result = self.edit_document(|document| {
+            let saved = rollback_parent(document, txn, expected)?;
+            let mut current = read_rollback(saved)?.ok_or_else(stale_rollback)?;
+            if &current != expected {
+                return Err(stale_rollback());
+            }
+            current.revision = current.revision.checked_add(1).ok_or_else(stale_rollback)?;
+            edit(&mut current);
+            saved["rollback"] = serde_json::to_value(&current).map_err(invalid)?;
+            changed = Some(current);
+            Ok(())
+        });
+        match result {
+            Ok(()) => Ok(changed),
+            Err(error) if error.reason() == Some("update_rollback_changed") => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The Cancel cutoff is the durable bootout admission. An earlier Cancel
+    /// saves withdrawal and its cleanup continuation before acknowledging it.
+    pub(super) fn withdraw_rollback(&self) -> Result<bool, GuiError> {
+        let document = self.read_document()?;
+        let Some(txn) = read_txn(&document)? else {
+            return Ok(false);
+        };
+        let Some(expected) = read_rollback(&document["txn"])? else {
+            return Ok(false);
+        };
+        self.edit_document(|document| {
+            let saved = rollback_parent(document, &txn, &expected)?;
+            let mut attempt = read_rollback(saved)?.ok_or_else(stale_rollback)?;
+            if attempt.id != expected.id {
+                return Err(stale_rollback());
+            }
+            if attempt.bootout_admitted {
+                return Err(not_cancellable());
+            }
+            if attempt.withdrawn() {
+                return Ok(());
+            }
+            attempt.revision = attempt.revision.checked_add(1).ok_or_else(stale_rollback)?;
+            attempt.disposition = RollbackDisposition::RetainTarget;
+            if attempt.phase == RollbackPhase::Stopping {
+                attempt.phase = RollbackPhase::CancelAfterStop;
+            }
+            if attempt.target_recovery.is_some() {
+                attempt.target_recovery = Some(TargetRecovery::Cancelled);
+            }
+            saved["rollback"] = serde_json::to_value(attempt).map_err(invalid)?;
+            Ok(())
+        })?;
+        #[cfg(test)]
+        if self
+            .fail_cancel_sync
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(io_error(io::Error::other(
+                "injected directory sync failure after rename",
+            )));
+        }
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_next_cancel_sync(&self) {
+        self.fail_cancel_sync
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(super) fn finish_rollback(
+        &self,
+        txn: &Txn,
+        expected: &RollbackAttempt,
+        consume_parent: bool,
+    ) -> Result<bool, GuiError> {
+        let result = self.edit_document(|document| {
+            let saved = rollback_parent(document, txn, expected)?;
+            if read_rollback(saved)?.as_ref() != Some(expected) {
+                return Err(stale_rollback());
+            }
+            if consume_parent {
+                document.remove("txn");
+            } else {
+                saved
+                    .as_object_mut()
+                    .ok_or_else(stale_rollback)?
+                    .remove("rollback");
+            }
+            Ok(())
+        });
+        match result {
+            Ok(()) => Ok(true),
+            Err(error) if error.reason() == Some("update_rollback_changed") => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) fn install_details(&self, txn: &Txn) -> Result<InstallDetails, GuiError> {
@@ -155,66 +444,21 @@ impl TxnStore {
         &self,
         edit: impl FnOnce(&mut Map<String, Value>) -> Result<(), GuiError>,
     ) -> Result<(), GuiError> {
-        let dir = self
-            .path
-            .parent()
-            .ok_or_else(|| invalid("update.json has no parent"))?;
-        fs::create_dir_all(dir).map_err(io_error)?;
-        // Lock a stable inode. Renaming update.json cannot break this lock.
-        let lock = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(self.path.with_extension("lock"))
-            .map_err(io_error)?;
-        lock.lock().map_err(io_error)?;
-        let mut document = self.read_document()?;
-        edit(&mut document)?;
-        write_document(dir, &self.path, &document)
+        super::cache::rewrite_document(&self.path, |document| {
+            edit(document).map_err(io::Error::other)
+        })
+        .map_err(|error| {
+            error
+                .get_ref()
+                .and_then(|cause| cause.downcast_ref::<GuiError>())
+                .cloned()
+                .unwrap_or_else(|| map_document_error(error))
+        })
     }
 
     fn read_document(&self) -> Result<Map<String, Value>, GuiError> {
-        let mut options = OpenOptions::new();
-        options.read(true).custom_flags(libc::O_NOFOLLOW);
-        match options.open(&self.path) {
-            Ok(file) => serde_json::from_reader(file).map_err(invalid),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Map::new()),
-            Err(e) => Err(io_error(e)),
-        }
+        super::cache::read_document(&self.path).map_err(map_document_error)
     }
-}
-
-fn write_document(dir: &Path, path: &Path, document: &Map<String, Value>) -> Result<(), GuiError> {
-    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-    let (temp, mut file) = loop {
-        let seq = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-        let temp = dir.join(format!(".update-{}-{seq}.tmp", std::process::id()));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)
-        {
-            Ok(file) => break (temp, file),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(io_error(e)),
-        }
-    };
-    let result = (|| {
-        serde_json::to_writer(&mut file, document).map_err(invalid)?;
-        file.write_all(b"\n").map_err(io_error)?;
-        file.sync_all().map_err(io_error)?;
-        fs::rename(&temp, path).map_err(io_error)?;
-        File::open(dir)
-            .and_then(|dir| dir.sync_all())
-            .map_err(io_error)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temp);
-    }
-    result
 }
 
 fn read_txn(document: &Map<String, Value>) -> Result<Option<Txn>, GuiError> {
@@ -254,6 +498,71 @@ fn check_owner(document: &Map<String, Value>, txn: &Txn) -> Result<(), GuiError>
     }
 }
 
+fn txn_id(saved: &Value) -> Result<&str, GuiError> {
+    saved["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| invalid("the transaction has no ID"))
+}
+
+fn read_rollback(saved: &Value) -> Result<Option<RollbackAttempt>, GuiError> {
+    let Some(value) = saved.get("rollback") else {
+        return Ok(None);
+    };
+    let attempt: RollbackAttempt = serde_json::from_value(value.clone()).map_err(invalid)?;
+    if attempt.parent_id != txn_id(saved)? {
+        return Err(invalid(
+            "the rollback attempt belongs to a different transaction",
+        ));
+    }
+    Ok(Some(attempt))
+}
+
+fn check_parent(document: &Map<String, Value>, txn: &Txn) -> Result<(), GuiError> {
+    if read_txn(document)?.as_ref() == Some(txn) {
+        Ok(())
+    } else {
+        Err(stale_rollback())
+    }
+}
+
+fn rollback_parent<'a>(
+    document: &'a mut Map<String, Value>,
+    txn: &Txn,
+    attempt: &RollbackAttempt,
+) -> Result<&'a mut Value, GuiError> {
+    check_parent(document, txn)?;
+    let saved = document.get_mut("txn").ok_or_else(stale_rollback)?;
+    if txn_id(saved)? != attempt.parent_id {
+        return Err(stale_rollback());
+    }
+    Ok(saved)
+}
+
+pub(super) fn stale_rollback() -> GuiError {
+    GuiError::new(
+        Code::Busy,
+        "The rollback attempt changed",
+        json!({"reason": "update_rollback_changed"}),
+    )
+}
+
+pub(super) fn not_cancellable() -> GuiError {
+    GuiError::new(
+        Code::Busy,
+        "The update is past its cancellation point",
+        json!({"reason": "update_not_cancellable"}),
+    )
+}
+
+fn map_document_error(error: io::Error) -> GuiError {
+    if error.kind() == io::ErrorKind::InvalidData {
+        invalid(error)
+    } else {
+        io_error(error)
+    }
+}
+
 fn invalid(error: impl std::fmt::Display) -> GuiError {
     GuiError::new(
         Code::InvalidInput,
@@ -282,6 +591,7 @@ pub(super) fn pending() -> GuiError {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+    use std::fs;
 
     fn transaction() -> Value {
         json!({

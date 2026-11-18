@@ -230,7 +230,17 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 pub fn refresh<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let mut cache = RENDERER.lock().unwrap_or_else(|p| p.into_inner());
     let snap = app.state::<crate::state::AppState>().snapshot();
-    cache.paint(model(&snap, SystemTime::now()), &mut NativeRenderer(app))
+    let expected = app
+        .try_state::<crate::update::state::Presentation>()
+        .is_some_and(|update| update.expected_restart());
+    cache.paint(
+        crate::tray_model::model_at_during_restart(
+            &snap,
+            crate::tray_snapshot::Stamp::now(),
+            expected,
+        ),
+        &mut NativeRenderer(app),
+    )
 }
 
 #[cfg(test)]

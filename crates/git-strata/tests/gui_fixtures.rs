@@ -29,6 +29,42 @@ use support::live::{Live, write};
 
 const NEW_DEP: &str = "{\n  \"name\": \"tool\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": { \"x\": \"^1.0.0\", \"y\": \"^2.0.0\" }\n}\n";
 
+#[test]
+fn desktop_drain_client_round_trips_against_the_daemon_handler() {
+    use std::time::Duration;
+    let live = Live::with_deps(&["tool"], &[], &[]);
+    live.serve(|_| {
+        let socket = live.home.socket();
+        let budget = Duration::from_secs(10);
+        let status = || {
+            strata_client::call(
+                &socket,
+                "daemon_status",
+                json!({"verify":false}),
+                Kind::Read,
+            )
+            .unwrap()
+        };
+        let before = status();
+        strata_client::require_feature(&before, "daemon.drain").unwrap();
+        let id = strata_client::drain_acquire(&socket, budget, |status| {
+            status["pid"] == before["pid"] && status["started"] == before["started"]
+        })
+        .unwrap();
+        assert_eq!(
+            strata_client::drain_on(&socket, Some(&id), budget).unwrap(),
+            id
+        );
+        assert_eq!(status()["draining"]["lease_id"], id);
+        strata_client::drain_seal(&socket, &id, "hold", budget).unwrap();
+        assert_eq!(status()["draining"]["then"], "hold");
+        let wrong = strata_client::drain_cancel(&socket, "wrong", budget).unwrap_err();
+        assert_eq!(wrong.detail.unwrap()["reason"], "lease_lost");
+        strata_client::drain_cancel(&socket, &id, budget).unwrap();
+        assert_eq!(status()["draining"], Value::Null);
+    });
+}
+
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop/src-tauri/tests/fixtures/p1")
 }
@@ -57,6 +93,13 @@ fn added() -> Vec<(&'static str, &'static str, Value)> {
         ("daemon_status", "pid", json!(4242)),
         ("daemon_status", "started", json!("2026-01-01T00:00:00Z")),
         ("daemon_status", "activity", json!([])),
+        ("daemon_status", "draining", Value::Null),
+        ("daemon_status", "inflight", json!([])),
+        (
+            "daemon_status",
+            "store_schema",
+            json!(strata_types::STORE_SCHEMA),
+        ),
         (
             "daemon_status",
             "busy",

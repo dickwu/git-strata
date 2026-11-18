@@ -72,6 +72,7 @@ const phases = {
     'Waiting for the daemon to finish its work…',
   ],
   stopping: [{ phase: 'stopping' }, 'Waiting for the daemon to stop…'],
+  stop_detail: [{ phase: 'stop_detail', slow: false }, 'Waiting for the daemon to stop…'],
   installing: [{ phase: 'installing' }, 'Installing the update…'],
   starting_daemon: [{ phase: 'starting_daemon' }, 'Starting the daemon…'],
   relaunching: [{ phase: 'relaunching' }, 'Reopening GIT STRATA…'],

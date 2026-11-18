@@ -1,9 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Button, Modal } from 'antd';
+import { App, Button, Modal } from 'antd';
 import { inTauri } from '@/lib/tauri';
-import type { DaemonStatus, UpdateTarget } from '@/lib/types';
+import type { DaemonStatus, GuiError, UpdateState, UpdateTarget } from '@/lib/types';
 import { isProgress, schemaAcknowledgementRequest, useUpdates } from '@/lib/update';
 import { useUpdateSettings } from '@/lib/updateSettings';
 import {
@@ -48,11 +48,14 @@ export function UpdateControls({
   updateSkill?: () => Promise<string>;
   cancelConsent?: CancelAfterStopConsent;
 }) {
+  const { message } = App.useApp();
   const {
     snapshot,
     snapshotSince,
     snapshotDismissed,
     lastCheck,
+    checkError,
+    fromTray,
     operation,
     restartStatus,
     cancelPending,
@@ -75,17 +78,38 @@ export function UpdateControls({
     };
     visible();
     const timer = setInterval(visible, 5000);
+    let gone = false;
+    let stopListeners: (() => void)[] = [];
+    void import('@tauri-apps/api/event').then(async ({ listen }) => {
+      const listeners = await Promise.all([
+        listen('strata://update-state', visible),
+        listen('strata://schema-pending', () => void refresh()),
+        listen<{ Ok: UpdateState } | { Err: GuiError }>(
+          'strata://update-check-result', ({ payload }) => fromTray(payload)
+        ),
+      ]);
+      if (gone) listeners.forEach((stop) => stop());
+      else stopListeners = listeners;
+    }).catch(() => { /* Visible polling still reads native state. */ });
     document.addEventListener('visibilitychange', visible);
     return () => {
+      gone = true;
+      stopListeners.forEach((stop) => stop());
       disconnectSettings();
       clearInterval(timer);
       document.removeEventListener('visibilitychange', visible);
     };
-  }, [connect, refresh]);
+  }, [connect, fromTray, refresh]);
+
+  useEffect(() => {
+    if (checkError && dialog !== 'settings') {
+      void message.error(`Couldn't check for updates. ${checkError.message}`);
+    }
+  }, [checkError, dialog, message]);
 
   const state = operation?.state ?? snapshot;
   const since = operation?.since ?? snapshotSince;
-  const progressKey = `${state.phase}:${since}`;
+  const progressKey = `${state.transaction_id ?? since}:${state.phase}`;
   const showProgress = operation
     ? progressKey !== dismissedOperation
     : isProgress(snapshot) && !snapshotDismissed;
@@ -210,7 +234,7 @@ export function UpdateControls({
           state={checkState}
           automatic={automatic}
           saving={saving}
-          error={settingsError}
+          error={settingsError ?? checkError?.message}
           onAutomaticChange={
             automatic === undefined ? undefined : (enabled) => void setAutomatic(enabled)
           }

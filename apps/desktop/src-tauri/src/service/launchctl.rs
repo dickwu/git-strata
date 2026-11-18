@@ -185,6 +185,10 @@ fn printed_job_fields(dump: &str) -> Option<scope::JobFields<'_>> {
 
 /// The pid of a loaded job from a complete dump. `Some(None)` means the
 /// dump reports a known no-process state. `None` means the probe is inconclusive.
+pub fn printed_program(dump: &str) -> Option<&str> {
+    printed_job_fields(dump)?.program
+}
+
 pub fn printed_pid(dump: &str) -> Option<Option<u32>> {
     printed_job_fields(dump).map(|fields| fields.pid)
 }
@@ -292,7 +296,10 @@ impl Launchctl {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
-                GuiError::launchctl_failed(step, None, &format!("cannot run {LAUNCHCTL}: {e}"))
+                let mut error =
+                    GuiError::launchctl_failed(step, None, &format!("cannot run {LAUNCHCTL}: {e}"));
+                error.detail["dispatched"] = json!(false);
+                error
             })?;
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
@@ -428,6 +435,10 @@ impl ServiceManager for Launchctl {
 
     fn bootout(&self, label: &str) -> Result<(), GuiError> {
         self.change_fence(Verb::Bootout, label)
+    }
+
+    fn bootout_targeted(&self, label: &str, target: BootoutTarget) -> Result<(), GuiError> {
+        Self::for_bootout(target).bootout(label)
     }
 
     fn disable(&self, label: &str) -> Result<(), GuiError> {

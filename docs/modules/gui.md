@@ -72,9 +72,11 @@ git-strata/
 GIT STRATA.app/Contents/
 ├─ MacOS/git-strata-desktop        # GUI
 ├─ MacOS/git-stratad               # daemon
-├─ MacOS/git-strata                # cli（引导把它链接到 ~/.local/bin/git-strata）
-├─ Library/LaunchAgents/io.github.dickwu.git-strata.daemon.plist   # SMAppService 方案：BundleProgram = Contents/MacOS/git-stratad
-└─ Info.plist                      # 不设 LSUIElement（窗口模式有 Dock 图标，关窗后切 Accessory，§5.8）
+├─ MacOS/git-strata                # cli（可选链接到 /opt/homebrew/bin 或 /usr/local/bin）
+├─ MacOS/strata-pack-probe          # 打包验证探针
+├─ Resources/config.toml          # Set up 的模板
+├─ Library/LaunchAgents/io.github.dickwu.git-strata.daemon.plist   # P-pack 探针使用，生产不注册
+└─ Info.plist                      # GitStrataStoreSchema 与 GitStrataDowngradeFloor                      # 不设 LSUIElement（窗口模式有 Dock 图标，关窗后切 Accessory，§5.8）
 ```
 
 三个可执行文件用同一个签名身份签（§6），identifier 分别是 `io.github.dickwu.git-strata`、`…git-strata.daemon`、`…git-strata.cli`。
@@ -433,8 +435,8 @@ README 第一节改成「下载 app → 首次打开 → 引导」，cli 用法�
 2. **内部二进制的 quarantine**：Open Anyway 只放行主程序；daemon 与 cli 若仍带 `com.apple.quarantine`，在注册前由 app 从**自己的 bundle** 去掉这个属性（P-pack 验证是否必要、bundle 不可写时怎么办）。
 3. **迁移检测**：发现旧安装（§5.7）先走迁移。
 4. **配置**：没有 config.toml 时用系统对话框选数据根、添加仓库，按 config.md V1–V3 校验；建议「与第一个仓库同卷的 `<volume>/.strata`」，人确认。根与仓库是否同一 APFS 卷由 daemon 启动时校验，失败的 InvalidInput 原样显示。
-5. **daemon 的 PATH**：`capture_login_path` 运行一次 `$SHELL -ilc 'printf "\n__GS_PATH__%s\n" "$PATH"'`：stdin 为 /dev/null、5 s 超时（到时杀掉整个进程组）、输出上限 64 KiB、只取标记后那一行；rc 文件打印的杂讯被忽略。结果给人看、可编辑，写入 `daemon-env.toml`（§5.7）。失败或人选择不设时**不写** daemon-env.toml，由 daemon 用自己编进去的默认值（`install_path_for_home`，lib.rs:52-59，`~/.bun/bin` 在最前，依赖安装靠它，startup.rs:289）；GUI 不另造一份默认 PATH。
-6. **注册 daemon**：按 P-pack 选定的方案（§5.7）。SMAppService 返回 `requiresApproval` 时说明并打开系统设置的登录项页。注册后等 socket 出现并 `daemon_status` 成功，才算完成。
+5. **核验配置**：Set up 保留现有 `config.toml`，或根据原生文件夹选择器生成新的配置。使用 bundle 内的 `git-stratad --check-config` 核验。保留的配置每次都要确认可能的 store 迁移。
+6. **注册 daemon**：写入指向 bundle 的用户 LaunchAgent（§5.7），按需启用后 bootstrap。核对版本、程序路径与应答 pid 后提供 CLI 链接安装。
 7. **权限（TCC）**：数据根在外置卷时，需要「可移除宗卷」授权。授权对象（git-stratad 还是 GIT STRATA）以 P-pack 实测为准，文案照实写。检测 `store_unavailable`，`open_privacy_pane`。
 8. **确认能力**：先发 `daemon_status{}` 取 `api`；`api ≥ 1` 才发 `daemon_status{probe: true}`（`DaemonStatusParams` 是 `deny_unknown_fields`，rpc.rs:246-251，旧 daemon 收到 `probe` 会回 `rpc_failed`）；不可用时说明要设登录密码 / Touch ID。
 9. **命令行工具**：`~/.local/bin/git-strata` → bundle 内 cli 的符号链接（免 sudo）。目标已存在且不是我们的链接 → 不覆盖，提示。之后用第 5 步拿到的 PATH 检查 `git-strata` 解析到哪里；若 `~/.cargo/bin` 的旧版排在前面，提示改名或调整顺序（删文件由用户自己做）。
@@ -616,12 +618,14 @@ app or daemon was used for this implementation. These are validation gaps, not p
 daemon 侧（P5）：
 
 1. `drain{on: true, ttl_s}` 开启租约。`ttl_s` 默认 120 s，上限 600 s。未封口时重发 `drain{on:true, ttl_s}` 从当前时刻续期，总时长不设上限（依赖安装可达 60 分钟）。到期、daemon 重启或 `drain{on:false}` 都会解除未封口租约。新的写请求回 `Busy` / `draining`，已接受的请求照常完成，只读与 watch 照常服务。持有租约期间禁止开启新的后台 pass。准入检查、写请求登记和 drain 开启使用同一临界区。回答带 `lease_id`，`daemon_status.draining` 给出 `{lease_id, expires_at, sealed, then}`。
+
+   已有租约时，不带 `lease_id` 的获取请求返回 `Busy draining`，回复不含租约 ID。续期须带获取时返回的 ID。未封口的租约到期、daemon 重启或解租后解除。租约生效时已有的后台轮次可以收尾，新的轮次等待解除。
 1a. `drain{seal: true, lease_id, then: "restart" | "stop" | "hold"}` 原子检查租约有效且 `inflight` 与后台持锁者为空。失败回 `Busy` / `not_idle` 或 `lease_lost`，状态保持原样。封口成功后租约不再过期。`restart` / `stop` 封口后立即开始停机，`drain{on:false}` 回 `InvalidInput` / `sealed`。`hold` 保持 daemon 运行并拒绝写入，`expires_at` 为 null，续租不改变状态。匹配的 `drain{on:false, lease_id}` 可以解除 `hold`，缺少或传错 `lease_id` 时回 `Busy` / `lease_lost`。进程退出也会结束 `hold`。
-1b. `then: restart` 以 **75**（EX_TEMPFAIL）退出，由 `KeepAlive = { SuccessfulExit = false }` 拉起新进程。`then: stop` 以 **0** 退出，job 保持已加载、未运行，直到下次登录（`RunAtLoad`）或手动 Start。收尾错误写到日志和 `~/Library/Application Support/git-strata/last_shutdown.json`，文件结构为 `{mode, epoch, close_error, at}`。退出码仍由封口模式决定。未封口时收到 SIGTERM（如登出、`bootout`、人工 `launchctl kill`）也以 0 退出并记录收尾错误。除主动重启的 75 外，panic、被信号杀死或启动失败才是非零退出。
+1b. `then: restart` 以 **75**（EX_TEMPFAIL）退出，由 `KeepAlive = { SuccessfulExit = false }` 拉起新进程。`then: stop` 以 **0** 退出，job 保持已加载、未运行，直到下次登录（`RunAtLoad`）或手动 Start。收尾错误写到日志和 `~/Library/Application Support/git-strata/last_shutdown.json`，文件结构为 `{mode, epoch, close_error, at}`。退出码仍由封口模式决定。未封口或在 hold 封口时收到 SIGTERM（如登出、`bootout`、人工 `launchctl kill`）也以 0 退出并记录收尾错误。除主动重启的 75 外，panic、被信号杀死或启动失败才是非零退出。
 2. `daemon_status.inflight[]`：每个已接受但未完成的写请求一项：`{method, session?, repo?, phase: queued / confirming / locked / running, started_at}`，覆盖今天 holds / waiters 看不到的阶段（确认框等待中、依赖构建中）。P-b `activity[]` 是用于展示的长任务（包括后台工作），不能替代准入栅栏的 `inflight[]`；drain UI 可展示正在等待的请求所对应的 activity。
 3. 收到 SIGTERM：照 daemon.md §5.9 停止 accept、在跑的请求做完、**还在排队的以 `ReadOnly shutting_down` 失败**、订阅者收到 `bye`；plist 的 `ExitTimeOut 900` 给足时间。所以 GUI 必须等 inflight（含 queued）为空才发停机。
 
-GUI 的 `daemon_restart`、`daemon_stop`、升级与 Move 按以下顺序执行（支持 `config.reload` 的收紧仍走热加载）。
+GUI 的 `daemon_restart`、升级与 Move 按以下顺序执行（支持 `config.reload` 的收紧仍走热加载）。
 
 1. 运行中的 daemon 先核对 `daemon.drain` 与 job 身份，再 `drain{on:true}`。已加载但未提供服务的分支跳过 drain 与封口，走第 4 步的核验。
 2. 等 `inflight` 与后台持锁者为空，封口前每 30 s 续租。等待时可以 `Cancel`，用 `drain{on:false}` 解除。确认中的请求显示 "Waiting for someone to answer a Touch ID prompt"。
@@ -648,7 +652,7 @@ GUI 的 `daemon_restart`、`daemon_stop`、升级与 Move 按以下顺序执行�
 | 部分成功 | 逐仓库结果（§5.4） | 按每行的 reason 处理 |
 | 新 daemon 起不来（升级 / 迁移后） | 显示退出码、日志 `~/Library/Logs/git-strata/daemon.log` | §5.7 回滚 |
 | 迁移时旧 daemon 不回答（fd 用尽 / EMFILE、连不上、`daemon_status` 5 s 超时、EOF；或 `status{all:true}` 60 s 超时） | 按情形分开措辞（§5.7 迁移第 3 条 ③）：连不上 / EOF → "…closed the connection without answering — it may have run out of file descriptors."；5 s 超时 → "…did not answer within 5 seconds — it may have run out of file descriptors or be stuck."；60 s 超时 → "…is answering, but listing session status took longer than 60 seconds — it is probably busy."；都列出已做的核对 | 不迁移、socket 改回原名；人重启旧 daemon 后 `Retry`，或手动迁移（§5.7 迁移第 3 条 ③） |
-| GUI 崩溃 | daemon 不受影响；若崩在 drain 期间，`ttl_s` 到期自动解除 | 重开 |
+| GUI 崩溃 | 未封口的租约到期自动解除。已封口的 hold 持续拒绝新写入，直到应用用记录的租约解除或 daemon 收到 SIGTERM。 | 重开 GIT STRATA 继续或取消迁移。 |
 
 **打包与签名**（D3）：
 
@@ -679,8 +683,27 @@ GUI 的 `daemon_restart`、`daemon_stop`、升级与 Move 按以下顺序执行�
   release.
 - **D-U3 (no opt-out toggle) is superseded.** **Check for updates automatically**
   in Settings defaults to on and can be turned off. **Check for updates…** is
-  still available manually. Installing an update requires the user to select
-  it in the app.
+  available in the menu bar and the ⌘K command palette. A release app checks
+  after 15 seconds, every six hours, and on wake when a check is due. GitHub
+  receives an IP and updater User-Agent for the feed check and the archive
+  download. Debug and translocated builds have checks disabled.
+
+The app protects its `update.json` check, Move and transaction records with
+one sibling `update.lock` across read, edit, rename and directory sync. A saved
+transaction takes precedence over a ready offer. `update_state` returns the
+transaction identifier, restart timing, eligible versions and recovery
+actions when verified. `strata://update-state` signals a ready-state change,
+and `strata://update-check-result` carries a manual tray check's result.
+`strata://update-settings-get` and `strata://update-settings-set` request
+preference reads and writes. `strata://update-settings` returns the result.
+A pending schema decision is bound to its native request and target schema.
+
+The journal records the `disabling` phase before submitting disable, the
+exact kept app and candidate paths during bundle recovery, and the startup
+anchor and elapsed budget during a permission pause. Unknown phases preserve
+the journal for recovery. An uncertain unload retains the fence. A vanished
+App before the swap can unwind only after rechecking the socket and instance
+lock. An acknowledged schema rise may make rollback unavailable.
 
 ## 7. 测试清单
 
@@ -804,7 +827,7 @@ GUI 的 `daemon_restart`、`daemon_stop`、升级与 Move 按以下顺序执行�
 **工作流** `.github/workflows/desktop-pack.yml`（照 R2 的 release.yml / ci.yml 结构）：
 
 - 触发：`workflow_dispatch`（输入 `signing`：`self-signed` 默认，或 `adhoc` 作对照）或推送 `desktop-pack-v*` tag；**不随推送 main 运行**；`permissions: contents: read`，不建 release。
-- `build`（macos-15，`MACOSX_DEPLOYMENT_TARGET=13.0`）：checkout → setup-bun → rust stable（aarch64-apple-darwin）+ rust-cache → 核心 workspace `cargo build --release --locked -p strata-daemon -p git-strata` → `bun install --frozen-lockfile`、`bun run typecheck`、`bun test src` → desktop crate `cargo test` → `bun run tauri build --bundles app` → 检查 CSP 不是 null → 导入身份（self-signed）→ `pack/assemble.sh`（放二进制、编译探针、放 plist、签名、核对 identifier 与 DR、做 DMG、记 sha256，`pack-record.md` 写进 job summary）→ 删临时钥匙串 → 上传 DMG 与 pack-record。
+- `build`（macos-15，`MACOSX_DEPLOYMENT_TARGET=13.0`）：checkout → setup-bun → rust stable（aarch64-apple-darwin）+ rust-cache → 核心 workspace `cargo build --release --locked -p strata-daemon -p git-strata` → `bun install --frozen-lockfile`、`bun run typecheck`、`bun test src` → desktop crate `cargo test` → `bun run tauri build --bundles app` → 检查 CSP 不是 null → 导入身份（self-signed）→ `pack/assemble.sh`（放二进制、编译探针、放 plist 和 `Contents/Resources/config.toml`、写入 `GitStrataStoreSchema` 与 `GitStrataDowngradeFloor`、签名、核对 identifier 与 DR、做 DMG、记 sha256，`pack-record.md` 写进 job summary）→ 删临时钥匙串 → 上传 DMG 与 pack-record。
 - `smoke`（矩阵 macos-15、macos-latest，fail-fast 关）：下载 DMG，跑 `pack/smoke.sh`（只在 `CI=true` 且 `GITHUB_ACTIONS=true` 时肯跑，本机拒绝），上传 `smoke-record.md`。步骤：
   0. 记环境：macOS 版本、架构、gui/<uid> 域是否存在、控制台用户。
   1. 安装：给 DMG 打 quarantine 后挂载，记 `spctl` / `syspolicy_check` 的拒绝结果，ditto 到 /Applications，记 app 与内部二进制的 quarantine；去掉属性（代替 Open Anyway），codesign 校验，记 DR。
@@ -1227,8 +1250,11 @@ Only current unresolved failures create amber `Couldn't measure N items` chips; 
 shows unresolved unit/error/time rows. `Recent measuring errors` remains an old-daemon
 history view and is hidden on P-b, whose failed history may contain resolved attempts.
 
-Daemon identity is reported as muted `daemon 0.2.x`, pid and started/uptime in the modal.
-A version differing from the existing App package version produces amber `App X · daemon Y`.
+The footer shows `App X · daemon Y` and keeps the App version visible at the
+narrowest width. An available update appears beside the version pair. The
+Versions panel shows the verified launchd program, process facts and CLI link
+labels. Version drift offers a safe daemon restart. The expected restart
+window suppresses disconnect notices while independent errors stay visible.
 Muted `Daemon restarted 2 min ago` appears only for a restart the App saw: a reply whose pid
 or `started` differs from an earlier reply's, while that start is less than ten minutes old.
 The first daemon the App sees, such as one started at login just before it, is no restart.

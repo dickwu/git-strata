@@ -3,6 +3,7 @@
 import { Alert } from 'antd';
 import { copy } from '@/lib/copy';
 import { asGuiError, reason } from '@/lib/tauri';
+import { isExpectedDaemonRestartError, restartingDaemon, useUpdates } from '@/lib/update';
 import { DaemonDownAlert } from './DaemonStart';
 import { Inline } from './Inline';
 
@@ -27,6 +28,8 @@ export function errorText(e: unknown): { title: string; hint?: string } {
 
 /** A down daemon gets the Start daemon notice (S0); anything else is a plain warning. */
 export function ErrorNote({ error }: { error: unknown }) {
+  const restarting = useUpdates(restartingDaemon);
+  if (restarting && isExpectedDaemonRestartError(error)) return null;
   if (reason(asGuiError(error)) === 'daemon_down') return <DaemonDownAlert />;
   const t = errorText(error);
   return (

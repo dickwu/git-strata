@@ -9,15 +9,20 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime};
+#[cfg(test)]
+use std::time::Instant;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 use strata_types::{Code, STORE_SCHEMA};
 
-use super::bundle::{BundleInfo, BundleOps};
+use super::bundle::{BundleInfo, BundleOps, ExchangeError, ExchangeEvidence};
 use super::source::VerifiedUpdate;
-use super::state::{TxnPhase as Phase, UpdateState};
-use super::txn::{DaemonIdentity, InstallDetails, Txn, TxnStore};
+use super::state::{RollbackPhase, TxnPhase as Phase, UpdateState};
+use super::txn::{
+    DaemonIdentity, InstallDetails, RollbackAction, RollbackAttempt, RollbackScope,
+    RollbackSubject, TargetRecovery, Txn, TxnStore, not_cancellable, stale_rollback,
+};
 use super::{Clock, UpdateFuture};
 use crate::error::GuiError;
 use crate::service::{AGENT_LABEL, ServiceManager, scope};
@@ -33,10 +38,20 @@ const RENEW_INTERVAL: Duration = Duration::from_secs(30);
 pub type Progress<'a> = dyn FnMut(UpdateState) + Send + 'a;
 
 pub enum DrainAction<'a> {
-    Acquire { ttl_s: u32 },
-    Renew { lease_id: &'a str, ttl_s: u32 },
-    Release { lease_id: &'a str },
-    SealStop { lease_id: &'a str },
+    Acquire {
+        ttl_s: u32,
+        expected: &'a DaemonIdentity,
+    },
+    Renew {
+        lease_id: &'a str,
+        ttl_s: u32,
+    },
+    Release {
+        lease_id: &'a str,
+    },
+    SealStop {
+        lease_id: &'a str,
+    },
 }
 
 /// Fresh, bounded RPCs to the daemon at this login home's socket. The drain
@@ -174,6 +189,18 @@ pub trait InstallHost: Send + Sync {
         progress: &'a mut Progress<'_>,
     ) -> UpdateFuture<'a, Result<PreparedUpdate, GuiError>>;
     fn daemon_version(&self) -> Result<String, GuiError>;
+    fn transaction_id(&self) -> Option<String> {
+        None
+    }
+    fn rollback_scope(&self) -> Result<(PathBuf, PathBuf), GuiError> {
+        Err(unexpected())
+    }
+    fn verify_loaded_policy(&self, _dump: &str) -> Result<(), GuiError> {
+        Ok(())
+    }
+    fn check_preconditions(&self, _running: Option<&str>, _bundled: &str) -> Result<(), GuiError> {
+        Ok(())
+    }
     fn confirm_schema<'a>(
         &'a self,
         live_schema: Option<u32>,
@@ -181,7 +208,7 @@ pub trait InstallHost: Send + Sync {
     ) -> UpdateFuture<'a, Result<bool, GuiError>>;
     /// Restore the already codesign- and version-verified bundle returned
     /// by the plugin, without overwriting an unrelated installed bundle.
-    fn restore_kept(&self, kept: &Path, bundle: &Path) -> Result<(), GuiError>;
+    fn restore_kept(&self, kept: &Path, bundle: &Path, txn: &Txn) -> Result<(), GuiError>;
 }
 
 pub struct InstallPaths {
@@ -268,6 +295,72 @@ enum Stopped {
     CrashLoop(bool),
 }
 
+struct LiveLease {
+    id: String,
+    peer: DaemonIdentity,
+    renew_at: std::time::Instant,
+}
+
+#[derive(Default)]
+struct RollbackDrain {
+    lease: Option<LiveLease>,
+    orphan_seen_at: Option<std::time::Instant>,
+}
+
+#[derive(PartialEq, Eq)]
+enum DrainObservation<'a> {
+    Absent,
+    Unsealed(&'a str),
+    Sealed,
+}
+
+#[derive(Clone, Copy)]
+enum DrainStep {
+    Acquire,
+    Renew,
+    Seal,
+    Wait,
+}
+
+impl DrainStep {
+    fn action<'a>(
+        self,
+        peer: &'a DaemonIdentity,
+        acknowledged: Option<&'a str>,
+    ) -> Result<Option<DrainAction<'a>>, GuiError> {
+        let action = match self {
+            Self::Acquire => DrainAction::Acquire {
+                ttl_s: LEASE_TTL_S,
+                expected: peer,
+            },
+            Self::Renew => DrainAction::Renew {
+                lease_id: acknowledged.ok_or_else(unexpected)?,
+                ttl_s: LEASE_TTL_S,
+            },
+            Self::Seal => DrainAction::SealStop {
+                lease_id: acknowledged.ok_or_else(unexpected)?,
+            },
+            Self::Wait => return Ok(None),
+        };
+        Ok(Some(action))
+    }
+}
+
+struct StopRequest<'a> {
+    predecessor: Option<&'a DaemonIdentity>,
+    requested_ms: Option<u64>,
+    seal_accepted: bool,
+    allow_original_absent: bool,
+    allow_unsealed_original: bool,
+    expected_version: Option<&'a str>,
+}
+
+enum StopObservation {
+    Steady(Job, bool),
+    Unsealed(DaemonIdentity),
+    CrashLoop,
+}
+
 enum Fence {
     Unloaded,
     DrainAgain,
@@ -320,16 +413,38 @@ impl InstallCoordinator {
         }
     }
 
+    pub(crate) fn pending(&self) -> Result<Option<Txn>, GuiError> {
+        self.store.load()
+    }
+
+    pub(crate) fn require_idle(&self) -> Result<(), GuiError> {
+        self.store.require_idle()
+    }
+
+    pub(crate) fn rollback_relaunch_pending(&self) -> Result<bool, GuiError> {
+        let Some(txn) = self.store.load()? else {
+            return Ok(false);
+        };
+        Ok(self.paths.app_version == txn.to
+            && self
+                .store
+                .rollback(&txn)?
+                .is_some_and(|attempt| attempt.phase == RollbackPhase::Relaunching))
+    }
+
+    pub(crate) async fn eligibility(&self) -> Result<(), GuiError> {
+        self.store.require_idle()?;
+        self.validate().await?;
+        self.eligible().await.map(|_| ())
+    }
+
     pub fn cancel(&self) -> Result<(), GuiError> {
+        if self.store.withdraw_rollback()? {
+            return Ok(());
+        }
         let mut cancel = self.cancel_state();
         match cancel.mode {
-            CancelMode::Closed => {
-                return Err(problem(
-                    Code::Busy,
-                    "update_not_cancellable",
-                    "The update is past its cancellation point",
-                ));
-            }
+            CancelMode::Closed => return Err(not_cancellable()),
             CancelMode::SealedStop => {
                 // The RPC can complete while the App is dying. Persist the
                 // cancellation as soon as it is requested, including then.
@@ -407,7 +522,8 @@ impl InstallCoordinator {
         if let Eligible::Serving(identity, _) = &eligible {
             txn.from_daemon = Some(identity.clone());
         }
-        self.store.begin(&txn)?;
+        self.store
+            .begin_with_id(&txn, self.adapters.host.transaction_id())?;
 
         loop {
             let (job, sealed) = match eligible {
@@ -468,6 +584,1072 @@ impl InstallCoordinator {
         self.swap(&mut txn, prepared.update, progress).await
     }
 
+    /// Recovery controls use fresh identity and schema evidence. A stale
+    /// timeout hint alone does not permit a launch or bundle replacement.
+    pub(crate) async fn recovery(
+        &self,
+        txn: &Txn,
+        config: &Path,
+        root: &Path,
+    ) -> Result<Value, GuiError> {
+        if let Some(attempt) = self.store.rollback(txn)? {
+            self.validate().await?;
+            if attempt.scope != self.rollback_scope(config, root)
+                || txn.program != self.program
+                || ![&txn.from, &txn.to].contains(&&self.paths.app_version)
+            {
+                return Err(unexpected());
+            }
+            // The same recovery command resumes the saved attempt, including
+            // a pending stop or withdrawn lease cleanup.
+            return Ok(json!({"start":false, "rollback_version": &txn.from}));
+        }
+        if !matches!(
+            Phase::parse(&txn.phase),
+            Some(
+                Phase::StartingDaemon
+                    | Phase::Relaunching
+                    | Phase::WaitingDaemon
+                    | Phase::WaitingPermission
+            )
+        ) || self.paths.app_version != txn.to
+        {
+            return Err(unexpected());
+        }
+        self.validate().await?;
+        if self.installed(txn).await? != Installed::Target {
+            return Err(unexpected());
+        }
+        let eligible = self.eligible().await?;
+        let (start, evidence) = match eligible {
+            Eligible::Serving(_, schema) => (false, super::rollback::StoreEvidence::Live(schema)),
+            Eligible::NotServing => (
+                true,
+                super::rollback::StoreEvidence::Down {
+                    config_dir: config,
+                    data_root: root,
+                },
+            ),
+        };
+        let rollback = super::rollback::check(txn, evidence).is_ok()
+            && fs::symlink_metadata(&txn.rollback_zip).is_ok_and(|meta| meta.is_file());
+        Ok(json!({"start":start, "rollback_version":rollback.then_some(&txn.from)}))
+    }
+
+    pub(crate) async fn start_recovery(
+        &self,
+        config: &Path,
+        root: &Path,
+        progress: &mut Progress<'_>,
+    ) -> Result<(), GuiError> {
+        let _guard = self.lifecycle.try_lock().map_err(|_| lifecycle_busy())?;
+        let mut txn = self.store.load()?.ok_or_else(unexpected)?;
+        if self.recovery(&txn, config, root).await?["start"] != true
+            || !self.can_offer_not_serving().await
+        {
+            return Err(not_quiescent());
+        }
+        self.require_enabled().await?;
+        self.install_phase(&mut txn, Phase::WaitingDaemon, |details| {
+            details.start_requested_ms = Some(unix_millis(self.adapters.clock.now()));
+            details.permission_wait_elapsed_ms = None;
+        })?;
+        self.kickstart().await?;
+        self.start_new(&mut txn, false, progress).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn rollback_to_previous(
+        &self,
+        config: &Path,
+        root: &Path,
+        progress: &mut Progress<'_>,
+    ) -> Result<bool, GuiError> {
+        let _guard = self.lifecycle.try_lock().map_err(|_| lifecycle_busy())?;
+        let txn = self.store.load()?.ok_or_else(unexpected)?;
+        let scope = self.rollback_scope(config, root);
+        if self.store.rollback(&txn)?.is_none() {
+            let parent_id = self.store.id(&txn)?;
+            self.verify_rollback_scope(&scope).await?;
+            if !self.recovery(&txn, config, root).await?["rollback_version"].is_string() {
+                return Err(problem(
+                    Code::Unsupported,
+                    "rollback_unavailable",
+                    "Cannot verify a safe rollback. See the release notes and store backups.",
+                ));
+            }
+            let bundles = self.adapters.bundles.clone();
+            let bundle = self.paths.bundle.clone();
+            let saved = txn.clone();
+            blocking(move || bundles.verify_previous_archive(&bundle, &saved)).await?;
+            let subject = match self.eligible().await? {
+                Eligible::Serving(daemon, schema) => {
+                    super::rollback::check(&txn, super::rollback::StoreEvidence::Live(schema))?;
+                    RollbackSubject::Serving(daemon)
+                }
+                Eligible::NotServing => {
+                    self.check_rollback_snapshot(&txn, &scope)?;
+                    RollbackSubject::NoPid
+                }
+            };
+            self.require_rollback_target(&txn).await?;
+            self.store
+                .begin_rollback(&txn, &parent_id, subject, scope.clone())?;
+        }
+        let outcome = self.resume_rollback(&txn, &scope, progress).await?;
+        Ok(outcome == InstallOutcome::Restored && self.paths.app_version != txn.from)
+    }
+
+    fn rollback_scope(&self, config: &Path, root: &Path) -> RollbackScope {
+        RollbackScope {
+            plist: self.paths.plist.clone(),
+            config_dir: config.to_owned(),
+            data_root: root.to_owned(),
+        }
+    }
+
+    async fn verify_rollback_scope(&self, scope: &RollbackScope) -> Result<(), GuiError> {
+        let host = self.adapters.host.clone();
+        let (config, root) = blocking(move || host.rollback_scope()).await?;
+        if *scope != self.rollback_scope(&config, &root) {
+            return Err(unexpected());
+        }
+        Ok(())
+    }
+
+    fn check_rollback_snapshot(&self, txn: &Txn, scope: &RollbackScope) -> Result<(), GuiError> {
+        super::rollback::check(
+            txn,
+            super::rollback::StoreEvidence::Down {
+                config_dir: &scope.config_dir,
+                data_root: &scope.data_root,
+            },
+        )
+    }
+
+    async fn resume_rollback(
+        &self,
+        txn: &Txn,
+        scope: &RollbackScope,
+        progress: &mut Progress<'_>,
+    ) -> Result<InstallOutcome, GuiError> {
+        self.validate().await?;
+        if txn.program != self.program
+            || txn.rollback_zip != self.rollback_zip(&txn.from)
+            || release_cmp(&txn.to, &txn.from) != Some(Ordering::Greater)
+            || ![&txn.from, &txn.to].contains(&&self.paths.app_version)
+        {
+            return Err(unexpected());
+        }
+        self.verify_rollback_scope(scope).await?;
+        let id = self.store.rollback(txn)?.ok_or_else(unexpected)?.id;
+        let mut drain = RollbackDrain::default();
+        loop {
+            let attempt = self.rollback_attempt(txn, &id)?;
+            if attempt.scope != *scope {
+                return Err(unexpected());
+            }
+            match attempt.phase {
+                RollbackPhase::Draining => {
+                    self.rollback_drain(txn, &attempt, &mut drain, progress)
+                        .await?;
+                }
+                RollbackPhase::Stopping | RollbackPhase::CancelAfterStop => {
+                    self.rollback_stop(txn, &attempt, progress)
+                        .await
+                        .inspect_err(|error| {
+                            progress(UpdateState::DaemonFailed {
+                                reason: error.reason().unwrap_or("daemon_identity").into(),
+                            });
+                        })?;
+                }
+                RollbackPhase::Fencing => {
+                    self.rollback_disable(txn, &attempt, progress).await?;
+                }
+                RollbackPhase::Disabling => {
+                    self.rollback_observe_disable(txn, &attempt).await?;
+                }
+                RollbackPhase::Fenced => {
+                    self.rollback_unload(txn, &attempt, progress).await?;
+                }
+                RollbackPhase::RollbackEnabling => {
+                    self.require_rollback_target(txn).await?;
+                    if self.rollback_enable(txn, &attempt).await? {
+                        self.store.advance_rollback(txn, &attempt, |next| {
+                            next.owns_fence = false;
+                            if next.withdrawn() {
+                                retain_target(next, TargetRecovery::Cancelled);
+                            } else {
+                                next.phase = RollbackPhase::Draining;
+                            }
+                        })?;
+                    }
+                }
+                RollbackPhase::Bootout => {
+                    // A relaunched coordinator can observe explicit unload. It
+                    // has no launchctl exit result and cannot replay bootout.
+                    let timeout = self
+                        .job()
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|job| job.exit_timeout);
+                    if matches!(self.wait_unloaded(timeout, false).await, Unload::Done) {
+                        self.rollback_unloaded(txn, &attempt).await?;
+                    } else {
+                        return Ok(fence_uncertain(progress));
+                    }
+                }
+                RollbackPhase::Restoring => {
+                    self.rollback_exchange(txn, &attempt, progress).await?;
+                }
+                RollbackPhase::StartingTarget => {
+                    if let Some(outcome) =
+                        self.rollback_start_target(txn, &attempt, progress).await?
+                    {
+                        return Ok(outcome);
+                    }
+                }
+                RollbackPhase::StartingPrevious | RollbackPhase::Relaunching => {
+                    if let Some(outcome) = self
+                        .rollback_start_previous(txn, &attempt, progress)
+                        .await?
+                    {
+                        return Ok(outcome);
+                    }
+                }
+            }
+        }
+    }
+
+    fn rollback_attempt(&self, txn: &Txn, id: &str) -> Result<RollbackAttempt, GuiError> {
+        self.store
+            .rollback(txn)?
+            .filter(|attempt| attempt.id == id)
+            .ok_or_else(stale_rollback)
+    }
+
+    /// A reply can settle its own admission after withdrawal. It cannot
+    /// replace the withdrawn continuation, or complete a later admission.
+    fn settle_rollback(
+        &self,
+        txn: &Txn,
+        admitted: &RollbackAttempt,
+        settle: impl Fn(&mut RollbackAttempt),
+    ) -> Result<RollbackAttempt, GuiError> {
+        loop {
+            let current = self.rollback_attempt(txn, &admitted.id)?;
+            let same_phase = current.phase == admitted.phase
+                || (admitted.phase == RollbackPhase::Stopping
+                    && current.phase == RollbackPhase::CancelAfterStop
+                    && current.withdrawn());
+            if !same_phase
+                || current.pending != admitted.pending
+                || (admitted.withdrawn() && !current.withdrawn())
+                || admitted.pending.is_none()
+            {
+                return Err(stale_rollback());
+            }
+            if let Some(next) = self.store.advance_rollback(txn, &current, |next| {
+                next.pending = None;
+                settle(next);
+            })? {
+                return Ok(next);
+            }
+        }
+    }
+
+    async fn rollback_drain(
+        &self,
+        txn: &Txn,
+        attempt: &RollbackAttempt,
+        drain: &mut RollbackDrain,
+        progress: &mut Progress<'_>,
+    ) -> Result<(), GuiError> {
+        self.require_rollback_target(txn).await?;
+        self.require_enabled().await?;
+        let job = self.loaded().await?;
+        if job.pid.is_none() {
+            if !self.can_offer_not_serving().await {
+                return Err(not_quiescent());
+            }
+            if !attempt.withdrawn() {
+                self.check_rollback_snapshot(txn, &attempt.scope)?;
+            }
+            *drain = RollbackDrain::default();
+            self.store.advance_rollback(txn, attempt, |next| {
+                next.subject = RollbackSubject::NoPid;
+                next.pending = None;
+                next.seal_accepted = false;
+                next.stopped = true;
+                if next.withdrawn() {
+                    retain_target(next, TargetRecovery::Cancelled);
+                } else {
+                    next.phase = RollbackPhase::Fencing;
+                }
+            })?;
+            return Ok(());
+        }
+        let (peer, status) = self.verified_drain_status().await?;
+        if job.pid != Some(peer.pid) || peer.version != txn.to {
+            return Err(daemon_identity());
+        }
+        let observation = drain_observation(&status).ok_or_else(invalid_drain_status)?;
+        if !attempt.withdrawn() {
+            super::rollback::check(
+                txn,
+                super::rollback::StoreEvidence::Live(store_schema(&status)),
+            )?;
+        }
+
+        if attempt.subject.daemon() != Some(&peer) {
+            if attempt
+                .subject
+                .daemon()
+                .is_some_and(|old| !replacement(old, &peer))
+            {
+                return Err(daemon_identity());
+            }
+            // A different verified process cannot execute the saved RPC.
+            *drain = RollbackDrain::default();
+            self.store.advance_rollback(txn, attempt, |next| {
+                next.subject = RollbackSubject::Serving(peer.clone());
+                next.pending = None;
+                next.seal_accepted = false;
+                next.stopped = false;
+            })?;
+            return Ok(());
+        }
+
+        let idle = report_draining(&status, progress);
+        if let Some(action) = attempt.action() {
+            match action {
+                // A status on a second connection can overtake a fully sent
+                // acquire. Null and a local deadline cannot settle it.
+                RollbackAction::Acquire => return Err(cleanup_uncertain()),
+                RollbackAction::Renew | RollbackAction::Release
+                    if observation == DrainObservation::Absent =>
+                {
+                    *drain = RollbackDrain::default();
+                    self.store
+                        .advance_rollback(txn, attempt, |next| next.pending = None)?;
+                    return Ok(());
+                }
+                RollbackAction::Renew | RollbackAction::Release if attempt.withdrawn() => {
+                    return self.observe_orphan_lease(drain, observation).await;
+                }
+                RollbackAction::Renew | RollbackAction::Release => return Err(cleanup_uncertain()),
+                _ => return Err(unexpected()),
+            }
+        }
+
+        if observation == DrainObservation::Absent {
+            *drain = RollbackDrain::default();
+        }
+        let acknowledged = drain.lease.as_ref().filter(|live| live.peer == peer);
+        let id = acknowledged.map(|live| live.id.clone());
+        let action = if attempt.withdrawn() {
+            if observation == DrainObservation::Absent {
+                self.store.advance_rollback(txn, attempt, |next| {
+                    retain_target(next, TargetRecovery::Cancelled)
+                })?;
+                return Ok(());
+            }
+            let Some(id) = id
+                .as_deref()
+                .filter(|id| observation == DrainObservation::Unsealed(id))
+            else {
+                return self.observe_orphan_lease(drain, observation).await;
+            };
+            DrainAction::Release { lease_id: id }
+        } else {
+            let step = next_drain_step(
+                observation,
+                acknowledged,
+                idle,
+                self.adapters.clock.monotonic(),
+            )?;
+            let Some(action) = step.action(&peer, id.as_deref())? else {
+                self.adapters.clock.sleep(POLL).await;
+                return Ok(());
+            };
+            action
+        };
+        self.verify_rollback_scope(&attempt.scope).await?;
+        self.rollback_drain_rpc(txn, attempt, action, &mut drain.lease)
+            .await
+    }
+
+    async fn observe_orphan_lease(
+        &self,
+        drain: &mut RollbackDrain,
+        observation: DrainObservation<'_>,
+    ) -> Result<(), GuiError> {
+        if matches!(observation, DrainObservation::Unsealed(_)) {
+            let clock = &self.adapters.clock;
+            let now = clock.monotonic();
+            let seen_at = *drain.orphan_seen_at.get_or_insert(now);
+            if now.duration_since(seen_at) < Duration::from_secs(LEASE_TTL_S.into()) {
+                clock.sleep(POLL).await;
+                return Ok(());
+            }
+        }
+        Err(cleanup_uncertain())
+    }
+
+    async fn verified_drain_status(&self) -> Result<(DaemonIdentity, Value), GuiError> {
+        let status = self.adapters.daemon.status().await?;
+        let peer = identity(&status)?;
+        if self.loaded().await?.pid != Some(peer.pid) {
+            return Err(daemon_identity());
+        }
+        require_drain(&status)?;
+        Ok((peer, status))
+    }
+
+    async fn rollback_drain_rpc(
+        &self,
+        txn: &Txn,
+        attempt: &RollbackAttempt,
+        action: DrainAction<'_>,
+        lease: &mut Option<LiveLease>,
+    ) -> Result<(), GuiError> {
+        let (kind, renew_id) = match action {
+            DrainAction::Acquire { .. } => (RollbackAction::Acquire, None),
+            DrainAction::Renew { lease_id, .. } => (RollbackAction::Renew, Some(lease_id)),
+            DrainAction::Release { .. } => (RollbackAction::Release, None),
+            DrainAction::SealStop { .. } => (RollbackAction::Seal, None),
+        };
+        let Some(admitted) = self.store.advance_rollback(txn, attempt, |next| {
+            if kind == RollbackAction::Seal {
+                next.phase = RollbackPhase::Stopping;
+                next.stop_requested_ms = Some(unix_millis(self.adapters.clock.now()));
+                next.seal_accepted = false;
+            }
+            next.admit(kind);
+        })?
+        else {
+            return Ok(());
+        };
+        let result = self.adapters.daemon.drain(action).await;
+        let uncertain = matches!(&result, Err(error) if error.code == Code::Unknown.as_str())
+            || (matches!(kind, RollbackAction::Acquire | RollbackAction::Renew)
+                && matches!(&result, Ok(id) if !valid_lease_grant(id.as_deref(), renew_id)));
+        if uncertain {
+            return if kind == RollbackAction::Seal {
+                Ok(())
+            } else {
+                Err(cleanup_uncertain())
+            };
+        }
+
+        let current = self.settle_rollback(txn, &admitted, |next| {
+            if kind == RollbackAction::Seal {
+                next.seal_accepted = result.is_ok();
+                if result.is_err() && !next.withdrawn() {
+                    next.phase = RollbackPhase::Draining;
+                }
+            }
+        })?;
+        match result {
+            Ok(Some(id)) if matches!(kind, RollbackAction::Acquire | RollbackAction::Renew) => {
+                *lease = Some(LiveLease {
+                    id,
+                    peer: attempt.subject.daemon().ok_or_else(unexpected)?.clone(),
+                    renew_at: self.adapters.clock.monotonic() + RENEW_INTERVAL,
+                });
+            }
+            Ok(_) if kind == RollbackAction::Release => *lease = None,
+            Err(error) if error.reason() == Some("lease_lost") => *lease = None,
+            Err(error) if !current.withdrawn() && error.reason() != Some("not_idle") => {
+                return Err(error);
+            }
+            _ => {}
+        }
+        if kind == RollbackAction::Seal && current.phase == RollbackPhase::Draining {
+            self.adapters.clock.sleep(POLL).await;
+        }
+        Ok(())
+    }
+
+    async fn rollback_stop(
+        &self,
+        txn: &Txn,
+        attempt: &RollbackAttempt,
+        progress: &mut Progress<'_>,
+    ) -> Result<(), GuiError> {
+        self.require_rollback_target(txn).await?;
+        let expected = attempt.subject.daemon().ok_or_else(unexpected)?;
+        let uncertain = attempt.action() == Some(RollbackAction::Seal);
+        let sample = self
+            .observe_stop(
+                StopRequest {
+                    predecessor: Some(expected),
+                    requested_ms: attempt.stop_requested_ms,
+                    seal_accepted: attempt.seal_accepted,
+                    allow_original_absent: uncertain,
+                    allow_unsealed_original: !uncertain && !attempt.seal_accepted,
+                    expected_version: Some(&txn.to),
+                },
+                || Ok(self.rollback_attempt(txn, &attempt.id)?.withdrawn()),
+                progress,
+            )
+            .await?;
+        let current = self.rollback_attempt(txn, &attempt.id)?;
+        if current.pending != attempt.pending
+            || !matches!(
+                current.phase,
+                RollbackPhase::Stopping | RollbackPhase::CancelAfterStop
+            )
+        {
+            return Err(stale_rollback());
+        }
+        self.store.advance_rollback(txn, &current, |next| {
+            next.pending = None;
+            match &sample {
+                StopObservation::Unsealed(peer) => {
+                    next.phase = RollbackPhase::Draining;
+                    next.subject = RollbackSubject::Serving(peer.clone());
+                    next.seal_accepted = false;
+                    next.stopped = false;
+                }
+                StopObservation::Steady(_, sealed) => {
+                    next.stopped = true;
+                    if next.withdrawn() {
+                        retain_target(next, TargetRecovery::Cancelled);
+                    } else {
+                        next.phase = RollbackPhase::Fencing;
+                        next.seal_accepted = *sealed;
+                    }
+                }
+                StopObservation::CrashLoop => {
+                    if next.withdrawn() {
+                        retain_target(next, TargetRecovery::NotStarting);
+                    } else {
+                        next.phase = RollbackPhase::Fencing;
+                        next.seal_accepted = false;
+                    }
+                }
+            }
+        })?;
+        Ok(())
+    }
+
+    async fn rollback_disable(
+        &self,
+        txn: &Txn,
+        attempt: &RollbackAttempt,
+        progress: &mut Progress<'_>,
+    ) -> Result<(), GuiError> {
+        self.require_rollback_target(txn).await?;
+        self.require_enabled().await?;
+        let job = self.loaded().await?;
+        if attempt.withdrawn() || job.pid.is_some() {
+            self.store.advance_rollback(txn, attempt, |next| {
+                if next.withdrawn() {
+                    retain_target(next, TargetRecovery::Cancelled);
+                } else {
+                    next.phase = RollbackPhase::Draining;
+                }
+            })?;
+            return Ok(());
+        }
+        if !self.adapters.daemon.quiescent()?
+            || attempt.seal_accepted && job.last_exit != Some(LastExit::Clean)
+        {
+            return Err(not_quiescent());
+        }
+        self.check_rollback_snapshot(txn, &attempt.scope)?;
+        self.verify_rollback_scope(&attempt.scope).await?;
+        self.require_enabled().await?;
+        progress(UpdateState::Stopping);
+        let Some(admitted) = self.store.advance_rollback(txn, attempt, |next| {
+            next.was_enabled = true;
+            next.phase = RollbackPhase::Disabling;
+            next.admit(RollbackAction::Disable);
+        })?
+        else {
+            return Ok(());
+        };
+        match self.service(|service| service.disable(AGENT_LABEL)).await {
+            Ok(()) => self.rollback_observe_disable(txn, &admitted).await,
+            Err(error) if disable_settled(&error) => {
+                self.settle_rollback(txn, &admitted, |next| {
+                    // A pre-dispatch refusal cannot own a later disabled label.
+                    next.owns_fence = !crate::service::pre_dispatch_error(&error);
+                    retain_target(
+                        next,
+                        if next.withdrawn() {
+                            TargetRecovery::Cancelled
+                        } else {
+                            TargetRecovery::DisableRefused
+                        },
+                    );
+                })?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn rollback_observe_disable(
+        &self,
+        txn: &Txn,
+        attempt: &RollbackAttempt,
+    ) -> Result<(), GuiError> {
+        if !attempt.was_enabled || attempt.action() != Some(RollbackAction::Disable) {
+            return Err(unexpected());
+        }
+        // Disable cannot unload a job. An unloaded or still-enabled sample
+        // cannot settle this admission or grant authority to restore.
+        self.loaded().await?;
+        if !self.read_fence_state().await? {
+            return Err(not_quiescent());
+        }
+        self.settle_rollback(txn, attempt, |next| {
+            next.owns_fence = true;
+            next.phase = RollbackPhase::Fenced;
+        })?;
+        Ok(())
+    }
+
+    async fn rollback_unload(
+        &self,
+        txn: &Txn,
+        attempt: &RollbackAttempt,
+        progress: &mut Progress<'_>,
+    ) -> Result<(), GuiError> {
+        if !attempt.owns_fence || !attempt.was_enabled || attempt.pending.is_some() {
+            return Err(unexpected());
+        }
+        if attempt.withdrawn() {
+            self.store.advance_rollback(txn, attempt, |next| {
+                retain_target(next, TargetRecovery::Cancelled)
+            })?;
+            return Ok(());
+        }
+        self.require_rollback_target(txn).await?;
+        self.verify_rollback_scope(&attempt.scope).await?;
+        let checked = self.recheck_fence(attempt.seal_accepted).await;
+        let stopped = match checked {
+            Ok(Some(stopped)) => stopped,
+            Ok(None) => {
+                self.store.advance_rollback(txn, attempt, |next| {
+                    next.phase = RollbackPhase::RollbackEnabling
+                })?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(admitted) = self.store.advance_rollback(txn, attempt, |next| {
+            next.phase = RollbackPhase::Bootout;
+            next.bootout_admitted = true;
+            next.admit(RollbackAction::Bootout);
+        })?
+        else {
+            return Ok(());
+        };
+        match self.unload(&stopped).await {
+            Unload::Done => self.rollback_unloaded(txn, &admitted).await,
+            Unload::Failed => {
+                self.settle_rollback(txn, &admitted, |next| {
+                    retain_target(next, TargetRecovery::BootoutFailed)
+                })?;
+                Ok(())
+            }
+            Unload::Uncertain => {
+                fence_uncertain(progress);
+                Err(not_quiescent())
+            }
+        }
+    }
+
+    async fn rollback_unloaded(
+        &self,
+        txn: &Txn,
+        attempt: &RollbackAttempt,
+    ) -> Result<(), GuiError> {
+        if attempt.action() != Some(RollbackAction::Bootout)
+            || !attempt.was_enabled
+            || !attempt.owns_fence
+            || !self.fenced_and_unloaded().await?
+        {
+            return Err(not_quiescent());
+        }
+        self.settle_rollback(txn, attempt, |next| {
+            next.unloaded = true;
+            next.phase = RollbackPhase::Restoring;
+        })?;
+        Ok(())
+    }
+
+    async fn rollback_exchange(
+        &self,
+        txn: &Txn,
+        attempt: &RollbackAttempt,
+        progress: &mut Progress<'_>,
+    ) -> Result<(), GuiError> {
+        if !attempt.unloaded
+            || !attempt.owns_fence
+            || !attempt.bootout_admitted
+            || attempt.withdrawn()
+            || !self.fenced_and_unloaded().await?
+        {
+            return Err(not_quiescent());
+        }
+        let bundle = self.paths.bundle.clone();
+        let adapters = &self.adapters;
+        let ops = adapters.bundles.clone();
+        let service = adapters.service.clone();
+        let daemon = adapters.daemon.clone();
+        let host = adapters.host.clone();
+        let saved = txn.clone();
+        let attempt = attempt.clone();
+        let store = TxnStore::new(self.paths.app_support.join("update.json"));
+        progress(UpdateState::Installing);
+        let result = blocking(move || {
+            let check_fence = || {
+                let (config, root) = host.rollback_scope()?;
+                if config != attempt.scope.config_dir
+                    || root != attempt.scope.data_root
+                    || !service.print_disabled(AGENT_LABEL)?
+                    || service.print(AGENT_LABEL)?.is_some()
+                    || !daemon.quiescent()?
+                {
+                    return Err(not_quiescent());
+                }
+                Ok(())
+            };
+            check_fence()?;
+            if let Some(evidence) = &attempt.exchange {
+                if attempt.action() != Some(RollbackAction::Exchange) {
+                    return Err(unexpected());
+                }
+                super::rollback::check(
+                    &saved,
+                    super::rollback::StoreEvidence::Down {
+                        config_dir: &attempt.scope.config_dir,
+                        data_root: &attempt.scope.data_root,
+                    },
+                )?;
+                return super::rollback::verify_exchange(ops.as_ref(), &bundle, &saved, evidence)
+                    .map(|()| None);
+            }
+            if attempt.pending.is_some() {
+                return Err(unexpected());
+            }
+            let admitted = |evidence: &ExchangeEvidence| {
+                store
+                    .advance_rollback(&saved, &attempt, |next| {
+                        next.exchange = Some(evidence.clone());
+                        next.admit(RollbackAction::Exchange);
+                    })?
+                    .ok_or_else(stale_rollback)?;
+                Ok(())
+            };
+            match super::rollback::exchange_fenced(
+                ops.as_ref(),
+                &bundle,
+                &saved,
+                &attempt.scope.config_dir,
+                &attempt.scope.data_root,
+                &check_fence,
+                &admitted,
+            ) {
+                Ok(()) => {
+                    let current = store.rollback(&saved)?.ok_or_else(stale_rollback)?;
+                    let evidence = current.exchange.as_ref().ok_or_else(unexpected)?;
+                    super::rollback::verify_exchange(ops.as_ref(), &bundle, &saved, evidence)?;
+                    Ok(None)
+                }
+                Err(ExchangeError::NotActivated(error)) => {
+                    // Compensate only when the retained signed target still
+                    // matches the one selected for exchange.
+                    let target = super::rollback::verified_target(ops.as_ref(), &bundle, &saved)?;
+                    let current = store.rollback(&saved)?.ok_or_else(stale_rollback)?;
+                    if current.id != attempt.id
+                        || current
+                            .exchange
+                            .as_ref()
+                            .is_some_and(|evidence| evidence.target != target)
+                    {
+                        return Err(error);
+                    }
+                    Ok(Some(error))
+                }
+                Err(ExchangeError::Uncertain(error)) => Err(error),
+            }
+        })
+        .await;
+        let refusal = result.inspect_err(|_| progress(UpdateState::RestoreFailed))?;
+        let current = self.store.rollback(txn)?.ok_or_else(stale_rollback)?;
+        if current.phase != RollbackPhase::Restoring || current.withdrawn() {
+            return Err(stale_rollback());
+        }
+        if refusal.is_none()
+            && (current.action() != Some(RollbackAction::Exchange) || current.exchange.is_none())
+        {
+            return Err(unexpected());
+        }
+        let changed = self
+            .store
+            .advance_rollback(txn, &current, |next| {
+                next.pending = None;
+                if refusal.is_some() {
+                    retain_target(next, TargetRecovery::ExchangeRefused);
+                } else {
+                    next.phase = RollbackPhase::StartingPrevious;
+                }
+            })?
+            .ok_or_else(stale_rollback)?;
+        if let Some(evidence) = changed.exchange {
+            let ops = self.adapters.bundles.clone();
+            let bundle = self.paths.bundle.clone();
+            blocking(move || {
+                ops.discard_exchange(&bundle, &evidence, refusal.is_none());
+                Ok(())
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Enable only a fence established by this attempt. An unloaded job is
+    /// eligible only after this attempt verified its bootout.
+    async fn rollback_enable(
+        &self,
+        txn: &Txn,
+        attempt: &RollbackAttempt,
+    ) -> Result<bool, GuiError> {
+        self.verify_rollback_scope(&attempt.scope).await?;
+        self.verify_start_job(attempt).await?;
+        if !self.disabled().await? {
+            if attempt.action() == Some(RollbackAction::Enable) {
+                self.settle_rollback(txn, attempt, |_| {})?;
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+        if !attempt.was_enabled
+            || !attempt.owns_fence
+            || !matches!(attempt.action(), None | Some(RollbackAction::Enable))
+        {
+            return Err(agent_disabled());
+        }
+        let Some(admitted) = self
+            .store
+            .advance_rollback(txn, attempt, |next| next.admit(RollbackAction::Enable))?
+        else {
+            return Ok(false);
+        };
+        self.verify_start_job(&admitted).await?;
+        self.service(|service| service.enable(AGENT_LABEL)).await?;
+        self.require_enabled().await?;
+        self.settle_rollback(txn, &admitted, |_| {})?;
+        Ok(false)
+    }
+
+    async fn verify_start_job(&self, attempt: &RollbackAttempt) -> Result<Option<Job>, GuiError> {
+        let job = self.job().await?;
+        if job.is_none() && (!attempt.unloaded || !self.adapters.daemon.quiescent()?) {
+            return Err(not_quiescent());
+        }
+        Ok(job)
+    }
+
+    async fn verify_exchanged_bundle(
+        &self,
+        expected: &super::bundle::VerifiedBundle,
+    ) -> Result<(), GuiError> {
+        let ops = self.adapters.bundles.clone();
+        let bundle = self.paths.bundle.clone();
+        let expected = expected.clone();
+        blocking(move || {
+            let installed = super::bundle::probe_bundle(ops.as_ref(), &bundle)
+                .map_err(super::bundle::ProbeError::into_error)?;
+            if installed == expected {
+                Ok(())
+            } else {
+                Err(unexpected())
+            }
+        })
+        .await
+    }
+
+    async fn rollback_start_target(
+        &self,
+        txn: &Txn,
+        attempt: &RollbackAttempt,
+        progress: &mut Progress<'_>,
+    ) -> Result<Option<InstallOutcome>, GuiError> {
+        self.require_rollback_target(txn).await?;
+        if self.daemon_version().await? != txn.to {
+            return Err(unexpected());
+        }
+        if let Some(evidence) = &attempt.exchange {
+            self.verify_exchanged_bundle(&evidence.target).await?;
+        }
+        let reason = attempt.target_recovery.ok_or_else(unexpected)?;
+        let (outcome, state) = match reason {
+            TargetRecovery::Cancelled => (InstallOutcome::Cancelled, UpdateState::Cancelled),
+            TargetRecovery::NotStarting => (InstallOutcome::NotStarting, UpdateState::NotStarting),
+            TargetRecovery::DisableRefused | TargetRecovery::ExchangeRefused => (
+                InstallOutcome::Unchanged,
+                UpdateState::InstallFailedUnchanged,
+            ),
+            TargetRecovery::BootoutFailed => {
+                (InstallOutcome::BootoutFailed, UpdateState::BootoutFailed)
+            }
+        };
+        if reason == TargetRecovery::NotStarting {
+            self.require_enabled().await?;
+        } else {
+            if !self
+                .rollback_start_job(txn, attempt, &txn.to, progress)
+                .await?
+            {
+                return Ok(None);
+            }
+            self.require_rollback_target(txn).await?;
+            if let Some(evidence) = &attempt.exchange {
+                self.verify_exchanged_bundle(&evidence.target).await?;
+            }
+        }
+        if !self.store.finish_rollback(txn, attempt, false)? {
+            return Ok(None);
+        }
+        progress(state);
+        Ok(Some(outcome))
+    }
+
+    async fn rollback_start_previous(
+        &self,
+        txn: &Txn,
+        attempt: &RollbackAttempt,
+        progress: &mut Progress<'_>,
+    ) -> Result<Option<InstallOutcome>, GuiError> {
+        let evidence = attempt.exchange.as_ref().ok_or_else(unexpected)?;
+        self.require_previous(txn).await?;
+        if self.daemon_version().await? != txn.from {
+            return Err(unexpected());
+        }
+        self.verify_exchanged_bundle(&evidence.previous).await?;
+        if attempt.phase == RollbackPhase::StartingPrevious {
+            if self.job().await?.is_none() {
+                self.check_rollback_snapshot(txn, &attempt.scope)?;
+            }
+            if !self
+                .rollback_start_job(txn, attempt, &txn.from, progress)
+                .await?
+            {
+                return Ok(None);
+            }
+            self.verify_exchanged_bundle(&evidence.previous).await?;
+            self.store
+                .advance_rollback(txn, attempt, |next| next.phase = RollbackPhase::Relaunching)?;
+            return Ok(None);
+        }
+
+        // The target App leaves the verified handoff in place even if the
+        // relaunch dispatch fails or the process exits before dispatch.
+        if self.paths.app_version != txn.from {
+            self.require_app_version(&txn.to)?;
+            progress(UpdateState::Relaunching);
+        } else {
+            self.require_enabled().await?;
+            let predecessor = attempt.subject.daemon().or(txn.from_daemon.as_ref());
+            self.wait_ready(&txn.from, predecessor, None, true, progress)
+                .await?;
+            self.verify_exchanged_bundle(&evidence.previous).await?;
+            if !self.store.finish_rollback(txn, attempt, true)? {
+                return Ok(None);
+            }
+            progress(UpdateState::Restored {
+                from: txn.from.clone(),
+            });
+        }
+        Ok(Some(InstallOutcome::Restored))
+    }
+
+    /// Select the same plain kickstart or bootstrap used by forward recovery.
+    /// Keep the admission until there is verified readiness on the saved bundle.
+    async fn rollback_start_job(
+        &self,
+        txn: &Txn,
+        attempt: &RollbackAttempt,
+        version: &str,
+        progress: &mut Progress<'_>,
+    ) -> Result<bool, GuiError> {
+        if !self.rollback_enable(txn, attempt).await? {
+            return Ok(false);
+        }
+        self.require_enabled().await?;
+        let job = self.verify_start_job(attempt).await?;
+        let prior_launch = attempt.action();
+        let action = match &job {
+            Some(job) if job.pid.is_some() => None,
+            // The prior bootstrap registered the job. Wait for the daemon
+            // without submitting a second start against that admission.
+            Some(_) if prior_launch == Some(RollbackAction::Bootstrap) => None,
+            Some(_) => Some(RollbackAction::Kickstart),
+            None => Some(RollbackAction::Bootstrap),
+        };
+        if prior_launch.is_some()
+            && !matches!(
+                prior_launch,
+                Some(RollbackAction::Bootstrap | RollbackAction::Kickstart)
+            )
+        {
+            return Err(unexpected());
+        }
+        let admitted = if let Some(action) = action {
+            if prior_launch.is_some_and(|pending| pending != action)
+                || !self.adapters.daemon.quiescent()?
+            {
+                return Err(not_quiescent());
+            }
+            progress(UpdateState::StartingDaemon);
+            let Some(admitted) = self.store.advance_rollback(txn, attempt, |next| {
+                next.start_requested_ms = Some(unix_millis(self.adapters.clock.now()));
+                next.admit(action);
+            })?
+            else {
+                return Ok(false);
+            };
+            self.require_enabled().await?;
+            let job = self.verify_start_job(&admitted).await?;
+            match (action, job) {
+                (_, Some(job)) if job.pid.is_some() => {}
+                (RollbackAction::Kickstart, Some(_)) if self.adapters.daemon.quiescent()? => {
+                    self.kickstart().await?
+                }
+                (RollbackAction::Bootstrap, None) if self.adapters.daemon.quiescent()? => {
+                    self.bootstrap().await?
+                }
+                _ => return Err(not_quiescent()),
+            }
+            Some(admitted)
+        } else {
+            prior_launch.map(|_| attempt.clone())
+        };
+
+        let previous_bundle = version == txn.from;
+        let predecessor = if previous_bundle {
+            attempt.subject.daemon().or(txn.from_daemon.as_ref())
+        } else if attempt.stopped || admitted.is_some() {
+            attempt.subject.daemon()
+        } else {
+            None
+        };
+        self.wait_ready(version, predecessor, None, true, progress)
+            .await?;
+        if let Some(admitted) = admitted {
+            self.settle_rollback(txn, &admitted, |_| {})?;
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     /// Run at startup before checking for update eligibility.
     pub async fn reconcile(
         &self,
@@ -478,6 +1660,14 @@ impl InstallCoordinator {
         let Some(mut txn) = self.store.load()? else {
             return Ok(None);
         };
+        if self.store.rollback(&txn)?.is_some() {
+            let host = self.adapters.host.clone();
+            let (config, root) = blocking(move || host.rollback_scope()).await?;
+            return self
+                .resume_rollback(&txn, &self.rollback_scope(&config, &root), progress)
+                .await
+                .map(Some);
+        }
         let phase = Phase::parse(&txn.phase).ok_or_else(|| {
             problem(
                 Code::InvalidInput,
@@ -636,7 +1826,11 @@ impl InstallCoordinator {
     async fn job(&self) -> Result<Option<Job>, GuiError> {
         self.service(|service| service.print(AGENT_LABEL))
             .await?
-            .map(|dump| Job::parse(&dump, &self.paths.plist, &self.program))
+            .map(|dump| {
+                let job = Job::parse(&dump, &self.paths.plist, &self.program)?;
+                self.adapters.host.verify_loaded_policy(&dump)?;
+                Ok(job)
+            })
             .transpose()
     }
 
@@ -676,7 +1870,9 @@ impl InstallCoordinator {
                     return Err(not_quiescent());
                 }
                 // A stopped bundle must still be safe to bootstrap on failure.
-                if self.daemon_version().await? != self.paths.app_version {
+                let bundled = self.daemon_version().await?;
+                self.check_preconditions(None, &bundled).await?;
+                if bundled != self.paths.app_version {
                     return Err(unexpected());
                 }
                 return Ok(Eligible::NotServing);
@@ -688,7 +1884,10 @@ impl InstallCoordinator {
             return Err(daemon_identity());
         }
         require_drain(&status)?;
-        match release_cmp(&self.daemon_version().await?, &daemon.version) {
+        let bundled = self.daemon_version().await?;
+        self.check_preconditions(Some(&daemon.version), &bundled)
+            .await?;
+        match release_cmp(&bundled, &daemon.version) {
             Some(Ordering::Equal) if daemon.version == self.paths.app_version => {}
             Some(Ordering::Greater) => {
                 return Err(problem(
@@ -708,10 +1907,19 @@ impl InstallCoordinator {
         if self.disabled().await? {
             return Err(agent_disabled());
         }
-        let schema = status["store_schema"]
-            .as_u64()
-            .and_then(|n| u32::try_from(n).ok());
+        let schema = store_schema(&status);
         Ok(Eligible::Serving(daemon, schema))
+    }
+
+    async fn check_preconditions(
+        &self,
+        running: Option<&str>,
+        bundled: &str,
+    ) -> Result<(), GuiError> {
+        let host = self.adapters.host.clone();
+        let running = running.map(str::to_owned);
+        let bundled = bundled.to_owned();
+        blocking(move || host.check_preconditions(running.as_deref(), &bundled)).await
     }
 
     fn observed_schema(&self, eligible: &Eligible) -> Option<u32> {
@@ -746,6 +1954,9 @@ impl InstallCoordinator {
         acknowledged: &mut Option<u32>,
         schema: Option<u32>,
     ) -> Result<bool, GuiError> {
+        if schema.is_some_and(|live| live > target.store_schema) {
+            return Err(schema_older());
+        }
         if schema == *acknowledged || schema.is_some_and(|current| current >= target.store_schema) {
             return Ok(false);
         }
@@ -772,13 +1983,14 @@ impl InstallCoordinator {
         let predecessor = txn.from_daemon.as_ref().ok_or_else(unexpected)?.clone();
         self.phase(txn, Phase::Draining)?;
         self.set_cancel(CancelMode::Drain, false);
-        let mut lease: Option<String> = None;
-        let mut renew_at = clock.monotonic();
+        let mut lease: Option<LiveLease> = None;
         loop {
             if self.cancel_state().requested {
                 self.close_cancel();
-                if let Some(id) = lease.as_deref()
-                    && let Err(error) = daemon.drain(DrainAction::Release { lease_id: id }).await
+                if let Some(live) = lease.as_ref()
+                    && let Err(error) = daemon
+                        .drain(DrainAction::Release { lease_id: &live.id })
+                        .await
                     && error.reason() != Some("lease_lost")
                 {
                     return Err(error);
@@ -787,86 +1999,85 @@ impl InstallCoordinator {
                 return Ok(Seal::Cancelled);
             }
 
-            let status = daemon.status().await?;
-            if self.loaded().await?.pid != Some(predecessor.pid)
-                || identity(&status)? != predecessor
-            {
+            let (peer, status) = self.verified_drain_status().await?;
+            if peer != predecessor {
                 return Err(daemon_identity());
             }
-            require_drain(&status)?;
-            if sealed(&status) {
-                return Err(problem(
-                    Code::Busy,
-                    "daemon_already_sealed",
-                    "The daemon is already stopping",
-                ));
+            let observation = drain_observation(&status).ok_or_else(invalid_drain_status)?;
+            if observation == DrainObservation::Absent {
+                lease = None;
             }
+            let idle = lease.is_some() && report_draining(&status, progress);
+            let step = next_drain_step(observation, lease.as_ref(), idle, clock.monotonic())?;
+            let id = lease.as_ref().map(|live| live.id.as_str());
+            let Some(action) = step.action(&predecessor, id)? else {
+                clock.sleep(POLL).await;
+                continue;
+            };
 
-            if clock.monotonic() >= renew_at {
-                let action = match lease.as_deref() {
-                    Some(id) => DrainAction::Renew {
-                        lease_id: id,
-                        ttl_s: LEASE_TTL_S,
-                    },
-                    None => DrainAction::Acquire { ttl_s: LEASE_TTL_S },
-                };
-                match daemon.drain(action).await {
-                    Ok(Some(id)) if !id.is_empty() => lease = Some(id),
-                    Err(e) if e.reason() == Some("lease_lost") => {
-                        lease = None;
-                        clock.sleep(POLL).await;
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                    _ => {
-                        return Err(problem(
-                            Code::InvalidInput,
-                            "update_drain_reply",
-                            "The drain reply has no lease ID",
-                        ));
-                    }
-                }
-                renew_at = clock.monotonic() + RENEW_INTERVAL;
-            }
-
-            let inflight = list(&status, "inflight");
-            let background: Vec<_> = list(&status, "holds")
-                .into_iter()
-                .filter(|hold| hold["origin"] == "background")
-                .collect();
-            let idle = inflight.is_empty() && background.is_empty();
-            progress(UpdateState::Draining {
-                inflight,
-                background,
-            });
-            if idle {
-                // A Cancel during this RPC must be durable, even if the App
-                // never receives the response. The daemon arbitrates idleness.
+            if matches!(step, DrainStep::Seal) {
                 {
                     let mut cancel = self.cancel_state();
                     if cancel.requested {
                         continue;
                     }
-                    self.phase(txn, Phase::Stopping)?;
+                    self.install_phase(txn, Phase::Stopping, |details| {
+                        details.stop_requested_ms = Some(unix_millis(clock.now()));
+                    })?;
                     cancel.mode = CancelMode::SealedStop;
                 }
-                let id = lease.as_deref().ok_or_else(unexpected)?;
-                match daemon.drain(DrainAction::SealStop { lease_id: id }).await {
+                match daemon.drain(action).await {
                     Ok(_) => return Ok(Seal::Accepted),
-                    Err(e) if matches!(e.reason(), Some("not_idle" | "lease_lost")) => {
+                    Err(error) if matches!(error.reason(), Some("not_idle" | "lease_lost")) => {
                         let mut cancel = self.cancel_state();
-                        if e.reason() == Some("lease_lost") {
+                        if error.reason() == Some("lease_lost") {
                             lease = None;
+                        } else if let Some(live) = &mut lease {
+                            live.renew_at = clock.monotonic();
                         }
-                        renew_at = clock.monotonic();
-                        self.phase(txn, Phase::Draining)?;
-                        cancel.mode = CancelMode::Drain;
+                        if !cancel.requested {
+                            self.phase(txn, Phase::Draining)?;
+                            cancel.mode = CancelMode::Drain;
+                        }
                     }
-                    Err(e) if e.code == Code::Unknown.as_str() => return Ok(Seal::Uncertain),
-                    Err(e) => return Err(e),
+                    Err(error) if error.code == Code::Unknown.as_str() => {
+                        return Ok(Seal::Uncertain);
+                    }
+                    Err(error) => return Err(error),
+                }
+                clock.sleep(POLL).await;
+                continue;
+            }
+
+            if self.cancel_state().requested {
+                continue;
+            }
+            let renew = if matches!(step, DrainStep::Renew) {
+                id
+            } else {
+                None
+            };
+            match daemon.drain(action).await {
+                Ok(Some(id)) if valid_lease_grant(Some(&id), renew) => {
+                    lease = Some(LiveLease {
+                        id,
+                        peer: peer.clone(),
+                        renew_at: clock.monotonic() + RENEW_INTERVAL,
+                    });
+                }
+                Err(error) if error.reason() == Some("lease_lost") => {
+                    lease = None;
+                    clock.sleep(POLL).await;
+                }
+                Err(error) => return Err(error),
+                _ => {
+                    return Err(problem(
+                        Code::InvalidInput,
+                        "update_drain_reply",
+                        "The drain reply has no matching lease ID",
+                    ));
                 }
             }
-            clock.sleep(POLL).await;
         }
     }
 
@@ -877,41 +2088,78 @@ impl InstallCoordinator {
         already_cancelled: bool,
         progress: &mut Progress<'_>,
     ) -> Result<Stopped, GuiError> {
+        let observed = self
+            .observe_stop(
+                StopRequest {
+                    predecessor: txn.from_daemon.as_ref(),
+                    requested_ms: self.store.install_details(txn)?.stop_requested_ms,
+                    seal_accepted: !seal_uncertain,
+                    allow_original_absent: seal_uncertain,
+                    allow_unsealed_original: false,
+                    expected_version: None,
+                },
+                || Ok(already_cancelled || self.cancel_state().requested),
+                progress,
+            )
+            .await?;
+        let cancelled = self.close_cancel() || already_cancelled;
+        Ok(match observed {
+            StopObservation::Steady(job, sealed) => Stopped::Steady {
+                job,
+                cancelled,
+                sealed,
+            },
+            StopObservation::Unsealed(peer) => Stopped::Respawned(peer, cancelled),
+            StopObservation::CrashLoop => Stopped::CrashLoop(cancelled),
+        })
+    }
+
+    /// Observes step 7 for both bundle directions. A daemon answering on the
+    /// owned job must report a valid drain state before it can be redrained.
+    async fn observe_stop(
+        &self,
+        request: StopRequest<'_>,
+        is_cancelled: impl Fn() -> Result<bool, GuiError>,
+        progress: &mut Progress<'_>,
+    ) -> Result<StopObservation, GuiError> {
         let clock = &self.adapters.clock;
         let began = clock.monotonic();
-        let stop_after = txn
-            .from_daemon
-            .as_ref()
-            .map(|d| d.started)
+        let stop_after = request
+            .requested_ms
+            .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms))
+            .or_else(|| request.predecessor.map(|daemon| daemon.started))
             .unwrap_or_else(|| clock.now());
         let mut warned = false;
         let mut last_failure = None;
-        let mut sealed_exit = !seal_uncertain;
-        let predecessor_pid = txn.from_daemon.as_ref().map(|daemon| daemon.pid);
+        let mut sealed_exit = request.seal_accepted;
+        let predecessor_pid = request.predecessor.map(|daemon| daemon.pid);
         progress(UpdateState::Stopping);
         loop {
             match self.stop_sample().await {
                 Ok(Some((job, _))) if job.pid.is_some() => {
-                    // A replacement's exit can be clean even if it never served.
                     if job.pid != predecessor_pid {
                         sealed_exit = false;
                     }
                     if let Ok(status) = self.adapters.daemon.status().await
-                        && let Ok(now) = identity(&status)
-                        && job.pid == Some(now.pid)
-                        && !sealed(&status)
+                        && let Ok(peer) = identity(&status)
+                        && job.pid == Some(peer.pid)
+                        && request
+                            .expected_version
+                            .is_none_or(|version| peer.version == version)
+                        && let Some(
+                            observation
+                            @ (DrainObservation::Absent | DrainObservation::Unsealed(_)),
+                        ) = drain_observation(&status)
                     {
-                        let respawned = txn
-                            .from_daemon
-                            .as_ref()
-                            .is_some_and(|old| old.pid != now.pid || now.started > old.started);
-                        // A missing lease on the original process after a lost reply
-                        // proves that the old lease can no longer seal.
-                        if respawned || (seal_uncertain && status["draining"].is_null()) {
-                            return Ok(Stopped::Respawned(
-                                now,
-                                self.close_cancel() || already_cancelled,
-                            ));
+                        let respawned = request
+                            .predecessor
+                            .is_some_and(|old| replacement(old, &peer));
+                        let original_settled = request.predecessor == Some(&peer)
+                            && (request.allow_unsealed_original
+                                || (request.allow_original_absent
+                                    && observation == DrainObservation::Absent));
+                        if respawned || original_settled {
+                            return Ok(StopObservation::Unsealed(peer));
                         }
                     }
                 }
@@ -922,24 +2170,17 @@ impl InstallCoordinator {
                             close_error: Some(close_error),
                         });
                     }
-                    return Ok(Stopped::Steady {
-                        job,
-                        cancelled: self.close_cancel() || already_cancelled,
-                        sealed: sealed_exit,
-                    });
+                    return Ok(StopObservation::Steady(job, sealed_exit));
                 }
                 Ok(Some((job, true))) if job.last_exit == Some(LastExit::Failed) => {
                     sealed_exit = false;
                     let now = clock.monotonic();
-                    // A process seen between the two samples can itself be a failed
-                    // respawn. Only a matching, answering process takes the branch above.
+                    // A process seen between these samples can itself be a failed respawn.
                     let first = *last_failure.get_or_insert(now);
                     if now.duration_since(first) >= CRASH_LOOP_GAP
-                        && (now.duration_since(began) >= STOP_BUDGET
-                            || already_cancelled
-                            || self.cancel_state().requested)
+                        && (now.duration_since(began) >= STOP_BUDGET || is_cancelled()?)
                     {
-                        return Ok(Stopped::CrashLoop(self.close_cancel() || already_cancelled));
+                        return Ok(StopObservation::CrashLoop);
                     }
                 }
                 Ok(_) => {}
@@ -1114,7 +2355,12 @@ impl InstallCoordinator {
 
     async fn unload(&self, job: &Job) -> Unload {
         let error = self
-            .service(|service| service.bootout(AGENT_LABEL))
+            .service(|service| {
+                service.bootout_targeted(
+                    AGENT_LABEL,
+                    crate::service::launchctl::BootoutTarget::Stopped,
+                )
+            })
             .await
             .err();
         if error.as_ref().is_some_and(bootout_preflight_failed) {
@@ -1209,6 +2455,7 @@ impl InstallCoordinator {
             return Ok(Installed::Invalid);
         };
         if info.version == txn.from {
+            super::bundle::verify_predecessor_schema(&info, txn)?;
             return Ok(Installed::Previous);
         }
         if info.version == txn.to
@@ -1225,6 +2472,13 @@ impl InstallCoordinator {
             Installed::Previous => Ok(()),
             _ => Err(unexpected()),
         }
+    }
+
+    async fn require_rollback_target(&self, txn: &Txn) -> Result<(), GuiError> {
+        if self.paths.app_version != txn.to || self.installed(txn).await? != Installed::Target {
+            return Err(unexpected());
+        }
+        Ok(())
     }
 
     fn require_app_version(&self, expected: &str) -> Result<(), GuiError> {
@@ -1282,8 +2536,11 @@ impl InstallCoordinator {
 
         progress(UpdateState::Installing);
         let bundles = self.adapters.bundles.clone();
+        let bundle = self.paths.bundle.clone();
+        let saved = txn.clone();
         let kept = blocking(move || {
-            let result = bundles.install(update);
+            let result =
+                super::bundle::install_verified(bundles.as_ref(), update, &bundle, &saved)?;
             Ok(match result {
                 Err(tauri_plugin_updater::Error::PreviousAppNotRestored(path)) => Some(path),
                 _ => None,
@@ -1373,10 +2630,9 @@ impl InstallCoordinator {
                 });
                 for path in details.kept_bundle.iter().chain(candidates) {
                     if !self.is_kept_bundle(path)
-                        || !self
-                            .bundle_info_at(path)
-                            .await
-                            .is_ok_and(|info| info.version == txn.from)
+                        || !self.bundle_info_at(path).await.is_ok_and(|info| {
+                            info.version == txn.from && info.store_schema == txn.from_schema
+                        })
                     {
                         continue;
                     }
@@ -1390,7 +2646,22 @@ impl InstallCoordinator {
                     let host = self.adapters.host.clone();
                     let bundle = self.paths.bundle.clone();
                     let path = path.clone();
-                    let _ = blocking(move || host.restore_kept(&path, &bundle)).await;
+                    let saved = txn.clone();
+                    if let Err(error) =
+                        blocking(move || host.restore_kept(&path, &bundle, &saved)).await
+                        && matches!(
+                            error.reason(),
+                            Some(
+                                "bundle_verification_uncertain"
+                                    | "unexpected_bundle_version"
+                                    | "unexpected_bundle_metadata"
+                                    | "restore_verification_failed"
+                            )
+                        )
+                    {
+                        progress(UpdateState::RestoreFailed);
+                        return Err(error);
+                    }
                     installed = self.inspect_for_recovery(txn, progress).await?;
                     if installed != Installed::Invalid {
                         break;
@@ -1404,11 +2675,16 @@ impl InstallCoordinator {
                         return Ok(fence_uncertain(progress));
                     }
                     let bundle = self.paths.bundle.clone();
-                    let zip = txn.rollback_zip.clone();
+                    let saved = txn.clone();
                     let bundles = self.adapters.bundles.clone();
-                    // Verification below decides; the restore may have edited
-                    // the destination before reporting an error.
-                    let _ = blocking(move || bundles.restore_zip(&zip, &bundle)).await;
+                    if let Err(error) = blocking(move || {
+                        super::bundle::restore_interrupted_zip(bundles.as_ref(), &bundle, &saved)
+                    })
+                    .await
+                    {
+                        progress(UpdateState::RestoreFailed);
+                        return Err(error);
+                    }
                 }
             }
             Installed::Previous => {}
@@ -1477,18 +2753,19 @@ impl InstallCoordinator {
         self.finish(txn, InstallOutcome::Updated, progress)
     }
 
-    async fn start_fenced(&self, txn: &Txn) -> Result<(), GuiError> {
-        if self.needs_bootstrap(txn).await? {
-            self.bootstrap().await?;
-        }
-        Ok(())
-    }
-
     async fn needs_bootstrap(&self, txn: &Txn) -> Result<bool, GuiError> {
         if txn.was_enabled == Some(false) {
             return Err(agent_disabled());
         }
-        self.job().await?; // Refuse a foreign plist or program before enabling.
+        let interrupted = txn.phase == Phase::Interrupted.name();
+        // An earlier App may have crashed after recording Interrupted. Its
+        // earlier lock and socket probes cannot authorize this enable.
+        if self.job().await?.is_none()
+            && interrupted
+            && !matches!(self.adapters.daemon.quiescent(), Ok(true))
+        {
+            return Err(not_quiescent());
+        }
         self.restore_enabled(txn).await?;
         self.require_enabled().await?;
         let unloaded = self.job().await?.is_none();
@@ -1501,6 +2778,10 @@ impl InstallCoordinator {
     async fn bootstrap(&self) -> Result<(), GuiError> {
         let plist = self.paths.plist.clone();
         self.service(move |service| service.bootstrap(&plist)).await
+    }
+
+    async fn kickstart(&self) -> Result<(), GuiError> {
+        self.service(|service| service.kickstart(AGENT_LABEL)).await
     }
 
     async fn require_enabled(&self) -> Result<(), GuiError> {
@@ -1667,8 +2948,7 @@ impl InstallCoordinator {
         match self.job().await? {
             Some(job) if job.pid.is_some() => Ok(false),
             Some(_) if self.adapters.daemon.quiescent()? => {
-                self.service(|service| service.kickstart(AGENT_LABEL))
-                    .await?;
+                self.kickstart().await?;
                 Ok(true)
             }
             Some(_) => Err(not_quiescent()),
@@ -1690,7 +2970,21 @@ impl InstallCoordinator {
         if self.daemon_version().await? != txn.from {
             return Err(unexpected());
         }
-        self.start_fenced(txn).await?;
+        match self.needs_bootstrap(txn).await {
+            Ok(true) => {
+                if txn.phase == Phase::Interrupted.name()
+                    && !matches!(self.adapters.daemon.quiescent(), Ok(true))
+                {
+                    return Ok(fence_uncertain(progress));
+                }
+                self.bootstrap().await?;
+            }
+            Ok(false) => {}
+            Err(error) if error.reason() == Some("update_not_quiescent") => {
+                return Ok(fence_uncertain(progress));
+            }
+            Err(error) => return Err(error),
+        }
         if outcome == InstallOutcome::Unchanged && txn.from_daemon.is_none() {
             // There was no healthy predecessor. The verified old bundle
             // and its registered job are enough for step 8(b).
@@ -1843,17 +3137,23 @@ impl InstallCoordinator {
                         identity(&status)
                             .is_ok_and(|new| new.pid != old.pid && new.started > old.started)
                     });
+                    let drain = drain_observation(&status);
                     if reply_matches
                         && status["version"] == version
                         && new_process
-                        && (!require_unsealed || status["draining"].is_null())
+                        && (!require_unsealed
+                            || (drain == Some(DrainObservation::Absent)
+                                && identity(&status).is_ok()))
                     {
                         return Ok(());
                     }
                     if journal.is_some()
                         && reply_matches
                         && status["version"] == version
-                        && !sealed(&status)
+                        && matches!(
+                            drain,
+                            Some(DrainObservation::Absent | DrainObservation::Unsealed(_))
+                        )
                         && require_drain(&status).is_ok()
                     {
                         rollback_path = Some("sealed");
@@ -2077,25 +3377,11 @@ fn launchctl_exited_nonzero(error: &GuiError, step: &str) -> bool {
 }
 
 fn bootout_preflight_failed(error: &GuiError) -> bool {
-    // The adapter checks the login home, job ownership and target before dispatch.
-    match error.reason() {
-        Some("launchctl_failed") => error.detail["step"] == "print",
-        Some(
-            "no_home"
-            | "foreign_home"
-            | "foreign_agent"
-            | "bootout_target_required"
-            | "bootout_target_changed",
-        ) => true,
-        _ => false,
-    }
+    crate::service::pre_dispatch_error(error)
 }
 
 fn disable_settled(error: &GuiError) -> bool {
-    // The service adapter checks the loaded job with print before dispatch.
-    // Failure of that read cannot leave a disable running in the background.
-    launchctl_exited_nonzero(error, "disable")
-        || (error.reason() == Some("launchctl_failed") && error.detail["step"] == "print")
+    launchctl_exited_nonzero(error, "disable") || crate::service::pre_dispatch_error(error)
 }
 
 fn transient_stop_probe(error: &GuiError) -> bool {
@@ -2168,8 +3454,112 @@ fn require_drain(status: &Value) -> Result<(), GuiError> {
     }
 }
 
-fn sealed(status: &Value) -> bool {
-    status["draining"]["sealed"].as_bool() == Some(true)
+fn drain_observation(status: &Value) -> Option<DrainObservation<'_>> {
+    let value = status.get("draining")?;
+    if value.is_null() {
+        return Some(DrainObservation::Absent);
+    }
+    let id = value
+        .get("lease_id")?
+        .as_str()
+        .filter(|id| !id.is_empty())?;
+    match value.get("sealed")?.as_bool()? {
+        false
+            if value.get("then")?.is_null()
+                && strata_types::serde_rfc3339::parse(value.get("expires_at")?.as_str()?)
+                    .is_ok() =>
+        {
+            Some(DrainObservation::Unsealed(id))
+        }
+        true if value.get("expires_at")?.is_null()
+            && matches!(
+                value.get("then")?.as_str(),
+                Some("stop" | "restart" | "hold")
+            ) =>
+        {
+            Some(DrainObservation::Sealed)
+        }
+        _ => None,
+    }
+}
+
+fn next_drain_step(
+    observed: DrainObservation<'_>,
+    lease: Option<&LiveLease>,
+    idle: bool,
+    now: std::time::Instant,
+) -> Result<DrainStep, GuiError> {
+    match observed {
+        DrainObservation::Absent => Ok(DrainStep::Acquire),
+        DrainObservation::Unsealed(id) if lease.is_some_and(|live| live.id == id) => {
+            if lease.is_some_and(|live| now >= live.renew_at) {
+                Ok(DrainStep::Renew)
+            } else if idle {
+                Ok(DrainStep::Seal)
+            } else {
+                Ok(DrainStep::Wait)
+            }
+        }
+        DrainObservation::Unsealed(_) => Err(problem(
+            Code::Busy,
+            "draining",
+            "The daemon already has a drain lease",
+        )),
+        DrainObservation::Sealed => Err(problem(
+            Code::Busy,
+            "daemon_already_sealed",
+            "The daemon is already stopping",
+        )),
+    }
+}
+
+fn valid_lease_grant(id: Option<&str>, renew: Option<&str>) -> bool {
+    id.is_some_and(|id| !id.is_empty() && renew.is_none_or(|old| id == old))
+}
+
+fn invalid_drain_status() -> GuiError {
+    problem(
+        Code::InvalidInput,
+        "invalid_drain_status",
+        "The daemon did not report a valid drain lease status",
+    )
+}
+
+fn cleanup_uncertain() -> GuiError {
+    problem(
+        Code::Unknown,
+        "drain_release_unconfirmed",
+        "Drain lease cleanup is uncertain",
+    )
+}
+
+fn replacement(old: &DaemonIdentity, new: &DaemonIdentity) -> bool {
+    new.started > old.started || (new.pid != old.pid && new.started == old.started)
+}
+
+fn store_schema(status: &Value) -> Option<u32> {
+    status["store_schema"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+}
+
+fn retain_target(attempt: &mut RollbackAttempt, reason: TargetRecovery) {
+    attempt.phase = RollbackPhase::StartingTarget;
+    attempt.target_recovery = Some(reason);
+}
+
+fn report_draining(status: &Value, progress: &mut Progress<'_>) -> bool {
+    let inflight = list(status, "inflight");
+    let background: Vec<_> = list(status, "holds")
+        .into_iter()
+        .filter(|hold| hold["origin"] == "background")
+        .collect();
+    let idle = inflight.is_empty() && background.is_empty();
+    progress(UpdateState::Draining {
+        inflight,
+        background,
+    });
+    idle
 }
 
 fn list(status: &Value, field: &str) -> Vec<Value> {
@@ -2203,6 +3593,36 @@ fn fence_uncertain(progress: &mut Progress<'_>) -> InstallOutcome {
 
 fn problem(code: Code, reason: &str, message: impl Into<String>) -> GuiError {
     GuiError::new(code, message, json!({ "reason": reason }))
+}
+
+fn schema_older() -> GuiError {
+    problem(
+        Code::Unsupported,
+        "update_schema_older",
+        "The update cannot open the current store schema",
+    )
+}
+
+pub(super) fn require_schema_ack(
+    live: Option<u32>,
+    target: &BundleInfo,
+    acknowledged: Option<u32>,
+) -> Result<(), GuiError> {
+    if live.is_some_and(|live| live > target.store_schema) {
+        return Err(schema_older());
+    }
+    if live.is_none_or(|live| live < target.store_schema)
+        && acknowledged != Some(target.store_schema)
+    {
+        return Err(GuiError::new(
+            Code::NotConfirmed,
+            "Confirm the verified store schema change",
+            json!({
+                "reason":"schema_acknowledgement_required", "from_schema":live, "to_schema":target.store_schema
+            }),
+        ));
+    }
+    Ok(())
 }
 
 fn lifecycle_busy() -> GuiError {
@@ -2246,4 +3666,4 @@ fn not_quiescent() -> GuiError {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::update) mod tests;

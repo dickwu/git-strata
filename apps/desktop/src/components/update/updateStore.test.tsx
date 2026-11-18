@@ -197,7 +197,7 @@ test('manual check failures are visible while passive failures retain the last o
   const unavailable = {
     code: 'Unsupported',
     message: 'not available',
-    detail: { reason: 'not_implemented' },
+    detail: { reason: 'update_disabled' },
   };
   let healthy = true;
   const store = createUpdateStore(
@@ -614,4 +614,29 @@ test('Settings reads and saves the native preference without disabling manual ch
   await createUpdateStore(fake({ check })).getState().check();
   expect(check).toHaveBeenCalledTimes(1);
   close();
+});
+
+test('a new failure first observed after the window was hidden has its own recovery controls', async () => {
+  const previous = {
+    phase: 'daemon_failed',
+    reason: 'restart_timeout',
+    transaction_id: 'first-native-transaction',
+    recovery: { start: true, rollback_version: '0.3.1' },
+  } as const;
+  let native: UpdateState = previous;
+  const store = createUpdateStore(fake({ state: async () => native }));
+  await store.getState().refresh();
+  store.getState().dismiss();
+  await store.getState().refresh();
+  expect(store.getState().snapshotDismissed).toBe(true);
+
+  // There were no reads during the second update, which failed in the same phase.
+  native = {
+    ...previous,
+    transaction_id: 'second-native-transaction',
+    recovery: { start: false, rollback_version: '0.3.2' },
+  };
+  await store.getState().refresh();
+  expect(store.getState().snapshotDismissed).toBe(false);
+  expect(store.getState().snapshot.recovery).toEqual({ start: false, rollback_version: '0.3.2' });
 });

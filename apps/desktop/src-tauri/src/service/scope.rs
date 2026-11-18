@@ -133,6 +133,7 @@ fn block_key(line: &str) -> Option<&str> {
 #[derive(Default)]
 pub(super) struct JobFields<'a> {
     pub(super) path: Option<&'a str>,
+    pub(super) program: Option<&'a str>,
     pub(super) pid: Option<u32>,
     pub(super) exit_timeout_s: Option<u64>,
 }
@@ -174,6 +175,11 @@ pub(super) fn job_fields<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Job
                         return None;
                     }
                 }
+                "program" => {
+                    if value.is_empty() || value == "{" || fields.program.replace(value).is_some() {
+                        return None;
+                    }
+                }
                 "pid" => {
                     let pid = value.parse::<u32>().ok()?;
                     if pid == 0 || fields.pid.replace(pid).is_some() {
@@ -186,11 +192,8 @@ pub(super) fn job_fields<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Job
                         return None;
                     }
                 }
-                "state" => {
-                    if value.is_empty() || state.replace(value).is_some() {
-                        return None;
-                    }
-                }
+                "state" if !value.is_empty() && state.is_none() => state = Some(value),
+                "state" => return None,
                 _ => {}
             }
         }

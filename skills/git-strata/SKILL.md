@@ -217,7 +217,7 @@ Unknown help topics return an `InvalidInput` / `help_topic` envelope.
 
 | You got | Do |
 | --- | --- |
-| `Busy daemon_down` | keep working and report it to the human. Let an in-app update finish. Retry after `daemon status` shows running. |
+| `Busy daemon_down` | keep working and report it to the human. Let an in-app update finish. Retry after `daemon status` shows running. A sealed Move requires the human to finish or cancel it in GIT STRATA. |
 | `Busy too_many_open_files` | the daemon is out of file handles; tell the human; do not retry in a loop or start another daemon ([errors.md](errors.md)) |
 | `Busy publish_unknown` | do not loop; tell the human ([errors.md](errors.md)) |
 | `Busy client_timeout` | back off before retrying; nothing was changed by that request |

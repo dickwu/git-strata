@@ -31,6 +31,7 @@ export function updateCopy(
     case 'draining':
       return 'Waiting for the daemon to finish its work…';
     case 'stopping':
+    case 'stop_detail':
       return 'Waiting for the daemon to stop…';
     case 'installing':
       return 'Installing the update…';

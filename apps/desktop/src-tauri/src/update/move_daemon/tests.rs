@@ -1791,6 +1791,48 @@ async fn repair_retries_a_rollback_enable_interrupted_before_submission() {
 }
 
 #[tokio::test]
+async fn no_pid_rollback_repair_enables_before_draining_and_consumes_the_retry() {
+    let test = Test::new(Sim::default());
+    test.interrupted(Phase::RollbackHold, None).await;
+    fs::rename(test.mover.staged(), test.mover.plist()).unwrap();
+    let mut record = test.recorded(Phase::RollbackHold);
+    record.service_attempt = Some(ServiceAttempt::Enable);
+    assert!(record.hold.is_none());
+    test.mover.save(Some(&record)).unwrap();
+    {
+        let mut sim = test.fake.sim.lock().unwrap();
+        sim.loaded = Loaded::Bundle;
+        sim.disabled = true;
+        sim.pid = Some(21);
+        sim.started = 21;
+        sim.respawn_on_fence = 1;
+    }
+
+    let error = test
+        .mover
+        .check_repair(&mut |state| {
+            if matches!(state, UpdateState::Draining { .. }) {
+                assert!(test.recorded(Phase::RollbackHold).rollback_retried);
+                assert!(!test.fake.sim.lock().unwrap().disabled);
+            }
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.reason(), Some("move_incomplete"));
+    assert_eq!(
+        test.actions(),
+        [
+            "enable:bundle",
+            "drain:bundle",
+            "seal:bundle",
+            "disable:bundle",
+            "enable:bundle"
+        ]
+    );
+    assert!(test.recorded(Phase::Incomplete).rollback_retried);
+}
+
+#[tokio::test]
 async fn resumes_unissued_starts_only_after_resolving_any_outstanding_bootstrap() {
     for (phase, expected) in [
         (Phase::Start, ["enable:bundle", "bootstrap:bundle"]),
@@ -2128,4 +2170,38 @@ async fn schema_refusal_after_unload_is_saved_and_never_advises_bootstrapping() 
     );
     assert_eq!(test.actions(), ["disable:old", "bootout:old", "enable:old"]);
     assert!(!test.mover.has_pending_move().unwrap());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn move_then_update_uses_the_same_plist_and_journal() {
+    let test = Test::new(Sim::default());
+    let journal = test.mover.journal();
+    // Keep the production cache writer active while the Move and install
+    // coordinators use the same document. Writes must never replace the roots
+    // owned by the other coordinator.
+    let cache_path = journal.clone();
+    let writer = std::thread::spawn(move || {
+        for _ in 0..64 {
+            super::super::cache::write_automatic(&cache_path, false).unwrap();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    test.run().await.unwrap();
+    assert!(!test.mover.has_pending_move().unwrap());
+    assert_eq!(test.fake.plist_program(), test.mover.program());
+    let peer = MoveDrain::status(test.fake.as_ref()).await.unwrap();
+    super::super::install::tests::upgrade_moved_installation(
+        test.mover.bundle.clone(),
+        test.mover.plist(),
+        journal.parent().unwrap().to_owned(),
+        &peer,
+    )
+    .await;
+    writer.join().unwrap();
+    let document = super::super::cache::read_document(&journal).unwrap();
+    assert_eq!(document.get("future_check"), Some(&json!({"enabled":true})));
+    assert_eq!(document.get("check").unwrap()["automatic"], false);
+    assert!(document.get("txn").is_none());
+    assert!(document.get("move").is_none());
 }

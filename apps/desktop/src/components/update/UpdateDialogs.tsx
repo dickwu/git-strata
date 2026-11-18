@@ -4,7 +4,7 @@ import { useState, type ReactNode } from 'react';
 import { App, Button, Checkbox, Modal, Progress } from 'antd';
 import { useNow } from '@/hooks/useNow';
 import { asGuiError, reason } from '@/lib/tauri';
-import type { GuiError, UpdateState, UpdateTarget } from '@/lib/types';
+import type { GuiError, InstallEligibility, UpdateState, UpdateTarget } from '@/lib/types';
 import {
   canCancelUpdate,
   isActive,
@@ -51,18 +51,10 @@ interface ConfirmProps {
 }
 
 /** Presentation of the native install preflight for a specific offer. */
-export type InstallEligibility = { version: string } & (
-  | { kind: 'eligible' }
-  | { kind: 'move' }
-  | { kind: 'setup' }
-  | { kind: 'refused'; message: string }
-);
+export type { InstallEligibility } from '@/lib/types';
 
 function manualDownloadUrl(target: UpdateTarget) {
-  // T04 computes this from the installed version. Its additive field is absent on T00.
-  if (!('manual_download_url' in target) || typeof target.manual_download_url !== 'string')
-    return undefined;
-  return diskImageUrl(target.version, target.manual_download_url);
+  return target.manual_download_url ? diskImageUrl(target.version, target.manual_download_url) : undefined;
 }
 
 function diskImageUrl(target: string, reported: unknown) {
@@ -232,7 +224,15 @@ export function ConfirmUpdateContent({
     } else if (needsSetup) {
       message = 'Set up the daemon first.';
     } else if (checked?.kind === 'refused') {
-      message = checked.message;
+      const download = checked.manual_download_url && daemonVersion
+        ? diskImageUrl(daemonVersion, checked.manual_download_url)
+        : undefined;
+      message = download ? (
+        <>
+          {checked.message}{' '}
+          <ReleaseLink url={download}>Download the disk image</ReleaseLink>
+        </>
+      ) : checked.message;
     }
     return (
       <div className={css.stack}>
@@ -375,7 +375,7 @@ export function UpdateProgressContent({
   const { message } = App.useApp();
   const [skillRunning, setSkillRunning] = useState(false);
   const [skillResult, setSkillResult] = useState<{ output: string; error?: boolean }>();
-  const error = operation ? operationErrorCopy(operation) : undefined;
+  const error = (operation ? operationErrorCopy(operation) : undefined) ?? state.operation_error?.message;
   const manualUrl =
     operation?.target && operation.error && reason(operation.error) === 'below_min_updatable_from'
       ? diskImageUrl(
@@ -418,6 +418,9 @@ export function UpdateProgressContent({
               ? 'The daemon is taking long to stop'
               : updateCopy(state, appVersion, operation?.target?.version, operation?.kind))}
       </p>
+      {operation?.stopDetail?.close_error != null && (
+        <pre className={css.notes}>{JSON.stringify(operation.stopDetail.close_error, null, 2)}</pre>
+      )}
       {(expired || restartStatus === 'unknown') && (
         <p>You can close this dialog while GIT STRATA continues checking the restart.</p>
       )}
@@ -589,7 +592,7 @@ export function UpdateProgressDialog({
   const slowStop =
     state.phase === 'stopping' &&
     !operation?.error &&
-    now >= Math.max(since + 120_000, waitedUntil);
+    (operation?.stopDetail?.slow === true || now >= since + 120_000) && now >= waitedUntil;
   const canClose = canDismissUpdateProgress(state, operation, restartStatus);
   return (
     <Modal
@@ -671,7 +674,7 @@ export function UpdateSettingsContent({
 export function retryableDownload(operation: UpdateOperation | null): boolean {
   return Boolean(
     operation?.error &&
-    reason(operation.error) !== 'not_implemented' &&
+    reason(operation.error) !== 'update_disabled' &&
     reason(operation.error) !== 'below_min_updatable_from' &&
     reason(operation.error) !== SCHEMA_ACKNOWLEDGEMENT_REQUIRED &&
     (operation.state.phase === 'downloading' || operation.state.phase === 'verifying_bundle')

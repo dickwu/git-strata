@@ -444,6 +444,16 @@ impl Store {
     }
 
     pub fn open(root: &Path, checkouts: &[&Path]) -> Result<Store> {
+        Self::open_with_schema_hook(root, checkouts, |_| Ok(()))
+    }
+
+    /// Under the writer lock, call `before_schema_change` before publishing a
+    /// fresh store (`None`) or starting a backed-up migration (`Some(from)`).
+    pub fn open_with_schema_hook(
+        root: &Path,
+        checkouts: &[&Path],
+        mut before_schema_change: impl FnMut(Option<u32>) -> Result<()>,
+    ) -> Result<Store> {
         if !root.is_absolute() {
             return Err(err(
                 Code::InvalidInput,
@@ -460,7 +470,7 @@ impl Store {
         // a store in a directory that is not one. (An error here is left
         // to steps 3 and 4 to classify.)
         if let Ok(true) = exists(&root.join("store").join("store.db")) {
-            return open_existing(root, None);
+            return open_existing(root, None, &mut before_schema_change);
         }
         // 3. look at <root>
         match retry_eintr(|| fs::metadata(root)) {
@@ -502,7 +512,7 @@ impl Store {
         let db = store_dir.join("store.db");
         // 4.
         if exists(&db).map_err(|e| ioe(&e, IoSide::Read, &db, "open"))? {
-            return open_existing(root, None);
+            return open_existing(root, None, &mut before_schema_change);
         }
         for d in ["bases", "deps", "sessions"] {
             let p = root.join(d);
@@ -519,7 +529,7 @@ impl Store {
         }
         let anc = retry_eintr(|| nearest_existing_ancestor(root))
             .map_err(|e| classify_io_error(&e, IoSide::Read, root))?;
-        create(root, &anc)
+        create(root, &anc, &mut before_schema_change)
     }
 
     pub fn open_read_only(root: &Path) -> Result<Store> {
@@ -651,7 +661,11 @@ fn mkdir_ok(p: &Path) -> Result<()> {
 }
 
 /// §5.1 steps 5–10.
-fn create(root: &Path, anc: &Path) -> Result<Store> {
+fn create(
+    root: &Path,
+    anc: &Path,
+    before_schema_change: &mut impl FnMut(Option<u32>) -> Result<()>,
+) -> Result<Store> {
     let mut created = Vec::new();
     // <root> and any missing parents below the nearest existing ancestor
     let mut chain = Vec::new();
@@ -675,7 +689,7 @@ fn create(root: &Path, anc: &Path) -> Result<Store> {
     let lock = take_lock(&store_dir)?;
     let db = store_dir.join("store.db");
     if exists(&db).map_err(|e| ioe(&e, IoSide::Read, &db, "init"))? {
-        return open_existing(root, Some(lock));
+        return open_existing(root, Some(lock), before_schema_change);
     }
     // 6. probe clonefile
     let probe = tmp.join(format!("probe-{}", hex32()));
@@ -761,13 +775,18 @@ fn create(root: &Path, anc: &Path) -> Result<Store> {
         ));
     }
     // 9. publish atomically
+    before_schema_change(None)?;
     rename_excl(&tdb, &db).map_err(|e| ioe(&e, IoSide::Write, &db, "init"))?;
     full_sync_path(&store_dir, "init", errors::UNCERTAIN)?;
-    open_existing(root, Some(lock))
+    open_existing(root, Some(lock), before_schema_change)
 }
 
 /// §5.2, the writer path (from step 1, or step 2 with L1 already held).
-fn open_existing(root: &Path, lock: Option<File>) -> Result<Store> {
+fn open_existing(
+    root: &Path,
+    lock: Option<File>,
+    before_schema_change: &mut impl FnMut(Option<u32>) -> Result<()>,
+) -> Result<Store> {
     let store_dir = root.join("store");
     let lock = match lock {
         Some(l) => l,
@@ -806,7 +825,7 @@ fn open_existing(root: &Path, lock: Option<File>) -> Result<Store> {
         if !checked {
             quick_check_on(&c)?;
         }
-        migrate(&c, &rstore, &rdb, v)?;
+        migrate(&c, &rstore, &rdb, v, before_schema_change)?;
     }
     Ok(new_store(root, real_root, false, c, Some(lock)))
 }
@@ -817,8 +836,15 @@ const CHECKPOINT_WAIT: Duration = Duration::from_secs(5);
 /// store.md §4.4: take a store at `from` to `LATEST` in one transaction,
 /// after a durable, verified backup of the `from` file. L1 is held, so no
 /// other writer (or checkpointer) exists; read-only connections may.
-fn migrate(c: &Connection, rstore: &Path, rdb: &Path, from: u32) -> Result<()> {
+fn migrate(
+    c: &Connection,
+    rstore: &Path,
+    rdb: &Path,
+    from: u32,
+    before_schema_change: &mut impl FnMut(Option<u32>) -> Result<()>,
+) -> Result<()> {
     let backup = backup(c, rstore, rdb, from)?;
+    before_schema_change(Some(from))?;
     c.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| sql(e, MIGRATE, NOT_WRITTEN))?;
     let applied = (|| -> Result<()> {

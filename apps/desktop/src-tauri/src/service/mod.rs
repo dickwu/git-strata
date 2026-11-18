@@ -60,6 +60,13 @@ pub trait ServiceManager: Send + Sync {
     fn bootout(&self, _label: &str) -> Result<(), GuiError> {
         Err(upgrade_unavailable())
     }
+    fn bootout_targeted(
+        &self,
+        label: &str,
+        _target: launchctl::BootoutTarget,
+    ) -> Result<(), GuiError> {
+        self.bootout(label)
+    }
     /// Inhibit launches of the label in the login user's domain.
     fn disable(&self, _label: &str) -> Result<(), GuiError> {
         Err(upgrade_unavailable())
@@ -78,8 +85,25 @@ fn upgrade_unavailable() -> GuiError {
     GuiError::new(
         Code::Unsupported,
         "daemon upgrade service operations are unavailable",
-        json!({ "reason": "not_implemented" }),
+        json!({ "reason": "service_operation_unavailable" }),
     )
+}
+
+/// A verified refusal before a mutating launchctl child could run.
+pub(crate) fn pre_dispatch_error(error: &GuiError) -> bool {
+    match error.reason() {
+        Some("launchctl_failed") => {
+            error.detail["step"] == "print" || error.detail["dispatched"] == false
+        }
+        Some(
+            "no_home"
+            | "foreign_home"
+            | "foreign_agent"
+            | "bootout_target_required"
+            | "bootout_target_changed",
+        ) => true,
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -426,6 +450,7 @@ pub struct Starter {
     sm: Arc<dyn ServiceManager>,
     policy: WaitPolicy,
     busy: AtomicBool,
+    lifecycle: Option<Arc<tokio::sync::Mutex<()>>>,
 }
 
 struct Slot<'a>(&'a AtomicBool);
@@ -448,6 +473,7 @@ impl Starter {
             sm,
             policy,
             busy: AtomicBool::new(false),
+            lifecycle: None,
         }
     }
 
@@ -461,6 +487,11 @@ impl Starter {
             Arc::new(launchctl::Launchctl::new()),
             WaitPolicy::PRODUCTION,
         )
+    }
+
+    pub(crate) fn with_lifecycle(mut self, lifecycle: Arc<tokio::sync::Mutex<()>>) -> Self {
+        self.lifecycle = Some(lifecycle);
+        self
     }
 
     fn home(&self) -> Result<&Path, GuiError> {
@@ -524,6 +555,16 @@ impl Starter {
             return Err(GuiError::start_in_flight());
         }
         let _slot = Slot(&self.busy);
+        let _lifecycle = if let Some(lifecycle) = &self.lifecycle {
+            let guard = lifecycle
+                .try_lock()
+                .map_err(|_| GuiError::start_in_flight())?;
+            let home = scope::lifecycle_scope(self.home()?, self.login.as_deref())?;
+            crate::update::txn::TxnStore::new(crate::update::cache::path(&home)).require_idle()?;
+            Some(guard)
+        } else {
+            None
+        };
         let sm = self.sm.clone();
         let state = {
             let sm = sm.clone();

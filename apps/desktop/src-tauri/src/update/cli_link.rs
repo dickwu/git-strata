@@ -32,6 +32,11 @@ pub trait AdminCliLinkInstaller: Send + Sync {
 pub struct AdminCliLinkOperation(());
 
 impl AdminCliLinkOperation {
+    #[cfg(test)]
+    pub(super) fn fixture() -> Self {
+        Self(())
+    }
+
     pub fn argv(&self) -> (&'static str, [OsString; 3]) {
         // Paths come solely from the updater allowlist and are plain literals
         // in the privileged program. The AppleScript quotes the program as one
@@ -244,6 +249,11 @@ impl LinkPaths {
             labels.push(CliLabel { path, label });
         }
         Ok(labels)
+    }
+
+    #[cfg(test)]
+    pub(in crate::update) fn install_without_elevation(&self) -> Result<(), GuiError> {
+        self.install(|| panic!("fake installation should use the user-writable prefix"))
     }
 
     fn install(

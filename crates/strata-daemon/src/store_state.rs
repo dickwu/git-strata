@@ -1,9 +1,7 @@
 //! The App's schema snapshot when the daemon is down.
 
-use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::SystemTime;
@@ -15,23 +13,18 @@ use strata_types::{Code, STORE_SCHEMA, StrataError, serde_rfc3339};
 
 use crate::Result;
 
-/// Called under the daemon's instance lock. Opening an existing store can
-/// migrate it, so invalidate the last snapshot before handing off to the store.
+/// Replace the last snapshot only when the store is about to change schema
+/// or has finished opening. A rejected open can leave valid evidence intact.
 pub(super) fn open(config_dir: &Path, root: &Path, checkouts: &[&Path]) -> Result<Store> {
-    let before = migration_backups(root);
-    write(
-        config_dir,
-        json!({ "root": root, "migrating_to": STORE_SCHEMA }),
-    )?;
-    let store = Store::open(root, checkouts)?;
+    let mut migrated_from = None;
+    let store = Store::open_with_schema_hook(root, checkouts, |from| {
+        migrated_from = from;
+        write(
+            config_dir,
+            json!({ "root": root, "migrating_to": STORE_SCHEMA }),
+        )
+    })?;
 
-    let migrated_from = before.and_then(|before| {
-        let mut added = migration_backups(root)?
-            .into_iter()
-            .filter(|(name, _)| !before.contains_key(name));
-        let (_, from) = added.next()?;
-        added.next().is_none().then_some(from)
-    });
     let at = serde_rfc3339::format(&SystemTime::now())
         .map_err(|e| StrataError::new(Code::Unknown, e))?;
     write(
@@ -44,38 +37,6 @@ pub(super) fn open(config_dir: &Path, root: &Path, checkouts: &[&Path]) -> Resul
         }),
     )?;
     Ok(store)
-}
-
-/// The store writes a verified `store-v<from>-<ns>.db` backup before the
-/// migration transaction. A new backup and a successful open give us the
-/// source schema, including when the pre-migration version was in the WAL.
-fn migration_backups(root: &Path) -> Option<BTreeMap<OsString, u32>> {
-    let mut versions = BTreeMap::new();
-    let entries = match fs::read_dir(root.join("store/backups")) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(versions),
-        Err(_) => return None,
-    };
-    for entry in entries {
-        let entry = entry.ok()?;
-        let name = entry.file_name();
-        let Some((version, nanos)) = name
-            .to_str()
-            .and_then(|s| s.strip_prefix("store-v"))
-            .and_then(|s| s.strip_suffix(".db"))
-            .and_then(|s| s.split_once('-'))
-        else {
-            continue;
-        };
-        if let Ok(version) = version.parse::<u32>()
-            && (1..STORE_SCHEMA).contains(&version)
-            && nanos.parse::<u128>().is_ok()
-            && entry.file_type().ok()?.is_file()
-        {
-            versions.insert(name, version);
-        }
-    }
-    Some(versions)
 }
 
 fn write(config_dir: &Path, state: Value) -> Result<()> {

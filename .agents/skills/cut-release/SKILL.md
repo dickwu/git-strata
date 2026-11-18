@@ -15,7 +15,7 @@ Before step 1, check all four and stop with a question if any fails: `$ARGUMENTS
 
 ## Steps
 
-1. **Collect what ships.** Take the previous tag from `git describe --tags --abbrev=0` and read `git log --oneline <previous>..HEAD`. Note each store migration added to `MIGRATIONS` in `crates/strata-store/src/schema.rs`, each new `FEATURES` string, config key and CLI command or flag, and any `rust-version` change in `Cargo.toml` or `apps/desktop/src-tauri/Cargo.toml` (the notes then say which Rust a source build needs). Done when every commit since the previous tag is classed as user-visible or internal.
+1. **Collect what ships.** Take the previous tag from `git describe --tags --abbrev=0` and read `git log --oneline <previous>..HEAD`. Note each store migration added to `MIGRATIONS` in `crates/strata-store/src/schema.rs`, each new `FEATURES` string, config key and CLI command or flag, and any `rust-version` change in `Cargo.toml` or `apps/desktop/src-tauri/Cargo.toml` (the notes then say which Rust a source build needs). Record whether `strata_types::STORE_SCHEMA` rises relative to the previous release. If a store, pins or config format changed, check that `strata_types::DOWNGRADE_FLOOR` names the oldest release that can read the files this release writes. Update the floor as needed. Both constants feed the signed app metadata. Done when every commit since the previous tag is classed as user-visible or internal.
 
 2. **Bump the version in exactly these 16 files.** Edit the `version` field itself in each one. A search-and-replace of the old version corrupts other lines: `libc = "0.2.191"` contains `0.2.1`.
    - line 3 of each of the 13 `crates/*/Cargo.toml`
@@ -23,7 +23,7 @@ Before step 1, check all four and stop with a question if any fails: `$ARGUMENTS
    - `apps/desktop/src-tauri/tauri.conf.json`
    - `apps/desktop/package.json`
 
-   `release.yml` compares only `git-strata`, `strata-daemon` and `tauri.conf.json` with the tag, so a miss in the other 13 ships silently. Done when `git diff --stat` lists those 16 files with one changed line each.
+   The workflow checks `git-strata`, `strata-daemon` and `tauri.conf.json` against the tag. Bundle assembly checks the compiled `strata-types` version against the app. A missed bump in the other version files can ship silently. Done when `git diff --stat` shows one version-line edit in each of the 16 files.
 
 3. **Refresh both lock files.** The core release build and the desktop tests run with `--locked`.
 
@@ -44,6 +44,7 @@ Before step 1, check all four and stop with a question if any fails: `$ARGUMENTS
 4. **Write `docs/release-notes/v$ARGUMENTS.md`.** Read the newest `docs/release-notes/v*.md` first and match its shape:
    - Title `# git-strata X.Y.Z — <theme>`.
    - If step 1 found a store migration, the notes open with an `## Upgrade first: …` section, as every earlier notes file with a migration does. Model it on `v0.2.1.md`: the daemon writes a verified backup under `store/backups/`, the previous release cannot open the new store, CLI, daemon and hook callers upgrade together, and how to downgrade.
+   - For a schema-raising in-app update, use the opening paragraph of that section to explain the schema change, the verified backup, and that returning to the old version after migration requires restoring the backup by hand. The updater shows this paragraph in its release notes.
    - One `##` section per user-visible change from step 1, written for the person or agent running the CLI: commands, flags, config keys, reply fields.
 
    Done when every user-visible item from step 1 appears in the notes.
@@ -64,9 +65,11 @@ Before step 1, check all four and stop with a question if any fails: `$ARGUMENTS
    Release X.Y.Z: bump crate/app versions; release notes (<store vA->vB, then the headline changes>)
    ```
 
-   The commit holds the 16 version files, both lock files, the notes, and any step 5 edits.
+   The commit holds the 16 version files, both lock files, the notes, any downgrade-floor adjustment, and any step 5 edits.
 
-8. **Hand over.** Tell the maintainer what remains, with the version filled in, and run none of it: push `main`, then steps 2 to 5 of `docs/release.md` (the optional dry run, the tag below, the notes onto the draft release and publishing it, the Homebrew check).
+8. **Hand over.** Tell the maintainer what remains, with the version filled in, and run none of it: push `main`, then steps 2 to 5 of `docs/release.md` (the optional dry run, the tag below, checking `latest.json` and its signed archive on the draft, adding the notes and publishing, then the Homebrew check). Publishing the draft makes the in-app update live immediately.
+
+   Before publishing 0.3.0, the maintainer must pass the G1–G3 gates in `docs/release.md` on 0.3.0's own signed CI artifacts in an isolated macOS test environment. These gates cover the bundle swap and relaunch, quarantine and App Management, and launchd respawn for both enabled and disabled jobs.
 
    ```sh
    git tag -a vX.Y.Z -m "git-strata X.Y.Z" <release commit>

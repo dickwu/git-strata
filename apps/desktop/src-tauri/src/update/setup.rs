@@ -544,6 +544,7 @@ pub(crate) async fn run(
         let service = service.clone();
         let progress = progress.clone();
         move || {
+            runtime.bundles.codesign_verify(&paths.bundle)?;
             let bundle = runtime.bundles.read_info_plist(&paths.bundle)?;
             let daemon_version = runtime.exec.run(&paths.home, Operation::DaemonVersion)?;
             if bundle.version != version
@@ -1221,6 +1222,63 @@ mod tests {
             .unwrap();
         assert_eq!(fs::read_to_string(paths.config()).unwrap(), text);
         assert!(!fake.calls.lock().unwrap().contains(&"enable"));
+    }
+
+    #[test]
+    fn setup_with_kept_config_confirms_then_links_the_bundled_cli() {
+        let temp = tempfile::tempdir().unwrap();
+        let (paths, picks) = fixture(temp.path());
+        let text = keep_config(&paths, &picks);
+        let fake = Fake::default();
+        let setup = Setup {
+            paths: &paths,
+            service: &fake,
+            exec: &fake,
+        };
+        let mut pending = None;
+        let error = setup
+            .bootstrap(
+                None,
+                7,
+                &mut pending,
+                || Ok(()),
+                || panic!("setup requires consent"),
+            )
+            .unwrap_err();
+        assert_eq!(error.reason(), Some("setup_schema_acknowledgement"));
+        setup
+            .bootstrap(None, 7, &mut pending, || Ok(()), || {})
+            .unwrap();
+        assert_eq!(fs::read_to_string(paths.config()).unwrap(), text);
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            [
+                "check-config",
+                "check-config",
+                "print-plist",
+                "print-disabled",
+                "bootstrap"
+            ]
+        );
+        let links = super::super::cli_link::LinkPaths {
+            bundle: paths.bundle.clone(),
+            homebrew: temp.path().join("opt/homebrew"),
+            local: temp.path().join("usr/local"),
+        };
+        fs::create_dir_all(links.homebrew.join("bin")).unwrap();
+        let bin = paths.bundle.join("Contents/MacOS");
+        fs::create_dir_all(&bin).unwrap();
+        for tool in ["git-strata", "git-stratad"] {
+            fs::write(bin.join(tool), b"fixture").unwrap();
+        }
+        links.install_without_elevation().unwrap();
+        assert_eq!(links.labels().unwrap()[0].label, "this app");
+        for tool in ["git-strata", "git-stratad"] {
+            assert_eq!(
+                fs::read_link(links.homebrew.join("bin").join(tool)).unwrap(),
+                bin.join(tool)
+            );
+        }
     }
 
     #[test]

@@ -48,6 +48,21 @@ enum Phase {
     Finishing,
 }
 
+enum DrainLease {
+    Absent,
+    Held(String),
+    AcquisitionUncertain,
+}
+
+impl DrainLease {
+    fn id(&self) -> Option<&str> {
+        match self {
+            Self::Held(id) => Some(id),
+            Self::Absent | Self::AcquisitionUncertain => None,
+        }
+    }
+}
+
 struct RestartObservation {
     previous: DaemonIdentity,
     expected_version: String,
@@ -133,7 +148,7 @@ impl RestartController {
         progress: &mut Progress<'_>,
     ) -> Result<(), GuiError> {
         let flight = self.begin()?;
-        let mut lease = None;
+        let mut lease = DrainLease::Absent;
         let mut last_progress = None;
         let seal = self
             .drain_and_seal(
@@ -152,15 +167,23 @@ impl RestartController {
             Ok(Some(observation)) => observation,
             unsealed => {
                 let cancelled = flight.finish_drain();
-                // After an unacknowledged acquisition we cannot identify the
-                // lease to release. Keep the uncertainty visible.
-                let refusal = unsealed.err().filter(|error| {
-                    !cancelled
-                        || (lease.is_none() && error.code == Code::Unknown.as_str())
-                        || error.reason() == Some("unexpected_lease")
-                });
+                let drain_error = unsealed.err();
                 let released = match lease {
-                    Some(id) => {
+                    DrainLease::AcquisitionUncertain => {
+                        // A lost acquisition reply leaves no lease ID to release.
+                        if !matches!(last_progress, Some(UpdateState::Draining { .. })) {
+                            progress(UpdateState::Draining {
+                                inflight: Vec::new(),
+                                background: Vec::new(),
+                            });
+                        }
+                        return Err(GuiError::new(
+                            Code::Unknown,
+                            "Drain cleanup is uncertain. The daemon may still refuse writes until the lease expires (up to 120 seconds).",
+                            json!({"reason":"drain_release_unconfirmed", "acquire_error": drain_error}),
+                        ));
+                    }
+                    DrainLease::Held(id) => {
                         let released = target.release(id.clone()).await;
                         if !cancelled
                             && released
@@ -174,8 +197,10 @@ impl RestartController {
                             released
                         }
                     }
-                    None => Ok(()),
+                    DrainLease::Absent => Ok(()),
                 };
+                let refusal = drain_error
+                    .filter(|error| !cancelled || error.reason() == Some("unexpected_lease"));
                 if let Err(release_error) = released {
                     // Keep the operation in Draining so the UI shows the
                     // cleanup error and ends any expected restart window.
@@ -232,7 +257,7 @@ impl RestartController {
         clock: &dyn Clock,
         flight: &RestartFlight<'_>,
         progress: &mut Progress<'_>,
-        lease: &mut Option<String>,
+        lease: &mut DrainLease,
     ) -> Result<Option<RestartObservation>, GuiError> {
         let status = target.status(RPC_TIMEOUT).await?;
         strata_client::require_feature(&status, DRAIN_FEATURE)?;
@@ -253,7 +278,7 @@ impl RestartController {
                 None => target.status(RPC_TIMEOUT).await?,
             };
             if identity(&status)? != previous {
-                *lease = None;
+                *lease = DrainLease::Absent;
                 return Err(failure(
                     Code::Busy,
                     "daemon_identity_changed",
@@ -268,7 +293,7 @@ impl RestartController {
                 ));
             };
             if draining.is_null() {
-                *lease = None;
+                *lease = DrainLease::Absent;
             } else {
                 let (Some(id), Some(sealed)) =
                     (draining["lease_id"].as_str(), draining["sealed"].as_bool())
@@ -279,8 +304,8 @@ impl RestartController {
                         "The daemon reported an invalid drain lease status",
                     ));
                 };
-                if lease.as_deref() != Some(id) || sealed {
-                    *lease = None;
+                if lease.id() != Some(id) || sealed {
+                    *lease = DrainLease::Absent;
                     return Err(failure(
                         Code::Busy,
                         "draining",
@@ -294,8 +319,8 @@ impl RestartController {
             }
 
             let now = clock.monotonic();
-            if lease.is_none() || now >= renew_at {
-                let existing = lease.clone();
+            if matches!(lease, DrainLease::Absent) || now >= renew_at {
+                let existing = lease.id().map(str::to_owned);
                 let expected = previous.clone();
                 *lease = match target
                     .rpc(RPC_TIMEOUT, move |socket, budget| {
@@ -309,7 +334,9 @@ impl RestartController {
                     })
                     .await
                 {
-                    Ok(id) if lease.as_ref().is_none_or(|previous| *previous == id) => Some(id),
+                    Ok(id) if lease.id().is_none_or(|previous| previous == id) => {
+                        DrainLease::Held(id)
+                    }
                     Ok(_) => {
                         return Err(failure(
                             Code::Unknown,
@@ -317,8 +344,19 @@ impl RestartController {
                             "The daemon changed the drain lease during renewal",
                         ));
                     }
-                    Err(error) if lease.is_some() && busy(&error, "lease_lost") => None,
-                    Err(error) => return Err(error),
+                    Err(error)
+                        if matches!(lease, DrainLease::Held(_)) && busy(&error, "lease_lost") =>
+                    {
+                        DrainLease::Absent
+                    }
+                    Err(error) => {
+                        if matches!(lease, DrainLease::Absent)
+                            && error.code == Code::Unknown.as_str()
+                        {
+                            *lease = DrainLease::AcquisitionUncertain;
+                        }
+                        return Err(error);
+                    }
                 };
                 renew_at = now + RENEW_INTERVAL;
                 continue;
@@ -341,8 +379,9 @@ impl RestartController {
             }
             if idle && !flight.cancelled() {
                 let id = lease
-                    .clone()
-                    .expect("lease acquired before checking for idle");
+                    .id()
+                    .expect("lease acquired before checking for idle")
+                    .to_owned();
                 // Verify the bundle again after waiting. Homebrew may have swapped it.
                 let expected_version = self
                     .check_bundle(target, &status, &previous.version, acknowledgement)
@@ -362,7 +401,7 @@ impl RestartController {
                 {
                     Err(error) if busy(&error, "not_idle") || busy(&error, "lease_lost") => {
                         if error.reason() == Some("lease_lost") {
-                            *lease = None;
+                            *lease = DrainLease::Absent;
                         }
                         flight.retry_drain();
                         progress(next);
@@ -371,7 +410,7 @@ impl RestartController {
                         if error.code == Code::InvalidInput.as_str()
                             && error.reason() == Some("sealed")
                         {
-                            *lease = None;
+                            *lease = DrainLease::Absent;
                         }
                         return Err(error);
                     }
@@ -430,6 +469,13 @@ impl RestartController {
         let live = status["store_schema"]
             .as_u64()
             .and_then(|value| u32::try_from(value).ok());
+        if live.is_some_and(|schema| schema > bundle.store_schema) {
+            return Err(failure(
+                Code::Unsupported,
+                "restart_schema_older",
+                "The bundled daemon cannot open the current store schema",
+            ));
+        }
         if live.is_none_or(|schema| bundle.store_schema > schema)
             && acknowledgement != Some(bundle.store_schema)
         {
@@ -579,7 +625,7 @@ fn job_lines(dump: &str) -> impl Iterator<Item = (i32, &str)> {
     })
 }
 
-fn has_restart_policy(dump: &str) -> bool {
+pub(super) fn has_restart_policy(dump: &str) -> bool {
     // launchctl print reports the loaded SuccessfulExit=false condition
     // under semaphores. The plist on disk could have changed since bootstrap.
     let mut lines = job_lines(dump);
@@ -709,7 +755,7 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| GuiError::internal(format!("daemon restart worker failed: {error}")))?
 }
 
-struct SystemClock;
+pub(super) struct SystemClock;
 
 impl Clock for SystemClock {
     fn now(&self) -> SystemTime {
@@ -726,10 +772,8 @@ impl Clock for SystemClock {
 pub async fn command(
     window: &WebviewWindow,
     acknowledgement: Option<u32>,
-    progress: Channel<UpdateState>,
+    progress: Channel<Value>,
 ) -> Result<(), GuiError> {
-    // The integration lane registers the controller with the updater's pinned
-    // exec runner and installed-bundle metadata reader.
     let controller = window.try_state::<RestartController>().ok_or_else(|| {
         failure(
             Code::Unsupported,
@@ -768,7 +812,8 @@ pub async fn command(
     };
     controller
         .run(&target, acknowledgement, &SystemClock, &mut |state| {
-            let _ = progress.send(state);
+            let view = window.state::<super::state::Presentation>();
+            let _ = progress.send(view.wire_progress(state));
         })
         .await
 }
@@ -1084,6 +1129,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn brew_replaced_bundle_restarts_only_after_verified_drain() {
+        let socket = FakeSocket::new(vec![
+            old(None),
+            acquire("brew-restart"),
+            old(Some("brew-restart")),
+            seal("brew-restart", Some(ok(json!({})))),
+            Exchange::status(status(NEW_PID, BUNDLE_VERSION, None)),
+        ]);
+        let (target, service) = socket.target(&[OLD_PID, OLD_PID, NEW_PID], &[false; 2]);
+        let mut events = Vec::new();
+        bundle(BUNDLE_VERSION, 7)
+            .run(&target, None, &FakeClock::new(), &mut |state| {
+                events.push(state)
+            })
+            .await
+            .unwrap();
+        socket.finish(&service);
+        assert!(events.contains(&UpdateState::Stopping));
+        assert_eq!(events.last(), Some(&UpdateState::Done));
+    }
+
+    #[tokio::test]
     async fn busy_drain_shows_work_renews_at_thirty_seconds_and_cancels() {
         let mut busy = status(OLD_PID, OLD_VERSION, Some("first"));
         let confirm = json!({"method":"publish", "phase":"confirming", "repo":"tool", "started_at":"2026-11-17T17:00:00Z"});
@@ -1355,8 +1422,42 @@ mod tests {
             .unwrap_err();
         socket.finish(&service);
         assert_eq!(error.code, Code::Unknown.as_str());
-        assert_eq!(error.reason(), Some("socket_closed"));
-        assert!(events.is_empty());
+        assert_eq!(error.reason(), Some("drain_release_unconfirmed"));
+        assert_eq!(
+            error.detail["acquire_error"]["detail"]["reason"],
+            "socket_closed"
+        );
+        assert!(matches!(events.as_slice(), [UpdateState::Draining { .. }]));
+    }
+
+    #[tokio::test]
+    async fn lost_replacement_lease_reply_keeps_cleanup_uncertain_without_release() {
+        let socket = FakeSocket::new(vec![
+            old(None),
+            acquire("first"),
+            old(Some("first")),
+            seal("first", Some(refused("lease_lost"))),
+            old(None),
+            old(None).followed_by(Exchange::drain(json!({"on":true,"ttl_s":120}), None)),
+        ]);
+        let (target, service) = socket.target(&[OLD_PID, OLD_PID], &[false; 2]);
+        let mut events = Vec::new();
+        let error = bundle(BUNDLE_VERSION, 7)
+            .run(&target, None, &FakeClock::new(), &mut |state| {
+                events.push(state)
+            })
+            .await
+            .unwrap_err();
+        // The fake socket would reject any release or additional acquire.
+        socket.finish(&service);
+        assert_eq!(error.code, Code::Unknown.as_str());
+        assert_eq!(error.reason(), Some("drain_release_unconfirmed"));
+        assert_eq!(
+            error.detail["acquire_error"]["detail"]["reason"],
+            "socket_closed"
+        );
+        assert!(matches!(events.last(), Some(UpdateState::Draining { .. })));
+        assert!(!events.contains(&UpdateState::Idle));
     }
 
     #[tokio::test]

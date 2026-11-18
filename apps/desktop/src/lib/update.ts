@@ -38,6 +38,7 @@ export interface UpdateClient {
   ) => Promise<void>;
   restart: (schemaAcknowledgement: number | undefined, progress: Progress) => Promise<void>;
   cancel: () => Promise<void>;
+  recover?: (startOnly: boolean, progress: Progress) => Promise<void>;
 }
 
 const client: UpdateClient = {
@@ -52,6 +53,8 @@ const client: UpdateClient = {
   restart: async (schemaAcknowledgement, progress) =>
     invokeUpdate('daemon_restart', { schemaAcknowledgement, onProgress: await channel(progress) }),
   cancel: () => invokeUpdate('update_cancel', undefined),
+  recover: async (startOnly, progress) =>
+    invokeUpdate('update_rollback', { startOnly, onProgress: await channel(progress) }),
 };
 
 export function useAppVersion() {
@@ -89,6 +92,8 @@ export const isProgress = (state: UpdateState) => !preUpdate.has(state.phase);
 export const isActive = (state: UpdateState) => active.has(state.phase);
 
 const starting = new Set<UpdateState['phase']>([
+  'stopping',
+  'installing',
   'starting_daemon',
   'relaunching',
   'reconciling',
@@ -134,7 +139,8 @@ export function canCancelUpdate(state: UpdateState) {
 }
 
 export interface UpdateOperation {
-  kind: 'install' | 'restart';
+  kind: 'install' | 'restart' | 'recovery';
+  stopDetail?: Extract<UpdateState, { phase: 'stop_detail' }>;
   target?: UpdateTarget;
   state: UpdateState;
   since: number;
@@ -147,12 +153,15 @@ interface Updates {
   snapshotSince: number;
   snapshotDismissed: boolean;
   lastCheck?: UpdateState;
+  checkError?: GuiError;
   operation: UpdateOperation | null;
   restartStatus: RestartStatus;
   cancelPending: boolean;
   cancelError?: GuiError;
   refresh: () => Promise<void>;
   check: () => Promise<void>;
+  fromTray: (result: { Ok: UpdateState } | { Err: GuiError }) => void;
+  recover: (startOnly: boolean) => Promise<void>;
   install: (target: UpdateTarget, schemaAcknowledgement?: number) => Promise<void>;
   restart: (schemaAcknowledgement?: number) => Promise<void>;
   confirmSchema: (acknowledgement: number) => Promise<void>;
@@ -169,7 +178,8 @@ export function createUpdateStore(ipc: UpdateClient = client, clock = updateCloc
   return createStore<Updates>((set, get) => {
     let timing: RestartTiming | undefined;
     let cancelExpiry: (() => void) | undefined;
-    let dismissedOperationOutcome: UpdateState['phase'] | undefined;
+    let dismissedNativeId: string | undefined;
+    let dismissedLegacyPhase: UpdateState['phase'] | undefined;
 
     function observePhase(state: UpdateState, fromChannel = false): Partial<Updates> {
       cancelExpiry?.();
@@ -177,8 +187,7 @@ export function createUpdateStore(ipc: UpdateClient = client, clock = updateCloc
       if (!starting.has(state.phase)) {
         timing = undefined;
         return {
-          restartStatus:
-            state.phase === 'stopping' || state.phase === 'installing' ? 'expected' : null,
+          restartStatus: null,
           ...(isActive(state) ? {} : { cancelPending: false, cancelError: undefined }),
         };
       }
@@ -193,7 +202,8 @@ export function createUpdateStore(ipc: UpdateClient = client, clock = updateCloc
         if (Number.isFinite(since) && since <= now && since !== next?.nativeSince) {
           next = { nativeSince: since, deadline: since + START_BUDGET_MS };
         }
-      } else if (!next && fromChannel && state.phase === 'starting_daemon') {
+      } else if (!next && (state.phase === 'stopping' || state.phase === 'installing'
+        || (fromChannel && state.phase === 'starting_daemon'))) {
         // Only an observed start on this command's channel can supply a provisional deadline.
         // A reopened WebView in reconciling cannot infer when the native start happened.
         next = { deadline: now + START_BUDGET_MS };
@@ -226,18 +236,20 @@ export function createUpdateStore(ipc: UpdateClient = client, clock = updateCloc
       set((prev) => {
         const current = prev.operation;
         // A command can return before relaunch. Continue from the native transaction state.
-        const follow = current && !current.error && isActive(current.state);
+        const follow = current && !current.running && !current.error && isActive(current.state);
         const samePhase = snapshot.phase === prev.snapshot.phase;
-        // A command outcome may arrive again through polling. New progress clears its dismissal.
-        const dismissedEcho = snapshot.phase === dismissedOperationOutcome;
-        if (dismissedEcho || (!samePhase && isActive(snapshot))) {
-          dismissedOperationOutcome = undefined;
-        }
+        const sameTransaction = snapshot.transaction_id === prev.snapshot.transaction_id;
+        if (!sameTransaction && !current?.running) timing = undefined;
+        const dismissed = snapshot.transaction_id !== undefined
+          ? snapshot.transaction_id === dismissedNativeId
+          : snapshot.phase === dismissedLegacyPhase || (samePhase && sameTransaction && prev.snapshotDismissed);
+        if (snapshot.transaction_id === undefined && (!samePhase || dismissed))
+          dismissedLegacyPhase = undefined;
         const next = {
           snapshot,
-          snapshotSince: samePhase ? prev.snapshotSince : clock.now(),
-          snapshotDismissed: dismissedEcho || (samePhase && prev.snapshotDismissed),
-          ...(!current || follow ? observePhase(snapshot) : {}),
+          snapshotSince: samePhase && sameTransaction ? prev.snapshotSince : clock.now(),
+          snapshotDismissed: dismissed,
+          ...(!current || follow ? observePhase(snapshot.operation_error ? { phase: 'idle' } : snapshot) : {}),
         };
         if (!follow) return next;
         if (!isProgress(snapshot)) return { ...next, operation: null };
@@ -254,7 +266,8 @@ export function createUpdateStore(ipc: UpdateClient = client, clock = updateCloc
 
     function canBegin() {
       const { snapshot, operation, lastCheck } = get();
-      return !operation && lastCheck?.phase !== 'checking' && !isActive(snapshot);
+      return !operation && lastCheck?.phase !== 'checking'
+        && (!isActive(snapshot) || snapshot.operation_error !== undefined);
     }
 
     async function run(
@@ -262,9 +275,10 @@ export function createUpdateStore(ipc: UpdateClient = client, clock = updateCloc
       target: UpdateTarget | undefined,
       call: (progress: Progress) => Promise<void>
     ) {
-      if (!canBegin()) return;
+      if (kind === 'recovery' ? get().operation?.running : !canBegin()) return;
       revision++;
-      dismissedOperationOutcome = undefined;
+      dismissedNativeId = undefined;
+      dismissedLegacyPhase = undefined;
       const state = { phase: 'confirming' } as const;
       set({
         snapshotDismissed: false,
@@ -289,6 +303,10 @@ export function createUpdateStore(ipc: UpdateClient = client, clock = updateCloc
       }
       try {
         await call((state) => {
+          if (state.phase === 'stop_detail') {
+            change(() => ({ stopDetail: state }));
+            return;
+          }
           change(
             (op) => ({ state, since: op.state.phase === state.phase ? op.since : clock.now() }),
             true
@@ -296,12 +314,15 @@ export function createUpdateStore(ipc: UpdateClient = client, clock = updateCloc
         });
         change(() => ({ running: false }));
         const operation = get().operation;
-        if (operation && isActive(operation.state)) await get().refresh();
+        if (operation && (isActive(operation.state) || operation.state.transaction_id))
+          await get().refresh();
       } catch (error) {
         const failure = asGuiError(error);
         change((op) => ({
           running: false,
-          error: isActive(op.state) || !isProgress(op.state) ? failure : undefined,
+          error: isActive(op.state) || !isProgress(op.state) || op.state.transaction_id
+            ? failure
+            : undefined,
         }));
       }
     }
@@ -314,8 +335,8 @@ export function createUpdateStore(ipc: UpdateClient = client, clock = updateCloc
       restartStatus: null,
       cancelPending: false,
       refresh: async () => {
-        const { operation, lastCheck } = get();
-        if (reading || operation?.running || lastCheck?.phase === 'checking') return;
+        const { lastCheck } = get();
+        if (reading || lastCheck?.phase === 'checking') return;
         reading = true;
         const readRevision = revision;
         try {
@@ -331,15 +352,25 @@ export function createUpdateStore(ipc: UpdateClient = client, clock = updateCloc
       check: async () => {
         if (!canBegin()) return;
         revision++;
-        set({ lastCheck: { phase: 'checking' } });
+        set({ lastCheck: { phase: 'checking' }, checkError: undefined });
         try {
           const checked = await ipc.check();
           setSnapshot(checked);
           set({ lastCheck: checked });
-        } catch {
-          set({ lastCheck: { phase: 'check_failed' } });
+        } catch (error) {
+          set({ lastCheck: { phase: 'check_failed' }, checkError: asGuiError(error) });
         }
       },
+      fromTray: (result) => {
+        if ('Err' in result) {
+          set({ lastCheck: { phase: 'check_failed' }, checkError: result.Err });
+        } else {
+          set({ lastCheck: result.Ok, checkError: undefined });
+          if (!get().operation?.running) void get().refresh();
+        }
+      },
+      recover: (startOnly) =>
+        run('recovery', undefined, (progress) => ipc.recover?.(startOnly, progress) ?? Promise.resolve()),
       install: (target, acknowledgement) =>
         run('install', target, (progress) =>
           ipc.install(target.version, acknowledgement, progress)
@@ -373,9 +404,10 @@ export function createUpdateStore(ipc: UpdateClient = client, clock = updateCloc
       },
       dismiss: () => {
         const { operation, snapshot } = get();
-        const outcome = operation?.state.phase;
-        dismissedOperationOutcome =
-          operation && !isActive(operation.state) && outcome !== snapshot.phase ? outcome : undefined;
+        const outcome = operation?.state;
+        dismissedNativeId = outcome?.transaction_id ?? snapshot.transaction_id;
+        if (!dismissedNativeId && outcome && !isActive(outcome) && outcome.phase !== snapshot.phase)
+          dismissedLegacyPhase = outcome.phase;
         if (!operation || operation.running || (!operation.error && isActive(operation.state))) {
           set({ snapshotDismissed: true });
           return;
@@ -451,4 +483,37 @@ export function releaseNotesUrl(target: UpdateTarget): string | undefined {
 export async function openReleaseUrl(url: string) {
   const { invoke } = await import('@tauri-apps/api/core');
   await invoke('plugin:opener|open_url', { url });
+}
+
+const skillTarget = { kind: 'WebviewWindow', label: 'main' } as const;
+let skillRequest = 0;
+
+export async function updateSkillFromApp(): Promise<string> {
+  const { emitTo, listen } = await import('@tauri-apps/api/event');
+  const id = ++skillRequest;
+  let resolve!: (output: string) => void;
+  let reject!: (error: unknown) => void;
+  const result = new Promise<string>((ok, fail) => { resolve = ok; reject = fail; });
+  const unlisten = await listen<{ id: number; result: { Ok: string } | { Err: GuiError } }>(
+    'strata://update-skill-result',
+    ({ payload }) => {
+      if (payload.id === id) {
+        if ('Ok' in payload.result) resolve(payload.result.Ok);
+        else reject(payload.result.Err);
+      }
+    }
+  );
+  const timeout = setTimeout(() => reject(new Error('Could not confirm that the skill was updated')), 120_000);
+  try {
+    await emitTo(skillTarget, 'git-strata-update-skill', id);
+    return await result;
+  } finally {
+    clearTimeout(timeout);
+    unlisten();
+  }
+}
+
+export async function answerSchema(requestId: string, acknowledgement: number | null) {
+  const { emitTo } = await import('@tauri-apps/api/event');
+  await emitTo(skillTarget, 'git-strata-schema-answer', { request_id: requestId, acknowledgement });
 }

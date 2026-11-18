@@ -414,6 +414,14 @@ pub fn model(s: &Snapshot, now: SystemTime) -> TrayModel {
     )
 }
 pub fn model_at(s: &Snapshot, now: Stamp) -> TrayModel {
+    model_at_during_restart(s, now, false)
+}
+
+pub(crate) fn model_at_during_restart(
+    s: &Snapshot,
+    now: Stamp,
+    expected_restart: bool,
+) -> TrayModel {
     let daemon_fresh = s.daemon_status.fresh(now, STALE_AFTER);
     let sessions_fresh = s.sessions.fresh(now, s.sessions_limit());
     let deps_fresh = s.deps.fresh(now, Duration::from_secs(90));
@@ -512,69 +520,73 @@ pub fn model_at(s: &Snapshot, now: Stamp) -> TrayModel {
     };
     let n = active_sessions(s.sessions.value.as_ref());
     let running = format!("Daemon running, {}", plural(n, "session", "sessions"));
-    let (icon, description) =
-        if let Some((_, why)) = s.last_down.filter(|(at, _)| at.age(now) < STALE_AFTER) {
-            (
-                Icon::Down,
-                match why {
-                    DownWhy::NotRunning => "Daemon isn't running",
-                    DownWhy::NotResponding => "Daemon isn't responding",
-                }
-                .to_string(),
-            )
-        } else if s.fd_at.is_some_and(|at| at.age(now) < STALE_AFTER)
-            || (daemon_fresh && s.fd_pressure)
-            || alerts > 0
-        {
-            let base = if s.fd_at.is_some_and(|at| at.age(now) < STALE_AFTER) {
-                "Daemon is out of file handles".to_string()
-            } else if daemon_fresh && s.fd_pressure {
-                "Daemon is close to its file-handle limit".to_string()
-            } else {
-                format!(
-                    "Daemon needs attention: {}",
-                    plural(alerts, "alert", "alerts")
-                )
-            };
-            let suffix = if sessions_fresh
-                && deps_fresh
-                && (daemon_fresh || !all.iter().any(|w| w.kind == WaitingKind::ConfigRelax))
-            {
-                if waiting > 0 {
-                    format!(", {waiting} waiting")
-                } else {
-                    String::new()
-                }
-            } else {
-                ", waiting items not current".to_string()
-            };
-            (Icon::Alert, format!("{base}{suffix}"))
-        } else if let Some(stale) = &stale {
-            (Icon::Checking, stale.clone())
-        } else if waiting > 0 {
-            (Icon::Waiting, format!("{waiting} waiting for you"))
-        } else if conflicts > 0 {
-            (
-                Icon::Conflict,
-                format!(
-                    "{} need{} an agent",
-                    plural(conflicts, "repo", "repos"),
-                    if conflicts == 1 { "s" } else { "" }
-                ),
-            )
-        } else if unavailable > 0 {
-            (
-                Icon::Checking,
-                "Some session details are unavailable".to_string(),
-            )
-        } else if syncing(s.sessions.value.as_ref(), enabled, now.wall) {
-            (Icon::Syncing, syncing_description(s, now.wall))
+    let (icon, description) = if let Some((_, why)) = s
+        .last_down
+        .filter(|(at, _)| !expected_restart && at.age(now) < STALE_AFTER)
+    {
+        (
+            Icon::Down,
+            match why {
+                DownWhy::NotRunning => "Daemon isn't running",
+                DownWhy::NotResponding => "Daemon isn't responding",
+            }
+            .to_string(),
+        )
+    } else if s.fd_at.is_some_and(|at| at.age(now) < STALE_AFTER)
+        || (daemon_fresh && s.fd_pressure)
+        || alerts > 0
+    {
+        let base = if s.fd_at.is_some_and(|at| at.age(now) < STALE_AFTER) {
+            "Daemon is out of file handles".to_string()
+        } else if daemon_fresh && s.fd_pressure {
+            "Daemon is close to its file-handle limit".to_string()
         } else {
-            (
-                Icon::Normal,
-                format!("All clear, {}", plural(n, "session", "sessions")),
+            format!(
+                "Daemon needs attention: {}",
+                plural(alerts, "alert", "alerts")
             )
         };
+        let suffix = if sessions_fresh
+            && deps_fresh
+            && (daemon_fresh || !all.iter().any(|w| w.kind == WaitingKind::ConfigRelax))
+        {
+            if waiting > 0 {
+                format!(", {waiting} waiting")
+            } else {
+                String::new()
+            }
+        } else {
+            ", waiting items not current".to_string()
+        };
+        (Icon::Alert, format!("{base}{suffix}"))
+    } else if expected_restart {
+        (Icon::Checking, "Daemon restarting…".to_owned())
+    } else if let Some(stale) = &stale {
+        (Icon::Checking, stale.clone())
+    } else if waiting > 0 {
+        (Icon::Waiting, format!("{waiting} waiting for you"))
+    } else if conflicts > 0 {
+        (
+            Icon::Conflict,
+            format!(
+                "{} need{} an agent",
+                plural(conflicts, "repo", "repos"),
+                if conflicts == 1 { "s" } else { "" }
+            ),
+        )
+    } else if unavailable > 0 {
+        (
+            Icon::Checking,
+            "Some session details are unavailable".to_string(),
+        )
+    } else if syncing(s.sessions.value.as_ref(), enabled, now.wall) {
+        (Icon::Syncing, syncing_description(s, now.wall))
+    } else {
+        (
+            Icon::Normal,
+            format!("All clear, {}", plural(n, "session", "sessions")),
+        )
+    };
     let mut status_line = if matches!(icon, Icon::Down | Icon::Alert | Icon::Checking) {
         description.clone()
     } else {
@@ -617,6 +629,29 @@ pub fn model_at(s: &Snapshot, now: Stamp) -> TrayModel {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn planned_restart_hides_only_the_disconnect_until_its_window_expires() {
+        let now = Stamp::now();
+        let mut snapshot = Snapshot {
+            last_down: Some((now, DownWhy::NotRunning)),
+            ..Snapshot::default()
+        };
+        assert_eq!(
+            model_at_during_restart(&snapshot, now, true).icon,
+            Icon::Checking
+        );
+        snapshot.fd_at = Some(now);
+        assert_eq!(
+            model_at_during_restart(&snapshot, now, true).icon,
+            Icon::Alert
+        );
+        snapshot.fd_at = None;
+        assert_eq!(
+            model_at_during_restart(&snapshot, now, false).icon,
+            Icon::Down
+        );
+    }
+
     #[test]
     fn config_warning_status_line_requires_feature_and_fresh_daemon() {
         let now = Stamp::now();

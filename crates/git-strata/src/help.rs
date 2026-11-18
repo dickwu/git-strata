@@ -695,7 +695,7 @@ they tell the human. Both act only when HOME is the login user's home (D38).
 INSTALL
   The per-user LaunchAgent is ~/Library/LaunchAgents/com.gwd.git-stratad.plist
   (Label com.gwd.git-stratad, ProgramArguments the git-stratad binary, RunAtLoad,
-  KeepAlive, LimitLoadToSessionType Aqua, PATH ~/.bun/bin:/opt/homebrew/bin:
+  KeepAlive.SuccessfulExit false, LimitLoadToSessionType Aqua, PATH ~/.bun/bin:/opt/homebrew/bin:
   /usr/local/bin:/usr/bin:/bin, StandardErrorPath ~/Library/Application
   Support/git-strata/daemon.err.log). The CLI does not write it; the human
   can print it with `git-stratad --print-plist [ABSOLUTE_BIN]`.
@@ -706,7 +706,7 @@ EXAMPLES
                             #                   restart_required}}
   git-strata daemon start    # bootstrap if unloaded, kickstart without -k if loaded
                             # and stopped, {already:true} if enabled and running
-  git-strata daemon stop     # launchctl bootout; waits up to 10 s until unloaded
+  git-strata daemon stop     # bootout, then wait up to 10 s for explicit absence
 
 config is copied when the daemon returns it; absent when down or omitted by an
 older daemon. generation/hash/loaded_at describe the active catalog. last_attempt
@@ -716,7 +716,8 @@ activity, busy, volume, scan, version, pid and started are copied the same way
 (feature daemon_status.activity): work in flight, Busy replies of the last 10
 min, free/size bytes of the volume holding paths.root (store, sessions; with
 path, mount and name under feature daemon_status.volume_name), size-scan counts,
-the daemon's identity.
+the daemon's identity. draining, inflight and store_schema are copied when
+reported (feature daemon.drain).
 
 After editing config.toml, run `git-strata config reload` and check data.repos.
 Restart-only changes and old daemons require an owner restart. start/stop use

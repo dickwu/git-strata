@@ -62,7 +62,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_REAL_UPDATER_PUBKEY_T13",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQyNTI3RDE5QjcyQkM4NTMKUldSVHlDdTNHWDFTUXRJK3ZsY2RzaWlXMzdqZGhjRzlYM0Y2ZnZwMXNUVnBFbmxHRmlTYnN2S2QK",
       "endpoints": ["https://github.com/dickwu/git-strata/releases/latest/download/latest.json"],
       "requireSignedVersion": true
     }

@@ -148,7 +148,7 @@ pub fn edit_document(path: &Path, edit: impl FnOnce(&mut Map<String, Value>)) ->
     })
 }
 
-fn rewrite_document(
+pub(super) fn rewrite_document(
     path: &Path,
     edit: impl FnOnce(&mut Map<String, Value>) -> io::Result<()>,
 ) -> io::Result<()> {

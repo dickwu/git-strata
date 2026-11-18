@@ -22,11 +22,13 @@ pub struct UpdateCandidate {
     pub raw_json: Value,
 }
 
+type Installer = dyn FnOnce(&[u8]) -> tauri_plugin_updater::Result<()> + Send;
+
 /// A verified archive and the install operation from the same checked update.
 pub struct VerifiedUpdate {
     pub bytes: Vec<u8>,
     /// Captures the updater that verified these bytes, including its signature and install destination.
-    pub installer: Box<dyn FnOnce(&[u8]) -> tauri_plugin_updater::Result<()> + Send>,
+    pub installer: Box<Installer>,
 }
 
 pub trait UpdateSource: Send + Sync {

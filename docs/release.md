@@ -87,7 +87,9 @@ What this means:
 Updater signing runs only in the GitHub Actions release workflow. Configure
 the repository secrets `TAURI_SIGNING_PRIVATE_KEY` and
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The matching public key belongs in
-`plugins.updater.pubkey` in `apps/desktop/src-tauri/tauri.conf.json`. Keep a
+`plugins.updater.pubkey` in `apps/desktop/src-tauri/tauri.conf.json`
+(current Minisign key ID `42527D19B72BC853`). The app requires a version-bound
+signature. Local builds keep `createUpdaterArtifacts: false`. Keep a
 separate encrypted offline copy of the updater private key. Losing the key
 requires a manual update for apps that trust it.
 

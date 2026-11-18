@@ -87,9 +87,12 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_connector::init());
     let app = builder
         .manage(AppState::new(socket::default_socket().map(Daemon::new)))
-        .manage(service::Starter::from_env())
         .setup(|app| {
             let handle = app.handle().clone();
+            #[cfg(target_os = "macos")]
+            update::start(&handle);
+            #[cfg(not(target_os = "macos"))]
+            handle.manage(service::Starter::from_env());
             tray::install(&handle)?;
             let h = handle.clone();
             app.state::<AppState>().set_on_change(move || {

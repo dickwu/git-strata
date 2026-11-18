@@ -1549,8 +1549,17 @@ pub const STATUS_LOOKUP_WAIT: std::time::Duration = std::time::Duration::from_se
 
 /// `daemon_status` keys `daemon status` copies into `data` unchanged when
 /// the daemon sends them.
-pub const DAEMON_STATUS_PASSTHROUGH: [&str; 7] = [
-    "activity", "busy", "volume", "scan", "version", "pid", "started",
+pub const DAEMON_STATUS_PASSTHROUGH: [&str; 10] = [
+    "activity",
+    "busy",
+    "volume",
+    "scan",
+    "version",
+    "pid",
+    "started",
+    "draining",
+    "inflight",
+    "store_schema",
 ];
 
 /// §3.3. Never fails for a missing config or a down daemon (SessionStart).
@@ -1618,12 +1627,16 @@ pub fn daemon_status() -> Result<Envelope> {
             if let Some(f) = v.get("features") {
                 data["features"] = f.clone();
             }
-            // Status-bar fields (feature `daemon_status.activity`), as the
-            // daemon sent them; an older daemon sends none of them.
+            // Status-bar and drain fields are optional on older daemons.
             for key in DAEMON_STATUS_PASSTHROUGH {
                 if let Some(x) = v.get(key) {
                     data[key] = x.clone();
                 }
+            }
+            if v["draining"]["sealed"] == true && v["draining"]["then"] == "hold" {
+                eprintln!(
+                    "The daemon is sealed for a move by GIT STRATA. Open the app to finish or cancel."
+                );
             }
         }
         Err(CallError::Down(_)) => {}

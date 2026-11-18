@@ -85,6 +85,6 @@ jobs:
             fi
             echo "updated $2"
           }
-          # Formula first: the cask depends on it.
+          # Publish the formula and independent desktop cask to the same tap.
           put out/Formula/git-strata.rb Formula/git-strata.rb
           put out/Casks/git-strata-desktop.rb Casks/git-strata-desktop.rb

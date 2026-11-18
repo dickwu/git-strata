@@ -68,6 +68,10 @@ data root (`[paths] root`, default `~/.strata`) as
 | `session ports` | `--session <S>`, `--repo <R>` (defaults: cwd's session; cwd's repo, else every repo), or `--all` (read-only, every live workspace; unleased ones show `ports: null`, `reason: "unleased"`); `--check` (who listens on each port); `--reassign` (move exactly one workspace's lease to another block) | no | yes when the lease exists | `{leases:[{session,repo,path,tauri_app_root,ports:{web,connector,connector_mcp,aux},env:{...},check?}]}` |
 | `session exec -- <CMD>...` | `--session <S>`, `--repo <R>` (exactly one workspace), `--tauri` (add `--config $STRATA_TAURI_DEV_CONFIG` to `tauri dev`), `--no-check` | no | yes when the lease exists | none: the process becomes `<CMD>` (its output and exit code) with the lease env set |
 
+`daemon status` also copies `draining`, `inflight` and `store_schema` when
+the daemon reports them. For a sealed Move, it prints a reminder to finish
+or cancel in GIT STRATA. Only the App manages the drain lease.
+
 `daemon status` copies `config` when the daemon returns it; the field is absent
 when down or omitted by an older daemon. `generation`, `hash` and `loaded_at`
 describe the active catalog. `last_attempt` is null before any reload attempt,

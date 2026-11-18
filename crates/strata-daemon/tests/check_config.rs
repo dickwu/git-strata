@@ -192,6 +192,20 @@ fn store_state_writes_a_new_file_without_truncating_an_existing_link() {
     core.close().unwrap();
 }
 
+#[test]
+fn store_state_is_unchanged_after_cross_volume_rejection() {
+    let mut fx = Dfx::new();
+    fx.prepare().unwrap().close().unwrap();
+    let path = fx.config_dir.join("store_state.json");
+    let before = fs::read(&path).unwrap();
+    fx.config.paths.root = Path::new("/usr/bin").join("strata-test-data");
+    fx.write_config();
+
+    let error = fx.prepare().err().expect("store volumes differ");
+    assert_eq!(error.code, Code::CrossVolume);
+    assert_eq!(fs::read(path).unwrap(), before);
+}
+
 fn make_v6_store(fx: &Dfx) {
     // As in strata-store/tests/migrate_v7.rs, remove the v7 addition to
     // build a v6 fixture that the real store migrator will accept.

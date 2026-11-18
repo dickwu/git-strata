@@ -460,10 +460,8 @@ export function StatusBar({
   const hasOperation = useUpdates((state) => state.operation !== null);
   const busy = hasOperation || checking || isActive(snapshot);
   const restarting = useUpdates(restartingDaemon);
-  const offer =
-    snapshot.phase === 'available' && snapshot.target.version !== skipped
-      ? snapshot.target
-      : undefined;
+  const latestOffer = snapshot.phase === 'available' ? snapshot.target : snapshot.latest_offer;
+  const offer = latestOffer?.version !== skipped ? latestOffer : undefined;
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 5000);
     return () => clearInterval(t);

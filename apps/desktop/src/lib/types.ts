@@ -519,10 +519,36 @@ export interface UpdateTarget {
   /** Advisory until the downloaded bundle has been verified. */
   store_schema?: number;
   min_updatable_from?: string;
+  manual_download_url?: string;
+}
+
+export type InstallEligibility = { version: string } & (
+  | { kind: 'eligible' }
+  | { kind: 'move' }
+  | { kind: 'setup' }
+  | { kind: 'refused'; message: string; manual_download_url?: string }
+);
+
+interface UpdatePresentation {
+  transaction_id?: string;
+  start_requested_ms?: number;
+  permission_wait_elapsed_ms?: number | null;
+  operation_error?: GuiError;
+  install_eligibility?: InstallEligibility;
+  latest_offer?: UpdateTarget;
+  schema_consent?: { request_id: string; from_schema: number | null; to_schema: number; version: string };
+  version_details?: {
+    program?: string;
+    cli?: { path: string; label: 'this app' | `Homebrew formula ${string}` | 'other' }[];
+    move_mode?: 'formula' | 'program_missing' | 'resume';
+    can_setup?: boolean;
+    can_link_cli?: boolean;
+  };
+  recovery?: { start?: boolean; rollback_version?: string | null };
 }
 
 /** Version-upgrade design §4.3. */
-export type UpdateState =
+export type UpdateState = UpdatePresentation & (
   | { phase: 'idle' }
   | { phase: 'checking' }
   | { phase: 'up_to_date' }
@@ -533,6 +559,7 @@ export type UpdateState =
   | { phase: 'verifying_bundle' }
   | { phase: 'draining'; inflight: Inflight[]; background: LockHoldJson[] }
   | { phase: 'stopping' }
+  | { phase: 'stop_detail'; slow: boolean; close_error?: unknown }
   | { phase: 'installing' }
   | { phase: 'starting_daemon' }
   | { phase: 'relaunching' }
@@ -548,7 +575,8 @@ export type UpdateState =
   | { phase: 'restore_failed' }
   | { phase: 'cancel_blocked' }
   | { phase: 'bootout_failed' }
-  | { phase: 'fence_uncertain' };
+  | { phase: 'fence_uncertain' }
+);
 
 /** Persisted update transaction (§4.2 step 4). */
 export interface Txn {
@@ -585,9 +613,9 @@ export interface UpdateCommandArgs {
    * Omit folder choices to keep the existing config. This path requires
    * schemaAcknowledgement for the target schema (§6.3 step 3).
    */
-  daemon_setup: UpdateSchemaArgs & { dataRoot?: string; repos?: Record<string, string> };
+  daemon_setup: UpdateSchemaArgs & { setupReviewId?: string };
   cli_link_install: undefined;
-  update_rollback: UpdateProgressArgs;
+  update_rollback: UpdateProgressArgs & { startOnly?: boolean };
 }
 
 export interface UpdateCommandResults {

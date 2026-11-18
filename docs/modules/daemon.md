@@ -302,7 +302,10 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
     <string>BIN</string>
   </array>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>LimitLoadToSessionType</key>
@@ -322,7 +325,7 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 </plist>
 ```
 
-`LimitLoadToSessionType = Aqua` 是 confirm.md §5.2 第 3 步要的：不在图形会话里，LocalAuthentication 弹不出框。`KeepAlive` 为真，空闲不退出（design §5）。`RunAtLoad` 与 `ProcessType = Interactive` 是 [我的决定 D7]：前者让 bootstrap 之后就起来，后者让认证框画得出。`ExitTimeOut = 900`（`EXIT_TIMEOUT_SECS`）高于最长的有界 git 调用（attach 600 s），停机时 launchd 等在途的写做完再 SIGKILL（D29）。装上之后 `launchctl bootstrap gui/$UID <plist>`；卸下是 `bootout` 再删 plist。这是库函数，不是 RPC：daemon 没在跑时 cli 在本进程调它。
+`LimitLoadToSessionType = Aqua` 是 confirm.md §5.2 第 3 步要的：不在图形会话里，LocalAuthentication 弹不出框。`KeepAlive.SuccessfulExit` 为 false，daemon 空闲时继续运行。退出码为 0 时 launchd 保持 job 已加载、未运行，非 0 退出可以触发重启。`RunAtLoad` 与 `ProcessType = Interactive` 是 [我的决定 D7]：前者让 bootstrap 之后就起来，后者让认证框画得出。`ExitTimeOut = 900`（`EXIT_TIMEOUT_SECS`）高于最长的有界 git 调用（attach 600 s），停机时 launchd 等在途的写做完再 SIGKILL（D29）。装上之后 `launchctl bootstrap gui/$UID <plist>`；卸下是 `bootout` 再删 plist。这是库函数，不是 RPC：daemon 没在跑时 cli 在本进程调它。
 
 `strata_confirm::TEST_SEAMS == true` 时 main 拒绝启动，不听 socket，不弹框（confirm.md C8）。
 
@@ -1527,12 +1530,13 @@ returns `{already:true}`. A disabled label returns `Unsupported` with
 `git-strata daemon stop` waits for launchd's explicit service-not-found
 reply (exit 113 for that label and GUI domain).
 
-Before store open, the daemon durably replaces
-`~/Library/Application Support/git-strata/store_state.json` with a snapshot
-containing `root` and `migrating_to`. A successful open replaces it with
-`{root, user_version, migrated_from, at}`. The timestamp is UTC RFC 3339.
-`migrated_from` is the source schema when open produced a new migration
-backup and null on an ordinary open. Readers treat an absent or unreadable
+Under the store writer lock, the daemon writes a durable `{root, migrating_to}`
+marker to `~/Library/Application Support/git-strata/store_state.json` after
+verifying the migration backup and before starting the migration. A fresh
+store writes the marker before publishing its database. Rejected opens before
+these boundaries leave the prior snapshot intact. A successful open writes
+`{root, user_version, migrated_from, at}`, using the verified source schema
+for a migration and null otherwise. The timestamp is UTC RFC 3339. Readers treat an absent or unreadable
 snapshot, a `migrating_to` marker or a `root` that differs from the
 configured data root as an unknown schema. A failed or interrupted migration
 leaves the marker in place. If the final snapshot write fails, startup

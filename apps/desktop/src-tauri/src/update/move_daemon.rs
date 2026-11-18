@@ -20,7 +20,9 @@ use super::{
     txn::DaemonIdentity,
 };
 use crate::error::GuiError;
-use crate::service::{AGENT_LABEL, ServiceManager, plist_for_home, scope};
+use crate::service::{
+    AGENT_LABEL, ServiceManager, launchctl::BootoutTarget, plist_for_home, scope,
+};
 
 const INSTALLED_APP: &str = "/Applications/GIT STRATA.app";
 const APP_SUPPORT: &str = "Library/Application Support/io.github.dickwu.git-strata";
@@ -36,6 +38,9 @@ const DEFAULT_EXIT_TIMEOUT: Duration = Duration::from_secs(900);
 /// chosen by the adapter, never by the webview.
 pub trait MoveDrain: Send + Sync {
     fn status(&self) -> UpdateFuture<'_, Result<Value, GuiError>>;
+    fn acquire(&self, _expected: &DaemonIdentity) -> UpdateFuture<'_, Result<Value, GuiError>> {
+        self.drain(strata_client::drain_on_params(None))
+    }
     fn drain(&self, params: Value) -> UpdateFuture<'_, Result<Value, GuiError>>;
 }
 
@@ -181,6 +186,8 @@ struct MoveRecord {
     #[serde(default)]
     rollback_retried: bool,
     #[serde(default)]
+    retry_enable_pending: bool,
+    #[serde(default)]
     failure: Option<String>,
     #[serde(default)]
     service_attempt: Option<ServiceAttempt>,
@@ -314,11 +321,12 @@ impl MoveDaemon {
 
     fn update_doc(&self) -> Result<serde_json::Map<String, Value>, GuiError> {
         let path = self.journal();
-        let Some(bytes) = read_optional(&path)? else {
-            return Ok(Default::default());
-        };
-        let doc: serde_json::Map<String, Value> =
-            serde_json::from_slice(&bytes).map_err(|e| file_error(&path, e))?;
+        let doc = super::cache::read_document(&path).map_err(|e| file_error(&path, e))?;
+        Self::require_no_update(&doc)?;
+        Ok(doc)
+    }
+
+    fn require_no_update(doc: &serde_json::Map<String, Value>) -> Result<(), GuiError> {
         if doc.get("txn").is_some_and(|v| !v.is_null()) {
             return Err(move_error(
                 Code::Busy,
@@ -326,25 +334,26 @@ impl MoveDaemon {
                 "Finish the pending app update before moving the daemon.",
             ));
         }
-        Ok(doc)
+        Ok(())
     }
 
     fn save(&self, record: Option<&MoveRecord>) -> Result<(), GuiError> {
         let path = self.journal();
-        let mut doc = self.update_doc()?;
-        match record {
-            Some(record) => {
-                doc.insert(
-                    "move".into(),
-                    serde_json::to_value(record).map_err(|e| file_error(&path, e))?,
-                );
+        super::txn::TxnStore::new(path.clone()).edit_document(|doc| {
+            Self::require_no_update(doc)?;
+            match record {
+                Some(record) => {
+                    doc.insert(
+                        "move".into(),
+                        serde_json::to_value(record).map_err(|e| file_error(&path, e))?,
+                    );
+                }
+                None => {
+                    doc.remove("move");
+                }
             }
-            None => {
-                doc.remove("move");
-            }
-        }
-        let bytes = serde_json::to_vec(&doc).map_err(|e| file_error(&path, e))?;
-        atomic_write(&path, &bytes)
+            Ok(())
+        })
     }
 
     fn clear(&self) -> Result<(), GuiError> {
@@ -414,10 +423,8 @@ impl MoveDaemon {
             .await;
         if result.is_ok()
             || result.as_ref().is_err_and(|e| {
-                matches!(
-                    e.reason(),
-                    Some("move_plist_changed" | "move_file" | "not_implemented")
-                ) || exited(e, attempt.verb())
+                matches!(e.reason(), Some("move_plist_changed" | "move_file"))
+                    || exited(e, attempt.verb())
             })
         {
             record.service_attempt = None;
@@ -729,8 +736,13 @@ impl MoveDaemon {
                 self.save(Some(&record))?;
                 self.drive(record, &|| false, progress).await
             }
+            (Phase::RollbackHold, Some(ServiceAttempt::Enable)) => {
+                record.service_attempt = None;
+                self.begin_rollback_retry(&mut record)?;
+                self.drive(record, &|| false, progress).await
+            }
             (
-                Phase::RollbackHold | Phase::RestoreMissing | Phase::RestoreEnabledAfterRollback,
+                Phase::RestoreMissing | Phase::RestoreEnabledAfterRollback,
                 Some(ServiceAttempt::Enable),
             ) => {
                 record.service_attempt = None;
@@ -870,6 +882,7 @@ impl MoveDaemon {
                 bootout: None,
                 cancelled: false,
                 rollback_retried: false,
+                retry_enable_pending: false,
                 failure: None,
                 service_attempt: None,
                 schema_block: None,
@@ -997,11 +1010,7 @@ impl MoveDaemon {
                 return Err(drain_busy());
             }
             record.hold = None;
-            let reply = self
-                .adapters
-                .daemon
-                .drain(json!({ "on": true, "ttl_s": TTL_S }))
-                .await?;
+            let reply = self.adapters.daemon.acquire(&daemon).await?;
             let lease_id = lease_id(&reply)?.to_string();
             record.hold = Some(Hold { daemon, lease_id });
             // In rollback_hold, this replaces intent with the new daemon's
@@ -1218,6 +1227,7 @@ impl MoveDaemon {
         job: &Job,
         rollback: bool,
     ) -> Result<(), GuiError> {
+        let previous_phase = record.phase;
         let exit_timeout_s = job.exit_timeout.as_secs();
         let previous_timeout = std::mem::replace(&mut record.exit_timeout_s, exit_timeout_s);
         let previous_attempt = record.bootout.replace(BootoutAttempt {
@@ -1231,12 +1241,30 @@ impl MoveDaemon {
         } else {
             Phase::Bootout
         };
-        self.phase(record, phase).inspect_err(|_| {
+        if let Err(error) = self.phase(record, phase) {
             record.bootout = previous_attempt;
             record.exit_timeout_s = previous_timeout;
-        })?;
+            return Err(error);
+        }
 
-        let result = self.service(|s| s.bootout(AGENT_LABEL)).await;
+        let target = job
+            .pid
+            .map_or(BootoutTarget::Stopped, BootoutTarget::Sealed);
+        let result = self
+            .service(move |s| s.bootout_targeted(AGENT_LABEL, target))
+            .await;
+        if let Err(error) = &result
+            && crate::service::pre_dispatch_error(error)
+        {
+            record.bootout = previous_attempt;
+            record.exit_timeout_s = previous_timeout;
+            self.phase(record, previous_phase)?;
+            return Err(if error.reason() == Some("bootout_target_changed") {
+                identity_changed()
+            } else {
+                error.clone()
+            });
+        }
         if result.as_ref().is_err_and(|e| exited(e, "bootout")) {
             record
                 .bootout
@@ -1485,12 +1513,15 @@ impl MoveDaemon {
         record: &mut MoveRecord,
         progress: &mut Progress<'_>,
     ) -> Result<(), GuiError> {
-        let first = self.job().await;
         if record.phase != Phase::RollbackHold {
             record.hold = None;
             record.bootout = None;
             self.phase(record, Phase::RollbackHold)?;
         }
+        if record.retry_enable_pending {
+            self.finish_rollback_retry_enable(record).await?;
+        }
+        let first = self.job().await;
 
         let program = self.program();
         if record.bootout.is_some() {
@@ -1525,13 +1556,8 @@ impl MoveDaemon {
                     if record.rollback_retried {
                         return self.leave_incomplete(record, Some(&e.message)).await;
                     }
-                    self.release_rollback_hold(record).await?;
-                    self.restore_enabled(record, Target::Bundle)
-                        .await
-                        .map_err(|e| self.incomplete(record, Some(&e.message)))?;
-                    record.hold = None;
-                    record.rollback_retried = true;
-                    self.save(Some(record))?;
+                    self.begin_rollback_retry(record)?;
+                    self.finish_rollback_retry_enable(record).await?;
                     observed = self.job().await;
                 }
                 Err(e)
@@ -1544,6 +1570,41 @@ impl MoveDaemon {
                 Err(e) => return Err(self.incomplete(record, Some(&e.message))),
             }
         }
+    }
+
+    fn begin_rollback_retry(&self, record: &mut MoveRecord) -> Result<(), GuiError> {
+        record.rollback_retried = true;
+        record.retry_enable_pending = true;
+        self.save(Some(record))
+    }
+
+    async fn finish_rollback_retry_enable(&self, record: &mut MoveRecord) -> Result<(), GuiError> {
+        let enabled = async {
+            if self
+                .job()
+                .await?
+                .is_some_and(|job| !same_program(&job.program, &self.program()))
+            {
+                return Err(identity_changed());
+            }
+            self.installed_plist(record, Target::Bundle)?;
+            self.release_rollback_hold(record).await?;
+            record.hold = None;
+            if self.disabled().await? {
+                self.restore_enabled(record, Target::Bundle).await?;
+            }
+            if self.disabled().await? {
+                return Err(refuse(
+                    "agent_disabled",
+                    "The LaunchAgent is still disabled.",
+                ));
+            }
+            Ok::<_, GuiError>(())
+        }
+        .await;
+        enabled.map_err(|e| self.incomplete(record, Some(&e.message)))?;
+        record.retry_enable_pending = false;
+        self.save(Some(record))
     }
 
     async fn fence_rollback_job(
@@ -1566,6 +1627,9 @@ impl MoveDaemon {
             ));
         }
         if job.pid.is_some() {
+            if record.hold.is_none() && self.disabled().await? {
+                return Err(identity_changed());
+            }
             self.fence_serving(record, true, &|| false, progress)
                 .await?;
         } else {
@@ -2185,7 +2249,7 @@ fn environment_diff(
     )
 }
 
-fn validate_template(plist: &Plist, program: &Path) -> Result<(), GuiError> {
+pub(super) fn validate_template(plist: &Plist, program: &Path) -> Result<(), GuiError> {
     let expected = PlistValue::String(program.to_string_lossy().into_owned());
     if plist.get("Label") != Some(&PlistValue::String(AGENT_LABEL.into()))
         || plist.get("ProgramArguments") != Some(&PlistValue::Array(vec![expected]))
@@ -2227,7 +2291,7 @@ fn effective_program(plist: &Plist) -> Option<&Path> {
     }
 }
 
-fn formula_program(path: &Path) -> bool {
+pub(super) fn formula_program(path: &Path) -> bool {
     if [
         Path::new("/opt/homebrew/opt/git-strata/bin/git-stratad"),
         Path::new("/usr/local/opt/git-strata/bin/git-stratad"),
