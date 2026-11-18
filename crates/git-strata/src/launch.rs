@@ -30,22 +30,23 @@ const STOP_POLL: Duration = Duration::from_millis(100);
 
 /// The one place a `launchctl` process is spawned.
 pub trait Launchctl {
-    /// `(exit status success, stdout + stderr)`.
-    fn run(&self, args: &[&str]) -> Result<(bool, String)>;
+    /// The exit code (none on signal) and combined stdout and stderr.
+    fn run(&self, args: &[&str]) -> Result<(Option<i32>, String)>;
 }
 
 /// Production: `launchctl` from `PATH`.
 pub struct PathLaunchctl;
 
 impl Launchctl for PathLaunchctl {
-    fn run(&self, args: &[&str]) -> Result<(bool, String)> {
+    fn run(&self, args: &[&str]) -> Result<(Option<i32>, String)> {
         let out = Command::new("launchctl")
             .args(args)
+            .env("LC_ALL", "C")
             .stdin(Stdio::null())
             .output()
             .map_err(|e| StrataError::new(Code::Unknown, format!("cannot run launchctl: {e}")).with_detail(json!({ "reason": "launchctl" })))?;
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        Ok((out.status.success(), text))
+        Ok((out.status.code(), text))
     }
 }
 
@@ -67,6 +68,10 @@ fn failed(what: &str, text: &str) -> StrataError {
 /// launchd loaded the agent from. Nested dicts and `stdout path` /
 /// `stderr path` do not count. `None` when absent (format change).
 pub(crate) fn loaded_path(text: &str) -> Option<String> {
+    service_field(text, "path").map(str::to_owned)
+}
+
+fn service_field<'a>(text: &'a str, field: &str) -> Option<&'a str> {
     let mut depth = 0i32;
     for line in text.lines() {
         let t = line.trim();
@@ -76,11 +81,11 @@ pub(crate) fn loaded_path(text: &str) -> Option<String> {
         }
         if depth == 1
             && let Some((k, v)) = t.split_once(" = ")
-            && k.trim() == "path"
+            && k.trim() == field
         {
             let v = v.trim();
             if !v.is_empty() && !v.ends_with('{') {
-                return Some(v.to_string());
+                return Some(v);
             }
         }
         if t.ends_with('{') {
@@ -90,12 +95,34 @@ pub(crate) fn loaded_path(text: &str) -> Option<String> {
     None
 }
 
-/// `print`: is the agent loaded, and (D38) was it loaded from `home`'s plist?
-fn loaded_owned(lc: &dyn Launchctl, home: &Path) -> Result<bool> {
-    let (ok, text) = lc.run(&["print", &target()])?;
-    if !ok {
-        return Ok(false);
+/// Only launchd's explicit service-not-found reply proves it is unloaded.
+fn print_agent(lc: &dyn Launchctl) -> Result<Option<String>> {
+    let (status, text) = lc.run(&["print", &target()])?;
+    if status == Some(0) {
+        return Ok(Some(text));
     }
+    if status == Some(113) {
+        let missing = format!(
+            "Could not find service \"{}\" in domain for user gui:",
+            strata_daemon::AGENT_LABEL
+        );
+        if text.lines().any(|line| {
+            line.trim()
+                .strip_prefix(&missing)
+                .and_then(|uid| uid.trim().trim_end_matches('.').parse::<u32>().ok())
+                == Some(uid())
+        }) {
+            return Ok(None);
+        }
+    }
+    Err(failed("print", &text))
+}
+
+/// `print`: is the agent loaded, and (D38) was it loaded from `home`'s plist?
+fn loaded_owned(lc: &dyn Launchctl, home: &Path) -> Result<Option<String>> {
+    let Some(text) = print_agent(lc)? else {
+        return Ok(None);
+    };
     let expected = agent_plist_path(home);
     if let Some(lp) = loaded_path(&text)
         && anchored(Path::new(&lp)) != anchored(&expected)
@@ -110,11 +137,56 @@ fn loaded_owned(lc: &dyn Launchctl, home: &Path) -> Result<bool> {
         )
         .with_detail(json!({ "reason": "foreign_agent", "loaded_path": lp, "expected": expected.to_string_lossy() })));
     }
-    Ok(true)
+    Ok(Some(text))
+}
+
+fn check_enabled(lc: &dyn Launchctl, domain: &str) -> Result<()> {
+    let (status, text) = lc.run(&["print-disabled", domain])?;
+    if status != Some(0) {
+        return Err(failed("print-disabled", &text));
+    }
+    let Some(entries) = text.trim_start().strip_prefix("disabled services = {") else {
+        return Err(failed("print-disabled", &text));
+    };
+    let mut disabled = false;
+    for line in entries
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if line == "}" {
+            // launchd can print other blocks after the disabled services.
+            return if disabled {
+                Err(StrataError::new(
+                    Code::Unsupported,
+                    "The daemon's launch agent is disabled (an app update may be in progress; open GIT STRATA)",
+                )
+                .with_detail(json!({ "reason": "agent_disabled" })))
+            } else {
+                Ok(())
+            };
+        }
+        let Some((label, value)) = line.split_once("=>") else {
+            return Err(failed("print-disabled", &text));
+        };
+        if label.trim().trim_matches('"') != strata_daemon::AGENT_LABEL {
+            continue;
+        }
+        match value.trim() {
+            "enabled" | "false" => {}
+            "disabled" | "true" => disabled = true,
+            _ => return Err(failed("print-disabled", &text)),
+        }
+    }
+    Err(failed("print-disabled", &text))
 }
 
 pub fn start(home: &Path) -> Result<Envelope> {
-    start_with(home, login_home().as_deref(), &PathLaunchctl)
+    start_with(home, login_home().as_deref(), &PathLaunchctl).inspect_err(|e| {
+        if e.detail.as_ref().and_then(|d| d["reason"].as_str()) == Some("agent_disabled") {
+            eprintln!("An app update is in progress; open GIT STRATA to finish it");
+        }
+    })
 }
 
 pub fn stop(home: &Path) -> Result<Envelope> {
@@ -129,12 +201,33 @@ pub fn start_with(home: &Path, login: Option<&Path>, lc: &dyn Launchctl) -> Resu
         return Err(StrataError::new(Code::InvalidInput, format!("no agent plist at {}", p.display()))
             .with_detail(json!({ "reason": "no_plist", "path": p.to_string_lossy() })));
     }
-    if loaded_owned(lc, &home)? {
-        return Ok(Envelope::ok(json!({ "already": true })));
-    }
-    let (ok, text) = lc.run(&["bootstrap", &format!("gui/{}", uid()), &p.to_string_lossy()])?;
-    if !ok {
-        return Err(failed("bootstrap", &text));
+    let loaded = loaded_owned(lc, &home)?;
+    let domain = format!("gui/{}", uid());
+    check_enabled(lc, &domain)?;
+    let service = target();
+    let plist = p.to_string_lossy();
+    let bootstrap = ["bootstrap", domain.as_str(), plist.as_ref()];
+    let kickstart = ["kickstart", service.as_str()];
+    let args: &[&str] = match loaded {
+        None => &bootstrap,
+        Some(text) => {
+            if service_field(&text, "pid")
+                .is_some_and(|pid| pid.parse::<u32>().is_ok_and(|pid| pid > 0))
+            {
+                return Ok(Envelope::ok(json!({ "already": true })));
+            }
+            if loaded_path(&text).is_none() {
+                return Err(failed(
+                    "print",
+                    "could not confirm the loaded agent's plist path",
+                ));
+            }
+            &kickstart
+        }
+    };
+    let (status, text) = lc.run(args)?;
+    if status != Some(0) {
+        return Err(failed(args[0], &text));
     }
     Ok(Envelope::ok(json!({})))
 }
@@ -146,25 +239,30 @@ pub fn stop_with(home: &Path, login: Option<&Path>, lc: &dyn Launchctl) -> Resul
 
 fn stop_wait(home: &Path, login: Option<&Path>, lc: &dyn Launchctl, wait: Duration) -> Result<Envelope> {
     let home = lifecycle_scope(home, login)?;
-    if !loaded_owned(lc, &home)? {
+    if loaded_owned(lc, &home)?.is_none() {
         return Ok(Envelope::ok(json!({ "already": true })));
     }
-    let (ok, text) = lc.run(&["bootout", &target()])?;
-    if !ok {
+    let (status, text) = lc.run(&["bootout", &target()])?;
+    if status != Some(0) {
         return Err(failed("bootout", &text));
     }
-    // bootout can return while launchd still lists the service; a `start`
-    // right after would then answer `already` and leave nothing running.
-    // Return only once it is gone (D24).
+    // bootout can return before launchd drops the service (D24).
     let deadline = Instant::now() + wait;
-    while lc.run(&["print", &target()])?.0 {
+    loop {
+        let message = match print_agent(lc) {
+            Ok(None) => return Ok(Envelope::ok(json!({}))),
+            Ok(Some(_)) => "launchctl bootout returned but the agent is still loaded".into(),
+            Err(e) => format!(
+                "launchctl bootout returned but unloading could not be confirmed: {}",
+                e.message
+            ),
+        };
         if Instant::now() >= deadline {
-            return Err(StrataError::new(Code::Unknown, "launchctl bootout returned but the agent is still loaded")
+            return Err(StrataError::new(Code::Unknown, message)
                 .with_detail(json!({ "reason": "launchctl", "step": "bootout_wait" })));
         }
         std::thread::sleep(STOP_POLL);
     }
-    Ok(Envelope::ok(json!({})))
 }
 
 #[cfg(test)]
@@ -178,26 +276,42 @@ mod tests {
     use super::*;
 
     /// Records every call; `reply(verb, n)` answers the n-th call (0-based).
-    struct Mock<F: Fn(&str, usize) -> (bool, String)> {
+    struct Mock<F: Fn(&str, usize) -> (i32, String)> {
         log: RefCell<Vec<String>>,
         reply: F,
     }
 
-    impl<F: Fn(&str, usize) -> (bool, String)> Launchctl for Mock<F> {
-        fn run(&self, args: &[&str]) -> Result<(bool, String)> {
+    impl<F: Fn(&str, usize) -> (i32, String)> Launchctl for Mock<F> {
+        fn run(&self, args: &[&str]) -> Result<(Option<i32>, String)> {
             let n = self.log.borrow().len();
             self.log.borrow_mut().push(args.join(" "));
-            Ok((self.reply)(args[0], n))
+            let (status, text) = (self.reply)(args[0], n);
+            Ok((Some(status), text))
         }
     }
 
-    fn mock<F: Fn(&str, usize) -> (bool, String)>(reply: F) -> Mock<F> {
+    fn mock<F: Fn(&str, usize) -> (i32, String)>(reply: F) -> Mock<F> {
         Mock { log: RefCell::new(Vec::new()), reply }
+    }
+
+    fn not_found() -> (i32, String) {
+        (
+            113,
+            format!(
+                "Could not find service \"{}\" in domain for user gui: {}",
+                strata_daemon::AGENT_LABEL,
+                uid(),
+            ),
+        )
+    }
+
+    fn disabled_list() -> (i32, String) {
+        (0, "disabled services = {\n}\n".into())
     }
 
     fn dump(path: &Path) -> String {
         format!(
-            "{t} = {{\n\tactive count = 1\n\tpath = {p}\n\ttype = LaunchAgent\n\tstdout path = /dev/null\n\tstderr path = /tmp/x.log\n\tenvironment = {{\n\t\tPATH => /usr/bin\n\t}}\n}}\n",
+            "{t} = {{\n\tactive count = 1\n\tpath = {p}\n\ttype = LaunchAgent\n\tpid = 42\n\tstdout path = /dev/null\n\tstderr path = /tmp/x.log\n\tenvironment = {{\n\t\tPATH => /usr/bin\n\t}}\n}}\n",
             t = target(),
             p = path.display()
         )
@@ -235,7 +349,7 @@ mod tests {
         }
     }
 
-    fn calls<F: Fn(&str, usize) -> (bool, String)>(m: &Mock<F>) -> Vec<String> {
+    fn calls<F: Fn(&str, usize) -> (i32, String)>(m: &Mock<F>) -> Vec<String> {
         m.log.borrow().clone()
     }
 
@@ -244,7 +358,7 @@ mod tests {
     fn foreign_home_refuses_before_any_launchctl() {
         let h = homes();
         with_plist(&h.other);
-        let m = mock(|_, _| (true, String::new()));
+        let m = mock(|_, _| (0, String::new()));
         assert_eq!(reason(stop_with(&h.other, Some(&h.home), &m)), json!("foreign_home"));
         assert_eq!(reason(start_with(&h.other, Some(&h.home), &m)), json!("foreign_home"));
         assert!(calls(&m).is_empty());
@@ -255,7 +369,7 @@ mod tests {
     fn unresolvable_login_home_refuses_with_zero_calls() {
         let h = homes();
         with_plist(&h.home);
-        let m = mock(|_, _| (true, String::new()));
+        let m = mock(|_, _| (0, String::new()));
         for login in [None, Some(PathBuf::new()), Some(h.home.join("missing"))] {
             assert_eq!(reason(stop_with(&h.home, login.as_deref(), &m)), json!("foreign_home"));
             assert_eq!(reason(start_with(&h.home, login.as_deref(), &m)), json!("foreign_home"));
@@ -270,7 +384,7 @@ mod tests {
     fn missing_home_refuses_with_zero_calls() {
         let h = homes();
         with_plist(&h.home);
-        let m = mock(|_, _| (true, String::new()));
+        let m = mock(|_, _| (0, String::new()));
         for home in [PathBuf::new(), h.home.join("missing")] {
             assert_eq!(reason(stop_with(&home, Some(&h.home), &m)), json!("foreign_home"));
             assert_eq!(reason(start_with(&home, Some(&h.home), &m)), json!("foreign_home"));
@@ -285,9 +399,9 @@ mod tests {
         let h = homes();
         let p = agent_plist_path(&h.home);
         let m = mock(|verb, n| match verb {
-            "print" if n == 0 => (true, dump(&p)),
-            "print" => (n < 5, String::new()),
-            _ => (true, String::new()),
+            "print" if n < 5 => (0, dump(&p)),
+            "print" => not_found(),
+            _ => (0, String::new()),
         });
         assert_eq!(stop_with(&h.home, Some(&h.home), &m).unwrap().data, json!({}));
         let t = target();
@@ -299,7 +413,7 @@ mod tests {
     #[test]
     fn stop_reports_an_agent_that_never_leaves() {
         let h = homes();
-        let m = mock(|_, _| (true, String::new()));
+        let m = mock(|_, _| (0, String::new()));
         let r = stop_wait(&h.home, Some(&h.home), &m, Duration::from_millis(1));
         assert_eq!(r.err().unwrap().detail.unwrap()["step"], json!("bootout_wait"));
     }
@@ -312,16 +426,18 @@ mod tests {
         let p = with_plist(&h.home);
         let state = RefCell::new(false);
         let m = mock(|verb, _| match verb {
-            "print" => (*state.borrow(), if *state.borrow() { dump(&p) } else { String::new() }),
+            "print" if *state.borrow() => (0, dump(&p)),
+            "print" => not_found(),
+            "print-disabled" => disabled_list(),
             "bootstrap" => {
                 *state.borrow_mut() = true;
-                (true, String::new())
+                (0, String::new())
             }
             "bootout" => {
                 *state.borrow_mut() = false;
-                (true, String::new())
+                (0, String::new())
             }
-            _ => (false, String::new()),
+            _ => panic!("unexpected verb {verb}"),
         });
         assert_eq!(start_with(&h.home, Some(&h.home), &m).unwrap().data, json!({}));
         assert_eq!(start_with(&h.home, Some(&h.home), &m).unwrap().data, json!({ "already": true }));
@@ -330,8 +446,10 @@ mod tests {
         let (uid, t) = (uid(), target());
         let want = vec![
             format!("print {t}"),
+            format!("print-disabled gui/{uid}"),
             format!("bootstrap gui/{uid} {}", p.display()),
             format!("print {t}"),
+            format!("print-disabled gui/{uid}"),
             format!("print {t}"),
             format!("bootout {t}"),
             format!("print {t}"),
@@ -348,9 +466,20 @@ mod tests {
     fn start_under_an_alias_bootstraps_the_canonical_plist() {
         let h = homes();
         let p = with_plist(&h.home);
-        let m = mock(|verb, _| (verb != "print", String::new()));
-        assert_eq!(start_with(&h.alias, Some(&h.home), &m).unwrap().data, json!({}));
-        assert_eq!(calls(&m)[1], format!("bootstrap gui/{} {}", uid(), p.display()));
+        let m = mock(|verb, _| match verb {
+            "print" => not_found(),
+            "print-disabled" => disabled_list(),
+            "bootstrap" => (0, String::new()),
+            _ => panic!("unexpected verb {verb}"),
+        });
+        assert_eq!(
+            start_with(&h.alias, Some(&h.home), &m).unwrap().data,
+            json!({})
+        );
+        assert_eq!(
+            calls(&m)[2],
+            format!("bootstrap gui/{} {}", uid(), p.display())
+        );
     }
 
     // U6/U7: an agent loaded from another plist is neither stopped nor
@@ -360,7 +489,7 @@ mod tests {
         let h = homes();
         with_plist(&h.home);
         let foreign = agent_plist_path(&h.other);
-        let m = mock(|_, _| (true, dump(&foreign)));
+        let m = mock(|_, _| (0, dump(&foreign)));
         let e = stop_with(&h.home, Some(&h.home), &m).err().unwrap();
         assert!(e.message.contains(&format!("launchctl bootout {}", target())), "{}", e.message);
         let d = e.detail.unwrap();
@@ -377,9 +506,9 @@ mod tests {
         let h = homes();
         let canon = agent_plist_path(&h.home);
         let m = mock(|verb, n| match verb {
-            "print" if n == 0 => (true, dump(&canon)),
-            "print" => (false, String::new()),
-            _ => (true, String::new()),
+            "print" if n == 0 => (0, dump(&canon)),
+            "print" => not_found(),
+            _ => (0, String::new()),
         });
         assert_eq!(stop_with(&h.alias, Some(&h.home), &m).unwrap().data, json!({}));
         let t = target();
@@ -387,9 +516,9 @@ mod tests {
         // And the reverse: canonical HOME, launchd loaded it via the alias.
         let aliased = agent_plist_path(&h.alias);
         let m = mock(|verb, n| match verb {
-            "print" if n == 0 => (true, dump(&aliased)),
-            "print" => (false, String::new()),
-            _ => (true, String::new()),
+            "print" if n == 0 => (0, dump(&aliased)),
+            "print" => not_found(),
+            _ => (0, String::new()),
         });
         assert_eq!(stop_with(&h.home, Some(&h.alias), &m).unwrap().data, json!({}));
     }
@@ -399,7 +528,7 @@ mod tests {
     fn trailing_slash_home_is_the_login_home() {
         let h = homes();
         let slash = PathBuf::from(format!("{}/", h.home.display()));
-        let m = mock(|_, _| (false, String::new()));
+        let m = mock(|_, _| not_found());
         assert_eq!(stop_with(&slash, Some(&h.home), &m).unwrap().data, json!({ "already": true }));
     }
 
@@ -409,9 +538,9 @@ mod tests {
     fn missing_path_line_proceeds() {
         let h = homes();
         let m = mock(|verb, n| match verb {
-            "print" if n == 0 => (true, "something = {\n\tstderr path = /x\n}\n".to_string()),
-            "print" => (false, String::new()),
-            _ => (true, String::new()),
+            "print" if n == 0 => (0, "something = {\n\tstderr path = /x\n}\n".to_string()),
+            "print" => not_found(),
+            _ => (0, String::new()),
         });
         assert_eq!(stop_with(&h.home, Some(&h.home), &m).unwrap().data, json!({}));
     }

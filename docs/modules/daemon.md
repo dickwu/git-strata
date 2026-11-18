@@ -1484,3 +1484,39 @@ holds are reported as before.
 `warning_times` keeps the hold's start for it. Tests shorten the maximum at run
 time with `Locks::set_background_hold_max` (test-seams), not with an `Options`
 field.
+
+## Configuration preflight and upgrade startup
+
+`git-stratad --check-config PATH` reads the supplied TOML and checks the
+configuration, canonical paths and volume compatibility. A new data root may
+be absent. Its nearest existing ancestor must be a canonical directory on a
+volume that supports APFS clones. A dangling symbolic link in that path fails
+preflight. The repo directories must be on the same volume. The command opens
+no store or socket and creates no directories.
+It prints one JSON line, `{"ok":true,"error":null}` on exit 0. On exit 1,
+`ok` is false, `error` contains a `StrataError`, and stderr carries the
+message. Argument failures follow the same format.
+
+`git-stratad --print-plist [ABSOLUTE_BIN]` renders the LaunchAgent without
+installing it. It requires an absolute `HOME`. Both the print flag and the
+installer use `RunAtLoad` and set `KeepAlive.SuccessfulExit` to false. A
+non-zero daemon exit permits a launchd restart. A successful exit leaves the
+loaded job stopped until a start is requested or the agent is loaded at the
+next login. `git-strata daemon start` kickstarts a stopped job without `-k`
+and bootstraps an unloaded agent. An enabled job that is already running
+returns `{already:true}`. A disabled label returns `Unsupported` with
+`detail.reason = "agent_disabled"`, even if the job is running.
+`git-strata daemon stop` waits for launchd's explicit service-not-found
+reply (exit 113 for that label and GUI domain).
+
+Before store open, the daemon durably replaces
+`~/Library/Application Support/git-strata/store_state.json` with a snapshot
+containing `root` and `migrating_to`. A successful open replaces it with
+`{root, user_version, migrated_from, at}`. The timestamp is UTC RFC 3339.
+`migrated_from` is the source schema when open produced a new migration
+backup and null on an ordinary open. Readers treat an absent or unreadable
+snapshot, a `migrating_to` marker or a `root` that differs from the
+configured data root as an unknown schema. A failed or interrupted migration
+leaves the marker in place. If the final snapshot write fails, startup
+reports the failure. A later successful open can refresh `user_version`
+with `migrated_from` set to null.

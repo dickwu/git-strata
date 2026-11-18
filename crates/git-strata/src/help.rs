@@ -106,6 +106,8 @@ const ERRORS: &str = "ERRORS (code -> what an agent does)
   Busy pins_tightened rerun with the newly applied config
   Busy reload_pending rerun config reload; its current attempt continues
   Unsupported daemon_too_old  ask the owner to upgrade/restart
+  Unsupported agent_disabled  ask the human to open GIT STRATA to finish the update.
+                              daemon start is human-only. Never run launchctl.
   InvalidInput config_rejected  fallback if the rejected report has no reason;
                                otherwise the daemon reason is forwarded.
                                Inspect data.reasons and data.restart_required
@@ -702,7 +704,8 @@ EXAMPLES
   git-strata daemon status   # {running, socket, session?, holders, unknown_publishes,
                             #  alerts, alerts_at, pins_meta, config?:{generation,hash,loaded_at,last_attempt,
                             #                   restart_required}}
-  git-strata daemon start    # launchctl bootstrap gui/<uid> <plist>; {already:true} if loaded
+  git-strata daemon start    # bootstrap if unloaded, kickstart without -k if loaded
+                            # and stopped, {already:true} if enabled and running
   git-strata daemon stop     # launchctl bootout; waits up to 10 s until unloaded
 
 config is copied when the daemon returns it; absent when down or omitted by an
@@ -722,8 +725,9 @@ ERRORS InvalidInput no_plist (LaunchAgent not installed: tell the human; do
 not write the plist yourself), InvalidInput foreign_home (HOME is not the login
 home; nothing done), InvalidInput foreign_agent (the loaded agent comes from
 another plist, e.g. one bootstrapped from a temp HOME; nothing done, the
-message names the `launchctl bootout` the human can run), Unknown launchctl
-(launchctl failed or timed out).
+message names the `launchctl bootout` the human can run), Unsupported agent_disabled
+(disabled launch agent. Ask the human to open GIT STRATA to finish the update),
+Unknown launchctl (launchctl failed or timed out).
 ";
 
 pub const RESOLVE_AFTER: &str = concat!(

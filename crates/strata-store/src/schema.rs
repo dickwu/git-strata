@@ -650,6 +650,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compiled_store_schema_matches_latest() {
+        assert_eq!(strata_types::STORE_SCHEMA, LATEST);
+    }
+
+    #[test]
     fn migrations_are_contiguous_and_set_their_version() {
         assert!(BASE_DDL.contains("PRAGMA user_version = 1;"));
         for (i, m) in MIGRATIONS.iter().enumerate() {

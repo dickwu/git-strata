@@ -43,6 +43,7 @@ All three keys are always present; `data` is never null. Branch on
 | `InvalidInput` (`shown_required`) | Use a CLI that sends the displayed flags with `config relax`. |
 | `InvalidInput` (`config_not_applied`) | Apply the current file with `config reload` before `config relax`. |
 | `Unsupported` (`daemon_too_old`) | The daemon lacks the requested feature. Ask the human to install matching CLI/daemon versions and restart the daemon (`config reload` exits 4); do not resend unknown fields to an old daemon. |
+| `Unsupported` (`agent_disabled`) | The launch agent is disabled and `daemon start` is human-only. Ask the human to open GIT STRATA to finish the update. Never run `launchctl`. |
 | `NotTty` | Command needs a human at a terminal. Stop; give the exact command to the human. |
 | `NotConfirmed` | Human confirmation failed / was cancelled / expired. Report it; the human reruns. Exception: `detail.reason` `plan_changed` (publish) means no confirmation was attempted and nothing was written: rerun the same command yourself first; if that rerun returns `NotTty`, hand the command to the human. |
 | `AmbiguousMatch` | Ticket matches several sessions; retry with an id from `detail`. |

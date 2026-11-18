@@ -206,14 +206,14 @@ plist; installing it is a human step. Its content (from
 `strata_daemon::plist::plist_text`):
 
 - `Label` `com.gwd.git-stratad`; `ProgramArguments` the absolute path of `git-stratad`
-- `RunAtLoad` true, `KeepAlive` true, `LimitLoadToSessionType` `Aqua`, `ProcessType` `Interactive`, `ExitTimeOut` 900 (a stop waits for in-flight writes instead of killing them)
+- `RunAtLoad` true, `KeepAlive` with `SuccessfulExit` false, `LimitLoadToSessionType` `Aqua`, `ProcessType` `Interactive`, `ExitTimeOut` 900 (a stop waits for in-flight writes)
 - `EnvironmentVariables.PATH` `~/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`
 - `StandardErrorPath` `~/Library/Application Support/git-strata/daemon.err.log`
 
 | Command | What it does | Result |
 | --- | --- | --- |
 | `git-strata daemon status` | Asks the socket; never fails for a down daemon or missing config | `{running, socket, session?, holders:[], unknown_publishes:[], alerts:[], config?:{generation,hash,loaded_at,last_attempt,restart_required}, version?, pid?, started?, activity?, busy?, volume?, scan?}` |
-| `git-strata daemon start` | `launchctl bootstrap gui/<uid> <plist>` | `{}`; `{already:true}` if loaded; `InvalidInput` `no_plist` if the plist is missing; `foreign_home` / `foreign_agent` (below) |
+| `git-strata daemon start` | Bootstraps an unloaded agent or kickstarts a loaded, stopped agent | `{}` on start, `{already:true}` if running. `InvalidInput` `no_plist` if the plist is missing. A disabled agent returns `Unsupported` (`agent_disabled`). Open GIT STRATA to finish an app update if one is in progress. See `foreign_home` / `foreign_agent` below. |
 | `git-strata daemon stop` | `launchctl bootout`, then waits up to 10 s until launchd drops the agent | `{}`; `Unknown` `launchctl` (`step: bootout_wait`) on timeout; `foreign_home` / `foreign_agent` (below) |
 
 `daemon status` copies `config` from the daemon when available; it is absent
@@ -1040,6 +1040,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Corrupt` | store damage; stop, tell the human |
 | `PortInUse` | `already_running`: reuse the server this workspace already runs; `foreign`: run `detail.fix` (`session ports --reassign`) for your own session, then `exec` again |
 | `Unsupported` (`daemon_too_old`) | the daemon lacks the requested feature (e.g. sync, dev-port leases or config reload); ask the human to install matching CLI/daemon versions and restart the daemon (`config reload` exits 4) |
+| `Unsupported` (`agent_disabled`) | the launch agent is disabled and `daemon start` is human-only. Ask the human to open GIT STRATA to finish the update. Never run `launchctl`. |
 
 The full closed set of codes: Conflict, HeadMoved, Dirty, Busy, NoSuchPath,
 NoSuchBranch, NoSuchCommit, NoCommit, NoMergeBase, IsDirectory, NotDirectory,

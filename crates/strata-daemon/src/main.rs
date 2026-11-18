@@ -1,6 +1,7 @@
 //! git-stratad: the per-user daemon. Started by launchd (`RunAtLoad`,
 //! `KeepAlive.SuccessfulExit = false`); never exits on idle. With
-//! `--version` or `--print-plist [BIN]` it only prints (plist::Invocation).
+//! `--version`, `--print-plist [BIN]` or `--check-config PATH` it
+//! only prints (plist::Invocation).
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -129,8 +130,7 @@ fn run() -> Result<(), StrataError> {
     result.and(closed)
 }
 
-/// `--version` / `--print-plist` (plist::Invocation): print and exit,
-/// before the seams check, the lock or anything under HOME.
+/// Print and exit before the seams check, the lock or server startup.
 fn print(inv: Invocation) -> Result<(), StrataError> {
     match inv {
         Invocation::Serve => unreachable!("serve is not a print"),
@@ -149,23 +149,33 @@ fn print(inv: Invocation) -> Result<(), StrataError> {
             };
             print!("{}", plist::plist_text(&bin, &home));
         }
+        Invocation::CheckConfig(path) => {
+            plist::check_config(&path)?;
+            println!("{}", serde_json::json!({ "ok": true, "error": null }));
+        }
     }
     Ok(())
 }
 
 fn main() -> ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    // --check-config has a JSON result. For --print-plist, keep stdout
+    // empty on every failure so a redirected file never contains JSON.
+    let print_failed: fn(&StrataError) -> ExitCode =
+        if args.first().is_some_and(|arg| arg == "--check-config") {
+            fail
+        } else {
+            fail_quiet
+        };
     match plist::parse_invocation(&args) {
         Ok(Invocation::Serve) => {}
-        // Print invocations report errors on stderr only, so a failed
-        // `--print-plist > file` never leaves JSON in the plist.
         Ok(inv) => {
             return match print(inv) {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(e) => fail_quiet(&e),
+                Err(e) => print_failed(&e),
             };
         }
-        Err(e) => return fail_quiet(&e),
+        Err(e) => return print_failed(&e),
     }
     match run() {
         Ok(()) => ExitCode::SUCCESS,

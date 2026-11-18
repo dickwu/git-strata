@@ -162,7 +162,16 @@ fn config_relax_writes_pin_after_validate() {
     let names: Vec<String> = fs::read_dir(&fx.config_dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     let mut names = names;
     names.sort();
-    assert_eq!(names, vec!["audit.jsonl", "config.toml", "daemon.lock", "pins.json"]);
+    assert_eq!(
+        names,
+        vec![
+            "audit.jsonl",
+            "config.toml",
+            "daemon.lock",
+            "pins.json",
+            "store_state.json"
+        ]
+    );
 }
 
 #[test]
@@ -303,7 +312,7 @@ fn plist_has_label_keepalive_aqua_and_d1_path() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["Label"], "com.gwd.git-stratad");
-    assert_eq!(v["KeepAlive"], true);
+    assert_eq!(v["KeepAlive"], serde_json::json!({"SuccessfulExit": false}));
     assert_eq!(v["RunAtLoad"], true);
     assert_eq!(v["LimitLoadToSessionType"], "Aqua");
     assert_eq!(v["ProcessType"], "Interactive");

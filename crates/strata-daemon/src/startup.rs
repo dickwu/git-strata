@@ -33,6 +33,9 @@ use crate::locks::Locks;
 use crate::rpc::{self, Reply, Request};
 use crate::{DaemonWarning, GC_KEEP, LOCK_WAIT, MAX_FRAME, PinnedFlags, Result};
 
+#[path = "store_state.rs"]
+mod store_state;
+
 /// Review P1-3: connections served at once; more wait in the backlog.
 pub const MAX_CONNS: usize = 128;
 
@@ -370,7 +373,11 @@ pub fn prepare_locked(
     }
     // 6. The store checks its own clean-shutdown marker.
     let checkouts: Vec<&Path> = config.repos.values().map(|r| r.path.as_path()).collect();
-    let store = Arc::new(Store::open(&config.paths.root, &checkouts)?);
+    let store = Arc::new(store_state::open(
+        &opts.config_dir,
+        &config.paths.root,
+        &checkouts,
+    )?);
     // deps-drift §2.4: publish's install-input snapshots of a stopped daemon.
     for p in strata_deps::clean_snapshots(&config.paths) {
         tracing::warn!(path = %p.display(), "an install-input snapshot could not be removed");

@@ -15,6 +15,10 @@ use strata_types::{Code, StrataError};
 
 use crate::{AGENT_LABEL, Result};
 
+#[path = "check_config.rs"]
+mod check_config;
+pub use check_config::check_config;
+
 /// `launchctl bootstrap` / `bootout` for one plist.
 pub trait Launchd {
     fn bootstrap(&self, plist: &Path) -> Result<()>;
@@ -56,12 +60,12 @@ fn xml(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// The plist text for `bin` (absolute) and `home` (absolute).
 /// Review P1-5: launchd's SIGTERM → SIGKILL grace. Above the longest
 /// bounded git call (attach, 600 s) so a stop drains in-flight writes
 /// instead of killing a ref transaction (launchd's default is about 20 s).
 pub const EXIT_TIMEOUT_SECS: u64 = 900;
 
+/// The plist text for `bin` (absolute) and `home` (absolute).
 pub fn plist_text(bin: &Path, home: &Path) -> String {
     let err = crate::err_log_path(&crate::config_dir_for_home(home));
     format!(
@@ -76,7 +80,10 @@ pub fn plist_text(bin: &Path, home: &Path) -> String {
     <string>{bin}</string>
   </array>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>LimitLoadToSessionType</key>
@@ -124,11 +131,14 @@ pub enum Invocation {
     /// `~/Library/LaunchAgents/com.gwd.git-stratad.plist`. A Homebrew
     /// install passes the stable `opt` path so upgrades keep it valid.
     PrintPlist(Option<PathBuf>),
+    /// `--check-config PATH`: validate an explicit file without starting.
+    CheckConfig(PathBuf),
 }
 
 pub const USAGE: &str = "usage: git-stratad                          serve (launchd starts it this way)
        git-stratad --version | -V
        git-stratad --print-plist [ABSOLUTE_BIN]  print the LaunchAgent plist for $HOME
+       git-stratad --check-config PATH         validate a config and print JSON
        git-stratad --help | -h
 ";
 
@@ -146,6 +156,7 @@ pub fn parse_invocation(args: &[std::ffi::OsString]) -> Result<Invocation> {
             }
             Ok(Invocation::PrintPlist(Some(bin)))
         }
+        [a, path] if a == "--check-config" => Ok(Invocation::CheckConfig(PathBuf::from(path))),
         _ => Err(bad(format!(
             "unexpected arguments {:?}; see git-stratad --help",
             args
@@ -271,8 +282,10 @@ pub fn install_agent_with(bin: &Path, home: &Path, launchd: &dyn Launchd) -> Res
             .mode(0o644)
             .open(&tmp)
             .map_err(|e| classify_io_error(&e, IoSide::Write, &tmp))?;
-        f.write_all(plist_text(bin, home).as_bytes()).map_err(|e| classify_io_error(&e, IoSide::Write, &tmp))?;
-        f.sync_all().map_err(|e| classify_io_error(&e, IoSide::Write, &tmp))?;
+        f.write_all(plist_text(bin, home).as_bytes())
+            .map_err(|e| classify_io_error(&e, IoSide::Write, &tmp))?;
+        f.sync_all()
+            .map_err(|e| classify_io_error(&e, IoSide::Write, &tmp))?;
     }
     fs::rename(&tmp, &path).map_err(|e| classify_io_error(&e, IoSide::Write, &path))?;
     launchd.bootstrap(&path)?;
