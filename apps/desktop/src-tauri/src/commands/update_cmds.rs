@@ -22,12 +22,18 @@ fn unavailable<T>() -> Result<T, GuiError> {
 
 #[tauri::command]
 pub fn update_state() -> Result<UpdateState, GuiError> {
-    unavailable()
+    match crate::update::check::checker() {
+        Some(checker) => Ok(checker.state()),
+        None => unavailable(),
+    }
 }
 
 #[tauri::command]
 pub async fn update_check() -> Result<UpdateState, GuiError> {
-    unavailable()
+    match crate::update::check::checker() {
+        Some(checker) => checker.manual().await,
+        None => unavailable(),
+    }
 }
 
 #[tauri::command]

@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::lifecycle;
 use crate::tray_model::{Icon, Snapshot, TrayModel, model};
+use crate::update::check;
 
 const TRAY_ID: &str = "main";
 /// Payload: the waiting item's id (`waiting:deps:12`); the window refetches
@@ -167,6 +168,13 @@ fn menu<R: Runtime>(app: &AppHandle<R>, m: &TrayModel) -> tauri::Result<Menu<R>>
         true,
         None::<&str>,
     )?));
+    items.push(Box::new(MenuItem::with_id(
+        app,
+        "check_updates",
+        "Check for updates…",
+        check::checked_source().is_some(),
+        None::<&str>,
+    )?));
     items.push(Box::new(PredefinedMenuItem::separator(app)?));
     items.push(Box::new(MenuItem::with_id(
         app,
@@ -180,6 +188,7 @@ fn menu<R: Runtime>(app: &AppHandle<R>, m: &TrayModel) -> tauri::Result<Menu<R>>
 }
 
 pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    check::start(app);
     let m = model(&Snapshot::default(), SystemTime::now());
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(m.icon)?)
@@ -192,6 +201,14 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             match id.as_str() {
                 "quit" => app.exit(0),
                 "open" => lifecycle::bring_to_front(&crate::TauriShell(app.clone())),
+                "check_updates" => {
+                    lifecycle::bring_to_front(&crate::TauriShell(app.clone()));
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let result = check::manual().await;
+                        let _ = handle.emit_to("main", check::MANUAL_RESULT_EVENT, result);
+                    });
+                }
                 w if w.starts_with("waiting:") => {
                     lifecycle::bring_to_front(&crate::TauriShell(app.clone()));
                     let _ = app.emit(OPEN_EVENT, w.to_string());
