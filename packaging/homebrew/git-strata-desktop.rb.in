@@ -16,18 +16,17 @@ cask "git-strata-desktop" do
     strategy :github_latest
   end
 
+  auto_updates true
   depends_on arch: :arm64
-  depends_on formula: "dickwu/tap/git-strata"
   depends_on macos: :ventura
 
   app "GIT STRATA.app"
 
   uninstall quit: "io.github.dickwu.git-strata"
 
-  # Only the app's own bundle-id paths. Never ~/Library/Application Support/git-strata:
-  # that is the daemon's config, pins and store, owned by the git-strata formula.
+  # Keep the app's Application Support directory for update and daemon move
+  # recovery. Preserve the daemon's config, pins and configured data root.
   zap trash: [
-    "~/Library/Application Support/io.github.dickwu.git-strata",
     "~/Library/Caches/io.github.dickwu.git-strata",
     "~/Library/Preferences/io.github.dickwu.git-strata.plist",
     "~/Library/Saved Application State/io.github.dickwu.git-strata.savedState",
@@ -40,7 +39,44 @@ cask "git-strata-desktop" do
     If the app is not listed there, run:
       sudo xattr -dr com.apple.quarantine "/Applications/GIT STRATA.app"
 
-    The app drives the daemon from the git-strata formula (LaunchAgent
-    com.gwd.git-stratad); see `brew info dickwu/tap/git-strata`.
+    This app includes the daemon and command-line tools. On a fresh install,
+    open GIT STRATA and choose Set up daemon in the Daemon panel.
+
+    Run this before upgrading an existing desktop install whose daemon uses
+    the formula. It keeps Homebrew from autoremoving the formula when the cask
+    drops the dependency.
+
+      brew tab --installed-on-request dickwu/tap/git-strata
+
+    The 0.3.0 release notes show the order for upgrading the formula and app.
+      https://github.com/dickwu/git-strata/blob/main/docs/release-notes/v0.3.0.md
+
+    After moving the daemon into the app, use the in-app updater. Homebrew can
+    still replace the app, for example with a greedy upgrade. If it does, follow
+    the app's Restart daemon prompt. A daemon crash before that restart can
+    cause launchd to start the new bundled binary before you confirm the change.
+
+    Once the LaunchAgent runs the bundled daemon, quit GIT STRATA and stop
+    the daemon before uninstalling the app.
+
+      git-strata daemon stop
+
+    Use the app's copy if git-strata is absent from PATH.
+
+      "/Applications/GIT STRATA.app/Contents/MacOS/git-strata" daemon stop
+
+    If the stop times out, leave the files in place and wait for daemon work
+    to finish. Resolve any other stop error before continuing. Check the job
+    with launchctl print.
+
+      launchctl print gui/$(id -u)/com.gwd.git-stratad
+
+    If the job is still loaded after a timeout, retry the stop and check again.
+    Continue only when print explicitly reports that the service could not be
+    found in this domain (exit 113). Remove the plist at
+    ~/Library/LaunchAgents/com.gwd.git-stratad.plist and the git-strata and
+    git-stratad symlinks in /opt/homebrew/bin (or /usr/local/bin) that point
+    into this app. Then run `brew uninstall --cask dickwu/tap/git-strata-desktop`
+    or move the app to the Trash. Keep the config, store and sessions.
   EOS
 end

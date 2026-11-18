@@ -687,6 +687,18 @@ GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 需要重启的配�
 - **GUI 自身不需要 TCC 授权**（G5）。
 - **以后有了 Developer ID**：换证书 = DR 变 = 所有用户重新授权一次；公证后第 0 步可删。
 
+### Desktop updates from 0.3.0
+
+- **D-U1 (fixed `desktop-updater` tag) is superseded.** The stable feed is
+  `https://github.com/dickwu/git-strata/releases/latest/download/latest.json`.
+  The release workflow signs the assembled app archive with a version-bound
+  signature and attaches the archive, signature and manifest to the draft
+  release.
+- **D-U3 (no opt-out toggle) is superseded.** **Check for updates automatically**
+  in Settings defaults to on and can be turned off. **Check for updates…** is
+  still available manually. Installing an update requires the user to select
+  it in the app.
+
 ## 7. 测试清单
 
 | 测试名 | 断言 | 来源（矩阵行 或 新增） |

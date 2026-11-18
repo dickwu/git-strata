@@ -37,9 +37,11 @@ When this skill and the binary disagree, the binary wins:
 
 ## Before you start
 
-- `git-strata daemon status` must show `data.running: true`. If it does not,
-  keep working and tell the human the daemon is down; they run
-  `git-strata daemon start`. **Never start, stop or restart the daemon
+- Check `git-strata daemon status` for `data.running: true`. If it is down,
+  keep working and report it to the human. During an in-app update, downtime
+  is expected. Let the app finish restarting the daemon. Outside an update,
+  the human can run `git-strata daemon start`.
+  **Never start, stop or restart the daemon
   yourself**, never run `launchctl` or `brew services`, and never write its
   plist, not even with a temp `HOME`. Without the daemon only `status`,
   `ls`, `grep`, `files`, `diff`, `deps list`, `daemon status`, a repeated
@@ -215,7 +217,7 @@ Unknown help topics return an `InvalidInput` / `help_topic` envelope.
 
 | You got | Do |
 | --- | --- |
-| `Busy daemon_down` | keep working; tell the human; retry after `daemon status` shows running |
+| `Busy daemon_down` | keep working and report it to the human. Let an in-app update finish. Retry after `daemon status` shows running. |
 | `Busy too_many_open_files` | the daemon is out of file handles; tell the human; do not retry in a loop or start another daemon ([errors.md](errors.md)) |
 | `Busy publish_unknown` | do not loop; tell the human ([errors.md](errors.md)) |
 | `Busy client_timeout` | back off before retrying; nothing was changed by that request |

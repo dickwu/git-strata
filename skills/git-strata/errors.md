@@ -24,7 +24,7 @@ All three keys are always present; `data` is never null. Branch on
 
 | `error.code` (`detail.reason`) | What an agent should do |
 | --- | --- |
-| `Busy` (`daemon_down`) | Keep working; tell the human the daemon is down (they run `git-strata daemon start`). Retry once `daemon status` shows `running`. Never start it yourself. |
+| `Busy` (`daemon_down`) | Keep working and report it to the human. Let an in-app update finish. Retry once `daemon status` shows `running`. Never start it yourself. See [Daemon down](#daemon-down). |
 | `Busy` (`too_many_open_files`) | The daemon answered but is out of file handles. Tell the human; do not treat this as an id mismatch or start another daemon. The desktop shows an Alert and keeps waiting items visible. |
 | `Busy` (`workspace_changed`) | A file changed while reading it; retry. |
 | `Busy` (`publish_unknown`) | An earlier publish of this repo is `Unknown`. It clears by itself once origin has that commit (checked on each publish). Do not loop: tell the human; they may run `git-strata push <REPO>` first. |
@@ -82,10 +82,12 @@ a `fix` yourself (SKILL.md, hard rule 1).
 / `stop` are human-only; never run them, or `launchctl`, yourself, not even
 with a temp `HOME`: the LaunchAgent domain is per user, not per HOME). Check
 it with `git-strata daemon status` (`data.running`). If it is down, keep
-working in the workspace and tell the human it is down so they can run
-`git-strata daemon start`. While it is down `checkpoint` (by hand or from a
-hook) answers `Busy` `daemon_down` and that checkpoint is not recorded: tell the human which edits
-were not checkpointed. Do not write a plist yourself.
+working in the workspace and report it to the human. During an in-app update,
+`daemon_down` replies are expected. Let the app finish restarting the daemon.
+Outside an update, the human can run `git-strata daemon start`. While it is
+down, `checkpoint` (by hand or from a hook) answers `Busy` `daemon_down`.
+Tell the human which edits still need a checkpoint. Do not write, move or
+delete the plist yourself.
 
 Without the daemon, only these work (read-only, straight from the store):
 `status`, `ls`, `grep`, `files`, `diff`, `deps list`, `daemon status`, a

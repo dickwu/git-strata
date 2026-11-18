@@ -19,7 +19,7 @@ agents with `npx skills add`, see [Agent skill](#agent-skill)).
 
 - [Install and daemon](#install-and-daemon)
 - [Agent skill](#agent-skill)
-- [macOS Installation](#macos-installation)
+- [macOS troubleshooting for 0.3.0 and later](#macos-troubleshooting-for-030-and-later)
 - [Paths](#paths)
 - [Output: the JSON envelope](#output-the-json-envelope)
 - [Session lifecycle](#session-lifecycle)
@@ -42,6 +42,116 @@ data root on one APFS volume. macOS only: git-strata uses APFS clones,
 FSEvents and launchd.
 
 ### Homebrew
+
+#### Updating the app
+
+These desktop instructions apply to GIT STRATA 0.3.0 and later in
+`/Applications`. The status bar shows the app and running daemon versions.
+To use in-app updates, first [move your existing daemon](#move-the-daemon-into-the-app)
+or [set it up from the app](#set-up-daemon).
+
+Choose **Check for updates…** from the menu bar or the **⌘K** command menu.
+**Check for updates automatically** is on by default in Settings. Choose
+**Update to …** to review and install a newer stable release. The app waits
+for daemon work to finish before replacing the bundle. New writes may get
+`Busy` with reason `draining` while the app waits. `Busy` with reason
+`daemon_down` is expected during the restart. Agents should report the
+interruption and let the app finish. Retry any unrecorded checkpoints once
+`git-strata daemon status` reports `data.running: true`.
+
+Use the in-app updater after the move. If Homebrew replaces the app, follow
+the app's **Restart daemon** prompt and review any store schema warning. A
+daemon crash before that restart can cause launchd to start the new bundled
+binary before you confirm the change. If the app fails to open after an
+interruption, see [macOS troubleshooting for 0.3.0 and later](#macos-troubleshooting-for-030-and-later).
+
+#### Move the daemon into the app
+
+If your desktop install uses the Homebrew formula's daemon, keep agents
+idle while you switch. Before upgrading the cask to 0.3.0, run
+`brew tab --installed-on-request dickwu/tap/git-strata` to keep Homebrew from
+autoremoving the formula. Use the named cask upgrade
+`brew upgrade --cask dickwu/tap/git-strata-desktop` and verify both packages'
+versions before restarting the formula's daemon. Follow the
+[0.3.0 transition steps](docs/release-notes/v0.3.0.md#move-an-existing-desktop-installation).
+
+In the **Daemon** panel, choose **Move the daemon into the app**. Once the app
+confirms the bundled daemon is running, remove the unused formula with
+`brew uninstall dickwu/tap/git-strata`. Leave the daemon running and keep
+`~/Library/LaunchAgents/com.gwd.git-stratad.plist`. Immediately choose
+**Install command-line tool** so hooks and agents can find `git-strata` again.
+
+#### Set up daemon
+
+For a fresh desktop installation on Apple silicon, run
+`brew install --cask dickwu/tap/git-strata-desktop` and open GIT STRATA from
+`/Applications`. If macOS blocks the first open, see
+[macOS troubleshooting for 0.3.0 and later](#macos-troubleshooting-for-030-and-later).
+
+In the **Daemon** panel, choose **Set up daemon**. Select your data root and
+repository folders on the same APFS volume to create a configuration. If you
+already have a configuration, the app keeps it and asks for confirmation
+before starting with the retained store. The app validates the configuration
+before starting the daemon.
+
+##### macOS troubleshooting for 0.3.0 and later
+
+If macOS blocks the first open, choose **Open Anyway** in **System Settings →
+Privacy & Security**. If that option is unavailable on a fresh cask install,
+see the first-open instructions in `brew info --cask dickwu/tap/git-strata-desktop`.
+
+If the app still won't open, quit it if it's running, move these folders to
+the Trash if present, then reopen the app.
+
+- `~/Library/Caches/io.github.dickwu.git-strata/`
+- `~/Library/Saved Application State/io.github.dickwu.git-strata.savedState/`
+
+Keep `~/Library/Application Support/io.github.dickwu.git-strata/`. It holds
+`update.json`, the rollback archive under `previous/` and the saved
+LaunchAgent plist under `legacy/`. Reopen the installed app after an
+interruption so it can reconcile its update or move records.
+
+#### Command-line tool
+
+Choose **Install command-line tool** in the app to put `git-strata` and
+`git-stratad` on PATH. It links both names to the bundle in `/opt/homebrew/bin`.
+On a Mac without `/opt/homebrew`, it uses `/usr/local/bin` and asks for
+administrator permission. The app uses vacant paths or dangling symlinks and
+leaves existing formula links alone. A subsequent formula install can fail to
+link while the app's links are present. In-app updates keep the bundle at the
+same path, so the links follow the new version.
+
+#### Uninstall the desktop app
+
+If the LaunchAgent runs the bundled daemon, quit GIT STRATA and run
+`git-strata daemon stop`. If the command-line tool is off PATH, run
+`"/Applications/GIT STRATA.app/Contents/MacOS/git-strata" daemon stop` instead.
+If the stop times out, leave the files in place and wait for daemon work to
+finish. Resolve any other stop error before continuing. Check the job with
+`launchctl print gui/$(id -u)/com.gwd.git-stratad`. If the job is still loaded
+after a timeout, retry the stop and check again. Continue only if `print`
+explicitly reports that the service could not be found in this domain (exit 113).
+
+Remove `~/Library/LaunchAgents/com.gwd.git-stratad.plist` and the `git-strata`
+and `git-stratad` symlinks in `/opt/homebrew/bin` or `/usr/local/bin` that point
+into this app. Then run `brew uninstall --cask dickwu/tap/git-strata-desktop`
+or move the app to the Trash. Keep the config, store and sessions.
+
+With the 0.3.0 desktop cask, `brew uninstall --zap` keeps the app's Application
+Support folder and its [recovery records](#macos-troubleshooting-for-030-and-later).
+
+#### CLI-only or headless installation
+
+Install the formula with `brew install dickwu/tap/git-strata`. Run
+`brew info dickwu/tap/git-strata` and follow its caveats to set up, upgrade
+or uninstall the daemon. The setup commands create only missing files, so
+you can keep your existing LaunchAgent plist and configuration on reinstall.
+
+#### Formula-backed desktop releases through 0.2.x
+
+The legacy setup below is for a fresh 0.2.x installation with no existing
+LaunchAgent plist or config. For current installations and reinstalls, use
+the [formula caveats](#cli-only-or-headless-installation).
 
 ```sh
 brew install dickwu/tap/git-strata         # CLI + daemon (prebuilt, Apple silicon)
@@ -73,10 +183,9 @@ Use the single agent `com.gwd.git-stratad` above, not `brew services`: a
 second (`homebrew.mxcl.*`) agent would run a second daemon on the same socket
 and lock, and neither the CLI nor the GUI manages it.
 
-The desktop app (Apple silicon only for now) is a cask:
-`brew install --cask dickwu/tap/git-strata-desktop`. It uses the formula's daemon. If macOS
-blocks the first open, see [macOS Installation](#macos-installation). Release builds, signing
-modes and the tap update: [docs/release.md](docs/release.md).
+Desktop releases through 0.2.x use the formula's daemon. If macOS blocks the
+first open on those releases, see [Legacy macOS installation and reset](#legacy-macos-installation-and-reset-02x-and-earlier).
+For release builds, signing modes and tap updates, see [docs/release.md](docs/release.md).
 
 `git-stratad --version` prints the version; `git-stratad --print-plist [BIN]`
 prints the plist below for this `HOME` (BIN: absolute path, default the
@@ -229,6 +338,11 @@ settings, see [hooks.md](skills/git-strata/hooks.md).
 
 ## macOS Installation
 
+For GIT STRATA 0.3.0 and later, see
+[macOS troubleshooting for 0.3.0 and later](#macos-troubleshooting-for-030-and-later).
+
+### Legacy macOS installation and reset (0.2.x and earlier)
+
 Unless a release is notarized, macOS blocks the first open of the desktop app
 (`GIT STRATA.app`, from the cask). To allow it:
 
@@ -244,8 +358,9 @@ sudo xattr -dr com.apple.quarantine "/Applications/GIT STRATA.app"
 The formula's `git-strata` and `git-stratad` need no such step: Homebrew does
 not quarantine formula downloads (only cask downloads).
 
-If the app still will not start, reset its own state (bundle id
-`io.github.dickwu.git-strata`) and open it again:
+If the app still will not start and this Mac has stayed on 0.2.x or earlier,
+reset the legacy app's state (bundle id `io.github.dickwu.git-strata`) and
+open it again.
 
 ```sh
 rm -rf ~/Library/Application\ Support/io.github.dickwu.git-strata/
@@ -883,7 +998,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 
 | `error.code` (`detail.reason`) | Agent action |
 | --- | --- |
-| `Busy` (`daemon_down`) | tell the human (they run `git-strata daemon start`); retry once it runs |
+| `Busy` (`daemon_down`) | Report it to the human. During an [in-app update](#updating-the-app), let the app finish. Outside an update, the human can run `git-strata daemon start`. Retry once `daemon status` reports `running`. |
 | `Busy` (`workspace_changed`) | a file changed while read; retry |
 | `Busy` (`publish_unknown`) | an earlier publish of this repo has an unknown outcome; it clears once origin has that commit (checked at each publish), e.g. after the human runs `git-strata push REPO`; a definite remote refusal never blocks |
 | `Busy` (`port_unidentified` / `port_probe_error`) | `session exec` could not identify a port's holder; retry shortly |
