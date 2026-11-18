@@ -1,6 +1,8 @@
 # Update dickwu/homebrew-tap after a release (modelled on dickwu/r2's homebrew.yml).
-# Runs when a release is published (release.yml creates it as a draft; publishing
-# it by hand fires this), or by hand with a tag.
+# Official vX.Y.Z tags update the tap in release.yml's update-tap job, because a
+# release published with GITHUB_TOKEN does not fire this workflow. This workflow
+# remains for workflow_dispatch reruns, and for a release published by hand
+# (which does fire `release: published`).
 # Needs the repository secret HOMEBREW_TAP_TOKEN: a token with contents:write on
 # dickwu/homebrew-tap. Writes Formula/git-strata.rb and Casks/git-strata-desktop.rb
 # from packaging/homebrew/*.rb.in.
@@ -25,8 +27,10 @@ concurrency:
 
 jobs:
   update-tap:
-    # Pre-releases do not move Homebrew users; dispatch by hand to publish one anyway.
-    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    # Official repo only (render-tap.sh URLs always point at dickwu/git-strata).
+    # Stable vX.Y.Z tags only: a hand-published prerelease tag can have
+    # prerelease=false, and dispatch must not push one either.
+    if: github.repository == 'dickwu/git-strata' && (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
     runs-on: ubuntu-latest
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -34,7 +38,7 @@ jobs:
       - name: Version from tag
         id: version
         run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]] || { echo "::error::bad tag $TAG"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad tag $TAG (stable vX.Y.Z only)"; exit 1; }
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v5
@@ -73,7 +77,11 @@ jobs:
           put() { # local file, path in the tap
             local encoded existing
             encoded="$(base64 -w 0 "$1")"
-            existing="$(gh api "repos/dickwu/homebrew-tap/contents/$2" --jq '.sha' 2>/dev/null || true)"
+            # Public contents SHA; do not send the write token on the GET.
+            existing="$(curl -fsSL -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/dickwu/homebrew-tap/contents/$2" \
+              | jq -r '.sha // empty' 2>/dev/null || true)"
+            [[ "$existing" =~ ^[0-9a-f]{40}$ ]] || existing=""
             if [[ -n "$existing" ]]; then
               gh api "repos/dickwu/homebrew-tap/contents/$2" --method PUT \
                 --field message="chore: update $(basename "$2" .rb) to ${VERSION}" \

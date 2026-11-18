@@ -2,8 +2,9 @@
 # silicon runner, sign them, and attach them to a GitHub Release that the
 # dickwu/homebrew-tap formula (tarball), cask (DMG) and in-app updater download.
 #
-# Triggers: pushing a v* tag (builds + creates a draft release), or by hand (builds and
-# uploads workflow artifacts only; nothing is published).
+# Triggers: pushing a v* tag (builds, publishes the GitHub Release, and updates
+# the Homebrew tap), or by hand (builds and uploads workflow artifacts only;
+# nothing is published).
 #
 # Code signing uses a stable identity on dickwu/git-strata release tags:
 #   developer-id  APPLE_DEVELOPER_ID_P12 (base64 .p12), APPLE_DEVELOPER_ID_P12_PASSWORD;
@@ -16,9 +17,13 @@
 # The updater requires TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD.
 # What each means for Gatekeeper, TCC and Touch ID: docs/release.md.
 #
-# The release is created as a DRAFT. Publishing it (by hand, after checking the
-# files) fires homebrew.yml, which updates dickwu/homebrew-tap. A release made
-# with GITHUB_TOKEN would not trigger other workflows anyway.
+# A tag push publishes the GitHub Release (it is not left as a draft). That
+# makes the artifacts public for Homebrew and moves releases/latest, so the
+# in-app update is live when the workflow finishes. Publishing with
+# GITHUB_TOKEN does not trigger other workflows, so the update-tap job in this
+# workflow updates dickwu/homebrew-tap (version, URLs, sha256) with
+# HOMEBREW_TAP_TOKEN (contents:write on that repo). homebrew.yml remains for
+# workflow_dispatch reruns and for a release published by hand.
 name: Release
 
 on:
@@ -255,7 +260,7 @@ jobs:
           name: release-${{ needs.build.outputs.version }}-arm64
           path: dist
 
-      - name: Create (draft) or update the GitHub Release
+      - name: Create or update the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -281,7 +286,94 @@ jobs:
               exit 1
             fi
             gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
           else
-            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
               --title "git-strata $TAG" --notes-file notes.md --generate-notes
           fi
+
+  # GITHUB_TOKEN cannot fire homebrew.yml (release published event), so the tap
+  # is updated here after the GitHub Release is public. Homebrew fetches the
+  # tarball and DMG anonymously; a draft would 404.
+  update-tap:
+    needs: publish
+    # Official stable tags only. A fork tag would hash the fork's assets while
+    # render-tap.sh still points URLs at dickwu/git-strata. Pre-release tags
+    # (v0.3.0-rc.1 and similar) do not move Homebrew users.
+    if: github.repository == 'dickwu/git-strata' && github.event_name == 'push' && github.ref_type == 'tag' && !contains(github.ref_name, '-')
+    # Share the group with homebrew.yml so two PUTs cannot interleave and leave
+    # the formula and cask on different versions.
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Version from tag
+        id: version
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad tag $TAG"; exit 1; }
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+          sparse-checkout: |
+            packaging/homebrew
+            scripts/release
+
+      - name: Download the artifacts and compute SHA256
+        id: sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Prefer the API (GITHUB_TOKEN) so we do not race the public CDN.
+          draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          if [[ "$draft" != "false" ]]; then
+            echo "::error::release $TAG is still a draft; Homebrew needs a public release"
+            exit 1
+          fi
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "git-strata-${VERSION}-aarch64-apple-darwin.tar.gz" \
+            --pattern "Git-Strata_${VERSION}_arm64.dmg"
+          echo "tarball=$(sha256sum "git-strata-${VERSION}-aarch64-apple-darwin.tar.gz" | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "dmg=$(sha256sum "Git-Strata_${VERSION}_arm64.dmg" | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Render formula and cask
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA_TARBALL: ${{ steps.sha.outputs.tarball }}
+          SHA_DMG: ${{ steps.sha.outputs.dmg }}
+        run: |
+          scripts/release/render-tap.sh "$VERSION" "$SHA_TARBALL" "$SHA_DMG" out
+          cat out/Formula/git-strata.rb out/Casks/git-strata-desktop.rb
+
+      - name: Update dickwu/homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          [[ -n "$GH_TOKEN" ]] || { echo "::error::secret HOMEBREW_TAP_TOKEN is not set"; exit 1; }
+          put() { # local file, path in the tap
+            local encoded existing
+            encoded="$(base64 -w 0 "$1")"
+            # Public contents SHA; do not send the write token on the GET.
+            existing="$(curl -fsSL -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/dickwu/homebrew-tap/contents/$2" \
+              | jq -r '.sha // empty' 2>/dev/null || true)"
+            [[ "$existing" =~ ^[0-9a-f]{40}$ ]] || existing=""
+            if [[ -n "$existing" ]]; then
+              gh api "repos/dickwu/homebrew-tap/contents/$2" --method PUT \
+                --field message="chore: update $(basename "$2" .rb) to ${VERSION}" \
+                --field content="$encoded" --field sha="$existing" > /dev/null
+            else
+              gh api "repos/dickwu/homebrew-tap/contents/$2" --method PUT \
+                --field message="chore: add $(basename "$2" .rb) ${VERSION}" \
+                --field content="$encoded" > /dev/null
+            fi
+            echo "updated $2"
+          }
+          put out/Formula/git-strata.rb Formula/git-strata.rb
+          put out/Casks/git-strata-desktop.rb Casks/git-strata-desktop.rb

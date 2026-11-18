@@ -2,8 +2,8 @@
 # Render the dickwu/homebrew-tap formula and cask for a release.
 # usage: render-tap.sh <version> <tarball sha256> <dmg sha256> <out dir>
 # Writes <out>/Formula/git-strata.rb and <out>/Casks/git-strata-desktop.rb from
-# packaging/homebrew/*.rb.in. Used by .github/workflows/homebrew.yml; by hand,
-# pass a homebrew-tap checkout as <out dir>, then review and commit.
+# packaging/homebrew/*.rb.in. Used by the update-tap job in
+# .github/workflows/release.yml and by .github/workflows/homebrew.yml.
 set -euo pipefail
 version="$1"; tar_sha="$2"; dmg_sha="$3"; out="$4"
 root="$(cd "$(dirname "$0")/../.." && pwd)"

@@ -67,9 +67,9 @@ Before step 1, check all four and stop with a question if any fails: `$ARGUMENTS
 
    The commit holds the 16 version files, both lock files, the notes, any downgrade-floor adjustment, and any step 5 edits.
 
-8. **Hand over.** Tell the maintainer what remains, with the version filled in, and run none of it: push `main`, then steps 2 to 5 of `docs/release.md` (the optional dry run, the tag below, checking `latest.json` and its signed archive on the draft, adding the notes and publishing, then the Homebrew check). Publishing the draft makes the in-app update live immediately.
+8. **Hand over.** Tell the maintainer what remains, with the version filled in, and run none of it: push `main`, then steps 2 to 5 of `docs/release.md` (the optional dry run, the tag below, then checking `latest.json` and its signed archive on the published release and that CI updated the Homebrew tap). Pushing the tag publishes the GitHub Release and makes the in-app update live immediately. The Release workflow's `update-tap` job updates dickwu/homebrew-tap; do not edit the tap by hand.
 
-   Before publishing 0.3.0, the maintainer must pass the G1–G3 gates in `docs/release.md` on 0.3.0's own signed CI artifacts in an isolated macOS test environment. These gates cover the bundle swap and relaunch, quarantine and App Management, and launchd respawn for both enabled and disabled jobs.
+   Before tagging 0.3.0, the maintainer must pass the G1–G3 gates in `docs/release.md` on 0.3.0's own signed CI artifacts in an isolated macOS test environment (a `workflow_dispatch` Release build is enough). These gates cover the bundle swap and relaunch, quarantine and App Management, and launchd respawn for both enabled and disabled jobs.
 
    ```sh
    git tag -a vX.Y.Z -m "git-strata X.Y.Z" <release commit>

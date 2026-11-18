@@ -105,9 +105,10 @@ and checks the bundled daemon's version.
 
 ## First updater release (0.3.0)
 
-Before publishing 0.3.0, pass all three manual gates using 0.3.0's own signed
-CI artifacts. Use a signed `workflow_dispatch` build or a throwaway tag on a
-fork. Run the gates on a GitHub macOS runner or in a spare macOS user account
+Before tagging 0.3.0, pass all three manual gates using 0.3.0's own signed
+CI artifacts. Use a signed `workflow_dispatch` build (or a throwaway tag on a
+fork). Tagging publishes the GitHub Release and makes the in-app update live.
+Run the gates on a GitHub macOS runner or in a spare macOS user account
 with the test bundle outside `/Applications`.
 
 - **G1** exercises the updater plugin's swap of the signed app bundle with its
@@ -142,46 +143,37 @@ with the test bundle outside `/Applications`.
    git push origin v0.1.0
    ```
 
-   The workflow builds, signs (and notarizes when configured) and creates a
-   **draft** GitHub Release with the CLI tarball, DMG, updater archive, signature,
-   manifest and checksums.
-   The first time only: push and merge the tap branch `add-git-strata` (README
-   section and placeholder files) BEFORE publishing, so homebrew.yml updates the
-   files instead of colliding with the branch later.
-4. Check that the draft contains `latest.json`, its matching archive and
-   signature, and the checksums for all three. Confirm the manifest version and
-   URLs point to this tag. The updater feed takes its notes from the opening
-   paragraph of `docs/release-notes/v<version>.md`. Official tag builds warn if
-   that paragraph is missing. Put the notes file above the
-   generated notes before publishing.
+   The workflow builds, signs (and notarizes when configured), publishes a
+   GitHub Release (not a draft) with the CLI tarball, DMG, updater archive,
+   signature, manifest and checksums, and then updates the Homebrew tap.
+   Publishing moves `releases/latest` and makes the in-app update live
+   immediately, so finish the [first updater release gates](#first-updater-release-030)
+   on a `workflow_dispatch` build before tagging 0.3.0.
+
+   A release published with `GITHUB_TOKEN` does not trigger other workflows, so
+   the `update-tap` job in `.github/workflows/release.yml` downloads the public
+   tarball and DMG, computes their sha256, renders `Formula/git-strata.rb` and
+   `Casks/git-strata-desktop.rb` from `packaging/homebrew/*.rb.in`
+   (`scripts/release/render-tap.sh`) and PUTs them to dickwu/homebrew-tap with
+   `gh api` (updating with the existing blob sha, or creating the file). It
+   needs the repository secret **`HOMEBREW_TAP_TOKEN`**: a token with contents
+   write access to dickwu/homebrew-tap. Tags with a pre-release suffix (for example `v0.3.0-rc.1`)
+   do not update the tap. `.github/workflows/homebrew.yml`
+   remains to rerun the same update: Actions > Update Homebrew tap > Run
+   workflow with `tag` = `v0.1.0`, or `gh workflow run homebrew.yml -f tag=v0.1.0`.
+
+4. Check that the published release contains `latest.json`, its matching archive
+   and signature, and the checksums for all three. Confirm the manifest version
+   and URLs point to this tag, and that the `update-tap` job on the Release
+   workflow run committed the formula and cask. The updater feed takes its notes
+   from the opening paragraph of `docs/release-notes/v<version>.md`. Official
+   tag builds warn if that paragraph is missing. To put the notes file above the
+   generated notes:
 
    `{ cat docs/release-notes/vX.Y.Z.md; echo; gh release view vX.Y.Z --json body -q .body; } > /tmp/notes.md && gh release edit vX.Y.Z --notes-file /tmp/notes.md`
 
-   For 0.3.0, confirm the [first updater release gates](#first-updater-release-030)
-   passed before publishing. Publish it as a stable release. Publishing moves
-   `releases/latest` and makes the in-app update live immediately. The Homebrew tap follows
-   asynchronously. Publishing fires
-   `.github/workflows/homebrew.yml`, which downloads both artifacts, computes
-   their sha256, renders `Formula/git-strata.rb` and `Casks/git-strata-desktop.rb`
-   from `packaging/homebrew/*.rb.in` (`scripts/release/render-tap.sh`) and PUTs
-   them to dickwu/homebrew-tap with `gh api` (updating with the existing blob
-   sha, or creating the file). It needs the repository secret
-   **`HOMEBREW_TAP_TOKEN`**: a token with contents write access to
-   dickwu/homebrew-tap. To rerun it: Actions > Update Homebrew tap > Run
-   workflow with `tag` = `v0.1.0`, or `gh workflow run homebrew.yml -f tag=v0.1.0`.
-
-   By hand instead (no token):
-
-   ```sh
-   cd /path/to/homebrew-tap && git pull
-   gh release download v0.1.0 --repo dickwu/git-strata --pattern SHA256SUMS.txt --dir /tmp
-   t=$(awk '/aarch64-apple-darwin.tar.gz$/{print $1}' /tmp/SHA256SUMS.txt)
-   d=$(awk '/_arm64.dmg$/{print $1}' /tmp/SHA256SUMS.txt)
-   /path/to/git-strata/scripts/release/render-tap.sh 0.1.0 "$t" "$d" .
-   brew style Formula/git-strata.rb Casks/git-strata-desktop.rb
-   git add Formula/git-strata.rb Casks/git-strata-desktop.rb
-   git commit -m "git-strata 0.1.0" && git push
-   ```
+   Do not update the tap by hand. If `update-tap` fails after the GitHub
+   Release is public, rerun it with the dispatch command above.
 
 5. Check: `brew update && brew info dickwu/tap/git-strata`.
 

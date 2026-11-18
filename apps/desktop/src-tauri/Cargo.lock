@@ -1683,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "git-strata-desktop"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "block2",
  "libc",
@@ -4403,7 +4403,7 @@ checksum = "ff7589a1859b09232522bb9edf076ca7fcf14ded96685d3fa629db73023ffbb7"
 
 [[package]]
 name = "strata-client"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "libc",
  "serde",
@@ -4413,7 +4413,7 @@ dependencies = [
 
 [[package]]
 name = "strata-types"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
