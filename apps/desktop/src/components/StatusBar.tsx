@@ -1,13 +1,16 @@
 'use client';
 
 import { useEffect, useState, type ReactNode } from 'react';
+import { UnorderedListOutlined } from '@ant-design/icons';
 import { Tooltip } from 'antd';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { copy } from '@/lib/copy';
 import { useDu } from '@/lib/queries';
 import {
+  capChips,
   observeDaemonStart,
   observeScanRun,
+  retainsReply,
   statusBarModel,
   type Chip,
   type ChipTarget,
@@ -17,13 +20,27 @@ import {
   type SpaceLevel,
 } from '@/lib/statusBar';
 import { asGuiError, reason } from '@/lib/tauri';
-import type { DaemonStatus, DepsList, StatusReply } from '@/lib/types';
-import { DaemonStatusModal } from './DaemonStatusModal';
+import type { DaemonStatus, DepsList, StatusReply, UpdateTarget } from '@/lib/types';
+import {
+  isActive,
+  isExpectedDaemonRestartError,
+  restartingDaemon,
+  useAppVersion,
+  useUpdates,
+} from '@/lib/update';
+import { DaemonStatusModal, type DaemonModalLanding } from './DaemonStatusModal';
 import { ThemeSwitch } from './ThemeSwitch';
+import { UpdateControls, type UpdateDialog } from './update/UpdateControls';
+import type {
+  CancelAfterStopConsent,
+  InstallEligibility,
+  RecoveryActions,
+} from './update/UpdateDialogs';
+import { VersionsBlock, type VersionDetails } from './update/VersionsBlock';
 import css from './StatusBar.module.css';
 
 /** A section of the daemon status modal that a click can open at. */
-export type ModalSection = Extract<ChipTarget, { kind: 'modal' }>['section'];
+export type ModalSection = DaemonModalLanding;
 
 const s = copy.statusBar;
 
@@ -125,6 +142,7 @@ function chipTip(chip: Chip) {
 
 function chipButton(chip: Chip, h: StatusBarHandlers) {
   const dialog = chip.target === undefined || chip.target.kind === 'modal';
+  const versions = chip.id === 'version';
   return (
     <Tooltip key={chip.id} title={chipTip(chip)} placement="top" mouseEnterDelay={0.35}>
       <button
@@ -133,14 +151,56 @@ function chipButton(chip: Chip, h: StatusBarHandlers) {
         data-sev={chip.sev}
         data-chip={chip.id}
         aria-haspopup={dialog ? 'dialog' : undefined}
-        aria-label={s.label(chip.text, action(chip.target))}
-        onClick={() => followTarget(chip.target, h)}
+        aria-label={s.label(chip.text, versions ? 'Show versions' : action(chip.target))}
+        onClick={() => (versions ? h.onOpen('versions') : followTarget(chip.target, h))}
       >
         <span className={css.mark} aria-hidden />
         <span className={css.text}>{chip.text}</span>
       </button>
     </Tooltip>
   );
+}
+
+interface Versions {
+  app?: string;
+  daemon?: string;
+  restarting: boolean;
+  independentError?: boolean;
+}
+
+const RESTARTING_LABEL = 'Daemon restarting…';
+
+/** Replace the drift chip with a restart action and refill the visible slots when it is suppressed. */
+export function versionedStatusBar(model: StatusBarModel, versions: Versions): StatusBarModel {
+  const chips = [...model.chips, ...model.overflow];
+  const index = chips.findIndex((chip) => chip.id === 'version');
+  const remaining = chips.filter((chip) => chip.id !== 'version');
+  if (
+    !versions.restarting &&
+    versions.app &&
+    versions.daemon &&
+    versions.app !== versions.daemon &&
+    (model.daemon.state === 'up' || index >= 0)
+  ) {
+    const chip: Chip = {
+      id: 'version',
+      sev: 'amber',
+      rank: 4,
+      text: 'Restart daemon',
+      tooltip: `App ${versions.app} · daemon ${versions.daemon}`,
+      target: { kind: 'modal', section: 'daemon' },
+    };
+    if (index < 0) remaining.push(chip);
+    else remaining.splice(index, 0, chip);
+  }
+  return {
+    ...model,
+    ...capChips(remaining),
+    daemon:
+      versions.restarting && !versions.independentError
+        ? { state: 'pending', label: RESTARTING_LABEL, detail: null }
+        : model.daemon,
+  };
 }
 
 /**
@@ -153,16 +213,32 @@ function chipButton(chip: Chip, h: StatusBarHandlers) {
  */
 export function StatusBarView({
   model,
+  versions,
+  offer,
+  onUpdate,
+  updateDisabled,
   children,
   ...h
 }: StatusBarHandlers & {
   model: StatusBarModel;
+  versions?: Versions;
+  offer?: UpdateTarget;
+  onUpdate?: () => void;
+  updateDisabled?: boolean;
   /** Rendered last inside the footer (the modal). */
   children?: ReactNode;
 }) {
   const { daemon, chips, overflow, right } = model;
+  const app = versions?.app ?? '?';
+  const daemonVersion = versions?.daemon ?? '?';
+  const restarting = versions?.restarting === true;
+  const plannedOutage = restarting && daemon.label === RESTARTING_LABEL;
+  const drift = Boolean(versions?.app && versions.daemon && versions.app !== versions.daemon);
+  const pair = `App ${app} · daemon ${restarting ? 'restarting…' : daemonVersion}`;
+  const update = offer && `Update to ${offer.version}`;
+  const sessionCount = right.sessions === null ? null : copy.status.sessions(right.sessions);
   return (
-    <footer className="statusbar" role="status">
+    <footer className={`statusbar ${css.bar}`} role="status">
       <Tooltip title={triggerTip(daemon)} placement="top" mouseEnterDelay={0.35}>
         <button
           type="button"
@@ -171,9 +247,12 @@ export function StatusBarView({
           aria-haspopup="dialog"
           aria-label={s.label(triggerCopy(daemon), s.show.daemon)}
           data-testid="daemon-trigger"
+          data-restarting={plannedOutage || undefined}
         >
           <span className="dot" data-state={daemon.state} aria-hidden />
-          {daemon.state !== 'up' && <span className={css.name}>{daemon.label}</span>}
+          {daemon.state !== 'up' && !plannedOutage && (
+            <span className={css.name}>{daemon.label}</span>
+          )}
         </button>
       </Tooltip>
       <div className={css.chips} data-testid="status-chips">
@@ -204,6 +283,69 @@ export function StatusBarView({
         )}
       </div>
       <div className={css.right}>
+        {versions && (
+          <Tooltip
+            title={
+              <div className={css.tip}>
+                <div className={css.tipHead}>{pair}</div>
+                {daemon.state === 'up' && !restarting && !versions.daemon && (
+                  <div>This daemon does not report its version</div>
+                )}
+              </div>
+            }
+            placement="top"
+            mouseEnterDelay={0.35}
+            trigger={['hover', 'focus']}
+          >
+            <button
+              type="button"
+              className={`${css.trigger} ${css.version}`}
+              data-sev={restarting ? 'blue' : drift ? 'amber' : 'muted'}
+              data-testid="status-version"
+              aria-haspopup="dialog"
+              aria-label={s.label(pair, 'Show versions')}
+              onClick={() => h.onOpen('versions')}
+            >
+              <span className={css.versionFull}>{pair}</span>
+              {!restarting && (
+                <>
+                  <span className={css.versionShort}>
+                    {versions.app && versions.app === versions.daemon
+                      ? app
+                      : `${app} · ${daemonVersion}`}
+                  </span>
+                  <span className={css.versionApp}>
+                    {drift && <span className={css.driftDot} aria-hidden="true" />}
+                    {app}
+                  </span>
+                </>
+              )}
+            </button>
+          </Tooltip>
+        )}
+        {update && (
+          <Tooltip
+            title={update}
+            placement="top"
+            mouseEnterDelay={0.35}
+            trigger={['hover', 'focus']}
+          >
+            <button
+              type="button"
+              className={css.update}
+              aria-haspopup="dialog"
+              aria-label={update}
+              data-testid="status-update"
+              disabled={updateDisabled}
+              onClick={onUpdate}
+            >
+              <span className={css.updateText}>{update}</span>
+              <span className={css.updateArrow} aria-hidden="true">
+                ↑
+              </span>
+            </button>
+          </Tooltip>
+        )}
         {right.free && (
           <button
             type="button"
@@ -231,12 +373,37 @@ export function StatusBarView({
             </button>
           </Tooltip>
         )}
-        {right.sessions !== null && <span>{copy.status.sessions(right.sessions)}</span>}
+        {sessionCount !== null && (
+          <>
+            <span className={css.sessionsFull}>{sessionCount}</span>
+            <span className={css.sessionsShort} title={sessionCount}>
+              <UnorderedListOutlined aria-hidden="true" />
+              <span aria-hidden="true">{right.sessions}</span>
+              <span className="sr-only">{sessionCount}</span>
+            </span>
+          </>
+        )}
         <ThemeSwitch />
       </div>
       {children}
     </footer>
   );
+}
+
+const SKIP_KEY = 'git-strata.skip-update-version';
+
+function skippedUpdate(): string | null {
+  try {
+    return typeof window === 'undefined' ? null : window.localStorage.getItem(SKIP_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** Matches the tray's lifecycle count. A done mark does not close a session. */
+export function activeSessionCount({ sessions }: StatusReply): number {
+  return sessions.filter(({ status }) => status.state === 'Active' || status.state === 'Creating')
+    .length;
 }
 
 /**
@@ -249,12 +416,22 @@ export function StatusBar({
   deps,
   onWaiting,
   onSession,
+  installEligibility,
+  versionDetails,
+  recovery,
+  updateSkill,
+  cancelConsent,
 }: {
   status: UseQueryResult<DaemonStatus>;
   sessions: UseQueryResult<StatusReply>;
   deps: DepsList | undefined;
   onWaiting: () => void;
   onSession: (id: string) => void;
+  installEligibility?: InstallEligibility;
+  versionDetails?: VersionDetails;
+  recovery?: RecoveryActions;
+  updateSkill?: () => Promise<string>;
+  cancelConsent?: CancelAfterStopConsent;
 }) {
   const [now, setNow] = useState(() => Date.now());
   const [spaceLevel, setSpaceLevel] = useState<SpaceLevel>('muted');
@@ -275,6 +452,18 @@ export function StatusBar({
   if (observedStart !== daemonStart) setDaemonStart(observedStart);
   // null while closed; otherwise the section the click asked for (none: the top).
   const [modal, setModal] = useState<{ section?: ModalSection } | null>(null);
+  const [updateDialog, setUpdateDialog] = useState<UpdateDialog | null>(null);
+  const [skipped, setSkipped] = useState(skippedUpdate);
+  const appVersion = useAppVersion();
+  const snapshot = useUpdates((state) => state.snapshot);
+  const checking = useUpdates((state) => state.lastCheck?.phase === 'checking');
+  const hasOperation = useUpdates((state) => state.operation !== null);
+  const busy = hasOperation || checking || isActive(snapshot);
+  const restarting = useUpdates(restartingDaemon);
+  const offer =
+    snapshot.phase === 'available' && snapshot.target.version !== skipped
+      ? snapshot.target
+      : undefined;
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 5000);
     return () => clearInterval(t);
@@ -285,14 +474,15 @@ export function StatusBar({
   const du = useDu(live ? 60_000 : false);
   // The ticker lags a reply that arrived since its last tick; that reply's time has passed.
   const at = Math.max(now, status.dataUpdatedAt);
-  const model = statusBarModel(
+  const daemon = {
+    pending: status.isPending,
+    data: status.data,
+    error: status.isError ? status.error : null,
+    updatedAt: status.dataUpdatedAt,
+  };
+  const baseModel = statusBarModel(
     {
-      daemon: {
-        pending: status.isPending,
-        data: status.data,
-        error: status.isError ? status.error : null,
-        updatedAt: status.dataUpdatedAt,
-      },
+      daemon,
       sessions: sessions.data,
       sessionsUpdatedAt: sessions.dataUpdatedAt,
       deps,
@@ -305,26 +495,82 @@ export function StatusBar({
     at,
     spaceLevel
   );
+  const current = live || retainsReply(daemon, at, observedHealth) ? status.data : undefined;
+  const independentError = status.isError && !isExpectedDaemonRestartError(status.error);
+  const versions = { app: appVersion, daemon: current?.version, restarting, independentError };
+  const model = versionedStatusBar(baseModel, versions);
   if (model.spaceLevel !== undefined && model.spaceLevel !== spaceLevel)
     setSpaceLevel(model.spaceLevel);
   return (
-    <StatusBarView
-      model={model}
-      onOpen={(section) => setModal({ section })}
-      onWaiting={onWaiting}
-      onSession={onSession}
-    >
-      <DaemonStatusModal
-        open={modal !== null}
-        onClose={() => setModal(null)}
-        section={modal?.section}
-        chips={[...model.chips, ...model.overflow]}
-        daemon={model.daemon}
-        status={status}
-        du={du}
-        sessions={sessions.data}
-        now={at}
+    <>
+      <StatusBarView
+        model={model}
+        versions={versions}
+        offer={offer}
+        updateDisabled={busy}
+        onUpdate={busy ? undefined : () => setUpdateDialog('confirm')}
+        onOpen={(section) => setModal({ section })}
+        onWaiting={onWaiting}
+        onSession={onSession}
+      >
+        <DaemonStatusModal
+          open={modal !== null}
+          onClose={() => setModal(null)}
+          section={modal?.section}
+          chips={[...model.chips, ...model.overflow]}
+          daemon={model.daemon}
+          status={status}
+          du={du}
+          sessions={sessions.data}
+          now={at}
+          restarting={restarting}
+          versions={
+            <VersionsBlock
+              {...versionDetails}
+              appVersion={appVersion}
+              status={current}
+              now={at}
+              restarting={restarting}
+              onRestart={
+                !busy && live && appVersion && current?.version && current.version !== appVersion
+                  ? () => {
+                      setModal(null);
+                      setUpdateDialog('restart');
+                    }
+                  : undefined
+              }
+              onSettings={() => {
+                setModal(null);
+                setUpdateDialog('settings');
+              }}
+            />
+          }
+        />
+      </StatusBarView>
+      <UpdateControls
+        dialog={updateDialog}
+        onDialog={setUpdateDialog}
+        appVersion={appVersion}
+        daemon={live ? status.data : undefined}
+        activeSessions={sessions.isSuccess ? activeSessionCount(sessions.data) : undefined}
+        offer={offer}
+        eligibility={installEligibility}
+        onOpenVersions={() => {
+          setUpdateDialog(null);
+          setModal({ section: 'versions' });
+        }}
+        recovery={recovery}
+        updateSkill={updateSkill}
+        cancelConsent={cancelConsent}
+        onSkip={(version) => {
+          setSkipped(version);
+          try {
+            window.localStorage.setItem(SKIP_KEY, version);
+          } catch {
+            // The version remains skipped for this app window.
+          }
+        }}
       />
-    </StatusBarView>
+    </>
   );
 }

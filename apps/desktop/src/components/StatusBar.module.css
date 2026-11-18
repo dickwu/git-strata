@@ -4,6 +4,11 @@
  * The trigger stays a fixed hit target (a compact healthy dot, or the dot plus a short
  * non-healthy label). Short of room, the chips give way.
  */
+.bar {
+  container: strata-statusbar / inline-size;
+  min-width: 0;
+}
+
 .trigger {
   display: inline-flex;
   flex: none;
@@ -29,6 +34,9 @@
 }
 .name {
   color: var(--text);
+}
+.trigger[data-restarting='true'] > :global(.dot) {
+  background: var(--sev-blue);
 }
 
 /* Padding with a matching negative margin keeps chip focus rings clear of the clipping edge. */
@@ -164,6 +172,50 @@
   gap: 16px;
   white-space: nowrap;
 }
+.version {
+  margin-left: 0;
+  font-variant-numeric: tabular-nums;
+}
+.version[data-sev='amber'] {
+  color: var(--sev-amber);
+}
+.version[data-sev='blue'] {
+  color: var(--sev-blue);
+}
+.versionShort,
+.versionApp,
+.sessionsShort,
+.updateArrow {
+  display: none;
+}
+.driftDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.update {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--sev-blue) 46%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--sev-blue) 12%, transparent);
+  color: var(--sev-blue);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.update:enabled:hover {
+  border-color: currentColor;
+  background: color-mix(in srgb, var(--sev-blue) 20%, transparent);
+}
+.update:disabled {
+  cursor: default;
+}
 .saved {
   margin-left: 0;
   color: var(--accent);
@@ -187,6 +239,55 @@
 .free[data-sev='red'] {
   color: var(--sev-red);
   font-weight: 500;
+}
+
+@container strata-statusbar (max-width: 1100px) {
+  .saved {
+    display: none;
+  }
+}
+@container strata-statusbar (max-width: 1030px) {
+  .sessionsFull {
+    display: none;
+  }
+  .sessionsShort {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+}
+@container strata-statusbar (max-width: 955px) {
+  .version:not([data-sev='blue']) .versionFull {
+    display: none;
+  }
+  .versionShort {
+    display: inline;
+  }
+}
+@container strata-statusbar (max-width: 885px) {
+  .right {
+    gap: 8px;
+  }
+  .freeText {
+    max-width: 24ch;
+  }
+  .versionShort,
+  .updateText {
+    display: none;
+  }
+  .versionApp {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .update {
+    width: 22px;
+    padding: 0;
+    border-radius: 50%;
+  }
+  .updateArrow {
+    display: inline;
+  }
 }
 
 /* Tooltip bodies. */

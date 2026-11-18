@@ -38,12 +38,14 @@ import {
   type WarningView,
 } from '@/lib/statusBar';
 import type { DaemonStatus, DuReply, StatusReply } from '@/lib/types';
+import { isExpectedDaemonRestartError } from '@/lib/update';
 import { daemonView } from '@/lib/view';
 import { ErrorNote } from './ErrorNote';
 import css from './DaemonStatusModal.module.css';
 
 /** Where a status-bar chip opens the modal (statusBar.ts `ChipTarget`). */
 export type DaemonModalSection = Extract<ChipTarget, { kind: 'modal' }>['section'];
+export type DaemonModalLanding = DaemonModalSection | 'versions';
 
 /** Session id → ticket (agent text: plain text only). */
 type Tickets = ReadonlyMap<string, string>;
@@ -51,13 +53,16 @@ type Tickets = ReadonlyMap<string, string>;
 /** The status bar's daemon trigger: the modal states what the bar states. */
 type Trigger = StatusBarModel['daemon'];
 
-/** Without the bar's trigger (a direct render), the last poll alone decides. */
-const triggerOf = (daemon: Trigger | undefined, live: boolean): Trigger =>
-  daemon ?? {
+/** Use the restart window and last poll when the bar has no trigger. */
+const triggerOf = (daemon: Trigger | undefined, live: boolean, restarting: boolean): Trigger => {
+  if (daemon) return daemon;
+  if (restarting) return { state: 'pending', label: 'Daemon restarting…', detail: null };
+  return {
     state: live ? 'up' : 'down',
     label: live ? t.modal.state.up : t.modal.state.down,
     detail: null,
   };
+};
 
 const TAG_COLOR = { up: 'success', pending: 'default', down: 'error' } as const;
 
@@ -106,7 +111,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
  * A place a chip can open the modal at: a direct child of the modal body (the positioned scroll
  * box), which scrolls to it (`DaemonStatusContent`).
  */
-function Target({ name, children }: { name: DaemonModalSection; children: ReactNode }) {
+function Target({ name, children }: { name: DaemonModalLanding; children: ReactNode }) {
   return (
     <div data-section={name} className={css.target}>
       {children}
@@ -619,11 +624,13 @@ export interface DaemonStatusContentProps {
   /** The daemon socket path, once known. */
   socket: string | undefined;
   /** Scroll this section into view when the modal opens. */
-  section?: DaemonModalSection;
+  section?: DaemonModalLanding;
   /** The status bar's chips, overflow included; listed under "Now" when non-empty. */
   chips?: readonly Chip[];
   /** The status bar's daemon trigger, repeated in the State row. */
   daemon?: Trigger;
+  restarting?: boolean;
+  versions?: ReactNode;
 }
 
 /** The modal's body. No data hooks, so it renders on its own (tests render it directly). */
@@ -636,9 +643,13 @@ export function DaemonStatusContent({
   section,
   chips = [],
   daemon,
+  restarting = false,
+  versions,
 }: DaemonStatusContentProps) {
   const live = isLive(status);
-  const trigger = triggerOf(daemon, live);
+  const expectedRestart =
+    restarting && (!status.isError || isExpectedDaemonRestartError(status.error));
+  const trigger = triggerOf(daemon, live, expectedRestart);
   // Warnings and activity only from a live answer: a stale hold would keep "running".
   const data = live ? status.data : undefined;
   const f = status.data ? statusFacts(status.data, now) : null;
@@ -682,7 +693,12 @@ export function DaemonStatusContent({
   });
   return (
     <div ref={body} className={css.body}>
-      {status.isError && <ErrorNote error={status.error} />}
+      {status.isError && !expectedRestart && <ErrorNote error={status.error} />}
+      {versions && (
+        <Target name="versions">
+          <Section title="Versions">{versions}</Section>
+        </Target>
+      )}
       {chips.length > 0 && (
         <Section title={t.now.heading}>
           <NowList chips={chips} />
@@ -707,7 +723,9 @@ export function DaemonStatusContent({
         <Target name="storage">
           {v && <Savings v={v} tickets={tickets} />}
           {!v && du.isSuccess && <p className={css.note}>{t.savings.unavailable}</p>}
-          {du.isError && <ErrorNote error={du.error} />}
+          {du.isError && !(restarting && isExpectedDaemonRestartError(du.error)) && (
+            <ErrorNote error={du.error} />
+          )}
           {(volume || storage) && (
             <Section title={t.storage.heading}>
               {volume && <VolumeBlock v={volume} />}
@@ -746,22 +764,26 @@ export function DaemonStatusContent({
                 )}
               </span>
             </Descriptions.Item>
-            <Descriptions.Item label={st.version}>
-              {f?.version ? (
-                <span className="mono muted">
-                  {pb ? `daemon ${f.version}` : f.version}
-                  {f.api !== null && ` (api ${f.api})`}
-                </span>
-              ) : (
-                <Missing live={live} />
-              )}
-            </Descriptions.Item>
-            <Descriptions.Item label={st.pid}>
-              {f?.pid != null ? <span className="mono">{f.pid}</span> : <Missing live={live} />}
-            </Descriptions.Item>
-            <Descriptions.Item label={st.uptime}>
-              {f?.uptimeMs != null ? duration(f.uptimeMs) : <Missing live={live} />}
-            </Descriptions.Item>
+            {!versions && (
+              <>
+                <Descriptions.Item label={st.version}>
+                  {f?.version ? (
+                    <span className="mono muted">
+                      {pb ? `daemon ${f.version}` : f.version}
+                      {f.api !== null && ` (api ${f.api})`}
+                    </span>
+                  ) : (
+                    <Missing live={live} />
+                  )}
+                </Descriptions.Item>
+                <Descriptions.Item label={st.pid}>
+                  {f?.pid != null ? <span className="mono">{f.pid}</span> : <Missing live={live} />}
+                </Descriptions.Item>
+                <Descriptions.Item label={st.uptime}>
+                  {f?.uptimeMs != null ? duration(f.uptimeMs) : <Missing live={live} />}
+                </Descriptions.Item>
+              </>
+            )}
             {pb && (
               <Descriptions.Item label={st.started}>
                 {data?.started ? when(data.started) : <Missing live={live} />}
@@ -830,6 +852,8 @@ export function DaemonStatusModal({
   section,
   chips,
   daemon,
+  restarting,
+  versions,
 }: {
   open: boolean;
   onClose: () => void;
@@ -838,14 +862,18 @@ export function DaemonStatusModal({
   sessions: StatusReply | undefined;
   now: number;
   /** Open scrolled to this section (a chip's target). */
-  section?: DaemonModalSection;
+  section?: DaemonModalLanding;
   /** Every current status-bar chip, overflow included. */
   chips?: readonly Chip[];
   /** The status bar's daemon trigger, so the title and State row say what the bar says. */
   daemon?: Trigger;
+  restarting?: boolean;
+  versions?: ReactNode;
 }) {
   const socket = useSocket();
   const live = isLive(status);
+  const expectedRestart =
+    Boolean(restarting) && (!status.isError || isExpectedDaemonRestartError(status.error));
   return (
     <Modal
       open={open}
@@ -855,7 +883,7 @@ export function DaemonStatusModal({
       destroyOnHidden
       title={
         <DaemonModalTitle
-          daemon={triggerOf(daemon, live)}
+          daemon={triggerOf(daemon, live, expectedRestart)}
           updated={live ? ago(now - status.dataUpdatedAt) : null}
         />
       }
@@ -869,6 +897,8 @@ export function DaemonStatusModal({
         section={section}
         chips={chips}
         daemon={daemon}
+        restarting={restarting}
+        versions={versions}
       />
     </Modal>
   );

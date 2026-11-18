@@ -6,13 +6,15 @@ import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { contrast, mix } from '../lib/contrast';
 import { statusBarModel, type Chip, type StatusBarModel } from '../lib/statusBar';
-import type { DaemonStatus, DuReply } from '../lib/types';
+import type { DaemonStatus, DuReply, SessionEntry, StatusReply } from '../lib/types';
 import { TOKENS, type ThemeName } from '../lib/tokens';
 import {
   StatusBarView,
+  activeSessionCount,
   followTarget,
   observeDaemonHealth,
   triggerCopy,
+  versionedStatusBar,
   type ModalSection,
   type StatusBarHandlers,
 } from './StatusBar';
@@ -242,6 +244,151 @@ describe('StatusBarView', () => {
     expect(render({ ...calm, right: { ...right, sessions: 1 } })).toContain('>1 session<');
   });
 
+  test('version pair and update action precede the right-side facts', () => {
+    const { calls, h } = recorder();
+    let openedUpdate = false;
+    const model = {
+      ...calm,
+      right: { ...right, free: { text: '48 GB free', sev: 'muted' as const } },
+    };
+    const tree = StatusBarView({
+      model,
+      versions: { app: '0.3.0', daemon: '0.3.0', restarting: false },
+      offer: { version: '0.3.1' },
+      onUpdate: () => {
+        openedUpdate = true;
+      },
+      ...h,
+    });
+    const html = renderToStaticMarkup(tree);
+    const order = [
+      'status-version',
+      'status-update',
+      'status-free',
+      'status-saved',
+      '>7 sessions<',
+      'data-testid="theme-switch"',
+    ].map((marker) => html.indexOf(marker));
+    expect(order.every((i) => i > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(html).toContain('App 0.3.0 · daemon 0.3.0');
+    expect(html).toContain('aria-label="Update to 0.3.1"');
+    expect(html).toContain(`class="${css.versionShort}">0.3.0</span>`);
+    expect(html).toContain(`class="${css.versionApp}">0.3.0</span>`);
+    expect(html).toContain(`class="${css.updateArrow}" aria-hidden="true">↑</span>`);
+    expect(all(html, 'data-chip')).toEqual([]);
+    for (const id of ['status-version', 'status-update']) {
+      const click = buttons(tree).find((b) => b.props['data-testid'] === id)?.props.onClick;
+      expect(typeof click).toBe('function');
+      if (typeof click === 'function') click();
+    }
+    expect(calls).toEqual([['open', 'versions']]);
+    expect(openedUpdate).toBe(true);
+  });
+
+  test('width steps drop savings, compact the session count and then compact the versions', () => {
+    const src = readFileSync(join(import.meta.dir, 'StatusBar.module.css'), 'utf8');
+    const widths = [
+      ...src.matchAll(/@container strata-statusbar \(max-width: (\d+)px\) \{([\s\S]*?)(?=\n\})/g),
+    ];
+    expect(widths.map((match) => Number(match[1]))).toEqual([1100, 1030, 955, 885]);
+    expect(widths[0][2]).toMatch(/\.saved\s*\{\s*display: none/);
+    expect(widths[1][2]).toMatch(/\.sessionsFull\s*\{\s*display: none/);
+    expect(widths[1][2]).toMatch(/\.sessionsShort\s*\{\s*display: inline-flex/);
+    expect(widths[2][2]).toMatch(/\.versionShort\s*\{\s*display: inline/);
+    expect(widths[3][2]).toMatch(/\.versionApp\s*\{\s*display: inline-flex/);
+    expect(widths[3][2]).toMatch(/\.updateArrow\s*\{\s*display: inline/);
+    expect(src).not.toMatch(/\.(update|version)\s*\{[^}]*display: none/);
+  });
+
+  test('the offered update stays visible and disabled during another operation', () => {
+    const html = renderToStaticMarkup(
+      <StatusBarView model={calm} offer={{ version: '0.3.1' }} updateDisabled {...recorder().h} />
+    );
+    expect(html).toContain('data-testid="status-update" disabled=""');
+    expect(html).toContain('Update to 0.3.1');
+  });
+
+  test('reported drift is amber and a missing daemon version is shown as a question mark', () => {
+    const { calls, h } = recorder();
+    const versions = { app: '0.3.1', daemon: '0.3.0', restarting: false };
+    const model = versionedStatusBar(calm, versions);
+    const tree = StatusBarView({ model, versions, ...h });
+    const html = renderToStaticMarkup(tree);
+    expect(html).toContain('data-sev="amber" data-testid="status-version"');
+    expect(html).toContain(`class="${css.versionShort}">0.3.1 · 0.3.0</span>`);
+    expect(html).toContain(`class="${css.driftDot}"`);
+    expect(html).toContain('Restart daemon. Show versions');
+    const click = buttons(tree).find((b) => b.props['data-chip'] === 'version')?.props.onClick;
+    expect(typeof click).toBe('function');
+    if (typeof click === 'function') click();
+    expect(calls).toEqual([['open', 'versions']]);
+
+    const absent = StatusBarView({
+      model: calm,
+      versions: { app: '0.3.1', restarting: false },
+      ...h,
+    });
+    const text = renderToStaticMarkup(absent);
+    expect(text).toContain('data-sev="muted" data-testid="status-version"');
+    expect(text).toContain('App 0.3.1 · daemon ?');
+    const tip = elements(absent).find((e) => {
+      const child = e.props.children;
+      return isValidElement(child) && (child as El).props['data-testid'] === 'status-version';
+    });
+    expect(renderToStaticMarkup(<>{tip?.props.title}</>)).toContain(
+      'This daemon does not report its version'
+    );
+
+    const down = StatusBarView({
+      model: { ...calm, daemon: { state: 'down', label: "Daemon isn't running", detail: null } },
+      versions: { app: '0.3.1', restarting: false },
+      ...h,
+    });
+    const downTip = elements(down).find((e) => {
+      const child = e.props.children;
+      return isValidElement(child) && (child as El).props['data-testid'] === 'status-version';
+    });
+    expect(renderToStaticMarkup(<>{downTip?.props.title}</>)).toContain('App 0.3.1 · daemon ?');
+    expect(renderToStaticMarkup(<>{downTip?.props.title}</>)).not.toContain('does not report');
+  });
+
+  test('restart replaces the down trigger and removes drift from the bar and modal chips', () => {
+    const down: StatusBarModel = {
+      ...crowded,
+      daemon: { state: 'down', label: "Daemon isn't running", detail: null },
+      chips: [
+        shown[0],
+        { id: 'version', rank: 4, sev: 'amber', text: 'Restart daemon' },
+        hidden[0],
+      ],
+      overflow: [hidden[1]],
+    };
+    const versions = { app: '0.3.0', daemon: '0.2.3', restarting: true };
+    const model = versionedStatusBar(down, versions);
+    const html = renderToStaticMarkup(
+      <StatusBarView model={model} versions={versions} {...recorder().h} />
+    );
+    expect(html).toContain('data-sev="blue" data-testid="status-version"');
+    expect(html).toContain('App 0.3.0 · daemon restarting…');
+    expect(html).not.toContain('data-state="down"');
+    expect(html).not.toContain('Restart daemon');
+    expect(model.chips.map((chip) => chip.id)).toEqual([shown[0].id, hidden[0].id, hidden[1].id]);
+    expect(model.overflow).toEqual([]);
+  });
+
+  test('an independent daemon error remains visible during the planned outage', () => {
+    const daemon = { state: 'down', label: 'Daemon is out of file handles', detail: null } as const;
+    const versions = { app: '0.3.0', restarting: true, independentError: true };
+    const model = versionedStatusBar({ ...calm, daemon }, versions);
+    const html = renderToStaticMarkup(
+      <StatusBarView model={model} versions={versions} {...recorder().h} />
+    );
+    expect(html).toContain('App 0.3.0 · daemon restarting…');
+    expect(html).toContain('>Daemon is out of file handles<');
+    expect(html).not.toContain('data-restarting');
+  });
+
   test('daemon trigger: a healthy state is only the dot; other states keep a short label', () => {
     const html = render({
       ...calm,
@@ -379,6 +526,24 @@ describe('StatusBarView', () => {
       ['open', 'scan'],
     ]);
   });
+});
+
+test('the confirmation counts active and creating lifecycles regardless of mark', () => {
+  const entry = (state: string, mark?: 'active' | 'done') =>
+    ({ status: { state, mark: mark && { state: mark } } }) as SessionEntry;
+  const sessions: StatusReply = {
+    holds: [],
+    leftovers: [],
+    warnings: [],
+    sessions: [
+      entry('Active', 'done'),
+      entry('Creating'),
+      entry('Removing'),
+      entry('Closed', 'active'),
+    ],
+  };
+  expect(activeSessionCount(sessions)).toBe(2);
+  expect(activeSessionCount({ ...sessions, sessions: [] })).toBe(0);
 });
 
 describe('daemonStatus query observations', () => {

@@ -1,0 +1,43 @@
+.stack {
+  display: grid;
+  gap: 12px;
+  padding-block: 6px;
+}
+
+.stack p,
+.stack pre {
+  margin: 0;
+}
+
+.notes {
+  max-height: 12rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font: inherit;
+  background: var(--bg-app);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.warning {
+  color: var(--sev-amber);
+}
+
+.error {
+  color: var(--sev-red);
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.code {
+  overflow-wrap: anywhere;
+}

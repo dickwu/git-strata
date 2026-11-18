@@ -10,6 +10,7 @@ import { useDu, useSocket } from '@/lib/queries';
 import type { PollPlan } from '@/lib/poll';
 import { retainsReply } from '@/lib/statusBar';
 import type { DaemonStatus, StatusReply } from '@/lib/types';
+import { isExpectedDaemonRestartError, restartingDaemon, useUpdates } from '@/lib/update';
 import { daemonView } from '@/lib/view';
 import { useNav } from '@/stores/nav';
 import { StorageHeadline, WarningList } from './DaemonStatusModal';
@@ -31,6 +32,7 @@ export function DaemonScreen({
   onBack: () => void;
 }) {
   const socket = useSocket();
+  const restarting = useUpdates(restartingDaemon);
   const openSession = useNav((s) => s.openSession);
   const du = useDu(plan.du);
   // Warning severity and text depend on how long a hold has run (status bar ticker cadence).
@@ -38,6 +40,8 @@ export function DaemonScreen({
   // A reply that arrived after the last tick is no older than its arrival (as in the bar).
   const now = Math.max(clock, status.dataUpdatedAt);
   const live = isLive(status);
+  const expectedRestart =
+    restarting && (!status.isError || isExpectedDaemonRestartError(status.error));
   // One failed poll keeps the last good reply on show, by the status bar's own rule: at most
   // 60 s old, from a daemon that is not stopped, starting or shedding. Past that nothing is
   // classified from the cached reply, where a hold would keep aging (a LongHold turning amber
@@ -65,14 +69,15 @@ export function DaemonScreen({
           aria-label={copy.detail.back}
         />
         <h1 className="screen-title">{copy.daemon.title}</h1>
-        {v && !status.isError && <Tag color="success">{copy.daemon.running}</Tag>}
+        {v && !status.isError && !restarting && <Tag color="success">{copy.daemon.running}</Tag>}
+        {expectedRestart && <Tag color="processing">Daemon restarting…</Tag>}
         {v?.version && <span className="mono muted">{v.version}</span>}
       </div>
       <div
         className="content"
         style={{ display: 'grid', gap: 16, alignContent: 'start', maxWidth: 880 }}
       >
-        {status.isError && <ErrorNote error={status.error} />}
+        {status.isError && !expectedRestart && <ErrorNote error={status.error} />}
         {retained && v && (
           <div className="muted">{copy.daemon.lastAnswer(ago(now - status.dataUpdatedAt))}</div>
         )}
@@ -134,7 +139,7 @@ export function DaemonScreen({
             ))}
           </section>
         )}
-        {!v && !status.isError && <Empty description={copy.status.loading} />}
+        {!v && !status.isError && !expectedRestart && <Empty description={copy.status.loading} />}
       </div>
     </>
   );
