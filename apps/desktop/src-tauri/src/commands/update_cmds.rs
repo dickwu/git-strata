@@ -71,9 +71,86 @@ pub async fn daemon_move_into_app(
     schema_acknowledgement: Option<u32>,
     on_progress: Channel<UpdateState>,
 ) -> Result<(), GuiError> {
+    use tauri::Listener;
+
+    #[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Action {
+        Continue,
+        Cancel,
+        CheckRepair,
+    }
+
     main_only(window.label())?;
-    let _ = (schema_acknowledgement, on_progress);
-    unavailable()
+    let coordinator = tauri::Manager::try_state::<crate::update::move_daemon::MoveDaemon>(&window)
+        .ok_or_else(|| {
+            GuiError::new(
+                Code::Unsupported,
+                "Moving the daemon into the app is unavailable in this build.",
+                json!({ "reason": "move_unavailable" }),
+            )
+        })?;
+    // Keep the T00 command signature. The progress channel identifies this
+    // invocation's action listener on the main window. Checking is sent
+    // only after that listener is ready, before the coordinator can mutate.
+    let (actions, mut requested) = tokio::sync::watch::channel(None);
+    let listener = window.listen(
+        format!("git-strata-move-action-{}", on_progress.id()),
+        move |event| {
+            if let Ok(action) = serde_json::from_str::<Action>(event.payload()) {
+                actions.send_if_modified(|current| {
+                    if current.is_none()
+                        || (*current == Some(Action::Continue) && action == Action::Cancel)
+                    {
+                        *current = Some(action);
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+        },
+    );
+    let result = async {
+        on_progress
+            .send(UpdateState::Checking)
+            .map_err(|e| GuiError::internal(format!("The Move panel is unavailable: {e}")))?;
+        let action = *tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            requested.wait_for(Option::is_some),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or_else(|| {
+            GuiError::new(
+                Code::Busy,
+                "The Move panel did not confirm the action. Try again.",
+                json!({ "reason": "move_action_timeout" }),
+            )
+        })?;
+        let mut progress = |state| {
+            let _ = on_progress.send(state);
+        };
+        match action {
+            Some(Action::Continue) => {
+                coordinator
+                    .run_cancellable(
+                        schema_acknowledgement,
+                        None,
+                        &|| *requested.borrow() == Some(Action::Cancel),
+                        &mut progress,
+                    )
+                    .await
+            }
+            Some(Action::Cancel) => coordinator.cancel_pending(&mut progress).await,
+            Some(Action::CheckRepair) => coordinator.check_repair(&mut progress).await,
+            None => unreachable!("Move action was received"),
+        }
+    }
+    .await;
+    window.unlisten(listener);
+    result
 }
 
 /// Setup with a retained store requires acknowledgement of its current review (§6.3).
