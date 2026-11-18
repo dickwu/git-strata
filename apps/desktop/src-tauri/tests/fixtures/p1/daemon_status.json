@@ -5,7 +5,9 @@
     "total": 0,
     "truncated": false
   },
+  "draining": null,
   "holds": [],
+  "inflight": [],
   "pid": 4242,
   "reconcile": {
     "last": null,
@@ -24,6 +26,7 @@
     "unresolved_n": 0
   },
   "started": "2026-01-01T00:00:00Z",
+  "store_schema": 7,
   "verify": null,
   "version": "0.2.2",
   "volume": {

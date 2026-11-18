@@ -16,6 +16,7 @@ mod auto_close;
 pub mod catalog;
 pub mod client;
 pub mod confirm_flow;
+mod drain;
 pub mod du;
 pub mod fetch_after;
 pub mod handlers;
@@ -158,6 +159,7 @@ pub const FEATURES: &[&str] = &[
     "config.reload",
     "daemon_status.activity",
     "daemon_status.volume_name",
+    "daemon.drain",
 ];
 
 /// The launchd label of the agent.

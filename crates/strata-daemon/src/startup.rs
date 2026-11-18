@@ -9,14 +9,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 use strata_apfs::{IoSide, classify_io_error, retry_eintr};
@@ -29,6 +29,7 @@ use strata_store::{PublishPhase, Store};
 use strata_types::{CheckpointReason, Code, Config, RepoId, RepoName, StrataError};
 
 use crate::confirm_flow::{self, Pins};
+use crate::drain::{self, Drain, ShutdownMode};
 use crate::locks::Locks;
 use crate::rpc::{self, Reply, Request};
 use crate::{DaemonWarning, GC_KEEP, LOCK_WAIT, MAX_FRAME, PinnedFlags, Result};
@@ -38,6 +39,9 @@ mod store_state;
 
 /// Review P1-3: connections served at once; more wait in the backlog.
 pub const MAX_CONNS: usize = 128;
+
+/// Give the seal acknowledgement and outstanding replies time to reach readers.
+const SEALED_REPLY_GRACE: Duration = Duration::from_secs(2);
 
 /// Where the daemon keeps its files, and the knobs tests turn.
 #[derive(Clone)]
@@ -302,6 +306,8 @@ pub struct Core {
     pub reload: Arc<crate::reload::ReloadState>,
     pub(crate) open_git: Arc<GitOpener>,
     pub(crate) started: SystemTime,
+    pub(crate) drain: Drain,
+    epoch: String,
     pub gits: BTreeMap<RepoName, Git>,
     pub locks: Locks,
     pub env: InstallEnv,
@@ -429,7 +435,8 @@ pub fn prepare_locked(
         )
         .with_detail(json!({ "reason": "no_instance_lock" })));
     };
-    let volume = crate::volume::Volume::start(&config.paths.root);
+    let drain = Drain::default();
+    let volume = crate::volume::Volume::start_guarded(&config.paths.root, drain.clone());
     Ok(Core {
         busy: Default::default(),
         volume,
@@ -438,6 +445,8 @@ pub fn prepare_locked(
         reload,
         open_git: Arc::new(open_git.clone()),
         started: SystemTime::now(),
+        drain,
+        epoch: drain::random_id(),
         main_sync: Default::default(),
         activity: Default::default(),
         upstream: Default::default(),
@@ -547,24 +556,79 @@ impl Core {
         &self.instance
     }
 
-    /// §5.9 after the daemon is gone: `Store::close` (writes the store's
-    /// clean-shutdown marker), unlink the socket, release the flock.
+    /// Finalize shutdown for the daemon executable. An accepted restart
+    /// exits with EX_TEMPFAIL after the store, socket and flock are closed.
+    /// In-process callers can take the code with [Self::close_with_exit_code].
     pub fn close(self) -> Result<()> {
+        let code = self.close_with_exit_code()?;
+        if code != 0 {
+            std::process::exit(i32::from(code));
+        }
+        Ok(())
+    }
+
+    /// §5.9: close the store, unlink the socket, release the flock, and
+    /// return the chosen exit code. A close failure during orderly
+    /// shutdown is recorded without changing that code.
+    pub fn close_with_exit_code(self) -> Result<u8> {
+        let mode = self.drain.shutdown_mode();
         let Core {
             store,
             opts,
             instance,
             locks,
+            epoch,
             ..
         } = self;
         drop(locks);
         let r = Arc::try_unwrap(store)
-            .map_err(|_| StrataError::new(Code::Busy, "store is still borrowed"))?
-            .close();
+            .map_err(|_| StrataError::new(Code::Busy, "store is still borrowed"))
+            .and_then(Store::close);
         let _ = fs::remove_file(&opts.socket);
+        if let Some(mode) = mode {
+            let error = r.as_ref().err();
+            if let Some(e) = error {
+                (opts.alert)(&format!("daemon shutdown: {}", e.message));
+            }
+            if let Err(e) = record_shutdown(&opts.config_dir, mode, &epoch, error) {
+                (opts.alert)(&format!("could not record daemon shutdown: {e}"));
+            }
+            return Ok(mode.exit_code());
+        }
         drop(instance);
-        r
+        r.map(|()| 0)
     }
+}
+
+fn record_shutdown(
+    dir: &Path,
+    mode: ShutdownMode,
+    epoch: &str,
+    close_error: Option<&StrataError>,
+) -> io::Result<()> {
+    let tmp = dir.join(format!(".last_shutdown.{epoch}.tmp"));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    let result = (|| {
+        let data = json!({
+            "mode": mode,
+            "epoch": epoch,
+            "close_error": close_error,
+            "at": strata_types::serde_rfc3339::format(&SystemTime::now()).ok(),
+        });
+        serde_json::to_writer(&mut file, &data)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        fs::rename(&tmp, dir.join("last_shutdown.json"))?;
+        File::open(dir)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// The running daemon: `Sessions` opened once over the [`Core`].
@@ -693,7 +757,7 @@ impl<'a> Daemon<'a> {
             next_conn: std::sync::atomic::AtomicU64::new(0),
             fd_errors: std::sync::atomic::AtomicU64::new(0),
             reconcile: Mutex::new(json!({ "runs": 0, "last": null })),
-            du: crate::du::Du::open(&core.config.paths.root),
+            du: crate::du::Du::open_guarded(&core.config.paths.root, core.drain.clone()),
         })
     }
 
@@ -712,6 +776,37 @@ impl<'a> Daemon<'a> {
     /// leaves no descriptor behind).
     pub fn open_connections(&self) -> usize {
         self.conns.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    fn finish_connections(&self, mode: Option<ShutdownMode>) {
+        for stream in self
+            .conns
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+        {
+            let _ = stream.shutdown(std::net::Shutdown::Read);
+        }
+        // A sealed daemon has already waited for writes to finish. Allow final
+        // replies, including the small seal acknowledgement, before unblocking
+        // socket writes to any client that has stopped reading.
+        if matches!(
+            mode,
+            Some(ShutdownMode::Stop | ShutdownMode::Restart | ShutdownMode::Hold)
+        ) {
+            let deadline = Instant::now() + SEALED_REPLY_GRACE;
+            while self.open_connections() != 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            for stream in self
+                .conns
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .values()
+            {
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            }
+        }
     }
 
     /// Ask the accept loop to stop (SIGTERM, or a test).
@@ -743,6 +838,7 @@ impl<'a> Daemon<'a> {
             .set_nonblocking(true)
             .map_err(|e| classify_io_error(&e, IoSide::Read, &self.core.opts.socket))?;
         let mut poisoned = false;
+        let mut orderly = false;
         // Incident 2026-10-27: out of descriptors (EMFILE/ENFILE) the loop
         // used to retry every 20 ms in silence (and macOS closes the client
         // whose accept failed, which the CLI saw as `socket_closed`). Now
@@ -847,18 +943,13 @@ impl<'a> Daemon<'a> {
             // Stop: queued takes fail ReadOnly(shutting_down); the holder
             // finishes. Idle connections see end of input; a connection in
             // the middle of a request still writes its reply.
+            let mode = self.core.drain.finish_serving(poisoned);
+            orderly = mode.is_some();
             drop(reserve.take());
             self.core.locks.shutdown();
-            for c in self
-                .conns
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .values()
-            {
-                let _ = c.shutdown(std::net::Shutdown::Read);
-            }
+            self.finish_connections(mode);
         });
-        if poisoned {
+        if poisoned && !orderly {
             self.core.warnings.alert_once(
                 "the store writer is poisoned after an uncertain commit; git-stratad exits so launchd restarts it and reopens the store",
             );
@@ -886,6 +977,7 @@ impl<'a> Daemon<'a> {
     /// `daemon_status`: holds, queues, the daemon's warnings; never waits.
     pub fn daemon_status(&self, verify: bool) -> Result<Value> {
         let _catalog = self.core.admit();
+        let (draining, inflight) = self.core.drain.status();
         // Status-bar §12.3: the activity registry is copied (and released)
         // before any lock FIFO or store read.
         let activity = self.core.activity.snapshot();
@@ -980,6 +1072,9 @@ impl<'a> Daemon<'a> {
             "verify": verify_result,
             "reconcile": self.reconcile.lock().unwrap_or_else(|p| p.into_inner()).clone(),
             "features": crate::FEATURES,
+            "draining": draining,
+            "inflight": inflight,
+            "store_schema": strata_types::STORE_SCHEMA,
             "config": { "generation": catalog.generation, "hash": catalog.hash, "loaded_at": catalog.loaded_at, "last_attempt": last_attempt, "restart_required": restart_required },
             "fds": {
                 "open": open_fd_count(),

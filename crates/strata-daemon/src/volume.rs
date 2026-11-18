@@ -71,16 +71,30 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 impl Volume {
     /// Sample the volume holding `root` every [`EVERY`].
     pub fn start(root: &Path) -> VolumeHandle {
-        Volume::start_with(
+        Volume::start_guarded(root, Default::default())
+    }
+
+    pub(crate) fn start_guarded(root: &Path, drain: crate::drain::Drain) -> VolumeHandle {
+        Volume::start_with_guard(
             root.to_path_buf(),
             EVERY,
             Arc::new(strata_apfs::volume_space),
+            drain,
         )
     }
 
     /// [`Volume::start`] with the interval and the sampling function given
     /// (tests). A thread that cannot be spawned leaves the cache empty.
     pub fn start_with(path: PathBuf, every: Duration, sample: Arc<SampleFn>) -> VolumeHandle {
+        Self::start_with_guard(path, every, sample, Default::default())
+    }
+
+    fn start_with_guard(
+        path: PathBuf,
+        every: Duration,
+        sample: Arc<SampleFn>,
+        drain: crate::drain::Drain,
+    ) -> VolumeHandle {
         let v = Arc::new(Volume {
             path: path.clone(),
             last: Mutex::new(None),
@@ -90,29 +104,31 @@ impl Volume {
         let me = Arc::clone(&v);
         let spawned = std::thread::Builder::new()
             .name("strata-volume".into())
-            .spawn(move || me.run(&path, every, &*sample));
+            .spawn(move || me.run(&path, every, &*sample, &drain));
         if let Err(e) = spawned {
             tracing::warn!(error = %e, "the volume sampler thread could not be started");
         }
         VolumeHandle(v)
     }
 
-    fn run(&self, path: &Path, every: Duration, sample: &SampleFn) {
+    fn run(&self, path: &Path, every: Duration, sample: &SampleFn, drain: &crate::drain::Drain) {
         loop {
-            let got = sample(path);
-            if let Err(e) = &got {
-                tracing::debug!(path = %path.display(), error = %e, "volume sample failed");
+            if let Some(_pass) = drain.background() {
+                let got = sample(path);
+                if let Err(e) = &got {
+                    tracing::debug!(path = %path.display(), error = %e, "volume sample failed");
+                }
+                let got = got.ok().map(|space| Sample {
+                    space,
+                    label: strata_apfs::volume_label(path)
+                        .inspect_err(|e| {
+                            tracing::debug!(path = %path.display(), error = %e, "volume name read failed")
+                        })
+                        .ok(),
+                    at: SystemTime::now(),
+                });
+                *lock(&self.last) = got;
             }
-            let got = got.ok().map(|space| Sample {
-                space,
-                label: strata_apfs::volume_label(path)
-                    .inspect_err(|e| {
-                        tracing::debug!(path = %path.display(), error = %e, "volume name read failed")
-                    })
-                    .ok(),
-                at: SystemTime::now(),
-            });
-            *lock(&self.last) = got;
             let end = Instant::now() + every;
             let mut stopped = lock(&self.stopped);
             loop {

@@ -125,7 +125,8 @@ fn method_table_has_the_documented_names() {
             "daemon_status",
             "du",
             "ports_ensure",
-            "ports_reassign"
+            "ports_reassign",
+            "drain",
         ]
     );
     let ro: Vec<&str> = Method::ALL
@@ -283,6 +284,7 @@ fn every_method_parses_its_documented_params() {
             "ports_reassign",
             json!({ "session": sid, "repo": "tool", "checked": 20000 }),
         ),
+        ("drain", json!({ "on": true })),
     ];
     assert_eq!(cases.len(), Method::ALL.len());
     for (m, p) in cases {
@@ -302,6 +304,43 @@ fn every_method_parses_its_documented_params() {
         q.params,
         Params::DaemonStatus(rpc::DaemonStatusParams { verify: true })
     );
+}
+
+#[test]
+fn drain_accepts_only_the_lease_and_seal_shapes() {
+    let accepted = [
+        json!({ "on": true }),
+        json!({ "on": true, "ttl_s": 120, "lease_id": "abc" }),
+        json!({ "on": false, "lease_id": "abc" }),
+        json!({ "on": false }),
+        json!({ "seal": true, "lease_id": "abc", "then": "hold" }),
+        json!({ "seal": true, "lease_id": "abc", "then": "stop" }),
+        json!({ "seal": true, "lease_id": "abc", "then": "restart" }),
+    ];
+    for params in accepted {
+        let q = req(json!({ "id": 7, "method": "drain", "params": params })).unwrap();
+        assert!(matches!(q.params, Params::Drain(_)));
+    }
+
+    let refused = [
+        json!({}),
+        json!({ "enabled": true }),
+        json!({ "on": true, "ttl": 120 }),
+        json!({ "on": true, "seal": false }),
+        json!({ "on": true, "ttl_s": -1 }),
+        json!({ "on": true, "ttl_s": u64::from(u32::MAX) + 1 }),
+        json!({ "seal": false, "lease_id": "abc", "then": "stop" }),
+        json!({ "seal": true, "then": "stop" }),
+        json!({ "seal": true, "lease_id": "abc" }),
+        json!({ "seal": true, "lease_id": "abc", "then": "quit" }),
+        json!({ "seal": true, "lease_id": "abc", "then": "hold", "ttl_s": 120 }),
+        json!({ "seal": true, "lease_id": "abc", "then": "stop", "on": false }),
+    ];
+    for params in refused {
+        let r = rejected(json!({ "id": 7, "method": "drain", "params": params }));
+        assert_eq!(r["id"], 7);
+        assert_eq!(rpc_of(&r), "Failed", "{params}");
+    }
 }
 
 /// `new.agent`: `agent` is optional, nullable, and a plain string on the
@@ -660,7 +699,8 @@ publish = { branch = "main", push = true, confirm = false, auto_clse = true }
 
 /// FEATURES only grows: the strings shipped before keep their places, and
 /// `daemon_status.activity` (the status-bar reply fields) comes right after
-/// them, then `daemon_status.volume_name` (which volume `volume` measured).
+/// them, then `daemon_status.volume_name` (which volume `volume` measured)
+/// and `daemon.drain`.
 #[test]
 fn features_keep_their_order_and_append_the_reply_capabilities() {
     let shipped = [
@@ -689,6 +729,11 @@ fn features_keep_their_order_and_append_the_reply_capabilities() {
     assert_eq!(
         features.get(shipped.len() + 1),
         Some(&"daemon_status.volume_name"),
+        "{features:?}"
+    );
+    assert_eq!(
+        features.get(shipped.len() + 2),
+        Some(&"daemon.drain"),
         "{features:?}"
     );
     let mut seen = std::collections::BTreeSet::new();

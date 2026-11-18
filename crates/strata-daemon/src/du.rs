@@ -520,6 +520,7 @@ impl Drop for DuHold {
 /// Lock order (review P1-4): `recorded` → `scan` → `cache`. A path that
 /// needs two of them takes them in that order or one at a time.
 pub struct Du {
+    drain: crate::drain::Drain,
     root: PathBuf,
     dir: PathBuf,
     cache: Mutex<CacheFile>,
@@ -565,6 +566,10 @@ pub struct Record {
 impl Du {
     /// `root` is the strata root; state goes to `<root>/daemon/du/`.
     pub fn open(root: &Path) -> DuHandle {
+        Self::open_guarded(root, Default::default())
+    }
+
+    pub(crate) fn open_guarded(root: &Path, drain: crate::drain::Drain) -> DuHandle {
         let dir = root.join("daemon/du");
         let cache = fs::read(dir.join("cache.json"))
             .ok()
@@ -575,6 +580,7 @@ impl Du {
                 ..CacheFile::default()
             });
         DuHandle(Arc::new(Du {
+            drain,
             root: root.to_path_buf(),
             dir,
             cache: Mutex::new(cache),
@@ -912,6 +918,7 @@ impl Du {
     pub fn on_new_timed(self: &Arc<Self>, sid: &str, took: Option<Duration>) {
         let ms = took.map(|d| d.as_millis().min(u64::MAX as u128) as u64);
         lock(&self.scan).new_due.insert(sid.to_owned(), ms);
+        let pass = self.drain.background();
         let keys = Self::session_keys(sid);
         {
             let mut st = self.scan_state();
@@ -921,7 +928,9 @@ impl Du {
                 }
             }
         }
-        self.kick();
+        if let Some(pass) = pass {
+            self.kick(pass);
+        }
     }
 
     /// After `rm`: one `rm` record with the last cached figures, then the
@@ -1045,6 +1054,11 @@ impl Du {
     }
 
     fn enqueue(self: &Arc<Self>, keys: Vec<String>, full: bool) {
+        // Cached du replies remain available while draining. They cannot
+        // extend an already running pass with newly requested work.
+        let Some(pass) = self.drain.background() else {
+            return;
+        };
         {
             let mut st = self.scan_state();
             if full && st.full_started.is_none() {
@@ -1059,11 +1073,11 @@ impl Du {
                 return;
             }
         }
-        self.kick();
+        self.kick(pass);
     }
 
     /// Start the pass thread unless one runs.
-    fn kick(self: &Arc<Self>) {
+    fn kick(self: &Arc<Self>, pass: crate::drain::Background) {
         {
             let mut st = self.scan_state();
             if st.running || self.stop.load(Ordering::SeqCst) {
@@ -1076,7 +1090,10 @@ impl Du {
         let me = Arc::clone(self);
         let spawned = std::thread::Builder::new()
             .name("strata-du".into())
-            .spawn(move || me.pass());
+            .spawn(move || {
+                let _pass = pass;
+                me.pass();
+            });
         if spawned.is_err() {
             self.scan_state().running = false;
         }

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strata_types::{Code, RepoName, SessionId, StrataError};
 
+use crate::drain::{Phase, Write};
 use crate::{DaemonWarning, LockHold, Result};
 
 /// Status-bar §3.1, §12.1: how long a background hold, or a hold doing
@@ -70,10 +71,10 @@ pub fn with_yield<R>(flag: Arc<AtomicBool>, f: impl FnOnce() -> R) -> R {
 }
 
 /// The per-thread request context (D8).
-#[derive(Debug)]
 struct Ctx {
     method: String,
     session: Option<SessionId>,
+    write: Option<Arc<Write>>,
     /// Something visible has been written (set after `session::new`
     /// returns, after a checkpoint commits, …).
     visible: bool,
@@ -102,6 +103,7 @@ impl RequestScope {
             *c.borrow_mut() = Some(Ctx {
                 method: method.to_string(),
                 session,
+                write: None,
                 visible: false,
                 took: false,
                 repos: BTreeSet::new(),
@@ -110,12 +112,50 @@ impl RequestScope {
         });
         RequestScope { _priv: () }
     }
+
+    pub(crate) fn track(&self, write: Write) {
+        CTX.with(|c| c.borrow_mut().as_mut().expect("request scope").write = Some(Arc::new(write)));
+    }
 }
 
 impl Drop for RequestScope {
     fn drop(&mut self) {
         CTX.with(|c| *c.borrow_mut() = None);
     }
+}
+
+fn with_write<T>(f: impl FnOnce(&Arc<Write>) -> T) -> Option<T> {
+    CTX.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|ctx| ctx.write.as_ref().map(f))
+    })
+}
+
+/// Keep the same inflight row alive for work delegated beyond the RPC.
+pub(crate) fn retain_request_write() -> Option<Arc<Write>> {
+    with_write(Arc::clone)
+}
+
+pub(crate) fn request_session(session: SessionId) {
+    with_write(|write| write.set_session(session));
+}
+
+pub(crate) fn request_repo(repo: RepoName) {
+    with_write(|write| write.set_repo(repo));
+}
+
+/// Show a temporary phase, restoring the enclosing phase on every exit.
+pub(crate) fn request_phase(phase: Phase) -> impl Drop {
+    struct Restore(Option<Phase>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(phase) = self.0 {
+                with_write(|write| write.set_phase(phase));
+            }
+        }
+    }
+    Restore(with_write(|write| write.set_phase(phase)).flatten())
 }
 
 /// The current request has written something visible: later takes wait
@@ -542,8 +582,12 @@ impl Locks {
         if cleanup {
             holder.generation = None;
         }
-        fifo.acquire(bound, &self.closed, holder, || Ok(()))
-            .map_err(|e| self.take_error(e, json!({ "repo": repo.as_str() }), t0.elapsed()))?;
+        {
+            let _queued = request_phase(Phase::Queued);
+            fifo.acquire(bound, &self.closed, holder, || Ok(()))
+                .map_err(|e| self.take_error(e, json!({ "repo": repo.as_str() }), t0.elapsed()))?;
+        }
+        let _locked = request_phase(Phase::Locked);
         CTX.with(|c| {
             if let Some(x) = c.borrow_mut().as_mut() {
                 x.repos.insert(repo.clone());
@@ -653,8 +697,13 @@ impl Locks {
                 }
             };
             let t0 = Instant::now();
-            fifo.acquire(bound, &self.closed, holder, || self.check_session(id))
-                .map_err(|e| self.take_error(e, json!({ "session": id.as_str() }), t0.elapsed()))?;
+            {
+                let _queued = request_phase(Phase::Queued);
+                fifo.acquire(bound, &self.closed, holder, || self.check_session(id))
+                    .map_err(|e| {
+                        self.take_error(e, json!({ "session": id.as_str() }), t0.elapsed())
+                    })?;
+            }
             CTX.with(|c| {
                 if let Some(x) = c.borrow_mut().as_mut() {
                     x.sessions.insert(id.clone());
@@ -674,6 +723,7 @@ impl Locks {
                 }),
             });
         }
+        let _locked = (!guards.is_empty()).then(|| request_phase(Phase::Locked));
         let r = f();
         // Release in reverse order of taking.
         while let Some(g) = guards.pop() {
@@ -727,6 +777,16 @@ impl Locks {
                 })
             })
             .collect()
+    }
+
+    /// A background queue place counts as well as a repo lock. Reads may
+    /// use a session queue without being part of the drain.
+    pub(crate) fn has_background_holder(&self) -> bool {
+        let background = |fifo: &Arc<Fifo>| {
+            fifo.holder()
+                .is_some_and(|h| h.origin == Origin::Background)
+        };
+        self.repo_entries().values().any(background) || lock(&self.queues).values().any(background)
     }
 
     /// [`Locks::long_holds_with`] with no exempt work in flight.

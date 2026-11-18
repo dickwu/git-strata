@@ -52,6 +52,20 @@ type CacheKey = Vec<(String, Option<String>, Option<String>)>;
 static CACHE: OnceLock<Mutex<VecDeque<(CacheKey, Changes)>>> = OnceLock::new();
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
+#[cfg(feature = "test-seams")]
+type WorkerHook = Box<dyn FnOnce() + Send>;
+
+#[cfg(feature = "test-seams")]
+thread_local! {
+    static BEFORE_WORKER: std::cell::RefCell<Option<WorkerHook>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs in the next summary worker started by the calling thread.
+#[cfg(feature = "test-seams")]
+pub fn before_changes_worker(hook: impl FnOnce() + Send + 'static) {
+    BEFORE_WORKER.set(Some(Box::new(hook)));
+}
+
 fn unavailable(reason: &str) -> StrataError {
     StrataError::new(Code::Busy, "package summary is not available yet")
         .with_detail(serde_json::json!({"reason": reason}))
@@ -74,17 +88,30 @@ pub fn changes(
     from_head: &CommitOid,
     to_head: &CommitOid,
 ) -> Result<Changes> {
+    changes_with_guard(git, cfg, from_head, to_head, ())
+}
+
+/// As in [`changes`], with an admission guard kept until the worker finishes,
+/// even when the caller's response deadline has passed.
+pub fn changes_with_guard(
+    git: &Git,
+    cfg: &RepoConfig,
+    from_head: &CommitOid,
+    to_head: &CommitOid,
+    guard: impl Send + 'static,
+) -> Result<Changes> {
     if cfg.install_inputs.is_empty() || from_head == to_head {
         return Ok(finish(Vec::new(), &[], false));
     }
     let (git, cfg, from, to) = (git.clone(), cfg.clone(), from_head.clone(), to_head.clone());
-    within_budget(RESPONSE_BUDGET, move |deadline| {
+    within_budget(RESPONSE_BUDGET, guard, move |deadline| {
         compare(&git, &cfg, &from, &to, deadline)
     })
 }
 
 fn within_budget(
     budget: Duration,
+    guard: impl Send + 'static,
     work: impl FnOnce(Instant) -> Result<Changes> + Send + 'static,
 ) -> Result<Changes> {
     let response_deadline = Instant::now() + budget;
@@ -103,9 +130,16 @@ fn within_budget(
     }
     let slot = Slot;
     let (tx, rx) = mpsc::sync_channel(1);
+    #[cfg(feature = "test-seams")]
+    let hook = BEFORE_WORKER.take();
     std::thread::Builder::new()
         .name("deps-summary".into())
         .spawn(move || {
+            let _guard = guard;
+            #[cfg(feature = "test-seams")]
+            if let Some(hook) = hook {
+                hook();
+            }
             let result = work(worker_deadline);
             drop(slot);
             let _ = tx.send(result);
@@ -876,7 +910,7 @@ mod tests {
         let (release, wait) = mpsc::channel();
         let (ended, done) = mpsc::channel();
         let start = Instant::now();
-        let error = within_budget(Duration::from_millis(10), move |_| {
+        let error = within_budget(Duration::from_millis(10), (), move |_| {
             wait.recv().unwrap();
             let _ = ended.send(());
             Ok(finish(Vec::new(), &[], false))
@@ -885,10 +919,12 @@ mod tests {
         assert_eq!(error.detail.unwrap()["reason"], "changes_budget");
         assert!(start.elapsed() < Duration::from_millis(200));
         assert_eq!(
-            within_budget(RESPONSE_BUDGET, |_| panic!("must not spawn another parser"))
-                .unwrap_err()
-                .detail
-                .unwrap()["reason"],
+            within_budget(RESPONSE_BUDGET, (), |_| panic!(
+                "must not spawn another parser"
+            ))
+            .unwrap_err()
+            .detail
+            .unwrap()["reason"],
             "changes_busy"
         );
         release.send(()).unwrap();

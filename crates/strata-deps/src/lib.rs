@@ -27,7 +27,9 @@ mod snapshot;
 pub use adopt::adopt;
 pub use attempts::attempts;
 pub use build::{build, clone_into, find_set, key_of};
-pub use changes::{ChangeKind, Changes, PackageChange, changes};
+#[cfg(feature = "test-seams")]
+pub use changes::before_changes_worker;
+pub use changes::{ChangeKind, Changes, PackageChange, changes, changes_with_guard};
 pub use drift::{Drift, drift};
 pub use ensure::ensure;
 pub use inputs::{InputRecord, hash_records, input_records, inputs_hash, is_input, is_input_folded, nested_seed_caches, platform, set_id, toolchain};

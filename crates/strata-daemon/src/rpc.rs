@@ -76,12 +76,38 @@ methods! {
     Du = "du", ro = true;
     PortsEnsure = "ports_ensure", ro = false;
     PortsReassign = "ports_reassign", ro = false;
+    Drain = "drain", ro = false;
 }
 
 /// A field that must be present but may be `null` (a missing one is
 /// `Failed`, like any other missing field).
 fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     Option::<T>::deserialize(d)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrainThen {
+    Stop,
+    Restart,
+    Hold,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum DrainParams {
+    Lease {
+        on: bool,
+        #[serde(default)]
+        ttl_s: Option<u32>,
+        #[serde(default)]
+        lease_id: Option<String>,
+    },
+    Seal {
+        seal: bool,
+        lease_id: String,
+        then: DrainThen,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -444,6 +470,7 @@ pub enum Params {
     Du(DuParams),
     PortsEnsure(PortsParams),
     PortsReassign(ReassignParams),
+    Drain(DrainParams),
 }
 
 fn typed<T: DeserializeOwned>(v: Value, wrap: fn(T) -> Params) -> Result<Params, String> {
@@ -491,6 +518,13 @@ impl Params {
             Method::Du => typed(v, Params::Du),
             Method::PortsEnsure => typed(v, Params::PortsEnsure),
             Method::PortsReassign => typed(v, Params::PortsReassign),
+            Method::Drain => {
+                let p = serde_json::from_value(v).map_err(|e| e.to_string())?;
+                if matches!(p, DrainParams::Seal { seal: false, .. }) {
+                    return Err("seal must be true".into());
+                }
+                Ok(Params::Drain(p))
+            }
         }
     }
 }

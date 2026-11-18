@@ -65,7 +65,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 
 未知方法 → RPC `UnknownMethod`。参数对不上 → RPC `Failed`。
 
-方法与 cli 子命令同名。T14 按这张表绑定。名字不改。除表里这 27 个以外不加方法（`sync` 是 main-sync 加的；`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）：
+方法沿用对应 CLI 子命令的名字，`drain` 由桌面应用调用。T14 按这张表绑定。名字不改。除表里这 28 个以外不加方法（`sync` 是 main-sync 加的；`add` 是 session.md D52 加的，`ports_ensure` / `ports_reassign` 是 D39 加的）（`tests/rpc.rs` 的 `daemon_md_method_table_matches_rpc` 核对这个数、名字与只读列，review-3 T4）。
 
 | method | 作用 | 是否只读 |
 | --- | --- | --- |
@@ -83,7 +83,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `deps_approve` | 确认后铺开 | 否 |
 | `deps_list` | `open_proposals` | 是 |
 | `publish` | `stage` 到 `commit`，按配置 `push` | 否 |
-| `publish_plan` | 同一个 group 的发布会做什么：还要提交的仓库与已经落地的仓库。不写任何东西（review-2 N2）[实现时补的决定] | 是 |
+| `publish_plan` | 预览同一个 group 中还要提交的仓库与已经落地的仓库（review-2 N2）[实现时补的决定]。缓存未命中时尝试更新私有跟踪 refs，受 drain 准入限制。 | 是 |
 | `push` | `publish::push` | 否 |
 | `assign` | 点名冲突解决者 | 否 |
 | `rm` | `session::remove` | 否 |
@@ -96,6 +96,7 @@ RPC 是 JSON 行，一行一个请求，一行一个回答。形状只借 tgrep 
 | `du` | 数据根的磁盘用量，读缓存（§5.12） | 是 |
 | `ports_ensure` | `store::ensure_dev_ports`：一个工作区的 dev 端口租约，没有就分配（D39） | 否 |
 | `ports_reassign` | `store::reassign_dev_ports`：把租约挪到另一块（D39） | 否 |
+| `drain` | 管理 daemon 的停机租约与封口，见 §5.9 | 否 |
 
 `params` 的字段（serde，未知字段 → RPC `Failed`）[我的决定 D4]：
 
@@ -128,10 +129,11 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice, "shown"?: CommitOid \| null }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
 | `config_reload` | `{}` | ReloadReport，见 Config catalog and reload |
 | `config_relax` | `{ "repo": RepoName, "shown"?: PinnedFlags \| null }` | `{pins_meta, warnings?}`。`shown` 在反序列化时可省略或为 null，但 handler 会以 `InvalidInput shown_required` 拒绝；支持 `config.reload` 的客户端必须发送展示的 flags。没有凭据字段。见 §5.5 |
-| `daemon_status` | `{ "verify": bool }` | `holds`, `queues:[{session,holder,since,queued}]`, `repo_waiting`, `warnings`（含 LongWait）, `features`, `sessions_audit_error`（会话审计写入失败信息或 null；见下文 sidecar 说明）；见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc`。状态栏字段 `version`、`pid`、`started`、`activity`、`busy`、`volume`、`scan`（feature `daemon_status.activity`；`volume` 的 `path`、`mount`、`name` 是 feature `daemon_status.volume_name`）见 Status bar fields |
+| `daemon_status` | `{ "verify": bool }` | `holds`, `queues:[{session,holder,since,queued}]`, `repo_waiting`, `warnings`（含 LongWait）, `features`, `sessions_audit_error`（会话审计写入失败信息或 null；见下文 sidecar 说明）；见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc`。状态栏字段 `version`、`pid`、`started`、`activity`、`busy`、`volume`、`scan`（feature `daemon_status.activity`；`volume` 的 `path`、`mount`、`name` 是 feature `daemon_status.volume_name`）见 Status bar fields。支持 `daemon.drain` 时另带 `draining`、`inflight` 与 `store_schema`，见 §5.9。 |
 | `du` | `{ "refresh": bool }`（缺省 false） | 见 §5.12 |
 | `ports_ensure` | `{ "session": SessionId, "repo": RepoName }` | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
 | `ports_reassign` | `{ "session": SessionId, "repo": RepoName, "checked": u16 \| null }`（`checked`：cli 查过监听的那个 base，`null` 或缺省 = 它没看到租约；与事务里的租约不同时 `Busy lease_changed`，什么都不动） | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
+| `drain` | `{on: bool, ttl_s?: u32, lease_id?: string}` 或 `{seal: true, lease_id: string, then: "restart" \| "stop" \| "hold"}` | 开租、续租与封口回 `{lease_id}`，解租回 `{}`。错误与停机流程见 §5.9。 |
 
 设计 §6.3 的 `diff --base` 在 publish 草案里没有对应函数。本方法只做 `diff_between`。`--base` 等 publish 补了函数再加参数，不加方法名。
 
@@ -441,7 +443,7 @@ value; workers should use the accessor for subsequent passes.
 
 `ObserveFailed` 不在 `DaemonWarning` 里重定义。它是 `NewWarning` 或这次 RPC 的 `data.warnings`。
 
-`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity", "daemon_status.volume_name"]`（D38、D39；`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload）；没有这个键的 daemon 一个也不支持。最后两项 `daemon_status.activity` 与 `daemon_status.volume_name` 不是请求扩展，而是回复能力：前者表示这个 daemon 的 `daemon_status` 带状态栏字段，后者表示其中的 `volume` 还带 `path`、`mount`、`name`，见 Status bar fields。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
+`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity", "daemon_status.volume_name", "daemon.drain"]`（D38、D39；`daemon.drain` 见 §5.9，`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload）；没有这个键的 daemon 一个也不支持。`daemon_status.activity` 与 `daemon_status.volume_name` 表示回复能力：前者表示这个 daemon 的 `daemon_status` 带状态栏字段，后者表示其中的 `volume` 还带 `path`、`mount`、`name`，见 Status bar fields。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
 
 stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看见某个影子仓库的 `PrePushGuardDisabled`。同一条不重复打。这些警告 JSON 里都有，不靠人去翻日志；R2 activity-scope 的 once-per-repo 日志提示是下文注明的例外。
 
@@ -481,7 +483,7 @@ Upstream status has a separate last-good summary cache keyed by
 that exact key's summary; busy, error and timeout results retain it. Cached reads reuse it,
 and a different key cannot inherit it. With no matching cached value, the summary is omitted.
 
-**`publish_plan`**：不排队。`publish` 开头那一步重跑过滤（`rerun_plan`，即 D22 的按选择子、按内容判定）原样跑一遍，返回还要提交的仓库与 `already_published`，不写（review-2 N2）[实现时补的决定]。
+**`publish_plan`**：不排队。`publish` 开头那一步重跑过滤（`rerun_plan`，即 D22 的按选择子、按内容判定）原样跑一遍，返回还要提交的仓库与 `already_published`（review-2 N2）[实现时补的决定]。需要抓取来更新私有跟踪 refs 时，先登记为在途写入，再试取 repo 锁。租约生效时，需抓取的预览返回 `Busy draining`，命中缓存的预览可以继续。
 
 **`deps_propose`**：锁外 `drift`，没有漂移不必提议。有则锁外 `build`。然后占 repo 锁（写前 30 秒）调 `propose`。`switch` 为真：先锁外 `ensure_base_for`，再占该会话队列、拿锁、`plan_switch` 与 `move_workspace`。建造都在占队列之前。写入无 target 的 draft（有 origin）时，`record_proposal` 在同一事务里读 origin 的 lifecycle：`removing` → `InvalidInput`（`reason: "lifecycle"`），`removed` → `NoSuchSession`；不另加锁或队列，建造仍在占锁之前，插入只占 repo 锁。正在关闭或 `rm` 中的过期 `deps propose` 被告知真相，而不是写入无人会看到的行。
 
@@ -561,7 +563,23 @@ daemon 实现 `publish::PublishLocks`（`with_sessions`、`with_repo`），放�
 
 实现（review M1）：`handlers::serve` 在 accept 循环旁边起一条对账线程，与 accept 循环同生同灭，丢 Tracker 之前先 join。线程先做 §5.1 第 13 步（给每个 Active 会话里 tracked 的工作区建 Tracker 并 watch；队列被占的跳过，由持有它的请求自己建），然后每 `Options::reconcile_every`（生产为 `RECONCILE_EVERY`，测试缩短）跑一轮 `Trackers::reconcile_once`：`Locks::try_session` 不等、不排队；占上就 `compute(.., None)`（不带脏集合 = 走全树，事件整段没来也能发现），只更新缓存。每 20 ms 看一次停机标志，停机不等间隔；正在跑的一轮做完（之后的取锁按 D17 失败）。一轮 panic 记进 `daemon_status`，不拖垮 daemon。上一轮结果写进 `daemon_status.reconcile` [实现时补的决定]。同一条线程每 `SEED_REFRESH_EVERY`（2 s）跑一轮种子刷新（session.md "种子刷新"）：对每个会话先只读地 `seeds_due`，有要换的才 `try_session` 再 `refresh_seeds`；错误与 panic 都吞掉，下一轮再试 [实现时补的决定]（2026-10-26）。
 
-停机（SIGTERM）：停止 accept。在跑的请求做完。还在排队的以 `ReadOnly` 失败，`detail.reason = "shutting_down"`（types.md 没有 Closed 这个码，映射到已有的「写被拒绝」）[我的决定 D17]。在请求线程上丢掉 Tracker（从而丢掉 Watcher），不在回调里丢。放开全部 `Arc<Store>` 之后 `Store::close`（它写 `store/clean-shutdown`）。不写 `daemon.clean`。unlink socket。放开 flock。退出。
+停机（SIGTERM）：停止 accept。在跑的请求做完。还在排队的以 `ReadOnly` 失败，`detail.reason = "shutting_down"`（types.md 没有 Closed 这个码，映射到已有的「写被拒绝」）[我的决定 D17]。在请求线程上丢掉 Tracker（从而丢掉 Watcher），不在回调里丢。放开全部 `Arc<Store>` 之后 `Store::close`（它写 `store/clean-shutdown`）。不写 `daemon.clean`。unlink socket。放开 flock。正常的 SIGTERM 停机（含 hold 封口后）以 0 退出，收尾错误记入日志与 `last_shutdown.json`。
+
+#### Drain RPC
+
+Desktop callers require the `daemon.drain` feature. `drain{on:true}` creates a lease with a default TTL of 120 seconds and a maximum of 600 seconds. When a lease already exists, a lease-less acquisition returns `Busy draining` without a lease ID. To renew from the current time, send `drain{on:true, lease_id}` with the ID returned by acquisition. An unknown or expired ID returns `Busy lease_lost`. An unsealed lease expires automatically and can be released with `drain{on:false}`.
+
+Write admission, inflight registration, background-pass admission and sealing use the same critical section. A write arriving during the lease receives `Busy draining`. Already admitted work can finish. Read-only calls, including sync checks and store-GC previews, can continue. A publish preview that needs to refresh tracking refs must first register a write. During drain, `status` and sync checks can reuse cached upstream dependency summaries. `deps_list` omits the optional `changes` field.
+
+Background passes wait for release or expiry before starting. These include catch-up, reconciliation, seed refresh, old-tree checks, autonomous config polling, main-follow fetch, automatic dependency work and disk sampling. An admitted `config_reload` ticket can run during drain and keeps its inflight entry through completion, even after a `pending` reply. `drain` is exempt from the fence and from inflight tracking.
+
+Sealing requires the current lease ID and an empty inflight list with no active background passes or holders. Failure returns `Busy lease_lost` or `Busy not_idle`. A background pass can block sealing before it takes a lock visible in `daemon_status`. Dependency-summary workers block sealing through completion, even after a read replies without the summary. A successful `then:"stop"` or `then:"restart"` seal starts orderly shutdown and selects exit 0 or 75 respectively. A matching renewal or a release with a matching or omitted ID returns `InvalidInput sealed`. A `then:"hold"` seal stays in memory without expiry or exit. A matching renewal leaves it sealed. Releasing it requires `drain{on:false, lease_id}` with the matching ID, otherwise it returns `Busy lease_lost`. SIGTERM during a hold shuts down the process with exit 0.
+
+When shutting down from a seal, the daemon stops reading requests and allows up to two seconds for outstanding replies, including the seal acknowledgement. It then closes the write halves of lingering connections.
+
+`daemon_status.draining` is null without a lease and otherwise contains `{lease_id, expires_at, sealed, then}`. `expires_at` is RFC 3339 while unsealed and null once sealed. `then` is null before sealing. `inflight` contains accepted writes as `{method, session?, repo?, phase, started_at}`. Phases are `queued`, `confirming`, `locked` and `running`. A request shows `confirming` only during its authentication call. `started_at` is RFC 3339. `store_schema` reports the schema of the open store as a u32.
+
+Orderly shutdown records `{mode, epoch, close_error, at}` in `last_shutdown.json` in the daemon's config directory. `mode` is `stop`, `restart`, `hold` (SIGTERM during a hold) or `sigterm`. `epoch` is a per-process 128-bit hexadecimal identifier. A store-close error is recorded and logged while the selected exit code remains in effect.
 
 ### 5.10 告警与影子仓库
 
@@ -1000,7 +1018,7 @@ git commit -m "feat(daemon): resolve_move and chain_resolve"
 | D28 du 的锁只有一个顺序（review P1-4） | `Du` 的三把锁固定按 `recorded` → `scan` → `cache` 取；`report` 先读扫描队列再拿 cache 锁，不在 cache 锁里拿 scan 锁 | 原来 `report` 持 cache 再拿 scan，而 `scan_json`/扫描收尾持 scan 再拿 cache，`du` 和 `status` 并发时会 ABBA 死锁（单测可复现）。否决：合并成一把锁（扫描收尾要长时间持 scan） | 2026-10-27 |
 | D29 启动清理残留 ref 锁、停机宽限 900 s（review P1-5） | `Daemon::start` 在第 8 步前、持实例 flock，对每个 repo 在其写锁下删掉 mtime 早于本次启动的 `refs/strata/**/*.lock`，各记一条 `StaleRefLock` 告警并打印一行；比启动新的锁留着（可能是活着的 `git pack-refs`）。plist 写 `ExitTimeOut = 900` | 原来 SIGKILL（launchd 默认约 20 s 的宽限、断电、自己的 killpg）落在 prepare 与 commit 之间就留下锁，git 和 daemon 都不清，之后那条 ref 的事务全失败、`rm` 卡在 pin CAS。只有 daemon 写 `refs/strata/`，所以启动时清是安全的。否决：拒绝 `daemon stop`（launchd/重启不经过它） | 2026-10-27 |
 | D30 等待期应答器先起（review P1-6） | `main` 拿到实例锁后、第一次 `prepare_locked` 之前就 `waiting::answer_early`（bind + 应答 `Busy starting`），失败才在第一次出错时再试；apfs 内部 `EINTR` 重试最多 64 次 | 原来第一次出错才 bind：第一次尝试卡在 TCC 里时 socket 一声不响，`daemon status` 只能超时；apfs 的 `retry` 无限重试 EINTR，外层有界的 `retry_eintr`/启动等待回不来、也看不到 SIGTERM | 2026-10-27 |
-| D31 写者中毒就退出重启（review P1-7） | `serve` 的接受循环每轮看 `store.is_poisoned()`；中毒就停止接受、排空在途连接、告警一次，以 `Unknown{reason:"store_poisoned_restart"}` 返回，`main` 以失败退出，launchd `KeepAlive` 拉起新进程重开 store（没有干净关停标记，所以跑 quick_check） | 原来中毒之后 daemon 一直活着，每个写都 `Unknown poisoned`，直到有人手动重启；进程内重开不行：Turso 每进程每文件一个 `Database`，不会重跑 WAL 恢复 | 2026-10-27 |
+| D31 写者中毒就退出重启（review P1-7） | `serve` 的接受循环每轮看 `store.is_poisoned()`；中毒就停止接受、排空在途连接、告警一次，以 `Unknown{reason:"store_poisoned_restart"}` 返回，`main` 以失败退出，launchd `KeepAlive` 拉起新进程重开 store（没有干净关停标记，所以跑 quick_check）。已有 `stop` 或 `restart` 封口时依 §5.9 保留选定的退出码（0 或 75），记录收尾错误。 | 原来中毒之后 daemon 一直活着，每个写都 `Unknown poisoned`，直到有人手动重启；进程内重开不行：Turso 每进程每文件一个 `Database`，不会重跑 WAL 恢复 | 2026-10-27 |
 | D32 重跑过滤容忍已被清掉的提交（review P1-8） | `landed_content` 读最新 `Done` 行的提交时，`tree_of`/`tree_items` 报 `NoSuchCommit`/`NoSuchPath` 就当作“证明不了已落地”，返回 `None`：选择器留着，由 stage 如实回答（`NoMatch`/`NoCommit` 后的 H4 兜底） | 那个提交被 replay 或 `chain --accept-origin drop` 挪出链、再被 git gc 清掉后，同一会话任何“内容没变”的选择器都让整个 publish 以 `NoSuchCommit` 失败，agent 只能改文件或开新会话 | 2026-10-27 |
 | D33 全局 gc 只在人要求时跑（review GS-09，P1-12） | `Store::gc`（删已移除会话过了保留期的行与 checkpoint、已决提议、已结束的尝试、旧 gc 记录、无引用的 blob、`store/tmp`、trash，再做 2 GiB 的 blob 校验）此前没有调用方。现在只由 `gc` 方法在 `store = true` 时调用（`git-strata gc --store`），保留期 `STORE_GC_KEEP` 30 天，比 `GC_KEEP` 长：删掉的 checkpoint 无法重建。启动、对账循环都不调它。`dry_run` 先给 `gc_preview`（只读、不记 `gc_runs`）。trash 步改用与 `gc_trash` 相同的引用集（行与 git 链接），被点名的条目记进 `trash_refused`。在跑的发布、Unknown 的发布点名的会话照 store.md §5.11 留着。自动定期跑留待人决定。测试：`store_gc_is_opt_in_and_previews_first`（daemon）、`gc_preview_counts_and_writes_nothing`、`gc_trash_step_spares_referenced_trash`（store）、cli 的 `shape_is_this_doc_not_a_golden` |
 | D34 推送记录先落盘再推送（review GS-10，P1-13） | `with_staging` 写 `push.json` 走 临时文件 → 写入 → F_FULLFSYNC（卷不支持就 fsync）→ 改名 → F_FULLFSYNC 暂存目录与其父目录 `daemon/push/`；任何一步失败：删掉目录、返回错误、不导出不推送 | 原来是 `fs::write` 不 fsync：推送已到远端后断电，重启时没有暂存目录，这次结果不确定的推送永远不会被报告。测试 `standalone_push_needs_a_durable_scene_record`（seam `set_scene_sync_fails` 让 fsync 报 EIO：推送被拒、origin 不变、不留目录；关掉后正常推送） |

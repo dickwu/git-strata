@@ -21,7 +21,7 @@ use strata_types::{
     Action, Code, Config, ConfirmToken, RepoConfig, RepoName, StrataError, SyncDeps,
 };
 
-use crate::{PinnedFlags, Result};
+use crate::{PinnedFlags, Result, drain::Phase, locks};
 
 /// The flags a repo's configuration file asks for.
 pub fn flags_of(rc: &RepoConfig) -> PinnedFlags {
@@ -299,7 +299,10 @@ impl Pins {
 /// thread, with no queue or repo lock held. `between` runs after `require`
 /// returned and before `validate` (a test seam; production passes `&|| {}`).
 pub fn require_validated_with(confirmer: &Confirmer, action: Action, between: &dyn Fn()) -> Result<ConfirmToken> {
-    let token = confirmer.require(action.clone())?;
+    let token = {
+        let _phase = locks::request_phase(Phase::Confirming);
+        confirmer.require(action.clone())?
+    };
     between();
     confirmer.validate(&token, &action)?;
     Ok(token)

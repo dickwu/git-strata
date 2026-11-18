@@ -37,6 +37,10 @@ All three keys are always present; `data` is never null. Branch on
 | `OpenFiles cwd_holders` | Other shells would be left in the old tree; ask their owners to cd out. `--allow-cwd` only exempts the caller's PID chain; `--allow-cwd-holders` explicitly accepts others. |
 | `Busy` (`pins_tightened`) | Rerun the command with a fresh snapshot of the newly applied config; do not retry inside the old operation. |
 | `Busy` (`reload_pending`) | Rerun `config reload`; the current attempt continues (exit 3). |
+| `Busy` (`draining`) | The daemon is preparing for a stop, restart or move. A new drain request without a lease ID also receives this error while a lease exists. The App renews with the ID from its acquisition reply. Retry once the operation finishes. If it persists, run `git-strata daemon status`. |
+| `Busy` (`not_idle`) | The App's drain still has admitted work. Wait for inflight requests and background holders to finish before sealing. |
+| `Busy` (`lease_lost`) | Refresh daemon status before retrying. To cancel a sealed hold, reopen the App and resume the move with its recorded lease. |
+| `InvalidInput` (`sealed`) | The requested change conflicts with an existing seal. Wait for a sealed stop or restart to finish. For a sealed hold, reopen the App to finish or cancel the move. |
 | `Busy` (other) | Repo lock held by another operation; wait and retry later. |
 | `InvalidInput` (`config_rejected`) | Fallback when a rejected `config reload` report supplies no reason; otherwise the daemon's reason is forwarded. Inspect `data.reasons` and `data.restart_required` (exit 2). |
 | `InvalidInput` (`recovery_failed`) | A new repo's pending-rebase reconstruction failed before catalog publication; the old catalog remains active. Inspect `data.reasons`, resolve the reported failure, then rerun `config reload`. |

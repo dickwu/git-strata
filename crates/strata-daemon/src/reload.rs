@@ -5,10 +5,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::{DaemonWarning, PinnedFlags, Result, catalog::Catalog, confirm_flow, startup::Core};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use strata_types::{Action, Code, Config, RepoName, StrataError};
+
+use crate::drain::Write;
+use crate::{
+    DaemonWarning, PinnedFlags, Result, catalog::Catalog, confirm_flow, locks, startup::Core,
+};
 
 pub static HUP: AtomicBool = AtomicBool::new(false);
 pub const RELOAD_WAIT: Duration = Duration::from_secs(15);
@@ -29,6 +33,7 @@ pub struct ReloadReport {
 struct State {
     requested: u64,
     finished: u64,
+    admissions: Vec<Arc<Write>>,
     last: Option<ReloadReport>,
     at: Option<SystemTime>,
 }
@@ -56,6 +61,10 @@ impl ReloadState {
     }
     pub fn wake(&self) {
         self.cv.notify_all();
+    }
+    fn wait_for_work(&self) {
+        let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = self.cv.wait_timeout(s, Duration::from_millis(20));
     }
     pub fn status(&self) -> Value {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -177,10 +186,15 @@ impl Core {
     /// The report always belongs to an attempt whose read started after this
     /// request. A simultaneous poll that started earlier cannot satisfy it.
     pub fn request_reload(&self, wait: Duration) -> Result<ReloadReport> {
+        let admission = match locks::retain_request_write() {
+            Some(write) => write,
+            None => Arc::new(self.drain.admit("config_reload", None, None)?),
+        };
         let deadline = Instant::now() + wait;
         let mut s = self.reload.state.lock().unwrap_or_else(|p| p.into_inner());
         s.requested += 1;
         let ticket = s.requested;
+        s.admissions.push(admission);
         self.reload.cv.notify_all();
         loop {
             if self.locks.is_shut_down() {
@@ -558,51 +572,44 @@ pub fn run(core: &Core, stop: &(dyn Fn() -> bool + Sync)) {
                 Err(e) => core.warnings.alert_once(&e.message),
             }
         }
-        let mut observed = stat(core);
-        let mut handled = observed;
+        let mut observed = None;
+        let mut handled = None;
         let mut initialized = false;
         let mut next_stat = Instant::now() + core.opts.config_poll_every;
         let mut hash = core.catalog.current().hash.clone();
         let mut retry_at = None;
         let mut backoff = Duration::from_secs(60);
         while !stop() && !core.locks.is_shut_down() {
-            let requested = core
-                .reload
-                .state
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .requested;
-            let finished = core
-                .reload
-                .state
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .finished;
-            let mut due = requested > finished || HUP.swap(false, Ordering::SeqCst);
-            if Instant::now() >= next_stat {
-                let stamp = stat(core);
-                if stamp == observed && (!initialized || stamp != handled) {
-                    initialized = true;
-                    handled = stamp;
-                    let new_hash = fs::read(&core.opts.config_file)
-                        .ok()
-                        .and_then(|b| source_hash(&b).ok())
-                        .unwrap_or_default();
-                    due |= new_hash != hash;
+            // Explicit tickets carry their RPC admission through completion.
+            // HUP, retries and polling need separate background admission.
+            let pass = core.drain.background();
+            let mut due = false;
+            if pass.is_some() {
+                due = HUP.swap(false, Ordering::SeqCst);
+                if Instant::now() >= next_stat {
+                    let stamp = stat(core);
+                    if stamp == observed && (!initialized || stamp != handled) {
+                        initialized = true;
+                        handled = stamp;
+                        let new_hash = fs::read(&core.opts.config_file)
+                            .ok()
+                            .and_then(|b| source_hash(&b).ok())
+                            .unwrap_or_default();
+                        due |= new_hash != hash;
+                    }
+                    observed = stamp;
+                    next_stat = Instant::now() + core.opts.config_poll_every;
                 }
-                observed = stamp;
-                next_stat = Instant::now() + core.opts.config_poll_every;
+                due |= retry_at.is_some_and(|at| Instant::now() >= at);
             }
-            due |= retry_at.is_some_and(|at| Instant::now() >= at);
-            if due {
+            let attempt = {
                 // Capture before the read. Requests arriving during this attempt
                 // require another one, even if it publishes their desired file.
-                let stamp = core
-                    .reload
-                    .state
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .requested;
+                let mut s = core.reload.state.lock().unwrap_or_else(|p| p.into_inner());
+                (due || s.requested > s.finished)
+                    .then(|| (s.requested, std::mem::take(&mut s.admissions)))
+            };
+            if let Some((stamp, admissions)) = attempt {
                 let (result, attempted_hash) = core.apply_reload(&mut prepare);
                 // Cache the bytes the attempt actually parsed, not a second
                 // read that could race an editor's rename-save.
@@ -617,14 +624,17 @@ pub fn run(core: &Core, stop: &(dyn Fn() -> bool + Sync)) {
                 } else {
                     Duration::from_secs(60)
                 };
-                let mut s = core.reload.state.lock().unwrap_or_else(|p| p.into_inner());
-                s.finished = stamp;
-                s.last = Some(result);
-                s.at = Some(SystemTime::now());
-                core.reload.cv.notify_all();
+                {
+                    let mut s = core.reload.state.lock().unwrap_or_else(|p| p.into_inner());
+                    s.finished = stamp;
+                    s.last = Some(result);
+                    s.at = Some(SystemTime::now());
+                }
+                drop(admissions);
+                core.reload.wake();
             }
-            let s = core.reload.state.lock().unwrap_or_else(|p| p.into_inner());
-            let _ = core.reload.cv.wait_timeout(s, Duration::from_millis(20));
+            drop(pass);
+            core.reload.wait_for_work();
         }
         core.reload.wake();
     });

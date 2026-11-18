@@ -31,7 +31,7 @@ use crate::confirm_flow::{needs_confirm, recheck, require_validated};
 use crate::fetch_after::{alert_attach, report_guard_disabled};
 use crate::locks::{self, RequestScope};
 use crate::resolve;
-use crate::rpc::{Params, Reply, Request};
+use crate::rpc::{Method, Params, Reply, Request};
 use crate::startup::{Core, Daemon};
 use crate::track::{self, drop_tracker, prepare_tool_call};
 use crate::{DaemonWarning, GC_KEEP, Result, RpcReject, STORE_GC_KEEP};
@@ -151,14 +151,18 @@ fn deps_list(core: &Core, repo: Option<&RepoName>) -> Result<Value> {
             let Some(to) = &p.head else {
                 return Ok(None);
             };
+            let Some(pass) = core.drain.background() else {
+                return Ok(None);
+            };
             let Some((from, legacy)) = changes_base(core, &p, &mut legacy_budget)? else {
                 return Ok(None);
             };
-            let mut changes = json_of(&strata_deps::changes(
+            let mut changes = json_of(&strata_deps::changes_with_guard(
                 git_of(core, &p.repo)?,
                 repo_cfg(core, &p.repo)?,
                 &from,
                 to,
+                pass,
             )?);
             if legacy {
                 changes["since"] = json!("session_base");
@@ -732,7 +736,7 @@ pub fn serve(
 /// once the locks are shut down). A panicking pass is recorded, not fatal.
 fn reconcile_loop(d: &Daemon<'_>, trackers: &Trackers<'_>, stop: &dyn Fn() -> bool) {
     let every = d.core.opts.reconcile_every;
-    trackers.watch_tracked();
+    let mut watch_pending = true;
     let mut seeds_at = std::time::Instant::now();
     loop {
         let next = std::time::Instant::now() + every;
@@ -741,7 +745,13 @@ fn reconcile_loop(d: &Daemon<'_>, trackers: &Trackers<'_>, stop: &dyn Fn() -> bo
                 return;
             }
             let now = std::time::Instant::now();
-            if now >= seeds_at {
+            if watch_pending && let Some(_pass) = d.core.drain.background() {
+                trackers.watch_tracked();
+                watch_pending = false;
+            }
+            if now >= seeds_at
+                && let Some(_pass) = d.core.drain.background()
+            {
                 let _ = catch_unwind(AssertUnwindSafe(|| refresh_seeds_pass(d)));
                 seeds_at = std::time::Instant::now() + crate::SEED_REFRESH_EVERY;
             }
@@ -750,9 +760,11 @@ fn reconcile_loop(d: &Daemon<'_>, trackers: &Trackers<'_>, stop: &dyn Fn() -> bo
             }
             std::thread::sleep((next - now).min(std::time::Duration::from_millis(20)));
         }
-        let last = catch_unwind(AssertUnwindSafe(|| trackers.reconcile_once()))
-            .unwrap_or_else(|_| json!({ "at": json_of(&SystemTime::now()), "panicked": true }));
-        d.reconciled(last);
+        if let Some(_pass) = d.core.drain.background() {
+            let last = catch_unwind(AssertUnwindSafe(|| trackers.reconcile_once()))
+                .unwrap_or_else(|_| json!({ "at": json_of(&SystemTime::now()), "panicked": true }));
+            d.reconciled(last);
+        }
     }
 }
 
@@ -793,6 +805,9 @@ pub type RepoCatchUp = Result<Vec<(SessionId, Result<strata_publish::pending::Ca
 /// pass. Returns what happened to each row, per repo.
 pub fn catch_up_pass(d: &Daemon<'_>, now: SystemTime) -> Vec<(RepoName, RepoCatchUp)> {
     let core = d.core;
+    let Some(_pass) = core.drain.background() else {
+        return Vec::new();
+    };
     let _catalog = core.admit();
     // Status-bar §11.2: its moves and base builds show in `activity`.
     let _observe = crate::activity::enter_background(core);
@@ -901,10 +916,11 @@ fn old_tree_loop_with_retry(
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         });
-        let _ = catch_unwind(AssertUnwindSafe(|| old_tree_startup(d, &flag)));
-        let mut sweep_at = std::time::Instant::now() + crate::RECONCILE_EVERY;
+        let mut sweep_at = std::time::Instant::now();
         while !flag.load(Ordering::SeqCst) {
-            if std::time::Instant::now() >= sweep_at {
+            if std::time::Instant::now() >= sweep_at
+                && let Some(_pass) = d.core.drain.background()
+            {
                 let _ = catch_unwind(AssertUnwindSafe(|| old_tree_startup(d, &flag)));
                 sweep_at = std::time::Instant::now() + crate::RECONCILE_EVERY;
             }
@@ -912,6 +928,11 @@ fn old_tree_loop_with_retry(
                 .sessions
                 .next_old_tree(std::time::Duration::from_millis(100))
             else {
+                continue;
+            };
+            let Some(_pass) = d.core.drain.background() else {
+                d.sessions.requeue_old_tree(key, path, ino);
+                std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
             };
             let _catalog = d.core.admit();
@@ -1042,6 +1063,45 @@ fn session_of(p: &Params) -> Option<SessionId> {
     }
 }
 
+fn repo_of(p: &Params) -> Option<RepoName> {
+    fn only(repos: &[RepoName]) -> Option<&RepoName> {
+        match repos {
+            [repo] => Some(repo),
+            _ => None,
+        }
+    }
+    let repo = match p {
+        Params::New(p) => only(&p.repos),
+        Params::Add(p) => only(&p.repos),
+        Params::Sync(p) => only(&p.repos),
+        Params::Checkpoint(p) => Some(&p.repo),
+        Params::Restore(p) => Some(&p.repo),
+        Params::DepsPropose(p) => Some(&p.repo),
+        Params::Publish(p) => p
+            .group
+            .batches
+            .first()
+            .map(|b| &b.repo)
+            .filter(|repo| p.group.batches.iter().all(|b| &b.repo == *repo)),
+        Params::Push(p) => Some(&p.repo),
+        Params::Gc(p) => p.repo.as_ref(),
+        Params::ResolveMove(p) => Some(&p.repo),
+        Params::ChainResolve(p) => Some(&p.repo),
+        Params::ConfigRelax(p) => Some(&p.repo),
+        Params::PortsEnsure(p) => Some(&p.repo),
+        Params::PortsReassign(p) => Some(&p.repo),
+        _ => None,
+    };
+    repo.cloned()
+}
+
+fn needs_write_admission(req: &Request) -> bool {
+    !req.method.is_read_only()
+        && req.method != Method::Drain
+        && !matches!(&req.params, Params::Sync(p) if p.check)
+        && !matches!(&req.params, Params::Gc(p) if p.dry_run)
+}
+
 impl<'d, 'a> Server<'d, 'a> {
     pub fn new(d: &'d Daemon<'a>, trackers: &'d Trackers<'a>) -> Server<'d, 'a> {
         let search = Search::open(&d.core.config, &d.sessions, trackers);
@@ -1155,17 +1215,25 @@ impl<'d, 'a> Server<'d, 'a> {
 
     /// One request: scope, handler, panic → `Failed` / `Unknown`.
     pub fn handle(&self, req: Request) -> Reply {
-        let _catalog = self.core().catalog.enter(|c| c.generation);
+        let core = self.core();
         let name = req.method.name();
-        let _scope = RequestScope::begin(name, session_of(&req.params));
-        let _observe = crate::activity::enter_request(self.core(), name, session_of(&req.params));
+        let session = session_of(&req.params);
+        let scope = RequestScope::begin(name, session.clone());
         WRITING.with(|w| w.set(false));
-        let r = catch_unwind(AssertUnwindSafe(|| self.dispatch(&req.params)));
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            if needs_write_admission(&req) {
+                scope.track(
+                    core.drain
+                        .admit(name, session.clone(), repo_of(&req.params))?,
+                );
+            }
+            let _catalog = core.catalog.enter(|c| c.generation);
+            let _observe = crate::activity::enter_request(core, name, session.clone());
+            self.dispatch(&req.params)
+        }));
         let wrote = WRITING.with(|w| w.replace(false)) || locks::is_visible();
         if let Ok(Err(e)) = &r {
-            self.core()
-                .busy
-                .record(name, session_of(&req.params).as_ref(), e);
+            core.busy.record(name, session.as_ref(), e);
         }
         match r {
             Ok(Ok(v)) => Reply::ok(&req.id, v),
@@ -1205,6 +1273,7 @@ impl<'d, 'a> Server<'d, 'a> {
                     return Err(StrataError::new(Code::InvalidInput, "--hook requires --check"));
                 }
                 let id = self.sync_session(p)?;
+                locks::request_session(id.clone());
                 let req = strata_types::SyncRequest {
                     session: id.clone(),
                     caller_cwd: p.cwd.clone(),
@@ -1490,13 +1559,20 @@ impl<'d, 'a> Server<'d, 'a> {
             Params::ConfigRelax(p) => {
                 writing();
                 let shown = p.shown.as_ref().ok_or_else(|| StrataError::new(Code::InvalidInput, "upgrade the CLI: config relax requires shown flags").with_detail(json!({ "reason": "shown_required" })))?;
-                core.relax_shown(&p.repo, shown, &|| {})?;
+                core.relax_shown(&p.repo, shown, &|| crate::after_confirm(&core.config.paths.root))?;
                 let mut reply = json!({"pins_meta":core.pins.metadata()});
                 if let Some(error) = core.pins.audit_error(&p.repo) { reply["warnings"] = json!([{"kind":"audit_write_failed","repo":p.repo,"message":error}]); }
                 Ok(reply)
             }
             Params::ConfigReload(_) => Ok(json_of(&core.request_reload(crate::reload::RELOAD_WAIT)?)),
             Params::DaemonStatus(p) => self.d.daemon_status(p.verify),
+            Params::Drain(p) => {
+                let (data, exit) = core.drain.command(p, || core.locks.has_background_holder())?;
+                if exit {
+                    self.d.request_stop();
+                }
+                Ok(data)
+            }
             Params::Du(p) => Ok(self.d.du.report(p.refresh)),
             // design dev-ports §3.1: under the session queue, so serialized
             // with rm's Active→Removing→Removed; the store re-reads the
@@ -2013,6 +2089,7 @@ impl<'d, 'a> Server<'d, 'a> {
             return Err(not_pending(&p, None));
         }
         let repo = p.repo.clone();
+        locks::request_repo(repo.clone());
         // 2.
         let action = Action::DepsApprove { proposal: id };
         let token = require_validated(&core.confirmer, action.clone())?;
@@ -2450,7 +2527,16 @@ impl<'d, 'a> Server<'d, 'a> {
             let preview = self.with_publish_ctx(&repo, |ctx| {
                 match strata_publish::gate::check_cached(ctx, group, messages) {
                     Err(e) if strata_publish::gate::needs_refresh(&e) => {
-                        self.core().locks.try_repo(&repo, "publish_plan", || {
+                        let core = self.core();
+                        // Publish already holds admission. A standalone preview
+                        // needs it only on the path that can write tracking refs.
+                        let _refresh = if locks::retain_request_write().is_none() {
+                            Some(core.drain.admit("publish_plan", None, Some(repo.clone()))?)
+                        } else {
+                            None
+                        };
+                        core.locks.try_repo(&repo, "publish_plan", || {
+                            writing();
                             strata_publish::gate::refresh_refs(ctx)?;
                             strata_publish::gate::check_cached(ctx, group, messages)
                         })?;

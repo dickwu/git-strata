@@ -448,11 +448,13 @@ impl Cache {
             p.id,
             core.cfg_hash(repo)?,
         );
-        let summary = if mode == ReadMode::Full {
+        let summary = if mode == ReadMode::Full
+            && let Some(pass) = core.drain.background()
+        {
             let cfg = &core.snapshot()?.config.repos[repo];
             let git = &core.snapshot()?.gits[repo];
             let summary = p.head.as_ref().and_then(|head| {
-                match strata_deps::changes(git, cfg, &ws.head, head) {
+                match strata_deps::changes_with_guard(git, cfg, &ws.head, head, pass) {
                     Ok(c) => Some(c.summary),
                     Err(e) => {
                         tracing::debug!(%repo, error = %e, "upstream deps summary omitted");

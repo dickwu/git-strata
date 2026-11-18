@@ -252,22 +252,24 @@ pub(crate) fn run_loop(core: &Core, repo: &RepoName, install: bool, stop: &dyn F
     };
     while !stop() {
         let started = Instant::now();
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if install {
-                deps_auto_pass(core, repo)
-            } else {
-                crate::periodic_fetch::fetch_due(core, repo, SystemTime::now()).map(|_| ())
+        if let Some(_pass) = core.drain.background() {
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if install {
+                    deps_auto_pass(core, repo)
+                } else {
+                    crate::periodic_fetch::fetch_due(core, repo, SystemTime::now()).map(|_| ())
+                }
+            }));
+            match run {
+                Ok(Err(e)) if strata_deps::pins_tightened(&e) => {
+                    tracing::debug!(repo=%repo, "main-sync pass fenced by config reload")
+                }
+                Ok(Err(e)) if e.code != Code::ReadOnly => {
+                    tracing::warn!(repo=%repo,error=%e.message,"main-sync background pass failed")
+                }
+                Err(_) => tracing::warn!(repo=%repo,"main-sync background pass panicked"),
+                _ => {}
             }
-        }));
-        match run {
-            Ok(Err(e)) if strata_deps::pins_tightened(&e) => {
-                tracing::debug!(repo=%repo, "main-sync pass fenced by config reload")
-            }
-            Ok(Err(e)) if e.code != Code::ReadOnly => {
-                tracing::warn!(repo=%repo,error=%e.message,"main-sync background pass failed")
-            }
-            Err(_) => tracing::warn!(repo=%repo,"main-sync background pass panicked"),
-            _ => {}
         }
         while !stop() && started.elapsed() < every {
             std::thread::sleep(Duration::from_millis(20));
