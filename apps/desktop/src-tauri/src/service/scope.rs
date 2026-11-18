@@ -1,11 +1,11 @@
-//! cli.md D38 for the GUI (daemon-stop-scope review C5): the app starts
-//! the launch agent only when HOME is the login user's home, and only an
-//! agent that launchd loaded from that home's plist. Checked before any
-//! launchctl verb that changes anything.
+//! cli.md D38 for the GUI: the app changes the service only from the
+//! login user's home and checks that the loaded job came from that home's
+//! plist before starting it or changing the update fence.
 //!
-//! The desktop may not depend on strata-daemon (gui.md §2.3), so these
-//! mirror `strata_daemon::plist::{login_home, anchored, lifecycle_scope}`
-//! and `git_strata::launch::loaded_path`; keep them in step.
+//! The desktop implements the login-home check locally (gui.md §2.3).
+//! Start keeps the CLI's fallback for a missing path line and checks the
+//! absolute plist path when present. Fence mutations require a complete
+//! dump and positive ownership.
 
 use std::ffi::{CStr, OsStr};
 use std::fs;
@@ -16,6 +16,17 @@ use serde_json::json;
 use strata_types::Code;
 
 use crate::error::GuiError;
+
+pub(super) fn env_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+pub(super) fn current_login_home() -> Result<PathBuf, GuiError> {
+    let home = env_home().ok_or_else(GuiError::no_home)?;
+    lifecycle_scope(&home, login_home().as_deref())
+}
 
 /// The login user's home from the password database (`getpwuid_r` for the
 /// real uid), never `$HOME`. `None` when there is no entry, the lookup
@@ -92,37 +103,127 @@ pub fn lifecycle_scope(home: &Path, login: Option<&Path>) -> Result<PathBuf, Gui
 /// `stderr path` do not count. `None` when absent (format change).
 pub fn loaded_path(text: &str) -> Option<String> {
     let mut depth = 0i32;
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with('}') {
+    for line in text.lines().map(str::trim) {
+        if line == "}" {
             depth -= 1;
             continue;
         }
         if depth == 1
-            && let Some((k, v)) = t.split_once(" = ")
-            && k.trim() == "path"
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim_end() == "path"
+            && !value.starts_with('>')
         {
-            let v = v.trim();
-            if !v.is_empty() && !v.ends_with('{') {
-                return Some(v.to_string());
+            let path = value.trim();
+            if !path.is_empty() && path != "{" {
+                return Some(path.to_owned());
             }
         }
-        if t.ends_with('{') {
+        if block_key(line).is_some() {
             depth += 1;
         }
     }
     None
 }
 
+fn block_key(line: &str) -> Option<&str> {
+    let (key, value) = line.split_once('=')?;
+    matches!(value.trim(), "{" | "> {").then(|| key.trim_end())
+}
+
+#[derive(Default)]
+pub(super) struct JobFields<'a> {
+    pub(super) path: Option<&'a str>,
+    pub(super) pid: Option<u32>,
+    pub(super) exit_timeout_s: Option<u64>,
+}
+
+/// Read the body after the service heading, including its closing brace.
+/// Launchd indents its sections and prints arguments and environment values
+/// verbatim. A brace in either list is data unless it closes the section at
+/// the indentation of the opener.
+pub(super) fn job_fields<'a>(lines: impl Iterator<Item = &'a str>) -> Option<JobFields<'a>> {
+    let mut fields = JobFields::default();
+    let mut blocks = vec![(0, false)];
+    let mut state = None;
+
+    for raw in lines.filter(|line| !line.trim().is_empty()) {
+        let line = raw.trim_start();
+        let indent = raw.len() - line.len();
+        let (opener, values_only) = *blocks.last()?;
+        if line.trim_end() == "}" && indent == opener {
+            blocks.pop();
+            continue;
+        }
+        if indent <= opener {
+            return None;
+        }
+        if values_only {
+            continue;
+        }
+        let line = line.trim_end();
+        if line == "}" {
+            return None;
+        }
+        if blocks.len() == 1
+            && let Some((key, value)) = line.split_once('=')
+        {
+            let value = value.trim();
+            match key.trim_end() {
+                "path" => {
+                    if value.is_empty() || value == "{" || fields.path.replace(value).is_some() {
+                        return None;
+                    }
+                }
+                "pid" => {
+                    let pid = value.parse::<u32>().ok()?;
+                    if pid == 0 || fields.pid.replace(pid).is_some() {
+                        return None;
+                    }
+                }
+                "exit timeout" => {
+                    let timeout = value.parse().ok()?;
+                    if fields.exit_timeout_s.replace(timeout).is_some() {
+                        return None;
+                    }
+                }
+                "state" => {
+                    if value.is_empty() || state.replace(value).is_some() {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(key) = block_key(line) {
+            let values_only = matches!(
+                key,
+                "arguments" | "inherited environment" | "default environment" | "environment"
+            );
+            blocks.push((indent, values_only));
+        }
+    }
+
+    // A job waiting out its respawn throttle can have a scheduled spawn
+    // and no current process. Bootout still requires the caller's fence.
+    let no_process = matches!(state, Some("not running" | "spawn scheduled"));
+    (blocks.is_empty() && (fields.pid.is_some() || no_process)).then_some(fields)
+}
+
 /// `Err(foreign_agent)` when launchd's dump names a plist other than
 /// `expected`; no `path` line means it is ours (as in the cli).
 pub fn owned(print: &str, expected: &Path) -> Result<(), GuiError> {
-    match loaded_path(print) {
-        Some(lp) if anchored(Path::new(&lp)) != anchored(expected) => {
-            Err(GuiError::foreign_agent(&lp, expected))
-        }
-        _ => Ok(()),
+    if let Some(path) = loaded_path(print) {
+        owned_path(&path, expected)?;
     }
+    Ok(())
+}
+
+pub(super) fn owned_path(loaded: &str, expected: &Path) -> Result<(), GuiError> {
+    let path = Path::new(loaded);
+    if !path.is_absolute() || anchored(path) != anchored(expected) {
+        return Err(GuiError::foreign_agent(loaded, expected));
+    }
+    Ok(())
 }
 
 impl GuiError {

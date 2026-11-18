@@ -1,19 +1,17 @@
-//! S0 (gui-daemon-setup design §6.1 `legacy_down`, §13 Q3): start the
-//! existing `com.gwd.git-stratad` launch agent from the app, the same way
-//! `git-strata daemon start` does, so a down daemon needs no terminal.
+//! The app manages `com.gwd.git-stratad` through the login user's plist.
+//! Start chooses `kickstart` or `bootstrap`; a missing plist yields
+//! `plist_missing`. Move and Set up point the same plist into the bundle
+//! (version-upgrade design Q3, gui.md §5.7).
 //!
-//! Start only. The updater's service operations return `Unsupported`
-//! until their launchd implementation lands. With no plist the GUI reports
-//! `plist_missing` and writes nothing; installing a plist from the app is
-//! S1 territory.
+//! Move and update disable the label and verify the stopped job or sealed
+//! daemon before unloading it (gui.md §5.9). The final probe before
+//! dispatch requires the login home's plist and the same PID or stopped
+//! state. A later `print` confirms unload, and an uncertain outcome keeps
+//! the fence in place.
 //!
-//! The decision (`kickstart` when loaded, `bootstrap` of the plist when
-//! not) and the wait for the socket live here, over [`ServiceManager`], so
-//! the tests drive them with a fake and never run launchctl.
-//!
-//! cli.md D38 (scope.rs): only when HOME is the login home, and only an
-//! agent launchd loaded from that home's plist; anything else is
-//! `foreign_home` / `foreign_agent` before a kickstart or bootstrap.
+//! cli.md D38 applies to Start and the fence. A loaded job needs a
+//! readable plist path for fence changes. Tests use fake responses and
+//! record the actual service argv.
 
 pub mod launchctl;
 pub mod scope;
@@ -29,6 +27,7 @@ use serde_json::{Value, json};
 use strata_types::Code;
 
 use crate::error::GuiError;
+use crate::update::Clock;
 
 /// The legacy agent's label (strata_daemon::AGENT_LABEL; the desktop may
 /// not depend on strata-daemon, gui.md §2.3).
@@ -306,6 +305,74 @@ pub fn run(sm: &dyn ServiceManager, action: Action, plist: &Path) -> Result<(), 
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootoutOutcome {
+    Unloaded,
+    DefiniteFailure,
+    Uncertain,
+}
+
+/// Poll the owned job after the bootout call returns. Measure the exit timeout
+/// from this point so preflight, spawning or waiting for the child cannot
+/// shorten it. Pass `None` for an unknown child result, as during recovery.
+/// Handle target and scope refusals before polling because they precede dispatch.
+/// `DefiniteFailure` requires two post-timeout probes of `expected_plist`
+/// with the same pid or no pid. It permits unwinding the fence while loaded.
+pub async fn wait_for_bootout<F, Fut>(
+    mut print: F,
+    expected_plist: &Path,
+    clock: &dyn Clock,
+    exit_timeout: Duration,
+    child: Option<&Result<(), GuiError>>,
+) -> BootoutOutcome
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<Option<String>, GuiError>>,
+{
+    const POLL: Duration = Duration::from_secs(5);
+    let Some(deadline) = clock.monotonic().checked_add(exit_timeout) else {
+        return BootoutOutcome::Uncertain;
+    };
+    let nonzero_exit = child.and_then(|r| r.as_ref().err()).is_some_and(|error| {
+        error.reason() == Some("launchctl_failed")
+            && error.detail["step"] == launchctl::Verb::Bootout.as_str()
+            && error.detail["status"]
+                .as_i64()
+                .is_some_and(|status| status > 0)
+    });
+    loop {
+        let after_exit_timeout = clock.monotonic() >= deadline;
+        let probe = print().await;
+        if matches!(probe, Ok(None)) {
+            return BootoutOutcome::Unloaded;
+        }
+        if after_exit_timeout {
+            if nonzero_exit
+                && let Ok(Some(dump)) = probe
+                && let Some(pid) = launchctl::printed_owned_pid(&dump, expected_plist)
+            {
+                clock.sleep(POLL).await;
+                match print().await {
+                    Ok(None) => return BootoutOutcome::Unloaded,
+                    Ok(Some(dump))
+                        if launchctl::printed_owned_pid(&dump, expected_plist) == Some(pid) =>
+                    {
+                        return BootoutOutcome::DefiniteFailure;
+                    }
+                    _ => {}
+                }
+            }
+            return BootoutOutcome::Uncertain;
+        }
+        let delay = deadline
+            .saturating_duration_since(clock.monotonic())
+            .min(POLL);
+        if !delay.is_zero() {
+            clock.sleep(delay).await;
+        }
+    }
+}
+
 /// Probe until the daemon answers or `policy.timeout` passes. Progress is
 /// sent only when it changes.
 pub async fn wait_ready<F, Fut>(
@@ -388,11 +455,8 @@ impl Starter {
     /// home from the password database, the real launchctl, the
     /// production wait.
     pub fn from_env() -> Starter {
-        let home = std::env::var_os("HOME")
-            .filter(|h| !h.is_empty())
-            .map(PathBuf::from);
         Starter::new(
-            home,
+            scope::env_home(),
             scope::login_home(),
             Arc::new(launchctl::Launchctl::new()),
             WaitPolicy::PRODUCTION,

@@ -1,28 +1,35 @@
-//! S0 tests. A fake ServiceManager only: nothing here runs launchctl.
+//! Lifecycle tests on a fake service manager and clock.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 
-use super::launchctl::{LAUNCHCTL, Verb, argv};
+use super::launchctl::{
+    BootoutTarget, LAUNCHCTL, Outcome, Verb, argv, dispatch_fence, printed_exit_timeout,
+    printed_pid, read_stdout,
+};
 use super::*;
+use crate::update::UpdateFuture;
 
 #[derive(Default)]
 struct Fake {
     loaded: bool,
-    /// The top-level `path = ` launchd reports when loaded.
-    loaded_from: Option<String>,
+    disabled: bool,
+    /// Override the successful print output for fixture-specific cases.
+    loaded_dump: Option<String>,
     fail: Option<&'static str>,
-    calls: Mutex<Vec<String>>,
+    calls: Mutex<Vec<Vec<String>>>,
 }
 
 impl Fake {
-    fn calls(&self) -> Vec<String> {
+    fn calls(&self) -> Vec<Vec<String>> {
         self.calls.lock().unwrap().clone()
     }
-    fn result(&self, step: &str) -> Result<(), GuiError> {
+    fn record(&self, verb: Verb, label: &str, plist: Option<&Path>) -> Result<(), GuiError> {
+        self.calls.lock().unwrap().push(argv(verb, label, plist));
+        let step = verb.as_str();
         match self.fail {
             Some(s) if s == step => Err(GuiError::launchctl_failed(
                 step,
@@ -36,23 +43,30 @@ impl Fake {
 
 impl ServiceManager for Fake {
     fn print(&self, label: &str) -> Result<Option<String>, GuiError> {
-        self.calls.lock().unwrap().push(format!("print {label}"));
-        self.result("print")?;
-        Ok(self.loaded.then(|| dump(self.loaded_from.as_deref())))
+        self.record(Verb::Print, label, None)?;
+        Ok(self
+            .loaded_dump
+            .clone()
+            .or_else(|| self.loaded.then(|| job_dump(None, Some(42)))))
     }
     fn kickstart(&self, label: &str) -> Result<(), GuiError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("kickstart {label}"));
-        self.result("kickstart")
+        self.record(Verb::Kickstart, label, None)
     }
     fn bootstrap(&self, plist: &Path) -> Result<(), GuiError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("bootstrap {}", plist.display()));
-        self.result("bootstrap")
+        self.record(Verb::Bootstrap, AGENT_LABEL, Some(plist))
+    }
+    fn bootout(&self, label: &str) -> Result<(), GuiError> {
+        self.record(Verb::Bootout, label, None)
+    }
+    fn disable(&self, label: &str) -> Result<(), GuiError> {
+        self.record(Verb::Disable, label, None)
+    }
+    fn enable(&self, label: &str) -> Result<(), GuiError> {
+        self.record(Verb::Enable, label, None)
+    }
+    fn print_disabled(&self, label: &str) -> Result<bool, GuiError> {
+        self.record(Verb::PrintDisabled, label, None)?;
+        Ok(self.disabled)
     }
 }
 
@@ -72,10 +86,15 @@ fn home(with_plist: bool) -> tempfile::TempDir {
 }
 
 /// A `launchctl print` service dump shaped like macOS 15's.
-fn dump(path: Option<&str>) -> String {
-    let p = path.map(|p| format!("\tpath = {p}\n")).unwrap_or_default();
+fn job_dump(path: Option<&str>, pid: Option<u32>) -> String {
+    let uid = unsafe { libc::getuid() };
+    let path = path.map(|p| format!("\tpath = {p}\n")).unwrap_or_default();
+    let process = match pid {
+        Some(pid) => format!("\tpid = {pid}\n\tstate = running\n"),
+        None => "\tstate = not running\n".to_owned(),
+    };
     format!(
-        "gui/501/{AGENT_LABEL} = {{\n\tactive count = 1\n{p}\tstdout path = /tmp/o.log\n\tenvironment = {{\n\t\tpath = /nested\n\t}}\n\tstate = running\n}}\n"
+        "gui/{uid}/{AGENT_LABEL} = {{\n\tactive count = 1\n{path}\tstdout path = /tmp/o.log\n\tenvironment = {{\n\t\tpath = /nested\n\t}}\n\texit timeout = 900\n{process}}}\n"
     )
 }
 
@@ -152,9 +171,9 @@ fn loaded_agent_is_kickstarted_then_waited_for() {
     assert_eq!(r.action, Action::Kickstart);
     assert_eq!(
         fake.calls(),
-        vec![
-            format!("print {AGENT_LABEL}"),
-            format!("kickstart {AGENT_LABEL}")
+        [
+            argv(Verb::Print, AGENT_LABEL, None),
+            argv(Verb::Kickstart, AGENT_LABEL, None),
         ]
     );
     assert_eq!(
@@ -180,9 +199,9 @@ fn unloaded_agent_with_plist_is_bootstrapped_from_that_plist() {
     assert_eq!(r.action, Action::Bootstrap);
     assert_eq!(
         fake.calls(),
-        vec![
-            format!("print {AGENT_LABEL}"),
-            format!("bootstrap {}", canon_plist(h.path()).display())
+        [
+            argv(Verb::Print, AGENT_LABEL, None),
+            argv(Verb::Bootstrap, AGENT_LABEL, Some(&canon_plist(h.path()))),
         ]
     );
 }
@@ -200,7 +219,7 @@ fn no_plist_is_setup_needed_and_runs_nothing_after_print() {
         e.detail["plist"],
         canon_plist(h.path()).to_string_lossy().as_ref()
     );
-    assert_eq!(fake.calls(), vec![format!("print {AGENT_LABEL}")]);
+    assert_eq!(fake.calls(), [argv(Verb::Print, AGENT_LABEL, None)]);
     assert!(seen.lock().unwrap().is_empty());
     assert!(!plist_for_home(h.path()).exists(), "S0 writes no plist");
     let a = rt().block_on(starter(h.path(), fake).agent()).unwrap();
@@ -459,7 +478,11 @@ fn a_symlinked_alias_of_the_login_home_is_the_login_home() {
     assert_eq!(r.action, Action::Bootstrap);
     assert_eq!(
         fake.calls()[1],
-        format!("bootstrap {}", canon_plist(login.path()).display()),
+        argv(
+            Verb::Bootstrap,
+            AGENT_LABEL,
+            Some(&canon_plist(login.path()))
+        ),
         "bootstraps the canonical plist"
     );
 }
@@ -468,30 +491,28 @@ fn a_symlinked_alias_of_the_login_home_is_the_login_home() {
 fn an_agent_loaded_from_another_plist_is_foreign_and_not_kickstarted() {
     let h = home(true);
     let other = home(true);
-    let fake = Arc::new(Fake {
-        loaded: true,
-        loaded_from: Some(canon_plist(other.path()).to_string_lossy().into_owned()),
-        ..Fake::default()
-    });
-    let (seen, mut on) = collect();
-    let e = rt()
-        .block_on(starter(h.path(), fake.clone()).start(scripted(vec![Ok(json!({}))]), &mut on))
-        .unwrap_err();
-    assert_eq!(e.code, "InvalidInput");
-    assert_eq!(e.reason(), Some("foreign_agent"));
-    assert_eq!(
-        e.detail["loaded_path"],
-        canon_plist(other.path()).to_string_lossy().as_ref()
-    );
-    assert_eq!(
-        e.detail["expected"],
-        canon_plist(h.path()).to_string_lossy().as_ref()
-    );
-    assert_eq!(fake.calls(), vec![format!("print {AGENT_LABEL}")]);
-    assert!(seen.lock().unwrap().is_empty());
-    let a = rt().block_on(starter(h.path(), fake).agent()).unwrap();
-    assert_eq!(a.state, AgentState::Foreign);
-    assert_eq!(a.refusal.unwrap().reason(), Some("foreign_agent"));
+    let loaded = canon_plist(other.path());
+    let expected = canon_plist(h.path());
+    let dump = job_dump(loaded.to_str(), Some(42));
+    for path_key in ["\tpath = ", "\tpath  =  ", "\tpath\t=\t"] {
+        let fake = Arc::new(Fake {
+            loaded_dump: Some(dump.replacen("\tpath = ", path_key, 1)),
+            ..Fake::default()
+        });
+        let (seen, mut on) = collect();
+        let e = rt()
+            .block_on(starter(h.path(), fake.clone()).start(scripted(vec![Ok(json!({}))]), &mut on))
+            .unwrap_err();
+        assert_eq!(e.code, "InvalidInput");
+        assert_eq!(e.reason(), Some("foreign_agent"));
+        assert_eq!(e.detail["loaded_path"], loaded.to_str().unwrap());
+        assert_eq!(e.detail["expected"], expected.to_str().unwrap());
+        assert_eq!(fake.calls(), [argv(Verb::Print, AGENT_LABEL, None)]);
+        assert!(seen.lock().unwrap().is_empty());
+        let a = rt().block_on(starter(h.path(), fake).agent()).unwrap();
+        assert_eq!(a.state, AgentState::Foreign);
+        assert_eq!(a.refusal.unwrap().reason(), Some("foreign_agent"));
+    }
 }
 
 #[test]
@@ -505,8 +526,7 @@ fn our_own_plist_under_an_alias_or_without_a_path_line_is_ours() {
         None,
     ] {
         let fake = Arc::new(Fake {
-            loaded: true,
-            loaded_from: from,
+            loaded_dump: Some(job_dump(from.as_deref(), Some(42))),
             ..Fake::default()
         });
         let mut on = |_p: Progress| {};
@@ -520,18 +540,24 @@ fn our_own_plist_under_an_alias_or_without_a_path_line_is_ours() {
 #[test]
 fn loaded_path_reads_only_the_top_level_path() {
     assert_eq!(
-        scope::loaded_path(&dump(Some("/Users/a/Library/LaunchAgents/x.plist"))).as_deref(),
+        scope::loaded_path(&job_dump(
+            Some("/Users/a/Library/LaunchAgents/x.plist"),
+            None
+        ))
+        .as_deref(),
         Some("/Users/a/Library/LaunchAgents/x.plist")
     );
     assert_eq!(
-        scope::loaded_path(&dump(None)),
+        scope::loaded_path(&job_dump(None, None)),
         None,
         "nested and stdout paths do not count"
     );
     assert_eq!(scope::loaded_path(""), None);
     // A nested dict before the top-level line, and a depth-0 `path =`.
-    let t = "path = /depth0\nsvc = {\n\tsub = {\n\t\tpath = /nested\n\t}\n\tpath = /top\n}\n";
+    let t =
+        "path = /depth0\nsvc = {\n\tsub = {\n\t\tpath = /nested\n\t}\n\tpath =\n\tpath = /top\n}\n";
     assert_eq!(scope::loaded_path(t).as_deref(), Some("/top"));
+    assert_eq!(scope::loaded_path("svc = {\n\tpath => /alien\n}\n"), None);
 }
 
 #[test]
@@ -562,28 +588,609 @@ fn only_the_main_window() {
 #[test]
 fn argv_is_fixed_per_verb() {
     let uid = unsafe { libc::getuid() };
-    assert_eq!(
-        argv(Verb::Print, AGENT_LABEL, None),
-        vec!["print".to_string(), format!("gui/{uid}/{AGENT_LABEL}")]
+    let domain = format!("gui/{uid}");
+    let job = format!("{domain}/{AGENT_LABEL}");
+    let plist = "/Users/Test Home/Library/LaunchAgents/com.gwd.git-stratad.plist";
+    let expected: [&[&str]; 7] = [
+        &["print", &job],
+        &["print-disabled", &domain],
+        &["kickstart", &job],
+        &["bootstrap", &domain, plist],
+        &["bootout", &job],
+        &["disable", &job],
+        &["enable", &job],
+    ];
+    for (verb, expected) in Verb::ALL.into_iter().zip(expected) {
+        assert_eq!(argv(verb, AGENT_LABEL, Some(Path::new(plist))), expected);
+    }
+}
+
+fn fence_call(
+    verb: Verb,
+    target: Option<BootoutTarget>,
+    label: &str,
+    home: &Path,
+    login: &Path,
+    probe: Outcome,
+) -> (Result<(), GuiError>, Vec<Vec<String>>) {
+    let mut probe = Some(probe);
+    let mut calls = Vec::new();
+    let result = dispatch_fence(
+        verb,
+        label,
+        target,
+        || scope::lifecycle_scope(home, Some(login)),
+        |step| {
+            calls.push(argv(step, label, None));
+            Ok(if step == Verb::Print {
+                probe.take().expect("only one preflight print")
+            } else {
+                outcome(Some(0), "", "")
+            })
+        },
+    );
+    (result, calls)
+}
+
+#[test]
+fn bootout_dispatch_requires_the_verified_pid_or_stopped_job() {
+    let h = home(true);
+    let plist = plist_for_home(h.path());
+    let job = |pid| job_dump(plist.to_str(), pid);
+    let dispatch = |target, dump: &str| {
+        fence_call(
+            Verb::Bootout,
+            Some(target),
+            AGENT_LABEL,
+            h.path(),
+            h.path(),
+            outcome(Some(0), "", dump),
+        )
+    };
+    let stopped = job(None);
+    let scheduled = stopped.replace("\tstate = not running", "\tstate = spawn scheduled");
+    for (target, dump) in [
+        (BootoutTarget::Sealed(42), job(Some(42))),
+        (BootoutTarget::Stopped, stopped),
+        (BootoutTarget::Stopped, scheduled),
+    ] {
+        let (result, calls) = dispatch(target, &dump);
+        result.unwrap();
+        assert_eq!(
+            calls,
+            [
+                argv(Verb::Print, AGENT_LABEL, None),
+                argv(Verb::Bootout, AGENT_LABEL, None)
+            ]
+        );
+    }
+    for (target, pid, expected) in [
+        (BootoutTarget::Sealed(42), Some(43), Some(42)),
+        (BootoutTarget::Sealed(42), None, Some(42)),
+        (BootoutTarget::Stopped, Some(43), None),
+    ] {
+        let (result, calls) = dispatch(target, &job(pid));
+        let error = result.unwrap_err();
+        assert_eq!(error.reason(), Some("bootout_target_changed"));
+        assert_eq!(error.detail["expected_pid"], json!(expected));
+        assert_eq!(error.detail["observed_pid"], json!(pid));
+        assert_eq!(calls, [argv(Verb::Print, AGENT_LABEL, None)]);
+    }
+}
+
+#[test]
+fn fence_dispatch_handles_explicit_unload_without_bootout() {
+    let h = home(false);
+    for verb in [Verb::Bootout, Verb::Disable, Verb::Enable] {
+        let (result, calls) = fence_call(
+            verb,
+            Some(BootoutTarget::Stopped),
+            AGENT_LABEL,
+            h.path(),
+            h.path(),
+            outcome(Some(113), &missing_job(), ""),
+        );
+        result.unwrap();
+        let mut expected = vec![argv(Verb::Print, AGENT_LABEL, None)];
+        if verb != Verb::Bootout {
+            expected.push(argv(verb, AGENT_LABEL, None));
+        }
+        assert_eq!(calls, expected);
+    }
+}
+
+#[test]
+fn fence_dispatch_refuses_foreign_home_label_and_plist() {
+    let h = home(true);
+    let foreign_home = home(true);
+    for verb in [Verb::Bootout, Verb::Disable, Verb::Enable] {
+        let stop = Some(BootoutTarget::Stopped);
+        let (result, calls) = fence_call(
+            verb,
+            stop,
+            AGENT_LABEL,
+            foreign_home.path(),
+            h.path(),
+            outcome(Some(113), &missing_job(), ""),
+        );
+        assert_eq!(result.unwrap_err().reason(), Some("foreign_home"));
+        assert!(calls.is_empty());
+
+        let (result, calls) = fence_call(
+            verb,
+            stop,
+            "foreign.agent",
+            h.path(),
+            h.path(),
+            outcome(Some(113), &missing_job(), ""),
+        );
+        assert_eq!(result.unwrap_err().reason(), Some("launchctl_failed"));
+        assert!(calls.is_empty());
+
+        let foreign_plist = job_dump(
+            Some("/Library/LaunchAgents/com.gwd.git-stratad.plist"),
+            None,
+        );
+        let (result, calls) = fence_call(
+            verb,
+            stop,
+            AGENT_LABEL,
+            h.path(),
+            h.path(),
+            outcome(Some(0), "", &foreign_plist),
+        );
+        assert_eq!(result.unwrap_err().reason(), Some("foreign_agent"));
+        assert_eq!(calls, [argv(Verb::Print, AGENT_LABEL, None)]);
+    }
+}
+
+#[test]
+fn bootout_dispatch_refuses_unverified_or_ambiguous_targets() {
+    let h = home(true);
+    let (result, calls) = fence_call(
+        Verb::Bootout,
+        None,
+        AGENT_LABEL,
+        h.path(),
+        h.path(),
+        outcome(Some(113), &missing_job(), ""),
     );
     assert_eq!(
-        argv(Verb::Kickstart, AGENT_LABEL, None),
-        vec!["kickstart".to_string(), format!("gui/{uid}/{AGENT_LABEL}")],
-        "no -k: a running daemon is never restarted"
+        result.unwrap_err().reason(),
+        Some("bootout_target_required")
     );
-    let plist = PathBuf::from("/Users/x/Library/LaunchAgents/com.gwd.git-stratad.plist");
+    assert!(calls.is_empty());
+
+    let plist = canon_plist(h.path());
+    let stopped_job = job_dump(plist.to_str(), None);
+    let unknown = stopped_job.replace("\tstate = not running", "\tstate = unknown");
+    for probe in [
+        outcome(Some(0), "", &job_dump(None, None)),
+        outcome(Some(113), "Could not find domain for user gui", ""),
+        outcome(Some(0), "", "truncated dump"),
+        outcome(Some(0), "", &unknown),
+    ] {
+        let (result, calls) = fence_call(
+            Verb::Bootout,
+            Some(BootoutTarget::Stopped),
+            AGENT_LABEL,
+            h.path(),
+            h.path(),
+            probe,
+        );
+        let error = result.unwrap_err();
+        assert_eq!(error.reason(), Some("launchctl_failed"));
+        assert_eq!(error.detail["step"], "print");
+        assert_eq!(calls, [argv(Verb::Print, AGENT_LABEL, None)]);
+    }
+}
+
+#[test]
+fn bootout_dispatch_observes_a_pid_with_extra_whitespace() {
+    let h = home(true);
+    let plist = canon_plist(h.path());
+    let job = job_dump(plist.to_str(), None).replace(
+        "\tstate = not running",
+        "\tstate = spawn scheduled\n\tpid  =  42",
+    );
+    let (result, calls) = fence_call(
+        Verb::Bootout,
+        Some(BootoutTarget::Stopped),
+        AGENT_LABEL,
+        h.path(),
+        h.path(),
+        outcome(Some(0), "", &job),
+    );
+    let error = result.unwrap_err();
+    assert_eq!(error.reason(), Some("bootout_target_changed"));
+    assert_eq!(error.detail["observed_pid"], 42);
+    assert_eq!(calls, [argv(Verb::Print, AGENT_LABEL, None)]);
+}
+
+fn outcome(status: Option<i32>, stderr: &str, out: &str) -> Outcome {
+    Outcome {
+        status,
+        success: status == Some(0),
+        stderr: stderr.into(),
+        out: out.into(),
+    }
+}
+
+fn missing_job() -> String {
+    let uid = unsafe { libc::getuid() };
+    format!("Could not find service \"{AGENT_LABEL}\" in domain for user gui: {uid}\n")
+}
+
+#[test]
+fn print_requires_the_exact_label_and_domain_to_confirm_unload() {
+    let uid = unsafe { libc::getuid() };
+    let missing = missing_job();
     assert_eq!(
-        argv(Verb::Bootstrap, AGENT_LABEL, Some(&plist)),
-        vec![
-            "bootstrap".to_string(),
-            format!("gui/{uid}"),
-            plist.to_string_lossy().into_owned()
-        ]
+        outcome(Some(113), &format!("Bad request.\n{missing}"), "").printed_job(AGENT_LABEL),
+        Ok(None)
     );
     assert_eq!(
-        Verb::ALL.map(Verb::as_str),
-        ["print", "kickstart", "bootstrap"]
+        outcome(Some(113), "Bad request.\n", &missing).printed_job(AGENT_LABEL),
+        Ok(None)
     );
+    let job = job_dump(None, None);
+    assert_eq!(
+        outcome(Some(0), "", &job).printed_job(AGENT_LABEL),
+        Ok(Some(job))
+    );
+
+    for (status, text) in [
+        (Some(5), missing.clone()),
+        (Some(113), String::new()),
+        (
+            Some(113),
+            format!("Could not find domain for user gui: {uid}"),
+        ),
+        (Some(113), missing.replace(AGENT_LABEL, "foreign.agent")),
+        (Some(113), missing.replace("user gui:", "uid:")),
+        (Some(113), format!("{}0\n", missing.trim_end())),
+        (
+            Some(113),
+            missing.replace(&format!("gui: {uid}"), &format!("gui: {}", uid + 1)),
+        ),
+    ] {
+        let error = outcome(status, &text, "")
+            .printed_job(AGENT_LABEL)
+            .unwrap_err();
+        assert_eq!(error.reason(), Some("launchctl_failed"));
+        assert_eq!(error.detail["step"], "print");
+        assert_eq!(error.detail["status"], json!(status));
+    }
+}
+
+#[test]
+fn print_does_not_count_a_truncated_diagnostic_as_missing() {
+    let missing = missing_job();
+    let line = missing.trim_end();
+    let padding = "x".repeat(8 * 1024 - line.len() - 1);
+    let stderr = format!("{padding}\n{line}0\n");
+    // Non-probe stdout and stderr use the same bounded pipe reader.
+    let capture =
+        String::from_utf8(read_stdout(Verb::Bootout, stderr.as_bytes()).unwrap()).unwrap();
+    assert!(
+        outcome(Some(113), &capture, "")
+            .printed_job(AGENT_LABEL)
+            .is_err()
+    );
+}
+
+#[test]
+fn print_disabled_reads_only_the_exact_label_in_a_complete_table() {
+    let table = |entries: &str| format!("disabled services = {{\n{entries}\n}}\n");
+    for (value, expected) in [
+        ("disabled", true),
+        ("true", true),
+        ("enabled", false),
+        ("false", false),
+    ] {
+        let out = table(&format!(
+            "\t\"{AGENT_LABEL}.other\" => disabled\n\t\"{AGENT_LABEL}\" => {value}"
+        ));
+        assert_eq!(
+            outcome(Some(0), "", &out).disabled(AGENT_LABEL),
+            Ok(expected)
+        );
+    }
+    let out = table(&format!("\t\"{AGENT_LABEL}.other\" => disabled"));
+    assert_eq!(outcome(Some(0), "", &out).disabled(AGENT_LABEL), Ok(false));
+    let empty = "disabled services = (no disabled services)\n";
+    assert_eq!(outcome(Some(0), "", empty).disabled(AGENT_LABEL), Ok(false));
+    assert!(
+        outcome(Some(1), "probe failure", empty)
+            .disabled(AGENT_LABEL)
+            .is_err()
+    );
+
+    for out in [
+        String::new(),
+        "disabled services = {\n".into(),
+        table(&format!("\t\"{AGENT_LABEL}\" => unknown")),
+        table(&format!(
+            "\t\"{AGENT_LABEL}\" => enabled\n\t\"{AGENT_LABEL}\" => disabled"
+        )),
+    ] {
+        let error = outcome(Some(0), "", &out)
+            .disabled(AGENT_LABEL)
+            .unwrap_err();
+        assert_eq!(error.reason(), Some("launchctl_failed"));
+        assert_eq!(error.detail["step"], "print-disabled");
+    }
+    let error = outcome(Some(1), "probe failure", &table(""))
+        .disabled(AGENT_LABEL)
+        .unwrap_err();
+    assert_eq!(error.detail["status"], 1);
+}
+
+#[test]
+fn large_job_dumps_keep_the_pid_and_closing_brace() {
+    let job = job_dump(None, Some(42)).replace(
+        "\t\tpath = /nested\n",
+        &"\t\tEXTRA => a-long-value\n".repeat(600),
+    );
+    assert!(job.find("\tpid = 42").unwrap() > 8 * 1024);
+    let stdout = String::from_utf8(read_stdout(Verb::Print, job.as_bytes()).unwrap()).unwrap();
+    let printed = outcome(Some(0), "", &stdout)
+        .printed_job(AGENT_LABEL)
+        .unwrap()
+        .unwrap();
+    assert_eq!(printed_pid(&printed), Some(Some(42)));
+    assert_eq!(
+        printed_exit_timeout(&printed),
+        Some(Duration::from_secs(900))
+    );
+
+    let error = outcome(Some(5), "", &stdout)
+        .printed_job(AGENT_LABEL)
+        .unwrap_err();
+    assert!(error.detail["stderr"].as_str().unwrap().len() <= 8 * 1024);
+}
+
+#[test]
+fn a_large_disabled_table_can_find_the_label_after_eight_kib() {
+    let entries: String = (0..400)
+        .map(|index| format!("\t\"com.example.long.{index}\" => enabled\n"))
+        .collect();
+    assert!(entries.len() > 8 * 1024);
+    let table = format!("disabled services = {{\n{entries}\t\"{AGENT_LABEL}\" => disabled\n}}\n");
+    let stdout =
+        String::from_utf8(read_stdout(Verb::PrintDisabled, table.as_bytes()).unwrap()).unwrap();
+    assert_eq!(
+        outcome(Some(0), "", &stdout).disabled(AGENT_LABEL),
+        Ok(true)
+    );
+}
+
+#[test]
+fn a_failed_print_never_falls_back_to_bootstrap() {
+    let h = home(true);
+    let fake = Arc::new(Fake {
+        fail: Some("print"),
+        ..Fake::default()
+    });
+    let (seen, mut on) = collect();
+    let error = rt()
+        .block_on(starter(h.path(), fake.clone()).start(scripted(vec![Ok(json!({}))]), &mut on))
+        .unwrap_err();
+    assert_eq!(error.reason(), Some("launchctl_failed"));
+    assert!(seen.lock().unwrap().is_empty());
+    assert_eq!(fake.calls(), [argv(Verb::Print, AGENT_LABEL, None)]);
+}
+
+struct TestClock {
+    start: Instant,
+    elapsed: Mutex<Duration>,
+}
+
+impl Clock for TestClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::UNIX_EPOCH + *self.elapsed.lock().unwrap()
+    }
+
+    fn monotonic(&self) -> Instant {
+        self.start + *self.elapsed.lock().unwrap()
+    }
+
+    fn sleep(&self, duration: Duration) -> UpdateFuture<'_, ()> {
+        Box::pin(async move { *self.elapsed.lock().unwrap() += duration })
+    }
+}
+
+fn resolve_bootout(
+    child: Option<Result<(), GuiError>>,
+    exit_timeout: u64,
+    probes: Vec<Result<Option<String>, GuiError>>,
+) -> (BootoutOutcome, Vec<u64>) {
+    let clock = TestClock {
+        start: Instant::now(),
+        elapsed: Mutex::default(),
+    };
+    let mut observed_at = Vec::new();
+    let mut probes = probes.into_iter();
+    let verdict = rt().block_on(wait_for_bootout(
+        || {
+            observed_at.push(clock.monotonic().duration_since(clock.start).as_secs());
+            std::future::ready(probes.next().expect("an unexpected print probe"))
+        },
+        Path::new(BOOTOUT_PLIST),
+        &clock,
+        Duration::from_secs(exit_timeout),
+        child.as_ref(),
+    ));
+    assert_eq!(probes.next(), None, "every expected probe was used");
+    (verdict, observed_at)
+}
+
+const BOOTOUT_PLIST: &str = "/fake-home/Library/LaunchAgents/com.gwd.git-stratad.plist";
+
+fn loaded_job(pid: Option<u32>) -> Result<Option<String>, GuiError> {
+    Ok(Some(job_dump(Some(BOOTOUT_PLIST), pid)))
+}
+
+#[test]
+fn different_pids_remain_visible_after_braces_in_environment_values() {
+    let job = |pid| {
+        job_dump(Some(BOOTOUT_PLIST), Some(pid)).replace(
+            "\t\tpath = /nested\n",
+            "\t\tFRAGMENT => prefix {\n\t\tBRACE => {\n\t\tpid => 99\n",
+        )
+    };
+    let before = job(42);
+    let after = job(43);
+    assert_eq!(printed_pid(&before), Some(Some(42)));
+    assert_eq!(printed_pid(&after), Some(Some(43)));
+
+    let child = Err(GuiError::launchctl_failed(
+        "bootout",
+        Some(5),
+        "bootout failed",
+    ));
+    let probes = vec![Ok(Some(before.clone())), Ok(Some(before)), Ok(Some(after))];
+    assert_eq!(
+        resolve_bootout(Some(child), 5, probes),
+        (BootoutOutcome::Uncertain, vec![0, 5, 10])
+    );
+}
+
+#[test]
+fn an_incomplete_job_dump_cannot_prove_a_stopped_job() {
+    let stopped = job_dump(None, None);
+    for malformed in [
+        stopped.trim_end_matches("}\n").to_owned(),
+        stopped.replacen("\t}\n", "", 1),
+        format!("{stopped}}}\n"),
+        stopped.replace("\tstate = not running", "\tstate = running"),
+        stopped.replace("\tstate = not running\n", ""),
+        stopped.replace("\tstate = not running", "\tpid => 42"),
+    ] {
+        assert_eq!(printed_pid(&malformed), None, "{malformed}");
+    }
+}
+
+#[test]
+fn bootout_is_done_when_a_later_print_confirms_unload() {
+    let failed_probe = GuiError::launchctl_failed("print", Some(5), "probe failure");
+    for child in [
+        Ok(()),
+        Err(GuiError::launchctl_failed("bootout", None, "timed out")),
+    ] {
+        assert_eq!(
+            resolve_bootout(Some(child), 7, vec![Err(failed_probe.clone()), Ok(None)]),
+            (BootoutOutcome::Unloaded, vec![0, 5]),
+        );
+    }
+}
+
+#[test]
+fn bootout_definite_failure_requires_nonzero_exit_and_two_stable_reads_after_timeout() {
+    let failed = GuiError::launchctl_failed("bootout", Some(5), "bootout failed");
+    for pid in [Some(42), None] {
+        assert_eq!(
+            resolve_bootout(Some(Err(failed.clone())), 7, vec![loaded_job(pid); 4]),
+            (BootoutOutcome::DefiniteFailure, vec![0, 5, 7, 12]),
+        );
+    }
+}
+
+#[test]
+fn bootout_keeps_uncertain_outcomes_distinct_from_definite_failure() {
+    for child in [
+        Some(Ok(())),
+        Some(Err(GuiError::launchctl_failed(
+            "bootout",
+            None,
+            "timed out",
+        ))),
+        None,
+    ] {
+        assert_eq!(
+            resolve_bootout(child, 5, vec![loaded_job(Some(42)); 2]),
+            (BootoutOutcome::Uncertain, vec![0, 5]),
+        );
+    }
+    let failed = GuiError::launchctl_failed("bootout", Some(5), "bootout failed");
+    for later in [
+        loaded_job(Some(43)),
+        Err(GuiError::launchctl_failed(
+            "print",
+            Some(5),
+            "probe failure",
+        )),
+        Ok(Some("truncated dump".to_string())),
+        Ok(Some(
+            job_dump(Some(BOOTOUT_PLIST), Some(42)).replace("\tstate = running", "\tpid = 43"),
+        )),
+    ] {
+        let probes = vec![loaded_job(Some(42)), loaded_job(Some(42)), later];
+        assert_eq!(
+            resolve_bootout(Some(Err(failed.clone())), 5, probes),
+            (BootoutOutcome::Uncertain, vec![0, 5, 10]),
+        );
+    }
+}
+
+#[test]
+fn bootout_polling_cannot_confirm_failure_from_an_unknown_state() {
+    let stopped = job_dump(Some(BOOTOUT_PLIST), None);
+    let unknown = Ok(Some(
+        stopped.replace("\tstate = not running", "\tstate = unknown"),
+    ));
+    let failed = Some(Err(GuiError::launchctl_failed(
+        "bootout",
+        Some(5),
+        "bootout failed",
+    )));
+
+    assert_eq!(
+        resolve_bootout(
+            failed.clone(),
+            5,
+            vec![
+                Ok(Some(stopped.clone())),
+                Ok(Some(stopped)),
+                unknown.clone()
+            ],
+        ),
+        (BootoutOutcome::Uncertain, vec![0, 5, 10])
+    );
+    assert_eq!(
+        resolve_bootout(failed, 5, vec![unknown; 2]),
+        (BootoutOutcome::Uncertain, vec![0, 5])
+    );
+}
+
+#[test]
+fn bootout_polling_requires_owned_plist_in_first_post_timeout_probe() {
+    let failed = GuiError::launchctl_failed("bootout", Some(5), "bootout failed");
+    for path in [Some("/foreign/agent.plist"), None] {
+        let probes = vec![loaded_job(None), Ok(Some(job_dump(path, None)))];
+        assert_eq!(
+            resolve_bootout(Some(Err(failed.clone())), 5, probes),
+            (BootoutOutcome::Uncertain, vec![0, 5]),
+            "service dump path: {path:?}"
+        );
+    }
+}
+
+#[test]
+fn bootout_polling_requires_owned_plist_in_second_post_timeout_probe() {
+    let failed = GuiError::launchctl_failed("bootout", Some(5), "bootout failed");
+    for path in [Some("/foreign/agent.plist"), None] {
+        let probes = vec![
+            loaded_job(None),
+            loaded_job(None),
+            Ok(Some(job_dump(path, None))),
+        ];
+        assert_eq!(
+            resolve_bootout(Some(Err(failed.clone())), 5, probes),
+            (BootoutOutcome::Uncertain, vec![0, 5, 10]),
+            "service dump path: {path:?}"
+        );
+    }
 }
 
 /// The code of a Rust file without comments and without its test module.
@@ -615,11 +1222,9 @@ fn literals(code: &str) -> Vec<String> {
     out
 }
 
-/// §13 Q3, start only: no stop / bootout / kill / remove / unload /
-/// disable / `-k` anywhere launchctl could be handed one. The service runs
-/// only /bin/launchctl.
+/// §6.1: the service uses fixed launchctl verbs and cannot force a restart.
 #[test]
-fn service_never_stops_and_spawns_only_launchctl() {
+fn service_uses_only_fixed_launchctl_verbs() {
     let files = [
         ("mod.rs", include_str!("mod.rs")),
         ("launchctl.rs", include_str!("launchctl.rs")),
@@ -630,20 +1235,16 @@ fn service_never_stops_and_spawns_only_launchctl() {
         ),
     ];
     let forbidden = [
-        "stop", "bootout", "kill", "remove", "unload", "disable", "-k", "signal", "sigterm",
+        "stop", "kill", "remove", "unload", "-k", "signal", "sigterm",
     ];
     for (name, src) in files {
         let c = code(src);
         for lit in literals(&c) {
-            let l = lit.to_lowercase();
-            for f in forbidden {
-                // "-k" only as a whole argument.
-                let hit = if f == "-k" {
-                    l.split_whitespace().any(|w| w == "-k")
-                } else {
-                    l.contains(f)
-                };
-                assert!(!hit, "{name}: string literal {lit:?} contains {f:?}");
+            for token in lit.split_whitespace() {
+                assert!(
+                    !forbidden.iter().any(|arg| token.eq_ignore_ascii_case(arg)),
+                    "{name}: forbidden argv token {token:?}"
+                );
             }
         }
         for f in ["fn stop", "fn kill", "fn remove", "fn unregister", ".kill("] {
@@ -651,23 +1252,75 @@ fn service_never_stops_and_spawns_only_launchctl() {
         }
     }
     let lc = code(include_str!("launchctl.rs"));
-    assert_eq!(lc.matches("Command::new(").count(), 1);
     assert!(lc.contains("Command::new(LAUNCHCTL)"));
     assert!(lc.contains("pub const LAUNCHCTL: &str = \"/bin/launchctl\";"));
     assert_eq!(LAUNCHCTL, "/bin/launchctl");
     assert!(lc.contains(".env_clear()"));
-    assert!(!lc.contains(".arg("), "argv comes only from argv()");
-    // Every verb literal in launchctl.rs is one of the three.
-    let verbs: Vec<String> = literals(&lc)
-        .into_iter()
-        .filter(|l| l.chars().all(|c| c.is_ascii_lowercase()) && !l.is_empty())
+    assert!(!lc.contains(".arg("));
+    assert_eq!(lc.matches(".args(").count(), 1);
+    assert!(lc.contains(".args(argv(verb, label, plist))"));
+    let verbs: Vec<_> = lc
+        .lines()
+        .filter(|line| line.trim_start().starts_with("Verb::"))
+        .flat_map(literals)
         .collect();
-    for v in &verbs {
-        assert!(
-            ["print", "kickstart", "bootstrap"].contains(&v.as_str()),
-            "unexpected literal {v:?}"
-        );
+    assert_eq!(
+        verbs,
+        [
+            "print",
+            "print-disabled",
+            "kickstart",
+            "bootstrap",
+            "bootout",
+            "disable",
+            "enable"
+        ]
+    );
+}
+
+const UPDATER_COMMAND_BUILDER: &str = r"
+    fn command(operation: Operation<'_>, login_home: &Path) -> Command {
+        let (program, args) = operation.argv();
+        let mut command = Command::new(program);
+        command.args(args).env_clear().envs(environment(login_home));
+        command
     }
+";
+
+fn without_whitespace(source: &str) -> String {
+    source.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+fn uses_fixed_updater_command(source: &str) -> bool {
+    source.contains(&without_whitespace(UPDATER_COMMAND_BUILDER))
+        && ["Command::new(", ".args(", ".env_clear(", ".envs("]
+            .into_iter()
+            .all(|call| source.matches(call).count() == 1)
+        && [".arg(", ".env(", ".env_remove(", ".pre_exec("]
+            .into_iter()
+            .all(|call| !source.contains(call))
+}
+
+#[test]
+fn updater_spawn_guard_checks_the_builder_and_refuses_later_changes() {
+    let allowed = without_whitespace(UPDATER_COMMAND_BUILDER);
+    assert!(uses_fixed_updater_command(&allowed));
+    for (checked, replacement) in [
+        ("Command::new(program)", "Command::new(\"/usr/bin/false\")"),
+        (".args(args)", ".args(other_args)"),
+        (".env_clear()", ""),
+        ("environment(login_home)", "environment(other_home)"),
+    ] {
+        assert!(!uses_fixed_updater_command(
+            &allowed.replace(checked, replacement)
+        ));
+    }
+    assert!(!uses_fixed_updater_command(&format!(
+        "{allowed}command.arg(extra);"
+    )));
+    assert!(!uses_fixed_updater_command(&format!(
+        "{allowed}command.env(key,value);"
+    )));
 }
 
 /// Process constructors are confined to the launchctl and updater runners.
@@ -690,16 +1343,22 @@ fn nothing_else_spawns_a_process() {
     walk(&src, &mut files);
     for f in files {
         let text = std::fs::read_to_string(&f).unwrap();
-        let c = code(&text);
+        let c = without_whitespace(&code(&text));
         let n = c.matches("Command::new(").count();
         if f == launchctl {
             assert_eq!(n, 1);
         } else if f == update_exec {
-            assert!(
-                n <= 1,
-                "{} has more than one process constructor",
-                f.display()
-            );
+            // T00 has only the operation list and environment. Once the
+            // runner lands, its sole constructor must apply both to the
+            // actual command, without subsequent argument or env changes.
+            let has_runner = c.contains("Command") || c.contains("fncommand(");
+            assert_eq!(n, usize::from(has_runner));
+            if has_runner {
+                assert!(
+                    uses_fixed_updater_command(&c),
+                    "update/exec.rs must use {UPDATER_COMMAND_BUILDER}"
+                );
+            }
         } else {
             assert_eq!(n, 0, "{} spawns a process", f.display());
             assert!(

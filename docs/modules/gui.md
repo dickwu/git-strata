@@ -11,12 +11,12 @@
 | D1 | GUI 是项目主入口：放在本仓库 `apps/desktop`，README 与引导先讲 app；cli 保留，主要给 agent 用 | t49u | §1、§5.6 |
 | D2 | 实时看到后端分配（会话、工作区、基线 / 依赖集、克隆、存储）：daemon 新增只读 `watch` 事件流；轮询保留为回退 | t49u | §5.3 |
 | D3 | 没有 Apple Developer ID：只做自签名（稳定身份），不公证；引导里写 Gatekeeper 首次打开步骤 | t49u | §6 |
-| D4 | daemon 与 cli 打进 `.app`（不走 Homebrew）；LaunchAgent 首选 SMAppService.agent，**是否可行由 P-pack 实测决定**，不行就用 plist.rs 的传统 plist（D13） | t49u、D13 | §5.7、§8.1 |
+| D4 | daemon 与 cli 打进 `.app`；App 用 `git-stratad --print-plist` 生成用户 LaunchAgent plist，其 `ProgramArguments[0]` 指向 bundle 内的 daemon | 版本升级设计 Q3（取代 D4 原方案） | §5.7 |
 | D5 | 界面只用英文 | t49u | §5.2 |
 | D6 | 关窗不退出，常驻菜单栏 | t49u | §5.8 |
 | D7 | 强调色深青石蓝：浅色 `#2E6F8E`，深色 `#6FB3D2`（对比度 ≥ 4.5:1，§8.2） | 按建议，r3 修正 | §8.2 |
 | D8 | 同意新增 daemon 只读方法（清单与分期见 §3.4） | 按建议 | §3.4 |
-| D9 | `com.gwd.*` 改为 `io.github.dickwu.git-strata`（app），LaunchAgent label `io.github.dickwu.git-strata.daemon`；默认数据根与 plist PATH 去个人化 | 按建议 | §5.7 |
+| D9 | App 标识为 `io.github.dickwu.git-strata`；用户 LaunchAgent 继续用 `com.gwd.git-stratad`。默认数据根与 plist PATH 去个人化 | 版本升级设计 Q3（取代 D9 的 label 变更） | §5.7 |
 | ~~D10~~ | ~~gc 需要 Touch ID（`Action::Gc`）~~ —— **撤销**，见 D11 | — | — |
 | D11 | **gc 不走 Touch ID**。删掉 `Action::Gc` 和 gc 门；GUI 用普通确认对话框，文案如实说 gc 做什么（每仓库 `gc_repo`，全局 gc 另加 `gc_trash`），并说明 daemon 启动时与每小时 reconcile 时本来就会自动 gc | peilin 10:28 | §5.5 |
 | D12 | **推送批准绑定目标 URL**：由 impl/v1 的另一位 worker 在核心 daemon 里实现——门之前解析出实际 push URL，写进计划与 Touch ID 文案，锁内复核，不一致返回 `remote_changed`。GUI 依赖这一点，不自己读 remote | peilin 10:28 | §4 G2、§5.4 |
@@ -223,7 +223,7 @@ GUI 不拥有持久业务数据。它写的东西都由人按按钮触发：首�
 - **G6 不信任仓库内容**：diff、路径、提交信息、ticket、提议理由都是 agent 写的，按纯文本渲染（Monaco 只读、AntD 文本），不渲染 HTML / Markdown，严格 CSP。
 - **G7 托盘不批准、不显示 agent 文本**：托盘只显示种类、编号、仓库名与受影响会话数（如 "Deps proposal 12 in tool · 2 sessions"），不显示 ticket、提交标题、提议理由；点击只打开主窗口到对应对话框；Quit 只退 GUI。
 - **G8 bundle 内 cli 与外部 cli 同权**：bundle 里的 `git-strata` 没有额外能力，确认仍由 daemon 弹框。
-- **G9 不在有写操作时重启 daemon**：GUI 发起的任何 daemon 停止 / 重启 / 升级 / 迁移都先走 §5.9 的 drain；不用 `launchctl kickstart -k`，不发 SIGKILL。
+- **G9 不在有写操作时重启 daemon**。运行中的 daemon 先按 §5.9 drain、封口。`bootout` 前须禁用 label 并复查，目标只能是仍保持 `hold` 封口的同一进程，或已核验停止或未提供服务的 job。`kickstart` 只用于启动，始终省略 `-k`；GUI 不发 SIGKILL。
 
 ## 5. 流程与算法
 
@@ -442,35 +442,21 @@ README 第一节改成「下载 app → 首次打开 → 引导」，cli 用法�
 
 ### 5.7 LaunchAgent、升级与迁移（D4、D9、D13）
 
-**两套方案，P-pack 实测后选一套**（§8.1）：
+**用户 LaunchAgent（版本升级设计 Q3）**。Move 和 Set up 用 bundle 内的 `git-stratad --print-plist <bundle>/git-stratad` 生成 `~/Library/LaunchAgents/com.gwd.git-stratad.plist`，`ProgramArguments[0]` 为 bundle 内 daemon 的绝对路径。执行者清空继承环境，向渲染命令显式传入核验过的登录 `HOME` 与固定 `PATH`。bundle 内供 P-pack 验证的 SMAppService plist 保持未注册。新用户 plist 包含 `KeepAlive = { SuccessfulExit = false }`、`RunAtLoad` 和 `ExitTimeOut = 900`。退出码 0 让已加载的 job 保持停止，非 0 退出由 launchd 按节流规则拉起（§5.9）。
 
-| | A：SMAppService.agent（首选） | B：传统 plist（回退，复用 plist.rs） |
-|---|---|---|
-| 注册 | bundle 内 `Contents/Library/LaunchAgents/…plist`，`BundleProgram` 相对路径 | app 写 `~/Library/LaunchAgents/io.github.dickwu.git-strata.daemon.plist`，绝对路径 |
-| app 被移动 | 跟着走 | 每次启动自检，路径变了就提示重写（需 drain 重启） |
-| 状态 | `enabled` / `requiresApproval` / `notFound` | 读 `launchctl print` |
-| 风险（待 P-pack） | 自签名能否注册 agent；TCC 与 Touch ID 框归到哪个名字 | 登录项里显示「身份不明开发者」 |
-| 最低系统 | macOS 13 | 任意（仍按 13 发布） |
+**服务命令**。`service/` 只用绝对路径 `/bin/launchctl`，清空继承环境，每次调用限 15 s。`print`、`kickstart`、`bootout`、`disable`、`enable` 的目标都是 `gui/<uid>/com.gwd.git-stratad`；`print-disabled` 读取 `gui/<uid>` 域；`bootstrap` 接收域与该用户的 plist 路径。`print` 只有退出码 113 且明确报告此 label 在此 GUI 域找不到时才判定未加载，其他失败保留为探测错误。`print-disabled` 读取完整表中的同名 label，缺项或明确的空表表示默认启用。
 
-**plist 内容**（两套共同）：`KeepAlive = { SuccessfulExit = false }`（退出码 0 = 有意停止，留在停止状态；非 0 = 崩溃或要求重启，launchd 拉起；§5.9；plist.rs:73-74 现在是无条件 `<true/>`，P5 改，main.rs:2 的注释与新行为一致）、`RunAtLoad`、`ProcessType Interactive`、**`ExitTimeOut 900`**（launchd 默认 20 s 后 SIGKILL，不够发布或推送收尾）。**不写** `StandardErrorPath` / `StandardOutPath` / `EnvironmentVariables PATH`——bundle 里的 plist 是只读且所有用户共用的，放不进每个用户的路径：
+**D38 作用域**。`realpath(HOME)` 必须与 `realpath(getpwuid_r(getuid()).pw_dir)` 相同，否则 Start 和修改栅栏返回 `foreign_home`。`launchctl print` 的顶层 `path` 先去掉键和值两侧的空白，再按路径别名归一。若结果与该登录 home 的 plist 不同，返回 `foreign_agent`。Start 仍允许没有 `path` 行的 job。修改已加载 job 的栅栏需要完整的输出和可核对的 plist 路径。GUI 先核对已加载的 job，所以本 home 没有 plist 时也可能报 `foreign_agent`，同一情形 CLI 报 `no_plist`。`legacy_agent` 遇到 D38 拒绝时回 `state: "foreign"` 与 `refusal`，下线横幅说明原因。`foreign_agent` 的提示仅在旧安装已停用的前提下给出人工终端步骤 `launchctl bootout gui/$(id -u)/com.gwd.git-stratad`。
 
-- **日志**：daemon 启动时自己打开 `~/Library/Logs/git-strata/daemon.log`（追加，10 MiB 轮转一份），`dup2` 到 stderr / stdout。旧 plist 的 StandardErrorPath 继续有效（daemon 只在 stderr 不是 TTY 且环境变量 `GIT_STRATA_SELF_LOG=1` 时自重定向，新 plist 设这个变量）。
-- **PATH**：daemon 启动时读旁路文件 `~/Library/Application Support/git-strata/daemon-env.toml`（`path = "…"`），没有就用编进二进制的默认值。**不**在 config.toml 里加 `[daemon]` 表：Config 是 `deny_unknown_fields`，旧版 daemon 读到新表会拒绝启动，回滚就坏了；旁路文件旧版不读，回滚无害。
+**启动是幂等的**。daemon 已应答时无需启动。已加载的 job 走 `kickstart`（无 `-k`）；明确未加载且已有 plist 时走 `bootstrap`。界面区分无 plist、已安装未加载、已禁用、已加载未运行和运行中。手动停用的 label 由用户保留，Move 和升级先要求它启用。Set up 对遗留的禁用记录先 `enable`，再 `bootstrap`。
 
-**daemon 状态的五种情况分开处理**（Daemon 屏与引导都按这个显示）：未注册 / 已注册待批准（requiresApproval）/ 已注册但被禁用（`launchctl print-disabled` 里为 true）/ 已加载未运行（launchd 退避中，显示最后的退出码与日志位置）/ 运行中（socket 可连、daemon_status 成功）。
+**升级**。下载后验签并保留回滚副本，再执行 §5.9 的停稳与卸载流程。job 已确认卸载且 label 处于禁用状态后才安装，恢复 bundle 的过程中也保留栅栏。bundle 验证成功后恢复先前启用状态并 `bootstrap`，用户 plist 仍指向原 bundle 路径。完成时核对新 daemon 的版本、bundle 程序路径，以及 `daemon_status.pid` 与 `print` 的 pid 一致。回滚前核对 store schema 兼容性。
 
-**启动是幂等的**：socket 能连就什么都不做；否则按 `launchctl print gui/<uid>/<label>` 判断：服务在域里 → `kickstart`（**不带 `-k`**）；不在域里 → A 方案 `unregister()` 后 `register()`（bootout 之后 SMAppService 仍认为「已注册」，单调 register() 不会把它放回域里——P-pack 第 1 项实测确认），B 方案 `bootstrap`。
+**Move the daemon into the app**。识别同一 label 的 formula 安装，比较并备份旧 plist。运行中的 daemon 必须支持 `daemon.drain`；用 §5.9 的 `hold` 封口并卸载。已加载但程序缺失时按同节的未提供服务分支核验。确认卸载后原子替换为指向 bundle 的用户 plist，恢复启用状态并 `bootstrap`，最后核对版本、程序路径和应答 pid。Move 保留原有配置、数据根与会话。
 
-[实现时补的决定] S0 的 `Start daemon`（`apps/desktop/src-tauri/src/service/`，只有 print / kickstart（无 `-k`）/ bootstrap 三个动词）与 cli `daemon start` 守同一条 cli.md D38：`realpath(HOME)` 不等于 `realpath(getpwuid_r(getuid()).pw_dir)`（或登录 home 解析不出）→ 在任何 `launchctl` 之前 `InvalidInput`，`detail = {reason: "foreign_home", home, login_home}`；`launchctl print` 顶层 `path = ` 与本 home（取 realpath 后）的 plist 不同 → 不 kickstart，`InvalidInput`，`detail = {reason: "foreign_agent", loaded_path, expected}`；没有 `path` 行照常进行。bootstrap 用 realpath 后 home 下的 plist。`legacy_agent` 遇到这两种情况回 `state: "foreign"` 与 `refusal`（上面的错误），下线横幅不给按钮，只说明原因；foreign_agent 的提示让人自己在终端 `launchctl bootout gui/$(id -u)/com.gwd.git-stratad`（这串只在前端文案里，Rust 侧的静态测试仍禁止 stop / bootout 字面量）。desktop 不能依赖 strata-daemon（§2.3），所以 `service/scope.rs` 复制了 `login_home` / `anchored` / `lifecycle_scope` / `loaded_path`，改动时两边一起改。与 cli 的两处无害差别：GUI 先 `launchctl print` 再看 plist 在不在，所以「别处的 agent 已加载且本 home 没有 plist」报 foreign_agent（cli 报 no_plist）；GUI 只解析 print 的 stdout（cli 解析 stdout 加 stderr）。
+**原 P5 设计中的日志与 PATH**。日志方案由 daemon 在 `GIT_STRATA_SELF_LOG=1` 且 stderr 不是 TTY 时把输出重定向到 `~/Library/Logs/git-strata/daemon.log`，10 MiB 轮转一份。兼容旧 plist 的 `StandardErrorPath`。PATH 方案用 `~/Library/Application Support/git-strata/daemon-env.toml` 保存 `path`，缺少该文件时使用编译时默认值。`config.toml` 保持原有的表，以便旧版 daemon 在回滚时仍可读取。当前 Move 比较生成的用户 plist 与旧 plist，原来的 PATH 等用户改动按差异处理。
 
-**升级**（Tauri updater）：
-1. `update.download()` 下载并校验签名（§6），**不安装**。
-2. §5.9 的 drain：等进行中的操作结束（显示列表，人可以取消升级）。
-3. 停 daemon：按 §5.9 第 4 条「升级 / 迁移」的顺序——封口 `then: stop` → 等进程以 0 退出并**停稳**（无 pid、last exit 0、socket 消失、daemon.lock 可拿）→ `launchctl disable` → 复查停稳 → A：`unregister()`；B：`bootout`。
-4. `update.install()`，重启 app。
-5. 新 app 首次启动：注册 / 启动新 daemon，核对 `daemon_status.version` 等于自己的版本；不等或 60 s 内起不来 → 显示 "The new daemon didn't start" 与日志位置，提供 `Roll back`（重新安装上一版需要用户手动下载，README 写明）。**数据不一定不受影响**：新 daemon 首次打开 store 时若把 `store.db` 从 v1 迁到 v2（impl/agent-id，store.md §5.2 第 9 步「迁移」），旧版本就拒绝这个库（`Corrupt`，`reason = user_version`，例如 c98794f）。所以 `Roll back` 先读 store 的 `user_version`：仍是 v1 → 直接装回旧版；已是 v2 → 必须先做第 5 步之后写明的备份恢复，GUI 做不了或用户不同意时 `Roll back` 不可用，只给手动步骤。
-
-**从旧安装迁移**（`~/.cargo/bin/git-strata{,d}` + `~/Library/LaunchAgents/com.gwd.git-stratad.plist`）：
+**历史迁移方案（旧版 `~/.cargo/bin` 安装）**。以下步骤记录早期设计和 fixture 的来源。当前 Move 以版本升级设计 §6.2 的 drain 与封口为准。
 
 **范围（peilin 11:32，t51u）**：只覆盖 peilin 这台 Mac 上现有的这一套——用本仓库编出（2026-10-27 实测：运行中的 `git-stratad` pid 29858 是 c98794f，10:23 安装；`git-strata` 11:57 安装，应为 924a3f3）、`cargo install` 到 `~/.cargo/bin`、由 `com.gwd.git-stratad` LaunchAgent 起的 daemon。**不做通用的旧版兼容**：不支持别的安装位置、别的 label、别的版本区间。开源用户一律是全新安装，走 §5.6 的引导，看不到迁移入口。
 1. **检测**（每次启动都做，不只首次）：旧 plist 存在、`launchctl print gui/<uid>/com.gwd.git-stratad` 有记录、`~/.cargo/bin` 下有旧二进制、PATH 里排前面的 `git-strata` 不是 bundle 的。两个 label 同时加载时显示警告（两个 daemon 会争 daemon.lock）。检测到的只要不是下面「身份核对」认得的那一套，迁移入口不出现，只显示 "An older git-strata install was found that this app can't migrate automatically" 与 README 的手动步骤。
@@ -629,26 +615,23 @@ app or daemon was used for this implementation. These are validation gaps, not p
 
 daemon 侧（P5）：
 
-1. `drain{on: true, ttl_s}`：daemon 进入 draining：**新的写请求**一律回 `Busy`，`detail.reason = draining`（只读请求与 watch 照常）；已在排队或执行的写请求照常完成。drain 是**租约**：`ttl_s` 默认 120 s、上限 600 s；再发一次 `drain{on: true, ttl_s}` 就从现在起续期，总时长不设上限（依赖安装可达 60 分钟，strata-deps lib.rs:76）。租约到期自动解除，daemon 重启也解除——GUI 崩溃或睡眠后 daemon 不会永远拒写。`drain{on: false}` 立即解除。回答带 `lease_id`，`daemon_status.draining` 给出 `{lease_id, expires_at, sealed}`。**准入原子性**：写请求的「查 draining」与「登记进 inflight」在同一个临界区里做（同一把 inflight 锁）；drain 的开启也在这把锁里，所以不存在「已解析、未登记」而同时躲过 `Busy draining` 与 inflight 列表的请求。
-1a. `drain{seal: true, lease_id, then: "restart" | "stop"}`（**封口**）：在同一临界区里原子地核对 `lease_id` 是当前的、未过期、`inflight` 为空；不满足 → `Busy`，`detail.reason = not_idle / lease_lost`，什么都不改。满足 → drain 变为 sealed：**不再过期、不能解除**（`drain{on:false}` 回 `InvalidInput sealed`），回答之后 daemon **立即**走自己的 §5.9 停机路径（等同收到 SIGTERM）。**没有「封口后等别人来停」的窗口**，r3.2 的 60 s 自退兜底删除。
-1b. **退出码由封口决定，与收尾是否出错无关**（plist 是 `KeepAlive = { SuccessfulExit = false }`）：`then: restart` → 以 **75**（EX_TEMPFAIL）退出，launchd 拉起新进程；`then: stop` → 以 **0** 退出，launchd 不拉起，服务停在「已加载、未运行」，直到下次登录（RunAtLoad）或幂等启动的 `kickstart`。`core.close()` 出错（main.rs:92 今天是 `result.and(closed)`，会把退出码变成非 0）时：错误写进 err.log 与 `~/Library/Application Support/git-strata/last_shutdown.json`（`{mode, epoch, close_error, at}`），**退出码仍按 `then`**——所以 stop 不会因为收尾出错被拉起一个未封口的进程；restart 本来就要拉起，下一次启动照常走 daemon.md §5.1 的恢复。未封口的 SIGTERM（登出、bootout、人手 `launchctl kill`）同样以 0 退出并记录 close 错误。只有 panic / 被信号杀死 / 启动失败是非 0（launchd 按节流拉起），这是要的行为。main.rs:95-99 的 `ExitCode` 映射在 P5 改。
+1. `drain{on: true, ttl_s}` 开启租约。`ttl_s` 默认 120 s，上限 600 s。未封口时重发 `drain{on:true, ttl_s}` 从当前时刻续期，总时长不设上限（依赖安装可达 60 分钟）。到期、daemon 重启或 `drain{on:false}` 都会解除未封口租约。新的写请求回 `Busy` / `draining`，已接受的请求照常完成，只读与 watch 照常服务。持有租约期间禁止开启新的后台 pass。准入检查、写请求登记和 drain 开启使用同一临界区。回答带 `lease_id`，`daemon_status.draining` 给出 `{lease_id, expires_at, sealed, then}`。
+1a. `drain{seal: true, lease_id, then: "restart" | "stop" | "hold"}` 原子检查租约有效且 `inflight` 与后台持锁者为空。失败回 `Busy` / `not_idle` 或 `lease_lost`，状态保持原样。封口成功后租约不再过期。`restart` / `stop` 封口后立即开始停机，`drain{on:false}` 回 `InvalidInput` / `sealed`。`hold` 保持 daemon 运行并拒绝写入，`expires_at` 为 null，续租不改变状态。匹配的 `drain{on:false, lease_id}` 可以解除 `hold`，缺少或传错 `lease_id` 时回 `Busy` / `lease_lost`。进程退出也会结束 `hold`。
+1b. `then: restart` 以 **75**（EX_TEMPFAIL）退出，由 `KeepAlive = { SuccessfulExit = false }` 拉起新进程。`then: stop` 以 **0** 退出，job 保持已加载、未运行，直到下次登录（`RunAtLoad`）或手动 Start。收尾错误写到日志和 `~/Library/Application Support/git-strata/last_shutdown.json`，文件结构为 `{mode, epoch, close_error, at}`。退出码仍由封口模式决定。未封口时收到 SIGTERM（如登出、`bootout`、人工 `launchctl kill`）也以 0 退出并记录收尾错误。除主动重启的 75 外，panic、被信号杀死或启动失败才是非零退出。
 2. `daemon_status.inflight[]`：每个已接受但未完成的写请求一项：`{method, session?, repo?, phase: queued / confirming / locked / running, started_at}`，覆盖今天 holds / waiters 看不到的阶段（确认框等待中、依赖构建中）。P-b `activity[]` 是用于展示的长任务（包括后台工作），不能替代准入栅栏的 `inflight[]`；drain UI 可展示正在等待的请求所对应的 activity。
 3. 收到 SIGTERM：照 daemon.md §5.9 停止 accept、在跑的请求做完、**还在排队的以 `ReadOnly shutting_down` 失败**、订阅者收到 `bye`；plist 的 `ExitTimeOut 900` 给足时间。所以 GUI 必须等 inflight（含 queued）为空才发停机。
 
-GUI 侧 `daemon_restart` / `daemon_stop` / 升级 / 迁移 / 需要重启的配置变更共用一个流程（支持 `config.reload` 的收紧不走此流程）：
+GUI 的 `daemon_restart`、`daemon_stop`、升级与 Move 按以下顺序执行（支持 `config.reload` 的收紧仍走热加载）。
 
-1. `drain{on: true}`；旧 daemon（api 不够，没有 drain）→ 走 §5.7 迁移第 3 条的做法（socket 栅栏 + 核验无客户端连接 + 人确认，核验不了就拒绝）。
-2. 显示 inflight 列表，等它变空；等待期间**每 30 s 续租**，一直保持到 daemon 进程退出；人可以 `Cancel`（`drain{on: false}`），也可以等。确认框等待中的项写明 "Waiting for someone to answer a Touch ID prompt"。**没有「强制」按钮。**
-3. **封口**：`drain{seal: true, lease_id, then: <restart 时 restart，其余 stop>}`。检查与封口由 daemon 在一个临界区里完成，GUI 侧没有「查完再停」的空档；回 `not_idle` / `lease_lost`（例如电脑睡眠导致租约过期、期间有新写请求进来）→ 回到第 1 步，不停机。
-4. 停：
-   - restart：封口带 `then: restart`，daemon 自己优雅退出，以 75 退出，launchd 按 `SuccessfulExit = false` 拉起新进程；服务留在域里，GUI **不调 launchctl**。
-   - stop：封口带 `then: stop`，daemon 自己以 0 退出，服务停在「已加载、未运行」；GUI **不调 launchctl**（A 仍注册着，下次登录会再起，见下）。
-   - 升级 / 迁移：同 stop 封口；等进程退出后，GUI 先确认**停稳**——`launchctl print` 显示没有 pid、`last exit code = 0`（0 退出在 `SuccessfulExit = false` 下不会被拉起；非 0 说明 launchd 会再拉起，等它起来后从第 1 步重来）、`daemon.sock` 已消失、daemon.lock 可拿——再 `launchctl disable gui/<uid>/<label>`（挡住 agent 的 `git-strata daemon start` 在此刻 bootstrap / kickstart，launch.rs:60），再复查一次停稳，然后 A 方案 `unregister()`、B 方案 `bootout`，装好新版后 `enable` 再启动。这些 launchctl 调用都发生在 daemon 已退出、且不会被拉起之后，不在任何时间窗口里；GUI 在其间暂停多久都不会误停一个新进程（复查发现 pid 出现 → 不继续，从第 1 步重来）。`disable` 对 SMAppService 注册的 label 是否生效由 P-pack 第 1 项实测；不生效时 A 方案的残余窗口只剩「复查到 unregister」之间人手 `daemon start`，写进 P-pack 结论。
-   封口后 drain 不会过期、进程随即退出，所以停机过程中没有新的 **RPC 写请求**能进来，退出后也没有未封口的同代进程。注意 inflight 只覆盖 RPC：reconcile（handlers.rs:205-238，compute + 锁内 `gc_repo`）不在其中，可能在封口后开始；停机时它作为持锁者照常做完（ExitTimeOut 900 足够），不丢数据。等 socket 消失与 daemon.lock 释放。
-5. 起：restart 只需等新进程出现；stop 之后的启动走 §5.7 的幂等启动（服务在域里 → `kickstart`，不带 `-k`）。两者都核对 `daemon_status.epoch` 变了、`version` 符合预期，并读 `last_shutdown.json`：有 `close_error` → 显示 "The daemon reported an error while shutting down" 与日志位置（数据由启动恢复处理）。
-6. 任一步失败 → 显示原因与日志位置，不自动重试。
-
-`daemon_stop` 的文案写明 "The daemon will start again at your next login."（agent 仍注册着）；彻底停用是 Settings 里的 `Unregister daemon`。
+1. 运行中的 daemon 先核对 `daemon.drain` 与 job 身份，再 `drain{on:true}`。已加载但未提供服务的分支跳过 drain 与封口，走第 4 步的核验。
+2. 等 `inflight` 与后台持锁者为空，封口前每 30 s 续租。等待时可以 `Cancel`，用 `drain{on:false}` 解除。确认中的请求显示 "Waiting for someone to answer a Touch ID prompt"。
+3. 重启用 `then: "restart"`，然后等 launchd 拉起新进程。`daemon_stop` 用 `then: "stop"`，由 daemon 自行退出并保留已加载的 job，GUI 无需调用 launchctl。界面写明 "The daemon will start again at your next login."。需要启动时走 §5.7 的幂等启动。升级封口用 `then: "stop"`，Move 用 `then: "hold"`，接着取得第 4 步的栅栏。封口回 `not_idle` / `lease_lost` 时回第 1 步。
+4. **核验并取得栅栏**。
+   - 升级等待 `print` 无 pid、最后退出码为 0、socket 拒绝连接且 `daemon.lock` 可拿。残留 socket 文件可以保留。记录先前启用状态，`disable`，再复查停稳后 `bootout`。发现未封口的新 pid 时恢复记录的启用状态，回第 1 步。
+   - Move 的 `hold` 先持久化 pid、`started` 与 `lease_id`。`disable` 前、`bootout` 前和恢复时都核对 `daemon_status` 中的同一 pid、启动时间与 `hold` 封口，还要与 `print` 的 pid 一致。核验通过才 `bootout`，由其 SIGTERM 关闭已封口的 daemon；卸载前核验不通过则恢复记录的启用状态，重新 drain。
+   - 已加载但未提供服务的 job 先记录启用状态再 `disable`，读 `print` 两次、间隔 5 s，均无 pid，同时确认 socket 拒绝连接且锁可拿，才 `bootout`。该分支允许任意最后退出码；Move 的程序缺失分支在 `disable` 前也做同样核验。发现 pid 则恢复记录的启用状态，按运行中处理。
+   - **执行并确认卸载**。发出 `bootout` 前最后一次 `print` 必须仍指向登录 home 的 plist，并与已核验的 pid 或无 pid 状态相符。无 pid 时，仅在报告 `not running` 或 `spawn scheduled` 时确认当前无进程。无法识别的状态按探测不确定处理。若已明确未加载，跳过发命令。以 `print` 读到的 job 退出时限轮询，单次调用仍限 15 s。只有 §5.7 的明确未加载结果才允许继续。只有 `bootout` 子进程已非零退出，且退出时限过后相隔 5 s 的两次 `print` 均确认 job 已加载并指向预期的 plist，pid 相同或均无 pid，才判定为明确失败。此时可恢复先前启用状态；Move 还可以用匹配的 `lease_id` 解除 `hold`。其余结果均视为未确定，保留禁用状态与 `txn` 或 `move` 记录，并显示原因与手动步骤。
+5. 确认卸载并验证安装或恢复的 bundle 后，先恢复记录的启用状态，再 `bootstrap`。重启和启动完成时核对 `daemon_status` 版本及应答 pid；有前任进程时还要核对 pid 已变、`started` 更新。`last_shutdown.json` 包含 `close_error` 时，显示 "The daemon reported an error while shutting down" 与日志位置。
 
 ## 6. 失败与恢复
 
