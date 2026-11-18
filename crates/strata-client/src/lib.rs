@@ -121,6 +121,242 @@ pub fn call_within(
     call_inner(socket, method, params, kind, Some(budget))
 }
 
+/// Check the feature on the same status reply the caller uses to identify the daemon.
+pub fn require_feature(status: &Value, feature: &str) -> Result<(), StrataError> {
+    if status["features"]
+        .as_array()
+        .is_some_and(|features| features.iter().any(|value| value.as_str() == Some(feature)))
+    {
+        return Ok(());
+    }
+    Err(StrataError::new(
+        Code::Unsupported,
+        format!("the daemon does not support {feature}; install a matching git-strata"),
+    )
+    .with_detail(json!({"reason": "daemon_too_old", "feature": feature})))
+}
+
+/// Build the parameters for a 120 s drain acquisition or renewal.
+pub fn drain_on_params(lease_id: Option<&str>) -> Value {
+    let mut params = json!({"on": true, "ttl_s": 120});
+    if let Some(id) = lease_id {
+        params["lease_id"] = json!(id);
+    }
+    params
+}
+
+/// Acquire a 120 s drain lease, or renew the lease identified by `lease_id`.
+pub fn drain_on(
+    socket: &Path,
+    lease_id: Option<&str>,
+    budget: Duration,
+) -> Result<String, StrataError> {
+    drain_lease_id(call_drain(socket, drain_on_params(lease_id), budget, None)?)
+}
+
+/// Acquire a lease only after checking the expected daemon on the same stream.
+/// A replacement at the socket path cannot receive this stream's drain request.
+pub fn drain_acquire(
+    socket: &Path,
+    budget: Duration,
+    is_expected_daemon: impl Fn(&Value) -> bool,
+) -> Result<String, StrataError> {
+    drain_lease_id(call_drain(
+        socket,
+        drain_on_params(None),
+        budget,
+        Some(&is_expected_daemon),
+    )?)
+}
+
+fn drain_lease_id(reply: Value) -> Result<String, StrataError> {
+    reply["lease_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            StrataError::new(Code::Unknown, "the daemon did not return a drain lease id")
+                .with_detail(json!({"reason": "invalid_drain_reply"}))
+        })
+}
+
+/// Build the parameters for releasing a drain lease by its id.
+pub fn drain_cancel_params(lease_id: &str) -> Value {
+    json!({"on": false, "lease_id": lease_id})
+}
+
+/// Release this drain lease. The daemon can also release a sealed hold with its id.
+pub fn drain_cancel(socket: &Path, lease_id: &str, budget: Duration) -> Result<(), StrataError> {
+    call_drain(socket, drain_cancel_params(lease_id), budget, None)?;
+    Ok(())
+}
+
+/// Build the parameters for sealing a drain lease.
+pub fn drain_seal_params(lease_id: &str, then: &str) -> Value {
+    json!({"seal": true, "lease_id": lease_id, "then": then})
+}
+
+/// Seal this drain lease with the daemon's atomic idle check.
+pub fn drain_seal(
+    socket: &Path,
+    lease_id: &str,
+    then: &str,
+    budget: Duration,
+) -> Result<(), StrataError> {
+    call_drain(socket, drain_seal_params(lease_id, then), budget, None)?;
+    Ok(())
+}
+
+fn call_drain(
+    socket: &Path,
+    params: Value,
+    budget: Duration,
+    expected_daemon: Option<&dyn Fn(&Value) -> bool>,
+) -> Result<Value, StrataError> {
+    let started = Instant::now();
+    let until = started.checked_add(budget).ok_or_else(|| {
+        StrataError::new(
+            Code::InvalidInput,
+            "timeout exceeds the monotonic clock range",
+        )
+        .with_detail(json!({"reason": "timeout_budget"}))
+    })?;
+    let timeout = |phase, sent| {
+        CallError::Timeout {
+            method: "drain".into(),
+            waited: started.elapsed(),
+            phase,
+            kind: Kind::Write,
+            sent,
+        }
+        .into_error()
+    };
+    let mut stream = deadline::connect(socket, until).map_err(|error| {
+        if error.kind() == ErrorKind::TimedOut {
+            timeout("connect", false)
+        } else {
+            daemon_down(socket)
+        }
+    })?;
+    if let Some(is_expected_daemon) = expected_daemon {
+        let status = call_on_stream(
+            socket,
+            "daemon_status",
+            json!({"verify": false}),
+            Kind::Read,
+            started,
+            Some(until),
+            &mut stream,
+        )?;
+        check_drain_peer(&status, is_expected_daemon)?;
+    }
+
+    let id = next_id();
+    let line = format!(
+        "{}\n",
+        json!({"id": id, "method": "drain", "params": params})
+    );
+    let mut bytes = line.as_bytes();
+    while !bytes.is_empty() {
+        let left = deadline::remaining(until).map_err(|_| timeout("send", false))?;
+        stream
+            .set_write_timeout(Some(left))
+            .map_err(|_| daemon_down(socket))?;
+        match stream.write(bytes) {
+            Ok(n) if n > 0 => bytes = &bytes[n..],
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Err(timeout("send", false));
+            }
+            _ => return Err(daemon_down(socket)),
+        }
+    }
+
+    // Once the newline was sent, a missing or malformed reply leaves the
+    // drain write uncertain. Keep that distinction in all three wrappers.
+    let closed = || {
+        StrataError::new(
+            Code::Unknown,
+            "the daemon connection closed after the drain request was sent",
+        )
+        .with_detail(json!({"reason": "socket_closed", "method": "drain"}))
+    };
+    let mut reply = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let left = deadline::remaining(until).map_err(|_| timeout("reply", true))?;
+        stream.set_read_timeout(Some(left)).map_err(|_| closed())?;
+        match stream.read(&mut buffer) {
+            Ok(0) => return Err(closed()),
+            Ok(n) => {
+                if let Some(end) = buffer[..n].iter().position(|byte| *byte == b'\n') {
+                    reply.extend_from_slice(&buffer[..end]);
+                    return parse_drain_reply(&id, &reply);
+                }
+                reply.extend_from_slice(&buffer[..n]);
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Err(timeout("reply", true));
+            }
+            Err(_) => return Err(closed()),
+        }
+    }
+}
+
+fn check_drain_peer(
+    status: &Value,
+    is_expected_daemon: &dyn Fn(&Value) -> bool,
+) -> Result<(), StrataError> {
+    if !is_expected_daemon(status) {
+        return Err(
+            StrataError::new(Code::Busy, "the daemon changed while preparing to restart")
+                .with_detail(json!({"reason": "daemon_identity_changed"})),
+        );
+    }
+    require_feature(status, "daemon.drain")?;
+    match status.get("draining") {
+        Some(Value::Null) => Ok(()),
+        Some(Value::Object(_)) => Err(StrataError::new(
+            Code::Busy,
+            "another operation is draining the daemon",
+        )
+        .with_detail(json!({"reason": "draining"}))),
+        _ => Err(StrataError::new(
+            Code::InvalidInput,
+            "the daemon did not report a valid drain lease status",
+        )
+        .with_detail(json!({"reason": "invalid_drain_status"}))),
+    }
+}
+
+fn parse_drain_reply(id: &str, frame: &[u8]) -> Result<Value, StrataError> {
+    let invalid = || {
+        StrataError::new(Code::Unknown, "the daemon sent an invalid drain reply")
+            .with_detail(json!({"reason": "rpc_failed", "method": "drain"}))
+    };
+    let line = std::str::from_utf8(frame).map_err(|_| invalid())?;
+    // The shared parser tolerates missing envelope fields. Drain writes need
+    // an explicit refusal or a success with an actual data object.
+    let reply: Value = serde_json::from_str(line).map_err(|_| invalid())?;
+    match reply["ok"].as_bool() {
+        Some(true) if reply["data"].is_object() => {}
+        Some(false) => {}
+        _ => return Err(invalid()),
+    }
+    parse_reply("drain", id, line).map_err(|error| {
+        let mut error = error.into_error();
+        if error.code == Code::InvalidInput
+            && let Some(detail) = &error.detail
+            && (detail["reason"] == "rpc_id"
+                || (detail["reason"] == "rpc_failed" && detail["rpc"] != "Failed"))
+        {
+            error.code = Code::Unknown;
+        }
+        error
+    })
+}
+
 fn call_inner(
     socket: &Path,
     method: &str,

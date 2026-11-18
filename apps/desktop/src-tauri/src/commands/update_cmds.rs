@@ -94,8 +94,7 @@ pub async fn daemon_restart(
     on_progress: Channel<UpdateState>,
 ) -> Result<(), GuiError> {
     main_only(window.label())?;
-    let _ = (schema_acknowledgement, on_progress);
-    unavailable()
+    crate::update::restart::command(&window, schema_acknowledgement, on_progress).await
 }
 
 #[tauri::command]
