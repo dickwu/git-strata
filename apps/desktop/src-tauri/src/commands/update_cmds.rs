@@ -10,6 +10,7 @@ use tauri::{WebviewWindow, ipc::Channel};
 use crate::error::GuiError;
 use crate::service::main_only;
 use crate::update::state::UpdateState;
+use crate::update::{cli_link, setup};
 
 fn unavailable<T>() -> Result<T, GuiError> {
     Err(GuiError::new(
@@ -69,24 +70,37 @@ pub async fn daemon_move_into_app(
     unavailable()
 }
 
-/// The retained-config path requires acknowledgement of the target schema (§6.3 step 3).
+/// Setup with a retained store requires acknowledgement of its current review (§6.3).
 #[tauri::command]
 pub async fn daemon_setup(
     window: WebviewWindow,
     data_root: Option<PathBuf>,
     repos: Option<BTreeMap<String, PathBuf>>,
     schema_acknowledgement: Option<u32>,
+    setup_review_id: Option<String>,
     on_progress: Channel<UpdateState>,
 ) -> Result<(), GuiError> {
     main_only(window.label())?;
-    let _ = (data_root, repos, schema_acknowledgement, on_progress);
-    unavailable()
+    if data_root.is_some() || repos.is_some() {
+        return Err(GuiError::new(
+            Code::InvalidInput,
+            "Choose setup folders in the macOS folder picker.",
+            json!({ "reason": "setup_native_picker_required" }),
+        ));
+    }
+    setup::run(
+        &window,
+        schema_acknowledgement,
+        setup_review_id.as_deref(),
+        on_progress,
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn cli_link_install(window: WebviewWindow) -> Result<(), GuiError> {
     main_only(window.label())?;
-    unavailable()
+    cli_link::install(&window).await
 }
 
 #[tauri::command]
