@@ -43,15 +43,48 @@ pub async fn update_install(
     schema_acknowledgement: Option<u32>,
     on_progress: Channel<UpdateState>,
 ) -> Result<(), GuiError> {
+    use crate::update::install::{InstallCoordinator, InstallOutcome};
+    use tauri::Manager as _;
+
     main_only(window.label())?;
-    let _ = (target, schema_acknowledgement, on_progress);
-    unavailable()
+    let installer = window.try_state::<InstallCoordinator>().ok_or_else(|| {
+        GuiError::new(
+            Code::Unsupported,
+            "Updates are unavailable",
+            json!({"reason": "updater_unconfigured"}),
+        )
+    })?;
+    let mut progress = |state| {
+        let _ = on_progress.send(state);
+    };
+    let outcome = installer
+        .install(&target, schema_acknowledgement, &mut progress)
+        .await?;
+    if outcome == InstallOutcome::Relaunch {
+        let app = window.app_handle().clone();
+        window
+            .run_on_main_thread(move || app.restart())
+            .map_err(|error| GuiError::internal(format!("Cannot relaunch GIT STRATA: {error}")))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn update_cancel(window: WebviewWindow) -> Result<(), GuiError> {
+    use crate::update::install::InstallCoordinator;
+    use tauri::Manager as _;
+
     main_only(window.label())?;
-    unavailable()
+    window
+        .try_state::<InstallCoordinator>()
+        .ok_or_else(|| {
+            GuiError::new(
+                Code::Unsupported,
+                "Updates are unavailable",
+                json!({"reason": "updater_unconfigured"}),
+            )
+        })?
+        .cancel()
 }
 
 #[tauri::command]
