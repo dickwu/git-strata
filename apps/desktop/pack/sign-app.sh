@@ -6,8 +6,10 @@
 #   the app itself                    io.github.dickwu.git-strata (from Info.plist)
 # usage: sign-app.sh <path/GIT STRATA.app> <identity SHA-1 | ->
 # "-" is ad-hoc: the DR is the cdhash and changes with every build.
-# STRATA_SIGN_KEYCHAIN (optional) names the keychain holding the identity, so
-# the user's keychain search list is never touched.
+# STRATA_SIGN_KEYCHAIN (optional) is passed to codesign --keychain. That flag
+# alone is unreliable on macOS 15; import-identity.sh also adds this keychain
+# to the user search list and import-identity.sh --restore puts the original
+# list back after signing.
 # STRATA_SIGN_KIND=developer-id adds a secure timestamp (needed for notarization).
 set -euo pipefail
 app="$1"; id="$2"

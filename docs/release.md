@@ -46,7 +46,9 @@ available.
 
 The Developer ID `.p12` should hold one identity plus the Apple intermediate
 certificate (or pin it with `APPLE_DEVELOPER_ID_CERT_SHA1`); `import-identity.sh`
-uses the first identity it finds.
+uses the first identity it finds, adds the throwaway keychain to the user search
+list so `codesign` can see it, and `import-identity.sh --restore` puts the original
+list back after signing (including when a later step fails).
 
 What this means:
 

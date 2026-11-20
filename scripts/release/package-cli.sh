@@ -7,7 +7,7 @@
 # (io.github.dickwu.git-strata.cli / .daemon), so with a stable identity both
 # share one designated requirement and one TCC grant.
 # STRATA_SIGN_KIND: adhoc | self-signed | developer-id (default: adhoc when id is "-", else self-signed)
-# STRATA_SIGN_KEYCHAIN (optional): keychain holding the identity.
+# STRATA_SIGN_KEYCHAIN (optional): passed to codesign --keychain; the CI keychain is also on the user search list (see import-identity.sh).
 set -euo pipefail
 bins="$1"; id="$2"; version="$3"; out="$4"
 root="$(cd "$(dirname "$0")/../.." && pwd)"

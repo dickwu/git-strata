@@ -206,9 +206,9 @@ jobs:
           ditto -c -k "$tmp/git-strata-$VERSION-$TARGET/bin" "$tmp/cli.zip"
           notarize "$tmp/cli.zip"
 
-      - name: Remove the signing keychain
+      - name: Restore the keychain search list and remove the signing keychain
         if: always() && env.STRATA_SIGN_KEYCHAIN != ''
-        run: security delete-keychain "$STRATA_SIGN_KEYCHAIN" || true
+        run: apps/desktop/pack/import-identity.sh --restore
 
       - name: Homebrew artifact checksums
         working-directory: dist

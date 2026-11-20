@@ -75,6 +75,9 @@ jobs:
       - name: Signing-identity script test (fake security, no keychain)
         run: bash apps/desktop/scripts/tests/test-make-signing-identity.sh
 
+      - name: Import-identity search-list test (fake security, no keychain)
+        run: bash apps/desktop/scripts/tests/test-import-identity.sh
+
       - name: Release-connector check test
         run: bash apps/desktop/scripts/tests/test-check-release-no-connector.sh
 
@@ -109,9 +112,9 @@ jobs:
             target/aarch64-apple-darwin/release "$id" pack-out
           cat pack-out/pack-record.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Remove the signing keychain
+      - name: Restore the keychain search list and remove the signing keychain
         if: always() && env.STRATA_SIGN_KEYCHAIN != ''
-        run: security delete-keychain "$STRATA_SIGN_KEYCHAIN" || true
+        run: apps/desktop/pack/import-identity.sh --restore
 
       - name: Upload the DMG and pack record
         uses: actions/upload-artifact@v5
