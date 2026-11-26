@@ -1,4 +1,4 @@
-# Unreleased: `new`/`add` without the repo lock, a lock-free old-tree check, retry by default
+# 0.3.2: `new`/`add` without the repo lock, a lock-free old-tree check, retry by default
 
 **Upgrade the CLI and the daemon together.** The retry needs both: an older
 daemon never marks a refusal replay-safe, so a new CLI retries nothing against
