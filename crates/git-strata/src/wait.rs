@@ -1,5 +1,7 @@
 //! Status/sync deadlines and optional stderr progress. No request is retried
 //! after a timeout; the diagnostic probe is read-only and separately bounded.
+//! `new`/`add` instead re-send a refusal the daemon certified replay-safe
+//! ([`retry`], new-lock §4).
 use crate::{
     Result,
     args::WaitArgs,
@@ -26,7 +28,9 @@ pub fn budget(args: &WaitArgs, default_secs: u64) -> Result<Option<Duration>> {
     if seconds == 0.0 {
         return Ok(None);
     }
-    Duration::try_from_secs_f64(seconds).map(Some).map_err(|_| invalid_timeout())
+    Duration::try_from_secs_f64(seconds)
+        .map(Some)
+        .map_err(|_| invalid_timeout())
 }
 fn invalid_timeout() -> StrataError {
     StrataError::new(
@@ -113,9 +117,17 @@ pub fn call_until(
                     .as_ref()
                     .map(|s| format!("git-strata status --session {s}"))
                     .unwrap_or_else(|| "git-strata status".into());
-                detail["fix"] = json!(format!("{command} shows the result when it finishes; do not retry, gc, or rm"));
+                detail["fix"] = json!(format!(
+                    "{command} shows the result when it finishes; do not retry, gc, or rm"
+                ));
             }
-            match rpc::call_within(&ctx.paths.socket, "daemon_status", json!({}), Kind::Read, Duration::from_secs(2)) {
+            match rpc::call_within(
+                &ctx.paths.socket,
+                "daemon_status",
+                json!({}),
+                Kind::Read,
+                Duration::from_secs(2),
+            ) {
                 Ok(v) => {
                     for key in ["holds", "queues"] {
                         if let Some(value) = v.get(key) {
@@ -123,8 +135,9 @@ pub fn call_until(
                         }
                     }
                     if let Some(s) = session.as_ref()
-                        && let Some(queue) =
-                            v["queues"].as_array().and_then(|q| q.iter().find(|q| q["session"].as_str() == Some(s)))
+                        && let Some(queue) = v["queues"]
+                            .as_array()
+                            .and_then(|q| q.iter().find(|q| q["session"].as_str() == Some(s)))
                     {
                         detail["session"] = json!({ "id": queue["session"], "in_flight": queue["holder"],
                             "since": queue["since"], "queued": queue["queued"] });
@@ -135,6 +148,160 @@ pub fn call_until(
             Err(CallError::Failed(error))
         }
         other => other,
+    }
+}
+
+/// new-lock §4.1: `new`/`add`'s retry budget when neither `--timeout` nor
+/// `GIT_STRATA_TIMEOUT` is given (0 there: unlimited).
+pub const RETRY_DEFAULT_SECS: u64 = 600;
+const RETRY_FIRST: Duration = Duration::from_secs(1);
+const RETRY_MAX: Duration = Duration::from_secs(10);
+const RETRY_FIX: &str = "no session or workspace was created or changed (fetch records and tracking refs may have); rerun, or pass --timeout 0 to keep retrying";
+
+/// new-lock §4: send with `attempt` (the caller's normal call, without a
+/// client deadline) and, while the reply is a refusal the daemon certified
+/// replay-safe (`Busy` with `detail.retry_safe`), send it again after 1 s,
+/// doubling to at most 10 s, until `args`' budget (default
+/// [`RETRY_DEFAULT_SECS`], 0: unlimited) is spent. The budget is checked
+/// only between attempts, so one attempt can run past it. Every other
+/// outcome is returned at once. Before each retry and on the final refusal
+/// the holder goes to stderr (TTY or `--progress`).
+pub fn retry(
+    method: &str,
+    args: &WaitArgs,
+    attempt: impl FnMut() -> std::result::Result<Value, CallError>,
+) -> std::result::Result<Value, CallError> {
+    let budget = budget(args, RETRY_DEFAULT_SECS).map_err(CallError::Failed)?;
+    let show = args.progress || crate::tty::stderr_is_tty();
+    let clock = Wall(Instant::now());
+    retry_loop(
+        method,
+        budget,
+        &clock,
+        &mut |line| {
+            if show {
+                eprintln!("{line}");
+            }
+        },
+        attempt,
+    )
+}
+
+trait Clock {
+    fn elapsed(&self) -> Duration;
+    fn sleep(&self, d: Duration);
+}
+
+struct Wall(Instant);
+impl Clock for Wall {
+    fn elapsed(&self) -> Duration {
+        self.0.elapsed()
+    }
+    fn sleep(&self, d: Duration) {
+        std::thread::sleep(d);
+    }
+}
+
+fn retry_loop(
+    method: &str,
+    budget: Option<Duration>,
+    clock: &dyn Clock,
+    note: &mut dyn FnMut(String),
+    mut attempt: impl FnMut() -> std::result::Result<Value, CallError>,
+) -> std::result::Result<Value, CallError> {
+    let mut delay = RETRY_FIRST;
+    let mut retries: u64 = 0;
+    loop {
+        let e = match attempt() {
+            Err(CallError::Failed(e)) => e,
+            other => return other,
+        };
+        let waited = clock.elapsed();
+        if !retry_safe(&e) {
+            if let Some(line) = holder_line(method, waited, &e) {
+                note(format!("{line}; not retried"));
+            }
+            return Err(CallError::Failed(e));
+        }
+        let left = budget.map(|b| b.saturating_sub(waited));
+        if left == Some(Duration::ZERO) {
+            if let Some(line) = holder_line(method, waited, &e) {
+                note(format!("{line}; giving up"));
+            }
+            return Err(CallError::Failed(spent(e, retries, waited)));
+        }
+        if let Some(line) = holder_line(method, waited, &e) {
+            note(format!("{line}; retrying"));
+        }
+        clock.sleep(left.map_or(delay, |l| l.min(delay)));
+        delay = (delay * 2).min(RETRY_MAX);
+        retries += 1;
+    }
+}
+
+/// new-lock §4.1: only the daemon's certification makes a refusal
+/// replay-safe; a bare `Busy lock_wait` (and every legacy daemon's) is not.
+fn retry_safe(e: &StrataError) -> bool {
+    e.code == Code::Busy && e.detail.as_ref().is_some_and(|d| d["retry_safe"] == true)
+}
+
+/// The last certified refusal once the budget is spent (new-lock §4.3).
+fn spent(mut e: StrataError, retries: u64, waited: Duration) -> StrataError {
+    if let Some(d) = e.detail.as_mut().and_then(Value::as_object_mut) {
+        d.insert("retries".into(), json!(retries));
+        d.insert("waited_ms".into(), json!(waited.as_millis() as u64));
+        d.insert("fix".into(), json!(RETRY_FIX));
+    }
+    e
+}
+
+/// new-lock §4.3: `waiting (45s): new; repo tool held by sync (session
+/// s-uijvlo3l, request, 2m10s)`, from a `lock_wait` refusal's detail; `held
+/// by (handing over)` when the lock was between holders. None for any other
+/// refusal.
+fn holder_line(method: &str, waited: Duration, e: &StrataError) -> Option<String> {
+    let d = e.detail.as_ref()?;
+    if d["reason"] != "lock_wait" {
+        return None;
+    }
+    let lock = match (d["lock"]["repo"].as_str(), d["lock"]["session"].as_str()) {
+        (Some(r), _) => format!("repo {r}"),
+        (None, Some(s)) => format!("session {s}"),
+        (None, None) => "the lock".to_string(),
+    };
+    let holder = match d["holder"].as_str() {
+        None => "(handing over)".to_string(),
+        Some(h) => {
+            let mut about = Vec::new();
+            if let Some(s) = d["holder_session"].as_str() {
+                about.push(format!("session {s}"));
+            }
+            if let Some(o) = d["holder_origin"].as_str() {
+                about.push(o.to_string());
+            }
+            if let Some(ms) = d["held_ms"].as_u64() {
+                about.push(span(Duration::from_millis(ms)));
+            }
+            if about.is_empty() {
+                h.to_string()
+            } else {
+                format!("{h} ({})", about.join(", "))
+            }
+        }
+    };
+    Some(format!(
+        "waiting ({}s): {method}; {lock} held by {holder}",
+        waited.as_secs()
+    ))
+}
+
+/// `45s`, `2m10s`, `1h05m`.
+fn span(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m{:02}s", s / 60, s % 60),
+        _ => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
     }
 }
 
@@ -149,15 +316,26 @@ impl Progress {
                 let interval = Duration::from_secs(15);
                 let mut next = start + interval;
                 loop {
-                    if rx.recv_timeout(next.saturating_duration_since(Instant::now())) != Err(mpsc::RecvTimeoutError::Timeout) {
+                    if rx.recv_timeout(next.saturating_duration_since(Instant::now()))
+                        != Err(mpsc::RecvTimeoutError::Timeout)
+                    {
                         break;
                     }
-                    let state =
-                        rpc::call_within(&socket, "daemon_status", json!({}), Kind::Read, Duration::from_secs(2)).ok();
+                    let state = rpc::call_within(
+                        &socket,
+                        "daemon_status",
+                        json!({}),
+                        Kind::Read,
+                        Duration::from_secs(2),
+                    )
+                    .ok();
                     if rx.try_recv() != Err(mpsc::TryRecvError::Empty) {
                         break;
                     }
-                    eprintln!("{}", line(&method, session.as_deref(), start.elapsed(), state.as_ref()));
+                    eprintln!(
+                        "{}",
+                        line(&method, session.as_deref(), start.elapsed(), state.as_ref())
+                    );
                     next += interval;
                 }
             })
@@ -177,8 +355,12 @@ fn line(method: &str, session: Option<&str>, elapsed: Duration, state: Option<&V
         elapsed.as_secs(),
         session.map(|s| format!(" {s}")).unwrap_or_default()
     );
-    let Some(state) = state else { return format!("{text}; daemon status unresponsive") };
-    if let Some(queue) = state["queues"].as_array().and_then(|q| q.iter().find(|q| q["session"].as_str() == session))
+    let Some(state) = state else {
+        return format!("{text}; daemon status unresponsive");
+    };
+    if let Some(queue) = state["queues"]
+        .as_array()
+        .and_then(|q| q.iter().find(|q| q["session"].as_str() == session))
         && let Some(holder) = queue["holder"].as_str()
     {
         if holder == method {
@@ -206,6 +388,227 @@ mod tests {
             "still waiting (45s): sync s-ab12; r2 held by publish"
         );
         let new = json!({"queues":[{"session":"s-ab12", "holder":"old_tree"}], "holds":[]});
-        assert!(line("sync", Some("s-ab12"), Duration::from_secs(45), Some(&new)).contains("queued behind old_tree"));
+        assert!(
+            line("sync", Some("s-ab12"), Duration::from_secs(45), Some(&new))
+                .contains("queued behind old_tree")
+        );
+    }
+
+    /// Virtual time: `sleep` and long attempts move it, nothing blocks.
+    #[derive(Default)]
+    struct Fake {
+        now: std::cell::Cell<Duration>,
+        slept: std::cell::RefCell<Vec<Duration>>,
+    }
+    impl Fake {
+        fn advance(&self, d: Duration) {
+            self.now.set(self.now.get() + d);
+        }
+    }
+    impl Clock for Fake {
+        fn elapsed(&self) -> Duration {
+            self.now.get()
+        }
+        fn sleep(&self, d: Duration) {
+            self.slept.borrow_mut().push(d);
+            self.advance(d);
+        }
+    }
+
+    fn lock_wait(certified: bool) -> CallError {
+        let mut d = json!({
+            "reason": "lock_wait", "lock": {"repo": "tool"}, "holder": "sync",
+            "holder_session": "s-uijvlo3l", "holder_origin": "request",
+            "holder_since": "2026-11-25T10:00:00Z", "held_ms": 130_000,
+        });
+        if certified {
+            d["retry_safe"] = json!(true);
+        }
+        CallError::Failed(
+            StrataError::new(Code::Busy, "waited 30000 ms before anything was written")
+                .with_detail(d),
+        )
+    }
+
+    fn run(
+        budget: Option<Duration>,
+        clock: &Fake,
+        replies: Vec<std::result::Result<Value, CallError>>,
+    ) -> (std::result::Result<Value, CallError>, usize, Vec<String>) {
+        let mut replies = replies.into_iter();
+        let mut sent = 0;
+        let mut lines = Vec::new();
+        let out = retry_loop("new", budget, clock, &mut |l| lines.push(l), || {
+            sent += 1;
+            replies.next().expect("no more replies than attempts")
+        });
+        (out, sent, lines)
+    }
+
+    fn failed(r: std::result::Result<Value, CallError>) -> StrataError {
+        match r {
+            Err(CallError::Failed(e)) => e,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// new-lock §8 `cli_retries_only_pre_write_lock_wait`: only `retry_safe`
+    /// refusals are sent again; a bare `lock_wait` (a legacy daemon's, or
+    /// one after a write), a fence refusal and `Unknown` come back at once.
+    #[test]
+    fn cli_retries_only_pre_write_lock_wait() {
+        let clock = Fake::default();
+        let (out, sent, _) = run(
+            Some(Duration::from_secs(600)),
+            &clock,
+            vec![
+                Err(lock_wait(true)),
+                Err(lock_wait(true)),
+                Ok(json!({"session": {}})),
+            ],
+        );
+        assert!(out.is_ok());
+        assert_eq!(sent, 3);
+        assert_eq!(
+            *clock.slept.borrow(),
+            [Duration::from_secs(1), Duration::from_secs(2)]
+        );
+
+        let fenced =
+            StrataError::new(Code::Busy, "fence").with_detail(json!({"reason": "pins_tightened"}));
+        let unknown =
+            StrataError::new(Code::Unknown, "lost").with_detail(json!({"outcome": "UNCERTAIN"}));
+        for refusal in [
+            lock_wait(false),
+            CallError::Failed(fenced),
+            CallError::Failed(unknown),
+        ] {
+            let clock = Fake::default();
+            let (out, sent, _) = run(None, &clock, vec![Err(refusal)]);
+            let e = failed(out);
+            assert_eq!(sent, 1, "{e:?} is not replayed");
+            assert!(clock.slept.borrow().is_empty());
+            assert!(e.detail.unwrap().get("retries").is_none(), "returned as is");
+        }
+    }
+
+    /// new-lock §8 `budget_checked_between_attempts_only`: an attempt is
+    /// never cut short; the budget only decides whether another is sent.
+    #[test]
+    fn budget_checked_between_attempts_only() {
+        // One attempt runs 20 s past a 5 s budget: no retry, and the last
+        // refusal carries the retry count, the wait and the fix.
+        let clock = Fake::default();
+        let mut attempts = vec![Err(lock_wait(true))].into_iter();
+        let mut lines = Vec::new();
+        let out = retry_loop(
+            "add",
+            Some(Duration::from_secs(5)),
+            &clock,
+            &mut |l| lines.push(l),
+            || {
+                clock.advance(Duration::from_secs(20));
+                attempts.next().unwrap()
+            },
+        );
+        let e = failed(out);
+        let d = e.detail.unwrap();
+        assert_eq!(d["retries"], 0);
+        assert_eq!(d["waited_ms"], 20_000);
+        assert_eq!(d["fix"], RETRY_FIX);
+        assert_eq!(d["retry_safe"], true, "the refusal itself is unchanged");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].ends_with("; giving up"), "{lines:?}");
+
+        // Quick refusals: 1 s, 2 s, then the 2 s left of the budget; the
+        // attempt at the deadline is the last.
+        let clock = Fake::default();
+        let (out, sent, lines) = run(
+            Some(Duration::from_secs(5)),
+            &clock,
+            (0..4).map(|_| Err(lock_wait(true))).collect(),
+        );
+        let e = failed(out);
+        assert_eq!(sent, 4);
+        assert_eq!(*clock.slept.borrow(), [1, 2, 2].map(Duration::from_secs));
+        assert_eq!(e.detail.unwrap()["retries"], 3);
+        assert_eq!(
+            lines.iter().filter(|l| l.ends_with("; retrying")).count(),
+            3
+        );
+    }
+
+    /// new-lock §8 `timeout_zero_unlimited`: no budget; the backoff stops
+    /// growing at 10 s.
+    #[test]
+    fn timeout_zero_unlimited() {
+        let args = WaitArgs {
+            timeout: Some(0.0),
+            progress: false,
+        };
+        assert_eq!(budget(&args, RETRY_DEFAULT_SECS).unwrap(), None);
+        let none = WaitArgs::default();
+        if std::env::var_os("GIT_STRATA_TIMEOUT").is_none() {
+            assert_eq!(
+                budget(&none, RETRY_DEFAULT_SECS).unwrap(),
+                Some(Duration::from_secs(600))
+            );
+        }
+        let clock = Fake::default();
+        let mut replies: Vec<_> = (0..30).map(|_| Err(lock_wait(true))).collect();
+        replies.push(Ok(json!({})));
+        let (out, sent, _) = run(None, &clock, replies);
+        assert!(out.is_ok());
+        assert_eq!(sent, 31);
+        let slept = clock.slept.borrow();
+        assert_eq!(slept[..5], [1, 2, 4, 8, 10].map(Duration::from_secs));
+        assert!(slept.iter().all(|d| *d <= RETRY_MAX));
+    }
+
+    /// new-lock §8 `progress_lines`: the holder comes from the refusal; a
+    /// lock between holders reads `(handing over)`, a legacy detail shows
+    /// the method alone, a session queue names the session.
+    #[test]
+    fn progress_lines() {
+        let CallError::Failed(e) = lock_wait(true) else {
+            unreachable!()
+        };
+        assert_eq!(
+            holder_line("new", Duration::from_secs(45), &e).unwrap(),
+            "waiting (45s): new; repo tool held by sync (session s-uijvlo3l, request, 2m10s)"
+        );
+        let between = StrataError::new(Code::Busy, "w").with_detail(json!({
+            "reason": "lock_wait", "lock": {"repo": "tool"}, "holder": null, "holder_session": null,
+        }));
+        assert_eq!(
+            holder_line("new", Duration::from_secs(3), &between).unwrap(),
+            "waiting (3s): new; repo tool held by (handing over)"
+        );
+        let legacy = StrataError::new(Code::Busy, "w").with_detail(json!({
+            "reason": "lock_wait", "lock": {"session": "s-ab12cd34"}, "holder": "checkpoint", "holder_session": null,
+        }));
+        assert_eq!(
+            holder_line("add", Duration::from_secs(31), &legacy).unwrap(),
+            "waiting (31s): add; session s-ab12cd34 held by checkpoint"
+        );
+        let fenced =
+            StrataError::new(Code::Busy, "f").with_detail(json!({"reason": "pins_tightened"}));
+        assert_eq!(holder_line("new", Duration::ZERO, &fenced), None);
+        assert_eq!(span(Duration::from_secs(59)), "59s");
+        assert_eq!(span(Duration::from_secs(3_900)), "1h05m");
+
+        // Not retried, but still named.
+        let clock = Fake::default();
+        let (_, _, lines) = run(
+            Some(Duration::from_secs(600)),
+            &clock,
+            vec![Err(lock_wait(false))],
+        );
+        assert_eq!(
+            lines,
+            [
+                "waiting (0s): new; repo tool held by sync (session s-uijvlo3l, request, 2m10s); not retried"
+            ]
+        );
     }
 }

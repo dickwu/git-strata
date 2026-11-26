@@ -937,6 +937,28 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
         assert_eq!(paths, vec!["src/index.ts"], "{r:#}");
         assert_eq!(origin("tool"), upstream, "tool not pushed");
 
+        // Front's post-publish Auto move can be Deferred (open files, recent
+        // writes). A rerun proves front landed only from a workspace on the
+        // landed commit (`rerun_paths`), so catch up, bounded, before the
+        // retry checkpoints, and keep the report for the messages below.
+        let front_rebase = det["published_before"][0]["rebases"].clone();
+        let front = repo_name("front");
+        let front_head = || {
+            core.store.session(&id).unwrap().unwrap().manifest.repos[&front]
+                .head
+                .as_str()
+                .to_owned()
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while front_head() != landed.as_str() {
+            assert!(
+                Instant::now() < deadline,
+                "front never moved onto {landed}; its rebase: {front_rebase:#}"
+            );
+            handlers::catch_up_pass(&d, std::time::SystemTime::now());
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
         // A retry's preflight error retains the repo that already landed,
         // both when planning and when publishing directly.
         let mut retry = group(
@@ -972,11 +994,14 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
                     let detail = &refused["error"]["detail"];
                     assert_eq!(detail["reason"], "lock_wait", "{refused}");
                     assert_eq!(detail["repo"], "tool", "{refused}");
-                    assert_eq!(detail["already_published"][0]["repo"], "front", "{refused}");
+                    assert_eq!(
+                        detail["already_published"][0]["repo"], "front",
+                        "{refused}\nfront's rebase: {front_rebase}"
+                    );
                     assert_eq!(
                         detail["already_published"][0]["commit"],
                         json!(landed),
-                        "{refused}"
+                        "{refused}\nfront's rebase: {front_rebase}"
                     );
                 }
                 fx.sb
@@ -991,15 +1016,28 @@ fn publish_conflict_fix_rerun_succeeds_without_duplicates() {
             "printf 'export const t = 9\\n' > src/index.ts",
         );
         push_calls(&core);
-        let r = ok(run());
+        let r = run();
+        assert_eq!(
+            r["ok"],
+            json!(true),
+            "{r:#}\nfront's rebase: {front_rebase:#}"
+        );
+        let r = ok(r);
         assert_eq!(
             core.gits[&repo_name("front")].read_ref(&chain).unwrap(),
             Some(landed.clone()),
             "no second front commit"
         );
         assert_eq!(origin("front"), landed.as_str());
-        assert_eq!(r["already_published"][0]["repo"], "front", "{r:#}");
-        assert_eq!(r["published"].as_array().unwrap().len(), 1, "{r:#}");
+        assert_eq!(
+            r["already_published"][0]["repo"], "front",
+            "{r:#}\nfront's rebase: {front_rebase:#}"
+        );
+        assert_eq!(
+            r["published"].as_array().unwrap().len(),
+            1,
+            "{r:#}\nfront's rebase: {front_rebase:#}"
+        );
         assert_eq!(r["published"][0]["repo"], "tool", "{r:#}");
         let t = core.gits[&repo_name("tool")]
             .read_ref(&chain)

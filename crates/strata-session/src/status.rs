@@ -192,28 +192,42 @@ pub struct MirrorDriftItem {
 
 impl From<MirrorDrift> for MirrorDriftItem {
     fn from(d: MirrorDrift) -> Self {
-        let item =
-            |reason: &str| MirrorDriftItem { reason: reason.into(), key: None, hooks_path: None, hook_replaced: None };
+        let item = |reason: &str| MirrorDriftItem {
+            reason: reason.into(),
+            key: None,
+            hooks_path: None,
+            hook_replaced: None,
+        };
         match d {
             MirrorDrift::Exclude => item("info_exclude"),
             MirrorDrift::Attributes => item("info_attributes"),
-            MirrorDrift::Config { key } => MirrorDriftItem { key: Some(key), ..item("config") },
-            MirrorDrift::PrePushGuardDisabled { hooks_path,
+            MirrorDrift::Config { key } => MirrorDriftItem {
+                key: Some(key),
+                ..item("config")
+            },
+            MirrorDrift::PrePushGuardDisabled {
+                hooks_path,
                 hook_replaced,
-            } => MirrorDriftItem { hooks_path, hook_replaced: Some(hook_replaced), ..item("pre_push_guard_disabled")
+            } => MirrorDriftItem {
+                hooks_path,
+                hook_replaced: Some(hook_replaced),
+                ..item("pre_push_guard_disabled")
             },
         }
     }
 }
 
 pub(crate) fn no_such_session(id: &str) -> StrataError {
-    StrataError::new(Code::NoSuchSession, format!("no session {id}")).with_detail(json!({ "session": id }))
+    StrataError::new(Code::NoSuchSession, format!("no session {id}"))
+        .with_detail(json!({ "session": id }))
 }
 
 impl Sessions<'_> {
     /// §5.5 steps 1, 2 and 3.
     pub fn status(&self, id: &SessionId) -> Result<SessionStatus> {
-        self.status_many(std::slice::from_ref(id)).pop().unwrap_or_else(|| Err(no_such_session(id.as_str())))
+        self.status_many(std::slice::from_ref(id))
+            .pop()
+            .unwrap_or_else(|| Err(no_such_session(id.as_str())))
     }
 
     /// status-perf A4: `status` of each id, one result per id in the order
@@ -253,10 +267,18 @@ impl Sessions<'_> {
             .iter()
             .enumerate()
             .filter_map(|(i, h)| h.as_ref().ok().map(|h| (i, h)))
-            .flat_map(|(i, h)| h.rec.workspaces.iter().map(move |(repo, row)| (i, repo, row)))
+            .flat_map(|(i, h)| {
+                h.rec
+                    .workspaces
+                    .iter()
+                    .map(move |(repo, row)| (i, repo, row))
+            })
             .collect();
         let done = on_slots(&self.status_slots, &tasks, |&(i, repo, row)| {
-            heads[i].as_ref().ok().map(|h| self.workspace_status(&h.rec, repo, row))
+            heads[i]
+                .as_ref()
+                .ok()
+                .map(|h| self.workspace_status(&h.rec, repo, row))
         });
         let n = tasks.len();
         drop(tasks);
@@ -285,7 +307,10 @@ impl Sessions<'_> {
                     }
                     None => {
                         first_err.get_or_insert_with(|| {
-                            StrataError::new(Code::Unknown, format!("status of {repo} was not read"))
+                            StrataError::new(
+                                Code::Unknown,
+                                format!("status of {repo} was not read"),
+                            )
                         });
                     }
                 }
@@ -320,11 +345,19 @@ impl Sessions<'_> {
         }
     }
 
-    fn workspace_status(&self, rec: &SessionRecord, repo: &RepoName, row: &WorkspaceRecord) -> Result<WorkspaceStatus> {
+    fn workspace_status(
+        &self,
+        rec: &SessionRecord,
+        repo: &RepoName,
+        row: &WorkspaceRecord,
+    ) -> Result<WorkspaceStatus> {
         let id = &rec.manifest.id;
         let ws = rec.manifest.repos.get(repo).ok_or_else(|| {
-            StrataError::new(Code::Corrupt, format!("session {id} has a workspace row for {repo} outside its manifest"))
-                .with_detail(json!({ "session": id.as_str(), "repo": repo.as_str() }))
+            StrataError::new(
+                Code::Corrupt,
+                format!("session {id} has a workspace row for {repo} outside its manifest"),
+            )
+            .with_detail(json!({ "session": id.as_str(), "repo": repo.as_str() }))
         })?;
         let git = self.git(repo)?;
         let cfg = self.repo_cfg(repo)?;
@@ -332,12 +365,18 @@ impl Sessions<'_> {
 
         // 2.1 health.
         let (health, scene, shadow) = if row.health == Health::Unknown {
-            let scene = row.scene.as_ref().map(|v| scene_of(v, "workspace")).transpose()?;
+            let scene = row
+                .scene
+                .as_ref()
+                .map(|v| scene_of(v, "workspace"))
+                .transpose()?;
             (WorkspaceHealth::Unknown, scene, None)
         } else {
             let dir_ok = is_dir(&ws.path)?;
-            let git_ok =
-                dir_ok && lstat(&ws.path.join(".git")).map_err(|e| read_err(&e, &ws.path.join(".git")))?.is_some();
+            let git_ok = dir_ok
+                && lstat(&ws.path.join(".git"))
+                    .map_err(|e| read_err(&e, &ws.path.join(".git")))?
+                    .is_some();
             let shadow_dir = self.shadow_dir(id, repo);
             let shadow = match git.shadow_at(&shadow_dir) {
                 Ok(s) => Some(s),
@@ -348,14 +387,30 @@ impl Sessions<'_> {
                 // Not a shadow of this repo (e.g. half-built, no marker):
                 // the workspace is Missing; status still answers.
                 Err(e) if e.code == Code::InvalidInput => {
-                    let reason = e.detail.as_ref().and_then(|d| d.get("reason")).and_then(|r| r.as_str()).unwrap_or("");
-                    warnings.push(StatusWarning::ShadowInvalid { path: shadow_dir, reason: reason.to_string() });
+                    let reason = e
+                        .detail
+                        .as_ref()
+                        .and_then(|d| d.get("reason"))
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("");
+                    warnings.push(StatusWarning::ShadowInvalid {
+                        path: shadow_dir,
+                        reason: reason.to_string(),
+                    });
                     None
                 }
                 Err(e) => return Err(e),
             };
             let ok = dir_ok && git_ok && shadow.is_some();
-            (if ok { WorkspaceHealth::Ok } else { WorkspaceHealth::Missing }, None, shadow)
+            (
+                if ok {
+                    WorkspaceHealth::Ok
+                } else {
+                    WorkspaceHealth::Missing
+                },
+                None,
+                shadow,
+            )
         };
 
         // 2.3 checkpoint.
@@ -405,10 +460,14 @@ impl Sessions<'_> {
                     Some(m) => mtime_of(&m) != written_stamp(&ws.path.join(s.path.as_str()), s).0,
                 };
                 if stale {
-                    warnings.push(StatusWarning::SeedStale { path: s.path.clone() });
+                    warnings.push(StatusWarning::SeedStale {
+                        path: s.path.clone(),
+                    });
                 }
                 if !git.is_ignored(&ws.path, &s.path)? {
-                    warnings.push(StatusWarning::SeedNotIgnored { path: s.path.clone() });
+                    warnings.push(StatusWarning::SeedNotIgnored {
+                        path: s.path.clone(),
+                    });
                 }
             }
         }
@@ -429,17 +488,29 @@ impl Sessions<'_> {
 
         // 2.9 move intents. A move running in this process is not a leftover.
         let live = self.is_live_move(id, repo);
-        for i in self.store.move_intents(id)?.into_iter().filter(|i| &i.repo == repo) {
+        for i in self
+            .store
+            .move_intents(id)?
+            .into_iter()
+            .filter(|i| &i.repo == repo)
+        {
             match i.state {
-                MoveState::Preparing if !live => warnings.push(StatusWarning::MoveLeftover { n: i.n, staging: i.staging.clone(),
+                MoveState::Preparing if !live => warnings.push(StatusWarning::MoveLeftover {
+                    n: i.n,
+                    staging: i.staging.clone(),
                 }),
-                MoveState::Swapping if !live => warnings.push(StatusWarning::MoveAwaitingRecover { n: i.n, staging: i.staging.clone(),
+                MoveState::Swapping if !live => warnings.push(StatusWarning::MoveAwaitingRecover {
+                    n: i.n,
+                    staging: i.staging.clone(),
                 }),
                 MoveState::Abandoned
                     if lstat(&i.staging)
                         .map_err(|e| read_err(&e, &i.staging))?
-                        .is_some() => {
-                    warnings.push(StatusWarning::MoveLeftover { n: i.n, staging: i.staging.clone(),
+                        .is_some() =>
+                {
+                    warnings.push(StatusWarning::MoveLeftover {
+                        n: i.n,
+                        staging: i.staging.clone(),
                     })
                 }
                 MoveState::Done => {
@@ -451,7 +522,8 @@ impl Sessions<'_> {
                     if self.old_tree_mode() == OldTreeMode::Deferred {
                         // status-perf A1: only the verdict table; what it
                         // lacks is queued for the background thread.
-                        let hint = crate::old_tree::ino_of(&path).and_then(|ino| self.old_tree_hint(&i, &path, ino));
+                        let hint = crate::old_tree::ino_of(&path)
+                            .and_then(|ino| self.old_tree_hint(&i, &path, ino));
                         warnings.push(match hint {
                             Some(v) => StatusWarning::OldTreeKept {
                                 path,
@@ -493,7 +565,10 @@ impl Sessions<'_> {
         }
 
         // 2.10 an overlay restore scene.
-        let restore = rec.manifest.root.join(format!("{}{repo}", strata_overlay::RESTORE_TEMP_PREFIX));
+        let restore = rec
+            .manifest
+            .root
+            .join(format!("{}{repo}", strata_overlay::RESTORE_TEMP_PREFIX));
         if non_empty_dir(&restore)? {
             warnings.push(StatusWarning::RestoreScene { path: restore });
         }
@@ -513,7 +588,12 @@ impl Sessions<'_> {
     }
 
     pub(crate) fn shadow_dir(&self, id: &SessionId, repo: &RepoName) -> PathBuf {
-        self.config.paths.root.join("sessions/.repos").join(id.as_str()).join(format!("{repo}.git"))
+        self.config
+            .paths
+            .root
+            .join("sessions/.repos")
+            .join(id.as_str())
+            .join(format!("{repo}.git"))
     }
 }
 
@@ -522,7 +602,9 @@ fn read_err(e: &io::Error, p: &Path) -> StrataError {
 }
 
 fn is_dir(p: &Path) -> Result<bool> {
-    Ok(lstat(p).map_err(|e| read_err(&e, p))?.is_some_and(|m| m.is_dir()))
+    Ok(lstat(p)
+        .map_err(|e| read_err(&e, p))?
+        .is_some_and(|m| m.is_dir()))
 }
 
 /// A directory with at least one entry; anything else (absent, not a
@@ -552,7 +634,11 @@ impl Sessions<'_> {
     /// status-perf A4: `f` of each item on the same shared slots as the
     /// workspace reads of [`Sessions::status_many`] (the daemon's chains
     /// go through here), one result per item in the order given.
-    pub fn on_status_slots<T: Sync, R: Send>(&self, items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<Option<R>> {
+    pub fn on_status_slots<T: Sync, R: Send>(
+        &self,
+        items: &[T],
+        f: impl Fn(&T) -> R + Sync,
+    ) -> Vec<Option<R>> {
         on_slots(&self.status_slots, items, f)
     }
 }
@@ -607,7 +693,11 @@ pub(crate) struct Slot<'a>(&'a Slots);
 impl Slots {
     pub(crate) fn new(cap: usize) -> Slots {
         let cap = cap.max(1);
-        Slots { cap, free: Mutex::new(cap), freed: Condvar::new() }
+        Slots {
+            cap,
+            free: Mutex::new(cap),
+            freed: Condvar::new(),
+        }
     }
 
     pub(crate) fn cap(&self) -> usize {
@@ -635,8 +725,9 @@ impl Drop for Slot<'_> {
     }
 }
 
-/// `Option<SystemTime>` as an RFC 3339 string (status-perf A1 `checked_at`).
-mod opt_rfc3339 {
+/// `Option<SystemTime>` as an RFC 3339 string (status-perf A1 `checked_at`,
+/// new-lock `FetchSkipped.last_fetch_at`).
+pub(crate) mod opt_rfc3339 {
     use std::time::SystemTime;
 
     use serde::{Deserialize, Deserializer, Serializer};
@@ -650,7 +741,9 @@ mod opt_rfc3339 {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SystemTime>, D::Error> {
         match Option::<String>::deserialize(d)? {
-            Some(text) => strata_types::serde_rfc3339::parse(&text).map(Some).map_err(serde::de::Error::custom),
+            Some(text) => strata_types::serde_rfc3339::parse(&text)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
             None => Ok(None),
         }
     }

@@ -2,7 +2,7 @@
 name: git-strata
 description: Use when working in a repo managed by git-strata (macOS), when the cwd is inside a git-strata session workspace (`<root>/sessions/<id>/<repo>`, default root ~/.strata), or when the user asks to start, checkpoint, diff, restore, sync with main, publish, push or remove a git-strata session, or to run a dev server on per-session ports. Gives each agent session its own isolated APFS-cloned workspace over a shared base snapshot. Covers the CLI loop (new, checkpoint, sync --check, publish, which closes a fully landed session), the JSON envelope and error codes, main-sync conflict resolution, and the commands an agent must hand to a human. For any agent that runs shell commands (Claude Code, Codex, Cursor and others).
 license: MIT OR Apache-2.0
-compatibility: macOS 13+ on APFS. Needs matching git-strata CLI and daemon builds; R2 features require R2 or later. The 0.1.2 CLI cannot read a v6 or v7 store. Only a human starts the daemon.
+compatibility: macOS 13+ on APFS. Needs matching git-strata CLI and daemon builds (upgrade both together); R2 features require R2 or later. The 0.1.2 CLI cannot read a v6 or v7 store. Only a human starts the daemon.
 ---
 
 # git-strata
@@ -167,6 +167,15 @@ git-strata push api
 - Marking requires the daemon feature `session.mark`; an older daemon returns
   `Unsupported daemon_too_old`. Done notes are 1–2000 UTF-8 bytes, with tab/newline
   allowed and other C0 controls refused. Active clears the mark and takes no note.
+- `new` and `add` retry a busy repo (`Busy lock_wait` with
+  `detail.retry_safe`) until `--timeout SECS` (default 600, 0: no limit), then
+  fail with that `Busy` plus `detail.retries`; nothing was created, so rerun
+  the same command. A busy repo's due fetch is skipped (`warnings` gets
+  `FetchSkipped`: the base is main as last fetched). stderr names the holder
+  only on a TTY or with `--progress`. Once the session exists, its follow-up
+  steps can still wait behind the current repo-lock holder: slow is not hung.
+  If your own tool timeout kills `new`, run `git-strata ls` and look for the
+  ticket before running `new` again: the session may exist already.
 - `--session` takes a session id or a ticket (`AmbiguousMatch` when a ticket
   names several; use an id from `detail`). Write `"${S}:path"`, never
   `"$S:path"`: zsh reads `$S:t`, `$S:h` as modifiers.
@@ -226,6 +235,7 @@ Unknown help topics return an `InvalidInput` / `help_topic` envelope.
 | `OpenFiles caller_cwd` | run `detail.fix` from outside, preserving its repo/resolution flags; then cd back |
 | `OpenFiles cwd_holders` | `--allow-cwd` accepts your own PID chain's stale cwd; other holders must cd out or be explicitly accepted with `--allow-cwd-holders` |
 | `Busy pins_tightened` | rerun the command once on the new catalog; do not loop inside the old operation |
+| `Busy lock_wait` with `detail.retry_safe` (`new`/`add`) | the CLI already retried for `--timeout`; nothing was created or changed: rerun the same command, or with `--timeout 0` |
 | `Busy` (other) | another operation holds the lock; wait and retry |
 | `NotTty` / human-only command | stop; give the human the exact command |
 | `NoSuchSession` | `cd` into your workspace or pass `--session` |

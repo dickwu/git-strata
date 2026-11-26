@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strata_apfs::RenameMode;
+use strata_deps::RepoWriteLock;
 use strata_store::{Lifecycle, SeedRow};
 use strata_types::{
     BaseGen, Code, CommitOid, RepoName, SessionId, StrataError, TreeOid, WorkspaceState,
@@ -36,7 +37,8 @@ pub struct AddReport {
     pub added: BTreeMap<RepoName, WorkspaceState>,
     /// Requested repos the session already had; nothing was done to them.
     pub already: BTreeMap<RepoName, WorkspaceState>,
-    /// Observing main for the added repos; empty means no warnings.
+    /// The head step's `FetchSkipped` and observing main for the added
+    /// repos; empty means no warnings.
     pub warnings: Vec<NewWarning>,
 }
 
@@ -110,10 +112,29 @@ impl Sessions<'_> {
             session: Some(id.clone()),
         });
 
+        // new-lock §2.4a: the fence checkpoints cover the whole affected
+        // membership, the session's repos and the added ones.
+        let affected: Vec<RepoName> = rec
+            .manifest
+            .repos
+            .keys()
+            .chain(new.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
         // B. heads, bases, plans
         observed.step("head");
-        let heads: BTreeMap<RepoName, (CommitOid, TreeOid)> =
-            self.resolve_heads(&new)?.into_iter().collect();
+        let mut warnings = Vec::new();
+        let heads: BTreeMap<RepoName, (CommitOid, TreeOid)> = self
+            .head_phase(&new, &BTreeMap::new(), "add")?
+            .into_iter()
+            .map(|(r, (head, tree, warning))| {
+                warnings.extend(warning);
+                (r, (head, tree))
+            })
+            .collect();
         observed.step("base");
         let planned = dispatch::each_repo(&new, &|_| Ok(()), &|r| {
             let (_, tree) = &heads[r];
@@ -125,6 +146,7 @@ impl Sessions<'_> {
 
         // C. build each workspace in staging and move it into place
         observed.step("build");
+        self.locks.check_fence(&affected)?;
         let built = dispatch::each_repo(&new, &|r| self.seams.hit("add.build", Some(r)), &|r| {
             let ws = WorkspaceState {
                 base: plans[r].0.clone(),
@@ -132,7 +154,7 @@ impl Sessions<'_> {
                 path: root.join(r.as_str()),
                 tracked: true,
             };
-            let seeds = self.add_build(id, &root, r, &ws, &plans[r].1)?;
+            let seeds = self.add_build(id, &root, r, &ws, &plans[r].1, &affected)?;
             Ok((ws, seeds))
         });
         let built = match built {
@@ -170,6 +192,18 @@ impl Sessions<'_> {
             .collect();
         let seeds: BTreeMap<RepoName, Vec<SeedRow>> =
             built.into_iter().map(|(r, (_, s))| (r, s)).collect();
+        let kept = || -> Vec<String> {
+            added
+                .values()
+                .map(|w| w.path.display().to_string())
+                .collect()
+        };
+        // new-lock §2.4a: the authorization point; a refusal keeps D52's
+        // cleanup (unpin) and `kept`.
+        if let Err(e) = self.locks.check_fence(&affected) {
+            self.add_unpin(id, &new);
+            return Err(with_kept(e, &kept()));
+        }
         let recorded = if self.catalog.is_some() {
             self.store
                 .add_workspaces_with_policy(id, &added, &seeds, self.dev_ports_policy()?)
@@ -177,17 +211,16 @@ impl Sessions<'_> {
             self.store.add_workspaces(id, &added, &seeds)
         };
         if let Err(e) = recorded {
-            self.add_unpin(id, &new);
-            let kept: Vec<String> = added
-                .values()
-                .map(|w| w.path.display().to_string())
-                .collect();
-            return Err(with_kept(e, &kept));
+            // new-lock §2.7: whether an uncertain commit recorded the
+            // workspaces is unknown, so their pins stay.
+            if e.code != Code::Unknown {
+                self.add_unpin(id, &new);
+            }
+            return Err(with_kept(e, &kept()));
         }
 
         // E. observe main; failures are warnings
         observed.step("observe");
-        let mut warnings = Vec::new();
         for (r, ws) in &added {
             let res = self.deps_ctx(r).and_then(|ctx| {
                 strata_deps::observe_main(
@@ -221,6 +254,7 @@ impl Sessions<'_> {
         r: &RepoName,
         ws: &WorkspaceState,
         plan: &Plan,
+        affected: &[RepoName],
     ) -> Result<Vec<SeedRow>> {
         let sname = format!("{ADD_STAGING_PREFIX}{r}-{}", random_hex(8));
         let staging: PathBuf = root.join(&sname);
@@ -238,31 +272,33 @@ impl Sessions<'_> {
         }
         let git = self.git(r)?;
         let dir = self.shadow_dir(id, r);
-        self.with_lock_unbounded(r, || {
+        // new-lock §2.3: the session's own shadow and its pin take no repo
+        // lock; the removed takes' fence and shutdown checks stay (§2.4a).
+        let admitted = || -> Result<()> {
+            self.refuse_if_shut_down()?;
+            self.locks.check_fence(affected)
+        };
+        admitted().map_err(fail)?;
+        (|| -> Result<()> {
             let shadow = git.ensure_shadow(&dir)?;
             git.attach_worktree(&shadow, 1, &ws.head, &staging, &ws.path)?;
             Ok(())
-        })
+        })()
         .map_err(fail)?;
         let records = seed_files(&plan.files, &staging).map_err(fail)?;
-        self.with_lock_unbounded(r, || git.update_ref(&pin_ref(id), &ws.head, None))
-            .map_err(fail)?;
+        admitted().map_err(fail)?;
+        git.update_ref(&pin_ref(id), &ws.head, None).map_err(fail)?;
         strata_apfs::rename_rooted(root, &rp(&sname), &rp(r.as_str()), RenameMode::Excl)
             .map_err(fail)?;
         Ok(records.iter().map(SeedRow::from).collect())
     }
 
-    /// Best effort: delete this session's pin in each repo not recorded in it.
+    /// Best effort: delete this session's pin in each repo not recorded in
+    /// it, without the repo lock (new-lock §2.7), so a failed `add` never
+    /// waits behind a long holder.
     fn add_unpin(&self, id: &SessionId, repos: &[RepoName]) {
-        let pin = pin_ref(id);
         for r in repos {
-            let Ok(git) = self.git(r) else { continue };
-            let _ = self.with_cleanup_lock(r, || {
-                if let Some(c) = git.read_ref(&pin)? {
-                    git.delete_ref(&pin, &c)?;
-                }
-                Ok(())
-            });
+            let _ = self.unpin(r, id);
         }
     }
 }

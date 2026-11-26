@@ -918,16 +918,17 @@ impl Sessions<'_> {
             }
         };
         // 20. earlier trees kept only because they were held (status-perf
-        // A1: the same judgement as the background thread).
+        // A1; new-lock §15.5: inline, a foreground judgement).
         if let Ok(all) = self.store.move_intents(session) {
             for i in all.iter().filter(|i| i.repo == name) {
                 if i.n == n || i.state != MoveState::Done || i.old_tree.is_some() {
                     continue;
                 }
-                let _ = self.collect_old_tree(&all, i, cfg, false);
+                let _ = self.collect_old_tree(&all, i, cfg);
             }
         }
-        self.forget_old_trees(session);
+        // new-lock §3.3: only this repo's trees changed.
+        self.forget_old_trees_of(session, &name);
         // G4 item 4: every `Auto` tree still kept gets its next Q pass;
         // invalidating verdicts above preserves other repos' queued retries.
         self.queue_auto_trees(session);

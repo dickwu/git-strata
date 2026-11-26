@@ -19,6 +19,13 @@ accepts others' (also on deps approve/propose --switch). They do not bypass
 file or mapping protections. `status`/`sync` accept `--timeout SECS` (0 unlimited)
 and `--progress`; the flag beats GIT_STRATA_TIMEOUT. Defaults: status 30 s,
 status --all 120 s, sync 600 s. Hooks retain their own five-second budget.
+`new`/`add` take the same two flags, but there `--timeout` (default 600, 0
+unlimited) bounds only the retries of a `Busy lock_wait` the daemon marked
+`detail.retry_safe` (nothing was created); it never cuts one call short. A
+busy repo's due fetch is skipped instead of waited for (warning `FetchSkipped`).
+If your own tool timeout kills `new`, check `git-strata ls` for the ticket
+before running it again. Upgrade the CLI and the daemon together: an older
+daemon never marks a refusal retry-safe, so nothing is retried against it.
 
 `new --repo R --base REV` parks a session at a local commit. It is still a
 checkpoint/publish session, not a git branch. Publishing is refused until every
@@ -38,8 +45,8 @@ data root (`[paths] root`, default `~/.strata`) as
 
 | Command | Arguments and flags | Human | No daemon | `data` on success |
 | --- | --- | --- | --- | --- |
-| `new [TICKET]` | `--ticket <T>` (same as positional), `--repo <R>` (repeatable or comma separated; only these repos get a workspace, all tracked; preferred) or `--repos <A,B>` (the tracked repos; every configured repo still gets a workspace); one of the two, not both (`repo_flags`); `--agent <NAME>` (default: `STRATA_AGENT`, else detected: `claude-code`, `codex`, `cursor-agent`; invalid: `InvalidInput` `agent`); `--base REV` with one `--repo`, or repeat `--base R=REV` for selected repos (requires `new.base`; incompatible with `--repos`) | no | no | `{manifest:{id,ticket?,agent?,root,repos:{<repo>:{base,head,path,tracked}}},warnings:[]}`; warning `AgentNotRecorded` (`daemon_too_old`): the daemon predates agent recording, the session is fine |
-| `add` | `--repo <R>` (at least one; repeatable or comma separated), `--session <S>` (default: cwd's session) | no | no | `{session,added:{<repo>:WorkspaceState},already:{<repo>:WorkspaceState},warnings:[]}`; `Exists` `add_leftover`: an earlier failed add left `detail.path` (an `rm` of the session clears it) |
+| `new [TICKET]` | `--ticket <T>` (same as positional), `--repo <R>` (repeatable or comma separated; only these repos get a workspace, all tracked; preferred) or `--repos <A,B>` (the tracked repos; every configured repo still gets a workspace); one of the two, not both (`repo_flags`); `--agent <NAME>` (default: `STRATA_AGENT`, else detected: `claude-code`, `codex`, `cursor-agent`; invalid: `InvalidInput` `agent`); `--base REV` with one `--repo`, or repeat `--base R=REV` for selected repos (requires `new.base`; incompatible with `--repos`); `--timeout SECS`, `--progress` (retry budget, above) | no | no | `{manifest:{id,ticket?,agent?,root,repos:{<repo>:{base,head,path,tracked}}},warnings:[]}`; warning `AgentNotRecorded` (`daemon_too_old`): the daemon predates agent recording, the session is fine; warning `FetchSkipped` `{repo,holder,holder_session,last_fetch_at}`: the repo was busy, its base is main as last fetched |
+| `add` | `--repo <R>` (at least one; repeatable or comma separated), `--session <S>` (default: cwd's session); `--timeout SECS`, `--progress` (as `new`) | no | no | `{session,added:{<repo>:WorkspaceState},already:{<repo>:WorkspaceState},warnings:[]}` (`warnings` as `new`'s `FetchSkipped`); `Exists` `add_leftover`: an earlier failed add left `detail.path` (an `rm` of the session clears it) |
 | `ls` | `--table` (a table for people; errors stay envelopes) | no | yes (`data.source: "local"`) | `{sessions:[{id,ticket,state,created,repos,phase?}]}`; cache-only, never runs git |
 | `status` | `--session <S>` or `--all` (default: cwd's session); `--brief` (store only: no drift, seeds, mirrors, old trees), `--timeout SECS`, `--progress` | no | yes | `SessionStatus` (per repo `upstream`: behind/ahead, following, state, fix); `--all`: `{sessions:[...]}`; health `Unknown` with `choices` = the human's `resolve` |
 | `sync` | `--session S`, repeatable `--repo R`, `--check`, `--hook` (requires `--check`; see [hooks.md](hooks.md)), `--no-fetch`, repeatable `--resolved PATH` / `--keep PATH`, `--target HEAD --generation N`, `--accept-diverged`, `--allow-cwd`, `--allow-cwd-holders`, `--timeout SECS`, `--progress` | no; accepting divergence requires the human's prior chain recovery | no | `--check`: `{session,upstream,base_warnings}` (exit 0 even when unclean); move: `{session,fetched,repos,next,upstream?}` with per-repo `moved`, `source_only`, `up_to_date`, `waiting`, `not_following`, or `conflicts_cleared`; `--check --hook`: optional `{decision:"block",reason}` without an envelope, otherwise silent, always exit 0 |

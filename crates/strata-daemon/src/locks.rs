@@ -261,6 +261,20 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     })
 }
 
+/// How a repo lock is taken.
+#[derive(Clone, Copy)]
+enum Take<'a> {
+    /// A request's take: its first is bounded by the lock wait, later ones
+    /// and any after a visible write wait without bound.
+    Request,
+    /// Only if free right now; the holder shows as this label.
+    Try(&'a str),
+    /// Like `Try`, the label naming this request's session too.
+    TryAs(&'a str),
+    /// At most the lock wait, given up once the closure says so.
+    Abortable(&'a str, &'a dyn Fn() -> bool),
+}
+
 /// What a take failed with. The holder is boxed to keep the error small.
 enum TakeError {
     Timeout(Option<Box<Holder>>),
@@ -371,6 +385,31 @@ impl Drop for Held<'_> {
 
 type LongWaitKey = (RepoName, Option<SessionId>, String);
 
+/// Reads a repo's [`strata_deps::RefSnapshot`] refs (origin, chain top,
+/// anchor) for the release-point refresh: an owned `Git` and the refs'
+/// names on the default branch.
+#[derive(Clone)]
+struct RefSource {
+    git: strata_gitio::Git,
+    names: [String; 3],
+}
+
+impl RefSource {
+    fn names(&self) -> Vec<&str> {
+        self.names.iter().map(String::as_str).collect()
+    }
+}
+
+/// A repo's snapshot and the stamp of its refs' files when it was read
+/// (`None` after a failed or skipped read).
+struct Snap {
+    snapshot: strata_deps::RefSnapshot,
+    stamp: Option<strata_gitio::RefsStamp>,
+}
+
+/// How long the release-point refresh's one git subprocess may run.
+const SNAPSHOT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The daemon's repo write locks and session queues.
 pub struct Locks {
     wait: Duration,
@@ -383,6 +422,13 @@ pub struct Locks {
     expired_waits: Mutex<BTreeMap<LongWaitKey, DaemonWarning>>,
     closed: AtomicBool,
     close_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// new-lock §2.1: per repo, the reader of its snapshot refs and the
+    /// snapshot as the last holder left it (a missing one is not valid).
+    ref_sources: Mutex<BTreeMap<RepoName, RefSource>>,
+    snapshots: Mutex<BTreeMap<RepoName, Snap>>,
+    /// new-lock §3.3: per repo, how many reloads changed its configuration;
+    /// part of every old-tree judgement's token.
+    config_epochs: Mutex<BTreeMap<RepoName, u64>>,
 }
 
 impl Locks {
@@ -404,11 +450,111 @@ impl Locks {
             expired_waits: Mutex::new(BTreeMap::new()),
             closed: AtomicBool::new(false),
             close_hook: Mutex::new(None),
+            ref_sources: Mutex::new(BTreeMap::new()),
+            snapshots: Mutex::new(BTreeMap::new()),
+            config_epochs: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// new-lock §3.3: a reload changed `repo`'s configuration, so every
+    /// old-tree judgement made under the previous one is void.
+    pub fn bump_config_epoch(&self, repo: &RepoName) {
+        *lock(&self.config_epochs).entry(repo.clone()).or_default() += 1;
+    }
+
+    /// How many reloads changed `repo`'s configuration in this process.
+    pub fn config_epoch(&self, repo: &RepoName) -> u64 {
+        lock(&self.config_epochs).get(repo).copied().unwrap_or(0)
     }
 
     pub fn set_close_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         *lock(&self.close_hook) = Some(hook);
+    }
+
+    /// new-lock §2.1: where `repo`'s release-point snapshot comes from (its
+    /// default branch in `git`). Set at startup and when a reload adds the
+    /// repo; [`Locks::refresh_snapshot`] then computes it.
+    pub fn set_ref_source(&self, repo: &RepoName, git: strata_gitio::Git, branch: &str) {
+        let names = strata_deps::snapshot_refs(branch);
+        lock(&self.ref_sources).insert(repo.clone(), RefSource { git, names });
+    }
+
+    /// The snapshot of `repo`'s default-branch refs as the lock's last
+    /// holder left them; `None` before the first refresh.
+    pub fn ref_snapshot(&self, repo: &RepoName) -> Option<strata_deps::RefSnapshot> {
+        lock(&self.snapshots).get(repo).map(|s| s.snapshot.clone())
+    }
+
+    /// Test seam: mark `repo`'s snapshot invalid, as a failed refresh does
+    /// (the next release of the lock refreshes it).
+    #[cfg(feature = "test-seams")]
+    pub fn invalidate_snapshot(&self, repo: &RepoName) {
+        if let Some(s) = lock(&self.snapshots).get_mut(repo) {
+            s.snapshot.valid = false;
+            s.stamp = None;
+        }
+    }
+
+    /// Re-read `repo`'s snapshot refs. Called by the holder of the repo lock
+    /// before it releases it (and once for a repo a reload adds, before its
+    /// lock is published). While unwinding it only invalidates; a failed or
+    /// panicking read invalidates too. A repo without a source keeps no
+    /// snapshot. The git subprocess runs only when the refs' files changed
+    /// since the last good read (their stamp, taken first, differs): the
+    /// holder is the only writer of these refs, so equal files read equal.
+    pub fn refresh_snapshot(&self, repo: &RepoName) {
+        let Some(source) = lock(&self.ref_sources).get(repo).cloned() else {
+            return;
+        };
+        // `None`: unchanged and kept; `Some(None)`: invalid.
+        let read = if std::thread::panicking() {
+            Some(None)
+        } else {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let stamp = source.git.strata_refs_stamp(&source.names());
+                if let Some(s) = &stamp {
+                    let mut snapshots = lock(&self.snapshots);
+                    if let Some(prev) = snapshots.get_mut(repo)
+                        && prev.snapshot.valid
+                        && prev.stamp.as_ref() == Some(s)
+                    {
+                        prev.snapshot.generation += 1;
+                        return None;
+                    }
+                }
+                let refs = source
+                    .git
+                    .read_strata_refs(&source.names(), SNAPSHOT_READ_TIMEOUT);
+                Some(refs.ok().filter(|v| v.len() == 3).map(|v| (v, stamp)))
+            }))
+            .unwrap_or(Some(None))
+        };
+        let Some(read) = read else {
+            return;
+        };
+        let mut snapshots = lock(&self.snapshots);
+        let generation = snapshots.get(repo).map_or(0, |s| s.snapshot.generation) + 1;
+        let next = match read {
+            Some((mut v, stamp)) => Snap {
+                snapshot: strata_deps::RefSnapshot {
+                    anchor: v.pop().flatten(),
+                    chain_top: v.pop().flatten(),
+                    origin: v.pop().flatten(),
+                    generation,
+                    valid: true,
+                },
+                stamp,
+            },
+            None => Snap {
+                snapshot: strata_deps::RefSnapshot {
+                    generation,
+                    valid: false,
+                    ..Default::default()
+                },
+                stamp: None,
+            },
+        };
+        snapshots.insert(repo.clone(), next);
     }
 
     pub fn set_catalog(&self, id: u64) {
@@ -516,23 +662,42 @@ impl Locks {
     fn take_error(&self, e: TakeError, what: serde_json::Value, waited: Duration) -> StrataError {
         match e {
             TakeError::Policy(e) => e,
-            TakeError::ShuttingDown => StrataError::new(Code::ReadOnly, "the daemon is shutting down")
-                .with_detail(json!({ "reason": "shutting_down" })),
+            TakeError::ShuttingDown => {
+                StrataError::new(Code::ReadOnly, "the daemon is shutting down")
+                    .with_detail(json!({ "reason": "shutting_down" }))
+            }
             TakeError::Timeout(h) => {
-                StrataError::new(Code::Busy, format!("waited {} ms before anything was written", waited.as_millis()))
-                    .with_detail(json!({
-                        "reason": "lock_wait",
-                        "lock": what,
-                        "holder": h.as_ref().map(|h| h.method.clone()),
-                        "holder_session": h.as_ref().and_then(|h| h.shown_session().map(|s| s.as_str().to_string())),
-                    }))
+                let mut detail = json!({
+                    "reason": "lock_wait",
+                    "lock": what,
+                    "holder": h.as_ref().map(|h| h.method.clone()),
+                    "holder_session": h.as_ref().and_then(|h| h.shown_session().map(|s| s.as_str().to_string())),
+                });
+                // new-lock §4.3: additive; absent when the lock was between
+                // holders at the timeout (`holder_since` also when its time
+                // cannot be written).
+                if let Some(h) = &h {
+                    detail["holder_origin"] = json!(h.origin);
+                    if let Ok(since) = strata_types::serde_rfc3339::format(&h.since) {
+                        detail["holder_since"] = json!(since);
+                    }
+                    detail["held_ms"] = json!(h.started.elapsed().as_millis() as u64);
+                }
+                StrataError::new(
+                    Code::Busy,
+                    format!(
+                        "waited {} ms before anything was written",
+                        waited.as_millis()
+                    ),
+                )
+                .with_detail(detail)
             }
         }
     }
 
     /// Run `f` while holding `repo`'s write lock.
     pub fn with_repo<T>(&self, repo: &RepoName, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.repo_take(repo, None, false, f)
+        self.repo_take(repo, Take::Request, false, f)
     }
 
     /// rm-followups §1.6 T2: [`Locks::with_repo`] only if the lock is free
@@ -544,13 +709,47 @@ impl Locks {
         holder: &str,
         f: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
-        self.repo_take(repo, Some(holder), false, f)
+        self.repo_take(repo, Take::Try(holder), false, f)
+    }
+
+    /// new-lock §2.2: [`Locks::try_repo`] whose holder names this request's
+    /// session as well (`new`'s and `add`'s head step).
+    pub fn try_repo_as<T>(
+        &self,
+        repo: &RepoName,
+        holder: &str,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.repo_take(repo, Take::TryAs(holder), false, f)
+    }
+
+    /// new-lock §3.1 phase 2 (§15.2): the repo lock for the old-tree
+    /// worker, waited for at most the lock wait and given up as soon as
+    /// `abort` says so (a foreground guard registered for the session;
+    /// [`Locks::wake_repo`] makes the waiter look again). The holder shows
+    /// as `holder`; no yield is installed. Expiry is `Busy` `lock_wait`, an
+    /// abort `Busy` `foreground_guard`.
+    pub fn repo_abortable<T>(
+        &self,
+        repo: &RepoName,
+        holder: &str,
+        abort: &dyn Fn() -> bool,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.repo_take(repo, Take::Abortable(holder, abort), false, f)
+    }
+
+    /// Wake the waiters of `repo`'s lock (they re-check their conditions).
+    pub fn wake_repo(&self, repo: &RepoName) {
+        if let Some(f) = self.repo_entries().get(repo) {
+            f.wake();
+        }
     }
 
     fn repo_take<T>(
         &self,
         repo: &RepoName,
-        try_as: Option<&str>,
+        take: Take<'_>,
         cleanup: bool,
         f: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
@@ -574,9 +773,11 @@ impl Locks {
             )
             .with_detail(json!({ "reason": "reentrant", "repo": repo.as_str() })));
         }
-        let (bound, mut holder) = match try_as {
-            None => (take_bound(self.wait), self.holder_now()),
-            Some(m) => (Some(Duration::ZERO), self.holder_as(m)),
+        let (bound, mut holder) = match take {
+            Take::Request => (take_bound(self.wait), self.holder_now()),
+            Take::Try(m) => (Some(Duration::ZERO), self.holder_as(m)),
+            Take::TryAs(m) => (Some(Duration::ZERO), self.holder(m.into(), ctx_method().1)),
+            Take::Abortable(m, _) => (Some(self.wait), self.holder_as(m)),
         };
         let t0 = Instant::now();
         if cleanup {
@@ -584,7 +785,15 @@ impl Locks {
         }
         {
             let _queued = request_phase(Phase::Queued);
-            fifo.acquire(bound, &self.closed, holder, || Ok(()))
+            let check = || match take {
+                Take::Abortable(_, abort) if abort() => Err(StrataError::new(
+                    Code::Busy,
+                    format!("a foreground request for the session stopped the wait for {repo}"),
+                )
+                .with_detail(json!({ "reason": "foreground_guard", "repo": repo.as_str() }))),
+                _ => Ok(()),
+            };
+            fifo.acquire(bound, &self.closed, holder, check)
                 .map_err(|e| self.take_error(e, json!({ "repo": repo.as_str() }), t0.elapsed()))?;
         }
         let _locked = request_phase(Phase::Locked);
@@ -596,6 +805,9 @@ impl Locks {
         let _held = Held {
             fifo,
             on_drop: Box::new(move || {
+                // new-lock §2.1: the holder publishes the refs it leaves
+                // behind before anyone else can take the lock.
+                self.refresh_snapshot(repo);
                 CTX.with(|c| {
                     if let Ok(mut b) = c.try_borrow_mut()
                         && let Some(x) = b.as_mut()
@@ -951,7 +1163,37 @@ impl strata_deps::RepoWriteLock for Locks {
         repo: &RepoName,
         f: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Result<()>> {
-        self.repo_take(repo, None, true, || Ok(f()))
+        self.repo_take(repo, Take::Request, true, || Ok(f()))
+    }
+
+    fn try_write_as(
+        &self,
+        repo: &RepoName,
+        holder: &str,
+        f: &mut dyn FnMut() -> strata_deps::Result<()>,
+    ) -> strata_deps::Result<strata_deps::Result<()>> {
+        let mut inner = None;
+        self.try_repo_as(repo, holder, || {
+            inner = Some(f());
+            Ok(())
+        })?;
+        Ok(inner.unwrap_or(Ok(())))
+    }
+
+    fn is_shut_down(&self) -> bool {
+        Locks::is_shut_down(self)
+    }
+
+    fn ref_snapshot(&self, repo: &RepoName) -> Option<strata_deps::RefSnapshot> {
+        Locks::ref_snapshot(self, repo)
+    }
+
+    fn wake(&self, repo: &RepoName) {
+        self.wake_repo(repo);
+    }
+
+    fn config_epoch(&self, repo: &RepoName) -> u64 {
+        Locks::config_epoch(self, repo)
     }
     fn with_write(
         &self,

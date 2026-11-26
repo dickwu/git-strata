@@ -699,8 +699,9 @@ publish = { branch = "main", push = true, confirm = false, auto_clse = true }
 
 /// FEATURES only grows: the strings shipped before keep their places, and
 /// `daemon_status.activity` (the status-bar reply fields) comes right after
-/// them, then `daemon_status.volume_name` (which volume `volume` measured)
-/// and `daemon.drain`.
+/// them, then `daemon_status.volume_name` (which volume `volume` measured),
+/// `daemon.drain` and `new.fetch_skip` (new-lock §5: `NewWarning::FetchSkipped`
+/// and the lock-free head step).
 #[test]
 fn features_keep_their_order_and_append_the_reply_capabilities() {
     let shipped = [
@@ -734,6 +735,11 @@ fn features_keep_their_order_and_append_the_reply_capabilities() {
     assert_eq!(
         features.get(shipped.len() + 2),
         Some(&"daemon.drain"),
+        "{features:?}"
+    );
+    assert_eq!(
+        features.get(shipped.len() + 3),
+        Some(&"new.fetch_skip"),
         "{features:?}"
     );
     let mut seen = std::collections::BTreeSet::new();

@@ -2371,3 +2371,16 @@ verified pre-migration backup, transaction and schema check. `tests/migrate_v7.r
 exercises populated v6 checkpoint/overlay rows, unchanged row contents, foreign keys
 on, the v6 backup, the five-column table and its constraints. Existing fixture
 migration and forward-version refusal tests now pin v7 as the latest version.
+
+### new-lock: conditional late-writes notice (2026-11-25)
+
+No schema change; the store stays v7. The lock-free old-tree worker (session.md,
+new-lock section, phase 2N) records a late-writes notice without the repo lock, so
+it must not land on a move that changed after the worker judged it.
+`Store::set_move_late_writes_if(session, repo, n, notice, staging, old_tree,
+baseline)` is `set_move_late_writes` with the checks in the same write
+transaction: move `n`'s intent is still `done` with this `staging` and this
+retained `old_tree` (`None` = none recorded), and its `move_activity` row still
+has this `baseline`. Otherwise, or when a notice is already there (the first
+notice stands), it rolls back and returns `false`; on a schema older than v3 it
+returns `false` as well.

@@ -142,7 +142,11 @@ pub fn new(
     repos: &[String],
     agent_flag: Option<&str>,
     bases: &[String],
+    wait: &crate::args::WaitArgs,
 ) -> Result<Envelope> {
+    // new-lock §4.2: the budget bounds only the retries; parse it before
+    // anything is sent.
+    crate::wait::budget(wait, crate::wait::RETRY_DEFAULT_SECS)?;
     if !only.is_empty() && !repos.is_empty() {
         return Err(invalid(
             "repo_flags",
@@ -197,24 +201,29 @@ pub fn new(
             dropped = agent.as_ref();
         }
     }
-    let v = match ctx.try_call("new", params.clone(), Kind::Write) {
-        Ok(v) => v,
-        // The daemon was swapped for an older one since the probe: it
-        // refused the field before running anything, so send it again
-        // without (only this refusal; nothing else is replayed).
-        Err(CallError::Failed(e))
-            if params.get("agent").is_some() && crate::agent::refused_unknown_agent(&e) =>
-        {
-            params.as_object_mut().expect("an object").remove("agent");
-            dropped = agent.as_ref();
-            ctx.call("new", params, Kind::Write)?
+    // new-lock §4.1: a refusal the daemon certified replay-safe is sent
+    // again, unchanged, until the budget is spent.
+    let v = crate::wait::retry("new", wait, || {
+        match ctx.try_call("new", params.clone(), Kind::Write) {
+            // The daemon was swapped for an older one since the probe: it
+            // refused the field before running anything, so send it again
+            // without (only this refusal; nothing else is replayed).
+            Err(CallError::Failed(e))
+                if params.get("agent").is_some() && crate::agent::refused_unknown_agent(&e) =>
+            {
+                params.as_object_mut().expect("an object").remove("agent");
+                dropped = agent.as_ref();
+                ctx.try_call("new", params.clone(), Kind::Write)
+            }
+            other => other,
         }
-        Err(e) => return Err(e.into_error()),
-    };
+    })
+    .map_err(CallError::into_error)?;
     for w in v["anchor_unknown"].as_array().into_iter().flatten() {
         eprintln!("warning: anchor unknown: {w}");
     }
     let mut report = v.get("session").cloned().unwrap_or(Value::Null);
+    fetch_skipped_notes(&report["warnings"]);
     if let Some(a) = dropped {
         eprintln!(
             "warning: the daemon predates agent recording; the session does not record agent {a} (install the matching git-strata and restart the daemon)"
@@ -263,13 +272,19 @@ fn parse_bases(
 // ---- add --------------------------------------------------------------------
 
 /// cli.md `add`: more repos for an existing session (session.md D52).
-pub fn add(ctx: &Ctx, session: Option<String>, repos: &[String]) -> Result<Envelope> {
+pub fn add(
+    ctx: &Ctx,
+    session: Option<String>,
+    repos: &[String],
+    wait: &crate::args::WaitArgs,
+) -> Result<Envelope> {
     if repos.is_empty() || repos.iter().any(|r| r.is_empty()) {
         return Err(invalid(
             "repos",
             "pass --repo R (repeatable) with at least one repo name",
         ));
     }
+    crate::wait::budget(wait, crate::wait::RETRY_DEFAULT_SECS)?;
     let config = ctx.config()?;
     let names: Vec<RepoName> = repos
         .iter()
@@ -277,13 +292,46 @@ pub fn add(ctx: &Ctx, session: Option<String>, repos: &[String]) -> Result<Envel
         .collect::<Result<_>>()?;
     let store = ro::open_store(&config)?;
     let (s, _) = ro::session_or_cwd(&store, session.as_deref())?;
-    let v = ctx.call("add", json!({ "session": s, "repos": names }), Kind::Write)?;
+    let params = json!({ "session": s, "repos": names });
+    let v = crate::wait::retry("add", wait, || {
+        ctx.try_call("add", params.clone(), Kind::Write)
+    })
+    .map_err(CallError::into_error)?;
     for w in v["anchor_unknown"].as_array().into_iter().flatten() {
         eprintln!("warning: anchor unknown: {w}");
     }
+    let report = v.get("report").cloned().unwrap_or(Value::Null);
+    fetch_skipped_notes(&report["warnings"]);
     hint(s);
-    Ok(Envelope::ok(
-        v.get("report").cloned().unwrap_or(Value::Null),
+    Ok(Envelope::ok(report))
+}
+
+/// new-lock §2.2: a `FetchSkipped` warning of a `new`/`add` report, on
+/// stderr (the report keeps it).
+fn fetch_skipped_notes(warnings: &Value) {
+    for w in warnings.as_array().into_iter().flatten() {
+        if let Some(line) = fetch_skipped_line(w) {
+            eprintln!("{line}");
+        }
+    }
+}
+
+fn fetch_skipped_line(w: &Value) -> Option<String> {
+    if w["kind"] != "FetchSkipped" {
+        return None;
+    }
+    let repo = w["repo"].as_str().unwrap_or("?");
+    let holder = match (w["holder"].as_str(), w["holder_session"].as_str()) {
+        (Some(h), Some(s)) => format!("{h} (session {s})"),
+        (Some(h), None) => h.to_string(),
+        (None, _) => "another request".to_string(),
+    };
+    let fetched = w["last_fetch_at"]
+        .as_str()
+        .map(|t| format!("last fetched at {t}"))
+        .unwrap_or_else(|| "no successful fetch recorded".to_string());
+    Some(format!(
+        "warning: {repo}: fetch skipped, the repo is busy ({holder}); the base is main as last fetched ({fetched})"
     ))
 }
 

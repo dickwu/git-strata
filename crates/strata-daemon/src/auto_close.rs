@@ -426,8 +426,10 @@ impl<'r, 'd, 'a> Run<'r, 'd, 'a> {
             return step;
         }
         self.seam("auto_close.before_judge");
+        // new-lock §3.4: the strict close is a blocking old-tree guard whose
+        // wait counts against the admission deadline.
         let taken = catch_unwind(AssertUnwindSafe(|| {
-            resolve::with_queue_not_publishing(self.core, s, || {
+            resolve::with_queue_guarded(self.core, self.srv.sessions(), s, || {
                 Ok(self.under_place(s, baseline, in_group))
             })
         }));
@@ -960,7 +962,10 @@ mod tests {
         let src = include_str!("auto_close.rs");
         let body = &src[src.find("fn clauses(").expect("fn clauses")..];
         let body = &body[..body.find("\n    }\n").expect("end of clauses")];
-        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("{needle} in clauses"));
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("{needle} in clauses"))
+        };
         assert!(at("r.add_outstanding(") < at("r.add_upstream("));
 
         let s = SessionId::try_from("s-abcdefgh".to_string()).unwrap();
@@ -982,8 +987,14 @@ mod tests {
         r.add_outstanding(&s, &[item]);
         r.add_upstream(&upstream);
         assert_eq!(r.reasons, ["not_merged", "ahead"]);
-        assert_eq!(r.detail["what"], "base", "the first clause keeps the shared keys");
+        assert_eq!(
+            r.detail["what"], "base",
+            "the first clause keeps the shared keys"
+        );
         let note = r.note().unwrap();
-        assert!(note.find("not_merged").unwrap() < note.find("ahead").unwrap(), "{note}");
+        assert!(
+            note.find("not_merged").unwrap() < note.find("ahead").unwrap(),
+            "{note}"
+        );
     }
 }

@@ -1493,3 +1493,29 @@ Sync repeats `classify_rollout` after its lock-free ensure gap, before moving.
 A different AwaitingPublish session draft is reported as OwnChange rather than
 generic Drift. The classifier does not scan holders, build a set, acquire a
 repo lock, or decide the pinned sync policy.
+
+### new-lock: release-point ref snapshot and lock trait additions (2026-11-25)
+
+`new`/`add` read main without the repo write lock (session.md, new-lock section).
+deps owns the pieces that make that safe:
+
+- `RefSnapshot { origin, chain_top, anchor, generation, valid }`: the default
+  branch's three refs that `publish_chain` reads (`snapshot_refs(branch)` lists
+  them in that order: origin's tracking ref, `refs/strata/publish/<branch>`,
+  `refs/strata/anchor/<branch>`), as the write lock's last holder left them. The
+  daemon refreshes it while still holding the lock, before handing it to the next
+  waiter, so it never shows a writer's mid-section state; `valid` is false after
+  a failed refresh (or one skipped while unwinding), and `generation` counts the
+  refreshes.
+- `main_tip_of(cfg, git, snap)`: `main_tip` as a pure function of the snapshot's
+  OIDs (the chain judgement reads only objects, no refs). `None` when the
+  snapshot is not valid or origin was never fetched; the caller then reads under
+  the lock as before.
+- `RepoWriteLock` gains five defaulted methods, so other implementors are
+  unchanged: `try_write_as(repo, holder, f)` (`try_write` whose holder shows as
+  `holder`, e.g. `new`'s due fetch), `is_shut_down()` (work that no longer takes
+  the lock refuses as a closed lock would), `ref_snapshot(repo)` (default
+  `None`: not valid), `wake(repo)` (waiters look at their abort condition again;
+  the old-tree worker's phase 2) and `config_epoch(repo)` (how often a reload
+  changed the repo's configuration in this process; an old-tree verdict made
+  under one epoch is void under another).

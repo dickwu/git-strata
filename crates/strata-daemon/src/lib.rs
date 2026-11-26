@@ -70,6 +70,7 @@ pub mod seams {
     /// Review P1-15: run `hook` after every passed push confirmation of the
     /// daemon whose root is `root`, before its repo lock is taken (`None`
     /// removes it). Keyed by root so parallel tests are unaffected.
+    /// `rm --discard` runs it too, before its queue place (new-lock §3.4).
     pub fn set_after_confirm(root: &std::path::Path, hook: Option<Hook>) {
         let mut v = AFTER_CONFIRM.lock().unwrap_or_else(|p| p.into_inner());
         v.retain(|(r, _)| r != root);
@@ -160,6 +161,7 @@ pub const FEATURES: &[&str] = &[
     "daemon_status.activity",
     "daemon_status.volume_name",
     "daemon.drain",
+    "new.fetch_skip",
 ];
 
 /// The launchd label of the agent.

@@ -961,6 +961,7 @@ describe('P-b contract sources', () => {
       'Creating session s-pb9492 · 3 repos',
     ],
     [{ kind: 'deps_install', proposal: null }, 'Installing dependencies · tool'],
+    [{ kind: 'old_tree_check', n: 1, phase: 'walk' }, 'Checking old tree · tool'],
     [{ kind: 'publish' }, 'Publishing tool'],
     [{ kind: 'push' }, 'Pushing tool'],
   ])('activity kind copy %j', (fields, text) => {
@@ -1002,6 +1003,24 @@ describe('P-b contract sources', () => {
     ]);
     i.daemon.data!.activity = [work({ kind: 'deps_install', proposal: null, id: 1 })];
     expect(activity(i)[0].text).toBe('Installing dependencies · tool · 2 min');
+  });
+
+  // new-lock §3.5: the old-tree worker walks holding no lock, so it never takes the repo's chip
+  // from the real lock holder and promises no wait.
+  test('an old-tree check never hides lock-holding work or carries its waiting count', () => {
+    const i = pbi();
+    const check = { kind: 'old_tree_check', n: 3, phase: 'walk', id: 1 };
+    i.daemon.data!.activity = [work({ ...check, elapsed_ms: 10 * MINUTE }), work({ id: 2 })];
+    expect(activity(i)).toEqual([
+      expect.objectContaining({
+        text: 'Moving s-pb9492 to new main · tool · 2 min · 2 waiting',
+        tooltip: expect.stringContaining('may wait for this work'),
+      }),
+    ]);
+    i.daemon.data!.activity = [work(check)];
+    expect(activity(i)).toEqual([
+      expect.objectContaining({ text: 'Checking old tree · tool · 2 min', tooltip: undefined }),
+    ]);
   });
 
   test('malformed activity renders safely: no repos, no usable elapsed time', () => {

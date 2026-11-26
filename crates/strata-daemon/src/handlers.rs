@@ -875,13 +875,13 @@ pub fn catch_up_pass(d: &Daemon<'_>, now: SystemTime) -> Vec<(RepoName, RepoCatc
 /// tried again.
 const OLD_TREE_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// status-perf A1 on its own thread (started by `serve`, after startup's
-/// recover): first the half-retired sweep and a queue of every existing
-/// old tree, then one queued old tree at a time, each under the session's
-/// queue place (taken only when free; a busy session is retried after
-/// [`OLD_TREE_RETRY`]) and the repo's write lock, released between items.
-/// `stop` reaches into the walks: a judgement in progress gives up and
-/// writes no verdict.
+/// status-perf A1 and new-lock §3 on its own thread (started by `serve`,
+/// after startup's recover): first the half-retired sweep and a queue of
+/// every existing old tree, then one claimed old tree at a time, judged in
+/// phases that walk holding no lock ([`strata_session::OldTreeLocks`] is
+/// [`WorkerLocks`]); a busy, yielded or deferred claim is retried after
+/// [`OLD_TREE_RETRY`]. `stop` reaches into the walks: a judgement in
+/// progress gives up and writes no verdict.
 fn old_tree_loop(d: &Daemon<'_>, stop: &(dyn Fn() -> bool + Sync)) {
     old_tree_loop_with_retry(d, stop, OLD_TREE_RETRY, || {});
 }
@@ -924,53 +924,31 @@ fn old_tree_loop_with_retry(
                 let _ = catch_unwind(AssertUnwindSafe(|| old_tree_startup(d, &flag)));
                 sweep_at = std::time::Instant::now() + crate::RECONCILE_EVERY;
             }
-            let Some((key, path, ino)) = d
+            let Some(claim) = d
                 .sessions
-                .next_old_tree(std::time::Duration::from_millis(100))
+                .claim_old_tree(std::time::Duration::from_millis(100))
             else {
                 continue;
             };
+            // new-lock §3.1: the background pass is held across all phases.
             let Some(_pass) = d.core.drain.background() else {
-                d.sessions.requeue_old_tree(key, path, ino);
+                d.sessions.release_old_tree_claim(claim, true);
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
             };
             let _catalog = d.core.admit();
             after_admit();
-            let yield_to = Arc::new(AtomicBool::new(false));
+            // §3.5: the claim shows as an `old_tree_check` activity.
+            let _observe = crate::activity::enter_background(d.core);
+            let key = claim.key.clone();
+            let locks = WorkerLocks { core: d.core };
+            // A panic ends the claim through its drop guard.
             let r = catch_unwind(AssertUnwindSafe(|| {
-                crate::locks::with_yield(yield_to.clone(), || {
-                    d.core.locks.try_session(&key.session, "old_tree", || {
-                        d.core.locks.try_repo(&key.repo, "old_tree", || {
-                            strata_apfs::with_walk_stop(yield_to.clone(), || {
-                                d.sessions.check_old_tree(&key, &path, ino, &flag)
-                            })
-                        })
-                    })
-                })
-            }));
-            if flag.load(Ordering::SeqCst) {
-                d.sessions.finish_old_tree_retry(&key);
-                break;
-            }
-            // A late waiter can set yield_to after a completed judgement;
-            // only an actually interrupted outcome needs a yield retry.
-            let retry = matches!(&r, Ok(None))
-                || matches!(
-                    &r,
-                    Ok(Some(Ok(strata_session::OldTreeOutcome::Skipped(
-                        "yielded" | "passes_read_failed"
-                    ))))
-                )
-                || matches!(&r, Ok(Some(Err(e))) if e.code == Code::Busy);
-            if retry {
                 d.sessions
-                    .retry_old_tree(key.clone(), path.clone(), ino, retry_delay);
-            } else {
-                d.sessions.finish_old_tree_retry(&key);
-            }
+                    .run_old_tree_claim(claim, &locks, &flag, retry_delay)
+            }));
             match r {
-                Ok(Some(Err(e))) if e.code != Code::Busy => {
+                Ok(Err(e)) if e.code != Code::Busy => {
                     tracing::warn!(session = %key.session, repo = %key.repo, n = key.n, error = %e.message, "old tree check failed")
                 }
                 Err(_) => {
@@ -978,9 +956,58 @@ fn old_tree_loop_with_retry(
                 }
                 _ => {}
             }
+            if flag.load(Ordering::SeqCst) {
+                break;
+            }
         }
         finished.store(true, Ordering::SeqCst);
     });
+}
+
+/// new-lock §3.1: the old-tree worker's takes. Phase 0's session place
+/// yields to a request that queues for it (its walk-stop flag); phase 2's
+/// repo lock waits at most the lock wait and gives up once a foreground
+/// guard registers (`abort`, woken by [`crate::locks::Locks::wake_repo`]).
+/// Both show as `old_tree`.
+struct WorkerLocks<'c> {
+    core: &'c Core,
+}
+
+impl strata_session::OldTreeLocks for WorkerLocks<'_> {
+    fn try_session(
+        &self,
+        session: &SessionId,
+        yielding: bool,
+        f: &mut dyn FnMut(),
+    ) -> Option<Result<()>> {
+        if !yielding {
+            return self.core.locks.try_session(session, "old_tree", || {
+                f();
+                Ok(())
+            });
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        crate::locks::with_yield(flag.clone(), || {
+            self.core.locks.try_session(session, "old_tree", || {
+                strata_apfs::with_walk_stop(flag.clone(), || {
+                    f();
+                    Ok(())
+                })
+            })
+        })
+    }
+
+    fn repo_bounded(
+        &self,
+        repo: &RepoName,
+        abort: &dyn Fn() -> bool,
+        f: &mut dyn FnMut(),
+    ) -> Result<()> {
+        self.core.locks.repo_abortable(repo, "old_tree", abort, || {
+            f();
+            Ok(())
+        })
+    }
 }
 
 /// The start of [`old_tree_loop`]: the half-retired sweep of every active
@@ -1351,7 +1378,10 @@ impl<'d, 'a> Server<'d, 'a> {
                     "warnings": json_of(&c.warnings),
                 }))
             }),
-            Params::Restore(p) => core.locks.with_sessions(std::slice::from_ref(&p.session), || {
+            Params::Restore(p) => {
+                // new-lock §3.4: no old-tree claim of the session runs meanwhile.
+                let _guard = self.d.sessions.old_tree_guard(std::slice::from_ref(&p.session), None);
+                core.locks.with_sessions(std::slice::from_ref(&p.session), || {
                 let ws = workspace(core, &p.session, &p.repo)?;
                 let base = base_of(core, &ws.base)?;
                 let target = core.store.checkpoint(&p.session, p.checkpoint)?;
@@ -1371,7 +1401,8 @@ impl<'d, 'a> Server<'d, 'a> {
                 self.d.sessions.forget_old_trees(&p.session);
                 self.trackers.put(&p.session, &p.repo, t);
                 Ok(json_of(&r?))
-            }),
+            })
+            }
             Params::Grep(p) => self.grep(&p.pattern, p.session.as_ref(), p.all, p.ignore_case),
             Params::Files(p) => {
                 let view = self.search.attach(&p.session, &p.repo)?;
@@ -1431,8 +1462,15 @@ impl<'d, 'a> Server<'d, 'a> {
                 })
             }
             Params::Rm(p) => {
+                // new-lock §3.4: the old-tree worker's descriptors are closed
+                // before the discard preflight scans; held to the request's
+                // end, so without an admission deadline.
+                let _guard = self.d.sessions.old_tree_guard(std::slice::from_ref(&p.session), None);
                 let action = self.d.sessions.discard_action(&p.session)?;
                 let token = if p.discard { Some(require_validated(&core.confirmer, action.clone())?) } else { None };
+                if token.is_some() {
+                    crate::after_confirm(&core.config.paths.root);
+                }
                 // Review M5: wait out `publishing` (holding nothing), then the
                 // queue place, the flag checked again under it.
                 crate::resolve::with_queue_not_publishing(core, &p.session, || {
@@ -1592,6 +1630,7 @@ impl<'d, 'a> Server<'d, 'a> {
                 };
                 let r = resolve::resolve_move(
                     core,
+                    &self.d.sessions,
                     &p.session,
                     &p.repo,
                     choice,
@@ -1686,15 +1725,26 @@ impl<'d, 'a> Server<'d, 'a> {
     /// anchor of each added repo, as after `new`.
     fn add_repos(&self, session: &SessionId, repos: &[RepoName]) -> Result<Value> {
         let core = self.core();
+        let started = std::cell::Cell::new(false);
         let rep = core
             .locks
             .with_sessions(std::slice::from_ref(session), || {
+                started.set(true);
                 writing();
                 let rep = self.d.sessions.add(session, repos)?;
                 if !rep.added.is_empty() {
                     crate::auto_close::clear_daemon_mark(core, session);
                 }
                 Ok(rep)
+            })
+            .map_err(|e| {
+                // new-lock §4.1 (i): the initial queue take expired before
+                // `Sessions::add` started, so a replay is safe.
+                if started.get() {
+                    e
+                } else {
+                    certify_retry_safe(e)
+                }
             })?;
         let mut anchor_unknown = Vec::new();
         if !rep.added.is_empty() {
@@ -2169,6 +2219,8 @@ impl<'d, 'a> Server<'d, 'a> {
         ids.sort();
         ids.dedup();
         let repo_id = git.repo_id();
+        // new-lock §3.4: the rollout's moves exclude the old-tree worker.
+        let _guard = self.d.sessions.old_tree_guard(&ids, None);
         core.locks.with_sessions(&ids, || {
             self.with_du_hold(&ids, || {
                 core.locks.with_repo(&repo, || {
@@ -3146,6 +3198,22 @@ impl strata_publish::PublishLocks for PublishLocksNoWait<'_> {
     fn waits(&self) -> bool {
         false
     }
+}
+
+/// new-lock §4.1: mark a `Busy` `lock_wait` that expired before anything
+/// was started as replay-safe (`detail.retry_safe: true`); any other error
+/// is returned as it is.
+fn certify_retry_safe(mut e: StrataError) -> StrataError {
+    let lock_wait = e.code == Code::Busy
+        && e.detail
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .and_then(Value::as_str)
+            == Some("lock_wait");
+    if lock_wait && let Some(Value::Object(m)) = &mut e.detail {
+        m.insert("retry_safe".into(), json!(true));
+    }
+    e
 }
 
 /// The session of a take of exactly one session's queue place.

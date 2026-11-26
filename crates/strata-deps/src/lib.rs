@@ -32,11 +32,15 @@ pub use changes::before_changes_worker;
 pub use changes::{ChangeKind, Changes, PackageChange, changes, changes_with_guard};
 pub use drift::{Drift, drift};
 pub use ensure::ensure;
-pub use inputs::{InputRecord, hash_records, input_records, inputs_hash, is_input, is_input_folded, nested_seed_caches, platform, set_id, toolchain};
+pub use inputs::{
+    InputRecord, hash_records, input_records, inputs_hash, is_input, is_input_folded,
+    nested_seed_caches, platform, set_id, toolchain,
+};
 pub use open_files::{Hold, OpenFile, open_files, open_files_many, process_parent};
 pub use proposal::{
     ChainState, Proposal, ProposalOrigin, ProposalState, ProposeArgs, PublishChain, get_proposal,
-    main_tip, observe_main, observe_main_locked, open_proposals, propose, publish_chain,
+    main_tip, main_tip_of, observe_main, observe_main_locked, open_proposals, propose,
+    publish_chain, snapshot_refs,
 };
 pub use rollout::{
     RolloutPlan, RolloutStep, SkipReason, Target, classify_rollout, ensure_target, plan_rollout,
@@ -92,7 +96,53 @@ pub trait RepoWriteLock: Sync {
     }
     /// Record an expired attempt that the caller will retry after a visible
     /// write. The timestamp belongs to that attempt, not the whole retry loop.
+    /// `rm`'s unpin no longer reports one: it is lock-free (new-lock §2.7).
     fn record_long_wait(&self, _repo: &RepoName, _attempt_since: std::time::SystemTime) {}
+    /// [`RepoWriteLock::try_write`] whose holder shows as `holder` (the
+    /// default keeps `try_write`'s label).
+    fn try_write_as(
+        &self,
+        repo: &RepoName,
+        _holder: &str,
+        f: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Result<()>> {
+        self.try_write(repo, f)
+    }
+    /// Whether the lock manager is shutting down: work that no longer takes
+    /// the lock refuses then exactly as a closed lock would (new-lock §2.4a).
+    fn is_shut_down(&self) -> bool {
+        false
+    }
+    /// The default branch's refs of `repo` as of the end of the latest
+    /// critical section of its write lock (new-lock §2.1). `None` (no
+    /// snapshot) counts as not valid.
+    fn ref_snapshot(&self, _repo: &RepoName) -> Option<RefSnapshot> {
+        None
+    }
+    /// Wake the waiters of `repo`'s write lock so that they look at their
+    /// abort condition again (the old-tree worker's phase 2, §3.4).
+    fn wake(&self, _repo: &RepoName) {}
+    /// How often a config reload changed `repo`'s configuration in this
+    /// process (new-lock §3.3: a judgement made under one value is void
+    /// under another).
+    fn config_epoch(&self, _repo: &RepoName) -> u64 {
+        0
+    }
+}
+
+/// The default branch's three refs `publish_chain` reads (origin's tracking
+/// ref, the publish chain top, the anchor) as the repo write lock's last
+/// holder left them (new-lock design §2.1). The lock refreshes it on every
+/// release, so it never shows a writer's mid-section state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RefSnapshot {
+    pub origin: Option<strata_types::CommitOid>,
+    pub chain_top: Option<strata_types::CommitOid>,
+    pub anchor: Option<strata_types::CommitOid>,
+    /// Counts the refreshes of this repo's snapshot.
+    pub generation: u64,
+    /// False after a failed refresh (or one skipped while unwinding).
+    pub valid: bool,
 }
 
 /// The environment `install` and `<program> --version` run with.

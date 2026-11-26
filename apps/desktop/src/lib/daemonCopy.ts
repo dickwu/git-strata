@@ -38,6 +38,7 @@ export const daemonCopy = {
       base_build: 'Building base',
       session_create: 'Creating session',
       deps_install: 'Installing dependencies',
+      old_tree_check: 'Checking an old tree',
       publish: 'Publishing',
       push: 'Pushing',
     },

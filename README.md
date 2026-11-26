@@ -41,6 +41,14 @@ Requirements: macOS 13 or later (Apple silicon or Intel), the repos and the
 data root on one APFS volume. macOS only: git-strata uses APFS clones,
 FSEvents and launchd.
 
+**Upgrade the CLI and the daemon together.** Install `git-strata` and the
+daemon from the same release and restart the daemon after an upgrade. The wire
+rules are unchanged (the daemon advertises its `features` and the CLI gates on
+them), but from the release after 0.3.1 only a CLI and a daemon of the same
+release retry a busy `new`/`add`: the daemon marks such a refusal
+`detail.retry_safe` and the CLI sends it again. That daemon's `new`/`add`
+replies can also carry the `FetchSkipped` warning (feature `new.fetch_skip`).
+
 ### Homebrew
 
 #### Updating the app
@@ -234,9 +242,10 @@ down or older). They are read from memory, so they never slow the reply:
 - `version`, `pid`, `started`: which daemon answered and since when (RFC 3339).
 - `activity`: long work in flight, oldest first (`[]` when idle). Each item has
   `kind` (`move`, `deps_rollout`, `base_build`, `session_create`,
-  `deps_install`, `publish`, `push`), `origin` (`request` or `background`),
-  `repo`, `session`, `started`, `elapsed_ms`, `step_elapsed_ms`, plus fields of
-  its kind (a move's `cause` and `phase`, a rollout's `sessions` and `done`).
+  `deps_install`, `publish`, `push`, `old_tree_check`), `origin` (`request` or
+  `background`), `repo`, `session`, `started`, `elapsed_ms`, `step_elapsed_ms`,
+  plus fields of its kind (a move's `cause` and `phase`, a rollout's `sessions`
+  and `done`, an old-tree check's `n` and `phase`).
 - `busy`: `{total, recent, truncated}`, the `Busy` replies requests got because
   a lock or a size scan was slow to let go (`reason` `lock_wait` or
   `du_cancel_timeout`). `recent` keeps the last 50 of the past 10 minutes,
@@ -440,7 +449,19 @@ Every call prints exactly one compact JSON line on stdout:
      checkpointed and makes `rm` return `Dirty` (`detail.untracked_repos`).
    Giving both is `InvalidInput` (`repo_flags`). The daemon reuses a fetch of
    the same repo younger than 30 s (back-to-back `new`/`add`); publish always
-   fetches for itself.
+   fetches for itself. When a repo's fetch is due while another request holds
+   that repo's lock (a long `sync`, a publish), `new` and `add` do not wait:
+   they skip that fetch, start from the tip the lock's last holder left, and
+   add `{kind: FetchSkipped, repo, holder, holder_session, last_fetch_at}` to
+   `data.warnings`. An explicit `--base` still waits for the lock. A
+   `Busy lock_wait` refusal that the daemon marks `detail.retry_safe` (nothing
+   was created) is sent again automatically, backing off from 1 s to 10 s, for
+   `--timeout SECS` or `GIT_STRATA_TIMEOUT` (default 600, `0` unlimited; it
+   bounds only these retries), with the holder named on stderr (TTY or
+   `--progress`). Once the session exists, `new` can still wait for a repo
+   lock holder before it replies; if an agent's tool call cuts `new` off,
+   check `git-strata ls` for the ticket before running it again, so that a
+   second session is not created.
    Result: `data.manifest.id` (the session id, `s-` + 8 base32 chars) and
    `data.manifest.repos.<repo>.{path, tracked, base, head}`.
    **`add --repo R [--session S]`** gives an existing active session
@@ -1016,6 +1037,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Unknown` (`client_timeout`) | the complete write may still run; inspect status, do not retry, `gc` or `rm` |
 | `Busy` (`pins_tightened`) | rerun the command with a fresh snapshot of the newly applied config; do not retry inside the old operation |
 | `Busy` (`reload_pending`) | rerun `config reload`; the current attempt continues (exit 3) |
+| `Busy` (`lock_wait`, `new`/`add` with `detail.retry_safe`) | the CLI already retried for `--timeout` (`detail.retries`, `detail.waited_ms`); nothing was created or changed: rerun, or pass `--timeout 0` to keep retrying |
 | `Busy` (other) | repo lock held; wait, retry later |
 | `NotTty` | hand the exact command to the human |
 | `NotConfirmed` | report; the human reruns (`plan_changed`: rerun once yourself) |
@@ -1116,8 +1138,8 @@ Flags, defaults and `data` shapes:
 | Command | Human needed |
 | --- | --- |
 | `help [TOPIC \| COMMAND ...]` | no |
-| `new [TICKET] [--ticket T] (--repo R... \| --repos A,B)` | no |
-| `add --repo R... [--session S]` | no |
+| `new [TICKET] [--ticket T] (--repo R... \| --repos A,B) [--timeout SECS] [--progress]` | no |
+| `add --repo R... [--session S] [--timeout SECS] [--progress]` | no |
 | `status [--session S \| --all] [--brief] [--timeout SECS] [--progress]` | no |
 | `checkpoint (--tool-call [ID] \| -m MSG) [--session S] [--path P]...` | no |
 | `restore CHECKPOINT [PATHS]... [--session S]` | no |

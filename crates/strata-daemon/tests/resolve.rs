@@ -23,7 +23,9 @@ use support::*;
 
 // These tests count one explicit request's Git writes and confirmation
 // bindings. Background follow/fetch behavior is exercised in main_sync.rs.
-fn request_fx() -> Dfx { request_fx_with(&["tool"]) }
+fn request_fx() -> Dfx {
+    request_fx_with(&["tool"])
+}
 fn request_fx_with(names: &[&str]) -> Dfx {
     let mut fx = Dfx::with(names);
     for cfg in fx.config.repos.values_mut() {
@@ -64,7 +66,11 @@ fn ok(v: Value) -> Value {
 }
 
 fn new_session(socket: &Path) -> SessionId {
-    let d = ok(call(socket, "new", json!({ "ticket": null, "repos": ["tool"] })));
+    let d = ok(call(
+        socket,
+        "new",
+        json!({ "ticket": null, "repos": ["tool"] }),
+    ));
     serde_json::from_value(d["session"]["manifest"]["id"].clone()).unwrap()
 }
 
@@ -75,9 +81,15 @@ fn src(name: &str) -> String {
 /// The text of `fn name` in `file` (up to the next top-level item).
 fn fn_body(file: &str, name: &str) -> String {
     let s = src(file);
-    let start = s.find(&format!("pub fn {name}")).unwrap_or_else(|| panic!("no fn {name}"));
+    let start = s
+        .find(&format!("pub fn {name}"))
+        .unwrap_or_else(|| panic!("no fn {name}"));
     let rest = &s[start..];
-    let end = rest[1..].find("\npub fn ").or_else(|| rest[1..].find("\n/// ")).map(|i| i + 1).unwrap_or(rest.len());
+    let end = rest[1..]
+        .find("\npub fn ")
+        .or_else(|| rest[1..].find("\n/// "))
+        .map(|i| i + 1)
+        .unwrap_or(rest.len());
     rest[..end].to_string()
 }
 
@@ -110,25 +122,43 @@ impl Chain {
         sb.git(&main, &["update-ref", CHAIN, &c]);
         sb.git(&main, &["update-ref", ANCHOR, &a]);
         let other = sb.root.join("other");
-        sb.git(&sb.root, &["clone", "-q", bare.to_str().unwrap(), other.to_str().unwrap()]);
-        Chain { main, bare, other, p, a, c }
+        sb.git(
+            &sb.root,
+            &[
+                "clone",
+                "-q",
+                bare.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        Chain {
+            main,
+            bare,
+            other,
+            p,
+            a,
+            c,
+        }
     }
 
     /// origin gains O on A (a plain push from another clone): Diverged.
     fn advance_origin(&self, fx: &Dfx, files: &[(&str, &[u8])]) -> String {
         let o = fx.sb.commit(&self.other, files, "O");
-        fx.sb.git(&self.other, &["push", "-q", "origin", "HEAD:main"]);
+        fx.sb
+            .git(&self.other, &["push", "-q", "origin", "HEAD:main"]);
         o
     }
 
     /// origin's main set to `to` in the bare repo itself: Rewound.
     fn rewind_origin(&self, fx: &Dfx, to: &str) {
-        fx.sb.git(&self.bare, &["update-ref", "refs/heads/main", to]);
+        fx.sb
+            .git(&self.bare, &["update-ref", "refs/heads/main", to]);
     }
 
     /// origin gets Q on P on a side branch, then main is set to it.
     fn rewind_to_unrelated(&self, fx: &Dfx) -> String {
-        fx.sb.git(&self.other, &["checkout", "-q", "-b", "q", &self.p]);
+        fx.sb
+            .git(&self.other, &["checkout", "-q", "-b", "q", &self.p]);
         let q = fx.sb.commit(&self.other, &[("q.txt", b"q\n")], "Q");
         fx.sb.git(&self.other, &["push", "-q", "origin", "q"]);
         self.rewind_origin(fx, &q);
@@ -136,7 +166,9 @@ impl Chain {
     }
 
     fn rev(&self, fx: &Dfx, r: &str) -> String {
-        let out = fx.sb.git_output(&self.main, &["rev-parse", "--verify", "-q", r]);
+        let out = fx
+            .sb
+            .git_output(&self.main, &["rev-parse", "--verify", "-q", r]);
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -145,7 +177,10 @@ impl Chain {
     }
 
     fn origin_main(&self, fx: &Dfx) -> String {
-        fx.sb.git(&self.bare, &["rev-parse", "refs/heads/main"]).trim().to_string()
+        fx.sb
+            .git(&self.bare, &["rev-parse", "refs/heads/main"])
+            .trim()
+            .to_string()
     }
 }
 
@@ -168,7 +203,11 @@ struct Calls {
 fn calls(core: &Core) -> Calls {
     let mut out = Calls::default();
     for c in core.gits[&repo_name("tool")].take_git_calls() {
-        let args: Vec<String> = c.args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let args: Vec<String> = c
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         let has = |w: &str| args.iter().any(|a| a == w);
         if has("fetch") {
             out.fetch += 1;
@@ -193,7 +232,11 @@ fn resolve(core: &Core, choice: ChainChoice) -> (strata_daemon::Result<ChainReso
     resolve_shown(core, choice, shown.as_ref())
 }
 
-fn resolve_shown(core: &Core, choice: ChainChoice, shown: Option<&CommitOid>) -> (strata_daemon::Result<ChainResolved>, usize) {
+fn resolve_shown(
+    core: &Core,
+    choice: ChainChoice,
+    shown: Option<&CommitOid>,
+) -> (strata_daemon::Result<ChainResolved>, usize) {
     let mut observed = 0;
     let r = resolve::chain_resolve(core, &repo_name("tool"), choice, shown, &mut |_| {
         observed += 1;
@@ -232,8 +275,14 @@ fn report_for(core: &Core, s: &SessionId, choice: MoveResolution) -> ResolutionR
 
 #[test]
 fn resolve_move_exclusive_choice() {
-    assert_eq!(resolve::move_choice(true, false), Some(MoveResolution::Abandon));
-    assert_eq!(resolve::move_choice(false, true), Some(MoveResolution::Accept));
+    assert_eq!(
+        resolve::move_choice(true, false),
+        Some(MoveResolution::Abandon)
+    );
+    assert_eq!(
+        resolve::move_choice(false, true),
+        Some(MoveResolution::Accept)
+    );
     assert_eq!(resolve::move_choice(true, true), None);
     assert_eq!(resolve::move_choice(false, false), None);
 
@@ -243,18 +292,31 @@ fn resolve_move_exclusive_choice() {
     let sock = fx.socket();
     serving(&d, || {
         let id = new_session(&sock);
-        let before = serde_json::to_value(core.store.session(&id).unwrap().unwrap().manifest).unwrap();
+        let before =
+            serde_json::to_value(core.store.session(&id).unwrap().unwrap().manifest).unwrap();
         for (ab, ac) in [(true, true), (false, false)] {
-            let r = call(&sock, "resolve_move", json!({ "session": id, "repo": "tool", "abandon": ab, "accept": ac }));
+            let r = call(
+                &sock,
+                "resolve_move",
+                json!({ "session": id, "repo": "tool", "abandon": ab, "accept": ac }),
+            );
             assert_eq!(r["error"]["rpc"], json!("Failed"), "{ab} {ac}: {r:#}");
         }
         // resolve_failed_move was not called: the session is untouched.
-        let after = serde_json::to_value(core.store.session(&id).unwrap().unwrap().manifest).unwrap();
+        let after =
+            serde_json::to_value(core.store.session(&id).unwrap().unwrap().manifest).unwrap();
         assert_eq!(before, after);
         // One choice reaches session (no failed move here → its refusal).
-        let r = call(&sock, "resolve_move", json!({ "session": id, "repo": "tool", "abandon": true, "accept": false }));
+        let r = call(
+            &sock,
+            "resolve_move",
+            json!({ "session": id, "repo": "tool", "abandon": true, "accept": false }),
+        );
         assert_eq!(r["ok"], json!(false), "{r:#}");
-        assert!(r["error"]["rpc"].is_null(), "a domain error, not an RPC rejection: {r:#}");
+        assert!(
+            r["error"]["rpc"].is_null(),
+            "a domain error, not an RPC rejection: {r:#}"
+        );
     });
 }
 
@@ -270,18 +332,32 @@ fn resolve_move_skips_tty_and_confirm() {
     serving(&d, || {
         let id = new_session(&sock);
         for (ab, ac) in [(true, false), (false, true)] {
-            let r = call(&sock, "resolve_move", json!({ "session": id, "repo": "tool", "abandon": ab, "accept": ac }));
+            let r = call(
+                &sock,
+                "resolve_move",
+                json!({ "session": id, "repo": "tool", "abandon": ab, "accept": ac }),
+            );
             let code = r["error"]["code"].as_str().unwrap_or("");
             assert!(code != "NotTty" && code != "NotConfirmed", "{r:#}");
         }
         // No credential in the parameters.
-        let r = call(&sock, "resolve_move", json!({ "session": id, "repo": "tool", "abandon": true, "accept": false, "token": "x" }));
+        let r = call(
+            &sock,
+            "resolve_move",
+            json!({ "session": id, "repo": "tool", "abandon": true, "accept": false, "token": "x" }),
+        );
         assert_eq!(r["error"]["rpc"], json!("Failed"), "{r:#}");
     });
     assert!(log.shown().is_empty(), "{:?}", log.shown());
     assert_eq!(log.probes(), 0);
     let body = fn_body("resolve.rs", "resolve_move");
-    for w in ["confirmer", "require_validated", "NotTty", "isatty", "is_terminal"] {
+    for w in [
+        "confirmer",
+        "require_validated",
+        "NotTty",
+        "isatty",
+        "is_terminal",
+    ] {
         assert!(!body.contains(w), "resolve_move mentions {w}");
     }
 }
@@ -299,12 +375,19 @@ fn resolve_move_queues_and_does_not_hold_repo_lock() {
             let order = RefCell::new(Vec::new());
             let r = resolve::resolve_move(
                 &core,
+                &d.sessions,
                 &id,
                 &repo,
                 choice,
                 &|s, r, c| {
-                    assert!(core.locks.holds().is_empty(), "no repo lock around resolve_failed_move");
-                    assert!(core.locks.in_flight(s).is_some(), "the session queue is held");
+                    assert!(
+                        core.locks.holds().is_empty(),
+                        "no repo lock around resolve_failed_move"
+                    );
+                    assert!(
+                        core.locks.in_flight(s).is_some(),
+                        "the session queue is held"
+                    );
                     assert_eq!((s, r, c), (&id, &repo, choice));
                     order.borrow_mut().push("resolve");
                     Ok(report_for(&core, s, c))
@@ -316,8 +399,11 @@ fn resolve_move_queues_and_does_not_hold_repo_lock() {
             )
             .unwrap();
             assert_eq!(r.choice, choice);
-            let want: Vec<&str> =
-                if choice == MoveResolution::Accept { vec!["resolve", "reset+watch"] } else { vec!["resolve"] };
+            let want: Vec<&str> = if choice == MoveResolution::Accept {
+                vec!["resolve", "reset+watch"]
+            } else {
+                vec!["resolve"]
+            };
             assert_eq!(*order.borrow(), want, "{choice:?}");
         }
 
@@ -325,7 +411,7 @@ fn resolve_move_queues_and_does_not_hold_repo_lock() {
         let released = AtomicBool::new(false);
         std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel();
-            let (core, id, released) = (&core, &id, &released);
+            let (core, id, released, sessions) = (&core, &id, &released, &d.sessions);
             s.spawn(move || {
                 core.locks
                     .with_sessions(std::slice::from_ref(id), || {
@@ -340,11 +426,15 @@ fn resolve_move_queues_and_does_not_hold_repo_lock() {
             let t = Instant::now();
             resolve::resolve_move(
                 core,
+                sessions,
                 id,
                 &repo,
                 MoveResolution::Abandon,
                 &|s, _, c| {
-                    assert!(released.load(Ordering::SeqCst), "ran while the queue was held");
+                    assert!(
+                        released.load(Ordering::SeqCst),
+                        "ran while the queue was held"
+                    );
                     Ok(report_for(core, s, c))
                 },
                 &mut || {},
@@ -368,10 +458,17 @@ fn chain_resolve_accept_origin_does_not_push() {
         sync(&core);
         let (r, _) = resolve(&core, ChainChoice::AcceptOriginDrop);
         let r = r.unwrap();
-        assert_eq!((r.chain.as_str(), r.anchor.as_str(), r.pushed), (o.as_str(), o.as_str(), false));
+        assert_eq!(
+            (r.chain.as_str(), r.anchor.as_str(), r.pushed),
+            (o.as_str(), o.as_str(), false)
+        );
         assert_eq!(ch.refs(&fx), (o.clone(), o.clone()));
         let k = calls(&core);
-        assert_eq!((k.push, k.transactions, k.replay, k.fetch), (0, 1, 0, 1), "{k:?}");
+        assert_eq!(
+            (k.push, k.transactions, k.replay, k.fetch),
+            (0, 1, 0, 1),
+            "{k:?}"
+        );
         assert_eq!(ch.origin_main(&fx), o, "origin untouched");
     }
     // Replay: the range is the advanced a..c, not the old anchor's.
@@ -388,10 +485,20 @@ fn chain_resolve_accept_origin_does_not_push() {
         assert_eq!(r.anchor, o);
         assert!(!r.pushed);
         let (chain, anchor) = ch.refs(&fx);
-        assert_eq!((chain.as_str(), anchor.as_str()), (r.chain.as_str(), o.as_str()));
-        let n = fx.sb.git(&ch.main, &["rev-list", "--count", &format!("{o}..{chain}")]);
+        assert_eq!(
+            (chain.as_str(), anchor.as_str()),
+            (r.chain.as_str(), o.as_str())
+        );
+        let n = fx
+            .sb
+            .git(&ch.main, &["rev-list", "--count", &format!("{o}..{chain}")]);
         assert_eq!(n.trim(), "1", "only C is replayed (A is already on origin)");
-        assert_eq!(fx.sb.git(&ch.main, &["rev-parse", &format!("{chain}^")]).trim(), o);
+        assert_eq!(
+            fx.sb
+                .git(&ch.main, &["rev-parse", &format!("{chain}^")])
+                .trim(),
+            o
+        );
         let files = fx.sb.git(&ch.main, &["ls-tree", "--name-only", &chain]);
         for f in ["a.txt", "c.txt", "o.txt"] {
             assert!(files.lines().any(|l| l == f), "{f} in {files}");
@@ -425,7 +532,10 @@ fn chain_resolve_accept_origin_does_not_push() {
         let core = fx.prepare().unwrap();
         sync(&core);
         let (r, _) = resolve(&core, ChainChoice::AcceptOriginReplay);
-        assert_eq!(code_reason(&r), (Code::InvalidInput, "no_replay_range".into()));
+        assert_eq!(
+            code_reason(&r),
+            (Code::InvalidInput, "no_replay_range".into())
+        );
         assert_eq!(ch.rev(&fx, ANCHOR), "");
         assert_eq!(ch.rev(&fx, CHAIN), ch.c);
         assert_eq!(calls(&core).transactions, 0);
@@ -449,19 +559,30 @@ fn chain_resolve_restore_pushes_only_fast_forward() {
         let k = calls(&core);
         assert_eq!((k.push, k.transactions), (1, 1), "{k:?}");
         for a in &k.push_args {
-            assert!(!a.starts_with("--force") && !a.starts_with('+'), "{:?}", k.push_args);
+            assert!(
+                !a.starts_with("--force") && !a.starts_with('+'),
+                "{:?}",
+                k.push_args
+            );
         }
     }
     // Rewound to an unrelated Q, and Diverged: not a fast-forward.
     for diverge in [false, true] {
         let fx = request_fx();
         let ch = Chain::new(&fx);
-        let o = if diverge { ch.advance_origin(&fx, &[("o.txt", b"o\n")]) } else { ch.rewind_to_unrelated(&fx) };
+        let o = if diverge {
+            ch.advance_origin(&fx, &[("o.txt", b"o\n")])
+        } else {
+            ch.rewind_to_unrelated(&fx)
+        };
         let core = fx.prepare().unwrap();
         sync(&core);
         let before = ch.refs(&fx);
         let (r, _) = resolve(&core, ChainChoice::Restore);
-        assert_eq!(code_reason(&r), (Code::InvalidInput, "not_fast_forward".into()));
+        assert_eq!(
+            code_reason(&r),
+            (Code::InvalidInput, "not_fast_forward".into())
+        );
         assert_eq!(ch.refs(&fx), before);
         assert_eq!(ch.origin_main(&fx), o);
         let k = calls(&core);
@@ -485,12 +606,26 @@ fn chain_resolve_restore_settles_only_matching_push_scenes() {
     let ch = Chain::new(&fx);
     ch.rewind_origin(&fx, &ch.p);
     let tool = fx.config.repos[&repo_name("tool")].path.clone();
-    let a_url = fx.sb.git(&tool, &["config", "remote.origin.url"]).trim().to_string();
+    let a_url = fx
+        .sb
+        .git(&tool, &["config", "remote.origin.url"])
+        .trim()
+        .to_string();
     let b = fx.sb.path("tool-b.git");
-    fx.sb.git(&fx.sb.root, &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()]);
+    fx.sb.git(
+        &fx.sb.root,
+        &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()],
+    );
     let b_url = b.to_str().unwrap().to_string();
-    fx.sb.git(&tool, &["config", "remote.origin.pushurl", &b_url]);
-    let repo_id = fx.sb.open(&tool).repo_id().get().to_string_lossy().into_owned();
+    fx.sb
+        .git(&tool, &["config", "remote.origin.pushurl", &b_url]);
+    let repo_id = fx
+        .sb
+        .open(&tool)
+        .repo_id()
+        .get()
+        .to_string_lossy()
+        .into_owned();
     let scenes = fx.config.paths.root.join("daemon/push");
     let scene = |name: &str, body: Value| {
         let d = scenes.join(name);
@@ -498,26 +633,34 @@ fn chain_resolve_restore_settles_only_matching_push_scenes() {
         fs::write(d.join("push.json"), body.to_string()).unwrap();
         d
     };
-    let full = |branch: &str, id: &str, url: &str| {
-        json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": branch, "repo_id": id, "push_url": url })
-    };
+    let full = |branch: &str, id: &str, url: &str| json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": branch, "repo_id": id, "push_url": url });
     let same = scene("1-1", full("main", &repo_id, &b_url));
     let other = scene("1-2", full("release", &repo_id, &b_url));
     let legacy = scene("1-3", json!({ "repo": "tool", "commit": ch.c }));
-    let pre_r4 = scene("1-4", json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "main" }));
+    let pre_r4 = scene(
+        "1-4",
+        json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "main" }),
+    );
     let to_a = scene("1-5", full("main", &repo_id, &a_url));
     let other_id = scene("1-6", full("main", "/elsewhere/.git", &b_url));
     let core = fx.prepare().unwrap();
     sync(&core);
     let (r, _) = resolve(&core, ChainChoice::Restore);
     assert!(r.unwrap().pushed);
-    assert_eq!(fx.sb.git(&b, &["rev-parse", "refs/heads/main"]).trim(), ch.c, "the restore pushed to B");
+    assert_eq!(
+        fx.sb.git(&b, &["rev-parse", "refs/heads/main"]).trim(),
+        ch.c,
+        "the restore pushed to B"
+    );
     assert!(!same.exists(), "the matching scene is settled");
     assert!(other.exists(), "another branch's scene stays");
     assert!(legacy.exists(), "a record without remote/branch stays");
     assert!(pre_r4.exists(), "a record without repo_id/push_url stays");
     assert!(to_a.exists(), "a scene of another push URL stays");
-    assert!(other_id.exists(), "a scene of another repository identity stays");
+    assert!(
+        other_id.exists(),
+        "a scene of another repository identity stays"
+    );
 }
 
 /// Review-4 F1: the restore pushes to exactly the push URL it recorded in
@@ -531,11 +674,24 @@ fn chain_resolve_restore_pushes_to_the_recorded_url_across_a_b_a() {
     let ch = Chain::new(&fx);
     ch.rewind_origin(&fx, &ch.p);
     let tool = fx.config.repos[&repo_name("tool")].path.clone();
-    let a_url = fx.sb.git(&tool, &["config", "remote.origin.url"]).trim().to_string();
+    let a_url = fx
+        .sb
+        .git(&tool, &["config", "remote.origin.url"])
+        .trim()
+        .to_string();
     let b = fx.sb.path("tool-b.git");
-    fx.sb.git(&fx.sb.root, &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()]);
+    fx.sb.git(
+        &fx.sb.root,
+        &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()],
+    );
     let b_url = b.to_str().unwrap().to_string();
-    let repo_id = fx.sb.open(&tool).repo_id().get().to_string_lossy().into_owned();
+    let repo_id = fx
+        .sb
+        .open(&tool)
+        .repo_id()
+        .get()
+        .to_string_lossy()
+        .into_owned();
     let old = fx.config.paths.root.join("daemon/push/1-1");
     fs::create_dir_all(&old).unwrap();
     let body = json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "main", "repo_id": repo_id, "push_url": a_url });
@@ -555,25 +711,47 @@ fn chain_resolve_restore_pushes_to_the_recorded_url_across_a_b_a() {
     std::thread::scope(|sc| {
         let t = sc.spawn(|| resolve(&core, ChainChoice::Restore).0);
         let start = std::time::Instant::now();
-        while !staging.is_paused() && !t.is_finished() && start.elapsed() < Duration::from_secs(20) {
+        while !staging.is_paused() && !t.is_finished() && start.elapsed() < Duration::from_secs(20)
+        {
             std::thread::sleep(Duration::from_millis(10));
         }
         if t.is_finished() {
             panic!("restore ended before staging: {:?}", t.join().unwrap());
         }
         wait(&staging, "staging");
-        let scene = fs::read_dir(fx.config.paths.root.join("daemon/push")).unwrap().flatten().map(|d| d.path()).find(|d| *d != old).unwrap();
-        let rec: Value = serde_json::from_str(&fs::read_to_string(scene.join("push.json")).unwrap()).unwrap();
+        let scene = fs::read_dir(fx.config.paths.root.join("daemon/push"))
+            .unwrap()
+            .flatten()
+            .map(|d| d.path())
+            .find(|d| *d != old)
+            .unwrap();
+        let rec: Value =
+            serde_json::from_str(&fs::read_to_string(scene.join("push.json")).unwrap()).unwrap();
         assert_eq!(rec["push_url"], a_url, "the scene records A");
-        fx.sb.git(&tool, &["config", "remote.origin.pushurl", &b_url]);
+        fx.sb
+            .git(&tool, &["config", "remote.origin.pushurl", &b_url]);
         staging.release();
         wait(&record, "record");
-        fx.sb.git(&tool, &["config", "--unset", "remote.origin.pushurl"]);
+        fx.sb
+            .git(&tool, &["config", "--unset", "remote.origin.pushurl"]);
         record.release();
         assert!(t.join().unwrap().unwrap().pushed);
     });
-    assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", &a_url, "rev-parse", "refs/heads/main"]).trim(), ch.c, "the push went to A, as recorded");
-    assert_eq!(fx.sb.git(&b, &["rev-parse", "refs/heads/main"]).trim(), ch.p, "B untouched");
+    assert_eq!(
+        fx.sb
+            .git(
+                &fx.sb.root,
+                &["--git-dir", &a_url, "rev-parse", "refs/heads/main"]
+            )
+            .trim(),
+        ch.c,
+        "the push went to A, as recorded"
+    );
+    assert_eq!(
+        fx.sb.git(&b, &["rev-parse", "refs/heads/main"]).trim(),
+        ch.p,
+        "B untouched"
+    );
     assert!(!old.exists(), "the scene for A settles: A has the commit");
 }
 
@@ -588,13 +766,26 @@ fn chain_resolve_restore_is_pinned_against_url_rewriting() {
     let ch = Chain::new(&fx);
     ch.rewind_origin(&fx, &ch.p);
     let tool = fx.config.repos[&repo_name("tool")].path.clone();
-    let a_url = fx.sb.git(&tool, &["config", "remote.origin.url"]).trim().to_string();
+    let a_url = fx
+        .sb
+        .git(&tool, &["config", "remote.origin.url"])
+        .trim()
+        .to_string();
     let a = Path::new(&a_url);
     let alt = fx.sb.path("alt");
     fs::create_dir_all(&alt).unwrap();
     let alt_repo = alt.join(a.file_name().unwrap());
-    fx.sb.git(&fx.sb.root, &["clone", "-q", "--bare", &a_url, alt_repo.to_str().unwrap()]);
-    let repo_id = fx.sb.open(&tool).repo_id().get().to_string_lossy().into_owned();
+    fx.sb.git(
+        &fx.sb.root,
+        &["clone", "-q", "--bare", &a_url, alt_repo.to_str().unwrap()],
+    );
+    let repo_id = fx
+        .sb
+        .open(&tool)
+        .repo_id()
+        .get()
+        .to_string_lossy()
+        .into_owned();
     let old = fx.config.paths.root.join("daemon/push/1-1");
     fs::create_dir_all(&old).unwrap();
     let body = json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "main", "repo_id": repo_id, "push_url": a_url });
@@ -606,7 +797,8 @@ fn chain_resolve_restore_is_pinned_against_url_rewriting() {
     std::thread::scope(|sc| {
         let t = sc.spawn(|| resolve(&core, ChainChoice::Restore).0);
         let start = std::time::Instant::now();
-        while !staging.is_paused() && !t.is_finished() && start.elapsed() < Duration::from_secs(20) {
+        while !staging.is_paused() && !t.is_finished() && start.elapsed() < Duration::from_secs(20)
+        {
             std::thread::sleep(Duration::from_millis(10));
         }
         if t.is_finished() {
@@ -614,13 +806,46 @@ fn chain_resolve_restore_is_pinned_against_url_rewriting() {
         }
         assert!(staging.is_paused(), "restore reached the staging pause");
         let rule = format!("url.{}/.insteadOf", alt.display());
-        fx.sb.git(&tool, &["config", &rule, &format!("{}/", a.parent().unwrap().display())]);
+        fx.sb.git(
+            &tool,
+            &[
+                "config",
+                &rule,
+                &format!("{}/", a.parent().unwrap().display()),
+            ],
+        );
         staging.release();
         assert!(t.join().unwrap().unwrap().pushed);
     });
-    assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", &a_url, "rev-parse", "refs/heads/main"]).trim(), ch.c, "the push went to A, as recorded");
-    assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", alt_repo.to_str().unwrap(), "rev-parse", "refs/heads/main"]).trim(), ch.p, "not to the rewritten URL");
-    assert!(old.exists(), "origin's destination changed around the push: nothing settles");
+    assert_eq!(
+        fx.sb
+            .git(
+                &fx.sb.root,
+                &["--git-dir", &a_url, "rev-parse", "refs/heads/main"]
+            )
+            .trim(),
+        ch.c,
+        "the push went to A, as recorded"
+    );
+    assert_eq!(
+        fx.sb
+            .git(
+                &fx.sb.root,
+                &[
+                    "--git-dir",
+                    alt_repo.to_str().unwrap(),
+                    "rev-parse",
+                    "refs/heads/main"
+                ]
+            )
+            .trim(),
+        ch.p,
+        "not to the rewritten URL"
+    );
+    assert!(
+        old.exists(),
+        "origin's destination changed around the push: nothing settles"
+    );
 }
 
 /// Review-6 hole 2: a rule added after gitio's pre-send check and before
@@ -635,10 +860,23 @@ fn chain_resolve_restore_rule_added_between_check_and_push_is_refused() {
     let ch = Chain::new(&fx);
     ch.rewind_origin(&fx, &ch.p);
     let tool = fx.config.repos[&repo_name("tool")].path.clone();
-    let a_url = fx.sb.git(&tool, &["config", "remote.origin.url"]).trim().to_string();
+    let a_url = fx
+        .sb
+        .git(&tool, &["config", "remote.origin.url"])
+        .trim()
+        .to_string();
     let b = fx.sb.path("other.git");
-    fx.sb.git(&fx.sb.root, &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()]);
-    let repo_id = fx.sb.open(&tool).repo_id().get().to_string_lossy().into_owned();
+    fx.sb.git(
+        &fx.sb.root,
+        &["clone", "-q", "--bare", &a_url, b.to_str().unwrap()],
+    );
+    let repo_id = fx
+        .sb
+        .open(&tool)
+        .repo_id()
+        .get()
+        .to_string_lossy()
+        .into_owned();
     let old = fx.config.paths.root.join("daemon/push/1-1");
     fs::create_dir_all(&old).unwrap();
     let body = json!({ "repo": "tool", "commit": ch.c, "remote": "origin", "branch": "main", "repo_id": repo_id, "push_url": a_url });
@@ -667,7 +905,15 @@ fn chain_resolve_restore_rule_added_between_check_and_push_is_refused() {
         record.release();
         t.join().unwrap()
     });
-    let at = |u: &str| fx.sb.git(&fx.sb.root, &["--git-dir", u, "rev-parse", "refs/heads/main"]).trim().to_string();
+    let at = |u: &str| {
+        fx.sb
+            .git(
+                &fx.sb.root,
+                &["--git-dir", u, "rev-parse", "refs/heads/main"],
+            )
+            .trim()
+            .to_string()
+    };
     assert_eq!(at(b.to_str().unwrap()), ch.p, "nothing sent to B: {r:?}");
     assert_eq!(at(&a_url), ch.p, "nothing sent to A: {r:?}");
     assert!(r.is_err(), "the restore did not push: {r:?}");
@@ -695,16 +941,31 @@ fn chain_resolve_restore_records_tracking_and_anchor_together() {
         while !gap.is_paused() && !t.is_finished() && start.elapsed() < Duration::from_secs(20) {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(gap.is_paused(), "restore records through the recording push: {:?}", if t.is_finished() { Some(t.join().unwrap()) } else { None });
+        assert!(
+            gap.is_paused(),
+            "restore records through the recording push: {:?}",
+            if t.is_finished() {
+                Some(t.join().unwrap())
+            } else {
+                None
+            }
+        );
         assert_eq!(ch.rev(&fx, tracking), ch.p, "fetched the rewound origin");
         fx.sb.git(&ch.main, &["update-ref", tracking, &ch.a]);
         gap.release();
         let r = t.join().unwrap();
         let e = r.expect_err("unrecorded push is not Pushed");
         assert_eq!(e.code, Code::Unknown, "{e:?}");
-        assert!(e.detail.as_ref().and_then(|d| d.get("scene")).is_some(), "scene kept: {e:?}");
+        assert!(
+            e.detail.as_ref().and_then(|d| d.get("scene")).is_some(),
+            "scene kept: {e:?}"
+        );
     });
-    assert_eq!(ch.refs(&fx), (ch.c.clone(), ch.a.clone()), "anchor not advanced alone");
+    assert_eq!(
+        ch.refs(&fx),
+        (ch.c.clone(), ch.a.clone()),
+        "anchor not advanced alone"
+    );
     assert_eq!(ch.rev(&fx, tracking), ch.a);
 }
 
@@ -745,7 +1006,10 @@ fn chain_resolve_restore_checks_push_deploy() {
         assert_eq!(calls(&core).push, 1);
     }
     // Accepting origin never prompts, even when confirm is pinned.
-    for choice in [ChainChoice::AcceptOriginDrop, ChainChoice::AcceptOriginReplay] {
+    for choice in [
+        ChainChoice::AcceptOriginDrop,
+        ChainChoice::AcceptOriginReplay,
+    ] {
         let mut fx = request_fx();
         set_confirm(&mut fx);
         let ch = Chain::new(&fx);
@@ -769,9 +1033,16 @@ fn chain_resolve_refs_under_repo_lock() {
         let ch = Chain::new(&fx); // chain leads origin
         let core = fx.prepare().unwrap();
         sync(&core);
-        for choice in [ChainChoice::AcceptOriginDrop, ChainChoice::AcceptOriginReplay, ChainChoice::Restore] {
+        for choice in [
+            ChainChoice::AcceptOriginDrop,
+            ChainChoice::AcceptOriginReplay,
+            ChainChoice::Restore,
+        ] {
             let (r, _) = resolve(&core, choice);
-            assert_eq!(code_reason(&r), (Code::InvalidInput, "not_rewound_or_diverged".into()));
+            assert_eq!(
+                code_reason(&r),
+                (Code::InvalidInput, "not_rewound_or_diverged".into())
+            );
             let k = calls(&core);
             assert_eq!((k.fetch, k.push, k.transactions), (0, 0, 0), "{k:?}");
         }
@@ -787,7 +1058,10 @@ fn chain_resolve_refs_under_repo_lock() {
         sync(&core);
         ch.rewind_origin(&fx, &ch.a); // origin back at A: the chain leads again
         let (r, _) = resolve(&core, ChainChoice::AcceptOriginDrop);
-        assert_eq!(code_reason(&r), (Code::InvalidInput, "not_rewound_or_diverged".into()));
+        assert_eq!(
+            code_reason(&r),
+            (Code::InvalidInput, "not_rewound_or_diverged".into())
+        );
         let k = calls(&core);
         assert_eq!((k.fetch, k.push, k.transactions), (1, 0, 0), "{k:?}");
         assert_eq!(ch.refs(&fx), (ch.c.clone(), ch.a.clone()));
@@ -806,7 +1080,8 @@ fn chain_resolve_refs_under_repo_lock() {
             let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
             let (core_r, repo_r) = (&core, &repo);
             s.spawn(move || {
-                core_r.locks
+                core_r
+                    .locks
                     .with_repo(repo_r, || {
                         tx.send(()).unwrap();
                         let _ = done_rx.recv_timeout(Duration::from_secs(10));
@@ -815,14 +1090,21 @@ fn chain_resolve_refs_under_repo_lock() {
                     .unwrap();
             });
             rx.recv().unwrap();
-            for choice in [ChainChoice::AcceptOriginDrop, ChainChoice::AcceptOriginReplay] {
+            for choice in [
+                ChainChoice::AcceptOriginDrop,
+                ChainChoice::AcceptOriginReplay,
+            ] {
                 let (r, _) = resolve(&core, choice);
                 assert_eq!(code_reason(&r), (Code::Busy, "lock_wait".into()));
             }
             done_tx.send(()).unwrap();
         });
         let k = calls(&core);
-        assert_eq!((k.fetch, k.push, k.transactions, k.replay), (0, 0, 0, 0), "{k:?}");
+        assert_eq!(
+            (k.fetch, k.push, k.transactions, k.replay),
+            (0, 0, 0, 0),
+            "{k:?}"
+        );
         assert_eq!(ch.refs(&fx), before);
     }
     // Through the socket: the same handler, refs under the lock.
@@ -835,22 +1117,36 @@ fn chain_resolve_refs_under_repo_lock() {
         let d = Daemon::start(&core).unwrap();
         let sock = fx.socket();
         serving(&d, || {
-            let r = call(&sock, "chain_resolve", json!({ "repo": "tool", "choice": "Bogus" }));
+            let r = call(
+                &sock,
+                "chain_resolve",
+                json!({ "repo": "tool", "choice": "Bogus" }),
+            );
             assert_eq!(r["error"]["rpc"], json!("Failed"), "{r:#}");
-            let v = ok(call(&sock, "chain_resolve", json!({ "repo": "tool", "choice": "AcceptOriginDrop" })));
+            let v = ok(call(
+                &sock,
+                "chain_resolve",
+                json!({ "repo": "tool", "choice": "AcceptOriginDrop" }),
+            ));
             assert_eq!(v["chain"], json!(o));
             assert_eq!(v["anchor"], json!(o));
         });
         assert_eq!(ch.refs(&fx), (o.clone(), o));
     }
     let body = src("resolve.rs");
-    assert!(!body.contains("update_ref("), "chain and anchor only through the one ref transaction");
+    assert!(
+        !body.contains("update_ref("),
+        "chain and anchor only through the one ref transaction"
+    );
 }
 
 #[test]
 fn publish_calls_publish_not_stage() {
     let h = src("handlers.rs");
-    assert!(h.contains("strata_publish::publish_with_messages("), "the publish handler calls the complete publish pipeline with the shown plan and messages");
+    assert!(
+        h.contains("strata_publish::publish_with_messages("),
+        "the publish handler calls the complete publish pipeline with the shown plan and messages"
+    );
     for s in ["strata_publish::stage", "stage(", "Staged"] {
         assert!(!h.contains(s), "handlers.rs mentions {s}");
     }
@@ -879,13 +1175,21 @@ fn confirmed_push_is_bound_to_the_shown_chain_top() {
         let before = ch.refs(&fx);
         let shown = CommitOid::try_from(ch.c.clone()).unwrap();
         let (r, _) = resolve_shown(&core, ChainChoice::Restore, Some(&shown));
-        assert_eq!(code_reason(&r), (Code::NotConfirmed, "chain_moved".into()), "{r:?}");
+        assert_eq!(
+            code_reason(&r),
+            (Code::NotConfirmed, "chain_moved".into()),
+            "{r:?}"
+        );
         assert_eq!(ch.refs(&fx), before);
         assert_eq!(ch.origin_main(&fx), ch.p);
         assert_eq!(calls(&core).push, 0);
         // Nothing shown at all is not a plan either.
         let (r, _) = resolve_shown(&core, ChainChoice::Restore, None);
-        assert_eq!(code_reason(&r), (Code::NotConfirmed, "chain_moved".into()), "{r:?}");
+        assert_eq!(
+            code_reason(&r),
+            (Code::NotConfirmed, "chain_moved".into()),
+            "{r:?}"
+        );
         assert_eq!(calls(&core).push, 0);
         assert_eq!(log.shown().len(), 2);
         let _ = c2;
@@ -939,7 +1243,8 @@ fn redirect_after_confirm(root: &Path, main: &Path, other: &Path) {
 
 fn unredirect(root: &Path, fx: &Dfx, main: &Path) {
     strata_daemon::seams::set_after_confirm(root, None);
-    fx.sb.git(main, &["config", "--unset", "remote.origin.pushurl"]);
+    fx.sb
+        .git(main, &["config", "--unset", "remote.origin.pushurl"]);
 }
 
 /// Review P1-15: a confirmed restore or push is bound to origin's push URL
@@ -955,7 +1260,10 @@ fn confirmed_push_is_bound_to_the_approved_url() {
         let ch = Chain::new(&fx);
         ch.rewind_origin(&fx, &ch.p);
         let elsewhere = fx.sb.root.join("elsewhere.git");
-        fx.sb.git(&fx.sb.root, &["init", "-q", "--bare", elsewhere.to_str().unwrap()]);
+        fx.sb.git(
+            &fx.sb.root,
+            &["init", "-q", "--bare", elsewhere.to_str().unwrap()],
+        );
         let (c, log, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass()]);
         let core = fx.prepare_with(c).unwrap();
         sync(&core);
@@ -964,12 +1272,26 @@ fn confirmed_push_is_bound_to_the_approved_url() {
         let before = ch.refs(&fx);
         let shown = CommitOid::try_from(ch.c.clone()).unwrap();
         let (r, _) = resolve_shown(&core, ChainChoice::Restore, Some(&shown));
-        assert_eq!(code_reason(&r), (Code::NotConfirmed, "remote_changed".into()), "{r:?}");
-        assert!(log.shown()[0].contains("tool-origin.git"), "the prompt names the URL: {:?}", log.shown());
+        assert_eq!(
+            code_reason(&r),
+            (Code::NotConfirmed, "remote_changed".into()),
+            "{r:?}"
+        );
+        assert!(
+            log.shown()[0].contains("tool-origin.git"),
+            "the prompt names the URL: {:?}",
+            log.shown()
+        );
         assert_eq!(ch.refs(&fx), before);
         assert_eq!(ch.origin_main(&fx), ch.p);
         assert_eq!(calls(&core).push, 0);
-        assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", elsewhere.to_str().unwrap(), "for-each-ref"]), "");
+        assert_eq!(
+            fx.sb.git(
+                &fx.sb.root,
+                &["--git-dir", elsewhere.to_str().unwrap(), "for-each-ref"]
+            ),
+            ""
+        );
         unredirect(&root, &fx, &ch.main);
         let (r, _) = resolve_shown(&core, ChainChoice::Restore, Some(&shown));
         assert!(r.is_ok(), "{r:?}");
@@ -982,7 +1304,10 @@ fn confirmed_push_is_bound_to_the_approved_url() {
         set_confirm(&mut fx);
         let ch = Chain::new(&fx);
         let elsewhere = fx.sb.root.join("elsewhere.git");
-        fx.sb.git(&fx.sb.root, &["init", "-q", "--bare", elsewhere.to_str().unwrap()]);
+        fx.sb.git(
+            &fx.sb.root,
+            &["init", "-q", "--bare", elsewhere.to_str().unwrap()],
+        );
         let (c, _log, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass()]);
         let core = fx.prepare_with(c).unwrap();
         sync(&core);
@@ -994,11 +1319,25 @@ fn confirmed_push_is_bound_to_the_approved_url() {
             let r = call(&sock, "push", json!({ "repo": "tool", "shown": ch.c }));
             assert_eq!(r["error"]["code"], "NotConfirmed", "{r:#}");
             assert_eq!(r["error"]["detail"]["reason"], "remote_changed", "{r:#}");
-            assert_eq!(r["error"]["detail"]["now"], json!(elsewhere.to_str().unwrap()), "{r:#}");
+            assert_eq!(
+                r["error"]["detail"]["now"],
+                json!(elsewhere.to_str().unwrap()),
+                "{r:#}"
+            );
             assert_eq!(ch.origin_main(&fx), ch.a, "nothing pushed");
-            assert_eq!(fx.sb.git(&fx.sb.root, &["--git-dir", elsewhere.to_str().unwrap(), "for-each-ref"]), "");
+            assert_eq!(
+                fx.sb.git(
+                    &fx.sb.root,
+                    &["--git-dir", elsewhere.to_str().unwrap(), "for-each-ref"]
+                ),
+                ""
+            );
             unredirect(&root, &fx, &ch.main);
-            let r = ok(call(&sock, "push", json!({ "repo": "tool", "shown": ch.c })));
+            let r = ok(call(
+                &sock,
+                "push",
+                json!({ "repo": "tool", "shown": ch.c }),
+            ));
             assert_eq!(r["commit"], json!(ch.c), "{r:#}");
             assert_eq!(ch.origin_main(&fx), ch.c);
         });
@@ -1022,7 +1361,11 @@ fn advance_chain(fx: &Dfx, ch: &Chain) -> String {
 
 fn no_force(k: &Calls) {
     for a in &k.push_args {
-        assert!(!a.starts_with("--force") && !a.starts_with('+'), "{:?}", k.push_args);
+        assert!(
+            !a.starts_with("--force") && !a.starts_with('+'),
+            "{:?}",
+            k.push_args
+        );
     }
 }
 
@@ -1045,8 +1388,17 @@ fn headless_push_replays_a_diverged_chain_then_pushes() {
     let sock = fx.socket();
     serving(&d, || {
         let s = new_session(&sock);
-        let head = |s: &SessionId| core.store.session(s).unwrap().unwrap().manifest.repos[&repo_name("tool")].head.as_str().to_string();
-        assert_eq!(head(&s), ch.c, "the session is pinned on the unpushed chain top");
+        let head = |s: &SessionId| {
+            core.store.session(s).unwrap().unwrap().manifest.repos[&repo_name("tool")]
+                .head
+                .as_str()
+                .to_string()
+        };
+        assert_eq!(
+            head(&s),
+            ch.c,
+            "the session is pinned on the unpushed chain top"
+        );
         let o = ch.advance_origin(&fx, &[("o.txt", b"o\n")]);
         core.gits[&repo_name("tool")].take_git_calls();
         let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
@@ -1054,8 +1406,17 @@ fn headless_push_replays_a_diverged_chain_then_pushes() {
         assert_ne!(new, ch.c);
         assert_eq!(r["push"]["kind"], json!("Pushed"), "{r:#}");
         assert_eq!(r["warnings"], json!([]), "{r:#}");
-        assert_eq!(ch.origin_main(&fx), new, "origin fast-forwarded to the replayed tip");
-        assert_eq!(fx.sb.git(&ch.main, &["rev-parse", &format!("{new}^")]).trim(), o);
+        assert_eq!(
+            ch.origin_main(&fx),
+            new,
+            "origin fast-forwarded to the replayed tip"
+        );
+        assert_eq!(
+            fx.sb
+                .git(&ch.main, &["rev-parse", &format!("{new}^")])
+                .trim(),
+            o
+        );
         assert_eq!(ch.refs(&fx), (new.clone(), new.clone()));
         assert_eq!(r["replayed"]["from"], json!(ch.c), "{r:#}");
         assert_eq!(r["replayed"]["onto"], json!(o), "{r:#}");
@@ -1065,14 +1426,24 @@ fn headless_push_replays_a_diverged_chain_then_pushes() {
         for f in ["a.txt", "c.txt", "o.txt"] {
             assert!(files.lines().any(|l| l == f), "{f} in {files}");
         }
-        assert!(!files.lines().any(|l| l == "node_modules"), "deps never enter the tree: {files}");
+        assert!(
+            !files.lines().any(|l| l == "node_modules"),
+            "deps never enter the tree: {files}"
+        );
         let k = calls(&core);
-        assert_eq!((k.fetch >= 1, k.push, k.transactions >= 1, k.replay), (true, 1, true, 1), "{k:?}");
+        assert_eq!(
+            (k.fetch >= 1, k.push, k.transactions >= 1, k.replay),
+            (true, 1, true, 1),
+            "{k:?}"
+        );
         no_force(&k);
         assert_eq!(r["rebases"][0]["session"], json!(s.as_str()), "{r:#}");
         assert_eq!(r["rebases"][0]["report"]["kind"], json!("Moved"), "{r:#}");
         assert_eq!(head(&s), new, "the session follows its replayed commit");
-        assert!(core.store.rebase_pending(None).unwrap().is_empty(), "the adopted replay target was consumed by the move");
+        assert!(
+            core.store.rebase_pending(None).unwrap().is_empty(),
+            "the adopted replay target was consumed by the move"
+        );
         // A second push has nothing left to do.
         let r = call(&sock, "push", json!({ "repo": "tool" }));
         assert_eq!(r["error"]["code"], "NoCommit", "{r:#}");
@@ -1132,7 +1503,10 @@ fn headless_push_conflict_or_failed_check_writes_and_pushes_nothing() {
             let o = ch.advance_origin(&fx, &[("o.txt", b"o\n")]);
             let before = ch.refs(&fx);
             let r = call(&sock, "push", json!({ "repo": "tool" }));
-            assert_eq!(r["error"]["detail"]["reason"], "replay_deps_unsealed", "{r:#}");
+            assert_eq!(
+                r["error"]["detail"]["reason"], "replay_deps_unsealed",
+                "{r:#}"
+            );
             assert_eq!(ch.refs(&fx), before);
             new_session(&sock); // seals the deps set of these inputs
             assert_eq!(ch.refs(&fx), before);
@@ -1140,7 +1514,10 @@ fn headless_push_conflict_or_failed_check_writes_and_pushes_nothing() {
             let r = call(&sock, "push", json!({ "repo": "tool" }));
             assert_eq!(r["error"]["code"], "CheckFailed", "{r:#}");
             assert_eq!(ch.refs(&fx), before);
-            assert!(core.store.rebase_pending(None).unwrap().is_empty(), "a refused replay leaves no plan");
+            assert!(
+                core.store.rebase_pending(None).unwrap().is_empty(),
+                "a refused replay leaves no plan"
+            );
             assert_eq!(ch.origin_main(&fx), o);
             let k = calls(&core);
             assert_eq!((k.push, k.transactions), (0, 0), "{k:?}");
@@ -1191,7 +1568,11 @@ fn confirmed_repo_push_never_replays() {
         let r = call(&sock, "push", json!({ "repo": "tool", "shown": ch.c }));
         assert_ne!(r["ok"], json!(true), "{r:#}");
         let k = calls(&core);
-        assert_eq!((k.fetch, k.push, k.transactions, k.replay), (0, 0, 0, 0), "{k:?}");
+        assert_eq!(
+            (k.fetch, k.push, k.transactions, k.replay),
+            (0, 0, 0, 0),
+            "{k:?}"
+        );
         let r = call(&sock, "push", json!({ "repo": "tool", "shown": ch.c }));
         assert_eq!(r["error"]["code"], "NoCommit", "{r:#}");
         let k = calls(&core);
@@ -1213,7 +1594,10 @@ fn headless_replay_supplies_the_check_siblings() {
     let mut fx = request_fx_with(&["tool", "admin"]);
     {
         let rc = fx.config.repos.get_mut(&repo_name("tool")).unwrap();
-        rc.checks = vec!["test -f o.txt".into(), "test -f ../admin/package.json".into()];
+        rc.checks = vec![
+            "test -f o.txt".into(),
+            "test -f ../admin/package.json".into(),
+        ];
         rc.check_siblings = vec![repo_name("admin")];
     }
     fx.write_config();
@@ -1229,8 +1613,13 @@ fn headless_replay_supplies_the_check_siblings() {
         assert_eq!(r["replayed"]["onto"], json!(o), "{r:#}");
         assert_eq!(r["replayed"]["checks_ran"], json!(2), "{r:#}");
         let scenes = fx.sb.path("strata").join("daemon").join("push");
-        let left: Vec<_> = fs::read_dir(&scenes).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
-        assert!(left.is_empty(), "the scene and its sibling are removed: {left:?}");
+        let left: Vec<_> = fs::read_dir(&scenes)
+            .map(|rd| rd.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        assert!(
+            left.is_empty(),
+            "the scene and its sibling are removed: {left:?}"
+        );
     });
     drop(d);
     core.close().unwrap();
@@ -1274,7 +1663,9 @@ fn headless_replay_with_a_missing_sibling_is_siblings_missing() {
         let k = calls(&core);
         assert_eq!((k.push, k.transactions), (0, 0), "{k:?}");
         let scenes = fx.sb.path("strata").join("daemon").join("push");
-        let left: Vec<_> = fs::read_dir(&scenes).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        let left: Vec<_> = fs::read_dir(&scenes)
+            .map(|rd| rd.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
         assert!(left.is_empty(), "no scene was made: {left:?}");
     });
     drop(d);
@@ -1352,13 +1743,23 @@ fn a_busy_or_unknown_sibling_prep_stops_even_a_leads_push() {
             assert_eq!(r["error"]["detail"]["sibling"], "admin", "{r:#}");
         });
         // admin's anchor cannot be advanced after its fetch: Unknown.
-        strata_publish::seams::fail_once(&core.gits[&admin], strata_publish::seams::FailPoint::SiblingAnchor);
+        strata_publish::seams::fail_once(
+            &core.gits[&admin],
+            strata_publish::seams::FailPoint::SiblingAnchor,
+        );
         let r = call(&sock, "push", json!({ "repo": "tool" }));
         assert_eq!(r["error"]["code"], "Unknown", "{r:#}");
-        assert_eq!(r["error"]["detail"]["reason"], "anchor_transaction", "{r:#}");
+        assert_eq!(
+            r["error"]["detail"]["reason"], "anchor_transaction",
+            "{r:#}"
+        );
         assert_eq!(r["error"]["detail"]["sibling"], "admin", "{r:#}");
         let k = calls(&core);
-        assert_eq!((k.fetch, k.push, k.transactions), (0, 0, 0), "tool untouched: {k:?}");
+        assert_eq!(
+            (k.fetch, k.push, k.transactions),
+            (0, 0, 0),
+            "tool untouched: {k:?}"
+        );
         assert_eq!(ch.refs(&fx), before);
         assert_eq!(ch.origin_main(&fx), origin, "nothing pushed");
         let r = ok(call(&sock, "push", json!({ "repo": "tool" })));
@@ -1374,12 +1775,17 @@ fn a_busy_or_unknown_sibling_prep_stops_even_a_leads_push() {
 #[test]
 fn push_scene_cleanup_is_rooted_and_checked() {
     let body = src("resolve.rs");
-    let start = body.find("pub(crate) fn with_staging").expect("with_staging");
+    let start = body
+        .find("pub(crate) fn with_staging")
+        .expect("with_staging");
     let rest = &body[start..];
     let end = rest.find("\nfn scene_rel").expect("scene_rel follows");
     // After the uncertain branch (the scene is kept for an Unknown push).
     let f = &rest[rest.find("if uncertain(&r)").expect("uncertain")..end];
     assert!(f.contains("strata_publish::remove_layout"), "{f}");
-    assert!(f.contains("scene_outcome(&dir, r, removed)"), "the removal decides the result: {f}");
+    assert!(
+        f.contains("scene_outcome(&dir, r, removed)"),
+        "the removal decides the result: {f}"
+    );
     assert!(!f.contains("remove_dir_all"), "{f}");
 }

@@ -424,6 +424,12 @@ pub fn prepare_locked(
         crate::reload::source_hash(text.as_bytes())?,
     )?);
     locks.set_catalog(catalog.id());
+    // new-lock §2.1: every repo's release-point snapshot, computed once now
+    // under its write lock and refreshed by each release afterwards.
+    for (name, rc) in &config.repos {
+        locks.set_ref_source(name, gits[name].clone(), &rc.default_branch);
+        let _ = locks.with_repo(name, || Ok(()));
+    }
     let warnings = Warnings::new(opts.alert.clone());
     for repo in pins.pending() {
         warnings.add(DaemonWarning::ConfigRelaxPending { repo });

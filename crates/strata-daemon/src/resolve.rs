@@ -39,11 +39,9 @@ pub fn move_choice(abandon: bool, accept: bool) -> Option<MoveResolution> {
 
 /// Whether a publish of `session` is running (its `publishing` flag).
 fn publishing(core: &Core, session: &SessionId) -> Result<bool> {
-    Ok(core
-        .store
-        .open_publishes()?
-        .iter()
-        .any(|r| r.phase == PublishPhase::Running && r.group.batches.iter().any(|b| &b.session == session)))
+    Ok(core.store.open_publishes()?.iter().any(|r| {
+        r.phase == PublishPhase::Running && r.group.batches.iter().any(|b| &b.session == session)
+    }))
 }
 
 /// Wait for `session`'s publishing flag to clear, holding no queue and no
@@ -61,7 +59,11 @@ fn publishing_busy(session: &SessionId) -> StrataError {
         .with_detail(json!({ "reason": "publishing", "session": session.as_str() }))
 }
 
-fn wait_flag_until(session: &SessionId, deadline: Instant, mut flag: impl FnMut() -> Result<bool>) -> Result<()> {
+fn wait_flag_until(
+    session: &SessionId,
+    deadline: Instant,
+    mut flag: impl FnMut() -> Result<bool>,
+) -> Result<()> {
     while flag()? {
         if Instant::now() >= deadline {
             return Err(publishing_busy(session));
@@ -94,9 +96,54 @@ fn wait_flag_until(session: &SessionId, deadline: Instant, mut flag: impl FnMut(
 /// poll, or a free queue taken with a zero bound after expiry, no longer
 /// lets `f` start late. That expiry is `Busy` `lock_wait` with
 /// `deadline: true`; nothing is written. Once `f` runs it is not bounded.
-pub fn with_queue_not_publishing<T>(core: &Core, session: &SessionId, f: impl FnOnce() -> Result<T>) -> Result<T> {
+pub fn with_queue_not_publishing<T>(
+    core: &Core,
+    session: &SessionId,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let _catalog = core.admit();
-    guarded_until(&core.locks, session, Instant::now() + core.locks.wait(), || publishing(core, session), f)
+    guarded_until(
+        &core.locks,
+        session,
+        Instant::now() + core.locks.wait(),
+        || publishing(core, session),
+        f,
+    )
+}
+
+/// new-lock §3.4: [`with_queue_not_publishing`] behind a blocking old-tree
+/// guard of `session`, registered first. One deadline (start + lock wait)
+/// covers the guard's wait and the admission; expiry while the guard waits
+/// withdraws it and refuses like an expired admission (`Busy` `lock_wait`,
+/// `deadline: true`). Nothing is written then.
+pub fn with_queue_guarded<T>(
+    core: &Core,
+    sessions: &strata_session::Sessions<'_>,
+    session: &SessionId,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _catalog = core.admit();
+    let deadline = Instant::now() + core.locks.wait();
+    let Some(_guard) = sessions.old_tree_guard(std::slice::from_ref(session), Some(deadline))
+    else {
+        return Err(deadline_refusal(session));
+    };
+    guarded_until(
+        &core.locks,
+        session,
+        deadline,
+        || publishing(core, session),
+        f,
+    )
+}
+
+/// The refusal of a guarded step whose deadline ran out before it started.
+fn deadline_refusal(session: &SessionId) -> StrataError {
+    StrataError::new(
+        Code::Busy,
+        format!("the wait for session {session} ran out before the step could start"),
+    )
+    .with_detail(json!({ "reason": "lock_wait", "session": session.as_str(), "deadline": true }))
 }
 
 /// The loop of [`with_queue_not_publishing`] with the flag as a closure
@@ -117,12 +164,14 @@ pub fn guarded_until<T>(
                 return Ok(None);
             }
             if Instant::now() >= deadline {
-                return Err(StrataError::new(Code::Busy, format!("the wait for session {session} ran out before the step could start"))
-                    .with_detail(json!({ "reason": "lock_wait", "session": session.as_str(), "deadline": true })));
+                return Err(deadline_refusal(session));
             }
             match f.take() {
                 Some(f) => f().map(Some),
-                None => Err(StrataError::new(Code::Unknown, "the guarded step already ran")),
+                None => Err(StrataError::new(
+                    Code::Unknown,
+                    "the guarded step already ran",
+                )),
             }
         })?;
         if let Some(v) = r {
@@ -134,10 +183,12 @@ pub fn guarded_until<T>(
 
 /// §5.5 `resolve_move`. No TTY check, no `Confirmer`. `resolve` is
 /// `Sessions::resolve_failed_move` (it takes the repo lock itself); it runs
-/// holding only the session queue. `after_accept` resets the Tracker and
-/// watches again; `Abandon` keeps the tree and the Tracker.
+/// holding only the session queue, behind `sessions`' old-tree guard
+/// (new-lock §3.4, the deadline covering its wait). `after_accept` resets
+/// the Tracker and watches again; `Abandon` keeps the tree and the Tracker.
 pub fn resolve_move(
     core: &Core,
+    sessions: &strata_session::Sessions<'_>,
     session: &SessionId,
     repo: &RepoName,
     choice: MoveResolution,
@@ -145,7 +196,7 @@ pub fn resolve_move(
     after_accept: &mut dyn FnMut(),
 ) -> Result<ResolutionReport> {
     let _catalog = core.admit();
-    with_queue_not_publishing(core, session, || {
+    with_queue_guarded(core, sessions, session, || {
         crate::handlers::writing();
         let r = resolve(session, repo, choice)?;
         if choice == MoveResolution::Accept {
@@ -174,19 +225,28 @@ fn invalid(reason: &str, message: impl Into<String>) -> StrataError {
 }
 
 fn unknown(reason: &str, e: &StrataError) -> StrataError {
-    StrataError::new(Code::Unknown, format!("{}; the refs may have changed", e.message))
-        .with_detail(json!({ "reason": reason, "cause": e.code.as_str() }))
+    StrataError::new(
+        Code::Unknown,
+        format!("{}; the refs may have changed", e.message),
+    )
+    .with_detail(json!({ "reason": reason, "cause": e.code.as_str() }))
 }
 
 fn rewound_or_diverged(c: Option<PublishChain>) -> Result<(PublishChain, CommitOid)> {
     match c {
         Some(c) if matches!(c.state, ChainState::Rewound | ChainState::Diverged) => {
-            let top = c.top.clone().ok_or_else(|| invalid("not_rewound_or_diverged", "the publish chain is empty"))?;
+            let top = c
+                .top
+                .clone()
+                .ok_or_else(|| invalid("not_rewound_or_diverged", "the publish chain is empty"))?;
             Ok((c, top))
         }
         c => Err(invalid(
             "not_rewound_or_diverged",
-            format!("the publish chain is {:?}, not Rewound or Diverged", c.map(|c| c.state)),
+            format!(
+                "the publish chain is {:?}, not Rewound or Diverged",
+                c.map(|c| c.state)
+            ),
         )),
     }
 }
@@ -195,7 +255,8 @@ fn rewound_or_diverged(c: Option<PublishChain>) -> Result<(PublishChain, CommitO
 /// `Unknown`.
 fn transaction(git: &Git, updates: &[RefUpdate]) -> Result<()> {
     crate::handlers::writing();
-    git.ref_transaction(updates).map_err(|e| unknown("ref_transaction", &e))
+    git.ref_transaction(updates)
+        .map_err(|e| unknown("ref_transaction", &e))
 }
 
 /// The start of `AcceptOriginReplay`'s range: the anchor advanced in
@@ -248,8 +309,16 @@ pub(crate) fn with_staging<T: Serialize>(
     uncertain: impl Fn(&Result<T>) -> bool,
     f: impl FnOnce(&Path) -> Result<T>,
 ) -> Result<T> {
-    let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let dir = core.config.paths.root.join(PUSH_SCENES).join(format!("{}-{stamp}", std::process::id()));
+    let stamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = core
+        .config
+        .paths
+        .root
+        .join(PUSH_SCENES)
+        .join(format!("{}-{stamp}", std::process::id()));
     fs::create_dir_all(&dir).map_err(|e| classify_io_error(&e, IoSide::Write, &dir))?;
     let intent = dir.join(SCENE_FILE);
     let body = json!({
@@ -270,7 +339,11 @@ pub(crate) fn with_staging<T: Serialize>(
         f(&wt)
     })();
     if uncertain(&r) {
-        core.warnings.add(DaemonWarning::UnknownPush { repo: repo.clone(), commit: tip.clone(), scene: dir.clone() });
+        core.warnings.add(DaemonWarning::UnknownPush {
+            repo: repo.clone(),
+            commit: tip.clone(),
+            scene: dir.clone(),
+        });
         return r.map_err(|mut e| {
             let mut d = e.detail.take().unwrap_or_else(|| json!({}));
             if let Some(m) = d.as_object_mut() {
@@ -281,7 +354,8 @@ pub(crate) fn with_staging<T: Serialize>(
     }
     // publish.md D21: the scene may hold cloned check siblings; it is removed
     // rooted, idempotent and checked (see `scene_outcome`).
-    let removed = scene_rel(&dir).and_then(|rel| strata_publish::remove_layout(&core.config.paths.root, &rel));
+    let removed = scene_rel(&dir)
+        .and_then(|rel| strata_publish::remove_layout(&core.config.paths.root, &rel));
     scene_outcome(&dir, r, removed)
 }
 
@@ -290,7 +364,11 @@ pub(crate) fn with_staging<T: Serialize>(
 /// not removed → `Unknown` (reason `cleanup`) naming the scene, with the
 /// definite result kept (`detail.push` after a push, `detail.cause` after
 /// a named error). Never dropped silently.
-pub(crate) fn scene_outcome<T: Serialize>(dir: &Path, r: Result<T>, removed: Result<()>) -> Result<T> {
+pub(crate) fn scene_outcome<T: Serialize>(
+    dir: &Path,
+    r: Result<T>,
+    removed: Result<()>,
+) -> Result<T> {
     let mut u = match removed {
         Ok(()) => return r,
         Err(u) => u,
@@ -300,7 +378,10 @@ pub(crate) fn scene_outcome<T: Serialize>(dir: &Path, r: Result<T>, removed: Res
         m.insert("scene".into(), json!(dir.to_string_lossy()));
         match &r {
             Ok(v) => {
-                m.insert("push".into(), serde_json::to_value(v).unwrap_or(Value::Null));
+                m.insert(
+                    "push".into(),
+                    serde_json::to_value(v).unwrap_or(Value::Null),
+                );
             }
             Err(cause) => {
                 m.insert(
@@ -319,7 +400,10 @@ pub(crate) fn scene_outcome<T: Serialize>(dir: &Path, r: Result<T>, removed: Res
 
 /// `dir` (a scene under `<root>/daemon/push`) relative to the strata root.
 fn scene_rel(dir: &Path) -> Result<strata_types::RepoPath> {
-    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     strata_types::RepoPath::try_from(format!("{PUSH_SCENES}/{name}"))
 }
 
@@ -350,11 +434,17 @@ fn write_scene_record(dir: &Path, intent: &Path, body: &[u8]) -> Result<()> {
 fn sync_path_file(f: &fs::File, shown: &Path) -> Result<()> {
     #[cfg(feature = "test-seams")]
     if crate::seams::scene_sync_fails(shown) {
-        return Err(classify_io_error(&std::io::Error::from_raw_os_error(libc::EIO), IoSide::Write, shown));
+        return Err(classify_io_error(
+            &std::io::Error::from_raw_os_error(libc::EIO),
+            IoSide::Write,
+            shown,
+        ));
     }
     match strata_apfs::full_fsync(f) {
         Ok(()) => Ok(()),
-        Err(e) if e.code == Code::Unsupported => f.sync_all().map_err(|e| classify_io_error(&e, IoSide::Write, shown)),
+        Err(e) if e.code == Code::Unsupported => f
+            .sync_all()
+            .map_err(|e| classify_io_error(&e, IoSide::Write, shown)),
         Err(e) => Err(e),
     }
 }
@@ -371,7 +461,10 @@ pub(crate) const SCENE_REMOTE: &str = "origin";
 /// record is skipped (nothing was pushed from it: the record is written
 /// before the export).
 pub fn push_scenes(root: &Path) -> Vec<(RepoName, CommitOid, std::path::PathBuf)> {
-    scene_records(root).into_iter().map(|s| (s.repo, s.commit, s.dir)).collect()
+    scene_records(root)
+        .into_iter()
+        .map(|s| (s.repo, s.commit, s.dir))
+        .collect()
 }
 
 /// Review-3 R4: where a standalone or restore push goes — the repository's
@@ -400,13 +493,19 @@ impl PushDest {
 pub(crate) fn check_approved_url(approved: &str, dest: Option<&PushDest>) -> Result<()> {
     match dest {
         Some(d) if d.push_url == approved => Ok(()),
-        d => Err(strata_publish::remote_changed(approved, d.map(PushDest::url).unwrap_or(""))),
+        d => Err(strata_publish::remote_changed(
+            approved,
+            d.map(PushDest::url).unwrap_or(""),
+        )),
     }
 }
 
 pub(crate) fn push_dest(git: &Git) -> Option<PushDest> {
     let push_url = git.push_url(SCENE_REMOTE).ok()?;
-    Some(PushDest { repo_id: git.repo_id(), push_url })
+    Some(PushDest {
+        repo_id: git.repo_id(),
+        push_url,
+    })
 }
 
 /// One kept scene's record; `remote` / `branch` are `None` in a record
@@ -424,13 +523,23 @@ struct SceneRecord {
 
 fn scene_records(root: &Path) -> Vec<SceneRecord> {
     let mut out = Vec::new();
-    let Ok(rd) = fs::read_dir(root.join(PUSH_SCENES)) else { return out };
+    let Ok(rd) = fs::read_dir(root.join(PUSH_SCENES)) else {
+        return out;
+    };
     for e in rd.flatten() {
         let dir = e.path();
-        let Ok(text) = fs::read_to_string(dir.join(SCENE_FILE)) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-        let repo = v["repo"].as_str().and_then(|r| serde_json::from_value::<RepoName>(json!(r)).ok());
-        let commit = v["commit"].as_str().and_then(|c| serde_json::from_value::<CommitOid>(json!(c)).ok());
+        let Ok(text) = fs::read_to_string(dir.join(SCENE_FILE)) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let repo = v["repo"]
+            .as_str()
+            .and_then(|r| serde_json::from_value::<RepoName>(json!(r)).ok());
+        let commit = v["commit"]
+            .as_str()
+            .and_then(|c| serde_json::from_value::<CommitOid>(json!(c)).ok());
         let text_of = |k: &str| v[k].as_str().map(str::to_string);
         if let (Some(repo), Some(commit)) = (repo, commit) {
             out.push(SceneRecord {
@@ -469,9 +578,17 @@ fn scene_records(root: &Path) -> Vec<SceneRecord> {
 /// and `dest.push_url` must still be a URL git pushes to as given
 /// (`Git::push_url_exact`); otherwise nothing settles (the scenes stay,
 /// reported).
-pub(crate) fn settle_push_scenes(core: &Core, git: &Git, repo: &RepoName, branch: &str, pushed: &CommitOid, dest: Option<&PushDest>) {
+pub(crate) fn settle_push_scenes(
+    core: &Core,
+    git: &Git,
+    repo: &RepoName,
+    branch: &str,
+    pushed: &CommitOid,
+    dest: Option<&PushDest>,
+) {
     let Some(dest) = dest else { return };
-    if push_dest(git).as_ref() != Some(dest) || !git.push_url_exact(&dest.push_url).unwrap_or(false) {
+    if push_dest(git).as_ref() != Some(dest) || !git.push_url_exact(&dest.push_url).unwrap_or(false)
+    {
         return;
     }
     let repo_id = dest.repo_id.get().to_string_lossy();
@@ -485,7 +602,11 @@ pub(crate) fn settle_push_scenes(core: &Core, git: &Git, repo: &RepoName, branch
             continue;
         }
         if fs::remove_dir_all(&s.dir).is_ok() {
-            let gone = DaemonWarning::UnknownPush { repo: s.repo, commit: s.commit, scene: s.dir };
+            let gone = DaemonWarning::UnknownPush {
+                repo: s.repo,
+                commit: s.commit,
+                scene: s.dir,
+            };
             core.warnings.remove(|w| *w == gone);
         }
     }
@@ -497,8 +618,16 @@ pub(crate) fn settle_push_scenes(core: &Core, git: &Git, repo: &RepoName, branch
 pub fn observe_tip(core: &Core, repo: &RepoName, tip: &CommitOid) -> Result<()> {
     let _catalog = core.admit();
     let git = core.git(repo)?;
-    let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let dir = core.config.paths.root.join("daemon/observe").join(format!("{}-{stamp}", std::process::id()));
+    let stamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = core
+        .config
+        .paths
+        .root
+        .join("daemon/observe")
+        .join(format!("{}-{stamp}", std::process::id()));
     let r = (|| {
         let tree = git.tree_of(tip)?;
         // The export needs its parent; nothing else creates `daemon/observe`.
@@ -541,8 +670,16 @@ pub fn chain_resolve(
     // 3. Restore asks the human like push, holding nothing.
     // Review P1-15: the approval names origin's push URL read now.
     let confirm = choice == ChainChoice::Restore && needs_confirm(&core.pinned(repo)?);
-    let url = if confirm { git.push_url(SCENE_REMOTE)? } else { String::new() };
-    let action = Action::PushDeploy { repo: repo.clone(), branch: branch.clone(), url: url.clone() };
+    let url = if confirm {
+        git.push_url(SCENE_REMOTE)?
+    } else {
+        String::new()
+    };
+    let action = Action::PushDeploy {
+        repo: repo.clone(),
+        branch: branch.clone(),
+        url: url.clone(),
+    };
     let token = if confirm {
         Some(require_validated(&core.confirmer, action.clone())?)
     } else {
@@ -573,26 +710,35 @@ pub fn chain_resolve(
             branch: branch.clone(),
             choice,
             chain: c.as_str().to_string(),
-            anchor: a.as_ref().map(|a| a.as_str().to_string()).unwrap_or_default(),
+            anchor: a
+                .as_ref()
+                .map(|a| a.as_str().to_string())
+                .unwrap_or_default(),
             pushed: false,
             warnings: Vec::new(),
         };
         match choice {
             ChainChoice::Restore => {
                 if !git.is_ancestor(&o, &c)? {
-                    return Err(invalid("not_fast_forward", format!("origin/{branch} is not an ancestor of the publish chain")));
+                    return Err(invalid(
+                        "not_fast_forward",
+                        format!("origin/{branch} is not an ancestor of the publish chain"),
+                    ));
                 }
                 if let Some(t) = &token {
                     recheck(t, &action)?;
                     // Review H2: bound to what the cli showed, and to the
                     // daemon's own read before the prompt.
                     if c != seen || shown != Some(&c) {
-                        return Err(StrataError::new(Code::NotConfirmed, "the publish chain moved after the confirmation")
-                            .with_detail(json!({
-                                "reason": "chain_moved",
-                                "confirmed": shown.map(|s| s.as_str()),
-                                "now": c.as_str(),
-                            })));
+                        return Err(StrataError::new(
+                            Code::NotConfirmed,
+                            "the publish chain moved after the confirmation",
+                        )
+                        .with_detail(json!({
+                            "reason": "chain_moved",
+                            "confirmed": shown.map(|s| s.as_str()),
+                            "now": c.as_str(),
+                        })));
                     }
                 }
                 // 8. Push the chain tip. Review M7: `Pushed` only once one
@@ -601,33 +747,69 @@ pub fn chain_resolve(
                 // publish's `push_published`); a transaction that does not
                 // commit is `Unknown` and nothing local moved.
                 let verify = [RefUpdate::verify(&chain_name, Some(c.clone()))];
-                let uncertain = |r: &Result<PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
+                let uncertain =
+                    |r: &Result<PushOutcome>| r.as_ref().is_err_and(|e| e.code == Code::Unknown);
                 let dest = push_dest(git);
                 if token.is_some() {
                     check_approved_url(&url, dest.as_ref())?;
                 }
-                let outcome = with_staging(core, git, repo, &branch, &c, dest.as_ref(), uncertain, |wt| {
-                    crate::handlers::writing();
-                    // Review-4 F1: to exactly the recorded destination.
-                    let sent = match &dest {
-                        Some(d) => git.push_recorded_to(wt, "origin", &d.push_url, &chain_name, &branch, &anchor_name, &verify, PUSH_TIMEOUT)?,
-                        None => git.push_recorded(wt, "origin", &chain_name, &branch, &anchor_name, &verify, PUSH_TIMEOUT)?,
-                    };
-                    match sent {
-                        PushOutcome::Unknown => Err(StrataError::new(Code::Unknown, "the push outcome is unknown; not pushed again")
+                let outcome = with_staging(
+                    core,
+                    git,
+                    repo,
+                    &branch,
+                    &c,
+                    dest.as_ref(),
+                    uncertain,
+                    |wt| {
+                        crate::handlers::writing();
+                        // Review-4 F1: to exactly the recorded destination.
+                        let sent = match &dest {
+                            Some(d) => git.push_recorded_to(
+                                wt,
+                                "origin",
+                                &d.push_url,
+                                &chain_name,
+                                &branch,
+                                &anchor_name,
+                                &verify,
+                                PUSH_TIMEOUT,
+                            )?,
+                            None => git.push_recorded(
+                                wt,
+                                "origin",
+                                &chain_name,
+                                &branch,
+                                &anchor_name,
+                                &verify,
+                                PUSH_TIMEOUT,
+                            )?,
+                        };
+                        match sent {
+                            PushOutcome::Unknown => Err(StrataError::new(
+                                Code::Unknown,
+                                "the push outcome is unknown; not pushed again",
+                            )
                             .with_detail(json!({ "reason": "push_unknown", "branch": branch }))),
-                        o => Ok(o),
-                    }
-                })?;
+                            o => Ok(o),
+                        }
+                    },
+                )?;
                 match outcome {
                     PushOutcome::Pushed => {}
                     PushOutcome::Refused(msg) => {
-                        return Err(StrataError::new(Code::PushRefused, format!("origin refused the push: {msg}"))
-                            .with_detail(json!({ "reason": "push_refused", "branch": branch })));
+                        return Err(StrataError::new(
+                            Code::PushRefused,
+                            format!("origin refused the push: {msg}"),
+                        )
+                        .with_detail(json!({ "reason": "push_refused", "branch": branch })));
                     }
                     PushOutcome::Unknown => {
-                        return Err(StrataError::new(Code::Unknown, "the push outcome is unknown; not pushed again")
-                            .with_detail(json!({ "reason": "push_unknown", "branch": branch })));
+                        return Err(StrataError::new(
+                            Code::Unknown,
+                            "the push outcome is unknown; not pushed again",
+                        )
+                        .with_detail(json!({ "reason": "push_unknown", "branch": branch })));
                     }
                 }
                 done.pushed = true;
@@ -636,17 +818,32 @@ pub fn chain_resolve(
                 settle_push_scenes(core, git, repo, &branch, &c, dest.as_ref());
             }
             ChainChoice::AcceptOriginDrop => {
-                transaction(git, &[RefUpdate::set(&chain_name, o.clone(), Some(c.clone())), RefUpdate::set(&anchor_name, o.clone(), a)])?;
+                transaction(
+                    git,
+                    &[
+                        RefUpdate::set(&chain_name, o.clone(), Some(c.clone())),
+                        RefUpdate::set(&anchor_name, o.clone(), a),
+                    ],
+                )?;
                 done.chain = o.as_str().to_string();
                 done.anchor = o.as_str().to_string();
             }
             ChainChoice::AcceptOriginReplay => {
                 let Some(base) = replay_base(git, &chain, &c)? else {
-                    return Err(invalid("no_replay_range", "no replay range: the chain has no anchor on it"));
+                    return Err(invalid(
+                        "no_replay_range",
+                        "no replay range: the chain has no anchor on it",
+                    ));
                 };
                 // A Conflict here comes before any ref write: the refs are unchanged.
                 let tip = git.replay_commits(&base, &c, &o)?;
-                transaction(git, &[RefUpdate::set(&chain_name, tip.clone(), Some(c.clone())), RefUpdate::set(&anchor_name, o.clone(), a)])?;
+                transaction(
+                    git,
+                    &[
+                        RefUpdate::set(&chain_name, tip.clone(), Some(c.clone())),
+                        RefUpdate::set(&anchor_name, o.clone(), a),
+                    ],
+                )?;
                 done.chain = tip.as_str().to_string();
                 done.anchor = o.as_str().to_string();
             }
@@ -662,7 +859,10 @@ pub fn chain_resolve(
     };
     let mut done = match out {
         Ok(done) => done,
-        Err(e) => { follow(); return Err(e); }
+        Err(e) => {
+            follow();
+            return Err(e);
+        }
     };
     if let Some(after) = tips.1.clone()
         && let Some(e) = observe_if_moved(tips.0.as_ref(), Some(&after), &mut || observe(&after))
@@ -710,8 +910,11 @@ impl Replayed {
 fn range_oldest_first(git: &Git, exclusive: &CommitOid, tip: &CommitOid) -> Result<Vec<CommitOid>> {
     let (mut v, more) = git.commits_between(exclusive, tip, REPLAY_LIMIT)?;
     if more {
-        return Err(StrataError::new(Code::InvalidInput, "the unpushed chain is too long to replay headless; a human runs `git-strata chain`")
-            .with_detail(json!({ "reason": "replay_too_long", "limit": REPLAY_LIMIT })));
+        return Err(StrataError::new(
+            Code::InvalidInput,
+            "the unpushed chain is too long to replay headless; a human runs `git-strata chain`",
+        )
+        .with_detail(json!({ "reason": "replay_too_long", "limit": REPLAY_LIMIT })));
     }
     v.reverse();
     Ok(v.into_iter().map(|(c, _)| c).collect())
@@ -722,11 +925,25 @@ fn range_oldest_first(git: &Git, exclusive: &CommitOid, tip: &CommitOid) -> Resu
 /// / `node_modules`. A dir the tree already tracks is kept. No install
 /// runs here: a set that is not sealed is `InvalidInput`
 /// (`replay_deps_unsealed`), nothing written.
-fn clone_deps_for_checks(core: &Core, git: &Git, rc: &strata_types::RepoConfig, repo: &RepoName, wt: &Path) -> Result<()> {
+fn clone_deps_for_checks(
+    core: &Core,
+    git: &Git,
+    rc: &strata_types::RepoConfig,
+    repo: &RepoName,
+    wt: &Path,
+) -> Result<()> {
     if rc.deps_dirs.is_empty() || rc.checks.is_empty() {
         return Ok(());
     }
-    let ctx = strata_deps::Ctx { store: &core.store, paths: &core.config.paths, repo, cfg: rc, git, env: &core.env, locks: &core.locks };
+    let ctx = strata_deps::Ctx {
+        store: &core.store,
+        paths: &core.config.paths,
+        repo,
+        cfg: rc,
+        git,
+        env: &core.env,
+        locks: &core.locks,
+    };
     let (_, id) = strata_deps::key_of(&ctx, wt)?;
     let Some(mut set) = strata_deps::find_set(&core.store, repo, &id)? else {
         return Err(StrataError::new(
@@ -735,14 +952,21 @@ fn clone_deps_for_checks(core: &Core, git: &Git, rc: &strata_types::RepoConfig, 
         )
         .with_detail(json!({ "reason": "replay_deps_unsealed", "repo": repo.as_str(), "set": id.as_str() })));
     };
-    set.dirs.retain(|d| fs::symlink_metadata(wt.join(d.as_str())).is_err());
+    set.dirs
+        .retain(|d| fs::symlink_metadata(wt.join(d.as_str())).is_err());
     if set.dirs.is_empty() {
         return Ok(());
     }
     strata_deps::clone_into(&core.store, &set, wt)
 }
 
-fn replay_conflict(mut e: StrataError, repo: &RepoName, branch: &str, chain: &PublishChain, c: &CommitOid) -> StrataError {
+fn replay_conflict(
+    mut e: StrataError,
+    repo: &RepoName,
+    branch: &str,
+    chain: &PublishChain,
+    c: &CommitOid,
+) -> StrataError {
     if e.code != Code::Conflict {
         return e;
     }
@@ -753,7 +977,10 @@ fn replay_conflict(mut e: StrataError, repo: &RepoName, branch: &str, chain: &Pu
         m.insert("branch".into(), json!(branch));
         m.insert("chain".into(), json!(c.as_str()));
         m.insert("origin".into(), json!(chain.origin.as_str()));
-        m.insert("anchor".into(), json!(chain.anchor.as_ref().map(|a| a.as_str())));
+        m.insert(
+            "anchor".into(),
+            json!(chain.anchor.as_ref().map(|a| a.as_str())),
+        );
         m.insert("pushed".into(), json!(false));
     }
     e.message = format!(
@@ -788,7 +1015,12 @@ pub(crate) fn push_replaying(
     replayed: &mut Option<Replayed>,
 ) -> Result<CommitOid> {
     let branch = rc.publish.branch.as_str();
-    let pending = strata_publish::pending::Scope { store: &core.store, git, repo, branch };
+    let pending = strata_publish::pending::Scope {
+        store: &core.store,
+        git,
+        repo,
+        branch,
+    };
     // rm-followups §1.6 rule 4: reconstruction first, under the repo lock.
     if let Err(e) = strata_publish::pending::reconstruct(pending) {
         tracing::warn!(repo = %repo, error = %e.message, "rebase_pending reconstruction failed");
@@ -814,11 +1046,16 @@ pub(crate) fn push_replaying(
             let c = ch.top.clone().expect("diverged has a top");
             let Some(base) = replay_base(git, ch, &c)? else {
                 strata_publish::chain::refuse_unpublishable(git, branch)?;
-                return Err(invalid("no_replay_range", "no replay range: the chain has no anchor on it"));
+                return Err(invalid(
+                    "no_replay_range",
+                    "no replay range: the chain has no anchor on it",
+                ));
             };
             let old = range_oldest_first(git, &base, &c)?;
             // A Conflict here comes before any ref write: the refs are unchanged.
-            let new = git.replay_commits(&base, &c, &ch.origin).map_err(|e| replay_conflict(e, repo, branch, ch, &c))?;
+            let new = git
+                .replay_commits(&base, &c, &ch.origin)
+                .map_err(|e| replay_conflict(e, repo, branch, ch, &c))?;
             plan = Some((c, ch.origin.clone(), ch.anchor.clone(), old, new.clone()));
             // publish.md D21: the check siblings, re-checked before the scene.
             supplies = strata_publish::siblings::place(&core.store, git, rc, repo, None, prep)?;
@@ -826,10 +1063,17 @@ pub(crate) fn push_replaying(
         }
         Some(ch) if ch.state == ChainState::Rewound => {
             strata_publish::chain::refuse_unpublishable(git, branch)?;
-            return Err(invalid("chain_rewound", format!("the publish chain of {branch} is rewound")));
+            return Err(invalid(
+                "chain_rewound",
+                format!("the publish chain of {branch} is rewound"),
+            ));
         }
         c => {
-            return Err(StrataError::new(Code::NoCommit, format!("the publish chain of {repo} has no commit to push")).with_detail(json!({
+            return Err(StrataError::new(
+                Code::NoCommit,
+                format!("the publish chain of {repo} has no commit to push"),
+            )
+            .with_detail(json!({
                 "repo": repo.as_str(),
                 "branch": branch,
                 "state": c.as_ref().map(|c| format!("{:?}", c.state)),
@@ -840,33 +1084,67 @@ pub(crate) fn push_replaying(
     // Review M6: an unknown push keeps its scene; a transaction that did not
     // commit sent nothing, so it does not.
     let uncertain = |r: &Result<PushOutcome>| {
-        r.as_ref().is_err_and(|e| e.code == Code::Unknown && reason_of(e) != Some("ref_transaction"))
+        r.as_ref()
+            .is_err_and(|e| e.code == Code::Unknown && reason_of(e) != Some("ref_transaction"))
     };
     let dest = push_dest(git);
-    let r = with_staging(core, git, repo, branch, &tip, dest.as_ref(), uncertain, |wt| {
-        if let Some((c, o, a, old, new)) = &plan {
-            if let Some(scene) = wt.parent() {
-                strata_publish::siblings::clone_supplies(&supplies, scene)
-                    .map_err(|m| strata_publish::siblings::missing_error(repo, None, std::slice::from_ref(&m)))?;
+    let r = with_staging(
+        core,
+        git,
+        repo,
+        branch,
+        &tip,
+        dest.as_ref(),
+        uncertain,
+        |wt| {
+            if let Some((c, o, a, old, new)) = &plan {
+                if let Some(scene) = wt.parent() {
+                    strata_publish::siblings::clone_supplies(&supplies, scene).map_err(|m| {
+                        strata_publish::siblings::missing_error(
+                            repo,
+                            None,
+                            std::slice::from_ref(&m),
+                        )
+                    })?;
+                }
+                clone_deps_for_checks(core, git, rc, repo, wt)?;
+                let ran = strata_publish::check(rc, wt)?;
+                let copies = range_oldest_first(git, o, new)?;
+                if copies.len() != old.len() {
+                    return Err(invalid(
+                        "replay_mismatch",
+                        "the replayed range does not match the chain; nothing was written",
+                    ));
+                }
+                let map: Vec<(CommitOid, CommitOid)> = old.iter().cloned().zip(copies).collect();
+                // rm-followups §1.6 replay: retarget and enroll before the refs
+                // move, adopt (or clear) after.
+                let plans = strata_publish::pending::plan_replay(
+                    pending,
+                    &map,
+                    &session_heads(core, repo)?,
+                )?;
+                let t = transaction(
+                    git,
+                    &[
+                        RefUpdate::set(&chain_name, new.clone(), Some(c.clone())),
+                        RefUpdate::set(&anchor_name, o.clone(), a.clone()),
+                    ],
+                );
+                strata_publish::pending::adopt_replay(pending, &plans);
+                t?;
+                *replayed = Some(Replayed {
+                    from: c.clone(),
+                    to: new.clone(),
+                    onto: o.clone(),
+                    map,
+                    checks_ran: ran.ran,
+                });
             }
-            clone_deps_for_checks(core, git, rc, repo, wt)?;
-            let ran = strata_publish::check(rc, wt)?;
-            let copies = range_oldest_first(git, o, new)?;
-            if copies.len() != old.len() {
-                return Err(invalid("replay_mismatch", "the replayed range does not match the chain; nothing was written"));
-            }
-            let map: Vec<(CommitOid, CommitOid)> = old.iter().cloned().zip(copies).collect();
-            // rm-followups §1.6 replay: retarget and enroll before the refs
-            // move, adopt (or clear) after.
-            let plans = strata_publish::pending::plan_replay(pending, &map, &session_heads(core, repo)?)?;
-            let t = transaction(git, &[RefUpdate::set(&chain_name, new.clone(), Some(c.clone())), RefUpdate::set(&anchor_name, o.clone(), a.clone())]);
-            strata_publish::pending::adopt_replay(pending, &plans);
-            t?;
-            *replayed = Some(Replayed { from: c.clone(), to: new.clone(), onto: o.clone(), map, checks_ran: ran.ran });
-        }
-        crate::handlers::writing();
-        strata_publish::push_to(git, rc, repo, wt, None, dest.as_ref().map(PushDest::url))
-    });
+            crate::handlers::writing();
+            strata_publish::push_to(git, rc, repo, wt, None, dest.as_ref().map(PushDest::url))
+        },
+    );
     if matches!(r, Ok(PushOutcome::Pushed)) {
         settle_push_scenes(core, git, repo, branch, &tip, dest.as_ref());
     }
@@ -880,12 +1158,20 @@ fn session_heads(core: &Core, repo: &RepoName) -> Result<Vec<(SessionId, CommitO
         .sessions()?
         .into_iter()
         .filter(|r| r.lifecycle != strata_store::Lifecycle::Removed)
-        .filter_map(|r| r.manifest.repos.get(repo).map(|w| (r.manifest.id.clone(), w.head.clone())))
+        .filter_map(|r| {
+            r.manifest
+                .repos
+                .get(repo)
+                .map(|w| (r.manifest.id.clone(), w.head.clone()))
+        })
         .collect())
 }
 
 fn reason_of(e: &StrataError) -> Option<&str> {
-    e.detail.as_ref().and_then(|d| d.get("reason")).and_then(Value::as_str)
+    e.detail
+        .as_ref()
+        .and_then(|d| d.get("reason"))
+        .and_then(Value::as_str)
 }
 
 #[cfg(test)]
@@ -900,8 +1186,16 @@ mod tests {
     #[test]
     fn a_removed_scene_leaves_the_result_as_is() {
         let dir = Path::new("/x/daemon/push/1-2");
-        assert_eq!(scene_outcome(dir, Ok(PushOutcome::Pushed), Ok(())).unwrap(), PushOutcome::Pushed);
-        let e = scene_outcome::<PushOutcome>(dir, Err(StrataError::new(Code::CheckFailed, "c")), Ok(())).unwrap_err();
+        assert_eq!(
+            scene_outcome(dir, Ok(PushOutcome::Pushed), Ok(())).unwrap(),
+            PushOutcome::Pushed
+        );
+        let e = scene_outcome::<PushOutcome>(
+            dir,
+            Err(StrataError::new(Code::CheckFailed, "c")),
+            Ok(()),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::CheckFailed);
     }
 
@@ -920,11 +1214,15 @@ mod tests {
     #[test]
     fn a_stuck_scene_after_an_error_is_unknown_keeping_the_cause() {
         let dir = Path::new("/x/daemon/push/1-2");
-        let cause = StrataError::new(Code::InvalidInput, "missing").with_detail(json!({ "reason": "siblings_missing" }));
+        let cause = StrataError::new(Code::InvalidInput, "missing")
+            .with_detail(json!({ "reason": "siblings_missing" }));
         let e = scene_outcome::<PushOutcome>(dir, Err(cause), Err(stuck())).unwrap_err();
         assert_eq!(e.code, Code::Unknown);
         let d = e.detail.unwrap();
-        assert_eq!((d["reason"].as_str(), d["scene"].as_str()), (Some("cleanup"), Some("/x/daemon/push/1-2")));
+        assert_eq!(
+            (d["reason"].as_str(), d["scene"].as_str()),
+            (Some("cleanup"), Some("/x/daemon/push/1-2"))
+        );
         assert_eq!(d["cause"]["code"], "InvalidInput");
         assert_eq!(d["cause"]["detail"]["reason"], "siblings_missing");
         assert!(d.get("push").is_none());

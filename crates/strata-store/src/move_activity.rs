@@ -63,10 +63,16 @@ impl ActivityScope {
 /// The move policy recorded with a durable activity baseline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MoveActivityPolicy { Auto, Agent }
+pub enum MoveActivityPolicy {
+    Auto,
+    Agent,
+}
 impl MoveActivityPolicy {
     pub(crate) fn text(self) -> &'static str {
-        match self { Self::Auto => "auto", Self::Agent => "agent" }
+        match self {
+            Self::Auto => "auto",
+            Self::Agent => "agent",
+        }
     }
 }
 
@@ -85,13 +91,31 @@ pub struct MoveActivity {
     pub passes: Vec<i64>,
 }
 
-type Raw = (String, String, i64, i64, i64, String, i64, Option<String>, Option<String>, String, Option<String>);
+type Raw = (
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    String,
+    i64,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+);
 
 fn of_raw(r: Raw) -> Result<MoveActivity> {
     let (s, repo, n, m0, t0, names, entries, late, passes, policy, scope) = r;
     let root_names: Option<Vec<String>> = serde_json::from_str(&names).ok();
     let baseline = match (root_names, u64::try_from(entries)) {
-        (Some(root_names), Ok(entries)) => Some(MoveBaseline { scope: ActivityScope::decode(scope.as_deref()), m0_ns: m0, t0_ns: t0, root_names, entries }),
+        (Some(root_names), Ok(entries)) => Some(MoveBaseline {
+            scope: ActivityScope::decode(scope.as_deref()),
+            m0_ns: m0,
+            t0_ns: t0,
+            root_names,
+            entries,
+        }),
         _ => None,
     };
     let passes = match passes {
@@ -104,8 +128,13 @@ fn of_raw(r: Raw) -> Result<MoveActivity> {
         repo: crate::codec::parse(repo, "move_activity.repo")?,
         n: crate::codec::nonneg(n, "move_activity.n")?,
         policy: match policy.as_str() {
-            "auto" => MoveActivityPolicy::Auto, "agent" => MoveActivityPolicy::Agent,
-            _ => return Err(crate::errors::bad_row(format!("move_activity.policy {policy:?}"))),
+            "auto" => MoveActivityPolicy::Auto,
+            "agent" => MoveActivityPolicy::Agent,
+            _ => {
+                return Err(crate::errors::bad_row(format!(
+                    "move_activity.policy {policy:?}"
+                )));
+            }
         },
         baseline,
         late_writes: late.and_then(|l| serde_json::from_str(&l).ok()),
@@ -116,15 +145,42 @@ fn of_raw(r: Raw) -> Result<MoveActivity> {
 const COLS: &str = "session, repo, n, m0_ns, t0_ns, root_names_json, entries, late_writes_json, passes_json, policy";
 
 fn columns(c: &crate::sql::Connection) -> Result<String> {
-    Ok(format!("{COLS}, {}", if user_version(c)? >= 6 { "skip_json" } else { "NULL" }))
+    Ok(format!(
+        "{COLS}, {}",
+        if user_version(c)? >= 6 {
+            "skip_json"
+        } else {
+            "NULL"
+        }
+    ))
 }
 
 fn raw(r: &crate::sql::Row) -> crate::sql::SqlResult<Raw> {
-    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?))
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+        r.get(10)?,
+    ))
 }
 
 /// Inserts the row of move `n` (inside `begin_move`'s transaction).
-pub(crate) fn insert(c: &crate::sql::Connection, id: &str, repo: &str, n: i64, b: &MoveBaseline, policy: MoveActivityPolicy, op: &'static str) -> Result<()> {
+pub(crate) fn insert(
+    c: &crate::sql::Connection,
+    id: &str,
+    repo: &str,
+    n: i64,
+    b: &MoveBaseline,
+    policy: MoveActivityPolicy,
+    op: &'static str,
+) -> Result<()> {
     let names = to_json(&b.root_names, "root_names")?;
     let scope = to_json(&b.scope, "activity scope")?;
     let entries = i64::try_from(b.entries).unwrap_or(i64::MAX);
@@ -140,7 +196,12 @@ pub(crate) fn insert(c: &crate::sql::Connection, id: &str, repo: &str, n: i64, b
 impl Store {
     /// The row of move `n` of `session`/`repo`, if it had an activity baseline
     /// (none on a store older than v3).
-    pub fn move_activity(&self, session: &SessionId, repo: &RepoName, n: u64) -> Result<Option<MoveActivity>> {
+    pub fn move_activity(
+        &self,
+        session: &SessionId,
+        repo: &RepoName,
+        n: u64,
+    ) -> Result<Option<MoveActivity>> {
         let ni = i64::try_from(n).unwrap_or(i64::MAX);
         self.read(|c| {
             if user_version(c)? < V3 {
@@ -148,7 +209,10 @@ impl Store {
             }
             let r = c
                 .query_row(
-                    &format!("SELECT {} FROM move_activity WHERE session = ?1 AND repo = ?2 AND n = ?3", columns(c)?),
+                    &format!(
+                        "SELECT {} FROM move_activity WHERE session = ?1 AND repo = ?2 AND n = ?3",
+                        columns(c)?
+                    ),
                     params![session.as_str(), repo.as_str(), ni],
                     raw,
                 )
@@ -165,7 +229,10 @@ impl Store {
                 return Ok(Vec::new());
             }
             let mut st = c
-                .prepare(&format!("SELECT {} FROM move_activity WHERE session = ?1 ORDER BY repo, n", columns(c)?))
+                .prepare(&format!(
+                    "SELECT {} FROM move_activity WHERE session = ?1 ORDER BY repo, n",
+                    columns(c)?
+                ))
                 .map_err(sql_read)?;
             let rows = st
                 .query_map([session.as_str()], raw)
@@ -178,7 +245,13 @@ impl Store {
 
     /// Sets the late-write notice of move `n` unless one is already there
     /// (the first notice stands). `false` when there is no row.
-    pub fn set_move_late_writes(&self, session: &SessionId, repo: &RepoName, n: u64, notice: &Value) -> Result<bool> {
+    pub fn set_move_late_writes(
+        &self,
+        session: &SessionId,
+        repo: &RepoName,
+        n: u64,
+        notice: &Value,
+    ) -> Result<bool> {
         const OP: &str = "set_move_late_writes";
         let body = to_json(notice, "late_writes")?;
         let ni = i64::try_from(n).unwrap_or(i64::MAX);
@@ -193,12 +266,86 @@ impl Store {
                     params![session.as_str(), repo.as_str(), ni, body],
                 )
                 .map_err(w(OP))?;
+            Ok(if k == 1 {
+                Tx::Commit(true)
+            } else {
+                Tx::Rollback(false)
+            })
+        })
+    }
+
+    /// new-lock §3.1 phase 2N: [`Store::set_move_late_writes`] only while
+    /// move `n` is still the done move whose old tree is `staging` (with
+    /// the retained `old_tree`, if any) and its row still has `baseline`,
+    /// all checked in the one transaction. `false` when anything changed or
+    /// a notice is already there (the first notice stands).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_move_late_writes_if(
+        &self,
+        session: &SessionId,
+        repo: &RepoName,
+        n: u64,
+        notice: &Value,
+        staging: &std::path::Path,
+        old_tree: Option<&std::path::Path>,
+        baseline: Option<&MoveBaseline>,
+    ) -> Result<bool> {
+        const OP: &str = "set_move_late_writes_if";
+        let body = to_json(notice, "late_writes")?;
+        let ni = i64::try_from(n).unwrap_or(i64::MAX);
+        self.write(OP, |c| {
+            if user_version(c)? < V3 {
+                return Ok(Tx::Rollback(false));
+            }
+            let intent: Option<(String, String, Option<String>)> = c
+                .query_row(
+                    "SELECT state, staging, old_tree FROM move_intents WHERE session = ?1 AND repo = ?2 AND n = ?3",
+                    params![session.as_str(), repo.as_str(), ni],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(w(OP))?;
+            let same_intent = intent.is_some_and(|(state, s, o)| {
+                state == "done"
+                    && std::path::Path::new(&s) == staging
+                    && o.as_deref().map(std::path::Path::new) == old_tree
+            });
+            if !same_intent {
+                return Ok(Tx::Rollback(false));
+            }
+            let row = c
+                .query_row(
+                    &format!("SELECT {} FROM move_activity WHERE session = ?1 AND repo = ?2 AND n = ?3", columns(c)?),
+                    params![session.as_str(), repo.as_str(), ni],
+                    raw,
+                )
+                .optional()
+                .map_err(w(OP))?;
+            let Some(row) = row.map(of_raw).transpose()? else {
+                return Ok(Tx::Rollback(false));
+            };
+            if row.baseline.as_ref() != baseline {
+                return Ok(Tx::Rollback(false));
+            }
+            let k = c
+                .execute(
+                    "UPDATE move_activity SET late_writes_json = ?4 \
+                     WHERE session = ?1 AND repo = ?2 AND n = ?3 AND late_writes_json IS NULL",
+                    params![session.as_str(), repo.as_str(), ni, body],
+                )
+                .map_err(w(OP))?;
             Ok(if k == 1 { Tx::Commit(true) } else { Tx::Rollback(false) })
         })
     }
 
     /// Replaces the clean-pass list of move `n`. `false` when there is no row.
-    pub fn set_move_passes(&self, session: &SessionId, repo: &RepoName, n: u64, passes: &[i64]) -> Result<bool> {
+    pub fn set_move_passes(
+        &self,
+        session: &SessionId,
+        repo: &RepoName,
+        n: u64,
+        passes: &[i64],
+    ) -> Result<bool> {
         const OP: &str = "set_move_passes";
         let body = to_json(&passes, "passes")?;
         let ni = i64::try_from(n).unwrap_or(i64::MAX);
@@ -221,7 +368,12 @@ impl Store {
 impl Store {
     /// Test only: damage move `n`'s persisted baseline (its root names stop
     /// parsing), as store damage would.
-    pub fn damage_move_activity_for_test(&self, session: &SessionId, repo: &RepoName, n: u64) -> Result<bool> {
+    pub fn damage_move_activity_for_test(
+        &self,
+        session: &SessionId,
+        repo: &RepoName,
+        n: u64,
+    ) -> Result<bool> {
         const OP: &str = "damage_move_activity";
         let ni = i64::try_from(n).unwrap_or(i64::MAX);
         self.write(OP, |c| {

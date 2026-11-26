@@ -75,6 +75,12 @@ pub enum Kind {
     },
     Publish,
     Push,
+    /// new-lock §3.5: the old-tree worker's claim of done move `n`'s old
+    /// tree; `phase` is `None` until its first phase.
+    OldTreeCheck {
+        n: u64,
+        phase: Option<String>,
+    },
 }
 
 impl Kind {
@@ -87,6 +93,7 @@ impl Kind {
             Kind::DepsInstall { .. } => "deps_install",
             Kind::Publish => "publish",
             Kind::Push => "push",
+            Kind::OldTreeCheck { .. } => "old_tree_check",
         }
     }
 }
@@ -141,7 +148,9 @@ impl Activity {
             Kind::SessionCreate { repos, .. } => {
                 request.is_some() && self.request == request && repos.contains(repo)
             }
-            Kind::DepsInstall { .. } | Kind::Publish | Kind::Push => false,
+            Kind::DepsInstall { .. } | Kind::Publish | Kind::Push | Kind::OldTreeCheck { .. } => {
+                false
+            }
         }
     }
 
@@ -177,6 +186,10 @@ impl Activity {
                 v["proposal"] = json!(proposal.map(|p| p.get().to_string()))
             }
             Kind::Publish | Kind::Push => {}
+            Kind::OldTreeCheck { n, phase } => {
+                v["n"] = json!(n);
+                v["phase"] = json!(phase);
+            }
         }
         v
     }
@@ -335,6 +348,11 @@ impl observe::Observer for Activities {
             Work::SessionCreate { repos, session } => {
                 Activity::new(Kind::SessionCreate { repos, step: None }, None, session)
             }
+            Work::OldTreeCheck { repo, session, n } => Activity::new(
+                Kind::OldTreeCheck { n, phase: None },
+                Some(repo),
+                Some(session),
+            ),
         };
         self.insert(a)
     }
@@ -342,7 +360,8 @@ impl observe::Observer for Activities {
     fn step(&self, id: u64, step: &str) {
         self.update(id, |a| match &mut a.kind {
             Kind::Move { phase, .. } => *phase = Some(step.to_string()),
-            Kind::SessionCreate { step: current, .. } => {
+            Kind::SessionCreate { step: current, .. }
+            | Kind::OldTreeCheck { phase: current, .. } => {
                 *current = Some(step.to_string());
                 a.step_at = Instant::now();
             }

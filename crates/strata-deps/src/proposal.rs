@@ -355,6 +355,18 @@ pub fn publish_chain(git: &Git, branch: &str) -> Result<Option<PublishChain>> {
     };
     let top = git.read_ref(&format!("refs/strata/publish/{branch}"))?;
     let anchor = git.read_ref(&format!("refs/strata/anchor/{branch}"))?;
+    chain_of(git, branch, origin, top, anchor)
+}
+
+/// [`publish_chain`] of refs read earlier (a [`crate::RefSnapshot`]): the
+/// classification needs only ancestry over immutable objects, no lock.
+fn chain_of(
+    git: &Git,
+    branch: &str,
+    origin: CommitOid,
+    top: Option<CommitOid>,
+    anchor: Option<CommitOid>,
+) -> Result<Option<PublishChain>> {
     let state = match (&top, &anchor) {
         (None, _) => ChainState::Absent,
         (Some(_), None) => ChainState::Rewound,
@@ -395,6 +407,44 @@ pub fn main_tip(cfg: &RepoConfig, git: &Git) -> Result<Option<CommitOid>> {
     git.read_ref(&remote_ref("origin", &cfg.default_branch))
 }
 
+/// [`main_tip`] as of a release-point snapshot of the default branch's refs
+/// (new-lock design §2.1): a pure function of the frozen OIDs, read without
+/// the repo lock. `None` when the snapshot is not valid or origin was never
+/// fetched; the caller then reads under the lock as before.
+pub fn main_tip_of(
+    cfg: &RepoConfig,
+    git: &Git,
+    snap: &crate::RefSnapshot,
+) -> Result<Option<CommitOid>> {
+    let Some(origin) = snap.origin.clone().filter(|_| snap.valid) else {
+        return Ok(None);
+    };
+    if cfg.pin_unpushed && cfg.publish.branch == cfg.default_branch {
+        let c = chain_of(
+            git,
+            &cfg.default_branch,
+            origin,
+            snap.chain_top.clone(),
+            snap.anchor.clone(),
+        )?;
+        return Ok(c.map(|c| match (c.state, c.top) {
+            (ChainState::Leads, Some(top)) => top,
+            _ => c.origin,
+        }));
+    }
+    Ok(Some(origin))
+}
+
+/// The three refs a [`crate::RefSnapshot`] of `branch` holds, in its order:
+/// origin's tracking ref, the publish chain top and the anchor.
+pub fn snapshot_refs(branch: &str) -> [String; 3] {
+    [
+        remote_ref("origin", branch),
+        format!("refs/strata/publish/{branch}"),
+        format!("refs/strata/anchor/{branch}"),
+    ]
+}
+
 /// Record main's deps set for (tree, head) and propose the change when it
 /// moved (§5.9). Takes the repo write lock itself.
 pub fn observe_main(
@@ -428,11 +478,20 @@ pub fn observe_main(
 /// This function never acquires that lock. Prepare the exported install inputs
 /// and `key_of` result before locking, then recheck the tip under the lock;
 /// `inputs` and `id` must describe `tree` at `head` with the current config.
-pub fn observe_main_locked(ctx: &Ctx, tree: &TreeOid, head: &CommitOid, inputs: &str, id: &DepsSetId) -> Result<Option<Proposal>> {
+pub fn observe_main_locked(
+    ctx: &Ctx,
+    tree: &TreeOid,
+    head: &CommitOid,
+    inputs: &str,
+    id: &DepsSetId,
+) -> Result<Option<Proposal>> {
     let mut got = None;
     match observe_locked(ctx, tree, head, inputs, id, &mut got) {
         Ok(v) => Ok(v),
-        Err(e) => Err(match got { Some(p) => not_recorded(&p, e), None => e }),
+        Err(e) => Err(match got {
+            Some(p) => not_recorded(&p, e),
+            None => e,
+        }),
     }
 }
 
@@ -476,7 +535,10 @@ fn observe_locked(
             origin: ProposalOrigin::Main,
             from,
             from_inputs,
-            from_head: old.as_ref().filter(|o| o.set != *id).map(|o| o.head.clone()),
+            from_head: old
+                .as_ref()
+                .filter(|o| o.set != *id)
+                .map(|o| o.head.clone()),
             to: id.clone(),
             to_inputs: inputs.to_owned(),
             tree: Some(tree.clone()),

@@ -1,11 +1,10 @@
 use super::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+/// A lock adapter that only answers `is_shut_down`.
 #[derive(Default)]
 struct Lock {
-    attempts: AtomicUsize,
-    waits: Mutex<Vec<SystemTime>>,
+    closed: AtomicBool,
 }
 impl RepoWriteLock for Lock {
     fn with_write(
@@ -13,14 +12,10 @@ impl RepoWriteLock for Lock {
         _repo: &RepoName,
         f: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Result<()>> {
-        if self.attempts.fetch_add(1, Ordering::SeqCst) < 2 {
-            return Err(StrataError::new(Code::Busy, "attempt expired")
-                .with_detail(serde_json::json!({"reason":"lock_wait"})));
-        }
         Ok(f())
     }
-    fn record_long_wait(&self, _repo: &RepoName, attempt_since: SystemTime) {
-        self.waits.lock().unwrap().push(attempt_since);
+    fn is_shut_down(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
     }
 }
 struct Before;
@@ -35,8 +30,62 @@ impl BeforeCheckpoint for Before {
     }
 }
 
+fn git_failure(stderr: &str) -> StrataError {
+    StrataError::new(Code::Unknown, "git update-ref -d failed")
+        .with_detail(serde_json::json!({ "exit": 1, "stderr": stderr }))
+}
+
+/// new-lock §2.7 (`ref_lock_retry_only_on_lockfile_contention`): only git's
+/// lock-file form is contention; the generic `cannot lock ref` of a
+/// compare-and-swap mismatch and a moved pin are not.
 #[test]
-fn unbounded_lock_records_each_expired_attempt_and_preserves_inner_errors() {
+fn ref_lock_retry_only_on_lockfile_contention() {
+    let loose = "fatal: cannot lock ref 'refs/strata/pins/s-aaaaaaaa': Unable to create \
+                 '/r/.git/refs/strata/pins/s-aaaaaaaa.lock': File exists.\n\nAnother git process seems to be running";
+    let packed = "error: could not delete references: cannot lock ref 'refs/strata/pins/s-aaaaaaaa': \
+                  Unable to create '/r/.git/packed-refs.lock': File exists.";
+    assert!(ref_lock_busy(&git_failure(loose)));
+    assert!(ref_lock_busy(&git_failure(packed)));
+    let mismatch =
+        "fatal: cannot lock ref 'refs/strata/pins/s-aaaaaaaa': is at 1111 but expected 2222";
+    assert!(!ref_lock_busy(&git_failure(mismatch)));
+    assert!(!ref_lock_busy(&git_failure(
+        "fatal: cannot lock ref 'refs/strata/pins/s-aaaaaaaa'"
+    )));
+    let moved = StrataError::new(Code::HeadMoved, "moved")
+        .with_detail(serde_json::json!({ "stderr": loose }));
+    assert!(
+        !ref_lock_busy(&moved),
+        "only an Unknown git failure is contention"
+    );
+}
+
+/// new-lock §4.1 (ii): every failed repo waited for its lock → certified;
+/// any other failure wins and is returned uncertified.
+#[test]
+fn head_refusal_is_certified_only_when_every_failure_is_lock_wait() {
+    let busy = |repo: &str| {
+        StrataError::new(Code::Busy, "waited")
+            .with_detail(serde_json::json!({ "reason": "lock_wait", "lock": { "repo": repo } }))
+    };
+    let fenced = StrataError::new(Code::Busy, "fence")
+        .with_detail(serde_json::json!({ "reason": "pins_tightened" }));
+    let one = crate::new::certify_head(vec![busy("api"), busy("tool")]);
+    assert_eq!(one.detail.as_ref().unwrap()["retry_safe"], true);
+    assert_eq!(one.detail.as_ref().unwrap()["lock"]["repo"], "api");
+    let mixed = crate::new::certify_head(vec![busy("api"), fenced.clone()]);
+    assert_eq!(mixed, fenced, "pins_tightened takes precedence");
+    let no_such = StrataError::new(Code::NoSuchBranch, "no tip");
+    assert_eq!(
+        crate::new::certify_head(vec![no_such.clone(), busy("tool")]),
+        no_such
+    );
+}
+
+/// new-lock §2.4a: a removed take still refuses at shutdown, as the closed
+/// lock did.
+#[test]
+fn removed_takes_refuse_at_shutdown_like_a_closed_lock() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("store");
     // This unit exercises only the lock adapter, without a Git fixture.
@@ -55,25 +104,18 @@ fn unbounded_lock_records_each_expired_attempt_and_preserves_inner_errors() {
         timeout: Duration::ZERO,
     };
     let sessions = Sessions::open(&config, &gits, &store, &lock, &env, &Before).unwrap();
-    let repo = RepoName::try_from("tool".to_string()).unwrap();
-    let start = SystemTime::now();
-    let mut calls = 0;
+    assert!(sessions.refuse_if_shut_down().is_ok());
+    lock.closed.store(true, Ordering::SeqCst);
+    let e = sessions.refuse_if_shut_down().unwrap_err();
+    assert_eq!(e.code, Code::ReadOnly);
+    assert_eq!(e.detail.unwrap()["reason"], "shutting_down");
+    let id = SessionId::try_from("s-aaaaaaaa".to_string()).unwrap();
+    let e = sessions
+        .unpin(&RepoName::try_from("tool".to_string()).unwrap(), &id)
+        .unwrap_err();
     assert_eq!(
-        sessions
-            .with_lock_unbounded(&repo, || {
-                calls += 1;
-                Ok(7)
-            })
-            .unwrap(),
-        7
+        e.code,
+        Code::ReadOnly,
+        "the unpin refuses before it reads the pin"
     );
-    assert_eq!(calls, 1);
-    let waits = lock.waits.lock().unwrap().clone();
-    assert_eq!(waits.len(), 2);
-    assert!(waits[0] >= start && waits[1] > waits[0]);
-    let error = StrataError::new(Code::Busy, "closure refusal");
-    let result: Result<()> = sessions.with_lock_unbounded(&repo, || Err(error.clone()));
-    assert_eq!(result.unwrap_err(), error);
-    assert_eq!(lock.attempts.load(Ordering::SeqCst), 4);
-    assert_eq!(lock.waits.lock().unwrap().len(), 2);
 }

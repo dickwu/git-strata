@@ -82,6 +82,7 @@ export const statusBarCopy = {
     create: (session: string | undefined, repos: number) =>
       `Creating session${session ? ` ${session}` : ''}${repos > 0 ? ` · ${repos} ${repos === 1 ? 'repo' : 'repos'}` : ''}`,
     install: 'Installing dependencies',
+    oldTreeCheck: 'Checking old tree',
     publish: (repo: string) => `Publishing ${repo}`,
     push: (repo: string) => `Pushing ${repo}`,
     background: (repo: string) => `${repo} busy with daemon work`,

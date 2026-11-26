@@ -136,10 +136,20 @@ pub fn hint(s: strata_types::SessionId) {
 /// A clap rejection as `InvalidInput` (§3.1): an unknown or missing
 /// subcommand carries the sorted command list of its level.
 fn parse_error(argv: &[OsString], e: &clap::Error) -> StrataError {
-    let words: Vec<String> = argv.iter().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
+    let words: Vec<String> = argv
+        .iter()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     let first = words.iter().find(|w| !w.starts_with('-'));
     let group = first.and_then(|g| args::group_commands(g).map(|c| (g.clone(), c)));
-    let msg = e.to_string().lines().next().unwrap_or("invalid arguments").trim_start_matches("error: ").to_string();
+    let msg = e
+        .to_string()
+        .lines()
+        .next()
+        .unwrap_or("invalid arguments")
+        .trim_start_matches("error: ")
+        .to_string();
     match e.kind() {
         ErrorKind::InvalidSubcommand
         | ErrorKind::MissingSubcommand
@@ -192,9 +202,16 @@ fn run_cmd(cmd: Cmd, reload_code: &mut Option<i32>) -> Result<Envelope> {
     match cmd {
         Cmd::Help { .. } => unreachable!("help is dispatched before environment setup"),
         Cmd::Sync(args) => sync::run(&ctx, &args),
-        Cmd::Deps(DepsCmd::Approve { id, sessions, cwd }) => c::deps_approve_with_cwd(&ctx, &id, &sessions, &cwd),
+        Cmd::Deps(DepsCmd::Approve { id, sessions, cwd }) => {
+            c::deps_approve_with_cwd(&ctx, &id, &sessions, &cwd)
+        }
         Cmd::Push { repo } => c::push(&ctx, &repo),
-        Cmd::Publish { from, assign, message, message_for } => c::publish(&ctx, &from, assign.as_deref(), &message, &message_for),
+        Cmd::Publish {
+            from,
+            assign,
+            message,
+            message_for,
+        } => c::publish(&ctx, &from, assign.as_deref(), &message, &message_for),
         Cmd::Assign { file, session } => c::assign(&ctx, &file, &session),
         Cmd::Rm { session, discard } => c::rm(&ctx, &session, discard),
         Cmd::Mark {
@@ -226,6 +243,7 @@ fn run_cmd(cmd: Cmd, reload_code: &mut Option<i32>) -> Result<Envelope> {
             repos,
             agent,
             base,
+            wait,
         } => cmds::new(
             &ctx,
             ticket_flag,
@@ -234,21 +252,49 @@ fn run_cmd(cmd: Cmd, reload_code: &mut Option<i32>) -> Result<Envelope> {
             &repos,
             agent.as_deref(),
             &base,
+            &wait.wait(),
         ),
-        Cmd::Add { session, repo } => cmds::add(&ctx, session, &repo),
-        Cmd::Status { sel, brief: true, wait } => cmds::status_brief_with_wait(&ctx, &sel, &wait),
-        Cmd::Status { sel, brief: false, wait } => cmds::status_with_wait(&ctx, &sel, &wait),
+        Cmd::Add {
+            session,
+            repo,
+            wait,
+        } => cmds::add(&ctx, session, &repo, &wait.wait()),
+        Cmd::Status {
+            sel,
+            brief: true,
+            wait,
+        } => cmds::status_brief_with_wait(&ctx, &sel, &wait),
+        Cmd::Status {
+            sel,
+            brief: false,
+            wait,
+        } => cmds::status_with_wait(&ctx, &sel, &wait),
         Cmd::Ls { .. } => cmds::ls(&ctx),
-        Cmd::Checkpoint { tool_call, message, session, paths } => {
-            cmds::checkpoint(&ctx, tool_call, message, session, &paths)
-        }
-        Cmd::Restore { checkpoint, paths, session } => cmds::restore(&ctx, &checkpoint, &paths, session),
+        Cmd::Checkpoint {
+            tool_call,
+            message,
+            session,
+            paths,
+        } => cmds::checkpoint(&ctx, tool_call, message, session, &paths),
+        Cmd::Restore {
+            checkpoint,
+            paths,
+            session,
+        } => cmds::restore(&ctx, &checkpoint, &paths, session),
         Cmd::Grep { pattern, sel } => cmds::grep(&ctx, &pattern, &sel),
         Cmd::Files { glob, sel } => cmds::files(&ctx, glob.as_deref(), &sel),
-        Cmd::Diff { base, session, between, repo } => cmds::diff(&ctx, base, session, between, repo),
-        Cmd::Deps(DepsCmd::Propose { session, repo, switch, cwd }) => {
-            cmds::deps_propose_with_cwd(&ctx, session, repo, switch, &cwd)
-        }
+        Cmd::Diff {
+            base,
+            session,
+            between,
+            repo,
+        } => cmds::diff(&ctx, base, session, between, repo),
+        Cmd::Deps(DepsCmd::Propose {
+            session,
+            repo,
+            switch,
+            cwd,
+        }) => cmds::deps_propose_with_cwd(&ctx, session, repo, switch, &cwd),
         Cmd::Deps(DepsCmd::List { repo }) => cmds::deps_list(&ctx, repo),
         Cmd::Gc { store, dry_run } => cmds::gc(&ctx, store, dry_run),
         Cmd::Du { refresh } => cmds::du(&ctx, refresh),

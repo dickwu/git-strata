@@ -1189,19 +1189,21 @@ the presence of `api`, not this reply feature. The 0.2.2 incident fixture and fa
 
 Activity entries younger than 3 s are omitted. The oldest outer activity covers its repo
 (session creation covers its `repos`, suppressing child work chips); there is at most one
-activity chip per repo. A dependency install holds no repo lock, so no request waits on it:
+activity chip per repo. A dependency install holds no repo lock, and neither does an old-tree
+check (`old_tree_check`, new-lock §3) while it walks, so no request waits on them:
 lock-holding work in the same repo (a move, publish or push, for example) covers the repo
-first, however much younger, and an install is shown only for a repo no such work covers.
-Examples: `Moving gwd-9492 to new main · tool · 2 min`, `Rebasing
+first, however much younger, and an install or an old-tree check is shown only for a repo no
+such work covers. Examples: `Moving gwd-9492 to new main · tool · 2 min`, `Rebasing
 after publish · tool`, `Sync moving s-… · tool`, `Rolling out deps 2/5 · tool`, `Building
 base · tool`, `Creating session gwd-9500 · 3 repos`, `Installing dependencies · tool`,
-`Publishing tool`, and `Pushing tool`. S1 uses the session ticket when the sessions reply
-knows it, else a short id. Elapsed time comes from the daemon's monotonic milliseconds;
-the existing five-second UI clock advances it between health replies. Repo waiting counts
-(never on a dependency install's chip) and fresh session pending counts append `N waiting` /
-`N pending`. The tooltip gives the
+`Checking old tree · tool`, `Publishing tool`, and `Pushing tool`. S1 uses the session ticket
+when the sessions reply knows it, else a short id. Elapsed time comes from the daemon's
+monotonic milliseconds; the existing five-second UI clock advances it between health replies.
+Repo waiting counts (never on a dependency install's or an old-tree check's chip) and fresh
+session pending counts append `N waiting` / `N pending`. The tooltip gives the
 move phase or creation step and explains the 30-second Busy refusal/retry rule, except for a
-dependency install, which holds no repo lock.
+dependency install or an old-tree check, which hold no repo lock. The Daemon modal names an
+old-tree check `Checking an old tree`.
 
 Activity chips stay blue however long the work runs. The daemon judges what is abnormal (a
 move or rollout step past 30 min, a background hold past 30 min, a request hold past 30 s,

@@ -263,6 +263,16 @@ DATA
   running daemon predates agent recording; the session was created without it.
   Use data.manifest.id as SESSION and data.manifest.repos.<repo>.path as the cwd.
 
+WAITING
+  A busy repo's due fetch is skipped (warnings: {kind:FetchSkipped, repo,
+  holder, holder_session, last_fetch_at}). A Busy lock_wait with
+  detail.retry_safe (nothing created) is sent again, 1 s backing off to 10 s,
+  until --timeout SECS (default 600, 0: unlimited) runs out; then new fails
+  with it plus detail.retries. Holder lines go to stderr only on a TTY or with
+  --progress. Once the session exists, follow-up steps can still wait behind
+  the current repo-lock holder. If new is cut off, check `git-strata ls` for
+  the ticket before running it again.
+
 ERRORS
   InvalidInput repos       neither --repo nor --repos given, or an empty name
   InvalidInput repo_flags  --repo and --repos both given
@@ -270,6 +280,7 @@ ERRORS
   InvalidInput agent       --agent or STRATA_AGENT is not a valid agent name (nothing created)
   NoSuchRepo               a repo name is not in config.toml
   NoSuchBranch             a repo has no origin/<default_branch> tip (the session's repos are fetched)
+  Busy lock_wait           with retry_safe: retries spent (detail.retries, waited_ms); rerun
   Busy daemon_down         tell the human (they run `git-strata daemon start`)
 ";
 
@@ -286,6 +297,11 @@ detail.reason not_in_session and detail.fix: this command.
 
 DATA {session, added:{<repo>:{base, head, path, tracked}}, already:{...}, warnings:[]}
   A repo already in the session is listed in already and left as it is.
+
+WAITING
+  As for new: a busy repo's due fetch is skipped (warnings: FetchSkipped), and
+  a Busy lock_wait with detail.retry_safe (nothing changed) is sent again for
+  --timeout SECS (default 600, 0: unlimited).
 
 ERRORS
   InvalidInput repos       no --repo given

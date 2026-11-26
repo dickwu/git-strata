@@ -640,3 +640,29 @@ raises it when a store, pins, or config format change requires a newer reader.
 
 The desktop updater and release tools use these constants directly from
 `strata-types`, which has no dependency on `strata-store`.
+
+### new-lock additions (2026-11-25)
+
+- `NewWarning::FetchSkipped { repo, holder, holder_session, last_fetch_at }`
+  (`strata-session`, serialised with `kind` like the other variants;
+  `last_fetch_at` is RFC 3339 or null): `new`/`add` found the fetch of `repo`
+  due while its write lock was held by `holder` (for `holder_session`), and
+  used the tip as the lock's last holder left it, last fetched at
+  `last_fetch_at`. `NewWarning` is a closed enum, so a typed client built
+  before this variant cannot decode a report that carries it: the CLI and the
+  daemon are upgraded together (the daemon announces the variant with the
+  FEATURES string `new.fetch_skip`).
+- `Busy` `lock_wait` detail (§6): `retry_safe: true` marks a refusal the
+  daemon certifies as replay-safe (nothing was created or changed: `add`'s
+  initial session-queue wait, and `new`/`add`'s head step when every failed
+  repo failed with `lock_wait`); its absence means "not certified", never
+  "unsafe to look at". `holder_origin` (`request` | `background`),
+  `holder_since` (RFC 3339) and `held_ms` describe the holder at the timeout
+  and are absent when the lock was between holders. After the CLI's retry
+  budget is spent it returns the last refusal with `retries`, `waited_ms` and
+  `fix` added. All are additive; older readers ignore them.
+- `strata_deps::RefSnapshot { origin, chain_top, anchor, generation, valid }`
+  lives in `strata-deps` (§8: the daemon owns its storage and refresh, the
+  session layer reads it through `RepoWriteLock::ref_snapshot`), and
+  `strata_gitio::RefsStamp` is gitio's stat fingerprint of those refs' files.
+  Neither is serialised.

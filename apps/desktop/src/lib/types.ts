@@ -58,6 +58,8 @@ export type DaemonActivity = ActivityBase &
     | { kind: 'base_build'; tree: string | null }
     | { kind: 'session_create'; repos: string[]; step: string | null }
     | { kind: 'deps_install'; proposal: string | null }
+    /** new-lock §3.5: the old-tree worker's claim of done move `n`; its walk holds no lock. */
+    | { kind: 'old_tree_check'; n: number; phase: string | null }
     | { kind: 'publish' | 'push' }
   );
 

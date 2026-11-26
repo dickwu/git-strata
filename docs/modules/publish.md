@@ -931,3 +931,20 @@ cached base_not_on_main result refreshes the configured main and publish
 tracking refs under the repo lock, then rechecks. The daemon plan does the same
 cache fill with a zero-wait lock. Only object/private tracking caches change;
 no publish, anchor, workspace or store mutation is performed by the plan.
+
+### new-lock: the old-tree guard of `rebase_session` (2026-11-25)
+
+The old-tree check now runs on a lock-free worker (session.md, new-lock section)
+that may hold a session's queue place briefly and its repo lock for the final
+comparison. A rebase must not race it, so `rebase_session` takes the session
+crate's old-tree guard of every batch session before their queue places:
+
+- A foreground rebase (locks that wait) takes the blocking guard
+  (`Sessions::old_tree_guard(sessions, None)`): a claim in flight is stopped or
+  routed to its non-retiring exit and the rebase starts once none is in flight.
+  The guard is held for the whole rebase loop.
+- T2's try-only rebase never stops or waits for the worker: if a claim of a batch
+  session is in flight (`Sessions::old_tree_claim_in_flight`) it refuses with
+  `Busy`, `detail = {reason: "lock_wait", lock: {session}, holder: "old_tree",
+  holder_session}`, and is deferred exactly like a rebase behind a busy queue
+  place.

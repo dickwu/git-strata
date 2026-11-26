@@ -98,7 +98,8 @@ fn invalid(reason: &str, msg: String, mut detail: Value) -> StrataError {
 }
 
 fn no_such_session(s: &SessionId) -> StrataError {
-    StrataError::new(Code::NoSuchSession, format!("no session {s}")).with_detail(json!({ "session": s.as_str() }))
+    StrataError::new(Code::NoSuchSession, format!("no session {s}"))
+        .with_detail(json!({ "session": s.as_str() }))
 }
 
 /// A live session's workspace of `ctx.repo`.
@@ -107,7 +108,11 @@ pub(crate) fn workspace(ctx: &Ctx, s: &SessionId) -> Result<WorkspaceState> {
         Some(r) if r.lifecycle != Lifecycle::Removed => r,
         _ => return Err(no_such_session(s)),
     };
-    rec.manifest.repos.get(ctx.repo).cloned().ok_or_else(|| StrataError::not_in_session(s.as_str(), ctx.repo.as_str()))
+    rec.manifest
+        .repos
+        .get(ctx.repo)
+        .cloned()
+        .ok_or_else(|| StrataError::not_in_session(s.as_str(), ctx.repo.as_str()))
 }
 
 fn base_struct(store: &Store, g: &BaseGen) -> Result<Base> {
@@ -115,18 +120,44 @@ fn base_struct(store: &Store, g: &BaseGen) -> Result<Base> {
         StrataError::new(Code::Corrupt, "the base manifest is missing")
             .with_detail(json!({ "tree": g.tree.as_str(), "repo": g.repo.as_str() }))
     })?;
-    Ok(Base { r#gen: g.clone(), manifest: Arc::new(manifest), dir: store.base_dir(g) })
+    Ok(Base {
+        r#gen: g.clone(),
+        manifest: Arc::new(manifest),
+        dir: store.base_dir(g),
+    })
 }
 
 /// The session's current overlay against its pinned base (a cold scan;
 /// never writes the store or the workspace).
 fn current_overlay(ctx: &Ctx, s: &SessionId, ws: &WorkspaceState, base: &Base) -> Result<Overlay> {
-    let w = WorkspaceRef { session: s, repo: ctx.repo, root: &ws.path, config: ctx.cfg, git: ctx.git, store: ctx.store };
+    let w = WorkspaceRef {
+        session: s,
+        repo: ctx.repo,
+        root: &ws.path,
+        config: ctx.cfg,
+        git: ctx.git,
+        store: ctx.store,
+    };
     strata_overlay::reconcile_full(&w, base)
 }
 
 fn sleep_busy() {
     std::thread::sleep(Duration::from_millis(20));
+}
+
+/// T2's try-only old-tree guard: a claim of `s` is in flight, so the
+/// rebase is deferred like one behind a busy queue place.
+fn old_tree_busy(s: &SessionId) -> StrataError {
+    StrataError::new(
+        Code::Busy,
+        format!("the old-tree check of session {s} is running"),
+    )
+    .with_detail(json!({
+        "reason": "lock_wait",
+        "lock": { "session": s.as_str() },
+        "holder": "old_tree",
+        "holder_session": s.as_str(),
+    }))
 }
 
 /// The session queue (for `sessions`) then the repo write lock, both
@@ -138,6 +169,20 @@ fn under_locks<T>(
     sessions: &[SessionId],
     f: &mut dyn FnMut() -> Result<T>,
 ) -> Result<T> {
+    // new-lock §3.4: a foreground rebase holds a blocking old-tree guard of
+    // every batch session, registered before their queue places. T2 never
+    // stops or waits for the worker: a claim in flight defers it.
+    let _guard = if ctx.locks.waits() {
+        ctx.sessions.old_tree_guard(sessions, None)
+    } else {
+        if let Some(s) = sessions
+            .iter()
+            .find(|s| ctx.sessions.old_tree_claim_in_flight(s))
+        {
+            return Err(old_tree_busy(s));
+        }
+        None
+    };
     loop {
         let mut slot: Option<Result<T>> = None;
         let r = ctx.locks.with_rebase_sessions(sessions, &mut || {
@@ -187,7 +232,9 @@ fn under_locks<T>(
 fn base_for(ctx: &Ctx, tree: &strata_types::TreeOid, deps: &DepsSetId) -> Result<BaseGen> {
     if !ctx.locks.waits() {
         // T2: the base build's own lock takes do not wait either.
-        return ctx.sessions.no_wait(|| ctx.sessions.ensure_base_for(ctx.repo, tree, deps));
+        return ctx
+            .sessions
+            .no_wait(|| ctx.sessions.ensure_base_for(ctx.repo, tree, deps));
     }
     loop {
         match ctx.sessions.ensure_base_for(ctx.repo, tree, deps) {
@@ -225,9 +272,8 @@ fn inputs_landed(ctx: &Ctx, overlay: &Overlay, new: &Base) -> bool {
             EntryKind::Added { blob }
             | EntryKind::Modified { blob }
             | EntryKind::Untracked { blob }
-            | EntryKind::Renamed { blob, .. } => {
-                on_new(&e.path).is_some_and(|m| m.blob == *blob && git_mode(m.mode) == git_mode(e.mode))
-            }
+            | EntryKind::Renamed { blob, .. } => on_new(&e.path)
+                .is_some_and(|m| m.blob == *blob && git_mode(m.mode) == git_mode(e.mode)),
         };
         let from_gone = match &e.kind {
             EntryKind::Renamed { from, .. } => on_new(from).is_none(),
@@ -238,13 +284,22 @@ fn inputs_landed(ctx: &Ctx, overlay: &Overlay, new: &Base) -> bool {
 }
 
 pub(crate) fn deferred(reason: &str, detail: Value) -> RebaseReport {
-    RebaseReport::Deferred { reason: reason.to_owned(), detail, proposal: None }
+    RebaseReport::Deferred {
+        reason: reason.to_owned(),
+        detail,
+        proposal: None,
+    }
 }
 
 /// An `Auto` move's G4 deferral (`Busy`, `auto_deferred`) as a report.
 fn deferred_of(e: &StrataError) -> RebaseReport {
-    let (reason, detail) = strata_session::auto_deferral(e).unwrap_or_else(|| ("busy".into(), Value::Null));
-    RebaseReport::Deferred { reason, detail, proposal: None }
+    let (reason, detail) =
+        strata_session::auto_deferral(e).unwrap_or_else(|| ("busy".into(), Value::Null));
+    RebaseReport::Deferred {
+        reason,
+        detail,
+        proposal: None,
+    }
 }
 
 /// rm-followups §1.4 G0: an `Auto` move needs an Active session, no scene on
@@ -331,11 +386,19 @@ fn policy_gates(
     let activity = if policy == MovePolicy::Agent {
         let a = strata_session::walk_activity_scoped(&ws.path, &scope, &ctx.cfg.rebase.quiet_skip)?;
         if let Some(path) = &a.late {
-            return Ok(Err(deferred("recent_writes", json!({"path":path.strip_prefix(&ws.path).unwrap_or(path),"during_scan":true}))));
+            return Ok(Err(deferred(
+                "recent_writes",
+                json!({"path":path.strip_prefix(&ws.path).unwrap_or(path),"during_scan":true}),
+            )));
         }
         a
     } else {
-        match strata_session::idle_activity_scoped(&ws.path, quiet, &scope, &ctx.cfg.rebase.quiet_skip)? {
+        match strata_session::idle_activity_scoped(
+            &ws.path,
+            quiet,
+            &scope,
+            &ctx.cfg.rebase.quiet_skip,
+        )? {
             Ok(a) => a,
             Err(idle) => return Ok(Err(deferred(idle.reason, idle.detail))),
         }
@@ -347,18 +410,31 @@ fn policy_gates(
     let blobs = strata_overlay::PreviewBlobs::new(ctx.store, &ws.path, &overlay);
     let preview = match strata_overlay::rebase_preview(&overlay, &old_base, new, &blobs, &opts) {
         Ok(p) => p,
-        Err(e) if e.detail.as_ref().and_then(|d| d["reason"].as_str()) == Some(strata_overlay::CHANGED_SINCE_SCAN) => {
-            return Ok(Err(deferred("recent_writes", e.detail.unwrap_or(Value::Null))));
+        Err(e)
+            if e.detail.as_ref().and_then(|d| d["reason"].as_str())
+                == Some(strata_overlay::CHANGED_SINCE_SCAN) =>
+        {
+            return Ok(Err(deferred(
+                "recent_writes",
+                e.detail.unwrap_or(Value::Null),
+            )));
         }
         Err(e) => return Err(e),
     };
     let patterns = ctx.sessions.regenerable(ctx.repo)?;
     let regen = strata_session::Regenerable::new(&patterns, ctx.cfg);
     let (kept, blocking): (Vec<RepoPath>, Vec<RepoPath>) =
-        preview.conflicts.into_iter().partition(|p| overlay.get(p).is_some_and(|e| ws.tracked && regen.matches(e)));
+        preview.conflicts.into_iter().partition(|p| {
+            overlay
+                .get(p)
+                .is_some_and(|e| ws.tracked && regen.matches(e))
+        });
     if !blocking.is_empty() {
         let shown: Vec<&str> = blocking.iter().take(20).map(|p| p.as_str()).collect();
-        return Ok(Err(deferred("conflicts", json!({ "paths": shown, "count": blocking.len() }))));
+        return Ok(Err(deferred(
+            "conflicts",
+            json!({ "paths": shown, "count": blocking.len() }),
+        )));
     }
     Ok(Ok((kept, strata_session::baseline_of(&activity))))
 }
@@ -394,7 +470,11 @@ pub(crate) fn rebase_one_with(
         ));
     }
     if ctx.git.tree_of(head)? != new_base.tree {
-        return Err(invalid("tree_mismatch", "the head's tree is not the new base's tree".into(), json!({})));
+        return Err(invalid(
+            "tree_mismatch",
+            "the head's tree is not the new base's tree".into(),
+            json!({}),
+        ));
     }
     let ws = workspace(ctx, s)?;
     let old = ws.base.clone();
@@ -533,7 +613,11 @@ pub(crate) fn rebase_one_with(
             return Ok(deferred("state", json!({ "deps_inputs_changed": true })));
         }
         // 2. A draft whose input changes all landed is promoted.
-        let promoted = if n != old.deps { promote_draft(ctx, s, &ws, &new, &old, &n, &n_inputs, new_base, head)? } else { None };
+        let promoted = if n != old.deps {
+            promote_draft(ctx, s, &ws, &new, &old, &n, &n_inputs, new_base, head)?
+        } else {
+            None
+        };
         // 3. Same deps set: move (G0 again under the locks for `Auto`).
         if n == old.deps || c3 {
             if policy != MovePolicy::Explicit
@@ -612,9 +696,13 @@ fn promote_draft(
     new_base: &BaseGen,
     head: &CommitOid,
 ) -> Result<Option<Proposal>> {
-    let draft = deps::open_proposals(ctx.store, Some(ctx.repo))?.into_iter().rev().find(|p| {
-        p.state == ProposalState::AwaitingPublish && p.origin == (ProposalOrigin::Session { session: s.clone() })
-    });
+    let draft = deps::open_proposals(ctx.store, Some(ctx.repo))?
+        .into_iter()
+        .rev()
+        .find(|p| {
+            p.state == ProposalState::AwaitingPublish
+                && p.origin == (ProposalOrigin::Session { session: s.clone() })
+        });
     let Some(d) = draft else { return Ok(None) };
     if d.from == *n {
         return Ok(None);
@@ -681,14 +769,22 @@ fn move_source(
     n_inputs: &str,
     at: Attempt<'_>,
 ) -> Result<RebaseReport> {
-    let mut src = BaseGen { repo: ctx.repo.clone(), tree: new_base.tree.clone(), deps: old.deps.clone() };
+    let mut src = BaseGen {
+        repo: ctx.repo.clone(),
+        tree: new_base.tree.clone(),
+        deps: old.deps.clone(),
+    };
     if !ctx.store.base_dir(&src).exists() || !ctx.store.has_base_gen(&src)? {
         src = base_for(ctx, &src.tree, &src.deps)?;
     }
     let repo_id = ctx.git.repo_id();
     let queue = [s.clone()];
     let with_p = |r: RebaseReport, p: &Proposal| match r {
-        RebaseReport::Deferred { reason, detail, .. } => RebaseReport::Deferred { reason, detail, proposal: Some(p.clone()) },
+        RebaseReport::Deferred { reason, detail, .. } => RebaseReport::Deferred {
+            reason,
+            detail,
+            proposal: Some(p.clone()),
+        },
         r => r,
     };
     let new = base_struct(ctx.store, &src)?;
@@ -732,10 +828,24 @@ fn move_source(
         if let Some(d) = g0_state(ctx, s, old)? {
             return Ok(d);
         }
-        match ctx.sessions.move_workspace_auto(s, &repo_id, src.clone(), head.clone(), at.consume, &baseline) {
-            Ok(r) => Ok(RebaseReport::Moved { dropped: r.dropped, lww: r.lww, regenerable_kept: kept.clone(), deps_pending: Some(p.clone()) }),
+        match ctx.sessions.move_workspace_auto(
+            s,
+            &repo_id,
+            src.clone(),
+            head.clone(),
+            at.consume,
+            &baseline,
+        ) {
+            Ok(r) => Ok(RebaseReport::Moved {
+                dropped: r.dropped,
+                lww: r.lww,
+                regenerable_kept: kept.clone(),
+                deps_pending: Some(p.clone()),
+            }),
             Err(e) if strata_session::auto_deferral(&e).is_some() => Ok(deferred_of(&e)),
-            Err(e) if e.code == Code::OpenFiles => Ok(deferred("open_files", e.detail.unwrap_or(Value::Null))),
+            Err(e) if e.code == Code::OpenFiles => {
+                Ok(deferred("open_files", e.detail.unwrap_or(Value::Null)))
+            }
             Err(e) => Err(e),
         }
     })?;
@@ -801,8 +911,11 @@ pub(crate) fn after_publish(
 }
 
 fn deps_unsealed(repo: &RepoName, id: &DepsSetId) -> StrataError {
-    StrataError::new(Code::Corrupt, format!("the session's deps set {id} of {repo} has no record"))
-        .with_detail(json!({ "reason": "deps_unsealed", "repo": repo.as_str(), "deps": id.as_str() }))
+    StrataError::new(
+        Code::Corrupt,
+        format!("the session's deps set {id} of {repo} has no record"),
+    )
+    .with_detail(json!({ "reason": "deps_unsealed", "repo": repo.as_str(), "deps": id.as_str() }))
 }
 
 /// §3 `rebase_session`: put `session` on `new_base` after a publish, or
@@ -836,8 +949,15 @@ pub fn rebase_session_with(
     let report = rebase_one_with(ctx, &session, &new_base, &head, policy, Attempt::default())?;
     // 5. After the lock: main's record, best-effort.
     if deps::main_tip(ctx.cfg, ctx.git).ok().flatten().as_ref() == Some(&head) {
-        let dir = ctx.store.base_dir(&BaseGen { deps: workspace(ctx, &session)?.base.deps, ..new_base.clone() });
-        let dir = if dir.exists() { dir } else { ctx.store.base_dir(&new_base) };
+        let dir = ctx.store.base_dir(&BaseGen {
+            deps: workspace(ctx, &session)?.base.deps,
+            ..new_base.clone()
+        });
+        let dir = if dir.exists() {
+            dir
+        } else {
+            ctx.store.base_dir(&new_base)
+        };
         if let Err(e) = deps::observe_main(ctx.deps, &new_base.tree, &head, &dir) {
             tracing::warn!(repo = %ctx.repo, error = %e.message, "observe_main failed after rebase");
         }
@@ -851,9 +971,18 @@ pub(crate) fn observe_after(ctx: &Ctx, session: &SessionId, new_base: &BaseGen, 
     if deps::main_tip(ctx.cfg, ctx.git).ok().flatten().as_ref() != Some(head) {
         return;
     }
-    let Ok(ws) = workspace(ctx, session) else { return };
-    let dir = ctx.store.base_dir(&BaseGen { deps: ws.base.deps, ..new_base.clone() });
-    let dir = if dir.exists() { dir } else { ctx.store.base_dir(new_base) };
+    let Ok(ws) = workspace(ctx, session) else {
+        return;
+    };
+    let dir = ctx.store.base_dir(&BaseGen {
+        deps: ws.base.deps,
+        ..new_base.clone()
+    });
+    let dir = if dir.exists() {
+        dir
+    } else {
+        ctx.store.base_dir(new_base)
+    };
     if let Err(e) = deps::observe_main(ctx.deps, &new_base.tree, head, &dir) {
         tracing::warn!(repo = %ctx.repo, error = %e.message, "observe_main failed after rebase");
     }
@@ -862,14 +991,20 @@ pub(crate) fn observe_after(ctx: &Ctx, session: &SessionId, new_base: &BaseGen, 
 // ---- assign (§5.7) --------------------------------------------------------
 
 fn millis(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn conflict_paths(outcome: &Value) -> Vec<String> {
     outcome
         .get("conflicts")
         .and_then(|c| c.as_array())
-        .map(|a| a.iter().filter_map(|c| c.get("path").and_then(|p| p.as_str()).map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c.get("path").and_then(|p| p.as_str()).map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -878,8 +1013,11 @@ fn conflict_paths(outcome: &Value) -> Vec<String> {
 /// commit, no push.
 pub fn assign(store: &Store, id: u64, path: &RepoPath, session: SessionId) -> Result<()> {
     let no_path = || {
-        StrataError::new(Code::NoSuchPath, format!("{} is not a conflict of publish {id}", path.as_str()))
-            .with_detail(json!({ "publish": id, "path": path.as_str() }))
+        StrataError::new(
+            Code::NoSuchPath,
+            format!("{} is not a conflict of publish {id}", path.as_str()),
+        )
+        .with_detail(json!({ "publish": id, "path": path.as_str() }))
     };
     match store.session(&session)? {
         // Under the session queue this is a torn remove or a failed `new`
@@ -895,14 +1033,22 @@ pub fn assign(store: &Store, id: u64, path: &RepoPath, session: SessionId) -> Re
         _ => return Err(no_such_session(&session)),
     }
     for _ in 0..16 {
-        let Some(r) = store.publish_record(id)? else { return Err(no_path()) };
+        let Some(r) = store.publish_record(id)? else {
+            return Err(no_path());
+        };
         let outcome = r.outcome.clone().unwrap_or_else(|| json!({}));
         let paths = conflict_paths(&outcome);
         let p = path.as_str();
         if !paths.iter().any(|c| c == p) {
-            if paths.iter().any(|c| c.len() > p.len() && c.starts_with(p) && c.as_bytes()[p.len()] == b'/') {
-                return Err(StrataError::new(Code::IsDirectory, format!("{p} is a directory; assign one path"))
-                    .with_detail(json!({ "publish": id, "path": p })));
+            if paths
+                .iter()
+                .any(|c| c.len() > p.len() && c.starts_with(p) && c.as_bytes()[p.len()] == b'/')
+            {
+                return Err(StrataError::new(
+                    Code::IsDirectory,
+                    format!("{p} is a directory; assign one path"),
+                )
+                .with_detail(json!({ "publish": id, "path": p })));
             }
             return Err(no_path());
         }
@@ -915,14 +1061,19 @@ pub fn assign(store: &Store, id: u64, path: &RepoPath, session: SessionId) -> Re
             .into_iter()
             .filter(|a| a.get("path").and_then(|v| v.as_str()) != Some(p))
             .collect();
-        list.push(json!({ "path": p, "session": session.as_str(), "at": millis(SystemTime::now()) }));
+        list.push(
+            json!({ "path": p, "session": session.as_str(), "at": millis(SystemTime::now()) }),
+        );
         o["assigned"] = json!(list);
         if store.set_publish_outcome(id, r.phase, &o)? {
             return Ok(());
         }
     }
-    Err(StrataError::new(Code::Busy, format!("publish {id} kept changing while assign wrote it"))
-        .with_detail(json!({ "reason": "assign_race", "publish": id })))
+    Err(StrataError::new(
+        Code::Busy,
+        format!("publish {id} kept changing while assign wrote it"),
+    )
+    .with_detail(json!({ "reason": "assign_race", "publish": id })))
 }
 
 /// The paths of `repo` named by `assign` and not yet landed since: path →
@@ -965,23 +1116,42 @@ fn assignments_in(rows: &[PublishRecord], repo: &RepoName) -> BTreeMap<String, S
         if !of_repo(o) {
             continue;
         }
-        for a in o.get("assigned").and_then(|a| a.as_array()).into_iter().flatten() {
-            let (Some(p), Some(s)) = (a.get("path").and_then(|v| v.as_str()), a.get("session").and_then(|v| v.as_str()))
-            else {
+        for a in o
+            .get("assigned")
+            .and_then(|a| a.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let (Some(p), Some(s)) = (
+                a.get("path").and_then(|v| v.as_str()),
+                a.get("session").and_then(|v| v.as_str()),
+            ) else {
                 continue;
             };
-            let Ok(s) = SessionId::try_from(s.to_string()) else { continue };
+            let Ok(s) = SessionId::try_from(s.to_string()) else {
+                continue;
+            };
             let at = a.get("at").and_then(|v| v.as_u64()).unwrap_or(0);
             named.insert(p.to_string(), (s, at));
         }
     }
     for r in rows {
-        let (Some(o), Some(ended)) = (&r.outcome, r.ended) else { continue };
-        if r.phase != PublishPhase::Done || !of_repo(o) || o.get("commit").is_none_or(|c| c.is_null()) {
+        let (Some(o), Some(ended)) = (&r.outcome, r.ended) else {
+            continue;
+        };
+        if r.phase != PublishPhase::Done
+            || !of_repo(o)
+            || o.get("commit").is_none_or(|c| c.is_null())
+        {
             continue;
         }
-        let landed: BTreeSet<&str> =
-            o.get("paths").and_then(|p| p.as_array()).into_iter().flatten().filter_map(|v| v.as_str()).collect();
+        let landed: BTreeSet<&str> = o
+            .get("paths")
+            .and_then(|p| p.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .collect();
         named.retain(|p, (_, at)| !(landed.contains(p.as_str()) && millis(ended) >= *at));
     }
     named.into_iter().map(|(p, (s, _))| (p, s)).collect()
@@ -1007,8 +1177,16 @@ fn entry_ver(e: &OverlayEntry) -> Option<Ver> {
 }
 
 fn workspace_changed(s: &SessionId, p: &RepoPath) -> StrataError {
-    StrataError::new(Code::Busy, format!("{} in session {s} changed while it was read; retry", p.as_str()))
-        .with_detail(json!({ "reason": "workspace_changed", "session": s.as_str(), "path": p.as_str() }))
+    StrataError::new(
+        Code::Busy,
+        format!(
+            "{} in session {s} changed while it was read; retry",
+            p.as_str()
+        ),
+    )
+    .with_detail(
+        json!({ "reason": "workspace_changed", "session": s.as_str(), "path": p.as_str() }),
+    )
 }
 
 /// One side's version of `e` read from the workspace itself, not the
@@ -1018,12 +1196,22 @@ fn workspace_changed(s: &SessionId, p: &RepoPath) -> StrataError {
 /// file changed after the scan → `Busy` (`workspace_changed`), retry.
 /// Above `MERGE_MAX_BYTES` nothing is read (the entry is `TooLarge`).
 fn workspace_ver(root: &Path, s: &SessionId, e: &OverlayEntry) -> Result<Option<Ver>> {
-    let Some(mut v) = entry_ver(e) else { return Ok(None) };
+    let Some(mut v) = entry_ver(e) else {
+        return Ok(None);
+    };
     let full = root.join(e.path.as_str());
     let md = match std::fs::symlink_metadata(&full) {
         Ok(md) => md,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Err(workspace_changed(s, &e.path)),
-        Err(err) => return Err(strata_apfs::classify_io_error(&err, strata_apfs::IoSide::Read, &full)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(workspace_changed(s, &e.path));
+        }
+        Err(err) => {
+            return Err(strata_apfs::classify_io_error(
+                &err,
+                strata_apfs::IoSide::Read,
+                &full,
+            ));
+        }
     };
     if !md.file_type().is_symlink() && md.len() > strata_overlay::MERGE_MAX_BYTES {
         v.size = Some(md.len());
@@ -1031,7 +1219,12 @@ fn workspace_ver(root: &Path, s: &SessionId, e: &OverlayEntry) -> Result<Option<
     }
     let bytes = match read_rooted(root, &e.path) {
         Ok(b) => b,
-        Err(err) if matches!(err.code, Code::NoSuchPath | Code::IsDirectory | Code::NotFile) => {
+        Err(err)
+            if matches!(
+                err.code,
+                Code::NoSuchPath | Code::IsDirectory | Code::NotFile
+            ) =>
+        {
             return Err(workspace_changed(s, &e.path));
         }
         Err(err) => return Err(err),
@@ -1052,10 +1245,20 @@ fn workspace_ver(root: &Path, s: &SessionId, e: &OverlayEntry) -> Result<Option<
 /// means the file changed → `Busy` (`workspace_changed`).
 fn fill_blobs(ctx: &Ctx, s: &SessionId, root: &Path, o: &Overlay) -> Result<()> {
     for e in &o.entries {
-        let Some(Ver { blake: Some(want), .. }) = entry_ver(e) else { continue };
+        let Some(Ver {
+            blake: Some(want), ..
+        }) = entry_ver(e)
+        else {
+            continue;
+        };
         let got = match ctx.store.put_blob_rooted(root, &e.path) {
             Ok(id) => id,
-            Err(err) if matches!(err.code, Code::NoSuchPath | Code::IsDirectory | Code::NotFile) => {
+            Err(err)
+                if matches!(
+                    err.code,
+                    Code::NoSuchPath | Code::IsDirectory | Code::NotFile
+                ) =>
+            {
                 return Err(workspace_changed(s, &e.path));
             }
             Err(err) => return Err(err),
@@ -1068,13 +1271,25 @@ fn fill_blobs(ctx: &Ctx, s: &SessionId, root: &Path, o: &Overlay) -> Result<()> 
 }
 
 fn conflict(kind: &str, p: &RepoPath) -> StrataError {
-    StrataError::new(Code::Conflict, format!("{} cannot be merged ({kind})", p.as_str()))
-        .with_detail(json!({ "reason": kind, "path": p.as_str() }))
+    StrataError::new(
+        Code::Conflict,
+        format!("{} cannot be merged ({kind})", p.as_str()),
+    )
+    .with_detail(json!({ "reason": kind, "path": p.as_str() }))
 }
 
 /// The §5.3 three-way rules as a preview of one path.
-fn preview(src: &Src, p: &RepoPath, base: Option<&Ver>, a: Option<&Ver>, b: Option<&Ver>) -> Result<Merge3Preview> {
-    let clean = Merge3Preview { merged: true, hunks: vec![] };
+fn preview(
+    src: &Src,
+    p: &RepoPath,
+    base: Option<&Ver>,
+    a: Option<&Ver>,
+    b: Option<&Ver>,
+) -> Result<Merge3Preview> {
+    let clean = Merge3Preview {
+        merged: true,
+        hunks: vec![],
+    };
     if src.same(a, b)? {
         return Ok(clean);
     }
@@ -1082,7 +1297,9 @@ fn preview(src: &Src, p: &RepoPath, base: Option<&Ver>, a: Option<&Ver>, b: Opti
         (Some(o), Some(t)) => (o, t),
         _ => return Err(conflict("modify_delete", p)),
     };
-    let Some(bv) = base else { return Err(conflict("add_add", p)) };
+    let Some(bv) = base else {
+        return Err(conflict("add_add", p));
+    };
     if o.is_link() || t.is_link() || bv.is_link() {
         return Err(conflict("link", p));
     }
@@ -1090,15 +1307,21 @@ fn preview(src: &Src, p: &RepoPath, base: Option<&Ver>, a: Option<&Ver>, b: Opti
         return Err(conflict("mode", p));
     }
     let too_large = || {
-        StrataError::new(Code::TooLarge, format!("{} is larger than the merge limit", p.as_str()))
-            .with_detail(json!({ "path": p.as_str(), "limit": strata_overlay::MERGE_MAX_BYTES }))
+        StrataError::new(
+            Code::TooLarge,
+            format!("{} is larger than the merge limit", p.as_str()),
+        )
+        .with_detail(json!({ "path": p.as_str(), "limit": strata_overlay::MERGE_MAX_BYTES }))
     };
     let (Some(bb), Some(ob), Some(tb)) = (src.load(bv)?, src.load(o)?, src.load(t)?) else {
         return Err(too_large());
     };
     if is_binary(&bb) || is_binary(&ob) || is_binary(&tb) {
-        return Err(StrataError::new(Code::Binary, format!("{} is binary; no hunk preview", p.as_str()))
-            .with_detail(json!({ "path": p.as_str() })));
+        return Err(StrataError::new(
+            Code::Binary,
+            format!("{} is binary; no hunk preview", p.as_str()),
+        )
+        .with_detail(json!({ "path": p.as_str() })));
     }
     Ok(match merge3(&bb, &ob, &tb) {
         Merge3::Clean(_) => clean,
@@ -1109,7 +1332,12 @@ fn preview(src: &Src, p: &RepoPath, base: Option<&Ver>, a: Option<&Ver>, b: Opti
                 .map(|h| {
                     let (ours, to) = cap_text(&h.ours);
                     let (theirs, tt) = cap_text(&h.theirs);
-                    HunkPreview { start: h.ours_start as u32, ours, theirs, truncated: to || tt }
+                    HunkPreview {
+                        start: h.ours_start as u32,
+                        ours,
+                        theirs,
+                        truncated: to || tt,
+                    }
                 })
                 .collect(),
         },
@@ -1151,8 +1379,11 @@ pub fn diff_between(ctx: &Ctx, a: SessionId, b: SessionId, repo: &RepoName) -> R
                 json!({ "a": wa.head.as_str(), "b": wb.head.as_str() }),
             ));
         };
-        let (old_o, old_b, new_b, old_ws, old_s) =
-            if a_older { (&oa, &ba, &bb, &wa, &a) } else { (&ob, &bb, &ba, &wb, &b) };
+        let (old_o, old_b, new_b, old_ws, old_s) = if a_older {
+            (&oa, &ba, &bb, &wa, &a)
+        } else {
+            (&ob, &bb, &ba, &wb, &b)
+        };
         fill_blobs(ctx, old_s, &old_ws.path, old_o)?;
         let ignorecase = ctx.git.read_index(&old_ws.path)?.ignorecase;
         let opts = RebaseOptions::for_move(new_b, ignorecase)?;
@@ -1168,11 +1399,21 @@ pub fn diff_between(ctx: &Ctx, a: SessionId, b: SessionId, repo: &RepoName) -> R
         }
     };
     let map = |o: &Overlay| -> BTreeMap<RepoPath, OverlayEntry> {
-        o.entries.iter().map(|e| (e.path.clone(), e.clone())).collect()
+        o.entries
+            .iter()
+            .map(|e| (e.path.clone(), e.clone()))
+            .collect()
     };
     let (ma, mb) = (map(&oa), map(&ob));
-    let src = Src { store: ctx.store, git: ctx.git };
-    let mut out = BetweenDiff { only_a: vec![], only_b: vec![], both: vec![] };
+    let src = Src {
+        store: ctx.store,
+        git: ctx.git,
+    };
+    let mut out = BetweenDiff {
+        only_a: vec![],
+        only_b: vec![],
+        both: vec![],
+    };
     for (p, ea) in &ma {
         match mb.get(p) {
             None => out.only_a.push(p.clone()),
@@ -1185,14 +1426,26 @@ pub fn diff_between(ctx: &Ctx, a: SessionId, b: SessionId, repo: &RepoName) -> R
                     file: Some((common.dir.clone(), p.clone())),
                     data: None,
                 });
-                let va = if projected_a { entry_ver(ea) } else { workspace_ver(&wa.path, &a, ea)? };
-                let vb = if projected_b { entry_ver(eb) } else { workspace_ver(&wb.path, &b, eb)? };
+                let va = if projected_a {
+                    entry_ver(ea)
+                } else {
+                    workspace_ver(&wa.path, &a, ea)?
+                };
+                let vb = if projected_b {
+                    entry_ver(eb)
+                } else {
+                    workspace_ver(&wb.path, &b, eb)?
+                };
                 let r = preview(&src, p, base.as_ref(), va.as_ref(), vb.as_ref());
                 out.both.push((p.clone(), r));
             }
         }
     }
-    out.only_b = mb.keys().filter(|p| !ma.contains_key(*p)).cloned().collect();
+    out.only_b = mb
+        .keys()
+        .filter(|p| !ma.contains_key(*p))
+        .cloned()
+        .collect();
     Ok(out)
 }
 

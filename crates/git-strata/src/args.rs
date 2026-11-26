@@ -61,6 +61,8 @@ pub enum Cmd {
         /// Local revision at or ahead of main (REV for one repo, or R=REV)
         #[arg(long, value_name = "[R=]REV", allow_hyphen_values = true)]
         base: Vec<String>,
+        #[command(flatten)]
+        wait: RetryArgs,
     },
     /// Add workspaces of more repos to an existing session
     #[command(after_long_help = crate::help::ADD_AFTER)]
@@ -71,6 +73,8 @@ pub enum Cmd {
         /// A repo to add, tracked (repeatable or comma separated)
         #[arg(long = "repo", value_delimiter = ',', value_name = "R")]
         repo: Vec<String>,
+        #[command(flatten)]
+        wait: RetryArgs,
     },
     /// Session status (cwd's session, --session, or --all)
     #[command(after_long_help = crate::help::STATUS_AFTER)]
@@ -165,7 +169,12 @@ pub enum Cmd {
         #[arg(long, num_args = 2, value_names = ["FILE", "SESSION"])]
         assign: Option<Vec<String>>,
         /// Commit message paragraphs (repeatable)
-        #[arg(short = 'm', long = "message", value_name = "TEXT", conflicts_with = "assign")]
+        #[arg(
+            short = 'm',
+            long = "message",
+            value_name = "TEXT",
+            conflicts_with = "assign"
+        )]
         message: Vec<String>,
         /// Override a repo's message (repeatable; paragraphs joined)
         #[arg(long, value_name = "REPO=TEXT", conflicts_with = "assign")]
@@ -288,6 +297,29 @@ pub struct WaitArgs {
     /// Print waiting notes on stderr even without a TTY
     #[arg(long)]
     pub progress: bool,
+}
+
+/// `new`/`add`'s [`WaitArgs`]: the same flags, but they bound only the
+/// retries of a refusal the daemon certified replay-safe, never one call.
+#[derive(Debug, Args, Clone, Default)]
+pub struct RetryArgs {
+    /// Seconds to keep retrying a busy repo (default 600, 0: unlimited);
+    /// flag overrides GIT_STRATA_TIMEOUT. Bounds only the retries
+    #[arg(long, value_name = "SECS")]
+    pub timeout: Option<f64>,
+    /// Print who holds the lock before each retry, even without a TTY
+    #[arg(long)]
+    pub progress: bool,
+}
+
+impl RetryArgs {
+    /// The same values as [`WaitArgs`] (for the shared budget parsing).
+    pub fn wait(&self) -> WaitArgs {
+        WaitArgs {
+            timeout: self.timeout,
+            progress: self.progress,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -445,7 +477,10 @@ pub enum ConfigCmd {
 /// The top-level command names, sorted.
 pub fn top_commands() -> Vec<String> {
     use clap::CommandFactory;
-    let mut v: Vec<String> = Cli::command().get_subcommands().map(|c| c.get_name().to_string()).collect();
+    let mut v: Vec<String> = Cli::command()
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
     v.sort();
     v
 }
@@ -458,7 +493,10 @@ pub fn group_commands(group: &str) -> Option<Vec<String>> {
     if !g.has_subcommands() {
         return None;
     }
-    let mut v: Vec<String> = g.get_subcommands().map(|c| c.get_name().to_string()).collect();
+    let mut v: Vec<String> = g
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
     v.sort();
     Some(v)
 }

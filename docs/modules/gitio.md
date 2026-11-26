@@ -174,6 +174,12 @@ impl Git {
     pub fn fetch(&self, remote: &str, branch: &str) -> Result<CommitOid>;
     /// 读 `refs/strata/` 下的 ref，不存在为 None。Code：InvalidInput（不在 refs/strata/ 下）；Unknown。
     pub fn read_ref(&self, name: &str) -> Result<Option<CommitOid>>;
+    /// new-lock：一次 `for-each-ref` 按给的顺序读 `refs/strata/` 下的几个 ref（不存在为 None），以 `timeout` 为界；
+    /// 不是 commit 的再用 `read_ref` 读，结果与逐个 `read_ref` 相同。Code：同 read_ref。
+    pub fn read_strata_refs(&self, names: &[&str], timeout: Duration) -> Result<Vec<Option<CommitOid>>>;
+    /// new-lock：这些 ref 在盘上的样子（各松散 ref 文件、`packed-refs`、`reftable/tables.list` 的设备、inode、大小与时间），
+    /// 只 `stat`，不开描述符。相等即 ref 读起来与取指纹时相同；名字被拒或 `stat` 因不存在以外的原因失败为 None。
+    pub fn strata_refs_stamp(&self, names: &[&str]) -> Option<RefsStamp>;
     /// `ancestor` 是否为 `descendant` 的祖先，相等也算。Code：NoSuchCommit；Unknown。
     pub fn is_ancestor(&self, ancestor: &CommitOid, descendant: &CommitOid) -> Result<bool>;
     /// 一个最近公共祖先；没有共同祖先为 None，调用方据此报 NoMergeBase。Code：NoSuchCommit；Unknown。
@@ -474,7 +480,9 @@ agent 在工作区里的 git 写入（`git add`、`commit`、`stash`、`branch`�
 
 ## 5. 流程与算法
 
-gitio 自己不拿 strata 的锁，靠 git 的锁文件（ref 锁、`index.lock`）保证单个命令的原子性。会写主 checkout 或共享目录的操作（`fetch`、`attach_staging`、`stage`、`commit_tree`、`update_ref`、`delete_ref`）由调用方在 daemon 的 per-repo 写锁内调用；`ensure_shadow`、`attach_worktree` 只写本会话的影子仓库，按 module-rulings Addendum 3 同样在锁内调用（锁只罩 fetch、克隆、attach、pin、交换这些短临界区，`new` 的 fetch 也拿锁）。`export_tree` 不在其中（module-rulings 的 "gitio requirements from session r2"）：它只读主 checkout，只写调用方给的 `dst` 与它旁边的临时目录（§5.5），调用方保证 `dst` 独有就不需要锁。session 在锁外把基线导出到自己的随机暂存 `bases/<repo>/.staging/<hex>/tree`：基线是缓存填充，只有登记进锁（module-rulings "Base generations are built outside the lock"）。过滤器（若有）在 common dir 里的缓存由过滤器自己处理并发（session.md @cec336b §2）。`push` 的远端那一段不需要 gitio 的锁，它对本地唯一的写（§5.11 第 5 步）自带比较并交换，是否持锁推送由 publish.md 与 daemon.md 定。只读的（`read_index`、`is_ignored`、`is_ignored_in_export`、`worktree_gitdir`、`tree_of`、`tree_contains`、`shadow_at`、`shadow_drift`、`read_ref`、`is_ancestor`、`merge_base`、`merge3`）不需要锁。gitio 不做 checkpoint：发布前（`BeforePublish`）与移动前（`BeforeRollout`）的 checkpoint 是调用方的事。
+gitio 自己不拿 strata 的锁，靠 git 的锁文件（ref 锁、`index.lock`）保证单个命令的原子性。会写主 checkout 或共享目录的操作（`fetch`、`attach_staging`、`stage`、`commit_tree`、`update_ref`、`delete_ref`）由调用方在 daemon 的 per-repo 写锁内调用；`ensure_shadow`、`attach_worktree` 只写本会话的影子仓库，按 module-rulings Addendum 3 同样在锁内调用（锁只罩 fetch、克隆、attach、pin、交换这些短临界区，`new` 的 fetch 也拿锁）。`export_tree` 不在其中（module-rulings 的 "gitio requirements from session r2"）：它只读主 checkout，只写调用方给的 `dst` 与它旁边的临时目录（§5.5），调用方保证 `dst` 独有就不需要锁。session 在锁外把基线导出到自己的随机暂存 `bases/<repo>/.staging/<hex>/tree`：基线是缓存填充，只有登记进锁（module-rulings "Base generations are built outside the lock"）。过滤器（若有）在 common dir 里的缓存由过滤器自己处理并发（session.md @cec336b §2）。`push` 的远端那一段不需要 gitio 的锁，它对本地唯一的写（§5.11 第 5 步）自带比较并交换，是否持锁推送由 publish.md 与 daemon.md 定。只读的（`read_index`、`is_ignored`、`is_ignored_in_export`、`worktree_gitdir`、`tree_of`、`tree_contains`、`shadow_at`、`shadow_drift`、`read_ref`、`read_strata_refs`、`strata_refs_stamp`、`is_ancestor`、`merge_base`、`merge3`）不需要锁。gitio 不做 checkpoint：发布前（`BeforePublish`）与移动前（`BeforeRollout`）的 checkpoint 是调用方的事。
+
+new-lock 对上面调用方规则的修订（2026-11-25，session.md §9 "new-lock"）：`new` 与 `add` 建工作区时的 `ensure_shadow` 与 `attach_worktree`、pin 的建立（`update_ref(pin, head, None)`，只建不改）与 pin 的删除（`delete_ref(pin, 读到的值)`）不再要求在 repo 写锁内调用。前两者只写这个会话私有的影子仓库与 index；pin 的建、删靠 git 自己的 ref 锁与比较并交换，pin 已不在算删除成功。删除时只对 git 锁文件的争用（`Unable to create '….lock': File exists`）重试，至多 10 s；通用的 `cannot lock ref` 也用于比较并交换失败，不重试。`move_workspace` 的 attach 与其余写主 checkout 的调用照旧在锁内。daemon 在放锁时读发布链的三个 ref（`read_strata_refs`，一次 `for-each-ref`，有超时）给出释放点快照；`strata_refs_stamp` 只 `stat` 这几个松散 ref 文件、`packed-refs` 与 `reftable/tables.list`（设备、inode、大小、mtime、ctime），git 每次改 ref 都换掉这些文件，指纹没变就说明 ref 读起来与上次相同，daemon 据此跳过那次子进程（daemon.md I2）。
 
 ### 5.1 子进程环境（`command`）
 

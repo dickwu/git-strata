@@ -49,7 +49,9 @@ pub fn advance_anchor_locked(git: &Git, branch: &str) -> Result<AnchorStep> {
         return Ok(AnchorStep::NotCalled(None));
     };
     match c.state {
-        ChainState::Absent | ChainState::Rewound => return Ok(AnchorStep::NotCalled(Some(c.state))),
+        ChainState::Absent | ChainState::Rewound => {
+            return Ok(AnchorStep::NotCalled(Some(c.state)));
+        }
         ChainState::Equal | ChainState::Leads | ChainState::Behind | ChainState::Diverged => {}
     }
     let (Some(top), Some(a)) = (c.top, c.anchor) else {
@@ -174,7 +176,7 @@ impl Core {
         report: &mut NewReport,
         observe: &dyn Fn(&NewReport, &RepoName) -> Result<()>,
     ) -> AfterNew {
-    let _catalog = self.admit();
+        let _catalog = self.admit();
         let mut out = AfterNew::default();
         let repos: Vec<RepoName> = report.manifest.repos.keys().cloned().collect();
         for repo in &repos {
@@ -188,7 +190,7 @@ impl Core {
             .iter()
             .filter_map(|w| match w {
                 NewWarning::ObserveFailed { repo, .. } => Some(repo.clone()),
-                NewWarning::BaseAheadOfMain { .. } => None,
+                NewWarning::BaseAheadOfMain { .. } | NewWarning::FetchSkipped { .. } => None,
             })
             .collect();
         for repo in failed {
@@ -263,8 +265,15 @@ pub fn attach_outside_reason(e: &StrataError) -> Option<&str> {
     }
     let d = e.detail.as_ref()?;
     let direct = d.get("reason").and_then(Value::as_str);
-    let cause = d.get("cause").and_then(|c| c.get("detail")).and_then(|c| c.get("reason")).and_then(Value::as_str);
-    [direct, cause].into_iter().flatten().find(|r| ATTACH_OUTSIDE_REASONS.contains(r))
+    let cause = d
+        .get("cause")
+        .and_then(|c| c.get("detail"))
+        .and_then(|c| c.get("reason"))
+        .and_then(Value::as_str);
+    [direct, cause]
+        .into_iter()
+        .flatten()
+        .find(|r| ATTACH_OUTSIDE_REASONS.contains(r))
 }
 
 /// §5.10: an attach that may have written outside its staging raises
@@ -273,7 +282,10 @@ pub fn attach_outside_reason(e: &StrataError) -> Option<&str> {
 pub fn alert_attach(warnings: &Warnings, main: &Path, e: &StrataError) -> bool {
     match attach_outside_reason(e) {
         Some(reason) => {
-            warnings.add(DaemonWarning::AttachOutside { reason: reason.to_owned(), index: main.join(".git/index") });
+            warnings.add(DaemonWarning::AttachOutside {
+                reason: reason.to_owned(),
+                index: main.join(".git/index"),
+            });
             true
         }
         None => false,
@@ -284,7 +296,11 @@ pub fn alert_attach(warnings: &Warnings, main: &Path, e: &StrataError) -> bool {
 /// line the first time this daemon sees it for a shadow repository. No
 /// re-pinning, no rebuild, no config write. Returns the shadows newly
 /// reported.
-pub fn report_guard_disabled(warnings: &Warnings, status: &SessionStatus, shadow_root: &Path) -> Vec<PathBuf> {
+pub fn report_guard_disabled(
+    warnings: &Warnings,
+    status: &SessionStatus,
+    shadow_root: &Path,
+) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for (repo, ws) in &status.workspaces {
         let disabled = ws.warnings.iter().any(|w| match w {
@@ -311,5 +327,7 @@ pub fn report_guard_disabled(warnings: &Warnings, status: &SessionStatus, shadow
 
 /// session.md §4.1: `<root>/sessions/.repos/<id>/<repo>.git`.
 pub fn shadow_dir(root: &Path, id: &SessionId, repo: &RepoName) -> PathBuf {
-    root.join("sessions/.repos").join(id.as_str()).join(format!("{repo}.git"))
+    root.join("sessions/.repos")
+        .join(id.as_str())
+        .join(format!("{repo}.git"))
 }

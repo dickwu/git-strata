@@ -30,6 +30,18 @@ pub(crate) fn each_repo_n<T: Send>(
     seam: &(dyn Fn(&RepoName) -> Result<()> + Sync),
     f: &(dyn Fn(&RepoName) -> Result<T> + Sync),
 ) -> Result<Vec<(RepoName, T)>> {
+    each_repo_all(n, repos, seam, f).map_err(|mut errors| errors.remove(0))
+}
+
+/// `each_repo_n`, except that a failure returns the errors of every repo
+/// that failed, in `RepoName` order, after all workers were joined (the
+/// head phase's certification, new-lock §4.1).
+pub(crate) fn each_repo_all<T: Send>(
+    n: usize,
+    repos: &[RepoName],
+    seam: &(dyn Fn(&RepoName) -> Result<()> + Sync),
+    f: &(dyn Fn(&RepoName) -> Result<T> + Sync),
+) -> std::result::Result<Vec<(RepoName, T)>, Vec<strata_types::StrataError>> {
     struct Shared<T> {
         next: usize,
         failed: bool,
@@ -71,12 +83,17 @@ pub(crate) fn each_repo_n<T: Send>(
     });
     let sh = shared.into_inner().unwrap_or_else(|p| p.into_inner());
     let mut out = Vec::new();
+    let mut errors = Vec::new();
     for (i, r) in sh.results.into_iter().enumerate() {
         match r {
             Some(Ok(v)) => out.push((repos[i].clone(), v)),
-            Some(Err(e)) => return Err(e),
+            Some(Err(e)) => errors.push(e),
             None => {}
         }
     }
-    Ok(out)
+    if errors.is_empty() {
+        Ok(out)
+    } else {
+        Err(errors)
+    }
 }

@@ -35,6 +35,13 @@ pub enum Work {
         repos: Vec<RepoName>,
         session: Option<SessionId>,
     },
+    /// new-lock §3.5: the old-tree worker's judgement of done move `n`'s
+    /// old tree; its steps are the claim's phases.
+    OldTreeCheck {
+        repo: RepoName,
+        session: SessionId,
+        n: u64,
+    },
 }
 
 /// Told of [`Work`] on the threads it is installed on. Every call comes from

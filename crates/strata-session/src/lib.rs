@@ -57,7 +57,8 @@ pub use new::NewWarning;
 pub use new::add::{ADD_STAGING_PREFIX, AddReport};
 pub use new::{Layout, validate_base_rev};
 pub use old_tree::{
-    OLD_TREE_TTL, OldTreeKey, OldTreeMode, OldTreeVerdict, Outcome as OldTreeOutcome,
+    OLD_TREE_TTL, OldTreeClaim, OldTreeGuard, OldTreeKey, OldTreeLocks, OldTreeMode,
+    OldTreeVerdict, Outcome as OldTreeOutcome,
 };
 pub use orphans::{OrphanRetired, Sweep};
 pub use outstanding::{Ancestry, Outstanding, PendingFold, outstanding};
@@ -203,8 +204,9 @@ impl<'a> Sessions<'a> {
     }
 
     /// D53: a repo that `new` or `add` fetched successfully less than `w`
-    /// ago is not fetched again by them (the chain top is still read under
-    /// the repo lock). Zero turns the skip off.
+    /// ago is not fetched again by them (the main tip then comes from the
+    /// repo's release-point snapshot, or from the bounded locked read when
+    /// that snapshot is not valid). Zero turns the skip off.
     pub fn set_fetch_window(&self, w: Duration) {
         *self.fetch_window.lock().unwrap_or_else(|p| p.into_inner()) = w;
     }
@@ -294,61 +296,61 @@ impl<'a> Sessions<'a> {
         Ok(out.expect("with_write ran the closure"))
     }
 
-    /// The same after the call's first visible write: `Busy` from the outer
-    /// wait is retried until the lock is had (§6.2; module-rulings "Waits
-    /// after a call's first visible write are not bounded").
-    pub(crate) fn with_lock_unbounded<T>(
-        &self,
-        repo: &RepoName,
-        mut f: impl FnMut() -> Result<T>,
-    ) -> Result<T> {
+    /// new-lock §2.4a: where a repo-lock take was removed, shutdown still
+    /// refuses exactly as the closed lock did (`ReadOnly` `shutting_down`).
+    pub(crate) fn refuse_if_shut_down(&self) -> Result<()> {
+        if self.locks.is_shut_down() {
+            return Err(
+                StrataError::new(Code::ReadOnly, "the daemon is shutting down")
+                    .with_detail(serde_json::json!({ "reason": "shutting_down" })),
+            );
+        }
+        Ok(())
+    }
+
+    /// new-lock §2.7: delete session `id`'s pin in `repo` without the repo
+    /// lock (gitio.md §5's caller rule, amended). The pin is read once and
+    /// that value is the expected one; an absent pin is done. Only proven
+    /// lock-file contention is retried, for at most [`PIN_LOCK_RETRY`] and
+    /// with the same expected value; a moved pin (`HeadMoved`) and any other
+    /// error are returned for the caller's failure path. Refused at shutdown
+    /// like the closed lock; no policy fence applies (cleanup).
+    pub(crate) fn unpin(&self, repo: &RepoName, id: &SessionId) -> Result<()> {
+        self.refuse_if_shut_down()?;
+        let git = self.git(repo)?;
+        let pin = new::pin_ref(id);
+        let Some(expected) = git.read_ref(&pin)? else {
+            return Ok(());
+        };
+        let deadline = Instant::now() + PIN_LOCK_RETRY;
         loop {
-            let attempt_since = std::time::SystemTime::now();
-            let mut out: Option<T> = None;
-            match self.locks.with_write(repo, &mut || {
-                out = Some(f()?);
-                Ok(())
-            }) {
-                Err(e) if e.code == Code::Busy && !strata_deps::pins_tightened(&e) => {
-                    if e.detail
-                        .as_ref()
-                        .is_some_and(|d| d["reason"] == "lock_wait")
-                    {
-                        self.locks.record_long_wait(repo, attempt_since);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                    continue;
+            match git.delete_ref(&pin, &expected) {
+                Err(e) if ref_lock_busy(&e) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50))
                 }
-                Err(e) => return Err(e),
-                Ok(r) => {
-                    r?;
-                    return Ok(out.expect("with_write ran the closure"));
-                }
+                r => return r,
             }
         }
     }
-    pub(crate) fn with_cleanup_lock<T>(
-        &self,
-        repo: &RepoName,
-        mut f: impl FnMut() -> Result<T>,
-    ) -> Result<T> {
-        loop {
-            let mut out = None;
-            match self.locks.with_cleanup(repo, &mut || {
-                out = Some(f()?);
-                Ok(())
-            }) {
-                Err(e) if e.code == Code::Busy && !strata_deps::pins_tightened(&e) => {
-                    std::thread::sleep(Duration::from_millis(20))
-                }
-                Err(e) => return Err(e),
-                Ok(r) => {
-                    r?;
-                    return Ok(out.expect("cleanup lock ran closure"));
-                }
-            }
-        }
-    }
+}
+
+/// How long [`Sessions::unpin`] retries git's ref lock-file contention.
+pub(crate) const PIN_LOCK_RETRY: Duration = Duration::from_secs(10);
+
+/// git's lock-file contention (`Unable to create '<path>.lock': File
+/// exists`, also for `packed-refs.lock`), not the generic `cannot lock ref`
+/// git prints for a compare-and-swap mismatch too (gitio `cas_failure`).
+pub fn ref_lock_busy(e: &StrataError) -> bool {
+    let stderr = e
+        .detail
+        .as_ref()
+        .and_then(|d| d.get("stderr"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    e.code == Code::Unknown
+        && stderr
+            .lines()
+            .any(|l| l.contains("Unable to create '") && l.contains(".lock': File exists"))
 }
 
 pub(crate) fn no_such_repo(repo: &RepoName) -> StrataError {

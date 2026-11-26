@@ -239,7 +239,8 @@ pub struct SeedRecord {
     pub copied: SystemTime,
 }
 
-/// new 的结果：会话的清单，加上会话建好之后、观察主干没做成的警告（§5.1 第 15 步）[我的决定 D15]。
+/// new 的结果：会话的清单，加上警告：会话建好之后观察主干没做成（§5.1 第 15 步）[我的决定 D15]、`--base` 领先 main、
+/// 到期的 fetch 因仓库忙被跳过（new-lock §2.2）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewReport {
     pub manifest: SessionManifest,
@@ -251,10 +252,22 @@ pub struct NewReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum NewWarning {
+    /// [R2 local bases] `--base` 的 `rev` 解析出的 `head` 领先 main 的 tip `main` 共 `ahead` 个提交（最多数到 1000），
+    /// `commits` 是其中最多 20 个 `{head, subject}`。会话照常建好，停在这个基线上，直到 main 包含它。
+    BaseAheadOfMain { repo: RepoName, rev: String, head: CommitOid, main: CommitOid, ahead: u32, commits: Vec<serde_json::Value> },
     /// 对这个仓库的 `deps::observe_main` 失败了：具名拒绝（什么都没写），或 `Unknown`（`reason = "main_not_recorded"`：
     /// 提议已登记，主干记录还没跟上）。`detail` 是 deps 返回的原样错误。会话照常是 Active；daemon 之后重新观察
     /// （module-rulings "observe_main is best-effort for its callers"）。
     ObserveFailed { repo: RepoName, detail: StrataError },
+    /// [new-lock §2.2] 这个仓库的 fetch 到期了，可它的写锁正被 `holder`（替 `holder_session`）持有，于是跳过 fetch：head 是锁的
+    /// 上一个持有者留下的 main 的 tip，上次成功的 fetch 在 `last_fetch_at`（没有记录时为 null）。D53 的新鲜度只在仓库忙时放宽。
+    FetchSkipped {
+        repo: RepoName,
+        holder: Option<String>,
+        holder_session: Option<SessionId>,
+        #[serde(default, with = "crate::status::opt_rfc3339")]
+        last_fetch_at: Option<SystemTime>,
+    },
 }
 
 /// 一个会话的状态（design §6.3）。JSON 形状由 cli.md 引用。
@@ -675,7 +688,7 @@ design §6.1 第 2 步把接法交给构建者；增补 2 定为影子仓库，g
 
 **阶段 B：钉基线、填缓存、判种子。** 每个仓库各自进行，按 `RepoName` 的顺序派发给最多 4 个并行的工作者 [我的决定 D41]。这里写下的只有缓存（增补 6 细化 4）与 gitio 对 origin 的观察；失败是具名码或原样透传。一个仓库失败，`new` 就在 `create_session` 之前停下，别的仓库已经填好的缓存留着给以后用。
 
-8. 【锁 R】`git.fetch("origin", default_branch)`；同一段锁里 `head = deps::main_tip(cfg, git)`，放锁。说明，不是另一份规则：`pin_unpushed` 开着、发布分支等于默认分支时，`new` 只在链领先 origin 且锚在 origin 上（`deps::publish_chain` 为 `Leads`）时钉链顶，其余情形钉 origin 的 tip（没有链、与 origin 相同或落后、没有锚、被回退或分叉、`pin_unpushed` 关着）。判定与锚的前移都在 deps（module-rulings "The anchor follows origin along the chain — amended"、"The chain predicate lives in deps"；deps.md §5.9），session 不另写。`observe_main` 用的是同一个 `main_tip`（deps.md §2 对 session 的要求第 7 条）；它只读 ref、不取锁，在 session 持着的锁里调用不会自锁。它返回 None（fetch 之后 origin 仍没有默认分支）→ `NoSuchBranch`（config.md 的运行时检查）。`tree = git.tree_of(head)`。gitio 与 deps 的码原样透传（`NoSuchBranch`、`NoSuchCommit`、`Unsupported`……，3b `:14`）。fetch 写下的对象与 `refs/strata/remotes/origin/<default_branch>` 是 gitio 自己对 origin 的观察（gitio.md §4.1）：以后的操作都复用它，重做得到同样的结果；增补 6 把 `new` 的第一次对外可见的写定为 `create_session`，而 fetch 必须在它之前，所以本文把 fetch 当作缓存填充看待 [我的决定 D5]。
+8. 【锁 R】`git.fetch("origin", default_branch)`；同一段锁里 `head = deps::main_tip(cfg, git)`，放锁。new-lock 修订（§9 "new-lock"）：没有 `--base` 时这一步不再总是排锁的队。fetch 还在 D53 的窗口内就不取锁，按这个 repo 的释放点快照（`RepoWriteLock::ref_snapshot`，上一次放锁时的三个 ref）算 `head`；fetch 到期时零等待地试锁（`try_write_as`），锁空闲就照上面在锁里做，锁正被别人持有就不 fetch，按快照算，报告里加一条 `NewWarning::FetchSkipped`。显式 `--base`、快照无效、origin 从没 fetch 过时仍照上面在有界等待的锁里做。这一步的拒绝都在任何写之前；全部仓库都以 `Busy lock_wait` 失败时，拒绝带 `detail.retry_safe: true`，cli 据此重发。说明，不是另一份规则：`pin_unpushed` 开着、发布分支等于默认分支时，`new` 只在链领先 origin 且锚在 origin 上（`deps::publish_chain` 为 `Leads`）时钉链顶，其余情形钉 origin 的 tip（没有链、与 origin 相同或落后、没有锚、被回退或分叉、`pin_unpushed` 关着）。判定与锚的前移都在 deps（module-rulings "The anchor follows origin along the chain — amended"、"The chain predicate lives in deps"；deps.md §5.9），session 不另写。`observe_main` 用的是同一个 `main_tip`（deps.md §2 对 session 的要求第 7 条）；它只读 ref、不取锁，在 session 持着的锁里调用不会自锁。它返回 None（fetch 之后 origin 仍没有默认分支）→ `NoSuchBranch`（config.md 的运行时检查）。`tree = git.tree_of(head)`。gitio 与 deps 的码原样透传（`NoSuchBranch`、`NoSuchCommit`、`Unsupported`……，3b `:14`）。fetch 写下的对象与 `refs/strata/remotes/origin/<default_branch>` 是 gitio 自己对 origin 的观察（gitio.md §4.1）：以后的操作都复用它，重做得到同样的结果；增补 6 把 `new` 的第一次对外可见的写定为 `create_session`，而 fetch 必须在它之前，所以本文把 fetch 当作缓存填充看待 [我的决定 D5]。
 9. `gen` = §5.2 的 `ensure_base` 流程，沿用第 8 步得到的 head 与 tree：导出、`ensure` 与清单在锁外，只有登记取锁（第 8 步的锁这时已经放开）。
 10. 种子计划：`plan = seed_plan(cfg, git, path, store.base_dir(&gen), &tree)`（§5.3）。显式条目的拒绝在这里发生，对着的是基线 generation（review I3）。tracked 仓库再定种子缓存：条目 `c` 在主 checkout 里存在（第 6 步已确认是真目录），它在基线 generation 目录里不存在，而且各级上级要么不存在、要么是真目录（`apfs::attrs_of(base, 上级)`，逐级 `O_NOFOLLOW`）→ 进计划；否则静默跳过 [我的决定 D12]。种子缓存只是加速，缺省列表的条目不该因为某个仓库的形状让它的每一次 `new` 都失败（与 review M10 同一个教训）；这种情形要是在 `create_session` 之后才发现，就只能报 `Unknown`。
 
@@ -688,12 +701,12 @@ design §6.1 第 2 步把接法交给构建者；增补 2 定为影子仓库，g
 12. `root`：`mkdir_rooted(paths.root, "sessions", 0o755, parents = true)`；`mkdir_rooted(paths.root, "sessions/<id>", 0o755, parents = false)`，已存在即 `Exists`，排他由 `mkdir` 本身保证（M21）；`mkdir_rooted(paths.root, "sessions/.repos/<id>", 0o755, parents = true)`。
 13. 下面五个阶段依次进行，一个阶段对全部仓库做完才进入下一个，所以任何时刻会话只有一个 phase。阶段之内按 `RepoName` 的顺序把仓库派发给最多 4 个并行的工作者 [我的决定 D41]；某个仓库失败之后不再派发，等已经开始的做完，再按本节末尾"第 12–14 步的任何失败"处理，`detail.repo` 是按 `RepoName` 顺序第一个失败的仓库。
     1. `workspace`：`apfs::clone_tree_rooted(store.base_dir(&gen), root, <repo>)`，一次 clonefile 克隆源码与依赖目录（增补 3）。不取写锁 [我的决定 D13]：第 11 步写下的工作区行已经引用这个 generation，store 的 gc 不回收被引用的 generation（§4.3）。
-    2. `git`【锁 R】：`shadow = git.ensure_shadow(<paths.root>/sessions/.repos/<id>/<repo>.git)`；`git.attach_worktree(&shadow, 1, &head, ws, ws)`。gitio 要求两者在锁内（gitio.md §5 开头）。
-    3. `pin`【锁 R】：`git.update_ref("refs/strata/pins/<id>", &head, None)`，期望这个 ref 原本不存在。第 13.2 与 13.3 步已在 `create_session` 之后，取锁不超时：外层 `with_write` 返回 `Busy` 就再调，直到拿到锁，不受写之前的有界等待 `ctx.env.timeout` 截断（§6.2 末尾；module-rulings "Waits after a call's first visible write are not bounded"）。
+    2. `git`（new-lock：不取锁）：`shadow = git.ensure_shadow(<paths.root>/sessions/.repos/<id>/<repo>.git)`；`git.attach_worktree(&shadow, 1, &head, ws, ws)`。两者只写这个工作区私有的影子仓库与 index，gitio.md §5 的调用方规则已为它们放宽。原来取锁的地方先查 daemon 是否在关（`is_shut_down`）与 fence（`check_fence`），给出与原来取锁相同的拒绝（§9 "new-lock"）。
+    3. `pin`（new-lock：不取锁）：`git.update_ref("refs/strata/pins/<id>", &head, None)`，只建不改，由 git 自己的 ref 锁保证；期望这个 ref 原本不存在，CAS 失败照旧处理。关停与 fence 的检查同第 2 步。
     4. `seed_caches`（只对 tracked 仓库）：计划里的每个条目 `c`：`mkdir_rooted(ws, c 的上级, 0o755, parents = true)`；`clone_tree_rooted(path/c, ws, c)`。`node_modules/.cache` 因此落进刚克隆的依赖目录里（deps 封存时排除了它，见 `nested_seed_caches`）。最后一段名字是 `target` 的条目克隆完，删掉其中的 `.connector.json`、`debug/.connector.json`、`release/.connector.json`（tauri-connector 在主 checkout 里写下的端口与 pid，留着会让会话里的 agent 连到主 checkout 的应用）；不存在的跳过，别的错误按这一阶段失败（D58）。`add` 的暂存目录克隆种子缓存后做同样的事（D52）。
     5. `seed_files`：`records = seed_files(&plan, ws)`；`store.record_seeds(id, repo, rows)`。
 14. `finalize`：【F】对会话根与 `sessions/.repos/<id>/` 的目录句柄（`apfs::open_rooted(paths.root, …)`）各做一次 `full_fsync` [我的决定 D14]：会话一旦记成 `Active`，目录就要扛得住断电（增补 3 "Durability"）。然后 `store.set_lifecycle(id, Creating, Active, None, now)`。
-15. 观察主干：对每个仓库（按第 13 步的方式派发，只是一个仓库失败不影响别的仓库）`deps::observe_main(ctx, &tree, &head, &store.base_dir(&gen))`，记下主干当前的依赖集，id 变了就登记提议（deps.md §2 对 session 的要求第 4 条）。会话这时已是 `Active`，这一步不记阶段（store 只在 `Creating`、`Removing` 时收阶段名），接缝的位置是 `new.observe`（§3）。session 调它时不持有任何 repo 写锁：按 module-rulings "deps follows main's current tip"，`observe_main` 自己取锁，是写锁里的一小段临界区，在锁里读主干的 tip；签名不变（§2 对 deps 的要求第 1 条）。到这一步，第 8 步的 fetch、第 9 步的登记、第 13 步 `git` 与 `pin` 取的锁都已放开，所以它取锁不会撞上本线程或本次 `new` 的另一个工作者持有的锁（§5 开头的【锁 R】）。它的失败不让 `new` 失败，也不改会话的生命周期（module-rulings "observe_main is best-effort for its callers"，取代本文第二轮 D15 的失败处理）：具名拒绝（什么都没写，例如等写锁到时的 `Busy`），或 `Unknown`（`reason = "main_not_recorded"`：提议已登记，主干记录没跟上），都记成报告里的一条 `NewWarning::ObserveFailed { repo, detail }`（`kind = "ObserveFailed"`，`detail` 是 deps 的原样错误）。主干记录由 daemon 之后的观察补上（§2 对 daemon 的要求第 7 条）；记录落后期间，deps approve 的 `main_moved` 检查挡住按过时的 head 铺开（module-rulings "approve refuses a Pending whose head is no longer main's tip"）。放在 `finalize` 之后 [我的决定 D15]：等写锁的时间不再让会话停在 `Creating`；进程在这一步崩溃时，会话已是 `Active`，只是这次观察没做完，与观察失败一样由以后的观察补上，不会被 `recover` 记成 `Unknown`。
+15. 观察主干：对每个仓库（按第 13 步的方式派发，只是一个仓库失败不影响别的仓库）`deps::observe_main(ctx, &tree, &head, &store.base_dir(&gen))`，记下主干当前的依赖集，id 变了就登记提议（deps.md §2 对 session 的要求第 4 条）。会话这时已是 `Active`，这一步不记阶段（store 只在 `Creating`、`Removing` 时收阶段名），接缝的位置是 `new.observe`（§3）。session 调它时不持有任何 repo 写锁：按 module-rulings "deps follows main's current tip"，`observe_main` 自己取锁，是写锁里的一小段临界区，在锁里读主干的 tip；签名不变（§2 对 deps 的要求第 1 条）。到这一步，第 8 步的 fetch 与第 9 步的登记取过的锁都已放开（第 13 步的 `git` 与 `pin` 不取锁，new-lock），所以它取锁不会撞上本线程或本次 `new` 的另一个工作者持有的锁（§5 开头的【锁 R】）。它的失败不让 `new` 失败，也不改会话的生命周期（module-rulings "observe_main is best-effort for its callers"，取代本文第二轮 D15 的失败处理）：具名拒绝（什么都没写，例如等写锁到时的 `Busy`），或 `Unknown`（`reason = "main_not_recorded"`：提议已登记，主干记录没跟上），都记成报告里的一条 `NewWarning::ObserveFailed { repo, detail }`（`kind = "ObserveFailed"`，`detail` 是 deps 的原样错误）。主干记录由 daemon 之后的观察补上（§2 对 daemon 的要求第 7 条）；记录落后期间，deps approve 的 `main_moved` 检查挡住按过时的 head 铺开（module-rulings "approve refuses a Pending whose head is no longer main's tip"）。放在 `finalize` 之后 [我的决定 D15]：等写锁的时间不再让会话停在 `Creating`；进程在这一步崩溃时，会话已是 `Active`，只是这次观察没做完，与观察失败一样由以后的观察补上，不会被 `recover` 记成 `Unknown`。
 16. 返回 `NewReport { manifest, warnings }`。daemon 随后为 tracked 仓库建 `Tracker` 并开始监听（design §6.1 第 3 步）。
 
 第 12–14 步的任何失败：`set_lifecycle(id, Creating, Unknown, Some(scene), now)`，返回 `Unknown`（`detail` 与 `message` 见 §6.3），`scene.kept` 列出已经建出的会话根与影子仓库目录。`set_lifecycle` 本身也失败时照样返回 `Unknown`：会话行停在 `Creating`，下一次启动时 `recover` 把它记成 `Unknown`。
@@ -798,7 +811,7 @@ ticket 不会与 id 混淆：`new` 以 `ReservedName` 拒绝会话 id 形式的 
    6. `conflicts`：工作区行记下的、最近一次移动的冲突路径。
    7. `seeds`：每条种子行。主 checkout 里来源的 mtime 与 `source_mtime` 不同、或来源已不在 → `SeedStale` [我的决定 D18]；`git.is_ignored(ws, p)` 为假 → `SeedNotIgnored`。工作区不在时不查 [我的决定 D19]：`is_ignored` 要经工作区的 `.git` 读规则，`Missing` 已经说明了问题。
    8. `MirrorDrift`：影子仓库在时，`git.shadow_drift(&shadow, ws)` 非空 → 一条告警，每项一个 `MirrorDriftItem`：`Exclude` → `info_exclude`，`Attributes` → `info_attributes`，`Config { key }` → `config` 加 `key`，`PrePushGuardDisabled { hooks_path, hook_replaced }` → `pre_push_guard_disabled` 加这两个字段（gitio @60b1cf5：husky、lefthook 这类安装常把 `core.hooksPath` 改掉）。第二个参数是工作区根：守卫按 git 在工作区里实际用的 hooks 目录判断，工作区的 `.git` 不在时只比镜像（gitio §5.6）。session 只报告，不钉回；要不要钉回由 daemon 定（module-rulings 的 T13 条）。`shadow_drift` 返回 `Unknown`（不论 reason：`hooks-lookup` 是 git 查不出工作区的 hooks 目录，gitfile 坏了或 config 里有 git 拒绝的值；`timeout`；镜像文件读不了……）时不让 status 失败：这个工作区记一条 `PrePushGuardUnknown { detail }`（守卫状态不明，可能已失效；`detail` 是 gitio 的原样错误；gitio.md §5.6、§6 要 status 这样报出），接着做下一步 [我的决定 D48]。gitio 这时不返回任何漂移项，所以这个工作区这次没有 `MirrorDrift`。`shadow_drift` 的另一个码 `InvalidInput`（不是本仓库的影子仓库，或工作区不是绝对路径）照常透传。
-   9. 移动意图（`store.move_intents(id)` 里这个仓库的）：`begin_move` 之前已把 `(session, repo)` 标成进行中的（§5.7），只隐藏这个进行中工作区的 `Preparing` 与 `Swapping` 意图 [我的决定 D47，评审 M-8]。其余的：`Preparing` → `MoveLeftover { n, staging }`；`Swapping` → `MoveAwaitingRecover { n, staging }`：交换开始之后的失败没能记下（`fail_move` 本身也失败了，§5.7），交换可能已经发生，工作区健康却还是 `Ok`；daemon 下一次启动时 `recover` 把它记成 `Unknown`（§5.8 第 2 步），之后经 §5.9 处理；在那之前，这个工作区的移动以 `InvalidInput`（`move_awaiting_recover`）拒绝（§5.7 第 9 步；review M-3）。`remove` 与下一次 `move_workspace` 不查这套进行中记录，把每一条 `Swapping` 都当成停住的：一条泄漏的记录不能把停住的意图藏起来。`Abandoned` 而它的 `staging` 目录还在（§5.9 第 6 步没能退役）→ 同样是 `MoveLeftover`；`Unknown` 的意图不另报：工作区健康已是 `Unknown`，带着现场（第 2.1 步），daemon 据此给出 Abandon 与 Accept 两种处理（§5.9）；`Done` 而 `old_tree` 有值，或者它的 `staging` 目录还在（§5.7 第 19 步没走完）→ `OldTreeKept`（`path` 取 `old_tree`，没有时取 `staging`；`retained` 即 `old_tree` 有值），`holders = deps::open_files(path)`，`changed` 在读的时候重算 [我的决定 D22]：找这次移动的 `BeforeRollout` checkpoint，即 `checkpoints(id, Some(repo))` 里原因为 `BeforeRollout`、时刻不晚于意图 `started` 的最新一个；用 `overlay::reconcile_full` 冷扫旧树（`ws.root` 取旧树，它的 gitfile 仍指向旧管理目录；基线取那个 checkpoint 的 `base`），条目与 checkpoint 的条目不同即 `changed = true`。（status-perf A1，D1）这是 `Inline` 模式（默认，测试用）。daemon 在 `recover` 之后、本地回退（daemon 不在）总是把 `Sessions` 设成 `Deferred`：status 不再扫进程、不再冷扫旧树，只读后台给出的判定缓存 `old_tree_hint`：有与路径、inode 都对得上的判定 → `holders`、`changed: Some(..)`、`checked_at` 取自判定；没有 → `holders: []`、`changed: None`、`unchecked: true`（本地回退时总是这样，D10「尚未检查」）。判定缺失或早于 `OLD_TREE_TTL`（600 s）时把这棵树排进待查队列；过期的判定照样返回。缓存只是提示：从不凭缓存的判定退役任何东西。daemon 的旧树线程（daemon.md §5.11）对每个排队项在 `try_session` + `with_repo` 下调 `check_old_tree`：重读会话（须 `Active`、仓库在清单里）与意图（须 `Done`、路径与 inode 不变），再按 §5.7 第 20 步的规则当场判定：没人持有、与 checkpoint 一致、不是 `retained` → 连同管理目录退役（D1：没人用、没改过的旧树自动挪进 store 的回收区）；否则写一条判定。遍历遵守线程本地的停止标志（`strata_apfs::with_walk_stop`），被停下的检查不写判定。`move_workspace`、`remove`、`restore` 之后清掉该会话的判定与待查项（`forget_old_trees`）。
+   9. 移动意图（`store.move_intents(id)` 里这个仓库的）：`begin_move` 之前已把 `(session, repo)` 标成进行中的（§5.7），只隐藏这个进行中工作区的 `Preparing` 与 `Swapping` 意图 [我的决定 D47，评审 M-8]。其余的：`Preparing` → `MoveLeftover { n, staging }`；`Swapping` → `MoveAwaitingRecover { n, staging }`：交换开始之后的失败没能记下（`fail_move` 本身也失败了，§5.7），交换可能已经发生，工作区健康却还是 `Ok`；daemon 下一次启动时 `recover` 把它记成 `Unknown`（§5.8 第 2 步），之后经 §5.9 处理；在那之前，这个工作区的移动以 `InvalidInput`（`move_awaiting_recover`）拒绝（§5.7 第 9 步；review M-3）。`remove` 与下一次 `move_workspace` 不查这套进行中记录，把每一条 `Swapping` 都当成停住的：一条泄漏的记录不能把停住的意图藏起来。`Abandoned` 而它的 `staging` 目录还在（§5.9 第 6 步没能退役）→ 同样是 `MoveLeftover`；`Unknown` 的意图不另报：工作区健康已是 `Unknown`，带着现场（第 2.1 步），daemon 据此给出 Abandon 与 Accept 两种处理（§5.9）；`Done` 而 `old_tree` 有值，或者它的 `staging` 目录还在（§5.7 第 19 步没走完）→ `OldTreeKept`（`path` 取 `old_tree`，没有时取 `staging`；`retained` 即 `old_tree` 有值），`holders = deps::open_files(path)`，`changed` 在读的时候重算 [我的决定 D22]：找这次移动的 `BeforeRollout` checkpoint，即 `checkpoints(id, Some(repo))` 里原因为 `BeforeRollout`、时刻不晚于意图 `started` 的最新一个；用 `overlay::reconcile_full` 冷扫旧树（`ws.root` 取旧树，它的 gitfile 仍指向旧管理目录；基线取那个 checkpoint 的 `base`），条目与 checkpoint 的条目不同即 `changed = true`。（status-perf A1，D1）这是 `Inline` 模式（默认，测试用）。daemon 在 `recover` 之后、本地回退（daemon 不在）总是把 `Sessions` 设成 `Deferred`：status 不再扫进程、不再冷扫旧树，只读后台给出的判定缓存 `old_tree_hint`：有与路径、inode 都对得上的判定 → `holders`、`changed: Some(..)`、`checked_at` 取自判定；没有 → `holders: []`、`changed: None`、`unchecked: true`（本地回退时总是这样，D10「尚未检查」）。判定缺失或早于 `OLD_TREE_TTL`（600 s）时把这棵树排进待查队列；过期的判定照样返回。缓存只是提示：从不凭缓存的判定退役任何东西。daemon 的旧树线程（daemon.md §5.11）按 new-lock 分阶段判定每个排队项（§9 "new-lock"）：`claim_old_tree` 在队列的互斥量里取出一项并记为进行中；阶段 0 只在会话队列空闲时占位（`try_session`），重读会话（须 `Active`、仓库在清单里）与意图（须 `Done`、路径与 inode 不变），读活动行，先在 store 里清掉它的干净 pass；阶段 1 不持任何锁，扫进程、走查旧树；阶段 2 零等待地占会话队列，在有界等待内取 repo 锁，复核阶段 0 的事实与令牌，再按 §5.7 第 20 步的规则当场判定：没人持有、与 checkpoint 一致、不是 `retained` → 连同管理目录退役（D1：没人用、没改过的旧树自动挪进 store 的回收区）；否则写一条判定。阶段 2 拿不到锁时丢掉这次判定，稍后重试；阶段 1 已找到的迟到写入照样记下（2N），清掉的 pass 只在会话队列下复核之后放回（2′）。遍历遵守线程本地的停止标志（`strata_apfs::with_walk_stop`），被停下的检查不写判定。排队的规则：同一身份（路径、inode、令牌）正在判定、有新鲜的判定、判定完成不到 `OLD_TREE_TTL`、或排着同一棵树的重试时，status 不再排它；正在判定的那一项身份变了，只在它结束后补排一次。`remove`、`restore` 之后作废该会话的判定（`forget_old_trees`），`move_workspace` 之后只作废这个 repo 的（`forget_old_trees_of`）；排着的检查与重试留着，每次检查都会重新核对。
    10. `RestoreScene`：`<会话根>/.strata-tmp-restore-<repo>/` 存在且非空（增补 7）。里面的 `plan.json` 归 overlay，由 daemon 读出并入回复。
 3. 返回 `SessionStatus`。
 
@@ -845,13 +858,13 @@ ticket 不会与 id 混淆：`new` 以 `ReservedName` 拒绝会话 id 形式的 
 
 6. 【可见】`set_lifecycle(id, 当前状态, Removing, None, now)`，当前状态是 `Active` 或 `Unknown`。返回 false（状态在读与写之间变了；按会话排队时不会发生）→ `InvalidInput`（`reason: "lifecycle_changed"`）。
 7. `retire`：`store.retire_dir(会话根)`，再 `store.retire_dir(<paths.root>/sessions/.repos/<id>)`（store 第 4 行）。目录不存在（`NoSuchPath`，例如 `new` 在建会话根之前失败）就跳过 [我的决定 D27]。两次改名之后，会话根与本会话全部影子仓库都已离开活路径。session 自己什么都不删：trash 由 store 的 gc 过了 1 小时用 `apfs::remove_tree_rooted` 删掉（store.md §5.11；增补 8），删的时候不跟随符号链接，带 `uchg` 的条目由它清掉旗标再删，所以会话根里 dev-link 建的 `node_modules/tailwindcss` 这类指向外面的链接只删链接本身。
-8. `unpin`：对每个仓库【锁 R】（已在进入 `Removing` 之后，取锁不超时：外层 `with_write` 返回 `Busy` 就再调，直到拿到锁，不受写之前的有界等待 `ctx.env.timeout` 截断；§6.2 末尾，module-rulings "Waits after a call's first visible write are not bounded"）：`c = git.read_ref("refs/strata/pins/<id>")`，有值就 `git.delete_ref(pin, &c)`（比较并交换，review M20），没有就跳过 [我的决定 D27]。比较的是刚读到的值，不是清单里的 head：交换之后、`finish_move` 之前崩溃的工作区，pin 已经指向新 head，清单还记着旧 head。 [rm-followups R4] 排在退役之后：pin 只让基线 commit 不被 git gc 收走，多留一会儿无害；退役与解除 pin 之间崩溃 → `Unknown`，phase 是 `unpin`，`rm --discard` 重跑拆除（退役跳过不在的目录，解除 pin 照常）。`recover` 对没有记 phase 的 `Removing` 行默认 phase 改为 `retire`。
+8. `unpin`：对每个仓库，不取仓库锁（new-lock §2.7；原来在【锁 R】下且取锁不超时，长时间持锁的一方会拖住已提交的删除）。只查关停（关停时照旧拒绝 `ReadOnly` `shutting_down`），不调 `check_fence`，清理的围栏豁免不变：`c = git.read_ref("refs/strata/pins/<id>")`，有值就 `git.delete_ref(pin, &c)`（比较并交换，review M20；只有 git 的 lock 文件争用以同一个期望值重试，最多 10 s），没有就跳过 [我的决定 D27]。比较的是刚读到的值，不是清单里的 head：交换之后、`finish_move` 之前崩溃的工作区，pin 已经指向新 head，清单还记着旧 head。 [rm-followups R4] 排在退役之后：pin 只让基线 commit 不被 git gc 收走，多留一会儿无害；退役与解除 pin 之间崩溃 → `Unknown`，phase 是 `unpin`，`rm --discard` 重跑拆除（退役跳过不在的目录，解除 pin 照常）。`recover` 对没有记 phase 的 `Removing` 行默认 phase 改为 `retire`。
 9. `record`：`set_lifecycle(id, Removing, Removed, None, now)`。返回 `RemoveReport`。
 10. [rm-followups R1] 末尾清扫：`sweep_orphans(Some(id))`，对本会话的两个目录做一次孤儿清扫（见下）。退役进 trash 的列在 `RemoveReport.orphans`（`path`、`trash`）；清扫的失败（有打开的文件、改名失败）只进 `RemoveReport.warnings`，`rm` 照样成功，`Removed` 不撤回。两个字段为空时不序列化。
 
 [rm-followups R1] **孤儿清扫**（`orphans.rs`）。孤儿是 `sessions/<sid>` 或 `sessions/.repos/<sid>` 下的真目录（不是符号链接、不是文件，名字是合法的会话 id，`.strata-tmp-*` 之类不算），它的会话行是 `Removed` 或不存在。`Sessions::orphans()` 只列（经 `removed_leftovers`，不写）；`sweep_orphans(only)` 对每个候选：记下 (dev, ino) → `open_files`，有持有者 → 警告 `OpenFiles`（`reason: "orphan_open_files"`），不动 → 取叶子锁 `enroll` → 复核行仍是 `Removed`/不存在且 (dev, ino) 没变，否则跳过 → `retire_dir`（`NoSuchPath` 跳过）。`new` 在 `enroll` 下检查 id 空闲（行与两个目录都不在）、写 `Creating` 行并建出两个目录，之后才放锁；所以清扫要么在 `new` 之前（目录还不在），要么之后（看到 `Creating` 行）跳过，从不收走正在建的会话。`Creating`、`Active`、`Removing`、`Unknown` 的目录一概不碰。
 
-第 7–9 步的任何失败（第 7 步取锁等不到不算：一直等到拿到锁，§6.2 末尾）：`set_lifecycle(id, Removing, Unknown, Some(scene), now)`，返回 `Unknown`；之后的 `remove` 需要 `--discard` 加确认。
+第 7–9 步的任何失败（这三步都不取仓库锁，没有锁等待）：`set_lifecycle(id, Removing, Unknown, Some(scene), now)`，返回 `Unknown`；之后的 `remove` 需要 `--discard` 加确认。
 
 复杂度：阶段 A 是两次进程扫描（各小于 1 s），加上每个 tracked 工作区一次全量对账（`reconcile_full`，读遍候选文件），O(源码字节数)（design §8：tool 全量对账 < 3 s）。第 5.2 步的 `BeforeRemove` 经 daemon 的 Tracker 是一次属性遍历（tool 温热时约 0.20 s），没有 Tracker 时 O(源码字节数)。D57 的已落地判断只对 overlay 非空的 tracked 仓库做：一次 `store.publishes()`（读出全部发布行及其 `publish_items`，O(行数 + 条目数)，不受上限约束），最多 32 次 `is_ancestor`，每个候选一次 `tree_of`（冷的要校验整棵树）加一次批量 `tree_items`，每条还没落地、不超过 64 MiB 的条目读一次 blob；第 5.3 步只对 `K` 里第 4 步没判过的条目重做（通常没有）。非 `--discard` 的 `Active` 删除另加第 5.5 步：每个健康工作区再一次冷扫描（第三次，在 dirty_check 与 checkpoint 之后），每棵保留的旧树再一次 `reconcile_full` 加一次 activity 遍历（各第二次），以及第 5.6 步再一次 `open_files_many`（第三次；映射区那一趟最贵，约 0.3 s）；第 5.5 步不取锁。阶段 C 是两次目录改名，O(1)；删除由 store 的 gc 在后台做。
 
@@ -907,7 +920,7 @@ ticket 不会与 id 混淆：`new` 以 `ReservedName` 拒绝会话 id 形式的 
     - 只因为有进程持有：不记 `old_tree`。`Done` 意图的 `staging` 还在，`status` 照样报出它（`retained = false`），以后的移动在它没人持有、也没被改过时收走它（第 20 步）。
 
     留在原地而不改名，是为了交换之后不再添一步可能半途而废的目录操作；`S` 由 `Done` 意图点名，`retire_dir` 随时拿得走它。
-20. 同一工作区以前只因为有进程持有而保留的旧树（其它 `Done` 意图里 `old_tree` 为空、`staging` 还在的）：没有进程持有、且与各自的 `BeforeRollout` checkpoint 一致的（算法同 §5.5 第 2.9 步），连同各自的管理目录一并退役 [我的决定 D35]。agent 的 cwd 多半就在工作区里，几乎每次移动都会这样保留一棵旧树；它们就这样逐次被收走，不会一直累积。
+20. 同一工作区以前只因为有进程持有而保留的旧树（其它 `Done` 意图里 `old_tree` 为空、`staging` 还在的）：没有进程持有、且与各自的 `BeforeRollout` checkpoint 一致的（算法同 §5.5 第 2.9 步），连同各自的管理目录一并退役 [我的决定 D35]。agent 的 cwd 多半就在工作区里，几乎每次移动都会这样保留一棵旧树；它们就这样逐次被收走，不会一直累积。new-lock（§9 "new-lock"）：这一步仍在调用方的队列与 repo 锁里当场判定，不交给后台；它算一次前台判定，先改这个意图的令牌，后台 worker 对它尚未提交的判定随之作废。之后只让这个 repo 的旧树判定失效（`forget_old_trees_of`），别的 repo 排着的重试不动。
 21. 返回 `MoveReport { session, repo: name, from: base, from_head: ws.head, to: new_base, head, checkpoint: Some(cp.checkpoint.id), dropped: rebased.dropped, conflicts: rebased.conflicts, lww: rebased.lww, uncarried, old_tree }` [我的决定 D36]。daemon 随后对这个工作区 `Tracker::reset` 再 `watch`（增补 5）。
 
 第 13 步的失败（这时还没有任何对外可见的写，增补 3）分两种 [我的决定 D33]：
@@ -1474,11 +1487,11 @@ git commit -m "feat(session): resolve a failed move by abandoning or accepting i
 | D45 处理失败的移动的形状 | 一个函数 `resolve_failed_move(session, repo, MoveResolution::{Abandon, Accept})`，返回 `ResolutionReport`。先只读核对：两份 gitfile（经 gitio 的 `worktree_gitdir`）、pin、意图的 phase，对不上 → `InvalidInput`（`scene_mismatch`）并给出 `matches`。Abandon 先 `resolve_move` 再退役暂存，退役失败不算错误（`MoveLeftover`）；Accept 先同步会话根，再按 CAS 移 pin，再 `resolve_move`。gitdir 按路径分量比较；`worktree_gitdir` 的 None 与类型化的码（`S` 上的 `IsDirectory` 除外）都算现场合不上，`found` 记下码名。重试幂等：选择与记下的结果相同、工作区留作历史的现场是这次移动的，就返回同一份报告 | module-rulings "Resolving a failed move" 定了两种处理与先核对再动手，形状由本文定。一个函数加一个选择，对应 cli 的"一个显式命令"；用 `InvalidInput` 加 reason，不加码（码表封闭），`matches` 让人不必猜另一种。Abandon 先改 store：若先退役暂存、再记 store 时失败，现场已经变了，再试会因为对不上而永远被拒；暂存是内部的，晚些收走无妨。Accept 先移 pin：store 记成 `Done` 时 pin 必须已是新 head，否则健康是 `Ok` 而 pin 落后；pin 移过、store 失败时，再试一次会跳过 pin，是幂等的。现场核对只认两种形状：没有可用 gitfile 的树说明有人动过它；`S` 上的 `.git` 目录是 attach 停在第 3 步的样子，那棵树从没接上，与"没换"一致（控制者裁定）。重试幂等让 cli 在丢了回复之后照样报"已完成"（review M-4）；认的是这次移动的现场，所以一次正常完成的移动不会被当成处理过的失败。Accept 先同步，交换才扛得住断电（review I-2） | 2026-10-22 |
 | D47 status 怎样分开进行中的移动与停下的移动 | `begin_move` 之前把 `(session, repo)` 标成进行中，调用返回或 panic 时去掉（§5.7 第 12 步）。status 只隐藏这个进行中工作区的 `Preparing` 与 `Swapping`。`remove` 与下一次 `move_workspace` 不查这套记录，把每一条 `Swapping` 都当成停住的。`remove` 不带 `--discard` 时以 `Dirty` 拒绝（§5.6 第 4 步）；下一次 `move_workspace` 以 `InvalidInput`（`move_awaiting_recover`）拒绝（§5.7 第 9 步）。daemon 整个生命周期只打开一个 `Sessions`；cli 只在 daemon 没在跑时自己打开 | 标记若在 `begin_move` 之后才记下，提交与插入之间的一瞬会把新意图报成残留。两套 `Sessions` 会把正在跑的交换报成 `MoveAwaitingRecover`。做法同 `live_staging`：标记在建目录之前 | 2026-10-23 |
 | D48 status 里 `shadow_drift` 失败时的报法 | `shadow_drift` 返回 `Unknown`（`hooks-lookup`、`timeout`、镜像文件读不了，不论 reason）时，这个工作区记一条 `StatusWarning::PrePushGuardUnknown { detail }`（`detail` 是 gitio 的原样错误），没有 `MirrorDrift`，status 照常往下；`shadow_drift` 的 `InvalidInput` 照常透传 | gitio 把这种失败定为"守卫状态不明，可能已失效"，要 status 报出（gitio.md @9985e4c §5.6、§6；gitio re-review r4 的 N2）。让整个 status 失败，人就看不到这个会话的任何状态，连最需要人去看的这一项也看不到。名字取守卫：这次调用没有结果，镜像与守卫都不明，而守卫可能失效是要人处理的那一面 | 2026-10-22 |
-| D49 第一次可见的写之后的取锁 | 写之前的取锁超时是具名 `Busy`（`ctx.env.timeout`，module-rulings "Lock order: session queue before repo lock" 末句）。第一次对外可见的写之后（`new` 第 13 步的 `git` 与 `pin`，`remove` 第 7 步）不等到这个上限：外层 `with_write` 返回 `Busy` 就再调，直到拿到锁。`observe_main` 的等待仍是它自己写之前的有界等待，到时 `Busy`，session 只记 `ObserveFailed` | module-rulings "Waits after a call's first visible write are not bounded"。写之后把等锁超时记成 `Unknown`，会把还没失败的删除或建会话变成要人确认的现场 | 2026-10-23 |
+| D49 第一次可见的写之后的取锁 | 写之前的取锁超时是具名 `Busy`（`ctx.env.timeout`，module-rulings "Lock order: session queue before repo lock" 末句）。第一次对外可见的写之后（`new` 第 13 步的 `git` 与 `pin`，`remove` 第 7 步）不等到这个上限：外层 `with_write` 返回 `Busy` 就再调，直到拿到锁。`observe_main` 的等待仍是它自己写之前的有界等待，到时 `Busy`，session 只记 `ObserveFailed`。new-lock（2026-11-25）：`new` 第 13 步的 `git` 与 `pin`、`remove` 第 7 步的解 pin 已不取 repo 锁（§9 "new-lock"），这条只管余下的写后取锁 | module-rulings "Waits after a call's first visible write are not bounded"。写之后把等锁超时记成 `Unknown`，会把还没失败的删除或建会话变成要人确认的现场 | 2026-10-23 |
 | D50 `rm` 怎样对待 untracked 仓库 | 对它们也做只读 `reconcile_full`；为空不拦，非空记进 `untracked_repos` 与 `repos` | design（:81、:161、:302）让每个会话都带 untracked 兄弟仓库，原规则使不带 `--discard` 的 `rm` 永远失败，agent 无法收尾；对账能回答 T9 的"有没有编辑"。[实现时补的决定] | 2026-10-26 |
 | D51 `new` 只建会话要的仓库（`only`） | `new` 多一个 `only` 参数（cli `--repo R`，可重复）：只有这些 repo 被 fetch、建工作区，全部 tracked；`unknown_scenes`、`seed_files`、观察只走这些成员。不带 `--repo` 时保留原来的整套兄弟布局（每个配置的 repo 都建，`--repos` 选 tracked），不改默认。`--repo` 与 `--repos` 同给 → cli `InvalidInput`（`repo_flags`）。daemon RPC 的 `only` 缺省为假且只在为真时发送，新 cli 对旧 daemon 仍可用 | 默认改成精简布局会让已有 agent 的 `../` 兄弟链接（design §3/§6.1）静默失效，所以默认保留兼容，精简布局要显式要。23 个 repo 时整套布局约 84 s（fetch 22.5 s、克隆 27 s、缓存 31.5 s），而 agent 通常只碰 1–4 个。否决：默认精简（破坏兼容）；`--repos` 加修饰语义（同一个 flag 两种含义）[实现时补的决定]。补（2026-10-28）：精简会话发布时，检查要的兄弟（config `check_siblings`）由发布自己从它们的 main tip 基线补进 staging，会话仍是精简的；补不上 → `siblings_missing`，`fix` 是 `add --session <id> --repo …`（publish.md D21） | 2026-10-27 |
-| D52 `add`：给已有会话加仓库 | `git-strata add [--session S] --repo R…`，daemon 方法 `add`（写，排该会话的队）。每个 repo 在 `.strata-tmp-add-<repo>-<hex>` 暂存目录里按 `new` 的步骤建（克隆、缓存、影子仓库、seed_files），pin 之后改名到最终路径，最后一次 `add_workspaces` 写进 store；之后观察 main（失败只是 warning）、推进锚点。已有的 repo 列进 `already`，不动。最终路径或影子目录已存在 → `Exists`（`add_leftover`）。中途失败：解 pin、store 什么都不记，暂存目录与已改名目录列进 `detail.kept`（`op: "add"`），`rm` 该会话时回收。会话没有某 repo 时，用到它的命令返回 `NoSuchRepo`，`detail.reason = "not_in_session"`、`detail.fix = "git-strata add --session S --repo R"` | 精简会话之后总会遇到要多一个 repo 的情况；重建会话会丢 checkpoint。已知限制：pin 之后、记 store 之前崩溃会漏一个 pin ref（gc 不会自动认它）。否决：`new` 时预留空位；让 `checkpoint`/`publish` 自动补建（写命令隐式建工作区，失败面太大）[实现时补的决定] | 2026-10-27 |
-| D53 `new`/`add` 的 fetch | 只 fetch 会话成员；并发上限 `FETCH_WORKERS = 8`（原来 4）。同一个 repo 在窗口内成功 fetch 过就跳过这次 fetch（仍读 `origin/<default_branch>` 的 tip）；只记成功的 fetch。库与测试里窗口为 0（不跳过），daemon 二进制启动时设 `NEW_FETCH_WINDOW` = 30 s | 跳过只影响新会话的 base 是否最新到秒级，publish 自己会 fetch（strata-publish push/resolve），所以不会推到过时的 origin 上。窗口放在二进制里，库默认 0，让移动 origin 的测试保持确定。否决：完全不 fetch（base 可能旧几小时）；更长的窗口 | 2026-10-27 |
+| D52 `add`：给已有会话加仓库 | `git-strata add [--session S] --repo R…`，daemon 方法 `add`（写，排该会话的队）。每个 repo 在 `.strata-tmp-add-<repo>-<hex>` 暂存目录里按 `new` 的步骤建（克隆、缓存、影子仓库、seed_files），pin 之后改名到最终路径，最后一次 `add_workspaces` 写进 store；之后观察 main（失败只是 warning）、推进锚点。已有的 repo 列进 `already`，不动。最终路径或影子目录已存在 → `Exists`（`add_leftover`）。中途失败：解 pin、store 什么都不记，暂存目录与已改名目录列进 `detail.kept`（`op: "add"`），`rm` 该会话时回收。会话没有某 repo 时，用到它的命令返回 `NoSuchRepo`，`detail.reason = "not_in_session"`、`detail.fix = "git-strata add --session S --repo R"`。new-lock（2026-11-25）：`add` 与 `new` 共用第 8 步（警告随报告返回）；影子仓库、attach、pin 与解 pin（`add_unpin`）都不取 repo 锁；`add_workspaces` 的提交结果不确定（`Unknown`）时 `add_unpin` 留下 pin；最初排会话队列到时的拒绝带 `detail.retry_safe: true` | 精简会话之后总会遇到要多一个 repo 的情况；重建会话会丢 checkpoint。已知限制：pin 之后、记 store 之前崩溃会漏一个 pin ref（gc 不会自动认它）。否决：`new` 时预留空位；让 `checkpoint`/`publish` 自动补建（写命令隐式建工作区，失败面太大）[实现时补的决定] | 2026-10-27 |
+| D53 `new`/`add` 的 fetch | 只 fetch 会话成员；并发上限 `FETCH_WORKERS = 8`（原来 4）。同一个 repo 在窗口内成功 fetch 过就跳过这次 fetch（仍读 `origin/<default_branch>` 的 tip）；只记成功的 fetch。库与测试里窗口为 0（不跳过），daemon 二进制启动时设 `NEW_FETCH_WINDOW` = 30 s。new-lock（2026-11-25）：fetch 到期而 repo 的写锁正被别人持有、又没有 `--base` 时不等它，按释放点快照算 tip，报告里加 `NewWarning::FetchSkipped { repo, holder, holder_session, last_fetch_at }`：这个新鲜度只在 repo 忙时放宽，报告会说明 | 跳过只影响新会话的 base 是否最新到秒级，publish 自己会 fetch（strata-publish push/resolve），所以不会推到过时的 origin 上。窗口放在二进制里，库默认 0，让移动 origin 的测试保持确定。否决：完全不 fetch（base 可能旧几小时）；更长的窗口 | 2026-10-27 |
 | D54 构建缓存的拷贝 | (a) 每个 tracked repo 的工作区克隆完，就把它的缓存交给一个后台线程（`CACHE_WORKERS = 1`）去 clonefile，和后面的克隆、git attach、pin 重叠；`seed_caches` 阶段在 pin 之后等这个线程，失败的 `at` 仍是 `("seed_caches", repo)`。(b) 按顶层子目录并行 clonefile：测过，不启用 | 在 APFS 上 clonefile 是全卷串行的：front 缓存单独 2.66 s，与 tool 缓存同时拷则 25.06 s（tool 22.55 s），总墙钟不变。tool 的 target（约 77.2 万文件）：单线程 25.64 / 21.88 s，按 1 层 8 线程 27.94 / 25.15 s，2 层 8 线程 22.34 s，2 层 4 线程 21.22 s，都在噪声内。所以多线程不加速，只保留一个线程用于和非 clonefile 的步骤重叠（约省 2–3 s）。否决：每个子目录一个线程（更多线程、无收益）[实现时补的决定] | 2026-10-27 |
 | D55 旧树里被 ignore 的内容要证明已带走（review GS-01，P1-14） | 携带返回 `Carried { taken: 路径 → 取走前的纳秒时刻, entered: 两边都有、逐项携带的目录 }`，并写进旧树管理目录 `worktrees/<旧代数>/strata-carried.json`（带 n；写失败不算错）。第 19 步与之后的判断（第 20 步、`status` 的 `changed`、`remove` 的 `old_trees`）在覆盖检查之外再走一遍旧树里不属于投影的条目（依赖目录跳过；嵌套的种子缓存另外检查）：没被覆盖的、或 ctime/mtime 不早于其取走时刻的 → 视为改过，旧树保留并记 `old_tree`。没有记录时一律以意图的 `started` 为界（更严，不会更松） | 原来只比 overlay 的条目：携带之后、交换之前编辑器又存了一版 `.env`，旧树被当作没改过而退役，trash 清掉后唯一的新版本就没了。ctime 由内核按写入更新，用户工具改不回去；误判只会多留一棵旧树。代价是每次判断要遍历旧树里被 ignore 的部分（例如 `target/`） | 2026-10-27 |
 | D56 `new` 失败即回滚；缓存先于 git 汇合；`git init` 超时 120 s | (a) `new` 在第一次可见的写之后失败：照旧先记 `Unknown` 与现场，随即按 `rm --discard` 的第 6 步之后回滚（`teardown`：Removing、解 pin、两个目录退役进 store trash、Removed），返回的错误带 `rolled_back: true`、`op/session/phase/repo/cause`；git 超时 → `Busy`（`reason: "git_timeout"`，带 `hint`），EPERM 或 git 的 "Operation not permitted" → `ReadOnly`（`reason: "tcc_denied"`），其余用原因的码。回滚本身失败时现场留下，返回行上现场的错误（与 `status` 一致）。测试种子 `FailKeepAt` 让回滚失败以保留现场。这是 S5"session 从不自己回滚"对 `new` 的例外：这个会话的路径还从没交给过谁。(b) 每个 tracked repo 的缓存仍在工作区克隆之后由后台线程拷贝（D54），但在 `workspace` 阶段末汇合并检查（阶段 `seed_caches`），之后才进 `git`、`pin`；阶段顺序为 root → workspace → seed_caches → git → pin → seed_files → finalize。(c) 影子仓库的 `git init` 超时 `INIT_TIMEOUT` = 120 s（原 `QUERY_TIMEOUT` 10 s）。(d) `status`/`remove` 遇到不是本 repo 影子仓库的影子目录（如没有标记）不再整体失败：工作区报 `Missing`，另给 `ShadowInvalid { path, reason }` | 事故 2026-10-27（s-kooeepw3，`new --repos tool`）：tool 的 `src-tauri/target`（216 GB）整目录 clonefile 与 4 个并行的 `git init --bare` 重叠，APFS 卷上 clonefile 串行，init 的元数据写被拖过 10 s，`new` 报 `Unknown` 并留下 226 GB（逻辑）的工作区与 4 个只有 config 的影子目录，之后 `status --all` 因无标记的影子目录整体失败。缓存与 git 不再重叠约多花 2–3 s（D54 测过的收益）。否决：只加长超时（下一个更大的缓存照样会拖住）；新增 Creating→Removing 边（store 触发器要改，走 Unknown→Removing 已有边即可） | 2026-10-27 |
@@ -1626,3 +1639,98 @@ None of this changes what a call does or returns: no lock, store write or error
 is added. Tests: the `observe` unit tests (nested scopes restore on unwind,
 `spawn_pinned` workers inherit both values, a nested move joins the open one,
 nothing is called without an observer) and the daemon's `tests/activity.rs`.
+
+### new-lock: `new`/`add` without waiting behind the repo lock, and the lock-free old-tree check (2026-11-25)
+
+Design new-lock r7.1. `new` and `add` no longer fail behind a long holder of a
+repo's write lock before they write anything, and the old-tree check walks
+holding no lock.
+
+- **Head step** (§5.1 step 8; `add` runs the same `head_phase` with the
+  holder label `add` and returns its warnings). Per repo, on the
+  `FETCH_WORKERS` workers, all joined before a result:
+  - no `--base` and the fetch still fresh (D53): `main_tip_of` over the repo's
+    release-point snapshot (`RepoWriteLock::ref_snapshot`: the
+    `refs/strata/remotes/origin/<b>`, `refs/strata/publish/<b>` and
+    `refs/strata/anchor/<b>` that the last holder of the write lock left),
+    without the lock;
+  - no `--base` and the fetch due: `try_write_as(repo, label)` without
+    waiting. Free: the fetch, the tip and the freshness record as before.
+    Held: the snapshot, plus `NewWarning::FetchSkipped { repo, holder,
+    holder_session, last_fetch_at }`;
+  - an explicit `--base`, a snapshot that is not valid, or a tracking ref
+    never fetched: the bounded take as before (the revision and the live tip
+    are read in that one take).
+  - A refusal of the phase carries `detail.retry_safe: true` only when every
+    repo that failed failed with `Busy` `lock_wait` (`certify_head`); any
+    other error (`pins_tightened`, …) is returned instead, uncertified. The
+    phase writes nothing but a successful fetch's tracking ref and record.
+- **Takes removed**: the shadow and its attach, the pin's creation, `rm`'s
+  unpin and `add_unpin`. Where the shadow, attach or pin take was, the code
+  checks `RepoWriteLock::is_shut_down` and `check_fence` and refuses exactly
+  as the take would have (`ReadOnly` `shutting_down`, `Busy`
+  `pins_tightened`). An unpin (`rm`'s and `add_unpin`) checks shutdown only,
+  with no `check_fence`: the cleanup's fence exemption is unchanged.
+  `new` checks its layout before the head work, `create_session`, `git`,
+  `pin` and `finalize`; `add` checks the existing and the added repos before
+  staging, attach, pin and `add_workspaces`. An unpin reads the pin once and
+  deletes it with that expected OID (a pin already gone counts as done); only
+  git's lock-file contention (`Unable to create '….lock': File exists`) is
+  retried, for at most 10 s. `add_unpin` keeps the pin when the outcome of
+  the `add_workspaces` commit is `Unknown`.
+- **Unchanged**: cold base and deps builds, the observation (§5.1 step 15),
+  and the daemon's follow-ups after the session exists, which still wait for
+  the repo lock before the reply.
+- **The old-tree check** (status step 2.9's background worker) is a claim
+  (`claim_old_tree`) run by `run_old_tree_claim(claim, locks, shutdown,
+  retry)` with the daemon's `OldTreeLocks`:
+  - phase 0 (step `revalidate`) under the session's queue place, taken only
+    if free (a request that queues for it stops the phase; that stop does
+    not carry into phase 1): the session Active, the intent Done at the same
+    path and inode, the `move_activity` row, its clean passes cleared in the
+    store before any scan, the intent's token;
+  - phase 1 (`walk`) holding no lock: the open-files scan, then a held tree's
+    comparison (or its fresh cached verdict), or a free tree's activity probe
+    (`auto_probe`, which writes nothing) and comparison;
+  - phase 2 (`commit`): the session place without waiting, then the repo lock
+    within the lock wait, given up once a foreground guard registers. Phase
+    0's facts and token are checked again (a mismatch is
+    `Skipped("invalidated")`, the passes stay cleared), then step 20's rules
+    run in step 20's order: the late notice, two clean passes Q apart, the
+    final scan with the passes still cleared, the stop check, the retire. The
+    retire needs the claim to enter `Committing` under the queue mutex while
+    the session has no guard.
+  - A completed phase 1 that does not get to phase 2 (busy, or routed by a
+    guard) first records its `late_writes` or `baseline_missing` finding (2N:
+    `Store::set_move_late_writes_if`, conditioned on the intent, the row and
+    the token), then puts the cleared passes back under the session place
+    only if nothing changed and the walk found nothing late (2′, step
+    `restore`). A busy, yielded or deferred claim is retried after the
+    worker's delay, ten times that from the third attempt on.
+- **Tokens**: per intent, per (session, repo) and per session invalidation
+  counts, plus the repo's config epoch (`RepoWriteLock::config_epoch`, which a
+  reload that changes the repo bumps). Foreground judgements (`auto_check`:
+  rm, status Inline, step 19; step 20's `collect_old_tree`), notices written
+  outside the worker (`late_notice`), `forget_old_trees` (rm, restore) and
+  `forget_old_trees_of` (a move of that repo) change them. A verdict is
+  recorded only under the token its claim started with.
+- **Foreground guards**: `old_tree_guard(sessions, deadline)`, taken before
+  any queue place or repo lock, stops new claims of those sessions, stops the
+  walks of the claims in flight and routes them to their non-retiring exit,
+  and returns once none is in flight (`None`, the guard withdrawn, when
+  `deadline` passes first). `old_tree_claim_in_flight` is the try-only check
+  of background callers. Step 20 stays inline under its caller's locks (§5.7).
+- **Queue state** is one mutex: `pending`, `delayed` (Q passes), `retries`,
+  `in_flight`, the verdicts, the tokens, `completed` (the cooldown, recorded
+  only when a comparison ran) and the guards. `promote_due` never moves a key
+  that is in flight; `release_old_tree_claim` gives a claim back unjudged (the
+  drain refused it), with or without requeueing it.
+- `check_old_tree(key, path, ino, stop)` judges in place without locks
+  (tests): it claims the key (`Skipped("in_flight")` while another claim of
+  it runs) and schedules no retry.
+- Observation: `Work::OldTreeCheck { repo, session, n }`, with the steps
+  `revalidate`, `walk`, `commit` and `restore`.
+
+Tests: `tests/old_tree_claim.rs` (phases, 2N and 2′, tokens, guards, queue
+rules), `tests/move_workspace.rs` and `tests/slim_and_add.rs`; the daemon's
+`tests/new_lock.rs` and `tests/old_tree_yield.rs`.

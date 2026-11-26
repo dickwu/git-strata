@@ -462,6 +462,8 @@ function activityText(a: DaemonActivity, sessions: StatusReply | undefined): str
       return t.activity.create(session, activityRepos(a).length);
     case 'deps_install':
       return `${t.activity.install} · ${repo}`;
+    case 'old_tree_check':
+      return `${t.activity.oldTreeCheck} · ${repo}`;
     case 'publish':
       return t.activity.publish(repo);
     case 'push':
@@ -471,8 +473,9 @@ function activityText(a: DaemonActivity, sessions: StatusReply | undefined): str
 
 /**
  * Display the outermost (oldest) work per repo; parent rollout/create entries cover children.
- * A dependency install holds no repo lock, so no request waits for it: lock-holding work in its
- * repo is shown first, however much younger, and the install's chip carries no waiting count.
+ * A dependency install and an old-tree check (its walk, new-lock §3.5) hold no repo lock, so no
+ * request waits for them: lock-holding work in their repo is shown first, however much younger,
+ * and their chip carries no waiting count.
  * Always blue: what is abnormal (a step past 30 min, a background hold past 30 min, a request
  * hold past 30 s) the daemon reports as a LongHold, which is the amber chip (§3.1, §12.1, Q3).
  */
@@ -486,7 +489,7 @@ function reportedActivityChips(
   const work = activityList(daemon);
   const chips: Chip[] = [];
   const covered = new Set<string>();
-  const lockFree = (a: DaemonActivity) => a.kind === 'deps_install';
+  const lockFree = (a: DaemonActivity) => a.kind === 'deps_install' || a.kind === 'old_tree_check';
   const oldest = [...work].sort((a, b) => b.elapsed_ms - a.elapsed_ms || a.id - b.id);
   for (const a of [...oldest.filter((a) => !lockFree(a)), ...oldest.filter(lockFree)]) {
     const elapsed = a.elapsed_ms + age(input.daemon.updatedAt, now);

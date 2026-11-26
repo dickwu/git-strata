@@ -1,22 +1,29 @@
-//! status-perf A1: judging a done move's old tree off the status path.
+//! status-perf A1 and new-lock §3: judging a done move's old tree off the
+//! status path.
 //!
-//! One judgement, [`Sessions::collect_old_tree`], is shared by move step 20
-//! and the daemon's background `old-tree` thread. Status in
-//! [`OldTreeMode::Deferred`] only reads the verdict table this module keeps
-//! and queues the intents it has no fresh verdict for. The table is a hint:
+//! The daemon's background worker claims queued old trees and judges each
+//! in phases that walk without any lock ([`claim`]); move step 20 judges
+//! inline under sync's locks ([`Sessions::collect_old_tree`]). Status in
+//! [`OldTreeMode::Deferred`] only reads the verdict table ([`queue`]) and
+//! queues the intents it has no fresh verdict for. The table is a hint:
 //! nothing is ever retired on a cached verdict, only on a fresh judgement
-//! made under the session's queue place and the repo's write lock.
+//! whose retirement runs under the session's queue place and the repo's
+//! write lock.
 
-use std::collections::BTreeMap;
+mod claim;
+mod queue;
+
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use strata_deps::OpenFile;
-use strata_store::{Lifecycle, MoveIntent, MoveState};
+use strata_store::{Lifecycle, MoveActivity, MoveIntent, MoveState};
 use strata_types::{RepoConfig, RepoName, SessionId};
+
+pub use claim::OldTreeLocks;
+pub(crate) use queue::OldTrees;
+pub use queue::{OldTreeClaim, OldTreeGuard};
 
 use crate::move_workspace::prior_generation;
 use crate::{Result, Sessions};
@@ -52,7 +59,7 @@ pub struct OldTreeVerdict {
     pub checked_at: SystemTime,
 }
 
-/// What [`Sessions::collect_old_tree`] did.
+/// What a check of an old tree did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// Moved to the store trash (recoverable until gc), with its admin dir.
@@ -65,29 +72,6 @@ pub enum Outcome {
     },
     /// Not judged; no verdict is written.
     Skipped(&'static str),
-}
-
-/// The verdict table and the queue of the background thread.
-#[derive(Default)]
-pub(crate) struct OldTrees {
-    mode: Mutex<OldTreeMode>,
-    verdicts: Mutex<BTreeMap<OldTreeKey, OldTreeVerdict>>,
-    /// Queued keys with the path and inode they were queued for.
-    pending: Mutex<BTreeMap<OldTreeKey, (PathBuf, u64)>>,
-    /// rm-followups §1.4 G4 item 4: keys queued with a not-before time
-    /// (an `Auto` tree's next pass); moved to `pending` once due.
-    delayed: Mutex<BTreeMap<OldTreeKey, (Instant, PathBuf, u64)>>,
-    /// Loop retries take precedence over status and Q scheduling. Entries
-    /// stay while a check runs so an interrupted retry retains its count.
-    retries: Mutex<BTreeMap<OldTreeKey, Retry>>,
-    wake: Condvar,
-}
-
-struct Retry {
-    at: Option<Instant>,
-    path: PathBuf,
-    ino: u64,
-    attempts: u32,
 }
 
 /// rm-followups §1.4 G4 items 5–6: an old tree against its move's
@@ -105,8 +89,34 @@ pub(crate) enum AutoCheck {
     Clean(Vec<i64>),
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|p| p.into_inner())
+/// The activity probe of an old tree against its row, without any write
+/// (new-lock §3.1: only phase 2, 2N and foreground judges write notices).
+#[derive(Clone, Debug)]
+pub(crate) enum Probe {
+    /// No row: an `Explicit` move.
+    Explicit,
+    /// A late-write notice is already there.
+    Noticed,
+    /// The row's baseline cannot be read.
+    BaselineMissing,
+    /// Changed since the baseline: the paths.
+    LateWrites(Vec<String>),
+    /// The walk failed (not stopped): the message.
+    WalkError(String),
+    /// The walk was stopped.
+    Stopped,
+    /// Unchanged against the baseline.
+    Clean,
+}
+
+impl Probe {
+    /// Never retired.
+    pub(crate) fn late(&self) -> bool {
+        matches!(
+            self,
+            Probe::Noticed | Probe::BaselineMissing | Probe::LateWrites(_) | Probe::WalkError(_)
+        )
+    }
 }
 
 /// The inode of `p` (not followed), `None` when it cannot be read.
@@ -119,7 +129,7 @@ pub(crate) fn old_path(i: &MoveIntent) -> PathBuf {
     i.old_tree.clone().unwrap_or_else(|| i.staging.clone())
 }
 
-fn key_of(i: &MoveIntent) -> OldTreeKey {
+pub(crate) fn key_of(i: &MoveIntent) -> OldTreeKey {
     OldTreeKey {
         session: i.session.clone(),
         repo: i.repo.clone(),
@@ -128,141 +138,25 @@ fn key_of(i: &MoveIntent) -> OldTreeKey {
 }
 
 impl<'a> Sessions<'a> {
-    /// The daemon and the local fallback set [`OldTreeMode::Deferred`].
-    pub fn set_old_tree_mode(&self, mode: OldTreeMode) {
-        *lock(&self.old_trees.mode) = mode;
-    }
-
-    pub(crate) fn old_tree_mode(&self) -> OldTreeMode {
-        *lock(&self.old_trees.mode)
-    }
-
-    /// Status step 2.9 in Deferred mode: the verdict for the tree at
-    /// `path` (inode `ino`), if one was made for this very tree; queues the
-    /// intent when there is none or it is older than [`OLD_TREE_TTL`]. A
-    /// stale verdict is still returned (its `checked_at` shows its age).
-    pub(crate) fn old_tree_hint(
-        &self,
-        i: &MoveIntent,
-        path: &Path,
-        ino: u64,
-    ) -> Option<OldTreeVerdict> {
-        let key = key_of(i);
-        let v = lock(&self.old_trees.verdicts)
-            .get(&key)
-            .filter(|v| v.path == path && v.ino == ino)
-            .cloned();
-        let fresh = v
-            .as_ref()
-            .is_some_and(|v| v.checked_at.elapsed().is_ok_and(|age| age < OLD_TREE_TTL));
-        if !fresh {
-            self.queue_old_tree(key, path.to_path_buf(), ino);
-        }
-        v
-    }
-
-    fn queue_old_tree(&self, key: OldTreeKey, path: PathBuf, ino: u64) {
-        let retries = lock(&self.old_trees.retries);
-        if retries.contains_key(&key) {
-            return;
-        }
-        lock(&self.old_trees.pending).insert(key, (path, ino));
-        self.old_trees.wake.notify_all();
-    }
-
-    /// The verdicts of `session` are void (after a move, restore or rm).
-    /// Keep scheduled checks, including retries of other repos' Explicit
-    /// trees. Each check revalidates the lifecycle, intent, path and inode.
-    pub fn forget_old_trees(&self, session: &SessionId) {
-        lock(&self.old_trees.verdicts).retain(|k, _| &k.session != session);
-    }
-
-    /// Schedule a Q-driven check at `at`, preserving an earlier schedule
-    /// and any immediate status request. Loop retries have their own clock.
-    pub fn queue_old_tree_at(&self, key: OldTreeKey, path: PathBuf, ino: u64, at: Instant) {
-        let mut d = lock(&self.old_trees.delayed);
-        match d.get(&key) {
-            Some((due, ..)) if *due <= at => {}
-            _ => {
-                d.insert(key, (at, path, ino));
-            }
-        }
-    }
-
-    /// A busy, yielded or unreadable check backs off independently of Q.
-    /// Only a completed judgement resets the consecutive retry count.
-    pub fn retry_old_tree(
-        &self,
-        key: OldTreeKey,
-        path: PathBuf,
-        ino: u64,
-        delay: Duration,
-    ) -> Duration {
-        let mut retries = lock(&self.old_trees.retries);
-        let retry = retries.entry(key.clone()).or_insert(Retry {
-            at: None,
-            path,
-            ino,
-            attempts: 0,
-        });
-        retry.attempts = retry.attempts.saturating_add(1);
-        let delay = if retry.attempts >= 3 {
-            10 * delay
-        } else {
-            delay
-        };
-        retry.at = Some(Instant::now() + delay);
-        lock(&self.old_trees.pending).remove(&key);
-        delay
-    }
-
-    /// Completed or invalid work no longer needs its retry history.
-    pub fn finish_old_tree_retry(&self, key: &OldTreeKey) {
-        lock(&self.old_trees.retries).remove(key);
-    }
-
-    /// The delayed keys whose time has come, moved to the queue.
-    fn promote_due(&self) {
-        let now = Instant::now();
-        let mut retries = lock(&self.old_trees.retries);
-        let due: Vec<(OldTreeKey, (Instant, PathBuf, u64))> = {
-            let mut d = lock(&self.old_trees.delayed);
-            let keys: Vec<OldTreeKey> = d
-                .iter()
-                .filter(|(_, (at, ..))| *at <= now)
-                .map(|(k, _)| k.clone())
-                .collect();
-            keys.into_iter()
-                .filter_map(|k| d.remove(&k).map(|v| (k, v)))
-                .collect()
-        };
-        let mut q = lock(&self.old_trees.pending);
-        for (k, (_, p, ino)) in due {
-            if !retries.contains_key(&k) {
-                q.entry(k).or_insert((p, ino));
-            }
-        }
-        for (key, retry) in retries.iter_mut() {
-            if retry.at.is_some_and(|at| at <= now) {
-                retry.at = None;
-                q.entry(key.clone())
-                    .or_insert((retry.path.clone(), retry.ino));
-            }
-        }
-    }
-
     /// rm-followups §1.4 G4 item 4: queue the next pass of every done
     /// `Auto` move of `session` whose old tree is still there and may yet
     /// be retired (no late-write notice, not retained): at its last clean
     /// pass + Q, else now + Q. Phase F calls it after `forget_old_trees`.
     pub(crate) fn queue_auto_trees(&self, session: &SessionId) {
-        let Ok(all) = self.store.move_intents(session) else { return };
-        let Ok(rows) = self.store.move_activities(session) else { return };
+        let Ok(all) = self.store.move_intents(session) else {
+            return;
+        };
+        let Ok(rows) = self.store.move_activities(session) else {
+            return;
+        };
         for r in rows {
             if r.late_writes.is_some() || r.baseline.is_none() {
                 continue;
             }
-            let Some(i) = all.iter().find(|i| i.repo == r.repo && i.n == r.n && i.state == MoveState::Done) else {
+            let Some(i) = all
+                .iter()
+                .find(|i| i.repo == r.repo && i.n == r.n && i.state == MoveState::Done)
+            else {
                 continue;
             };
             if i.old_tree.is_some() {
@@ -276,40 +170,68 @@ impl<'a> Sessions<'a> {
     }
 
     fn quiet_of(&self, repo: &RepoName) -> Duration {
-        let secs = self.repo_cfg(repo).map(|c| c.rebase.quiet_secs).unwrap_or_else(|_| strata_types::RebaseConfig::default_quiet_secs());
+        let secs = self
+            .repo_cfg(repo)
+            .map(|c| c.rebase.quiet_secs)
+            .unwrap_or_else(|_| strata_types::RebaseConfig::default_quiet_secs());
         Duration::from_secs(secs)
     }
 
-    /// The tree at `path` of done move `i` against its move's activity
-    /// baseline. Records the late-write notice the first time it finds a
-    /// change (or no readable baseline); a store read error fails closed
-    /// (`Late`, nothing recorded).
-    pub(crate) fn auto_check(&self, i: &MoveIntent, path: &Path) -> AutoCheck {
-        let row = match self.store.move_activity(&i.session, &i.repo, i.n) {
-            Ok(None) => return AutoCheck::Explicit,
-            Ok(Some(r)) => r,
-            Err(_) => return AutoCheck::Late,
+    /// The tree at `path` of done move `i` against `row`, its activity
+    /// baseline. Writes nothing.
+    pub(crate) fn auto_probe(
+        &self,
+        i: &MoveIntent,
+        path: &Path,
+        row: Option<&MoveActivity>,
+    ) -> Probe {
+        let Some(row) = row else {
+            return Probe::Explicit;
         };
         if row.late_writes.is_some() {
-            return AutoCheck::Late;
+            return Probe::Noticed;
         }
         let Some(b) = &row.baseline else {
-            self.late_notice(i, &[], "baseline_missing");
-            return AutoCheck::Late;
+            return Probe::BaselineMissing;
         };
         match crate::activity::changed_since_with(path, b, || {
             self.seams.hit("old_tree.activity_directory", Some(&i.repo))
         }) {
-            Ok(v) if v.is_empty() => AutoCheck::Clean(row.passes),
-            Ok(v) => {
-                self.late_notice(i, &v, "late_writes");
+            Ok(v) if v.is_empty() => Probe::Clean,
+            Ok(v) => Probe::LateWrites(v),
+            Err(e) if crate::activity::stopped(&e) => Probe::Stopped,
+            Err(e) => Probe::WalkError(e.message),
+        }
+    }
+
+    /// A foreground judgement (rm, status Inline, a move's step 20) of
+    /// done move `i`'s tree at `path` against its activity baseline: bumps
+    /// the intent's token (new-lock §3.3) and records the late-write notice
+    /// the first time it finds a change (or no readable baseline); a store
+    /// read error fails closed (`Late`, nothing recorded).
+    pub(crate) fn auto_check(&self, i: &MoveIntent, path: &Path) -> AutoCheck {
+        self.bump_old_tree_token(&key_of(i));
+        let row = match self.store.move_activity(&i.session, &i.repo, i.n) {
+            Ok(r) => r,
+            Err(_) => return AutoCheck::Late,
+        };
+        match self.auto_probe(i, path, row.as_ref()) {
+            Probe::Explicit => AutoCheck::Explicit,
+            Probe::Noticed => AutoCheck::Late,
+            Probe::BaselineMissing => {
+                self.write_late_notice(i, &[], "baseline_missing");
                 AutoCheck::Late
             }
-            Err(e) if crate::activity::stopped(&e) => AutoCheck::Skipped,
-            Err(e) => {
-                self.late_notice(i, &[format!("(walk error: {})", e.message)], "walk_error");
+            Probe::LateWrites(v) => {
+                self.write_late_notice(i, &v, "late_writes");
                 AutoCheck::Late
             }
+            Probe::WalkError(m) => {
+                self.write_late_notice(i, &[format!("(walk error: {m})")], "walk_error");
+                AutoCheck::Late
+            }
+            Probe::Stopped => AutoCheck::Skipped,
+            Probe::Clean => AutoCheck::Clean(row.map(|r| r.passes).unwrap_or_default()),
         }
     }
 
@@ -321,10 +243,16 @@ impl<'a> Sessions<'a> {
     /// ([`Self::restore_passes`]). False when the write failed: the tree
     /// is then not scanned.
     fn suspend_passes(&self, i: &MoveIntent) -> bool {
-        if self.seams.hit("old_tree.suspend_passes", Some(&i.repo)).is_err() {
+        if self
+            .seams
+            .hit("old_tree.suspend_passes", Some(&i.repo))
+            .is_err()
+        {
             return false;
         }
-        self.store.set_move_passes(&i.session, &i.repo, i.n, &[]).is_ok()
+        self.store
+            .set_move_passes(&i.session, &i.repo, i.n, &[])
+            .is_ok()
     }
 
     /// Puts suspended clean passes back (no hold was seen). A failed write
@@ -335,153 +263,46 @@ impl<'a> Sessions<'a> {
         }
     }
 
-    /// Writes the late-write notice of move `i` (the first one stands).
+    /// Writes the late-write notice of move `i` (the first one stands) for
+    /// a writer other than the worker's own claim, so the intent's token
+    /// changes (new-lock §3.3).
     pub(crate) fn late_notice(&self, i: &MoveIntent, paths: &[String], reason: &str) {
+        self.bump_old_tree_token(&key_of(i));
+        self.write_late_notice(i, paths, reason);
+    }
+
+    /// The notice write itself (the first one stands).
+    fn write_late_notice(&self, i: &MoveIntent, paths: &[String], reason: &str) {
+        let notice = self.notice_json(i, paths, reason);
+        let _ = self
+            .store
+            .set_move_late_writes(&i.session, &i.repo, i.n, &notice);
+    }
+
+    /// `{moved_at, paths (the first 20), count, reason}`.
+    fn notice_json(&self, i: &MoveIntent, paths: &[String], reason: &str) -> serde_json::Value {
         let moved_at = i.ended.unwrap_or(i.started);
         let at = strata_types::serde_rfc3339::format(&moved_at).unwrap_or_default();
         let shown: Vec<&String> = paths.iter().take(20).collect();
-        let notice = serde_json::json!({ "moved_at": at, "paths": shown, "count": paths.len(), "reason": reason });
-        let _ = self.store.set_move_late_writes(&i.session, &i.repo, i.n, &notice);
+        serde_json::json!({ "moved_at": at, "paths": shown, "count": paths.len(), "reason": reason })
     }
 
-    /// The current verdict for `key` (tests, diagnostics).
-    pub fn old_tree_verdict(&self, key: &OldTreeKey) -> Option<OldTreeVerdict> {
-        lock(&self.old_trees.verdicts).get(key).cloned()
-    }
-
-    /// Queue every done move's existing old tree of every live session
-    /// (daemon startup, after recover).
-    pub fn queue_all_old_trees(&self) -> Result<()> {
-        for id in self.list()? {
-            for i in self.store.move_intents(&id)? {
-                if i.state != MoveState::Done {
-                    continue;
-                }
-                let path = old_path(&i);
-                if let Some(ino) = ino_of(&path) {
-                    self.queue_old_tree(key_of(&i), path, ino);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The next queued old tree, waiting up to `wait` for one.
-    pub fn next_old_tree(&self, wait: Duration) -> Option<(OldTreeKey, PathBuf, u64)> {
-        self.promote_due();
-        let mut q = lock(&self.old_trees.pending);
-        if q.is_empty() {
-            q = self
-                .old_trees
-                .wake
-                .wait_timeout(q, wait)
-                .unwrap_or_else(|p| p.into_inner())
-                .0;
-        }
-        let next = q.pop_first();
-        drop(q);
-        next.map(|(k, (p, ino))| {
-            lock(&self.old_trees.delayed).remove(&k);
-            (k, p, ino)
-        })
-    }
-
-    /// Put `key` back at the end of the queue (its session was busy).
-    pub fn requeue_old_tree(&self, key: OldTreeKey, path: PathBuf, ino: u64) {
-        lock(&self.old_trees.pending)
-            .entry(key)
-            .or_insert((path, ino));
-    }
-
-    /// The background check of one queued old tree. The caller holds the
-    /// session's queue place and the repo's write lock. Everything is read
-    /// again under them: the session must be Active and the intent still
-    /// Done at the same path and inode, else the item is dropped
-    /// (`Skipped`). Walks give up once `stop` is set (`Skipped("stopped")`,
-    /// no verdict). A retained tree gets a verdict but is never retired.
-    pub fn check_old_tree(
-        &self,
-        key: &OldTreeKey,
-        path: &Path,
-        ino: u64,
-        stop: &Arc<AtomicBool>,
-    ) -> Result<Outcome> {
-        let Some(rec) = self.store.session(&key.session)? else {
-            return Ok(Outcome::Skipped("no_session"));
-        };
-        if rec.lifecycle != Lifecycle::Active || !rec.manifest.repos.contains_key(&key.repo) {
-            return Ok(Outcome::Skipped("not_active"));
-        }
-        let all = self.store.move_intents(&key.session)?;
-        let Some(i) = all.iter().find(|i| i.repo == key.repo && i.n == key.n) else {
-            return Ok(Outcome::Skipped("no_intent"));
-        };
-        if i.state != MoveState::Done || old_path(i) != path || ino_of(path) != Some(ino) {
-            return Ok(Outcome::Skipped("intent_changed"));
-        }
-        let cfg = self.repo_cfg(&key.repo)?;
-        let out =
-            strata_apfs::with_walk_stop(stop.clone(), || self.collect_old_tree(&all, i, cfg, true));
-        if stop.load(Ordering::SeqCst) {
-            return Ok(Outcome::Skipped("stopped"));
-        }
-        // rm-followups §1.4 G4 item 4: a kept `Auto` tree that may yet be
-        // retired is checked again Q later; so is one not judged because a
-        // store write or the open-files scan failed (impl-p2 r3 note).
-        if matches!(
-            out,
-            Outcome::Kept { .. }
-                | Outcome::Skipped(
-                    "passes_read_failed" | "passes_write_failed" | "open_files_failed"
-                )
-        ) {
-            self.queue_auto_trees(&key.session);
-        }
-        match &out {
-            Outcome::Kept {
-                holders,
-                changed: Some(changed),
-            } => {
-                let v = OldTreeVerdict {
-                    path: path.to_path_buf(),
-                    ino,
-                    changed: *changed,
-                    holders: holders.clone(),
-                    checked_at: lock(&self.old_trees.verdicts)
-                        .get(key)
-                        .filter(|v| {
-                            !holders.is_empty()
-                                && v.path == path
-                                && v.ino == ino
-                                && v.checked_at.elapsed().is_ok_and(|age| age < OLD_TREE_TTL)
-                        })
-                        .map(|v| v.checked_at)
-                        .unwrap_or_else(SystemTime::now),
-                };
-                lock(&self.old_trees.verdicts).insert(key.clone(), v);
-            }
-            Outcome::Skipped("yielded") => {}
-            _ => {
-                lock(&self.old_trees.verdicts).remove(key);
-            }
-        }
-        Ok(out)
-    }
-
-    /// Move step 20 and the background thread (design A1): retire the old
-    /// tree of done move `i` (`all` = the session's intents) only on a
-    /// fresh judgement: no open files, unchanged against its BeforeRollout
-    /// checkpoint, and again no open files at the same inode right before
-    /// the retire. A retained tree (`old_tree` set) is judged, never
-    /// retired. `judge_held`: also compare a held tree (for its verdict).
-    /// An unreadable tree or `open_files` failure is never retired.
+    /// Move step 20 (design A1, new-lock §15.5): judge the old tree of done
+    /// move `i` (`all` = the session's intents) inline under the caller's
+    /// queue place and repo lock, and retire it only on a fresh judgement:
+    /// no open files, unchanged against its BeforeRollout checkpoint, and
+    /// again no open files at the same inode right before the retire. A
+    /// held tree is kept without a comparison; a retained tree (`old_tree`
+    /// set) is judged, never retired. An unreadable tree or `open_files`
+    /// failure is never retired. A foreground judgement: it bumps the
+    /// intent's token.
     pub(crate) fn collect_old_tree(
         &self,
         all: &[MoveIntent],
         i: &MoveIntent,
         cfg: &RepoConfig,
-        judge_held: bool,
     ) -> Outcome {
+        self.bump_old_tree_token(&key_of(i));
         let path = old_path(i);
         let Some(ino) = ino_of(&path) else {
             return Outcome::Skipped("gone");
@@ -509,7 +330,11 @@ impl<'a> Sessions<'a> {
                 return Outcome::Skipped("open_files_failed");
             }
         };
-        if self.seams.hit("old_tree.after_scan", Some(&i.repo)).is_err() {
+        if self
+            .seams
+            .hit("old_tree.after_scan", Some(&i.repo))
+            .is_err()
+        {
             if holders.is_empty() {
                 self.restore_passes(i, &suspended);
             }
@@ -522,25 +347,10 @@ impl<'a> Sessions<'a> {
             return Outcome::Skipped("yielded");
         }
         if !holders.is_empty() {
-            if !judge_held {
-                return Outcome::Kept { holders, changed: None };
-            }
-            let cached = self.old_tree_verdict(&key_of(i)).filter(|v| {
-                v.path == path && v.ino == ino && v.checked_at.elapsed().is_ok_and(|age| age < OLD_TREE_TTL)
-            });
-            let changed = match cached {
-                Some(v) => v.changed,
-                None => {
-                    if self.seams.hit("old_tree.before_compare", Some(&i.repo)).is_err() {
-                        return Outcome::Skipped("seam");
-                    }
-                    !self.old_tree_matches(i, cfg).unwrap_or(false)
-                }
+            return Outcome::Kept {
+                holders,
+                changed: None,
             };
-            if strata_apfs::walk_stopped() {
-                return Outcome::Skipped("yielded");
-            }
-            return Outcome::Kept { holders, changed: Some(changed) };
         }
         let auto = match self.auto_check(i, &path) {
             AutoCheck::Clean(_) => AutoCheck::Clean(suspended.clone()),
@@ -550,7 +360,8 @@ impl<'a> Sessions<'a> {
             self.restore_passes(i, &suspended);
             return Outcome::Skipped("yielded");
         }
-        let changed = matches!(auto, AutoCheck::Late) || !self.old_tree_matches(i, cfg).unwrap_or(false);
+        let changed =
+            matches!(auto, AutoCheck::Late) || !self.old_tree_matches(i, cfg).unwrap_or(false);
         if strata_apfs::walk_stopped() {
             self.restore_passes(i, &suspended);
             return Outcome::Skipped("yielded");
@@ -558,8 +369,13 @@ impl<'a> Sessions<'a> {
         if changed || i.old_tree.is_some() {
             // A late notice clears its clean history permanently. Do not
             // resurrect passes that were suspended before that judgement.
-            if !matches!(auto, AutoCheck::Late) { self.restore_passes(i, &suspended); }
-            return Outcome::Kept { holders, changed: Some(changed) };
+            if !matches!(auto, AutoCheck::Late) {
+                self.restore_passes(i, &suspended);
+            }
+            return Outcome::Kept {
+                holders,
+                changed: Some(changed),
+            };
         }
         // Two consecutive clean passes at least Q apart before an `Auto`
         // tree is retired; this one is recorded (a restart keeps it).
@@ -584,7 +400,11 @@ impl<'a> Sessions<'a> {
                 }
             }
         }
-        if self.seams.hit("old_tree.final_scan", Some(&i.repo)).is_err() {
+        if self
+            .seams
+            .hit("old_tree.final_scan", Some(&i.repo))
+            .is_err()
+        {
             self.restore_passes(i, &suspended);
             return Outcome::Skipped("seam");
         }
@@ -610,7 +430,10 @@ impl<'a> Sessions<'a> {
             self.restore_passes(i, &suspended);
             return Outcome::Skipped("yielded");
         }
-        let admin = self.shadow_dir(&i.session, &i.repo).join("worktrees").join(prior_generation(all, i).to_string());
+        let admin = self
+            .shadow_dir(&i.session, &i.repo)
+            .join("worktrees")
+            .join(prior_generation(all, i).to_string());
         if self.store.retire_dir(&i.staging).is_err() {
             self.restore_passes(i, &suspended);
             return Outcome::Kept {
@@ -648,7 +471,9 @@ impl<'a> Sessions<'a> {
             .iter()
             .filter(|i| &i.repo == repo && i.state == MoveState::Done)
         {
-            if strata_apfs::walk_stopped() { break; }
+            if strata_apfs::walk_stopped() {
+                break;
+            }
             if ino_of(&old_path(i)).is_some() || ino_of(&i.staging).is_some() {
                 continue;
             }

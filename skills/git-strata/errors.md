@@ -41,6 +41,7 @@ All three keys are always present; `data` is never null. Branch on
 | `Busy` (`not_idle`) | The App's drain still has admitted work. Wait for inflight requests and background holders to finish before sealing. |
 | `Busy` (`lease_lost`) | Refresh daemon status before retrying. To cancel a sealed hold, reopen the App and resume the move with its recorded lease. |
 | `InvalidInput` (`sealed`) | The requested change conflicts with an existing seal. Wait for a sealed stop or restart to finish. For a sealed hold, reopen the App to finish or cancel the move. |
+| `Busy` (`lock_wait`) with `detail.retry_safe` | From `new`/`add`: a repo lock or the session queue stayed busy and nothing was created or changed (fetch records and tracking refs may have). The CLI already retried for `--timeout` (`detail.retries`, `detail.waited_ms`; `holder`, `holder_session`, `holder_origin`, `held_ms` name who held it). Rerun the same command, or with `--timeout 0` to keep waiting. |
 | `Busy` (other) | Repo lock held by another operation; wait and retry later. |
 | `InvalidInput` (`config_rejected`) | Fallback when a rejected `config reload` report supplies no reason; otherwise the daemon's reason is forwarded. Inspect `data.reasons` and `data.restart_required` (exit 2). |
 | `InvalidInput` (`recovery_failed`) | A new repo's pending-rebase reconstruction failed before catalog publication; the old catalog remains active. Inspect `data.reasons`, resolve the reported failure, then rerun `config reload`. |
@@ -119,6 +120,11 @@ the [0.1.2 release notes](https://github.com/dickwu/git-strata/blob/main/docs/re
   workspaces, or you passed `--path` and left it out.
 - `status` shows health `Unknown` with `choices: ["abandon","accept"]`: a move
   failed midway; this is the human's `git-strata resolve`.
+- `new` or `add` prints `waiting (45s): new; repo tool held by sync (…); retrying`
+  on stderr: another operation holds the repo; the CLI keeps retrying until
+  `--timeout` runs out. A `new` that your own tool timeout killed may still have
+  created the session: run `git-strata ls` and look for the ticket before
+  running `new` again.
 - Unexpected command error: `git-strata <cmd> --help` shows the real flags.
 - Disk space questions: `git-strata du` (read-only, cached, each figure has
   `as_of`); `du --refresh` re-sizes in the background. `store.trash.eligible`

@@ -183,6 +183,11 @@ pub fn run(d: &Daemon<'_>, req: SyncRequest) -> Result<Value> {
             }
         }
     }
+    // new-lock §3.4, §15.6: one blocking old-tree guard for the whole
+    // request, registered before any queue or lock (no admission deadline).
+    let _guard = d
+        .sessions
+        .old_tree_guard(std::slice::from_ref(&req.session), None);
     let mut fetched = BTreeMap::new();
     let mut done = BTreeMap::new();
     crate::handlers::writing();

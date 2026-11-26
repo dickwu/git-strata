@@ -13,7 +13,11 @@ pub(crate) const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 /// or writes, restricted to `refs/strata/`.
 pub(crate) fn check_strata_ref(name: &str) -> Result<()> {
     let bad = |why: &str| -> StrataError {
-        errd(Code::InvalidInput, format!("ref {name:?} refused: {why}"), json!({ "ref": name }))
+        errd(
+            Code::InvalidInput,
+            format!("ref {name:?} refused: {why}"),
+            json!({ "ref": name }),
+        )
     };
     let Some(rest) = name.strip_prefix("refs/strata/") else {
         return Err(bad("not under refs/strata/"));
@@ -36,7 +40,10 @@ pub(crate) fn ref_format_ok(name: &str) -> bool {
         return false;
     }
     for c in name.bytes() {
-        if c < 0x20 || c == 0x7f || matches!(c, b' ' | b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\') {
+        if c < 0x20
+            || c == 0x7f
+            || matches!(c, b' ' | b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+        {
             return false;
         }
     }
@@ -48,11 +55,37 @@ pub(crate) fn ref_format_ok(name: &str) -> bool {
     true
 }
 
+/// [`Git::strata_refs_stamp`]: one entry per file, `None` for an absent one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefsStamp(Vec<Option<[i64; 7]>>);
+
+/// `Some(None)`: absent; `None`: the stat failed otherwise.
+fn file_stamp(path: &std::path::Path) -> Option<Option<[i64; 7]>> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(m) => Some(Some([
+            m.dev() as i64,
+            m.ino() as i64,
+            m.size() as i64,
+            m.mtime(),
+            m.mtime_nsec(),
+            m.ctime(),
+            m.ctime_nsec(),
+        ])),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
+        Err(_) => None,
+    }
+}
+
 pub(crate) fn parse_oid(out: &[u8], what: &str) -> Result<CommitOid> {
     let s = String::from_utf8_lossy(out);
     let line = s.lines().next().unwrap_or("").trim();
     CommitOid::try_from(line.to_string()).map_err(|_| {
-        errd(Code::Unknown, format!("git {what} printed no commit id"), json!({ "stdout": s.to_string() }))
+        errd(
+            Code::Unknown,
+            format!("git {what} printed no commit id"),
+            json!({ "stdout": s.to_string() }),
+        )
     })
 }
 
@@ -63,10 +96,70 @@ impl Git {
         self.resolve_commit(name)
     }
 
+    /// [`Git::read_ref`] of several refs under `refs/strata/` in one
+    /// `for-each-ref`, in the order given (`None` for an absent ref), bounded
+    /// by `timeout`. A ref that is not a commit is read again with
+    /// `read_ref`, so the result is always what `read_ref` would return.
+    pub fn read_strata_refs(
+        &self,
+        names: &[&str],
+        timeout: std::time::Duration,
+    ) -> Result<Vec<Option<CommitOid>>> {
+        for n in names {
+            check_strata_ref(n)?;
+        }
+        let mut c = self.repo_command();
+        c.args([
+            "for-each-ref",
+            "--format=%(refname)%00%(objecttype)%00%(objectname)",
+        ])
+        .args(names);
+        let out = self.run(c, Opts::c().timeout(timeout))?;
+        if !out.ok() {
+            return Err(failed("for-each-ref", &out));
+        }
+        let listed = String::from_utf8_lossy(&out.stdout).into_owned();
+        let mut found: std::collections::BTreeMap<&str, (&str, &str)> =
+            std::collections::BTreeMap::new();
+        for line in listed.lines() {
+            let mut f = line.split('\0');
+            if let (Some(name), Some(kind), Some(oid)) = (f.next(), f.next(), f.next()) {
+                found.insert(name, (kind, oid));
+            }
+        }
+        names
+            .iter()
+            .map(|n| match found.get(n) {
+                None => Ok(None),
+                Some(("commit", oid)) => parse_oid(oid.as_bytes(), "for-each-ref").map(Some),
+                Some(_) => self.resolve_commit(n),
+            })
+            .collect()
+    }
+
+    /// How the storage of `names` (under `refs/strata/`) looks on disk: each
+    /// loose ref file, `packed-refs` and the reftable list, by device,
+    /// inode, size and times. Git replaces these files (a lock file renamed
+    /// into place) on every change, so an equal stamp means the refs read as
+    /// they did when it was taken. `None` when a name is refused or a stat
+    /// fails for another reason than absence. Opens no descriptor.
+    pub fn strata_refs_stamp(&self, names: &[&str]) -> Option<RefsStamp> {
+        let dir = self.common_dir();
+        let mut files = Vec::with_capacity(names.len() + 2);
+        for n in names {
+            check_strata_ref(n).ok()?;
+            files.push(file_stamp(&dir.join(n))?);
+        }
+        files.push(file_stamp(&dir.join("packed-refs"))?);
+        files.push(file_stamp(&dir.join("reftable/tables.list"))?);
+        Some(RefsStamp(files))
+    }
+
     /// `rev-parse --verify --quiet <rev>^{commit}`: exit 1 → None.
     pub(crate) fn resolve_commit(&self, rev: &str) -> Result<Option<CommitOid>> {
         let mut c = self.repo_command();
-        c.args(["rev-parse", "--verify", "--quiet", "--end-of-options"]).arg(format!("{rev}^{{commit}}"));
+        c.args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
+            .arg(format!("{rev}^{{commit}}"));
         let out = self.run(c, Opts::c())?;
         match out.status {
             Some(0) => Ok(Some(parse_oid(&out.stdout, "rev-parse")?)),
@@ -77,8 +170,16 @@ impl Git {
 
     /// Resolve a caller-supplied local revision without interpreting options.
     pub fn resolve_rev(&self, rev: &str) -> Result<Option<CommitOid>> {
-        if rev.is_empty() || rev.len() > 256 || rev.starts_with('-') || rev.contains(['\0', '\n', '\r']) {
-            return Err(errd(Code::InvalidInput, "invalid base revision", json!({"reason":"base_rev"})));
+        if rev.is_empty()
+            || rev.len() > 256
+            || rev.starts_with('-')
+            || rev.contains(['\0', '\n', '\r'])
+        {
+            return Err(errd(
+                Code::InvalidInput,
+                "invalid base revision",
+                json!({"reason":"base_rev"}),
+            ));
         }
         self.resolve_commit(rev)
     }
@@ -86,21 +187,40 @@ impl Git {
     /// Refs of every namespace containing a commit (including other pins).
     pub fn refs_containing(&self, oid: &CommitOid) -> Result<Vec<String>> {
         let mut c = self.repo_command();
-        c.args(["for-each-ref", "--format=%(refname)", "--contains", oid.as_str()]);
+        c.args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "--contains",
+            oid.as_str(),
+        ]);
         let out = self.run(c, Opts::c())?;
-        if !out.ok() { return Err(failed("for-each-ref", &out)); }
-        Ok(String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect())
+        if !out.ok() {
+            return Err(failed("for-each-ref", &out));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect())
     }
 
     /// Whether `ancestor` is an ancestor of (or equal to) `descendant`.
     pub fn is_ancestor(&self, ancestor: &CommitOid, descendant: &CommitOid) -> Result<bool> {
         let mut c = self.repo_command();
-        c.args(["merge-base", "--is-ancestor", ancestor.as_str(), descendant.as_str()]);
+        c.args([
+            "merge-base",
+            "--is-ancestor",
+            ancestor.as_str(),
+            descendant.as_str(),
+        ]);
         let out = self.run(c, Opts::default())?;
         match out.status {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
-            _ => Err(self.missing_commit_or(&[ancestor, descendant], "merge-base --is-ancestor", &out)),
+            _ => Err(self.missing_commit_or(
+                &[ancestor, descendant],
+                "merge-base --is-ancestor",
+                &out,
+            )),
         }
     }
 
@@ -118,7 +238,12 @@ impl Git {
 
     /// `NoSuchCommit` for the first of `oids` that is not a commit here,
     /// else `Unknown` for the failed command.
-    pub(crate) fn missing_commit_or(&self, oids: &[&CommitOid], what: &str, out: &Out) -> StrataError {
+    pub(crate) fn missing_commit_or(
+        &self,
+        oids: &[&CommitOid],
+        what: &str,
+        out: &Out,
+    ) -> StrataError {
         for o in oids {
             match self.resolve_commit(o.as_str()) {
                 Ok(None) => {
@@ -139,8 +264,15 @@ impl Git {
     pub fn update_ref(&self, name: &str, new: &CommitOid, old: Option<&CommitOid>) -> Result<()> {
         check_strata_ref(name)?;
         let mut c = self.repo_command();
-        c.args(["update-ref", "-m", "strata", "--end-of-options", name, new.as_str()])
-            .arg(old.map(|o| o.as_str()).unwrap_or(ZERO_OID));
+        c.args([
+            "update-ref",
+            "-m",
+            "strata",
+            "--end-of-options",
+            name,
+            new.as_str(),
+        ])
+        .arg(old.map(|o| o.as_str()).unwrap_or(ZERO_OID));
         let out = self.run(c, Opts::c())?;
         if out.ok() {
             return Ok(());
@@ -152,7 +284,15 @@ impl Git {
     pub fn delete_ref(&self, name: &str, old: &CommitOid) -> Result<()> {
         check_strata_ref(name)?;
         let mut c = self.repo_command();
-        c.args(["update-ref", "-m", "strata", "-d", "--end-of-options", name, old.as_str()]);
+        c.args([
+            "update-ref",
+            "-m",
+            "strata",
+            "-d",
+            "--end-of-options",
+            name,
+            old.as_str(),
+        ]);
         let out = self.run(c, Opts::c())?;
         if out.ok() {
             return Ok(());
@@ -160,7 +300,13 @@ impl Git {
         Err(self.cas_failure(name, Some(old), "update-ref -d", &out))
     }
 
-    fn cas_failure(&self, name: &str, expected: Option<&CommitOid>, what: &str, out: &Out) -> StrataError {
+    fn cas_failure(
+        &self,
+        name: &str,
+        expected: Option<&CommitOid>,
+        what: &str,
+        out: &Out,
+    ) -> StrataError {
         let stderr = out.stderr_str();
         let actual = match self.read_ref(name) {
             Ok(a) => a,
@@ -183,4 +329,3 @@ impl Git {
         )
     }
 }
-

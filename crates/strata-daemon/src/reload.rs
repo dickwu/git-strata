@@ -359,12 +359,32 @@ impl Core {
                     &mut r.changed,
                 );
                 for name in added {
+                    // new-lock §2.1: the snapshot exists before the lock is
+                    // published, so no reader sees the repo without one.
+                    self.locks.set_ref_source(
+                        &name,
+                        next.gits[&name].clone(),
+                        &next.config.repos[&name].default_branch,
+                    );
+                    self.locks.refresh_snapshot(&name);
                     self.locks.insert(name);
                 }
                 self.locks.tighten(&tightened, next.generation);
+                let reconfigured: Vec<RepoName> = current
+                    .source
+                    .repos
+                    .iter()
+                    .filter(|(n, old)| source.repos.get(*n).is_some_and(|new| new != *old))
+                    .map(|(n, _)| n.clone())
+                    .collect();
                 self.pins
                     .replace(next.pins.clone(), next.file_flags.clone(), None);
                 self.catalog.publish(next);
+                // new-lock §3.3: after the publish, so an old-tree judgement
+                // that read the epoch before admitting the old catalog is void.
+                for name in &reconfigured {
+                    self.locks.bump_config_epoch(name);
+                }
                 self.refresh_config_warnings();
                 for latch in parked.0.drain(..) {
                     latch.set(true);

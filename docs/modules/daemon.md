@@ -350,7 +350,7 @@ launchd 的 plist 不进仓库，由 `install_agent` 写到 `~/Library/LaunchAge
 | 编号 | 内容 | design §9 |
 | --- | --- | --- |
 | I1 | 一台机器一个进程。锁文件被占时第二个进程以 `Exists` 退出（`detail.reason = "daemon_running"`）。`Busy` 用于写前等待和配置 fence 的 `pins_tightened` 拒绝 | §5 |
-| I2 | 每 repo 一把写锁，不可重入。先到先得。写前等 `LOCK_WAIT`，超时 `Busy`，什么都没写。写后的普通锁等待一直等到拿到；配置收紧是例外：每次 take/wake/grant 都可返回 `Busy pins_tightened`，调用不重试。已落地 publish 的 rebase 记 Deferred，publish 行仍为 Done | §8、不变量 6 |
+| I2 | 每 repo 一把写锁，不可重入。先到先得。写前等 `LOCK_WAIT`，超时 `Busy`，什么都没写。写后的普通锁等待一直等到拿到；配置收紧是例外：每次 take/wake/grant 都可返回 `Busy pins_tightened`，调用不重试。已落地 publish 的 rebase 记 Deferred，publish 行仍为 Done。new-lock（2026-11-25）：每次放 repo 写锁时，放锁的线程还持着锁，就把默认分支的三个 ref（`refs/strata/remotes/origin/<b>`、`refs/strata/publish/<b>`、`refs/strata/anchor/<b>`）记成这个 repo 的释放点快照；`new`/`add` 的头一步按它算 tip，不排锁（见 new-lock 节） | §8、不变量 6 |
 | I3 | 每会话一条队列，先到先得，不可重入。同一会话的 checkpoint、restore、`rm`、`move_workspace`、`resolve_failed_move` 串行。持有者不取消，后来的排队；每次 take/wake/grant 重新检查会话成员，过时的配置代以 `Busy pins_tightened` 拒绝 | §8 |
 | I4 | 建造锁 → 会话队列（`SessionId` 升序）→ repo 写锁（一次只拿一个 repo 的）。持有队列或 repo 锁时不等建造锁。reload/relax 的 committer 只能在未持有建造锁、队列或 repo 锁时取得；committer 内不等待这些锁，也不等待凭据或网络 | — |
 | I5 | status、grep、files、diff、deps_list、publish_plan、daemon_status 不排队，不等写锁 | §8 |
@@ -446,7 +446,7 @@ value; workers should use the accessor for subsequent passes.
 
 `ObserveFailed` 不在 `DaemonWarning` 里重定义。它是 `NewWarning` 或这次 RPC 的 `data.warnings`。
 
-`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity", "daemon_status.volume_name", "daemon.drain"]`（D38、D39；`daemon.drain` 见 §5.9，`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload）；没有这个键的 daemon 一个也不支持。`daemon_status.activity` 与 `daemon_status.volume_name` 表示回复能力：前者表示这个 daemon 的 `daemon_status` 带状态栏字段，后者表示其中的 `volume` 还带 `path`、`mount`、`name`，见 Status bar fields。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
+`daemon_status` 同样不等锁。总是列出当前持锁者与队列里在等的人。回复总带 `features`（`strata_daemon::FEATURES`）：这个 daemon 接受的、旧 daemon 没有的请求扩展，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity", "daemon_status.volume_name", "daemon.drain", "new.fetch_skip"]`（D38、D39；`daemon.drain` 见 §5.9，`status.upstream` 与 `sync` 见 main-sync，`config.reload` 见 Config catalog and reload，`new.fetch_skip` 见 new-lock 节）；没有这个键的 daemon 一个也不支持。`daemon_status.activity` 与 `daemon_status.volume_name` 表示回复能力：前者表示这个 daemon 的 `daemon_status` 带状态栏字段，后者表示其中的 `volume` 还带 `path`、`mount`、`name`，见 Status bar fields。`verify: true` 时调 `Store::quick_check`，这就是裁定要本文点名的那次校验命令：冻结表里没有 `verify` 方法，所以它是这个已有方法的参数 [我的决定 D10]。
 
 stderr 只为给人看的告警打一行：隔离、attach 越界、第一次看见某个影子仓库的 `PrePushGuardDisabled`。同一条不重复打。这些警告 JSON 里都有，不靠人去翻日志；R2 activity-scope 的 once-per-repo 日志提示是下文注明的例外。
 
@@ -594,7 +594,7 @@ Orderly shutdown records `{mode, epoch, close_error, at}` in `last_shutdown.json
 
 旧树上的进程只列在 status 里，不杀（session 的已知限制）。
 
-R2 old-tree worker: startup/periodic half-retired sweeps and queued items use try_session("old_tree") then zero-wait try_repo. Busy locks requeue after 5 s, releasing the queue immediately. Both holders carry one per-item yield flag; any actual bounded/unbounded waiter sets it; zero-bound probes do not. Walks stop at the next directory. Yield, Busy and passes_read_failed retries wait 5 s, or 50 s after three consecutive retries without a completed judgement. Busy or a failed read does not reset escalation. A completed Kept/Retired result is not retried merely because a late waiter set the yield flag. Shutdown does not requeue. Frequent foreground traffic may starve collection until idle. The previous verdict survives yield; status cannot bypass its retry delay. Loop retries are separate from Q scheduling: status can queue a fresh kept Agent/Auto tree during Q. Invalidating verdicts preserves other repos' queued work; completing or dropping a check clears its retry history. Panics are logged; no request is cancelled.
+R2 old-tree worker (queued items superseded by new-lock: each item is now a claim judged in phases, its walk holding no lock; see the new-lock section; the sweeps below are unchanged): startup/periodic half-retired sweeps and queued items use try_session("old_tree") then zero-wait try_repo. Busy locks requeue after 5 s, releasing the queue immediately. Both holders carry one per-item yield flag; any actual bounded/unbounded waiter sets it; zero-bound probes do not. Walks stop at the next directory. Yield, Busy and passes_read_failed retries wait 5 s, or 50 s after three consecutive retries without a completed judgement. Busy or a failed read does not reset escalation. A completed Kept/Retired result is not retried merely because a late waiter set the yield flag. Shutdown does not requeue. Frequent foreground traffic may starve collection until idle. The previous verdict survives yield; status cannot bypass its retry delay. Loop retries are separate from Q scheduling: status can queue a fresh kept Agent/Auto tree during Q. Invalidating verdicts preserves other repos' queued work; completing or dropping a check clears its retry history. Panics are logged; no request is cancelled.
 
 ### 5.12 `du`：磁盘用量
 
@@ -1152,7 +1152,10 @@ acquiring the held queue. Repo/session waiters older than LOCK_WAIT produce
 LongWait `{repo?, session?, method, since, attempt_since}` alongside LongHold.
 Live FIFO waits use their own attempt start. An expired `with_lock_unbounded`
 attempt logs and records a LongWait before retrying, retained in daemon_status
-warnings even after its FIFO entry disappears. Records are deduplicated by
+warnings even after its FIFO entry disappears. (new-lock, 2026-11-25: session's
+pin and unpin no longer take the repo lock, so `with_lock_unbounded` and
+`with_cleanup_lock` are gone and no production path calls `record_long_wait`
+now; the record and its warning are kept for any later caller.) Records are deduplicated by
 repo/session/method, replacing the previous attempt. Both since and
 attempt_since describe the latest expired or currently long-waiting attempt,
 never a cumulative retry age. This diagnostic does not change the lock budget.
@@ -1364,8 +1367,9 @@ activity registry), never from the file system or the store, and none waits for
   being moved, or null), `base_build` (`tree`), `session_create` (`repos`,
   `step`; `repo` is null, and `session` is the new session's id from the
   start: the id is minted before the activity begins),
-  `deps_install` (`proposal`), `publish` and `push`. For a kind without steps
-  `step_elapsed_ms` equals `elapsed_ms`.
+  `deps_install` (`proposal`), `publish`, `push` and `old_tree_check` (`n`;
+  `phase`: `revalidate`, `walk`, `commit`, `restore` or null). For a kind
+  without steps `step_elapsed_ms` equals `elapsed_ms`.
 - `holds[]` items gain `origin` and `elapsed_ms`. Their `session` is the subject
   the holder works on when it names one (a catch-up move names the session it
   moves), else the request's session as before.
@@ -1472,6 +1476,7 @@ is `{id, kind, origin, repo, session, started, elapsed_ms, step_elapsed_ms}`
 | `base_build` | a base is registered under the repo lock (session observer) | `tree` | the build |
 | `session_create` | `new` or `add` runs (session observer) | `repos`, `step` (`new`: `head`, `base`, `enroll`, `root`, `workspace`, `seed_caches`, `git`, `pin`, `seed_files`, `finalize`, `observe`; `add`: `head`, `base`, `build`, `record`, `observe`); `repo` is null | restarted at each step |
 | `deps_install` | main-sync's automatic install runs (it holds no lock) | `proposal`: the proposal id as a string | the install |
+| `old_tree_check` | the old-tree worker runs a claim (new-lock §3.5; its walk holds no lock) | `n`: the move whose old tree it judges; `phase`: `revalidate`, `walk`, `commit`, `restore`, or null before the first | restarted at each phase |
 | `publish` | publish's own step holds its session queue places | — | the publish |
 | `push` | `push` holds the repo lock | — | the push |
 
@@ -1485,8 +1490,11 @@ crate reports moves, base builds and session creation
 through `strata_session::observe::Observer`, which the daemon installs per
 thread (`Server::handle`, and the catch-up pass for its background moves); the
 session crate never depends on the daemon. Checkpoint, restore, auto-close,
-gc, the reconcile pass, old-tree collection and fetches are not activity; their
-holds are reported as before.
+gc, the reconcile pass, the half-retired sweep and fetches are not activity;
+their holds are reported as before. The old-tree worker's claims are activity
+since new-lock (`old_tree_check`, reported through the same observer, which
+the worker installs on its thread); a claim's short phase-2 hold of the repo
+lock still shows in `holds[]` as `old_tree`, `background`.
 
 **`LongHold`** is raised by `daemon_status` for a held repo lock when
 - exempt long work is in flight on that repo (a move, deps rollout or base
@@ -1542,3 +1550,95 @@ configured data root as an unknown schema. A failed or interrupted migration
 leaves the marker in place. If the final snapshot write fails, startup
 reports the failure. A later successful open can refresh `user_version`
 with `migrated_from` set to null.
+
+## new-lock: release-point snapshot, `new`/`add` without the repo lock, the lock-free old-tree worker
+
+Design new-lock r7.1 (2026-11-25). The session side is session.md §9
+"new-lock".
+
+**Release-point snapshot (I2).** `Locks` keeps, per repo, a
+`strata_deps::RefSnapshot { origin, chain_top, anchor, generation, valid }`
+of the default branch: the three refs `publish_chain` reads. A repo write
+lock's release (`Held` dropped, before the FIFO is released, so it covers
+`repo_take`, `try_repo` and the cleanup take) refreshes it while the releasing
+thread still holds the lock. The refresh first stats the refs' files
+(`Git::strata_refs_stamp`); if they are unchanged since the last good read
+only the generation moves, otherwise one bounded `for-each-ref`
+(`read_strata_refs`) reads them. A failed read, or a release while the thread
+unwinds, marks the snapshot not valid; the refresh runs under `catch_unwind`
+and the FIFO is released whatever happens. Every write of the three refs
+happens under the repo's write lock, so a snapshot is always the state at the
+end of some critical section. The source (`set_ref_source`: the repo's `Git`
+and default branch) is set at startup, which then computes every snapshot
+under its lock, and when a reload adds a repo, which computes it before the
+repo's lock is published. A missing snapshot counts as not valid.
+
+**The lock trait for `new` and `add`.** `RepoWriteLock` gains
+`try_write_as(repo, holder, f)` (a zero-wait take labelled with the request's
+method), `is_shut_down`, `ref_snapshot`, `wake` and `config_epoch`. Where
+`new`/`add` no longer take the lock (the head step on the snapshot, the
+shadow and its attach, the pin) they call `is_shut_down` and `check_fence`
+instead and refuse as the take would have. `rm`'s unpin and `add_unpin`, also
+without the lock, call only `is_shut_down`: the cleanup's fence exemption is
+unchanged.
+`new`'s observation and its follow-ups after the session exists (`after_new`:
+anchor, re-observation, reconcile) are unchanged and still wait for the lock.
+
+**`lock_wait` detail.** A `Busy` `lock_wait` refusal's detail gains, beside
+`lock`, `holder` and `holder_session`: `holder_origin` (`request` or
+`background`), `holder_since` (RFC 3339) and `held_ms`, all absent when the
+lock was between holders at the timeout. The daemon adds `retry_safe: true`
+only where nothing was written: `add`'s initial session-queue wait, and a
+head-step refusal in which every failed repo failed with `lock_wait`. The CLI
+retries only those (cli.md); every other refusal, and every refusal from an
+older daemon, is returned at once. FEATURES appends `new.fetch_skip`: such a
+daemon may answer `new`/`add` with `NewWarning::FetchSkipped`, which an older
+typed client cannot decode, so the CLI and the daemon are upgraded together.
+
+**The old-tree worker.** `old_tree_loop` claims one queued old tree at a time
+(`Sessions::claim_old_tree`, waiting at most 100 ms); a key of a session with
+a foreground guard is not claimed. The claim then takes the drain's
+background pass (refused: `release_old_tree_claim(claim, true)`, sleep 100 ms)
+and is admitted to the catalog, installs the activity observer and runs
+`run_old_tree_claim` with `WorkerLocks`:
+
+- phase 0's `try_session(session, "old_tree")` registers a yield flag
+  (`locks::with_yield`): a request that queues for the place stops phase 0's
+  checks, not phase 1;
+- phase 2's `try_session` does not yield; its repo take is
+  `Locks::repo_abortable(repo, "old_tree", abort)`: bounded by the lock wait
+  and given up once `abort` holds (a guard registered); `wake_repo` makes the
+  waiter look at it again.
+
+A busy, yielded or deferred claim is retried after `OLD_TREE_RETRY` (5 s), 50
+s from the third consecutive retry. Shutdown stops the walks (the loop's stop
+flag), and a stopped claim is neither recorded nor retried. A panic is logged
+and the claim's drop guard ends it.
+
+**Foreground guards** (`Sessions::old_tree_guard`), each registered before any
+queue place or repo lock: `rm` before its `discard_action` preflight (no
+deadline, held to the request's end), `restore`, `sync` once per request
+before its fetch and acknowledgements (no deadline), `deps_approve` before its
+queue places, and the foreground publish rebase for every batch session
+(strata-publish). `resolve_move` and the strict auto-close use
+`resolve::with_queue_guarded`: their admission deadline starts before the
+guard, and a guard still waiting at the deadline is withdrawn and the caller
+gets `Busy` `lock_wait` with `deadline: true`. Background catch-up and the
+never-waiting T2 rebase only check `old_tree_claim_in_flight`: a claim of the
+session in flight defers them with `Busy` `lock_wait` (holder `old_tree`),
+registering nothing.
+
+**Reload.** A reload that changes a repo's configuration bumps that repo's
+config epoch after the new catalog is published (`Locks::bump_config_epoch`).
+A claim reads the epoch when it is claimed, before the worker admits a
+catalog, so a judgement made under the old configuration is never recorded.
+
+**Activity.** A claim is an `old_tree_check` activity (`n`, `phase`:
+`revalidate`, `walk`, `commit`, `restore`). It is not exempt long work: its
+phase-2 hold is `background` and becomes a `LongHold` only past
+`BACKGROUND_HOLD_MAX`.
+
+Tests: `tests/new_lock.rs` (head step, snapshot, `--base`, fences, unpin,
+`holder_*` fields, certified refusals) and `tests/old_tree_yield.rs` (phase 1
+holds no lock and shows as activity, the phase-0 yield, the bounded and the
+busy phase 2, guards with and without a deadline, `rm` past the lock wait).

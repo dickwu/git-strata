@@ -21,7 +21,6 @@ use strata_types::{
     RepoName, RepoPath, SessionId, StrataError, TreeOid, WorkspaceState,
 };
 
-use crate::new::pin_ref;
 use crate::rm_note::{interrupted, interrupted_line};
 use crate::scene::{Scene, SceneOp, cause_of, kept_dirs, unknown_error};
 use crate::seams::is_stop;
@@ -60,7 +59,10 @@ pub struct RemoveReport {
 
 /// Who judges a remove (auto-close §3.1).
 enum RemoveMode {
-    Agent { discard: bool, confirm: Option<ConfirmToken> },
+    Agent {
+        discard: bool,
+        confirm: Option<ConfirmToken>,
+    },
     /// The daemon's auto-close: non-discard, no token and no exemption, and
     /// nothing but a projection onto the default branch discharges an entry.
     Strict,
@@ -76,7 +78,11 @@ pub(crate) struct Torn {
 /// The branch whose tracking ref discharges an entry: the one this repo
 /// publishes to for an agent's `rm` (D57), the default branch for a close.
 fn landing_branch(cfg: &strata_types::RepoConfig, strict: bool) -> &str {
-    if strict { &cfg.default_branch } else { &cfg.publish.branch }
+    if strict {
+        &cfg.default_branch
+    } else {
+        &cfg.publish.branch
+    }
 }
 
 fn lifecycle_changed(id: &SessionId, was: Lifecycle) -> StrataError {
@@ -84,7 +90,9 @@ fn lifecycle_changed(id: &SessionId, was: Lifecycle) -> StrataError {
         Code::InvalidInput,
         format!("session {id} changed state while it was being removed"),
     )
-    .with_detail(json!({ "reason": "lifecycle_changed", "session": id.as_str(), "was": lc_name(was) }))
+    .with_detail(
+        json!({ "reason": "lifecycle_changed", "session": id.as_str(), "was": lc_name(was) }),
+    )
 }
 
 /// What step 4 let go without blocking: the entries that landed (D57) and
@@ -106,15 +114,20 @@ pub struct Regenerable<'c> {
 
 impl<'c> Regenerable<'c> {
     pub fn new(patterns: &[String], cfg: &'c strata_types::RepoConfig) -> Self {
-        Regenerable { rules: strata_overlay::LwwRules::parse(&patterns.join("\n")), cfg }
+        Regenerable {
+            rules: strata_overlay::LwwRules::parse(&patterns.join("\n")),
+            cfg,
+        }
     }
 
     /// Modified/Added/Untracked only (a deletion or a rename is never
     /// regenerable) and never an install input, whatever its case or
     /// normalization.
     pub fn matches(&self, e: &OverlayEntry) -> bool {
-        matches!(e.kind, EntryKind::Added { .. } | EntryKind::Modified { .. } | EntryKind::Untracked { .. })
-            && !self.rules.is_empty()
+        matches!(
+            e.kind,
+            EntryKind::Added { .. } | EntryKind::Modified { .. } | EntryKind::Untracked { .. }
+        ) && !self.rules.is_empty()
             && strata_overlay::lww_matches(&self.rules, &e.path)
             && !strata_deps::is_input_folded(self.cfg, &e.path)
     }
@@ -148,23 +161,40 @@ impl Sessions<'_> {
     /// not be recorded is still listed (count 0), never left out.
     pub fn discard_action(&self, id: &SessionId) -> Result<Action> {
         let mut late: Vec<PathBuf> = Vec::new();
-        for i in self.store.move_intents(id)?.iter().filter(|i| i.state == MoveState::Done) {
+        for i in self
+            .store
+            .move_intents(id)?
+            .iter()
+            .filter(|i| i.state == MoveState::Done)
+        {
             let path = crate::old_tree::old_path(i);
-            if exists(&path) && matches!(self.auto_check(i, &path), crate::old_tree::AutoCheck::Late | crate::old_tree::AutoCheck::Skipped) {
+            if exists(&path)
+                && matches!(
+                    self.auto_check(i, &path),
+                    crate::old_tree::AutoCheck::Late | crate::old_tree::AutoCheck::Skipped
+                )
+            {
                 late.push(path);
             }
         }
-        let mut kept_trees: Vec<strata_types::KeptTreeRef> = crate::rm_note::kept_trees(self.store, id)?
-            .into_iter()
-            .map(|k| strata_types::KeptTreeRef { path: k.path.display().to_string(), count: k.count })
-            .collect();
+        let mut kept_trees: Vec<strata_types::KeptTreeRef> =
+            crate::rm_note::kept_trees(self.store, id)?
+                .into_iter()
+                .map(|k| strata_types::KeptTreeRef {
+                    path: k.path.display().to_string(),
+                    count: k.count,
+                })
+                .collect();
         for p in late {
             let p = p.display().to_string();
             if !kept_trees.iter().any(|k| k.path == p) {
                 kept_trees.push(strata_types::KeptTreeRef { path: p, count: 0 });
             }
         }
-        Ok(Action::RemoveDiscard { session: id.clone(), kept_trees })
+        Ok(Action::RemoveDiscard {
+            session: id.clone(),
+            kept_trees,
+        })
     }
 
     pub fn remove(
@@ -198,7 +228,9 @@ impl Sessions<'_> {
         };
         let cur = rec.lifecycle;
         // A close accepts `Active` only: an `Unknown` session's scene is its record.
-        if !matches!(cur, Lifecycle::Active | Lifecycle::Unknown) || (strict && cur != Lifecycle::Active) {
+        if !matches!(cur, Lifecycle::Active | Lifecycle::Unknown)
+            || (strict && cur != Lifecycle::Active)
+        {
             let state = lc_name(cur);
             return Err(StrataError::new(
                 Code::InvalidInput,
@@ -278,7 +310,10 @@ impl Sessions<'_> {
                 checkpoints.insert(repo.clone(), cp.checkpoint.id);
                 checkpointed.insert(
                     repo.clone(),
-                    strata_overlay::Overlay { base: ws.base.clone(), entries: cp.checkpoint.entries.clone() },
+                    strata_overlay::Overlay {
+                        base: ws.base.clone(),
+                        entries: cp.checkpoint.entries.clone(),
+                    },
                 );
                 // 5.3 (D57): what is about to be retired is what step 4 let go.
                 if !discard {
@@ -421,11 +456,21 @@ impl Sessions<'_> {
             } else {
                 let git = self.git(repo)?;
                 let base = self.base_of(&ws.base)?;
-                let wsref = WorkspaceRef { session: id, repo, root: &ws.path, config: cfg, git, store: self.store };
-                let mut t = strata_overlay::Tracker::new(&ws.path, strata_overlay::DEFAULT_DIRTY_CAPACITY);
+                let wsref = WorkspaceRef {
+                    session: id,
+                    repo,
+                    root: &ws.path,
+                    config: cfg,
+                    git,
+                    store: self.store,
+                };
+                let mut t =
+                    strata_overlay::Tracker::new(&ws.path, strata_overlay::DEFAULT_DIRTY_CAPACITY);
                 let scan = strata_overlay::compute(&wsref, &base, &mut t, None)?;
                 let mut paths: BTreeSet<RepoPath> =
-                    strata_overlay::changed_paths(checkpointed.get(repo), &scan.overlay).into_iter().collect();
+                    strata_overlay::changed_paths(checkpointed.get(repo), &scan.overlay)
+                        .into_iter()
+                        .collect();
                 paths.extend(unstable(&scan.warnings));
                 if strict {
                     paths.extend(embedded_paths(&scan.warnings));
@@ -435,7 +480,10 @@ impl Sessions<'_> {
                     changed.insert(repo.as_str().into(), list_json(&paths));
                 }
             }
-            for i in intents.iter().filter(|i| &i.repo == repo && i.state == MoveState::Done) {
+            for i in intents
+                .iter()
+                .filter(|i| &i.repo == repo && i.state == MoveState::Done)
+            {
                 let path = crate::old_tree::old_path(i);
                 if exists(&path) && !self.old_tree_unchanged(i, cfg).unwrap_or(false) {
                     old_trees.push(json!({ "repo": repo.as_str(), "n": i.n, "path": path }));
@@ -447,7 +495,14 @@ impl Sessions<'_> {
         if strict {
             let pending = self.store.rebase_pending(Some(id))?;
             let rows = self.store.publishes()?;
-            items = crate::outstanding(self.store, |r| self.git(r), |r| self.repo_cfg(r), rec, &pending, &rows)?;
+            items = crate::outstanding(
+                self.store,
+                |r| self.git(r),
+                |r| self.repo_cfg(r),
+                rec,
+                &pending,
+                &rows,
+            )?;
             keys = Some(pending.iter().map(PendingKey::of).collect());
         }
         if changed.is_empty() && old_trees.is_empty() && items.is_empty() {
@@ -482,7 +537,12 @@ impl Sessions<'_> {
     fn refuse_open_files(&self, rec: &SessionRecord, strict: bool) -> Result<()> {
         let id = &rec.manifest.id;
         let root = rec.manifest.root.clone();
-        let repos_dir = self.config.paths.root.join("sessions/.repos").join(id.as_str());
+        let repos_dir = self
+            .config
+            .paths
+            .root
+            .join("sessions/.repos")
+            .join(id.as_str());
         let open = strata_deps::open_files_many(&[&root, &repos_dir])?;
         if open.is_empty() {
             return Ok(());
@@ -490,7 +550,11 @@ impl Sessions<'_> {
         let mut pids: Vec<i32> = open.iter().map(|o| o.pid).collect();
         pids.sort_unstable();
         pids.dedup();
-        let held = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+        let held = pids
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         // A close has no command of the agent's to re-run.
         let tail = if strict {
             format!("close them, then run `git-strata rm --session {id}` yourself.")
@@ -499,7 +563,10 @@ impl Sessions<'_> {
         };
         Err(StrataError::new(
             Code::OpenFiles,
-            format!("{} Processes {held} hold files in it; {tail}", self.refused_prefix(rec, strict)),
+            format!(
+                "{} Processes {held} hold files in it; {tail}",
+                self.refused_prefix(rec, strict)
+            ),
         )
         .with_detail(json!({
             "session": id.as_str(),
@@ -537,42 +604,53 @@ impl Sessions<'_> {
         // 6.
         match pending {
             None => {
-                if !self.store.set_lifecycle(id, cur, Lifecycle::Removing, None, SystemTime::now())? {
+                if !self.store.set_lifecycle(
+                    id,
+                    cur,
+                    Lifecycle::Removing,
+                    None,
+                    SystemTime::now(),
+                )? {
                     return Err(lifecycle_changed(id, cur));
                 }
             }
-            Some(keys) => match self.store.set_removing_if_unchanged(id, cur, keys, SystemTime::now())? {
-                IfUnchanged::Removing => {}
-                IfUnchanged::LifecycleMoved => return Err(lifecycle_changed(id, cur)),
-                IfUnchanged::PendingMoved => {
-                    return Err(changed_during(
-                        &self.refused_prefix(rec, true),
-                        true,
-                        rec,
-                        &["a rebase target".to_string()],
-                        json!({ "repos": {}, "pending_changed": true, "after": "checkpoint" }),
-                    ));
+            Some(keys) => {
+                match self
+                    .store
+                    .set_removing_if_unchanged(id, cur, keys, SystemTime::now())?
+                {
+                    IfUnchanged::Removing => {}
+                    IfUnchanged::LifecycleMoved => return Err(lifecycle_changed(id, cur)),
+                    IfUnchanged::PendingMoved => {
+                        return Err(changed_during(
+                            &self.refused_prefix(rec, true),
+                            true,
+                            rec,
+                            &["a rebase target".to_string()],
+                            json!({ "repos": {}, "pending_changed": true, "after": "checkpoint" }),
+                        ));
+                    }
+                    IfUnchanged::Reopened(items) => {
+                        let names: Vec<String> = items
+                            .iter()
+                            .map(|v| {
+                                format!(
+                                    "{}: {}",
+                                    v.get("repo").and_then(Value::as_str).unwrap_or("?"),
+                                    v.get("code").and_then(Value::as_str).unwrap_or("?")
+                                )
+                            })
+                            .collect();
+                        return Err(changed_during(
+                            &self.refused_prefix(rec, true),
+                            true,
+                            rec,
+                            &names,
+                            json!({ "repos": {}, "reopened": items, "after": "checkpoint" }),
+                        ));
+                    }
                 }
-                IfUnchanged::Reopened(items) => {
-                    let names: Vec<String> = items
-                        .iter()
-                        .map(|v| {
-                            format!(
-                                "{}: {}",
-                                v.get("repo").and_then(Value::as_str).unwrap_or("?"),
-                                v.get("code").and_then(Value::as_str).unwrap_or("?")
-                            )
-                        })
-                        .collect();
-                    return Err(changed_during(
-                        &self.refused_prefix(rec, true),
-                        true,
-                        rec,
-                        &names,
-                        json!({ "repos": {}, "reopened": items, "after": "checkpoint" }),
-                    ));
-                }
-            },
+            }
         }
         let mut phase = "retire";
         let mut not_owned = Vec::new();
@@ -602,15 +680,10 @@ impl Sessions<'_> {
             phase = "unpin";
             self.store.set_session_phase(id, "unpin")?;
             self.seams.hit("remove.unpin", None)?;
-            let pin = pin_ref(id);
+            // new-lock §2.7: without the repo lock, so a long holder no
+            // longer stalls a committed removal.
             for repo in rec.manifest.repos.keys() {
-                let git = self.git(repo)?;
-                self.with_cleanup_lock(repo, || {
-                    if let Some(c) = git.read_ref(&pin)? {
-                        git.delete_ref(&pin, &c)?;
-                    }
-                    Ok(())
-                })?;
+                self.unpin(repo, id)?;
             }
             // 9.
             phase = "record";
@@ -642,13 +715,38 @@ impl Sessions<'_> {
     /// row; if that fails too the row stays Removing and `recover` marks it.
     fn remove_unknown(&self, rec: &SessionRecord, phase: &str, e: &StrataError) -> StrataError {
         let id = &rec.manifest.id;
-        let kept = kept_dirs(&self.config.paths.root, id, rec.manifest.repos.keys().cloned());
-        let err = unknown_error(SceneOp::Remove, id, None, phase, cause_of(e), &kept, Map::new());
+        let kept = kept_dirs(
+            &self.config.paths.root,
+            id,
+            rec.manifest.repos.keys().cloned(),
+        );
+        let err = unknown_error(
+            SceneOp::Remove,
+            id,
+            None,
+            phase,
+            cause_of(e),
+            &kept,
+            Map::new(),
+        );
         let now = SystemTime::now();
-        let scene =
-            Scene { op: SceneOp::Remove, session: id.clone(), repo: None, phase: phase.into(), at: now, kept, error: err.clone() };
+        let scene = Scene {
+            op: SceneOp::Remove,
+            session: id.clone(),
+            repo: None,
+            phase: phase.into(),
+            at: now,
+            kept,
+            error: err.clone(),
+        };
         if let Ok(v) = serde_json::to_value(&scene) {
-            let _ = self.store.set_lifecycle(id, Lifecycle::Removing, Lifecycle::Unknown, Some(&v), now);
+            let _ = self.store.set_lifecycle(
+                id,
+                Lifecycle::Removing,
+                Lifecycle::Unknown,
+                Some(&v),
+                now,
+            );
         }
         err
     }
@@ -666,16 +764,29 @@ impl Sessions<'_> {
         let head = "rm refused: nothing was removed;";
         match rec.lifecycle {
             Lifecycle::Unknown => match interrupted(&self.config.paths.root, rec) {
-                Some(i) => format!("{head} session {id} is still Unknown ({}).", interrupted_line(id, &i)),
-                None => format!("{head} session {id} is still Unknown (an earlier operation was interrupted)."),
+                Some(i) => format!(
+                    "{head} session {id} is still Unknown ({}).",
+                    interrupted_line(id, &i)
+                ),
+                None => format!(
+                    "{head} session {id} is still Unknown (an earlier operation was interrupted)."
+                ),
             },
-            l => format!("{head} session {id} is still {} and listed (`git-strata ls`).", lc_title(l)),
+            l => format!(
+                "{head} session {id} is still {} and listed (`git-strata ls`).",
+                lc_title(l)
+            ),
         }
     }
 
     /// Why a workspace is not healthy (healthy: not Unknown in the store,
     /// its directory and `.git` present, its shadow repository there): `Some("unknown")` or `Some("missing")`.
-    fn unhealthy(&self, rec: &SessionRecord, repo: &RepoName, ws: &WorkspaceState) -> Result<Option<&'static str>> {
+    fn unhealthy(
+        &self,
+        rec: &SessionRecord,
+        repo: &RepoName,
+        ws: &WorkspaceState,
+    ) -> Result<Option<&'static str>> {
         match rec.workspaces.get(repo) {
             Some(row) if row.health == Health::Unknown => return Ok(Some("unknown")),
             None => return Ok(Some("missing")),
@@ -685,11 +796,16 @@ impl Sessions<'_> {
         if !dir_ok || !exists(&ws.path.join(".git")) {
             return Ok(Some("missing"));
         }
-        match self.git(repo)?.shadow_at(&self.shadow_dir(&rec.manifest.id, repo)) {
+        match self
+            .git(repo)?
+            .shadow_at(&self.shadow_dir(&rec.manifest.id, repo))
+        {
             Ok(_) => Ok(None),
             // A half-built shadow (no marker, e.g. a `new` that stopped in
             // `git init`) is as good as none.
-            Err(e) if matches!(e.code, Code::NoSuchPath | Code::InvalidInput) => Ok(Some("missing")),
+            Err(e) if matches!(e.code, Code::NoSuchPath | Code::InvalidInput) => {
+                Ok(Some("missing"))
+            }
             Err(e) => Err(e),
         }
     }
@@ -701,7 +817,12 @@ impl Sessions<'_> {
     /// Strict (auto-close §3.1): only the projection onto the current landed
     /// target discharges, regenerable entries count, every kept old tree and
     /// every nested repository refuses.
-    fn dirty_check(&self, rec: &SessionRecord, intents: &[MoveIntent], strict: bool) -> Result<Judged> {
+    fn dirty_check(
+        &self,
+        rec: &SessionRecord,
+        intents: &[MoveIntent],
+        strict: bool,
+    ) -> Result<Judged> {
         let id = &rec.manifest.id;
         let mut unresolved: Vec<Value> = Vec::new();
         let mut repos = Map::new();
@@ -722,16 +843,27 @@ impl Sessions<'_> {
         for (repo, ws) in &rec.manifest.repos {
             let bad = self.unhealthy(rec, repo, ws)?;
             match bad {
-                Some("unknown") => unresolved.push(json!({ "kind": "workspace_unknown", "repo": repo.as_str() })),
-                Some(_) => unresolved
-                    .push(json!({ "kind": "workspace_missing", "repo": repo.as_str(), "path": ws.path })),
+                Some("unknown") => {
+                    unresolved.push(json!({ "kind": "workspace_unknown", "repo": repo.as_str() }))
+                }
+                Some(_) => unresolved.push(
+                    json!({ "kind": "workspace_missing", "repo": repo.as_str(), "path": ws.path }),
+                ),
                 None => {}
             }
-            let restore = rec.manifest.root.join(format!("{}{repo}", strata_overlay::RESTORE_TEMP_PREFIX));
+            let restore = rec
+                .manifest
+                .root
+                .join(format!("{}{repo}", strata_overlay::RESTORE_TEMP_PREFIX));
             if non_empty_dir(&restore)? {
-                unresolved.push(json!({ "kind": "restore_scene", "repo": repo.as_str(), "path": restore }));
+                unresolved.push(
+                    json!({ "kind": "restore_scene", "repo": repo.as_str(), "path": restore }),
+                );
             }
-            for i in intents.iter().filter(|i| &i.repo == repo && i.state == MoveState::Swapping) {
+            for i in intents
+                .iter()
+                .filter(|i| &i.repo == repo && i.state == MoveState::Swapping)
+            {
                 unresolved.push(
                     json!({ "kind": "move_awaiting_recover", "repo": repo.as_str(), "n": i.n, "staging": i.staging }),
                 );
@@ -746,8 +878,16 @@ impl Sessions<'_> {
                 let cfg = self.repo_cfg(repo)?;
                 let git = self.git(repo)?;
                 let base = self.base_of(&ws.base)?;
-                let wsref = WorkspaceRef { session: id, repo, root: &ws.path, config: cfg, git, store: self.store };
-                let mut t = strata_overlay::Tracker::new(&ws.path, strata_overlay::DEFAULT_DIRTY_CAPACITY);
+                let wsref = WorkspaceRef {
+                    session: id,
+                    repo,
+                    root: &ws.path,
+                    config: cfg,
+                    git,
+                    store: self.store,
+                };
+                let mut t =
+                    strata_overlay::Tracker::new(&ws.path, strata_overlay::DEFAULT_DIRTY_CAPACITY);
                 let scan = strata_overlay::compute(&wsref, &base, &mut t, None)?;
                 let unstable_paths = unstable(&scan.warnings);
                 if strict {
@@ -761,7 +901,8 @@ impl Sessions<'_> {
                 let mut remaining = if !ws.tracked || entries.is_empty() {
                     entries
                 } else if strict {
-                    let j = self.judge_strict(id, repo, ws, git, &base, &full, &unstable_paths, cfg)?;
+                    let j =
+                        self.judge_strict(id, repo, ws, git, &base, &full, &unstable_paths, cfg)?;
                     landing.insert(repo.as_str().into(), j.landing);
                     if let Some(v) = j.landed {
                         landed.insert(repo.as_str().into(), v);
@@ -777,26 +918,49 @@ impl Sessions<'_> {
                     }
                     j.remaining
                 } else {
-                    match split_landed(self.store, git, id, repo, &cfg.publish.branch, entries.clone(), &unstable_paths)
-                    {
+                    match split_landed(
+                        self.store,
+                        git,
+                        id,
+                        repo,
+                        &cfg.publish.branch,
+                        entries.clone(),
+                        &unstable_paths,
+                    ) {
                         Ok(mut sp) => {
                             // §1.9 T3: what is left, projected onto the newest
                             // D57-eligible publish (the move's judgement).
                             let regen = Regenerable::new(&self.regenerable(repo)?, cfg);
-                            let rest: Vec<OverlayEntry> =
-                                sp.remaining.iter().filter(|e| !regen.matches(e)).cloned().collect();
+                            let rest: Vec<OverlayEntry> = sp
+                                .remaining
+                                .iter()
+                                .filter(|e| !regen.matches(e))
+                                .cloned()
+                                .collect();
                             let mut rebased = 0usize;
                             let mut onto_publish = None;
                             // Only a publish newer than the base: onto an older
                             // tree, a revert to its content would look discharged.
                             let newer = |c: &Candidate| {
-                                c.commit != ws.head && git.is_ancestor(&ws.head, &c.commit).unwrap_or(false)
+                                c.commit != ws.head
+                                    && git.is_ancestor(&ws.head, &c.commit).unwrap_or(false)
                             };
-                            if let Some(c) = sp.newest.take().filter(|c| !rest.is_empty() && newer(c)) {
+                            if let Some(c) =
+                                sp.newest.take().filter(|c| !rest.is_empty() && newer(c))
+                            {
                                 let tree = git.tree_of(&c.commit);
                                 match tree.and_then(|t| {
-                                    self.project(repo, ws, git, &base, &full, &rest, &t, &unstable_paths)
-                                        .map(|r| r.map(|d| (t, d)))
+                                    self.project(
+                                        repo,
+                                        ws,
+                                        git,
+                                        &base,
+                                        &full,
+                                        &rest,
+                                        &t,
+                                        &unstable_paths,
+                                    )
+                                    .map(|r| r.map(|d| (t, d)))
                                 }) {
                                     Ok(Some((t, d))) if !d.is_empty() => {
                                         sp.remaining.retain(|e| !d.contains(e));
@@ -806,7 +970,8 @@ impl Sessions<'_> {
                                     }
                                     Ok(_) => {}
                                     Err(e) => {
-                                        projection_errors.insert(repo.as_str().into(), json!(e.message));
+                                        projection_errors
+                                            .insert(repo.as_str().into(), json!(e.message));
                                     }
                                 }
                             }
@@ -841,14 +1006,20 @@ impl Sessions<'_> {
                 // `remaining` and only names the ones an agent's `rm` lets go.
                 if ws.tracked && strict {
                     let regen = Regenerable::new(&self.regenerable(repo)?, cfg);
-                    let r: Vec<OverlayEntry> = remaining.iter().filter(|e| regen.matches(e)).cloned().collect();
+                    let r: Vec<OverlayEntry> = remaining
+                        .iter()
+                        .filter(|e| regen.matches(e))
+                        .cloned()
+                        .collect();
                     if !r.is_empty() {
                         regen_json.insert(repo.as_str().into(), paths_json(&r));
                     }
                 } else if ws.tracked {
                     let regen = Regenerable::new(&self.regenerable(repo)?, cfg);
                     let (r, keep): (Vec<OverlayEntry>, Vec<OverlayEntry>) =
-                        std::mem::take(&mut remaining).into_iter().partition(|e| regen.matches(e));
+                        std::mem::take(&mut remaining)
+                            .into_iter()
+                            .partition(|e| regen.matches(e));
                     remaining = keep;
                     if !r.is_empty() {
                         regen_json.insert(repo.as_str().into(), paths_json(&r));
@@ -866,7 +1037,10 @@ impl Sessions<'_> {
             // §1.4 G4 item 5: a late-write tree lists its changed paths).
             let cfg = self.repo_cfg(repo)?;
             let kept = crate::rm_note::kept_trees(self.store, id).unwrap_or_default();
-            for i in intents.iter().filter(|i| &i.repo == repo && i.state == MoveState::Done) {
+            for i in intents
+                .iter()
+                .filter(|i| &i.repo == repo && i.state == MoveState::Done)
+            {
                 let path = i.old_tree.clone().unwrap_or_else(|| i.staging.clone());
                 if !exists(&path) {
                     continue;
@@ -890,7 +1064,11 @@ impl Sessions<'_> {
             && old_trees.is_empty()
             && embedded.is_empty()
         {
-            return Ok(Judged { landed: landed_all, regenerable: regen_all, projected: projected_all });
+            return Ok(Judged {
+                landed: landed_all,
+                regenerable: regen_all,
+                projected: projected_all,
+            });
         }
         let prefix = self.refused_prefix(rec, strict);
         let msg = if strict {
@@ -908,7 +1086,16 @@ impl Sessions<'_> {
                 },
             )
         } else {
-            dirty_message(&prefix, id, rec.lifecycle, &repos, &landed, &untracked, &unresolved, &old_trees)
+            dirty_message(
+                &prefix,
+                id,
+                rec.lifecycle,
+                &repos,
+                &landed,
+                &untracked,
+                &unresolved,
+                &old_trees,
+            )
         };
         Err(StrataError::new(Code::Dirty, msg).with_detail({
             let mut d = json!({
@@ -1018,10 +1205,18 @@ fn embedded_paths(warnings: &[OverlayWarning]) -> Vec<RepoPath> {
 
 /// The refusal of a recheck: the session changed between the judgement and the
 /// visible steps. `sections` holds what this recheck found.
-fn changed_during(prefix: &str, strict: bool, rec: &SessionRecord, names: &[String], sections: Value) -> StrataError {
+fn changed_during(
+    prefix: &str,
+    strict: bool,
+    rec: &SessionRecord,
+    names: &[String],
+    sections: Value,
+) -> StrataError {
     let names = names.join(", ");
     let tail = if strict {
-        format!("It changed while it was being closed ({names}); the next publish or push of its repos judges again.")
+        format!(
+            "It changed while it was being closed ({names}); the next publish or push of its repos judges again."
+        )
     } else {
         format!("It changed while it was being removed ({names}); run the same command again.")
     };
@@ -1038,7 +1233,8 @@ fn changed_during(prefix: &str, strict: bool, rec: &SessionRecord, names: &[Stri
 }
 
 fn touches(e: &OverlayEntry, set: &BTreeSet<RepoPath>) -> bool {
-    set.contains(&e.path) || matches!(&e.kind, EntryKind::Renamed { from, .. } if set.contains(from))
+    set.contains(&e.path)
+        || matches!(&e.kind, EntryKind::Renamed { from, .. } if set.contains(from))
 }
 
 /// The git mode publish writes for an overlay mode (publish `stage.rs` `git_mode`).
@@ -1073,7 +1269,11 @@ struct Split {
 
 impl Split {
     fn summary(&self) -> Value {
-        let mut proposals: Vec<u64> = self.used.iter().flat_map(|c| c.proposals.iter().copied()).collect();
+        let mut proposals: Vec<u64> = self
+            .used
+            .iter()
+            .flat_map(|c| c.proposals.iter().copied())
+            .collect();
         proposals.sort_unstable();
         proposals.dedup();
         // `used` is newest first; the detail lists publishes ascending (§5.6 step 4.2).
@@ -1093,18 +1293,26 @@ fn join_u64(v: &[u64], sep: &str) -> String {
 }
 
 fn u64s(v: Option<&Value>) -> Vec<u64> {
-    v.and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default()
+    v.and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_u64).collect())
+        .unwrap_or_default()
 }
 
 /// "REPO: N paths not published: p1, … (+k more); M already published
 /// (publish 22, waiting on deps proposal #21)" from the Dirty detail.
 fn repo_line(repo: &str, entry: &Value, landed: Option<&Value>, untracked: bool) -> String {
     let n = entry.get("count").and_then(Value::as_u64).unwrap_or(0);
-    let shown: Vec<&str> =
-        entry.get("paths").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let shown: Vec<&str> = entry
+        .get("paths")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
     let inline: Vec<&str> = shown.iter().take(INLINE_PATHS).copied().collect();
     let more = n.saturating_sub(inline.len() as u64);
-    let mut s = format!("{repo}: {n} {} not published", if n == 1 { "path" } else { "paths" });
+    let mut s = format!(
+        "{repo}: {n} {} not published",
+        if n == 1 { "path" } else { "paths" }
+    );
     if !inline.is_empty() {
         s.push_str(&format!(": {}", inline.join(", ")));
         if more > 0 {
@@ -1117,10 +1325,16 @@ fn repo_line(repo: &str, entry: &Value, landed: Option<&Value>, untracked: bool)
     if let Some(l) = landed {
         let m = l.get("count").and_then(Value::as_u64).unwrap_or(0);
         if m > 0 {
-            s.push_str(&format!("; {m} already published (publish {}", join_u64(&u64s(l.get("publishes")), ", ")));
+            s.push_str(&format!(
+                "; {m} already published (publish {}",
+                join_u64(&u64s(l.get("publishes")), ", ")
+            ));
             let props = u64s(l.get("proposals"));
             if !props.is_empty() {
-                s.push_str(&format!(", which left the session waiting on deps proposal #{}", join_u64(&props, ", #")));
+                s.push_str(&format!(
+                    ", which left the session waiting on deps proposal #{}",
+                    join_u64(&props, ", #")
+                ));
             }
             s.push(')');
         }
@@ -1134,7 +1348,11 @@ fn scenes_line(unresolved: &[Value]) -> Option<String> {
         .iter()
         .filter(|v| v.get("kind").and_then(Value::as_str) != Some("session_unknown"))
         .map(|v| {
-            let kind = v.get("kind").and_then(Value::as_str).unwrap_or("scene").replace('_', " ");
+            let kind = v
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("scene")
+                .replace('_', " ");
             match v.get("repo").and_then(Value::as_str) {
                 Some(r) => format!("{kind} in {r}"),
                 None => kind,
@@ -1150,11 +1368,21 @@ fn late_line(v: &Value) -> String {
     let repo = v.get("repo").and_then(Value::as_str).unwrap_or("?");
     let path = v.get("path").and_then(Value::as_str).unwrap_or("?");
     let count = l.get("count").and_then(Value::as_u64).unwrap_or(0);
-    let shown: Vec<&str> = l.get("paths").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let shown: Vec<&str> = l
+        .get("paths")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
     if count == 0 {
-        return format!("{repo}: pre-move tree kept after an auto-rebase (activity baseline unreadable) at {path}; its files are intact there");
+        return format!(
+            "{repo}: pre-move tree kept after an auto-rebase (activity baseline unreadable) at {path}; its files are intact there"
+        );
     }
-    let more = if count as usize > shown.len() { format!(", … (+{} more)", count as usize - shown.len()) } else { String::new() };
+    let more = if count as usize > shown.len() {
+        format!(", … (+{} more)", count as usize - shown.len())
+    } else {
+        String::new()
+    };
     format!(
         "{repo}: {count} {} written to the pre-move tree after an auto-rebase, kept at {path}: {}{more}; the files are intact there",
         if count == 1 { "file" } else { "files" },
@@ -1180,7 +1408,9 @@ fn dirty_message(
         parts.push(repo_line(repo, entry, landed.get(repo), u));
     }
     parts.extend(scenes_line(unresolved));
-    let (late, plain): (Vec<&Value>, Vec<&Value>) = old_trees.iter().partition(|v| v.get("late_writes").is_some());
+    let (late, plain): (Vec<&Value>, Vec<&Value>) = old_trees
+        .iter()
+        .partition(|v| v.get("late_writes").is_some());
     parts.extend(late.iter().map(|v| late_line(v)));
     if !plain.is_empty() {
         let t: Vec<String> = plain
@@ -1202,12 +1432,20 @@ fn dirty_message(
         s.push('.');
     }
     if lifecycle == Lifecycle::Unknown {
-        s.push_str(&format!(" Run `git-strata rm --discard {id}` (Touch ID) to finish removing it."));
+        s.push_str(&format!(
+            " Run `git-strata rm --discard {id}` (Touch ID) to finish removing it."
+        ));
     } else if !repos.is_empty() {
         let is_untracked = |r: &String| untracked.iter().any(|v| v.as_str() == Some(r.as_str()));
-        let lost: Vec<&str> = repos.keys().filter(|r| is_untracked(r)).map(String::as_str).collect();
+        let lost: Vec<&str> = repos
+            .keys()
+            .filter(|r| is_untracked(r))
+            .map(String::as_str)
+            .collect();
         let kept = repos.keys().any(|r| !is_untracked(r));
-        s.push_str(&format!(" Publish them, or run `git-strata rm --discard {id}` (Touch ID) to throw them away"));
+        s.push_str(&format!(
+            " Publish them, or run `git-strata rm --discard {id}` (Touch ID) to throw them away"
+        ));
         match (kept, lost.is_empty()) {
             (true, true) => s.push_str("; the BeforeRemove checkpoint then keeps them until gc."),
             (true, false) => s.push_str(&format!(
@@ -1215,10 +1453,15 @@ fn dirty_message(
                  but the edits in untracked {} are lost (no checkpoint).",
                 lost.join(", ")
             )),
-            (false, _) => s.push_str(&format!("; the edits in untracked {} are then lost (no checkpoint).", lost.join(", "))),
+            (false, _) => s.push_str(&format!(
+                "; the edits in untracked {} are then lost (no checkpoint).",
+                lost.join(", ")
+            )),
         }
     } else {
-        s.push_str(&format!(" Resolve them, or run `git-strata rm --discard {id}` (Touch ID) to remove it anyway."));
+        s.push_str(&format!(
+            " Resolve them, or run `git-strata rm --discard {id}` (Touch ID) to remove it anyway."
+        ));
     }
     if !late.is_empty() {
         s.push_str(" Copy the files you want out of the kept pre-move tree first: `--discard` moves it to trash too (recoverable until trash gc).");
@@ -1264,13 +1507,24 @@ impl Sessions<'_> {
         }
         blocked.extend(r.conflicts.iter().cloned());
         blocked.extend(r.lww.iter().cloned());
-        Ok(Some(rest.iter().filter(|e| !touches(e, &blocked)).cloned().collect()))
+        Ok(Some(
+            rest.iter()
+                .filter(|e| !touches(e, &blocked))
+                .cloned()
+                .collect(),
+        ))
     }
 }
 
 /// §5.6 step 4.2 (D57): Done publishes this session took part in for
 /// `repo`, whose commit origin's tracking ref already has; newest first.
-fn candidates(store: &Store, git: &Git, session: &SessionId, repo: &RepoName, branch: &str) -> Result<Vec<Candidate>> {
+fn candidates(
+    store: &Store,
+    git: &Git,
+    session: &SessionId,
+    repo: &RepoName,
+    branch: &str,
+) -> Result<Vec<Candidate>> {
     let Some(tip) = git.read_ref(&format!("refs/strata/remotes/origin/{branch}"))? else {
         return Ok(Vec::new());
     };
@@ -1278,7 +1532,12 @@ fn candidates(store: &Store, git: &Git, session: &SessionId, repo: &RepoName, br
         .publishes()?
         .into_iter()
         .filter(|r| r.phase == PublishPhase::Done)
-        .filter(|r| r.group.batches.iter().any(|b| &b.session == session && &b.repo == repo))
+        .filter(|r| {
+            r.group
+                .batches
+                .iter()
+                .any(|b| &b.session == session && &b.repo == repo)
+        })
         .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.group.id));
     let mut seen = BTreeSet::new();
@@ -1287,11 +1546,16 @@ fn candidates(store: &Store, git: &Git, session: &SessionId, repo: &RepoName, br
         if seen.len() >= LANDED_MAX_COMMITS {
             break;
         }
-        let Some(o) = r.outcome.as_ref() else { continue };
+        let Some(o) = r.outcome.as_ref() else {
+            continue;
+        };
         if o.get("repo").and_then(Value::as_str) != Some(repo.as_str()) {
             continue;
         }
-        let Some(commit) = o.get("commit").and_then(Value::as_str).and_then(|c| CommitOid::try_from(c.to_string()).ok())
+        let Some(commit) = o
+            .get("commit")
+            .and_then(Value::as_str)
+            .and_then(|c| CommitOid::try_from(c.to_string()).ok())
         else {
             continue;
         };
@@ -1310,7 +1574,11 @@ fn candidates(store: &Store, git: &Git, session: &SessionId, repo: &RepoName, br
             .filter(|x| x.get("session").and_then(Value::as_str) == Some(session.as_str()))
             .filter_map(|x| x.get("proposal").and_then(Value::as_u64))
             .collect();
-        out.push(Candidate { publish: r.group.id, commit, proposals });
+        out.push(Candidate {
+            publish: r.group.id,
+            commit,
+            proposals,
+        });
     }
     Ok(out)
 }
@@ -1324,8 +1592,16 @@ fn absent(git: &Git, tree: &TreeOid, p: &RepoPath) -> Result<bool> {
 }
 
 /// Whether the blob at `p` has these exact bytes and this mode.
-fn same_blob(git: &Git, items: &BTreeMap<String, TreeItem>, p: &RepoPath, blob: &strata_types::BlobId, mode: u32) -> Result<bool> {
-    let Some(i) = items.get(p.as_str()) else { return Ok(false) };
+fn same_blob(
+    git: &Git,
+    items: &BTreeMap<String, TreeItem>,
+    p: &RepoPath,
+    blob: &strata_types::BlobId,
+    mode: u32,
+) -> Result<bool> {
+    let Some(i) = items.get(p.as_str()) else {
+        return Ok(false);
+    };
     if !blob_fits(i, git_mode(mode)) {
         return Ok(false);
     }
@@ -1339,13 +1615,20 @@ fn blob_fits(i: &TreeItem, mode: u32) -> bool {
 }
 
 /// The per-kind content rule of D57.
-fn landed_at(git: &Git, tree: &TreeOid, items: &BTreeMap<String, TreeItem>, e: &OverlayEntry) -> Result<bool> {
+fn landed_at(
+    git: &Git,
+    tree: &TreeOid,
+    items: &BTreeMap<String, TreeItem>,
+    e: &OverlayEntry,
+) -> Result<bool> {
     match &e.kind {
         EntryKind::Deleted => absent(git, tree, &e.path),
-        EntryKind::Added { blob } | EntryKind::Modified { blob } | EntryKind::Untracked { blob } => {
-            same_blob(git, items, &e.path, blob, e.mode)
+        EntryKind::Added { blob }
+        | EntryKind::Modified { blob }
+        | EntryKind::Untracked { blob } => same_blob(git, items, &e.path, blob, e.mode),
+        EntryKind::Renamed { from, blob } => {
+            Ok(absent(git, tree, from)? && same_blob(git, items, &e.path, blob, e.mode)?)
         }
-        EntryKind::Renamed { from, blob } => Ok(absent(git, tree, from)? && same_blob(git, items, &e.path, blob, e.mode)?),
     }
 }
 
@@ -1371,7 +1654,8 @@ fn split_on(
     entries: Vec<OverlayEntry>,
     unstable: &BTreeSet<RepoPath>,
 ) -> Result<Split> {
-    let (mut pending, never): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| !touches(e, unstable));
+    let (mut pending, never): (Vec<_>, Vec<_>) =
+        entries.into_iter().partition(|e| !touches(e, unstable));
     let mut sp = Split::default();
     sp.newest = cands.first().cloned();
     for c in cands {
@@ -1441,7 +1725,15 @@ fn recheck(
         let rest = if strict {
             new
         } else {
-            match split_landed(store, git, session, repo, branch, new.clone(), &BTreeSet::new()) {
+            match split_landed(
+                store,
+                git,
+                session,
+                repo,
+                branch,
+                new.clone(),
+                &BTreeSet::new(),
+            ) {
                 Ok(sp) => sp.remaining,
                 Err(_) => new,
             }
@@ -1456,7 +1748,12 @@ mod landed_tests {
     use super::*;
 
     fn item(kind: &str, mode: u32, size: u64) -> TreeItem {
-        TreeItem { mode, kind: kind.into(), oid: "0".repeat(40), size }
+        TreeItem {
+            mode,
+            kind: kind.into(),
+            oid: "0".repeat(40),
+            size,
+        }
     }
 
     #[test]
@@ -1470,8 +1767,14 @@ mod landed_tests {
 
     #[test]
     fn blob_fits_checks_kind_mode_and_size() {
-        assert!(blob_fits(&item("blob", 0o100644, LANDED_MAX_BYTES), 0o100644));
-        assert!(!blob_fits(&item("blob", 0o100644, LANDED_MAX_BYTES + 1), 0o100644));
+        assert!(blob_fits(
+            &item("blob", 0o100644, LANDED_MAX_BYTES),
+            0o100644
+        ));
+        assert!(!blob_fits(
+            &item("blob", 0o100644, LANDED_MAX_BYTES + 1),
+            0o100644
+        ));
         assert!(!blob_fits(&item("blob", 0o100755, 1), 0o100644));
         assert!(!blob_fits(&item("commit", 0o160000, 0), 0o160000));
         assert!(!blob_fits(&item("tree", 0o040000, 0), 0o040000));
@@ -1482,10 +1785,25 @@ mod landed_tests {
         let id = SessionId::try_from("s-abcdefgh".to_string()).unwrap();
         let paths: Vec<String> = (0..7).map(|i| format!("p{i}")).collect();
         let mut repos = Map::new();
-        repos.insert("admin".into(), json!({ "paths": paths, "count": 36, "truncated": false }));
+        repos.insert(
+            "admin".into(),
+            json!({ "paths": paths, "count": 36, "truncated": false }),
+        );
         let mut landed = Map::new();
-        landed.insert("admin".into(), json!({ "count": 2, "publishes": [16, 17], "proposals": [21] }));
-        let m = dirty_message("PFX", &id, Lifecycle::Active, &repos, &landed, &[], &[], &[]);
+        landed.insert(
+            "admin".into(),
+            json!({ "count": 2, "publishes": [16, 17], "proposals": [21] }),
+        );
+        let m = dirty_message(
+            "PFX",
+            &id,
+            Lifecycle::Active,
+            &repos,
+            &landed,
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(
             m,
             "PFX admin: 36 paths not published: p0, p1, p2, p3, p4 (+31 more); 2 already published (publish 16, 17, \
@@ -1494,18 +1812,56 @@ mod landed_tests {
              keeps them until gc."
         );
         let one = json!({ "paths": ["a"], "count": 1, "truncated": false });
-        assert_eq!(repo_line("app", &one, None, true), "app: 1 path not published: a (untracked repo: no checkpoint keeps them)");
-        let m = dirty_message("PFX", &id, Lifecycle::Unknown, &Map::new(), &Map::new(), &[], &[json!({"kind": "session_unknown"})], &[]);
-        assert_eq!(m, "PFX Run `git-strata rm --discard s-abcdefgh` (Touch ID) to finish removing it.");
+        assert_eq!(
+            repo_line("app", &one, None, true),
+            "app: 1 path not published: a (untracked repo: no checkpoint keeps them)"
+        );
+        let m = dirty_message(
+            "PFX",
+            &id,
+            Lifecycle::Unknown,
+            &Map::new(),
+            &Map::new(),
+            &[],
+            &[json!({"kind": "session_unknown"})],
+            &[],
+        );
+        assert_eq!(
+            m,
+            "PFX Run `git-strata rm --discard s-abcdefgh` (Touch ID) to finish removing it."
+        );
         // Untracked edits get no checkpoint: never promised one.
         let mut only = Map::new();
         only.insert("web".into(), one.clone());
-        let m = dirty_message("PFX", &id, Lifecycle::Active, &only, &Map::new(), &[json!("web")], &[], &[]);
+        let m = dirty_message(
+            "PFX",
+            &id,
+            Lifecycle::Active,
+            &only,
+            &Map::new(),
+            &[json!("web")],
+            &[],
+            &[],
+        );
         assert!(!m.contains("checkpoint then keeps"), "{m}");
-        assert!(m.ends_with("throw them away; the edits in untracked web are then lost (no checkpoint)."), "{m}");
+        assert!(
+            m.ends_with(
+                "throw them away; the edits in untracked web are then lost (no checkpoint)."
+            ),
+            "{m}"
+        );
         let mut mixed = only.clone();
         mixed.insert("app".into(), one);
-        let m = dirty_message("PFX", &id, Lifecycle::Active, &mixed, &Map::new(), &[json!("web")], &[], &[]);
+        let m = dirty_message(
+            "PFX",
+            &id,
+            Lifecycle::Active,
+            &mixed,
+            &Map::new(),
+            &[json!("web")],
+            &[],
+            &[],
+        );
         assert!(
             m.ends_with("keeps the tracked repos' edits until gc, but the edits in untracked web are lost (no checkpoint)."),
             "{m}"
@@ -1514,7 +1870,9 @@ mod landed_tests {
 
     #[test]
     fn dirty_detail_keeps_every_path() {
-        let paths: Vec<RepoPath> = (0..250).map(|i| RepoPath::try_from(format!("d/p{i:03}")).unwrap()).collect();
+        let paths: Vec<RepoPath> = (0..250)
+            .map(|i| RepoPath::try_from(format!("d/p{i:03}")).unwrap())
+            .collect();
         let v = list_json(&paths);
         assert_eq!(v["count"], 250);
         assert_eq!(v["paths"].as_array().unwrap().len(), 250);

@@ -11,6 +11,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use strata_apfs::{FileKind, IoSide, classify_io_error};
+use strata_deps::RepoWriteLock;
 use strata_store::{Lifecycle, SeedRow};
 use strata_types::{BaseGen, RepoPath, SessionId, WorkspaceState};
 
@@ -62,8 +63,9 @@ pub enum Layout {
     Only,
 }
 
-/// `new`'s result: the manifest, plus warnings about observing main after
-/// the session was built (§5.1 step 15) [D15].
+/// `new`'s result: the manifest, plus warnings: observing main failed after
+/// the session was built (§5.1 step 15) [D15], an explicit `--base` ahead of
+/// main, or a due fetch skipped because the repo was busy (new-lock §2.2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewReport {
     pub manifest: SessionManifest,
@@ -86,6 +88,17 @@ pub enum NewWarning {
     /// `deps::observe_main` failed for this repo; `detail` is deps' error
     /// as returned. The session is Active all the same.
     ObserveFailed { repo: RepoName, detail: StrataError },
+    /// new-lock §2.2: the fetch of `repo` was due but its write lock was
+    /// held (`holder`, for `holder_session`), so the head is the tip as the
+    /// lock's last holder left it, last fetched at `last_fetch_at`. D53's
+    /// freshness bound is relaxed only while the repo is busy.
+    FetchSkipped {
+        repo: RepoName,
+        holder: Option<String>,
+        holder_session: Option<SessionId>,
+        #[serde(default, with = "crate::status::opt_rfc3339")]
+        last_fetch_at: Option<SystemTime>,
+    },
 }
 
 impl Sessions<'_> {
@@ -138,6 +151,8 @@ impl Sessions<'_> {
             validate_base_rev(rev)?;
         }
         let v = self.validate_new(ticket, repos, layout)?;
+        // new-lock §2.4a: a fence checkpoint before the head work.
+        self.locks.check_fence(&v.members)?;
         // status-bar §11.2, §12.8: the daemon's `session_create` activity,
         // from the minted id on; dispatch workers inherit the observer.
         let observed = crate::observe::begin(crate::observe::Work::SessionCreate {
@@ -145,13 +160,7 @@ impl Sessions<'_> {
             session: Some(v.id.clone()),
         });
         observed.step("head");
-        let resolved = dispatch::each_repo_n(
-            dispatch::FETCH_WORKERS,
-            &v.members,
-            &|r| self.seams.hit("head", Some(r)),
-            &|r| self.head_at(r, bases.get(r).map(String::as_str)),
-        )
-        .map_err(|mut e| {
+        let resolved = self.head_phase(&v.members, bases, "new").map_err(|mut e| {
             if e.detail.as_ref().and_then(|d| d["reason"].as_str()) == Some("base_behind_main") {
                 let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
                 let mut command = String::from("git-strata new");
@@ -218,6 +227,8 @@ impl Sessions<'_> {
         // id between them; released right after the mkdirs (layout_steps).
         observed.step("enroll");
         self.seams.hit("new.enroll", None)?;
+        // new-lock §2.4a: before the first visible write.
+        self.locks.check_fence(&all)?;
         let enroll = self.enroll.lock().unwrap_or_else(|p| p.into_inner());
         self.id_free(&manifest.id)?;
         if self.catalog.is_some() {
@@ -550,24 +561,28 @@ impl Sessions<'_> {
             return Err(e);
         }
 
-        // 13.2 git
+        // 13.2 git. new-lock §2.3: the shadow repository and its index are
+        // this session's own, so no repo lock; the fence and shutdown checks
+        // of the removed take stay (§2.4a).
         enter("git")?;
+        self.locks.check_fence(&repos)?;
         each("git", &repos, &|r| {
+            self.refuse_if_shut_down()?;
             let git = self.git(r)?;
             let ws = &m.repos[r];
             let dir = self.shadow_dir(id, r);
-            self.with_lock_unbounded(r, || {
-                let shadow = git.ensure_shadow(&dir)?;
-                git.attach_worktree(&shadow, 1, &ws.head, &ws.path, &ws.path)?;
-                Ok(())
-            })
+            let shadow = git.ensure_shadow(&dir)?;
+            git.attach_worktree(&shadow, 1, &ws.head, &ws.path, &ws.path)?;
+            Ok(())
         })?;
 
-        // 13.3 pin
+        // 13.3 pin: a create-only update under git's own ref lock (§2.3).
         enter("pin")?;
+        self.locks.check_fence(&repos)?;
         each("pin", &repos, &|r| {
-            let git = self.git(r)?;
-            self.with_lock_unbounded(r, || git.update_ref(&pin_ref(id), &m.repos[r].head, None))
+            self.refuse_if_shut_down()?;
+            self.git(r)?
+                .update_ref(&pin_ref(id), &m.repos[r].head, None)
         })?;
 
         // 13.5 seed_files
@@ -578,9 +593,11 @@ impl Sessions<'_> {
             self.store.record_seeds(id, r, &rows)
         })?;
 
-        // 14. finalize
+        // 14. finalize. new-lock §2.4a: the authorization point; a fence
+        // refusal here rolls back (D56) and nothing becomes Active.
         enter("finalize")?;
         self.seams.hit("new.finalize", None)?;
+        self.locks.check_fence(&repos)?;
         for rel in [format!("sessions/{id}"), format!("sessions/.repos/{id}")] {
             let fd = strata_apfs::open_rooted(proot, &rp(rel))?;
             strata_apfs::full_fsync(&fd)?;
@@ -639,80 +656,87 @@ impl Sessions<'_> {
             .collect()
     }
 
-    /// §5.1 step 8 for the session's repos: fetch the default branch and
-    /// read the chain top in one critical section, then the tree. Fetches
-    /// run `FETCH_WORKERS` wide (D53); a repo fetched successfully within
-    /// the fetch window is not fetched again.
-    pub(crate) fn resolve_heads(
+    /// §5.1 step 8 for `members` (new-lock §2.2, §4.1): each repo's head on
+    /// `FETCH_WORKERS` workers (D53), `bases` naming an explicit `--base`,
+    /// `label` the holder a due fetch's lock take shows (`new`, `add`). All
+    /// workers are joined first. A refusal is certified replay-safe
+    /// (`detail.retry_safe: true`) only when every repo that failed failed
+    /// with `Busy` `lock_wait`: the phase wrote nothing but fetch records
+    /// and tracking refs. Any other failure is returned instead, uncertified.
+    pub(crate) fn head_phase(
         &self,
         members: &[RepoName],
-    ) -> Result<Vec<(RepoName, (CommitOid, TreeOid))>> {
-        dispatch::each_repo_n(
+        bases: &BTreeMap<RepoName, String>,
+        label: &str,
+    ) -> Result<Vec<(RepoName, Head)>> {
+        dispatch::each_repo_all(
             dispatch::FETCH_WORKERS,
             members,
             &|r| self.seams.hit("head", Some(r)),
-            &|r| self.head_of(r),
+            &|r| self.head_at(r, bases.get(r).map(String::as_str), label),
         )
+        .map_err(certify_head)
     }
 
-    fn head_of(&self, repo: &RepoName) -> Result<(CommitOid, TreeOid)> {
-        self.head_at(repo, None).map(|(h, t, _)| (h, t))
-    }
-
-    fn head_at(
-        &self,
-        repo: &RepoName,
-        rev: Option<&str>,
-    ) -> Result<(CommitOid, TreeOid, Option<NewWarning>)> {
+    /// One repo's head (new-lock §2.2). Without `rev`: a fresh fetch (D53)
+    /// reads the release-point snapshot without the lock; a due fetch tries
+    /// the lock without waiting and runs today's fetch under it, and when
+    /// the lock is held uses the snapshot with a `FetchSkipped` warning. An
+    /// explicit `rev`, a snapshot that is not valid and a tracking ref never
+    /// fetched take the lock with the bounded wait, as before.
+    fn head_at(&self, repo: &RepoName, rev: Option<&str>, label: &str) -> Result<Head> {
         let cfg = self.repo_cfg(repo)?;
         let git = self.git(repo)?;
         let fresh = self.fetch_is_fresh(repo);
-        let mut fetched_at = None;
         let mut warning = None;
-        let head = self.with_lock(repo, || {
-            if !fresh {
-                let t = std::time::Instant::now();
-                let fetched = git.fetch("origin", &cfg.default_branch);
-                let _ = self.store.record_fetch(
-                    repo,
-                    fetched.is_ok(),
-                    fetched.as_ref().err().map(|e| e.message.as_str()),
-                    SystemTime::now(),
-                );
-                fetched?;
-                fetched_at = Some(t);
+        // `Some(tip)`: settled without the bounded take (`tip` may be None:
+        // no tracking ref under the lock); `None`: take the lock below.
+        let unlocked: Option<Option<CommitOid>> = match rev {
+            Some(_) => None,
+            None if fresh => self.snapshot_tip(repo, cfg, git)?.map(Some),
+            None => {
+                let mut fetched_at = None;
+                let mut out = None;
+                let tried = self.locks.try_write_as(repo, label, &mut || {
+                    out = Some(self.head_locked(
+                        repo,
+                        cfg,
+                        git,
+                        false,
+                        None,
+                        &mut fetched_at,
+                        &mut warning,
+                    )?);
+                    Ok(())
+                });
+                match tried {
+                    Ok(r) => {
+                        r?;
+                        self.note_fetch(repo, fetched_at);
+                        out
+                    }
+                    Err(e) if is_lock_wait(&e) => {
+                        let tip = self.snapshot_tip(repo, cfg, git)?;
+                        if tip.is_some() {
+                            warning = Some(self.fetch_skipped(repo, &e));
+                        }
+                        tip.map(Some)
+                    }
+                    Err(e) => return Err(e),
+                }
             }
-            let tip = strata_deps::main_tip(cfg, git)?;
-            let (Some(rev), Some(tip)) = (rev, tip.as_ref()) else { return Ok(tip); };
-            let oid = git.resolve_rev(rev)?.ok_or_else(|| StrataError::new(Code::NoSuchCommit, format!("no local commit {rev}"))
-                .with_detail(json!({"reason":"base_rev", "repo":repo, "rev":rev})))?;
-            if !git.is_ancestor(tip, &oid)? {
-                let behind = git.is_ancestor(&oid, tip)?;
-                let commits = git.history_between(tip, &oid, 20)?;
-                let chain = strata_deps::publish_chain(git, &cfg.publish.branch)?;
-                let chain_tip = cfg.pin_unpushed && cfg.publish.branch == cfg.default_branch
-                    && chain.as_ref().is_some_and(|c| c.state == strata_deps::ChainState::Leads && c.top.as_ref() == Some(tip));
-                let tip_ref = if chain_tip { format!("refs/strata/publish/{}", cfg.publish.branch) } else { format!("origin/{}", cfg.default_branch) };
-                let fix = if behind { format!("git-strata new --repo {repo}") } else {
-                    format!("ask the human: {}rebase {rev} onto main_tip {tip} ({tip_ref}) in the main checkout, then rerun new --base", if chain_tip { format!("push the publish chain with git-strata push {repo} first; ") } else { String::new() })
-                };
-                return Err(StrataError::new(Code::InvalidInput, format!("base {rev} does not descend from main_tip {tip} ({tip_ref})"))
-                    .with_detail(json!({"reason":if behind {"base_behind_main"} else {"base_diverged_from_main"}, "repo":repo, "rev":rev,
-                        "main":tip,"main_ref":tip_ref,"base_only":commits.iter().map(|c| json!({"head":c.oid,"subject":c.subject})).collect::<Vec<_>>(),"fix":fix})));
+        };
+        let head = match unlocked {
+            Some(head) => head,
+            None => {
+                let mut fetched_at = None;
+                let head = self.with_lock(repo, || {
+                    self.head_locked(repo, cfg, git, fresh, rev, &mut fetched_at, &mut warning)
+                })?;
+                self.note_fetch(repo, fetched_at);
+                head
             }
-            let ahead = git.count_between(tip, &oid, 1000)?;
-            if ahead > 0 {
-                warning = Some(NewWarning::BaseAheadOfMain { repo: repo.clone(), rev: rev.to_string(), head: oid.clone(), main: tip.clone(), ahead,
-                    commits: git.history_between(tip, &oid, 20)?.iter().map(|c| json!({"head":c.oid,"subject":c.subject})).collect() });
-            }
-            Ok(Some(oid))
-        })?;
-        if let Some(t) = fetched_at {
-            self.fetched
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(repo.clone(), t);
-        }
+        };
         let Some(head) = head else {
             return Err(StrataError::new(
                 Code::NoSuchBranch,
@@ -728,6 +752,174 @@ impl Sessions<'_> {
         let tree = git.tree_of(&head)?;
         Ok((head, tree, warning))
     }
+
+    /// new-lock §2.2: `repo`'s main tip from its release-point snapshot,
+    /// read without the lock. `None` when there is no valid snapshot or
+    /// origin was never fetched (the caller takes the lock as before). The
+    /// shutdown and fence checks of the skipped take run first (§2.4a).
+    fn snapshot_tip(
+        &self,
+        repo: &RepoName,
+        cfg: &strata_types::RepoConfig,
+        git: &strata_gitio::Git,
+    ) -> Result<Option<CommitOid>> {
+        let Some(snap) = self.locks.ref_snapshot(repo) else {
+            return Ok(None);
+        };
+        if !snap.valid || snap.origin.is_none() {
+            return Ok(None);
+        }
+        self.refuse_if_shut_down()?;
+        self.locks.check_fence(std::slice::from_ref(repo))?;
+        strata_deps::main_tip_of(cfg, git, &snap)
+    }
+
+    /// The `FetchSkipped` warning for `repo`, from the try's `lock_wait`.
+    fn fetch_skipped(&self, repo: &RepoName, busy: &StrataError) -> NewWarning {
+        let text = |k: &str| {
+            busy.detail
+                .as_ref()
+                .and_then(|d| d.get(k))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        };
+        NewWarning::FetchSkipped {
+            repo: repo.clone(),
+            holder: text("holder"),
+            holder_session: text("holder_session").and_then(|s| SessionId::try_from(s).ok()),
+            last_fetch_at: self
+                .store
+                .repo_fetch(repo)
+                .ok()
+                .flatten()
+                .and_then(|f| f.ok_at),
+        }
+    }
+
+    /// D53: when `new`/`add` last fetched `repo` successfully.
+    fn note_fetch(&self, repo: &RepoName, fetched_at: Option<std::time::Instant>) {
+        if let Some(t) = fetched_at {
+            self.fetched
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(repo.clone(), t);
+        }
+    }
+
+    /// The head step's critical section under `repo`'s write lock, as
+    /// before new-lock: the fetch unless `fresh`, the main tip, and an
+    /// explicit `rev` judged against that tip.
+    #[allow(clippy::too_many_arguments)]
+    fn head_locked(
+        &self,
+        repo: &RepoName,
+        cfg: &strata_types::RepoConfig,
+        git: &strata_gitio::Git,
+        fresh: bool,
+        rev: Option<&str>,
+        fetched_at: &mut Option<std::time::Instant>,
+        warning: &mut Option<NewWarning>,
+    ) -> Result<Option<CommitOid>> {
+        if !fresh {
+            let t = std::time::Instant::now();
+            let fetched = git.fetch("origin", &cfg.default_branch);
+            let _ = self.store.record_fetch(
+                repo,
+                fetched.is_ok(),
+                fetched.as_ref().err().map(|e| e.message.as_str()),
+                SystemTime::now(),
+            );
+            fetched?;
+            *fetched_at = Some(t);
+        }
+        let tip = strata_deps::main_tip(cfg, git)?;
+        let (Some(rev), Some(tip)) = (rev, tip.as_ref()) else {
+            return Ok(tip);
+        };
+        let oid = git.resolve_rev(rev)?.ok_or_else(|| {
+            StrataError::new(Code::NoSuchCommit, format!("no local commit {rev}"))
+                .with_detail(json!({"reason":"base_rev", "repo":repo, "rev":rev}))
+        })?;
+        if !git.is_ancestor(tip, &oid)? {
+            let behind = git.is_ancestor(&oid, tip)?;
+            let commits = git.history_between(tip, &oid, 20)?;
+            let chain = strata_deps::publish_chain(git, &cfg.publish.branch)?;
+            let chain_tip = cfg.pin_unpushed
+                && cfg.publish.branch == cfg.default_branch
+                && chain.as_ref().is_some_and(|c| {
+                    c.state == strata_deps::ChainState::Leads && c.top.as_ref() == Some(tip)
+                });
+            let tip_ref = if chain_tip {
+                format!("refs/strata/publish/{}", cfg.publish.branch)
+            } else {
+                format!("origin/{}", cfg.default_branch)
+            };
+            let fix = if behind {
+                format!("git-strata new --repo {repo}")
+            } else {
+                format!(
+                    "ask the human: {}rebase {rev} onto main_tip {tip} ({tip_ref}) in the main checkout, then rerun new --base",
+                    if chain_tip {
+                        format!("push the publish chain with git-strata push {repo} first; ")
+                    } else {
+                        String::new()
+                    }
+                )
+            };
+            return Err(StrataError::new(Code::InvalidInput, format!("base {rev} does not descend from main_tip {tip} ({tip_ref})"))
+                    .with_detail(json!({"reason":if behind {"base_behind_main"} else {"base_diverged_from_main"}, "repo":repo, "rev":rev,
+                        "main":tip,"main_ref":tip_ref,"base_only":commits.iter().map(|c| json!({"head":c.oid,"subject":c.subject})).collect::<Vec<_>>(),"fix":fix})));
+        }
+        let ahead = git.count_between(tip, &oid, 1000)?;
+        if ahead > 0 {
+            *warning = Some(NewWarning::BaseAheadOfMain {
+                repo: repo.clone(),
+                rev: rev.to_string(),
+                head: oid.clone(),
+                main: tip.clone(),
+                ahead,
+                commits: git
+                    .history_between(tip, &oid, 20)?
+                    .iter()
+                    .map(|c| json!({"head":c.oid,"subject":c.subject}))
+                    .collect(),
+            });
+        }
+        Ok(Some(oid))
+    }
+}
+
+/// One repo's result of the head step: the head, its tree, and the warning
+/// the step raised (a skipped fetch, new-lock §2.2).
+pub(crate) type Head = (CommitOid, TreeOid, Option<NewWarning>);
+
+/// new-lock §4.1 (ii): `errors` of the head phase, in repo order. When
+/// every one is `Busy` `lock_wait` the first is returned with
+/// `detail.retry_safe: true`; otherwise the first other error, as it is.
+pub(crate) fn certify_head(errors: Vec<StrataError>) -> StrataError {
+    let terminal = errors.iter().position(|e| !is_lock_wait(e));
+    let mut errors = errors.into_iter();
+    match terminal {
+        Some(i) => errors.nth(i).expect("a failed repo"),
+        None => {
+            let mut e = errors.next().expect("a failed repo");
+            if let Some(serde_json::Value::Object(m)) = &mut e.detail {
+                m.insert("retry_safe".into(), json!(true));
+            }
+            e
+        }
+    }
+}
+
+/// `Busy` with `detail.reason` `lock_wait`: a bounded wait for a lock or
+/// a session queue that expired before its callback ran.
+pub(crate) fn is_lock_wait(e: &StrataError) -> bool {
+    e.code == Code::Busy
+        && e.detail
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .and_then(|v| v.as_str())
+            == Some("lock_wait")
 }
 
 /// This release accepts local revisions only, not per-session publish lines.

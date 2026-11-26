@@ -5,7 +5,6 @@
 //! in-process through `strata_apfs` rooted reads (G11). Errors are
 //! `StrataError` with the codes of §6.
 
-
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -41,6 +40,7 @@ mod worktree;
 pub use index::IndexInfo;
 pub use merge::{Hunk, Merge3, is_binary, merge3, merge3_favour_ours};
 pub use publish_io::{RefUpdate, TreeBlob, TreeItem};
+pub use refs::RefsStamp;
 pub use remote::remote_ref;
 #[cfg(feature = "test-seams")]
 pub use seams::{GitCall, Pause, SyncEvent};
@@ -102,14 +102,19 @@ impl Git {
     /// Returns the removed paths.
     pub fn clear_stale_strata_locks(&self, before: std::time::SystemTime) -> Vec<PathBuf> {
         fn walk(dir: &Path, before: std::time::SystemTime, out: &mut Vec<PathBuf>) {
-            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
             for e in rd.flatten() {
                 let Ok(ft) = e.file_type() else { continue };
                 let p = e.path();
                 if ft.is_dir() {
                     walk(&p, before, out);
                 } else if ft.is_file() && p.extension().is_some_and(|x| x == "lock") {
-                    let old = e.metadata().and_then(|m| m.modified()).is_ok_and(|m| m < before);
+                    let old = e
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .is_ok_and(|m| m < before);
                     if old && std::fs::remove_file(&p).is_ok() {
                         out.push(p);
                     }

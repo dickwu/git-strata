@@ -92,6 +92,7 @@ pub fn require_tty() -> Result<(), StrataError>;
 | `git-strata new`（精简） | `--repo R`，可重复或逗号分隔：只有这些 repo 建工作区，全部 tracked（session.md D51；daemon `new` 的 `only = true`）。ticket 同上 | 与 `--repos` 同给 → `InvalidInput`，`detail.reason = "repo_flags"`；两个都不给 → `InvalidInput` |
 | `git-strata new` 的 agent | `--agent NAME`（可选，`new` 与精简形式都有）。创建会话的 AI agent，按 D36 检测：`--agent`，否则 `STRATA_AGENT`（空 = 没设），否则 Claude Code（`CLAUDECODE`、`CLAUDE_CODE_SESSION_ID`、`CLAUDE_CODE_ENTRYPOINT` 任一非空 → `claude-code`）、Codex（`CODEX_THREAD_ID`、`CODEX_SANDBOX` → `codex`）、Cursor（`CURSOR_AGENT` → `cursor-agent`），按这个顺序取第一个；都没有就不记 | `--agent` 或 `STRATA_AGENT` 不是合法的 `AgentName`（types.md）或不是 UTF-8 → `InvalidInput`，`detail = {reason: "agent", source: "--agent" \| "STRATA_AGENT"}`，在连 daemon 之前，什么都不发 |
 | `git-strata add` | `--repo R`（至少一个，可重复或逗号分隔）`[--session S]`，不给 = cwd 的会话（session.md D52） | 没有 `--repo` → `InvalidInput`（`repos`）；未知 repo 透传 `NoSuchRepo`；会话不是 `Active` 透传 session 的码 |
+| `git-strata new` / `add` 的重试 | `[--timeout SECS] [--progress]`（new-lock §4）：`--timeout` 只限定重试，不限定单次调用；`--timeout` 优先于 `GIT_STRATA_TIMEOUT`，都不给 = 600 s，0 = 不限。只重发 daemon 证明可重放的拒绝（`Busy`，`detail.reason = "lock_wait"` 且 `detail.retry_safe = true`），见 §5 的 new-lock 小节 | `--timeout` 或 `GIT_STRATA_TIMEOUT` 不是有限的非负秒数 → `InvalidInput`，`detail.reason = "timeout"`，在发送之前 |
 | `git-strata status` | `[--all]` 或 `[--session S]`。都不给 = cwd 的会话。`[--brief]`：只读 store 的摘要（§3.2，D36）；`[--timeout SECS] [--progress]` | — |
 | `git-strata ls` | `[--table]`：成功时 stdout 只有表格（D36，对 D19 的修订） | — |
 | `git-strata checkpoint` | `--tool-call [ID]` 与 `-m MSG` 二选一；`ID` 省略或为空时取钩子 stdin JSON 的 `tool_use_id`（§3.5，D22）。`[--session S]`。`--path P` 可重复，P 是工作区里的路径，cli 收成相对该 repo 根的 `RepoPath` | 两个都给，或两个都不给 → `InvalidInput`，`detail.reason = "checkpoint_reason"` |
@@ -163,6 +164,7 @@ This mode reads `{cwd, stop_hook_active}` on stdin and resolves the session from
 | --- | --- | --- |
 | `new` | `NewReport`；`manifest.agent` 是记下的 agent（没有就省略）。agent 没能记下时（daemon 太旧，D36），`warnings` 多一条 `{kind: "AgentNotRecorded", agent, reason: "daemon_too_old"}`，stderr 一行同样的意思 | — |
 | `add` | `AddReport`：`{ session, added: {<repo>: WorkspaceState}, already: {<repo>: WorkspaceState}, warnings }`；锚点未知的 repo 打在 stderr | — |
+| `new` / `add` 的 `FetchSkipped` | `warnings` 里的 `{kind: "FetchSkipped", repo, holder, holder_session, last_fetch_at}`（new-lock §2.2：repo 忙，到期的 fetch 被跳过，基线是上次 fetch 的 main）原样留在 data；cli 另在 stderr 每条写一行 `warning: <repo>: fetch skipped, the repo is busy (<holder> (session <S>)); the base is main as last fetched (last fetched at <t>)` | — |
 | `status` | 一个会话：`SessionStatus`（顶层带 `id`、`ticket`（无则 null）；`manifest.id`、`manifest.ticket` 与之重复，**已弃用**，下一个大版本去掉，新代码读顶层）。warning `OldTreeKept`（status-perf A1）：`changed` 可为 `null`（daemon 还没在后台检查这棵旧树，同时带 `unchecked: true`，此时 `holders` 为空；daemon 不在、走本地回退时总是这样）；检查过的带 `checked_at`（RFC 3339）。旧 GUI 读到 `null` 应当当作「未知」。`--all`：`{ "sessions": [SessionStatus, …] }`，按 `SessionId` 升序。健康为 `Unknown` 的工作区带 `choices: ["abandon", "accept"]`。工作区有 `drift` 时它另带 `fix`（`cd ~ && git-strata deps propose --session <S> --repo <R> --switch`）与 `note`（publish 会用 staged 安装输入对应的依赖集跑检查，但工作区仍是旧的依赖；deps-drift §2.7）。`OldTreeKept` 的 `holders` 原样透传 | — |
 | `status --brief` | 只来自 store（status-perf C）：`SessionSummary` = `{ id, ticket（无则 null）, state, created（RFC 3339）, repos: [RepoName], phase?, workspaces: [{ repo, health_stored, path, checkpoint }] }`。`state` 是 store 的 lifecycle（`Creating`/`Active`/`Removing`/`Unknown`），没有只能从文件系统得出的 `Missing`；`health_stored` 是 store 记录的健康（`Ok`/`Unknown`），工作区目录缺失在这里看不出；`checkpoint` 是最新检查点，untracked 或没有则 null。不算 drift、seeds、mirrors、旧树，不 stat 工作区，不跑 git。一个会话：该对象；`--all`：`{ "sessions": [SessionSummary, …] }`，按 id 升序。daemon 不在或 daemon 不认识 `summary`/`workspaces` 时读 store，并带 `source: "local"` | — |
 | `ls` | `{ "sessions": [{ id, ticket, state, mark?, created, repos, phase? }, …], "source"? }`：全部未 Removed 的会话，按 id 升序，字段同上（没有 `workspaces`）。`source: "local"` 同上。`--table`：`ID  TICKET  STATE  MARK  REPOS  CREATED`（ticket 为空写 `-`，repos 用逗号连），不套信封 | — |
@@ -233,7 +235,7 @@ pub enum DiffPreview {
 - `running`：daemon 是否在听 socket。没在跑时 cli 本地造这份对象，`running` 为 false，`holders` 与 `unknown_publishes` 为空数组，不假装知道锁。
 - `session`：cwd 能解析出会话才有，否则省略。daemon 回答了时，这个查找（读 config、开 store）放在另一个线程里，最多等 2 秒（`STATUS_LOOKUP_WAIT`）；超时就省略 `session`，加 `"session_lookup": "timed_out"`，信封照常 `ok`。SessionStart 钩子不会因为 store 一时读不动而卡住。daemon 没在跑时直接查。
 - `holders`：谁持着哪把 repo 写锁、从什么时候起。daemon 在跑时由 `daemon_status` 填。
-- `features`：daemon 支持的扩展（daemon.md D38，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity", "daemon_status.volume_name", "daemon.drain"]`，与 `strata_daemon::FEATURES` 同序），daemon 在跑时原样透传。旧 daemon 可能没有这个键。`publish.auto_close` 表示 publish / push 的回复带 auto-close 的结果。`daemon_status.activity` 表示 daemon 的回复带下一条的状态栏字段，`daemon_status.volume_name` 表示其中的 `volume` 还带 `path`、`mount`、`name`。`daemon.drain` 表示 daemon 支持桌面应用的停机租约。
+- `features`：daemon 支持的扩展（daemon.md D38，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity", "daemon_status.volume_name", "daemon.drain", "new.fetch_skip"]`，与 `strata_daemon::FEATURES` 同序），daemon 在跑时原样透传。旧 daemon 可能没有这个键。`publish.auto_close` 表示 publish / push 的回复带 auto-close 的结果。`daemon_status.activity` 表示 daemon 的回复带下一条的状态栏字段，`daemon_status.volume_name` 表示其中的 `volume` 还带 `path`、`mount`、`name`。`daemon.drain` 表示 daemon 支持桌面应用的停机租约。
 - `activity`、`busy`、`volume`、`scan`、`version`、`pid`、`started`：状态栏字段（feature `daemon_status.activity`，见 daemon.md Status bar fields），daemon 回了哪个就原样透传哪个；旧 daemon 或 daemon 没在跑时省略。`activity` 是在跑的长任务；`busy` 是请求收到的 `Busy`（`{total, recent, truncated}`，`recent` 只留最近 10 分钟）；`volume` 是数据根所在卷的 `{free, size, as_of}`（字节，还没取样成功或取样失败为 null；feature `daemon_status.volume_name` 时另带 `path`（数据根）、`mount`（挂载点）、`name`（卷名））；`scan` 是 du 扫描的计数；`version`、`pid`、`started` 是 daemon 的版本、进程号与启动时刻。
 - `draining`、`inflight`、`store_schema`：支持 `daemon.drain` 的 daemon 返回这些字段时原样透传。Move 的 `hold` 封口生效时，stderr 提示打开 GIT STRATA 完成或取消迁移。
 - `config`：daemon 返回时原样透传；daemon 没在跑或旧 daemon 没有这个键时省略。`generation`、`hash`、`loaded_at` 描述当前已应用的 catalog；`last_attempt` 在尚无重载尝试时为 null，之后是 ReloadReport 加 `at`，拒绝时另带 `reason`；`restart_required` 是该次尝试要求重启的字段列表。
@@ -302,7 +304,7 @@ cli 不拥有表，不拥有目录。它读的配置目录是 `~/Library/Applica
 
 ## 5. 流程与算法
 
-The CLI takes no repo lock or session queue. Status/sync use one deadline across connect/send/reply: status 30 s, status --all 120 s, sync 600 s. `--timeout SECS` overrides `GIT_STRATA_TIMEOUT`; 0 disables it. This is client policy, not a daemon 600 s bound: sync may still be queued or cold-installing. Other commands keep unbounded calls. Hooks retain their five-second process deadline. Daemon D8 is unchanged: later/post-visible takes stay unbounded.
+The CLI takes no repo lock or session queue. Status/sync use one deadline across connect/send/reply: status 30 s, status --all 120 s, sync 600 s. `--timeout SECS` overrides `GIT_STRATA_TIMEOUT`; 0 disables it. This is client policy, not a daemon 600 s bound: sync may still be queued or cold-installing. Other commands keep unbounded calls; `new` and `add` use their `--timeout` only to bound retries (see "new-lock: `new`/`add` retry by default" below), never one call. Hooks retain their five-second process deadline. Daemon D8 is unchanged: later/post-visible takes stay unbounded.
 
 共同的五步：
 
@@ -653,3 +655,41 @@ Full status, summaries, `ls`, and `sync --check` carry the optional mark;
 from the reconciled live overlay. Edits checkpointed and then reverted remain
 restorable but do not count as unpublished, nor does an old checkpoint after its
 content has landed on main. A cold/reset tracker stays conservative until scanned.
+
+### new-lock: `new`/`add` retry by default
+
+`new` and `add` no longer wait behind a busy repo lock (session.md, new-lock section).
+A repo whose due fetch cannot take its lock is skipped and reported as a
+`FetchSkipped` warning (§4 table); a bounded lock wait that expires before anything
+was created comes back as `Busy` with `detail.reason: "lock_wait"` and
+`detail.retry_safe: true`. The daemon sets `retry_safe` only in two places: the head
+step of `new`/`add` when every failed repo failed with `lock_wait` (it wrote nothing
+but fetch records and tracking refs), and `add`'s session-queue take when it expired
+before `Sessions::add` started.
+
+- `wait::retry` sends the same params again, unchanged, while the reply is such a
+  certified refusal, sleeping 1 s and doubling to 10 s. Any other reply, success or
+  failure, a bare `lock_wait` without `retry_safe` included, is returned at once. An
+  older daemon never sets `retry_safe`, so against one the CLI retries nothing.
+- `--timeout SECS` (else `GIT_STRATA_TIMEOUT`, else 600; 0 = unlimited) is the retry
+  budget. It is checked only between attempts and never bounds one call: the first
+  attempt and every retry use the unbounded `rpc::call`, so a `new` waiting in
+  `after_new` (§5.1 steps after the session exists) runs past it. A bad value is
+  `InvalidInput reason: "timeout"` before anything is sent.
+- On stderr (TTY or `--progress`), before each retry and on the last refusal, one
+  line names the holder from the refusal's detail:
+  `waiting (45s): new; repo tool held by sync (session s-uijvlo3l, request, 2m10s); retrying`
+  (`giving up` once the budget is spent, `held by (handing over)` when the lock was
+  between holders). A `lock_wait` that is not retried ends `; not retried`.
+- The last certified refusal once the budget is spent gains `detail.retries`,
+  `detail.waited_ms` and `detail.fix` ("no session or workspace was created or
+  changed (fetch records and tracking refs may have); rerun, or pass --timeout 0 to
+  keep retrying"); `retry_safe` and the holder fields stay as the daemon sent them.
+- `new`'s unknown-`agent` resend (D36) stays inside one attempt, so a daemon swapped
+  for an older one between the probe and the call is still handled once.
+- An agent whose own tool timeout kills `new` must check `git-strata ls` for the
+  ticket before running it again: the session may have been created after the kill.
+- The CLI and the daemon are upgraded together. A new CLI against an old daemon
+  keeps the old blocking `new`/`add` and retries nothing; an old CLI against a new
+  daemon gets the `retry_safe` refusal once, as a plain `Busy lock_wait`, and the
+  `FetchSkipped` warning in `warnings` without the stderr line.
