@@ -776,7 +776,9 @@ fn daemon_status_passes_the_status_bar_fields_through() {
     );
     let ds = h.run(&["daemon", "status"]).ok();
     assert_eq!(ds["running"], json!(true), "{ds}");
-    for key in KEYS {
+    // Every supported daemon (0.3.0 on) reports `version`, so the fake
+    // answers with the current one; the other status-bar fields stay absent.
+    for key in KEYS.into_iter().filter(|key| *key != "version") {
         assert!(ds.get(key).is_none(), "{key}: {ds}");
     }
 }
