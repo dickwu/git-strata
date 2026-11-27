@@ -263,10 +263,12 @@ fn real_daemon_finishes_sync_after_client_timeout_and_survives_closed_reply() {
                 rx.recv_timeout(Duration::from_secs(10)).unwrap();
             }),
         ));
-        let run = live.run(&["sync", "--session", id.as_str(), "--timeout", "0.1"]);
+        // Long enough for the capability probe and the send on a loaded
+        // runner, well short of the hook's 10s wait.
+        let run = live.run(&["sync", "--session", id.as_str(), "--timeout", "0.5"]);
         // Release even if an assertion fails, so the fixture cannot strand its server.
         tx.send(()).unwrap();
-        assert_eq!(run.err_code(), "Unknown");
+        assert_eq!(run.err_code(), "Unknown", "{run:?}");
         assert_eq!(run.reason(), "client_timeout");
         let start = Instant::now();
         loop {
