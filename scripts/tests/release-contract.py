@@ -90,15 +90,26 @@ def volume(root, scratch):
 def detach(mount):
     # A process that exited moments ago (a worker, git or Spotlight) can keep
     # the volume busy briefly. Retry, then force: the image is disposable.
+    # If the mount is already gone (a teardown race), treat as detached.
+    if not mount.exists():
+        return
     for attempt in range(6):
         try:
             run(["hdiutil", "detach", str(mount)])
             return
         except RuntimeError as err:
-            if "Resource busy" not in str(err):
+            text = str(err)
+            if "No such file or directory" in text or not mount.exists():
+                return
+            if "Resource busy" not in text:
                 raise
             time.sleep(2 + attempt)
-    run(["hdiutil", "detach", "-force", str(mount)])
+    try:
+        run(["hdiutil", "detach", "-force", str(mount)])
+    except RuntimeError as err:
+        if "No such file or directory" in str(err) or not mount.exists():
+            return
+        raise
 
 
 def configure(root, vol):
