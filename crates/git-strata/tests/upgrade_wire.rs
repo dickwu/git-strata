@@ -546,7 +546,9 @@ fn u3_feature_gate_and_its_write_share_one_retry_budget() {
     });
     let run: support::Run = home
         .cmd(&["config", "reload"])
-        .env("GIT_STRATA_TIMEOUT", "0.05")
+        // Long enough for the first refusal to arrive on a loaded runner; the
+        // backoff after it (over a second) still spends the whole budget.
+        .env("GIT_STRATA_TIMEOUT", "0.5")
         .output()
         .unwrap()
         .into();

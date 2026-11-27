@@ -306,10 +306,17 @@ impl FakeDaemon {
                 match l.accept() {
                     Ok((s, _)) => {
                         cn.fetch_add(1, Ordering::SeqCst);
-                        s.set_nonblocking(false).unwrap();
-                        s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                            .unwrap();
-                        let mut w = s.try_clone().unwrap();
+                        // macOS answers EINVAL here when the client already
+                        // closed (a probe that gave up); there is nothing to serve.
+                        let Ok(mut w) = s
+                            .set_nonblocking(false)
+                            .and_then(|()| {
+                                s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                            })
+                            .and_then(|()| s.try_clone())
+                        else {
+                            continue;
+                        };
                         let mut r = BufReader::new(s);
                         let mut line = String::new();
                         while r.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {

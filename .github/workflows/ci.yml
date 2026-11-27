@@ -19,7 +19,8 @@ env:
 
 jobs:
   workspace:
-    runs-on: macos-15
+    # The suite targets current macOS (Unicode case tables, APFS behaviour).
+    runs-on: macos-26
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v5
@@ -49,7 +50,9 @@ jobs:
       - name: Clippy (library and binaries)
         run: cargo clippy --locked --workspace -- -D warnings
       - name: Test
-        run: env -u TMPDIR cargo test --locked --workspace --no-fail-fast
+        # Same shape as a developer shell: Apple git first and no runner locale
+        # overrides (tests assert the child git environment).
+        run: env -u TMPDIR -u LC_ALL -u LANG PATH="/usr/bin:$PATH" cargo test --locked --workspace --no-fail-fast
 
   desktop:
     runs-on: macos-15
