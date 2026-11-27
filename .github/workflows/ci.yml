@@ -26,6 +26,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100
         with:
           components: clippy, rustfmt
+      - name: Select an Xcode whose /usr/bin/git is at least 2.44
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fixtures run with PATH=/usr/bin:/bin:/usr/sbin:/sbin, so the git they
+          # get is the selected Xcode's. git-strata requires git 2.44 or later.
+          for x in $(ls -d /Applications/Xcode*.app | sort -V -r); do
+            v=$(DEVELOPER_DIR="$x/Contents/Developer" /usr/bin/git --version | awk '{print $3}')
+            if [[ "$(printf '%s\n2.44\n' "$v" | sort -V | head -1)" == 2.44 ]]; then
+              sudo xcode-select -s "$x"
+              break
+            fi
+          done
+          /usr/bin/git --version
+          v=$(/usr/bin/git --version | awk '{print $3}')
+          test "$(printf '%s\n2.44\n' "$v" | sort -V | head -1)" = 2.44
       - name: Build
         run: cargo build --locked --workspace
       - name: Clippy (all targets)
@@ -43,9 +59,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100
         with:
           components: clippy
+      - name: Select an Xcode whose /usr/bin/git is at least 2.44
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fixtures run with PATH=/usr/bin:/bin:/usr/sbin:/sbin, so the git they
+          # get is the selected Xcode's. git-strata requires git 2.44 or later.
+          for x in $(ls -d /Applications/Xcode*.app | sort -V -r); do
+            v=$(DEVELOPER_DIR="$x/Contents/Developer" /usr/bin/git --version | awk '{print $3}')
+            if [[ "$(printf '%s\n2.44\n' "$v" | sort -V | head -1)" == 2.44 ]]; then
+              sudo xcode-select -s "$x"
+              break
+            fi
+          done
+          /usr/bin/git --version
+          v=$(/usr/bin/git --version | awk '{print $3}')
+          test "$(printf '%s\n2.44\n' "$v" | sort -V | head -1)" = 2.44
+      # The frontend tests import CSS modules as objects, which needs bun 1.4.6
+      # (canary until 1.4.6 is released; the local toolchain is 1.4.6-canary).
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.4
+          bun-version: canary
       - name: Install frontend dependencies
         working-directory: apps/desktop
         run: bun install --frozen-lockfile

@@ -46,6 +46,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - name: Select an Xcode whose /usr/bin/git is at least 2.44
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fixtures run with PATH=/usr/bin:/bin:/usr/sbin:/sbin, so the git they
+          # get is the selected Xcode's. git-strata requires git 2.44 or later.
+          for x in $(ls -d /Applications/Xcode*.app | sort -V -r); do
+            v=$(DEVELOPER_DIR="$x/Contents/Developer" /usr/bin/git --version | awk '{print $3}')
+            if [[ "$(printf '%s\n2.44\n' "$v" | sort -V | head -1)" == 2.44 ]]; then
+              sudo xcode-select -s "$x"
+              break
+            fi
+          done
+          /usr/bin/git --version
+          v=$(/usr/bin/git --version | awk '{print $3}')
+          test "$(printf '%s\n2.44\n' "$v" | sort -V | head -1)" = 2.44
       - name: Check out the unpublished floor tag
         if: matrix.source == 'tag'
         uses: actions/checkout@v5
