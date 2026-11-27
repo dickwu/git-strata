@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ['ci/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  workspace:
+    # The suite targets current macOS (Unicode case tables, APFS behaviour).
+    runs-on: macos-26
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.100
+        with:
+          components: clippy, rustfmt
+      - name: Select an Xcode whose /usr/bin/git is at least 2.44
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fixtures run with PATH=/usr/bin:/bin:/usr/sbin:/sbin, so the git they
+          # get is the selected Xcode's. git-strata requires git 2.44 or later.
+          for x in $(ls -d /Applications/Xcode*.app | sort -V -r); do
+            v=$(DEVELOPER_DIR="$x/Contents/Developer" /usr/bin/git --version | awk '{print $3}')
+            if [[ "$(printf '%s\n2.44\n' "$v" | sort -V | head -1)" == 2.44 ]]; then
+              sudo xcode-select -s "$x"
+              break
+            fi
+          done
+          /usr/bin/git --version
+          v=$(/usr/bin/git --version | awk '{print $3}')
+          test "$(printf '%s\n2.44\n' "$v" | sort -V | head -1)" = 2.44
+      - name: Build
+        run: cargo build --locked --workspace
+      - name: Clippy (all targets)
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Clippy (library and binaries)
+        run: cargo clippy --locked --workspace -- -D warnings
+      - name: Test
+        # Same shape as a developer shell: Apple git first and no runner locale
+        # overrides (tests assert the child git environment).
+        run: env -u TMPDIR -u LC_ALL -u LANG PATH="/usr/bin:$PATH" cargo test --locked --workspace --no-fail-fast
+
+  desktop:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.100
+        with:
+          components: clippy
+      - name: Select an Xcode whose /usr/bin/git is at least 2.44
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fixtures run with PATH=/usr/bin:/bin:/usr/sbin:/sbin, so the git they
+          # get is the selected Xcode's. git-strata requires git 2.44 or later.
+          for x in $(ls -d /Applications/Xcode*.app | sort -V -r); do
+            v=$(DEVELOPER_DIR="$x/Contents/Developer" /usr/bin/git --version | awk '{print $3}')
+            if [[ "$(printf '%s\n2.44\n' "$v" | sort -V | head -1)" == 2.44 ]]; then
+              sudo xcode-select -s "$x"
+              break
+            fi
+          done
+          /usr/bin/git --version
+          v=$(/usr/bin/git --version | awk '{print $3}')
+          test "$(printf '%s\n2.44\n' "$v" | sort -V | head -1)" = 2.44
+      # The frontend tests import CSS modules as objects, which needs bun 1.4.6
+      # (canary until 1.4.6 is released; the local toolchain is 1.4.6-canary).
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: canary
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: bun install --frozen-lockfile
+      - name: Typecheck and unit tests
+        working-directory: apps/desktop
+        run: bun run check
+      - name: Lint
+        working-directory: apps/desktop
+        run: bun run lint
+      - name: Tauri tests
+        run: env -u TMPDIR cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Tauri clippy
+        run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Set up Minisign
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --silent --show-error --location --retry 3 -o minisign.zip \
+            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-macos.zip
+          echo "89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63  minisign.zip" | shasum -a 256 -c -
+          unzip -q minisign.zip minisign -d minisign-bin
+          echo "$RUNNER_TEMP/minisign-bin" >> "$GITHUB_PATH"
+      - name: Script tests
+        shell: bash
+        run: |
+          set -u
+          failed=0
+          for s in apps/desktop/scripts/tests/test-*.sh; do
+            # make-signing-identity.sh is an operator tool for a local login
+            # session (throwaway keychain plus interactive prompts); its test
+            # runs in the local done bar, not on hosted runners.
+            [[ $s == */test-make-signing-identity.sh ]] && continue
+            echo "::group::$s"
+            bash "$s" || { echo "::error::$s failed"; failed=1; }
+            echo "::endgroup::"
+          done
+          exit $failed
