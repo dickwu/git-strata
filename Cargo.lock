@@ -271,9 +271,9 @@ dependencies = [
 
 [[package]]
 name = "blake3"
-version = "1.8.7"
+version = "1.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
+checksum = "64c0e36294adc8db531500e3f2b8ec75c4af9177271e9c6d33f93609d56e57cd"
 dependencies = [
  "arrayvec",
  "cc",
@@ -420,9 +420,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.11.3"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02f0e023adb368345ce0ca6cdfc0f24a06554468d0e8503e14a0841de79bfa69"
+checksum = "95e45cf2980b2d467be49a9ed942c9179b701063a7ca3d037de7ee9bd67f8d66"
 dependencies = [
  "find-msvc-tools",
  "shlex 2.0.1",
@@ -557,9 +557,12 @@ dependencies = [
 
 [[package]]
 name = "constant_time_eq"
-version = "0.4.2"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+checksum = "144e7f1de087984240b7816d47f698b414979faa6f40839c5b86d6bd47db57b7"
+dependencies = [
+ "rustversion",
+]
 
 [[package]]
 name = "core-foundation-sys"
@@ -758,9 +761,9 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.15"
+version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
+checksum = "3e44f110d1777dc6559a51e7d45083945ded4f1bf3305494350f693b6d20b9c8"
 
 [[package]]
 name = "fnv"
@@ -902,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "git-strata"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "clap",
  "libc",
@@ -2260,7 +2263,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "strata-apfs"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "libc",
  "serde_json",
@@ -2272,7 +2275,7 @@ dependencies = [
 
 [[package]]
 name = "strata-client"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "libc",
  "serde",
@@ -2283,7 +2286,7 @@ dependencies = [
 
 [[package]]
 name = "strata-confirm"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "block2",
  "libc",
@@ -2301,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "strata-daemon"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "libc",
  "serde",
@@ -2324,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "strata-deps"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "blake3",
  "libc",
@@ -2341,7 +2344,7 @@ dependencies = [
 
 [[package]]
 name = "strata-gitio"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "libc",
  "serde_json",
@@ -2355,7 +2358,7 @@ dependencies = [
 
 [[package]]
 name = "strata-overlay"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "blake3",
  "libc",
@@ -2375,7 +2378,7 @@ dependencies = [
 
 [[package]]
 name = "strata-publish"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "blake3",
  "libc",
@@ -2396,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "strata-search"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "getrandom 0.4.3",
  "globset",
@@ -2417,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "strata-session"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "blake3",
  "libc",
@@ -2435,7 +2438,7 @@ dependencies = [
 
 [[package]]
 name = "strata-store"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "blake3",
  "libc",
@@ -2451,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "strata-types"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde",
  "serde_json",
