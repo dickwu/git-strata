@@ -84,7 +84,21 @@ def volume(root, scratch):
             assert mount.stat().st_dev != root.stat().st_dev
             yield mount
         finally:
+            detach(mount)
+
+
+def detach(mount):
+    # A process that exited moments ago (a worker, git or Spotlight) can keep
+    # the volume busy briefly. Retry, then force: the image is disposable.
+    for attempt in range(6):
+        try:
             run(["hdiutil", "detach", str(mount)])
+            return
+        except RuntimeError as err:
+            if "Resource busy" not in str(err):
+                raise
+            time.sleep(2 + attempt)
+    run(["hdiutil", "detach", "-force", str(mount)])
 
 
 def configure(root, vol):
