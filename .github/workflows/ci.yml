@@ -55,14 +55,23 @@ jobs:
         # runs as `cargo test` runs it (package dir as cwd), under a 15-minute
         # watchdog so a hang fails the job quickly and by name.
         #
-        # Hosted-runner exceptions, all failing identically on the untouched
-        # 0.3.2 baseline (branch ci/baseline-0.3.2, run 46052865196), so they
-        # are runner timing, not product changes; they run in the local done bar:
+        # Hosted-runner exceptions, documented against the untouched 0.3.2
+        # baseline (branch ci/baseline-0.3.2, run 46052865196) or later
+        # hosted runs of this same workflow:
         # - skipped: remove_has_no_force_path (strata-session) and
         #   old_daemon_delayed_rejection_does_not_restart_the_sync_budget
-        #   (git-strata timeouts) assert wall-clock waits the runner misses.
-        # - strata-daemon `locks` runs single-threaded: its 300 ms lock-wait
-        #   tests miss the budget under parallel load on 3 vCPUs.
+        #   (git-strata timeouts) assert wall-clock waits the runner misses
+        #   (both failed on the baseline run).
+        # - strata-daemon `locks` and `main_sync` run single-threaded:
+        #   `locks` 300 ms lock-wait tests miss the budget under parallel
+        #   load on 3 vCPUs (baseline: build_lock_wait / publish_hold;
+        #   branch run 46052865059: rm_queued_behind_in_flight_checkpoint).
+        #   `main_sync` serving_schedules_worker_and_t2_until_applied missed
+        #   its 30 s settle once under parallel load (run 46062654751) after
+        #   passing on the baseline and two earlier 0.3.3 runs; assertions
+        #   are unchanged.
+        # The default GitHub bash is `set -e`; a failing binary is captured
+        # so later packages still run and the job reports every failure.
         shell: bash
         run: |
           set -o pipefail  # no -u: bash 3.2 treats an empty array as unset
@@ -77,10 +86,14 @@ jobs:
           while IFS=$'\t' read -r exe dir; do
             name=${exe##*/}
             extra=()
-            [[ $name == locks-* && $dir == */strata-daemon ]] && extra=(--test-threads=1)
+            if [[ $dir == */strata-daemon ]]; then
+              case $name in
+                locks-*|main_sync-*) extra=(--test-threads=1);;
+              esac
+            fi
             echo "::group::$name"
-            ( cd "$dir" && CARGO_MANIFEST_DIR="$dir" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 900 "$exe" "${skip[@]}" "${extra[@]}" )
-            rc=$?
+            rc=0
+            ( cd "$dir" && CARGO_MANIFEST_DIR="$dir" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 900 "$exe" "${skip[@]}" "${extra[@]}" ) || rc=$?
             echo "::endgroup::"
             if [[ $rc -eq 142 ]]; then
               echo "::error::$name hung (15-minute watchdog)"; failed+=("$name (hung)")

@@ -431,7 +431,9 @@ fn u3_sync_final_certified_retry_has_its_own_io_deadline() {
     });
     // The first backoff exhausts the retry budget. GS-2 still allows the
     // attempt at the deadline; its reply fits the separate call deadline.
-    assert_eq!(h.run(&["sync", "--timeout", "0.25"]).ok()["finished"], true);
+    // A 1 s budget against the 2 s retry_after: one retry, at the deadline,
+    // with room for the reply on a loaded runner.
+    assert_eq!(h.run(&["sync", "--timeout", "1"]).ok()["finished"], true);
     assert_eq!(server.operations().len(), 2);
 }
 

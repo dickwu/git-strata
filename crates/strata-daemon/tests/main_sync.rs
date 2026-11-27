@@ -752,7 +752,9 @@ fn serving_schedules_worker_and_t2_until_applied() {
         server.join().unwrap().unwrap();
         assert!(
             applied,
-            "the scheduled worker and T2 did not settle the proposal"
+            "the scheduled worker and T2 did not settle the proposal; deps_auto={:?}, loops_started={}",
+            core.store.deps_auto(p.id).unwrap(),
+            core.reload.loops_started.load(std::sync::atomic::Ordering::SeqCst)
         );
     });
 }
