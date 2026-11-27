@@ -735,7 +735,9 @@ fn serving_schedules_worker_and_t2_until_applied() {
     let stop = std::sync::atomic::AtomicBool::new(false);
     std::thread::scope(|scope| {
         let server = scope.spawn(|| strata_daemon::handlers::serve(&d, &listener, &stop));
-        let deadline = Instant::now() + Duration::from_secs(30);
+        // 30s is enough locally and on a quiet runner; a loaded hosted
+        // runner may need two slow main-sync loops to reach Applied.
+        let deadline = Instant::now() + Duration::from_secs(120);
         let mut applied = false;
         while Instant::now() < deadline {
             applied = core
