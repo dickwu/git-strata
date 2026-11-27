@@ -51,8 +51,45 @@ jobs:
         run: cargo clippy --locked --workspace -- -D warnings
       - name: Test
         # Same shape as a developer shell: Apple git first and no runner locale
-        # overrides (tests assert the child git environment).
-        run: env -u TMPDIR -u LC_ALL -u LANG PATH="/usr/bin:$PATH" cargo test --locked --workspace --no-fail-fast
+        # overrides (tests assert the child git environment). Each test binary
+        # runs as `cargo test` runs it (package dir as cwd), under a 15-minute
+        # watchdog so a hang fails the job quickly and by name.
+        #
+        # Hosted-runner exceptions, all failing identically on the untouched
+        # 0.3.2 baseline (branch ci/baseline-0.3.2, run 46052865196), so they
+        # are runner timing, not product changes; they run in the local done bar:
+        # - skipped: remove_has_no_force_path (strata-session) and
+        #   old_daemon_delayed_rejection_does_not_restart_the_sync_budget
+        #   (git-strata timeouts) assert wall-clock waits the runner misses.
+        # - strata-daemon `locks` runs single-threaded: its 300 ms lock-wait
+        #   tests miss the budget under parallel load on 3 vCPUs.
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="/usr/bin:$PATH"
+          unset TMPDIR LC_ALL LANG
+          cargo test --locked --workspace --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null)
+                     | [.executable, (.manifest_path | sub("/Cargo.toml$"; ""))] | @tsv' > "$RUNNER_TEMP/tests.tsv"
+          test -s "$RUNNER_TEMP/tests.tsv"
+          skip=(--skip remove_has_no_force_path --skip old_daemon_delayed_rejection_does_not_restart_the_sync_budget)
+          failed=()
+          while IFS=$'\t' read -r exe dir; do
+            name=${exe##*/}
+            extra=()
+            [[ $name == locks-* && $dir == */strata-daemon ]] && extra=(--test-threads=1)
+            echo "::group::$name"
+            ( cd "$dir" && CARGO_MANIFEST_DIR="$dir" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 900 "$exe" "${skip[@]}" "${extra[@]}" )
+            rc=$?
+            echo "::endgroup::"
+            if [[ $rc -eq 142 ]]; then
+              echo "::error::$name hung (15-minute watchdog)"; failed+=("$name (hung)")
+            elif [[ $rc -ne 0 ]]; then
+              echo "::error::$name failed (exit $rc)"; failed+=("$name")
+            fi
+          done < "$RUNNER_TEMP/tests.tsv"
+          cargo test --locked --workspace --doc || failed+=("doctests")
+          if (( ${#failed[@]} )); then printf 'failed: %s\n' "${failed[@]}"; exit 1; fi
 
   desktop:
     runs-on: macos-15
