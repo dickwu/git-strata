@@ -65,7 +65,7 @@ jobs:
         #   tests miss the budget under parallel load on 3 vCPUs.
         shell: bash
         run: |
-          set -uo pipefail
+          set -o pipefail  # no -u: bash 3.2 treats an empty array as unset
           export PATH="/usr/bin:$PATH"
           unset TMPDIR LC_ALL LANG
           cargo test --locked --workspace --no-run --message-format=json \
