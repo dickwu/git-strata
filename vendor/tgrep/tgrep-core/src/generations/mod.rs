@@ -105,6 +105,8 @@ pub type Result<T> = std::result::Result<T, GenerationError>;
 /// Identity is the canonical native Git common-directory path, not a remote.
 #[derive(Clone, Debug)]
 pub struct Repository {
+    #[cfg(feature = "strata-fixture")]
+    fixture_home: Option<PathBuf>,
     common_dir: PathBuf,
     git_dir: PathBuf,
     identity: String,
@@ -115,23 +117,30 @@ impl Repository {
     /// Discover from a worktree, a subdirectory, or a bare Git repository.
     /// Git must be installed. Ambient `GIT_*` overrides are not inherited.
     pub fn discover(root: &Path) -> Result<Self> {
-        Self::discover_inner(root, None)
+        Self::discover_inner(root, None, None)
+    }
+
+    /// Isolate Git and its transports for a git-strata fixture worker.
+    #[cfg(feature = "strata-fixture")]
+    pub fn discover_for_fixture(root: &Path, home: &Path) -> Result<Self> {
+        Self::discover_inner(root, None, Some(home))
     }
 
     pub(crate) fn discover_controlled(
         root: &Path,
         control: &crate::managed::process::Control,
     ) -> Result<Self> {
-        Self::discover_inner(root, Some(control))
+        Self::discover_inner(root, Some(control), None)
     }
 
     fn discover_inner(
         root: &Path,
         control: Option<&crate::managed::process::Control>,
+        fixture_home: Option<&Path>,
     ) -> Result<Self> {
         let root = fs::canonicalize(root)?;
-        let common_dir = git::discover_directory(&root, "--git-common-dir", control)?;
-        let git_dir = git::discover_directory(&root, "--absolute-git-dir", control)?;
+        let common_dir = git::discover_directory(&root, "--git-common-dir", control, fixture_home)?;
+        let git_dir = git::discover_directory(&root, "--absolute-git-dir", control, fixture_home)?;
         let mut hash = blake3::Hasher::new();
         hash.update(b"tgrep-repository-v1\0");
         #[cfg(unix)]
@@ -153,6 +162,8 @@ impl Repository {
             "repository identity on this platform".into(),
         ));
         let mut repository = Self {
+            #[cfg(feature = "strata-fixture")]
+            fixture_home: fixture_home.map(Path::to_owned),
             common_dir,
             git_dir,
             identity: hash.finalize().to_hex().to_string(),
@@ -192,7 +203,7 @@ impl Repository {
         root: &Path,
         control: &crate::managed::process::Control,
     ) -> Result<PathBuf> {
-        git::discover_directory(root, "--show-toplevel", Some(control))
+        git::discover_directory(root, "--show-toplevel", Some(control), None)
     }
 
     pub(crate) fn validate_managed_storage(&self, storage: &Path) -> Result<()> {
@@ -1689,6 +1700,8 @@ mod tests {
     fn publication_lock_is_exclusive_and_released_when_dropped() {
         let directory = tempfile::tempdir().unwrap();
         let repository = Repository {
+            #[cfg(feature = "strata-fixture")]
+            fixture_home: None,
             common_dir: directory.path().to_path_buf(),
             git_dir: directory.path().to_path_buf(),
             identity: "test".into(),
@@ -1879,6 +1892,8 @@ mod tests {
     fn invalid_staged_generation_is_never_published() {
         let root = tempfile::tempdir().unwrap();
         let repository = Repository {
+            #[cfg(feature = "strata-fixture")]
+            fixture_home: None,
             common_dir: root.path().to_path_buf(),
             git_dir: root.path().to_path_buf(),
             identity: "test".into(),

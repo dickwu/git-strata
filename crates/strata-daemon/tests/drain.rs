@@ -94,10 +94,10 @@ fn new_session(server: &Server<'_, '_>) -> Value {
 }
 
 /// The external stop flag stands in for the executable's signal handler.
-fn serve(
+fn serve<T>(
     daemon: &Daemon<'_>,
-    test: impl FnOnce(&Path, &AtomicBool, &Receiver<strata_daemon::Result<()>>),
-) {
+    test: impl FnOnce(&Path, &AtomicBool, &Receiver<strata_daemon::Result<()>>) -> T,
+) -> T {
     let path = &daemon.core.opts.socket;
     let listener = startup::bind(path).unwrap();
     let external = AtomicBool::new(false);
@@ -109,8 +109,8 @@ fn serve(
             let _ = done.send(handlers::serve(daemon, listener, stop));
         });
         let _stop = Stop(stop);
-        test(path, stop, &ended);
-    });
+        test(path, stop, &ended)
+    })
 }
 
 #[test]
@@ -122,6 +122,20 @@ fn lease_expiry_renewal_and_read_only_calls() {
     let server = Server::new(&daemon, &trackers);
 
     let initial = status(&server);
+    assert_eq!(initial.get("handover"), Some(&Value::Null));
+    assert_eq!(
+        initial["features"].as_array().unwrap().last(),
+        Some(&json!("daemon.handover"))
+    );
+    assert!(daemon.begin_handover_parking("status-test", 42));
+    let handover = status(&server)["handover"].clone();
+    assert_eq!(handover["id"], "status-test");
+    assert_eq!(handover["to"], 42);
+    assert_eq!(handover["phase"], "park");
+    assert_eq!(handover["parked"], 0);
+    assert_eq!(handover["waiting_on"]["inflight"], json!([]));
+    assert!(daemon.abort_handover_parking("status-test"));
+    assert!(status(&server)["handover"].is_null());
     assert_eq!(initial["store_schema"], strata_types::STORE_SCHEMA);
     assert_eq!(initial.get("draining"), Some(&Value::Null));
     assert_eq!(initial["inflight"], json!([]));
@@ -1069,6 +1083,34 @@ fn terminal_seal_replies_and_exits_with_a_stalled_reader() {
     assert_eq!(shutdown_record(&fx)["mode"], "restart");
 }
 
+/// CR r2 #2: an H2 stop with no sealed lease selects Sigterm. A peer that
+/// stopped reading a large reply must not keep the worker from exiting.
+#[test]
+fn h2_stop_exits_with_a_stalled_reader() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let daemon = Daemon::start(&core).unwrap();
+    serve(&daemon, |socket, stop, ended| {
+        let mut stalled = UnixStream::connect(socket).unwrap();
+        stalled.set_read_timeout(Some(WAIT)).unwrap();
+        stalled.set_write_timeout(Some(WAIT)).unwrap();
+        let query =
+            json!({ "id": "x".repeat(2 * 1024 * 1024), "method": "daemon_status", "params": {} });
+        writeln!(stalled, "{query}").unwrap();
+        let mut first = [0];
+        stalled.read_exact(&mut first).unwrap();
+        assert_eq!(first, [b'{']);
+
+        assert!(daemon.begin_handover_parking("stalled", 42));
+        stop.store(true, Ordering::SeqCst);
+        ended.recv_timeout(WAIT).unwrap().unwrap();
+        drop(stalled);
+    });
+    drop(daemon);
+    assert_eq!(core.close_with_exit_code().unwrap(), 0);
+    assert_eq!(shutdown_record(&fx)["mode"], "sigterm");
+}
+
 #[test]
 fn terminal_seal_cannot_be_cancelled() {
     let fx = Dfx::new();
@@ -1142,4 +1184,157 @@ fn seal_exit_codes_and_shutdown_diagnostic_survive_close_error() {
         );
         assert!(!fx.socket().exists());
     }
+}
+
+fn replay_read(
+    daemon: &Daemon<'_>,
+    server: &Server<'_, '_>,
+    method: &str,
+    params: Value,
+    untouched: impl FnOnce() -> bool,
+) -> Value {
+    assert!(daemon.begin_handover_parking("u4", 42));
+    // The direct path has no stream to park. It must decline before entering
+    // the same real handler that will receive the socket request below.
+    refused(call(server, method, params.clone()), "Busy", "upgrading");
+    serve(daemon, |socket, _, _| {
+        std::thread::scope(|scope| {
+            let client = scope.spawn(|| rpc(socket, method, params));
+            let parked = until(|| {
+                let held = status(server)["handover"]["parked"] == 1;
+                (held || client.is_finished()).then_some(held)
+            });
+            let clean = untouched();
+            assert!(daemon.abort_handover_parking("u4"));
+            let reply = client.join().unwrap();
+            assert!(
+                parked && clean,
+                "{method} must be parked before changing disk"
+            );
+            data(reply)
+        })
+    })
+}
+
+fn check_cold_search(method: &str) {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let daemon = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&daemon, &trackers);
+    let id = new_session(&server);
+    let params = if method == "grep" {
+        json!({"session":id,"pattern":"name","all":false,"ignore_case":false})
+    } else {
+        json!({"session":id,"repo":"tool","glob":"package.json"})
+    };
+    let index = core.config.paths.root.join("search/tool");
+    assert!(!index.exists());
+    let result = replay_read(&daemon, &server, method, params, || !index.exists());
+    let rows = if method == "grep" {
+        &result["hits"]
+    } else {
+        &result["paths"]
+    };
+    assert!(!rows.as_array().unwrap().is_empty(), "{result}");
+    assert!(index.is_dir());
+}
+
+#[test]
+fn u4_cold_grep_builds_its_index_only_after_parking_ends() {
+    check_cold_search("grep");
+}
+
+#[test]
+fn u4_cold_files_builds_its_index_only_after_parking_ends() {
+    check_cold_search("files");
+}
+
+#[test]
+fn u4_cross_base_diff_stores_uncheckpointed_blobs_only_after_parking_ends() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    let daemon = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&daemon, &trackers);
+    let older = new_session(&server);
+    let repo = repo_name("tool");
+    let id = SessionId::try_from(older.as_str().unwrap().to_owned()).unwrap();
+    fs::write(
+        ws(&core, &id, "tool").join("uncheckpointed.txt"),
+        b"unique U4 contents\n",
+    )
+    .unwrap();
+    let main = fx.main("tool");
+    let head = fx
+        .sb
+        .commit(&main, &[("new-base.txt", b"another base\n")], "new base");
+    let new = data(call(
+        &server,
+        "new",
+        json!({"repos":["tool"], "only":true, "ticket":null, "base":{"tool":head}}),
+    ));
+    let newer = &new["session"]["manifest"]["id"];
+    let record = core.store.session(&id).unwrap().unwrap();
+    let newer_id = SessionId::try_from(newer.as_str().unwrap().to_owned()).unwrap();
+    assert_ne!(
+        record.manifest.repos[&repo].base,
+        core.store
+            .session(&newer_id)
+            .unwrap()
+            .unwrap()
+            .manifest
+            .repos[&repo]
+            .base
+    );
+    let params = json!({"a":older,"b":newer,"repo":"tool"});
+    let blob_count = || {
+        fs::read_dir(core.config.paths.store().join("blobs"))
+            .unwrap()
+            .map(|bucket| fs::read_dir(bucket.unwrap().path()).unwrap().count())
+            .sum::<usize>()
+    };
+    let before = blob_count();
+    let result = replay_read(&daemon, &server, "diff", params, || blob_count() == before);
+    assert!(
+        result["only_a"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("uncheckpointed.txt"))
+    );
+    assert!(blob_count() > before);
+}
+
+#[test]
+fn u2_terminal_stop_finishes_an_admitted_lock_waiter_and_refuses_the_parked_write() {
+    let mut fx = Dfx::new();
+    fx.lock_wait = WAIT;
+    let core = fx.prepare().unwrap();
+    let daemon = Daemon::start(&core).unwrap();
+    let trackers = Trackers::new(&core);
+    let server = Server::new(&daemon, &trackers);
+    let session = new_session(&server);
+    let id: SessionId = serde_json::from_value(session.clone()).unwrap();
+    serve(&daemon, |socket, stop, _| {
+        std::thread::scope(|scope| {
+            let admitted = core
+                .locks
+                .with_sessions(std::slice::from_ref(&id), || {
+                    let admitted = scope
+                        .spawn(|| rpc(socket, "mark", json!({"session":session,"state":"done"})));
+                    until(|| (status(&server)["inflight"][0]["phase"] == "queued").then_some(()));
+                    assert!(daemon.begin_handover_parking("terminal", 42));
+                    let parked = scope
+                        .spawn(|| rpc(socket, "mark", json!({"session":session,"state":"active"})));
+                    until(|| (status(&server)["handover"]["parked"] == 1).then_some(()));
+                    stop.store(true, Ordering::SeqCst);
+                    let reply = parked.join().unwrap();
+                    assert_eq!(reply["error"]["detail"]["retry_safe"], true);
+                    refused(reply, "Busy", "upgrading");
+                    Ok(admitted)
+                })
+                .unwrap();
+            assert_eq!(data(admitted.join().unwrap())["mark"]["state"], "done");
+        })
+    });
 }

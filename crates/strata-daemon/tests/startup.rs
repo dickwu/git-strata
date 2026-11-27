@@ -62,7 +62,11 @@ fn calls_mention(core: &startup::Core, needle: &str) -> Vec<String> {
             let line = format!(
                 "{} :: {}",
                 c.cwd.display(),
-                c.args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ")
+                c.args
+                    .iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
             if line.contains(needle) {
                 out.push(line);
@@ -130,13 +134,34 @@ fn unknown_publish_reported_on_restart_not_replayed() {
     let (unknown, running) = {
         let core = fx.prepare().unwrap();
         let d = Daemon::start(&core).unwrap();
-        let id = { let _catalog = core.admit(); d.sessions.new(None, &[repo_name("tool")]).unwrap() }.manifest.id;
+        let id = {
+            let _catalog = core.admit();
+            d.sessions.new(None, &[repo_name("tool")]).unwrap()
+        }
+        .manifest
+        .id;
         fx.sb.write(&ws(&core, &id, "tool"), "src/a.ts", b"a\n");
         let cp = checkpoint(&core, &id, "tool");
         let now = SystemTime::now();
-        let unknown = core.store.record_publish(&group(vec![batch(&id, "tool", cp.id, &["src/a.ts"])]), now).unwrap();
-        assert!(core.store.set_publish_phase(unknown, PublishPhase::Running, PublishPhase::Unknown, None, now).unwrap());
-        let running = core.store.record_publish(&group(vec![batch(&id, "tool", cp.id, &["src/a.ts"])]), now).unwrap();
+        let unknown = core
+            .store
+            .record_publish(&group(vec![batch(&id, "tool", cp.id, &["src/a.ts"])]), now)
+            .unwrap();
+        assert!(
+            core.store
+                .set_publish_phase(
+                    unknown,
+                    PublishPhase::Running,
+                    PublishPhase::Unknown,
+                    None,
+                    now
+                )
+                .unwrap()
+        );
+        let running = core
+            .store
+            .record_publish(&group(vec![batch(&id, "tool", cp.id, &["src/a.ts"])]), now)
+            .unwrap();
         drop(d);
         core.close().unwrap();
         (unknown, running)
@@ -150,13 +175,31 @@ fn unknown_publish_reported_on_restart_not_replayed() {
     want.sort();
     assert_eq!(unknown_ids(&status(&d)), want);
     for id in [unknown, running] {
-        assert_eq!(core.store.publish_record(id).unwrap().unwrap().phase, PublishPhase::Unknown);
+        assert_eq!(
+            core.store.publish_record(id).unwrap().unwrap().phase,
+            PublishPhase::Unknown
+        );
     }
-    assert!(core.store.open_publishes().unwrap().iter().all(|r| r.phase == PublishPhase::Unknown));
+    assert!(
+        core.store
+            .open_publishes()
+            .unwrap()
+            .iter()
+            .all(|r| r.phase == PublishPhase::Unknown)
+    );
     assert_eq!(push_calls(&core), Vec::<String>::new());
-    assert_eq!(fx.sb.git(&origin, &["for-each-ref"]), before, "origin untouched");
+    assert_eq!(
+        fx.sb.git(&origin, &["for-each-ref"]),
+        before,
+        "origin untouched"
+    );
     // Over the socket too.
-    let v = serving(&d, || call(&fx.socket(), r#"{"id":1,"method":"daemon_status","params":{}}"#));
+    let v = serving(&d, || {
+        call(
+            &fx.socket(),
+            r#"{"id":1,"method":"daemon_status","params":{}}"#,
+        )
+    });
     assert_eq!(v["ok"], json!(true), "{v}");
     assert_eq!(unknown_ids(&v["data"]), want);
     drop(d);
@@ -182,13 +225,23 @@ fn second_instance_refused_then_reacquired() {
 
     // A second instance (its own open file description) gets Exists, not Busy,
     // before it reads config or opens the store.
-    let e = fx.prepare_once(fx.confirmer(vec![]).0).err().expect("second instance refused");
+    let e = fx
+        .prepare_once(fx.confirmer(vec![]).0)
+        .err()
+        .expect("second instance refused");
     assert_eq!(e.code, Code::Exists);
     assert_eq!(reason(&e), Some("daemon_running"));
-    let e = startup::InstanceLock::take(&strata_daemon::lock_path(&fx.config_dir)).err().unwrap();
+    let e = startup::InstanceLock::take(&strata_daemon::lock_path(&fx.config_dir))
+        .err()
+        .unwrap();
     assert_eq!(e.code, Code::Exists);
 
-    serving(&d, || assert!(strata_daemon::rpc::ready(&fx.socket(), Duration::from_secs(5))));
+    serving(&d, || {
+        assert!(strata_daemon::rpc::ready(
+            &fx.socket(),
+            Duration::from_secs(5)
+        ))
+    });
     drop(d);
     let stopped = Instant::now();
     core.close().unwrap();
@@ -211,10 +264,19 @@ fn quarantine_is_an_alert() {
     let (id, shadow) = {
         let core = fx.prepare().unwrap();
         let d = Daemon::start(&core).unwrap();
-        let id = { let _catalog = core.admit(); d.sessions.new(None, &[repo_name("tool")]).unwrap() }.manifest.id;
+        let id = {
+            let _catalog = core.admit();
+            d.sessions.new(None, &[repo_name("tool")]).unwrap()
+        }
+        .manifest
+        .id;
         drop(d);
         core.close().unwrap();
-        let shadow = fx.config.paths.root.join(format!("sessions/.repos/{id}/tool.git"));
+        let shadow = fx
+            .config
+            .paths
+            .root
+            .join(format!("sessions/.repos/{id}/tool.git"));
         assert!(shadow.is_dir(), "shadow at {}", shadow.display());
         (id, shadow)
     };
@@ -227,18 +289,33 @@ fn quarantine_is_an_alert() {
     let d = Daemon::start(&core).unwrap();
     let w = status(&d)["warnings"].clone();
     assert!(
-        w.as_array().unwrap().contains(&serde_json::to_value(DaemonWarning::Quarantine { path: entry.clone() }).unwrap()),
+        w.as_array().unwrap().contains(
+            &serde_json::to_value(DaemonWarning::Quarantine {
+                path: entry.clone()
+            })
+            .unwrap()
+        ),
         "{w}"
     );
     let alerts = fx.alerts();
-    assert_eq!(alerts.iter().filter(|l| l.contains("quarantine")).count(), 1, "{alerts:?}");
+    assert_eq!(
+        alerts.iter().filter(|l| l.contains("quarantine")).count(),
+        1,
+        "{alerts:?}"
+    );
     assert!(alerts[0].contains(entry.to_str().unwrap()));
     // No gc, worktree prune or commit ran in that shadow repository.
     let touched = calls_mention(&core, shadow.to_str().unwrap());
     for t in &touched {
-        assert!(!t.contains(" gc") && !t.contains("prune") && !t.contains("commit"), "{t}");
+        assert!(
+            !t.contains(" gc") && !t.contains("prune") && !t.contains("commit"),
+            "{t}"
+        );
     }
-    assert!(fs::symlink_metadata(&entry).is_ok(), "quarantine entry left alone");
+    assert!(
+        fs::symlink_metadata(&entry).is_ok(),
+        "quarantine entry left alone"
+    );
     // A second status does not print again.
     let _ = status(&d);
     assert_eq!(fx.alerts().len(), alerts.len());
@@ -265,10 +342,16 @@ fn quarantine_scan_reports_non_directory_worktrees() {
 fn release_daemon_has_no_test_seams() {
     // This test build has the seams on: the refusal is in force.
     const { assert!(strata_confirm::TEST_SEAMS) };
-    assert_eq!(startup::refuse_test_seams().unwrap_err().code, Code::InvalidInput);
+    assert_eq!(
+        startup::refuse_test_seams().unwrap_err().code,
+        Code::InvalidInput
+    );
     // The binary cargo built for these tests is a seams build: it refuses
     // before it takes the lock, reads config or listens.
-    let home = tempfile::Builder::new().prefix("sd-").tempdir_in("/tmp").unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("sd-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_git-stratad"))
         .env_clear()
         .env("HOME", home.path())
@@ -276,11 +359,15 @@ fn release_daemon_has_no_test_seams() {
         .output()
         .unwrap();
     assert!(!out.status.success());
-    let line: Value = serde_json::from_slice(out.stdout.split(|b| *b == b'\n').next().unwrap()).unwrap();
+    let line: Value =
+        serde_json::from_slice(out.stdout.split(|b| *b == b'\n').next().unwrap()).unwrap();
     assert_eq!(line["ok"], json!(false));
     assert_eq!(line["error"]["detail"]["reason"], json!("test_seams"));
     let cfg = strata_daemon::config_dir_for_home(home.path());
-    assert!(!cfg.exists(), "nothing created under HOME: no lock, no socket");
+    assert!(
+        !cfg.exists(),
+        "nothing created under HOME: no lock, no socket"
+    );
 }
 
 #[test]
@@ -289,20 +376,36 @@ fn daemon_does_not_idle_exit() {
     let core = fx.prepare().unwrap();
     let d = Daemon::start(&core).unwrap();
     serving(&d, || {
-        assert!(strata_daemon::rpc::ready(&fx.socket(), Duration::from_secs(5)));
+        assert!(strata_daemon::rpc::ready(
+            &fx.socket(),
+            Duration::from_secs(5)
+        ));
         // An idle connection and an idle daemon: both still there later.
         let idle = UnixStream::connect(fx.socket()).unwrap();
         std::thread::sleep(Duration::from_millis(1500));
         assert!(!d.stopping());
-        let v = call(&fx.socket(), r#"{"id":"x","method":"daemon_status","params":{}}"#);
+        let v = call(
+            &fx.socket(),
+            r#"{"id":"x","method":"daemon_status","params":{}}"#,
+        );
         assert_eq!(v["ok"], json!(true));
         drop(idle);
     });
     drop(d);
     core.close().unwrap();
     // No idle timer and no "a workspace keeps it alive" relation in the source.
-    let src = concat!(include_str!("../src/startup.rs"), include_str!("../src/main.rs"), include_str!("../src/lib.rs"));
-    for bad in ["idle_timeout", "IDLE_", "exit_when_idle", "keep_alive_while"] {
+    let src = concat!(
+        include_str!("../src/startup.rs"),
+        include_str!("../src/main.rs"),
+        include_str!("../src/worker.rs"),
+        include_str!("../src/lib.rs")
+    );
+    for bad in [
+        "idle_timeout",
+        "IDLE_",
+        "exit_when_idle",
+        "keep_alive_while",
+    ] {
         assert!(!src.contains(bad), "{bad}");
     }
 }
@@ -319,7 +422,10 @@ fn idle_close_is_not_ours() {
             let s = UnixStream::connect(fx.socket()).unwrap();
             drop(s);
         }
-        let v = call(&fx.socket(), r#"{"id":2,"method":"daemon_status","params":{"verify":true}}"#);
+        let v = call(
+            &fx.socket(),
+            r#"{"id":2,"method":"daemon_status","params":{"verify":true}}"#,
+        );
         assert_eq!(v["ok"], json!(true), "{v}");
         assert_eq!(v["data"]["verify"]["ok"], json!(true));
     });
@@ -337,12 +443,20 @@ fn no_linux_install_path() {
     let src = concat!(
         include_str!("../src/startup.rs"),
         include_str!("../src/main.rs"),
+        include_str!("../src/worker.rs"),
         include_str!("../src/lib.rs"),
         include_str!("../src/locks.rs"),
         include_str!("../src/rpc.rs"),
         include_str!("../Cargo.toml"),
     );
-    for bad in ["systemd", "/usr/local/bin/git-stratad", "/etc/", "install_binary", "setuid", "chown("] {
+    for bad in [
+        "systemd",
+        "/usr/local/bin/git-stratad",
+        "/etc/",
+        "install_binary",
+        "setuid",
+        "chown(",
+    ] {
         assert!(!src.contains(bad), "{bad}");
     }
     // The daemon does not run installs at startup: a session's deps are
@@ -385,13 +499,19 @@ fn two_names_for_one_repository_is_name_taken() {
     // common dir, so the same RepoId.
     let fx = Dfx::new();
     let wt = fx.sb.path("wt/tool2");
-    fx.sb.git(&fx.main("tool"), &["worktree", "add", "-q", "-b", "side", wt.to_str().unwrap()]);
+    fx.sb.git(
+        &fx.main("tool"),
+        &["worktree", "add", "-q", "-b", "side", wt.to_str().unwrap()],
+    );
     let mut cfg = fx.config.clone();
     let mut rc = cfg.repos[&repo_name("tool")].clone();
     rc.path = wt;
     cfg.repos.insert(repo_name("tool2"), rc);
     fx.write_config_text(&toml::to_string(&cfg).unwrap());
-    let e = fx.prepare().err().expect("same repository under two names refused");
+    let e = fx
+        .prepare()
+        .err()
+        .expect("same repository under two names refused");
     assert_eq!(e.code, Code::NameTaken, "{e:?}");
     assert_eq!(reason(&e), Some("repo_id"));
 }
@@ -409,11 +529,21 @@ fn stale_strata_ref_locks_are_removed_at_startup() {
     let stale = dir.join("main.lock");
     fs::write(&stale, "0000\n").unwrap();
     let old = SystemTime::now() - Duration::from_secs(3600);
-    fs::File::options().write(true).open(&stale).unwrap().set_modified(old).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
     let fresh = dir.join("live.lock");
     fs::write(&fresh, "").unwrap();
     let later = SystemTime::now() + Duration::from_secs(3600);
-    fs::File::options().write(true).open(&fresh).unwrap().set_modified(later).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&fresh)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
     // Not a lock: kept.
     let keep = dir.join("main");
     fs::write(&keep, "0000\n").unwrap();
@@ -423,9 +553,17 @@ fn stale_strata_ref_locks_are_removed_at_startup() {
     assert!(fresh.exists(), "a lock newer than the start is kept");
     assert!(keep.exists());
     let w = status(&d)["warnings"].clone();
-    let want = serde_json::to_value(DaemonWarning::StaleRefLock { repo: repo_name("tool"), path: stale.clone() }).unwrap();
+    let want = serde_json::to_value(DaemonWarning::StaleRefLock {
+        repo: repo_name("tool"),
+        path: stale.clone(),
+    })
+    .unwrap();
     assert!(w.as_array().unwrap().contains(&want), "{w}");
-    assert!(fx.alerts().iter().any(|l| l.contains("stale ref lock")), "{:?}", fx.alerts());
+    assert!(
+        fx.alerts().iter().any(|l| l.contains("stale ref lock")),
+        "{:?}",
+        fx.alerts()
+    );
     drop(d);
     core.close().unwrap();
 }
@@ -444,7 +582,10 @@ fn poisoned_store_ends_serve_for_a_restart() {
         let h = s.spawn(|| d.serve(&listener, &ext, &|req| d.handle(req)));
         let reload_waiter = s.spawn(|| core.request_reload(Duration::from_secs(15)));
         let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            assert!(strata_daemon::rpc::ready(&fx.socket(), Duration::from_secs(5)));
+            assert!(strata_daemon::rpc::ready(
+                &fx.socket(),
+                Duration::from_secs(5)
+            ));
             core.store.poison_for_test();
             let t = Instant::now();
             while !h.is_finished() && t.elapsed() < Duration::from_secs(10) {
@@ -464,7 +605,11 @@ fn poisoned_store_ends_serve_for_a_restart() {
     let e = r.expect_err("serve ends with an error when the store is poisoned");
     assert_eq!(e.code, Code::Unknown);
     assert_eq!(reason(&e), Some("store_poisoned_restart"));
-    assert!(fx.alerts().iter().any(|l| l.contains("poisoned")), "{:?}", fx.alerts());
+    assert!(
+        fx.alerts().iter().any(|l| l.contains("poisoned")),
+        "{:?}",
+        fx.alerts()
+    );
     drop(d);
     let _ = core.close();
 }
@@ -477,14 +622,24 @@ fn print_plist_and_version_only_print() {
     assert_eq!(parse_invocation(&[]).unwrap(), Invocation::Serve);
     assert_eq!(parse_invocation(&os(&["-V"])).unwrap(), Invocation::Version);
     assert_eq!(parse_invocation(&os(&["-h"])).unwrap(), Invocation::Help);
-    assert_eq!(parse_invocation(&os(&["--print-plist"])).unwrap(), Invocation::PrintPlist(None));
-    for bad in [&["--print-plist", "rel/git-stratad"][..], &["--serve"], &["--print-plist", "/a", "/b"]] {
+    assert_eq!(
+        parse_invocation(&os(&["--print-plist"])).unwrap(),
+        Invocation::PrintPlist(None)
+    );
+    for bad in [
+        &["--print-plist", "rel/git-stratad"][..],
+        &["--serve"],
+        &["--print-plist", "/a", "/b"],
+    ] {
         let e = parse_invocation(&os(bad)).unwrap_err();
         assert_eq!(e.code, Code::InvalidInput, "{bad:?}");
         assert_eq!(e.detail.unwrap()["reason"], json!("args"), "{bad:?}");
     }
     // The (seams) binary prints before the seams refusal and creates nothing.
-    let home = tempfile::Builder::new().prefix("sd-").tempdir_in("/tmp").unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("sd-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let run = |args: &[&str]| {
         std::process::Command::new(env!("CARGO_BIN_EXE_git-stratad"))
             .args(args)
@@ -496,19 +651,38 @@ fn print_plist_and_version_only_print() {
     };
     let bin = "/opt/homebrew/opt/git-strata/bin/git-stratad";
     let out = run(&["--print-plist", bin]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), plist_text(Path::new(bin), home.path()));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        plist_text(Path::new(bin), home.path())
+    );
     let out = run(&["--version"]);
     assert!(out.status.success());
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("git-stratad {}\n", env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("git-stratad {}\n", env!("CARGO_PKG_VERSION"))
+    );
     let out = run(&["--help"]);
     assert!(out.status.success());
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), strata_daemon::plist::USAGE);
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        strata_daemon::plist::USAGE
+    );
     for bad in [&["--bogus"][..], &["--print-plist", "rel/git-stratad"]] {
         let out = run(bad);
         assert!(!out.status.success(), "{bad:?}");
         assert!(out.stdout.is_empty(), "errors go to stderr only: {bad:?}");
-        assert!(String::from_utf8_lossy(&out.stderr).starts_with("git-stratad: "), "{bad:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).starts_with("git-stratad: "),
+            "{bad:?}"
+        );
     }
-    assert!(!strata_daemon::config_dir_for_home(home.path()).exists(), "nothing created under HOME");
+    assert!(
+        !strata_daemon::config_dir_for_home(home.path()).exists(),
+        "nothing created under HOME"
+    );
 }

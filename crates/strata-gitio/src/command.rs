@@ -55,7 +55,10 @@ pub(crate) struct Opts {
 
 impl Opts {
     pub(crate) fn c() -> Opts {
-        Opts { lc_all: true, ..Opts::default() }
+        Opts {
+            lc_all: true,
+            ..Opts::default()
+        }
     }
     pub(crate) fn timeout(mut self, t: Duration) -> Opts {
         self.timeout = Some(t);
@@ -93,7 +96,9 @@ pub(crate) fn base_command(extra_env: &[(OsString, Option<OsString>)]) -> Comman
             cmd.env_remove(&k);
         }
     }
-    cmd.arg("--no-replace-objects").arg("-c").arg("core.fsmonitor=false");
+    cmd.arg("--no-replace-objects")
+        .arg("-c")
+        .arg("core.fsmonitor=false");
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.env("GIT_NO_LAZY_FETCH", "1");
     cmd.env("GIT_OPTIONAL_LOCKS", "0");
@@ -122,7 +127,10 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
     cmd.stderr(Stdio::piped());
     cmd.process_group(0);
     seams.record_call(&cmd, piped);
-    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     let mut child = cmd.spawn().map_err(|e| {
         errd(
             Code::Unknown,
@@ -159,7 +167,10 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
             loop {
                 match so.read(&mut chunk) {
                     Ok(0) => break,
-                    Ok(n) => buf.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(&chunk[..n]),
+                    Ok(n) => buf
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .extend_from_slice(&chunk[..n]),
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(_) => break,
                 }
@@ -209,9 +220,12 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
                     unsafe {
                         libc::killpg(pid, libc::SIGKILL);
                     }
-                    rx.recv().unwrap_or_else(|_| Err(std::io::Error::other("wait thread ended")))
+                    rx.recv()
+                        .unwrap_or_else(|_| Err(std::io::Error::other("wait thread ended")))
                 }
-                Err(RecvTimeoutError::Disconnected) => Err(std::io::Error::other("wait thread ended")),
+                Err(RecvTimeoutError::Disconnected) => {
+                    Err(std::io::Error::other("wait thread ended"))
+                }
             }
         }
     };
@@ -236,7 +250,12 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
         unsafe {
             libc::killpg(pid, libc::SIGKILL);
         }
-        join_by(&mut threads, &done_rx, &mut pending, Instant::now() + DRAIN_AFTER_KILL);
+        join_by(
+            &mut threads,
+            &done_rx,
+            &mut pending,
+            Instant::now() + DRAIN_AFTER_KILL,
+        );
     }
     let stdout = std::mem::take(&mut *stdout_buf.lock().unwrap_or_else(|p| p.into_inner()));
     let mut stderr = std::mem::take(&mut *stderr_buf.lock().unwrap_or_else(|p| p.into_inner()));
@@ -247,14 +266,28 @@ pub(crate) fn run(seams: &Seams, mut cmd: Command, opts: Opts) -> Result<Out> {
     if timed_out {
         return Err(errd(
             Code::Unknown,
-            format!("git {} timed out", args.iter().find(|a| !a.starts_with('-') && !a.contains('=')).cloned().unwrap_or_default()),
+            format!(
+                "git {} timed out",
+                args.iter()
+                    .find(|a| !a.starts_with('-') && !a.contains('='))
+                    .cloned()
+                    .unwrap_or_default()
+            ),
             json!({ "reason": "timeout", "args": args, "stderr": lossy(&stderr) }),
         ));
     }
     let status = status.map_err(|e| {
-        errd(Code::Unknown, format!("waiting for git failed: {e}"), json!({ "reason": "wait" }))
+        errd(
+            Code::Unknown,
+            format!("waiting for git failed: {e}"),
+            json!({ "reason": "wait" }),
+        )
     })?;
-    Ok(Out { status: status.code(), stdout, stderr })
+    Ok(Out {
+        status: status.code(),
+        stdout,
+        stderr,
+    })
 }
 
 /// Sends on drop: a pipe thread's end, however it ends.
@@ -270,7 +303,12 @@ impl Drop for Done {
 /// join them; `true` when all did. `pending` counts the reports still due
 /// and carries over to a later call. Unjoined handles stay in `ts`
 /// (dropping one detaches the thread).
-fn join_by(ts: &mut Vec<thread::JoinHandle<()>>, done: &mpsc::Receiver<()>, pending: &mut usize, by: Instant) -> bool {
+fn join_by(
+    ts: &mut Vec<thread::JoinHandle<()>>,
+    done: &mpsc::Receiver<()>,
+    pending: &mut usize,
+    by: Instant,
+) -> bool {
     while *pending > 0 {
         match done.recv_timeout(by.saturating_duration_since(Instant::now())) {
             Ok(()) => *pending -= 1,
@@ -305,7 +343,7 @@ impl Git {
     }
 
     /// A repository-level command: cwd = common dir, `--git-dir=.`.
-    pub(crate) fn repo_command(&self) -> Command {
+    pub fn repo_command(&self) -> Command {
         let mut c = self.command();
         c.current_dir(&self.inner.common_dir).arg("--git-dir=.");
         c
@@ -313,14 +351,20 @@ impl Git {
 
     /// A worktree-level command (no discovery): explicit git dir and tree,
     /// cwd = tree. With `index`, sets `GIT_INDEX_FILE` and disables hooks.
-    pub(crate) fn tree_command(&self, git_dir: &Path, tree: &Path, index: Option<&Path>) -> Command {
+    pub(crate) fn tree_command(
+        &self,
+        git_dir: &Path,
+        tree: &Path,
+        index: Option<&Path>,
+    ) -> Command {
         let mut c = self.command();
         c.current_dir(tree);
         if let Some(ix) = index {
             c.arg("-c").arg("core.hooksPath=/dev/null");
             c.env("GIT_INDEX_FILE", ix);
         }
-        c.arg(flag("--git-dir=", git_dir)).arg(flag("--work-tree=", tree));
+        c.arg(flag("--git-dir=", git_dir))
+            .arg(flag("--work-tree=", tree));
         c
     }
 
@@ -348,7 +392,6 @@ pub(crate) fn flag(prefix: &str, p: &Path) -> OsString {
     s
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,15 +410,30 @@ mod tests {
         let seams = Seams::default();
         let marker = std::env::temp_dir().join(format!("gitio-drain-{}", std::process::id()));
         let _ = std::fs::remove_file(&marker);
-        let script = format!("echo out; echo err >&2; (sleep 3; touch {}) & exit 0", marker.display());
+        let script = format!(
+            "echo out; echo err >&2; (sleep 3; touch {}) & exit 0",
+            marker.display()
+        );
         let t = Instant::now();
-        let out = run(&seams, sh(&script), Opts::default().timeout(Duration::from_secs(1))).unwrap();
-        assert!(t.elapsed() < Duration::from_secs(3), "bounded by the deadline: {:?}", t.elapsed());
+        let out = run(
+            &seams,
+            sh(&script),
+            Opts::default().timeout(Duration::from_secs(1)),
+        )
+        .unwrap();
+        assert!(
+            t.elapsed() < Duration::from_secs(3),
+            "bounded by the deadline: {:?}",
+            t.elapsed()
+        );
         assert_eq!(out.status, Some(0));
         assert_eq!(out.stdout, b"out\n");
         assert_eq!(out.stderr, b"err\n");
         std::thread::sleep(Duration::from_secs(4));
-        assert!(!marker.exists(), "the straggler was killed with the process group");
+        assert!(
+            !marker.exists(),
+            "the straggler was killed with the process group"
+        );
     }
 
     #[test]
@@ -384,7 +442,10 @@ mod tests {
         let t = Instant::now();
         let out = run(&seams, sh("echo out; sleep 60 & exit 3"), Opts::default()).unwrap();
         let took = t.elapsed();
-        assert!(took >= DRAIN_GRACE && took < DRAIN_GRACE + Duration::from_secs(5), "{took:?}");
+        assert!(
+            took >= DRAIN_GRACE && took < DRAIN_GRACE + Duration::from_secs(5),
+            "{took:?}"
+        );
         assert_eq!(out.status, Some(3));
         assert_eq!(out.stdout, b"out\n");
     }
@@ -393,7 +454,12 @@ mod tests {
     fn a_plain_run_still_returns_promptly_with_all_output() {
         let seams = Seams::default();
         let t = Instant::now();
-        let out = run(&seams, sh("head -c 300000 /dev/zero; echo done >&2"), Opts::default()).unwrap();
+        let out = run(
+            &seams,
+            sh("head -c 300000 /dev/zero; echo done >&2"),
+            Opts::default(),
+        )
+        .unwrap();
         assert!(t.elapsed() < Duration::from_secs(2));
         assert_eq!(out.stdout.len(), 300000);
         assert_eq!(out.stderr, b"done\n");

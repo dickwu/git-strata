@@ -60,6 +60,16 @@ impl StrataError {
         self
     }
 
+    /// A handover owner refused this frame before dispatching any of its work.
+    pub fn upgrading(handover_id: &str, phase: &str, retry_after_ms: u64) -> Self {
+        Self::new(
+            Code::Busy,
+            "the daemon is upgrading; the request was not started",
+        )
+        .with_detail(serde_json::json!({"reason":"upgrading", "retry_safe":true,
+                "retry_after_ms":retry_after_ms, "handover_id":handover_id, "phase":phase}))
+    }
+
     /// `NoSuchRepo` for a configured repo that `session` has no workspace
     /// of (a session made with `new --repo` holds only the repos it asked
     /// for). `detail.fix` is the one command that adds it.

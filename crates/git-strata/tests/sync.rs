@@ -78,7 +78,7 @@ fn old_daemon_unknown_method_mapping() {
     let r = home.run(&["sync", "--check"]);
     assert_eq!(r.err_code(), "Unsupported");
     assert_eq!(r.reason(), "daemon_too_old");
-    assert_eq!(fake.requests()[0]["method"], "sync");
+    assert_eq!(fake.operations()[0]["method"], "sync");
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn sync_forwards_all_flags_and_noncheck_to_daemon() {
     assert_eq!(out["keep"], json!(["b"]));
     assert_eq!(out["generation"], 4);
     assert_eq!(out["accept_diverged"], true);
-    assert_eq!(fake.requests().len(), 1);
+    assert_eq!(fake.operations().len(), 1);
 }
 
 /// The daemon decides whether a resolution needs target/generation: a saved
@@ -140,7 +140,7 @@ fn resolution_binding_is_left_to_the_daemon() {
         ]);
         assert_eq!(r.err_code(), "InvalidInput");
     }
-    assert_eq!(fake.requests().len(), 2);
+    assert_eq!(fake.operations().len(), 2);
 }
 
 #[test]
@@ -167,11 +167,11 @@ fn hook_blocks_once_with_unpublished_and_behind() {
             .unwrap()
             .contains("main moved 3 commits since your base in tool")
     );
-    assert_eq!(fake.requests()[0]["params"]["hook"], true);
-    assert_eq!(fake.requests()[0]["params"]["check"], true);
-    assert_eq!(fake.requests()[0]["params"]["fetch"], false);
+    assert_eq!(fake.operations()[0]["params"]["hook"], true);
+    assert_eq!(fake.operations()[0]["params"]["check"], true);
+    assert_eq!(fake.operations()[0]["params"]["fetch"], false);
     silent(hook(&home, true));
-    assert_eq!(fake.requests().len(), 1);
+    assert_eq!(fake.operations().len(), 1);
 }
 
 #[test]
@@ -301,28 +301,43 @@ fn hook_deps_conflicts_and_following_rules() {
 
 #[test]
 fn hook_ignores_regular_timeout_flag_and_environment() {
-    let home=Home::new();
-    let _fake=FakeDaemon::start(&home.socket(),|q| {
+    let home = Home::new();
+    let _fake = FakeDaemon::start(&home.socket(), |q| {
         std::thread::sleep(Duration::from_millis(150));
         json!({"id":q["id"],"ok":true,"data":data(Some(3),true)})
     });
-    let mut child=home.cmd(&["sync","--check","--hook","--timeout","0.001"])
-        .env("GIT_STRATA_TIMEOUT","invalid-and-ignored")
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    writeln!(child.stdin.take().unwrap(),"{}",json!({"cwd":home.path(),"stop_hook_active":false})).unwrap();
-    let result:Run=child.wait_with_output().unwrap().into();
-    assert_eq!(result.code,0);assert!(result.stderr.is_empty());
-    let value:Value=serde_json::from_str(&result.stdout).unwrap();assert_eq!(value["decision"],"block");
+    for extra in [vec!["--timeout", "0.001"], vec![]] {
+        let args = [vec!["sync", "--check", "--hook"], extra].concat();
+        let mut child = home
+            .cmd(&args)
+            .env("GIT_STRATA_TIMEOUT", "invalid-and-ignored")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(
+            child.stdin.take().unwrap(),
+            "{}",
+            json!({"cwd":home.path(),"stop_hook_active":false})
+        )
+        .unwrap();
+        let result: Run = child.wait_with_output().unwrap().into();
+        assert_eq!(result.code, 0);
+        assert!(result.stderr.is_empty());
+        let value: Value = serde_json::from_str(&result.stdout).unwrap();
+        assert_eq!(value["decision"], "block");
+    }
 }
 
 #[test]
 fn stuck_hook_blocks_clean_workspace_once_and_does_not_offer_sync_when_not_following() {
-    let home=Home::new();
-    let _fake=FakeDaemon::start(&home.socket(),|q| {
-        let mut d=data(Some(0),false);
-        let u=&mut d["upstream"]["repos"]["tool"];
-        u["following"]=json!(false);
-        u["auto"]=json!({"source":"main","state":"deferred","reason":"open_files","since":"2026-11-03T12:00:00Z","attempts":3,"escalated_at":"2026-11-03T12:06:00Z","escalation_new":true,"detail":{"holders":[{"pid":123,"command":"node","hold":"cwd","path":"."}],"count":1}});
+    let home = Home::new();
+    let _fake = FakeDaemon::start(&home.socket(), |q| {
+        let mut d = data(Some(0), false);
+        let u = &mut d["upstream"]["repos"]["tool"];
+        u["following"] = json!(false);
+        u["auto"] = json!({"source":"main","state":"deferred","reason":"open_files","since":"2026-11-03T12:00:00Z","attempts":3,"escalated_at":"2026-11-03T12:06:00Z","escalation_new":true,"detail":{"holders":[{"pid":123,"command":"node","hold":"cwd","path":"."}],"count":1}});
         json!({"id":q["id"],"ok":true,"data":d})
     });
     let r = hook(&home, false);
@@ -331,7 +346,7 @@ fn stuck_hook_blocks_clean_workspace_once_and_does_not_offer_sync_when_not_follo
     let reason = block["reason"].as_str().unwrap();
     assert!(reason.contains("ask the user") && reason.contains("node[123] cwd"));
     assert!(!reason.contains("git-strata sync"));
-    silent(hook(&home,true));
+    silent(hook(&home, true));
 }
 
 #[test]
@@ -378,8 +393,7 @@ fn escalated_auto() -> Value {
 fn hook_reason(home: &Home) -> String {
     let run = hook(home, false);
     assert_eq!(run.code, 0, "{run:?}");
-    let block: Value =
-        serde_json::from_str(&run.stdout).unwrap_or_else(|e| panic!("{e}: {run:?}"));
+    let block: Value = serde_json::from_str(&run.stdout).unwrap_or_else(|e| panic!("{e}: {run:?}"));
     assert_eq!(block["decision"], "block", "{run:?}");
     block["reason"].as_str().unwrap().to_string()
 }

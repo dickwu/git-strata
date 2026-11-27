@@ -78,7 +78,8 @@ pub(crate) fn err(code: Code, msg: impl Into<String>, reason: &str) -> StrataErr
 }
 
 pub(crate) fn no_such_view(id: &ViewId) -> StrataError {
-    StrataError::new(Code::NoSuchView, format!("no view {id}")).with_detail(json!({ "view": id.get() }))
+    StrataError::new(Code::NoSuchView, format!("no view {id}"))
+        .with_detail(json!({ "view": id.get() }))
 }
 
 /// (st_dev, st_ino) of a workspace root, through `open_root` (no symlink
@@ -118,19 +119,33 @@ pub(crate) struct View {
 
 impl View {
     fn fill(&self) -> view::Fill<'_> {
-        view::Fill { root: &self.path, overlay: &self.overlay, generation: &self.generation, excl: &self.excl }
+        view::Fill {
+            root: &self.path,
+            overlay: &self.overlay,
+            generation: &self.generation,
+            excl: &self.excl,
+        }
     }
 
     /// Publish `ops` with the current generation and root identity.
     fn publish(&mut self) {
         let members = self.fill().members();
-        let snap = view::Snap::build(&self.generation, &self.ops, members, (&self.session, &self.repo, &self.path, self.root));
+        let snap = view::Snap::build(
+            &self.generation,
+            &self.ops,
+            members,
+            (&self.session, &self.repo, &self.path, self.root),
+        );
         self.snap = Some(Arc::new(snap));
     }
 
     fn refused(&self) -> Result<()> {
         match self.reattach {
-            Some(r) => Err(err(Code::Busy, format!("view of {}/{} must be re-attached", self.session, self.repo), r)),
+            Some(r) => Err(err(
+                Code::Busy,
+                format!("view of {}/{} must be re-attached", self.session, self.repo),
+                r,
+            )),
             None => Ok(()),
         }
     }
@@ -169,7 +184,11 @@ fn new_view_id() -> ViewId {
 }
 
 fn root_changed(what: &str) -> StrataError {
-    err(Code::Busy, format!("the workspace root of {what} was replaced"), "root_changed")
+    err(
+        Code::Busy,
+        format!("the workspace root of {what} was replaced"),
+        "root_changed",
+    )
 }
 
 impl<'a> Search<'a> {
@@ -189,8 +208,17 @@ impl<'a> Search<'a> {
         }
     }
 
+    #[cfg(feature = "test-seams")]
+    pub fn with_fixture_home(mut self, home: &Path) -> Self {
+        self.bases.fixture_home = Some(home.to_owned());
+        self
+    }
+
     fn view(&self, id: &ViewId) -> Result<Arc<Mutex<View>>> {
-        lock(&self.views).get(id).cloned().ok_or_else(|| no_such_view(id))
+        lock(&self.views)
+            .get(id)
+            .cloned()
+            .ok_or_else(|| no_such_view(id))
     }
 
     /// §5.1. Only a fully built view gets an id.
@@ -316,7 +344,10 @@ impl<'a> Search<'a> {
 
     /// §5.7. The shared generations stay.
     pub fn detach(&self, view: ViewId) -> Result<()> {
-        lock(&self.views).remove(&view).map(|_| ()).ok_or_else(|| no_such_view(&view))
+        lock(&self.views)
+            .remove(&view)
+            .map(|_| ())
+            .ok_or_else(|| no_such_view(&view))
     }
 
     /// §5.3.
@@ -333,7 +364,10 @@ impl<'a> Search<'a> {
         // 2: the workspace and its root still are the attached ones.
         let st = self.sessions.status(&v.session)?;
         let Some(ws) = st.manifest.repos.get(&v.repo) else {
-            return Err(StrataError::not_in_session(v.session.as_str(), v.repo.as_str()));
+            return Err(StrataError::not_in_session(
+                v.session.as_str(),
+                v.repo.as_str(),
+            ));
         };
         if ws.path != v.path || root_identity(&v.path).ok() != Some(v.root) {
             v.reattach = Some("root_changed");
@@ -341,19 +375,31 @@ impl<'a> Search<'a> {
         }
         if ws.base != v.base {
             v.reattach = Some("base_moved");
-            return Err(err(Code::Busy, format!("{what} moved to another base"), "base_moved"));
+            return Err(err(
+                Code::Busy,
+                format!("{what} moved to another base"),
+                "base_moved",
+            ));
         }
         // 3: the latest overlay.
         let overlay = match self.overlays.last(&v.session, &v.repo) {
             Some(o) => o,
             None if ws.tracked => {
-                return Err(err(Code::Busy, format!("overlay of {what} not scanned yet"), "overlay_not_ready"));
+                return Err(err(
+                    Code::Busy,
+                    format!("overlay of {what} not scanned yet"),
+                    "overlay_not_ready",
+                ));
             }
             None => Overlay::empty(ws.base.clone()),
         };
         if overlay.base != v.base {
             v.reattach = Some("base_moved");
-            return Err(err(Code::Busy, format!("overlay of {what} is on another base"), "base_moved"));
+            return Err(err(
+                Code::Busy,
+                format!("overlay of {what} is on another base"),
+                "base_moved",
+            ));
         }
         // 4–5: what to reread.
         let full = v.snap.is_none() || self.overlays.needs_full(&v.session, &v.repo);
@@ -400,11 +446,24 @@ impl<'a> Search<'a> {
                 Ok(()) => {}
                 Err(e) if e.code == Code::Busy => return Err(e),
                 Err(e) => {
-                    return Err(err(Code::Unknown, format!("view of {}/{} is not ready: {}", g.session, g.repo, e.message), "not_ready"));
+                    return Err(err(
+                        Code::Unknown,
+                        format!(
+                            "view of {}/{} is not ready: {}",
+                            g.session, g.repo, e.message
+                        ),
+                        "not_ready",
+                    ));
                 }
             }
         }
-        g.snap.clone().ok_or_else(|| err(Code::Unknown, format!("view of {}/{} is not ready", g.session, g.repo), "not_ready"))
+        g.snap.clone().ok_or_else(|| {
+            err(
+                Code::Unknown,
+                format!("view of {}/{} is not ready", g.session, g.repo),
+                "not_ready",
+            )
+        })
     }
 
     /// §5.5 step 7: the root of a finished query is still the snapshot's.
@@ -455,7 +514,9 @@ impl<'a> Search<'a> {
         for (v, s) in views.iter().zip(&snaps) {
             self.recheck(v, s)?;
         }
-        hits.sort_by(|a, b| (&a.session, &a.repo, &a.path, a.line).cmp(&(&b.session, &b.repo, &b.path, b.line)));
+        hits.sort_by(|a, b| {
+            (&a.session, &a.repo, &a.path, a.line).cmp(&(&b.session, &b.repo, &b.path, b.line))
+        });
         Ok(hits)
     }
 
@@ -481,8 +542,13 @@ pub(crate) fn check_pattern(pattern: &str) -> Result<()> {
     if pattern.is_empty() {
         return Err(err(Code::InvalidInput, "empty pattern", "pattern"));
     }
-    tgrep_core::query::build_query_plan(pattern, false)
-        .map_err(|e| err(Code::InvalidInput, format!("invalid pattern: {e}"), "pattern"))?;
+    tgrep_core::query::build_query_plan(pattern, false).map_err(|e| {
+        err(
+            Code::InvalidInput,
+            format!("invalid pattern: {e}"),
+            "pattern",
+        )
+    })?;
     Ok(())
 }
 
@@ -506,18 +572,24 @@ impl<'a> Search<'a> {
     /// generation has one reader, so equal pointers are `Arc::ptr_eq` of
     /// the generation too, and comparable with `paused_reader_ptr`.
     pub fn generation_ptr(&self, repo: &RepoName, tree: &TreeOid) -> Option<usize> {
-        self.bases.opened(repo, tree.as_str()).map(|g| Arc::as_ptr(g.base().reader()) as usize)
+        self.bases
+            .opened(repo, tree.as_str())
+            .map(|g| Arc::as_ptr(g.base().reader()) as usize)
     }
 
     /// `<root>/search/<repo>/<identity>/`, once the repo has a manager.
     pub fn storage_dir(&self, repo: &RepoName) -> Option<PathBuf> {
-        self.bases.existing(repo).map(|r| r.manager.directory().to_path_buf())
+        self.bases
+            .existing(repo)
+            .map(|r| r.manager.directory().to_path_buf())
     }
 
     pub fn arm(&self, seam: SearchSeam) {
         match seam {
             SearchSeam::FailEnsureAfterStage => {
-                self.bases.fail_after_stage.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.bases
+                    .fail_after_stage
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
             }
             SearchSeam::PauseBeforeVerify => *lock(&self.pause.state) = (true, None, false),
         }
@@ -538,10 +610,13 @@ impl<'a> Search<'a> {
     pub fn swap_view_reader(&self, view: ViewId, tree: &TreeOid) -> Result<()> {
         let v = self.view(&view)?;
         let mut v = lock(&v);
-        let g = self
-            .bases
-            .opened(&v.repo, tree.as_str())
-            .ok_or_else(|| err(Code::InvalidInput, format!("no generation of {tree} is open"), "no_generation"))?;
+        let g = self.bases.opened(&v.repo, tree.as_str()).ok_or_else(|| {
+            err(
+                Code::InvalidInput,
+                format!("no generation of {tree} is open"),
+                "no_generation",
+            )
+        })?;
         v.generation = g;
         v.publish();
         Ok(())
@@ -553,6 +628,10 @@ impl<'a> Search<'a> {
     pub fn private_paths(&self, view: ViewId) -> Result<Vec<String>> {
         let v = self.view(&view)?;
         let v = lock(&v);
-        Ok(v.ops.iter().filter(|(_, op)| matches!(op, view::Op::Upsert(_))).map(|(p, _)| p.clone()).collect())
+        Ok(v.ops
+            .iter()
+            .filter(|(_, op)| matches!(op, view::Op::Upsert(_)))
+            .map(|(p, _)| p.clone())
+            .collect())
     }
 }

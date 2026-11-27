@@ -1262,3 +1262,25 @@ or `started` differs from an earlier reply's, while that start is less than ten 
 The first daemon the App sees, such as one started at login just before it, is no restart.
 Display `activity[]` remains distinct from the admitted-write `inflight[]` list used for
 safe drain (§5.9); display activity is not an admission or quiescence proof.
+
+## Release worker check
+
+Before copying or signing the app, `pack/assemble.sh` checks the CLI, daemon
+and desktop executable for the production build marker. The source app is also
+checked for a test worker or a renamed test-seams helper. The release workflow
+runs the same check on the build inputs, and the standalone CLI packager checks
+its two binaries before staging them. The release smoke test repeats the check
+on the extracted CLI archive and assembled app before upload.
+
+## Shared transport and the CLI version field
+
+A `strata_client::Request` can serialize the optional `client` release.
+The CLI negotiates that field per RPC. The existing desktop transport calls
+send the original envelope, including the identity check on a drain stream.
+The reply parser preserves the exact legacy unknown-`client` rejection so a
+CLI can distinguish it from a handler error before considering a resend.
+
+A worker advertising `daemon.handover` supplies the optional `handover`
+field on the desktop's status reply. If its identity-checked drain stream
+receives `Busy upgrading` with `generation_changed: true`, the caller needs
+a fresh connection and identity check before issuing a control request.

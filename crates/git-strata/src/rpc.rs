@@ -37,7 +37,9 @@ fn test_interrupt(point: &str) -> bool {
     if !cfg!(debug_assertions) {
         return false;
     }
-    let Ok(v) = std::env::var("GIT_STRATA_TEST_INTERRUPT") else { return false };
+    let Ok(v) = std::env::var("GIT_STRATA_TEST_INTERRUPT") else {
+        return false;
+    };
     let (at, sig) = match v.split_once(':') {
         Some((at, "term")) => (at.to_string(), libc::SIGTERM),
         _ => (v.clone(), libc::SIGINT),
@@ -63,18 +65,36 @@ pub fn call_interruptible(
     kind: Kind,
     stop: &AtomicBool,
 ) -> Result<Result<Value, CallError>, Stopped> {
-    let Ok(mut stream) = UnixStream::connect(socket) else { return Ok(Err(CallError::Down(daemon_down(socket)))) };
-    if stream.set_write_timeout(Some(POLL)).is_err() || stream.set_read_timeout(Some(POLL)).is_err() {
+    call_interruptible_request(socket, Request::new(method, &params), kind, stop)
+}
+
+pub(crate) fn call_interruptible_request(
+    socket: &Path,
+    request: Request<'_>,
+    kind: Kind,
+    stop: &AtomicBool,
+) -> Result<Result<Value, CallError>, Stopped> {
+    if stop.load(Ordering::SeqCst) {
+        return Err(Stopped::NotSent);
+    }
+    let method = request.method;
+    let Ok(mut stream) = UnixStream::connect(socket) else {
+        return Ok(Err(CallError::Down(daemon_down(socket))));
+    };
+    if stream.set_write_timeout(Some(POLL)).is_err() || stream.set_read_timeout(Some(POLL)).is_err()
+    {
         return Ok(Err(CallError::Down(daemon_down(socket))));
     }
     let id = next_id();
-    let body = json!({ "id": id, "method": method, "params": params }).to_string();
-    let broken = || match kind {
+    let body = request.body(&id);
+    let broken = || {
+        match kind {
         Kind::Write => CallError::Failed(
             StrataError::new(Code::Unknown, "the connection to the daemon closed after the request was sent; see `git-strata status`")
                 .with_detail(json!({ "reason": "socket_closed", "method": method })),
         ),
         Kind::Read => CallError::Failed(daemon_down(socket)),
+    }
     };
     // A write that times out (a full socket buffer) is retried after a
     // look at the flag; anything else is a broken connection.
@@ -86,7 +106,11 @@ pub fn call_interruptible(
             match stream.write(buf) {
                 Ok(0) => return Ok(Err(())),
                 Ok(n) => buf = &buf[n..],
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                    ) => {}
                 Err(_) => return Ok(Err(())),
             }
         }
@@ -105,7 +129,11 @@ pub fn call_interruptible(
         }
     }
     test_interrupt("before_newline");
-    let newline = if test_interrupt("newline_fails") { Ok(Err(())) } else { send(b"\n") };
+    let newline = if test_interrupt("newline_fails") {
+        Ok(Err(()))
+    } else {
+        send(b"\n")
+    };
     if newline?.is_err() {
         // The one-byte newline was not written: the daemon never dispatches
         // a line without it (`read_frame` drops a partial last line).
@@ -127,7 +155,11 @@ pub fn call_interruptible(
 
 /// The reply line. Gives up as soon as `stop` is set; the caller then
 /// returns `Stopped::Sent` instead of this result.
-fn read_reply(stream: &UnixStream, stop: &AtomicBool, broken: &dyn Fn() -> CallError) -> Result<String, CallError> {
+fn read_reply(
+    stream: &UnixStream,
+    stop: &AtomicBool,
+    broken: &dyn Fn() -> CallError,
+) -> Result<String, CallError> {
     let mut r = BufReader::new(stream);
     let mut reply = Vec::new();
     loop {
@@ -138,10 +170,13 @@ fn read_reply(stream: &UnixStream, stop: &AtomicBool, broken: &dyn Fn() -> CallE
             Ok(0) => return Err(broken()),
             Ok(_) if reply.ends_with(b"\n") => break,
             Ok(_) => return Err(broken()),
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                ) => {}
             Err(_) => return Err(broken()),
         }
     }
     Ok(String::from_utf8_lossy(&reply).into_owned())
 }
-

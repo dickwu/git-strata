@@ -464,6 +464,9 @@ pub(crate) fn sanitize(cmd: &mut Command, env: &InstallEnv) {
         }
     }
     cmd.env("PATH", &env.path);
+    for (key, value) in &env.child_env {
+        cmd.env(key, value);
+    }
 }
 
 /// `<program name> <first line of --version>`, `""` without `install`.
@@ -580,4 +583,48 @@ fn run_version(program: &Path, env: &InstallEnv) -> Result<String> {
                 "version_empty",
             )
         })
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    /// CR r2 #5: the fixture's variables reach the child after the GIT_* sweep.
+    #[test]
+    fn child_env_is_applied_after_sanitization() {
+        let env = InstallEnv {
+            path: "/usr/bin:/bin".into(),
+            timeout: std::time::Duration::ZERO,
+            child_env: vec![
+                ("HOME".into(), "/tmp/gsfx-child/home".into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                ("GIT_ALLOW_PROTOCOL".into(), "file".into()),
+            ],
+        };
+        let mut cmd = Command::new("/usr/bin/env");
+        sanitize(&mut cmd, &env);
+        let out = cmd.output().unwrap();
+        assert!(out.status.success());
+        let seen = String::from_utf8(out.stdout).unwrap();
+        let lines: Vec<&str> = seen.lines().collect();
+        for expected in [
+            "HOME=/tmp/gsfx-child/home",
+            "GIT_CONFIG_NOSYSTEM=1",
+            "GIT_ALLOW_PROTOCOL=file",
+            "PATH=/usr/bin:/bin",
+        ] {
+            assert!(lines.contains(&expected), "{expected} missing: {seen}");
+        }
+        let mut git: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|l| l.starts_with("GIT_"))
+            .collect();
+        git.sort_unstable();
+        assert_eq!(
+            git,
+            ["GIT_ALLOW_PROTOCOL=file", "GIT_CONFIG_NOSYSTEM=1"],
+            "only the fixture's GIT_* reach the child: {seen}"
+        );
+    }
 }

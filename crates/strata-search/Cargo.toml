@@ -10,7 +10,7 @@ description = "git-strata search: per-session grep/files views over a shared tgr
 [features]
 default = []
 # Test seams (search.md §3 SearchSeam and the inspection hooks).
-test-seams = []
+test-seams = ["strata-types/test-seams", "tgrep-core/strata-fixture"]
 
 [dependencies]
 strata-types = { path = "../strata-types" }

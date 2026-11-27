@@ -19,10 +19,27 @@ use crate::{AGENT_LABEL, Result};
 mod check_config;
 pub use check_config::check_config;
 
-/// `launchctl bootstrap` / `bootout` for one plist.
+/// Operations on one launchd job. Only the existing plist lifecycle is wired
+/// in production. The remaining operations are driven by the worker fixture.
 pub trait Launchd {
     fn bootstrap(&self, plist: &Path) -> Result<()>;
     fn bootout(&self, plist: &Path) -> Result<()>;
+    fn enable(&self) -> Result<()> {
+        Err(unwired("enable"))
+    }
+    fn disable(&self) -> Result<()> {
+        Err(unwired("disable"))
+    }
+    fn print(&self) -> Result<String> {
+        Err(unwired("print"))
+    }
+    fn kickstart(&self) -> Result<()> {
+        Err(unwired("kickstart"))
+    }
+}
+
+fn unwired(verb: &str) -> StrataError {
+    StrataError::new(Code::Unsupported, format!("launchd {verb} is not wired"))
 }
 
 /// The real `launchctl`, in `gui/<uid>`.
@@ -30,6 +47,9 @@ pub struct Launchctl;
 
 impl Launchctl {
     fn run(&self, verb: &str, plist: &Path) -> Result<()> {
+        if strata_types::TEST_SEAMS {
+            return Err(unwired(verb));
+        }
         // SAFETY: getuid has no failure mode.
         let uid = unsafe { libc::getuid() };
         let out = Command::new("/bin/launchctl")
@@ -57,7 +77,10 @@ impl Launchd for Launchctl {
 }
 
 fn xml(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Review P1-5: launchd's SIGTERM → SIGKILL grace. Above the longest
@@ -135,7 +158,8 @@ pub enum Invocation {
     CheckConfig(PathBuf),
 }
 
-pub const USAGE: &str = "usage: git-stratad                          serve (launchd starts it this way)
+pub const USAGE: &str =
+    "usage: git-stratad                          serve (launchd starts it this way)
        git-stratad --version | -V
        git-stratad --print-plist [ABSOLUTE_BIN]  print the LaunchAgent plist for $HOME
        git-stratad --check-config PATH         validate a config and print JSON
@@ -143,7 +167,9 @@ pub const USAGE: &str = "usage: git-stratad                          serve (laun
 ";
 
 pub fn parse_invocation(args: &[std::ffi::OsString]) -> Result<Invocation> {
-    let bad = |m: String| StrataError::new(Code::InvalidInput, m).with_detail(json!({ "reason": "args" }));
+    let bad = |m: String| {
+        StrataError::new(Code::InvalidInput, m).with_detail(json!({ "reason": "args" }))
+    };
     match args {
         [] => Ok(Invocation::Serve),
         [a] if a == "--help" || a == "-h" => Ok(Invocation::Help),
@@ -152,7 +178,10 @@ pub fn parse_invocation(args: &[std::ffi::OsString]) -> Result<Invocation> {
         [a, bin] if a == "--print-plist" => {
             let bin = PathBuf::from(bin);
             if !bin.is_absolute() {
-                return Err(bad(format!("--print-plist needs an absolute path, got {}", bin.display())));
+                return Err(bad(format!(
+                    "--print-plist needs an absolute path, got {}",
+                    bin.display()
+                )));
             }
             Ok(Invocation::PrintPlist(Some(bin)))
         }
@@ -166,7 +195,8 @@ pub fn parse_invocation(args: &[std::ffi::OsString]) -> Result<Invocation> {
 
 /// `<home>/Library/LaunchAgents/<label>.plist`.
 pub fn agent_plist_path(home: &Path) -> PathBuf {
-    home.join("Library/LaunchAgents").join(format!("{AGENT_LABEL}.plist"))
+    home.join("Library/LaunchAgents")
+        .join(format!("{AGENT_LABEL}.plist"))
 }
 
 /// The login user's home from the password database (`getpwuid_r` for the
@@ -250,17 +280,22 @@ pub fn lifecycle_scope(home: &Path, login: Option<&Path>) -> Result<PathBuf> {
             home.display()
         ),
     };
-    Err(StrataError::new(Code::InvalidInput, msg).with_detail(json!({
-        "reason": "foreign_home",
-        "home": home.to_string_lossy(),
-        "login_home": login.map(|l| l.to_string_lossy().into_owned()),
-    })))
+    Err(
+        StrataError::new(Code::InvalidInput, msg).with_detail(json!({
+            "reason": "foreign_home",
+            "home": home.to_string_lossy(),
+            "login_home": login.map(|l| l.to_string_lossy().into_owned()),
+        })),
+    )
 }
 
 fn absolute(what: &str, p: &Path) -> Result<()> {
     if !p.is_absolute() {
-        return Err(StrataError::new(Code::InvalidInput, format!("{what} must be an absolute path"))
-            .with_detail(json!({ "reason": "not_absolute", "field": what, "path": p })));
+        return Err(StrataError::new(
+            Code::InvalidInput,
+            format!("{what} must be an absolute path"),
+        )
+        .with_detail(json!({ "reason": "not_absolute", "field": what, "path": p })));
     }
     Ok(())
 }
@@ -272,7 +307,8 @@ pub fn install_agent_with(bin: &Path, home: &Path, launchd: &dyn Launchd) -> Res
     let path = agent_plist_path(home);
     let dir = path.parent().unwrap_or(home);
     fs::create_dir_all(dir).map_err(|e| classify_io_error(&e, IoSide::Write, dir))?;
-    fs::create_dir_all(crate::config_dir_for_home(home)).map_err(|e| classify_io_error(&e, IoSide::Write, home))?;
+    fs::create_dir_all(crate::config_dir_for_home(home))
+        .map_err(|e| classify_io_error(&e, IoSide::Write, home))?;
     let tmp = dir.join(format!(".{AGENT_LABEL}.plist.tmp"));
     {
         let mut f = OpenOptions::new()
@@ -306,8 +342,12 @@ pub fn uninstall_agent_with(home: &Path, launchd: &dyn Launchd) -> Result<()> {
 /// Production: the user's HOME and the real `launchctl`. Called by the CLI
 /// in its own process when no daemon runs; never by a test.
 pub fn install_agent(bin: &Path) -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").ok_or_else(|| StrataError::new(Code::InvalidInput, "HOME is not set"))?;
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| StrataError::new(Code::InvalidInput, "HOME is not set"))?;
     let home = lifecycle_scope(Path::new(&home), login_home().as_deref())?;
+    if strata_types::TEST_SEAMS {
+        return Err(unwired("install"));
+    }
     install_agent_with(bin, &home, &Launchctl)
 }
 
@@ -329,7 +369,12 @@ mod tests {
         let alias = t.path().join("alias");
         std::os::unix::fs::symlink(&real, &alias).unwrap();
         let canon = fs::canonicalize(&real).unwrap();
-        for (home, login) in [(&real, &real), (&alias, &real), (&real, &alias), (&alias, &alias)] {
+        for (home, login) in [
+            (&real, &real),
+            (&alias, &real),
+            (&real, &alias),
+            (&alias, &alias),
+        ] {
             assert_eq!(lifecycle_scope(home, Some(login)).unwrap(), canon);
         }
         let slash = PathBuf::from(format!("{}/", alias.display()));
@@ -345,9 +390,18 @@ mod tests {
         let reason = |r: Result<PathBuf>| r.unwrap_err().detail.unwrap()["reason"].clone();
         assert_eq!(reason(lifecycle_scope(&a, Some(&b))), json!("foreign_home"));
         assert_eq!(reason(lifecycle_scope(&a, None)), json!("foreign_home"));
-        assert_eq!(reason(lifecycle_scope(&a, Some(&t.path().join("missing")))), json!("foreign_home"));
-        assert_eq!(reason(lifecycle_scope(&t.path().join("missing"), Some(&a))), json!("foreign_home"));
-        assert_eq!(reason(lifecycle_scope(&a, Some(Path::new("")))), json!("foreign_home"));
+        assert_eq!(
+            reason(lifecycle_scope(&a, Some(&t.path().join("missing")))),
+            json!("foreign_home")
+        );
+        assert_eq!(
+            reason(lifecycle_scope(&t.path().join("missing"), Some(&a))),
+            json!("foreign_home")
+        );
+        assert_eq!(
+            reason(lifecycle_scope(&a, Some(Path::new("")))),
+            json!("foreign_home")
+        );
         let e = lifecycle_scope(&a, None).unwrap_err();
         assert_eq!(e.detail.unwrap()["login_home"], serde_json::Value::Null);
     }
@@ -360,7 +414,10 @@ mod tests {
         let alias = t.path().join("alias");
         std::os::unix::fs::symlink(&real, &alias).unwrap();
         let canon = fs::canonicalize(&real).unwrap();
-        assert_eq!(anchored(&alias.join("Library/LaunchAgents/x.plist")), canon.join("Library/LaunchAgents/x.plist"));
+        assert_eq!(
+            anchored(&alias.join("Library/LaunchAgents/x.plist")),
+            canon.join("Library/LaunchAgents/x.plist")
+        );
         assert_eq!(anchored(&canon.join("gone")), canon.join("gone"));
     }
 }

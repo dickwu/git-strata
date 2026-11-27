@@ -27,7 +27,9 @@ fn invalid(reason: &str, message: impl Into<String>) -> StrataError {
 
 /// A decimal id within `i64::MAX`.
 pub fn parse_id(s: &str, what: &str) -> Result<u64> {
-    let n: u64 = s.parse().map_err(|_| invalid("id", format!("{what} {s:?} is not a decimal number")))?;
+    let n: u64 = s
+        .parse()
+        .map_err(|_| invalid("id", format!("{what} {s:?} is not a decimal number")))?;
     if n > i64::MAX as u64 {
         return Err(invalid("id", format!("{what} {s} exceeds i64::MAX")));
     }
@@ -49,15 +51,22 @@ fn outcome_result(repo: &RepoName, outcome: &Value, data: Value) -> Envelope {
     match outcome.get("kind").and_then(Value::as_str) {
         Some("Pushed") => Envelope::ok(data),
         Some("Refused") => {
-            let msg = outcome.get("message").and_then(Value::as_str).unwrap_or("the remote refused the push");
+            let msg = outcome
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("the remote refused the push");
             Envelope::err_with(
-                StrataError::new(Code::PushRefused, msg.to_string()).with_detail(json!({ "repo": repo.as_str() })),
+                StrataError::new(Code::PushRefused, msg.to_string())
+                    .with_detail(json!({ "repo": repo.as_str() })),
                 data,
             )
         }
         _ => Envelope::err_with(
-            StrataError::new(Code::Unknown, format!("whether the push of {repo} landed is unknown; the chain stays"))
-                .with_detail(json!({ "reason": "push_unknown", "repo": repo.as_str() })),
+            StrataError::new(
+                Code::Unknown,
+                format!("whether the push of {repo} landed is unknown; the chain stays"),
+            )
+            .with_detail(json!({ "reason": "push_unknown", "repo": repo.as_str() })),
             data,
         ),
     }
@@ -77,12 +86,23 @@ pub fn push(ctx: &Ctx, repo: &str) -> Result<Envelope> {
         }
     }
     // Review H2: the daemon pushes only the chain top shown here.
-    let data = ctx.call("push", json!({ "repo": name.as_str(), "shown": shown }), Kind::Write)?;
+    let data = ctx.call(
+        "push",
+        json!({ "repo": name.as_str(), "shown": shown }),
+        Kind::Write,
+    )?;
     let outcome = data.get("push").cloned().unwrap_or(Value::Null);
     // Publish.md D2a: a headless push may have replayed the chain first.
     let mut shown_data = outcome.clone();
     if let Some(m) = shown_data.as_object_mut() {
-        for k in ["commit", "replayed", "rebases", "warnings", "closed", "auto_close"] {
+        for k in [
+            "commit",
+            "replayed",
+            "rebases",
+            "warnings",
+            "closed",
+            "auto_close",
+        ] {
             if let Some(v) = data.get(k) {
                 m.insert(k.into(), v.clone());
             }
@@ -100,7 +120,11 @@ pub fn config_relax(ctx: &Ctx, repo: &str) -> Result<Envelope> {
     known_repo(config.as_ref(), &name)?;
     eprintln!("confirm relaxing the pinned safety settings of {name} to what config.toml says");
     let mut params = json!({ "repo": name.as_str() });
-    if crate::reload::supported(ctx)? {
+    // One negotiated call: the feature check and the write share a budget.
+    let mut call = ctx
+        .begin_gated("config_relax", Kind::Write, None)
+        .map_err(crate::rpc::CallError::into_error)?;
+    if crate::reload::has_reload(&call.status) {
         let cfg = config
             .as_ref()
             .and_then(|c| c.repos.get(&name))
@@ -122,7 +146,9 @@ pub fn config_relax(ctx: &Ctx, repo: &str) -> Result<Envelope> {
         );
         params["shown"] = serde_json::to_value(shown).unwrap();
     }
-    let data = ctx.call("config_relax", params, Kind::Write)?;
+    let data = call
+        .send(&params)
+        .map_err(crate::rpc::CallError::into_error)?;
     Ok(Envelope::ok(data))
 }
 
@@ -152,7 +178,13 @@ pub fn rm(ctx: &Ctx, session: &str, discard: bool) -> Result<Envelope> {
                 );
             }
             for w in r["warnings"].as_array().into_iter().flatten() {
-                eprintln!("rm warning: {}", w["message"].as_str().map(str::to_string).unwrap_or_else(|| w.to_string()));
+                eprintln!(
+                    "rm warning: {}",
+                    w["message"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| w.to_string())
+                );
             }
             Ok(Envelope::ok(r))
         }
@@ -161,7 +193,8 @@ pub fn rm(ctx: &Ctx, session: &str, discard: bool) -> Result<Envelope> {
             let (code, reason, msg) = match stopped {
                 Stopped::NotSent => (
                     Code::NotConfirmed,
-                    "interrupted_not_sent", format!("rm of {id} was not sent; nothing happened"),
+                    "interrupted_not_sent",
+                    format!("rm of {id} was not sent; nothing happened"),
                 ),
                 Stopped::Sent => (
                     Code::Unknown,
@@ -192,13 +225,22 @@ pub fn resolve_choice_error(n: usize) -> Result<Envelope> {
 
 fn one_choice(n: usize) -> Result<()> {
     match n {
-        0 => Err(invalid("no_choice", "choose exactly one; there is no default")),
+        0 => Err(invalid(
+            "no_choice",
+            "choose exactly one; there is no default",
+        )),
         1 => Ok(()),
         _ => Err(invalid("both_choices", "choose exactly one")),
     }
 }
 
-pub fn resolve(ctx: &Ctx, session: &str, repo: &str, abandon: bool, accept: bool) -> Result<Envelope> {
+pub fn resolve(
+    ctx: &Ctx,
+    session: &str,
+    repo: &str,
+    abandon: bool,
+    accept: bool,
+) -> Result<Envelope> {
     one_choice(abandon as usize + accept as usize)?;
     require_tty_for("resolve")?;
     let name = repo_name(repo)?;
@@ -207,11 +249,18 @@ pub fn resolve(ctx: &Ctx, session: &str, repo: &str, abandon: bool, accept: bool
     let id = ro::select(&store, session)?;
     let rec = ro::record(&store, &id)?;
     let scene = rec.scene.clone().unwrap_or(Value::Null);
-    let ws = rec.workspaces.get(&name).map(|w| format!("{w:?}")).unwrap_or_else(|| "(no workspace record)".into());
+    let ws = rec
+        .workspaces
+        .get(&name)
+        .map(|w| format!("{w:?}"))
+        .unwrap_or_else(|| "(no workspace record)".into());
     eprintln!("session {id} repo {name}: phase {:?}", rec.phase);
     eprintln!("  scene {scene}");
     eprintln!("  workspace {ws}");
-    eprintln!("  choices: abandon, accept; chosen: {}", if abandon { "abandon" } else { "accept" });
+    eprintln!(
+        "  choices: abandon, accept; chosen: {}",
+        if abandon { "abandon" } else { "accept" }
+    );
     let data = ctx.call(
         "resolve_move",
         json!({ "session": id.as_str(), "repo": name.as_str(), "abandon": abandon, "accept": accept }),
@@ -222,7 +271,12 @@ pub fn resolve(ctx: &Ctx, session: &str, repo: &str, abandon: bool, accept: bool
 
 // ---- chain -----------------------------------------------------------------
 
-pub fn chain(ctx: &Ctx, repo: &str, accept_origin: Option<AcceptOrigin>, restore: bool) -> Result<Envelope> {
+pub fn chain(
+    ctx: &Ctx,
+    repo: &str,
+    accept_origin: Option<AcceptOrigin>,
+    restore: bool,
+) -> Result<Envelope> {
     one_choice(accept_origin.is_some() as usize + restore as usize)?;
     require_tty_for("chain")?;
     let name = repo_name(repo)?;
@@ -235,8 +289,14 @@ pub fn chain(ctx: &Ctx, repo: &str, accept_origin: Option<AcceptOrigin>, restore
         eprintln!(
             "{name} {branch}: origin {} chain top {} anchor {} ({:?})",
             ch.origin,
-            ch.top.as_ref().map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
-            ch.anchor.as_ref().map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
+            ch.top
+                .as_ref()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".into()),
+            ch.anchor
+                .as_ref()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".into()),
             ch.state
         );
     }
@@ -248,10 +308,16 @@ pub fn chain(ctx: &Ctx, repo: &str, accept_origin: Option<AcceptOrigin>, restore
     };
     if restore {
         let Some(ch) = &ch else {
-            return Err(invalid("no_chain", format!("{name} has no origin/{branch}")));
+            return Err(invalid(
+                "no_chain",
+                format!("{name} has no origin/{branch}"),
+            ));
         };
         let Some(top) = &ch.top else {
-            return Err(invalid("no_chain", format!("{name} has no local publish chain to restore")));
+            return Err(invalid(
+                "no_chain",
+                format!("{name} has no local publish chain to restore"),
+            ));
         };
         if !git.is_ancestor(&ch.origin, top)? {
             return Err(StrataError::new(Code::InvalidInput, "origin is not an ancestor of the chain; restoring would not fast-forward")
@@ -262,18 +328,46 @@ pub fn chain(ctx: &Ctx, repo: &str, accept_origin: Option<AcceptOrigin>, restore
         }
         shown = Some(top.clone());
     } else {
-        eprintln!("chosen: {}; nothing is pushed", if accept_origin == Some(AcceptOrigin::Replay) { "replay onto origin" } else { "drop the local chain" });
+        eprintln!(
+            "chosen: {}; nothing is pushed",
+            if accept_origin == Some(AcceptOrigin::Replay) {
+                "replay onto origin"
+            } else {
+                "drop the local chain"
+            }
+        );
     }
-    let data = ctx.call("chain_resolve", json!({ "repo": name.as_str(), "choice": choice, "shown": shown }), Kind::Write)?;
-    for w in data.get("warnings").and_then(Value::as_array).into_iter().flatten() {
+    let data = ctx.call(
+        "chain_resolve",
+        json!({ "repo": name.as_str(), "choice": choice, "shown": shown }),
+        Kind::Write,
+    )?;
+    for w in data
+        .get("warnings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         eprintln!("warning: {w}");
     }
     Ok(match accept_origin {
-        Some(AcceptOrigin::Replay) => Envelope::ok(json!({ "repo": name.as_str(), "choice": "accept_origin_replay", "refs_moved": true })),
-        Some(AcceptOrigin::Drop) => Envelope::ok(json!({ "repo": name.as_str(), "choice": "accept_origin_drop", "refs_moved": true })),
+        Some(AcceptOrigin::Replay) => Envelope::ok(
+            json!({ "repo": name.as_str(), "choice": "accept_origin_replay", "refs_moved": true }),
+        ),
+        Some(AcceptOrigin::Drop) => Envelope::ok(
+            json!({ "repo": name.as_str(), "choice": "accept_origin_drop", "refs_moved": true }),
+        ),
         None => {
-            let outcome = if data.get("pushed") == Some(&Value::Bool(true)) { json!({ "kind": "Pushed" }) } else { json!({ "kind": "Unknown" }) };
-            outcome_result(&name, &outcome, json!({ "repo": name.as_str(), "choice": "restore", "outcome": outcome }))
+            let outcome = if data.get("pushed") == Some(&Value::Bool(true)) {
+                json!({ "kind": "Pushed" })
+            } else {
+                json!({ "kind": "Unknown" })
+            };
+            outcome_result(
+                &name,
+                &outcome,
+                json!({ "repo": name.as_str(), "choice": "restore", "outcome": outcome }),
+            )
         }
     })
 }
@@ -282,23 +376,53 @@ pub fn chain(ctx: &Ctx, repo: &str, accept_origin: Option<AcceptOrigin>, restore
 
 /// Sessions a read-only rollout plan would move (best effort; `None` when
 /// the plan cannot be computed here).
-fn planned_moves(config: &Config, store: &Store, id: ProposalId, only: &[SessionId]) -> Option<(RepoName, Vec<String>)> {
+fn planned_moves(
+    config: &Config,
+    store: &Store,
+    id: ProposalId,
+    only: &[SessionId],
+) -> Option<(RepoName, Vec<String>)> {
     struct NoLock;
     impl strata_deps::RepoWriteLock for NoLock {
-        fn with_write(&self, repo: &RepoName, _f: &mut dyn FnMut() -> strata_deps::Result<()>) -> strata_deps::Result<strata_deps::Result<()>> {
-            Err(StrataError::new(Code::Busy, format!("the cli takes no lock on {repo}")).with_detail(json!({ "reason": "readonly_client" })))
+        fn with_write(
+            &self,
+            repo: &RepoName,
+            _f: &mut dyn FnMut() -> strata_deps::Result<()>,
+        ) -> strata_deps::Result<strata_deps::Result<()>> {
+            Err(
+                StrataError::new(Code::Busy, format!("the cli takes no lock on {repo}"))
+                    .with_detail(json!({ "reason": "readonly_client" })),
+            )
         }
     }
     let p = strata_deps::get_proposal(store, id).ok()?;
     let rc = config.repos.get(&p.repo)?;
     let git = Git::open(&rc.path).ok()?;
-    let env = strata_deps::InstallEnv { path: std::env::var("PATH").unwrap_or_default(), timeout: std::time::Duration::from_secs(1) };
-    let ctx = strata_deps::Ctx { store, paths: &config.paths, repo: &p.repo, cfg: rc, git: &git, env: &env, locks: &NoLock };
+    let env = strata_deps::InstallEnv {
+        path: std::env::var("PATH").unwrap_or_default(),
+        timeout: std::time::Duration::from_secs(1),
+        child_env: Vec::new(),
+    };
+    let ctx = strata_deps::Ctx {
+        store,
+        paths: &config.paths,
+        repo: &p.repo,
+        cfg: rc,
+        git: &git,
+        env: &env,
+        locks: &NoLock,
+    };
     let list: Vec<(SessionId, strata_types::WorkspaceState)> = ro::live(store)
         .ok()?
         .into_iter()
         .filter(|r| only.is_empty() || only.contains(&r.manifest.id))
-        .filter_map(|r| r.manifest.repos.get(&p.repo).cloned().map(|ws| (r.manifest.id.clone(), ws)))
+        .filter_map(|r| {
+            r.manifest
+                .repos
+                .get(&p.repo)
+                .cloned()
+                .map(|ws| (r.manifest.id.clone(), ws))
+        })
         .collect();
     let plan = strata_deps::plan_rollout(&ctx, id, &list, only.is_empty()).ok()?;
     let moves = plan
@@ -315,7 +439,12 @@ fn planned_moves(config: &Config, store: &Store, id: ProposalId, only: &[Session
 pub fn deps_approve(ctx: &Ctx, id: &str, sessions: &[String]) -> Result<Envelope> {
     deps_approve_with_cwd(ctx, id, sessions, &crate::args::CwdArgs::default())
 }
-pub fn deps_approve_with_cwd(ctx: &Ctx, id: &str, sessions: &[String], cwd: &crate::args::CwdArgs) -> Result<Envelope> {
+pub fn deps_approve_with_cwd(
+    ctx: &Ctx,
+    id: &str,
+    sessions: &[String],
+    cwd: &crate::args::CwdArgs,
+) -> Result<Envelope> {
     let n = parse_id(id, "proposal id")?;
     require_tty_for("deps approve")?;
     let pid = ProposalId::try_from(n)?;
@@ -325,7 +454,10 @@ pub fn deps_approve_with_cwd(ctx: &Ctx, id: &str, sessions: &[String], cwd: &cra
     for s in sessions {
         match &store {
             Some(st) => only.push(ro::select(st, s)?),
-            None => only.push(SessionId::try_from(s.clone()).map_err(|_| invalid("session", format!("{s:?} is not a session id")))?),
+            None => only.push(
+                SessionId::try_from(s.clone())
+                    .map_err(|_| invalid("session", format!("{s:?} is not a session id")))?,
+            ),
         }
     }
     // The proposal and the sessions it would move, read without
@@ -335,7 +467,10 @@ pub fn deps_approve_with_cwd(ctx: &Ctx, id: &str, sessions: &[String], cwd: &cra
         Some(Err(e)) => eprintln!("(cannot read proposal {n}: {})", e.message),
         None => eprintln!("(cannot read the store to show proposal {n})"),
     }
-    match store.as_ref().and_then(|st| planned_moves(&config, st, pid, &only)) {
+    match store
+        .as_ref()
+        .and_then(|st| planned_moves(&config, st, pid, &only))
+    {
         Some((repo, moves)) => {
             eprintln!("sessions of {repo} this approval moves:");
             for s in &moves {
@@ -353,7 +488,9 @@ pub fn deps_approve_with_cwd(ctx: &Ctx, id: &str, sessions: &[String], cwd: &cra
         "sessions": if only.is_empty() { Value::Null } else { json!(only.iter().map(|s| s.as_str()).collect::<Vec<_>>()) },
     });
     match crate::cwd_guard::deps_call(ctx, "deps_approve", params, cwd) {
-        Ok(data) => Ok(Envelope::ok(json!({ "results": data.get("results").cloned().unwrap_or_else(|| json!([])) }))),
+        Ok(data) => Ok(Envelope::ok(
+            json!({ "results": data.get("results").cloned().unwrap_or_else(|| json!([])) }),
+        )),
         Err(e) => {
             if e.code == Code::NoSuchProposal {
                 let d = e.detail.clone().unwrap_or(Value::Null);
@@ -362,11 +499,16 @@ pub fn deps_approve_with_cwd(ctx: &Ctx, id: &str, sessions: &[String], cwd: &cra
                     show::proposal_value("replacement proposal", r);
                 }
                 if let Some(by) = d.get("state").and_then(|s| s.get("by")) {
-                    eprintln!("superseded by proposal {by}; approve it with `git-strata deps approve {by}` after reading it");
+                    eprintln!(
+                        "superseded by proposal {by}; approve it with `git-strata deps approve {by}` after reading it"
+                    );
                 }
             } else if e.code == Code::HeadMoved {
                 let d = e.detail.clone().unwrap_or(Value::Null);
-                eprintln!("main moved; the proposal's head is not main's tip: {}", d.get("tip").unwrap_or(&Value::Null));
+                eprintln!(
+                    "main moved; the proposal's head is not main's tip: {}",
+                    d.get("tip").unwrap_or(&Value::Null)
+                );
             }
             Err(e)
         }
@@ -376,13 +518,20 @@ pub fn deps_approve_with_cwd(ctx: &Ctx, id: &str, sessions: &[String], cwd: &cra
 // ---- assign ------------------------------------------------------------------
 
 pub fn assign(ctx: &Ctx, file: &str, session: &str) -> Result<Envelope> {
-    let path = RepoPath::try_from(file.to_string())
-        .map_err(|e| invalid("path", format!("{file:?} is not a repo path: {}", e.message)))?;
+    let path = RepoPath::try_from(file.to_string()).map_err(|e| {
+        invalid(
+            "path",
+            format!("{file:?} is not a repo path: {}", e.message),
+        )
+    })?;
     let config = ctx.config()?;
     let store = ro::open_store(&config)?;
     let id = ro::select(&store, session)?;
     let records = store.publishes()?;
-    let mentions = |o: &Option<Value>| o.as_ref().is_some_and(|v| v.to_string().contains(&format!("\"{}\"", path.as_str())));
+    let mentions = |o: &Option<Value>| {
+        o.as_ref()
+            .is_some_and(|v| v.to_string().contains(&format!("\"{}\"", path.as_str())))
+    };
     let group = records
         .iter()
         .rev()
@@ -391,7 +540,11 @@ pub fn assign(ctx: &Ctx, file: &str, session: &str) -> Result<Envelope> {
         .map(|r| r.group.id)
         .unwrap_or(0);
     drop(store);
-    let data = ctx.call("assign", json!({ "group": group, "path": path.as_str(), "session": id.as_str() }), Kind::Write)?;
+    let data = ctx.call(
+        "assign",
+        json!({ "group": group, "path": path.as_str(), "session": id.as_str() }),
+        Kind::Write,
+    )?;
     Ok(Envelope::ok(data))
 }
 
@@ -412,13 +565,22 @@ type Batch = BTreeMap<(SessionId, RepoName), Vec<RepoPath>>;
 /// daemon then reads).
 fn which_repo(store: &Store, id: &SessionId, path: &RepoPath) -> Result<RepoName> {
     let rec = ro::record(store, id)?;
-    let mut hits: Vec<RepoName> =
-        rec.manifest.repos.iter().filter(|(r, ws)| ws_has(store, r, ws, path)).map(|(r, _)| r.clone()).collect();
+    let mut hits: Vec<RepoName> = rec
+        .manifest
+        .repos
+        .iter()
+        .filter(|(r, ws)| ws_has(store, r, ws, path))
+        .map(|(r, _)| r.clone())
+        .collect();
     match hits.len() {
         1 => return Ok(hits.remove(0)),
         0 => {}
         _ => {
-            let changed: Vec<RepoName> = hits.iter().filter(|r| checkpoints_changed(store, id, r, path)).cloned().collect();
+            let changed: Vec<RepoName> = hits
+                .iter()
+                .filter(|r| checkpoints_changed(store, id, r, path))
+                .cloned()
+                .collect();
             if changed.len() == 1 {
                 return Ok(changed.into_iter().next().expect("one repo"));
             }
@@ -444,7 +606,11 @@ fn which_repo(store: &Store, id: &SessionId, path: &RepoPath) -> Result<RepoName
     }
     if let Some((first, rest)) = path.as_str().split_once('/')
         && let Ok(inner) = RepoPath::try_from(rest.to_string())
-        && let Some((repo, _)) = rec.manifest.repos.iter().find(|(r, ws)| r.as_str() == first && ws_has(store, r, ws, &inner))
+        && let Some((repo, _)) = rec
+            .manifest
+            .repos
+            .iter()
+            .find(|(r, ws)| r.as_str() == first && ws_has(store, r, ws, &inner))
     {
         let expected = format!("{id}:{rest}");
         return Err(StrataError::new(
@@ -474,7 +640,11 @@ fn from_path_error(id: &SessionId, path: &RepoPath, repos: &[&str]) -> StrataErr
 /// Whether workspace `ws` of `repo` has `p` on disk or in its base.
 fn ws_has(store: &Store, repo: &RepoName, ws: &strata_types::WorkspaceState, p: &RepoPath) -> bool {
     std::fs::symlink_metadata(ws.path.join(p.as_str())).is_ok()
-        || store.manifest(repo, &ws.base.tree).ok().flatten().is_some_and(|m| m.entries.contains_key(p))
+        || store
+            .manifest(repo, &ws.base.tree)
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.entries.contains_key(p))
 }
 
 /// Whether any checkpoint of `repo` in session `id` records `path` (or,
@@ -482,11 +652,15 @@ fn ws_has(store: &Store, repo: &RepoName, ws: &strata_types::WorkspaceState, p: 
 /// checkpoint counts as not changing it.
 fn checkpoints_changed(store: &Store, id: &SessionId, repo: &RepoName, path: &RepoPath) -> bool {
     let under = format!("{}/", path.as_str());
-    let Ok(infos) = store.checkpoints(id, Some(repo)) else { return false };
+    let Ok(infos) = store.checkpoints(id, Some(repo)) else {
+        return false;
+    };
     infos.iter().any(|info| {
-        store
-            .checkpoint(id, info.id)
-            .is_ok_and(|c| c.entries.iter().any(|e| e.path == *path || e.path.as_str().starts_with(&under)))
+        store.checkpoint(id, info.id).is_ok_and(|c| {
+            c.entries
+                .iter()
+                .any(|e| e.path == *path || e.path.as_str().starts_with(&under))
+        })
     })
 }
 
@@ -502,15 +676,26 @@ struct FromEntry {
 /// after the first ':' is PATH (`S:PATH`, which may itself contain ':').
 /// So a PATH whose first segment is `<repo>:...` must be written
 /// `S:<repo>:<repo>:...`.
-fn split_repo<'a>(rec: &'a strata_store::SessionRecord, rest: &str) -> Option<(&'a RepoName, String)> {
+fn split_repo<'a>(
+    rec: &'a strata_store::SessionRecord,
+    rest: &str,
+) -> Option<(&'a RepoName, String)> {
     let (r, p) = rest.split_once(':')?;
-    rec.manifest.repos.keys().find(|k| k.as_str() == r).map(|k| (k, p.to_string()))
+    rec.manifest
+        .repos
+        .keys()
+        .find(|k| k.as_str() == r)
+        .map(|k| (k, p.to_string()))
 }
 
 /// The `--from` errors that are about a path (not the session selector):
 /// reported as they are, before the TTY gate.
 fn is_path_error(e: &StrataError) -> bool {
-    let reason = e.detail.as_ref().and_then(|d| d.get("reason")).and_then(Value::as_str);
+    let reason = e
+        .detail
+        .as_ref()
+        .and_then(|d| d.get("reason"))
+        .and_then(Value::as_str);
     matches!(reason, Some("from_path" | "from_repo_prefix" | "from_repo"))
 }
 
@@ -518,7 +703,12 @@ fn parse_from(entries: &[String]) -> Result<Vec<FromEntry>> {
     entries
         .iter()
         .map(|e| {
-            let (s, p) = e.split_once(':').ok_or_else(|| invalid("from_syntax", format!("{e:?} is not SESSION:PATH or SESSION:REPO:PATH")))?;
+            let (s, p) = e.split_once(':').ok_or_else(|| {
+                invalid(
+                    "from_syntax",
+                    format!("{e:?} is not SESSION:PATH or SESSION:REPO:PATH"),
+                )
+            })?;
             if s.is_empty() {
                 return Err(invalid("from_syntax", format!("{e:?} names no session")));
             }
@@ -526,14 +716,21 @@ fn parse_from(entries: &[String]) -> Result<Vec<FromEntry>> {
             // well-formed; which one is decided against the session.
             let as_path = RepoPath::try_from(p.to_string());
             let qualified = p.split_once(':').is_some_and(|(r, q)| {
-                strata_types::RepoName::try_from(r.to_string()).is_ok() && RepoPath::try_from(q.to_string()).is_ok()
+                strata_types::RepoName::try_from(r.to_string()).is_ok()
+                    && RepoPath::try_from(q.to_string()).is_ok()
             });
             if let Err(x) = as_path
                 && !qualified
             {
-                return Err(invalid("from_syntax", format!("{p:?} is not a repo path: {}", x.message)));
+                return Err(invalid(
+                    "from_syntax",
+                    format!("{p:?} is not a repo path: {}", x.message),
+                ));
             }
-            Ok(FromEntry { session: s.to_string(), rest: p.to_string() })
+            Ok(FromEntry {
+                session: s.to_string(),
+                rest: p.to_string(),
+            })
         })
         .collect()
 }
@@ -545,7 +742,12 @@ fn build_batch(config: &Config, from: &[FromEntry]) -> Result<Batch> {
         let id = ro::select(&store, &f.session)?;
         let rec = ro::record(&store, &id)?;
         let (repo, path) = if let Some((repo, p)) = split_repo(&rec, &f.rest) {
-            let path = RepoPath::try_from(p.clone()).map_err(|x| invalid("from_syntax", format!("{p:?} is not a repo path: {}", x.message)))?;
+            let path = RepoPath::try_from(p.clone()).map_err(|x| {
+                invalid(
+                    "from_syntax",
+                    format!("{p:?} is not a repo path: {}", x.message),
+                )
+            })?;
             let ws = &rec.manifest.repos[repo];
             if !ws_has(&store, repo, ws, &path) {
                 return Err(StrataError::new(
@@ -599,7 +801,10 @@ fn interactive_batch(config: &Config) -> Result<Batch> {
     items.sort();
     items.dedup();
     if items.is_empty() {
-        return Err(invalid("no_batch", format!("session {id} has no checkpointed changes to publish")));
+        return Err(invalid(
+            "no_batch",
+            format!("session {id} has no checkpointed changes to publish"),
+        ));
     }
     eprintln!("changed paths of {id} (newest checkpoint per repo):");
     for (i, (r, p)) in items.iter().enumerate() {
@@ -623,9 +828,16 @@ fn interactive_batch(config: &Config) -> Result<Batch> {
                 ));
             }
             Err(_) => {
-                let v: Vec<_> = items.iter().filter(|(_, p)| p.as_str() == t).cloned().collect();
+                let v: Vec<_> = items
+                    .iter()
+                    .filter(|(_, p)| p.as_str() == t)
+                    .cloned()
+                    .collect();
                 if v.is_empty() {
-                    return Err(invalid("pick", format!("{t:?} is neither a number nor a listed path")));
+                    return Err(invalid(
+                        "pick",
+                        format!("{t:?} is neither a number nor a listed path"),
+                    ));
                 }
                 v
             }
@@ -643,24 +855,51 @@ fn interactive_batch(config: &Config) -> Result<Batch> {
     Ok(batch)
 }
 
-pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message: &[String], message_for: &[String]) -> Result<Envelope> {
+pub fn publish(
+    ctx: &Ctx,
+    from: &[String],
+    assign_to: Option<&[String]>,
+    message: &[String],
+    message_for: &[String],
+    dry_run: bool,
+) -> Result<Envelope> {
     if let Some(a) = assign_to {
         if !from.is_empty() {
-            return Err(invalid("assign_with_from", "--assign is its own call; do not combine it with --from"));
+            return Err(invalid(
+                "assign_with_from",
+                "--assign is its own call; do not combine it with --from",
+            ));
         }
         return assign(ctx, &a[0], &a[1]);
     }
     let mut messages = strata_publish::message::Messages::default();
-    if !message.is_empty() { messages.message = Some(message.join("\n\n")); }
-    for item in message_for {
-        let (repo, text) = item.split_once('=').ok_or_else(|| invalid("message_repo", "--message-for needs REPO=TEXT"))?;
-        let repo = RepoName::try_from(repo.to_string())?;
-        messages.message_for.entry(repo).and_modify(|m| { m.push_str("\n\n"); m.push_str(text); }).or_insert_with(|| text.to_owned());
+    if !message.is_empty() {
+        messages.message = Some(message.join("\n\n"));
     }
-    if let Some(m) = &messages.message { strata_publish::message::validate(m)?; }
-    for m in messages.message_for.values() { strata_publish::message::validate(m)?; }
+    for item in message_for {
+        let (repo, text) = item
+            .split_once('=')
+            .ok_or_else(|| invalid("message_repo", "--message-for needs REPO=TEXT"))?;
+        let repo = RepoName::try_from(repo.to_string())?;
+        messages
+            .message_for
+            .entry(repo)
+            .and_modify(|m| {
+                m.push_str("\n\n");
+                m.push_str(text);
+            })
+            .or_insert_with(|| text.to_owned());
+    }
+    if let Some(m) = &messages.message {
+        strata_publish::message::validate(m)?;
+    }
+    for m in messages.message_for.values() {
+        strata_publish::message::validate(m)?;
+    }
     let has_message = messages.message.is_some() || !messages.message_for.is_empty();
-    if has_message { crate::agent::require_feature(&ctx.paths.socket, "publish.message")?; }
+    if has_message {
+        strata_client::require_feature(&ctx.probe(None)?, "publish.message")?;
+    }
     let add_messages = |params: &mut Value| {
         if has_message {
             params["message"] = json!(messages.message);
@@ -670,8 +909,10 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message
     let config = ctx.config()?;
     let pins = ctx.pins();
     let gate = |repos: &mut dyn Iterator<Item = &RepoName>| -> Result<Vec<RepoName>> {
-        let front: Vec<RepoName> =
-            repos.filter(|r| pins.pushes(Some(&config), r) && pins.needs_confirm(Some(&config), r)).cloned().collect();
+        let front: Vec<RepoName> = repos
+            .filter(|r| pins.pushes(Some(&config), r) && pins.needs_confirm(Some(&config), r))
+            .cloned()
+            .collect();
         if !front.is_empty() {
             require_tty_for("publish")?;
         }
@@ -679,7 +920,10 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message
     };
     let batch = if from.is_empty() {
         if !stdin_is_tty() {
-            return Err(invalid("no_batch", "give --from SESSION:PATH, or run in a terminal to choose"));
+            return Err(invalid(
+                "no_batch",
+                "give --from SESSION:PATH, or run in a terminal to choose",
+            ));
         }
         interactive_batch(&config)?
     } else {
@@ -690,7 +934,9 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message
             // is; a NotTty here would hide it (no connection either way). So
             // is a session that is gone: a full publish closes its session,
             // so a retry after a lost reply lands here.
-            Err(e) if is_path_error(&e) || e.code == Code::NoSuchSession => return Err(e),
+            Err(e) if dry_run || is_path_error(&e) || e.code == Code::NoSuchSession => {
+                return Err(e);
+            }
             Err(e) => {
                 // The session is unreadable, so the batch's repos are
                 // unknown: gate on every configured repo before reporting.
@@ -740,11 +986,21 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message
         match require_tty_for("publish") {
             Err(mut t) => {
                 if let Some(d) = t.detail.as_mut().and_then(Value::as_object_mut) {
-                    d.insert("plan_error".into(), json!({ "code": e.code, "message": e.message, "detail": e.detail }));
+                    d.insert(
+                        "plan_error".into(),
+                        json!({ "code": e.code, "message": e.message, "detail": e.detail }),
+                    );
                 }
                 t
             }
             Ok(()) => e,
+        }
+    };
+    let plan_error = |e| {
+        if dry_run || guarded.is_empty() {
+            e
+        } else {
+            tty_refused(e)
         }
     };
     // Before-publish checkpoints, then the plan, the gate, the publish.
@@ -763,21 +1019,37 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message
             let _ = CheckpointId::try_from(cid)?;
             Ok::<u64, StrataError>(cid)
         })()
-        .map_err(|e| if guarded.is_empty() { e } else { tty_refused(e) })?;
-        batches.push(json!({ "session": s.as_str(), "repo": r.as_str(), "checkpoint": cid, "paths": ps }));
+        .map_err(plan_error)?;
+        batches.push(
+            json!({ "session": s.as_str(), "repo": r.as_str(), "checkpoint": cid, "paths": ps }),
+        );
     }
     let mut plan_params = json!({ "group": { "id": 0, "batches": batches } });
-    messages.validate(&serde_json::from_value(plan_params["group"].clone()).map_err(|e| invalid("message", e.to_string()))?)?;
+    messages.validate(
+        &serde_json::from_value(plan_params["group"].clone())
+            .map_err(|e| invalid("message", e.to_string()))?,
+    )?;
     add_messages(&mut plan_params);
-    let preview = ctx.call("publish_plan", plan_params, Kind::Read).map_err(|e| if guarded.is_empty() { e } else { tty_refused(e) })?;
-    let remaining: Vec<RepoName> = preview.get("repos").and_then(Value::as_array)
-        .ok_or_else(|| tty_refused(invalid("rpc_failed", "the daemon's publish_plan reply has no repos")))?
-        .iter().filter_map(Value::as_str).filter_map(|r| RepoName::try_from(r.to_string()).ok()).collect();
+    let preview = ctx
+        .call("publish_plan", plan_params, Kind::Read)
+        .map_err(plan_error)?;
+    let remaining: Vec<RepoName> =
+        serde::Deserialize::deserialize(&preview["repos"]).map_err(|_| {
+            plan_error(invalid(
+                "rpc_failed",
+                "the daemon's publish_plan reply has invalid or missing repos",
+            ))
+        })?;
+    if dry_run {
+        return Ok(Envelope::ok(preview));
+    }
     let front = gate(&mut guarded.iter().filter(|r| remaining.contains(r)))?;
     let mut shown = serde_json::Map::new();
     for r in &front {
         if let Some(rc) = config.repos.get(r) {
-            if let Some(subject) = preview["subjects"][r.as_str()]["subject"].as_str() { eprintln!("commit ({r}): {subject}"); }
+            if let Some(subject) = preview["subjects"][r.as_str()]["subject"].as_str() {
+                eprintln!("commit ({r}): {subject}");
+            }
             let top = show::push_plan(r, rc, "publish will ask to confirm");
             shown.insert(r.as_str().to_string(), json!(top));
         }
@@ -785,7 +1057,8 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message
     // Review-3 T1: the guarded repos this gate covered; the daemon refuses
     // (before any prompt) a guarded repo outside it.
     let plan: Vec<&str> = front.iter().map(|r| r.as_str()).collect();
-    let mut params = json!({ "group": { "id": 0, "batches": batches }, "shown": shown, "plan": plan });
+    let mut params =
+        json!({ "group": { "id": 0, "batches": batches }, "shown": shown, "plan": plan });
     add_messages(&mut params);
     let reply = ctx.call("publish", params, Kind::Write);
     match reply {
@@ -807,11 +1080,23 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message
         Err(e) => {
             // Review H4: what landed before the stop (in this call or an
             // earlier one) is reported in `data`; the error names the repo.
-            let list = |k: &str| e.detail.as_ref().and_then(|d| d.get(k)).and_then(Value::as_array).cloned().unwrap_or_default();
+            let list = |k: &str| {
+                e.detail
+                    .as_ref()
+                    .and_then(|d| d.get(k))
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+            };
             // Review M4: the failing repo's commit (and what is known of
             // its push) when the error came after its commit was written.
             let (mut before, already) = (list("published_before"), list("already_published"));
-            if let Some(l) = e.detail.as_ref().and_then(|d| d.get("landed")).filter(|l| l.is_object()) {
+            if let Some(l) = e
+                .detail
+                .as_ref()
+                .and_then(|d| d.get("landed"))
+                .filter(|l| l.is_object())
+            {
                 before.push(l.clone());
             }
             if before.is_empty() && already.is_empty() {
@@ -825,7 +1110,12 @@ pub fn publish(ctx: &Ctx, from: &[String], assign_to: Option<&[String]>, message
             // A definite remote refusal after the commit is `PushRefused`
             // (cli.md §5), not the publish layer's `Unknown`.
             let refused = bare_refusal(&e);
-            Ok(publish_envelope(&config, &before, &already, (!refused).then_some(e)))
+            Ok(publish_envelope(
+                &config,
+                &before,
+                &already,
+                (!refused).then_some(e),
+            ))
         }
     }
 }
@@ -846,9 +1136,10 @@ fn carry_enrichment(envelope: &mut Envelope, daemon: &Value) {
 /// a refusal is not one; it stays the error.
 fn bare_refusal(e: &StrataError) -> bool {
     e.code == Code::Unknown
-        && e.detail
-            .as_ref()
-            .is_some_and(|d| d.get("kind").and_then(Value::as_str) == Some("PushRefused") && d.get("reason").is_none())
+        && e.detail.as_ref().is_some_and(|d| {
+            d.get("kind").and_then(Value::as_str) == Some("PushRefused")
+                && d.get("reason").is_none()
+        })
 }
 
 /// The `PushRefused` of a repo an earlier publish landed and whose push was
@@ -857,11 +1148,19 @@ fn bare_refusal(e: &StrataError) -> bool {
 /// is a commit still unpushed.
 fn refused_already(already: &[Value]) -> Option<StrataError> {
     already.iter().find_map(|a| {
-        let push = a.get("push").filter(|o| o.get("kind").and_then(Value::as_str) == Some("Refused"))?;
+        let push = a
+            .get("push")
+            .filter(|o| o.get("kind").and_then(Value::as_str) == Some("Refused"))?;
         let repo = a.get("repo").and_then(Value::as_str).unwrap_or_default();
         Some(
-            StrataError::new(Code::PushRefused, push.get("message").and_then(Value::as_str).unwrap_or("refused").to_string())
-                .with_detail(json!({ "repo": repo, "fix": format!("git-strata push {repo}") })),
+            StrataError::new(
+                Code::PushRefused,
+                push.get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("refused")
+                    .to_string(),
+            )
+            .with_detail(json!({ "repo": repo, "fix": format!("git-strata push {repo}") })),
         )
     })
 }
@@ -870,7 +1169,12 @@ fn refused_already(already: &[Value]) -> Option<StrataError> {
 /// if every push outcome is `Pushed`. `already_published` (review H4): the
 /// repos of this group that an earlier publish already landed, not
 /// committed again (`[{repo, publish, commit, push}]`).
-fn publish_envelope(config: &Config, published: &[Value], already: &[Value], failed: Option<StrataError>) -> Envelope {
+fn publish_envelope(
+    config: &Config,
+    published: &[Value],
+    already: &[Value],
+    failed: Option<StrataError>,
+) -> Envelope {
     let mut commits = serde_json::Map::new();
     let mut checks = 0u64;
     let mut pushes = Vec::new();
@@ -878,12 +1182,21 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
     let mut touched = Vec::new();
     let mut lines: Vec<String> = Vec::new();
     for p in published {
-        let repo = p.get("repo").and_then(Value::as_str).unwrap_or_default().to_string();
+        let repo = p
+            .get("repo")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         if let Some(c) = p.get("commit") {
             commits.insert(repo.clone(), c.clone());
         }
         checks += p.get("checks_ran").and_then(Value::as_u64).unwrap_or(0);
-        for w in p.get("warnings").and_then(Value::as_array).into_iter().flatten() {
+        for w in p
+            .get("warnings")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             lines.push(match deps_warning_line(w) {
                 Some(m) => format!("warning: {m}"),
                 None => format!("warning ({repo}): {w}"),
@@ -896,12 +1209,27 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
                 match o.get("kind").and_then(Value::as_str) {
                     Some("Pushed") => {}
                     Some("Refused") => {
-                        bad = Some(StrataError::new(Code::PushRefused, o.get("message").and_then(Value::as_str).unwrap_or("refused").to_string())
-                            .with_detail(json!({ "repo": repo })))
+                        bad = Some(
+                            StrataError::new(
+                                Code::PushRefused,
+                                o.get("message")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("refused")
+                                    .to_string(),
+                            )
+                            .with_detail(json!({ "repo": repo })),
+                        )
                     }
                     _ => {
-                        bad = Some(StrataError::new(Code::Unknown, format!("whether the push of {repo} landed is unknown; the chain stays"))
-                            .with_detail(json!({ "reason": "push_unknown", "repo": repo })))
+                        bad = Some(
+                            StrataError::new(
+                                Code::Unknown,
+                                format!(
+                                    "whether the push of {repo} landed is unknown; the chain stays"
+                                ),
+                            )
+                            .with_detail(json!({ "reason": "push_unknown", "repo": repo })),
+                        )
                     }
                 }
             }
@@ -910,14 +1238,27 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
     // deps-drift §2.5: a failure after staging still says what the checks
     // used. The daemon also copies the failing repo's `deps_warning` into
     // its `landed.warnings`, so each line is printed once.
-    lines.extend(failed.as_ref().map(failure_warning_lines).unwrap_or_default().into_iter().map(|m| format!("warning: {m}")));
+    lines.extend(
+        failed
+            .as_ref()
+            .map(failure_warning_lines)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| format!("warning: {m}")),
+    );
     for l in dedup(lines) {
         eprintln!("{l}");
     }
     let waiting = waiting_proposals(config, &touched);
     let mut data = json!({ "commits": commits, "checks_ran": checks, "waiting": waiting, "pushes": pushes, "already_published": already });
-    let sources: BTreeMap<_, _> = published.iter().chain(already).filter_map(|p| Some((p.get("repo")?.as_str()?, p.get("message_source")?.as_str()?))).collect();
-    if !sources.is_empty() { data["message_source"] = json!(sources); }
+    let sources: BTreeMap<_, _> = published
+        .iter()
+        .chain(already)
+        .filter_map(|p| Some((p.get("repo")?.as_str()?, p.get("message_source")?.as_str()?)))
+        .collect();
+    if !sources.is_empty() {
+        data["message_source"] = json!(sources);
+    }
     match failed.or(bad).or_else(|| refused_already(already)) {
         Some(e) => Envelope::err_with(e, data),
         None => Envelope::ok(data),
@@ -927,12 +1268,18 @@ fn publish_envelope(config: &Config, published: &[Value], already: &[Value], fai
 /// deps-drift §2.5: the deps lines a publish error carries: the staged
 /// `deps_warning` and a `deps_inputs_left` snapshot report.
 fn failure_warning_lines(e: &StrataError) -> Vec<String> {
-    let Some(d) = e.detail.as_ref() else { return Vec::new() };
+    let Some(d) = e.detail.as_ref() else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     if let Some(m) = d.get("deps_warning").and_then(deps_warning_line) {
         out.push(m.to_string());
     }
-    if let Some(m) = d.get("deps_inputs_left").and_then(|l| l.get("message")).and_then(Value::as_str) {
+    if let Some(m) = d
+        .get("deps_inputs_left")
+        .and_then(|l| l.get("message"))
+        .and_then(Value::as_str)
+    {
         out.push(m.to_string());
     }
     out
@@ -962,12 +1309,20 @@ fn deps_warning_line(w: &Value) -> Option<&str> {
 }
 
 fn waiting_proposals(config: &Config, repos: &[String]) -> Vec<Value> {
-    let Ok(store) = ro::open_store(config) else { return Vec::new() };
+    let Ok(store) = ro::open_store(config) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for r in repos {
-        let Ok(name) = RepoName::try_from(r.clone()) else { continue };
+        let Ok(name) = RepoName::try_from(r.clone()) else {
+            continue;
+        };
         if let Ok(ps) = strata_deps::open_proposals(&store, Some(&name)) {
-            out.extend(ps.into_iter().filter(|p| p.state == strata_deps::ProposalState::AwaitingPublish).map(|p| json!(p)));
+            out.extend(
+                ps.into_iter()
+                    .filter(|p| p.state == strata_deps::ProposalState::AwaitingPublish)
+                    .map(|p| json!(p)),
+            );
         }
     }
     out
@@ -1010,7 +1365,9 @@ mod tests {
     #[test]
     fn only_a_bare_refusal_becomes_push_refused() {
         let push = serde_json::json!({ "kind": "Refused", "message": "denied" });
-        assert!(bare_refusal(&unknown(serde_json::json!({ "kind": "PushRefused", "message": "denied", "push": push }))));
+        assert!(bare_refusal(&unknown(
+            serde_json::json!({ "kind": "PushRefused", "message": "denied", "push": push })
+        )));
         for reason in ["row_moved", "row_not_closed"] {
             let wrapped = serde_json::json!({
                 "reason": reason, "kind": "PushRefused", "push": push,
@@ -1018,7 +1375,9 @@ mod tests {
             });
             assert!(!bare_refusal(&unknown(wrapped)), "{reason}");
         }
-        assert!(!bare_refusal(&unknown(serde_json::json!({ "reason": "push_unknown", "kind": "Unknown" }))));
+        assert!(!bare_refusal(&unknown(
+            serde_json::json!({ "reason": "push_unknown", "kind": "Unknown" })
+        )));
         assert!(!bare_refusal(&StrataError::new(Code::PushRefused, "x")));
     }
 
@@ -1028,8 +1387,13 @@ mod tests {
     fn failure_warning_lines_read_both_deps_keys() {
         let w = json!({ "kind": "DepsSubstituted", "detail": { "message": "used X" } });
         let e = unknown(json!({ "deps_warning": w, "deps_inputs_left": { "message": "left /s" } }));
-        assert_eq!(failure_warning_lines(&e), vec!["used X".to_string(), "left /s".to_string()]);
-        let other = unknown(json!({ "deps_warning": { "kind": "ObserveFailed", "detail": { "message": "m" } } }));
+        assert_eq!(
+            failure_warning_lines(&e),
+            vec!["used X".to_string(), "left /s".to_string()]
+        );
+        let other = unknown(
+            json!({ "deps_warning": { "kind": "ObserveFailed", "detail": { "message": "m" } } }),
+        );
         assert!(failure_warning_lines(&other).is_empty());
         assert!(failure_warning_lines(&StrataError::new(Code::Unknown, "x")).is_empty());
     }

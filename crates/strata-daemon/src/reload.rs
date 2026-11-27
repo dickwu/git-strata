@@ -36,6 +36,10 @@ struct State {
     admissions: Vec<Arc<Write>>,
     last: Option<ReloadReport>,
     at: Option<SystemTime>,
+    /// Set by the worker, under this lock, once it has finished every admitted
+    /// ticket and is exiting. A later request is refused instead of parking an
+    /// admission guard that no worker would ever release (CR r2 #1).
+    closed: bool,
 }
 
 #[derive(Default)]
@@ -58,6 +62,15 @@ impl ReloadState {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .requested
+    }
+    /// Admission guards still owned by the ticket queue.
+    #[cfg(feature = "test-seams")]
+    pub fn held_admissions_for_test(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .admissions
+            .len()
     }
     pub fn wake(&self) {
         self.cv.notify_all();
@@ -192,6 +205,13 @@ impl Core {
         };
         let deadline = Instant::now() + wait;
         let mut s = self.reload.state.lock().unwrap_or_else(|p| p.into_inner());
+        if s.closed {
+            // No worker will collect this ticket; the admission drops here.
+            return Err(
+                StrataError::new(Code::ReadOnly, "the daemon is shutting down")
+                    .with_detail(json!({ "reason": "shutting_down" })),
+            );
+        }
         s.requested += 1;
         let ticket = s.requested;
         s.admissions.push(admission);
@@ -230,11 +250,17 @@ impl Core {
         let mut attempted_hash = String::new();
         let mut restart = Vec::new();
         let attempted = (|| -> Result<ReloadReport> {
+            #[cfg(feature = "test-seams")]
+            let fixture = crate::fixture::WorkerFixture::check_layout(&self.opts)?;
             let bytes = fs::read(&self.opts.config_file)
                 .map_err(|e| error("read_failed", e.to_string()))?;
             attempted_hash = source_hash(&bytes)?;
             let text = std::str::from_utf8(&bytes).map_err(|e| error("parse", e.to_string()))?;
-            let source = Config::parse(text).map_err(|mut e| {
+            #[cfg(feature = "test-seams")]
+            let parsed = fixture.parse_config(text);
+            #[cfg(not(feature = "test-seams"))]
+            let parsed = Config::parse(text);
+            let source = parsed.map_err(|mut e| {
                 let detail = e.detail.get_or_insert_with(|| json!({}));
                 detail["reason"] =
                     json!(if matches!(detail["rule"].as_str(), Some("toml" | "V11")) {
@@ -599,6 +625,11 @@ pub fn run(core: &Core, stop: &(dyn Fn() -> bool + Sync)) {
         let mut hash = core.catalog.current().hash.clone();
         let mut retry_at = None;
         let mut backoff = Duration::from_secs(60);
+        core.reload
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .closed = false;
         while !stop() && !core.locks.is_shut_down() {
             // Explicit tickets carry their RPC admission through completion.
             // HUP, retries and polling need separate background admission.
@@ -655,6 +686,34 @@ pub fn run(core: &Core, stop: &(dyn Fn() -> bool + Sync)) {
             }
             drop(pass);
             core.reload.wait_for_work();
+        }
+        // Admitted tickets own drain admissions, so terminal stop waits for
+        // them. Finish every ticket queued before the worker closes; closing
+        // under the same lock makes a later request refuse instead of parking
+        // a guard nobody releases (CR r2 #1). Each ticket still gets exactly
+        // one attempt that started after it was queued.
+        loop {
+            let attempt = {
+                let mut s = core.reload.state.lock().unwrap_or_else(|p| p.into_inner());
+                if s.requested > s.finished {
+                    Some((s.requested, std::mem::take(&mut s.admissions)))
+                } else {
+                    s.closed = true;
+                    None
+                }
+            };
+            let Some((stamp, admissions)) = attempt else {
+                break;
+            };
+            let (result, _) = core.apply_reload(&mut prepare);
+            {
+                let mut s = core.reload.state.lock().unwrap_or_else(|p| p.into_inner());
+                s.finished = stamp;
+                s.last = Some(result);
+                s.at = Some(SystemTime::now());
+            }
+            drop(admissions);
+            core.reload.wake();
         }
         core.reload.wake();
     });

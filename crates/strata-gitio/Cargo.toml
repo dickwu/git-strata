@@ -9,7 +9,7 @@ description = "git plumbing for git-strata: sanitized git commands, index and ig
 
 [features]
 default = []
-test-seams = []
+test-seams = ["strata-types/test-seams"]
 
 [dependencies]
 strata-types = { path = "../strata-types" }

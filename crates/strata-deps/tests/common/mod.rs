@@ -227,6 +227,7 @@ impl Sandbox {
         InstallEnv {
             path: self.install_path(),
             timeout: Duration::from_secs(60),
+            child_env: Vec::new(),
         }
     }
 

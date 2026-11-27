@@ -3,11 +3,10 @@
 //! (strata_daemon::seams). The socket is the cli's own
 //! `$HOME/Library/Application Support/git-strata/daemon.sock` under a
 //! short /tmp HOME; repositories, bare origins and the store live in a
-//! TMPDIR sandbox. No launchd, no network remote.
+//! subdirectory of the same fixture. No launchd, no network remote.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -18,7 +17,6 @@ use std::time::Duration;
 use strata_daemon::handlers;
 use strata_daemon::seams::{Confirmer, FakeClock, PromptLog, ScriptedAuth, Verdict};
 use strata_daemon::startup::{self, Core, Daemon, Options};
-use strata_gitio::Git;
 use strata_types::{RepoName, SessionId};
 
 use super::{Home, Run, git};
@@ -47,7 +45,9 @@ impl Drop for Live {
     /// Sealed sets are 0555: make directories writable so the sandbox goes.
     fn drop(&mut self) {
         fn writable(p: &Path) {
-            let Ok(m) = fs::symlink_metadata(p) else { return };
+            let Ok(m) = fs::symlink_metadata(p) else {
+                return;
+            };
             if !m.is_dir() {
                 return;
             }
@@ -74,7 +74,10 @@ impl Live {
     /// fake `bun` that writes `node_modules/x`.
     pub fn with_deps(names: &[&str], files: &[(&str, &[u8])], deps: &[&str]) -> Live {
         let home = Home::new();
-        let sandbox = tempfile::Builder::new().prefix("strata-cli-").tempdir().expect("sandbox");
+        let sandbox = tempfile::Builder::new()
+            .prefix("strata-cli-")
+            .tempdir_in(home.path())
+            .expect("sandbox");
         let sb = fs::canonicalize(sandbox.path()).unwrap();
         let root = sb.join("strata");
         let mut repos = BTreeMap::new();
@@ -83,17 +86,40 @@ impl Live {
             fs::create_dir_all(&p).unwrap();
             git(&p, home.path(), &["init", "-q"]);
             let bun = deps.contains(n);
-            write(&p, ".gitignore", if bun { b".DS_Store\nnode_modules/\n" } else { b".DS_Store\n" });
+            write(
+                &p,
+                ".gitignore",
+                if bun {
+                    b".DS_Store\nnode_modules/\n"
+                } else {
+                    b".DS_Store\n"
+                },
+            );
             git(&p, home.path(), &["add", "-f", "--", ".gitignore"]);
-            let project: &[(&str, &[u8])] = if bun { &[("package.json", PACKAGE_JSON.as_bytes()), ("bun.lock", b"lock v1\n")] } else { &[] };
+            let project: &[(&str, &[u8])] = if bun {
+                &[
+                    ("package.json", PACKAGE_JSON.as_bytes()),
+                    ("bun.lock", b"lock v1\n"),
+                ]
+            } else {
+                &[]
+            };
             for (rel, content) in files.iter().chain(project) {
                 write(&p, rel, content);
                 git(&p, home.path(), &["add", "-f", "--", rel]);
             }
             git(&p, home.path(), &["commit", "-q", "-m", "initial"]);
             let origin = sb.join(format!("{n}-origin.git"));
-            git(&sb, home.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
-            git(&p, home.path(), &["remote", "add", "origin", origin.to_str().unwrap()]);
+            git(
+                &sb,
+                home.path(),
+                &["init", "-q", "--bare", origin.to_str().unwrap()],
+            );
+            git(
+                &p,
+                home.path(),
+                &["remote", "add", "origin", origin.to_str().unwrap()],
+            );
             git(&p, home.path(), &["push", "-q", "origin", "main"]);
             repos.insert(n.to_string(), p);
         }
@@ -103,7 +129,18 @@ impl Live {
         fs::write(&bun, FAKE_BUN).unwrap();
         fs::set_permissions(&bun, fs::Permissions::from_mode(0o755)).unwrap();
         let deps_repos = deps.iter().map(|s| s.to_string()).collect();
-        let live = Live { home, sandbox, sb, root, repos, deps_repos, bin, alerts: Arc::new(Mutex::new(Vec::new())), requests: Arc::new(Mutex::new(Vec::new())), on_request: Arc::new(Mutex::new(Vec::new())) };
+        let live = Live {
+            home,
+            sandbox,
+            sb,
+            root,
+            repos,
+            deps_repos,
+            bin,
+            alerts: Arc::new(Mutex::new(Vec::new())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            on_request: Arc::new(Mutex::new(Vec::new())),
+        };
         live.write_config();
         live
     }
@@ -117,7 +154,10 @@ impl Live {
     pub fn write_config_guarded(&self, guarded: &[&str]) {
         // Auto-close off: a Live test asserts what stays open after a publish.
         // `live_product_default_closes_on_publish` takes this table out.
-        let mut t = format!("[paths]\nroot = {:?}\n\n[publish]\nauto_close = false\n", self.root.to_string_lossy());
+        let mut t = format!(
+            "[paths]\nroot = {:?}\n\n[publish]\nauto_close = false\n",
+            self.root.to_string_lossy()
+        );
         for (n, p) in &self.repos {
             let g = guarded.contains(&n.as_str());
             let deps = if self.deps_repos.contains(n) {
@@ -135,14 +175,9 @@ impl Live {
 
     fn options(&self) -> Options {
         let alerts = self.alerts.clone();
-        let config_dir = self
-            .home
-            .canon()
-            .join("Library/Application Support/git-strata");
+        let home = self.home.canon();
+        let config_dir = strata_daemon::config_dir_for_home(&home);
         Options {
-            socket: strata_daemon::socket_path(&config_dir),
-            config_file: config_dir.join("config.toml"),
-            config_dir,
             lock_wait: Duration::from_millis(500),
             install_path: format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.bin.display()),
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
@@ -150,6 +185,9 @@ impl Live {
             catch_up_every: strata_daemon::CATCH_UP_EVERY,
             config_poll_every: Duration::from_millis(50),
             background_main_sync: false,
+            ..strata_daemon::fixture::WorkerFixture::new(&home, &home, &config_dir)
+                .unwrap()
+                .options()
         }
     }
 
@@ -177,13 +215,6 @@ impl Live {
             Duration::from_secs(2),
             Duration::from_millis(200),
         );
-        let home = self.home.canon();
-        let xdg = home.join(".config");
-        let env: Vec<(&str, Option<&OsStr>)> = vec![
-            ("HOME", Some(home.as_os_str())),
-            ("XDG_CONFIG_HOME", Some(xdg.as_os_str())),
-            ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
-        ];
         // A repo with no pin needs confirmation: pin the first config as if
         // a human had accepted it; later writes go through tighten/pending.
         let pins = self.home.config_dir().join("pins.json");
@@ -208,19 +239,9 @@ impl Live {
             )
             .unwrap();
         }
-        let env: Vec<(String, Option<std::ffi::OsString>)> = env
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.map(|v| v.to_os_string())))
-            .collect();
-        let core = startup::prepare(self.options(), c, &move |p: &Path| {
-            Git::open_with_env(
-                p,
-                &env.iter()
-                    .map(|(k, v)| (k.as_str(), v.as_deref()))
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .expect("prepare");
+        let opts = self.options();
+        let fixture = opts.fixture.clone().unwrap();
+        let core = startup::prepare(opts, c, &move |p| fixture.open_git(p)).expect("prepare");
         let d = Daemon::start(&core).expect("daemon start");
         let listener = startup::bind(&core.opts.socket).expect("bind");
         let ext = AtomicBool::new(false);
@@ -231,7 +252,7 @@ impl Live {
                 let trackers = handlers::Trackers::new(&core);
                 let r = {
                     let server = handlers::Server::new(&d, &trackers);
-                    d.serve(&listener, &ext, &|req| {
+                    server.serve(&listener, &ext, &|req| {
                         let name = req.method.name().to_string();
                         let hook = {
                             let mut h = hooks.lock().unwrap();
@@ -243,7 +264,6 @@ impl Live {
                             hook(&core);
                         }
                         requests.lock().unwrap().push(name);
-                        server.handle(req)
                     })
                 };
                 trackers.clear();
@@ -266,22 +286,32 @@ impl Live {
         }
         let out = c.output().expect("spawn git-strata");
         drop(master);
-        Run::from(out)
+        Run::from(out).with_args(args)
     }
 
     /// The cli in `dir` (stdin /dev/null).
     pub fn run_in(&self, dir: &Path, args: &[&str]) -> Run {
-        Run::from(self.home.cmd(args).current_dir(dir).output().expect("spawn git-strata"))
+        Run::from(
+            self.home
+                .cmd(args)
+                .current_dir(dir)
+                .output()
+                .expect("spawn git-strata"),
+        )
+        .with_args(args)
     }
 
     /// The cli in `dir` with `input` on a piped stdin.
     pub fn run_piped(&self, dir: &Path, args: &[&str], input: &[u8]) -> Run {
         use std::io::Write;
         let mut c = self.home.cmd(args);
-        c.current_dir(dir).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        c.current_dir(dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         let mut child = c.spawn().expect("spawn git-strata");
         child.stdin.take().unwrap().write_all(input).unwrap();
-        Run::from(child.wait_with_output().unwrap())
+        Run::from(child.wait_with_output().unwrap()).with_args(args)
     }
 
     pub fn run(&self, args: &[&str]) -> Run {
@@ -292,14 +322,22 @@ impl Live {
     pub fn new_session(&self, ticket: &str, repos: &str) -> SessionId {
         let r = self.run(&["new", "--ticket", ticket, "--repos", repos]);
         let d = r.ok();
-        SessionId::try_from(d["manifest"]["id"].as_str().expect("session id").to_string()).unwrap()
+        SessionId::try_from(
+            d["manifest"]["id"]
+                .as_str()
+                .expect("session id")
+                .to_string(),
+        )
+        .unwrap()
     }
 
     /// The workspace of `repo` in session `s` (read from a reader store).
     pub fn ws(&self, s: &SessionId, repo: &str) -> PathBuf {
         let store = strata_store::Store::open_read_only(&self.root).unwrap();
         let rec = store.session(s).unwrap().expect("session row");
-        rec.manifest.repos[&RepoName::try_from(repo.to_string()).unwrap()].path.clone()
+        rec.manifest.repos[&RepoName::try_from(repo.to_string()).unwrap()]
+            .path
+            .clone()
     }
 
     pub fn main(&self, repo: &str) -> PathBuf {

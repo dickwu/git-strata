@@ -103,6 +103,8 @@ const OUTPUT: &str = "OUTPUT
 ";
 const ERRORS: &str = "ERRORS (code -> what an agent does)
   Busy daemon_down   tell the human, retry later   Busy other       wait, retry later
+  Busy upgrading + retry_safe  retry budget spent; rerun the same command
+  Unsupported cli_too_old / InvalidInput client_too_old  use the updated CLI on PATH
   Busy pins_tightened rerun with the newly applied config
   Busy reload_pending rerun config reload; its current attempt continues
   Unsupported daemon_too_old  ask the owner to upgrade/restart
@@ -422,12 +424,7 @@ Check data.switched.kind. For skipped with code OpenFiles, inspect detail.reason
     gate_brief!("deps approve always needs a TTY + Touch ID; propose does not.")
 );
 
-pub const PUBLISH: &str =
-    "Publish checkpointed session content as commits on each repo's publish branch.
-
-Before publishing, a fresh BeforePublish checkpoint of each --from batch is
-taken, so the paths' current content is what gets committed. Repos commit one
-by one; a repo that landed stays landed when a later repo fails.";
+pub const PUBLISH: &str = "Checkpoint each --from batch and commit its current content to the repo's publish branch. Earlier commits survive a later repo's failure.";
 
 pub const PUBLISH_AFTER: &str = concat!(
     "EXAMPLES
@@ -459,16 +456,12 @@ In zsh write \"${S}:path\", not \"$S:path\" ($S:t, $S:h, ... are modifiers).
                                  (S:REPO:PATH)
 
 DURATION
-  The reply comes after checks, commit, push and the rebase of every session.
-  git push waits for the remote to close (its hooks included; bounded at
-  120 s, then Unknown push_unknown); the rebase is not bounded. Silence for a
-  minute or two after the remote branch moved is normal: wait for the JSON
-  line, do not interrupt or rerun.
+  Wait for the JSON reply through checks, commit, push and rebase. Remote
+  hooks get 120 s (then Unknown push_unknown). Do not interrupt or rerun.
 
 RELEASE BUILDS
-  Not from a workspace (no remotes, detached HEAD, push guard). Publish and
-  push, then in the main checkout: git pull --ff-only, check HEAD equals
-  data.commits.<repo>, run the build there. See README.md.
+  Publish and push, then build in the main checkout after git pull --ff-only
+  and verifying HEAD equals data.commits.<repo>. See README.md.
 
 DATA
   {commits:{<repo>:oid}, message_source:{<repo>:flag|checkpoints|legacy}, checks_ran, waiting:[], pushes:[{repo, outcome}],
@@ -733,7 +726,8 @@ activity, busy, volume, scan, version, pid and started are copied the same way
 min, free/size bytes of the volume holding paths.root (store, sessions; with
 path, mount and name under feature daemon_status.volume_name), size-scan counts,
 the daemon's identity. draining, inflight and store_schema are copied when
-reported (feature daemon.drain).
+reported (feature daemon.drain). handover reports the target worker, parked
+requests and outstanding work when the daemon advertises daemon.handover.
 
 After editing config.toml, run `git-strata config reload` and check data.repos.
 Restart-only changes and old daemons require an owner restart. start/stop use

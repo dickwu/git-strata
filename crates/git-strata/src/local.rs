@@ -20,24 +20,40 @@ use strata_types::{BaseGen, CheckpointReason, Code, Config, RepoName, SessionId,
 use crate::Result;
 
 pub fn readonly_client(what: &str) -> StrataError {
-    StrataError::new(Code::InvalidInput, format!("{what} is a write; the read-only client cannot do it"))
-        .with_detail(json!({ "reason": "readonly_client" }))
+    StrataError::new(
+        Code::InvalidInput,
+        format!("{what} is a write; the read-only client cannot do it"),
+    )
+    .with_detail(json!({ "reason": "readonly_client" }))
 }
 
 /// Never waits, never runs `f`.
 pub struct NoLock;
 
 impl RepoWriteLock for NoLock {
-    fn with_write(&self, repo: &RepoName, _f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>> {
-        Err(StrataError::new(Code::Busy, format!("the read-only client takes no write lock on {repo}"))
-            .with_detail(json!({ "reason": "readonly_client", "repo": repo.as_str() })))
+    fn with_write(
+        &self,
+        repo: &RepoName,
+        _f: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Result<()>> {
+        Err(StrataError::new(
+            Code::Busy,
+            format!("the read-only client takes no write lock on {repo}"),
+        )
+        .with_detail(json!({ "reason": "readonly_client", "repo": repo.as_str() })))
     }
 }
 
 impl strata_publish::PublishLocks for NoLock {
-    fn with_sessions(&self, _s: &[SessionId], _f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>> {
-        Err(StrataError::new(Code::Busy, "the read-only client takes no session queue")
-            .with_detail(json!({ "reason": "readonly_client" })))
+    fn with_sessions(
+        &self,
+        _s: &[SessionId],
+        _f: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Result<()>> {
+        Err(
+            StrataError::new(Code::Busy, "the read-only client takes no session queue")
+                .with_detail(json!({ "reason": "readonly_client" })),
+        )
     }
     fn with_repo(&self, repo: &RepoName, f: &mut dyn FnMut() -> Result<()>) -> Result<Result<()>> {
         RepoWriteLock::with_write(self, repo, f)
@@ -48,7 +64,12 @@ impl strata_publish::PublishLocks for NoLock {
 pub struct NoBefore;
 
 impl BeforeCheckpoint for NoBefore {
-    fn checkpoint(&self, _ws: &WorkspaceRef<'_>, _base: &Base, _reason: CheckpointReason) -> Result<Checkpointed> {
+    fn checkpoint(
+        &self,
+        _ws: &WorkspaceRef<'_>,
+        _base: &Base,
+        _reason: CheckpointReason,
+    ) -> Result<Checkpointed> {
         Err(readonly_client("a checkpoint"))
     }
 }
@@ -56,20 +77,49 @@ impl BeforeCheckpoint for NoBefore {
 /// The base generation with its manifest and exported directory.
 pub fn base_of(store: &Store, g: &BaseGen) -> Result<Base> {
     let m = store.manifest(&g.repo, &g.tree)?.ok_or_else(|| {
-        StrataError::new(Code::Unknown, format!("the manifest of base {} of {} is missing", g.tree.as_str(), g.repo))
-            .with_detail(json!({ "reason": "base_manifest_missing", "repo": g.repo.as_str() }))
+        StrataError::new(
+            Code::Unknown,
+            format!(
+                "the manifest of base {} of {} is missing",
+                g.tree.as_str(),
+                g.repo
+            ),
+        )
+        .with_detail(json!({ "reason": "base_manifest_missing", "repo": g.repo.as_str() }))
     })?;
-    Ok(Base { dir: store.base_dir(g), r#gen: g.clone(), manifest: Arc::new(m) })
+    Ok(Base {
+        dir: store.base_dir(g),
+        r#gen: g.clone(),
+        manifest: Arc::new(m),
+    })
 }
 
 /// The current overlay of one workspace, recomputed from the files (a cold
 /// scan; reads only, no store write, no `Sessions`).
-pub fn overlay_of(config: &Config, store: &Store, git: &Git, s: &SessionId, repo: &RepoName) -> Result<Overlay> {
+pub fn overlay_of(
+    config: &Config,
+    store: &Store,
+    git: &Git,
+    s: &SessionId,
+    repo: &RepoName,
+) -> Result<Overlay> {
     let rec = crate::ro::record(store, s)?;
-    let ws = rec.manifest.repos.get(repo).cloned().ok_or_else(|| StrataError::not_in_session(s.as_str(), repo.as_str()))?;
+    let ws = rec
+        .manifest
+        .repos
+        .get(repo)
+        .cloned()
+        .ok_or_else(|| StrataError::not_in_session(s.as_str(), repo.as_str()))?;
     let cfg = config.repo(repo)?;
     let base = base_of(store, &ws.base)?;
-    let w = WorkspaceRef { session: s, repo, root: &ws.path, config: cfg, git, store };
+    let w = WorkspaceRef {
+        session: s,
+        repo,
+        root: &ws.path,
+        config: cfg,
+        git,
+        store,
+    };
     strata_overlay::reconcile_full(&w, &base)
 }
 
@@ -83,7 +133,7 @@ pub struct Local {
 
 impl Local {
     pub fn open(config: Config) -> Result<Local> {
-        let store = Store::open_read_only(&config.paths.root)?;
+        let store = crate::ro::open_store(&config)?;
         let mut gits = BTreeMap::new();
         for (name, rc) in &config.repos {
             gits.insert(name.clone(), Git::open(&rc.path)?);
@@ -93,19 +143,39 @@ impl Local {
             Some(h) => strata_daemon::install_path_for_home(std::path::Path::new(&h)),
             None => strata_daemon::DEFAULT_PATH.to_string(),
         };
-        let env = InstallEnv { path, timeout: Duration::from_secs(60) };
-        Ok(Local { config, gits, store, env })
+        let env = InstallEnv {
+            path,
+            timeout: Duration::from_secs(60),
+            child_env: Vec::new(),
+        };
+        Ok(Local {
+            config,
+            gits,
+            store,
+            env,
+        })
     }
 
     pub fn git(&self, repo: &RepoName) -> Result<&Git> {
         self.gits.get(repo).ok_or_else(|| {
-            StrataError::new(Code::NoSuchRepo, format!("no repo {repo} in the configuration")).with_detail(json!({ "repo": repo.as_str() }))
+            StrataError::new(
+                Code::NoSuchRepo,
+                format!("no repo {repo} in the configuration"),
+            )
+            .with_detail(json!({ "repo": repo.as_str() }))
         })
     }
 
     /// `Sessions` over the reader store; only while no daemon runs.
     pub fn sessions(&self) -> Result<Sessions<'_>> {
-        Sessions::open(&self.config, &self.gits, &self.store, &NoLock, &self.env, &NoBefore)
+        Sessions::open(
+            &self.config,
+            &self.gits,
+            &self.store,
+            &NoLock,
+            &self.env,
+            &NoBefore,
+        )
     }
 }
 

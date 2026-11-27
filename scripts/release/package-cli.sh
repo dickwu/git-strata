@@ -11,6 +11,7 @@
 set -euo pipefail
 bins="$1"; id="$2"; version="$3"; out="$4"
 root="$(cd "$(dirname "$0")/../.." && pwd)"
+bash "$root/apps/desktop/scripts/check-release-workers.sh" "$bins"
 prefix="io.github.dickwu.git-strata"
 kind="${STRATA_SIGN_KIND:-}"
 [[ -n "$kind" ]] || { [[ "$id" == - ]] && kind=adhoc || kind=self-signed; }

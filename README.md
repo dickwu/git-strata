@@ -41,13 +41,21 @@ Requirements: macOS 13 or later (Apple silicon or Intel), the repos and the
 data root on one APFS volume. macOS only: git-strata uses APFS clones,
 FSEvents and launchd.
 
-**Upgrade the CLI and the daemon together.** Install `git-strata` and the
-daemon from the same release and restart the daemon after an upgrade. The wire
-rules are unchanged (the daemon advertises its `features` and the CLI gates on
-them), but from the release after 0.3.1 only a CLI and a daemon of the same
-release retry a busy `new`/`add`: the daemon marks such a refusal
-`detail.retry_safe` and the CLI sends it again. That daemon's `new`/`add`
-replies can also carry the `FetchSkipped` warning (feature `new.fetch_skip`).
+**Upgrade the CLI and daemon together** until the hosted Wire compatibility
+workflow passes for the release. The candidate negotiates optional features
+per RPC and checks a 0.3.0 floor in both directions when the store schema and
+config format match. A migrating release or a new config key can end this window. Use the
+updated CLI on PATH if a local store open reports `Unsupported cli_too_old`.
+Older releases report `Corrupt user_version` after a store migration.
+
+During an upgrade, `Busy upgrading` with `retry_safe: true` means the daemon
+refused that RPC before dispatch. The CLI retries that RPC with delays of
+1, 2, 4, 8, then 10 seconds. `--timeout SECS` overrides `GIT_STRATA_TIMEOUT`
+(default 600 seconds, 0 unlimited). `--wait` also waits for `Busy starting`
+and `store_unavailable`. A down socket returns immediately. If a sent write
+times out with `Unknown` and `outcome: in_progress`, inspect status before
+taking further action. The compatibility checks and their release boundary are
+described in the [wire compatibility notes](docs/upgrade-wire.md).
 
 ### Homebrew
 
@@ -221,13 +229,21 @@ plist; installing it is a human step. Its content (from
 
 | Command | What it does | Result |
 | --- | --- | --- |
-| `git-strata daemon status` | Asks the socket; never fails for a down daemon or missing config | `{running, socket, session?, holders:[], unknown_publishes:[], alerts:[], config?:{generation,hash,loaded_at,last_attempt,restart_required}, version?, pid?, started?, activity?, busy?, volume?, scan?, draining?, inflight?, store_schema?}` |
+| `git-strata daemon status` | Asks the socket; never fails for a down daemon or missing config | `{running, socket, session?, holders:[], unknown_publishes:[], alerts:[], config?:{generation,hash,loaded_at,last_attempt,restart_required}, version?, pid?, started?, activity?, busy?, volume?, scan?, draining?, inflight?, store_schema?, handover?}` |
 | `git-strata daemon start` | Bootstraps an unloaded agent or kickstarts a loaded, stopped agent | `{}` on start, `{already:true}` if running. `InvalidInput` `no_plist` if the plist is missing. A disabled agent returns `Unsupported` (`agent_disabled`). Open GIT STRATA to finish an app update if one is in progress. See `foreign_home` / `foreign_agent` below. |
 | `git-strata daemon stop` | `launchctl bootout`, then waits up to 10 s for launchd to confirm the label is absent | `{}` after unload or `{already:true}` if absent. `Unknown` `launchctl` at `step: print` for a failed initial probe or `step: bootout_wait` on timeout. See `foreign_home` / `foreign_agent` below. |
 
 `draining`, `inflight` and `store_schema` are optional status fields from
 daemons with `daemon.drain`. If the status reports a sealed Move, open GIT STRATA
 to finish or cancel it. The App manages the drain lease.
+
+Workers advertising `daemon.handover` also report `handover`. It is null when
+idle. During parking it shows the target worker PID, how many requests are
+held, and which requests and background passes the worker is waiting for.
+Writes, publish previews, cross-session diff, grep and files wait during parking.
+Status stays available. On abort the same worker runs parked requests in order
+on their original connections. On terminal stop it replies to each untouched
+frame by ID with retry-safe `Busy upgrading`.
 
 `daemon status` copies `config` from the daemon when available; it is absent
 when the daemon is down or an older daemon omits it. `generation`, `hash` and
@@ -296,6 +312,13 @@ current database and sidecars, restore a compatible
 [store recovery](docs/modules/store.md), install matching older CLI and daemon
 binaries together with a config they accept, then start. Work recorded after the
 backup is absent from the restored store.
+
+### Testing daemon changes
+
+Cargo integration tests run `git-stratad-test` under a temporary HOME. The
+worker checks its config, socket, both lock paths and data root before startup.
+The CLI archive and desktop bundle reject test workers and binaries linked with
+test seams. See the [daemon fixture guide](docs/modules/daemon.md#worker-fixtures).
 
 ### Dev install
 
@@ -741,6 +764,10 @@ git-strata publish --from "${S}:src/a.ts" --from "${S}:src/lib"
 #     close (NoSuchSession); never discard.
 ```
 
+Use `git-strata publish --dry-run --from "${S}:src/a.ts"` to checkpoint the
+selected content and see which repos a publish would commit. The CLI returns
+the daemon's plan before confirmation, commit or push.
+
 `diff --session S` outside a workspace and without `--repo` compares the one
 repo of S that has changes or checkpoints (`data.repo`); if several do, it is
 `InvalidInput` with `detail.reason = "repo"` and `detail.candidates`.
@@ -1037,6 +1064,7 @@ staging scene is listed by `daemon status` as `UnknownPush`.
 | `Unknown` (`client_timeout`) | the complete write may still run; inspect status, do not retry, `gc` or `rm` |
 | `Busy` (`pins_tightened`) | rerun the command with a fresh snapshot of the newly applied config; do not retry inside the old operation |
 | `Busy` (`reload_pending`) | rerun `config reload`; the current attempt continues (exit 3) |
+| `Busy upgrading` with `retry_safe: true` | The CLI retried the refused RPC until its budget expired. Run the same command again. |
 | `Busy` (`lock_wait`, `new`/`add` with `detail.retry_safe`) | the CLI already retried for `--timeout` (`detail.retries`, `detail.waited_ms`); nothing was created or changed: rerun, or pass `--timeout 0` to keep retrying |
 | `Busy` (other) | repo lock held; wait, retry later |
 | `NotTty` | hand the exact command to the human |
@@ -1148,7 +1176,7 @@ Flags, defaults and `data` shapes:
 | `diff [--base \| --session S \| --between A B] [--repo R]` | no |
 | `deps propose [--session S] [--repo R] [--switch] [--allow-cwd] [--allow-cwd-holders]` / `deps list [--repo R]` | no |
 | `deps approve ID [--sessions S,S] [--allow-cwd] [--allow-cwd-holders]` | yes |
-| `publish --from S:PATH... ` / `publish --assign FILE SESSION` | only when gated |
+| `publish [--dry-run] --from S:PATH...` / `publish --assign FILE SESSION` | only when gated |
 | `push REPO` | only when gated |
 | `sync [--session S] [--repo R]... [--check [--hook]] [--no-fetch] [--resolved PATH \| --keep PATH]... [--target HEAD --generation N] [--accept-diverged] [--allow-cwd] [--allow-cwd-holders] [--timeout SECS] [--progress]` | no (`--accept-diverged` only on the human's say-so) |
 | `assign --file PATH --session S` | no |

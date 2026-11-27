@@ -1023,6 +1023,9 @@ fn conflict_json_is_not_windowed() {
     // The daemon's Conflict detail (publish's whole list) passes through.
     let lv = Live::new(&["tool"], &base_files());
     let fake = FakeDaemon::start(&lv.home.socket(), |req| {
+        if req["method"] == "daemon_status" {
+            return json!({"id":req["id"],"ok":true,"data":{"features":[]}});
+        }
         let conflicts: Vec<Value> = (0..2000)
             .map(|i| json!({ "path": format!("f{i:04}.txt"), "sessions": ["s-a", "s-b"] }))
             .collect();
@@ -1037,7 +1040,7 @@ fn conflict_json_is_not_windowed() {
         vec!["conflicts"]
     );
     assert!(!r.stdout.contains("runcated"), "no window flag");
-    assert_eq!(fake.requests().len(), 1);
+    assert_eq!(fake.operations().len(), 1);
 }
 
 #[test]

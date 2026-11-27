@@ -24,7 +24,12 @@ use support::{FakeDaemon, Home, RepoSpec, Run, git};
 
 fn guarded_home() -> Home {
     let h = Home::new();
-    h.write_config(&[RepoSpec { name: "app", push: true, confirm: true, deploy_on_push: true }]);
+    h.write_config(&[RepoSpec {
+        name: "app",
+        push: true,
+        confirm: true,
+        deploy_on_push: true,
+    }]);
     h
 }
 
@@ -42,7 +47,14 @@ fn confirm_commands_refuse_non_tty() {
         &["publish", "--from", "s-aaaaaaaa:a.txt"],
         &["chain", "--repo", "app", "--restore"],
         &["chain", "--repo", "app", "--accept-origin", "replay"],
-        &["resolve", "--session", "s-aaaaaaaa", "--repo", "app", "--accept"],
+        &[
+            "resolve",
+            "--session",
+            "s-aaaaaaaa",
+            "--repo",
+            "app",
+            "--accept",
+        ],
         &["config", "relax", "app"],
         &["rm", "--session", "s-aaaaaaaa", "--discard"],
     ];
@@ -50,14 +62,22 @@ fn confirm_commands_refuse_non_tty() {
         let r = h.run(args);
         assert_eq!(r.err_code(), "NotTty", "{args:?}: {r:?}");
         assert_eq!(r.reason(), "not_tty", "{args:?}");
-        assert!(r.stderr.is_empty() || !r.stderr.contains("confirm"), "{args:?} showed a prompt: {r:?}");
+        assert!(
+            r.stderr.is_empty() || !r.stderr.contains("confirm"),
+            "{args:?} showed a prompt: {r:?}"
+        );
     }
     // Publish without --from on a non-TTY is no_batch, not a prompt.
     let r = h.run(&["publish"]);
     assert_eq!(r.err_code(), "InvalidInput");
     assert_eq!(r.reason(), "no_batch");
     std::thread::sleep(std::time::Duration::from_millis(50));
-    assert_eq!(d.connections(), 0, "a refused command connected: {:?}", d.requests());
+    assert_eq!(
+        d.connections(),
+        0,
+        "a refused command connected: {:?}",
+        d.requests()
+    );
 }
 
 #[test]
@@ -66,18 +86,33 @@ fn deploy_on_push_without_confirm_is_headless() {
     // A billing-api-like repo (deploy_on_push, confirm = false, push = false)
     // pushes and publishes without a terminal: the CLI connects.
     let h = Home::new();
-    h.write_config(&[RepoSpec { name: "api", push: false, confirm: false, deploy_on_push: true }]);
+    h.write_config(&[RepoSpec {
+        name: "api",
+        push: false,
+        confirm: false,
+        deploy_on_push: true,
+    }]);
     let d = FakeDaemon::start(&h.socket(), refuse_all);
-    for args in [&["push", "api"][..], &["publish", "--from", "s-aaaaaaaa:a.txt"][..]] {
+    for args in [
+        &["push", "api"][..],
+        &["publish", "--from", "s-aaaaaaaa:a.txt"][..],
+    ] {
         let r = h.run(args);
         assert_ne!(r.err_code(), "NotTty", "{args:?}: {r:?}");
     }
     // push reaches the daemon (publish --from stops on the unknown session
     // before connecting, but not on NotTty).
-    assert!(d.requests().iter().any(|q| q["method"] == "push"), "push did not connect: {:?}", d.requests());
+    assert!(
+        d.requests().iter().any(|q| q["method"] == "push"),
+        "push did not connect: {:?}",
+        d.requests()
+    );
 }
 
 fn superseded(req: &Value) -> Value {
+    if req["method"] == "daemon_status" {
+        return json!({"id":req["id"],"ok":true,"data":{"features":[]}});
+    }
     assert_eq!(req["method"], "deps_approve");
     json!({
         "id": req["id"],
@@ -102,7 +137,7 @@ fn superseded_proposal_is_not_auto_approved() {
     assert_eq!(r.err_code(), "NoSuchProposal", "{r:?}");
     assert!(r.stderr.contains("superseded by proposal 2"), "{r:?}");
     assert!(r.stderr.contains("replacement"), "{r:?}");
-    let reqs = d.requests();
+    let reqs = d.operations();
     assert_eq!(reqs.len(), 1, "approved again: {reqs:?}");
     assert_eq!(reqs[0]["method"], "deps_approve");
     assert_eq!(reqs[0]["params"]["proposal"], 1);
@@ -114,10 +149,34 @@ fn resolve_and_chain_require_an_explicit_choice() {
     let h = guarded_home();
     let d = FakeDaemon::start(&h.socket(), refuse_all);
     for (args, reason) in [
-        (vec!["resolve", "--session", "s-aaaaaaaa", "--repo", "app"], "no_choice"),
-        (vec!["resolve", "--session", "s-aaaaaaaa", "--repo", "app", "--abandon", "--accept"], "both_choices"),
+        (
+            vec!["resolve", "--session", "s-aaaaaaaa", "--repo", "app"],
+            "no_choice",
+        ),
+        (
+            vec![
+                "resolve",
+                "--session",
+                "s-aaaaaaaa",
+                "--repo",
+                "app",
+                "--abandon",
+                "--accept",
+            ],
+            "both_choices",
+        ),
         (vec!["chain", "--repo", "app"], "no_choice"),
-        (vec!["chain", "--repo", "app", "--accept-origin", "drop", "--restore"], "both_choices"),
+        (
+            vec![
+                "chain",
+                "--repo",
+                "app",
+                "--accept-origin",
+                "drop",
+                "--restore",
+            ],
+            "both_choices",
+        ),
     ] {
         // Even on a terminal: the choice is checked first.
         let r = h.run_tty(&args);
@@ -131,17 +190,47 @@ fn resolve_and_chain_require_an_explicit_choice() {
     git(&repo, h.path(), &["init", "-q", "-b", "main"]);
     let tree = git(&repo, h.path(), &["write-tree"]);
     let a = git(&repo, h.path(), &["commit-tree", &tree, "-m", "a"]);
-    let b = git(&repo, h.path(), &["commit-tree", &tree, "-p", &a, "-m", "origin b"]);
-    let c = git(&repo, h.path(), &["commit-tree", &tree, "-p", &a, "-m", "local c"]);
-    git(&repo, h.path(), &["update-ref", "refs/strata/remotes/origin/main", &b]);
-    git(&repo, h.path(), &["update-ref", "refs/strata/publish/main", &c]);
-    git(&repo, h.path(), &["update-ref", "refs/strata/anchor/main", &a]);
+    let b = git(
+        &repo,
+        h.path(),
+        &["commit-tree", &tree, "-p", &a, "-m", "origin b"],
+    );
+    let c = git(
+        &repo,
+        h.path(),
+        &["commit-tree", &tree, "-p", &a, "-m", "local c"],
+    );
+    git(
+        &repo,
+        h.path(),
+        &["update-ref", "refs/strata/remotes/origin/main", &b],
+    );
+    git(
+        &repo,
+        h.path(),
+        &["update-ref", "refs/strata/publish/main", &c],
+    );
+    git(
+        &repo,
+        h.path(),
+        &["update-ref", "refs/strata/anchor/main", &a],
+    );
     let r = h.run_tty(&["chain", "--repo", "app", "--restore"]);
     assert_eq!(r.err_code(), "InvalidInput", "{r:?}");
     assert_eq!(r.reason(), "not_ancestor", "{r:?}");
-    let refs = git(&repo, h.path(), &["for-each-ref", "--format=%(refname) %(objectname)"]);
-    assert!(refs.contains(&format!("refs/strata/publish/main {c}")), "{refs}");
-    assert!(refs.contains(&format!("refs/strata/remotes/origin/main {b}")), "{refs}");
+    let refs = git(
+        &repo,
+        h.path(),
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    assert!(
+        refs.contains(&format!("refs/strata/publish/main {c}")),
+        "{refs}"
+    );
+    assert!(
+        refs.contains(&format!("refs/strata/remotes/origin/main {b}")),
+        "{refs}"
+    );
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert_eq!(d.connections(), 0, "{:?}", d.requests());
 }
@@ -164,7 +253,11 @@ fn guarded_live() -> Live {
 }
 
 fn origin_main(lv: &Live) -> String {
-    git(&lv.sb.join("app-origin.git"), lv.home.path(), &["rev-parse", "refs/heads/main"])
+    git(
+        &lv.sb.join("app-origin.git"),
+        lv.home.path(),
+        &["rev-parse", "refs/heads/main"],
+    )
 }
 
 /// A session with an unpublished, checkpointed change; a Pending proposal
@@ -174,12 +267,16 @@ fn fixture(lv: &Live, core: &Core) -> Fx {
     let ws = lv.ws(&s, "app");
     write(&ws, "a.txt", b"two\n");
     let cp = lv.run_in(&ws, &["checkpoint", "-m", "unpublished"]).ok();
-    let cid = cp["checkpoints"][0]["id"].as_u64().unwrap_or_else(|| panic!("{cp}"));
+    let cid = cp["checkpoints"][0]["id"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{cp}"));
     let repo = RepoName::try_from("app".to_string()).unwrap();
     let main = lv.main("app");
     let head = git(&main, lv.home.path(), &["rev-parse", "HEAD"]);
     let tree = git(&main, lv.home.path(), &["rev-parse", "HEAD^{tree}"]);
-    let base = core.store.session(&s).unwrap().unwrap().manifest.repos[&repo].base.clone();
+    let base = core.store.session(&s).unwrap().unwrap().manifest.repos[&repo]
+        .base
+        .clone();
     let rc = core.config.repos[&repo].clone();
     let ctx = strata_deps::Ctx {
         store: &core.store,
@@ -190,7 +287,11 @@ fn fixture(lv: &Live, core: &Core) -> Fx {
         env: &core.env,
         locks: &core.locks,
     };
-    let to = if base.deps.as_str() == "e".repeat(64) { "d".repeat(64) } else { "e".repeat(64) };
+    let to = if base.deps.as_str() == "e".repeat(64) {
+        "d".repeat(64)
+    } else {
+        "e".repeat(64)
+    };
     let p = strata_deps::propose(
         &ctx,
         strata_deps::ProposeArgs {
@@ -206,17 +307,31 @@ fn fixture(lv: &Live, core: &Core) -> Fx {
     )
     .expect("pending proposal");
     assert_eq!(p.state, strata_deps::ProposalState::Pending);
-    Fx { s, ws, pid: p.id.get(), cid, origin_main: origin_main(lv) }
+    Fx {
+        s,
+        ws,
+        pid: p.id.get(),
+        cid,
+        origin_main: origin_main(lv),
+    }
 }
 
 /// The three checks: the session is there, the proposal is still Pending,
 /// origin's branch did not move.
 fn untouched(lv: &Live, core: &Core, fx: &Fx, what: &str) {
     let rec = core.store.session(&fx.s).unwrap().expect("session row");
-    assert_ne!(rec.lifecycle, strata_store::Lifecycle::Removed, "{what}: session removed");
+    assert_ne!(
+        rec.lifecycle,
+        strata_store::Lifecycle::Removed,
+        "{what}: session removed"
+    );
     let id = strata_types::ProposalId::try_from(fx.pid).unwrap();
     let p = strata_deps::get_proposal(&core.store, id).unwrap();
-    assert_eq!(p.state, strata_deps::ProposalState::Pending, "{what}: proposal moved");
+    assert_eq!(
+        p.state,
+        strata_deps::ProposalState::Pending,
+        "{what}: proposal moved"
+    );
     assert_eq!(origin_main(lv), fx.origin_main, "{what}: origin moved");
 }
 
@@ -224,7 +339,12 @@ fn untouched(lv: &Live, core: &Core, fx: &Fx, what: &str) {
 fn confirm_cmds(fx: &Fx) -> Vec<Vec<String>> {
     let s = fx.s.as_str();
     [
-        vec!["rm".to_string(), "--session".into(), s.into(), "--discard".into()],
+        vec![
+            "rm".to_string(),
+            "--session".into(),
+            s.into(),
+            "--discard".into(),
+        ],
         vec!["deps".into(), "approve".into(), fx.pid.to_string()],
         vec!["push".into(), "app".into()],
         vec!["publish".into(), "--from".into(), format!("{s}:a.txt")],
@@ -249,7 +369,11 @@ fn pending_proposals_ride_in_the_envelope() {
         for args in [vec!["diff"], vec!["status"]] {
             let r = lv.run_in(&fx.ws, &args);
             let d = r.ok();
-            assert_eq!(d["pending_proposals"], json!([{ "id": fx.pid, "repo": "app" }]), "{args:?}: {d}");
+            assert_eq!(
+                d["pending_proposals"],
+                json!([{ "id": fx.pid, "repo": "app" }]),
+                "{args:?}: {d}"
+            );
             // stderr is not a terminal here: no duplicate notice line.
             assert!(!r.stderr.contains("pending proposal"), "{args:?}: {r:?}");
         }
@@ -267,9 +391,16 @@ fn non_tty_refused_before_prompt() {
         let seen = lv.requests.lock().unwrap().len();
         for cmd in confirm_cmds(&fx) {
             let args = strs(&cmd);
-            for r in [lv.run_in(&fx.ws, &args), lv.run_piped(&fx.ws, &args, b"y\n")] {
+            for r in [
+                lv.run_in(&fx.ws, &args),
+                lv.run_piped(&fx.ws, &args, b"y\n"),
+            ] {
                 assert_eq!(r.err_code(), "NotTty", "{args:?}: {r:?}");
-                assert!(log.shown().is_empty(), "{args:?} prompted: {:?}", log.shown());
+                assert!(
+                    log.shown().is_empty(),
+                    "{args:?} prompted: {:?}",
+                    log.shown()
+                );
             }
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -278,7 +409,16 @@ fn non_tty_refused_before_prompt() {
         // no `publish`, no prompt. Every other command sends nothing.
         assert_eq!(
             lv.requests.lock().unwrap()[seen..],
-            ["checkpoint", "publish_plan", "checkpoint", "publish_plan"],
+            [
+                "daemon_status",
+                "checkpoint",
+                "daemon_status",
+                "publish_plan",
+                "daemon_status",
+                "checkpoint",
+                "daemon_status",
+                "publish_plan"
+            ],
             "a refused command reached the daemon"
         );
         untouched(&lv, core, &fx, "non-tty");
@@ -289,7 +429,11 @@ fn non_tty_refused_before_prompt() {
         let once = |args: &[&str]| -> Run {
             let n = log.shown().len();
             let r = lv.run_tty_env(&lv.sb, args, &[]);
-            assert_eq!(log.shown().len(), n + 1, "{args:?} did not prompt exactly once: {r:?}");
+            assert_eq!(
+                log.shown().len(),
+                n + 1,
+                "{args:?} did not prompt exactly once: {r:?}"
+            );
             r
         };
         // deps approve: one prompt; the rollout after it needs a real
@@ -303,15 +447,34 @@ fn non_tty_refused_before_prompt() {
         // push needs a chain ahead of origin: one more commit on the
         // local publish chain (as a later publish without push leaves it).
         let main = lv.main("app");
-        let top = git(&main, lv.home.path(), &["rev-parse", "refs/strata/publish/main"]);
-        let tree = git(&main, lv.home.path(), &["rev-parse", &format!("{top}^{{tree}}")]);
-        let next = git(&main, lv.home.path(), &["commit-tree", &tree, "-p", &top, "-m", "next"]);
-        git(&main, lv.home.path(), &["update-ref", "refs/strata/publish/main", &next, &top]);
+        let top = git(
+            &main,
+            lv.home.path(),
+            &["rev-parse", "refs/strata/publish/main"],
+        );
+        let tree = git(
+            &main,
+            lv.home.path(),
+            &["rev-parse", &format!("{top}^{{tree}}")],
+        );
+        let next = git(
+            &main,
+            lv.home.path(),
+            &["commit-tree", &tree, "-p", &top, "-m", "next"],
+        );
+        git(
+            &main,
+            lv.home.path(),
+            &["update-ref", "refs/strata/publish/main", &next, &top],
+        );
         once(&["push", "app"]).ok();
         assert_eq!(origin_main(&lv), next, "push did not move origin");
         once(&["rm", "--session", fx.s.as_str(), "--discard"]).ok();
         let rec = core.store.session(&fx.s).unwrap();
-        assert!(rec.is_none_or(|r| r.lifecycle == strata_store::Lifecycle::Removed), "rm --discard did not remove");
+        assert!(
+            rec.is_none_or(|r| r.lifecycle == strata_store::Lifecycle::Removed),
+            "rm --discard did not remove"
+        );
     });
 }
 
@@ -346,8 +509,47 @@ fn non_tty_publish_plan_preserves_busy_without_prompting() {
         assert!(core.store.publishes().unwrap().is_empty());
         assert_eq!(
             lv.requests.lock().unwrap()[seen..],
+            [
+                "daemon_status",
+                "checkpoint",
+                "daemon_status",
+                "publish_plan"
+            ]
+        );
+    });
+}
+
+#[test]
+fn c1_publish_dry_run_returns_the_real_plan_and_sends_no_publish() {
+    let lv = guarded_live();
+    lv.serve_scripted(vec![], |core, log| {
+        let session = lv.new_session("preview", "app");
+        let workspace = lv.ws(&session, "app");
+        write(&workspace, "a.txt", b"changed for preview\n");
+        let start = lv.requests.lock().unwrap().len();
+        let before = origin_main(&lv);
+        let result = lv.run_in(
+            &workspace,
+            &[
+                "publish",
+                "--dry-run",
+                "--from",
+                &format!("{session}:app:a.txt"),
+            ],
+        );
+        assert_eq!(result.ok()["repos"], json!(["app"]));
+        assert!(result.ok().get("plan_error").is_none());
+        let requests = lv.requests.lock().unwrap();
+        assert_eq!(
+            requests[start..]
+                .iter()
+                .filter(|m| *m != "daemon_status")
+                .collect::<Vec<_>>(),
             ["checkpoint", "publish_plan"]
         );
+        assert!(log.shown().is_empty());
+        assert!(core.store.publishes().unwrap().is_empty());
+        assert_eq!(origin_main(&lv), before);
     });
 }
 
@@ -364,7 +566,8 @@ fn non_tty_rerun_of_a_landed_guarded_repo_is_not_gated() {
         write(&ws, "a.txt", b"two\n");
         let from = format!("{s}:a.txt");
         let before = origin_main(&lv);
-        lv.run_tty_env(&lv.sb, &["publish", "--from", &from], &[]).ok();
+        lv.run_tty_env(&lv.sb, &["publish", "--from", &from], &[])
+            .ok();
         assert_eq!(log.shown().len(), 1, "the first publish prompts once");
         let landed = origin_main(&lv);
         assert_ne!(landed, before, "publish did not push");
@@ -375,20 +578,44 @@ fn non_tty_rerun_of_a_landed_guarded_repo_is_not_gated() {
         assert_eq!(r["commits"], json!({}), "{r:#}");
         assert_eq!(log.shown().len(), 1, "the re-run prompted");
         assert_eq!(origin_main(&lv), landed);
-        assert_eq!(lv.requests.lock().unwrap()[seen..], ["checkpoint", "publish_plan", "publish"]);
+        assert_eq!(
+            lv.requests.lock().unwrap()[seen..],
+            [
+                "daemon_status",
+                "checkpoint",
+                "daemon_status",
+                "publish_plan",
+                "daemon_status",
+                "publish"
+            ]
+        );
 
         write(&ws, "a.txt", b"three\n");
         let seen = lv.requests.lock().unwrap().len();
         let r = lv.run_in(&ws, &["publish", "--from", &from]);
         assert_eq!(r.err_code(), "NotTty", "{r:?}");
         assert_eq!(log.shown().len(), 1, "a refused publish prompted");
-        assert_eq!(lv.requests.lock().unwrap()[seen..], ["checkpoint", "publish_plan"]);
+        assert_eq!(
+            lv.requests.lock().unwrap()[seen..],
+            [
+                "daemon_status",
+                "checkpoint",
+                "daemon_status",
+                "publish_plan"
+            ]
+        );
         assert_eq!(origin_main(&lv), landed, "a refused publish pushed");
     });
 }
 
 /// Every run's verdict: never a success; a prompt only before `NotConfirmed`.
-fn judge(r: &Run, shown_before: usize, log: &PromptLog, what: &str, codes: &mut std::collections::BTreeSet<String>) {
+fn judge(
+    r: &Run,
+    shown_before: usize,
+    log: &PromptLog,
+    what: &str,
+    codes: &mut std::collections::BTreeSet<String>,
+) {
     let after = log.shown().len();
     assert!(r.code != 0, "{what} succeeded: {r:?}");
     let v = r.env();
@@ -405,7 +632,10 @@ fn judge(r: &Run, shown_before: usize, log: &PromptLog, what: &str, codes: &mut 
 }
 
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
 }
 
 const ENV_CHILD: &str = "GS_GATE_ENV_VALUE";
@@ -422,12 +652,25 @@ fn values_for(long: &str, n: usize, fx: &Fx, possible: Option<String>) -> Vec<St
         "between" => vec![s.clone(), s.clone()],
         _ => vec![possible.unwrap_or_else(|| "x".into())],
     };
-    (0..n.max(1)).map(|i| v[i.min(v.len() - 1)].clone()).collect()
+    (0..n.max(1))
+        .map(|i| v[i.min(v.len() - 1)].clone())
+        .collect()
 }
 
 /// (subcommand path, tokens) for every named argument of every subcommand.
-fn every_flag(fx: &Fx) -> (Vec<Vec<String>>, std::collections::BTreeMap<String, Vec<String>>) {
-    fn walk(c: &clap::Command, path: String, fx: &Fx, out: &mut Vec<Vec<String>>, bools: &mut std::collections::BTreeMap<String, Vec<String>>) {
+fn every_flag(
+    fx: &Fx,
+) -> (
+    Vec<Vec<String>>,
+    std::collections::BTreeMap<String, Vec<String>>,
+) {
+    fn walk(
+        c: &clap::Command,
+        path: String,
+        fx: &Fx,
+        out: &mut Vec<Vec<String>>,
+        bools: &mut std::collections::BTreeMap<String, Vec<String>>,
+    ) {
         for a in c.get_arguments() {
             let id = a.get_id().as_str();
             if id == "help" || id == "version" {
@@ -437,23 +680,39 @@ fn every_flag(fx: &Fx) -> (Vec<Vec<String>>, std::collections::BTreeMap<String, 
             let mut t = vec![format!("--{long}")];
             if a.get_action().takes_values() {
                 let n = a.get_num_args().map(|r| r.min_values()).unwrap_or(1);
-                let possible = a.get_possible_values().first().map(|p| p.get_name().to_string());
+                let possible = a
+                    .get_possible_values()
+                    .first()
+                    .map(|p| p.get_name().to_string());
                 t.extend(values_for(long, n, fx, possible));
             } else {
-                bools.entry(path.clone()).or_default().push(format!("--{long}"));
+                bools
+                    .entry(path.clone())
+                    .or_default()
+                    .push(format!("--{long}"));
             }
             if !out.contains(&t) {
                 out.push(t);
             }
         }
         for sc in c.get_subcommands() {
-            let p = if path.is_empty() { sc.get_name().to_string() } else { format!("{path} {}", sc.get_name()) };
+            let p = if path.is_empty() {
+                sc.get_name().to_string()
+            } else {
+                format!("{path} {}", sc.get_name())
+            };
             walk(sc, p, fx, out, bools);
         }
     }
     let mut out = Vec::new();
     let mut bools = std::collections::BTreeMap::new();
-    walk(&git_strata::args::Cli::command(), String::new(), fx, &mut out, &mut bools);
+    walk(
+        &git_strata::args::Cli::command(),
+        String::new(),
+        fx,
+        &mut out,
+        &mut bools,
+    );
     (out, bools)
 }
 
@@ -500,7 +759,12 @@ fn no_env_or_flag_bypass() {
     }
     for value in ["1", "true", "yes", "on", "0"] {
         let out = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "no_env_or_flag_bypass", "--nocapture", "--test-threads=1"])
+            .args([
+                "--exact",
+                "no_env_or_flag_bypass",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .envs(names.iter().map(|n| (n.as_str(), value)))
             .env(ENV_CHILD, value)
             .output()
@@ -520,16 +784,28 @@ fn no_env_or_flag_bypass() {
         let (flags, bools) = every_flag(&fx);
         assert!(flags.len() >= 15, "{flags:?}");
         let mut runs = 0;
+        let mut check_flags = |args: &[String]| {
+            let shown = log.shown().len();
+            let start = lv.requests.lock().unwrap().len();
+            let result = lv.run_tty_env(&fx.ws, &strs(args), &[]);
+            if args[0] == "publish" && args.iter().any(|a| a == "--dry-run") {
+                assert_eq!(result.ok()["repos"], json!(["app"]));
+                let requests = lv.requests.lock().unwrap();
+                assert_eq!(requests[start..].iter().filter(|m| *m != "daemon_status").collect::<Vec<_>>(), ["checkpoint", "publish_plan"]);
+                assert_eq!(log.shown().len(), shown);
+                assert!(core.store.publishes().unwrap().is_empty());
+            } else {
+                judge(&result, shown, log, &format!("{args:?}"), &mut codes);
+            }
+            runs += 1;
+        };
         // (b) flags: each named argument of every subcommand on each
         // confirm command, then all of the command's own booleans at once.
         for cmd in confirm_cmds(&fx) {
             for f in &flags {
                 let mut args = cmd.clone();
                 args.extend(f.iter().cloned());
-                let n = log.shown().len();
-                let r = lv.run_tty_env(&fx.ws, &strs(&args), &[]);
-                judge(&r, n, log, &format!("{args:?}"), &mut codes);
-                runs += 1;
+                check_flags(&args);
             }
             let mut args = cmd.clone();
             for b in bools.get(&sub_path(&cmd)).cloned().unwrap_or_default() {
@@ -537,10 +813,7 @@ fn no_env_or_flag_bypass() {
                     args.push(b);
                 }
             }
-            let n = log.shown().len();
-            let r = lv.run_tty_env(&fx.ws, &strs(&args), &[]);
-            judge(&r, n, log, &format!("all booleans {args:?}"), &mut codes);
-            runs += 1;
+            check_flags(&args);
         }
         untouched(&lv, core, &fx, "flags");
 
@@ -590,13 +863,34 @@ fn release_daemon_has_no_test_seams() {
     for pkg in ["strata-daemon", "git-strata"] {
         let out = Command::new(&cargo)
             .current_dir(workspace_root())
-            .args(["tree", "-p", pkg, "-e", "features", "--edges", "normal", "--target", "aarch64-apple-darwin", "--offline"])
+            .args([
+                "tree",
+                "-p",
+                pkg,
+                "-e",
+                "features",
+                "--edges",
+                "normal",
+                "--target",
+                "aarch64-apple-darwin",
+                "--offline",
+            ])
             .output()
             .unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
-        assert!(out.status.success(), "{pkg}: {}", String::from_utf8_lossy(&out.stderr));
-        assert!(text.contains("strata-confirm feature \"default\""), "{pkg}: {text}");
-        assert!(!text.contains("feature \"test-seams\""), "{pkg} release build has test seams:\n{text}");
+        assert!(
+            out.status.success(),
+            "{pkg}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            text.contains("strata-confirm feature \"default\""),
+            "{pkg}: {text}"
+        );
+        assert!(
+            !text.contains("feature \"test-seams\""),
+            "{pkg} release build has test seams:\n{text}"
+        );
     }
 }
 
@@ -615,7 +909,8 @@ fn non_tty_publish_refuses_a_guarded_repo_the_plan_left_out() {
         write(&ws, "a.txt", b"two\n");
         let from = format!("{s}:a.txt");
         let before = origin_main(&lv);
-        lv.run_tty_env(&lv.sb, &["publish", "--from", &from], &[]).ok();
+        lv.run_tty_env(&lv.sb, &["publish", "--from", &from], &[])
+            .ok();
         assert_eq!(log.shown().len(), 1, "the first publish prompts once");
         let landed = origin_main(&lv);
         assert_ne!(landed, before, "publish did not push");
@@ -626,18 +921,44 @@ fn non_tty_publish_refuses_a_guarded_repo_the_plan_left_out() {
         lv.on_request.lock().unwrap().push((
             "publish".into(),
             Box::new(move |core: &Core| {
-                let g = core.store.publishes().unwrap().pop().expect("the landed row").group;
-                let id = core.store.record_publish(&g, std::time::SystemTime::now()).unwrap();
-                let outcome = json!({ "commit": other, "paths": ["a.txt"] });
-                assert!(core
+                let g = core
                     .store
-                    .set_publish_phase(id, strata_store::PublishPhase::Running, strata_store::PublishPhase::Done, Some(&outcome), std::time::SystemTime::now())
-                    .unwrap());
+                    .publishes()
+                    .unwrap()
+                    .pop()
+                    .expect("the landed row")
+                    .group;
+                let id = core
+                    .store
+                    .record_publish(&g, std::time::SystemTime::now())
+                    .unwrap();
+                let outcome = json!({ "commit": other, "paths": ["a.txt"] });
+                assert!(
+                    core.store
+                        .set_publish_phase(
+                            id,
+                            strata_store::PublishPhase::Running,
+                            strata_store::PublishPhase::Done,
+                            Some(&outcome),
+                            std::time::SystemTime::now()
+                        )
+                        .unwrap()
+                );
             }),
         ));
         let seen = lv.requests.lock().unwrap().len();
         let r = lv.run_in(&ws, &["publish", "--from", &from]);
-        assert_eq!(lv.requests.lock().unwrap()[seen..], ["checkpoint", "publish_plan", "publish"]);
+        assert_eq!(
+            lv.requests.lock().unwrap()[seen..],
+            [
+                "daemon_status",
+                "checkpoint",
+                "daemon_status",
+                "publish_plan",
+                "daemon_status",
+                "publish"
+            ]
+        );
         assert_eq!(r.err_code(), "NotConfirmed", "{r:?}");
         let e = r.env();
         assert_eq!(e["error"]["detail"]["reason"], "plan_changed", "{e:#}");
@@ -645,7 +966,15 @@ fn non_tty_publish_refuses_a_guarded_repo_the_plan_left_out() {
         assert_eq!(log.shown().len(), 1, "the non-TTY publish prompted");
         assert_eq!(origin_main(&lv), landed, "nothing pushed");
         let main = lv.main("app");
-        assert_eq!(git(&main, lv.home.path(), &["rev-parse", "refs/strata/publish/main"]), landed, "no new commit");
+        assert_eq!(
+            git(
+                &main,
+                lv.home.path(),
+                &["rev-parse", "refs/strata/publish/main"]
+            ),
+            landed,
+            "no new commit"
+        );
     });
 }
 
@@ -660,13 +989,24 @@ fn closed_session_on_a_non_tty_is_no_such_session() {
         let s = lv.new_session("T-closed", "app");
         lv.run_in(&lv.sb, &["rm", "--session", s.as_str()]).ok();
         let rec = core.store.session(&s).unwrap();
-        assert!(rec.is_none_or(|r| r.lifecycle == strata_store::Lifecycle::Removed), "rm did not remove");
+        assert!(
+            rec.is_none_or(|r| r.lifecycle == strata_store::Lifecycle::Removed),
+            "rm did not remove"
+        );
 
         let seen = lv.requests.lock().unwrap().len();
         let r = lv.run_in(&lv.sb, &["publish", "--from", &format!("{s}:a.txt")]);
         assert_eq!(r.err_code(), "NoSuchSession", "{r:?}");
         std::thread::sleep(Duration::from_millis(50));
-        assert!(lv.requests.lock().unwrap()[seen..].is_empty(), "the retry reached the daemon: {:?}", &lv.requests.lock().unwrap()[seen..]);
-        assert!(log.shown().is_empty(), "the retry prompted: {:?}", log.shown());
+        assert!(
+            lv.requests.lock().unwrap()[seen..].is_empty(),
+            "the retry reached the daemon: {:?}",
+            &lv.requests.lock().unwrap()[seen..]
+        );
+        assert!(
+            log.shown().is_empty(),
+            "the retry prompted: {:?}",
+            log.shown()
+        );
     });
 }

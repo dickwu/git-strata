@@ -1,0 +1,22 @@
+[paths]
+root = "$VOLUME/data"
+
+[repo.tool]
+path = "$VOLUME/tool"
+default_branch = "main"
+deps_dirs = []
+
+[repo.tool.publish]
+branch = "main"
+push = true
+confirm = true
+
+[repo.front]
+path = "$VOLUME/front"
+default_branch = "main"
+deps_dirs = []
+
+[repo.front.publish]
+branch = "main"
+push = false
+confirm = true

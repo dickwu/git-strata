@@ -102,6 +102,7 @@ fn removed_takes_refuse_at_shutdown_like_a_closed_lock() {
     let env = InstallEnv {
         path: String::new(),
         timeout: Duration::ZERO,
+        child_env: Vec::new(),
     };
     let sessions = Sessions::open(&config, &gits, &store, &lock, &env, &Before).unwrap();
     assert!(sessions.refuse_if_shut_down().is_ok());

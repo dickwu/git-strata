@@ -1,0 +1,98 @@
+name: Wire compatibility
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  releases:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.window.outputs.versions }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Check matrix selection and preview assertions
+        run: python3 scripts/tests/test-release-contract.py
+      - id: window
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          floor=$(sed -n 's/^pub const MIN_CLIENT: &str = "\([0-9.]*\)";/\1/p' crates/strata-types/src/lib.rs)
+          git tag --merged HEAD^ > "$RUNNER_TEMP/reachable"
+          gh api --paginate repos/dickwu/git-strata/releases --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' > "$RUNNER_TEMP/published"
+          versions=$(python3 scripts/tests/release-contract.py --matrix "$floor" "$RUNNER_TEMP/published" "$RUNNER_TEMP/reachable")
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+
+  contract:
+    needs: releases
+    runs-on: macos-15
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.releases.outputs.versions) }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      C1_RELEASE: ${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check out the unpublished floor tag
+        if: matrix.source == 'tag'
+        uses: actions/checkout@v5
+        with:
+          repository: dickwu/git-strata
+          ref: refs/tags/v0.3.0
+          path: c1-floor-src
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the tag and build its CLI and daemon
+        if: matrix.source == 'tag'
+        working-directory: c1-floor-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$C1_RELEASE" = 0.3.0
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$(git rev-parse --verify 'refs/tags/v0.3.0^{commit}')"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse --verify 'fbc6a76^{commit}')"
+          target="$RUNNER_TEMP/c1-floor-build"
+          cargo build --locked --release --target-dir "$target" -p git-strata -p strata-daemon --bin git-strata --bin git-stratad
+          bin="$RUNNER_TEMP/c1-release/git-strata-$C1_RELEASE-aarch64-apple-darwin/bin"
+          mkdir -p "$bin"
+          cp "$target/release/git-strata" "$target/release/git-stratad" "$bin/"
+      - name: Fetch and verify the released CLI and daemon
+        if: matrix.source == 'tarball'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          package="git-strata-$C1_RELEASE-aarch64-apple-darwin"
+          mkdir "$RUNNER_TEMP/c1-release"
+          cd "$RUNNER_TEMP/c1-release"
+          gh release download "v$C1_RELEASE" --repo dickwu/git-strata \
+            --pattern "$package.tar.gz" --pattern "$package.tar.gz.sha256"
+          shasum -a 256 -c "$package.tar.gz.sha256"
+          tar -xzf "$package.tar.gz" "$package/bin/git-strata" "$package/bin/git-stratad"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the fixture worker and check the shared RPC corpus
+        run: |
+          cargo build --locked -p strata-daemon --features test-seams --bin git-stratad-test
+          cargo test --locked -p strata-daemon --test rpc
+      - name: Exercise both CLI and daemon directions
+        run: |
+          cargo test --locked -p git-strata --lib --test upgrade_wire -- --test-threads=1
+          cargo test --locked -p git-strata --test upgrade_wire c1_released_binaries -- --exact --ignored --nocapture

@@ -6,6 +6,7 @@
     "truncated": false
   },
   "draining": null,
+  "handover": null,
   "holds": [],
   "inflight": [],
   "pid": 4242,

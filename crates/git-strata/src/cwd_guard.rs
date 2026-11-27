@@ -9,7 +9,9 @@ pub fn caller_pids() -> Vec<i32> {
     let mut pid = std::process::id() as i32;
     while pid > 0 && out.len() < 64 && !out.contains(&pid) {
         out.push(pid);
-        let Some(parent) = strata_deps::process_parent(pid) else { break };
+        let Some(parent) = strata_deps::process_parent(pid) else {
+            break;
+        };
         pid = parent;
     }
     out
@@ -135,7 +137,8 @@ pub fn local_sync(ctx: &Ctx, params: &Value, args: &CwdArgs, cwd: &Path) -> Resu
 
 pub fn deps_call(ctx: &Ctx, method: &str, mut params: Value, args: &CwdArgs) -> Result<Value> {
     add(&mut params, args);
-    match ctx.call(method, params.clone(), Kind::Write) {
+    let mut op = ctx.begin_call(method, Kind::Write, None)?;
+    match op.send(&params).map_err(crate::rpc::CallError::into_error) {
         Err(e) if rejected(&e) => {
             // Old daemons lack the final mover guard; refuse visible cwd
             // holders locally before sending a legacy request.
@@ -155,7 +158,7 @@ pub fn deps_call(ctx: &Ctx, method: &str, mut params: Value, args: &CwdArgs) -> 
                 Ok(())
             })?;
             strip(&mut params);
-            ctx.call(method, params, Kind::Write)
+            op.send(&params).map_err(crate::rpc::CallError::into_error)
         }
         other => other,
     }
@@ -204,6 +207,7 @@ fn planned_deps_workspaces(
     let env = strata_deps::InstallEnv {
         path: String::new(),
         timeout: std::time::Duration::ZERO,
+        child_env: Vec::new(),
     };
     let deps = strata_deps::Ctx {
         store,

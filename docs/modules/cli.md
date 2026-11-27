@@ -235,9 +235,10 @@ pub enum DiffPreview {
 - `running`：daemon 是否在听 socket。没在跑时 cli 本地造这份对象，`running` 为 false，`holders` 与 `unknown_publishes` 为空数组，不假装知道锁。
 - `session`：cwd 能解析出会话才有，否则省略。daemon 回答了时，这个查找（读 config、开 store）放在另一个线程里，最多等 2 秒（`STATUS_LOOKUP_WAIT`）；超时就省略 `session`，加 `"session_lookup": "timed_out"`，信封照常 `ok`。SessionStart 钩子不会因为 store 一时读不动而卡住。daemon 没在跑时直接查。
 - `holders`：谁持着哪把 repo 写锁、从什么时候起。daemon 在跑时由 `daemon_status` 填。
-- `features`：daemon 支持的扩展（daemon.md D38，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity", "daemon_status.volume_name", "daemon.drain", "new.fetch_skip"]`，与 `strata_daemon::FEATURES` 同序），daemon 在跑时原样透传。旧 daemon 可能没有这个键。`publish.auto_close` 表示 publish / push 的回复带 auto-close 的结果。`daemon_status.activity` 表示 daemon 的回复带下一条的状态栏字段，`daemon_status.volume_name` 表示其中的 `volume` 还带 `path`、`mount`、`name`。`daemon.drain` 表示 daemon 支持桌面应用的停机租约。
+- `features`：daemon 支持的扩展（daemon.md D38，现在是 `["new.agent", "session.mark", "publish.auto_close", "session.ports", "status.upstream", "sync", "client.timeout", "old_tree.yield", "sync.cwd_guard", "deps.cwd_guard", "publish.message", "new.base", "rebase.quiet_scope", "config.reload", "daemon_status.activity", "daemon_status.volume_name", "daemon.drain", "new.fetch_skip", "envelope.client", "daemon.handover"]`，与 `strata_daemon::FEATURES` 同序），daemon 在跑时原样透传。旧 daemon 可能没有这个键。`publish.auto_close` 表示 publish / push 的回复带 auto-close 的结果。`daemon_status.activity` 表示 daemon 的回复带下一条的状态栏字段，`daemon_status.volume_name` 表示其中的 `volume` 还带 `path`、`mount`、`name`。`daemon.drain` 表示 daemon 支持桌面应用的停机租约。
 - `activity`、`busy`、`volume`、`scan`、`version`、`pid`、`started`：状态栏字段（feature `daemon_status.activity`，见 daemon.md Status bar fields），daemon 回了哪个就原样透传哪个；旧 daemon 或 daemon 没在跑时省略。`activity` 是在跑的长任务；`busy` 是请求收到的 `Busy`（`{total, recent, truncated}`，`recent` 只留最近 10 分钟）；`volume` 是数据根所在卷的 `{free, size, as_of}`（字节，还没取样成功或取样失败为 null；feature `daemon_status.volume_name` 时另带 `path`（数据根）、`mount`（挂载点）、`name`（卷名））；`scan` 是 du 扫描的计数；`version`、`pid`、`started` 是 daemon 的版本、进程号与启动时刻。
 - `draining`、`inflight`、`store_schema`：支持 `daemon.drain` 的 daemon 返回这些字段时原样透传。Move 的 `hold` 封口生效时，stderr 提示打开 GIT STRATA 完成或取消迁移。
+- 支持 `daemon.handover` 时，CLI 会原样透传 `handover`。空闲时该字段为 null。暂停写请求时可看到交接 ID、阶段、目标 PID、排队数，以及尚在执行的请求和后台任务数。
 - `config`：daemon 返回时原样透传；daemon 没在跑或旧 daemon 没有这个键时省略。`generation`、`hash`、`loaded_at` 描述当前已应用的 catalog；`last_attempt` 在尚无重载尝试时为 null，之后是 ReloadReport 加 `at`，拒绝时另带 `reason`；`restart_required` 是该次尝试要求重启的字段列表。
 - `fds`：daemon 的文件描述符计数（`open`、`limit` 等），daemon 在跑时原样透传 `daemon_status` 的 `fds`（D35）。
 - `alerts`：隔离区、`index-read-back-refused`、`staging-changed` 这类要人看的项，原样透传 daemon 的 warnings。每条同时在 stderr 打一行。
@@ -304,7 +305,8 @@ cli 不拥有表，不拥有目录。它读的配置目录是 `~/Library/Applica
 
 ## 5. 流程与算法
 
-The CLI takes no repo lock or session queue. Status/sync use one deadline across connect/send/reply: status 30 s, status --all 120 s, sync 600 s. `--timeout SECS` overrides `GIT_STRATA_TIMEOUT`; 0 disables it. This is client policy, not a daemon 600 s bound: sync may still be queued or cold-installing. Other commands keep unbounded calls; `new` and `add` use their `--timeout` only to bound retries (see "new-lock: `new`/`add` retry by default" below), never one call. Hooks retain their five-second process deadline. Daemon D8 is unchanged: later/post-visible takes stay unbounded.
+The CLI takes no repo lock or session queue. Status/sync use one deadline across connect/send/reply: status 30 s, status --all 120 s, sync 600 s. `--timeout SECS` overrides `GIT_STRATA_TIMEOUT`; 0 disables it. This is client policy, not a daemon 600 s bound: sync may still be queued or cold-installing. Other commands keep unbounded calls; `new` and `add` use their `--timeout` only to bound retries (see "new-lock: `new`/`add` retry by default" below), never one call. Hooks retain their private five-second process deadline even when the regular timeout flag or
+`GIT_STRATA_TIMEOUT` is set. Daemon D8 is unchanged: later/post-visible takes stay unbounded.
 
 共同的五步：
 
@@ -662,7 +664,7 @@ content has landed on main. A cold/reset tracker stays conservative until scanne
 A repo whose due fetch cannot take its lock is skipped and reported as a
 `FetchSkipped` warning (§4 table); a bounded lock wait that expires before anything
 was created comes back as `Busy` with `detail.reason: "lock_wait"` and
-`detail.retry_safe: true`. The daemon sets `retry_safe` only in two places: the head
+`detail.retry_safe: true`. The daemon certifies a pre-write lock wait in two places: the head
 step of `new`/`add` when every failed repo failed with `lock_wait` (it wrote nothing
 but fetch records and tracking refs), and `add`'s session-queue take when it expired
 before `Sessions::add` started.
@@ -689,7 +691,43 @@ before `Sessions::add` started.
   for an older one between the probe and the call is still handled once.
 - An agent whose own tool timeout kills `new` must check `git-strata ls` for the
   ticket before running it again: the session may have been created after the kill.
-- The CLI and the daemon are upgraded together. A new CLI against an old daemon
-  keeps the old blocking `new`/`add` and retries nothing; an old CLI against a new
-  daemon gets the `retry_safe` refusal once, as a plain `Busy lock_wait`, and the
-  `FetchSkipped` warning in `warnings` without the stderr line.
+- Against a daemon before 0.3.2 the CLI keeps that daemon's blocking `new`/`add`.
+  A CLI before 0.3.2 surfaces a certified `Busy lock_wait` directly and passes
+  `FetchSkipped` through in `warnings`. CLI 0.3.2 retries certified `new`/`add`
+  refusals.
+
+## Retrying an upgrade refusal
+
+Each application RPC probes `daemon_status{verify:false}` for `envelope.client`.
+The bootstrap probe uses the legacy envelope. The public `daemon status`
+command validates the floor on its own unannotated status reply. A supported peer receives
+`client` with the CLI release; a peer announcing a release below `MIN_DAEMON`
+returns `Unsupported daemon_too_old` on the client. If the serving worker
+changes, its exact RPC `Failed` with `unknown envelope field "client"` permits
+one resend without that field. Handler errors and lost write replies do not
+permit this fallback.
+
+`Busy upgrading` with boolean `retry_safe: true` uses the GS-2 backoff for
+one RPC. Its capability probe, both parameter variants and its single envelope
+downgrade share that budget and backoff. The budget is `--timeout SECS`, then `GIT_STRATA_TIMEOUT`, then
+600 seconds. Zero is unlimited. A command's earlier writes stay completed.
+`new` and `add` retain their certified busy-repo retry. `--wait` adds the
+pre-dispatch `starting` and `store_unavailable` refusals. A failed connection
+returns immediately. Each status/sync attempt shares one I/O deadline across negotiation and parser
+fallback. A certified retry gets a fresh I/O deadline. The Stop hook keeps its
+private five-second process deadline even when the regular timeout flag or
+`GIT_STRATA_TIMEOUT` is set. When a write deadline expires after its
+newline was sent, `Unknown client_timeout` reports `outcome: in_progress`.
+
+A newer local store is reported as `Unsupported cli_too_old` before the
+checkpoint command sends an RPC. The repair identifies the release from
+`store_state.json` when its root and schema agree with the failed open.
+
+
+## Publish preview
+
+`git-strata publish --dry-run --from SESSION:REPO:PATH` takes the usual
+before-publish checkpoints, asks the daemon for `publish_plan` and returns
+its `repos`, `subjects` and `already_published` in the success envelope.
+The command ends before confirmation, commit or push. Planning errors reach
+the caller directly.

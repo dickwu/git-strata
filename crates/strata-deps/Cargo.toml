@@ -9,7 +9,7 @@ description = "git-strata deps: install-input keys, sealed deps-set generations,
 
 [features]
 default = []
-test-seams = []
+test-seams = ["strata-types/test-seams"]
 
 [dependencies]
 strata-types = { path = "../strata-types" }

@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, Write};
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -32,7 +32,7 @@ use crate::confirm_flow::{self, Pins};
 use crate::drain::{self, Drain, ShutdownMode};
 use crate::locks::Locks;
 use crate::rpc::{self, Reply, Request};
-use crate::{DaemonWarning, GC_KEEP, LOCK_WAIT, MAX_FRAME, PinnedFlags, Result};
+use crate::{DaemonWarning, GC_KEEP, LOCK_WAIT, PinnedFlags, Result};
 
 #[path = "store_state.rs"]
 mod store_state;
@@ -70,6 +70,9 @@ pub struct Options {
     /// Test-only scheduler admission; direct worker passes remain callable.
     #[cfg(feature = "test-seams")]
     pub background_main_sync: bool,
+    /// Required for every seams-enabled worker, even when constructed in-process.
+    #[cfg(feature = "test-seams")]
+    pub fixture: Option<crate::fixture::WorkerFixture>,
 }
 
 impl Options {
@@ -88,13 +91,15 @@ impl Options {
             config_poll_every: Duration::from_secs(2),
             #[cfg(feature = "test-seams")]
             background_main_sync: true,
+            #[cfg(feature = "test-seams")]
+            fixture: None,
         }
     }
 }
 
-/// Step 1: a binary built with any test seam does not start.
+/// Refuse production daemon startup if any linked Strata crate enabled test seams.
 pub fn refuse_test_seams() -> Result<()> {
-    if strata_confirm::TEST_SEAMS {
+    if strata_types::TEST_SEAMS {
         return Err(StrataError::new(
             Code::InvalidInput,
             "this git-stratad was built with test seams and refuses to start",
@@ -335,9 +340,43 @@ pub fn prepare(
     confirmer: Confirmer,
     open_git: &(impl Fn(&Path) -> Result<Git> + Clone + Send + Sync + 'static),
 ) -> Result<Core> {
-    // 2. Single instance before anything else is read.
-    let instance = InstanceLock::take(&crate::lock_path(&opts.config_dir))?;
+    let instance = take_instance(&opts)?;
     prepare_locked(opts, confirmer, open_git, &mut Some(instance))
+}
+
+/// Both process startup and in-process workers enter through this guard.
+pub fn take_instance(opts: &Options) -> Result<InstanceLock> {
+    // Test workers must prove their data and socket paths before even creating
+    // daemon.lock or answering Busy on the early listener.
+    #[cfg(feature = "test-seams")]
+    read_config(opts)?;
+    InstanceLock::take(&crate::lock_path(&opts.config_dir))
+}
+
+/// Dependency children keep the daemon's sanitized environment; a test
+/// fixture adds its HOME and Git policy (CR r2 #5).
+fn install_child_env(opts: &Options) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    #[cfg(feature = "test-seams")]
+    if let Some(fixture) = &opts.fixture {
+        return fixture.child_env();
+    }
+    let _ = opts;
+    Vec::new()
+}
+
+fn read_config(opts: &Options) -> Result<(String, Config)> {
+    #[cfg(feature = "test-seams")]
+    let fixture = crate::fixture::WorkerFixture::check_layout(opts)?;
+    let text = retry_eintr(|| fs::read_to_string(&opts.config_file))
+        .map_err(|e| classify_io_error(&e, IoSide::Read, &opts.config_file))?;
+    // Validate the same parsed value that opens the store. The config may have
+    // changed since the pre-lock check, including between startup retries.
+    #[cfg(feature = "test-seams")]
+    let config = fixture.parse_config(&text)?;
+    #[cfg(not(feature = "test-seams"))]
+    let config = Config::parse(&text)?;
+    config.validate()?;
+    Ok((text, config))
 }
 
 /// Steps 3–7 under an instance lock the caller already holds. The lock
@@ -358,10 +397,7 @@ pub fn prepare_locked(
         .with_detail(json!({ "reason": "no_instance_lock" })));
     }
     // 3. Config: parse (TOML + validate in file order), then validate.
-    let text = retry_eintr(|| fs::read_to_string(&opts.config_file))
-        .map_err(|e| classify_io_error(&e, IoSide::Read, &opts.config_file))?;
-    let mut config = Config::parse(&text)?;
-    config.validate()?;
+    let (text, mut config) = read_config(&opts)?;
     let source = config.clone();
     // 4. Every path exists and is its own realpath.
     for (name, rc) in &config.repos {
@@ -461,6 +497,7 @@ pub fn prepare_locked(
         env: InstallEnv {
             path: opts.install_path.clone(),
             timeout: InstallEnv::DEFAULT_TIMEOUT,
+            child_env: install_child_env(&opts),
         },
         before: DaemonBefore,
         opts,
@@ -643,9 +680,6 @@ pub struct Daemon<'a> {
     pub sessions: Sessions<'a>,
     pub recovered: RecoverReport,
     stop: AtomicBool,
-    /// Review P1-3: the open connections only (a clone each, for the
-    /// stop), removed when the connection ends.
-    conns: Mutex<BTreeMap<u64, UnixStream>>,
     next_conn: std::sync::atomic::AtomicU64,
     /// `accept` failures for want of descriptors (EMFILE/ENFILE).
     fd_errors: std::sync::atomic::AtomicU64,
@@ -759,7 +793,6 @@ impl<'a> Daemon<'a> {
             sessions,
             recovered,
             stop: AtomicBool::new(false),
-            conns: Mutex::new(BTreeMap::new()),
             next_conn: std::sync::atomic::AtomicU64::new(0),
             fd_errors: std::sync::atomic::AtomicU64::new(0),
             reconcile: Mutex::new(json!({ "runs": 0, "last": null })),
@@ -781,37 +814,42 @@ impl<'a> Daemon<'a> {
     /// Connections being served now (review P1-3: a finished connection
     /// leaves no descriptor behind).
     pub fn open_connections(&self) -> usize {
-        self.conns.lock().unwrap_or_else(|p| p.into_inner()).len()
+        self.core.drain.open_connections()
+    }
+
+    /// Worker control entry point for H2. The service socket cannot start a handover.
+    pub fn begin_handover_parking(&self, id: &str, to_pid: u32) -> bool {
+        self.core.drain.begin_parking(id, to_pid)
+    }
+
+    /// Resume this worker's parked requests in dispatch sequence order. Each connection
+    /// continues serving its saved read-ahead after its first reply.
+    pub fn abort_handover_parking(&self, id: &str) -> bool {
+        self.core.drain.abort_parking(id)
     }
 
     fn finish_connections(&self, mode: Option<ShutdownMode>) {
-        for stream in self
-            .conns
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .values()
-        {
-            let _ = stream.shutdown(std::net::Shutdown::Read);
-        }
-        // A sealed daemon has already waited for writes to finish. Allow final
+        self.core
+            .drain
+            .shutdown_connections(std::net::Shutdown::Read);
+        // A sealed daemon has already waited for writes to finish. So has an
+        // H2 stop without a sealed lease (mode Sigterm): finish_serving waited
+        // for admitted work and every terminal refusal (CR r2 #2). Allow final
         // replies, including the small seal acknowledgement, before unblocking
         // socket writes to any client that has stopped reading.
-        if matches!(
-            mode,
-            Some(ShutdownMode::Stop | ShutdownMode::Restart | ShutdownMode::Hold)
-        ) {
+        let settled = match mode {
+            Some(ShutdownMode::Stop | ShutdownMode::Restart | ShutdownMode::Hold) => true,
+            Some(_) => self.core.drain.stopped_handover(),
+            None => false,
+        };
+        if settled {
             let deadline = Instant::now() + SEALED_REPLY_GRACE;
             while self.open_connections() != 0 && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            for stream in self
-                .conns
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .values()
-            {
-                let _ = stream.shutdown(std::net::Shutdown::Write);
-            }
+            self.core
+                .drain
+                .shutdown_connections(std::net::Shutdown::Write);
         }
     }
 
@@ -839,6 +877,15 @@ impl<'a> Daemon<'a> {
         listener: &UnixListener,
         external: &AtomicBool,
         handle: &(dyn Fn(Request) -> Reply + Sync),
+    ) -> Result<()> {
+        self.serve_admitted(listener, external, &|req, _write| handle(req))
+    }
+
+    pub(crate) fn serve_admitted(
+        &self,
+        listener: &UnixListener,
+        external: &AtomicBool,
+        handle: &(dyn Fn(Request, Option<drain::Write>) -> Reply + Sync),
     ) -> Result<()> {
         listener
             .set_nonblocking(true)
@@ -870,7 +917,7 @@ impl<'a> Daemon<'a> {
                 // Review P1-3: at most MAX_CONNS connections are served at
                 // once; past that the loop stops accepting (clients wait in
                 // the listen backlog) until one ends.
-                if self.open_connections() >= MAX_CONNS {
+                if self.core.drain.held_connections() >= MAX_CONNS {
                     std::thread::sleep(Duration::from_millis(20));
                     continue;
                 }
@@ -894,26 +941,15 @@ impl<'a> Daemon<'a> {
                             shed(stream);
                             continue;
                         };
-                        self.conns
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .insert(id, c);
+                        self.core.drain.register(id, c);
                         s.spawn(move || {
-                            match stream.try_clone() {
-                                Ok(w) => {
-                                    let mut r = BufReader::new(stream);
-                                    let mut w = w;
-                                    let mut h = |req: Request| handle(req);
-                                    let _ =
-                                        rpc::serve_connection(&mut r, &mut w, MAX_FRAME, &mut h);
-                                }
-                                Err(_) => shed(stream),
-                            }
-                            // The clone kept for the stop goes with the connection.
-                            self.conns
-                                .lock()
-                                .unwrap_or_else(|p| p.into_inner())
-                                .remove(&id);
+                            let _ = self.core.drain.serve_stream(
+                                id,
+                                stream,
+                                &self.core.busy,
+                                &mut io::stderr(),
+                                handle,
+                            );
                         });
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -983,7 +1019,7 @@ impl<'a> Daemon<'a> {
     /// `daemon_status`: holds, queues, the daemon's warnings; never waits.
     pub fn daemon_status(&self, verify: bool) -> Result<Value> {
         let _catalog = self.core.admit();
-        let (draining, inflight) = self.core.drain.status();
+        let (draining, inflight, handover) = self.core.drain.status();
         // Status-bar §12.3: the activity registry is copied (and released)
         // before any lock FIFO or store read.
         let activity = self.core.activity.snapshot();
@@ -1079,6 +1115,7 @@ impl<'a> Daemon<'a> {
             "reconcile": self.reconcile.lock().unwrap_or_else(|p| p.into_inner()).clone(),
             "features": crate::FEATURES,
             "draining": draining,
+            "handover": handover,
             "inflight": inflight,
             "store_schema": strata_types::STORE_SCHEMA,
             "config": { "generation": catalog.generation, "hash": catalog.hash, "loaded_at": catalog.loaded_at, "last_attempt": last_attempt, "restart_required": restart_required },
@@ -1252,15 +1289,21 @@ pub fn quarantine_entries(root: &Path) -> Vec<PathBuf> {
 
 fn sweep_exports(root: &Path) {
     for sub in ["daemon/main-follow", "daemon/sync"] {
-        let Ok(entries) = std::fs::read_dir(root.join(sub)) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            let name = e.file_name();
-            let Some(pid) = name
-                .to_str()
+        let dir =
+            strata_types::RepoPath::try_from(sub.to_owned()).expect("static export directory");
+        for (entry, attrs) in strata_apfs::list_dir(root, Some(&dir)).flatten() {
+            if !matches!(
+                attrs.kind,
+                strata_apfs::FileKind::Dir | strata_apfs::FileKind::Symlink { .. }
+            ) {
+                continue;
+            }
+            let Some(pid) = entry
+                .as_str()
+                .rsplit('/')
+                .next()
                 .and_then(|n| n.split('-').next())
-                .and_then(|p| p.parse::<i32>().ok())
+                .and_then(|n| n.parse::<i32>().ok())
             else {
                 continue;
             };
@@ -1268,8 +1311,13 @@ fn sweep_exports(root: &Path) {
             let alive = pid == std::process::id() as i32
                 || unsafe { libc::kill(pid, 0) } == 0
                 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-            if !alive && let Err(err) = std::fs::remove_dir_all(e.path()) {
-                tracing::warn!(path = %e.path().display(), %err, "a stale main-sync export could not be removed");
+            if !alive {
+                match strata_apfs::remove_tree_rooted(root, &entry) {
+                    Ok(report) if report.is_complete() => {}
+                    result => {
+                        tracing::warn!(path = %entry, ?result, "a stale main-sync export could not be removed")
+                    }
+                }
             }
         }
     }

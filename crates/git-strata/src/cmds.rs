@@ -119,15 +119,17 @@ pub fn mark(
         _ => return Err(invalid("state", "mark state must be done or active")),
     };
     let agent = crate::agent::detect(agent, |k| std::env::var_os(k))?;
-    crate::agent::require_feature(&ctx.paths.socket, "session.mark")?;
+    // One negotiated call: the feature check and the write share a budget.
+    let mut call = ctx
+        .begin_gated("mark", Kind::Write, None)
+        .map_err(crate::rpc::CallError::into_error)?;
+    strata_client::require_feature(&call.status, "session.mark")?;
     let config = ctx.config()?;
     let store = ro::open_store(&config)?;
     let session = ro::select(&store, session)?;
-    let reply = ctx.call(
-        "mark",
-        json!({ "session": session, "state": state, "note": note, "agent": agent }),
-        Kind::Write,
-    )?;
+    let reply = call
+        .send(&json!({ "session": session, "state": state, "note": note, "agent": agent }))
+        .map_err(crate::rpc::CallError::into_error)?;
     Ok(Envelope::ok(reply))
 }
 
@@ -171,9 +173,7 @@ pub fn new(
     };
     let names: Vec<RepoName> = list.iter().map(|r| repo_name(r)).collect::<Result<_>>()?;
     let bases = parse_bases(only, repos, bases)?;
-    if !bases.is_empty() {
-        crate::agent::require_feature(&ctx.paths.socket, "new.base")?;
-    }
+
     let agent = crate::agent::detect(agent_flag, |k| std::env::var_os(k))?;
     // `only` is sent only when set, so this CLI still talks to a daemon
     // that predates it (its params refuse unknown fields).
@@ -193,9 +193,16 @@ pub fn new(
     }
     // `agent` goes only to a daemon that lists `new.agent`; an older one
     // would refuse the unknown field.
+    let mut operation = ctx
+        .begin_call("new", Kind::Write, None)
+        .map_err(CallError::into_error)?;
+    let status = &operation.status;
+    if !bases.is_empty() {
+        strata_client::require_feature(status, "new.base")?;
+    }
     let mut dropped = None;
     if let Some(a) = &agent {
-        if crate::agent::daemon_takes_agent(&ctx.paths.socket) {
+        if crate::agent::lists_feature(status) {
             params["agent"] = json!(a.as_str());
         } else {
             dropped = agent.as_ref();
@@ -203,21 +210,16 @@ pub fn new(
     }
     // new-lock §4.1: a refusal the daemon certified replay-safe is sent
     // again, unchanged, until the budget is spent.
-    let v = crate::wait::retry("new", wait, || {
-        match ctx.try_call("new", params.clone(), Kind::Write) {
-            // The daemon was swapped for an older one since the probe: it
-            // refused the field before running anything, so send it again
-            // without (only this refusal; nothing else is replayed).
-            Err(CallError::Failed(e))
-                if params.get("agent").is_some() && crate::agent::refused_unknown_agent(&e) =>
-            {
-                params.as_object_mut().expect("an object").remove("agent");
-                dropped = agent.as_ref();
-                ctx.try_call("new", params.clone(), Kind::Write)
-            }
-            other => other,
+    let v = match operation.send(&params) {
+        Err(CallError::Failed(e))
+            if params.get("agent").is_some() && crate::agent::refused_unknown_agent(&e) =>
+        {
+            params.as_object_mut().expect("an object").remove("agent");
+            dropped = agent.as_ref();
+            operation.send(&params)
         }
-    })
+        other => other,
+    }
     .map_err(CallError::into_error)?;
     for w in v["anchor_unknown"].as_array().into_iter().flatten() {
         eprintln!("warning: anchor unknown: {w}");
@@ -293,10 +295,7 @@ pub fn add(
     let store = ro::open_store(&config)?;
     let (s, _) = ro::session_or_cwd(&store, session.as_deref())?;
     let params = json!({ "session": s, "repos": names });
-    let v = crate::wait::retry("add", wait, || {
-        ctx.try_call("add", params.clone(), Kind::Write)
-    })
-    .map_err(CallError::into_error)?;
+    let v = ctx.call("add", params, Kind::Write)?;
     for w in v["anchor_unknown"].as_array().into_iter().flatten() {
         eprintln!("warning: anchor unknown: {w}");
     }
@@ -1597,7 +1596,7 @@ pub const STATUS_LOOKUP_WAIT: std::time::Duration = std::time::Duration::from_se
 
 /// `daemon_status` keys `daemon status` copies into `data` unchanged when
 /// the daemon sends them.
-pub const DAEMON_STATUS_PASSTHROUGH: [&str; 10] = [
+pub const DAEMON_STATUS_PASSTHROUGH: [&str; 11] = [
     "activity",
     "busy",
     "volume",
@@ -1607,13 +1606,16 @@ pub const DAEMON_STATUS_PASSTHROUGH: [&str; 10] = [
     "started",
     "draining",
     "inflight",
+    "handover",
     "store_schema",
 ];
 
 /// §3.3. Never fails for a missing config or a down daemon (SessionStart).
 pub fn daemon_status() -> Result<Envelope> {
-    let paths = crate::env::Paths::from_env()?;
-    let ctx = Ctx { paths };
+    daemon_status_with_ctx(Ctx::from_env()?)
+}
+
+pub(crate) fn daemon_status_with_ctx(ctx: Ctx) -> Result<Envelope> {
     let mut data = json!({
         "running": false,
         "socket": ctx.paths.socket.to_string_lossy(),

@@ -649,9 +649,8 @@ The desktop updater and release tools use these constants directly from
   due while its write lock was held by `holder` (for `holder_session`), and
   used the tip as the lock's last holder left it, last fetched at
   `last_fetch_at`. `NewWarning` is a closed enum, so a typed client built
-  before this variant cannot decode a report that carries it: the CLI and the
-  daemon are upgraded together (the daemon announces the variant with the
-  FEATURES string `new.fetch_skip`).
+  before this variant cannot decode a report that contains it. The CLI reads
+  the warning as JSON. The daemon advertises `new.fetch_skip`.
 - `Busy` `lock_wait` detail (§6): `retry_safe: true` marks a refusal the
   daemon certifies as replay-safe (nothing was created or changed: `add`'s
   initial session-queue wait, and `new`/`add`'s head step when every failed
@@ -666,3 +665,30 @@ The desktop updater and release tools use these constants directly from
   session layer reads it through `RepoWriteLock::ref_snapshot`), and
   `strata_gitio::RefsStamp` is gitio's stat fingerprint of those refs' files.
   Neither is serialised.
+
+## Release binary marker
+
+Every Strata `test-seams` feature enables `strata-types/test-seams` through
+Cargo feature unification. `mark_release_binary!` places the resulting build
+kind in the Mach-O `__TEXT,__strata_build` section of the CLI, daemon, desktop
+executable and fixture worker. The packaging scripts inspect the artifact before
+signing it.
+
+## CLI and daemon wire compatibility
+
+`MIN_CLIENT` and `MIN_DAEMON` are the previous minor's first release,
+currently 0.3.0. They apply while the store schema and config format match.
+An optional envelope `client` carries a semantic version. A valid release
+below `MIN_CLIENT` receives `InvalidInput client_too_old` with `client` and
+`min_client`. An absent field is accepted.
+
+`StrataError::upgrading(handover_id, phase, retry_after_ms)` describes a
+pre-dispatch refusal. Its code is `Busy`. Its detail carries `reason:
+"upgrading"`, `retry_safe: true`, the string `handover_id`, the string `phase`
+and the integer delay hint `retry_after_ms`. A timeout after sending a write
+retains `Unknown client_timeout` and `outcome: in_progress`.
+
+A CLI local open of a newer store returns `Unsupported cli_too_old`, keeping
+the actual schema in detail. `required_version` is the daemon release in a
+matching store snapshot if available. Shipped 0.3.x CLIs return
+`Corrupt user_version` in this case.

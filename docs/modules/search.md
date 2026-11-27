@@ -643,3 +643,10 @@ git commit -m "feat(search): pin the query snapshot and refuse a replaced root"
 | D13 命中形状 | 一行一条。行不是 UTF-8 就丢掉这一行，查询继续 | `Hit` 没有列号，简报的字段就是 session、repo、path、line、text。`text` 是 `String`，非法 UTF-8 放不进去。不因此让整次查询失败 | 2026-10-23 |
 
 待定：没有。上面 13 条都定了。T15 要看的两处写在 §6 的 `TooLarge` 行和 `NoSuchPath` 行，不是未定的产品行为。
+
+
+## Worker fixtures
+
+A fixture worker passes its HOME to tgrep repository discovery and index
+generation. Each Git process uses that HOME's XDG config and permits file
+transport only, including blob readers started during a parallel index build.

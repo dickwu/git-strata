@@ -31,7 +31,7 @@ use crate::confirm_flow::{needs_confirm, recheck, require_validated};
 use crate::fetch_after::{alert_attach, report_guard_disabled};
 use crate::locks::{self, RequestScope};
 use crate::resolve;
-use crate::rpc::{Method, Params, Reply, Request};
+use crate::rpc::{Params, Reply, Request};
 use crate::startup::{Core, Daemon};
 use crate::track::{self, drop_tracker, prepare_tool_call};
 use crate::{DaemonWarning, GC_KEEP, Result, RpcReject, STORE_GC_KEEP};
@@ -45,6 +45,8 @@ thread_local! {
 }
 
 pub(crate) fn writing() {
+    #[cfg(any(test, feature = "test-seams"))]
+    crate::rpc::admission_audit::check();
     WRITING.with(|w| w.set(true));
 }
 
@@ -721,7 +723,7 @@ pub fn serve(
                 done.load(Ordering::SeqCst) || d.stopping() || external.load(Ordering::SeqCst)
             })
         });
-        let r = d.serve(listener, external, &|req| server.handle(req));
+        let r = server.serve(listener, external, &|_| {});
         done.store(true, Ordering::SeqCst);
         r
     });
@@ -1073,7 +1075,7 @@ fn refresh_seeds_pass(d: &Daemon<'_>) {
     }
 }
 
-fn session_of(p: &Params) -> Option<SessionId> {
+pub(crate) fn session_of(p: &Params) -> Option<SessionId> {
     match p {
         Params::Checkpoint(p) => Some(p.session.clone()),
         Params::Mark(p) => Some(p.session.clone()),
@@ -1090,7 +1092,7 @@ fn session_of(p: &Params) -> Option<SessionId> {
     }
 }
 
-fn repo_of(p: &Params) -> Option<RepoName> {
+pub(crate) fn repo_of(p: &Params) -> Option<RepoName> {
     fn only(repos: &[RepoName]) -> Option<&RepoName> {
         match repos {
             [repo] => Some(repo),
@@ -1122,16 +1124,18 @@ fn repo_of(p: &Params) -> Option<RepoName> {
     repo.cloned()
 }
 
-fn needs_write_admission(req: &Request) -> bool {
-    !req.method.is_read_only()
-        && req.method != Method::Drain
-        && !matches!(&req.params, Params::Sync(p) if p.check)
-        && !matches!(&req.params, Params::Gc(p) if p.dry_run)
-}
-
 impl<'d, 'a> Server<'d, 'a> {
     pub fn new(d: &'d Daemon<'a>, trackers: &'d Trackers<'a>) -> Server<'d, 'a> {
         let search = Search::open(&d.core.config, &d.sessions, trackers);
+        #[cfg(feature = "test-seams")]
+        let search = search.with_fixture_home(
+            d.core
+                .opts
+                .fixture
+                .as_ref()
+                .expect("validated fixture")
+                .home(),
+        );
         Server {
             d,
             trackers,
@@ -1240,20 +1244,45 @@ impl<'d, 'a> Server<'d, 'a> {
         Ok(result)
     }
 
-    /// One request: scope, handler, panic → `Failed` / `Unknown`.
+    /// Serve requests admitted at the connection boundary. The fixture observer
+    /// sees the same dispatch order and admission guards as the real handlers.
+    pub fn serve(
+        &self,
+        listener: &std::os::unix::net::UnixListener,
+        external: &AtomicBool,
+        observe: &(dyn Fn(&Request) + Sync),
+    ) -> Result<()> {
+        self.d.serve_admitted(listener, external, &|req, write| {
+            observe(&req);
+            self.handle_admitted(req, write)
+        })
+    }
+
+    /// Direct dispatch without a connection, used by in-process callers.
     pub fn handle(&self, req: Request) -> Reply {
+        req.serve(|req| match self.core().drain.admit_request(&req) {
+            Ok(write) => self.handle_admitted(req, write),
+            Err(error) => {
+                self.core().busy.record(
+                    req.method.name(),
+                    session_of(&req.params).as_ref(),
+                    &error,
+                );
+                Reply::error(&req.id, &error)
+            }
+        })
+    }
+
+    fn handle_admitted(&self, req: Request, write: Option<crate::drain::Write>) -> Reply {
         let core = self.core();
         let name = req.method.name();
         let session = session_of(&req.params);
         let scope = RequestScope::begin(name, session.clone());
+        if let Some(write) = write {
+            scope.track(write);
+        }
         WRITING.with(|w| w.set(false));
         let r = catch_unwind(AssertUnwindSafe(|| {
-            if needs_write_admission(&req) {
-                scope.track(
-                    core.drain
-                        .admit(name, session.clone(), repo_of(&req.params))?,
-                );
-            }
             let _catalog = core.catalog.enter(|c| c.generation);
             let _observe = crate::activity::enter_request(core, name, session.clone());
             self.dispatch(&req.params)
@@ -1405,12 +1434,14 @@ impl<'d, 'a> Server<'d, 'a> {
             }
             Params::Grep(p) => self.grep(&p.pattern, p.session.as_ref(), p.all, p.ignore_case),
             Params::Files(p) => {
+                writing(); // Attaching a cold base publishes its search index.
                 let view = self.search.attach(&p.session, &p.repo)?;
                 let r = self.search.files(view.clone(), &p.glob);
                 let _ = self.search.detach(view);
                 Ok(json!({ "paths": json_of(&r?) }))
             }
             Params::Diff(p) => self.with_publish_ctx(&p.repo, |ctx| {
+                writing(); // Projecting an older base can store uncheckpointed blobs.
                 let d = strata_publish::diff_between(ctx, p.a.clone(), p.b.clone(), &p.repo)?;
                 let both: Vec<Value> = d
                     .both
@@ -2024,6 +2055,7 @@ impl<'d, 'a> Server<'d, 'a> {
         let mut hits: Vec<Hit> = Vec::new();
         let mut skipped = Vec::new();
         for (s, repo) in targets {
+            writing();
             let view = match self.search.attach(&s, &repo) {
                 Ok(v) => v,
                 Err(e) if all => {
@@ -2571,6 +2603,7 @@ impl<'d, 'a> Server<'d, 'a> {
         messages: &strata_publish::message::Messages,
         already: &[Value],
     ) -> Result<Value> {
+        let write = locks::retain_request_write().expect("publish and publish_plan hold admission");
         let mut subjects = serde_json::Map::new();
         let repos: BTreeSet<_> = group.batches.iter().map(|b| b.repo.clone()).collect();
         for repo in repos {
@@ -2580,13 +2613,8 @@ impl<'d, 'a> Server<'d, 'a> {
                 match strata_publish::gate::check_cached(ctx, group, messages) {
                     Err(e) if strata_publish::gate::needs_refresh(&e) => {
                         let core = self.core();
-                        // Publish already holds admission. A standalone preview
-                        // needs it only on the path that can write tracking refs.
-                        let _refresh = if locks::retain_request_write().is_none() {
-                            Some(core.drain.admit("publish_plan", None, Some(repo.clone()))?)
-                        } else {
-                            None
-                        };
+                        write.check_ref_refresh()?;
+                        write.set_repo(repo.clone());
                         core.locks.try_repo(&repo, "publish_plan", || {
                             writing();
                             strata_publish::gate::refresh_refs(ctx)?;

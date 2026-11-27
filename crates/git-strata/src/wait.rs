@@ -1,12 +1,10 @@
-//! Status/sync deadlines and optional stderr progress. No request is retried
-//! after a timeout; the diagnostic probe is read-only and separately bounded.
-//! `new`/`add` instead re-send a refusal the daemon certified replay-safe
-//! ([`retry`], new-lock §4).
+//! Status/sync I/O deadlines, stderr progress and per-RPC refusal retry.
+//! A timeout is terminal. The read-only diagnostic probe has a separate deadline.
 use crate::{
     Result,
     args::WaitArgs,
     ctx::Ctx,
-    rpc::{self, CallError, Kind},
+    rpc::{CallError, Kind},
 };
 use serde_json::{Value, json};
 use std::sync::mpsc;
@@ -40,18 +38,59 @@ fn invalid_timeout() -> StrataError {
     .with_detail(json!({ "reason": "timeout" }))
 }
 
-#[derive(Clone, Copy)]
+/// Parser fallbacks share one I/O deadline. A certified new attempt gets
+/// another full status/sync window; diagnostic and hook deadlines are fixed.
 pub struct Deadline {
     started: Instant,
-    end: Option<Instant>,
+    end: std::cell::Cell<Option<Instant>>,
+    per_attempt: Option<Duration>,
+}
+
+impl Deadline {
+    fn new(budget: Option<Duration>, per_attempt: Option<Duration>) -> Result<Self> {
+        let started = Instant::now();
+        let end = budget
+            .map(|b| started.checked_add(b).ok_or_else(invalid_timeout))
+            .transpose()?;
+        Ok(Self {
+            started,
+            end: std::cell::Cell::new(end),
+            per_attempt,
+        })
+    }
+
+    pub(crate) fn fixed(budget: Duration) -> Result<Self> {
+        Self::new(Some(budget), None)
+    }
+
+    pub(crate) fn remaining(&self) -> Option<Duration> {
+        self.end
+            .get()
+            .map(|end| end.saturating_duration_since(Instant::now()))
+    }
+
+    fn fixed_end(&self) -> Option<Instant> {
+        if self.per_attempt.is_some() {
+            None
+        } else {
+            self.end.get()
+        }
+    }
+
+    fn next_attempt(&self) -> Result<()> {
+        if let Some(window) = self.per_attempt {
+            let end = Instant::now()
+                .checked_add(window)
+                .ok_or_else(invalid_timeout)?;
+            self.end.set(Some(end));
+        }
+        Ok(())
+    }
 }
 
 pub fn deadline(args: &WaitArgs, default_secs: u64) -> Result<Deadline> {
-    let started = Instant::now();
-    let end = budget(args, default_secs)?
-        .map(|b| started.checked_add(b).ok_or_else(invalid_timeout))
-        .transpose()?;
-    Ok(Deadline { started, end })
+    let budget = budget(args, default_secs)?;
+    Deadline::new(budget, budget)
 }
 
 pub fn call(
@@ -63,39 +102,27 @@ pub fn call(
     default_secs: u64,
 ) -> std::result::Result<Value, CallError> {
     let deadline = deadline(args, default_secs).map_err(CallError::Failed)?;
-    call_until(ctx, method, params, kind, args, deadline)
+    let session = params["session"].as_str().map(str::to_owned);
+    with_progress(ctx, method, session, args, &deadline, || {
+        ctx.call_until(method, params, kind, Some(&deadline))
+    })
 }
 
-/// Parser-rejection fallbacks share the initial start and deadline.
-pub fn call_until(
+/// Timeouts report the whole operation, including any legacy parameter fallback.
+pub(crate) fn with_progress(
     ctx: &Ctx,
     method: &str,
-    params: Value,
-    kind: Kind,
+    session: Option<String>,
     args: &WaitArgs,
-    deadline: Deadline,
+    deadline: &Deadline,
+    invoke: impl FnOnce() -> std::result::Result<Value, CallError>,
 ) -> std::result::Result<Value, CallError> {
-    let session = params["session"].as_str().map(str::to_owned);
     let _progress = if args.progress || crate::tty::stderr_is_tty() {
-        Progress::start(
-            ctx.paths.socket.clone(),
-            method.to_string(),
-            session.clone(),
-        )
+        Progress::start(ctx.clone(), method.to_string(), session.clone())
     } else {
         None
     };
-    let result = match deadline.end {
-        Some(end) => rpc::call_within(
-            &ctx.paths.socket,
-            method,
-            params,
-            kind,
-            end.saturating_duration_since(Instant::now()),
-        ),
-        None => rpc::call(&ctx.paths.socket, method, params, kind),
-    };
-    match result {
+    match invoke() {
         Err(CallError::Timeout {
             method,
             phase,
@@ -121,8 +148,7 @@ pub fn call_until(
                     "{command} shows the result when it finishes; do not retry, gc, or rm"
                 ));
             }
-            match rpc::call_within(
-                &ctx.paths.socket,
+            match ctx.call_within(
                 "daemon_status",
                 json!({}),
                 Kind::Read,
@@ -158,33 +184,51 @@ const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(10);
 const RETRY_FIX: &str = "no session or workspace was created or changed (fetch records and tracking refs may have); rerun, or pass --timeout 0 to keep retrying";
 
-/// new-lock §4: send with `attempt` (the caller's normal call, without a
-/// client deadline) and, while the reply is a refusal the daemon certified
-/// replay-safe (`Busy` with `detail.retry_safe`), send it again after 1 s,
-/// doubling to at most 10 s, until `args`' budget (default
-/// [`RETRY_DEFAULT_SECS`], 0: unlimited) is spent. The budget is checked
-/// only between attempts, so one attempt can run past it. Every other
-/// outcome is returned at once. Before each retry and on the final refusal
-/// the holder goes to stderr (TTY or `--progress`).
-pub fn retry(
-    method: &str,
-    args: &WaitArgs,
-    attempt: impl FnMut() -> std::result::Result<Value, CallError>,
-) -> std::result::Result<Value, CallError> {
-    let budget = budget(args, RETRY_DEFAULT_SECS).map_err(CallError::Failed)?;
-    let show = args.progress || crate::tty::stderr_is_tty();
-    let clock = Wall(Instant::now());
-    retry_loop(
-        method,
-        budget,
-        &clock,
-        &mut |line| {
-            if show {
-                eprintln!("{line}");
-            }
-        },
-        attempt,
-    )
+/// Retry one RPC after an eligible pre-dispatch refusal. The retry budget is
+/// checked between attempts. Status and sync also pass their I/O deadline.
+pub(crate) struct RetryBudget {
+    started: Instant,
+    limit: Option<Duration>,
+    next_delay: Duration,
+    retries: u64,
+}
+
+impl RetryBudget {
+    pub(crate) fn new(args: &WaitArgs) -> Result<Self> {
+        Ok(Self::with_limit(budget(args, RETRY_DEFAULT_SECS)?))
+    }
+
+    fn with_limit(limit: Option<Duration>) -> Self {
+        Self {
+            started: Instant::now(),
+            limit,
+            next_delay: RETRY_FIRST,
+            retries: 0,
+        }
+    }
+
+    pub(crate) fn run<T>(
+        &mut self,
+        method: &str,
+        args: &WaitArgs,
+        deadline: Option<&Deadline>,
+        attempt: impl FnMut() -> std::result::Result<T, CallError>,
+    ) -> std::result::Result<T, CallError> {
+        let show = args.progress || crate::tty::stderr_is_tty();
+        let clock = Wall(self.started);
+        self.run_with_clock(
+            method,
+            args.startup,
+            deadline,
+            &clock,
+            &mut |line| {
+                if show {
+                    eprintln!("{line}");
+                }
+            },
+            attempt,
+        )
+    }
 }
 
 trait Clock {
@@ -198,51 +242,86 @@ impl Clock for Wall {
         self.0.elapsed()
     }
     fn sleep(&self, d: Duration) {
-        std::thread::sleep(d);
+        // A signal during rm's backoff belongs to the next (unsent) request.
+        let end = Instant::now() + d;
+        while !crate::interrupt::STOP.load(std::sync::atomic::Ordering::SeqCst) {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(100)));
+        }
     }
 }
 
-fn retry_loop(
-    method: &str,
-    budget: Option<Duration>,
-    clock: &dyn Clock,
-    note: &mut dyn FnMut(String),
-    mut attempt: impl FnMut() -> std::result::Result<Value, CallError>,
-) -> std::result::Result<Value, CallError> {
-    let mut delay = RETRY_FIRST;
-    let mut retries: u64 = 0;
-    loop {
-        let e = match attempt() {
-            Err(CallError::Failed(e)) => e,
-            other => return other,
-        };
-        let waited = clock.elapsed();
-        if !retry_safe(&e) {
-            if let Some(line) = holder_line(method, waited, &e) {
-                note(format!("{line}; not retried"));
+impl RetryBudget {
+    fn run_with_clock<T>(
+        &mut self,
+        method: &str,
+        wait_startup: bool,
+        deadline: Option<&Deadline>,
+        clock: &dyn Clock,
+        note: &mut dyn FnMut(String),
+        mut attempt: impl FnMut() -> std::result::Result<T, CallError>,
+    ) -> std::result::Result<T, CallError> {
+        let until = deadline.and_then(Deadline::fixed_end);
+        loop {
+            let e = match attempt() {
+                Err(CallError::Failed(e)) => e,
+                other => return other,
+            };
+            let waited = clock.elapsed();
+            if crate::interrupt::STOP.load(std::sync::atomic::Ordering::SeqCst)
+                || !should_retry(method, &e, wait_startup)
+            {
+                if let Some(line) = holder_line(method, waited, &e) {
+                    note(format!("{line}; not retried"));
+                }
+                return Err(CallError::Failed(e));
             }
-            return Err(CallError::Failed(e));
-        }
-        let left = budget.map(|b| b.saturating_sub(waited));
-        if left == Some(Duration::ZERO) {
-            if let Some(line) = holder_line(method, waited, &e) {
-                note(format!("{line}; giving up"));
+            let mut left = self.limit.map(|b| b.saturating_sub(waited));
+            let call_left = until.map(|end| end.saturating_duration_since(Instant::now()));
+            if let Some(time) = call_left {
+                left = Some(left.unwrap_or(time).min(time));
             }
-            return Err(CallError::Failed(spent(e, retries, waited)));
+            if left == Some(Duration::ZERO) {
+                if let Some(line) = holder_line(method, waited, &e) {
+                    note(format!("{line}; giving up"));
+                }
+                return Err(CallError::Failed(spent(e, self.retries, waited)));
+            }
+            if let Some(line) = holder_line(method, waited, &e) {
+                note(format!("{line}; retrying"));
+            }
+            clock.sleep(left.map_or(self.next_delay, |l| l.min(self.next_delay)));
+            // Diagnostic probes and the Stop hook have a fixed wall-clock limit.
+            if until.is_some_and(|end| Instant::now() >= end) {
+                return Err(CallError::Failed(spent(e, self.retries, clock.elapsed())));
+            }
+            if let Some(limit) = deadline {
+                limit.next_attempt().map_err(CallError::Failed)?;
+            }
+            self.next_delay = (self.next_delay * 2).min(RETRY_MAX);
+            self.retries += 1;
         }
-        if let Some(line) = holder_line(method, waited, &e) {
-            note(format!("{line}; retrying"));
-        }
-        clock.sleep(left.map_or(delay, |l| l.min(delay)));
-        delay = (delay * 2).min(RETRY_MAX);
-        retries += 1;
     }
 }
 
 /// new-lock §4.1: only the daemon's certification makes a refusal
 /// replay-safe; a bare `Busy lock_wait` (and every legacy daemon's) is not.
-fn retry_safe(e: &StrataError) -> bool {
-    e.code == Code::Busy && e.detail.as_ref().is_some_and(|d| d["retry_safe"] == true)
+fn should_retry(method: &str, e: &StrataError, wait_startup: bool) -> bool {
+    if e.code != Code::Busy {
+        return false;
+    }
+    let Some(detail) = &e.detail else {
+        return false;
+    };
+    match detail["reason"].as_str() {
+        Some("daemon_down") => false,
+        Some("starting" | "store_unavailable") => wait_startup,
+        Some("upgrading") => detail["retry_safe"] == true,
+        _ => matches!(method, "new" | "add") && detail["retry_safe"] == true,
+    }
 }
 
 /// The last certified refusal once the budget is spent (new-lock §4.3).
@@ -250,7 +329,12 @@ fn spent(mut e: StrataError, retries: u64, waited: Duration) -> StrataError {
     if let Some(d) = e.detail.as_mut().and_then(Value::as_object_mut) {
         d.insert("retries".into(), json!(retries));
         d.insert("waited_ms".into(), json!(waited.as_millis() as u64));
-        d.insert("fix".into(), json!(RETRY_FIX));
+        let fix = if d.get("reason").is_some_and(|v| v == "lock_wait") {
+            RETRY_FIX
+        } else {
+            "this RPC was refused before it ran; rerun the command, or use --timeout 0 to keep waiting"
+        };
+        d.insert("fix".into(), json!(fix));
     }
     e
 }
@@ -261,8 +345,16 @@ fn spent(mut e: StrataError, retries: u64, waited: Duration) -> StrataError {
 /// refusal.
 fn holder_line(method: &str, waited: Duration, e: &StrataError) -> Option<String> {
     let d = e.detail.as_ref()?;
-    if d["reason"] != "lock_wait" {
-        return None;
+    match d["reason"].as_str()? {
+        "upgrading" | "starting" | "store_unavailable" => {
+            return Some(format!(
+                "waiting ({}s): {method}; daemon {}",
+                waited.as_secs(),
+                d["reason"].as_str()?
+            ));
+        }
+        "lock_wait" => {}
+        _ => return None,
     }
     let lock = match (d["lock"]["repo"].as_str(), d["lock"]["session"].as_str()) {
         (Some(r), _) => format!("repo {r}"),
@@ -307,7 +399,7 @@ fn span(d: Duration) -> String {
 
 struct Progress(mpsc::Sender<()>);
 impl Progress {
-    fn start(socket: std::path::PathBuf, method: String, session: Option<String>) -> Option<Self> {
+    fn start(ctx: Ctx, method: String, session: Option<String>) -> Option<Self> {
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("rpc-progress".into())
@@ -321,14 +413,14 @@ impl Progress {
                     {
                         break;
                     }
-                    let state = rpc::call_within(
-                        &socket,
-                        "daemon_status",
-                        json!({}),
-                        Kind::Read,
-                        Duration::from_secs(2),
-                    )
-                    .ok();
+                    let state = ctx
+                        .call_within(
+                            "daemon_status",
+                            json!({}),
+                            Kind::Read,
+                            Duration::from_secs(2),
+                        )
+                        .ok();
                     if rx.try_recv() != Err(mpsc::TryRecvError::Empty) {
                         break;
                     }
@@ -430,6 +522,69 @@ mod tests {
         )
     }
 
+    fn retry_loop<T>(
+        method: &str,
+        wait_startup: bool,
+        limit: Option<Duration>,
+        deadline: Option<&Deadline>,
+        clock: &dyn Clock,
+        note: &mut dyn FnMut(String),
+        attempt: impl FnMut() -> std::result::Result<T, CallError>,
+    ) -> std::result::Result<T, CallError> {
+        RetryBudget::with_limit(limit).run_with_clock(
+            method,
+            wait_startup,
+            deadline,
+            clock,
+            note,
+            attempt,
+        )
+    }
+
+    #[test]
+    fn u3_exact_boundary_retry_uses_the_virtual_clock() {
+        for reason in ["starting", "store_unavailable", "upgrading"] {
+            let clock = Fake::default();
+            let result = retry_loop(
+                "du",
+                true,
+                Some(Duration::from_millis(120)),
+                None,
+                &clock,
+                &mut |_| {},
+                || {
+                    Err::<Value, _>(CallError::Failed(
+                        StrataError::new(Code::Busy, reason).with_detail(
+                            json!({"reason":reason, "retry_safe":reason == "upgrading"}),
+                        ),
+                    ))
+                },
+            );
+            assert_eq!(failed(result).detail.unwrap()["retries"], 1);
+            assert_eq!(*clock.slept.borrow(), [Duration::from_millis(120)]);
+        }
+    }
+
+    #[test]
+    fn u3_probe_and_parameter_variants_share_backoff_and_retry_count() {
+        let clock = Fake::default();
+        let mut budget = RetryBudget::with_limit(Some(Duration::from_secs(3)));
+        let busy = || CallError::Failed(StrataError::upgrading("test", "park", 2000));
+        for method in ["daemon_status", "sync"] {
+            let mut attempts = [Err(busy()), Ok(())].into_iter();
+            budget
+                .run_with_clock(method, false, None, &clock, &mut |_| {}, || {
+                    attempts.next().unwrap()
+                })
+                .unwrap();
+        }
+        let legacy = budget.run_with_clock("sync", false, None, &clock, &mut |_| {}, || {
+            Err::<Value, _>(busy())
+        });
+        assert_eq!(failed(legacy).detail.unwrap()["retries"], 2);
+        assert_eq!(*clock.slept.borrow(), [1, 2].map(Duration::from_secs));
+    }
+
     fn run(
         budget: Option<Duration>,
         clock: &Fake,
@@ -438,10 +593,18 @@ mod tests {
         let mut replies = replies.into_iter();
         let mut sent = 0;
         let mut lines = Vec::new();
-        let out = retry_loop("new", budget, clock, &mut |l| lines.push(l), || {
-            sent += 1;
-            replies.next().expect("no more replies than attempts")
-        });
+        let out = retry_loop(
+            "new",
+            false,
+            budget,
+            None,
+            clock,
+            &mut |l| lines.push(l),
+            || {
+                sent += 1;
+                replies.next().expect("no more replies than attempts")
+            },
+        );
         (out, sent, lines)
     }
 
@@ -503,7 +666,9 @@ mod tests {
         let mut lines = Vec::new();
         let out = retry_loop(
             "add",
+            false,
             Some(Duration::from_secs(5)),
+            None,
             &clock,
             &mut |l| lines.push(l),
             || {
@@ -544,7 +709,7 @@ mod tests {
     fn timeout_zero_unlimited() {
         let args = WaitArgs {
             timeout: Some(0.0),
-            progress: false,
+            ..WaitArgs::default()
         };
         assert_eq!(budget(&args, RETRY_DEFAULT_SECS).unwrap(), None);
         let none = WaitArgs::default();
@@ -563,6 +728,50 @@ mod tests {
         let slept = clock.slept.borrow();
         assert_eq!(slept[..5], [1, 2, 4, 8, 10].map(Duration::from_secs));
         assert!(slept.iter().all(|d| *d <= RETRY_MAX));
+    }
+
+    #[test]
+    fn u3_upgrade_backoff_is_capped_and_the_budget_only_bounds_retries() {
+        let another_certified_reason = StrataError::new(Code::Busy, "refused")
+            .with_detail(json!({"reason":"future_pre_write_refusal","retry_safe":true}));
+        assert!(should_retry("new", &another_certified_reason, false));
+        assert!(should_retry("add", &another_certified_reason, false));
+        assert!(!should_retry("publish", &another_certified_reason, false));
+        let clock = Fake::default();
+        let mut calls = 0;
+        let result = retry_loop("publish", false, None, None, &clock, &mut |_| {}, || {
+            calls += 1;
+            if calls == 7 {
+                return Ok(());
+            }
+            Err(CallError::Failed(StrataError::upgrading(
+                "h1", "park", 2000,
+            )))
+        });
+        result.unwrap();
+        assert_eq!(
+            *clock.slept.borrow(),
+            [1, 2, 4, 8, 10, 10].map(Duration::from_secs)
+        );
+
+        let clock = Fake::default();
+        let result = retry_loop(
+            "publish",
+            false,
+            Some(Duration::from_secs(2)),
+            None,
+            &clock,
+            &mut |_| {},
+            || {
+                clock.advance(Duration::from_secs(30));
+                Err::<(), _>(CallError::Failed(StrataError::upgrading(
+                    "h1", "park", 2000,
+                )))
+            },
+        );
+        let error = result.unwrap_err().into_error();
+        assert_eq!(error.detail.unwrap()["retries"], 0);
+        assert!(clock.slept.borrow().is_empty());
     }
 
     /// new-lock §8 `progress_lines`: the holder comes from the refusal; a

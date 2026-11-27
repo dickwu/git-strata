@@ -129,7 +129,7 @@ Main-sync 的 `sync` 参数是 `{session?: string|null, cwd?: string|null, repos
 | `chain_resolve` | `{ "repo": RepoName, "choice": ChainChoice, "shown"?: CommitOid \| null }` | 见 §5.5。`choice` 不是这三个变体名 → RPC `Failed` |
 | `config_reload` | `{}` | ReloadReport，见 Config catalog and reload |
 | `config_relax` | `{ "repo": RepoName, "shown"?: PinnedFlags \| null }` | `{pins_meta, warnings?}`。`shown` 在反序列化时可省略或为 null，但 handler 会以 `InvalidInput shown_required` 拒绝；支持 `config.reload` 的客户端必须发送展示的 flags。没有凭据字段。见 §5.5 |
-| `daemon_status` | `{ "verify": bool }` | `holds`, `queues:[{session,holder,since,queued}]`, `repo_waiting`, `warnings`（含 LongWait）, `features`, `sessions_audit_error`（会话审计写入失败信息或 null；见下文 sidecar 说明）；见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc`。状态栏字段 `version`、`pid`、`started`、`activity`、`busy`、`volume`、`scan`（feature `daemon_status.activity`；`volume` 的 `path`、`mount`、`name` 是 feature `daemon_status.volume_name`）见 Status bar fields。支持 `daemon.drain` 时另带 `draining`、`inflight` 与 `store_schema`，见 §5.9。 |
+| `daemon_status` | `{ "verify": bool }` | `holds`, `queues:[{session,holder,since,queued}]`, `repo_waiting`, `warnings`（含 LongWait）, `features`, `sessions_audit_error`（会话审计写入失败信息或 null；见下文 sidecar 说明）；见 §5.4；`verify` 缺省 false。另带 `reconcile: { runs, last }`：§5.9 上一轮的 `scanned`（每个工作区扫出的 `changed`）、`skipped`（队列被占，`holder`）、`failed`、`gc`。状态栏字段 `version`、`pid`、`started`、`activity`、`busy`、`volume`、`scan`（feature `daemon_status.activity`；`volume` 的 `path`、`mount`、`name` 是 feature `daemon_status.volume_name`）见 Status bar fields。支持 `daemon.drain` 时另带 `draining`、`inflight` 与 `store_schema`，见 §5.9。支持 `daemon.handover` 时另带 `handover`，见 Handover parking。 |
 | `du` | `{ "refresh": bool }`（缺省 false） | 见 §5.12 |
 | `ports_ensure` | `{ "session": SessionId, "repo": RepoName }` | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
 | `ports_reassign` | `{ "session": SessionId, "repo": RepoName, "checked": u16 \| null }`（`checked`：cli 查过监听的那个 base，`null` 或缺省 = 它没看到租约；与事务里的租约不同时 `Busy lease_changed`，什么都不动） | `{ "session", "repo", "base", "ports": { "web", "connector", "connector_mcp", "aux" } }` |
@@ -572,7 +572,7 @@ daemon 实现 `publish::PublishLocks`（`with_sessions`、`with_repo`），放�
 
 Desktop callers require the `daemon.drain` feature. `drain{on:true}` creates a lease with a default TTL of 120 seconds and a maximum of 600 seconds. When a lease already exists, a lease-less acquisition returns `Busy draining` without a lease ID. To renew from the current time, send `drain{on:true, lease_id}` with the ID returned by acquisition. An unknown or expired ID returns `Busy lease_lost`. An unsealed lease expires automatically and can be released with `drain{on:false}`.
 
-Write admission, inflight registration, background-pass admission and sealing use the same critical section. A write arriving during the lease receives `Busy draining`. Already admitted work can finish. Read-only calls, including sync checks and store-GC previews, can continue. A publish preview that needs to refresh tracking refs must first register a write. During drain, `status` and sync checks can reuse cached upstream dependency summaries. `deps_list` omits the optional `changes` field.
+Write admission, inflight registration, background-pass admission and sealing use the same critical section. A write arriving during the lease receives `Busy draining`. Already admitted work can finish. Read-only calls, including sync checks and store-GC previews, can continue. The worker conservatively refuses cross-session diff, grep and files during a cold lease because they can populate the store or a disk index. A standalone publish preview holds one admission for the entire request. A preview admitted during a lease can read cached refs. If it needs a refresh it returns `Busy draining` before changing any ref. During drain, `status` and sync checks can reuse cached upstream dependency summaries. `deps_list` omits the optional `changes` field.
 
 Background passes wait for release or expiry before starting. These include catch-up, reconciliation, seed refresh, old-tree checks, autonomous config polling, main-follow fetch, automatic dependency work and disk sampling. An admitted `config_reload` ticket can run during drain and keeps its inflight entry through completion, even after a `pending` reply. `drain` is exempt from the fence and from inflight tracking.
 
@@ -1587,13 +1587,11 @@ anchor, re-observation, reconcile) are unchanged and still wait for the lock.
 **`lock_wait` detail.** A `Busy` `lock_wait` refusal's detail gains, beside
 `lock`, `holder` and `holder_session`: `holder_origin` (`request` or
 `background`), `holder_since` (RFC 3339) and `held_ms`, all absent when the
-lock was between holders at the timeout. The daemon adds `retry_safe: true`
-only where nothing was written: `add`'s initial session-queue wait, and a
-head-step refusal in which every failed repo failed with `lock_wait`. The CLI
-retries only those (cli.md); every other refusal, and every refusal from an
-older daemon, is returned at once. FEATURES appends `new.fetch_skip`: such a
-daemon may answer `new`/`add` with `NewWarning::FetchSkipped`, which an older
-typed client cannot decode, so the CLI and the daemon are upgraded together.
+lock was between holders at the timeout. For lock waits the daemon adds `retry_safe: true`
+in two places before workspace changes: `add`'s initial session-queue wait, and a
+head-step refusal in which every failed repo failed with `lock_wait`. CLIs from 0.3.2 retry these certified `new`/`add`
+refusals. A daemon advertising `new.fetch_skip` may include
+`NewWarning::FetchSkipped` in the JSON warnings array.
 
 **The old-tree worker.** `old_tree_loop` claims one queued old tree at a time
 (`Sessions::claim_old_tree`, waiting at most 100 ms); a key of a session with
@@ -1642,3 +1640,83 @@ Tests: `tests/new_lock.rs` (head step, snapshot, `--base`, fences, unpin,
 `holder_*` fields, certified refusals) and `tests/old_tree_yield.rs` (phase 1
 holds no lock and shows as activity, the phase-0 yield, the bounded and the
 busy phase 2, guards with and without a deadline, `rm` past the lock wait).
+
+## Worker fixtures
+
+The `test-seams` feature enables `git-stratad-test`. Cargo integration tests
+supply a short temporary fixture root, a HOME and a config directory. A test
+process receives the root and config directory as its two arguments. Its harness
+sets HOME on the child. In-process tests pass the same layout in startup options.
+
+Before opening `daemon.lock` or binding the early listener, startup checks HOME,
+the config directory and file, the socket, and the administrative paths used
+by store initialization, cleanup and the ref sweep. A
+missing leaf is allowed. A symlink in any of these paths, a parent traversal or
+a path outside the fixture aborts startup. The worker validates the config it
+actually uses again on each open attempt. An omitted data root resolves to
+`.strata` under the fixture HOME. The test process uses a scripted confirmer
+and allows only the Git file transport. In-process workers pass fixture HOME,
+XDG_CONFIG_HOME and this same transport policy to foreground Git commands,
+periodic fetch and search-index builders.
+
+`fixture::FakeLaunchd` records bootstrap, bootout, enable, disable, print and
+kickstart for a test label in a synthetic `fixture/<name>` domain.
+The production adapter currently implements the existing bootstrap and bootout
+operations. The other four operations return `Unsupported` until a caller is
+implemented. Tests use ordinary temporary APFS directories for these checks.
+
+Run the worker harness with `cargo test -p strata-daemon --test worker_fixture`.
+The U5 source checks run with `cargo test -p git-strata --test custody`.
+
+## Versioned request envelopes
+
+`daemon_status.features` advertises `envelope.client`. An unannotated
+request uses the original envelope. An announced `client` version
+is logged once on receipt. A failed diagnostic write leaves dispatch and replay
+available. The parser refuses a release below `MIN_CLIENT`
+with `InvalidInput client_too_old` before invoking any handler. Unknown keys
+still receive the original RPC `Failed` parser reply with the request ID.
+
+A handover owner can use `StrataError::upgrading` to refuse an unadmitted
+request. The detail identifies the handover, phase and retry delay. Genuine
+startup continues to answer `Busy starting` or `Busy store_unavailable`.
+The per-root schema snapshot in `store_state.json` also records
+`daemon_version` so a CLI encountering a newer local schema can name the
+matching release before it connects to a daemon.
+
+## Handover parking
+
+The worker control entry point starts parking and a matching abort resumes the
+same worker. The service dispatcher decides under the drain mutex whether to
+admit a potentially writing method or park its complete request. This covers
+every write-class method, including drain controls, sync checks and dry-run GC,
+plus standalone `publish_plan`, `diff`, `grep`, and `files`. A cross-base diff
+can store blobs, and a cold search can publish an index. Each permitted
+handler retains one guard for its lifetime. Other read-only methods can run.
+New background passes wait until parking ends.
+
+The queue holds up to 64 connections and 32 MiB combined. The byte count
+includes each frame's newline and all bytes the reader has already taken past
+it. Parked sockets leave the shutdown registry and still count toward the
+connection limit. On abort their first frames run once in sequence order.
+Each connection then consumes its saved read-ahead and continues serving.
+Terminal stop answers untouched parked frames and their complete read-ahead
+by ID with retry-safe `Busy upgrading`. On a healthy worker it waits for
+previously admitted requests, including lock waiters, and background passes.
+Overflow receives `Busy upgrading` with `retry_safe: true` and
+`retry_after_ms: 2000` before the handler starts.
+
+A successful `daemon_status` can serve as the App's same-stream identity
+check. That stream, a stream that acquired a drain lease, and a request
+presenting a lease ID on a fresh stream are generation-bound. When a write
+on a bound stream meets parking, all subsequent complete in-limit frames
+on that stream receive the same refusal, by ID in order. The detail includes
+`generation_changed: true`. Refusal continues after abort until the peer
+closes or the stream has been idle for five seconds.
+
+Workers advertising `daemon.handover` return `handover: null` when idle.
+During parking or abort replay the object has `id`, `phase` (`park` or
+`resuming`), `to` (target PID), `parked` (queued first frames), and
+`waiting_on`. Its `inflight` array uses the existing inflight row shape and
+includes all admitted methods in the parked set. Its `background`
+count includes each admitted background pass through completion.

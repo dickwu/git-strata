@@ -24,13 +24,19 @@ unlimited) bounds only the retries of a `Busy lock_wait` the daemon marked
 `detail.retry_safe` (nothing was created); it never cuts one call short. A
 busy repo's due fetch is skipped instead of waited for (warning `FetchSkipped`).
 If your own tool timeout kills `new`, check `git-strata ls` for the ticket
-before running it again. Upgrade the CLI and the daemon together: an older
-daemon never marks a refusal retry-safe, so nothing is retried against it.
+before running it again. Daemons before 0.3.2 return their original blocking
+`new`/`add` behavior and omit the replay-safe lock refusal.
 
 `new --repo R --base REV` parks a session at a local commit. It is still a
 checkpoint/publish session, not a git branch. Publishing is refused until every
 base-only commit is reachable from the publish baseline B or main; B may be
 the leading publish-chain tip. No per-session publish lines are introduced.
+
+Any RPC can receive `Busy upgrading` with `detail.retry_safe: true`. The CLI
+retries that one call for `--timeout SECS` or `GIT_STRATA_TIMEOUT` (default
+600 seconds, 0 unlimited). `--wait` also waits for startup and an unavailable
+store. `status` and `sync` retain their own I/O deadlines. An unanswered write
+with `outcome: in_progress` may still run.
 
 ## Paths
 
@@ -58,6 +64,7 @@ data root (`[paths] root`, default `~/.strata`) as
 | `deps propose` | `--session <S>`, `--repo <R>` (default: cwd's), `--switch` (move this session only), `--allow-cwd`, `--allow-cwd-holders` | no | no | `Proposal`; with `--switch`: `{ proposal, switched: { session, kind: moved\|skipped, code?, detail? } }` |
 | `deps approve <ID>` | `--sessions <S,S>` (default: all sessions of the repo), `--allow-cwd`, `--allow-cwd-holders` | yes + confirm | no | `{results:[{session,kind:"moved"\|"skipped",code?,detail?}]}` |
 | `deps list` | `--repo <R>` | no | yes | `{proposals:[...]}`; daemon rows carry effective pinned `mode: "apply" \| "confirm"` |
+| `publish --dry-run` | `--from <S:[REPO:]PATH>` (repeatable) | no | no | Checkpoints the selected content and returns the plan with `repos`, `subjects` and `already_published` before confirmation, commit or push. |
 | `publish` | `--from <S:PATH>` or `--from <S:REPO:PATH>` (repeatable; none = interactive on a TTY, else `InvalidInput` `no_batch`); `--assign <FILE> <SESSION>`; `-m TEXT` and `--message-for REPO=TEXT` repeat as paragraphs | when a repo it will still commit pushes and needs confirmation. A guarded repo is exempt only when the content check proves its selected paths already landed; a session still on its old base (its rebase is `Waiting` on a deps proposal) still counts, so it can need a TTY and confirmation even though nothing new would be committed. If the daemon's own replan needs a guarded repo outside the set the CLI's TTY check covered (history changed between the plan and the publish), publish returns `NotConfirmed` with `detail.reason` `plan_changed` before prompting or writing anything (`data.already_published` still lists repos that landed earlier): rerun the same command | no | `{commits:{<repo>:oid},message_source:{<repo>:source},checks_ran,waiting:[],pushes:[{repo,outcome}],already_published:[{repo,publish,commit,push}],closed,auto_close:{closed,reasons[],sessions}}`; `closed` and `auto_close` say whether the publish closed the session (SKILL.md step 8); a re-run whose `already_published` entry has a `Refused` push is `ok:false` `PushRefused` with `detail.fix` `git-strata push REPO`; on `Conflict`, `error.detail.repo` is the stopped repo and `data` keeps the repos that landed |
 | `push <REPO>` | — | when the repo needs confirmation | no | `PushOutcome` `{kind,message}`; also `closed` and `auto_close` when a done-marked session of the repo has an entry (a push can close it, SKILL.md step 8); for a repo without confirmation also `commit`, `replayed` (`{from,to,onto,commits,checks_ran}` or null), `rebases`, `warnings`: it fetches and replays a diverged chain onto origin first (`Conflict` `replay_conflict` / `CheckFailed` / `replay_deps_unsealed`: nothing written or pushed) |
 | `assign` | `--file <PATH> --session <S>` (both required) | no | no | `{}` |
@@ -75,9 +82,18 @@ data root (`[paths] root`, default `~/.strata`) as
 | `session ports` | `--session <S>`, `--repo <R>` (defaults: cwd's session; cwd's repo, else every repo), or `--all` (read-only, every live workspace; unleased ones show `ports: null`, `reason: "unleased"`); `--check` (who listens on each port); `--reassign` (move exactly one workspace's lease to another block) | no | yes when the lease exists | `{leases:[{session,repo,path,tauri_app_root,ports:{web,connector,connector_mcp,aux},env:{...},check?}]}` |
 | `session exec -- <CMD>...` | `--session <S>`, `--repo <R>` (exactly one workspace), `--tauri` (add `--config $STRATA_TAURI_DEV_CONFIG` to `tauri dev`), `--no-check` | no | yes when the lease exists | none: the process becomes `<CMD>` (its output and exit code) with the lease env set |
 
+Workers with `daemon.handover` also return `data.handover`. It is null when
+idle. During parking, `to` is the target worker PID, `parked` counts held
+requests, and `waiting_on` lists inflight work and counts background passes.
+A cross-session diff, grep or files request can also be parked. Abort resumes
+parked requests in order. Terminal stop returns retry-safe `Busy upgrading`
+for each untouched frame.
+Leave a pending command running while it waits for its reply.
+
 `daemon status` also copies `draining`, `inflight` and `store_schema` when
 the daemon reports them. For a sealed Move, it prints a reminder to finish
-or cancel in GIT STRATA. Only the App manages the drain lease.
+or cancel in GIT STRATA. Only the App manages the drain lease. An announced version below the floor
+returns `Unsupported daemon_too_old` on that same status call.
 
 `daemon status` copies `config` when the daemon returns it; the field is absent
 when down or omitted by an older daemon. `generation`, `hash` and `loaded_at`
