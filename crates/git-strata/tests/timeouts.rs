@@ -6,7 +6,7 @@ fn slow(q: &Value) -> Value {
     let data = if q["method"] == "daemon_status" {
         json!({"holds":[],"queues":[{"session":"s-abcdefgh","holder":"old_tree","queued":["sync"]}]})
     } else {
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(1500));
         if q["method"] == "status" {
             json!({"sessions":[]})
         } else {
@@ -25,7 +25,9 @@ fn timeouts_are_not_local_fallbacks_and_writes_are_not_retried() {
         vec!["sync", "--session", "s-abcdefgh"],
     ] {
         let mut args = args;
-        args.extend(["--timeout", "0.05"]);
+        // Long enough for the capability probe and the send on a loaded
+        // runner, well short of the fake's reply.
+        args.extend(["--timeout", "0.5"]);
         let run = h.run(&args);
         assert_eq!(run.reason(), "client_timeout", "{run:?}");
         assert_eq!(
@@ -321,11 +323,11 @@ fn stale_socket_status_falls_back_to_a_v5_store_and_old_probes_may_omit_queues()
     std::fs::remove_file(h.socket()).unwrap();
     let _d = FakeDaemon::start(&h.socket(), |q| {
         if q["method"] != "daemon_status" {
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(Duration::from_millis(1500));
         }
         json!({"id":q["id"],"ok":true,"data":{"holds":[]}})
     });
-    let out = h.run(&["sync", "--timeout", "0.02"]);
+    let out = h.run(&["sync", "--timeout", "0.5"]);
     assert_eq!(out.err_code(), "Unknown");
     assert!(out.env()["error"]["detail"].get("queues").is_none());
 }
