@@ -32,6 +32,7 @@ pub(super) fn open(config_dir: &Path, root: &Path, checkouts: &[&Path]) -> Resul
         json!({
             "root": root,
             "user_version": STORE_SCHEMA,
+            "daemon_version": env!("CARGO_PKG_VERSION"),
             "migrated_from": migrated_from,
             "at": at,
         }),

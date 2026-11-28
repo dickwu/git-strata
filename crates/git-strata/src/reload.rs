@@ -11,18 +11,11 @@ use strata_types::{Code, StrataError};
 pub(crate) const OLD_DAEMON: &str =
     "this daemon loads config only at start; ask the owner to restart it";
 
-pub(crate) fn supported(ctx: &Ctx) -> Result<bool> {
-    let status = rpc::call_within(
-        &ctx.paths.socket,
-        "daemon_status",
-        json!({}),
-        Kind::Read,
-        crate::agent::PROBE_DEADLINE,
-    )
-    .map_err(rpc::CallError::into_error)?;
-    Ok(status["features"]
+/// Whether a `daemon_status` reply lists hot reload.
+pub(crate) fn has_reload(status: &Value) -> bool {
+    status["features"]
         .as_array()
-        .is_some_and(|f| f.iter().any(|s| s == "config.reload")))
+        .is_some_and(|f| f.iter().any(|s| s == "config.reload"))
 }
 
 pub(crate) fn result(data: Value) -> (Envelope, i32) {
@@ -69,7 +62,11 @@ pub(crate) fn result(data: Value) -> (Envelope, i32) {
 }
 
 pub(crate) fn request(ctx: &Ctx) -> Result<(Envelope, i32)> {
-    if !supported(ctx)? {
+    // One negotiated call: the feature check and the write share a budget.
+    let mut call = ctx
+        .begin_gated("config_reload", Kind::Write, None)
+        .map_err(rpc::CallError::into_error)?;
+    if !has_reload(&call.status) {
         return Ok((
             Envelope::err(
                 StrataError::new(Code::Unsupported, OLD_DAEMON)
@@ -78,7 +75,8 @@ pub(crate) fn request(ctx: &Ctx) -> Result<(Envelope, i32)> {
             4,
         ));
     }
-    Ok(result(ctx.call("config_reload", json!({}), Kind::Write)?))
+    let data = call.send(&json!({})).map_err(rpc::CallError::into_error)?;
+    Ok(result(data))
 }
 
 pub(crate) fn emit(env: &Envelope, code: i32) -> i32 {

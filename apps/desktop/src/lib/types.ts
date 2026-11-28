@@ -174,6 +174,14 @@ export interface DaemonStatus {
   /** Feature `daemon.drain`. Older daemons omit these fields. */
   draining?: Draining | null;
   inflight?: Inflight[];
+  /** Feature `daemon.handover`. The target is the worker PID. */
+  handover?: {
+    id: string;
+    phase: string;
+    to: number;
+    parked: number;
+    waiting_on: { inflight: Inflight[]; background: number };
+  } | null;
   store_schema?: number;
   scan?: DaemonScan;
 }

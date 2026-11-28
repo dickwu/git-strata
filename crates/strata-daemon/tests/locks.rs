@@ -476,7 +476,14 @@ fn concurrent_sessions_are_not_refused_for_a_sibling() {
 
 #[test]
 fn status_sees_in_flight_without_cancelling() {
-    let l = locks();
+    // The hold sleeps 250ms and the queued rm waits on it. With the shared
+    // 300ms WAIT, a loaded runner that stretched the hold to 324ms (CI)
+    // made rm return Busy. The test only needs rm to run after the
+    // checkpoint, so use a wider wait, as the publish test below does.
+    let l = Arc::new(Locks::new(
+        [rn("front"), rn("tool")],
+        Duration::from_secs(2),
+    ));
     let s = sid("hhhhhhhh");
     let b = Arc::new(Barrier::new(2));
     let (l1, s1, b1) = (l.clone(), s.clone(), b.clone());
@@ -512,7 +519,14 @@ fn checkpoint_during_publish_does_not_cancel() {
     // same-session checkpoint and rm queue and run afterwards, and publish
     // returns its own result.
     use strata_publish::PublishLocks;
-    let l = locks();
+    // The shared WAIT is 300ms and the hold sleeps 250ms. On a loaded
+    // hosted runner the preamble before that sleep can push the hold
+    // past 300ms (CI saw 387ms), so the queued checkpoint returns Busy.
+    // This test only needs them to run after publish; use a wider wait.
+    let l = Arc::new(Locks::new(
+        [rn("front"), rn("tool")],
+        Duration::from_secs(2),
+    ));
     let s = sid("iiiiiiii");
     let b = Arc::new(Barrier::new(2));
     let (l1, s1, b1) = (l.clone(), s.clone(), b.clone());

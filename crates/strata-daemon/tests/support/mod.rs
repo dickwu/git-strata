@@ -1,7 +1,7 @@
 //! Shared fixtures for the daemon tests (daemon.md §7, §8). The sandbox
 //! part is the publish test support's: every repository, store, config dir
 //! and fake program lives in a temp dir; every git gets a sandbox HOME /
-//! XDG_CONFIG_HOME and GIT_CONFIG_NOSYSTEM=1. The socket lives in a short
+//! XDG_CONFIG_HOME and GIT_CONFIG_NOSYSTEM=1. The whole fixture uses a short
 //! temp dir under /tmp (sockaddr_un is 104 bytes on macOS).
 #![allow(dead_code)]
 
@@ -72,8 +72,8 @@ impl Default for Sandbox {
 impl Sandbox {
     pub fn new() -> Sandbox {
         let dir = tempfile::Builder::new()
-            .prefix("strata-daemon-")
-            .tempdir()
+            .prefix(strata_daemon::fixture::PREFIX)
+            .tempdir_in("/tmp")
             .expect("tempdir");
         let root = fs::canonicalize(dir.path()).unwrap();
         let home = root.join("home");
@@ -111,6 +111,7 @@ impl Sandbox {
             ("HOME", Some(self.home.as_os_str())),
             ("XDG_CONFIG_HOME", Some(self.xdg.as_os_str())),
             ("GIT_CONFIG_NOSYSTEM", Some(OsStr::new("1"))),
+            ("GIT_ALLOW_PROTOCOL", Some(OsStr::new("file"))),
         ]
     }
 
@@ -120,6 +121,12 @@ impl Sandbox {
     }
 
     pub fn cmd(&self, cwd: &Path) -> Command {
+        Self::git_command(&self.home, &self.xdg, cwd)
+    }
+
+    /// The sandbox's git without borrowing it, for a `'static` test callback:
+    /// no runner GIT_* (GIT_DIR included), the sandbox HOME and Git policy.
+    pub fn git_command(home: &Path, xdg: &Path, cwd: &Path) -> Command {
         let mut c = Command::new("git");
         for (k, _) in std::env::vars_os() {
             if k.to_string_lossy().to_ascii_uppercase().starts_with("GIT_") {
@@ -127,9 +134,10 @@ impl Sandbox {
             }
         }
         c.current_dir(cwd)
-            .env("HOME", &self.home)
-            .env("XDG_CONFIG_HOME", &self.xdg)
+            .env("HOME", home)
+            .env("XDG_CONFIG_HOME", xdg)
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_ALLOW_PROTOCOL", "file")
             .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(Stdio::null());
         c
@@ -230,6 +238,7 @@ impl Sandbox {
         InstallEnv {
             path: self.install_path(),
             timeout: Duration::from_secs(60),
+            child_env: Vec::new(),
         }
     }
 
@@ -368,7 +377,6 @@ pub struct Dfx {
     pub sb: Sandbox,
     pub config: Config,
     pub config_dir: PathBuf,
-    pub sock_dir: tempfile::TempDir,
     pub alerts: Arc<Mutex<Vec<String>>>,
     pub lock_wait: Duration,
     /// `Options::reconcile_every` (production value unless a test shortens it).
@@ -404,15 +412,10 @@ impl Dfx {
             publish: PublishDefaults { auto_close: false },
         };
         let config_dir = sb.path("cfg");
-        let sock_dir = tempfile::Builder::new()
-            .prefix("sd-")
-            .tempdir_in("/tmp")
-            .expect("sock dir");
         let fx = Dfx {
             sb,
             config,
             config_dir,
-            sock_dir,
             alerts: Arc::new(Mutex::new(Vec::new())),
             lock_wait: Duration::from_millis(300),
             reconcile_every: strata_daemon::RECONCILE_EVERY,
@@ -460,37 +463,23 @@ impl Dfx {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         let lock = strata_daemon::lock_path(&self.config_dir);
         while lock.exists() && std::time::Instant::now() < deadline {
-            match startup::InstanceLock::take(&lock) {
+            match startup::take_instance(&self.options()) {
                 Err(e) if is_daemon_running(&e) => std::thread::sleep(Duration::from_millis(20)),
                 _ => break,
             }
         }
-        let env: Vec<(String, Option<std::ffi::OsString>)> = self
-            .sb
-            .git_env()
-            .into_iter()
-            .map(|(k, v)| (k.to_owned(), v.map(|v| v.to_os_string())))
-            .collect();
-        startup::prepare(self.options(), c, &move |p: &Path| {
-            Git::open_with_env(
-                p,
-                &env.iter()
-                    .map(|(k, v)| (k.as_str(), v.as_deref()))
-                    .collect::<Vec<_>>(),
-            )
-        })
+        let opts = self.options();
+        let fixture = opts.fixture.clone().unwrap();
+        startup::prepare(opts, c, &move |p| fixture.open_git(p))
     }
 
     pub fn socket(&self) -> PathBuf {
-        self.sock_dir.path().join("d.sock")
+        strata_daemon::socket_path(&self.config_dir)
     }
 
     pub fn options(&self) -> Options {
         let alerts = self.alerts.clone();
         Options {
-            config_dir: self.config_dir.clone(),
-            config_file: self.config_dir.join("config.toml"),
-            socket: self.socket(),
             lock_wait: self.lock_wait,
             install_path: self.sb.install_path(),
             alert: Arc::new(move |l: &str| alerts.lock().unwrap().push(l.to_string())),
@@ -499,6 +488,13 @@ impl Dfx {
             config_poll_every: self.config_poll_every,
             // Legacy RPC tests control their own fetch/install timelines.
             background_main_sync: false,
+            ..strata_daemon::fixture::WorkerFixture::new(
+                &self.sb.root,
+                &self.sb.home,
+                &self.config_dir,
+            )
+            .unwrap()
+            .options()
         }
     }
 
@@ -546,7 +542,7 @@ impl Dfx {
         // A first start has nothing to wait for (and a probe would only add a
         // window of its own); only a restart probes.
         while lock.exists() && std::time::Instant::now() < deadline {
-            match startup::InstanceLock::take(&lock) {
+            match startup::take_instance(&self.options()) {
                 Err(e) if is_daemon_running(&e) => std::thread::sleep(Duration::from_millis(20)),
                 _ => break,
             }
@@ -556,20 +552,9 @@ impl Dfx {
 
     pub fn prepare_once(&self, c: Confirmer) -> strata_daemon::Result<Core> {
         self.seed_pins();
-        let env: Vec<(String, Option<std::ffi::OsString>)> = self
-            .sb
-            .git_env()
-            .into_iter()
-            .map(|(k, v)| (k.to_owned(), v.map(|v| v.to_os_string())))
-            .collect();
-        startup::prepare(self.options(), c, &move |p: &Path| {
-            Git::open_with_env(
-                p,
-                &env.iter()
-                    .map(|(k, v)| (k.as_str(), v.as_deref()))
-                    .collect::<Vec<_>>(),
-            )
-        })
+        let opts = self.options();
+        let fixture = opts.fixture.clone().unwrap();
+        startup::prepare(opts, c, &move |p| fixture.open_git(p))
     }
 
     pub fn main(&self, repo: &str) -> PathBuf {

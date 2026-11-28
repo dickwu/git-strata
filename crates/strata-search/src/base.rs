@@ -14,13 +14,18 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 use strata_types::{Code, CommitOid, Config, RepoName, StrataError, TreeOid};
-use tgrep_core::generations::{Generation, GenerationError, GenerationKey, GenerationManager, IndexingProfile, Repository};
+use tgrep_core::generations::{
+    Generation, GenerationError, GenerationKey, GenerationManager, IndexingProfile, Repository,
+};
 
 use crate::{Result, err, lock};
 
 /// The v1 profile (D3): tgrep's default with overlay's size cap.
 pub(crate) fn profile() -> IndexingProfile {
-    IndexingProfile { max_blob_bytes: Some(strata_overlay::MERGE_MAX_BYTES), ..IndexingProfile::default() }
+    IndexingProfile {
+        max_blob_bytes: Some(strata_overlay::MERGE_MAX_BYTES),
+        ..IndexingProfile::default()
+    }
 }
 
 /// tgrep's legacy-key schema number. `GenerationKey::legacy` is crate
@@ -36,6 +41,8 @@ pub(crate) struct RepoBase {
 
 #[derive(Default)]
 pub(crate) struct Bases {
+    #[cfg(feature = "test-seams")]
+    pub(crate) fixture_home: Option<PathBuf>,
     repos: Mutex<BTreeMap<RepoName, Arc<RepoBase>>>,
     #[cfg(feature = "test-seams")]
     pub(crate) fail_after_stage: std::sync::atomic::AtomicBool,
@@ -46,7 +53,11 @@ fn unknown(msg: String, reason: &str) -> StrataError {
 }
 
 fn git_missing(e: &std::io::Error) -> StrataError {
-    err(Code::Unsupported, format!("git is not on PATH: {e}"), "git_missing")
+    err(
+        Code::Unsupported,
+        format!("git is not on PATH: {e}"),
+        "git_missing",
+    )
 }
 
 impl Bases {
@@ -57,30 +68,59 @@ impl Bases {
             return Ok(r.clone());
         }
         let Some(rc) = config.repos.get(repo) else {
-            return Err(StrataError::new(Code::NoSuchRepo, format!("no repo {repo} in the config"))
-                .with_detail(json!({ "repo": repo.as_str() })));
+            return Err(StrataError::new(
+                Code::NoSuchRepo,
+                format!("no repo {repo} in the config"),
+            )
+            .with_detail(json!({ "repo": repo.as_str() })));
         };
         // With the main checkout present, a NotFound out of discover is the
         // git executable itself.
         if !rc.path.is_dir() {
-            return Err(StrataError::new(Code::NoSuchPath, format!("main checkout {} is missing", rc.path.display()))
-                .with_detail(json!({ "path": rc.path.to_string_lossy() })));
+            return Err(StrataError::new(
+                Code::NoSuchPath,
+                format!("main checkout {} is missing", rc.path.display()),
+            )
+            .with_detail(json!({ "path": rc.path.to_string_lossy() })));
         }
-        let repository = Repository::discover(&rc.path).map_err(|e| match e {
+        #[cfg(feature = "test-seams")]
+        let repository = match &self.fixture_home {
+            Some(home) => Repository::discover_for_fixture(&rc.path, home),
+            None => Repository::discover(&rc.path),
+        };
+        #[cfg(not(feature = "test-seams"))]
+        let repository = Repository::discover(&rc.path);
+        let repository = repository.map_err(|e| match e {
             GenerationError::Io(io) if io.kind() == ErrorKind::NotFound => git_missing(&io),
-            other => unknown(format!("discover {}: {other}", rc.path.display()), "index_storage"),
+            other => unknown(
+                format!("discover {}: {other}", rc.path.display()),
+                "index_storage",
+            ),
         })?;
         let storage = storage_parent(config, repo);
-        fs::create_dir_all(&storage)
-            .map_err(|e| unknown(format!("create {}: {e}", storage.display()), "index_storage"))?;
-        let manager = GenerationManager::with_storage(repository, &storage).map_err(|e| match e {
-            GenerationError::Io(io) if io.kind() == ErrorKind::NotFound => git_missing(&io),
-            GenerationError::Unsupported(m) => {
-                err(Code::Unsupported, format!("index storage {} refused: {m}", storage.display()), "index_storage")
-            }
-            other => unknown(format!("index storage {}: {other}", storage.display()), "index_storage"),
+        fs::create_dir_all(&storage).map_err(|e| {
+            unknown(
+                format!("create {}: {e}", storage.display()),
+                "index_storage",
+            )
         })?;
-        let r = Arc::new(RepoBase { manager, generations: Mutex::new(BTreeMap::new()) });
+        let manager =
+            GenerationManager::with_storage(repository, &storage).map_err(|e| match e {
+                GenerationError::Io(io) if io.kind() == ErrorKind::NotFound => git_missing(&io),
+                GenerationError::Unsupported(m) => err(
+                    Code::Unsupported,
+                    format!("index storage {} refused: {m}", storage.display()),
+                    "index_storage",
+                ),
+                other => unknown(
+                    format!("index storage {}: {other}", storage.display()),
+                    "index_storage",
+                ),
+            })?;
+        let r = Arc::new(RepoBase {
+            manager,
+            generations: Mutex::new(BTreeMap::new()),
+        });
         repos.insert(repo.clone(), r.clone());
         Ok(r)
     }
@@ -93,21 +133,38 @@ impl Bases {
     /// §5.1 steps 9–12: the generation of `head`'s tree, which must be
     /// `tree`. No search lock is held here; tgrep's `publication.lock` is
     /// the only wait (D5).
-    pub(crate) fn ensure(&self, config: &Config, repo: &RepoName, head: &CommitOid, tree: &TreeOid) -> Result<Arc<Generation>> {
+    pub(crate) fn ensure(
+        &self,
+        config: &Config,
+        repo: &RepoName,
+        head: &CommitOid,
+        tree: &TreeOid,
+    ) -> Result<Arc<Generation>> {
         let rb = self.repo(config, repo)?;
         let repository = rb.manager.repository();
         // Resolve first, so a missing commit or git is named before any
         // build starts.
-        let (commit, resolved) = repository.resolve_commit_tree(head.as_str()).map_err(|e| match e {
-            GenerationError::Io(io) if io.kind() == ErrorKind::NotFound => git_missing(&io),
-            GenerationError::Git { stderr, .. } => {
-                StrataError::new(Code::NoSuchCommit, format!("commit {head} is not in the main checkout of {repo}: {}", stderr.trim()))
-                    .with_detail(json!({ "commit": head.as_str() }))
-            }
-            other => unknown(format!("resolve {head}: {other}"), "index_build"),
-        })?;
+        let (commit, resolved) =
+            repository
+                .resolve_commit_tree(head.as_str())
+                .map_err(|e| match e {
+                    GenerationError::Io(io) if io.kind() == ErrorKind::NotFound => git_missing(&io),
+                    GenerationError::Git { stderr, .. } => StrataError::new(
+                        Code::NoSuchCommit,
+                        format!(
+                            "commit {head} is not in the main checkout of {repo}: {}",
+                            stderr.trim()
+                        ),
+                    )
+                    .with_detail(json!({ "commit": head.as_str() })),
+                    other => unknown(format!("resolve {head}: {other}"), "index_build"),
+                })?;
         if commit.len() == 64 || resolved.len() == 64 {
-            return Err(err(Code::Unsupported, format!("repo {repo} uses SHA-256 objects"), "sha256"));
+            return Err(err(
+                Code::Unsupported,
+                format!("repo {repo} uses SHA-256 objects"),
+                "sha256",
+            ));
         }
         let key = legacy_key(repository, &resolved);
         let published_before = key
@@ -116,16 +173,30 @@ impl Bases {
             .unwrap_or(false);
 
         #[cfg(feature = "test-seams")]
-        if self.fail_after_stage.swap(false, std::sync::atomic::Ordering::SeqCst) && !published_before {
+        if self
+            .fail_after_stage
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+            && !published_before
+        {
             // tgrep has no hook between staging and the publishing rename;
             // stand in for it: a `.stage-*` exists and the build fails.
-            let stage = rb.manager.directory().join(format!(".stage-{}", crate::rand_hex(6)));
-            fs::create_dir(&stage).map_err(|e| unknown(format!("stage {}: {e}", stage.display()), "index_build"))?;
-            return Err(StrataError::new(Code::Unknown, format!("index build of {resolved} failed after staging (seam)"))
-                .with_detail(json!({ "reason": "index_build", "stage": stage.to_string_lossy() })));
+            let stage = rb
+                .manager
+                .directory()
+                .join(format!(".stage-{}", crate::rand_hex(6)));
+            fs::create_dir(&stage)
+                .map_err(|e| unknown(format!("stage {}: {e}", stage.display()), "index_build"))?;
+            return Err(StrataError::new(
+                Code::Unknown,
+                format!("index build of {resolved} failed after staging (seam)"),
+            )
+            .with_detail(json!({ "reason": "index_build", "stage": stage.to_string_lossy() })));
         }
 
-        let predecessor = lock(&rb.generations).iter().find(|(t, _)| **t != resolved).map(|(_, g)| g.clone());
+        let predecessor = lock(&rb.generations)
+            .iter()
+            .find(|(t, _)| **t != resolved)
+            .map(|(_, g)| g.clone());
         let res = rb.manager.ensure(head.as_str(), profile(), predecessor.as_ref()).map_err(|e| match e {
             GenerationError::Io(io) if io.kind() == ErrorKind::NotFound && !published_before => git_missing(&io),
             GenerationError::Git { stderr, .. } if !published_before => {
@@ -139,7 +210,9 @@ impl Bases {
         })?;
         let g = {
             let mut gens = lock(&rb.generations);
-            gens.entry(res.generation.key().tree_oid().to_string()).or_insert(res.generation).clone()
+            gens.entry(res.generation.key().tree_oid().to_string())
+                .or_insert(res.generation)
+                .clone()
         };
         // Step 11: a known mismatch, not an uncertain one.
         if g.key().tree_oid() != tree.as_str() {
@@ -175,4 +248,3 @@ fn legacy_key(repository: &Repository, tree: &str) -> Option<GenerationKey> {
     }))
     .ok()
 }
-

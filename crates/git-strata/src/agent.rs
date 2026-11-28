@@ -25,7 +25,14 @@ pub const PROBE_DEADLINE: Duration = Duration::from_secs(5);
 /// name. First match wins (a Claude Code shell that started Codex has both;
 /// `STRATA_AGENT` settles it).
 const MARKERS: &[(&[&str], &str)] = &[
-    (&["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT"], "claude-code"),
+    (
+        &[
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_ENTRYPOINT",
+        ],
+        "claude-code",
+    ),
     (&["CODEX_THREAD_ID", "CODEX_SANDBOX"], "codex"),
     (&["CURSOR_AGENT"], "cursor-agent"),
 ];
@@ -33,7 +40,10 @@ const MARKERS: &[(&[&str], &str)] = &[
 /// The agent for `new`: `flag` (`--agent`), then `STRATA_AGENT` (empty =
 /// unset), then the markers; `None` when nothing says. An explicit value
 /// that is not a valid name is `InvalidInput` reason `agent`, never skipped.
-pub fn detect(flag: Option<&str>, env: impl Fn(&str) -> Option<OsString>) -> Result<Option<AgentName>> {
+pub fn detect(
+    flag: Option<&str>,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Result<Option<AgentName>> {
     if let Some(f) = flag {
         return named(f.to_string(), "--agent").map(Some);
     }
@@ -46,7 +56,9 @@ pub fn detect(flag: Option<&str>, env: impl Fn(&str) -> Option<OsString>) -> Res
     }
     for (vars, name) in MARKERS {
         if vars.iter().any(|k| env(k).is_some_and(|v| !v.is_empty())) {
-            return Ok(Some(AgentName::try_from(name.to_string()).expect("a valid built-in name")));
+            return Ok(Some(
+                AgentName::try_from(name.to_string()).expect("a valid built-in name"),
+            ));
         }
     }
     Ok(None)
@@ -63,14 +75,22 @@ fn named(s: String, source: &str) -> Result<AgentName> {
 /// Whether the daemon on `socket` says `new` takes `agent`. Bounded by
 /// `PROBE_DEADLINE`; any failure (down, slow, an older reply) is `false`.
 pub fn daemon_takes_agent(socket: &Path) -> bool {
-    match rpc::call_within(socket, "daemon_status", json!({ "verify": false }), Kind::Read, PROBE_DEADLINE) {
+    match rpc::call_within(
+        socket,
+        "daemon_status",
+        json!({ "verify": false }),
+        Kind::Read,
+        PROBE_DEADLINE,
+    ) {
         Ok(v) => lists_feature(&v),
         Err(_) => false,
     }
 }
 
-fn lists_feature(status: &Value) -> bool {
-    status["features"].as_array().is_some_and(|f| f.iter().any(|x| x == FEATURE))
+pub(crate) fn lists_feature(status: &Value) -> bool {
+    status["features"]
+        .as_array()
+        .is_some_and(|f| f.iter().any(|x| x == FEATURE))
 }
 
 /// An older daemon refused `agent` while parsing params (rpc `Failed`,
@@ -90,11 +110,25 @@ pub fn not_recorded(agent: &AgentName) -> Value {
 
 /// Required additive params must never be silently dropped for an old daemon.
 pub fn require_feature(socket: &Path, feature: &str) -> Result<()> {
-    let v = rpc::call_within(socket, "daemon_status", json!({"verify":false}), Kind::Read, PROBE_DEADLINE)
-        .map_err(|e| e.into_error())?;
-    if v["features"].as_array().is_some_and(|f| f.iter().any(|x| x == feature)) { return Ok(()); }
-    Err(StrataError::new(Code::Unsupported, format!("the daemon does not support {feature}; install the matching git-strata"))
-        .with_detail(json!({"reason":"daemon_too_old", "feature":feature})))
+    let v = rpc::call_within(
+        socket,
+        "daemon_status",
+        json!({"verify":false}),
+        Kind::Read,
+        PROBE_DEADLINE,
+    )
+    .map_err(|e| e.into_error())?;
+    if v["features"]
+        .as_array()
+        .is_some_and(|f| f.iter().any(|x| x == feature))
+    {
+        return Ok(());
+    }
+    Err(StrataError::new(
+        Code::Unsupported,
+        format!("the daemon does not support {feature}; install the matching git-strata"),
+    )
+    .with_detail(json!({"reason":"daemon_too_old", "feature":feature})))
 }
 
 #[cfg(test)]
@@ -103,7 +137,10 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
 
     fn run(flag: Option<&str>, vars: &[(&str, OsString)]) -> Result<Option<String>> {
-        detect(flag, |k| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())).map(|a| a.map(|a| a.as_str().to_string()))
+        detect(flag, |k| {
+            vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
+        })
+        .map(|a| a.map(|a| a.as_str().to_string()))
     }
 
     fn s(v: &str) -> OsString {
@@ -120,9 +157,15 @@ mod tests {
         ];
         assert_eq!(run(Some("mine"), &all).unwrap().as_deref(), Some("mine"));
         assert_eq!(run(None, &all).unwrap().as_deref(), Some("aider"));
-        assert_eq!(run(None, &all[1..]).unwrap().as_deref(), Some("claude-code"));
+        assert_eq!(
+            run(None, &all[1..]).unwrap().as_deref(),
+            Some("claude-code")
+        );
         assert_eq!(run(None, &all[2..]).unwrap().as_deref(), Some("codex"));
-        assert_eq!(run(None, &all[3..]).unwrap().as_deref(), Some("cursor-agent"));
+        assert_eq!(
+            run(None, &all[3..]).unwrap().as_deref(),
+            Some("cursor-agent")
+        );
         assert_eq!(run(None, &[]).unwrap(), None);
     }
 
@@ -130,16 +173,32 @@ mod tests {
     fn every_marker_counts() {
         for (vars, name) in MARKERS {
             for k in *vars {
-                assert_eq!(run(None, &[(k, s("x"))]).unwrap().as_deref(), Some(*name), "{k}");
+                assert_eq!(
+                    run(None, &[(k, s("x"))]).unwrap().as_deref(),
+                    Some(*name),
+                    "{k}"
+                );
             }
         }
     }
 
     #[test]
     fn empty_values_are_unset() {
-        let v = [("STRATA_AGENT", s("")), ("CLAUDECODE", s("")), ("CODEX_SANDBOX", s("seatbelt")), ("CURSOR_AGENT", s(""))];
+        let v = [
+            ("STRATA_AGENT", s("")),
+            ("CLAUDECODE", s("")),
+            ("CODEX_SANDBOX", s("seatbelt")),
+            ("CURSOR_AGENT", s("")),
+        ];
         assert_eq!(run(None, &v).unwrap().as_deref(), Some("codex"));
-        assert_eq!(run(None, &[("CLAUDE_CODE_ENTRYPOINT", s("")), ("CURSOR_AGENT", s(""))]).unwrap(), None);
+        assert_eq!(
+            run(
+                None,
+                &[("CLAUDE_CODE_ENTRYPOINT", s("")), ("CURSOR_AGENT", s(""))]
+            )
+            .unwrap(),
+            None
+        );
     }
 
     /// (--agent, environment, expected reason)
@@ -152,14 +211,33 @@ mod tests {
             (Some(""), vec![marker.clone()], "--agent"),
             (Some("bad name"), vec![marker.clone()], "--agent"),
             (Some("-x"), vec![], "--agent"),
-            (None, vec![("STRATA_AGENT", s("é")), marker.clone()], "STRATA_AGENT"),
-            (None, vec![("STRATA_AGENT", s(&"a".repeat(65)))], "STRATA_AGENT"),
-            (None, vec![("STRATA_AGENT", OsString::from_vec(vec![0x61, 0xff])), marker.clone()], "STRATA_AGENT"),
+            (
+                None,
+                vec![("STRATA_AGENT", s("é")), marker.clone()],
+                "STRATA_AGENT",
+            ),
+            (
+                None,
+                vec![("STRATA_AGENT", s(&"a".repeat(65)))],
+                "STRATA_AGENT",
+            ),
+            (
+                None,
+                vec![
+                    ("STRATA_AGENT", OsString::from_vec(vec![0x61, 0xff])),
+                    marker.clone(),
+                ],
+                "STRATA_AGENT",
+            ),
         ];
         for (flag, vars, source) in cases {
             let e = run(flag, &vars).expect_err(&format!("{flag:?} {vars:?}"));
             assert_eq!(e.code, Code::InvalidInput);
-            assert_eq!(e.detail, Some(json!({ "reason": "agent", "source": source })), "{flag:?} {vars:?}");
+            assert_eq!(
+                e.detail,
+                Some(json!({ "reason": "agent", "source": source })),
+                "{flag:?} {vars:?}"
+            );
         }
     }
 
@@ -168,14 +246,22 @@ mod tests {
         assert!(lists_feature(&json!({ "features": ["x", "new.agent"] })));
         assert!(!lists_feature(&json!({ "features": [] })));
         assert!(!lists_feature(&json!({ "holds": [] })));
-        let old = StrataError::new(Code::InvalidInput, "unknown field `agent`, expected one of `ticket`, `repos`, `only`")
-            .with_detail(json!({ "reason": "rpc_failed", "method": "new", "rpc": "Failed" }));
+        let old = StrataError::new(
+            Code::InvalidInput,
+            "unknown field `agent`, expected one of `ticket`, `repos`, `only`",
+        )
+        .with_detail(json!({ "reason": "rpc_failed", "method": "new", "rpc": "Failed" }));
         assert!(refused_unknown_agent(&old));
-        let other = StrataError::new(Code::InvalidInput, "unknown field `x`").with_detail(json!({ "reason": "rpc_failed", "method": "new", "rpc": "Failed" }));
+        let other = StrataError::new(Code::InvalidInput, "unknown field `x`")
+            .with_detail(json!({ "reason": "rpc_failed", "method": "new", "rpc": "Failed" }));
         assert!(!refused_unknown_agent(&other));
-        let handler = StrataError::new(Code::InvalidInput, "unknown field `agent`").with_detail(json!({ "reason": "agent" }));
+        let handler = StrataError::new(Code::InvalidInput, "unknown field `agent`")
+            .with_detail(json!({ "reason": "agent" }));
         assert!(!refused_unknown_agent(&handler));
         let w = not_recorded(&AgentName::try_from("codex".to_string()).unwrap());
-        assert_eq!(w, json!({ "kind": "AgentNotRecorded", "agent": "codex", "reason": "daemon_too_old" }));
+        assert_eq!(
+            w,
+            json!({ "kind": "AgentNotRecorded", "agent": "codex", "reason": "daemon_too_old" })
+        );
     }
 }

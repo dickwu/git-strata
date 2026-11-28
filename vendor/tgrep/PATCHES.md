@@ -22,5 +22,10 @@ Patches:
    inlined from tgrep's root Cargo.toml at d25ade6; `[[bench]]` targets and the
    `criterion` dev-dependency dropped.
 
+3. The optional `strata-fixture` feature in `tgrep-core/Cargo.toml` and
+   `src/generations/{mod,git}.rs` passes a test worker's HOME to repository
+   discovery and generation Git commands, including parallel blob readers.
+   Fixture children use that HOME's XDG config and file-only Git transport.
+
 The root git-strata workspace lists `vendor` in `exclude`, so these crates are
 path dependencies only: `cargo test --workspace` does not run their tests.

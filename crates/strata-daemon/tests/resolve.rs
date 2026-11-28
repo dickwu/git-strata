@@ -1224,19 +1224,29 @@ fn confirmed_push_is_bound_to_the_shown_chain_top() {
 
 /// Sets origin's push URL of `main` to `other` once a confirmation passed
 /// (between the prompt and the push), through the daemon's test seam.
-fn redirect_after_confirm(root: &Path, main: &Path, other: &Path) {
+/// CR r2 #5: the callback uses the sandbox's git, so the runner's HOME or
+/// GIT_DIR cannot redirect the config write away from the fixture checkout.
+fn redirect_after_confirm(sb: &Sandbox, root: &Path, main: &Path, other: &Path) {
     let (main, other) = (main.to_path_buf(), other.to_path_buf());
+    let (home, xdg) = (sb.home.clone(), sb.xdg.clone());
     strata_daemon::seams::set_after_confirm(
         root,
         Some(std::sync::Arc::new(move || {
-            let st = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&main)
+            let st = Sandbox::git_command(&home, &xdg, &main)
                 .args(["config", "remote.origin.pushurl"])
                 .arg(&other)
                 .status()
                 .unwrap();
             assert!(st.success());
+            let out = Sandbox::git_command(&home, &xdg, &main)
+                .args(["config", "--local", "--get", "remote.origin.pushurl"])
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                other.to_string_lossy(),
+                "the write landed in the fixture checkout"
+            );
         })),
     );
 }
@@ -1268,7 +1278,7 @@ fn confirmed_push_is_bound_to_the_approved_url() {
         let core = fx.prepare_with(c).unwrap();
         sync(&core);
         let root = core.config.paths.root.clone();
-        redirect_after_confirm(&root, &ch.main, &elsewhere);
+        redirect_after_confirm(&fx.sb, &root, &ch.main, &elsewhere);
         let before = ch.refs(&fx);
         let shown = CommitOid::try_from(ch.c.clone()).unwrap();
         let (r, _) = resolve_shown(&core, ChainChoice::Restore, Some(&shown));
@@ -1312,7 +1322,7 @@ fn confirmed_push_is_bound_to_the_approved_url() {
         let core = fx.prepare_with(c).unwrap();
         sync(&core);
         let root = core.config.paths.root.clone();
-        redirect_after_confirm(&root, &ch.main, &elsewhere);
+        redirect_after_confirm(&fx.sb, &root, &ch.main, &elsewhere);
         let d = Daemon::start(&core).unwrap();
         let sock = fx.socket();
         serving(&d, || {

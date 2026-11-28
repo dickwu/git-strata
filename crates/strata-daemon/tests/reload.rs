@@ -456,6 +456,34 @@ fn shutdown_wakes_an_already_waiting_reload() {
     });
 }
 
+/// CR r2 #1: the worker sees stop before it collects an admitted ticket. It
+/// must still finish that ticket and release its admission guard, or terminal
+/// stop would wait on the guard forever.
+#[test]
+fn stopped_worker_finishes_an_admitted_ticket_and_then_refuses() {
+    let fx = Dfx::new();
+    let core = fx.prepare().unwrap();
+    std::thread::scope(|s| {
+        let h = s.spawn(|| core.request_reload(Duration::from_secs(15)));
+        wait_until("reload did not register its ticket", || {
+            core.reload.requested_for_test() == 1
+        });
+        let started = Instant::now();
+        strata_daemon::reload::run(&core, &|| true);
+        let report = h.join().unwrap().unwrap();
+        assert_ne!(report.outcome, "pending", "{report:?}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(core.reload.held_admissions_for_test(), 0);
+        let late = core
+            .request_reload(Duration::from_secs(1))
+            .unwrap_err()
+            .detail
+            .unwrap();
+        assert_eq!(late["reason"], "shutting_down");
+        assert_eq!(core.reload.held_admissions_for_test(), 0);
+    });
+}
+
 #[test]
 fn landed_publish_base_registration_fence_defers_and_closes_done() {
     landed_fence(false);

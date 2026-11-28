@@ -6,8 +6,12 @@ fn slow(q: &Value) -> Value {
     let data = if q["method"] == "daemon_status" {
         json!({"holds":[],"queues":[{"session":"s-abcdefgh","holder":"old_tree","queued":["sync"]}]})
     } else {
-        std::thread::sleep(Duration::from_millis(250));
-        if q["method"] == "status" { json!({"sessions":[]}) } else { json!({"finished":true}) }
+        std::thread::sleep(Duration::from_millis(1500));
+        if q["method"] == "status" {
+            json!({"sessions":[]})
+        } else {
+            json!({"finished":true})
+        }
     };
     json!({"id":q["id"],"ok":true,"data":data})
 }
@@ -15,35 +19,72 @@ fn slow(q: &Value) -> Value {
 fn timeouts_are_not_local_fallbacks_and_writes_are_not_retried() {
     let h = Home::new();
     let d = FakeDaemon::start(&h.socket(), slow);
-    for args in [vec!["status"], vec!["status", "--brief"], vec!["sync", "--session", "s-abcdefgh"]] {
+    for args in [
+        vec!["status"],
+        vec!["status", "--brief"],
+        vec!["sync", "--session", "s-abcdefgh"],
+    ] {
         let mut args = args;
-        args.extend(["--timeout", "0.05"]);
+        // Long enough for the capability probe and the send on a loaded
+        // runner, well short of the fake's reply.
+        args.extend(["--timeout", "0.5"]);
         let run = h.run(&args);
         assert_eq!(run.reason(), "client_timeout", "{run:?}");
-        assert_eq!(run.err_code(), if args[0] == "sync" { "Unknown" } else { "Busy" });
+        assert_eq!(
+            run.err_code(),
+            if args[0] == "sync" { "Unknown" } else { "Busy" }
+        );
         assert!(run.env()["error"]["detail"]["queues"].is_array());
         if args[0] == "sync" {
             assert_eq!(run.env()["error"]["detail"]["outcome"], "in_progress");
             assert_eq!(run.env()["error"]["detail"]["session"]["id"], "s-abcdefgh");
-            assert_eq!(run.env()["error"]["detail"]["session"]["in_flight"], "old_tree");
+            assert_eq!(
+                run.env()["error"]["detail"]["session"]["in_flight"],
+                "old_tree"
+            );
             assert!(run.stdout.contains("may still run"));
             assert!(run.stdout.contains("status --session s-abcdefgh"));
         }
         assert!(run.stderr.is_empty());
     }
-    assert_eq!(d.requests().iter().filter(|r| r["method"] == "sync").count(), 1);
+    assert_eq!(
+        d.operations()
+            .iter()
+            .filter(|r| r["method"] == "sync")
+            .count(),
+        1
+    );
     // Closing the timed-out peer doesn't cancel the fixture or prevent its next reply.
-    assert!(h.run(&["sync", "--timeout", "0"]).ok()["finished"].as_bool().unwrap());
+    assert!(
+        h.run(&["sync", "--timeout", "0"]).ok()["finished"]
+            .as_bool()
+            .unwrap()
+    );
 }
 #[test]
 fn flag_overrides_env_and_zero_waits() {
     let h = Home::new();
     let _d = FakeDaemon::start(&h.socket(), slow);
-    let out: Run = h.cmd(&["sync", "--timeout", "0"]).env("GIT_STRATA_TIMEOUT", "0.01").output().unwrap().into();
+    let out: Run = h
+        .cmd(&["sync", "--timeout", "0"])
+        .env("GIT_STRATA_TIMEOUT", "0.01")
+        .output()
+        .unwrap()
+        .into();
     assert_eq!(out.ok()["finished"], true);
-    let out: Run = h.cmd(&["sync"]).env("GIT_STRATA_TIMEOUT", "0.01").output().unwrap().into();
+    let out: Run = h
+        .cmd(&["sync"])
+        .env("GIT_STRATA_TIMEOUT", "0.01")
+        .output()
+        .unwrap()
+        .into();
     assert_eq!(out.reason(), "client_timeout");
-    let out: Run = h.cmd(&["status"]).env("GIT_STRATA_TIMEOUT", "NaN").output().unwrap().into();
+    let out: Run = h
+        .cmd(&["status"])
+        .env("GIT_STRATA_TIMEOUT", "NaN")
+        .output()
+        .unwrap()
+        .into();
     assert_eq!(out.reason(), "timeout");
 }
 #[test]
@@ -53,7 +94,11 @@ fn stale_socket_sync_is_down_without_waiting_for_its_budget() {
     drop(std::os::unix::net::UnixListener::bind(h.socket()).unwrap());
     let start = Instant::now();
     let run = h.run(&["sync", "--timeout", "30"]);
-    assert!(start.elapsed() < Duration::from_millis(300), "{:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_millis(300),
+        "{:?}",
+        start.elapsed()
+    );
     assert_eq!(run.err_code(), "Busy");
     assert_eq!(run.reason(), "daemon_down");
     assert_eq!(run.env()["error"]["detail"]["socket_exists"], true);
@@ -74,11 +119,16 @@ fn old_daemon_sync_rejects_cwd_locally_before_resend() {
     });
     let run: Run = h.cmd(&["sync"]).current_dir(&ws).output().unwrap().into();
     assert_eq!(run.reason(), "caller_cwd");
-    assert_eq!(d.requests().len(), 1);
-    let run: Run = h.cmd(&["sync", "--allow-cwd"]).current_dir(&ws).output().unwrap().into();
+    assert_eq!(d.operations().len(), 1);
+    let run: Run = h
+        .cmd(&["sync", "--allow-cwd"])
+        .current_dir(&ws)
+        .output()
+        .unwrap()
+        .into();
     run.ok();
-    assert_eq!(d.requests().len(), 3);
-    assert!(d.requests()[2]["params"].get("caller_pids").is_none());
+    assert_eq!(d.operations().len(), 3);
+    assert!(d.operations()[2]["params"].get("caller_pids").is_none());
     let staging = ws.with_file_name(".strata-tmp-move-tool-old-01234567");
     std::fs::create_dir_all(&staging).unwrap();
     let run: Run = h
@@ -148,11 +198,11 @@ fn old_daemon_s_shaped_ticket_refuses_cwd_without_legacy_resend() {
         )
     );
     assert_eq!(
-        d.requests().len(),
+        d.operations().len(),
         1,
         "a refused caller must not send a legacy request"
     );
-    assert!(d.requests()[0]["params"].get("caller_pids").is_some());
+    assert!(d.operations()[0]["params"].get("caller_pids").is_some());
 }
 
 #[test]
@@ -187,7 +237,7 @@ fn old_daemon_delayed_rejection_does_not_restart_the_sync_budget() {
         "the first rejected attempt must count: waited {waited}s"
     );
     assert_eq!(
-        d.requests()
+        d.operations()
             .iter()
             .filter(|q| q["method"] == "sync")
             .count(),
@@ -213,30 +263,57 @@ fn real_daemon_finishes_sync_after_client_timeout_and_survives_closed_reply() {
                 rx.recv_timeout(Duration::from_secs(10)).unwrap();
             }),
         ));
-        let run = live.run(&["sync", "--session", id.as_str(), "--timeout", "0.1"]);
+        // Long enough for the capability probe and the send on a loaded
+        // runner, well short of the hook's 10s wait.
+        let run = live.run(&["sync", "--session", id.as_str(), "--timeout", "0.5"]);
         // Release even if an assertion fails, so the fixture cannot strand its server.
         tx.send(()).unwrap();
-        assert_eq!(run.err_code(), "Unknown");
+        assert_eq!(run.err_code(), "Unknown", "{run:?}");
         assert_eq!(run.reason(), "client_timeout");
         let start = Instant::now();
         loop {
             let rec = core.store.session(&id).unwrap().unwrap();
-            if rec.manifest.repos.values().any(|ws| ws.path.join("later.txt").exists()) {
+            if rec
+                .manifest
+                .repos
+                .values()
+                .any(|ws| ws.path.join("later.txt").exists())
+            {
                 break;
             }
             assert!(start.elapsed() < Duration::from_secs(15));
             std::thread::sleep(Duration::from_millis(20));
         }
-        let status = live.run(&["status", "--brief", "--session", id.as_str(), "--timeout", "5"]);
+        let status = live.run(&[
+            "status",
+            "--brief",
+            "--session",
+            id.as_str(),
+            "--timeout",
+            "5",
+        ]);
         assert_eq!(status.code, 0, "{status:?}");
-        assert_eq!(live.requests.lock().unwrap().iter().filter(|m| m.as_str() == "sync").count(), 1);
+        assert_eq!(
+            live.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.as_str() == "sync")
+                .count(),
+            1
+        );
     });
 }
 
 #[test]
 fn stale_socket_status_falls_back_to_a_v5_store_and_old_probes_may_omit_queues() {
     let h = Home::new();
-    h.write_config(&[support::RepoSpec { name: "tool", push: false, confirm: false, deploy_on_push: false }]);
+    h.write_config(&[support::RepoSpec {
+        name: "tool",
+        push: false,
+        confirm: false,
+        deploy_on_push: false,
+    }]);
     let root = h.canon().join("root");
     let store = strata_store::Store::open(&root, &[]).unwrap();
     drop(store);
@@ -248,11 +325,11 @@ fn stale_socket_status_falls_back_to_a_v5_store_and_old_probes_may_omit_queues()
     std::fs::remove_file(h.socket()).unwrap();
     let _d = FakeDaemon::start(&h.socket(), |q| {
         if q["method"] != "daemon_status" {
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(Duration::from_millis(1500));
         }
         json!({"id":q["id"],"ok":true,"data":{"holds":[]}})
     });
-    let out = h.run(&["sync", "--timeout", "0.02"]);
+    let out = h.run(&["sync", "--timeout", "0.5"]);
     assert_eq!(out.err_code(), "Unknown");
     assert!(out.env()["error"]["detail"].get("queues").is_none());
 }

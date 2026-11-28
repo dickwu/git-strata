@@ -452,7 +452,7 @@ fn sync_path_file(f: &fs::File, shown: &Path) -> Result<()> {
 /// Where standalone and restore pushes stage (under `paths.root`).
 pub(crate) const PUSH_SCENES: &str = "daemon/push";
 /// The attempt record inside a push directory.
-const SCENE_FILE: &str = "push.json";
+pub(crate) const SCENE_FILE: &str = "push.json";
 /// The remote every standalone and restore push goes to.
 pub(crate) const SCENE_REMOTE: &str = "origin";
 
@@ -521,14 +521,31 @@ struct SceneRecord {
     dir: std::path::PathBuf,
 }
 
+fn read_no_follow(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut text = String::new();
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?
+        .read_to_string(&mut text)?;
+    Ok(text)
+}
+
 fn scene_records(root: &Path) -> Vec<SceneRecord> {
     let mut out = Vec::new();
     let Ok(rd) = fs::read_dir(root.join(PUSH_SCENES)) else {
         return out;
     };
     for e in rd.flatten() {
+        // Scenes are directories this daemon created; never follow a link
+        // out of daemon/push, at the scene or at its record (CR r2 #4).
+        if !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
         let dir = e.path();
-        let Ok(text) = fs::read_to_string(dir.join(SCENE_FILE)) else {
+        let Ok(text) = read_no_follow(&dir.join(SCENE_FILE)) else {
             continue;
         };
         let Ok(v) = serde_json::from_str::<Value>(&text) else {

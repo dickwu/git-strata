@@ -213,84 +213,15 @@ fn upstream_error_carries_code_message_detail() {
 
 #[test]
 fn every_method_parses_its_documented_params() {
-    let sid = "s-abcdefgh";
-    let cases = [
-        ("new", json!({ "ticket": null, "repos": ["tool"] })),
-        ("add", json!({ "session": sid, "repos": ["front"] })),
-        (
-            "mark",
-            json!({ "session": sid, "state": "done", "note": "ready" }),
-        ),
-        (
-            "status",
-            json!({ "cwd": "/x", "session": null, "all": false }),
-        ),
-        (
-            "sync",
-            json!({ "cwd": "/x", "session": null, "check": true }),
-        ),
-        (
-            "checkpoint",
-            json!({ "session": sid, "repo": "tool", "reason": { "kind": "Manual", "message": "m" }, "paths": [] }),
-        ),
-        (
-            "restore",
-            json!({ "session": sid, "repo": "tool", "checkpoint": 3, "paths": null }),
-        ),
-        (
-            "grep",
-            json!({ "pattern": "x", "session": null, "all": true, "ignore_case": false }),
-        ),
-        (
-            "files",
-            json!({ "session": sid, "repo": "tool", "glob": "*.ts" }),
-        ),
-        (
-            "diff",
-            json!({ "a": sid, "b": "s-bcdefghi", "repo": "tool" }),
-        ),
-        (
-            "deps_propose",
-            json!({ "session": sid, "repo": "tool", "switch": true }),
-        ),
-        ("deps_approve", json!({ "proposal": 1, "sessions": null })),
-        ("deps_list", json!({ "repo": null })),
-        ("publish", json!({ "group": { "id": 0, "batches": [] } })),
-        (
-            "publish_plan",
-            json!({ "group": { "id": 0, "batches": [] } }),
-        ),
-        ("push", json!({ "repo": "tool" })),
-        (
-            "assign",
-            json!({ "group": 1, "path": "a.txt", "session": sid }),
-        ),
-        ("rm", json!({ "session": sid, "discard": false })),
-        ("gc", json!({ "repo": "tool" })),
-        (
-            "resolve_move",
-            json!({ "session": sid, "repo": "tool", "abandon": true, "accept": false }),
-        ),
-        (
-            "chain_resolve",
-            json!({ "repo": "tool", "choice": "AcceptOriginDrop" }),
-        ),
-        ("config_relax", json!({ "repo": "tool" })),
-        ("config_reload", json!({})),
-        ("daemon_status", json!({})),
-        ("du", json!({ "refresh": true })),
-        ("ports_ensure", json!({ "session": sid, "repo": "tool" })),
-        (
-            "ports_reassign",
-            json!({ "session": sid, "repo": "tool", "checked": 20000 }),
-        ),
-        ("drain", json!({ "on": true })),
-    ];
+    // Shared with the release tarball contract. A new method must have a real frame.
+    let cases: std::collections::BTreeMap<String, Value> =
+        serde_json::from_str(include_str!("fixtures/wire_contract.json")).unwrap();
     assert_eq!(cases.len(), Method::ALL.len());
-    for (m, p) in cases {
-        let q = req(json!({ "id": 1, "method": m, "params": p }))
-            .unwrap_or_else(|r| panic!("{m}: {:?}", r.0));
-        assert_eq!(q.method.name(), m);
+    for method in Method::ALL {
+        let name = method.name();
+        let q = req(json!({ "id": 1, "method": name, "params": cases[name] }))
+            .unwrap_or_else(|r| panic!("{name}: {:?}", r.0));
+        assert_eq!(q.method, *method);
     }
     let q = req(json!({ "id": 1, "method": "new", "params": { "ticket": null, "repos": ["tool"], "only": true } })).unwrap();
     assert!(matches!(q.params, Params::New(ref p) if p.only));
@@ -846,4 +777,83 @@ fn daemon_md_method_table_matches_rpc() {
         .map(|m| m.name().to_string())
         .collect();
     assert_eq!(ro, want_ro);
+}
+
+#[test]
+fn c1_client_floor_accepts_unannounced_clients_and_refuses_before_dispatch() {
+    let lines = [
+        None,
+        Some("0.3.0"),
+        Some("0.10.0"),
+        Some("0.2.99"),
+        Some("bad"),
+    ];
+    let mut bytes = Vec::new();
+    for (id, client) in lines.iter().enumerate() {
+        let mut q = status_req(json!(id));
+        if let Some(version) = client {
+            q["client"] = json!(version);
+        }
+        writeln!(&mut bytes, "{q}").unwrap();
+    }
+    let mut output = Vec::new();
+    let mut admitted = vec![];
+    rpc::serve_connection(&mut Cursor::new(bytes), &mut output, 4096, &mut |r| {
+        admitted.push(r.id.clone());
+        Reply::ok(&r.id, json!({}))
+    })
+    .unwrap();
+    let replies: Vec<Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert_eq!(admitted, [json!(0), json!(1), json!(2)]);
+    assert_eq!(replies[3]["id"], 3);
+    assert_eq!(replies[3]["error"]["code"], "InvalidInput");
+    assert_eq!(replies[3]["error"]["detail"]["reason"], "client_too_old");
+    assert_eq!(replies[3]["error"]["detail"]["min_client"], "0.3.0");
+    assert_eq!(rpc_of(&replies[4]), "Failed");
+    assert!(strata_daemon::FEATURES.contains(&"envelope.client"));
+}
+
+#[test]
+fn u3_predispatch_handover_refusal_has_the_shipped_busy_shape() {
+    let reply = Reply::error(
+        &json!("42"),
+        &StrataError::upgrading("handover-17", "park", 2000),
+    )
+    .0;
+    assert_eq!(reply["id"], "42");
+    assert_eq!(reply["error"]["code"], "Busy");
+    assert_eq!(
+        reply["error"]["detail"],
+        json!({"reason":"upgrading","retry_safe":true,
+            "retry_after_ms":2000,"handover_id":"handover-17","phase":"park"})
+    );
+}
+
+#[test]
+fn c1_version_floor_orders_prereleases_and_ignores_build_metadata() {
+    for version in ["0.3.0+build.007", "0.10.0-rc.1"] {
+        let mut q = status_req(json!(7));
+        q["client"] = json!(version);
+        req(q).unwrap();
+    }
+    let mut q = status_req(json!(7));
+    q["client"] = json!("0.3.0-rc.1");
+    assert_eq!(
+        rejected(q.clone())["error"]["detail"]["reason"],
+        "client_too_old"
+    );
+    for bad in [
+        Value::Null,
+        json!(3),
+        json!("0.3.0-a..b"),
+        json!("0.4.0-01"),
+        json!("0.4.0+"),
+    ] {
+        q["client"] = bad;
+        assert_eq!(rpc_of(&rejected(q.clone())), "Failed");
+    }
 }

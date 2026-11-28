@@ -152,6 +152,9 @@ pub struct InstallEnv {
     pub path: String,
     /// One `install`'s time limit; the build lock wait is bounded by it too.
     pub timeout: Duration,
+    /// Set after sanitization. Empty in production; a test fixture puts its
+    /// HOME and Git policy here so children never see the runner's.
+    pub child_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 }
 
 impl InstallEnv {

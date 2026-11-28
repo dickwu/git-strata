@@ -52,3 +52,12 @@ An unchanged workspace behind main is left to the background mover. Cold
 cache, daemon errors, non-workspace cwd and the five-second deadline are silent.
 `stop_hook_active:true` never blocks again. A block is `{decision,reason}` and
 the process always exits zero, rather than using the usual envelope.
+
+
+## Checkpoints across releases
+
+A CLI with upgrade retry repeats only the refused `checkpoint` RPC on
+`Busy upgrading` with `retry_safe: true`. Check `data.checkpoints` for repos
+already recorded if the command ends with an error. Shipped 0.3.x hook CLIs
+skip a checkpoint that receives this refusal. A later tool call has a new ID
+and cannot recreate it. After a store migration use the updated CLI on PATH.

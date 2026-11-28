@@ -114,9 +114,9 @@ fn legacy_sync_resolution_repos(saved_report: bool) {
                 "1",
             ]);
         }
-        let before = daemon.requests().len();
+        let before = daemon.operations().len();
         live.run_in(&cwd, &args).ok();
-        let requests = daemon.requests();
+        let requests = daemon.operations();
         assert_eq!(requests.len(), before + 2, "other repo must resend");
         let mut expected = requests[before]["params"].clone();
         assert_eq!(expected["repos"], json!([]));
@@ -129,22 +129,22 @@ fn legacy_sync_resolution_repos(saved_report: bool) {
         let run = live.run_in(&cwd, &args);
         assert_eq!(run.err_code(), "OpenFiles", "{run:?}");
         assert_eq!(run.reason(), "caller_cwd");
-        assert_eq!(daemon.requests().len(), before + 3, "no refused resend");
+        assert_eq!(daemon.operations().len(), before + 3, "no refused resend");
 
         for path in ["shared.txt", "missing.txt"] {
             args[4] = path;
-            let before = daemon.requests().len();
+            let before = daemon.operations().len();
             let run = live.run_in(&cwd, &args);
             assert_eq!(run.err_code(), "InvalidInput", "{run:?}");
             assert_eq!(run.reason(), "ambiguous_resolution");
-            assert_eq!(daemon.requests().len(), before + 1);
+            assert_eq!(daemon.operations().len(), before + 1);
         }
 
         args[4] = "shared.txt";
         args.extend(["--repo", "web"]);
-        let before = daemon.requests().len();
+        let before = daemon.operations().len();
         live.run_in(&cwd, &args).ok();
-        assert_eq!(daemon.requests().len(), before + 2);
+        assert_eq!(daemon.operations().len(), before + 2);
     }
 }
 
@@ -207,16 +207,16 @@ fn legacy_propose_guards_only_moves_and_exempts_known_daemon_children() {
         "--switch",
     ];
     live.run(&args).ok(); // No drift: the old daemon would not move this workspace.
-    assert_eq!(daemon.requests().len(), 2);
+    assert_eq!(daemon.operations().len(), 2);
     std::fs::write(ws.join("package.json"), CHANGED).unwrap();
     assert_eq!(live.run(&args).reason(), "cwd_holders");
-    assert_eq!(daemon.requests().len(), 3); // Refused before the legacy resend.
+    assert_eq!(daemon.operations().len(), 3); // Refused before the legacy resend.
     let _lock = strata_daemon::startup::InstanceLock::take(&strata_daemon::lock_path(
         &live.home.config_dir(),
     ))
     .unwrap();
     live.run(&args).ok(); // The fake daemon's direct child has the same exemption.
-    assert_eq!(daemon.requests().len(), 5);
+    assert_eq!(daemon.operations().len(), 5);
 }
 
 #[test]

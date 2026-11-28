@@ -30,10 +30,13 @@ pub mod sync_move;
 pub mod track;
 pub mod upstream;
 pub mod waiting;
+pub mod worker;
 
-/// The confirm seams a test daemon is built with (feature `test-seams`
-/// only; a binary built with them refuses to start). Re-exported so the
-/// cli's end-to-end tests need no direct strata-confirm dependency.
+#[cfg(feature = "test-seams")]
+pub mod fixture;
+
+/// Confirm seams for isolated workers. Re-exporting these lets the CLI's
+/// end-to-end tests inject a confirmer through the daemon dependency.
 #[cfg(feature = "test-seams")]
 pub mod seams {
     pub use strata_confirm::Confirmer;
@@ -162,6 +165,8 @@ pub const FEATURES: &[&str] = &[
     "daemon_status.volume_name",
     "daemon.drain",
     "new.fetch_skip",
+    "envelope.client",
+    "daemon.handover",
 ];
 
 /// The launchd label of the agent.

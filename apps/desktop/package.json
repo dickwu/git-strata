@@ -1,7 +1,7 @@
 {
   "name": "git-strata-desktop",
   "private": true,
-  "version": "0.3.2",
+  "version": "0.3.3",
   "license": "MIT OR Apache-2.0",
   "scripts": {
     "dev": "next dev --turbopack -p ${PORT:-4001}",
@@ -22,7 +22,7 @@
     "@tauri-apps/api": "^2.12.5",
     "antd": "^6.7.2",
     "next": "^16.4.6",
-    "postcss": "^8.5.33",
+    "postcss": "^8.5.34",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "tailwindcss": "^4.3.5",

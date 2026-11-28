@@ -15,6 +15,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
     after_long_help = crate::help::TOP
 )]
 pub struct Cli {
+    #[command(flatten)]
+    pub wait: WaitArgs,
     #[command(subcommand)]
     pub cmd: Cmd,
 }
@@ -61,8 +63,6 @@ pub enum Cmd {
         /// Local revision at or ahead of main (REV for one repo, or R=REV)
         #[arg(long, value_name = "[R=]REV", allow_hyphen_values = true)]
         base: Vec<String>,
-        #[command(flatten)]
-        wait: RetryArgs,
     },
     /// Add workspaces of more repos to an existing session
     #[command(after_long_help = crate::help::ADD_AFTER)]
@@ -73,8 +73,6 @@ pub enum Cmd {
         /// A repo to add, tracked (repeatable or comma separated)
         #[arg(long = "repo", value_delimiter = ',', value_name = "R")]
         repo: Vec<String>,
-        #[command(flatten)]
-        wait: RetryArgs,
     },
     /// Session status (cwd's session, --session, or --all)
     #[command(after_long_help = crate::help::STATUS_AFTER)]
@@ -86,8 +84,6 @@ pub enum Cmd {
         /// old trees)
         #[arg(long)]
         brief: bool,
-        #[command(flatten)]
-        wait: WaitArgs,
     },
     /// List live sessions from the store (id, ticket, state, mark, repos, created)
     #[command(after_long_help = crate::help::LS_AFTER)]
@@ -165,6 +161,9 @@ pub enum Cmd {
         /// SESSION:PATH or SESSION:REPO:PATH to include (repeatable; without it, interactive on a TTY)
         #[arg(long = "from", value_name = "S:[REPO:]PATH")]
         from: Vec<String>,
+        /// Take the normal workspace checkpoint of each selected repo and return the plan without publishing
+        #[arg(long, conflicts_with = "assign")]
+        dry_run: bool,
         /// Same as `git-strata assign --file FILE --session SESSION`
         #[arg(long, num_args = 2, value_names = ["FILE", "SESSION"])]
         assign: Option<Vec<String>>,
@@ -291,43 +290,21 @@ pub struct CwdArgs {
 
 #[derive(Debug, Args, Clone, Default)]
 pub struct WaitArgs {
-    /// Total seconds to wait (0: unlimited); flag overrides GIT_STRATA_TIMEOUT
-    #[arg(long, value_name = "SECS")]
+    /// Retry budget in seconds (default 600, 0 unlimited); also sets status/sync deadlines
+    #[arg(long, global = true, value_name = "SECS")]
     pub timeout: Option<f64>,
-    /// Print waiting notes on stderr even without a TTY
-    #[arg(long)]
+    /// Print waiting notes on stderr
+    #[arg(long, global = true)]
     pub progress: bool,
-}
-
-/// `new`/`add`'s [`WaitArgs`]: the same flags, but they bound only the
-/// retries of a refusal the daemon certified replay-safe, never one call.
-#[derive(Debug, Args, Clone, Default)]
-pub struct RetryArgs {
-    /// Seconds to keep retrying a busy repo (default 600, 0: unlimited);
-    /// flag overrides GIT_STRATA_TIMEOUT. Bounds only the retries
-    #[arg(long, value_name = "SECS")]
-    pub timeout: Option<f64>,
-    /// Print who holds the lock before each retry, even without a TTY
-    #[arg(long)]
-    pub progress: bool,
-}
-
-impl RetryArgs {
-    /// The same values as [`WaitArgs`] (for the shared budget parsing).
-    pub fn wait(&self) -> WaitArgs {
-        WaitArgs {
-            timeout: self.timeout,
-            progress: self.progress,
-        }
-    }
+    /// Wait through daemon startup or an unavailable store
+    #[arg(long = "wait", global = true)]
+    pub startup: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct SyncArgs {
     #[command(flatten)]
     pub cwd: CwdArgs,
-    #[command(flatten)]
-    pub wait: WaitArgs,
     #[arg(long)]
     pub session: Option<String>,
     #[arg(long = "repo", value_delimiter = ',', value_name = "R", value_parser = sync_repo)]

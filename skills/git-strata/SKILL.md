@@ -2,7 +2,7 @@
 name: git-strata
 description: Use when working in a repo managed by git-strata (macOS), when the cwd is inside a git-strata session workspace (`<root>/sessions/<id>/<repo>`, default root ~/.strata), or when the user asks to start, checkpoint, diff, restore, sync with main, publish, push or remove a git-strata session, or to run a dev server on per-session ports. Gives each agent session its own isolated APFS-cloned workspace over a shared base snapshot. Covers the CLI loop (new, checkpoint, sync --check, publish, which closes a fully landed session), the JSON envelope and error codes, main-sync conflict resolution, and the commands an agent must hand to a human. For any agent that runs shell commands (Claude Code, Codex, Cursor and others).
 license: MIT OR Apache-2.0
-compatibility: macOS 13+ on APFS. Needs matching git-strata CLI and daemon builds (upgrade both together); R2 features require R2 or later. The 0.1.2 CLI cannot read a v6 or v7 store. Only a human starts the daemon.
+compatibility: macOS 13+ on APFS. Upgrade the CLI and daemon together until hosted C1 passes. Candidate wire floors are 0.3.0 while store and config formats match; R2 features require R2 or later. The 0.1.2 CLI cannot read a v6 or v7 store. Only a human starts the daemon.
 ---
 
 # git-strata
@@ -226,6 +226,8 @@ Unknown help topics return an `InvalidInput` / `help_topic` envelope.
 
 | You got | Do |
 | --- | --- |
+| `Busy upgrading` with `retry_safe: true` | The CLI already retried until its timeout. Run the same command again. A shipped 0.3.x hook can miss this checkpoint. |
+| `Unsupported cli_too_old` | Use the updated CLI on PATH. Follow the release version in `detail.fix` when available. |
 | `Busy daemon_down` | keep working and report it to the human. Let an in-app update finish. Retry after `daemon status` shows running. A sealed Move requires the human to finish or cancel it in GIT STRATA. |
 | `Busy too_many_open_files` | the daemon is out of file handles; tell the human; do not retry in a loop or start another daemon ([errors.md](errors.md)) |
 | `Busy publish_unknown` | do not loop; tell the human ([errors.md](errors.md)) |

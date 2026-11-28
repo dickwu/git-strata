@@ -35,6 +35,7 @@ pub struct Image {
     pub mount: PathBuf,
     image: PathBuf,
     attached: bool,
+    fs: Fs,
 }
 
 fn hdiutil(args: &[&str]) -> Result<String, String> {
@@ -65,13 +66,16 @@ impl Image {
         let image = base.join("img.sparseimage");
         let mount = base.join("mnt");
         fs::create_dir(&mount).unwrap();
-        let mut img = Image { dir, mount: mount.clone(), image, attached: false };
+        let mut img = Image { dir, mount: mount.clone(), image, attached: false, fs };
         img.attach(&mount, false);
         img
     }
 
     fn attach(&mut self, at: &Path, ro: bool) {
-        let mut args = vec!["attach", "-quiet", "-nobrowse", "-noautoopen", "-owners", "on", "-mountpoint"];
+        // FAT stores no owners. With `-owners on` some hosts (the hosted macOS
+        // CI runners) mount its root as another user; off maps it to the caller.
+        let owners = if self.fs == Fs::MsDos { "off" } else { "on" };
+        let mut args = vec!["attach", "-quiet", "-nobrowse", "-noautoopen", "-owners", owners, "-mountpoint"];
         args.push(at.to_str().unwrap());
         if ro {
             args.push("-readonly");

@@ -70,6 +70,7 @@ fn worker() {
                     var("STRATA_BIN").display()
                 ),
                 timeout: Duration::from_secs(120),
+                child_env: Vec::new(),
             };
             let paths = Paths { root };
             let repo = repo_name("tool");
@@ -573,6 +574,7 @@ fn build_lock_is_rooted_and_regular_file_only() {
         let env = InstallEnv {
             path: format!("{}:/usr/bin:/bin", bin.display()),
             timeout: Duration::from_secs(60),
+            child_env: Vec::new(),
         };
         let paths = Paths { root };
         let repo = repo_name("tool");

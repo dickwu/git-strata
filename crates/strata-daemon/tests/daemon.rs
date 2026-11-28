@@ -1408,6 +1408,28 @@ fn publish_rerun_of_a_directory_selector_commits_new_edits() {
         assert_eq!(r["published"].as_array().unwrap().len(), 1, "{r:#}");
         let first = git.read_ref(&chain).unwrap().expect("first commit");
 
+        // CR r2 #8: the post-publish Auto move can be Deferred, which leaves
+        // the workspace on the old base and makes the next publish conflict.
+        // Catch up, bounded, as the neighbouring tests do, and keep the first
+        // rebase report for the timeout message.
+        let first_rebase = r["published"][0]["rebases"].clone();
+        let tool = repo_name("tool");
+        let tool_head = || {
+            core.store.session(&id).unwrap().unwrap().manifest.repos[&tool]
+                .head
+                .as_str()
+                .to_owned()
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while tool_head() != first.as_str() {
+            assert!(
+                Instant::now() < deadline,
+                "tool never moved onto {first}; its rebase: {first_rebase:#}"
+            );
+            handlers::catch_up_pass(&d, std::time::SystemTime::now());
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
         external(
             &root,
             "printf 'export const a = 2\\n' > src/index.ts && printf 'export const n = 1\\n' > src/new.ts",

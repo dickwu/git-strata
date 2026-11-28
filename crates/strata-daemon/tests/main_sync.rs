@@ -249,7 +249,11 @@ fn t4_identity_refresh_real_locks_no_reentrant_wait() {
 /// first periodic fetch is due one interval after that.
 /// (The fixture interval is 900 s; an hour past the recorded fetch is due.)
 fn due(core: &Core) -> SystemTime {
-    let at = core.store.repo_fetch(&repo_name("tool")).unwrap().map(|f| f.at);
+    let at = core
+        .store
+        .repo_fetch(&repo_name("tool"))
+        .unwrap()
+        .map(|f| f.at);
     at.unwrap_or_else(SystemTime::now) + Duration::from_secs(3600)
 }
 #[test]
@@ -260,15 +264,10 @@ fn periodic_fetch_real_locks_observes_in_same_pass() {
     let h = CommitOid::try_from(f.sb.commit(&f.main("tool"), &[("bun.lock", b"new\n")], "new"))
         .unwrap();
     let at = Instant::now();
-    let r = periodic_fetch::fetch_due_with(
-        &core,
-        &repo_name("tool"),
-        due(&core),
-        &mut |git, b| {
-            assert!(core.locks.holds().is_empty());
-            stage(git, b, &h)
-        },
-    )
+    let r = periodic_fetch::fetch_due_with(&core, &repo_name("tool"), due(&core), &mut |git, b| {
+        assert!(core.locks.holds().is_empty());
+        stage(git, b, &h)
+    })
     .unwrap();
     assert_eq!(r, FetchStep::Fetched);
     assert!(at.elapsed() < Duration::from_secs(3));
@@ -349,11 +348,8 @@ fn periodic_fetch_cas_under_try_lock() {
     let old = git.read_ref("refs/strata/remotes/origin/main").unwrap();
     let a = CommitOid::try_from(f.sb.commit(&f.main("tool"), &[("a", b"a")], "a")).unwrap();
     let b = CommitOid::try_from(f.sb.commit(&f.main("tool"), &[("b", b"b")], "b")).unwrap();
-    let e = periodic_fetch::fetch_due_with(
-        &core,
-        &repo_name("tool"),
-        due(&core),
-        &mut |g, branch| {
+    let e =
+        periodic_fetch::fetch_due_with(&core, &repo_name("tool"), due(&core), &mut |g, branch| {
             core.locks
                 .with_repo(&repo_name("tool"), || {
                     g.ref_transaction(&[RefUpdate::set(
@@ -364,9 +360,8 @@ fn periodic_fetch_cas_under_try_lock() {
                 })
                 .unwrap();
             stage(g, branch, &a)
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
     // A lost CAS skips the round; it is not a fetch failure.
     assert_eq!(e, FetchStep::Skipped);
     assert!(
@@ -415,12 +410,9 @@ fn periodic_fetch_skips_busy_repo_and_rejects_rewind() {
     core.locks
         .with_repo(&repo, || {
             assert_eq!(
-                periodic_fetch::fetch_due_with(
-                    &core,
-                    &repo,
-                    due(&core),
-                    &mut |_, _| panic!("busy")
-                )
+                periodic_fetch::fetch_due_with(&core, &repo, due(&core), &mut |_, _| panic!(
+                    "busy"
+                ))
                 .unwrap(),
                 FetchStep::Skipped
             );
@@ -432,10 +424,8 @@ fn periodic_fetch_skips_busy_repo_and_rejects_rewind() {
         .unwrap()
         .unwrap();
     advance(&f, &core);
-    let e = periodic_fetch::fetch_due_with(&core, &repo, due(&core), &mut |g, b| {
-        stage(g, b, &old)
-    })
-    .unwrap_err();
+    let e = periodic_fetch::fetch_due_with(&core, &repo, due(&core), &mut |g, b| stage(g, b, &old))
+        .unwrap_err();
     assert_eq!(e.code, Code::HeadMoved);
 }
 
@@ -450,9 +440,33 @@ fn periodic_fetch_export_temp_removed() {
         "fetch",
     );
     f.sb.git(&f.main("tool"), &["push", "-q", "origin", "main"]);
+    // Git launches the fixture's upload-pack for this local fetch. Check its
+    // actual child environment without reading the runner's configuration.
+    let wrapper = f.sb.path("record-upload-pack");
+    let witness = f.sb.path("fetch-child-env");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$HOME\" \"$XDG_CONFIG_HOME\" \"$GIT_CONFIG_NOSYSTEM\" \"$GIT_ALLOW_PROTOCOL\" > '{}'\nexec git upload-pack \"$@\"\n",
+        witness.display()
+    );
+    std::fs::write(&wrapper, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    f.sb.git(
+        &f.main("tool"),
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            wrapper.to_str().unwrap(),
+        ],
+    );
     assert_eq!(
         periodic_fetch::fetch_due(&core, &repo_name("tool"), due(&core)).unwrap(),
         FetchStep::Fetched
+    );
+    let env = std::fs::read_to_string(witness).unwrap();
+    assert_eq!(
+        env,
+        format!("{}\n{}\n1\nfile\n", f.sb.home.display(), f.sb.xdg.display())
     );
     assert_eq!(pending(&core).head.unwrap().as_str(), h);
     exports_empty(&core);
@@ -721,7 +735,9 @@ fn serving_schedules_worker_and_t2_until_applied() {
     let stop = std::sync::atomic::AtomicBool::new(false);
     std::thread::scope(|scope| {
         let server = scope.spawn(|| strata_daemon::handlers::serve(&d, &listener, &stop));
-        let deadline = Instant::now() + Duration::from_secs(30);
+        // 30s is enough locally and on a quiet runner; a loaded hosted
+        // runner may need two slow main-sync loops to reach Applied.
+        let deadline = Instant::now() + Duration::from_secs(120);
         let mut applied = false;
         while Instant::now() < deadline {
             applied = core
@@ -738,7 +754,9 @@ fn serving_schedules_worker_and_t2_until_applied() {
         server.join().unwrap().unwrap();
         assert!(
             applied,
-            "the scheduled worker and T2 did not settle the proposal"
+            "the scheduled worker and T2 did not settle the proposal; deps_auto={:?}, loops_started={}",
+            core.store.deps_auto(p.id).unwrap(),
+            core.reload.loops_started.load(std::sync::atomic::Ordering::SeqCst)
         );
     });
 }

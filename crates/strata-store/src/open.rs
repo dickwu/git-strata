@@ -652,6 +652,19 @@ fn mkdir_track(p: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
     }
 }
 
+/// A blob shard: an existing entry must be a real directory, never a link
+/// that would place blobs outside the store (CR r2 #4).
+fn mkdir_shard(p: &Path) -> Result<()> {
+    match fs::create_dir(p) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => match fs::symlink_metadata(p) {
+            Ok(meta) if meta.is_dir() => Ok(()),
+            _ => Err(ioe(&e, IoSide::Write, p, "init")),
+        },
+        Err(e) => Err(ioe(&e, IoSide::Write, p, "init")),
+    }
+}
+
 fn mkdir_ok(p: &Path) -> Result<()> {
     match fs::create_dir(p) {
         Ok(()) => Ok(()),
@@ -717,7 +730,7 @@ fn create(
     let blobs = store_dir.join("blobs");
     mkdir_ok(&blobs)?;
     for i in 0..=255u8 {
-        mkdir_ok(&blobs.join(format!("{i:02x}")))?;
+        mkdir_shard(&blobs.join(format!("{i:02x}")))?;
     }
     mkdir_ok(&store_dir.join("trash"))?;
     for d in ["bases", "deps", "sessions"] {

@@ -27,7 +27,11 @@ fn set_flags(fx: &mut Dfx, deploy: bool, confirm: bool, push: bool) {
 }
 
 fn pending(core: &strata_daemon::startup::Core) -> bool {
-    core.warnings.snapshot().contains(&DaemonWarning::ConfigRelaxPending { repo: repo_name("tool") })
+    core.warnings
+        .snapshot()
+        .contains(&DaemonWarning::ConfigRelaxPending {
+            repo: repo_name("tool"),
+        })
 }
 
 #[test]
@@ -38,17 +42,31 @@ fn config_relax_not_applied_on_restart() {
     let core = fx.prepare_with(c).unwrap();
     // First start: the loaded config becomes the pins, not a relaxation.
     assert!(!pending(&core));
-    assert_eq!(current_pin(&core, &repo_name("tool")), PinnedFlags { deploy_on_push: true, confirm: true, push: true, sync_deps: Some(SyncDeps::Apply), ..Default::default() });
+    assert_eq!(
+        current_pin(&core, &repo_name("tool")),
+        PinnedFlags {
+            deploy_on_push: true,
+            confirm: true,
+            push: true,
+            sync_deps: Some(SyncDeps::Apply),
+            ..Default::default()
+        }
+    );
     core.close().unwrap();
     let before = pins_bytes(&fx);
 
     // While stopped, deploy_on_push true → false (V5 keeps confirm as is).
     set_flags(&mut fx, false, true, true);
     for _ in 0..2 {
-        let core = fx.prepare_with(fx.confirmer(vec![Verdict::pass()]).0).unwrap();
+        let core = fx
+            .prepare_with(fx.confirmer(vec![Verdict::pass()]).0)
+            .unwrap();
         let f = current_pin(&core, &repo_name("tool"));
         assert!(f.deploy_on_push, "relaxation not applied");
-        assert!(confirm_flow::needs_confirm(&f), "a push still needs confirming");
+        assert!(
+            confirm_flow::needs_confirm(&f),
+            "a push still needs confirming"
+        );
         assert!(core.config.repos[&repo_name("tool")].needs_human_confirm());
         assert!(pending(&core));
         core.close().unwrap();
@@ -88,7 +106,16 @@ fn config_relax_does_not_prompt_on_file_change() {
     let (c, log4, _) = fx.confirmer(vec![]);
     let core = fx.prepare_with(c).unwrap();
     assert!(pending(&core));
-    assert_eq!(current_pin(&core, &repo_name("tool")), PinnedFlags { deploy_on_push: false, confirm: true, push: false, sync_deps: Some(SyncDeps::Apply), ..Default::default() });
+    assert_eq!(
+        current_pin(&core, &repo_name("tool")),
+        PinnedFlags {
+            deploy_on_push: false,
+            confirm: true,
+            push: false,
+            sync_deps: Some(SyncDeps::Apply),
+            ..Default::default()
+        }
+    );
     core.close().unwrap();
     for l in [log, log2, log3, log4] {
         assert!(l.shown().is_empty());
@@ -118,7 +145,9 @@ fn config_relax_writes_pin_after_validate() {
     let (c, log, clock) = fx.confirmer(vec![Verdict::pass()]);
     let core = fx.prepare_with(c).unwrap();
     let e = core
-        .config_relax_with(&repo_name("tool"), &|| clock.advance(strata_confirm::TOKEN_TTL + Duration::from_secs(1)))
+        .config_relax_with(&repo_name("tool"), &|| {
+            clock.advance(strata_confirm::TOKEN_TTL + Duration::from_secs(1))
+        })
         .unwrap_err();
     assert_eq!(e.code, Code::NotConfirmed, "{e:?}");
     assert_eq!(log.shown().len(), 1);
@@ -137,7 +166,11 @@ fn config_relax_writes_pin_after_validate() {
     })
     .unwrap();
     assert_eq!(*shown_between.borrow(), 1, "require ran first");
-    assert_eq!(seen_between.borrow().as_deref(), Some(pinned_before.as_slice()), "not written before validate");
+    assert_eq!(
+        seen_between.borrow().as_deref(),
+        Some(pinned_before.as_slice()),
+        "not written before validate"
+    );
     assert_ne!(pins_bytes(&fx), pinned_before);
     assert!(!current_pin(&core, &repo_name("tool")).deploy_on_push);
     assert!(!pending(&core));
@@ -148,7 +181,10 @@ fn config_relax_writes_pin_after_validate() {
     assert_eq!(reason(&e), Some("not_relaxed"));
     assert_eq!(log.shown().len(), 1);
     // Unknown repo: NoSuchRepo, no prompt.
-    assert_eq!(core.config_relax(&repo_name("nope")).unwrap_err().code, Code::NoSuchRepo);
+    assert_eq!(
+        core.config_relax(&repo_name("nope")).unwrap_err().code,
+        Code::NoSuchRepo
+    );
     assert_eq!(log.shown().len(), 1);
     core.close().unwrap();
 
@@ -159,7 +195,10 @@ fn config_relax_writes_pin_after_validate() {
     core.close().unwrap();
 
     // No temporary pin file remains; confirmed pin changes have an audit sidecar.
-    let names: Vec<String> = fs::read_dir(&fx.config_dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    let names: Vec<String> = fs::read_dir(&fx.config_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
     let mut names = names;
     names.sort();
     assert_eq!(
@@ -183,7 +222,14 @@ fn prompt_holds_no_queue_or_repo_lock() {
     let (c, log, _) = fx.confirmer(vec![Verdict::Hang]);
     let core = fx.prepare_with(c).unwrap();
     let d = strata_daemon::startup::Daemon::start(&core).unwrap();
-    let sid = { let _catalog = core.admit(); d.sessions.new(None, &[repo_name("tool")]).unwrap().manifest.id };
+    let sid = {
+        let _catalog = core.admit();
+        d.sessions
+            .new(None, &[repo_name("tool")])
+            .unwrap()
+            .manifest
+            .id
+    };
     std::thread::scope(|s| {
         let h = s.spawn(|| core.config_relax(&repo_name("tool")));
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -194,7 +240,11 @@ fn prompt_holds_no_queue_or_repo_lock() {
         // The prompt is up: both locks are free (a held one would be Busy
         // after the 300 ms test bound).
         let t = Instant::now();
-        core.locks.with_sessions(std::slice::from_ref(&sid), || core.locks.with_repo(&repo_name("tool"), || Ok(()))).unwrap();
+        core.locks
+            .with_sessions(std::slice::from_ref(&sid), || {
+                core.locks.with_repo(&repo_name("tool"), || Ok(()))
+            })
+            .unwrap();
         assert!(t.elapsed() < Duration::from_millis(250));
         assert!(core.locks.holds().is_empty());
         let e = h.join().unwrap().unwrap_err();
@@ -208,10 +258,18 @@ fn prompt_holds_no_queue_or_repo_lock() {
 fn action_mismatch_is_not_confirmed() {
     let fx = Dfx::new();
     let (c, _, _) = fx.confirmer(vec![Verdict::pass(), Verdict::pass()]);
-    let a = Action::PushDeploy { repo: repo_name("tool"), branch: "main".into(), url: "git@github.com:acme/tool.git".into() };
+    let a = Action::PushDeploy {
+        repo: repo_name("tool"),
+        branch: "main".into(),
+        url: "git@github.com:acme/tool.git".into(),
+    };
     let token = require_validated(&c, a.clone()).unwrap();
     recheck(&token, &a).unwrap();
-    let other = Action::PushDeploy { repo: repo_name("tool"), branch: "release".into(), url: "git@github.com:acme/tool.git".into() };
+    let other = Action::PushDeploy {
+        repo: repo_name("tool"),
+        branch: "release".into(),
+        url: "git@github.com:acme/tool.git".into(),
+    };
     let e = recheck(&token, &other).unwrap_err();
     assert_eq!(e.code, Code::NotConfirmed);
     // Redeemed once: validating the same token again is refused.
@@ -261,20 +319,13 @@ fn install_env_path_is_d1() {
     );
     fs::create_dir_all(&opts.config_dir).unwrap();
     fs::copy(fx.config_dir.join("config.toml"), &opts.config_file).unwrap();
+    opts.fixture = Some(
+        strata_daemon::fixture::WorkerFixture::new(&fx.sb.root, &home, &opts.config_dir).unwrap(),
+    );
     opts.socket = fx.socket();
-    let env: Vec<(String, Option<std::ffi::OsString>)> = fx
-        .sb
-        .git_env()
-        .into_iter()
-        .map(|(k, v)| (k.to_owned(), v.map(|v| v.to_os_string())))
-        .collect();
-    let core = strata_daemon::startup::prepare(opts, fx.confirmer(vec![]).0, &move |p: &Path| {
-        strata_gitio::Git::open_with_env(
-            p,
-            &env.iter()
-                .map(|(k, v)| (k.as_str(), v.as_deref()))
-                .collect::<Vec<_>>(),
-        )
+    let fixture = opts.fixture.clone().unwrap();
+    let core = strata_daemon::startup::prepare(opts, fx.confirmer(vec![]).0, &move |p| {
+        fixture.open_git(p)
     })
     .unwrap();
     assert_eq!(core.env.path, d1);
@@ -288,11 +339,17 @@ struct FakeLaunchd {
 
 impl Launchd for FakeLaunchd {
     fn bootstrap(&self, p: &Path) -> strata_daemon::Result<()> {
-        self.calls.lock().unwrap().push(("bootstrap".into(), p.to_path_buf()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("bootstrap".into(), p.to_path_buf()));
         Ok(())
     }
     fn bootout(&self, p: &Path) -> strata_daemon::Result<()> {
-        self.calls.lock().unwrap().push(("bootout".into(), p.to_path_buf()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("bootout".into(), p.to_path_buf()));
         Ok(())
     }
 }
@@ -304,12 +361,26 @@ fn plist_has_label_keepalive_aqua_and_d1_path() {
     let bin = Path::new("/opt/strata/bin/git-stratad");
     let fake = FakeLaunchd::default();
     let p = plist::install_agent_with(bin, &home, &fake).unwrap();
-    assert_eq!(p, home.join("Library/LaunchAgents/com.gwd.git-stratad.plist"));
-    assert_eq!(*fake.calls.lock().unwrap(), vec![("bootstrap".to_string(), p.clone())]);
+    assert_eq!(
+        p,
+        home.join("Library/LaunchAgents/com.gwd.git-stratad.plist")
+    );
+    assert_eq!(
+        *fake.calls.lock().unwrap(),
+        vec![("bootstrap".to_string(), p.clone())]
+    );
 
     // plutil reads it as a property list (lint + convert to JSON on stdout).
-    let out = std::process::Command::new("/usr/bin/plutil").args(["-convert", "json", "-o", "-"]).arg(&p).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = std::process::Command::new("/usr/bin/plutil")
+        .args(["-convert", "json", "-o", "-"])
+        .arg(&p)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["Label"], "com.gwd.git-stratad");
     assert_eq!(v["KeepAlive"], serde_json::json!({"SuccessfulExit": false}));
@@ -319,12 +390,24 @@ fn plist_has_label_keepalive_aqua_and_d1_path() {
     // Review P1-5: launchd waits for in-flight writes before SIGKILL.
     assert_eq!(v["ExitTimeOut"], plist::EXIT_TIMEOUT_SECS);
     // Incident 2026-10-27: launchd's default soft limit of 256 descriptors ran out.
-    assert_eq!(v["SoftResourceLimits"]["NumberOfFiles"], strata_daemon::startup::FD_LIMIT);
-    assert!(v.get("HardResourceLimits").is_none(), "the hard limit is left alone");
+    assert_eq!(
+        v["SoftResourceLimits"]["NumberOfFiles"],
+        strata_daemon::startup::FD_LIMIT
+    );
+    assert!(
+        v.get("HardResourceLimits").is_none(),
+        "the hard limit is left alone"
+    );
     assert_eq!(v["ProgramArguments"], serde_json::json!([bin]));
-    assert_eq!(v["EnvironmentVariables"]["PATH"], format!("{}/.bun/bin:{DEFAULT_PATH}", home.display()));
+    assert_eq!(
+        v["EnvironmentVariables"]["PATH"],
+        format!("{}/.bun/bin:{DEFAULT_PATH}", home.display())
+    );
     let err = v["StandardErrorPath"].as_str().unwrap();
-    assert_eq!(Path::new(err), home.join("Library/Application Support/git-strata/daemon.err.log"));
+    assert_eq!(
+        Path::new(err),
+        home.join("Library/Application Support/git-strata/daemon.err.log")
+    );
     assert!(!err.contains('~'));
 
     plist::uninstall_agent_with(&home, &fake).unwrap();
@@ -348,7 +431,16 @@ fn missing_pins_file_means_needs_confirmation() {
     let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
     let core = fx.prepare_unseeded(c).unwrap();
     let f = current_pin(&core, &repo_name("tool"));
-    assert_eq!(f, PinnedFlags { deploy_on_push: false, confirm: true, push: true, sync_deps: Some(SyncDeps::Confirm), ..Default::default() });
+    assert_eq!(
+        f,
+        PinnedFlags {
+            deploy_on_push: false,
+            confirm: true,
+            push: true,
+            sync_deps: Some(SyncDeps::Confirm),
+            ..Default::default()
+        }
+    );
     assert!(pending(&core), "the looser config waits for config relax");
     assert!(log.shown().is_empty(), "startup never prompts");
     // Only a confirmed relax adopts it.
@@ -369,7 +461,10 @@ fn deleted_pins_file_does_not_loosen() {
     fs::remove_file(strata_daemon::pins_path(&fx.config_dir)).unwrap();
     set_flags(&mut fx, false, false, true);
     let core = fx.prepare_unseeded(fx.confirmer(vec![]).0).unwrap();
-    assert!(confirm_flow::needs_confirm(&current_pin(&core, &repo_name("tool"))));
+    assert!(confirm_flow::needs_confirm(&current_pin(
+        &core,
+        &repo_name("tool")
+    )));
     assert!(core.config.repos[&repo_name("tool")].needs_human_confirm());
     assert!(pending(&core));
     core.close().unwrap();
@@ -394,7 +489,13 @@ fn renamed_repo_does_not_reset_the_pin() {
     let f = current_pin(&core, &repo_name("tool2"));
     assert!(f.confirm, "renamed repo is gated");
     assert!(core.config.repos[&repo_name("tool2")].needs_human_confirm());
-    assert!(core.warnings.snapshot().contains(&DaemonWarning::ConfigRelaxPending { repo: repo_name("tool2") }));
+    assert!(
+        core.warnings
+            .snapshot()
+            .contains(&DaemonWarning::ConfigRelaxPending {
+                repo: repo_name("tool2")
+            })
+    );
     core.close().unwrap();
 }
 
@@ -420,16 +521,43 @@ fn regenerable_narrower_is_syntactic() {
     let pin = v(&["gen/**", "!gen/keep.json", "a.json"]);
     assert!(n(&pin, &pin));
     assert!(n(&pin, &v(&[])), "emptied: matches nothing");
-    assert!(n(&pin, &v(&["!other.json"])), "no positives left: matches nothing");
+    assert!(
+        n(&pin, &v(&["!other.json"])),
+        "no positives left: matches nothing"
+    );
     assert!(n(&pin, &v(&["!gen/keep.json"])));
     assert!(n(&pin, &v(&["gen/**", "!gen/keep.json"])));
-    assert!(n(&pin, &v(&["gen/**", "!gen/keep.json", "a.json", "!gen/x.json"])), "appended negation");
+    assert!(
+        n(
+            &pin,
+            &v(&["gen/**", "!gen/keep.json", "a.json", "!gen/x.json"])
+        ),
+        "appended negation"
+    );
     assert!(!n(&pin, &v(&["gen/**", "a.json"])), "negation removed");
-    assert!(!n(&pin, &v(&["gen/**", "!gen/kept.json", "a.json"])), "negation edited");
-    assert!(!n(&pin, &v(&["gen/*", "!gen/keep.json", "a.json"])), "positive edited");
-    assert!(!n(&pin, &v(&["gen/**", "!gen/keep.json", "a.json", "b.json"])), "positive added");
-    assert!(!n(&pin, &v(&["a.json", "gen/**", "!gen/keep.json"])), "reordered");
-    assert!(!n(&pin, &v(&["gen/**", "!gen/x.json", "!gen/keep.json", "a.json"])), "negation inserted mid-list");
+    assert!(
+        !n(&pin, &v(&["gen/**", "!gen/kept.json", "a.json"])),
+        "negation edited"
+    );
+    assert!(
+        !n(&pin, &v(&["gen/*", "!gen/keep.json", "a.json"])),
+        "positive edited"
+    );
+    assert!(
+        !n(&pin, &v(&["gen/**", "!gen/keep.json", "a.json", "b.json"])),
+        "positive added"
+    );
+    assert!(
+        !n(&pin, &v(&["a.json", "gen/**", "!gen/keep.json"])),
+        "reordered"
+    );
+    assert!(
+        !n(
+            &pin,
+            &v(&["gen/**", "!gen/x.json", "!gen/keep.json", "a.json"])
+        ),
+        "negation inserted mid-list"
+    );
     assert!(!n(&v(&[]), &v(&["a.json"])));
     assert!(n(&v(&[]), &v(&["!a.json"])));
 }
@@ -444,7 +572,13 @@ fn pins_json_without_regenerable_reads_empty_and_list_waits_for_relax() {
     set_regenerable(&mut fx, &["gen/**"]);
     let core = fx.prepare().unwrap();
     assert!(pinned_regen(&core).is_empty());
-    assert!(core.config.repos[&repo_name("tool")].rm.regenerable.is_empty(), "effective list is the pin");
+    assert!(
+        core.config.repos[&repo_name("tool")]
+            .rm
+            .regenerable
+            .is_empty(),
+        "effective list is the pin"
+    );
     assert!(pending(&core), "widening shows as pending relax");
     core.close().unwrap();
     assert_eq!(pins_bytes(&fx), old, "an empty list is not written");
@@ -470,7 +604,9 @@ fn regenerable_unpinned_repo_is_empty_until_relax() {
 fn regenerable_widening_and_edits_need_relax_narrowing_applies() {
     let mut fx = Dfx::new();
     set_regenerable(&mut fx, &["gen/**", "!gen/keep.json"]);
-    let core = fx.prepare_unseeded(fx.confirmer(vec![Verdict::pass()]).0).unwrap();
+    let core = fx
+        .prepare_unseeded(fx.confirmer(vec![Verdict::pass()]).0)
+        .unwrap();
     core.config_relax(&repo_name("tool")).unwrap();
     core.close().unwrap();
 
@@ -482,8 +618,16 @@ fn regenerable_widening_and_edits_need_relax_narrowing_applies() {
     ] {
         set_regenerable(&mut fx, list);
         let core = fx.prepare().unwrap();
-        assert_eq!(pinned_regen(&core), v(&["gen/**", "!gen/keep.json"]), "{what}");
-        assert_eq!(core.config.repos[&repo_name("tool")].rm.regenerable, v(&["gen/**", "!gen/keep.json"]), "{what}");
+        assert_eq!(
+            pinned_regen(&core),
+            v(&["gen/**", "!gen/keep.json"]),
+            "{what}"
+        );
+        assert_eq!(
+            core.config.repos[&repo_name("tool")].rm.regenerable,
+            v(&["gen/**", "!gen/keep.json"]),
+            "{what}"
+        );
         assert!(pending(&core), "{what}");
         core.close().unwrap();
     }
@@ -492,7 +636,10 @@ fn regenerable_widening_and_edits_need_relax_narrowing_applies() {
     set_regenerable(&mut fx, &["gen/**", "!gen/keep.json", "!gen/also.json"]);
     let (c, log, _) = fx.confirmer(vec![]);
     let core = fx.prepare_with(c).unwrap();
-    assert_eq!(pinned_regen(&core), v(&["gen/**", "!gen/keep.json", "!gen/also.json"]));
+    assert_eq!(
+        pinned_regen(&core),
+        v(&["gen/**", "!gen/keep.json", "!gen/also.json"])
+    );
     assert!(!pending(&core));
     assert!(log.shown().is_empty());
     core.close().unwrap();
@@ -500,7 +647,10 @@ fn regenerable_widening_and_edits_need_relax_narrowing_applies() {
     // Deleting every positive is narrower too.
     set_regenerable(&mut fx, &["!gen/keep.json", "!gen/also.json"]);
     let core = fx.prepare().unwrap();
-    assert_eq!(pinned_regen(&core), v(&["!gen/keep.json", "!gen/also.json"]));
+    assert_eq!(
+        pinned_regen(&core),
+        v(&["!gen/keep.json", "!gen/also.json"])
+    );
     assert!(!pending(&core));
     core.close().unwrap();
 }
@@ -513,9 +663,21 @@ fn relax_reloads_regenerable_without_restart() {
     let (c, _log, _) = fx.confirmer(vec![Verdict::pass()]);
     let core = fx.prepare_with(c).unwrap();
     let d = strata_daemon::startup::Daemon::start(&core).unwrap();
-    assert!({ let _catalog = core.admit(); d.sessions.regenerable(&repo_name("tool")).unwrap().is_empty() });
+    assert!({
+        let _catalog = core.admit();
+        d.sessions
+            .regenerable(&repo_name("tool"))
+            .unwrap()
+            .is_empty()
+    });
     d.config_relax(&repo_name("tool")).unwrap();
-    assert_eq!({ let _catalog = core.admit(); d.sessions.regenerable(&repo_name("tool")).unwrap() }, v(&["gen/**"]));
+    assert_eq!(
+        {
+            let _catalog = core.admit();
+            d.sessions.regenerable(&repo_name("tool")).unwrap()
+        },
+        v(&["gen/**"])
+    );
     assert!(!pending(&core));
     drop(d);
     core.close().unwrap();
@@ -524,15 +686,28 @@ fn relax_reloads_regenerable_without_restart() {
 #[test]
 fn pin_relax_needed_for_confirm_to_apply() {
     let mut fx = Dfx::new();
-    fx.config.repos.get_mut(&repo_name("tool")).unwrap().sync.deps = SyncDeps::Confirm;
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .sync
+        .deps = SyncDeps::Confirm;
     fx.write_config();
     fx.prepare().unwrap().close().unwrap();
-    fx.config.repos.get_mut(&repo_name("tool")).unwrap().sync.deps = SyncDeps::Apply;
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .sync
+        .deps = SyncDeps::Apply;
     fx.write_config();
     let (c, log, _) = fx.confirmer(vec![Verdict::pass()]);
     let core = fx.prepare_with(c).unwrap();
     assert_eq!(current_sync(&core, &repo_name("tool")), SyncDeps::Confirm);
-    assert_eq!(core.config.repos[&repo_name("tool")].sync.deps, SyncDeps::Confirm);
+    assert_eq!(
+        core.config.repos[&repo_name("tool")].sync.deps,
+        SyncDeps::Confirm
+    );
     assert!(pending(&core));
     assert!(log.shown().is_empty());
     core.config_relax(&repo_name("tool")).unwrap();
@@ -541,7 +716,12 @@ fn pin_relax_needed_for_confirm_to_apply() {
     assert_eq!(log.shown().len(), 1);
     core.close().unwrap();
     // The opposite change tightens on restart without any prompt.
-    fx.config.repos.get_mut(&repo_name("tool")).unwrap().sync.deps = SyncDeps::Confirm;
+    fx.config
+        .repos
+        .get_mut(&repo_name("tool"))
+        .unwrap()
+        .sync
+        .deps = SyncDeps::Confirm;
     fx.write_config();
     let (c, log, _) = fx.confirmer(vec![]);
     let core = fx.prepare_with(c).unwrap();
@@ -555,19 +735,31 @@ fn pin_relax_needed_for_confirm_to_apply() {
 fn missing_sync_deps_field_pins_config_value() {
     for mode in [SyncDeps::Apply, SyncDeps::Confirm] {
         let mut fx = Dfx::new();
-        fx.config.repos.get_mut(&repo_name("tool")).unwrap().sync.deps = mode;
+        fx.config
+            .repos
+            .get_mut(&repo_name("tool"))
+            .unwrap()
+            .sync
+            .deps = mode;
         fx.write_config();
         fx.seed_pins();
         let path = strata_daemon::pins_path(&fx.config_dir);
-        let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        value["repos"]["tool"].as_object_mut().unwrap().remove("sync_deps");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["repos"]["tool"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sync_deps");
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         let core = fx.prepare().unwrap();
         assert_eq!(current_sync(&core, &repo_name("tool")), mode);
         assert!(!pending(&core));
         core.close().unwrap();
         let written: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-        assert_eq!(written["repos"]["tool"]["sync_deps"], serde_json::to_value(mode).unwrap());
+        assert_eq!(
+            written["repos"]["tool"]["sync_deps"],
+            serde_json::to_value(mode).unwrap()
+        );
     }
 }
 
@@ -598,12 +790,18 @@ fn missing_pins_file_fails_closed_to_confirm() {
 
 #[test]
 fn malformed_pins_still_fails_startup() {
-    for bytes in [r#"{"repos":{"tool":{"sync_deps":"bogus","confirm":false,"deploy_on_push":false,"push":true}}}"#, "{"] {
+    for bytes in [
+        r#"{"repos":{"tool":{"sync_deps":"bogus","confirm":false,"deploy_on_push":false,"push":true}}}"#,
+        "{",
+    ] {
         let fx = Dfx::new();
         let path = strata_daemon::pins_path(&fx.config_dir);
         fs::write(&path, bytes).unwrap();
         let (c, log, _) = fx.confirmer(vec![]);
-        let e = fx.prepare_unseeded(c).err().expect("malformed pins refuse startup");
+        let e = fx
+            .prepare_unseeded(c)
+            .err()
+            .expect("malformed pins refuse startup");
         assert_eq!(e.code, Code::InvalidInput);
         assert_eq!(reason(&e), Some("pins"));
         assert_eq!(fs::read_to_string(path).unwrap(), bytes);
@@ -614,7 +812,11 @@ fn malformed_pins_still_fails_startup() {
 #[test]
 fn sync_deps_does_not_change_publish_confirmation() {
     for mode in [SyncDeps::Apply, SyncDeps::Confirm] {
-        let flags = PinnedFlags { confirm: false, sync_deps: Some(mode), ..Default::default() };
+        let flags = PinnedFlags {
+            confirm: false,
+            sync_deps: Some(mode),
+            ..Default::default()
+        };
         assert!(!confirm_flow::needs_confirm(&flags));
     }
 }
@@ -657,21 +859,27 @@ fn relax_audit_sidecar_preserves_pins_format_and_append_failure_keeps_relaxation
         let mut fx = Dfx::new();
         set_flags(&mut fx, true, true, true);
         fx.prepare().unwrap().close().unwrap();
-        set_flags(&mut fx,false,true,true);
-        let (c,_,_)=fx.confirmer(vec![Verdict::pass()]);
-        let core=fx.prepare_with(c).unwrap();
-        let audit=strata_daemon::pins_path(&fx.config_dir).with_file_name("audit.jsonl");
-        if fail { fs::remove_file(&audit).unwrap(); fs::create_dir(&audit).unwrap(); }
+        set_flags(&mut fx, false, true, true);
+        let (c, _, _) = fx.confirmer(vec![Verdict::pass()]);
+        let core = fx.prepare_with(c).unwrap();
+        let audit = strata_daemon::pins_path(&fx.config_dir).with_file_name("audit.jsonl");
+        if fail {
+            fs::remove_file(&audit).unwrap();
+            fs::create_dir(&audit).unwrap();
+        }
         core.config_relax(&repo_name("tool")).unwrap();
         assert!(!current_pin(&core, &repo_name("tool")).deploy_on_push);
-        let pin:serde_json::Value=serde_json::from_slice(&pins_bytes(&fx)).unwrap();
+        let pin: serde_json::Value = serde_json::from_slice(&pins_bytes(&fx)).unwrap();
         assert!(pin["repos"]["tool"].get("relaxed_at").is_none());
-        assert_eq!(pin.as_object().unwrap().len(),1);
-        if fail { assert!(core.pins.audit_error(&repo_name("tool")).is_some()); }
-        else {
-            let text=fs::read_to_string(audit).unwrap();
-            let e:serde_json::Value=serde_json::from_str(text.lines().last().unwrap()).unwrap();
-            assert_eq!(e["event"],"config_relax"); assert_eq!(e["from"]["deploy_on_push"],true); assert_eq!(e["to"]["deploy_on_push"],false);
+        assert_eq!(pin.as_object().unwrap().len(), 1);
+        if fail {
+            assert!(core.pins.audit_error(&repo_name("tool")).is_some());
+        } else {
+            let text = fs::read_to_string(audit).unwrap();
+            let e: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+            assert_eq!(e["event"], "config_relax");
+            assert_eq!(e["from"]["deploy_on_push"], true);
+            assert_eq!(e["to"]["deploy_on_push"], false);
             assert!(e["at"].as_str().is_some());
             assert!(core.pins.metadata()["tool"]["relaxed_at"].is_string());
         }
@@ -679,8 +887,10 @@ fn relax_audit_sidecar_preserves_pins_format_and_append_failure_keeps_relaxation
 }
 
 fn current_pin(core: &strata_daemon::startup::Core, repo: &strata_types::RepoName) -> PinnedFlags {
-    let _catalog = core.admit(); core.pinned(repo).unwrap()
+    let _catalog = core.admit();
+    core.pinned(repo).unwrap()
 }
 fn current_sync(core: &strata_daemon::startup::Core, repo: &strata_types::RepoName) -> SyncDeps {
-    let _catalog = core.admit(); core.effective_sync_deps(repo)
+    let _catalog = core.admit();
+    core.effective_sync_deps(repo)
 }

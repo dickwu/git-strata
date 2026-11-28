@@ -1,6 +1,6 @@
 [package]
 name = "strata-confirm"
-version = "0.3.2"
+version = "0.3.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,7 +11,7 @@ description = "Human confirmation for git-strata: LocalAuthentication (Touch ID 
 default = []
 # Scripted authenticator, fake clock and LocalAuthentication variants for tests.
 # Never enabled in a shipped build: git-stratad refuses to start when TEST_SEAMS is true.
-test-seams = []
+test-seams = ["strata-types/test-seams"]
 
 [dependencies]
 strata-types = { path = "../strata-types" }

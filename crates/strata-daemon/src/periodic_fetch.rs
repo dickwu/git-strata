@@ -8,7 +8,7 @@ use crate::{
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime};
 use strata_gitio::{Git, RefUpdate, remote_ref};
 use strata_publish::main_follow::{self, TempTree};
@@ -89,8 +89,10 @@ fn fetch_due_inner(
             }
             core.locks.try_repo(repo, "periodic_fetch", || {
                 if core.catalog.current().config.repos.get(repo) != Some(cfg) {
-                    return Err(StrataError::new(Code::Busy, "configuration changed during fetch")
-                        .with_detail(serde_json::json!({"reason":"config_changed"})));
+                    return Err(
+                        StrataError::new(Code::Busy, "configuration changed during fetch")
+                            .with_detail(serde_json::json!({"reason":"config_changed"})),
+                    );
                 }
                 git.ref_transaction(&[
                     RefUpdate::verify(staging_ref(&cfg.default_branch), Some(fetched.clone())),
@@ -114,8 +116,12 @@ fn fetch_due_inner(
             || (e.code == Code::HeadMoved
                 && e.detail.as_ref().and_then(|d| d.get("reason")).is_none()))
     {
-        core.store
-            .record_fetch(repo, false, Some("skipped: concurrent fetch, lock, or config change"), now)?;
+        core.store.record_fetch(
+            repo,
+            false,
+            Some("skipped: concurrent fetch, lock, or config change"),
+            now,
+        )?;
         return Ok(FetchStep::Skipped);
     }
     core.store.record_fetch(
@@ -145,40 +151,26 @@ fn fetch_staged(core: &Core, git: &Git, branch: &str) -> Result<CommitOid> {
     let temp = TempTree::new(&core.config.paths.root)?;
     let log = temp.path();
     let stderr = File::create(&log).map_err(|e| StrataError::new(Code::Unknown, e.to_string()))?;
-    let mut cmd = Command::new("git");
-    for (key, _) in std::env::vars_os() {
-        let upper = key.to_string_lossy().to_ascii_uppercase();
-        if upper.starts_with("GIT_") || upper == "STRATA_PUBLISH" {
-            cmd.env_remove(key);
-        }
-    }
-    cmd.current_dir(git.common_dir())
-        .args([
-            "--no-replace-objects",
-            "-c",
-            "core.fsmonitor=false",
-            "--git-dir=.",
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "--no-auto-maintenance",
-            "--no-write-commit-graph",
-            "--no-prune",
-            "--no-recurse-submodules",
-            "--refmap=",
-            "--end-of-options",
-            "origin",
-        ])
-        .arg(format!("+refs/heads/{branch}:{}", staging_ref(branch)))
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(stderr)
-        .process_group(0);
+    let mut cmd = git.repo_command();
+    cmd.args([
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--no-auto-maintenance",
+        "--no-write-commit-graph",
+        "--no-prune",
+        "--no-recurse-submodules",
+        "--refmap=",
+        "--end-of-options",
+        "origin",
+    ])
+    .arg(format!("+refs/heads/{branch}:{}", staging_ref(branch)))
+    .env("LC_ALL", "C")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(stderr)
+    .process_group(0);
     let mut child = cmd.spawn().map_err(|e| {
         StrataError::new(Code::Unknown, format!("cannot start periodic fetch: {e}"))
     })?;

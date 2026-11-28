@@ -43,10 +43,25 @@ pub fn run() -> i32 {
     run_args(std::env::args_os().collect())
 }
 
+/// Skip global options before the command, including the value of --timeout.
+fn command_words(argv: &[OsString]) -> &[OsString] {
+    let mut words = argv.get(1..).unwrap_or_default();
+    while let Some((flag, rest)) = words.split_first() {
+        words = match flag.to_str() {
+            Some("--timeout") => rest.get(1..).unwrap_or_default(),
+            Some("--wait" | "--progress") => rest,
+            Some(flag) if flag.starts_with("--timeout=") => rest,
+            _ => break,
+        };
+    }
+    words
+}
+
 pub fn run_args(argv: Vec<OsString>) -> i32 {
     // Arm before parsing or reading stdin/environment. Hook failures are
     // deliberately silent, including invalid flags and a blocked stdin.
-    let hook = argv.get(1).is_some_and(|s| s == "sync") && argv.iter().any(|s| s == "--hook");
+    let words = command_words(&argv);
+    let hook = words.first().is_some_and(|s| s == "sync") && words.iter().any(|s| s == "--hook");
     let started = std::time::Instant::now();
     let _timer = if hook {
         match sync::Deadline::start(started) {
@@ -86,7 +101,7 @@ pub fn run_args(argv: Vec<OsString>) -> i32 {
     // status-perf C: `ls --table` prints a table instead of a successful
     // envelope (a stated exception to D19); errors stay envelopes.
     let table = matches!(cli.cmd, Cmd::Ls { table: true });
-    let (mut env, reload_code) = dispatch(cli.cmd);
+    let (mut env, reload_code) = dispatch(cli.cmd, cli.wait);
     if table && env.ok {
         return cmds::emit_table(&env);
     }
@@ -136,13 +151,10 @@ pub fn hint(s: strata_types::SessionId) {
 /// A clap rejection as `InvalidInput` (§3.1): an unknown or missing
 /// subcommand carries the sorted command list of its level.
 fn parse_error(argv: &[OsString], e: &clap::Error) -> StrataError {
-    let words: Vec<String> = argv
-        .iter()
-        .skip(1)
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
-    let first = words.iter().find(|w| !w.starts_with('-'));
-    let group = first.and_then(|g| args::group_commands(g).map(|c| (g.clone(), c)));
+    let group = command_words(argv)
+        .first()
+        .and_then(|g| g.to_str())
+        .and_then(|name| args::group_commands(name).map(|commands| (name, commands)));
     let msg = e
         .to_string()
         .lines()
@@ -168,19 +180,13 @@ fn parse_error(argv: &[OsString], e: &clap::Error) -> StrataError {
     }
 }
 
-fn dispatch(cmd: Cmd) -> (Envelope, Option<i32>) {
+fn dispatch(cmd: Cmd, wait: args::WaitArgs) -> (Envelope, Option<i32>) {
     let mut reload_code = None;
-    let env = match cmd {
-        Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status().unwrap_or_else(Envelope::err),
-        cmd => match run_cmd(cmd, &mut reload_code) {
-            Ok(env) => env,
-            Err(e) => Envelope::err(e),
-        },
-    };
+    let env = run_cmd(cmd, wait, &mut reload_code).unwrap_or_else(Envelope::err);
     (env, reload_code)
 }
 
-fn run_cmd(cmd: Cmd, reload_code: &mut Option<i32>) -> Result<Envelope> {
+fn run_cmd(cmd: Cmd, wait: args::WaitArgs, reload_code: &mut Option<i32>) -> Result<Envelope> {
     use crate::confirm as c;
     // Argument checks that need no environment come first.
     match &cmd {
@@ -198,7 +204,7 @@ fn run_cmd(cmd: Cmd, reload_code: &mut Option<i32>) -> Result<Envelope> {
         }
         _ => {}
     }
-    let ctx = Ctx::from_env()?;
+    let ctx = Ctx::with_wait(wait)?;
     match cmd {
         Cmd::Help { .. } => unreachable!("help is dispatched before environment setup"),
         Cmd::Sync(args) => sync::run(&ctx, &args),
@@ -208,10 +214,18 @@ fn run_cmd(cmd: Cmd, reload_code: &mut Option<i32>) -> Result<Envelope> {
         Cmd::Push { repo } => c::push(&ctx, &repo),
         Cmd::Publish {
             from,
+            dry_run,
             assign,
             message,
             message_for,
-        } => c::publish(&ctx, &from, assign.as_deref(), &message, &message_for),
+        } => c::publish(
+            &ctx,
+            &from,
+            assign.as_deref(),
+            &message,
+            &message_for,
+            dry_run,
+        ),
         Cmd::Assign { file, session } => c::assign(&ctx, &file, &session),
         Cmd::Rm { session, discard } => c::rm(&ctx, &session, discard),
         Cmd::Mark {
@@ -243,7 +257,6 @@ fn run_cmd(cmd: Cmd, reload_code: &mut Option<i32>) -> Result<Envelope> {
             repos,
             agent,
             base,
-            wait,
         } => cmds::new(
             &ctx,
             ticket_flag,
@@ -252,23 +265,11 @@ fn run_cmd(cmd: Cmd, reload_code: &mut Option<i32>) -> Result<Envelope> {
             &repos,
             agent.as_deref(),
             &base,
-            &wait.wait(),
+            &ctx.wait,
         ),
-        Cmd::Add {
-            session,
-            repo,
-            wait,
-        } => cmds::add(&ctx, session, &repo, &wait.wait()),
-        Cmd::Status {
-            sel,
-            brief: true,
-            wait,
-        } => cmds::status_brief_with_wait(&ctx, &sel, &wait),
-        Cmd::Status {
-            sel,
-            brief: false,
-            wait,
-        } => cmds::status_with_wait(&ctx, &sel, &wait),
+        Cmd::Add { session, repo } => cmds::add(&ctx, session, &repo, &ctx.wait),
+        Cmd::Status { sel, brief: true } => cmds::status_brief_with_wait(&ctx, &sel, &ctx.wait),
+        Cmd::Status { sel, brief: false } => cmds::status_with_wait(&ctx, &sel, &ctx.wait),
         Cmd::Ls { .. } => cmds::ls(&ctx),
         Cmd::Checkpoint {
             tool_call,
@@ -300,7 +301,7 @@ fn run_cmd(cmd: Cmd, reload_code: &mut Option<i32>) -> Result<Envelope> {
         Cmd::Du { refresh } => cmds::du(&ctx, refresh),
         Cmd::Daemon(DaemonCmd::Start) => launch::start(&ctx.paths.home),
         Cmd::Daemon(DaemonCmd::Stop) => launch::stop(&ctx.paths.home),
-        Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status(),
+        Cmd::Daemon(DaemonCmd::Status) => cmds::daemon_status_with_ctx(ctx),
         Cmd::Session(SessionCmd::Ports {
             session,
             repo,

@@ -174,6 +174,7 @@ fn assert_open_state(fx: &Dfx, migrated_from: Option<u32>) {
     let state = read_state(fx);
     assert_eq!(state["root"], json!(fx.config.paths.root));
     assert_eq!(state["user_version"], STORE_SCHEMA);
+    assert_eq!(state["daemon_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(state["migrated_from"], json!(migrated_from));
     assert!(state.get("migrating_to").is_none());
     serde_rfc3339::parse(state["at"].as_str().unwrap()).unwrap();

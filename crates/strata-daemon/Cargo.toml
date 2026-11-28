@@ -1,6 +1,6 @@
 [package]
 name = "strata-daemon"
-version = "0.3.2"
+version = "0.3.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,10 +11,15 @@ description = "git-stratad: the per-user git-strata daemon (json-lines RPC over 
 name = "git-stratad"
 path = "src/main.rs"
 
+[[bin]]
+name = "git-stratad-test"
+path = "src/test_main.rs"
+required-features = ["test-seams"]
+
 [features]
 default = []
 # Test seams of every lower layer the daemon tests drive. A binary built
-# with these refuses to start (strata_confirm::TEST_SEAMS).
+# with these refuses production startup. Only git-stratad-test serves fixtures.
 test-seams = ["strata-confirm/test-seams", "strata-gitio/test-seams", "strata-store/test-seams", "strata-apfs/test-seams", "strata-session/test-seams", "strata-deps/test-seams", "strata-publish/test-seams", "strata-overlay/test-seams", "strata-search/test-seams"]
 
 [dependencies]

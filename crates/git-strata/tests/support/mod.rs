@@ -18,7 +18,10 @@ pub struct Home {
 
 impl Home {
     pub fn new() -> Home {
-        let dir = tempfile::Builder::new().prefix("gh-").tempdir_in("/tmp").expect("home");
+        let dir = tempfile::Builder::new()
+            .prefix(strata_daemon::fixture::PREFIX)
+            .tempdir_in("/tmp")
+            .expect("home");
         fs::write(
             dir.path().join(".gitconfig"),
             "[user]\n\tname = Strata Test\n\temail = test@example.com\n[init]\n\tdefaultBranch = main\n",
@@ -51,7 +54,10 @@ impl Home {
         for (k, _) in std::env::vars_os() {
             let up = k.to_string_lossy().to_ascii_uppercase();
             // Agent markers too: `new` would record the agent running the tests.
-            if ["GIT_", "STRATA", "CLAUDE", "CODEX", "CURSOR"].iter().any(|p| up.starts_with(p)) {
+            if ["GIT_", "STRATA", "CLAUDE", "CODEX", "CURSOR"]
+                .iter()
+                .any(|p| up.starts_with(p))
+            {
                 c.env_remove(&k);
             }
         }
@@ -66,7 +72,7 @@ impl Home {
     }
 
     pub fn run(&self, args: &[&str]) -> Run {
-        Run::from(self.cmd(args).output().expect("spawn git-strata"))
+        Run::from(self.cmd(args).output().expect("spawn git-strata")).with_args(args)
     }
 }
 
@@ -77,8 +83,11 @@ impl Default for Home {
 }
 
 /// One finished run: exit code, stdout, stderr, the envelope (serde view).
+/// `args` names the command in assertion messages (CR r2 #9); it is empty
+/// for runs built straight from an `Output`.
 #[derive(Debug)]
 pub struct Run {
+    pub args: Vec<String>,
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
@@ -87,6 +96,7 @@ pub struct Run {
 impl From<Output> for Run {
     fn from(o: Output) -> Run {
         Run {
+            args: Vec::new(),
             code: o.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
@@ -95,13 +105,28 @@ impl From<Output> for Run {
 }
 
 impl Run {
-    /// The envelope, checked to be one compact line ending in `\n`.
-    pub fn env(&self) -> serde_json::Value {
-        assert!(self.stdout.ends_with('\n'), "no trailing newline: {self:?}");
-        assert_eq!(self.stdout.matches('\n').count(), 1, "not one line: {self:?}");
-        serde_json::from_str(self.stdout.trim_end_matches('\n')).unwrap_or_else(|e| panic!("not JSON ({e}): {self:?}"))
+    /// Record the cli arguments so a failed assertion names the command.
+    pub fn with_args(mut self, args: &[&str]) -> Run {
+        self.args = args.iter().map(|a| a.to_string()).collect();
+        self
     }
 
+    /// The envelope, checked to be one compact line ending in `\n`.
+    /// The helpers below are `#[track_caller]`, so a failure points at the
+    /// test line that ran the command, not at this file.
+    #[track_caller]
+    pub fn env(&self) -> serde_json::Value {
+        assert!(self.stdout.ends_with('\n'), "no trailing newline: {self:?}");
+        assert_eq!(
+            self.stdout.matches('\n').count(),
+            1,
+            "not one line: {self:?}"
+        );
+        serde_json::from_str(self.stdout.trim_end_matches('\n'))
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {self:?}"))
+    }
+
+    #[track_caller]
     pub fn ok(&self) -> serde_json::Value {
         let v = self.env();
         assert_eq!(v["ok"], true, "expected success: {self:?}");
@@ -109,6 +134,7 @@ impl Run {
         v["data"].clone()
     }
 
+    #[track_caller]
     pub fn err_code(&self) -> String {
         let v = self.env();
         assert_eq!(v["ok"], false, "expected failure: {self:?}");
@@ -116,14 +142,21 @@ impl Run {
         v["error"]["code"].as_str().unwrap_or_default().to_string()
     }
 
+    #[track_caller]
     pub fn reason(&self) -> String {
-        self.env()["error"]["detail"]["reason"].as_str().unwrap_or_default().to_string()
+        self.env()["error"]["detail"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
     }
 }
 
 /// Every name of types' `Code`, read from the enum.
 pub fn code_names() -> Vec<String> {
-    strata_types::Code::ALL.iter().map(|c| c.as_str().to_string()).collect()
+    strata_types::Code::ALL
+        .iter()
+        .map(|c| c.as_str().to_string())
+        .collect()
 }
 
 /// One `[repo.<name>]` of a test config.
@@ -178,7 +211,11 @@ impl Home {
                     )
                 })
                 .collect();
-            fs::write(pins, serde_json::to_string_pretty(&serde_json::json!({ "repos": repos })).unwrap()).unwrap();
+            fs::write(
+                pins,
+                serde_json::to_string_pretty(&serde_json::json!({ "repos": repos })).unwrap(),
+            )
+            .unwrap();
         }
     }
 
@@ -190,7 +227,7 @@ impl Home {
         c.stdin(Stdio::from(slave));
         let out = c.output().expect("spawn git-strata");
         drop(master);
-        Run::from(out)
+        Run::from(out).with_args(args)
     }
 }
 
@@ -199,9 +236,22 @@ pub fn pty() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
     use std::os::fd::FromRawFd;
     let mut m: libc::c_int = -1;
     let mut s: libc::c_int = -1;
-    let rc = unsafe { libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+    let rc = unsafe {
+        libc::openpty(
+            &mut m,
+            &mut s,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
     assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
-    unsafe { (std::os::fd::OwnedFd::from_raw_fd(m), std::os::fd::OwnedFd::from_raw_fd(s)) }
+    unsafe {
+        (
+            std::os::fd::OwnedFd::from_raw_fd(m),
+            std::os::fd::OwnedFd::from_raw_fd(s),
+        )
+    }
 }
 
 /// `git` for building fixtures (the binary under test never runs git).
@@ -220,7 +270,11 @@ pub fn git(dir: &Path, home: &Path, args: &[&str]) -> String {
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .expect("git");
-    assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
 
@@ -235,7 +289,10 @@ pub struct FakeDaemon {
 }
 
 impl FakeDaemon {
-    pub fn start(socket: &Path, reply: fn(&serde_json::Value) -> serde_json::Value) -> FakeDaemon {
+    pub fn start(
+        socket: &Path,
+        reply: impl Fn(&serde_json::Value) -> serde_json::Value + Send + 'static,
+    ) -> FakeDaemon {
         use std::io::{BufRead, BufReader, Write};
         use std::sync::atomic::Ordering;
         let l = std::os::unix::net::UnixListener::bind(socket).expect("bind fake socket");
@@ -249,15 +306,48 @@ impl FakeDaemon {
                 match l.accept() {
                     Ok((s, _)) => {
                         cn.fetch_add(1, Ordering::SeqCst);
-                        s.set_nonblocking(false).unwrap();
-                        s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-                        let mut w = s.try_clone().unwrap();
+                        // macOS answers EINVAL here when the client already
+                        // closed (a probe that gave up); there is nothing to serve.
+                        let Ok(mut w) = s
+                            .set_nonblocking(false)
+                            .and_then(|()| {
+                                s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                            })
+                            .and_then(|()| s.try_clone())
+                        else {
+                            continue;
+                        };
                         let mut r = BufReader::new(s);
                         let mut line = String::new();
                         while r.read_line(&mut line).map(|n| n > 0).unwrap_or(false) {
-                            let v: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap_or(serde_json::Value::Null);
+                            let v: serde_json::Value = serde_json::from_str(line.trim_end())
+                                .unwrap_or(serde_json::Value::Null);
                             rq.lock().unwrap().push(v.clone());
-                            let answer = reply(&v);
+                            let mut answer = reply(&v);
+                            // The cli refuses a daemon below MIN_DAEMON, and every
+                            // supported daemon reports its version (CR r2 #6). A
+                            // fake that omits it answers as the current release;
+                            // an explicit `"version": null` drops the key, the
+                            // v0.2.0 shape.
+                            if v["method"] == "daemon_status"
+                                && answer["ok"] == true
+                                && let Some(data) = answer
+                                    .get_mut("data")
+                                    .and_then(serde_json::Value::as_object_mut)
+                            {
+                                match data.get("version") {
+                                    None => {
+                                        data.insert(
+                                            "version".into(),
+                                            env!("CARGO_PKG_VERSION").into(),
+                                        );
+                                    }
+                                    Some(serde_json::Value::Null) => {
+                                        data.remove("version");
+                                    }
+                                    Some(_) => {}
+                                }
+                            }
                             if answer.is_null() {
                                 break; // `null`: close without a reply
                             }
@@ -271,11 +361,24 @@ impl FakeDaemon {
                 }
             }
         });
-        FakeDaemon { requests, connections, stop, thread: Some(thread) }
+        FakeDaemon {
+            requests,
+            connections,
+            stop,
+            thread: Some(thread),
+        }
     }
 
     pub fn requests(&self) -> Vec<serde_json::Value> {
         self.requests.lock().unwrap().clone()
+    }
+
+    /// Application requests, excluding only the read-only capability probe.
+    pub fn operations(&self) -> Vec<serde_json::Value> {
+        self.requests()
+            .into_iter()
+            .filter(|q| q["method"] != "daemon_status")
+            .collect()
     }
 
     pub fn connections(&self) -> usize {

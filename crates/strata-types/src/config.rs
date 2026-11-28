@@ -41,7 +41,9 @@ pub struct PublishDefaults {
 /// absent table, and a derived impl would read `false`.
 impl Default for PublishDefaults {
     fn default() -> Self {
-        Self { auto_close: Self::default_auto_close() }
+        Self {
+            auto_close: Self::default_auto_close(),
+        }
     }
 }
 
@@ -67,7 +69,9 @@ pub struct StatusConfig {
 
 impl Default for StatusConfig {
     fn default() -> Self {
-        Self { parallel: Self::default_parallel() }
+        Self {
+            parallel: Self::default_parallel(),
+        }
     }
 }
 
@@ -97,7 +101,10 @@ pub struct DevPorts {
 
 impl Default for DevPorts {
     fn default() -> Self {
-        Self { range: Self::default_range(), exclude: Vec::new() }
+        Self {
+            range: Self::default_range(),
+            exclude: Vec::new(),
+        }
     }
 }
 
@@ -107,7 +114,14 @@ impl Default for DevPorts {
 /// (bridge 9300–9400, git-strata 9300; WS/MCP 9555–9656, which holds the
 /// GIT STRATA app's 9555/9556 and the Hub's pinned WS 9640–9649 / MCP
 /// 9650–9654).
-const DEV_PORTS_FORBIDDEN: &[(u16, u16)] = &[(3000, 3999), (4001, 4001), (5173, 5173), (8080, 8080), (9300, 9400), (9555, 9656)];
+const DEV_PORTS_FORBIDDEN: &[(u16, u16)] = &[
+    (3000, 3999),
+    (4001, 4001),
+    (5173, 5173),
+    (8080, 8080),
+    (9300, 9400),
+    (9555, 9656),
+];
 
 impl DevPorts {
     /// Ports per lease: web, connector, connector_mcp, aux.
@@ -124,15 +138,39 @@ impl DevPorts {
     /// `(lo, hi)` of `range`, inclusive; the P1/P2 rules.
     pub fn bounds(&self) -> Result<(u16, u16), StrataError> {
         let field = "dev_ports.range";
-        let parsed = self.range.split_once('-').and_then(|(a, b)| Some((a.trim().parse::<u16>().ok()?, b.trim().parse::<u16>().ok()?)));
+        let parsed = self.range.split_once('-').and_then(|(a, b)| {
+            Some((a.trim().parse::<u16>().ok()?, b.trim().parse::<u16>().ok()?))
+        });
         let Some((lo, hi)) = parsed.filter(|(lo, hi)| lo <= hi) else {
-            return Err(Self::bad(field, "P1", format!("dev_ports.range {:?} is not \"LO-HI\" with LO <= HI", self.range)));
+            return Err(Self::bad(
+                field,
+                "P1",
+                format!(
+                    "dev_ports.range {:?} is not \"LO-HI\" with LO <= HI",
+                    self.range
+                ),
+            ));
         };
         if lo < 1024 || hi > 49151 {
-            return Err(Self::bad(field, "P2", format!("dev_ports.range {lo}-{hi} must lie within 1024-49151 (below macOS's ephemeral ports)")));
+            return Err(Self::bad(
+                field,
+                "P2",
+                format!(
+                    "dev_ports.range {lo}-{hi} must lie within 1024-49151 (below macOS's ephemeral ports)"
+                ),
+            ));
         }
-        if let Some((a, b)) = DEV_PORTS_FORBIDDEN.iter().find(|(a, b)| lo <= *b && *a <= hi) {
-            return Err(Self::bad(field, "P2", format!("dev_ports.range {lo}-{hi} overlaps {a}-{b}, a default dev-server or connector port range")));
+        if let Some((a, b)) = DEV_PORTS_FORBIDDEN
+            .iter()
+            .find(|(a, b)| lo <= *b && *a <= hi)
+        {
+            return Err(Self::bad(
+                field,
+                "P2",
+                format!(
+                    "dev_ports.range {lo}-{hi} overlaps {a}-{b}, a default dev-server or connector port range"
+                ),
+            ));
         }
         Ok((lo, hi))
     }
@@ -145,7 +183,11 @@ impl DevPorts {
         let mut b = u32::from(first);
         while b + u32::from(Self::BLOCK) - 1 <= u32::from(hi) {
             let base = b as u16;
-            if !self.exclude.iter().any(|p| (base..base + Self::BLOCK).contains(p)) {
+            if !self
+                .exclude
+                .iter()
+                .any(|p| (base..base + Self::BLOCK).contains(p))
+            {
                 v.push(base);
             }
             b += u32::from(Self::BLOCK);
@@ -157,10 +199,24 @@ impl DevPorts {
     /// at least one block; exclusions must be ports (not 0).
     pub fn validate(&self) -> Result<(), StrataError> {
         if let Some(i) = self.exclude.iter().position(|p| *p == 0) {
-            return Err(violation(Code::InvalidInput, None, "dev_ports.exclude", Some(i), "P1", "dev_ports.exclude has port 0"));
+            return Err(violation(
+                Code::InvalidInput,
+                None,
+                "dev_ports.exclude",
+                Some(i),
+                "P1",
+                "dev_ports.exclude has port 0",
+            ));
         }
         if self.blocks()?.is_empty() {
-            return Err(Self::bad("dev_ports.range", "P3", format!("dev_ports.range {:?} with its exclusions leaves no block of 4 ports", self.range)));
+            return Err(Self::bad(
+                "dev_ports.range",
+                "P3",
+                format!(
+                    "dev_ports.range {:?} with its exclusions leaves no block of 4 ports",
+                    self.range
+                ),
+            ));
         }
         Ok(())
     }
@@ -223,7 +279,9 @@ pub enum SyncDeps {
 }
 
 impl SyncDeps {
-    fn is_default(&self) -> bool { *self == Self::Apply }
+    fn is_default(&self) -> bool {
+        *self == Self::Apply
+    }
 }
 
 /// `[repo.X.sync]`. Resolve `follow_main` through [`RepoConfig::follow_main`]
@@ -235,20 +293,33 @@ pub struct SyncConfig {
     pub follow_main: Option<bool>,
     #[serde(default, skip_serializing_if = "SyncDeps::is_default")]
     pub deps: SyncDeps,
-    #[serde(default = "SyncConfig::default_fetch_secs", skip_serializing_if = "SyncConfig::is_default_fetch_secs")]
+    #[serde(
+        default = "SyncConfig::default_fetch_secs",
+        skip_serializing_if = "SyncConfig::is_default_fetch_secs"
+    )]
     pub fetch_secs: u64,
 }
 
 impl Default for SyncConfig {
     fn default() -> Self {
-        Self { follow_main: None, deps: SyncDeps::Apply, fetch_secs: Self::default_fetch_secs() }
+        Self {
+            follow_main: None,
+            deps: SyncDeps::Apply,
+            fetch_secs: Self::default_fetch_secs(),
+        }
     }
 }
 
 impl SyncConfig {
-    pub fn default_fetch_secs() -> u64 { 900 }
-    fn is_default_fetch_secs(value: &u64) -> bool { *value == Self::default_fetch_secs() }
-    pub fn is_default(&self) -> bool { *self == Self::default() }
+    pub fn default_fetch_secs() -> u64 {
+        900
+    }
+    fn is_default_fetch_secs(value: &u64) -> bool {
+        *value == Self::default_fetch_secs()
+    }
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// `[repo.X.rm]`.
@@ -299,7 +370,11 @@ pub struct RebaseConfig {
 
 impl Default for RebaseConfig {
     fn default() -> Self {
-        RebaseConfig { deps_changed: DepsChanged::default(), quiet_secs: Self::default_quiet_secs(), quiet_skip: Vec::new() }
+        RebaseConfig {
+            deps_changed: DepsChanged::default(),
+            quiet_secs: Self::default_quiet_secs(),
+            quiet_skip: Vec::new(),
+        }
     }
 }
 
@@ -327,7 +402,9 @@ impl Paths {
     /// `$HOME/.strata`. It must share an APFS volume with every repo, so set
     /// `[paths] root` when the repos live elsewhere (docs/config.md).
     pub fn default_root() -> PathBuf {
-        let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).unwrap_or_else(|| "/".into());
+        let home = std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| "/".into());
         PathBuf::from(home).join(".strata")
     }
 
@@ -354,7 +431,9 @@ fn must_path(text: &str) -> RepoPath {
 
 impl RepoConfig {
     pub fn follow_main(&self) -> bool {
-        self.sync.follow_main.unwrap_or(self.publish.branch == self.default_branch)
+        self.sync
+            .follow_main
+            .unwrap_or(self.publish.branch == self.default_branch)
     }
     pub fn default_deps_dirs() -> Vec<RepoPath> {
         vec![must_path("node_modules"), must_path("vendor")]
@@ -432,9 +511,27 @@ impl RepoConfig {
 
 impl Config {
     pub fn parse(text: &str) -> Result<Self, StrataError> {
+        Self::parse_with_home(text, None)
+    }
+
+    /// Resolve an omitted paths.root against an in-process worker's HOME.
+    #[cfg(feature = "test-seams")]
+    pub fn parse_for_fixture(text: &str, home: &Path) -> Result<Self, StrataError> {
+        Self::parse_with_home(text, Some(home))
+    }
+
+    fn parse_with_home(text: &str, home: Option<&Path>) -> Result<Self, StrataError> {
         let value: toml::Value = toml::from_str(text).map_err(toml_error)?;
         let order = repo_order(&value)?;
-        let config: Config = toml::from_str(text).map_err(toml_error)?;
+        let mut config: Config = toml::from_str(text).map_err(toml_error)?;
+        if let Some(home) = home
+            && value
+                .get("paths")
+                .and_then(|paths| paths.get("root"))
+                .is_none()
+        {
+            config.paths.root = home.join(".strata");
+        }
         config.validate_ordered(&order)?;
         Ok(config)
     }
@@ -734,7 +831,14 @@ fn validate_check_siblings(
         } else {
             continue;
         };
-        return Err(violation(Code::InvalidInput, Some(repo), "check_siblings", Some(i), "V12", message));
+        return Err(violation(
+            Code::InvalidInput,
+            Some(repo),
+            "check_siblings",
+            Some(i),
+            "V12",
+            message,
+        ));
     }
     Ok(())
 }
@@ -746,7 +850,14 @@ fn validate_rm_rebase(name: &RepoName, cfg: &RepoConfig) -> Result<(), StrataErr
     let repo = name.as_str();
     for (i, pat) in cfg.rm.regenerable.iter().enumerate() {
         if let Some(message) = regenerable_problem(pat) {
-            return Err(violation(Code::InvalidInput, Some(repo), "rm.regenerable", Some(i), "V14", message));
+            return Err(violation(
+                Code::InvalidInput,
+                Some(repo),
+                "rm.regenerable",
+                Some(i),
+                "V14",
+                message,
+            ));
         }
     }
     for (i, pat) in cfg.rebase.quiet_skip.iter().enumerate() {
@@ -775,12 +886,30 @@ fn validate_rm_rebase(name: &RepoName, cfg: &RepoConfig) -> Result<(), StrataErr
     let problem = if cfg.sync.fetch_secs != 0 && !(60..=86_400).contains(&cfg.sync.fetch_secs) {
         Some(("sync.fetch_secs", "sync.fetch_secs must be 0 or 60..=86400"))
     } else if cfg.sync.follow_main == Some(true) && cfg.publish.branch != cfg.default_branch {
-        Some(("sync.follow_main", "follow_main = true requires publish.branch = default_branch"))
-    } else if !cfg.follow_main() && cfg.sync.deps == SyncDeps::Apply && cfg.publish.branch == cfg.default_branch {
-        Some(("sync.deps", "sync.deps = apply requires follow_main = true on a non-split repo"))
-    } else { None };
+        Some((
+            "sync.follow_main",
+            "follow_main = true requires publish.branch = default_branch",
+        ))
+    } else if !cfg.follow_main()
+        && cfg.sync.deps == SyncDeps::Apply
+        && cfg.publish.branch == cfg.default_branch
+    {
+        Some((
+            "sync.deps",
+            "sync.deps = apply requires follow_main = true on a non-split repo",
+        ))
+    } else {
+        None
+    };
     if let Some((field, message)) = problem {
-        return Err(violation(Code::InvalidInput, Some(repo), field, None, "V16", message));
+        return Err(violation(
+            Code::InvalidInput,
+            Some(repo),
+            field,
+            None,
+            "V16",
+            message,
+        ));
     }
     Ok(())
 }
@@ -812,12 +941,20 @@ pub fn regenerable_problem(pat: &str) -> Option<&'static str> {
     // allowed (`generated/**`), but not a pattern of wildcards only.
     let could_be_git = |c: &str| {
         let c = c.to_lowercase();
-        c != "**" && (c == ".git" || git_glob(&c.chars().collect::<Vec<_>>(), &".git".chars().collect::<Vec<_>>()))
+        c != "**"
+            && (c == ".git"
+                || git_glob(
+                    &c.chars().collect::<Vec<_>>(),
+                    &".git".chars().collect::<Vec<_>>(),
+                ))
     };
     if comps.iter().any(|c| could_be_git(c)) {
         return Some("rm.regenerable patterns may not match .git or anything under it");
     }
-    if comps.iter().all(|c| c.chars().all(|ch| matches!(ch, '*' | '?'))) {
+    if comps
+        .iter()
+        .all(|c| c.chars().all(|ch| matches!(ch, '*' | '?')))
+    {
         return Some("rm.regenerable patterns must name something (not wildcards only)");
     }
     None
@@ -829,7 +966,9 @@ fn git_glob(p: &[char], t: &[char]) -> bool {
         None => t.is_empty(),
         Some(('*', rest)) => (0..=t.len()).any(|k| git_glob(rest, &t[k..])),
         Some(('?', rest)) => !t.is_empty() && git_glob(rest, &t[1..]),
-        Some(('\\', rest)) if !rest.is_empty() => t.first() == Some(&rest[0]) && git_glob(&rest[1..], &t[1..]),
+        Some(('\\', rest)) if !rest.is_empty() => {
+            t.first() == Some(&rest[0]) && git_glob(&rest[1..], &t[1..])
+        }
         Some((c, rest)) => t.first() == Some(c) && git_glob(rest, &t[1..]),
     }
 }

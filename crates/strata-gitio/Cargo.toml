@@ -1,6 +1,6 @@
 [package]
 name = "strata-gitio"
-version = "0.3.2"
+version = "0.3.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ description = "git plumbing for git-strata: sanitized git commands, index and ig
 
 [features]
 default = []
-test-seams = []
+test-seams = ["strata-types/test-seams"]
 
 [dependencies]
 strata-types = { path = "../strata-types" }

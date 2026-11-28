@@ -1352,3 +1352,10 @@ queries all ref namespaces. `tracked_paths` reads the workspace head's tree,
 independent of the main index. `base_only` excludes both B and main_tip.
 `commits_between_trailers` lets Git parse the final Strata-Publish trailer block;
 `changed_path_count` counts the final B/staged-tree diff without rename folding.
+
+
+## Fixture Git subprocesses
+
+The daemon builds its staged periodic fetch with the repository handle's
+sanitized command. In tests that handle supplies the fixture HOME, XDG config
+directory and file-only transport policy to Git and its upload-pack child.

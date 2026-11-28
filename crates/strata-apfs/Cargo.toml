@@ -1,6 +1,6 @@
 [package]
 name = "strata-apfs"
-version = "0.3.2"
+version = "0.3.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ description = "APFS primitives for git-strata: clonefile, rooted no-follow I/O, 
 
 [features]
 default = []
-test-seams = []
+test-seams = ["strata-types/test-seams"]
 
 [dependencies]
 strata-types = { path = "../strata-types" }

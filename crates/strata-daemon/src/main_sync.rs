@@ -140,8 +140,17 @@ fn deps_auto_pass_inner(
         if pending.is_empty() {
             return Ok(());
         }
+        // A pass that changes no job leaves T4 and settlement to T2. Taking
+        // the repo lock for them every pass would starve T2's no-wait move.
+        let mut changed = false;
         for p in pending {
             if deps::find_set(&core.store, repo, &p.to)?.is_some() {
+                if core.store.deps_auto(p.id)?.is_some_and(|a| {
+                    matches!(a.state, DepsAutoState::Ready | DepsAutoState::Applied)
+                }) {
+                    continue;
+                }
+                changed = true;
                 core.locks.with_repo(repo, || {
                     if deps::get_proposal(&core.store, p.id)?.state == ProposalState::Pending {
                         core.store.set_deps_auto(
@@ -196,6 +205,7 @@ fn deps_auto_pass_inner(
             if !admitted {
                 continue;
             }
+            changed = true;
             let outcome = (|| {
                 // Status-bar §11.2: shown while it runs; it holds no lock.
                 let _installing = core.begin_activity(
@@ -233,6 +243,9 @@ fn deps_auto_pass_inner(
                 }
                 Ok(())
             })?;
+        }
+        if !changed {
+            return Ok(());
         }
         // Sealing can recover a prior terminal row; T4 enrolls residue now.
         main_follow::reconcile_deps(ctx)?;

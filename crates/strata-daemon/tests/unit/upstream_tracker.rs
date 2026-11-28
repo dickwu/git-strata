@@ -6,9 +6,6 @@ use support::*;
 fn prepare(fx: &Dfx) -> Core {
     fx.seed_pins();
     let opts = crate::startup::Options {
-        config_dir: fx.config_dir.clone(),
-        config_file: fx.config_dir.join("config.toml"),
-        socket: fx.socket(),
         lock_wait: fx.lock_wait,
         install_path: fx.sb.install_path(),
         alert: Arc::new(|_| {}),
@@ -16,6 +13,9 @@ fn prepare(fx: &Dfx) -> Core {
         catch_up_every: fx.catch_up_every,
         config_poll_every: std::time::Duration::from_millis(50),
         background_main_sync: false,
+        ..crate::fixture::WorkerFixture::new(&fx.sb.root, &fx.sb.home, &fx.config_dir)
+            .unwrap()
+            .options()
     };
     let env: Vec<(String, Option<std::ffi::OsString>)> = fx
         .sb

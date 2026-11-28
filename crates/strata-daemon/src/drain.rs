@@ -1,7 +1,8 @@
 //! Admission fence and lease for a graceful daemon shutdown.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::Serialize;
@@ -9,7 +10,10 @@ use serde_json::{Value, json};
 use strata_types::{Code, RepoName, SessionId, StrataError, serde_rfc3339};
 
 use crate::Result;
-use crate::rpc::{DrainParams, DrainThen};
+use crate::rpc::{DrainParams, DrainThen, Params, Request};
+
+#[path = "dispatcher.rs"]
+mod dispatcher;
 
 const DEFAULT_TTL_S: u32 = 120;
 const MAX_TTL_S: u32 = 600;
@@ -33,6 +37,10 @@ struct Inflight {
     phase: Phase,
     #[serde(with = "serde_rfc3339")]
     started_at: SystemTime,
+    // A legacy lease permits its own controls, sync checks and dry-run GC.
+    // Handover still counts these methods from dispatch to return.
+    #[serde(skip)]
+    blocks_lease: bool,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -86,13 +94,19 @@ impl Lease {
 #[derive(Default)]
 struct State {
     lease: Option<Lease>,
+    parking: Option<dispatcher::Parking>,
+    connections: BTreeMap<u64, UnixStream>,
     inflight: BTreeMap<u64, Inflight>,
     next: u64,
     // A pass counts from admission through completion, including periods
     // between lock acquisitions or while a child process runs.
     background: usize,
     closing: bool,
+    terminal_upgrade: Option<StrataError>,
     shutdown: Option<ShutdownMode>,
+    // Generation-bound streams still refusing frames. Terminal stop waits for
+    // them before it closes read halves (CR r2 #3).
+    refusing: usize,
 }
 
 impl State {
@@ -103,14 +117,22 @@ impl State {
     }
 }
 
+#[derive(Default)]
+struct Inner {
+    state: Mutex<State>,
+    replay: Condvar,
+}
+
 /// Every admission and seal uses the same mutex. Guards never hold it
 /// while a request or scheduler runs.
 #[derive(Clone, Default)]
-pub(crate) struct Drain(Arc<Mutex<State>>);
+pub(crate) struct Drain {
+    inner: Arc<Inner>,
+}
 
 impl Drain {
     fn state(&self) -> MutexGuard<'_, State> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub(crate) fn admit(
@@ -119,12 +141,28 @@ impl Drain {
         session: Option<SessionId>,
         repo: Option<RepoName>,
     ) -> Result<Write> {
+        #[cfg(any(test, feature = "test-seams"))]
+        crate::rpc::admission_audit::check();
         let mut state = self.state();
         state.expire();
-        if state.lease.is_some() {
+        if let Some(parking) = state.parking.as_ref().filter(|p| p.holding()) {
+            return Err(parking.refusal());
+        }
+        self.admit_locked(&mut state, method, session, repo, true)
+    }
+
+    fn admit_locked(
+        &self,
+        state: &mut State,
+        method: &'static str,
+        session: Option<SessionId>,
+        repo: Option<RepoName>,
+        blocks_lease: bool,
+    ) -> Result<Write> {
+        if blocks_lease && state.lease.is_some() {
             return Err(draining());
         }
-        if state.closing {
+        if blocks_lease && state.closing {
             return Err(shutting_down());
         }
         let id = state.next;
@@ -137,18 +175,58 @@ impl Drain {
                 repo,
                 phase: Phase::Running,
                 started_at: SystemTime::now(),
+                blocks_lease,
             },
         );
         Ok(Write {
             drain: self.clone(),
             id,
+            blocks_lease,
         })
+    }
+
+    // The connection dispatcher calls this while still holding the mutex
+    // that decided whether to park. Direct handler callers have no stream
+    // to retain and receive the same pre-dispatch refusal as overflow.
+    fn admit_request_locked(&self, state: &mut State, req: &Request) -> Result<Option<Write>> {
+        if !req.method.may_admit() {
+            return Ok(None);
+        }
+        if let Some(error) = &state.terminal_upgrade {
+            return Err(error.clone());
+        }
+        if let Some(parking) = state.parking.as_ref().filter(|p| p.holding()) {
+            return Err(parking.refusal());
+        }
+        state.expire();
+        let blocks_lease = match &req.params {
+            Params::Drain(_) => false,
+            Params::Sync(p) => !p.check,
+            Params::Gc(p) => !p.dry_run,
+            Params::PublishPlan(_) => state.lease.is_none(),
+            _ => true,
+        };
+        self.admit_locked(
+            state,
+            req.method.name(),
+            crate::handlers::session_of(&req.params),
+            crate::handlers::repo_of(&req.params),
+            blocks_lease,
+        )
+        .map(Some)
+    }
+
+    pub(crate) fn admit_request(&self, req: &Request) -> Result<Option<Write>> {
+        self.admit_request_locked(&mut self.state(), req)
     }
 
     pub(crate) fn background(&self) -> Option<Background> {
         let mut state = self.state();
         state.expire();
-        if state.closing || state.lease.is_some() {
+        if state.closing
+            || state.lease.is_some()
+            || state.parking.as_ref().is_some_and(|p| p.holding())
+        {
             return None;
         }
         state.background += 1;
@@ -219,7 +297,10 @@ impl Drain {
                 if state.closing {
                     return Err(shutting_down());
                 }
-                if !state.inflight.is_empty() || state.background != 0 || background_locked() {
+                if state.inflight.values().any(|row| row.blocks_lease)
+                    || state.background != 0
+                    || background_locked()
+                {
                     return Err(refusal(
                         Code::Busy,
                         "not_idle",
@@ -236,23 +317,28 @@ impl Drain {
         }
     }
 
-    pub(crate) fn status(&self) -> (Value, Value) {
-        let (draining, inflight) = {
-            let mut state = self.state();
-            state.expire();
-            (
-                state.lease.as_ref().map_or(Value::Null, Lease::status),
-                state.inflight.values().cloned().collect::<Vec<_>>(),
-            )
-        };
-        (draining, json!(inflight))
+    pub(crate) fn status(&self) -> (Value, Value, Value) {
+        let mut state = self.state();
+        state.expire();
+        let inflight: Vec<_> = state
+            .inflight
+            .values()
+            .filter(|row| row.blocks_lease)
+            .collect();
+        let handover = state.parking.as_ref().map(|p| p.status(&state));
+        (
+            state.lease.as_ref().map_or(Value::Null, Lease::status),
+            json!(inflight),
+            json!(handover),
+        )
     }
 
     /// The accept loop calls this before shutting down the operation queues.
     /// Once it chooses a mode, a late request cannot change it.
     pub(crate) fn finish_serving(&self, poisoned: bool) -> Option<ShutdownMode> {
-        let mut state = self.state();
-        state.closing = true;
+        // A stop during H2 first gives O's parked frames their disposition.
+        // Once this returns with the mutex held all streams are registered.
+        let mut state = self.stop_parking(poisoned);
         state.shutdown = match state.lease.as_ref().and_then(|l| l.then) {
             Some(DrainThen::Stop) => Some(ShutdownMode::Stop),
             Some(DrainThen::Restart) => Some(ShutdownMode::Restart),
@@ -266,14 +352,31 @@ impl Drain {
     pub(crate) fn shutdown_mode(&self) -> Option<ShutdownMode> {
         self.state().shutdown
     }
+
+    /// Whether serving ended during H2. Its stop already waited for admitted
+    /// work and terminal refusals, like a sealed lease.
+    pub(crate) fn stopped_handover(&self) -> bool {
+        self.state().terminal_upgrade.is_some()
+    }
 }
 
 pub(crate) struct Write {
     drain: Drain,
     id: u64,
+    blocks_lease: bool,
 }
 
 impl Write {
+    /// A preview admitted during a cold lease can still use cached refs.
+    /// Its permission is fixed at dispatch for the whole preview.
+    pub(crate) fn check_ref_refresh(&self) -> Result<()> {
+        if self.blocks_lease {
+            Ok(())
+        } else {
+            Err(draining())
+        }
+    }
+
     pub(crate) fn set_phase(&self, phase: Phase) -> Option<Phase> {
         self.drain
             .state()
@@ -297,7 +400,11 @@ impl Write {
 
 impl Drop for Write {
     fn drop(&mut self) {
-        self.drain.state().inflight.remove(&self.id);
+        let mut state = self.drain.state();
+        state.inflight.remove(&self.id);
+        if state.terminal_upgrade.is_some() && state.inflight.is_empty() {
+            self.drain.inner.replay.notify_all();
+        }
     }
 }
 
@@ -305,7 +412,11 @@ pub(crate) struct Background(Drain);
 
 impl Drop for Background {
     fn drop(&mut self) {
-        self.0.state().background -= 1;
+        let mut state = self.0.state();
+        state.background -= 1;
+        if state.terminal_upgrade.is_some() && state.background == 0 {
+            self.0.inner.replay.notify_all();
+        }
     }
 }
 

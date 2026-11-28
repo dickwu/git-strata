@@ -29,6 +29,10 @@ All three keys are always present; `data` is never null. Branch on
 | `Busy` (`workspace_changed`) | A file changed while reading it; retry. |
 | `Busy` (`publish_unknown`) | An earlier publish of this repo is `Unknown`. It clears by itself once origin has that commit (checked on each publish). Do not loop: tell the human; they may run `git-strata push <REPO>` first. |
 | `Busy` / `Unknown` with `detail.sibling` | Preparing that sibling repo (fetch, anchor) was busy or unknown. `Busy`: retry later. `Unknown`: stop and tell the human. |
+| `Busy upgrading` with `detail.retry_safe: true` | The CLI already retried the refused RPC until its timeout. Run the same command again. `handover_id` and `phase` identify the upgrade. `retry_after_ms` is the daemon's hint. For a persistent control stream with `generation_changed: true`, reconnect and check the worker identity. Shipped 0.3.x checkpoint hooks return the refusal immediately. |
+| `Busy starting` / `Busy store_unavailable` | Startup has not finished. Pass `--wait` to wait within the retry budget. A down socket still returns immediately. |
+| `Unsupported cli_too_old` | Use the updated CLI on PATH. `detail.required_version` identifies the recorded release when available. A shipped 0.3.x CLI reports `Corrupt user_version` when the store is newer. |
+| `InvalidInput client_too_old` | The daemon refused the announced CLI version before dispatch. Update to at least `detail.min_client`. |
 | `Busy client_timeout` | Read deadline or final request newline unsent; nothing changed by this request. Back off before retrying. `phase` is connect/send/reply. |
 | `Unknown client_timeout` | The complete write may still run. Inspect status; do not retry, gc, or rm. Timeout did not cancel it. |
 | `NoSuchSession stale_cwd` | Cwd is in a staging/old tree; cd to `detail.workspace`. |

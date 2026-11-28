@@ -46,6 +46,11 @@ fn desktop_drain_client_round_trips_against_the_daemon_handler() {
             .unwrap()
         };
         let before = status();
+        strata_client::require_feature(&before, "daemon.handover").unwrap();
+        assert_eq!(
+            live.run(&["daemon", "status"]).ok().get("handover"),
+            Some(&Value::Null)
+        );
         strata_client::require_feature(&before, "daemon.drain").unwrap();
         let id = strata_client::drain_acquire(&socket, budget, |status| {
             status["pid"] == before["pid"] && status["started"] == before["started"]
@@ -95,6 +100,7 @@ fn added() -> Vec<(&'static str, &'static str, Value)> {
         ("daemon_status", "activity", json!([])),
         ("daemon_status", "draining", Value::Null),
         ("daemon_status", "inflight", json!([])),
+        ("daemon_status", "handover", Value::Null),
         (
             "daemon_status",
             "store_schema",

@@ -118,11 +118,11 @@ fn ls_and_status_brief_daemon_local_and_old_daemon() {
         let br = lv.run_in(&ws, &["status", "--brief"]).ok();
         assert_eq!(br["source"], "local", "{br:#}");
         assert!(
-            d.requests()
+            d.operations()
                 .iter()
                 .all(|r| r["params"]["summary"] == json!(true)),
             "{:?}",
-            d.requests()
+            d.operations()
         );
         drop(d);
         let _ = std::fs::remove_file(lv.home.socket());

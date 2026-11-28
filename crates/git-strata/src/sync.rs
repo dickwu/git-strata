@@ -12,7 +12,7 @@ use crate::Result;
 use crate::args::SyncArgs;
 use crate::ctx::Ctx;
 use crate::envelope::Envelope;
-use crate::rpc::{self, Kind};
+use crate::rpc::Kind;
 
 pub const HOOK_BUDGET: Duration = Duration::from_secs(5);
 
@@ -52,7 +52,7 @@ pub fn old_daemon(mut e: StrataError) -> StrataError {
         && e.detail.as_ref().and_then(|d| d["reason"].as_str()) == Some("unknown_method")
     {
         e.code = Code::Unsupported;
-        e.message = "this daemon does not support sync; ask the human to upgrade the CLI and daemon together".into();
+        e.message = "this daemon does not support sync; ask the human to update the daemon".into();
         e.detail = Some(json!({ "reason": "daemon_too_old", "method": "sync" }));
     }
     e
@@ -66,18 +66,29 @@ pub fn run(ctx: &Ctx, args: &SyncArgs) -> Result<Envelope> {
     if !args.check {
         crate::cwd_guard::add(&mut request, &args.cwd);
     }
-    let deadline = crate::wait::deadline(&args.wait, 600)?;
-    let first = crate::wait::call_until(ctx, "sync", request.clone(), kind, &args.wait, deadline)
-        .map_err(|e| old_daemon(e.into_error()));
-    let data = match first {
-        Err(e) if !args.check && crate::cwd_guard::rejected(&e) => {
-            crate::cwd_guard::local_sync(ctx, &request, &args.cwd, &cwd)?;
-            crate::cwd_guard::strip(&mut request);
-            crate::wait::call_until(ctx, "sync", request, kind, &args.wait, deadline)
-                .map_err(|e| old_daemon(e.into_error()))?
-        }
-        other => other?,
-    };
+    let deadline = crate::wait::deadline(&ctx.wait, 600)?;
+    let data = crate::wait::with_progress(
+        ctx,
+        "sync",
+        args.session.clone(),
+        &ctx.wait,
+        &deadline,
+        || {
+            let mut op = ctx.begin_call("sync", kind, Some(&deadline))?;
+            match op.send(&request) {
+                Err(crate::rpc::CallError::Failed(e))
+                    if !args.check && crate::cwd_guard::rejected(&e) =>
+                {
+                    crate::cwd_guard::local_sync(ctx, &request, &args.cwd, &cwd)
+                        .map_err(crate::rpc::CallError::Failed)?;
+                    crate::cwd_guard::strip(&mut request);
+                    op.send(&request)
+                }
+                other => other,
+            }
+        },
+    )
+    .map_err(|e| old_daemon(e.into_error()))?;
     Ok(Envelope::ok(data))
 }
 
@@ -99,7 +110,11 @@ pub(crate) fn hook(args: &SyncArgs, started: Instant) -> i32 {
         if input.stop_hook_active {
             return None;
         }
-        let ctx = Ctx::from_env().ok()?;
+        let ctx = Ctx::with_wait(crate::args::WaitArgs {
+            timeout: Some(HOOK_BUDGET.as_secs_f64()),
+            ..Default::default()
+        })
+        .ok()?;
         let budget = HOOK_BUDGET
             .checked_sub(started.elapsed())
             .filter(|b| !b.is_zero())?;
@@ -108,16 +123,26 @@ pub(crate) fn hook(args: &SyncArgs, started: Instant) -> i32 {
         // caller's --session flag; checks never perform a fetch.
         request["session"] = Value::Null;
         request["fetch"] = json!(false);
-        let data = rpc::call_within(&ctx.paths.socket, "sync", request, Kind::Read, budget).ok()?;
+        let data = ctx.call_within("sync", request, Kind::Read, budget).ok()?;
         let upstream: Upstream = serde_json::from_value(data.get("upstream")?.clone()).ok()?;
         if started.elapsed() >= HOOK_BUDGET {
             return None;
         }
-        for warning in data["base_warnings"].as_array().into_iter().flatten().filter_map(Value::as_str) { eprintln!("note: {warning}"); }
+        for warning in data["base_warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            eprintln!("note: {warning}");
+        }
         // An older daemon's reply has no `mark`, and gets the old words.
         let done = data["mark"]["state"].as_str() == Some("done");
         block_reason(&upstream, done).map(|reason| {
-            let reason = reason.replace("<session-id>", data["session"].as_str().unwrap_or("<session-id>"));
+            let reason = reason.replace(
+                "<session-id>",
+                data["session"].as_str().unwrap_or("<session-id>"),
+            );
             json!({ "decision": "block", "reason": reason })
         })
     };
@@ -147,7 +172,11 @@ pub fn block_reason(upstream: &Upstream, done: bool) -> Option<String> {
                     u.fix
                         .as_deref()
                         .unwrap_or("cd ~ && git-strata sync --session <session-id>"),
-                    if done { "" } else { " and cd back into the workspace" }
+                    if done {
+                        ""
+                    } else {
+                        " and cd back into the workspace"
+                    }
                 )
             } else {
                 "ask the user to release the named holders or pause writes, then review the dependency/rebase plan for this non-following repo".into()
@@ -193,7 +222,9 @@ pub fn block_reason(upstream: &Upstream, done: bool) -> Option<String> {
         } else {
             ", cd back to the workspace, resolve any conflicts it returns (merge upstream's change, then `cd ~ && git-strata sync --session <session-id> --resolved PATH --target … --generation …`), cd back, re-run checks, then publish."
         };
-        reasons.push(format!("{prefix} `cd ~ && git-strata sync --session <session-id>`{then}"));
+        reasons.push(format!(
+            "{prefix} `cd ~ && git-strata sync --session <session-id>`{then}"
+        ));
     }
     (!reasons.is_empty()).then(|| reasons.join("\n"))
 }

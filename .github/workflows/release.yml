@@ -142,6 +142,12 @@ jobs:
           bash apps/desktop/scripts/check-release-no-connector.sh \
             apps/desktop/src-tauri/target/aarch64-apple-darwin/release/git-strata-desktop
 
+      - name: Reject test workers and test-seams builds
+        run: |
+          bash apps/desktop/scripts/tests/test-release-workers.sh
+          bash apps/desktop/scripts/check-release-workers.sh "target/$TARGET/release" \
+            "apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/GIT STRATA.app"
+
       - name: Import the Developer ID identity
         if: steps.kind.outputs.kind == 'developer-id'
         run: apps/desktop/pack/import-identity.sh
@@ -237,6 +243,7 @@ jobs:
           tmp="$(mktemp -d)"
           tar -C "$tmp" -xzf "dist/git-strata-$VERSION-$TARGET.tar.gz"
           d="$tmp/git-strata-$VERSION-$TARGET"
+          bash apps/desktop/scripts/check-release-workers.sh "$d/bin" "pack-out/GIT STRATA.app"
           "$d/bin/git-strata" --version
           "$d/bin/git-stratad" --version
           "$d/bin/git-stratad" --print-plist /opt/homebrew/opt/git-strata/bin/git-stratad | plutil -lint -

@@ -1,6 +1,6 @@
 //! The json-lines envelope (daemon.md §4, D7).
 //!
-//! One request per line: `{"id", "method", "params"}`; one reply per line:
+//! One request per line: `id`, `method`, `params` and an optional `client`; one reply per line:
 //! `{"id", "ok": true, "data"}` or `{"id", "ok": false, "error"}`. `id` is a
 //! string or a number and is echoed back unchanged. There is no handshake,
 //! no token, no scope and no binary framing: the channel is a same-user unix
@@ -79,9 +79,26 @@ methods! {
     Drain = "drain", ro = false;
 }
 
+// Methods classified as reads on the wire that can enter write admission.
+// Preview may refresh refs, cross-base diff stores blobs, and search publishes indexes.
+const MAY_ADMIT: &[Method] = &[
+    Method::PublishPlan,
+    Method::Diff,
+    Method::Grep,
+    Method::Files,
+];
+
+impl Method {
+    pub(crate) fn may_admit(self) -> bool {
+        !self.is_read_only() || MAY_ADMIT.contains(&self)
+    }
+}
+
 /// A field that must be present but may be `null` (a missing one is
 /// `Failed`, like any other missing field).
-fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
     Option::<T>::deserialize(d)
 }
 
@@ -474,7 +491,9 @@ pub enum Params {
 }
 
 fn typed<T: DeserializeOwned>(v: Value, wrap: fn(T) -> Params) -> Result<Params, String> {
-    serde_json::from_value::<T>(v).map(wrap).map_err(|e| e.to_string())
+    serde_json::from_value::<T>(v)
+        .map(wrap)
+        .map_err(|e| e.to_string())
 }
 
 impl Params {
@@ -538,6 +557,67 @@ pub struct Request {
     pub params: Params,
 }
 
+impl Request {
+    pub(crate) fn serve<T>(self, handler: impl FnOnce(Self) -> T) -> T {
+        #[cfg(any(test, feature = "test-seams"))]
+        let _audit = admission_audit::Serving::enter(self.method);
+        handler(self)
+    }
+}
+
+#[cfg(any(test, feature = "test-seams"))]
+pub(crate) mod admission_audit {
+    use super::Method;
+    use std::cell::Cell;
+
+    thread_local! {
+        static METHOD: Cell<Option<Method>> = const { Cell::new(None) };
+        static VIOLATION: Cell<Option<Method>> = const { Cell::new(None) };
+    }
+
+    pub(super) struct Serving(Option<Method>);
+
+    impl Serving {
+        pub(super) fn enter(method: Method) -> Self {
+            Self(METHOD.with(|m| m.replace(Some(method))))
+        }
+    }
+
+    impl Drop for Serving {
+        fn drop(&mut self) {
+            METHOD.set(self.0);
+            // Best-effort handlers can catch panics internally. Carry the
+            // violation past every handler catch, up to the outermost request.
+            if self.0.is_none()
+                && let Some(method) = VIOLATION.take()
+                && !std::thread::panicking()
+            {
+                panic!(
+                    "{} entered write admission outside the parked set",
+                    method.name()
+                );
+            }
+        }
+    }
+
+    pub(crate) fn check() {
+        let method = METHOD.get().or_else(|| {
+            crate::locks::request_method()
+                .as_deref()
+                .and_then(Method::from_name)
+        });
+        if let Some(method) = method.filter(|m| !m.may_admit()) {
+            if METHOD.get().is_some() {
+                VIOLATION.set(Some(method));
+            }
+            panic!(
+                "{} entered write admission outside the parked set",
+                method.name()
+            );
+        }
+    }
+}
+
 /// One reply line.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reply(pub Value);
@@ -552,7 +632,10 @@ impl Reply {
     /// `{id, ok: false, error: {code, message, detail?}}`: an upstream error.
     pub fn error(id: &Value, e: &StrataError) -> Reply {
         let mut err = Map::new();
-        err.insert("code".into(), serde_json::to_value(e.code).unwrap_or(Value::Null));
+        err.insert(
+            "code".into(),
+            serde_json::to_value(e.code).unwrap_or(Value::Null),
+        );
         err.insert("message".into(), Value::String(e.message.clone()));
         if let Some(d) = &e.detail {
             err.insert("detail".into(), d.clone());
@@ -573,8 +656,11 @@ impl Reply {
     pub fn too_large(limit: usize) -> Reply {
         Reply::error(
             &Value::Null,
-            &StrataError::new(Code::TooLarge, format!("request line is longer than {limit} bytes"))
-                .with_detail(json!({ "limit": limit })),
+            &StrataError::new(
+                Code::TooLarge,
+                format!("request line is longer than {limit} bytes"),
+            )
+            .with_detail(json!({ "limit": limit })),
         )
     }
 
@@ -591,10 +677,30 @@ impl Reply {
     }
 }
 
+// Keep extension fields optional for every released client. The outer parser
+// retains its exact unknown-key diagnostic, including the request id.
+#[derive(Deserialize)]
+struct EnvelopeOptions {
+    #[serde(default)]
+    client: Option<String>,
+}
+
 /// Parse one request line. An `Err` is the reply to send instead.
 pub fn parse_request(line: &[u8]) -> Result<Request, Reply> {
+    parse_with_client(line, |_| {})
+}
+
+/// Receipt owns the diagnostic. Reconstructing a parked request is a pure parse.
+pub(crate) fn received(line: &[u8], log: &mut dyn Write) -> Result<Request, Reply> {
+    parse_with_client(line, |client| {
+        let _ = writeln!(log, "git-stratad: RPC client {client}");
+    })
+}
+
+fn parse_with_client(line: &[u8], observed: impl FnOnce(&str)) -> Result<Request, Reply> {
     let failed = |id: &Value, m: String| Reply::rejected(id, RpcReject::Failed, m);
-    let v: Value = serde_json::from_slice(line).map_err(|e| failed(&Value::Null, format!("not json: {e}")))?;
+    let v: Value =
+        serde_json::from_slice(line).map_err(|e| failed(&Value::Null, format!("not json: {e}")))?;
     let Value::Object(mut obj) = v else {
         return Err(failed(&Value::Null, "a request is a json object".into()));
     };
@@ -614,16 +720,37 @@ pub fn parse_request(line: &[u8]) -> Result<Request, Reply> {
         None => return Err(failed(&id, "missing method".into())),
     };
     let params = obj.remove("params");
-    if let Some(k) = obj.keys().next() {
+    if let Some(k) = obj.keys().find(|k| k.as_str() != "client") {
         return Err(failed(&id, format!("unknown envelope field {k:?}")));
     }
+    if obj.get("client").is_some_and(Value::is_null) {
+        return Err(failed(&id, "client must be a semantic version".into()));
+    }
+    let options: EnvelopeOptions = serde_json::from_value(Value::Object(obj))
+        .map_err(|e| failed(&id, format!("invalid envelope: {e}")))?;
+    if let Some(client) = options.client {
+        let version = strata_types::release_version(&client)
+            .ok_or_else(|| failed(&id, "client must be a semantic version".into()))?;
+        observed(&client);
+        if version < strata_types::release_version(strata_types::MIN_CLIENT).expect("release floor")
+        {
+            return Err(Reply::error(&id, &StrataError::new(Code::InvalidInput,
+                format!("git-strata {client} is too old; use {} or later", strata_types::MIN_CLIENT))
+                .with_detail(json!({"reason":"client_too_old","client":client,"min_client":strata_types::MIN_CLIENT}))));
+        }
+    }
     let Some(method) = Method::from_name(&method) else {
-        return Err(Reply::rejected(&id, RpcReject::UnknownMethod, format!("unknown method {method:?}")));
+        return Err(Reply::rejected(
+            &id,
+            RpcReject::UnknownMethod,
+            format!("unknown method {method:?}"),
+        ));
     };
     let Some(params) = params else {
         return Err(failed(&id, "missing params".into()));
     };
-    let params = Params::parse(method, params).map_err(|m| failed(&id, format!("{}: {m}", method.name())))?;
+    let params = Params::parse(method, params)
+        .map_err(|m| failed(&id, format!("{}: {m}", method.name())))?;
     Ok(Request { id, method, params })
 }
 
@@ -671,7 +798,11 @@ pub fn read_frame_limited(r: &mut dyn BufRead, limit: usize) -> io::Result<Frame
         let used = done.unwrap_or(buf.len());
         r.consume(used);
         if done.is_some() {
-            return Ok(if over { Frame::TooLarge } else { Frame::Line(line) });
+            return Ok(if over {
+                Frame::TooLarge
+            } else {
+                Frame::Line(line)
+            });
         }
     }
 }
@@ -705,8 +836,8 @@ pub fn serve_connection(
         let reply = match read_frame_limited(r, limit)? {
             Frame::Eof => return Ok(()),
             Frame::TooLarge => Reply::too_large(limit),
-            Frame::Line(line) => match parse_request(&line) {
-                Ok(req) => handle(req),
+            Frame::Line(line) => match received(&line, &mut io::stderr()) {
+                Ok(req) => req.serve(&mut *handle),
                 Err(reply) => reply,
             },
         };

@@ -80,18 +80,21 @@ fn path(bytes: Vec<u8>) -> Result<PathBuf> {
 }
 
 pub(super) fn worktree_root(root: &Path) -> Result<PathBuf> {
-    discover_directory(root, "--show-toplevel", None)
+    discover_directory(root, "--show-toplevel", None, None)
 }
 
 pub(super) fn discover_directory(
     root: &Path,
     option: &str,
     control: Option<&Control>,
+    fixture_home: Option<&Path>,
 ) -> Result<PathBuf> {
     let mut bytes = controlled_output(
-        command()
-            .current_dir(root)
-            .args(["rev-parse", "--path-format=absolute", option]),
+        command_with_home(fixture_home).current_dir(root).args([
+            "rev-parse",
+            "--path-format=absolute",
+            option,
+        ]),
         "discover common directory",
         control,
         128 * 1024,
@@ -112,7 +115,21 @@ pub(super) fn discover_directory(
     Ok(std::fs::canonicalize(directory)?)
 }
 
+fn command_with_home(home: Option<&Path>) -> Command {
+    let mut cmd = command();
+    if let Some(home) = home {
+        cmd.env("HOME", home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_ALLOW_PROTOCOL", "file");
+    }
+    cmd
+}
+
 pub(super) fn repository_command(repository: &Repository) -> Command {
+    #[cfg(feature = "strata-fixture")]
+    let mut command = command_with_home(repository.fixture_home.as_deref());
+    #[cfg(not(feature = "strata-fixture"))]
     let mut command = command();
     // Git for Windows does not consistently accept verbatim paths in --git-dir.
     // Set the native process cwd instead; keep the canonical identity lossless.

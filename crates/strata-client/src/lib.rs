@@ -35,6 +35,8 @@ pub enum Kind {
 pub enum CallError {
     Down(StrataError),
     Failed(StrataError),
+    /// Exact legacy parser refusal, distinguished before normalizing wire errors.
+    UnknownClientField(StrataError),
     Timeout {
         method: String,
         waited: Duration,
@@ -47,7 +49,7 @@ pub enum CallError {
 impl CallError {
     pub fn into_error(self) -> StrataError {
         match self {
-            CallError::Down(e) | CallError::Failed(e) => e,
+            CallError::Down(e) | CallError::Failed(e) | CallError::UnknownClientField(e) => e,
             CallError::Timeout {
                 method,
                 waited,
@@ -107,7 +109,7 @@ pub fn listening(socket: &Path) -> bool {
 
 /// Send `method` with `params`; the reply's `data`, or its error as is.
 pub fn call(socket: &Path, method: &str, params: Value, kind: Kind) -> Result<Value, CallError> {
-    call_inner(socket, method, params, kind, None)
+    call_request(socket, Request::new(method, &params), kind, None)
 }
 
 /// `call` with one total wall-clock budget, including connect, send and reply.
@@ -118,7 +120,7 @@ pub fn call_within(
     kind: Kind,
     budget: Duration,
 ) -> Result<Value, CallError> {
-    call_inner(socket, method, params, kind, Some(budget))
+    call_request(socket, Request::new(method, &params), kind, Some(budget))
 }
 
 /// Check the feature on the same status reply the caller uses to identify the daemon.
@@ -241,8 +243,7 @@ fn call_drain(
     if let Some(is_expected_daemon) = expected_daemon {
         let status = call_on_stream(
             socket,
-            "daemon_status",
-            json!({"verify": false}),
+            Request::new("daemon_status", &json!({"verify": false})),
             Kind::Read,
             started,
             Some(until),
@@ -357,13 +358,39 @@ fn parse_drain_reply(id: &str, frame: &[u8]) -> Result<Value, StrataError> {
     })
 }
 
-fn call_inner(
+/// A service request. The CLI sets `client` only for a negotiated call.
+#[derive(Clone, Copy)]
+pub struct Request<'a> {
+    pub method: &'a str,
+    pub params: &'a Value,
+    pub client: Option<&'a str>,
+}
+
+impl<'a> Request<'a> {
+    pub fn new(method: &'a str, params: &'a Value) -> Self {
+        Self {
+            method,
+            params,
+            client: None,
+        }
+    }
+
+    pub fn body(self, id: &str) -> String {
+        let mut envelope = json!({"id": id, "method": self.method, "params": self.params});
+        if let Some(version) = self.client {
+            envelope["client"] = json!(version);
+        }
+        envelope.to_string()
+    }
+}
+
+pub fn call_request(
     socket: &Path,
-    method: &str,
-    params: Value,
+    request: Request<'_>,
     kind: Kind,
     budget: Option<Duration>,
 ) -> Result<Value, CallError> {
+    let method = request.method;
     let started = Instant::now();
     let until = budget
         .map(|b| {
@@ -396,7 +423,7 @@ fn call_inner(
             CallError::Down(daemon_down(socket))
         }
     })?;
-    call_on_stream(socket, method, params, kind, started, until, &mut stream)
+    call_on_stream(socket, request, kind, started, until, &mut stream)
 }
 
 // Separate the connected stream so the shed EPIPE race can be tested with a
@@ -404,13 +431,13 @@ fn call_inner(
 // Carry the original clock and deadline through so connecting uses the same budget.
 fn call_on_stream(
     socket: &Path,
-    method: &str,
-    params: Value,
+    request: Request<'_>,
     kind: Kind,
     started: Instant,
     until: Option<Instant>,
     stream: &mut UnixStream,
 ) -> Result<Value, CallError> {
+    let method = request.method;
     let timeout = |phase, sent| CallError::Timeout {
         method: method.into(),
         waited: started.elapsed(),
@@ -419,10 +446,8 @@ fn call_on_stream(
         sent,
     };
     let id = next_id();
-    let line = format!(
-        "{}\n",
-        json!({ "id": id, "method": method, "params": params })
-    );
+    let mut line = request.body(&id);
+    line.push('\n');
     let broken = |sent| {
         match kind {
         Kind::Write if sent => CallError::Failed(
@@ -533,7 +558,15 @@ pub fn parse_reply(method: &str, id: &str, reply: &str) -> Result<Value, CallErr
     if v.get("ok") == Some(&Value::Bool(true)) {
         return Ok(v.get("data").cloned().unwrap_or_else(|| json!({})));
     }
-    Err(CallError::Failed(reply_error(method, v.get("error"))))
+    let error = reply_error(method, v.get("error"));
+    if v["ok"] == false
+        && v["error"]["rpc"] == "Failed"
+        && v["error"].get("code").is_none()
+        && error.message == r#"unknown envelope field "client""#
+    {
+        return Err(CallError::UnknownClientField(error));
+    }
+    Err(CallError::Failed(error))
 }
 
 /// The reply's error: a `StrataError` as is; the RPC-level names
@@ -589,8 +622,7 @@ mod shed_tests {
                 let started = Instant::now();
                 let error = call_on_stream(
                     Path::new("fixture.sock"),
-                    "daemon_status",
-                    json!({}),
+                    Request::new("daemon_status", &json!({})),
                     kind,
                     started,
                     budget.map(|b| started + b),
@@ -625,8 +657,10 @@ mod shed_tests {
         // Force WouldBlock before the newline while a shed reply is queued.
         let error = call_on_stream(
             Path::new("fixture.sock"),
-            "daemon_status",
-            json!({ "large": "x".repeat(1024 * 1024) }),
+            Request::new(
+                "daemon_status",
+                &json!({ "large": "x".repeat(1024 * 1024) }),
+            ),
             Kind::Read,
             started,
             Some(started + Duration::from_secs(1)),
@@ -650,8 +684,7 @@ mod shed_tests {
         let started = Instant::now();
         let error = call_on_stream(
             Path::new("fixture.sock"),
-            "daemon_status",
-            json!({}),
+            Request::new("daemon_status", &json!({})),
             Kind::Read,
             started,
             Some(started + Duration::from_millis(100)),
@@ -681,8 +714,7 @@ mod shed_tests {
         let started = now - Duration::from_millis(800);
         let error = call_on_stream(
             Path::new("fixture.sock"),
-            "daemon_status",
-            json!({}),
+            Request::new("daemon_status", &json!({})),
             Kind::Read,
             started,
             Some(started + Duration::from_secs(1)),
